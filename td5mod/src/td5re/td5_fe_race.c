@@ -1263,18 +1263,12 @@ void Screen_QuickRaceMenu(void) {
             }
         }
 
-        /* [PHYSICS 2026-06-26] ARCADE / SIMULATION (dynamics) selector row, placed
-         * directly under Laps at row 5. Created LAST (index QR_BTN_PHYSICS=14, after
-         * the RANDOMIZE buttons at 12/13) so every hard-coded index above stays put.
-         * A normal selectable caption row like Car/Track/Direction: L/R (or A/Enter)
-         * flips the shared s_game_option_dynamics, the value column shows ARCADE /
-         * SIMULATION, and the OK handler commits it to physics + the INI. Visible in
-         * BOTH dev and release — it's a real player option, not a dev affordance.
-         * Sync the live value from the persisted INI first so the row shows the
-         * choice that's actually in effect. */
-        s_game_option_dynamics = g_td5.ini.dynamics ? 1 : 0;
+        /* [PHYSICS 2026-06-26 / RETIRED 2026-09-29] This slot used to be the
+         * ARCADE / SIMULATION (DYNAMICS) selector. DYNAMICS is gone — arcade is
+         * the only vehicle model — but the button is still CREATED, hidden and
+         * disabled, purely to keep index QR_BTN_PHYSICS=14 occupied so
+         * QR_BTN_RACEOPTS stays at 15 and every hard-coded index above holds. */
         { int bph = frontend_create_button("Physics", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_PHYSICS */
-          /* [QUICK RACE DEBUG 2026-07-21] Physics moved to RACE OPTIONS -> hide inline. */
           if (bph >= 0) { s_buttons[bph].hidden = 1; s_buttons[bph].disabled = 1; }
         }
         /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS entry (created LAST, index
@@ -1409,20 +1403,6 @@ void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(2);
             }
 
-            /* [PHYSICS 2026-06-26] Physics (ARCADE/SIMULATION) row: a 2-state toggle
-             * like Direction. L/R OR A/Enter while focused flips the shared
-             * s_game_option_dynamics (0=ARCADE, 1=SIMULATION). The OK handler commits
-             * it to physics + the INI. Mirrors the Track Selection DYNAMICS row. */
-            if (selected_button == QR_BTN_PHYSICS && s_button_count > QR_BTN_PHYSICS &&
-                !s_buttons[QR_BTN_PHYSICS].hidden &&
-                (delta != 0 || s_button_index == QR_BTN_PHYSICS)) {
-                s_game_option_dynamics ^= 1;
-                frontend_play_sfx(2);
-                TD5_LOG_I(LOG_TAG, "QuickRace PHYSICS -> %s (%d)",
-                          s_game_option_dynamics ? "SIMULATION" : "ARCADE",
-                          s_game_option_dynamics);
-            }
-
             /* [2026-06-08] AI Screens (dev/profiling): 0..min(opponents,
              * TD5_MAX_VIEWPORTS-1). Each step adds an AI car to its own pane.
              * Hidden+disabled in release (see case-0 creation). */
@@ -1520,20 +1500,11 @@ void Screen_QuickRaceMenu(void) {
                     /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
                      * Game Options' OK, which no longer owns this setting). */
                     g_td5.ini.laps = s_game_option_laps;
-                    /* [PHYSICS 2026-06-26] Commit the ARCADE/SIMULATION choice picked
-                     * on the new Physics row. Persist to the INI (survives relaunch)
-                     * AND push it into the physics race-init flag NOW, before the
-                     * race launches — ConfigureGameTypeFlags already ran at screen
-                     * init with the pre-toggle value, so set it here deterministically
-                     * (mirrors the AutoRace commit at td5_frontend.c). */
-                    g_td5.ini.dynamics = s_game_option_dynamics;
-                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     TD5_LOG_I(LOG_TAG,
-                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d physics=%s",
+                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d",
                               s_selected_track, s_track_direction ? "Backwards" : "Forwards",
-                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1,
-                              s_game_option_dynamics ? "SIMULATION" : "ARCADE");
+                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1);
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 5;
                 }
@@ -4062,9 +4033,8 @@ static int mp_cfg_build(MpCfgOpt *o) {
      * ARCADE/SIM selector (s_trksel_dyn_btn on both the regular track-select and the
      * cup track-picker) — so the control showed up twice (most obviously on the cup
      * setup). Track selection is now the single place to set physics for all MP
-     * flows. The choice still lives in the shared s_game_option_dynamics (seeded
-     * from g_td5.ini.dynamics, committed to physics by ConfigureGameTypeFlags at
-     * race launch). Side effect (intended): MP RACE has no other options, so this
+     * flows. (The DYNAMICS row itself was retired 2026-09-29 — arcade physics is
+     * the only model.) Side effect (intended): MP RACE has no other options, so this
      * now returns 0 for it and Screen_MpModeConfig skips the config screen entirely
      * (the original count==0 fast-path). */
     return n;
@@ -6906,20 +6876,32 @@ static void raceopts_commit_persist(void) {
     if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
         g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
     g_td5.ini.cops                 = s_game_option_cops;
-    g_td5.ini.dynamics             = s_game_option_dynamics;
-    g_td5.ini.powerups             = s_game_option_powerups;
-    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
     g_td5.ini.car_damage_deform    = s_game_option_car_deform;
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed the remaining GAME OPTIONS
-     * fields (3D collisions, the single DAMAGE toggle that drives BOTH master
-     * car-damage and the HUD bar/wreck sub-toggle, lane assist, tutorial overlay
-     * — preserving a dev "force every race" (2)). Mirrors td5_gameopts_commit. */
+     * fields (3D collisions, DAMAGE, lane assist, tutorial overlay — preserving a
+     * dev "force every race" (2)). Mirrors td5_gameopts_commit. */
     g_td5.ini.collisions           = s_game_option_collisions;
-    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
-    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
+    /* [DAMAGE MERGE 2026-09-29] The one DAMAGE row (0=OFF 1=LOW 2=MEDIUM 3=HIGH)
+     * writes THREE fields: the master switch, its HUD-bar/wreck mirror, and
+     * CarToughness — which runs the other way round (0=Low toughness = takes the
+     * most damage), so level L maps to toughness 3-L. OFF also parks toughness at
+     * its own 3=Off value so either kill switch alone disables the module
+     * (td5_damage_enabled ORs them). Inverse of raceopts_damage_level_from_ini. */
+    {
+        int lvl = s_game_option_car_damage;
+        if (lvl < 0) lvl = 0;
+        if (lvl > 3) lvl = 3;
+        g_td5.ini.car_damage           = (lvl > 0) ? 1 : 0;
+        g_td5.ini.car_damage_bar       = (lvl > 0) ? 1 : 0;
+        g_td5.ini.car_damage_toughness = (lvl > 0) ? (3 - lvl) : 3;
+    }
     g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
-    /* [AI DRIVER MODEL 2026-08-17] Commit the opponent-AI mode choice. */
-    g_td5.ini.ai_model             = ((s_game_option_ai_model % 3) + 3) % 3;
+    /* [AI MODEL 2026-09-29] Commit the opponent-AI mode choice (CLASSIC/SMART).
+     * The row only ever holds 0 or 1; DRIVER (2) is INI/env-only and a value of
+     * 2 loaded from the INI is clamped to SMART when the row is seeded, so this
+     * commit can never silently demote a deliberate --AIModel=2 mid-session
+     * without the player opening RACE OPTIONS. */
+    g_td5.ini.ai_model             = (s_game_option_ai_model >= 1) ? 1 : 0;
     g_td5.ini.tutorial_overlay     = s_game_option_tutorial
         ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] RACE OPTIONS is now the ONLY
@@ -6929,17 +6911,19 @@ static void raceopts_commit_persist(void) {
      * still copies s_race_difficulty into g_td5.difficulty_tier. */
     s_game_option_difficulty       = s_race_difficulty;
     g_td5.ini.difficulty           = s_race_difficulty;
-    td5_physics_set_dynamics(s_game_option_dynamics);
     td5_ini_persist_options();
     TD5_LOG_I(LOG_TAG,
-              "RaceOpts commit: opp=%d traffic=%d cops=%d diff=%d dyn=%d "
-              "cp=%d pu=%d tough=%d deform=%d coll=%d dmg=%d lane=%d tut=%d",
+              "RaceOpts commit: opp=%d traffic=%d cops=%d diff=%d "
+              "cp=%d dmg=%d(tough=%d) deform=%d coll=%d lane=%d tut=%d "
+              "ai_model=%d catchup=%d",
               s_num_ai_opponents, s_game_option_traffic, s_game_option_cops,
-              s_race_difficulty, s_game_option_dynamics,
-              s_game_option_checkpoint_timers, s_game_option_powerups,
-              s_game_option_car_toughness, s_game_option_car_deform,
-              s_game_option_collisions, s_game_option_car_damage,
-              s_game_option_laneassist, s_game_option_tutorial);
+              s_race_difficulty,
+              s_game_option_checkpoint_timers,
+              s_game_option_car_damage, g_td5.ini.car_damage_toughness,
+              s_game_option_car_deform,
+              s_game_option_collisions,
+              s_game_option_laneassist, s_game_option_tutorial,
+              g_td5.ini.ai_model, td5_save_get_catchup_assist());
 }
 
 /* Leave RACE OPTIONS via OK. Options are edited live (always persisted). When
@@ -6985,11 +6969,25 @@ static void raceopts_back(void) {
  * shows only the rows this mode needs. MP variant discrimination uses
  * mp_mode_config.mode (the SP menu's s_selected_game_type is not reliably stamped
  * for MP cop-chase/drag); SP uses s_selected_game_type (TD5_GameType). */
+/* [MP OPPONENTS DEFAULT 0 2026-09-29] One-shot per MP session: the AI OPPONENTS
+ * row defaults to 0 in multiplayer (human-vs-human unless rivals are asked for),
+ * while single player keeps its 5. Latched so re-opening RACE OPTIONS inside the
+ * same MP session does NOT stomp a count the player just chose; cleared whenever
+ * the ctx is single-player again, so the next MP session re-seeds. */
+static int s_mp_opponents_seeded = 0;
+
 static void raceopts_build_ctx(TD5_RaceOptsCtx *ctx) {
     int any_mp = (s_mp_simul || s_network_active);
     int is_mp  = any_mp || s_mp_flow;
     int mode   = g_td5.mp_mode_config.mode;
     memset(ctx, 0, sizeof *ctx);
+    if (!is_mp) {
+        s_mp_opponents_seeded = 0;
+    } else if (!s_mp_opponents_seeded) {
+        s_mp_opponents_seeded = 1;
+        s_num_ai_opponents    = 0;
+        TD5_LOG_I(LOG_TAG, "RaceOpts: MP session -> AI OPPONENTS seeded to 0");
+    }
     /* [SP DRAG OPPONENTS 2026-08-19] On the SP drag strip the opponent count is
      * also the lane count, so sanitize it into the drag-legal [1,7] band BEFORE
      * the row model snapshots it. Without this, a 0 carried over from a previous
@@ -8646,19 +8644,6 @@ void Screen_TrackSelection(void) {
                     if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
                     if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
                         g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
-                    /* [ARCADE 2026-06-26] Persist the ARCADE/SIMULATION choice
-                     * picked on this screen so it survives a relaunch. */
-                    g_td5.ini.dynamics = s_game_option_dynamics;
-                    /* [DYNAMICS COMMIT FIX 2026-06-28] Push the choice into the
-                     * physics race-init flag NOW (mirrors the Quick Race OK handler
-                     * @ ~L1353). ConfigureGameTypeFlags ran at this screen's init
-                     * with the PRE-toggle value, so without this an ARCADE->SIM flip
-                     * on this screen launched with the stale mode and the arcade
-                     * item-box power-ups stayed ON in SIMULATION. A race-init backstop
-                     * in td5_game.c also re-commits g_td5.ini.dynamics, but commit
-                     * here too so get_dynamics() is correct the instant the race is
-                     * requested. */
-                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     /* [2026-06-12] Per-race AI difficulty: commit the row into
                      * the live tier read by InitializeRaceActorRuntime

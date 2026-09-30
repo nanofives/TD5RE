@@ -474,11 +474,9 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Traffic",          g_td5.ini.traffic);
     td5_ini_write_int("GameOptions", "Cops",             g_td5.ini.cops);
     td5_ini_write_int("GameOptions", "Difficulty",       g_td5.ini.difficulty);
-    td5_ini_write_int("GameOptions", "Dynamics",         g_td5.ini.dynamics);
     /* [AI DRIVER MODEL 2026-08-17] Persist the RACE OPTIONS "AI MODEL" choice. */
     td5_ini_write_int("GameOptions", "AIModel",          g_td5.ini.ai_model);
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
-    td5_ini_write_int("GameOptions", "Powerups",         g_td5.ini.powerups);
     /* [SP DRAG DISTANCE 2026-07-23] Persist the SP drag DISTANCE preset so the
      * RACE OPTIONS choice sticks across launches (loaded in main() as DragLength). */
     td5_ini_write_int("GameOptions", "DragLength",        g_td5.ini.drag_length);
@@ -508,11 +506,11 @@ void td5_ini_persist_options(void)
     td5_plat_log(TD5_LOG_INFO, "main",
                  "td5re.ini options persisted (in-game change write-back): "
                  "fog=%d units=%d cam=%d sfx=%d mus=%d sfxmode=%d laps=%d "
-                 "chk=%d traf=%d cops=%d diff=%d dyn=%d coll=%d",
+                 "chk=%d traf=%d cops=%d diff=%d coll=%d",
                  g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping,
                  g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
                  g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
-                 g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics,
+                 g_td5.ini.cops, g_td5.ini.difficulty,
                  g_td5.ini.collisions);
 }
 
@@ -627,9 +625,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Traffic",              &g_td5.ini.traffic },
         { "Cops",                 &g_td5.ini.cops },
         { "Difficulty",           &g_td5.ini.difficulty },
-        { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
-        { "Powerups",             &g_td5.ini.powerups },
         { "LaneAssist",           &g_td5.ini.lane_assist },
         { "RearImpactResponse",   &g_td5.ini.rear_impact_response },
         { "AntiTunnel",           &g_td5.ini.anti_tunnel },
@@ -1119,11 +1115,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * migration below: that migration calls td5_ini_persist_options(), which
      * writes the FULL options set (incl. AIModel). If ai_model were still
      * unset here, the migration would persist AIModel=0 (CLASSIC) on a fresh /
-     * pre-v5 INI and defeat the DRIVER default. Loaded early, the migration
-     * persists the correct value. 0=CLASSIC,1=SMART,2=DRIVER (default). */
-    g_td5.ini.ai_model = td5_ini_int("GameOptions", "AIModel", 2);
+     * pre-v5 INI. Loaded early, the migration persists the correct value.
+     * [AI MODEL 2026-09-29] 0=CLASSIC, 1=SMART (default). The DRIVER model (2)
+     * left the RACE OPTIONS row, so the INI clamps to 1 as well: an existing
+     * td5re.ini carrying AIModel=2 now boots SMART instead of a mode with no UI
+     * to turn it off. td5_ai_driver.c stays compiled and TD5RE_AI_MODEL=2 still
+     * reaches it (td5_ai_driver_mode applies the env override after this). */
+    g_td5.ini.ai_model = td5_ini_int("GameOptions", "AIModel", 1);
     if (g_td5.ini.ai_model < 0) g_td5.ini.ai_model = 0;
-    if (g_td5.ini.ai_model > 2) g_td5.ini.ai_model = 2;
+    if (g_td5.ini.ai_model > 1) g_td5.ini.ai_model = 1;
 
     #define RT_OPT_VERSION_CURRENT 5
     if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
@@ -1162,13 +1162,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * Applied after CLI overrides below via td5_i18n_set_language(). */
     g_td5.ini.language           = td5_ini_int("Game", "Language", 0);
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
-    g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
-    /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS; clamp in case of a stray
-     * out-of-range manual INI edit (old on/off files only ever had 0/1). */
-    g_td5.ini.powerups           = td5_ini_int("GameOptions", "Powerups", 1);
-    if (g_td5.ini.powerups < 0) g_td5.ini.powerups = 0;
-    if (g_td5.ini.powerups > 2) g_td5.ini.powerups = 2;
+    /* [RACE OPTIONS 2026-09-29] [GameOptions]Dynamics and [GameOptions]Powerups
+     * are RETIRED keys: the DYNAMICS row is gone (arcade physics is the only
+     * vehicle model) and the power-ups feature was deleted. Both struct fields
+     * survive only because they sit in the replicated net race config, whose
+     * wire layout must not move; they are pinned to 0 here and never read for
+     * behaviour. A stale key left in an existing td5re.ini is simply ignored. */
+    g_td5.ini.dynamics           = 0;
+    g_td5.ini.powerups           = 0;
     /* [NAME MERGE 2026-07-21] [GameOptions]PlayerName retired — the single player
      * identity is [Network]Nickname (parsed below into net_nickname), used for
      * results / high-score prefill as well as the net lobby. */
@@ -1212,8 +1214,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.smart_ai_aggression = td5_ini_int("GameOptions", "SmartAIAggression", 1);
     if (g_td5.ini.smart_ai_aggression < 0) g_td5.ini.smart_ai_aggression = 0;
     if (g_td5.ini.smart_ai_aggression > 2) g_td5.ini.smart_ai_aggression = 2;
-    g_td5.ini.smart_ai_leash = td5_ini_int("GameOptions", "SmartAILeash", 3);
-    if (g_td5.ini.smart_ai_leash < 0) g_td5.ini.smart_ai_leash = 0;
+    /* [CATCHUP LEVELS 2026-09-29] -1 (default) = follow the CATCHUP row
+     * (td5_ai_smart_leash_modifier maps level 0..3 onto 0/3/6/9, so the old
+     * hardcoded default of 3 is what CATCHUP=LOW now produces). 0..9 still pins
+     * the leash for A/B work. */
+    g_td5.ini.smart_ai_leash = td5_ini_int("GameOptions", "SmartAILeash", -1);
+    if (g_td5.ini.smart_ai_leash < -1) g_td5.ini.smart_ai_leash = -1;
     if (g_td5.ini.smart_ai_leash > 9) g_td5.ini.smart_ai_leash = 9;
     /* Ray-sensing decision brain (wall/car rays + curvature-aware corner line);
      * default ON. Falls back to the discrete-lane SmartAI scorer when 0. */
@@ -1648,9 +1654,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d Radio=%d RadioVol=%d url=%s",
            g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
            g_td5.ini.radio_enabled, g_td5.ini.radio_volume, g_td5.ini.radio_url);
-    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d PlayerIsAI=%d",
+    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Coll=%d PlayerIsAI=%d",
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
-           g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
+           g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.collisions,
            g_td5.ini.player_is_ai);
     dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d StartScreen=%d StartSpanOffset=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,

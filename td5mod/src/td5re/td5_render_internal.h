@@ -605,7 +605,6 @@ int td6_mesh_uses_banner_page(const TD5_MeshHeader *mesh);
 int td6_banner_roadcenter_x(float ref_x, float ref_z, float *out_rx);
 TD5_MeshHeader *td5_render_drag_gantry(void);
 void update_render_camera_from_game(void);
-void td5_render_set_actor_effect_tint(uint32_t argb);
 
 static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
 {

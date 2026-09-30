@@ -45,7 +45,6 @@
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
-#include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
@@ -245,20 +244,6 @@ void td5_render_set_actor_draw_alpha(int alpha)
     if (alpha == s_actor_draw_alpha) return;
     flush_immediate_internal();
     s_actor_draw_alpha = alpha;
-}
-
-/* [ARCADE 2026-06-26] Per-actor effect-glow tint (0 = none). When set, the
- * actor's body vertices are ADDITIVELY brightened toward this ARGB colour in
- * flush_immediate_internal, so the car SILHOUETTE glows in the power-up colour
- * (the alpha byte is the glow intensity 0..255). Bracket the body draw with it
- * like s_actor_draw_alpha; MUST flush on change so the tint can't bleed into the
- * next actor's triangles. */
-static uint32_t s_actor_effect_tint = 0;
-void td5_render_set_actor_effect_tint(uint32_t argb)
-{
-    if (argb == s_actor_effect_tint) return;
-    flush_immediate_internal();
-    s_actor_effect_tint = argb;
 }
 
 /* Per-slot "this is a ported TD6 car" flag. TD6 cars have a grayscale body and
@@ -618,33 +603,6 @@ void flush_immediate_internal(void)
                 uint32_t a = (((d >> 24) & 0xFFu) * fade) >> 8;
                 s_imm_verts[i].diffuse = (d & 0x00FFFFFFu) | (a << 24);
             }
-        }
-    }
-
-    /* [ARCADE] effect-glow tint: make the car SILHOUETTE clearly glow in the
-     * power-up colour. Two steps per body vertex: (1) COLORIZE — replace the body
-     * colour with the effect hue, scaled by the vertex's own brightness (so the
-     * car's shape/shading is kept) with a floor so dark panels still read the
-     * colour; (2) add a pulsing GLOW on top (the tint's alpha is the strength).
-     * Runs after fade, only set around a car's body draw, so nothing else tints. */
-    if (s_actor_effect_tint & 0xFF000000u) {
-        uint32_t inten = (s_actor_effect_tint >> 24) & 0xFFu;
-        uint32_t tr = (s_actor_effect_tint >> 16) & 0xFFu;
-        uint32_t tg = (s_actor_effect_tint >>  8) & 0xFFu;
-        uint32_t tb =  s_actor_effect_tint        & 0xFFu;
-        for (int i = 0; i < s_imm_vert_count; i++) {
-            uint32_t d = s_imm_verts[i].diffuse;
-            uint32_t a = (d >> 24) & 0xFFu;
-            uint32_t r = (d >> 16) & 0xFFu, g = (d >> 8) & 0xFFu, b = d & 0xFFu;
-            uint32_t luma = (r * 77u + g * 150u + b * 29u) >> 8;   /* 0..255 */
-            uint32_t base = 96u + (luma * 159u) / 255u;            /* 96..255 */
-            uint32_t cr = (tr * base) / 255u + (tr * inten) / 255u;
-            uint32_t cg = (tg * base) / 255u + (tg * inten) / 255u;
-            uint32_t cb = (tb * base) / 255u + (tb * inten) / 255u;
-            if (cr > 255u) cr = 255u;
-            if (cg > 255u) cg = 255u;
-            if (cb > 255u) cb = 255u;
-            s_imm_verts[i].diffuse = td5_argb8(a, cr, cg, cb);
         }
     }
 

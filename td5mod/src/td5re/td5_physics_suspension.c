@@ -22,7 +22,6 @@
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
-#include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
 #include "td5_laneassist.h" /* optional lane-assist steering aid (port-only, default OFF) */
 #include "td5_platform.h"
@@ -3931,8 +3930,18 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     int32_t iVar1 = td5_angle12_signed(raw_roll);   /* signed roll  */
     int32_t iVar2 = td5_angle12_signed(raw_pitch);  /* signed pitch */
 
-    /* === Dispatch on collisions flag [0x00405B86-B88] === */
-    if (g_collisions_enabled != 0) {
+    /* === Dispatch on collisions flag [0x00405B86-B88] ===
+     * [3D COLLISIONS 2026-09-29] One extra port-only condition: a car that is
+     * eligible for the GENTLE recovery coast must still take the MODE-0 LATCH
+     * below (vehicle_mode=1 / frame_counter=0), because the coast is driven off
+     * that latch in td5_physics.c. recovery_gentle_for_actor() is itself gated
+     * on collisions being OFF and on the slot being a human racer, so:
+     *   collisions ON            -> gentle=0 -> MODE-0 latch -> faithful tumble
+     *   collisions OFF, human    -> gentle=1 -> MODE-0 latch -> gentle coast
+     *   collisions OFF, AI/traffic -> gentle=0 -> MODE-1 hard clamp (unchanged)
+     * Without this, turning 3D COLLISIONS off pinned the car at the attitude
+     * limits and the gentle path could never fire. */
+    if (g_collisions_enabled != 0 && !recovery_gentle_for_actor(actor)) {
         /* MODE-1: soft nudge then hard clamp [0x00405B8E-C3D].
          *
          * Original layout is 8 straight-line independent `if`s with no

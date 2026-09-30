@@ -281,11 +281,22 @@ void frontend_init_race_schedule(void) {
          * through to the legacy fill (TD5_LEGACY_RACE_SLOTS - humans = 5) and the
          * OPPONENTS row the user just set was silently discarded. Scoped to drag so
          * no other pre-launch RACE OPTIONS path changes behaviour. */
+        /* [MP DRAG OPPONENTS 2026-09-29] RACE_OPTIONS is also the pre-launch step
+         * for MP DRAG (no track-select), so honour the AI OPPONENTS row there
+         * too — the row is now shown for MP drag. */
         if (s_current_screen == TD5_SCREEN_QUICK_RACE ||
             s_current_screen == TD5_SCREEN_TRACK_SELECTION ||
             (s_current_screen == TD5_SCREEN_RACE_OPTIONS && s_selected_game_type == 9) ||
+            (s_current_screen == TD5_SCREEN_RACE_OPTIONS &&
+             g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE) ||
             (s_current_screen == TD5_SCREEN_RACE_RESULTS && s_selected_game_type == 0))
             ai = s_num_ai_opponents;
+        /* [MP OPPONENTS DEFAULT 0 2026-09-29] A multiplayer launch that never
+         * passed an opponents control defaults to NO AI: multiplayer is
+         * human-vs-human unless the AI OPPONENTS row asks for rivals. Single
+         * player keeps the legacy 5-AI fill (cups override it downstream). */
+        else if (s_mp_flow || s_launching_net_race)
+            ai = 0;
         else
             ai = TD5_LEGACY_RACE_SLOTS - humans;
         if (ai < 0) ai = 0;

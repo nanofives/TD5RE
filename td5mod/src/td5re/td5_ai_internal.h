@@ -97,6 +97,11 @@ enum {
 #define ACTOR_SPAN_RAW            offsetof(TD5_Actor, track_span_raw)          /* 0x080 */
 #define ACTOR_SPAN_NORMALIZED     offsetof(TD5_Actor, track_span_normalized)   /* 0x082 */
 #define ACTOR_SPAN_ACCUM          offsetof(TD5_Actor, track_span_accumulated)  /* 0x084 */
+/* [CATCHUP 2026-09-29] Monotonic race progress — the SAME field UpdateRaceOrder
+ * and the MP/Hard catch-up assists read, so a gap measured with it agrees with
+ * the standings. NOT interchangeable with ACTOR_SPAN_ACCUM (0x084) above, which
+ * the faithful rubber-band uses. */
+#define ACTOR_SPAN_HIGH_WATER     offsetof(TD5_Actor, track_span_high_water)   /* 0x086 */
 #define ACTOR_SUB_LANE_INDEX      offsetof(TD5_Actor, track_sub_lane_index)    /* 0x08C */
 #define ACTOR_CAR_DEF_PTR         offsetof(TD5_Actor, car_definition_ptr)      /* 0x1B8 */
 #define ACTOR_YAW_ACCUM          (offsetof(TD5_Actor, euler_accum) + 4)        /* 0x1F4 */
@@ -152,6 +157,7 @@ _Static_assert(ACTOR_STRIDE == TD5_ACTOR_STRIDE_ORIG, "actor stride drifted from
 _Static_assert(ACTOR_SPAN_RAW            == 0x080, "ACTOR_SPAN_RAW drifted from the original");
 _Static_assert(ACTOR_SPAN_NORMALIZED     == 0x082, "ACTOR_SPAN_NORMALIZED drifted from the original");
 _Static_assert(ACTOR_SPAN_ACCUM          == 0x084, "ACTOR_SPAN_ACCUM drifted from the original");
+_Static_assert(ACTOR_SPAN_HIGH_WATER     == 0x086, "ACTOR_SPAN_HIGH_WATER drifted from the original");
 _Static_assert(ACTOR_SUB_LANE_INDEX      == 0x08C, "ACTOR_SUB_LANE_INDEX drifted from the original");
 _Static_assert(ACTOR_PROBE_FL_BASE       == 0x090, "ACTOR_PROBE_FL_BASE drifted from the original");
 _Static_assert(ACTOR_PROBE_FR_BASE       == 0x09C, "ACTOR_PROBE_FR_BASE drifted from the original");

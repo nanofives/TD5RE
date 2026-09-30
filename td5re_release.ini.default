@@ -43,14 +43,13 @@ CheckpointTimers =0
 Traffic          =4
 Cops             =0
 Difficulty       =0
-Dynamics         =0
 Collisions       =1
 AutoGearbox      =1
 ; RearImpactResponse: % of the rear-end car-vs-car angular response (spin/launch)
 ; kept for the human player. 100 = faithful; 45 (default) = recoverable nudge. [S08]
 RearImpactResponse = 45
-; CatchupAssist: AI rubber-band/catchup. -1 = use the in-game toggle (default
-; ON, softened); 0 = off; 1..9 = on. [S06]
+; CatchupAssist: AI rubber-band/catchup. -1 = use the in-game RACE OPTIONS row
+; (OFF/LOW/MEDIUM/HIGH = 0..3, default LOW); 0 = off; 1..9 = on. [S06]
 CatchupAssist    = -1
 ; AIAccelFromCar: 1 = AI/traffic accel + top speed from each car's carparam
 ; (difficulty still scales); 0 = faithful template behaviour. [S06]

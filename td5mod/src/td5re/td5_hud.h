@@ -198,10 +198,6 @@ void td5_hud_draw_pause_action_confirm(void);
  * under the car. Set by the multiplayer frontend at race start. */
 void td5_hud_draw_player_id_overlays(void);
 void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb);
-
-/* [ARCADE] Per-viewport active power-up chip (label + shrinking timer bar).
- * No-op outside ARCADE mode. */
-void td5_hud_draw_arcade_chips(void);
 /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" indicator. No-op outside
  * the Traffic Destruction battle mode. */
 void td5_hud_draw_battle_wrecks(void);
