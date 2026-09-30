@@ -41,6 +41,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 
 #include "td5_render_internal.h"  /* PRIVATE core<->effects seam */
+#include "td5_geo_signals.h"      /* [GEO SIGNALS] lamp tag + live lamp colour */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1778,6 +1779,26 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
          * s_render_transform mixes coordinate spaces and collapses every
          * billboard quad off-screen. */
         int billboard_tag = (int)mesh->texture_page_id;
+        /* [GEO SIGNALS] A traffic-light lens is an ordinary additive
+         * camera-facing billboard (tag 2) that also carries WHICH lamp it is.
+         * Normalising the tag here is the whole render-side cost of the
+         * feature; the colour write below is the rest.
+         *
+         * SAFE TO CLAIM 4..6, MEASURED not assumed: a scan of every shipped
+         * level's models.bin (31 levels, 20748 mesh headers, walked with
+         * td5_track_parser.c's own format-A/B autodetect) found tags 0, 1 and
+         * 2 ONLY -- 10948 / 9247 / 553, nothing else. A mesh can therefore
+         * carry a tag in this range only if the geo signal emitter wrote it,
+         * and the branch needs no further gate. An earlier draft also required
+         * a geo place to be loaded; that was dropped because it would make a
+         * geo level090 raced with TD5RE_GEO_PLACE unset fall through to the
+         * non-billboard path and draw the lenses as stray flat quads. */
+        int signal_phase = -1;
+        if (billboard_tag >= TD5_MESH_TAG_SIGNAL_LAMP &&
+            billboard_tag <  TD5_MESH_TAG_SIGNAL_LAMP + TD5_GEO_SIGNAL_PHASES) {
+            signal_phase = billboard_tag - TD5_MESH_TAG_SIGNAL_LAMP;
+            billboard_tag = 2;
+        }
         if (billboard_tag == 1 || billboard_tag == 2) {
             s_dbg_bb_drawn++;   /* [task#7] reached the camera-facing branch */
             /* per-pane billboard basis (baked from g_cameraSecondaryUnscaled in
@@ -1786,6 +1807,24 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
             td5_render_push_transform();
             td5_render_load_rotation((const TD5_Mat3x3 *)s_camera_secondary);
             td5_render_transform_mesh_vertices(mesh);
+
+            /* [GEO SIGNALS] The lamp's colour IS its state. The generator
+             * writes three identical white glow quads and tags them 0/1/2;
+             * which one reads as lit is decided here, per frame, from a wall
+             * clock in td5_geo_signals.c. Writing the workspace copy (the same
+             * place TD5RE_BILLBOARD_DEBUG writes) rather than the asset means
+             * nothing is mutated at load and the cycle can run backwards,
+             * pause, or be read by two panes in the same frame without any
+             * shared state. Cosmetic in the strict sense: no simulation code
+             * can observe this value, so a RaceTrace CSV is unaffected. */
+            if (signal_phase >= 0) {
+                const uint32_t lamp = td5_geo_signal_lamp_colour(signal_phase);
+                const int vc = mesh->total_vertex_count;
+                if (g_rs->vtx_work && vc > 0 && vc <= g_rs->vtx_work_cap) {
+                    for (int vi = 0; vi < vc; vi++)
+                        g_rs->vtx_work[vi].lighting = lamp;
+                }
+            }
             /* Skip runtime vertex-lighting recompute for billboard meshes.
              * RenderTrackSpanDisplayList @ 0x00431270 only calls
              * TransformAndQueueTranslucentMesh which transforms XYZ only.
