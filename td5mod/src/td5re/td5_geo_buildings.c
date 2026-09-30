@@ -112,6 +112,43 @@ int td5_geob_point_in_ring(const double *x, const double *z, int n,
     return in;
 }
 
+/* Do the open segments (a0,a1) and (b0,b1) properly cross? Sign-of-area test,
+ * strict on both sides, so a shared endpoint (which every adjacent pair of
+ * ring edges has) is NOT a crossing. */
+static int geob_seg_cross(const double *x, const double *z,
+                          int a0, int a1, int b0, int b1)
+{
+    const double d1 = (x[a1] - x[a0]) * (z[b0] - z[a0])
+                    - (z[a1] - z[a0]) * (x[b0] - x[a0]);
+    const double d2 = (x[a1] - x[a0]) * (z[b1] - z[a0])
+                    - (z[a1] - z[a0]) * (x[b1] - x[a0]);
+    const double d3 = (x[b1] - x[b0]) * (z[a0] - z[b0])
+                    - (z[b1] - z[b0]) * (x[a0] - x[b0]);
+    const double d4 = (x[b1] - x[b0]) * (z[a1] - z[b0])
+                    - (z[b1] - z[b0]) * (x[a1] - x[b0]);
+    return ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0));
+}
+
+/* ~0.5 m2 at 430 units/m. Below this a "footprint" is a traced line, not a
+ * building, and the emitters have nothing to extrude. */
+#define GEOB_RING_MIN_AREA  1.0e5
+
+int td5_geob_ring_simple(const double *x, const double *z, int n)
+{
+    int i, j;
+    if (n < 3) return 0;
+    if (fabs(td5_geob_ring_area(x, z, n)) < GEOB_RING_MIN_AREA) return 0;
+    for (i = 0; i < n; i++) {
+        const int i1 = (i + 1) % n;
+        for (j = i + 1; j < n; j++) {
+            const int j1 = (j + 1) % n;
+            if (j == i || j1 == i || j == i1) continue;   /* shares an end */
+            if (geob_seg_cross(x, z, i, i1, j, j1)) return 0;
+        }
+    }
+    return 1;
+}
+
 /* Is p strictly inside triangle (a,b,c), for a CCW triangle? */
 static int geob_in_tri(double ax, double az, double bx, double bz,
                        double cx, double cz, double px, double pz)
@@ -199,14 +236,94 @@ static unsigned int geob_id_hash(double id)
     return h;
 }
 
+/* roof:shape -> the silhouette the emitter builds.
+ *
+ * The shapes below are the ones the OSM wiki lists and the ones that actually
+ * occur; the DEFAULT is still APEX, because an untranslated value ("cone",
+ * "quadruple_saltbox", a typo) is far more likely to be some kind of slope
+ * than to be flat, and a pyramid is the silhouette that cannot be wrong in a
+ * way that pokes through a wall.
+ *
+ * `gabled_with_*` is matched by PREFIX: the wiki sanctions a family of
+ * gabled_with_<something> values and they are all ridged. */
 static int geob_roof_of(const char *s)
 {
     if (!s || !s[0]) return TD5_GEOB_ROOF_NONE;
-    if (!strcmp(s, "flat")) return TD5_GEOB_ROOF_FLAT;
-    if (!strcmp(s, "mansard") || !strcmp(s, "gambrel")) return TD5_GEOB_ROOF_MANSARD;
-    /* Everything else OSM tags is some kind of slope: gabled, hipped,
-     * half-hipped, pyramidal, skillion, round, dome, onion, gabled_with_... */
-    return TD5_GEOB_ROOF_PITCHED;
+    if (!strcmp(s, "flat"))                            return TD5_GEOB_ROOF_FLAT;
+    if (!strcmp(s, "mansard") || !strcmp(s, "gambrel"))
+        return TD5_GEOB_ROOF_MANSARD;
+    if (!strcmp(s, "gabled") || !strcmp(s, "half-hipped")
+        || !strcmp(s, "side_hipped") || !strcmp(s, "saltbox")
+        || !strncmp(s, "gabled_with", 11))             return TD5_GEOB_ROOF_GABLED;
+    if (!strcmp(s, "hipped") || !strcmp(s, "hipped_and_gabled"))
+        return TD5_GEOB_ROOF_HIPPED;
+    if (!strcmp(s, "skillion") || !strcmp(s, "lean_to")
+        || !strcmp(s, "shed") || !strcmp(s, "monopitch"))
+        return TD5_GEOB_ROOF_SKILLION;
+    /* pyramidal, dome, onion, round, cone, sphere and anything unrecognised. */
+    return TD5_GEOB_ROOF_APEX;
+}
+
+/* A number that may have arrived as a JSON STRING.
+ *
+ * Overpass hands every tag back as a string and geo_fetch stores height,
+ * min_height and roof:height RAW (re/tools/geo_fetch.py, the buildings
+ * branch), so `geob_num` -- which only accepts cJSON numbers -- read 0 for
+ * every one of them. MEASURED on the La Plata cache: min_height_m is absent
+ * on all 2047 footprints and roof_height_m is present on exactly one, as the
+ * string "5". Accepting a leading numeric prefix also absorbs the "12 m" and
+ * "3.5m" spellings OSM allows. */
+static double geob_num_tag(const cJSON *o, const char *key, double def)
+{
+    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
+    if (!v) return def;
+    if (cJSON_IsNumber(v)) return v->valuedouble;
+    if (cJSON_IsString(v) && v->valuestring && v->valuestring[0]) {
+        char *end = NULL;
+        const double d = strtod(v->valuestring, &end);
+        if (end != v->valuestring) return d;
+    }
+    return def;
+}
+
+/* A building=* value that names a landmark ON ITS OWN, with or without a
+ * name tag.
+ *
+ * WHY THIS IS HERE AND NOT IN geo_fetch.py. geo_fetch's own rule is
+ * `tourism or historic or (name and building in {cathedral, church, stadium,
+ * museum, train_station, civic, public})`. MEASURED on the La Plata cache:
+ * 10 of 2047 footprints pass it and only 2 come within 100 m of the route, so
+ * the whole landmark path shipped exercised twice. Widening it there would
+ * mean a re-fetch, and the network is not available to this workstream; these
+ * classes come off the `class` field that is ALREADY in BUILDINGS.JSON, so
+ * the rule can be applied to a cache on disk.
+ *
+ * The set is deliberately the UNMISTAKABLE classes. `university`, `school`,
+ * `hospital`, `office` and `retail` are ordinary urban fabric at La Plata's
+ * scale (29 universities and 13 schools in this one cache) and promoting them
+ * would hand a quarter of the city the landmark treatment.
+ *
+ * KNOWN GAP, measured rather than assumed: the tags that would catch the rest
+ * -- amenity=place_of_worship / theatre / police, office=government,
+ * government=* -- are NOT carried into BUILDINGS.JSON at all, so no C-side
+ * rule can see them. On the La Plata route that is 9 further landmark-worthy
+ * objects (6 government, 1 theatre, 1 place_of_worship, 1 police). The
+ * permanent home for that is geo_fetch.py's tag list; offline,
+ * re/tools/geo_fixtures/land_relabel.py re-stamps an existing cache from the
+ * raw Overpass response beside it. */
+static int geob_class_is_landmark(const char *c)
+{
+    static const char *const k[] = {
+        "cathedral", "church", "chapel", "basilica", "mosque", "synagogue",
+        "temple", "monastery", "shrine", "stadium", "museum", "palace",
+        "castle", "monument", "memorial", "train_station", "courthouse",
+        "townhall", "government", "civic", "public", "theatre", "opera_house",
+        NULL
+    };
+    int i;
+    if (!c || !c[0]) return 0;
+    for (i = 0; k[i]; i++) if (!strcmp(c, k[i])) return 1;
+    return 0;
 }
 
 static int geob_area_kind_of(const char *leisure, const char *landuse)
@@ -373,7 +490,7 @@ static int geob_load_buildings(const char *slug)
         const cJSON *e = cJSON_GetArrayItem(arr, i);
         TD5_GeoBuilding *b = &s_gb.b[s_gb.nb];
         const char *hs;
-        double h_m, mh_m;
+        double h_m, mh_m, rh_m;
         int first = 0, rn;
 
         rn = geob_push_ring(e ? cJSON_GetObjectItem(e, "points") : NULL,
@@ -382,18 +499,27 @@ static int geob_load_buildings(const char *slug)
         b->first = first;
         b->n     = rn;
 
-        h_m  = geob_num(e, "height_m", 0.0);
-        mh_m = geob_num(e, "min_height_m", 0.0);
+        h_m  = geob_num_tag(e, "height_m", 0.0);
+        mh_m = geob_num_tag(e, "min_height_m", 0.0);
+        rh_m = geob_num_tag(e, "roof_height_m", 0.0);
         /* A footprint with no usable height is not a building we can extrude;
          * one storey is the floor rather than dropping it, since the footprint
          * itself is the fact worth keeping. */
         if (!(h_m > 0.0)) h_m = s_gb.storey_m;
-        b->height     = h_m  * s_gb.units_per_m;
-        b->min_height = (mh_m > 0.0) ? mh_m * s_gb.units_per_m : 0.0;
+        /* min_height is the BASE of the mass and height is its TOP, both
+         * measured from the ground (OSM Simple 3D Buildings). A part whose
+         * base is at or above its top is a tagging error; drop the base rather
+         * than extrude a mass the wrong way up. */
+        if (mh_m >= h_m) mh_m = 0.0;
+        b->height      = h_m  * s_gb.units_per_m;
+        b->min_height  = (mh_m > 0.0) ? mh_m * s_gb.units_per_m : 0.0;
+        b->roof_height = (rh_m > 0.0) ? rh_m * s_gb.units_per_m : 0.0;
         b->area_m2    = geob_num(e, "area_m2", 0.0);
         b->id_hash    = geob_id_hash(geob_num(e, "id", (double)i));
         b->roof       = (unsigned char)geob_roof_of(geob_str(e, "roof_shape"));
-        b->landmark   = (unsigned char)(geob_true(e, "landmark") ? 1 : 0);
+        b->landmark   = (unsigned char)(geob_true(e, "landmark")
+                                        || geob_class_is_landmark(
+                                               geob_str(e, "class")) ? 1 : 0);
         b->part       = (unsigned char)(geob_true(e, "part") ? 1 : 0);
         b->host_span  = -1;
         b->host_side  = 0;

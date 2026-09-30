@@ -2901,6 +2901,11 @@ int  tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
 double      tg_prefab_half_depth(int pf);
 const char *tg_prefab_name(int pf);
 void        tg_prefab_report(void);
+/* [GEO PHASE 5] footprint-driven fallback: pick the biggest set piece that
+ * fits a real OSM footprint, and stamp it straight into a live buffer. */
+int         tg_prefab_fit(double fx_max, double fz_max, unsigned int salt);
+int         tg_prefab_write_at(TG_Buf *blk, int pf, double ox, double oy,
+                               double oz, double ca, double sa);
 
 int  tg_shape_lane_aim(int si, int base_lanes, int lo, int hi);
 int  tg_shape_safety_x100(int si, int base_x100);

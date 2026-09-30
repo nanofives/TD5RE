@@ -634,11 +634,206 @@ Follow-ups done 2026-09-30 (before merge):
   the same route (La Plata 1492 spans before and after; was 1200).
 
 Still open:
-- Plaza lawn texture is stretched along long strips (UVs follow the outline).
 - `TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
   no TEXTURES.DAT in level090.zip and no scenery; the default streamed path and
   the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
-- Landmark prefab fallback and roof:shape only exercised on 2 buildings.
+
+(Plaza UV stretch and the landmark coverage were closed in 6g below.)
+
+## 6g. Plaza texel density and landmark coverage, closed 2026-09-30
+
+The two Phase 5 follow-ups from 6f, done offline on `la_plata` plus a new
+synthetic fixture. Files: `td5_tg_streets.c`, `td5_tg_city.c`,
+`td5_geo_buildings.c/.h`, `td5_tg_prefab.c`, and `re/tools/geo_fixtures/land_*`.
+
+### Item 8 -- the plaza was not stretched where the report said it was
+
+Measured before touching anything, with a new offline probe
+(`re/tools/geo_fixtures/land_models_probe.py`, which fits the plane-to-UV
+Jacobian of every face and reports its two principal texel densities).
+Plaza Mariano Moreno, span 701:
+
+| page | faces | units/repeat | anisotropy p50 | worst |
+|---|---|---|---|---|
+| 65 lawn | 27 | 3400 | 1.00 | 1.2 |
+| 2 beds (GREEN) | 8 | 12336..58912 | 3.13 | 4.7 |
+| 66 boundary hedge | 23 | 520..40219 | **13.46** | **78.0** |
+| 44 paving + paths | 184 | 1496 | 1.01 | 1.7 |
+
+The LAWN was never the stretched surface: it was already planar in world XZ,
+just 2.3x coarser than the generator's own grass. What followed the outline
+were the **hedge** (u 0..1 per ring edge, so a 94 m edge got one repeat) and
+the **beds** (u,v 0..1 across a whole wedge). Everything is now pinned to
+`TD5_TG_GEOP_TILE` = the span length, which is exactly the density
+`tg_block_emit_park` lays for a procedural park.
+
+| page | after | anisotropy p50 | worst |
+|---|---|---|---|
+| 65 lawn | 1500 | 1.00 | 1.2 |
+| 2 beds | 1500 | **1.00** | 1.0 |
+| 66 hedge | 520..1502 | **2.88** | **2.9** |
+| 44 paving | 1496 (unchanged) | 1.01 | 1.7 |
+
+The residual 2.88 on the hedge is the procedural park hedge's OWN ratio
+(1500 along / 520 up), which is the reference, not a defect. The paving was
+already isotropic and was left alone. `TD5RE_GEO_PLAZA_TILE=0` restores the
+old UVs, so the before/after is one variable on one exe.
+
+### Item 7 -- landmarks, exercised on a fixture because the real data is thin
+
+Why a fixture: the La Plata cache carries **4** `roof:shape` tags in 2047
+footprints (3 mansard, 1 flat), **zero** `building:part`, **zero**
+`min_height`, and 2 of its 10 tagged landmarks within 100 m of the route. The
+whole path shipped exercised twice, and a richer city needs the network.
+`re/tools/geo_fixtures/land_fixture_build.py` writes a place whose road,
+terrain and route are La Plata's, byte for byte, and whose BUILDINGS.JSON is
+20 controlled cases one per span: every roof:shape the reader accepts, a
+three-part stack with min_height, two tagged landmarks with no 3D tags, an
+L-shaped (concave) footprint, and the degenerate rings the emitter has to
+refuse.
+
+What the fixture found, and what was fixed:
+
+1. **`min_height` never arrived.** Overpass returns every tag as a string and
+   `geo_fetch` stores it raw, so the reader's `cJSON_IsNumber` check read 0
+   for `min_height_m` and `roof_height_m` on every footprint in every cache.
+   `geob_num_tag` now accepts a leading numeric prefix ("12", "12 m").
+2. **A part was extruded its FULL height above its base.** OSM's `min_height`
+   is the base and `height` is the top; the emitter added the base and then
+   extruded the top, so a part tagged 20..34 m came out 34 m tall starting at
+   20. A three-part stack was three times the building.
+3. **Every sloped roof was a centroid pyramid.** Gabled, hipped, skillion and
+   mansard all got a tent. `tg_geo_roof_ridge` now builds one ridge per shape
+   -- full-length (gabled), inset at both ends (hipped), at the far edge
+   (skillion), collapsed to a point (pyramidal, dome, onion, round) -- and a
+   mansard gets a truncated pyramid with a flat deck. One loop, one
+   parameter; a zero-length ridge reproduces the old pyramid exactly.
+4. **`roof:height` was ignored.** Tagged, the eaves now sit at
+   `height - roof:height` (OSM's own reading) instead of the roof stacking on
+   top; untagged, the old default pitch above the walls is kept, because
+   subtracting a made-up rise from an ESTIMATED height would shorten the
+   building for nothing. Wall storeys are repeated over the wall, not over
+   the building, so a tagged roof no longer squashes the windows.
+5. **A non-simple ring produced garbage.** `td5_geob_ring_simple` refuses a
+   self-intersecting or zero-area footprint (the fixture's bowtie emitted a
+   roof with two faces wound against each other; the collinear one emitted a
+   wall sheet with no roof). No real La Plata footprint fails it -- the geo
+   MODELS.DAT hash is unchanged by the test.
+6. **The base sink ate 0.7 m off every building.** `TD5_TG_GEO_BASE_SINK`
+   exists so uneven terrain under a big flat footprint cannot show daylight
+   under a wall, which is a statement about the BOTTOM edge -- but it was
+   subtracted from the base before the top was derived from it, so every geo
+   building came out 300 units short of its tagged height. Invisible on one
+   building; on the fixture's three-part stack the plinth's top face landed
+   at 6375 while the block above it started at 6675, a 0.7 m ring of
+   daylight between two masses that are supposed to meet. The sink now
+   lowers the base only, so a mass's top lands on its tagged height.
+   MEASURED after, on the same stack: plinth 2935..6675, block
+   6375..11835, tower 11535..19555 (17855 plus a 1700 pyramidal rise) --
+   every top exactly on its tag, and each part's base now sits 300 units
+   INSIDE the one below instead of 300 above it, which is what the sink is
+   for. Footprints shrink 18.6 -> 14.5 -> 10.3 m as tagged.
+7. **The prefab-table fallback was a counter, not a fallback.** A landmark
+   with no 3D tags was extruded as a generic box and `s_geo_lm_fallback` was
+   bumped. `tg_geo_emit_landmark_prefab` now picks the biggest shipped set
+   piece that FITS INSIDE the real footprint and stamps it at the centroid,
+   facing the footprint's principal axis. Fitting inside is what makes "does
+   not intersect the road" true by construction: the ring has already been
+   nudged clear of the carriageway and the pavement. `TD5RE_GEO_LM_PREFAB=0`
+   restores the plain extrusion.
+
+Fixture result after the fixes, `re/tools/geo_fixtures/land_geom_audit.py`
+over 578 meshes in the 18 fixture entries: **DEGEN 0, FLIP 0, ROOFGAP 0**
+(roof eaves meet the wall top exactly on every case). On-road guard: 0
+rejections of geo meshes.
+
+The census now names the shape each roof was BUILT as, not just how many
+were shaped, because "12 shaped" cannot tell 12 pyramids from a ridge, a
+hip and a shed. On the fixture it reads
+
+    roofs BUILT by shape: 2 flat, 5 apex (pyramidal/dome/onion/round),
+    3 gabled, 1 hipped, 1 skillion, 2 mansard, 3 with no roof tag
+
+and every one of the 20 cases is accounted for: apex 5 = pyramidal, dome,
+round, onion and the part-stack's tower; gabled 3 = gabled, half-hipped and
+the 2 m test case; flat 2 = the flat case plus the concave L falling back;
+no-tag 3 = the two lower parts and the landmark no set piece fitted; plus 1
+set piece stamped and 2 degenerate rings refused. 18 emitted, 20 in.
+
+**On the REAL place these six fixes are almost entirely inert, and that is
+worth stating plainly rather than leaving a reader to infer it.** La Plata's
+census reads `2 flat, 0 apex, 0 gabled, 0 hipped, 0 skillion, 0 mansard, 52
+with no roof tag`, 0 parts stacked and 0 set pieces stamped: the cache has
+no `roof:shape` on any footprint near the route, no `building:part` at all,
+and no near-route landmark that lacks 3D tags. The only visible change on La
+Plata is the base sink, which moved the geo MODELS.DAT hash. So the coverage
+this round buys is proven ON THE FIXTURE, and the fixture is the committed
+artefact for exactly that reason -- the next real place with 3D tagging gets
+the benefit, and the regression net already exists when it arrives.
+
+**What the framedumps can and cannot show.** There is one capture per roof
+type in `re/tools/geo_fixtures/out/` (gitignored; regenerate with
+`land_frame.py`). They confirm the fixture buildings stand on the ground, at
+the right spans, clear of the carriageway. They do NOT settle which
+silhouette a roof came out as, and three framings were tried before
+accepting that: a 34000-unit overhead is too far to resolve a ridge, a
+13000-unit oblique puts the camera inside the surrounding procedural towers,
+and at every altitude the roof page's tiled texture hides the geometry while
+the dense procedural city makes one building hard to pick out. No knob
+clears the procedural frontage without also clearing the real buildings
+(`TD5RE_AUTOTRACK_FACADE_MASS=0` only flattens the mass). So the shape proof
+is the per-shape census plus the audit above, and the framedumps are
+supporting evidence rather than the measurement -- which is the right way
+round anyway, since a hash and a face count do not depend on where a camera
+happened to be pointing.
+
+An audit trap worth recording: the first cut of `land_geom_audit.py` read
+every VERTICAL roof face as an inverted one and reported 5 flips. A gable END
+and a shed's high wall are vertical by definition. The audit now classes
+`|n_y|/|n| < 0.05` separately, and the count fell 5 -> 1, the survivor being
+the bowtie, which is a real inversion and is now refused outright.
+
+### Landmark coverage: what the filter misses, and where the fix belongs
+
+`geo_fetch`'s rule is `tourism or historic or (name and building in
+{cathedral, church, stadium, museum, train_station, civic, public})`. It
+flags 10 of 2047 La Plata footprints, 2 of them near the route.
+
+Two changes, because the data is in two places:
+
+- **In the reader** (`geob_class_is_landmark`), the unmistakable `building=*`
+  values -- cathedral, chapel, basilica, mosque, synagogue, stadium, museum,
+  palace, castle, monument, memorial, train_station, courthouse, townhall,
+  government, civic, public, theatre, opera_house -- count on their own, with
+  or without a name. La Plata: cache landmarks 10 -> 22, near-route landmarks
+  extruded 2 -> 3. `university`, `school`, `hospital`, `office` and `retail`
+  are deliberately NOT promoted: 29 universities and 13 schools in one cache
+  is ordinary urban fabric.
+- **The tags that would catch the rest are not in BUILDINGS.JSON at all.**
+  Walking the raw Overpass response for the 54 footprints within 100 m of the
+  route finds nine more landmark-worthy objects -- `office=government` x4,
+  `government=administrative/ministry/legislative/yes`, `amenity=theatre`,
+  `amenity=place_of_worship`, `amenity=police` -- and `geo_fetch` keeps none
+  of those keys, so no reader-side rule can see them. The permanent home is
+  `geo_fetch.py`'s tag list, which this workstream does not own and cannot
+  re-run without the network. `re/tools/geo_fixtures/land_relabel.py` is the
+  offline stand-in: it re-stamps `landmark` (plus a `landmark_src` naming the
+  deciding tag) straight from the cached Overpass responses. On La Plata it
+  takes the cache from 10 to 77 landmarks and, within 100 m of the route,
+  from 2 of 54 to **11 of 54**. It is not run by default.
+
+### Gates
+
+| gate | result |
+|---|---|
+| synthetic seed 20260901, no geo knobs | MODELS.DAT `98E749869051ACE3`, STRIP.DAT `7C392E1958498B53` -- all 8 files identical to master |
+| La Plata geo MODELS.DAT | `50C8E8FC902D4BAA` -> `0E3C3CA41A7038D0` (12248316 bytes both) |
+| La Plata geo fixture `land_test` MODELS.DAT | `993681FC9709351C` |
+| two geo builds | identical |
+| `tg_network_audit.py` | OK (0 crossings, 0 street points on the road, worst grade 0.1147) |
+| `tg_strip_audit.py` | 0 violations, 4 lane seams |
+| on-road guard | 2 city rejects at spans 339 and 571, unchanged; 0 geo meshes rejected |
+| structure lint | OK (warnings 83 against a baseline of 84) |
 
 ## 7. Phases
 
