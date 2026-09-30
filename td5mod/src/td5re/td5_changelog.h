@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 30 (AI on real city corners)" },
+    { CL_ITEM,    "AI cars on a real-world track keep their body off the" },
+    { CL_ITEM,    "  inside kerb of tight city corners instead of pinning" },
+    { CL_ITEM,    "  against it. La Plata: 83% less wall contact." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "September 30 (real places keep their scenery)" },
     { CL_ITEM,    "A real-world track no longer rolls its buildings," },
     { CL_ITEM,    "  streets, bridges or coast away. About 1 seed in 8" },
