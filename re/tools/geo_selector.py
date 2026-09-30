@@ -134,15 +134,44 @@ def write_selected(slug: str, root: str = CACHE_ROOT) -> None:
 _graph_cache: dict[str, tuple[float, tuple]] = {}
 
 
+def _in_bbox(la: float, lo: float, bb: dict) -> bool:
+    return bb["south"] <= la <= bb["north"] and bb["west"] <= lo <= bb["east"]
+
+
 def _load_graph(slug: str, root: str):
     """The road graph is ~16k nodes; build it once per place and reuse it until
-    ROADS.JSON changes (a save re-writes it in the new frame)."""
-    rp = os.path.join(place_dir(slug, root), "ROADS.JSON")
+    ROADS.JSON changes (a save re-writes it in the new frame).
+
+    ROUTING AREA IS PINNED. SEND TO GAME re-fetches a WIDER circle (the route's
+    own origin plus the old radius, so the terrain covers everything). Routing
+    over that wider graph found a different, shorter path for the same A/B
+    (La Plata: 1492 -> 1200 spans), so touching a saved route silently changed
+    it. The first save records the area the user actually routed in
+    (PLACE.JSON "route_graph_bbox") and the graph is limited to roads with a
+    point inside it from then on."""
+    d = place_dir(slug, root)
+    rp = os.path.join(d, "ROADS.JSON")
     mt = os.path.getmtime(rp)
     hit = _graph_cache.get(root + "|" + slug)
     if hit and hit[0] == mt:
         return hit[1]
-    loaded = geo_route.load_place(slug, root)
+    place = read_json(os.path.join(d, "PLACE.JSON"))
+    roads = read_json(rp)["roads"]
+    pr = place["projection"]
+    proj = LocalProjection(pr["lat0"], pr["lon0"], pr["units_per_metre"])
+    proj.set_rotation(pr.get("rotation_rad", 0.0))
+    proj.set_offset(pr.get("offset_x", 0.0), pr.get("offset_z", 0.0))
+    bb = place.get("route_graph_bbox")
+    if bb:
+        keep = []
+        for r in roads:
+            for pt in r.get("points") or []:
+                la, lo = proj.world_to_latlon(pt["x"], pt["z"])
+                if _in_bbox(la, lo, bb):
+                    keep.append(r)
+                    break
+        roads = keep
+    loaded = (place, geo_route.RoadGraph(roads), proj)
     _graph_cache[root + "|" + slug] = (mt, loaded)
     return loaded
 
@@ -215,6 +244,9 @@ def save_route(slug: str, waypoints: list[list[float]], root: str = CACHE_ROOT,
 
     if refetch:
         place = read_json(os.path.join(d, "PLACE.JSON"))
+        # Pin the routing area to what the user routed in, the FIRST time only:
+        # a later save must not widen it again (see _load_graph).
+        graph_bbox = place.get("route_graph_bbox") or place.get("bbox")
         pr = cond["projection"]
         centre = (place["centre"]["lat"], place["centre"]["lon"])
         origin = (pr["lat0"], pr["lon0"])
@@ -225,6 +257,11 @@ def save_route(slug: str, waypoints: list[list[float]], root: str = CACHE_ROOT,
                                      rotation_rad=pr["rotation_rad"],
                                      offset_x=pr["offset_x"],
                                      offset_z=pr["offset_z"])
+        if graph_bbox:
+            pj = os.path.join(d, "PLACE.JSON")
+            newp = read_json(pj)
+            newp["route_graph_bbox"] = graph_bbox
+            write_json(pj, newp)
         _graph_cache.pop(root + "|" + slug, None)
 
     write_selected(slug, root)

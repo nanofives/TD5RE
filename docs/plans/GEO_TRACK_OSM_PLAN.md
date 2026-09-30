@@ -622,13 +622,22 @@ workstreams, each on its own branch, merged here:
 Gates on the merged branch: synthetic seed 20260901 byte-identical (8 files),
 network + strip audits OK on La Plata, structure lint OK (83/84).
 
-Open:
-- Plaza paths z-fight with the lawn at some angles (G2 was fixing lift order).
-- `TD5RE_AUTOTRACK_STREAM=0` with REUSE left at its default produced one build
-  with no TEXTURES.DAT in level090.zip and no scenery; the default streamed path
-  and the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
-- After SEND TO GAME the selector re-fetches a wider radius, so re-routing the
-  same A/B can pick a different, shorter route (1492 -> 1200 spans on La Plata).
+Follow-ups done 2026-09-30 (before merge):
+- Traffic lights verified in race: heads beside the kerb at spans 696/702, the
+  lit lens went green -> red within 4 s. Placement spans are now logged
+  (`[GEO SIGNALS]   head N: span S side`).
+- Plaza paths: G2's three Y tiers hold; a full-resolution frame of the plaza at
+  span ~399 shows clean lawn/path edges, no flicker. Plaza first spans are now
+  logged (`[GEO PLAZA]   area N first at span S`).
+- Selector: the first SEND TO GAME pins the routing area in PLACE.JSON
+  (`route_graph_bbox`), so re-routing a saved A/B over the wider re-fetch gives
+  the same route (La Plata 1492 spans before and after; was 1200).
+
+Still open:
+- Plaza lawn texture is stretched along long strips (UVs follow the outline).
+- `TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
+  no TEXTURES.DAT in level090.zip and no scenery; the default streamed path and
+  the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
 - Landmark prefab fallback and roof:shape only exercised on 2 buildings.
 
 ## 7. Phases

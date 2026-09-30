@@ -1364,4 +1364,12 @@ void tg_geo_signals_report(int nspans)
                   s_sig_drop_struct, s_sig_drop_side, s_sig_drop_street,
                   s_sig_drop_dup, s_sig_drop_budget,
                   td5_geo_signals_source());
+    /* Where each head stands, so a capture (StartSpanOffset) can be aimed at
+     * one without guessing. */
+    {
+        int i;
+        for (i = 0; i < s_sigp_n; i++)
+            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side",
+                      i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right");
+    }
 }
