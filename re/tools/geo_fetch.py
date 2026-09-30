@@ -78,6 +78,35 @@ OVERPASS_ENDPOINTS = (
 )
 TERRARIUM_URL = ("https://s3.amazonaws.com/elevation-tiles-prod/terrarium"
                  "/%d/%d/%d.png")
+# Ground sample distance of the DATA BEHIND the tiles, which is not the tile
+# grid's own resolution. Terrarium is SRTM-derived, so ~30 m, and z13 tiles at
+# 15.7 m/px are already oversampled relative to that.
+TERRARIUM_NATIVE_M = 30.0
+
+# Lowpass width applied to a fetched DEM, metres. NOT the native GSD: measured on
+# La Plata (a flat city) with Terrarium, which is SRTM-derived and therefore a
+# SURFACE model that reads rooftops as ground.
+#
+#   lowpass   relief kept   p99 grade x1.5   max grade
+#   30 m         67.6 m         0.297          0.993     <- pinned at the cap
+#   60 m         57.4 m         0.208          0.543
+#   120 m        44.2 m         0.127          0.273
+#   200 m        33.1 m         0.076          0.153     <- default
+#   500 m        24.6 m         0.037          0.047
+#
+# 200 m is the first width where the exaggerated p99 clears the default
+# TD5RE_AUTOTRACK_GRADE cap (0.12) AND the worst cell clears the absolute ceiling
+# TG_ROAD_GRADE_ABSMAX (0.20), so the road profile stops sitting pinned. Filtering
+# at the native 30 m does NOT fix it: SRTM's rooftop artefacts are whole CITY
+# BLOCKS, 30-80 m of plateau, so a 31 m window barely touches them.
+#
+# Real relief survives because it lives at a much larger scale -- a mountain pass
+# turns over 500 m to 2 km. Override with --dem-smooth-m, and use 0 to disable.
+#
+# THE REAL FIX is a bare-earth model. The IGN publishes MDT (Modelo Digital de
+# TERRENO) as well as MDE (surface) at 5 m, which is exactly the right product and
+# needs no smoothing at all -- one more reason to request the AMBA sheet.
+DEM_SMOOTH_M_DEFAULT = 200.0
 IGN_MDE_WFS = "https://wms.ign.gob.ar/geoserver/ows"
 
 # ESA WorldCover class ids, kept as the COVER.R8 vocabulary even when the values
@@ -286,7 +315,9 @@ def _terrarium_zoom(lat: float, target_m_per_px: float) -> int:
 def build_height_raster(proj: LocalProjection,
                         bbox: tuple[float, float, float, float],
                         root: str, cell: float = TG_WORLD_CELL,
-                        dem_override: str | None = None) -> tuple[Raster, dict]:
+                        dem_override: str | None = None,
+                        smooth_m: float = DEM_SMOOTH_M_DEFAULT
+                        ) -> tuple[Raster, dict]:
     """Sample elevation onto the world cell grid.
 
     The grid is axis-aligned in WORLD space (already rotated by the conditioner),
@@ -318,6 +349,7 @@ def build_height_raster(proj: LocalProjection,
             "url": TERRARIUM_URL % (z, 0, 0),
             "zoom": z,
             "ground_res_m": 156543.03392 * math.cos(math.radians(lat_mid)) / (2.0 ** z),
+            "native_m": TERRARIUM_NATIVE_M,
             "licence": "ODbL / public-domain mix, see AWS elevation-tiles-prod",
             "vintage": "SRTM-derived, see the dataset for per-region sources",
             "tiles": int(mosaic.shape[0] * mosaic.shape[1] // (256 * 256)),
@@ -339,6 +371,30 @@ def build_height_raster(proj: LocalProjection,
             wx = x0 + ix * cell
             la, lo = proj.world_to_latlon(wx, wz)
             out[iz, ix] = sampler(la, lo)
+
+    # LOWPASS TO THE SOURCE'S NATIVE RESOLUTION.
+    #
+    # This is not cosmetic. Terrarium is SRTM-derived, and SRTM is a SURFACE
+    # model: over a city it measures rooftops, not ground. Sampled straight onto
+    # 3.49 m cells that puts building-height steps into the terrain -- measured on
+    # La Plata, a flat city, as a 4.8 m step between adjacent cells (138% grade)
+    # and a p99 grade of 22.7%, which made the road profile sit pinned at its
+    # 0.20 absolute cap for the whole track.
+    #
+    # The fix is to stop pretending to have detail the source does not have. The
+    # plan's design already says the generator's own surface-detail octave
+    # (wavelength 9000 units, ~21 m) supplies the fine texture and the DEM only
+    # the large scale; this is the missing half of that. A separable box blur at
+    # the native GSD removes building-scale steps and keeps real relief.
+    cell_m = cell / proj.units_per_metre
+    rad = int(round(0.5 * smooth_m / cell_m)) if (cell_m > 0.0 and smooth_m > 0.0) else 0
+    if rad >= 1:
+        out = _box_blur(out, rad)
+        provenance["lowpass_m"] = smooth_m
+        provenance["lowpass_radius_cells"] = rad
+    else:
+        provenance["lowpass_m"] = None
+        provenance["lowpass_radius_cells"] = 0
 
     # Store as int16 world units. A metre is ~430 units, so a raw int16 would
     # saturate at 76 m of relief; scale by the cell-appropriate step instead and
@@ -376,6 +432,24 @@ def _build_mosaic(bbox, z: int, root: str) -> tuple[np.ndarray, int, int]:
             mosaic[j * 256:(j + 1) * 256, i * 256:(i + 1) * 256] = \
                 _terrarium_tile(z, tx0 + i, ty0 + j, root)
     return mosaic, tx0, ty0
+
+
+def _box_blur(a: np.ndarray, rad: int) -> np.ndarray:
+    """Separable moving average of radius `rad` cells, edge-extended.
+
+    Two 1-D cumulative-sum passes, so it is O(cells) rather than O(cells * k^2)
+    and a 1786x1786 grid with a radius of 4 costs milliseconds.
+    """
+    k = 2 * rad + 1
+    padx = np.pad(a, ((0, 0), (rad, rad)), mode="edge")
+    cs = np.cumsum(padx, axis=1)
+    cs = np.concatenate([np.zeros((cs.shape[0], 1)), cs], axis=1)
+    tmp = (cs[:, k:] - cs[:, :-k]) / float(k)
+
+    padz = np.pad(tmp, ((rad, rad), (0, 0)), mode="edge")
+    cs = np.cumsum(padz, axis=0)
+    cs = np.concatenate([np.zeros((1, cs.shape[1])), cs], axis=0)
+    return (cs[k:, :] - cs[:-k, :]) / float(k)
 
 
 def _bilinear(a: np.ndarray, px: float, py: float) -> float:
@@ -808,7 +882,8 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                 dem_override: str | None = None,
                 cell: float = TG_WORLD_CELL,
                 rotation_rad: float = 0.0,
-                offset_x: float = 0.0, offset_z: float = 0.0) -> dict:
+                offset_x: float = 0.0, offset_z: float = 0.0,
+                smooth_m: float = DEM_SMOOTH_M_DEFAULT) -> dict:
     slug = slugify(name)
     out = place_dir(slug, root)
     os.makedirs(out, exist_ok=True)
@@ -856,13 +931,17 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
         print("  %-20s %d" % (k, vec["counts"][k]))
 
     print("\n[4/5] elevation")
-    height, dem_prov = build_height_raster(proj, bbox, out, cell, dem_override)
+    height, dem_prov = build_height_raster(proj, bbox, out, cell, dem_override,
+                                           smooth_m)
     hs = height.stats()
     print("  grid %dx%d cells of %.0f units (%.2f m)"
           % (hs["width"], hs["height"], cell, cell / units_per_metre))
-    print("  source %s, relief %.1f m (%.1f..%.1f)"
+    print("  source %s, relief %.1f m (%.1f..%.1f), lowpass %s"
           % (dem_prov["source"], dem_prov["relief_m"],
-             dem_prov["min_m"], dem_prov["max_m"]))
+             dem_prov["min_m"], dem_prov["max_m"],
+             ("%.0f m (%d cells)" % (dem_prov["lowpass_m"],
+                                     dem_prov["lowpass_radius_cells"]))
+             if dem_prov.get("lowpass_m") else "none"))
 
     print("\n[5/5] rasterize cover/water, estimate building heights")
     cover, water, painted = rasterize_layers(vec, proj, height)
@@ -941,6 +1020,10 @@ def main(argv=None) -> int:
                     default=UNITS_PER_METRE_DERIVED)
     ap.add_argument("--dem-override",
                     help="GeoTIFF or Terrarium-coded PNG to use instead of tiles")
+    ap.add_argument("--dem-smooth-m", type=float, default=DEM_SMOOTH_M_DEFAULT,
+                    help="DEM lowpass width in metres; 0 disables. See "
+                         "DEM_SMOOTH_M_DEFAULT for the measurements behind the "
+                         "default")
     ap.add_argument("--rotation", type=float, default=0.0,
                     help="frame rotation in radians; pass the rotation_rad from "
                          "a conditioned ROUTE.JSON so the cache and the route "
@@ -973,7 +1056,8 @@ def main(argv=None) -> int:
         print("frame from %s" % a.frame_from)
 
     fetch_place(a.name, a.lat, a.lon, a.radius, a.root,
-                a.units_per_metre, a.dem_override, TG_WORLD_CELL, rot, ox, oz)
+                a.units_per_metre, a.dem_override, TG_WORLD_CELL, rot, ox, oz,
+                a.dem_smooth_m)
     return 0
 
 

@@ -473,6 +473,66 @@ lanes 16.0, 12 lanes only 5.3. Per-node widths raised the preserved worst turn
 from 20.5 to 31.6 deg on the same route, which is exactly the tight residential
 corners that make a city recognisable.
 
+## 6c. Phase 2 shipped and verified 2026-09-30
+
+`td5_geo.c/.h` plus THREE branches in `td5_tg_world.c` (`tg_w_raw`,
+`tg_world_water_y`, `tg_world_build`). Everything else untouched: `tg_world_h`,
+`_h_base`, `_slope`, `_is_water`, `_class`, the whole conform/occupancy overlay,
+and all 130 call sites.
+
+**Byte-identity proven, not asserted.** Built a pre-geo baseline exe from the
+previous commit and ran `verify/topo_gen.ps1 -Seed 20260901` against both. All
+eight generated level files are byte-identical -- STRIP.DAT, LEFT/RIGHT.TRK,
+LEVELINF.DAT, MODELS.DAT (`98E749869051ACE3`, 10271488 bytes), TEXTURES.DAT,
+MESHTAG.BIN, NETWORK.JSON. Only GENSTAMP.TXT differs, and it carries an `exe=`
+identity hash, so two different binaries must differ there; since the eight data
+files match, its `spec=` and `env=` fields necessarily agreed.
+
+`verify/topo_gen.ps1` gained `-MinGfx`, default ON (RT off + the 16
+minimum-graphics flags), per the standing run rule. A switch rather than
+unconditional because that script's own `-Race` + `TD5RE_FRAMEDUMP` path exists
+to look at visuals.
+
+### The finding that mattered: SRTM is a SURFACE model, so it reads rooftops
+
+The first geo build of La Plata came out with its grade profile PINNED at the
+absolute ceiling -- p90 0.1550, p99 and max both 0.1999 against
+`TG_ROAD_GRADE_ABSMAX` 0.20 -- and classified the terrain `flat 61% hill 36%
+mountain 1%`. For a city on the Pampa that is wrong.
+
+Measured rather than guessed: the DEM held **4.8 m steps between adjacent 3.49 m
+cells** (138% grade), 297 cells from the nearest edge, so not a clamping
+artefact. Terrarium is SRTM-derived and SRTM is a **surface** model: over a city
+it measures rooftops, not ground.
+
+Filtering at the source's native 30 m GSD barely helped (p99 0.227 -> 0.198),
+because the artefacts are whole **city blocks** -- 30 to 80 m of rooftop plateau
+-- so a 31 m window cannot touch them. Measured the trade directly:
+
+| lowpass | relief kept | p99 grade x1.5 | worst cell |
+|---|---|---|---|
+| 30 m (native) | 67.6 m | 0.297 | 0.993 |
+| 60 m | 57.4 m | 0.208 | 0.543 |
+| 120 m | 44.2 m | 0.127 | 0.273 |
+| **200 m (default)** | **33.1 m** | **0.076** | **0.153** |
+| 500 m | 24.6 m | 0.037 | 0.047 |
+
+**200 m** is the first width where the exaggerated p99 clears the default
+`TD5RE_AUTOTRACK_GRADE` cap (0.12) and the worst cell clears the absolute ceiling
+(0.20). Real relief survives because it lives at a much larger scale -- a
+mountain pass turns over 500 m to 2 km. `--dem-smooth-m` overrides it; 0 disables.
+
+After the fix, the same seed on the same place: p90 0.0602, max 0.1833, terrain
+`flat 96% hill 2%`, 0 bridges (that route crosses no real water), and 1800 open
+spans conformed with **zero cut and zero fill** -- the road follows the ground
+instead of fighting it.
+
+**This also raises the value of the IGN request.** Their 5 m product is published
+as MDE *and MDT* -- Modelo Digital de **TERRENO**, bare earth. That is not merely
+6x finer than Terrarium, it is the right KIND of model, and it needs no smoothing
+at all. The gated sheet is therefore worth more than the resolution number
+suggests.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth
