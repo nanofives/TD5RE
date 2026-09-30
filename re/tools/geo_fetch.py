@@ -112,6 +112,17 @@ IGN_MDE_WFS = "https://wms.ign.gob.ar/geoserver/ows"
 # ESA WorldCover class ids, kept as the COVER.R8 vocabulary even when the values
 # are derived from OSM landuse instead, so the C side has one enum either way.
 # https://collections.sentinel-hub.com/worldcover/readme.html
+# Shelf depth the bathymetry is clamped to before the DEM lowpass (see
+# build_height_raster). Shallow enough that the blur cannot drag the shore under
+# the water plane, deep enough to stay below any sea cell's mean height guard.
+SEA_FLOOR_CLAMP_M = -4.0
+# A region bounded by coastline is SEA only if more than SEA_LOW_FRAC_MIN of its
+# cells sit below SEA_LOW_M. Measured on Valparaiso: the sea side 0.69, the land
+# side 0.00. Not the MEAN: Terrarium stays a metre or two above zero for up to
+# ~1.7 km offshore there, which put the sea region's mean at 1.7 m.
+SEA_LOW_M = 0.5
+SEA_LOW_FRAC_MIN = 0.5
+
 COVER_NONE = 0
 COVER_TREE = 10
 COVER_SHRUB = 20
@@ -464,6 +475,18 @@ def build_height_raster(proj: LocalProjection,
     # (wavelength 9000 units, ~21 m) supplies the fine texture and the DEM only
     # the large scale; this is the missing half of that. A separable box blur at
     # the native GSD removes building-scale steps and keeps real relief.
+    # SEA FLOOR CLAMP (2026-09-30, Valparaiso). Terrarium carries BATHYMETRY:
+    # the Valparaiso cache read -320 m offshore. The game never sees the sea
+    # floor (WATER.R8 lays a water plane there), but the 200 m lowpass below
+    # would average that trench into the shore and sink the waterfront road
+    # tens of metres below the water. Clamp the floor to a shallow shelf first.
+    # A no-op wherever the DEM stays above it (La Plata's minimum is -2 m).
+    below = int((out < SEA_FLOOR_CLAMP_M).sum())
+    if below:
+        out = np.maximum(out, SEA_FLOOR_CLAMP_M)
+    provenance["sea_floor_clamp_m"] = SEA_FLOOR_CLAMP_M
+    provenance["sea_floor_clamped_cells"] = below
+
     cell_m = cell / proj.units_per_metre
     rad = int(round(0.5 * smooth_m / cell_m)) if (cell_m > 0.0 and smooth_m > 0.0) else 0
     if rad >= 1:
@@ -903,6 +926,67 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
             for ix, iz in cells_of(wy["points"]):
                 water[iz, ix] = 1
                 cover[iz, ix] = COVER_WATER
+
+    # SEA FROM COASTLINE (2026-09-30, Valparaiso). natural=coastline is a LINE in
+    # OSM, never a polygon, so the loop above only stamped its outline and the
+    # open sea stayed dry: the first Valparaiso fetch painted 6211 water cells
+    # out of 1.8 M in a box that is half ocean. Rasterise every coastline as a
+    # barrier, label the regions it cuts the box into, and mark as sea each
+    # region that (a) touches the coast and (b) sits below sea level on the DEM
+    # (most cells under SEA_LOW_M). (b) is what makes this independent of the
+    # coastline's winding and of the frame's axis handedness, and it refuses a
+    # land region that a gap in the coast would otherwise flood.
+    coast = [wy for wy in vec["water"] if wy["kind"] == "coastline"]
+    painted["sea_cells"] = 0
+    if coast:
+        from scipy import ndimage
+        barrier = np.zeros((h, w), dtype=bool)
+        step = height.cell * 0.5
+        for wy in coast:
+            pts = wy["points"]
+            for a, b in zip(pts, pts[1:]):
+                dx, dz = b["x"] - a["x"], b["z"] - a["z"]
+                n = max(1, int(math.hypot(dx, dz) / step))
+                for k in range(n + 1):
+                    x = a["x"] + dx * k / n
+                    z = a["z"] + dz * k / n
+                    ix = int(round((x - height.origin_x) / height.cell))
+                    iz = int(round((z - height.origin_z) / height.cell))
+                    if 0 <= ix < w and 0 <= iz < h:
+                        barrier[iz, ix] = True
+        labels, nlab = ndimage.label(~barrier)
+        touching = np.unique(np.concatenate([
+            labels[np.roll(barrier, s_, axis=ax)] for ax in (0, 1) for s_ in (1, -1)]))
+        metres = (height.data.astype(np.float64) * height.scale + height.bias) \
+            / proj.units_per_metre
+        lows = ndimage.mean((metres < SEA_LOW_M).astype(np.float64), labels,
+                            index=np.arange(1, nlab + 1))
+        sea = np.zeros((h, w), dtype=bool)
+        kept, refused = 0, 0
+        for lab in touching:
+            if lab <= 0:
+                continue
+            if lows[lab - 1] > SEA_LOW_FRAC_MIN:
+                sea |= labels == lab
+                kept += 1
+            else:
+                refused += 1
+        sea |= barrier & ndimage.binary_dilation(sea)
+        water[sea] = 1
+        cover[sea] = COVER_WATER
+        # Sink the sea floor to the clamp shelf under the water plane: the DEM's
+        # near-shore sea reads +1..2 m, which would stand the "floor" above the
+        # water surface across a 1.7 km band.
+        floor_raw = int(round((SEA_FLOOR_CLAMP_M * proj.units_per_metre
+                               - height.bias) / height.scale))
+        floor_raw = max(-32000, min(32000, floor_raw))
+        height.data[sea] = np.minimum(height.data[sea], floor_raw).astype(height.data.dtype)
+        painted["sea_cells"] = int(sea.sum())
+        painted["water_cells"] += painted["sea_cells"]
+        print("  coastline: %d way(s), %d region(s), %d kept as sea, %d refused "
+              "(%.0f%% or fewer cells under %.1f m), %d sea cells"
+              % (len(coast), nlab, kept, refused, SEA_LOW_FRAC_MIN * 100, SEA_LOW_M,
+                 painted["sea_cells"]))
 
     # Buildings imply BUILT even where no landuse polygon says so, which is what
     # makes the built-up fraction usable as a height proxy.
