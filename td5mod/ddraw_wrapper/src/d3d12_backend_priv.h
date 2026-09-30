@@ -105,4 +105,18 @@ void  d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMA
  * raw-pointer dedup then refuses to repair the slot when the address is reused). */
 void  d3d12_dxr_unregister_texture(ID3D12Resource *res);
 
+/* [PSO CRASH CRUMB 2026-09-29] Record the pipeline being built (site + shader
+ * bytecode size/hash) so an SEH crash inside the runtime's DXBC->DXIL converter
+ * (dxilconv.dll) is attributed in crash.log (pso_in_flight). Clear afterwards. */
+void  d3d12_pso_crumb_set(const char *site, const void *bc, SIZE_T len);
+void  d3d12_pso_crumb_clear(void);
+
+/* [DXIL 2026-09-29] Shader-set selector. 1 (default) = the SM 6.0 DXIL builds
+ * (g_<name>_60, compile_shaders.bat) so the runtime never converts DXBC in
+ * dxilconv.dll; 0 = the SM 5.0 DXBC builds (g_<name>_50). TD5RE_SHADER_DXIL.
+ * Global on purpose: a PSO must not mix DXBC and DXIL stages. */
+int   d3d12_shader_dxil(void);
+#define SH_BC(n)  (d3d12_shader_dxil() ? (const void *)g_##n##_60 : (const void *)g_##n##_50)
+#define SH_LEN(n) (d3d12_shader_dxil() ? (SIZE_T)sizeof(g_##n##_60) : (SIZE_T)sizeof(g_##n##_50))
+
 #endif /* D3D12_BACKEND_PRIV_H */

@@ -822,7 +822,25 @@ void td5_plat_present(int vsync)
                 s_fd_isseq = (strchr(s_fd_path, '%') != NULL);
             }
         }
-        if (s_fd_on && (s_fd_count++ % 30) == 0) {
+        /* [FRAMEDUMP TICK 2026-09-29] TD5RE_FRAMEDUMP_TICK=N: one dump only, on the
+         * first race present whose sim tick has reached N, so two builds (or two
+         * shader sets) can be compared at the same simulated moment instead of at
+         * a wall-clock frame count. */
+        static int s_fd_tick = -2;
+        if (s_fd_tick == -2) {
+            const char *t = getenv("TD5RE_FRAMEDUMP_TICK");
+            s_fd_tick = (t && t[0]) ? atoi(t) : -1;
+        }
+        if (s_fd_on && s_fd_tick >= 0) {
+            if (g_td5.game_state == TD5_GAMESTATE_RACE &&
+                (int)g_td5.simulation_tick_counter >= s_fd_tick) {
+                td5_plat_dump_frame_png(s_fd_path);
+                TD5_LOG_I("plat", "frame dumped at sim tick %d (target %d) -> %s",
+                          (int)g_td5.simulation_tick_counter, s_fd_tick, s_fd_path);
+                s_fd_tick = -1;
+                s_fd_on = 0;
+            }
+        } else if (s_fd_on && (s_fd_count++ % 30) == 0) {
             if (s_fd_isseq) {
                 char buf[320];
                 snprintf(buf, sizeof(buf), s_fd_path, s_fd_seq++);

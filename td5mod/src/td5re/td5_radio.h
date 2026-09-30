@@ -31,6 +31,13 @@ void td5_radio_init(const char *stream_url, int volume);
 /* Stop the worker (with a bounded join) and close the PCM sink. */
 void td5_radio_shutdown(void);
 
+/* 1 when td5_radio_shutdown() had to leave the worker running inside Media
+ * Foundation (2 s join timeout, or the worker faulted). The process must then
+ * not return into the CRT/loader teardown: unloading the MF DLLs under a live
+ * MF thread faults (ntdll+0x1CCD1, access 0x345 -- the same bogus address as
+ * the RTWorkQ exit fault). main.c terminates instead. */
+int  td5_radio_worker_detached(void);
+
 /* Set the radio's fixed output volume 0-100 at runtime (e.g. the pause-menu
  * RADIO slider). Updates the level the backend re-asserts and applies it live.
  * Safe no-op if the radio was never initialised. */
