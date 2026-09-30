@@ -67,6 +67,8 @@ td5_rt.c
 td5_arcade.c
 td5_damage.c
 td5_tutorial.c
+td5_chaos.c
+td5_chaos_fold.c
 td5_laneassist.c
 td5_fmv.c
 td5_benchmark.c

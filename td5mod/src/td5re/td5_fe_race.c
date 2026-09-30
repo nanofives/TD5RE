@@ -3560,7 +3560,7 @@ static int mp_game_modes_enabled(void) {
 }
 
 static const char *const k_mp_mode_names[TD5_MP_MODE_COUNT] = {
-    "REGULAR RACE", "CUP", "TRAFFIC BATTLE", "COP CHASE", "DRAG RACE"
+    "REGULAR RACE", "CUP", "TRAFFIC BATTLE", "COP CHASE", "DRAG RACE", "CHAOS CO-OP"
 };
 
 /* [SCREEN-ID BADGE 2026-07-27] Display name for an MP game mode, exposed so the
@@ -3576,6 +3576,7 @@ static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
     "Wreck the most ONCOMING traffic - placement ignored",
     "One cop hunts the rest before time runs out",
     "Lane-change drag - no AI, optional oncoming traffic",
+    "Two teams, one car each - every player holds one control",
 };
 
 /* Each local player's current pick (index into TD5_MpGameMode). Player 0's pick
