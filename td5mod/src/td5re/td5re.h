@@ -920,6 +920,48 @@ void td5_ini_persist_options(void);
 void td5_ini_write_str(const char *section, const char *key, const char *value);
 
 /* ========================================================================
+ * [PERF PRESETS 2026-09-29] Quality tiers (PERFORMANCE screen + auto-detect)
+ *
+ * Two independent axes, because they cost on different hardware:
+ *   GRAPHICS  -- raster knobs (render scale, draw distance, shadows, SSR, VFX,
+ *                billboards, foliage AA). Cheap-ish; mostly fill rate.
+ *   LIGHTING  -- the ray-traced stack (g_td5.ini.lighting_quality + the rt_*
+ *                tiers). MEASURED on an RTX 5070 Ti / Moscow / 5 opponents:
+ *                dropping LIGHTING HIGH -> LOW took the frame from 14.1 ms to
+ *                9.8 ms (71 -> 102 fps), i.e. RT is the dominant GPU cost and
+ *                the axis an auto-tier has to get right.
+ * Tier HIGH on BOTH axes reproduces the shipped defaults exactly, so a machine
+ * that auto-detects HIGH is byte-identical to today. ULTRA is opt-in only --
+ * the auto-detect never selects it.
+ * Defined in main.c (beside td5_auto_perf_preset, which now calls them).
+ * ======================================================================== */
+enum { TD5_QTIER_LOW = 0, TD5_QTIER_MEDIUM, TD5_QTIER_HIGH, TD5_QTIER_ULTRA,
+       TD5_QTIER_COUNT };
+
+/* Apply a tier. `live` = also call the runtime setters (light registry, LIGHT2
+ * sun-shadow/SSR/wet, td5_rt_set_quality) -- pass 0 at boot, before the render
+ * device exists, and 1 from the menu. Neither variant persists; callers follow
+ * with td5_ini_persist_options(). */
+void td5_perf_apply_graphics_tier(int tier, int live);
+void td5_perf_apply_lighting_tier(int tier, int live);
+
+/* Which tier the CURRENT g_td5.ini state matches, or -1 for CUSTOM. */
+int  td5_perf_graphics_tier(void);
+int  td5_perf_lighting_tier(void);
+
+/* Hardware probe -> recommended tier (adapter VRAM + vendor + DXR + logical
+ * cores). Caps at HIGH: auto-detect never makes the game slower than today. */
+int  td5_perf_detect_graphics_tier(void);
+int  td5_perf_detect_lighting_tier(void);
+
+/* Probe + apply both axes + log the verdict. `live` as above. Used by the boot
+ * one-shot AND by the PERFORMANCE screen's AUTO-SELECT row. */
+void td5_perf_auto_select(int live);
+
+/* "LOW" / "MEDIUM" / "HIGH" / "ULTRA", or "CUSTOM" for anything else. */
+const char *td5_perf_tier_name(int tier);
+
+/* ========================================================================
  * Master Entry Points
  * ======================================================================== */
 

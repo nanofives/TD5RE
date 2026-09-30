@@ -2017,11 +2017,15 @@ void Screen_LightingOptions(void) {
 }
 
 /* ====================================================================
- * [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS sub-screen.
+ * [LOW-END PERF 2026-09-12, split 2026-09-29] CUSTOM PERFORMANCE sub-screen.
  *
- * Reached from GRAPHICS OPTIONS via the "PERFORMANCE ->" nav row; BACK returns
- * there. Row 0 is the LOW-END PRESET action (Enter sets every row to its
- * cheapest choice); rows 1..9 are ◄► selectors; row PO_ROWS is OK.
+ * This is the original PERFORMANCE screen's per-knob list. Since the
+ * 2026-09-29 preset rework it lives one level deeper: PERFORMANCE (screen 53)
+ * is the short preset page and its "CUSTOM ->" row lands here (screen 54);
+ * BACK/OK return to PERFORMANCE.
+ *
+ * Row 0 is the LOW-END PRESET action (Enter sets every row to its cheapest
+ * choice); rows 1..9 are ◄► selectors; row PC_ROWS is OK.
  *
  * Every row is wired to a real render gate that genuinely skips work (see the
  * per-row notes). Most apply LIVE (read g_td5.ini each frame / have a live
@@ -2029,15 +2033,27 @@ void Screen_LightingOptions(void) {
  * create, so they take effect on the next launch (persisted immediately).
  * Defaults reproduce today's look, so shipping this screen changes nothing until
  * the user opts in.
+ *
+ * [LAYOUT 2026-09-29] Buttons are FE_MENU_BTN_X / FE_MENU_BTN_W (120 / 0xE0)
+ * per FRONTEND_SCREEN_GUIDE.md, and the value text is LEFT-justified at x=348
+ * (the guide's selector-row rule) instead of centred in the old floating
+ * 224px value panel at 506 — with 0x130-wide buttons the frame ran to x=424
+ * and overlapped that column. Labels were shortened to fit 224px rather than
+ * widening the column, which the guide forbids.
  * ==================================================================== */
 #define PO_BASE_Y 74
 #define PO_STEP_Y 36
-#define PO_ROWS   10   /* rows 0..9 (0 = LOW-END PRESET action); OK is row PO_ROWS */
+#define PC_ROWS   10   /* rows 0..9 (0 = LOW-END PRESET action); OK is row PC_ROWS */
+#define PO_ROWS   PC_ROWS
+/* Selector-row value column, shared by both performance screens. Matches the
+ * RACE OPTIONS overlay (td5_frontend.c) so the two read identically. */
+#define PERF_VALUE_X     348.0f
+#define PERF_VALUE_SCALE 0.8f
 
-static const char *const k_po_labels[PO_ROWS] = {
+static const char *const k_po_labels[PC_ROWS] = {
     "LOW-END PRESET", "RENDER SCALE", "DRAW DISTANCE", "DYNAMIC LIGHTS",
-    "CAR SHADOWS",    "SUN SHADOWS",  "REFLECTIONS",   "PARTICLES & WEATHER",
-    "WORLD BILLBOARDS", "FOLIAGE AA"
+    "CAR SHADOWS",    "SUN SHADOWS",  "REFLECTIONS",   "PARTICLES",
+    "BILLBOARDS",     "FOLIAGE AA"
 };
 static const char *const k_po_scale[]   = { "50%", "75%", "100%" };   /* -> render_scale */
 static const char *const k_po_drawdist[] = { "LOW", "MEDIUM", "HIGH", "FULL" }; /* 25/50/75/100 */
@@ -2149,36 +2165,39 @@ static void performance_apply_low_end_preset(void)
               "refl/vfx/billboards/foliageAA off)");
 }
 
-int td5_performance_opts_row_count(void) { return PO_ROWS; }
+int td5_performance_custom_row_count(void) { return PC_ROWS; }
 
-static void performance_opts_create_buttons(void)
+static void performance_custom_create_buttons(void)
 {
     frontend_reset_buttons();
-    for (int r = 0; r < PO_ROWS; r++)
-        frontend_create_button(k_po_labels[r], 120, PO_BASE_Y + PO_STEP_Y * r, 0x130, 0x20);
-    frontend_create_button(SNK_OkButTxt, 200, PO_BASE_Y + PO_STEP_Y * PO_ROWS, 0x60, 0x20);
+    for (int r = 0; r < PC_ROWS; r++)
+        frontend_create_button(k_po_labels[r], FE_MENU_BTN_X, PO_BASE_Y + PO_STEP_Y * r,
+                               FE_MENU_BTN_W, FE_MENU_BTN_H);
+    frontend_create_button(SNK_OkButTxt, 200, PO_BASE_Y + PO_STEP_Y * PC_ROWS, 0x60, 0x20);
 }
 
-void frontend_render_performance_options_overlay(float sx, float sy)
+void frontend_render_performance_custom_overlay(float sx, float sy)
 {
     if (!s_anim_complete) return;
-    /* Row 0 (LOW-END PRESET) is an action; rows 1..9 show their current value. */
-    for (int r = 1; r < PO_ROWS; r++) {
+    /* Row 0 (LOW-END PRESET) is an action; rows 1..9 show their current value,
+     * LEFT-justified at x=348 per FRONTEND_SCREEN_GUIDE.md's selector-row rule. */
+    for (int r = 1; r < PC_ROWS; r++) {
         int cnt; const char *const *opts = po_row_opts(r, &cnt);
         if (!opts) continue;
-        frontend_draw_value_centered(sx, sy, PO_BASE_Y + PO_STEP_Y * r + 6,
-                                     opts[po_row_index(r)], 0xFFFFFFFF);
+        fe_draw_text(PERF_VALUE_X * sx, (float)(PO_BASE_Y + PO_STEP_Y * r + 6) * sy,
+                     td5_tr(opts[po_row_index(r)]), 0xFFFFFFFFu,
+                     sx * PERF_VALUE_SCALE, sy * PERF_VALUE_SCALE);
     }
 }
 
-void Screen_PerformanceOptions(void) {
+void Screen_PerformanceCustom(void) {
     switch (s_inner_state) {
     case 0:
-        frontend_init_return_screen(TD5_SCREEN_PERFORMANCE_OPTIONS);
-        TD5_LOG_D(LOG_TAG, "PerformanceOptions: init (scale=%d viewdist=%.2f)",
+        frontend_init_return_screen(TD5_SCREEN_PERFORMANCE_CUSTOM);
+        TD5_LOG_D(LOG_TAG, "PerformanceCustom: init (scale=%d viewdist=%.2f)",
                   g_td5.ini.render_scale, td5_save_get_view_distance());
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        performance_opts_create_buttons();
+        performance_custom_create_buttons();
         s_anim_complete = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -2207,12 +2226,166 @@ void Screen_PerformanceOptions(void) {
                 td5_ini_persist_options();
                 frontend_play_sfx(2);
                 s_inner_state = 4;
-            } else if (active_button >= 1 && active_button < PO_ROWS && delta != 0) {
+            } else if (active_button >= 1 && active_button < PC_ROWS && delta != 0) {
                 po_row_apply(active_button, delta);
                 td5_ini_persist_options();
                 frontend_play_sfx(2);
                 s_inner_state = 4;
-            } else if (s_button_index == PO_ROWS) {
+            } else if (s_button_index == PC_ROWS) {
+                /* OK -> persist + back up to PERFORMANCE (not GRAPHICS OPTIONS:
+                 * this screen is now one level deeper). */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_PERFORMANCE_OPTIONS;
+                s_inner_state = 7;
+            }
+        }
+        break;
+    case 7:
+        frontend_begin_timed_animation();
+        s_inner_state = 8;
+        break;
+    case 8:
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
+            s_inner_state = 9;
+        }
+        break;
+    case 9:
+        td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        break;
+    }
+}
+
+/* ====================================================================
+ * [PERF PRESETS 2026-09-29] PERFORMANCE screen (the short preset page).
+ *
+ * Reached from GRAPHICS OPTIONS via the "PERFORMANCE ->" nav row; BACK/OK
+ * return there. Four rows:
+ *   0 AUTO-SELECT      action  — probe the GPU/CPU and pick both tiers
+ *   1 GRAPHICS QUALITY ◄►      — LOW / MEDIUM / HIGH / ULTRA (raster knobs)
+ *   2 LIGHTING         ◄►      — LOW / MEDIUM / HIGH / ULTRA (the RT stack)
+ *   3 CUSTOM ->        nav     — the per-knob list (screen 54)
+ *   4 OK
+ *
+ * The two tier rows read back from the live g_td5.ini state, so a player who
+ * changes one knob in CUSTOM sees the row fall to "CUSTOM" — the preset is a
+ * shortcut, not a separate mode with its own stored value.
+ *
+ * WHY LIGHTING gets its own row: measured on an RTX 5070 Ti (Moscow, 5
+ * opponents, dev build, [Logging] Profile=1, MinLevel=0), dropping LIGHTING
+ * HIGH -> LOW moved the frame from 14.12 ms to 9.81 ms (71 -> 102 fps) with the
+ * "present" zone going 7.98 -> 4.64 ms. It is the single biggest GPU lever in
+ * the build and it shipped defaulted to HIGH.
+ *
+ * Layout per FRONTEND_SCREEN_GUIDE.md: x=FE_MENU_BTN_X, w=FE_MENU_BTN_W,
+ * base y 97 pitch 40 (same as the GRAPHICS OPTIONS column above it), value
+ * text LEFT-justified at x=348, ◄► from the shared post-button pass.
+ * ==================================================================== */
+#define PP_BASE_Y 97
+#define PP_STEP_Y 40
+enum { PP_ROW_AUTO = 0, PP_ROW_GFX, PP_ROW_LIGHT, PP_ROW_CUSTOM, PP_ROWS };
+
+/* [LAYOUT] "GRAPHICS QUALITY" overflowed the 224px frame into the ◄► arrow
+ * zone (verified by framedump 2026-09-30). FRONTEND_SCREEN_GUIDE.md: shorten
+ * the label, never widen the column -- and "GRAPHICS" reads fine as the pair
+ * to "LIGHTING". */
+static const char *const k_pp_labels[PP_ROWS] = {
+    "AUTO-SELECT", "GRAPHICS", "LIGHTING", "CUSTOM"
+};
+
+int td5_performance_first_selector_row(void) { return PP_ROW_GFX; }
+int td5_performance_last_selector_row(void)  { return PP_ROW_LIGHT; }
+
+/* Cycle one tier row. A row currently reading CUSTOM snaps to the tier it is
+ * closest to in spirit -- LOW when stepping down, HIGH when stepping up -- so a
+ * player who wandered into CUSTOM can always get back onto the ladder. */
+static void pp_row_apply(int row, int delta)
+{
+    int cur = (row == PP_ROW_GFX) ? td5_perf_graphics_tier() : td5_perf_lighting_tier();
+    int next;
+    if (cur < 0) next = (delta > 0) ? TD5_QTIER_HIGH : TD5_QTIER_LOW;
+    else {
+        next = cur + delta;
+        while (next < 0) next += TD5_QTIER_COUNT;
+        next %= TD5_QTIER_COUNT;
+    }
+    if (row == PP_ROW_GFX) td5_perf_apply_graphics_tier(next, 1);
+    else                   td5_perf_apply_lighting_tier(next, 1);
+    TD5_LOG_I(LOG_TAG, "PERFORMANCE: %s -> %s",
+              k_pp_labels[row], td5_perf_tier_name(next));
+}
+
+static void performance_opts_create_buttons(void)
+{
+    frontend_reset_buttons();
+    for (int r = 0; r < PP_ROWS; r++)
+        frontend_create_button(TR(k_pp_labels[r]), FE_MENU_BTN_X, PP_BASE_Y + PP_STEP_Y * r,
+                               FE_MENU_BTN_W, FE_MENU_BTN_H);
+    frontend_create_button(SNK_OkButTxt, 200, PP_BASE_Y + PP_STEP_Y * PP_ROWS, 0x60, 0x20);
+}
+
+void frontend_render_performance_options_overlay(float sx, float sy)
+{
+    if (!s_anim_complete) return;
+    /* Rows 1..2 show their tier; row 3 (CUSTOM) shows the nav arrow marker so it
+     * reads as "goes somewhere" rather than "has a value". */
+    for (int r = PP_ROW_GFX; r <= PP_ROW_LIGHT; r++) {
+        int tier = (r == PP_ROW_GFX) ? td5_perf_graphics_tier() : td5_perf_lighting_tier();
+        fe_draw_text(PERF_VALUE_X * sx, (float)(PP_BASE_Y + PP_STEP_Y * r + 6) * sy,
+                     td5_tr(td5_perf_tier_name(tier)), 0xFFFFFFFFu,
+                     sx * PERF_VALUE_SCALE, sy * PERF_VALUE_SCALE);
+    }
+    fe_draw_text(PERF_VALUE_X * sx, (float)(PP_BASE_Y + PP_STEP_Y * PP_ROW_CUSTOM + 6) * sy,
+                 ">", 0xFF8890A0u, sx * PERF_VALUE_SCALE, sy * PERF_VALUE_SCALE);
+}
+
+void Screen_PerformanceOptions(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_PERFORMANCE_OPTIONS);
+        TD5_LOG_D(LOG_TAG, "PerformanceOptions: init (gfx tier=%d lighting tier=%d)",
+                  td5_perf_graphics_tier(), td5_perf_lighting_tier());
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        performance_opts_create_buttons();
+        s_anim_complete = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        break;
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3:
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 4;
+        }
+        break;
+    case 4:
+    case 5:
+        s_inner_state++;
+        break;
+    case 6:
+        if (s_input_ready) {
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            int delta = frontend_option_delta();
+            if (s_button_index == PP_ROW_AUTO) {
+                /* AUTO-SELECT: re-probe and apply both tiers live. */
+                td5_perf_auto_select(1);
+                td5_ini_persist_options();
+                frontend_play_sfx(3);
+                s_inner_state = 4;
+            } else if ((active_button == PP_ROW_GFX || active_button == PP_ROW_LIGHT) && delta != 0) {
+                pp_row_apply(active_button, delta);
+                td5_ini_persist_options();
+                frontend_play_sfx(2);
+                s_inner_state = 4;
+            } else if (s_button_index == PP_ROW_CUSTOM) {
+                /* CUSTOM -> the per-knob list; its OK comes back here. */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_PERFORMANCE_CUSTOM;
+                frontend_play_sfx(3);
+                s_inner_state = 7;
+            } else if (s_button_index == PP_ROWS) {
                 /* OK -> persist + back to GRAPHICS OPTIONS. */
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;

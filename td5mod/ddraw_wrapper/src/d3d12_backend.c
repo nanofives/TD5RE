@@ -239,6 +239,11 @@ typedef struct { const void *ps; int blend; ID3D12PipelineState *pso; } PassPSO;
 static PassPSO s_pass_pso[8];
 static int     s_pass_pso_count;
 static BackendTexture *s_scene_copy;   /* SSR: CopyResource of the scene color (t2) */
+/* [PAUSE RENDER CACHE 2026-09-29] Freeze-frame held ACROSS frames while the sim
+ * is paused (see Backend_SceneSnapshot* below). Declared here, beside the SSR
+ * copy it is modelled on, because d3d12_render_core_shutdown() releases it. */
+static BackendTexture *s_pause_snap;
+static int             s_pause_snap_valid;
 
 /* Current draw state (selected into the next PSO / bindings). */
 static int              s_cur_ps    = PS_MODULATE;
@@ -2497,6 +2502,9 @@ static void d3d12_render_core_shutdown(void)
     if (s_black_tex)   { if (s_black_tex->res) ID3D12Resource_Release(s_black_tex->res); free(s_black_tex); s_black_tex = NULL; }
     if (s_gbuffer_tex) { if (s_gbuffer_tex->res) ID3D12Resource_Release(s_gbuffer_tex->res); free(s_gbuffer_tex); s_gbuffer_tex = NULL; s_gbuffer_enabled = 0; s_gbuf_bound = 0; }
     if (s_scene_copy)  { if (s_scene_copy->res) ID3D12Resource_Release(s_scene_copy->res); free(s_scene_copy); s_scene_copy = NULL; }
+    /* [PAUSE RENDER CACHE] freeze-frame texture (see Backend_SceneSnapshot*). */
+    if (s_pause_snap)  { if (s_pause_snap->res) ID3D12Resource_Release(s_pause_snap->res); free(s_pause_snap); s_pause_snap = NULL; }
+    s_pause_snap_valid = 0;
     if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
     if (s_copy_alloc)  { ID3D12CommandAllocator_Release(s_copy_alloc); s_copy_alloc = NULL; }
     if (s_viewport_cb) { if (s_viewport_cb->res) ID3D12Resource_Release(s_viewport_cb->res); free(s_viewport_cb); s_viewport_cb = NULL; }
@@ -3153,6 +3161,65 @@ void Backend_ApplySSRPass(const SSRCB *cb)
     d3d12_fullscreen_pass(SH_BC(ps_ssr), SH_LEN(ps_ssr), BLEND_SRCALPHA_INVSRC,
                           cb, sizeof(SSRCB), srvs, 3);
 }
+
+/* ---- [PAUSE RENDER CACHE 2026-09-29] scene freeze-frame ------------------
+ * Same machinery as the SSR scene copy above (CopyResource of the swapchain
+ * backbuffer into a private SRV texture), kept alive across frames instead of
+ * one frame. While the pause menu is up the sim is frozen, so every paused
+ * frame re-renders a world that is pixel-identical to the one before it --
+ * blitting the snapshot back costs one fullscreen triangle instead of the
+ * track walk + actors + RT dispatches + deferred passes.
+ * Deliberately NOT tied to the frame's own RT state machine: Capture is called
+ * mid-frame with the backbuffer in RENDER_TARGET (the same assumption
+ * Backend_ApplySSRPass makes), and Blit is a plain fullscreen draw. */
+void Backend_SceneSnapshotInvalidate(void) { s_pause_snap_valid = 0; }
+
+void Backend_SceneSnapshotCapture(void)
+{
+    ID3D12GraphicsCommandList *cl = g_d3d12.list;
+    UINT fi;
+    if (!g_d3d12.device || g_backend.device_removed) return;
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    fi = g_d3d12.frame_index;
+
+    if (!s_pause_snap || s_pause_snap->w != (UINT)g_backend.width ||
+        s_pause_snap->h != (UINT)g_backend.height) {
+        if (s_pause_snap) { if (s_pause_snap->res) d3d12_retire(s_pause_snap->res); free(s_pause_snap); s_pause_snap = NULL; }
+        s_pause_snap_valid = 0;
+        s_pause_snap = d3d12_tex_create((UINT)g_backend.width, (UINT)g_backend.height,
+                                        DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+        if (!s_pause_snap) return;
+    }
+
+    d3d12_resource_barrier(g_d3d12.backbuffers[fi], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (s_pause_snap->rstate != D3D12_RESOURCE_STATE_COPY_DEST)
+        d3d12_resource_barrier(s_pause_snap->res, s_pause_snap->rstate, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12GraphicsCommandList_CopyResource(cl, s_pause_snap->res, g_d3d12.backbuffers[fi]);
+    d3d12_resource_barrier(s_pause_snap->res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    s_pause_snap->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    d3d12_resource_barrier(g_d3d12.backbuffers[fi], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    s_pause_snap_valid = 1;
+}
+
+int Backend_SceneSnapshotBlit(void)
+{
+    if (!g_d3d12.device || g_backend.device_removed) return 0;
+    if (!s_pause_snap_valid || !s_pause_snap || !s_pause_snap->res) return 0;
+    if (s_pause_snap->w != (UINT)g_backend.width || s_pause_snap->h != (UINT)g_backend.height) {
+        s_pause_snap_valid = 0;   /* resized under us -- caller must render for real */
+        return 0;
+    }
+    /* d3d12_fullscreen_blit SILENTLY no-ops without the fullscreen-quad PSO.
+     * Returning 1 on that path would tell the caller "the world is painted" when
+     * nothing was drawn, and it would skip the real render -- a stale or garbage
+     * paused frame. Check the same precondition the blit checks, and report
+     * failure so the caller renders for real. */
+    if (!s_fsquad_pso) return 0;
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    d3d12_fullscreen_blit(s_pause_snap);
+    return 1;
+}
+
 /* Screen-space ray-marched sun shadow: multiplicative fullscreen pass that
  * reconstructs world pos from scene depth (t0) and darkens shadowed pixels.
  * t1 (gbuffer) is the depth SRV placeholder for now -- the gbuffer is not yet

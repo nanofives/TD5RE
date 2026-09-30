@@ -998,13 +998,23 @@ void frontend_render_language_options_overlay(float sx, float sy);
 void Screen_LightingOptions(void);
 void frontend_render_lighting_options_overlay(float sx, float sy);
 
-/* [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS sub-screen (td5_fe_menu.c) — the
- * low-end toggles + LOW-END PRESET, reached from GRAPHICS OPTIONS. The row count
- * is exported so the arrow dispatch in td5_frontend.c can't go stale against the
- * screen's own PO_ROWS (the creation-vs-rendering gap this file has hit before). */
+/* [PERF PRESETS 2026-09-29] PERFORMANCE (td5_fe_menu.c), reached from GRAPHICS
+ * OPTIONS: AUTO-SELECT action, two ◄► preset rows (GRAPHICS QUALITY / LIGHTING),
+ * a "CUSTOM ->" nav row and OK. The selector row ids are exported so the arrow
+ * dispatch in td5_frontend.c can't go stale against the screen's own row enum
+ * (the creation-vs-rendering gap this file has hit before). */
 void Screen_PerformanceOptions(void);
 void frontend_render_performance_options_overlay(float sx, float sy);
-int  td5_performance_opts_row_count(void);
+int  td5_performance_first_selector_row(void);
+int  td5_performance_last_selector_row(void);
+
+/* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE (td5_fe_menu.c) — the per-knob
+ * list that used to BE the PERFORMANCE screen (LOW-END PRESET + 9 selectors),
+ * now reached from PERFORMANCE's "CUSTOM ->" row. Row count exported for the
+ * same arrow-dispatch reason. */
+void Screen_PerformanceCustom(void);
+void frontend_render_performance_custom_overlay(float sx, float sy);
+int  td5_performance_custom_row_count(void);
 
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS (td5_fe_race.c) — the
  * TD5RE_AUTOTRACK_* generator knobs. The row count is exported so the arrow

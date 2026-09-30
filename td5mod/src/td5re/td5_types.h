@@ -484,7 +484,12 @@ typedef enum TD5_ScreenIndex {
      * low-end performance toggles + LOW-END PRESET, reached from GRAPHICS OPTIONS
      * via the "PERFORMANCE ->" nav row. */
     TD5_SCREEN_PERFORMANCE_OPTIONS = 53,
-    TD5_SCREEN_COUNT               = 54
+    /* [PERF PRESETS 2026-09-29] Screen_PerformanceCustom (td5_fe_menu.c) — the
+     * per-knob list that USED to be screen 53. Screen 53 is now the short
+     * preset page (AUTO-SELECT / QUALITY / LIGHTING / CUSTOM ->) and this is
+     * where its "CUSTOM ->" row lands. */
+    TD5_SCREEN_PERFORMANCE_CUSTOM  = 54,
+    TD5_SCREEN_COUNT               = 55
 } TD5_ScreenIndex;
 
 /* ========================================================================

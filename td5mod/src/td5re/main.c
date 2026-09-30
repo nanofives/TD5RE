@@ -370,46 +370,341 @@ void td5_ini_write_str(const char *section, const char *key, const char *value)
     WritePrivateProfileStringA(section, key, value ? value : "", s_ini_path);
 }
 
-/* [AUTO PERF 2026-09-27] One-time low-end preset for integrated Intel GPUs.
- * On the FIRST launch ([Display] AutoPerfChecked absent/0) probe DXGI adapter 0
- * (the one the D3D12 device is created on). If it is an Intel GPU with < 1 GB of
- * dedicated VRAM (an iGPU; Arc discrete cards report several GB) apply the same
- * choices as the PERFORMANCE screen's LOW-END PRESET, except RENDER SCALE 75
- * (the whole frame incl. HUD/menus is scaled today, and 50 makes text hard to
- * read). The flag is then written so it never runs again -- the player's own
- * PERFORMANCE settings always win afterwards. TD5RE_AUTO_PERF=0 disables the
- * probe; TD5RE_AUTO_PERF=2 forces the preset (testing on non-Intel hardware). */
+/* [PERF PRESETS 2026-09-29] Set when the command line explicitly overrode any
+ * graphics/lighting knob (see cli_key_is_graphics, further down beside the CLI
+ * parser that sets it). The boot auto-tier (td5_auto_perf_preset) runs AFTER
+ * CLI parsing -- without this it would silently stomp `--Quality=0` and friends
+ * on the one launch where the tier fires, which is exactly the launch a perf
+ * A/B cares about. A CLI override is a deliberate per-launch instruction, so it
+ * wins; the tier is simply deferred to the next normal launch.
+ * Declared HERE, above td5_auto_perf_preset, because that is the reader. */
+static int s_cli_gfx_override = 0;
+
+/* ========================================================================
+ * [PERF PRESETS 2026-09-29] Quality-tier tables — see the contract in td5re.h.
+ *
+ * One row per tier, in tier order LOW / MEDIUM / HIGH / ULTRA. The HIGH row is
+ * a literal copy of the shipped defaults (see k_display_cfg / k_lighting_cfg),
+ * so "GRAPHICS QUALITY = HIGH, LIGHTING = HIGH" is exactly today's build. That
+ * invariant is what lets the auto-tier run on an existing install without
+ * changing anything for a machine it classes HIGH.
+ * ======================================================================== */
+typedef struct {
+    int render_scale;      /* [Display] RenderScale %                    */
+    int view_pct;          /* draw distance %   -> td5_save_set_view_distance */
+    int dyn_lights;        /* [Lighting] Enabled (dynamic light registry) */
+    int car_shadows;       /* 0 off / 1 quad / 2 conforming              */
+    int legacy_shadows;    /* kept in sync with car_shadows==1 (quad)    */
+    int sun_shadows;       /* LIGHT2 screen-space sun shadow pass        */
+    int reflections;       /* LIGHT2 screen-space reflections            */
+    int wet_roads;         /* LIGHT2 wet-road specular                   */
+    int vfx;               /* particles + weather + tire tracks          */
+    int billboards;        /* world billboards                           */
+    int foliage_aa;        /* cutout-foliage AA (next launch)            */
+} TD5_GfxTier;
+
+/* RENDER SCALE stays 100 in EVERY tier. [2026-09-30] A framedump at
+ * --RenderScale=50 shows the frontend drawing 640-wide canvas content into the
+ * 320-wide render target: the menu renders at 1/scale zoom with only the
+ * top-left portion on screen (title clipped mid-word, button column running off
+ * the right edge). The frontend derives its sx/sy from the WINDOW size while the
+ * swapchain/RT is scaled, so any scale < 100 breaks menu layout. That bug is
+ * pre-existing and out of W4's scope to fix, but an auto-selected preset must
+ * not ship a broken menu -- so no tier picks a reduced scale. The row is still
+ * there in CUSTOM for anyone who wants to trade the menus for frame rate.
+ * (The 2026-09-27 Intel-iGPU preset set 75 and has this bug today.) */
+static const TD5_GfxTier k_gfx_tier[TD5_QTIER_COUNT] = {
+    /* scale view dyn shd leg sun refl wet vfx bill foliage */
+    {  100,  25,  0,  0,  0,  0,  0,  0,  0,  0,  0 },  /* LOW    */
+    {  100,  60,  1,  1,  1,  1,  0,  0,  1,  1,  0 },  /* MEDIUM */
+    {  100, 100,  1,  2,  0,  1,  1,  1,  1,  1,  1 },  /* HIGH  == shipped defaults */
+    {  100, 100,  1,  2,  0,  1,  1,  1,  1,  1,  1 },  /* ULTRA (raster is already maxed at HIGH) */
+};
+
+typedef struct {
+    int quality;      /* lighting_quality: 0 = screen-space, 1 = ray traced */
+    int shadow_rays;  /* rt_shadow_rays     1 / 4 / 8                       */
+    int shadow_res;   /* rt_shadow_res      0 half / 1 full                 */
+    int refl_q;       /* rt_reflection_q    0 off / 1 half / 2 full         */
+    int refl_rng;     /* rt_reflection_rng  0 near / 1 far / 2 unlimited    */
+    int gi;           /* rt_gi_quality      0 off / 1 low / 2 high          */
+    int sun_probe;    /* rt_sun_probe       0 classic / 1 auto              */
+    int light_q;      /* rt_light_quality   0 basic / 1 realistic           */
+} TD5_LightTier;
+
+/* ULTRA deliberately stops at reflection range FAR, not UNLIMITED: UNLIMITED is
+ * the documented TDR culprit from 2026-08-02 (multi-second RT frames at high
+ * res tripped the Windows watchdog), so no preset may select it.
+ *
+ * !! UNMEASURED (Mariano's 2026-09-30 rule: no RT / default-graphics perf runs).
+ * The MEDIUM row's "half-res shadows + half-res reflections + GI off" is a
+ * reasoned cost reduction, NOT a benchmarked one -- nobody has timed this tier
+ * on any card. The only RT datapoint in hand predates the rule: on an RTX
+ * 5070 Ti, LIGHTING HIGH vs LOW was 14.12 ms vs 9.81 ms per frame (71 vs 102
+ * fps). That says RT HIGH is expensive; it does NOT say what MEDIUM costs.
+ * Needs a measurement pass on real hardware before these rows are trusted. */
+static const TD5_LightTier k_light_tier[TD5_QTIER_COUNT] = {
+    /* qual rays res refl rng gi probe lights */
+    {   0,   1,   0,  0,  0,  0,  0,  0 },   /* LOW    -- screen-space stack only, no DXR */
+    {   1,   1,   0,  1,  0,  0,  1,  0 },   /* MEDIUM -- RT on, half-res shadows+refl, no GI */
+    {   1,   2,   1,  2,  1,  1,  1,  1 },   /* HIGH   == shipped defaults */
+    {   1,   8,   1,  2,  1,  2,  1,  1 },   /* ULTRA  -- 8 shadow rays + GI HIGH */
+};
+
+const char *td5_perf_tier_name(int tier)
+{
+    switch (tier) {
+    case TD5_QTIER_LOW:    return "LOW";
+    case TD5_QTIER_MEDIUM: return "MEDIUM";
+    case TD5_QTIER_HIGH:   return "HIGH";
+    case TD5_QTIER_ULTRA:  return "ULTRA";
+    }
+    return "CUSTOM";
+}
+
+void td5_perf_apply_graphics_tier(int tier, int live)
+{
+    const TD5_GfxTier *t;
+    if (tier < 0 || tier >= TD5_QTIER_COUNT) return;
+    t = &k_gfx_tier[tier];
+    g_td5.ini.render_scale     = t->render_scale;          /* next launch */
+    td5_save_set_view_distance((float)t->view_pct / 100.0f);
+    g_td5.ini.lighting_enabled = t->dyn_lights;
+    g_td5.ini.car_shadows      = t->car_shadows;
+    g_td5.ini.legacy_shadows   = t->legacy_shadows;
+    g_td5.ini.sun_shadows      = t->sun_shadows;
+    g_td5.ini.reflections      = t->reflections;
+    g_td5.ini.wet_roads        = t->wet_roads;
+    g_td5.ini.vfx_enabled      = t->vfx;
+    g_td5.ini.world_billboards = t->billboards;
+    g_td5.ini.foliage_aa       = t->foliage_aa;            /* next launch */
+    if (live) {
+        td5_light_set_enabled(t->dyn_lights);
+        td5_light2_set_sun_shadows(t->sun_shadows);
+        td5_light2_set_reflections(t->reflections);
+        td5_light2_set_wet_roads(t->wet_roads);
+    }
+}
+
+void td5_perf_apply_lighting_tier(int tier, int live)
+{
+    const TD5_LightTier *t;
+    if (tier < 0 || tier >= TD5_QTIER_COUNT) return;
+    t = &k_light_tier[tier];
+    g_td5.ini.lighting_quality  = t->quality;
+    g_td5.ini.rt_shadow_rays    = t->shadow_rays;
+    g_td5.ini.rt_shadow_res     = t->shadow_res;
+    g_td5.ini.rt_reflection_q   = t->refl_q;
+    g_td5.ini.rt_reflection_rng = t->refl_rng;
+    g_td5.ini.rt_gi_quality     = t->gi;
+    g_td5.ini.rt_sun_probe      = t->sun_probe;
+    g_td5.ini.rt_light_quality  = t->light_q;
+    if (live) {
+        td5_rt_set_quality(t->quality);
+        /* The rt_* tiers are env-cached knobs -- this re-maps them, and the ones
+         * that only read their env at race start take effect on the next race. */
+        td5_rt_apply_lighting_options();
+    }
+}
+
+int td5_perf_graphics_tier(void)
+{
+    int vp = (int)(td5_save_get_view_distance() * 100.0f + 0.5f);
+    int i;
+    for (i = 0; i < TD5_QTIER_COUNT; i++) {
+        const TD5_GfxTier *t = &k_gfx_tier[i];
+        /* View distance is a float round-trip through the INI, so match it with
+         * a tolerance instead of exactly; everything else is a small int. */
+        if (g_td5.ini.render_scale     == t->render_scale &&
+            vp >= t->view_pct - 2 && vp <= t->view_pct + 2 &&
+            (g_td5.ini.lighting_enabled != 0) == (t->dyn_lights != 0) &&
+            g_td5.ini.car_shadows      == t->car_shadows &&
+            (g_td5.ini.sun_shadows  != 0) == (t->sun_shadows  != 0) &&
+            (g_td5.ini.reflections  != 0) == (t->reflections  != 0) &&
+            (g_td5.ini.wet_roads    != 0) == (t->wet_roads    != 0) &&
+            (g_td5.ini.vfx_enabled  != 0) == (t->vfx          != 0) &&
+            (g_td5.ini.world_billboards != 0) == (t->billboards != 0) &&
+            (g_td5.ini.foliage_aa   != 0) == (t->foliage_aa   != 0))
+            return i;
+    }
+    return -1;   /* CUSTOM */
+}
+
+int td5_perf_lighting_tier(void)
+{
+    int i;
+    for (i = 0; i < TD5_QTIER_COUNT; i++) {
+        const TD5_LightTier *t = &k_light_tier[i];
+        if (g_td5.ini.lighting_quality  == t->quality &&
+            g_td5.ini.rt_shadow_rays    == t->shadow_rays &&
+            g_td5.ini.rt_shadow_res     == t->shadow_res &&
+            g_td5.ini.rt_reflection_q   == t->refl_q &&
+            g_td5.ini.rt_reflection_rng == t->refl_rng &&
+            g_td5.ini.rt_gi_quality     == t->gi &&
+            g_td5.ini.rt_sun_probe      == t->sun_probe &&
+            g_td5.ini.rt_light_quality  == t->light_q)
+            return i;
+    }
+    return -1;   /* CUSTOM */
+}
+
+/* ---- hardware probe -> tier --------------------------------------------
+ * Deliberately coarse. The inputs an app can trust across every vendor are
+ * dedicated VRAM, the vendor id, whether DXR exists, and the logical core
+ * count; device-id whitelists rot. Both axes CAP AT HIGH so auto-detect never
+ * selects ULTRA.
+ *
+ * HONEST LIMITATION: dedicated VRAM is a PROXY for ray-tracing throughput, not
+ * a measure of it. A 16 GB RTX 4060 Ti traces slower than a 12 GB 4070 yet
+ * lands a tier higher here. The correct input is a startup micro-benchmark of
+ * the actual RT passes; that is not built, so the thresholds below are chosen
+ * to fail SAFE (a card that could have taken more lighting just gets less)
+ * rather than to be precise. LIGHTING tiers are UNMEASURED -- see the note on
+ * k_light_tier. */
+static void perf_probe_hw(unsigned *vendor, unsigned *vram_mb, int *dxr, int *cores,
+                          int *probe_ok, char *name, int name_cap)
+{
+    static int   s_done = 0;
+    static unsigned s_vendor, s_vram;
+    static int   s_dxr, s_cores, s_ok;
+    static char  s_name[128];
+    if (!s_done) {
+        unsigned dev = 0;
+        s_vendor = 0; s_vram = 0; s_name[0] = '\0';
+        s_ok = td5_plat_gpu_probe(&s_vendor, &dev, &s_vram, s_name, sizeof(s_name)) ? 1 : 0;
+        if (!s_ok) s_vendor = 0;
+        s_dxr   = td5_plat_dxr_probe();
+        s_cores = td5_plat_cpu_logical_cores();
+        s_done  = 1;
+    }
+    if (vendor)   *vendor   = s_vendor;
+    if (vram_mb)  *vram_mb  = s_vram;
+    if (dxr)      *dxr      = s_dxr;
+    if (cores)    *cores    = s_cores;
+    if (probe_ok) *probe_ok = s_ok;
+    /* snprintf, not strncpy: strncpy's "may be truncated" diagnostic is a build
+     * ratchet here (-Wstringop-truncation) and snprintf always NUL-terminates. */
+    if (name && name_cap > 0) snprintf(name, (size_t)name_cap, "%s", s_name);
+}
+
+int td5_perf_detect_graphics_tier(void)
+{
+    unsigned vendor = 0, vram = 0; int cores = 0, ok = 0;
+    perf_probe_hw(&vendor, &vram, NULL, &cores, &ok, NULL, 0);
+    /* Probe failed: we know nothing, so do NOT read the zeroed vram as "iGPU"
+     * and drop the machine to LOW. MEDIUM is the playable middle. */
+    if (!ok) return TD5_QTIER_MEDIUM;
+    /* An Intel part with < 1 GB dedicated is an iGPU (Arc discretes report
+     * several GB) -- the original 2026-09-27 low-end rule, kept verbatim. */
+    if ((vendor == 0x8086u && vram < 1024u) || vram < 1024u || cores < 4)
+        return TD5_QTIER_LOW;
+    if (vram < 3072u || cores < 6)
+        return TD5_QTIER_MEDIUM;
+    return TD5_QTIER_HIGH;
+}
+
+int td5_perf_detect_lighting_tier(void)
+{
+    unsigned vram = 0; int dxr = 0, ok = 0;
+    perf_probe_hw(NULL, &vram, &dxr, NULL, &ok, NULL, 0);
+    /* No DXR, or we could not identify the adapter: screen-space stack only.
+     * Unknown hardware must not be handed the most expensive pass in the build. */
+    if (!dxr || !ok) return TD5_QTIER_LOW;
+    /* DXR-capable but too little VRAM to be worth paying for (GTX 16xx-class
+     * DXR fallback, RTX 2060 6 GB, RX 6500). */
+    if (vram < 6144u) return TD5_QTIER_LOW;
+    /* 6-16 GB: REDUCED RT -- half-res shadows + half-res reflections, GI off.
+     * This is where the 24 fps report's RTX 3070 (8 GB) lands, and where every
+     * 8/10/12 GB card lands: 2060 Super, 2080, 3060, 3060 Ti, 3070, 3070 Ti,
+     * 3080 10/12 GB, 4060, 4060 Ti 8 GB, 4070, 4070 Ti, RX 6700/6800/7700.
+     * Threshold raised 10240 -> 16384 on 2026-09-30: at 10 GB a 12 GB 4070 or
+     * 3080 was being handed FULL-res RT reflections + GI, which is the exact
+     * cost profile that produced the 24 fps report one tier down. */
+    if (vram < 16384u) return TD5_QTIER_MEDIUM;
+    /* >= 16 GB: full RT (2 shadow rays, full-res shadows, full reflections,
+     * GI LOW) -- 4080/4090, 5070 Ti/5080/5090, RX 7900 XT/XTX class. Still
+     * never ULTRA; that stays opt-in. */
+    return TD5_QTIER_HIGH;
+}
+
+void td5_perf_auto_select(int live)
+{
+    unsigned vendor = 0, vram = 0; int dxr = 0, cores = 0, ok = 0;
+    char name[128] = "";
+    int gt, lt;
+    perf_probe_hw(&vendor, &vram, &dxr, &cores, &ok, name, sizeof(name));
+    gt = td5_perf_detect_graphics_tier();
+    lt = td5_perf_detect_lighting_tier();
+    dbglog("auto perf: adapter0 '%s' vendor=0x%04X vram=%u MB dxr=%d cores=%d probe=%d "
+           "-> GRAPHICS %s, LIGHTING %s",
+           name, vendor, vram, dxr, cores, ok,
+           td5_perf_tier_name(gt), td5_perf_tier_name(lt));
+    TD5_LOG_I("main", "AUTO-SELECT: '%s' vram=%u MB dxr=%d cores=%d probe=%d -> GRAPHICS %s / LIGHTING %s",
+              name, vram, dxr, cores, ok, td5_perf_tier_name(gt), td5_perf_tier_name(lt));
+    if (!ok)
+        TD5_LOG_W("main", "AUTO-SELECT: adapter probe FAILED -- falling back to "
+                          "GRAPHICS MEDIUM / LIGHTING LOW (no RT) rather than guessing");
+    td5_perf_apply_graphics_tier(gt, live);
+    td5_perf_apply_lighting_tier(lt, live);
+}
+
+/* [AUTO PERF 2026-09-27, tiered 2026-09-29] Hardware auto-tier.
+ *
+ * TWO cases, and the FIRST one is the point of the whole file:
+ *
+ *  1. NEW INSTALL ([Display] AutoPerfChecked absent => 0). Both guards below
+ *     fall through and the tier is applied. So the effective out-of-box
+ *     configuration is the AUTO-SELECTED tier, NOT the k_lighting_cfg defaults
+ *     -- those defaults (Quality=1 = full-res RT reflections + GI) are only
+ *     what gets loaded before this runs and overwrites them. Do not "simplify"
+ *     this function in a way that makes a fresh install keep RT HIGH.
+ *  2. EXISTING INSTALL. AutoPerfChecked doubles as a SCHEMA VERSION (it was a
+ *     0/1 flag), so bumping TD5_AUTOPERF_VERSION re-runs detection once. v2 is
+ *     that bump: v1 only ever demoted Intel iGPUs, so every discrete card was
+ *     left on LIGHTING HIGH.
+ *
+ * On the 24 fps report (RTX 3070 + Ryzen 7 2700X, neither CPU nor GPU at
+ * 100%): LIGHTING HIGH is the leading SUSPECT, not a proven cause -- nothing
+ * has been measured on a 3070. What IS measured, on an RTX 5070 Ti before
+ * Mariano's no-RT-measurement rule: LIGHTING HIGH vs LOW = 14.12 vs 9.81 ms
+ * per frame (71 vs 102 fps). A 3070 now auto-lands on LIGHTING MEDIUM.
+ *
+ * It will NOT stomp a player who has already tuned things: the re-run is
+ * skipped unless BOTH axes still read as their shipped-default tier (HIGH), and
+ * once applied the player's own PERFORMANCE settings always win afterwards.
+ * TD5RE_AUTO_PERF=0 disables the probe; =2 forces it (testing). */
+#define TD5_AUTOPERF_VERSION 2
 void td5_ini_persist_options(void);
 static void td5_auto_perf_preset(void)
 {
-    unsigned vendor = 0, device = 0, vram_mb = 0;
-    char name[128] = "";
     int force = td5_env_int("TD5RE_AUTO_PERF", 1, 0, 2);
+    int checked;
     if (force == 0) return;
-    if (force != 2 && td5_ini_int("Display", "AutoPerfChecked", 0)) return;
-    if (!td5_plat_gpu_probe(&vendor, &device, &vram_mb, name, sizeof(name))) {
-        dbglog("auto perf: DXGI adapter probe failed -- leaving settings as-is");
+    /* A graphics knob given on the command line is a deliberate per-launch
+     * instruction and outranks the tier. Deliberately does NOT consume the
+     * version: the tier still fires on the next launch without overrides. */
+    if (s_cli_gfx_override) {
+        dbglog("auto perf: skipped -- graphics/lighting overridden on the command line");
         return;
     }
-    int weak = (vendor == 0x8086u && vram_mb < 1024u);
-    dbglog("auto perf: adapter0 '%s' vendor=0x%04X device=0x%04X vram=%u MB -> %s",
-              name, vendor, device, vram_mb,
-              (weak || force == 2) ? "INTEGRATED: applying low-end preset" : "no change");
-    if (weak || force == 2) {
-        g_td5.ini.render_scale     = 75;
-        td5_save_set_view_distance(0.25f);
-        g_td5.ini.lighting_enabled = 0;
-        g_td5.ini.car_shadows      = 0;
-        g_td5.ini.legacy_shadows   = 0;
-        g_td5.ini.sun_shadows      = 0;
-        g_td5.ini.reflections      = 0;
-        g_td5.ini.wet_roads        = 0;
-        g_td5.ini.vfx_enabled      = 0;
-        g_td5.ini.world_billboards = 0;
-        g_td5.ini.foliage_aa       = 0;
-        td5_ini_persist_options();
+    checked = td5_ini_int("Display", "AutoPerfChecked", 0);
+    if (force != 2 && checked >= TD5_AUTOPERF_VERSION) return;
+    if (force != 2 && checked > 0) {
+        /* Upgrade path: only re-tier a machine still sitting on the shipped
+         * defaults. Anything else is a deliberate user choice -- leave it. */
+        if (td5_perf_graphics_tier() != TD5_QTIER_HIGH ||
+            td5_perf_lighting_tier() != TD5_QTIER_HIGH) {
+            dbglog("auto perf: v%d upgrade skipped -- settings already customised "
+                   "(gfx tier %d, lighting tier %d)",
+                   TD5_AUTOPERF_VERSION, td5_perf_graphics_tier(), td5_perf_lighting_tier());
+            td5_ini_write_int("Display", "AutoPerfChecked", TD5_AUTOPERF_VERSION);
+            return;
+        }
     }
-    if (force != 2) td5_ini_write_int("Display", "AutoPerfChecked", 1);
+    /* Boot-time: the render device does not exist yet, so INI fields only. */
+    td5_perf_auto_select(0);
+    td5_ini_persist_options();
+    if (force != 2) td5_ini_write_int("Display", "AutoPerfChecked", TD5_AUTOPERF_VERSION);
 }
 
 void td5_ini_persist_options(void)
@@ -607,6 +902,21 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
     { "LightOptVersion",  "Lighting", "LightOptVersion",  &g_td5.ini.rt_opt_version,    0 },
 };
 #define K_LIGHTING_CFG_N (sizeof(k_lighting_cfg) / sizeof(k_lighting_cfg[0]))
+
+/* Display-table keys that are graphics knobs the auto-tier writes. The
+ * [Lighting] table is graphics in its entirety and is handled at its call site,
+ * so only the [Display] subset needs naming here. */
+static int cli_key_is_graphics(const char *name)
+{
+    static const char *const k_gfx_keys[] = {
+        "RenderScale", "FoliageAA", "VFX", "WorldBillboards", "CarShadows",
+        "ViewDistance"
+    };
+    size_t i;
+    for (i = 0; i < sizeof(k_gfx_keys) / sizeof(k_gfx_keys[0]); ++i)
+        if (_stricmp(name, k_gfx_keys[i]) == 0) return 1;
+    return 0;
+}
 
 static int td5_apply_cli_overrides(const char *cmdline,
                                    int *pwidth, int *pheight, int *pwindowed)
@@ -852,6 +1162,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
                 _strnicmp(key, table[i].name, klen) == 0) {
                 *table[i].target = val;
                 dbglog("  CLI override: %s=%d", table[i].name, val);
+                if (cli_key_is_graphics(table[i].name)) s_cli_gfx_override = 1;
                 matched = 1;
                 n_applied++;
                 break;
@@ -863,6 +1174,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
                     _strnicmp(key, k_lighting_cfg[i].cli_name, klen) == 0) {
                     *k_lighting_cfg[i].target = val;
                     dbglog("  CLI override: %s=%d", k_lighting_cfg[i].cli_name, val);
+                    /* Every [Lighting] key is a graphics knob. */
+                    s_cli_gfx_override = 1;
                     matched = 1;
                     n_applied++;
                     break;
@@ -1495,7 +1808,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Resolution-independent vector frontend (MSDF text). Default on. */
     g_td5.ini.vector_ui     = td5_ini_int("Frontend", "VectorUI", 1);
     g_td5.ini.log_enabled   = td5_ini_int("Logging", "Enabled",  1);
+    /* [PERF 2026-09-29] MinLevel default is WARN in RELEASE, INFO in DEV.
+     * MEASURED on this machine (Moscow, 5 opponents, dev build, Profile=1,
+     * ~180 one-second windows per arm): MinLevel 0 -> 2 moved the mean frame
+     * from 14.12 ms to 12.17 ms (71 -> 82 fps). Release shipped at INFO, i.e.
+     * writing an INFO line to disk from per-frame render/asset paths on a
+     * player's machine for no player-visible benefit. A release player who
+     * needs a log still gets one by putting MinLevel=0 in td5re_release.ini;
+     * dev keeps INFO so the existing dev diagnostics are unchanged. */
+#ifdef TD5RE_RELEASE
+    g_td5.ini.log_min_level = td5_ini_int("Logging", "MinLevel", 2);
+#else
     g_td5.ini.log_min_level = td5_ini_int("Logging", "MinLevel", 1);
+#endif
     g_td5.ini.log_frontend  = td5_ini_int("Logging", "Frontend", 1);
     g_td5.ini.log_race      = td5_ini_int("Logging", "Race",     1);
     g_td5.ini.log_engine    = td5_ini_int("Logging", "Engine",   1);
