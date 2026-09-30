@@ -568,6 +568,42 @@ Verified:
 Open for Phase 3 with real data: re-fetch La Plata (network, ask first), then
 confirm bridges land on real water and the conformed chunk goes away.
 
+## 6e. Phase 4 shipped 2026-09-30 (selector + game side)
+
+**Selector.** `python re/tools/geo_selector.py` from the repo root, then open
+`http://127.0.0.1:8765/`. Stdlib HTTP server bound to 127.0.0.1 only, serving
+`re/tools/geo_selector/index.html` (Leaflet over OSM tiles, TD5 skin). Search a
+city (Nominatim, from the browser) or paste `lat, lon`, an OSM permalink or a
+Google Maps link; FETCH MAP CENTRE runs `geo_fetch` for a circle (1.5 to 4 km);
+click A and B; click the line to add a waypoint, drag markers to re-route,
+right-click to remove. Every change routes + conditions and shows the verdict,
+spans against the 3000 cap, worst turn, straight-ahead share, street names, and
+a red marker on every self-overlap. SEND TO GAME writes ROUTE_RAW.JSON +
+ROUTE.JSON, rebuilds the rasters in the route's frame and writes SELECTED.TXT.
+
+Frame fix found on the way: `geo_fetch --frame-from` takes the route's rotation
+and offset but keeps the PLACE centre as the projection origin, while the
+conditioner's origin is the ROUTE centroid. The selector passes the route's
+origin explicitly (radius widened to still cover the original area). The CLI
+recipe in 6b has the same trap when `--lat/--lon` differ from the route centroid.
+
+**Game.** `re/assets/geo/SELECTED.TXT` fills an unset `TD5RE_GEO_PLACE` at boot;
+`td5_geo_sync()` (inside `tg_geo_apply_spec`, so at every spec fold) loads or
+drops the place and its ROUTE.JSON to match the knob, so no restart is needed.
+AUTO TRACK STUDIO > TERRAIN > **LOCATION** cycles SYNTHETIC plus every place
+with a ROUTE.JSON and writes SELECTED.TXT. The track registers under the real
+place name, and the studio preview shows the OSM credit while a place is set.
+
+Verified offline: `geo_selector.py --self-test` (synthetic grid place: state,
+route + condition, retrace flagged with 2 markers, save, 404); synthetic build
+still byte-identical to master; a flat test place selected only through
+SELECTED.TXT built the full 1492-span route, 0 forced conforms, registered as
+the place name. Not verified here (needs network or a person): the page in a
+browser, FETCH, and the LOCATION row on screen.
+
+Still open from the Phase 4 list: fork-candidate toggles (FORKS.JSON) and the
+per-layer vintage display.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth

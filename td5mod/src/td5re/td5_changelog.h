@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 30 (real-world tracks)" },
+    { CL_ITEM,    "AUTO TRACK STUDIO has a LOCATION row: race the auto" },
+    { CL_ITEM,    "  track along a real route picked on a map (run" },
+    { CL_ITEM,    "  re/tools/geo_selector.py). It keeps the place name." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 30 (horns)" },
     { CL_ITEM,    "Each local player now picks their own horn in the" },
     { CL_ITEM,    "  multiplayer profile panel: tabs for Test Drive 5" },

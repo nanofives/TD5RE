@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <dirent.h>
 
 #include "td5re.h"
 #include "td5_platform.h"
@@ -437,33 +438,143 @@ int td5_geo_route_node(int i, double *x, double *z, int *lanes)
     return 1;
 }
 
+/* ------------------------------------------------------- place selection --- */
+
+#define GEO_SELECTED_PATH "re/assets/geo/SELECTED.TXT"
+#define GEO_PLACES_MAX    64
+
+static struct {
+    int  n;
+    char slug[GEO_PLACES_MAX][64];
+    char name[GEO_PLACES_MAX][96];
+} s_places;
+
+/* Which route file the loaded route came from, so sync can tell "already
+ * loaded" from "needs loading" without re-parsing JSON every build. */
+static char s_route_want[512];
+
+static void geo_route_sync(void)
+{
+    const char *env = getenv("TD5RE_GEO_ROUTE");
+    char want[512];
+
+    if (env && env[0])
+        snprintf(want, sizeof(want), "%s", env);
+    else if (s_geo.loaded)
+        snprintf(want, sizeof(want), "re/assets/geo/%s/ROUTE.JSON", s_geo.slug);
+    else
+        want[0] = '\0';
+
+    if (!strcmp(want, s_route_want)) return;          /* nothing changed */
+    snprintf(s_route_want, sizeof(s_route_want), "%s", want);
+    geo_route_free();
+    if (!want[0]) return;
+    if (!geo_route_load(want) && env && env[0])
+        TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_ROUTE=\"%s\" could not be loaded; "
+                  "the generator walks its own road", want);
+}
+
+void td5_geo_sync(void)
+{
+    const char *slug = getenv("TD5RE_GEO_PLACE");
+    if (!slug) slug = "";
+
+    if (strcmp(slug, s_geo.loaded ? s_geo.slug : "")) {
+        if (!slug[0]) {
+            td5_geo_unload();
+            TD5_LOG_I(LOG_TAG, "geo: synthetic world selected");
+        } else if (!td5_geo_load(slug)) {
+            /* Not fatal: fall through to the synthetic world rather than
+             * refusing to build. A missing or malformed cache is a content
+             * problem, and the generator has a perfectly good world of its
+             * own. */
+            TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_PLACE=\"%s\" could not be loaded; "
+                      "falling back to the synthetic world", slug);
+        }
+    }
+    geo_route_sync();
+}
+
+void td5_geo_select(const char *slug)
+{
+    TD5_File *f;
+    if (!slug) slug = "";
+    _putenv_s("TD5RE_GEO_PLACE", slug);      /* "" removes it */
+    /* Persist, so the choice survives a relaunch and the browser selector sees
+     * what the game is set to. Best effort: a read-only install still works for
+     * this session. */
+    f = td5_plat_file_open(GEO_SELECTED_PATH, "wb");
+    if (f) {
+        td5_plat_file_write(f, slug, strlen(slug));
+        td5_plat_file_close(f);
+    }
+    TD5_LOG_I(LOG_TAG, "geo: LOCATION -> %s", slug[0] ? slug : "SYNTHETIC");
+}
+
+int td5_geo_places_rescan(void)
+{
+    DIR *d = opendir("re/assets/geo");
+    struct dirent *e;
+    s_places.n = 0;
+    if (!d) return 0;
+    while ((e = readdir(d)) != NULL && s_places.n < GEO_PLACES_MAX) {
+        char path[384];
+        char *json;
+        TD5_File *f;
+        const size_t len = strlen(e->d_name);
+        if (e->d_name[0] == '.' || e->d_name[0] == '_' || len >= 64) continue;
+        snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", e->d_name);
+        f = td5_plat_file_open(path, "rb");
+        if (!f) continue;                    /* no route: not raceable yet */
+        td5_plat_file_close(f);
+        memcpy(s_places.slug[s_places.n], e->d_name, len + 1);
+        snprintf(s_places.name[s_places.n], sizeof(s_places.name[0]), "%s", e->d_name);
+        snprintf(path, sizeof(path), "re/assets/geo/%s/PLACE.JSON", e->d_name);
+        json = geo_slurp(path);
+        if (json) {
+            cJSON *root = cJSON_Parse(json);
+            const cJSON *nm = root ? cJSON_GetObjectItem(root, "name") : NULL;
+            if (nm && cJSON_IsString(nm) && nm->valuestring[0])
+                snprintf(s_places.name[s_places.n], sizeof(s_places.name[0]),
+                         "%s", nm->valuestring);
+            cJSON_Delete(root);
+            free(json);
+        }
+        s_places.n++;
+    }
+    closedir(d);
+    return s_places.n;
+}
+
+int         td5_geo_places_count(void) { return s_places.n; }
+const char *td5_geo_places_slug(int i) { return (i >= 0 && i < s_places.n) ? s_places.slug[i] : ""; }
+const char *td5_geo_places_name(int i) { return (i >= 0 && i < s_places.n) ? s_places.name[i] : ""; }
+
 int td5_geo_init(void)
 {
-    /* String knobs, so getenv rather than td5_env_int -- the same pattern main.c
-     * uses for its own string env vars. Unset means the synthetic world and
-     * costs exactly these lookups. */
-    const char *slug  = getenv("TD5RE_GEO_PLACE");
-    const char *route = getenv("TD5RE_GEO_ROUTE");
-    if (slug && slug[0] && !td5_geo_load(slug)) {
-        /* Not fatal: fall through to the synthetic world rather than refusing to
-         * boot. A missing or malformed cache is a content problem, and the
-         * generator has a perfectly good world of its own. */
-        TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_PLACE=\"%s\" could not be loaded; "
-                  "falling back to the synthetic world", slug);
+    /* String knobs, so getenv rather than td5_env_int. An unset
+     * TD5RE_GEO_PLACE is filled from SELECTED.TXT (what the selector or the
+     * LOCATION row last chose); an env value always wins over the file. Unset
+     * and no file means the synthetic world, unchanged. */
+    const char *slug = getenv("TD5RE_GEO_PLACE");
+    if (!slug || !slug[0]) {
+        char *sel = geo_slurp(GEO_SELECTED_PATH);
+        if (sel) {
+            char *q = sel + strlen(sel);
+            while (q > sel && (q[-1] == '\n' || q[-1] == '\r' || q[-1] == ' ')) *--q = '\0';
+            if (sel[0] && strlen(sel) < 64) {
+                _putenv_s("TD5RE_GEO_PLACE", sel);
+                TD5_LOG_I(LOG_TAG, "geo: LOCATION %s (from %s)", sel, GEO_SELECTED_PATH);
+            }
+            free(sel);
+        }
     }
-    if (route && route[0]) {
-        if (!geo_route_load(route))
-            TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_ROUTE=\"%s\" could not be loaded; "
-                      "the generator walks its own road", route);
-    } else if (s_geo.loaded) {
-        char path[512];
-        snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", s_geo.slug);
-        geo_route_load(path);   /* optional: a place may be terrain-only */
-    }
+    td5_geo_places_rescan();
+    td5_geo_sync();
     return 1;
 }
 
-void td5_geo_shutdown(void) { td5_geo_unload(); geo_route_free(); }
+void td5_geo_shutdown(void) { td5_geo_unload(); geo_route_free(); s_route_want[0] = '\0'; }
 
 int         td5_geo_loaded(void)     { return s_geo.loaded; }
 const char *td5_geo_place_name(void) { return s_geo.loaded ? s_geo.name : ""; }

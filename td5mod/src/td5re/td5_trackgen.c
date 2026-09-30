@@ -1430,11 +1430,30 @@ void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
  * means no write: synthetic builds stay byte-identical. */
 void tg_geo_apply_spec(TD5_TrackGenSpec *spec)
 {
-    int n = td5_geo_route_count();
+    int n;
+    /* [GEO PHASE 4] Make the loaded place + route match TD5RE_GEO_PLACE first,
+     * so a LOCATION change in the studio takes effect on this very build. */
+    td5_geo_sync();
+    n = td5_geo_route_count();
     if (!spec || n < 2) return;
     spec->target_spans = n - 1;
     if (spec->target_spans > TD5_TG_MAX_SPANS) spec->target_spans = TD5_TG_MAX_SPANS;
     spec->circuit = 0;
+}
+
+/* [GEO PHASE 4 2026-09-30] The name the track registers under: the real
+ * place, upper-cased like every shipped track name, when a geo route drives the
+ * road; the studio's own name otherwise. */
+static const char *tg_geo_track_name(void)
+{
+    static char buf[64];
+    const char *nm = td5_geo_place_name();
+    size_t i;
+    if (td5_geo_route_count() < 2 || !nm[0]) return TD5_TG_TRACK_NAME;
+    for (i = 0; nm[i] && i + 1 < sizeof(buf); i++)
+        buf[i] = (char)((nm[i] >= 'a' && nm[i] <= 'z') ? nm[i] - 32 : nm[i]);
+    buf[i] = '\0';
+    return buf;
 }
 
 /* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
@@ -4435,7 +4454,7 @@ int td5_trackgen_init(void)
     TD5_TrackGenSpec spec;
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
-    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, TD5_TG_TRACK_NAME,
+    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, tg_geo_track_name(),
                                spec.circuit, TD5_TG_GRID_SPAN, 0);
     TD5_LOG_I(LOG_TAG, "trackgen: " TD5_TG_TRACK_NAME " registered (slot %d, level %d); "
               "built on race entry", TD5_TG_SLOT, TD5_TG_LEVEL_NUM);
@@ -4631,7 +4650,7 @@ int td5_trackgen_regenerate(unsigned int seed)
             s_ring_len  = have.ring;
             s_tg_progress = 100;
             td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                       TD5_TG_TRACK_NAME, have.circuit,
+                                       tg_geo_track_name(), have.circuit,
                                        TD5_TG_GRID_SPAN, have.finish);
             TD5_LOG_W(LOG_TAG, "trackgen: REUSED the on-disk build for seed %u "
                       "(%d spans, ring %d, finish %d) -- generation skipped",
@@ -4675,7 +4694,7 @@ int td5_trackgen_regenerate(unsigned int seed)
         if (finish <= 0)   /* ring too short for a placed finish: last-resort */
             finish = (spans > 8) ? spans - 4 : spans - 1;
         td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                   TD5_TG_TRACK_NAME, spec.circuit,
+                                   tg_geo_track_name(), spec.circuit,
                                    TD5_TG_GRID_SPAN, finish);
         TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
                   "strip=%d; old spans-4 would be %d)", finish, ring, spans,
