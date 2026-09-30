@@ -39,6 +39,7 @@
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 #include "td5_control.h"     /* live-control per-slot action bits (dev-only) */
 #include "td5_net.h"     /* td5_net_is_active/td5_net_local_slot — FFB netplay-vs-local branch */
+#include "td5_chaos.h"   /* [CHAOS CO-OP 2026-09-29] seat roles + the N-seat -> 2-car input fold */
 
 /* Defined in td5_game.c */
 
@@ -838,38 +839,90 @@ void td5_input_poll_race_session(void)
     }
 
     /* ---- Normal polling ---- */
-    for (int i = 0; i < s_active_players; i++) {
-        TD5_InputState state;
-        memset(&state, 0, sizeof(state));
+    /* [CHAOS CO-OP 2026-09-29] The raw poll and the per-slot post-processing
+     * that used to share one loop body now run as two PHASES, so the N-seat ->
+     * 2-car input fold can sit between them (plan section 4.5). It has to: the
+     * camera-change, rear-view and recovery edge latches are keyed by the slot
+     * they post-process, so for a team car they must see the FOLDED word and
+     * not seat 0's raw pad.
+     *
+     * CROSS-ITERATION AUDIT — why the mode-OFF path keeps ONE interleaved loop:
+     * td5_plat_input_poll() re-reads the WHOLE keyboard into the platform's
+     * shared s_keyboard[] on every call, whichever slot is passed
+     * (td5_platform_win32.c:700-746), and the post-processing body reads that
+     * same buffer via td5_plat_input_key_pressed(0x13) (the stuck-recovery R
+     * key). So with 2+ players "poll 0, post 0, poll 1, post 1" and "poll 0,
+     * poll 1, post 0, post 1" can disagree: in the split ordering player 0's R
+     * check would see the snapshot taken by player 1's poll. Everything else in
+     * the post body is poll-order independent — the gearbox bit, camera
+     * cooldown, rear-view and recovery latches are per-slot; CycleRaceCameraPreset
+     * / LoadCameraPresetForView / td5_camera_set_rear_view touch camera state
+     * only, which no poll reads; td5_plat_input_joystick_buttons() issues its
+     * own GetDeviceState. Rather than lean on that audit, the mode-OFF path
+     * runs the ORIGINAL single interleaved loop unchanged (phase_n == 1, so
+     * do_poll and do_post are both true in the one pass) and byte-identity
+     * holds by construction.
+     *
+     * The phase-loop locals sit at this indent level on purpose: it keeps the
+     * long post-processing body below at its original indentation, so the diff
+     * shows only the structure and not a re-indent of 200 unchanged lines. */
+    {
+    const int chaos = td5_chaos_active();
+    const int phase_n = chaos ? 2 : 1;
+    int post_n = s_active_players;
 
-        s_control_bits[i] = 0;
+    /* Which path is live: logged once per transition, never per tick. */
+    {
+        static int s_chaos_path_logged = -1;
+        if (s_chaos_path_logged != chaos) {
+            s_chaos_path_logged = chaos;
+            TD5_LOG_I(LOG_TAG, "race input path: %s (input slots=%d)",
+                      chaos ? "CHAOS CO-OP fold (N seats -> 2 cars)" : "direct",
+                      s_active_players);
+        }
+    }
 
-        if (s_input_source[i] == 0) {
-            /* Keyboard */
-            td5_plat_input_poll(i, &state);
-        } else {
-            /* Joystick (source is 1-based index) */
-            td5_plat_input_poll(i, &state);
+    for (int phase = 0; phase < phase_n; phase++) {
+    const int do_poll = (phase == 0);
+    const int do_post = (!chaos) || (phase == 1);
+    const int count   = do_poll ? s_active_players : post_n;
+
+    for (int i = 0; i < count; i++) {
+        if (do_poll) {
+            TD5_InputState state;
+            memset(&state, 0, sizeof(state));
+
+            s_control_bits[i] = 0;
+
+            if (s_input_source[i] == 0) {
+                /* Keyboard */
+                td5_plat_input_poll(i, &state);
+            } else {
+                /* Joystick (source is 1-based index) */
+                td5_plat_input_poll(i, &state);
+            }
+
+            s_control_bits[i] = state.buttons;
+            s_analog_x[i] = state.analog_x;
+            s_analog_y[i] = state.analog_y;
+
+            /* [INPUTSCRIPT 2026-07-03] Scripted race actions overlay the polled
+             * hardware word AFTER the poll, so they flow through the identical
+             * downstream paths as real input (steering ramp, horn edge latch,
+             * gear debounce, camera cooldown) — and keep working when the window
+             * is unfocused (the platform poll early-outs with zero buttons there).
+             * Inert (one branch) when no script is loaded. */
+            if (td5_inputscript_active())
+                s_control_bits[i] |= td5_inputscript_race_bits(i);
+
+            /* [CONTROL 2026-07-21] Live-control hold_action bits overlay the same
+             * way (identical downstream paths). Returns 0 whenever the control
+             * server is off or nothing is held; compiled to a constant 0 in
+             * release, so the sim path is untouched unless a client drives it. */
+            s_control_bits[i] |= td5_control_race_bits(i);
         }
 
-        s_control_bits[i] = state.buttons;
-        s_analog_x[i] = state.analog_x;
-        s_analog_y[i] = state.analog_y;
-
-        /* [INPUTSCRIPT 2026-07-03] Scripted race actions overlay the polled
-         * hardware word AFTER the poll, so they flow through the identical
-         * downstream paths as real input (steering ramp, horn edge latch,
-         * gear debounce, camera cooldown) — and keep working when the window
-         * is unfocused (the platform poll early-outs with zero buttons there).
-         * Inert (one branch) when no script is loaded. */
-        if (td5_inputscript_active())
-            s_control_bits[i] |= td5_inputscript_race_bits(i);
-
-        /* [CONTROL 2026-07-21] Live-control hold_action bits overlay the same
-         * way (identical downstream paths). Returns 0 whenever the control
-         * server is off or nothing is held; compiled to a constant 0 in
-         * release, so the sim path is untouched unless a client drives it. */
-        s_control_bits[i] |= td5_control_race_bits(i);
+        if (!do_post) continue;
 
         /* Bit 28 = auto/manual gearbox toggle.
          * Orig 0x00402E60 derives actor+0x378 = ~(bits >> 28) & 1, then gates
@@ -912,6 +965,13 @@ void td5_input_poll_race_session(void)
              * manual gearbox without the car-select menu (gearbox tests). */
             if (td5_env_int("TD5RE_FORCE_MANUAL", 0, 0, 1)) want_manual = 1;
 #endif   /* [GEARBOX INI REMOVAL 2026-08-10] AutoGearbox INI gone; menu pick authoritative, legacy env-off = auto unless drag */
+            /* [CHAOS CO-OP 2026-09-29] No seat owns the gearbox (plan section
+             * 2.3), so a team car is ALWAYS auto — a fifth role nobody asked
+             * for would starve the size-2 team. Last word on purpose: it has
+             * to outrank drag, the car-select pick and the dev override, and
+             * it runs in the post-processing pass so it also outrides whatever
+             * the fold wrote into bit 28. */
+            if (chaos) want_manual = 0;
             if (want_manual)
                 s_control_bits[i] |=  0x10000000u;   /* manual (gear keys honored) */
             else
@@ -1068,12 +1128,52 @@ void td5_input_poll_race_session(void)
              * which is exactly how s_control_bits[] is indexed in this poll loop.
              * When the whole feature is knob-disabled recover_now is always 0, so
              * the bit is never set and this is a no-op. */
+            /* [CHAOS CO-OP 2026-09-29] In chaos `i` is a CAR slot, not a seat,
+             * so the device it reads (device i) is only one of the team's 2-4
+             * seats. The fold already ORed RECOVER from every seat on the team,
+             * so here the bit is only ever ADDED, never cleared — clearing
+             * would drop the other seats' request. */
             if (recover_now)
                 s_control_bits[i] |=  (uint32_t)TD5_INPUT_RECOVER;
-            else
+            else if (!chaos)
                 s_control_bits[i] &= ~(uint32_t)TD5_INPUT_RECOVER;
         }
+    }   /* per-slot loop */
+
+    /* [CHAOS CO-OP 2026-09-29] THE FOLD — between the two phases. Snapshot the
+     * seat words the poll just wrote, collapse them onto the two team cars per
+     * the current role map, and write the result back over input slots 0 and 1.
+     * Slots 2..N-1 keep their seat words; nothing decodes them (only slots 0-1
+     * are human when num_human_players == 2), and the next tick overwrites them.
+     * If the fold declines (mode went inert mid-race) post_n stays at
+     * s_active_players and phase 1 post-processes the raw seats, which is the
+     * pre-chaos behaviour. */
+    if (chaos && phase == 0) {
+        uint32_t seat_bits[TD5_CHAOS_MAX_SEATS];
+        int16_t  seat_ax[TD5_CHAOS_MAX_SEATS];
+        int16_t  seat_ay[TD5_CHAOS_MAX_SEATS];
+        uint32_t car_bits[TD5_CHAOS_TEAMS];
+        int16_t  car_ax[TD5_CHAOS_TEAMS];
+        int16_t  car_ay[TD5_CHAOS_TEAMS];
+        int seats = s_active_players;
+        if (seats > TD5_CHAOS_MAX_SEATS) seats = TD5_CHAOS_MAX_SEATS;
+        for (int s = 0; s < seats; s++) {
+            seat_bits[s] = s_control_bits[s];
+            seat_ax[s]   = s_analog_x[s];
+            seat_ay[s]   = s_analog_y[s];
+        }
+        if (td5_chaos_fold_inputs(seat_bits, seat_ax, seat_ay, seats,
+                                  car_bits, car_ax, car_ay)) {
+            for (int t = 0; t < TD5_CHAOS_TEAMS; t++) {
+                s_control_bits[t] = car_bits[t];
+                s_analog_x[t]     = car_ax[t];
+                s_analog_y[t]     = car_ay[t];
+            }
+            post_n = TD5_CHAOS_TEAMS;
+        }
     }
+    }   /* phase loop */
+    }   /* [CHAOS CO-OP] poll/fold/post-process scope */
 
     /* [LANE ASSIST 2026-06-28] Keyboard 'L' (DIK_L = 0x26) toggles the optional
      * lane-assist steering aid for player 0 at runtime (rising edge so a held key
@@ -2958,6 +3058,15 @@ void td5_input_ff_shutdown(void)
 static int ff_local_actor_slot(int player)
 {
     int aslot;
+    /* [CHAOS CO-OP 2026-09-29] A third regime: `player` is a SEAT, and seat s
+     * drives its TEAM's car (racer slot 0 or 1), not actor slot s. Without this
+     * every seat from 2 up would feel the forces of the AI/empty actor sitting
+     * at its own index. Returns -1 when the mode is off, so the two regimes
+     * below are untouched. */
+    {
+        int cteam = td5_chaos_team_of_seat(player);
+        if (cteam >= 0) return cteam;
+    }
     if (g_td5.network_active && td5_net_is_active()) {
         aslot = td5_net_local_slot();   /* netplay: this machine's own car (1+ on a client) */
     } else {
@@ -2976,7 +3085,17 @@ static int ff_local_actor_slot(int player)
     return aslot;
 }
 
-static void td5_input_ff_update_jolt(int player)
+/* [CHAOS CO-OP 2026-09-29] `arm` / `consume` exist because the jolt state
+ * (s_ff_gear_seen / _crash_seen / _land_seen / _pulse_* / _side_*) is keyed by
+ * ACTOR SLOT — td5_input_ff_collision() is fed an actor slot straight from the
+ * physics side, so it cannot be re-keyed by device. In chaos 2-4 SEATS share
+ * one actor slot, and whichever seat ran first would swallow the edge and
+ * decrement the pulse, leaving the team's other pads silent. So the caller
+ * arms the edges once per team (first seat that owns a device) and lets the
+ * LAST such seat consume: every seat in between still drives its own motor
+ * from the shared pulse. Non-chaos callers pass arm = consume = 1, which is
+ * the original statement sequence exactly. */
+static void td5_input_ff_update_jolt(int player, int arm, int consume)
 {
     if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return;
     if (s_ff.controller_assignment[player] == 0) return;
@@ -2985,6 +3104,7 @@ static void td5_input_ff_update_jolt(int player)
     int slot = ff_local_actor_slot(player);    /* [MP FF FIX] actor slot this device follows */
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
 
+    if (arm) {
     /* ---- GEAR SWITCH edge: brief LOW-force bump ---- */
     {
         uint32_t seq = td5_physics_gear_change_seq(slot);
@@ -3049,6 +3169,7 @@ static void td5_input_ff_update_jolt(int player)
             s_ff_land_seen[slot] = lseq;          /* acknowledge any stale seq */
         }
     }
+    }   /* if (arm) */
 
     /* ---- Drive / decay the jolt on slot 1 (FRONTAL -> high motor) ---- */
     /* [stuck-motor fix 2026-06-15] Drive while ticks remain; do NOT zero the
@@ -3059,30 +3180,30 @@ static void td5_input_ff_update_jolt(int player)
      * actually call td5_plat_ff_stop and release the motor. */
     if (s_ff_pulse_ticks[slot] > 0) {
         td5_plat_ff_constant(dev, TD5_FF_SLOT_FRONTAL, s_ff_pulse_mag[slot]);
-        s_ff_pulse_ticks[slot]--;
+        if (consume) s_ff_pulse_ticks[slot]--;
     } else if (s_ff_pulse_mag[slot] != 0) {
         /* Pulse expired: release the slot so it stops asserting force. Frontal
          * V2V/wall collisions now feed THIS same pulse (td5_input_ff_collision),
          * so there is no separate persistent collision effect to protect — always
          * stop. (The OLD collision_active guard left the motor asserted forever
          * once a start-line contact latched the flag.) */
-        s_ff_pulse_mag[slot] = 0;
+        if (consume) s_ff_pulse_mag[slot] = 0;
         td5_plat_ff_stop(dev, TD5_FF_SLOT_FRONTAL);
     }
 
     /* ---- Drive / decay the SIDE collision pulse on slot 2 (low motor) ---- */
     if (s_ff_side_ticks[slot] > 0) {
         td5_plat_ff_constant(dev, TD5_FF_SLOT_SIDE, s_ff_side_mag[slot]);
-        s_ff_side_ticks[slot]--;
+        if (consume) s_ff_side_ticks[slot]--;
     } else if (s_ff_side_mag[slot] != 0) {
-        s_ff_side_mag[slot] = 0;
+        if (consume) s_ff_side_mag[slot] = 0;
         td5_plat_ff_stop(dev, TD5_FF_SLOT_SIDE);
     }
 
     /* Terrain-dampen latch counts down so it can't stick on. The old code only
      * ever cleared it on the one-time terrain-effect start, so any collision left
      * it asserted for the rest of the race. */
-    if (s_ff.collision_active[slot] > 0)
+    if (consume && s_ff.collision_active[slot] > 0)
         s_ff.collision_active[slot]--;
 }
 
@@ -3095,9 +3216,37 @@ void td5_input_ff_update(void)
     int players = s_active_players;
     if (players < 1) players = 1;
     if (players > TD5_MAX_HUMAN_PLAYERS) players = TD5_MAX_HUMAN_PLAYERS;
-    for (int p = 0; p < players; p++) {
-        td5_input_ff_update_player(p);   /* steering + terrain + redline rumble */
-        td5_input_ff_update_jolt(p);     /* [FF SIGNALS #1] crash/gear jolt pulse */
+
+    /* [CHAOS CO-OP 2026-09-29] `players` is the SEAT count here (4/6/8), and
+     * 2-4 seats share one team car. The continuous effects
+     * (td5_input_ff_update_player) are recomputed from actor state every frame
+     * and keyed by device, so they just work once ff_local_actor_slot() points
+     * at the team's car. The EDGE-driven jolts need the arm/consume split: arm
+     * on the first seat of the team that owns a device, consume on the last,
+     * so all of that team's pads feel the same crash/gear/landing pulse
+     * instead of only the lowest-numbered one. */
+    if (td5_chaos_active()) {
+        int first[TD5_CHAOS_TEAMS], last[TD5_CHAOS_TEAMS];
+        for (int t = 0; t < TD5_CHAOS_TEAMS; t++) { first[t] = -1; last[t] = -1; }
+        for (int p = 0; p < players; p++) {
+            int t = td5_chaos_team_of_seat(p);
+            if (t < 0 || t >= TD5_CHAOS_TEAMS) continue;
+            if (s_ff.controller_assignment[p] == 0) continue;
+            if (first[t] < 0) first[t] = p;
+            last[t] = p;
+        }
+        for (int p = 0; p < players; p++) {
+            int t = td5_chaos_team_of_seat(p);
+            td5_input_ff_update_player(p);
+            td5_input_ff_update_jolt(p,
+                                     (t >= 0 && t < TD5_CHAOS_TEAMS && first[t] == p),
+                                     (t >= 0 && t < TD5_CHAOS_TEAMS && last[t]  == p));
+        }
+    } else {
+        for (int p = 0; p < players; p++) {
+            td5_input_ff_update_player(p);      /* steering + terrain + redline rumble */
+            td5_input_ff_update_jolt(p, 1, 1);  /* [FF SIGNALS #1] crash/gear jolt pulse */
+        }
     }
     TD5_LOG_D(LOG_TAG, "FF dispatcher: players=%d", players);
 }
