@@ -109,7 +109,16 @@ const char *const k_mp_missing_content[3] = { "EMPTY", "MAP", "STANDINGS" };
  * override so the clamp/grid logic cannot drift. */
 void frontend_commit_pane_layout(int eff_humans, int requested_spectate)
 {
-    int spectate = requested_spectate;
+    int spectate;
+    /* [CHAOS CO-OP 2026-09-29] The mode runs 4/6/8 SEATS folded into exactly TWO
+     * cars, so the pane layout is always 2 human panes with split-screen ON and
+     * no AI spectate panes, whatever the joined head count was. The seat table
+     * itself lives only in TD5_ChaosConfig (td5_chaos_commit_config). */
+    if (frontend_chaos_pending()) {
+        eff_humans = TD5_CHAOS_TEAMS;
+        requested_spectate = 0;
+    }
+    spectate = requested_spectate;
     if (spectate < 0) spectate = 0;
     if (spectate > g_td5.num_ai_opponents) spectate = g_td5.num_ai_opponents;
     if (spectate > TD5_MAX_VIEWPORTS - eff_humans) spectate = TD5_MAX_VIEWPORTS - eff_humans;
@@ -252,6 +261,13 @@ void frontend_init_race_schedule(void) {
              * local-follow viewport for net play is a documented follow-up. */
             int np = td5_net_get_player_count();
             humans = (np > 0) ? np : 1;
+        } else if (frontend_chaos_pending()) {
+            /* [CHAOS CO-OP 2026-09-29] 4/6/8 seats, TWO cars: racer slots 0/1 are
+             * the team cars (RED drives 0, BLUE drives 1) and each gets one pane.
+             * num_human_players stays 2 so everything downstream of it (viewport
+             * count, human-slot marking, results rows) keeps working untouched;
+             * the seat count reaches the input path through td5_chaos.h only. */
+            humans = TD5_CHAOS_TEAMS;
         } else if (s_mp_flow && s_two_player_mode != 0)
             humans = (s_num_human_players > 1) ? s_num_human_players : 2;
         else
@@ -321,6 +337,15 @@ void frontend_init_race_schedule(void) {
             if (opp > TD5_MAX_RACER_SLOTS - humans) opp = TD5_MAX_RACER_SLOTS - humans;
             ai = opp;
             TD5_LOG_I(LOG_TAG, "MP cup: AI opponents=%d (humans=%d)", ai, humans);
+        }
+
+        /* [CHAOS CO-OP 2026-09-29] The AI field size is a mode option (0..4,
+         * default 0 — the mode is a duel), so it overrides the legacy fill. */
+        if (frontend_chaos_pending()) {
+            ai = frontend_chaos_ai_opponents();
+            if (ai > TD5_MAX_RACER_SLOTS - humans) ai = TD5_MAX_RACER_SLOTS - humans;
+            if (ai < 0) ai = 0;
+            TD5_LOG_I(LOG_TAG, "CHAOS CO-OP: %d team cars + %d AI opponents", humans, ai);
         }
 
         g_td5.num_human_players = humans;
@@ -544,6 +569,18 @@ void frontend_init_race_schedule(void) {
         /* AI / unused slots get the hashed AI palette (clear any stale override). */
         for (; i < TD5_MAX_RACER_SLOTS; i++)
             td5_asset_set_human_td6_color(i, -1);
+
+        /* [CHAOS CO-OP 2026-09-29] Racer slots 0/1 are TEAM cars, not individual
+         * players: the per-viewport identity plate reads TEAM RED / TEAM BLUE (a
+         * single player's profile name there would be wrong — 2 to 4 people share
+         * the car). Car + paint for each slot already came from that team's own
+         * picker on the car grid (pane 0 = RED, pane 1 = BLUE). */
+        if (frontend_chaos_pending()) {
+            td5_hud_set_player_identity(0, TR("TEAM RED"),
+                                        k_mp_player_colors[0] | 0xFF000000u);
+            td5_hud_set_player_identity(1, TR("TEAM BLUE"),
+                                        k_mp_player_colors[1] | 0xFF000000u);
+        }
 
         /* [MP SESSION PERSISTENCE 2026-06] Bulk-snapshot the just-committed local
          * roster into the process-lifetime store so re-entering the MP menu in the
