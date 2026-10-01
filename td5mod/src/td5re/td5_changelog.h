@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 1 (split-screen camera views)" },
+    { CL_ITEM,    "In a 3-or-more-player split screen, the in-car view no" },
+    { CL_ITEM,    "  longer leaves you staring at the inside of your own" },
+    { CL_ITEM,    "  car, and a chase pane no longer loses its car." },
+    { CL_ITEM,    "The overhead (top-down) view is pulled back 3.6x, so" },
+    { CL_ITEM,    "  you can see the road, both edges and what is coming" },
+    { CL_ITEM,    "  up ahead, in full screen and in a split pane." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },
     { CL_ITEM,    "New real-world place: Valparaiso to Vina del Mar," },
     { CL_ITEM,    "  7.9 km along the coast, up a hill and over the" },
