@@ -40,6 +40,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Horn picker: every horn you choose now plays. It used" },
     { CL_ITEM,    "  to stay silent if you picked another one within a" },
     { CL_ITEM,    "  second of the last, which is most of the list." },
+    { CL_ITEM,    "The menus are quiet in local multiplayer: the cursor," },
+    { CL_ITEM,    "  selector and confirm pings are off while 2+ players" },
+    { CL_ITEM,    "  share the screen. Six cursors pinging at once was" },
+    { CL_ITEM,    "  noise. Single-player menus keep their sounds." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },

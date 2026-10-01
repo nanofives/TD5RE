@@ -2821,9 +2821,15 @@ static void mp_horn_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             memcpy(s_mp_player_horn[p], h->id, hl);
             s_mp_player_horn[p][hl] = '\0';
         }
-        /* The pick is committed whether or not the sample is audible: a preview
-         * swallowed by the rate limiter must not silently drop the choice. */
-        if (!td5_sound_preview_horn(h->wav, h->zip)) frontend_play_sfx(3);
+        /* The pick is committed whether or not the sample is audible: a failed
+         * preview must not silently drop the choice.
+         *
+         * [MP QUIET MENUS 2026-10-01] The fallback cue is 10 (Uh-Oh, "rejected")
+         * rather than 3 (the confirm ping): 3 is muted during a local MP flow,
+         * which would leave a genuinely missing horn sample with NO feedback at
+         * all, and "this one did not load" is a rejection anyway -- which is
+         * already what the missing-entry branch above reports. */
+        if (!td5_sound_preview_horn(h->wav, h->zip)) frontend_play_sfx(10);
         TD5_LOG_I(LOG_TAG, "MP horn: P%d picked '%s' (%s)", p, h->id, h->label);
         return;
     }
