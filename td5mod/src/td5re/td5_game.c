@@ -3627,7 +3627,18 @@ static void init_race_level_and_assets(void)
                  * traced without a rebuild. */
                 if (is_human && i < g_td5.num_human_players) {
                     const char *horn_id = td5_frontend_player_horn(i);
-                    const TD5_HornEntry *h = td5_horns_find(horn_id, NULL, NULL);
+                    const TD5_HornEntry *h;
+#ifndef TD5RE_RELEASE
+                    /* TD5RE_HORN_FORCE=<catalogue id> overrides every local
+                     * player's pick (dev builds only). AutoRace never visits the
+                     * MP setup, so without this knob the harness can only ever
+                     * exercise the car's own Horn.wav and the whole catalogue
+                     * load path (td5:/td6:/meme: ids) is untestable without six
+                     * pads to open a split-screen lobby with. */
+                    const char *forced = getenv("TD5RE_HORN_FORCE");
+                    if (forced && forced[0]) horn_id = forced;
+#endif
+                    h = td5_horns_find(horn_id, NULL, NULL);
                     if (h) {
                         if (td5_sound_override_horn(i, h->wav, h->zip)) {
                             TD5_LOG_I(LOG_TAG,

@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 1 (horns)" },
+    { CL_ITEM,    "Split-screen with 3 or more players: every player" },
+    { CL_ITEM,    "  hears their own horn again. It was being faded out" },
+    { CL_ITEM,    "  by player 1's camera, so once the field spread out" },
+    { CL_ITEM,    "  only the cars near player 1 could be heard." },
+    { CL_ITEM,    "Horn picker: every horn you choose now plays. It used" },
+    { CL_ITEM,    "  to stay silent if you picked another one within a" },
+    { CL_ITEM,    "  second of the last, which is most of the list." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },
     { CL_ITEM,    "New real-world place: Valparaiso to Vina del Mar," },
     { CL_ITEM,    "  7.9 km along the coast, up a hill and over the" },

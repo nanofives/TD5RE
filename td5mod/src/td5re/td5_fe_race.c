@@ -2765,9 +2765,13 @@ static int mp_profile_list_nav_enabled(void) {
  * B closes.
  *
  * ANTI-SPAM: navigating never plays a horn, only the nav ping. A sample is
- * heard solely on a commit, and td5_sound_preview_horn rate-limits those. That
- * ordering is what makes hold-to-scroll harmless -- auto-repeat fires on the
- * list cursor, which has no sound attached to it.
+ * heard solely on a commit. That ordering is what makes hold-to-scroll harmless
+ * -- auto-repeat fires on the list cursor, which has no sound attached to it --
+ * and it is also why td5_sound_preview_horn no longer rate-limits commits: with
+ * nothing repeating there was no spam to throttle, and the 1 s window it used to
+ * apply silently ate every A press made less than a second after the last one
+ * (see the 2026-10-01 note on horn_preview_window_ms). A 0 return now means the
+ * sample genuinely failed to load, which is what the fallback blip reports.
  */
 static void mp_horn_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
     int cnt;
