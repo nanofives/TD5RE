@@ -196,6 +196,48 @@ int td5_plat_cpu_logical_cores(void)
 static int s_idle_frame_cap = 0;
 void td5_plat_set_idle_frame_cap(int fps) { s_idle_frame_cap = (fps > 0) ? fps : 0; }
 
+/* [MENU FPS 2026-10-01] See td5_platform.h. Queries the monitor the game window
+ * actually sits on (not just the primary) so a 120 Hz TV as a second display
+ * reports 120. EnumDisplaySettings is a registry/driver round-trip, so the value
+ * is cached for TD5_REFRESH_TTL_MS -- long enough that the per-frame caller in
+ * td5_plat_present costs nothing, short enough that dragging the window to
+ * another monitor, or changing the refresh rate, is picked up while running.
+ * dmDisplayFrequency returns 0 or 1 for "hardware default" on some drivers;
+ * both are meaningless as a rate, so they are reported as 0 (unknown). */
+#define TD5_REFRESH_TTL_MS 1000u
+int td5_plat_display_refresh_hz(void)
+{
+    static int      s_hz = 0;
+    static uint32_t s_last_ms = 0;
+    uint32_t now = td5_plat_time_ms();
+    DEVMODEW dm;
+    MONITORINFOEXW mi;
+    HMONITOR mon;
+    const WCHAR *dev = NULL;
+
+    if (s_last_ms != 0 && (now - s_last_ms) < TD5_REFRESH_TTL_MS) {
+        return s_hz;
+    }
+    s_last_ms = now;
+
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    mon = s_hwnd ? MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
+    if (mon && GetMonitorInfoW(mon, (MONITORINFO *)&mi)) {
+        dev = mi.szDevice;      /* NULL below = primary display fallback */
+    }
+
+    ZeroMemory(&dm, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsW(dev, ENUM_CURRENT_SETTINGS, &dm) &&
+        (dm.dmFields & DM_DISPLAYFREQUENCY) && dm.dmDisplayFrequency > 1) {
+        s_hz = (int)dm.dmDisplayFrequency;
+    } else {
+        s_hz = 0;
+    }
+    return s_hz;
+}
+
 /* [PAUSE RENDER CACHE 2026-09-29] See td5_platform.h. */
 void td5_plat_scene_snapshot_capture(void)    { Backend_SceneSnapshotCapture(); }
 int  td5_plat_scene_snapshot_blit(void)       { return Backend_SceneSnapshotBlit(); }
@@ -834,16 +876,31 @@ void td5_plat_present(int vsync)
         if (s_recover_ease_frames > 0) {      /* post-recovery ease-in window */
             s_recover_ease_frames--;
             if (eff_cap == 0 || eff_cap > 60) eff_cap = 60;
+            pace_even_with_vsync = 1;         /* ease a fragile driver back in */
         }
         /* [PAUSE RENDER CACHE 2026-09-29] The idle ceiling (paused race / static
          * menu) is the tighter of the two AND overrides the "vsync already paces
          * it" skip below: at 60 Hz vsync a paused race still redraws 60 unchanged
-         * frames/second, which is exactly the GPU burn this is here to stop. */
+         * frames/second, which is exactly the GPU burn this is here to stop.
+         *
+         * [MENU FPS 2026-10-01] ...but ONLY when the ceiling is meaningfully
+         * BELOW the display refresh. Overriding the vsync skip means we Sleep+spin
+         * until min_dt has passed and THEN wait for a vblank. When min_dt equals
+         * the vblank period, normal jitter makes the spin finish just after the
+         * vblank we were aiming for about half the time, so we miss it and wait a
+         * whole extra interval -- a beat that HALVES the rate (a 120 Hz menu
+         * asking for a 120 fps ceiling lands on 60). The idle cap exists to stop
+         * redundant redraws, and with vsync on the vblank wait already does that
+         * job at exactly the right rate, so the hard pacer is only needed for a
+         * ceiling genuinely under the refresh -- the 30 Hz pause cap. 95% of
+         * refresh is the threshold: comfortably above any real sub-refresh cap,
+         * and below the refresh itself even after the driver rounds 59.94 to 60. */
         {
             int idle = s_idle_frame_cap;
             if (idle > 0) {
+                int hz = td5_plat_display_refresh_hz();
                 if (eff_cap == 0 || idle < eff_cap) eff_cap = idle;
-                pace_even_with_vsync = 1;
+                if (hz <= 0 || idle < (hz * 19) / 20) pace_even_with_vsync = 1;
             }
         }
         if (eff_cap > 0 && (pace_even_with_vsync || !(vsync && g_backend.vsync))) {

@@ -99,6 +99,14 @@ int  td5_plat_cpu_logical_cores(void);
  * 0 = no extra ceiling (the normal in-race case). */
 void td5_plat_set_idle_frame_cap(int fps);
 
+/* [MENU FPS 2026-10-01] Refresh rate (Hz) of the monitor the game window is
+ * currently on, so a frame ceiling can be expressed as "the display's rate"
+ * instead of a hardcoded number. Follows the window across monitors (re-queried
+ * on a short TTL), falls back to the primary display, and returns 0 when the
+ * rate is unknown or the driver reports a meaningless value (0/1 Hz) -- callers
+ * must handle 0 by keeping their own default. */
+int  td5_plat_display_refresh_hz(void);
+
 /* [PAUSE RENDER CACHE 2026-09-29] Scene freeze-frame, for the paused race.
  * capture() copies the frame drawn so far into a private backend texture;
  * blit() paints it back over the whole render target and returns 1 (0 = no
