@@ -281,6 +281,13 @@ int tg_fork_count_planned(void)
 {
     const int geo = tg_geo_forks_n();      /* [GEO FORKS] */
     if (geo > 0) return geo;
+    /* [GEO 2026-09-30, Valparaiso] A real route with NO confirmed forks gets
+     * none: a synthetic fork there is a divided avenue that does not exist
+     * (Valparaiso grew an AVENUE fork at span 1201 on Av. Espana). The real
+     * ones come only from FORKS.JSON. TD5RE_GEO_FORKS=0 still pins the
+     * synthetic ladder for an A/B. */
+    if (td5_geo_route_count() >= 2 && td5_env_flag_on("TD5RE_GEO_FORKS"))
+        return 0;
     if (!tg_fork_kinds_enabled()) return 3;
     return td5_env_int("TD5RE_AUTOTRACK_BRANCH_COUNT", 6, 0, TD5_TG_BRANCH_MAX);
 }

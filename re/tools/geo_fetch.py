@@ -121,6 +121,11 @@ SEA_FLOOR_CLAMP_M = -4.0
 # side 0.00. Not the MEAN: Terrarium stays a metre or two above zero for up to
 # ~1.7 km offshore there, which put the sea region's mean at 1.7 m.
 SEA_LOW_M = 0.5
+# Sea is cleared this far beyond a non-bridge road's half width (see
+# rasterize_layers): OSM roads that are not bridges are on land.
+SEA_ROAD_CLEAR_M = 6.0
+# A hole enclosed by sea becomes sea if >95% of it is under this (an island is not).
+SEA_HOLE_MAX_M = 3.0
 SEA_LOW_FRAC_MIN = 0.5
 
 COVER_NONE = 0
@@ -837,7 +842,7 @@ _OSM_TO_COVER = {
 
 
 def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
-                     ) -> tuple[Raster, Raster, dict]:
+                     bbox: tuple | None = None) -> tuple[Raster, Raster, dict]:
     """COVER.R8 and WATER.R8 on the SAME grid as HEIGHT.R16.
 
     Sharing the grid exactly is what lets td5_tg_world.c sample all of them with
@@ -954,7 +959,28 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
                     iz = int(round((z - height.origin_z) / height.cell))
                     if 0 <= ix < w and 0 <= iz < h:
                         barrier[iz, ix] = True
-        labels, nlab = ndimage.label(~barrier)
+        # Only the Overpass query box is KNOWN: the grid is axis-aligned in the
+        # route's rotated frame, so it overhangs the lat/lon box at the corners,
+        # and there the coastline simply is not in the data. Labelling across
+        # that overhang joined sea and land into one region on the first
+        # route-frame Valparaiso build (14 regions, 8 sea cells). Label inside
+        # the box; the overhang is filled from the DEM below.
+        inside = np.ones((h, w), dtype=bool)
+        if bbox is not None:
+            s_, w_, n_, e_ = bbox
+            quad = [proj.to_world(la, lo) for la, lo in
+                    ((s_, w_), (s_, e_), (n_, e_), (n_, w_))]
+            gx = height.origin_x + np.arange(w) * height.cell
+            gz = height.origin_z + np.arange(h) * height.cell
+            X, Z = np.meshgrid(gx, gz)
+            pos = np.ones((h, w), dtype=bool)
+            neg = np.ones((h, w), dtype=bool)
+            for (ax, az), (bx, bz) in zip(quad, quad[1:] + quad[:1]):
+                c = (bx - ax) * (Z - az) - (bz - az) * (X - ax)
+                pos &= c >= 0
+                neg &= c <= 0
+            inside = pos | neg              # same side of all four edges
+        labels, nlab = ndimage.label(~barrier & inside)
         touching = np.unique(np.concatenate([
             labels[np.roll(barrier, s_, axis=ax)] for ax in (0, 1) for s_ in (1, -1)]))
         metres = (height.data.astype(np.float64) * height.scale + height.bias) \
@@ -972,6 +998,26 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
             else:
                 refused += 1
         sea |= barrier & ndimage.binary_dilation(sea)
+        # Overhang outside the query box: extend the sea through low cells
+        # connected to it, DEM only (there is no vector data out there).
+        if not inside.all() and sea.any():
+            low = metres < SEA_LOW_M
+            llab, _ = ndimage.label(low | sea)
+            keep = np.unique(llab[sea])
+            keep = keep[keep > 0]
+            sea |= np.isin(llab, keep) & ~inside & low
+        # Enclosed holes in the sea with no relief are sea too: the DEM reads a
+        # little above SEA_LOW_M offshore in patches, and the first route-frame
+        # Valparaiso build left a 1 km dry blob in the bay. A real island has
+        # height, so the test is "almost every cell under SEA_HOLE_MAX_M".
+        holes = ndimage.binary_fill_holes(sea) & ~sea
+        if holes.any():
+            hlab, hn = ndimage.label(holes)
+            hlow = ndimage.mean((metres < SEA_HOLE_MAX_M).astype(np.float64),
+                                hlab, index=np.arange(1, hn + 1))
+            for i, f in enumerate(hlow, start=1):
+                if f > 0.95:
+                    sea |= hlab == i
         water[sea] = 1
         cover[sea] = COVER_WATER
         # Sink the sea floor to the clamp shelf under the water plane: the DEM's
@@ -987,6 +1033,55 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
               "(%.0f%% or fewer cells under %.1f m), %d sea cells"
               % (len(coast), nlab, kept, refused, SEA_LOW_FRAC_MIN * 100, SEA_LOW_M,
                  painted["sea_cells"]))
+
+    step = height.cell * 0.5
+    # A mapped road that is not a bridge stands on LAND -- for every kind of
+    # water, sea or not. Along a waterfront
+    # (Valparaiso's Av. Espana runs on the seawall) the coastline sits a few
+    # metres off the carriageway, so the sea mask reached under the road's
+    # own width and the generator got 23 "open spans over water" on dry
+    # ground 9 m above the sea. Clear the sea from a buffer of half the
+    # road's width plus SEA_ROAD_CLEAR_M around every non-bridge,
+    # non-tunnel drivable way. Real bridges keep their water. The same
+    # happened inland: Vina's street beside the Estero Marga-Marga canal
+    # polygon put 23 route spans "over water" 11-16 m up.
+    road = np.zeros((h, w), dtype=bool)
+    cell_m = height.cell / proj.units_per_metre
+    rads = {}
+    for rd in vec["roads"]:
+        if rd.get("bridge") or rd.get("tunnel"):
+            continue
+        try:                                  # OSM width is free text
+            wd = float(str(rd.get("width") or "").split()[0].replace(",", "."))
+        except (ValueError, IndexError):
+            wd = 0.0
+        try:
+            ln = float(rd.get("lanes") or 2)
+        except (TypeError, ValueError):
+            ln = 2.0
+        half_m = (wd if wd > 0.0 else ln * 3.5) * 0.5
+        rc = max(1, int(math.ceil((half_m + SEA_ROAD_CLEAR_M) / cell_m)))
+        mask = rads.setdefault(rc, np.zeros((h, w), dtype=bool))
+        pts = rd["points"]
+        for a, b in zip(pts, pts[1:]):
+            dx, dz = b["x"] - a["x"], b["z"] - a["z"]
+            n = max(1, int(math.hypot(dx, dz) / step))
+            for k in range(n + 1):
+                ix = int(round((a["x"] + dx * k / n - height.origin_x) / height.cell))
+                iz = int(round((a["z"] + dz * k / n - height.origin_z) / height.cell))
+                if 0 <= ix < w and 0 <= iz < h:
+                    mask[iz, ix] = True
+    for rc, mask in rads.items():
+        yy, xx = np.mgrid[-rc:rc + 1, -rc:rc + 1]
+        road |= ndimage.binary_dilation(mask, structure=(xx * xx + yy * yy) <= rc * rc)
+    wet_now = water.astype(bool)
+    dried = int((wet_now & road).sum())
+    water[road] = 0
+    cover[road & (cover == COVER_WATER)] = COVER_NONE
+    painted["water_dried_under_roads"] = dried
+    if dried:
+        print("  water cleared under %d road cell(s) (non-bridge roads are on land)"
+              % dried)
 
     # Buildings imply BUILT even where no landuse polygon says so, which is what
     # makes the built-up fraction usable as a height proxy.
@@ -1113,7 +1208,7 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
              if dem_prov.get("lowpass_m") else "none"))
 
     print("\n[5/5] rasterize cover/water, estimate building heights")
-    cover, water, painted = rasterize_layers(vec, proj, height)
+    cover, water, painted = rasterize_layers(vec, proj, height, bbox)
     bh = estimate_building_heights(vec, cover)
     print("  cover cells %d, water cells %d, built stamps %d"
           % (painted["cover_cells"], painted["water_cells"],

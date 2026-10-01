@@ -966,12 +966,25 @@ static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     const int    want     = spec->target_spans + 1;
     const double lane_w   = (double)spec->lane_width;
     const int    n        = (n_route < want) ? n_route : want;
-    int i, chunk0 = 0, forced = 0, too_close = 0, turns = 0;
+    int i, chunk0 = 0, forced = 0, too_close = 0, turns = 0, ramped = 0;
+    int prev_lanes = 0;
 
     for (i = 0; i < n; i++) {
         double x, z;
         int lanes;
         td5_geo_route_node(i, &x, &z, &lanes);
+        /* [GEO 2026-09-30, Valparaiso] ONE LANE PER SEAM. A real street can go
+         * from 2 to 5 lanes between two OSM nodes, and a seam that adds or
+         * drops more than one lane is typed "both sides" (4/7), which needs a
+         * lane-base shift this walk never makes: tg_strip_audit flagged 13 such
+         * seams on Valparaiso (0 on La Plata, whose changes are all single).
+         * Ramp toward the mapped count one lane per node instead. A no-op on
+         * any route whose lane changes are already single steps. */
+        if (prev_lanes > 0) {
+            if (lanes > prev_lanes + 1) { lanes = prev_lanes + 1; ramped++; }
+            else if (lanes < prev_lanes - 1) { lanes = prev_lanes - 1; ramped++; }
+        }
+        prev_lanes = lanes;
         if (i > skip && tg_too_close(nl, x, z, (double)lanes * lane_w, lane_w, skip))
             too_close++;
         if (!tg_nodes_push(nl, x, z, (double)lanes * lane_w, lanes)) return 0;
@@ -1034,6 +1047,9 @@ static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                                " self-crossing"
                              : " -- ROUTE SELF-OVERLAPS and declares no grade"
                                " separation, re-run geo_condition");
+    if (ramped)
+        TD5_LOG_I(LOG_TAG, "trackgen: [GEO] %d node(s) lane-ramped to one lane "
+                  "per seam", ramped);
     if (n < n_route)
         TD5_LOG_W(LOG_TAG, "trackgen: [GEO] route truncated at %d of %d nodes by "
                   "target_spans %d", n, n_route, spec->target_spans);
