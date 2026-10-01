@@ -148,6 +148,16 @@ int td5_render_prop_mesh_count(void);
  * Custom tracks use this instead of the fixed s_td6_col_radius[8] table. */
 int td5_render_prop_mesh_radius(int model);
 
+#ifndef TD5RE_RELEASE
+/* [QA 2026-10-01] 1 when actor `slot`'s BODY was submitted in viewport `view` on
+ * the most recent frame that rendered that view. The per-actor render pass has
+ * many legitimate skips (no mesh, slot state 3, span cull, zero fade, own-car
+ * bumper skip), so an actor EXISTING says nothing about a pane showing a car.
+ * The selftest's chaos rows use this to assert each pane actually drew the team
+ * car its camera targets. Dev builds only (see td5_render_mesh.c). */
+int td5_render_actor_was_drawn(int view, int slot);
+#endif
+
 /* Per-slot paint TINT (0xRRGGBB; 0 = white/identity). Used to color a grayscale
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);

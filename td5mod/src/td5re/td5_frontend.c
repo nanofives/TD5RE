@@ -3846,6 +3846,14 @@ void td5_frontend_auto_race_setup(void) {
     /* Configure game type flags (sets g_td5.game_type, traffic, etc.) */
     ConfigureGameTypeFlags();
 
+#ifndef TD5RE_RELEASE
+    /* [CHAOS CO-OP 2026-10-01] Dev harness: TD5RE_CHAOS_FE_SEATS=4|6|8 fabricates
+     * the lobby + board state and commits it through the real frontend path, so
+     * the schedule call below takes the frontend_chaos_pending() branch. No-op
+     * when the knob is unset. See frontend_chaos_dev_commit_from_env(). */
+    frontend_chaos_dev_commit_from_env();
+#endif
+
     /* Now trigger the race schedule (sets race_requested, assigns AI cars) */
     frontend_init_race_schedule();
 

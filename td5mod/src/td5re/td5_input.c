@@ -964,6 +964,47 @@ void td5_input_poll_race_session(void)
              * server is off or nothing is held; compiled to a constant 0 in
              * release, so the sim path is untouched unless a client drives it. */
             s_control_bits[i] |= td5_control_race_bits(i);
+
+#ifndef TD5RE_RELEASE
+            /* [CHAOS CO-OP 2026-10-01] TD5RE_CHAOS_FAKE_PADS=1 — re-encode a
+             * fabricated (keyboard-bound) chaos seat's word the way the PLATFORM
+             * encodes a real PAD: packed X in bits 0..8, packed Y in bits 9..17,
+             * both ANALOG flags raised (td5_platform_win32.c:942-949).
+             *
+             * This exists because the whole automated harness is keyboard-only:
+             * TD5RE_CHAOS_FAKE_SEATS binds every seat to device 0, whose word is
+             * pure digital bits with NO analog flag, so no self-test could ever
+             * enter the fold's analog branch — which is how a pad-only
+             * full-right-lock + full-brake regression reached a player. With this
+             * on, a 4/8-seat AutoRace reproduces the pad case exactly.
+             *
+             * Steering/pedal INTENT from the keyboard bits is preserved (so a
+             * scripted harness can still drive), and bits 0..17 are cleared
+             * first: on a real pad those positions are axis payload, never
+             * buttons, so leaving the STEER, THROTTLE, BRAKE or RECOVER bits set
+             * there would be a shape no device ever produces. */
+            if (chaos && td5_env_int("TD5RE_CHAOS_FAKE_PADS", 0, 0, 1) &&
+                !(s_control_bits[i] & (uint32_t)TD5_INPUT_ANALOG_X_FLAG)) {
+                uint32_t w = s_control_bits[i];
+                int steer = 0, thr = 0, ax, ay;
+                if (w & (uint32_t)TD5_INPUT_STEER_LEFT)  steer += 256;
+                if (w & (uint32_t)TD5_INPUT_STEER_RIGHT) steer -= 256;
+                if (w & (uint32_t)TD5_INPUT_THROTTLE)    thr   += 256;
+                if (w & (uint32_t)TD5_INPUT_BRAKE)       thr   -= 256;
+                ax = TD5_INPUT_JS_AXIS_CENTER + steer * TD5_INPUT_JS_AXIS_CENTER / 256;
+                ay = TD5_INPUT_JS_AXIS_CENTER - thr   * TD5_INPUT_JS_AXIS_CENTER / 256;
+                if (ax < 0) ax = 0;
+                if (ax > 0x1FF) ax = 0x1FF;
+                if (ay < 0) ay = 0;
+                if (ay > 0x1FF) ay = 0x1FF;
+                w &= ~0x3FFFFu;                      /* drop both packed fields */
+                w |= ((uint32_t)ax & 0x1FFu) | (uint32_t)TD5_INPUT_ANALOG_X_FLAG;
+                w |= (((uint32_t)ay & 0x1FFu) << 9) | (uint32_t)TD5_INPUT_ANALOG_Y_FLAG;
+                s_control_bits[i] = w;
+                s_analog_x[i] = (int16_t)(ax - TD5_INPUT_JS_AXIS_CENTER);
+                s_analog_y[i] = (int16_t)(ay - TD5_INPUT_JS_AXIS_CENTER);
+            }
+#endif
         }
 
         if (!do_post) continue;
@@ -1164,6 +1205,28 @@ void td5_input_poll_race_session(void)
                      * k_default_js_action_bind in td5_platform_win32.c. */
                     if (td5_plat_input_joystick_buttons(i) & (1u << 6))
                         recover_now = 1;
+                }
+                /* [CHAOS CO-OP 2026-10-01] In chaos `i` is a TEAM CAR, so the
+                 * scan above only covers the one seat that happens to sit in
+                 * input slot i. The fold used to carry RECOVER in from the other
+                 * seats, but it can no longer read that bit off a PAD seat's
+                 * word: bit 11 is inside the packed Y-axis field, so it flicked
+                 * on and off with the stick and repositioned the car at random
+                 * (see chaos_shared_action_bits in td5_chaos_fold.c). Scan the
+                 * team's OTHER seats' devices directly instead — same button,
+                 * same meaning, no axis payload involved. Keyboard seats keep
+                 * the player-0-only R rule above. */
+                if (chaos && !recover_now) {
+                    int seats = td5_chaos_seat_count(), s;
+                    for (s = 0; s < seats && s < TD5_MAX_HUMAN_PLAYERS; s++) {
+                        if (s == i) continue;                       /* done above */
+                        if (td5_chaos_team_of_seat(s) != i) continue;
+                        if (s_input_source[s] == 0) continue;       /* keyboard seat */
+                        if (td5_plat_input_joystick_buttons(s) & (1u << 6)) {
+                            recover_now = 1;
+                            break;
+                        }
+                    }
                 }
             }
 

@@ -94,6 +94,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  selector and confirm pings are off while 2+ players" },
     { CL_ITEM,    "  share the screen. Six cursors pinging at once was" },
     { CL_ITEM,    "  noise. Single-player menus keep their sounds." },
+    { CL_DATE,    "October 1" },
+    { CL_ITEM,    "CHAOS CO-OP: pads no longer pin both team cars" },
+    { CL_ITEM,    "  at full right lock with the brake held" },
+    { CL_ITEM,    "CHAOS TEAMS: a seat's d-pad only moves that seat;" },
+    { CL_ITEM,    "  ROTATE AT and START belong to P1 and say so" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },

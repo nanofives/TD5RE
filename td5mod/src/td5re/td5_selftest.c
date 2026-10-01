@@ -58,6 +58,9 @@
 #include "td5_backend_capture.h"
 #include "td5_rt.h"   /* pin the harness to LOW (RT render-only; avoids 8x-FF TDR) */
 #include "td5_chaos.h"   /* [CHAOS CO-OP] read-only rotation-step query + config reset */
+#include "td5_input.h"   /* [CHAOS CO-OP] packed-axis constants for the fold check */
+#include "td5_camera.h"  /* [CHAOS CO-OP] per-view solved camera pose (pane check) */
+#include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
 
@@ -715,6 +718,120 @@ static void st_inv_reset(void)
     memset(&s_inv, 0, sizeof(s_inv));
     s_inv.active = 1;
     s_inv.worst  = ST_PASS;
+}
+
+/* ------------------------------------------------------------------------
+ * [CHAOS CO-OP 2026-10-01] PER-PANE "is my team car actually on screen?" check
+ *
+ * Why it exists: the chaos rows used to judge the mode purely on the invariant
+ * checker plus the rotation counter. Both are blind to the thing a player sees
+ * first — Mariano's report was "two panes, NO cars, each looking at empty
+ * track". Every physics invariant can be green while a pane points its camera
+ * at nothing, so assert the pane binding itself:
+ *   1. pane v's camera target is actor slot v (team t drives racer slot t, the
+ *      identity binding td5_chaos.h documents) and that slot is a live racer;
+ *   2. the camera eye is within a sane chase distance of that car (a camera
+ *      left at the origin / stuck on an unplaced actor blows this out by
+ *      orders of magnitude, which is why the bound can be loose and still bite);
+ *   3. the car's BODY was actually submitted in that pane
+ *      (td5_render_actor_was_drawn) — the one signal that separates "the car is
+ *      there but invisible" from "the camera is wrong".
+ *
+ * Sampled ONCE per race, ST_CHAOS_PANE_TICK racing ticks in, so the start
+ * countdown's camera fly-in is over and the cars are still on the grid (no
+ * legitimate reason for either pane to have lost its car yet).
+ * ---------------------------------------------------------------------- */
+#define ST_CHAOS_PANE_TICK 60        /* ~2 s of racing at 30 Hz */
+/* Chase-distance ceiling in 24.8 world units.
+ *
+ * MEASURED, not guessed: on the chaos rows (Moscow, default chase preset,
+ * tick 60) the solved eye sits cam_dist2 = 3.123e11 from the car, i.e. ~5.6e5
+ * FP units (~2.2e3 in the float world units the debug overlay prints). The
+ * ceiling below is ~5.4x that, so camera tuning cannot trip it; what it DOES
+ * catch is a pane left on an unplaced actor or at the origin, which on a track
+ * sitting ~1e7 from origin is off by ~two orders of magnitude in d2.
+ *
+ * It deliberately does NOT try to tell team car 0 from team car 1 — the two
+ * sit closer together on the grid than the chase radius, so distance cannot
+ * separate them. The `slot != v` test above is what covers mis-binding.
+ * Override: TD5RE_SELFTEST_CHAOS_CAM_MAX. */
+#define ST_CHAOS_CAM_MAX_DEFAULT 3000000
+
+static int  s_chaos_pane_sampled;        /* 1 once this race has been judged */
+static int  s_chaos_pane_status;         /* ST_PASS / ST_FAIL */
+static char s_chaos_pane_note[96];
+
+static void st_chaos_pane_reset(void)
+{
+    s_chaos_pane_sampled = 0;
+    s_chaos_pane_status  = ST_PASS;
+    s_chaos_pane_note[0] = '\0';
+}
+
+static void st_chaos_pane_sample(int racing_ticks)
+{
+    int views, v;
+    long long cam_max;
+    if (s_chaos_pane_sampled || racing_ticks < ST_CHAOS_PANE_TICK) return;
+    s_chaos_pane_sampled = 1;
+
+    cam_max = (long long)td5_env_int("TD5RE_SELFTEST_CHAOS_CAM_MAX",
+                                     ST_CHAOS_CAM_MAX_DEFAULT, 1000, 100000000);
+    views = g_td5.viewport_count;
+    if (views < 1) views = 1;
+    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+
+    if (views != TD5_CHAOS_TEAMS) {
+        s_chaos_pane_status = ST_FAIL;
+        snprintf(s_chaos_pane_note, sizeof s_chaos_pane_note,
+                 "chaos panes: %d viewports, expected %d", views, TD5_CHAOS_TEAMS);
+        return;
+    }
+
+    for (v = 0; v < views; v++) {
+        int slot = td5_game_get_player_slot(v);
+        TD5_Actor *a;
+        int eye[3] = { 0, 0, 0 }, mode = 0, locked = 0;
+        long long dx, dy, dz, d2, lim2;
+        int drawn;
+
+        if (slot != v) {
+            s_chaos_pane_status = ST_FAIL;
+            snprintf(s_chaos_pane_note, sizeof s_chaos_pane_note,
+                     "chaos pane %d targets actor %d, not its team car", v, slot);
+            return;
+        }
+        a = td5_game_get_actor(slot);
+        if (!a || td5_game_get_slot_state(slot) == 3) {
+            s_chaos_pane_status = ST_FAIL;
+            snprintf(s_chaos_pane_note, sizeof s_chaos_pane_note,
+                     "chaos pane %d: team car slot %d is not a live racer", v, slot);
+            return;
+        }
+        drawn = td5_render_actor_was_drawn(v, slot);
+        td5_camera_get_tick_pose(v, eye, &mode, &locked);
+        dx = (long long)eye[0] - a->world_pos.x;
+        dy = (long long)eye[1] - a->world_pos.y;
+        dz = (long long)eye[2] - a->world_pos.z;
+        d2 = dx * dx + dy * dy + dz * dz;
+        lim2 = cam_max * cam_max;
+        TD5_LOG_I(LOG_TAG,
+                  "chaos pane %d: slot=%d drawn=%d cam_dist2=%lld (limit %lld) "
+                  "preset_mode=%d", v, slot, drawn, d2, lim2, mode);
+        if (!drawn) {
+            s_chaos_pane_status = ST_FAIL;
+            snprintf(s_chaos_pane_note, sizeof s_chaos_pane_note,
+                     "chaos pane %d drew NO car for team slot %d", v, slot);
+            return;
+        }
+        if (d2 > lim2) {
+            s_chaos_pane_status = ST_FAIL;
+            snprintf(s_chaos_pane_note, sizeof s_chaos_pane_note,
+                     "chaos pane %d cam_dist2=%lld > %lld from team car %d",
+                     v, d2, lim2, slot);
+            return;
+        }
+    }
 }
 
 static void st_inv_sample(void)
@@ -1797,6 +1914,90 @@ static void st_i18n_verdict(void)
     if (r->status == ST_FAIL) s_exit_code = 1;
 }
 
+/* [CHAOS CO-OP 2026-10-01] PAD-SEAT FOLD check — the regression net for the
+ * bug behind "CHAOS race is broken, two empty panes".
+ *
+ * The in-race chaos rows cannot cover this: every fabricated seat is bound to
+ * the KEYBOARD (TD5RE_CHAOS_FAKE_SEATS, by design — the harness has no pads),
+ * and the keyboard word carries digital action bits and no analog flag. The
+ * fold's analog branch, where the bug lived, is therefore never entered by any
+ * automated race. So check the pure function directly with a word shaped
+ * exactly like the one td5_platform_win32.c builds for a pad
+ * (packed X in bits 0..8, packed Y in bits 9..17, both ANALOG flags).
+ *
+ * At rest that word has bit 1 (STEER_RIGHT) and bit 10 (BRAKE) SET as axis
+ * payload (centre 0xFA = 0b0_1111_1010). The old fold read them as buttons and
+ * gave every resting pad team full right lock + full brake. Positive control
+ * included so the row cannot pass by the fold simply doing nothing. */
+static void st_chaos_pad_fold_verdict(void)
+{
+    StepRow *r = st_new_row("chaos-pad-fold", 'D');
+    TD5_ChaosConfig cfg;
+    TD5_MpGameMode saved_mode;
+    uint32_t seat_bits[TD5_CHAOS_MAX_SEATS];
+    int16_t  seat_ax[TD5_CHAOS_MAX_SEATS], seat_ay[TD5_CHAOS_MAX_SEATS];
+    uint32_t car_bits[TD5_CHAOS_TEAMS];
+    int16_t  car_ax[TD5_CHAOS_TEAMS], car_ay[TD5_CHAOS_TEAMS];
+    const int C = TD5_INPUT_JS_AXIS_CENTER;
+    /* A pad at rest, packed the way the platform packs it. */
+    const uint32_t rest = ((uint32_t)C & 0x1FFu) | (uint32_t)TD5_INPUT_ANALOG_X_FLAG |
+                          ((((uint32_t)C & 0x1FFu)) << 9) | (uint32_t)TD5_INPUT_ANALOG_Y_FLAG;
+    int s, ok_rest = 0, ok_live = 0, folded_rest = 0, folded_live = 0;
+
+    if (!r) return;
+
+    saved_mode = g_td5.mp_mode_config.mode;
+    memset(&cfg, 0, sizeof cfg);
+    cfg.seat_count = 4;
+    cfg.trigger    = TD5_CHAOS_TRIGGER_OFF;
+    for (s = 0; s < 4; s++) {
+        cfg.team_of_seat[s]   = s & 1;      /* alternating RED/BLUE          */
+        cfg.row_of_seat[s]    = s / 2;      /* row 0 = STEER, row 1 = PEDALS */
+        cfg.device_of_seat[s] = s + 1;      /* pads                          */
+    }
+    td5_chaos_commit_config(&cfg);
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_CHAOS_COOP;
+
+    /* --- 1. every seat at rest: both cars must be NEUTRAL --- */
+    for (s = 0; s < 4; s++) { seat_bits[s] = rest; seat_ax[s] = 0; seat_ay[s] = 0; }
+    folded_rest = td5_chaos_fold_inputs(seat_bits, seat_ax, seat_ay, 4,
+                                        car_bits, car_ax, car_ay);
+    if (folded_rest) {
+        ok_rest = 1;
+        for (s = 0; s < TD5_CHAOS_TEAMS; s++) {
+            int packed_x = (int)(car_bits[s] & 0x1FFu);
+            int packed_y = (int)((car_bits[s] >> 9) & 0x1FFu);
+            if (car_ax[s] != 0 || car_ay[s] != 0) ok_rest = 0;
+            if (packed_x != C || packed_y != C)   ok_rest = 0;
+            if (car_bits[s] & (uint32_t)TD5_INPUT_RECOVER) ok_rest = 0;
+        }
+    }
+
+    /* --- 2. positive control: seat 0 (RED STEER) full LEFT, seat 2 (RED
+     * PEDALS) full THROTTLE. The platform packs left as X above centre and
+     * throttle as Y below centre. RED must move, BLUE must stay neutral. --- */
+    seat_bits[0] = (0x1FFu) | (uint32_t)TD5_INPUT_ANALOG_X_FLAG |
+                   (((uint32_t)C & 0x1FFu) << 9) | (uint32_t)TD5_INPUT_ANALOG_Y_FLAG;
+    seat_ax[0]   = (int16_t)(0x1FF - C);
+    seat_bits[2] = ((uint32_t)C & 0x1FFu) | (uint32_t)TD5_INPUT_ANALOG_X_FLAG |
+                   (0u << 9) | (uint32_t)TD5_INPUT_ANALOG_Y_FLAG;
+    seat_ay[2]   = (int16_t)(0 - C);
+    folded_live = td5_chaos_fold_inputs(seat_bits, seat_ax, seat_ay, 4,
+                                        car_bits, car_ax, car_ay);
+    if (folded_live)
+        ok_live = (car_ax[0] > 0 && car_ay[0] < 0 &&
+                   car_ax[1] == 0 && car_ay[1] == 0);
+
+    td5_chaos_commit_config(NULL);
+    g_td5.mp_mode_config.mode = saved_mode;
+
+    snprintf(r->note, sizeof(r->note),
+             "pad-at-rest neutral=%d (folded=%d) steer+throttle=%d (folded=%d)",
+             ok_rest, folded_rest, ok_live, folded_live);
+    r->status = (ok_rest && ok_live) ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_saveload_roundtrip_verdict(void)
 {
     static const char *k_temp_path = "log/selftest_cup_roundtrip.ini";
@@ -1834,6 +2035,7 @@ static void st_write_report(void)
 
     st_degradation_verdicts();
     st_i18n_verdict();
+    st_chaos_pad_fold_verdict();   /* [CHAOS CO-OP] pad-seat input fold (no pads needed) */
     st_saveload_roundtrip_verdict();
     /* net-loopback REMOVED 2026-09-29 on purpose: its INADDR_ANY bind raised the
      * Windows firewall prompt every run. Network is out of selftest scope --
@@ -2170,6 +2372,7 @@ static void st_tick_races(uint32_t now)
             s_last_sim_tick   = s_race_start_tick;
             st_histo_reset();
             st_inv_reset();                          /* [NEW SUITE] arm damage checker */
+            st_chaos_pane_reset();                   /* [CHAOS CO-OP] arm pane check  */
             s_race_budget = st_depth_ticks(sc->depth);
             /* Running budget: tick target at 30 Hz / ff, plus countdown and
              * fade margins. Natural finishes get a much longer leash. */
@@ -2243,7 +2446,17 @@ static void st_tick_races(uint32_t now)
                 if (sc->chaos_seats > 0) {
                     int st0 = td5_chaos_rotation_step(0);
                     int st1 = td5_chaos_rotation_step(1);
-                    if (st0 <= 0 || st1 <= 0) {
+                    /* [CHAOS CO-OP 2026-10-01] The per-pane binding verdict
+                     * sampled mid-race outranks everything below: a race whose
+                     * panes showed no car is broken however well it rotated. */
+                    if (s_chaos_pane_status == ST_FAIL) {
+                        status = ST_FAIL;
+                        snprintf(note, sizeof(note), "%s", s_chaos_pane_note);
+                    } else if (!s_chaos_pane_sampled) {
+                        status = ST_FAIL;
+                        snprintf(note, sizeof(note),
+                                 "chaos: pane check never sampled (race too short?)");
+                    } else if (st0 <= 0 || st1 <= 0) {
                         status = ST_FAIL;
                         snprintf(note, sizeof(note),
                                  "chaos: no swap in %d ticks (steps %d/%d, "
@@ -2292,6 +2505,12 @@ static void st_tick_races(uint32_t now)
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
             st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
+            /* [CHAOS CO-OP 2026-10-01] One-shot per-pane binding check. Must run
+             * HERE, while the race is live: the drawn-mask it reads is per-frame
+             * state, so SS_RACE_POST_MENU would see it cleared. No-op on every
+             * non-chaos row and after the first sample. */
+            if (sc->chaos_seats > 0)
+                st_chaos_pane_sample(tick - s_race_start_tick);
             s_last_sim_tick = tick;
         }
         /* [render golden] grab the composited frame at fixed sim ticks. */
