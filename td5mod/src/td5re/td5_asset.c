@@ -3940,7 +3940,15 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
                 s[i * 4 + 0] = o0; s[i * 4 + 1] = o1; s[i * 4 + 2] = o2; s[i * 4 + 3] = 255;
                 continue;
             }
-            if (m[i * 4] > 127) {          /* body texel (grayscale) -> lum * tint */
+            /* [TD5 CAR PAINT 2026-10-01] The mask byte is a blend WEIGHT, not a
+             * flag: 255 inside the body, ramping to 0 over the last ~1.5 texels
+             * at the silhouette (re/tools/bake_td5_car_paint.py). Lerp the tint
+             * toward WHITE by that weight so the body/glass seam fades instead
+             * of stair-stepping. A hard 0/255 mask — every ported TD6 car's
+             * hand-made carmask, and every bake made before this date — lands on
+             * exactly the old multiply, so this is behaviour-compatible. */
+            if (m[i * 4] != 0) {           /* body texel (grayscale) -> lum * tint */
+                int mw_ = m[i * 4];
                 int g = s[i * 4];          /* body is R==G==B, so any byte is the luminance */
                 int cr = tr, cg = tg, cb = tb;
                 if (pattern != 0) {
@@ -3954,6 +3962,11 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
                     }
                     float t  = td5_asset_paint_pattern_t(pattern, fx, fy);
                     if (t > 0.5f) { cr = tr2; cg = tg2; cb = tb2; }
+                }
+                if (mw_ != 255) {          /* feather: lerp the tint to white */
+                    cr = (cr * mw_ + 255 * (255 - mw_)) / 255;
+                    cg = (cg * mw_ + 255 * (255 - mw_)) / 255;
+                    cb = (cb * mw_ + 255 * (255 - mw_)) / 255;
                 }
                 s[i * 4 + 0] = (unsigned char)((g * cb) / 255);   /* B */
                 s[i * 4 + 1] = (unsigned char)((g * cg) / 255);   /* G */

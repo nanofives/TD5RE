@@ -1812,6 +1812,17 @@ static int  s_pat_page = -1;
 static int  s_pat_built = -1;                /* pattern the bottom layer holds */
 static char s_pat_archive[128];
 
+/* [MP DOUBLE BODY 2026-10-01] How many stacked layers the overlay surface's
+ * TEXTURE PAGE currently holds: 1 = the plain body photo, 2 = the pattern atlas
+ * (whole body on top, the pattern's secondary region below). Per SURFACE, not
+ * global: s_pat_* only ever describes the MOST RECENTLY loaded overlay, so a
+ * second pane loading another car wipes it while the first pane's page still
+ * holds a 2-layer atlas. Any drawer that samples V 0..1 on such a page renders
+ * BOTH layers into the quad and the car appears twice — which is exactly what
+ * the MP car-select pane did (it called fe_draw_surface_rect, whose UVs are
+ * hardcoded 0,0,1,1). Every drawer must scale V by this. */
+static unsigned char s_overlay_layers[FE_MAX_SURFACES];
+
 static void frontend_paint_pattern_reset(void) {
     free(s_pat_body); s_pat_body = NULL;
     free(s_pat_bits); s_pat_bits = NULL;
@@ -1943,6 +1954,7 @@ int frontend_load_car_paint_overlay_surface(int car_index) {
     s_surfaces[slot].tex_page = page;
     s_surfaces[slot].width = w;
     s_surfaces[slot].height = atlas_h;
+    s_overlay_layers[slot] = (unsigned char)(atlas_h == h * 2 ? 2 : 1);
     strncpy(s_surfaces[slot].source_name, "CarPicPaint0.tga", sizeof(s_surfaces[slot].source_name) - 1);
     s_surfaces[slot].source_name[sizeof(s_surfaces[slot].source_name) - 1] = '\0';
     strncpy(s_surfaces[slot].source_archive, archive, sizeof(s_surfaces[slot].source_archive) - 1);
@@ -2736,15 +2748,16 @@ static void fe_draw_paint_overlay_band(int handle, float dx, float dy, float dw,
  * with c2 (the reported "2nd colour not rendered on the diagonal preview").
  * [PAINT PERSPECTIVE 2026-09-12] Each band is split along that view's own fitted
  * body axis so the angled view reads in perspective. */
-static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float dw, float dh) {
-    uint32_t c1 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
-    uint32_t c2 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2);
-    int pat = g_td5.ini.td6_paint_pattern;
+void frontend_draw_paint_overlay_rect(int handle, float dx, float dy, float dw, float dh,
+                                      uint32_t rgb1, uint32_t rgb2, int pat) {
+    uint32_t c1 = frontend_rgb_to_bgra(rgb1);
+    uint32_t c2 = frontend_rgb_to_bgra(rgb2);
     /* [PAINT PATTERN MAP 2026-09-26] Rendered map path (see s_pat_*). The handle
      * must still be the live overlay surface the map was loaded with. */
     int slot = handle - 1;
-    if (s_pat_body && handle == s_pat_handle && slot >= 0 && slot < FE_MAX_SURFACES &&
-        s_surfaces[slot].in_use && s_surfaces[slot].tex_page == s_pat_page &&
+    if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
+    if (s_pat_body && handle == s_pat_handle &&
+        s_surfaces[slot].tex_page == s_pat_page &&
         strcmp(s_surfaces[slot].source_name, "CarPicPaint0.tga") == 0 &&
         strcmp(s_surfaces[slot].source_archive, s_pat_archive) == 0) {
         if (pat <= TD6_PAT_SOLID || pat >= TD6_PAT_COUNT) {
@@ -2752,14 +2765,17 @@ static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float 
                 td5_plat_render_upload_texture(s_pat_page, s_pat_body, s_pat_w, s_pat_h, 2)) {
                 s_pat_built = -1;
                 s_surfaces[slot].height = s_pat_h;
+                s_overlay_layers[slot] = 1;
             }
             if (s_pat_built == -1) {
                 fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0, 0, 1, 1);
                 return;
             }
         } else {
-            if (s_pat_built != pat && frontend_paint_pattern_upload(s_pat_page, pat))
+            if (s_pat_built != pat && frontend_paint_pattern_upload(s_pat_page, pat)) {
                 s_surfaces[slot].height = s_pat_h * 2;
+                s_overlay_layers[slot] = 2;
+            }
             if (s_pat_built == pat) {
                 fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0, 0.0f, 1, 0.5f);
                 fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c2, 0, 0.5f, 1, 1.0f);
@@ -2767,13 +2783,30 @@ static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float 
             }
         }
     }
+    /* [MP DOUBLE BODY 2026-10-01] This page may STILL hold a 2-layer pattern
+     * atlas built for some other pane/screen — s_pat_* describes only the last
+     * overlay loaded, so the branch above can be skipped while the texture is
+     * still doubled. Sampling the full V range then draws the whole-body layer
+     * AND the secondary-region layer into one quad, i.e. the car twice. Confine
+     * the sampling to the top (whole-body) layer. */
+    float vspan = (s_overlay_layers[slot] == 2 &&
+                   strcmp(s_surfaces[slot].source_name, "CarPicPaint0.tga") == 0)
+                  ? 0.5f : 1.0f;
     for (int v = 0; v < TD6_PREVIEW_VIEWS; v++) {
         float va  = (float)v       / (float)TD6_PREVIEW_VIEWS;
         float vb  = (float)(v + 1) / (float)TD6_PREVIEW_VIEWS;
         float bdy = dy + dh * va;
         float bdh = dh * (vb - va);
-        fe_draw_paint_overlay_band(handle, dx, bdy, dw, bdh, va, vb, c1, c2, pat, v);
+        fe_draw_paint_overlay_band(handle, dx, bdy, dw, bdh,
+                                   va * vspan, vb * vspan, c1, c2, pat, v);
     }
+}
+
+static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float dw, float dh) {
+    frontend_draw_paint_overlay_rect(handle, dx, dy, dw, dh,
+                                     (uint32_t)g_td5.ini.td6_paint_color,
+                                     (uint32_t)g_td5.ini.td6_paint_color2,
+                                     g_td5.ini.td6_paint_pattern);
 }
 
 /* Draw the TD6 body-only paint overlay for actual_car at preview x (canvas px),
@@ -5105,6 +5138,7 @@ static void frontend_recover_surfaces(void) {
                      * top half of a plain texture stretched 2x (the misplaced
                      * paint after coming back from a race). */
                     if (s_pat_handle == i + 1) s_pat_built = -1;
+                    s_overlay_layers[i] = 1;   /* plain overlay: one layer again */
                 }
                 s_surfaces[i].width = w;
                 s_surfaces[i].height = h;
