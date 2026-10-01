@@ -841,8 +841,108 @@ _OSM_TO_COVER = {
 }
 
 
+# ---------------------------------------------------------------- land cover
+# ESA WorldCover 2021 v200 (10 m, CC-BY 4.0) and Meta/WRI Global Canopy Height
+# (1.2 m, CC-BY 4.0), both cloud-optimised GeoTIFFs on AWS S3, read by WINDOW
+# through geo_cog (HTTP Range, cached under the place's _cache). Network only
+# when the cache is cold, like every other layer.
+WORLDCOVER_URL = ("https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/"
+                  "map/ESA_WorldCover_10m_2021_v200_%s_Map.tif")
+CANOPY_URL = ("https://dataforgood-fb-data.s3.amazonaws.com/forests/v1/"
+              "alsgedi_global_v6_float/chm/%s.tif")
+CANOPY_ZOOM = 9
+
+
+def _grid_latlon(proj: LocalProjection, height: Raster):
+    """lat/lon of every cell centre. The local projection is affine in the
+    world frame (equirectangular about the centre + rotation + offset), so
+    three exact samples give the whole grid."""
+    h, w = height.data.shape
+    ox, oz, c = height.origin_x, height.origin_z, height.cell
+    la0, lo0 = proj.world_to_latlon(ox, oz)
+    la1, lo1 = proj.world_to_latlon(ox + c, oz)
+    la2, lo2 = proj.world_to_latlon(ox, oz + c)
+    ix = np.arange(w, dtype=np.float64)[None, :]
+    iz = np.arange(h, dtype=np.float64)[:, None]
+    lat = la0 + (la1 - la0) * ix + (la2 - la0) * iz
+    lon = lo0 + (lo1 - lo0) * ix + (lo2 - lo0) * iz
+    return lat, lon
+
+
+def _worldcover_tile(lat: float, lon: float) -> str:
+    la = int(math.floor(lat / 3.0) * 3)
+    lo = int(math.floor(lon / 3.0) * 3)
+    return "%s%02d%s%03d" % ("S" if la < 0 else "N", abs(la),
+                             "W" if lo < 0 else "E", abs(lo))
+
+
+def worldcover_grid(lat, lon, cache_dir: str) -> tuple:
+    """ESA WorldCover class id per cell (nearest 10 m pixel), 0 where unread."""
+    import geo_cog
+    out = np.zeros(lat.shape, dtype=np.uint8)
+    names = np.vectorize(_worldcover_tile)(np.round(lat, 6), np.round(lon, 6))
+    tiles = sorted(set(names.ravel().tolist()))
+    pulled = 0
+    for t in tiles:
+        cog = geo_cog.RemoteCOG(WORLDCOVER_URL % t, cache_dir)
+        sel = names == t
+        px, py = cog.xy_to_pixel(lon[sel], lat[sel])
+        px = np.floor(px).astype(np.int64)
+        py = np.floor(py).astype(np.int64)
+        x0, x1, y0, y1 = int(px.min()), int(px.max()) + 1, int(py.min()), int(py.max()) + 1
+        win = cog.read_window(x0, y0, x1, y1)
+        out[sel] = win[np.clip(py - y0, 0, win.shape[0] - 1),
+                       np.clip(px - x0, 0, win.shape[1] - 1)]
+        pulled += win.size
+    return out, {"tiles": tiles, "pixels_read": int(pulled)}
+
+
+def _quadkey(lat: float, lon: float, z: int) -> str:
+    s_ = math.sin(math.radians(lat))
+    x = (lon + 180.0) / 360.0
+    y = 0.5 - math.log((1 + s_) / (1 - s_)) / (4 * math.pi)
+    n = 1 << z
+    tx, ty = min(n - 1, int(x * n)), min(n - 1, int(y * n))
+    q = ""
+    for i in range(z, 0, -1):
+        m = 1 << (i - 1)
+        q += str((1 if tx & m else 0) + (2 if ty & m else 0))
+    return q
+
+
+def canopy_grid(lat, lon, cache_dir: str) -> tuple:
+    """Canopy height in metres per cell: the MAX of the ~3x3 1.2 m pixels the
+    3.49 m cell covers, so a single crown is not averaged away."""
+    import geo_cog
+    from scipy import ndimage
+    out = np.zeros(lat.shape, dtype=np.uint8)
+    names = np.vectorize(lambda a, b: _quadkey(a, b, CANOPY_ZOOM))(
+        np.round(lat, 6), np.round(lon, 6))
+    keys = sorted(set(names.ravel().tolist()))
+    pulled = 0
+    R = 6378137.0
+    for k in keys:
+        cog = geo_cog.RemoteCOG(CANOPY_URL % k, cache_dir)
+        sel = names == k
+        mx = np.radians(lon[sel]) * R
+        my = np.log(np.tan(np.pi / 4 + np.radians(lat[sel]) / 2)) * R
+        px, py = cog.xy_to_pixel(mx, my)
+        px = np.floor(px).astype(np.int64)
+        py = np.floor(py).astype(np.int64)
+        x0, x1 = int(px.min()) - 2, int(px.max()) + 3
+        y0, y1 = int(py.min()) - 2, int(py.max()) + 3
+        win = cog.read_window(x0, y0, x1, y1)
+        win = ndimage.maximum_filter(win, size=3)
+        out[sel] = win[np.clip(py - max(0, y0), 0, win.shape[0] - 1),
+                       np.clip(px - max(0, x0), 0, win.shape[1] - 1)]
+        pulled += win.size
+    return out, {"quadkeys": keys, "pixels_read": int(pulled)}
+
+
 def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
-                     bbox: tuple | None = None) -> tuple[Raster, Raster, dict]:
+                     bbox: tuple | None = None,
+                     base_cover: "np.ndarray | None" = None,
+                     ) -> tuple[Raster, Raster, dict]:
     """COVER.R8 and WATER.R8 on the SAME grid as HEIGHT.R16.
 
     Sharing the grid exactly is what lets td5_tg_world.c sample all of them with
@@ -850,7 +950,10 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
     from the terrain it is masking.
     """
     h, w = height.data.shape
-    cover = np.full((h, w), COVER_NONE, dtype=np.uint8)
+    # WorldCover, when wired, is the BASE; OSM areas and buildings are painted
+    # over it below (an OSM park outline is sharper than a 10 m classifier).
+    cover = (base_cover.copy() if base_cover is not None
+             else np.full((h, w), COVER_NONE, dtype=np.uint8))
     water = np.zeros((h, w), dtype=np.uint8)
 
     def cells_of(points: list[dict]) -> list[tuple[int, int]]:
@@ -1034,6 +1137,7 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
               % (len(coast), nlab, kept, refused, SEA_LOW_FRAC_MIN * 100, SEA_LOW_M,
                  painted["sea_cells"]))
 
+    from scipy import ndimage
     step = height.cell * 0.5
     # A mapped road that is not a bridge stands on LAND -- for every kind of
     # water, sea or not. Along a waterfront
@@ -1140,10 +1244,25 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                 cell: float = TG_WORLD_CELL,
                 rotation_rad: float = 0.0,
                 offset_x: float = 0.0, offset_z: float = 0.0,
-                smooth_m: float = DEM_SMOOTH_M_DEFAULT) -> dict:
+                smooth_m: float = DEM_SMOOTH_M_DEFAULT,
+                land_cover: str | None = None,
+                canopy: bool | None = None) -> dict:
     slug = slugify(name)
     out = place_dir(slug, root)
     os.makedirs(out, exist_ok=True)
+    # Land-cover choices are STICKY: a re-fetch that does not say (the
+    # selector's route-frame pass) keeps what the place was built with.
+    prev = {}
+    if os.path.exists(os.path.join(out, "PLACE.JSON")):
+        try:
+            with open(os.path.join(out, "PLACE.JSON"), encoding="utf-8") as f:
+                prev = json.load(f).get("sources", {})
+        except Exception:                              # noqa: BLE001
+            prev = {}
+    if land_cover is None:
+        land_cover = prev.get("land_cover", "osm")
+    if canopy is None:
+        canopy = bool(prev.get("canopy", False))
 
     # Degrees for the requested radius, at this latitude.
     dlat = radius_m / 110_574.0
@@ -1208,7 +1327,27 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
              if dem_prov.get("lowpass_m") else "none"))
 
     print("\n[5/5] rasterize cover/water, estimate building heights")
-    cover, water, painted = rasterize_layers(vec, proj, height, bbox)
+    base_cover, wc_prov, canopy_r, cn_prov = None, None, None, None
+    if land_cover == "worldcover" or canopy:
+        glat, glon = _grid_latlon(proj, height)
+        cache_dir = os.path.join(out, "_cache")
+        if land_cover == "worldcover":
+            base_cover, wc_prov = worldcover_grid(glat, glon, cache_dir)
+            cls, cnt = np.unique(base_cover, return_counts=True)
+            wc_prov["classes"] = {int(c): int(n) for c, n in zip(cls, cnt)}
+            print("  WorldCover: tiles %s, classes %s"
+                  % (",".join(wc_prov["tiles"]), wc_prov["classes"]))
+        if canopy:
+            cg, cn_prov = canopy_grid(glat, glon, cache_dir)
+            canopy_r = Raster(cg, height.origin_x, height.origin_z, height.cell,
+                              1.0, 0.0, 255, height.rotation_rad)
+            cn_prov["cells_over_3m"] = int((cg >= 3).sum())
+            cn_prov["max_m"] = int(cg.max())
+            print("  canopy: quadkeys %s, %d cells >= 3 m, max %d m"
+                  % (",".join(cn_prov["quadkeys"]), cn_prov["cells_over_3m"],
+                     cn_prov["max_m"]))
+        del glat, glon
+    cover, water, painted = rasterize_layers(vec, proj, height, bbox, base_cover)
     bh = estimate_building_heights(vec, cover)
     print("  cover cells %d, water cells %d, built stamps %d"
           % (painted["cover_cells"], painted["water_cells"],
@@ -1219,6 +1358,10 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
     # ---- write the contract ---------------------------------------------
     height.write(os.path.join(out, "HEIGHT.R16"))
     cover.write(os.path.join(out, "COVER.R8"))
+    if canopy_r is not None:
+        canopy_r.write(os.path.join(out, "CANOPY.R8"))
+    elif os.path.exists(os.path.join(out, "CANOPY.R8")):
+        os.remove(os.path.join(out, "CANOPY.R8"))
     water.write(os.path.join(out, "WATER.R8"))
     write_json(os.path.join(out, "ROADS.JSON"), {"roads": vec["roads"]})
     write_json(os.path.join(out, "BUILDINGS.JSON"),
@@ -1249,23 +1392,36 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                 "counts": vec["counts"],
             },
             "height": dem_prov,
-            "cover": {
-                "source": "OSM landuse/leisure (ESA WorldCover not yet wired)",
+            "cover": ({
+                "source": "ESA WorldCover 10 m v200 + OSM landuse/leisure overlay",
+                "vintage": "2021 (WorldCover), live OSM overlay",
+                "licence": "CC-BY 4.0 (ESA WorldCover), ODbL (OSM)",
+                "vocabulary": "ESA WorldCover class ids",
+                "worldcover": wc_prov,
+                "painted": painted,
+            } if wc_prov else {
+                "source": "OSM landuse/leisure (ESA WorldCover not fetched for this place)",
                 "vocabulary": "ESA WorldCover class ids",
                 "painted": painted,
-            },
-            "canopy": {
-                "source": "NOT YET WIRED -- Meta/WRI Global Canopy Height, 1 m, "
-                          "CC-BY 4.0, cloud-optimised GeoTIFF on AWS S3 "
-                          "(registry.opendata.aws/dataforgood-fb-forestsv2). "
-                          "Needs a COG range reader or GDAL; this environment has "
-                          "tifffile but no GDAL.",
-            },
+            }),
+            "canopy": ({
+                "source": "Meta/WRI Global Canopy Height 1 m (alsgedi v6), CANOPY.R8 "
+                          "in metres, max of the 1.2 m pixels per cell",
+                "vintage": "2018-2020 imagery",
+                "licence": "CC-BY 4.0",
+                "detail": cn_prov,
+            } if cn_prov else {
+                "source": "NOT WIRED for this place -- Meta/WRI Global Canopy Height, "
+                          "1 m, CC-BY 4.0 (fetch with --canopy)",
+            }),
         },
+        "sources": {"land_cover": land_cover, "canopy": bool(canopy)},
         "attribution": [
             "Map data (c) OpenStreetMap contributors, ODbL 1.0",
             "Elevation: %s" % dem_prov.get("source"),
-        ],
+        ] + (["Land cover: ESA WorldCover 2021, CC-BY 4.0"] if wc_prov else [])
+          + (["Tree canopy: Meta and WRI Global Canopy Height, CC-BY 4.0"]
+             if cn_prov else []),
     }
     write_json(os.path.join(out, "PLACE.JSON"), place)
     print("\nwrote %s" % out)
@@ -1299,6 +1455,13 @@ def main(argv=None) -> int:
                          "TRANSLATES the route so node 0 lands at the origin, and "
                          "a cache built with only the rotation puts the terrain "
                          "somewhere else.")
+    ap.add_argument("--land-cover", choices=("osm", "worldcover"), default=None,
+                    help="COVER.R8 base: OSM only, or ESA WorldCover 10 m with "
+                         "OSM painted over it (network once, then cached). "
+                         "Default: whatever the place was last built with")
+    ap.add_argument("--canopy", choices=("on", "off"), default=None,
+                    help="write CANOPY.R8 from the Meta/WRI 1 m canopy map "
+                         "(network once, then cached). Default: as last built")
     ap.add_argument("--probe-dem", action="store_true",
                     help="only report IGN elevation coverage, fetch nothing")
     a = ap.parse_args(argv)
@@ -1321,7 +1484,8 @@ def main(argv=None) -> int:
 
     fetch_place(a.name, a.lat, a.lon, a.radius, a.root,
                 a.units_per_metre, a.dem_override, TG_WORLD_CELL, rot, ox, oz,
-                a.dem_smooth_m)
+                a.dem_smooth_m, a.land_cover,
+                None if a.canopy is None else a.canopy == "on")
     return 0
 
 

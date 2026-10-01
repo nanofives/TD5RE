@@ -90,6 +90,10 @@ int    td5_geo_is_water(double x, double z);
 /* Land-cover class, or TD5_GEO_COVER_NONE where the cache has no opinion. */
 int    td5_geo_cover(double x, double z);
 
+/* [GEO item 6] Real tree-canopy height in metres (Meta/WRI 1 m map, max per
+ * cell), or -1 when this place has no CANOPY.R8. */
+int    td5_geo_canopy_m(double x, double z);
+
 /* Real sea level (0 m) expressed in this cache's world units, BEFORE the
  * origin shift that tg_world_build applies. */
 double td5_geo_sea_y_raw(void);

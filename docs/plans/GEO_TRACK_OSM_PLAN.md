@@ -1057,6 +1057,58 @@ two decks are thousands of units apart in Y. The two legs never share a frame
 (the renderer culls to +-64 spans, they are 430 apart), so the visual proof is
 per-leg framedumps plus the probe numbers above.
 
+## 6k. The three network items (4, 6, 9), 2026-09-30, with Mariano's OK
+
+**Item 4 -- the selector in a real browser.** Chrome (installed) driven by
+Playwright against `geo_selector.py`: tiles, place list, route + verdict
+(La Plata READY TO RACE, 1492/3000), fork toggles and DATA SOURCES panel all
+render, no page errors, no failed requests (one favicon 404, browser-side).
+Valparaiso was fetched, routed and saved through the same backend (`/api/fetch`,
+`/api/route`, `/api/save`).
+
+**Item 9 -- Valparaiso, the hilly coastal fixture.** Fetched once (Overpass +
+20 Terrarium tiles), route A Av. Errazuriz -> via Recreo -> B north of the
+Marga-Marga: 7.94 km, 2245 spans, street names Errazuriz, Av. Espana, Diego
+Portales, Camino Real, Puente Casino, San Martin. The fixture did its job and
+found four pipeline bugs, all fixed in `geo_fetch.py` / the game:
+
+| Bug | Symptom | Fix |
+|---|---|---|
+| coastline is a LINE in OSM, never filled | 6211 water cells in a box that is half sea | barrier + region labelling, sea = coast-touching region with most cells under 0.5 m (sea 0.69, land 0.00); query-box overhang filled from the DEM; enclosed low holes filled |
+| Terrarium carries bathymetry (-320 m) | the 200 m lowpass would sink the waterfront | clamp to a -4 m shelf before the blur; sea floor sunk under the water plane |
+| roads beside water read as wet | 23 spans "over water" 11-16 m up (Vina's street along the Marga-Marga canal) | water of any kind cleared from a half-width + 6 m buffer round every non-bridge OSM road (1358 cells on Valparaiso, 23 on La Plata) |
+| 2 -> 5 lane jumps | 13 strip-audit violations (seams typed "both sides" without a base shift) | `tg_geo_walk` ramps one lane per node (18 nodes on Valparaiso, 0 on La Plata) |
+
+Plus: a geo route with no confirmed FORKS.JSON gets no synthetic forks
+(Valparaiso grew a fake AVENUE fork on Av. Espana). Gates on Valparaiso: geo_audit
+15 pass / 1 warning (real cliffs, worst cell gradient 1.69 against the 0.20 road
+cap, which is the point of the fixture), two builds identical, network audit OK,
+strip audit 0 of 40 seams, one 17-span bridge over the estero, worst road grade
+0.184. Driven: 5 of 5 AI finish, spans continuous; one stall at span ~142 where
+the field piled behind a stopped car on a 2-lane street (open, AI/traffic).
+
+**Item 6 -- real land cover and canopy, La Plata.** `re/tools/geo_cog.py` reads a
+window of a remote COG over HTTP Range with tifffile (no GDAL), every range
+cached in the place's `_cache`. Tiled (WorldCover, 1024 px DEFLATE) and stripped
+(canopy, one row per strip, predictor 2) layouts both handled; contiguous strips
+coalesce into one request. `geo_fetch --land-cover worldcover --canopy on`
+(sticky in PLACE.JSON `sources`, so the selector's route-frame re-fetch keeps
+them):
+
+- ESA WorldCover 2021 v200 tile S36W060 (10 m): La Plata classes built 80%,
+  tree 11%, grass 8%. It is the COVER.R8 base; OSM areas and buildings paint
+  over it. The route start along the Paseo del Bosque is now FOREST, the rest
+  CITY.
+- Meta/WRI canopy, quadkeys 210321301 / 210321303 (1.19 m, EPSG:3857): CANOPY.R8
+  in metres, max of the ~3x3 pixels per 3.49 m cell; 560392 cells at 3 m or more,
+  max 35 m. `td5_geo_canopy_m()`; plaza interior trees plant where a crown of
+  3 m or more lies within half a lattice step (62 trees, 59 with the file
+  removed; the 8-per-plaza mesh cap binds).
+
+La Plata geo build after items 6 + the water rule: MODELS `F236C0B6454447FC`,
+STRIP `18FEA73AB9227300`, deterministic, both audits OK. Synthetic seed 20260901
+byte-identical throughout.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth

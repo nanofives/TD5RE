@@ -1447,6 +1447,7 @@ static int tg_r16_emit_outskirt_park(const TG_FBHook *h)
 #define TD5_TG_GEOP_PATHS_MAX  8        /* radial paths per plaza             */
 #define TD5_TG_GEOP_TREE_STEP  5160.0   /* 12 m planting lattice              */
 #define TD5_TG_GEOP_TREES_MAX  8        /* per plaza, per the mesh budget     */
+#define TD5_TG_GEOP_CANOPY_M   3        /* [GEO item 6] crown height to plant */
 #define TD5_TG_GEOP_MIN_R      3000.0   /* under ~7 m across it is a verge    */
 /* Clear air between the plaza edge and a tree trunk / the boundary hedge, so
  * neither leans over the pavement the plaza stops at. */
@@ -1827,7 +1828,21 @@ static int tg_geop_emit_trees(const TG_FBHook *h, const double *rx,
             if (!td5_geob_point_in_ring(rx, rz, n, gx, gz)) continue;
             if (tg_geop_out(h->nl, h->si, side, gx, gz)
                 < minout + TD5_TG_GEOP_EDGE_CLR) continue;
-            if (!always && td5_geo_cover(gx, gz) != TD5_GEO_COVER_TREE) continue;
+            if (td5_geo_canopy_m(gx, gz) >= 0) {
+                /* [GEO item 6] REAL canopy: plant where the map has a crown of
+                 * TD5_TG_GEOP_CANOPY_M or more within half a lattice step. This
+                 * replaces both the PARK "always" rule and the COVER gate,
+                 * which only said where trees MIGHT be. */
+                int dx, dz, best = 0;
+                for (dz = -1; dz <= 1; dz++)
+                    for (dx = -1; dx <= 1; dx++) {
+                        const int c = td5_geo_canopy_m(
+                            gx + dx * TD5_TG_GEOP_TREE_STEP * 0.33,
+                            gz + dz * TD5_TG_GEOP_TREE_STEP * 0.33);
+                        if (c > best) best = c;
+                    }
+                if (best < TD5_TG_GEOP_CANOPY_M) continue;
+            } else if (!always && td5_geo_cover(gx, gz) != TD5_GEO_COVER_TREE) continue;
             /* Never standing on a path: measure to the path AXIS, which is what
              * the quad was laid along. */
             for (j = 0; j < npath && clear; j++) {

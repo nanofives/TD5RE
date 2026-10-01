@@ -58,6 +58,7 @@ static struct {
     char      name[96];
     double    exaggeration;
     GeoRaster height, cover, water;
+    GeoRaster canopy;       /* [GEO item 6] CANOPY.R8, metres; optional */
 } s_geo;
 
 /* ----------------------------------------------------------------- io ------ */
@@ -253,6 +254,23 @@ int td5_geo_load(const char *slug)
     if (!geo_raster_load(path, GEO_R_KIND_U8, &s_geo.water))
         TD5_LOG_W(LOG_TAG, "geo: %s has no WATER.R8; nothing will be water", slug);
 
+    /* [GEO item 6, 2026-09-30] CANOPY.R8: Meta/WRI canopy height in metres on
+     * the same grid. Optional and newer than the rest of the contract, so its
+     * absence is silent: a cache built before it simply plants plaza trees the
+     * old way. */
+    snprintf(path, sizeof(path), "re/assets/geo/%s/CANOPY.R8", slug);
+    if (td5_plat_file_exists(path)
+        && !geo_raster_load(path, GEO_R_KIND_U8, &s_geo.canopy))
+        TD5_LOG_W(LOG_TAG, "geo: %s CANOPY.R8 unreadable; canopy unavailable", slug);
+    if (s_geo.canopy.data
+        && (s_geo.canopy.w != s_geo.height.w || s_geo.canopy.h != s_geo.height.h
+            || s_geo.canopy.cell != s_geo.height.cell
+            || s_geo.canopy.origin_x != s_geo.height.origin_x
+            || s_geo.canopy.origin_z != s_geo.height.origin_z)) {
+        TD5_LOG_E(LOG_TAG, "geo: CANOPY.R8 grid differs from HEIGHT.R16; dropped");
+        geo_raster_free(&s_geo.canopy);
+    }
+
     /* A mask on a different grid than the terrain it masks is worse than no
      * mask, so drop any that disagrees rather than sampling it anyway. */
     if (s_geo.cover.data
@@ -296,11 +314,12 @@ int td5_geo_load(const char *slug)
 
     TD5_LOG_I(LOG_TAG, "geo: loaded \"%s\" (%s) grid=%dx%d cell=%.0f "
               "origin=(%.0f,%.0f) rot=%.6frad exaggeration=%.2fx "
-              "cover=%s water=%s",
+              "cover=%s water=%s canopy=%s",
               s_geo.name, s_geo.slug, s_geo.height.w, s_geo.height.h,
               s_geo.height.cell, s_geo.height.origin_x, s_geo.height.origin_z,
               s_geo.height.rotation, s_geo.exaggeration,
-              s_geo.cover.data ? "yes" : "no", s_geo.water.data ? "yes" : "no");
+              s_geo.cover.data ? "yes" : "no", s_geo.water.data ? "yes" : "no",
+              s_geo.canopy.data ? "yes" : "no");
     return 1;
 }
 
@@ -309,6 +328,7 @@ void td5_geo_unload(void)
     geo_raster_free(&s_geo.height);
     geo_raster_free(&s_geo.cover);
     geo_raster_free(&s_geo.water);
+    geo_raster_free(&s_geo.canopy);
     memset(&s_geo, 0, sizeof(s_geo));
 }
 
@@ -726,6 +746,12 @@ double td5_geo_water_y(double x, double z)
     /* The DEM sees the water SURFACE, and td5_geo_height lowered the bed below
      * it, so the un-lowered value IS the surface. */
     return geo_sample_bilinear(&s_geo.height, x, z) * s_geo.exaggeration;
+}
+
+int td5_geo_canopy_m(double x, double z)
+{
+    if (!s_geo.loaded || !s_geo.canopy.data) return -1;
+    return (int)geo_sample_u8(&s_geo.canopy, x, z);
 }
 
 int td5_geo_cover(double x, double z)
