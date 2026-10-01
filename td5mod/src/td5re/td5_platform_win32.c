@@ -2224,8 +2224,31 @@ void td5_plat_input_scan_join_release(void)
     }
 }
 
-/* Frontend navigation bitmask aggregated across EVERY connected joystick, so any
- * configured pad drives the menus from startup:
+/* [MP SHARED-NAV OWNER 2026-10-01] Which enumerated device may drive the SHARED
+ * frontend navigation. -1 (the default, and the only value single-player ever
+ * uses) = unrestricted: every connected pad navigates, which is what you want
+ * when there is one person at the keyboard. In the LOCAL split-screen MP flow the
+ * frontend pins this to the OWNER device so a second player's pad cannot drag the
+ * shared menu cursor; 0 means the owner is the KEYBOARD, so no joystick
+ * contributes at all. Set only by td5_plat_input_set_nav_owner.
+ * Per-player panes are unaffected: they read their own pad through
+ * td5_plat_input_device_nav / td5_plat_input_joystick_nav, never this aggregate. */
+static int s_nav_owner_dev = -1;
+
+void td5_plat_input_set_nav_owner(int enum_index)
+{
+    if (enum_index < -1) enum_index = -1;
+    if (s_nav_owner_dev != enum_index) {
+        TD5_LOG_I(LOG_TAG, "frontend shared-nav owner device: %d -> %d (-1 = any pad)",
+                  s_nav_owner_dev, enum_index);
+        s_nav_owner_dev = enum_index;
+    }
+}
+
+/* Frontend navigation bitmask aggregated across every connected joystick that is
+ * allowed to drive the shared menus (see s_nav_owner_dev — all of them unless the
+ * local-MP flow pinned an owner), so any configured pad drives the menus from
+ * startup:
  *   bit0 LEFT  bit1 RIGHT  bit2 UP  bit3 DOWN  bit4 A/confirm  bit5 B/back.
  * Also records which joystick produced A as the active controller. */
 uint32_t td5_plat_input_frontend_nav(void)
@@ -2238,7 +2261,12 @@ uint32_t td5_plat_input_frontend_nav(void)
         DIJOYSTATE2 js;
         uint32_t db = 0;
         long cx, cy;
-        LPDIRECTINPUTDEVICE8A dev = scan_dev(i);
+        LPDIRECTINPUTDEVICE8A dev;
+        /* [MP SHARED-NAV OWNER] Skip every pad that is not the owner. Done before
+         * the poll so a non-owner pad costs nothing and, more importantly, cannot
+         * set s_plat_active_js below and steal "active controller" from the owner. */
+        if (s_nav_owner_dev >= 0 && i != s_nav_owner_dev) continue;
+        dev = scan_dev(i);
         if (!dev) continue;
         memset(&js, 0, sizeof(js));
         if (FAILED(IDirectInputDevice8_Poll(dev))) {

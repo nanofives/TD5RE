@@ -644,8 +644,16 @@ static void st_reset_scenario_fields(void)
     _putenv("TD5RE_CHAOS_TRIGGER=");
     _putenv("TD5RE_CHAOS_PERIOD=");
     td5_chaos_commit_config(NULL);
-    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CHAOS_COOP)
-        g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+    /* [MP DRAG LEAK FIX 2026-10-01] This used to reset mp_mode_config.mode for
+     * CHAOS only, so EVERY other mode leaked into the following rows the same way
+     * — most visibly DRAG: mp-drag-9p is the last mp_mode row in the matrix, so
+     * every row after it (the chaos block) was still running with mode ==
+     * TD5_MP_MODE_DRAG_RACE and therefore on the drag code path. Reset the mode
+     * unconditionally: a row that wants one sets .mp_mode and re-arms it at
+     * :1501, and the rows that deliberately leave .mp_mode unset (chaos) want
+     * plain RACE. This is what makes the matrix cover "drag race, then a normal
+     * race in the same session" at all. */
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
 }
 
 /* ------------------------------------------------------------------------
@@ -1681,6 +1689,85 @@ static void st_mp_lobby_verdict(void)
     if (r->status == ST_FAIL) s_exit_code = 1;
 }
 
+/* [MP DRAG LEAK FIX 2026-10-01] Regression net for "a drag race forced every
+ * following race into drag, with MANUAL gearbox and LANE ASSIST on".
+ *
+ * The race matrix cannot cover this: every harness race goes through the
+ * AutoRace frontend path, which calls ConfigureGameTypeFlags and so clears
+ * drag_race_enabled before init ever runs. The REAL local-MP lobby flow never
+ * calls it — that asymmetry IS the bug — so the leak is only reachable by
+ * driving the menus. This step exercises the authoritative reset directly
+ * instead, over the four state combinations that matter:
+ *
+ *   1. local split-screen, mode RACE, drag flags stale  -> MUST clear
+ *   2. local split-screen, mode DRAG                    -> MUST keep (real drag)
+ *   3. single player (no split), drag armed             -> MUST keep (SP drag)
+ *   4. network session, mode RACE, drag flags stale     -> MUST keep (net owns it)
+ *
+ * MANUAL gearbox and forced LANE ASSIST are both pure per-tick functions of
+ * g_td5.drag_race_enabled (td5_input.c / td5_laneassist.c), so case 1 clearing
+ * the flag is exactly what gives the player their gearbox and lane-assist choice
+ * back. Every global touched here is saved and restored. */
+static void st_mp_drag_leak_verdict(void)
+{
+    StepRow *r = st_new_row("mp-drag-leak", 'D');
+    int sv_split, sv_net, sv_drag, sv_mode;
+    TD5_GameType sv_type;
+    int c1, c2, c3, c4;
+
+    if (!r) return;
+
+    sv_split = g_td5.split_screen_mode;
+    sv_net   = g_td5.network_active;
+    sv_drag  = g_td5.drag_race_enabled;
+    sv_mode  = g_td5.mp_mode_config.mode;
+    sv_type  = g_td5.game_type;
+
+    /* 1. The reported bug: drag race, then the lobby picks RACE. */
+    g_td5.split_screen_mode   = 1;
+    g_td5.network_active      = 0;
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+    g_td5.drag_race_enabled   = 1;                       /* left over from the drag race */
+    g_td5.game_type           = TD5_GAMETYPE_DRAG_RACE;  /* ditto */
+    td5_game_clear_stale_local_mp_drag();
+    c1 = (g_td5.drag_race_enabled == 0 && g_td5.game_type != TD5_GAMETYPE_DRAG_RACE);
+
+    /* 2. A real local-MP drag race must stay drag. */
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_DRAG_RACE;
+    g_td5.drag_race_enabled   = 1;
+    g_td5.game_type           = TD5_GAMETYPE_DRAG_RACE;
+    td5_game_clear_stale_local_mp_drag();
+    c2 = (g_td5.drag_race_enabled == 1 && g_td5.game_type == TD5_GAMETYPE_DRAG_RACE);
+
+    /* 3. Single-player drag must be untouched (ConfigureGameTypeFlags owns SP). */
+    g_td5.split_screen_mode   = 0;
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+    g_td5.drag_race_enabled   = 1;
+    g_td5.game_type           = TD5_GAMETYPE_DRAG_RACE;
+    td5_game_clear_stale_local_mp_drag();
+    c3 = (g_td5.drag_race_enabled == 1 && g_td5.game_type == TD5_GAMETYPE_DRAG_RACE);
+
+    /* 4. Net sessions clear drag on their own path; don't double-handle them. */
+    g_td5.split_screen_mode   = 1;
+    g_td5.network_active      = 1;
+    g_td5.drag_race_enabled   = 1;
+    g_td5.game_type           = TD5_GAMETYPE_DRAG_RACE;
+    td5_game_clear_stale_local_mp_drag();
+    c4 = (g_td5.drag_race_enabled == 1);
+
+    g_td5.split_screen_mode   = sv_split;
+    g_td5.network_active      = sv_net;
+    g_td5.drag_race_enabled   = sv_drag;
+    g_td5.mp_mode_config.mode = sv_mode;
+    g_td5.game_type           = sv_type;
+
+    snprintf(r->note, sizeof(r->note),
+             "stale-cleared=%d mp-drag-kept=%d sp-drag-kept=%d net-kept=%d",
+             c1, c2, c3, c4);
+    r->status = (c1 && c2 && c3 && c4) ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_i18n_verdict(void)
 {
     static const char k_sanity[] = "I18N SELFTEST \xBF\xC1\xC9\xCD\xD3\xDA\xD1?";
@@ -1752,6 +1839,7 @@ static void st_write_report(void)
      * Windows firewall prompt every run. Network is out of selftest scope --
      * do not reintroduce socket-opening checks here. */
     st_mp_lobby_verdict();
+    st_mp_drag_leak_verdict();   /* [MP DRAG LEAK FIX 2026-10-01] */
 
     for (i = 0; i < s_row_count; i++) {
         if (s_rows[i].status == ST_PASS) n_pass++;

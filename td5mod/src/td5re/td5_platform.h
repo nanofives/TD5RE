@@ -495,6 +495,17 @@ int  td5_plat_input_devices_changed(void);
  *  Returns 0 if no joystick is present. [PORT ENHANCEMENT 2026-06] */
 uint32_t td5_plat_input_frontend_nav(void);
 
+/** [MP SHARED-NAV OWNER 2026-10-01] Restrict td5_plat_input_frontend_nav to ONE
+ *  enumerated device, so only the pad that OWNS a shared menu can move its
+ *  cursor. `enum_index` uses the same numbering as td5_plat_input_device_nav:
+ *  -1 = unrestricted (default — every pad navigates, the single-player case),
+ *   0 = keyboard owns it, so NO joystick contributes,
+ *  >0 = only that joystick contributes.
+ *  Has no effect on per-player reads (td5_plat_input_device_nav /
+ *  td5_plat_input_joystick_nav), which is what keeps split-screen panes —
+ *  car select, name entry, per-pane colour — individually controllable. */
+void     td5_plat_input_set_nav_owner(int enum_index);
+
 /** In-race navigation bitmask from a player's EXCLUSIVE joystick device (same
  *  encoding as td5_plat_input_frontend_nav) — for the pause menu, which can't use
  *  the released frontend scan handles while a race owns the device. */
