@@ -1,0 +1,47 @@
+{
+  "_README": [
+    "Per-car overrides for re/tools/bake_td5_car_paint.py. Everything here is a",
+    "JUDGEMENT CALL that no measurement can settle, so it lives in data instead of",
+    "being buried in thresholds. Edit a value and re-run the baker for that car:",
+    "    python re/tools/bake_td5_car_paint.py <code>",
+    "",
+    "paint_all_varying (default false)",
+    "    Normally only the PRIMARY paint is recoloured: a texel that moves between",
+    "    the four factory skins but does not follow the primary paint is treated as",
+    "    deliberate art (a stripe, a flame, a second body colour) and keeps what it",
+    "    shipped with.",
+    "",
+    "    That policy assumes the four skins are the SAME car in four colours. On a",
+    "    handful of cars they are not -- they are four different LIVERIES (mus and",
+    "    fhm have flames only on skins 1/3, cat's skin 3 is a green/yellow two-tone,",
+    "    chv has flames on skin 0 and racing stripes on 2/3). There the primary paint",
+    "    covers only part of the body and the rest stays at SKIN 0's colour, which on",
+    "    a repainted car reads as a white hood or a red nose next to a blue body.",
+    "",
+    "    Set true to recolour EVERY texel the four paints move (minus the chrome /",
+    "    specular-dominated ones, which stay protected either way). The car then",
+    "    takes one coherent colour and loses its flames/stripes. Set false to keep",
+    "    the livery and accept the patches.",
+    "",
+    "    Chosen below: true where the leftover reads as a defect (a plain car with a",
+    "    stray white or red panel), false where the livery IS the car's identity."
+  ],
+
+  "mus": { "paint_all_varying": true,
+           "why": "'68 Mustang: skins 0/1 both plain white, 2 dark, 3 magenta with flames. The flame texels left the HOOD and ROCKER white on a repainted car -- a hard cut, not a livery." },
+
+  "fhm": { "paint_all_varying": true,
+           "why": "'68 Mustang HR: skin 1 purple+flames, skin 3 a yellow/cyan two-tone. Left the NOSE and FRONT FENDER white against a repainted body." },
+
+  "cat": { "paint_all_varying": true,
+           "why": "Super 7: skin 3 is a green body with a yellow nose, so the nose fits no single paint and kept skin 0's red. Lowest paint contrast of the roster (Pcon 0.51)." },
+
+  "chv": { "paint_all_varying": false,
+           "why": "'70 Chevelle: the FLAMES are the car. Skin 0's yellow flames over the chosen colour read as intentional, so the primary-only policy is right here." },
+
+  "hot": { "paint_all_varying": false,
+           "why": "'69 Camaro HR: a genuine two-tone plus red pinstripes. Keeping them is the point of the car." },
+
+  "cob": { "paint_all_varying": false,
+           "why": "Cobra: the twin bonnet stripes are present in all four schemes, just in different colours. Keep them." }
+}

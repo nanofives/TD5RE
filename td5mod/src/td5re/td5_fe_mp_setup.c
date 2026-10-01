@@ -1238,10 +1238,18 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
     dy = ay + (ah - dh) * 0.5f;
     if (s_mp_pane_preview[p] > 0)
         fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
+    /* [MP DOUBLE BODY 2026-10-01] Must go through frontend_draw_paint_overlay_rect,
+     * NOT fe_draw_surface_rect: that one samples UV 0..1, and the overlay page can
+     * hold the 2-layer pattern atlas (whole body + the pattern's secondary region),
+     * which then drew the car TWICE in the pane. A pane has its own colour and no
+     * pattern of its own, so it asks for SOLID with that colour on both slots. */
     if (frontend_paint_overlay_visible(car, (uint32_t)s_mp_player_color[p]) &&
         s_mp_pane_overlay[p] > 0)
-        fe_draw_surface_rect(s_mp_pane_overlay[p], dx * sx, dy * sy, dw * sx, dh * sy,
-                             frontend_rgb_to_bgra((uint32_t)s_mp_player_color[p]));
+        frontend_draw_paint_overlay_rect(s_mp_pane_overlay[p], dx * sx, dy * sy,
+                                         dw * sx, dh * sy,
+                                         (uint32_t)s_mp_player_color[p],
+                                         (uint32_t)s_mp_player_color[p],
+                                         TD6_PAT_SOLID);
 }
 
 /* Draw one car-select pane button by MP_BTN_* index — keeps the PAINT variants

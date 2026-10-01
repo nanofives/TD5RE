@@ -662,6 +662,14 @@ int frontend_paint_overlay_visible(int car_index, uint32_t rgb);
 int frontend_current_car_index(void);
 int frontend_find_surface_by_source(const char *name, const char *archive);
 int frontend_load_car_paint_overlay_surface(int car_index);
+/* [MP DOUBLE BODY 2026-10-01] Draw a loaded TD6/TD5-bake body-paint overlay into
+ * a rect with an EXPLICIT colour pair + pattern, instead of the global INI one.
+ * The MP car-select panes each carry their own colour and have no pattern, so
+ * they pass (pane colour, pane colour, TD6_PAT_SOLID). Routing them through here
+ * is also what keeps them off a stale 2-layer pattern atlas — drawing such a
+ * page with UV 0..1 rendered the car twice. */
+void frontend_draw_paint_overlay_rect(int handle, float dx, float dy, float dw, float dh,
+                                      uint32_t rgb1, uint32_t rgb2, int pattern);
 uint32_t mp_setup_grid_color(int col, int row);
 uint32_t td6_map_color(float u, float v);
 void Screen_CarSelection(void);
