@@ -545,6 +545,17 @@ void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb)
     s_hud_id_active = 1;
 }
 
+/* [TUTORIAL NAMES 2026-10-01] Read-only view of the same per-racer-slot name the
+ * pane frames / name plates use, so the pre-race tutorial overlay can spell out
+ * WHICH player still has to confirm. NULL when that slot has no name (single
+ * player, or a race that never went through the local-MP flow) — callers fall
+ * back to "PLAYER N". */
+const char *td5_hud_get_player_identity_name(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return NULL;
+    return s_hud_id_name[slot][0] ? s_hud_id_name[slot] : NULL;
+}
+
 /* Global scale factors */
 static float s_scale_x;                  /* 0x4B1138 */
 static float s_scale_y;                  /* 0x4B113C */
