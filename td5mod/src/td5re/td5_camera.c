@@ -555,13 +555,37 @@ static void update_debug_race_camera(int view);   /* defined later */
 static void UpdateTopDownCamera(uint8_t *actor, int view);
 
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
+/* [G2 CAMERA 2026-10-01 — PORT-ONLY DIVERGENCE from 0x463098] Every CHASE
+ * preset (0-5) is pulled back 30% so the cycle offers a genuinely distant view.
+ * Requested by Mariano after the 2026-10-01 split-screen session.
+ *
+ * BOTH orbit_radius_raw AND height_target_raw are scaled by 1.3, deliberately.
+ * orbit_radius is purely HORIZONTAL: UpdateChaseCamera builds the offset as
+ * (sin*radius, stored_pitch, -cos*radius) and its own comment at the orbit
+ * block says "Y = stored pitch (no orbit component on vertical)" — the vertical
+ * comes from height_target_raw instead. So scaling the radius ALONE would have
+ * pushed each camera back without lifting it, flattening every preset's angle
+ * into a different camera. Scaling radius and height together is a uniform
+ * scale of the position offset, which keeps the car-to-eye direction identical
+ * and just moves the eye 30% further along the same ray — each preset keeps its
+ * character, only the distance changes.
+ *
+ * elevation_angle is intentionally NOT scaled: it is the vertical component of
+ * the ORIENTATION vector (orient[1]), and under a uniform position scale the
+ * look direction is unchanged, so the orientation term must stay as it is.
+ *
+ * Originals, for reverting: radius 2100/1710/1500/1350/1200/1550,
+ * height 510/110/310/110/240/110.
+ * Note preset 4 doubles as the countdown tight-chase hold, so the pre-race
+ * hold is 30% further back too. The fly-in presets 10-13 are countdown
+ * cinematics, not part of the player cycle, and are left untouched. */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
-    { 0, 600,  2100, 510, 0, 0 },  /* preset  0: far chase */
-    { 0, 550,  1710, 110, 0, 0 },  /* preset  1: medium chase */
-    { 0, 475,  1500, 310, 0, 0 },  /* preset  2: close chase high */
-    { 0, 400,  1350, 110, 0, 0 },  /* preset  3: close chase low */
-    { 0, 325,  1200, 240, 0, 0 },  /* preset  4: tight chase */
-    { 0, 240,  1550, 110, 0, 0 },  /* preset  5: wide low */
+    { 0, 600,  2730, 663, 0, 0 },  /* preset  0: far chase        (was 2100/510) */
+    { 0, 550,  2223, 143, 0, 0 },  /* preset  1: medium chase     (was 1710/110) */
+    { 0, 475,  1950, 403, 0, 0 },  /* preset  2: close chase high (was 1500/310) */
+    { 0, 400,  1755, 143, 0, 0 },  /* preset  3: close chase low  (was 1350/110) */
+    { 0, 325,  1560, 312, 0, 0 },  /* preset  4: tight chase      (was 1200/240) */
+    { 0, 240,  2015, 143, 0, 0 },  /* preset  5: wide low         (was 1550/110) */
     { 1, 0,    0,    0,   (int)0xFF380000, 0 },  /* preset  6: bumper cam */
     /* [W5 TOP-DOWN 2026-09-29 — PORT-ONLY, no original counterpart] preset 7 is
      * the GTA I/II style overhead view. mode 2 selects UpdateTopDownCamera,

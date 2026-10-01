@@ -39,6 +39,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "The overhead (top-down) view is pulled back 3.6x, so" },
     { CL_ITEM,    "  you can see the road, both edges and what is coming" },
     { CL_ITEM,    "  up ahead, in full screen and in a split pane." },
+    { CL_ITEM,    "All six chase views sit 30% further back, so there is" },
+    { CL_ITEM,    "  a properly distant camera to pick from. Each one" },
+    { CL_ITEM,    "  keeps its own angle, it is only the distance." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },
