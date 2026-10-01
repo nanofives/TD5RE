@@ -78,12 +78,26 @@ Usage:
     python bake_td5_car_paint.py --dry-run      # classify + report, write nothing
     python bake_td5_car_paint.py --preview      # also write carpaint_preview.png
 """
-import os, sys, glob
+import os, sys, glob, json
 import numpy as np
 from PIL import Image
 from scipy import ndimage
 
 CARS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "cars")
+HINTS_PATH = os.path.join(os.path.dirname(__file__), "car_paint_hints.json")
+
+
+def load_hints():
+    """Per-car judgement calls, see car_paint_hints.json. Missing file = defaults."""
+    try:
+        with open(HINTS_PATH, "r", encoding="utf-8") as f:
+            return {k: v for k, v in json.load(f).items()
+                    if not k.startswith("_") and isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+HINTS = load_hints()
 
 TD6_BODY_TOP   = 0.882   # TD6 grayscale body max (225/255) — match it
 VAR_THR        = 0.10    # per-texel colour range across variants
@@ -215,11 +229,128 @@ def fit_shade_ambient(S, A, P):
     return shade, amb, rms, n
 
 
-def derive_primary_body(paths):
+def paint_probability(S, A, seed, shade, amb, rms, pcon):
+    """Per-texel PROBABILITY that a texel is primary paint, in 0..1.
+
+    Replaces three shared hard thresholds (FIT_RES / FIT_MIN_VAR / WHITE_DOM)
+    with three soft terms whose reference levels are measured PER CAR from that
+    car's own seed — the texels the direction clustering already proved are
+    paint. A global constant cannot suit both a glossy black concept car and a
+    matt white muscle car; a reference read off the car itself can.
+
+      p_fit   how well `shade*P + ambient` explains the four skins
+      p_var   how much of the across-skin movement the model attributes to
+              PAINT (a texel the paint barely moves is not worth claiming)
+      p_white how little of the texel is achromatic highlight — this is the
+              chrome/glass discriminator (chrome mirrors the paint, so it fits
+              and it varies, but its paint term sits under a big white one)
+
+    Combined as a geometric mean so any single term near zero vetoes the texel,
+    which is the behaviour the old AND-of-thresholds had.
+    """
+    eps = 1e-6
+    ratio = amb / np.maximum(shade, eps)
+    pvar_raw = shade * pcon
+
+    # fit_shade_ambient reports rms = 1e9 for a texel it could not solve (fewer
+    # than MIN_SAMPLES unclipped samples). Those must NOT enter the reference —
+    # on a heavily saturated car (cat, vip) most of the seed is unsolvable and a
+    # naive percentile returned sigma = 1.6e9, which makes p_fit == 1 everywhere
+    # and silently switches the fit term off. Calibrate on the solvable seed
+    # only, and fall back to the fixed residual budget when too little of it is.
+    sr = rms[seed]
+    sr = sr[np.isfinite(sr) & (sr < 1.0)]
+    if sr.size >= 64:
+        sigma = max(float(np.percentile(sr, 90)) * 1.6, 0.012)
+    else:
+        sigma = FIT_RES
+    var_ref = max(float(np.percentile(pvar_raw[seed], 10)), 0.04)
+    # Clamped BOTH ways: a noisy seed pushed white_ref to 3.5 on gto, which all
+    # but disables the chrome discriminator. WHITE_DOM is the designed level, so
+    # allow a per-car stretch of a bit over 2x and no more.
+    white_ref = float(np.percentile(ratio[seed], 90)) * 2.0
+    white_ref = min(max(white_ref, 0.30), 0.80)
+
+    p_fit = np.exp(-0.5 * (rms / sigma) ** 2)
+    p_var = np.clip(pvar_raw / var_ref, 0.0, 1.0)
+    p_white = np.clip(1.0 - ratio / white_ref, 0.0, 1.0)
+    prob = np.cbrt(np.maximum(p_fit * p_var * p_white, 0.0))
+    prob[~A] = 0.0
+    return prob, dict(sigma=sigma, var_ref=var_ref, white_ref=white_ref)
+
+
+def regularize_probability(prob, S, A):
+    """Make the decision REGIONAL instead of per-texel.
+
+    The reported symptom was "the paint is not coherent across panels", and a
+    per-texel threshold is structurally incapable of being coherent: it decides
+    each texel on its own noise. SLIC superpixels over the car's mean colour cut
+    the atlas into colour-homogeneous patches that follow panel/glass/light
+    boundaries, and averaging the probability inside each patch lets a whole
+    panel carry its weakest texels instead of dropping them.
+
+    Blended half-and-half with the raw probability rather than replacing it, so a
+    superpixel that happens to straddle a real boundary cannot repaint the wrong
+    side wholesale.
+    """
+    try:
+        from skimage.segmentation import slic
+        from skimage.color import rgb2lab
+    except Exception:
+        return prob
+    H, W = prob.shape
+    n_seg = max(64, (H * W) // 48)
+    lab = rgb2lab(np.clip(S.mean(0), 0.0, 1.0).astype(np.float64))
+    try:
+        seg = slic(lab, n_segments=n_seg, compactness=10.0, channel_axis=-1,
+                   convert2lab=False, start_label=1, mask=A, enforce_connectivity=True)
+    except Exception:
+        return prob
+    ids = np.unique(seg)
+    ids = ids[ids > 0]
+    if ids.size == 0:
+        return prob
+    means = ndimage.mean(prob, seg, ids)
+    lut = np.zeros(int(seg.max()) + 1, np.float64)
+    lut[ids] = means
+    region = lut[seg]
+    out = np.where(seg > 0, 0.5 * prob + 0.5 * region, prob)
+    out[~A] = 0.0
+    return out
+
+
+def choose_threshold(prob, A, seed):
+    """Per-car cut on the regularised probability.
+
+    Otsu over this car's own opaque histogram: the split between "paint" and
+    "everything else" is where that car's two modes separate, which is not the
+    same number on every car. Clamped so a degenerate histogram (a car that is
+    almost all body, or almost none) cannot pick an absurd cut, and lowered if
+    it would reject the seed the reference was built from.
+    """
+    vals = prob[A]
+    thr = 0.45
+    try:
+        from skimage.filters import threshold_otsu
+        if vals.size >= 256 and vals.max() > vals.min():
+            thr = float(threshold_otsu(vals))
+    except Exception:
+        pass
+    # No "lower the cut until it accepts the seed" step: the seed is unioned
+    # back into the mask by the caller regardless, so lowering here protected
+    # nothing and let a few weak seed texels drag the cut to the floor (jag,
+    # cat and vip all collapsed to the 0.15 clamp, discarding Otsu's answer).
+    return float(min(max(thr, 0.25), 0.70))
+
+
+def derive_primary_body(paths, hint=None):
     """Primary-paint mask + neutral greyscale shade from K pre-painted variants.
+
+    `hint` is this car's entry from car_paint_hints.json (or None).
 
     Returns dict(base, alpha, varying, primary, shade, ...) or None when the
     variants carry no paint difference (car is not repaintable)."""
+    hint = hint or {}
     rgb, alpha = zip(*[load_rgba(p) for p in paths])
     S = np.stack(rgb, 0)                                  # K,H,W,3
     A = np.stack(alpha, 0).min(0) > 0.5                   # opaque in every variant
@@ -262,10 +393,24 @@ def derive_primary_body(paths):
         return None                                       # no paint to replace
     shade, amb, rms, nsam = fit_shade_ambient(S, A, P)
 
-    fit_ok = (A & (rms < FIT_RES) & (shade * pcon > FIT_MIN_VAR)
-              & (amb <= WHITE_DOM * shade))
+    # Soft, per-car-calibrated evidence, then made panel-coherent, then cut at a
+    # threshold chosen from this car's own histogram. The old shared constants
+    # (FIT_RES / FIT_MIN_VAR / WHITE_DOM) survive only as the floors inside
+    # paint_probability's reference estimates.
+    prob, refs = paint_probability(S, A, seed, shade, amb, rms, pcon)
+    prob = regularize_probability(prob, S, A)
+    thr = choose_threshold(prob, A, seed)
+    fit_ok = A & (prob > thr)
     # The seed is paint by construction; never let the fit throw it away.
     primary = fit_ok | seed
+
+    # [HINTS] Four-LIVERY cars: see car_paint_hints.json. Claim everything the
+    # four paints MOVE, except the specular/chrome-dominated texels, which stay
+    # protected by the same ratio the probability model uses.
+    if hint.get("paint_all_varying"):
+        ratio = amb / np.maximum(shade, 1e-6)
+        primary |= varying & (ratio <= refs["white_ref"])
+
     if primary.sum() < 256:
         return None
 
@@ -364,7 +509,8 @@ def derive_primary_body(paths):
 
     return dict(base=S[0], alpha=np.stack(alpha, 0)[0], varying=varying,
                 primary=primary, weight=weight, shade=shade_out,
-                areas=areas.tolist(), kept=len(keep), seed=seed, pcon=pcon)
+                areas=areas.tolist(), kept=len(keep), seed=seed, pcon=pcon,
+                thr=thr, refs=refs, prob=prob)
 
 
 def u8(a):
@@ -392,7 +538,8 @@ def bake_car(code, dry_run=False, want_preview=False):
     skins = sorted(glob.glob(os.path.join(d, "carskin?.png")))
     if len(skins) < 2:
         return None
-    r = derive_primary_body(skins)
+    hint = HINTS.get(code)
+    r = derive_primary_body(skins, hint)
     if r is None:
         print(f"  {code}: skins carry no paint variation -> NOT paintable")
         clear_bake(d, dry_run)
@@ -403,7 +550,7 @@ def bake_car(code, dry_run=False, want_preview=False):
     # Both have to succeed — a car painted in-race but showing its old paint in
     # the car-select preview reads as a bug, so it stays non-paintable instead.
     pics = sorted(glob.glob(os.path.join(d, "carpic?.png")))
-    rp = derive_primary_body(pics) if len(pics) >= 2 else None
+    rp = derive_primary_body(pics, hint) if len(pics) >= 2 else None
     if rp is None:
         print(f"  {code}: no usable carpic body -> NOT paintable")
         clear_bake(d, dry_run)
@@ -416,8 +563,10 @@ def bake_car(code, dry_run=False, want_preview=False):
 
     print(f"  {code}: body={pm.mean()*100:5.1f}% of atlas  "
           f"(varying {r['varying'].mean()*100:4.1f}%, seed {r['seed'].mean()*100:4.1f}%, "
-          f"clusters kept {r['kept']}, Pcontrast {r['pcon']:.2f})"
-          f"   carpic body={rp['primary'].mean()*100:5.1f}%")
+          f"Pcon {r['pcon']:.2f})"
+          f"  cal: thr={r['thr']:.2f} sigma={r['refs']['sigma']:.3f} "
+          f"var_ref={r['refs']['var_ref']:.2f} white_ref={r['refs']['white_ref']:.2f}"
+          f"   carpic body={rp['primary'].mean()*100:5.1f}% thr={rp['thr']:.2f}")
 
     if not dry_run:
         # Neutral skin FIRST: the "already baked / hand-made TD6 mask" skip below
