@@ -161,11 +161,16 @@ static int      s_seat_count;           /* legal head count this entry uses (4/6
 /* [CHAOS CO-OP 2026-10-01] The board's OWN footer focus. s_selected_button is
  * driven by the shared frontend nav, which ORs EVERY connected pad
  * (td5_plat_input_frontend_nav, td5_frontend.c:4368) — on a 4-8 pad board that
- * meant any seat's d-pad moved the host's ROTATE AT / START highlight and
- * stepped the shared ROTATE AT value while that player was only picking a seat.
- * The screen owns this row (FRONTEND_SCREEN_GUIDE.md: "the host owns START and
- * ESC"), so it keeps its focus here and re-asserts s_selected_button from it
- * every frame. Only the HOST's own per-device nav and the host's mouse write it. */
+ * meant any seat's d-pad moved the host's ROTATE AT / START highlight while that
+ * player was only picking a seat. The screen owns this row
+ * (FRONTEND_SCREEN_GUIDE.md: "the host owns START and ESC"), so it keeps its
+ * focus here and re-asserts s_selected_button from it every frame. Only the
+ * HOST's own per-device nav and the host's mouse write it.
+ *
+ * Still load-bearing WITH G1's td5_plat_input_set_nav_owner(): once the shared
+ * mask carries only the owner device, the host's single Up/Down press arrives
+ * through BOTH the shared cursor (frontend_nav_vertical) and this screen's own
+ * edge decode, and the re-assert is what collapses that back to one move. */
 static int      s_footer_sel;           /* CT_BTN_ROTATE / CT_BTN_START             */
 #ifndef TD5RE_RELEASE
 static int      s_fake_roster;          /* 1 = dev direct-entry fake roster seeded   */
@@ -562,15 +567,17 @@ void Screen_ChaosTeams(void) {
     if (frontend_mp_setup_disconnect_check(n)) return;
 
     /* "BACK TO MODE OPTIONS?" confirm modal -- host only.
-     * [CHAOS CO-OP 2026-10-01] The old YES test also accepted s_input_ready,
-     * which the shared nav raises for ANY pad's A — so a second player pressing
-     * A (their TAKE SEAT button) confirmed the host's back-out and dropped the
-     * whole board. Host edge or host keyboard/mouse confirm only. */
+     * [CHAOS CO-OP 2026-10-01] The old YES test also accepted a bare
+     * s_input_ready, which the shared nav raises for ANY pad's A — so a second
+     * player pressing A (their TAKE SEAT button) confirmed the host's back-out
+     * and dropped the whole board. `he & 0x10` already covers both host kinds
+     * (host pad A, and host keyboard Enter/Space via td5_fe_race.c:1590), so the
+     * only thing s_input_ready still needs to carry here is a MOUSE confirm. */
     if (s_back_confirm) {
         uint32_t hb   = mp_simul_player_nav(0);
         uint32_t he   = hb & ~s_mp_pane_nav_prev[0];
         s_mp_pane_nav_prev[0] = hb;
-        if ((he & 0x10) || (s_input_ready && !(s_fe_gamepad_nav & 0x10u))) {
+        if ((he & 0x10) || (s_input_ready && frontend_input_confirm_was_mouse())) {
             s_back_confirm = 0;
             frontend_play_sfx(3);
             td5_plat_input_flush_nav();
@@ -642,14 +649,20 @@ void Screen_ChaosTeams(void) {
             /* [CHAOS CO-OP 2026-10-01] The host's OWN Left/Right steps ROTATE AT.
              * This used to come from the shared frontend_option_delta() below,
              * which every pad feeds — so a seat crossing teams also stepped this
-             * row. Decoding the host's own edges here is what lets that call be
-             * narrowed to the keyboard/mouse host. */
+             * row. mp_simul_player_nav(0) is the host's device and ONLY the
+             * host's device (pad via td5_plat_input_device_nav, keyboard via the
+             * direct arrow reads at td5_fe_race.c:1586-1589), so this is now the
+             * single source for a key/pad step. The log line names the source so
+             * a manual pad test can prove the row steps ONCE per press. */
             if (s_footer_sel == CT_BTN_ROTATE && (edge & 3)) {
                 int v = (int)s_draft_trigger + ((edge & 2) ? 1 : -1);
                 if (v < 0) v = TD5_CHAOS_TRIGGER_COUNT - 1;
                 if (v >= TD5_CHAOS_TRIGGER_COUNT) v = 0;
                 s_draft_trigger = v;
                 frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "CHAOS TEAMS: ROTATE AT -> %s (source=host dev %d)",
+                          frontend_chaos_trigger_name((int)s_draft_trigger),
+                          s_mp_join_device[0]);
             }
             if (edge & 0x20) host_back = 1;
             if (edge & 0x10) {
@@ -662,21 +675,41 @@ void Screen_ChaosTeams(void) {
         }
     }
 
-    /* Keyboard host only. frontend_option_delta() reads s_arrow_input, which the
-     * shared nav fills from the keyboard FIFO AND from the OR of every connected
-     * pad (s_fe_gamepad_nav, td5_frontend.c:4368-4373). On this board 4 to 8 pads
-     * are live and each one's Left/Right means "cross to the other team" for ITS
-     * OWN seat, so honouring the shared delta let any seat step this shared row —
-     * the reported bug. [CHAOS CO-OP 2026-10-01] Take the delta only when NO pad
-     * produced an arrow this frame; the host's pad goes through its own edges in
-     * the footer branch above. */
-    if (!s_host_in_panel && !(s_fe_gamepad_nav & 0x03u)) {
+    /* [CHAOS CO-OP 2026-10-01] MOUSE ONLY, and that is the whole point.
+     *
+     * This row used to be stepped by frontend_option_delta(), which reads
+     * s_arrow_input — filled from the keyboard FIFO AND from the OR of every
+     * connected pad (s_fe_gamepad_nav, td5_frontend.c:4368-4373). On this board
+     * 4 to 8 pads are live and each one's Left/Right means "cross to the other
+     * team" for ITS OWN seat, so the shared delta let ANY seat step this shared
+     * row. That was the reported bug.
+     *
+     * The footer branch above now decodes the host's own Left/Right out of
+     * mp_simul_player_nav(0), which already covers BOTH host kinds: a pad host
+     * via td5_plat_input_device_nav(dev), and a keyboard host via the direct
+     * arrow reads at td5_fe_race.c:1586-1589. So the only arrow source that
+     * per-device nav cannot see is a MOUSE click on this row's arrow zone
+     * (td5_frontend.c:4542-4546 sets s_arrow_input from the click) — hence the
+     * s_mouse_clicked gate. Gating on anything wider double-steps a keyboard
+     * host, whose arrows arrive through BOTH paths in the same frame.
+     *
+     * Deliberately independent of G1's td5_plat_input_set_nav_owner(): that
+     * narrows the shared MASK to the owner device, which already stops other
+     * seats reaching the shared cursor, but it cannot fix the keyboard
+     * double-step (both sources are then the same device) and it does not change
+     * per-device reads. This fix holds with or without it. */
+    if (!s_host_in_panel && s_mouse_clicked) {
         d = frontend_option_delta();
         if (d) {
             int v = (int)s_draft_trigger + d;
             if (v < 0) v = TD5_CHAOS_TRIGGER_COUNT - 1;
             if (v >= TD5_CHAOS_TRIGGER_COUNT) v = 0;
-            if (v != (int)s_draft_trigger) { s_draft_trigger = v; frontend_play_sfx(2); }
+            if (v != (int)s_draft_trigger) {
+                s_draft_trigger = v;
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "CHAOS TEAMS: ROTATE AT -> %s (source=mouse)",
+                          frontend_chaos_trigger_name((int)s_draft_trigger));
+            }
         }
     }
     /* Mouse is host-only hardware, so a click may move the footer focus. */
@@ -690,12 +723,18 @@ void Screen_ChaosTeams(void) {
     if (s_footer_sel > CT_BTN_START) s_footer_sel = CT_BTN_START;
     /* Re-assert the board's own focus over anything the shared nav moved. */
     s_selected_button = s_footer_sel;
-    /* [CHAOS CO-OP 2026-10-01] frontend_check_escape() folds in ANY pad's B
-     * (td5_frontend.c:4644), but on this board B means "leave my seat" for every
-     * non-host seat — it must not also raise the host's back-out modal. Call it
-     * unconditionally (it is read-and-clear, so a skipped call would leak a
-     * latched ESC into the next screen) and honour it only when no pad was
-     * holding B; the host's own pad B is handled as `edge & 0x20` above. */
+    /* [CHAOS CO-OP 2026-10-01] frontend_check_escape() folds in a pad's B
+     * (td5_frontend.c:4644), but on this board B means "leave my seat" — for
+     * every non-host seat AND for the host while its cursor is up on the board,
+     * where `edge & 0x20` runs chaos_seat_action_b(0). Neither may raise the
+     * back-out modal. Call it unconditionally (read-and-clear: a skipped call
+     * would leak a latched ESC into the next screen) and honour it only when no
+     * pad B was held, so what survives is the KEYBOARD Esc. The host's pad B
+     * reaches host_back through its own footer edge above.
+     *
+     * G1's nav owner gate narrows this mask to the owner device, which removes
+     * the other-seats half on its own — the host-on-the-board half still needs
+     * this, so the gate stays correct either way. */
     if (frontend_check_escape() && !(s_fe_gamepad_nav & 0x20u)) host_back = 1;
 
     if (host_start) {
