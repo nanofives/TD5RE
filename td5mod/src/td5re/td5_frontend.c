@@ -5831,6 +5831,52 @@ static int frontend_frame_cap(void) {
     return hz;
 }
 
+/* ======================================================================
+ * [MP SHARED-NAV OWNER 2026-10-01] Who may drive a SHARED menu screen.
+ *
+ * PROBLEM: td5_plat_input_frontend_nav() ORs the dpad/stick/A/B of EVERY
+ * connected pad into one bitmask, which frontend_poll_input turns into the
+ * single shared cursor (s_selected_button / s_input_ready / s_arrow_input).
+ * In split-screen that means all six players fight over one cursor on screens
+ * that have exactly one — lobby, mode vote, mode config, track select, race
+ * options, post-race — and any player's A confirms the owner's highlighted pick.
+ *
+ * "OWNER" is defined as the device in JOIN SLOT 0: s_mp_join_device[0], the
+ * first device that pressed the join control in the MP lobby scan
+ * (td5_fe_net.c assigns s_mp_join_device[s_mp_joined_count++] in press order).
+ * That is exactly "the player who entered the MP menu flow" — normally P1, and
+ * the same slot the FRONTEND_SCREEN_GUIDE already calls the host ("the host is
+ * always player 0"). 0 = the keyboard owns it, in which case no pad navigates.
+ *
+ * SCOPE — this gates ONLY the aggregated shared path. Per-player panes read
+ * their own device through mp_simul_player_nav -> td5_plat_input_device_nav and
+ * are untouched, so car select, name entry and per-pane colour stay individually
+ * controllable. Single-player and net both return -1 (unrestricted): SP has one
+ * person who may be holding any pad, and over the net each machine is one player.
+ *
+ * Knob: TD5RE_MP_NAV_OWNER (default on; "0" restores the old all-pads nav).
+ * ====================================================================== */
+static int mp_nav_owner_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_MP_NAV_OWNER");
+        v = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        TD5_LOG_I(LOG_TAG, "MP shared-menu nav owner gate %s (TD5RE_MP_NAV_OWNER=%s)",
+                  v ? "ENABLED" : "disabled", e ? e : "default");
+    }
+    return v;
+}
+
+static int frontend_shared_nav_owner_device(void) {
+    if (!mp_nav_owner_enabled())           return -1;
+    if (s_network_active)                  return -1;   /* one machine = one player */
+    if (!s_mp_flow && !s_mp_simul)         return -1;   /* not in the local MP flow */
+    if (s_num_human_players < 2)           return -1;   /* nobody to collide with */
+    if (s_mp_joined_count < 1)             return -1;   /* slot 0 not bound yet */
+    if (s_mp_join_device[0] < 0)           return -1;   /* AI sentinel — no real device */
+    return s_mp_join_device[0];
+}
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
@@ -5858,6 +5904,14 @@ int td5_frontend_display_loop(void) {
             s_rec_w = rw; s_rec_h = rh;
         }
     }
+
+    /* [MP SHARED-NAV OWNER 2026-10-01] Re-pin the owner every frame, BEFORE any
+     * consumer of the aggregate runs. It has to be here rather than inside
+     * frontend_poll_input: the back-confirm modal ticks while the poll is frozen,
+     * and the MP car-select / position screens skip the poll entirely, yet both
+     * still read td5_plat_input_frontend_nav. Recomputing per frame also means
+     * leaving the MP flow (or a pad dropping) restores unrestricted nav on its own. */
+    td5_plat_input_set_nav_owner(frontend_shared_nav_owner_device());
 
     /* [splitscreen back-confirm 2026-06-24] While a "GO BACK?" prompt is up the
      * whole frontend is FROZEN behind it: tick the modal (reads A/B/timeout and

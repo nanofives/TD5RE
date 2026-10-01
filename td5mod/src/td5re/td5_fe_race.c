@@ -2449,8 +2449,13 @@ static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now) {
  * here (before frontend_mp_setup_init) so init can reset them; the helper
  * functions + the panel-input handler are defined just below frontend_mp_setup_init. */
 #define MP_SET_PROFILE 3                          /* button id (the header enum only goes to OK=2) */
-#define MP_PROF_ACT_COUNT 3                       /* SAVE / LOAD / DELETE actions */
-enum { MP_PROF_ACT_SAVE = 0, MP_PROF_ACT_LOAD, MP_PROF_ACT_DELETE };
+/* [PROFILE SAVE-ON-OK 2026-10-01] The SAVE action is GONE — pressing OK on the
+ * pane is now the save (see mp_profile_commit_on_ok). The action row is therefore
+ * two segments wide instead of three; the row's layout is computed from
+ * MP_PROF_ACT_COUNT, so it re-flows on its own and keeps the 2px inter-segment
+ * gap the guide asks for. */
+#define MP_PROF_ACT_COUNT 2                       /* LOAD / DELETE actions */
+enum { MP_PROF_ACT_LOAD = 0, MP_PROF_ACT_DELETE };
 static int s_mp_prof_focus[TD5_MAX_HUMAN_PLAYERS];   /* 0 = action row, 1 = list */
 static int s_mp_prof_act[TD5_MAX_HUMAN_PLAYERS];     /* MP_PROF_ACT_* */
 static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
@@ -2615,7 +2620,7 @@ static void frontend_mp_setup_init(void) {
         s_mp_col_col[p]       = 0;
         s_mp_col_row[p]       = 0;
         s_mp_prof_focus[p]    = 0;   /* [#11] profile-panel cursor reset */
-        s_mp_prof_act[p]      = MP_PROF_ACT_SAVE;
+        s_mp_prof_act[p]      = MP_PROF_ACT_LOAD;
         s_mp_prof_sel[p]      = 0;
         s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
     }
@@ -2635,10 +2640,14 @@ static void frontend_mp_setup_init(void) {
  * [#11 2026-06-15] MP PROFILE MANAGEMENT (name/colour step).
  *
  * Reachable as a 4th item (PROFILE) on each player's NAME/COLOUR/OK pane. Opens
- * a panel (s_mp_setup_sub[p] == 3) that lets the player SAVE the just-configured
- * identity (name + accent + car + paint + colour + transmission) as a persistent
- * TD5_Profile, or LOAD an existing one (applies its name + accent + car to this
- * player; EDIT = load, tweak NAME/COLOUR, re-SAVE — upsert-by-name in the store).
+ * a panel (s_mp_setup_sub[p] == 3) that lets the player LOAD an existing profile
+ * (applies its name + accent + car + paint + colour + transmission + horn to this
+ * player) or DELETE one.
+ *
+ * [PROFILE SAVE-ON-OK 2026-10-01] There is no SAVE action any more. Pressing OK
+ * on the pane persists the player's identity as a TD5_Profile (upsert by name —
+ * see mp_profile_commit_on_ok), so EDIT is just "LOAD, tweak, OK". Players kept
+ * typing a name, never opening this panel, and losing the profile.
  *
  * "Load once per session": a profile already LOADED by some player this session
  * cannot be loaded again by another. Tracked by NAME (the store upserts by name,
@@ -2945,21 +2954,11 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
          * index 0 (see s_mp_prof_del_pick's comment). */
         if (s_mp_prof_focus[p] == 1)
             act = s_mp_prof_del_pick[p] ? MP_PROF_ACT_DELETE : MP_PROF_ACT_LOAD;
-        if (act == MP_PROF_ACT_SAVE) {
-            if (s_mp_player_name[p][0]) {
-                TD5_Profile pr;
-                mp_prof_fill_from_player(p, &pr);
-                int slot = td5_save_profile_save(&pr);
-                /* [#11] Saving makes it THIS player's held profile for the session
-                 * (so a second player can't also load it); releases whatever p held
-                 * before. Per-player, so it frees when p loads another / leaves. */
-                if (slot >= 0) mp_prof_set_held(p, pr.name);
-                frontend_play_sfx(slot >= 0 ? 3 : 10);
-                TD5_LOG_I(LOG_TAG, "MP profile: P%d SAVE '%s' -> slot %d (held)", p, pr.name, slot);
-            } else {
-                frontend_play_sfx(10);   /* need a name first */
-            }
-        } else if (act == MP_PROF_ACT_LOAD) {
+        /* [PROFILE SAVE-ON-OK 2026-10-01] MP_PROF_ACT_SAVE used to live here. It is
+         * gone: the panel is now LOAD / DELETE only, and persisting the identity is
+         * done by mp_profile_commit_on_ok when the player presses OK on their pane.
+         * Players kept typing a name, never opening this panel, and losing it. */
+        if (act == MP_PROF_ACT_LOAD) {
             TD5_Profile pr;
             if (cnt > 0 && td5_save_profile_get(s_mp_prof_sel[p], &pr)) {
                 /* [#11] Block only if ANOTHER player currently holds it; p re-loading
@@ -3090,6 +3089,59 @@ static void mp_autosave_unsaved_profiles(int n) {
             TD5_LOG_W(LOG_TAG, "MP profile: P%d auto-save '%s' FAILED (store full?)",
                       p, s_mp_player_name[p]);
         }
+    }
+}
+
+/* [PROFILE SAVE-ON-OK 2026-10-01] Persist player p's identity the moment THEY
+ * press OK on their own pane. This replaces the SAVE button, which is gone from
+ * the PROFILE panel (LOAD / DELETE remain).
+ *
+ * Why OK and not the batch pass: mp_autosave_unsaved_profiles only ran once
+ * EVERYONE had OK'd and the flow advanced to the position/car grid, so a player
+ * who typed a name and then backed out — or who sat in a lobby somebody else
+ * left — lost it. OK is the player's own confirmation of their own identity, so
+ * it is the honest commit point, and it fires per player with no dependency on
+ * the rest of the lobby. The batch pass is kept as a backstop for anything that
+ * reaches the grid without an OK edge (AI auto-resolve, session restore).
+ *
+ * UPSERT, not create-only. With no SAVE button there is no other way to update a
+ * profile, so OK must also persist edits to one the player LOADed and then
+ * tweaked (colour, car, paint, transmission, horn). td5_save_profile_save is
+ * already an upsert keyed on the name, so this is a single call either way.
+ * The one thing it will NOT do is overwrite a stored profile that ANOTHER player
+ * currently holds this session — that is the same "in use" rule the LOAD gate
+ * enforces, and it stops P2 typing P1's name and silently rewriting P1's car.
+ *
+ * Save format is untouched (same TD5_Profile, same upsert-by-name store), so
+ * progress files written by older builds load unchanged.
+ * Gated by mp_profiles_enabled() + TD5RE_MP_PROFILE_AUTOSAVE (default on). */
+static void mp_profile_commit_on_ok(int p) {
+    TD5_Profile pr;
+    int existing, slot;
+
+    if (!mp_profiles_enabled() || !mp_profile_autosave_enabled()) return;
+    if (p < 0 || p >= TD5_MAX_HUMAN_PLAYERS) return;
+    if (s_mp_slot_is_ai[p]) return;              /* AI identities are throwaway */
+    if (!s_mp_player_name[p][0]) return;         /* nothing typed -> nothing to save */
+
+    /* Another player is holding a profile under this exact name: do not touch the
+     * stored copy. p keeps the typed name for THIS race, it just isn't persisted. */
+    if (mp_prof_name_in_use_ex(s_mp_player_name[p], p)) {
+        TD5_LOG_I(LOG_TAG, "MP profile: P%d OK '%s' NOT saved (name held by another player)",
+                  p, s_mp_player_name[p]);
+        return;
+    }
+
+    existing = mp_prof_index_of_name(s_mp_player_name[p]);
+    mp_prof_fill_from_player(p, &pr);
+    slot = td5_save_profile_save(&pr);
+    if (slot >= 0) {
+        mp_prof_set_held(p, pr.name);            /* same bookkeeping the old SAVE did */
+        TD5_LOG_I(LOG_TAG, "MP profile: P%d OK -> %s '%s' (slot %d, held)",
+                  p, existing >= 0 ? "UPDATED" : "CREATED", pr.name, slot);
+    } else {
+        TD5_LOG_W(LOG_TAG, "MP profile: P%d OK -> save '%s' FAILED (store full?)",
+                  p, s_mp_player_name[p]);
     }
 }
 
@@ -3248,7 +3300,7 @@ static void frontend_mp_setup_update(void) {
             else if (s_mp_setup_btn[p] == MP_SET_PROFILE && mp_profiles_enabled()) {
                 s_mp_setup_sub[p]        = 3;       /* open profile panel */
                 s_mp_prof_focus[p]       = 0;
-                s_mp_prof_act[p]         = MP_PROF_ACT_SAVE;
+                s_mp_prof_act[p]         = MP_PROF_ACT_LOAD;
                 s_mp_rep_ms[p]           = 0;
                 s_mp_prof_confirm_del[p] = 0;       /* [#delete-confirm] never open with a stale prompt */
                 mp_prof_clamp_sel(p);
@@ -3264,7 +3316,14 @@ static void frontend_mp_setup_update(void) {
                 mp_horn_cursor_to_current(p);
                 frontend_play_sfx(3);
             }
-            else { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }   /* OK */
+            else {                                                     /* OK */
+                /* [PROFILE SAVE-ON-OK 2026-10-01] OK confirms this player's name +
+                 * look, so OK is the save. Done BEFORE marking ready so the stored
+                 * profile reflects exactly what the pane showed at confirm time. */
+                s_mp_player_ready[p] = 1;
+                mp_profile_commit_on_ok(p);
+                frontend_play_sfx(3);
+            }
         }
         if (edge & 0x20) want_back = 1;
     }
@@ -3327,6 +3386,12 @@ static void frontend_mp_setup_update(void) {
  * mask @0x00414BC4 fires once per press; presses during the anim are
  * discarded) — this is a port enhancement, no original constants exist. */
 static int s_carsel_hold_btn = -1;
+
+/* [MP DRAG LEAK FIX 2026-10-01] The player's AUTO/MANUAL pick as it was BEFORE a
+ * drag race forced MANUAL on it, so car-select can hand the choice back once drag
+ * is no longer armed. -1 = nothing stashed (no drag race has clobbered it yet).
+ * See the restore block in Screen_CarSelection's button-creation state. */
+static int s_trans_pre_drag = -1;
 
 /* Current LEFT/RIGHT hold state for the single-player car-select FSM:
  * keyboard level (DIK arrows) OR'd with the aggregated gamepad nav bits
@@ -3938,6 +4003,23 @@ void mp_mode_config_apply_defaults(int mode) {
      * committed earlier in this session (the board is re-entered from scratch),
      * so drop the pending-chaos-race state before seeding the new defaults. */
     frontend_chaos_clear_pending();
+    /* [MP DRAG LEAK FIX 2026-10-01] Common reset preamble for the DRAG flags —
+     * this function previously only SET each mode's own fields (every case is a
+     * pure setter, and TD5_MP_MODE_RACE writes nothing at all), so picking RACE
+     * after a DRAG race left g_td5.drag_race_enabled at 1. InitRace now clears it
+     * too, but doing it here as well is what makes the MENUS right immediately:
+     * the SP car-select AUTO/MANUAL row greys itself out and refuses to toggle
+     * while the flag is set (see Screen_CarSelection), so a player returning from
+     * MP drag found the gearbox row dead before any race started. Mirrors the
+     * unconditional clear at the top of ConfigureGameTypeFlags, which the MP flow
+     * never reaches. DRAG re-arms the flag in InitRace, so this is safe for it. */
+    if (mode != TD5_MP_MODE_DRAG_RACE) {
+        if (g_td5.drag_race_enabled)
+            TD5_LOG_I(LOG_TAG, "MP mode %d locked — clearing stale drag_race_enabled", mode);
+        g_td5.drag_race_enabled = 0;
+        if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE)
+            g_td5.game_type = TD5_GAMETYPE_SINGLE_RACE;
+    }
     switch (mode) {
     case TD5_MP_MODE_CUP:
         c->cup_race_count    = 3;
@@ -6082,9 +6164,11 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 else
                     mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("PROFILE"), 0xFFFFE060u, sx, sy);
 
-                /* action row: SAVE / LOAD / DELETE */
+                /* action row: LOAD / DELETE ([PROFILE SAVE-ON-OK 2026-10-01] SAVE
+                 * removed — OK on the pane persists the identity). Two segments
+                 * now, laid out from MP_PROF_ACT_COUNT so the row re-flows. */
                 {
-                    static const char *acts[MP_PROF_ACT_COUNT] = { "SAVE", "LOAD", "DELETE" };
+                    static const char *acts[MP_PROF_ACT_COUNT] = { "LOAD", "DELETE" };
                     /* [I18N] translated at the draw below via td5_tr(acts[..]) */
                     float ar_y = pany + 16.0f;
                     float seg = panw / (float)MP_PROF_ACT_COUNT;
@@ -6468,9 +6552,25 @@ void Screen_CarSelection(void) {
          * non-interactive [CONFIRMED @ 0x0040e119 cmp gameType!=7(orig drag) /
          * 0x0040e167 write g_carSelectManualTransmissionToggle = (gameType==7)].
          * Port game_type 9 == drag. Force the value here so the button shows
-         * "Manual"; case 3 below refuses to toggle it back. */
-        if (g_td5.drag_race_enabled)
+         * "Manual"; case 3 below refuses to toggle it back.
+         *
+         * [MP DRAG LEAK FIX 2026-10-01] The force is an IN-PLACE clobber of the
+         * player's own preference, and nothing ever put it back: after one drag
+         * race s_selected_transmission stayed 1 for the rest of the session, so
+         * every later SP race started in MANUAL even though the player had picked
+         * AUTOMATIC (it is only re-seeded at boot, and the "Race Again" snapshot
+         * is taken AFTER this write, so it re-applies the forced value rather than
+         * undoing it). Snapshot the real pick on the way in and restore it the
+         * first time car-select opens without drag armed. -1 = nothing stashed. */
+        if (g_td5.drag_race_enabled) {
+            if (s_trans_pre_drag < 0) s_trans_pre_drag = s_selected_transmission;
             s_selected_transmission = 1;
+        } else if (s_trans_pre_drag >= 0) {
+            TD5_LOG_I(LOG_TAG, "CarSelect: drag over — restoring transmission pick %s",
+                      s_trans_pre_drag ? "Manual" : "Automatic");
+            s_selected_transmission = s_trans_pre_drag;
+            s_trans_pre_drag = -1;
+        }
         frontend_create_button(SNK_CarButTxt,   46, 169, 168, 32);
         frontend_create_button(SNK_PaintButTxt, 46, 205, 168, 32);
         frontend_create_button(SNK_ConfigButTxt, 46, 297, 168, 32);

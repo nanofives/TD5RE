@@ -2347,6 +2347,15 @@ static void init_race_modes_and_seed(void)
     memset(s_battle_chase_caught, 0, sizeof(s_battle_chase_caught));
     s_battle_finish_ticks_left = -1;   /* [TRAFFIC BATTLE FINISH TIMER] disarm */
 
+    /* [MP SHARED-NAV OWNER 2026-10-01] Release the frontend's shared-nav owner pin
+     * for the race. The frontend pins it to the owner pad every frame so only the
+     * MP-flow owner moves a shared menu cursor, but the frontend display loop stops
+     * running once a race starts, so the pin would persist — and the in-race
+     * change-camera button (td5_input.c's td5_fe_pad_nav_edge) reads that SAME
+     * aggregate, which would leave every non-owner player unable to change camera.
+     * Returning to the menus re-pins it on the next frontend frame. */
+    td5_plat_input_set_nav_owner(-1);
+
     /* [LANE ASSIST 2026-06-28] Seed each local human's lane-assist enable from
      * their menu choice (SP: Game Options [Input] LaneAssist; MP: the per-player
      * Profile-screen toggle). Keyboard 'L' can still flip it per player in-race. */
@@ -2531,6 +2540,10 @@ static void init_race_modes_and_seed(void)
         }
         g_td5.wanted_mode_enabled = 0;
     }
+
+    /* [MP DRAG LEAK FIX 2026-10-01] Same sibling-arm bug as the wanted-mode reset
+     * above, for DRAG. Full rationale on the function (near td5_game_drag_mp_active). */
+    td5_game_clear_stale_local_mp_drag();
 
     /* [MP GAME MODES: COP CHASE 2026-06-22] The MP cop-chase mode reuses the
      * wanted-mode machinery (a player-cop rams the other racers — the suspects —
@@ -12019,6 +12032,50 @@ void td5_game_battle_note_ram(int aggressor, int victim, int impact_mag) {
  * option reads in drag_length_level / td5_game_drag_field_size / trf_force_oncoming. */
 int td5_game_drag_mp_active(void) {
     return g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE;
+}
+
+/* ========================================================================
+ * [MP DRAG LEAK FIX 2026-10-01] Clear drag state left over from a previous
+ * LOCAL split-screen race. Called at the top of race init; also exercised
+ * directly by the selftest (mp-drag-leak step).
+ *
+ * The local-MP drag block in init is a pure SETTER (g_td5.drag_race_enabled = 1)
+ * and the only clears lived inside the NET branch and the TRAFFIC BATTLE branch,
+ * so a local split-screen DRAG race left the flag at 1 for the rest of the
+ * process. Every drag-only override is DERIVED per-tick from that one flag, which
+ * is why a single drag race poisoned three things at once:
+ *   - drag mode itself  (td5_asset.c drag-strip load + drag placement key off
+ *                        game_type == TD5_GAMETYPE_DRAG_RACE)
+ *   - MANUAL gearbox    (td5_input.c: want_manual |= g_td5.drag_race_enabled,
+ *                        control bit 28 forced every frame)
+ *   - LANE ASSIST on    (td5_laneassist.c: la_is_drag runs the aid even when the
+ *                        player's own enable is 0)
+ * plus the SP-drag traffic block (gated on drag_race_enabled && !drag_mp_active),
+ * which hijacked a normal race's traffic settings.
+ *
+ * Clearing the flag restores all of them at once: none of those paths keeps a
+ * clobbered copy of the user's preference, they all re-derive from the flag.
+ * game_type goes back to SINGLE_RACE for the same reason the battle block does
+ * it — the MP flow never re-runs ConfigureGameTypeFlags, so a stale 9 leaks
+ * through on its own.
+ *
+ * SP is deliberately excluded (split_screen_mode == 0): there every race-type
+ * menu entry calls ConfigureGameTypeFlags, whose common reset already clears
+ * this. Net is excluded too (it clears both flags on its own path).
+ * ======================================================================== */
+void td5_game_clear_stale_local_mp_drag(void) {
+    if (g_td5.split_screen_mode <= 0 || g_td5.network_active) return;
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE) return;   /* genuinely drag */
+
+    if (g_td5.drag_race_enabled || g_td5.game_type == TD5_GAMETYPE_DRAG_RACE) {
+        TD5_LOG_I(LOG_TAG,
+                  "InitRace: local MP mode=%d (not drag) — clearing stale drag state "
+                  "(drag_race_enabled=%d game_type=%d) [restores AUTO gearbox + lane-assist choice]",
+                  g_td5.mp_mode_config.mode, g_td5.drag_race_enabled, (int)g_td5.game_type);
+    }
+    g_td5.drag_race_enabled = 0;
+    if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE)
+        g_td5.game_type = TD5_GAMETYPE_SINGLE_RACE;
 }
 
 /* ========================================================================

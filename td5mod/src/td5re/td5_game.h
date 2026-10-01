@@ -333,6 +333,11 @@ int  td5_game_mp_traffic_fair(void);
 int  td5_game_battle_mode_active(void);
 /* [DRAG RACE 2026-06-30] 1 when the MP lobby selected DRAG RACE mode. */
 int  td5_game_drag_mp_active(void);
+/* [MP DRAG LEAK FIX 2026-10-01] Drop drag state left behind by a previous LOCAL
+ * split-screen race when the current one is NOT drag. No-op in SP and over the
+ * net (both clear it on their own paths). Called at race init; the selftest's
+ * mp-drag-leak step calls it directly. */
+void td5_game_clear_stale_local_mp_drag(void);
 /* [TRAFFIC BATTLE checkpoints] 1 while the CHECKPOINTS deadline chaser is armed. */
 int  td5_game_battle_chase_active(void);
 /* Spans a racer slot is ahead of the creeping deadline (negative = caught). */
