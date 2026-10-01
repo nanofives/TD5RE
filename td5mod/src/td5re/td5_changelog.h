@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 1 (traffic keeps coming all race)" },
+    { CL_ITEM,    "Traffic no longer thins out after the first few" },
+    { CL_ITEM,    "  corners. Cars you have already passed now give up" },
+    { CL_ITEM,    "  their place, so new ones keep appearing ahead of" },
+    { CL_ITEM,    "  you for the whole race, on loops as well as" },
+    { CL_ITEM,    "  point-to-point tracks." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },
     { CL_ITEM,    "New real-world place: Valparaiso to Vina del Mar," },
     { CL_ITEM,    "  7.9 km along the coast, up a hill and over the" },

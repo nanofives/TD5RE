@@ -2552,18 +2552,46 @@ static int battle_despawn_behind(void)
  * trailing HUMAN even when the per-player cap is on, so the freed slot re-spawns
  * ahead of the field (the spawn window is always ahead of the leader) and the
  * budget concentrates in the forward band the player actually looks at. The rear
- * bound is off-screen (default 65 == the faithful DespawnDistance, well behind the
- * ~128-span rear render horizon) so nothing ever fades in view. VERY HIGH only —
- * lower tiers keep their exact behaviour. Default ON; TD5RE_TRAFFIC_NEAR_FILL=0
- * restores byte-identical VERY-HIGH behaviour. TD5RE_TRAFFIC_REAR_KEEP overrides
- * the rear distance (spans). */
+ * bound is off-screen (default 65 == the faithful DespawnDistance, and the forward
+ * chase camera frustum-culls everything behind the car) so nothing fades in view.
+ *
+ * [G6 item 11 2026-10-01] The arm used to be gated `trf_dyn_volume() >= 4`, i.e.
+ * VERY HIGH ONLY -- and the SHIPPED DEFAULT is HIGH (GameOptions/Traffic=3, see
+ * main.c:1483). So at the density almost everybody races at, this fix was INERT and
+ * the symptom above was still live. That is why "traffic frequency drops a lot as
+ * the race advances" survived several rounds of fixing: every previous measurement
+ * was taken at VERY HIGH, where the arm does fire.
+ *
+ * Measured at the DEFAULT tier (HIGH, cap 6, census every 30 ticks, PlayerIsAI
+ * autopilot so the car actually advances), before removing the gate:
+ *   Moscow     P2P  SP : on_road pinned 5.98/6 the whole race, 15 despawns in 171 s
+ *                        and ALL 15 were the ~229-span far_from_all arm; cars ahead
+ *                        5.97 -> 1.0 while cars behind 0 -> 5.0; 69.8% of samples
+ *                        with ZERO traffic in the 40 spans ahead.
+ *   Newcastle  ring SP : on_road 6.00/6, only TWO despawns in the whole race (a
+ *                        ~600-span ring caps min_player_dist at ring/2 = 300, so a
+ *                        229-span keep radius covers nearly the entire loop and
+ *                        almost nothing can ever retire); one slice read 0.00 cars
+ *                        ahead against 5.90 behind.
+ *   Moscow     P2P  2P : on_road 6.00/6, 13 despawns, all far_from_all, 77.9% zero
+ *                        ahead; two slices at 0.00 ahead / 6.00 behind.
+ * stuck and broken were 0.00 in all three and there was not a single starvation
+ * event, so wrecks, stuck cars and a failing spawn window are all ruled out: the
+ * pool is simply FULL of cars the player already drove past, and the spawn gate
+ * `on_road < trf_dyn_cap()` therefore never reopens.
+ *
+ * Dropping the tier gate makes the arm apply at every volume. It only ever ADDS a
+ * retire reason, and the spawn window is always ahead, so a freed slot comes back
+ * in front of the player rather than looping. Default ON; TD5RE_TRAFFIC_NEAR_FILL=0
+ * restores the old behaviour at every tier. TD5RE_TRAFFIC_REAR_KEEP overrides the
+ * rear distance (spans). */
 static int trf_near_fill_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
         s = td5_env_flag_on("TD5RE_TRAFFIC_NEAR_FILL");
         TD5_LOG_I(LOG_TAG, "traffic_near_fill: TD5RE_TRAFFIC_NEAR_FILL=%d "
-                  "(VERY-HIGH prompt rear retire -> denser forward band)", s);
+                  "(prompt rear retire at EVERY volume -> denser forward band)", s);
     }
     return s;
 }
@@ -4600,12 +4628,15 @@ void td5_ai_traffic_dynamic_tick(void)
                  * passed oncoming car goes increasingly negative and this arm fires. */
                 ((td5_game_battle_mode_active() || g_td5.drag_race_enabled) &&
                  behind < -battle_despawn_behind()) ||
-                /* [VERY-HIGH NEAR-PLAYER FILL 2026-09-12] Retire a car once it has
-                 * fallen rear_keep spans behind the trailing human even with the
-                 * per-player cap on, so the freed slot re-spawns AHEAD and the
+                /* [NEAR-PLAYER FILL 2026-09-12, ungated 2026-10-01] Retire a car once
+                 * it has fallen rear_keep spans behind the trailing human even with
+                 * the per-player cap on, so the freed slot re-spawns AHEAD and the
                  * budget concentrates in the forward band (see trf_near_fill_enabled
-                 * for the census evidence). VERY HIGH only; off => byte-identical. */
-                (trf_near_fill_enabled() && trf_dyn_volume() >= 4 &&
+                 * for the census evidence). Applies at EVERY volume: the old
+                 * `trf_dyn_volume() >= 4` gate made this inert at the shipped default
+                 * of HIGH, which is why the "traffic thins out after the opening"
+                 * report outlived the fix. TD5RE_TRAFFIC_NEAR_FILL=0 => old behaviour. */
+                (trf_near_fill_enabled() &&
                  behind < -trf_rear_keep_spans()) ||
                 ahead  >  front_keep ||
                 far_from_all ||
