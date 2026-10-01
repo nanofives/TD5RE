@@ -198,6 +198,9 @@ void td5_hud_draw_pause_action_confirm(void);
  * under the car. Set by the multiplayer frontend at race start. */
 void td5_hud_draw_player_id_overlays(void);
 void td5_hud_set_player_identity(int slot, const char *name, uint32_t rgb);
+/* [TUTORIAL NAMES 2026-10-01] Read-only accessor for the name above. Returns NULL
+ * when that racer slot has no identity set, so the caller can fall back. */
+const char *td5_hud_get_player_identity_name(int slot);
 /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" indicator. No-op outside
  * the Traffic Destruction battle mode. */
 void td5_hud_draw_battle_wrecks(void);
