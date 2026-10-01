@@ -555,13 +555,37 @@ static void update_debug_race_camera(int view);   /* defined later */
 static void UpdateTopDownCamera(uint8_t *actor, int view);
 
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
+/* [G2 CAMERA 2026-10-01 — PORT-ONLY DIVERGENCE from 0x463098] Every CHASE
+ * preset (0-5) is pulled back 30% so the cycle offers a genuinely distant view.
+ * Requested by Mariano after the 2026-10-01 split-screen session.
+ *
+ * BOTH orbit_radius_raw AND height_target_raw are scaled by 1.3, deliberately.
+ * orbit_radius is purely HORIZONTAL: UpdateChaseCamera builds the offset as
+ * (sin*radius, stored_pitch, -cos*radius) and its own comment at the orbit
+ * block says "Y = stored pitch (no orbit component on vertical)" — the vertical
+ * comes from height_target_raw instead. So scaling the radius ALONE would have
+ * pushed each camera back without lifting it, flattening every preset's angle
+ * into a different camera. Scaling radius and height together is a uniform
+ * scale of the position offset, which keeps the car-to-eye direction identical
+ * and just moves the eye 30% further along the same ray — each preset keeps its
+ * character, only the distance changes.
+ *
+ * elevation_angle is intentionally NOT scaled: it is the vertical component of
+ * the ORIENTATION vector (orient[1]), and under a uniform position scale the
+ * look direction is unchanged, so the orientation term must stay as it is.
+ *
+ * Originals, for reverting: radius 2100/1710/1500/1350/1200/1550,
+ * height 510/110/310/110/240/110.
+ * Note preset 4 doubles as the countdown tight-chase hold, so the pre-race
+ * hold is 30% further back too. The fly-in presets 10-13 are countdown
+ * cinematics, not part of the player cycle, and are left untouched. */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
-    { 0, 600,  2100, 510, 0, 0 },  /* preset  0: far chase */
-    { 0, 550,  1710, 110, 0, 0 },  /* preset  1: medium chase */
-    { 0, 475,  1500, 310, 0, 0 },  /* preset  2: close chase high */
-    { 0, 400,  1350, 110, 0, 0 },  /* preset  3: close chase low */
-    { 0, 325,  1200, 240, 0, 0 },  /* preset  4: tight chase */
-    { 0, 240,  1550, 110, 0, 0 },  /* preset  5: wide low */
+    { 0, 600,  2730, 663, 0, 0 },  /* preset  0: far chase        (was 2100/510) */
+    { 0, 550,  2223, 143, 0, 0 },  /* preset  1: medium chase     (was 1710/110) */
+    { 0, 475,  1950, 403, 0, 0 },  /* preset  2: close chase high (was 1500/310) */
+    { 0, 400,  1755, 143, 0, 0 },  /* preset  3: close chase low  (was 1350/110) */
+    { 0, 325,  1560, 312, 0, 0 },  /* preset  4: tight chase      (was 1200/240) */
+    { 0, 240,  2015, 143, 0, 0 },  /* preset  5: wide low         (was 1550/110) */
     { 1, 0,    0,    0,   (int)0xFF380000, 0 },  /* preset  6: bumper cam */
     /* [W5 TOP-DOWN 2026-09-29 — PORT-ONLY, no original counterpart] preset 7 is
      * the GTA I/II style overhead view. mode 2 selects UpdateTopDownCamera,
@@ -2238,10 +2262,24 @@ static void cam_solve_view(int v)
      * [W5 2026-09-29] TD5RE_START_PRESET (dev harness) picks which preset the
      * race starts on instead of the hard-coded 0, so a camera view can be
      * verified from a scripted launch without driving the CHANGE VIEW button.
-     * Unset / out of range = 0, i.e. unchanged. */
+     * Unset / out of range = 0, i.e. unchanged.
+     *
+     * [G2 CAMERA 2026-10-01] TD5RE_START_PRESET_V<pane> overrides the global knob
+     * for ONE pane, so a scripted launch can reproduce a MIXED split-screen
+     * camera state (e.g. pane 0 chase + pane 2 bumper). The bumper own-car
+     * suppression bug fixed this round was invisible to a uniform
+     * TD5RE_START_PRESET sweep precisely because every pane held the same mode —
+     * the mis-indexed gate then read a pane that happened to agree. Unset =
+     * whatever TD5RE_START_PRESET says, so the default path is unchanged. */
     if (!s_flyin_preset_reloaded[v] && !g_td5.paused) {
         int start_preset = td5_env_int("TD5RE_START_PRESET", 0, 0,
                                        TD5_CAMERA_PRESET_CYCLE - 1);
+        {
+            char key[32];
+            snprintf(key, sizeof(key), "TD5RE_START_PRESET_V%d", v);
+            start_preset = td5_env_int(key, start_preset, 0,
+                                       TD5_CAMERA_PRESET_CYCLE - 1);
+        }
         s_flyin_preset_reloaded[v] = 1;
         g_raceCameraPresetId[v]   = start_preset;
         g_raceCameraPresetMode[v] = g_cameraPresets[start_preset].mode;
@@ -3046,17 +3084,54 @@ void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view)
  * why the A/B was run instead of trusting the comment.)
  * ======================================================================== */
 
+/* [G2 CAMERA 2026-10-01] Top-down framing constants.
+ *
+ * The W5 default (2200 wu up / 260 wu back) put the eye so close that the car
+ * body filled the pane: measured at 1920x1080 + preset 7, a 1-pane framedump
+ * showed only roof and bare asphalt — no road edge on either side and no
+ * lookahead — and a 2-pane split was worse (one car per pane, no track at all).
+ * Framedump sweep at h = 2200 / 4500 / 6500 / 8000 (1, 2 and 4 panes): 8000 is
+ * the first value where BOTH road edges plus a useful lookahead are in frame in
+ * every pane count, and the car is still large enough to read. 8000 / 2200 =
+ * 3.64x zoom-out.
+ *
+ * BACK is now DERIVED from HEIGHT instead of being a fixed 260, because it is
+ * not a framing knob — it is what keeps the view off the exact vertical.
+ * OrientCameraTowardTarget takes a degenerate straight-down branch (drops the
+ * yaw, which would freeze the top-down rotation) when the squared horizontal
+ * component of the normalized forward vector falls to g_nearZeroThreshold
+ * (0.001f, td5_camera.c:157). That term is (back / hypot(back, height))^2:
+ *     h=2200 back=260 -> 0.013775  (13.8x margin — the shipped, proven ratio)
+ *     h=8000 back=260 -> 0.001055  ( 1.1x margin — ON the edge)
+ * So holding BACK at 260 while raising HEIGHT to 8000 would have parked the
+ * camera 5% away from the frozen-rotation branch. Keeping the ratio constant
+ * keeps the exact margin the 2200/260 default has always had, at any height. */
+#define TD5_TOPDOWN_HEIGHT_DEF    8000    /* was 2200 — see the sweep above */
+#define TD5_TOPDOWN_HEIGHT_MAX   24000
+#define TD5_TOPDOWN_BACK_RATIO   (260.0f / 2200.0f)   /* the proven tilt */
+/* Hard floor on the tilt: horiz^2 >= 4x g_nearZeroThreshold needs
+ * back/height >= sqrt(0.004) = 0.0632. Applied even to an explicit
+ * TD5RE_TOPDOWN_BACK, so no knob setting can freeze the rotation. */
+#define TD5_TOPDOWN_BACK_MIN_RATIO  0.064f
+
 static int td5_camera_topdown_height(void)   /* world units above the car */
 {
     static int v = -1;
-    if (v < 0) v = td5_env_int("TD5RE_TOPDOWN_HEIGHT", 2200, 200, 8000);
+    if (v < 0) v = td5_env_int("TD5RE_TOPDOWN_HEIGHT", TD5_TOPDOWN_HEIGHT_DEF,
+                               200, TD5_TOPDOWN_HEIGHT_MAX);
     return v;
 }
 
 static int td5_camera_topdown_back(void)     /* world units behind, in car space */
 {
     static int v = -1;
-    if (v < 0) v = td5_env_int("TD5RE_TOPDOWN_BACK", 260, 0, 2000);
+    if (v < 0) {
+        int h       = td5_camera_topdown_height();
+        int def     = (int)((float)h * TD5_TOPDOWN_BACK_RATIO + 0.5f);
+        int min_back = (int)((float)h * TD5_TOPDOWN_BACK_MIN_RATIO + 0.5f);
+        v = td5_env_int("TD5RE_TOPDOWN_BACK", def, 0, 4000);
+        if (v < min_back) v = min_back;   /* never let the look-at go degenerate */
+    }
     return v;
 }
 

@@ -2951,9 +2951,27 @@ void td5_render_actors_for_view(int view_index)
         int camera_target_slot   = td5_game_get_player_slot(view_index);
         /* [W5 TOP-DOWN 2026-09-29] Only the BUMPER/in-car mode (1) hides the
          * view's own car. Mode 2 (top-down) looks AT the car from above, so the
-         * `!= 0` test would have made the player's car invisible in it. */
+         * `!= 0` test would have made the player's car invisible in it.
+         *
+         * [G2 CAMERA 2026-10-01] The index was `view_index & 1`, which is only
+         * correct for the 1- and 2-pane layouts. g_raceCameraPresetMode is sized
+         * TD5_MAX_VIEWPORTS (9) and the camera solver writes EVERY pane's own
+         * entry, so in a 3+ pane split the mask folded panes 2..8 back onto
+         * panes 0/1 and this gate read the WRONG player's camera mode:
+         *   - pane 2..8 in bumper cam while pane 0/1 was in a chase preset ->
+         *     suppression never fired, so the own car was still drawn with the
+         *     eye sitting inside the cockpit. That is the reported "one view
+         *     puts the camera inside/under the chassis, you only see the inside
+         *     of the car" bug, and it needed >= 3 panes to appear.
+         *   - the converse (pane 0/1 in bumper, pane 2+ in chase) deleted a
+         *     chase pane's car for no reason.
+         * The adjacent td5_game_get_player_slot(view_index) call above was
+         * already un-masked, so only this one line was inconsistent. Index by
+         * the real pane and bounds-check instead of masking. */
         int camera_preset_active =
-            (g_raceCameraPresetMode[view_index & 1] == TD5_CAM_MODE_BUMPER);
+            (view_index >= 0 && view_index < TD5_MAX_VIEWPORTS)
+            ? (g_raceCameraPresetMode[view_index] == TD5_CAM_MODE_BUMPER)
+            : 0;
 
         /* === Vehicle shadow PRE-PASS (FIX 2026-06-02 inter-actor overlay) ===
          * Draw EVERY visible actor's ground shadow BEFORE any car body is drawn
