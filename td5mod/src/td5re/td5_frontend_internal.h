@@ -128,6 +128,11 @@ int  frontend_chaos_pending(void);
 int  frontend_chaos_pane_device(int pane);          /* input source for pane 0/1 */
 int  frontend_chaos_ai_opponents(void);             /* committed AI field size   */
 void frontend_chaos_clear_pending(void);
+#ifndef TD5RE_RELEASE
+/* [CHAOS CO-OP 2026-10-01] Dev harness: commit the chaos FRONTEND path from
+ * TD5RE_CHAOS_FE_SEATS=4|6|8. See the definition in td5_fe_chaos.c. */
+int  frontend_chaos_dev_commit_from_env(void);
+#endif
 
 /* ---- CHANGELOG (2026-06-25) / PENDING TO TEST (2026-06-25) ----
  * Screen_Changelog / Screen_PendingTest declared in td5_fe_devscreens.h. */

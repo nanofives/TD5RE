@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 1" },
+    { CL_ITEM,    "CHAOS CO-OP: pads no longer pin both team cars" },
+    { CL_ITEM,    "  at full right lock with the brake held" },
+    { CL_ITEM,    "CHAOS TEAMS: a seat's d-pad only moves that seat;" },
+    { CL_ITEM,    "  ROTATE AT and START belong to P1 and say so" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },
     { CL_ITEM,    "New real-world place: Valparaiso to Vina del Mar," },
     { CL_ITEM,    "  7.9 km along the coast, up a hill and over the" },

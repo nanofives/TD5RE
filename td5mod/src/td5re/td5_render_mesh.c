@@ -2366,6 +2366,19 @@ static void car_shadow_pass(int view_index, int total_actors,
     }
 }
 
+#ifndef TD5RE_RELEASE
+/* [QA 2026-10-01] Per-view bitmask of actor slots whose BODY was submitted this
+ * frame (slots 0..31). Written at the body dispatch below, cleared at the top of
+ * each view's pass, read by td5_render_actor_was_drawn(). Dev builds only. */
+static uint32_t s_actor_drawn_mask[TD5_MAX_VIEWPORTS];
+
+int td5_render_actor_was_drawn(int view, int slot)
+{
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS || slot < 0 || slot >= 32) return 0;
+    return (s_actor_drawn_mask[view] & (1u << slot)) ? 1 : 0;
+}
+#endif
+
 void td5_render_actors_for_view(int view_index)
 {
     /*
@@ -2374,6 +2387,11 @@ void td5_render_actors_for_view(int view_index)
      * renders vehicles with full transform/light/render pipeline.
      */
     int rendered_spans = 0;
+
+#ifndef TD5RE_RELEASE
+    if (view_index >= 0 && view_index < TD5_MAX_VIEWPORTS)
+        s_actor_drawn_mask[view_index] = 0;
+#endif
 
     /* View distance span-window cull.
      * Original RunRaceFrame (0x42BB2E): effective_spans = (int)((v * 0.85 + 0.15) * max_spans)
@@ -3329,6 +3347,17 @@ void td5_render_actors_for_view(int view_index)
              * scales it (0 = off). */
             int car_sun = (slot >= 0 && slot < g_traffic_slot_base && td5_rt_active());
             if (car_sun) td5_plat_render_set_car_sun(td5_render_car_sun_gain());
+#ifndef TD5RE_RELEASE
+            /* [QA 2026-10-01] Mark this slot as actually BODY-DRAWN in this view.
+             * Everything above can skip a car (no mesh, slot state 3, span cull,
+             * fade, own-car bumper skip), so "the race has N actors" says nothing
+             * about whether a pane shows a car — which is exactly what the chaos
+             * "two empty panes" report was. The selftest asserts each pane drew
+             * the car its camera targets. Dev builds only; one OR per body. */
+            if (view_index >= 0 && view_index < TD5_MAX_VIEWPORTS &&
+                slot >= 0 && slot < 32)
+                s_actor_drawn_mask[view_index] |= (1u << slot);
+#endif
             td5_render_prepared_mesh(mesh);
             if (car_sun) td5_plat_render_set_car_sun(0.0f);
             if (td6_zfix) s_td6_car_zbias = 0.0f;

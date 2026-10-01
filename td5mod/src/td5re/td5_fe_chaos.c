@@ -60,7 +60,10 @@
 #define CT_ROT_W         516
 #define CT_ROT_H          28
 #define CT_HINT_CX       370.0f
-#define CT_HINT_Y        388.0f
+/* [CHAOS CO-OP 2026-10-01] 388 -> 382: the hint is two lines now (the second
+ * names the per-seat / host-only split), and 10 design px below 388 would clip
+ * into the START button at y=404. The ROTATE AT row ends at 380. */
+#define CT_HINT_Y        382.0f
 #define CT_START_X       322
 #define CT_START_Y       404
 #define CT_START_W        96
@@ -155,6 +158,15 @@ static int      s_cur_row[TD5_MAX_HUMAN_PLAYERS];
 static int      s_host_in_panel;        /* 1 = host cursor on the board, 0 = footer */
 static int      s_back_confirm;         /* "BACK TO MODE OPTIONS?" modal up         */
 static int      s_seat_count;           /* legal head count this entry uses (4/6/8) */
+/* [CHAOS CO-OP 2026-10-01] The board's OWN footer focus. s_selected_button is
+ * driven by the shared frontend nav, which ORs EVERY connected pad
+ * (td5_plat_input_frontend_nav, td5_frontend.c:4368) — on a 4-8 pad board that
+ * meant any seat's d-pad moved the host's ROTATE AT / START highlight and
+ * stepped the shared ROTATE AT value while that player was only picking a seat.
+ * The screen owns this row (FRONTEND_SCREEN_GUIDE.md: "the host owns START and
+ * ESC"), so it keeps its focus here and re-asserts s_selected_button from it
+ * every frame. Only the HOST's own per-device nav and the host's mouse write it. */
+static int      s_footer_sel;           /* CT_BTN_ROTATE / CT_BTN_START             */
 #ifndef TD5RE_RELEASE
 static int      s_fake_roster;          /* 1 = dev direct-entry fake roster seeded   */
 #endif
@@ -358,6 +370,7 @@ static void chaos_screen_init(void) {
     }
     s_host_in_panel   = 1;
     s_back_confirm    = 0;
+    s_footer_sel      = CT_BTN_START;
     s_selected_button = CT_BTN_START;
     s_anim_complete   = 1;
     s_inner_state     = 1;
@@ -421,7 +434,11 @@ static void chaos_seat_action_b(int p) {
  * SECTION: commit + route to the car grid
  * ======================================================================== */
 
-static void chaos_commit_and_start(void) {
+/* State half of the START action: build the seat table from the board, commit it
+ * and collapse the local roster to the two team cars. Split out of
+ * chaos_commit_and_start() so the dev harness below can exercise the REAL commit
+ * without the screen routing (plus the sfx / nav flush) that follows it. */
+static void chaos_commit_board(void) {
     TD5_ChaosConfig cfg;
     int t, r, ts = chaos_team_size();
 
@@ -466,13 +483,67 @@ static void chaos_commit_and_start(void) {
               frontend_chaos_trigger_name((int)s_draft_trigger),
               (int)s_draft_period_secs, frontend_chaos_ai_opponents(),
               s_pane_device[0], s_pane_device[1]);
+}
 
+static void chaos_commit_and_start(void) {
+    chaos_commit_board();
     frontend_play_sfx(3);
     td5_plat_input_flush_nav();
     s_mp_phase    = 1;               /* car GRID (phase 1), not the profile setup */
     s_inner_state = 0;
     td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
 }
+
+#ifndef TD5RE_RELEASE
+/* [CHAOS CO-OP 2026-10-01] TD5RE_CHAOS_FE_SEATS=4|6|8 — dev harness for the
+ * FRONTEND chaos path. It fabricates the lobby/board state the real flow leaves
+ * behind (MP flow live, legal roster, mode locked to CHAOS CO-OP, every seat
+ * claimed) and commits it through chaos_commit_board() — the same function the
+ * CHAOS TEAMS screen's START calls — so an --AutoRace=1 launch runs
+ * frontend_init_race_schedule() with frontend_chaos_pending() TRUE.
+ *
+ * Why this exists next to TD5RE_CHAOS_FAKE_SEATS (td5_game.c, race init): the
+ * two are NOT the same path. FAKE_SEATS writes num_human_players / split /
+ * ai_opponents directly at race init and never touches the frontend, so it
+ * cannot see any bug that lives in the frontend commit — which is exactly where
+ * the "two empty panes" regression lived (the selftest's chaos rows use
+ * FAKE_SEATS and therefore missed it). Call site: td5_frontend_auto_race_setup,
+ * immediately before frontend_init_race_schedule(). Compiled out of RELEASE.
+ *
+ * Returns the seat count it committed, 0 when the knob is unset/illegal. */
+int frontend_chaos_dev_commit_from_env(void) {
+    int n = td5_env_int("TD5RE_CHAOS_FE_SEATS", 0, 0, TD5_CHAOS_MAX_SEATS);
+    int p;
+
+    if (!td5_chaos_count_is_legal(n)) return 0;
+
+    /* The lobby's leftovers: local MP flow, N joined non-AI players, no net. */
+    s_mp_flow         = 1;
+    s_two_player_mode = 1;
+    s_mp_net_config   = 0;
+    s_network_active  = 0;
+    s_mp_joined_count = n;
+    for (p = 0; p < n; p++) {
+        s_mp_slot_is_ai[p]   = 0;
+        s_mp_join_device[p]  = 0;                 /* keyboard: no pads in a harness */
+        s_mp_player_car[p]   = g_td5.ini.default_car;
+        s_mp_player_paint[p] = 0;
+        s_mp_player_ready[p] = 0;
+    }
+    s_num_human_players = n;
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_CHAOS_COOP;
+
+    /* The board: every seat claimed, alternating RED/BLUE by join order. */
+    s_seat_count = n;
+    chaos_auto_seat(n);
+    chaos_commit_board();
+
+    TD5_LOG_W(LOG_TAG, "CHAOS: DEV frontend commit from TD5RE_CHAOS_FE_SEATS=%d "
+                       "(pending=%d humans=%d)",
+              n, frontend_chaos_pending(), s_num_human_players);
+    return n;
+}
+#endif
 
 /* ========================================================================
  * SECTION: screen handler
@@ -490,12 +561,16 @@ void Screen_ChaosTeams(void) {
 
     if (frontend_mp_setup_disconnect_check(n)) return;
 
-    /* "BACK TO MODE OPTIONS?" confirm modal -- host only. */
+    /* "BACK TO MODE OPTIONS?" confirm modal -- host only.
+     * [CHAOS CO-OP 2026-10-01] The old YES test also accepted s_input_ready,
+     * which the shared nav raises for ANY pad's A — so a second player pressing
+     * A (their TAKE SEAT button) confirmed the host's back-out and dropped the
+     * whole board. Host edge or host keyboard/mouse confirm only. */
     if (s_back_confirm) {
         uint32_t hb   = mp_simul_player_nav(0);
         uint32_t he   = hb & ~s_mp_pane_nav_prev[0];
         s_mp_pane_nav_prev[0] = hb;
-        if ((he & 0x10) || s_input_ready) {
+        if ((he & 0x10) || (s_input_ready && !(s_fe_gamepad_nav & 0x10u))) {
             s_back_confirm = 0;
             frontend_play_sfx(3);
             td5_plat_input_flush_nav();
@@ -550,8 +625,8 @@ void Screen_ChaosTeams(void) {
             if (edge & 0x20) chaos_seat_action_b(p);
         } else {                                   /* host on the footer rows */
             if (edge & 4) {
-                if (s_selected_button == CT_BTN_START) {
-                    s_selected_button = CT_BTN_ROTATE;
+                if (s_footer_sel == CT_BTN_START) {
+                    s_footer_sel = CT_BTN_ROTATE;
                 } else {
                     s_host_in_panel = 1;
                     s_cur_row[0]    = ts - 1;
@@ -559,14 +634,26 @@ void Screen_ChaosTeams(void) {
                 frontend_play_sfx(2);
             }
             if (edge & 8) {
-                if (s_selected_button == CT_BTN_ROTATE) {
-                    s_selected_button = CT_BTN_START;
+                if (s_footer_sel == CT_BTN_ROTATE) {
+                    s_footer_sel = CT_BTN_START;
                     frontend_play_sfx(2);
                 }
             }
+            /* [CHAOS CO-OP 2026-10-01] The host's OWN Left/Right steps ROTATE AT.
+             * This used to come from the shared frontend_option_delta() below,
+             * which every pad feeds — so a seat crossing teams also stepped this
+             * row. Decoding the host's own edges here is what lets that call be
+             * narrowed to the keyboard/mouse host. */
+            if (s_footer_sel == CT_BTN_ROTATE && (edge & 3)) {
+                int v = (int)s_draft_trigger + ((edge & 2) ? 1 : -1);
+                if (v < 0) v = TD5_CHAOS_TRIGGER_COUNT - 1;
+                if (v >= TD5_CHAOS_TRIGGER_COUNT) v = 0;
+                s_draft_trigger = v;
+                frontend_play_sfx(2);
+            }
             if (edge & 0x20) host_back = 1;
             if (edge & 0x10) {
-                if (s_selected_button == CT_BTN_START) host_start = 1;
+                if (s_footer_sel == CT_BTN_START) host_start = 1;
                 else {                              /* A on the selector row = step it */
                     s_draft_trigger = (s_draft_trigger + 1) % TD5_CHAOS_TRIGGER_COUNT;
                     frontend_play_sfx(2);
@@ -575,11 +662,15 @@ void Screen_ChaosTeams(void) {
         }
     }
 
-    /* Keyboard / mouse host. The seat cursor already consumed the host's arrow
-     * keys above (mp_simul_player_nav reads them directly for device 0), so the
-     * shared nav's own move is overridden here -- the same override MP MODE
-     * VOTE uses to stop a non-host pad dragging the host highlight. */
-    if (!s_host_in_panel) {
+    /* Keyboard host only. frontend_option_delta() reads s_arrow_input, which the
+     * shared nav fills from the keyboard FIFO AND from the OR of every connected
+     * pad (s_fe_gamepad_nav, td5_frontend.c:4368-4373). On this board 4 to 8 pads
+     * are live and each one's Left/Right means "cross to the other team" for ITS
+     * OWN seat, so honouring the shared delta let any seat step this shared row —
+     * the reported bug. [CHAOS CO-OP 2026-10-01] Take the delta only when NO pad
+     * produced an arrow this frame; the host's pad goes through its own edges in
+     * the footer branch above. */
+    if (!s_host_in_panel && !(s_fe_gamepad_nav & 0x03u)) {
         d = frontend_option_delta();
         if (d) {
             int v = (int)s_draft_trigger + d;
@@ -588,14 +679,24 @@ void Screen_ChaosTeams(void) {
             if (v != (int)s_draft_trigger) { s_draft_trigger = v; frontend_play_sfx(2); }
         }
     }
+    /* Mouse is host-only hardware, so a click may move the footer focus. */
     if (s_input_ready && frontend_input_confirm_was_mouse() && s_button_index >= 0) {
-        s_host_in_panel   = 0;
-        s_selected_button = s_button_index;
-        if (s_button_index == CT_BTN_START) host_start = 1;
+        s_host_in_panel = 0;
+        s_footer_sel    = (s_button_index > CT_BTN_START) ? CT_BTN_START
+                                                          : s_button_index;
+        if (s_footer_sel == CT_BTN_START) host_start = 1;
     }
-    if (s_selected_button < 0)              s_selected_button = CT_BTN_ROTATE;
-    if (s_selected_button > CT_BTN_START)   s_selected_button = CT_BTN_START;
-    if (frontend_check_escape()) host_back = 1;
+    if (s_footer_sel < 0)            s_footer_sel = CT_BTN_ROTATE;
+    if (s_footer_sel > CT_BTN_START) s_footer_sel = CT_BTN_START;
+    /* Re-assert the board's own focus over anything the shared nav moved. */
+    s_selected_button = s_footer_sel;
+    /* [CHAOS CO-OP 2026-10-01] frontend_check_escape() folds in ANY pad's B
+     * (td5_frontend.c:4644), but on this board B means "leave my seat" for every
+     * non-host seat — it must not also raise the host's back-out modal. Call it
+     * unconditionally (it is read-and-clear, so a skipped call would leak a
+     * latched ESC into the next screen) and honour it only when no pad was
+     * holding B; the host's own pad B is handled as `edge & 0x20` above. */
+    if (frontend_check_escape() && !(s_fe_gamepad_nav & 0x20u)) host_back = 1;
 
     if (host_start) {
         if (!chaos_all_seated()) {
@@ -757,25 +858,40 @@ void frontend_chaos_teams_render(float sx, float sy) {
                                TR("NOBODY - EVERY SEAT IS TAKEN"), 0xFF80FF80u, sx, sy);
     }
 
-    /* ROTATE AT selector row (label left, value + arrows right). */
+    /* ROTATE AT selector row (label left, "P1" owner tag, value + arrows right).
+     * [CHAOS CO-OP 2026-10-01] This row is SHARED and host-owned, while every
+     * other control on the board is per-seat — the thing players got wrong. It
+     * now says so ("P1") and goes DIM whenever the host's cursor is up on the
+     * board, so a row that nobody can currently move never looks live. */
     {
         float ty = (float)CT_ROT_Y + 1.0f;
         float ay = (float)CT_ROT_Y + (float)CT_ROT_H * 0.5f - 7.0f;
         float val_l = (float)CT_ROT_X + 300.0f;
         float val_r = (float)CT_ROT_X + (float)CT_ROT_W - 24.0f;
         float valc  = (val_l + 12.0f + val_r) * 0.5f;
+        int   live  = !s_host_in_panel;          /* host is on the footer = row live */
+        uint32_t lab_col = live ? 0xFFE6ECF4u : 0xFF808890u;
+        uint32_t val_col = live ? 0xFFFFFFFFu : 0xFF909898u;
+        uint32_t arr_col = live ? 0xFF7995FFu : 0xFF4A5570u;
         fe_draw_text(((float)CT_ROT_X + 16.0f) * sx, ty * sy, TR("ROTATE AT"),
-                     0xFFE6ECF4u, sx, sy);
+                     lab_col, sx, sy);
+        fe_draw_small_text(((float)CT_ROT_X + 150.0f) * sx, (ty + 8.0f) * sy,
+                           TR("P1 ONLY"), live ? 0xFFFFC060u : 0xFF806840u, sx, sy);
         fe_draw_text_centered(valc * sx, ty * sy,
                               td5_tr(frontend_chaos_trigger_name((int)s_draft_trigger)),
-                              0xFFFFFFFFu, sx, sy);
-        td5_vui_arrow(val_l * sx, ay * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
-        td5_vui_arrow(val_r * sx, ay * sy, 12.0f * sx, 14.0f * sy, 1, 0xFF7995FFu);
+                              val_col, sx, sy);
+        td5_vui_arrow(val_l * sx, ay * sy, 12.0f * sx, 14.0f * sy, 0, arr_col);
+        td5_vui_arrow(val_r * sx, ay * sy, 12.0f * sx, 14.0f * sy, 1, arr_col);
     }
 
     /* hint line + START status */
     chaos_small_centered(CT_HINT_CX * sx, CT_HINT_Y * sy,
                          TR("Roles shift down one row. Row 1 wraps to the bottom. Team only."),
+                         0xFF98A0B0u, sx, sy);
+    /* [CHAOS CO-OP 2026-10-01] Say who owns what: every pad drives ONLY its own
+     * seat cursor, and the bottom row (ROTATE AT + START) belongs to P1. */
+    chaos_small_centered(CT_HINT_CX * sx, (CT_HINT_Y + 10.0f) * sy,
+                         TR("Each pad moves only its own seat. P1 owns ROTATE AT and START."),
                          0xFF98A0B0u, sx, sy);
     {
         int empty = chaos_empty_seat_count();

@@ -35,21 +35,43 @@ static int chaos_clamp_axis(int v)
     return v;
 }
 
+/* [CHAOS CO-OP 2026-10-01] WHY THE ANALOG BRANCH MAY NOT FALL BACK ON BITS.
+ *
+ * On an analog device the low bits of the word are NOT buttons: the platform
+ * packs the X axis into bits 0..8 and the Y axis into bits 9..17 and raises the
+ * two ANALOG_* flags (td5_platform_win32.c:948-949). Those bit ranges COVER the
+ * named digital actions:
+ *   bit 0  STEER_LEFT   bit 1  STEER_RIGHT   (inside the packed X field)
+ *   bit 9  THROTTLE     bit 10 BRAKE    bit 11 RECOVER  (inside the packed Y field)
+ * A CENTRED pad packs TD5_INPUT_JS_AXIS_CENTER = 0xFA = 0b0_1111_1010 into both
+ * fields, so bit 1 (STEER_RIGHT) and bit 10 (BRAKE) read as permanently HELD.
+ *
+ * The original "honour the digital bits when the axis reads exactly centre"
+ * fallback therefore did not cost "no fidelity" on a pad seat — it gave every
+ * resting pad seat a full RIGHT lock plus full BRAKE, which is the reported
+ * "CHAOS race is broken" (both team cars pinned at the line, wheels hard over,
+ * brake-at-standstill dropping them into reverse). The keyboard-only harness
+ * never saw it: the keyboard path sets the digital bits and raises NO analog
+ * flag, so it never enters this branch.
+ *
+ * Same trap, same week, already fixed once in the drag auto-steer path — see
+ * the "[W6 item 4 2026-09-29] STICK STEERING IN DRAG MP" comment in
+ * td5_input.c. Rule: ANALOG flag set => decode the axis and nothing else.
+ *
+ * Cost of dropping the fallback: an inputscript / control-socket overlay that
+ * ORs digital bits onto a PAD-bound seat no longer moves that seat's axis (it
+ * cannot be told apart from axis payload). Keyboard seats are unaffected, and
+ * so is every harness that uses them. */
+
 /* Signed steering contribution of one seat: +256 = full left, -256 = full
  * right. Analog whenever the seat's word carries the packed X axis (every pad
- * seat does), digital otherwise (keyboard seats, and the inputscript /
- * control-socket overlays, which only ever OR digital bits in).
- *
- * The digital bits are also honoured when the analog axis reads exactly
- * centre: a pad seat contributes nothing at that point, so letting the
- * overlay bits through costs no fidelity and keeps the control-socket
- * `hold_action left|right` harness working on pad-bound seats too. */
+ * seat does), digital otherwise (keyboard seats and digital-bit overlays). */
 static int chaos_seat_steer(uint32_t w, int ax)
 {
     int v = 0;
-    if (w & (uint32_t)TD5_INPUT_ANALOG_X_FLAG)
+    if (w & (uint32_t)TD5_INPUT_ANALOG_X_FLAG) {
         v = (ax * CHAOS_AXIS_FULL) / TD5_INPUT_JS_AXIS_CENTER;
-    if (v == 0) {
+    } else {
         if (w & (uint32_t)TD5_INPUT_STEER_LEFT)  v += CHAOS_AXIS_FULL;
         if (w & (uint32_t)TD5_INPUT_STEER_RIGHT) v -= CHAOS_AXIS_FULL;
     }
@@ -62,13 +84,28 @@ static int chaos_seat_steer(uint32_t w, int ax)
 static int chaos_seat_pedal(uint32_t w, int ay)
 {
     int v = 0;
-    if (w & (uint32_t)TD5_INPUT_ANALOG_Y_FLAG)
+    if (w & (uint32_t)TD5_INPUT_ANALOG_Y_FLAG) {
         v = (-ay * CHAOS_AXIS_FULL) / TD5_INPUT_JS_AXIS_CENTER;
-    if (v == 0) {
+    } else {
         if (w & (uint32_t)TD5_INPUT_THROTTLE) v += CHAOS_AXIS_FULL;
         if (w & (uint32_t)TD5_INPUT_BRAKE)    v -= CHAOS_AXIS_FULL;
     }
     return chaos_clamp_axis(v);
+}
+
+/* The subset of the team-shared action bits that is safe to read off `w`.
+ * HORN (21), CAMERA_CHANGE (24) and REAR_VIEW (25) sit above both packed axis
+ * fields and are real buttons on every device. RECOVER (11) does NOT — it lives
+ * inside the packed Y field, so on a pad it is axis payload that flickers with
+ * the stick and would fire a car reposition at random. Pad seats recover
+ * through the per-seat SELECT scan in td5_input.c's post-processing pass. */
+static uint32_t chaos_shared_action_bits(uint32_t w)
+{
+    uint32_t m = (uint32_t)(TD5_INPUT_HORN | TD5_INPUT_CAMERA_CHANGE |
+                            TD5_INPUT_REAR_VIEW);
+    if (!(w & (uint32_t)TD5_INPUT_ANALOG_Y_FLAG))
+        m |= (uint32_t)TD5_INPUT_RECOVER;
+    return w & m;
 }
 
 int td5_chaos_fold_inputs(const uint32_t *seat_bits, const int16_t *seat_ax,
@@ -113,9 +150,10 @@ int td5_chaos_fold_inputs(const uint32_t *seat_bits, const int16_t *seat_ax,
              * team action for the same reason — a chaos car with no reachable
              * recovery would stay wedged (it is not in the 2.3 table; the
              * post-processing pass in td5_input.c ORs its own device on top
-             * rather than clearing this). */
-            bits |= w & (uint32_t)(TD5_INPUT_HORN | TD5_INPUT_CAMERA_CHANGE |
-                                   TD5_INPUT_REAR_VIEW | TD5_INPUT_RECOVER);
+             * rather than clearing this) — but only from a seat whose word is
+             * not carrying a packed Y axis over that bit (see
+             * chaos_shared_action_bits). */
+            bits |= chaos_shared_action_bits(w);
 
             switch (td5_chaos_role_of_seat(s)) {
             case TD5_CHAOS_ROLE_STEER:      /* team of 2: both directions */
