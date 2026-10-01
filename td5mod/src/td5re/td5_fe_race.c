@@ -2774,9 +2774,13 @@ static int mp_profile_list_nav_enabled(void) {
  * B closes.
  *
  * ANTI-SPAM: navigating never plays a horn, only the nav ping. A sample is
- * heard solely on a commit, and td5_sound_preview_horn rate-limits those. That
- * ordering is what makes hold-to-scroll harmless -- auto-repeat fires on the
- * list cursor, which has no sound attached to it.
+ * heard solely on a commit. That ordering is what makes hold-to-scroll harmless
+ * -- auto-repeat fires on the list cursor, which has no sound attached to it --
+ * and it is also why td5_sound_preview_horn no longer rate-limits commits: with
+ * nothing repeating there was no spam to throttle, and the 1 s window it used to
+ * apply silently ate every A press made less than a second after the last one
+ * (see the 2026-10-01 note on horn_preview_window_ms). A 0 return now means the
+ * sample genuinely failed to load, which is what the fallback blip reports.
  */
 static void mp_horn_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
     int cnt;
@@ -2826,9 +2830,15 @@ static void mp_horn_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             memcpy(s_mp_player_horn[p], h->id, hl);
             s_mp_player_horn[p][hl] = '\0';
         }
-        /* The pick is committed whether or not the sample is audible: a preview
-         * swallowed by the rate limiter must not silently drop the choice. */
-        if (!td5_sound_preview_horn(h->wav, h->zip)) frontend_play_sfx(3);
+        /* The pick is committed whether or not the sample is audible: a failed
+         * preview must not silently drop the choice.
+         *
+         * [MP QUIET MENUS 2026-10-01] The fallback cue is 10 (Uh-Oh, "rejected")
+         * rather than 3 (the confirm ping): 3 is muted during a local MP flow,
+         * which would leave a genuinely missing horn sample with NO feedback at
+         * all, and "this one did not load" is a rejection anyway -- which is
+         * already what the missing-entry branch above reports. */
+        if (!td5_sound_preview_horn(h->wav, h->zip)) frontend_play_sfx(10);
         TD5_LOG_I(LOG_TAG, "MP horn: P%d picked '%s' (%s)", p, h->id, h->label);
         return;
     }

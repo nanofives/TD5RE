@@ -1,0 +1,33 @@
+# TD5RE input-script: bang the frontend nav keys so the UI-cue tally moves
+# (G3 HORNS item 13 probe). Pair with:
+#   MP : TD5RE_MP_SIMUL_PREVIEW=4 --StartScreen=20  -> expect muted > 0
+#   SP : --StartScreen=20 (no knob)                 -> expect muted = 0
+# Read the result from frontend.log: "frontend UI sfx tally: played=N muted=M".
+
+sync menu
+0    log UISFX walk begin
+30   key down press
+45   key up press
+60   key down press
+75   key left press
+90   key right press
+105  key left press
+120  key right press
+135  key down press
+150  key up press
+165  key enter press
+195  key down press
+210  key up press
+225  key left press
+240  key right press
+255  key down press
+270  key up press
+285  key left press
+300  key right press
+315  key enter press
+345  key down press
+360  key up press
+375  key left press
+390  key right press
+405  log UISFX walk end
+435  quit

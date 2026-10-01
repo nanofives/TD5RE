@@ -31,6 +31,7 @@
 #include "td5_vfx.h"
 #include "td5_ai.h"    /* td5_ai_traffic_get_draw_alpha (dynamic-traffic fade) */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-SFX trigger (Item #12) */
+#include "td5_horns.h"   /* [SELECTABLE HORNS] catalogue, for the dev preview probe */
 
 /* Full actor struct needed for field-level access (engine speed, slip, position) */
 #include "../../../re/include/td5_actor_struct.h"
@@ -509,6 +510,10 @@ static int sound_nearest_human_listener(const TD5_Actor *src, int num_human,
 static int sound_load_wav_from_zip(const char *wav_name, const char *zip_path,
                                    int slot, int loop, int duplicates);
 
+#ifndef TD5RE_RELEASE
+static void sound_horn_preview_probe(void);
+#endif
+
 /* ========================================================================
  * Init / Shutdown / Tick
  * ======================================================================== */
@@ -542,6 +547,9 @@ int td5_sound_init(void)
     }
     TD5_LOG_I(LOG_TAG, "audio subsystem initialized (sfx master=%d, radio=%d)",
               g_td5.ini.sfx_volume, g_td5.ini.radio_enabled);
+#ifndef TD5RE_RELEASE
+    sound_horn_preview_probe();
+#endif
     return 1;
 }
 
@@ -1339,13 +1347,23 @@ static int      s_horn_preview_buf   = -1;
 static uint32_t s_horn_preview_until = 0;
 static int      s_horn_preview_armed = 0;
 
-/* TD5RE_HORN_PREVIEW_MS (default 1000): minimum gap between two previews. 0
- * disables the limiter, which is how an A/B run tells "the limiter swallowed
- * it" apart from "the sound failed to load". */
+/* TD5RE_HORN_PREVIEW_MS: minimum gap between two previews. 0 (the default)
+ * disables the limiter entirely.
+ *
+ * [HORN PREVIEW 2026-10-01] The default was 1000 ms, and that was the "choosing
+ * a horn sometimes plays nothing" report. The picker commits a horn on an A
+ * press edge (td5_fe_race.c mp_horn_panel_input), and stepping down a tab
+ * pressing A on each entry puts those presses ~200-500 ms apart -- comfortably
+ * inside a one-second window -- so every entry after the first was dropped and
+ * the player heard the generic menu blip instead of their horn. The limiter was
+ * also redundant: navigation already plays no horn (only the nav ping), and a
+ * held A does not re-commit, so there is no repeat to throttle. A commit is an
+ * explicit request to hear that sample, so it must always be heard. The knob
+ * stays so the old throttle can be re-armed for an A/B. */
 static int horn_preview_window_ms(void)
 {
     static int s_ms = -1;
-    if (s_ms < 0) s_ms = td5_env_int("TD5RE_HORN_PREVIEW_MS", 1000, 0, 10000);
+    if (s_ms < 0) s_ms = td5_env_int("TD5RE_HORN_PREVIEW_MS", 0, 0, 10000);
     return s_ms;
 }
 
@@ -1375,9 +1393,15 @@ int td5_sound_preview_horn(const char *wav, const char *zip)
     window = horn_preview_window_ms();
 
     /* Rate limit. Signed difference so the comparison survives the 32-bit
-     * millisecond wrap (~49 days) instead of locking the preview out. */
+     * millisecond wrap (~49 days) instead of locking the preview out. Off by
+     * default (see horn_preview_window_ms); when a window IS configured, say so
+     * in the log rather than failing silently -- a dropped preview looks exactly
+     * like a failed load from the player's side. */
     if (window > 0 && s_horn_preview_armed &&
         (int32_t)(now - s_horn_preview_until) < 0) {
+        TD5_LOG_I(LOG_TAG, "horn preview dropped by rate limit: wav=%s window=%dms "
+                           "(%d ms early)", wav, window,
+                  (int)(int32_t)(s_horn_preview_until - now));
         return 0;
     }
 
@@ -1399,6 +1423,55 @@ int td5_sound_preview_horn(const char *wav, const char *zip)
               wav, zip, TD5_SOUND_HORN_PREVIEW_SLOT, window);
     return 1;
 }
+
+#ifndef TD5RE_RELEASE
+/* TD5RE_HORN_PREVIEW_PROBE=<gap_ms> (dev builds, unset/0 = off).
+ *
+ * Auditions EVERY catalogue entry in order, `gap_ms` apart, logging the result
+ * of each td5_sound_preview_horn() call. This is the horn-picker commit path
+ * without the picker: the panel reaches it with exactly these (wav, zip) pairs,
+ * so the probe answers both halves of "choosing a horn plays nothing" -- which
+ * entries fail to LOAD, and which get swallowed by the rate limiter -- on a
+ * machine with one keyboard and no six pads to open a split-screen lobby with.
+ *
+ * Set gap_ms to the cadence a player actually achieves pressing A down a tab
+ * (~300 ms) to reproduce the reported drop; pair with TD5RE_HORN_PREVIEW_MS to
+ * tell a swallowed preview apart from a failed load. */
+static void sound_horn_preview_probe(void)
+{
+    int gap = td5_env_int("TD5RE_HORN_PREVIEW_PROBE", 0, 0, 5000);
+    int cat, ok = 0, failed = 0;
+
+    if (gap <= 0) return;
+
+    td5_horns_init();
+    TD5_LOG_I(LOG_TAG, "HORNPROBE begin: gap=%dms limiter_window=%dms",
+              gap, horn_preview_window_ms());
+
+    for (cat = 0; cat < TD5_HORN_CAT_COUNT; cat++) {
+        int n = td5_horns_count((TD5_HornCat)cat);
+        int i;
+        TD5_LOG_I(LOG_TAG, "HORNPROBE tab=%d entries=%d", cat, n);
+        for (i = 0; i < n; i++) {
+            const TD5_HornEntry *h = td5_horns_get((TD5_HornCat)cat, i);
+            int r;
+            uint32_t t0;
+            if (!h) continue;
+            r = td5_sound_preview_horn(h->wav, h->zip);
+            if (r) ok++; else failed++;
+            TD5_LOG_I(LOG_TAG, "HORNPROBE %s tab=%d idx=%d id=%s wav=%s zip=%s",
+                      r ? "PLAYED" : "SILENT", cat, i, h->id, h->wav, h->zip);
+            /* Busy-wait: the probe runs during module init, before any frame
+             * loop exists to spread the calls across. */
+            t0 = td5_plat_time_ms();
+            while ((int32_t)(td5_plat_time_ms() - t0) < gap) { /* spin */ }
+        }
+    }
+
+    td5_sound_stop_horn_preview();
+    TD5_LOG_I(LOG_TAG, "HORNPROBE end: played=%d silent=%d", ok, failed);
+}
+#endif /* !TD5RE_RELEASE */
 
 /* ========================================================================
  * [ITEM #12] Crash impact SFX trigger
@@ -2001,12 +2074,50 @@ void td5_sound_update_audio_mix(void)
                      * attenuation model as the engine/siren. [2026-08-20] The
                      * old inline formula scaled by 0x1000 then clamped >=0x80 to
                      * 0x7F, i.e. it pinned full volume until ~15872 units then
-                     * fell off a cliff -- effectively binary. */
-                    float dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x)
-                               * TD5_SOUND_DISTANCE_SCALE;
-                    float dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z)
-                               * TD5_SOUND_DISTANCE_SCALE;
-                    float dist = sqrtf(dx * dx + dz * dz);
+                     * fell off a cliff -- effectively binary.
+                     *
+                     * [HORN LISTENER 2026-10-01] Measure from the NEAREST HUMAN
+                     * PLAYER'S CAR, not from this pass's camera listener -- the
+                     * same model the engine block above already uses, and for the
+                     * same reason. td5_sound_set_listener_pos() only accepts
+                     * viewports 0-1, and a 3+ split-screen race collapses the
+                     * mixer to ONE pass, so every horn was measured against
+                     * viewport 0's camera. Measured on a 6-player Moscow race
+                     * (log/, horn_far.txt harness): once the field spread out,
+                     * four of the six slots honked at vol=0 (dist 27080..109473
+                     * against the ~16256-unit cutoff) while the two cars still
+                     * near pane 0 played at 108-120. That is the "nobody can use
+                     * the horn in local MP" report: a player's own honk was
+                     * attenuated to silence by another player's camera.
+                     *
+                     * Nearest-human is the right listener because a human's OWN
+                     * car is at distance 0 from itself, so a honk is always full
+                     * volume in its own pane regardless of pane count, pane
+                     * permutation (g_actorSlotForView) or how far the field has
+                     * spread. Falls back to the pass listener when no human actor
+                     * resolves, exactly like the engine branch.
+                     *
+                     * Accepted trade-off: only HUMAN cars ever honk (the honk is
+                     * armed from td5_input_update_player_control, and AI drivers
+                     * never press horn), so nearest-human always resolves to the
+                     * honking car itself and a horn is now effectively unattenuated
+                     * -- player 1 hears player 6's honk at full volume across the
+                     * whole track. One mixer pass cannot render a per-pane volume
+                     * for one voice, so the choice is between that and the status
+                     * quo of players 2..N hearing nothing; veh_pan still puts each
+                     * honk on the honking player's own side of the stereo image.
+                     * This is the same compromise the engine mix already makes for
+                     * every local human car in 3+ split. */
+                    float dx, dz, dist2;
+                    if (sound_nearest_human_listener(actor, g_td5.num_human_players,
+                                                     &dx, &dz, &dist2, NULL) < 0) {
+                        dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x)
+                             * TD5_SOUND_DISTANCE_SCALE;
+                        dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z)
+                             * TD5_SOUND_DISTANCE_SCALE;
+                        dist2 = dx * dx + dz * dz;
+                    }
+                    float dist = sqrtf(dist2);
                     int horn_vol = sound_attenuate_volume(0x7F, dist);
 
                     if (s_horn_state[state_idx] == 1) {

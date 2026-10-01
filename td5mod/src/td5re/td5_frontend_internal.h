@@ -437,6 +437,9 @@ void frontend_init_race_schedule(void);
 void frontend_init_return_screen(TD5_ScreenIndex screen);
 void frontend_net_destroy(void);
 void frontend_play_sfx(int id);
+/* [MP QUIET MENUS 2026-10-01] Log the frontend UI-cue played/muted tallies.
+ * Called from td5_frontend_shutdown; see frontend_play_sfx in td5_frontend.c. */
+void frontend_log_sfx_tally(void);
 #ifndef TD5RE_RELEASE
 /* [2026-06-15 TASK A1] Dev-only: toggle the Quick Race span-offset field's
  * "input active" state (click-to-type). Owned by td5_frontend.c (which holds the

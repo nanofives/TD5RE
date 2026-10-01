@@ -3333,10 +3333,104 @@ static int s_fade_in_pending;       /* default slide-in chime still owed to the 
 
 #define TD5_FE_FADE_IN_DEADLINE_MS 1500u /* backstop chime if a screen never sets s_anim_complete */
 
+/* ------------------------------------------------------------------------
+ * [MP QUIET MENUS 2026-10-01, PORT-ONLY] Frontend UI chatter during LOCAL
+ * multiplayer.
+ *
+ * User report: with 4-6 players on one couch the menu pings are constant --
+ * every pane moves its own cursor, flips its own selector and confirms its own
+ * row, so one screen emits several pings per second from six independent
+ * cursors. Silence the three per-keypress cues while a local MP flow is live.
+ *
+ * Gated at this ONE helper rather than at the ~280 frontend_play_sfx() call
+ * sites: every nav/confirm cue in td5_frontend.c and td5_fe_*.c routes through
+ * here, so a single predicate covers every screen in the flow (join lobby,
+ * profile/player setup, car-select panes, horn and colour pickers, mode select,
+ * race options, track select, post-race) and cannot be missed by a call site
+ * added later.
+ *
+ * WHICH IDS (table at s_frontend_sfx_paths in td5_sound.c):
+ *   1  ping3  cursor enters a different button (mouse hover)   -> MUTED
+ *   2  ping2  cursor move / selector value change              -> MUTED
+ *   3  Ping1  confirm / choose / player ready                   -> MUTED
+ *   4  Crash1 screen slide-IN chime                             -> kept
+ *   5  Whoosh screen slide-OUT                                  -> kept
+ *   10 Uh-Oh  rejection / locked                                -> kept
+ * 4 and 5 fire once per screen TRANSITION, not per keypress, so they are not
+ * the spam and they carry the "the screen changed" signal. 10 is kept because
+ * it is the only feedback that an input was REJECTED -- silencing it would make
+ * a locked row feel like a dead button.
+ *
+ * NOT affected: music, the countdown, anything in-race, and the horn PREVIEW --
+ * the picker's preview goes through td5_sound_preview_horn() on its own vehicle
+ * horn slot, never through this helper.
+ *
+ * TD5RE_MP_QUIET_MENUS=0 restores the pings for an A/B.
+ * ------------------------------------------------------------------------ */
+
+/* Is a LOCAL split-screen multiplayer flow live right now?
+ *
+ * Composite, mirroring the predicate the Main-Menu cleanup already uses to
+ * decide that MP state is stale (td5_fe_menu.c: `s_mp_flow || s_two_player_mode
+ * || s_num_human_players > 1`), plus the pre-START lobby:
+ *
+ *   s_mp_flow          the lobby's START was pressed -- set together with
+ *                      s_two_player_mode at td5_fe_net.c:468-477 (local join
+ *                      lobby) and by the dev simul-preview harness
+ *                      (frontend_mp_simul_preview_setup, td5_fe_race.c:2044).
+ *                      Covers setup -> car select -> race options -> post-race.
+ *   s_two_player_mode  split-screen engaged.
+ *   s_num_human_players > 1
+ *   s_mp_joined_count > 1   still ON the join lobby with 2+ pads already in,
+ *                      before START sets the flags above -- that screen is
+ *                      already multi-cursor, so it is already noisy.
+ *
+ * NET play is excluded (g_td5.network_active): the report is about several
+ * people at one keyboard/TV, and a net lobby has one cursor per machine. */
+static int frontend_local_mp_active(void) {
+    if (g_td5.network_active) return 0;
+    return s_mp_flow || s_two_player_mode ||
+           s_num_human_players > 1 || s_mp_joined_count > 1;
+}
+
+static int frontend_mp_quiet_menus_on(void) {
+    static int s_on = -1;
+    if (s_on < 0) {
+        s_on = td5_env_flag_on("TD5RE_MP_QUIET_MENUS");   /* default ON */
+        TD5_LOG_I(LOG_TAG, "local-MP quiet menus %s (TD5RE_MP_QUIET_MENUS)",
+                  s_on ? "ENABLED" : "disabled");
+    }
+    return s_on;
+}
+
+/* Cumulative tallies so an MP menu walk can be counted from the log instead of
+ * by ear. Reported once at frontend shutdown (see td5_frontend_shutdown). */
+static unsigned s_fe_sfx_played;
+static unsigned s_fe_sfx_muted;
+
 void frontend_play_sfx(int id) {
+    /* Bookkeeping FIRST and unconditionally: the slide-in/slide-out dedup state
+     * machine must see the same edges whether or not a cue is muted. (Neither 4
+     * nor 5 is ever muted today, but tying the two together would be a trap for
+     * whoever widens the mute set.) */
     if (id == 5) s_fade_whoosh_emitted = 1;
     if (id == 4) s_fade_chime_emitted = 1;
+
+    if ((id == 1 || id == 2 || id == 3) &&
+        frontend_mp_quiet_menus_on() && frontend_local_mp_active()) {
+        s_fe_sfx_muted++;
+        return;
+    }
+
+    s_fe_sfx_played++;
     td5_sound_play_frontend_sfx(id);
+}
+
+/* Log the UI-cue tallies. Called from td5_frontend_shutdown so an MP menu walk
+ * can be verified by number (muted>0 in MP, muted==0 in a single-player walk). */
+void frontend_log_sfx_tally(void) {
+    TD5_LOG_I(LOG_TAG, "frontend UI sfx tally: played=%u muted=%u (local-MP gate on ids 1/2/3)",
+              s_fe_sfx_played, s_fe_sfx_muted);
 }
 
 
@@ -11640,6 +11734,7 @@ int td5_frontend_init(void) {
 
 void td5_frontend_shutdown(void) {
     td5_frontend_release_resources();
+    frontend_log_sfx_tally();   /* [MP QUIET MENUS] UI-cue played/muted counts */
     TD5_LOG_I(LOG_TAG, "td5_frontend_shutdown");
 }
 

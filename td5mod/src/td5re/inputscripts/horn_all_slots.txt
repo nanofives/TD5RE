@@ -1,0 +1,35 @@
+# TD5RE input-script: honk every racer slot in turn (G3 HORNS item 3 probe).
+#
+# Run with:
+#   td5re.exe --AutoRace=1 --SkipIntro=1 --DefaultPlayers=<N> \
+#             --InputScript=td5mod/src/td5re/inputscripts/horn_all_slots.txt
+#
+# Verify from the log: one "horn honk: racer=S" per slot AND one
+# "horn play: pass=.. veh=.. vol=.." with a NON-ZERO vol for each.
+# 120-tick (2 s) gaps so the previous one-shot has finished.
+
+sync race
+0    log HORNTEST begin
+120  log HORNTEST slot 0
+120  slot 0
+121  horn press
+240  log HORNTEST slot 1
+240  slot 1
+241  horn press
+360  log HORNTEST slot 2
+360  slot 2
+361  horn press
+480  log HORNTEST slot 3
+480  slot 3
+481  horn press
+600  log HORNTEST slot 4
+600  slot 4
+601  horn press
+720  log HORNTEST slot 5
+720  slot 5
+721  horn press
+840  log HORNTEST second pass (slot 0 again)
+840  slot 0
+841  horn press
+960  log HORNTEST end
+990  quit
