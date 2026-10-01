@@ -5764,19 +5764,37 @@ static uint32_t frontend_attract_idle_window_ms(void) {
     return s_win;
 }
 
-/* [PAUSE RENDER CACHE 2026-09-29] Menus animate at 60 Hz (see
- * frontend_update_anim_pacing) and are otherwise a static redraw, so anything
- * above 60 fps here is pure GPU burn -- the frontend was measured spinning fast
- * enough to be the TDR trigger documented in td5_plat_present's frame-cap block.
- * Cap it at the animation rate. TD5RE_FE_FRAME_CAP overrides (0 = uncapped). */
+/* [PAUSE RENDER CACHE 2026-09-29] Menus are a mostly-static redraw, so spinning
+ * the present loop far above the display rate is pure GPU burn -- the frontend
+ * was measured fast enough to be the TDR trigger documented in td5_plat_present's
+ * frame-cap block. Cap it. TD5RE_FE_FRAME_CAP overrides (0 = uncapped).
+ *
+ * [MENU FPS 2026-10-01] The ceiling is the DISPLAY REFRESH RATE, not a literal
+ * 60. The old hardcoded 60 was the whole reason the main menu sat at 60 fps on a
+ * 120 Hz TV while the race ran at 120: the race clears the idle cap entirely
+ * (td5_game.c, td5_plat_set_idle_frame_cap(0)) and is paced by vsync alone, so
+ * it follows the panel, while the frontend pinned itself to 60 on every display.
+ * Tying it to the refresh rate keeps the "don't redraw faster than the screen can
+ * show" intent on every panel and makes a 60 Hz machine byte-identical to before.
+ *
+ * Deliberately NOT cached: the user can drag the window to another monitor or
+ * change the refresh rate from the Display options screen mid-session, and the
+ * platform query is already TTL-cached so this stays a cheap read. The env
+ * override IS cached -- it cannot change while the process runs. */
 static int frontend_frame_cap(void) {
-    static int s_cap = -1;
-    if (s_cap < 0) {
+    static int s_env_cap = -1;        /* -1 = unread, -2 = unset */
+    int hz;
+    if (s_env_cap == -1) {
         const char *e = getenv("TD5RE_FE_FRAME_CAP");
-        s_cap = (e && e[0]) ? atoi(e) : 60;
-        if (s_cap < 0) s_cap = 0;
+        s_env_cap = (e && e[0]) ? atoi(e) : -2;
+        if (s_env_cap < 0 && s_env_cap != -2) s_env_cap = 0;   /* negative -> uncapped */
     }
-    return s_cap;
+    if (s_env_cap != -2) return s_env_cap;
+
+    hz = td5_plat_display_refresh_hz();
+    if (hz <= 0) return 60;           /* rate unknown -> the historical default */
+    if (hz < 30)  return 30;          /* absurd value: keep menus responsive    */
+    return hz;
 }
 
 int td5_frontend_display_loop(void) {

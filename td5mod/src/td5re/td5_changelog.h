@@ -38,6 +38,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  their place, so new ones keep appearing ahead of" },
     { CL_ITEM,    "  you for the whole race, on loops as well as" },
     { CL_ITEM,    "  point-to-point tracks." },
+    { CL_DATE,    "October 1" },
+    { CL_ITEM,    "The menus now run at your screen's refresh rate," },
+    { CL_ITEM,    "  like the race does. On a 120 Hz or 144 Hz display" },
+    { CL_ITEM,    "  the front end is no longer stuck at 60 FPS." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (Valparaiso, real trees, real land)" },
