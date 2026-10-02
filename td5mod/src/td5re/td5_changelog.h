@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 2 (crash forensics)" },
+    { CL_ITEM,    "A long race that dies inside the graphics driver now" },
+    { CL_ITEM,    "  names the call it died in, and lists the texture and" },
+    { CL_ITEM,    "  shader work that ran just before it. No change to how" },
+    { CL_ITEM,    "  the game plays." },
+    { CL_ITEM,    "Malformed pipeline builds are refused and logged rather" },
+    { CL_ITEM,    "  than handed to the driver." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },
     { CL_ITEM,    "Auto tracks load up to a minute faster. A leftover" },
     { CL_ITEM,    "  debug scan no longer runs on every track build." },

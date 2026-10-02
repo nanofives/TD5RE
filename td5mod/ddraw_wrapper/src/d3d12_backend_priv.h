@@ -105,6 +105,18 @@ void  d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMA
  * raw-pointer dedup then refuses to repair the slot when the address is reused). */
 void  d3d12_dxr_unregister_texture(ID3D12Resource *res);
 
+/* [H4 CRASH 2026-10-02] D3D12 CALL WATCH. Record a non-per-draw D3D12 call
+ * (object create / release) on ENTRY; call d3d12_api_done() when it returns.
+ * The ring plus the still-set in-flight tag are printed by Backend_DumpCrashDiag,
+ * so a fault inside the runtime names the call that was running instead of
+ * requiring a disassembly of D3D12Core. Per-draw traffic is NOT marked here --
+ * DRAW WATCH already covers it. See the long comment in d3d12_backend.c. */
+void  d3d12_api_mark(const char *tag);
+void  d3d12_api_done(void);
+/* Ring-only variant: records the event without claiming a call is in flight.
+ * Use at object create/release sites (many return paths). */
+void  d3d12_api_note(const char *tag);
+
 /* [PSO CRASH CRUMB 2026-09-29] Record the pipeline being built (site + shader
  * bytecode size/hash) so an SEH crash inside the runtime's DXBC->DXIL converter
  * (dxilconv.dll) is attributed in crash.log (pso_in_flight). Clear afterwards. */
