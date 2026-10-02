@@ -38,6 +38,20 @@ int td5_env_int_opt(const char *name, int lo, int hi, int notset)
     return (int)v;
 }
 
+unsigned int td5_env_u32(const char *name, unsigned int def)
+{
+    const char *e = getenv(name);
+    const char *p;
+    char *end = NULL;
+    unsigned long long v;
+    if (!e || !e[0]) return def;
+    for (p = e; *p == ' ' || *p == '	'; p++) {}
+    if (*p == '-') return 0u;
+    v = strtoull(p, &end, 10);
+    if (end == p) return def;
+    return v > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned int)v;
+}
+
 int td5_env_flag_on(const char *name)
 {
     const char *e = getenv(name);

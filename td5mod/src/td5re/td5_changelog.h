@@ -32,6 +32,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 2 (auto track seeds)" },
+    { CL_ITEM,    "Any auto track seed can now be typed or replayed." },
+    { CL_ITEM,    "  Seeds above 2147483647 used to turn into that number." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 2 (dev free camera)" },
     { CL_ITEM,    "The dev free camera now really freezes the car." },
     { CL_ITEM,    "  It kept visibly sliding back and forth while you" },

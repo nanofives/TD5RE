@@ -24,6 +24,11 @@ int   td5_env_int(const char *name, int def, int lo, int hi);
 /* Clamped float knob: unset/empty -> def, else atof clamped to [lo,hi]. */
 float td5_env_float(const char *name, float def, float lo, float hi);
 
+/* Full-range unsigned 32-bit knob (seeds): unset/empty/no digits -> def; a
+ * negative value -> 0; above 0xFFFFFFFF -> 0xFFFFFFFF. td5_env_int cannot hold
+ * these: its int range clamped every seed above 2^31-1 to 2147483647. */
+unsigned int td5_env_u32(const char *name, unsigned int def);
+
 /* Like td5_env_int but returns `notset` (choose a sentinel < lo) when the var is
  * absent, so a caller can distinguish "overridden" from "use default/level". */
 int   td5_env_int_opt(const char *name, int lo, int hi, int notset);

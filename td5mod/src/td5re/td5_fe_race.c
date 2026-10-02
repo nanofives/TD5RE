@@ -7969,6 +7969,15 @@ static void at_setenv(const char *knob, int value)
     _putenv_s(knob, buf);
 }
 
+/* [SEED U32] The seed is a full unsigned 32-bit value. at_setenv takes an int
+ * and prints %d, which would write any seed above 2^31-1 as a negative number. */
+static void at_setenv_seed(unsigned int seed)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u", seed);
+    _putenv_s("TD5RE_AUTOTRACK_SEED", buf);
+}
+
 /* Which registry entry owns this row's knob, or -1. Matched by knob NAME so
  * the row table needs no parallel id column to keep in step. */
 static int at_roll_id_for(int row)
@@ -8210,11 +8219,11 @@ static int  s_at_seed_editing;
 static void at_preview_request(void)
 {
     TD5_TrackGenSpec spec;
-    int seed = td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+    unsigned int seed = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
 
     if (seed == 0) {
-        seed = (int)at_roll_seed();
-        at_setenv("TD5RE_AUTOTRACK_SEED", seed);
+        seed = at_roll_seed();
+        at_setenv_seed(seed);
     }
 
     td5_trackgen_default_spec(&spec);
@@ -8513,7 +8522,7 @@ void frontend_render_autotrack_options_overlay(float sx, float sy)
     {
         TD5_TgRolls rolls;
         td5_trackgen_resolve_rolls(
-            (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF),
+            td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u),
             &rolls);
 
         for (i = 0; i < s_at_view_n; i++) {
@@ -8544,8 +8553,7 @@ void frontend_render_autotrack_options_overlay(float sx, float sy)
                 if (s_at_seed_editing)
                     snprintf(buf, sizeof(buf), "%s_", s_at_seed_buf);
                 else
-                    snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
-                                 "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
+                    snprintf(buf, sizeof(buf), "%u", td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u));
             } else if (k_at_rows[row].kind == AT_KIND_PLACE) {
                 /* Real place names run long; the value column fits ~16
                  * characters before the preview panel. */
@@ -8587,8 +8595,7 @@ int td5_autotrack_opts_row_count(void) { return s_at_view_n + 1; }
 
 static void at_seed_edit_begin(void)
 {
-    unsigned int cur = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED",
-                                                 0, 0, 0x7FFFFFFF);
+    unsigned int cur = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
     snprintf(s_at_seed_buf, sizeof(s_at_seed_buf), "%u", cur);
     s_at_seed_editing = 1;
     frontend_reset_text_input();
@@ -8608,9 +8615,14 @@ static int at_seed_edit_tick(void)
     frontend_handle_text_input_key();
     if (frontend_text_input_confirmed()) {
         /* 0 is meaningful: it is the generator's "roll one from the clock". */
-        long v = strtol(s_at_seed_buf, NULL, 10);
-        if (v < 0) v = 0;
-        at_setenv("TD5RE_AUTOTRACK_SEED", (int)v);
+        /* [SEED U32] strtoull, not strtol: long is 32-bit here, so strtol
+         * clamped any typed seed above 2^31-1 to 2147483647. */
+        unsigned long long v = 0;
+        if (s_at_seed_buf[0] != '-') {
+            v = strtoull(s_at_seed_buf, NULL, 10);
+            if (v > 0xFFFFFFFFull) v = 0xFFFFFFFFull;
+        }
+        at_setenv_seed((unsigned int)v);
         s_at_seed_editing = 0;
         frontend_reset_text_input();
         at_preview_request();               /* a new seed is worth showing now */
@@ -8631,7 +8643,7 @@ static void at_fav_capture(TD5_FavSeed *f)
     size_t used = 0;
 
     memset(f, 0, sizeof(*f));
-    f->seed = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+    f->seed = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
 
     /* [R21] Format marker, written FIRST. Before R21 an omitted knob meant
      * "the generator's shipped constant"; now it means "roll it from the
@@ -8663,7 +8675,7 @@ static void at_fav_apply(const TD5_FavSeed *f)
     char knob[64], val[24];
     int r;
 
-    at_setenv("TD5RE_AUTOTRACK_SEED", (int)f->seed);
+    at_setenv_seed(f->seed);
 
     /* [R21] A favourite saved BEFORE this round omitted unset knobs too, but
      * omission then meant the generator's shipped constant -- not "roll it".
@@ -8911,7 +8923,7 @@ void Screen_AutoTrackOptions(void) {
             at_seed_edit_begin();
             frontend_play_sfx(3);
         } else if (s_button_index == b_gen) {
-            at_setenv("TD5RE_AUTOTRACK_SEED", (int)at_roll_seed());
+            at_setenv_seed(at_roll_seed());
             at_preview_request();
             frontend_play_sfx(3);
         } else if (s_button_index == b_save) {

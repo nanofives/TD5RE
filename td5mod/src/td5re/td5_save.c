@@ -2719,7 +2719,7 @@ static void favseeds_read(void)
         memset(fs, 0, sizeof(*fs));
         snprintf(fs->name, sizeof fs->name, "%s", name);
         snprintf(key, sizeof key, "Fav%dSeed", i);
-        fs->seed = (unsigned int)cfgini_get_i32(f, "FavoriteSeeds", key, 0);
+        fs->seed = cfgini_get_u32(f, "FavoriteSeeds", key, 0u);
         snprintf(key, sizeof key, "Fav%dParams", i);
         td5_plat_ini_get_str(f, "FavoriteSeeds", key, "", fs->params,
                              (int)sizeof fs->params);
