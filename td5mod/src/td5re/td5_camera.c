@@ -553,6 +553,8 @@ void td5_camera_snap_poses(void);
 static void update_debug_race_camera(int view);   /* defined later */
 /* [W5 TOP-DOWN 2026-09-29] defined below, used by the tick solver above them. */
 static void UpdateTopDownCamera(uint8_t *actor, int view);
+/* [H1 CAMERA 2026-10-02] defined below, used by td5_camera_snap_poses. */
+static void td5_camera_topdown_reset(void);
 
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
 /* [G2 CAMERA 2026-10-01 — PORT-ONLY DIVERGENCE from 0x463098] Every CHASE
@@ -578,9 +580,40 @@ static void UpdateTopDownCamera(uint8_t *actor, int view);
  * height 510/110/310/110/240/110.
  * Note preset 4 doubles as the countdown tight-chase hold, so the pre-race
  * hold is 30% further back too. The fly-in presets 10-13 are countdown
- * cinematics, not part of the player cycle, and are left untouched. */
+ * cinematics, not part of the player cycle, and are left untouched.
+ *
+ * [H1 CAMERA 2026-10-02 — CORRECTION to the paragraph above, preset 0 only]
+ * The claim that scaling radius + height_target together is "a uniform scale of
+ * the position offset" is WRONG: height_target_raw is NOT the eye's vertical
+ * offset, it is the LOOK-AT TARGET's. Measured on Moscow (preset 0, race.log
+ * "chase pitch" line), the chase geometry is
+ *     eye    = car + (sin*orbit_radius_raw, elevation_angle,  -cos*orbit_radius_raw)
+ *     target = car + (0,                    height_target_raw, 0)
+ * because UpdateChaseCamera writes g_camOrbitOffset[v][1] = g_camStoredPitch
+ * (which converges to elevation_angle, td5_camera.c:1528 + :1819) while
+ * finalize_chase_pos aims at base_y + smoothed_h (= height_target_raw,
+ * td5_camera.c:2172 + :1836). So the look-down angle is
+ *     atan((elevation_angle - height_target_raw) / orbit_radius_raw).
+ * Scaling height_target_raw by 1.3 therefore raised the AIM POINT 153 units
+ * while the eye stayed at 600 — it tilted preset 0 from +2.45 deg DOWN
+ * (600-510)/2100 to 1.35 deg UP (600-663)/2730. Measured, not inferred:
+ * race.log reported down_deg=-1.35 on the pre-fix build.
+ *
+ * Fix, preset 0 ONLY (Mariano: the furthest camera should look down harder so
+ * the car and the road ahead read better):
+ *   height_target_raw 663 -> 510  (undo the mis-applied 1.3x on the AIM point)
+ *   elevation_angle   600 -> 1150 (raise the eye)
+ * => atan((1150-510)/2730) = 13.2 deg down, steeper than every other preset
+ * (p1 10.4, p3 8.3, p5 2.8, p2 2.1, p4 0.5). The horizontal radius is
+ * UNCHANGED at 2730, so the close-to-far ordering of the cycle is intact and
+ * preset 0 is still the furthest (3D eye distance 2962 vs p1's 2290).
+ * Overridable at runtime without a rebuild via TD5RE_FARCHASE_ELEV /
+ * TD5RE_FARCHASE_TGTH (see td5_camera_farchase_tune below).
+ * Presets 1-5 keep the round-1001 values: Mariano asked for the furthest one
+ * only, and their (elevation - height_target) deltas are all already positive,
+ * so none of them inherited the sign flip. */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
-    { 0, 600,  2730, 663, 0, 0 },  /* preset  0: far chase        (was 2100/510) */
+    { 0, 1150, 2730, 510, 0, 0 },  /* preset  0: far chase  (orig 2100/510; H1: 13.2 deg down) */
     { 0, 550,  2223, 143, 0, 0 },  /* preset  1: medium chase     (was 1710/110) */
     { 0, 475,  1950, 403, 0, 0 },  /* preset  2: close chase high (was 1500/310) */
     { 0, 400,  1755, 143, 0, 0 },  /* preset  3: close chase low  (was 1350/110) */
@@ -600,6 +633,42 @@ TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
     { 0, 300,  1600, 310, 0, 0 },  /* preset 12: fly-in level 1  */
     { 0, 550,  3800, 110, 0, 0 },  /* preset 13: fly-in level 0  (wide pull-back before GO) */
 };
+
+/* [H1 CAMERA 2026-10-02] Runtime override of the FAR-CHASE (preset 0) framing,
+ * so the look-down angle can be dialled in a live session instead of needing a
+ * rebuild per trial:
+ *     TD5RE_FARCHASE_ELEV=<world units>  eye height above the car   (table: 1150)
+ *     TD5RE_FARCHASE_TGTH=<world units>  aim point above the car    (table:  510)
+ * down_deg = atan((ELEV - TGTH) / 2730). Both are pure overrides: when the var
+ * is unset the shipped table value stands, so the table stays the single source
+ * of truth. One-shot — env vars are fixed for a process run — and called from
+ * every site that reads the table, so no read can observe the untuned value.
+ * The horizontal radius is deliberately NOT exposed: changing it would reorder
+ * the close-to-far preset cycle. */
+static void td5_camera_farchase_tune(void)
+{
+    static int s_done = 0;
+    if (s_done) return;
+    s_done = 1;
+
+    int elev = td5_env_int_opt("TD5RE_FARCHASE_ELEV", 0, 8000, -1);
+    int tgth = td5_env_int_opt("TD5RE_FARCHASE_TGTH", 0, 8000, -1);
+    if (elev < 0 && tgth < 0) return;
+
+    if (elev >= 0) g_cameraPresets[0].elevation_angle   = (short)elev;
+    if (tgth >= 0) g_cameraPresets[0].height_target_raw = (short)tgth;
+
+    {
+        int dy = (int)g_cameraPresets[0].elevation_angle -
+                 (int)g_cameraPresets[0].height_target_raw;
+        int r  = (int)g_cameraPresets[0].orbit_radius_raw;
+        TD5_LOG_I(LOG_TAG,
+                  "far-chase tune: elev=%d tgt_h=%d radius=%d -> %.2f deg down",
+                  (int)g_cameraPresets[0].elevation_angle,
+                  (int)g_cameraPresets[0].height_target_raw, r,
+                  (r != 0) ? (atan2f((float)dy, (float)r) * 57.2957795f) : 0.0f);
+    }
+}
 
 /* ========================================================================
  * Spline template table (6 templates x 8 shorts, on stack in original)
@@ -995,6 +1064,7 @@ static void td5_camera_unpack_save_byte(int view, unsigned int packed)
 
 void LoadCameraPresetForView(uint8_t *actor, int force_reload, int view, int save_state)
 {
+    td5_camera_farchase_tune();   /* [H1 CAMERA] one-shot preset-0 env override */
     int preset_idx = g_raceCameraPresetId[view];
     TD5_CameraPreset *p = &g_cameraPresets[preset_idx];
 
@@ -2172,6 +2242,26 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
     target[1] = base_y + smoothed_h;   /* smoothed base (see high-FPS note above) */
     target[2] = pos_z + vel_z_interp;
 
+    /* [H1 CAMERA 2026-10-02] Chase look-down telemetry. The eye's vertical
+     * offset is off1 (= g_camStoredPitch, which converges to the preset's
+     * elevation_angle) and the AIM point's is smoothed_h (= the preset's
+     * height_target_raw) — so the camera pitches DOWN only while
+     * (off1 - smoothed_h) > 0. This line makes that sign directly observable
+     * per preset instead of having to re-derive it from the table. */
+    {
+        static uint32_t s_pitch_log_ctr;
+        if ((s_pitch_log_ctr++ % 60u) == 0u) {
+            int dy   = cam_y_desired - target[1];
+            int horz = (int)sqrtf((float)((float)off0 * (float)off0 +
+                                          (float)off2 * (float)off2));
+            TD5_LOG_D(LOG_TAG,
+                      "chase pitch v%d preset=%d eye_dy=%d horz=%d down_deg=%.2f",
+                      v, g_raceCameraPresetId[v], dy, horz,
+                      (horz != 0) ? (atan2f((float)dy, (float)horz) * 57.2957795f)
+                                  : 0.0f);
+        }
+    }
+
     SetCameraWorldPosition(g_camWorldPos[v]);
     OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
 }
@@ -2219,6 +2309,7 @@ void td5_camera_snap_poses(void)
 {
     for (int v = 0; v < TD5_MAX_VIEWPORTS; v++)
         s_cam_pose_init[v] = 0;
+    td5_camera_topdown_reset();   /* [H1 CAMERA] drop the top-down speed lag too */
 }
 
 /* [CAR DAMAGE 2026-06-28] When this view's car is done for the race (finished or
@@ -2283,6 +2374,7 @@ static void cam_solve_view(int v)
         s_flyin_preset_reloaded[v] = 1;
         g_raceCameraPresetId[v]   = start_preset;
         g_raceCameraPresetMode[v] = g_cameraPresets[start_preset].mode;
+        td5_camera_farchase_tune();   /* [H1 CAMERA] before any table read */
         TD5_CameraPreset *p = &g_cameraPresets[start_preset];
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw  * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
@@ -3135,6 +3227,168 @@ static int td5_camera_topdown_back(void)     /* world units behind, in car space
     return v;
 }
 
+/* ------------------------------------------------------------------------
+ * [H1 CAMERA 2026-10-02] SPEED-REACTIVE TOP-DOWN HEIGHT (PORT-ONLY)
+ *
+ * The static height above is now the AT-REST / MINIMUM framing. The faster the
+ * car goes, the further the eye pulls away; off the throttle it eases back in
+ * and settles exactly on that minimum. Knobs:
+ *
+ *   TD5RE_TOPDOWN_DYNAMIC=0     disable entirely -> byte-identical to the old
+ *                               fixed-height behaviour (default ON)
+ *   TD5RE_TOPDOWN_DYN_MAX=<wu>  max EXTRA height at/above the reference speed.
+ *                               Default is half the configured base height, so
+ *                               it stays sane if TD5RE_TOPDOWN_HEIGHT is changed
+ *                               (8000 base -> +4000 max, i.e. 1.5x at full tilt).
+ *   TD5RE_TOPDOWN_DYN_SMOOTH=<ms>  lag time constant, default 750 ms.
+ *   TD5RE_TOPDOWN_DYN_REFSPD=<mph> speed at which the extra height saturates,
+ *                               default 120 (the speedo dial's full scale).
+ *
+ * ANTI-PUMPING. The lag is a first-order exponential on the NORMALISED speed
+ * factor, stepped once per 30 Hz SIM TICK — not per render frame. Two reasons:
+ * (1) a per-frame step would make the response rate depend on the frame rate,
+ * so the same drive would pull back differently at 30 vs 144 fps; (2) with a
+ * 750 ms time constant a single tick moves the factor by only ~4%, so throttle
+ * feathering and traffic-speed wobble are absorbed instead of pumping the eye.
+ * The step is symmetric, so braking returns along the same curve.
+ *
+ * SPEED SOURCE: horizontal world velocity magnitude, converted to MPH with the
+ * speedo's own scale factor (td5_hud.c:5768-5785 — mph = raw24.8 / 1252), so
+ * the REFSPD knob is in the units the player reads off the dial. The HUD
+ * projects onto the heading; we take the horizontal magnitude instead, which is
+ * identical in a straight line and is the more appropriate quantity for a
+ * camera (speed through the world, not along the nose).
+ *
+ * BACK SCALES WITH THE DYNAMIC HEIGHT. This is load-bearing, not cosmetic: the
+ * block above derives BACK from HEIGHT precisely to hold back/height at the
+ * ratio that keeps OrientCameraTowardTarget off its degenerate straight-down
+ * branch (which drops the yaw and would freeze the top-down rotation). Growing
+ * HEIGHT while BACK stayed fixed would shrink that margin quadratically and
+ * eventually freeze the rotation at speed. Scaling BACK by the same factor
+ * keeps the ratio — and therefore the margin — exactly as configured, at any
+ * dynamic height.
+ * ------------------------------------------------------------------------ */
+#define TD5_TOPDOWN_DYN_MAX_RATIO     0.5f    /* default extra = 0.5 x base height */
+#define TD5_TOPDOWN_DYN_SMOOTH_MS_DEF 750
+#define TD5_TOPDOWN_DYN_REFSPD_DEF    120.0f  /* mph */
+#define TD5_TOPDOWN_SIM_HZ            30.0f
+/* MPH per unit of raw 24.8 horizontal velocity — see td5_hud.c:5785. */
+#define TD5_TOPDOWN_FP_PER_MPH        1252.0f
+/* Cap the catch-up when many sim ticks elapsed between two camera updates (a
+ * load hitch / alt-tab): without it the lag would fast-forward and snap. */
+#define TD5_TOPDOWN_DYN_MAX_STEPS     16
+
+static int td5_camera_topdown_dyn_on(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_flag_on("TD5RE_TOPDOWN_DYNAMIC");   /* default ON */
+    return v;
+}
+
+static int td5_camera_topdown_dyn_max(void)   /* extra world units at full speed */
+{
+    static int v = -1;
+    if (v < 0) {
+        int def = (int)((float)td5_camera_topdown_height() *
+                        TD5_TOPDOWN_DYN_MAX_RATIO + 0.5f);
+        v = td5_env_int("TD5RE_TOPDOWN_DYN_MAX", def, 0, TD5_TOPDOWN_HEIGHT_MAX);
+    }
+    return v;
+}
+
+/* Per-sim-tick blend weight of the first-order lag. */
+static float td5_camera_topdown_dyn_alpha(void)
+{
+    static float a = -1.0f;
+    if (a < 0.0f) {
+        int ms = td5_env_int("TD5RE_TOPDOWN_DYN_SMOOTH",
+                             TD5_TOPDOWN_DYN_SMOOTH_MS_DEF, 0, 10000);
+        if (ms <= 0) {
+            a = 1.0f;   /* 0 ms = no smoothing (instant follow) */
+        } else {
+            a = 1.0f - expf(-(1.0f / TD5_TOPDOWN_SIM_HZ) / ((float)ms * 0.001f));
+            if (a < 0.0f) a = 0.0f;
+            if (a > 1.0f) a = 1.0f;
+        }
+    }
+    return a;
+}
+
+static float td5_camera_topdown_dyn_refspd(void)   /* mph */
+{
+    static float v = -1.0f;
+    if (v < 0.0f)
+        v = td5_env_float("TD5RE_TOPDOWN_DYN_REFSPD",
+                          TD5_TOPDOWN_DYN_REFSPD_DEF, 1.0f, 500.0f);
+    return v;
+}
+
+/* Smoothed 0..1 speed factor, one slot per viewport (split-screen panes each
+ * follow their own car). */
+static float s_topdown_dyn_f[TD5_MAX_VIEWPORTS];
+static int   s_topdown_dyn_tick[TD5_MAX_VIEWPORTS];
+static int   s_topdown_dyn_seeded[TD5_MAX_VIEWPORTS];
+/* Last raw (unsmoothed) speed in mph, for the telemetry line only — lets the
+ * log show the instantaneous input beside the lagged factor it produced. */
+static float s_topdown_dyn_mph;
+
+/* Drop the speed lag for every pane. Called from td5_camera_snap_poses (race
+ * start, preset change, resume-from-pause) — the same discontinuities the rest
+ * of the camera re-seeds on. Clearing `seeded` makes the next update jump
+ * straight to the car's CURRENT speed instead of gliding in from stale state,
+ * which is what each case wants: a new race opens at rest, and cycling into
+ * top-down at 100 mph opens already pulled back rather than winding out. */
+static void td5_camera_topdown_reset(void)
+{
+    for (int i = 0; i < TD5_MAX_VIEWPORTS; i++) {
+        s_topdown_dyn_f[i]      = 0.0f;
+        s_topdown_dyn_tick[i]   = 0;
+        s_topdown_dyn_seeded[i] = 0;
+    }
+}
+
+/* Extra height in world units for this view, this frame. 0 when disabled. */
+static int td5_camera_topdown_dyn_extra(const uint8_t *actor, int view)
+{
+    s_topdown_dyn_mph = 0.0f;
+    if (!td5_camera_topdown_dyn_on()) return 0;
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS) return 0;
+
+    int dyn_max = td5_camera_topdown_dyn_max();
+    if (dyn_max <= 0) return 0;
+
+    /* Normalised speed target in [0,1]. float math throughout: at 100 mph the
+     * raw 24.8 velocity is ~125k, so vx*vx overflows a 32-bit int. */
+    float vx = (float)TD5_ACTOR_AT(actor)->linear_velocity_x;
+    float vz = (float)TD5_ACTOR_AT(actor)->linear_velocity_z;
+    float mph = sqrtf(vx * vx + vz * vz) / TD5_TOPDOWN_FP_PER_MPH;
+    float target = mph / td5_camera_topdown_dyn_refspd();
+    s_topdown_dyn_mph = mph;
+    if (target < 0.0f) target = 0.0f;
+    if (target > 1.0f) target = 1.0f;
+
+    /* Advance the lag once per SIM TICK (see the anti-pumping note above). */
+    {
+        int tick = g_td5.simulation_tick_counter;
+        if (!s_topdown_dyn_seeded[view] || tick < s_topdown_dyn_tick[view]) {
+            /* First use, or the tick counter went backwards (race restart):
+             * seed on the current speed rather than gliding in from stale state. */
+            s_topdown_dyn_seeded[view] = 1;
+            s_topdown_dyn_f[view]      = target;
+            s_topdown_dyn_tick[view]   = tick;
+        } else if (tick != s_topdown_dyn_tick[view]) {
+            int steps = tick - s_topdown_dyn_tick[view];
+            if (steps > TD5_TOPDOWN_DYN_MAX_STEPS) steps = TD5_TOPDOWN_DYN_MAX_STEPS;
+            float a = td5_camera_topdown_dyn_alpha();
+            for (int i = 0; i < steps; i++)
+                s_topdown_dyn_f[view] += (target - s_topdown_dyn_f[view]) * a;
+            s_topdown_dyn_tick[view] = tick;
+        }
+    }
+
+    return (int)((float)dyn_max * s_topdown_dyn_f[view] + 0.5f);
+}
+
 /* Replay-side toggle: the CHANGE VIEW button flips the replay camera between
  * the authored cinematic trackside profiles and this top-down view. */
 static int s_replay_topdown;
@@ -3151,8 +3405,21 @@ static void UpdateTopDownCamera(uint8_t *actor, int view)
 {
     int v = view;
     int eye[3], target[3];
-    int back_fp = td5_camera_topdown_back()   * 0x100;
-    int up_fp   = td5_camera_topdown_height() * 0x100;
+
+    /* [H1 CAMERA 2026-10-02] Speed-reactive height. h_base is the at-rest
+     * minimum; extra grows with the smoothed speed factor. BACK is re-derived
+     * from the DYNAMIC height at the configured back/height ratio so the
+     * anti-degenerate tilt margin is preserved at every altitude — see the
+     * knob block above for why that is load-bearing. */
+    int h_base  = td5_camera_topdown_height();
+    int b_base  = td5_camera_topdown_back();
+    int extra   = td5_camera_topdown_dyn_extra(actor, v);
+    int h_wu    = h_base + extra;
+    int b_wu    = (extra > 0 && h_base > 0)
+                      ? (int)((float)b_base * (float)h_wu / (float)h_base + 0.5f)
+                      : b_base;
+    int back_fp = b_wu * 0x100;
+    int up_fp   = h_wu * 0x100;
 
     /* Sub-tick velocity extrapolation, exactly as the other updaters do. */
     int vx = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
@@ -3187,10 +3454,12 @@ static void UpdateTopDownCamera(uint8_t *actor, int view)
         static uint32_t s_td_log_ctr;
         if ((s_td_log_ctr++ % 120u) == 0u)
             TD5_LOG_D(LOG_TAG,
-                      "topdown v%d: eye=(%d,%d,%d) car=(%d,%d,%d) h=%d back=%d",
+                      "topdown v%d: eye=(%d,%d,%d) car=(%d,%d,%d) "
+                      "h=%d (base=%d +%d) back=%d mph=%.1f spd_f=%.3f",
                       v, eye[0], eye[1], eye[2],
                       target[0], target[1], target[2],
-                      td5_camera_topdown_height(), td5_camera_topdown_back());
+                      h_wu, h_base, extra, b_wu,
+                      s_topdown_dyn_mph, s_topdown_dyn_f[v]);
     }
 }
 
@@ -4692,6 +4961,7 @@ void td5_camera_update_transition_state(int p, int vi)
         g_raceCameraPresetId[v] = 0;
         g_raceCameraPresetMode[v] = 0;
         /* Restore spring targets from preset 0 (far chase) */
+        td5_camera_farchase_tune();   /* [H1 CAMERA] before any table read */
         TD5_CameraPreset *p = &g_cameraPresets[0];
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
