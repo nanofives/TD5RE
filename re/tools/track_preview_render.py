@@ -90,6 +90,91 @@ POOL_TO_NAME = {
 
 
 # ---------------------------------------------------------------------------
+# [H5 2026-10-02] The RACE's checkpoint records (not LEVELINF)
+# ---------------------------------------------------------------------------
+# The tick marks used to come from LEVELINF checkpoint_count/checkpoint_spans[7]
+# (0x08/0x0C). That is the wrong table: the original reads +0x08 only as an
+# ENABLE flag and takes the actual span thresholds from g_raceCheckpointTablePtr
+# -- CheckRaceCompletionState @ 0x00409e80 does `if (trackEnvironmentConfig[8]
+# == 0) return;` and then indexes _g_raceCheckpointTablePtr, never +0x0C. The
+# LEVELINF array additionally leads with the track's START span (and two leading
+# entries on San Francisco), so every preview drew one or two ticks the race
+# does not have, plus a tick on the finish line.
+#
+# These three tables are the original's own, byte-verified against
+# original/TD5_d3d.exe and mirrored in td5_game.c / td5_asset.c:
+#   gScheduleToPoolIndex            [CONFIRMED @ 0x00466894]
+#   gTrackPoolSpanCountTable        [CONFIRMED @ 0x00466D50]  (forward record)
+#   gTrackPoolReverseSpanCountTable [CONFIRMED @ 0x00466E3C]  (-1 = no reverse)
+#   g_raceCheckpointTable           [CONFIRMED @ 0x0046CBB0]  (40 x 12 uint16)
+# Record layout: count, initial_time, then 5 x (span_threshold, time_bonus).
+# NOTE both pool tables hold the original's raw pool-count value; the record
+# index is value - 1 (same arithmetic as td5_asset_resolve_checkpoint_record_index).
+SCHEDULE_TO_POOL = [11, 9, 7, 10, 13, 16, 15, 14, 6, 8,
+                    0, 1, 2, 3, 4, 5, 12, 18, 17, 19]
+POOL_SPAN_COUNT_FWD = [1, 2, 3, 4, 5, 6, 13, 14, 15, 16,
+                       17, 23, 25, 26, 27, 28, 29, 37, 39, 64]
+POOL_SPAN_COUNT_REV = [7, 8, 9, 10, 11, 12, 18, 19, 20, 21,
+                       22, 24, -1, -1, -1, -1, -1, -1, -1, 1073741824]
+# Only the span thresholds are needed here (bonuses drive the race timer, not
+# the preview). Index = record number; value = the record's span list.
+CHECKPOINT_RECORD_SPANS = {
+    0:  [869, 1511, 2061, 2618, 3074],   6:  [556, 1113, 1663, 2305, 3060],
+    1:  [826, 1429, 1652, 1926, 2516],   7:  [715, 989, 1212, 1815, 2508],
+    2:  [768, 1379, 2090, 2776, 3221],   8:  [585, 1271, 1982, 2593, 3282],
+    3:  [623, 1175, 1751, 2181, 2552],   9:  [466, 896, 1472, 2024, 2528],
+    4:  [747, 1006, 1533, 1978, 2754],   10: [901, 1346, 1873, 2132, 2755],
+    5:  [609, 1029, 1560, 2140, 2567],   11: [519, 1099, 1630, 2050, 2523],
+    12: [651, 1128, 1599, 2115, 2574],   17: [606, 1122, 1593, 2070, 2610],
+    13: [486, 1057, 1655, 2071, 2658],   18: [665, 1081, 1679, 2250, 2635],
+    14: [660, 1297, 1840, 2193, 2656],   19: [583, 936, 1479, 2116, 2657],
+    15: [629, 1182, 1608, 2211, 2644],   20: [544, 1147, 1573, 2126, 2684],
+    16: [685, 1446, 1842, 2281, 2988],   21: [827, 1266, 1662, 2423, 2989],
+    22: [738, 1116, 1707, 2094, 2649],   23: [694, 1081, 1672, 2050, 2668],
+    24: [106, 1511, 2061, 2618, 3120],   25: [25, 1511, 2061, 2618, 3120],
+    26: [119, 1511, 2061, 2618, 3120],   27: [56, 1511, 2061, 2618, 3120],
+    28: [116, 1511, 2061, 2618, 3120],   29: [204],
+    30: [204],                           31: [106, 1511, 2061, 2618, 3120],
+    32: [25, 1511, 2061, 2618, 3120],    33: [119, 1511, 2061, 2618, 3120],
+    34: [56, 1511, 2061, 2618, 3120],    35: [116, 1511, 2061, 2618, 3120],
+    36: [47, 1511, 2061, 2618, 3120],    37: [47, 1511, 2061, 2618, 3120],
+    38: [35, 1511, 2061, 2618, 3120],    39: [35, 1511, 2061, 2618, 3120],
+}
+
+
+def race_checkpoint_record(pool, reverse=False):
+    """The race's checkpoint span list for a POOL index, or [] when the track
+    has no record. Mirrors td5_game_track_checkpoint_record()."""
+    if pool is None or not (0 <= pool < len(POOL_SPAN_COUNT_FWD)):
+        return []
+    raw = POOL_SPAN_COUNT_REV[pool] if reverse else POOL_SPAN_COUNT_FWD[pool]
+    if reverse and raw < 0:                      # no reverse data: forward record
+        raw = POOL_SPAN_COUNT_FWD[pool]
+    return list(CHECKPOINT_RECORD_SPANS.get(raw - 1, []))
+
+
+def drawable_checkpoints(spans, ring, is_circuit):
+    """The subset of a record that earns a TICK, as [(idx, span)].
+
+    Mirrors td5_game_checkpoint_is_tick(). Two entries never get one because
+    they are already drawn as marker DOTS: on a point-to-point track the LAST
+    entry is the finish line, on a circuit the FIRST is the lap/start-finish
+    line (a circuit ends on laps, not on checkpoints). Spans outside [1, ring)
+    are inert at race time too -- the shipped circuit records carry four spans
+    copied from Keswick (1511/2061/2618/3120) that sit far past every circuit's
+    own ring, and the HUD minimap drops them the same way."""
+    n = len(spans)
+    out = []
+    for i, sp in enumerate(spans):
+        if sp <= 0 or (ring > 0 and sp >= ring):
+            continue
+        if i == (0 if is_circuit else n - 1):
+            continue
+        out.append((i, int(sp)))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # STRIP.DAT parsing (branch-aware)
 # ---------------------------------------------------------------------------
 
@@ -436,7 +521,13 @@ def preview_projection(strip: Strip, w=PREVIEW_W, h=PREVIEW_H, ss=4, margin=6,
 
 
 def checkpoint_marks(uv, n_main, cp_spans, w=PREVIEW_W, h=PREVIEW_H, window=3):
-    """[(u, v, tu, tv)] for each checkpoint span that lies on the main ring.
+    """[(span, u, v, tu, tv)] for each checkpoint that lies on the main ring.
+
+    `cp_spans` is either a list of spans, or a list of (label_span,
+    project_span) pairs -- the second form is what a REVERSE record needs: the
+    span the race compares against is in reverse numbering, while the preview
+    image is projected from the FORWARD strip, so the point is looked up at
+    ring-1-span while the emitted label stays the race's own span.
 
     (tu,tv) is the UNIT local tangent in preview-IMAGE PIXEL space (not in
     normalized uv, which is anisotropic because the preview is 152x224). The
@@ -444,8 +535,11 @@ def checkpoint_marks(uv, n_main, cp_spans, w=PREVIEW_W, h=PREVIEW_H, window=3):
     the on-screen panel aspect. A checkpoint always sits on the race line, so a
     span outside [1, n_main) is dropped rather than guessed at."""
     out = []
-    for sp in cp_spans:
-        sp = int(sp)
+    for item in cp_spans:
+        if isinstance(item, (tuple, list)):
+            label, sp = int(item[0]), int(item[1])
+        else:
+            label = sp = int(item)
         if sp <= 0 or sp >= n_main:
             continue
         a = max(0, sp - window)
@@ -460,7 +554,7 @@ def checkpoint_marks(uv, n_main, cp_spans, w=PREVIEW_W, h=PREVIEW_H, window=3):
         m = math.hypot(du, dv)
         if m < 1e-6:          # degenerate neighbourhood: no usable tangent
             continue
-        out.append((u, v, du / m, dv / m))
+        out.append((label, u, v, du / m, dv / m))
     return out
 
 
@@ -639,10 +733,16 @@ def load_levelinf_json(ldir):
 
 
 def level_checkpoint_spans(ldir):
-    """The track's checkpoint span indices, from LEVELINF checkpoint_count +
-    checkpoint_spans[7] (0x08 / 0x0C, both confirmed live fields). The array is
-    zero-padded beyond the count, so trailing zeros are dropped. Returns [] when
-    the level has no checkpoints or no levelinf."""
+    """The track's LEVELINF checkpoint_count + checkpoint_spans[7] (0x08 / 0x0C).
+    The array is zero-padded beyond the count, so trailing zeros are dropped.
+    Returns [] when the level has no checkpoints or no levelinf.
+
+    [H5 2026-10-02] NOT the race's checkpoint source for a shipped TD5 track --
+    use race_checkpoint_record(). The original reads +0x08 only as an ENABLE
+    flag and takes the thresholds from the exe's own record table; this array
+    additionally leads with the START span, so driving preview ticks off it drew
+    checkpoints the race does not have. Kept because it is still how a custom /
+    auto-generated level declares its own checkpoints."""
     inf = load_levelinf_json(ldir)
     if inf is None:
         p = os.path.join(ldir, "levelinf.dat")
@@ -696,23 +796,37 @@ def is_circuit(strip):
     return math.hypot(a[0] - b[0], a[1] - b[1]) <= med * 6.0
 
 
+def cp_json(marks):
+    """Serialize checkpoint_marks() output. `span` is the span the RACE compares
+    against (reverse numbering on a reverse record), so the runtime can check
+    each tick against td5_game_track_checkpoint_record() and refuse to draw one
+    the race does not have."""
+    return [
+        {"span": int(sp), "u": round(u, 6), "v": round(v, 6),
+         "tu": round(tu, 6), "tv": round(tv, 6)}
+        for (sp, u, v, tu, tv) in marks
+    ]
+
+
 def markers_to_entries(markers, index_key, index_base, name_map, count):
-    """markers: {index: ((su,sv),(eu,ev),circuit[,checkpoints])} keyed by
-    absolute index (pool for TD5, tga for TD6). Produce the JSON entry list for
-    indices in [index_base, index_base+count) that actually have data
-    (zero/placeholder slots are omitted). `checkpoints`, when present, is the
-    checkpoint_marks() list and is emitted as the optional "checkpoints" array."""
+    """markers: {index: ((su,sv),(eu,ev),circuit[,checkpoints[,checkpoints_rev]])}
+    keyed by absolute index (pool for TD5, tga for TD6). Produce the JSON entry
+    list for indices in [index_base, index_base+count) that actually have data
+    (zero/placeholder slots are omitted). `checkpoints` /`checkpoints_rev`, when
+    present, are checkpoint_marks() lists emitted as optional arrays."""
     entries = []
     for i in range(count):
         key = index_base + i
         m = markers.get(key)
         if not m:
             continue
-        if len(m) == 4:
+        cps = cps_rev = None
+        if len(m) == 5:
+            (su, sv), (eu, ev), circ, cps, cps_rev = m
+        elif len(m) == 4:
             (su, sv), (eu, ev), circ, cps = m
         else:
             (su, sv), (eu, ev), circ = m
-            cps = None
         e = {index_key: key}
         nm = name_map.get(key) if name_map else None
         if nm:
@@ -723,11 +837,9 @@ def markers_to_entries(markers, index_key, index_base, name_map, count):
         e["end_v"] = round(float(ev), 6)
         e["circuit"] = 1 if circ else 0
         if cps:
-            e["checkpoints"] = [
-                {"u": round(u, 6), "v": round(v, 6),
-                 "tu": round(tu, 6), "tv": round(tv, 6)}
-                for (u, v, tu, tv) in cps
-            ]
+            e["checkpoints"] = cp_json(cps)
+        if cps_rev:
+            e["checkpoints_rev"] = cp_json(cps_rev)
         entries.append(e)
     return entries
 
@@ -835,10 +947,20 @@ def cmd_render_all(args):
             # [W3 2026-09-29] Checkpoint ticks alongside the start/finish dots,
             # from the SAME projection this preview was just drawn with, so a
             # re-render never silently drops them from the marker file.
+            # [H5 2026-10-02] ...and sourced from the RACE's checkpoint record
+            # (both directions), not from LEVELINF -- see the table block at the
+            # top of this file.
             _c, _s2, _p, uv, _r = preview_projection(strip, **proj_kw)
-            cps = checkpoint_marks(uv, strip.span_count_main,
-                                   level_checkpoint_spans(ldir))
-            markers[pool] = (mk[0], mk[1], circ, cps)
+            ring = strip.span_count_main
+            cps = checkpoint_marks(uv, ring, [
+                sp for (_i, sp) in drawable_checkpoints(
+                    race_checkpoint_record(pool, False), ring, bool(circ))])
+            cps_rev = []
+            if 0 <= pool < len(POOL_SPAN_COUNT_REV) and POOL_SPAN_COUNT_REV[pool] >= 0:
+                cps_rev = checkpoint_marks(uv, ring, [
+                    (sp, ring - 1 - sp) for (_i, sp) in drawable_checkpoints(
+                        race_checkpoint_record(pool, True), ring, bool(circ))])
+            markers[pool] = (mk[0], mk[1], circ, cps, cps_rev)
             print(f"  trak{pool:04d} <- level{lvl:03d} {name:14s} "
                   f"({strip.span_count_main} main + {nb} branch){tag}"
                   f"  {'circuit' if circ else 'P2P'}")
@@ -1007,25 +1129,56 @@ def cmd_checkpoints(args):
             except Exception as ex:
                 print(f"  {index_key} {key} ({name}): ERROR {ex}")
                 continue
-            spans = cp_src if cp_src is not None else level_checkpoint_spans(ldir)
-            if not spans:
+            ring = strip.span_count_main
+            circuit = bool(e.get("circuit"))
+            # [H5 2026-10-02] Source = the RACE's checkpoint record, not
+            # LEVELINF. See the table block at the top of this file for why.
+            if cp_src is not None:
+                # TD6: synthesized banner spans, all intermediate (a TD6 P2P
+                # track finishes on its own separate finish span, and the
+                # circuits ship none), so nothing is dropped beyond the
+                # out-of-ring guard inside checkpoint_marks.
+                fwd_items, rev_items = list(cp_src), []
+                record = list(cp_src)
+            else:
+                record = race_checkpoint_record(key, reverse=False)
+                fwd_items = [sp for (_i, sp)
+                             in drawable_checkpoints(record, ring, circuit)]
+                # A reverse race runs its OWN record, in REVERSE span numbering,
+                # while this preview image is projected from the forward strip:
+                # label with the race's span, project at ring-1-span. Tracks
+                # with no reverse record keep the forward one at race time too,
+                # so they emit no separate list and the runtime reuses 'checkpoints'.
+                rev_items = []
+                if 0 <= key < len(POOL_SPAN_COUNT_REV) and POOL_SPAN_COUNT_REV[key] >= 0:
+                    rev_rec = race_checkpoint_record(key, reverse=True)
+                    rev_items = [(sp, ring - 1 - sp) for (_i, sp)
+                                 in drawable_checkpoints(rev_rec, ring, circuit)]
+            if not fwd_items and not rev_items:
                 e.pop("checkpoints", None)
-                print(f"  {index_key} {key:3d} {name:16s} no checkpoints")
+                e.pop("checkpoints_rev", None)
+                print(f"  {index_key} {key:3d} {name:16s} no ticks "
+                      f"(record {record} -> all start/finish or out of ring {ring})")
                 continue
             uv, resid = recover_uv_mapper(strip, e, start_idx)
             if resid > ORIENT_MATCH_TOL:
                 print(f"  {index_key} {key:3d} {name:16s} ORIENTATION NOT "
                       f"RECOVERED (residual {resid:.4f}) -- left unchanged")
                 continue
-            marks = checkpoint_marks(uv, strip.span_count_main, spans)
-            e["checkpoints"] = [
-                {"u": round(u, 6), "v": round(v, 6),
-                 "tu": round(tu, 6), "tv": round(tv, 6)}
-                for (u, v, tu, tv) in marks
-            ]
+            marks = checkpoint_marks(uv, ring, fwd_items)
+            e["checkpoints"] = cp_json(marks)
             total_cp += len(marks)
+            if rev_items:
+                rmarks = checkpoint_marks(uv, ring, rev_items)
+                e["checkpoints_rev"] = cp_json(rmarks)
+                total_cp += len(rmarks)
+            else:
+                e.pop("checkpoints_rev", None)
             print(f"  {index_key} {key:3d} {name:16s} {len(marks)} ticks "
-                  f"from spans {spans} (resid {resid:.2e})")
+                  f"{[sp for (sp, *_r) in marks]} of record {record} "
+                  f"(ring {ring}, {'circuit' if circuit else 'P2P'}"
+                  f"{', +%d reverse' % len(rev_items) if rev_items else ''}"
+                  f", resid {resid:.2e})")
         cp_note = ("'checkpoints' holds each checkpoint's u,v plus the unit "
                    "local tangent tu,tv in 152x224 image pixels; the frontend "
                    "draws a white tick perpendicular to it.")

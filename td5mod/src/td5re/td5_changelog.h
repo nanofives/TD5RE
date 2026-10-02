@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 2 (track preview checkpoints)" },
+    { CL_ITEM,    "SELECT TRACK now marks the checkpoints the race" },
+    { CL_ITEM,    "  really uses: 4 ticks on a normal track, plus the" },
+    { CL_ITEM,    "  start and finish dots. Circuits show no ticks." },
+    { CL_ITEM,    "BACKWARDS reads the reverse course's own checkpoint" },
+    { CL_ITEM,    "  list, so the ticks stay on the real banners." },
+    { CL_ITEM,    "San Francisco's checkpoint timer is 70 seconds" },
+    { CL_ITEM,    "  again, as it should always have been." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },
     { CL_ITEM,    "Auto tracks load up to a minute faster. A leftover" },
     { CL_ITEM,    "  debug scan no longer runs on every track build." },

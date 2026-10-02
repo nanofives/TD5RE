@@ -1151,24 +1151,45 @@ int s_track_switch_tick = 16; /* 0-15 = animating in, 16 = settled */
  * normalized 0..1 in the 152x224 preview, top-left origin. circuit: LEVELINF
  * DWORD[0] (1=circuit -> single start/finish dot; 0=P2P -> start+end dots that
  * swap with the Forwards/Backwards toggle). */
-/* [W3 2026-09-29] Per-checkpoint ticks. cp_u/cp_v are the checkpoint's position
- * in the same normalized preview space as the start/end dots; cp_tu/cp_tv is the
- * UNIT local road tangent in 152x224 IMAGE pixels (the drawer turns it 90
- * degrees to get the tick direction, after rescaling for the on-screen panel
- * aspect). 7 is the LEVELINF checkpoint_spans[7] ceiling; the JSON field is
- * optional, so a marker file generated before this feature just has cp_count 0
- * and draws no ticks. */
+/* [W3 2026-09-29] Per-checkpoint ticks. u/v are the checkpoint's position in
+ * the same normalized preview space as the start/end dots; tu/tv is the UNIT
+ * local road tangent in 152x224 IMAGE pixels (the drawer turns it 90 degrees to
+ * get the tick direction, after rescaling for the on-screen panel aspect).
+ *
+ * [H5 2026-10-02] Each tick now also carries the SPAN the race compares against,
+ * and a track with its own reverse checkpoint record carries a second list.
+ * Both exist because the ticks are generated from the RACE's checkpoint record
+ * (re/tools/track_preview_render.py, mirroring td5_game_track_checkpoint_record)
+ * instead of from LEVELINF checkpoint_spans[7] as they were in round 0929: that
+ * array leads with the track's START span, so every P2P preview drew a tick the
+ * race has no checkpoint for, plus one on the finish line, and a circuit drew a
+ * tick on its own start/finish dot. The span lets the render path re-check each
+ * tick against the live record and refuse to draw one the race does not have.
+ *
+ * 7 stays the ceiling (a record holds 5; LEVELINF declared up to 7). Both JSON
+ * fields are optional: a marker file generated before this feature has count 0
+ * and draws no ticks, and one with no "checkpoints_rev" reuses the forward list
+ * -- which is also what the race does on a track with no reverse record. */
 #define TD5_TRACK_CP_MAX 7
+typedef struct {
+    uint8_t count;
+    int16_t span[TD5_TRACK_CP_MAX];
+    float   u[TD5_TRACK_CP_MAX],  v[TD5_TRACK_CP_MAX];
+    float   tu[TD5_TRACK_CP_MAX], tv[TD5_TRACK_CP_MAX];
+} TD5_TrackCpList;
 typedef struct {
     float start_u, start_v;
     float end_u, end_v;
     uint8_t circuit;
-    uint8_t cp_count;
-    float cp_u[TD5_TRACK_CP_MAX], cp_v[TD5_TRACK_CP_MAX];
-    float cp_tu[TD5_TRACK_CP_MAX], cp_tv[TD5_TRACK_CP_MAX];
+    TD5_TrackCpList cp;        /* forward-direction ticks */
+    TD5_TrackCpList cp_rev;    /* Backwards ticks; count 0 = reuse cp */
 } TD5_TrackMarker;
 static TD5_TrackMarker s_track_markers[20];
 static int s_track_markers_loaded = 0; /* 0=untried, 1=loaded, -1=unavailable */
+/* [H5 2026-10-02] Last (track, direction) the tick cross-check logged, so the
+ * race-record-vs-preview-ticks line prints once per selection and not per frame. */
+static int s_cp_log_track = -1;
+static int s_cp_log_dir   = -1;
 /* Migrated TD6 tracks use preview TGA numbers >= TD6_PREVIEW_TGA_BASE (trak0090+),
  * outside the 20-entry pool array. Their start/finish markers live in a separate
  * file keyed by (tga - base). Loaded lazily, same projection as their preview PNG. */
@@ -8498,6 +8519,27 @@ static double frontend_json_num(const cJSON *obj, const char *key) {
     return cJSON_IsNumber(n) ? cJSON_GetNumberValue(n) : 0.0;
 }
 
+/* [H5 2026-10-02] Parse one "checkpoints"/"checkpoints_rev" array into a tick
+ * list. A missing/!array node leaves the list empty, which is how an older
+ * marker file (and every circuit, which now ships none) reads. */
+static void frontend_parse_cp_list(const cJSON *arr, TD5_TrackCpList *out) {
+    const cJSON *cp;
+    int n = 0;
+    memset(out, 0, sizeof(*out));
+    if (!cJSON_IsArray(arr)) return;
+    cJSON_ArrayForEach(cp, arr) {
+        if (n >= TD5_TRACK_CP_MAX) break;
+        if (!cJSON_IsObject(cp)) continue;
+        out->span[n] = (int16_t)frontend_json_num(cp, "span");
+        out->u[n]    = (float)frontend_json_num(cp, "u");
+        out->v[n]    = (float)frontend_json_num(cp, "v");
+        out->tu[n]   = (float)frontend_json_num(cp, "tu");
+        out->tv[n]   = (float)frontend_json_num(cp, "tv");
+        n++;
+    }
+    out->count = (uint8_t)n;
+}
+
 /* Parse a trak_markers JSON file into dst[], placing each entry at
  * (<index_key> - index_base). Returns the number of markers placed (>=0), or
  * -1 if the file is absent / unparseable (caller treats that as "unavailable").
@@ -8534,27 +8576,17 @@ static int frontend_parse_track_markers_json(const char *path,
             dst[slot].end_v   = (float)frontend_json_num(el, "end_v");
             dst[slot].circuit = (uint8_t)(cJSON_IsTrue(ci) ||
                 (cJSON_IsNumber(ci) && cJSON_GetNumberValue(ci) != 0.0));
-            /* [W3 2026-09-29] Optional "checkpoints": [{u,v,tu,tv}, ...]. Absent
-             * on a marker file generated before the ticks existed, which just
-             * means no ticks -- everything else parses exactly as before. */
-            {
-                const cJSON *cps = cJSON_GetObjectItemCaseSensitive(el, "checkpoints");
-                const cJSON *cp;
-                int n = 0;
-                dst[slot].cp_count = 0;
-                if (cJSON_IsArray(cps)) {
-                    cJSON_ArrayForEach(cp, cps) {
-                        if (n >= TD5_TRACK_CP_MAX) break;
-                        if (!cJSON_IsObject(cp)) continue;
-                        dst[slot].cp_u[n]  = (float)frontend_json_num(cp, "u");
-                        dst[slot].cp_v[n]  = (float)frontend_json_num(cp, "v");
-                        dst[slot].cp_tu[n] = (float)frontend_json_num(cp, "tu");
-                        dst[slot].cp_tv[n] = (float)frontend_json_num(cp, "tv");
-                        n++;
-                    }
-                    dst[slot].cp_count = (uint8_t)n;
-                }
-            }
+            /* [W3 2026-09-29] Optional "checkpoints": [{span,u,v,tu,tv}, ...].
+             * Absent on a marker file generated before the ticks existed, which
+             * just means no ticks -- everything else parses exactly as before.
+             * [H5 2026-10-02] "checkpoints_rev" is the Backwards list (only on a
+             * track whose reverse race runs its own checkpoint record); "span"
+             * is new and parses as 0 on an older file, which the render path
+             * reads as "unverifiable", not as "span 0". */
+            frontend_parse_cp_list(cJSON_GetObjectItemCaseSensitive(el, "checkpoints"),
+                                   &dst[slot].cp);
+            frontend_parse_cp_list(cJSON_GetObjectItemCaseSensitive(el, "checkpoints_rev"),
+                                   &dst[slot].cp_rev);
             placed++;
         }
     }
@@ -8788,15 +8820,62 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
                  * dots still composite on top where one sits on a checkpoint.
                  * The stored tangent is in 152x224 image px; the panel scales
                  * those axes by pw/152 and ph/224 independently (they differ on
-                 * a non-4:3 window), so scale before taking the perpendicular. */
+                 * a non-4:3 window), so scale before taking the perpendicular.
+                 *
+                 * [H5 2026-10-02] Which ticks: the Backwards list when the
+                 * direction toggle is on (a reverse race runs its OWN record,
+                 * with different spans), and every tick re-checked against the
+                 * live race record so the preview can only ever show a subset of
+                 * the checkpoints the race actually uses. A TD6 / custom / auto
+                 * track has no exe record (count 0) and draws its list as-is. */
                 {
-                    int ci2;
-                    for (ci2 = 0; ci2 < (int)m->cp_count; ci2++) {
-                        frontend_draw_marker_tick(bx + m->cp_u[ci2] * pw,
-                                                  by + m->cp_v[ci2] * ph,
-                                                  m->cp_tu[ci2] * pw / 152.0f,
-                                                  m->cp_tv[ci2] * ph / 224.0f,
+                    const TD5_TrackCpList *cl =
+                        (bwd && m->cp_rev.count > 0) ? &m->cp_rev : &m->cp;
+                    int rec[TD5_TRACK_CP_MAX];
+                    int rec_n = td5_game_track_checkpoint_record(
+                        s_selected_track, bwd, rec, TD5_TRACK_CP_MAX);
+                    int ci2, drawn = 0;
+                    for (ci2 = 0; ci2 < (int)cl->count; ci2++) {
+                        if (rec_n > 0) {
+                            /* ring 0 = "don't range-check here": the generator
+                             * already dropped out-of-ring entries, and the
+                             * frontend has no strip loaded to know the ring. */
+                            int ri, ok = 0;
+                            for (ri = 0; ri < rec_n && !ok; ri++)
+                                ok = (rec[ri] == (int)cl->span[ci2]) &&
+                                     td5_game_checkpoint_is_tick(ri, rec_n, rec[ri],
+                                                                 0, m->circuit);
+                            if (!ok) continue;
+                        }
+                        frontend_draw_marker_tick(bx + cl->u[ci2] * pw,
+                                                  by + cl->v[ci2] * ph,
+                                                  cl->tu[ci2] * pw / 152.0f,
+                                                  cl->tv[ci2] * ph / 224.0f,
                                                   sx, sy);
+                        drawn++;
+                    }
+                    /* One line per (track, direction) so the log shows the race's
+                     * record beside the ticks the preview drew -- the side-by-side
+                     * this feature is verified with. */
+                    if (s_cp_log_track != s_selected_track || s_cp_log_dir != bwd) {
+                        char rb[64], tb[64];
+                        int k, o = 0;
+                        for (k = 0; k < rec_n && o < (int)sizeof(rb) - 8; k++)
+                            o += snprintf(rb + o, sizeof(rb) - (size_t)o,
+                                          "%s%d", k ? "," : "", rec[k]);
+                        if (!rec_n) snprintf(rb, sizeof rb, "-");
+                        o = 0;
+                        for (k = 0; k < (int)cl->count && o < (int)sizeof(tb) - 8; k++)
+                            o += snprintf(tb + o, sizeof(tb) - (size_t)o,
+                                          "%s%d", k ? "," : "", (int)cl->span[k]);
+                        if (!cl->count) snprintf(tb, sizeof tb, "-");
+                        TD5_LOG_I(LOG_TAG,
+                                  "track preview checkpoints: track=%d %s circuit=%d "
+                                  "race_record=[%s] preview_ticks=[%s] drawn=%d",
+                                  s_selected_track, bwd ? "BACKWARDS" : "FORWARDS",
+                                  (int)m->circuit, rb, tb, drawn);
+                        s_cp_log_track = s_selected_track;
+                        s_cp_log_dir   = bwd;
                     }
                 }
                 if (m->circuit) {
