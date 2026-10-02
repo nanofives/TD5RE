@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 2 (camera framing)" },
+    { CL_ITEM,    "The top-down view now breathes with your speed. It" },
+    { CL_ITEM,    "  lifts further away the faster you go and eases back" },
+    { CL_ITEM,    "  down to the old framing as you brake, so you get more" },
+    { CL_ITEM,    "  warning of what is coming at high speed." },
+    { CL_ITEM,    "The furthest chase camera now looks down at the car" },
+    { CL_ITEM,    "  instead of sitting level with it, so the road ahead" },
+    { CL_ITEM,    "  reads much better from the widest view." },
+
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },
     { CL_ITEM,    "Auto tracks load up to a minute faster. A leftover" },
     { CL_ITEM,    "  debug scan no longer runs on every track build." },
