@@ -191,6 +191,25 @@ static int                 s_custom_ps_count;
  * (empty = no PSO creation was in flight). Written only at PSO creation. */
 static char s_pso_crumb[160];
 
+/* [H4 CRASH 2026-10-02] How many PSOs were built with the frame's command list
+ * already open. Printed by Backend_DumpCrashDiag. s_cur_frame lives further
+ * down (next to the draw rings), hence the accessor. */
+static unsigned s_pso_midframe;
+static unsigned s_cur_frame_draws(void);
+
+/* [H4 CRASH 2026-10-02] ALWAYS-ON forensic sink -> log/gpu_d3d_debug.log,
+ * flushed per line so it survives a force-kill.
+ *
+ * NOT WRAPPER_LOG: that is gated behind [Logging] Wrapper, which defaults to 0
+ * ("very verbose: logs every ddraw_wrapper API call"), so anything written
+ * through it is invisible in the configuration people actually play in -- which
+ * is the only configuration this crash has ever happened in. Same lesson the
+ * device-removal post-mortem learned on 2026-09-07 (see Backend_NoteDeviceRemoved:
+ * three removals were investigated with one bare hr= line because the forensics
+ * were opt-in). Reserved for RARE events: heap corruption, a refused PSO, and
+ * the first few mid-frame PSO builds. */
+static void d3d12_forensic(const char *fmt, ...);
+
 /* Shared with d3d12_dxr.c (its blit/composite/denoise PSOs + RT state object). */
 void d3d12_pso_crumb_set(const char *site, const void *bc, SIZE_T len)
 {
@@ -217,7 +236,43 @@ static HRESULT d3d12_create_pso(const char *site, int ps_id, int blend, int ds, 
              site, ps_id, blend, ds, gbuf, (unsigned)pd->VS.BytecodeLength,
              (unsigned)pd->PS.BytecodeLength, (unsigned)h, pd->PS.pShaderBytecode,
              s_pso_count, s_custom_ps_count);
+
+    /* [H4 CRASH 2026-10-02] Validate the desc BEFORE handing it to the runtime.
+     * The 2026-10-01 crash faulted inside CreateGraphicsPipelineState, and the
+     * first thing to rule out next time is "we passed something malformed".
+     * A bytecode pointer that is NULL while the length is non-zero, or a length
+     * that is non-zero while the pointer is NULL, is exactly the shape a
+     * use-after-free of a BackendPixelShader would take (d3d12_resolve_ps
+     * reading a released s_custom_ps[] entry). Refusing the call turns that into
+     * a skipped draw plus a named log line instead of a process-killing fault. */
+    if (!g_d3d12.device) { d3d12_forensic("D3D12 PSO '%s' REFUSED: no device", site); return E_FAIL; }
+    if (!pd->pRootSignature) { d3d12_forensic("D3D12 PSO '%s' REFUSED: null root signature (%s)", site, s_pso_crumb); s_pso_crumb[0] = '\0'; return E_INVALIDARG; }
+    if ((pd->VS.pShaderBytecode == NULL) != (pd->VS.BytecodeLength == 0) ||
+        (pd->PS.pShaderBytecode == NULL) != (pd->PS.BytecodeLength == 0)) {
+        d3d12_forensic("D3D12 PSO '%s' REFUSED: torn shader bytecode vs=%p/%u ps=%p/%u (%s)",
+                       site, pd->VS.pShaderBytecode, (unsigned)pd->VS.BytecodeLength,
+                       pd->PS.pShaderBytecode, (unsigned)pd->PS.BytecodeLength, s_pso_crumb);
+        s_pso_crumb[0] = '\0';
+        return E_INVALIDARG;
+    }
+
+    /* [H4 CRASH 2026-10-02] Creating a PSO while the frame's command list is
+     * OPEN is what the crash log caught us doing (draw 506 of ~850). It is legal
+     * but it is also a multi-millisecond stall in the middle of recording, and
+     * it is the single operation we want timestamped in the next post-mortem.
+     * Counted + logged, not blocked: the alternative (skip the draw) would drop
+     * the first frame of every new effect. */
+    if (g_d3d12.frame_open) {
+        s_pso_midframe++;
+        /* Rate-limited: a pathological cache-miss loop must not fill the disk. */
+        if (s_pso_midframe <= 16)
+            d3d12_forensic("D3D12 PSO '%s' built MID-FRAME at present#%u draw=%u (%s)",
+                           site, (unsigned)g_backend.present_count, s_cur_frame_draws(), s_pso_crumb);
+    }
+
+    d3d12_api_mark("CreateGraphicsPipelineState");
     hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, pd, &IID_ID3D12PipelineState, (void **)out);
+    d3d12_api_done();
     s_pso_crumb[0] = '\0';
     return hr;
 }
@@ -405,6 +460,123 @@ typedef struct {
 static TD5FrameStat s_frame_hist[TD5_FRAME_HIST];
 static unsigned s_frame_hist_head;
 static TD5FrameStat s_cur_frame = { 0, 0, 0, 1e30f, -1e30f, 1e30f, -1e30f, 0 };
+static unsigned s_cur_frame_draws(void) { return s_cur_frame.draws; }
+
+/* ---- D3D12 CALL WATCH ---------------------------------------------------
+ *
+ * [H4 CRASH 2026-10-02] A 10-minute RT HIGH play session died with
+ * 0xC0000005 reading address 0 at D3D12Core.dll+0x1EF94 (main thread,
+ * device_removed=0, present #103344, mid-frame at draw 506 of ~850).
+ *
+ * WHAT WAS PROVEN from that crash.log + a disassembly of D3D12Core:
+ *   - pso_in_flight was NON-EMPTY, and d3d12_create_pso sets that crumb on the
+ *     line before ID3D12Device_CreateGraphicsPipelineState and clears it on the
+ *     line after -- so the faulting call WAS CreateGraphicsPipelineState, for
+ *     "draw ps=16 blend=1 ds=2 gbuf=0" (ps_id 16 = PS_COUNT+8 = the 9th custom
+ *     pixel shader, which the engine log shows was registered one line earlier:
+ *     the procedural FX 'rain' shader, created on the first rain frame).
+ *   - the faulting function (RVA 0x1EF3C..0x1F001) is a hash-map lookup:
+ *     AcquireSRWLockShared -> FNV-1a/hash_combine over a 20-byte key ->
+ *     bucket walk.  RBX and RBP were device+0x9E8 / device+0x860, i.e. the map
+ *     and its lock live INSIDE the ID3D12Device object.
+ *   - the faulting instruction is `cmp (%rcx),%r9` with RCX = node->key, i.e. a
+ *     node already linked into the bucket chain had a NULL key pointer.
+ *     Our own key was dereferenced successfully one instruction earlier, so the
+ *     arguments we passed were NOT the direct cause, and the read was correctly
+ *     serialised under D3D12Core's own shared lock.
+ *   => the runtime's internal cache was already corrupt when we called in.
+ *      The port's malloc/free and the wrapper's HeapAlloc(GetProcessHeap())
+ *      share the process heap with D3D12Core's own allocations, so a heap
+ *      overrun anywhere in TD5RE can damage one of these nodes.  WHICH writer
+ *      corrupts it is NOT proven -- these breadcrumbs exist to name it next time.
+ *
+ * This ring records the last few NON-per-draw D3D12 calls the wrapper makes
+ * (object create/release -- the per-draw traffic is already covered by DRAW
+ * WATCH), plus the one currently in flight.  Cost is a strncpy on calls that
+ * already cost microseconds, so it is in RELEASE builds too: the crash we are
+ * chasing only shows up in long real play sessions, never under a harness. */
+/* 64, not 24: texture create/release is bursty during scenery streaming, so a
+ * short ring fills with one fraction of one frame's texture traffic and loses
+ * the rare shader/PSO events that are the point. 64 * 56 B is ~3.5 KB static. */
+#define TD5_APIMARK_RING 64
+typedef struct { char tag[40]; unsigned present, draws, gen; } TD5ApiMark;
+static TD5ApiMark s_apimark_ring[TD5_APIMARK_RING];
+static unsigned   s_apimark_head, s_apimark_total;
+/* Non-empty while a tracked call has not returned -- names the call directly in
+ * crash.log instead of leaving the next investigator to disassemble D3D12Core. */
+static char       s_api_inflight[40];
+
+/* Ring-only breadcrumb: "this happened", no in-flight claim. Use at object
+ * create/release sites, which have many return paths -- pairing an exit call
+ * onto each of them would rot the first time someone adds an early return. */
+void d3d12_api_note(const char *tag)
+{
+    TD5ApiMark *m = &s_apimark_ring[s_apimark_head % TD5_APIMARK_RING];
+    if (tag) { strncpy(m->tag, tag, sizeof(m->tag) - 1); m->tag[sizeof(m->tag) - 1] = 0; }
+    else m->tag[0] = 0;
+    m->present = (unsigned)g_backend.present_count;
+    m->draws   = s_cur_frame.draws;
+    m->gen     = g_backend.device_generation;
+    s_apimark_head++; s_apimark_total++;
+}
+
+/* Ring + in-flight tag. ONLY for a call bracketed by d3d12_api_done() on every
+ * path, so a non-empty s_api_inflight in crash.log genuinely means "we were
+ * inside this call when the process died". */
+void d3d12_api_mark(const char *tag)
+{
+    d3d12_api_note(tag);
+    if (tag) { strncpy(s_api_inflight, tag, sizeof(s_api_inflight) - 1); s_api_inflight[sizeof(s_api_inflight) - 1] = 0; }
+    else s_api_inflight[0] = '\0';
+}
+void d3d12_api_done(void) { s_api_inflight[0] = '\0'; }
+
+/* ---- PROCESS-HEAP INTEGRITY PROBE ---------------------------------------
+ *
+ * [H4 CRASH 2026-10-02] Opt-in bisection tool for the corruption above.
+ * TD5RE_HEAPCHECK=N runs HeapValidate(GetProcessHeap()) every N presents and
+ * logs LOUDLY the first time it fails, naming the present# -- which turns "it
+ * died after 10 minutes somewhere" into a bounded window to bisect.
+ *
+ * DEFAULT OFF (0): HeapValidate walks every block in the heap, so at TD5RE's
+ * allocation count it costs tens of milliseconds and would wreck frame pacing.
+ * N=600 (~4 s at 165 FPS) is a usable setting for a diagnostic run.
+ * A pass proves nothing (corruption can sit in a free block's user data); a
+ * FAILURE is conclusive and is what we are fishing for. */
+static int      s_heapchk_every = -1;   /* -1 = unread, 0 = off */
+static unsigned s_heapchk_runs;
+static unsigned s_heapchk_fail_present;  /* 0 = never failed */
+static int      s_heapchk_failed;
+
+static void d3d12_heapcheck_tick(void)
+{
+    if (s_heapchk_every < 0) {
+        const char *e = getenv("TD5RE_HEAPCHECK");
+        s_heapchk_every = (e && e[0]) ? atoi(e) : 0;
+        if (s_heapchk_every < 0) s_heapchk_every = 0;
+        if (s_heapchk_every) d3d12_forensic("D3D12 heapcheck ON: HeapValidate every %d presents", s_heapchk_every);
+    }
+    if (!s_heapchk_every || s_heapchk_failed) return;
+    if ((unsigned)g_backend.present_count % (unsigned)s_heapchk_every) return;
+    s_heapchk_runs++;
+    if (!HeapValidate(GetProcessHeap(), 0, NULL)) {
+        s_heapchk_failed = 1;
+        s_heapchk_fail_present = (unsigned)g_backend.present_count;
+        d3d12_forensic("D3D12 *** PROCESS HEAP CORRUPT *** first seen at present#%u "
+                       "(after %u clean checks, every %d presents) -- see the D3D12 CALL WATCH "
+                       "in crash.log for the surrounding object traffic",
+                       s_heapchk_fail_present, s_heapchk_runs - 1, s_heapchk_every);
+    } else if (s_heapchk_runs == 1 || (s_heapchk_runs % 64) == 0) {
+        /* Liveness heartbeat. A probe that only ever logs on failure is
+         * indistinguishable from a probe that never ran -- which is exactly how
+         * the first cut of these diagnostics went out through WRAPPER_LOG and
+         * printed nothing. The first check and every 64th prove it is alive
+         * without filling the log. */
+        d3d12_forensic("D3D12 heapcheck: clean (check #%u at present#%u)",
+                       s_heapchk_runs, (unsigned)g_backend.present_count);
+    }
+}
+
 #define TD5_PRESENT_SENTINEL 0xFFFFu
 
 void Backend_NoteVerts(const void *verts, unsigned vert_count, unsigned stride)
@@ -713,6 +885,8 @@ void Backend_NotePresent(void)
     s_cur_frame.min_x = 1e30f; s_cur_frame.max_x = -1e30f;
     s_cur_frame.min_y = 1e30f; s_cur_frame.max_y = -1e30f;
     s_cur_frame.nan_verts = 0;
+
+    d3d12_heapcheck_tick();   /* no-op unless TD5RE_HEAPCHECK=N */
 }
 
 /* Shared ring writer. `f` is an already-open stream; `tag` labels the dump. */
@@ -752,6 +926,17 @@ static void d3d12_write_draw_ring(FILE *f, const char *tag)
         for (i = 0; i < rn; i++) {
             const TD5RTMark *m = &s_rtmark_ring[(s_rtmark_head - rn + i) % TD5_RTMARK_RING];
             fprintf(f, "  [%u] RTMARK:%s present#%u gen=%u\n", i, m->tag, m->present, m->gen);
+        }
+    }
+    /* [H4 CRASH 2026-10-02] The D3D12 object-lifetime traffic around the fault.
+     * Read it together with d3d12_call_in_flight above: that names the call we
+     * were inside, this names what ran just before it. */
+    if (s_apimark_total) {
+        unsigned an = s_apimark_total < TD5_APIMARK_RING ? s_apimark_total : TD5_APIMARK_RING;
+        fprintf(f, "==== D3D12 CALL WATCH (last %u non-draw calls; total=%u) ====\n", an, s_apimark_total);
+        for (i = 0; i < an; i++) {
+            const TD5ApiMark *m = &s_apimark_ring[(s_apimark_head - an + i) % TD5_APIMARK_RING];
+            fprintf(f, "  [%u] %s present#%u draw=%u gen=%u\n", i, m->tag, m->present, m->draws, m->gen);
         }
     }
 }
@@ -1822,6 +2007,7 @@ static BackendTexture *d3d12_tex_create(UINT w, UINT h, DXGI_FORMAT fmt, int rt)
     HRESULT hr;
 
     if (!g_d3d12.device || w == 0 || h == 0) return NULL;
+    d3d12_api_note("tex_create");   /* [H4 CRASH] object-lifetime breadcrumb */
     bt = (BackendTexture *)calloc(1, sizeof(*bt));
     if (!bt) return NULL;
 
@@ -2223,6 +2409,14 @@ static void d3d12_bt_recreate_from_init(BackendTexture **pbt, UINT w, UINT h,
 static void d3d12_diag(const char *fmt, ...)
 {
     FILE *f = fopen("log/d3d12_init.log", "a");
+    if (f) { va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap); fputc('\n', f); fflush(f); fclose(f); }
+}
+
+/* [H4 CRASH 2026-10-02] See the forward declaration for why this is not
+ * WRAPPER_LOG. Shares gpu_d3d_debug.log with the device-removal post-mortem. */
+static void d3d12_forensic(const char *fmt, ...)
+{
+    FILE *f = fopen("log/gpu_d3d_debug.log", "a");
     if (f) { va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap); fputc('\n', f); fflush(f); fclose(f); }
 }
 
@@ -3258,6 +3452,7 @@ BackendPixelShader *Backend_CreatePixelShader(const void *bytecode, size_t len)
     BackendPixelShader *ps;
     void *copy;
     if (!bytecode || !len) return NULL;
+    d3d12_api_note("CreatePixelShader");   /* [H4 CRASH] object-lifetime breadcrumb */
     ps = (BackendPixelShader *)calloc(1, sizeof(*ps));
     if (!ps) return NULL;
     copy = malloc(len);
@@ -3333,11 +3528,18 @@ void Backend_DumpCrashDiag(const char *path)
         "  device_generation=%u device_removed=%d present_count=%lu\n"
         "  cur_tex=%p windowed=%d rt=%dx%d frame_index=%u\n"
         "  diag_context=\"%s\"\n"
-        "  pso_in_flight=\"%s\"\n",
+        "  pso_in_flight=\"%s\"\n"
+        "  d3d12_call_in_flight=\"%s\"\n"
+        "  frame_open=%d pso_built_midframe=%u npso=%d ncustom=%d\n"
+        "  heapcheck=%s runs=%u first_fail_present=%u\n",
         (void *)g_d3d12.device, (void *)g_d3d12.queue, (void *)g_d3d12.swapchain,
         g_backend.device_generation, g_backend.device_removed, g_backend.present_count,
         (void *)s_cur_tex, g_backend.windowed, g_backend.width, g_backend.height,
-        g_d3d12.frame_index, g_backend.diag_context, s_pso_crumb);
+        g_d3d12.frame_index, g_backend.diag_context, s_pso_crumb,
+        s_api_inflight,
+        g_d3d12.frame_open, s_pso_midframe, s_pso_count, s_custom_ps_count,
+        s_heapchk_every > 0 ? (s_heapchk_failed ? "CORRUPT" : "clean") : "off",
+        s_heapchk_runs, s_heapchk_fail_present);
     d3d12_write_draw_ring(f, "SEH crash");
     fflush(f); fclose(f);
 }
@@ -3491,6 +3693,7 @@ void Backend_ReleasePixelShader(BackendPixelShader *ps)
 {
     int ci;
     if (!ps) return;
+    d3d12_api_note("ReleasePixelShader");   /* [H4 CRASH] object-lifetime breadcrumb */
     ci = ps->id - PS_COUNT;
     if (ci >= 0 && ci < s_custom_ps_count && s_custom_ps[ci] == ps) s_custom_ps[ci] = NULL;
     free((void *)ps->bc);
@@ -3751,6 +3954,7 @@ void Backend_TextureRelease(BackendTexture *bt)
 {
     if (!bt) return;
     if (InterlockedDecrement(&bt->ref) <= 0) {
+        d3d12_api_note("tex_release");   /* [H4 CRASH] object-lifetime breadcrumb */
         if (bt == s_cur_tex) s_cur_tex = NULL;
         /* Defer the GPU resource free until the in-flight frame that may still
          * reference this texture (e.g. the mid-frame recreate path) completes.

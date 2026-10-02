@@ -49,6 +49,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Cars no longer float above the asphalt. The tyres" },
     { CL_ITEM,    "  now meet the road instead of hovering a quarter" },
     { CL_ITEM,    "  of a wheel above it, on every car and track." },
+    { CL_DATE,    "October 2 (crash forensics)" },
+    { CL_ITEM,    "A long race that dies inside the graphics driver now" },
+    { CL_ITEM,    "  names the call it died in, and lists the texture and" },
+    { CL_ITEM,    "  shader work that ran just before it. No change to how" },
+    { CL_ITEM,    "  the game plays." },
+    { CL_ITEM,    "Malformed pipeline builds are refused and logged rather" },
+    { CL_ITEM,    "  than handed to the driver." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },

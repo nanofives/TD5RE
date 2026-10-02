@@ -646,6 +646,7 @@ void d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMAT
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, res, &srvd,
         dxr_cpu(g_dxr.heap, DXR_BINDLESS_BASE + index));
     g_dxr.bindless_res[index] = (const void *)res;
+    d3d12_api_note("bindless_register");   /* [H4 CRASH] object-lifetime breadcrumb */
     { static int n = 0; if (n < 8) { n++; dxr_log("bindless register page %u (res %p)", index, (void *)res); } }
 }
 
@@ -667,6 +668,7 @@ void d3d12_dxr_unregister_texture(ID3D12Resource *res)
     D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
     unsigned i;
     if (!res) return;
+    d3d12_api_note("bindless_unregister");   /* [H4 CRASH] object-lifetime breadcrumb */
     ZeroMemory(&srvd, sizeof(srvd));
     srvd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
