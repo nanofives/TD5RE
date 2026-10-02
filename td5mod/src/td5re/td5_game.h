@@ -130,6 +130,18 @@ int td5_game_get_total_actor_count(void);
 int td5_game_get_racer_count(void);   /* racer slots only (no traffic/scenery) */
 int td5_game_get_minimap_checkpoint_count(void);
 int td5_game_get_minimap_checkpoint_span(int idx);
+/* [H5 2026-10-02] The race's checkpoint record for a SCHEDULE track, resolved
+ * without a loaded race so the SELECT TRACK preview can tick exactly the
+ * checkpoints the race will use (and the reverse record on Backwards).
+ * Returns the entry count (0 = no record); out_spans gets the span thresholds
+ * in record order. Not every entry is a drawable tick -- ask the predicate. */
+int td5_game_track_checkpoint_record(int track_index, int reverse,
+                                     int *out_spans, int max_spans);
+/* Is record entry idx a drawable intermediate checkpoint? Excludes the P2P
+ * finish (last entry), the circuit lap line (first entry) and any span outside
+ * [1, ring) -- all three are either drawn as a dot or inert at race time. */
+int td5_game_checkpoint_is_tick(int idx, int count, int span, int ring,
+                                int is_circuit);
 int td5_game_get_player_lap(int slot);
 int td5_game_get_slot_span(int slot);   /* live track_span_normalized (+0x82) for a slot, 0 if none */
 int td5_game_get_slot_heaviness_q8(int slot); /* car heaviness Q8 (0x100=median, higher=heavier), 0 if none */

@@ -8409,6 +8409,13 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
                 const int ci = st->cp_span[k];
                 int a, b;
                 if (ci <= 0 || ci >= s_at_pts_n) continue;
+                /* [H5 2026-10-02] tg_checkpoint_spans puts its LAST checkpoint
+                 * exactly on the finish span (that crossing is what ends the
+                 * race), so ticking it stamped a bar under the checkered finish
+                 * dot. Same rule the shipped tracks follow: the finish is a dot,
+                 * not a tick. The short-ring fallback branch places no
+                 * checkpoint on the finish, so this drops nothing there. */
+                if (st->finish_span > 0 && ci == st->finish_span) continue;
                 a = (ci - 2 >= 0) ? ci - 2 : 0;
                 b = (ci + 2 < s_at_pts_n) ? ci + 2 : s_at_pts_n - 1;
                 if (b <= a) continue;

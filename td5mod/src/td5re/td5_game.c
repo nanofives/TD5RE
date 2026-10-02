@@ -478,7 +478,11 @@ static int32_t s_levelinf_span_count;        /* +0x58: track ring length (redund
  * with the sequential record order. */
 static const uint16_t k_checkpoint_table[40][12] = {
     {5,25659,  869,15360, 1511,11520, 2061,15360, 2618,10240, 3074,    0}, /* 0  ← sched 10 Keswick */
-    {5,25659,  826,11520, 1429, 5120, 1652, 7680, 1926,15360, 2516,    0}, /* 1  ← sched 11 SanFrancisco */
+    /* [H5 2026-10-02] initial_time was 25659 here; the original has 17979
+     * (verified against original/TD5_d3d.exe @ 0x0046CBB0 + 1*24). A stray 25659
+     * (record 0's value) gave forward San Francisco a 100 s checkpoint timer
+     * instead of 70 s. Reachable: sched 11 -> pool 1 -> record 1. */
+    {5,17979,  826,11520, 1429, 5120, 1652, 7680, 1926,15360, 2516,    0}, /* 1  ← sched 11 SanFrancisco */
     {5,20539,  768,17920, 1379,16640, 2090,16640, 2776,11520, 3221,    0}, /* 2  ← sched 12 Bern */
     {5,17979,  623,12800, 1175,15360, 1751, 8960, 2181, 8960, 2552,    0}, /* 3  ← sched 13 Kyoto */
     {5,17979,  747, 7680, 1006,12800, 1533,14080, 1978,17920, 2754,    0}, /* 4  ← sched 14 Washington */
@@ -508,8 +512,12 @@ static const uint16_t k_checkpoint_table[40][12] = {
     {5,30779,  116,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*28 ← sched  5 Newcastle */
     {1,30779,  204,    0,    0,    0,    0,    0,    0,    0,    0,    0}, /*29 */
     {1,30779,  204,    0,    0,    0,    0,    0,    0,    0,    0,    0}, /*30 */
-    {5,30779,  119,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*31 */
-    {5,30779,   56,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*32 */
+    /* [H5 2026-10-02] first span was 119 / 56; the original has 106 / 25.
+     * Unreachable records (no pool row resolves to 31 or 32), so this is a
+     * transcription correction only -- but the table is documented as a
+     * byte-faithful mirror, so it has to actually be one. */
+    {5,30779,  106,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*31 */
+    {5,30779,   25,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*32 */
     {5,30779,  119,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*33 */
     {5,30779,   56,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*34 */
     {5,30779,  116,10240, 1511,11520, 2061,12800, 2618,14080, 3120,    0}, /*35 */
@@ -915,6 +923,79 @@ int td5_game_get_minimap_checkpoint_span(int idx)
     if (g_active_td6_level > 0 && s_td6_cp_count > 0)
         return s_td6_cp_spans[idx];
     return (int)s_active_checkpoint.checkpoints[idx].span_threshold;
+}
+
+/* [H5 2026-10-02] The race's checkpoint spans for a SCHEDULE track index, for
+ * callers that have no race loaded -- the SELECT TRACK preview, which has to
+ * tick exactly the checkpoints the race will use.
+ *
+ * Resolved the same three steps init_race_checkpoints uses, so there is one
+ * answer and not two:
+ *   k_schedule_to_checkpoint_index[track]        (forward), or
+ *   td5_asset_resolve_checkpoint_record_index()  (reverse: its own record)
+ *   -> k_checkpoint_table[record]                (spans + bonuses)
+ * All three tables are byte-verified against the original binary: the record
+ * table [CONFIRMED @ 0x0046CBB0], the schedule->pool map [CONFIRMED @
+ * 0x00466894], the forward/reverse pool->record maps [CONFIRMED @ 0x00466D50 /
+ * 0x00466E3C].
+ *
+ * Returns the raw record entry count (0 when the track has no record, e.g. the
+ * drag strip or a custom/auto slot past the 19 schedule rows). out_spans gets
+ * the span thresholds in record order. The entries are NOT all drawable
+ * checkpoints -- see td5_game_checkpoint_is_tick below. */
+int td5_game_track_checkpoint_record(int track_index, int reverse,
+                                     int *out_spans, int max_spans)
+{
+    int record_idx = -1;
+    int n, i;
+
+    if (!out_spans || max_spans <= 0) return 0;
+    if (track_index < 0 ||
+        track_index >= (int)(sizeof(k_schedule_to_checkpoint_index) /
+                             sizeof(k_schedule_to_checkpoint_index[0])))
+        return 0;
+
+    record_idx = (int)k_schedule_to_checkpoint_index[track_index];
+    if (reverse) {
+        /* Reverse races run their OWN record (different spans AND a different
+         * initial time), exactly as the race path does. A track with no reverse
+         * data resolves to -1 there and keeps the forward record; mirror that
+         * rather than inventing a mapping. */
+        int rev_rec = td5_asset_resolve_checkpoint_record_index(track_index, 1);
+        if (rev_rec >= 0) record_idx = rev_rec;
+    }
+    if (record_idx < 0 || record_idx >= 40) return 0;
+
+    n = (int)k_checkpoint_table[record_idx][0];
+    if (n > 5) n = 5;                 /* the record holds 5 (span,bonus) pairs */
+    if (n > max_spans) n = max_spans;
+    for (i = 0; i < n; i++)
+        out_spans[i] = (int)k_checkpoint_table[record_idx][2 + 2 * i];
+    return n;
+}
+
+/* [H5 2026-10-02] Is record entry `idx` of `count` a checkpoint the preview
+ * should tick, given the ring length and whether the track is a circuit?
+ *
+ * Two entries in a record are NOT intermediate checkpoints and must not get a
+ * tick, because they are already drawn as marker DOTS:
+ *   - point-to-point: the LAST entry is the finish line (it is the entry whose
+ *     time_bonus is 0 in every shipped record, and crossing it is what ends the
+ *     race),
+ *   - circuit: the FIRST entry is the lap / start-finish line (a circuit race
+ *     ends on laps, not on checkpoints).
+ * Entries outside [1, ring) are inert at race time too: the shipped circuit
+ * records carry four spans copied from Keswick (1511/2061/2618/3120) that sit
+ * far past every circuit's ring, and the HUD minimap already drops them the
+ * same way (minimap_emit_checkpoint_dash). */
+int td5_game_checkpoint_is_tick(int idx, int count, int span, int ring,
+                                int is_circuit)
+{
+    if (idx < 0 || idx >= count) return 0;
+    if (span <= 0) return 0;
+    if (ring > 0 && span >= ring) return 0;
+    if (is_circuit) return idx != 0;
+    return idx != count - 1;
 }
 
 static void set_countdown_indicator_state(int value);
