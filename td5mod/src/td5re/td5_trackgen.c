@@ -4625,7 +4625,7 @@ int td5_trackgen_prepare_race(int restart, int streamed)
      * from one build into the next. Deliberately NOT streamed: the point is to
      * compare two complete builds, and a streamed build writes no MODELS.DAT. */
     if (td5_env_flag_off("TD5RE_TG_DOUBLE_BUILD")) {
-        unsigned int pinned = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+        unsigned int pinned = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
         _putenv_s("TD5RE_AUTOTRACK_REUSE", "0");
         td5_trackgen_regenerate(seed ? seed : pinned);
         return td5_trackgen_regenerate(seed ? seed : pinned);
@@ -4674,8 +4674,10 @@ int td5_trackgen_regenerate(unsigned int seed)
      * track. Without this any A/B measurement compares two different random
      * roads and attributes the difference to whatever knob was changed. */
     if (seed == 0) {
-        int pinned = td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
-        seed = pinned ? (unsigned int)pinned
+        const unsigned int pinned = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
+        if (pinned)
+            TD5_LOG_I(LOG_TAG, "trackgen: seed pinned by TD5RE_AUTOTRACK_SEED = %u", pinned);
+        seed = pinned ? pinned
                       : (unsigned int)td5_plat_time_ms() * 2654435761u
                         + 0x9E3779B9u;
     }
