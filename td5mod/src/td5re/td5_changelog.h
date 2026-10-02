@@ -45,6 +45,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "The furthest chase camera now looks down at the car" },
     { CL_ITEM,    "  instead of sitting level with it, so the road ahead" },
     { CL_ITEM,    "  reads much better from the widest view." },
+    { CL_DATE,    "October 2 (the car sits on the road again)" },
+    { CL_ITEM,    "Cars no longer float above the asphalt. The tyres" },
+    { CL_ITEM,    "  now meet the road instead of hovering a quarter" },
+    { CL_ITEM,    "  of a wheel above it, on every car and track." },
+    { CL_BLANK,   "" },
 
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },
     { CL_ITEM,    "Auto tracks load up to a minute faster. A leftover" },
