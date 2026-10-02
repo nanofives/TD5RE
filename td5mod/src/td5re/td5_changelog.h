@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },
+    { CL_ITEM,    "Auto tracks load up to a minute faster. A leftover" },
+    { CL_ITEM,    "  debug scan no longer runs on every track build." },
     { CL_ITEM,    "Traffic no longer thins out after the first few" },
     { CL_ITEM,    "  corners. Cars you have already passed now give up" },
     { CL_ITEM,    "  their place, so new ones keep appearing ahead of" },

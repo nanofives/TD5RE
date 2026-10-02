@@ -1532,7 +1532,14 @@ double tg_road_node_water_y(int i)
  * road. Reports the plane's source (sea vs river surface), its bounding centre
  * + radius (so the picked e<N> mesh can be matched), and the worst offender
  * node with its span distance (|j-si| large = the plane reached a DIFFERENT
- * part of the loop = an extent defect, not a height one). Gated, read-only. */
+ * part of the loop = an extent defect, not a height one). Gated, read-only.
+ *
+ * [LOAD PERF 2026-10-01] OPT-IN (TD5RE_R22_WATER_DIAG=1). It was gated with
+ * td5_env_flag_on, which is 1 when the variable is UNSET, so it ran on every
+ * build. The scan is O(wet span-sides x all spans) and calls tg_facade_stands
+ * (several uncached getenv reads) per pair: 62 s of a 66 s "Generating auto
+ * track" splash on a 2669-span track. It only logs, so the generated level is
+ * byte-identical with it off (all 9 level090 files, streamed + synchronous). */
 static int tg_r22_pt_in_quad(double x, double z,
                              const double *px, const double *pz)
 {
@@ -1550,7 +1557,10 @@ static void tg_r22_water_diag(const TG_NodeList *nl)
 {
     const double sea = tg_world_sea_y();
     int si;
-    if (!td5_env_flag_on("TD5RE_R22_WATER_DIAG")) return;
+    if (!td5_env_flag_off("TD5RE_R22_WATER_DIAG")) {
+        TD5_LOG_I(LOG_TAG, "trackgen: [R22 WDIAG] skipped (opt-in: TD5RE_R22_WATER_DIAG=1)");
+        return;
+    }
     TD5_LOG_I(LOG_TAG, "trackgen: [R22 WDIAG] sea level %.0f, extent %d, "
               "spans %d", sea, (int)TD5_TG_WATER_EXTENT, nl->count);
     for (si = 0; si + 1 < nl->count && si < s_shore_n - 1; si++) {
