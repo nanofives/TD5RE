@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 2 (the car sits on the road again)" },
+    { CL_ITEM,    "Cars no longer float above the asphalt. The tyres" },
+    { CL_ITEM,    "  now meet the road instead of hovering a quarter" },
+    { CL_ITEM,    "  of a wheel above it, on every car and track." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 1 (traffic keeps coming all race)" },
     { CL_ITEM,    "Auto tracks load up to a minute faster. A leftover" },
     { CL_ITEM,    "  debug scan no longer runs on every track build." },

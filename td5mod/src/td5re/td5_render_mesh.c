@@ -3252,6 +3252,63 @@ void td5_render_actors_for_view(int view_index)
                 render_pos.x = interp_x * (1.0f / 256.0f);
                 render_pos.y = interp_y * (1.0f / 256.0f);
                 render_pos.z = interp_z * (1.0f / 256.0f);
+
+                /* [H3 FLOAT INSTRUMENT 2026-10-02] Measure the rendered tyre
+                 * bottom against the road surface. Opt-in: TD5RE_FLOATDBG=1.
+                 * Everything here mirrors the wheel draw in
+                 * render_vehicle_wheels_unified(): body-local wheel centre =
+                 * wheel_display_angles[w], tyre half-height = rim_radius
+                 * (cardef+0x82 * 195/256), body->world Y = row 1 of disp_mat.
+                 * Road surface comes from wheel_contact_pos[w].y, which
+                 * refresh_wheel_contacts snaps to ground_y for every grounded
+                 * wheel (td5_physics_suspension.c:3740). Reads disp_mat, so the
+                 * numbers are only meaningful for vehicle_mode==0 actors (the
+                 * vehicle_mode!=0 draw below uses actor->rotation_matrix). */
+                static int s_floatdbg = -1;
+                if (s_floatdbg < 0) s_floatdbg = td5_env_flag_off("TD5RE_FLOATDBG");
+                if (s_floatdbg && slot >= 0 && slot < 4) {
+                    static int s_fd_div[4] = {0,0,0,0};
+                    if ((s_fd_div[slot]++ % 30) == 0 && actor->car_definition_ptr) {
+                        int16_t rr = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
+                        float rim = (rr > 0) ? (float)rr * (195.0f / 256.0f) : 0.0f;
+                        float m3 = disp_mat[3], m4 = disp_mat[4], m5 = disp_mat[5];
+                        char buf[512]; int n = 0;
+                        for (int w = 0; w < 4; w++) {
+                            float wx = (float)actor->wheel_display_angles[w][0];
+                            float wy = (float)actor->wheel_display_angles[w][1];
+                            float wz = (float)actor->wheel_display_angles[w][2];
+                            wy -= td5_render_wheel_ground_drop(actor, w);
+                            /* world Y of the drawn wheel centre */
+                            float cy = render_pos.y + wx * m3 + wy * m4 + wz * m5;
+                            /* Lowest point of the tyre disc. Measured 2026-10-02
+                             * on Moscow: body-local -Y points at the road (the
+                             * contact probe sits at wheel_display_angles.y minus
+                             * susp_offset and lands exactly on ground_y), so the
+                             * tyre bottom is centre MINUS rim along world Y. */
+                            float span = sqrtf(m4 * m4 + m5 * m5);
+                            float bot = cy - rim * span;
+                            float gnd = (float)actor->wheel_contact_pos[w].y / 256.0f;
+                            /* positive = tyre bottom is ABOVE the road (float) */
+                            int left = (int)sizeof(buf) - n;
+                            if (left <= 1) break;
+                            int got = snprintf(buf + n, (size_t)left,
+                                               " w%d[wy=%d cy=%.1f bot=%.1f gnd=%.1f float=%+.1f]",
+                                               w, (int)actor->wheel_display_angles[w][1],
+                                               cy, bot, gnd, bot - gnd);
+                            /* snprintf returns the WOULD-BE length; clamp so the
+                             * next iteration's `left` can never go negative. */
+                            n += (got < 0) ? 0 : ((got >= left) ? (left - 1) : got);
+                        }
+                        TD5_LOG_I("render",
+                                  "FLOATDBG slot=%d r=%d rp_y=%.1f wpy=%.1f rim=%.1f drop=%.1f "
+                                  "m=[%.3f %.3f %.3f] mask=0x%02X span=%d%s",
+                                  slot, (int)rr,
+                                  render_pos.y, (float)actor->world_pos.y / 256.0f, rim,
+                                  td5_render_wheel_ground_drop(actor, 0),
+                                  m3, m4, m5, (unsigned)actor->wheel_contact_bitmask,
+                                  (int)actor->track_span_raw, buf);
+                    }
+                }
             }
 
             /* Original (0x40C1E2-0x40C25E): vehicle_mode==0 builds an

@@ -625,6 +625,8 @@ static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
 void render_vehicle_shadow_quad(const TD5_Actor *actor);
 void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 void render_vehicle_wheels_unified(TD5_Actor *actor, int slot);  /* wheel overhaul */
+/* [H3 FLOAT FIX] body-local Y drop that re-seats the drawn tyre on the road. */
+float td5_render_wheel_ground_drop(const TD5_Actor *actor, int wheel);
 int  wheel_overhaul_enabled(void);
 int  wheel_traffic_enabled(void);
 /* [W5 2026-09-29] takes the body mesh so the lamps can snap to real geometry

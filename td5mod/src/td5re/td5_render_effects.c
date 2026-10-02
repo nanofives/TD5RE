@@ -29,6 +29,7 @@
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
+#include "td5_fp.h"       /* FP_TRUNC: shared 24.8 fixed-point idiom */
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -2445,6 +2446,66 @@ static float wheel_arch_travel_frac(void) {
     return cached;
 }
 
+/* [H3 FLOAT FIX 2026-10-02] Render-only drop that re-seats the drawn tyre on the
+ * road. Measured on Moscow (slot 0, Viper, cardef+0x82 = 152):
+ *
+ *   ground_y                              -3408.0   (track surface at the wheel)
+ *   world_pos.y                           -3181.0   chassis, 227.0 above ground
+ *   render_pos.y                          -3145.0   chassis + the +36 render lift
+ *   wheel_display_angles[w][1]             -120     body-local wheel centre
+ *   drawn wheel centre                    -3265.0   = ground + 143.0
+ *   rim_radius (r * 195/256)                115.7
+ *   drawn tyre bottom                     -3380.7   = ground + 27.3  <-- FLOATS
+ *
+ * Two render-side terms stack between the sim's contact patch and the drawn tyre:
+ *
+ *  1. The chassis render lift. td5_render_mesh.c applies the original's
+ *     g_trackHeightBaseOffset (-36, -18 under replay playback) to the racer's
+ *     render position [CONFIRMED @ 0x40C1C5-0x40C1D7]. Measured effect: it moves
+ *     the drawn car 36 units AWAY from the road (render_pos.y - world_pos.y =
+ *     +36 while the wheel sits at a more negative Y than the chassis, so -Y is
+ *     the road direction). The wheels share that transform, exactly as in the
+ *     original, so they are lifted with the body.
+ *
+ *  2. The sim's own tyre radius is susp_offset = cardef+0x82 * 0xB5/256
+ *     (= r * 181/256, i.e. r/sqrt(2)) -- that is the distance from the wheel
+ *     hardpoint down to the contact probe that refresh_wheel_contacts snaps onto
+ *     ground_y (td5_physics_suspension.c:3419-3442, :3740). The port draws a
+ *     CIRCLE of rim_radius = r * 195/256 instead, 14/256*r larger.
+ *
+ * The original got away with (1) because RenderVehicleWheelBillboards @0x00446f00
+ * does not draw a circle: its quad corners are (+-cos*r, +-sin*r) [CONFIRMED @
+ * 0x00446f00, local_cc[] built from CosFixed12bit/SinFixed12bit * *(short*)(cdef
+ * + 0x82)], i.e. a SQUARE of half-diagonal r that rolls with the wheel. Its
+ * silhouette reaches r = 152 at the diagonal, which covers the 36-unit lift. The
+ * port's fixed-radius circle (115.7) cannot, so the gap is permanently visible.
+ *
+ * Fix: lower the DRAWN wheel centre by (lift + susp_offset - rim_radius) so the
+ * tyre bottom lands on the contact probe. Render-only -- it touches only the
+ * local wy fed to wheel_project, never actor state, the sim or the golden trace.
+ * Racer slots only (traffic has no cardef and its synth stance is tuned apart).
+ * TD5RE_WHEEL_GROUND_FIX=0 reverts to the floating placement. */
+static int wheel_ground_fix_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_GROUND_FIX"); }
+    return cached;
+}
+
+float td5_render_wheel_ground_drop(const TD5_Actor *actor, int wheel)
+{
+    (void)wheel;   /* same for all four wheels: both terms are per-car, not per-wheel */
+    if (!actor || !actor->car_definition_ptr || !wheel_ground_fix_enabled())
+        return 0.0f;
+    int16_t r = *(int16_t *)((uint8_t *)actor->car_definition_ptr + 0x82);
+    if (r <= 0) return 0.0f;
+    /* susp_offset: same integer form the physics uses (href * 0xB5) >> 8 */
+    float susp_offset = (float)FP_TRUNC((int32_t)r * 0xB5);
+    float rim_radius  = (float)r * WHEEL_RADIUS_SCALE;
+    float lift        = td5_input_is_playback_active() ? 18.0f : 36.0f;
+    float drop        = lift + susp_offset - rim_radius;
+    return (drop > 0.0f) ? drop : 0.0f;
+}
+
 /* Per-slot synthesized wheel-spin phase (BUG 3b). Advanced once per sim tick by
  * the traffic actor's longitudinal_speed so it is independent of viewport count
  * and frame rate, and fully deterministic (netplay/replay safe). Stored in the
@@ -2687,6 +2748,13 @@ void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
             float ceil_y = (float)rest_y + rim_radius * wheel_arch_travel_frac();
             if (wy > ceil_y) wy = ceil_y;
         }
+
+        /* [H3 FLOAT FIX 2026-10-02] Re-seat the drawn tyre on the road. Applied
+         * AFTER the arch ceiling so the clamp keeps operating on the suspension
+         * travel it was written for, not on the constant ground correction.
+         * See td5_render_wheel_ground_drop() for the measurement + derivation. */
+        if (!use_synth)
+            wy -= td5_render_wheel_ground_drop(actor, w);
 
         float wheel_halfw = axle_halfw;
         /* [BUG 3a] Pull a traffic wheel inboard until its outer tyre face sits at
