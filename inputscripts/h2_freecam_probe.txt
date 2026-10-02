@@ -1,0 +1,25 @@
+# H2 FREECAM probe (dev): accelerate, enter the dev free cam with throttle still
+# held, fly for ~10 s, exit back to the pause menu, CONTINUE, then quit cleanly
+# so race.log flushes. Pause menu opens on CONTINUE (row 3); one DOWN reaches
+# FREE CAMERA (row 4, dev builds only).
+sync race
+
+0    log PHASE accelerate
+0    throttle 1
+
+420  log PHASE pause-open
+420  key esc press
+
+450  key down press
+
+480  log PHASE freecam-enter
+480  key enter press
+
+1080 log PHASE freecam-exit
+1080 key esc press
+
+1140 log PHASE continue-resume
+1140 key enter press
+
+1380 log PHASE quit
+1380 quit

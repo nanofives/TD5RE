@@ -7869,6 +7869,27 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
 
 static void frame_interpolate(int net_lockstep, int ticks_this_frame)
 {
+#ifndef TD5RE_RELEASE
+    /* [FREE CAMERA PROBE] Dev diagnostic for "does the car move while flying".
+     * Logs slot 0's authoritative sim pose (world_pos), the velocity the body
+     * mesh is extrapolated by, the interpolated render_pos every non-mesh
+     * consumer reads, and the fraction driving both. Off unless
+     * TD5RE_FREECAM_PROBE=1, so a normal fly-around costs one branch. */
+    if (td5_camera_freecam_active() && td5_env_flag_off("TD5RE_FREECAM_PROBE")) {
+        TD5_Actor *pa = td5_game_get_actor(0);
+        if (pa) {
+            TD5_LOG_I(LOG_TAG,
+                      "FREECAM-PROBE tick=%u ticks=%d frac=%.4f accum=0x%X "
+                      "world=(%d,%d,%d) vel=(%d,%d,%d) render=(%.3f,%.3f,%.3f)",
+                      (unsigned)g_td5.simulation_tick_counter, ticks_this_frame,
+                      g_subTickFraction, g_td5.sim_time_accumulator,
+                      pa->world_pos.x, pa->world_pos.y, pa->world_pos.z,
+                      pa->linear_velocity_x, pa->linear_velocity_y, pa->linear_velocity_z,
+                      (double)pa->render_pos.x, (double)pa->render_pos.y,
+                      (double)pa->render_pos.z);
+        }
+    }
+#endif
     /* Compute sub-tick interpolation fraction for camera/VFX rendering.
      * Original (0x0042b709): fraction is NOT recomputed when paused.
      * [S31] A net-synced REMOTE pause freezes it too -- otherwise the
@@ -7878,9 +7899,23 @@ static void frame_interpolate(int net_lockstep, int ticks_this_frame)
      * field via its own sub-tick `continue`, but the menu is already closed
      * (s_pause_menu_active==0) so without this guard the body-mesh velocity
      * extrapolation + camera keep gliding under the countdown -- exactly the
-     * "not completely frozen" glide. Hold the fraction here until GO. */
+     * "not completely frozen" glide. Hold the fraction here until GO.
+     * [FREE CAMERA FREEZE 2026-10-02] Same glide, same cause: free-roam clears
+     * s_pause_menu_active (so the pause panel goes away) which RELEASED this
+     * guard, even though the sim loop keeps the tick frozen. Measured on Moscow
+     * with the car frozen at speed: world_pos and simulation_tick_counter were
+     * rock-constant over 1484 render frames, but g_subTickFraction swept
+     * 0.00..1.00 every ~4 frames, so the body mesh (drawn as world_pos +
+     * linear_velocity * frac) and actor->render_pos (lerped prev->cur, where
+     * prev_world_pos is a full tick stale because its snapshot lives inside the
+     * skipped physics tick) both slid one whole tick of travel and snapped back,
+     * forever -- "the car keeps moving while the free cam is on". Holding the
+     * fraction freezes the DRAWN pose for every actor at once (the interpolation
+     * pass loops all slots), so the field and traffic stop dead too. The fly cam
+     * is unaffected: it is driven from td5_camera_apply_view() in the render
+     * path off its own wall clock, not from here. */
     if (!s_pause_menu_active && !(net_lockstep && s_net_pause_round) &&
-        s_resume_countdown_ticks == 0) {
+        s_resume_countdown_ticks == 0 && !td5_camera_freecam_active()) {
         g_subTickFraction = (float)g_td5.sim_time_accumulator / (float)TD5_TICK_ACCUMULATOR_ONE;
         if (g_subTickFraction < 0.0f) g_subTickFraction = 0.0f;
         if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
