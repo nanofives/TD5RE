@@ -3237,20 +3237,65 @@ static int td5_camera_topdown_back(void)     /* world units behind, in car space
  *   TD5RE_TOPDOWN_DYNAMIC=0     disable entirely -> byte-identical to the old
  *                               fixed-height behaviour (default ON)
  *   TD5RE_TOPDOWN_DYN_MAX=<wu>  max EXTRA height at/above the reference speed.
- *                               Default is half the configured base height, so
+ *                               Default is 2.5x the configured base height, so
  *                               it stays sane if TD5RE_TOPDOWN_HEIGHT is changed
- *                               (8000 base -> +4000 max, i.e. 1.5x at full tilt).
- *   TD5RE_TOPDOWN_DYN_SMOOTH=<ms>  lag time constant, default 750 ms.
- *   TD5RE_TOPDOWN_DYN_REFSPD=<mph> speed at which the extra height saturates,
- *                               default 120 (the speedo dial's full scale).
+ *                               (8000 base -> +20000 max, i.e. 3.5x at full tilt).
+ *   TD5RE_TOPDOWN_DYN_SMOOTH=<ms>      lag time constant AT REST, default 900 ms.
+ *   TD5RE_TOPDOWN_DYN_SMOOTH_FAST=<ms> lag time constant AT/ABOVE the reference
+ *                               speed, default 220 ms. The live constant is
+ *                               interpolated between the two by speed.
+ *   TD5RE_TOPDOWN_DYN_REFSPD=<mph> speed at which the extra height saturates
+ *                               and the response is fastest, default 150.
  *
- * ANTI-PUMPING. The lag is a first-order exponential on the NORMALISED speed
- * factor, stepped once per 30 Hz SIM TICK — not per render frame. Two reasons:
- * (1) a per-frame step would make the response rate depend on the frame rate,
- * so the same drive would pull back differently at 30 vs 144 fps; (2) with a
- * 750 ms time constant a single tick moves the factor by only ~4%, so throttle
- * feathering and traffic-speed wobble are absorbed instead of pumping the eye.
- * The step is symmetric, so braking returns along the same curve.
+ * [J1 CAMERA 2026-10-03] HOW FAR, AND WHY THAT FAR.
+ * Round 1002 shipped +4000 wu of pull-back and the verdict was "se aleja muy
+ * poco". The number was never derived from framing, so here it is, measured
+ * from the projection the game actually uses.
+ *
+ *   Vertical FOV: focal = viewport_height * 0.75 (td5_render_mesh.c:3768), so
+ *   the vertical half-angle is atan(0.5/0.75) = 33.69 deg.
+ *   Eye geometry: height H above the car, BACK = 0.11818 * H behind it
+ *   (TD5_TOPDOWN_BACK_RATIO), car at screen centre. The look-down angle is
+ *   atan(H/BACK) = 83.26 deg, so the top screen edge is a ray 49.57 deg below
+ *   horizontal and the ground it hits is
+ *       ahead(H) = H/tan(49.57 deg) - 0.11818*H = 0.7346 * H   world units
+ *   in front of the car (and 0.627*H behind it at the bottom edge).
+ *   Speed scale: 1 mph = 4.8906 wu per 30 Hz tick = 146.7 wu/s (same speedo
+ *   constant as below), and an auto-track span is TD5_TG_SPAN_LENGTH = 1500 wu.
+ *
+ * At the shipped 8000 wu that is 5877 wu = 3.9 spans ahead. At 120 mph the car
+ * covers 17,607 wu/s, so the player sees 0.33 SECONDS of road ahead — less than
+ * reaction time. Round 1002's 12,000 wu only took that to 0.50 s, which is why
+ * the change read as almost nothing.
+ *
+ * The new default sizes the pull-back so the look-ahead TIME stays near one
+ * second across the whole top end instead of collapsing with speed:
+ *   H(v) = 8000 + 20000 * min(v/150 mph, 1)
+ *     at rest   H =  8000 -> 5877 wu ahead =  3.9 spans
+ *     at  60    H = 16000 ->11754 wu ahead =  7.8 spans = 1.34 s
+ *     at 120    H = 24000 ->17630 wu ahead = 11.8 spans = 1.00 s
+ *     at 150+   H = 28000 ->20569 wu ahead = 13.7 spans = 0.93 s
+ * The far edge sits 36,800 wu of slant range from the eye, well inside the
+ * fixed 195,000 far cull, so nothing new is clipped.
+ *
+ * [J1 CAMERA 2026-10-03] RESPONSE RATE NOW SCALES WITH SPEED.
+ * Round 1002 used one fixed 750 ms constant at every speed. Mariano asked for
+ * the pull-out and the pull-in to scale with the car: quick when you are
+ * moving, gentle when you are not. The time constant is therefore interpolated
+ *     tau = SMOOTH + (SMOOTH_FAST - SMOOTH) * rate_f
+ * with rate_f = max(instantaneous speed factor, current smoothed factor).
+ * Taking the MAX is what makes braking behave: lifting off at 150 mph drops the
+ * instantaneous factor at once, but the camera is still far out, so rate_f stays
+ * high and the eye comes back in at the fast constant instead of crawling. Both
+ * directions use the same tau, so the response is symmetric at any given speed.
+ *
+ * ANTI-PUMPING. The lag is still a first-order exponential on the NORMALISED
+ * speed factor, stepped once per 30 Hz SIM TICK — not per render frame. Two
+ * reasons: (1) a per-frame step would make the response rate depend on the
+ * frame rate, so the same drive would pull back differently at 30 vs 144 fps;
+ * (2) even at the FAST end one tick moves the factor by 14% (220 ms), and the
+ * input is a vehicle speed — an inertial quantity that cannot step — so
+ * throttle feathering and traffic-speed wobble are absorbed rather than pumped.
  *
  * SPEED SOURCE: horizontal world velocity magnitude, converted to MPH with the
  * speedo's own scale factor (td5_hud.c:5768-5785 — mph = raw24.8 / 1252), so
@@ -3268,9 +3313,13 @@ static int td5_camera_topdown_back(void)     /* world units behind, in car space
  * keeps the ratio — and therefore the margin — exactly as configured, at any
  * dynamic height.
  * ------------------------------------------------------------------------ */
-#define TD5_TOPDOWN_DYN_MAX_RATIO     0.5f    /* default extra = 0.5 x base height */
-#define TD5_TOPDOWN_DYN_SMOOTH_MS_DEF 750
-#define TD5_TOPDOWN_DYN_REFSPD_DEF    120.0f  /* mph */
+#define TD5_TOPDOWN_DYN_MAX_RATIO     2.5f    /* default extra = 2.5 x base height */
+/* The extra is allowed well past TD5_TOPDOWN_HEIGHT_MAX (which caps the AT-REST
+ * framing knob) so the pull-back can be tuned without a rebuild. */
+#define TD5_TOPDOWN_DYN_MAX_CAP       96000
+#define TD5_TOPDOWN_DYN_SMOOTH_MS_DEF 900     /* lag at rest   */
+#define TD5_TOPDOWN_DYN_FAST_MS_DEF   220     /* lag at REFSPD */
+#define TD5_TOPDOWN_DYN_REFSPD_DEF    150.0f  /* mph */
 #define TD5_TOPDOWN_SIM_HZ            30.0f
 /* MPH per unit of raw 24.8 horizontal velocity — see td5_hud.c:5785. */
 #define TD5_TOPDOWN_FP_PER_MPH        1252.0f
@@ -3291,26 +3340,56 @@ static int td5_camera_topdown_dyn_max(void)   /* extra world units at full speed
     if (v < 0) {
         int def = (int)((float)td5_camera_topdown_height() *
                         TD5_TOPDOWN_DYN_MAX_RATIO + 0.5f);
-        v = td5_env_int("TD5RE_TOPDOWN_DYN_MAX", def, 0, TD5_TOPDOWN_HEIGHT_MAX);
+        v = td5_env_int("TD5RE_TOPDOWN_DYN_MAX", def, 0, TD5_TOPDOWN_DYN_MAX_CAP);
     }
     return v;
 }
 
-/* Per-sim-tick blend weight of the first-order lag. */
-static float td5_camera_topdown_dyn_alpha(void)
+/* The two ends of the speed-scaled time constant, in ms. */
+static int td5_camera_topdown_dyn_tau_slow(void)
 {
-    static float a = -1.0f;
-    if (a < 0.0f) {
-        int ms = td5_env_int("TD5RE_TOPDOWN_DYN_SMOOTH",
-                             TD5_TOPDOWN_DYN_SMOOTH_MS_DEF, 0, 10000);
-        if (ms <= 0) {
-            a = 1.0f;   /* 0 ms = no smoothing (instant follow) */
-        } else {
-            a = 1.0f - expf(-(1.0f / TD5_TOPDOWN_SIM_HZ) / ((float)ms * 0.001f));
-            if (a < 0.0f) a = 0.0f;
-            if (a > 1.0f) a = 1.0f;
-        }
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_TOPDOWN_DYN_SMOOTH",
+                               TD5_TOPDOWN_DYN_SMOOTH_MS_DEF, 0, 10000);
+    return v;
+}
+
+static int td5_camera_topdown_dyn_tau_fast(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        v = td5_env_int("TD5RE_TOPDOWN_DYN_SMOOTH_FAST",
+                        TD5_TOPDOWN_DYN_FAST_MS_DEF, 0, 10000);
+        /* A "fast" end slower than the at-rest end would invert the feel the
+         * knob names promise; clamp it instead of surprising the tuner. */
+        int slow = td5_camera_topdown_dyn_tau_slow();
+        if (v > slow) v = slow;
     }
+    return v;
+}
+
+/* Per-sim-tick blend weight of the first-order lag, for a response rate
+ * `rate_f` in [0,1] (0 = at rest / tucked in, 1 = at or above the reference
+ * speed / fully pulled out). Last tau used is published for the telemetry
+ * line so the log can show the rate the camera actually ran at. */
+static float s_topdown_dyn_tau_ms;
+
+static float td5_camera_topdown_dyn_alpha(float rate_f)
+{
+    int slow = td5_camera_topdown_dyn_tau_slow();
+    int fast = td5_camera_topdown_dyn_tau_fast();
+
+    if (rate_f < 0.0f) rate_f = 0.0f;
+    if (rate_f > 1.0f) rate_f = 1.0f;
+
+    float tau_ms = (float)slow + ((float)fast - (float)slow) * rate_f;
+    s_topdown_dyn_tau_ms = tau_ms;
+
+    if (tau_ms <= 0.0f) return 1.0f;   /* 0 ms = no smoothing (instant follow) */
+
+    float a = 1.0f - expf(-(1.0f / TD5_TOPDOWN_SIM_HZ) / (tau_ms * 0.001f));
+    if (a < 0.0f) a = 0.0f;
+    if (a > 1.0f) a = 1.0f;
     return a;
 }
 
@@ -3345,6 +3424,7 @@ static void td5_camera_topdown_reset(void)
         s_topdown_dyn_tick[i]   = 0;
         s_topdown_dyn_seeded[i] = 0;
     }
+    s_topdown_dyn_tau_ms = 0.0f;   /* telemetry only */
 }
 
 /* Extra height in world units for this view, this frame. 0 when disabled. */
@@ -3379,9 +3459,18 @@ static int td5_camera_topdown_dyn_extra(const uint8_t *actor, int view)
         } else if (tick != s_topdown_dyn_tick[view]) {
             int steps = tick - s_topdown_dyn_tick[view];
             if (steps > TD5_TOPDOWN_DYN_MAX_STEPS) steps = TD5_TOPDOWN_DYN_MAX_STEPS;
-            float a = td5_camera_topdown_dyn_alpha();
-            for (int i = 0; i < steps; i++)
-                s_topdown_dyn_f[view] += (target - s_topdown_dyn_f[view]) * a;
+            /* [J1 2026-10-03] alpha is re-derived every step from the CURRENT
+             * response rate, so the time constant tracks the car instead of
+             * being a fixed 750 ms. rate_f = max(where the speed wants us,
+             * where we already are): accelerating it rises with the speed, and
+             * braking from a long way out it stays high so the eye comes back
+             * in briskly rather than crawling once the speedo drops. */
+            for (int i = 0; i < steps; i++) {
+                float cur    = s_topdown_dyn_f[view];
+                float rate_f = (target > cur) ? target : cur;
+                s_topdown_dyn_f[view] = cur +
+                        (target - cur) * td5_camera_topdown_dyn_alpha(rate_f);
+            }
             s_topdown_dyn_tick[view] = tick;
         }
     }
@@ -3451,15 +3540,27 @@ static void UpdateTopDownCamera(uint8_t *actor, int view)
     OrientCameraTowardTarget(target, 0);
 
     {
+        /* [J1 2026-10-03] Height-vs-speed trace. Every 30 frames so a normal
+         * race yields a usable series; `ahead` is the look-ahead derived in
+         * the knob block (0.7346 * H), printed in world units and in seconds
+         * at the CURRENT speed, which is the quantity the framing was sized
+         * on. Grep race.log for "topdown v". */
         static uint32_t s_td_log_ctr;
-        if ((s_td_log_ctr++ % 120u) == 0u)
+        if ((s_td_log_ctr++ % 30u) == 0u) {
+            float ahead_wu = 0.7346f * (float)h_wu;
+            float wu_per_s = s_topdown_dyn_mph * 146.72f;
+            float ahead_s  = (wu_per_s > 1.0f) ? (ahead_wu / wu_per_s) : 0.0f;
             TD5_LOG_D(LOG_TAG,
-                      "topdown v%d: eye=(%d,%d,%d) car=(%d,%d,%d) "
-                      "h=%d (base=%d +%d) back=%d mph=%.1f spd_f=%.3f",
-                      v, eye[0], eye[1], eye[2],
+                      "topdown v%d: tick=%d eye=(%d,%d,%d) car=(%d,%d,%d) "
+                      "h=%d (base=%d +%d) back=%d mph=%.1f spd_f=%.3f "
+                      "tau=%.0fms ahead=%.0fwu (%.2fs)",
+                      v, (int)g_td5.simulation_tick_counter,
+                      eye[0], eye[1], eye[2],
                       target[0], target[1], target[2],
                       h_wu, h_base, extra, b_wu,
-                      s_topdown_dyn_mph, s_topdown_dyn_f[v]);
+                      s_topdown_dyn_mph, s_topdown_dyn_f[v],
+                      s_topdown_dyn_tau_ms, ahead_wu, ahead_s);
+        }
     }
 }
 
