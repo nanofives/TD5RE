@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 3 (auto track buildings)" },
+    { CL_ITEM,    "Measured the see-through building report. No visual change." },
+    { CL_ITEM,    "  The generator closes all 1001 built facade sides." },
+    { CL_ITEM,    "  The building audit was over-counting: 27 open -> 9." },
+    { CL_ITEM,    "  Trackgen reports now say NOT MEASURED, not a false 0." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 2 (auto track seeds)" },
     { CL_ITEM,    "Any auto track seed can now be typed or replayed." },
     { CL_ITEM,    "  Seeds above 2147483647 used to turn into that number." },

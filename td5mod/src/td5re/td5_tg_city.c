@@ -2512,7 +2512,12 @@ static long s_r23_close_seen, s_r23_closed;
  * 1001 of 1001), and the La Plata geo track. The frontage path is not the
  * source of the remaining see-through buildings; see re/tools/tg_building_audit.py
  * for the MODELS.DAT-side census that says where they do come from. */
-static long s_j7_backless, s_j7_roofless, s_j7_shallow;
+static long s_j7_sides, s_j7_backless, s_j7_roofless, s_j7_shallow;
+/* [J7 item 1] Run-end CORNER PRISM ledger -- see the emit site for why. The
+ * min starts above any real thickness so an untouched run reports it unchanged
+ * rather than reporting a spurious 0. */
+static long s_j7_cap_seen, s_j7_cap_degen, s_j7_cap_thin;
+static double s_j7_cap_min_thick = 1.0e30;
 static long s_r15_sign_posts;
 static long s_r15_sign_xing;
 static long s_r15_statue_walled;
@@ -2796,6 +2801,15 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * turns "R23's test looks fragile" into a number, and the next report of
          * a see-through building can be checked against them in one run instead
          * of re-deriving this. */
+        /* DENOMINATOR first. "0 backless" is worth nothing without the number
+         * of sides it is 0 out of -- a build that emitted no facade at all
+         * reports the same 0 as a build that closed every side, and the first
+         * read of this ledger did exactly that: the default race path calls
+         * td5_trackgen_regenerate TWICE (td5_trackgen.c:4630), the second call
+         * short-circuits on the GENSTAMP, and its report printed 0/0/0 over
+         * the real build's numbers. MODELS.DAT had 7195 building components at
+         * the time, so the pass plainly had run. */
+        s_j7_sides++;
         if (!had_back) s_j7_backless++;
         if (!had_roof) s_j7_roofless++;
         n_ret = n;
@@ -2808,6 +2822,29 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
             const double auz = (alen > 1.0) ? g->az / alen : 1.0;
             double thick = cap_thick;
             if (alen > 1.0 && thick > alen * 0.9) thick = alen * 0.9;
+            /* [J7 item 1] CAP LEDGER. Measurement only -- it reads `thick` and
+             * `alen`, writes no geometry, and MODELS.DAT is byte-identical with
+             * it in place.
+             *
+             * The corrected audit (re/tools/tg_building_audit.py, DEPTH_MIN)
+             * leaves a handful of run-end prisms reported as open with
+             * walls == 1, i.e. ONE wall direction where a prism has two -- the
+             * rear face and the inner return are missing or have collapsed to
+             * nothing. Both are scaled by `thick`, and `thick` has two ways to
+             * shrink here: the alen*0.9 clamp on a SHORT span, and the
+             * alen <= 1.0 branch above, which additionally substitutes an
+             * ARBITRARY (0,1) along-road unit for the real span direction, so a
+             * prism on such a span is pushed along +Z no matter where the road
+             * actually goes.
+             *
+             * Rather than argue which one fires, count them. THIN is measured
+             * against a quarter of a metre, the same DEPTH_MIN the audit now
+             * uses to call two surfaces a body, so the two numbers answer the
+             * same question on the same scale. */
+            s_j7_cap_seen++;
+            if (alen <= 1.0) s_j7_cap_degen++;
+            if (thick < 0.25 * TD5_TG_INFRA_M) s_j7_cap_thin++;
+            if (thick < s_j7_cap_min_thick) s_j7_cap_min_thick = thick;
             /* [R8 item 6] The return is `dcols` cells deep, this RUN's depth,
              * not the one biome depth -- the prism has to follow the body or
              * the corner would fold back short of the roof it closes. */
@@ -5208,13 +5245,41 @@ void tg_r23_close_report(void)
         "(BUILDING MASS off / depth collapse), %ld closed with back+roof "
         "(knob=%s)", s_r23_close_seen, s_r23_closed,
         td5_env_flag_on("TD5RE_R23_BUILDING_CLOSE") ? "on" : "off");
-    TD5_LOG_I(LOG_TAG,
-        "trackgen: [J7 LEDGER] built facade sides that ended with no back wall "
-        "= %ld, with no roof = %ld, with a collapsed depth = %ld (direct count, "
-        "not R23's n==n_pre_mass inference; expected 0/0/0)",
-        s_j7_backless, s_j7_roofless, s_j7_shallow);
+    /* NOT MEASURED is not the same answer as ZERO. The default race path calls
+     * td5_trackgen_regenerate twice and the second call reuses the GENSTAMP
+     * without running a single emitter, so an unguarded report prints a clean
+     * 0/0/0 for a build that never executed the code it claims to vouch for.
+     * Say which of the two happened, and always print the denominator. */
+    if (s_j7_sides <= 0) {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 LEDGER] NOT MEASURED -- no facade side was built in "
+            "this pass (REUSED GENSTAMP build, or the city pass is off). This "
+            "is NOT a clean result; force a real build with "
+            "TD5RE_AUTOTRACK_REUSE=0 TD5RE_TG_DOUBLE_BUILD=1 to measure.");
+    } else {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 LEDGER] of %ld built facade sides, %ld ended with no "
+            "back wall, %ld with no roof, %ld with a collapsed depth (direct "
+            "count, not R23's n==n_pre_mass inference; expected 0/0/0)",
+            s_j7_sides, s_j7_backless, s_j7_roofless, s_j7_shallow);
+    }
+    if (s_j7_cap_seen <= 0) {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 CAP] NOT MEASURED -- no run-end corner prism was "
+            "emitted in this pass (see the J7 LEDGER note above).");
+    } else {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 CAP] run-end corner prisms = %ld, of which %ld on a "
+            "span too short to give an along-road direction (arbitrary +Z "
+            "fallback) and %ld thinner than 0.25 m; thinnest = %.1f raw "
+            "(%.2f m)",
+            s_j7_cap_seen, s_j7_cap_degen, s_j7_cap_thin,
+            s_j7_cap_min_thick, s_j7_cap_min_thick / TD5_TG_INFRA_M);
+    }
     s_r23_close_seen = s_r23_closed = 0;
-    s_j7_backless = s_j7_roofless = s_j7_shallow = 0;
+    s_j7_sides = s_j7_backless = s_j7_roofless = s_j7_shallow = 0;
+    s_j7_cap_seen = s_j7_cap_degen = s_j7_cap_thin = 0;
+    s_j7_cap_min_thick = 1.0e30;
 }
 
 /* [R15] Per-module half of the round-15 report. Split out of the single
