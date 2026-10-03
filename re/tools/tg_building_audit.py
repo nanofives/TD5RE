@@ -239,6 +239,7 @@ def audit_level(leveldir, weld, minarea, minheight):
         for fi in range(len(keyed)):
             comps[dsu.find(("f", fi))].append(fi)
         mesh_recs = []
+        mesh_any = []          # every component, as a candidate BACK wall
 
         for root, fis in comps.items():
             edge_use = defaultdict(int)
@@ -342,6 +343,15 @@ def audit_level(leveldir, weld, minarea, minheight):
                 if (max(off) - min(off)) >= DEPTH_MIN:
                     opposed = True
                     break
+            # CANDIDATE BACKERS are every component of the mesh, not just the
+            # building-like ones. [J7] The closing walls generated for an open
+            # landmark prefab (td5_tg_prefab_close_data.h) are 3 to 5 quads on
+            # the open component's bounding box; they do not weld to it, so
+            # they form their own small island, and that island is a back wall
+            # whether or not it would pass for a building on its own. Judging
+            # backers by `building_like` made every such closure invisible to
+            # this audit and reported the piece as still open.
+            mesh_any.append({"clusters": clusters, "y": (ymin, ymax)})
             if kind in BUILDING_KINDS and building_like:
                 mesh_recs.append({
                     "kind": kind, "mesh": mi, "pages": list(pages),
@@ -365,14 +375,22 @@ def audit_level(leveldir, weld, minarea, minheight):
         # a wall parallel to one of this island's walls, set back between
         # BACK_MIN and BACK_MAX, with overlapping height. That is a back wall
         # whoever emitted it.
-        for i, r in enumerate(mesh_recs):
+        for r in mesh_recs:
             if r["opposed"]:
                 continue
-            for j, o in enumerate(mesh_recs):
-                if i == j or r["opposed"]:
+            for o in mesh_any:
+                if o["clusters"] is r["clusters"] or r["opposed"]:
+                    continue                       # a wall cannot back itself
+                # A backer has to cover MOST OF THE WALL'S HEIGHT. Any overlap
+                # at all is far too weak: a prefab mesh carries detail islands
+                # (kiosks, canopies, railings) and a 3.9 m kiosk standing 5 m
+                # behind a 10.2 m facade would otherwise "back" it while
+                # leaving 6.3 m of open wall above -- which is precisely the
+                # see-through band you drive past and notice.
+                ov = min(r["y"][1], o["y"][1]) - max(r["y"][0], o["y"][0])
+                rh = r["y"][1] - r["y"][0]
+                if rh <= 0 or ov < 0.6 * rh:
                     continue
-                if min(r["y"][1], o["y"][1]) - max(r["y"][0], o["y"][0]) <= 0:
-                    continue                       # no shared height, not a back
                 for ang, pts in r["clusters"]:
                     ux, uz = math.cos(ang), math.sin(ang)
                     mine = [x * ux + z * uz for (x, z) in pts]
