@@ -638,6 +638,13 @@ static int frontend_track_level_exists(int track_index) {
     char path[64];
     int level_num;
     if (track_index < 0) return 1; /* -1 = random, always "valid" */
+    /* [J8 GEO-PICK 2026-10-03] A generated slot (the auto track, or a real
+     * place) has no level on disk until a race entry builds one, so the
+     * on-disk test would hide it from the cycler on a fresh install -- and
+     * permanently for a place that has never been raced. The level files are
+     * not a precondition for these slots, the registry row is, and
+     * frontend_track_excluded_from_selector already checks that. */
+    if (td5_trackgen_is_generated_slot(track_index)) return 1;
     level_num = td5_asset_level_number(track_index);
     snprintf(path, sizeof(path), "level%03d.zip", level_num);
     if (td5_plat_file_exists(path)) return 1;
@@ -845,7 +852,13 @@ static int frontend_postrace_td6_level(void) {
  * table, corrupting a real track's scores. Callers now bail instead of clamping. */
 static int frontend_track_has_high_scores(int track) {
     if (track < 0) return 0;
-    if (td5_trackgen_is_auto_slot(track)) return 0;
+    /* [J8 GEO-PICK 2026-10-03] Real places are excluded for the SAME two
+     * reasons, both still true of a geo track: the seed still randomises
+     * scenery, night and the structure table on top of the real road, so a
+     * stored time describes a course the next build will not reproduce; and
+     * level091+ lands just as far past the TD6 record array's capacity as
+     * level090 does, so the insert would fail AFTER the player typed a name. */
+    if (td5_trackgen_is_generated_slot(track)) return 0;
     if (track < 26) return 1;               /* authored TD5 track / cup group */
     /* Past the authored range: only storable if the TD6 record store can hold the
      * key. Resolved from the `track` argument (NOT frontend_postrace_td6_level(),
@@ -1195,7 +1208,10 @@ void Screen_QuickRaceMenu(void) {
          * was effectively unreachable from Quick Race. Exempt the auto slot; the
          * registry-backed exclusion check on the next line still rejects it if
          * the generator never registered a track there. */
-        if (s_selected_track >= 26 && !td5_trackgen_is_auto_slot(s_selected_track))
+        /* [J8 GEO-PICK 2026-10-03] Exempt every GENERATED slot, not just the auto
+         * one: a real place picked here would otherwise bounce back to Moscow on
+         * the next entry exactly as the auto track used to. */
+        if (s_selected_track >= 26 && !td5_trackgen_is_generated_slot(s_selected_track))
             s_selected_track = 0;
         if (frontend_track_excluded_from_selector(s_selected_track)) s_selected_track = 0;
 
@@ -8449,6 +8465,113 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
                                      sx, sy, 1);
         }
     }
+    return 1;
+}
+
+/* ---------------------------- [J8 GEO-PICK 2026-10-03] real-place preview ---
+ * SELECT TRACK's panel for a real place. Deliberately NOT td5_autotrack_draw_route:
+ * that one plots s_at_pts[], which only the AUTO TRACK STUDIO worker ever fills,
+ * so it is blank until the studio has run this session. A real place already has
+ * its route on disk, so the panel can show the true road the moment the player
+ * cycles onto it -- which is the whole point of picking a place by name.
+ *
+ * Draws the ODbL credit under the panel itself (every surface that shows a real
+ * place's geometry must carry it) and, when the route cannot be read, says why
+ * instead of leaving an empty rectangle.
+ *
+ * Returns 1 if a route was plotted. */
+int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
+                       float sx, float sy)
+{
+    double min_x, max_x, min_z, max_z;
+    float ext_x, ext_z, sc_x, sc_z, scale, ox, oz, cx, cy, dot;
+    int i, n;
+    const char *slug = td5_geo_places_slug(place_index);
+
+    n = td5_geo_preview_route(slug);
+    if (n < 2) {
+        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f) * sy,
+                           "NO ROUTE DATA", 0xFF8899AA, sx, sy);
+        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f + 12.0f) * sy,
+                           "RUN re/tools/geo_selector.py", 0xFF8899AA, sx, sy);
+        return 0;
+    }
+
+    td5_geo_preview_node(0, &min_x, &min_z);
+    max_x = min_x; max_z = min_z;
+    for (i = 1; i < n; i++) {
+        double px, pz;
+        td5_geo_preview_node(i, &px, &pz);
+        if (px < min_x) min_x = px;
+        if (px > max_x) max_x = px;
+        if (pz < min_z) min_z = pz;
+        if (pz > max_z) max_z = pz;
+    }
+
+    /* Same uniform fit as td5_autotrack_draw_route: a long thin city route must
+     * keep its proportions in a 152x224 portrait panel, not be stretched into it. */
+    ext_x = (float)(max_x - min_x);
+    ext_z = (float)(max_z - min_z);
+    if (ext_x < 1.0f) ext_x = 1.0f;
+    if (ext_z < 1.0f) ext_z = 1.0f;
+    sc_x = (bw - AT_PV_MARGIN * 2.0f) / ext_x;
+    sc_z = (bh - AT_PV_MARGIN * 2.0f) / ext_z;
+    scale = (sc_x < sc_z) ? sc_x : sc_z;
+    if (scale <= 0.0f) return 0;
+    ox = (float)(min_x + max_x) * 0.5f;
+    oz = (float)(min_z + max_z) * 0.5f;
+    cx = bx + bw * 0.5f;
+    cy = by + bh * 0.5f;
+
+    dot = 1.0f * sx;
+    if (dot < 1.0f) dot = 1.0f;
+
+    for (i = 0; i < n; i++) {
+        double px, pz;
+        td5_geo_preview_node(i, &px, &pz);
+        /* +Z is into the screen in world space, flipped for a top-down map. */
+        fe_draw_quad((cx + ((float)px - ox) * scale) * sx,
+                     (cy - ((float)pz - oz) * scale) * sy,
+                     dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);
+    }
+
+    /* Start and finish. A conditioned geo route is point-to-point (node 0 is the
+     * origin by contract, see td5_geo.h), so both ends get a marker. The grid is
+     * staggered behind TD5_TG_GRID_SPAN, but a span index is a point index only
+     * on the FULL route -- the preview is decimated, so plot node 0 rather than
+     * claim a precision the decimation does not have. */
+    {
+        double sxp, szp, exp_, ezp;
+        td5_geo_preview_node(0, &sxp, &szp);
+        td5_geo_preview_node(n - 1, &exp_, &ezp);
+        frontend_draw_marker_dot((cx + ((float)exp_ - ox) * scale) * sx,
+                                 (cy - ((float)ezp - oz) * scale) * sy, sx, sy, 1);
+        frontend_draw_marker_dot((cx + ((float)sxp - ox) * scale) * sx,
+                                 (cy - ((float)szp - oz) * scale) * sy, sx, sy, 0);
+    }
+
+    /* [GEO PHASE 4 / ODbL] The credit travels with the map, wherever it is shown.
+     * TWO LINES, ABOVE the panel. On one line under it (what the studio does in
+     * its wider rect) the full credit is ~228 canvas units from bx=412, so it ran
+     * off the 640-unit canvas and through the Pitbull logo -- measured on the
+     * first framedump of this screen. Above the panel there is clear space
+     * between the track name and the panel top, and splitting the string keeps
+     * the attribution complete rather than truncating it to fit. */
+    fe_draw_small_text(bx * sx, (by - 26.0f) * sy, "MAP DATA (C)", 0xFF8899AA, sx, sy);
+    fe_draw_small_text(bx * sx, (by - 14.0f) * sy, "OPENSTREETMAP CONTRIBUTORS",
+                       0xFF8899AA, sx, sy);
+    return 1;
+}
+
+/* Reason line for the places that exist under re/assets/geo/ but could not be
+ * listed, so an incomplete fetch reads as a diagnosable state rather than a
+ * missing feature. Returns 0 when every place dir is raceable. */
+int td5_geo_incomplete_note(char *out, size_t cap)
+{
+    const int bad = td5_geo_places_incomplete_count();
+    if (bad <= 0 || !out || cap == 0) return 0;
+    snprintf(out, cap, "%s: %s", td5_geo_places_incomplete_slug(0),
+             td5_geo_places_incomplete_reason(0));
     return 1;
 }
 

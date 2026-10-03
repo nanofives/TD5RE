@@ -45,6 +45,24 @@ int  td5_track_registry_slot_max(void);
 int td5_track_registry_set_auto(int slot, int level, const char *name,
                                 int circuit, int start_span, int finish_span);
 
+/* Maximum number of GEO TRACK real places that can be selectable at once.
+ * Sized to match TD5_GEO_SLOT_MAX in td5_trackgen.h -- that header owns the
+ * slot/level bands, this one only needs the row count. */
+#define TD5_GEO_TRACK_MAX 12
+
+/* [J8 GEO-PICK 2026-10-03] Register (or re-register) real place `index` as a
+ * selectable track. Same contract as set_auto, except the rows live in their
+ * own fixed table rather than one struct, because every raceable place under
+ * re/assets/geo/ gets a slot and a level dir of its own. `index` is the place
+ * index from td5_geo_places_slug(), so a rescan that re-orders places
+ * re-registers them consistently.
+ * Returns 1 on success, 0 if the index or slot is out of range. */
+int td5_track_registry_set_geo(int index, int slot, int level, const char *name,
+                               int circuit, int start_span, int finish_span);
+
+/* Number of geo places currently registered. */
+int td5_track_registry_geo_count(void);
+
 /* --- by SLOT (frontend) --- */
 int          td5_track_registry_has_slot(int slot);
 const char  *td5_track_registry_name_for_slot(int slot);   /* NULL if not custom */

@@ -1036,7 +1036,10 @@ int tg_rolls_enabled(void) { return td5_env_flag_on("TD5RE_R21_ROLL"); }
  * geo hold in td5_trackgen_resolve_rolls for why not td5_geo_loaded). */
 static int tg_rolls_geo_requested(void)
 {
-    const char *p = getenv("TD5RE_GEO_PLACE");
+    /* [J8 GEO-PICK] td5_geo_wanted_slug, not getenv: a place picked as its own
+     * track slot sets the override instead of the env knob, and the geo hold
+     * must apply to it for exactly the same reason it applies to the knob. */
+    const char *p = td5_geo_wanted_slug();
     const char *r = getenv("TD5RE_GEO_ROUTE");
     return (p && p[0]) || (r && r[0]);
 }
@@ -4515,6 +4518,119 @@ static void tg_selfcheck_regen(unsigned int seed)
     free(b);
 }
 
+/* ================= SECTION: [J8 GEO-PICK] real places as track slots =======
+ * A real place is built by this same generator, so the only thing that differs
+ * between "AUTO-GENERATED TRACK" and "LA PLATA (REAL)" is WHICH place is loaded
+ * and WHICH level dir the files land in. Both are per-build state, so they live
+ * in two statics the race-entry path sets through td5_trackgen_set_target_slot
+ * and everything downstream reads -- rather than the TD5_TG_LEVEL_NUM /
+ * TD5_TG_SLOT literals that used to be hardcoded through regenerate.
+ *
+ * DEFAULTS ARE THE OLD CONSTANTS, so a build nobody retargeted is the build
+ * that shipped: same slot, same level090, same GENSTAMP path, byte-identical
+ * MODELS.DAT for a given seed. */
+static int s_target_slot  = TD5_TG_SLOT;
+static int s_target_level = TD5_TG_LEVEL_NUM;
+
+int td5_trackgen_is_geo_slot(int slot)
+{
+    return slot >= TD5_GEO_SLOT_BASE && slot < TD5_GEO_SLOT_BASE + TD5_GEO_SLOT_MAX;
+}
+
+int td5_trackgen_geo_index_for_slot(int slot)
+{
+    return td5_trackgen_is_geo_slot(slot) ? slot - TD5_GEO_SLOT_BASE : -1;
+}
+
+int td5_trackgen_is_generated_slot(int slot)
+{
+    return td5_trackgen_is_auto_slot(slot) || td5_trackgen_is_geo_slot(slot);
+}
+
+/* "LA PLATA (REAL)" -- the suffix is what separates a real place from a shipped
+ * track with the same name in a one-line selector, and it is the word Mariano
+ * used for the feature. Uppercased to match every other entry in the track name
+ * table (the frontend font has no lowercase metrics tuned for this row). */
+static void tg_geo_slot_name(int gi, char *out, size_t n)
+{
+    const char *nm = td5_geo_places_name(gi);
+    size_t i;
+    if (!nm || !nm[0]) nm = td5_geo_places_slug(gi);
+    snprintf(out, n, "%s (REAL)", (nm && nm[0]) ? nm : "GEO TRACK");
+    for (i = 0; out[i]; i++)
+        if (out[i] >= 'a' && out[i] <= 'z') out[i] = (char)(out[i] - 'a' + 'A');
+}
+
+int td5_trackgen_register_geo_places(void)
+{
+    int n, i, registered = 0;
+
+    td5_geo_places_rescan();
+    n = td5_geo_places_count();
+    if (n > TD5_GEO_SLOT_MAX) {
+        TD5_LOG_W(LOG_TAG, "trackgen: %d geo places found, only the first %d get "
+                  "a track slot", n, TD5_GEO_SLOT_MAX);
+        n = TD5_GEO_SLOT_MAX;
+    }
+    for (i = 0; i < n; i++) {
+        char name[40];
+        tg_geo_slot_name(i, name, sizeof(name));
+        /* circuit=0: a conditioned geo route is point-to-point (tg_geo_apply_spec
+         * forces spec->circuit = 0). finish=0 until the real build publishes the
+         * ring length -- the frontend never reads it, and regenerate re-registers
+         * with the true value before the level loads. */
+        if (td5_track_registry_set_geo(i, TD5_GEO_SLOT_BASE + i,
+                                       TD5_GEO_LEVEL_BASE + i, name,
+                                       0, TD5_TG_GRID_SPAN, 0))
+            registered++;
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: %d real place(s) registered as track slots "
+              "%d..%d (%d place dir(s) incomplete)", registered,
+              TD5_GEO_SLOT_BASE, TD5_GEO_SLOT_BASE + registered - 1,
+              td5_geo_places_incomplete_count());
+    return registered;
+}
+
+void td5_trackgen_set_target_slot(int slot)
+{
+    const int gi = td5_trackgen_geo_index_for_slot(slot);
+    if (gi >= 0 && gi < td5_geo_places_count()) {
+        s_target_slot  = slot;
+        s_target_level = TD5_GEO_LEVEL_BASE + gi;
+        td5_geo_force_place(td5_geo_places_slug(gi));
+        TD5_LOG_I(LOG_TAG, "trackgen: target slot %d = real place '%s' -> level %d",
+                  slot, td5_geo_places_slug(gi), s_target_level);
+        return;
+    }
+    if (gi >= 0)
+        TD5_LOG_W(LOG_TAG, "trackgen: geo slot %d has no place behind it "
+                  "(%d place(s) known); falling back to the auto track",
+                  slot, td5_geo_places_count());
+    s_target_slot  = TD5_TG_SLOT;
+    s_target_level = TD5_TG_LEVEL_NUM;
+    /* Clearing the override hands the place decision back to TD5RE_GEO_PLACE,
+     * i.e. to the studio's LOCATION row -- which is the whole reason the geo
+     * slots never write that knob. */
+    td5_geo_force_place(NULL);
+}
+
+/* Registry row for whatever the current target is. The auto track and the geo
+ * places live in different registry tables (one struct vs an array), so this is
+ * the single place that knows which one a build belongs to. */
+static void tg_register_target(const char *name, int circuit, int finish)
+{
+    const int gi = td5_trackgen_geo_index_for_slot(s_target_slot);
+    if (gi >= 0) {
+        char gname[40];
+        tg_geo_slot_name(gi, gname, sizeof(gname));
+        td5_track_registry_set_geo(gi, s_target_slot, s_target_level, gname,
+                                   circuit, TD5_TG_GRID_SPAN, finish);
+        return;
+    }
+    td5_track_registry_set_auto(s_target_slot, s_target_level, name,
+                                circuit, TD5_TG_GRID_SPAN, finish);
+}
+
 /* ------------------------------------------------------- lifecycle ------- */
 int td5_trackgen_init(void)
 {
@@ -4534,6 +4650,9 @@ int td5_trackgen_init(void)
                                spec.circuit, TD5_TG_GRID_SPAN, 0);
     TD5_LOG_I(LOG_TAG, "trackgen: " TD5_TG_TRACK_NAME " registered (slot %d, level %d); "
               "built on race entry", TD5_TG_SLOT, TD5_TG_LEVEL_NUM);
+    /* [J8 GEO-PICK] Same deal for every real place: the selector needs only the
+     * registry row (name, circuit flag, start span). Nothing is built here. */
+    td5_trackgen_register_geo_places();
     return 1;
 }
 
@@ -4556,6 +4675,18 @@ static unsigned int tg_env_hash(void)
             && strncmp(*e, "TD5RE_D3D12_", 12) != 0 && strncmp(*e, "TD5RE_TG_REPORTS", 16) != 0
             && strncmp(*e, "TD5RE_R14_GENPROF", 17) != 0)
             h = tg_fnv1a(h, *e, strlen(*e));
+    /* [J8 GEO-PICK] The slot-driven place override deliberately never reaches
+     * the environment, so hash it here or two places would produce the same
+     * env_hash. Only when it is ACTIVE and differs from the knob: with no
+     * override this adds nothing and every existing stamp still matches. */
+    {
+        const char *want = td5_geo_wanted_slug();
+        const char *env  = getenv("TD5RE_GEO_PLACE");
+        if (want && want[0] && strcmp(want, env ? env : "") != 0) {
+            h = tg_fnv1a(h, "GEOFORCE=", 9);
+            h = tg_fnv1a(h, want, strlen(want));
+        }
+    }
     return h;
 }
 
@@ -4567,9 +4698,12 @@ static unsigned long long tg_exe_id(void)
     return ((unsigned long long)st.st_mtime << 20) ^ (unsigned long long)st.st_size;
 }
 
+/* [J8 GEO-PICK] s_target_level, not TD5_TG_LEVEL_NUM: each real place owns its
+ * own level dir, so each carries its own stamp and a second race on the same
+ * place is a reuse hit instead of a rebuild. */
 static void tg_stamp_path(char *out, size_t n)
 {
-    snprintf(out, n, "re/assets/levels/level%03d/GENSTAMP.TXT", TD5_TG_LEVEL_NUM);
+    snprintf(out, n, "re/assets/levels/level%03d/GENSTAMP.TXT", s_target_level);
 }
 
 static int tg_stamp_read(TG_Stamp *st)
@@ -4608,7 +4742,7 @@ static int tg_level_files_present(void)
     char path[256];
     size_t i;
     for (i = 0; i < sizeof(k_files) / sizeof(k_files[0]); i++) {
-        snprintf(path, sizeof(path), "re/assets/levels/level%03d/%s", TD5_TG_LEVEL_NUM, k_files[i]);
+        snprintf(path, sizeof(path), "re/assets/levels/level%03d/%s", s_target_level, k_files[i]);
         if (!td5_plat_file_exists(path)) return 0;
     }
     return 1;
@@ -4649,7 +4783,10 @@ void td5_trackgen_shutdown(void)
 }
 
 /* -------------------------------------------------------- identity ------- */
-int td5_trackgen_level_number(void) { return TD5_TG_LEVEL_NUM; }
+/* [J8 GEO-PICK] The level the NEXT build writes into: level090 for the auto
+ * track, level09x for a real place. Callers ask this to find the dir, so it
+ * must follow the target rather than the constant. */
+int td5_trackgen_level_number(void) { return s_target_level; }
 
 int td5_trackgen_slot(void)         { return TD5_TG_SLOT; }
 
@@ -4677,9 +4814,33 @@ int td5_trackgen_regenerate(unsigned int seed)
         const unsigned int pinned = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
         if (pinned)
             TD5_LOG_I(LOG_TAG, "trackgen: seed pinned by TD5RE_AUTOTRACK_SEED = %u", pinned);
-        seed = pinned ? pinned
-                      : (unsigned int)td5_plat_time_ms() * 2654435761u
-                        + 0x9E3779B9u;
+        if (!pinned && td5_trackgen_is_geo_slot(s_target_slot)) {
+            /* [J8 GEO-PICK 2026-10-03] A REAL PLACE IS ITS OWN IDENTITY, so its
+             * seed comes from the slug instead of the clock. Two consequences,
+             * both of them the point of picking a place by name:
+             *
+             * REPRODUCIBLE -- "LA PLATA (REAL)" is the same track every time.
+             * The road already comes from ROUTE.JSON, but the seed still drives
+             * scenery, night and the structure table, so a rolled seed would
+             * hand the player a visibly different La Plata on every entry.
+             *
+             * CACHEABLE -- the GENSTAMP reuse check keys on the seed, so a
+             * rolled seed could never match and the SECOND race on a place
+             * would pay the full 20-35 s build again. With the seed fixed, and
+             * the place owning its own level dir, the second race is a reuse
+             * hit. TD5RE_AUTOTRACK_SEED still overrides, for an A/B. */
+            const char *slug = td5_geo_places_slug(
+                td5_trackgen_geo_index_for_slot(s_target_slot));
+            seed = tg_fnv1a(2166136261u, slug, strlen(slug));
+            if (seed == 0) seed = 1u;   /* 0 means "roll one" to every caller */
+            TD5_LOG_I(LOG_TAG, "trackgen: seed %u derived from real place '%s' "
+                      "(stable across races; TD5RE_AUTOTRACK_SEED overrides)",
+                      seed, slug);
+        } else {
+            seed = pinned ? pinned
+                          : (unsigned int)td5_plat_time_ms() * 2654435761u
+                            + 0x9E3779B9u;
+        }
     }
     spec.seed = seed;
 
@@ -4727,17 +4888,16 @@ int td5_trackgen_regenerate(unsigned int seed)
             s_last_seed = seed;
             s_ring_len  = have.ring;
             s_tg_progress = 100;
-            td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                       tg_geo_track_name(), have.circuit,
-                                       TD5_TG_GRID_SPAN, have.finish);
+            tg_register_target(tg_geo_track_name(), have.circuit, have.finish);
             TD5_LOG_W(LOG_TAG, "trackgen: REUSED the on-disk build for seed %u "
-                      "(%d spans, ring %d, finish %d) -- generation skipped",
-                      seed, have.spans, have.ring, have.finish);
+                      "(slot %d, level %d, %d spans, ring %d, finish %d) -- "
+                      "generation skipped", seed, s_target_slot, s_target_level,
+                      have.spans, have.ring, have.finish);
             return 1;
         }
     }
 
-    if (!td5_trackgen_build_level(&spec, TD5_TG_LEVEL_NUM, &spans)) {
+    if (!td5_trackgen_build_level(&spec, s_target_level, &spans)) {
         TD5_LOG_E(LOG_TAG, "trackgen: regenerate failed; auto track unavailable");
         return 0;
     }
@@ -4771,9 +4931,7 @@ int td5_trackgen_regenerate(unsigned int seed)
         int finish = tg_finish_span(ring);
         if (finish <= 0)   /* ring too short for a placed finish: last-resort */
             finish = (spans > 8) ? spans - 4 : spans - 1;
-        td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                   tg_geo_track_name(), spec.circuit,
-                                   TD5_TG_GRID_SPAN, finish);
+        tg_register_target(tg_geo_track_name(), spec.circuit, finish);
         TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
                   "strip=%d; old spans-4 would be %d)", finish, ring, spans,
                   spans > 8 ? spans - 4 : spans - 1);
@@ -4793,8 +4951,9 @@ int td5_trackgen_regenerate(unsigned int seed)
         s_tg_progress = 100;
     }
 
-    TD5_LOG_I(LOG_TAG, "trackgen: auto track ready (slot %d, level %d, "
-              "seed %u, %d spans)", TD5_TG_SLOT, TD5_TG_LEVEL_NUM, seed, spans);
+    TD5_LOG_I(LOG_TAG, "trackgen: generated track ready (slot %d, level %d, "
+              "place '%s', seed %u, %d spans)", s_target_slot, s_target_level,
+              td5_geo_loaded() ? td5_geo_place_slug() : "SYNTHETIC", seed, spans);
     return 1;
 }
 

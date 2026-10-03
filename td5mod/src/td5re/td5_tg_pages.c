@@ -1176,7 +1176,11 @@ int td5_trackgen_treeline_png_page(int level_number, int page)
 {
     size_t i;
     if (!tg_treeline_png_enabled()) return 0;
-    if (level_number != TD5_TG_LEVEL_NUM) return 0;
+    /* [J8 GEO-PICK] Any level this generator writes, not just level090: a real
+     * place builds into its own level09x dir with the same tree-line pages. */
+    if (level_number != TD5_TG_LEVEL_NUM &&
+        (level_number < TD5_GEO_LEVEL_BASE ||
+         level_number >= TD5_GEO_LEVEL_BASE + TD5_GEO_SLOT_MAX)) return 0;
     for (i = 0; i < sizeof k_treeline_png_pages / sizeof k_treeline_png_pages[0]; i++)
         if (k_treeline_png_pages[i] == page) return 1;
     return 0;

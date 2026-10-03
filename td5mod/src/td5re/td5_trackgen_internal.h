@@ -73,6 +73,22 @@
 #define TD5_TG_LEVEL_NUM   90
 /* Last custom slot, so manifest-loaded tracks keep the low slots. */
 #define TD5_TG_SLOT        (TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX - 1)
+/* [J8 GEO-PICK 2026-10-03] Real places (GEO TRACK) are selectable tracks in
+ * their own right, so they get their own slot band ABOVE the auto slot and
+ * their own level band above level090.
+ *
+ * ONE LEVEL DIR PER PLACE IS THE POINT. The GENSTAMP reuse check reads
+ * re/assets/levels/level<NNN>/GENSTAMP.TXT, so a shared dir means every switch
+ * between places is a stamp miss and a 20-35 s rebuild. Giving La Plata
+ * level091 and Valparaiso level092 makes the SECOND race on a place a reuse
+ * hit, which is what "pick a real place and race it" has to feel like.
+ *
+ * APPEND-ONLY, like the screen enum: the slot number goes into the netplay
+ * track fingerprint and into a save's track index, so renumbering an existing
+ * place would silently point both at a different map. */
+#define TD5_GEO_SLOT_BASE  (TD5_TG_SLOT + 1)
+#define TD5_GEO_SLOT_MAX   TD5_GEO_TRACK_MAX
+#define TD5_GEO_LEVEL_BASE (TD5_TG_LEVEL_NUM + 1)
 /* Name shown in the track selector. Defined once: the registry is re-set on
  * every regenerate, and three call sites drifting apart is how the feature
  * ended up with four different names in the first place. Must match the

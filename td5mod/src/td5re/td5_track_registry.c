@@ -49,6 +49,17 @@ static int s_slot_max = TD5_CUSTOM_TRACK_SLOT_BASE;
 static TD5_CustomTrack s_auto;
 static int s_auto_valid = 0;
 
+/* [J8 GEO-PICK 2026-10-03] The GEO TRACK places (La Plata, Valparaiso, ...) are
+ * selectable tracks in their own right, one slot and one level dir each, so
+ * they need N rows -- set_auto's dedicated single struct cannot hold them and
+ * the manifest table must stay free for the user's own custom_tracks.json.
+ * A third dedicated table costs 12 structs and keeps all three populations
+ * independent: a full manifest cannot evict a place, and a place cannot evict
+ * the auto track. */
+static TD5_CustomTrack s_geo[TD5_GEO_TRACK_MAX];
+static int s_geo_valid[TD5_GEO_TRACK_MAX];
+static int s_geo_count = 0;
+
 /* Read a whole file into a malloc'd, NUL-terminated buffer (for cJSON_Parse).
  * Mirrors td5_assetsrc.c's reader (which is file-static there). */
 static char *registry_read_file(const char *path)
@@ -162,6 +173,8 @@ int td5_track_registry_init(void)
 void td5_track_registry_shutdown(void)
 {
     s_auto_valid = 0;
+    memset(s_geo_valid, 0, sizeof(s_geo_valid));
+    s_geo_count = 0;
     s_track_count = 0;
     s_slot_max = TD5_CUSTOM_TRACK_SLOT_BASE;
 }
@@ -205,10 +218,53 @@ int td5_track_registry_set_auto(int slot, int level, const char *name,
     return 1;
 }
 
+int td5_track_registry_set_geo(int index, int slot, int level, const char *name,
+                               int circuit, int start_span, int finish_span)
+{
+    TD5_CustomTrack *t;
+
+    if (index < 0 || index >= TD5_GEO_TRACK_MAX) {
+        TD5_LOG_W(LOG_TAG, "track registry: set_geo rejected index %d "
+                  "(must be 0..%d)", index, TD5_GEO_TRACK_MAX - 1);
+        return 0;
+    }
+    if (slot < TD5_CUSTOM_TRACK_SLOT_BASE) {
+        TD5_LOG_W(LOG_TAG, "track registry: set_geo rejected slot %d "
+                  "(must be >= %d)", slot, TD5_CUSTOM_TRACK_SLOT_BASE);
+        return 0;
+    }
+    t = &s_geo[index];
+    if (!s_geo_valid[index]) { s_geo_valid[index] = 1; s_geo_count++; }
+
+    t->slot        = slot;
+    t->level       = level;
+    t->circuit     = circuit ? 1 : 0;
+    t->start_span  = start_span;
+    t->finish_span = finish_span;
+    t->sky_pitch   = 0.08f;
+    t->tga         = -1;          /* no shipped trak*.tga: the panel plots the route */
+    if (name && name[0]) {
+        strncpy(t->name, name, sizeof(t->name) - 1);
+        t->name[sizeof(t->name) - 1] = '\0';
+    } else {
+        snprintf(t->name, sizeof(t->name), "GEO TRACK %d", slot);
+    }
+    if (slot + 1 > s_slot_max) s_slot_max = slot + 1;
+
+    TD5_LOG_I(LOG_TAG, "track registry: set_geo[%d] slot %d -> level %d '%s' "
+              "(%s, start=%d finish=%d)", index, t->slot, t->level, t->name,
+              t->circuit ? "circuit" : "p2p", t->start_span, t->finish_span);
+    return 1;
+}
+
+int td5_track_registry_geo_count(void) { return s_geo_count; }
+
 static const TD5_CustomTrack *find_by_slot(int slot)
 {
     int i;
     if (s_auto_valid && s_auto.slot == slot) return &s_auto;
+    for (i = 0; i < TD5_GEO_TRACK_MAX; i++)
+        if (s_geo_valid[i] && s_geo[i].slot == slot) return &s_geo[i];
     for (i = 0; i < s_track_count; i++)
         if (s_tracks[i].slot == slot) return &s_tracks[i];
     return NULL;
@@ -218,6 +274,8 @@ static const TD5_CustomTrack *find_by_level(int level)
 {
     int i;
     if (s_auto_valid && s_auto.level == level) return &s_auto;
+    for (i = 0; i < TD5_GEO_TRACK_MAX; i++)
+        if (s_geo_valid[i] && s_geo[i].level == level) return &s_geo[i];
     for (i = 0; i < s_track_count; i++)
         if (s_tracks[i].level == level) return &s_tracks[i];
     return NULL;

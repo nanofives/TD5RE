@@ -3468,7 +3468,14 @@ static void init_race_level_and_assets(void)
      * condition that picks level030 (battle mode excluded there too). */
     int drag_strip = (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
                      && !td5_game_battle_mode_active();
-    if (td5_trackgen_is_auto_slot(g_td5.track_index)) {
+    /* [J8 GEO-PICK 2026-10-03] is_GENERATED_slot, not is_auto_slot: a real place
+     * (LA PLATA (REAL), ...) is a track slot of its own and is synthesised by the
+     * same generator, so it has to take this branch too or the loader would look
+     * for a level09x zip that no build ever wrote. set_target_slot resolves which
+     * level dir to build into and selects the place, and it must run BEFORE the
+     * generation worker starts -- the worker reads both. */
+    if (td5_trackgen_is_generated_slot(g_td5.track_index)) {
+        td5_trackgen_set_target_slot(g_td5.track_index);
         if (drag_strip)
             TD5_LOG_I(LOG_TAG, "Auto track: skipped, drag race loads the drag strip (track_index=%d)",
                       g_td5.track_index);
