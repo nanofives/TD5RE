@@ -167,11 +167,38 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                              int *out_spans);
 
 /* Reserved identity of the auto-generated track. */
-int td5_trackgen_level_number(void);   /* the levelNNN it builds into */
+int td5_trackgen_level_number(void);   /* the levelNNN the NEXT build targets */
 int td5_trackgen_slot(void);           /* its frontend schedule slot */
 
-/* Is this frontend schedule slot the auto-generated track? */
+/* Is this frontend schedule slot the auto-generated (SYNTHETIC, studio) track?
+ * Stays an exact match on the single studio slot: callers that mean "the studio
+ * knobs apply here" (the AUTO TRACK STUDIO chip, the "AUTO-GENERATED TRACK"
+ * display name) must NOT fire on a real place. */
 int td5_trackgen_is_auto_slot(int slot);
+
+/* -------------------------------------------------- [J8 GEO-PICK] ----------
+ * Real places (GEO TRACK) are selectable tracks of their own, one slot and one
+ * level dir per place, listed on SELECT TRACK next to the shipped tracks. They
+ * are built by the SAME generator as the auto track, so every caller that means
+ * "this slot's level is synthesised at race entry, not shipped in a zip" must
+ * ask td5_trackgen_is_generated_slot, not td5_trackgen_is_auto_slot. */
+int td5_trackgen_is_geo_slot(int slot);
+int td5_trackgen_is_generated_slot(int slot);   /* auto slot OR a geo place */
+
+/* Place index for a geo slot (the index td5_geo_places_slug() takes), or -1. */
+int td5_trackgen_geo_index_for_slot(int slot);
+
+/* Register every raceable place under re/assets/geo/ as a selectable track.
+ * Rescans the places first. Safe to call again (rows update in place); returns
+ * the number registered. */
+int td5_trackgen_register_geo_places(void);
+
+/* Point the NEXT build at `slot`: resolves the level dir it writes into and,
+ * for a geo slot, applies the place override (td5_geo_force_place) so the build
+ * uses that place without touching TD5RE_GEO_PLACE or SELECTED.TXT. Call it
+ * before td5_trackgen_prepare_race / _regenerate. A slot that is not a
+ * generated slot resets the target to the auto track. */
+void td5_trackgen_set_target_slot(int slot);
 
 /* [PICK] Human name for an auto-track texture page id (e.g. "GUARDRAIL",
  * "FLORA", "WALL_TOWER"), or NULL for reserved/unnamed slots. Valid only for

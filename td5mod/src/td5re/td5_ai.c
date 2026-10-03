@@ -4626,8 +4626,12 @@ static int s_geo_edge = 900;
 static void geo_gov_race_init(void)
 {
     s_geo_edge = td5_env_int("TD5RE_AI_GEO_EDGE", 900, 0, 4000);
+    /* [J8 GEO-PICK 2026-10-03] is_GENERATED_slot: a real place picked from
+     * SELECT TRACK is its own slot, and the geo corner governor exists precisely
+     * for the tight real-world corners those routes carry. The route-count test
+     * is what actually gates it on a geo build either way. */
     s_geo_gov  = s_geo_edge > 0
-              && td5_trackgen_is_auto_slot(g_td5.track_index)
+              && td5_trackgen_is_generated_slot(g_td5.track_index)
               && td5_geo_route_count() >= 2;
     TD5_LOG_I(LOG_TAG, "geo_corners: %s (edge=%d units)",
               s_geo_gov ? "ARMED" : "off", s_geo_edge);

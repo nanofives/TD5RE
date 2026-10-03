@@ -189,6 +189,39 @@ int         td5_geo_places_count(void);
 const char *td5_geo_places_slug(int i);
 const char *td5_geo_places_name(int i);  /* PLACE.JSON name, else the slug */
 
+/* -------------------------------------------------- [J8 GEO-PICK] ----------
+ * SELECT TRACK lists every raceable place as its OWN track slot (see
+ * TD5_GEO_SLOT_BASE in td5_trackgen.h), so picking one must not disturb the
+ * studio. The build therefore names the place by OVERRIDE rather than by
+ * writing the env knob: TD5RE_GEO_PLACE, SELECTED.TXT and the studio's own
+ * LOCATION row all keep whatever value they had, and the synthetic auto-track
+ * build on slot 60 is byte-identical to what it was before this existed.
+ *
+ * NULL or "" clears the override; while one is active it beats the env knob in
+ * td5_geo_sync(). Set it immediately before a build and clear it after. */
+void        td5_geo_force_place(const char *slug);
+const char *td5_geo_wanted_slug(void);   /* override, else env knob, else "" */
+
+/* Place dirs that EXIST under re/assets/geo/ but cannot be raced. Surfaced so
+ * the selector can say why a place the user fetched is not in the list rather
+ * than silently omitting it. */
+int         td5_geo_places_incomplete_count(void);
+const char *td5_geo_places_incomplete_slug(int i);
+const char *td5_geo_places_incomplete_reason(int i);
+
+/* Route plot for the SELECT TRACK preview panel. Reads
+ * re/assets/geo/<slug>/ROUTE.JSON directly and keeps only x/z -- deliberately
+ * NOT td5_geo_load(), which also parses a multi-megabyte HEIGHT.R16 and belongs
+ * to the build, not to a menu that re-draws every frame. Decimated to
+ * TD5_GEO_PREVIEW_MAX points and cached by slug, so re-asking for the place
+ * that is already shown costs one strcmp.
+ *
+ * Returns the point count (0 when the place has no usable route). */
+#define TD5_GEO_PREVIEW_MAX 2048
+int td5_geo_preview_route(const char *slug);
+int td5_geo_preview_count(void);
+int td5_geo_preview_node(int i, double *x, double *z);
+
 /* Attribution every geo track must show (ODbL). */
 #define TD5_GEO_CREDIT "MAP DATA (C) OPENSTREETMAP CONTRIBUTORS"
 

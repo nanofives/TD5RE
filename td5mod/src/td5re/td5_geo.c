@@ -579,6 +579,41 @@ static struct {
     char name[GEO_PLACES_MAX][96];
 } s_places;
 
+/* [J8 GEO-PICK] Place dirs that exist but are not raceable, with the reason, so
+ * the selector can explain the gap instead of dropping them silently. */
+static struct {
+    int  n;
+    char slug[GEO_PLACES_MAX][64];
+    char reason[GEO_PLACES_MAX][48];
+} s_places_bad;
+
+/* [J8 GEO-PICK] Slot-driven place override. Empty = not active, and then the
+ * env knob decides exactly as before. */
+static char s_force_slug[64];
+static int  s_force_active;
+
+void td5_geo_force_place(const char *slug)
+{
+    if (!slug || !slug[0]) {
+        if (s_force_active)
+            TD5_LOG_I(LOG_TAG, "geo: place override cleared");
+        s_force_active = 0;
+        s_force_slug[0] = '\0';
+        return;
+    }
+    s_force_active = 1;
+    snprintf(s_force_slug, sizeof(s_force_slug), "%s", slug);
+    TD5_LOG_I(LOG_TAG, "geo: place override -> %s (env knob untouched)", s_force_slug);
+}
+
+const char *td5_geo_wanted_slug(void)
+{
+    const char *env;
+    if (s_force_active) return s_force_slug;
+    env = getenv("TD5RE_GEO_PLACE");
+    return env ? env : "";
+}
+
 /* Which route file the loaded route came from, so sync can tell "already
  * loaded" from "needs loading" without re-parsing JSON every build. */
 static char s_route_want[512];
@@ -606,7 +641,10 @@ static void geo_route_sync(void)
 
 void td5_geo_sync(void)
 {
-    const char *slug = getenv("TD5RE_GEO_PLACE");
+    /* [J8 GEO-PICK] Was getenv("TD5RE_GEO_PLACE"). A SELECT TRACK geo slot sets
+     * the override instead of the env, so the studio's LOCATION row keeps its
+     * own value; with no override this reads the knob exactly as before. */
+    const char *slug = td5_geo_wanted_slug();
     if (!slug) slug = "";
 
     if (strcmp(slug, s_geo.loaded ? s_geo.slug : "")) {
@@ -641,11 +679,23 @@ void td5_geo_select(const char *slug)
     TD5_LOG_I(LOG_TAG, "geo: LOCATION -> %s", slug[0] ? slug : "SYNTHETIC");
 }
 
+/* [J8 GEO-PICK] Record a place dir that exists but cannot be raced, so the
+ * selector can name it and say why. */
+static void geo_place_note_incomplete(const char *slug, const char *reason)
+{
+    if (s_places_bad.n >= GEO_PLACES_MAX) return;
+    snprintf(s_places_bad.slug[s_places_bad.n], sizeof(s_places_bad.slug[0]), "%s", slug);
+    snprintf(s_places_bad.reason[s_places_bad.n], sizeof(s_places_bad.reason[0]), "%s", reason);
+    s_places_bad.n++;
+    TD5_LOG_W(LOG_TAG, "geo: place '%s' is not raceable: %s", slug, reason);
+}
+
 int td5_geo_places_rescan(void)
 {
     DIR *d = opendir("re/assets/geo");
     struct dirent *e;
     s_places.n = 0;
+    s_places_bad.n = 0;
     if (!d) return 0;
     while ((e = readdir(d)) != NULL && s_places.n < GEO_PLACES_MAX) {
         char path[384];
@@ -653,9 +703,23 @@ int td5_geo_places_rescan(void)
         TD5_File *f;
         const size_t len = strlen(e->d_name);
         if (e->d_name[0] == '.' || e->d_name[0] == '_' || len >= 64) continue;
+        /* A dir with neither file is not a place at all (stray folder), so look
+         * for the terrain first and only report dirs that tried to be one. */
+        snprintf(path, sizeof(path), "re/assets/geo/%s/HEIGHT.R16", e->d_name);
+        f = td5_plat_file_open(path, "rb");
+        if (!f) {
+            snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", e->d_name);
+            f = td5_plat_file_open(path, "rb");
+            if (f) { td5_plat_file_close(f); geo_place_note_incomplete(e->d_name, "NO TERRAIN DATA"); }
+            continue;                        /* no DEM: td5_geo_load would fail */
+        }
+        td5_plat_file_close(f);
         snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", e->d_name);
         f = td5_plat_file_open(path, "rb");
-        if (!f) continue;                    /* no route: not raceable yet */
+        if (!f) {                            /* no route: not raceable yet */
+            geo_place_note_incomplete(e->d_name, "NO ROUTE -- DRAW ONE IN geo_selector.py");
+            continue;
+        }
         td5_plat_file_close(f);
         memcpy(s_places.slug[s_places.n], e->d_name, len + 1);
         snprintf(s_places.name[s_places.n], sizeof(s_places.name[0]), "%s", e->d_name);
@@ -679,6 +743,96 @@ int td5_geo_places_rescan(void)
 int         td5_geo_places_count(void) { return s_places.n; }
 const char *td5_geo_places_slug(int i) { return (i >= 0 && i < s_places.n) ? s_places.slug[i] : ""; }
 const char *td5_geo_places_name(int i) { return (i >= 0 && i < s_places.n) ? s_places.name[i] : ""; }
+
+int td5_geo_places_incomplete_count(void) { return s_places_bad.n; }
+const char *td5_geo_places_incomplete_slug(int i)
+{ return (i >= 0 && i < s_places_bad.n) ? s_places_bad.slug[i] : ""; }
+const char *td5_geo_places_incomplete_reason(int i)
+{ return (i >= 0 && i < s_places_bad.n) ? s_places_bad.reason[i] : ""; }
+
+/* ------------------------------------------- [J8 GEO-PICK] preview route ---
+ * The SELECT TRACK panel needs the SHAPE of a place's route before anything is
+ * built or loaded. Parsing ROUTE.JSON for x/z alone is cheap (~150 KB) and,
+ * unlike td5_geo_load, touches none of the module's live state -- so the panel
+ * can show Valparaiso while La Plata is the loaded place, with no interaction
+ * between the two.
+ *
+ * Deliberately NOT validating chord spacing / origin the way geo_route_load
+ * does: those checks decide whether the ENGINE may build from a route, and a
+ * route that fails them still draws a perfectly truthful map. Rejecting one
+ * here would leave the panel blank for a place the user can see on disk. */
+static struct {
+    char   slug[64];
+    int    n;
+    double x[TD5_GEO_PREVIEW_MAX];
+    double z[TD5_GEO_PREVIEW_MAX];
+} s_preview;
+
+int td5_geo_preview_route(const char *slug)
+{
+    char path[384];
+    char *json;
+    cJSON *root, *pts;
+    int total, i, stride;
+
+    if (!slug || !slug[0]) { s_preview.slug[0] = '\0'; s_preview.n = 0; return 0; }
+    if (!strcmp(slug, s_preview.slug)) return s_preview.n;   /* already shown */
+
+    snprintf(s_preview.slug, sizeof(s_preview.slug), "%s", slug);
+    s_preview.n = 0;
+
+    snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", slug);
+    json = geo_slurp(path);
+    if (!json) return 0;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        TD5_LOG_W(LOG_TAG, "geo: preview route %s is not valid JSON", path);
+        return 0;
+    }
+    pts = cJSON_GetObjectItem(root, "points");
+    if (!pts || !cJSON_IsArray(pts) || (total = cJSON_GetArraySize(pts)) < 2) {
+        cJSON_Delete(root);
+        return 0;
+    }
+    /* Keep the LAST node whatever the stride, so the finish marker lands on the
+     * real end of the route rather than wherever the decimation happened to stop. */
+    stride = total / TD5_GEO_PREVIEW_MAX;
+    if (stride < 1) stride = 1;
+    for (i = 0; i < total && s_preview.n < TD5_GEO_PREVIEW_MAX; i += stride) {
+        const cJSON *p  = cJSON_GetArrayItem(pts, i);
+        const cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
+        const cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
+        if (!px || !pz || !cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) continue;
+        s_preview.x[s_preview.n] = px->valuedouble;
+        s_preview.z[s_preview.n] = pz->valuedouble;
+        s_preview.n++;
+    }
+    if (s_preview.n > 1 && stride > 1 && s_preview.n < TD5_GEO_PREVIEW_MAX) {
+        const cJSON *p  = cJSON_GetArrayItem(pts, total - 1);
+        const cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
+        const cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
+        if (px && pz && cJSON_IsNumber(px) && cJSON_IsNumber(pz)) {
+            s_preview.x[s_preview.n] = px->valuedouble;
+            s_preview.z[s_preview.n] = pz->valuedouble;
+            s_preview.n++;
+        }
+    }
+    cJSON_Delete(root);
+    TD5_LOG_I(LOG_TAG, "geo: preview route %s -> %d of %d nodes (stride %d)",
+              slug, s_preview.n, total, stride);
+    return s_preview.n;
+}
+
+int td5_geo_preview_count(void) { return s_preview.n; }
+
+int td5_geo_preview_node(int i, double *x, double *z)
+{
+    if (i < 0 || i >= s_preview.n) return 0;
+    if (x) *x = s_preview.x[i];
+    if (z) *z = s_preview.z[i];
+    return 1;
+}
 
 int td5_geo_init(void)
 {

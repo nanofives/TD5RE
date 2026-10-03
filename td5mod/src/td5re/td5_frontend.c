@@ -882,7 +882,13 @@ uint8_t s_car_lock_table[TD5_CAR_SLOT_MAX]; /* g_savedCarLockTable (0-36); 37-75
 /* Sized base(37)+custom headroom so custom-track slots (>=37) read in-bounds
  * (always 0 = unlocked; the static global is zero-initialized and never written
  * non-zero past slot 36). See td5_track_registry.h. */
-uint8_t s_track_lock_table[TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX];  /* DAT_004668B0 (orig 26); 26-36 = TD6; 37+ = custom */
+/* DAT_004668B0 (orig 26); 26-36 = TD6; 37+ = custom; 61+ = [J8 GEO-PICK] real
+ * places. Every live index site guards on `< 37`, so the geo band is headroom
+ * rather than a fix -- but the table's contract is "every selectable slot is
+ * in-bounds and reads as unlocked", and leaving it one band short is how a
+ * future guard-less read becomes an out-of-bounds one. */
+uint8_t s_track_lock_table[TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX
+                           + TD5_GEO_TRACK_MAX];
 int  s_total_unlocked_cars;      /* g_savedMaxUnlockedCar */
 int  s_total_unlocked_tracks;    /* g_savedMusicTrackIndex */
 int  s_cheat_unlock_all;         /* g_cheatPostRaceHighScoreUnlock */
@@ -8906,6 +8912,22 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         td5_autotrack_draw_route(412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f,
                                  sx, sy);
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    } else if (td5_trackgen_is_geo_slot(s_selected_track)) {
+        /* [J8 GEO-PICK 2026-10-03] A real place has no trak*.tga either, but
+         * unlike the auto slot its route is already on disk -- so this panel is
+         * populated immediately, shows the REAL road, and carries the OSM credit
+         * the ODbL requires wherever that geometry is displayed. */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        td5_geo_draw_route(td5_trackgen_geo_index_for_slot(s_selected_track),
+                           412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f, sx, sy);
+        {
+            /* Name the places that could NOT be listed, so an incomplete fetch
+             * is a diagnosable state instead of a silently missing entry. */
+            char note[96];
+            if (td5_geo_incomplete_note(note, sizeof(note)))
+                frontend_draw_value_text(sx, sy, 412, 375, note, 0xFF8899AA);
+        }
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     }
     /* [FIXED 2026-06-01] Arrows only on the Track selector (slot 0). Orig

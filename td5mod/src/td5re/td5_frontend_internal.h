@@ -1085,6 +1085,17 @@ int  td5_autotrack_opts_row_count(void);
  * map for the auto slot, which has no pre-rendered TGA of its own. */
 int  td5_autotrack_draw_route(float bx, float by, float bw, float bh,
                               float sx, float sy);
+/* [J8 GEO-PICK 2026-10-03] Same job for a REAL PLACE slot, reading that place's
+ * ROUTE.JSON straight off disk instead of the studio worker's point mirror --
+ * so the panel is populated the moment the player cycles onto the entry, with
+ * no generator run. Also draws the ODbL credit under the rect. `place_index` is
+ * the td5_geo_places_slug() index (td5_trackgen_geo_index_for_slot). Returns 0
+ * when the place has no usable route (it has already drawn the reason). */
+int  td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
+                        float sx, float sy);
+/* One line naming a place dir under re/assets/geo/ that could not be listed and
+ * why, for the SELECT TRACK footer. Returns 0 when every place is raceable. */
+int  td5_geo_incomplete_note(char *out, size_t cap);
 /* Preview start/finish marker (td5_frontend.c). kind 0 = START (green),
  * 1 = FINISH (black/white checker). Shared with the auto-track route plot so
  * both previews mark their ends identically. */
