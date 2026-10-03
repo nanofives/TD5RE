@@ -3080,7 +3080,14 @@ static int trf_dyn_clear_lane_count(int self_slot, int span, int lane_count)
  * and from then on they are a rolling roadblock across a 2-lane road. That is why
  * the item reads "better, but not always": the spawn guard did its job (it skipped
  * 22 placements in a 180 s Newcastle run) while the lane-wall sweep still measured
- * 2-lane spans ahead of the player fully occupied on 55 of 296 samples (0.75%).
+ * 55 fully-occupied 2-lane spans out of 7342 2-lane span observations (0.75%),
+ * spread over 28 of the run's 296 sweep samples.
+ *
+ * [2026-10-03 MEASUREMENT CAVEAT] That 0.75% is NOT a usable A/B metric. Across
+ * the 2026-10-03 Newcastle runs it ranged 0.08%-0.50% with the config held fixed,
+ * so its run-to-run spread is larger than any effect this rule has. The runtime
+ * half below fires (29 yields in a 3750-tick run) but its benefit is UNPROVEN;
+ * proving it needs a pinned-traffic harness, not a free race.
  *
  * The runtime half breaks the abreast pair instead of preventing it. On a road with
  * fewer than 3 lanes, when another traffic car sits in the OTHER lane within
@@ -3988,13 +3995,23 @@ static int trf_taper_enabled(void)
     return s;
 }
 
-/* [TAPER ON BRANCHES 2026-10-03] A/B knob: TD5RE_TRAFFIC_TAPER_BRANCH=0 restores
- * the old behaviour where the lane taper was skipped on a branch corridor. */
+/* [TAPER ON BRANCHES 2026-10-03] A/B knob, DEFAULT OFF -- measured a REGRESSION.
+ * The hypothesis was that running the lane taper on branch corridors would stop
+ * cars aiming at a lane that ends (Newcastle fork-B 741-744). Measured on
+ * Newcastle at TRAFFIC VERY HIGH, 3 baseline runs vs 2 taper runs, stuck episodes
+ * per 1000 sim ticks: baseline 11.9 / 8.2 / 11.2, taper 13.8 / 13.6 -- both taper
+ * samples above EVERY baseline sample, ~+32% on the means. Escape episodes did
+ * not improve either (baseline 2/2/5, taper 9/2). Most likely
+ * td5_track_traffic_taper_lane is not branch-aware: it walks `target_span`
+ * forward through the MAIN span table, so on a corridor it reads lane counts for
+ * unrelated spans and returns a target lane that steers the car off the corridor.
+ * Kept behind the knob rather than deleted so the branch-aware version can be
+ * A/B'd against this exact measurement. TD5RE_TRAFFIC_TAPER_BRANCH=1 enables. */
 static int trf_taper_branch_enabled(void)
 {
     static int s = -1;
     if (s < 0) {
-        s = td5_env_flag_on("TD5RE_TRAFFIC_TAPER_BRANCH");
+        s = td5_env_flag_off("TD5RE_TRAFFIC_TAPER_BRANCH");
         TD5_LOG_I(LOG_TAG, "traffic_taper knob: TD5RE_TRAFFIC_TAPER_BRANCH=%d", s);
     }
     return s;

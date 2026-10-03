@@ -1577,6 +1577,49 @@ static int trf_edge_escape_depth(void)
     return v;
 }
 
+/* [EDGE CLAMP DEPTH LIMIT 2026-10-03] The original applies containment on EVERY
+ * tick the car reads outside the rail: 0x00407390 tests `pen < 0` and goes
+ * straight to ApplySimpleTrackSurfaceForce with no segment test at all
+ * [CONFIRMED @ 0x00407390: `if (iVar8 < 0) { DecayUltimateVariantTimer(...);
+ * ApplySimpleTrackSurfaceForce(actor,uVar7,iVar8); UpdateTrafficVehiclePose(actor); }`
+ * for the inner rail, and the identical block at the outer rail]. The PORT-ONLY
+ * segment clamp (TD5RE_TRAFFIC_EDGE_SEGMENT, 2026-09-29) suppresses that push
+ * whenever the perpendicular foot misses the A..B segment -- correct for the
+ * shallow false positive it was built for, but it has NO depth limit, so a car
+ * that is already far across the rail gets no containment from anything and
+ * simply stays out there.
+ *
+ * The two cases separate cleanly on the signed distance of the car CENTRE to the
+ * rail line (`dist` in the traffic_edge_hit log, = (pen + extent) / 4096):
+ *   - the measured false positive sits on the CORRECT side, dist = +319 (it only
+ *     trips because the car's half-extent 359 is subtracted), so depth = -319;
+ *   - the measured escapes sit across the line, depth = 2261 / 3131 / 3505 /
+ *     4565 / 16906 over the 2026-10-03 Newcastle runs.
+ * Anything at or past this threshold therefore falls back to the ORIGINAL
+ * unconditional push. TD5RE_TRAFFIC_EDGE_DEEP=0 disables the fallback and
+ * restores the unlimited 2026-09-29 clamp. */
+static int trf_edge_deep_limit(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        v = td5_env_int("TD5RE_TRAFFIC_EDGE_DEEP", 400, 0, 1000000);
+        TD5_LOG_I(LOG_TAG, "traffic_edge knob: TD5RE_TRAFFIC_EDGE_DEEP=%d", v);
+    }
+    return v;
+}
+
+/* Depth (world units) of the car centre on the WRONG side of the rail line.
+ * Negative while the centre is still inside. */
+static int trf_edge_depth(int32_t pen, int32_t ext) { return -(pen + ext) / 4096; }
+
+/* 1 when the segment clamp must NOT suppress this push because the car is already
+ * deep outside -- i.e. fall back to the original's unconditional containment. */
+static int trf_edge_deep_escape(int depth)
+{
+    int lim = trf_edge_deep_limit();
+    return lim > 0 && depth >= lim;
+}
+
 void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
     const char *grind_edge = "none";
@@ -1641,17 +1684,21 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
             cos_hd, sin_hd,
             &edge_angle);
 
-        if (pen < 0 && trf_edge_segment_enabled() &&
+        int32_t ext_i = sin_hd * car_half_w + cos_hd * car_half_l;
+        int     dep_i = trf_edge_depth(pen, ext_i);
+        int     deep_i = trf_edge_deep_escape(dep_i);
+
+        if (pen < 0 && trf_edge_segment_enabled() && !deep_i &&
             !traffic_edge_foot_on_segment(A->x, A->z, B->x, B->z, arel_x, arel_z)) {
-            int d = -(pen + sin_hd * car_half_w + cos_hd * car_half_l) / 4096;
-            if (d > escape_depth) escape_depth = d;
+            if (dep_i > escape_depth) escape_depth = dep_i;
             trf_edge_log(slot, actor, "inner_offseg", sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_i, hd, car_half_w, car_half_l);
         } else if (pen < 0) {
-            trf_edge_log(slot, actor, "inner", sub_lane, lane_count, pen, edge_angle,
+            trf_edge_log(slot, actor, deep_i ? "inner_deep" : "inner",
+                         sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_i, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             grind_pushed = 1; grind_edge = "inner";
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]:
@@ -1706,17 +1753,21 @@ outer_test:
             cos_hd, sin_hd,
             &edge_angle);
 
-        if (pen < 0 && trf_edge_segment_enabled() &&
+        int32_t ext_o = sin_hd * car_half_w + cos_hd * car_half_l;
+        int     dep_o = trf_edge_depth(pen, ext_o);
+        int     deep_o = trf_edge_deep_escape(dep_o);
+
+        if (pen < 0 && trf_edge_segment_enabled() && !deep_o &&
             !traffic_edge_foot_on_segment(A->x, A->z, B->x, B->z, arel_x, arel_z)) {
-            int d = -(pen + sin_hd * car_half_w + cos_hd * car_half_l) / 4096;
-            if (d > escape_depth) escape_depth = d;
+            if (dep_o > escape_depth) escape_depth = dep_o;
             trf_edge_log(slot, actor, "outer_offseg", sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_o, hd, car_half_w, car_half_l);
         } else if (pen < 0) {
-            trf_edge_log(slot, actor, "outer", sub_lane, lane_count, pen, edge_angle,
+            trf_edge_log(slot, actor, deep_o ? "outer_deep" : "outer",
+                         sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_o, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             grind_pushed = 1;
             grind_edge   = (grind_edge[0] == 'i') ? "both" : "outer";
