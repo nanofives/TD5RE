@@ -177,6 +177,24 @@ const char *tg_prefab_name(int pf)
  *
  * Returns -1 when nothing fits, which is an ordinary answer: the caller then
  * extrudes the real footprint as it always did. */
+/* [J7] Is this set piece selectable at all?
+ *
+ * Four of the five open prefabs are closed by td5_tg_prefab_close_data.h. The
+ * fifth, lm12, cannot be: its open island spans 21.7 x 17.8 m while the walls
+ * inside it span only 5.5 x 14.2 m, so a box drawn from either extent lands in
+ * open air rather than against the architecture. Rendering the emitted mesh
+ * confirmed it -- the closure buried the piece at one yaw and stood in front of
+ * its detailed face at another, which is worse than the hole it was closing.
+ *
+ * So lm12 is not closed, it is withdrawn, and tg_prefab_fit's documented
+ * "nothing fits" answer takes over: the caller extrudes the real footprint, as
+ * it did before any prefab existed. One piece of 24. */
+static int tg_prefab_usable(int i)
+{
+    if (!td5_env_flag_on("TD5RE_TG_PREFAB_CLOSE")) return 1;
+    return !k_pfclose_exclude[i];
+}
+
 int tg_prefab_fit(double fx_max, double fz_max, unsigned int salt)
 {
     int i, best = -1, nfit = 0, pick;
@@ -185,6 +203,7 @@ int tg_prefab_fit(double fx_max, double fz_max, unsigned int salt)
     if (!(fx_max > 0.0) || !(fz_max > 0.0)) return -1;
     for (i = 0; i < TD5_TG_PREFAB_N; i++) {
         const double fx = k_tg_prefabs[i].fx, fz = k_tg_prefabs[i].fz;
+        if (!tg_prefab_usable(i)) continue;
         if (!(fx > 0.0) || !(fz > 0.0)) continue;
         if (fx > fx_max || fz > fz_max) continue;
         if (fx * fz > best_area) best_area = fx * fz;
@@ -196,12 +215,14 @@ int tg_prefab_fit(double fx_max, double fz_max, unsigned int salt)
     nfit = 0;
     for (i = 0; i < TD5_TG_PREFAB_N; i++) {
         const double a = (double)k_tg_prefabs[i].fx * k_tg_prefabs[i].fz;
+        if (!tg_prefab_usable(i)) continue;
         if (k_tg_prefabs[i].fx > fx_max || k_tg_prefabs[i].fz > fz_max) continue;
         if (a >= best_area * 0.75) nfit++;
     }
     pick = (int)(salt % (unsigned)(nfit > 0 ? nfit : 1));
     for (i = 0; i < TD5_TG_PREFAB_N; i++) {
         const double a = (double)k_tg_prefabs[i].fx * k_tg_prefabs[i].fz;
+        if (!tg_prefab_usable(i)) continue;
         if (k_tg_prefabs[i].fx > fx_max || k_tg_prefabs[i].fz > fz_max) continue;
         if (a < best_area * 0.75) continue;
         best = i;
