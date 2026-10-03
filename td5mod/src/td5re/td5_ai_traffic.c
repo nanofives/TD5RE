@@ -1532,6 +1532,39 @@ static void traffic_force_unstick(int slot, char *actor, int32_t *rs) {
     td5_track_normalize_actor_wrap((TD5_Actor *)actor);
 }
 
+/* [TRAFFIC OFF-ROAD 2026-10-03] PORT-ONLY. Consecutive ticks on which the
+ * segment-edge containment found this slot OUTSIDE its span's rail and declined to
+ * push it back, because the PORT-ONLY off-segment clamp (TD5RE_TRAFFIC_EDGE_SEGMENT,
+ * added 2026-09-29) only pushes when the perpendicular foot lands on the rail
+ * segment. That clamp is right for its measured case -- a diagonal lane-add rail
+ * whose infinite extension cuts ~40 units into the lane that continues straight --
+ * but it has no depth limit, so a car that ends up HUNDREDS of units off the road
+ * gets no containment at all and simply stays there. Measured on Newcastle at
+ * TRAFFIC VERY HIGH: slot 13 sat 4565 units outside the fork-B corridor's right rail
+ * at span 741 for ~27 s, and the existing stuck detector never fired on it. Counting
+ * the reports gives the recovery path a signal that does not depend on the car being
+ * motionless. See td5_ai_traffic_note_offroad in td5_ai.h. */
+#define TRF_OFFROAD_TICKS 45       /* ~1.5 s outside the rail with no containment  */
+static uint16_t s_trf_offroad_ticks[TD5_MAX_TOTAL_ACTORS];
+
+void td5_ai_traffic_note_offroad(int slot, int depth)
+{
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (depth <= 0) { s_trf_offroad_ticks[slot] = 0; return; }
+    if (s_trf_offroad_ticks[slot] < 0xFFFFu) s_trf_offroad_ticks[slot]++;
+}
+
+/* TD5RE_TRAFFIC_OFFROAD_FIX=0 restores the old behaviour (count but never act). */
+static int trf_offroad_fix_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_OFFROAD_FIX");
+        TD5_LOG_I(LOG_TAG, "traffic_offroad knob: TD5RE_TRAFFIC_OFFROAD_FIX=%d", s);
+    }
+    return s;
+}
+
 /* [#3 COLLISION-DEADLOCK ESCAPE 2026-06-19] Safety net for traffic cars that pile
  * into each other (or geometry) and cannot free themselves. When a traffic car
  * has been effectively stopped for ~1.5 s — and it is NOT a deliberate stop
@@ -3039,6 +3072,98 @@ static int trf_dyn_clear_lane_count(int self_slot, int span, int lane_count)
     return clear;
 }
 
+/* [KEEP-A-LANE-FREE RUNTIME 2026-10-03] PORT-ONLY. The 2026-09-12 keep-a-lane-free
+ * rule is enforced ONLY in trf_dyn_spawn_in_window, i.e. at the instant a car is
+ * placed, against the lane occupancy of its spawn span. It therefore cannot see the
+ * wall that FORMS later: two cars that spawned in different lanes at different spans
+ * drift abreast through ordinary speed spread, a lane change, or a road narrowing,
+ * and from then on they are a rolling roadblock across a 2-lane road. That is why
+ * the item reads "better, but not always": the spawn guard did its job (it skipped
+ * 22 placements in a 180 s Newcastle run) while the lane-wall sweep still measured
+ * 2-lane spans ahead of the player fully occupied on 55 of 296 samples (0.75%).
+ *
+ * The runtime half breaks the abreast pair instead of preventing it. On a road with
+ * fewer than 3 lanes, when another traffic car sits in the OTHER lane within
+ * UNWALL_ABREAST spans, exactly one of the pair yields -- deterministically the
+ * HIGHER slot index, so every peer and every replay picks the same car -- by easing
+ * its cruise throttle until the pair is staggered by UNWALL_CLEAR spans. Staggering
+ * is enough to make the road passable: the player meets the yielder first, moves to
+ * the lane the yielder left, and then has a clear run past the leader. The yielder
+ * deliberately does NOT change lane (the peer's lane is occupied by definition while
+ * abreast, so a merge there would be a collision).
+ *
+ * Reads only replicated sim state (slot indices, spans, sub-lanes) and uses no RNG,
+ * so it is MP-lockstep safe. Shares TD5RE_TRAFFIC_KEEP_LANE with the spawn guard;
+ * TD5RE_TRAFFIC_UNWALL=0 disables just this runtime half. */
+#define TRF_UNWALL_ABREAST  1    /* |span delta| at or below this == side by side   */
+#define TRF_UNWALL_CLEAR    4    /* release once the pair is this far apart         */
+#define TRF_UNWALL_SCALE   45    /* yielder cruise, percent, while easing off       */
+static uint8_t s_trf_unwall_active[TD5_MAX_TOTAL_ACTORS];
+
+static int trf_unwall_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_UNWALL");
+        TD5_LOG_I(LOG_TAG, "traffic_unwall knob: TD5RE_TRAFFIC_UNWALL=%d", s);
+    }
+    return s;
+}
+
+/* 1 when this slot is the designated yielder of an abreast pair that walls a
+ * narrow road. Hysteresis: engage at <= ABREAST, release at >= CLEAR. */
+static int trf_unwall_should_yield(int slot)
+{
+    char *self;
+    int my_span, my_lane, lane_count, n, i;
+    int engaged, closest = 32767;
+
+    if (!trf_keep_lane_free_enabled() || !trf_unwall_enabled()) return 0;
+    if (slot < g_traffic_slot_base || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    if (g_cop_is_cop[slot]) return 0;            /* never slow a cop mid-chase */
+    self = actor_ptr(slot);
+    if (!self) return 0;
+
+    my_span = (int)ACTOR_I16(self, ACTOR_SPAN_RAW);
+    lane_count = td5_track_span_lane_count_at(my_span);
+    if (lane_count != 2) { s_trf_unwall_active[slot] = 0; return 0; }
+    my_lane = (int)ACTOR_U8(self, ACTOR_SUB_LANE_INDEX);
+
+    /* Nearest peer in the OTHER lane (same lane is a queue, not a wall). */
+    n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (i = g_traffic_slot_base; i < n; i++) {
+        char *peer;
+        int d, peer_lane;
+        if (i == slot) continue;
+        if (td5_ai_traffic_pair_blocked(slot, i)) continue;
+        if (!ai_peer_is_present(i)) continue;
+        peer = actor_ptr(i);
+        if (!peer) continue;
+        peer_lane = (int)ACTOR_U8(peer, ACTOR_SUB_LANE_INDEX);
+        if (peer_lane == my_lane) continue;
+        if (peer_lane < 0 || peer_lane >= lane_count) continue;
+        d = (int)ACTOR_I16(peer, ACTOR_SPAN_RAW) - my_span;
+        if (d < 0) d = -d;
+        /* Only the HIGHER slot index yields, so the pair never both brake. */
+        if (i > slot) continue;
+        if (d < closest) closest = d;
+    }
+    if (closest == 32767) {
+        engaged = 0;                              /* no peer we are responsible for */
+    } else if (s_trf_unwall_active[slot]) {
+        engaged = (closest < TRF_UNWALL_CLEAR);   /* hold until properly staggered */
+    } else {
+        engaged = (closest <= TRF_UNWALL_ABREAST);
+    }
+    s_trf_unwall_active[slot] = (uint8_t)engaged;
+    if (engaged && (g_ai_frame_counter % 60u) == 0u)
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_unwall: slot=%d span=%d lane=%d/2 yields (abreast peer %d spans away)",
+                  slot, my_span, my_lane, closest);
+    return engaged;
+}
+
 /* [item#10 2026-06-15] Live-spawn anchor for the consistent-density goal. In a
  * multi-human (split-screen) race the players can spread far apart; anchoring all
  * spawns on the FRONT-MOST human (ai_player_span_lead) leaves the trailing
@@ -3859,6 +3984,18 @@ static int trf_taper_enabled(void)
     if (s < 0) {
         s = td5_env_flag_on("TD5RE_TRAFFIC_TAPER");
         TD5_LOG_I(LOG_TAG, "traffic_taper knob: TD5RE_TRAFFIC_TAPER=%d", s);
+    }
+    return s;
+}
+
+/* [TAPER ON BRANCHES 2026-10-03] A/B knob: TD5RE_TRAFFIC_TAPER_BRANCH=0 restores
+ * the old behaviour where the lane taper was skipped on a branch corridor. */
+static int trf_taper_branch_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_TAPER_BRANCH");
+        TD5_LOG_I(LOG_TAG, "traffic_taper knob: TD5RE_TRAFFIC_TAPER_BRANCH=%d", s);
     }
     return s;
 }
@@ -4971,6 +5108,65 @@ void td5_ai_traffic_dynamic_tick(void)
                 fflush(s_census_csv);
             }
         }
+
+        /* [LANE-WALL DIAG 2026-10-03] The keep-a-lane-free rule is enforced only at
+         * SPAWN time, on the spawn span. It cannot see a wall that FORMS later, when
+         * two cars that spawned in different lanes at different spans drift abreast
+         * (speed spread, lane changes, a road narrowing). Mariano's verdict on that
+         * item was "better, but not always", so measure the thing the rule is
+         * supposed to guarantee instead of the rule's own skip count: sweep the spans
+         * ahead of the player and count how many have EVERY lane occupied. A car
+         * occupies its span +/- 1 (its own footprint). Pure measurement.
+         * TD5RE_TRAFFIC_LANEDIAG=1. */
+        if (td5_env_flag_off("TD5RE_TRAFFIC_LANEDIAG")) {
+            enum { LD_SPANS = 48 };
+            uint16_t occ[LD_SPANS];
+            int walled2 = 0, spans2 = 0, walledN = 0, spansN = 0;
+            int base = p_span + 1;
+            for (int z = 0; z < LD_SPANS; z++) occ[z] = 0;
+            for (int i = g_traffic_slot_base;
+                 i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
+                 i < TD5_MAX_TOTAL_ACTORS; i++) {
+                int sp, d, lane;
+                if (s_trf_dyn_state[i] != TRF_DYN_ACTIVE &&
+                    s_trf_dyn_state[i] != TRF_DYN_FADE_IN &&
+                    s_trf_dyn_state[i] != TRF_DYN_FADE_OUT)
+                    continue;
+                sp = (int)(int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
+                if (ring2 > 0 && sp >= ring2) {
+                    int m = td5_track_branch_to_main_span(sp);
+                    if (m < 0) continue;       /* corridor with no main twin: not a wall here */
+                    sp = m;
+                }
+                lane = (int)ACTOR_U8(actor_ptr(i), ACTOR_SUB_LANE_INDEX);
+                if (lane < 0 || lane > 15) continue;
+                for (int k = -1; k <= 1; k++) {
+                    d = (sp + k) - base;
+                    if (g_td5.track_type == TD5_TRACK_CIRCUIT && ring2 > 0) {
+                        int half = ring2 / 2;
+                        while (d >  half) d -= ring2;
+                        while (d < -half) d += ring2;
+                    }
+                    if (d >= 0 && d < LD_SPANS) occ[d] |= (uint16_t)(1u << lane);
+                }
+            }
+            for (int z = 0; z < LD_SPANS; z++) {
+                int s = base + z;
+                int lc, full;
+                if (ring2 > 0) { while (s >= ring2) s -= ring2; while (s < 0) s += ring2; }
+                lc = td5_track_span_lane_count_at(s);
+                if (lc <= 1 || lc > 15) continue;
+                full = ((occ[z] & ((1u << lc) - 1u)) == ((1u << lc) - 1u));
+                spansN++;
+                if (full) walledN++;
+                if (lc == 2) { spans2++; if (full) walled2++; }
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "traffic_lanediag: tick=%u player_span=%d walled2=%d spans2=%d "
+                      "walledN=%d spansN=%d",
+                      (unsigned)g_td5.simulation_tick_counter, p_span,
+                      walled2, spans2, walledN, spansN);
+        }
     }
     }
 }
@@ -5019,6 +5215,38 @@ void td5_ai_update_traffic_route_plan(int slot) {
     /* [S20 AntiFreeze] un-stick a traffic car that the faithful recovery brake
      * has frozen and the player-relative recycle can't reach (parked player). */
     traffic_smart_antifreeze(slot, actor, rs);
+
+    /* [TRAFFIC OFF-ROAD 2026-10-03] Recover a car the segment-edge containment has
+     * left stranded outside the road (see td5_ai_traffic_note_offroad). This is a
+     * SEPARATE net from the stuck detector below: that one requires SPAN_RAW frozen
+     * AND |speed| < 0x1000, so it is blind to a stranded car that still creeps or
+     * whose span oscillates by one -- which is what "stopped sideways / grinding
+     * walls" looks like in the log. Reset in place (realign, clear velocity, reseed
+     * progress) exactly like the stuck path; dynamic traffic additionally relocates a
+     * car that strands twice in quick succession rather than thrashing one spot. */
+    if (trf_offroad_fix_enabled() && slot >= g_traffic_slot_base &&
+        slot < TD5_MAX_TOTAL_ACTORS &&
+        s_trf_offroad_ticks[slot] >= TRF_OFFROAD_TICKS &&
+        !g_actor_broken_down[slot] &&
+        !(g_cop_is_cop[slot] && g_cop_phase[slot] != COP_IDLE)) {
+        static uint32_t s_last_offroad_frame[TD5_MAX_TOTAL_ACTORS];
+        unsigned since = (s_last_offroad_frame[slot] != 0)
+            ? (g_ai_frame_counter - s_last_offroad_frame[slot]) : 0xFFFFFFFFu;
+        s_last_offroad_frame[slot] = g_ai_frame_counter ? g_ai_frame_counter : 1u;
+        if (since < 300u && td5_ai_traffic_dynamic_active() && !g_cop_is_cop[slot]) {
+            s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;   /* relocate, don't thrash */
+            TD5_LOG_I(LOG_TAG,
+                "traffic_offroad: slot=%d RE-STRANDED at span=%d -> despawn/relocate",
+                slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
+        } else {
+            traffic_force_unstick(slot, actor, rs);
+            TD5_LOG_I(LOG_TAG,
+                "traffic_offroad: slot=%d recovered at span=%d after %u off-road ticks",
+                slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW),
+                (unsigned)s_trf_offroad_ticks[slot]);
+        }
+        s_trf_offroad_ticks[slot] = 0;
+    }
 
     /* [DIAG+FIX 2026-07-07] Stuck detector + universal unstick backstop. Tracks
      * per-slot span progress; under TD5RE_TRAFFIC_DIAG it edge-logs STUCK/UNSTUCK
@@ -5343,6 +5571,14 @@ void td5_ai_update_traffic_route_plan(int slot) {
         cruise = (cruise * cscale) >> 8;
         if (cruise < 0) cruise = 0;
     }
+    /* [KEEP-A-LANE-FREE RUNTIME 2026-10-03] Break an abreast pair that is walling a
+     * 2-lane road: the deterministic yielder eases off until the pair is staggered.
+     * See trf_unwall_should_yield. Applied after the cruise scales so it composes
+     * with them, and before the ray brain so a wall/corner brake still wins. */
+    if (trf_unwall_should_yield(slot)) {
+        cruise = (cruise * TRF_UNWALL_SCALE) / 100;
+        if (cruise < 0x14) cruise = 0x14;   /* keep it rolling, never a dead stop */
+    }
     ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
 
@@ -5584,8 +5820,25 @@ void td5_ai_update_traffic_route_plan(int slot) {
              * valid for the raw-based target span (raw±1 may have a different
              * lane count than the car's current span). */
             /* [TRAFFIC LANE TAPER 2026-09-29] Leave a lane that ends ahead in time
-             * (see td5_track_traffic_taper_lane). */
-            if (!traffic_on_branch && !fork_target && trf_taper_enabled() &&
+             * (see td5_track_traffic_taper_lane).
+             *
+             * [TAPER ON BRANCHES 2026-10-03] The taper used to be skipped on a branch
+             * corridor, inheriting the `!traffic_on_branch` gate from the LATERAL
+             * CHOOSER above (which is skipped there because it jitters the target lane
+             * tick to tick on a narrow branch). The taper is not a jitter source -- it
+             * is the monotone "leave the lane that ends ahead" rule -- and corridors are
+             * exactly where lanes end: Newcastle's fork-B corridor (ring=634) runs 4
+             * lanes at spans 741/742 and drops to 3 at the type-6 span 743. With the
+             * taper off there, a car in sub-lane 3 kept aiming at a lane that does not
+             * exist on 744 and was steered past the right curb; the measured result was
+             * slot 13 parked 4565 units outside the corridor's right rail for ~27 s
+             * (825 ticks of outer_offseg at span 741, A=(8270,-17784) B=(6872,-15986)),
+             * with spans 741-744 the top stuck spans of the whole run. The corridor is a
+             * contiguous span run, so the taper walks it the same as the main road and
+             * stops at junction types 8-11 on its own. TD5RE_TRAFFIC_TAPER_BRANCH=0
+             * restores the old skip. */
+            if ((!traffic_on_branch || trf_taper_branch_enabled()) &&
+                !fork_target && trf_taper_enabled() &&
                 branch_traffic_fix_enabled() && slot >= g_traffic_slot_base) {
                 target_sub_lane = td5_track_traffic_taper_lane(
                     (int)span_raw, target_span, target_sub_lane, polarity == 0, 6);
