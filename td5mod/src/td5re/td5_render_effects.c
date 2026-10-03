@@ -3767,8 +3767,12 @@ void td5_render_draw_sun_disc(void)
         float mx = s_center_x * 2.0f, my = s_center_y * 2.0f;
         if (cx < -mx || cx > mx * 2.0f || cy < -my || cy > my * 2.0f) {
             if (diag)
-                TD5_LOG_I(RENDER_LOG_TAG, "[sundisc] OFFSCREEN screen=(%.0f,%.0f) vz=%.1f",
-                          (double)cx, (double)cy, (double)vz);
+                TD5_LOG_I(RENDER_LOG_TAG, "[sundisc] OFFSCREEN screen=(%.0f,%.0f) vz=%.1f "
+                          "dir=(%.3f,%.3f,%.3f) fwd=(%.3f,%.3f,%.3f) freecam=%d",
+                          (double)cx, (double)cy, (double)vz,
+                          (double)dir[0], (double)dir[1], (double)dir[2],
+                          (double)vb.m[6], (double)vb.m[7], (double)vb.m[8],
+                          td5_camera_freecam_active());
             return;
         }
     }
