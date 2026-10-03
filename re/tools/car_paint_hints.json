@@ -33,6 +33,9 @@
   "fhm": { "paint_all_varying": true,
            "why": "'68 Mustang HR: skin 1 purple+flames, skin 3 a yellow/cyan two-tone. Left the NOSE and FRONT FENDER white against a repainted body." },
 
+  "128": { "paint_all_varying": true,
+           "why": "SPEED 12: an IRIDESCENT paint (purple / teal / black / silver). The flank where it shifts hue goes achromatic in skin 3, so the chrome guard dropped it and a repainted car kept a magenta streak down the right flank plus a pink patch at the nose. Coverage 89.4% -> 97.3%; claimed-but-not-moving only +202 texels, so no chrome or lamp was swallowed. There is no livery here to lose -- the gradient IS the paint." },
+
   "cat": { "paint_all_varying": true,
            "why": "Super 7: skin 3 is a green body with a yellow nose, so the nose fits no single paint and kept skin 0's red. Lowest paint contrast of the roster (Pcon 0.51)." },
 
