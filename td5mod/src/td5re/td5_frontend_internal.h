@@ -424,6 +424,9 @@ int frontend_create_button(const char *label, int x, int y, int w, int h);
 int frontend_load_tga(const char *name, const char *archive);
 int frontend_option_delta(void);
 int frontend_input_confirm_was_mouse(void);
+/* [J2 2026-10-03] 1 when the game window has focus (or the test harness forces
+ * input). For raw held-state reads outside frontend_poll_input's own focus gate. */
+int frontend_window_is_active(void);
 int frontend_text_input_confirmed(void);
 void Screen_ConnectionBrowser(void);
 void Screen_CreateSession(void);

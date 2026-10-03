@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 3 (track select)" },
+    { CL_ITEM,    "The R key now picks a random track on SELECT" },
+    { CL_ITEM,    "  TRACK, as the on-screen hint promised. It did" },
+    { CL_ITEM,    "  nothing before unless you also nudged an arrow." },
+    { CL_ITEM,    "  Pad X does the same, one track per press." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 2 (auto track seeds)" },
     { CL_ITEM,    "Any auto track seed can now be typed or replayed." },
     { CL_ITEM,    "  Seeds above 2147483647 used to turn into that number." },
