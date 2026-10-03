@@ -118,6 +118,24 @@ FIT_MIN_VAR    = 0.075   # the model's predicted across-variant range must clear
                          # clipping, so it legitimately accepts texels whose
                          # RAW range was flattened by the rails)
 MIN_SAMPLES    = 6       # unclipped (variant,channel) samples needed to fit
+# Uncertainty budget for the NEUTRAL GREY, in grey levels (0..1). The fitted
+# level `shade + ambient` carries its own standard deviation
+# `rms * sqrt(var_unit)`; above this it stops being worth more than the
+# closed-form mean and neutral_level() blends toward that instead.
+# 0.010 ~ 2.5/255: trust the fit only where it is pinned to within a quarter of
+# a visible step. Swept 0.005..0.20 over the 27 shipped bakes, scored by the
+# invented-seam count of re/tools/audit_td5_car_paint.py:
+#     SD_OK    0.005  0.010  0.015  0.020  0.030  0.050   inf
+#     seams      223    360    805   1032   1323   1998   5520
+#     fit used   29%    49%    61%    68%    78%    87%    96%
+# (3526 seams before this rework). 0.010 halves the seam count again versus
+# 0.015 while still letting the fit carry half the body, and no car scores worse
+# than it did before. Going lower buys little: the fit is what sees THROUGH
+# clipping to the true level, and the global affine calibration cannot do that
+# locally. Detail is not the trade-off here — Laplacian energy inside the body
+# runs 0.165 (no fit) to 0.176 (all fit) against 0.179 for the raw art, so the
+# extra the fit contributes is mostly noise.
+SD_OK          = 0.010
 FEATHER        = 1.5     # texels of inward ramp on the written mask
 # How far the reference paint must travel across the four skins for there to be
 # a paint worth replacing at all. This is what keeps ss1 (the Shelby Series 1 —
@@ -195,7 +213,19 @@ def fit_shade_ambient(S, A, P):
     """Weighted least-squares fit of S[k][c] ~= shade*P[k][c] + ambient, per
     texel, over the K*3 samples. Saturated samples get zero weight so a variant
     whose paint clips (a white skin) stops dragging the fit. Returns
-    (shade, ambient, rms_residual, n_samples)."""
+    (shade, ambient, rms_residual, n_samples, var_unit).
+
+    `var_unit` is the variance of the SUM `shade + ambient` for unit residual
+    variance — the quantity the neutral grey is built from, so this is how well
+    that grey is actually pinned down. For the design [x, 1] with weights w,
+    cov = inv(X'WX) = [[n, -sx], [-sx, sxx]] / det, hence
+
+        Var(shade + ambient) = (n - 2*sx + sxx) / det = sum_i w_i (x_i - 1)^2 / det
+
+    which blows up exactly when it should: too few surviving samples, or all of
+    them at the same x (every unclipped variant carrying the same paint level),
+    leaving the shade/ambient split undetermined. neutral_level() uses it to
+    decide per texel how much to trust the fit."""
     K, H, W, _ = S.shape
     Y = S.transpose(1, 2, 0, 3).reshape(H, W, K * 3)
     x = P.reshape(K * 3).astype(np.float64)
@@ -226,7 +256,14 @@ def fit_shade_ambient(S, A, P):
     res = Y - (shade[..., None] * x + amb[..., None])
     rms = np.sqrt((w * res * res).sum(-1) / np.maximum(n, 1.0))
     rms = np.where(ok, rms, 1e9)
-    return shade, amb, rms, n
+
+    # `neg` texels were re-solved with ambient PINNED to zero, so there the sum
+    # is just `shade` and its variance is the one-parameter 1/sxx, not the
+    # two-parameter form.
+    var_unit = np.where(ok, (sxx - 2.0 * sx + n) / detz, 1e9)
+    var_unit = np.where(neg, 1.0 / np.maximum(sxx, 1e-9), var_unit)
+    var_unit = np.where(ok, np.maximum(var_unit, 0.0), 1e9)
+    return shade, amb, rms, n, var_unit
 
 
 def paint_probability(S, A, seed, shade, amb, rms, pcon):
@@ -277,6 +314,82 @@ def paint_probability(S, A, seed, shade, amb, rms, pcon):
     prob = np.cbrt(np.maximum(p_fit * p_var * p_white, 0.0))
     prob[~A] = 0.0
     return prob, dict(sigma=sigma, var_ref=var_ref, white_ref=white_ref)
+
+
+def neutral_level(S, primary, shade, amb, rms, var_unit, sigma):
+    """Brightness each body texel would have under a WHITE paint — on ONE scale.
+
+    There are two ways to get it. `shade + amb` is the fitted answer, and
+    `S.mean(0).mean(-1)` is the closed-form one: with P normalised to unit mean,
+    mean_k,c(S) = shade*mean(P) + amb = shade + amb, so the two are
+    algebraically the SAME number. Measured on fully unclipped, well-fit body
+    texels they agree to a median ratio of 1.000.
+
+    They stop agreeing the moment a sample rails. The fit DROPS railed samples
+    and extrapolates from the rest; the mean keeps them at the rail. Clipping is
+    not rare — on jag 4.8 of the 12 (variant,channel) samples sit on the black
+    rail across the whole body, and the two answers then differ by 1.36x. Over
+    the 27 shipped bakes the gap runs 1.00x (vet) to 1.61x (gto).
+
+    The old code picked between them PER TEXEL on `rms < FIT_RES`. Two
+    estimators with different scales, switched on a noise-driven contour, is a
+    brightness step of up to 61% along a ragged line through the middle of a
+    panel. Measured as the step in the baked grey across that contour versus the
+    step carskin0 itself has in the same place, the baker was ADDING 7.6x (gto),
+    3.9x (crg), 3.8x (tvr), 2.9x (frd), 1.4x (jag). That is the reported "bad
+    sectors / hard edges on a repainted car": on these cars the MASK is right
+    (jag claims 100% of what the four paints move) and the grey underneath it is
+    not. FIT_RES is also a leftover — the 2026-10-01 rework moved every other
+    decision onto a per-car calibrated residual scale, so on a car whose sigma
+    is 0.26 (vet) the fixed 0.055 shunted 95% of the body to the other
+    estimator.
+
+    Fixed two ways, both of which make a hard edge structurally impossible:
+
+      1. CALIBRATE the closed-form estimator onto the fit's scale with a robust
+         affine map measured on this car's own well-fit body texels. After it
+         the two agree by construction, so switching cannot create a step.
+      2. BLEND instead of switching, weighted by HOW WELL PINNED DOWN the fitted
+         level actually is: `sd = rms * sqrt(var_unit)`, the standard deviation
+         of `shade + ambient` itself. This is the term that matters, and a
+         residual test alone does not capture it — a texel can fit its surviving
+         samples perfectly and still have a meaningless shade/ambient split when
+         those samples all sit at the same paint level. The fit carries real
+         detail the clipped mean loses, so it should win WHERE IT IS DETERMINED
+         and only there. A continuous weight also has no contour to step across.
+
+    SD_OK is in grey levels, so it is comparable across cars: 0.03 is about
+    8/255, just under the point where a seam becomes visible on a flat panel.
+    """
+    fit = shade + amb
+    raw = S.mean(0).mean(-1)
+    solved = np.isfinite(rms) & (rms < 1.0)
+    budget = max(float(sigma), FIT_RES)
+
+    good = primary & solved & (rms < budget)
+    cal = raw
+    if good.sum() >= 64:
+        x, y = raw[good], fit[good]
+        try:
+            a, c = np.polyfit(x, y, 1)
+            # Two trimming passes: the top decile of the residual is specular
+            # and mis-classified texels, and letting them set the scale is how
+            # the calibration would import the very bias it exists to remove.
+            for _ in range(2):
+                r = np.abs(y - (a * x + c))
+                k = r <= max(float(np.percentile(r, 90)), 1e-6)
+                if k.sum() < 32:
+                    break
+                a, c = np.polyfit(x[k], y[k], 1)
+            if np.isfinite(a) and np.isfinite(c) and a > 0.0:
+                cal = a * raw + c
+        except Exception:
+            pass
+
+    sd = np.where(solved, rms * np.sqrt(var_unit), 1e9)
+    w = np.exp(-0.5 * (np.minimum(sd, 8.0 * SD_OK) / SD_OK) ** 2)
+    w = np.where(solved, w, 0.0)
+    return np.maximum(w * fit + (1.0 - w) * cal, 0.0)
 
 
 def regularize_probability(prob, S, A):
@@ -391,7 +504,7 @@ def derive_primary_body(paths, hint=None):
     pcon = float((P.max(0) - P.min(0)).mean())
     if pcon < MIN_PCONTRAST:
         return None                                       # no paint to replace
-    shade, amb, rms, nsam = fit_shade_ambient(S, A, P)
+    shade, amb, rms, nsam, var_unit = fit_shade_ambient(S, A, P)
 
     # Soft, per-car-calibrated evidence, then made panel-coherent, then cut at a
     # threshold chosen from this car's own histogram. The old shared constants
@@ -486,13 +599,11 @@ def derive_primary_body(paths, hint=None):
         return None
 
     # ---- neutral grey + feathered weight -----------------------------------
-    # The fitted level (shade + ambient, with P at unit mean) is the brightness
-    # this texel would have under a WHITE paint — exactly what `grey * colour`
-    # needs. Texels the fit could not solve (inside the mask only via the
-    # closing / hole-fill / dark-grow) fall back to their own luminance.
-    lvl = shade + amb
-    fallback = S.mean(0).mean(-1)
-    lvl = np.where(rms < FIT_RES, lvl, fallback)
+    # The brightness this texel would have under a WHITE paint — exactly what
+    # `grey * colour` needs. See neutral_level(): the fitted and closed-form
+    # answers are the same number until a sample rails, so they are calibrated
+    # onto one scale and blended rather than switched between.
+    lvl = neutral_level(S, primary, shade, amb, rms, var_unit, refs["sigma"])
     p99 = float(np.percentile(lvl[primary], 99))
     shade_out = np.clip(lvl * (TD6_BODY_TOP / max(p99, 1e-3)), 0.0, 1.0)
 

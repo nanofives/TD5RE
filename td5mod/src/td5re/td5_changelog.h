@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 3 (car paint)" },
+    { CL_ITEM,    "Repainted TD5 cars no longer show blotchy panels." },
+    { CL_ITEM,    "  Worst were the XJ220, the GTO and the XKR." },
+    { CL_ITEM,    "The SPEED 12 keeps no magenta streak on its flank." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 2 (auto track seeds)" },
     { CL_ITEM,    "Any auto track seed can now be typed or replayed." },
     { CL_ITEM,    "  Seeds above 2147483647 used to turn into that number." },
