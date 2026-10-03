@@ -1612,6 +1612,33 @@ static int trf_edge_deep_limit(void)
  * Negative while the centre is still inside. */
 static int trf_edge_depth(int32_t pen, int32_t ext) { return -(pen + ext) / 4096; }
 
+/* [EDGE RE-POSE 2026-10-03] The original re-poses the car the instant it pushes it:
+ * both containment blocks end ApplySimpleTrackSurfaceForce -> UpdateTrafficVehiclePose
+ * [CONFIRMED @ 0x00407390 inner, 0x4074B4 outer]. The port pushed without re-posing,
+ * so the correction did not reach track position / contact height / display angles
+ * until the NEXT tick's integrate_traffic_pose -- one tick of the car being drawn and
+ * tested at a pose the sim had already corrected.
+ *
+ * Re-posing here is safe and is NOT a double integration: 0x443CF0 contains no
+ * velocity integration at all, and the port's integrate_traffic_pose is the faithful
+ * pose-only counterpart (XZ+yaw integration lives in td5_physics_update_traffic,
+ * see that function's own header comment). The stale block comment above
+ * integrate_traffic_pose that lists "1. Integrates X/Z from velocity" describes the
+ * original's whole traffic pipeline, not that function.
+ *
+ * TD5RE_TRAFFIC_EDGE_REPOSE=1 enables. Default OFF -- see the pending_to_test row:
+ * it was measured against the pinning cost of the depth-limited clamp and did not
+ * pay for itself, so it ships off rather than on an argument from faithfulness. */
+static int trf_edge_repose_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_off("TD5RE_TRAFFIC_EDGE_REPOSE");
+        TD5_LOG_I(LOG_TAG, "traffic_edge knob: TD5RE_TRAFFIC_EDGE_REPOSE=%d", s);
+    }
+    return s;
+}
+
 /* 1 when the segment clamp must NOT suppress this push because the car is already
  * deep outside -- i.e. fall back to the original's unconditional containment. */
 static int trf_edge_deep_escape(int depth)
@@ -1700,6 +1727,16 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
                          ext_i, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* [EDGE RE-POSE] orig: UpdateTrafficVehiclePose right after the push.
+             * The outer test below must then see the UPDATED car position but the
+             * SAME cached span/vertex indices -- the original recomputes world_pos
+             * for the outer block [CONFIRMED @ 0x00407390 lines reading +0x819c /
+             * +0x8194 again] while keeping the strip pointer it cached on entry. */
+            if (trf_edge_repose_enabled()) {
+                integrate_traffic_pose(actor);
+                rel_x = (FP_TRUNC(actor->world_pos.x)) - orig_x;
+                rel_z = (FP_TRUNC(actor->world_pos.z)) - orig_z;
+            }
             grind_pushed = 1; grind_edge = "inner";
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]:
              * encounter mode 4 erodes the actor's clean_driving_score by 1
@@ -1769,6 +1806,10 @@ outer_test:
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
                          ext_o, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* [EDGE RE-POSE] orig: UpdateTrafficVehiclePose right after the push
+             * [CONFIRMED @ 0x4074B4]. Nothing reads the pose after this point in
+             * the tick, so no rel_* refresh is needed here. */
+            if (trf_edge_repose_enabled()) integrate_traffic_pose(actor);
             grind_pushed = 1;
             grind_edge   = (grind_edge[0] == 'i') ? "both" : "outer";
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */
@@ -1981,8 +2022,13 @@ void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
 
     if (pen < 0) {
         apply_simple_track_surface_force(actor, edge_angle, pen);
-        /* Original calls UpdateTrafficVehiclePose again after push;
-         * port's integrate_traffic_pose runs at end of tick — skip redundant rebuild. */
+        /* Original calls UpdateTrafficVehiclePose again after this push.
+         * [2026-10-03 CORRECTION] The old note here said the port's
+         * integrate_traffic_pose "runs at end of tick" so the rebuild was
+         * redundant. It does not: td5_physics.c calls integrate_traffic_pose at
+         * :1503, BEFORE the containment at :1512-1514, so a push lands one tick
+         * late in the pose. See trf_edge_repose_enabled for the measured fix on
+         * the segment-edge path; this forward-edge path is left alone for now. */
     }
 }
 
@@ -1997,6 +2043,17 @@ void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
  *   4. Converts euler accumulators to display angles + rotation matrix
  *   5. Computes render position
  * [CONFIRMED @ 0x443ED0 — no call to 0x405E80 for traffic]
+ *
+ * [2026-10-03 READ THIS BEFORE REUSING THE LIST ABOVE] Step 1 belongs to the
+ * PIPELINE, not to this function. 0x443CF0 itself contains NO velocity
+ * integration — it is pose-only (display yaw, render pos, BuildRotationMatrix,
+ * UpdateActorTrackPosition, ComputeActorTrackContactNormalExtended, wheel
+ * probes, roll/pitch); the XZ+yaw integration is 0x00443CBF/CCD/CD7, ported in
+ * td5_physics_update_traffic. So integrate_traffic_pose below is IDEMPOTENT with
+ * respect to position and is safe to call a second time inside one tick, which
+ * is exactly what the original does after a containment push. Reading step 1 as
+ * part of this function is what previously blocked that fix as a supposed
+ * double-integration.
  * ======================================================================== */
 
 void integrate_traffic_pose(TD5_Actor *actor)
