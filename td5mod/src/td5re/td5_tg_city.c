@@ -2494,6 +2494,30 @@ static long s_r15_back_closed;
  * can't read as a false green); s_r23_closed counts the ones the fix closed with
  * a back + roof. Reported by tg_r23_close_report, unconditional. */
 static long s_r23_close_seen, s_r23_closed;
+/* [J7 item 1] "todavia hay edificios que no tienen lados" (2026-10-03). R23
+ * above infers "no massing ran" from `n == n_pre_mass`, which only holds while
+ * the mass pass is all-or-nothing -- and it is not. These counters measure the
+ * two gaps that inference leaves, DIRECTLY, instead of arguing them from the
+ * shape of the code. They emit no geometry: MODELS.DAT is byte-identical.
+ *   s_j7_backless  built sides that ended with NO back wall, by any route.
+ *                  Catches the case R23 is blind to -- the roof at :2669 is
+ *                  unconditional, so a side that got a roof and no back makes
+ *                  n != n_pre_mass and is never even counted in s_r23_close_seen.
+ *   s_j7_roofless  built sides that ended with no roof deck.
+ *   s_j7_shallow   sides whose run depth collapsed to <= 1.0, the FIRST term of
+ *                  both the mass gate (:2658) and R23's own gate (:2723), so
+ *                  such a side falls through every close in this function.
+ * MEASURED: all three are 0 across seeds 4172065417 and 1459285111 (BUILDING
+ * MASS on), 4172065417 with BUILDING MASS pinned off (where R23 itself closes
+ * 1001 of 1001), and the La Plata geo track. The frontage path is not the
+ * source of the remaining see-through buildings; see re/tools/tg_building_audit.py
+ * for the MODELS.DAT-side census that says where they do come from. */
+static long s_j7_sides, s_j7_backless, s_j7_roofless, s_j7_shallow;
+/* [J7 item 1] Run-end CORNER PRISM ledger -- see the emit site for why. The
+ * min starts above any real thickness so an untouched run reports it unchanged
+ * rather than reporting a spurious 0. */
+static long s_j7_cap_seen, s_j7_cap_degen, s_j7_cap_thin;
+static double s_j7_cap_min_thick = 1.0e30;
 static long s_r15_sign_posts;
 static long s_r15_sign_xing;
 static long s_r15_statue_walled;
@@ -2655,6 +2679,17 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          *            behind and down every cross street. Gated by height so the
          *            quad budget is only spent where it shows. */
         const int n_pre_mass = n;   /* [R23 item 2] faces before the mass pass */
+        /* [J7 item 1] A LEDGER beside R23's face-count inference. PURELY A
+         * MEASUREMENT -- it emits no geometry and MODELS.DAT is byte-identical
+         * with it in place. R23 asks `n == n_pre_mass` and reads "no massing
+         * ran", which is only sound while the mass pass is all-or-nothing, and
+         * it is not: the roof at :2669 is unconditional while the back wall
+         * below it is gated twice over. So a side that got a roof and no back
+         * answers "massing ran" and R23 never looks at it. These two counters
+         * say how often that actually happens, instead of leaving it to be
+         * re-argued from the shape of the code. */
+        int had_back = 0, had_roof = 0;
+        if (g->depth <= 1.0) s_j7_shallow++;
         if (g->depth > 1.0 && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS")) {
             const double d = g->depth;
             double q[12];
@@ -2667,6 +2702,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
             q[9] = g->bx + g->lx0 * d;     q[10] = g->by + g->H;
             q[11] = g->bz + g->lz0 * d;
             tg_facade_push_quad(q, px, py, pz, uu, vv, &n);
+            had_roof = 1;
 
             if (g->rows >= TD5_TG_FACADE_TALL_ROWS) {
                 const double bx2 = g->bx + g->lx0 * d, bz2 = g->bz + g->lz0 * d;
@@ -2675,6 +2711,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                     (g->bz + g->az + g->lz1 * d) - bz2,
                                     0.0, g->H, 0.0, g->cols, g->rows, 0, g->rows,
                                     px, py, pz, uu, vv, &n);
+                had_back = 1;
             }
             /* [R15 CITY item 8b] "this building ... has no side to it, it looks
              * hollow."
@@ -2705,6 +2742,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                 qb[9] = bx2;  qb[10] = g->by + g->H;         qb[11] = bz2;
                 tg_facade_push_quad(qb, px, py, pz, uu, vv, &n);
                 s_r15_back_closed++;
+                had_back = 1;
             }
         }
         /* [R23 item 2] "buildings with no side faces ... a front face with
@@ -2719,7 +2757,10 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * not just the roll. Run ends still get their corner prisms below (caps
          * fire regardless of FACADE_MASS); interior spans are hidden laterally by
          * the abutting neighbour, exactly as a mass-on run relies on.
-         * TD5RE_R23_BUILDING_CLOSE=0 restores the see-through build byte-for-byte. */
+         * TD5RE_R23_BUILDING_CLOSE=0 restores the see-through build byte-for-byte.
+         * MEASURED 2026-10-03: with BUILDING MASS pinned off on seed 4172065417
+         * this path sees 1001 front-only sides and closes 1001 of them, so the
+         * case it was written for is fully covered. */
         if (g->depth > 1.0 && n == n_pre_mass) {
             s_r23_close_seen++;
             if (td5_env_flag_on("TD5RE_R23_BUILDING_CLOSE")) {
@@ -2746,8 +2787,31 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                 qr[11] = bz2;
                 tg_facade_push_quad(qr, px, py, pz, uu, vv, &n);
                 s_r23_closed++;
+                had_back = had_roof = 1;
             }
         }
+        /* The LEDGER's verdict for this side. Measured 2026-10-03 over four
+         * configurations (seeds 4172065417 and 1459285111 with BUILDING MASS
+         * rolled on, 4172065417 with it pinned off, and the La Plata geo track):
+         * s_j7_backless and s_j7_shallow are ZERO in all four, while the
+         * mass-off run shows R23 closing 1001 of 1001 sides. Both gaps this
+         * ledger was written to catch are therefore empty in practice -- the
+         * three passes above already close every built side -- which is why no
+         * extra geometry is emitted here. Keep the counters: they are what
+         * turns "R23's test looks fragile" into a number, and the next report of
+         * a see-through building can be checked against them in one run instead
+         * of re-deriving this. */
+        /* DENOMINATOR first. "0 backless" is worth nothing without the number
+         * of sides it is 0 out of -- a build that emitted no facade at all
+         * reports the same 0 as a build that closed every side, and the first
+         * read of this ledger did exactly that: the default race path calls
+         * td5_trackgen_regenerate TWICE (td5_trackgen.c:4630), the second call
+         * short-circuits on the GENSTAMP, and its report printed 0/0/0 over
+         * the real build's numbers. MODELS.DAT had 7195 building components at
+         * the time, so the pass plainly had run. */
+        s_j7_sides++;
+        if (!had_back) s_j7_backless++;
+        if (!had_roof) s_j7_roofless++;
         n_ret = n;
         if (g->cap_near || g->cap_far) {
             /* Along-road unit, needed to give the corner prism its thickness.
@@ -2758,6 +2822,29 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
             const double auz = (alen > 1.0) ? g->az / alen : 1.0;
             double thick = cap_thick;
             if (alen > 1.0 && thick > alen * 0.9) thick = alen * 0.9;
+            /* [J7 item 1] CAP LEDGER. Measurement only -- it reads `thick` and
+             * `alen`, writes no geometry, and MODELS.DAT is byte-identical with
+             * it in place.
+             *
+             * The corrected audit (re/tools/tg_building_audit.py, DEPTH_MIN)
+             * leaves a handful of run-end prisms reported as open with
+             * walls == 1, i.e. ONE wall direction where a prism has two -- the
+             * rear face and the inner return are missing or have collapsed to
+             * nothing. Both are scaled by `thick`, and `thick` has two ways to
+             * shrink here: the alen*0.9 clamp on a SHORT span, and the
+             * alen <= 1.0 branch above, which additionally substitutes an
+             * ARBITRARY (0,1) along-road unit for the real span direction, so a
+             * prism on such a span is pushed along +Z no matter where the road
+             * actually goes.
+             *
+             * Rather than argue which one fires, count them. THIN is measured
+             * against a quarter of a metre, the same DEPTH_MIN the audit now
+             * uses to call two surfaces a body, so the two numbers answer the
+             * same question on the same scale. */
+            s_j7_cap_seen++;
+            if (alen <= 1.0) s_j7_cap_degen++;
+            if (thick < 0.25 * TD5_TG_INFRA_M) s_j7_cap_thin++;
+            if (thick < s_j7_cap_min_thick) s_j7_cap_min_thick = thick;
             /* [R8 item 6] The return is `dcols` cells deep, this RUN's depth,
              * not the one biome depth -- the prism has to follow the body or
              * the corner would fold back short of the roof it closes. */
@@ -5158,7 +5245,41 @@ void tg_r23_close_report(void)
         "(BUILDING MASS off / depth collapse), %ld closed with back+roof "
         "(knob=%s)", s_r23_close_seen, s_r23_closed,
         td5_env_flag_on("TD5RE_R23_BUILDING_CLOSE") ? "on" : "off");
+    /* NOT MEASURED is not the same answer as ZERO. The default race path calls
+     * td5_trackgen_regenerate twice and the second call reuses the GENSTAMP
+     * without running a single emitter, so an unguarded report prints a clean
+     * 0/0/0 for a build that never executed the code it claims to vouch for.
+     * Say which of the two happened, and always print the denominator. */
+    if (s_j7_sides <= 0) {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 LEDGER] NOT MEASURED -- no facade side was built in "
+            "this pass (REUSED GENSTAMP build, or the city pass is off). This "
+            "is NOT a clean result; force a real build with "
+            "TD5RE_AUTOTRACK_REUSE=0 TD5RE_TG_DOUBLE_BUILD=1 to measure.");
+    } else {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 LEDGER] of %ld built facade sides, %ld ended with no "
+            "back wall, %ld with no roof, %ld with a collapsed depth (direct "
+            "count, not R23's n==n_pre_mass inference; expected 0/0/0)",
+            s_j7_sides, s_j7_backless, s_j7_roofless, s_j7_shallow);
+    }
+    if (s_j7_cap_seen <= 0) {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 CAP] NOT MEASURED -- no run-end corner prism was "
+            "emitted in this pass (see the J7 LEDGER note above).");
+    } else {
+        TD5_LOG_I(LOG_TAG,
+            "trackgen: [J7 CAP] run-end corner prisms = %ld, of which %ld on a "
+            "span too short to give an along-road direction (arbitrary +Z "
+            "fallback) and %ld thinner than 0.25 m; thinnest = %.1f raw "
+            "(%.2f m)",
+            s_j7_cap_seen, s_j7_cap_degen, s_j7_cap_thin,
+            s_j7_cap_min_thick, s_j7_cap_min_thick / TD5_TG_INFRA_M);
+    }
     s_r23_close_seen = s_r23_closed = 0;
+    s_j7_sides = s_j7_backless = s_j7_roofless = s_j7_shallow = 0;
+    s_j7_cap_seen = s_j7_cap_degen = s_j7_cap_thin = 0;
+    s_j7_cap_min_thick = 1.0e30;
 }
 
 /* [R15] Per-module half of the round-15 report. Split out of the single
