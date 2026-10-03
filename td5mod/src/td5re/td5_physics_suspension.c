@@ -1503,21 +1503,170 @@ static void trf_edge_log(int slot, const TD5_Actor *actor, const char *edge,
 #endif
 }
 
+/* [TRAFFIC GRIND DIAG 2026-10-03] The existing stuck detector (td5_ai_traffic.c)
+ * only fires when SPAN_RAW stops advancing AND |speed| < 0x1000, so it is blind to
+ * the failure Mariano reports as "stopped sideways / grinding walls": a car pinned
+ * against a rail that still creeps, or whose span oscillates by one. This counts
+ * CONSECUTIVE ticks on which the segment-edge containment pushed this slot, and
+ * reports an episode once the run reaches GRIND_TICKS (~1 s at 30 Hz), with the
+ * span and span type so a wall can be attributed to geometry rather than guessed
+ * at. Measurement only (no state the sim reads); DEV builds; TD5RE_TRAFFIC_GRINDDIAG=1. */
+#define TRF_GRIND_TICKS 30
+static void trf_grind_note(int slot, const TD5_Actor *actor, int pushed,
+                           const char *edge, int type, int sub, int lanes)
+{
+#ifndef TD5RE_RELEASE
+    static int on = -1;
+    static uint16_t run[TD5_MAX_TOTAL_ACTORS];
+    static uint8_t  logged[TD5_MAX_TOTAL_ACTORS];
+    if (on < 0) on = td5_env_int("TD5RE_TRAFFIC_GRINDDIAG", 0, 0, 1);
+    if (!on || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!pushed) { run[slot] = 0; logged[slot] = 0; return; }
+    if (++run[slot] < TRF_GRIND_TICKS || logged[slot]) return;
+    logged[slot] = 1;
+    TD5_LOG_W(LOG_TAG,
+              "traffic_grind: slot=%d span=%d ticks=%u edge=%s type=%d sub=%d lanes=%d v=%d",
+              slot, (int)actor->track_span_raw, (unsigned)run[slot], edge,
+              type, sub, lanes, (int)actor->longitudinal_speed);
+#else
+    (void)slot; (void)actor; (void)pushed; (void)edge; (void)type; (void)sub; (void)lanes;
+#endif
+}
+
+/* [SPAN GEOMETRY DUMP 2026-10-03] DEV one-shot: print a span's whole rail row set
+ * (type, lane_count, both vertex bases, every lane-boundary vertex of the near and
+ * far rows) the first time a traffic car is evaluated on it. Lets an "invisible
+ * wall" claim be checked against the actual geometry instead of inferred from a
+ * single penetration number. TD5RE_TRAFFIC_SPANDUMP=<span> (-1 = off, 0 = all). */
+static void trf_span_dump(const TD5_StripSpan *sp, int span, int type, int lanes)
+{
+#ifndef TD5RE_RELEASE
+    static int want = -2;
+    static uint8_t done[4096];
+    char buf[512];
+    int n = 0;
+    if (want == -2) want = td5_env_int("TD5RE_TRAFFIC_SPANDUMP", -1, -1, 100000);
+    if (want < 0 || (want > 0 && want != span)) return;
+    if (span < 0 || span >= 4096 || done[span]) return;
+    done[span] = 1;
+    for (int k = 0; k <= lanes && n < (int)sizeof(buf) - 48; k++) {
+        TD5_StripVertex *l = td5_track_get_vertex((int)sp->left_vertex_index + k);
+        TD5_StripVertex *r = td5_track_get_vertex((int)sp->right_vertex_index + k);
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n, " [%d]L=(%d,%d)R=(%d,%d)", k,
+                      l ? (int)l->x : 0, l ? (int)l->z : 0,
+                      r ? (int)r->x : 0, r ? (int)r->z : 0);
+    }
+    TD5_LOG_I(LOG_TAG, "traffic_spandump: span=%d type=%d lanes=%d li=%d ri=%d org=(%d,%d)%s",
+              span, type, lanes, (int)sp->left_vertex_index, (int)sp->right_vertex_index,
+              (int)sp->origin_x, (int)sp->origin_z, buf);
+#else
+    (void)sp; (void)span; (void)type; (void)lanes;
+#endif
+}
+
+/* [TRAFFIC OFF-ROAD 2026-10-03] How far outside a rail (world units, car centre)
+ * an UNCONTAINED car has to be before it is reported as stranded. The off-segment
+ * clamp's own measured false positive is ~40 units deep (Newcastle 471/472, dist 319
+ * vs half-width 359), while a real escape measured 4565, so anything in the hundreds
+ * separates them with room to spare. TD5RE_TRAFFIC_EDGE_ESCAPE=0 disables the
+ * report entirely (restores 2026-09-29 behaviour). */
+static int trf_edge_escape_depth(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_TRAFFIC_EDGE_ESCAPE", 400, 0, 1000000);
+    return v;
+}
+
+/* [EDGE CLAMP DEPTH LIMIT 2026-10-03] The original applies containment on EVERY
+ * tick the car reads outside the rail: 0x00407390 tests `pen < 0` and goes
+ * straight to ApplySimpleTrackSurfaceForce with no segment test at all
+ * [CONFIRMED @ 0x00407390: `if (iVar8 < 0) { DecayUltimateVariantTimer(...);
+ * ApplySimpleTrackSurfaceForce(actor,uVar7,iVar8); UpdateTrafficVehiclePose(actor); }`
+ * for the inner rail, and the identical block at the outer rail]. The PORT-ONLY
+ * segment clamp (TD5RE_TRAFFIC_EDGE_SEGMENT, 2026-09-29) suppresses that push
+ * whenever the perpendicular foot misses the A..B segment -- correct for the
+ * shallow false positive it was built for, but it has NO depth limit, so a car
+ * that is already far across the rail gets no containment from anything and
+ * simply stays out there.
+ *
+ * The two cases separate cleanly on the signed distance of the car CENTRE to the
+ * rail line (`dist` in the traffic_edge_hit log, = (pen + extent) / 4096):
+ *   - the measured false positive sits on the CORRECT side, dist = +319 (it only
+ *     trips because the car's half-extent 359 is subtracted), so depth = -319;
+ *   - the measured escapes sit across the line, depth = 2261 / 3131 / 3505 /
+ *     4565 / 16906 over the 2026-10-03 Newcastle runs.
+ * Anything at or past this threshold therefore falls back to the ORIGINAL
+ * unconditional push. TD5RE_TRAFFIC_EDGE_DEEP=0 disables the fallback and
+ * restores the unlimited 2026-09-29 clamp. */
+static int trf_edge_deep_limit(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        v = td5_env_int("TD5RE_TRAFFIC_EDGE_DEEP", 400, 0, 1000000);
+        TD5_LOG_I(LOG_TAG, "traffic_edge knob: TD5RE_TRAFFIC_EDGE_DEEP=%d", v);
+    }
+    return v;
+}
+
+/* Depth (world units) of the car centre on the WRONG side of the rail line.
+ * Negative while the centre is still inside. */
+static int trf_edge_depth(int32_t pen, int32_t ext) { return -(pen + ext) / 4096; }
+
+/* [EDGE RE-POSE 2026-10-03] The original re-poses the car the instant it pushes it:
+ * both containment blocks end ApplySimpleTrackSurfaceForce -> UpdateTrafficVehiclePose
+ * [CONFIRMED @ 0x00407390 inner, 0x4074B4 outer]. The port pushed without re-posing,
+ * so the correction did not reach track position / contact height / display angles
+ * until the NEXT tick's integrate_traffic_pose -- one tick of the car being drawn and
+ * tested at a pose the sim had already corrected.
+ *
+ * Re-posing here is safe and is NOT a double integration: 0x443CF0 contains no
+ * velocity integration at all, and the port's integrate_traffic_pose is the faithful
+ * pose-only counterpart (XZ+yaw integration lives in td5_physics_update_traffic,
+ * see that function's own header comment). The stale block comment above
+ * integrate_traffic_pose that lists "1. Integrates X/Z from velocity" describes the
+ * original's whole traffic pipeline, not that function.
+ *
+ * TD5RE_TRAFFIC_EDGE_REPOSE=1 enables. Default OFF -- see the pending_to_test row:
+ * it was measured against the pinning cost of the depth-limited clamp and did not
+ * pay for itself, so it ships off rather than on an argument from faithfulness. */
+static int trf_edge_repose_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_off("TD5RE_TRAFFIC_EDGE_REPOSE");
+        TD5_LOG_I(LOG_TAG, "traffic_edge knob: TD5RE_TRAFFIC_EDGE_REPOSE=%d", s);
+    }
+    return s;
+}
+
+/* 1 when the segment clamp must NOT suppress this push because the car is already
+ * deep outside -- i.e. fall back to the original's unconditional containment. */
+static int trf_edge_deep_escape(int depth)
+{
+    int lim = trf_edge_deep_limit();
+    return lim > 0 && depth >= lim;
+}
+
 void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
+    const char *grind_edge = "none";
+    int grind_pushed = 0;
+    int escape_depth = 0;
+    int span_type = -1, sub_lane = -1, lane_count = -1;
     TD5_StripSpan *sp = td5_track_get_span((int)actor->track_span_raw);
-    if (!sp) return;
+    if (!sp) goto done;
     int32_t *car_def = (int32_t *)actor->car_definition_ptr;
-    if (!car_def) return;
+    if (!car_def) goto done;
 
-    int span_type    = (int)sp->span_type;
-    if (span_type < 0 || span_type >= 12) return;
+    span_type = (int)sp->span_type;
+    if (span_type < 0 || span_type >= 12) goto done;
 
-    int sub_lane  = (int)(int8_t)actor->track_sub_lane_index;
+    sub_lane = (int)(int8_t)actor->track_sub_lane_index;
     /* [CONFIRMED @ 0x004073B0: `uVar10 = *(byte*)(strip+3) & 0xf`] — orig
      * reads byte +0x03 (geometry_metadata low nibble = lane_count), NOT
      * byte +0x01 (surface_attribute). Use the helper that mirrors orig. */
-    int lane_count = (int)(((const uint8_t *)sp)[3] & 0x0F);
+    lane_count = (int)(((const uint8_t *)sp)[3] & 0x0F);
+    trf_span_dump(sp, (int)actor->track_span_raw, span_type, lane_count);
 
     /* Heading delta for car projection */
     uint32_t hd      = traffic_route_heading_delta(slot);
@@ -1562,16 +1711,33 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
             cos_hd, sin_hd,
             &edge_angle);
 
-        if (pen < 0 && trf_edge_segment_enabled() &&
+        int32_t ext_i = sin_hd * car_half_w + cos_hd * car_half_l;
+        int     dep_i = trf_edge_depth(pen, ext_i);
+        int     deep_i = trf_edge_deep_escape(dep_i);
+
+        if (pen < 0 && trf_edge_segment_enabled() && !deep_i &&
             !traffic_edge_foot_on_segment(A->x, A->z, B->x, B->z, arel_x, arel_z)) {
+            if (dep_i > escape_depth) escape_depth = dep_i;
             trf_edge_log(slot, actor, "inner_offseg", sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_i, hd, car_half_w, car_half_l);
         } else if (pen < 0) {
-            trf_edge_log(slot, actor, "inner", sub_lane, lane_count, pen, edge_angle,
+            trf_edge_log(slot, actor, deep_i ? "inner_deep" : "inner",
+                         sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_i, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* [EDGE RE-POSE] orig: UpdateTrafficVehiclePose right after the push.
+             * The outer test below must then see the UPDATED car position but the
+             * SAME cached span/vertex indices -- the original recomputes world_pos
+             * for the outer block [CONFIRMED @ 0x00407390 lines reading +0x819c /
+             * +0x8194 again] while keeping the strip pointer it cached on entry. */
+            if (trf_edge_repose_enabled()) {
+                integrate_traffic_pose(actor);
+                rel_x = (FP_TRUNC(actor->world_pos.x)) - orig_x;
+                rel_z = (FP_TRUNC(actor->world_pos.z)) - orig_z;
+            }
+            grind_pushed = 1; grind_edge = "inner";
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]:
              * encounter mode 4 erodes the actor's clean_driving_score by 1
              * per wall-contact tick, but only while the actor is still racing. */
@@ -1579,7 +1745,7 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
                 if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
                 if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
             }
-            if (!trf_edge_both_enabled()) return;
+            if (!trf_edge_both_enabled()) goto done;
         }
     }
 
@@ -1607,7 +1773,7 @@ outer_test:
         int b_idx = k_outer_right_offsets[span_type] + (int)sp->right_vertex_index + lane_count;
         TD5_StripVertex *A = td5_track_get_vertex(a_idx);
         TD5_StripVertex *B = td5_track_get_vertex(b_idx);
-        if (!A || !B) return;
+        if (!A || !B) goto done;
 
         /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=1b (outer) */
         tep_trace_arm("1b", slot, (int)actor->track_span_raw, sub_lane,
@@ -1624,22 +1790,54 @@ outer_test:
             cos_hd, sin_hd,
             &edge_angle);
 
-        if (pen < 0 && trf_edge_segment_enabled() &&
+        int32_t ext_o = sin_hd * car_half_w + cos_hd * car_half_l;
+        int     dep_o = trf_edge_depth(pen, ext_o);
+        int     deep_o = trf_edge_deep_escape(dep_o);
+
+        if (pen < 0 && trf_edge_segment_enabled() && !deep_o &&
             !traffic_edge_foot_on_segment(A->x, A->z, B->x, B->z, arel_x, arel_z)) {
+            if (dep_o > escape_depth) escape_depth = dep_o;
             trf_edge_log(slot, actor, "outer_offseg", sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_o, hd, car_half_w, car_half_l);
         } else if (pen < 0) {
-            trf_edge_log(slot, actor, "outer", sub_lane, lane_count, pen, edge_angle,
+            trf_edge_log(slot, actor, deep_o ? "outer_deep" : "outer",
+                         sub_lane, lane_count, pen, edge_angle,
                          span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
-                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+                         ext_o, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
+            /* [EDGE RE-POSE] orig: UpdateTrafficVehiclePose right after the push
+             * [CONFIRMED @ 0x4074B4]. Nothing reads the pose after this point in
+             * the tick, so no rel_* refresh is needed here. */
+            if (trf_edge_repose_enabled()) integrate_traffic_pose(actor);
+            grind_pushed = 1;
+            grind_edge   = (grind_edge[0] == 'i') ? "both" : "outer";
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */
             if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {
                 if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
                 if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
             }
         }
+    }
+
+done:
+    trf_grind_note(slot, actor, grind_pushed, grind_edge, span_type, sub_lane, lane_count);
+    /* Report the deepest UNCONTAINED excursion this tick (0 = contained / on road).
+     * A push happened means the containment is doing its job, so that is not a
+     * strand even if the other edge also read outside.
+     *
+     * [2026-10-03] With the depth-limited clamp above, this is now a BACKSTOP that
+     * does not normally arm: anything at or past TD5RE_TRAFFIC_EDGE_DEEP is pushed
+     * (so grind_pushed is set and escape_depth stays 0), and the shallow cases that
+     * still reach the offseg branch are by construction below that depth. It only
+     * comes back into play if the deep fallback is turned off
+     * (TD5RE_TRAFFIC_EDGE_DEEP=0), or if TD5RE_TRAFFIC_EDGE_ESCAPE is lowered below
+     * TD5RE_TRAFFIC_EDGE_DEEP to catch shallower strands. Kept deliberately: it is
+     * the layer underneath the clamp, not dead code to delete. */
+    {
+        int thr = trf_edge_escape_depth();
+        td5_ai_traffic_note_offroad(
+            slot, (thr > 0 && !grind_pushed && escape_depth >= thr) ? escape_depth : 0);
     }
 }
 
@@ -1824,8 +2022,13 @@ void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
 
     if (pen < 0) {
         apply_simple_track_surface_force(actor, edge_angle, pen);
-        /* Original calls UpdateTrafficVehiclePose again after push;
-         * port's integrate_traffic_pose runs at end of tick — skip redundant rebuild. */
+        /* Original calls UpdateTrafficVehiclePose again after this push.
+         * [2026-10-03 CORRECTION] The old note here said the port's
+         * integrate_traffic_pose "runs at end of tick" so the rebuild was
+         * redundant. It does not: td5_physics.c calls integrate_traffic_pose at
+         * :1503, BEFORE the containment at :1512-1514, so a push lands one tick
+         * late in the pose. See trf_edge_repose_enabled for the measured fix on
+         * the segment-edge path; this forward-edge path is left alone for now. */
     }
 }
 
@@ -1840,6 +2043,17 @@ void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
  *   4. Converts euler accumulators to display angles + rotation matrix
  *   5. Computes render position
  * [CONFIRMED @ 0x443ED0 — no call to 0x405E80 for traffic]
+ *
+ * [2026-10-03 READ THIS BEFORE REUSING THE LIST ABOVE] Step 1 belongs to the
+ * PIPELINE, not to this function. 0x443CF0 itself contains NO velocity
+ * integration — it is pose-only (display yaw, render pos, BuildRotationMatrix,
+ * UpdateActorTrackPosition, ComputeActorTrackContactNormalExtended, wheel
+ * probes, roll/pitch); the XZ+yaw integration is 0x00443CBF/CCD/CD7, ported in
+ * td5_physics_update_traffic. So integrate_traffic_pose below is IDEMPOTENT with
+ * respect to position and is safe to call a second time inside one tick, which
+ * is exactly what the original does after a containment push. Reading step 1 as
+ * part of this function is what previously blocked that fix as a supposed
+ * double-integration.
  * ======================================================================== */
 
 void integrate_traffic_pose(TD5_Actor *actor)

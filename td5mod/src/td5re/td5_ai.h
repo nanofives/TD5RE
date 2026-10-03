@@ -141,6 +141,15 @@ int  td5_ai_traffic_slot_owner_vp(int slot);
  * per-viewport isolation (a traffic car only touches its own viewport's player,
  * and cross-partition traffic-traffic pairs never collide). 0 when per-vp off. */
 int  td5_ai_traffic_pair_blocked(int slot_a, int slot_b);
+/* [TRAFFIC OFF-ROAD 2026-10-03] Reported once per sim tick per traffic slot by the
+ * segment-edge containment (td5_physics_suspension.c). `depth` is how far outside
+ * the span's rail the car sits, in world units, and is only non-zero when the
+ * PORT-ONLY off-segment clamp DECLINED to push it back (so nothing else is going to
+ * bring it home). The traffic route plan counts consecutive reports and recovers the
+ * car, which the existing stuck detector cannot do: that one needs SPAN_RAW frozen
+ * AND |speed| < 0x1000, and an escaped car usually still creeps or oscillates by a
+ * span. Pass depth 0 for "on road" to clear the run. */
+void td5_ai_traffic_note_offroad(int slot, int depth);
 /* Once-per-sim-tick driver (called from td5_ai_pre_tick). */
 void td5_ai_traffic_dynamic_tick(void);
 /* [TRAFFIC BATTLE HWM] Racer's cumulative furthest-progress mark, or -1. */
