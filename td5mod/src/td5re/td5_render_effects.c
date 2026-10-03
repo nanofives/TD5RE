@@ -3508,6 +3508,40 @@ void td5_render_load_sky(const char *path)
     sky_probe_resolve_dir();
 }
 
+/* [SUN DISC 2026-10-03] The basis the SKY is viewed through: the camera basis,
+ * plus the TD6 horizon pitch when a TD6 level is active. Shared by the dome draw
+ * and the sun disc so the painted sun and the disc can never drift apart — before
+ * this was factored out, the disc used the raw camera basis and sat off the
+ * painted sun by the pitch angle on every TD6 track. */
+static void sky_view_basis(TD5_Mat3x3 *out)
+{
+    for (int i = 0; i < 9; i++)
+        out->m[i] = s_camera_basis[i];
+
+    /* TD6 sky horizon adjustment. The TD6 FORWSKY panoramas place their horizon
+     * higher than the TD5 sky dome was tuned for, so the sky reads "too high".
+     * Pitch the dome about the view right-axis (compose a pitch P with the camera
+     * basis: rows 1,2 = up/forward mixed) to slide the horizon down. Gated on TD6
+     * so faithful tracks are byte-unchanged. Angle from TD5RE_SKY_PITCH (radians)
+     * during bring-up; falls back to the baked default below. */
+    if (g_active_td6_level > 0) {
+        const char *sp = getenv("TD5RE_SKY_PITCH");
+        float ang = sp ? (float)atof(sp)
+                       : td5_asset_td6_sky_pitch_for_level(g_active_td6_level);
+        if (ang != 0.0f) {
+            float c = cosf(ang), s = sinf(ang);
+            float u0 = out->m[3], u1 = out->m[4], u2 = out->m[5];
+            float f0 = out->m[6], f1 = out->m[7], f2 = out->m[8];
+            out->m[3] = c * u0 - s * f0;
+            out->m[4] = c * u1 - s * f1;
+            out->m[5] = c * u2 - s * f2;
+            out->m[6] = s * u0 + c * f0;
+            out->m[7] = s * u1 + c * f1;
+            out->m[8] = s * u2 + c * f2;
+        }
+    }
+}
+
 void td5_render_draw_sky(void)
 {
     if (!s_sky_loaded) return;
@@ -3537,33 +3571,9 @@ void td5_render_draw_sky(void)
     if (s_sky_mesh) {
         TD5_Mat3x3 sky_rot;
 
-        /* Camera basis IS the rotation — sky has identity model rotation */
-        for (int i = 0; i < 9; i++)
-            sky_rot.m[i] = s_camera_basis[i];
-
-        /* TD6 sky horizon adjustment. The TD6 FORWSKY panoramas place their
-         * horizon higher than the TD5 sky dome was tuned for, so the sky reads
-         * "too high". Pitch the dome about the view right-axis (compose a pitch
-         * P with the camera basis: rows 1,2 = up/forward mixed) to slide the
-         * horizon down. Gated on TD6 so faithful tracks are byte-unchanged.
-         * Angle from TD5RE_SKY_PITCH (radians) during bring-up; falls back to
-         * the baked default below. */
-        if (g_active_td6_level > 0) {
-            const char *sp = getenv("TD5RE_SKY_PITCH");
-            float ang = sp ? (float)atof(sp)
-                           : td5_asset_td6_sky_pitch_for_level(g_active_td6_level);
-            if (ang != 0.0f) {
-                float c = cosf(ang), s = sinf(ang);
-                float u0 = sky_rot.m[3], u1 = sky_rot.m[4], u2 = sky_rot.m[5];
-                float f0 = sky_rot.m[6], f1 = sky_rot.m[7], f2 = sky_rot.m[8];
-                sky_rot.m[3] = c * u0 - s * f0;
-                sky_rot.m[4] = c * u1 - s * f1;
-                sky_rot.m[5] = c * u2 - s * f2;
-                sky_rot.m[6] = s * u0 + c * f0;
-                sky_rot.m[7] = s * u1 + c * f1;
-                sky_rot.m[8] = s * u2 + c * f2;
-            }
-        }
+        /* Camera basis IS the rotation — sky has identity model rotation (plus
+         * the TD6 horizon pitch; see sky_view_basis). */
+        sky_view_basis(&sky_rot);
 
         td5_render_load_rotation(&sky_rot);
 
@@ -3670,9 +3680,24 @@ void td5_render_draw_sun_disc(void)
      * sun is part of the sky, not a ray-tracing feature, so LOW/MEDIUM get it too
      * on SUNNY tracks. Shares s_sky_sun_dir with the shadow pass, so the disc and
      * the shadows always agree on where the sun is. */
-    if (s_sky_sun_class != TD5_SKY_SUNNY || !s_sky_sun_dir_valid) return;
     static int   s_disc_on = -1, s_disc_dbg = -1;
     static float s_disc_sz = -1.0f;
+    /* [SUN DIAG] TD5RE_SUN_DISC_DIAG=1 logs one line every N frames (N = the env
+     * value when >1) covering EVERY exit path, so "no sun on screen" can be told
+     * apart from "not SUNNY", "behind the camera" and "drawn but depth-rejected". */
+    static int s_diag_n = -1, s_diag_tick = 0;
+    if (s_diag_n < 0) {
+        const char *g = getenv("TD5RE_SUN_DISC_DIAG");
+        s_diag_n = (g && g[0]) ? atoi(g) : 0;
+        if (s_diag_n == 1) s_diag_n = 60;
+    }
+    int diag = (s_diag_n > 0 && (s_diag_tick++ % s_diag_n) == 0);
+    if (s_sky_sun_class != TD5_SKY_SUNNY || !s_sky_sun_dir_valid) {
+        if (diag)
+            TD5_LOG_I(RENDER_LOG_TAG, "[sundisc] SKIP class=%d dir_valid=%d",
+                      s_sky_sun_class, s_sky_sun_dir_valid);
+        return;
+    }
     if (s_disc_on < 0) {
         const char *e = getenv("TD5RE_SUN_DISC");      s_disc_on = (e && e[0]) ? atoi(e) : 1;
         const char *z = getenv("TD5RE_SUN_DISC_SIZE"); s_disc_sz = (z && z[0]) ? (float)atof(z) : 0.03f;
@@ -3681,34 +3706,91 @@ void td5_render_draw_sun_disc(void)
     }
     if (!s_disc_on) return;
 
-    float dir[3] = { s_sky_sun_dir[0], s_sky_sun_dir[1], s_sky_sun_dir[2] };
+    /* [SUN DISC Y-SPACE FIX 2026-10-03] The disc must project onto the painted
+     * sun, and where the painted sun lands is fixed by construction: the dome is
+     * drawn by pushing its RAW vertex positions through sky_view_basis (see
+     * td5_render_draw_sky), so the bright texel sits at the projection of the raw
+     * position of the dome vertex nearest the bright sky UV. sky_probe_resolve_dir
+     * picks exactly that vertex — but stores it Y-NEGATED, because its consumer is
+     * the shadow march + SSR, which run in POSITION/ray space (+Y DOWN), while the
+     * dome is authored +Y UP (td5_render.h documents s_sky_sun_dir as +Y DOWN).
+     * This path was feeding that +Y-DOWN vector straight into the +Y-UP render
+     * basis, which MIRRORS the sun's elevation about the view axis: the probed sun
+     * on Honolulu is 33 deg UP (dir.y=+0.551 in render space) and was projected
+     * 33 deg DOWN instead — into the road, where the opaque world has already
+     * written a much nearer depth and this quad's z-test (ADDITIVE_GLOW: z_test
+     * on, LESSEQUAL, depth 0.999) discards it, or simply off the bottom of frame.
+     * Either way never a visible pixel, on any lighting level, in any race camera
+     * or the dev free cam. Un-flip Y back into render space here; s_sky_sun_dir
+     * itself is untouched so the shadow/SSR contract is unchanged.
+     * NOTE the elevation clamp in sky_probe_resolve_dir: when the probe resolves
+     * at/below the horizon the direction is lifted to TD5RE_SUN_MIN_ELEV (~8.6 deg
+     * by default) and no longer coincides with a dome vertex — that is deliberate
+     * (a grounded low sun), and the disc then sits slightly above the painted
+     * glow rather than on it. */
+    float dir[3] = { s_sky_sun_dir[0], -s_sky_sun_dir[1], s_sky_sun_dir[2] };
+    /* Project through the SKY's basis, not the bare camera basis, so the disc
+     * tracks the dome through the TD6 horizon pitch too. */
+    TD5_Mat3x3 vb;
+    sky_view_basis(&vb);
     float D = 100000.0f, depth = 0.999f;   /* far, behind all world geometry */
     if (s_disc_dbg) {
         /* aim down camera-forward + place CLOSE and unoccluded (depth ~near) so
          * the primitive is proven regardless of sun bearing / geometry. */
-        dir[0] = s_camera_basis[6]; dir[1] = s_camera_basis[7]; dir[2] = s_camera_basis[8];
+        dir[0] = vb.m[6]; dir[1] = vb.m[7]; dir[2] = vb.m[8];
         D = 500.0f; depth = 0.02f;
     }
     float rx = dir[0] * D, ry = dir[1] * D, rz = dir[2] * D;  /* world = cam + dir*D, minus cam */
-    float vx = rx*s_camera_basis[0] + ry*s_camera_basis[1] + rz*s_camera_basis[2];
-    float vy = rx*s_camera_basis[3] + ry*s_camera_basis[4] + rz*s_camera_basis[5];
-    float vz = rx*s_camera_basis[6] + ry*s_camera_basis[7] + rz*s_camera_basis[8];
-    if (vz <= s_near_clip) return;                      /* sun behind camera */
+    float vx = rx*vb.m[0] + ry*vb.m[1] + rz*vb.m[2];
+    float vy = rx*vb.m[3] + ry*vb.m[4] + rz*vb.m[5];
+    float vz = rx*vb.m[6] + ry*vb.m[7] + rz*vb.m[8];
+    if (vz <= s_near_clip) {                            /* sun behind camera */
+        if (diag)
+            TD5_LOG_I(RENDER_LOG_TAG, "[sundisc] BEHIND vz=%.1f dir=(%.3f,%.3f,%.3f) "
+                      "fwd=(%.3f,%.3f,%.3f) freecam=%d",
+                      (double)vz, (double)dir[0], (double)dir[1], (double)dir[2],
+                      (double)vb.m[6], (double)vb.m[7], (double)vb.m[8],
+                      td5_camera_freecam_active());
+        return;
+    }
     float invz = 1.0f / vz;
     vx *= invz; vy *= invz;                              /* view/z for projection */
+    /* [SUN DISC 2026-10-03] vz>near_clip only rejects BEHIND the camera. A sun
+     * ~90 deg off-axis survives it with a near-zero vz (measured on Honolulu:
+     * vz=952 of a 100000-unit ray) and projects to tens of thousands of pixels
+     * off-screen — a correct projection, but a needlessly huge degenerate quad
+     * handed to the rasteriser every frame. It is off-frame either way, so drop
+     * it once the centre is more than one viewport outside the pane. */
     {
-        static int s_disc_diag = 0;
-        if (!s_disc_diag && getenv("TD5RE_SUN_DISC_DIAG")) {
-            s_disc_diag = 1;
-            TD5_LOG_I(RENDER_LOG_TAG,
-                "[sundisc] rt=%d disc_on=%d dbg=%d dir=(%.3f,%.3f,%.3f) vz=%.1f "
-                "screen=(%.0f,%.0f) center=(%.0f,%.0f) sz=%.3f",
-                td5_rt_active(), s_disc_on, s_disc_dbg,
-                (double)dir[0], (double)dir[1], (double)dir[2], (double)vz,
-                (double)(-vx * s_focal_length + s_center_x),
-                (double)(-vy * s_focal_length + s_center_y),
-                (double)s_center_x, (double)s_center_y, (double)s_disc_sz);
+        float cx = -vx * s_focal_length + s_center_x;
+        float cy = -vy * s_focal_length + s_center_y;
+        float mx = s_center_x * 2.0f, my = s_center_y * 2.0f;
+        if (cx < -mx || cx > mx * 2.0f || cy < -my || cy > my * 2.0f) {
+            if (diag)
+                TD5_LOG_I(RENDER_LOG_TAG, "[sundisc] OFFSCREEN screen=(%.0f,%.0f) vz=%.1f "
+                          "dir=(%.3f,%.3f,%.3f) fwd=(%.3f,%.3f,%.3f) freecam=%d",
+                          (double)cx, (double)cy, (double)vz,
+                          (double)dir[0], (double)dir[1], (double)dir[2],
+                          (double)vb.m[6], (double)vb.m[7], (double)vb.m[8],
+                          td5_camera_freecam_active());
+            return;
         }
+    }
+    if (diag) {
+        TD5_LOG_I(RENDER_LOG_TAG,
+            "[sundisc] DRAW tick=%d rt=%d dbg=%d freecam=%d dir=(%.3f,%.3f,%.3f) "
+            "up=(%.3f,%.3f,%.3f) fwd=(%.3f,%.3f,%.3f) vz=%.1f "
+            "screen=(%.0f,%.0f) center=(%.0f,%.0f) focal=%.0f half=%.1f",
+            (int)g_td5.simulation_tick_counter,
+            td5_rt_active(), s_disc_dbg, td5_camera_freecam_active(),
+            (double)dir[0], (double)dir[1], (double)dir[2],
+            (double)vb.m[3], (double)vb.m[4], (double)vb.m[5],
+            (double)vb.m[6], (double)vb.m[7], (double)vb.m[8],
+            (double)vz,
+            (double)(-vx * s_focal_length + s_center_x),
+            (double)(-vy * s_focal_length + s_center_y),
+            (double)s_center_x, (double)s_center_y, (double)s_focal_length,
+            (double)(s_disc_sz * s_focal_length));
     }
 
     int R = (int)s_sky_sun_rgb[0], G = (int)s_sky_sun_rgb[1], B = (int)s_sky_sun_rgb[2];
