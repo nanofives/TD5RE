@@ -1,0 +1,7 @@
+# J5b traffic A/B: AI-driven lap, quit cleanly at 9000 ticks (~300 s @30Hz)
+# so race.log flushes. No input beyond the autopilot (PlayerIsAI=1).
+sync race
+
+0    log PHASE traffic-ab-start
+9000 log PHASE traffic-ab-quit
+9000 quit

@@ -1783,7 +1783,16 @@ done:
     trf_grind_note(slot, actor, grind_pushed, grind_edge, span_type, sub_lane, lane_count);
     /* Report the deepest UNCONTAINED excursion this tick (0 = contained / on road).
      * A push happened means the containment is doing its job, so that is not a
-     * strand even if the other edge also read outside. */
+     * strand even if the other edge also read outside.
+     *
+     * [2026-10-03] With the depth-limited clamp above, this is now a BACKSTOP that
+     * does not normally arm: anything at or past TD5RE_TRAFFIC_EDGE_DEEP is pushed
+     * (so grind_pushed is set and escape_depth stays 0), and the shallow cases that
+     * still reach the offseg branch are by construction below that depth. It only
+     * comes back into play if the deep fallback is turned off
+     * (TD5RE_TRAFFIC_EDGE_DEEP=0), or if TD5RE_TRAFFIC_EDGE_ESCAPE is lowered below
+     * TD5RE_TRAFFIC_EDGE_DEEP to catch shallower strands. Kept deliberately: it is
+     * the layer underneath the clamp, not dead code to delete. */
     {
         int thr = trf_edge_escape_depth();
         td5_ai_traffic_note_offroad(

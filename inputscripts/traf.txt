@@ -1,0 +1,2 @@
+sync race
+7200 quit
