@@ -8499,9 +8499,9 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
     n = td5_geo_preview_route(slug);
     if (n < 2) {
         fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f) * sy,
-                           "NO ROUTE DATA", 0xFF8899AA, sx, sy);
+                           TR("NO ROUTE DATA"), 0xFF8899AA, sx, sy);
         fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f + 12.0f) * sy,
-                           "RUN re/tools/geo_selector.py", 0xFF8899AA, sx, sy);
+                           TR("RUN re/tools/geo_selector.py"), 0xFF8899AA, sx, sy);
         return 0;
     }
 
@@ -8565,8 +8565,8 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
      * first framedump of this screen. Above the panel there is clear space
      * between the track name and the panel top, and splitting the string keeps
      * the attribution complete rather than truncating it to fit. */
-    fe_draw_small_text(bx * sx, (by - 26.0f) * sy, "MAP DATA (C)", 0xFF8899AA, sx, sy);
-    fe_draw_small_text(bx * sx, (by - 14.0f) * sy, "OPENSTREETMAP CONTRIBUTORS",
+    fe_draw_small_text(bx * sx, (by - 26.0f) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
+    fe_draw_small_text(bx * sx, (by - 14.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
                        0xFF8899AA, sx, sy);
     return 1;
 }
@@ -8579,7 +8579,7 @@ int td5_geo_incomplete_note(char *out, size_t cap)
     const int bad = td5_geo_places_incomplete_count();
     if (bad <= 0 || !out || cap == 0) return 0;
     snprintf(out, cap, "%s: %s", td5_geo_places_incomplete_slug(0),
-             td5_geo_places_incomplete_reason(0));
+             TR(td5_geo_places_incomplete_reason(0)));
     return 1;
 }
 

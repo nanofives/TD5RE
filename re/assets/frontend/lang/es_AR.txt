@@ -607,3 +607,14 @@ AI OPPONENTS=RIVALES IA
 # role names (td5_chaos_role_name); LEFT / RIGHT / PEDALS / STEER / BRAKE are
 # already in the controller-action block above, THROTTLE is new here.
 THROTTLE=ACELERADOR
+
+# ============================================================
+# Real places (GEO TRACK) in SELECT TRACK — round 1003 J8.
+# "(REAL)" in the track name stays as is: same word in Spanish.
+# ============================================================
+NO ROUTE DATA=SIN DATOS DE RUTA
+RUN re/tools/geo_selector.py=EJECUTÁ re/tools/geo_selector.py
+MAP DATA (C)=DATOS DEL MAPA (C)
+OPENSTREETMAP CONTRIBUTORS=COLABORADORES DE OPENSTREETMAP
+NO TERRAIN DATA=SIN DATOS DE TERRENO
+NO ROUTE -- DRAW ONE IN geo_selector.py=SIN RUTA: DIBUJALA EN geo_selector.py
