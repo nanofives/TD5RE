@@ -1718,6 +1718,14 @@ void tg_landmarks_place(const TG_NodeList *nl, int nspans)
                 (tg_roll_hash(s_gen_seed, L->salt ^ ((unsigned)a * 2654435761u))
                  % 100u) >= (unsigned)L->weight) continue;
             if (L->prefab < 0) { placed++; used[li] = 1; continue; }
+            /* [J7] This row names its prefab directly, so it bypasses
+             * tg_prefab_fit and the usability test has to be repeated here --
+             * that is exactly how lm12 kept being placed, and kept reading as
+             * see-through, after being withdrawn from the fit pool. Marked
+             * used, not refused: a withdrawn piece is a decision, not a
+             * placement failure, and counting it as refused would make the
+             * landmark report look like the track ran out of room. */
+            if (!tg_prefab_usable(L->prefab)) { used[li] = 1; continue; }
 
             /* Try a few hash-chosen spans in the run. A refusal is ordinary --
              * bridges and tunnels have no ground to stand a building on -- so

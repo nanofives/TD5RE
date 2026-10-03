@@ -2916,6 +2916,11 @@ void        tg_prefab_report(void);
 /* [GEO PHASE 5] footprint-driven fallback: pick the biggest set piece that
  * fits a real OSM footprint, and stamp it straight into a live buffer. */
 int         tg_prefab_fit(double fx_max, double fz_max, unsigned int salt);
+/* [J7] 0 when this set piece is an open shell no box can close soundly, so it
+ * must not be selected at all. Both selectors have to ask: tg_prefab_fit (the
+ * geo footprint fallback) and the k_landmarks table, which names its prefab
+ * directly and never goes through fit. */
+int         tg_prefab_usable(int pf);
 int         tg_prefab_write_at(TG_Buf *blk, int pf, double ox, double oy,
                                double oz, double ca, double sa);
 

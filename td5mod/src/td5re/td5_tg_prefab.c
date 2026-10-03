@@ -189,8 +189,9 @@ const char *tg_prefab_name(int pf)
  * So lm12 is not closed, it is withdrawn, and tg_prefab_fit's documented
  * "nothing fits" answer takes over: the caller extrudes the real footprint, as
  * it did before any prefab existed. One piece of 24. */
-static int tg_prefab_usable(int i)
+int tg_prefab_usable(int i)
 {
+    if (i < 0 || i >= TD5_TG_PREFAB_N) return 0;
     if (!td5_env_flag_on("TD5RE_TG_PREFAB_CLOSE")) return 1;
     return !k_pfclose_exclude[i];
 }
