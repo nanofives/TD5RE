@@ -45,6 +45,78 @@ static TG_PrefabPlace s_pf[TG_PREFAB_MAX];
 static int s_pf_n;
 static long s_pf_emitted;
 
+/* [J7 item 1] "todavia hay edificios que no tienen lados" (Mariano,
+ * 2026-10-03). Some of the shipped set pieces in td5_tg_prefab_data.h are OPEN
+ * SHELLS: lifted verbatim out of L23, where a piece that only ever faced the
+ * road needs no back and no roof. In the original that is invisible. Standing
+ * one alone beside a generated road, it is a building you can see straight
+ * through, and the MODELS.DAT census found exactly that -- 2 instances of the
+ * same prefab open on seed 4172065417, with closed_same_pages=0, i.e. open on
+ * EVERY instance rather than in some branch.
+ *
+ * re/tools/tg_prefab_audit.py measures the table offline and generates
+ * td5_tg_prefab_close_data.h: for each open component, the quads that complete
+ * its own BOUNDING BOX on the planes it does not already wall, carrying that
+ * component's dominant texture page. 7 open components across 5 of the 24
+ * prefabs, 25 quads in total. Doing it offline rather than at runtime keeps the
+ * analysis (vertex welding, wall clustering) out of the generator entirely and
+ * makes the added geometry reviewable as data.
+ *
+ * The closure is the component's bbox, so a piece whose open part is L-shaped
+ * comes out as the enclosing block rather than the L. That is a deliberate
+ * trade: it is a slight simplification of the silhouette, and it is the only
+ * shape derivable from the piece itself without inventing architecture.
+ *
+ * TD5RE_TG_PREFAB_CLOSE=0 takes the plain path below and is byte-identical to
+ * the build before this change. */
+static int tg_prefab_write(TG_Buf *blk, const TG_PrefabDef *d, int pf,
+                           double ox, double oy, double oz,
+                           double ca, double sa)
+{
+    /* Big enough for the largest prefab (lm00, 975 verts) plus the most
+     * closing quads any one piece takes (lm15, 8 -> 32 verts). */
+    static float        v[(1024 + 64) * 5];
+    static unsigned int lgt[1024 + 64];
+    static unsigned short cmd[(64 + 32) * 3];
+    int nq, first, i, k, nv, ncmd;
+
+    if (pf < 0 || pf >= TD5_TG_PREFAB_N
+        || !td5_env_flag_on("TD5RE_TG_PREFAB_CLOSE"))
+        return tg_write_prefab_mesh(blk, d->v, d->l, d->nv, d->c, d->ncmd,
+                                    TD5_TG_PAGE_LM_BASE, ox, oy, oz, ca, sa);
+
+    first = (int)k_pfclose[pf][0];
+    nq    = (int)k_pfclose[pf][1];
+    if (nq <= 0
+        || d->nv + nq * 4 > (int)(sizeof(lgt) / sizeof(lgt[0]))
+        || d->ncmd + nq > (int)(sizeof(cmd) / sizeof(cmd[0]) / 3))
+        return tg_write_prefab_mesh(blk, d->v, d->l, d->nv, d->c, d->ncmd,
+                                    TD5_TG_PAGE_LM_BASE, ox, oy, oz, ca, sa);
+
+    /* The prefab first, UNCHANGED, so the closure can only ever add faces. */
+    memcpy(v, d->v, (size_t)d->nv * 5 * sizeof(float));
+    memcpy(lgt, d->l, (size_t)d->nv * sizeof(unsigned int));
+    memcpy(cmd, d->c, (size_t)d->ncmd * 3 * sizeof(unsigned short));
+    nv = d->nv;
+    ncmd = d->ncmd;
+
+    for (i = 0; i < nq; i++) {
+        const TG_PrefabCloseQuad *q = &k_pfclose_quads[first + i];
+        for (k = 0; k < 20; k++) v[nv * 5 + k] = q->v[k];
+        /* 0xFFA0A0A0 is the dominant baked value across this corpus, so a
+         * closing wall sits at the same brightness as the piece it closes
+         * instead of flaring white next to it. */
+        for (k = 0; k < 4; k++) lgt[nv + k] = 0xFFA0A0A0u;
+        cmd[ncmd * 3 + 0] = q->page_local;
+        cmd[ncmd * 3 + 1] = 0;            /* triangles */
+        cmd[ncmd * 3 + 2] = 1;            /* quads     */
+        nv += 4;
+        ncmd++;
+    }
+    return tg_write_prefab_mesh(blk, v, lgt, nv, cmd, ncmd,
+                                TD5_TG_PAGE_LM_BASE, ox, oy, oz, ca, sa);
+}
+
 /* Per-BUILD, exactly like tg_acct_reset and the R12 flora ledgers: a second
  * generation in the same process must not inherit the first one's placements.
  * That is the R9 water-table crash class (stale gen-1 span indices read against
@@ -151,8 +223,7 @@ int tg_prefab_write_at(TG_Buf *blk, int pf, double ox, double oy, double oz,
     const TG_PrefabDef *d;
     if (!blk || pf < 0 || pf >= TD5_TG_PREFAB_N) return 1;
     d = &k_tg_prefabs[pf];
-    if (!tg_write_prefab_mesh(blk, d->v, d->l, d->nv, d->c, d->ncmd,
-                              TD5_TG_PAGE_LM_BASE, ox, oy, oz, ca, sa))
+    if (!tg_prefab_write(blk, d, pf, ox, oy, oz, ca, sa))
         return 0;
     s_pf_emitted++;
     return 1;
@@ -175,10 +246,9 @@ int tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
         d = &k_tg_prefabs[s_pf[i].pf];
         m0 = meshes->len;
         moff[*nmesh] = m0;
-        ok = tg_write_prefab_mesh(meshes, d->v, d->l, d->nv, d->c, d->ncmd,
-                                  TD5_TG_PAGE_LM_BASE,
-                                  s_pf[i].ox, s_pf[i].oy, s_pf[i].oz,
-                                  s_pf[i].ca, s_pf[i].sa);
+        ok = tg_prefab_write(meshes, d, s_pf[i].pf,
+                             s_pf[i].ox, s_pf[i].oy, s_pf[i].oz,
+                             s_pf[i].ca, s_pf[i].sa);
         if (!ok) {
             /* tg_write_prefab_mesh only fails its own cursor check, which means
              * the two generated headers disagree. Say so loudly: silently

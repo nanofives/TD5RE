@@ -59,6 +59,7 @@
 #include "td5_tg_real_tex_roads.h" /* [GEOMLIB] curated real ROAD surfaces  */
 #include "td5_tg_real_tex_landmarks.h" /* [GEOMLIB] pages used by the prefabs */
 #include "td5_tg_prefab_data.h"   /* [GEOMLIB] shipped-geometry PREFABS      */
+#include "td5_tg_prefab_close_data.h" /* [J7] closing walls for the OPEN ones */
 #include "td5re.h"
 #include <stdio.h>
 #include <stdlib.h>
