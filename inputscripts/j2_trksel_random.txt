@@ -1,0 +1,17 @@
+# [J2 2026-10-03] SELECT TRACK "R = RANDOM" shortcut probe.
+# Boot with --StartScreen=21 (SELECT TRACK) so this script only has to press R.
+# Expected in log/frontend.log:
+#   - 3x "TrackSel RANDOM shortcut: src=key-R" + "TrackSel RANDOMIZE: track=..."
+#     from the three taps below (one pick PER PRESS, never per frame)
+#   - exactly 1 more pair from the 3-second HOLD (edge-latched, not repeated)
+sync menu
+480  log J2PROBE taps-begin
++120 key r press
++120 key r press
++120 key r press
++120 log J2PROBE taps-end
++60  log J2PROBE hold-begin
++30  key r 1
++180 key r 0
++60  log J2PROBE hold-end
++90  quit

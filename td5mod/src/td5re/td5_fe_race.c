@@ -360,6 +360,14 @@ int  s_trksel_dyn_btn  = -1;
  * frame as an entry" (reset at screen init so a stale L/R bit can't cycle on the
  * first interactive frame); set to the live focus each interactive frame. */
 static int  s_trksel_prev_focus = -2;
+/* [J2 2026-10-03] Held-state latches for the RANDOM shortcut (keyboard R / pad X)
+ * on the track-select screen, so the pick fires once per PRESS. Module scope (not
+ * function statics) so screen init can seed them to 1 = "treat as already held":
+ * a key still down when SELECT TRACK appears must be released before it can fire,
+ * which is what stops a stray R carried in from the previous screen from
+ * randomizing on entry. */
+static int  s_trksel_rand_r_held = 1;
+static int  s_trksel_rand_x_held = 1;
 
 /* Race results state */
 static int  s_results_button;           /* g_postRaceMenuButtonChoice */
@@ -9064,6 +9072,10 @@ void Screen_TrackSelection(void) {
         s_anim_complete = 0;
         s_trksel_dyn_btn  = -1;   /* [ARCADE] (re)assigned with the buttons below */
         s_trksel_prev_focus = -2; /* [R3-3] treat the first interactive frame as a focus-entry (no cycle) */
+        /* [J2 2026-10-03] A key/button still down when the screen appears must be
+         * released before the RANDOM shortcut can fire (no randomize on entry). */
+        s_trksel_rand_r_held = 1;
+        s_trksel_rand_x_held = 1;
 
         /* Validate track index for cup modes: skip locked/invalid NPC groups */
         /* Determine track max for current mode. [2026-06-19] Net play can now
@@ -9347,43 +9359,69 @@ void Screen_TrackSelection(void) {
                 break;
             }
 
-            /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
-             * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
-             * track_max is exclusive; network caps at 0x13 like frontend_cycle_track.
-             * [W3 2026-09-29] The chip is gone: the ONLY triggers are the keyboard
-             * 'R' key and the pad's X face button. Both are unambiguous, so the old
-             * focus-agreement guard (which existed purely to stop a stray
-             * s_button_index aliasing the chip's index) is no longer needed. */
-            {
-                /* One-shot each: latch the rising edge so HOLDING the key/button
-                 * randomizes once per press, not every frame. s_fe_gamepad_nav is
-                 * a HELD level refreshed by frontend_poll_input, hence the latch.
-                 * 'R' = DIK 0x13, 0x80 = pad X (td5_plat_input_frontend_nav). */
-                static int s_trksel_r_held = 0;
-                static int s_trksel_x_held = 0;
-                int r_now  = td5_plat_input_key_pressed(0x13) ? 1 : 0;
-                int x_now  = (s_fe_gamepad_nav & 0x80u) ? 1 : 0;
-                int r_edge = (r_now && !s_trksel_r_held) ? 1 : 0;
-                int x_edge = (x_now && !s_trksel_x_held) ? 1 : 0;
-                s_trksel_r_held = r_now;
-                s_trksel_x_held = x_now;
-                if (r_edge || x_edge) {
-                    int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
-                    if (frontend_pick_random_track(bound)) {
-                        frontend_play_sfx(3);
-                        TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
-                                  s_selected_track, td5_asset_level_number(s_selected_track),
-                                  frontend_get_track_name(s_selected_track));
-                        s_track_switch_tick = 0;
-                        frontend_update_direction_button_visibility(1, 1);
-                        frontend_update_laps_button_visibility(2);
-                        /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] refresh for
-                         * the randomly picked track too. */
-                        frontend_trksel_refresh_auto_btn();
-                        s_inner_state = 5;
-                    } else {
-                        frontend_play_sfx(10); /* nothing else to pick */
-                    }
+        }
+
+        /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
+         * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
+         * track_max is exclusive; network caps at 0x13 like frontend_cycle_track.
+         * [W3 2026-09-29] The chip is gone: the ONLY triggers are the keyboard
+         * 'R' key and the pad's X face button. Both are unambiguous, so the old
+         * focus-agreement guard (which existed purely to stop a stray
+         * s_button_index aliasing the chip's index) is no longer needed.
+         *
+         * [J2 2026-10-03 ROOT CAUSE] This block used to sit INSIDE the
+         * `if (s_input_ready)` above, which is why neither R nor pad X ever did
+         * anything. s_input_ready is NOT "input was polled" — frontend_poll_input
+         * clears it every frame (td5_frontend.c:4459) and raises it only on a
+         * CONFIRM (Enter/pad A on an active button, mouse activation) or when
+         * s_arrow_input is non-zero (a LEFT/RIGHT/UP/DOWN nav event, incl. the
+         * hold-repeater and the mouse arrow zones) — td5_frontend.c:4394, 4700,
+         * 4719, 4781. A bare letter key raises none of those, so the whole case-4
+         * body was skipped on an R-only frame and the shortcut was unreachable
+         * unless the player happened to nudge a direction in the same frame.
+         * It lives outside the gate now and runs on every interactive frame. */
+        {
+            /* One-shot each: latch the rising edge so HOLDING the key/button
+             * randomizes once per press, not every frame. s_fe_gamepad_nav is
+             * a HELD level refreshed by frontend_poll_input, hence the latch.
+             * 'R' = DIK 0x13, 0x80 = pad X (td5_plat_input_frontend_nav).
+             * Latches are module statics seeded to "held" at screen init so a key
+             * carried in from the previous screen can't fire on the entry frame. */
+            int active = frontend_window_is_active();
+            /* Never fire while a text field is accepting keystrokes (name entry,
+             * dev span field, any future field): there, 'R' is a typed character.
+             * The pad X latch follows the same gate so a single release/press
+             * can't straddle the field opening and closing. */
+            int typing = (s_text_input_state != 0);
+            int r_now  = (active && !typing && td5_plat_input_key_pressed(0x13)) ? 1 : 0;
+            int x_now  = (active && !typing && (s_fe_gamepad_nav & 0x80u)) ? 1 : 0;
+            int r_edge = (r_now && !s_trksel_rand_r_held) ? 1 : 0;
+            int x_edge = (x_now && !s_trksel_rand_x_held) ? 1 : 0;
+            s_trksel_rand_r_held = r_now;
+            s_trksel_rand_x_held = x_now;
+            /* Only act while still in the interactive sub-state: an OK/BACK/RACE
+             * OPTIONS handled above may already have moved s_inner_state on this
+             * same frame, and a randomize must not stomp that transition. */
+            if ((r_edge || x_edge) && s_inner_state == 4) {
+                int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
+                TD5_LOG_I(LOG_TAG, "TrackSel RANDOM shortcut: src=%s screen=%d bound=%d from=%d",
+                          r_edge ? "key-R" : "pad-X", (int)td5_frontend_get_screen(),
+                          bound, s_selected_track);
+                if (frontend_pick_random_track(bound)) {
+                    frontend_play_sfx(3);
+                    TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
+                              s_selected_track, td5_asset_level_number(s_selected_track),
+                              frontend_get_track_name(s_selected_track));
+                    s_track_switch_tick = 0;
+                    frontend_update_direction_button_visibility(1, 1);
+                    frontend_update_laps_button_visibility(2);
+                    /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] refresh for
+                     * the randomly picked track too. */
+                    frontend_trksel_refresh_auto_btn();
+                    s_inner_state = 5;
+                } else {
+                    TD5_LOG_W(LOG_TAG, "TrackSel RANDOM shortcut: no alternative track to pick");
+                    frontend_play_sfx(10); /* nothing else to pick */
                 }
             }
         }

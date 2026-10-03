@@ -4190,6 +4190,14 @@ static int frontend_is_window_active(void) {
     return (foreground == hwnd) ? 1 : 0;
 }
 
+/* [J2 2026-10-03] Public form of the above for the per-screen modules. Needed by
+ * raw held-state reads that run OUTSIDE frontend_poll_input's own focus gate —
+ * e.g. the track-select RANDOM shortcut, which must not act on a stale
+ * s_fe_gamepad_nav (that word is only refreshed while the window has focus). */
+int frontend_window_is_active(void) {
+    return frontend_is_window_active();
+}
+
 /* [STARTSCREEN WALK 2026-07-03] Harness hooks for the StartScreen nav walker
  * (td5_game.c): report when the current screen is interactive, and move the
  * keyboard focus to a specific button so an injected ENTER confirms it through
