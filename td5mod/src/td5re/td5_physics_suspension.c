@@ -4095,16 +4095,52 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
     float build_mat[9];
     BuildRotationMatrixFromAngles(build_mat, delta_angles);
 
-    /* The original then shuffles the build output through `local_30..local_10`
-     * back into `local_60[0..8]`. The shuffle is identity for the port-side
-     * helper (which writes its 9-float row-major output directly into the
-     * destination buffer). Skip the shuffle.
+    /* === The shuffle is a TRANSPOSE, not identity [FIX 2026-10-03 J4 COLL3D] ===
+     *
+     * [CONFIRMED @ 0x00405CCD-0x00405D21] The original copies the
+     * BuildRotationMatrixFromAngles output (9 consecutive dwords
+     * local_30, local_2c, local_28, local_24, local_20, local_1c, local_18,
+     * local_14, local_10 = b[0..8]) into local_60[0..8] with this mapping:
+     *     local_60[0] = local_30  -> out[0] = b[0]
+     *     local_60[1] = local_24  -> out[1] = b[3]
+     *     local_60[2] = local_18  -> out[2] = b[6]
+     *     local_60[3] = local_2c  -> out[3] = b[1]
+     *     local_50    = local_20  -> out[4] = b[4]
+     *     local_4c    = local_14  -> out[5] = b[7]
+     *     local_48    = local_28  -> out[6] = b[2]
+     *     local_44    = local_1c  -> out[7] = b[5]
+     *     local_40    = local_10  -> out[8] = b[8]
+     * i.e. out[i*3+j] = b[j*3+i]  — a 3x3 TRANSPOSE. For a rotation matrix the
+     * transpose IS the inverse, so the original computes
+     *     collision_spin = R(current) * R(previous)^-1
+     * which is the per-tick rotation DELTA (the car's own angular velocity
+     * expressed as a rotation). IntegrateScriptedVehicleMotion then re-applies
+     * that delta once per tick for the whole 60-tick window
+     * [CONFIRMED @ 0x00409D67-95] — that compounding delta IS the tumble.
+     *
+     * The prior port called the shuffle "identity" and skipped it, so it stored
+     * R(current) * R(previous) instead — not a delta but a near-DOUBLING of the
+     * (already past-the-limit) attitude. Measured on representative latch states
+     * (roll 0x360/0x400/0x800, omega 25-60 12-bit units/tick):
+     *     transposed (orig):  2.4 - 6.9 deg per tick   -> 142 - 412 deg over 60
+     *     non-transposed:    85.1 - 159.2 deg per tick -> 5105 - 9555 deg over 60
+     * and the transposed per-tick angle matches |omega| as a rotation to within
+     * a few tenths of a degree, as a delta must. At 30 Hz the non-transposed
+     * version re-orients the body near-randomly every frame: the recovery WINDOW
+     * is visible (the car is uncontrollable for ~2 s) but there is no coherent
+     * tumble — it reads as glitching. Exactly the reported symptom with 3D
+     * COLLISIONS ON.
      *
      * MultiplyRotationMatrices3x3(&actor->rotation_matrix, local_60, local_60)
      * [CALL 0x0042DA10 at 0x00405D26]. */
+    float spin_basis[9];
+    for (int si = 0; si < 3; si++)
+        for (int sj = 0; sj < 3; sj++)
+            spin_basis[si * 3 + sj] = build_mat[sj * 3 + si];
+
     float product[9];
     MultiplyRotationMatrices3x3((float *)&actor->rotation_matrix,
-                                build_mat, product);
+                                spin_basis, product);
 
     /* MOVSD.REP 12-dword copies [0x00405D2B-4C].
      *
@@ -4157,6 +4193,29 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
             (int)*(int16_t *)((uint8_t *)actor + 0x82),
             (int)g_collisions_enabled, (int)g_active_td6_level);
 
+        /* [J4 COLL3D 2026-10-03] Report the magnitude of the latched per-tick
+         * spin delta. This is the number that tells you whether the tumble is
+         * coherent: it must track the car's own angular rate (single-digit to
+         * low-tens of degrees per tick, ~1-2 full flips over the 60-tick
+         * window). A value near 90-180 deg/tick means the delta is not a delta
+         * and the body will re-orient near-randomly every frame (the pre-fix
+         * missing-transpose failure mode). Latch-only, so no per-tick cost. */
+        {
+            float tr  = product[0] + product[4] + product[8];
+            float cth = (tr - 1.0f) * 0.5f;
+            if (cth >  1.0f) cth =  1.0f;
+            if (cth < -1.0f) cth = -1.0f;
+            float deg = (float)(acos((double)cth) * (180.0 / 3.14159265358979323846));
+            TD5_LOG_I(LOG_TAG,
+                "J4 tumble spin: slot=%d delta=%.2f deg/tick (~%.0f deg over 60 ticks) "
+                "omega{r=%d y=%d p=%d} linvel{x=%d y=%d z=%d}",
+                (int)actor->slot_index, deg, deg * 60.0f,
+                actor->angular_velocity_roll, actor->angular_velocity_yaw,
+                actor->angular_velocity_pitch,
+                actor->linear_velocity_x, actor->linear_velocity_y,
+                actor->linear_velocity_z);
+        }
+
         /* [task #12] Damp the RETAINED linear velocity on entering roll
          * recovery. The scripted recovery integrator (integrate_scripted_motion)
          * only sheds ~1/256 of linear velocity per tick, so a car that was
@@ -4166,15 +4225,27 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
          * Shed most of it here, ONCE, at the 0->1 latch transition (this branch
          * runs exactly when vehicle_mode flips into recovery).
          *
-         * Knob TD5RE_ROLL_RECOVER_DAMP = retained fraction in [0,1] (default
-         * 0.15 = strong damp, keep 15%). "1" = retain all (old byte-faithful
-         * carry-through); "0" = kill all retained linear velocity. Y is left
-         * to the integrator's gravity so the car still settles onto the road. */
+         * Knob TD5RE_ROLL_RECOVER_DAMP = retained fraction in [0,1].
+         * "1" = retain all (byte-faithful carry-through); "0" = kill all
+         * retained linear velocity. Y is left to the integrator's gravity so
+         * the car still settles onto the road.
+         *
+         * [J4 COLL3D 2026-10-03] Default raised 0.15 -> 1.00 (faithful). This
+         * slash has NO original counterpart — it is a port-only tuning, and it
+         * is only ever reachable with 3D COLLISIONS ON (with the row OFF a
+         * human racer takes the gentle coast, which skips the slash, and
+         * AI/traffic never reach the MODE-0 latch at all because they take the
+         * MODE-1 hard clamp). So as long as it defaulted to 0.15 the row's
+         * stated contract — "ON = the original tumble for every car" — could
+         * not hold: the car shed 85% of its horizontal momentum the instant it
+         * flipped and then spun on the spot instead of being thrown along its
+         * travel direction. That is the "no jump" half of the report. Set
+         * TD5RE_ROLL_RECOVER_DAMP=0.15 to restore the old tamed behaviour. */
         {
             static int   s_rrd_init = 0;
-            static float s_rrd_keep = 0.15f;
+            static float s_rrd_keep = 1.0f;
             if (!s_rrd_init) {
-                s_rrd_keep = td5_env_float("TD5RE_ROLL_RECOVER_DAMP", 0.15f, 0.0f, 1.0f);
+                s_rrd_keep = td5_env_float("TD5RE_ROLL_RECOVER_DAMP", 1.0f, 0.0f, 1.0f);
                 s_rrd_init = 1;
                 TD5_LOG_I(LOG_TAG, "roll_recover_damp: TD5RE_ROLL_RECOVER_DAMP=%.3f (retained linvel fraction)",
                           s_rrd_keep);
