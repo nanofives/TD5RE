@@ -221,6 +221,91 @@ static int td5_copchase_arrest_freeze_enabled(void) {
     }
     return cached;
 }
+/* ========================================================================
+ * [COLL3D 2026-10-04] 3D-collision / scripted-recovery faithfulness knobs
+ *
+ * Three independent divergences from the original's vehicle_mode==1 path were
+ * found by auditing re/ghidra_export/ against the port. Each fix is behind its
+ * own DEFAULT-ON knob so a single one can be backed out for an A/B without
+ * rebuilding. Set the var to 0 to restore the pre-fix behaviour.
+ *
+ *   TD5RE_COLL3D_NO_DOUBLE_POSE  F1 — a mode-1 RACER no longer also runs the
+ *                                normal pose integrator in the same tick
+ *                                (orig 0x00406650 RETURNs after the mode-1 arm)
+ *   TD5RE_COLL3D_SCRIPTED_CB     F3 — contact resolvers during mode 1 use the
+ *                                original's mode-1 callback LAB_00409CB0
+ *                                instead of UpdateVehiclePoseFromPhysicsState
+ *   TD5RE_COLL3D_BODY_PROBES     F2 — (td5_track.c) mode 1 walks the original's
+ *                                8-entry probe table @0x46738C {0..7} instead
+ *                                of the 4-entry mode-0 table @0x467384
+ * ======================================================================== */
+static int coll3d_no_double_pose_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) cached = td5_env_flag_on("TD5RE_COLL3D_NO_DOUBLE_POSE");
+    return cached;
+}
+static int coll3d_scripted_cb_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) cached = td5_env_flag_on("TD5RE_COLL3D_SCRIPTED_CB");
+    return cached;
+}
+
+#ifndef TD5RE_RELEASE
+/* [COLL3D MEASURE 2026-10-04 — DEV ONLY, compiled out of RELEASE]
+ *
+ * The real attitude latch (ClampVehicleAttitudeLimits @0x00405B40) is not
+ * provokable headlessly — selftest, an AI race and scripted input all produce
+ * zero latches — so the whole vehicle_mode==1 chain was previously untestable
+ * without a human rolling a car by hand. This knob latches a chosen slot into
+ * scripted recovery at a chosen sim tick, from a KNOWN state, so the integrator
+ * can be driven deterministically and its trajectory captured in a RaceTrace.
+ *
+ *   TD5RE_COLL3D_FORCE_FLIP=<sim_tick>   tick to latch at (0 = off, default off)
+ *   TD5RE_COLL3D_FORCE_FLIP_SLOT=<n>     actor slot (default 0 = player)
+ *   TD5RE_COLL3D_FORCE_FLIP_SPIN=<deg12> per-tick spin angle in 12-bit units
+ *                                        applied to roll/yaw/pitch (default 128)
+ *
+ * The latch mirrors exactly what the original writes [CONFIRMED @ 0x00405B40 /
+ * 0x004079C0]: recovery_target (collision_spin_matrix) = the per-tick delta
+ * rotation, saved_orientation = the current rotation, vehicle_mode = 1,
+ * frame_counter = 0. */
+static void coll3d_dev_force_flip(TD5_Actor *actor)
+{
+    static int s_tick = -1, s_slot = 0, s_spin = 0;
+    static int s_fired = 0;
+    if (s_tick < 0) {
+        s_tick = td5_env_int("TD5RE_COLL3D_FORCE_FLIP", 0, 0, 100000);
+        s_slot = td5_env_int("TD5RE_COLL3D_FORCE_FLIP_SLOT", 0, 0, 15);
+        s_spin = td5_env_int("TD5RE_COLL3D_FORCE_FLIP_SPIN", 128, -2048, 2047);
+        if (s_tick > 0)
+            TD5_LOG_I(LOG_TAG, "coll3d_force_flip armed: tick=%d slot=%d spin=%d",
+                      s_tick, s_slot, s_spin);
+    }
+    if (s_tick <= 0 || s_fired) return;
+    if ((int)actor->slot_index != s_slot) return;
+    if ((int)g_td5.simulation_tick_counter < s_tick) return;
+
+    s_fired = 1;
+
+    int16_t ang[3] = { (int16_t)s_spin, (int16_t)s_spin, (int16_t)s_spin };
+    float spin[9];
+    BuildRotationMatrixFromAngles(spin, ang);
+    memcpy(&actor->collision_spin_matrix, spin, 9 * sizeof(float));
+    memcpy(&actor->saved_orientation, &actor->rotation_matrix, 9 * sizeof(float));
+    actor->vehicle_mode  = 1;
+    actor->frame_counter = 0;
+
+    TD5_LOG_I(LOG_TAG,
+        "coll3d_force_flip FIRED: slot=%d tick=%d spin=%d world=(%d,%d,%d) "
+        "vel=(%d,%d,%d) disp{r=%d y=%d p=%d}",
+        (int)actor->slot_index, (int)g_td5.simulation_tick_counter, s_spin,
+        actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
+        actor->linear_velocity_x, actor->linear_velocity_y, actor->linear_velocity_z,
+        (int)actor->display_angles.roll, (int)actor->display_angles.yaw,
+        (int)actor->display_angles.pitch);
+}
+#endif /* !TD5RE_RELEASE */
+
 int32_t g_difficulty_hard = 0;
 int32_t g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 
@@ -1219,6 +1304,18 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
          * avoid a redundant write that would also be visible in the trace. */
     }
 
+    /* [COLL3D F1 2026-10-04] Set once the byte-faithful scripted-recovery
+     * integrator has run this tick, so step 7 can skip the NORMAL pose
+     * integrator — see the long note at the step-7 gate below. */
+    int scripted_motion_owned = 0;
+
+#ifndef TD5RE_RELEASE
+    /* [COLL3D MEASURE] DEV-only forced latch — no-op unless
+     * TD5RE_COLL3D_FORCE_FLIP is set. Runs BEFORE the clamp so the forced
+     * mode-1 state is seen by this same tick's dispatch. */
+    coll3d_dev_force_flip(actor);
+#endif
+
     /* 5. Attitude clamp (unless scripted mode) — listing 0x0040677B-678E:
      *     if ([+0x379] == 0) ClampVehicleAttitudeLimits(actor) */
     if (actor->vehicle_mode == 0)
@@ -1413,6 +1510,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
         update_engine_speed_smoothed(actor);
         td5_physics_integrate_scripted_motion(actor);
+        scripted_motion_owned = 1;   /* [COLL3D F1] see the step-7 gate */
         }  /* end byte-faithful recovery (else branch of gentle coast) */
     } else if (g_game_paused) {
         /* Paused branch — listing 0x00406881-690B, line-by-line.
@@ -1512,7 +1610,42 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
         process_traffic_route_advance(actor, _ts);
         process_traffic_forward_checkpoint_pass(actor, _ts);  /* [CONFIRMED @ 0x443ED0] */
         process_traffic_segment_edge(actor, _ts);
-    } else if (actor->slot_index < g_traffic_slot_base) {
+    } else if (actor->slot_index < g_traffic_slot_base &&
+               !(scripted_motion_owned && coll3d_no_double_pose_enabled())) {
+        /* [COLL3D F1 2026-10-04 — scripted recovery double-integration]
+         *
+         * A RACER in scripted recovery (vehicle_mode==1) used to fall through
+         * into this branch and run td5_physics_integrate_pose() on top of
+         * td5_physics_integrate_scripted_motion() in the SAME tick. The normal
+         * pose integrator applies gravity and the per-wheel ground snap and
+         * re-derives roll/pitch from wheel contacts, so it overwrote the
+         * scripted tumble's pose every tick — the car's flip animation and
+         * motion could not look like the original's.
+         *
+         * The original NEVER does this. UpdateVehicleActor @ 0x00406650 is an
+         * if/else on the mode byte (+0x379) and the mode-1 arm ends in an
+         * explicit RETURN [CONFIRMED @ 0x00406650]:
+         *     if (cVar3 == '\0') { ...normal dynamics...
+         *                          IntegrateVehiclePoseAndContacts(actor);
+         *                          UpdateActorTrackSegmentContacts*(slot,
+         *                              UpdateVehiclePoseFromPhysicsState, 0x467384); }
+         *     else if (cVar3 == '\x01') {
+         *                          RefreshScriptedVehicleTransforms(actor);
+         *                          UpdateVehicleEngineSpeedSmoothed(actor);
+         *                          IntegrateScriptedVehicleMotion(actor);
+         *                          UpdateActorTrackSegmentContacts*(slot,
+         *                              LAB_00409CB0, 0x46738c);
+         *                          return; }
+         * IntegrateVehiclePoseAndContacts is reachable ONLY from the mode-0 arm.
+         * UpdateTrafficActorMotion @ 0x00443ED0 has the identical shape, which
+         * is why the traffic branch above already carries a `vehicle_mode != 1`
+         * guard (added 2026-05-28) — the racer side simply never got the
+         * matching guard.
+         *
+         * `scripted_motion_owned` is set ONLY on the byte-faithful arm, so the
+         * PORT-ONLY gentle flip-recovery coast (which wants this integrator for
+         * its height hold) is deliberately untouched.
+         * Knob TD5RE_COLL3D_NO_DOUBLE_POSE=0 restores the old double-integrate. */
         /* Racer path: full gravity + per-wheel ground snap. [BIG-FIELD FIX
          * 2026-06-25] g_traffic_slot_base (not literal 6) so slots 6..15 in a
          * >6-racer field get the faithful settle-to-flat pose integrator —
@@ -5123,9 +5256,34 @@ void td5_physics_set_collisions(int enabled)
     g_collisions_enabled = enabled ? 0 : 1;  /* 0=on, 1=off (inverted) */
 }
 
+/* [COLL3D F3] Port of LAB_00409CB0 — defined after the scripted integrator so
+ * it can reach td5_physics_render_vehicle_actor_model(); declared here because
+ * td5_physics_rebuild_pose (below) dispatches to it. */
+static void td5_physics_scripted_contact_refresh(TD5_Actor *actor);
+
 void td5_physics_rebuild_pose(TD5_Actor *actor)
 {
     if (!actor) return;
+
+    /* [COLL3D F3 2026-10-04 — mode-1 contact callback]
+     *
+     * This function is the port's stand-in for the per-contact callback that
+     * UpdateActorTrackSegmentContacts{,Forward,Reverse} invokes when a probe
+     * penetrates a track boundary. The original passes a DIFFERENT callback
+     * depending on the vehicle mode [CONFIRMED @ 0x00406650 / 0x00443ED0]:
+     *     mode 0 : UpdateVehiclePoseFromPhysicsState @ 0x004063A0
+     *     mode 1 : LAB_00409CB0
+     * The port passed the mode-0 callback in BOTH modes. UpdateVehiclePose-
+     * FromPhysicsState re-derives the chassis attitude from the four wheel
+     * contacts, so every wall/edge touch during a tumble snapped the car back
+     * toward "sitting flat on the road" — directly at odds with the scripted
+     * spin the mode-1 integrator is driving.
+     *
+     * Knob TD5RE_COLL3D_SCRIPTED_CB=0 restores the mode-0 callback everywhere. */
+    if (actor->vehicle_mode == 1 && coll3d_scripted_cb_enabled()) {
+        td5_physics_scripted_contact_refresh(actor);
+        return;
+    }
     update_vehicle_pose_from_physics(actor);
 }
 
@@ -5974,6 +6132,53 @@ void td5_physics_integrate_scripted_motion(TD5_Actor *actor)
      * Either path calls ResetVehicleActorState. */
     if (actor->frame_counter > 0x3B)
         td5_physics_reset_actor_state(actor);
+}
+
+/* [COLL3D F3 2026-10-04] LAB_00409CB0 — the mode-1 per-contact callback.
+ *
+ * Recovered by disassembling the original at 0x00409CB0 (the export has no
+ * functions/ entry for it; the stub sits in the 0x7C-byte gap between
+ * RefreshScriptedVehicleTransforms, which ends at 0x00409CA4, and
+ * IntegrateScriptedVehicleMotion at 0x00409D20). Full body, ESI = actor:
+ *
+ *   409cb7  lea  edi,[esi+0x1fc]              ; &world_pos
+ *   409cbd  lea  ebx,[esi+0x80]               ; &track position block
+ *   409cc5  call 0x4440f0                     ; UpdateActorTrackPosition(blk, pos)
+ *   409cda  call 0x4457e0                     ; ComputeActorTrackContactNormalExtended
+ *                                             ;   (blk, pos, esi+0x290, esi+0x2d8)
+ *   409cdf..409d0c                            ; render_pos{x,y,z} (+0x144/148/14c)
+ *                                             ;   = (float)world_pos{x,y,z} * 1/256
+ *   409d12  call 0x4092d0                     ; RenderVehicleActorModel(actor)
+ *   409d1d  ret
+ *
+ * So instead of re-solving the chassis attitude from wheel contacts (what the
+ * mode-0 callback does), the original simply re-syncs the actor's track
+ * position and render transform after the contact push and re-runs the model
+ * probe pass — leaving the scripted spin basis alone. That is what lets the
+ * tumble keep its orientation while still being contained by the rails.
+ *
+ * NOT PORTED here: the ComputeActorTrackContactNormalExtended call at 0x409CDA
+ * (orig 0x004457E0, the "Extended" variant writing +0x290/+0x2D8). The port has
+ * only the plain ComputeActorTrackContactNormal @ 0x00445450; the Extended
+ * variant has no port equivalent and td5_physics_integrate_scripted_motion
+ * already omits the very same call, so omitting it here keeps the two mode-1
+ * sites consistent. Tracked as an open divergence rather than half-ported. */
+static void td5_physics_scripted_contact_refresh(TD5_Actor *actor)
+{
+    if (!actor) return;
+
+    /* 0x409CC5 — UpdateActorTrackPosition(&actor->track block, &world_pos) */
+    td5_track_update_actor_position(actor);
+
+    /* 0x409CDF-0x409D0C — render transform from the pushed-back world position */
+    actor->render_pos.x = (float)actor->world_pos.x * (1.0f / 256.0f);
+    actor->render_pos.y = (float)actor->world_pos.y * (1.0f / 256.0f);
+    actor->render_pos.z = (float)actor->world_pos.z * (1.0f / 256.0f);
+
+    /* 0x409D12 — RenderVehicleActorModel(actor). The original DISCARDS the
+     * return value here (unlike IntegrateScriptedVehicleMotion, which feeds it
+     * to ComputeActorWorldBoundingVolume), so no bounding-volume pass. */
+    (void)td5_physics_render_vehicle_actor_model(actor);
 }
 
 /* ========================================================================
