@@ -2298,6 +2298,27 @@ static void trf_per_viewport_setup(void)
  * tracks without a TRAFFIC.BUS, e.g. TD6 conversions). */
 #define TRF_DYN_MAX_LANES 15
 static int8_t   s_trf_dyn_lane_dir[TRF_DYN_MAX_LANES + 1][TRF_DYN_MAX_LANES];
+
+/* [AUTHORED LANES 2026-10-04] PORT-ONLY. The ORIGINAL never picks a traffic
+ * lane: every ambient car's sub-lane is an authored byte in the TRAFFIC.BUS
+ * queue entry (+0x03), written straight into the actor and only clamped to
+ * lane_count-1 [CONFIRMED @ 0x004353B0, 0x00435940, 0x00445F10]. There is no
+ * shoulder/"banquina" concept in the binary at all -- the original stays off the
+ * shoulder purely because the designers' authored lane bytes never name it.
+ *
+ * The port's dynamic spawner instead rolls rand() % lane_count over EVERY lane,
+ * so it uses lanes the designers never used on that road. On Moscow's 4-lane
+ * stretches the shipped table authors forward traffic into sub-lane 1 and
+ * oncoming into sub-lane 3 and never uses sub-lane 0, yet the port was measured
+ * putting 36% of its traffic samples on an outermost lane.
+ *
+ * Learn which sub-lanes the shipped table actually uses, per (lane_count,
+ * polarity), and prefer them. This is a PREFERENCE, not a ban: if no authored
+ * lane is clear the full range is still tried, so a track with no TRAFFIC.BUS
+ * (TD6 conversions) or an unseen lane_count behaves exactly as before.
+ * Bit L set = sub-lane L is authored. TD5RE_TRAFFIC_AUTHORED_LANES=0 restores
+ * the uniform roll. */
+static uint16_t s_trf_authored_lanes[TRF_DYN_MAX_LANES + 1][2];
 static int      s_trf_dyn_oncoming_left;                  /* 1 = oncoming on left half */
 
 /* Direction a freshly spawned car should drive in `lane` of a
@@ -3834,6 +3855,37 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
  * validate clearance in that requested direction (the clearance test is
  * direction-dependent — see traffic_lane_is_clear), then fall back to the
  * natural-direction pass so a hinted spawn is never starved. */
+/* [AUTHORED LANES 2026-10-04] see s_trf_authored_lanes. Default ON;
+ * TD5RE_TRAFFIC_AUTHORED_LANES=0 restores the uniform lane roll. */
+static int trf_authored_lanes_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_AUTHORED_LANES");
+        TD5_LOG_I(LOG_TAG, "traffic_authored_lanes knob: TD5RE_TRAFFIC_AUTHORED_LANES=%d", s);
+    }
+    return s;
+}
+
+/* 1 = the shipped TRAFFIC.BUS uses sub-lane `lane` for this (lane_count,
+ * polarity). 1 (permissive) when the combination was never seen, so a track
+ * without a queue behaves exactly as before. */
+static int trf_lane_is_authored(int lane_count, int pol, int lane)
+{
+    uint16_t mask;
+    if (lane_count < 1 || lane_count > TRF_DYN_MAX_LANES) return 1;
+    if (lane < 0 || lane >= TRF_DYN_MAX_LANES) return 1;
+    mask = s_trf_authored_lanes[lane_count][pol & 1];
+    if (!mask) return 1;                      /* nothing authored -> no opinion */
+    return (mask & (uint16_t)(1u << lane)) ? 1 : 0;
+}
+
+int td5_ai_traffic_lane_is_authored(int lane_count, int pol, int lane)
+{
+    if (!trf_authored_lanes_enabled()) return 1;
+    return trf_lane_is_authored(lane_count, pol, lane);
+}
+
 static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
                                  int desired_pol, int *out_polarity)
 {
@@ -3849,22 +3901,31 @@ static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
             break;
         }
     }
-    /* Pass 0 honours `desired_pol` (skipped when no hint); pass 1 is the
-     * original natural-direction fallback. */
-    for (pass = (desired_pol >= 0) ? 0 : 1; pass <= 1; pass++) {
-        for (int k = 0; k < lane_count; k++) {
-            int lane = (start + k) % lane_count;
-            int nat  = trf_dyn_lane_direction(lane_count, lane);
-            int pol  = (pass == 0) ? (desired_pol & 1) : nat;
-            if (lane < band_lo || lane > band_hi)
-                continue;   /* [task#18] outside the drivable band = sidewalk */
-            if (any_fast &&
-                td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
-                continue;   /* user rule: never spawn on a slow (shoulder) lane */
-            if (!traffic_lane_is_clear(slot, span, lane, pol))
-                continue;
-            *out_polarity = pol;
-            return lane;
+    /* [AUTHORED LANES 2026-10-04] round 0 considers ONLY the sub-lanes the
+     * shipped TRAFFIC.BUS actually uses for this (lane_count, direction); round 1
+     * is the old unrestricted search, so a spawn is never starved and tracks with
+     * no queue are unaffected. */
+    for (int authored_only = trf_authored_lanes_enabled() ? 1 : 0;
+         authored_only >= 0; authored_only--) {
+        /* Pass 0 honours `desired_pol` (skipped when no hint); pass 1 is the
+         * original natural-direction fallback. */
+        for (pass = (desired_pol >= 0) ? 0 : 1; pass <= 1; pass++) {
+            for (int k = 0; k < lane_count; k++) {
+                int lane = (start + k) % lane_count;
+                int nat  = trf_dyn_lane_direction(lane_count, lane);
+                int pol  = (pass == 0) ? (desired_pol & 1) : nat;
+                if (lane < band_lo || lane > band_hi)
+                    continue;   /* [task#18] outside the drivable band = sidewalk */
+                if (authored_only && !trf_lane_is_authored(lane_count, pol, lane))
+                    continue;   /* designers never put traffic in this lane */
+                if (any_fast &&
+                    td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
+                    continue;   /* user rule: never spawn on a slow (shoulder) lane */
+                if (!traffic_lane_is_clear(slot, span, lane, pol))
+                    continue;
+                *out_polarity = pol;
+                return lane;
+            }
         }
     }
     return -1;
@@ -4438,6 +4499,7 @@ void td5_ai_traffic_dynamic_race_init(void)
      * unseen (lane_count, lane) combos and for tracks without a queue
      * (TD6 conversions default to oncoming-on-the-left-half). */
     memset(s_trf_dyn_lane_dir, -1, sizeof(s_trf_dyn_lane_dir));
+    memset(s_trf_authored_lanes, 0, sizeof(s_trf_authored_lanes));
     s_trf_dyn_oncoming_left = 1;
     s_trf_dyn_oncoming_pct  = 0;
     if (g_traffic_queue_base) {
@@ -4461,6 +4523,10 @@ void td5_ai_traffic_dynamic_race_init(void)
             if (lc < 1 || lc > TRF_DYN_MAX_LANES || lane >= lc)
                 continue;   /* junction-table entry or unusable span */
             votes[lc][lane][pol]++;
+            /* [AUTHORED LANES 2026-10-04] remember that the shipped table really
+             * uses this sub-lane for this (lane_count, direction). Same skip rule
+             * as the direction vote above, so both read the queue identically. */
+            s_trf_authored_lanes[lc][pol] |= (uint16_t)(1u << lane);
             side_sum[pol] += ((lane * 2 + 1) * 128) / lc;   /* 0..256 centre pos */
             side_n[pol]++;
         }
