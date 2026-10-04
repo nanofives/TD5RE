@@ -83,6 +83,8 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+import car_mesh_uv
+
 CARS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "cars")
 HINTS_PATH = os.path.join(os.path.dirname(__file__), "car_paint_hints.json")
 
@@ -157,6 +159,38 @@ WHITE_DOM      = 0.35
 # ---- clean-up ---------------------------------------------------------------
 CLOSE_ITERS    = 2       # binary closing: bridge 1-2 texel gaps inside a panel
 MIN_COMP_FRAC  = 0.004   # drop accepted components smaller than this share
+
+# ---- stage 5 (PART VETO, geometry-anchored) ---------------------------------
+# See part_veto(). A part is seeded from an AUTHORED hardpoint and grown through
+# the paint-INVARIANT region, so neither a radius nor a colour rule decides its
+# extent -- the four factory paints do.
+#
+# SEED_FRAC: how far an authored hardpoint may sit from the invariant blob it
+# names, as a fraction of the mesh bbox diagonal. The hardpoint is a bare
+# authored coordinate and "on several cars it sits slightly off the actual lamp
+# face" (td5_render_effects.c, W5 BRAKE LIGHTS ON THE BODY), so it needs slack --
+# but not so much that it can reach across the car. 0.06 of the diagonal is
+# ~95 model units on a typical car, against a lamp half-width of ~60.
+SEED_FRAC      = 0.06
+# WEAK_REL: a texel moving less than this FRACTION of the car's own body response
+# across the four factory paints is only REFLECTING the paint, not wearing it.
+# Measured medians (see part_veto): the glass the mask currently claims sits at
+# 0.17 (gto), 0.23 (vet), 0.26 (jag), 0.35 (cob) of that car's body response, so
+# the cut has to clear 0.35 to catch cob and stay well under 1.0 to leave body
+# alone. Swept 0.25..0.70 over the 27 shipped bakes in --sweep mode.
+WEAK_REL       = 0.45
+# A single lamp/wheel/window part cannot plausibly be a large share of the
+# atlas. This is the runaway guard on the flood: an invariant component bigger
+# than this is the dark background or a whole unpainted flank, not one part.
+MAX_PART_FRAC  = 0.10
+# Window seeding: a glass blob is DARK, weakly saturated, paint-invariant, and
+# window-sized. Lamps get their seed from geometry; glass has no hardpoint, so
+# it keeps a (measured) image seed -- but unlike bake_car_material_mask.py it is
+# computed WITHOUT reference to carmask, which is the dependency inversion this
+# change is really about (see the module note in part_veto).
+GLASS_LUM_HI   = 0.35
+GLASS_SAT_HI   = 0.55
+GLASS_MIN_FRAC = 0.004   # of the atlas; ~131 texels on a 128x256 skin
 
 
 def load_rgba(path):
@@ -392,6 +426,139 @@ def neutral_level(S, primary, shade, amb, rms, var_unit, sigma):
     return np.maximum(w * fit + (1.0 - w) * cal, 0.0)
 
 
+def part_veto(S, A, varying, seed, tg, diag):
+    """Texels that are a PART -- a lamp, a wheel, a window -- and so can never be
+    primary paint, however the classifier and its clean-up happen to vote.
+
+    WHY A VETO AND NOT MORE EVIDENCE. The classifier's own stages are already
+    reasonable; what leaks is stage 4. binary_closing, binary_fill_holes and the
+    DARK_GROW dilation are purely topological -- they cannot tell a specular
+    pinhole they should close from a headlight lens they must not, so they walk
+    across part boundaries. That is the reported "wheels, part of the windows,
+    headlights still wrong" (Mariano, 2026-10-04). A veto applied AFTER clean-up
+    is the only placement that can undo a leak clean-up created.
+
+    WHY NOT REUSE carmatmask0.png. bake_car_material_mask.py already finds glass
+    and lights -- but it derives its body mask FROM carmask.png and then looks for
+    parts only in `non_body` (`derive_body_mask` / `classify`). So by construction
+    it can never contradict the paint mask: a window the paint mask wrongly claims
+    is invisible to it, and the error propagates instead of being caught. This
+    function inverts that dependency -- parts are found FIRST, from geometry and
+    from the four skins, and the paint mask is cut against them.
+
+    THE EVIDENCE, in order of strength:
+
+      1. WEAK PAINT RESPONSE, measured RELATIVE to this car's own paint. Only the
+         paint changes between carskin0..3, so how far a texel MOVES across the
+         four skins is the primary evidence. The existing `varying` test uses an
+         ABSOLUTE floor (VAR_THR = 0.10) and that is precisely what leaks: a
+         window or a lens REFLECTS the body, so it moves a little, clears 0.10,
+         and is treated as paint. Measured 2026-10-04 on the shipped skins, with
+         `rng` = mean across-variant colour range:
+
+             car   body rng   glass texels the mask CLAIMS    n
+             jag     0.578              0.150              3580
+             gto     0.765              0.131               431
+             vet     0.580              0.131               510
+             cob     0.410              0.142               361
+
+         The two populations are a factor of 3-6 apart on every car but never at
+         the same absolute level, so one global constant cannot split them and a
+         per-car ratio can. WEAK_REL cuts at a fraction of the car's own body
+         response (measured on the SEED, which is paint by construction).
+      2. AUTHORED HARDPOINTS. carparam.json carries four wheel centres and two
+         mirrored lamp pairs in the mesh's own model space. The mesh itself cannot
+         name a part (measured: one command for the whole body, vertex `lighting`
+         constant 0xFFFFFFFF, proj UVs all zero -- there is no material bit), but
+         `car_mesh_uv.rasterise` puts every texel in model space, so a hardpoint
+         can SEED the part it names. See car_mesh_uv for which pair is CONFIRMED
+         (rear/taillights, td5_render_effects.c:1322) and which is INFERRED.
+      3. SHAPE, for glass only, which has no hardpoint: dark, weakly saturated,
+         window-sized.
+
+    WHY (1) IS NEVER USED ALONE. A weak response is necessary but not sufficient:
+    the 2026-10-01 rework exists precisely so the shade/ambient FIT can see
+    THROUGH clipping and claim body texels whose raw range was flattened by the
+    0/255 rails. Vetoing on a weak response by itself would undo that and bring
+    back the hard cuts it removed. So a veto always needs (1) AND one of (2)/(3):
+    geometry or shape has to say WHICH part the texel belongs to.
+
+    A part is the weak-response CONNECTED COMPONENT its seed falls in, capped at
+    MAX_PART_FRAC. Growing the component rather than applying a radius means the
+    extent is decided by the four paints, not by a constant -- a big taillight bar
+    and a small round lamp both come out right.
+
+    Returns (veto HxW bool, stats dict).
+    """
+    rng = (S.max(0) - S.min(0)).mean(-1)
+    # This car's own paint response, from the SEED (paint by construction). The
+    # median, not the mean: the seed legitimately contains clipped texels whose
+    # range is railed flat, and they would drag a mean down.
+    body_rng = float(np.median(rng[seed])) if seed.any() else 0.0
+    if body_rng < 1e-3:
+        return np.zeros_like(A), dict(lamp=0, wheel=0, glass=0, uncovered=0,
+                                      ncc=0, body_rng=body_rng, weak_thr=0.0)
+    # Floored at VAR_THR so a LOW-CONTRAST car (one whose four paints barely
+    # differ) cannot set a threshold under the one the classifier already trusts.
+    weak_thr = max(WEAK_REL * body_rng, VAR_THR)
+    weak = A & (rng < weak_thr)
+    lbl, ncc = ndimage.label(weak)
+    veto = np.zeros_like(weak)
+    stats = dict(lamp=0, wheel=0, glass=0, uncovered=0, ncc=int(ncc),
+                 body_rng=body_rng, weak_thr=weak_thr)
+    if ncc == 0:
+        return veto, stats
+    total = float(max(A.sum(), 1))
+    sizes = np.bincount(lbl.ravel(), minlength=ncc + 1).astype(np.float64)
+    too_big = sizes > MAX_PART_FRAC * total
+
+    def claim(ids):
+        ids = [i for i in ids if i > 0 and not too_big[i]]
+        if not ids:
+            return np.zeros_like(weak)
+        return np.isin(lbl, ids)
+
+    # --- (2) hardpoint-seeded parts: lamps, then wheels ----------------------
+    if tg is not None:
+        seed_r = SEED_FRAC * diag
+        for name, dist in (("lamp", tg["lamp_d"]), ("wheel", tg["wheel_d"])):
+            near = weak & np.isfinite(dist) & (dist <= seed_r)
+            if not near.any():
+                continue
+            got = claim(np.unique(lbl[near]))
+            stats[name] = int((got & ~veto).sum())
+            veto |= got
+
+    # --- (3) glass: no hardpoint exists, so seed on shape --------------------
+    base = S[0]
+    lum = 0.299 * base[..., 0] + 0.587 * base[..., 1] + 0.114 * base[..., 2]
+    mx = base.max(-1)
+    mn = base.min(-1)
+    sat = (mx - mn) / np.maximum(mx, 1e-3)
+    dark = weak & (lum >= 0.004) & (lum < GLASS_LUM_HI) & (sat < GLASS_SAT_HI)
+    if dark.any():
+        ids = [i for i in np.unique(lbl[dark]) if i > 0
+               and sizes[i] >= GLASS_MIN_FRAC * total and not too_big[i]]
+        got = claim(ids)
+        stats["glass"] = int((got & ~veto).sum())
+        veto |= got
+
+    # --- NOT vetoed: texels no body face samples -----------------------------
+    # Tried and REJECTED (measured 2026-10-04). 109,920 painted texels over the
+    # 27 cars sit outside the body-face UV footprint -- 15.2% of the opaque area
+    # on gto alone -- so vetoing them looked like a large, cheap win. It is not:
+    # a texel no face samples is INVISIBLE on the car, so removing it changes
+    # nothing except the atlas GUTTER. Leaving those texels painted is what makes
+    # a chart's padding match the chart, so LINEAR sampling at a chart edge
+    # blends paint into paint. Veto them and the same filter blends the painted
+    # body into untinted factory art, putting a wrong-coloured rim on every chart
+    # boundary -- trading an invisible defect for a visible one.
+    # Coverage still earns its keep: `distance_to` leaves uncovered texels at
+    # +inf, so a part SEED can only ever land on geometry the body really shows.
+    stats["uncovered"] = int((A & ~tg["covered"]).sum()) if tg is not None else 0
+    return veto, stats
+
+
 def regularize_probability(prob, S, A):
     """Make the decision REGIONAL instead of per-texel.
 
@@ -456,10 +623,14 @@ def choose_threshold(prob, A, seed):
     return float(min(max(thr, 0.25), 0.70))
 
 
-def derive_primary_body(paths, hint=None):
+def derive_primary_body(paths, hint=None, geo=None):
     """Primary-paint mask + neutral greyscale shade from K pre-painted variants.
 
     `hint` is this car's entry from car_paint_hints.json (or None).
+    `geo`  is this car's mesh geometry from car_mesh_uv.load_car_geometry(), or
+           None. Only SKIN space has a mesh correspondence -- the carpic preview
+           renders are a different projection with no UV mapping back to the
+           mesh, so that call passes geo=None and keeps the image-only path.
 
     Returns dict(base, alpha, varying, primary, shade, ...) or None when the
     variants carry no paint difference (car is not repaintable)."""
@@ -564,6 +735,31 @@ def derive_primary_body(paths, hint=None):
     for _ in range(DARK_GROW):
         primary |= ndimage.binary_dilation(primary, np.ones((3, 3))) & dark
 
+    # ---- stage 5: PART VETO -------------------------------------------------
+    # LAST, and deliberately so: the three clean-up steps above are topological
+    # and are themselves the leak (closing/fill-holes/dark-grow walking off the
+    # body onto a lens, a tyre or a window). A veto placed before them would be
+    # undone by them. See part_veto().
+    # carpic space has no mesh correspondence (the previews are renders in a
+    # different projection), so it runs with tg=None: the two hardpoint-seeded
+    # legs are skipped and only the shape-seeded GLASS leg fires. That still
+    # matters -- a car repainted correctly in-race but showing a tinted
+    # windscreen in the car-select preview reads as the same bug.
+    tg = None
+    diag = 0.0
+    if geo is not None:
+        tg = car_mesh_uv.texel_geometry(geo, W, H)
+        lo, hi = geo["mesh"].bbox()
+        diag = float(np.linalg.norm(np.asarray(hi) - np.asarray(lo)))
+    veto, vstats = part_veto(S, A, varying, seed, tg, diag)
+    before = int(primary.sum())
+    primary &= ~veto
+    vstats["removed"] = before - int(primary.sum())
+    vstats["before"] = before
+    vstats["geo"] = geo is not None
+    if primary.sum() < 256:
+        return None
+
     # Drop accepted speckle: a stray component a few texels across is a fit
     # false positive (compression noise), never a panel. A component the SEED
     # already claimed is exempt — the direction clustering is independent
@@ -621,7 +817,7 @@ def derive_primary_body(paths, hint=None):
     return dict(base=S[0], alpha=np.stack(alpha, 0)[0], varying=varying,
                 primary=primary, weight=weight, shade=shade_out,
                 areas=areas.tolist(), kept=len(keep), seed=seed, pcon=pcon,
-                thr=thr, refs=refs, prob=prob)
+                thr=thr, refs=refs, prob=prob, veto=veto, vstats=vstats)
 
 
 def u8(a):
@@ -650,7 +846,11 @@ def bake_car(code, dry_run=False, want_preview=False):
     if len(skins) < 2:
         return None
     hint = HINTS.get(code)
-    r = derive_primary_body(skins, hint)
+    # Geometry gate: SKIN space only (see derive_primary_body). A car whose mesh
+    # is missing or is a TD6 indexed mesh returns None here and bakes exactly as
+    # it did before -- the gate is additive, never a new failure mode.
+    geo = car_mesh_uv.load_car_geometry(code, CARS_DIR)
+    r = derive_primary_body(skins, hint, geo=geo)
     if r is None:
         print(f"  {code}: skins carry no paint variation -> NOT paintable")
         clear_bake(d, dry_run)
@@ -678,6 +878,15 @@ def bake_car(code, dry_run=False, want_preview=False):
           f"  cal: thr={r['thr']:.2f} sigma={r['refs']['sigma']:.3f} "
           f"var_ref={r['refs']['var_ref']:.2f} white_ref={r['refs']['white_ref']:.2f}"
           f"   carpic body={rp['primary'].mean()*100:5.1f}% thr={rp['thr']:.2f}")
+    vs = r.get("vstats")
+    if vs:
+        print(f"       PART VETO: -{vs['removed']} texels of {vs['before']} "
+              f"({vs['removed']/max(vs['before'],1)*100:4.1f}%)  "
+              f"lamp={vs['lamp']} wheel={vs['wheel']} glass={vs['glass']} "
+              f"weak<{vs['weak_thr']:.3f} (body {vs['body_rng']:.3f}) "
+              f"[uncovered={vs['uncovered']} kept as gutter]")
+    else:
+        print(f"       PART VETO: no mesh geometry -> image-only bake (unchanged)")
 
     if not dry_run:
         # Neutral skin FIRST: the "already baked / hand-made TD6 mask" skip below
