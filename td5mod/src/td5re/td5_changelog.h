@@ -42,6 +42,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  through a rail roof-first." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 4 (car paint)" },
+    { CL_ITEM,    "Repainting an original TD5 car no longer tints its" },
+    { CL_ITEM,    "  windows, headlights, taillights or wheels. The" },
+    { CL_ITEM,    "  colour now stops at the real panel edges." },
     { CL_DATE,    "October 3 (track select)" },
     { CL_ITEM,    "The R key now picks a random track on SELECT" },
     { CL_ITEM,    "  TRACK, as the on-screen hint promised. It did" },
