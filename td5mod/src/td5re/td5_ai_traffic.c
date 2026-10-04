@@ -2298,6 +2298,43 @@ static void trf_per_viewport_setup(void)
  * tracks without a TRAFFIC.BUS, e.g. TD6 conversions). */
 #define TRF_DYN_MAX_LANES 15
 static int8_t   s_trf_dyn_lane_dir[TRF_DYN_MAX_LANES + 1][TRF_DYN_MAX_LANES];
+
+/* [AUTHORED LANES 2026-10-04] PORT-ONLY. The ORIGINAL never picks a traffic
+ * lane: every ambient car's sub-lane is an authored byte in the TRAFFIC.BUS
+ * queue entry (+0x03), written straight into the actor and only clamped to
+ * lane_count-1 [CONFIRMED @ 0x004353B0, 0x00435940, 0x00445F10]. There is no
+ * shoulder/"banquina" concept in the binary at all -- the original stays off the
+ * shoulder purely because the designers' authored lane bytes never name it.
+ *
+ * The port's dynamic spawner instead rolls rand() % lane_count over EVERY lane,
+ * so it uses lanes the designers never used on that road. On Moscow's 4-lane
+ * stretches the shipped table authors forward traffic into sub-lane 1 and
+ * oncoming into sub-lane 3 and never uses sub-lane 0, yet the port was measured
+ * putting 36% of its traffic samples on an outermost lane.
+ *
+ * Learn which sub-lanes the shipped table actually uses, per (lane_count,
+ * polarity), and prefer them. This is a PREFERENCE, not a ban: if no authored
+ * lane is clear the full range is still tried, so a track with no TRAFFIC.BUS
+ * (TD6 conversions) or an unseen lane_count behaves exactly as before.
+ * Bit L set = sub-lane L is authored. TD5RE_TRAFFIC_AUTHORED_LANES=0 restores
+ * the uniform roll. */
+static uint16_t s_trf_authored_lanes[TRF_DYN_MAX_LANES + 1][2];
+
+/* [AUTHORED LANES 2026-10-04] The per-(lane_count,polarity) mask above is too
+ * COARSE on its own: Moscow authors forward traffic into sub-lane 0 on three
+ * spans (295/338/371) and into sub-lane 1 everywhere else, so the global union
+ * for a 4-lane span is {0,1,2} -- which blesses the left shoulder across the
+ * whole track. Measured: using the global mask alone pushed cars out of sub-lane
+ * 3 (19.4% -> 3.0%) but made sub-lane 0 WORSE (17.9% -> 24.7%), because the
+ * evicted traffic redistributed into a lane the designers only use three times.
+ * Keep the raw records so the preference can be taken from the authored spans
+ * NEAR the car instead, falling back to the global mask where the track has no
+ * nearby record. */
+#define TRF_AUTHORED_MAX 512
+static int16_t  s_trf_auth_span[TRF_AUTHORED_MAX];
+static uint8_t  s_trf_auth_pol[TRF_AUTHORED_MAX];
+static uint8_t  s_trf_auth_lane[TRF_AUTHORED_MAX];
+static int      s_trf_auth_count;
 static int      s_trf_dyn_oncoming_left;                  /* 1 = oncoming on left half */
 
 /* Direction a freshly spawned car should drive in `lane` of a
@@ -3558,6 +3595,21 @@ static int16_t s_fork_choice_span[TD5_MAX_TOTAL_ACTORS];
 static uint8_t s_fork_choice_br[TD5_MAX_TOTAL_ACTORS];
 static int     s_fork_choice_init = 0;
 
+/* [MERGE LANE HOLD 2026-10-04] ticks left during which a just-merged traffic car
+ * keeps the lane the fork/corridor exit put it in (armed in
+ * td5_ai_update_traffic_route_plan). 0 = free to re-choose. */
+static uint16_t s_trf_merge_hold[TD5_MAX_TOTAL_ACTORS];
+
+static int trf_merge_hold_ticks(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_MERGE_HOLD", 45, 0, 600);
+        TD5_LOG_I(LOG_TAG, "traffic_merge_hold knob: TD5RE_TRAFFIC_MERGE_HOLD=%d", s);
+    }
+    return s;
+}
+
 static int trf_branch_pct(void)
 {
     static int s = -1;
@@ -3574,7 +3626,12 @@ static void trf_fork_choice_reset(int slot)
         for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) s_fork_choice_span[i] = -1;
         s_fork_choice_init = 1;
     }
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) s_fork_choice_span[slot] = -1;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        s_fork_choice_span[slot] = -1;
+        /* [MERGE LANE HOLD 2026-10-04] a recycled slot must not inherit the
+         * previous car's merge settle window. */
+        s_trf_merge_hold[slot] = 0;
+    }
 }
 
 static void trf_dyn_place(int slot, int span, int lane, int polarity)
@@ -3814,6 +3871,69 @@ static int td5_ai_td6_drivable_band(int route_span, int lane_count,
  * validate clearance in that requested direction (the clearance test is
  * direction-dependent — see traffic_lane_is_clear), then fall back to the
  * natural-direction pass so a hinted spawn is never starved. */
+/* [AUTHORED LANES 2026-10-04] see s_trf_authored_lanes. Default ON;
+ * TD5RE_TRAFFIC_AUTHORED_LANES=0 restores the uniform lane roll. */
+static int trf_authored_lanes_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_AUTHORED_LANES");
+        TD5_LOG_I(LOG_TAG, "traffic_authored_lanes knob: TD5RE_TRAFFIC_AUTHORED_LANES=%d", s);
+    }
+    return s;
+}
+
+/* How far along the track an authored record still speaks for a span. Moscow's
+ * records sit ~31 spans apart, so 160 spans normally catches several on the same
+ * stretch of road without reaching around a corner into a different one. */
+static int trf_authored_window(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_int("TD5RE_TRAFFIC_AUTHORED_WINDOW", 160, 0, 4000);
+    return s;
+}
+
+/* Union of the sub-lanes authored by records NEAR `span` that carry the same
+ * direction and sit on a span with the same lane count. 0 = no local evidence. */
+static uint16_t trf_authored_mask_near(int span, int lane_count, int pol)
+{
+    uint16_t m = 0;
+    int w = trf_authored_window();
+    if (w <= 0) return 0;
+    for (int i = 0; i < s_trf_auth_count; i++) {
+        int d;
+        if ((int)s_trf_auth_pol[i] != (pol & 1)) continue;
+        d = (int)s_trf_auth_span[i] - span;
+        if (d < 0) d = -d;
+        if (d > w) continue;
+        if (td5_track_span_lane_count_at((int)s_trf_auth_span[i]) != lane_count) continue;
+        if (s_trf_auth_lane[i] < TRF_DYN_MAX_LANES)
+            m |= (uint16_t)(1u << s_trf_auth_lane[i]);
+    }
+    return m;
+}
+
+/* 1 = the shipped TRAFFIC.BUS uses sub-lane `lane` on this part of the road for
+ * this direction. Local (nearby) evidence wins; the whole-track mask is the
+ * fallback; permissive (1) when there is no evidence at all, so a track without
+ * a queue behaves exactly as before. */
+static int trf_lane_is_authored(int span, int lane_count, int pol, int lane)
+{
+    uint16_t mask;
+    if (lane_count < 1 || lane_count > TRF_DYN_MAX_LANES) return 1;
+    if (lane < 0 || lane >= TRF_DYN_MAX_LANES) return 1;
+    mask = trf_authored_mask_near(span, lane_count, pol);
+    if (!mask) mask = s_trf_authored_lanes[lane_count][pol & 1];
+    if (!mask) return 1;                      /* nothing authored -> no opinion */
+    return (mask & (uint16_t)(1u << lane)) ? 1 : 0;
+}
+
+int td5_ai_traffic_lane_is_authored(int span, int lane_count, int pol, int lane)
+{
+    if (!trf_authored_lanes_enabled()) return 1;
+    return trf_lane_is_authored(span, lane_count, pol, lane);
+}
+
 static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
                                  int desired_pol, int *out_polarity)
 {
@@ -3829,22 +3949,31 @@ static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
             break;
         }
     }
-    /* Pass 0 honours `desired_pol` (skipped when no hint); pass 1 is the
-     * original natural-direction fallback. */
-    for (pass = (desired_pol >= 0) ? 0 : 1; pass <= 1; pass++) {
-        for (int k = 0; k < lane_count; k++) {
-            int lane = (start + k) % lane_count;
-            int nat  = trf_dyn_lane_direction(lane_count, lane);
-            int pol  = (pass == 0) ? (desired_pol & 1) : nat;
-            if (lane < band_lo || lane > band_hi)
-                continue;   /* [task#18] outside the drivable band = sidewalk */
-            if (any_fast &&
-                td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
-                continue;   /* user rule: never spawn on a slow (shoulder) lane */
-            if (!traffic_lane_is_clear(slot, span, lane, pol))
-                continue;
-            *out_polarity = pol;
-            return lane;
+    /* [AUTHORED LANES 2026-10-04] round 0 considers ONLY the sub-lanes the
+     * shipped TRAFFIC.BUS actually uses for this (lane_count, direction); round 1
+     * is the old unrestricted search, so a spawn is never starved and tracks with
+     * no queue are unaffected. */
+    for (int authored_only = trf_authored_lanes_enabled() ? 1 : 0;
+         authored_only >= 0; authored_only--) {
+        /* Pass 0 honours `desired_pol` (skipped when no hint); pass 1 is the
+         * original natural-direction fallback. */
+        for (pass = (desired_pol >= 0) ? 0 : 1; pass <= 1; pass++) {
+            for (int k = 0; k < lane_count; k++) {
+                int lane = (start + k) % lane_count;
+                int nat  = trf_dyn_lane_direction(lane_count, lane);
+                int pol  = (pass == 0) ? (desired_pol & 1) : nat;
+                if (lane < band_lo || lane > band_hi)
+                    continue;   /* [task#18] outside the drivable band = sidewalk */
+                if (authored_only && !trf_lane_is_authored(span, lane_count, pol, lane))
+                    continue;   /* designers never put traffic in this lane */
+                if (any_fast &&
+                    td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
+                    continue;   /* user rule: never spawn on a slow (shoulder) lane */
+                if (!traffic_lane_is_clear(slot, span, lane, pol))
+                    continue;
+                *out_polarity = pol;
+                return lane;
+            }
         }
     }
     return -1;
@@ -4418,6 +4547,8 @@ void td5_ai_traffic_dynamic_race_init(void)
      * unseen (lane_count, lane) combos and for tracks without a queue
      * (TD6 conversions default to oncoming-on-the-left-half). */
     memset(s_trf_dyn_lane_dir, -1, sizeof(s_trf_dyn_lane_dir));
+    memset(s_trf_authored_lanes, 0, sizeof(s_trf_authored_lanes));
+    s_trf_auth_count = 0;
     s_trf_dyn_oncoming_left = 1;
     s_trf_dyn_oncoming_pct  = 0;
     if (g_traffic_queue_base) {
@@ -4441,6 +4572,16 @@ void td5_ai_traffic_dynamic_race_init(void)
             if (lc < 1 || lc > TRF_DYN_MAX_LANES || lane >= lc)
                 continue;   /* junction-table entry or unusable span */
             votes[lc][lane][pol]++;
+            /* [AUTHORED LANES 2026-10-04] remember that the shipped table really
+             * uses this sub-lane for this (lane_count, direction). Same skip rule
+             * as the direction vote above, so both read the queue identically. */
+            s_trf_authored_lanes[lc][pol] |= (uint16_t)(1u << lane);
+            if (s_trf_auth_count < TRF_AUTHORED_MAX) {
+                s_trf_auth_span[s_trf_auth_count] = q_span;
+                s_trf_auth_pol[s_trf_auth_count]  = (uint8_t)pol;
+                s_trf_auth_lane[s_trf_auth_count] = (uint8_t)lane;
+                s_trf_auth_count++;
+            }
             side_sum[pol] += ((lane * 2 + 1) * 128) / lc;   /* 0..256 centre pos */
             side_n[pol]++;
         }
@@ -5188,8 +5329,48 @@ void td5_ai_traffic_dynamic_tick(void)
     }
 }
 
+/* [BRAKE REASON DIAG 2026-10-04] DEV-ONLY. Five separate sites in
+ * td5_ai_update_traffic_route_plan can raise ACTOR_BRAKE_FLAG, and the existing
+ * traffic_dev line only reports the resulting brk=1 — so a traffic car that
+ * decelerates to a stop (e.g. inside a fork corridor approaching its merge) gives
+ * no clue WHICH gate did it. Edge-log the reason whenever it changes for a slot,
+ * with the raw/normalized span so corridor spans (raw >= ring) are identifiable.
+ * Gated on TD5RE_TRAFFIC_DIAG; zero cost when off. */
+enum {
+    TRF_BRK_NONE = 0,
+    TRF_BRK_BAIL,        /* Stage 3 near-edge / recovery-latch bail            */
+    TRF_BRK_PARKED,      /* despawn / parked hold                             */
+    TRF_BRK_WALLRAY,     /* smart_sense wall_imminent                         */
+    TRF_BRK_PEER,        /* peer proximity gate                               */
+    TRF_BRK_TTC          /* faithful time-to-collision gate                   */
+};
+static uint8_t s_trf_brake_why[TD5_MAX_TOTAL_ACTORS];
+
+static void trf_brake_note(int slot, const char *actor, int why, const char *detail)
+{
+    static const char *k_why_name[] = { "none", "bail", "parked", "wallray", "peer", "ttc" };
+    if (!traffic_diag_enabled()) return;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (s_trf_brake_why[slot] == (uint8_t)why) return;
+    s_trf_brake_why[slot] = (uint8_t)why;
+    if (actor) {
+        int raw  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int ring = td5_track_get_ring_length();
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_brake_why: slot=%d why=%s raw=%d norm=%d corridor=%d sub=%d v=%d %s",
+                  slot, k_why_name[why], raw,
+                  (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED),
+                  (ring > 0 && raw >= ring) ? 1 : 0,
+                  (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),
+                  (int)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
+                  detail ? detail : "");
+    }
+}
 
 void td5_ai_update_traffic_route_plan(int slot) {
+    /* [BRAKE REASON DIAG 2026-10-04] first gate that raises the brake this tick
+     * wins, so the reported reason can't flap between two gates that both fire. */
+    int brake_why = TRF_BRK_NONE;
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
     int  ref_slot;
@@ -5223,6 +5404,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
         if (td5_ai_traffic_dynamic_parked(slot)) {
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            trf_brake_note(slot, actor, TRF_BRK_PARKED, "");
             return;
         }
     } else {
@@ -5538,6 +5720,8 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* LAB_004366c7: brake = 1, encounter_steer = 0, return */
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            trf_brake_note(slot, actor, TRF_BRK_BAIL,
+                           (g_traffic_recovery_stage[slot] != 0) ? "latch" : "near_edge");
             /* Observability (fix-1780404735): rate-limited so a latched actor
              * braking-until-recycle is visible without per-tick spam. Only logs
              * the recovery-latch cause (not the faithful near-edge/script bails). */
@@ -5619,6 +5803,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) > trf_wall_ray_min_speed()) {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+                if (brake_why == TRF_BRK_NONE) brake_why = TRF_BRK_WALLRAY;
                 if ((g_ai_frame_counter % 90u) == 0u)
                     TD5_LOG_I(LOG_TAG, "smart_ray_traffic_wall: slot=%d span=%d front=%.0f",
                               slot, tspan, tse.front_clear);
@@ -5753,6 +5938,23 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     fork_target = 1;
                 }
             }
+            /* [MERGE LANE HOLD 2026-10-04] The fork target deliberately places the
+             * car in the lane the walker will use on the rejoin span, but the hold
+             * above only lasted the single transition tick. On a right-hand corridor
+             * the rejoin mapping (sub + dst_lanes - cur_lanes) lands the car in the
+             * OUTERMOST lane of the main road (Moscow 3105 -> 954: corridor sub 0/1
+             * -> main sub 2/3 of 4), and td5_ai_smart_traffic_lane penalises lane 0
+             * and lane N-1 by +0.6 -- so the very next tick the chooser pulled the
+             * car straight out of the lane it had just been merged into. That is the
+             * "unnecessary lane change at the rejoin". Keep the merged lane for a
+             * short settle window instead. TD5RE_TRAFFIC_MERGE_HOLD=0 restores the
+             * old one-tick hold. */
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                if (fork_target)
+                    s_trf_merge_hold[slot] = (uint16_t)trf_merge_hold_ticks();
+                else if (s_trf_merge_hold[slot] > 0)
+                    s_trf_merge_hold[slot]--;
+            }
 
             /* Target sub_lane: start with current sub_lane (default path). */
             int target_sub_lane = fork_target ? fork_sub
@@ -5807,8 +6009,13 @@ void td5_ai_update_traffic_route_plan(int slot) {
              * and on a narrow (2-3 lane) branch that lateral jitter jerks the
              * 1-span-lookahead steering and the car fishtails into the rail. Hold
              * the car's current lane there; the wall-nudge below still keeps an
-             * edge lane off the rail, and branches are short so we lose nothing. */
-            if (!traffic_on_branch && !fork_target) {
+             * edge lane off the rail, and branches are short so we lose nothing.
+             *
+             * [MERGE LANE HOLD 2026-10-04] also hold the lane for a short settle
+             * window after a fork/corridor merge, so the chooser's edge-lane
+             * penalty cannot immediately undo the merge the walker just made. */
+            if (!traffic_on_branch && !fork_target &&
+                !(slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && s_trf_merge_hold[slot] > 0)) {
                 if (td5_ai_smart_active()) {
                     /* [SmartAI] unified lane brain for traffic: score lanes by
                      * surface/occupancy/wall/change-cost (±1 step). Replaces the
@@ -6122,6 +6329,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
             } else {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+                if (brake_why == TRF_BRK_NONE) brake_why = TRF_BRK_PEER;
                 TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d too_close=%d",
                           slot, span_diff_dir, too_close);
             }
@@ -6161,10 +6369,15 @@ void td5_ai_update_traffic_route_plan(int slot) {
             } else {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+                if (brake_why == TRF_BRK_NONE) brake_why = TRF_BRK_TTC;
                 TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d ttc=%d spd_shifted=%d", slot, iVar13, speed_shifted);
             }
         }
     }
 ttc_done:;
+    /* [BRAKE REASON DIAG 2026-10-04] flush: report the first gate that braked this
+     * tick (or none when the car is rolling), edge-logged inside trf_brake_note. */
+    trf_brake_note(slot, actor,
+                   ACTOR_U8(actor, ACTOR_BRAKE_FLAG) ? brake_why : TRF_BRK_NONE, "");
 }
 
