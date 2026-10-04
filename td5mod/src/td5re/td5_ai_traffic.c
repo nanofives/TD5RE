@@ -5188,8 +5188,48 @@ void td5_ai_traffic_dynamic_tick(void)
     }
 }
 
+/* [BRAKE REASON DIAG 2026-10-04] DEV-ONLY. Five separate sites in
+ * td5_ai_update_traffic_route_plan can raise ACTOR_BRAKE_FLAG, and the existing
+ * traffic_dev line only reports the resulting brk=1 — so a traffic car that
+ * decelerates to a stop (e.g. inside a fork corridor approaching its merge) gives
+ * no clue WHICH gate did it. Edge-log the reason whenever it changes for a slot,
+ * with the raw/normalized span so corridor spans (raw >= ring) are identifiable.
+ * Gated on TD5RE_TRAFFIC_DIAG; zero cost when off. */
+enum {
+    TRF_BRK_NONE = 0,
+    TRF_BRK_BAIL,        /* Stage 3 near-edge / recovery-latch bail            */
+    TRF_BRK_PARKED,      /* despawn / parked hold                             */
+    TRF_BRK_WALLRAY,     /* smart_sense wall_imminent                         */
+    TRF_BRK_PEER,        /* peer proximity gate                               */
+    TRF_BRK_TTC          /* faithful time-to-collision gate                   */
+};
+static uint8_t s_trf_brake_why[TD5_MAX_TOTAL_ACTORS];
+
+static void trf_brake_note(int slot, const char *actor, int why, const char *detail)
+{
+    static const char *k_why_name[] = { "none", "bail", "parked", "wallray", "peer", "ttc" };
+    if (!traffic_diag_enabled()) return;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (s_trf_brake_why[slot] == (uint8_t)why) return;
+    s_trf_brake_why[slot] = (uint8_t)why;
+    if (actor) {
+        int raw  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int ring = td5_track_get_ring_length();
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_brake_why: slot=%d why=%s raw=%d norm=%d corridor=%d sub=%d v=%d %s",
+                  slot, k_why_name[why], raw,
+                  (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED),
+                  (ring > 0 && raw >= ring) ? 1 : 0,
+                  (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),
+                  (int)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
+                  detail ? detail : "");
+    }
+}
 
 void td5_ai_update_traffic_route_plan(int slot) {
+    /* [BRAKE REASON DIAG 2026-10-04] first gate that raises the brake this tick
+     * wins, so the reported reason can't flap between two gates that both fire. */
+    int brake_why = TRF_BRK_NONE;
     int32_t *rs = route_state(slot);
     char *actor  = actor_ptr(slot);
     int  ref_slot;
@@ -5223,6 +5263,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
         if (td5_ai_traffic_dynamic_parked(slot)) {
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            trf_brake_note(slot, actor, TRF_BRK_PARKED, "");
             return;
         }
     } else {
@@ -5538,6 +5579,8 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* LAB_004366c7: brake = 1, encounter_steer = 0, return */
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+            trf_brake_note(slot, actor, TRF_BRK_BAIL,
+                           (g_traffic_recovery_stage[slot] != 0) ? "latch" : "near_edge");
             /* Observability (fix-1780404735): rate-limited so a latched actor
              * braking-until-recycle is visible without per-tick spam. Only logs
              * the recovery-latch cause (not the faithful near-edge/script bails). */
@@ -5619,6 +5662,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) > trf_wall_ray_min_speed()) {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+                if (brake_why == TRF_BRK_NONE) brake_why = TRF_BRK_WALLRAY;
                 if ((g_ai_frame_counter % 90u) == 0u)
                     TD5_LOG_I(LOG_TAG, "smart_ray_traffic_wall: slot=%d span=%d front=%.0f",
                               slot, tspan, tse.front_clear);
@@ -6122,6 +6166,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
             } else {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+                if (brake_why == TRF_BRK_NONE) brake_why = TRF_BRK_PEER;
                 TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d proximity gate span_diff=%d too_close=%d",
                           slot, span_diff_dir, too_close);
             }
@@ -6161,10 +6206,15 @@ void td5_ai_update_traffic_route_plan(int slot) {
             } else {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00; /* -256 */
+                if (brake_why == TRF_BRK_NONE) brake_why = TRF_BRK_TTC;
                 TD5_LOG_I(LOG_TAG, "ttc_brake: slot=%d ttc=%d spd_shifted=%d", slot, iVar13, speed_shifted);
             }
         }
     }
 ttc_done:;
+    /* [BRAKE REASON DIAG 2026-10-04] flush: report the first gate that braked this
+     * tick (or none when the car is rolling), edge-logged inside trf_brake_note. */
+    trf_brake_note(slot, actor,
+                   ACTOR_U8(actor, ACTOR_BRAKE_FLAG) ? brake_why : TRF_BRK_NONE, "");
 }
 
