@@ -147,7 +147,7 @@ int  td5_ai_traffic_pair_blocked(int slot_a, int slot_b);
  * is off, when the track has no queue, or when the combination was never seen.
  * Lets the lane chooser prefer the lanes the designers authored instead of
  * treating every lane on the road as equally valid. */
-int  td5_ai_traffic_lane_is_authored(int lane_count, int pol, int lane);
+int  td5_ai_traffic_lane_is_authored(int span, int lane_count, int pol, int lane);
 /* [TRAFFIC OFF-ROAD 2026-10-03] Reported once per sim tick per traffic slot by the
  * segment-edge containment (td5_physics_suspension.c). `depth` is how far outside
  * the span's rail the car sits, in world units, and is only non-zero when the

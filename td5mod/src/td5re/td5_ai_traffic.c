@@ -2319,6 +2319,22 @@ static int8_t   s_trf_dyn_lane_dir[TRF_DYN_MAX_LANES + 1][TRF_DYN_MAX_LANES];
  * Bit L set = sub-lane L is authored. TD5RE_TRAFFIC_AUTHORED_LANES=0 restores
  * the uniform roll. */
 static uint16_t s_trf_authored_lanes[TRF_DYN_MAX_LANES + 1][2];
+
+/* [AUTHORED LANES 2026-10-04] The per-(lane_count,polarity) mask above is too
+ * COARSE on its own: Moscow authors forward traffic into sub-lane 0 on three
+ * spans (295/338/371) and into sub-lane 1 everywhere else, so the global union
+ * for a 4-lane span is {0,1,2} -- which blesses the left shoulder across the
+ * whole track. Measured: using the global mask alone pushed cars out of sub-lane
+ * 3 (19.4% -> 3.0%) but made sub-lane 0 WORSE (17.9% -> 24.7%), because the
+ * evicted traffic redistributed into a lane the designers only use three times.
+ * Keep the raw records so the preference can be taken from the authored spans
+ * NEAR the car instead, falling back to the global mask where the track has no
+ * nearby record. */
+#define TRF_AUTHORED_MAX 512
+static int16_t  s_trf_auth_span[TRF_AUTHORED_MAX];
+static uint8_t  s_trf_auth_pol[TRF_AUTHORED_MAX];
+static uint8_t  s_trf_auth_lane[TRF_AUTHORED_MAX];
+static int      s_trf_auth_count;
 static int      s_trf_dyn_oncoming_left;                  /* 1 = oncoming on left half */
 
 /* Direction a freshly spawned car should drive in `lane` of a
@@ -3867,23 +3883,55 @@ static int trf_authored_lanes_enabled(void)
     return s;
 }
 
-/* 1 = the shipped TRAFFIC.BUS uses sub-lane `lane` for this (lane_count,
- * polarity). 1 (permissive) when the combination was never seen, so a track
- * without a queue behaves exactly as before. */
-static int trf_lane_is_authored(int lane_count, int pol, int lane)
+/* How far along the track an authored record still speaks for a span. Moscow's
+ * records sit ~31 spans apart, so 160 spans normally catches several on the same
+ * stretch of road without reaching around a corner into a different one. */
+static int trf_authored_window(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_int("TD5RE_TRAFFIC_AUTHORED_WINDOW", 160, 0, 4000);
+    return s;
+}
+
+/* Union of the sub-lanes authored by records NEAR `span` that carry the same
+ * direction and sit on a span with the same lane count. 0 = no local evidence. */
+static uint16_t trf_authored_mask_near(int span, int lane_count, int pol)
+{
+    uint16_t m = 0;
+    int w = trf_authored_window();
+    if (w <= 0) return 0;
+    for (int i = 0; i < s_trf_auth_count; i++) {
+        int d;
+        if ((int)s_trf_auth_pol[i] != (pol & 1)) continue;
+        d = (int)s_trf_auth_span[i] - span;
+        if (d < 0) d = -d;
+        if (d > w) continue;
+        if (td5_track_span_lane_count_at((int)s_trf_auth_span[i]) != lane_count) continue;
+        if (s_trf_auth_lane[i] < TRF_DYN_MAX_LANES)
+            m |= (uint16_t)(1u << s_trf_auth_lane[i]);
+    }
+    return m;
+}
+
+/* 1 = the shipped TRAFFIC.BUS uses sub-lane `lane` on this part of the road for
+ * this direction. Local (nearby) evidence wins; the whole-track mask is the
+ * fallback; permissive (1) when there is no evidence at all, so a track without
+ * a queue behaves exactly as before. */
+static int trf_lane_is_authored(int span, int lane_count, int pol, int lane)
 {
     uint16_t mask;
     if (lane_count < 1 || lane_count > TRF_DYN_MAX_LANES) return 1;
     if (lane < 0 || lane >= TRF_DYN_MAX_LANES) return 1;
-    mask = s_trf_authored_lanes[lane_count][pol & 1];
+    mask = trf_authored_mask_near(span, lane_count, pol);
+    if (!mask) mask = s_trf_authored_lanes[lane_count][pol & 1];
     if (!mask) return 1;                      /* nothing authored -> no opinion */
     return (mask & (uint16_t)(1u << lane)) ? 1 : 0;
 }
 
-int td5_ai_traffic_lane_is_authored(int lane_count, int pol, int lane)
+int td5_ai_traffic_lane_is_authored(int span, int lane_count, int pol, int lane)
 {
     if (!trf_authored_lanes_enabled()) return 1;
-    return trf_lane_is_authored(lane_count, pol, lane);
+    return trf_lane_is_authored(span, lane_count, pol, lane);
 }
 
 static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
@@ -3916,7 +3964,7 @@ static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
                 int pol  = (pass == 0) ? (desired_pol & 1) : nat;
                 if (lane < band_lo || lane > band_hi)
                     continue;   /* [task#18] outside the drivable band = sidewalk */
-                if (authored_only && !trf_lane_is_authored(lane_count, pol, lane))
+                if (authored_only && !trf_lane_is_authored(span, lane_count, pol, lane))
                     continue;   /* designers never put traffic in this lane */
                 if (any_fast &&
                     td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lane)))
@@ -4500,6 +4548,7 @@ void td5_ai_traffic_dynamic_race_init(void)
      * (TD6 conversions default to oncoming-on-the-left-half). */
     memset(s_trf_dyn_lane_dir, -1, sizeof(s_trf_dyn_lane_dir));
     memset(s_trf_authored_lanes, 0, sizeof(s_trf_authored_lanes));
+    s_trf_auth_count = 0;
     s_trf_dyn_oncoming_left = 1;
     s_trf_dyn_oncoming_pct  = 0;
     if (g_traffic_queue_base) {
@@ -4527,6 +4576,12 @@ void td5_ai_traffic_dynamic_race_init(void)
              * uses this sub-lane for this (lane_count, direction). Same skip rule
              * as the direction vote above, so both read the queue identically. */
             s_trf_authored_lanes[lc][pol] |= (uint16_t)(1u << lane);
+            if (s_trf_auth_count < TRF_AUTHORED_MAX) {
+                s_trf_auth_span[s_trf_auth_count] = q_span;
+                s_trf_auth_pol[s_trf_auth_count]  = (uint8_t)pol;
+                s_trf_auth_lane[s_trf_auth_count] = (uint8_t)lane;
+                s_trf_auth_count++;
+            }
             side_sum[pol] += ((lane * 2 + 1) * 128) / lc;   /* 0..256 centre pos */
             side_n[pol]++;
         }

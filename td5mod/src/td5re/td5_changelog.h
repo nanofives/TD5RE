@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 4 (traffic at forks)" },
+    { CL_ITEM,    "Traffic now keeps the lane it merges into when a" },
+    { CL_ITEM,    "  fork rejoins the main road, instead of swerving" },
+    { CL_ITEM,    "  straight back out of it a moment later." },
+    { CL_ITEM,    "Traffic now prefers the lanes the track's own data" },
+    { CL_ITEM,    "  puts cars in, so it keeps off the shoulder." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 3 (track select)" },
     { CL_ITEM,    "The R key now picks a random track on SELECT" },
     { CL_ITEM,    "  TRACK, as the on-screen hint promised. It did" },

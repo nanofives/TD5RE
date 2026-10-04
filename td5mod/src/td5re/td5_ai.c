@@ -5888,7 +5888,7 @@ static int traffic_lane_hyst_cooldown(void) { /* ticks between committed changes
          * never uses (on Moscow's 4-lane stretches that is sub-lane 0, the
          * shoulder). Weighted above the edge penalty but below the slow-surface
          * one, so it is a strong preference, not a ban. */
-        if (!td5_ai_traffic_lane_is_authored(lane_count, polarity, l)) score += 3.0;
+        if (!td5_ai_traffic_lane_is_authored(target_span, lane_count, polarity, l)) score += 3.0;
         score += (double)smart_iabs(l - base) * (1.4 - skill * 0.7);
         if (score < best_score) { best_score = score; best = l; }
     }
@@ -5917,7 +5917,7 @@ static int traffic_lane_hyst_cooldown(void) { /* ticks between committed changes
                 cl_score += 6.0;
             cl_score += (double)occ[cl] * 1.5;
             if (cl == 0 || cl == lane_count - 1) cl_score += 0.6;
-            if (!td5_ai_traffic_lane_is_authored(lane_count, polarity, cl)) cl_score += 3.0;
+            if (!td5_ai_traffic_lane_is_authored(target_span, lane_count, polarity, cl)) cl_score += 3.0;
             cl_score += (double)smart_iabs(cl - base) * (1.4 - skill * 0.7);
             if (s_commit_cd[slot] > 0 ||
                 (cl_score - best_score) < (double)traffic_lane_hyst_margin()) {
