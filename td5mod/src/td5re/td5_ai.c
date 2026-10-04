@@ -4822,6 +4822,38 @@ static int smart_gather_blockers(int self_slot, int self_span, int span_count,
 
 static inline int smart_ang_signed(int a) { a &= 0xFFF; if (a > 0x800) a -= 0x1000; return a; }
 
+/* [CORRIDOR RAY WALK 2026-10-04] PORT-ONLY. The ray sensor built its rail
+ * polyline with a plain (span_raw + d) % span_count. Branch corridors are
+ * APPENDED after the main ring and packed back to back, so the span one past a
+ * corridor's LAST span is the FIRST span of an unrelated corridor somewhere else
+ * on the track. With SMART_RAY_SPANS = 8 every car within 8 spans of a corridor
+ * end therefore stitched its rails onto foreign geometry and read a phantom wall
+ * right at the merge -- measured on Moscow corridor 3012..3105 (rejoin span 954),
+ * where traffic braked to a standstill a few spans short of the rejoin and brake
+ * onsets piled up at raw 3100..3105.
+ *
+ * Step through the walker's own link at a corridor end instead.
+ * td5_track_traffic_next_span returns -1 for an ordinary span+1 step (and for the
+ * main continuation of a fork), so on the main road this is bit-identical to the
+ * old modulo walk -- only type-10 corridor ends change.
+ * TD5RE_TRAFFIC_RAY_CORRIDOR=0 restores the old walk. */
+static int smart_ray_corridor_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_flag_on("TD5RE_TRAFFIC_RAY_CORRIDOR");
+    return s;
+}
+
+static int smart_ray_step(int span, int span_count)
+{
+    if (span_count <= 0) return span;
+    if (smart_ray_corridor_enabled()) {
+        int nx = td5_track_traffic_next_span(span, 0, 1, NULL);
+        if (nx >= 0 && nx < span_count) return nx;
+    }
+    return ((span + 1) % span_count + span_count) % span_count;
+}
+
 
 /* ===== SECTION: Smart Opponent AI (smart_*) sensing, branch/lane/speed ===== */
 
@@ -4969,11 +5001,15 @@ static double smart_ray_circle(double ox, double oz, double dx, double dz, doubl
     double Lx[SMART_RAY_SPANS + 2], Lz[SMART_RAY_SPANS + 2];
     double Rx[SMART_RAY_SPANS + 2], Rz[SMART_RAY_SPANS + 2];
     int npts = 0;
+    /* [CORRIDOR RAY WALK 2026-10-04] step span-by-span (see smart_ray_step) so a
+     * corridor end follows its rejoin link instead of running into the next
+     * corridor's unrelated geometry. */
+    int s = ((span_raw % span_count) + span_count) % span_count;
     for (int d = 0; d <= SMART_RAY_SPANS; d++) {
-        int s = ((span_raw + d) % span_count + span_count) % span_count;
         int lx, lz, rx, rz;
         if (!td5_track_get_span_route_frame(s, &lx, &lz, &rx, &rz)) break;
         Lx[npts] = lx; Lz[npts] = lz; Rx[npts] = rx; Rz[npts] = rz; npts++;
+        s = smart_ray_step(s, span_count);
     }
     if (npts < 2) return;
 

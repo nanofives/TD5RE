@@ -3558,6 +3558,21 @@ static int16_t s_fork_choice_span[TD5_MAX_TOTAL_ACTORS];
 static uint8_t s_fork_choice_br[TD5_MAX_TOTAL_ACTORS];
 static int     s_fork_choice_init = 0;
 
+/* [MERGE LANE HOLD 2026-10-04] ticks left during which a just-merged traffic car
+ * keeps the lane the fork/corridor exit put it in (armed in
+ * td5_ai_update_traffic_route_plan). 0 = free to re-choose. */
+static uint16_t s_trf_merge_hold[TD5_MAX_TOTAL_ACTORS];
+
+static int trf_merge_hold_ticks(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_MERGE_HOLD", 45, 0, 600);
+        TD5_LOG_I(LOG_TAG, "traffic_merge_hold knob: TD5RE_TRAFFIC_MERGE_HOLD=%d", s);
+    }
+    return s;
+}
+
 static int trf_branch_pct(void)
 {
     static int s = -1;
@@ -3574,7 +3589,12 @@ static void trf_fork_choice_reset(int slot)
         for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) s_fork_choice_span[i] = -1;
         s_fork_choice_init = 1;
     }
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) s_fork_choice_span[slot] = -1;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        s_fork_choice_span[slot] = -1;
+        /* [MERGE LANE HOLD 2026-10-04] a recycled slot must not inherit the
+         * previous car's merge settle window. */
+        s_trf_merge_hold[slot] = 0;
+    }
 }
 
 static void trf_dyn_place(int slot, int span, int lane, int polarity)
@@ -5797,6 +5817,23 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     fork_target = 1;
                 }
             }
+            /* [MERGE LANE HOLD 2026-10-04] The fork target deliberately places the
+             * car in the lane the walker will use on the rejoin span, but the hold
+             * above only lasted the single transition tick. On a right-hand corridor
+             * the rejoin mapping (sub + dst_lanes - cur_lanes) lands the car in the
+             * OUTERMOST lane of the main road (Moscow 3105 -> 954: corridor sub 0/1
+             * -> main sub 2/3 of 4), and td5_ai_smart_traffic_lane penalises lane 0
+             * and lane N-1 by +0.6 -- so the very next tick the chooser pulled the
+             * car straight out of the lane it had just been merged into. That is the
+             * "unnecessary lane change at the rejoin". Keep the merged lane for a
+             * short settle window instead. TD5RE_TRAFFIC_MERGE_HOLD=0 restores the
+             * old one-tick hold. */
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                if (fork_target)
+                    s_trf_merge_hold[slot] = (uint16_t)trf_merge_hold_ticks();
+                else if (s_trf_merge_hold[slot] > 0)
+                    s_trf_merge_hold[slot]--;
+            }
 
             /* Target sub_lane: start with current sub_lane (default path). */
             int target_sub_lane = fork_target ? fork_sub
@@ -5851,8 +5888,13 @@ void td5_ai_update_traffic_route_plan(int slot) {
              * and on a narrow (2-3 lane) branch that lateral jitter jerks the
              * 1-span-lookahead steering and the car fishtails into the rail. Hold
              * the car's current lane there; the wall-nudge below still keeps an
-             * edge lane off the rail, and branches are short so we lose nothing. */
-            if (!traffic_on_branch && !fork_target) {
+             * edge lane off the rail, and branches are short so we lose nothing.
+             *
+             * [MERGE LANE HOLD 2026-10-04] also hold the lane for a short settle
+             * window after a fork/corridor merge, so the chooser's edge-lane
+             * penalty cannot immediately undo the merge the walker just made. */
+            if (!traffic_on_branch && !fork_target &&
+                !(slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && s_trf_merge_hold[slot] > 0)) {
                 if (td5_ai_smart_active()) {
                     /* [SmartAI] unified lane brain for traffic: score lanes by
                      * surface/occupancy/wall/change-cost (±1 step). Replaces the
