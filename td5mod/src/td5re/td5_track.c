@@ -1378,6 +1378,17 @@ static int xspan_track_is_geo(void)
             g_active_td6_level == 0 && td5_geo_route_count() > 0);
 }
 
+/* [COLL3D F2 2026-10-04] Default ON: a vehicle in scripted recovery
+ * (vehicle_mode==1) walks the original's 8-entry probe table @0x46738C instead
+ * of the 4-entry mode-0 table @0x467384. Set TD5RE_COLL3D_BODY_PROBES=0 to
+ * revert to the 4-wheel-only containment the port used before. */
+static int coll3d_body_probes_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = td5_env_flag_on("TD5RE_COLL3D_BODY_PROBES");
+    return cached;
+}
+
 static int xspan_enabled(void)
 {
     if (s_xspan_force == -2) {
@@ -2320,10 +2331,23 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     }
     const int32_t MEDIAN_HALF = 0;     /* physics median off; geometry ridge handles it */
 
-    for (int pi = 0; pi < 4; pi++) {
+    /* [COLL3D F2 2026-10-04] Same mode-driven probe count as fwd_rev_handler:
+     * the original's wall resolver (UpdateActorTrackSegmentContacts @0x00406CC0)
+     * walks table @0x467384 {0,1,2,3,-1} in mode 0 and table @0x46738C {0..7} in
+     * mode 1, so a car in scripted recovery is contained by its 4 body corners
+     * as well as its 4 wheels. probe_block is &actor->probe_FL and the body
+     * corners (bbox_vertices_upper, +0x0C0) sit immediately after the 4 wheel
+     * probes (+0x090..0x0BF), so indices 4..7 address them with no extra math —
+     * which is exactly why the original's table is a flat {0..7}. */
+    const int probe_count =
+        (actor->vehicle_mode == 1 && coll3d_body_probes_enabled()) ? 8 : 4;
+
+    for (int pi = 0; pi < probe_count; pi++) {
         int32_t px = FP_TRUNC(probe_block[pi].x);
         int32_t pz = FP_TRUNC(probe_block[pi].z);
-        int sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
+        int sub_lane = (pi < 4)
+                     ? (int)actor->wheel_probes[pi].sub_lane_index
+                     : (int)actor->body_probes[pi - 4].sub_lane_index;
 
         int test_left  = (left.ok  && sub_lane < 1);
         int test_right = (right.ok && sub_lane >= rc - 1);   /* rc == lane_count */
@@ -2883,14 +2907,37 @@ static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
 
     TD5_Vec3_Fixed *probe_block = &actor->probe_FL;
 
-    /* Iterate the car probe table [0,1,2,3,0xFF,...] — 4 probes. */
-    static const int8_t k_probe_table[8] = { 0, 1, 2, 3, -1, 0, 0, 0 };
+    /* Iterate the car probe table. [COLL3D F2 2026-10-04] The original selects
+     * the table by VEHICLE MODE [CONFIRMED @ 0x00406650 / 0x00443ED0]; both
+     * tables were read straight out of TD5_d3d.exe .data:
+     *     mode 0  @0x467384 = { 0, 1, 2, 3, -1, 0, 0, 0 }  -> 4 wheel probes
+     *     mode 1  @0x46738C = { 0, 1, 2, 3,  4, 5, 6, 7 }  -> + 4 body corners
+     * The consumer loop runs `do { idx = tbl[i]; if (idx < 0) return; ... }
+     * while (i < 8)` [CONFIRMED @ 0x00406CC0], so the mode-0 table stops at the
+     * -1 sentinel after 4 entries while the mode-1 table runs all 8. The port
+     * hardcoded the mode-0 table for BOTH modes, so a tumbling car was only ever
+     * contained by its four wheel probes and could clip a rail body-first.
+     * Knob TD5RE_COLL3D_BODY_PROBES=0 reverts to the 4-probe table. */
+    static const int8_t k_probe_table_mode0[8] = { 0, 1, 2, 3, -1, 0, 0, 0 };
+    static const int8_t k_probe_table_mode1[8] = { 0, 1, 2, 3,  4, 5, 6, 7 };
+    const int8_t *k_probe_table =
+        (actor->vehicle_mode == 1 && coll3d_body_probes_enabled())
+            ? k_probe_table_mode1 : k_probe_table_mode0;
+
     for (int i = 0; i < 8; i++) {
         int probe_idx = k_probe_table[i];
         if (probe_idx < 0) break;
 
-        /* Per-probe gate — Forward: probe_span <= boundary, Reverse: equality. */
-        int probe_span = (int)actor->wheel_probes[i].span_index;
+        /* Per-probe gate — Forward: probe_span <= boundary, Reverse: equality.
+         * Entries 0..3 keep the port's existing state block (wheel_probes)
+         * byte-for-byte; the new entries 4..7 read the body-corner block.
+         * NOTE the original's absolute pairing is state@(+0x00+idx*0x10) for
+         * ALL 8 entries, which for 0..3 is body_probes, not wheel_probes — see
+         * the OPEN divergence note in the commit message. Not changed here
+         * because mode 0 is golden-trace guarded. */
+        int probe_span = (probe_idx < 4)
+                       ? (int)actor->wheel_probes[probe_idx].span_index
+                       : (int)actor->body_probes[probe_idx - 4].span_index;
         if (!reverse_mode) {
             if (probe_span > boundary) continue;
         } else if (g_td5.drag_race_enabled) {

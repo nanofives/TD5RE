@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 4 (3D collisions)" },
+    { CL_ITEM,    "Crashes and rolls now tumble like the original." },
+    { CL_ITEM,    "  The car's own physics used to fight the crash" },
+    { CL_ITEM,    "  animation every frame and flatten it back onto" },
+    { CL_ITEM,    "  the road, so flips and traffic hits looked wrong." },
+    { CL_ITEM,    "A tumbling car is also held by its body corners" },
+    { CL_ITEM,    "  now, not just its wheels, so it no longer slides" },
+    { CL_ITEM,    "  through a rail roof-first." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 3 (track select)" },
     { CL_ITEM,    "The R key now picks a random track on SELECT" },
     { CL_ITEM,    "  TRACK, as the on-screen hint promised. It did" },
