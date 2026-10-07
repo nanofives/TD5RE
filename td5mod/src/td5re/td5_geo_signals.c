@@ -13,6 +13,19 @@
  * traffic actually arrives from on the drivable line and is available for every
  * node rather than the tagged minority. The field is parsed anyway so a place
  * that does carry it fails loudly on a type change rather than silently.
+ *
+ * 2026-10-07, the tag round (docs/plans/GEO_TAG_AUDIT.md). The Overpass query
+ * used to ask only for `node[highway=traffic_signals]`, so crossings, stop
+ * lines, give-ways and speed humps were 0 of 566 nodes -- not absent from the
+ * city, never requested. They are fetched now, and they go into a SEPARATE
+ * `nodes[]` array in the same file rather than into `signals[]`, because this
+ * module masts a traffic light at every `signals[]` entry: folding them in
+ * would grow a lamp on every zebra crossing in La Plata. `signals[]`
+ * membership is therefore byte-identical to before.
+ *
+ * This reader counts `nodes[]` and reports it, and reads nothing from it. A
+ * count in the log is how the next workstream finds out the data is already on
+ * disk; a silent array is how it gets fetched twice.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,7 +111,7 @@ int td5_geo_signals_sync(void)
     char *json;
     cJSON *root = NULL;
     const cJSON *arr;
-    int n, i, kept = 0, bad = 0;
+    int n, i, kept = 0, bad = 0, other = 0;
 
     if (!slug || !slug[0]) {           /* synthetic build: nothing to read */
         td5_geo_signals_unload();
@@ -125,6 +138,11 @@ int td5_geo_signals_sync(void)
         return 0;
     }
 
+    {   /* Counted before the signals walk so an early return still reports
+         * it: a cache at tag_schema 1 simply has no `nodes` and reports 0. */
+        const cJSON *nd = cJSON_GetObjectItem(root, "nodes");
+        if (nd && cJSON_IsArray(nd)) other = cJSON_GetArraySize(nd);
+    }
     arr = cJSON_GetObjectItem(root, "signals");
     if (!arr || !cJSON_IsArray(arr)) {
         TD5_LOG_W(LOG_TAG, "signals: %s has no \"signals\" array", path);
@@ -181,6 +199,11 @@ int td5_geo_signals_sync(void)
               bad ? " (some entries skipped, see the file)" : "");
     if (bad)
         TD5_LOG_W(LOG_TAG, "signals: %d of %d entries were malformed", bad, n);
+    if (other > 0)
+        TD5_LOG_I(LOG_TAG, "signals: the cache also carries %d non-signal "
+                  "highway node(s) (crossings / stop / give_way / humps) in "
+                  "nodes[]; nothing reads them yet -- they are NOT masted as "
+                  "lamps, which is why they are a separate array", other);
     return s_sig_count;
 }
 

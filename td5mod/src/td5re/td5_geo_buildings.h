@@ -79,6 +79,31 @@
 #define TD5_GEOA_KIND_PLAY    4      /* leisure=playground */
 #define TD5_GEOA_KIND_FOREST  5
 
+/* WHICH TAG MADE A FOOTPRINT A LANDMARK.
+ *
+ * The 2026-09-30 census could say "22 landmarks" and nothing more, which is
+ * exactly as informative as "22 hostels" -- and the old blanket
+ * `tourism or historic` really had promoted a boutique hostel. geo_fetch now
+ * writes `landmark_src` as "key=value" (docs/plans/GEO_TAG_AUDIT.md) and these
+ * are its KEYS, so the build log can break the count down by deciding tag.
+ *
+ * FLAG is the pre-2026-10-07 case: a cache at `tag_schema` 1 carries the bool
+ * and no reason, and saying so beats inventing one. */
+#define TD5_GEOB_LMSRC_NONE       0
+#define TD5_GEOB_LMSRC_FLAG       1   /* the cache's own bool, reason unknown */
+#define TD5_GEOB_LMSRC_BUILDING   2
+#define TD5_GEOB_LMSRC_GOVERNMENT 3
+#define TD5_GEOB_LMSRC_OFFICE     4
+#define TD5_GEOB_LMSRC_AMENITY    5
+#define TD5_GEOB_LMSRC_HISTORIC   6
+#define TD5_GEOB_LMSRC_HERITAGE   7
+#define TD5_GEOB_LMSRC_MANMADE    8
+#define TD5_GEOB_LMSRC_TOURISM    9
+#define TD5_GEOB_LMSRC_COUNT     10
+
+/* Human name of a TD5_GEOB_LMSRC_*, for the log. Never NULL. */
+const char *td5_geob_lmsrc_name(int src);
+
 /* Ring points kept per polygon. OSM rings run to 182 points here (the La Plata
  * cathedral); past this the ring is DECIMATED, never truncated, so the
  * silhouette survives and only its detail is lost. */
@@ -99,6 +124,7 @@ typedef struct {
     unsigned char hsrc;       /* TD5_GEOB_HSRC_*                           */
     unsigned char roof;       /* TD5_GEOB_ROOF_*                           */
     unsigned char landmark;   /* OSM says this is a named landmark         */
+    unsigned char lmsrc;      /* TD5_GEOB_LMSRC_* -- which tag decided it  */
     unsigned char part;       /* building:part -- a 3D-modelled sub-volume */
 } TD5_GeoBuilding;
 
@@ -236,6 +262,11 @@ int  td5_geob_ring_simple(const double *x, const double *z, int n);
  * a claim. Any pointer may be NULL. */
 void td5_geob_census(int *buildings, int *measured, int *estimated,
                      int *landmarks, int *roofs, int *areas, int *plazas);
+
+/* Landmarks broken down by the tag that decided them: `out` receives
+ * TD5_GEOB_LMSRC_COUNT counts indexed by TD5_GEOB_LMSRC_*. The sum is the
+ * `landmarks` the census reports. */
+void td5_geob_landmark_sources(int *out, int n);
 
 /* How many ring points the loader decimated away, and how many polygons it
  * had to decimate at all -- the honest cost of TD5_GEOB_RING_MAX. */

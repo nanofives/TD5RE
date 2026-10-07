@@ -6,6 +6,7 @@
  */
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"
+#include "td5_geo_roads.h"       /* TD5_GEO_SURF_* for the real-surface page */
 
 const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
     { 4200, 5600, TG_TREE_DECID,   0 },  /* 0  L017 p266  deciduous         */
@@ -1153,6 +1154,30 @@ int tg_road_page(int si)
      * a surface class, never which class this span is, so the pairing holds. */
     b = &k_biomes[tg_biome_cell_index(si)];
     return tg_road_page_for(b->road_surf);
+}
+
+/* Road page for a REAL OSM `surface=*` class, or -1 for "nothing to say".
+ *
+ * The one place the geo tag round (docs/plans/GEO_TAG_AUDIT.md) reaches the
+ * road texture. It deliberately does NOT go through tg_surface_attr, so the
+ * GRIP a car feels is untouched: an OSM-cobbled side street LOOKS cobbled and
+ * drives exactly as it did. Grip is a sim property and moving it would move
+ * the golden traces; the page is a draw property and does not.
+ *
+ * SMOOTH returns -1 rather than the tarmac page, because "paved" must mean
+ * "whatever this span's biome lays" -- an ALPINE street is ice-surfaced and
+ * forcing tarmac on it because OSM said `surface=asphalt` would be the tag
+ * overruling the world. Only the two classes the biome CANNOT express get a
+ * page of their own. */
+int tg_road_page_for_geo_surface(int geo_surf)
+{
+    switch (geo_surf) {
+    case TD5_GEO_SURF_COBBLE: return tg_road_page_for(RS_COBBLE);
+    /* RS_GRAVEL maps to the DIRT art anyway (see tg_rs_real_base), so loose
+     * aggregate and bare earth share one page here too. */
+    case TD5_GEO_SURF_LOOSE:  return tg_road_page_for(RS_DIRT);
+    default:                  return -1;
+    }
 }
 
 int tg_topo_enabled(void)

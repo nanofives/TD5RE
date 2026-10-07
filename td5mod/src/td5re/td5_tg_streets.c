@@ -402,8 +402,30 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
      * page whose centre line runs DOWN the street (see tg_emit_texture_page_r4_cross).
      * Default ON; TD5RE_AUTOTRACK_CROSS_MARKINGS=0 restores the biome road page. */
     const int marks = td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_MARKINGS");
+    /* THE REAL WAY'S OWN SURFACE, where OSM states one this page can depict
+     * (docs/plans/GEO_TAG_AUDIT.md gate 4). It overrides the markings page
+     * too, on purpose: painted lane markings on a dirt lane is the wrong
+     * picture, and `marks` exists to make a paved crossing read as a crossing.
+     *
+     * ONE page for the whole crossing, because the two side quads share one
+     * mesh. Taking the first side that has an opinion is right rather than
+     * merely convenient: both arms of a crossing come from the SAME OSM way
+     * (tg_geo_arm_push pushes the forward and backward arms of one hit), so
+     * they carry the same surface except where two different real streets
+     * happen to meet the route at one span -- and there, either answer names a
+     * real street that is really there.
+     *
+     * A synthetic street, a span with no mouth and a pre-tag cache all return
+     * SMOOTH, which leaves seg_page exactly as it was. */
     int seg_page = marks ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(h->si), seg_nq;
     int s, n = 0;
+
+    {
+        int gp = tg_road_page_for_geo_surface(tg_net_mouth_surface(h->si, 1));
+        if (gp < 0)
+            gp = tg_road_page_for_geo_surface(tg_net_mouth_surface(h->si, 0));
+        if (gp >= 0) seg_page = gp;
+    }
 
     /* [R6 CROSS item 15] no cross-street carriageway right after a bridge run. */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&

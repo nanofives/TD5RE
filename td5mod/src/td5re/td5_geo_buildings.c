@@ -221,6 +221,26 @@ int td5_geob_triangulate(const double *x, const double *z, int n,
 
 /* ------------------------------------------------------------------ parse -- */
 
+/* The three cJSON field accessors. Up here rather than beside the loaders
+ * because the tag rules below read them. */
+static const char *geob_str(const cJSON *o, const char *key)
+{
+    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
+    return (v && cJSON_IsString(v)) ? v->valuestring : NULL;
+}
+
+static double geob_num(const cJSON *o, const char *key, double def)
+{
+    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
+    return (v && cJSON_IsNumber(v)) ? v->valuedouble : def;
+}
+
+static int geob_true(const cJSON *o, const char *key)
+{
+    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
+    return v && cJSON_IsTrue(v);
+}
+
 static unsigned int geob_id_hash(double id)
 {
     /* The way id arrives as a JSON number, so it can exceed int range. Fold it
@@ -289,28 +309,28 @@ static double geob_num_tag(const cJSON *o, const char *key, double def)
 /* A building=* value that names a landmark ON ITS OWN, with or without a
  * name tag.
  *
- * WHY THIS IS HERE AND NOT IN geo_fetch.py. geo_fetch's own rule is
- * `tourism or historic or (name and building in {cathedral, church, stadium,
- * museum, train_station, civic, public})`. MEASURED on the La Plata cache:
- * 10 of 2047 footprints pass it and only 2 come within 100 m of the route, so
- * the whole landmark path shipped exercised twice. Widening it there would
- * mean a re-fetch, and the network is not available to this workstream; these
- * classes come off the `class` field that is ALREADY in BUILDINGS.JSON, so
- * the rule can be applied to a cache on disk.
+ * geo_fetch's rule used to be `tourism or historic or (name and building in
+ * {cathedral, church, stadium, museum, train_station, civic, public})`.
+ * MEASURED on the La Plata cache: 10 of 2047 footprints passed it and only 2
+ * came within 100 m of the route, so the whole landmark path shipped
+ * exercised twice. These classes come off the `class` field that has ALWAYS
+ * been in BUILDINGS.JSON, so the rule works on a cache already on disk --
+ * which is why it lives here as well as in geo_fetch.
  *
  * The set is deliberately the UNMISTAKABLE classes. `university`, `school`,
  * `hospital`, `office` and `retail` are ordinary urban fabric at La Plata's
  * scale (29 universities and 13 schools in this one cache) and promoting them
  * would hand a quarter of the city the landmark treatment.
  *
- * KNOWN GAP, measured rather than assumed: the tags that would catch the rest
- * -- amenity=place_of_worship / theatre / police, office=government,
- * government=* -- are NOT carried into BUILDINGS.JSON at all, so no C-side
- * rule can see them. On the La Plata route that is 9 further landmark-worthy
- * objects (6 government, 1 theatre, 1 place_of_worship, 1 police). The
- * permanent home for that is geo_fetch.py's tag list; offline,
- * re/tools/geo_fixtures/land_relabel.py re-stamps an existing cache from the
- * raw Overpass response beside it. */
+ * THE GAP RECORDED HERE IS NOW CLOSED (2026-10-07). The tags that caught the
+ * rest -- amenity=place_of_worship / theatre / police, office=government,
+ * government=* -- were not carried into BUILDINGS.JSON at all, so no C-side
+ * rule could see them: 9 further landmark-worthy objects on the La Plata
+ * route. geo_fetch.py now keeps them (docs/plans/GEO_TAG_AUDIT.md) and
+ * decides `landmark` from the full table itself, so for a cache at
+ * `tag_schema` 2 this function is a belt-and-braces agreement rather than the
+ * only rule. It still matters for an OLD cache, and the tag rule below still
+ * matters for a cache land_relabel.py has not been run over. */
 static int geob_class_is_landmark(const char *c)
 {
     static const char *const k[] = {
@@ -326,14 +346,158 @@ static int geob_class_is_landmark(const char *c)
     return 0;
 }
 
-static int geob_area_kind_of(const char *leisure, const char *landuse)
+const char *td5_geob_lmsrc_name(int src)
+{
+    static const char *const k[TD5_GEOB_LMSRC_COUNT] = {
+        "none", "flag", "building", "government", "office", "amenity",
+        "historic", "heritage", "man_made", "tourism"
+    };
+    return (src >= 0 && src < TD5_GEOB_LMSRC_COUNT) ? k[src] : "?";
+}
+
+/* Does one of `vals` equal `v`? NULL-terminated list, NULL/empty v is no. */
+static int geob_in_set(const char *v, const char *const *vals)
+{
+    int i;
+    if (!v || !v[0]) return 0;
+    for (i = 0; vals[i]; i++) if (!strcmp(v, vals[i])) return 1;
+    return 0;
+}
+
+/* THE TAG RULE, over the civic keys geo_fetch now promotes to fields.
+ *
+ * Mirrors geo_fetch.py's LANDMARK_RULE, in the SAME attribution order (most
+ * specific statement of what the structure IS first), so the key this returns
+ * and the key `landmark_src` names agree. It is evaluated here as well as
+ * there for two reasons that are not redundancy:
+ *
+ *  - a cache that `land_relabel.py` upgraded carries the tags and a stale
+ *    `landmark` bool it cannot recompute for every rule;
+ *  - it is the ONE place a reader can be A/B'd. TD5RE_GEO_LM_TAGS=0 turns the
+ *    tag promotion off and leaves the cache's own bool plus the class rule,
+ *    which is what the pre-2026-10-07 reader saw -- so the La Plata MODELS.DAT
+ *    delta can be attributed to the tags instead of asserted.
+ *
+ * Returns TD5_GEOB_LMSRC_NONE when nothing fires. The tourism exclusions are
+ * geo_fetch's TOURISM_NOT_LANDMARK: a hotel carries `tourism=*` and is
+ * ordinary street frontage. */
+static int geob_tag_landmark_src(const cJSON *e)
+{
+    static const char *const k_amenity[] = {
+        "place_of_worship", "theatre", "townhall", "courthouse", "arts_centre",
+        "police", "fire_station", "embassy", "casino", "cinema",
+        "conference_centre", "exhibition_centre", "monastery",
+        "public_building", NULL
+    };
+    static const char *const k_office[]   = { "government", "diplomatic", NULL };
+    static const char *const k_man_made[] = { "tower", "lighthouse", "obelisk",
+                                              "water_tower", "campanile", NULL };
+    static const char *const k_tourism[]  = { "attraction", "museum", "gallery",
+                                              "artwork", "viewpoint",
+                                              "theme_park", "aquarium", "zoo",
+                                              "monument", NULL };
+    const char *v;
+
+    if (geob_class_is_landmark(geob_str(e, "class")))
+        return TD5_GEOB_LMSRC_BUILDING;
+    v = geob_str(e, "government");
+    if (v && v[0]) return TD5_GEOB_LMSRC_GOVERNMENT;   /* any value */
+    if (geob_in_set(geob_str(e, "office"), k_office))
+        return TD5_GEOB_LMSRC_OFFICE;
+    if (geob_in_set(geob_str(e, "amenity"), k_amenity))
+        return TD5_GEOB_LMSRC_AMENITY;
+    v = geob_str(e, "historic");
+    if (v && v[0]) return TD5_GEOB_LMSRC_HISTORIC;     /* any value */
+    v = geob_str(e, "heritage");
+    if (v && v[0]) return TD5_GEOB_LMSRC_HERITAGE;     /* any value */
+    if (geob_in_set(geob_str(e, "man_made"), k_man_made))
+        return TD5_GEOB_LMSRC_MANMADE;
+    if (geob_in_set(geob_str(e, "tourism"), k_tourism))
+        return TD5_GEOB_LMSRC_TOURISM;
+    return TD5_GEOB_LMSRC_NONE;
+}
+
+/* THE PRE-2026-10-07 geo_fetch RULE, recomputed from the record.
+ *
+ * It was, verbatim:
+ *   tourism or historic or (name and building in {cathedral, church, stadium,
+ *                           museum, train_station, civic, public})
+ * -- a BLANKET `tourism`, which is why a boutique hostel was a La Plata
+ * landmark, and a NAME requirement on a narrow building set, which is why an
+ * unnamed cathedral was not.
+ *
+ * Every field it reads is in BUILDINGS.JSON at tag_schema 2 (`tourism` and
+ * `historic` are promoted fields now, `name` and `class` always were), so the
+ * old answer is exactly reconstructible on the NEW cache. That is what makes
+ * TD5RE_GEO_LM_TAGS=0 an A/B of one cache rather than a comparison of two. */
+static int geob_legacy_landmark(const cJSON *e)
+{
+    static const char *const k_narrow[] = {
+        "cathedral", "church", "stadium", "museum", "train_station",
+        "civic", "public", NULL
+    };
+    const char *nm;
+    const char *v = geob_str(e, "tourism");
+    if (v && v[0]) return 1;
+    v = geob_str(e, "historic");
+    if (v && v[0]) return 1;
+    nm = geob_str(e, "name");
+    return (nm && nm[0] && geob_in_set(geob_str(e, "class"), k_narrow)) ? 1 : 0;
+}
+
+/* The KEY of geo_fetch's "key=value" `landmark_src`, as a TD5_GEOB_LMSRC_*.
+ * The value half is deliberately not kept: the emitters branch on nothing
+ * finer than "is this a landmark", and a per-value code would be a table to
+ * maintain in two languages for a log line. */
+static int geob_lmsrc_of_string(const char *s)
+{
+    static const struct { const char *key; int src; } k[] = {
+        { "building",   TD5_GEOB_LMSRC_BUILDING   },
+        { "government", TD5_GEOB_LMSRC_GOVERNMENT },
+        { "office",     TD5_GEOB_LMSRC_OFFICE     },
+        { "amenity",    TD5_GEOB_LMSRC_AMENITY    },
+        { "historic",   TD5_GEOB_LMSRC_HISTORIC   },
+        { "heritage",   TD5_GEOB_LMSRC_HERITAGE   },
+        { "man_made",   TD5_GEOB_LMSRC_MANMADE    },
+        { "tourism",    TD5_GEOB_LMSRC_TOURISM    }
+    };
+    const int n = (int)(sizeof(k) / sizeof(k[0]));
+    size_t len;
+    const char *eq;
+    int i;
+
+    if (!s || !s[0]) return TD5_GEOB_LMSRC_NONE;
+    eq = strchr(s, '=');
+    len = eq ? (size_t)(eq - s) : strlen(s);
+    for (i = 0; i < n; i++)
+        if (strlen(k[i].key) == len && !strncmp(s, k[i].key, len))
+            return k[i].src;
+    return TD5_GEOB_LMSRC_NONE;
+}
+
+/* AREAS.JSON kind -> what the plaza emitter distinguishes.
+ *
+ * WIDENED 2026-10-07 with the values geo_fetch's whitelist used to refuse
+ * outright (docs/plans/GEO_TAG_AUDIT.md): La Plata carries leisure=track x7,
+ * swimming_pool x2, sports_centre x2, stadium, bleachers, fitness_station and
+ * landuse=education x4 / railway x3 / plant_nursery, and they were the whole
+ * of the cache's `ignored` count. `natural` is read as well, which it never
+ * was -- the branch only ever consulted it for water.
+ *
+ * A running TRACK, a STADIUM bowl and a sports CENTRE ground are flat laid
+ * surfaces, which is what PITCH means here, not lawn. `education`,
+ * `institutional` and `railway` land on OTHER on purpose: a campus block and a
+ * rail yard are BUILT ground, and laying a lawn over a mapped campus would
+ * carpet it -- the same argument the header records for residential/retail. */
+static int geob_area_kind_of(const char *leisure, const char *landuse,
+                             const char *natural, int wide)
 {
     if (leisure) {
-        if (!strcmp(leisure, "park"))       return TD5_GEOA_KIND_PARK;
-        if (!strcmp(leisure, "common"))     return TD5_GEOA_KIND_PARK;
-        if (!strcmp(leisure, "pitch"))      return TD5_GEOA_KIND_PITCH;
-        if (!strcmp(leisure, "playground")) return TD5_GEOA_KIND_PLAY;
-        if (!strcmp(leisure, "garden"))     return TD5_GEOA_KIND_PARK;
+        if (!strcmp(leisure, "park"))           return TD5_GEOA_KIND_PARK;
+        if (!strcmp(leisure, "common"))         return TD5_GEOA_KIND_PARK;
+        if (!strcmp(leisure, "pitch"))          return TD5_GEOA_KIND_PITCH;
+        if (!strcmp(leisure, "playground"))     return TD5_GEOA_KIND_PLAY;
+        if (!strcmp(leisure, "garden"))         return TD5_GEOA_KIND_PARK;
     }
     if (landuse) {
         if (!strcmp(landuse, "grass"))         return TD5_GEOA_KIND_GRASS;
@@ -341,25 +505,39 @@ static int geob_area_kind_of(const char *leisure, const char *landuse)
         if (!strcmp(landuse, "forest"))        return TD5_GEOA_KIND_FOREST;
         if (!strcmp(landuse, "meadow"))        return TD5_GEOA_KIND_GRASS;
     }
+    /* Everything from here down is the 2026-10-07 widening, so
+     * TD5RE_GEO_AREA_TAGS=0 reproduces the old classification exactly on the
+     * new cache -- the same A/B shape as TD5RE_GEO_LM_TAGS. An area the old
+     * reader never saw at all (the whitelist refused it upstream) still
+     * arrives in AREAS.JSON and still lands on OTHER here, which is what the
+     * old reader would have done with it. */
+    if (!wide) return TD5_GEOA_KIND_OTHER;
+    if (leisure) {
+        if (!strcmp(leisure, "nature_reserve")) return TD5_GEOA_KIND_PARK;
+        if (!strcmp(leisure, "picnic_site"))    return TD5_GEOA_KIND_PARK;
+        if (!strcmp(leisure, "golf_course"))    return TD5_GEOA_KIND_GRASS;
+        /* A running TRACK, a STADIUM bowl and a sports CENTRE ground are flat
+         * laid surfaces, which is what PITCH means here -- not lawn. */
+        if (!strcmp(leisure, "track"))          return TD5_GEOA_KIND_PITCH;
+        if (!strcmp(leisure, "stadium"))        return TD5_GEOA_KIND_PITCH;
+        if (!strcmp(leisure, "sports_centre"))  return TD5_GEOA_KIND_PITCH;
+    }
+    if (landuse) {
+        if (!strcmp(landuse, "grassland"))         return TD5_GEOA_KIND_GRASS;
+        if (!strcmp(landuse, "recreation_ground")) return TD5_GEOA_KIND_PARK;
+        if (!strcmp(landuse, "cemetery"))          return TD5_GEOA_KIND_GRASS;
+    }
+    /* `natural` was NEVER read by this layer: geo_fetch only ever consulted it
+     * for water, so `natural=wood` could not become a forest even though
+     * _OSM_TO_COVER had a row for it. */
+    if (natural) {
+        if (!strcmp(natural, "wood"))      return TD5_GEOA_KIND_FOREST;
+        if (!strcmp(natural, "tree_row"))  return TD5_GEOA_KIND_FOREST;
+        if (!strcmp(natural, "grassland")) return TD5_GEOA_KIND_GRASS;
+        if (!strcmp(natural, "heath"))     return TD5_GEOA_KIND_GRASS;
+        if (!strcmp(natural, "scrub"))     return TD5_GEOA_KIND_GRASS;
+    }
     return TD5_GEOA_KIND_OTHER;
-}
-
-static const char *geob_str(const cJSON *o, const char *key)
-{
-    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
-    return (v && cJSON_IsString(v)) ? v->valuestring : NULL;
-}
-
-static double geob_num(const cJSON *o, const char *key, double def)
-{
-    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
-    return (v && cJSON_IsNumber(v)) ? v->valuedouble : def;
-}
-
-static int geob_true(const cJSON *o, const char *key)
-{
-    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
-    return v && cJSON_IsTrue(v);
 }
 
 /* Copy one `points` array into the shared pool as an OPEN, CCW ring.
@@ -453,6 +631,9 @@ static int geob_load_buildings(const char *slug)
     char path[512];
     char *json;
     cJSON *root, *arr;
+    /* Read ONCE for the whole file, not per footprint: an env knob is fixed
+     * for a process run and this loop is 2047 iterations at La Plata. */
+    const int tag_lm = td5_env_flag_on("TD5RE_GEO_LM_TAGS");
     int n, i;
 
     snprintf(path, sizeof(path), "re/assets/geo/%s/BUILDINGS.JSON", slug);
@@ -517,9 +698,38 @@ static int geob_load_buildings(const char *slug)
         b->area_m2    = geob_num(e, "area_m2", 0.0);
         b->id_hash    = geob_id_hash(geob_num(e, "id", (double)i));
         b->roof       = (unsigned char)geob_roof_of(geob_str(e, "roof_shape"));
-        b->landmark   = (unsigned char)(geob_true(e, "landmark")
-                                        || geob_class_is_landmark(
-                                               geob_str(e, "class")) ? 1 : 0);
+        /* LANDMARK.
+         *
+         * ON (the default): geo_fetch's own `landmark_src` is believed first,
+         * because it was decided against the WHOLE tag set including keys not
+         * promoted to fields. Then the C tag rule, for a cache land_relabel
+         * upgraded. Then the bare bool, which is all a tag_schema 1 cache has
+         * and carries no reason to report.
+         *
+         * OFF (TD5RE_GEO_LM_TAGS=0): the PRE-2026-10-07 rule, RECONSTRUCTED
+         * rather than approximated. The new cache's own `landmark` bool is no
+         * use for the A/B -- it already contains the tag decision -- but the
+         * old Python rule was `tourism or historic or (name and building in
+         * <narrow set>)` and every one of those fields is in the record, so it
+         * can be recomputed exactly and OR'd with the class rule the old
+         * reader applied. That makes the knob a true A/B on one cache instead
+         * of a third behaviour that resembles neither build. */
+        {
+            int src;
+            if (tag_lm) {
+                src = geob_lmsrc_of_string(geob_str(e, "landmark_src"));
+                if (!src) src = geob_tag_landmark_src(e);
+                if (!src && geob_true(e, "landmark"))
+                    src = TD5_GEOB_LMSRC_FLAG;
+            } else if (geob_legacy_landmark(e)) {
+                src = TD5_GEOB_LMSRC_FLAG;
+            } else {
+                src = geob_class_is_landmark(geob_str(e, "class"))
+                    ? TD5_GEOB_LMSRC_BUILDING : TD5_GEOB_LMSRC_NONE;
+            }
+            b->landmark = (unsigned char)(src != TD5_GEOB_LMSRC_NONE);
+            b->lmsrc    = (unsigned char)src;
+        }
         b->part       = (unsigned char)(geob_true(e, "part") ? 1 : 0);
         b->host_span  = -1;
         b->host_side  = 0;
@@ -540,6 +750,7 @@ static int geob_load_areas(const char *slug)
     char path[512];
     char *json;
     cJSON *root, *arr;
+    const int wide = td5_env_flag_on("TD5RE_GEO_AREA_TAGS");
     int n, i;
 
     snprintf(path, sizeof(path), "re/assets/geo/%s/AREAS.JSON", slug);
@@ -572,8 +783,11 @@ static int geob_load_areas(const char *slug)
         if (rn == 0) continue;
         a->first = first;
         a->n     = rn;
-        a->kind  = (unsigned char)geob_area_kind_of(geob_str(e, "leisure"),
-                                                    geob_str(e, "landuse"));
+        /* `natural` is new to this call (2026-10-07): the areas layer never
+         * carried it, because geo_fetch only consulted `natural` for water. */
+        a->kind  = (unsigned char)geob_area_kind_of(
+                       geob_str(e, "leisure"), geob_str(e, "landuse"),
+                       geob_str(e, "natural"), wide);
         a->id_hash = geob_id_hash(geob_num(e, "id", (double)i));
         nm = geob_str(e, "name");
         a->named = (unsigned char)((nm && nm[0]) ? 1 : 0);
@@ -652,6 +866,23 @@ int td5_geob_sync(void)
                   slug, s_gb.nb, meas, est, lm, roof, s_gb.na, plaza,
                   s_gb.npt, s_gb.units_per_m, s_gb.storey_m,
                   s_gb.dec_polys, s_gb.dec_points);
+        {   /* WHICH TAG decided each landmark. "22 landmarks" is as
+             * informative as "22 hostels" -- and the pre-2026-10-07 blanket
+             * `tourism or historic` really had promoted one. */
+            int src[TD5_GEOB_LMSRC_COUNT];
+            char line[256];
+            int k, off = 0;
+            td5_geob_landmark_sources(src, TD5_GEOB_LMSRC_COUNT);
+            for (k = 1; k < TD5_GEOB_LMSRC_COUNT; k++) {
+                if (!src[k]) continue;
+                off += snprintf(line + off, sizeof(line) - (size_t)off,
+                                "%s%s=%d", off ? ", " : "",
+                                td5_geob_lmsrc_name(k), src[k]);
+                if (off < 0 || (size_t)off >= sizeof(line)) break;
+            }
+            TD5_LOG_I(LOG_TAG, "geob: landmarks by deciding tag: %s",
+                      off > 0 ? line : "(none)");
+        }
         TD5_LOG_I(LOG_TAG, "geob: bound to %d route span(s): %d building(s) "
                   "on the route / %d past %.0f units, %d area(s) on the route "
                   "/ %d past %.0f units",
@@ -938,6 +1169,17 @@ void td5_geob_census(int *buildings, int *measured, int *estimated,
     if (roofs)     *roofs     = roof;
     if (areas)     *areas     = s_gb.na;
     if (plazas)    *plazas    = plaza;
+}
+
+void td5_geob_landmark_sources(int *out, int n)
+{
+    int i;
+    if (!out || n <= 0) return;
+    for (i = 0; i < n; i++) out[i] = 0;
+    for (i = 0; i < s_gb.nb; i++) {
+        const int s = s_gb.b[i].lmsrc;
+        if (s > 0 && s < n) out[s]++;
+    }
 }
 
 void td5_geob_decimation(int *polys, int *points_dropped)

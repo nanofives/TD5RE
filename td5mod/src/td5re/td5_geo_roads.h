@@ -43,11 +43,32 @@
 #define TD5_GEO_RC_TRUNK         8
 #define TD5_GEO_RC_MOTORWAY      9
 
+/* OSM `surface=*`, collapsed to what the road pages can depict.
+ *
+ * The tag is on 2238 of La Plata's 2291 drivable ways and was being DROPPED by
+ * this reader (the module header used to say so: "surface ... deliberately
+ * skipped"), even though geo_fetch had always written it into ROADS.JSON --
+ * gate 4 of docs/plans/GEO_TAG_AUDIT.md. La Plata's distribution: asphalt 999,
+ * concrete 690, untagged 299, paved 194, sett 87, dirt 10, paving_stones 5,
+ * unpaved 3, gravel 3, cobblestone 1. So the interesting minority is 104 ways,
+ * which is small, real, and exactly the kind of thing that makes a real place
+ * read as a real place.
+ *
+ * SMOOTH is the default and the no-op: every smooth value maps to it and a
+ * SMOOTH street takes the span's own biome page, which is what every street
+ * did before. Only LOOSE and COBBLE change anything. */
+#define TD5_GEO_SURF_SMOOTH  0   /* asphalt, concrete, paved, paving_stones */
+#define TD5_GEO_SURF_COBBLE  1   /* sett, cobblestone, unhewn_cobblestone   */
+#define TD5_GEO_SURF_LOOSE   2   /* dirt, unpaved, gravel, ground, sand     */
+
 typedef struct {
     int    first, count;   /* slice of the shared point pool                  */
     int    lanes;          /* 1..TD5_GEO_ROADS_LANES_MAX (see the note below) */
     int    klass;          /* TD5_GEO_RC_*                                    */
     int    oneway;
+    int    oneway_dir;     /* +1 along the way, -1 against it, 0 two-way      */
+    int    surface;        /* TD5_GEO_SURF_*                                  */
+    int    roundabout;     /* OSM junction=roundabout / circular              */
     int    bridge, tunnel; /* OSM bridge=* / tunnel=*                         */
     int    layer;          /* OSM layer=*, 0 at grade                         */
     double width;          /* world units: lanes * TD5_TG_LANE_WIDTH          */
