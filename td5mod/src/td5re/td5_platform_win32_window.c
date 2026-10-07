@@ -49,6 +49,7 @@
 #include "td5_rcmd.h"
 #include "td5_render.h"  /* g_render_width/_height(+_f) resize cache */
 #include "td5re.h"       /* td5re_set_render_dims, g_td5 (selftest/control flags) */
+#include "td5_race_state.h"  /* dev span-triggered framedump: player span */
 #include "td5_rt.h"       /* [DEVICE-LOST] force LOW on recovery to avoid re-TDR */
 
 /* Pull in the wrapper types and backend access */
@@ -968,6 +969,51 @@ void td5_plat_present(int vsync)
             }
         }
     }
+
+#ifndef TD5RE_RELEASE
+    /* [FRAMEDUMP SPAN 2026-10-07] TD5RE_FRAMEDUMP_SPANS="600,1100,1149": dump
+     * once each time the PLAYER's live span first reaches one of the listed
+     * targets, to TD5RE_FRAMEDUMP_SPAN_PATH (a printf format with a single %d,
+     * default "log/span_%d.png"). Lets a harness capture a named point on the
+     * track WITHOUT the control socket (sockets are opt-in per Mariano). The
+     * targets are driven straight from the game's own span counter, so a slow
+     * or fast AI lands the same frames. Compiled out of RELEASE. */
+    {
+        static int   s_sp_init, s_sp_n, s_sp_targets[16], s_sp_done[16];
+        static char  s_sp_path[300];
+        if (!s_sp_init) {
+            const char *e = getenv("TD5RE_FRAMEDUMP_SPANS");
+            const char *pp = getenv("TD5RE_FRAMEDUMP_SPAN_PATH");
+            s_sp_init = 1;
+            snprintf(s_sp_path, sizeof s_sp_path, "%s",
+                     (pp && pp[0]) ? pp : "log/span_%d.png");
+            if (e && e[0]) {
+                const char *p = e;
+                while (*p && s_sp_n < 16) {
+                    int v = atoi(p);
+                    if (v > 0) s_sp_targets[s_sp_n++] = v;
+                    while (*p && *p != ',') p++;
+                    if (*p == ',') p++;
+                }
+            }
+        }
+        if (s_sp_n && g_td5.game_state == TD5_GAMESTATE_RACE) {
+            int ps = td5_game_get_player_slot(0);
+            int span = (ps >= 0) ? td5_game_get_slot_span(ps) : -1;
+            int i;
+            for (i = 0; i < s_sp_n; i++) {
+                if (!s_sp_done[i] && span >= s_sp_targets[i]) {
+                    char buf[320];
+                    snprintf(buf, sizeof buf, s_sp_path, s_sp_targets[i]);
+                    td5_plat_dump_frame_png(buf);
+                    s_sp_done[i] = 1;
+                    TD5_LOG_I("plat", "frame dumped at player span %d "
+                              "(target %d) -> %s", span, s_sp_targets[i], buf);
+                }
+            }
+        }
+    }
+#endif
 
     /* One-shot runtime dump request (live-control `framedump` verb). */
     if (s_fd_request[0]) {

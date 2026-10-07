@@ -20,6 +20,7 @@
 #include "td5re.h"
 #include "td5_platform.h"
 #include "td5_config.h"
+#include "td5_geo.h"         /* read-only: is this a real place? (blob sizing) */
 #include "td5_track.h"
 #include "td5_race_state.h"  /* read-only: the player's live span */
 #include "td5_trackgen.h"
@@ -165,6 +166,7 @@ static void tgstream_drain_synchronously(const char *why)
 int td5_tgstream_begin(void)
 {
     size_t blob_bytes;
+    unsigned bytes_per_span;
     int nspans;
 
     /* A non-streamed build leaves nothing pending, so this is the no-op that
@@ -179,11 +181,24 @@ int td5_tgstream_begin(void)
         return 0;
     }
 
-    /* 8 KB/span against about 6 KB/span measured across three configs
+    /* 8 KB/span against about 6 KB/span measured across three SYNTHETIC configs
      * (MARATHON: 19,098,312 B over 3187 spans). A streamed table cannot know
      * the real total until the last entry exists and must never realloc, so it
-     * over-reserves; publish stops and warns if even this runs out. */
-    blob_bytes = (size_t)nspans * 8192u;
+     * over-reserves; publish stops and warns if even this runs out.
+     *
+     * A GEO place is denser: it dresses every span from real OSM city data
+     * instead of a seeded biome layout. MEASURED on the 1150-span La Plata
+     * route: 9,399,944 B over the 259 entries that fitted = 9.1 KB/span, so
+     * 8 KB/span ran out at entry 259/288 and the last ~115 spans stayed
+     * undecorated -- the player drove the ribbon over open water with a
+     * mirrored far band where downtown should be. This only ever bit the
+     * IN-SESSION first race; MODELS.DAT is written from the generator's own
+     * per-entry buffers (tg_scenery_end), not from this blob, so the on-disk
+     * build was complete and a REUSE of it rendered correctly. That is also
+     * why raising the reservation cannot move a single track byte: synthetic
+     * byte-identity is structural here, not a coincidence. */
+    bytes_per_span = td5_geo_loaded() ? 16384u : 8192u;
+    blob_bytes = (size_t)nspans * bytes_per_span;
 
     s_passes_done = 0;
     s_caught_up_warned = 0;
@@ -218,8 +233,9 @@ int td5_tgstream_begin(void)
     }
 
     TD5_LOG_I(LOG_TAG, "scenery stream: worker started, %d entries over %d "
-              "spans, %zu B reserved, lead %d entries",
-              s_nentries, nspans, blob_bytes, tgstream_lead());
+              "spans, %zu B reserved (%u B/span, %s), lead %d entries",
+              s_nentries, nspans, blob_bytes, bytes_per_span,
+              td5_geo_loaded() ? "geo place" : "synthetic", tgstream_lead());
     return 1;
 }
 

@@ -742,9 +742,15 @@ int td5_track_scenery_publish_entry(int e, const void *bytes, size_t len)
          * undecorated, which is visible but not fatal. Silence here would
          * read as "the generator stopped emitting". */
         if (!s_scn_overflow++)
+            /* Report the RATE as well as the total: the reservation is set
+             * per span in td5_tgstream_begin, so "needed at least N B/entry"
+             * is the number that fixes it, not the raw byte count. */
             TD5_LOG_W("track", "streamed scenery: blob full at entry %d/%d "
-                      "(%zu B reserved) -- the remaining spans stay "
-                      "undecorated", e, s_scn_reserved, s_models_blob_size);
+                      "(%zu B reserved, %zu used, %zu B/entry so far, this "
+                      "entry wanted %zu) -- the remaining spans stay "
+                      "undecorated", e, s_scn_reserved, s_models_blob_size,
+                      s_scn_cursor, s_scn_cursor / (size_t)(e > 0 ? e : 1),
+                      len);
         goto settled;
     }
 
