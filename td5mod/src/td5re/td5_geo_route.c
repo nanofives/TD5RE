@@ -2505,6 +2505,23 @@ int td5_geo_route_commit(void)
         }
     }
 
+    /* FORKS.JSON is indexed by SPAN of the route it was confirmed against, and
+     * this is a different route, so leaving the old file in place would have
+     * the engine split carriageways at span ranges that no longer mean
+     * anything. geo_selector.py writes FORKS.JSON alongside ROUTE.JSON ALWAYS,
+     * including the delete when nothing is confirmed -- the two files are one
+     * artefact. Nothing here confirms a fork (the fork-candidate toggles are
+     * still Python-only), so the C side of that contract is the delete. */
+    {
+        char fp[300];
+        snprintf(fp, sizeof fp, "%.200s/FORKS.JSON", dir);
+        if (td5_plat_file_exists(fp)) {
+            td5_plat_file_delete(fp);
+            TD5_LOG_I(LOG_TAG, "geo route: dropped %s -- its span ranges belong "
+                      "to the previous route", fp);
+        }
+    }
+
     gr_reproject_vectors(dir, "ROADS.JSON",     "roads",     &c->proj, &oldp);
     gr_reproject_vectors(dir, "BUILDINGS.JSON", "buildings", &c->proj, &oldp);
     gr_reproject_vectors(dir, "AREAS.JSON",     "areas",     &c->proj, &oldp);
