@@ -1105,6 +1105,34 @@ void Screen_GeoGenerator(void)
     geo_handle_mouse();
     if (s_rebuild_wanted) geo_rebuild_route();
 
+#ifndef TD5RE_RELEASE
+    /* Dev-only in-session BUILD -> race, so the one-process path can be
+     * verified on a framedump: control-socket keys do not reach frontend menus
+     * and inject_key cannot press a vector button. TD5RE_GEO_AUTOBUILD=1 waits
+     * for the (seeded, see TD5RE_GEO_SEED) route to condition OK, presses
+     * BUILD once, then re-arms AutoRace on the slot it registered -- which is
+     * the whole point: it exercises the commit -> re-grid -> reload -> build
+     * path WITHOUT a relaunch, the thing a fresh process would paper over.
+     * Fires exactly once. Compiled out of RELEASE. */
+    {
+        static int s_autobuild_fired;
+        if (!s_autobuild_fired && td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
+            && geo_route_is_buildable()) {
+            s_autobuild_fired = 1;
+            TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - pressing "
+                      "BUILD on the %d-span route (dev build only)", s_spans);
+            geo_do_build();                 /* commit + invalidate + register */
+            if (s_selected_track >= 0) {
+                g_td5.ini.default_track = s_selected_track;
+                g_td5.ini.auto_race     = 1;   /* MENU loop fires auto_race_setup */
+                TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - armed "
+                          "AutoRace on slot %d", s_selected_track);
+            }
+            return;
+        }
+    }
+#endif
+
     s_buttons[GEO_BTN_CLEAR].disabled = (s_n_pts > 0) ? 0 : 1;
     s_buttons[GEO_BTN_BUILD].disabled = geo_route_is_buildable() ? 0 : 1;
 

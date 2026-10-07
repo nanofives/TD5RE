@@ -64,6 +64,13 @@ void td5_geo_shutdown(void);
 int  td5_geo_load(const char *slug);
 void td5_geo_unload(void);
 
+/* Drop every in-memory copy of the loaded place (rasters AND the parsed route)
+ * so the next td5_geo_sync() reloads from disk. For td5_geo_route_commit, which
+ * rewrites a place's ROUTE.JSON and rasters in place: a same-place rebuild in
+ * the same process would otherwise keep the pre-commit copies, because sync
+ * skips a reload when the slug/path are unchanged. */
+void td5_geo_invalidate(void);
+
 int         td5_geo_loaded(void);
 const char *td5_geo_place_name(void);   /* "" when nothing is loaded */
 const char *td5_geo_place_slug(void);

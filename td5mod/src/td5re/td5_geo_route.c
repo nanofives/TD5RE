@@ -2549,9 +2549,13 @@ int td5_geo_route_commit(void)
         return 1;
     }
 
-    /* The graph and everything td5_geo caches are in the OLD frame now. */
+    /* The graph and everything td5_geo caches are in the OLD frame now.
+     * td5_geo_invalidate (not plain unload) also drops the PARSED ROUTE and
+     * resets the route-want path, so the next td5_geo_sync re-reads the new
+     * ROUTE.JSON and the re-gridded rasters even though the slug and the path
+     * string are unchanged -- the in-session BUILD -> race path depends on it. */
     gr_graph_free();
-    td5_geo_unload();
+    td5_geo_invalidate();
     td5_geo_places_rescan();
     td5_geo_select(s_last.slug);
 

@@ -663,6 +663,22 @@ void td5_geo_sync(void)
     geo_route_sync();
 }
 
+/* [GEO ROUTE 2026-10-07] Drop every in-memory copy of the place so the NEXT
+ * td5_geo_sync() reloads it from disk. td5_geo_route_commit calls this after it
+ * rewrites ROUTE.JSON and re-grids the rasters IN PLACE: without it an
+ * in-session BUILD -> race would keep racing the pre-commit track, because
+ * td5_geo_sync skips a reload when the slug is unchanged and geo_route_sync
+ * skips one when the ROUTE.JSON PATH string is unchanged (both are true after a
+ * commit of the already-selected place). Clearing s_geo and the route-want
+ * string forces both reloads. A plain unload is not enough on its own: the
+ * route is cached separately and keys on the path, not the file's contents. */
+void td5_geo_invalidate(void)
+{
+    td5_geo_unload();            /* place + rasters: next sync sees a slug change */
+    geo_route_free();            /* parsed route nodes + grade separations       */
+    s_route_want[0] = '\0';      /* so geo_route_sync reloads the same path       */
+}
+
 void td5_geo_select(const char *slug)
 {
     TD5_File *f;

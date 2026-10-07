@@ -4677,6 +4677,38 @@ static unsigned int tg_fnv1a(unsigned int h, const void *p, size_t n)
     return h;
 }
 
+/* The build-identity hash for the REUSE check (TG_Stamp.spec_hash). The spec
+ * struct alone is not enough when a geo route drives the road: its only
+ * route-dependent field is target_spans, so two DIFFERENT routes of the same
+ * length would hash the same and the second one would REUSE the first one's
+ * level091. So when (and only when) a geo route is loaded, fold the route's own
+ * nodes into the hash.
+ *
+ * BYTE-IDENTITY: with no geo route loaded this returns exactly the old
+ * tg_fnv1a(seed, spec, sizeof) value, so a synthetic build's stamp -- and the
+ * REUSE decision that keys on it -- is unchanged. A genuine re-race of the SAME
+ * route hashes identically and still REUSEs, which is what we want; only a
+ * different route misses. The nodes are read back from the loaded route (the
+ * same values td5_geo.c parsed out of ROUTE.JSON), so the hash is deterministic
+ * across builds of one route, which the determinism gate requires. */
+static unsigned int tg_spec_hash(const TD5_TrackGenSpec *spec)
+{
+    unsigned int h = tg_fnv1a(2166136261u, spec, sizeof *spec);
+    const int n = td5_geo_route_count();
+    int i;
+    if (n < 2) return h;                 /* synthetic: unchanged */
+    h = tg_fnv1a(h, &n, sizeof n);
+    for (i = 0; i < n; i++) {
+        double x = 0.0, z = 0.0;
+        int lanes = 0;
+        td5_geo_route_node(i, &x, &z, &lanes);
+        h = tg_fnv1a(h, &x, sizeof x);
+        h = tg_fnv1a(h, &z, sizeof z);
+        h = tg_fnv1a(h, &lanes, sizeof lanes);
+    }
+    return h;
+}
+
 static unsigned int tg_env_hash(void)
 {
     unsigned int h = 2166136261u;
@@ -4888,7 +4920,7 @@ int td5_trackgen_regenerate(unsigned int seed)
         memset(&want, 0, sizeof(want));
         want.version   = TG_STAMP_VERSION;
         want.seed      = seed;
-        want.spec_hash = tg_fnv1a(2166136261u, &spec, sizeof(spec));
+        want.spec_hash = tg_spec_hash(&spec);
         want.env_hash  = tg_env_hash();
         want.exe_id    = tg_exe_id();
         if (td5_env_flag_on("TD5RE_AUTOTRACK_REUSE") && tg_stamp_read(&have) &&
@@ -4954,7 +4986,7 @@ int td5_trackgen_regenerate(unsigned int seed)
             memset(&st, 0, sizeof(st));
             st.version   = TG_STAMP_VERSION;
             st.seed      = seed;
-            st.spec_hash = tg_fnv1a(2166136261u, &spec, sizeof(spec));
+            st.spec_hash = tg_spec_hash(&spec);
             st.env_hash  = tg_env_hash();
             st.exe_id    = tg_exe_id();
             st.spans = spans; st.ring = ring; st.finish = finish;
