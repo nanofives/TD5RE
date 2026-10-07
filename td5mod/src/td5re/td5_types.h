@@ -492,7 +492,13 @@ typedef enum TD5_ScreenIndex {
     /* [CHAOS CO-OP 2026-09-29] Screen_ChaosTeams (td5_fe_chaos.c) — seat/role
      * claim board for TD5_MP_MODE_CHAOS_COOP, after MP MODE CONFIG. */
     TD5_SCREEN_CHAOS_TEAMS         = 55,
-    TD5_SCREEN_COUNT               = 56
+    /* [GEO GENERATOR 2026-10-07] Screen_GeoGenerator (td5_fe_geo.c) — the OSM
+     * map + route builder, entered from SELECT TRACK's "GEOSPATIAL TRACK
+     * GENERATOR" row. APPEND-ONLY, like every entry above it: these numbers
+     * are referenced by --StartScreen, the logs, the inputscripts and the
+     * docs, so a renumber silently redirects all of them. */
+    TD5_SCREEN_GEO_GENERATOR       = 56,
+    TD5_SCREEN_COUNT               = 57
 } TD5_ScreenIndex;
 
 /* ========================================================================

@@ -338,6 +338,11 @@ static int  s_carsel_rand_btn = -1;
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS button index on the track-select
  * column, or -1 when the current pick is not the auto-generated slot. */
 static int  s_trksel_auto_btn = -1;
+/* [GEO GENERATOR 2026-10-07] GEOSPATIAL TRACK GENERATOR button index on the
+ * track-select column. Unlike the STUDIO chip above this one is ALWAYS shown:
+ * it is how a player builds a route from a real place in the first place, so
+ * gating it on the current pick would hide the only way in. */
+static int  s_trksel_geo_btn = -1;
 /* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO is now reachable from TWO
  * screens (Track Selection and Quick Race), so the studio can no longer hardcode
  * its way back to track-select. Whoever opens it records the parent here, and the
@@ -7460,6 +7465,15 @@ static void trksel_build_main_buttons(void) {
                                                120, 306, 224, 32);
     frontend_trksel_refresh_auto_btn();
 
+    /* [GEO GENERATOR 2026-10-07] GEOSPATIAL TRACK GENERATOR. Sits in the empty
+     * band between LAPS (167..199) and the STUDIO row (306), at the standard
+     * FE_MENU_BTN_X / FE_MENU_BTN_W so the column stays aligned under the
+     * title. The label is long for a 224-wide frame; the shared button loop
+     * condenses it (fe_fit_text_scale, floor 0.55) rather than clipping, so
+     * Mariano's wording survives intact instead of being abbreviated. */
+    s_trksel_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
+                                              120, 268, 224, 32);
+
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
     /* Track-dependent row visibility (Direction hidden on forward-only tracks,
      * Laps hidden on point-to-point tracks) — same helpers, new indices. */
@@ -9479,6 +9493,20 @@ void Screen_TrackSelection(void) {
                 frontend_play_sfx(3);
                 s_at_parent_screen = TD5_SCREEN_TRACK_SELECTION;
                 td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+                break;
+            }
+
+            /* [GEO GENERATOR 2026-10-07] GEOSPATIAL TRACK GENERATOR -> the OSM
+             * map screen. Same focus-agreement guard as the STUDIO chip: this
+             * button is created past the fixed rows, so in a flow with fewer
+             * buttons a stray s_button_index could alias it and open the map
+             * on a focus change. */
+            if (s_trksel_geo_btn >= 0 &&
+                s_button_index == s_trksel_geo_btn &&
+                s_selected_button == s_trksel_geo_btn) {
+                frontend_play_sfx(3);
+                frontend_geo_generator_set_parent(TD5_SCREEN_TRACK_SELECTION);
+                td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
                 break;
             }
 
