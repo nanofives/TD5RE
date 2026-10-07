@@ -82,8 +82,17 @@ typedef struct {
     double build_ms;             /* wall time of td5_geo_route_build            */
 } TD5_GeoRouteResult;
 
-/* Route + condition through start, waypoints..., finish. Synchronous but must
-   finish well under a second on La Plata; L2 calls it on a worker if needed. */
+/* Route + condition through start, waypoints..., finish. `n_pts` >= 2.
+ * Synchronous but must finish well under a second on La Plata; the screen
+ * calls it on a worker once a build has been measured over the frame budget,
+ * so it must not touch frontend state or g_td5 -- it reads the place cache
+ * off disk and writes only its own buffers.
+ *
+ * RETURNS 0 when the CALL was made, and `out->verdict` then says whether the
+ * route is raceable -- every refusal (no data, no path, too long, too short)
+ * is a 0 return with a verdict, NOT an error return. Non-zero means the call
+ * itself could not be made (a null `out`). `out->path` and `out->crossings`
+ * point into module-owned storage valid until the next build. */
 int  td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult *out);
 
 /* Write ROUTE_RAW.JSON + ROUTE.JSON for the last OK build, rebuild the rasters

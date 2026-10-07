@@ -1734,7 +1734,14 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     int *raw_lanes = NULL;
     double raw_len = 0.0;
 
-    if (!out) return 0;
+    /* RETURN CONVENTION, and it is the opposite of the reflex: 0 means the
+     * CALL was made and `out->verdict` carries the answer, including every
+     * refusal. Non-zero means the call itself could not be made at all. The
+     * screen tests `== 0` (td5_fe_geo.c:334, :369) and prints ROUTER REFUSED
+     * THE REQUEST otherwise, so returning 1 on a good route -- which this did
+     * until the round-1007 integration -- made every successful build read as
+     * a router failure on screen. */
+    if (!out) return 1;
     if (!pts || n_pts < 2) {
         gr_result_set(out, TD5_GEO_ROUTE_ERROR, "", "click A and B first");
         return 0;
@@ -1952,7 +1959,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
 
     out->build_ms = (double)(td5_plat_time_us() - t_us) / 1000.0;
     s_result = *out;
-    return out->verdict == TD5_GEO_ROUTE_OK;
+    return 0;    /* the call was made; out->verdict carries the answer */
 }
 
 /* ======================================================================== *
