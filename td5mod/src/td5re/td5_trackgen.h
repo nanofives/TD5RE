@@ -187,6 +187,11 @@ int td5_trackgen_is_generated_slot(int slot);   /* auto slot OR a geo place */
 
 /* Place index for a geo slot (the index td5_geo_places_slug() takes), or -1. */
 int td5_trackgen_geo_index_for_slot(int slot);
+/* The inverse: the track slot a registered place index owns, or -1 when `gi`
+ * is out of range. [GEO GENERATOR 2026-10-07] Added so td5_fe_geo.c can jump
+ * SELECT TRACK onto the place it just built without including
+ * td5_trackgen_internal.h for TD5_GEO_SLOT_BASE. */
+int td5_trackgen_geo_slot_for_index(int gi);
 
 /* Register every raceable place under re/assets/geo/ as a selectable track.
  * Rescans the places first. Safe to call again (rows update in place); returns

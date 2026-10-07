@@ -171,6 +171,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [PERF PRESETS 2026-09-29] auto-select + quality/lighting presets */
     /* [54] */ { "PERFORMANCE CUSTOM",   Screen_PerformanceCustom },/* [PERF PRESETS 2026-09-29] the per-knob list (was screen 53) */
     /* [55] */ { "CHAOS TEAMS",           Screen_ChaosTeams },      /* [CHAOS CO-OP 2026-09-29] seat/role board */
+    /* [56] */ { "GEO GENERATOR",        Screen_GeoGenerator },    /* [GEO GENERATOR 2026-10-07] OSM map + route builder */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -4058,6 +4059,12 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_CHAOS_TEAMS:
         return TD5_SCREEN_MP_MODE_CONFIG;
 
+    /* [GEO GENERATOR 2026-10-07] BACK follows whoever opened the map, the same
+     * way the AUTO TRACK STUDIO chip does — SELECT TRACK today, Quick Race if
+     * it ever grows its own row. */
+    case TD5_SCREEN_GEO_GENERATOR:
+        return frontend_geo_generator_parent_screen();
+
     case TD5_SCREEN_CAR_SELECTION:
         if (s_network_active || s_previous_screen == TD5_SCREEN_NETWORK_LOBBY) {
             return TD5_SCREEN_NETWORK_LOBBY;
@@ -6440,6 +6447,13 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] same 3/8 anim states */
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
+        break;
+    /* [GEO GENERATOR 2026-10-07] No button animation: the map screen jumps
+     * straight to s_inner_state 1 with s_anim_complete already set, because a
+     * slide-in over live map imagery reads as a glitch rather than a
+     * transition. Listed here with that reason rather than left to the
+     * default so the next person does not "fix" the omission. */
+    case TD5_SCREEN_GEO_GENERATOR:
         break;
     case TD5_SCREEN_MUSIC_TEST:
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
@@ -11312,6 +11326,12 @@ void td5_frontend_render_ui_rects(void) {
              * (Prototype in td5_frontend_internal.h — no extern-in-.c.) */
             frontend_chaos_teams_render(sx, sy);
             frontend_mp_setup_disconnect_render(sx, sy);
+            break;
+        case TD5_SCREEN_GEO_GENERATOR:
+            /* [GEO GENERATOR 2026-10-07] The whole map pane draws POST-button:
+             * the status box sits directly above the button row and the route
+             * markers must composite over everything. */
+            frontend_geo_generator_render(sx, sy);
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,

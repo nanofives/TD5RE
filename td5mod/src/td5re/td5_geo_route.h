@@ -91,9 +91,25 @@ int  td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult
 int  td5_geo_route_commit(void);
 
 /* Bounds of every downloaded place, so the screen can shade where routing works.
- * bbox rows are {south, west, north, east} in degrees. Returns the count
- * written (<= max); pass slugs == NULL to count only. */
+ * bbox rows are {west, south, east, north} in degrees -- lon first, the order
+ * the screen's own projection takes, and the one td5_fe_geo.c reads. Returns
+ * the count written (<= max); pass slugs == NULL to count only. */
 int  td5_geo_route_places(char slugs[][64], double bbox[][4], int max);
+
+/* The conditioned-span ceiling the engine cannot exceed: s_struct[] / s_rn[]
+ * in td5_tg_road.c are indexed by node with no bounds check, so the
+ * conditioner enforces the cap rather than leaving it to the build. Mirrors
+ * TD5_TG_MAX_SPANS in td5_trackgen_internal.h, repeated here so the screen can
+ * show "N / 3000" without pulling in the generator's private header. */
+#define TD5_GEO_ROUTE_MAX_SPANS 3000
+
+/* 1 while the L2 placeholder is standing in for the router, 0 once the real
+ * module is linked. The screen gates BUILD TRACK on it and labels its status
+ * line with it, so a framedump of the placeholder can never be read as proof
+ * that routing works. (The L2 header had this comment the other way round;
+ * every call site -- td5_fe_geo.c:823, :957, :1030 -- reads it as written
+ * here, and the placeholder returned 1.) */
+int  td5_geo_route_is_stub(void);
 
 /* ------------------------------------------------------------ extensions ---
  * Additive helpers. The three calls above are the contract; these exist so the

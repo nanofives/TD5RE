@@ -4550,6 +4550,11 @@ int td5_trackgen_geo_index_for_slot(int slot)
     return td5_trackgen_is_geo_slot(slot) ? slot - TD5_GEO_SLOT_BASE : -1;
 }
 
+int td5_trackgen_geo_slot_for_index(int gi)
+{
+    return (gi >= 0 && gi < TD5_GEO_SLOT_MAX) ? TD5_GEO_SLOT_BASE + gi : -1;
+}
+
 int td5_trackgen_is_generated_slot(int slot)
 {
     return td5_trackgen_is_auto_slot(slot) || td5_trackgen_is_geo_slot(slot);

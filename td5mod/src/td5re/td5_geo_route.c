@@ -346,7 +346,7 @@ typedef struct {
 static struct {
     char    slug[64];
     GeoProj proj;                 /* the PLACE frame, as PLACE.JSON has it */
-    double  bbox[4];              /* S W N E, degrees */
+    double  bbox[4];              /* W S E N, degrees -- see the header   */
     int     have_gbbox;
     double  gbbox[4];             /* route_graph_bbox, when PLACE.JSON pins one */
 
@@ -443,9 +443,14 @@ static void gr_edge_add(int from, int to, double cost, int road)
  * and shorter path for the same A/B (La Plata 1492 -> 1200 spans), so touching
  * a saved route silently changed it. PLACE.JSON "route_graph_bbox" pins the
  * area the user actually routed in, and the graph is limited to it. */
+/* bb is {west, south, east, north}, the public order from td5_geo_route.h.
+ * ONE order is used end to end -- the public call, the internal filter and
+ * the commit's grid sizing all read these four slots the same way, because a
+ * bbox that means two different things in two functions is the shape of bug
+ * that reads as "the route is outside the place" with nothing logged. */
 static int gr_in_bbox(double la, double lo, const double *bb)
 {
-    return bb[0] <= la && la <= bb[2] && bb[1] <= lo && lo <= bb[3];
+    return bb[1] <= la && la <= bb[3] && bb[0] <= lo && lo <= bb[2];
 }
 
 static int gr_place_read(const char *slug)
@@ -487,8 +492,8 @@ static int gr_place_read(const char *slug)
         const cJSON *e = cJSON_GetObjectItem(bb, "east");
         if (cJSON_IsNumber(s) && cJSON_IsNumber(w) &&
             cJSON_IsNumber(n) && cJSON_IsNumber(e)) {
-            s_g.bbox[0] = s->valuedouble; s_g.bbox[1] = w->valuedouble;
-            s_g.bbox[2] = n->valuedouble; s_g.bbox[3] = e->valuedouble;
+            s_g.bbox[0] = w->valuedouble; s_g.bbox[1] = s->valuedouble;
+            s_g.bbox[2] = e->valuedouble; s_g.bbox[3] = n->valuedouble;
         }
     }
     gb = cJSON_GetObjectItem(root, "route_graph_bbox");
@@ -499,8 +504,8 @@ static int gr_place_read(const char *slug)
         const cJSON *e = cJSON_GetObjectItem(gb, "east");
         if (cJSON_IsNumber(s) && cJSON_IsNumber(w) &&
             cJSON_IsNumber(n) && cJSON_IsNumber(e)) {
-            s_g.gbbox[0] = s->valuedouble; s_g.gbbox[1] = w->valuedouble;
-            s_g.gbbox[2] = n->valuedouble; s_g.gbbox[3] = e->valuedouble;
+            s_g.gbbox[0] = w->valuedouble; s_g.gbbox[1] = s->valuedouble;
+            s_g.gbbox[2] = e->valuedouble; s_g.gbbox[3] = n->valuedouble;
             s_g.have_gbbox = 1;
         }
     }
@@ -1616,6 +1621,50 @@ static void gr_result_set(TD5_GeoRouteResult *r, TD5_GeoRouteVerdict v,
     snprintf(r->reason, sizeof r->reason, "%s", reason ? reason : "");
 }
 
+/* The ROUTABLE bounds of one place, as {west, south, east, north}.
+ *
+ * route_graph_bbox FIRST, the fetched bbox only as a fallback. The two are not
+ * interchangeable: the selector pins route_graph_bbox on the first SEND TO
+ * GAME (plan 6f) and gr_graph_load filters the road graph to it, so a point
+ * inside the fetched bbox but outside the pinned one has NO roads in the
+ * graph. Reporting the fetched bbox would shade that annulus as routable and
+ * then refuse every click in it with a "250 m from the nearest road" message
+ * that names the wrong cause. L2's placeholder had this right and it is kept.
+ *
+ * Returns 1 when `out` was filled. */
+static int gr_place_bounds(const char *slug, double *out)
+{
+    char path[512];
+    char *json;
+    cJSON *root, *bb;
+    int ok = 0;
+
+    if (!slug || !slug[0]) return 0;
+    snprintf(path, sizeof path, "re/assets/geo/%s/PLACE.JSON", slug);
+    json = gr_slurp(path, NULL);
+    if (!json) return 0;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return 0;
+
+    bb = cJSON_GetObjectItem(root, "route_graph_bbox");
+    if (!bb || !cJSON_IsObject(bb)) bb = cJSON_GetObjectItem(root, "bbox");
+    if (bb && cJSON_IsObject(bb)) {
+        const cJSON *we = cJSON_GetObjectItem(bb, "west");
+        const cJSON *so = cJSON_GetObjectItem(bb, "south");
+        const cJSON *ea = cJSON_GetObjectItem(bb, "east");
+        const cJSON *no = cJSON_GetObjectItem(bb, "north");
+        if (cJSON_IsNumber(we) && cJSON_IsNumber(so) &&
+            cJSON_IsNumber(ea) && cJSON_IsNumber(no)) {
+            out[0] = we->valuedouble; out[1] = so->valuedouble;
+            out[2] = ea->valuedouble; out[3] = no->valuedouble;
+            ok = 1;
+        }
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
 const char *td5_geo_route_place_at(TD5_GeoLatLon p)
 {
     static char slug[64];
@@ -1624,31 +1673,11 @@ const char *td5_geo_route_place_at(TD5_GeoLatLon p)
     for (i = 0; i < n; i++) {
         const char *s = td5_geo_places_slug(i);
         double bb[4];
-        char path[512];
-        char *json;
-        cJSON *root, *b;
-        int hit = 0;
-        snprintf(path, sizeof path, "re/assets/geo/%s/PLACE.JSON", s);
-        json = gr_slurp(path, NULL);
-        if (!json) continue;
-        root = cJSON_Parse(json);
-        free(json);
-        if (!root) continue;
-        b = cJSON_GetObjectItem(root, "bbox");
-        if (b && cJSON_IsObject(b)) {
-            const cJSON *so = cJSON_GetObjectItem(b, "south");
-            const cJSON *we = cJSON_GetObjectItem(b, "west");
-            const cJSON *no = cJSON_GetObjectItem(b, "north");
-            const cJSON *ea = cJSON_GetObjectItem(b, "east");
-            if (cJSON_IsNumber(so) && cJSON_IsNumber(we) &&
-                cJSON_IsNumber(no) && cJSON_IsNumber(ea)) {
-                bb[0] = so->valuedouble; bb[1] = we->valuedouble;
-                bb[2] = no->valuedouble; bb[3] = ea->valuedouble;
-                hit = gr_in_bbox(p.lat, p.lon, bb);
-            }
+        if (!gr_place_bounds(s, bb)) continue;
+        if (gr_in_bbox(p.lat, p.lon, bb)) {
+            snprintf(slug, sizeof slug, "%s", s);
+            return slug;
         }
-        cJSON_Delete(root);
-        if (hit) { snprintf(slug, sizeof slug, "%s", s); return slug; }
     }
     slug[0] = '\0';
     return slug;
@@ -1659,36 +1688,17 @@ int td5_geo_route_places(char slugs[][64], double bbox[][4], int max)
     const int n = td5_geo_places_count();
     int i, out = 0;
     for (i = 0; i < n; i++) {
-        const char *s = td5_geo_places_slug(i);
-        char path[512];
-        char *json;
-        cJSON *root, *b;
+        double bb[4];
         if (slugs && out >= max) break;
-        snprintf(path, sizeof path, "re/assets/geo/%s/PLACE.JSON", s);
-        json = gr_slurp(path, NULL);
-        if (!json) continue;
-        root = cJSON_Parse(json);
-        free(json);
-        if (!root) continue;
-        b = cJSON_GetObjectItem(root, "bbox");
-        if (b && cJSON_IsObject(b)) {
-            const cJSON *so = cJSON_GetObjectItem(b, "south");
-            const cJSON *we = cJSON_GetObjectItem(b, "west");
-            const cJSON *no = cJSON_GetObjectItem(b, "north");
-            const cJSON *ea = cJSON_GetObjectItem(b, "east");
-            if (cJSON_IsNumber(so) && cJSON_IsNumber(we) &&
-                cJSON_IsNumber(no) && cJSON_IsNumber(ea)) {
-                if (slugs) {
-                    snprintf(slugs[out], 64, "%s", s);
-                    if (bbox) {
-                        bbox[out][0] = so->valuedouble; bbox[out][1] = we->valuedouble;
-                        bbox[out][2] = no->valuedouble; bbox[out][3] = ea->valuedouble;
-                    }
-                }
-                out++;
+        if (!gr_place_bounds(td5_geo_places_slug(i), bb)) continue;
+        if (slugs) {
+            snprintf(slugs[out], 64, "%s", td5_geo_places_slug(i));
+            if (bbox) {
+                bbox[out][0] = bb[0]; bbox[out][1] = bb[1];
+                bbox[out][2] = bb[2]; bbox[out][3] = bb[3];
             }
         }
-        cJSON_Delete(root);
+        out++;
     }
     return out;
 }
@@ -2466,8 +2476,8 @@ int td5_geo_route_commit(void)
     /* New grid: the world-space bbox of the place's lat/lon box in the NEW
      * frame, exactly as geo_fetch.build_height_raster sizes it. */
     {
-        const double lats[2] = { s_g.bbox[0], s_g.bbox[2] };
-        const double lons[2] = { s_g.bbox[1], s_g.bbox[3] };
+        const double lats[2] = { s_g.bbox[1], s_g.bbox[3] };   /* south, north */
+        const double lons[2] = { s_g.bbox[0], s_g.bbox[2] };   /* west,  east  */
         int k = 0, a, b;
         for (a = 0; a < 2; a++) for (b = 0; b < 2; b++) {
             gr_proj_to_world(&c->proj, lats[a], lons[b], &corners_x[k], &corners_z[k]);
@@ -2806,6 +2816,15 @@ static void gr_self_test(int level)
     fflush(stdout);
 }
 #endif /* !TD5RE_RELEASE */
+
+/* 0: this IS the real router. The L2 placeholder (td5_geo_route_stub.c, gone
+ * at the round-1007 integration) returned 1 and the screen greyed BUILD TRACK
+ * on it. Kept rather than deleted so the screen needs no edit and so a future
+ * placeholder has the same seam to sit behind. */
+int td5_geo_route_is_stub(void)
+{
+    return 0;
+}
 
 int td5_geo_route_init(void)
 {
