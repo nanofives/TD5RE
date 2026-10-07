@@ -1262,7 +1262,8 @@ def convert_osm(osm: dict, proj: LocalProjection,
             continue
 
         if (leisure in AREA_KEEP_LEISURE or landuse in AREA_KEEP_LANDUSE
-                or natural in AREA_KEEP_NATURAL):
+                or natural in AREA_KEEP_NATURAL
+                or t.get("amenity") in AREA_KEEP_AMENITY):
             areas.append({
                 "id": el.get("id"),
                 "name": t.get("name"),
@@ -1270,8 +1271,12 @@ def convert_osm(osm: dict, proj: LocalProjection,
                 # looked up by, so the rasteriser is unchanged. The precedence
                 # leisure > landuse > natural is the sharpest-first order: a
                 # mapper who drew `leisure=park` over `natural=wood` meant the
-                # park, and `natural` is the broad-brush fallback.
-                "kind": leisure or landuse or natural,
+                # park, and `natural` is the broad-brush fallback. `amenity`
+                # sits last because a school ground tagged `leisure=pitch` is
+                # a pitch first and a school second.
+                "kind": (leisure or landuse or natural
+                         or (t.get("amenity")
+                             if t.get("amenity") in AREA_KEEP_AMENITY else None)),
                 "leisure": leisure,
                 "landuse": landuse,
                 "natural": natural,
@@ -1341,11 +1346,27 @@ _OSM_TO_COVER = {
     "residential": COVER_BUILT, "commercial": COVER_BUILT,
     "retail": COVER_BUILT, "industrial": COVER_BUILT,
     "education": COVER_BUILT, "institutional": COVER_BUILT,
-    "stadium": COVER_BUILT, "sports_centre": COVER_BUILT,
+    # Institutional PRECINCTS mapped as an amenity area rather than a landuse.
+    # BUILT, and all but inert: WorldCover already reads these as built-up, so
+    # the OSM outline sharpens an edge instead of inventing a class.
+    "school": COVER_BUILT, "university": COVER_BUILT, "college": COVER_BUILT,
+    "hospital": COVER_BUILT, "prison": COVER_BUILT, "parking": COVER_BUILT,
+    # A sports ground is PITCHES AND GRASS, not built-up. MEASURED: mapping
+    # these to BUILT painted 53142 cells of La Plata (two club grounds plus
+    # the stadium, 0.65 km2) as built-up, which is both wrong and the single
+    # largest cover change of the tag round. GRASS also agrees with
+    # geob_area_kind_of, which classes them PITCH -- a flat laid ground.
+    "stadium": COVER_GRASS, "sports_centre": COVER_GRASS,
     "construction": COVER_BARE, "quarry": COVER_BARE, "brownfield": COVER_BARE,
-    "landfill": COVER_BARE, "railway": COVER_BARE, "sand": COVER_BARE,
+    "landfill": COVER_BARE, "sand": COVER_BARE,
     "beach": COVER_BARE, "bare_rock": COVER_BARE, "scree": COVER_BARE,
     "shingle": COVER_BARE, "mud": COVER_BARE,
+    # `landuse=railway` is NOT here, deliberately. Three La Plata polygons
+    # would have painted 41311 cells BARE, and 19562 of those cells were
+    # WorldCover BUILT and 7898 TREE -- the OSM outline covers a whole station
+    # precinct, buildings and trees included, so reading it as ballast
+    # OVERRIDES A MEASUREMENT WITH A GUESS over half a square kilometre. The
+    # 10 m classifier already knows what is there.
     "glacier": COVER_SNOW,
     "wetland": COVER_WETLAND, "marsh": COVER_WETLAND, "swamp": COVER_WETLAND,
     "swimming_pool": COVER_WATER, "basin": COVER_WATER,
@@ -1371,8 +1392,15 @@ AREA_KEEP_LANDUSE = frozenset((
     "orchard", "vineyard", "residential", "commercial", "retail",
     "industrial", "construction", "farmland", "farmyard", "quarry",
     "brownfield", "greenfield", "landfill", "education", "institutional",
-    "religious", "military", "railway", "plant_nursery",
+    "religious", "military", "plant_nursery",
     "greenhouse_horticulture", "recreation_ground", "grassland", "basin",
+))
+# An institutional PRECINCT mapped as an amenity area rather than a landuse.
+# The widened query made these visible for the first time -- 36 school grounds,
+# 34 car parks, 14 hospital and 9 university precincts at La Plata, which were
+# the bulk of the 135 `ignored` ways the first re-fetch reported.
+AREA_KEEP_AMENITY = frozenset((
+    "school", "university", "college", "hospital", "prison", "parking",
 ))
 # `natural` as an AREA. water and coastline are NOT here: they are claimed by
 # the water branch above this one and must stay there, because the sea
@@ -1387,7 +1415,7 @@ AREA_KEEP_NATURAL = frozenset((
 # bug this round found. Asserted at import so it cannot come back.
 _UNREACHABLE_COVER = sorted(set(_OSM_TO_COVER)
                             - AREA_KEEP_LEISURE - AREA_KEEP_LANDUSE
-                            - AREA_KEEP_NATURAL)
+                            - AREA_KEEP_NATURAL - AREA_KEEP_AMENITY)
 assert not _UNREACHABLE_COVER, (
     "_OSM_TO_COVER rows no AREA_KEEP_* set can reach: %s" % _UNREACHABLE_COVER)
 
