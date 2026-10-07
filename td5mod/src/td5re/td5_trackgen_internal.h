@@ -128,6 +128,11 @@
  * use them are defined earlier. */
 int tg_surface_attr(int si);
 int tg_road_page(int si);
+/* Page for a TD5_GEO_SURF_* read off a real OSM way, or -1 for "no opinion"
+ * (SMOOTH), where the caller keeps the span's own biome page. Draw only --
+ * grip still comes from tg_surface_attr, so a cobbled real street looks
+ * cobbled and drives unchanged. */
+int tg_road_page_for_geo_surface(int geo_surf);
 /* Texture page ids, in the order tg_emit_textures writes them. Declared here
  * because the mesh emitters (further up) reference them. */
 #define TD5_TG_PAGE_ROAD   0
@@ -1490,6 +1495,11 @@ int  tg_network_built(void);
 void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
 int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
 int  tg_net_mouth_kind(int si, int left);                          /* TG_NE_* or -1  */
+/* TD5_GEO_SURF_* of the REAL OSM way behind this mouth, or SMOOTH (0) when the
+ * street is synthetic, there is no mouth, or the cache predates the tag round.
+ * SMOOTH is the no-op: the cross-street emitter then takes the span's own biome
+ * page, which is what every street did before docs/plans/GEO_TAG_AUDIT.md. */
+int  tg_net_mouth_surface(int si, int left);
 /* fork placement (was inline in tg_emit_strip) and the bypass lateral table */
 void   tg_fork_place(const TG_NodeList *nl, int ring);
 extern int s_fork_placed;

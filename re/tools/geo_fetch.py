@@ -162,6 +162,147 @@ HIGHWAY_NONDRIVABLE = {
 # (section 10 item 3): per-country or per-landuse would be better.
 STOREY_HEIGHT_M = 3.0
 
+# Bumped whenever the tag set written into the cache changes, and recorded in
+# PLACE.JSON as `tag_schema`. A reader can then tell a pre-2026-10-07 cache
+# (no amenity/office/government on a building, `landmark` decided by the old
+# narrow rule) from one fetched after, without guessing from which keys happen
+# to be present on the footprint it is looking at.
+#   1  the original Phase 1..5 set
+#   2  2026-10-07, round 1007: the full tag path (docs/plans/GEO_TAG_AUDIT.md)
+TAG_SCHEMA = 2
+
+# ------------------------------------------------------------ landmark rule ---
+#
+# THIS IS THE PERMANENT HOME the 2026-09-30 close-out asked for. The rule was
+# `tourism or historic or (name and building in {cathedral, church, stadium,
+# museum, train_station, civic, public})`, which flagged 10 of La Plata's 2047
+# footprints and only 2 within 100 m of the route -- so the whole landmark path
+# shipped exercised twice. The tags that catch the rest were never carried into
+# BUILDINGS.JSON, so no C-side rule could see them.
+#
+# The table below is `re/tools/geo_fixtures/land_relabel.py`'s RULE, which was
+# written as the offline stand-in for this and measured on the raw responses:
+# La Plata 10 -> 77 cache landmarks, 2 of 54 -> 11 of 54 within 100 m of the
+# route. `land_relabel.py` stays as the tool that upgrades an OLD cache in
+# place without the network; the two tables are kept identical on purpose.
+#
+# tag -> the values that name a landmark, or True for "any value".
+#
+# ORDER IS THE ATTRIBUTION ORDER, not a precedence that can change the answer:
+# `landmark` is an OR over every row, so reordering moves only which tag is
+# named in `landmark_src`. Most specific statement of WHAT THE STRUCTURE IS
+# first. Measured reason for this order: with `tourism` ahead of `building`,
+# La Plata's Cathedral came out as "landmark because tourism=viewpoint", which
+# is true, useless, and hides `building=cathedral` sitting right beside it.
+LANDMARK_RULE = {
+    "building": {"cathedral", "church", "chapel", "basilica", "mosque",
+                 "synagogue", "temple", "monastery", "shrine", "stadium",
+                 "museum", "palace", "castle", "monument", "memorial",
+                 "train_station", "courthouse", "townhall", "government",
+                 "civic", "public", "theatre", "opera_house"},
+    "government": True,
+    "office": {"government", "diplomatic"},
+    "amenity": {"place_of_worship", "theatre", "townhall", "courthouse",
+                "arts_centre", "police", "fire_station", "embassy", "casino",
+                "cinema", "conference_centre", "exhibition_centre",
+                "monastery", "public_building"},
+    "historic": True,
+    "heritage": True,
+    "man_made": {"tower", "lighthouse", "obelisk", "water_tower", "campanile"},
+    "tourism": {"attraction", "museum", "gallery", "artwork", "viewpoint",
+                "theme_park", "aquarium", "zoo", "monument"},
+}
+# Deliberately NOT promoted, and why: a hotel or a hostel carries `tourism=*`
+# and is ordinary street frontage. The OLD blanket `tourism or historic` is
+# what put "UNICO Eco Hostel Boutique" in the La Plata landmark list, so
+# widening the rule and narrowing this one are the same change.
+# `amenity=community_centre` is out for the same reason -- La Plata has 14 and
+# they are neighbourhood social clubs in ordinary shopfronts.
+# `university`, `school`, `hospital`, `office` and `retail` as BUILDING values
+# stay out too: 29 universities and 13 schools in one cache is urban fabric,
+# not landmarks (the same judgement the C reader's geob_class_is_landmark
+# records).
+TOURISM_NOT_LANDMARK = {"hotel", "hostel", "guest_house", "motel", "apartment",
+                        "chalet", "camp_site", "caravan_site", "information"}
+
+
+def landmark_decide(t: dict) -> tuple[bool, str | None]:
+    """(is_landmark, "key=value") for one tag dict, or (False, None).
+
+    The deciding tag is returned so a promotion is ATTRIBUTABLE: it goes into
+    BUILDINGS.JSON as `landmark_src` and into the build log's census. Without
+    it "22 landmarks" cannot be told from "22 hostels".
+    """
+    for key, allow in LANDMARK_RULE.items():
+        v = t.get(key)
+        if not v:
+            continue
+        if key == "tourism" and v in TOURISM_NOT_LANDMARK:
+            continue
+        if allow is True or v in allow:
+            return True, "%s=%s" % (key, v)
+    return False, None
+
+
+# ------------------------------------------------------------- tag carriage ---
+#
+# Which keys are copied verbatim into each layer's records, over and above the
+# fields the normaliser derives. Carried as a flat `tags` sub-object so adding
+# a key is a one-line change here and costs no schema churn: a C reader that
+# does not know a key simply never asks for it, and the derived fields the
+# readers DO use (class, lanes, height_m, landmark, ...) keep their old names
+# and old types. That is what makes this backward compatible.
+BUILDING_TAG_KEYS = (
+    # civic identity -- the close-out's gap
+    "amenity", "office", "government", "tourism", "historic", "heritage",
+    "man_made", "religion", "denomination", "leisure", "shop", "healthcare",
+    "emergency", "craft", "club",
+    # 3D form
+    "building", "building:part", "building:levels", "building:min_level",
+    "height", "min_height", "roof:shape", "roof:height", "roof:levels",
+    "roof:material", "roof:colour", "roof:orientation", "roof:direction",
+    "roof:angle", "building:colour", "building:material", "building:use",
+    # identity / provenance
+    "name", "name:en", "name:es", "alt_name", "short_name", "official_name",
+    "operator", "brand", "wikidata", "wikipedia", "start_date", "layer",
+    "addr:street", "addr:housenumber", "addr:city",
+)
+ROAD_TAG_KEYS = (
+    "highway", "name", "name:en", "name:es", "alt_name", "old_name", "ref",
+    "lanes", "lanes:forward", "lanes:backward", "width", "surface",
+    "smoothness", "tracktype", "maxspeed", "oneway", "junction", "roundabout",
+    "sidewalk", "sidewalk:left", "sidewalk:right", "footway", "crossing",
+    "lit", "incline", "bridge", "bridge:structure", "tunnel", "covered",
+    "layer", "access", "service", "motor_vehicle", "area", "lane_markings",
+    "dual_carriageway", "divider", "destination", "destination:street",
+)
+AREA_TAG_KEYS = (
+    "leisure", "landuse", "natural", "amenity", "tourism", "historic",
+    "man_made", "sport", "surface", "barrier", "access", "layer", "name",
+    "name:en", "name:es", "operator", "wikidata", "water", "area", "place",
+)
+WATER_TAG_KEYS = (
+    "natural", "waterway", "water", "landuse", "name", "layer", "tunnel",
+    "covered", "intermittent", "width", "bridge",
+)
+NODE_TAG_KEYS = (
+    "highway", "traffic_signals", "traffic_signals:direction", "crossing",
+    "crossing:markings", "button_operated", "tactile_paving",
+    "traffic_calming", "direction", "stop", "give_way", "railway",
+)
+
+
+def _keep_tags(t: dict, keys) -> dict:
+    """The subset of `t` whose keys are in `keys` and whose value is non-empty.
+
+    Values stay RAW STRINGS, exactly as Overpass hands them over. The 2026-09-30
+    `min_height` bug was the opposite mistake made once already -- geo_fetch
+    stored the string and the C reader's cJSON_IsNumber check read 0 -- so the
+    rule is: raw here, parse at the point of use, and never two spellings of
+    the same fact in one file.
+    """
+    return {k: t[k] for k in keys if t.get(k)}
+
 
 # ------------------------------------------------------------------- cache ---
 
@@ -285,16 +426,47 @@ def clip_roads(roads: list[dict], cap: int = FETCH_MAX_DRIVABLE_WAYS
 
 # ---------------------------------------------------------------- overpass ---
 
+# GATE 1 of the tag path (docs/plans/GEO_TAG_AUDIT.md). A tag on a way this
+# query already selects arrives FREE -- Overpass returns every tag of a matched
+# element -- which is why `amenity` was in the La Plata cache all along and the
+# 2026-09-30 loss was in the NORMALISER, not here. What a clause buys is the
+# element no other clause matches.
+#
+# WIDENED 2026-10-07:
+#   building:part   the part-stack branch in convert_osm was unreachable for a
+#                   part way not also tagged `building`, which is most of them.
+#   amenity/office/government/tourism/historic/heritage/shop/man_made
+#                   a standalone civic AREA (a walled school ground, a
+#                   place_of_worship mapped as an area with no building tag).
+#   natural         bare, not just water/coastline: `_OSM_TO_COVER` carries a
+#                   `wood` row that nothing could reach.
+#   node["highway"] bare, not just traffic_signals: crossings, stop lines and
+#                   give-ways were 0 of 566 nodes because the query never asked.
+#   node[traffic_calming]  speed humps.
+#
+# NOT widened: relation[...]. A multipolygon needs outer/inner ring assembly in
+# convert_osm and a ring pool that understands holes; shipping that untested
+# against the ONE authorised re-fetch is the wrong risk. See the audit's
+# "Not done" section.
 OVERPASS_QL = """[out:json][timeout:180];
 (
   way["highway"](%(bbox)s);
-  node["highway"="traffic_signals"](%(bbox)s);
-  way["natural"="water"](%(bbox)s);
-  way["natural"="coastline"](%(bbox)s);
+  node["highway"](%(bbox)s);
+  node["traffic_calming"](%(bbox)s);
+  way["natural"](%(bbox)s);
   way["waterway"](%(bbox)s);
   way["landuse"](%(bbox)s);
   way["leisure"](%(bbox)s);
   way["building"](%(bbox)s);
+  way["building:part"](%(bbox)s);
+  way["amenity"](%(bbox)s);
+  way["office"](%(bbox)s);
+  way["government"](%(bbox)s);
+  way["tourism"](%(bbox)s);
+  way["historic"](%(bbox)s);
+  way["heritage"](%(bbox)s);
+  way["shop"](%(bbox)s);
+  way["man_made"](%(bbox)s);
 );
 out body geom;
 """
@@ -646,7 +818,138 @@ def _lanes_for(t: dict) -> tuple[int, str]:
     return HIGHWAY_LANES.get(hw, 2), "highway_class"
 
 
-def _estimate_levels(t: dict, area_m2: float, built_frac: float) -> tuple[float, str]:
+# GATE 2's second use of the new tags: the HEIGHT ESTIMATOR.
+#
+# A building tagged only `building=yes` but also `amenity=place_of_worship` or
+# `office=government` is not a 3-storey house, and until this round the
+# estimator could not see either tag. These are levels for the non-`building`
+# key that names the use, applied only when `building` itself is untyped
+# (`yes` / absent) -- a mapper who wrote `building=apartments` has already
+# said more than `shop=supermarket` does, so the building value keeps priority.
+#
+# ONLY USES THAT DESCRIBE THE WHOLE STRUCTURE. This is the distinction that
+# makes the table defensible, and it was MEASURED rather than assumed: the first
+# cut also carried the tenant-shaped tags (restaurant, pharmacy, bank,
+# supermarket, office=company/insurance/estate_agent, fitness_centre, hotel) and
+# moved 256 of La Plata's 2047 footprints -- 133 of them SHORTER, p50 -1.1 m,
+# worst -7.5 m. That is the wrong direction and for a knowable reason: on a
+# planned city's 110 m blocks `amenity=restaurant` on a building way means
+# "there is a restaurant in this block", not "this block is a restaurant", so
+# reading it as a 2-storey use DEMOLISHED four floors off a block the area
+# context had sized correctly.
+#
+# A church, a townhall, a courthouse, a fire station, a stadium or a ministry
+# IS the building. A pharmacy is a shopfront in one. Only the first kind is
+# here; the second keeps the area/context estimate, which is what it was for.
+# Same judgement the landmark rule and the C reader's geob_class_is_landmark
+# already record about `university`/`school`/`retail`.
+#
+# Values are the same boring order of magnitude as the building table below:
+# a parish church is a tall single volume, a ministry is an office block, a
+# fire station is low-rise, a sports hall is one tall storey.
+#
+# (levels, min_area_m2). THE AREA FLOOR IS THE SECOND HALF OF THE SAME
+# ARGUMENT, and it was also measured rather than assumed. With no floor, six La
+# Plata footprints of 115..324 m2 tagged `amenity=hospital` or
+# `office=government` -- "Sancor Salud" at 155 m2, "PAMI" at 154 m2,
+# "Ministerio del Interior y Transporte" at 125 m2 -- rose by 7.5 to 10.5 m to
+# 5-7 storeys. A 5-storey hospital does not have a 155 m2 footprint; those are
+# branch offices and consulting rooms at street level, i.e. the tenant read
+# again, and for them v1's AREA ladder (under 120 m2 -> 1 storey, under 400 ->
+# 2) is the better signal and is kept.
+#
+# 400 m2 is v1's own "big footprint" threshold, so the two estimators agree on
+# where a footprint stops being a house-sized thing.
+#
+# A floor of 0 means the use needs no floor area to be what it claims: a tower,
+# a campanile, a water tower and a monument are legitimately small and tall,
+# and a blanket minimum would flatten exactly the silhouettes worth having.
+_USE_MIN_AREA_M2 = 400.0
+_USE_LEVELS = {
+    # civic / religious -- the building is its use, and it takes room
+    ("amenity", "place_of_worship"): (3.0, 0.0),   # a chapel is small and tall
+    ("amenity", "townhall"): (4.0, _USE_MIN_AREA_M2),
+    ("amenity", "courthouse"): (4.0, _USE_MIN_AREA_M2),
+    ("amenity", "police"): (2.0, _USE_MIN_AREA_M2),
+    ("amenity", "fire_station"): (2.0, _USE_MIN_AREA_M2),
+    ("amenity", "embassy"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "prison"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "theatre"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "cinema"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "arts_centre"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "conference_centre"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "exhibition_centre"): (2.0, _USE_MIN_AREA_M2),
+    ("amenity", "casino"): (2.0, _USE_MIN_AREA_M2),
+    ("amenity", "hospital"): (5.0, _USE_MIN_AREA_M2),
+    ("amenity", "school"): (2.0, _USE_MIN_AREA_M2),
+    ("amenity", "college"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "university"): (3.0, _USE_MIN_AREA_M2),
+    ("amenity", "library"): (2.0, _USE_MIN_AREA_M2),
+    ("amenity", "marketplace"): (1.0, _USE_MIN_AREA_M2),
+    ("amenity", "fuel"): (1.0, 0.0),      # a forecourt canopy, always low
+    ("amenity", "parking"): (1.0, 0.0),   # a car-park deck, always low
+    # government -- `government=*` and `office=government` name the whole seat,
+    # not a desk in it, PROVIDED the footprint is a seat-sized building
+    ("government", "administrative"): (6.0, _USE_MIN_AREA_M2),
+    ("government", "ministry"): (7.0, _USE_MIN_AREA_M2),
+    ("government", "legislative"): (5.0, _USE_MIN_AREA_M2),
+    ("government", "healthcare"): (4.0, _USE_MIN_AREA_M2),
+    ("government", "yes"): (5.0, _USE_MIN_AREA_M2),
+    ("office", "government"): (6.0, _USE_MIN_AREA_M2),
+    ("office", "diplomatic"): (4.0, _USE_MIN_AREA_M2),
+    # big-span sheds
+    ("leisure", "sports_hall"): (1.0, _USE_MIN_AREA_M2),
+    ("leisure", "sports_centre"): (2.0, _USE_MIN_AREA_M2),
+    ("leisure", "stadium"): (4.0, _USE_MIN_AREA_M2),
+    ("shop", "mall"): (2.0, _USE_MIN_AREA_M2),   # a mall IS the building; a
+                                      # supermarket is often a ground floor,
+                                      # so it is out of the table entirely
+    # free-standing vertical structures -- small footprint, tall on purpose
+    ("man_made", "tower"): (8.0, 0.0),
+    ("man_made", "water_tower"): (6.0, 0.0),
+    ("man_made", "lighthouse"): (6.0, 0.0),
+    ("man_made", "campanile"): (8.0, 0.0),
+    ("historic", "monument"): (3.0, 0.0),
+    ("historic", "castle"): (5.0, _USE_MIN_AREA_M2),
+    ("tourism", "museum"): (3.0, _USE_MIN_AREA_M2),
+    # `historic=memorial` is NOT here: it is a plaque on a wall as often as it
+    # is a structure. La Plata's "Espacio Memoria ex Comisaria 5ta" is a 1381
+    # m2 former police station, and reading the memorial tag as one storey took
+    # 7.5 m off a real building -- the single worst drop the A/B found.
+}
+# Order a use is consulted in when a footprint carries several. Most specific
+# statement of "what this building IS" first.
+_USE_KEY_ORDER = ("government", "office", "amenity", "historic",
+                  "tourism", "man_made", "leisure", "shop")
+
+
+def _use_levels(t: dict, area_m2: float) -> tuple[float | None, str | None]:
+    """Levels implied by a non-`building` use tag, or (None, None).
+
+    A row whose footprint is under its own `min_area_m2` is REFUSED rather than
+    clamped: the tag is being read as a tenant and the caller's area/context
+    ladder is the better estimate, so the right answer is to decline and let it
+    run. The FIRST matching key decides -- a row that declines does not fall
+    through to a lower-priority key, because a small `office=government` is
+    still a government office and consulting its `amenity` would be guessing
+    twice.
+    """
+    for key in _USE_KEY_ORDER:
+        v = t.get(key)
+        if not v:
+            continue
+        row = _USE_LEVELS.get((key, v))
+        if row is None:
+            continue
+        lv, min_area = row
+        if min_area > 0.0 and area_m2 < min_area:
+            return None, None
+        return lv, "%s=%s" % (key, v)
+    return None, None
+
+
+def _estimate_levels(t: dict, area_m2: float, built_frac: float,
+                     estimator: int = 2) -> tuple[float, str]:
     """Levels for a building OSM did not tag, from proxies.
 
     Per the plan's decision: footprint area, building class, and how built-up the
@@ -654,8 +957,21 @@ def _estimate_levels(t: dict, area_m2: float, built_frac: float) -> tuple[float,
     credible skyline, not a guess dressed up as a measurement. Every building
     carries `height_src` so a bad skyline is attributable here rather than hunted
     in the emitters.
+
+    `estimator` 1 is the pre-2026-10-07 behaviour, kept so the La Plata
+    MODELS.DAT delta can be split into "new landmarks" and "new heights"
+    instead of asserted to be one of them. Selected with
+    `--levels-estimator v1`; the estimator in force is recorded in
+    BUILDINGS.JSON's `height_provenance` and in PLACE.JSON.
     """
     cls = (t.get("building") or "yes").lower()
+    if estimator >= 2 and cls in ("yes", ""):
+        # Only an UNTYPED building defers to its use tag: `building=apartments`
+        # is already a statement about form, `shop=supermarket` is a statement
+        # about trade that happens to correlate with one.
+        lv, why = _use_levels(t, area_m2)
+        if lv is not None:
+            return max(1.0, lv + 1.5 * built_frac), "estimated_use:" + why
     base = {
         "house": 1.0, "detached": 1.0, "bungalow": 1.0, "hut": 1.0,
         "garage": 1.0, "garages": 1.0, "shed": 1.0, "carport": 1.0,
@@ -694,14 +1010,50 @@ def _polygon_area_m2(pts_m: list[tuple[float, float]]) -> float:
     return abs(s) * 0.5
 
 
-def convert_osm(osm: dict, proj: LocalProjection) -> dict:
-    """Split one Overpass response into the cache's vector layers, in world units."""
+def _int_tag(t: dict, key: str) -> int:
+    """A signed integer tag, 0 when absent or not an integer. OSM `layer` is the
+    case: it is free text and "-1", " 2" and "1;2" all occur."""
+    m = re.match(r"\s*(-?\d+)", t.get(key, "") or "")
+    return int(m.group(1)) if m else 0
+
+
+def _oneway_dir(t: dict) -> int:
+    """+1 forward, -1 against the way's own drawing order, 0 two-way.
+
+    The old code collapsed this to a bool with `oneway in ("yes","1","-1",
+    "true")`, so a street tagged `oneway=-1` (1997 ways carry some oneway value
+    at La Plata) read as "one way, forward" -- the correct flag with the wrong
+    direction. The bool is still written under the old name and keeps the old
+    meaning; the direction is a new field beside it.
+    """
+    v = (t.get("oneway") or "").strip().lower()
+    if v in ("yes", "1", "true"):
+        return 1
+    if v in ("-1", "reverse", "backward"):
+        return -1
+    return 0
+
+
+def convert_osm(osm: dict, proj: LocalProjection,
+                levels_estimator: int = 2) -> dict:
+    """Split one Overpass response into the cache's vector layers, in world units.
+
+    GATE 2 of the tag path -- see docs/plans/GEO_TAG_AUDIT.md. Every layer now
+    carries a `tags` sub-object with the raw OSM values (the *_TAG_KEYS tables
+    above) ALONGSIDE the derived fields the C readers already use. The derived
+    fields keep their names, types and meanings exactly, so a reader built
+    against the old schema is unaffected and a new reader can ask for a tag
+    without the normaliser having to decide first what the tag is for.
+    """
     roads: list[dict] = []
     buildings: list[dict] = []
     areas: list[dict] = []
     signals: list[dict] = []
+    nodes: list[dict] = []
     water: list[dict] = []
-    counts: dict[str, int] = {}
+    counts: dict = {}
+    lm_src: dict[str, int] = {}
+    ignored_sample: list[dict] = []
 
     def bump(k: str) -> None:
         counts[k] = counts.get(k, 0) + 1
@@ -709,13 +1061,47 @@ def convert_osm(osm: dict, proj: LocalProjection) -> dict:
     for el in osm.get("elements", []):
         t = _tags(el)
         if el.get("type") == "node":
-            if t.get("highway") == "traffic_signals":
-                x, z = proj.to_world(el["lat"], el["lon"])
-                signals.append({"x": round(x, 2), "z": round(z, 2),
-                                "direction": t.get("traffic_signals:direction")})
+            hw = t.get("highway")
+            # WHAT THIS NODE IS, in one field, so a reader does not re-derive
+            # it from a tag soup. `traffic_signals` keeps its own kind because
+            # SIGNALS.JSON's membership must not change -- see below.
+            kind = (hw if hw in ("traffic_signals", "crossing", "stop",
+                                 "give_way", "mini_roundabout", "turning_circle",
+                                 "speed_camera", "traffic_mirror")
+                    else ("traffic_calming" if t.get("traffic_calming")
+                          else None))
+            if kind is None:
+                bump("node_ignored")
+                continue
+            x, z = proj.to_world(el["lat"], el["lon"])
+            rec = {
+                "id": el.get("id"),
+                "kind": kind,
+                "x": round(x, 2), "z": round(z, 2),
+                "lat": round(el["lat"], 7), "lon": round(el["lon"], 7),
+                "tags": _keep_tags(t, NODE_TAG_KEYS),
+            }
+            # SIGNALS.JSON STAYS TRAFFIC-SIGNALS-ONLY. The query now also pulls
+            # crossings, stop lines and humps (0 of 566 La Plata nodes before,
+            # because it never asked), and td5_geo_signals.c emits a LAMP MAST
+            # at every entry of `signals[]` -- so folding them in would grow a
+            # traffic light on every zebra and move MODELS.DAT for a reason that
+            # has nothing to do with tags. They go in a new `nodes[]` array,
+            # which no reader reads yet, and `signals[]` has byte-identical
+            # membership and field set to before plus `id`/`kind`/`lat`/`lon`.
+            if kind == "traffic_signals":
+                rec["direction"] = t.get("traffic_signals:direction")
+                signals.append(rec)
                 bump("signals")
+            else:
+                nodes.append(rec)
+                bump("nodes_" + kind)
             continue
         if el.get("type") != "way":
+            # Relations are not requested (see OVERPASS_QL) and would need ring
+            # assembly; counted rather than silently skipped so a future cache
+            # that does carry them is visible in PLACE.JSON.
+            bump("non_way_" + str(el.get("type")))
             continue
         ll = _geom_latlon(el)
         if len(ll) < 2:
@@ -732,6 +1118,7 @@ def convert_osm(osm: dict, proj: LocalProjection) -> dict:
                 bump("highway_nondrivable")
                 continue
             lanes, lanes_src = _lanes_for(t)
+            junction = t.get("junction")
             roads.append({
                 "id": el.get("id"),
                 "name": t.get("name"),
@@ -739,20 +1126,42 @@ def convert_osm(osm: dict, proj: LocalProjection) -> dict:
                 "lanes": lanes,
                 "lanes_src": lanes_src,
                 "oneway": t.get("oneway") in ("yes", "1", "-1", "true"),
+                # The DIRECTION the old bool threw away. `oneway` above keeps
+                # its exact old value so nothing that reads it changes.
+                "oneway_dir": _oneway_dir(t),
                 "surface": t.get("surface"),
                 "bridge": bool(t.get("bridge")),
                 "tunnel": bool(t.get("tunnel")),
-                "layer": int(t["layer"]) if re.fullmatch(r"-?\d+", t.get("layer", "") or "") else 0,
+                # The VALUES, because they are not all equivalent:
+                # `tunnel=building_passage` is an archway, not a bore, and
+                # `bridge=viaduct` is a structure a deck page should depict.
+                "bridge_kind": t.get("bridge"),
+                "tunnel_kind": t.get("tunnel"),
+                "covered": bool(t.get("covered")
+                                and t.get("covered") not in ("no", "false")),
+                "layer": _int_tag(t, "layer"),
+                # DEAD CODE FIXED. This read
+                #   ... or t.get("junction") == "roundabout" and False
+                # and `and` binds tighter than `or`, so the whole third clause
+                # was the constant False: `median` was False on all 2291 La
+                # Plata ways and no roundabout could ever set it. The roundabout
+                # is not a median anyway -- it is its own geometry -- so it gets
+                # its own field and the median keeps only the two tags that
+                # really mean "divided carriageway".
                 "median": (t.get("dual_carriageway") == "yes"
-                           or t.get("divider") is not None
-                           or t.get("junction") == "roundabout" and False),
+                           or t.get("divider") is not None),
+                "junction": junction,
+                "roundabout": junction in ("roundabout", "circular"),
                 "sidewalk": t.get("sidewalk"),
                 "width": t.get("width"),
                 "maxspeed": t.get("maxspeed"),
                 "points": wpts,
                 "latlon": [[round(la, 7), round(lo, 7)] for la, lo in ll],
+                "tags": _keep_tags(t, ROAD_TAG_KEYS),
             })
             bump("roads")
+            if junction:
+                bump("road_junction_tagged")
             continue
 
         if t.get("building") or t.get("building:part"):
@@ -770,6 +1179,7 @@ def convert_osm(osm: dict, proj: LocalProjection) -> dict:
                 if mm:
                     height_m = float(mm.group(1)) * STOREY_HEIGHT_M
                     src = "osm_levels"
+            is_lm, lm_why = landmark_decide(t)
             buildings.append({
                 "id": el.get("id"),
                 "name": t.get("name"),
@@ -780,16 +1190,44 @@ def convert_osm(osm: dict, proj: LocalProjection) -> dict:
                 "height_src": src,           # filled below when estimated
                 "roof_shape": t.get("roof:shape"),
                 "roof_height_m": t.get("roof:height"),
+                "roof_levels": t.get("roof:levels"),
                 "min_height_m": t.get("min_height"),
+                "levels": t.get("building:levels"),
+                "min_level": t.get("building:min_level"),
                 "colour": t.get("building:colour"),
                 "material": t.get("building:material"),
-                "landmark": bool(t.get("tourism") or t.get("historic")
-                                 or t.get("name") and t.get("building") in
-                                 ("cathedral", "church", "stadium", "museum",
-                                  "train_station", "civic", "public")),
+                "roof_material": t.get("roof:material"),
+                "roof_colour": t.get("roof:colour"),
+                "layer": _int_tag(t, "layer"),
+                # The civic keys the close-out named, promoted to FIELDS and not
+                # just left in `tags`, because they are what the landmark rule
+                # and the height estimator read and a reader should not have to
+                # know they live one level down.
+                "amenity": t.get("amenity"),
+                "office": t.get("office"),
+                "government": t.get("government"),
+                "tourism": t.get("tourism"),
+                "historic": t.get("historic"),
+                "heritage": t.get("heritage"),
+                "man_made": t.get("man_made"),
+                "religion": t.get("religion"),
+                "denomination": t.get("denomination"),
+                "leisure": t.get("leisure"),
+                "shop": t.get("shop"),
+                "healthcare": t.get("healthcare"),
+                "landmark": is_lm,
+                # WHICH TAG DECIDED. Without this "22 landmarks" cannot be
+                # told from "22 hostels" -- the old blanket `tourism or
+                # historic` really did promote a boutique hostel.
+                "landmark_src": lm_why,
                 "points": wpts,
+                "tags": _keep_tags(t, BUILDING_TAG_KEYS),
             })
             bump("buildings")
+            if is_lm:
+                bump("landmarks")
+                key = lm_why.split("=", 1)[0]
+                lm_src[key] = lm_src.get(key, 0) + 1
             continue
 
         leisure = t.get("leisure")
@@ -798,47 +1236,188 @@ def convert_osm(osm: dict, proj: LocalProjection) -> dict:
         waterway = t.get("waterway")
 
         if natural in ("water", "coastline") or waterway or landuse == "reservoir":
-            water.append({"kind": natural or waterway or landuse,
-                          "closed": closed, "points": wpts})
+            # A CULVERTED ditch runs under the ground. 9 of La Plata's
+            # non-highway ways carry `tunnel` and 12 carry `layer`, and water
+            # painted on the surface above a culvert is a river through a
+            # street. Carried as a field so the rasteriser (and a future
+            # reader) can refuse it; the `kind`/`closed`/`points` contract the
+            # sea labelling keys off is untouched.
+            water.append({
+                "id": el.get("id"),
+                "name": t.get("name"),
+                "kind": natural or waterway or landuse,
+                "closed": closed,
+                "layer": _int_tag(t, "layer"),
+                # `tunnel=no` and `covered=no` are explicit NEGATIVES and OSM
+                # does carry them, so a bare truthiness test would culvert an
+                # open ditch.
+                "culvert": (t.get("tunnel") not in (None, "", "no", "false")
+                            or t.get("covered") not in (None, "", "no", "false")),
+                "intermittent": t.get("intermittent") in ("yes", "1", "true"),
+                "width": t.get("width"),
+                "points": wpts,
+                "tags": _keep_tags(t, WATER_TAG_KEYS),
+            })
             bump("water")
             continue
 
-        if leisure in ("park", "garden", "pitch", "playground", "common",
-                       "recreation_ground", "dog_park") or landuse in (
-                "grass", "village_green", "meadow", "forest", "cemetery",
-                "allotments", "orchard", "vineyard", "residential",
-                "commercial", "retail", "industrial", "construction"):
+        if (leisure in AREA_KEEP_LEISURE or landuse in AREA_KEEP_LANDUSE
+                or natural in AREA_KEEP_NATURAL
+                or t.get("amenity") in AREA_KEEP_AMENITY):
             areas.append({
                 "id": el.get("id"),
                 "name": t.get("name"),
-                "kind": leisure or landuse,
+                # `kind` is still ONE value and still the key _OSM_TO_COVER is
+                # looked up by, so the rasteriser is unchanged. The precedence
+                # leisure > landuse > natural is the sharpest-first order: a
+                # mapper who drew `leisure=park` over `natural=wood` meant the
+                # park, and `natural` is the broad-brush fallback. `amenity`
+                # sits last because a school ground tagged `leisure=pitch` is
+                # a pitch first and a school second.
+                "kind": (leisure or landuse or natural
+                         or (t.get("amenity")
+                             if t.get("amenity") in AREA_KEEP_AMENITY else None)),
                 "leisure": leisure,
                 "landuse": landuse,
+                "natural": natural,
+                "sport": t.get("sport"),
+                "surface": t.get("surface"),
+                "amenity": t.get("amenity"),
+                "tourism": t.get("tourism"),
+                "historic": t.get("historic"),
+                "man_made": t.get("man_made"),
+                "barrier": t.get("barrier"),
+                "access": t.get("access"),
+                "layer": _int_tag(t, "layer"),
                 "closed": closed,
                 "points": wpts,
+                "tags": _keep_tags(t, AREA_TAG_KEYS),
             })
             bump("areas")
             continue
+        # What is left after a whitelist that now covers every _OSM_TO_COVER
+        # row. Recorded WITH ITS TAGS (capped) rather than as a bare count, so
+        # the next place's residue is a list to read instead of a number to
+        # wonder about -- the old `ignored: 22` is what hid leisure=track and
+        # landuse=education for a week.
         bump("ignored")
+        ignored_sample.append(
+            {k: v for k, v in sorted(t.items())
+             if k in ("leisure", "landuse", "natural", "amenity", "barrier",
+                      "man_made", "place", "tourism", "historic", "railway",
+                      "power", "aeroway", "military")})
+
+    if lm_src:
+        counts["landmark_by_tag"] = lm_src
+    if ignored_sample:
+        # Distinct tag signatures, most common first, capped: a sentence for
+        # the operator, not a dump of 22 near-identical dicts.
+        sig: dict[str, int] = {}
+        for d in ignored_sample:
+            k = ",".join("%s=%s" % kv for kv in sorted(d.items())) or "(untagged)"
+            sig[k] = sig.get(k, 0) + 1
+        counts["ignored_kinds"] = dict(sorted(sig.items(), key=lambda kv: -kv[1])[:24])
 
     return {"roads": roads, "buildings": buildings, "areas": areas,
-            "signals": signals, "water": water, "counts": counts}
+            "signals": signals, "nodes": nodes, "water": water,
+            "counts": counts, "levels_estimator": levels_estimator}
 
 
 # COVER class per OSM tag, used to bootstrap COVER.R8 before ESA WorldCover is
 # wired in. OSM is sharper than 10 m where it is tagged, and WorldCover's job is
 # to fill what OSM leaves blank -- so this ordering survives that addition.
+#
+# 2026-10-07: `wood`, `farmland`, `quarry` and `brownfield` had rows here that
+# NOTHING COULD REACH, because the areas whitelist below (the only caller) did
+# not accept them -- `wood` is a `natural` value and the branch only consulted
+# `natural` for water, and the other three were simply missing from the landuse
+# list. Reachability is now a property of AREA_KEEP_* rather than of two lists
+# that had drifted apart: every key here appears there, asserted at import.
 _OSM_TO_COVER = {
     "forest": COVER_TREE, "wood": COVER_TREE, "orchard": COVER_TREE,
+    "tree_row": COVER_TREE, "scrub": COVER_SHRUB, "heath": COVER_SHRUB,
     "grass": COVER_GRASS, "village_green": COVER_GRASS, "meadow": COVER_GRASS,
     "park": COVER_GRASS, "garden": COVER_GRASS, "pitch": COVER_GRASS,
     "playground": COVER_GRASS, "common": COVER_GRASS, "dog_park": COVER_GRASS,
     "recreation_ground": COVER_GRASS, "cemetery": COVER_GRASS,
+    "track": COVER_GRASS, "golf_course": COVER_GRASS, "grassland": COVER_GRASS,
     "farmland": COVER_CROP, "allotments": COVER_CROP, "vineyard": COVER_CROP,
+    "farmyard": COVER_CROP, "plant_nursery": COVER_CROP, "greenhouse_horticulture": COVER_CROP,
     "residential": COVER_BUILT, "commercial": COVER_BUILT,
     "retail": COVER_BUILT, "industrial": COVER_BUILT,
+    "education": COVER_BUILT, "institutional": COVER_BUILT,
+    # Institutional PRECINCTS mapped as an amenity area rather than a landuse.
+    # BUILT, and all but inert: WorldCover already reads these as built-up, so
+    # the OSM outline sharpens an edge instead of inventing a class.
+    "school": COVER_BUILT, "university": COVER_BUILT, "college": COVER_BUILT,
+    "hospital": COVER_BUILT, "prison": COVER_BUILT, "parking": COVER_BUILT,
+    # A sports ground is PITCHES AND GRASS, not built-up. MEASURED: mapping
+    # these to BUILT painted 53142 cells of La Plata (two club grounds plus
+    # the stadium, 0.65 km2) as built-up, which is both wrong and the single
+    # largest cover change of the tag round. GRASS also agrees with
+    # geob_area_kind_of, which classes them PITCH -- a flat laid ground.
+    "stadium": COVER_GRASS, "sports_centre": COVER_GRASS,
     "construction": COVER_BARE, "quarry": COVER_BARE, "brownfield": COVER_BARE,
+    "landfill": COVER_BARE, "sand": COVER_BARE,
+    "beach": COVER_BARE, "bare_rock": COVER_BARE, "scree": COVER_BARE,
+    "shingle": COVER_BARE, "mud": COVER_BARE,
+    # `landuse=railway` is NOT here, deliberately. Three La Plata polygons
+    # would have painted 41311 cells BARE, and 19562 of those cells were
+    # WorldCover BUILT and 7898 TREE -- the OSM outline covers a whole station
+    # precinct, buildings and trees included, so reading it as ballast
+    # OVERRIDES A MEASUREMENT WITH A GUESS over half a square kilometre. The
+    # 10 m classifier already knows what is there.
+    "glacier": COVER_SNOW,
+    "wetland": COVER_WETLAND, "marsh": COVER_WETLAND, "swamp": COVER_WETLAND,
+    "swimming_pool": COVER_WATER, "basin": COVER_WATER,
 }
+
+# GATE 2's area whitelist, as three sets instead of a literal tuple inside the
+# branch. A way that matches none of these is `bump("ignored")`.
+#
+# WIDENED 2026-10-07 to everything `_OSM_TO_COVER` can colour plus the
+# leisure/landuse values La Plata actually carries and the old list refused:
+# `leisure=track` x7, `swimming_pool` x2, `sports_centre` x2, `stadium`,
+# `bleachers`, `fitness_station`, and `landuse=education` x4 / `railway` x3 /
+# `plant_nursery` x1. Those 22 ways were the whole of the cache's `ignored`
+# count, so the layer is now lossless on this place by construction.
+AREA_KEEP_LEISURE = frozenset((
+    "park", "garden", "pitch", "playground", "common", "recreation_ground",
+    "dog_park", "track", "stadium", "sports_centre", "sports_hall",
+    "swimming_pool", "bleachers", "fitness_station", "fitness_centre",
+    "golf_course", "nature_reserve", "marina", "water_park", "picnic_site",
+))
+AREA_KEEP_LANDUSE = frozenset((
+    "grass", "village_green", "meadow", "forest", "cemetery", "allotments",
+    "orchard", "vineyard", "residential", "commercial", "retail",
+    "industrial", "construction", "farmland", "farmyard", "quarry",
+    "brownfield", "greenfield", "landfill", "education", "institutional",
+    "religious", "military", "plant_nursery",
+    "greenhouse_horticulture", "recreation_ground", "grassland", "basin",
+))
+# An institutional PRECINCT mapped as an amenity area rather than a landuse.
+# The widened query made these visible for the first time -- 36 school grounds,
+# 34 car parks, 14 hospital and 9 university precincts at La Plata, which were
+# the bulk of the 135 `ignored` ways the first re-fetch reported.
+AREA_KEEP_AMENITY = frozenset((
+    "school", "university", "college", "hospital", "prison", "parking",
+))
+# `natural` as an AREA. water and coastline are NOT here: they are claimed by
+# the water branch above this one and must stay there, because the sea
+# labelling keys off `kind == "coastline"`.
+AREA_KEEP_NATURAL = frozenset((
+    "wood", "tree_row", "scrub", "heath", "grassland", "sand", "beach",
+    "bare_rock", "scree", "shingle", "mud", "wetland", "marsh", "swamp",
+    "glacier", "cliff", "ridge", "peak", "valley",
+))
+
+# A row in _OSM_TO_COVER that no whitelist accepts is dead code, which is the
+# bug this round found. Asserted at import so it cannot come back.
+_UNREACHABLE_COVER = sorted(set(_OSM_TO_COVER)
+                            - AREA_KEEP_LEISURE - AREA_KEEP_LANDUSE
+                            - AREA_KEEP_NATURAL - AREA_KEEP_AMENITY)
+assert not _UNREACHABLE_COVER, (
+    "_OSM_TO_COVER rows no AREA_KEEP_* set can reach: %s" % _UNREACHABLE_COVER)
 
 
 # ---------------------------------------------------------------- land cover
@@ -1025,7 +1604,17 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
                 cover[iz, ix] = cls
                 painted["cover_cells"] += 1
 
+    painted["water_culverted"] = 0
     for wy in vec["water"]:
+        # A CULVERTED watercourse runs UNDER the ground: `waterway=ditch` with
+        # `tunnel=culvert` is a pipe, and painting water on the surface above it
+        # is a river through a street. 9 of La Plata's non-highway ways carry a
+        # tunnel tag. Refused here rather than in the road-buffer pass below,
+        # because that pass only clears water near a mapped ROAD and a culvert
+        # under open ground would survive it.
+        if wy.get("culvert"):
+            painted["water_culverted"] += 1
+            continue
         if wy["closed"]:
             painted["water_cells"] += fill_polygon(
                 wy["points"], lambda ix, iz: (water.__setitem__((iz, ix), 1),
@@ -1202,11 +1791,14 @@ def rasterize_layers(vec: dict, proj: LocalProjection, height: Raster,
     return cover_r, water_r, painted
 
 
-def estimate_building_heights(vec: dict, cover: Raster) -> dict:
+def estimate_building_heights(vec: dict, cover: Raster,
+                              estimator: int = 2) -> dict:
     """Fill every untagged building's height, flagging it as estimated."""
     h, w = cover.data.shape
     built = (cover.data == COVER_BUILT)
-    stats = {"osm_height": 0, "osm_levels": 0, "estimated": 0}
+    stats: dict = {"osm_height": 0, "osm_levels": 0, "estimated": 0,
+                   "estimator": estimator}
+    by_use: dict[str, int] = {}
 
     for b in vec["buildings"]:
         if b["height_m"]:
@@ -1225,13 +1817,29 @@ def estimate_building_heights(vec: dict, cover: Raster) -> dict:
             win = built[j0:j1, i0:i1]
             if win.size:
                 frac = float(win.mean())
+        # The ESTIMATOR'S VIEW OF THE BUILDING. Before this round it was one
+        # key -- `{"building": b["class"]}` -- so a footprint tagged only
+        # `building=yes` plus `office=government` was indistinguishable from a
+        # bare shed. The use tags are now in the record (see convert_osm), so
+        # hand the estimator the whole thing.
         levels, src = _estimate_levels(
-            {"building": b["class"]}, b["area_m2"], frac)
+            {"building": b["class"], "amenity": b.get("amenity"),
+             "office": b.get("office"), "government": b.get("government"),
+             "healthcare": b.get("healthcare"), "historic": b.get("historic"),
+             "tourism": b.get("tourism"), "man_made": b.get("man_made"),
+             "leisure": b.get("leisure"), "shop": b.get("shop")},
+            b["area_m2"], frac, estimator)
         b["levels_est"] = round(levels, 2)
         b["height_m"] = round(levels * STOREY_HEIGHT_M, 2)
         b["height_src"] = src
         b["built_frac"] = round(frac, 3)
         stats["estimated"] += 1
+        if src.startswith("estimated_use:"):
+            key = src.split(":", 1)[1]
+            by_use[key] = by_use.get(key, 0) + 1
+    if by_use:
+        stats["by_use_tag"] = dict(sorted(by_use.items(),
+                                          key=lambda kv: -kv[1])[:30])
     return stats
 
 
@@ -1246,7 +1854,9 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                 offset_x: float = 0.0, offset_z: float = 0.0,
                 smooth_m: float = DEM_SMOOTH_M_DEFAULT,
                 land_cover: str | None = None,
-                canopy: bool | None = None) -> dict:
+                canopy: bool | None = None,
+                levels_estimator: int = 2,
+                dem_probe: bool = True) -> dict:
     slug = slugify(name)
     out = place_dir(slug, root)
     os.makedirs(out, exist_ok=True)
@@ -1287,22 +1897,29 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
           % (rotation_rad, math.degrees(rotation_rad), offset_x, offset_z))
 
     print("\n[1/5] IGN elevation coverage probe")
-    ign = probe_ign_dem(bbox)
-    if ign.get("available"):
-        print("  projects: %s" % ", ".join("%s x%d" % (k, v)
-                                           for k, v in ign["projects"].items()))
-        if "MDE 5m" in ign.get("projects", {}):
-            print("  5 m EXISTS here -- request the sheet and drop a GeoTIFF in %s"
-                  % DEM_OVERRIDE_DIR)
+    # NOT CACHED (probe_ign_dem calls urlopen directly) and its result is not
+    # written into PLACE.JSON, so on a re-fetch it is one outbound request that
+    # buys nothing. --skip-dem-probe exists for a run with a fetch budget.
+    if not dem_probe:
+        print("  skipped (--skip-dem-probe): the probe is uncached and its "
+              "result is not stored, so a re-fetch gains nothing from it")
     else:
-        print("  none (outside Argentina, or the service did not answer)")
+        ign = probe_ign_dem(bbox)
+        if ign.get("available"):
+            print("  projects: %s" % ", ".join("%s x%d" % (k, v)
+                                               for k, v in ign["projects"].items()))
+            if "MDE 5m" in ign.get("projects", {}):
+                print("  5 m EXISTS here -- request the sheet and drop a GeoTIFF in %s"
+                      % DEM_OVERRIDE_DIR)
+        else:
+            print("  none (outside Argentina, or the service did not answer)")
 
     print("\n[2/5] Overpass")
     osm = fetch_osm(bbox, out)
     print("  elements: %d" % len(osm.get("elements", [])))
 
     print("\n[3/5] vector layers -> world units")
-    vec = convert_osm(osm, proj)
+    vec = convert_osm(osm, proj, levels_estimator)
     vec["roads"], clip = clip_roads(vec["roads"])
     if clip:
         vec["counts"]["roads"] = len(vec["roads"])
@@ -1312,6 +1929,11 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                       ", ".join(clip["dropped_classes"]) or "nothing"))
     for k in sorted(vec["counts"]):
         print("  %-20s %s" % (k, vec["counts"][k]))
+    if vec["counts"].get("landmark_by_tag"):
+        print("  landmarks by deciding tag: %s"
+              % ", ".join("%s x%d" % kv for kv in
+                          sorted(vec["counts"]["landmark_by_tag"].items(),
+                                 key=lambda kv: -kv[1])))
 
     print("\n[4/5] elevation")
     height, dem_prov = build_height_raster(proj, bbox, out, cell, dem_override,
@@ -1348,12 +1970,19 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                      cn_prov["max_m"]))
         del glat, glon
     cover, water, painted = rasterize_layers(vec, proj, height, bbox, base_cover)
-    bh = estimate_building_heights(vec, cover)
+    bh = estimate_building_heights(vec, cover, levels_estimator)
     print("  cover cells %d, water cells %d, built stamps %d"
           % (painted["cover_cells"], painted["water_cells"],
              painted["built_cells"]))
-    print("  building heights: %s" % ", ".join("%s=%d" % kv
-                                               for kv in sorted(bh.items())))
+    # `bh` carries a nested `by_use_tag` breakdown as well as the scalar
+    # counts, so this cannot be a blanket %d -- it raised TypeError on the
+    # first dry run.
+    print("  building heights: %s"
+          % ", ".join("%s=%s" % (k, v) for k, v in sorted(bh.items())
+                      if not isinstance(v, dict)))
+    if isinstance(bh.get("by_use_tag"), dict):
+        print("  estimated from a use tag: %s"
+              % ", ".join("%s x%d" % kv for kv in bh["by_use_tag"].items()))
 
     # ---- write the contract ---------------------------------------------
     height.write(os.path.join(out, "HEIGHT.R16"))
@@ -1368,7 +1997,12 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                {"buildings": vec["buildings"], "storey_height_m": STOREY_HEIGHT_M,
                 "height_provenance": bh})
     write_json(os.path.join(out, "AREAS.JSON"), {"areas": vec["areas"]})
-    write_json(os.path.join(out, "SIGNALS.JSON"), {"signals": vec["signals"]})
+    # `signals` keeps its exact old membership (highway=traffic_signals only);
+    # `nodes` is the new array for the crossings / stop lines / humps the
+    # widened query brings in. Separate keys rather than a `kind` filter the
+    # reader has to apply, so an old reader cannot accidentally mast a zebra.
+    write_json(os.path.join(out, "SIGNALS.JSON"),
+               {"signals": vec["signals"], "nodes": vec["nodes"]})
 
     place = {
         "name": name,
@@ -1415,7 +2049,14 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                           "1 m, CC-BY 4.0 (fetch with --canopy)",
             }),
         },
-        "sources": {"land_cover": land_cover, "canopy": bool(canopy)},
+        # STICKY source choices, plus the tag-path version. `tag_schema` is what
+        # lets a reader tell a pre-2026-10-07 cache (narrow landmark rule, no
+        # civic tags on a footprint) from one fetched after, without guessing
+        # from which keys happen to be present -- see TAG_SCHEMA.
+        "sources": {"land_cover": land_cover, "canopy": bool(canopy),
+                    "tag_schema": TAG_SCHEMA,
+                    "levels_estimator": levels_estimator},
+        "tag_schema": TAG_SCHEMA,
         "attribution": [
             "Map data (c) OpenStreetMap contributors, ODbL 1.0",
             "Elevation: %s" % dem_prov.get("source"),
@@ -1462,6 +2103,18 @@ def main(argv=None) -> int:
     ap.add_argument("--canopy", choices=("on", "off"), default=None,
                     help="write CANOPY.R8 from the Meta/WRI 1 m canopy map "
                          "(network once, then cached). Default: as last built")
+    ap.add_argument("--levels-estimator", choices=("v1", "v2"), default="v2",
+                    help="height estimator for a building OSM did not tag. v2 "
+                         "(default) also reads the use tags amenity / office / "
+                         "government / leisure / shop; v1 is the "
+                         "pre-2026-10-07 building-class-only behaviour, kept so "
+                         "a MODELS.DAT delta can be split into 'new landmarks' "
+                         "and 'new heights' instead of asserted to be one")
+    ap.add_argument("--skip-dem-probe", action="store_true",
+                    help="do not call the IGN WFS coverage probe. It is "
+                         "uncached and its answer is not stored in PLACE.JSON, "
+                         "so on a re-fetch it is one outbound request for "
+                         "nothing")
     ap.add_argument("--probe-dem", action="store_true",
                     help="only report IGN elevation coverage, fetch nothing")
     a = ap.parse_args(argv)
@@ -1485,7 +2138,9 @@ def main(argv=None) -> int:
     fetch_place(a.name, a.lat, a.lon, a.radius, a.root,
                 a.units_per_metre, a.dem_override, TG_WORLD_CELL, rot, ox, oz,
                 a.dem_smooth_m, a.land_cover,
-                None if a.canopy is None else a.canopy == "on")
+                None if a.canopy is None else a.canopy == "on",
+                1 if a.levels_estimator == "v1" else 2,
+                not a.skip_dem_probe)
     return 0
 
 

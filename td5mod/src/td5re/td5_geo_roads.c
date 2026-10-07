@@ -9,9 +9,17 @@
  *              "points":[{"x":257749.23,"z":722919.4}, ...], ...}, ...]}
  *
  * Only the fields the street network needs are kept. `latlon`, `name`,
- * `maxspeed`, `surface`, `sidewalk`, `median` and `lanes_src` are deliberately
- * skipped: a 2 MB file parses into roughly 10 MB of cJSON DOM and the pool
- * below is the long-lived copy, so it holds the minimum.
+ * `maxspeed`, `sidewalk`, `median`, `lanes_src` and the raw `tags` sub-object
+ * are deliberately skipped: a 2 MB file parses into roughly 10 MB of cJSON DOM
+ * and the pool below is the long-lived copy, so it holds the minimum.
+ *
+ * `surface` USED TO BE ON THAT SKIP LIST and should not have been -- it is on
+ * 2238 of La Plata's 2291 ways and it is the one tag here that changes what the
+ * driver sees. It is now reduced to a TD5_GEO_SURF_* class (3 values, one int)
+ * rather than held as a string, which costs the pool nothing. Same for
+ * `junction`, which geo_fetch dropped entirely until 2026-10-07 through a dead
+ * `and False` clause, and the direction half of `oneway`. See gate 4 of
+ * docs/plans/GEO_TAG_AUDIT.md.
  *
  * WIDTH. OSM tags `lanes` on 45% of ways and `width` (metres, as a free-text
  * string) on 2%; geo_fetch fills the rest from the highway class. Both are
@@ -29,6 +37,7 @@
 
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_config.h"          /* td5_env_flag_on */
 #include "td5_trackgen.h"        /* TD5_TG_LANE_WIDTH */
 #include "td5_geo_roads.h"
 #include "deps/cjson/cJSON.h"
@@ -104,6 +113,34 @@ static int geo_roads_class(const char *s)
     return TD5_GEO_RC_UNKNOWN;
 }
 
+/* OSM `surface` -> TD5_GEO_SURF_*. An unrecognised or absent value is SMOOTH,
+ * which is the no-op: it takes the span's own biome page, exactly as every
+ * street did before this tag was read. Defaulting the OTHER way would turn
+ * every untagged street to dirt, which is 299 of La Plata's ways. */
+static int geo_roads_surface(const char *s)
+{
+    static const char *const k_cobble[] = {
+        "sett", "cobblestone", "unhewn_cobblestone", "stone", NULL
+    };
+    static const char *const k_loose[] = {
+        "unpaved", "dirt", "ground", "earth", "gravel", "fine_gravel",
+        "compacted", "pebblestone", "sand", "mud", "grass", "woodchips", NULL
+    };
+    int i;
+    if (!s || !s[0]) return TD5_GEO_SURF_SMOOTH;
+    for (i = 0; k_cobble[i]; i++)
+        if (!strcmp(s, k_cobble[i])) return TD5_GEO_SURF_COBBLE;
+    for (i = 0; k_loose[i]; i++)
+        if (!strcmp(s, k_loose[i])) return TD5_GEO_SURF_LOOSE;
+    return TD5_GEO_SURF_SMOOTH;
+}
+
+static const char *geo_roads_str(const cJSON *o, const char *key)
+{
+    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
+    return (v && cJSON_IsString(v)) ? v->valuestring : NULL;
+}
+
 static int geo_roads_bool(const cJSON *o, const char *key)
 {
     const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
@@ -177,7 +214,12 @@ static int geo_roads_load(const char *slug)
     char *json;
     cJSON *root, *arr;
     const double upm = geo_roads_units_per_metre(slug);
-    int n, i, dropped_short = 0, truncated = 0;
+    /* The A/B for the road half of the tag round, same shape as
+     * TD5RE_GEO_LM_TAGS and TD5RE_GEO_AREA_TAGS: off, the reader ignores
+     * `surface` and `roundabout` and every street takes its biome page, which
+     * is what it did before 2026-10-07. */
+    const int read_tags = td5_env_flag_on("TD5RE_GEO_ROAD_TAGS");
+    int n, i, dropped_short = 0, truncated = 0, roundabouts = 0, n_surf[3];
 
     td5_geo_roads_unload();
     snprintf(path, sizeof path, "re/assets/geo/%s/ROADS.JSON", slug);
@@ -265,6 +307,17 @@ static int geo_roads_load(const char *slug)
         out->bridge = geo_roads_bool(r, "bridge");
         out->tunnel = geo_roads_bool(r, "tunnel");
         out->layer  = (ly && cJSON_IsNumber(ly)) ? ly->valueint : 0;
+        /* All three absent from a pre-2026-10-07 cache, and all three default
+         * to the old behaviour there: SMOOTH, two-way, not a roundabout. */
+        out->surface = read_tags
+                     ? geo_roads_surface(geo_roads_str(r, "surface")) : 0;
+        {
+            const cJSON *od = cJSON_GetObjectItem(r, "oneway_dir");
+            out->oneway_dir = (od && cJSON_IsNumber(od)) ? od->valueint
+                            : (out->oneway ? 1 : 0);
+        }
+        out->roundabout = read_tags ? geo_roads_bool(r, "roundabout") : 0;
+        if (out->roundabout) roundabouts++;
         s_roads.np += kept;
         s_roads.n++;
     }
@@ -281,6 +334,18 @@ static int geo_roads_load(const char *slug)
               "(%d too short); scale %.1f units/m",
               path, s_roads.n, s_roads.np, truncated ? " [TRUNCATED at a cap]" : "",
               dropped_short, upm);
+    /* The surface census is the attributable half of the surface change: a
+     * street that comes out cobbled or loose should be traceable to a count
+     * here rather than noticed in a framedump. */
+    n_surf[0] = n_surf[1] = n_surf[2] = 0;
+    for (i = 0; i < s_roads.n; i++) {
+        const int s = s_roads.road[i].surface;
+        if (s >= 0 && s < 3) n_surf[s]++;
+    }
+    TD5_LOG_I(LOG_TAG, "geo: roads surface: %d smooth, %d cobbled, %d loose; "
+              "%d roundabout way(s)%s",
+              n_surf[0], n_surf[1], n_surf[2], roundabouts,
+              read_tags ? "" : " [TD5RE_GEO_ROAD_TAGS=0: tags ignored]");
     return 1;
 }
 

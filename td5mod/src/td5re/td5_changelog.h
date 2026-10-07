@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 7 (real-world map data)" },
+    { CL_ITEM,    "Churches, ministries, courthouses, theatres and" },
+    { CL_ITEM,    "  police stations on a real-world track are now" },
+    { CL_ITEM,    "  recognised as landmarks instead of plain blocks" },
+    { CL_ITEM,    "Buildings the map does not measure are sized from" },
+    { CL_ITEM,    "  what they ARE, so a school is low and a ministry" },
+    { CL_ITEM,    "  is an office block" },
+    { CL_ITEM,    "Cobbled and unpaved real side streets now look it" },
+    { CL_ITEM,    "Parks, sports grounds and woodland the map marked" },
+    { CL_ITEM,    "  are no longer skipped" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 4 (3D collisions)" },
     { CL_ITEM,    "Crashes and rolls now tumble like the original." },
     { CL_ITEM,    "  The car's own physics used to fight the crash" },

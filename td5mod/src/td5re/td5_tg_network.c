@@ -63,6 +63,10 @@ typedef struct {
     int    npoly;
     double px[TG_NET_POLY], pz[TG_NET_POLY], py[TG_NET_POLY];
     int    rejoin_si;   /* -1, or the main span a loop rejoins              */
+    /* TD5_GEO_SURF_* of the real OSM way this edge came from, SMOOTH (0) for
+     * every synthetic edge -- which is the no-op, so a synthetic build reads
+     * exactly as it did. See tg_net_mouth_surface. */
+    int    surface;
 } TG_NetEdge;
 
 typedef struct { short edge; float skew, reach; } TG_NetMouth;
@@ -601,6 +605,7 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
 
 typedef struct {
     int    si, left, lanes, road, klass;
+    int    surface;         /* TD5_GEO_SURF_* of the real way this arm is   */
     double skew, want;
 } TG_GeoArm;
 
@@ -849,6 +854,7 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
         a->si = h->si; a->left = left; a->lanes = rd->lanes;
         a->road = ridx; a->klass = rd->klass;
         a->skew = skew; a->want = run;
+        a->surface = rd->surface;
     }
 }
 
@@ -1047,6 +1053,7 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         ed->mouth_si = a->si; ed->mouth_left = a->left;
         ed->mouth_lo = lo;    ed->mouth_hi   = hi;
         ed->skew = a->skew;   ed->reach      = reach;
+        ed->surface = a->surface;
         tg_net_paint_edge(ed, TG_WO_STREET);
         tg_net_set_mouth(lo, hi, a->left, (int)(ed - s_edges), a->skew, reach);
         if (kind == TG_NE_AVENUE)            s_gs.avenue++;
@@ -1199,6 +1206,15 @@ int tg_net_mouth_kind(int si, int left)
 {
     const int e = tg_net_mouth(si, left, NULL, NULL);
     return e < 0 ? -1 : s_edges[e].kind;
+}
+
+int tg_net_mouth_surface(int si, int left)
+{
+    const int e = tg_net_mouth(si, left, NULL, NULL);
+    /* No mouth is SMOOTH, not an error code: the caller is choosing a texture
+     * page and "there is no real street here" and "the real street is paved"
+     * want the same answer. */
+    return e < 0 ? TD5_GEO_SURF_SMOOTH : s_edges[e].surface;
 }
 
 /* ---------------------------------------------------------- emission -- */

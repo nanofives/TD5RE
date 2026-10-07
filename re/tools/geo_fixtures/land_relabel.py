@@ -35,23 +35,32 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 GEO = os.path.join(ROOT, "re", "assets", "geo")
 
 # tag -> set of values that name a landmark, or True for "any value".
+#
+# 2026-10-07: this table moved INTO geo_fetch.py as LANDMARK_RULE, which is the
+# permanent home the close-out asked for. The copy here is kept BYTE-IDENTICAL
+# (asserted below) because this tool's remaining job is upgrading an OLD cache
+# in place without the network, and it must agree with what a re-fetch would
+# produce. Edit geo_fetch.py and mirror it here, never the other way round.
+#
+# Order is the ATTRIBUTION order only -- `landmark` is an OR over every row --
+# so it names the most specific statement of what the structure IS.
 RULE = {
-    "historic": True,
-    "heritage": True,
-    "government": True,
-    "tourism": {"attraction", "museum", "gallery", "artwork", "viewpoint",
-                "theme_park", "aquarium", "zoo", "monument"},
-    "amenity": {"place_of_worship", "theatre", "townhall", "courthouse",
-                "arts_centre", "police", "fire_station", "embassy", "casino",
-                "cinema", "conference_centre", "exhibition_centre",
-                "monastery", "public_building"},
-    "office": {"government", "diplomatic"},
-    "man_made": {"tower", "lighthouse", "obelisk", "water_tower", "campanile"},
     "building": {"cathedral", "church", "chapel", "basilica", "mosque",
                  "synagogue", "temple", "monastery", "shrine", "stadium",
                  "museum", "palace", "castle", "monument", "memorial",
                  "train_station", "courthouse", "townhall", "government",
                  "civic", "public", "theatre", "opera_house"},
+    "government": True,
+    "office": {"government", "diplomatic"},
+    "amenity": {"place_of_worship", "theatre", "townhall", "courthouse",
+                "arts_centre", "police", "fire_station", "embassy", "casino",
+                "cinema", "conference_centre", "exhibition_centre",
+                "monastery", "public_building"},
+    "historic": True,
+    "heritage": True,
+    "man_made": {"tower", "lighthouse", "obelisk", "water_tower", "campanile"},
+    "tourism": {"attraction", "museum", "gallery", "artwork", "viewpoint",
+                "theme_park", "aquarium", "zoo", "monument"},
 }
 
 # Deliberately NOT promoted, and why: a hotel or a hostel carries tourism=*
@@ -62,6 +71,25 @@ RULE = {
 # buildings anyone would drive past and recognise.
 TOURISM_NOT = {"hotel", "hostel", "guest_house", "motel", "apartment",
                "chalet", "camp_site", "caravan_site", "information"}
+
+# THE TWO TABLES MUST AGREE. This tool upgrades a cache in place and a re-fetch
+# rebuilds it; if they diverge, the same place gets two different landmark sets
+# depending on which path last touched it, and nothing would say so. Checked at
+# import rather than documented, because a comment asking two files to stay in
+# step is how they drift.
+try:
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    import geo_fetch as _gf                              # noqa: E402
+except Exception as _exc:                                # noqa: BLE001
+    print("warn: cannot import geo_fetch to cross-check the rule (%s)" % _exc,
+          file=sys.stderr)
+else:
+    assert RULE == _gf.LANDMARK_RULE, (
+        "land_relabel.RULE has drifted from geo_fetch.LANDMARK_RULE; edit "
+        "geo_fetch.py and mirror it here")
+    assert TOURISM_NOT == _gf.TOURISM_NOT_LANDMARK, (
+        "land_relabel.TOURISM_NOT has drifted from "
+        "geo_fetch.TOURISM_NOT_LANDMARK")
 
 
 def near_route(place_dir, limit_m=100.0):
