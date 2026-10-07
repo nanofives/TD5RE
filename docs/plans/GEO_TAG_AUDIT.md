@@ -159,3 +159,155 @@ retail, industrial, construction}`. Everything else hits `bump("ignored")`.
   route would be the natural home for the surface tag, but the L3 child is
   porting the conditioner to C this round. Touching the schema would collide.
   Road surface therefore goes through `ROADS.JSON` -> the side streets only.
+
+## Measured after: the one authorised re-fetch, 2026-10-07
+
+### The fetch cost exactly one outbound request, proved before spending it
+
+A TRUE dry run: the real `fetch_place` with `urllib.request.urlopen` replaced
+by a raiser and the old cached response substituted for the new query. It ran
+to completion with **12 cache HITS and 0 MISSES**. The bbox is unchanged, so
+all 12 Terrarium tiles and all 248 WorldCover/canopy COG byte ranges were
+already on disk; both Overpass mirrors share one cache key (it is keyed on the
+QUERY, not the URL), so a mirror failover costs nothing; and `--skip-dem-probe`
+(new) suppresses the uncached IGN WFS probe, whose answer was never stored in
+PLACE.JSON anyway.
+
+That dry run also caught a real bug in this round's own code -- the
+building-heights print became a blanket `%d` over a dict that now nests
+`by_use_tag`, and it raised **after** the rasters were built and **before** the
+contract was written. Unfixed it would have burned the fetch and written
+nothing.
+
+Re-running the normaliser after the fetch is free, and that was verified too:
+`_cache` file count 263 before and 263 after the second pass.
+
+### What the re-fetch brought back
+
+Overpass elements **6119 -> 7504**.
+
+| | before | after |
+|---|---|---|
+| building footprints | 2047 | **2326** |
+| ... with a measured height | 301 | 376 |
+| ... with `roof:shape` | 4 | **45** |
+| `building:part` masses stacked | 0 | **31** |
+| areas | 302 | **416** |
+| `ignored` ways | 22 | 43 (all small or deliberate) |
+| traffic signals | 566 | **566** (membership identical) |
+| other highway nodes (new `nodes[]`) | 0 | 596 |
+| cache landmarks | 10 | **74** |
+| landmarks within 100 m of the route | 2 | **11** |
+| footprints within 100 m of the route | 54 | 88 |
+
+`building:part` is the quiet win. Section 6g had to prove the roof/part work on
+a synthetic fixture because La Plata carried **zero** `building:part` and four
+`roof:shape` -- and the reason was gate 1: `convert_osm` branched on
+`building:part` but the query never asked for a part way, and most part ways
+carry no `building` tag. Those six fixes are now exercised on the real place:
+31 part stacks and 45 roof shapes.
+
+### The 11 landmarks on the route, named
+
+9 of these 11 are new. Span is the route node, distance is to the centroid.
+
+| deciding tag | name | span | dist | height |
+|---|---|---|---|---|
+| `building=cathedral` | Iglesia Catedral Nuestra Señora de los Dolores | 772 | 78 m | 20.0 m (tagged) |
+| `heritage=1` | Casa Curutchet | 217 | 37 m | 9.0 m (levels) |
+| `government=administrative` | Torre Ing. Luis Monteverde | 648 | 42 m | 54.0 m (levels) |
+| `government=ministry` | Ministerio de Desarrollo Social de la Pcia. | 433 | 120 m | 30.0 m (levels) |
+| `government=legislative` | Honorable Cámara de Diputados de la Pcia. | 518 | 112 m | 27.0 m (levels) |
+| `government=yes` | Colegio de Arquitectos de la Pcia. | 216 | 58 m | 9.0 m (levels) |
+| `building=government` | Residencia del Gobernador de la Pcia. | 369 | 79 m | 20.0 m (tagged) |
+| `office=government` | Ministerio de Salud | 899 | 122 m | 22.5 m (use tag) |
+| `amenity=theatre` | Taller de Teatro UNLP | 573 | 40 m | 12.0 m (area ctx) |
+| `amenity=place_of_worship` | Ntra. Sra. de la Victoria | 1150 | 42 m | 13.5 m (use tag) |
+| `amenity=police` | Comisaría La Plata 1ª | 566 | 66 m | 7.8 m (use tag) |
+
+The two that were already landmarks are the Cathedral and Casa Curutchet.
+
+### Gates
+
+| gate | result |
+|---|---|
+| **synthetic seed 99991, slot 60** | **BYTE-IDENTICAL to master.** MODELS.DAT 13071384 `00FB76E8A4742DA94FE14BF12AC79AC2`, STRIP.DAT 144714 `0641EDB7787600D236AE7B51186888DD`, TEXTURES.DAT 1605328 `F69A8CBB6A3FFCA4757360F5AC39234B` -- all three equal on master (0999633c, built in its own worktree) and on this branch |
+| La Plata STRIP.DAT | **65730 `22E37FB227540EF63882E3764A4145B7`, unchanged** -- the drivable track did not move |
+| La Plata TEXTURES.DAT | unchanged |
+| La Plata MODELS.DAT | 12573804 -> 12660532 (+86728), decomposed below |
+| HEIGHT.R16 / WATER.R8 / CANOPY.R8 / ROUTE.JSON / ROUTE_RAW.JSON | **byte-identical after the re-fetch** |
+| COVER.R8 | 38413 cells differ (0.79%), attributed below |
+| structure lint | OK: extern_in_c 3/3, game_h_includers 23/23, warnings 83 vs baseline 84 (the same "improved" master itself reports, so it is pre-existing) |
+| build | dev + release OK |
+
+The synthetic gate is the one that matters: every geo path is gated on
+`td5_geo_loaded()`, so a synthetic build must not move, and it does not.
+Note that commit 400c9751's recorded 13069388 / `63919f5d...` is NOT a valid
+baseline any more -- master has moved since (round 1004). The baseline above
+was rebuilt from 0999633c for this comparison, which is the only honest way to
+run the gate.
+
+### The MODELS.DAT change, split by cause rather than asserted
+
+Three arms, one seed, one slot. This is what the A/B knobs are for.
+
+| arm | exe | cache | knobs | MODELS.DAT | landmarks |
+|---|---|---|---|---|---|
+| base | master | old | n/a | 12573804 | 22 |
+| noknobs | this branch | **new** | all three OFF | 12667824 | **22** |
+| new | this branch | new | all three ON | 12660532 | **74** |
+
+- **The new DATA accounts for +94020 bytes** (base -> noknobs): 279 more
+  footprints, 114 more areas, 34 more footprints bound within reach of the
+  route, 31 part stacks, 41 more roof shapes.
+- **The new READER RULES account for -7292 bytes** (noknobs -> new), and the
+  sign is the interesting part: 52 more landmarks make the file SMALLER,
+  because 3 of them have no 3D tags and are now stamped as a shipped set piece
+  instead of extruded as a full wall-and-roof box. The build log says so
+  directly: "3 shipped set piece(s) stamped on a real footprint, 1 found no
+  piece small enough".
+
+**The knobs-off arm reproduces the pre-round landmark count exactly: 22, from
+`flag=10, building=12`.** That is the documented pre-round state of section 6g
+("cache landmarks 10 -> 22" via the reader's class rule) recovered on the NEW
+cache, which is what makes `geob_legacy_landmark` a real reconstruction of the
+old rule rather than an approximation of it.
+
+Road surface, same two arms: `2187 smooth, 88 cobbled, 16 loose; 73 roundabout
+way(s)` with the knob on, `2291 smooth, 0 cobbled, 0 loose; 0 roundabout` with
+it off.
+
+### COVER.R8, attributed
+
+The first pass through the new data moved 77119 cells (1.59%) and most of it
+was wrong. Both causes were found by attributing the delta per newly-accepted
+area kind rather than by accepting the total:
+
+- `landuse=railway` painted 41311 cells BARE, of which 19562 were WorldCover
+  BUILT and 7898 TREE. The OSM outline covers a whole station precinct,
+  buildings and trees included, so reading it as ballast **overrides a
+  measurement with a guess** over half a square kilometre. Removed.
+- `leisure=sports_centre` / `stadium` painted 53142 cells BUILT. A sports
+  ground is pitches and grass, and GRASS also agrees with the reader's own
+  `geob_area_kind_of`, which classes them PITCH -- the two tables were saying
+  different things about one way. Changed to GRASS.
+
+After both: **38413 cells (0.79%)**, dominated by BUILT -> GRASS on those club
+grounds, which is exactly what `leisure=park` already does over WorldCover by
+design.
+
+### Reproducing any of this
+
+`verify/geo_tags_identity.ps1` runs one arm end to end (windowed, RT off,
+minimum graphics, PID-scoped shutdown, `TD5RE_TG_DOUBLE_BUILD=1` +
+`TD5RE_AUTOTRACK_REUSE=0` so the build is complete rather than streamed and
+the second pass is not a GENSTAMP reuse):
+
+```
+pwsh verify/geo_tags_identity.ps1 -Arm synthetic -Tag base
+pwsh -Command "& verify/geo_tags_identity.ps1 -Arm geo -Tag noknobs ``
+     -Extra @{TD5RE_GEO_LM_TAGS='0';TD5RE_GEO_AREA_TAGS='0';TD5RE_GEO_ROAD_TAGS='0'}"
+```
+
+Pass `-Extra` through `-Command`, not `-File`: `-File` stringifies every
+argument and the hashtable will not bind.
