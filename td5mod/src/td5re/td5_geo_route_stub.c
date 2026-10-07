@@ -169,9 +169,11 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts,
                  "NOT ENOUGH ROAD HERE - MOVE THE POINTS FURTHER APART");
     } else if (out->spans > TD5_GEO_ROUTE_MAX_SPANS) {
         out->verdict = TD5_GEO_ROUTE_TOO_LONG;
+        /* No number in the text: the screen passes `reason` through TR() at
+         * the draw site, and a formatted string can never match a catalog
+         * key. The span count is already on the status line as "N / 3000". */
         snprintf(out->reason, sizeof(out->reason),
-                 "ROUTE TOO LONG - OVER THE %d SPAN LIMIT",
-                 TD5_GEO_ROUTE_MAX_SPANS);
+                 "ROUTE TOO LONG - OVER THE SPAN LIMIT");
     } else {
         out->verdict = TD5_GEO_ROUTE_OK;
         snprintf(out->reason, sizeof(out->reason), "STRAIGHT LINE - ROUTER NOT LINKED YET");

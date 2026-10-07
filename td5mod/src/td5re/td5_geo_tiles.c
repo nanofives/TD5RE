@@ -279,37 +279,60 @@ void td5_geo_tiles_open(void)
                       TD5_GEO_TILE_ATLAS_DIM, TD5_GEO_TILE_ATLAS_DIM);
             return;
         }
+        memset(s_slot, 0, sizeof(s_slot));
     }
-    memset(s_slot, 0, sizeof(s_slot));
-    s_atlas_dirty = 1;   /* clear whatever a previous session left on the page */
+    /* The slot table is NOT reset on a re-open: the atlas still holds the
+     * tiles from last time, so keeping their keys is what makes re-entering
+     * the screen cost zero requests and zero decodes. Clearing it here would
+     * quietly undo the whole point of close() keeping the atlas. */
+    s_atlas_dirty = 1;   /* the page may have been reused while we were away */
 
+    /* Workers are created ONCE for the process, not once per screen entry:
+     * close() deliberately does not join them (see its comment), so spawning
+     * a fresh pair here would leak two threads every time the player opened
+     * the map. They park on the condition variable while the screen is shut
+     * and cost nothing; `s_open` is what gates whether work can reach them. */
     InterlockedExchange(&s_running, 1);
-    for (i = 0; i < TD5_GEO_TILE_WORKERS; i++)
-        s_worker[i] = td5_plat_thread_create(tile_worker, NULL);
+    for (i = 0; i < TD5_GEO_TILE_WORKERS; i++) {
+        if (!s_worker[i])
+            s_worker[i] = td5_plat_thread_create(tile_worker, NULL);
+    }
     s_open = 1;
     TD5_LOG_I(LOG_TAG, "geo tiles: open (%d worker(s), cache %s, UA %s)",
               TD5_GEO_TILE_WORKERS, TILE_CACHE_ROOT, TD5_GEO_TILE_UA);
 }
 
+/* Close must be INSTANT: it runs on the frame the player presses BACK.
+ *
+ * So it does NOT join the workers. Joining would block the main thread until
+ * whatever request is in flight returns -- up to the 6 s WinHTTP timeout, on
+ * exactly the path where a tile is least likely to arrive (a dead network),
+ * which would freeze the menu for six seconds every time someone backed out
+ * of an offline map. Instead the workers stay parked on the condition
+ * variable for the rest of the process, and `s_open` gates the only thing
+ * that matters: whether a NEW request can be made. td5_geo_tiles_lookup
+ * refuses to queue while it is 0, and the queued-but-not-started slots are
+ * dropped here, so the most that outlives the screen is the one request
+ * already on the wire -- which cannot be recalled in any case.
+ */
 void td5_geo_tiles_close(void)
 {
-    int i;
+    int i, dropped = 0;
     if (!s_open) return;
 
-    InterlockedExchange(&s_running, 0);
+    s_open = 0;
     if (s_lock_ready) {
         EnterCriticalSection(&s_lock);
-        WakeAllConditionVariable(&s_wake);
+        for (i = 0; i < TD5_GEO_TILE_SLOTS; i++) {
+            if (s_slot[i].state == SLOT_QUEUED) { s_slot[i].state = SLOT_EMPTY; dropped++; }
+        }
         LeaveCriticalSection(&s_lock);
-    }
-    for (i = 0; i < TD5_GEO_TILE_WORKERS; i++) {
-        if (s_worker[i]) { td5_plat_thread_join(s_worker[i]); s_worker[i] = NULL; }
     }
     /* The atlas is kept: re-entering the screen then redraws the last view
      * with no request at all, which is the politest thing we can do. The slot
      * table is kept with it so the UVs still match. */
-    s_open = 0;
-    TD5_LOG_I(LOG_TAG, "geo tiles: closed (no further requests)");
+    TD5_LOG_I(LOG_TAG, "geo tiles: closed (no further requests; %d queued tile(s) "
+              "dropped)", dropped);
 }
 
 /* ------------------------------------------------------------- the pump -- */

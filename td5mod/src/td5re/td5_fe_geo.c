@@ -46,6 +46,7 @@
 #include "td5_vectorui.h"
 #include "td5_font.h"
 #include "td5_i18n.h"
+#include "td5_config.h"        /* shared TD5RE_* env-knob accessors */
 #include "td5_frontend_internal.h"
 
 #include <math.h>
@@ -721,6 +722,12 @@ static void geo_draw_tiles(float sx, float sy)
 static void geo_draw_places(float sx, float sy)
 {
     int i;
+    if (s_n_places <= 0) return;
+    /* The wash is alpha-blended, so it needs the translucent preset. Without
+     * it the frontend's default opaque state ignores the alpha byte and
+     * 0x22-alpha green came out as FLAT GREEN over the whole map -- which is
+     * exactly what the first framedump showed. */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (i = 0; i < s_n_places; i++) {
         float x0, y0, x1, y1, t;
         geo_latlon_to_design(s_place_bbox[i][3], s_place_bbox[i][0], sx, sy, &x0, &y0);
@@ -735,6 +742,7 @@ static void geo_draw_places(float sx, float sy)
         geo_fill(x0, y0, x1 - x0, y1 - y0, GEO_COL_SHADE, sx, sy);
         geo_frame_rect(x0, y0, x1 - x0, y1 - y0, GEO_COL_SHADE_ED, sx, sy);
     }
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 static void geo_draw_route(float sx, float sy)
@@ -827,26 +835,43 @@ void frontend_geo_generator_render(float sx, float sy)
      * frame rather than next. */
     td5_geo_tiles_frame();
 
-    frontend_draw_screen_title(TR("GEOSPATIAL TRACK GENERATOR"),
-                               FE_TITLE_LEFT_X * sx, 17.0f * sy,
-                               0xFFE3D708u, sx, sy);
-
-    /* ---- the map ---- */
+    /* ---- the map ----
+     * SCISSORED. A slippy map always draws whole tiles, so the edge ones hang
+     * over the pane by up to 256 map pixels; unclipped they covered the title
+     * and ran off both sides of the canvas (first framedump, 2026-10-07).
+     * The clip is also what lets the tile loop stay a plain whole-tile loop
+     * instead of computing partial quads. */
+    td5_plat_render_set_clip_rect((int)(GEO_MAP_X * sx), (int)(GEO_MAP_Y * sy),
+                                  (int)((GEO_MAP_X + GEO_MAP_W) * sx),
+                                  (int)((GEO_MAP_Y + GEO_MAP_H) * sy));
     geo_fill(GEO_MAP_X, GEO_MAP_Y, GEO_MAP_W, GEO_MAP_H, 0xFF101018u, sx, sy);
     geo_draw_tiles(sx, sy);
     geo_draw_places(sx, sy);
     geo_draw_route(sx, sy);
+    td5_plat_render_set_clip_rect(0, 0, (int)(640.0f * sx), (int)(480.0f * sy));
+
     geo_frame_rect(GEO_MAP_X, GEO_MAP_Y, GEO_MAP_W, GEO_MAP_H, GEO_COL_FRAME, sx, sy);
 
-    /* [ODbL] The credit travels with the map and is never conditional. Bottom
-     * right of the pane, which is where every map widget puts it and which
-     * keeps it inside the imagery it credits. */
+    /* Title AFTER the map. Drawn before it, the overhanging edge tiles painted
+     * straight over it. */
+    frontend_draw_screen_title(TR("GEOSPATIAL TRACK GENERATOR"),
+                               FE_TITLE_LEFT_X * sx, 17.0f * sy,
+                               0xFFE3D708u, sx, sy);
+
+    /* [ODbL] The credit travels with the map and is never conditional.
+     * LEFT-aligned inside the pane's bottom edge: right-aligning it off
+     * fe_measure_small_text clipped the last characters on the first
+     * framedump, and a credit that can be truncated is not a credit. A dark
+     * plate under it keeps it readable over pale map imagery. */
     {
         const char *credit = TR("(C) OPENSTREETMAP CONTRIBUTORS");
-        const float cw = fe_measure_small_text(credit);
-        fe_draw_small_text((GEO_MAP_X + GEO_MAP_W - 4.0f - cw) * sx,
-                           (GEO_MAP_Y + GEO_MAP_H - 13.0f) * sy,
-                           credit, 0xFFD0D8E0u, sx, sy);
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        geo_fill(GEO_MAP_X + 1.0f, GEO_MAP_Y + GEO_MAP_H - 15.0f,
+                 GEO_MAP_W - 2.0f, 14.0f, 0x99101018u, sx, sy);
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        fe_draw_small_text((GEO_MAP_X + 4.0f) * sx,
+                           (GEO_MAP_Y + GEO_MAP_H - 14.0f) * sy,
+                           credit, 0xFFE8ECF0u, sx, sy);
     }
 
     /* ---- side readout ---- */
@@ -878,8 +903,10 @@ void frontend_geo_generator_render(float sx, float sy)
     }
 
     /* ---- status ---- */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     geo_fill(GEO_STATUS_X, GEO_STATUS_Y, GEO_STATUS_W, GEO_STATUS_H,
              0xC0101018u, sx, sy);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     geo_frame_rect(GEO_STATUS_X, GEO_STATUS_Y, GEO_STATUS_W, GEO_STATUS_H,
                    GEO_COL_FRAME, sx, sy);
     if (s_n_pts < 2) {
@@ -953,6 +980,28 @@ static void geo_screen_init(void)
         }
     }
 
+#ifndef TD5RE_RELEASE
+    /* Dev seed for framedump verification. Control-socket keys do not reach
+     * frontend menus and inject_key cannot fabricate a mouse drag, so the only
+     * way to see placed points and a drawn route on a screenshot is to put
+     * them there. TD5RE_GEO_SEED=1 drops a START, a middle and a FINISH across
+     * the centred place. Same device as the CHAOS board's "DEV: FAKE ROSTER"
+     * (td5_fe_chaos.c) and compiled out of RELEASE for the same reason. */
+    /* td5_env_int, not td5_env_flag_on: an unset knob must mean OFF, and
+     * flag_on has bitten this tree before (the R22 water diag that ran on
+     * every build). Default 0, range 0..1, no ambiguity. */
+    if (s_n_pts == 0 && td5_env_int("TD5RE_GEO_SEED", 0, 0, 1)) {
+        const double dlat = 0.010, dlon = 0.013;
+        s_pts[0].lat = s_cen_lat - dlat; s_pts[0].lon = s_cen_lon - dlon;
+        s_pts[1].lat = s_cen_lat + dlat * 0.3; s_pts[1].lon = s_cen_lon;
+        s_pts[2].lat = s_cen_lat + dlat; s_pts[2].lon = s_cen_lon + dlon;
+        s_n_pts = 3;
+        geo_mark_dirty();
+        TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_SEED - seeded 3 DEV points "
+                  "(dev build only; not a user action)");
+    }
+#endif
+
     s_drag_pt  = -1;
     s_panning  = 0;
     s_prev_lmb = td5_plat_input_mouse_left_down();   /* a click carried in from
@@ -973,6 +1022,21 @@ static void geo_screen_init(void)
 static void geo_leave(int screen)
 {
     td5_geo_tiles_close();
+
+    /* Drain a background build before leaving. Without this the thread handle
+     * leaks AND s_bg_busy stays 1 forever, so every later visit to the screen
+     * would find the slot occupied, set s_rebuild_wanted and never route
+     * again -- a dead screen with no error anywhere. The router is contracted
+     * to finish "well under a second", so the wait is bounded; the result is
+     * thrown away because the screen is closing. */
+    if (s_bg_thread) {
+        td5_plat_thread_join(s_bg_thread);
+        s_bg_thread = NULL;
+    }
+    InterlockedExchange(&s_bg_done, 0);
+    InterlockedExchange(&s_bg_busy, 0);
+    s_rebuild_wanted = 0;
+
     s_inner_state = 0;
     td5_frontend_set_screen(screen);
 }
