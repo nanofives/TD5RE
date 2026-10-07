@@ -108,6 +108,19 @@ void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team     
  * team). Plan: docs/plans/CHAOS_COOP_MODE_PLAN.md sections 6.2-6.4. */
 void Screen_ChaosTeams(void);
 void frontend_chaos_teams_render(float sx, float sy);
+
+/* ---- [GEO GENERATOR 2026-10-07] GEOSPATIAL TRACK GENERATOR (td5_fe_geo.c) ----
+ * OSM raster map + mouse route builder, entered from SELECT TRACK. Routes
+ * through the td5_geo_route.h contract and leaves with the built place picked
+ * as the current track slot. Round plan:
+ * _archive/GEO_GENERATOR_ROUND_2026-10-07_PLAN.md. */
+void Screen_GeoGenerator(void);
+void frontend_geo_generator_render(float sx, float sy);
+/* Where BACK and a finished BUILD return to. Set by whoever opens the screen,
+ * read by frontend_get_parent_screen -- same split as the AUTO TRACK STUDIO
+ * chip's frontend_autotrack_parent_screen. */
+void frontend_geo_generator_set_parent(int screen);
+int  frontend_geo_generator_parent_screen(void);
 /* 1 when CHAOS CO-OP may be picked with the CURRENT lobby roster (4/6/8 local
  * humans, no AI test players, not a network session). `why` (may be NULL) gets
  * a short reason line when the answer is 0. Shared with the MP MODE VOTE gate. */
