@@ -1946,8 +1946,15 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
     print("  cover cells %d, water cells %d, built stamps %d"
           % (painted["cover_cells"], painted["water_cells"],
              painted["built_cells"]))
-    print("  building heights: %s" % ", ".join("%s=%d" % kv
-                                               for kv in sorted(bh.items())))
+    # `bh` carries a nested `by_use_tag` breakdown as well as the scalar
+    # counts, so this cannot be a blanket %d -- it raised TypeError on the
+    # first dry run.
+    print("  building heights: %s"
+          % ", ".join("%s=%s" % (k, v) for k, v in sorted(bh.items())
+                      if not isinstance(v, dict)))
+    if isinstance(bh.get("by_use_tag"), dict):
+        print("  estimated from a use tag: %s"
+              % ", ".join("%s x%d" % kv for kv in bh["by_use_tag"].items()))
 
     # ---- write the contract ---------------------------------------------
     height.write(os.path.join(out, "HEIGHT.R16"))
