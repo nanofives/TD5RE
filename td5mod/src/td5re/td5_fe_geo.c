@@ -853,8 +853,22 @@ void frontend_geo_generator_render(float sx, float sy)
     geo_frame_rect(GEO_MAP_X, GEO_MAP_Y, GEO_MAP_W, GEO_MAP_H, GEO_COL_FRAME, sx, sy);
 
     /* Title AFTER the map. Drawn before it, the overhanging edge tiles painted
-     * straight over it. */
-    frontend_draw_screen_title(TR("GEOSPATIAL TRACK GENERATOR"),
+     * straight over it.
+     *
+     * "GEO TRACK GENERATOR", not the full "GEOSPATIAL TRACK GENERATOR" that
+     * the SELECT TRACK row carries. frontend_draw_screen_title does NOT fit
+     * text: its advance comes from FE_TITLE_CAP_PX * sy while the canvas is
+     * 640 * sx wide, so a title is widest in DESIGN terms at 4:3 (sx == sy)
+     * and 4/3 narrower at 16:9. Measured on a 1024x768 framedump
+     * (2026-10-07): the 26-character string ran clean off the right edge of
+     * the canvas, exactly the way "CUSTOM PERFORMANCE" did on screen 54, and
+     * a 19-character second attempt ("GEO TRACK GENERATOR") still ended at
+     * design x~637 of 640. The title font runs ~27 design px per character
+     * from FE_TITLE_LEFT_X (126) at 4:3, so 13 characters is the comfortable
+     * budget. "GEO GENERATOR" ends around x=476 and is also exactly what the
+     * s_screens[] badge calls this screen, so the header and the dev badge
+     * agree. The row the player clicked still says Mariano's full phrase. */
+    frontend_draw_screen_title(TR("GEO GENERATOR"),
                                FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
 
