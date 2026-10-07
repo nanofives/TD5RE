@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 7 (geo route builder)" },
+    { CL_ITEM,    "Building a track from a real place no longer needs" },
+    { CL_ITEM,    "  Python. The game itself can now find the roads" },
+    { CL_ITEM,    "  between two points on the map, turn that drive" },
+    { CL_ITEM,    "  into a legal track and save it." },
+    { CL_ITEM,    "It reports what it found before you commit: the" },
+    { CL_ITEM,    "  street names, the length, how tight the worst" },
+    { CL_ITEM,    "  corner is, and a marker wherever the route" },
+    { CL_ITEM,    "  crosses itself (which becomes a flyover)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 4 (3D collisions)" },
     { CL_ITEM,    "Crashes and rolls now tumble like the original." },
     { CL_ITEM,    "  The car's own physics used to fight the crash" },

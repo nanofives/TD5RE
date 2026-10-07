@@ -2538,6 +2538,8 @@ int td5_geo_route_commit(void)
  *
  *   TD5RE_GEO_ROUTE_TEST=1   condition both fixtures and exit
  *   TD5RE_GEO_ROUTE_TEST=2   also route La Plata from its saved waypoints
+ *   TD5RE_GEO_ROUTE_TEST=3   also COMMIT it (rewrites the place cache in place)
+ *   TD5RE_GEO_ROUTE_TEST_PTS="lat,lon;lat,lon"  override the waypoints
  */
 static int  gr_write_route(const char *dir);
 static int  gr_write_route_raw(const char *dir);
@@ -2676,32 +2678,56 @@ static void gr_dump_cond(const char *out_path, GrCond *c)
     s_last.cond = saved;
 }
 
-static void gr_test_route_live(void)
+static void gr_test_route_live(int level)
 {
     char path[512];
     char *json;
     cJSON *root, *wps;
     TD5_GeoLatLon wp[GR_MAX_WAYPOINTS];
     TD5_GeoRouteResult r;
+    const char *pts_env = getenv("TD5RE_GEO_ROUTE_TEST_PTS");
     int n = 0, i;
 
-    snprintf(path, sizeof path, "re/assets/geo/la_plata/ROUTE_RAW.JSON");
-    json = gr_slurp(path, NULL);
-    if (!json) { printf("\nGEOROUTE live: %s not readable\n", path); return; }
-    root = cJSON_Parse(json);
-    free(json);
-    if (!root) return;
-    wps = cJSON_GetObjectItem(root, "waypoints");
-    if (wps && cJSON_IsArray(wps)) {
-        n = cJSON_GetArraySize(wps);
-        if (n > GR_MAX_WAYPOINTS) n = GR_MAX_WAYPOINTS;
-        for (i = 0; i < n; i++) {
-            const cJSON *e = cJSON_GetArrayItem(wps, i);
-            wp[i].lat = cJSON_GetArrayItem(e, 0)->valuedouble;
-            wp[i].lon = cJSON_GetArrayItem(e, 1)->valuedouble;
+    /* TD5RE_GEO_ROUTE_TEST_PTS="lat,lon;lat,lon[;...]" overrides the saved
+     * waypoints, which matters for the commit test: re-committing the SAME
+     * route lands in almost the same frame and would not exercise the
+     * re-grid at all. */
+    if (pts_env && pts_env[0]) {
+        const char *p = pts_env;
+        while (*p && n < GR_MAX_WAYPOINTS) {
+            char *end = NULL;
+            const double la = strtod(p, &end);
+            if (end == p || *end != ',') break;
+            p = end + 1;
+            wp[n].lat = la;
+            wp[n].lon = strtod(p, &end);
+            if (end == p) break;
+            n++;
+            p = end;
+            if (*p == ';') p++;
+            else break;
         }
+        printf("\nGEOROUTE live: %d waypoint(s) from TD5RE_GEO_ROUTE_TEST_PTS\n", n);
     }
-    cJSON_Delete(root);
+    snprintf(path, sizeof path, "re/assets/geo/la_plata/ROUTE_RAW.JSON");
+    if (n < 2) {
+        json = gr_slurp(path, NULL);
+        if (!json) { printf("\nGEOROUTE live: %s not readable\n", path); return; }
+        root = cJSON_Parse(json);
+        free(json);
+        if (!root) return;
+        wps = cJSON_GetObjectItem(root, "waypoints");
+        if (wps && cJSON_IsArray(wps)) {
+            n = cJSON_GetArraySize(wps);
+            if (n > GR_MAX_WAYPOINTS) n = GR_MAX_WAYPOINTS;
+            for (i = 0; i < n; i++) {
+                const cJSON *e = cJSON_GetArrayItem(wps, i);
+                wp[i].lat = cJSON_GetArrayItem(e, 0)->valuedouble;
+                wp[i].lon = cJSON_GetArrayItem(e, 1)->valuedouble;
+            }
+        }
+        cJSON_Delete(root);
+    }
     if (n < 2) { printf("\nGEOROUTE live: no waypoints in %s\n", path); return; }
 
     printf("\nGEOROUTE live route from %d waypoint(s) of %s\n", n, path);
@@ -2736,6 +2762,18 @@ static void gr_test_route_live(void)
     td5_geo_route_build(wp, n, &r);
     printf("  build_ms (graph warm)  %.3f\n", r.build_ms);
     printf("  streets (full)         %s\n", r.streets);
+
+    /* Level 3 also COMMITS: writes both JSONs, re-grids the four rasters into
+     * the route frame, re-projects the four vector layers and selects the
+     * place. It rewrites re/assets/geo/<slug>/ in place, which is why it is a
+     * separate level and not part of the default harness. */
+    if (level >= 3) {
+        const uint64_t t0 = td5_plat_time_us();
+        const int rc = td5_geo_route_commit();
+        printf("  COMMIT rc              %d (0 = ok)\n", rc);
+        printf("  commit_ms              %.1f\n",
+               (double)(td5_plat_time_us() - t0) / 1000.0);
+    }
 }
 
 static void gr_self_test(int level)
@@ -2746,7 +2784,7 @@ static void gr_self_test(int level)
     printf("lead_in_nodes            %d\n", GR_LEAD_IN_NODES);
     gr_test_fixture("re/tools/geo_fixtures/la_plata_route_raw.json", 0);
     gr_test_fixture("re/tools/geo_fixtures/figure8_route_raw.json", 1);
-    if (level >= 2) gr_test_route_live();
+    if (level >= 2) gr_test_route_live(level);
     printf("\n=== end ===\n");
     fflush(stdout);
 }
@@ -2755,7 +2793,7 @@ static void gr_self_test(int level)
 int td5_geo_route_init(void)
 {
 #ifndef TD5RE_RELEASE
-    const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 2);
+    const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 3);
     if (lvl > 0) {
         gr_self_test(lvl);
         td5_geo_route_shutdown();
