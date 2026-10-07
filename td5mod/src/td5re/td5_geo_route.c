@@ -2037,6 +2037,58 @@ static int gr_write_route(const char *dir)
     cJSON_AddNumberToObject(root, "grade_separation_lift_units", GR_XSEP_LIFT_UNITS);
     cJSON_AddStringToObject(root, "written_by", "td5_geo_route.c");
 
+    /* The REPORT half of the file. The engine reads none of it, but
+     * geo_condition.py writes it, geo_audit reads it and the screen shows it,
+     * so a C-written ROUTE.JSON has to be a drop-in for a Python-written one
+     * rather than a subset that silently loses the quality numbers. */
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "limit_deg", c->curvature.limit_deg);
+        cJSON_AddNumberToObject(o, "limit_loose_deg", c->curvature.limit_loose_deg);
+        cJSON_AddNumberToObject(o, "worst_before_deg", c->curvature.worst_before_deg);
+        cJSON_AddNumberToObject(o, "worst_after_deg", c->curvature.worst_after_deg);
+        cJSON_AddNumberToObject(o, "worst_final_deg", c->curvature.worst_final_deg);
+        cJSON_AddNumberToObject(o, "iterations", c->curvature.iterations);
+        cJSON_AddNumberToObject(o, "over_nodes", c->curvature.over_nodes);
+        cJSON_AddNumberToObject(o, "over_nodes_final", c->curvature.over_nodes_final);
+        cJSON_AddNumberToObject(o, "min_radius_units", c->curvature.min_radius_units);
+        cJSON_AddBoolToObject(o, "converged", c->curvature.converged);
+        cJSON_AddItemToObject(root, "curvature", o);
+    }
+    {
+        int g;
+        for (g = 0; g < 2; g++) {
+            const GrScore *s = g ? &c->final : &c->orientation;
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "max_dev_deg", s->max_dev_deg);
+            cJSON_AddNumberToObject(o, "mean_dev_deg", s->mean_dev_deg);
+            cJSON_AddNumberToObject(o, "over_budget", s->over_budget);
+            cJSON_AddNumberToObject(o, "monotone_frac", s->monotone_frac);
+            cJSON_AddBoolToObject(o, "inherits_proof", s->inherits_proof);
+            cJSON_AddItemToObject(root, g ? "final" : "orientation", o);
+        }
+    }
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "clamped_low", c->heading.clamped_low);
+        cJSON_AddNumberToObject(o, "clamped_high", c->heading.clamped_high);
+        cJSON_AddNumberToObject(o, "clamped_total", c->heading.clamped_total);
+        cJSON_AddNumberToObject(o, "worst_heading_error_deg", c->heading.worst_deg);
+        cJSON_AddItemToObject(root, "heading_bytes", o);
+    }
+    {
+        cJSON *a = cJSON_CreateArray();
+        cJSON *w = cJSON_CreateArray();
+        for (i = 0; i < c->n_reasons; i++)
+            cJSON_AddItemToArray(a, cJSON_CreateString(c->reason[i]));
+        for (i = 0; i < c->n_warnings; i++)
+            cJSON_AddItemToArray(w, cJSON_CreateString(c->warning[i]));
+        cJSON_AddItemToObject(root, "reasons", a);
+        cJSON_AddItemToObject(root, "warnings", w);
+    }
+    cJSON_AddBoolToObject(root, "allow_crossings",
+                          td5_env_flag_on("TD5RE_GEO_ROUTE_XLEVEL"));
+
     /* [OPTION B] ADDITIVE, and it has to stay that way: td5_geo.c reads an
      * absent key as "no grade separation", which is the pre-Option-B build of
      * the same route. Never make it required. */
@@ -2488,6 +2540,7 @@ int td5_geo_route_commit(void)
  *   TD5RE_GEO_ROUTE_TEST=2   also route La Plata from its saved waypoints
  */
 static int  gr_write_route(const char *dir);
+static int  gr_write_route_raw(const char *dir);
 static void gr_dump_cond(const char *out_path, GrCond *c);
 
 static void gr_test_fixture(const char *path, int allow_cross)
@@ -2670,6 +2723,19 @@ static void gr_test_route_live(void)
     if (r.n_path)
         printf("  path[last]             %.7f %.7f\n",
                r.path[r.n_path - 1].lat, r.path[r.n_path - 1].lon);
+    /* Dump the ROUTED polyline through the shipping ROUTE_RAW writer, so the
+     * router half can be diffed against the saved file point by point. */
+    if (r.verdict == TD5_GEO_ROUTE_OK && gr_write_route_raw("log")) {
+        td5_plat_file_delete("log/georoute_live_ROUTE_RAW.JSON");
+        td5_plat_file_rename("log/ROUTE_RAW.JSON", "log/georoute_live_ROUTE_RAW.JSON");
+        printf("  dumped                 log/georoute_live_ROUTE_RAW.JSON\n");
+    }
+    /* Second build with the graph already cached: that is the cost the screen
+     * pays on every waypoint drag, and the one the plan's "well under a
+     * second" target is about. */
+    td5_geo_route_build(wp, n, &r);
+    printf("  build_ms (graph warm)  %.3f\n", r.build_ms);
+    printf("  streets (full)         %s\n", r.streets);
 }
 
 static void gr_self_test(int level)

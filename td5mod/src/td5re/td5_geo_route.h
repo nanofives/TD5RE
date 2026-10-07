@@ -76,7 +76,7 @@ typedef struct {
     float limit_turn_deg;        /* the tightest limit it was measured against  */
     float monotone_pct;          /* share of spans advancing along +X           */
     float raw_length_m;          /* the ROUTED polyline, before conditioning    */
-    char  streets[192];          /* "Avenida 53 -> Calle 30 -> ..." , truncated */
+    char  streets[320];          /* "Avenida 53 > Calle 30 > ...", truncated  */
     int   n_warnings;
     char  warning[TD5_GEO_ROUTE_MAX_WARN][TD5_GEO_ROUTE_WARN_LEN];
     double build_ms;             /* wall time of td5_geo_route_build            */
