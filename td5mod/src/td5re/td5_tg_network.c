@@ -863,8 +863,14 @@ static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
      * Measured on Mariano's route (ROADS.JSON, 2291 ways, replicating this loop
      * offline): 13 crossing hits and 90 ways called the route as shipped, versus
      * 59 hits and 63 ways with cos. The median skew of the 46 recovered hits is
-     * 44 degrees. That is the diagonal grid arriving. */
-    const double sn_min = cos(tg_geo_skew_max());
+     * 44 degrees. That is the diagonal grid arriving.
+     *
+     * TD5RE_GEO_NET_SKEW_TANGENT=1 restores the sin() comparison, so the whole
+     * mechanism can be A/B'd on one exe (the depth and cap changes have their
+     * own knobs; without this one the dominant change would be the only part of
+     * the round with no before picture). */
+    const double sn_min = td5_env_flag_off("TD5RE_GEO_NET_SKEW_TANGENT")
+                        ? sin(tg_geo_skew_max()) : cos(tg_geo_skew_max());
     /* [ROUND 1008b] shared-carriageway run state; see tg_geo_depart_hit */
     const double dep_sin = sin((double)TG_GEO_DEPART_DEG * TD5_TG_PI / 180.0);
     const int    dep_on  = td5_env_flag_on("TD5RE_GEO_NET_DEPART");

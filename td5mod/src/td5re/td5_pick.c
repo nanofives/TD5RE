@@ -487,7 +487,19 @@ void td5_pick_finish_frame(void)
         int   cmds  = s_best_mesh->command_count;
         float r = s_best_r;
         int   is_auto = td5_trackgen_is_auto_slot(g_td5.track_index);
-        const char *pgname = is_auto ? td5_trackgen_page_name(primary) : NULL;
+        /* [ROUND 1009] A GEO track is generated too, so its pages are generator
+         * pages and its MESHTAG.BIN sidecar is written next to its MODELS.DAT
+         * exactly as the auto track's is -- but is_auto is slot 60 only, so
+         * every pick Mariano copied off a real place arrived as a bare
+         * "level091 L91 e183 s11 p5+93", missing the two fields that identify
+         * the thing: the emitter kind and the page name. Both items 8 and 11 of
+         * this round had to be decoded offline from MODELS.DAT for want of
+         * them (scripts/geo_pick_lookup.py, which does exactly that). Generated
+         * is generated: ask is_gen for provenance, and keep is_auto only for
+         * the trackid, where "AUTO" vs "level091" is still the right split
+         * because level091 IS the import key a geo page lives under. */
+        int   is_gen = is_auto || td5_trackgen_is_geo_slot(g_td5.track_index);
+        const char *pgname = is_gen ? td5_trackgen_page_name(primary) : NULL;
         /* [IMPORT HANDLE] On a SHIPPED track the pick names the level the
          * page lives in ("level014" page 276), which is exactly the
          * (level, page) key re/tools/gen_tg_pages.py --from-pick consumes to
@@ -499,7 +511,7 @@ void td5_pick_finish_frame(void)
         char  trackid[16];
         if (is_auto) snprintf(trackid, sizeof trackid, "AUTO");
         else         snprintf(trackid, sizeof trackid, "level%03d", level_num);
-        const char *kind = (is_auto && entry >= 0)
+        const char *kind = (is_gen && entry >= 0)
                            ? td5_trackgen_mesh_kind_name(entry, s_best_slot) : NULL;
         uint32_t col = (s_flash > 0) ? 0xFF33FF33u : 0xFFFFFF00u;  /* green flash / yellow */
 
