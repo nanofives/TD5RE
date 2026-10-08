@@ -1853,6 +1853,24 @@ typedef struct {
  * would pop in and out between two crossings, which is the complaint the
  * synthetic sliver reject (tg_emit_avenue_divider) exists to avoid. */
 #define GR_AV_MIN_SPANS      12
+/* CONTINUITY: the most the offset to the opposite carriageway may change from
+ * one span to the next. A span is 1500 units (3.5 m) of road, so 375 units
+ * (0.87 m) is a 14-degree splay -- far more than any real median taper (the
+ * widest on Mariano's route opens 3.3 m over ~50 spans, 0.07 m per span) and
+ * far less than the jump to a different slice of the same street, which is
+ * what this exists to refuse. See gr_peer_offset_at for the measurement. */
+#define GR_AV_MAX_STEP      375.0
+/* The two carriageways must not touch: the gap has to hold both half widths
+ * and still leave something between them. 150 units is 0.35 m -- enough that
+ * the two road surfaces never share an edge and z-fight, small enough that a
+ * real median pinching at an intersection does not cut the avenue in half
+ * (the island itself is skipped under TG_AV_MIN_MEDIAN_W, which is wider). */
+#define GR_AV_MIN_MEDIAN    150.0
+/* How many consecutive unmapped spans the chain may cross before the avenue is
+ * declared over. 4 spans is 6000 units, 14 m -- an intersection's width. OSM
+ * interrupts a carriageway at a junction, and ending the avenue at the first
+ * such gap would cut a long one in half at its first crossing. */
+#define GR_AV_MAX_MISS         4
 
 /* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
  * convention gr_heading uses. */
@@ -2242,36 +2260,54 @@ static int gr_poly_at(const GrPts *p, const double *frac, double f,
     return 1;
 }
 
-/* Signed lateral offset (world units, + = LEFT of travel) from (x,z) to the
- * nearest point of a same-name one-way carriageway on `want_side`, plus that
- * way's lane count. Returns 0 where the opposite carriageway has ended -- which
- * is exactly how the median stops where the OSM ways stop.
+/* Signed lateral offset (world units, + = LEFT of travel) from (x,z) to a
+ * same-name one-way carriageway on `want_side`, plus that way's lane count.
+ * Returns 0 where the opposite carriageway has ended -- which is exactly how
+ * the median stops where the OSM ways stop.
  *
  * The peer set is the one gr_detect_medians accepted: same name, one-way, not a
- * plaza arc, and NOT a way the route itself drives on. */
-static int gr_peer_offset_at(const char *name, int want_side, double x, double z,
+ * plaza arc, and NOT a way the route itself drives on.
+ *
+ * CONTINUITY, and it is not optional. `want` is the offset the PREVIOUS span
+ * settled on, and the candidate chosen is the one NEAREST that rather than the
+ * one nearest the road. Taking the nearest each span independently follows
+ * whichever slice of the street happens to be closest, and a long avenue has
+ * several: MEASURED on the first run of this code over Mariano's route, avenue
+ * 0 ran 5.5..10.7 m and built a median of -1.43..3.74 m (negative: the scenery
+ * carriageway inside the race road), and avenue 2 ran 10.7..22.0 m and built
+ * 3.73..15.11 m -- one carriageway for part of the run and a different way for
+ * the rest. A median does not double in width over 3.5 m of road.
+ *
+ * A candidate further than GR_AV_MAX_STEP from `want` is refused outright, so
+ * the caller ends the run there: that is the honest reading of "the mapped
+ * opposite carriageway stops here". */
+static int gr_peer_offset_at(const char *name, int want_side, double want,
+                             double cap, double x, double z,
                              double tx, double tz, double *off, int *lanes)
 {
     const double lx = tz, lz = -tx;        /* left of travel, tg_road_edge's  */
     const double lo = GR_MED_MIN_M * GR_UNITS_PER_METRE;
     const double hi = GR_MED_MAX_M * GR_UNITS_PER_METRE;
-    double best = 1e30;
+    double best = 1e30, best_d = 0.0;
     int j, best_j = -1;
     if (!name || !name[0]) return 0;
+    if (want < 0.0) want = -want;
     for (j = 0; j < s_g.n_roads; j++) {
         const GrRoad *pr = &s_g.road[j];
-        double cx = 0.0, cz = 0.0, d, dot;
+        double cx = 0.0, cz = 0.0, d, dot, err;
         if (!pr->oneway || pr->ring) continue;
         if (!pr->name || strcmp(pr->name, name)) continue;
         if (gr_route_owns_way(j)) continue;
         d = gr_road_near_at(pr, x, z, NULL, &cx, &cz);
-        if (d < lo || d > hi || d >= best) continue;
+        if (d < lo || d > hi) continue;
         dot = (cx - x) * lx + (cz - z) * lz;
         if ((dot > 0.0 ? 1 : -1) != want_side) continue;
-        best = d; best_j = j;
+        err = (d > want) ? d - want : want - d;
+        if (err >= best) continue;
+        best = err; best_d = d; best_j = j;
     }
-    if (best_j < 0) return 0;
-    if (off)   *off   = best * (double)want_side;
+    if (best_j < 0 || best > cap) return 0;
+    if (off)   *off   = best_d * (double)want_side;
     if (lanes) *lanes = s_g.road[best_j].lanes > 0 ? s_g.road[best_j].lanes : 2;
     return 1;
 }
@@ -2751,24 +2787,73 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         why = "it does not reach the span floor clear of the "
                               "grid and the ring tail";
 
+                    /* The run's own measured spacing seeds the continuity
+                     * chain, so the first span is anchored on the carriageway
+                     * the detector scored rather than on whatever is nearest.
+                     *
+                     * The SEED gets a wider cap than the chain, by exactly the
+                     * spread the detector measured. `prev` starts at the MEAN,
+                     * but the first span can legitimately sit at either end of
+                     * a run that tapers: the 346 m avenue at spans 753..851 was
+                     * measured at 12.4..15.6 m and seeded at the 14.3 m mean,
+                     * so a flat GR_AV_MAX_STEP refused its own first span and
+                     * dropped the whole avenue with "0 span(s) sampled".
+                     *
+                     * `miss` lets the chain cross a GAP in the mapping without
+                     * ending the avenue. OSM interrupts a carriageway at a
+                     * junction, and a hard stop at the first unmapped span
+                     * would cut a long avenue in half at its first crossing.
+                     * Four spans is 6000 units, 14 m -- an intersection's
+                     * width. The skipped spans carry no row, so they get no
+                     * median and no scenery road, which is what a crossing
+                     * looks like anyway. */
+                    const double seed_cap = GR_AV_MAX_STEP
+                        + (med[j].gap_max_m - med[j].gap_min_m) * GR_UNITS_PER_METRE;
+                    double prev = med[j].gap_m * GR_UNITS_PER_METRE;
+                    int miss = 0, seeded = 0, last_ok = s0 - 1;
                     for (s = s0; !why && s <= s1 &&
                                  s_last.n_av_span < GR_AV_MAX_SPANS; s++) {
                         double f = (spans1 > lead1)
                                  ? (double)(s - lead1) / (double)(spans1 - lead1)
                                  : 0.0;
-                        double qx, qz, qtx, qtz, off;
+                        double qx, qz, qtx, qtz, off, a, half;
                         int plan = 2;
                         GrAvSpan *g;
                         if (rev1) f = 1.0 - f;
                         if (!gr_poly_at(&rawp, frac, f, &qx, &qz, &qtx, &qtz))
                             continue;
                         if (rev1) { qtx = -qtx; qtz = -qtz; }
-                        /* The opposite carriageway has ENDED here -- which is
-                         * how the median stops where the OSM ways stop rather
-                         * than at a round number of spans. */
-                        if (!gr_peer_offset_at(med[j].name, want, qx, qz,
-                                               qtx, qtz, &off, &plan))
-                            continue;
+                        /* The opposite carriageway has ENDED here (or jumped to
+                         * a different way, which from the ground is the same
+                         * thing): stop the avenue rather than carry it across
+                         * geometry the map does not have. This is what makes
+                         * the median end where the OSM ways end. */
+                        if (!gr_peer_offset_at(med[j].name, want, prev,
+                                               seeded ? GR_AV_MAX_STEP : seed_cap,
+                                               qx, qz, qtx, qtz, &off, &plan)) {
+                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            break;
+                        }
+                        /* THE TWO CARRIAGEWAYS MUST NOT OVERLAP. The gap has to
+                         * hold the race road's own half width, the opposite
+                         * carriageway's half width, and a median between them.
+                         * `c->lanes_out[s]` is the race road's STORED lane
+                         * count at this span, i.e. exactly what the generator
+                         * will build, so this is the same arithmetic
+                         * td5_tg_avenue.c does and not an approximation of it. */
+                        a    = (off < 0.0) ? -off : off;
+                        half = ((s < c->nodes && c->lanes_out)
+                                ? (double)c->lanes_out[s] : 2.0)
+                             * GR_LANE_WIDTH * 0.5;
+                        if (a < half + (double)plan * GR_LANE_WIDTH * 0.5
+                                + GR_AV_MIN_MEDIAN) {
+                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            break;
+                        }
+                        prev    = a;
+                        miss    = 0;
+                        seeded  = 1;
+                        last_ok = s;
                         g = &s_last.av_span[s_last.n_av_span++];
                         g->av    = s_last.n_av;
                         g->span  = s;
@@ -2778,6 +2863,11 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                                         qtx, qtz, off);
                         kept++;
                     }
+                    /* The run can be cut short by either gate above, and by
+                     * trailing misses. Report the span it actually reached:
+                     * "the avenue is shorter than the detector's range" is a
+                     * fact about the map, not a failure. */
+                    if (!why && kept > 0 && last_ok < s1) s1 = last_ok;
                     if (!why && kept < GR_AV_MIN_SPANS)
                         why = "the opposite carriageway is mapped over too few "
                               "of its spans";
