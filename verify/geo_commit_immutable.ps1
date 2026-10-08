@@ -25,6 +25,7 @@ param([string]$Slug   = "la_plata",
       [int]$SimTicks  = 6000,
       [string]$Spans  = "50,150,400,800",
       [int]$WaitSecs  = 1500,
+      [int]$Throttle  = 1,
       [string]$Tag    = "n1")
 
 $ErrorActionPreference = "Stop"
@@ -82,7 +83,11 @@ $gfx = @("--Windowed=1","--VSync=0","--Lighting=0","--Quality=0","--SunShadows=0
          "--LegacyShadows=0","--GIQuality=0","--ShadowRays=0",
          "--ReflectionQuality=0","--CarShadows=0","--VFX=0",
          "--WorldBillboards=0","--FoliageAA=0")
+# AutoThrottle holds full gas on slot 0. Without it the player car idles at
+# span 15 with the AI driving around it, the span-triggered framedumps never
+# fire, and the run proves nothing about what the track looks like.
 $args = @("--SkipIntro=1","--StartScreen=56","--StartScreenDirect=1",
+          "--AutoThrottle=$Throttle",
           "--RaceTraceMaxSimTicks=$SimTicks") + $gfx
 
 Write-Host "`nlaunching: td5re.exe $($args -join ' ')"
@@ -158,6 +163,6 @@ foreach ($f in @("frontend.log","race.log","engine.log")) {
 Write-Host "`n=== race census ==="
 $rl = Join-Path $out "race.log"
 if (Test-Path $rl) {
-    Select-String -Path $rl -Pattern "geob:|real street census|GEO SIGNALS|landmarks by deciding|roads surface" |
-        Select-Object -First 20 | ForEach-Object { "  " + $_.Line }
+    Select-String -Path $rl -Pattern "geob:|real street census|GEO SIGNALS\]|landmarks by deciding|roads surface|bound|frame dumped" |
+        Select-Object -First 24 | ForEach-Object { "  " + $_.Line }
 } else { Write-Host "  race.log MISSING (the race never ran, or the quit was not clean)" }
