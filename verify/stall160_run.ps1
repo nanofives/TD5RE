@@ -18,10 +18,14 @@ param([string]$Tag = "run",
       [int]$PlayerIsAI = 0,
       [int]$StartSpanOffset = 0,
       [int]$CarDamage = 1,
+      [int]$Difficulty = 1,
       [int]$Track = 61,
       [string]$Exe = "td5re.exe",
       [string]$FramedumpSpans = "",
-      [hashtable]$Extra = @{})
+      # "NAME=VALUE,NAME=VALUE" extra env, NOT a hashtable: `pwsh -File`
+      # stringifies every argument, so a [hashtable] parameter arrives as the
+      # literal text "System.Collections.Hashtable" and the cast fails.
+      [string]$Extra = "")
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
@@ -33,7 +37,12 @@ if ($FramedumpSpans -ne "") {
     $env:TD5RE_FRAMEDUMP_SPANS  = $FramedumpSpans
     $env:TD5RE_D3D12_CAPTURE    = "1"
 }
-foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }   # -Extra wins
+if ($Extra -ne "") {                                            # -Extra wins
+    foreach ($kv in $Extra.Split(',')) {
+        $p = $kv.Split('=', 2)
+        if ($p.Count -eq 2 -and $p[0].Trim() -ne "") { Set-Item "env:$($p[0].Trim())" $p[1] }
+    }
+}
 
 $gfx = @("--Lighting=0","--Quality=0","--SunShadows=0","--Reflections=0",
          "--WetRoads=0","--StreetLights=0","--CarLights=0","--LegacyShadows=0",
@@ -53,6 +62,7 @@ foreach ($f in @("race.log","engine.log","frontend.log",
 
 $args = @("--AutoRace=1","--SkipIntro=1","--DefaultTrack=$Track",
           "--DefaultOpponents=$Opponents","--Traffic=$Traffic",
+          "--Difficulty=$Difficulty",
           "--PlayerIsAI=$PlayerIsAI","--AutoThrottle=0","--CarDamage=$CarDamage",
           "--StartSpanOffset=$StartSpanOffset",
           "--Windowed=1","--VSync=0",
