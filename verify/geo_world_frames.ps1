@@ -14,6 +14,8 @@ param(
     [int]   $Track      = 61,
     [int]   $MaxSecs    = 900,
     [int]   $RenderScale= 100,
+    [string]$Exe        = "td5re.exe",
+    [int]   $StartSpan  = 0,
     [string]$Seed       = "",
     [hashtable]$Extra   = @{}
 )
@@ -48,8 +50,9 @@ Get-ChildItem (Join-Path $wt "log") -Filter "${Tag}_span_*.png" -ErrorAction Sil
 
 $args = @("--AutoRace=1","--SkipIntro=1","--PlayerIsAI=1","--Windowed=1","--VSync=0",
           "--DefaultTrack=$Track") + $gfx
+if ($StartSpan -gt 0) { $args += "--StartSpanOffset=$StartSpan" }
 Write-Host "launch: td5re.exe $($args -join ' ')"
-$p = Start-Process -FilePath (Join-Path $wt "td5re.exe") -ArgumentList $args `
+$p = Start-Process -FilePath (Join-Path $wt $Exe) -ArgumentList $args `
       -WorkingDirectory $wt -PassThru
 Write-Host "pid=$($p.Id) tag=$Tag maxsecs=$MaxSecs"
 
@@ -76,6 +79,7 @@ while (-not $p.HasExited) {
 }
 
 # Hard kill BY PID (never by name -- parallel sessions run their own exes).
+if ($p.HasExited) { Write-Host "PROCESS EXITED ON ITS OWN after $(((Get-Date)-$t0).TotalSeconds)s, exit code $($p.ExitCode)" }
 if (-not $p.HasExited) {
     Start-Sleep -Seconds 6     # let the last dump land
     try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch {}
