@@ -9,6 +9,7 @@
 #               knobs are for (TD5RE_GEO_LM_TAGS / _AREA_TAGS / _ROAD_TAGS).
 #
 #   pwsh verify/geo_tags_identity.ps1 -Arm synthetic -Tag base
+#   pwsh verify/geo_tags_identity.ps1 -Arm synthetic -Tag base -NoControl
 #   pwsh verify/geo_tags_identity.ps1 -Arm geo -Tag new
 #   pwsh verify/geo_tags_identity.ps1 -Arm geo -Tag noknobs `
 #        -Extra @{TD5RE_GEO_LM_TAGS="0"; TD5RE_GEO_AREA_TAGS="0"; TD5RE_GEO_ROAD_TAGS="0"}
@@ -27,7 +28,13 @@ param([ValidateSet("synthetic","geo")][string]$Arm = "synthetic",
       [int]$Port = 37231,
       [hashtable]$Extra = @{},
       [int]$GenWait = 900,
-      [int]$RaceSecs = 10)
+      [int]$RaceSecs = 10,
+      # [ROUND 1008b] Rounds that forbid sockets cannot pass --Control=1, so
+      # the graceful `quit` verb is unavailable. MODELS.DAT has already been
+      # polled to a stable size by then, so a PID-scoped kill cannot truncate
+      # it and the three hashes are still valid. The cost is race.log, which
+      # only flushes on a clean shutdown -- read the census from a separate run.
+      [switch]$NoControl)
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
@@ -68,8 +75,9 @@ foreach ($f in @("race.log","engine.log","frontend.log")) {
 
 Write-Host "arm=$Arm tag=$Tag seed=$Seed slot=$slot level=$lvlName"
 $p = Start-Process -FilePath (Join-Path $wt "td5re.exe") `
-      -ArgumentList (@("--AutoRace=1","--SkipIntro=1","--Control=1",
-                       "--DefaultTrack=$slot") + $gfx) `
+      -ArgumentList (@("--AutoRace=1","--SkipIntro=1") +
+                     $(if ($NoControl) { @("--VSync=0") } else { @("--Control=1") }) +
+                     @("--DefaultTrack=$slot") + $gfx) `
       -WorkingDirectory $wt -PassThru
 Write-Host "pid=$($p.Id)"
 
@@ -101,7 +109,10 @@ for ($i = 0; $i -lt $GenWait; $i++) {
 }
 Write-Host "models settled=$ok after ${i}s"
 if (-not $p.HasExited) { Start-Sleep -Seconds $RaceSecs }
-if (-not $p.HasExited) {
+if ($NoControl -and -not $p.HasExited) {
+    # No socket to ask politely with; MODELS.DAT is already stable above.
+    Stop-Process -Id $p.Id -Force; Start-Sleep -Seconds 2
+} elseif (-not $p.HasExited) {
     $u = New-Object System.Net.Sockets.UdpClient
     $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Loopback, $Port)
     try { $b = [Text.Encoding]::ASCII.GetBytes("quit"); [void]$u.Send($b, $b.Length, $ep) } catch { }

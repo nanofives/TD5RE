@@ -602,6 +602,14 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
                                       * killed by the main road's own paint  */
 #define TG_GEO_ALONG_NUM     6       /* a way is the route when 6/10 of its   */
 #define TG_GEO_ALONG_DEN     10      /* samples run along it                  */
+/* [ROUND 1008b] Shared carriageway. See tg_geo_depart_hit. A sample is ON the
+ * route when it is nearly parallel to the tangent AND inside the carriageway;
+ * the run has to last TG_GEO_DEPART_RUN samples (3 * 3000 = 9000 units, 21 m)
+ * before either of its ends counts as a junction, so a street that merely
+ * clips the kerb at a shallow angle invents nothing. */
+#define TG_GEO_DEPART_DEG    20      /* |angle| to the tangent that is "along" */
+#define TG_GEO_DEPART_LAT    1500.0  /* ... inside half-width plus this        */
+#define TG_GEO_DEPART_RUN    3       /* samples of shared carriageway needed   */
 
 typedef struct {
     int    si, left, lanes, road, klass;
@@ -622,7 +630,7 @@ static int       s_gna;
 static double    s_gcd[TD5_TG_MAX_SPANS / TG_GEO_COARSE + 2];
 
 static struct {
-    long ways, inbox, route, cand, street, avenue, cont, under;
+    long ways, inbox, route, cand, street, avenue, cont, under, depart;
     long d_grid, d_struct, d_biome, d_park, d_corridor, d_skew,
          d_short, d_taken, d_fold, d_full, d_under;
     long why_road, why_street, why_water;
@@ -719,6 +727,65 @@ static double tg_geo_skew_of(double ux, double uz, double ax, double az)
     return atan2(ux * az - uz * ax, ux * ax + uz * az);
 }
 
+/* [ROUND 1008b] SHARED CARRIAGEWAY -- the third kind of junction.
+ *
+ * The route is a real driving route, so it RIDES ON real streets: on La Plata it
+ * runs along Calle 14 for spans 743..750, along Avenida 19 for 953..971 and
+ * along Calle 20 for 1015..1037, then turns off. Where it turns off, the street
+ * carries straight on -- a side street a driver sees opening -- but neither of
+ * the two hit rules above can see it:
+ *
+ *   - the CROSSING rule needs the lateral offset to change sign at a sample
+ *     whose |sin| to the tangent is at least TG_GEO_SKEW_MAX_DEG. Inside a
+ *     shared run the sign does flip (the route wanders across the way by a
+ *     metre or two) but |sin| there is ~0.00, so the sample is refused -- and
+ *     rightly: that is not a crossing.
+ *   - the ENDPOINT rule only tests vertex 0 and vertex count-1. The point where
+ *     the route leaves is an INTERIOR vertex of the way, because the way runs on
+ *     past it.
+ *
+ * So the whole junction was refused UPSTREAM of every drop rule and the ledger
+ * never saw it. This function registers the run's end as a one-arm T: the
+ * junction is the way vertex `jv` where route and way part company, and the arm
+ * is the way's own geometry in index direction `step`, which is the half that
+ * leaves the route. The other half IS the route, so there is no second arm --
+ * same shape as a real T, and `kbwd < 0` keeps it out of tg_net_geo_underpasses.
+ *
+ * NOTHING IS INVENTED: `jv` is an OSM vertex of a way that demonstrably runs
+ * inside the carriageway for TG_GEO_DEPART_RUN samples and then does not, and
+ * the arm is read off that way's own following vertices. The vertex is also
+ * re-tested against the carriageway here, so a run whose bounding vertex sits a
+ * block away (the route curved off mid-segment) is refused rather than mouthed
+ * in the wrong place. */
+static int tg_geo_depart_hit(const TG_NodeList *nl, int nspans,
+                             const TD5_GeoRoad *rd, int jv, int step,
+                             TG_GeoHit *out, int nout, int maxout)
+{
+    double jx, jz, vx, vz, len, lat, along;
+    int ni;
+    if (nout >= maxout) return nout;
+    if (jv + step < 0 || jv + step >= rd->count) return nout;
+    if (!td5_geo_roads_point(rd, jv, &jx, &jz)) return nout;
+    if (!td5_geo_roads_point(rd, jv + step, &vx, &vz)) return nout;
+    ni = tg_geo_nearest(nl, nspans, jx, jz);
+    if (ni < 0) return nout;
+    tg_geo_lat(nl, ni, jx, jz, &lat, &along);
+    if (fabs(lat) > nl->v[ni].width * 0.5 + TG_GEO_DEPART_LAT) return nout;
+    len = sqrt((vx - jx) * (vx - jx) + (vz - jz) * (vz - jz));
+    if (len < 1.0) return nout;          /* the loader drops repeats, so this
+                                          * only guards a malformed cache */
+    {
+        TG_GeoHit *h = &out[nout++];
+        h->x = jx; h->z = jz;
+        h->dx = (vx - jx) / len; h->dz = (vz - jz) / len;
+        h->kfwd = jv + step; h->sfwd = step;
+        h->kbwd = -1;        h->sbwd = 0;
+        h->si = ni;
+    }
+    s_gs.depart++;
+    return nout;
+}
+
 /* Junctions between one real way and the route. Returns the count, or -1 when
  * the way IS the route (see TG_GEO_ALONG_*): those must produce nothing, and
  * reporting them as skew rejections would bury the real census under the
@@ -727,6 +794,10 @@ static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
                             const TD5_GeoRoad *rd, TG_GeoHit *out, int maxout)
 {
     const double sin_lim = sin((double)TG_GEO_SKEW_MAX_DEG * TD5_TG_PI / 180.0);
+    /* [ROUND 1008b] shared-carriageway run state; see tg_geo_depart_hit */
+    const double dep_sin = sin((double)TG_GEO_DEPART_DEG * TD5_TG_PI / 180.0);
+    const int    dep_on  = td5_env_flag_on("TD5RE_GEO_NET_DEPART");
+    int pon = 0, prun = 0, en_jv = -1, en_done = 0, pjv = -1;
     int k, nout = 0, first = 1, pni = -1;
     long nsamp = 0, nalong = 0;
     double plat = 0.0;
@@ -773,6 +844,31 @@ static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
                     h->kbwd = k;     h->sbwd = -1;
                     h->si = tg_geo_nearest(nl, nspans, h->x, h->z);
                     if (h->si < 0) nout--;
+                }
+                /* Shared-carriageway run: the junction is the way VERTEX that
+                 * bounds the run, so the mouth lands on the real OSM node
+                 * rather than up to half a sample step off it. `en_jv >= 1`
+                 * suppresses a run that starts at vertex 0 -- there the way has
+                 * no geometry behind the junction, so there is no arm. */
+                if (dep_on) {
+                    const int jv = (t <= len * 0.5) ? k : k + 1;
+                    const int on = (sn < dep_sin
+                                    && fabs(lat) < n->width * 0.5 + TG_GEO_DEPART_LAT);
+                    if (on && !pon) { prun = 1; en_jv = jv; en_done = 0; }
+                    else if (on) {
+                        if (++prun >= TG_GEO_DEPART_RUN && !en_done) {
+                            en_done = 1;
+                            if (en_jv >= 1)
+                                nout = tg_geo_depart_hit(nl, nspans, rd, en_jv,
+                                                         -1, out, nout, maxout);
+                        }
+                    } else if (pon) {
+                        if (prun >= TG_GEO_DEPART_RUN && pjv >= 0)
+                            nout = tg_geo_depart_hit(nl, nspans, rd, pjv,
+                                                     1, out, nout, maxout);
+                        prun = 0; en_done = 1;
+                    }
+                    pon = on; pjv = jv;
                 }
                 pni = ni; plat = lat; first = 0;
             }
@@ -1126,13 +1222,14 @@ static void tg_net_geo_census(void)
     TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO] %s: real street census -- "
               "%ld way(s), %ld near the route, %ld are the route itself; "
               "%ld junction arm(s) considered, %ld accepted "
-              "(street %ld avenue %ld continuation %ld), %ld real deck(s); "
+              "(street %ld avenue %ld continuation %ld), %ld real deck(s), "
+              "%ld shared-carriageway departure(s); "
               "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
               "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
               "table-full %ld; march stops: road %ld street %ld water/steep %ld",
               td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
               s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
-              s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under,
+              s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart,
               s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
