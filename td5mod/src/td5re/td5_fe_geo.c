@@ -1041,6 +1041,51 @@ static void geo_screen_init(void)
      * every build). Default 0, range 0..1, no ambiguity. */
     if (s_n_pts == 0 && td5_env_int("TD5RE_GEO_SEED", 0, 0, 1))
         geo_seed_dev_points(0);
+    /* [ROUND 1010 AVENUES] ...and the same thing for a SPECIFIC route.
+     * geo_seed_dev_points' four variants are relative to the place centre, so
+     * they can seed A route but never THE route a report is about. Verifying
+     * the avenue work needed Mariano's exact two clicks, which are recorded in
+     * his _route/ROUTE_RAW.JSON "waypoints", and copying his cache in does not
+     * help because the derived frame is what the fix REBUILDS.
+     *
+     *   TD5RE_GEO_SEED_LATLON="lat,lon;lat,lon[;...]"   (up to GEO_MAX_PTS)
+     *
+     * Dev-only and compiled out of RELEASE, like the seed above. */
+    if (s_n_pts == 0) {
+        const char *e = getenv("TD5RE_GEO_SEED_LATLON");
+        if (e && e[0]) {
+            const char *p = e;
+            while (s_n_pts < GEO_MAX_PTS && *p) {
+                char *end = NULL;
+                const double la = strtod(p, &end);
+                if (end == p || *end != ',') break;
+                p = end + 1;
+                {
+                    const double lo = strtod(p, &end);
+                    if (end == p) break;
+                    s_pts[s_n_pts].lat = la;
+                    s_pts[s_n_pts].lon = lo;
+                    s_n_pts++;
+                    p = end;
+                }
+                while (*p == ';' || *p == ' ') p++;
+            }
+            if (s_n_pts > 0) {
+                /* Centre the map on the first point, or the screen opens on the
+                 * place centre with the route off the visible map. */
+                s_cen_lat = s_pts[0].lat;
+                s_cen_lon = s_pts[0].lon;
+                geo_clear_result();
+                geo_mark_dirty();
+                TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_SEED_LATLON - "
+                          "seeded %d point(s) from \"%s\" (dev build only; not "
+                          "a user action)", s_n_pts, e);
+            } else {
+                TD5_LOG_E(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_SEED_LATLON=\"%s\" "
+                          "parsed to no points; expected \"lat,lon;lat,lon\"", e);
+            }
+        }
+    }
 #endif
 
     s_drag_pt  = -1;

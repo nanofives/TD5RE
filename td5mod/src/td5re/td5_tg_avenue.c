@@ -59,6 +59,10 @@
  * by [R16 MEDIAN] ("always median with height"); the same number is used here
  * so a geo median and a synthetic one read alike. */
 #define TG_AV_ISLAND_H       220.0
+/* World units per metre, for the log only -- GR_UNITS_PER_METRE in
+ * td5_geo_route.c, geo_common.py's one measured constant. Nothing here is
+ * computed in metres; the geometry is all world units end to end. */
+#define TG_AV_UNITS_PER_M    430.0
 
 int tg_geo_avenue_n(void)
 {
@@ -215,6 +219,66 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     return 1;
 }
 
+/* ---- the MEASUREMENT, logged ---------------------------------------------
+ *
+ * The one question this whole round is about is "is the median the width the
+ * map says", and it cannot be answered from a frame: a kerb at 3.8 m and a kerb
+ * at 6.0 m look the same through a windscreen. So the emitter reports what it
+ * built, per avenue, in metres, beside what the sidecar asked for.
+ *
+ * The ACCUMULATOR is reset when a span is seen at or before the previous run's
+ * start, which is what a rebuild (or the second entry of a two-pass build)
+ * looks like from here -- there is no end-of-build hook in this module and
+ * inventing one would couple it to the generator's loop structure. The summary
+ * fires on the avenue's LAST span, which td5_geo_avenue_range already knows.
+ *
+ * TD5RE_GEO_AVENUE_DIAG=1 adds a line per span (the full table); the per-avenue
+ * summary always runs, because a silent median that is the wrong width is the
+ * defect this round exists to stop shipping. */
+static int    s_av_n;
+static int    s_av_last = -1;
+static int    s_av_open;
+static double s_av_wlo, s_av_whi, s_av_olo, s_av_ohi;
+
+static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
+                       int open, double med_w)
+{
+    const double upm = TG_AV_UNITS_PER_M;
+    const double a   = (off < 0.0) ? -off : off;
+    int s0 = 0, s1 = 0, i;
+    const char *name = "";
+
+    if (si <= s_av_last) { s_av_n = 0; s_av_open = 0;
+                           s_av_wlo = s_av_olo = 1e30; s_av_whi = s_av_ohi = 0.0; }
+    if (s_av_n == 0)     { s_av_wlo = s_av_olo = 1e30; s_av_whi = s_av_ohi = 0.0; }
+    s_av_last = si;
+    s_av_n++;
+    if (open) s_av_open++;
+    if (med_w < s_av_wlo) s_av_wlo = med_w;
+    if (med_w > s_av_whi) s_av_whi = med_w;
+    if (a < s_av_olo) s_av_olo = a;
+    if (a > s_av_ohi) s_av_ohi = a;
+
+    if (getenv("TD5RE_GEO_AVENUE_DIAG"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [GEO AVENUE] span %4d off %+7.2f m "
+                  "(%+.0f u) opp %d lane(s) own road %.2f m median %.2f m%s",
+                  si, off / upm, off, lanes, nl->v[si].width / upm,
+                  med_w / upm, open ? " OPEN (cross street)" : "");
+
+    for (i = 0; i < td5_geo_avenues_count(); i++) {
+        if (!td5_geo_avenue_range(i, &s0, &s1, &name)) continue;
+        if (si != s1) continue;
+        TD5_LOG_I(LOG_TAG, "trackgen: [GEO AVENUE] %s spans %d..%d: opposite "
+                  "carriageway %.1f..%.1f m away, median built %.2f..%.2f m "
+                  "over %d span(s), %d opening(s) for real cross streets",
+                  name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
+                  s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open);
+        s_av_n = 0;        /* the next avenue starts its own accumulation */
+        s_av_open = 0;
+        break;
+    }
+}
+
 /* Span si of a geo track: build the divided avenue the map has there, if any.
  * Returns 0 only on an out-of-memory write. */
 int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
@@ -232,6 +296,11 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * carriageway in the live lanes. */
     if ((o0 < 0.0 ? -o0 : o0) <= nl->v[si].width * 0.5) return 1;
 
+    {
+        const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
+        const double a   = (o0 < 0.0) ? -o0 : o0;
+        tg_av_note(nl, si, o0, lanes, open, a - nl->v[si].width * 0.5 - ohw);
+    }
     if (!tg_av_emit_road(nl, si, o0, o1, lanes, blk, moff, nmesh)) return 0;
     /* A real cross street cuts the median here, so it opens for the turn. */
     if (open) return 1;

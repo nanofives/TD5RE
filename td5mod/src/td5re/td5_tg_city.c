@@ -3614,6 +3614,27 @@ double tg_pavement_side_width(const TG_NodeList *nl, int si,
      * never answer yes -- tg_r12_fcross_at requires FOREST -- so the raised slab
      * is bit-identical and only the band changes. */
     if (tg_r14_fcross_pave_stop(nl, si, side)) return 0.0;
+    /* [ROUND 1010 AVENUES] A DIVIDED AVENUE OWNS ITS INNER EDGE.
+     *
+     * Everything below this point is about a FORK, and both of the next two
+     * lines return `sw` unchanged when the span has none -- so on a geo avenue,
+     * which is deliberately not a fork, the main road's outer pavement would be
+     * laid at the race kerb, i.e. INSIDE the median island td5_tg_avenue.c
+     * raises there. A raised footway slab coincident with a raised kerbed
+     * island is the [R14 BRANCH item 2a] double-pavement defect in a new place.
+     *
+     * The ownership rule is the same one R14 settled for the corridor: on a
+     * span where something else owns that edge, the main road's pavement
+     * yields. Here the median owns it, and a real divided avenue has no footway
+     * between its carriageways anyway.
+     *
+     * NOT DONE, and worth knowing: this suppresses the inner pavement without
+     * laying one along the FAR edge of the opposite carriageway, which is where
+     * the real footway is. That needs its own emitter (the pavement emitters
+     * are all anchored on the race kerb) and is a separate piece of work. */
+    if (tg_geo_avenue_n() > 0 &&
+        tg_geo_avenue_reach(nl, si, side) > tg_road_half_width(nl, si))
+        return 0.0;
     if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return sw;
     if (!tg_span_in_fork_clear(si)) return sw;
     /* [R14 BRANCH item 2a] the corridor owns this edge -- see above. */

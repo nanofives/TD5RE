@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 8 (real places: divided avenues)" },
+    { CL_ITEM,    "A divided avenue is now built from the real map" },
+    { CL_ITEM,    "  instead of splitting the race into two paths" },
+    { CL_ITEM,    "You drive your own carriageway. The median sits" },
+    { CL_ITEM,    "  at the real width and opens at real crossings" },
+    { CL_ITEM,    "The oncoming carriageway is drawn where the map" },
+    { CL_ITEM,    "  puts it, with its own lanes and markings" },
+    { CL_ITEM,    "Plazas and roundabouts are no longer mistaken" },
+    { CL_ITEM,    "  for avenues, and nor is a plain one-way street" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 8 (real places: no water at the edges)" },
     { CL_ITEM,    "After you build a route, the empty corners of the" },
     { CL_ITEM,    "  map no longer count as water, so a city keeps its" },
