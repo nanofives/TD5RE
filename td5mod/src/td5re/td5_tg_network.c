@@ -713,6 +713,19 @@ static void tg_geo_drop_note(int si, int left, int why, double arg)
     s_gdropn++;
 }
 
+/* [ROUND 1009 item 6] The skew ceiling, in RADIANS, from ONE place.
+ *
+ * tg_geo_road_hits (which decides what is a crossing and what is the route) read
+ * the TG_GEO_SKEW_MAX_DEG literal while tg_net_geo_streets (which filters the
+ * arms) read the TD5RE_GEO_NET_SKEW_MAX_DEG env knob, so turning the knob moved
+ * the filter and left the detector where it was -- an A/B on it could only ever
+ * measure half the mechanism. Both now call this. */
+static double tg_geo_skew_max(void)
+{
+    return (double)td5_env_int("TD5RE_GEO_NET_SKEW_MAX_DEG",
+                               TG_GEO_SKEW_MAX_DEG, 10, 85) * TD5_TG_PI / 180.0;
+}
+
 /* Nearest main-route node to (x,z). Coarse stride first, then a full refine
  * around EVERY coarse sample that could still hold the answer: moving
  * TG_GEO_COARSE nodes changes the distance to a fixed point by at most
@@ -832,7 +845,26 @@ static int tg_geo_depart_hit(const TG_NodeList *nl, int nspans,
 static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
                             const TD5_GeoRoad *rd, TG_GeoHit *out, int maxout)
 {
-    const double sin_lim = sin((double)TG_GEO_SKEW_MAX_DEG * TD5_TG_PI / 180.0);
+    /* [ROUND 1009 item 6] THE CAP IS MEASURED FROM THE NORMAL; `sn` IS MEASURED
+     * FROM THE TANGENT. This line used to read sin(SKEW_MAX_DEG), which bounds
+     * the wrong angle, and the two are only equal at 45 degrees.
+     *
+     *   sn = |sin(way, tangent)| = cos(skew-from-normal)
+     *   so "skew <= cap" is  sn >= cos(cap),  not  sn >= sin(cap)
+     *
+     * With sin(65) = 0.906 the crossing rule demanded sn >= 0.906, i.e. a street
+     * within 25 degrees of PERPENDICULAR -- a tighter ceiling than the synthetic
+     * TD5_TG_DIAG_MAX_DEG of 28 that this whole section was written to escape.
+     * So La Plata's 45-degree diagonals, the streets the header calls "the ones
+     * that make the place recognisable", were never detected as crossings at
+     * all; and because the same constant splits crossing from along, every one
+     * of them was then counted toward "this way IS the route" and discarded.
+     *
+     * Measured on Mariano's route (ROADS.JSON, 2291 ways, replicating this loop
+     * offline): 13 crossing hits and 90 ways called the route as shipped, versus
+     * 59 hits and 63 ways with cos. The median skew of the 46 recovered hits is
+     * 44 degrees. That is the diagonal grid arriving. */
+    const double sn_min = cos(tg_geo_skew_max());
     /* [ROUND 1008b] shared-carriageway run state; see tg_geo_depart_hit */
     const double dep_sin = sin((double)TG_GEO_DEPART_DEG * TD5_TG_PI / 180.0);
     const int    dep_on  = td5_env_flag_on("TD5RE_GEO_NET_DEPART");
@@ -861,10 +893,10 @@ static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
                 const double sn = fabs(ux * n->tz - uz * n->tx);
                 tg_geo_lat(nl, ni, sx, sz, &lat, &along);
                 nsamp++;
-                if (sn < sin_lim
+                if (sn < sn_min
                     && fabs(lat) < n->width * 0.5 + rd->width * 0.5 + 1500.0)
                     nalong++;
-                if (!first && pni >= 0 && sn >= sin_lim
+                if (!first && pni >= 0 && sn >= sn_min
                     && (ni - pni) <= TG_GEO_SPAN_JUMP
                     && (pni - ni) <= TG_GEO_SPAN_JUMP
                     && ((plat < 0.0) != (lat < 0.0))
@@ -1144,9 +1176,7 @@ static void tg_net_geo_underpasses(const TG_NodeList *nl, int nspans)
 static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
 {
     static TG_GeoHit hits[TG_GEO_MAX_HITS];
-    const double skewmax = (double)td5_env_int("TD5RE_GEO_NET_SKEW_MAX_DEG",
-                                               TG_GEO_SKEW_MAX_DEG, 10, 85)
-                         * TD5_TG_PI / 180.0;
+    const double skewmax = tg_geo_skew_max();
     const int nr = td5_geo_roads_count();
     int r, i;
     double rminx, rminz, rmaxx, rmaxz;
