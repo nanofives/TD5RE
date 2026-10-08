@@ -967,9 +967,11 @@ static int tg_walk_push_section(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  *
  * Replaces ONLY the section walk (lead-in + section loop) of
  * tg_build_centerline, per docs/plans/GEO_TRACK_OSM_PLAN.md Phase 3. The route
- * already carries its own lead-in (node 0 at the origin, TD5_TG_GRID_SPAN + 16
- * nodes straight along +X) and chord spacing of exactly span_length --
- * td5_geo's loader rejected it otherwise. Everything downstream is kept:
+ * arrives with node 0 at the origin, its first span along +X and chord spacing
+ * of exactly span_length -- td5_geo's loader rejected it otherwise. It carries
+ * NO straight lead-in since round 1009 (TD5RE_GEO_LEAD_IN, gr_lead_in_nodes in
+ * td5_geo_route.c): the start grid sits on the real road rather than on 40
+ * spans of invented tarmac. Everything downstream is kept:
  * tg_nodes_push (so the preview hook and field defaults work), a
  * tg_road_revise every TG_GEO_CHUNK nodes (so s_rn / y / s_struct fill in
  * windowed exactly as the walk does), tg_road_finalize_to, and the caller's

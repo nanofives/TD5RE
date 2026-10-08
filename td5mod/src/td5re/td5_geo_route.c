@@ -72,8 +72,9 @@
 #define GR_MAX_SPANS         3000
 /* td5_trackgen_internal.h:102 -- grid (start-line) span. */
 #define GR_GRID_SPAN         24
-/* td5_tg_road.c:733-741 -- the fixed straight lead-in, node 0 at (0,0). */
-#define GR_LEAD_IN_NODES     (GR_GRID_SPAN + 16)
+/* The SYNTHETIC walk's fixed straight lead-in (td5_tg_road.c, tg_build_centerline),
+ * kept only as the value TD5RE_GEO_LEAD_IN restores. See gr_lead_in_nodes(). */
+#define GR_LEAD_IN_SYNTH     (GR_GRID_SPAN + 16)
 /* td5_trackgen_internal.h:1352 -- DUAL_LANE caps lanes at 12. */
 #define GR_MAX_LANES         12
 /* Spec defaults, td5_tg_pages.c:3470 and the AT_Row table td5_fe_race.c:7286. */
@@ -133,6 +134,56 @@ static const struct { const char *name; double cost; } k_class_cost[] = {
     { "living_street",  2.20 }, { "service",        2.60 },
     { "road",           1.50 },
 };
+
+/* [ROUND 1009 item 1] HOW MANY SPANS OF ROAD THE CONDITIONER INVENTS BEFORE THE
+ * REAL ONE. The answer is now ZERO by default, and that is the whole fix.
+ *
+ * The conditioner used to prepend GR_LEAD_IN_SYNTH (40) dead-straight nodes
+ * along +X before the first routed vertex, copying the synthetic walk's own
+ * lead-in. On a procedural track that road is as real as the rest of it; on a
+ * GEO track it is 40 spans -- 139.5 m at 430 units/m -- of tarmac that does not
+ * exist, laid down ahead of the point the user clicked, and ending in a join
+ * the smoothing then has to be rotated to hide (step 3b below). Mariano's
+ * round-1009 note 1 is exactly this: "I created the start point and instead of
+ * following the existing road it created some spans of road at the beginning
+ * that don't exist."
+ *
+ * Nothing needs the lead-in to be straight. td5_geo.c's loader asks only for
+ * node 0 at the origin and a 1500-unit chord between neighbours, and step 3b
+ * still rotates the frame so the first segment points +X, so the generator's
+ * TD5_TG_AXIS_HEADING convention holds with the REAL road's first span in that
+ * role. The start grid (spans 0..24) then sits on the road the user picked:
+ * measured on his La Plata route the first 40 real spans turn 17.4 deg in
+ * total, 8.0 deg worst per span against the conditioner's own 21.3 deg limit,
+ * so the grid lands on a gentle sweep rather than on invented tarmac.
+ *
+ * TD5RE_GEO_LEAD_IN=40 restores the old behaviour for a single-variable A/B. */
+static int gr_lead_in_nodes(void)
+{
+    return td5_env_int("TD5RE_GEO_LEAD_IN", 0, 0, 64);
+}
+
+/* Source vertex whose arclength fraction is nearest `f`. `frac` NULL falls back
+ * to the index fraction, which is what a 1-point table or an OOM leaves. */
+static int gr_src_at(double f, const double *frac, int m)
+{
+    int lo = 0, hi;
+    if (m < 2) return 0;
+    if (!frac) {
+        const int k = (int)(f * (double)(m - 1) + 0.5);
+        return k < 0 ? 0 : (k > m - 1 ? m - 1 : k);
+    }
+    if (f <= 0.0) return 0;
+    if (f >= 1.0) return m - 1;
+    hi = m - 1;
+    while (lo < hi) {                     /* first index with frac >= f */
+        const int mid = lo + (hi - lo) / 2;
+        if (frac[mid] < f) lo = mid + 1;
+        else               hi = mid;
+    }
+    if (lo > 0 && (f - frac[lo - 1]) < (frac[lo] - f)) lo--;
+    return lo;
+}
 
 static double gr_class_cost(const char *s)
 {
@@ -848,6 +899,41 @@ typedef struct { double *x, *z; int n, cap; } GrPts;
 
 static void gr_pts_free(GrPts *p) { free(p->x); free(p->z); p->x = p->z = NULL; p->n = p->cap = 0; }
 
+/* [ROUND 1009 item 12] NORMALISED ARCLENGTH of each source vertex, 0..1.
+ *
+ * The conditioner samples the per-vertex lane count twice -- once as the WIDTH
+ * the curvature floor is enforced for, once as the lane count STORED in
+ * ROUTE.JSON -- and both used to go through an INDEX fraction (gr_at_frac).
+ * That is only right when the OSM vertices are evenly spaced, and they are not:
+ * the routed polyline for Mariano's La Plata route has 153 vertices over
+ * 4.77 km, from 6 m at a junction to 180 m along a straight. Measured on that
+ * route, the three-lane stretch of Calle 54 (way 271454277, OSM `lanes=3`)
+ * landed on spans 458..511 while the road is at spans 671..700 -- 745 m early,
+ * leaving span 688 on 2 lanes. That span is the picker ID in his note 12,
+ * `level091 L91 e172 s1 p0 pos 956828,1842,-230883`.
+ *
+ * Sampling by ARCLENGTH puts every lane count where the road is. Both readers
+ * go through this one table, which is the invariant gr_at_frac existed to hold:
+ * a route whose width and whose stored lanes disagree reports "converged" while
+ * carrying a node over its own limit. */
+static double *gr_arc_frac(const GrPts *p)
+{
+    double *f;
+    double tot = 0.0;
+    int i;
+    if (!p || p->n < 1) return NULL;
+    f = (double *)malloc((size_t)p->n * sizeof(double));
+    if (!f) return NULL;
+    f[0] = 0.0;
+    for (i = 1; i < p->n; i++) {
+        tot += hypot(p->x[i] - p->x[i - 1], p->z[i] - p->z[i - 1]);
+        f[i] = tot;
+    }
+    if (tot > 0.0) for (i = 0; i < p->n; i++) f[i] /= tot;
+    else           for (i = 0; i < p->n; i++) f[i] = 0.0;
+    return f;
+}
+
 static int gr_pts_push(GrPts *p, double x, double z)
 {
     if (p->n >= p->cap) {
@@ -971,21 +1057,23 @@ typedef struct {
 /* geo_condition.enforce_curvature's lim_at: the limit is LOCAL. Using the
  * widest road's limit everywhere would round off exactly the tight residential
  * corners that make a real city recognisable, so the width list is sampled by
- * NORMALISED POSITION and survives the re-resampling. */
-static double gr_lim_at(int i, int n, const double *widths, int m,
-                        double step, int cs100)
+ * NORMALISED POSITION and survives the re-resampling. [ROUND 1009 item 12] that
+ * position is now the source polyline's ARCLENGTH fraction (`wfrac`, from
+ * gr_arc_frac) rather than its index fraction -- see gr_arc_frac for why, and
+ * note that the stored lane count goes through the same table, so the two
+ * cannot drift apart. */
+static double gr_lim_at(int i, int n, const double *widths,
+                        const double *wfrac, int m, double step, int cs100)
 {
     const double t = (n <= 1) ? 0.0 : (double)i / (double)(n - 1);
-    int k = (int)(t * (double)(m - 1) + 0.5);
-    if (k > m - 1) k = m - 1;
-    if (k < 0) k = 0;
-    return gr_max_turn_per_span(widths[k], step, cs100);
+    return gr_max_turn_per_span(widths[gr_src_at(t, wfrac, m)], step, cs100);
 }
 
 /* geo_condition.enforce_curvature. Laplacian smoothing applied ONLY at
  * offending vertices (so legal stretches keep the real geometry), re-resampling
  * each pass to keep the spacing uniform. Endpoints are pinned. */
-static int gr_enforce_curvature(GrPts *cur, const double *widths, int m,
+static int gr_enforce_curvature(GrPts *cur, const double *widths,
+                                const double *wfrac, int m,
                                 int cs100, double step, int max_iter,
                                 GrCurv *rep)
 {
@@ -1012,7 +1100,7 @@ static int gr_enforce_curvature(GrPts *cur, const double *widths, int m,
         for (i = 1; i <= n - 2; i++) {
             const double t = fabs(gr_turn(cur, i));
             if (t > worst) worst = t;
-            if (t > gr_lim_at(i, n, widths, m, step, cs100) + 1e-6) all_ok = 0;
+            if (t > gr_lim_at(i, n, widths, wfrac, m, step, cs100) + 1e-6) all_ok = 0;
         }
         if (it == 1) worst_before = worst;
         if (all_ok) break;
@@ -1021,7 +1109,7 @@ static int gr_enforce_curvature(GrPts *cur, const double *widths, int m,
         for (i = 0; i < n; i++) if (!gr_pts_push(&nxt, cur->x[i], cur->z[i])) goto oom;
         for (i = 1; i <= n - 2; i++) {
             double ax, az, bx, bz, px, pz;
-            if (fabs(gr_turn(cur, i)) <= gr_lim_at(i, n, widths, m, step, cs100))
+            if (fabs(gr_turn(cur, i)) <= gr_lim_at(i, n, widths, wfrac, m, step, cs100))
                 continue;
             ax = cur->x[i - 1]; az = cur->z[i - 1];
             bx = cur->x[i + 1]; bz = cur->z[i + 1];
@@ -1045,7 +1133,7 @@ static int gr_enforce_curvature(GrPts *cur, const double *widths, int m,
         for (i = 1; i <= n - 2; i++) {
             const double t = fabs(gr_turn(cur, i));
             if (t > worst_after) worst_after = t;
-            if (t > gr_lim_at(i, n, widths, m, step, cs100) + 1e-6) over++;
+            if (t > gr_lim_at(i, n, widths, wfrac, m, step, cs100) + 1e-6) over++;
         }
         rep->worst_before_deg = gr_deg(worst_before);
         rep->worst_after_deg  = gr_deg(worst_after);
@@ -1318,19 +1406,6 @@ static void gr_add_warning(GrCond *c, const char *fmt, ...)
     c->n_warnings++;
 }
 
-/* Index-fraction mapping, the ONE mapping the conditioner uses for both the
- * curvature limit and the stored lane count. The first version used a different
- * mapping for each and reported "converged" while geo_audit found a node over
- * the limit -- they were checking different widths for the same node. */
-static int gr_at_frac(int i, int n, const int *src, int m)
-{
-    const double t = (n <= 1) ? 0.0 : (double)i / (double)(n - 1);
-    int k = (int)(t * (double)(m - 1) + 0.5);
-    if (k > m - 1) k = m - 1;
-    if (k < 0) k = 0;
-    return src[k];
-}
-
 /* geo_condition.condition_route. Raw (lat, lon) -> a TD5-legal centerline plus
  * a verdict. `allow_crossings` asserts the engine's crossing-safe localiser is
  * armed, so a LEVEL self-crossing stops being fatal. */
@@ -1343,8 +1418,8 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     GrPts metric, cand, pts;
     double lat0 = 0.0, lon0 = 0.0, theta = 0.0, pca_deg, off_x, off_z, fix, h0;
     int *lane_src = NULL;
-    double *widths_src = NULL, *widths = NULL;
-    int i, reversed = 0, n_lead, n_body, n_nodes, skip;
+    double *widths_src = NULL, *widths = NULL, *src_frac = NULL;
+    int i, reversed = 0, lead, n_lead, n_body, n_nodes, skip;
     GrScore sc_f, sc_r, orient;
 
     memset(&sc_f, 0, sizeof sc_f);
@@ -1373,9 +1448,10 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     for (i = 0; i < n_in; i++) lane_src[i] = lanes_in ? lanes_in[i] : 2;
 
     /* -- 1. orientation --------------------------------------------------
-     * The lead-in is a fixed straight along +X (td5_tg_road.c:733-741), so the
-     * route's START TANGENT must be +X. That uses up the rotational freedom;
-     * the only remaining choice is which end is the start. */
+     * Span 0 runs along +X (TD5_TG_AXIS_HEADING, and the walk does
+     * x += sin(heading)), so the route's START TANGENT must be +X. That uses
+     * up the rotational freedom; the only remaining choice is which end is the
+     * start. */
     {
         double th_f, th_r;
         GrPts rot_f, rot_r;
@@ -1440,14 +1516,21 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     widths_src = (double *)malloc((size_t)n_in * sizeof(double));
     if (!widths_src) goto oom;
     for (i = 0; i < n_in; i++) widths_src[i] = (double)lane_src[i] * lane_width;
-    if (!gr_enforce_curvature(&pts, widths_src, n_in, cs100, span_length, 200,
-                              &out->curvature)) goto oom;
+    /* [ROUND 1009 item 12] `cand` is the source polyline in this frame and in
+     * lane_src's order (the reversal above flips both together), so its
+     * arclength is the table BOTH width readers index through. */
+    src_frac = gr_arc_frac(&cand);
+    if (!gr_enforce_curvature(&pts, widths_src, src_frac, n_in, cs100,
+                              span_length, 200, &out->curvature)) goto oom;
 
     /* -- 3b. RE-ALIGN the start tangent ----------------------------------
      * Smoothing moves interior points and the re-resample shifts every sample,
-     * so the first segment no longer points exactly along +X. Left uncorrected
-     * that is a kink at the lead-in join -- observed as a 97.2 degree turn at
-     * node 40 on the La Plata route, invisible to the convergence check. */
+     * so the first segment no longer points exactly along +X, which is the
+     * heading the generator's TD5_TG_AXIS_HEADING assumes for span 0. Left
+     * uncorrected it was a kink at the old lead-in join -- a 97.2 degree turn
+     * at node 40 on the La Plata route, invisible to the convergence check.
+     * With no lead-in (the default since round 1009) there is no join, and
+     * this is simply what pins the frame to the real road's first span. */
     if (pts.n >= 2) {
         h0 = gr_heading(&pts, 0);
         fix = h0 - M_PI / 2.0;
@@ -1458,9 +1541,14 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
         }
     }
 
-    /* -- 4. lead-in + origin ---------------------------------------------- */
-    n_lead = GR_LEAD_IN_NODES + 1;
-    off_x = (double)GR_LEAD_IN_NODES * span_length - pts.x[0];
+    /* -- 4. lead-in + origin ----------------------------------------------
+     * `lead` is 0 by default: node 0 IS the first routed vertex, so the track
+     * starts on the real road rather than on invented tarmac. See
+     * gr_lead_in_nodes(). With lead > 0 the old synthetic straight comes back
+     * and node lead-1 is where the real road joins. */
+    lead = gr_lead_in_nodes();
+    n_lead = lead + 1;
+    off_x = (double)lead * span_length - pts.x[0];
     off_z = 0.0 - pts.z[0];
     n_body = pts.n - 1;
     n_nodes = n_lead + n_body;
@@ -1476,9 +1564,17 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     out->lanes_out = (int *)malloc((size_t)n_nodes * sizeof(int));
     widths         = (double *)malloc((size_t)n_nodes * sizeof(double));
     if (!out->lanes_out || !widths) goto oom;
-    for (i = 0; i < n_lead; i++) out->lanes_out[i] = lane_src[0];
-    for (i = 0; i < n_body; i++) out->lanes_out[n_lead + i] = gr_at_frac(i, n_body, lane_src, n_in);
-    for (i = 0; i < n_nodes; i++) widths[i] = (double)out->lanes_out[i] * lane_width;
+    /* Node i holds pts[i - (n_lead-1)]; a lead node (negative index) takes the
+     * road's first lane count. The fraction is the stored node's own position
+     * along the body, which is what gr_src_at turns into a source vertex --
+     * the same table gr_enforce_curvature just used for the width. */
+    for (i = 0; i < n_nodes; i++) {
+        const int p = i - (n_lead - 1);
+        const double f = (pts.n <= 1) ? 0.0
+                       : (double)(p < 0 ? 0 : p) / (double)(pts.n - 1);
+        out->lanes_out[i] = lane_src[gr_src_at(f, src_frac, n_in)];
+        widths[i] = (double)out->lanes_out[i] * lane_width;
+    }
 
     /* Final verification against the widths actually STORED, which is the same
      * test geo_audit R5 runs. Reported rather than silently re-smoothed. */
@@ -1531,7 +1627,7 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
         gr_add_reason(out, "route is %d spans, over the %d cap", out->spans, GR_MAX_SPANS);
     /* A track must hold a grid, a race and a run-off. RUN-OFF defaults to 100
      * spans (TD5RE_AUTOTRACK_RUNOFF, td5_fe_race.c:7286). */
-    if (out->spans < GR_LEAD_IN_NODES + 100 + 50)
+    if (out->spans < lead + GR_GRID_SPAN + 100 + 50)
         gr_add_reason(out, "route is %d spans, too short to hold a grid, a race "
                       "and a run-off", out->spans);
     if (out->n_level && !allow_crossings)
@@ -1569,18 +1665,18 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     out->units_per_metre = upm;
     out->curve_safety_x100 = cs100;
     out->adjacent_skip = skip;
-    out->lead_in_nodes = GR_LEAD_IN_NODES;
+    out->lead_in_nodes = lead;
     out->proj = proj;
     out->offset_x = off_x;
     out->offset_z = off_z;
     out->principal_axis_dev_deg = pca_deg;
     out->orientation = orient;
 
-    free(lane_src); free(widths_src); free(widths);
+    free(lane_src); free(widths_src); free(widths); free(src_frac);
     gr_pts_free(&metric); gr_pts_free(&cand); gr_pts_free(&pts);
     return 1;
 oom:
-    free(lane_src); free(widths_src); free(widths);
+    free(lane_src); free(widths_src); free(widths); free(src_frac);
     gr_pts_free(&metric); gr_pts_free(&cand); gr_pts_free(&pts);
     gr_cond_free(out);
     memset(out, 0, sizeof *out);
@@ -1949,7 +2045,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     if (!c->ok) {
         snprintf(out->reason, sizeof out->reason, "%s", c->reason[0]);
         if (c->spans > GR_MAX_SPANS)                        out->verdict = TD5_GEO_ROUTE_TOO_LONG;
-        else if (c->spans < GR_LEAD_IN_NODES + 150)         out->verdict = TD5_GEO_ROUTE_TOO_SHORT;
+        else if (c->spans < GR_GRID_SPAN + 150)             out->verdict = TD5_GEO_ROUTE_TOO_SHORT;
         else                                                out->verdict = TD5_GEO_ROUTE_ERROR;
     }
 
@@ -3048,7 +3144,8 @@ static void gr_self_test(int level)
     printf("=== td5_geo_route parity harness ===\n");
     printf("adjacent_skip(default)   %d\n",
            gr_adjacent_skip(GR_LANE_WIDTH, GR_SPAN_LENGTH, GR_CURVE_SAFETY_X100));
-    printf("lead_in_nodes            %d\n", GR_LEAD_IN_NODES);
+    printf("lead_in_nodes            %d (synthetic walk uses %d)\n",
+           gr_lead_in_nodes(), GR_LEAD_IN_SYNTH);
     gr_test_fixture("re/tools/geo_fixtures/la_plata_route_raw.json", 0);
     gr_test_fixture("re/tools/geo_fixtures/figure8_route_raw.json", 1);
     if (level >= 2) gr_test_route_live(level);
