@@ -640,7 +640,7 @@ static struct {
  * so the ledger below names the streets Mariano could not see. Capped; the
  * overflow is still counted by the census. */
 #define TG_GEO_DROP_MAX 96
-static struct { short si; unsigned char left, why; } s_gdrop[TG_GEO_DROP_MAX];
+static struct { short si; unsigned char left, why; float arg; } s_gdrop[TG_GEO_DROP_MAX];
 static int s_gdropn;
 
 enum {
@@ -652,12 +652,17 @@ static const char *const k_gd_name[TG_GD_N] = {
     "skew", "short", "taken", "fold", "table-full"
 };
 
-static void tg_geo_drop_note(int si, int left, int why)
+/* `arg` is the number the rule actually compared: degrees of skew for SKEW,
+ * world units of reach for SHORT and FOLD, 0 for the rest. Without it a SKEW
+ * line says "too oblique" but not "by how much", and the cap cannot be argued
+ * about from the log. */
+static void tg_geo_drop_note(int si, int left, int why, double arg)
 {
     if (s_gdropn >= TG_GEO_DROP_MAX) return;
     s_gdrop[s_gdropn].si   = (short)si;
     s_gdrop[s_gdropn].left = (unsigned char)(left ? 1 : 0);
     s_gdrop[s_gdropn].why  = (unsigned char)why;
+    s_gdrop[s_gdropn].arg  = (float)arg;
     s_gdropn++;
 }
 
@@ -866,7 +871,7 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
     skew = tg_geo_skew_of(e[6], e[7], dx, dz);
     s_gs.cand++;
     if (fabs(skew) > skewmax) {
-        s_gs.d_skew++; tg_geo_drop_note(h->si, left, TG_GD_SKEW); return;
+        s_gs.d_skew++; tg_geo_drop_note(h->si, left, TG_GD_SKEW, fabs(skew) * 180.0 / TD5_TG_PI); return;
     }
 
     /* The run is measured from the JUNCTION (so `off` is the true offset from
@@ -877,7 +882,7 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
     if (kerb < 0.0) kerb = 0.0;
     run -= kerb;
     if (run < TD5_TG_R8_CLAMP_MIN) {
-        s_gs.d_short++; tg_geo_drop_note(h->si, left, TG_GD_SHORT); return;
+        s_gs.d_short++; tg_geo_drop_note(h->si, left, TG_GD_SHORT, run); return;
     }
 
     b = &k_biomes[tg_scenery_biome_index(h->si)];
@@ -909,30 +914,30 @@ static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
      * are FORCED built by tg_facade_built, so a mouth there would be claimed by
      * tg_xstreet_here and then never emitted -- the two authorities must agree. */
     if (lo < 1 || hi >= nspans || hi + 1 >= nl->count)
-        return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID), 0);
+        return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID, 0.0), 0);
     if (lo < TD5_TG_FACADE_START_RUN
         && td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
-        return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID), 0);
+        return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID, 0.0), 0);
 
     for (s = lo; s <= hi; s++) {
         if (tg_span_in_bridge_run(s) || tg_span_in_tunnel(s))
-            return (s_gs.d_struct++, tg_geo_drop_note(si, left, TG_GD_STRUCT), 0);
+            return (s_gs.d_struct++, tg_geo_drop_note(si, left, TG_GD_STRUCT, 0.0), 0);
         if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE")
             && tg_span_near_bridge(s, TD5_TG_XBRIDGE_CLEAR))
-            return (s_gs.d_struct++, tg_geo_drop_note(si, left, TG_GD_STRUCT), 0);
+            return (s_gs.d_struct++, tg_geo_drop_note(si, left, TG_GD_STRUCT, 0.0), 0);
         /* An unpaved biome has no sidewalk, and tg_facade_built only consults
          * the mouth table where one exists. */
         if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(s)]) > 0.0))
-            return (s_gs.d_biome++, tg_geo_drop_note(si, left, TG_GD_BIOME), 0);
+            return (s_gs.d_biome++, tg_geo_drop_note(si, left, TG_GD_BIOME, 0.0), 0);
         if (tg_block_is_park(s, left))
-            return (s_gs.d_park++, tg_geo_drop_note(si, left, TG_GD_PARK), 0);
+            return (s_gs.d_park++, tg_geo_drop_note(si, left, TG_GD_PARK, 0.0), 0);
         if (tg_side_corridor_here(nl, s, sg))
-            return (s_gs.d_corridor++, tg_geo_drop_note(si, left, TG_GD_CORRIDOR), 0);
+            return (s_gs.d_corridor++, tg_geo_drop_note(si, left, TG_GD_CORRIDOR, 0.0), 0);
         /* Inside the carriageway is what a second mouth on one (span,side)
          * amounts to: the table is single-valued and the emitters would draw
          * two overlapping quads out of one kerb. */
         if (s_mouth[s][left ? 0 : 1].edge >= 0)
-            return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN), 0);
+            return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN, 0.0), 0);
     }
     *lo_out = lo; *hi_out = hi;
     return 1;
@@ -1079,8 +1084,8 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         pre   = reach;
         reach = tg_r13_fold_cap(nl, a->si, sg, a->skew, reach, "TD5RE_R13_FOLD_STREET");
         if (reach < TD5_TG_R8_CLAMP_MIN) {
-            if (reach < pre) { s_gs.d_fold++;  tg_geo_drop_note(a->si, a->left, TG_GD_FOLD); }
-            else             { s_gs.d_short++; tg_geo_drop_note(a->si, a->left, TG_GD_SHORT); }
+            if (reach < pre) { s_gs.d_fold++;  tg_geo_drop_note(a->si, a->left, TG_GD_FOLD, reach); }
+            else             { s_gs.d_short++; tg_geo_drop_note(a->si, a->left, TG_GD_SHORT, reach); }
             continue;
         }
 
@@ -1092,7 +1097,7 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
                          tg_world_h(e[0] + ox * reach, e[2] + oz * reach),
                          why == 2 ? 1 : 2, -1);
         ed = tg_net_edge_new(na, nb, kind, width);
-        if (!ed) { s_gs.d_full++; tg_geo_drop_note(a->si, a->left, TG_GD_FULL); return; }
+        if (!ed) { s_gs.d_full++; tg_geo_drop_note(a->si, a->left, TG_GD_FULL, 0.0); return; }
         ed->mouth_si = a->si; ed->mouth_left = a->left;
         ed->mouth_lo = lo;    ed->mouth_hi   = hi;
         ed->skew = a->skew;   ed->reach      = reach;
@@ -1136,10 +1141,15 @@ static void tg_net_geo_census(void)
      * names its own rule instead of hiding inside a total. */
     {
         int i;
-        for (i = 0; i < s_gdropn; i++)
-            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO]   refused span %4d %-5s: %s",
+        for (i = 0; i < s_gdropn; i++) {
+            const int w = s_gdrop[i].why < TG_GD_N ? s_gdrop[i].why : 0;
+            const char *unit = (w == TG_GD_SKEW) ? "deg"
+                             : ((w == TG_GD_SHORT || w == TG_GD_FOLD) ? "units" : "");
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO]   refused span %4d %-5s: "
+                      "%-10s %.0f %s",
                       (int)s_gdrop[i].si, s_gdrop[i].left ? "left" : "right",
-                      k_gd_name[s_gdrop[i].why < TG_GD_N ? s_gdrop[i].why : 0]);
+                      k_gd_name[w], (double)s_gdrop[i].arg, unit);
+        }
         if (s_gdropn >= TG_GEO_DROP_MAX)
             TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO]   (ledger full at %d; the "
                       "census totals above are complete)", TG_GEO_DROP_MAX);
