@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 8 (real places: cross streets)" },
+    { CL_ITEM,    "A street the route drives along now opens where" },
+    { CL_ITEM,    "  the route turns off it. On La Plata that brings" },
+    { CL_ITEM,    "  back Calle 14, Avenida 19 and Calle 20, which" },
+    { CL_ITEM,    "  were blank kerb before." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 8 (real places: sky and structures)" },
     { CL_ITEM,    "A real place now gets a backdrop that matches it." },
     { CL_ITEM,    "  An inland city no longer races under an open-sea" },
