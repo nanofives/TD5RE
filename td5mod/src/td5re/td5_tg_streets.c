@@ -622,6 +622,9 @@ static long s_geop_straddle, s_geop_r16_stood_down, s_geop_nopath;
  * hold one once it was cut clear of the two paths bordering it, and boundary
  * hedges NOT emitted because OSM records no barrier on that area. */
 static long s_geop_bed_thin, s_geop_hedge_nobarrier;
+/* [ROUND 1009 item 10] Side-street frontage walls / flank blocks refused
+ * because they would have stood inside a real OSM square. */
+static long s_geop_xwall_park;
 static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
 
 int tg_block_is_park(int si, int left)
@@ -1542,6 +1545,41 @@ static int tg_geo_area_here(const TG_NodeList *nl, int si, int left)
     return td5_geob_points_in_plaza(si, px, pz, 3, TD5_GEOB_WIN_A);
 }
 
+/* [ROUND 1009 item 10] "these buildings are in the middle of a park", the
+ * SIDE-STREET half.
+ *
+ * MEASURED on the La Plata route: of the 22 facade meshes standing inside an
+ * OSM park/plaza in the parent build, MESHTAG labels 13 `building` (the main
+ * frontage and its back rows, which the [GEO PHASE 5] stand-down in
+ * td5_tg_city.c covers) and 9 `cross` -- the frontage walls and flank blocks a
+ * SIDE STREET gets, from tg_cross_emit_sidewalls and tg_cross_emit_street_flank
+ * here. Those two emitters have no geo gate at all: they run perpendicular to
+ * the main road, outward down the mouth, so the per-(span, side) stand-down
+ * cannot see where they end up.
+ *
+ * This is the point test they need. A wall running from (bx, bz) outward along
+ * the unit (ox, oz) for `flen` is sampled along its own length, because its far
+ * end can be 30 m past the mouth -- deep inside a square the mouth only
+ * touches. Same window as every other plaza probe.
+ *
+ * TD5RE_GEO_XWALL_PARK=0 restores the ungated side-street frontage. */
+static int tg_geo_xwall_in_plaza(int si, double bx, double bz,
+                                 double ox, double oz, double flen)
+{
+    double px[5], pz[5];
+    int k;
+
+    if (!tg_geo_city_active()) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_XWALL_PARK")) return 0;
+    for (k = 0; k < 5; k++) {
+        const double t = (double)k * 0.25;
+        px[k] = bx + ox * flen * t;
+        pz[k] = bz + oz * flen * t;
+    }
+    return td5_geob_points_in_plaza(si, px, pz, 5, TD5_GEOB_WIN_A);
+}
+
 /* Outward distance from the centreline at span si, on side `side`. */
 static double tg_geop_out(const TG_NodeList *nl, int si, double side,
                           double wx, double wz)
@@ -2092,13 +2130,17 @@ void tg_geo_plaza_report(void)
               "OSM records no barrier on them (knob TD5RE_GEO_PLAZA_HEDGE_OSM"
               "=%s); beds: %ld wedge(s) too narrow to hold one cut clear of "
               "its paths (knob TD5RE_GEO_PLAZA_BEDCUT=%s); ground tiers "
-              "lawn+%.0f / paving+%.0f raw (knob TD5RE_GEO_PLAZA_TIER=%s)",
+              "lawn+%.0f / paving+%.0f raw (knob TD5RE_GEO_PLAZA_TIER=%s); "
+              "%ld side-street wall(s)/flank block(s) refused for standing "
+              "inside a square (knob TD5RE_GEO_XWALL_PARK=%s)",
               s_geop_hedge_nobarrier,
               td5_env_flag_on("TD5RE_GEO_PLAZA_HEDGE_OSM") ? "on" : "off",
               s_geop_bed_thin,
               td5_env_flag_on("TD5RE_GEO_PLAZA_BEDCUT") ? "on" : "off",
               TD5_TG_GEOP_LIFT, TD5_TG_GEOP_LIFT + TD5_TG_GEOP_TIER,
-              td5_env_flag_on("TD5RE_GEO_PLAZA_TIER") ? "on" : "off");
+              td5_env_flag_on("TD5RE_GEO_PLAZA_TIER") ? "on" : "off",
+              s_geop_xwall_park,
+              td5_env_flag_on("TD5RE_GEO_XWALL_PARK") ? "on" : "off");
     /* First span each bound plaza is attached to, so a capture
      * (StartSpanOffset) can be aimed at one without guessing. */
     {
@@ -2347,6 +2389,13 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
             if (rows <= 0) rows = b->floors_min + 1;
             H = (double)rows * tg_facade_floor_h(b);
             cols = tg_facade_cols_for(flen, (double)b->cell_w, 5);
+            /* [ROUND 1009 item 10] Not through a real square. See
+             * tg_geo_xwall_in_plaza: this wall is one of the 9 `cross` meshes
+             * measured standing inside an OSM park on the La Plata route. */
+            if (tg_geo_xwall_in_plaza(h->si, cx, cz, ox, oz, flen)) {
+                s_geop_xwall_park++;
+                continue;
+            }
             /* base -> outward*flen, sinking with the skirt, rising H. */
             tg_facade_push_grid(cx, by, cz, ox * flen, -drop, oz * flen,
                                 0.0, H, 0.0, cols, rows, 0, rows,
@@ -2524,6 +2573,14 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                 cols = tg_facade_cols_for(TD5_TG_R8_FLANK_LEN,
                                           (double)b->cell_w, 4);
                 page = tg_facade_page_class(rh, rows);
+                /* [ROUND 1009 item 10] Same veto as the cross frontage wall:
+                 * a flank block is a building and a square is not where one
+                 * goes. Probed over the block's own along-street length. */
+                if (tg_geo_xwall_in_plaza(h->si, bxp, bzp, ox, oz,
+                                          (double)TD5_TG_R8_FLANK_LEN)) {
+                    s_geop_xwall_park++;
+                    continue;
+                }
                 if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                         bxp, byp, bzp,
                                         ox * TD5_TG_R8_FLANK_LEN, 0.0,
@@ -3685,7 +3742,7 @@ void tg_r9_city_reset(void)
     s_geop_areas = s_geop_lawn_tri = s_geop_paths = s_geop_beds = 0;
     s_geop_hedges = s_geop_trees = s_geop_clamped = s_geop_small = 0;
     s_geop_straddle = s_geop_r16_stood_down = s_geop_nopath = 0;
-    s_geop_bed_thin = s_geop_hedge_nobarrier = 0;
+    s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
 }
 
 /* Merge [lo,hi] into span si / side s's band set, joining bands that touch. */
