@@ -1,0 +1,13 @@
+# [1008 N2 item 1] AUTO TRACK STUDIO: change a knob row, then leave FAST.
+# One harness tick == 1/60 s. AT_DEBOUNCE_MS is 300 ms == 18 ticks, and the
+# studio's exit animation (state 8) is 267 ms == 16 ticks, so an ESC fired a few
+# ticks after a row change lets the debounce deadline expire INSIDE the exit
+# animation -- at_preview_tick() at state 9 then re-requests the preview and
+# td5_tgprev_cancel_join() kills it before it publishes a point.
+sync menu
+240 log STUDIO_SETTLED
++6 key down press
++40 key right press
++4 key esc press
++420 log AFTER_EXIT_FAST
++120 quit

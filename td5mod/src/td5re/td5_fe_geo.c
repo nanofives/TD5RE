@@ -1088,10 +1088,28 @@ static void geo_do_build(void)
 
     TD5_LOG_I(LOG_TAG, "GEO GENERATOR: built '%s' -> track slot %d (%d spans)",
               s_place, slot, s_spans);
-    /* SELECT TRACK re-inits on entry (td5_frontend_set_screen zeroes
-     * s_inner_state), so setting the shared pick here is all it takes for the
-     * column to come up on the new place with the right preview and the right
-     * DIRECTION / LAPS rows. */
+
+    /* [1008 N2 item 1] "I can't see the preview after I exit the menu."
+     *
+     * td5_geo_preview_route() caches the plotted route BY SLUG and returns the
+     * cached copy on a name match -- but BUILD has just REWRITTEN that place's
+     * ROUTE.JSON, and the slug is of course unchanged. So from the second BUILD
+     * of a session onwards the SELECT TRACK panel re-drew the FIRST route and
+     * the player's new one was never read off disk. Measured on master
+     * 3df2ce24: two BUILDs of la_plata in one session produce exactly ONE
+     * "geo: preview route la_plata -> N of M nodes" line in engine.log.
+     *
+     * Passing "" is that reader's documented invalidate (td5_geo.h: '"" =
+     * synthetic / clear'), so the next panel draw re-parses the file. One
+     * ~150 KB parse per BUILD, not per frame. */
+    td5_geo_preview_route("");
+
+    /* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] The place slots are no
+     * longer browsable, so SELECT TRACK would bounce this pick back to track 0
+     * on entry. Arm it: the selector accepts exactly this slot until the player
+     * cycles away. Must come BEFORE the s_selected_track write for symmetry
+     * with the screen's own entry validation, which reads both. */
+    frontend_geo_pick_arm(slot);
     s_selected_track = slot;
     frontend_play_sfx(3);
     geo_leave(s_parent_screen);

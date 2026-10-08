@@ -1,0 +1,10 @@
+# [1008 N2 item 1] Control for n2_studio_fast_exit.txt: identical keypresses,
+# but the ESC comes 2.5 s after the row change, so the debounce fires and the
+# new preview completes while the screen is still interactive (state 6).
+sync menu
+240 log STUDIO_SETTLED
++6 key down press
++40 key right press
++150 key esc press
++420 log AFTER_EXIT_SLOW
++120 quit
