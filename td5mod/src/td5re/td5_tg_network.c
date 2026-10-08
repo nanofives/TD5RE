@@ -1327,3 +1327,48 @@ void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main)
     fprintf(fp, "\n]}\n");
     fclose(fp);
 }
+
+/* ===== SECTION: minimap street read-back (PORT-ONLY) ===================== */
+
+/* [MINIMAP STREETS 2026-10-07] The in-race minimap draws the side streets of a
+ * generated track under the race route (td5_minimap_streets.c). It needs the
+ * EDGE POLYLINES, which until now never left this file -- tg_network_write
+ * printed them and nothing read them back.
+ *
+ * These are deliberately dumb accessors over the live arrays rather than a
+ * snapshot: the network is rebuilt whole by tg_network_build and never mutated
+ * afterwards, so a reader that re-asks after a rebuild sees the new graph with
+ * no invalidation protocol. They draw no RNG and write nothing, so a synthetic
+ * build is byte-identical whether or not anyone calls them.
+ *
+ * s_net_built is the gate, NOT s_ne: a reset network keeps its last edge count
+ * in s_ne until the next build overwrites it, and serving those stale
+ * coordinates would put the previous track's streets on this track's minimap.
+ * Declared in td5_trackgen.h so the HUD need not see this file's internals. */
+int td5_trackgen_street_edge_count(void)
+{
+    return s_net_built ? s_ne : 0;
+}
+
+int td5_trackgen_street_edge_points(int edge)
+{
+    if (!s_net_built || edge < 0 || edge >= s_ne) return 0;
+    return s_edges[edge].npoly;
+}
+
+int td5_trackgen_street_edge_point(int edge, int k, double *x, double *z)
+{
+    const TG_NetEdge *e;
+    if (!s_net_built || edge < 0 || edge >= s_ne) return 0;
+    e = &s_edges[edge];
+    if (k < 0 || k >= e->npoly) return 0;
+    if (x) *x = e->px[k];
+    if (z) *z = e->pz[k];
+    return 1;
+}
+
+int td5_trackgen_street_edge_kind(int edge)
+{
+    if (!s_net_built || edge < 0 || edge >= s_ne) return -1;
+    return s_edges[edge].kind;
+}

@@ -49,6 +49,7 @@ td5_fe_geo.c
 td5_font.c
 td5_i18n.c
 td5_hud.c
+td5_minimap_streets.c
 td5_sound.c
 td5_music.c
 td5_radio.c

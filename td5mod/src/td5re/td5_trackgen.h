@@ -205,6 +205,26 @@ int td5_trackgen_register_geo_places(void);
  * generated slot resets the target to the auto track. */
 void td5_trackgen_set_target_slot(int slot);
 
+/* ------------------------------------------- [MINIMAP STREETS] ------------
+ * Read-only walk of the street network td5_tg_network.c built for the auto
+ * track, exposed so the in-race minimap can draw the side streets WITHOUT
+ * including td5_trackgen_internal.h (which pulls the whole generator's private
+ * vocabulary into a HUD module). Polyline points are raw world units, the same
+ * frame the strip's span origins use.
+ *
+ * All four read the generator's live in-memory network, so they answer 0 /
+ * nothing on a build that was REUSED from disk (the stamp hit skips
+ * tg_network_build) and on every shipped track. A caller must treat an empty
+ * answer as "no overlay", never as an error. */
+int td5_trackgen_street_edge_count(void);          /* 0 when nothing is built */
+int td5_trackgen_street_edge_points(int edge);     /* polyline point count    */
+/* Point `k` of `edge` in world units. 0 (and no write) when out of range, so a
+ * walk can use the return value as its own bound. */
+int td5_trackgen_street_edge_point(int edge, int k, double *x, double *z);
+/* TG_NE_* kind of `edge`, or -1. The HUD maps it to a draw weight; the enum
+ * itself stays private to the generator. */
+int td5_trackgen_street_edge_kind(int edge);
+
 /* [PICK] Human name for an auto-track texture page id (e.g. "GUARDRAIL",
  * "FLORA", "WALL_TOWER"), or NULL for reserved/unnamed slots. Valid only for
  * the auto track (page ids are per-track). Used by the dev geometry picker. */
