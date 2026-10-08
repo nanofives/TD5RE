@@ -6134,19 +6134,41 @@ void td5_ai_update_track_behavior(int slot) {
          * misaligned cannot immediately re-arm the same dead script, while a car
          * that genuinely recovers can arm again later.
          * TD5RE_AI_RECOVERY_MAX=0 restores the unbounded behaviour. */
-        if (rs[RS_SCRIPT_BASE_PTR] == SCRIPT_PROG_INIT_RECOVERY) {
+        {
             static int s_rec_max = -1;
+            int32_t lspd_wd  = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            int32_t alspd_wd = lspd_wd < 0 ? -lspd_wd : lspd_wd;
+            /* The latch is the FLAGS, not the program identity. MEASURED with
+             * TD5RE_STALL_DIAG on the failing run: slot 4 sat at span 164 with
+             * prog=1 (SCRIPT_PROG_A, NOT INIT_RECOVERY), flags=0x6, countdown
+             * cycling 186->156->126->96->66, steering pinned at 102400. The
+             * prologue keeps rotating A<->B so the script never ends, while
+             * flag 0x04 re-slams the wheel to the clamp every tick. */
+            int armed_ramp = (rs[RS_SCRIPT_BASE_PTR] != 0) &&
+                             (rs[RS_SCRIPT_FLAGS] & 0x0C) != 0;
             if (s_rec_max < 0)
                 s_rec_max = td5_env_int("TD5RE_AI_RECOVERY_MAX", 150, 0, 20000);
             if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
-                if (g_recovery_ticks[slot] < 30000) g_recovery_ticks[slot]++;
+                /* Count only while BOTH hold: a ramp arm is set AND the car is
+                 * below a crawl. That is the unsatisfiable case -- at a
+                 * standstill the bicycle model makes no yaw torque, so the
+                 * alignment test the arm waits on can never pass. An authored
+                 * script arm on a MOVING car is left completely alone, which is
+                 * what keeps shipped-track scripts out of scope. */
+                if (armed_ramp && alspd_wd < 0x1800) {
+                    if (g_recovery_ticks[slot] < 30000) g_recovery_ticks[slot]++;
+                } else {
+                    g_recovery_ticks[slot] = 0;
+                }
                 if (s_rec_max > 0 && g_recovery_ticks[slot] > s_rec_max) {
                     TD5_LOG_I(LOG_TAG, "recovery: slot=%d script ABORTED after %d "
-                              "ticks (watchdog, span=%d lspd=%d steer=%d)",
+                              "stalled ticks (watchdog, span=%d lspd=%d steer=%d "
+                              "prog=%d flags=0x%X)",
                               slot, (int)g_recovery_ticks[slot],
-                              (int)ACTOR_I16(actor, ACTOR_SPAN_RAW),
-                              (int)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
-                              (int)ACTOR_I32(actor, ACTOR_STEERING_CMD));
+                              (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), (int)lspd_wd,
+                              (int)ACTOR_I32(actor, ACTOR_STEERING_CMD),
+                              (int)rs[RS_SCRIPT_BASE_PTR],
+                              (unsigned)rs[RS_SCRIPT_FLAGS]);
                     rs[RS_SCRIPT_BASE_PTR] = 0;
                     rs[RS_SCRIPT_IP]       = 0;
                     rs[RS_SCRIPT_FLAGS]    = 0;
@@ -6155,8 +6177,6 @@ void td5_ai_update_track_behavior(int slot) {
                     g_recovery_ticks[slot] = 0;
                 }
             }
-        } else if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
-            g_recovery_ticks[slot] = 0;
         }
 
         /* --- Script check: if a script is active, run it --- */
