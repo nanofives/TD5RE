@@ -7,6 +7,7 @@
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"             /* GEO TRACK: is a real place loaded?        */
 #include "td5_geo_buildings.h"   /* GEO TRACK: real footprints and areas      */
+#include "td5_geo_roads.h"       /* GEO TRACK: OSM sidewalk tags (item 7)     */
 
 double tg_r14_keep(void)
 {
@@ -1253,6 +1254,25 @@ double tg_city_sidewalk_w_at(const TG_NodeList *nl, int si,
     const double base = tg_city_sidewalk_w(b);
     double w;
     if (base <= 0.0) return 0.0;                    /* no pavement on this biome */
+    /* [ROUND 1009 item 7] "Sidewalk widths are not being passed to the race."
+     * On a geo build the width is the one the OSM way nearest this span
+     * implies, decided in tg_geo_city_prepare -- not the biome's single table
+     * field, which handed every street in every mapped place the same 2.1 m
+     * slab. Returns 0 where no mapped way is near enough, which falls through
+     * to the procedural rules below unchanged, and the whole table is empty on
+     * a synthetic build so nothing there can observe this.
+     *
+     * KNOWN LIMITATION, stated here because the next round will meet it. The
+     * side-blind tg_city_sidewalk_w(b) is read as a WIDTH by 48 call sites
+     * across six modules -- the junction pavement arm, the cross-street
+     * frontage setback, the branch kerb -- and those keep the biome width, so
+     * a corner arm can be a little narrower than the main pavement it turns
+     * off. That split is not new (TD5RE_R10_WIDEWALK already scaled only the
+     * _at form, up to 2000 raw against the arm's 900), and closing it means
+     * threading a width through tg_carriageway_clear_gap and every caller,
+     * which is a change of its own. */
+    w = tg_geo_sidewalk_w(si);
+    if (w > 0.0) return w;
     if (!td5_env_flag_on("TD5RE_R10_WIDEWALK")) return base;
     w = tg_road_half_width(nl, si) * TD5_TG_WIDEWALK_FACTOR;
     if (w < base) w = base;                         /* never below the floor     */
@@ -1420,6 +1440,18 @@ int tg_facade_floors(int si, int left, const TG_Biome *b)
     int floors, av;
 
     if (!tg_facade_built(si, left)) return 0;
+    /* A biome with NO FACADE CELLS has no floor count, and the expression
+     * below takes a modulo by floors_extra -- which is 0 on five of the eight
+     * biomes (FIELDS, FOREST, ALPINE, COAST, ORIENTAL, all tree/billboard).
+     * Reaching here with one has always been a caller bug, because
+     * tg_emit_street_wall is only called on a facade biome, and the two
+     * existing callers both sit behind that. It is guarded anyway: the 1009
+     * item-10 probe briefly called this from tg_city_emit_backrows, which uses
+     * the span's own biome, and the synthetic identity gate died with
+     * STATUS_INTEGER_DIVIDE_BY_ZERO on a worker thread -- a landmine worth
+     * removing rather than leaving for the next caller to step on. No existing
+     * output can depend on it: the old code FAULTED on exactly this input. */
+    if (b->floors_extra <= 0) return 0;
     gh = tg_facade_run_id(si, left);
     floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
     if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
@@ -1518,11 +1550,25 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
 #define TD5_TG_GEO_BASE_SINK  300.0
 /* How many points a stand-down probe samples across its depth band. Three --
  * front plane, middle, back plane -- is the fewest that cannot miss a polygon
- * edge falling anywhere inside the band. */
-#define TD5_TG_GEO_PROBES     3
+ * edge falling anywhere inside the band.
+ *
+ * [ROUND 1009 item 10] FIVE, because the band is now the RUN's depth rather
+ * than the biome's 3000: at La Plata a tall run reaches 6800 raw, and three
+ * samples across that leave 3400 raw (8 m) between them, which is wider than a
+ * mapped plaza's corner. Five keeps the gap near one span length. */
+#define TD5_TG_GEO_PROBES     5
+/* Samples along the ROAD, across the frontage quad's own length. Three -- near
+ * node, middle, far node -- is the fewest that cannot miss a polygon edge
+ * cutting the span diagonally. */
+#define TD5_TG_GEO_ALONG      3
 /* Pitched-roof rise when roof:shape says sloped but no roof height is tagged.
  * 1700 ~= 4 m, a plain domestic pitch. */
 #define TD5_TG_GEO_ROOF_RISE  1700.0
+/* [ROUND 1009 item 9] Ceiling on the STOREY count the facade page is tiled to.
+ * Only a UV property: it bounds how many times the page repeats up a wall, so a
+ * 140 m mass (the TD5_TG_GEO_MAX_H clamp) cannot ask for 46 repeats of a
+ * 4.79 m cell and read as a grid of slits. 40 storeys at 3 m is 120 m. */
+#define TD5_TG_GEO_MAX_STOREYS 40
 
 /* Latched ONCE per build, in the single-threaded prologue (see
  * tg_geo_city_build_begin). Read-only from here on, which is what makes it safe
@@ -1542,6 +1588,16 @@ static long s_geo_roof_shaped, s_geo_roof_concave, s_geo_parts;
 static long s_geo_roof_kind[TD5_GEOB_ROOF_SKILLION + 1];
 static long s_geo_lm_prefab, s_geo_lm_nofit;
 static double s_geo_shift_max, s_geo_route_dev_max;
+/* [ROUND 1009 item 9] HEIGHT FIDELITY LEDGER -- the number item 9 asks for.
+ * `err` is |built mass height - (height_m - min_height_m)| in world units,
+ * summed and worst-cased over every footprint that reached MODELS.DAT, plus how
+ * many carried a real storey count. A single "we fixed it" claim is worth
+ * nothing without this, and the pre-fix run reports it too. */
+static long   s_geo_h_n, s_geo_h_levels, s_geo_h_off;
+static double s_geo_h_err_sum, s_geo_h_err_max;
+/* [ROUND 1009 item 2] Flanks capped because the NEIGHBOUR's procedural wall
+ * stood down for a real footprint / plaza. */
+static long s_geo_cap_added;
 
 /* Per-build entry point. Called from tg_store_page_reset, which
  * td5_tg_pages.c runs at the top of the build -- before tg_world_build, before
@@ -1557,6 +1613,9 @@ static void tg_geo_city_build_begin(void)
     s_geo_backrow_suppressed = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
     s_geo_lm_prefab = s_geo_lm_nofit = 0;
+    s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
+    s_geo_h_err_sum = s_geo_h_err_max = 0.0;
+    s_geo_cap_added = 0;
     memset(s_geo_roof_kind, 0, sizeof(s_geo_roof_kind));
     s_geo_shift_max = s_geo_route_dev_max = 0.0;
     s_geo_city = s_geo_bld = 0;
@@ -1603,6 +1662,27 @@ static double tg_geo_outward(const TG_NodeList *nl, int si, double side,
  * showed a wall of shopfronts with the real plaza hidden behind it. Probing the
  * exact world point the wall would occupy, over a window of spans either side,
  * answers the question the emitter is actually asking. */
+/* [ROUND 1009 item 10] PROBE THE WHOLE FOOTPRINT, not one ray.
+ *
+ * "these buildings are in the middle of a park": the La Plata frontage at spans
+ * 668..671 is four 43 m towers whose block runs 4990 x 13693 units, and Plaza
+ * Mariano Moreno's nearest mapped vertex is 5452 units from the block's centre
+ * -- i.e. the park starts BEHIND the wall. The old probe walked a single
+ * outward ray at the span's own node across 0..tg_facade_depth(b) (3000 raw),
+ * so it could not reach the park at all, and the wall was built into it.
+ *
+ * Two corrections, both measured against what the emitter actually writes:
+ *   DEPTH   the band now runs to the RUN's depth (tg_facade_run_depth), which
+ *           is the number tg_side_geom hands the geometry, instead of the one
+ *           biome constant. The procedural block is as deep as its run.
+ *   EXTENT  the frontage is a QUAD from node si to node si+1, so the probe
+ *           samples across the along-road extent too. One ray at the near node
+ *           answers for a line, and a park edge that cuts the span diagonally
+ *           lies entirely between the samples.
+ *
+ * TD5_TG_GEO_PROBES x TD5_TG_GEO_ALONG points, which at 5 x 3 is 15 -- still
+ * ONE window walk per polygon, because td5_geob_points_in_* takes the whole
+ * set. TD5RE_GEO_MASS_DEEP=0 restores the single-ray 3-point probe. */
 static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
                           const TG_Biome *b, double lo, double hi)
 {
@@ -1610,35 +1690,78 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     const double side = left ? 1.0 : -1.0;
     const double lx = n->tz * side, lz = -n->tx * side;
     const double base = n->width * 0.5 + tg_city_sidewalk_w_at(nl, si, b);
-    double px[TD5_TG_GEO_PROBES], pz[TD5_TG_GEO_PROBES];
-    int k;
+    double px[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
+    double pz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
+    int k, a, np = 0, nalong = 1;
+    double ax = 0.0, az = 0.0;
 
     if (!s_geo_city) return 0;
-    for (k = 0; k < TD5_TG_GEO_PROBES; k++) {
-        const double d = base + lo
-                       + (hi - lo) * (double)k / (double)(TD5_TG_GEO_PROBES - 1);
-        px[k] = n->x + lx * d;
-        pz[k] = n->z + lz * d;
+    if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP") && si + 1 < nl->count) {
+        const TG_Node *n1 = &nl->v[si + 1];
+        const double b1 = n1->width * 0.5 + tg_city_sidewalk_w_at(nl, si + 1, b);
+        /* Along-road step: the far end of the frontage is the next node's own
+         * setback point, so the samples follow the wall through a bend instead
+         * of running off a straight line tangent to it. */
+        ax = (n1->x + n1->tz * side * b1) - (n->x + lx * base);
+        az = (n1->z - n1->tx * side * b1) - (n->z + lz * base);
+        nalong = TD5_TG_GEO_ALONG;
+    }
+    for (a = 0; a < nalong; a++) {
+        const double t = (nalong > 1) ? (double)a / (double)(nalong - 1) : 0.0;
+        for (k = 0; k < TD5_TG_GEO_PROBES; k++) {
+            const double d = base + lo
+                           + (hi - lo) * (double)k / (double)(TD5_TG_GEO_PROBES - 1);
+            px[np] = n->x + lx * d + ax * t;
+            pz[np] = n->z + lz * d + az * t;
+            np++;
+        }
     }
     /* Each half of the probe is gated by the emitter that would replace the
      * procedural mass, so "buildings off" leaves the wall standing in front of
      * a real building again and "plazas off" leaves it standing on bare ground
      * -- one variable per knob. */
     if (s_geo_bld
-        && td5_geob_points_in_building(si, px, pz, TD5_TG_GEO_PROBES,
+        && td5_geob_points_in_building(si, px, pz, np,
                                        TD5_GEOB_WIN_B)) return 1;
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
-    return td5_geob_points_in_plaza(si, px, pz, TD5_TG_GEO_PROBES,
-                                    TD5_GEOB_WIN_A);
+    return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
 }
 
 /* The FRONTAGE band: front plane to back plane of the street wall's own mass.
  * Both ends matter -- a real polygon whose edge falls inside the BACK half of
- * the wall still means the wall is standing in real geometry. */
+ * the wall still means the wall is standing in real geometry.
+ *
+ * [ROUND 1009 item 10] The depth is the RUN's, the same tg_facade_run_depth
+ * tg_side_geom gives the geometry. tg_facade_depth(b) is the biome's own
+ * constant and is SHORTER than what a tall run is actually built to, which is
+ * how a wall ended up inside a park its own probe never reached. */
 static int tg_geo_frontage_at(const TG_NodeList *nl, int si, int left,
                               const TG_Biome *b)
 {
-    return tg_geo_mass_at(nl, si, left, b, 0.0, tg_facade_depth(b));
+    double depth;
+    /* THE GEO EARLY-OUT COMES FIRST, and it is load-bearing.
+     *
+     * tg_geo_mass_at's own `!s_geo_city` return used to be the first thing
+     * either of these functions executed, so on a synthetic build they were a
+     * pure no-op. The 1009 item-10 fix put the run-depth lookup AHEAD of it,
+     * which made a synthetic build evaluate tg_facade_floors on every
+     * span-side -- and that CRASHED the synthetic gate with
+     * STATUS_INTEGER_DIVIDE_BY_ZERO, because tg_city_emit_backrows calls the
+     * back-row probe with the span's OWN biome and five of the eight biomes
+     * (FIELDS, FOREST, ALPINE, COAST, ORIENTAL) carry floors_extra = 0, which
+     * tg_facade_floors takes a modulo by. Nothing below this line may run
+     * without a place loaded: the byte-identity contract says so, and the
+     * crash is what happens when it does. */
+    if (!s_geo_city) return 0;
+    depth = tg_facade_depth(b);
+    if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP")) {
+        const int floors = tg_facade_floors(si, left, b);
+        if (floors > 0) {
+            const double rd = tg_facade_run_depth(b, si, left, floors, NULL);
+            if (rd > depth) depth = rd;
+        }
+    }
+    return tg_geo_mass_at(nl, si, left, b, 0.0, depth);
 }
 
 /* The BACK-ROW band: from the first receding row out past the last one, which
@@ -1646,8 +1769,153 @@ static int tg_geo_frontage_at(const TG_NodeList *nl, int si, int left,
 static int tg_geo_backrow_at(const TG_NodeList *nl, int si, int left,
                              const TG_Biome *b)
 {
-    const double d0 = tg_facade_depth(b) + TD5_TG_BACKROW_GAP;
+    double front, d0;
+    if (!s_geo_city) return 0;            /* see tg_geo_frontage_at */
+    front = tg_facade_depth(b);
+    /* [ROUND 1009 item 10] Same correction as the frontage: the rows recede
+     * from the BLOCK's back plane, which is the run's depth, not the biome's. */
+    if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP")) {
+        const int floors = tg_facade_floors(si, left, b);
+        if (floors > 0) {
+            const double rd = tg_facade_run_depth(b, si, left, floors, NULL);
+            if (rd > front) front = rd;
+        }
+    }
+    d0 = front + TD5_TG_BACKROW_GAP;
     return tg_geo_mass_at(nl, si, left, b, d0, d0 + 2.0 * TD5_TG_BACKROW_GAP);
+}
+
+/* ======================= [ROUND 1009] THE TWO PREPASS TABLES ===============
+ * Contract in td5_trackgen_internal.h (tg_geo_city_prepare). Both are indexed
+ * [span][side], side 0 = right, 1 = left, matching every other `left` flag in
+ * this module. Zero-filled and left that way on a synthetic build, which is
+ * what keeps MODELS.DAT byte-identical there.
+ * ========================================================================== */
+
+/* Item 7: pavement width per SPAN, WORLD UNITS. 0 = "no OSM answer, keep the
+ * biome width".
+ *
+ * ONE WIDTH PER SPAN, NOT PER SIDE, and that is deliberate. OSM does describe
+ * the two sides separately (`sidewalk=left` / `right`, 69 of La Plata's ways)
+ * and the slab emitter is per side, but the width is read by SIDE-BLIND callers
+ * too -- tg_carriageway_clear_gap's pavement argument, the facade setback, the
+ * plaza projection -- and tg_side_geom's own comment records what happens when
+ * the slab and the thing standing on it disagree: "the wall must land on the
+ * back edge of the slab the hook lays, or one of the two is left hanging."
+ * Handing the two sides different widths through a side-blind signature would
+ * reintroduce exactly that. So the span takes the WIDER of its two sides, which
+ * passes the real measurement through while keeping every consumer on one
+ * number. Per-side pavements are a separate change: it needs the width
+ * threaded through tg_carriageway_clear_gap and every caller of it. */
+static float         s_geo_sw_w[TD5_TG_MAX_SPANS];
+/* Item 2: the procedural frontage stands down here because real geometry does. */
+static unsigned char s_geo_wall_off[TD5_TG_MAX_SPANS][2];
+static int           s_geo_sw_ready, s_geo_wall_ready;
+static long          s_geo_sw_hit, s_geo_sw_miss;
+static double        s_geo_sw_min, s_geo_sw_max, s_geo_sw_sum;
+
+double tg_geo_sidewalk_w(int si)
+{
+    if (!s_geo_sw_ready || si < 0 || si >= TD5_TG_MAX_SPANS) return 0.0;
+    return (double)s_geo_sw_w[si];
+}
+
+int tg_geo_wall_down(int si, int left)
+{
+    if (!s_geo_wall_ready || si < 0 || si >= TD5_TG_MAX_SPANS) return 0;
+    return s_geo_wall_off[si][left ? 1 : 0];
+}
+
+/* Clamp on the OSM-derived pavement, world units. The floor is a kerb strip,
+ * not nothing: the facade, the kerb face and the lamp posts all stand on this
+ * slab (see tg_city_kerb_h), so a zero would strand them in the gutter. The
+ * ceiling is one span length, past which the pavement would be wider than the
+ * lane beside it and the facade would walk off the block. */
+#define TD5_TG_GEO_SW_MIN  320.0    /* 0.75 m at 430 units/m */
+#define TD5_TG_GEO_SW_MAX  2600.0   /* 6 m                   */
+/* How far off a span a mapped way may be and still be the way that span IS.
+ * The conditioner rotates and resamples the real drive, so the generated
+ * centreline sits a few metres off the OSM polyline; 25 m is comfortably past
+ * that and comfortably inside a La Plata block (120 m). */
+#define TD5_TG_GEO_SW_SEEK 10750.0  /* 25 m */
+
+void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
+{
+    int si, s;
+
+    memset(s_geo_sw_w, 0, sizeof s_geo_sw_w);
+    memset(s_geo_wall_off, 0, sizeof s_geo_wall_off);
+    s_geo_sw_ready = s_geo_wall_ready = 0;
+    s_geo_sw_hit = s_geo_sw_miss = 0;
+    s_geo_sw_min = s_geo_sw_max = s_geo_sw_sum = 0.0;
+    if (!s_geo_city || !nl || nspans < 2) return;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+    if (nspans > nl->count) nspans = nl->count;
+
+    /* --- item 7: pavement width from the nearest OSM way ------------------ */
+    if (td5_env_flag_on("TD5RE_GEO_SIDEWALK")
+        && td5_geo_roads_count() > 0
+        && td5_geob_units_per_m() > 1.0) {
+        const double upm = td5_geob_units_per_m();
+        for (si = 0; si < nspans; si++) {
+            const TG_Node *n = &nl->v[si];
+            double lm = 0.0, rm = 0.0, dx = 0.0, dz = 1.0, w;
+            if (!td5_geo_roads_pavement_at(n->x, n->z, TD5_TG_GEO_SW_SEEK,
+                                           &lm, &rm, &dx, &dz)) {
+                s_geo_sw_miss++;
+                continue;
+            }
+            w = ((lm > rm) ? lm : rm) * upm;        /* the wider side, see above */
+            if (w < TD5_TG_GEO_SW_MIN) w = TD5_TG_GEO_SW_MIN;
+            if (w > TD5_TG_GEO_SW_MAX) w = TD5_TG_GEO_SW_MAX;
+            s_geo_sw_w[si] = (float)w;
+            if (s_geo_sw_hit == 0) s_geo_sw_min = s_geo_sw_max = w;
+            if (w < s_geo_sw_min) s_geo_sw_min = w;
+            if (w > s_geo_sw_max) s_geo_sw_max = w;
+            s_geo_sw_sum += w;
+            s_geo_sw_hit++;
+        }
+        s_geo_sw_ready = 1;
+    }
+
+    /* --- item 2: where the procedural frontage stands down ----------------
+     * AFTER the widths, because tg_geo_frontage_at measures its probe band
+     * from the pavement's back edge and must see the same pavement the wall
+     * will be set back to. */
+    {
+        long down = 0;
+        if (td5_env_flag_on("TD5RE_GEO_WALL_CAP")) {
+            for (si = 1; si + 1 < nspans; si++) {
+                const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+                /* The same gate tg_building_for_span applies before it reaches
+                 * tg_emit_street_wall: a billboard/tree biome stands no wall,
+                 * so there is no stand-down to record either. */
+                if (b->billboard && b->tree_n > 0) continue;
+                for (s = 0; s < 2; s++)
+                    if (tg_geo_frontage_at(nl, si, s, b)) {
+                        s_geo_wall_off[si][s] = 1;
+                        down++;
+                    }
+            }
+            s_geo_wall_ready = 1;
+        }
+
+        {
+            const double upm = td5_geob_units_per_m() > 1.0
+                             ? td5_geob_units_per_m() : 1.0;
+            TD5_LOG_I(LOG_TAG, "[GEO PREP] pavement from OSM: %ld span(s) "
+                      "matched a mapped way within %.0f units, %ld unmatched "
+                      "(biome width kept); width %.0f..%.0f raw (%.2f..%.2f m), "
+                      "mean %.0f; procedural frontage stands down on %ld "
+                      "span-side(s)",
+                      s_geo_sw_hit, TD5_TG_GEO_SW_SEEK, s_geo_sw_miss,
+                      s_geo_sw_min, s_geo_sw_max,
+                      s_geo_sw_min / upm, s_geo_sw_max / upm,
+                      s_geo_sw_hit > 0
+                          ? s_geo_sw_sum / (double)s_geo_sw_hit : 0.0,
+                      down);
+        }
+    }
 }
 
 /* Is the ring CONVEX? Used only to decide whether a derived inset is safe. */
@@ -1924,7 +2192,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     double shift = 0.0, need, H, by, minout, gap, rise, inv_tile;
     double wall_top, vrows, cx = 0.0, cz = 0.0;
     int n_ring = gb->n, k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
-    int rows, wall_page, roof_page, shape, convex;
+    int rows, storeys = 0, wall_page, roof_page, shape, convex;
 
     if (n_ring < 3 || n_ring > TD5_GEOB_RING_MAX) { s_geo_dropped_deg++; return 1; }
     if (si + 1 >= nl->count) return 1;
@@ -1985,17 +2253,69 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
      * building. H is now the mass's OWN height. (It read 0 in practice
      * anyway: geo_fetch stores the tag as a string, which the reader only
      * started accepting today -- see geob_num_tag.) */
-    H = gb->height - gb->min_height;
-    if (H < floor_h) H = floor_h;
-    if (H > TD5_TG_GEO_MAX_H) H = TD5_TG_GEO_MAX_H;
-    rows = (int)(H / floor_h + 0.5);
-    if (rows < 1) rows = 1;
-    /* Ordinary buildings snap to a whole number of floors so the facade page
-     * never cuts mid-window. A REAL LANDMARK keeps its measured height instead:
-     * the whole point of extruding the real shape is that a 20 m cathedral is
-     * 20 m, not the nearest multiple of a generic storey. A building:part
-     * likewise: snapping a part would open a gap against the part above it. */
-    if (!tg_geo_landmark_real(gb) && !gb->part) H = (double)rows * floor_h;
+    /* [ROUND 1009 item 9] "Building heights are not fully correct."
+     *
+     * MEASURED, and the arithmetic is the whole bug. `floor_h` is the FACADE
+     * PAGE's authored cell height corrected for aspect -- 2058 raw, 4.79 m at
+     * La Plata's 430 units/m -- while OSM's storey is 3 m. The old code used
+     * that page property as BOTH the floor under a height AND the quantum a
+     * height snaps to, so every measured height came out as a multiple of
+     * 4.79 m:
+     *
+     *   tagged 3.0 m  (182 footprints) -> floored to 4.79 m   +60%
+     *   tagged 9.0 m  (594)            -> 2 x 4.79 = 9.57 m   +6%
+     *   tagged 12.0 m (647)            -> 3 x 4.79 = 14.36 m  +20%
+     *   tagged 16.5 m (98)             -> 3 x 4.79 = 14.36 m  -13%
+     *
+     * Nothing about a texture cell is a fact about a building, so the snap is
+     * gone and the measured height is kept as tagged. The two things the page
+     * count was really needed for are separated:
+     *
+     *   PAGE CLASS  still keyed on the page-floor count, because that is what
+     *               tg_facade_page_class's low-rise/tower split is authored in.
+     *   UV ROWS     now the OSM STOREY count (`levels`, else height / storey
+     *               height), so one page cell is one real floor instead of one
+     *               4.79 m slab -- which is also why the windows were too big.
+     *
+     * The remaining floor is HALF A STOREY: below that a footprint is a shed,
+     * not a mass, and a zero-height extrusion is a sheet with no inside.
+     * TD5RE_GEO_BLD_HEIGHT=0 restores the snap for an A/B. */
+    {
+        const double storey = td5_geob_storey_units();
+        const int    honest = td5_env_flag_on("TD5RE_GEO_BLD_HEIGHT")
+                           && storey > 1.0;
+        const double unit   = honest ? storey : floor_h;
+        H = gb->height - gb->min_height;
+        if (H < unit * (honest ? 0.5 : 1.0)) H = unit * (honest ? 0.5 : 1.0);
+        if (H > TD5_TG_GEO_MAX_H) H = TD5_TG_GEO_MAX_H;
+        /* Page-floor count, for the palette split only. */
+        rows = (int)(H / floor_h + 0.5);
+        if (rows < 1) rows = 1;
+        if (!honest) {
+            /* The pre-1009 behaviour, verbatim: ordinary buildings snapped to a
+             * whole number of PAGE floors; a real landmark or a building:part
+             * kept its measured height. */
+            if (!tg_geo_landmark_real(gb) && !gb->part) H = (double)rows * floor_h;
+            storeys = 0;
+        } else {
+            storeys = (int)gb->levels - (int)gb->min_level;
+            if (storeys < 1) storeys = (int)(H / storey + 0.5);
+            if (storeys < 1) storeys = 1;
+            if (storeys > TD5_TG_GEO_MAX_STOREYS) storeys = TD5_TG_GEO_MAX_STOREYS;
+        }
+    }
+    /* The ledger reads H HERE, before the base sink raises it: the sink lowers
+     * the bottom edge and raises the top by the same amount, so it is not part
+     * of the height the tag asked for. */
+    {
+        const double want = gb->height - gb->min_height;
+        const double err  = fabs(H - want);
+        s_geo_h_n++;
+        if (gb->levels > 0) s_geo_h_levels++;
+        s_geo_h_err_sum += err;
+        if (err > s_geo_h_err_max) s_geo_h_err_max = err;
+        if (err > 430.0) s_geo_h_off++;          /* more than a metre out */
+    }
     wall_page = tg_facade_page_class(gb->id_hash, rows);
     roof_page = TD5_TG_PAGE_R3_BLOCK + 3;      /* the house-roof page */
 
@@ -2116,7 +2436,17 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
         s_geo_roof_shaped++;
     }
     if (shape >= 0 && shape <= TD5_GEOB_ROOF_SKILLION) s_geo_roof_kind[shape]++;
-    vrows = (wall_top - by) / ((floor_h > 1.0) ? floor_h : 1.0);
+    /* [ROUND 1009 item 9] V extent = how many page cells repeat up the WALL.
+     * With the real storey count known that is the storey count, scaled by the
+     * wall's share of the mass (a tagged roof:height lowers the eaves, and
+     * repeating the whole building's storeys over the shorter wall would squash
+     * the windows -- the reason this was ever derived from a height). Falls back
+     * to the page-floor ratio when the cache has no storey count. */
+    if (storeys > 0 && H > 1.0) {
+        vrows = (double)storeys * (wall_top - by) / H;
+    } else {
+        vrows = (wall_top - by) / ((floor_h > 1.0) ? floor_h : 1.0);
+    }
     if (!(vrows > 0.25)) vrows = 1.0;
     if (ntri > 0) {
         cmd[ncmd * 3 + 0] = (unsigned short)roof_page;
@@ -2210,6 +2540,12 @@ void tg_geo_city_report(void)
     int bb = 0, bf = 0, ab = 0, af = 0, dp = 0, dpt = 0;
 
     if (!s_geo_city) return;
+    /* [GEO ROUND 1009] On a STREAMED build the scenery has not run yet when
+     * build_level reports, so every counter below would read zero and the
+     * honest numbers come from the call at the end of the streamed pass
+     * instead. Printing both leaves two contradictory censuses in one log,
+     * which is how the zeros were read as a finding in the first place. */
+    if (td5_trackgen_stream_pending()) return;
     td5_geob_census(&nb, &meas, &est, &lm, &roofs, &na, &plaza);
     td5_geob_bind_stats(&bb, &bf, &ab, &af);
     td5_geob_decimation(&dp, &dpt);
@@ -2250,6 +2586,29 @@ void tg_geo_city_report(void)
               "exactly, which is what the bind assumes)",
               s_geo_wall_suppressed, s_geo_backrow_suppressed,
               s_geo_route_dev_max);
+    /* [ROUND 1009 item 9] HEIGHT FIDELITY. The error is |built - tagged| for
+     * the mass height, in metres, so "heights are not fully correct" has a
+     * number on both sides of the fix instead of a claim on one. */
+    {
+        const double upm = td5_geob_units_per_m() > 1.0
+                         ? td5_geob_units_per_m() : 1.0;
+        TD5_LOG_I(LOG_TAG, "[GEO BUILD] heights: %ld extruded, %ld carried an "
+                  "OSM storey count; |built - tagged| mean %.2f m, worst "
+                  "%.2f m, %ld more than 1 m out (knob TD5RE_GEO_BLD_HEIGHT=%s,"
+                  " storey %.0f raw / page floor %.0f raw)",
+                  s_geo_h_n, s_geo_h_levels,
+                  s_geo_h_n > 0 ? s_geo_h_err_sum / (double)s_geo_h_n / upm : 0.0,
+                  s_geo_h_err_max / upm, s_geo_h_off,
+                  td5_env_flag_on("TD5RE_GEO_BLD_HEIGHT") ? "on" : "off",
+                  td5_geob_storey_units(),
+                  tg_facade_floor_h(&k_biomes[0]));
+    }
+    /* [ROUND 1009 item 2] How many flanks were closed that the old cap
+     * decision left open to the air. */
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] flanks: %ld corner return(s) added facing "
+              "a span-side whose procedural wall stood down for real geometry "
+              "(knob TD5RE_GEO_WALL_CAP=%s)", s_geo_cap_added,
+              td5_env_flag_on("TD5RE_GEO_WALL_CAP") ? "on" : "off");
 }
 
 /* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
@@ -2272,7 +2631,15 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * emitters read as a mouth -- suppressing it there would lay a carriageway
      * across the block instead of a building. Standing the wall down leaves the
      * run structure, the pavement and the crossings untouched. */
-    if (tg_geo_frontage_at(nl, si, left, b)) { s_geo_wall_suppressed++; return; }
+    /* [ROUND 1009 item 2] Read the FROZEN table where it exists, so this
+     * decision and the cap decision below can never disagree about the same
+     * span-side. Falls back to the live probe when the prepass did not run
+     * (TD5RE_GEO_WALL_CAP=0), which is the pre-1009 behaviour. */
+    if (s_geo_wall_ready ? tg_geo_wall_down(si, left)
+                         : tg_geo_frontage_at(nl, si, left, b)) {
+        s_geo_wall_suppressed++;
+        return;
+    }
     if (tg_branches_enabled() && side * (double)tg_fork_side_at(si) > 0.0 && tg_span_in_fork_clear(si)) return;
     /* [R11 BIOME item 4] Outskirts ramp -- the same gate tg_side_built asks, so
      * the wall that is not emitted here is the wall the caps and step walls
@@ -2440,8 +2807,33 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * includes a fork-cleared span (item 15), not just a run/gap boundary.
      * tg_side_built folds that in; on the left side and off any fork it is
      * exactly tg_facade_built, so straight blocks are unchanged. */
-    g->cap_near = !tg_side_built(si - 1, left);
-    g->cap_far  = !tg_side_built(si + 1, left);
+    /* [ROUND 1009 item 2] "this element doesn't have a side wall."
+     *
+     * MEASURED: the picked mesh is the La Plata frontage at span 35 (entry 8
+     * slot 23, pages 22+279) -- front, roof and back wall, and NO flank. Its
+     * near neighbours, spans 30..33, are inside Plaza Domingo Matheu
+     * (AREAS.JSON leisure=park, 8 points), so the [GEO PHASE 5] stand-down at
+     * the head of this function removed their walls. tg_side_built still said
+     * "built" there, because the geo stand-down is the FOURTH suppression and
+     * only the first three (fork clearance, bridge/biome, outskirts ramp) were
+     * ever folded into it -- so cap_near came out 0 and the flank facing the
+     * park was left open to the air.
+     *
+     * That is precisely the failure tg_side_built's own header warns about
+     * ("a flank facing a suppressed side is left open air"), so the fix is to
+     * tell the cap decision about the suppression rather than to special-case
+     * it. The table is read, not recomputed: tg_geo_city_prepare froze it
+     * single-threaded before this loop went parallel, and it is empty on a
+     * synthetic build. */
+    {
+        const int near_geo = tg_geo_wall_down(si - 1, left);
+        const int far_geo  = tg_geo_wall_down(si + 1, left);
+        g->cap_near = !tg_side_built(si - 1, left) || near_geo;
+        g->cap_far  = !tg_side_built(si + 1, left) || far_geo;
+        if ((near_geo && tg_side_built(si - 1, left))
+            || (far_geo && tg_side_built(si + 1, left)))
+            s_geo_cap_added++;
+    }
     g->built = 1;
 }
 
@@ -2882,9 +3274,15 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * which tg_side_geom now pushes out through the shared authority, so the
          * seam can no more land on a branch than the front facade can -- no
          * separate guard is needed here. */
+        /* [ROUND 1009 item 2] `&& !tg_geo_wall_down(si + 1, s)` for the same
+         * reason the cap decision gained it: a step wall closes to the
+         * NEIGHBOUR's roof, and a neighbour whose wall stood down for a real
+         * footprint or plaza has no roof to close to -- the seam would be a
+         * sheet standing in open ground. The corner prism above covers that
+         * boundary instead, which is what a run end is. */
         if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
             td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS") &&
-            tg_side_built(si + 1, s)) {
+            tg_side_built(si + 1, s) && !tg_geo_wall_down(si + 1, s)) {
             const int nrows = tg_facade_floors(si + 1, s, b);
             if (nrows > 0 && nrows != g->rows) {
                 const int hi = nrows > g->rows ? nrows : g->rows;

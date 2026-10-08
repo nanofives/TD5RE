@@ -618,6 +618,13 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
 static long s_geop_areas, s_geop_lawn_tri, s_geop_paths, s_geop_beds;
 static long s_geop_hedges, s_geop_trees, s_geop_clamped, s_geop_small;
 static long s_geop_straddle, s_geop_r16_stood_down, s_geop_nopath;
+/* [ROUND 1009 items 3 + 4] Beds dropped because their wedge was too narrow to
+ * hold one once it was cut clear of the two paths bordering it, and boundary
+ * hedges NOT emitted because OSM records no barrier on that area. */
+static long s_geop_bed_thin, s_geop_hedge_nobarrier;
+/* [ROUND 1009 item 10] Side-street frontage walls / flank blocks refused
+ * because they would have stood inside a real OSM square. */
+static long s_geop_xwall_park;
 static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
 
 int tg_block_is_park(int si, int left)
@@ -1474,6 +1481,10 @@ static int tg_r16_emit_outskirt_park(const TG_FBHook *h)
 /* Clear air between the plaza edge and a tree trunk / the boundary hedge, so
  * neither leans over the pavement the plaza stops at. */
 #define TD5_TG_GEOP_EDGE_CLR   1500.0
+/* [ROUND 1009 item 3] How far a planting bed is cut back from the path axis it
+ * borders: half a path width plus a 200-raw joint, so the two share an edge and
+ * no area. */
+#define TD5_TG_GEOP_BED_CLR    (TD5_TG_GEOP_PATH_W * 0.5 + 200.0)
 
 /* ONE TEXEL DENSITY FOR THE WHOLE PLAZA, and it is the generator's own.
  *
@@ -1534,6 +1545,41 @@ static int tg_geo_area_here(const TG_NodeList *nl, int si, int left)
     return td5_geob_points_in_plaza(si, px, pz, 3, TD5_GEOB_WIN_A);
 }
 
+/* [ROUND 1009 item 10] "these buildings are in the middle of a park", the
+ * SIDE-STREET half.
+ *
+ * MEASURED on the La Plata route: of the 22 facade meshes standing inside an
+ * OSM park/plaza in the parent build, MESHTAG labels 13 `building` (the main
+ * frontage and its back rows, which the [GEO PHASE 5] stand-down in
+ * td5_tg_city.c covers) and 9 `cross` -- the frontage walls and flank blocks a
+ * SIDE STREET gets, from tg_cross_emit_sidewalls and tg_cross_emit_street_flank
+ * here. Those two emitters have no geo gate at all: they run perpendicular to
+ * the main road, outward down the mouth, so the per-(span, side) stand-down
+ * cannot see where they end up.
+ *
+ * This is the point test they need. A wall running from (bx, bz) outward along
+ * the unit (ox, oz) for `flen` is sampled along its own length, because its far
+ * end can be 30 m past the mouth -- deep inside a square the mouth only
+ * touches. Same window as every other plaza probe.
+ *
+ * TD5RE_GEO_XWALL_PARK=0 restores the ungated side-street frontage. */
+static int tg_geo_xwall_in_plaza(int si, double bx, double bz,
+                                 double ox, double oz, double flen)
+{
+    double px[5], pz[5];
+    int k;
+
+    if (!tg_geo_city_active()) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_XWALL_PARK")) return 0;
+    for (k = 0; k < 5; k++) {
+        const double t = (double)k * 0.25;
+        px[k] = bx + ox * flen * t;
+        pz[k] = bz + oz * flen * t;
+    }
+    return td5_geob_points_in_plaza(si, px, pz, 5, TD5_GEOB_WIN_A);
+}
+
 /* Outward distance from the centreline at span si, on side `side`. */
 static double tg_geop_out(const TG_NodeList *nl, int si, double side,
                           double wx, double wz)
@@ -1543,23 +1589,50 @@ static double tg_geop_out(const TG_NodeList *nl, int si, double side,
 }
 
 /* Ground for a plaza surface point: the world's own height, lifted clear of the
- * ground skirt exactly as the procedural lawn is, and capped just above the
- * road node so a plaza can never end up lying over the carriageway.
+ * ground skirt, and capped just above the road node so a plaza can never end up
+ * lying over the carriageway.
  *
- * `tier` separates the three FLAT surfaces the plaza stacks on one piece of
- * ground. They must not share a Y: the first cut laid the lawn and the paths at
- * the same height and the paving z-fought the grass out of existence in the
- * top-down capture. Lawn 0, paving 1, planting 2, a few units apart -- far less
- * than the kerb, so nothing reads as a step. */
-#define TD5_TG_GEOP_TIER 12.0
+ * `tier` separates the FLAT surfaces the plaza stacks on one piece of ground.
+ * They must not share a Y: the first cut laid the lawn and the paths at the
+ * same height and the paving z-fought the grass out of existence in the
+ * top-down capture.
+ *
+ * [ROUND 1009 item 3] "right now there's a fight between 3 types of ground in
+ * this place" -- the pick is this plaza's paving mesh (entry 9 slot 23,
+ * page 44 SIDEWALK + page 2 GREEN, 8 pad triangles / 8 path quads / 8 bed
+ * quads), inside Plaza Domingo Matheu. THREE separate coplanarities, all
+ * measured off the numbers this file used:
+ *
+ *   1. the lawn sat at TD5_TG_VERGE_LIFT, which is EXACTLY where the verge
+ *      band, the crossing asphalt, the side-street aprons and the procedural
+ *      park lawn also sit (grep TD5_TG_VERGE_LIFT) -- so wherever one of those
+ *      laps a plaza the two surfaces are the same plane, not nearly;
+ *   2. the tiers were 12 raw apart. At 430 units/m that is 2.8 cm, which the
+ *      depth buffer cannot separate at race distance;
+ *   3. the cap was applied AFTER the tier was added, so on any span where it
+ *      binds all three tiers collapse onto the cap and the separation that did
+ *      exist is destroyed.
+ *
+ * So: the plaza gets a lift of its OWN (nothing else uses GEOP_LIFT), the tier
+ * step is 45 raw (10 cm -- a kerbless paving edge, and a third of the 130-raw
+ * kerb, so nothing reads as a step), and the cap is applied to the BASE before
+ * the tier so the ordering survives it. TD5RE_GEO_PLAZA_TIER=0 restores the old
+ * 16 + 12 x tier with the cap on top, for an A/B. */
+#define TD5_TG_GEOP_TIER 45.0
+#define TD5_TG_GEOP_LIFT 60.0
 static double tg_geop_ground_t(const TG_NodeList *nl, int si,
                                double x, double z, int tier)
 {
-    double y = tg_world_h(x, z) + TD5_TG_VERGE_LIFT
-             + TD5_TG_GEOP_TIER * (double)tier;
     const double cap = nl->v[si].y + 400.0;
-    if (y > cap) y = cap;
-    return y;
+    double y;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZA_TIER")) {
+        y = tg_world_h(x, z) + TD5_TG_VERGE_LIFT + 12.0 * (double)tier;
+        if (y > cap) y = cap;
+        return y;
+    }
+    y = tg_world_h(x, z) + TD5_TG_GEOP_LIFT;
+    if (y > cap) y = cap;                /* cap the BASE, not the tiered top */
+    return y + TD5_TG_GEOP_TIER * (double)tier;
 }
 static double tg_geop_ground(const TG_NodeList *nl, int si, double x, double z)
 {
@@ -1727,14 +1800,49 @@ static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
         const double ra = pad_r + (len[k] - pad_r) * 0.30;
         const double rb = pad_r + (len[k] - pad_r) * 0.55;
         double px[4], pz[4];
-        px[0] = cx + dx[k]*ra; pz[0] = cz + dz[k]*ra;
-        px[1] = cx + dx[k]*rb; pz[1] = cz + dz[k]*rb;
-        px[2] = cx + dx[j]*rb; pz[2] = cz + dz[j]*rb;
-        px[3] = cx + dx[j]*ra; pz[3] = cz + dz[j]*ra;
+        /* [ROUND 1009 item 3] CUT THE BED CLEAR OF THE PATHS instead of laying
+         * it over them. The wedge's two edges ran along the path AXES, and each
+         * path is a quad TD5_TG_GEOP_PATH_W wide centred on its axis, so the
+         * bed overlapped every path by half a path width along its whole length
+         * -- a grass quad lying on a paving quad, which is the "rendering over
+         * other tile elements" half of the report. The tier only decided which
+         * of the two won.
+         *
+         * Each corner is pushed off its own path axis, into the wedge, by half
+         * a path width plus a joint, so bed and path share an edge and no area.
+         * `w` is the component of the OTHER direction perpendicular to this
+         * one, i.e. the in-plane normal that points into the wedge -- which
+         * degenerates only when the two paths are collinear, and the guard
+         * below drops the bed there. */
+        double ikx = 0.0, ikz = 0.0, ijx = 0.0, ijz = 0.0;
+        if (td5_env_flag_on("TD5RE_GEO_PLAZA_BEDCUT")) {
+            const double dot = dx[k]*dx[j] + dz[k]*dz[j];
+            double wx = dx[j] - dx[k]*dot, wz = dz[j] - dz[k]*dot, wl;
+            double ux = dx[k] - dx[j]*dot, uz = dz[k] - dz[j]*dot, ul;
+            double chord;
+            wl = hypot(wx, wz);
+            ul = hypot(ux, uz);
+            if (!(wl > 1e-9) || !(ul > 1e-9)) { s_geop_bed_thin++; continue; }
+            /* No bed where the wedge is too narrow to hold one once both edges
+             * are cut back: the two insets would cross and the quad invert. */
+            chord = hypot((dx[j] - dx[k]) * ra, (dz[j] - dz[k]) * ra);
+            if (chord < 2.0 * TD5_TG_GEOP_BED_CLR + TD5_TG_GEOP_PATH_W) {
+                s_geop_bed_thin++;
+                continue;
+            }
+            ikx = wx / wl * TD5_TG_GEOP_BED_CLR;
+            ikz = wz / wl * TD5_TG_GEOP_BED_CLR;
+            ijx = ux / ul * TD5_TG_GEOP_BED_CLR;
+            ijz = uz / ul * TD5_TG_GEOP_BED_CLR;
+        }
+        px[0] = cx + dx[k]*ra + ikx; pz[0] = cz + dz[k]*ra + ikz;
+        px[1] = cx + dx[k]*rb + ikx; pz[1] = cz + dz[k]*rb + ikz;
+        px[2] = cx + dx[j]*rb + ijx; pz[2] = cz + dz[j]*rb + ijz;
+        px[3] = cx + dx[j]*ra + ijx; pz[3] = cz + dz[j]*ra + ijz;
         for (i = 0; i < 4; i++) {
             const int o = nv * 5;
             v[o + 0] = (float)px[i];
-            v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 2);
+            v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 1);
             v[o + 2] = (float)pz[i];
             v[o + 3] = (float)(tiled ? px[i] / TD5_TG_GEOP_TILE
                                      : ((i == 1 || i == 2) ? 1.0 : 0.0));
@@ -1762,10 +1870,27 @@ static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
 /* Boundary hedge, on the outline edges that do NOT face the road. A real square
  * is walled in by planting on three sides and open to the street on the fourth;
  * hedging the road-side edge too would put a green wall across the view in, the
- * exact complaint the R5 CROSS item 4 note above records. */
+ * exact complaint the R5 CROSS item 4 note above records.
+ *
+ * [ROUND 1009 item 4] "there's no such wall at the end of this park."
+ *
+ * He is right and the cache says so. The pick is this mesh -- entry 9 slot 24,
+ * page 66 (R3_BLOCK+1), 5 quads, 952 raw tall -- inside Plaza Domingo Matheu,
+ * and AREAS.JSON gives that area `barrier: null`. MEASURED over the whole La
+ * Plata cache: 414 of 417 areas carry NO barrier, 2 a fence and 1 a wall. So
+ * the premise above ("a real square is walled in by planting on three sides")
+ * is simply not true of this place: La Plata's plazas are open, and the hedge
+ * was derived geometry with nothing behind it, fencing in 414 squares to get 3
+ * right.
+ *
+ * The `barrier` field has always been in AREAS.JSON; the reader just never kept
+ * it (it does now -- td5_geo_buildings.c). The hedge is therefore emitted only
+ * where OSM records a barrier, and the shape follows the tag: a WALL and a
+ * FENCE are full height, a HEDGE is planting. TD5RE_GEO_PLAZA_HEDGE_OSM=0
+ * restores the unconditional hedge for an A/B. */
 static int tg_geop_emit_hedge(const TG_FBHook *h, const double *rx,
                               const double *rz, int n, double side,
-                              double minout)
+                              double minout, const TD5_GeoArea *a)
 {
     double px[TD5_GEOB_RING_MAX * 4], py[TD5_GEOB_RING_MAX * 4];
     double pz[TD5_GEOB_RING_MAX * 4], uu[TD5_GEOB_RING_MAX * 4];
@@ -1773,8 +1898,19 @@ static int tg_geop_emit_hedge(const TG_FBHook *h, const double *rx,
     int seg_page = TD5_TG_PAGE_R3_BLOCK + 1, seg_nq, k, nn = 0;
     const double open = minout + TD5_TG_GEOP_EDGE_CLR * 4.0;
     double u_e;
+    double hedge_h = (double)TD5_TG_HEDGE_H;
 
     if (*h->nmesh >= h->maxmesh) return 1;
+    if (td5_env_flag_on("TD5RE_GEO_PLAZA_HEDGE_OSM")) {
+        if (!a || a->barrier == TD5_GEOA_BARRIER_NONE) {
+            s_geop_hedge_nobarrier++;
+            return 1;
+        }
+        /* A mapped WALL or FENCE is a real boundary and stands taller than
+         * planting; the hedge page is the only boundary art the generator has,
+         * so the tag changes the height rather than the texture. */
+        if (a->barrier != TD5_GEOA_BARRIER_HEDGE) hedge_h *= 1.6;
+    }
     for (k = 0; k < n; k++) {
         const int j = (k + 1) % n;
         const double mx = (rx[k] + rx[j]) * 0.5, mz = (rz[k] + rz[j]) * 0.5;
@@ -1784,10 +1920,10 @@ static int tg_geop_emit_hedge(const TG_FBHook *h, const double *rx,
         {
             const double y0 = tg_geop_ground(h->nl, h->si, rx[k], rz[k]);
             const double y1 = tg_geop_ground(h->nl, h->si, rx[j], rz[j]);
-            q[0] = rx[k]; q[1]  = y0;                 q[2]  = rz[k];
-            q[3] = rx[j]; q[4]  = y1;                 q[5]  = rz[j];
-            q[6] = rx[j]; q[7]  = y1 + TD5_TG_HEDGE_H; q[8]  = rz[j];
-            q[9] = rx[k]; q[10] = y0 + TD5_TG_HEDGE_H; q[11] = rz[k];
+            q[0] = rx[k]; q[1]  = y0;           q[2]  = rz[k];
+            q[3] = rx[j]; q[4]  = y1;           q[5]  = rz[j];
+            q[6] = rx[j]; q[7]  = y1 + hedge_h; q[8]  = rz[j];
+            q[9] = rx[k]; q[10] = y0 + hedge_h; q[11] = rz[k];
         }
         /* u by the EDGE'S OWN LENGTH, not 0..1. A procedural park hedge quad
          * is exactly one span long, so its 0..1 is 1500 units a repeat; a real
@@ -1946,7 +2082,7 @@ static int tg_geop_emit_one(const TG_FBHook *h, const TD5_GeoArea *a)
     } else {
         s_geop_nopath++;
     }
-    if (!tg_geop_emit_hedge(h, rx, rz, n, side, minout)) return 0;
+    if (!tg_geop_emit_hedge(h, rx, rz, n, side, minout, a)) return 0;
     if (!tg_geop_emit_trees(h, rx, rz, n, a, side, minout, pick, npath, cx, cz))
         return 0;
     s_geop_areas++;
@@ -1976,6 +2112,10 @@ int tg_geo_emit_plaza(const TG_FBHook *h)
 void tg_geo_plaza_report(void)
 {
     if (!tg_geo_city_active()) return;
+    /* [GEO ROUND 1009] Same reason tg_geo_city_report returns here: on a
+     * streamed build the scenery has not run yet, so these would be zeros and
+     * the real numbers come from the call at the end of the streamed pass. */
+    if (td5_trackgen_stream_pending()) return;
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] %ld real area(s) laid: %ld lawn triangle(s) "
               "from the OSM outline, %ld derived path(s), %ld bed(s), %ld "
               "boundary hedge quad(s), %ld interior tree(s)",
@@ -1989,6 +2129,22 @@ void tg_geo_plaza_report(void)
               "OFF on the geo path (tg_block_is_park)",
               s_geop_clamped, s_geop_straddle, s_geop_small,
               TD5_TG_GEOP_MIN_R, s_geop_nopath, s_geop_r16_stood_down);
+    /* [ROUND 1009 items 3 + 4] The two numbers those fixes are judged on. */
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] boundary: %ld area(s) got NO hedge because "
+              "OSM records no barrier on them (knob TD5RE_GEO_PLAZA_HEDGE_OSM"
+              "=%s); beds: %ld wedge(s) too narrow to hold one cut clear of "
+              "its paths (knob TD5RE_GEO_PLAZA_BEDCUT=%s); ground tiers "
+              "lawn+%.0f / paving+%.0f raw (knob TD5RE_GEO_PLAZA_TIER=%s); "
+              "%ld side-street wall(s)/flank block(s) refused for standing "
+              "inside a square (knob TD5RE_GEO_XWALL_PARK=%s)",
+              s_geop_hedge_nobarrier,
+              td5_env_flag_on("TD5RE_GEO_PLAZA_HEDGE_OSM") ? "on" : "off",
+              s_geop_bed_thin,
+              td5_env_flag_on("TD5RE_GEO_PLAZA_BEDCUT") ? "on" : "off",
+              TD5_TG_GEOP_LIFT, TD5_TG_GEOP_LIFT + TD5_TG_GEOP_TIER,
+              td5_env_flag_on("TD5RE_GEO_PLAZA_TIER") ? "on" : "off",
+              s_geop_xwall_park,
+              td5_env_flag_on("TD5RE_GEO_XWALL_PARK") ? "on" : "off");
     /* First span each bound plaza is attached to, so a capture
      * (StartSpanOffset) can be aimed at one without guessing. */
     {
@@ -2237,6 +2393,13 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
             if (rows <= 0) rows = b->floors_min + 1;
             H = (double)rows * tg_facade_floor_h(b);
             cols = tg_facade_cols_for(flen, (double)b->cell_w, 5);
+            /* [ROUND 1009 item 10] Not through a real square. See
+             * tg_geo_xwall_in_plaza: this wall is one of the 9 `cross` meshes
+             * measured standing inside an OSM park on the La Plata route. */
+            if (tg_geo_xwall_in_plaza(h->si, cx, cz, ox, oz, flen)) {
+                s_geop_xwall_park++;
+                continue;
+            }
             /* base -> outward*flen, sinking with the skirt, rising H. */
             tg_facade_push_grid(cx, by, cz, ox * flen, -drop, oz * flen,
                                 0.0, H, 0.0, cols, rows, 0, rows,
@@ -2414,6 +2577,14 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                 cols = tg_facade_cols_for(TD5_TG_R8_FLANK_LEN,
                                           (double)b->cell_w, 4);
                 page = tg_facade_page_class(rh, rows);
+                /* [ROUND 1009 item 10] Same veto as the cross frontage wall:
+                 * a flank block is a building and a square is not where one
+                 * goes. Probed over the block's own along-street length. */
+                if (tg_geo_xwall_in_plaza(h->si, bxp, bzp, ox, oz,
+                                          (double)TD5_TG_R8_FLANK_LEN)) {
+                    s_geop_xwall_park++;
+                    continue;
+                }
                 if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                         bxp, byp, bzp,
                                         ox * TD5_TG_R8_FLANK_LEN, 0.0,
@@ -3575,6 +3746,7 @@ void tg_r9_city_reset(void)
     s_geop_areas = s_geop_lawn_tri = s_geop_paths = s_geop_beds = 0;
     s_geop_hedges = s_geop_trees = s_geop_clamped = s_geop_small = 0;
     s_geop_straddle = s_geop_r16_stood_down = s_geop_nopath = 0;
+    s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
 }
 
 /* Merge [lo,hi] into span si / side s's band set, joining bands that touch. */

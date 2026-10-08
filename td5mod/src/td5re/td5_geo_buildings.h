@@ -126,7 +126,25 @@ typedef struct {
     unsigned char landmark;   /* OSM says this is a named landmark         */
     unsigned char lmsrc;      /* TD5_GEOB_LMSRC_* -- which tag decided it  */
     unsigned char part;       /* building:part -- a 3D-modelled sub-volume */
+    /* [ROUND 1009 item 9] STOREY COUNTS, which the reader never kept.
+     * BUILDINGS.JSON carries `levels` on every record (286 of La Plata's 2326
+     * footprints have it from OSM, the rest from the estimator's `levels_est`)
+     * plus `roof_levels` and `min_level`. They matter because the facade page's
+     * own floor height is 2058 raw (4.79 m at 430 units/m) while OSM's storey
+     * is 3 m: without the real count the emitter has to infer floors from the
+     * page, which is what quantised every measured height. 0 = absent. */
+    unsigned short levels;      /* building:levels, or the estimator's guess */
+    unsigned short roof_levels; /* roof:levels                               */
+    unsigned short min_level;   /* building:min_level                        */
 } TD5_GeoBuilding;
+
+/* An area's own BARRIER, straight off AREAS.JSON's `barrier` field.
+ * MEASURED on the La Plata cache: 414 of 417 areas carry NOTHING, 2 a fence and
+ * 1 a wall -- so an emitter that hedges every plaza is inventing 414 walls. */
+#define TD5_GEOA_BARRIER_NONE  0
+#define TD5_GEOA_BARRIER_HEDGE 1
+#define TD5_GEOA_BARRIER_FENCE 2
+#define TD5_GEOA_BARRIER_WALL  3
 
 typedef struct {
     int    first, n;
@@ -138,6 +156,7 @@ typedef struct {
     double host_lat;
     unsigned char kind;       /* TD5_GEOA_KIND_* */
     unsigned char named;
+    unsigned char barrier;    /* TD5_GEOA_BARRIER_* -- what OSM fences it with */
 } TD5_GeoArea;
 
 /* ------------------------------------------------------------- lifecycle --- */
@@ -271,5 +290,16 @@ void td5_geob_landmark_sources(int *out, int n);
 /* How many ring points the loader decimated away, and how many polygons it
  * had to decimate at all -- the honest cost of TD5_GEOB_RING_MAX. */
 void td5_geob_decimation(int *polys, int *points_dropped);
+
+/* [ROUND 1009 item 9] The cache's OWN storey height, in WORLD UNITS
+ * (BUILDINGS.JSON `storey_height_m` x PLACE.JSON units_per_metre; 3 m x 430 =
+ * 1290 at La Plata). The emitter needs it because the facade PAGE's floor
+ * height is a texture property (2058 raw = 4.79 m) and must not be used as the
+ * unit a measured height is rounded to. 0 when no place is loaded. */
+double td5_geob_storey_units(void);
+
+/* Units per metre of the loaded cache's frame, so a caller can convert a tagged
+ * metre value without re-reading PLACE.JSON. 0 when no place is loaded. */
+double td5_geob_units_per_m(void);
 
 #endif /* TD5_GEO_BUILDINGS_H */

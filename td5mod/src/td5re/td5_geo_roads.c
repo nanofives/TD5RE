@@ -136,6 +136,50 @@ static int geo_roads_surface(const char *s)
     return TD5_GEO_SURF_SMOOTH;
 }
 
+/* [ROUND 1009 item 7] OSM `sidewalk` -> TD5_GEO_SW_*. `separate` means the
+ * pavement is mapped as its OWN way, so the footway exists even though this
+ * record does not describe it -- which for our purposes is still "there is a
+ * pavement here". UNKNOWN (no tag) is deliberately NOT the same as NONE: 2104
+ * of La Plata's 2291 ways are untagged and an untagged urban street has a
+ * pavement, while `sidewalk=no` is a mapper stating it does not. */
+static int geo_roads_sidewalk(const char *s)
+{
+    if (!s || !s[0]) return TD5_GEO_SW_UNKNOWN;
+    if (!strcmp(s, "no") || !strcmp(s, "none"))   return TD5_GEO_SW_NONE;
+    if (!strcmp(s, "left"))                       return TD5_GEO_SW_LEFT;
+    if (!strcmp(s, "right"))                      return TD5_GEO_SW_RIGHT;
+    if (!strcmp(s, "both") || !strcmp(s, "yes")
+        || !strcmp(s, "separate"))                return TD5_GEO_SW_BOTH;
+    return TD5_GEO_SW_UNKNOWN;
+}
+
+/* PAVEMENT WIDTH BY HIGHWAY CLASS, in METRES.
+ *
+ * These are the widths a street of that class actually has in a laid-out
+ * Argentine city centre, which is the place this is measured against: La Plata
+ * is a 1882 grid town whose residential veredas are about 2 m, whose avenidas
+ * (secondary/primary here) carry 3 m, and whose diagonals and trunk routes the
+ * same. A SERVICE way is an alley or a car park aisle and has a kerb at best.
+ *
+ * They are DEFAULTS, not measurements: nothing in the cache states a pavement
+ * width (sidewalk:width is absent on all 2291 ways), so this table is the
+ * honest substitute and is stated here once rather than hidden in an emitter. */
+double td5_geo_roads_pavement_default_m(int klass)
+{
+    switch (klass) {
+    case TD5_GEO_RC_MOTORWAY:     return 0.0;   /* no pedestrian kerb at all */
+    case TD5_GEO_RC_TRUNK:        return 3.0;
+    case TD5_GEO_RC_PRIMARY:      return 3.0;
+    case TD5_GEO_RC_SECONDARY:    return 3.0;
+    case TD5_GEO_RC_TERTIARY:     return 2.5;
+    case TD5_GEO_RC_UNCLASSIFIED: return 2.0;
+    case TD5_GEO_RC_RESIDENTIAL:  return 2.0;
+    case TD5_GEO_RC_LIVING:       return 1.5;
+    case TD5_GEO_RC_SERVICE:      return 1.2;
+    default:                      return 2.0;
+    }
+}
+
 static const char *geo_roads_str(const cJSON *o, const char *key)
 {
     const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
@@ -149,6 +193,26 @@ static int geo_roads_bool(const cJSON *o, const char *key)
     if (cJSON_IsBool(v))   return cJSON_IsTrue(v) ? 1 : 0;
     if (cJSON_IsNumber(v)) return v->valuedouble != 0.0;
     return 0;
+}
+
+/* [ROUND 1009 item 7] The per-side sidewalk spellings, which carry the same
+ * information split in two: `sidewalk:left=yes` + `sidewalk:right=no` is
+ * `sidewalk=left`. Read only when the single `sidewalk` key is absent, so the
+ * combined tag stays authoritative where a mapper set both. 20 of La Plata's
+ * ways are reachable only this way (left 3, right 17). */
+static int geo_roads_sidewalk_sides(const cJSON *r)
+{
+    const cJSON *tags = r ? cJSON_GetObjectItem(r, "tags") : NULL;
+    const char *l = geo_roads_str(tags, "sidewalk:left");
+    const char *g = geo_roads_str(tags, "sidewalk:right");
+    int have_l, have_r;
+    if (!l && !g) return TD5_GEO_SW_UNKNOWN;
+    have_l = l && l[0] && strcmp(l, "no") && strcmp(l, "none");
+    have_r = g && g[0] && strcmp(g, "no") && strcmp(g, "none");
+    if (have_l && have_r) return TD5_GEO_SW_BOTH;
+    if (have_l)           return TD5_GEO_SW_LEFT;
+    if (have_r)           return TD5_GEO_SW_RIGHT;
+    return TD5_GEO_SW_NONE;      /* both spelled out as absent */
 }
 
 /* Units per metre of the cache's frame, from PLACE.JSON's cell_units / cell_m.
@@ -319,6 +383,32 @@ static int geo_roads_load(const char *slug)
         }
         out->roundabout = read_tags ? geo_roads_bool(r, "roundabout") : 0;
         if (out->roundabout) roundabouts++;
+        /* [ROUND 1009 item 7] SIDEWALK + the raw tagged width. Both under
+         * `read_tags` with the rest of the 2026-10-07 tag round, so
+         * TD5RE_GEO_ROAD_TAGS=0 reproduces the pre-1009 pavement exactly:
+         * UNKNOWN on every way, which the consumer reads as "keep the biome
+         * width". */
+        out->sidewalk = TD5_GEO_SW_UNKNOWN;
+        out->tag_width_m = 0.0;
+        if (read_tags) {
+            out->sidewalk = geo_roads_sidewalk(geo_roads_str(r, "sidewalk"));
+            if (out->sidewalk == TD5_GEO_SW_UNKNOWN)
+                out->sidewalk = geo_roads_sidewalk_sides(r);
+            {   /* OSM width=* is free text; the same leading-number read the
+                 * lane count uses. Kept RAW in metres -- what it means for the
+                 * pavement is the consumer's decision, not this reader's. */
+                const cJSON *w = cJSON_GetObjectItem(r, "width");
+                if (w && cJSON_IsString(w) && w->valuestring[0]) {
+                    char *end = NULL;
+                    const double m = strtod(w->valuestring, &end);
+                    if (end != w->valuestring && m > 0.5 && m < 120.0)
+                        out->tag_width_m = m;
+                } else if (w && cJSON_IsNumber(w)
+                           && w->valuedouble > 0.5 && w->valuedouble < 120.0) {
+                    out->tag_width_m = w->valuedouble;
+                }
+            }
+        }
         s_roads.np += kept;
         s_roads.n++;
     }
@@ -375,5 +465,100 @@ int td5_geo_roads_point(const TD5_GeoRoad *r, int k, double *x, double *z)
     if (!r || k < 0 || k >= r->count) return 0;
     if (x) *x = s_roads.px[r->first + k];
     if (z) *z = s_roads.pz[r->first + k];
+    return 1;
+}
+
+/* ------------------------------------------------- [1009 item 7] pavement -- */
+
+/* Squared distance from (px,pz) to segment (ax,az)-(bx,bz), and the parameter
+ * t of the closest point along it. */
+static double geo_roads_seg_d2(double px, double pz, double ax, double az,
+                               double bx, double bz, double *t_out)
+{
+    const double dx = bx - ax, dz = bz - az;
+    const double len2 = dx * dx + dz * dz;
+    double t = 0.0, cx, cz;
+    if (len2 > 1e-9) {
+        t = ((px - ax) * dx + (pz - az) * dz) / len2;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+    }
+    cx = ax + dx * t;
+    cz = az + dz * t;
+    if (t_out) *t_out = t;
+    return (px - cx) * (px - cx) + (pz - cz) * (pz - cz);
+}
+
+int td5_geo_roads_pavement_at(double x, double z, double max_dist,
+                              double *left_m, double *right_m,
+                              double *dirx, double *dirz)
+{
+    const double max2 = max_dist * max_dist;
+    double best2 = -1.0, bdx = 0.0, bdz = 1.0;
+    const TD5_GeoRoad *best = NULL;
+    int i, k;
+
+    if (s_roads.n < 1) return 0;
+    for (i = 0; i < s_roads.n; i++) {
+        const TD5_GeoRoad *r = &s_roads.road[i];
+        /* Bbox reject, inflated by max_dist so a way whose box misses the
+         * point by less than the search radius is still considered. */
+        if (x < r->minx - max_dist || x > r->maxx + max_dist) continue;
+        if (z < r->minz - max_dist || z > r->maxz + max_dist) continue;
+        for (k = 0; k + 1 < r->count; k++) {
+            const double ax = s_roads.px[r->first + k];
+            const double az = s_roads.pz[r->first + k];
+            const double bx = s_roads.px[r->first + k + 1];
+            const double bz = s_roads.pz[r->first + k + 1];
+            const double d2 = geo_roads_seg_d2(x, z, ax, az, bx, bz, NULL);
+            if (d2 > max2) continue;
+            if (best2 >= 0.0 && d2 >= best2) continue;
+            {
+                const double sx = bx - ax, sz = bz - az;
+                const double l = sqrt(sx * sx + sz * sz);
+                if (!(l > 1e-6)) continue;
+                best2 = d2; best = r; bdx = sx / l; bdz = sz / l;
+            }
+        }
+    }
+    if (!best) return 0;
+
+    {
+        /* `sidewalk` chooses the SIDES; the class default chooses the WIDTH.
+         * NONE still leaves a narrow kerb strip rather than nothing: the
+         * facades, the kerb face and the lamp posts all stand on this slab, and
+         * a zero width would strand them in the gutter. 0.75 m is a kerb, which
+         * is what a street tagged sidewalk=no has. */
+        const double def = td5_geo_roads_pavement_default_m(best->klass);
+        const double kerb = 0.75;
+        double l = def, r = def;
+        switch (best->sidewalk) {
+        case TD5_GEO_SW_NONE:  l = kerb; r = kerb; break;
+        case TD5_GEO_SW_LEFT:  l = def;  r = kerb; break;
+        case TD5_GEO_SW_RIGHT: l = kerb; r = def;  break;
+        case TD5_GEO_SW_BOTH:  l = def;  r = def;  break;
+        default:               break;              /* UNKNOWN: class default */
+        }
+        /* SPECULATIVE, DEFAULT OFF. OSM defines highway `width` as the
+         * CARRIAGEWAY's width, so treating a surplus over the lane count as
+         * pavement is an inference, not a measurement -- and on this cache it
+         * would fire on 50 of 2291 ways. Behind its own knob so the claim can
+         * be tested rather than assumed. */
+        if (best->tag_width_m > 0.0
+            && td5_env_flag_off("TD5RE_GEO_SW_FROM_WIDTH")) {
+            const double carriage = (double)best->lanes * 3.5;
+            const double surplus = best->tag_width_m - carriage;
+            if (surplus > 2.0) {
+                double half = surplus * 0.5;
+                if (half > def * 1.5) half = def * 1.5;
+                if (half > l) l = half;
+                if (half > r) r = half;
+            }
+        }
+        if (left_m)  *left_m  = l;
+        if (right_m) *right_m = r;
+    }
+    if (dirx) *dirx = bdx;
+    if (dirz) *dirz = bdz;
     return 1;
 }

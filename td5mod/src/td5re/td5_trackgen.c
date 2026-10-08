@@ -3491,6 +3491,14 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * predicates it consults, and precede the per-entry loop. No-op with
          * no geo place loaded. */
         tg_geo_signals_prepare(nl, nspans);
+        /* [GEO ROUND 1009 items 2 + 7] Same contract and the same reason: the
+         * OSM pavement widths and the per-(span, side) frontage stand-down are
+         * decided here, while this is the only thread, because every facade,
+         * carriageway-clearance and plaza query downstream reads them and some
+         * of those run on workers. Must follow the street authority above
+         * (tg_facade_built consults the mouth table) and precede the per-entry
+         * loop. No-op with no geo place loaded. */
+        tg_geo_city_prepare(nl, nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
         /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is
@@ -5235,11 +5243,25 @@ int td5_trackgen_stream_scenery(volatile int *cancel)
     }
     tg_buf_free(&models);
 
-    /* (No per-build report here. The incoming commit called its TG_PF
+    /* (No per-build TIMING report here. The incoming commit called its TG_PF
      * per-emitter report at this point; master reports through the TG_ZONE
      * hierarchy from build_level, on the MAIN thread, and this function runs on
      * the streaming worker -- printing the shared zone tallies from here would
      * both race the main thread and attribute the worker's time to whatever
-     * build reports next.) */
+     * build reports next.)
+     *
+     * [GEO ROUND 1009] The GEO censuses are a different case and they do belong
+     * here. They are plain per-build counters written by the scenery emitters
+     * this loop just ran, and build_level prints them BEFORE this function
+     * exists -- so on a geo build, which streams by default, every one of them
+     * read zero while the geometry was plainly in MODELS.DAT. MEASURED on
+     * Mariano's own round-1009 race.log: "[GEO BUILD] emitted 0 real
+     * building(s)" and "[GEO PLAZA] 0 real area(s) laid" next to a level091
+     * holding both. A census that always reports zero is worse than none: it
+     * reads as a finding. No race to worry about -- the streaming worker holds
+     * the node list exclusively (td5_trackgen_stream_discard is what releases
+     * it), so no other build can be running. */
+    tg_geo_city_report();
+    tg_geo_plaza_report();
     return ok;
 }

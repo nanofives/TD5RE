@@ -57,6 +57,22 @@
  * SMOOTH is the default and the no-op: every smooth value maps to it and a
  * SMOOTH street takes the span's own biome page, which is what every street
  * did before. Only LOOSE and COBBLE change anything. */
+/* OSM `sidewalk=*`, which this reader also used to drop (the module header
+ * listed it with `latlon`/`name`/`maxspeed` as "deliberately skipped").
+ *
+ * MEASURED on the La Plata cache: 187 of 2291 ways carry it -- both 104,
+ * right 61, left 8, no 14 -- plus 20 on the per-side spellings
+ * (`sidewalk:left` 3, `sidewalk:right` 17). `sidewalk:width` is on NONE of
+ * them, so there is no measured pavement width anywhere in this cache and the
+ * width itself has to come from the highway class. LEFT/RIGHT are relative to
+ * the WAY's own direction, which is why the query below hands the caller the
+ * way's local direction instead of pretending to know the route's. */
+#define TD5_GEO_SW_UNKNOWN   0   /* no sidewalk tag at all                  */
+#define TD5_GEO_SW_NONE      1   /* sidewalk=no / none                      */
+#define TD5_GEO_SW_LEFT      2   /* sidewalk=left                           */
+#define TD5_GEO_SW_RIGHT     3   /* sidewalk=right                          */
+#define TD5_GEO_SW_BOTH      4   /* sidewalk=both / yes / separate          */
+
 #define TD5_GEO_SURF_SMOOTH  0   /* asphalt, concrete, paved, paving_stones */
 #define TD5_GEO_SURF_COBBLE  1   /* sett, cobblestone, unhewn_cobblestone   */
 #define TD5_GEO_SURF_LOOSE   2   /* dirt, unpaved, gravel, ground, sand     */
@@ -71,7 +87,9 @@ typedef struct {
     int    roundabout;     /* OSM junction=roundabout / circular              */
     int    bridge, tunnel; /* OSM bridge=* / tunnel=*                         */
     int    layer;          /* OSM layer=*, 0 at grade                         */
+    int    sidewalk;       /* TD5_GEO_SW_*, relative to the WAY's direction   */
     double width;          /* world units: lanes * TD5_TG_LANE_WIDTH          */
+    double tag_width_m;    /* OSM width=*, METRES, 0 when untagged            */
     double minx, minz, maxx, maxz;   /* bbox, so a caller can reject cheaply  */
 } TD5_GeoRoad;
 
@@ -95,5 +113,36 @@ const TD5_GeoRoad *td5_geo_roads_get(int i);
 /* Point k of road r in world units. Out-of-range k writes nothing and
  * returns 0, so a walk can use it as its own bound. */
 int  td5_geo_roads_point(const TD5_GeoRoad *r, int k, double *x, double *z);
+
+/* [ROUND 1009 item 7] "Sidewalk widths are not being passed to the race."
+ *
+ * The pavement the race lays came entirely from the biome table
+ * (tg_city_sidewalk_w reads TG_Biome.sidewalk), so every street in every mapped
+ * place got the same 900-raw slab -- 2.1 m -- whatever OSM said. This is the
+ * query that closes the gap: find the drivable way nearest (x, z) and report
+ * the pavement width it implies, in METRES, for the way's OWN left and right.
+ *
+ * WHY METRES AND WHY THE WAY'S OWN SIDES. The caller converts with the cache's
+ * units_per_metre, so this module needs no scale; and OSM's left/right are
+ * relative to the way's direction, which has no fixed relation to the generated
+ * route's direction, so the way's unit direction at the nearest segment comes
+ * back too and the caller resolves the sense with one dot product.
+ *
+ * WHERE THE WIDTH COMES FROM. `sidewalk=*` says WHETHER there is a pavement,
+ * never how wide (sidewalk:width is on none of La Plata's 2291 ways), so the
+ * width is the highway class's own realistic default and the tag only chooses
+ * which sides get it. Nothing is invented: a way with no sidewalk tag gets its
+ * class default on both sides, which is the honest reading of an untagged urban
+ * street.
+ *
+ * Returns 1 on a hit within `max_dist` world units, 0 otherwise (caller keeps
+ * the biome width). O(ways) with a bbox reject, so it belongs in a prepass. */
+int  td5_geo_roads_pavement_at(double x, double z, double max_dist,
+                               double *left_m, double *right_m,
+                               double *dirx, double *dirz);
+
+/* The per-class pavement default in METRES, exposed so a report can print the
+ * table it is actually using instead of restating it. */
+double td5_geo_roads_pavement_default_m(int klass);
 
 #endif /* TD5_GEO_ROADS_H */
