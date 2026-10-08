@@ -6125,5 +6125,29 @@ int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
 int  tg_geo_emit_plaza(const TG_FBHook *h);       /* td5_tg_streets.c */
 void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
 
+/* [ROUND 1009 items 2 + 7] Two per-(span, side) tables the geo path needs
+ * BEFORE the first facade query, decided in the single-threaded prepass for
+ * exactly the reason tg_geo_signals_prepare is:
+ *
+ *   SIDEWALK WIDTH  from the OSM way nearest the span (item 7). It feeds
+ *                   tg_city_sidewalk_w_at, which the carriageway authority,
+ *                   the facade setback, the plaza projection and the
+ *                   stand-down probes all read -- so it has to be frozen
+ *                   before any of them run, not sampled per call from a
+ *                   worker.
+ *   WALL STAND-DOWN whether the procedural frontage stands down at (span,
+ *                   side) because a real footprint or plaza is there (item 2).
+ *                   tg_side_built takes no node list, and its CALLERS -- the
+ *                   corner returns, the step walls, the junction furniture --
+ *                   must agree with tg_side_geom on whether a wall stands or a
+ *                   flank is left open to the air.
+ *
+ * Both are a no-op with no geo place loaded, so the synthetic track is
+ * byte-identical. Call order matters: the widths first, the stand-down second
+ * (its probe measures from the pavement's back edge). */
+void tg_geo_city_prepare(const TG_NodeList *nl, int nspans);  /* td5_tg_city.c */
+int  tg_geo_wall_down(int si, int left);                      /* td5_tg_city.c */
+double tg_geo_sidewalk_w(int si);                             /* td5_tg_city.c */
+
 #endif /* TD5_TRACKGEN_INTERNAL_H */
 

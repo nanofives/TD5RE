@@ -3491,6 +3491,14 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * predicates it consults, and precede the per-entry loop. No-op with
          * no geo place loaded. */
         tg_geo_signals_prepare(nl, nspans);
+        /* [GEO ROUND 1009 items 2 + 7] Same contract and the same reason: the
+         * OSM pavement widths and the per-(span, side) frontage stand-down are
+         * decided here, while this is the only thread, because every facade,
+         * carriageway-clearance and plaza query downstream reads them and some
+         * of those run on workers. Must follow the street authority above
+         * (tg_facade_built consults the mouth table) and precede the per-entry
+         * loop. No-op with no geo place loaded. */
+        tg_geo_city_prepare(nl, nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
         /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is

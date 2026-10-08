@@ -739,6 +739,25 @@ static int geob_load_buildings(const char *slug)
         else if (hs && !strcmp(hs, "osm_levels")) b->hsrc = TD5_GEOB_HSRC_OSM_LEVELS;
         else                                      b->hsrc = TD5_GEOB_HSRC_ESTIMATED;
 
+        /* [ROUND 1009 item 9] STOREY COUNTS. `levels` is on every record in a
+         * tag_schema-2 cache; `levels_est` is the estimator's own guess and is
+         * the honest fallback for a footprint OSM never counted. Read through
+         * geob_num_tag because Overpass hands every tag back as a STRING.
+         * Clamped at 200: a levels tag of 1000 is a typo, and the emitter
+         * divides the wall height by this to lay the facade page. */
+        {
+            double lv = geob_num_tag(e, "levels", 0.0);
+            double rl = geob_num_tag(e, "roof_levels", 0.0);
+            double ml = geob_num_tag(e, "min_level", 0.0);
+            if (!(lv > 0.0)) lv = geob_num_tag(e, "levels_est", 0.0);
+            if (lv > 200.0) lv = 200.0;
+            if (rl > 200.0) rl = 200.0;
+            if (ml > 200.0) ml = 200.0;
+            b->levels      = (unsigned short)((lv > 0.0) ? (int)(lv + 0.5) : 0);
+            b->roof_levels = (unsigned short)((rl > 0.0) ? (int)(rl + 0.5) : 0);
+            b->min_level   = (unsigned short)((ml > 0.0) ? (int)(ml + 0.5) : 0);
+        }
+
         s_gb.nb++;
     }
     cJSON_Delete(root);
@@ -791,6 +810,22 @@ static int geob_load_areas(const char *slug)
         a->id_hash = geob_id_hash(geob_num(e, "id", (double)i));
         nm = geob_str(e, "name");
         a->named = (unsigned char)((nm && nm[0]) ? 1 : 0);
+        /* [ROUND 1009 item 4] The area's OWN barrier. "there's no such wall at
+         * the end of this park" -- and OSM agrees: 414 of La Plata's 417 areas
+         * carry no `barrier` at all. The field has always been in AREAS.JSON;
+         * this layer simply never read it, so the plaza emitter's boundary
+         * hedge was derived geometry with nothing behind it. */
+        {
+            const char *bv = geob_str(e, "barrier");
+            a->barrier = TD5_GEOA_BARRIER_NONE;
+            if (bv && bv[0]) {
+                if (!strcmp(bv, "hedge"))      a->barrier = TD5_GEOA_BARRIER_HEDGE;
+                else if (!strcmp(bv, "wall")
+                         || !strcmp(bv, "retaining_wall")
+                         || !strcmp(bv, "city_wall")) a->barrier = TD5_GEOA_BARRIER_WALL;
+                else                           a->barrier = TD5_GEOA_BARRIER_FENCE;
+            }
+        }
         a->host_span = -1;
         a->host_side = 0;
         s_gb.na++;
@@ -1186,4 +1221,19 @@ void td5_geob_decimation(int *polys, int *points_dropped)
 {
     if (polys)          *polys          = s_gb.dec_polys;
     if (points_dropped) *points_dropped = s_gb.dec_points;
+}
+
+/* [ROUND 1009 item 9] The cache's own storey, in world units. See the header:
+ * this is the unit a MEASURED height may legitimately be expressed in, as
+ * opposed to the facade page's authored cell height, which is a texture
+ * property and 1.6x larger. */
+double td5_geob_storey_units(void)
+{
+    if (!s_gb.loaded) return 0.0;
+    return s_gb.storey_m * s_gb.units_per_m;
+}
+
+double td5_geob_units_per_m(void)
+{
+    return s_gb.loaded ? s_gb.units_per_m : 0.0;
 }
