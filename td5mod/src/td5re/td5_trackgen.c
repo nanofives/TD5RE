@@ -2162,6 +2162,113 @@ static const int k_sky_night[] = { 30, 5, 23, 18 };
 
 static const int k_sky_blind[] = { 1, 2, 3, 5, 8, 13, 21, 29 };
 
+/* [ROUND 1008 items 3 + 4] What fills the LOWER BAND of each panorama.
+ *
+ * The luminance split above answers "is it day or night" and nothing else, so a
+ * DAY track draws any of 26 panoramas with equal odds -- and 12 of those 26 are
+ * photographed ACROSS OPEN WATER. The backdrop sits behind everything, so on an
+ * inland city the water half of the panorama fills the gap at the end of every
+ * cross street and the whole horizon above the rooftops. That is the literal
+ * cause of Mariano's "a lot of water in the middle of the city" on La Plata,
+ * which has 704 wet cells in 4 846 602 (0.0145%) and ZERO within 70 m of the
+ * route: there is no water in the WORLD, only in the SKY. The build that
+ * produced the report drew level009, whose lower band is open water edge to
+ * edge. The same roll is also why "no city background": only 4 of the 31 shipped
+ * panoramas show city fabric to the horizon, so a built-up place got one 15% of
+ * the time.
+ *
+ * Classification is of the panorama's bottom 20% -- what a driver actually sees
+ * through a street gap -- and it is VISUAL, confirmed by looking at all 31. No
+ * single scalar separates the classes: measured over that band, horizontal edge
+ * energy runs 0.17..11.60 for WATER and 0.71..12.95 for LAND, and B-R runs
+ * -26..+60 for WATER against -127..+37 for LAND, so both overlap and a threshold
+ * would mis-sort. The measured numbers are kept beside each entry so the call
+ * can be re-checked rather than taken on trust (hedge = mean |horizontal
+ * luminance step| over the band, B-R = mean blue minus mean red):
+ *
+ *   WATER (open water fills the band)
+ *     002 hedge 10.20 B-R +12   city across a bay, water below
+ *     009 hedge  4.85 B-R  -3   river, a thin pier strip at the top  <- the report
+ *     010 hedge  0.17 B-R +19   flat blue-grey water haze
+ *     011 hedge  4.43 B-R +55   harbour skyline, water below
+ *     013 hedge  5.45 B-R +55   island across a turquoise sea
+ *     014 hedge  7.56 B-R -26   city across a bay
+ *     018 hedge  0.23 B-R +10   dark lake under hills        (NIGHT pool)
+ *     019 hedge  1.28 B-R +52   snow peaks across a lake
+ *     020 hedge  4.09 B-R +60   open sea
+ *     022 hedge  2.58 B-R +29   desert shore across water
+ *     028 hedge  1.63 B-R +55   wooded shore across pale water
+ *     039 hedge 11.60 B-R +15   forested hill above a sea
+ *
+ *   CITY (built fabric to the horizon -- the right backdrop for a real city)
+ *     008 hedge 22.82 B-R +13   dense rooftops with towers behind
+ *     012 hedge 17.45 B-R -15   rooftops and street trees
+ *     023 hedge  4.30 B-R  -1   tower blocks behind a tree line (NIGHT pool)
+ *     029 hedge  4.36 B-R -34   tower blocks over a park
+ *
+ *   Everything else in the two pools is a LAND horizon (hills, forest, alpine,
+ *   field, desert) or cloud only (007, 030), and is left alone.
+ *
+ * On a GEO track the pool is now filtered by the REAL PLACE rather than by the
+ * seed alone: a place with no water in its fetched box never draws a water
+ * panorama, and a built-up place prefers the city ones. A SYNTHETIC build takes
+ * the unchanged path, and the sky is a file copy that never enters MODELS.DAT,
+ * so no geometry byte moves either way. TD5RE_GEO_SKY=0 restores the blind geo
+ * behaviour for an A/B. */
+static const int k_sky_water[] = { 2, 9, 10, 11, 13, 14, 18, 19, 20, 22, 28, 39 };
+static const int k_sky_city[]  = { 8, 12, 23, 29 };
+
+static int tg_sky_in(const int *set, int n, int lvl)
+{
+    int i;
+    for (i = 0; i < n; i++) if (set[i] == lvl) return 1;
+    return 0;
+}
+
+#define TG_SKY_IS_WATER(l) tg_sky_in(k_sky_water, \
+    (int)(sizeof(k_sky_water) / sizeof(k_sky_water[0])), (l))
+#define TG_SKY_IS_CITY(l)  tg_sky_in(k_sky_city, \
+    (int)(sizeof(k_sky_city)  / sizeof(k_sky_city[0])),  (l))
+
+/* Wet and built percentages of the real place's fetched box, on a coarse
+ * lattice. The box is the horizon the backdrop stands in for (La Plata's is
+ * 4.4 x 4.4 km), so "is this place coastal" and "is this place a city" are
+ * exactly the two questions it can answer. Returns 0 when there is no cache. */
+static int tg_geo_sky_profile(int *out_wet_pct, int *out_built_pct)
+{
+    const int N = 96;
+    int gw = 0, gh = 0, i, j, n = 0, wet = 0, built = 0;
+    double cell = 0.0, ox = 0.0, oz = 0.0;
+
+    *out_wet_pct = *out_built_pct = 0;
+    if (!td5_geo_loaded()) return 0;
+    td5_geo_grid(&gw, &gh, &cell, &ox, &oz, NULL);
+    if (gw < 2 || gh < 2 || cell <= 0.0) return 0;
+
+    for (j = 0; j < N; j++) {
+        for (i = 0; i < N; i++) {
+            const double x = ox + cell * (double)(gw - 1) * ((double)i + 0.5) / N;
+            const double z = oz + cell * (double)(gh - 1) * ((double)j + 0.5) / N;
+            const int c = td5_geo_cover(x, z);
+            n++;
+            if (td5_geo_is_water(x, z) || c == TD5_GEO_COVER_WATER) wet++;
+            if (c == TD5_GEO_COVER_BUILT) built++;
+        }
+    }
+    if (n < 1) return 0;
+    *out_wet_pct   = wet   * 100 / n;
+    *out_built_pct = built * 100 / n;
+    return 1;
+}
+
+/* How much of the box must be wet before a water horizon is honest. 2% of a
+ * 4.4 km box is ~190 000 m2 of water, which is a real river or a bay rather
+ * than a pond. La Plata reads 0, Valparaiso's box is half sea. */
+#define TG_SKY_WET_PCT   2
+/* ESA WorldCover "built" over half the box is a city, not a town with fields.
+ * La Plata reads 80%. */
+#define TG_SKY_BUILT_PCT 50
+
 void tg_install_sky(const char *dir, unsigned int seed)
 {
     const int night = td5_trackgen_is_night();
@@ -2172,20 +2279,45 @@ void tg_install_sky(const char *dir, unsigned int seed)
         ? (int)(sizeof(k_sky_blind) / sizeof(k_sky_blind[0]))
         : (night ? (int)(sizeof(k_sky_night) / sizeof(k_sky_night[0]))
                  : (int)(sizeof(k_sky_day)   / sizeof(k_sky_day[0])));
+    /* Geo filtering: pass 0 takes only CITY panoramas, pass 1 takes anything
+     * that is not WATER, pass 2 is the unfiltered pool (so a place that is both
+     * dry and un-built still gets a sky rather than none). A synthetic build
+     * starts at pass 2 and is therefore bit-for-bit the old loop. */
+    int wet_pct = 0, built_pct = 0, pass0 = 2, pass;
+    const char *why = "synthetic";
     char src[256], dst[320];
     int i;
 
-    for (i = 0; i < n; i++) {
-        int lvl = pool[(seed / 7u + (unsigned)i) % (unsigned)n];
-        snprintf(src, sizeof(src),
-                 "re/assets/levels/level%03d/FORWSKY.png", lvl);
-        snprintf(dst, sizeof(dst), "%s/FORWSKY.png", dir);
-        if (tg_copy_file(src, dst)) {
-            TD5_LOG_I(LOG_TAG,
-                      "trackgen: sky from level%03d -> %s (%s pool, %d cands)",
-                      lvl, dst, !variety ? "blind" : (night ? "NIGHT" : "DAY"),
-                      n);
-            return;
+    if (td5_env_flag_on("TD5RE_GEO_SKY") && tg_geo_sky_profile(&wet_pct, &built_pct)) {
+        if (wet_pct >= TG_SKY_WET_PCT) {
+            pass0 = 2;  why = "GEO coastal: water horizon kept";
+        } else if (built_pct >= TG_SKY_BUILT_PCT) {
+            pass0 = 0;  why = "GEO dry + built: city horizon";
+        } else {
+            pass0 = 1;  why = "GEO dry: no water horizon";
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [GEO SKY] \"%s\" box is %d%% wet, %d%% "
+                  "built (thresholds %d / %d) -> %s",
+                  td5_geo_place_name(), wet_pct, built_pct,
+                  TG_SKY_WET_PCT, TG_SKY_BUILT_PCT, why);
+    }
+
+    for (pass = pass0; pass <= 2; pass++) {
+        for (i = 0; i < n; i++) {
+            int lvl = pool[(seed / 7u + (unsigned)i) % (unsigned)n];
+            if (pass == 0 && !TG_SKY_IS_CITY(lvl))  continue;
+            if (pass == 1 && TG_SKY_IS_WATER(lvl))  continue;
+            snprintf(src, sizeof(src),
+                     "re/assets/levels/level%03d/FORWSKY.png", lvl);
+            snprintf(dst, sizeof(dst), "%s/FORWSKY.png", dir);
+            if (tg_copy_file(src, dst)) {
+                TD5_LOG_I(LOG_TAG,
+                          "trackgen: sky from level%03d -> %s (%s pool, %d "
+                          "cands, %s, filter pass %d)",
+                          lvl, dst, !variety ? "blind" : (night ? "NIGHT" : "DAY"),
+                          n, why, pass);
+                return;
+            }
         }
     }
     TD5_LOG_W(LOG_TAG, "trackgen: no shipped FORWSKY.png found to borrow; "
