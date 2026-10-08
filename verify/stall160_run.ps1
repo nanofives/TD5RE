@@ -19,6 +19,12 @@ param([string]$Tag = "run",
       [int]$StartSpanOffset = 0,
       [int]$CarDamage = 1,
       [int]$Difficulty = 1,
+      # Fixed SIM-TICK budget: the game quits itself after this many ticks, so
+      # every run simulates the same amount of race regardless of frame rate.
+      # Without it the verdict depended on machine load -- one sweep run traced
+      # 793 ticks where its twin traced 5241, and reported FAIL purely because
+      # it was cut off before the cars reached the goal span.
+      [int]$MaxSimTicks = 4000,
       [int]$Track = 61,
       [string]$Exe = "td5re.exe",
       [string]$FramedumpSpans = "",
@@ -66,7 +72,7 @@ $args = @("--AutoRace=1","--SkipIntro=1","--DefaultTrack=$Track",
           "--PlayerIsAI=$PlayerIsAI","--AutoThrottle=0","--CarDamage=$CarDamage",
           "--StartSpanOffset=$StartSpanOffset",
           "--Windowed=1","--VSync=0",
-          "--RaceTrace=1","--RaceTraceSlot=-1","--RaceTraceMaxSimTicks=0",
+          "--RaceTrace=1","--RaceTraceSlot=-1","--RaceTraceMaxSimTicks=$MaxSimTicks",
           "--RaceTraceMaxFrames=400000") + $gfx
 
 $p = Start-Process -FilePath (Join-Path $wt $Exe) -ArgumentList $args `

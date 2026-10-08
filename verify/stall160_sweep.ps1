@@ -28,6 +28,8 @@ param([string]$Tag = "sweep",
       [int]$PlayerIsAI = 1,
       [int]$CarDamage = 0,
       [int]$Goal = 200,
+      [int]$MaxSimTicks = 4000,   # fixed sim-tick budget per run (see stall160_run.ps1)
+      [int]$MinTicks = 3000,      # below this a run is INCONCLUSIVE, not FAIL
       [string]$Extra = "")        # "NAME=VALUE,NAME=VALUE", see stall160_run.ps1
 
 $wt  = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -47,8 +49,10 @@ foreach ($tfc in $trafficList) {
         Write-Host "=== $t ==="
         & pwsh -NoProfile -File $run -Tag $t -Seed $c.seed -RaceSecs $RaceSecs `
                -GenWait $GenWait -Traffic $tfc -Opponents $c.opp -Difficulty $c.diff `
+               -MaxSimTicks $MaxSimTicks `
                -PlayerIsAI $PlayerIsAI -CarDamage $CarDamage -Extra "$Extra" | Out-Host
-        $out = & python $rep (Join-Path $wt "log\s160_$t") --hold 150 --goal $Goal 2>&1
+        $out = & python $rep (Join-Path $wt "log\s160_$t") --hold 150 --goal $Goal `
+                      --min-ticks $MinTicks 2>&1
         $out | Out-Host
         $verdict = ($out | Where-Object { $_ -match '^VERDICT' }) -join ''
         $results += [pscustomobject]@{ tag = $t; cfg = $c; traffic = $tfc; verdict = $verdict }

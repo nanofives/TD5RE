@@ -84,6 +84,10 @@ def main():
     ap.add_argument("prefix", help="e.g. log/s160_base (expects _race_trace_*.csv)")
     ap.add_argument("--hold", type=int, default=120, help="ticks a plateau must last")
     ap.add_argument("--goal", type=int, default=200, help="span every car must pass")
+    ap.add_argument("--min-ticks", type=int, default=3000,
+                    help="a run shorter than this is INCONCLUSIVE, not FAIL: the "
+                         "wall-clock kill can cut a healthy race off before the "
+                         "cars reach the goal (seen at 793 ticks vs a twin's 5241)")
     args = ap.parse_args()
 
     tr = read_track(args.prefix + "_race_trace_track.csv")
@@ -115,6 +119,10 @@ def main():
         for a, b, lo, hi in plateaus(seq, args.hold):
             print("        PLATEAU ticks %6d..%-6d (%5d) spans %d..%d"
                   % (a, b, b - a + 1, lo, hi))
+    if last_tick < args.min_ticks:
+        print("VERDICT: INCONCLUSIVE (only %d ticks traced, need %d -- run was "
+              "cut off, not a stall)" % (last_tick, args.min_ticks))
+        return 2
     print("VERDICT: %s (every slot past span %d)"
           % ("PASS" if ok else "FAIL", args.goal))
     return 0 if ok else 1

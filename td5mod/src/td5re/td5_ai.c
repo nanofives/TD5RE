@@ -6034,6 +6034,36 @@ void td5_ai_update_track_behavior(int slot) {
               ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
 
+    /* [STALL DIAG 2026-10-08] DEV-ONLY, env-gated, zero cost when off. A car
+     * that sits at the +-0x18000/0x19000 steering clamp forever can mean two
+     * very different things: a LIVE script holding it there, or a STALE value
+     * that nothing rewrites any more. The first is a latch to bound, the second
+     * is a missing write -- and guessing between them has already cost one
+     * wrong attribution this round. This prints, for any slow car, who is
+     * holding the wheel: the script program + flags + countdown alongside the
+     * steering command seen on ENTRY. No lines for a slot at all means this
+     * function is not running for it. TD5RE_STALL_DIAG=1. */
+#ifndef TD5RE_RELEASE
+    {
+        static int s_sd = -1;
+        if (s_sd < 0) s_sd = td5_env_flag_off("TD5RE_STALL_DIAG");
+        if (s_sd) {
+            int32_t lsp = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            int32_t alsp = lsp < 0 ? -lsp : lsp;
+            if (alsp < 0x1800 && (g_ai_frame_counter % 30u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "stall_diag: slot=%d span=%d lspd=%d "
+                          "steer_in=%d prog=%d flags=0x%X cdn=%d enc=%d brk=%d",
+                          slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), (int)lsp,
+                          (int)ACTOR_I32(actor, ACTOR_STEERING_CMD),
+                          (int)rs[RS_SCRIPT_BASE_PTR], (unsigned)rs[RS_SCRIPT_FLAGS],
+                          (int)rs[RS_SCRIPT_COUNTDOWN],
+                          (int)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER),
+                          (int)ACTOR_U8(actor, ACTOR_BRAKE_FLAG));
+            }
+        }
+    }
+#endif
+
     /* No countdown pre-seed: the original at 0x00434FE0 has NO countdown
      * gate and NO paused-branch write of encounter_steering_cmd (+0x33E) /
      * brake_flag (+0x36D) — the cascade below reaches
