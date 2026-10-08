@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 8 (geospatial track generator)" },
+    { CL_ITEM,    "Building a track no longer damages the map data." },
+    { CL_ITEM,    "  You can build route after route from the same" },
+    { CL_ITEM,    "  place and each one comes out the same as if it" },
+    { CL_ITEM,    "  were the first." },
+    { CL_ITEM,    "Fixes NO MAP DATA / UNABLE TO READ ROAD GRAPH on" },
+    { CL_ITEM,    "  the second route you pick." },
+    { CL_ITEM,    "If a route would build a broken world, the screen" },
+    { CL_ITEM,    "  now says why and builds nothing." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 7 (geospatial track generator)" },
     { CL_ITEM,    "SELECT TRACK has a GEOSPATIAL TRACK GENERATOR row." },
     { CL_ITEM,    "  It opens a real street map, starting on La Plata." },

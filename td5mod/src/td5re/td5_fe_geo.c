@@ -964,6 +964,41 @@ void frontend_geo_generator_render(float sx, float sy)
  * SECTION: the screen
  * ======================================================================== */
 
+#ifndef TD5RE_RELEASE
+/* [ROUND 1008] The dev seed, now parameterised by VARIANT so one process can
+ * build several DIFFERENT routes in a row -- which is the only way to catch a
+ * commit that corrupts the place cache, because the first build of a fresh
+ * process always looks fine. Each variant is a start / middle / finish triple
+ * at a different bearing across the centred place, well inside the La Plata
+ * bbox (0.049 deg of latitude by 0.059 of longitude). */
+static void geo_seed_dev_points(int variant)
+{
+    static const double k_var[][6] = {
+        /* s_lat   s_lon   m_lat   m_lon   f_lat   f_lon   (x dlat / dlon) */
+        { -1.00,  -1.00,   0.30,   0.00,   1.00,   1.00 },
+        {  1.00,  -1.00,   0.00,   0.30,  -1.00,   1.00 },
+        { -0.70,   0.90,   0.20,  -0.20,   0.90,  -0.70 },
+        {  0.00,  -1.00,   0.50,   0.10,   0.00,   1.00 },
+    };
+    const int n = (int)(sizeof k_var / sizeof k_var[0]);
+    const double *v = k_var[(variant % n + n) % n];
+    const double dlat = 0.010, dlon = 0.013;
+    int i;
+    for (i = 0; i < 3; i++) {
+        s_pts[i].lat = s_cen_lat + v[i * 2 + 0] * dlat;
+        s_pts[i].lon = s_cen_lon + v[i * 2 + 1] * dlon;
+    }
+    s_n_pts = 3;
+    geo_clear_result();
+    geo_mark_dirty();
+    TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_SEED - seeded 3 DEV points, "
+              "variant %d: (%.5f,%.5f) (%.5f,%.5f) (%.5f,%.5f) "
+              "(dev build only; not a user action)", variant,
+              s_pts[0].lat, s_pts[0].lon, s_pts[1].lat, s_pts[1].lon,
+              s_pts[2].lat, s_pts[2].lon);
+}
+#endif
+
 static void geo_screen_init(void)
 {
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
@@ -1004,16 +1039,8 @@ static void geo_screen_init(void)
     /* td5_env_int, not td5_env_flag_on: an unset knob must mean OFF, and
      * flag_on has bitten this tree before (the R22 water diag that ran on
      * every build). Default 0, range 0..1, no ambiguity. */
-    if (s_n_pts == 0 && td5_env_int("TD5RE_GEO_SEED", 0, 0, 1)) {
-        const double dlat = 0.010, dlon = 0.013;
-        s_pts[0].lat = s_cen_lat - dlat; s_pts[0].lon = s_cen_lon - dlon;
-        s_pts[1].lat = s_cen_lat + dlat * 0.3; s_pts[1].lon = s_cen_lon;
-        s_pts[2].lat = s_cen_lat + dlat; s_pts[2].lon = s_cen_lon + dlon;
-        s_n_pts = 3;
-        geo_mark_dirty();
-        TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_SEED - seeded 3 DEV points "
-                  "(dev build only; not a user action)");
-    }
+    if (s_n_pts == 0 && td5_env_int("TD5RE_GEO_SEED", 0, 0, 1))
+        geo_seed_dev_points(0);
 #endif
 
     s_drag_pt  = -1;
@@ -1058,11 +1085,14 @@ static void geo_leave(int screen)
 /* BUILD: commit the route, re-register the place as a track slot, and hand
  * the player back to SELECT TRACK with that slot picked -- the same shape the
  * J8 GEO-PICK place slots use, so nothing downstream learns a new path. */
-static void geo_do_build(void)
+/* [ROUND 1008] The commit half of BUILD, without leaving the screen, so the
+ * dev multi-build harness can press it again. Returns the registered track
+ * slot, or -1. */
+static int geo_commit_and_register(void)
 {
     int n, i, slot = -1;
 
-    if (!geo_route_is_buildable()) { frontend_play_sfx(10); return; }
+    if (!geo_route_is_buildable()) { frontend_play_sfx(10); return -1; }
     if (td5_geo_route_commit() != 0) {
         /* [ROUND 1008] Say WHY. The commit refuses a degenerate route frame
          * rather than writing one, and "COULD NOT SAVE THE ROUTE" for every
@@ -1073,7 +1103,7 @@ static void geo_do_build(void)
         snprintf(s_reason, sizeof(s_reason), "%s",
                  (why && why[0]) ? why : "COULD NOT SAVE THE ROUTE");
         s_verdict = TD5_GEO_ROUTE_ERROR;
-        return;
+        return -1;
     }
 
     td5_trackgen_register_geo_places();
@@ -1089,7 +1119,7 @@ static void geo_do_build(void)
         TD5_LOG_W(LOG_TAG, "GEO GENERATOR: committed '%s' but it did not register "
                   "as a track slot", s_place);
         frontend_play_sfx(10);
-        return;
+        return -1;
     }
 
     TD5_LOG_I(LOG_TAG, "GEO GENERATOR: built '%s' -> track slot %d (%d spans)",
@@ -1100,7 +1130,12 @@ static void geo_do_build(void)
      * DIRECTION / LAPS rows. */
     s_selected_track = slot;
     frontend_play_sfx(3);
-    geo_leave(s_parent_screen);
+    return slot;
+}
+
+static void geo_do_build(void)
+{
+    if (geo_commit_and_register() >= 0) geo_leave(s_parent_screen);
 }
 
 void Screen_GeoGenerator(void)
@@ -1116,24 +1151,44 @@ void Screen_GeoGenerator(void)
      * verified on a framedump: control-socket keys do not reach frontend menus
      * and inject_key cannot press a vector button. TD5RE_GEO_AUTOBUILD=1 waits
      * for the (seeded, see TD5RE_GEO_SEED) route to condition OK, presses
-     * BUILD once, then re-arms AutoRace on the slot it registered -- which is
-     * the whole point: it exercises the commit -> re-grid -> reload -> build
-     * path WITHOUT a relaunch, the thing a fresh process would paper over.
-     * Fires exactly once. Compiled out of RELEASE. */
+     * BUILD, then re-arms AutoRace on the slot it registered -- which is the
+     * whole point: it exercises the commit -> re-grid -> reload -> build path
+     * WITHOUT a relaunch, the thing a fresh process would paper over.
+     *
+     * [ROUND 1008] TD5RE_GEO_AUTOBUILD_N=k repeats that k times on k DIFFERENT
+     * seeded routes before arming the race. One build per process could never
+     * have caught the cache corruption that shipped in round 1007: commit 1
+     * looked perfectly healthy and it was commit 2, reading commit 1's output
+     * back as if it were the fetched data, that collapsed the place. The whole
+     * class of bug only shows up on the SECOND build in a process, so the
+     * harness has to be able to press BUILD twice. Compiled out of RELEASE. */
     {
-        static int s_autobuild_fired;
-        if (!s_autobuild_fired && td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
-            && geo_route_is_buildable()) {
-            s_autobuild_fired = 1;
+        static int s_autobuild_done;
+        const int want = td5_env_int("TD5RE_GEO_AUTOBUILD_N", 1, 1, 4);
+        if (td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
+            && s_autobuild_done < want && geo_route_is_buildable()) {
+            int slot;
             TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - pressing "
-                      "BUILD on the %d-span route (dev build only)", s_spans);
-            geo_do_build();                 /* commit + invalidate + register */
-            if (s_selected_track >= 0) {
-                g_td5.ini.default_track = s_selected_track;
-                g_td5.ini.auto_race     = 1;   /* MENU loop fires auto_race_setup */
-                TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - armed "
-                          "AutoRace on slot %d", s_selected_track);
+                      "BUILD %d of %d on the %d-span route (dev build only)",
+                      s_autobuild_done + 1, want, s_spans);
+            slot = geo_commit_and_register();   /* commit + invalidate + register */
+            s_autobuild_done++;
+            if (slot < 0) {
+                TD5_LOG_E(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - BUILD "
+                          "%d of %d FAILED: %s", s_autobuild_done, want,
+                          s_reason[0] ? s_reason : "(no reason given)");
+                return;
             }
+            TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - BUILD %d of "
+                      "%d OK -> slot %d", s_autobuild_done, want, slot);
+            if (s_autobuild_done < want) {
+                geo_seed_dev_points(s_autobuild_done);   /* a DIFFERENT route */
+                return;
+            }
+            g_td5.ini.default_track = slot;
+            g_td5.ini.auto_race     = 1;   /* MENU loop fires auto_race_setup */
+            TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - armed "
+                      "AutoRace on slot %d after %d build(s)", slot, want);
             return;
         }
     }
