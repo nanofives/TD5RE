@@ -3830,6 +3830,20 @@ static int tg_scenery_entry(int e)
              * occupy the drivable envelope on purpose. */
             tg_guard_mark(road_ex0, meshes.len, TG_GK_ROAD, si);
             }
+            /* [ROUND 1010 AVENUES] A GEO divided avenue: the REAL opposite
+             * carriageway and the kerbed median between it and the race road,
+             * at the offset the OSM ways actually have. Emitted right after the
+             * road and before the guardrails, because the rails ask
+             * tg_carriageway_reach -- which now folds this in -- and must land
+             * outside the scenery carriageway rather than through it.
+             *
+             * Nothing here touches spans, the jump table or the occupancy
+             * paint, so the race gets no second drivable path: that is the
+             * whole difference from the fork this replaces. No-op on every
+             * synthetic track (tg_geo_avenue_n returns 0 with no geo place). */
+            if (ok && !TG_SUB(TG_SUB_ROAD,
+                              tg_emit_geo_avenue(nl, si, &meshes, moff, &nmesh)))
+                ok = 0;
             /* Guardrails belong in THIS loop, not the box pass below: that pass
              * recovers each piece's offset by dividing the appended bytes by
              * n_added, which only holds while every piece is a same-sized box.

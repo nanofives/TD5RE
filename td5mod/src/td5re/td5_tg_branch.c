@@ -898,13 +898,26 @@ double tg_road_half_width(const TG_NodeList *nl, int si)
     return w * 0.5;
 }
 
-/* Outermost drivable lateral at span si on `side`, as a POSITIVE distance from
- * the main centerline. Never less than the main road's own half width. */
+/* Outermost ROAD SURFACE lateral at span si on `side`, as a POSITIVE distance
+ * from the main centerline. Never less than the main road's own half width.
+ *
+ * [ROUND 1010 AVENUES] "drivable" was the right word while the only thing out
+ * there was a fork corridor. A GEO divided avenue now lays the OPPOSITE
+ * CARRIAGEWAY as scenery beside the race road, and every caller of this
+ * function -- facade setbacks, tree placement, guardrails, bridge decks --
+ * wants to clear tarmac whether or not a car can be driven on it. A building
+ * standing in the oncoming carriageway is the same defect as one standing in
+ * the branch. So the avenue's reach folds in here, and the name of the thing
+ * being measured widens with it. */
 double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
 {
     double reach = tg_road_half_width(nl, si);
     int i;
 
+    {
+        const double av = tg_geo_avenue_reach(nl, si, side);
+        if (av > reach) reach = av;
+    }
     if (!tg_branches_enabled()) return reach;
     if (!nl || si < 0 || si + 1 >= nl->count) return reach;
 

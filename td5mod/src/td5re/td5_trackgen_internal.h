@@ -4198,6 +4198,14 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi,
 int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L, int fi, double bw, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_branch_flora(const TG_NodeList *nl, int mb, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double sh0, double sh1, double half0, double half1, int br_lanes, TG_Buf *blk, size_t *moff, int *nmesh);
+/* ===================== [ROUND 1010] GEO DIVIDED AVENUES =====================
+ * td5_tg_avenue.c. A divided avenue on a GEO track is NOT a fork: the race
+ * keeps its own carriageway and its own lanes, and the median plus the opposite
+ * carriageway are laid beside it as geometry only, at the offset the real OSM
+ * ways give. Contract and the root cause this replaces: td5_geo_avenues.h. */
+int    tg_geo_avenue_n(void);
+double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
+int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
 /* ===================== GUARDRAILS =====================
  * The car is already contained by collision WALLS derived from the STRIP rail
  * vertices, but nothing draws them, so the road ends at an invisible boundary.

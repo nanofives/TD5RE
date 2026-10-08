@@ -13,6 +13,7 @@ td5_geo_roads.c
 td5_geo_buildings.c
 td5_geo_signals.c
 td5_geo_forks.c
+td5_geo_avenues.c
 td5_geo_route.c
 td5_geo_tiles.c
 td5_trackgen.c
@@ -20,6 +21,7 @@ td5_tg_world.c
 td5_tg_road.c
 td5_tg_network.c
 td5_tg_branch.c
+td5_tg_avenue.c
 td5_tg_guard.c
 td5_tg_city.c
 td5_tg_streets.c
