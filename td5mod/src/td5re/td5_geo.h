@@ -64,6 +64,45 @@ void td5_geo_shutdown(void);
 int  td5_geo_load(const char *slug);
 void td5_geo_unload(void);
 
+/* ------------------------------------------- [ROUND 1008] SOURCE vs DERIVED
+ * A place on disk is TWO frames, and keeping them apart is the whole fix for
+ * the round-1007 cache corruption:
+ *
+ *   SOURCE   re/assets/geo/<slug>/<name>
+ *            Exactly what re/tools/geo_fetch.py wrote, in the frame it fetched
+ *            in. The GAME NEVER WRITES HERE. td5_geo_route_commit reads it and
+ *            only reads it, so N commits in a row from the same route give
+ *            byte-identical products.
+ *
+ *   DERIVED  re/assets/geo/<slug>/_route/<name>
+ *            The route-frame products of the LAST BUILD: re-gridded rasters,
+ *            re-projected ROADS/BUILDINGS/AREAS/SIGNALS, ROUTE.JSON,
+ *            ROUTE_RAW.JSON and a PLACE.JSON carrying the route frame. Wholly
+ *            rewritten by every commit, always from the source.
+ *
+ * Before this split, commit re-gridded the source IN PLACE: the second commit
+ * re-gridded the already-re-gridded data, and the third collapsed the grid to
+ * 2x2 with 76-byte rasters ("NO MAP DATA", "unable to read road graph", a city
+ * made of water). The invariant that prevents it is one line long -- a writer
+ * may only ever name a DERIVED path.
+ *
+ * Both return `buf`. _place_path is what every game-side READER wants: it
+ * reads the derived frame when the commit stamp TD5_GEO_DERIVED_STAMP is
+ * present and the SOURCE otherwise, all or nothing (see the comment on the
+ * implementation -- a place must never be read half in one frame and half in
+ * the other, and a cache that predates the split, with its products in the
+ * root, keeps working unchanged because it carries no stamp).
+ * _source_path is the pristine copy and never the derived one: the ROUTER and
+ * the commit's own inputs must use it, or the corruption comes back. */
+#define TD5_GEO_DERIVED_DIR   "_route"
+#define TD5_GEO_DERIVED_STAMP "DERIVED.OK"
+const char *td5_geo_place_path (char *buf, size_t cap,
+                                const char *slug, const char *name);
+const char *td5_geo_source_path(char *buf, size_t cap,
+                                const char *slug, const char *name);
+const char *td5_geo_derived_path(char *buf, size_t cap,
+                                 const char *slug, const char *name);
+
 /* Drop every in-memory copy of the loaded place (rasters AND the parsed route)
  * so the next td5_geo_sync() reloads from disk. For td5_geo_route_commit, which
  * rewrites a place's ROUTE.JSON and rasters in place: a same-place rebuild in

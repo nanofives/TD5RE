@@ -43,6 +43,7 @@
 #include <math.h>
 #include <float.h>
 #include <dirent.h>
+#include <direct.h>            /* _mkdir: the derived route-frame dir */
 
 #include "td5re.h"
 #include "td5_platform.h"
@@ -460,13 +461,19 @@ static int gr_place_read(const char *slug)
     cJSON *root, *pr, *bb, *gb;
     int ok = 0;
 
-    snprintf(path, sizeof path, "re/assets/geo/%s/PLACE.JSON", slug);
+    /* SOURCE, never the derived copy. The router routes on the PRISTINE
+     * fetched frame, so a BUILD cannot change what the next BUILD may route
+     * on -- the round-1007 "NO MAP DATA / unable to read road graph" bug was
+     * exactly this read landing on a re-gridded, then re-re-gridded, file. */
+    td5_geo_source_path(path, sizeof path, slug, "PLACE.JSON");
     json = gr_slurp(path, NULL);
     if (!json) return 0;
     root = cJSON_Parse(json);
     free(json);
     if (!root) return 0;
 
+    /* A place with no pin must not inherit the previous place's. */
+    s_g.have_gbbox = 0;
     pr = cJSON_GetObjectItem(root, "projection");
     bb = cJSON_GetObjectItem(root, "bbox");
     if (pr && cJSON_IsObject(pr)) {
@@ -522,11 +529,11 @@ static int gr_graph_load(const char *slug)
 
     gr_graph_free();
     if (!gr_place_read(slug)) {
-        TD5_LOG_E(LOG_TAG, "geo route: re/assets/geo/%s/PLACE.JSON has no usable "
-                  "projection", slug);
+        TD5_LOG_E(LOG_TAG, "geo route: the SOURCE re/assets/geo/%s/PLACE.JSON "
+                  "has no usable projection", slug);
         return 0;
     }
-    snprintf(path, sizeof path, "re/assets/geo/%s/ROADS.JSON", slug);
+    td5_geo_source_path(path, sizeof path, slug, "ROADS.JSON");   /* SOURCE */
     json = gr_slurp(path, NULL);
     if (!json) {
         TD5_LOG_E(LOG_TAG, "geo route: no readable %s", path);
@@ -1640,7 +1647,7 @@ static int gr_place_bounds(const char *slug, double *out)
     int ok = 0;
 
     if (!slug || !slug[0]) return 0;
-    snprintf(path, sizeof path, "re/assets/geo/%s/PLACE.JSON", slug);
+    td5_geo_source_path(path, sizeof path, slug, "PLACE.JSON");   /* SOURCE */
     json = gr_slurp(path, NULL);
     if (!json) return 0;
     root = cJSON_Parse(json);
@@ -2164,21 +2171,45 @@ static int gr_write_route(const char *dir)
 }
 
 /* ======================================================================== *
- * SECTION: RASTER REBUILD (geo_selector.save_route's refetch, without a fetch)
+ * SECTION: THE COMMIT -- SOURCE -> DERIVED
  *
- * DEVIATION (c), stated plainly. The Python SEND TO GAME re-runs geo_fetch with
- * --frame-from so the DEM, land cover, water and canopy are re-SAMPLED from
- * their sources into the route's frame. Those sources are Overpass JSON, a
- * terrarium PNG pyramid and two cloud-optimised GeoTIFFs; the only local copies
- * are the HTTP range fragments under <place>/_cache/, which cannot be read
- * without porting geo_fetch's COG header walk, a PNG decoder and the OSM
- * overlay painter. That is a round of its own.
+ * [ROUND 1008] This section used to rewrite the place cache IN PLACE, and that
+ * was the round-1007 corruption. Commit 1 re-gridded the fetched rasters into
+ * the route frame and overwrote them; commit 2 read those back as if they were
+ * the fetched data and re-gridded AGAIN; by commit 3 La Plata was a 2x2 grid in
+ * 76-byte files, ROADS.JSON held no usable road, 566 of 566 signals were
+ * malformed and the screen said "NO MAP DATA / unable to read road graph".
+ * Nothing in the flow was individually wrong -- the design was: a derivation
+ * whose output is its own next input diverges, and it only takes two presses of
+ * BUILD.
  *
- * What is done instead: the EXISTING rasters are re-gridded into the new frame.
+ * The rule now, and it is the whole fix:
+ *
+ *     THE SOURCE IS IMMUTABLE. The commit READS re/assets/geo/<slug>/ and
+ *     WRITES re/assets/geo/<slug>/_route/ . Never the other way, never both.
+ *
+ * So every commit starts from the same bytes, and N commits of the same route
+ * give N identical derived frames. td5_geo.h's three path resolvers are the
+ * only place a per-place path is spelled, which makes that rule greppable.
+ *
+ * The commit is also ATOMIC to a reader: the derived stamp (DERIVED.OK) is
+ * deleted first and written last, and a derived frame with no stamp is ignored
+ * wholesale, so an interrupted or refused BUILD leaves the place racing off its
+ * source rather than off half a frame.
+ *
+ * DEVIATION (c), unchanged and stated plainly. The Python SEND TO GAME re-runs
+ * geo_fetch with --frame-from so the DEM, land cover, water and canopy are
+ * re-SAMPLED from their sources into the route's frame. Those sources are
+ * Overpass JSON, a terrarium PNG pyramid and two cloud-optimised GeoTIFFs; the
+ * only local copies are the HTTP range fragments under <place>/_cache/, which
+ * cannot be read without porting geo_fetch's COG header walk, a PNG decoder and
+ * the OSM overlay painter. That is a round of its own.
+ *
+ * What is done instead: the SOURCE rasters are re-gridded into the new frame.
  * Both frames are rigid transforms of the same lat/lon plane at the same
- * units/metre, so old -> lat/lon -> new composes to one affine map and the
- * re-grid is exact up to a single interpolation step. Cost, measured rather
- * than asserted (see the harness):
+ * units/metre, so source -> lat/lon -> route composes to one affine map and the
+ * re-grid is exact up to a single interpolation step. Crucially it is now ONE
+ * step from the fetched data every time, not one more step each press.
  *
  *   HEIGHT  bilinear. The DEM is already low-passed to 200 m (PLACE.JSON
  *           layers.height.lowpass_m) on 3.49 m cells, so one more bilinear tap
@@ -2187,14 +2218,34 @@ static int gr_write_route(const char *dir)
  *           height; interpolating them would invent classes. A boundary moves
  *           by at most half a cell, 1.75 m.
  *   COVERAGE  the grid is the world-space bbox of the SAME lat/lon box, so the
- *           new grid's corners stick out past the old one's and land on nodata.
- *           The route itself is inside the fetched circle by construction (the
- *           click test refuses a point outside the place), so this only ever
- *           bites the far corners.
+ *           new grid's corners stick out past the source grid's and land on
+ *           nodata. That is geometry, not a bug: the fetched data covers a
+ *           rectangle that is rotated in the route frame, so its axis-aligned
+ *           box has empty corners. What matters is the corridor UNDER THE
+ *           ROUTE, and the guard below measures exactly that.
  *
  * The VECTOR layers are not resampled at all: ROADS/BUILDINGS/AREAS/SIGNALS are
  * re-projected point by point through the same affine, which is lossless.
+ *
+ * THE GUARD. Everything is built in memory and checked BEFORE a byte is
+ * written, because the failure the user saw was silent: each stage "succeeded"
+ * on degenerate input. A refusal names itself on the screen through
+ * td5_geo_route_commit_reason() instead of becoming a track made of water.
  * ======================================================================== */
+
+/* Grid sanity. 32 cells is 112 m of world at the 3.49 m cell -- far below any
+ * real place and far above the 2x2 the corruption produced. */
+#define GR_GUARD_MIN_GRID          32
+#define GR_GUARD_MAX_GRID       16384
+/* Half-width, in cells, of the corridor sampled around each route node. 2 is
+ * +/- 7 m at the La Plata cell, which is the road and its verges. */
+#define GR_GUARD_CORRIDOR_CELLS     2
+/* Share of corridor samples allowed to miss the source grid. A clean re-grid
+ * is 0; anything above this means the route is not under the fetched data. */
+#define GR_GUARD_CORRIDOR_PCT       5
+/* A derived ROADS.JSON with fewer ways than the router's own floor cannot be
+ * routed or built on, and is the shape "unable to read road graph" takes. */
+#define GR_GUARD_MIN_ROADS   GR_GRAPH_MIN_WAYS
 
 typedef struct {
     int      kind;               /* 1 = int16, 2 = uint8 */
@@ -2272,10 +2323,10 @@ static int gr_raster_write(const char *path, const GrRaster *r)
     return ok;
 }
 
-/* Compose old <- new as one affine on cell indices: a new cell (ix, iz) lands
- * at old world (ax*ix + bx*iz + cx, az*ix + bz*iz + cz). Both frames share the
- * lat/lon plane and the units/metre, so the composition is a pure rotation and
- * translation and no trigonometry runs per cell. */
+/* Compose source <- route as one affine on cell indices: a route-frame cell
+ * (ix, iz) lands at source world (ax*ix + bx*iz + cx, az*ix + bz*iz + cz). Both
+ * frames share the lat/lon plane and the units/metre, so the composition is a
+ * pure rotation and translation and no trigonometry runs per cell. */
 static void gr_affine_old_from_new(const GeoProj *np, const GeoProj *op,
                                    double ox_new, double oz_new, double cell,
                                    double *a)
@@ -2291,28 +2342,38 @@ static void gr_affine_old_from_new(const GeoProj *np, const GeoProj *op,
     a[3] = z1 - z0; a[4] = z2 - z0; a[5] = z0;      /* az, bz, cz */
 }
 
-static int gr_regrid_one(const char *dir, const char *name, int bilinear,
+/* Re-grid ONE source layer into memory. Returns 1 on success, 0 on failure and
+ * -1 when the place simply has no such layer (CANOPY.R8 is optional).
+ *
+ * Nothing is written here. The caller checks every layer first and only then
+ * puts the whole derived frame on disk -- a half-written frame is the state the
+ * stamp exists to make unreadable, and not producing one at all is better
+ * still. */
+static int gr_regrid_mem(const char *src_dir, const char *name, int bilinear,
                          const GeoProj *np, const GeoProj *op,
                          double ox, double oz, int nw, int nh,
-                         int *out_nodata_cells)
+                         GrRaster *out, long *out_nodata)
 {
     char path[512];
-    GrRaster src, dst;
+    GrRaster src;
     double a[6];
     int ix, iz;
     long nodata = 0;
 
-    snprintf(path, sizeof path, "%s/%s", dir, name);
-    if (!gr_raster_read(path, &src)) return -1;          /* absent: not an error */
+    memset(out, 0, sizeof *out);
+    if (out_nodata) *out_nodata = 0;
 
-    memset(&dst, 0, sizeof dst);
-    dst.kind = src.kind; dst.w = nw; dst.h = nh;
-    dst.origin_x = ox; dst.origin_z = oz; dst.cell = src.cell;
-    dst.scale = src.scale; dst.bias = src.bias;
-    dst.nodata_raw = src.nodata_raw;
-    dst.rotation = gr_proj_theta(np);
-    dst.data = malloc((size_t)nw * (size_t)nh * (src.kind == 1 ? 2u : 1u));
-    if (!dst.data) { gr_raster_free(&src); return 0; }
+    snprintf(path, sizeof path, "%s/%s", src_dir, name);
+    if (!td5_plat_file_exists(path)) return -1;
+    if (!gr_raster_read(path, &src)) return 0;
+
+    out->kind = src.kind; out->w = nw; out->h = nh;
+    out->origin_x = ox; out->origin_z = oz; out->cell = src.cell;
+    out->scale = src.scale; out->bias = src.bias;
+    out->nodata_raw = src.nodata_raw;
+    out->rotation = gr_proj_theta(np);
+    out->data = malloc((size_t)nw * (size_t)nh * (src.kind == 1 ? 2u : 1u));
+    if (!out->data) { gr_raster_free(&src); return 0; }
 
     gr_affine_old_from_new(np, op, ox, oz, src.cell, a);
     for (iz = 0; iz < nh; iz++) {
@@ -2350,7 +2411,7 @@ static int gr_regrid_one(const char *dir, const char *name, int bilinear,
                         v = s[(size_t)j0 * src.w + i0];
                 }
                 if (v == (short)src.nodata_raw) nodata++;
-                ((short *)dst.data)[(size_t)iz * nw + ix] = v;
+                ((short *)out->data)[(size_t)iz * nw + ix] = v;
             } else {
                 const unsigned char *s = (const unsigned char *)src.data;
                 const int i0 = (int)gr_round_even(fx), j0 = (int)gr_round_even(fz);
@@ -2358,37 +2419,70 @@ static int gr_regrid_one(const char *dir, const char *name, int bilinear,
                 if (i0 >= 0 && j0 >= 0 && i0 < src.w && j0 < src.h)
                     v = s[(size_t)j0 * src.w + i0];
                 else nodata++;
-                ((unsigned char *)dst.data)[(size_t)iz * nw + ix] = v;
+                ((unsigned char *)out->data)[(size_t)iz * nw + ix] = v;
             }
         }
     }
-    {
-        const int ok = gr_raster_write(path, &dst);
-        gr_raster_free(&src);
-        gr_raster_free(&dst);
-        if (out_nodata_cells) *out_nodata_cells = (int)nodata;
-        return ok;
-    }
+    if (out_nodata) *out_nodata = nodata;
+    gr_raster_free(&src);
+    return 1;
 }
 
-/* Re-project every world-unit coordinate in a vector layer. Lossless: the two
- * frames differ by a rigid transform of the same plane. */
-static int gr_reproject_vectors(const char *dir, const char *file,
-                                const char *array_key,
-                                const GeoProj *np, const GeoProj *op)
+/* Share of HEIGHT samples under the route that fell off the source grid, in
+ * percent. This is the number that says whether the derived frame is usable:
+ * the far corners of the box are allowed to be empty, the road is not. */
+static double gr_corridor_nodata_pct(const GrRaster *h, const GrPts *nodes,
+                                     long *out_samples, long *out_missing)
+{
+    long total = 0, miss = 0;
+    int i;
+    if (out_samples) *out_samples = 0;
+    if (out_missing) *out_missing = 0;
+    if (!h->data || h->kind != 1 || !nodes->n) return 0.0;
+    for (i = 0; i < nodes->n; i++) {
+        const double fx = (nodes->x[i] - h->origin_x) / h->cell;
+        const double fz = (nodes->z[i] - h->origin_z) / h->cell;
+        const int cx = (int)gr_round_even(fx), cz = (int)gr_round_even(fz);
+        int dx, dz;
+        for (dz = -GR_GUARD_CORRIDOR_CELLS; dz <= GR_GUARD_CORRIDOR_CELLS; dz++)
+            for (dx = -GR_GUARD_CORRIDOR_CELLS; dx <= GR_GUARD_CORRIDOR_CELLS; dx++) {
+                const int ix = cx + dx, iz = cz + dz;
+                total++;
+                if (ix < 0 || iz < 0 || ix >= h->w || iz >= h->h) { miss++; continue; }
+                if (((const short *)h->data)[(size_t)iz * h->w + ix]
+                    == (short)h->nodata_raw) miss++;
+            }
+    }
+    if (out_samples) *out_samples = total;
+    if (out_missing) *out_missing = miss;
+    return total ? (100.0 * (double)miss / (double)total) : 0.0;
+}
+
+/* Re-project every world-unit coordinate of a SOURCE vector layer into the
+ * route frame and hand the tree back. Lossless: the two frames differ by a
+ * rigid transform of the same plane. Returns NULL when the layer is absent or
+ * unreadable; *count is the number of entries, -1 when the file is not there
+ * at all (which is not a failure -- not every place has SIGNALS.JSON). */
+static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
+                               const char *array_key,
+                               const GeoProj *np, const GeoProj *op,
+                               int *count)
 {
     char path[512];
     char *json;
     cJSON *root, *arr;
     int i, n;
-    snprintf(path, sizeof path, "%s/%s", dir, file);
+
+    if (count) *count = -1;
+    snprintf(path, sizeof path, "%s/%s", src_dir, file);
+    if (!td5_plat_file_exists(path)) return NULL;
     json = gr_slurp(path, NULL);
-    if (!json) return -1;
+    if (!json) return NULL;
     root = cJSON_Parse(json);
     free(json);
-    if (!root) return 0;
+    if (!root) { if (count) *count = 0; return NULL; }
     arr = cJSON_GetObjectItem(root, array_key);
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(root); return 0; }
+    if (!arr || !cJSON_IsArray(arr)) { if (count) *count = 0; cJSON_Delete(root); return NULL; }
     n = cJSON_GetArraySize(arr);
     for (i = 0; i < n; i++) {
         cJSON *e = cJSON_GetArrayItem(arr, i);
@@ -2417,20 +2511,25 @@ static int gr_reproject_vectors(const char *dir, const char *file,
             cJSON_SetNumberValue(ez, z);
         }
     }
-    return gr_write_json(path, root);
+    if (count) *count = n;
+    return root;
 }
 
-static int gr_update_place(const char *dir, const GeoProj *np)
+/* The derived PLACE.JSON: the SOURCE one with the route frame substituted, plus
+ * a provenance stamp so a cache on disk says which frame it is in and what it
+ * came from. Nothing is written back to the source copy. */
+static cJSON *gr_derived_place(const char *src_dir, const GeoProj *np,
+                               int nw, int nh)
 {
     char path[512];
     char *json;
-    cJSON *root, *pr, *gb;
-    snprintf(path, sizeof path, "%s/PLACE.JSON", dir);
+    cJSON *root, *pr, *d;
+    snprintf(path, sizeof path, "%s/PLACE.JSON", src_dir);
     json = gr_slurp(path, NULL);
-    if (!json) return 0;
+    if (!json) return NULL;
     root = cJSON_Parse(json);
     free(json);
-    if (!root) return 0;
+    if (!root) return NULL;
     cJSON_DeleteItemFromObject(root, "projection");
     cJSON_AddItemToObject(root, "projection", gr_json_proj(np));
     pr = cJSON_GetObjectItem(root, "rotation_rad");
@@ -2442,46 +2541,98 @@ static int gr_update_place(const char *dir, const GeoProj *np)
     pr = cJSON_GetObjectItem(root, "offset_z");
     if (pr) cJSON_SetNumberValue(pr, np->off_z);
     else cJSON_AddNumberToObject(root, "offset_z", np->off_z);
-    /* Pin the routing area to what the user routed in, the FIRST time only: a
-     * later save must not widen it again (see gr_graph_load's bbox filter). */
-    gb = cJSON_GetObjectItem(root, "route_graph_bbox");
-    if (!gb) {
-        cJSON *bb = cJSON_GetObjectItem(root, "bbox");
-        if (bb) cJSON_AddItemToObject(root, "route_graph_bbox", cJSON_Duplicate(bb, 1));
-    }
-    return gr_write_json(path, root);
+    /* route_graph_bbox is a ROUTER input and the router reads the SOURCE, so a
+     * derived copy of it would be read by nobody. It used to be WRITTEN into
+     * the source here, to stop a SEND TO GAME widening the graph; with an
+     * immutable source the graph cannot widen and the pin is unnecessary. An
+     * existing pin in a shipped source is still honoured (gr_place_read). */
+    cJSON_DeleteItemFromObject(root, "route_graph_bbox");
+    d = cJSON_CreateObject();
+    cJSON_AddStringToObject(d, "frame", "route");
+    cJSON_AddStringToObject(d, "derived_by", "td5_geo_route.c");
+    cJSON_AddStringToObject(d, "derived_from", "../PLACE.JSON (the fetched source, never modified)");
+    cJSON_AddNumberToObject(d, "grid_w", nw);
+    cJSON_AddNumberToObject(d, "grid_h", nh);
+    cJSON_AddItemToObject(root, "derived", d);
+    return root;
+}
+
+/* -------------------------------------------------- refusal, named on screen */
+
+static char s_commit_reason[160];
+
+const char *td5_geo_route_commit_reason(void) { return s_commit_reason; }
+
+static int gr_commit_refuse(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_commit_reason, sizeof s_commit_reason, fmt, ap);
+    va_end(ap);
+    TD5_LOG_E(LOG_TAG, "geo route: COMMIT REFUSED -- %s", s_commit_reason);
+    return 1;
 }
 
 int td5_geo_route_commit(void)
 {
     const GrCond *c = &s_last.cond;
-    char dir[256];
+    char src_dir[256], dst_dir[300], path[512], stamp[512];
     GeoProj oldp;
-    double corners_x[4], corners_z[4], x0, x1, z0, z1;
-    int nw, nh, i, nodata = 0;
+    double corners_x[4], corners_z[4], x0, x1, z0, z1, cell, corridor_pct = 0.0;
+    long corridor_n = 0, corridor_miss = 0;
+    int nw, nh, i, rc = 1;
+    long nodata_total = 0;
     const uint64_t t_us = td5_plat_time_us();
 
-    if (!s_last.valid || !c->nodes_xz.n) {
-        TD5_LOG_E(LOG_TAG, "geo route: commit with no usable route");
-        return 1;
-    }
-    snprintf(dir, sizeof dir, "re/assets/geo/%s", s_last.slug);
+    /* Everything is built here and written in one go at the end. */
+    static const struct { const char *name; int bilinear; } k_rast[] = {
+        { "HEIGHT.R16", 1 }, { "COVER.R8", 0 }, { "WATER.R8", 0 }, { "CANOPY.R8", 0 },
+    };
+    static const struct { const char *file; const char *key; } k_vec[] = {
+        { "ROADS.JSON", "roads" }, { "BUILDINGS.JSON", "buildings" },
+        { "AREAS.JSON", "areas" }, { "SIGNALS.JSON",   "signals"   },
+    };
+    GrRaster rast[4];
+    int       rast_have[4];
+    cJSON    *vec[4];
+    int       vec_n[4];
+    cJSON    *place = NULL;
 
-    /* The frame the cache is in TODAY -- gr_graph_sync loaded it from
-     * PLACE.JSON, and the re-grid maps out of it into the route's frame. */
+    memset(rast, 0, sizeof rast);
+    memset(rast_have, 0, sizeof rast_have);
+    memset(vec, 0, sizeof vec);
+    for (i = 0; i < 4; i++) vec_n[i] = -1;
+    s_commit_reason[0] = '\0';
+
+    if (!s_last.valid || !c->nodes_xz.n)
+        return gr_commit_refuse("NO USABLE ROUTE TO SAVE");
+
+    td5_geo_source_path(src_dir, sizeof src_dir, s_last.slug, "");
+    {   /* td5_geo_source_path leaves a trailing '/' for an empty name. */
+        const size_t L = strlen(src_dir);
+        if (L && src_dir[L - 1] == '/') src_dir[L - 1] = '\0';
+    }
+    snprintf(dst_dir, sizeof dst_dir, "%s/%s", src_dir, TD5_GEO_DERIVED_DIR);
+
+    /* Re-read the SOURCE frame rather than trusting whatever s_g holds: the
+     * commit's one input is the fetched cache, and nothing it did earlier in
+     * the session may change what that is. */
+    if (!gr_place_read(s_last.slug))
+        return gr_commit_refuse("THE PLACE DATA HAS NO USABLE PROJECTION");
     oldp = s_g.proj;
 
-    if (!gr_write_route_raw(dir)) {
-        TD5_LOG_E(LOG_TAG, "geo route: could not write %s/ROUTE_RAW.JSON", dir);
-        return 1;
+    /* -------- 1. size the route-frame grid from the SOURCE lat/lon box ------ */
+    cell = 0.0;
+    {
+        char hp[512];
+        GrRaster probe;
+        snprintf(hp, sizeof hp, "%s/HEIGHT.R16", src_dir);
+        if (!gr_raster_read(hp, &probe))
+            return gr_commit_refuse("THE PLACE HAS NO READABLE TERRAIN DATA");
+        cell = probe.cell;
+        gr_raster_free(&probe);
     }
-    if (!gr_write_route(dir)) {
-        TD5_LOG_E(LOG_TAG, "geo route: could not write %s/ROUTE.JSON", dir);
-        return 1;
-    }
-
-    /* New grid: the world-space bbox of the place's lat/lon box in the NEW
-     * frame, exactly as geo_fetch.build_height_raster sizes it. */
+    if (!(cell > 0.0)) return gr_commit_refuse("THE TERRAIN DATA HAS NO CELL SIZE");
     {
         const double lats[2] = { s_g.bbox[1], s_g.bbox[3] };   /* south, north */
         const double lons[2] = { s_g.bbox[0], s_g.bbox[2] };   /* west,  east  */
@@ -2497,72 +2648,148 @@ int td5_geo_route_commit(void)
             if (corners_z[i] < z0) z0 = corners_z[i];
             if (corners_z[i] > z1) z1 = corners_z[i];
         }
-        nw = (int)ceil((x1 - x0) / GR_WORLD_CELL) + 1; if (nw < 2) nw = 2;
-        nh = (int)ceil((z1 - z0) / GR_WORLD_CELL) + 1; if (nh < 2) nh = 2;
+        nw = (int)ceil((x1 - x0) / cell) + 1;
+        nh = (int)ceil((z1 - z0) / cell) + 1;
+    }
+    /* GUARD 1: the 2x2 collapse. A grid this small means the bbox read as a
+     * point, which is what a corrupted or re-derived PLACE.JSON looks like. */
+    if (nw < GR_GUARD_MIN_GRID || nh < GR_GUARD_MIN_GRID)
+        return gr_commit_refuse("TERRAIN GRID WOULD BE %dx%d -- PLACE DATA LOOKS DAMAGED",
+                                nw, nh);
+    if (nw > GR_GUARD_MAX_GRID || nh > GR_GUARD_MAX_GRID)
+        return gr_commit_refuse("TERRAIN GRID WOULD BE %dx%d -- TOO LARGE TO BUILD",
+                                nw, nh);
+
+    /* -------- 2. re-grid every raster INTO MEMORY, from the source ---------- */
+    for (i = 0; i < 4; i++) {
+        long nd = 0;
+        const int r = gr_regrid_mem(src_dir, k_rast[i].name, k_rast[i].bilinear,
+                                    &c->proj, &oldp, x0, z0, nw, nh, &rast[i], &nd);
+        if (r < 0) continue;                        /* this place has no such layer */
+        if (!r) { gr_commit_refuse("COULD NOT RE-GRID %s", k_rast[i].name); goto done; }
+        /* GUARD 2: every layer must land on ONE grid. td5_geo.c drops a mask
+         * whose grid disagrees with HEIGHT, so a disagreement here is a place
+         * that silently races with no water and no land cover. */
+        if (i > 0 && rast_have[0] && rast[i].cell != rast[0].cell) {
+            gr_commit_refuse("%s IS ON A DIFFERENT CELL GRID THAN THE TERRAIN",
+                             k_rast[i].name);
+            goto done;
+        }
+        rast_have[i] = 1;
+        nodata_total += nd;
+    }
+    if (!rast_have[0]) { gr_commit_refuse("THE PLACE HAS NO READABLE TERRAIN DATA"); goto done; }
+
+    /* GUARD 3: the corridor. Empty corners are geometry; an empty road is a
+     * track built on nothing, which is how "a lot of water in the middle of
+     * the city" reads from the driver's seat. */
+    corridor_pct = gr_corridor_nodata_pct(&rast[0], &c->nodes_xz,
+                                          &corridor_n, &corridor_miss);
+    if (corridor_pct > (double)GR_GUARD_CORRIDOR_PCT) {
+        gr_commit_refuse("%.0f%% OF THE ROUTE HAS NO TERRAIN DATA UNDER IT",
+                         corridor_pct);
+        goto done;
     }
 
-    {
-        static const struct { const char *name; int bilinear; } k_rast[] = {
-            { "HEIGHT.R16", 1 }, { "COVER.R8", 0 }, { "WATER.R8", 0 }, { "CANOPY.R8", 0 },
-        };
-        for (i = 0; i < (int)(sizeof k_rast / sizeof k_rast[0]); i++) {
-            int nd = 0;
-            const int r = gr_regrid_one(dir, k_rast[i].name, k_rast[i].bilinear,
-                                        &c->proj, &oldp, x0, z0, nw, nh, &nd);
-            if (r < 0) continue;                 /* this place has no such layer */
-            if (!r) {
-                TD5_LOG_E(LOG_TAG, "geo route: could not re-grid %s/%s",
-                          dir, k_rast[i].name);
-                return 1;
-            }
-            nodata += nd;
-            TD5_LOG_I(LOG_TAG, "geo route: re-gridded %s to %dx%d in the route "
-                      "frame (%d cell(s) off the old grid)", k_rast[i].name,
-                      nw, nh, nd);
+    /* -------- 3. re-project every vector layer INTO MEMORY ----------------- */
+    for (i = 0; i < 4; i++)
+        vec[i] = gr_reproject_mem(src_dir, k_vec[i].file, k_vec[i].key,
+                                  &c->proj, &oldp, &vec_n[i]);
+    /* GUARD 4: a present-but-empty layer. vec_n < 0 means "the place never had
+     * this file", which is allowed; 0 entries from a file that exists is the
+     * "ROADS.JSON held no usable road" state. */
+    if (vec_n[0] >= 0 && vec_n[0] < GR_GUARD_MIN_ROADS) {
+        gr_commit_refuse("ONLY %d ROAD(S) SURVIVED -- MAP DATA LOOKS DAMAGED", vec_n[0]);
+        goto done;
+    }
+    for (i = 1; i < 4; i++) {
+        if (vec_n[i] == 0) {
+            gr_commit_refuse("%s IS PRESENT BUT EMPTY -- MAP DATA LOOKS DAMAGED",
+                             k_vec[i].file);
+            goto done;
         }
     }
 
-    /* FORKS.JSON is indexed by SPAN of the route it was confirmed against, and
-     * this is a different route, so leaving the old file in place would have
-     * the engine split carriageways at span ranges that no longer mean
-     * anything. geo_selector.py writes FORKS.JSON alongside ROUTE.JSON ALWAYS,
-     * including the delete when nothing is confirmed -- the two files are one
-     * artefact. Nothing here confirms a fork (the fork-candidate toggles are
-     * still Python-only), so the C side of that contract is the delete. */
-    {
-        char fp[300];
-        snprintf(fp, sizeof fp, "%.200s/FORKS.JSON", dir);
-        if (td5_plat_file_exists(fp)) {
-            td5_plat_file_delete(fp);
-            TD5_LOG_I(LOG_TAG, "geo route: dropped %s -- its span ranges belong "
-                      "to the previous route", fp);
+    place = gr_derived_place(src_dir, &c->proj, nw, nh);
+    if (!place) { gr_commit_refuse("COULD NOT READ THE PLACE DESCRIPTION"); goto done; }
+
+    /* -------- 4. everything checked out: now write the derived frame ------- */
+    _mkdir(dst_dir);
+    /* The stamp goes FIRST, so a reader never sees a frame being rebuilt. */
+    snprintf(stamp, sizeof stamp, "%s/%s", dst_dir, TD5_GEO_DERIVED_STAMP);
+    td5_plat_file_delete(stamp);
+
+    for (i = 0; i < 4; i++) {
+        if (!rast_have[i]) continue;
+        snprintf(path, sizeof path, "%s/%s", dst_dir, k_rast[i].name);
+        if (!gr_raster_write(path, &rast[i])) {
+            gr_commit_refuse("COULD NOT WRITE %s", k_rast[i].name);
+            goto done;
         }
     }
-
-    gr_reproject_vectors(dir, "ROADS.JSON",     "roads",     &c->proj, &oldp);
-    gr_reproject_vectors(dir, "BUILDINGS.JSON", "buildings", &c->proj, &oldp);
-    gr_reproject_vectors(dir, "AREAS.JSON",     "areas",     &c->proj, &oldp);
-    gr_reproject_vectors(dir, "SIGNALS.JSON",   "signals",   &c->proj, &oldp);
-
-    if (!gr_update_place(dir, &c->proj)) {
-        TD5_LOG_E(LOG_TAG, "geo route: could not update %s/PLACE.JSON", dir);
-        return 1;
+    for (i = 0; i < 4; i++) {
+        if (!vec[i]) continue;
+        snprintf(path, sizeof path, "%s/%s", dst_dir, k_vec[i].file);
+        if (!gr_write_json(path, vec[i])) {          /* consumes the tree */
+            vec[i] = NULL;
+            gr_commit_refuse("COULD NOT WRITE %s", k_vec[i].file);
+            goto done;
+        }
+        vec[i] = NULL;
     }
+    snprintf(path, sizeof path, "%s/PLACE.JSON", dst_dir);
+    if (!gr_write_json(path, place)) {               /* consumes the tree */
+        place = NULL;
+        gr_commit_refuse("COULD NOT WRITE THE PLACE DESCRIPTION");
+        goto done;
+    }
+    place = NULL;
+    if (!gr_write_route_raw(dst_dir)) { gr_commit_refuse("COULD NOT WRITE ROUTE_RAW.JSON"); goto done; }
+    if (!gr_write_route(dst_dir))     { gr_commit_refuse("COULD NOT WRITE ROUTE.JSON");     goto done; }
 
-    /* The graph and everything td5_geo caches are in the OLD frame now.
+    /* FORKS.JSON is indexed by the SPAN of the route it was confirmed against,
+     * and this is a different route, so the derived frame must NOT have one --
+     * span ranges from the previous route would split carriageways at places
+     * that no longer mean anything. Before the source/derived split this was a
+     * DELETE of the user's file; now it is simply a file the commit does not
+     * write, and the stamp rule makes "absent in the derived frame" mean absent
+     * rather than falling back to the source copy. The source FORKS.JSON (a
+     * geo_selector.py artefact) is left alone, where it belongs. */
+    snprintf(path, sizeof path, "%s/FORKS.JSON", dst_dir);
+    if (td5_plat_file_exists(path)) td5_plat_file_delete(path);
+
+    /* The stamp LAST: from here the readers see the new frame. */
+    if (!gr_write_atomic(stamp, "td5_geo_route.c\n", 16)) {
+        gr_commit_refuse("COULD NOT STAMP THE BUILT TRACK DATA");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    for (i = 0; i < 4; i++) { gr_raster_free(&rast[i]); if (vec[i]) cJSON_Delete(vec[i]); }
+    if (place) cJSON_Delete(place);
+
+    /* The graph and everything td5_geo caches belong to the previous frame.
      * td5_geo_invalidate (not plain unload) also drops the PARSED ROUTE and
-     * resets the route-want path, so the next td5_geo_sync re-reads the new
-     * ROUTE.JSON and the re-gridded rasters even though the slug and the path
-     * string are unchanged -- the in-session BUILD -> race path depends on it. */
+     * resets the route-want path, so the next td5_geo_sync re-reads the derived
+     * ROUTE.JSON and rasters even though the slug and the path string are
+     * unchanged -- the in-session BUILD -> race path depends on it. Done on the
+     * refusal path too: a refused commit must not leave the session holding
+     * half-stale state either. */
     gr_graph_free();
     td5_geo_invalidate();
     td5_geo_places_rescan();
     td5_geo_select(s_last.slug);
 
-    TD5_LOG_I(LOG_TAG, "geo route: committed %s: %d spans, %.2f km, grid %dx%d, "
-              "%d nodata cell(s), %.0f ms", s_last.slug, c->spans, c->length_km,
-              nw, nh, nodata, (double)(td5_plat_time_us() - t_us) / 1000.0);
-    return 0;
+    if (rc == 0)
+        TD5_LOG_I(LOG_TAG, "geo route: committed %s -> %s: %d spans, %.2f km, "
+                  "grid %dx%d cell %.0f, %ld nodata cell(s) overall, corridor "
+                  "%ld/%ld missing (%.2f%%), roads %d buildings %d areas %d "
+                  "signals %d, %.0f ms", s_last.slug, dst_dir, c->spans,
+                  c->length_km, nw, nh, cell, nodata_total, corridor_miss,
+                  corridor_n, corridor_pct, vec_n[0], vec_n[1], vec_n[2],
+                  vec_n[3], (double)(td5_plat_time_us() - t_us) / 1000.0);
+    return rc;
 }
 
 /* ======================================================================== *
@@ -2576,7 +2803,8 @@ int td5_geo_route_commit(void)
  *
  *   TD5RE_GEO_ROUTE_TEST=1   condition both fixtures and exit
  *   TD5RE_GEO_ROUTE_TEST=2   also route La Plata from its saved waypoints
- *   TD5RE_GEO_ROUTE_TEST=3   also COMMIT it (rewrites the place cache in place)
+ *   TD5RE_GEO_ROUTE_TEST=3   also COMMIT it (writes <place>/_route/, never the
+ *                            fetched source -- see the COMMIT section)
  *   TD5RE_GEO_ROUTE_TEST_PTS="lat,lon;lat,lon"  override the waypoints
  */
 static int  gr_write_route(const char *dir);
@@ -2803,7 +3031,8 @@ static void gr_test_route_live(int level)
 
     /* Level 3 also COMMITS: writes both JSONs, re-grids the four rasters into
      * the route frame, re-projects the four vector layers and selects the
-     * place. It rewrites re/assets/geo/<slug>/ in place, which is why it is a
+     * place. It writes re/assets/geo/<slug>/_route/ and never the source
+     * (see the COMMIT section), which is why it is a
      * separate level and not part of the default harness. */
     if (level >= 3) {
         const uint64_t t0 = td5_plat_time_us();

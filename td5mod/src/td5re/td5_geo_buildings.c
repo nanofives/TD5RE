@@ -611,7 +611,7 @@ static int geob_load_place_scale(const char *slug)
     cJSON *root;
 
     s_gb.units_per_m = GEOB_UNITS_PER_M_DEFAULT;
-    snprintf(path, sizeof(path), "re/assets/geo/%s/PLACE.JSON", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "PLACE.JSON");
     json = geob_slurp(path);
     if (!json) return 0;
     root = cJSON_Parse(json);
@@ -636,7 +636,7 @@ static int geob_load_buildings(const char *slug)
     const int tag_lm = td5_env_flag_on("TD5RE_GEO_LM_TAGS");
     int n, i;
 
-    snprintf(path, sizeof(path), "re/assets/geo/%s/BUILDINGS.JSON", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "BUILDINGS.JSON");
     json = geob_slurp(path);
     if (!json) {
         TD5_LOG_W(LOG_TAG, "geob: %s has no readable BUILDINGS.JSON; the "
@@ -753,7 +753,7 @@ static int geob_load_areas(const char *slug)
     const int wide = td5_env_flag_on("TD5RE_GEO_AREA_TAGS");
     int n, i;
 
-    snprintf(path, sizeof(path), "re/assets/geo/%s/AREAS.JSON", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "AREAS.JSON");
     json = geob_slurp(path);
     if (!json) {
         TD5_LOG_W(LOG_TAG, "geob: %s has no readable AREAS.JSON; plazas stay "

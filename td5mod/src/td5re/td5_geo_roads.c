@@ -39,6 +39,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"          /* td5_env_flag_on */
 #include "td5_trackgen.h"        /* TD5_TG_LANE_WIDTH */
+#include "td5_geo.h"            /* td5_geo_place_path: SOURCE vs DERIVED */
 #include "td5_geo_roads.h"
 #include "deps/cjson/cJSON.h"
 
@@ -160,7 +161,7 @@ static double geo_roads_units_per_metre(const char *slug)
     char path[320];
     char *json;
     double upm = 0.0;
-    snprintf(path, sizeof path, "re/assets/geo/%s/PLACE.JSON", slug);
+    td5_geo_place_path(path, sizeof path, slug, "PLACE.JSON");
     json = geo_roads_slurp(path);
     if (!json) return 0.0;
     {
@@ -222,7 +223,7 @@ static int geo_roads_load(const char *slug)
     int n, i, dropped_short = 0, truncated = 0, roundabouts = 0, n_surf[3];
 
     td5_geo_roads_unload();
-    snprintf(path, sizeof path, "re/assets/geo/%s/ROADS.JSON", slug);
+    td5_geo_place_path(path, sizeof path, slug, "ROADS.JSON");
     json = geo_roads_slurp(path);
     if (!json) {
         TD5_LOG_W(LOG_TAG, "geo: no readable %s; the street network stays synthetic",

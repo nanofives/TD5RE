@@ -27,6 +27,53 @@
 
 #define LOG_TAG "geo"
 
+/* ------------------------------------------- [ROUND 1008] SOURCE vs DERIVED
+ * The three resolvers td5_geo.h documents. They are the ONLY place in the port
+ * that spells a per-place file path, so "a writer may only ever name a DERIVED
+ * path" is a rule one grep can check rather than a convention. */
+
+const char *td5_geo_source_path(char *buf, size_t cap,
+                                const char *slug, const char *name)
+{
+    snprintf(buf, cap, "re/assets/geo/%s/%s", slug ? slug : "", name);
+    return buf;
+}
+
+const char *td5_geo_derived_path(char *buf, size_t cap,
+                                 const char *slug, const char *name)
+{
+    snprintf(buf, cap, "re/assets/geo/%s/" TD5_GEO_DERIVED_DIR "/%s",
+             slug ? slug : "", name);
+    return buf;
+}
+
+/* ALL OR NOTHING, and that is the point. The resolver switches on ONE stamp
+ * file, not on each file's existence, for two reasons:
+ *
+ *   a) MIXING FRAMES IS THE WORSE BUG. Per-file fallback would happily hand
+ *      the engine a derived ROADS.JSON and a source BUILDINGS.JSON, in two
+ *      different frames -- buildings and pavements landing nowhere near the
+ *      street, with nothing logged. Either the whole place reads derived or
+ *      the whole place reads source.
+ *   b) ABSENCE HAS TO BE INHERITABLE. FORKS.JSON is indexed by the SPAN of the
+ *      route it was confirmed against; after a new route it must read as
+ *      ABSENT, which per-file fallback cannot express (it would resurrect the
+ *      source copy). Under the stamp rule an unwritten derived file simply is
+ *      not there.
+ *
+ * td5_geo_route_commit deletes the stamp FIRST, writes the products, and
+ * writes the stamp LAST -- so a commit interrupted half way leaves a derived
+ * dir nobody reads, and the place keeps racing off its source. */
+const char *td5_geo_place_path(char *buf, size_t cap,
+                               const char *slug, const char *name)
+{
+    char stamp[512];
+    td5_geo_derived_path(stamp, sizeof(stamp), slug, TD5_GEO_DERIVED_STAMP);
+    if (td5_plat_file_exists(stamp))
+        return td5_geo_derived_path(buf, cap, slug, name);
+    return td5_geo_source_path(buf, cap, slug, name);
+}
+
 /* Bed depth below a water surface, world units. Matches the synthetic path's
  * TG_W_RIVER_DEPTH (td5_tg_world.c) so a geo river reads like a synthetic one to
  * every downstream emitter. A DEM sees the water SURFACE, not the bed, so
@@ -239,7 +286,7 @@ int td5_geo_load(const char *slug)
 
     snprintf(s_geo.slug, sizeof(s_geo.slug), "%s", slug);
 
-    snprintf(path, sizeof(path), "re/assets/geo/%s/HEIGHT.R16", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "HEIGHT.R16");
     if (!geo_raster_load(path, GEO_R_KIND_I16, &s_geo.height)) {
         td5_geo_unload();
         return 0;
@@ -247,10 +294,10 @@ int td5_geo_load(const char *slug)
     /* COVER and WATER are optional: a place is usable with terrain alone, and
      * failing the whole load over a missing mask would be worse than running
      * without it. Both sample as 0 when absent. */
-    snprintf(path, sizeof(path), "re/assets/geo/%s/COVER.R8", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "COVER.R8");
     if (!geo_raster_load(path, GEO_R_KIND_U8, &s_geo.cover))
         TD5_LOG_W(LOG_TAG, "geo: %s has no COVER.R8; land cover unavailable", slug);
-    snprintf(path, sizeof(path), "re/assets/geo/%s/WATER.R8", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "WATER.R8");
     if (!geo_raster_load(path, GEO_R_KIND_U8, &s_geo.water))
         TD5_LOG_W(LOG_TAG, "geo: %s has no WATER.R8; nothing will be water", slug);
 
@@ -258,7 +305,7 @@ int td5_geo_load(const char *slug)
      * the same grid. Optional and newer than the rest of the contract, so its
      * absence is silent: a cache built before it simply plants plaza trees the
      * old way. */
-    snprintf(path, sizeof(path), "re/assets/geo/%s/CANOPY.R8", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "CANOPY.R8");
     if (td5_plat_file_exists(path)
         && !geo_raster_load(path, GEO_R_KIND_U8, &s_geo.canopy))
         TD5_LOG_W(LOG_TAG, "geo: %s CANOPY.R8 unreadable; canopy unavailable", slug);
@@ -291,7 +338,7 @@ int td5_geo_load(const char *slug)
     }
 
     snprintf(s_geo.name, sizeof(s_geo.name), "%s", slug);
-    snprintf(path, sizeof(path), "re/assets/geo/%s/PLACE.JSON", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "PLACE.JSON");
     json = geo_slurp(path);
     if (json) {
         cJSON *root = cJSON_Parse(json);
@@ -626,7 +673,7 @@ static void geo_route_sync(void)
     if (env && env[0])
         snprintf(want, sizeof(want), "%s", env);
     else if (s_geo.loaded)
-        snprintf(want, sizeof(want), "re/assets/geo/%s/ROUTE.JSON", s_geo.slug);
+        td5_geo_place_path(want, sizeof(want), s_geo.slug, "ROUTE.JSON");
     else
         want[0] = '\0';
 
@@ -721,16 +768,16 @@ int td5_geo_places_rescan(void)
         if (e->d_name[0] == '.' || e->d_name[0] == '_' || len >= 64) continue;
         /* A dir with neither file is not a place at all (stray folder), so look
          * for the terrain first and only report dirs that tried to be one. */
-        snprintf(path, sizeof(path), "re/assets/geo/%s/HEIGHT.R16", e->d_name);
+        td5_geo_place_path(path, sizeof(path), e->d_name, "HEIGHT.R16");
         f = td5_plat_file_open(path, "rb");
         if (!f) {
-            snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", e->d_name);
+            td5_geo_place_path(path, sizeof(path), e->d_name, "ROUTE.JSON");
             f = td5_plat_file_open(path, "rb");
             if (f) { td5_plat_file_close(f); geo_place_note_incomplete(e->d_name, "NO TERRAIN DATA"); }
             continue;                        /* no DEM: td5_geo_load would fail */
         }
         td5_plat_file_close(f);
-        snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", e->d_name);
+        td5_geo_place_path(path, sizeof(path), e->d_name, "ROUTE.JSON");
         f = td5_plat_file_open(path, "rb");
         if (!f) {                            /* no route: not raceable yet */
             geo_place_note_incomplete(e->d_name, "NO ROUTE -- DRAW ONE IN geo_selector.py");
@@ -739,7 +786,7 @@ int td5_geo_places_rescan(void)
         td5_plat_file_close(f);
         memcpy(s_places.slug[s_places.n], e->d_name, len + 1);
         snprintf(s_places.name[s_places.n], sizeof(s_places.name[0]), "%s", e->d_name);
-        snprintf(path, sizeof(path), "re/assets/geo/%s/PLACE.JSON", e->d_name);
+        td5_geo_place_path(path, sizeof(path), e->d_name, "PLACE.JSON");
         json = geo_slurp(path);
         if (json) {
             cJSON *root = cJSON_Parse(json);
@@ -797,7 +844,7 @@ int td5_geo_preview_route(const char *slug)
     snprintf(s_preview.slug, sizeof(s_preview.slug), "%s", slug);
     s_preview.n = 0;
 
-    snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", slug);
+    td5_geo_place_path(path, sizeof(path), slug, "ROUTE.JSON");
     json = geo_slurp(path);
     if (!json) return 0;
     root = cJSON_Parse(json);

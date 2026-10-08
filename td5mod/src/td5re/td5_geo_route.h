@@ -95,9 +95,24 @@ typedef struct {
  * point into module-owned storage valid until the next build. */
 int  td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult *out);
 
-/* Write ROUTE_RAW.JSON + ROUTE.JSON for the last OK build, rebuild the rasters
-   in the route frame, set the place as selected. Returns 0 on success. */
+/* Build the DERIVED route frame of the last OK route and select the place.
+ * Returns 0 on success.
+ *
+ * [ROUND 1008] It READS re/assets/geo/<slug>/ and WRITES only
+ * re/assets/geo/<slug>/_route/ (see td5_geo.h). The fetched source is never
+ * modified, so pressing BUILD N times on the same route gives N identical
+ * results -- before the split each press re-derived from the previous press's
+ * output and the place collapsed to a 2x2 grid by the third.
+ *
+ * It REFUSES rather than writing a degenerate frame (tiny grid, no terrain
+ * under the route, a vector layer that survived empty). On a refusal nothing
+ * is written, the place keeps racing off whatever it raced off before, and
+ * td5_geo_route_commit_reason() is a short line the screen can show. */
 int  td5_geo_route_commit(void);
+
+/* Why the last td5_geo_route_commit() refused, in screen-ready English.
+ * "" after a successful commit, or before the first one. */
+const char *td5_geo_route_commit_reason(void);
 
 /* Bounds of every downloaded place, so the screen can shade where routing works.
  * bbox rows are {west, south, east, north} in degrees -- lon first, the order
