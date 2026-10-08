@@ -1685,6 +1685,379 @@ oom:
 }
 
 /* ======================================================================== *
+ * SECTION: divided avenues  (the C port of re/tools/geo_forks.detect_medians
+ *          plus the span half of geo_selector.resolve_forks)
+ * ======================================================================== *
+ *
+ * [ROUND 1009 item 5] "I selected an avenue with 2 lanes; by default avenues
+ * should be part of the track with their branches logic."
+ *
+ * OSM splits a dual carriageway into TWO one-way ways carrying the SAME name a
+ * few metres apart. The router drives one of them, so the route's own lane
+ * count is that carriageway's (2 on Diagonal 73, 1 before geo_fetch's floor)
+ * and the track used to be built as a plain two-lane road with the other
+ * carriageway, the median and the divider all missing. The generator already
+ * has the right shape for it -- TG_FORK_ISLAND, which splits the road at F and
+ * gives it a central divider -- and td5_geo_forks.c already reads a FORKS.JSON
+ * table of them. What was missing is that the table only ever came from
+ * re/tools/geo_selector.py; the in-game commit wrote no forks and deleted a
+ * stale file. This section is that missing half.
+ *
+ * MEASURED on La Plata's 2291 ways: 29 named avenues are divided (358
+ * anti-parallel one-way pairs), and Mariano's route runs on 10 of them,
+ * including 5511 m of Diagonal 73. `median` is false on all 2291 records and
+ * `junction` is only ever circular/roundabout, so NEITHER tag detects it --
+ * the geometry below is what does the work, exactly as geo_forks.py found.
+ *
+ * TWO INDEX MAPPINGS, and they are deliberately different. The span range is
+ * read by ARCLENGTH (where the avenue is on the ground). The lane window is
+ * written through the conditioner's own source mapping (gr_src_at) because
+ * that is what decides which stored node gets which lane count. Since round
+ * 1009 both are arclength, so they agree -- but the achieved range is still
+ * read BACK off the conditioned lanes (gr_fit_fork) rather than assumed,
+ * because that is what makes tg_fork_place's uniformity check pass by
+ * construction instead of by luck.
+ *
+ * TD5RE_GEO_AVENUES=0 pins the old behaviour (no detection, no FORKS.JSON) for
+ * a single-variable A/B. */
+
+/* geo_forks.py MEDIAN_MIN_M / MEDIAN_MAX_M -- the lateral gap between the two
+ * carriageways. Below 4 m they are the same road drawn twice; 45 m is above La
+ * Plata's widest boulevard (~30 m between carriageway centrelines) and below
+ * one city block (110 m), so a PARALLEL STREET one block over can never be
+ * mistaken for a median. */
+#define GR_MED_MIN_M          4.0
+#define GR_MED_MAX_M         45.0
+/* geo_forks.py MEDIAN_ANTIPARALLEL_TOL_DEG / MEDIAN_PARALLEL_TOL_DEG. 35 deg
+ * covers the divergence at junctions and the bend of a diagonal without
+ * admitting a crossing street. A same-name way running PARALLEL at median
+ * distance is a service road or a bus lane, accepted only when itself
+ * one-way -- then it is still a separate carriageway. */
+#define GR_MED_ANTI_TOL_DEG  35.0
+#define GR_MED_PARA_TOL_DEG  25.0
+/* geo_forks.py MEDIAN_MIN_COVER. Fraction of the run that has to find a
+ * partner, as a UNION over every same-name way. Measured union coverage on the
+ * reference route: 0.00 for the three undivided streets, 0.44 for the one
+ * partly-mapped case, 0.55..1.00 for everything divided on the ground, so 0.50
+ * sits in the 0.44 -> 0.55 gap. */
+#define GR_MED_MIN_COVER      0.50
+/* geo_forks.py MEDIAN_MIN_LEN_M -- shorter than one La Plata block (110 m)
+ * plus its intersection is a junction artefact. */
+#define GR_MED_MIN_LEN_M    120.0
+/* geo_selector.py FORK_WIDEN_PAD / FORK_TAIL_PAD: TD5_TG_BRANCH_WIDEN (6) plus
+ * the +/-2 margin the walk and the placement loop both use, plus one for
+ * rounding. */
+#define GR_FORK_WIDEN_PAD     9
+#define GR_FORK_TAIL_PAD      3
+/* The first fork must clear the grid and its widened approach; the last must
+ * leave the engine's "must fit on the ring" margin (R + 24 < ring). 48 is
+ * GR_GRID_SPAN + TD5_TG_BRANCH_WIDEN + 2 + 16, and is also what
+ * geo_selector.py uses. */
+#define GR_FORK_MIN_F        48
+#define GR_FORK_RING_TAIL    26
+/* tg_fork_len_floored: an ISLAND keeps any length from 3 spans up. */
+#define GR_FORK_ISLAND_MIN    3
+/* TD5_TG_BRANCH_MAX. */
+#define GR_FORK_MAX           8
+/* Runs are merged before scoring; a route cannot have more than this many. */
+#define GR_MED_MAX_RUNS     512
+
+typedef struct {
+    int    k0, k1;            /* raw route vertex range, inclusive, FORWARD */
+    int    lanes;             /* lanes(A) + lanes(B), clamped to 4..8 */
+    int    F, len;            /* placed span range; filled by gr_place_forks */
+    double sep;
+    double length_m, gap_m, cover;
+    char   name[64];
+    char   id[160];
+    char   source[80];
+    char   detail[160];
+} GrMedian;
+
+/* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
+ * convention gr_heading uses. */
+static double gr_bearing(double ax, double az, double bx, double bz)
+{
+    return atan2(bx - ax, bz - az);
+}
+
+static double gr_angdiff_deg(double a, double b)
+{
+    return fabs(gr_deg(gr_wrap(a - b)));
+}
+
+/* geo_forks._nearest_on_road: closest approach of one way's polyline to P, and
+ * that segment's bearing. */
+static double gr_road_near(const GrRoad *r, double px, double pz, double *bear)
+{
+    double best = 1e30;
+    int i;
+    for (i = 0; i + 1 < r->count; i++) {
+        const double ax = s_g.px[r->first + i],     az = s_g.pz[r->first + i];
+        const double bx = s_g.px[r->first + i + 1], bz = s_g.pz[r->first + i + 1];
+        const double dx = bx - ax, dz = bz - az;
+        const double l2 = dx * dx + dz * dz;
+        double t, cx, cz, d;
+        if (l2 <= 1e-12) continue;
+        t = ((px - ax) * dx + (pz - az) * dz) / l2;
+        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+        cx = ax + dx * t; cz = az + dz * t;
+        d = hypot(px - cx, pz - cz);
+        if (d < best) { best = d; if (bear) *bear = gr_bearing(ax, az, bx, bz); }
+    }
+    return best;
+}
+
+/* Is road `b` the same OSM way as road `a`? OSM splits one way into several
+ * records, and geo_forks excludes peers by OSM id rather than by record, so a
+ * run must not pair with another slice of itself. */
+static int gr_same_way(int a, int b)
+{
+    if (a == b) return 1;
+    if (!s_g.road[a].has_id || !s_g.road[b].has_id) return 0;
+    return s_g.road[a].id == s_g.road[b].id;
+}
+
+/* geo_forks.detect_medians. `road_id[k]` is the way the route's k-th vertex
+ * arrived on, `px/pz[k]` its position in the PLACE frame. Returns the number of
+ * medians written to `out`, longest first then overlap-filtered, finally sorted
+ * by k0. */
+static int gr_detect_medians(const int *road_id, const double *px,
+                             const double *pz, int n, double upm,
+                             GrMedian *out, int max)
+{
+    static int run_a[GR_MED_MAX_RUNS], run_b[GR_MED_MAX_RUNS], run_r[GR_MED_MAX_RUNS];
+    int n_run = 0, n_out = 0, i, j, k;
+
+    if (n < 2 || !out || max < 1 || upm <= 0.0) return 0;
+
+    /* 1a. maximal runs of >= 2 consecutive vertices on one way. */
+    for (i = 0; i < n; ) {
+        int e = i;
+        while (e + 1 < n && road_id[e + 1] == road_id[i]) e++;
+        if (e - i + 1 >= 2 && road_id[i] >= 0 && road_id[i] < s_g.n_roads &&
+            n_run < GR_MED_MAX_RUNS) {
+            /* 1b. join onto the previous run when the NAME matches and the gap
+             * is at most 2 vertices: OSM splits one avenue at every junction,
+             * so an avenue reaches the route as a dozen runs that are one road
+             * to a driver. */
+            const char *nm = s_g.road[road_id[i]].name;
+            if (n_run > 0 && nm && s_g.road[run_r[n_run - 1]].name &&
+                !strcmp(nm, s_g.road[run_r[n_run - 1]].name) &&
+                i - run_b[n_run - 1] <= 2) {
+                run_b[n_run - 1] = e;
+            } else {
+                run_a[n_run] = i; run_b[n_run] = e; run_r[n_run] = road_id[i];
+                n_run++;
+            }
+        }
+        i = e + 1;
+    }
+
+    /* 2. score each merged run against its same-name peers. */
+    for (i = 0; i < n_run && n_out < max; i++) {
+        const int k0 = run_a[i], k1 = run_b[i], rid = run_r[i];
+        const GrRoad *road = &s_g.road[rid];
+        const char *name = road->name;
+        double run_units = 0.0, dsum = 0.0, run_m;
+        int hits = 0, total = 0, step, best_peer = -1, best_peer_hits = 0;
+        int peer_hits_id[GR_FORK_MAX * 4], peer_hits_n[GR_FORK_MAX * 4], n_ph = 0;
+        GrMedian *m;
+
+        if (!name || !name[0]) continue;
+        for (k = k0; k < k1; k++)
+            run_units += hypot(px[k + 1] - px[k], pz[k + 1] - pz[k]);
+        run_m = run_units / upm;
+        if (run_m < GR_MED_MIN_LEN_M) continue;
+
+        step = (k1 - k0) / 12;
+        if (step < 1) step = 1;
+        for (k = k0; k <= k1; k += step) {
+            const int nx = (k + 1 < n) ? k + 1 : n - 1;
+            const double rbr = gr_bearing(px[k], pz[k], px[nx], pz[nx]);
+            double cand_m = 0.0;
+            int cand_j = -1;
+            total++;
+            for (j = 0; j < s_g.n_roads; j++) {
+                const GrRoad *pr = &s_g.road[j];
+                double pbr = 0.0, d_m, anti, para;
+                if (!pr->oneway) continue;          /* no median tag to trust  */
+                if (!pr->name || strcmp(pr->name, name)) continue;
+                if (gr_same_way(rid, j)) continue;
+                d_m = gr_road_near(pr, px[k], pz[k], &pbr) / upm;
+                if (d_m < GR_MED_MIN_M || d_m > GR_MED_MAX_M) continue;
+                anti = gr_angdiff_deg(rbr + M_PI, pbr);
+                para = gr_angdiff_deg(rbr, pbr);
+                if (anti > GR_MED_ANTI_TOL_DEG && para > GR_MED_PARA_TOL_DEG) continue;
+                if (cand_j < 0 || d_m < cand_m) { cand_j = j; cand_m = d_m; }
+            }
+            if (cand_j >= 0) {
+                int q, slot = -1;
+                hits++;
+                dsum += cand_m;
+                for (q = 0; q < n_ph; q++) if (peer_hits_id[q] == cand_j) { slot = q; break; }
+                if (slot < 0 && n_ph < (int)(sizeof peer_hits_id / sizeof peer_hits_id[0])) {
+                    slot = n_ph++;
+                    peer_hits_id[slot] = cand_j; peer_hits_n[slot] = 0;
+                }
+                if (slot >= 0) peer_hits_n[slot]++;
+            }
+        }
+        if (!total || (double)hits / (double)total < GR_MED_MIN_COVER) continue;
+        /* The carriageway the run pairs with most often is the one to read the
+         * opposing lane count off. */
+        for (j = 0; j < n_ph; j++)
+            if (peer_hits_n[j] > best_peer_hits) {
+                best_peer_hits = peer_hits_n[j];
+                best_peer = peer_hits_id[j];
+            }
+
+        m = &out[n_out++];
+        memset(m, 0, sizeof *m);
+        m->k0 = k0; m->k1 = k1;
+        m->sep = 0.16;
+        m->length_m = run_m;
+        m->gap_m = hits ? dsum / (double)hits : 0.0;
+        m->cover = (double)hits / (double)total;
+        {
+            const int la = road->lanes > 0 ? road->lanes : 2;
+            const int lb = (best_peer >= 0 && s_g.road[best_peer].lanes > 0)
+                         ? s_g.road[best_peer].lanes : la;
+            int want = la + lb;
+            if (want < 4) want = 4;
+            if (want > 8) want = 8;
+            m->lanes = want;
+        }
+        snprintf(m->name, sizeof m->name, "%s", name);
+        snprintf(m->id, sizeof m->id, "median:%s:%d-%d", name, k0, k1);
+        snprintf(m->source, sizeof m->source,
+                 "paired one-way ways, same name (%d of them)", n_ph);
+        snprintf(m->detail, sizeof m->detail,
+                 "%s: %.0f m of divided avenue, carriageways %.0f m apart",
+                 name, run_m, m->gap_m);
+    }
+
+    /* 3. longest first, then drop anything overlapping an already-kept range:
+     * two forks sharing spans would fight over the same carriageway. */
+    for (i = 0; i < n_out; i++)
+        for (j = i + 1; j < n_out; j++)
+            if (out[j].length_m > out[i].length_m) {
+                const GrMedian t = out[i]; out[i] = out[j]; out[j] = t;
+            }
+    for (i = 0; i < n_out; i++) {
+        int drop = 0;
+        for (j = 0; j < i; j++)
+            if (!(out[i].k1 < out[j].k0 || out[i].k0 > out[j].k1)) { drop = 1; break; }
+        if (drop) {
+            for (k = i; k + 1 < n_out; k++) out[k] = out[k + 1];
+            n_out--; i--;
+        }
+    }
+    for (i = 0; i < n_out; i++)
+        for (j = i + 1; j < n_out; j++)
+            if (out[j].k0 < out[i].k0) {
+                const GrMedian t = out[i]; out[i] = out[j]; out[j] = t;
+            }
+    return n_out;
+}
+
+/* geo_selector._span_of_frac: arclength fraction along the ROUTE BODY ->
+ * conditioned span index. Fraction 0 is node lead_in_nodes (the body's first
+ * point, which since round 1009 is node 0) and fraction 1 is the last span. */
+static int gr_span_of_frac(double f, int lead, int spans)
+{
+    if (f < 0.0) f = 0.0; else if (f > 1.0) f = 1.0;
+    return lead + (int)gr_round_even(f * (double)(spans - lead));
+}
+
+/* geo_selector._ramp_one_lane_per_seam. Raise the profile until no seam changes
+ * by more than ONE lane.
+ *
+ * MEASURED, and the reason this pass exists. Widening a fork window straight
+ * from 2 to 4 lanes puts a two-lane step at each end. The strip emitter types a
+ * two-lane change as "add/drop BOTH sides" (span types 4 and 7), and the
+ * generator's own invariant -- re/tools/tg_strip_audit.py -- is that a
+ * both-sides change must also move the lane BASE nibble, because a lane appears
+ * on each side and the numbering origin moves with it. tg_geo_walk does no lane
+ * bookkeeping at all and leaves every span on TD5_TG_HEIGHT_NIBBLE, so a
+ * both-sides seam on the geo path is a genuine violation; a one-lane seam is
+ * typed as a right-side add/drop (types 2 and 5) and is defined to leave the
+ * base alone. Only ever RAISES, so no fork window can be narrowed here.
+ *
+ * tg_geo_walk clamps to one lane per node as well, but doing it HERE is what
+ * keeps ROUTE.JSON truthful: gr_fit_fork reads the fork's span range back off
+ * the stored lanes, and a window the walk silently re-ramped would be read off
+ * numbers the track does not have. */
+static void gr_ramp_one_lane_per_seam(int *lanes, int n)
+{
+    int changed = 1;
+    while (changed) {
+        int k;
+        changed = 0;
+        for (k = 0; k + 1 < n; k++) {
+            if (lanes[k] < lanes[k + 1] - 1)      { lanes[k] = lanes[k + 1] - 1; changed = 1; }
+            else if (lanes[k + 1] < lanes[k] - 1) { lanes[k + 1] = lanes[k] - 1; changed = 1; }
+        }
+    }
+}
+
+/* geo_selector._fit_fork: the fork range the CONDITIONED route can actually
+ * carry. The maximal run of spans whose STORED lane count is exactly
+ * `want_lanes`, overlapping [span_lo, span_hi] and not already claimed, inset
+ * by the engine's approach and rejoin margins. 0 when it does not fit. */
+static int gr_fit_fork(const GrCond *c, int want_lanes, int span_lo, int span_hi,
+                       const int *taken_lo, const int *taken_hi, int n_taken,
+                       int *out_F, int *out_R)
+{
+    const int n = c->nodes;
+    int mid, a, b, i, F, R;
+    if (n < 3 || !c->lanes_out) return 0;
+    if (span_lo < 0) span_lo = 0;
+    if (span_hi > n - 1) span_hi = n - 1;
+    mid = (span_lo + span_hi) / 2;
+    if (mid < 0) mid = 0; else if (mid > n - 1) mid = n - 1;
+    if (c->lanes_out[mid] != want_lanes) {
+        /* The target centre did not get widened (rounding between the span
+         * mapping and the lane mapping): take the nearest span in range that
+         * did. */
+        mid = -1;
+        for (i = span_lo; i <= span_hi; i++)
+            if (c->lanes_out[i] == want_lanes) { mid = i; break; }
+        if (mid < 0) return 0;
+    }
+    a = mid; while (a > 0 && c->lanes_out[a - 1] == want_lanes) a--;
+    b = mid; while (b + 1 < n && c->lanes_out[b + 1] == want_lanes) b++;
+    /* CLIP THE RUN TO THIS AVENUE'S OWN SPANS. Two avenues a block apart widen
+     * to the same lane count and the one-lane-per-seam ramp then welds their
+     * windows into one run, so the maximal run is NOT this avenue -- measured
+     * on Mariano's route, three separate medians at spans 1041..1090,
+     * 1102..1184 and 1199..1351 all grew to the same 1023..1351 run, the first
+     * swallowed it and the other two were refused. Narrowing inside a uniform
+     * run keeps uniformity (the run is uniform past the clip as well), so this
+     * only ever costs the fork spans it never owned.
+     *
+     * The ring tail is clipped the same way rather than refusing: an avenue
+     * that runs INTO the finish line still gets a fork for the part of it the
+     * engine can hold, because the corridor is appended after the ring and
+     * needs R + 24 < ring (td5_geo_forks.c's own check). */
+    if (a < span_lo - GR_FORK_WIDEN_PAD - 2) a = span_lo - GR_FORK_WIDEN_PAD - 2;
+    if (b > span_hi + GR_FORK_TAIL_PAD + 2)  b = span_hi + GR_FORK_TAIL_PAD + 2;
+    if (b > c->spans - GR_FORK_RING_TAIL - 1 + GR_FORK_TAIL_PAD)
+        b = c->spans - GR_FORK_RING_TAIL - 1 + GR_FORK_TAIL_PAD;
+    if (a < 0) a = 0;
+    for (i = 0; i < n_taken; i++)
+        if (a <= taken_hi[i] && taken_lo[i] <= b) {
+            const int after = taken_hi[i] + GR_FORK_WIDEN_PAD + 2;
+            if (after > a) a = after;
+        }
+    F = a + GR_FORK_WIDEN_PAD;
+    R = b - GR_FORK_TAIL_PAD;
+    if (R <= F + 1) return 0;
+    *out_F = F; *out_R = R;
+    return 1;
+}
+
+/* ======================================================================== *
  * SECTION: build
  * ======================================================================== */
 
@@ -1701,6 +2074,11 @@ static struct {
     double raw_length_units;
     char   streets[1024];
     GrCond cond;
+    /* [ROUND 1009 item 5] the divided avenues this route was conditioned FOR,
+     * already placed on spans. FORKS.JSON is written from these at commit. */
+    int      n_fork;
+    int      fork_corridor_spans;
+    GrMedian fork[GR_FORK_MAX];
 } s_last;
 
 static TD5_GeoRouteResult s_result;
@@ -1832,6 +2210,8 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     const char *slug;
     int *wp_node = NULL, *seq = NULL, *legbuf = NULL;
     int n_seq = 0, i, allow_cross;
+    int *raw_road = NULL;
+    double *raw_x = NULL, *raw_z = NULL;
     GrCond *c = NULL;
     TD5_GeoLatLon *raw_ll = NULL;
     int *raw_lanes = NULL;
@@ -1951,8 +2331,12 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
 
     raw_ll    = (TD5_GeoLatLon *)malloc((size_t)n_seq * sizeof(TD5_GeoLatLon));
     raw_lanes = (int *)malloc((size_t)n_seq * sizeof(int));
-    if (!raw_ll || !raw_lanes) {
+    raw_road  = (int *)malloc((size_t)n_seq * sizeof(int));
+    raw_x     = (double *)malloc((size_t)n_seq * sizeof(double));
+    raw_z     = (double *)malloc((size_t)n_seq * sizeof(double));
+    if (!raw_ll || !raw_lanes || !raw_road || !raw_x || !raw_z) {
         free(wp_node); free(seq); free(raw_ll); free(raw_lanes);
+        free(raw_road); free(raw_x); free(raw_z);
         gr_result_set(out, TD5_GEO_ROUTE_ERROR, slug, "out of memory");
         return 0;
     }
@@ -1967,6 +2351,12 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
         gr_proj_to_latlon(&s_g.proj, s_g.nx[nd], s_g.nz[nd],
                           &raw_ll[i].lat, &raw_ll[i].lon);
         raw_lanes[i] = r ? r->lanes : 2;
+        /* [ROUND 1009 item 5] the way each vertex arrived on, and its position
+         * in the PLACE frame: geo_forks.detect_medians' `road_ids` and
+         * `pts_world`. */
+        raw_road[i] = ri;
+        raw_x[i] = s_g.nx[nd];
+        raw_z[i] = s_g.nz[nd];
         if (i) raw_len += gr_dist(s_g.nx[seq[i - 1]], s_g.nz[seq[i - 1]],
                                   s_g.nx[nd], s_g.nz[nd]);
         /* geo_route.route resolves the name through the first road record
@@ -1997,6 +2387,165 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     gr_condition(raw_ll, raw_lanes, n_seq, GR_UNITS_PER_METRE,
                  GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
                  1, allow_cross, c);
+
+    /* ---- [ROUND 1009 item 5] DIVIDED AVENUES BECOME FORKS, BY DEFAULT ----
+     * Detect them on the routed polyline, WIDEN the route to lanes(A)+lanes(B)
+     * over each one, re-condition for that width, then read the achieved span
+     * range back off the stored lanes. The widening is fed to gr_condition as
+     * its lane argument rather than patched into the result: the curvature
+     * floor is radius >= (width/2) * curve_safety, so a wider road has a
+     * TIGHTER turn limit, and enforcing it afterwards would store geometry
+     * smoothed for the narrow road and let a fork fold on a corner -- which is
+     * the failure tg_fork_region_max_curve exists to catch.
+     *
+     * Consequence the screen has to live with, and geo_selector.py lives with
+     * it too: an avenue moves the span count, because it is a different road.
+     * Nothing runs at all on a route with no divided avenue, so a place
+     * without one pays no second conditioning pass. */
+    if (c->ok && td5_env_flag_on("TD5RE_GEO_AVENUES")) {
+        GrMedian med[GR_FORK_MAX];
+        const int n_med = gr_detect_medians(raw_road, raw_x, raw_z, n_seq,
+                                            GR_UNITS_PER_METRE, med, GR_FORK_MAX);
+        TD5_LOG_I(LOG_TAG, "geo route: %d divided avenue(s) on the route "
+                  "(paired anti-parallel one-way ways of the same name, "
+                  "%.0f..%.0f m apart, >= %.0f m long, cover >= %.2f)",
+                  n_med, GR_MED_MIN_M, GR_MED_MAX_M, GR_MED_MIN_LEN_M,
+                  GR_MED_MIN_COVER);
+        for (i = 0; i < n_med; i++)
+            TD5_LOG_I(LOG_TAG, "geo route:   %s: raw %d..%d, %.0f m, gap %.0f m, "
+                      "cover %.2f, %d lanes wanted", med[i].name, med[i].k0,
+                      med[i].k1, med[i].length_m, med[i].gap_m, med[i].cover,
+                      med[i].lanes);
+        if (n_med > 0) {
+            GrPts rawp;
+            double *frac = NULL;
+            int *lanes2 = (int *)malloc((size_t)n_seq * sizeof(int));
+            const int lead1 = c->lead_in_nodes, spans1 = c->spans, rev1 = c->reversed;
+            memset(&rawp, 0, sizeof rawp);
+            for (i = 0; i < n_seq; i++)
+                if (!gr_pts_push(&rawp, raw_x[i], raw_z[i])) break;
+            if (i == n_seq) frac = gr_arc_frac(&rawp);
+            if (lanes2 && frac) {
+                int taken_lo[GR_FORK_MAX], taken_hi[GR_FORK_MAX];
+                int ord[GR_FORK_MAX], n_ord = 0, j, built = 0, corridor = 0;
+                int s0[GR_FORK_MAX], s1[GR_FORK_MAX];
+
+                memcpy(lanes2, raw_lanes, (size_t)n_seq * sizeof(int));
+                /* Span range of each median, and the raw window to widen. */
+                for (j = 0; j < n_med; j++) {
+                    const double f0 = rev1 ? 1.0 - frac[med[j].k1] : frac[med[j].k0];
+                    const double f1 = rev1 ? 1.0 - frac[med[j].k0] : frac[med[j].k1];
+                    const int a = gr_span_of_frac(f0, lead1, spans1);
+                    const int b = gr_span_of_frac(f1, lead1, spans1);
+                    s0[j] = a < b ? a : b;
+                    s1[j] = a < b ? b : a;
+                    {
+                        const int wlo = s0[j] - GR_FORK_WIDEN_PAD - 2;
+                        const int whi = s1[j] + GR_FORK_TAIL_PAD + 2;
+                        const double den = (double)(spans1 - lead1);
+                        double g0 = den > 0.0 ? (double)(wlo - lead1) / den : 0.0;
+                        double g1 = den > 0.0 ? (double)(whi - lead1) / den : 1.0;
+                        int lo, hi, k;
+                        if (rev1) { const double t = g0; g0 = 1.0 - g1; g1 = 1.0 - t; }
+                        lo = gr_src_at(g0, frac, n_seq);
+                        hi = gr_src_at(g1, frac, n_seq);
+                        for (k = lo; k <= hi && k < n_seq; k++)
+                            if (k >= 0) lanes2[k] = med[j].lanes;
+                    }
+                    ord[n_ord++] = j;
+                }
+                gr_ramp_one_lane_per_seam(lanes2, n_seq);
+
+                /* Re-condition for the widened road. */
+                gr_cond_free(c);
+                gr_condition(raw_ll, lanes2, n_seq, GR_UNITS_PER_METRE,
+                             GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
+                             1, allow_cross, c);
+                if (!c->ok) {
+                    /* The wider road does not fit. Go back to the road the
+                     * route actually asked for and say so, rather than refusing
+                     * a route that was fine without the avenues. */
+                    gr_cond_free(c);
+                    gr_condition(raw_ll, raw_lanes, n_seq, GR_UNITS_PER_METRE,
+                                 GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH,
+                                 GR_LANE_WIDTH, 1, allow_cross, c);
+                    gr_add_warning(c, "%d divided avenue(s) detected but NOT "
+                                   "built: the route cannot carry their width",
+                                   n_med);
+                } else {
+                    /* Span order, once: the gates in td5_tg_branch.c walk the
+                     * table in order, and a route driven REVERSED comes out of
+                     * detection descending. */
+                    for (i = 0; i < n_ord; i++)
+                        for (j = i + 1; j < n_ord; j++)
+                            if (s0[ord[j]] < s0[ord[i]]) {
+                                const int t = ord[i]; ord[i] = ord[j]; ord[j] = t;
+                            }
+                    /* Every drop is LOGGED with its reason. A widened avenue
+                     * that then fails to place leaves a wider road with no
+                     * divider, which looks like the detector half-worked;
+                     * naming the gate that refused it is the difference between
+                     * that and a bug. */
+                    for (i = 0; i < n_ord; i++) {
+                        GrMedian *m = &med[ord[i]];
+                        int F = 0, R = 0, L;
+                        const char *why = NULL;
+                        if (!gr_fit_fork(c, m->lanes, s0[ord[i]], s1[ord[i]],
+                                         taken_lo, taken_hi, built, &F, &R)) {
+                            why = "the route carries no uniform window of its "
+                                  "lane count there";
+                            L = 0;
+                        } else {
+                            L = R - F - 1;
+                            if (F < GR_FORK_MIN_F)
+                                why = "it starts inside the grid and its approach";
+                            else if (R + GR_FORK_RING_TAIL >= c->spans)
+                                why = "it rejoins inside the ring's tail margin";
+                            else if (L < GR_FORK_ISLAND_MIN)
+                                why = "it is shorter than an ISLAND's 3-span floor";
+                            else if (c->spans + corridor + 1 + L > GR_MAX_SPANS)
+                                why = "its corridor would pass the span cap";
+                        }
+                        if (why) {
+                            TD5_LOG_I(LOG_TAG, "geo route: avenue %s (%.0f m, "
+                                      "spans %d..%d, fitted F=%d len=%d) NOT "
+                                      "built: %s -- the road stays %d lanes "
+                                      "wide there with no divider", m->name,
+                                      m->length_m, s0[ord[i]], s1[ord[i]], F, L,
+                                      why, m->lanes);
+                            continue;
+                        }
+                        taken_lo[built] = F - GR_FORK_WIDEN_PAD;
+                        taken_hi[built] = R + GR_FORK_TAIL_PAD;
+                        corridor += 1 + L;
+                        m->F = F; m->len = L;
+                        s_last.fork[built] = *m;
+                        built++;
+                    }
+                    s_last.n_fork = built;
+                    s_last.fork_corridor_spans = corridor;
+                    if (built)
+                        gr_add_warning(c, "%d divided avenue(s) built as forked "
+                                       "carriageways (%s)", built,
+                                       s_last.fork[0].name);
+                    else
+                        gr_add_warning(c, "%d divided avenue(s) detected, none "
+                                       "could be placed on a span range",
+                                       n_med);
+                    for (i = 0; i < built; i++)
+                        TD5_LOG_I(LOG_TAG, "geo route: avenue %d: %s F=%d len=%d "
+                                  "lanes=%d (%.0f m, carriageways %.0f m apart, "
+                                  "cover %.2f)", i, s_last.fork[i].name,
+                                  s_last.fork[i].F, s_last.fork[i].len,
+                                  s_last.fork[i].lanes, s_last.fork[i].length_m,
+                                  s_last.fork[i].gap_m, s_last.fork[i].cover);
+                }
+            }
+            gr_pts_free(&rawp);
+            free(lanes2);
+            free(frac);
+        }
+    }
 
     /* ---- publish ---- */
     gr_result_set(out, TD5_GEO_ROUTE_OK, slug, "");
@@ -2059,6 +2608,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     s_last.raw_lanes = raw_lanes;
     s_last.raw_length_units = raw_len;
     free(wp_node);
+    free(raw_road); free(raw_x); free(raw_z);
 
     out->build_ms = (double)(td5_plat_time_us() - t_us) / 1000.0;
     s_result = *out;
@@ -2123,6 +2673,58 @@ static int gr_write_route_raw(const char *dir)
     }
     cJSON_AddItemToObject(root, "points", pts);
     cJSON_AddStringToObject(root, "street_names", s_last.streets);
+    return gr_write_json(path, root);
+}
+
+/* [ROUND 1009 item 5] FORKS.JSON for the divided avenues this route was
+ * conditioned for, in the SAME shape geo_selector.py's _write_forks produces,
+ * because td5_geo_forks.c reads both.
+ *
+ * ABSENCE IS MEANINGFUL and it is why the no-fork case DELETES. td5_geo_forks
+ * treats a missing file as "no geo forks" and the generator then uses its own
+ * synthetic fork placement; a stale file would keep the previous route's span
+ * ranges alive, splitting carriageways at places that no longer mean anything.
+ * This is the same delete the commit did unconditionally before -- now it only
+ * happens when there is nothing to write. */
+static int gr_write_forks(const char *dir)
+{
+    char path[512];
+    cJSON *root, *arr;
+    int i;
+
+    snprintf(path, sizeof path, "%s/FORKS.JSON", dir);
+    if (s_last.n_fork < 1) {
+        if (td5_plat_file_exists(path)) td5_plat_file_delete(path);
+        return 1;
+    }
+    root = cJSON_CreateObject();
+    arr  = cJSON_CreateArray();
+    cJSON_AddStringToObject(root, "place", s_last.slug);
+    cJSON_AddNumberToObject(root, "spans", s_last.cond.spans);
+    cJSON_AddNumberToObject(root, "corridor_spans", s_last.fork_corridor_spans);
+    for (i = 0; i < s_last.n_fork; i++) {
+        const GrMedian *m = &s_last.fork[i];
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "id", m->id);
+        /* ISLAND, not AVENUE: both read as a divided avenue downstream
+         * (sep <= TD5_TG_AVENUE_SEP_MAX) and both get the central divider, but
+         * ISLAND is the kind whose length floor is 3 spans rather than
+         * TD5_TG_BRANCH_MIN_LEN (24), so a real median of any length survives
+         * tg_fork_len_floored unchanged -- which is what lets the span range
+         * here mean what it says. */
+        cJSON_AddStringToObject(e, "kind", "ISLAND");
+        cJSON_AddStringToObject(e, "name", m->name);
+        cJSON_AddNumberToObject(e, "F", m->F);
+        cJSON_AddNumberToObject(e, "len", m->len);
+        cJSON_AddNumberToObject(e, "sep", m->sep);
+        cJSON_AddNumberToObject(e, "lanes", m->lanes);
+        cJSON_AddNumberToObject(e, "length_m", m->length_m);
+        cJSON_AddStringToObject(e, "source", m->source);
+        cJSON_AddStringToObject(e, "detail", m->detail);
+        cJSON_AddItemToArray(arr, e);
+    }
+    cJSON_AddItemToObject(root, "forks", arr);
+    cJSON_AddStringToObject(root, "written_by", "td5_geo_route.c");
     return gr_write_json(path, root);
 }
 
@@ -2844,15 +3446,15 @@ int td5_geo_route_commit(void)
     if (!gr_write_route(dst_dir))     { gr_commit_refuse("COULD NOT WRITE ROUTE.JSON");     goto done; }
 
     /* FORKS.JSON is indexed by the SPAN of the route it was confirmed against,
-     * and this is a different route, so the derived frame must NOT have one --
-     * span ranges from the previous route would split carriageways at places
-     * that no longer mean anything. Before the source/derived split this was a
-     * DELETE of the user's file; now it is simply a file the commit does not
-     * write, and the stamp rule makes "absent in the derived frame" mean absent
-     * rather than falling back to the source copy. The source FORKS.JSON (a
+     * so it has to be written in the SAME commit as the ROUTE.JSON it is
+     * indexed against -- and since round 1009 the commit has its own forks to
+     * write: the divided avenues gr_detect_medians found and the lane widening
+     * this route was conditioned for. With none found (or TD5RE_GEO_AVENUES=0)
+     * gr_write_forks deletes instead, which is what the commit always did, and
+     * the stamp rule makes "absent in the derived frame" mean absent rather
+     * than falling back to the source copy. The SOURCE FORKS.JSON (a
      * geo_selector.py artefact) is left alone, where it belongs. */
-    snprintf(path, sizeof path, "%s/FORKS.JSON", dst_dir);
-    if (td5_plat_file_exists(path)) td5_plat_file_delete(path);
+    if (!gr_write_forks(dst_dir)) { gr_commit_refuse("COULD NOT WRITE FORKS.JSON"); goto done; }
 
     /* The stamp LAST: from here the readers see the new frame. */
     if (!gr_write_atomic(stamp, "td5_geo_route.c\n", 16)) {
