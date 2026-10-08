@@ -18,6 +18,7 @@ param([string]$Tag = "run",
       [int]$PlayerIsAI = 0,
       [int]$StartSpanOffset = 0,
       [int]$CarDamage = 1,
+      [int]$Track = 61,
       [string]$Exe = "td5re.exe",
       [string]$FramedumpSpans = "",
       [hashtable]$Extra = @{})
@@ -50,7 +51,7 @@ foreach ($f in @("race.log","engine.log","frontend.log",
     }
 }
 
-$args = @("--AutoRace=1","--SkipIntro=1","--DefaultTrack=61",
+$args = @("--AutoRace=1","--SkipIntro=1","--DefaultTrack=$Track",
           "--DefaultOpponents=$Opponents","--Traffic=$Traffic",
           "--PlayerIsAI=$PlayerIsAI","--AutoThrottle=0","--CarDamage=$CarDamage",
           "--StartSpanOffset=$StartSpanOffset",
