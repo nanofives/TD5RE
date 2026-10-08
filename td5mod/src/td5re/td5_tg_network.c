@@ -596,10 +596,49 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
 #define TG_GEO_SPAN_JUMP     4       /* span continuity across a crossing     */
 #define TG_GEO_MOUTH_SPANS   12      /* widest frontage run a real road gets  */
 #define TG_GEO_AVENUE_LANES  4       /* lanes at which a street is an avenue  */
-#define TG_GEO_SKEW_MAX_DEG  65      /* default TD5RE_GEO_NET_SKEW_MAX_DEG    */
+/* [ROUND 1009 item 6] The cap was 65, which is 25 degrees off the route's own
+ * tangent. That is the right ceiling for a GRID, where a side street meets the
+ * road square or at the 45 of a La Plata diagonal, and anything steeper is a
+ * fold-back. It is the wrong ceiling AT A PLAZA, and Mariano's route passes
+ * three of them: the route curves hard around the square, so a perfectly
+ * ordinary street radiating off it is measured against a tangent that has
+ * already swung, and reads as 66..78 degrees. The ten skew refusals in his race
+ * log cluster exactly there -- spans 650/667/672, 800/806/808, 1400/1402 -- and
+ * each one is a street a driver plainly sees opening.
+ *
+ * 80 accepts nine of those ten and still refuses the tenth (span 1402, 89
+ * degrees), which is the case the cap exists for: 89 from the normal is 1 degree
+ * off the tangent, a way running ALONGSIDE the route, and mouthing it would draw
+ * a second carriageway down the kerb. The margin between 78 (the steepest real
+ * street) and 89 (the parallel way) is what makes 80 a defensible line rather
+ * than a tuned one. */
+#define TG_GEO_SKEW_MAX_DEG  80      /* default TD5RE_GEO_NET_SKEW_MAX_DEG    */
 #define TG_GEO_MARCH_COS_MIN 0.35    /* floor on cos(skew) for the own-paint
                                       * stand-off, so a steep diagonal is not
                                       * killed by the main road's own paint  */
+/* [ROUND 1009 item 6] How deep a real street is drawn.
+ *
+ * tg_city_crossst_reach is the SYNTHETIC answer -- sidewalk plus three facade
+ * blocks, 19500 units (45 m) for La Plata's biome -- and on a synthetic track it
+ * is also the honest answer, because the generator invented the street and may
+ * stop it where it likes. On a geo track the street is a real road that
+ * demonstrably continues, and tg_geo_straight_run has already measured how far.
+ * Capping that at 45 m is what Mariano is looking at: the audit
+ * (scripts/geo_road_audit.py) puts 31 of the 51 accepted arms at exactly 19500,
+ * so for sixty per cent of the streets on his route the stub ends mid-block for
+ * no reason in the data.
+ *
+ * The ceiling that IS real is the drawn ground: tg_far_reach() (30000 units,
+ * 70 m) is the outermost terrain beside the route, and a street past it floats.
+ * TD5_TG_R8_LAT_MAX (28000, 65 m) is the established "still beside the route"
+ * lateral, sits 2000 units inside the ground edge, and is already what the
+ * route-bbox test in tg_net_geo_streets uses -- so the depth and the candidate
+ * filter now agree on one number instead of two.
+ *
+ * This only ever RAISES a cap, and only when the real road's own straight run
+ * asks for it; tg_net_march still cuts the arm at the first street, carriageway
+ * or water it meets, so planarity is unchanged. */
+#define TG_GEO_DEPTH_MAX     TD5_TG_R8_LAT_MAX
 #define TG_GEO_ALONG_NUM     6       /* a way is the route when 6/10 of its   */
 #define TG_GEO_ALONG_DEN     10      /* samples run along it                  */
 /* [ROUND 1008b] Shared carriageway. See tg_geo_depart_hit. A sample is ON the
@@ -983,7 +1022,12 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
 
     b = &k_biomes[tg_scenery_biome_index(h->si)];
     {
-        const double cap = tg_city_crossst_reach(b, tg_city_sidewalk_w(b));
+        double cap = tg_city_crossst_reach(b, tg_city_sidewalk_w(b));
+        /* [ROUND 1009 item 6] see TG_GEO_DEPTH_MAX. The real road's own
+         * straight run is the authority; the facade-block reach is only a
+         * floor on how deep a geo street may go. */
+        if (td5_env_flag_on("TD5RE_GEO_NET_DEPTH") && cap < TG_GEO_DEPTH_MAX)
+            cap = TG_GEO_DEPTH_MAX;
         if (run > cap) run = cap;
     }
     if (s_gna >= TG_GEO_MAX_ARMS) { s_gs.d_full++; return; }
