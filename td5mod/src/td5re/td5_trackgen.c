@@ -5243,11 +5243,25 @@ int td5_trackgen_stream_scenery(volatile int *cancel)
     }
     tg_buf_free(&models);
 
-    /* (No per-build report here. The incoming commit called its TG_PF
+    /* (No per-build TIMING report here. The incoming commit called its TG_PF
      * per-emitter report at this point; master reports through the TG_ZONE
      * hierarchy from build_level, on the MAIN thread, and this function runs on
      * the streaming worker -- printing the shared zone tallies from here would
      * both race the main thread and attribute the worker's time to whatever
-     * build reports next.) */
+     * build reports next.)
+     *
+     * [GEO ROUND 1009] The GEO censuses are a different case and they do belong
+     * here. They are plain per-build counters written by the scenery emitters
+     * this loop just ran, and build_level prints them BEFORE this function
+     * exists -- so on a geo build, which streams by default, every one of them
+     * read zero while the geometry was plainly in MODELS.DAT. MEASURED on
+     * Mariano's own round-1009 race.log: "[GEO BUILD] emitted 0 real
+     * building(s)" and "[GEO PLAZA] 0 real area(s) laid" next to a level091
+     * holding both. A census that always reports zero is worse than none: it
+     * reads as a finding. No race to worry about -- the streaming worker holds
+     * the node list exclusively (td5_trackgen_stream_discard is what releases
+     * it), so no other build can be running. */
+    tg_geo_city_report();
+    tg_geo_plaza_report();
     return ok;
 }
