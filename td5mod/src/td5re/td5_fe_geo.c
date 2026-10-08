@@ -1064,8 +1064,14 @@ static void geo_do_build(void)
 
     if (!geo_route_is_buildable()) { frontend_play_sfx(10); return; }
     if (td5_geo_route_commit() != 0) {
+        /* [ROUND 1008] Say WHY. The commit refuses a degenerate route frame
+         * rather than writing one, and "COULD NOT SAVE THE ROUTE" for every
+         * cause is how the round-1007 corruption stayed invisible until it had
+         * already eaten the place cache. */
+        const char *why = td5_geo_route_commit_reason();
         frontend_play_sfx(10);
-        snprintf(s_reason, sizeof(s_reason), "COULD NOT SAVE THE ROUTE");
+        snprintf(s_reason, sizeof(s_reason), "%s",
+                 (why && why[0]) ? why : "COULD NOT SAVE THE ROUTE");
         s_verdict = TD5_GEO_ROUTE_ERROR;
         return;
     }

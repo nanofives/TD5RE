@@ -121,7 +121,7 @@ int td5_geo_signals_sync(void)
         return s_sig_count;            /* already this place */
 
     td5_geo_signals_unload();
-    snprintf(path, sizeof path, "re/assets/geo/%s/SIGNALS.JSON", slug);
+    td5_geo_place_path(path, sizeof path, slug, "SIGNALS.JSON");
 
     json = sig_slurp(path);
     if (!json) {

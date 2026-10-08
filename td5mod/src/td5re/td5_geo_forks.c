@@ -155,7 +155,7 @@ int td5_geo_forks_sync(void)
         return s_fk_count;             /* already this place */
 
     td5_geo_forks_unload();
-    snprintf(path, sizeof path, "re/assets/geo/%s/FORKS.JSON", slug);
+    td5_geo_place_path(path, sizeof path, slug, "FORKS.JSON");
     /* Remember the slug EVEN WHEN THERE IS NO FILE, so "this place has no
      * confirmed forks" is decided once per place rather than re-opening a
      * missing file on every span the walk asks about. */
