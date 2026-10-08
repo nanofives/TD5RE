@@ -7162,9 +7162,9 @@ static int hud_minimap_streets(float offset_x, float offset_z,
      * route by a wide margin -- that is the whole visual grammar: the route
      * reads as the road you are on, these as the map around it. */
     static const uint32_t k_col[TD5_MMS_RANK_COUNT] = {
-        0x8C5A5A5Au,   /* MINOR  -- service / back street / country lane */
-        0xB4707070u,   /* STREET -- residential, tertiary                */
-        0xD4868686u    /* MAJOR  -- secondary and up, avenues            */
+        0xA8707070u,   /* MINOR  -- service / back street / country lane */
+        0xC4808080u,   /* STREET -- residential, tertiary                */
+        0xE0989898u    /* MAJOR  -- secondary and up, avenues            */
     };
     static const float k_wide[TD5_MMS_RANK_COUNT] = { 0.45f, 0.62f, 0.85f };
 

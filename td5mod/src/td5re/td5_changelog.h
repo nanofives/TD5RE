@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 7 (minimap)" },
+    { CL_ITEM,    "The race minimap now draws the streets AROUND the" },
+    { CL_ITEM,    "  route, so you can see the crossings coming." },
+    { CL_ITEM,    "Real places show their actual street grid; the" },
+    { CL_ITEM,    "  auto track shows its own side streets." },
+    { CL_ITEM,    "The route stays bright and wide on top of them." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 7 (geospatial track generator)" },
     { CL_ITEM,    "SELECT TRACK has a GEOSPATIAL TRACK GENERATOR row." },
     { CL_ITEM,    "  It opens a real street map, starting on La Plata." },
