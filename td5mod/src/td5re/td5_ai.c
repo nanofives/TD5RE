@@ -244,6 +244,12 @@ static int32_t g_last_logged_opcode[TD5_MAX_TOTAL_ACTORS];
  * the ALIGNED band. See the recovery-trigger site for the rationale. */
 static uint8_t g_recovery_armed[TD5_MAX_TOTAL_ACTORS];
 
+/* [RECOVERY WATCHDOG 2026-10-08] Consecutive ticks the INITIAL RECOVERY program
+ * has been running for this actor. See the watchdog at the script-dispatch site:
+ * that one program never rotates out, and its flag-0x04 / flag-0x08 arms wait on
+ * an alignment a stationary car cannot produce, so it needs a time bound. */
+static int16_t g_recovery_ticks[TD5_MAX_TOTAL_ACTORS];
+
 /* Special encounter globals */
 int32_t g_encounter_tracked_handle = -1;    /* -1 = none */
 int32_t g_encounter_enabled;                 /* master gate */
@@ -793,6 +799,8 @@ int td5_ai_init(void) {
     memset(g_traffic_recovery_stage, 0, sizeof(g_traffic_recovery_stage));
     memset(g_encounter_active, 0, sizeof(g_encounter_active));
     memset(g_script_bank_index, 0, sizeof(g_script_bank_index));
+    memset(g_recovery_armed, 0, sizeof(g_recovery_armed));
+    memset(g_recovery_ticks, 0, sizeof(g_recovery_ticks));
     memset(g_last_logged_opcode, 0xFF, sizeof(g_last_logged_opcode));
     g_encounter_tracked_handle = -1;
     g_encounter_cooldown = 0;
@@ -6073,6 +6081,54 @@ void td5_ai_update_track_behavior(int slot) {
             rs[RS_SCRIPT_BASE_PTR] = 0;
             rs[RS_SCRIPT_IP] = 0;
         }
+        /* [RECOVERY WATCHDOG 2026-10-08] PORT-ONLY. Bound the INITIAL RECOVERY
+         * program in time. The countdown prologue rotates A<->B and C<->D every
+         * 0x96 ticks, but INIT_RECOVERY is explicitly left alone, so that one
+         * program only ends when its own alignment test passes -- and its
+         * flag-0x04 arm ramps STEERING_CMD by +0x4000 per tick to a hard
+         * +0x19000 while it waits. At a standstill the bicycle model generates
+         * no yaw torque, so the test can never pass and the car sits at full
+         * lock forever. This is the same self-sustaining shape the 2026-08-15
+         * arming hysteresis addressed on the ENTRY side; the hysteresis only
+         * gates arming, it gives an already-armed script no way out.
+         *
+         * MEASURED on La Plata (geo slot 61 / level091, difficulty 0, 5
+         * opponents, traffic OFF, 5303 sim ticks): slot 4 armed at span ~55,
+         * then held steer=+0x19000 / throttle 255 / brake 0 with |speed|
+         * oscillating 40..768 for the rest of the race -- 80.7% of its ticks at
+         * the clamp -- and never passed span 200. Slot 3 spent 59.5% the same way.
+         *
+         * After the cap, cancel the script and release the steering. The
+         * g_recovery_armed latch is deliberately LEFT SET: it only clears when
+         * the heading returns inside the aligned band, so a car that is still
+         * misaligned cannot immediately re-arm the same dead script, while a car
+         * that genuinely recovers can arm again later.
+         * TD5RE_AI_RECOVERY_MAX=0 restores the unbounded behaviour. */
+        if (rs[RS_SCRIPT_BASE_PTR] == SCRIPT_PROG_INIT_RECOVERY) {
+            static int s_rec_max = -1;
+            if (s_rec_max < 0)
+                s_rec_max = td5_env_int("TD5RE_AI_RECOVERY_MAX", 150, 0, 20000);
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                if (g_recovery_ticks[slot] < 30000) g_recovery_ticks[slot]++;
+                if (s_rec_max > 0 && g_recovery_ticks[slot] > s_rec_max) {
+                    TD5_LOG_I(LOG_TAG, "recovery: slot=%d script ABORTED after %d "
+                              "ticks (watchdog, span=%d lspd=%d steer=%d)",
+                              slot, (int)g_recovery_ticks[slot],
+                              (int)ACTOR_I16(actor, ACTOR_SPAN_RAW),
+                              (int)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
+                              (int)ACTOR_I32(actor, ACTOR_STEERING_CMD));
+                    rs[RS_SCRIPT_BASE_PTR] = 0;
+                    rs[RS_SCRIPT_IP]       = 0;
+                    rs[RS_SCRIPT_FLAGS]    = 0;
+                    ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+                    ACTOR_U8(actor,  ACTOR_BRAKE_FLAG)   = 0;
+                    g_recovery_ticks[slot] = 0;
+                }
+            }
+        } else if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+            g_recovery_ticks[slot] = 0;
+        }
+
         /* --- Script check: if a script is active, run it --- */
         if (rs[RS_SCRIPT_BASE_PTR] != 0) {
             int result = td5_ai_advance_track_script(rs);
