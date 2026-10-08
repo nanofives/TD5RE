@@ -1164,6 +1164,7 @@ void tg_network_reset(void)
     s_nn = s_ne = 0; s_net_built = 0; s_net_nspans = 0;
     s_stat_cand = s_stat_short = s_stat_tjunc = s_stat_water = s_stat_road = 0;
     s_gna = 0;
+    s_gdropn = 0;          /* or a regenerate replays the FIRST build's ledger */
     memset(&s_gs, 0, sizeof(s_gs));
     for (s = 0; s < TD5_TG_MAX_SPANS + 8; s++) {
         s_mouth[s][0].edge = s_mouth[s][1].edge = -1;
