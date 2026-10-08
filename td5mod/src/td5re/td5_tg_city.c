@@ -1260,7 +1260,17 @@ double tg_city_sidewalk_w_at(const TG_NodeList *nl, int si,
      * field, which handed every street in every mapped place the same 2.1 m
      * slab. Returns 0 where no mapped way is near enough, which falls through
      * to the procedural rules below unchanged, and the whole table is empty on
-     * a synthetic build so nothing there can observe this. */
+     * a synthetic build so nothing there can observe this.
+     *
+     * KNOWN LIMITATION, stated here because the next round will meet it. The
+     * side-blind tg_city_sidewalk_w(b) is read as a WIDTH by 48 call sites
+     * across six modules -- the junction pavement arm, the cross-street
+     * frontage setback, the branch kerb -- and those keep the biome width, so
+     * a corner arm can be a little narrower than the main pavement it turns
+     * off. That split is not new (TD5RE_R10_WIDEWALK already scaled only the
+     * _at form, up to 2000 raw against the arm's 900), and closing it means
+     * threading a width through tg_carriageway_clear_gap and every caller,
+     * which is a change of its own. */
     w = tg_geo_sidewalk_w(si);
     if (w > 0.0) return w;
     if (!td5_env_flag_on("TD5RE_R10_WIDEWALK")) return base;
@@ -1430,6 +1440,18 @@ int tg_facade_floors(int si, int left, const TG_Biome *b)
     int floors, av;
 
     if (!tg_facade_built(si, left)) return 0;
+    /* A biome with NO FACADE CELLS has no floor count, and the expression
+     * below takes a modulo by floors_extra -- which is 0 on five of the eight
+     * biomes (FIELDS, FOREST, ALPINE, COAST, ORIENTAL, all tree/billboard).
+     * Reaching here with one has always been a caller bug, because
+     * tg_emit_street_wall is only called on a facade biome, and the two
+     * existing callers both sit behind that. It is guarded anyway: the 1009
+     * item-10 probe briefly called this from tg_city_emit_backrows, which uses
+     * the span's own biome, and the synthetic identity gate died with
+     * STATUS_INTEGER_DIVIDE_BY_ZERO on a worker thread -- a landmine worth
+     * removing rather than leaving for the next caller to step on. No existing
+     * output can depend on it: the old code FAULTED on exactly this input. */
+    if (b->floors_extra <= 0) return 0;
     gh = tg_facade_run_id(si, left);
     floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
     if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
@@ -1716,7 +1738,22 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
 static int tg_geo_frontage_at(const TG_NodeList *nl, int si, int left,
                               const TG_Biome *b)
 {
-    double depth = tg_facade_depth(b);
+    double depth;
+    /* THE GEO EARLY-OUT COMES FIRST, and it is load-bearing.
+     *
+     * tg_geo_mass_at's own `!s_geo_city` return used to be the first thing
+     * either of these functions executed, so on a synthetic build they were a
+     * pure no-op. The 1009 item-10 fix put the run-depth lookup AHEAD of it,
+     * which made a synthetic build evaluate tg_facade_floors on every
+     * span-side -- and that CRASHED the synthetic gate with
+     * STATUS_INTEGER_DIVIDE_BY_ZERO, because tg_city_emit_backrows calls the
+     * back-row probe with the span's OWN biome and five of the eight biomes
+     * (FIELDS, FOREST, ALPINE, COAST, ORIENTAL) carry floors_extra = 0, which
+     * tg_facade_floors takes a modulo by. Nothing below this line may run
+     * without a place loaded: the byte-identity contract says so, and the
+     * crash is what happens when it does. */
+    if (!s_geo_city) return 0;
+    depth = tg_facade_depth(b);
     if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP")) {
         const int floors = tg_facade_floors(si, left, b);
         if (floors > 0) {
@@ -1732,8 +1769,9 @@ static int tg_geo_frontage_at(const TG_NodeList *nl, int si, int left,
 static int tg_geo_backrow_at(const TG_NodeList *nl, int si, int left,
                              const TG_Biome *b)
 {
-    double front = tg_facade_depth(b);
-    double d0;
+    double front, d0;
+    if (!s_geo_city) return 0;            /* see tg_geo_frontage_at */
+    front = tg_facade_depth(b);
     /* [ROUND 1009 item 10] Same correction as the frontage: the rows recede
      * from the BLOCK's back plane, which is the run's depth, not the biome's. */
     if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP")) {
