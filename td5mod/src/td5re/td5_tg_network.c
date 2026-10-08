@@ -628,17 +628,26 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
  * so for sixty per cent of the streets on his route the stub ends mid-block for
  * no reason in the data.
  *
- * The ceiling that IS real is the drawn ground: tg_far_reach() (30000 units,
- * 70 m) is the outermost terrain beside the route, and a street past it floats.
- * TD5_TG_R8_LAT_MAX (28000, 65 m) is the established "still beside the route"
- * lateral, sits 2000 units inside the ground edge, and is already what the
- * route-bbox test in tg_net_geo_streets uses -- so the depth and the candidate
- * filter now agree on one number instead of two.
+ * The ceiling that IS real is the FLAT VERGE, and it is tg_verge_reach()
+ * (TD5_TG_GROUND_WIDTH, 24000 units, 56 m) rather than the drawn ground's own
+ * outer edge at tg_far_reach() (30000). The street quad takes its height from
+ * tg_xstreet_drop, which is calibrated to exactly that number: it ramps the
+ * quad down by TD5_TG_GROUND_DROP (70 units) over the verge and then SATURATES.
+ * Past the verge the far band stops being flat and sinks toward
+ * tg_track_min_y - TD5_TG_FAR_SINK_AT, so a street drawn out there would hang
+ * level while the ground fell away under it. That is not a hypothetical: R17
+ * CITY item 1 is the same defect found on the park lawn, which had borrowed
+ * this very reach and "read as a giant floating green side street".
+ *
+ * So the depth stops where the drop model it is drawn with stops. 24000 against
+ * the old 19500 is a 23 per cent deeper street, every unit of it on ground that
+ * is flat by construction. Reaching the full 30000 needs the street to follow
+ * the sinking band, which is a different change in a different file.
  *
  * This only ever RAISES a cap, and only when the real road's own straight run
  * asks for it; tg_net_march still cuts the arm at the first street, carriageway
  * or water it meets, so planarity is unchanged. */
-#define TG_GEO_DEPTH_MAX     TD5_TG_R8_LAT_MAX
+#define TG_GEO_DEPTH_MAX     (tg_verge_reach())
 #define TG_GEO_ALONG_NUM     6       /* a way is the route when 6/10 of its   */
 #define TG_GEO_ALONG_DEN     10      /* samples run along it                  */
 /* [ROUND 1008b] Shared carriageway. See tg_geo_depart_hit. A sample is ON the
