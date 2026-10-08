@@ -423,6 +423,37 @@ static void tg_road_solve(TG_NodeList *nl, int a, int n)
     }
 }
 
+/* [ROUND 1008 item 4] On a GEO route the two TERRAIN rules below are OFF.
+ *
+ * They exist because a synthetic road is a free-floating polyline over invented
+ * ground: wherever the grade limiter cannot follow the terrain, the gap IS the
+ * structure, and calling it a viaduct or a bore is the only honest reading. A
+ * real road is the opposite -- it was surveyed onto the ground that the DEM
+ * measured, and OSM already says where its bridges and tunnels are. Any residual
+ * gap between the conditioned profile and the DEM is the conditioner's grade
+ * limit and the DEM's own 30 m sampling arguing with each other, not a structure
+ * anybody built. Letting it mint a viaduct is how a plain street becomes a
+ * bridge, which is half of Mariano's item 4.
+ *
+ * What a geo route keeps: `r->wet` (real water under the road, from WATER.R8 via
+ * tg_world_water_y) and a planned Option-B grade separation, which is read off
+ * ROUTE.JSON's own crossing list and signals itself through s_xsep_in. Nothing
+ * else may promote a span.
+ *
+ * Measured on La Plata before the change: the terrain rules already fired ZERO
+ * times ([R22 RELIEF] 0 would-be viaducts / 0 would-be tunnels, max lift 0, max
+ * cut 0), so this is a GUARD on the flat case rather than a fix for it -- it is
+ * the hilly places (Valparaiso's box has a worst cell gradient of 1.69 against
+ * the 0.20 road cap) where the rules would otherwise invent decks.
+ *
+ * TD5RE_GEO_STRUCT_OSM=0 restores the terrain rules on a geo route for an A/B.
+ * A synthetic build never reaches the gate. */
+static int tg_road_geo_struct_from_data(void)
+{
+    return td5_geo_loaded() && td5_geo_route_count() >= 2
+        && td5_env_flag_on("TD5RE_GEO_STRUCT_OSM");
+}
+
 /* Raw per-node verdict from the solved profile. */
 static int tg_road_node_kind(const TG_NodeList *nl, int i)
 {
@@ -430,6 +461,7 @@ static int tg_road_node_kind(const TG_NodeList *nl, int i)
     const double d = nl->v[i].y - r->h;
     if (r->force) return TG_ST_NONE;
     if (r->wet) return tg_bridges_enabled() ? TG_ST_BRIDGE : TG_ST_NONE;
+    if (tg_road_geo_struct_from_data() && !s_xsep_in[i]) return TG_ST_NONE;
     if (d < -TG_ROAD_TUNNEL_DEPTH) return tg_tunnels_enabled() ? TG_ST_TUNNEL : TG_ST_NONE;
     if (d >  TG_ROAD_BRIDGE_LIFT)  return tg_bridges_enabled() ? TG_ST_BRIDGE : TG_ST_NONE;
     return TG_ST_NONE;

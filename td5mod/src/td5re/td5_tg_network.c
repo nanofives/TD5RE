@@ -628,6 +628,39 @@ static struct {
     long why_road, why_street, why_water;
 } s_gs;
 
+/* [ROUND 1008 item 4] Per-arm drop ledger.
+ *
+ * The census counts WHY arms were refused but not WHERE, and the two questions
+ * have different answers: on La Plata 53 of 94 arms are accepted, which reads
+ * as decent coverage until the built mouths are diffed against the real OSM
+ * junctions -- 35 junction spans built, 21 real junctions with nothing within
+ * 6 spans, and the missing ones come in RUNS (spans 672..781, 1296..1347)
+ * rather than scattered. A run means one rule is firing repeatedly in one
+ * place, which a total cannot show. Each refusal now records its span and side
+ * so the ledger below names the streets Mariano could not see. Capped; the
+ * overflow is still counted by the census. */
+#define TG_GEO_DROP_MAX 96
+static struct { short si; unsigned char left, why; } s_gdrop[TG_GEO_DROP_MAX];
+static int s_gdropn;
+
+enum {
+    TG_GD_GRID = 0, TG_GD_STRUCT, TG_GD_BIOME, TG_GD_PARK, TG_GD_CORRIDOR,
+    TG_GD_SKEW, TG_GD_SHORT, TG_GD_TAKEN, TG_GD_FOLD, TG_GD_FULL, TG_GD_N
+};
+static const char *const k_gd_name[TG_GD_N] = {
+    "grid", "struct", "biome", "park", "corridor",
+    "skew", "short", "taken", "fold", "table-full"
+};
+
+static void tg_geo_drop_note(int si, int left, int why)
+{
+    if (s_gdropn >= TG_GEO_DROP_MAX) return;
+    s_gdrop[s_gdropn].si   = (short)si;
+    s_gdrop[s_gdropn].left = (unsigned char)(left ? 1 : 0);
+    s_gdrop[s_gdropn].why  = (unsigned char)why;
+    s_gdropn++;
+}
+
 /* Nearest main-route node to (x,z). Coarse stride first, then a full refine
  * around EVERY coarse sample that could still hold the answer: moving
  * TG_GEO_COARSE nodes changes the distance to a fixed point by at most
@@ -832,7 +865,9 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
 
     skew = tg_geo_skew_of(e[6], e[7], dx, dz);
     s_gs.cand++;
-    if (fabs(skew) > skewmax) { s_gs.d_skew++; return; }
+    if (fabs(skew) > skewmax) {
+        s_gs.d_skew++; tg_geo_drop_note(h->si, left, TG_GD_SKEW); return;
+    }
 
     /* The run is measured from the JUNCTION (so `off` is the true offset from
      * the real road's bearing) and then shortened to start at the kerb, which
@@ -841,7 +876,9 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
     kerb = (e[0] - h->x) * dx + (e[2] - h->z) * dz;
     if (kerb < 0.0) kerb = 0.0;
     run -= kerb;
-    if (run < TD5_TG_R8_CLAMP_MIN) { s_gs.d_short++; return; }
+    if (run < TD5_TG_R8_CLAMP_MIN) {
+        s_gs.d_short++; tg_geo_drop_note(h->si, left, TG_GD_SHORT); return;
+    }
 
     b = &k_biomes[tg_scenery_biome_index(h->si)];
     {
@@ -871,26 +908,31 @@ static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
     /* Off the ends, or on the start grid. Spans below TD5_TG_FACADE_START_RUN
      * are FORCED built by tg_facade_built, so a mouth there would be claimed by
      * tg_xstreet_here and then never emitted -- the two authorities must agree. */
-    if (lo < 1 || hi >= nspans || hi + 1 >= nl->count) return (s_gs.d_grid++, 0);
+    if (lo < 1 || hi >= nspans || hi + 1 >= nl->count)
+        return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID), 0);
     if (lo < TD5_TG_FACADE_START_RUN
-        && td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY")) return (s_gs.d_grid++, 0);
+        && td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
+        return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID), 0);
 
     for (s = lo; s <= hi; s++) {
         if (tg_span_in_bridge_run(s) || tg_span_in_tunnel(s))
-            return (s_gs.d_struct++, 0);
+            return (s_gs.d_struct++, tg_geo_drop_note(si, left, TG_GD_STRUCT), 0);
         if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE")
             && tg_span_near_bridge(s, TD5_TG_XBRIDGE_CLEAR))
-            return (s_gs.d_struct++, 0);
+            return (s_gs.d_struct++, tg_geo_drop_note(si, left, TG_GD_STRUCT), 0);
         /* An unpaved biome has no sidewalk, and tg_facade_built only consults
          * the mouth table where one exists. */
         if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(s)]) > 0.0))
-            return (s_gs.d_biome++, 0);
-        if (tg_block_is_park(s, left))          return (s_gs.d_park++, 0);
-        if (tg_side_corridor_here(nl, s, sg))   return (s_gs.d_corridor++, 0);
+            return (s_gs.d_biome++, tg_geo_drop_note(si, left, TG_GD_BIOME), 0);
+        if (tg_block_is_park(s, left))
+            return (s_gs.d_park++, tg_geo_drop_note(si, left, TG_GD_PARK), 0);
+        if (tg_side_corridor_here(nl, s, sg))
+            return (s_gs.d_corridor++, tg_geo_drop_note(si, left, TG_GD_CORRIDOR), 0);
         /* Inside the carriageway is what a second mouth on one (span,side)
          * amounts to: the table is single-valued and the emitters would draw
          * two overlapping quads out of one kerb. */
-        if (s_mouth[s][left ? 0 : 1].edge >= 0) return (s_gs.d_taken++, 0);
+        if (s_mouth[s][left ? 0 : 1].edge >= 0)
+            return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN), 0);
     }
     *lo_out = lo; *hi_out = hi;
     return 1;
@@ -1037,7 +1079,8 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         pre   = reach;
         reach = tg_r13_fold_cap(nl, a->si, sg, a->skew, reach, "TD5RE_R13_FOLD_STREET");
         if (reach < TD5_TG_R8_CLAMP_MIN) {
-            if (reach < pre) s_gs.d_fold++; else s_gs.d_short++;
+            if (reach < pre) { s_gs.d_fold++;  tg_geo_drop_note(a->si, a->left, TG_GD_FOLD); }
+            else             { s_gs.d_short++; tg_geo_drop_note(a->si, a->left, TG_GD_SHORT); }
             continue;
         }
 
@@ -1049,7 +1092,7 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
                          tg_world_h(e[0] + ox * reach, e[2] + oz * reach),
                          why == 2 ? 1 : 2, -1);
         ed = tg_net_edge_new(na, nb, kind, width);
-        if (!ed) { s_gs.d_full++; return; }
+        if (!ed) { s_gs.d_full++; tg_geo_drop_note(a->si, a->left, TG_GD_FULL); return; }
         ed->mouth_si = a->si; ed->mouth_left = a->left;
         ed->mouth_lo = lo;    ed->mouth_hi   = hi;
         ed->skew = a->skew;   ed->reach      = reach;
@@ -1089,6 +1132,18 @@ static void tg_net_geo_census(void)
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
               s_gs.why_road, s_gs.why_street, s_gs.why_water);
+    /* The ledger: one line per refused arm, so a RUN of missing crossings
+     * names its own rule instead of hiding inside a total. */
+    {
+        int i;
+        for (i = 0; i < s_gdropn; i++)
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO]   refused span %4d %-5s: %s",
+                      (int)s_gdrop[i].si, s_gdrop[i].left ? "left" : "right",
+                      k_gd_name[s_gdrop[i].why < TG_GD_N ? s_gdrop[i].why : 0]);
+        if (s_gdropn >= TG_GEO_DROP_MAX)
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO]   (ledger full at %d; the "
+                      "census totals above are complete)", TG_GEO_DROP_MAX);
+    }
 }
 
 /* -------------------------------------------------------------- build -- */
