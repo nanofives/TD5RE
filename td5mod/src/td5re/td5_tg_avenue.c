@@ -215,7 +215,20 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     moff[(*nmesh)++] = blk->len;
     if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2))
         return 0;
-    tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHSIDE, si);
+    /* TG_GK_ROAD, an EXEMPT kind, and it has to be.
+     *
+     * MEASURED: marked TG_GK_BRANCHSIDE (a SCENERY class) the on-road guard
+     * deleted 447 of these on Mariano's route -- one for every avenue span --
+     * and the median came out as flat ground between the two carriageways
+     * instead of a kerbed island. Of course it did: the island sits BETWEEN
+     * two carriageways, so it is inside the envelope by construction, and
+     * "scenery overlapping the carriageway" is exactly what the guard is for.
+     *
+     * The synthetic divider is exempt the same way, just less visibly: in
+     * td5_trackgen.c the whole road+gore+divider byte range is marked
+     * TG_GK_ROAD in one call. This is that authored-geometry claim made
+     * explicitly for the geo island. */
+    tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_ROAD, si);
     return 1;
 }
 
