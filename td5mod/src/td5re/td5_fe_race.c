@@ -9436,6 +9436,14 @@ void Screen_TrackSelection(void) {
                     if (s_selected_track < 0) s_selected_track = 0;  /* drop any stale -1 */
                     frontend_cycle_track(delta, 0, s_track_max);
                 }
+                /* [GEO ROW REMOVAL 2026-10-08] Backstop for the legacy 2P
+                 * branch above, which steps s_selected_track by hand and only
+                 * reaches frontend_cycle_track (where the arm is dropped) when
+                 * the slot it landed on is excluded or absent. Without this, an
+                 * arrow press that walked straight onto a valid slot would
+                 * leave the arm set and let the place be cycled back onto. */
+                if (s_selected_track != frontend_geo_pick_slot())
+                    frontend_geo_pick_arm(-1);
                 frontend_play_sfx(2); /* ping2.wav cycle */
                 TD5_LOG_I(LOG_TAG, "TrackSel CYCLED: track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),

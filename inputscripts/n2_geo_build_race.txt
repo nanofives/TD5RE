@@ -1,0 +1,19 @@
+# [1008 N2 item 5] BUILD TRACK on the dev-seeded route, then press OK on SELECT
+# TRACK and actually race the armed (otherwise hidden) place slot. Checks the
+# whole chain: the selector accepts the armed pick, OK launches, the loading
+# screen and HUD name the place, and the race runs.
+# SELECT TRACK rows visible on a point-to-point geo pick, top to bottom:
+# TRACK (97), GEOSPATIAL TRACK GENERATOR (268), RACE OPTIONS (344), OK (386).
+# UP/DOWN move focus, LEFT/RIGHT cycle a selector's value, so three DOWNs reach
+# OK without touching the TRACK row (which would retire the arm).
+sync menu
+300 log GEO_SETTLED
++8 key right press
++30 key enter press
++420 log AFTER_BUILD
++30 key down press
++20 key down press
++20 key down press
++30 key enter press
++1800 log AFTER_RACE_START
++600 quit
