@@ -1417,6 +1417,11 @@ static int16_t  s_racer_escape_cooldown[TD5_MAX_TOTAL_ACTORS]; /* post-burst re-
 static uint8_t  s_racer_has_moved[TD5_MAX_TOTAL_ACTORS];       /* gate: don't act at the start line */
 static uint8_t  s_racer_stall_active[TD5_MAX_TOTAL_ACTORS];    /* 1 = sustained low-speed steer-around running */
 static int16_t  s_racer_recover_ticks[TD5_MAX_TOTAL_ACTORS];   /* ticks back up to speed (release the steer) */
+/* [WEDGE DEADLOCK 2026-10-08] duration + re-arm bookkeeping for the sustained
+ * steer-around, so it can no longer run for the whole race. See the
+ * racer_collision_escape header note. */
+static int16_t  s_racer_stall_ticks[TD5_MAX_TOTAL_ACTORS];     /* ticks the current steer-around has run */
+static int16_t  s_racer_stall_block[TD5_MAX_TOTAL_ACTORS];     /* ticks the steer-around may NOT re-arm */
 /* V2V grind detection: physics sets the flag each tick this racer touches a car;
  * the leaky load climbs while grinding and decays when clear (catches an
  * intermittent side-by-side rub that a speed/progress test misses). */
@@ -1459,6 +1464,8 @@ void td5_traffic_smart_reset(void) {
         s_racer_has_moved[i]       = 0;
         s_racer_stall_active[i]    = 0;
         s_racer_recover_ticks[i]   = 0;
+        s_racer_stall_ticks[i]     = 0;
+        s_racer_stall_block[i]     = 0;
         s_racer_contact_flag[i]    = 0;
         s_racer_contact_peer[i]    = -1;
         s_racer_contact_load[i]    = 0;
@@ -1775,10 +1782,49 @@ static int traffic_lane_is_clear(int self_slot, int self_span,
 #define RACER_GRIND_LOAD      30     /* fast same-speed grind -> brake-yield        */
 #define RACER_BLOCK_LOAD      12     /* slow + this much contact -> blocked, steer around */
 
+/* [WEDGE DEADLOCK 2026-10-08] PORT-ONLY. The sustained steer-around above had
+ * no bounded duration, and in a multi-car wedge NONE of its three release tests
+ * can ever fire:
+ *   - `aspd > RACER_RECOVER_SPEED` -- the manoeuvre itself holds the car at full
+ *     lock on a feathered 0x18 throttle, so it never gets near 0x3000;
+ *   - `contact_load == 0`         -- load gains 6 per touching tick and sheds 1
+ *     per clear tick, so a car touching on alternate ticks sits pinned at the
+ *     cap of 60;
+ *   - `side == 0`                 -- always false on a multi-lane road.
+ * MEASURED on La Plata (geo slot 61 / level091, 5 AI + traffic, pinned trace
+ * seed, 5990 sim ticks): slots 4 and 5 spent 3393 and 3453 ticks -- 57% and 58%
+ * of the race -- inside this latch, parked across spans 123..128, each at full
+ * lock (steer +/-0x12000) with throttle alternating 0x18/0x50 exactly as this
+ * branch writes it. Slot 2 added 1398 ticks at 126..129. The log shows the ring:
+ * slot 4 BLOCKED peer=5, slot 5 BLOCKED peer=2, slot 2 BLOCKED peer=4 -- three
+ * cars steering INTO each other, each waiting for the others to move.
+ *
+ * Two changes, both deterministic (tick counters + span-accum + slot index, no
+ * rand), so MP lockstep and replays are preserved:
+ *   1. a hard duration cap plus a re-arm hold, so one episode can never outlast
+ *      ~4 s and cannot immediately re-latch;
+ *   2. a MUTUAL-WEDGE tie-break: when the car we are pressed against is itself
+ *      steering around, the one BEHIND (lower span-accum; higher slot on a tie,
+ *      the same rule the GRIND branch already uses) stops pushing and brake-
+ *      yields instead, so the pair separates longitudinally and the car ahead's
+ *      steer-around has somewhere to go.
+ * TD5RE_AI_UNSTICK_TIMEOUT=0 restores the unbounded pre-2026-10-08 behaviour. */
+#define RACER_STALL_MAX_TICKS  120   /* ~4 s cap on one sustained steer-around     */
+#define RACER_STALL_REARM_HOLD  90   /* ~3 s before the steer-around may re-arm    */
+#define RACER_WEDGE_YIELD      45    /* ~1.5 s brake-back for the wedge's rear car */
+
 /* Default ON; TD5RE_AI_UNSTICK=0 disables (restores the faithful no-escape AI). */
 static int racer_unstick_enabled(void) {
     static int v = -1;
     if (v < 0) { v = td5_env_flag_on("TD5RE_AI_UNSTICK"); }
+    return v;
+}
+
+/* [WEDGE DEADLOCK 2026-10-08] Default ON; TD5RE_AI_UNSTICK_TIMEOUT=0 restores
+ * the unbounded steer-around for an A/B. */
+static int racer_unstick_timeout_enabled(void) {
+    static int v = -1;
+    if (v < 0) { v = td5_env_flag_on("TD5RE_AI_UNSTICK_TIMEOUT"); }
     return v;
 }
 
@@ -1857,19 +1903,22 @@ void racer_collision_escape(int slot) {
     if (aspd > RACER_STUCK_SPEED) s_racer_has_moved[slot] = 1;
 
     if (s_racer_escape_cooldown[slot] > 0) s_racer_escape_cooldown[slot]--;
+    if (s_racer_stall_block[slot] > 0)     s_racer_stall_block[slot]--;
 
     /* ---- 1. SUSTAINED low-speed steer-around (blocked behind a car / wedge). ----
      * Blocked = has moved this race, is now slow, and is touching a car. At low
      * speed a firm steer is safe (no high-speed yank), and SUSTAINING it (rather
      * than a burst+cooldown that lets the car drift back into the obstacle) is
-     * what actually gets it past a stopped/slow car instead of sitting there. */
+     * what actually gets it past a stopped/slow car instead of sitting there.
+     * Bounded since 2026-10-08 — see the WEDGE DEADLOCK note above. */
     if (s_racer_has_moved[slot] && aspd < RACER_STUCK_SPEED &&
         s_racer_contact_load[slot] >= RACER_BLOCK_LOAD) {
-        if (!s_racer_stall_active[slot]) {
+        if (!s_racer_stall_active[slot] && s_racer_stall_block[slot] == 0) {
             int8_t side = racer_escape_pick_side(slot, actor);
             if (side != 0) {              /* only escape if there's a safe on-track way around */
                 s_racer_stall_active[slot] = 1;
                 s_racer_escape_side[slot]  = side;
+                s_racer_stall_ticks[slot]  = 0;
                 TD5_LOG_I(LOG_TAG,
                     "racer_unstick: slot=%d BLOCKED peer=%d spd=%d -> steer-around side=%d",
                     slot, peer, (int)aspd, (int)side);
@@ -1883,18 +1932,62 @@ void racer_collision_escape(int slot) {
          * side walk it off the track. side==0 means we've reached an edge / run
          * out of safe room, so abandon the maneuver. */
         int8_t side = racer_escape_pick_side(slot, actor);
+        const char *why = NULL;
+        int yield = 0;
         if (side != 0) s_racer_escape_side[slot] = side;
         /* Release when back up to speed for a few ticks (got around), OR as soon
          * as we're no longer touching anything (pulled clear) — the latter stops
          * the car steering in a circle out in open space. */
         if (aspd > RACER_RECOVER_SPEED) s_racer_recover_ticks[slot]++;
         else                            s_racer_recover_ticks[slot] = 0;
-        if (side == 0 ||
+
+        if (racer_unstick_timeout_enabled()) {
+            s_racer_stall_ticks[slot]++;
+            /* MUTUAL WEDGE: the car we are pressed against is steering around
+             * too, so both are pushing and neither can move. The one BEHIND
+             * stops pushing (brake-yield) to open the gap. Deterministic: the
+             * same span-accum / slot-index rule the GRIND branch below uses. */
+            if (contacted && peer >= 0 && peer < TD5_MAX_TOTAL_ACTORS &&
+                peer != slot && s_racer_stall_active[peer]) {
+                char *pa = actor_ptr(peer);
+                int my_acc   = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_ACCUM);
+                int peer_acc = pa ? (int)(int16_t)ACTOR_I16(pa, ACTOR_SPAN_ACCUM) : my_acc;
+                int gap      = my_acc - peer_acc;
+                if ((gap < -1) || (gap <= 1 && gap >= -1 && slot > peer)) {
+                    yield = 1;
+                    why   = "mutual-wedge yield";
+                }
+            }
+            if (!yield && s_racer_stall_ticks[slot] >= RACER_STALL_MAX_TICKS)
+                why = "timeout";
+        }
+
+        if (why != NULL || side == 0 ||
             s_racer_recover_ticks[slot] >= RACER_RECOVER_HOLD ||
             s_racer_contact_load[slot] == 0) {
+            if (why)
+                TD5_LOG_I(LOG_TAG,
+                    "racer_unstick: slot=%d steer-around RELEASED after %d ticks "
+                    "(%s, peer=%d spd=%d load=%d)",
+                    slot, (int)s_racer_stall_ticks[slot], why, peer,
+                    (int)aspd, (int)s_racer_contact_load[slot]);
             s_racer_stall_active[slot]  = 0;
             s_racer_recover_ticks[slot] = 0;
             s_racer_escape_side[slot]   = 0;
+            s_racer_stall_ticks[slot]   = 0;
+            if (why) {
+                /* Both exits are "this manoeuvre is not working": hold off
+                 * re-arming so the normal racing driver gets a clear run at
+                 * the problem instead of the latch re-engaging next tick. */
+                s_racer_stall_block[slot] = RACER_STALL_REARM_HOLD;
+                s_racer_contact_load[slot] = 0;
+            }
+            if (yield) {
+                /* Stop pushing: reuse the existing brake-yield burst so the
+                 * pair separates longitudinally. */
+                s_racer_escape_ticks[slot]    = RACER_WEDGE_YIELD;
+                s_racer_escape_cooldown[slot] = RACER_WEDGE_YIELD + RACER_ESCAPE_COOLDOWN;
+            }
         } else {
             /* Steer toward the open side. While still TOUCHING the obstacle,
              * barely feather the throttle so we redirect AROUND it instead of

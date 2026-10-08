@@ -2959,6 +2959,22 @@ static void init_race_modes_and_seed(void)
             } else {
                 session_seed = (uint32_t)GetTickCount();
             }
+#ifndef TD5RE_RELEASE
+            /* [STALL HARNESS 2026-10-08] DEV-ONLY: pin the per-race seed from
+             * the environment. The trace path above fixes it at 0x1A2B3C4D,
+             * which makes "does this hold across race seeds" unmeasurable while
+             * a trace is running -- exactly the question an AI pile-up has to
+             * answer. Unset = no change; a netplay race still wins above. */
+            {
+                int ov = td5_env_int_opt("TD5RE_RACE_SEED", 0, 0x7FFFFFFF, -1);
+                if (ov >= 0) {
+                    session_seed = (uint32_t)ov;
+                    TD5_LOG_I(LOG_TAG,
+                              "InitRace step 0/19: TD5RE_RACE_SEED override seed=0x%08X",
+                              session_seed);
+                }
+            }
+#endif
             s_saved_race_seed = session_seed;   /* capture for a later View Replay */
         }
         srand(session_seed);

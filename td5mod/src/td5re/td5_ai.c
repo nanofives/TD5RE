@@ -244,6 +244,12 @@ static int32_t g_last_logged_opcode[TD5_MAX_TOTAL_ACTORS];
  * the ALIGNED band. See the recovery-trigger site for the rationale. */
 static uint8_t g_recovery_armed[TD5_MAX_TOTAL_ACTORS];
 
+/* [RECOVERY WATCHDOG 2026-10-08] Consecutive ticks the INITIAL RECOVERY program
+ * has been running for this actor. See the watchdog at the script-dispatch site:
+ * that one program never rotates out, and its flag-0x04 / flag-0x08 arms wait on
+ * an alignment a stationary car cannot produce, so it needs a time bound. */
+static int16_t g_recovery_ticks[TD5_MAX_TOTAL_ACTORS];
+
 /* Special encounter globals */
 int32_t g_encounter_tracked_handle = -1;    /* -1 = none */
 int32_t g_encounter_enabled;                 /* master gate */
@@ -793,6 +799,8 @@ int td5_ai_init(void) {
     memset(g_traffic_recovery_stage, 0, sizeof(g_traffic_recovery_stage));
     memset(g_encounter_active, 0, sizeof(g_encounter_active));
     memset(g_script_bank_index, 0, sizeof(g_script_bank_index));
+    memset(g_recovery_armed, 0, sizeof(g_recovery_armed));
+    memset(g_recovery_ticks, 0, sizeof(g_recovery_ticks));
     memset(g_last_logged_opcode, 0xFF, sizeof(g_last_logged_opcode));
     g_encounter_tracked_handle = -1;
     g_encounter_cooldown = 0;
@@ -6026,6 +6034,36 @@ void td5_ai_update_track_behavior(int slot) {
               ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
 
+    /* [STALL DIAG 2026-10-08] DEV-ONLY, env-gated, zero cost when off. A car
+     * that sits at the +-0x18000/0x19000 steering clamp forever can mean two
+     * very different things: a LIVE script holding it there, or a STALE value
+     * that nothing rewrites any more. The first is a latch to bound, the second
+     * is a missing write -- and guessing between them has already cost one
+     * wrong attribution this round. This prints, for any slow car, who is
+     * holding the wheel: the script program + flags + countdown alongside the
+     * steering command seen on ENTRY. No lines for a slot at all means this
+     * function is not running for it. TD5RE_STALL_DIAG=1. */
+#ifndef TD5RE_RELEASE
+    {
+        static int s_sd = -1;
+        if (s_sd < 0) s_sd = td5_env_flag_off("TD5RE_STALL_DIAG");
+        if (s_sd) {
+            int32_t lsp = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            int32_t alsp = lsp < 0 ? -lsp : lsp;
+            if (alsp < 0x1800 && (g_ai_frame_counter % 30u) == 0u) {
+                TD5_LOG_I(LOG_TAG, "stall_diag: slot=%d span=%d lspd=%d "
+                          "steer_in=%d prog=%d flags=0x%X cdn=%d enc=%d brk=%d",
+                          slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), (int)lsp,
+                          (int)ACTOR_I32(actor, ACTOR_STEERING_CMD),
+                          (int)rs[RS_SCRIPT_BASE_PTR], (unsigned)rs[RS_SCRIPT_FLAGS],
+                          (int)rs[RS_SCRIPT_COUNTDOWN],
+                          (int)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER),
+                          (int)ACTOR_U8(actor, ACTOR_BRAKE_FLAG));
+            }
+        }
+    }
+#endif
+
     /* No countdown pre-seed: the original at 0x00434FE0 has NO countdown
      * gate and NO paused-branch write of encounter_steering_cmd (+0x33E) /
      * brake_flag (+0x36D) — the cascade below reaches
@@ -6073,6 +6111,74 @@ void td5_ai_update_track_behavior(int slot) {
             rs[RS_SCRIPT_BASE_PTR] = 0;
             rs[RS_SCRIPT_IP] = 0;
         }
+        /* [RECOVERY WATCHDOG 2026-10-08] PORT-ONLY. Bound the INITIAL RECOVERY
+         * program in time. The countdown prologue rotates A<->B and C<->D every
+         * 0x96 ticks, but INIT_RECOVERY is explicitly left alone, so that one
+         * program only ends when its own alignment test passes -- and its
+         * flag-0x04 arm ramps STEERING_CMD by +0x4000 per tick to a hard
+         * +0x19000 while it waits. At a standstill the bicycle model generates
+         * no yaw torque, so the test can never pass and the car sits at full
+         * lock forever. This is the same self-sustaining shape the 2026-08-15
+         * arming hysteresis addressed on the ENTRY side; the hysteresis only
+         * gates arming, it gives an already-armed script no way out.
+         *
+         * MEASURED on La Plata (geo slot 61 / level091, difficulty 0, 5
+         * opponents, traffic OFF, 5303 sim ticks): slot 4 armed at span ~55,
+         * then held steer=+0x19000 / throttle 255 / brake 0 with |speed|
+         * oscillating 40..768 for the rest of the race -- 80.7% of its ticks at
+         * the clamp -- and never passed span 200. Slot 3 spent 59.5% the same way.
+         *
+         * After the cap, cancel the script and release the steering. The
+         * g_recovery_armed latch is deliberately LEFT SET: it only clears when
+         * the heading returns inside the aligned band, so a car that is still
+         * misaligned cannot immediately re-arm the same dead script, while a car
+         * that genuinely recovers can arm again later.
+         * TD5RE_AI_RECOVERY_MAX=0 restores the unbounded behaviour. */
+        {
+            static int s_rec_max = -1;
+            int32_t lspd_wd  = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            int32_t alspd_wd = lspd_wd < 0 ? -lspd_wd : lspd_wd;
+            /* The latch is the FLAGS, not the program identity. MEASURED with
+             * TD5RE_STALL_DIAG on the failing run: slot 4 sat at span 164 with
+             * prog=1 (SCRIPT_PROG_A, NOT INIT_RECOVERY), flags=0x6, countdown
+             * cycling 186->156->126->96->66, steering pinned at 102400. The
+             * prologue keeps rotating A<->B so the script never ends, while
+             * flag 0x04 re-slams the wheel to the clamp every tick. */
+            int armed_ramp = (rs[RS_SCRIPT_BASE_PTR] != 0) &&
+                             (rs[RS_SCRIPT_FLAGS] & 0x0C) != 0;
+            if (s_rec_max < 0)
+                s_rec_max = td5_env_int("TD5RE_AI_RECOVERY_MAX", 150, 0, 20000);
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+                /* Count only while BOTH hold: a ramp arm is set AND the car is
+                 * below a crawl. That is the unsatisfiable case -- at a
+                 * standstill the bicycle model makes no yaw torque, so the
+                 * alignment test the arm waits on can never pass. An authored
+                 * script arm on a MOVING car is left completely alone, which is
+                 * what keeps shipped-track scripts out of scope. */
+                if (armed_ramp && alspd_wd < 0x1800) {
+                    if (g_recovery_ticks[slot] < 30000) g_recovery_ticks[slot]++;
+                } else {
+                    g_recovery_ticks[slot] = 0;
+                }
+                if (s_rec_max > 0 && g_recovery_ticks[slot] > s_rec_max) {
+                    TD5_LOG_I(LOG_TAG, "recovery: slot=%d script ABORTED after %d "
+                              "stalled ticks (watchdog, span=%d lspd=%d steer=%d "
+                              "prog=%d flags=0x%X)",
+                              slot, (int)g_recovery_ticks[slot],
+                              (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), (int)lspd_wd,
+                              (int)ACTOR_I32(actor, ACTOR_STEERING_CMD),
+                              (int)rs[RS_SCRIPT_BASE_PTR],
+                              (unsigned)rs[RS_SCRIPT_FLAGS]);
+                    rs[RS_SCRIPT_BASE_PTR] = 0;
+                    rs[RS_SCRIPT_IP]       = 0;
+                    rs[RS_SCRIPT_FLAGS]    = 0;
+                    ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
+                    ACTOR_U8(actor,  ACTOR_BRAKE_FLAG)   = 0;
+                    g_recovery_ticks[slot] = 0;
+                }
+            }
+        }
+
         /* --- Script check: if a script is active, run it --- */
         if (rs[RS_SCRIPT_BASE_PTR] != 0) {
             int result = td5_ai_advance_track_script(rs);
