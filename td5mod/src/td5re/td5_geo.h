@@ -153,8 +153,8 @@ void   td5_geo_grid(int *out_w, int *out_h, double *out_cell,
 
 /* ---------------------------------------------------------------- route ---
  * [GEO PHASE 3 2026-09-30] The conditioned centerline geo_condition.py writes
- * (ROUTE.JSON: points[] of {x, z, lanes}, node 0 at the origin, a straight
- * +X lead-in, chord spacing of exactly span_length). When one is loaded,
+ * (ROUTE.JSON: points[] of {x, z, lanes}, node 0 at the origin, its first span
+ * along +X, chord spacing of exactly span_length). When one is loaded,
  * tg_build_centerline pushes these nodes instead of walking sections, and the
  * track length follows the route.
  *
