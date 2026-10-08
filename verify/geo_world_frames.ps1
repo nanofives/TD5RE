@@ -14,6 +14,7 @@ param(
     [int]   $Track      = 61,
     [int]   $MaxSecs    = 900,
     [int]   $RenderScale= 100,
+    [string]$Seed       = "",
     [hashtable]$Extra   = @{}
 )
 
@@ -23,6 +24,7 @@ $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
 
 $env:TD5RE_RT                     = "0"
+if ($Seed -ne "") { $env:TD5RE_AUTOTRACK_SEED = $Seed }
 $env:TD5RE_GEO_PLACE              = $Place
 $env:TD5RE_WINDOW_TITLE           = "TD5RE geo $Tag"
 $env:TD5RE_FRAMEDUMP_SPANS        = $Spans

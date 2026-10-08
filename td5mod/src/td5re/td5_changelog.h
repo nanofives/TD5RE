@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 8 (real places: sky and structures)" },
+    { CL_ITEM,    "A real place now gets a backdrop that matches it." },
+    { CL_ITEM,    "  An inland city no longer races under an open-sea" },
+    { CL_ITEM,    "  horizon, and a built-up place gets a city skyline" },
+    { CL_ITEM,    "  instead of fields at the end of every street." },
+    { CL_ITEM,    "A real road no longer invents bridges or tunnels" },
+    { CL_ITEM,    "  from the terrain. Only real water under the road," },
+    { CL_ITEM,    "  or a crossing the route makes with itself, lifts" },
+    { CL_ITEM,    "  it onto a deck." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 7 (geospatial track generator)" },
     { CL_ITEM,    "SELECT TRACK has a GEOSPATIAL TRACK GENERATOR row." },
     { CL_ITEM,    "  It opens a real street map, starting on La Plata." },
