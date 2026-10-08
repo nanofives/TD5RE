@@ -1874,7 +1874,7 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
                       s_geo_sw_min, s_geo_sw_max,
                       s_geo_sw_min / upm, s_geo_sw_max / upm,
                       s_geo_sw_hit > 0
-                          ? s_geo_sw_sum / (double)(s_geo_sw_hit * 2) : 0.0,
+                          ? s_geo_sw_sum / (double)s_geo_sw_hit : 0.0,
                       down);
         }
     }
@@ -2502,6 +2502,12 @@ void tg_geo_city_report(void)
     int bb = 0, bf = 0, ab = 0, af = 0, dp = 0, dpt = 0;
 
     if (!s_geo_city) return;
+    /* [GEO ROUND 1009] On a STREAMED build the scenery has not run yet when
+     * build_level reports, so every counter below would read zero and the
+     * honest numbers come from the call at the end of the streamed pass
+     * instead. Printing both leaves two contradictory censuses in one log,
+     * which is how the zeros were read as a finding in the first place. */
+    if (td5_trackgen_stream_pending()) return;
     td5_geob_census(&nb, &meas, &est, &lm, &roofs, &na, &plaza);
     td5_geob_bind_stats(&bb, &bf, &ab, &af);
     td5_geob_decimation(&dp, &dpt);

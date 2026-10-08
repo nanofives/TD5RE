@@ -2112,6 +2112,10 @@ int tg_geo_emit_plaza(const TG_FBHook *h)
 void tg_geo_plaza_report(void)
 {
     if (!tg_geo_city_active()) return;
+    /* [GEO ROUND 1009] Same reason tg_geo_city_report returns here: on a
+     * streamed build the scenery has not run yet, so these would be zeros and
+     * the real numbers come from the call at the end of the streamed pass. */
+    if (td5_trackgen_stream_pending()) return;
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] %ld real area(s) laid: %ld lawn triangle(s) "
               "from the OSM outline, %ld derived path(s), %ld bed(s), %ld "
               "boundary hedge quad(s), %ld interior tree(s)",
