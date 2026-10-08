@@ -180,6 +180,8 @@ comment — regenerate after adding/splitting modules with
 | `td5_geo_buildings.c` | GEO TRACK: real OSM building footprints and area |
 | `td5_geo_signals.c` | GEO TRACK: traffic-signal nodes + the lamp cycle |
 | `td5_geo_forks.c` | GEO TRACK: CONFIRMED FORKS for a real place (PORT-ONLY). |
+| `td5_geo_route.c` | GEO TRACK: route + condition, in C (PORT-ONLY) |
+| `td5_geo_tiles.c` | OUTBOUND-ONLY OSM raster tile client. See td5_geo_tiles.h |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
 | `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
@@ -210,9 +212,11 @@ comment — regenerate after adding/splitting modules with
 | `td5_fe_carstats.c` | Car stat bars + physics-derived MORE STATS panel |
 | `td5_fe_devscreens.c` | CHANGELOG + PENDING TO TEST dev screens |
 | `td5_fe_chaos.c` | CHAOS CO-OP frontend: the CHAOS TEAMS seat/role board |
+| `td5_fe_geo.c` | GEOSPATIAL TRACK GENERATOR: the in-game map + route builder |
 | `td5_font.c` | runtime TTF glyph cache (stb_truetype). See td5_font.h. |
 | `td5_i18n.c` | runtime string localization (PORT-ONLY). See td5_i18n.h. |
 | `td5_hud.c` | Race HUD, minimap, text rendering, pause menu overlay |
+| `td5_minimap_streets.c` | surrounding street network for the in-race minimap |
 | `td5_sound.c` | Sound playback, vehicle audio, ambient, CD |
 | `td5_music.c` | Pluggable music-backend seam (see td5_music.h). |
 | `td5_radio.c` | Internet-radio music backend (see td5_radio.h). |
