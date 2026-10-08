@@ -1451,7 +1451,21 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
      * Span 0 runs along +X (TD5_TG_AXIS_HEADING, and the walk does
      * x += sin(heading)), so the route's START TANGENT must be +X. That uses
      * up the rotational freedom; the only remaining choice is which end is the
-     * start. */
+     * start.
+     *
+     * [ROUND 1009 item 1, follow-up] `allow_reverse` is what makes that a
+     * CHOICE, and the in-game path no longer allows it. geo_condition.py picks
+     * whichever end scores better against the generator's +X axis, and on
+     * Mariano's La Plata route that was the far end: the race started at his
+     * SECOND click and finished at his first. For a route the user drew, START
+     * is not a scoring input, it is the thing he said. The screen's path passes
+     * allow_reverse = 0 (TD5RE_GEO_START_AT_CLICK=0 restores the old choice);
+     * the fixture harness keeps passing 1, because that half is the Python
+     * parity test and reproducing geo_condition.py is its whole job.
+     *
+     * BOTH orientations are still SCORED whatever the flag says, so the result
+     * can report that the other way round would have fitted the axis better
+     * rather than silently taking the worse one. */
     {
         double th_f, th_r;
         GrPts rot_f, rot_r;
@@ -1466,12 +1480,13 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
         gr_rotate(&rot_f, th_f);
         gr_score(&rot_f, &sc_f);
 
+        for (i = metric.n - 1; i >= 0; i--)
+            if (!gr_pts_push(&rot_r, metric.x[i], metric.z[i])) goto oom;
+        th_r = gr_heading(&rot_r, 0) - M_PI / 2.0;
+        gr_rotate(&rot_r, th_r);
+        gr_score(&rot_r, &sc_r);
+
         if (allow_reverse) {
-            for (i = metric.n - 1; i >= 0; i--)
-                if (!gr_pts_push(&rot_r, metric.x[i], metric.z[i])) goto oom;
-            th_r = gr_heading(&rot_r, 0) - M_PI / 2.0;
-            gr_rotate(&rot_r, th_r);
-            gr_score(&rot_r, &sc_r);
             /* Prefer an orientation that inherits the proof outright; then
              * fewest spans over budget; then the smallest worst deviation.
              * Python sorts a 2-element list, so forward wins every tie. */
@@ -1489,6 +1504,14 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
                  * wins its tie; a bare `<` here flipped the answer and drove
                  * the whole track backwards. A nanodegree is not a preference. */
                 reversed = (sc_r.max_dev_deg < sc_f.max_dev_deg - GR_ORIENT_TIE_DEG);
+        } else if (sc_r.over_budget < sc_f.over_budget) {
+            /* Kept FORWARD on purpose. Say what it cost, in the units the
+             * screen already shows, so a route that fights the axis is visible
+             * rather than mysterious. */
+            gr_add_warning(out, "driven from START as placed; the reverse "
+                           "direction fits the track axis better (%d span(s) "
+                           "over the heading budget against %d)",
+                           sc_r.over_budget, sc_f.over_budget);
         }
         if (reversed) {
             theta = th_r; orient = sc_r;
@@ -1503,7 +1526,7 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
             for (i = 0; i < rot_f.n; i++) if (!gr_pts_push(&cand, rot_f.x[i], rot_f.z[i])) goto oom;
         }
         out->fwd_max_dev_deg = sc_f.max_dev_deg;
-        out->rev_max_dev_deg = allow_reverse ? sc_r.max_dev_deg : 0.0;
+        out->rev_max_dev_deg = sc_r.max_dev_deg;
         gr_pts_free(&rot_f); gr_pts_free(&rot_r);
     }
     gr_proj_rot(&proj, theta);
@@ -2044,6 +2067,12 @@ static int gr_fit_fork(const GrCond *c, int want_lanes, int span_lo, int span_hi
     if (b > span_hi + GR_FORK_TAIL_PAD + 2)  b = span_hi + GR_FORK_TAIL_PAD + 2;
     if (b > c->spans - GR_FORK_RING_TAIL - 1 + GR_FORK_TAIL_PAD)
         b = c->spans - GR_FORK_RING_TAIL - 1 + GR_FORK_TAIL_PAD;
+    /* Same for the grid at the other end, and honouring START made it matter:
+     * driven from his click, the longest avenue on the La Plata route (533 m of
+     * Diagonal 73) lands at spans 12..164 and used to be refused outright for
+     * starting inside the grid. Clipped, it opens at the first legal span
+     * instead and keeps the other 117. */
+    if (a < GR_FORK_MIN_F - GR_FORK_WIDEN_PAD) a = GR_FORK_MIN_F - GR_FORK_WIDEN_PAD;
     if (a < 0) a = 0;
     for (i = 0; i < n_taken; i++)
         if (a <= taken_hi[i] && taken_lo[i] <= b) {
@@ -2209,7 +2238,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     const uint64_t t_us = td5_plat_time_us();
     const char *slug;
     int *wp_node = NULL, *seq = NULL, *legbuf = NULL;
-    int n_seq = 0, i, allow_cross;
+    int n_seq = 0, i, allow_cross, allow_rev;
     int *raw_road = NULL;
     double *raw_x = NULL, *raw_z = NULL;
     GrCond *c = NULL;
@@ -2383,10 +2412,14 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     free(seq);
 
     allow_cross = td5_env_flag_on("TD5RE_GEO_ROUTE_XLEVEL");
+    /* [ROUND 1009 item 1, follow-up] The user placed START. Honour it:
+     * no orientation choice on the in-game path. See the orientation
+     * section of gr_condition. */
+    allow_rev = td5_env_flag_on("TD5RE_GEO_START_AT_CLICK") ? 0 : 1;
     c = &s_last.cond;
     gr_condition(raw_ll, raw_lanes, n_seq, GR_UNITS_PER_METRE,
                  GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
-                 1, allow_cross, c);
+                 allow_rev, allow_cross, c);
 
     /* ---- [ROUND 1009 item 5] DIVIDED AVENUES BECOME FORKS, BY DEFAULT ----
      * Detect them on the routed polyline, WIDEN the route to lanes(A)+lanes(B)
@@ -2460,7 +2493,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                 gr_cond_free(c);
                 gr_condition(raw_ll, lanes2, n_seq, GR_UNITS_PER_METRE,
                              GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
-                             1, allow_cross, c);
+                             allow_rev, allow_cross, c);
                 if (!c->ok) {
                     /* The wider road does not fit. Go back to the road the
                      * route actually asked for and say so, rather than refusing
@@ -2468,7 +2501,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     gr_cond_free(c);
                     gr_condition(raw_ll, raw_lanes, n_seq, GR_UNITS_PER_METRE,
                                  GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH,
-                                 GR_LANE_WIDTH, 1, allow_cross, c);
+                                 GR_LANE_WIDTH, allow_rev, allow_cross, c);
                     gr_add_warning(c, "%d divided avenue(s) detected but NOT "
                                    "built: the route cannot carry their width",
                                    n_med);

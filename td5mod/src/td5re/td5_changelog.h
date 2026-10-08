@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 8 (real places: the road you picked)" },
+    { CL_ITEM,    "The race now starts where you placed START and" },
+    { CL_ITEM,    "  finishes at FINISH. It used to pick whichever" },
+    { CL_ITEM,    "  end fitted the track axis better, which could" },
+    { CL_ITEM,    "  run your route backwards." },
     { CL_ITEM,    "A real-place track now starts ON the road you" },
     { CL_ITEM,    "  clicked. The 140 m of invented straight tarmac" },
     { CL_ITEM,    "  ahead of the start line is gone, and the grid" },
