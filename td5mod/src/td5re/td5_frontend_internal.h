@@ -121,6 +121,14 @@ void frontend_geo_generator_render(float sx, float sy);
  * chip's frontend_autotrack_parent_screen. */
 void frontend_geo_generator_set_parent(int screen);
 int  frontend_geo_generator_parent_screen(void);
+/* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] The per-place track slots are no
+ * longer browsable in SELECT TRACK -- this generator is the only way to a real
+ * place. BUILD therefore ARMS the slot it just registered (td5_fe_race.c keeps
+ * the state) so the selector accepts the pick it was handed; any move off that
+ * slot retires it with frontend_geo_pick_arm(-1). Query form returns -1 when
+ * nothing is armed. */
+void frontend_geo_pick_arm(int slot);
+int  frontend_geo_pick_slot(void);
 /* 1 when CHAOS CO-OP may be picked with the CURRENT lobby roster (4/6/8 local
  * humans, no AI test players, not a network session). `why` (may be NULL) gets
  * a short reason line when the answer is 0. Shared with the MP MODE VOTE gate. */

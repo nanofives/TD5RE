@@ -1,0 +1,19 @@
+# [1008 N2 item 1] Two BUILDs of the SAME place in one session, which is what
+# Mariano's own session log does (21 -> 56 -> BUILD -> 21, three times).
+# After the first BUILD the SELECT TRACK panel reads ROUTE.JSON and td5_geo.c
+# caches it by SLUG; the second BUILD rewrites ROUTE.JSON but the slug has not
+# changed, so the panel re-draws the FIRST route. Count the
+# "geo: preview route la_plata -> N of M nodes" lines in frontend.log: one line
+# means the second BUILD's route was never read.
+sync menu
+300 log GEO_SETTLED
++8 key right press
++30 key enter press
++420 log AFTER_BUILD_1
++30 key down press
++30 key enter press
++300 log BACK_IN_GENERATOR
++30 key right press
++30 key enter press
++420 log AFTER_BUILD_2
++240 quit

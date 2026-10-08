@@ -1,0 +1,11 @@
+# [1008 N2 item 1] GEOSPATIAL TRACK GENERATOR: press BUILD TRACK on the dev-seeded
+# route (TD5RE_GEO_SEED=1), then look at the SELECT TRACK preview panel we land on.
+# This is the flow Mariano's own log shows (screen 21 -> 56 -> BUILD -> 21 on slot 61).
+# Buttons CLEAR / BUILD TRACK / BACK share one row, so focus moves with RIGHT
+# (frontend_nav_horizontal), not DOWN.
+sync menu
+300 log GEO_SETTLED
++8 key right press
++30 key enter press
++600 log AFTER_BUILD
++240 quit

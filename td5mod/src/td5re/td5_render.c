@@ -52,6 +52,7 @@
 #include "td5_rt.h"       /* [RT P3] bindless page-texture registration */
 #include "td5_material.h" /* [LIGHT2] texture-page -> material id */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
+#include "td5_trackgen.h" /* [1008 item 6] generated slots have no light zones */
 #include "td5re.h"
 
 #include "../../../re/include/td5_actor_struct.h"
@@ -2963,6 +2964,33 @@ void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
         td5_render_set_override_daylight();
         return;
     }
+
+    /* [1008 N2 item 6] "I see the car black, as if it was a dark environment,
+     * when it should be sunlight."
+     *
+     * A GENERATED track -- the AUTO TRACK STUDIO slot and every real GEO place
+     * -- has no shipped light zones either: its level number (90, 91+) is past
+     * TD5_LIGHT_ZONE_TRACK_COUNT (42), so the range check below sends the car
+     * to tl_apply_fallback(), i.e. ambient 0x40 (64/255) with all three
+     * directional slots ZEROED. Under a bright generated daylight sky that
+     * reads as a black car, which is exactly what Mariano saw.
+     *
+     * It was masked at LIGHTING QUALITY = HIGH, because the RT branch above
+     * returns the sun-aligned basis before ever reaching here. At LOW (or with
+     * the min-graphics test flags, --Quality=0) nothing caught it. Measured on
+     * master 3df2ce24, slot 61, same frame: --Quality=0 -> near-black body;
+     * stock td5re.ini (Quality=1) -> correctly lit purple.
+     *
+     * Remedy is the one migrated TD6 tracks already get, a step up: ask for the
+     * SUN-ALIGNED basis so the lit side follows the generated scene's own sun,
+     * and let it fall back to the flat daylight studio basis when the track has
+     * no sun (tunnel, night). Shipped TD5 tracks are untouched -- their
+     * s_environs_level is in range and they never enter this branch. */
+    if (td5_trackgen_is_generated_slot(g_td5.track_index)) {
+        td5_render_set_override_sunlit(actor ? actor->rotation_matrix.m : NULL);
+        return;
+    }
+
     if (!actor || slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) {
         tl_apply_fallback();
         s_ambient_intensity = (float)s_tl_ambient;

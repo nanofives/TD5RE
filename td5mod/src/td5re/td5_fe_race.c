@@ -343,6 +343,20 @@ static int  s_trksel_auto_btn = -1;
  * it is how a player builds a route from a real place in the first place, so
  * gating it on the current pick would hide the only way in. */
 static int  s_trksel_geo_btn = -1;
+/* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] "I see La Plata as a separate
+ * option in the track selector, remove it." The GEOSPATIAL TRACK GENERATOR row
+ * is now the ONLY way to a real place: the per-place slots (TD5_GEO_SLOT_BASE+)
+ * stay registered -- the generator's BUILD, the level dirs, the HUD/loading
+ * name and the save/high-score indices all key off them -- but the TRACK
+ * cyclers hop over them (frontend_track_excluded_from_selector).
+ *
+ * That alone would also reject the slot BUILD itself just picked, because the
+ * screen re-validates its parked pick through the same predicate on entry. So
+ * BUILD ARMS the slot here, and the predicate makes exactly that one geo slot
+ * selectable. The arm is dropped the moment a cycler moves off it, so the row
+ * cannot be browsed back onto -- you can only get there through the generator.
+ * -1 = nothing armed. */
+static int  s_geo_pick_slot = -1;
 /* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO is now reachable from TWO
  * screens (Track Selection and Quick Race), so the studio can no longer hardcode
  * its way back to track-select. Whoever opens it records the parent here, and the
@@ -692,7 +706,27 @@ static int frontend_track_is_cup_slot(int track_index) {
  * and the cups via the Championship menu + the High Scores browser (which index
  * slots 20-25 directly, not through these cyclers). Quick Race already excluded
  * the drag strip; this unifies it with Track Selection. [user request 2026-06-05] */
+/* [GEO ROW REMOVAL 2026-10-08] Arm (slot >= 0) or retire (-1) the one geo slot
+ * the selector will accept. Called by td5_fe_geo.c's BUILD and by every path
+ * that moves the pick elsewhere. Declared in td5_frontend_internal.h. */
+void frontend_geo_pick_arm(int slot) {
+    if (s_geo_pick_slot == slot) return;
+    s_geo_pick_slot = slot;
+    TD5_LOG_I(LOG_TAG, "geo pick: %s (track selector accepts %s)",
+              slot >= 0 ? "armed" : "retired",
+              slot >= 0 ? "that one place slot" : "no place slot");
+}
+
+int frontend_geo_pick_slot(void) { return s_geo_pick_slot; }
+
 static int frontend_track_excluded_from_selector(int track_index) {
+    /* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] A real place's own slot is
+     * NOT a browsable track any more -- the GEOSPATIAL TRACK GENERATOR row is
+     * the single entry point. The one exception is the slot BUILD just armed
+     * (see s_geo_pick_slot), so the player it handed back to SELECT TRACK can
+     * still read the preview, set the race options and press OK. */
+    if (td5_trackgen_is_geo_slot(track_index))
+        return track_index != s_geo_pick_slot;
     /* Custom slots (>=37) are selectable ONLY when the registry actually has a
      * track there. Otherwise an unregistered slot in [37, slot_max) would
      * resolve via td5_asset_level_number's native fallback to level001 and show
@@ -710,6 +744,11 @@ static int frontend_track_excluded_from_selector(int track_index) {
 static void frontend_cycle_track(int delta, int track_min, int track_max) {
     int start = s_selected_track;
     int attempts = track_max - track_min + 1;
+    /* [GEO ROW REMOVAL 2026-10-08] Touching the TRACK arrows retires the armed
+     * geo pick: the place leaves the list for good and cannot be cycled back
+     * onto. Dropped BEFORE the walk so the armed slot is not a landing spot
+     * for this very move either. */
+    frontend_geo_pick_arm(-1);
     while (attempts-- > 0) {
         s_selected_track += delta;
         if (s_selected_track < track_min) s_selected_track = track_max - 1;
@@ -777,6 +816,11 @@ static int frontend_pick_random_track(int track_max) {
     int pick = cand[rand() % n];
     if (pick == s_selected_track) return 0;
     s_selected_track = pick;
+    /* [GEO ROW REMOVAL 2026-10-08] Same rule as the arrows: moving off the
+     * armed geo slot retires it. (The loops above already cannot pick another
+     * geo slot -- the predicate excludes every one that is not armed, and the
+     * armed one is the current pick, which they skip.) */
+    frontend_geo_pick_arm(-1);
     return 1;
 }
 
@@ -1125,6 +1169,7 @@ static void frontend_quickrace_cycle_track(int delta) {
     if (track_max <= 0) return;
     int start = s_selected_track;
     int attempts = track_max + 1;
+    frontend_geo_pick_arm(-1);   /* [GEO ROW REMOVAL] see frontend_cycle_track */
     while (attempts-- > 0) {
         s_selected_track += delta;
         if (s_selected_track < 0) s_selected_track = track_max - 1;
@@ -9106,7 +9151,21 @@ void Screen_AutoTrackOptions(void) {
         /* Drain whatever the worker published since the last frame BEFORE
          * killing it: track-select now draws this same mirror, so backing out
          * mid-build would otherwise carry a route truncated at the last
-         * rendered frame rather than at the last generated point. */
+         * rendered frame rather than at the last generated point.
+         *
+         * [1008 N2 item 1] Drop any PENDING debounce first. at_preview_tick()
+         * starts with "deadline reached -> at_preview_request()", and
+         * at_preview_request() clears the mirror (s_at_pts_n = 0) before
+         * spawning a fresh walk -- which the td5_tgprev_cancel_join() on the
+         * next line then kills before it publishes a single point. Net result:
+         * an empty mirror and a BLANK track-select panel for the rest of the
+         * session. The window is real: AT_DEBOUNCE_MS is 300 ms and the exit
+         * animation below takes ~133 ms (frontend_update_timed_animation
+         * reaches 1.0 at duration/2), so an OK/ESC landing 167-300 ms after the
+         * last row change hits it. We are leaving the screen, so a re-walk here
+         * has no purpose anyway -- the mirror the player already saw is exactly
+         * what the panel should keep. */
+        s_at_dirty_ms = 0;
         at_preview_tick();
         /* Leaving the screen must not leave a worker walking the generator
          * that the race launch is about to use. */
@@ -9377,6 +9436,14 @@ void Screen_TrackSelection(void) {
                     if (s_selected_track < 0) s_selected_track = 0;  /* drop any stale -1 */
                     frontend_cycle_track(delta, 0, s_track_max);
                 }
+                /* [GEO ROW REMOVAL 2026-10-08] Backstop for the legacy 2P
+                 * branch above, which steps s_selected_track by hand and only
+                 * reaches frontend_cycle_track (where the arm is dropped) when
+                 * the slot it landed on is excluded or absent. Without this, an
+                 * arrow press that walked straight onto a valid slot would
+                 * leave the arm set and let the place be cycled back onto. */
+                if (s_selected_track != frontend_geo_pick_slot())
+                    frontend_geo_pick_arm(-1);
                 frontend_play_sfx(2); /* ping2.wav cycle */
                 TD5_LOG_I(LOG_TAG, "TrackSel CYCLED: track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),

@@ -1,0 +1,14 @@
+# [1008 N2 item 5] SELECT TRACK, focus starts on the TRACK selector. LEFT from
+# slot 0 wraps to the TOP of the range, which is exactly where the per-place geo
+# slots live (TD5_GEO_SLOT_BASE = 61 and up). Before the fix the first LEFT
+# landed on LA PLATA (REAL); it must now hop straight over it to the
+# AUTO-GENERATED TRACK on slot 60. Gaps are wide enough for the track-change
+# slide-in to settle and for a framedump to land on each pick.
+sync menu
+300 log TRKSEL_SETTLED
++60 key left press
++90 key left press
++90 key left press
++90 key left press
++90 log SWEEP_DONE
++120 quit

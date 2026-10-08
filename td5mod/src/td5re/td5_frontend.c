@@ -6836,7 +6836,13 @@ static int frontend_qr_car_selectable(int i) {
     return i <= frontend_qr_td5_car_cap();                         /* unlocked TD5 */
 }
 static int frontend_qr_track_excluded(int t) {
-    /* mirrors frontend_track_excluded_from_selector(): drag strip + cups 20..25 */
+    /* mirrors frontend_track_excluded_from_selector(): drag strip + cups 20..25
+     * [GEO ROW REMOVAL 2026-10-08, Mariano item 5] ...plus the per-place geo
+     * slots, which are reachable only through the GEOSPATIAL TRACK GENERATOR
+     * now. Unlike the real predicate this mirror makes NO exception for the
+     * armed slot: RANDOMIZE is explicitly asking for a different track, so it
+     * should never re-roll onto the place the generator just handed over. */
+    if (td5_trackgen_is_geo_slot(t)) return 1;
     return t == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX || (t >= 20 && t <= 25);
 }
 static int frontend_qr_track_exists(int t) {
