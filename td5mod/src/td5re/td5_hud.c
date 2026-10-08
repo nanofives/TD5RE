@@ -30,6 +30,7 @@
 #include "td5_damage.h"   /* [CAR DAMAGE] player HUD health bar */
 #include "td5_input.h"    /* [CAR BROKE DOWN] recovery-key label per input source */
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
+#include "td5_minimap_streets.h" /* [MINIMAP STREETS] side streets under the route */
 #include "td5_track.h"
 #include "td5_camera.h"
 #include "td5_pick.h"     /* dev free-cam geometry picker HUD label */
@@ -7130,6 +7131,109 @@ static void hud_vector_minimap_grid(float mm_cx, float mm_cy)
     }
 }
 
+/* [MINIMAP STREETS 2026-10-07] Draw the surrounding street network under the
+ * race route. Mariano: "in race I should be able to see in the minimap the
+ * perpendicular streets that are not part of the race."
+ *
+ * The segments come from td5_minimap_streets.c already in WORLD units, in the
+ * same frame the span records use, so this applies exactly the transform the
+ * road quads apply -- translate by the player offset, rotate by the heading,
+ * scale. Nothing here is faithful: a shipped track has no street source, the
+ * sync() returns 0, and the minimap is byte-for-byte the one the original drew.
+ *
+ * COST. One pass over a flat array (about 9 400 chords on La Plata) with a
+ * four-compare bbox reject against the window the minimap can actually show,
+ * so only the ~1% that survive are projected. There is no spatial index on
+ * purpose: at this array size a grid would cost more code than the scan.
+ *
+ * CLIPPING is the GPU scissor td5_hud_render_minimap already set to the
+ * minimap rect, so a street that leaves the window is cut at the frame rather
+ * than bleeding over the HUD. The screen-AABB reject below is only there to
+ * keep offscreen quads out of the submit queue.
+ *
+ * Returns the number of quads submitted (for the dev log line). */
+static int hud_minimap_streets(float offset_x, float offset_z,
+                               float cos_h, float sin_h,
+                               float mm_cx, float mm_cy)
+{
+    /* ARGB per TD5_MMS_RANK_*, and the line width in units of the minimap's
+     * own UI scale. The route quads are opaque 0xFF9A9A9A and a full road wide
+     * (~18 px at 1080p), so every value here is dimmer AND thinner than the
+     * route by a wide margin -- that is the whole visual grammar: the route
+     * reads as the road you are on, these as the map around it. */
+    static const uint32_t k_col[TD5_MMS_RANK_COUNT] = {
+        0x8C5A5A5Au,   /* MINOR  -- service / back street / country lane */
+        0xB4707070u,   /* STREET -- residential, tertiary                */
+        0xD4868686u    /* MAJOR  -- secondary and up, avenues            */
+    };
+    static const float k_wide[TD5_MMS_RANK_COUNT] = { 0.45f, 0.62f, 0.85f };
+
+    const int n = td5_mmstreets_sync();
+    const TD5_MMStreetSeg *segs = td5_mmstreets_segs();
+    float ui, px, pz, reach, mm_l, mm_t, mm_r, mm_b;
+    int i, drawn = 0;
+
+    if (n <= 0 || !segs) return 0;
+    if (s_minimap_world_scale_x <= 0.0f || s_minimap_world_scale_y <= 0.0f) return 0;
+
+    /* The player sits at the minimap centre and offset_* is its negation (see
+     * the offset_x/offset_z comment in the caller). */
+    px = -offset_x;
+    pz = -offset_z;
+
+    /* Everything the window can reach, whatever the heading: the half-extents
+     * in world units, combined as a diagonal because the map rotates. */
+    {
+        const float hx = (s_minimap_width  * 0.5f) / s_minimap_world_scale_x;
+        const float hy = (s_minimap_height * 0.5f) / s_minimap_world_scale_y;
+        reach = sqrtf(hx * hx + hy * hy);
+    }
+
+    ui = s_minimap_width * (1.0f / 115.0f);   /* 1.0 at the 640x480 reference */
+    mm_l = s_minimap_x;
+    mm_t = s_minimap_y;
+    mm_r = s_minimap_x + s_minimap_width;
+    mm_b = s_minimap_y + s_minimap_height;
+
+    for (i = 0; i < n; i++) {
+        const TD5_MMStreetSeg *s = &segs[i];
+        float wx0, wz0, wx1, wz1, ax, ay, bx, by, dx, dy, len, nx, ny, hw;
+        TD5_SpriteQuad q;
+
+        if (s->maxx < px - reach || s->minx > px + reach ||
+            s->maxz < pz - reach || s->minz > pz + reach) continue;
+
+        wx0 = s->x0 + offset_x; wz0 = s->z0 + offset_z;
+        wx1 = s->x1 + offset_x; wz1 = s->z1 + offset_z;
+
+        ax = mm_cx + (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
+        ay = mm_cy + (wz0 * cos_h - wx0 * sin_h) * s_minimap_world_scale_y;
+        bx = mm_cx + (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
+        by = mm_cy + (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
+
+        hw = k_wide[s->rank] * ui;
+        if (hw < 0.5f) hw = 0.5f;
+
+        if ((ax < mm_l - hw && bx < mm_l - hw) || (ax > mm_r + hw && bx > mm_r + hw) ||
+            (ay < mm_t - hw && by < mm_t - hw) || (ay > mm_b + hw && by > mm_b + hw))
+            continue;
+
+        dx = bx - ax; dy = by - ay;
+        len = sqrtf(dx * dx + dy * dy);
+        if (len < 0.35f) continue;            /* sub-pixel: nothing to see */
+        nx = (-dy / len) * hw;                /* half-width normal, screen px */
+        ny = ( dx / len) * hw;
+
+        hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+            ax + nx, ay + ny, bx + nx, by + ny,
+            bx - nx, by - ny, ax - nx, ay - ny,
+            0.0f, 0.0f, 0.0f, 0.0f, k_col[s->rank], HUD_DEPTH);
+        hud_submit_quad(&q);
+        drawn++;
+    }
+    return drawn;
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
     /* Faithful: the original disabled the whole minimap on circuit tracks via an
@@ -7189,6 +7293,10 @@ void td5_hud_render_minimap(int actor_slot)
                 (uint16_t *)(s_minimap_quad_buf + buf_off));
         }
     }
+
+    /* [MINIMAP STREETS] Surrounding street network, between the background and
+     * the route so the route always wins the overlap. No-op on shipped tracks. */
+    hud_minimap_streets(offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
 
     /* Walk track spans and render road segments using the pre-built segment table.
      * Original @ 0x43A220 iterates the segment table (built in InitMinimapLayout),
