@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 8 (real places: no water at the edges)" },
+    { CL_ITEM,    "After you build a route, the empty corners of the" },
+    { CL_ITEM,    "  map no longer count as water, so a city keeps its" },
+    { CL_ITEM,    "  city skyline and no lake appears at the edges" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 8 (real places: the street network)" },
     { CL_ITEM,    "Far more of the real road network is now built" },
     { CL_ITEM,    "  around a real-place track. Diagonal streets were" },

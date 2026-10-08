@@ -273,6 +273,16 @@ static unsigned geo_sample_u8(const GeoRaster *r, double x, double z)
     return d[(size_t)(fz + 0.5) * (size_t)r->w + (size_t)(fx + 0.5)];
 }
 
+/* [ROUND 1009] A u8 cell holding the raster's own nodata byte (255 in every
+ * La Plata layer) is "no measurement", not a class. The route-frame commit
+ * fills the axis-aligned box's empty corners with it (28-36% of the grid on a
+ * rotated route), and WATER read it as `!= 0` -> wet, so a BUILD turned those
+ * corners into water and the sky picker called the city coastal. */
+static int geo_u8_is_nodata(const GeoRaster *r, unsigned v)
+{
+    return r->nodata >= 0 && r->nodata <= 255 && (int)v == r->nodata;
+}
+
 /* ------------------------------------------------------------- lifecycle --- */
 
 int td5_geo_load(const char *slug)
@@ -938,7 +948,10 @@ double td5_geo_height_raw_m_units(double x, double z)
 int td5_geo_is_water(double x, double z)
 {
     if (!s_geo.loaded || !s_geo.water.data) return 0;
-    return geo_sample_u8(&s_geo.water, x, z) != 0u;
+    {
+        const unsigned v = geo_sample_u8(&s_geo.water, x, z);
+        return v != 0u && !geo_u8_is_nodata(&s_geo.water, v);
+    }
 }
 
 double td5_geo_height(double x, double z)
@@ -968,13 +981,19 @@ double td5_geo_water_y(double x, double z)
 int td5_geo_canopy_m(double x, double z)
 {
     if (!s_geo.loaded || !s_geo.canopy.data) return -1;
-    return (int)geo_sample_u8(&s_geo.canopy, x, z);
+    {
+        const unsigned v = geo_sample_u8(&s_geo.canopy, x, z);
+        return geo_u8_is_nodata(&s_geo.canopy, v) ? -1 : (int)v;
+    }
 }
 
 int td5_geo_cover(double x, double z)
 {
     if (!s_geo.loaded || !s_geo.cover.data) return TD5_GEO_COVER_NONE;
-    return (int)geo_sample_u8(&s_geo.cover, x, z);
+    {
+        const unsigned v = geo_sample_u8(&s_geo.cover, x, z);
+        return geo_u8_is_nodata(&s_geo.cover, v) ? TD5_GEO_COVER_NONE : (int)v;
+    }
 }
 
 double td5_geo_sea_y_raw(void)
