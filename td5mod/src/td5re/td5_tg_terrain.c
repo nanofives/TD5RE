@@ -3498,6 +3498,35 @@ static int tg_r4_city_skyline(void)
     return td5_env_flag_on("TD5RE_R4_CITY_SKYLINE");
 }
 
+/* [ROUND 1009 item 11] "avoid this element from inclusion in any track."
+ *
+ * The element Mariano picked is
+ *   level091 L91 e183 s11 p5+93 pos 983004,1963,-245773 r41874 v16 c2
+ * and the two commands name it exactly: page 5 (GROUND) carrying three apron
+ * quads, then page 93 (TD5_TG_PAGE_R4_SKYLINE) carrying ONE quad whose far pair
+ * of vertices is lifted ~3000 units off the ground. That single quad is the
+ * far-band RIDGE WALL wearing the painted city-skyline page -- a flat drawing of
+ * a town standing at the edge of the drawn ground.
+ *
+ * It is the one piece of the far band that asserts a fact about the world, and
+ * on a geo track that fact is already on screen for real: La Plata's own OSM
+ * buildings are modelled, so the painted town behind them is a second, wrong
+ * city. On a synthetic track it is the same object with no better claim. He
+ * asked for it out of EVERY track, so this is not gated on geo.
+ *
+ * Scope is the SKYLINE ridge only. The tree-line and snow-flank ridges are
+ * different pages and a different object; he did not pick those and they stay.
+ * The ground apron under the wall stays too -- that is terrain, and the
+ * ridge_ok seam (see tg_emit_far_band) exists precisely so the wall can go
+ * without taking the ground with it.
+ *
+ * TD5RE_TG_SKYLINE_RIDGE=1 puts the wall back for an A/B. This DOES change the
+ * synthetic auto-track bytes, which is expected and authorised for this item. */
+static int tg_skyline_ridge_enabled(void)
+{
+    return td5_env_flag_off("TD5RE_TG_SKYLINE_RIDGE");
+}
+
 /* [R5 item 16] Tree-line stretch + "height not following the grass" fix. Default
  * ON; TD5RE_R5_FLORA_TREELINE=0 restores the pre-fix band for an A/B. */
 static int tg_r5_treeline_fix(void)
@@ -3804,6 +3833,17 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
+
+    /* [ROUND 1009 item 11] Refuse the SKYLINE ridge here -- before the sink
+     * decision below reads ridge_ok ("no wall means no wall ACTUALLY EMITTED"),
+     * and before the wall's vertices are built, so nothing has to be unwound.
+     * The condition reproduces the page router further down (snow -> flank,
+     * urban -> skyline, else -> tree line) by its two deciding terms, so
+     * "would this ridge be the skyline?" is answered with the same gb and
+     * hard_urban the router itself uses. See tg_skyline_ridge_enabled. */
+    if (ridge_ok && !tg_biome_is_snow(gb) && hard_urban && tg_r4_city_skyline()
+        && !tg_skyline_ridge_enabled())
+        ridge_ok = 0;
 
     /* [R22 item 12] "topology left some edges without geometry" -- a bare ring
      * or a vertical crack at every 4-span GROUP boundary of the far band.

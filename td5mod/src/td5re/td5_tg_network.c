@@ -596,10 +596,58 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
 #define TG_GEO_SPAN_JUMP     4       /* span continuity across a crossing     */
 #define TG_GEO_MOUTH_SPANS   12      /* widest frontage run a real road gets  */
 #define TG_GEO_AVENUE_LANES  4       /* lanes at which a street is an avenue  */
-#define TG_GEO_SKEW_MAX_DEG  65      /* default TD5RE_GEO_NET_SKEW_MAX_DEG    */
+/* [ROUND 1009 item 6] The cap was 65, which is 25 degrees off the route's own
+ * tangent. That is the right ceiling for a GRID, where a side street meets the
+ * road square or at the 45 of a La Plata diagonal, and anything steeper is a
+ * fold-back. It is the wrong ceiling AT A PLAZA, and Mariano's route passes
+ * three of them: the route curves hard around the square, so a perfectly
+ * ordinary street radiating off it is measured against a tangent that has
+ * already swung, and reads as 66..78 degrees. The ten skew refusals in his race
+ * log cluster exactly there -- spans 650/667/672, 800/806/808, 1400/1402 -- and
+ * each one is a street a driver plainly sees opening.
+ *
+ * 80 accepts nine of those ten and still refuses the tenth (span 1402, 89
+ * degrees), which is the case the cap exists for: 89 from the normal is 1 degree
+ * off the tangent, a way running ALONGSIDE the route, and mouthing it would draw
+ * a second carriageway down the kerb. The margin between 78 (the steepest real
+ * street) and 89 (the parallel way) is what makes 80 a defensible line rather
+ * than a tuned one. */
+#define TG_GEO_SKEW_MAX_DEG  80      /* default TD5RE_GEO_NET_SKEW_MAX_DEG    */
 #define TG_GEO_MARCH_COS_MIN 0.35    /* floor on cos(skew) for the own-paint
                                       * stand-off, so a steep diagonal is not
                                       * killed by the main road's own paint  */
+/* [ROUND 1009 item 6] How deep a real street is drawn.
+ *
+ * tg_city_crossst_reach is the SYNTHETIC answer -- sidewalk plus three facade
+ * blocks, 19500 units (45 m) for La Plata's biome -- and on a synthetic track it
+ * is also the honest answer, because the generator invented the street and may
+ * stop it where it likes. On a geo track the street is a real road that
+ * demonstrably continues, and tg_geo_straight_run has already measured how far.
+ * Capping that at 45 m is what Mariano is looking at: the audit
+ * (scripts/geo_road_audit.py) puts 31 of the 51 accepted arms at exactly 19500,
+ * so for sixty per cent of the streets on his route the stub ends mid-block for
+ * no reason in the data.
+ *
+ * The ceiling that IS real is the FLAT VERGE, and it is tg_verge_reach()
+ * (TD5_TG_GROUND_WIDTH, 24000 units, 56 m) rather than the drawn ground's own
+ * outer edge at tg_far_reach() (30000). The street quad takes its height from
+ * tg_xstreet_drop, which is calibrated to exactly that number: it ramps the
+ * quad down by TD5_TG_GROUND_DROP (70 units) over the verge and then SATURATES.
+ * Past the verge the far band stops being flat and sinks toward
+ * tg_track_min_y - TD5_TG_FAR_SINK_AT, so a street drawn out there would hang
+ * level while the ground fell away under it. That is not a hypothetical: R17
+ * CITY item 1 is the same defect found on the park lawn, which had borrowed
+ * this very reach and "read as a giant floating green side street".
+ *
+ * So the depth stops where the drop model it is drawn with stops. 24000 against
+ * the old 19500 is a 23 per cent deeper street, every unit of it on ground that
+ * is flat by construction. Reaching the full 30000 needs the street to follow
+ * the sinking band, which is a different change in a different file.
+ *
+ * This only ever RAISES a cap, and only when the real road's own straight run
+ * asks for it; tg_net_march still cuts the arm at the first street, carriageway
+ * or water it meets, so planarity is unchanged. */
+#define TG_GEO_DEPTH_MAX     (tg_verge_reach())
 #define TG_GEO_ALONG_NUM     6       /* a way is the route when 6/10 of its   */
 #define TG_GEO_ALONG_DEN     10      /* samples run along it                  */
 /* [ROUND 1008b] Shared carriageway. See tg_geo_depart_hit. A sample is ON the
@@ -672,6 +720,19 @@ static void tg_geo_drop_note(int si, int left, int why, double arg)
     s_gdrop[s_gdropn].why  = (unsigned char)why;
     s_gdrop[s_gdropn].arg  = (float)arg;
     s_gdropn++;
+}
+
+/* [ROUND 1009 item 6] The skew ceiling, in RADIANS, from ONE place.
+ *
+ * tg_geo_road_hits (which decides what is a crossing and what is the route) read
+ * the TG_GEO_SKEW_MAX_DEG literal while tg_net_geo_streets (which filters the
+ * arms) read the TD5RE_GEO_NET_SKEW_MAX_DEG env knob, so turning the knob moved
+ * the filter and left the detector where it was -- an A/B on it could only ever
+ * measure half the mechanism. Both now call this. */
+static double tg_geo_skew_max(void)
+{
+    return (double)td5_env_int("TD5RE_GEO_NET_SKEW_MAX_DEG",
+                               TG_GEO_SKEW_MAX_DEG, 10, 85) * TD5_TG_PI / 180.0;
 }
 
 /* Nearest main-route node to (x,z). Coarse stride first, then a full refine
@@ -793,7 +854,32 @@ static int tg_geo_depart_hit(const TG_NodeList *nl, int nspans,
 static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
                             const TD5_GeoRoad *rd, TG_GeoHit *out, int maxout)
 {
-    const double sin_lim = sin((double)TG_GEO_SKEW_MAX_DEG * TD5_TG_PI / 180.0);
+    /* [ROUND 1009 item 6] THE CAP IS MEASURED FROM THE NORMAL; `sn` IS MEASURED
+     * FROM THE TANGENT. This line used to read sin(SKEW_MAX_DEG), which bounds
+     * the wrong angle, and the two are only equal at 45 degrees.
+     *
+     *   sn = |sin(way, tangent)| = cos(skew-from-normal)
+     *   so "skew <= cap" is  sn >= cos(cap),  not  sn >= sin(cap)
+     *
+     * With sin(65) = 0.906 the crossing rule demanded sn >= 0.906, i.e. a street
+     * within 25 degrees of PERPENDICULAR -- a tighter ceiling than the synthetic
+     * TD5_TG_DIAG_MAX_DEG of 28 that this whole section was written to escape.
+     * So La Plata's 45-degree diagonals, the streets the header calls "the ones
+     * that make the place recognisable", were never detected as crossings at
+     * all; and because the same constant splits crossing from along, every one
+     * of them was then counted toward "this way IS the route" and discarded.
+     *
+     * Measured on Mariano's route (ROADS.JSON, 2291 ways, replicating this loop
+     * offline): 13 crossing hits and 90 ways called the route as shipped, versus
+     * 59 hits and 63 ways with cos. The median skew of the 46 recovered hits is
+     * 44 degrees. That is the diagonal grid arriving.
+     *
+     * TD5RE_GEO_NET_SKEW_TANGENT=1 restores the sin() comparison, so the whole
+     * mechanism can be A/B'd on one exe (the depth and cap changes have their
+     * own knobs; without this one the dominant change would be the only part of
+     * the round with no before picture). */
+    const double sn_min = td5_env_flag_off("TD5RE_GEO_NET_SKEW_TANGENT")
+                        ? sin(tg_geo_skew_max()) : cos(tg_geo_skew_max());
     /* [ROUND 1008b] shared-carriageway run state; see tg_geo_depart_hit */
     const double dep_sin = sin((double)TG_GEO_DEPART_DEG * TD5_TG_PI / 180.0);
     const int    dep_on  = td5_env_flag_on("TD5RE_GEO_NET_DEPART");
@@ -822,10 +908,10 @@ static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
                 const double sn = fabs(ux * n->tz - uz * n->tx);
                 tg_geo_lat(nl, ni, sx, sz, &lat, &along);
                 nsamp++;
-                if (sn < sin_lim
+                if (sn < sn_min
                     && fabs(lat) < n->width * 0.5 + rd->width * 0.5 + 1500.0)
                     nalong++;
-                if (!first && pni >= 0 && sn >= sin_lim
+                if (!first && pni >= 0 && sn >= sn_min
                     && (ni - pni) <= TG_GEO_SPAN_JUMP
                     && (pni - ni) <= TG_GEO_SPAN_JUMP
                     && ((plat < 0.0) != (lat < 0.0))
@@ -983,7 +1069,12 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
 
     b = &k_biomes[tg_scenery_biome_index(h->si)];
     {
-        const double cap = tg_city_crossst_reach(b, tg_city_sidewalk_w(b));
+        double cap = tg_city_crossst_reach(b, tg_city_sidewalk_w(b));
+        /* [ROUND 1009 item 6] see TG_GEO_DEPTH_MAX. The real road's own
+         * straight run is the authority; the facade-block reach is only a
+         * floor on how deep a geo street may go. */
+        if (td5_env_flag_on("TD5RE_GEO_NET_DEPTH") && cap < TG_GEO_DEPTH_MAX)
+            cap = TG_GEO_DEPTH_MAX;
         if (run > cap) run = cap;
     }
     if (s_gna >= TG_GEO_MAX_ARMS) { s_gs.d_full++; return; }
@@ -1100,9 +1191,7 @@ static void tg_net_geo_underpasses(const TG_NodeList *nl, int nspans)
 static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
 {
     static TG_GeoHit hits[TG_GEO_MAX_HITS];
-    const double skewmax = (double)td5_env_int("TD5RE_GEO_NET_SKEW_MAX_DEG",
-                                               TG_GEO_SKEW_MAX_DEG, 10, 85)
-                         * TD5_TG_PI / 180.0;
+    const double skewmax = tg_geo_skew_max();
     const int nr = td5_geo_roads_count();
     int r, i;
     double rminx, rminz, rmaxx, rmaxz;

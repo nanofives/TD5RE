@@ -5,6 +5,9 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+/* [ROUND 1009 item 8] td5_geo_loaded / td5_geo_route_count, for the
+ * "a geo route takes its grade separations from OSM" gate below. */
+#include "td5_geo.h"
 
 /* Which side of a coastal run the sea is on -- fixed per biome-run so the coast
  * does not flip sides mid-stretch. */
@@ -180,12 +183,41 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side,
  * road: still placed on a 32-span period by hash + biome urbanity until the
  * street network (td5_tg_network.c) owns crossings, and never on or next to
  * a detected bridge or bore. */
+/* [ROUND 1009 item 8] "this overpass element should not be selected in this
+ * race" -- level091 L91 e20 s12 p446 pos 118221,320,-14346, which decodes to
+ * page TD5_TG_PAGE_R9_UP_ABUT (446), a 6-quad box 7.2 x 3.8 x 6.0 m, at route
+ * span 80. An UNDERPASS ABUTMENT, and he is right that nothing justifies it:
+ * the real street census for that build reports "0 real deck(s)", i.e. no OSM
+ * way anywhere near the route is tagged bridge, tunnel or layer != 0.
+ *
+ * It is there because tg_underpass_run_selected is a pure HASH on the run
+ * index. TD5_TG_UNDERPASS_RUN is 32, so run 2 covers spans 64..95 and its
+ * crossing lands dead centre at 64 + 16 = 80. On a synthetic track inventing a
+ * grade separation on a hash is the whole point. On a geo track it contradicts
+ * the data: td5_tg_network.c's tg_net_geo_underpasses already registers the
+ * REAL grade-separated ways, so this adds a second, fictional authority.
+ *
+ * This is the same rule R22 applied to bridges and tunnels one layer up --
+ * tg_road_geo_struct_from_data in td5_tg_road.c, "Nothing else may promote a
+ * span" -- which the underpass selector was simply never wired into, because it
+ * lives in this file and decides per RUN rather than per node. Same predicate,
+ * same knob, so an A/B on TD5RE_GEO_STRUCT_OSM now moves both halves.
+ *
+ * A synthetic build never reaches the gate, so synthetic bytes are unaffected. */
+static int tg_up_geo_struct_from_data(void)
+{
+    return td5_geo_loaded() && td5_geo_route_count() >= 2
+        && td5_env_flag_on("TD5RE_GEO_STRUCT_OSM");
+}
+
 static int tg_underpass_run_selected(int si)
 {
     unsigned int h, thresh;
     const TG_Biome *b;
     int t0, t1, s, lo, hi;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNELS")) return 0;
+    /* [ROUND 1009 item 8] see tg_up_geo_struct_from_data */
+    if (tg_up_geo_struct_from_data()) return 0;
     if (si <= TD5_TG_GRID_SPAN + 40) return 0;
     t0 = (si / TD5_TG_UNDERPASS_RUN) * TD5_TG_UNDERPASS_RUN;
     t1 = t0 + TD5_TG_UNDERPASS_RUN - 1;
