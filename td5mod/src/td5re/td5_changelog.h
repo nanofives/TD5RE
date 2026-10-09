@@ -44,6 +44,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  own route, not the first one's buildings" },
     { CL_ITEM,    "A divided avenue's pavement has its kerb" },
     { CL_ITEM,    "  railing again, the median side stays open" },
+    { CL_ITEM,    "Fixed a rare crash as a race starts (the HUD" },
+    { CL_ITEM,    "  font table overran its memory block)" },
     { CL_ITEM,    "A real divided avenue is now divided for its" },
     { CL_ITEM,    "  WHOLE length, not just one block of it" },
     { CL_ITEM,    "Its central median is the real width between" },

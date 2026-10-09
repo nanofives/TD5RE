@@ -66,7 +66,15 @@
 #define TD5_HUD_MAX_TEXT_GLYPHS  512
 #define TD5_HUD_GLYPH_QUAD_SIZE  0xB8    /* bytes per glyph quad */
 #define TD5_HUD_TEXT_BUF_SIZE    0x17000 /* 512 * 0xB8 */
-#define TD5_HUD_GLYPH_TABLE_SIZE 0x404   /* 64 glyphs * 16 bytes + 4 bytes tex ptr */
+#define TD5_HUD_GLYPH_TABLE_SIZE 0x404   /* 64 glyphs * 16 bytes + 4 bytes tex page */
+/* The texture-page slot sits at BYTE offset 0x400, right after the 64 glyph
+ * records, and is 4 bytes wide -- the original's `glyph_table_ptr[0x100]` on a
+ * 4-byte-pointer build. Index it by BYTE offset (hud_glyph_table_set_page /
+ * hud_glyph_table_get_page in td5_hud.c): `((void **)table)[0x100]` is byte 0x800
+ * on x86_64, which is 0x404 bytes past the end of this block. */
+#define TD5_HUD_GLYPH_TEXPAGE_OFS 0x400
+/* Only font 0 has a table (the original allocated one per race too). */
+#define TD5_HUD_FONT_TABLES       1
 
 #define TD5_HUD_FONT_GRID_COLS   16
 #define TD5_HUD_FONT_GRID_ROWS   4
