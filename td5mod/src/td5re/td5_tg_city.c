@@ -1721,8 +1721,20 @@ static int        s_geo_n_ring = -1;        /* -1 = not collected yet */
 
 static void tg_geo_rings_collect(void)
 {
-    const int n = td5_geo_roads_count();
-    int i, k, q;
+    int n, i, k, q;
+    /* THE ROADS LAYER IS NOT LOADED YET WHEN THE LANDMARK WALK RUNS.
+     *
+     * s_geo_city is latched off td5_geob_sync (buildings + areas), and the
+     * landmark walk runs before anything else asks td5_geo_roads.c for
+     * anything. MEASURED: the first cut collected 0 rings and L23.lm08 stayed
+     * on Plaza Miguel de Azcuenaga, while the AREA half of the test refused
+     * three other sites -- so the two halves were being asked at different
+     * points in the build. td5_geo_roads_sync is idempotent and a no-op once
+     * the slug matches, so asking for it here costs nothing on the second
+     * call and is the only thing that makes the first one answerable. */
+    td5_geo_roads_sync(td5_geo_place_slug());
+    n = td5_geo_roads_count();
+    if (n < 1) return;                 /* leave -1: retry on the next query */
     s_geo_n_ring = 0;
     for (i = 0; i < n && s_geo_n_ring < TG_GEO_RING_MAX; i++) {
         const TD5_GeoRoad *r = td5_geo_roads_get(i);

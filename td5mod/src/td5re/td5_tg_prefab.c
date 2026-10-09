@@ -356,7 +356,8 @@ int tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
      *
      * tg_geo_open_space_at returns 0 before touching anything on a synthetic
      * build, so the synthetic byte-identity contract is unaffected. */
-    if (tg_geo_open_space_at(si, x, z, tg_prefab_half_depth(pf))) {
+    if (td5_env_flag_on("TD5RE_GEO_PREFAB_PLAZA")
+        && tg_geo_open_space_at(si, x, z, tg_prefab_half_depth(pf))) {
         s_pf_plaza_refused++;
         return 0;
     }

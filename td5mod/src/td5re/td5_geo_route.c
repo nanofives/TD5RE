@@ -2375,7 +2375,10 @@ static void gr_mark_divided_carriageways(void)
             GrRoad *A = &s_g.road[i];
             if (A->width_lanes > 0) continue;        /* a measurement wins */
             if (A->divided) {
-                if (A->lanes_osm > 0) A->lanes = A->lanes_osm;
+                /* TD5RE_GEO_DIVIDED_LANES=0 pins the round-1011 answer (the
+                 * place floor on both carriageways) for a one-knob A/B. */
+                if (A->lanes_osm > 0 && td5_env_flag_on("TD5RE_GEO_DIVIDED_LANES"))
+                    A->lanes = A->lanes_osm;
                 continue;
             }
             if (A->namek == TD5_GEO_NAMEK_AVENIDA ||
