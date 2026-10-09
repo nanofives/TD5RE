@@ -1084,6 +1084,15 @@ int td5_geob_in_plaza_ring(double x, double z)
 
 int td5_geob_plaza_ring_count(void) { return s_gb.loaded ? s_gb.n_pring : 0; }
 
+int td5_geob_plaza_ring_get(int i, double *cx, double *cz, double *r)
+{
+    if (!s_gb.loaded || i < 0 || i >= s_gb.n_pring) return 0;
+    if (cx) *cx = s_gb.pring[i].cx;
+    if (cz) *cz = s_gb.pring[i].cz;
+    if (r)  *r  = s_gb.pring[i].r;
+    return 1;
+}
+
 void td5_geob_plaza_veto_stats(int *vetoed, int *kept_small, int *kept_landmark)
 {
     if (vetoed)        *vetoed        = s_gb.veto_n;
@@ -1157,8 +1166,10 @@ static void geob_veto_plaza(void)
     for (i = 0; i < nslot; i++) {
         if (!cnt[i] && !keep[i]) continue;
         if (i < s_gb.na)
-            TD5_LOG_I(LOG_TAG, "geob:   plaza area %d (kind %d, centre %.0f,%.0f "
-                      "r %.0f m): %d dropped, %d kept", i, (int)s_gb.a[i].kind,
+            TD5_LOG_I(LOG_TAG, "geob:   %s %d (kind %d, centre %.0f,%.0f "
+                      "r %.0f m): %d dropped, %d kept",
+                      s_gb.a[i].ring ? "ring plaza area" : "plaza area",
+                      i, (int)s_gb.a[i].kind,
                       s_gb.a[i].cx, s_gb.a[i].cz,
                       s_gb.a[i].radius / s_gb.units_per_m, cnt[i], keep[i]);
         else
@@ -1169,6 +1180,163 @@ static void geob_veto_plaza(void)
                       cnt[i], keep[i]);
     }
     free(cnt); free(keep);
+}
+
+/* ---- [ROUND 1013 F1 follow-up] A RING PLAZA IS FILLED LIKE ANY OTHER ----------
+ *
+ * "The ring plaza interior is now bare paved ground, which will read as a car
+ * park, not a plaza."
+ *
+ * The plaza emitter (td5_tg_streets.c tg_geo_emit_plaza) lays a lawn, paths and
+ * trees for every bound AREAS.JSON polygon whose kind td5_geob_area_is_plaza
+ * names. A square mapped only as a ring has no polygon, so it got nothing. Rather
+ * than write a second emitter, each ring group becomes ONE synthesised
+ * TD5_GeoArea (kind PARK, ring=1) and goes through the same bind and the same
+ * emitter.
+ *
+ * THE OUTLINE IS THE HULL, INSET. The hull is bounded by the ring road's
+ * CENTRELINE, so a lawn over the hull itself would run onto the carriageway and
+ * its pavement. It is pulled in by GEOB_PRING_INSET_M = 9 m: measured on Mariano's
+ * route the ring edge is a 2-lane carriageway (3 m half width) with about 4.5 m
+ * of pavement and railing, so 9 m leaves 1.5 m of ground between railing and
+ * lawn. (11 m, the first cut, left a grey rim the width of a second pavement.)
+ * The plaza emitter then pushes any vertex still inside the carriageway +
+ * pavement clearance outward again (tg_geop_project), so a wider ring road costs
+ * the lawn some edge, never a lane. The hull is convex, so the inset is the intersection of
+ * its edges moved inward: each vertex goes along the bisector of its two edge
+ * normals by d / cos(half the turn), clamped on a sharp corner.
+ *
+ * A RING THAT A REAL POLYGON ALREADY COVERS IS SKIPPED (the hull centre inside a
+ * plaza polygon at least 0.6 as big), so a square mapped BOTH ways is not laid
+ * twice. */
+#define GEOB_PRING_INSET_M  9.0
+
+/* Move a convex CCW ring inward by `d` world units. 0 when it collapses. */
+static int geob_inset_convex(const double *x, const double *z, int n, double d,
+                             double *ox, double *oz)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        const int a = (i + n - 1) % n, b = (i + 1) % n;
+        double e1x = x[i] - x[a], e1z = z[i] - z[a];
+        double e2x = x[b] - x[i], e2z = z[b] - z[i];
+        const double l1 = hypot(e1x, e1z), l2 = hypot(e2x, e2z);
+        double n1x, n1z, n2x, n2z, dot, k;
+        if (!(l1 > 1e-9) || !(l2 > 1e-9)) return 0;
+        /* inward normal of a CCW edge is its LEFT normal (-dz, dx) */
+        n1x = -e1z / l1; n1z = e1x / l1;
+        n2x = -e2z / l2; n2z = e2x / l2;
+        dot = n1x * n2x + n1z * n2z;
+        k = 1.0 + dot;
+        if (k < 0.2) k = 0.2;                  /* sharp corner: bound the miter */
+        ox[i] = x[i] + (n1x + n2x) * d / k;
+        oz[i] = z[i] + (n1z + n2z) * d / k;
+    }
+    /* Collapsed or inverted? A convex ring moved inward keeps its winding. */
+    if (td5_geob_ring_area(ox, oz, n) <= 0.0) return 0;
+    return n;
+}
+
+/* Drop the vertex whose removal changes the outline least until `cap` remain. */
+static int geob_decimate_ring(double *x, double *z, int n, int cap)
+{
+    while (n > cap) {
+        int i, best = 0;
+        double ba = 1e300;
+        for (i = 0; i < n; i++) {
+            const int a = (i + n - 1) % n, b = (i + 1) % n;
+            const double ar = fabs((x[i] - x[a]) * (z[b] - z[a])
+                                 - (z[i] - z[a]) * (x[b] - x[a]));
+            if (ar < ba) { ba = ar; best = i; }
+        }
+        for (i = best; i + 1 < n; i++) { x[i] = x[i + 1]; z[i] = z[i + 1]; }
+        n--;
+    }
+    return n;
+}
+
+/* A plaza POLYGON that already covers ring `r`? Run BEFORE the ring areas are
+ * appended, so only AREAS.JSON polygons are asked. */
+static int geob_ring_covered_by_polygon(int r)
+{
+    int i;
+    for (i = 0; i < s_gb.na; i++) {
+        const TD5_GeoArea *a = &s_gb.a[i];
+        if (a->ring || !td5_geob_area_is_plaza(a)) continue;
+        if (a->radius < 0.6 * s_gb.pring[r].r) continue;
+        if (td5_geob_point_in_ring(&s_gb.px[a->first], &s_gb.pz[a->first],
+                                   a->n, s_gb.pring[r].cx, s_gb.pring[r].cz))
+            return 1;
+    }
+    return 0;
+}
+
+/* Append one synthesised area per ring group. Runs after the ring hulls are
+ * known and BEFORE geob_bind_all, so the new records are bound to spans exactly
+ * like the polygons. TD5RE_GEO_PLAZA_RING_FILL=0 pins the 1013-F1 first cut
+ * (ring interior left bare). */
+static void geob_add_ring_areas(void)
+{
+    double inset;
+    int r, added = 0, covered = 0, collapsed = 0;
+
+    if (!s_gb.pring_on || s_gb.n_pring < 1) return;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZA_RING_FILL")) return;
+    inset = GEOB_PRING_INSET_M * s_gb.units_per_m;
+    {
+        TD5_GeoArea *grown = (TD5_GeoArea *)realloc(
+            s_gb.a, (size_t)(s_gb.na + s_gb.n_pring) * sizeof(TD5_GeoArea));
+        if (!grown) return;
+        s_gb.a = grown;
+    }
+    for (r = 0; r < s_gb.n_pring; r++) {
+        double x[GEOB_PRING_PTS], z[GEOB_PRING_PTS];
+        double ix[GEOB_PRING_PTS], iz[GEOB_PRING_PTS];
+        TD5_GeoArea *a;
+        int n = s_gb.pring[r].n, k;
+        double cx = 0.0, cz = 0.0, rad = 0.0;
+
+        if (geob_ring_covered_by_polygon(r)) { covered++; continue; }
+        for (k = 0; k < n; k++) { x[k] = s_gb.pring[r].hx[k]; z[k] = s_gb.pring[r].hz[k]; }
+        if (td5_geob_ring_area(x, z, n) < 0.0) {            /* force CCW */
+            for (k = 0; k < n / 2; k++) {
+                double t = x[k]; x[k] = x[n - 1 - k]; x[n - 1 - k] = t;
+                t = z[k]; z[k] = z[n - 1 - k]; z[n - 1 - k] = t;
+            }
+        }
+        if (!geob_inset_convex(x, z, n, inset, ix, iz)) { collapsed++; continue; }
+        n = geob_decimate_ring(ix, iz, n, TD5_GEOB_RING_MAX);
+        if (n < 3 || !geob_pool_reserve(s_gb.npt + n)) { collapsed++; continue; }
+        for (k = 0; k < n; k++) { cx += ix[k]; cz += iz[k]; }
+        cx /= (double)n; cz /= (double)n;
+        for (k = 0; k < n; k++) {
+            const double d = hypot(ix[k] - cx, iz[k] - cz);
+            if (d > rad) rad = d;
+        }
+        a = &s_gb.a[s_gb.na];
+        memset(a, 0, sizeof *a);
+        a->first = s_gb.npt;
+        a->n = n;
+        for (k = 0; k < n; k++) {
+            s_gb.px[s_gb.npt] = ix[k];
+            s_gb.pz[s_gb.npt] = iz[k];
+            s_gb.npt++;
+        }
+        a->cx = cx; a->cz = cz; a->radius = rad;
+        a->kind = TD5_GEOA_KIND_PARK;
+        a->named = 1;
+        a->barrier = TD5_GEOA_BARRIER_NONE;
+        a->ring = 1;
+        a->id_hash = geob_id_hash((double)(1000000 + r));
+        a->host_span = -1;
+        a->host_side = 0;
+        s_gb.na++;
+        added++;
+    }
+    TD5_LOG_I(LOG_TAG, "geob: %d ring plaza(s) laid as areas (hull inset "
+              "%.0f m clear of the ring road): %d skipped because a mapped "
+              "polygon already covers them, %d too small to inset", added,
+              GEOB_PRING_INSET_M, covered, collapsed);
 }
 
 static void geob_bind_all(void);
@@ -1216,6 +1384,7 @@ int td5_geob_sync(void)
     }
     s_gb.loaded = 1;
     geob_collect_plaza_rings();
+    geob_add_ring_areas();
     geob_bind_all();
     geob_veto_plaza();
     {

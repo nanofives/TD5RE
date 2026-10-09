@@ -176,6 +176,12 @@ typedef struct {
     unsigned char kind;       /* TD5_GEOA_KIND_* */
     unsigned char named;
     unsigned char barrier;    /* TD5_GEOA_BARRIER_* -- what OSM fences it with */
+    /* [ROUND 1013 F1] 1 = not an AREAS.JSON polygon: SYNTHESISED from a named
+     * junction=circular/roundabout ring group (a square mapped only as the
+     * street round it), as that ring's hull inset clear of the ring road. The
+     * plaza emitter lays it like any other plaza and takes its paths from the
+     * real FOOTWAYS.JSON ways inside it. See geob_add_ring_areas. */
+    unsigned char ring;
 } TD5_GeoArea;
 
 /* ------------------------------------------------------------- lifecycle --- */
@@ -235,6 +241,8 @@ int  td5_geob_points_in_plaza(int span, const double *px, const double *pz,
  * TD5RE_GEO_PLAZA_RING=0 drops them for a one-variable A/B. */
 int  td5_geob_in_plaza_ring(double x, double z);
 int  td5_geob_plaza_ring_count(void);
+/* Ring i's hull centre and radius in world units; 0 when there is none. */
+int  td5_geob_plaza_ring_get(int i, double *cx, double *cz, double *r);
 /* The bind-time footprint veto: how many real footprints stand inside a plaza
  * (polygon or ring) and were dropped, how many were kept because they are
  * small OSM-tagged buildings / landmarks. TD5RE_GEO_PLAZA_BLD=0 keeps them all. */

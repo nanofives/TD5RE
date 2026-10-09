@@ -30,7 +30,13 @@ param([ValidateSet("before","after")][string]$Arm = "after",
       [string]$Spans = "8,150,270,295,320,345,450,560,540,640,670,925",
       [string]$RouteSrc = "",
       [int]$GenWait = 900,
-      [int]$RaceSecs = 900)
+      [int]$RaceSecs = 900,
+      # Extra TD5RE_* knobs for this run (e.g. @{TD5RE_CAM_TOPDOWN='70000'}), applied
+      # after the arm's own. -Prefix names the frames (default: the arm), so a
+      # second view of the same span does not overwrite the first.
+      [hashtable]$Env = @{},
+      [string]$Prefix = "")
+if (-not $Prefix) { $Prefix = $Arm }
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
@@ -58,12 +64,14 @@ $env:TD5RE_RT                  = "0"
 $env:TD5RE_WINDOW_TITLE        = "TD5RE f1 $Arm"
 $env:TD5RE_D3D12_CAPTURE       = "1"
 $env:TD5RE_FRAMEDUMP_SPANS     = $Spans
-$env:TD5RE_FRAMEDUMP_SPAN_PATH = "log/f1_${Arm}_span_%d.png"
+$env:TD5RE_FRAMEDUMP_SPAN_PATH = "log/f1_${Prefix}_span_%d.png"
 
 if ($Arm -eq "before") {
     $env:TD5RE_GEO_PLAZA_RING = "0"
     $env:TD5RE_GEO_PLAZA_BLD  = "0"
 }
+
+foreach ($k in $Env.Keys) { Set-Item -Path "env:$k" -Value ([string]$Env[$k]) }
 
 $gfx = @("--Windowed=1","--VSync=0","--CarDamage=0","--Lighting=0","--Quality=0",
          "--SunShadows=0","--Reflections=0","--WetRoads=0","--StreetLights=0",
@@ -77,7 +85,7 @@ New-Item -ItemType Directory -Force (Join-Path $wt "log") | Out-Null
 # Delete ONLY the spans this run is about to capture (a blanket wildcard delete
 # once threw away frames that were still the evidence for a different span).
 foreach ($s in ($Spans -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-    $q = Join-Path $wt "log\f1_${Arm}_span_$s.png"
+    $q = Join-Path $wt "log\f1_${Prefix}_span_$s.png"
     if (Test-Path $q) { Remove-Item -LiteralPath $q -Force -ErrorAction SilentlyContinue }
 }
 foreach ($f in @("race.log","engine.log","frontend.log")) {
@@ -125,7 +133,7 @@ $want = ($Spans -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 for ($t = 0; $t -lt $RaceSecs; $t += 5) {
     Start-Sleep -Seconds 5
     if ($p.HasExited) { break }
-    $have = @($want | Where-Object { Test-Path (Join-Path $wt "log\f1_${Arm}_span_$_.png") })
+    $have = @($want | Where-Object { Test-Path (Join-Path $wt "log\f1_${Prefix}_span_$_.png") })
     if ($have.Count -eq $want.Count) { Write-Host "all $($want.Count) frame(s) captured at ${t}s"; break }
 }
 # PID-scoped, never a name-wide kill: parallel sessions share this machine.
@@ -133,17 +141,17 @@ if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Start-Sleep -Seconds 2 }
 
 Write-Host "### $Arm"
 foreach ($s in $want) {
-    $q = Join-Path $wt "log\f1_${Arm}_span_$s.png"
+    $q = Join-Path $wt "log\f1_${Prefix}_span_$s.png"
     if (Test-Path $q) { Write-Host ("  span {0,-5} {1,9} bytes  {2}" -f $s, (Get-Item $q).Length, $q) }
     else              { Write-Host ("  span {0,-5} MISSING" -f $s) }
 }
 foreach ($f in @("race.log","engine.log")) {
     $src = Join-Path $wt "log\$f"
-    if (Test-Path $src) { Copy-Item $src (Join-Path $wt "log\f1_${Arm}_$f") -Force }
+    if (Test-Path $src) { Copy-Item $src (Join-Path $wt "log\f1_${Prefix}_$f") -Force }
 }
 Write-Host "### the lines this round is about"
-Select-String -Path (Join-Path $wt "log\f1_${Arm}_engine.log") `
+Select-String -Path (Join-Path $wt "log\f1_${Prefix}_engine.log") `
     -Pattern "plaza veto|named plaza ring|stand in a plaza|geo route: avenue" -Encoding utf8 |
     ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
-Select-String -Path (Join-Path $wt "log\f1_${Arm}_race.log") -Pattern "plaza veto" -Encoding utf8 |
+Select-String -Path (Join-Path $wt "log\f1_${Prefix}_race.log") -Pattern "plaza veto" -Encoding utf8 |
     ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
