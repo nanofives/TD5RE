@@ -3742,6 +3742,181 @@ static int gr_commit_refuse(const char *fmt, ...)
     return 1;
 }
 
+/* ==================== DERIVED-FRAME SCHEMA + MIGRATION ====================
+ *
+ * The derived _route/ cache is all-or-nothing on DERIVED.OK, which protects
+ * against mixing a derived layer with a source one -- but says nothing about a
+ * derived frame written by an OLDER build whose contents are wrong. Round 1011
+ * C4 produced exactly that case: every _route/ committed before it has a
+ * SIGNALS.JSON whose nodes[] was never reprojected, and no FOOTWAYS.JSON at
+ * all. Mariano will not know to press BUILD again, and the symptom (zebras and
+ * bus stops scattered across the map) looks like a bug in this round rather
+ * than like stale data.
+ *
+ * So the stamp carries a VERSION, and a place whose derived frame is older is
+ * repaired on load. The repair is NOT a re-commit: it needs no router, no
+ * waypoints and no guards, because reprojecting a vector layer is a pure rigid
+ * transform between two frames that are both written down -- the SOURCE
+ * PLACE.JSON's and the derived PLACE.JSON's. It reads the pristine source and
+ * rewrites only the layers this round changed.
+ *
+ * IF THE REPAIR FAILS, THE STAMP IS DELETED. That makes the resolver fall back
+ * to the SOURCE frame for the WHOLE place, which is self-consistent and
+ * costs the user their built route frame. Leaving a half-repaired derived
+ * frame in place would be the mixing bug again, which is the one outcome worth
+ * losing a BUILD to avoid.
+ */
+#define GR_DERIVED_SCHEMA 2
+
+/* The `projection` block of any PLACE.JSON, by path. gr_place_read does this
+ * for the SOURCE copy into s_g; this one answers about an arbitrary file and
+ * touches no global, because the migration needs BOTH frames at once. */
+static int gr_proj_from_place_file(const char *path, GeoProj *out)
+{
+    char *json = gr_slurp(path, NULL);
+    cJSON *root, *pr;
+    int ok = 0;
+
+    if (!json) return 0;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return 0;
+    pr = cJSON_GetObjectItem(root, "projection");
+    if (pr && cJSON_IsObject(pr)) {
+        const cJSON *a  = cJSON_GetObjectItem(pr, "lat0");
+        const cJSON *o  = cJSON_GetObjectItem(pr, "lon0");
+        const cJSON *u  = cJSON_GetObjectItem(pr, "units_per_metre");
+        const cJSON *r  = cJSON_GetObjectItem(pr, "rotation_rad");
+        const cJSON *ox = cJSON_GetObjectItem(pr, "offset_x");
+        const cJSON *oz = cJSON_GetObjectItem(pr, "offset_z");
+        if (cJSON_IsNumber(a) && cJSON_IsNumber(o)) {
+            gr_proj_init(out, a->valuedouble, o->valuedouble,
+                         cJSON_IsNumber(u) ? u->valuedouble : GR_UNITS_PER_METRE);
+            gr_proj_rot(out, cJSON_IsNumber(r) ? r->valuedouble : 0.0);
+            gr_proj_off(out, cJSON_IsNumber(ox) ? ox->valuedouble : 0.0,
+                             cJSON_IsNumber(oz) ? oz->valuedouble : 0.0);
+            ok = 1;
+        }
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+/* The schema a derived frame was written at. 0 = there is no derived frame;
+ * 1 = one written before the stamp carried a version. */
+static int gr_derived_schema_of(const char *dst_dir)
+{
+    char path[512];
+    char *txt;
+    const char *p;
+    int v = 1;
+
+    snprintf(path, sizeof path, "%s/%s", dst_dir, TD5_GEO_DERIVED_STAMP);
+    txt = gr_slurp(path, NULL);
+    if (!txt) return 0;
+    p = strstr(txt, "schema=");
+    if (p) {
+        const int n = atoi(p + 7);
+        if (n > 0) v = n;
+    }
+    free(txt);
+    return v;
+}
+
+int td5_geo_derived_migrate(const char *slug)
+{
+    static const struct { const char *file; const char *key; const char *key2; }
+    k_fix[] = {
+        /* Exactly the layers round 1011 C4 changed. ROADS/BUILDINGS/AREAS
+         * were always reprojected correctly and are left alone, so a repair
+         * cannot disturb geometry that was already right. */
+        { "SIGNALS.JSON",  "signals",  "nodes" },
+        { "FOOTWAYS.JSON", "footways", NULL    },
+    };
+    char src_dir[256], dst_dir[300], path[512];
+    GeoProj oldp, newp;
+    int have_schema, i, wrote = 0, failed = 0;
+
+    if (!slug || !slug[0]) return 0;
+
+    td5_geo_source_path(src_dir, sizeof src_dir, slug, "");
+    {   /* td5_geo_source_path leaves a trailing '/' for an empty name. */
+        const size_t L = strlen(src_dir);
+        if (L && src_dir[L - 1] == '/') src_dir[L - 1] = '\0';
+    }
+    snprintf(dst_dir, sizeof dst_dir, "%s/%s", src_dir, TD5_GEO_DERIVED_DIR);
+
+    have_schema = gr_derived_schema_of(dst_dir);
+    if (have_schema == 0)                   return 0;  /* races off SOURCE */
+    if (have_schema >= GR_DERIVED_SCHEMA)   return 0;  /* already current  */
+
+    TD5_LOG_W(LOG_TAG, "geo route: %s has a derived frame at schema %d "
+              "(current %d) -- it was BUILT before the SIGNALS.JSON nodes[] "
+              "reprojection fix, so its crossings and bus stops are in the "
+              "SOURCE frame and it has no mapped pavements. Repairing it in "
+              "place from the pristine source; no re-route is needed because "
+              "the two frames are both recorded.",
+              slug, have_schema, GR_DERIVED_SCHEMA);
+
+    snprintf(path, sizeof path, "%s/PLACE.JSON", src_dir);
+    if (!gr_proj_from_place_file(path, &oldp)) failed = 1;
+    snprintf(path, sizeof path, "%s/PLACE.JSON", dst_dir);
+    if (!failed && !gr_proj_from_place_file(path, &newp)) failed = 1;
+
+    for (i = 0; !failed && i < (int)(sizeof k_fix / sizeof k_fix[0]); i++) {
+        int n = -1;
+        cJSON *tree = gr_reproject_mem(src_dir, k_fix[i].file, k_fix[i].key,
+                                       k_fix[i].key2, &newp, &oldp, &n);
+        if (!tree) {
+            /* Absent in the SOURCE too is fine and expected: a cache fetched
+             * before tag_schema 3 has no FOOTWAYS.JSON to carry over, and the
+             * readers treat that as "this place has none". */
+            if (n < 0) continue;
+            failed = 1;
+            break;
+        }
+        snprintf(path, sizeof path, "%s/%s", dst_dir, k_fix[i].file);
+        if (!gr_write_json(path, tree)) { failed = 1; break; }  /* consumes */
+        wrote++;
+        TD5_LOG_I(LOG_TAG, "geo route:   repaired %s (%d entries) into the "
+                  "route frame", k_fix[i].file, n);
+    }
+
+    snprintf(path, sizeof path, "%s/%s", dst_dir, TD5_GEO_DERIVED_STAMP);
+    if (failed) {
+        /* NEVER leave a half-repaired derived frame: dropping the stamp sends
+         * the resolver back to the SOURCE frame for the whole place, which is
+         * self-consistent. The user loses the built route frame and is told
+         * to press BUILD, which is a far better outcome than a race whose
+         * street furniture is in a different coordinate system from its
+         * roads. */
+        td5_plat_file_delete(path);
+        TD5_LOG_E(LOG_TAG, "geo route: could not repair %s's derived frame. "
+                  "Dropped %s so the place races off its PRISTINE SOURCE "
+                  "rather than a half-converted frame -- press BUILD TRACK in "
+                  "the GEOSPATIAL TRACK GENERATOR to rebuild it.",
+                  slug, TD5_GEO_DERIVED_STAMP);
+        return -1;
+    }
+    {
+        char stamp[64];
+        const int len = snprintf(stamp, sizeof stamp,
+                                 "td5_geo_route.c\nschema=%d\n",
+                                 GR_DERIVED_SCHEMA);
+        if (!gr_write_atomic(path, stamp, (size_t)len)) {
+            TD5_LOG_W(LOG_TAG, "geo route: repaired %s but could not update "
+                      "the stamp; it will be repaired again next load "
+                      "(the repair is idempotent)", slug);
+            return 1;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "geo route: %s derived frame repaired to schema %d "
+              "(%d layer(s) rewritten). Crossings, bus stops and mapped "
+              "pavements are now in the same frame as the roads.",
+              slug, GR_DERIVED_SCHEMA, wrote);
+    return 1;
+}
+
 int td5_geo_route_commit(void)
 {
     const GrCond *c = &s_last.cond;
@@ -3943,10 +4118,19 @@ int td5_geo_route_commit(void)
      * there is nothing to say. */
     if (!gr_write_avenues(dst_dir)) { gr_commit_refuse("COULD NOT WRITE AVENUES.JSON"); goto done; }
 
-    /* The stamp LAST: from here the readers see the new frame. */
-    if (!gr_write_atomic(stamp, "td5_geo_route.c\n", 16)) {
-        gr_commit_refuse("COULD NOT STAMP THE BUILT TRACK DATA");
-        goto done;
+    /* The stamp LAST: from here the readers see the new frame. It carries the
+     * derived-frame SCHEMA, so a later build can tell a frame written by an
+     * older one and repair it instead of racing it -- see
+     * td5_geo_derived_migrate. A stamp with no `schema=` line reads as 1. */
+    {
+        char body[64];
+        const int blen = snprintf(body, sizeof body,
+                                  "td5_geo_route.c\nschema=%d\n",
+                                  GR_DERIVED_SCHEMA);
+        if (!gr_write_atomic(stamp, body, (size_t)blen)) {
+            gr_commit_refuse("COULD NOT STAMP THE BUILT TRACK DATA");
+            goto done;
+        }
     }
     rc = 0;
 

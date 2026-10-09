@@ -97,7 +97,50 @@ int  td5_geo_footways_point(const TD5_GeoFootway *f, int k, double *x, double *z
 /* How many ways of each TD5_GEO_FW_* kind are loaded. Out-of-range kind is 0. */
 int  td5_geo_footways_kind_count(int kind);
 
-/* ---------------------------------------------------- the C2 entry point ---
+/* ============================ THE C2 CONTRACT ============================
+ *
+ * ROUND 1011 C2 CONSUMES THIS ONE. Signature fixed by the orchestrator so C2
+ * could code against it (and ship a WEAK stub returning 0) before this module
+ * existed; the definition here is STRONG and overrides that stub at link.
+ *
+ * "Is there a mapped pavement on THIS side of the road, here?"
+ *
+ *   x, z          query point, world units in the place cache's frame -- the
+ *                 same x/z as ROADS.JSON points. (Metres are used for the
+ *                 ANSWERS, not the query, because the caller already holds a
+ *                 world-unit centreline and does not hold the scale.)
+ *   nx, nz        UNIT normal pointing at the side being asked about.
+ *   max_m         search radius in METRES.
+ *   out_dist_m    distance from (x,z) to the footway centreline, METRES.
+ *   out_width_m   that way's OSM `width` in METRES, 0 when untagged.
+ *
+ * Returns 1 only when a footway=sidewalk line lies ON THAT SIDE within max_m
+ * AND runs roughly parallel to the road (within TD5_GEO_FW_PARALLEL_DEG of
+ * it). Both tests matter: without the side test the pavement across the street
+ * answers for this one, and without the parallelism test the footway=crossing
+ * line running ACROSS the road at a junction reads as a pavement a metre away
+ * and collapses the width to nothing. Returns 0 otherwise, leaving every
+ * output alone.
+ *
+ * Cheap per span-side: backed by a uniform grid built once at load, so the
+ * sweep touches the handful of segments near the query rather than all of
+ * them.
+ *
+ * WHAT IT WILL AND WILL NOT FIND. A mapper draws a pavement as a separate
+ * polyline only occasionally -- la_plata has 8 footway=sidewalk ways against
+ * 2291 roads -- so on that cache this rung of C2's ladder fires rarely and the
+ * `sidewalk=*` tag on the road remains the main source. The richer
+ * measurement is the `width` tag on the 27 pedestrian ways that carry one,
+ * which is reachable through td5_geo_footways_nearest() below with a wider
+ * kind mask. It is the only real pavement measurement anywhere in the cache:
+ * `sidewalk:width` is absent on all 2291 roads. */
+#define TD5_GEO_FW_PARALLEL_DEG 20.0
+
+int  td5_geo_footway_sidewalk_near(double x, double z, double nx, double nz,
+                                   double max_m, double *out_dist_m,
+                                   double *out_width_m);
+
+/* -------------------------------------------- the general forms beneath ---
  *
  * NEAREST MAPPED KERBSIDE PAVEMENT to (x,z), searching only ways whose kind is
  * TD5_GEO_FW_SIDEWALK -- the 8 La Plata ways a mapper drew as a separate

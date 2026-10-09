@@ -44,13 +44,31 @@
 #define GEO_FW_MAX_PTS   32768
 #define GEO_FW_MAX_FILE  (32 * 1024 * 1024)
 
+/* The uniform grid that makes the per-span-side query cheap. Sized so the
+ * whole place is at most this many cells on a side; a place is a couple of
+ * kilometres across, so 128 puts a cell at roughly 20 m. */
+#define GEO_FW_GRID_MAX   128
+#define GEO_FW_CELL_MIN_M 10.0
+
+typedef struct { int wi, k; } FwSeg;   /* segment k of way wi */
+
 static struct {
     int             n, np;
     TD5_GeoFootway *way;
     double         *px, *pz;
     int             kind_n[TD5_GEO_FW_KINDS];
+    double          upm;               /* units per metre, from PLACE.JSON */
     char            slug[64];
     char            source[320];
+
+    /* segments, and the grid over them */
+    FwSeg          *seg;
+    int             nseg;
+    double          gminx, gminz, gcell;
+    int             gnx, gnz;
+    int            *gstart;            /* gnx*gnz + 1 */
+    int            *gitem;             /* segment indices, bucketed          */
+    int             gnitem;
 } s_fw;
 
 /* ------------------------------------------------------------------- io --- */
@@ -154,7 +172,131 @@ void td5_geo_footways_unload(void)
     free(s_fw.way);
     free(s_fw.px);
     free(s_fw.pz);
+    free(s_fw.seg);
+    free(s_fw.gstart);
+    free(s_fw.gitem);
     memset(&s_fw, 0, sizeof(s_fw));
+}
+
+/* units_per_metre for this place, read through the SAME path resolver the
+ * footways themselves came through. That matters: source and derived frames
+ * each carry their own PLACE.JSON, and a scale taken from the other one would
+ * silently mis-convert every metre this module reports. 430 is the value every
+ * shipped place uses and the fallback when the field is missing. */
+static double fw_units_per_metre(const char *slug)
+{
+    char path[512];
+    char *json;
+    cJSON *root, *pr, *u;
+    double upm = 430.0;
+
+    td5_geo_place_path(path, sizeof path, slug, "PLACE.JSON");
+    json = fw_slurp(path);
+    if (!json) return upm;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return upm;
+    pr = cJSON_GetObjectItem(root, "projection");
+    u  = pr ? cJSON_GetObjectItem(pr, "units_per_metre") : NULL;
+    if (u && cJSON_IsNumber(u) && u->valuedouble > 1.0)
+        upm = u->valuedouble;
+    cJSON_Delete(root);
+    return upm;
+}
+
+/* Build the segment list and the grid over it. A failure here is NOT fatal:
+ * every query falls back to the linear sweep when s_fw.gstart is NULL, so the
+ * answers are identical and only the cost changes. */
+static void fw_grid_build(void)
+{
+    double minx, minz, maxx, maxz, ex, ez, span;
+    int i, k, c, total;
+
+    if (s_fw.n < 1) return;
+
+    /* 1. flatten every way into segments. */
+    s_fw.nseg = 0;
+    for (i = 0; i < s_fw.n; i++) s_fw.nseg += s_fw.way[i].count - 1;
+    if (s_fw.nseg < 1) { s_fw.nseg = 0; return; }
+    s_fw.seg = (FwSeg *)malloc((size_t)s_fw.nseg * sizeof(FwSeg));
+    if (!s_fw.seg) { s_fw.nseg = 0; return; }
+    {
+        int w = 0;
+        for (i = 0; i < s_fw.n; i++)
+            for (k = 0; k + 1 < s_fw.way[i].count; k++) {
+                s_fw.seg[w].wi = i;
+                s_fw.seg[w].k  = k;
+                w++;
+            }
+        s_fw.nseg = w;
+    }
+
+    /* 2. bounds, from the way bboxes already computed at load. */
+    minx = s_fw.way[0].minx; maxx = s_fw.way[0].maxx;
+    minz = s_fw.way[0].minz; maxz = s_fw.way[0].maxz;
+    for (i = 1; i < s_fw.n; i++) {
+        if (s_fw.way[i].minx < minx) minx = s_fw.way[i].minx;
+        if (s_fw.way[i].maxx > maxx) maxx = s_fw.way[i].maxx;
+        if (s_fw.way[i].minz < minz) minz = s_fw.way[i].minz;
+        if (s_fw.way[i].maxz > maxz) maxz = s_fw.way[i].maxz;
+    }
+    ex = maxx - minx;
+    ez = maxz - minz;
+    span = (ex > ez) ? ex : ez;
+    if (!(span > 0.0)) { free(s_fw.seg); s_fw.seg = NULL; s_fw.nseg = 0; return; }
+
+    s_fw.gcell = span / (double)GEO_FW_GRID_MAX;
+    if (s_fw.gcell < GEO_FW_CELL_MIN_M * s_fw.upm)
+        s_fw.gcell = GEO_FW_CELL_MIN_M * s_fw.upm;
+    s_fw.gminx = minx;
+    s_fw.gminz = minz;
+    s_fw.gnx = (int)(ex / s_fw.gcell) + 1;
+    s_fw.gnz = (int)(ez / s_fw.gcell) + 1;
+    if (s_fw.gnx < 1) s_fw.gnx = 1;
+    if (s_fw.gnz < 1) s_fw.gnz = 1;
+    c = s_fw.gnx * s_fw.gnz;
+
+    /* 3. counting sort. A segment goes in EVERY cell its bbox touches, so a
+     * query that scans the cells over its own search box cannot miss one. */
+    s_fw.gstart = (int *)calloc((size_t)c + 1u, sizeof(int));
+    if (!s_fw.gstart) return;
+
+#define FW_SEG_CELLS(BODY)                                                    \
+    for (i = 0; i < s_fw.nseg; i++) {                                         \
+        const TD5_GeoFootway *f = &s_fw.way[s_fw.seg[i].wi];                  \
+        const int base = f->first + s_fw.seg[i].k;                            \
+        const double ax = s_fw.px[base],     az = s_fw.pz[base];              \
+        const double bx = s_fw.px[base + 1], bz = s_fw.pz[base + 1];          \
+        const double lo_x = (ax < bx) ? ax : bx, hi_x = (ax < bx) ? bx : ax;  \
+        const double lo_z = (az < bz) ? az : bz, hi_z = (az < bz) ? bz : az;  \
+        int cx0 = (int)((lo_x - s_fw.gminx) / s_fw.gcell);                    \
+        int cx1 = (int)((hi_x - s_fw.gminx) / s_fw.gcell);                    \
+        int cz0 = (int)((lo_z - s_fw.gminz) / s_fw.gcell);                    \
+        int cz1 = (int)((hi_z - s_fw.gminz) / s_fw.gcell);                    \
+        int gx, gz;                                                           \
+        if (cx0 < 0) cx0 = 0;                                                 \
+        if (cz0 < 0) cz0 = 0;                                                 \
+        if (cx1 >= s_fw.gnx) cx1 = s_fw.gnx - 1;                              \
+        if (cz1 >= s_fw.gnz) cz1 = s_fw.gnz - 1;                              \
+        for (gz = cz0; gz <= cz1; gz++)                                       \
+            for (gx = cx0; gx <= cx1; gx++) { const int cc = gz * s_fw.gnx + gx; BODY } \
+    }
+
+    FW_SEG_CELLS( s_fw.gstart[cc + 1]++; )
+    for (k = 0; k < c; k++) s_fw.gstart[k + 1] += s_fw.gstart[k];
+    total = s_fw.gstart[c];
+    s_fw.gitem = (int *)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
+    if (!s_fw.gitem) { free(s_fw.gstart); s_fw.gstart = NULL; return; }
+    {   /* Fill with a moving cursor, then rebuild the starts: the cursor
+         * consumes gstart[], which is why it is recomputed rather than saved. */
+        int *cur = (int *)malloc((size_t)c * sizeof(int));
+        if (!cur) { free(s_fw.gstart); s_fw.gstart = NULL; return; }
+        for (k = 0; k < c; k++) cur[k] = s_fw.gstart[k];
+        FW_SEG_CELLS( s_fw.gitem[cur[cc]++] = i; )
+        free(cur);
+    }
+#undef FW_SEG_CELLS
+    s_fw.gnitem = total;
 }
 
 static int fw_load(const char *slug)
@@ -281,6 +423,8 @@ static int fw_load(const char *slug)
     }
     snprintf(s_fw.slug, sizeof s_fw.slug, "%s", slug);
     snprintf(s_fw.source, sizeof s_fw.source, "%s", path);
+    s_fw.upm = fw_units_per_metre(slug);
+    fw_grid_build();
     {
         int nw = 0, i2;
         for (i2 = 0; i2 < s_fw.n; i2++)
@@ -298,6 +442,12 @@ static int fw_load(const char *slug)
                   s_fw.kind_n[TD5_GEO_FW_CYCLEWAY],
                   s_fw.kind_n[TD5_GEO_FW_PATH],
                   s_fw.kind_n[TD5_GEO_FW_PEDESTRIAN], nw);
+        TD5_LOG_I(LOG_TAG, "geo: footways index: %d segment(s) over a %dx%d "
+                  "grid of %.0f units (%.1f m)%s; scale %.1f units/m",
+                  s_fw.nseg, s_fw.gnx, s_fw.gnz, s_fw.gcell,
+                  s_fw.gcell / s_fw.upm,
+                  s_fw.gstart ? "" : " [GRID BUILD FAILED -- linear sweep]",
+                  s_fw.upm);
     }
     return 1;
 }
@@ -372,51 +522,129 @@ static double fw_seg_d2(double x, double z, double ax, double az,
     return (x - px) * (x - px) + (z - pz) * (z - pz);
 }
 
+/* Test one segment against the query and keep it if it is the best so far.
+ * Split out so the grid walk and the linear fallback share ONE copy of the
+ * acceptance rule -- two copies is how a side test ends up applied on one
+ * path and not the other. */
+typedef struct {
+    double   x, z;             /* query point                               */
+    double   max2;             /* squared search radius, world units        */
+    unsigned kind_mask;
+    int      side;             /* 1 = apply the side + parallel tests       */
+    double   nx, nz;           /* unit normal of the side being asked about */
+    double   sin_par_max;      /* |sin(angle to the road)| ceiling          */
+    /* results */
+    double   best2, bx, bz, bw;
+    int      bk, hit;
+} FwQuery;
+
+static void fw_try_seg(FwQuery *q, int wi, int k)
+{
+    const TD5_GeoFootway *f = &s_fw.way[wi];
+    const int base = f->first + k;
+    double ax, az, bx2, bz2, cx, cz, d2;
+
+    if (f->kind < 0 || f->kind >= TD5_GEO_FW_KINDS) return;
+    if (!(q->kind_mask & (1u << (unsigned)f->kind))) return;
+
+    ax = s_fw.px[base];      az = s_fw.pz[base];
+    bx2 = s_fw.px[base + 1]; bz2 = s_fw.pz[base + 1];
+
+    d2 = fw_seg_d2(q->x, q->z, ax, az, bx2, bz2, &cx, &cz);
+    if (d2 >= q->best2) return;
+
+    if (q->side) {
+        const double vx = cx - q->x, vz = cz - q->z;
+        double dx = bx2 - ax, dz = bz2 - az, len;
+
+        /* ON THAT SIDE. Without this the pavement across the street answers
+         * for this one, and a two-sided street reports the same width twice. */
+        if (vx * q->nx + vz * q->nz <= 0.0) return;
+
+        /* ROUGHLY PARALLEL TO THE ROAD. The road direction is perpendicular
+         * to the normal, so the angle to the road is read off the component
+         * of the segment direction ALONG the normal: that component is
+         * sin(angle). Without this the footway=crossing line running ACROSS
+         * the road at a junction sits a metre away, passes the side test, and
+         * collapses the reported pavement width to nothing. */
+        len = sqrt(dx * dx + dz * dz);
+        if (len <= 0.0) return;
+        dx /= len; dz /= len;
+        if (fabs(dx * q->nx + dz * q->nz) > q->sin_par_max) return;
+    }
+
+    q->best2 = d2;
+    q->bx = cx; q->bz = cz;
+    q->bw = f->width_m;
+    q->bk = f->kind;
+    q->hit = 1;
+}
+
+/* Walk the grid cells the search box covers, or every segment when the grid
+ * could not be built. Both paths call fw_try_seg, so they cannot disagree. */
+static void fw_run_query(FwQuery *q, double max_dist)
+{
+    int i;
+
+    if (s_fw.gstart && s_fw.seg) {
+        int cx0 = (int)((q->x - max_dist - s_fw.gminx) / s_fw.gcell);
+        int cx1 = (int)((q->x + max_dist - s_fw.gminx) / s_fw.gcell);
+        int cz0 = (int)((q->z - max_dist - s_fw.gminz) / s_fw.gcell);
+        int cz1 = (int)((q->z + max_dist - s_fw.gminz) / s_fw.gcell);
+        int gx, gz;
+
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= s_fw.gnx) cx1 = s_fw.gnx - 1;
+        if (cz1 >= s_fw.gnz) cz1 = s_fw.gnz - 1;
+        for (gz = cz0; gz <= cz1; gz++)
+            for (gx = cx0; gx <= cx1; gx++) {
+                const int c = gz * s_fw.gnx + gx;
+                int t;
+                /* A segment sits in every cell its bbox touches, so it can be
+                 * tested more than once here. Harmless: fw_try_seg keeps a
+                 * minimum, and the duplicate work is bounded by the segment's
+                 * own length in cells. */
+                for (t = s_fw.gstart[c]; t < s_fw.gstart[c + 1]; t++) {
+                    const FwSeg *s = &s_fw.seg[s_fw.gitem[t]];
+                    fw_try_seg(q, s->wi, s->k);
+                }
+            }
+        return;
+    }
+
+    for (i = 0; i < s_fw.n; i++) {
+        const TD5_GeoFootway *f = &s_fw.way[i];
+        int k;
+        if (q->x < f->minx - max_dist || q->x > f->maxx + max_dist ||
+            q->z < f->minz - max_dist || q->z > f->maxz + max_dist)
+            continue;
+        for (k = 0; k + 1 < f->count; k++) fw_try_seg(q, i, k);
+    }
+}
+
 int td5_geo_footways_nearest(double x, double z, double max_dist,
                              unsigned kind_mask, int *out_kind,
                              double *out_dist_u, double *out_width_m,
                              double *out_px, double *out_pz)
 {
-    const double max2 = max_dist * max_dist;
-    double best2 = max2, bx = 0.0, bz = 0.0, bw = 0.0;
-    int bk = -1, i, hit = 0;
+    FwQuery q;
 
     if (s_fw.n < 1 || max_dist <= 0.0) return 0;
+    memset(&q, 0, sizeof q);
+    q.x = x; q.z = z;
+    q.max2 = max_dist * max_dist;
+    q.best2 = q.max2;
+    q.kind_mask = kind_mask;
+    q.bk = -1;
+    fw_run_query(&q, max_dist);
 
-    for (i = 0; i < s_fw.n; i++) {
-        const TD5_GeoFootway *f = &s_fw.way[i];
-        int k;
-
-        if (f->kind < 0 || f->kind >= TD5_GEO_FW_KINDS) continue;
-        if (!(kind_mask & (1u << (unsigned)f->kind))) continue;
-        /* Bbox reject, grown by the search radius. This is what keeps an
-         * O(ways x points) sweep affordable enough to run in a prepass. */
-        if (x < f->minx - max_dist || x > f->maxx + max_dist ||
-            z < f->minz - max_dist || z > f->maxz + max_dist)
-            continue;
-
-        for (k = 0; k + 1 < f->count; k++) {
-            double cx, cz;
-            const double d2 = fw_seg_d2(x, z,
-                                        s_fw.px[f->first + k],
-                                        s_fw.pz[f->first + k],
-                                        s_fw.px[f->first + k + 1],
-                                        s_fw.pz[f->first + k + 1], &cx, &cz);
-            if (d2 < best2) {
-                best2 = d2;
-                bx = cx; bz = cz;
-                bw = f->width_m;
-                bk = f->kind;
-                hit = 1;
-            }
-        }
-    }
-    if (!hit) return 0;
-    if (out_kind)    *out_kind    = bk;
-    if (out_dist_u)  *out_dist_u  = sqrt(best2);
-    if (out_width_m) *out_width_m = bw;
-    if (out_px)      *out_px      = bx;
-    if (out_pz)      *out_pz      = bz;
+    if (!q.hit) return 0;
+    if (out_kind)    *out_kind    = q.bk;
+    if (out_dist_u)  *out_dist_u  = sqrt(q.best2);
+    if (out_width_m) *out_width_m = q.bw;
+    if (out_px)      *out_px      = q.bx;
+    if (out_pz)      *out_pz      = q.bz;
     return 1;
 }
 
@@ -427,4 +655,44 @@ int td5_geo_footways_sidewalk_nearest(double x, double z, double max_dist,
     return td5_geo_footways_nearest(x, z, max_dist,
                                     1u << TD5_GEO_FW_SIDEWALK, NULL,
                                     out_dist_u, out_width_m, out_px, out_pz);
+}
+
+/* THE C2 ENTRY POINT. Contract in the header. Metres in and out; the query
+ * point stays in world units because the caller holds a world-unit centreline
+ * and does not hold the scale. STRONG, so it overrides the weak stub C2 ships
+ * in its own branch. */
+int td5_geo_footway_sidewalk_near(double x, double z, double nx, double nz,
+                                  double max_m, double *out_dist_m,
+                                  double *out_width_m)
+{
+    const double upm = (s_fw.upm > 1.0) ? s_fw.upm : 430.0;
+    const double max_dist = max_m * upm;
+    double len;
+    FwQuery q;
+
+    if (s_fw.n < 1 || max_m <= 0.0) return 0;
+
+    /* The caller promises a unit normal; normalise anyway rather than trust
+     * it, because the side and parallel tests are both dot products against
+     * it and a vector of length 2 would silently double the parallel
+     * tolerance. A zero vector names no side and is refused. */
+    len = sqrt(nx * nx + nz * nz);
+    if (!(len > 1e-9)) return 0;
+
+    memset(&q, 0, sizeof q);
+    q.x = x; q.z = z;
+    q.max2 = max_dist * max_dist;
+    q.best2 = q.max2;
+    q.kind_mask = 1u << TD5_GEO_FW_SIDEWALK;
+    q.side = 1;
+    q.nx = nx / len;
+    q.nz = nz / len;
+    q.sin_par_max = sin(TD5_GEO_FW_PARALLEL_DEG * 3.14159265358979323846 / 180.0);
+    q.bk = -1;
+    fw_run_query(&q, max_dist);
+
+    if (!q.hit) return 0;
+    if (out_dist_m)  *out_dist_m  = sqrt(q.best2) / upm;
+    if (out_width_m) *out_width_m = q.bw;
+    return 1;
 }

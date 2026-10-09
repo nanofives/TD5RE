@@ -838,7 +838,6 @@ int tg_emit_geo_footpaths(const TG_NodeList *nl, int si,
 
     if (s_fp_n <= 0) return 1;
     if (si + 1 >= nl->count) return 1;
-    (void)nl;
 
     for (k = 0; k < s_fp_n; k++) {
         const TG_FootSeg *s = &s_fp[k];
@@ -976,6 +975,7 @@ void tg_geo_street_report(int nspans)
                   s_fp_drop_far, s_fp_drop_road, s_fp_drop_struct,
                   s_fp_drop_cap);
     } else {
+        int i, runs = 0, last = -99;
         TD5_LOG_I(LOG_TAG, "[GEO FOOTPATHS] ways=%ld segments=%ld drawn=%ld "
                   "over %d spans | dropped: kind=%ld far=%ld road=%ld "
                   "struct=%ld cap=%ld budget=%ld | src=%s",
@@ -983,5 +983,23 @@ void tg_geo_street_report(int nspans)
                   s_fp_drop_kind, s_fp_drop_far, s_fp_drop_road,
                   s_fp_drop_struct, s_fp_drop_cap, s_fp_drop_budget,
                   td5_geo_footways_source());
+        /* WHERE the paving is, so a framedump can be aimed at a plaza instead
+         * of hunting for one -- the same reason the signal heads list their
+         * spans. The table is in FOOTWAY order, not span order, so this is a
+         * lowest-unseen-span sweep rather than a walk: 8 lines at most,
+         * because 67 segments cluster into a handful of places and one line
+         * each would bury the census above. */
+        for (runs = 0; runs < 8; runs++) {
+            int best = -1, n = 0;
+            for (i = 0; i < s_fp_n; i++)
+                if (s_fp[i].si > last && (best < 0 || s_fp[i].si < best))
+                    best = s_fp[i].si;
+            if (best < 0) break;
+            for (i = 0; i < s_fp_n; i++)
+                if (s_fp[i].si >= best && s_fp[i].si <= best + 4) n++;
+            TD5_LOG_I(LOG_TAG, "[GEO FOOTPATHS]   run %d: span %d (%d quad(s) "
+                      "within 4 spans)", runs, best, n);
+            last = best + 4;
+        }
     }
 }

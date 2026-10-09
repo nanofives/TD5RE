@@ -114,6 +114,28 @@ int  td5_geo_route_commit(void);
  * "" after a successful commit, or before the first one. */
 const char *td5_geo_route_commit_reason(void);
 
+/* Bring `slug`'s derived _route/ frame up to the current schema, repairing it
+ * in place from the PRISTINE SOURCE. Call before anything reads a derived
+ * vector layer; td5_geo_sync() does.
+ *
+ * The derived cache is all-or-nothing on DERIVED.OK, which stops a derived
+ * layer being mixed with a source one -- but says nothing about a derived
+ * frame written by an OLDER build whose CONTENTS are wrong. Round 1011 C4 is
+ * that case: every _route/ committed before it has a SIGNALS.JSON whose
+ * nodes[] was never reprojected, and no FOOTWAYS.JSON at all, so its crossings
+ * and bus stops would be drawn in the source frame on a route-frame track.
+ *
+ * This is NOT a re-commit: reprojecting a vector layer is a pure rigid
+ * transform between two frames that are both written down, so it needs no
+ * router, no waypoints and no guards. Only the layers that round changed are
+ * rewritten.
+ *
+ * Returns 1 if it repaired something, 0 if there was nothing to do (no derived
+ * frame, or already current), -1 if the repair failed -- in which case the
+ * stamp is DELETED so the place falls back to its source frame wholesale
+ * rather than racing a half-converted one. Idempotent. */
+int  td5_geo_derived_migrate(const char *slug);
+
 /* Bounds of every downloaded place, so the screen can shade where routing works.
  * bbox rows are {west, south, east, north} in degrees -- lon first, the order
  * the screen's own projection takes, and the one td5_fe_geo.c reads. Returns
