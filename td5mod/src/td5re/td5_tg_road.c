@@ -1006,7 +1006,11 @@ static int tg_walk_push_section(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * table and is untouched; the one-lane-per-seam ramp below takes the step.
  * TD5RE_GEO_PLAZA_LANES=0 restores the raw count. */
 #define TG_GEO_UPM 430.0      /* GR_UNITS_PER_METRE, geo_common.py's one measured constant */
-int tg_geo_plaza_floor(int i, int lanes)
+#define TG_GEO_LANE_PROF_MAX 4096
+static signed char s_lane_prof[TG_GEO_LANE_PROF_MAX];
+static int         s_lane_prof_n = -1;
+
+static int tg_geo_plaza_floor_raw(int i, int lanes)
 {
     const char *nm;
     double tm;
@@ -1019,6 +1023,65 @@ int tg_geo_plaza_floor(int i, int lanes)
     if (!(tm > 0.0)) return lanes;
     want = (int)floor(tm * TG_GEO_UPM / 1500.0 + 0.5);
     return (lanes < want) ? want : lanes;
+}
+
+/* The profile is rebuilt at the start of every walk (the route can change
+ * between two builds in one session). */
+void tg_geo_lane_profile_reset(void) { s_lane_prof_n = -1; }
+
+/* [1014 B item 19] A SHORT WIDE BLIP IS NOT A ROAD. Plaza Moreno: spans 588..591
+ * are lanes 6 between 2 and 3 -- an undivided Diagonal 73 way the 1012 D2 rule
+ * counts as two carriageways, 12 spans long -- and the one-lane-per-seam ramp
+ * turns it into a six-lane DIAMOND with the markings of six lanes converging
+ * across it (and every street arm leaning back across the asphalt). A run of at
+ * most TG_GEO_SPIKE_RUN nodes that is two or more lanes wider than BOTH its
+ * neighbours is capped one lane over the wider neighbour. Real lane changes are
+ * long plateaus and are untouched. TD5RE_GEO_LANE_SPIKE=0 restores the blip. */
+#define TG_GEO_SPIKE_RUN 8
+static void tg_geo_lane_spikes(int n, signed char *ln)
+{
+    int t, i, capped = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_LANE_SPIKE")) return;
+    for (t = 4; t <= 12; t++) {
+        for (i = 1; i < n; ) {
+            int a, b, base, m;
+            if (ln[i] < t) { i++; continue; }
+            a = i;
+            while (i < n && ln[i] >= t) i++;
+            b = i - 1;                                  /* run [a..b] */
+            if (b - a + 1 > TG_GEO_SPIKE_RUN) continue;
+            if (b + 1 >= n) continue;                   /* open at the end: not a blip */
+            if (ln[a - 1] >= t - 1 || ln[b + 1] >= t - 1) continue;
+            base = (ln[a - 1] > ln[b + 1]) ? ln[a - 1] : ln[b + 1];
+            for (m = a; m <= b; m++)
+                if (ln[m] > base + 1) { ln[m] = (signed char)(base + 1); capped++; }
+        }
+    }
+    if (capped)
+        TD5_LOG_I(LOG_TAG, "trackgen: [GEO LANES] %d node(s) of short wide blips capped "
+                  "one lane over their neighbours", capped);
+}
+
+/* Route lanes at node i as the generator uses them: the raw count, the plaza
+ * ring's carriageway floor (items 11, 14) and the blip cap. Used by the walk and
+ * by the real-fork planner so the two always see the same road. */
+int tg_geo_plaza_floor(int i, int lanes)
+{
+    if (s_lane_prof_n < 0) {
+        const int nr = td5_geo_route_count();
+        int k;
+        const int n = (nr < TG_GEO_LANE_PROF_MAX) ? nr : TG_GEO_LANE_PROF_MAX;
+        for (k = 0; k < n; k++) {
+            double x, z;
+            int l = 0;
+            td5_geo_route_node(k, &x, &z, &l);
+            s_lane_prof[k] = (signed char)tg_geo_plaza_floor_raw(k, l);
+        }
+        tg_geo_lane_spikes(n, s_lane_prof);
+        s_lane_prof_n = n;
+    }
+    if (i < 0 || i >= s_lane_prof_n) return lanes;
+    return (int)s_lane_prof[i];
 }
 
 static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
@@ -1035,6 +1098,7 @@ static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
      * HERE, before the first node is pushed, because each one needs the ring's
      * lane count and the route's position changed over its window. 0 and a no-op
      * on a build with no fork, so the route is walked exactly as before. */
+    tg_geo_lane_profile_reset();
     tg_realfork_build();
 
     for (i = 0; i < n; i++) {

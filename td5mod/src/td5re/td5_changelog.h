@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: streets and plazas)" },
+    { CL_ITEM,    "A street that crosses a divided avenue now carries" },
+    { CL_ITEM,    "  on to the far side instead of ending at the median" },
+    { CL_ITEM,    "The pavement and railing break where a side street" },
+    { CL_ITEM,    "  opens, so the street meets the road cleanly" },
+    { CL_ITEM,    "Cross streets are as wide as the real street, and a" },
+    { CL_ITEM,    "  diagonal street no longer shrinks with its angle" },
+    { CL_ITEM,    "The road round a plaza is wider and now runs the whole" },
+    { CL_ITEM,    "  way round it, with a footway on both kerbs" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: driveable forks)" },
     { CL_ITEM,    "The other carriageway of a divided avenue is now" },
     { CL_ITEM,    "  a road you can drive, from one real median" },
