@@ -5712,6 +5712,25 @@ int tg_r8_treeline_page(int g0);
 #define TD5_TG_SHORE_FAR_INSET  4000.0   /* inside the water plane's outer edge */
 #define TD5_TG_SHORE_FAR_HIGH   2600.0   /* crest above the sea surface         */
 int tg_emit_fb_terrain(const TG_FBHook *h);
+
+/* [ROUND 1014 E] THE DRAWN FAR-TERRAIN SURFACE, asked for by a plaza.
+ *
+ * The far band's apron is three coarse quads per side per 4-span group, whose
+ * ring points sit on tg_world_h but whose interior is a bilinear chord between
+ * them. Over a valley the chord stands ABOVE the true ground, so a park lawn laid
+ * on world_h + lift was hidden under the apron (Parque Saavedra: 98 % / 99 % of
+ * its two lawns, MODELS.DAT measured). tg_far_surface_cover() runs the real band
+ * computation for the groups near a bounding box in CAPTURE mode (nothing is
+ * written, the report counters are restored) and returns the apron quads that
+ * overlap it; tg_surf_height() is the highest of them at a point. */
+typedef struct {
+    double *x, *y, *z;       /* 4 entries per quad, ring order */
+    int nq, cap;
+} TG_Surf;
+int  tg_far_surface_cover(const TG_FBHook *h, double x0, double z0,
+                          double x1, double z1, TG_Surf *out);
+int  tg_surf_height(const TG_Surf *s, double x, double z, double *y);
+void tg_surf_free(TG_Surf *s);
 extern long s_r13_models_bytes;
 void tg_r13_band_report(const TG_NodeList *nl, int nspans);
 void tg_r14_band_report(const TG_NodeList *nl, int nspans);
@@ -6185,6 +6204,11 @@ int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
 void tg_geo_city_report(void);                    /* td5_tg_city.c    */
 void tg_geo_city_report_streamed(void);           /* td5_tg_city.c    */
 int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
+/* [ROUND 1014 E] Does the verge strip beside span si on this side lie inside a
+ * mapped park / plaza? Then the skirt slab there is grass, not the GROUND tile
+ * page. td5_tg_streets.c. */
+int  tg_geo_skirt_side_park(const TG_NodeList *nl, int si, int is_left);
+extern long s_geop_skirt_park_n;   /* skirt slabs given the lawn page (terrain.c) */
 /* [ROUND 1012 D2] Would a footprint of half-extent `half` centred at (x,z)
  * stand in REAL open space -- a mapped plaza/park polygon, or inside a named
  * junction=circular ring like Plaza Miguel de Azcuenaga, which has no polygon

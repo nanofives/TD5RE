@@ -1696,6 +1696,38 @@ static long   s_r22_trim_relax, s_r22_trim_tight;
  * false green. Reported by tg_r23_slope_report, unconditional. */
 static long   s_r23_slope_seen, s_r23_slope_grass;
 
+/* [ROUND 1014 E] Capture mode of tg_emit_far_band and tg_emit_ground: when set,
+ * the apron quads / the skirt slab quads are appended here instead of being
+ * written (see TG_Surf). */
+static TG_Surf *s_farcap;
+long s_geop_skirt_park_n;   /* [ROUND 1014 E] skirt slabs given the lawn page */
+
+static void tg_farcap_push(const double *px, const double *py,
+                           const double *pz, int nverts)
+{
+    TG_Surf *c = s_farcap;
+    const int need = c->nq * 4 + nverts;
+    int i;
+    if (need > c->cap) {
+        const int nc = c->cap ? c->cap * 2 : 256;
+        double *nx = (double *)realloc(c->x, (size_t)nc * sizeof(double));
+        double *ny = (double *)realloc(c->y, (size_t)nc * sizeof(double));
+        double *nz = (double *)realloc(c->z, (size_t)nc * sizeof(double));
+        if (nx) c->x = nx;
+        if (ny) c->y = ny;
+        if (nz) c->z = nz;
+        if (!nx || !ny || !nz) return;
+        c->cap = nc;
+    }
+    for (i = 0; i < nverts; i++) {
+        c->x[c->nq * 4 + i] = px[i];
+        c->y[c->nq * 4 + i] = py[i];
+        c->z[c->nq * 4 + i] = pz[i];
+    }
+    c->nq += nverts / 4;
+}
+
+
 /* [R22 item 8] "a triangle without geometry near ... skirt p2:GREEN." Where a
  * fold cap (tg_r18_inside_bend_cap / tg_r13_fold_cap) drives the ground
  * profile's outer point in to the road edge, tg_ground_side floors the whole
@@ -1835,6 +1867,7 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
      * not from this span's dithered biome roll. See tg_topo_ground_index. */
     int seg_page = tg_topo_surface_page_sloped(nl, si), seg_nq;
     int s, k, n = 0;
+    int side_n[2] = { 0, 0 };         /* [ROUND 1014 E] vertices written per side */
     /* [R16 item B] Drop a side's grass skirt where a city frontage hides it end
      * to end. Precomputed for both sides so that if BOTH would cull we keep the
      * left one: the mesh must never come out empty (the skirt is the span's
@@ -1957,6 +1990,7 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
         else
             pb = pa;                      /* R7 single-profile slab, for the A/B */
         nseg = (pa.n > pb.n ? pa.n : pb.n) - 1;
+        side_n[s] = -n;                   /* closed after the k loop below */
         for (k = 0; k < nseg; k++) {
             const int ka0 = (k     < pa.n) ? k     : pa.n - 1;
             const int ka1 = (k + 1 < pa.n) ? k + 1 : pa.n - 1;
@@ -1975,9 +2009,40 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
             px[n]=bfx+gx*b0; py[n]=bfy-by0; pz[n]=bfz+gz*b0;
             uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
         }
+        side_n[s] += n;
     }
 
     seg_nq = n / 4;
+    if (s_farcap) {                    /* [ROUND 1014 E] ask-only: nothing is written */
+        tg_farcap_push(px, py, pz, n);
+        return 1;
+    }
+    /* [ROUND 1014 E item 12] A side whose verge lies inside a mapped park takes
+     * the lawn page; the two sides then need their own command. When neither
+     * side qualifies, or both do, the one-command mesh is written as before. */
+    {
+        const int pk0 = side_n[0] > 0 && tg_geo_skirt_side_park(nl, si, 1);
+        const int pk1 = side_n[1] > 0 && tg_geo_skirt_side_park(nl, si, 0);
+        if (pk0 || pk1) {
+            const int lawn = TD5_TG_PAGE_R3_BLOCK + 0;
+            if (pk0 && pk1) {
+                seg_page = lawn;
+            } else if (side_n[0] > 0 && side_n[1] > 0) {
+                int pages2[2], nq2[2];
+                pages2[0] = pk0 ? lawn : seg_page;
+                pages2[1] = pk1 ? lawn : seg_page;
+                nq2[0] = side_n[0] / 4;
+                nq2[1] = side_n[1] / 4;
+                tg_acct(TG_ACCT_TERRAIN, si);
+                if (tg_r14_up_ground_reach(si) > 0.0) tg_acct(TG_ACCT_R14_UP, si);
+                s_geop_skirt_park_n++;
+                return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, pages2, nq2, 2);
+            } else {
+                seg_page = lawn;     /* one side only, and it is the park's */
+            }
+            s_geop_skirt_park_n++;
+        }
+    }
     tg_acct(TG_ACCT_TERRAIN, si);      /* one slab covering both verges */
     /* [R14 OVERPASS item 3] The widened floor changes THIS slab rather than
      * adding one, so its accounting run is recorded where the slab is written.
@@ -4222,6 +4287,10 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         px[n]=X[1][j];   py[n]=Y[1][j];   pz[n]=Z[1][j];
         uu[n]=D[1][j]  /(double)TD5_TG_SPAN_LENGTH; vv[n]=U[1]; n++;
     }
+    if (s_farcap) {            /* [ROUND 1014 E] ask-only: nothing is written */
+        tg_farcap_push(px, py, pz, n);
+        return 1;
+    }
     /* [R9 TOPO C4] The apron is the same SURFACE the skirt it seams to is, so
      * it reads the same ground-run material. It used to read the far-group
      * owner's DITHERED biome, which at a boundary could put a tile apron behind
@@ -4654,6 +4723,109 @@ int tg_emit_fb_terrain(const TG_FBHook *h)
             tg_acct(TG_ACCT_R8_TERRAIN, h->si);
     }
     return 1;
+}
+
+/* [ROUND 1014 E] See TG_Surf. Groups whose road node lies within the box plus
+ * the far reach are run in capture mode; the counters the band bumps on its way
+ * to the (skipped) write are saved and restored so reports stay the real build's. */
+int tg_far_surface_cover(const TG_FBHook *h, double x0, double z0,
+                         double x1, double z1, TG_Surf *out)
+{
+    const TG_NodeList *nl = h->nl;
+    const double cx = (x0 + x1) * 0.5, cz = (z0 + z1) * 0.5;
+    const double rad = 0.5 * hypot(x1 - x0, z1 - z0) + 2.0 * tg_far_reach() + 4000.0;
+    const int rs = (int)(rad / (double)TD5_TG_SPAN_LENGTH) + 8;
+    int g, glo = ((h->si - rs) / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    int ghi = h->si + rs;
+    const long sv_snow = s_r22_snow_mismatch;
+    const int sv_t = s_r9_band_tested, sv_c = s_r9_band_clamped, sv_d = s_r9_band_dropped;
+    const long sv_h = s_r13_far_hidden, sv_r = s_r13_far_ridge, sv_k = s_r13_far_skyline_kept;
+    const long sv_ds = s_r22_degen_seen, sv_dk = s_r22_degen_skip;
+    const long sv_tr = s_r22_trim_relax, sv_tt = s_r22_trim_tight;
+    const long sv_ss = s_r23_slope_seen, sv_sg = s_r23_slope_grass;
+    int sk, slo = h->si - rs, shi = h->si + rs;
+
+    memset(out, 0, sizeof(*out));
+    if (glo < 0) glo = 0;
+    if (ghi > nl->count - 2) ghi = nl->count - 2;
+    s_farcap = out;
+    for (g = glo; g <= ghi; g += TD5_TG_FAR_GROUP) {
+        TG_FBHook hk = *h;
+        size_t moff[8];
+        int nm = 0;
+        const double dx = nl->v[g].x - cx, dz = nl->v[g].z - cz;
+        if (hypot(dx, dz) > rad) continue;
+        hk.si = g;
+        hk.b = &k_biomes[tg_biome_for_span(g)];
+        hk.moff = moff;
+        hk.nmesh = &nm;
+        hk.maxmesh = 8;
+        if (!tg_emit_fb_terrain(&hk)) break;
+    }
+    /* The skirt slabs: near the road the skirt is the road-bed conform (flat at
+     * the road's height out to TD5_TG_ROAD_BED_VERGE), not world_h, so a lawn on
+     * a slope beside the road can sit under it too. */
+    if (slo < 0) slo = 0;
+    if (shi > nl->count - 2) shi = nl->count - 2;
+    for (sk = slo; sk <= shi; sk++) {
+        const double dx = nl->v[sk].x - cx, dz = nl->v[sk].z - cz;
+        if (hypot(dx, dz) > rad) continue;
+        if (!tg_emit_ground(nl, sk, h->blk, tg_water_side(sk))) break;
+    }
+    s_farcap = NULL;
+    s_r22_degen_seen = sv_ds; s_r22_degen_skip = sv_dk;
+    s_r22_trim_relax = sv_tr; s_r22_trim_tight = sv_tt;
+    s_r23_slope_seen = sv_ss; s_r23_slope_grass = sv_sg;
+    s_r22_snow_mismatch = sv_snow;
+    s_r9_band_tested = sv_t; s_r9_band_clamped = sv_c; s_r9_band_dropped = sv_d;
+    s_r13_far_hidden = sv_h; s_r13_far_ridge = sv_r; s_r13_far_skyline_kept = sv_k;
+    return out->nq;
+}
+
+/* Highest captured apron surface over (x, z). Each quad is two triangles; both
+ * diagonals are tried and the higher answer kept, because which diagonal the
+ * renderer draws is not something this layer can see. 0 when nothing covers. */
+int tg_surf_height(const TG_Surf *s, double x, double z, double *y)
+{
+    static const int k_tri[4][3] = { {0, 1, 2}, {0, 2, 3}, {0, 1, 3}, {1, 2, 3} };
+    int q, t, found = 0;
+    double best = -1e300;
+    if (!s) return 0;
+    for (q = 0; q < s->nq; q++) {
+        const double *qx = &s->x[q * 4], *qy = &s->y[q * 4], *qz = &s->z[q * 4];
+        double lo_x = qx[0], hi_x = qx[0], lo_z = qz[0], hi_z = qz[0];
+        int k;
+        for (k = 1; k < 4; k++) {
+            if (qx[k] < lo_x) lo_x = qx[k];
+            if (qx[k] > hi_x) hi_x = qx[k];
+            if (qz[k] < lo_z) lo_z = qz[k];
+            if (qz[k] > hi_z) hi_z = qz[k];
+        }
+        if (x < lo_x || x > hi_x || z < lo_z || z > hi_z) continue;
+        for (t = 0; t < 4; t++) {
+            const int a = k_tri[t][0], b = k_tri[t][1], c = k_tri[t][2];
+            const double d = (qz[b] - qz[c]) * (qx[a] - qx[c])
+                           + (qx[c] - qx[b]) * (qz[a] - qz[c]);
+            double u, w;
+            if (fabs(d) < 1e-9) continue;
+            u = ((qz[b] - qz[c]) * (x - qx[c]) + (qx[c] - qx[b]) * (z - qz[c])) / d;
+            w = ((qz[c] - qz[a]) * (x - qx[c]) + (qx[a] - qx[c]) * (z - qz[c])) / d;
+            if (u < -1e-6 || w < -1e-6 || 1.0 - u - w < -1e-6) continue;
+            {
+                const double hh = u * qy[a] + w * qy[b] + (1.0 - u - w) * qy[c];
+                if (hh > best) best = hh;
+                found = 1;
+            }
+        }
+    }
+    if (found && y) *y = best;
+    return found;
+}
+
+void tg_surf_free(TG_Surf *s)
+{
+    free(s->x); free(s->y); free(s->z);
+    memset(s, 0, sizeof(*s));
 }
 
 /* [R13 BAND] MODELS.DAT total, recorded at the write so the band report can
