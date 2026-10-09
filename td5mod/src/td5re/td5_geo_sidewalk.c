@@ -294,21 +294,31 @@ double td5_geo_sw_resolve(const TD5_GeoSwIn *in, int *src_out)
      * plan itself implies. Behind its own knob so the rule can be taken out of
      * the stack and the three measurements above tested on their own. */
     if (src == TD5_GEO_SWSRC_NONE
-        && td5_env_flag_on("TD5RE_GEO_SW_FRONTAGE")
-        /* A DIVIDED AVENUE DECLINES, EXPLICITLY. Its building line spans two
-         * carriageways and a median, and this rule subtracts one carriageway;
-         * the real footway is outside the OPPOSITE carriageway, which no
-         * pavement emitter reaches (td5_tg_city.c, the ROUND 1010 AVENUES
-         * block, and tg_pavement_side_width returns 0 on that edge). The
-         * over-wide ceiling below would catch most of these anyway -- saying it
-         * here makes the reason attributable instead of incidental. */
-        && !in->divided) {
+        && td5_env_flag_on("TD5RE_GEO_SW_FRONTAGE")) {
         const double line = td5_geo_sw_building_line_for(in->klass, in->namek);
         if (line > 0.0) {
-            /* half_road_m: the line is placed against the road the generator
-             * BUILT, so road + 2 x pavement == the building line exactly, and
-             * the facade cannot land anywhere but on the back edge of the slab. */
-            const double m = line * 0.5 - in->half_road_m;
+            /* half_road_m, not OSM's: the line is placed against the road the
+             * generator BUILT, so road + 2 x pavement == the building line
+             * exactly and the facade cannot land anywhere but on the back edge
+             * of the slab.
+             *
+             * A DIVIDED AVENUE SPENDS THE LINE ON FOUR THINGS, not two. Its
+             * 30 m in La Plata covers pavement + near carriageway + median +
+             * far carriageway + pavement, and subtracting only the near one is
+             * what made this rule hand back 11.5 m a side. With the sidecar's
+             * offset and far width the whole section is known, so the line can
+             * be spent properly -- see TD5_GeoSwIn for the derivation.
+             *
+             * MEASURED on La Plata's 349 divided spans: |off| runs 7.4 to
+             * 15.1 m with a median of 14.2, and the far carriageway is 2 lanes
+             * on every one of them, which puts the pavement at roughly 3.1 to
+             * 4.4 m. A span whose carriageways nearly touch (|off| 7.4 m, a
+             * NEGATIVE median) produces an over-wide answer and declines on the
+             * ceiling below, which is the right outcome for a cross-section
+             * that does not physically fit. */
+            const double m = (in->divided && in->av_reach_m > 0.0)
+                           ? (line - in->av_reach_m - in->half_road_m) * 0.5
+                           : line * 0.5 - in->half_road_m;
             if (geo_sw_sane(m) && m <= GEO_SW_FRONTAGE_MAX_M)
                 { w = m; src = TD5_GEO_SWSRC_FRONTAGE; }
         }

@@ -93,7 +93,23 @@ typedef struct {
     double footway_m;        /* 2: mapped footway offset, 0 = none (not landed) */
     double facade_m;         /* 3: centreline -> first building, 0 = unmeasured */
     int    facade_ok;        /* 3: the facade genuinely IS the frontage       */
-    int    divided;          /* 4: a divided avenue is detected here          */
+    /* 4: THE DIVIDED CROSS-SECTION, when td5_geo_avenues.c reports one here.
+     * `av_reach_m` is the lateral from the race centreline out to the FAR EDGE
+     * of the opposite carriageway, METRES -- the carriageway authority's own
+     * number (tg_geo_avenue_reach), so the pavement is measured against exactly
+     * the thing the facades, trees and guardrails already clear.
+     *
+     * With it the building line can be spent on all four parts instead of two:
+     *
+     *     line = pavement + near + median + far + pavement
+     *          = pavement + half_road + av_reach + pavement
+     *  => pavement = (line - av_reach_m - half_road_m) / 2
+     *
+     * The median never has to be named, and a cross-section that does not fit
+     * comes out too small or negative, so the rule declines on its own
+     * arithmetic rather than on a special case. */
+    int    divided;
+    double av_reach_m;
 } TD5_GeoSwIn;
 
 /* Select the per-place building-line table. NULL/"" selects the generic one.

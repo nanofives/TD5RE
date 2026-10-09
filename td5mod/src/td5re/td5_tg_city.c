@@ -2085,12 +2085,33 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
                  * measured from this centreline -- the facade probe, the
                  * building line -- subtracts this one, not OSM's. */
                 in.half_road_m     = n->width * 0.5 / upm;
-                /* A divided avenue's building line describes a cross-section
-                 * the frontage rule does not model; the sidecar knows where
-                 * one is, so the rule is told rather than left to guess. */
-                in.divided         = tg_geo_avenue_n() > 0
-                                  && tg_geo_avenue_reach(nl, si, s ? 1.0 : -1.0)
-                                     > tg_road_half_width(nl, si);
+                /* A divided avenue spends its building line on four things, so
+                 * the rule is handed the whole cross-section rather than left
+                 * to subtract one carriageway from it. The reach is the
+                 * carriageway authority's own -- the same number the facades,
+                 * the trees and the guardrails already clear -- so the pavement
+                 * cannot be measured against a different opposite carriageway
+                 * than everything else on this span. */
+                /* ASKED ON BOTH SIDES, and that is the point. The building line
+                 * spans the WHOLE cross-section, so both of an avenue's
+                 * pavements are (line - reach - half_road) / 2 -- the one
+                 * beyond the far carriageway and the one behind the driver
+                 * alike. tg_geo_avenue_reach answers 0 for the side the avenue
+                 * is not on, so asking only about `s` gave the far side the
+                 * cross-section and left the near side subtracting a single
+                 * carriageway from a 30 m line: measured, 689 frontage-rule
+                 * span-sides on the right against 405 on the left, and 342
+                 * spans reporting a left/right difference that is an artefact
+                 * of the question, not of the street. */
+                if (tg_geo_avenue_n() > 0) {
+                    const double hw = tg_road_half_width(nl, si);
+                    double rch = tg_geo_avenue_reach(nl, si,  1.0);
+                    if (!(rch > hw)) rch = tg_geo_avenue_reach(nl, si, -1.0);
+                    if (rch > hw) {
+                        in.divided    = 1;
+                        in.av_reach_m = rch / upm;
+                    }
+                }
                 in.present         = (s ? present_l : present_r) > 0.5;
                 in.tag_m           = s ? tag_l : tag_r;
                 /* SOURCE 2, THE MAPPED FOOTWAY. Asked against round 1011 C4's

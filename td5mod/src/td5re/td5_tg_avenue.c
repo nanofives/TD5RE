@@ -232,6 +232,96 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     return 1;
 }
 
+/* [ROUND 1011 C2] THE FOOTWAY OUTSIDE THE FAR CARRIAGEWAY.
+ *
+ * Round 1010 wrote this gap down rather than closing it, at
+ * tg_pavement_side_width: "this suppresses the inner pavement without laying
+ * one along the FAR edge of the opposite carriageway, which is where the real
+ * footway is. That needs its own emitter (the pavement emitters are all
+ * anchored on the race kerb)." This is that emitter.
+ *
+ * It has to live here and not in td5_tg_city.c for the reason that note gives:
+ * every city pavement emitter measures outward from the race road's own kerb,
+ * and this slab is anchored on the FAR carriageway's outer edge instead -- a
+ * lateral only the avenue sidecar knows. The baseline framedump at span 267 of
+ * Mariano's La Plata route shows exactly what its absence looks like: the race
+ * road, a median, the oncoming carriageway, and then bare grass running up to
+ * the buildings.
+ *
+ * WIDTH comes from the same per-side table the city slab uses, so the footway
+ * across the avenue is the width the building-line rule computed for this span
+ * rather than a second opinion. Height and pages match the city slab (a kerb
+ * face up to TD5_TG_KERB_H, pavement on top), so the two read as one city.
+ *
+ * Geometry mirrors tg_av_emit_island deliberately -- same cl/cr convention
+ * (cl is the more POSITIVE lateral), same two-segment top-plus-wall mesh, same
+ * taper from node si to si+1 -- because that winding is already known to
+ * survive backface culling from the driver's side.
+ *
+ * TD5RE_GEO_AVENUE_FARWALK=0 drops it for an A/B. */
+static long s_av_farwalk;     /* spans that got one, for the measurement log */
+
+static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
+                                   double o0, double o1, int lanes,
+                                   TG_Buf *blk, size_t *moff, int *nmesh)
+{
+    const TG_Node *a = &nl->v[si];
+    const TG_Node *c = &nl->v[si + 1];
+    const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
+    const double sg0 = (o0 >= 0.0) ? 1.0 : -1.0;
+    const double sg1 = (o1 >= 0.0) ? 1.0 : -1.0;
+    /* The pavement's own width for THIS span and THIS side, world units. The
+     * avenue is on the side sg points to, which is the `left` flag the geo
+     * prepass indexed its table by. 0 means the prepass had no answer here --
+     * no mapped way in range, or a synthetic build -- and then there is nothing
+     * to lay rather than a guess to lay. */
+    const double sw = tg_geo_sidewalk_w_side(si, sg0 > 0.0);
+    /* OUTER edge of the far carriageway, and the back edge of the slab. */
+    const double e0 = o0 + sg0 * ohw, f0 = e0 + sg0 * sw;
+    const double e1 = o1 + sg1 * ohw, f1 = e1 + sg1 * sw;
+    const double cl0 = (e0 > f0) ? e0 : f0, cr0 = (e0 > f0) ? f0 : e0;
+    const double cl1 = (e1 > f1) ? e1 : f1, cr1 = (e1 > f1) ? f1 : e1;
+    const double H = (double)TD5_TG_KERB_H;
+    const double b0 = a->y, b1 = c->y;      /* the far carriageway's own plane */
+    double px[12], py[12], pz[12], uu[12], vv[12];
+    int seg_page[2], seg_nq[2];
+    int n = 0;
+
+    if (!(sw > 0.0)) return 1;
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_FARWALK")) return 1;
+
+    /* TOP. */
+    px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
+
+    /* Wall facing +lateral. */
+    px[n]=a->x+a->tz*cl0; py[n]=b0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=b1;   pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=1.0; n++;
+
+    /* Wall facing -lateral. */
+    px[n]=a->x+a->tz*cr0; py[n]=b0;   pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=b1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
+
+    seg_page[0] = TD5_TG_PAGE_SIDEWALK;    seg_nq[0] = 1;
+    seg_page[1] = TD5_TG_PAGE_BRANCH_KERB; seg_nq[1] = 2;
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2))
+        return 0;
+    /* BRANCHROAD, the same span-scoped exempt kind tg_av_emit_road takes, and
+     * for the same reason it gives: this sits outside the race road's own half
+     * width, where a SCENERY class would be read as scenery on the carriageway
+     * and deleted. */
+    tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHROAD, si);
+    s_av_farwalk++;
+    return 1;
+}
+
 /* ---- the MEASUREMENT, logged ---------------------------------------------
  *
  * The one question this whole round is about is "is the median the width the
@@ -283,9 +373,11 @@ static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
         if (si != s1) continue;
         TD5_LOG_I(LOG_TAG, "trackgen: [GEO AVENUE] %s spans %d..%d: opposite "
                   "carriageway %.1f..%.1f m away, median built %.2f..%.2f m "
-                  "over %d span(s), %d opening(s) for real cross streets",
+                  "over %d span(s), %d opening(s) for real cross streets; "
+                  "far-side footway on %ld span(s)",
                   name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
-                  s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open);
+                  s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open,
+                  s_av_farwalk);
         s_av_n = 0;        /* the next avenue starts its own accumulation */
         s_av_open = 0;
         break;
@@ -315,7 +407,13 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
         tg_av_note(nl, si, o0, lanes, open, a - nl->v[si].width * 0.5 - ohw);
     }
     if (!tg_av_emit_road(nl, si, o0, o1, lanes, blk, moff, nmesh)) return 0;
-    /* A real cross street cuts the median here, so it opens for the turn. */
+    /* A real cross street cuts the median here, so it opens for the turn --
+     * and so does everything beyond it. [1011 C2] The far footway takes the
+     * SAME gate as the island rather than one of its own: a car turning across
+     * the median crosses the far carriageway and its pavement too, so a slab
+     * left standing here would be a kerb across the mouth of a real street. */
     if (open) return 1;
+    if (!tg_av_emit_far_pavement(nl, si, o0, o1, lanes, blk, moff, nmesh))
+        return 0;
     return tg_av_emit_island(nl, si, o0, o1, lanes, blk, moff, nmesh);
 }
