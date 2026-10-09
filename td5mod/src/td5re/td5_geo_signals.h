@@ -39,6 +39,12 @@
 #ifndef TD5_GEO_SIGNALS_H
 #define TD5_GEO_SIGNALS_H
 
+/* For TD5_GEO_XP_*, the crossing-paint vocabulary. It lives in the footways
+ * header because geo_fetch writes the SAME `paint` field, decided by the SAME
+ * rule, onto both a crossing NODE (read here) and a footway=crossing WAY (read
+ * there). One spelling, one enum, whichever file you came in through. */
+#include "td5_geo_footways.h"
+
 /* Mesh header tag (the int16 at byte offset 2, named texture_page_id in
  * TD5_MeshHeader) for a traffic-light lamp. The existing vocabulary is
  * 0 = opaque, 1 = camera-facing, 2 = camera-facing additive; these continue it.
@@ -60,6 +66,44 @@ int  td5_geo_signals_count(void);
 int  td5_geo_signals_get(int i, double *x, double *z);
 /* Path the table came from, "" when nothing is loaded. */
 const char *td5_geo_signals_source(void);
+
+/* ------------------------------------------- the rest of SIGNALS.JSON ---
+ *
+ * The same file's `nodes[]` array, which this module has counted and ignored
+ * since 2026-10-07 ("a count in the log is how the next workstream finds out
+ * the data is already on disk"). Round 1011 C4 is that workstream.
+ *
+ * They are filled by the SAME td5_geo_signals_sync() pass -- SIGNALS.JSON is
+ * one 450 KB file and parsing it twice to populate two tables would be the
+ * only cost of keeping them in separate modules. `signals[]` membership is
+ * untouched: a crossing or a bus stop is NOT a traffic light and never enters
+ * the lamp-masting table.
+ */
+
+/* A highway=crossing node. `paint` is geo_fetch's verdict (TD5_GEO_XP_*), not
+ * a re-derivation of the raw tags. La Plata: 583 nodes, paint marked 127 /
+ * signals 119 / unmarked 28 / unknown 309. */
+typedef struct {
+    double x, z;
+    int    paint;      /* TD5_GEO_XP_* */
+    int    tactile;    /* tactile_paving was tagged (any truthy value) */
+} TD5_GeoCrossing;
+
+/* A highway=bus_stop node and the furniture a mapper surveyed on it. The
+ * flags are already resolved to bools by geo_fetch, so an explicit
+ * `shelter=no` is 0 here rather than truthy. La Plata: 370 stops, 78 with a
+ * shelter, 29 with a bench, 14 with a bin, 36 lit. */
+typedef struct {
+    double x, z;
+    int    shelter, bench, bin, lit;
+} TD5_GeoBusStop;
+
+int td5_geo_crossings_count(void);
+/* Crossing i. Returns 0 and leaves `out` alone out of range. */
+int td5_geo_crossing_get(int i, TD5_GeoCrossing *out);
+
+int td5_geo_bus_stops_count(void);
+int td5_geo_bus_stop_get(int i, TD5_GeoBusStop *out);
 
 /* ------------------------------------------------------------- run time --- */
 

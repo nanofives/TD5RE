@@ -3491,6 +3491,18 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * predicates it consults, and precede the per-entry loop. No-op with
          * no geo place loaded. */
         tg_geo_signals_prepare(nl, nspans);
+        /* [GEO STREET, round 1011 C4] Zebras at real crossing nodes, bus
+         * stops, mapped plaza paving. Same contract and the same placement in
+         * the order: all three consult the structure and street authorities
+         * above, and all three must be decided before the per-entry loop
+         * forks. The crossing prepass additionally publishes which spans the
+         * real data owns, which tg_emit_fb_city reads to stand the
+         * generator's own crossing rule down -- so it has to run BEFORE
+         * tg_xmemo_reset arms the crossing memo below. No-op with no geo
+         * place loaded. */
+        tg_geo_xings_prepare(nl, nspans);
+        tg_geo_bus_stops_prepare(nl, nspans);
+        tg_geo_footpaths_prepare(nl, nspans);
         /* [GEO ROUND 1009 items 2 + 7] Same contract and the same reason: the
          * OSM pavement widths and the per-(span, side) frontage stand-down are
          * decided here, while this is the only thread, because every facade,
@@ -4153,6 +4165,29 @@ static int tg_scenery_entry(int e)
                     }
                     tg_guard_mark(sq0, meshes.len, TG_GK_PROP, si);
                 }
+                /* [GEO STREET] Bus stops are furniture and take the same
+                 * last-in-the-span slot and the same TG_GK_PROP class as the
+                 * signal head beside them. The zebra and the mapped paving
+                 * mark themselves (DECAL and CITY respectively) inside their
+                 * own emitters, because neither is furniture and neither can
+                 * be judged by the furniture envelope: a decal is LICENSED to
+                 * cover the road it is painted on. Inert on synthetic. */
+                {
+                    size_t sb0 = meshes.len;
+                    if (!tg_emit_geo_bus_stops(nl, si, &meshes, moff, &nmesh,
+                                               TG_MAX_MESHES_PER_ENTRY)) {
+                        ok = 0; break;
+                    }
+                    tg_guard_mark(sb0, meshes.len, TG_GK_PROP, si);
+                }
+                if (!tg_emit_geo_xings(nl, si, &meshes, moff, &nmesh,
+                                       TG_MAX_MESHES_PER_ENTRY)) {
+                    ok = 0; break;
+                }
+                if (!tg_emit_geo_footpaths(nl, si, &meshes, moff, &nmesh,
+                                           TG_MAX_MESHES_PER_ENTRY)) {
+                    ok = 0; break;
+                }
             }
         }
 
@@ -4304,6 +4339,10 @@ static int tg_scenery_end(TG_Buf *out)
             /* [GEO SIGNALS] the G3 acceptance number: signals in cache, near
              * the route, placed, and dropped by reason. Silent on synthetic. */
             tg_geo_signals_report(nspans);
+            /* [GEO STREET] the C4 acceptance numbers: crossings, bus stops
+             * and mapped paving in cache, placed, and dropped by reason.
+             * Silent on synthetic. */
+            tg_geo_street_report(nspans);
             /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
              * assembled strip. These are the round's acceptance numbers. */
             tg_r9_city_report(nl, nspans);
