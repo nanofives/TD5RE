@@ -359,7 +359,24 @@ void td5_geo_attrs_race_init(void)
 int td5_geo_attrs_kph_to_units(int kph)
 {
     if (kph <= 0) return 0;
-    return (int)(((long)kph * 778L) / 256L);
+    /* kph -> SPEEDO units is the inverse of the original's own digit formula,
+     * kph = (speed_raw * 256 + 389) / 778  [CONFIRMED @0x438ebc], i.e.
+     * speed_raw = kph * 778 / 256.
+     *
+     * THEN SHIFT UP BY 8, and this is the part that was wrong first time.
+     * ACTOR_LONGITUDINAL_SPEED is 24.8 FIXED (td5_ai.h:193 says so outright),
+     * not the speedo's already-shifted value -- td5_hud.c's speedo does its own
+     * `speed_raw >>= 8` before the formula. So the whole conversion is simply
+     * kph * 778, the /256 and the <<8 cancelling.
+     *
+     * CORROBORATED by the thresholds the AI code already carries: 0x4000 and
+     * 0xA000 come out as 21 and 53 km/h -- a sane "is it moving" and "is it
+     * quick into this corner". Under the un-shifted scale they would have been
+     * 5390 and 13500 km/h, i.e. tests that could never fire, which is what gave
+     * the error away. Measured before the fix, a 150 km/h cap evaluated to 455
+     * against observed speeds of 18000-120000 and pinned the throttle to its
+     * 0x14 floor on nearly every span. */
+    return (int)((long)kph * 778L);
 }
 
 /* Build the race tables on first use, once per track index.

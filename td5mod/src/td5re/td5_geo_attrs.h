@@ -118,13 +118,20 @@ void td5_geo_attrs_report(int nspans);
  * Safe to call on any track: a no-op unless this is a geo slot with a route. */
 void td5_geo_attrs_race_init(void);
 
-/* km/h -> the engine's longitudinal_speed units.
+/* km/h -> ACTOR_LONGITUDINAL_SPEED units (24.8 fixed).
  *
- * NOT an invented constant. The HUD speedometer converts the other way with
- * the ORIGINAL's own formula, kph = (long_speed * 256 + 389) / 778 (recorded
- * at td5_hud.c's speedometer notes, from the original's digit emitter), so the
- * inverse is long_speed = kph * 778 / 256. The +389 is that formula's rounding
- * term and carries no information in this direction. */
+ * NOT an invented constant, and NOT the naive inverse either. The speedo's
+ * digit formula is kph = (speed_raw * 256 + 389) / 778 [CONFIRMED @0x438ebc],
+ * but `speed_raw` there has already been shifted down by 8 (td5_hud.c
+ * recomputes body-frame velocity and does `speed_raw >>= 8`). The actor field
+ * the AI reads is the UNSHIFTED 24.8 value, so the /256 and the <<8 cancel and
+ * the conversion is just kph * 778.
+ *
+ * Getting this wrong by that factor of 256 is not a subtle miss: it pinned the
+ * AI throttle to its floor on nearly every span. The arithmetic is checkable
+ * against constants already in the AI -- 0x4000 and 0xA000 become 21 and
+ * 53 km/h, which is what a "moving" and a "quick into this corner" test should
+ * read. */
 int td5_geo_attrs_kph_to_units(int kph);
 
 /* The speed cap for a span in engine longitudinal_speed units, or 0 for "no
