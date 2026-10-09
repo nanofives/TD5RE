@@ -259,7 +259,11 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
  * survive backface culling from the driver's side.
  *
  * TD5RE_GEO_AVENUE_FARWALK=0 drops it for an A/B. */
-static long s_av_farwalk;     /* spans that got one, for the measurement log */
+/* Spans that got one. CUMULATIVE over the whole track, unlike the per-avenue
+ * accumulators below which reset at each new avenue -- the summary line says so,
+ * because a reader comparing "87 / 228 / 336" against three avenues of 90 / 146
+ * / 112 spans would otherwise read three per-avenue counts that nearly fit. */
+static long s_av_farwalk;
 
 static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
                                    double o0, double o1, int lanes,
@@ -374,7 +378,7 @@ static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
         TD5_LOG_I(LOG_TAG, "trackgen: [GEO AVENUE] %s spans %d..%d: opposite "
                   "carriageway %.1f..%.1f m away, median built %.2f..%.2f m "
                   "over %d span(s), %d opening(s) for real cross streets; "
-                  "far-side footway on %ld span(s)",
+                  "far-side footway on %ld span(s) CUMULATIVE over the track",
                   name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
                   s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open,
                   s_av_farwalk);
