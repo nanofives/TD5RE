@@ -1024,6 +1024,7 @@ int tg_realfork_build(void)
     for (i = 0; i < n; i++) {
         double x = 0.0, z = 0.0; int l = 0;
         td5_geo_route_node(i, &x, &z, &l);
+        l = tg_geo_plaza_floor(i, l);      /* [1014 B] the same lanes the walk will push */
         s_rx[i] = x; s_rz[i] = z; s_rl[i] = l;
         s_node_fork[i] = -1; s_node_ovr[i] = 0; s_node_dt[i] = 0.0;
         s_node_extra[i] = 0.0;

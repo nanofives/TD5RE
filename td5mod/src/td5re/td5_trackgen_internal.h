@@ -1498,6 +1498,10 @@ enum { TG_NE_STREET = 0, TG_NE_AVENUE, TG_NE_BACKSTREET, TG_NE_CONTINUATION,
 void tg_network_reset(void);
 void tg_network_build(const TG_NodeList *nl, int nspans_main);
 int  tg_network_built(void);
+int  tg_net_geo(void);                 /* [1014 B] streets came from the real map */
+void   tg_geo_lane_profile_reset(void);
+int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
+double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
 void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
 int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
 int  tg_net_mouth_kind(int si, int left);                          /* TG_NE_* or -1  */

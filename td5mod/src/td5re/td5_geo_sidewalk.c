@@ -60,10 +60,10 @@ typedef struct {
      * only a proxy for the name, and on La Plata's own route it gets "Calle 14"
      * (primary) and "Calle 50" (tertiary) wrong. 0 = no rule for that kind
      * here, which falls back to the class. */
-    double      name_m[TD5_GEO_NAMEK_DIAGONAL + 1];
+    double      name_m[TD5_GEO_NAMEK_PLAZA + 1];
     /* [1011 C2] The REAL CARRIAGEWAY by street kind, METRES -- see
      * td5_geo_sw_carriageway_m. Same indexing as name_m; 0 = no rule. */
-    double      carriage_m[TD5_GEO_NAMEK_DIAGONAL + 1];
+    double      carriage_m[TD5_GEO_NAMEK_PLAZA + 1];
 } GeoSwPlaceRule;
 
 /* Index by TD5_GEO_RC_*: UNKNOWN, SERVICE, LIVING, RESIDENTIAL, UNCLASSIFIED,
@@ -74,13 +74,18 @@ static const GeoSwPlaceRule k_place_rules[] = {
      * class default. */
     { "la_plata",
       { 18.0,  0.0, 18.0, 18.0, 18.0, 30.0, 30.0, 30.0, 30.0,  0.0 },
-      /* UNKNOWN, CALLE, AVENIDA, DIAGONAL -- the 1882 plan, stated by name. */
-      {  0.0, 18.0, 30.0, 30.0 },
+      /* UNKNOWN, CALLE, AVENIDA, DIAGONAL, PLAZA -- the 1882 plan, stated by
+       * name. A plaza states no building line of its own: the ring road round
+       * it is a primary/secondary way, which takes the 30 m class row. */
+      {  0.0, 18.0, 30.0, 30.0,  0.0 },
       /* Carriageway: 10 m, which is what 34 of the 37 measured calles say.
        * The avenidas and diagonales take the same per-carriageway figure --
        * a divided one is then 10 + median + 10, which is the 30 m line with
        * a 10 m median, and that is the cross-section the city has. */
-      {  0.0, 10.0, 10.0, 10.0 } },
+      /* [1014 B items 11, 14] ... and a PLAZA's ring road takes it too. OSM
+       * counts the ring's `lanes` as 2 (a 7 m road), narrower than every calle
+       * that feeds it -- "the road bordering the whole plaza should be wider". */
+      {  0.0, 10.0, 10.0, 10.0, 10.0 } },
     /* THE GENERIC ROW, for every other place. Deliberately a European/Latin
      * American town centre rather than a second La Plata: narrower on the small
      * classes, and it only ever has to beat the class default, which is the
@@ -91,8 +96,8 @@ static const GeoSwPlaceRule k_place_rules[] = {
        * "Avenue" carries no reserved width, so the class is the better guide.
        * And no carriageway rule either -- without a plan to point at, the
        * `lanes` field is the honest answer and the route keeps using it. */
-      {  0.0,  0.0,  0.0,  0.0 },
-      {  0.0,  0.0,  0.0,  0.0 } },
+      {  0.0,  0.0,  0.0,  0.0,  0.0 },
+      {  0.0,  0.0,  0.0,  0.0,  0.0 } },
 };
 
 static const GeoSwPlaceRule *s_rule;
@@ -131,7 +136,7 @@ double td5_geo_sw_carriageway_m(int klass, int namek)
 {
     (void)klass;                 /* no class row today: the plan states a KIND */
     if (!s_rule) td5_geo_sw_place("");
-    if (namek > TD5_GEO_NAMEK_UNKNOWN && namek <= TD5_GEO_NAMEK_DIAGONAL)
+    if (namek > TD5_GEO_NAMEK_UNKNOWN && namek <= TD5_GEO_NAMEK_PLAZA)
         return s_rule->carriage_m[namek];
     return 0.0;
 }
@@ -139,7 +144,7 @@ double td5_geo_sw_carriageway_m(int klass, int namek)
 double td5_geo_sw_building_line_for(int klass, int namek)
 {
     if (!s_rule) td5_geo_sw_place("");
-    if (namek > TD5_GEO_NAMEK_UNKNOWN && namek <= TD5_GEO_NAMEK_DIAGONAL) {
+    if (namek > TD5_GEO_NAMEK_UNKNOWN && namek <= TD5_GEO_NAMEK_PLAZA) {
         const double m = s_rule->name_m[namek];
         if (m > 0.0) return m;        /* the plan states it by name: use that */
     }

@@ -4501,6 +4501,9 @@ int tg_side_blocked(int si, double side)
  * TD5RE_R9_CITY_ARM_MEASURED=0 restores the blanket gate for an A/B. */
 int tg_side_corridor_here(const TG_NodeList *nl, int si, double side)
 {
+    /* [1014 B item 8] a street that starts beyond the avenue is clear of the
+     * corridor by construction (the network refused every other one). */
+    if (tg_net_mouth_shift(si, side > 0.0) > 0.0) return 0;
     if (!td5_env_flag_on("TD5RE_R9_CITY_ARM_MEASURED"))
         return tg_side_blocked(si, side);
     if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return 0;
@@ -4595,6 +4598,24 @@ static int tg_r14_fork_nostreet(int si)
 {
     return tg_r14_fork_pave() && tg_branches_enabled() &&
            tg_span_in_fork_clear(si);
+}
+
+/* [1014 B item 6] "a sidewalk sits on top of the crossing." The exception above
+ * is only true where the fork window REALLY has no street: it was written for
+ * the synthetic tg_r10_cross_gates, which refuses every side street inside the
+ * window. On a geo track the street comes from the real map and is laid on the
+ * side the corridor does not take (tg_geo_span_run_ok refuses the corridor
+ * side), so inside a real fork window a mouth is a street, the slab must break
+ * for it, and the railing with it. Asked per SIDE for that reason: on a geo
+ * track `!tg_facade_built` is exactly "the network opened a street here".
+ * TD5RE_GEO_FORK_MOUTH_PAVE=0 restores the blanket exception. Synthetic builds
+ * never reach the override (tg_net_geo() is 0), so slot 60 is unchanged. */
+static int tg_r14_fork_nostreet_s(int si, int left)
+{
+    if (!tg_r14_fork_nostreet(si)) return 0;
+    if (tg_net_geo() && !tg_facade_built(si, left) &&
+        td5_env_flag_on("TD5RE_GEO_FORK_MOUTH_PAVE")) return 0;
+    return 1;
 }
 
 double tg_pavement_side_width(const TG_NodeList *nl, int si,
@@ -4904,6 +4925,21 @@ void tg_city_edge_frame(const TG_NodeList *nl, int si, double sg,
         out[3] = frx; out[4] = fry; out[5] = frz;
         out[6] = -nux; out[7] = -nuz; out[8] = -fux; out[9] = -fuz;
     }
+    /* [1014 B item 8] A street mouth on a DIVIDED AVENUE's own side leaves from
+     * the far carriageway's outer kerb, not the race kerb. The network records
+     * that offset per (span, side); every emitter that lays a street, its
+     * pavement arms, its flanks or its reveal building reads this frame, so
+     * moving the frame moves them together. 0 everywhere else (no mouth, no
+     * avenue, any synthetic build), so no other span sees a different frame. */
+    {
+        const double s0 = tg_net_mouth_shift(si, sg > 0.0);
+        if (s0 > 0.0) {
+            const double s1n = tg_net_mouth_shift(si + 1, sg > 0.0);
+            const double s1  = (s1n > 0.0) ? s1n : s0;
+            out[0] += out[6] * s0;  out[2] += out[7] * s0;
+            out[3] += out[8] * s1;  out[5] += out[9] * s1;
+        }
+    }
 }
 
 /* Append one quad (loop order given by the caller) to the vertex arrays. */
@@ -4970,7 +5006,7 @@ int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
     /* [R14 BRANCH item 2a] and the same for a fork region, where the side
      * street this rule drops the slab FOR is suppressed wholesale. */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !tg_facade_built(si, s) &&
-        !tg_r13_approach_span(si) && !tg_r14_fork_nostreet(si))
+        !tg_r13_approach_span(si) && !tg_r14_fork_nostreet_s(si, s))
         return 0;
     return 1;
 }
@@ -5018,7 +5054,7 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
          * dither R11 GUARD hardened). See tg_r14_fork_nostreet. */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") &&
             !tg_facade_built(h->si, s) && !tg_r13_approach_span(h->si) &&
-            !tg_r14_fork_nostreet(h->si))
+            !tg_r14_fork_nostreet_s(h->si, s))
             continue;
         /* [R15 CITY item 6] "this sidewalk is on top of another crossing."
          *
@@ -5357,7 +5393,7 @@ int tg_rail_kerbfence_here(int si, double sg)
      * must break on the same spans or the railing floats -- see
      * tg_r14_fork_nostreet. */
     if (!tg_facade_built(si, sg > 0.0) && !tg_r13_approach_span(si) &&
-        !tg_r14_fork_nostreet(si)) return 0;
+        !tg_r14_fork_nostreet_s(si, sg > 0.0)) return 0;
     if (tg_biome_cell_index(si) != tg_biome_cell_index(si - 1)) return 0;
     if (tg_side_blocked(si, sg)) return 0;                /* fork corridor        */
     if (tg_rail_avenue_owns_edge(si, sg)) return 0;       /* [1013 F1] median edge */
@@ -5976,6 +6012,7 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                 !tg_facade_built(h->si, s) && !tg_block_is_park(h->si, s))
                 set = tg_xstreet_reach_at(h->nl, h->si, sg,
                                           tg_block_arm_skew(h->si, s), b, sw)
+                    + tg_net_mouth_shift(h->si, s)
                     + TD5_TG_BACKROW_GAP
                     + (tg_facade_depth(b) + TD5_TG_BACKROW_GAP) * (double)r
                     + (double)(rh % 1800u);
@@ -6009,6 +6046,7 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                                       tg_city_side_base(h->si, s, sw));
                 const double term = tg_xstreet_reach_at(h->nl, h->si, sg,
                                         tg_block_arm_skew(h->si, s), b, sw)
+                                  + tg_net_mouth_shift(h->si, s)
                                   + (pw > 0.0 ? pw : sw);
                 if (term < set) { set = term; s_r15_backrow_close++; }
             }

@@ -486,6 +486,13 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * the median crosses the far carriageway and its pavement too, so a slab
      * left standing here would be a kerb across the mouth of a real street. */
     if (open) return 1;
+    /* [1014 B item 8] and where a street really leaves the far kerb: the sidecar's
+     * `open` runs and the network's mouths are measured by different code, so
+     * they can differ by a span or two, and a footway left standing across the
+     * mouth is the item-6 defect again. */
+    if (tg_net_mouth_shift(si, o0 > 0.0) > 0.0 &&
+        tg_net_mouth_kind(si, o0 > 0.0) >= 0)
+        return tg_av_emit_island(nl, si, o0, o1, lanes, blk, moff, nmesh);
     if (!tg_av_emit_far_pavement(nl, si, o0, o1, lanes, blk, moff, nmesh))
         return 0;
     return tg_av_emit_island(nl, si, o0, o1, lanes, blk, moff, nmesh);

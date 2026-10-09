@@ -266,6 +266,7 @@ double tg_footway_reach(const TG_NodeList *nl, int si, double side)
     double r = tg_carriageway_reach(nl, si, side), xr = 0.0;
     if (tg_r10_xstreet_guard() && tg_xstreet_here(nl, si, side, &xr)) {
         const double rr = tg_road_half_width(nl, si) + xr
+                        + tg_net_mouth_shift(si, side > 0.0)
                         + TD5_TG_R10_XSTREET_MARGIN;
         if (rr > r) r = rr;
     }
