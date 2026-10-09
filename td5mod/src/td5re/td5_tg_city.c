@@ -10,6 +10,7 @@
 #include "td5_geo_roads.h"       /* GEO TRACK: OSM sidewalk tags (item 7)     */
 #include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
 #include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
+#include "td5_geo_avenues.h"     /* [1013 F1] which edge a divided avenue owns  */
 
 double tg_r14_keep(void)
 {
@@ -4794,6 +4795,42 @@ void tg_r8_city_sidewalk_diag(const TG_FBHook *h)
  *
  * The caller-side gates (paved / TD5RE_AUTOTRACK_SIDEWALKS) are folded in here
  * too, so the guardrail does not have to reconstruct the call chain. */
+/* [ROUND 1013 F1] DOES A DIVIDED AVENUE OWN THIS EDGE?
+ *
+ * The kerb railing is ONE mesh per span with up to two quads, one per road edge.
+ * On an avenue the edge on the median's side is where the median island and the
+ * oncoming carriageway stand, so tg_carriageway_reach there is the whole
+ * cross-section (15..20 m against a 3.4 m road) and the on-road guard rejects
+ * the railing quad on that side -- as it must -- but it rejects the MESH, and
+ * the quad on the outer pavement edge, which is perfectly legal, went with it.
+ * MEASURED on Mariano's route: 253 of the 450 guard rejects inside the second
+ * Diagonal 73 run (spans 337..588) were this railing, one per span, and the same
+ * on the first run and on Avenida 13; the avenue spans had NO kerb railing on
+ * either side while every ordinary city span had both.
+ *
+ * The same ownership rule tg_city_pave_w already applies to the pavement ("a
+ * divided avenue owns its inner edge, the main road's pavement yields") now
+ * applies to the railing: it yields the median-side edge and keeps the other.
+ * One definition, here, because the roadside guardrail asks this predicate to
+ * decide whether it may stand down for a railing.
+ *
+ * Answers from the avenue's own sidecar with one span of slack each way, the
+ * slack tg_geo_avenue_reach takes. 0 on any build with no real place, before
+ * touching anything -- that is what keeps the synthetic gate byte-identical.
+ * TD5RE_GEO_AVENUE_RAIL=0 pins the old all-or-nothing mesh for an A/B. */
+static int tg_rail_avenue_owns_edge(int si, double sg)
+{
+    int e;
+    if (tg_geo_avenue_n() < 1) return 0;          /* MUST be the first statement */
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_RAIL")) return 0;
+    for (e = -1; e <= 1; e++) {
+        double off = 0.0;
+        if (!td5_geo_avenue_at(si + e, &off, NULL, NULL)) continue;
+        if (sg * off >= 0.0) return 1;            /* the avenue is on this side */
+    }
+    return 0;
+}
+
 int tg_rail_kerbfence_here(int si, double sg)
 {
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) return 0;
@@ -4836,6 +4873,7 @@ int tg_rail_kerbfence_here(int si, double sg)
         !tg_r14_fork_nostreet(si)) return 0;
     if (tg_biome_cell_index(si) != tg_biome_cell_index(si - 1)) return 0;
     if (tg_side_blocked(si, sg)) return 0;                /* fork corridor        */
+    if (tg_rail_avenue_owns_edge(si, sg)) return 0;       /* [1013 F1] median edge */
     return 1;
 }
 
