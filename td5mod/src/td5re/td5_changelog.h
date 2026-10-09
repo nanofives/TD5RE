@@ -41,6 +41,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  bench or a bin wherever the map records one" },
     { CL_ITEM,    "Plaza, park and pedestrian-street paving follows the" },
     { CL_ITEM,    "  mapped path instead of being guessed from scenery" },
+    { CL_ITEM,    "Routes you built earlier pick all this up on their" },
+    { CL_ITEM,    "  own. You do not have to build them again" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 8 (real places: divided avenues)" },
