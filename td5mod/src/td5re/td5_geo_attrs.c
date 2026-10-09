@@ -106,6 +106,18 @@ void td5_geo_attrs_prepare(const void *nlv, int nspans)
     /* Every branch below is past this gate, which is what keeps a synthetic
      * auto track byte-identical: with no place loaded there are no roads, the
      * tables stay NULL and every accessor returns "nothing known". */
+    /* CLAIM THE LATCH ON EVERY EXIT PATH, INCLUDING THE BAILS.
+     *
+     * This is a thread-safety requirement, not tidiness. ga_in() -- the guard
+     * on every per-span query -- calls ga_race_ensure(), and
+     * td5_geo_attrs_lamp_here() is queried from the generator's WORKER
+     * threads. With the latch claimed, every one of those calls is a plain int
+     * compare that returns immediately. Leave it unclaimed on a bail and the
+     * workers all race to rebuild the tables at once.
+     *
+     * Set BEFORE the early-outs so it holds whichever way this returns. */
+    s_race_tried_track = g_td5.track_index;
+
     /* Every bail says WHY. A silent early-out here is indistinguishable from
      * "the attributes are all unknown", and that ambiguity cost one run. */
     if (!nl || nspans < 1) {

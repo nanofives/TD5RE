@@ -3779,6 +3779,23 @@ static void hud_draw_street_line(int player_slot, int view_index)
      * every cache that exists today. td5_geo_attrs_name falls back to the
      * nearest mapped way, which is the whole reason the fallback exists. */
     name = td5_geo_attrs_name(td5_game_get_slot_span(player_slot));
+#ifndef TD5RE_RELEASE
+    /* TD5RE_HUD_STREET_TEST=1 substitutes a name with a real UTF-8 accent.
+     *
+     * WHY THIS EXISTS. The accent path is the half of this feature that was
+     * actually broken, and La Plata's shipped route touches 18 streets of
+     * which NONE is accented -- the 9 accented names in that cache (Plaza
+     * Miguel de Azcuenaga, Plaza Espana, ...) are all off-route. So there is
+     * no way to photograph the fix by driving. This forces it.
+     *
+     * The literal is written as explicit hex escapes, not as source UTF-8:
+     * C3 A9 is e-acute, C3 B1 is n-tilde. That keeps this file pure ASCII (the
+     * house convention) and makes the bytes under test unambiguous rather than
+     * dependent on how an editor saved them. Correct output is "Azcuenaga"
+     * with an accented e; "AzcuA~(c)naga" means the decoder was bypassed. */
+    if (td5_env_flag_off("TD5RE_HUD_STREET_TEST"))
+        name = "Azcu\xC3\xA9naga / Espa\xC3\xB1a";
+#endif
     if (!name || !name[0]) return;
 
     snprintf(buf, sizeof buf, TR("ON %s"), name);
