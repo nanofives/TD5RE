@@ -34,6 +34,8 @@
 #include "td5_trackgen_internal.h"
 #include "td5_tg_world.h"
 #include "td5_geo.h"
+#include "td5_geo_roads.h"       /* [1014 B] street kind from a name */
+#include "td5_geo_sidewalk.h"    /* [1014 B] the place carriageway table */
 
 /* ----------------------------------------------------------- constants -- */
 
@@ -993,6 +995,32 @@ static int tg_walk_push_section(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * so the scenery that draws after the walk is still a pure function of seed. */
 #define TG_GEO_CHUNK 32
 
+/* [1014 B items 11, 14] "the road bordering the whole plaza should be wider."
+ * The ring road round a plaza is OSM `lanes=2` -- a 7 m road -- while every
+ * calle that feeds it has had the place's 10.47 m carriageway since round 1011.
+ * The route reader raises it too (td5_geo_route.c, PLAZA kind), but the lane
+ * count is baked into ROUTE.JSON at BUILD, so a route built before this change
+ * still says 2. Applying the same floor here, from the same table and the
+ * node's own street name, makes an existing _route/ and a fresh BUILD agree
+ * without anyone rebuilding. A place with no carriageway table gets 0 from the
+ * table and is untouched; the one-lane-per-seam ramp below takes the step.
+ * TD5RE_GEO_PLAZA_LANES=0 restores the raw count. */
+#define TG_GEO_UPM 430.0      /* GR_UNITS_PER_METRE, geo_common.py's one measured constant */
+int tg_geo_plaza_floor(int i, int lanes)
+{
+    const char *nm;
+    double tm;
+    int want;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZA_LANES")) return lanes;
+    nm = td5_geo_route_name(i);
+    if (!nm || td5_geo_roads_namek_of(nm) != TD5_GEO_NAMEK_PLAZA) return lanes;
+    td5_geo_sw_place(td5_geo_place_slug());
+    tm = td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN, TD5_GEO_NAMEK_PLAZA);
+    if (!(tm > 0.0)) return lanes;
+    want = (int)floor(tm * TG_GEO_UPM / 1500.0 + 0.5);
+    return (lanes < want) ? want : lanes;
+}
+
 static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                        int section_tally[TD5_TG_SECTION_COUNT], int skip)
 {
@@ -1013,6 +1041,7 @@ static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
         double x, z;
         int lanes;
         td5_geo_route_node(i, &x, &z, &lanes);
+        lanes = tg_geo_plaza_floor(i, lanes);           /* [1014 B items 11, 14] */
         lanes = tg_realfork_lanes_override(i, lanes);   /* [ROUND 1013 F2] */
         /* [GEO 2026-09-30, Valparaiso] ONE LANE PER SEAM. A real street can go
          * from 2 to 5 lanes between two OSM nodes, and a seam that adds or

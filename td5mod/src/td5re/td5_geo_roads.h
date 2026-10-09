@@ -90,6 +90,7 @@
 #define TD5_GEO_NAMEK_CALLE   1   /* Calle / Street / Rua / Via             */
 #define TD5_GEO_NAMEK_AVENIDA 2   /* Avenida / Av. / Avenue / Boulevard     */
 #define TD5_GEO_NAMEK_DIAGONAL 3  /* Diagonal                               */
+#define TD5_GEO_NAMEK_PLAZA   4   /* Plaza -- a ring road round a square    */
 
 #define TD5_GEO_SURF_SMOOTH  0   /* asphalt, concrete, paved, paving_stones */
 #define TD5_GEO_SURF_COBBLE  1   /* sett, cobblestone, unhewn_cobblestone   */
