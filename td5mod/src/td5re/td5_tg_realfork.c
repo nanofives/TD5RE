@@ -375,6 +375,9 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
 static void rf_gen_avenue(void)
 {
     int a;
+    /* [ROUND 1014 A] TD5RE_GEO_FORK_MERGE=0 restores the round-1013 rule: one
+     * block per candidate, weight capped at 90. */
+    const int merge = td5_env_flag_on("TD5RE_GEO_FORK_MERGE");
     if (!td5_env_flag_on("TD5RE_GEO_FORK_AVENUE")) return;
     if (tg_geo_avenue_n() < 1) return;
 
@@ -403,8 +406,14 @@ static void rf_gen_avenue(void)
 
         for (g = 0; g < ng; g++)
             for (h = g + 1; h < ng; h++) {
-                const int F = (gate_a[g] > TD5_TG_GRID_SPAN + 12) ? gate_a[g]
-                                                                  : TD5_TG_GRID_SPAN + 12;
+                /* [ROUND 1014 A] The earliest F the start grid allows is the one
+                 * whose WINDOW (F - widen - taper) clears the grid, not the old
+                 * GRID_SPAN + 12 -- a clamp that always failed rf_validate's
+                 * "inside the start grid" test, so a run that begins in the grid
+                 * (Diagonal 73 at span 24) lost its first 34 spans of corridor. */
+                const int Fmin = merge ? TD5_TG_GRID_SPAN + 2 + TG_RF_WIDEN + s_rf_taper
+                                       : TD5_TG_GRID_SPAN + 12;
+                const int F = (gate_a[g] > Fmin) ? gate_a[g] : Fmin;
                 const int R = gate_b[h];
                 int la = 0, lb_n[10], lb_best = 2, nb = 0, i, ok = 1;
                 RfCand *c;
@@ -444,12 +453,17 @@ static void rf_gen_avenue(void)
                     c->off[i - F] = off;
                 }
                 if (rf_validate(c)) {
-                    /* Capped: a 190-span corridor is not worth more than two
-                     * 55-span blocks, which are two forks the field can choose. */
-                    c->weight = (double)(c->len > 90 ? 90 : c->len) * 1.05;
+                    /* [ROUND 1014 A] Weighted by its FULL length unless the merge
+                     * knob is off. The old cap of 90 made two 55-span blocks worth
+                     * more than the 194-span run they are the halves of, so the
+                     * selector kept alternate blocks (full-width windows of
+                     * neighbouring blocks overlap across the 2-span median
+                     * opening) and the other blocks were left as a scenery
+                     * carriageway that looks drivable and is not. */
+                    c->weight = (double)(merge ? c->len : (c->len > 90 ? 90 : c->len)) * 1.05;
                     s_ncand++;
                 }
-                break;      /* the nearest long-enough gate only */
+                if (!merge) break;      /* the old rule: the nearest long-enough gate only */
             }
     }
 }

@@ -4223,6 +4223,10 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double
  * ways give. Contract and the root cause this replaces: td5_geo_avenues.h. */
 int    tg_geo_avenue_n(void);
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
+/* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
+ * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
+ * slab must not be laid on top of it. */
+int tg_realfork_walk_owned(int fi, int mb);
 int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
 /* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
  * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
