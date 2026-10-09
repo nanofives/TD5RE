@@ -8,6 +8,7 @@
 #include "td5_geo.h"             /* GEO TRACK: is a real place loaded?        */
 #include "td5_geo_buildings.h"   /* GEO TRACK: real footprints and areas      */
 #include "td5_geo_roads.h"       /* GEO TRACK: OSM sidewalk tags (item 7)     */
+#include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
 
 double tg_r14_keep(void)
 {
@@ -1262,15 +1263,16 @@ double tg_city_sidewalk_w_at(const TG_NodeList *nl, int si,
      * to the procedural rules below unchanged, and the whole table is empty on
      * a synthetic build so nothing there can observe this.
      *
-     * KNOWN LIMITATION, stated here because the next round will meet it. The
-     * side-blind tg_city_sidewalk_w(b) is read as a WIDTH by 48 call sites
-     * across six modules -- the junction pavement arm, the cross-street
-     * frontage setback, the branch kerb -- and those keep the biome width, so
-     * a corner arm can be a little narrower than the main pavement it turns
-     * off. That split is not new (TD5RE_R10_WIDEWALK already scaled only the
-     * _at form, up to 2000 raw against the arm's 900), and closing it means
-     * threading a width through tg_carriageway_clear_gap and every caller,
-     * which is a change of its own. */
+     * SIDE-BLIND, STILL, AND ON PURPOSE. This form has no side to give, so it
+     * answers with the wider of the span's two pavements -- the round-1009
+     * behaviour. [ROUND 1011 C2] added tg_city_sidewalk_w_side_at below for the
+     * callers that DO have a side, and moved the ones that decide visible
+     * geometry over to it: the slab, the facade setback, the carriageway gap,
+     * the junction arms and the verge furniture. What is left on this form is
+     * the set of call sites that genuinely have no side in hand. They are
+     * therefore a little wide rather than wrong, which is the same direction
+     * the 1009 max erred in and is why this is an additive change: a call site
+     * nobody threaded is a missed improvement, not a new defect. */
     w = tg_geo_sidewalk_w(si);
     if (w > 0.0) return w;
     if (!td5_env_flag_on("TD5RE_R10_WIDEWALK")) return base;
@@ -1278,6 +1280,46 @@ double tg_city_sidewalk_w_at(const TG_NodeList *nl, int si,
     if (w < base) w = base;                         /* never below the floor     */
     if (w > TD5_TG_WIDEWALK_MAX) w = TD5_TG_WIDEWALK_MAX;
     return w;
+}
+
+/* [ROUND 1011 C2] THE SAME QUESTION, WITH A SIDE -- which closes the KNOWN
+ * LIMITATION written out just above.
+ *
+ * The only difference from tg_city_sidewalk_w_at is which entry of the geo
+ * table it reads: this one takes the side's own width, that one takes the wider
+ * of the pair. EVERYTHING ELSE IS SHARED, deliberately, so a threaded caller
+ * and an unthreaded one can only ever differ by the measurement itself and
+ * never by a rule. On a synthetic build the geo table is empty, both return the
+ * biome base, and the two are the same function -- which is what keeps
+ * MODELS.DAT byte-identical there. */
+double tg_city_sidewalk_w_side_at(const TG_NodeList *nl, int si, int left,
+                                  const TG_Biome *b)
+{
+    const double w = tg_geo_sidewalk_w_side(si, left);
+    if (w > 0.0 && tg_city_sidewalk_w(b) > 0.0) return w;
+    return tg_city_sidewalk_w_at(nl, si, b);
+}
+
+/* [ROUND 1011 C2] The PER-SIDE base, for an emitter that was handed one width.
+ *
+ * Several emitters and their matching predicates take a single `sw` from their
+ * caller and then split it per side through tg_pavement_side_width. This swaps
+ * in that side's own OSM-derived width where there is one, and hands back `sw`
+ * untouched where there is not -- so a synthetic build, a non-geo biome and an
+ * unmatched span all keep exactly the number they had.
+ *
+ * `sw > 0.0` IS LOAD-BEARING: a biome with no raised pavement says so by
+ * passing 0, and that answer must survive. Returning a geo width there would
+ * lay a slab on a verge the biome deliberately left flat.
+ *
+ * It lives up here, beside the width accessors, because the SLAB and the
+ * PREDICATE that says where the slab stands (tg_r12_pave_stands) both have to
+ * call it, and R5 item 15's lesson is that those two drifting apart is how an
+ * end cap ends up floating where there is no pavement. */
+double tg_city_side_base(int si, int s, double sw)
+{
+    const double w = tg_geo_sidewalk_w_side(si, s);
+    return (w > 0.0 && sw > 0.0) ? w : sw;
 }
 
 double tg_verge_band_w(const TG_Biome *b)
@@ -1689,7 +1731,10 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     const TG_Node *n = &nl->v[si];
     const double side = left ? 1.0 : -1.0;
     const double lx = n->tz * side, lz = -n->tx * side;
-    const double base = n->width * 0.5 + tg_city_sidewalk_w_at(nl, si, b);
+    /* [1011 C2] PER SIDE: the probe measures from the back edge of the slab
+     * this side actually gets, so a street with a wide vereda one way and a
+     * kerb the other probes two different bands -- which is the whole point. */
+    const double base = n->width * 0.5 + tg_city_sidewalk_w_side_at(nl, si, left, b);
     double px[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
     double pz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
     int k, a, np = 0, nalong = 1;
@@ -1698,7 +1743,8 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     if (!s_geo_city) return 0;
     if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP") && si + 1 < nl->count) {
         const TG_Node *n1 = &nl->v[si + 1];
-        const double b1 = n1->width * 0.5 + tg_city_sidewalk_w_at(nl, si + 1, b);
+        const double b1 = n1->width * 0.5
+                        + tg_city_sidewalk_w_side_at(nl, si + 1, left, b);
         /* Along-road step: the far end of the frontage is the next node's own
          * setback point, so the samples follow the wall through a bend instead
          * of running off a straight line tangent to it. */
@@ -1795,29 +1841,60 @@ static int tg_geo_backrow_at(const TG_NodeList *nl, int si, int left,
 /* Item 7: pavement width per SPAN, WORLD UNITS. 0 = "no OSM answer, keep the
  * biome width".
  *
- * ONE WIDTH PER SPAN, NOT PER SIDE, and that is deliberate. OSM does describe
- * the two sides separately (`sidewalk=left` / `right`, 69 of La Plata's ways)
- * and the slab emitter is per side, but the width is read by SIDE-BLIND callers
- * too -- tg_carriageway_clear_gap's pavement argument, the facade setback, the
- * plaza projection -- and tg_side_geom's own comment records what happens when
- * the slab and the thing standing on it disagree: "the wall must land on the
- * back edge of the slab the hook lays, or one of the two is left hanging."
- * Handing the two sides different widths through a side-blind signature would
- * reintroduce exactly that. So the span takes the WIDER of its two sides, which
- * passes the real measurement through while keeping every consumer on one
- * number. Per-side pavements are a separate change: it needs the width
- * threaded through tg_carriageway_clear_gap and every caller of it. */
-static float         s_geo_sw_w[TD5_TG_MAX_SPANS];
+ * [ROUND 1011 C2] NOW PER SIDE, indexed [span][side] like s_geo_wall_off below,
+ * side 0 = right, 1 = left.
+ *
+ * What round 1009 wrote here, and why it no longer holds: the two sides were
+ * collapsed with `w = max(left, right)` because the width is read by SIDE-BLIND
+ * callers -- tg_carriageway_clear_gap's pavement argument, the facade setback,
+ * the plaza projection -- and tg_side_geom requires the wall to land on the
+ * back edge of the slab the hook lays, so handing the two sides different
+ * widths through a side-blind signature would leave one of the pair hanging.
+ * That reasoning was right about the hazard and wrong about the remedy: the
+ * answer is to give those callers a side, not to throw the second measurement
+ * away. tg_city_sidewalk_w_side_at below is that signature, and the consumers
+ * that decide the slab, the facade setback, the carriageway gap, the junction
+ * arms and the furniture now pass one.
+ *
+ * tg_geo_sidewalk_w(si) is KEPT, and still answers with the wider of the two.
+ * Any caller not yet threaded therefore behaves exactly as it did in 1009 --
+ * the change is additive, so a missed call site is a missed improvement rather
+ * than a new defect. */
+static float         s_geo_sw_w[TD5_TG_MAX_SPANS][2];
+/* Which of the five sources won, per span-side (TD5_GEO_SWSRC_*). Kept so the
+ * census is a report of what actually happened rather than a recount of the
+ * inputs. */
+static unsigned char s_geo_sw_src[TD5_TG_MAX_SPANS][2];
 /* Item 2: the procedural frontage stands down here because real geometry does. */
 static unsigned char s_geo_wall_off[TD5_TG_MAX_SPANS][2];
 static int           s_geo_sw_ready, s_geo_wall_ready;
 static long          s_geo_sw_hit, s_geo_sw_miss;
 static double        s_geo_sw_min, s_geo_sw_max, s_geo_sw_sum;
+/* Per-source census, [source][side]. */
+static long          s_geo_sw_bysrc[TD5_GEO_SWSRC__N][2];
+static long          s_geo_sw_sided;    /* span-sides whose width differs L vs R */
+static long          s_geo_sw_smoothed; /* span-sides the block smoother moved   */
 
 double tg_geo_sidewalk_w(int si)
 {
+    double l, r;
     if (!s_geo_sw_ready || si < 0 || si >= TD5_TG_MAX_SPANS) return 0.0;
-    return (double)s_geo_sw_w[si];
+    r = (double)s_geo_sw_w[si][0];
+    l = (double)s_geo_sw_w[si][1];
+    return (l > r) ? l : r;              /* the 1009 answer, for the unthreaded */
+}
+
+double tg_geo_sidewalk_w_side(int si, int left)
+{
+    if (!s_geo_sw_ready || si < 0 || si >= TD5_TG_MAX_SPANS) return 0.0;
+    return (double)s_geo_sw_w[si][left ? 1 : 0];
+}
+
+int tg_geo_sidewalk_src(int si, int left)
+{
+    if (!s_geo_sw_ready || si < 0 || si >= TD5_TG_MAX_SPANS)
+        return TD5_GEO_SWSRC_NONE;
+    return (int)s_geo_sw_src[si][left ? 1 : 0];
 }
 
 int tg_geo_wall_down(int si, int left)
@@ -1839,41 +1916,220 @@ int tg_geo_wall_down(int si, int left)
  * that and comfortably inside a La Plata block (120 m). */
 #define TD5_TG_GEO_SW_SEEK 10750.0  /* 25 m */
 
+/* [ROUND 1011 C2] THE FACADE PROBE, source 3. Metres. */
+#define TD5_TG_GEO_FACE_REACH_M  30.0   /* past La Plata's 30 m avenue line  */
+#define TD5_TG_GEO_FACE_STEP_M    0.5   /* march resolution                  */
+#define TD5_TG_GEO_FACE_TOL_M     3.0   /* neighbour agreement, see below    */
+/* The span must be straight for a facade beside it to be a frontage: on a bend
+ * the outward ray leaves the block and measures the NEXT street's buildings.
+ * cos(12 deg) between this span's tangent and the next one's. */
+#define TD5_TG_GEO_FACE_COS       0.978
+
+/* OSM'S LEFT IS NOT THE GENERATOR'S LEFT, and which way round it goes is a
+ * fact about the cache's frame rather than a convention anyone chose.
+ *
+ * Measured, not assumed. Fitting the 2x2 map from (east, north) metres to the
+ * cache's (x, z) over all 9448 of La Plata's ROADS.JSON segments gives a pure
+ * rotation+scale -- 131.39 deg, determinant POSITIVE -- so the frame is
+ * orientation PRESERVING and the OSM "left of the way" normal for a direction
+ * (dx, dz) is (-dz, +dx).
+ *
+ * The generator's `left` flag uses the OTHER normal: tg_geo_mass_at and every
+ * emitter beside it take (tz, -tx) for left (see the `lx`/`lz` pair there),
+ * which is the orientation-preserving RIGHT of the span tangent.
+ *
+ * So the two labels are opposite whenever the span runs WITH the way, and agree
+ * when it runs against it. One dot product of the two tangents decides it:
+ *
+ *     dot > 0  (span runs with the way)     generator-left  <- OSM right
+ *     dot < 0  (span runs against the way)  generator-left  <- OSM left
+ *
+ * TD5RE_GEO_SW_SIDE_FLIP=1 swaps the pair, so the claim above is an A/B rather
+ * than an assertion. */
+static void tg_geo_sw_sides(double tx, double tz, double dirx, double dirz,
+                            double way_l, double way_r,
+                            double *eng_l, double *eng_r)
+{
+    const double dot = tx * dirx + tz * dirz;
+    int with = (dot >= 0.0);
+    if (td5_env_flag_off("TD5RE_GEO_SW_SIDE_FLIP")) with = !with;
+    *eng_l = with ? way_r : way_l;
+    *eng_r = with ? way_l : way_r;
+}
+
+/* Distance from the span's centreline out to the first REAL building polygon on
+ * `left`, world units; 0 when none is within reach.
+ *
+ * Marches outward from the kerb in TD5_TG_GEO_FACE_STEP_M steps, sampling three
+ * points spread along the span at each step. A hit needs TWO of the three, which
+ * is the cheap form of "parallel and consistent along the block": a facade
+ * square to the street answers at all three, a single building corner poking
+ * into the probe answers at one, and a gap between two buildings does not throw
+ * the block away. */
+static double tg_geo_facade_dist(const TG_NodeList *nl, int si, int left,
+                                 double reach, double step)
+{
+    const TG_Node *n  = &nl->v[si];
+    const double side = left ? 1.0 : -1.0;
+    const double lx = n->tz * side, lz = -n->tx * side;
+    const double ax = (si + 1 < nl->count) ? (nl->v[si + 1].x - n->x) : 0.0;
+    const double az = (si + 1 < nl->count) ? (nl->v[si + 1].z - n->z) : 0.0;
+    double d;
+
+    if (!s_geo_bld) return 0.0;
+    for (d = n->width * 0.5; d <= reach; d += step) {
+        double px[3], pz[3];
+        int k, hits = 0;
+        for (k = 0; k < 3; k++) {
+            const double t = 0.5 * (double)k;      /* 0.0, 0.5, 1.0 along */
+            px[k] = n->x + lx * d + ax * t;
+            pz[k] = n->z + lz * d + az * t;
+        }
+        for (k = 0; k < 3; k++)
+            if (td5_geob_points_in_building(si, &px[k], &pz[k], 1,
+                                            TD5_GEOB_WIN_B)) hits++;
+        if (hits >= 2) return d;
+    }
+    return 0.0;
+}
+
+/* Is this span straight enough for a facade beside it to BE its frontage? */
+static int tg_geo_span_straight(const TG_NodeList *nl, int si)
+{
+    const TG_Node *n = &nl->v[si];
+    if (si + 1 >= nl->count) return 0;
+    {
+        const TG_Node *m = &nl->v[si + 1];
+        return (n->tx * m->tx + n->tz * m->tz) > TD5_TG_GEO_FACE_COS;
+    }
+}
+
 void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
 {
     int si, s;
 
     memset(s_geo_sw_w, 0, sizeof s_geo_sw_w);
+    memset(s_geo_sw_src, 0, sizeof s_geo_sw_src);
     memset(s_geo_wall_off, 0, sizeof s_geo_wall_off);
+    memset(s_geo_sw_bysrc, 0, sizeof s_geo_sw_bysrc);
     s_geo_sw_ready = s_geo_wall_ready = 0;
     s_geo_sw_hit = s_geo_sw_miss = 0;
+    s_geo_sw_sided = s_geo_sw_smoothed = 0;
     s_geo_sw_min = s_geo_sw_max = s_geo_sw_sum = 0.0;
     if (!s_geo_city || !nl || nspans < 2) return;
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
     if (nspans > nl->count) nspans = nl->count;
 
-    /* --- item 7: pavement width from the nearest OSM way ------------------ */
+    /* --- item 7 / [1011 C2]: pavement width per SIDE from the nearest way -- */
     if (td5_env_flag_on("TD5RE_GEO_SIDEWALK")
         && td5_geo_roads_count() > 0
         && td5_geob_units_per_m() > 1.0) {
-        const double upm = td5_geob_units_per_m();
+        const double upm   = td5_geob_units_per_m();
+        const double reach = TD5_TG_GEO_FACE_REACH_M * upm;
+        const double step  = TD5_TG_GEO_FACE_STEP_M * upm;
+        const double tol   = TD5_TG_GEO_FACE_TOL_M * upm;
+        const int    use_face = td5_env_flag_on("TD5RE_GEO_SW_FACADE");
+        /* Raw facade distances, kept for the whole pass so the consistency test
+         * can look at a span's neighbours after they have all been measured. */
+        static float face[TD5_TG_MAX_SPANS][2];
+
+        td5_geo_sw_place(td5_geo_place_slug());
+        memset(face, 0, sizeof face);
+
+        if (use_face)
+            for (si = 0; si < nspans; si++) {
+                if (!tg_geo_span_straight(nl, si)) continue;
+                for (s = 0; s < 2; s++)
+                    face[si][s] =
+                        (float)tg_geo_facade_dist(nl, si, s, reach, step);
+            }
+
         for (si = 0; si < nspans; si++) {
             const TG_Node *n = &nl->v[si];
-            double lm = 0.0, rm = 0.0, dx = 0.0, dz = 1.0, w;
-            if (!td5_geo_roads_pavement_at(n->x, n->z, TD5_TG_GEO_SW_SEEK,
-                                           &lm, &rm, &dx, &dz)) {
+            TD5_GeoPavementAt f;
+            double present_l, present_r;    /* 1 / 0 carried through the swap */
+            double tag_l, tag_r;
+
+            if (!td5_geo_roads_pavement_facts_at(n->x, n->z,
+                                                 TD5_TG_GEO_SW_SEEK, &f)) {
                 s_geo_sw_miss++;
                 continue;
             }
-            w = ((lm > rm) ? lm : rm) * upm;        /* the wider side, see above */
-            if (w < TD5_TG_GEO_SW_MIN) w = TD5_TG_GEO_SW_MIN;
-            if (w > TD5_TG_GEO_SW_MAX) w = TD5_TG_GEO_SW_MAX;
-            s_geo_sw_w[si] = (float)w;
-            if (s_geo_sw_hit == 0) s_geo_sw_min = s_geo_sw_max = w;
-            if (w < s_geo_sw_min) s_geo_sw_min = w;
-            if (w > s_geo_sw_max) s_geo_sw_max = w;
-            s_geo_sw_sum += w;
+            /* Presence and the measured tag are both stated in the WAY's sense,
+             * so both go through the same swap as the widths. */
+            present_l = (f.sidewalk == TD5_GEO_SW_NONE
+                      || f.sidewalk == TD5_GEO_SW_RIGHT) ? 0.0 : 1.0;
+            present_r = (f.sidewalk == TD5_GEO_SW_NONE
+                      || f.sidewalk == TD5_GEO_SW_LEFT) ? 0.0 : 1.0;
+            tg_geo_sw_sides(n->tx, n->tz, f.dirx, f.dirz,
+                            present_l, present_r, &present_l, &present_r);
+            tag_l = f.tag_l_m; tag_r = f.tag_r_m;
+            tg_geo_sw_sides(n->tx, n->tz, f.dirx, f.dirz,
+                            tag_l, tag_r, &tag_l, &tag_r);
+
+            for (s = 0; s < 2; s++) {
+                TD5_GeoSwIn in;
+                int src = TD5_GEO_SWSRC_NONE;
+                double w;
+
+                memset(&in, 0, sizeof in);
+                in.klass           = f.klass;
+                in.half_carriage_m = f.half_carriage_m;
+                in.present         = (s ? present_l : present_r) > 0.5;
+                in.tag_m           = s ? tag_l : tag_r;
+                /* FOOTWAY HOOK (source 2): round 1011 C4 owns the geometry.
+                 * Until a reader lands, the slot stays 0 and the resolver skips
+                 * it -- see the hook note in td5_geo_sidewalk.c. */
+                in.footway_m       = 0.0;
+                /* FACADE (source 3): a measurement only where the facade is
+                 * genuinely the frontage. Straightness was required to measure
+                 * it at all; here it must also AGREE with a neighbour, which is
+                 * what rules out a single set-back tower reading as the block. */
+                if (face[si][s] > 0.0) {
+                    const double d = (double)face[si][s];
+                    const double a = (si > 0) ? (double)face[si - 1][s] : 0.0;
+                    const double b = (si + 1 < nspans)
+                                   ? (double)face[si + 1][s] : 0.0;
+                    const int agree = (a > 0.0 && fabs(a - d) < tol)
+                                   || (b > 0.0 && fabs(b - d) < tol);
+                    in.facade_m  = d / upm;
+                    in.facade_ok = agree;
+                }
+                w = td5_geo_sw_resolve(&in, &src) * upm;
+                if (w < TD5_TG_GEO_SW_MIN) w = TD5_TG_GEO_SW_MIN;
+                if (w > TD5_TG_GEO_SW_MAX) w = TD5_TG_GEO_SW_MAX;
+                s_geo_sw_w[si][s]   = (float)w;
+                s_geo_sw_src[si][s] = (unsigned char)src;
+                if (src >= 0 && src < TD5_GEO_SWSRC__N) s_geo_sw_bysrc[src][s]++;
+                if (s_geo_sw_hit == 0 && s == 0) s_geo_sw_min = s_geo_sw_max = w;
+                if (w < s_geo_sw_min) s_geo_sw_min = w;
+                if (w > s_geo_sw_max) s_geo_sw_max = w;
+                s_geo_sw_sum += w;
+            }
+            if (s_geo_sw_w[si][0] != s_geo_sw_w[si][1]) s_geo_sw_sided++;
             s_geo_sw_hit++;
+        }
+
+        /* SMOOTH ALONG THE BLOCK. The three derived sources all subtract a
+         * carriageway that can step by a whole lane between neighbouring spans,
+         * so an untouched table has 1 m jumps mid-block and the slab visibly
+         * steps. A 3-tap mean over spans that AGREE ON THE SOURCE takes that
+         * out without blending across a real boundary -- where the source
+         * changes, so does the street, and the step is the right answer. */
+        for (s = 0; s < 2; s++) {
+            static float sm[TD5_TG_MAX_SPANS];
+            for (si = 0; si < nspans; si++) sm[si] = s_geo_sw_w[si][s];
+            for (si = 1; si + 1 < nspans; si++) {
+                const int src = s_geo_sw_src[si][s];
+                if (src == TD5_GEO_SWSRC_NONE) continue;
+                if (s_geo_sw_src[si - 1][s] != src) continue;
+                if (s_geo_sw_src[si + 1][s] != src) continue;
+                sm[si] = (float)((s_geo_sw_w[si - 1][s]
+                                + s_geo_sw_w[si][s]
+                                + s_geo_sw_w[si + 1][s]) / 3.0);
+                if (sm[si] != s_geo_sw_w[si][s]) s_geo_sw_smoothed++;
+            }
+            for (si = 0; si < nspans; si++) s_geo_sw_w[si][s] = sm[si];
         }
         s_geo_sw_ready = 1;
     }
@@ -1903,6 +2159,7 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
         {
             const double upm = td5_geob_units_per_m() > 1.0
                              ? td5_geob_units_per_m() : 1.0;
+            int k;
             TD5_LOG_I(LOG_TAG, "[GEO PREP] pavement from OSM: %ld span(s) "
                       "matched a mapped way within %.0f units, %ld unmatched "
                       "(biome width kept); width %.0f..%.0f raw (%.2f..%.2f m), "
@@ -1912,8 +2169,24 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
                       s_geo_sw_min, s_geo_sw_max,
                       s_geo_sw_min / upm, s_geo_sw_max / upm,
                       s_geo_sw_hit > 0
-                          ? s_geo_sw_sum / (double)s_geo_sw_hit : 0.0,
+                          ? s_geo_sw_sum / (double)s_geo_sw_hit * 0.5 : 0.0,
                       down);
+            /* [1011 C2] THE PER-SOURCE CENSUS. The point of a priority order is
+             * that you can see which rung each span-side actually landed on --
+             * a round that claims to read measurements and in fact runs on the
+             * class default should say so here rather than in a framedump. */
+            TD5_LOG_I(LOG_TAG, "[GEO PREP] pavement sources (right/left), "
+                      "building-line table '%s':",
+                      td5_geo_sw_place_name());
+            for (k = 0; k < TD5_GEO_SWSRC__N; k++) {
+                if (!s_geo_sw_bysrc[k][0] && !s_geo_sw_bysrc[k][1]) continue;
+                TD5_LOG_I(LOG_TAG, "[GEO PREP]   %-18s %6ld / %6ld",
+                          td5_geo_sw_source_name(k),
+                          s_geo_sw_bysrc[k][0], s_geo_sw_bysrc[k][1]);
+            }
+            TD5_LOG_I(LOG_TAG, "[GEO PREP]   %ld span(s) differ left vs right; "
+                      "%ld span-side(s) moved by the block smoother",
+                      s_geo_sw_sided, s_geo_sw_smoothed);
         }
     }
 }
@@ -2210,7 +2483,8 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
 
     /* --- clear the carriageway and the pavement, by the least nudge that does */
     gap = tg_carriageway_clear_gap(nl, si, side,
-                                   tg_city_sidewalk_w_at(nl, si, h->b),
+                                   tg_city_sidewalk_w_side_at(nl, si,
+                                                              side > 0.0, h->b),
                                    TD5_TG_CARRIAGEWAY_MARGIN);
     minout = n->width * 0.5 + gap;
     for (k = 0; k < n_ring; k++) {
@@ -2690,7 +2964,7 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * step wall, which all derive from set0/set1) off any carriageway. */
     {
         const double gap = tg_carriageway_clear_gap(nl, si, side,
-                               tg_city_sidewalk_w_at(nl, si, b),
+                               tg_city_sidewalk_w_side_at(nl, si, side > 0.0, b),
                                TD5_TG_CARRIAGEWAY_MARGIN);
         set0 = n0->width * 0.5 + gap;
         set1 = n1->width * 0.5 + gap;
@@ -3960,7 +4234,11 @@ int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
         return 1;
     b = &k_biomes[tg_scenery_biome_index(si)];
     if (!(tg_city_sidewalk_w(b) > 0.0)) return 0;
-    sw = tg_city_sidewalk_w_at(nl, si, b);
+    /* [1011 C2] THE SAME BASE THE SLAB USES. This predicate exists to be the
+     * emitter's gate stated once; if it asked about the wider of the two sides
+     * while the emitter laid the narrower, a kerb-width side would report a
+     * pavement that is not there. */
+    sw = tg_city_side_base(si, s, tg_city_sidewalk_w_at(nl, si, b));
     if (!(tg_pavement_side_width(nl, si, s ? 1.0 : -1.0, sw) > 0.0)) return 0;
     /* [R13 RAIL item 5b] mirrors the emitter's own ramp exception above -- this
      * predicate exists to be the emitter's gate stated once, so it has to move
@@ -3987,8 +4265,10 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         const double sg = s ? 1.0 : -1.0;
         /* [R8 CITY item 2] PER SIDE: the branch corridor eats into the right
          * verge gradually, so the slab there narrows span by span rather than
-         * disappearing at the first unit of overlap. */
-        const double sw_s = tg_pavement_side_width(h->nl, h->si, sg, sw);
+         * disappearing at the first unit of overlap.
+         * [1011 C2] and the base it narrows FROM is now this side's own. */
+        const double sw_s = tg_pavement_side_width(h->nl, h->si, sg,
+                                tg_city_side_base(h->si, s, sw));
         const double u_w = sw_s / (double)TD5_TG_SPAN_LENGTH;
         const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
         if (!(sw_s > 0.0)) continue;
@@ -4230,8 +4510,8 @@ void tg_r8_city_sidewalk_diag(const TG_FBHook *h)
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
         const int paved = tg_city_span_paved(h);
-        const double sw =
-            tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]);
+        const double sw = tg_city_side_base(h->si, s,
+            tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]));
         const double sw_s  = tg_pavement_side_width(h->nl, h->si, sg, sw);
         const int built    = tg_facade_built(h->si, s);
         const int xstop    = td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !built;
@@ -4776,7 +5056,7 @@ static void tg_r15_occ_diag(const TG_FBHook *h, double sw)
         const int here  = tg_xstreet_here(h->nl, h->si, sg, &xr);
         const double hw = tg_road_half_width(h->nl, h->si);
         const double pw = tg_pavement_side_width(h->nl, h->si, sg,
-                              tg_city_sidewalk_w_at(h->nl, h->si, h->b));
+                              tg_city_sidewalk_w_side_at(h->nl, h->si, s, h->b));
         TD5_LOG_W(LOG_TAG, "[R15 OCC DIAG] si=%4d %-5s node=(%.0f,%.0f,%.0f) "
                   "built=%d park=%d "
                   "blocked=%d xhere=%d xreach=%.0f half=%.0f pave=%.0f "
@@ -4964,7 +5244,8 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
              * terminating block, not the terminator. */
             if (r == 0 && td5_env_flag_on("TD5RE_R15_BACKROW_CLOSE") &&
                 !tg_facade_built(h->si, s) && !tg_block_is_park(h->si, s)) {
-                const double pw = tg_pavement_side_width(h->nl, h->si, sg, sw);
+                const double pw = tg_pavement_side_width(h->nl, h->si, sg,
+                                      tg_city_side_base(h->si, s, sw));
                 const double term = tg_xstreet_reach_at(h->nl, h->si, sg,
                                         tg_block_arm_skew(h->si, s), b, sw)
                                   + (pw > 0.0 ? pw : sw);

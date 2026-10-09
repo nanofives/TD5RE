@@ -3089,6 +3089,14 @@ double tg_city_sidewalk_w(const TG_Biome *b);
 #define TD5_TG_WIDEWALK_FACTOR 0.40    /* pavement width = half-road * this ...  */
 #define TD5_TG_WIDEWALK_MAX   2000.0   /* ... clamped to a sane ceiling (raw)    */
 double tg_city_sidewalk_w_at(const TG_NodeList *nl, int si, const TG_Biome *b);
+/* [ROUND 1011 C2] the same, for ONE side (1 = left). On a geo build this is the
+ * side's own OSM-derived width; everywhere else it IS tg_city_sidewalk_w_at. */
+double tg_city_sidewalk_w_side_at(const TG_NodeList *nl, int si, int left,
+                                  const TG_Biome *b);
+/* [ROUND 1011 C2] Swap this side's own OSM width into a width an emitter was
+ * already handed; returns `sw` unchanged when there is none, and when `sw` is
+ * 0 (the biome saying "no raised pavement here"). */
+double tg_city_side_base(int si, int s, double sw);
 /* Width of the FLAT verge band outside the city: "elevated sidewalks are fine,
  * but when outside the city the sidewalks can be just another texture". Tree
  * biomes get a painted-looking margin drawn on the ground rather than a slab
@@ -6155,7 +6163,13 @@ void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
  * (its probe measures from the pavement's back edge). */
 void tg_geo_city_prepare(const TG_NodeList *nl, int nspans);  /* td5_tg_city.c */
 int  tg_geo_wall_down(int si, int left);                      /* td5_tg_city.c */
+/* [ROUND 1011 C2] The table is now [span][SIDE]. tg_geo_sidewalk_w keeps the
+ * round-1009 answer -- the wider of the pair -- so a caller that has no side to
+ * give still gets what it got before; _side is the real one. _src reports which
+ * of the five sources won there, for the census and for a log line. */
 double tg_geo_sidewalk_w(int si);                             /* td5_tg_city.c */
+double tg_geo_sidewalk_w_side(int si, int left);              /* td5_tg_city.c */
+int    tg_geo_sidewalk_src(int si, int left);                 /* td5_tg_city.c */
 
 #endif /* TD5_TRACKGEN_INTERNAL_H */
 

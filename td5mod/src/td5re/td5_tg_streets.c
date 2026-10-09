@@ -303,7 +303,9 @@ double tg_occ_reach(const TG_NodeList *nl, int si, double side,
 
     if (mask & TG_OCC_PAVE) {
         const TG_Biome *pb = &k_biomes[tg_scenery_biome_index(si)];
-        const double bw = tg_city_sidewalk_w_at(nl, si, pb);
+        /* [1011 C2] per side, for the same reason the whole composition is: it
+         * must report the slab that is actually laid, and the slab is per side. */
+        const double bw = tg_city_sidewalk_w_side_at(nl, si, side > 0.0, pb);
         if (bw > 0.0) {
             const double w = tg_pavement_side_width(nl, si, side, bw);
             if (w > 0.0) {
@@ -829,10 +831,15 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
      * laid to the near span's narrower reach. Per-endpoint clearance makes the
      * band follow the bow. Default ON; TD5RE_AUTOTRACK_FORKBACK_FOLLOW=0 restores
      * the single-set behaviour for an A/B. */
-    set0 = tg_carriageway_clear_gap(nl, si, side, tg_city_sidewalk_w(b),
+    /* [1011 C2] the clearance is measured past THIS side's pavement. */
+    set0 = tg_carriageway_clear_gap(nl, si, side,
+                                    tg_city_side_base(si, side > 0.0,
+                                                      tg_city_sidewalk_w(b)),
                                     TD5_TG_CARRIAGEWAY_MARGIN) + gap;
     set1 = td5_env_flag_on("TD5RE_AUTOTRACK_FORKBACK_FOLLOW")
-         ? tg_carriageway_clear_gap(nl, si + 1, side, tg_city_sidewalk_w(b),
+         ? tg_carriageway_clear_gap(nl, si + 1, side,
+                                    tg_city_side_base(si + 1, side > 0.0,
+                                                      tg_city_sidewalk_w(b)),
                                     TD5_TG_CARRIAGEWAY_MARGIN) + gap
          : set0;
 
@@ -1099,6 +1106,11 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
     for (s = 0; s < 2; s++) {
         const int arms = tg_r11_arm_side(h->nl, h->si, s);
         const double sg = s ? 1.0 : -1.0;
+        /* [1011 C2] THE ARM IS AS WIDE AS THE PAVEMENT IT TURNS OFF. The arm is
+         * the corner where the main road's slab turns down the side street, so
+         * a side-blind width here is visible as a step at the corner the moment
+         * the two sides differ. Same base the slab itself uses. */
+        const double sw_s = tg_city_side_base(h->si, s, sw);
         double reach, ang, ax, az, alen, ox, oz;
         int near_corner, far_corner;
 
@@ -1110,7 +1122,7 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
         ang   = tg_block_arm_skew(h->si, s);
         /* [R8] Same per-side clamped reach the carriageway uses, so a pavement
          * arm can never outrun (or fall short of) the street it flanks. */
-        reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw);
+        reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw_s);
         /* Along-road unit, near -> far. */
         ax = e[3] - e[0]; az = e[5] - e[2];
         alen = sqrt(ax * ax + az * az);
@@ -1120,13 +1132,13 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
             tg_block_rot2(e[6], e[7], ang, &ox, &oz);
             /* back = -along (onto the built side, off the carriageway). */
             if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
-                                   reach, sw))
+                                   reach, sw_s))
                 return 0;
         }
         if (far_corner) {                             /* corner at the far node */
             tg_block_rot2(e[8], e[9], ang, &ox, &oz);
             if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
-                                   reach, sw))
+                                   reach, sw_s))
                 return 0;
         }
     }
@@ -1536,7 +1548,8 @@ static int tg_geo_area_here(const TG_NodeList *nl, int si, int left)
     b = &k_biomes[tg_scenery_biome_index(si)];
     lx = nl->v[si].tz * (left ? 1.0 : -1.0);
     lz = -nl->v[si].tx * (left ? 1.0 : -1.0);
-    base = nl->v[si].width * 0.5 + tg_city_sidewalk_w_at(nl, si, b);
+    /* [1011 C2] the probe starts at the back edge of THIS side's slab. */
+    base = nl->v[si].width * 0.5 + tg_city_sidewalk_w_side_at(nl, si, left, b);
     for (k = 0; k < 3; k++) {
         d = base + tg_facade_depth(b) * 0.5 * (double)k;
         px[k] = nl->v[si].x + lx * d;

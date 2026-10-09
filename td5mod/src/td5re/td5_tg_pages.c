@@ -3552,8 +3552,8 @@ static void tg_r11_guard_report(const TG_NodeList *nl, int nspans)
             "railgate=%d railpage=%d railL=%u railR=%u",
             si, k_biomes[hard].name, k_biomes[soft].name, k_biomes[scen].name,
             hard != soft, sw, bw,
-            tg_pavement_side_width(nl, si,  1.0, base),
-            tg_pavement_side_width(nl, si, -1.0, base),
+            tg_pavement_side_width(nl, si,  1.0, tg_city_side_base(si, 1, base)),
+            tg_pavement_side_width(nl, si, -1.0, tg_city_side_base(si, 0, base)),
             tg_rail_kerbfence_here(si,  1.0), tg_rail_kerbfence_here(si, -1.0),
             tg_span_needs_guardrail(nl, si, nspans), tg_rail_page(si),
             (unsigned)s_rail_edge[si][0], (unsigned)s_rail_edge[si][1]);
@@ -3623,8 +3623,8 @@ static void tg_r13_rail_mouth_report(const TG_NodeList *nl, int nspans)
                     tg_r12_pave_stands(nl, s, 1), tg_r12_pave_stands(nl, s, 0),
                     tg_rail_kerbfence_here(s, 1.0), tg_rail_kerbfence_here(s, -1.0),
                     bb->name, swb,
-                    tg_pavement_side_width(nl, s,  1.0, swb),
-                    tg_pavement_side_width(nl, s, -1.0, swb),
+                    tg_pavement_side_width(nl, s,  1.0, tg_city_side_base(s, 1, swb)),
+                    tg_pavement_side_width(nl, s, -1.0, tg_city_side_base(s, 0, swb)),
                     tg_facade_built(s, 1), tg_facade_built(s, 0),
                     tg_side_blocked(s, 1.0), tg_side_blocked(s, -1.0),
                     tg_city_crossing_here(s));
