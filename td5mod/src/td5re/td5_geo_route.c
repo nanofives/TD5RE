@@ -51,6 +51,11 @@
 #include "td5_geo.h"
 #include "td5_geo_route.h"
 #include "td5_geo_roads.h"       /* [1011 C2] the shared name classifier   */
+#include "td5_geo_buildings.h"   /* [1013 F1] the two-route staleness probe  */
+#include "td5_geo_footways.h"
+#include "td5_geo_avenues.h"
+#include "td5_geo_forks.h"
+#include "td5_geo_signals.h"
 #include "td5_geo_sidewalk.h"    /* [1011 C2] the per-place carriageway    */
 #include "deps/cjson/cJSON.h"
 
@@ -4814,6 +4819,35 @@ int td5_geo_derived_migrate(const char *slug)
     return 1;
 }
 
+/* [ROUND 1013 F1] THE VECTOR LAYERS BELONG TO THE FRAME THE COMMIT JUST
+ * REPLACED.
+ *
+ * Six per-place layers (buildings + areas + plaza rings, roads, footways,
+ * signals, avenues, forks) each cache what they read from _route/ and each
+ * decide "already loaded" by the place SLUG alone. A commit rewrites _route/
+ * with a NEW frame (rotation + offset are chosen per route) and leaves the slug
+ * unchanged, so a second BUILD TRACK in the same session raced the FIRST route's
+ * buildings, roads and plaza rings in the SECOND route's coordinates.
+ * MEASURED with TD5RE_GEO_ROUTE_TEST=4 (two different routes of La Plata
+ * committed in one process, td5_geo_sync + each layer's sync after each): after
+ * commit 2 the route held 1072 nodes but the layers printed exactly what they
+ * had after commit 1 -- 1857 buildings + 30 areas, 5 rings with ring 0 at
+ * 319498,1021051, 2291 roads, 865 footways. Nothing between the commit and the
+ * next sync unloaded them (td5_geo_invalidate drops only the place and the
+ * route; td5_geo_place_slug() reads "" for a moment, but every sync that runs
+ * after td5_geo_sync has reloaded the place sees the same slug again).
+ * Each is lazily reloaded by its own sync on the next query, so dropping them
+ * here costs one reload and nothing else. */
+static void gr_drop_place_layers(void)
+{
+    td5_geob_unload();
+    td5_geo_roads_unload();
+    td5_geo_footways_unload();
+    td5_geo_signals_unload();
+    td5_geo_avenues_unload();
+    td5_geo_forks_unload();
+}
+
 int td5_geo_route_commit(void)
 {
     const GrCond *c = &s_last.cond;
@@ -5048,6 +5082,7 @@ done:
      * half-stale state either. */
     gr_graph_free();
     td5_geo_invalidate();
+    gr_drop_place_layers();
     td5_geo_places_rescan();
     td5_geo_select(s_last.slug);
 
@@ -5219,6 +5254,8 @@ static void gr_dump_cond(const char *out_path, GrCond *c)
     s_last.cond = saved;
 }
 
+static void gr_test_second_route(void);      /* level 4, defined below */
+
 static void gr_test_route_live(int level)
 {
     char path[512];
@@ -5315,7 +5352,76 @@ static void gr_test_route_live(int level)
         printf("  COMMIT rc              %d (0 = ok)\n", rc);
         printf("  commit_ms              %.1f\n",
                (double)(td5_plat_time_us() - t0) / 1000.0);
+        if (level >= 4 && rc == 0) gr_test_second_route();
     }
+}
+
+/* [ROUND 1013 F1] LEVEL 4: TWO ROUTES OF ONE PLACE IN ONE PROCESS.
+ *
+ * "a second BUILD TRACK in one session cannot use stale rings." The vector
+ * layers (buildings + areas + plaza rings, roads, footways, signals) are each
+ * keyed on the place SLUG alone, and a commit rewrites the frame they are in.
+ * This prints what each layer holds after the first commit and after the second,
+ * exactly as the next trackgen build would find it (td5_geo_sync, then
+ * td5_geob_sync, then the roads query). A layer that is stale prints the same
+ * numbers twice for two different routes. TD5RE_GEO_ROUTE_TEST_PTS2 is the
+ * second route, TD5RE_GEO_PLACE must name the place. */
+static void gr_probe_layers(const char *tag)
+{
+    double rcx = 0.0, rcz = 0.0, rr = 0.0, px = 0.0, pz = 0.0;
+    int nb = 0, nbf = 0, na = 0, naf = 0;
+    const TD5_GeoRoad *r0;
+
+    td5_geo_sync();
+    td5_geob_sync();
+    td5_geo_roads_sync(td5_geo_place_slug());
+    td5_geob_bind_stats(&nb, &nbf, &na, &naf);
+    td5_geob_plaza_ring_get(0, &rcx, &rcz, &rr);
+    r0 = td5_geo_roads_get(0);
+    if (r0) td5_geo_roads_point(r0, 0, &px, &pz);
+    {
+        double fx = 0.0, fz = 0.0;
+        const TD5_GeoFootway *f0;
+        td5_geo_footways_sync(td5_geo_place_slug());
+        f0 = td5_geo_footways_get(0);
+        if (f0) td5_geo_footways_point(f0, 0, &fx, &fz);
+        printf("  LAYERS %-15s route nodes %d | geob bound %d bldg + %d area, "
+               "%d ring(s), ring0 centre %.0f,%.0f | roads %d, road0 pt0 "
+               "%.0f,%.0f | footways %d, fw0 pt0 %.0f,%.0f\n",
+               tag, td5_geo_route_count(), nb, na, td5_geob_plaza_ring_count(),
+               rcx, rcz, td5_geo_roads_count(), px, pz,
+               td5_geo_footways_count(), fx, fz);
+    }
+}
+
+static void gr_test_second_route(void)
+{
+    const char *pts_env = getenv("TD5RE_GEO_ROUTE_TEST_PTS2");
+    TD5_GeoLatLon wp[GR_MAX_WAYPOINTS];
+    TD5_GeoRouteResult r;
+    int n = 0;
+
+    gr_probe_layers("after commit 1");
+    if (!pts_env || !pts_env[0]) return;
+    {
+        const char *p = pts_env;
+        while (*p && n < GR_MAX_WAYPOINTS) {
+            char *end = NULL;
+            wp[n].lat = strtod(p, &end);
+            if (end == p || *end != ',') break;
+            p = end + 1;
+            wp[n].lon = strtod(p, &end);
+            if (end == p) break;
+            n++;
+            p = end;
+            if (*p == ';') p++; else break;
+        }
+    }
+    if (n < 2) { printf("  LAYERS: TD5RE_GEO_ROUTE_TEST_PTS2 has %d point(s)\n", n); return; }
+    td5_geo_route_build(wp, n, &r);
+    printf("  route 2: verdict %d spans %d streets %s\n", (int)r.verdict, r.spans, r.streets);
+    printf("  COMMIT 2 rc            %d\n", td5_geo_route_commit());
+    gr_probe_layers("after commit 2");
 }
 
 static void gr_self_test(int level)
@@ -5356,7 +5462,7 @@ int td5_geo_route_is_stub(void)
 int td5_geo_route_init(void)
 {
 #ifndef TD5RE_RELEASE
-    const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 3);
+    const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 4);
     if (lvl > 0) {
         gr_self_test(lvl);
         td5_geo_route_shutdown();

@@ -40,6 +40,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Kiosk-sized plaza features stay, big blocks go" },
     { CL_ITEM,    "A plaza mapped only as a roundabout ring is a" },
     { CL_ITEM,    "  lawn with its real footpaths and trees now" },
+    { CL_ITEM,    "A second BUILD TRACK in one session uses its" },
+    { CL_ITEM,    "  own route, not the first one's buildings" },
     { CL_ITEM,    "A real divided avenue is now divided for its" },
     { CL_ITEM,    "  WHOLE length, not just one block of it" },
     { CL_ITEM,    "Its central median is the real width between" },

@@ -1655,6 +1655,8 @@ static long s_geo_cap_added;
  * only single-threaded per-build hook this module owns, and the load it drives
  * (two JSON files plus a nearest-node bind over every polygon) must not happen
  * lazily from inside an emitter. */
+static void tg_geo_rings_reset(void);
+
 static void tg_geo_city_build_begin(void)
 {
     s_geo_emitted = s_geo_shifted = s_geo_dropped_shift = 0;
@@ -1671,6 +1673,13 @@ static void tg_geo_city_build_begin(void)
     memset(s_geo_roof_kind, 0, sizeof(s_geo_roof_kind));
     s_geo_shift_max = s_geo_route_dev_max = 0.0;
     s_geo_city = s_geo_bld = 0;
+    /* [ROUND 1013 F1] THE SET-PIECE RING TABLE IS PER BUILD. It was a lazy
+     * static (-1 = not collected) that nothing ever put back to -1, so the
+     * rings of the FIRST route built in a process were used for every later
+     * one -- and a route's frame (rotation + offset) is chosen per route, so
+     * the second BUILD TRACK in one session vetoed set pieces at the first
+     * route's plaza coordinates. Collected again on the next query. */
+    tg_geo_rings_reset();
     if (!td5_geo_loaded()) { td5_geob_sync(); return; }   /* also drops a stale place */
     if (!td5_env_flag_on("TD5RE_GEO_CITY")) return;
     s_geo_city = td5_geob_sync();
@@ -1727,6 +1736,7 @@ int tg_geo_city_active(void) { return s_geo_city; }
 typedef struct { double cx, cz, r; } TG_GeoRing;
 static TG_GeoRing s_geo_ring[TG_GEO_RING_MAX];
 static int        s_geo_n_ring = -1;        /* -1 = not collected yet */
+static void tg_geo_rings_reset(void) { s_geo_n_ring = -1; }
 
 static void tg_geo_rings_collect(void)
 {
