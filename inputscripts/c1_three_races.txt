@@ -1,0 +1,58 @@
+# C1 CRASH repro, THREE races in one process, each on a different-length track:
+#   1) Blue Ridge   (track 3, level017, 3109 route rows)   <- via --AutoRace
+#   2) Courmayeur   (track 7, level027,  600 route rows)   <- 4 x right
+#   3) Jarash       (track 4, level026,  729 route rows)   <- 3 x left
+# Launch with --AutoRace=1 --DefaultTrack=3 --StartSpanOffset=2600.
+
+sync race
+280 log R1-SETTLED
++10 key esc press
++40 key down press
++20 key down press
++20 key down press
++20 key down press
++30 log R1-PAUSE-AT-QUIT
++10 key enter press
+
+sync menu
+150 log AT-MAIN-MENU-1
++20 key down press
++20 key enter press
+200 log AT-QUICK-RACE-1
++20 key down press
++20 key right press
++20 key right press
++20 key right press
++20 key right press
++30 log TRACK-CYCLED-1
++20 key up press
++20 key up press
++10 key enter press
+
+sync race
+280 log R2-SETTLED
++10 key esc press
++40 key down press
++20 key down press
++20 key down press
++20 key down press
++30 log R2-PAUSE-AT-QUIT
++10 key enter press
+
+sync menu
+150 log AT-MAIN-MENU-2
++20 key down press
++20 key enter press
+200 log AT-QUICK-RACE-2
++20 key down press
++20 key left press
++20 key left press
++20 key left press
++30 log TRACK-CYCLED-2
++20 key up press
++20 key up press
++10 key enter press
+
+sync race
+240 log R3-RUNNING
++10 quit

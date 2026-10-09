@@ -3932,6 +3932,22 @@ void InitializeTracksideCameraProfiles(void)
     g_cameraLastProjScale[0] = -1;
     g_cameraLastProjScale[1] = -1;
 
+    /* [STALE SPAN FIX 2026-10-09] Drop the previous track's anchor span BEFORE
+     * the no-profiles early-out below. g_camAnchorSpan[] is a file-scope global
+     * that the live camera re-seeds from the driven actor's span (+0x80, see
+     * UpdateTracksideCameraAnchor), and it indexes g_spanTable at stride 0x18
+     * with a span_delta of up to +41 and NO length check anywhere in this file.
+     * The seeding writes below sit AFTER the early-out, so a track with no
+     * authored trackside cameras used to inherit the anchor of whatever track
+     * ran before it -- on a shorter track that is a read past the end of the new
+     * span array. Same defect class as the actor span state cleared by
+     * td5_ai_invalidate_actor_track_state(); this is the camera's copy of it.
+     * Span 0 exists on every track, so it is always a safe seed. */
+    for (int v = 0; v < TD5_MAX_VIEWPORTS; v++) {
+        g_camAnchorSpan[v]   = 0;
+        g_camTrackSpanOfs[v] = 0;
+    }
+
     /* Defensive: no profile table bound for this track/direction (e.g. a track
      * without authored trackside cameras). Leave count 0 so the replay camera
      * dispatch falls back to chase instead of dereferencing NULL. */

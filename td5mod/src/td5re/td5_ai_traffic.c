@@ -1230,7 +1230,15 @@ void td5_ai_init_traffic_actors(void) {
                 {
                     const uint8_t *rb =
                         td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
-                    if (rb && span_norm >= 0) {
+                    /* [STALE SPAN GUARD 2026-10-09] The comment above assumes
+                     * span_normalized "is still zero/uninit" here. That holds
+                     * for a fresh pool, not for a RECYCLED slot: nothing zeroed
+                     * the actor pool between the previous race and this track's
+                     * load (see td5_ai_invalidate_actor_track_state), so the
+                     * field can still hold a span from a longer track. Bound the
+                     * read against the table that is actually loaded. */
+                    if (rb && span_norm >= 0 &&
+                        td5_ai_route_span_valid(rs[RS_ROUTE_TABLE_PTR], span_norm)) {
                         route_byte = (int)rb[(size_t)(unsigned)span_norm * 3u];
                     }
                 }

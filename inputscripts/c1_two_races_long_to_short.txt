@@ -1,0 +1,47 @@
+# C1 CRASH repro: race 1 on a LONG track (Blue Ridge / level017, 3109 spans)
+# with the actors spawned deep into the ring (--StartSpanOffset=2600), quit to
+# the menu, then race a SHORT track (Courmayeur / level027, 600 route rows).
+# The second track load indexes the NEW 1800-byte route table with the actors'
+# STALE span from race 1 -> OOB read.
+#
+# Launch:
+#   td5re.exe --AutoRace=1 --DefaultTrack=3 --StartSpanOffset=2600 --SkipIntro=1
+#             --InputScript=inputscripts/c1_two_races_long_to_short.txt
+
+sync race
+300 log R1-SETTLED
++10 key esc press
+# DEV single-player pause rows (td5_hud.c endrace_row=1, freecam_row=1, pause_mp=0):
+#   0 VIEW  1 SOUND  2 RADIO  3 CONTINUE  4 FREE CAMERA  5 RESTART RACE
+#   6 END RACE NOW  7 QUIT TO MENU  8 EXIT GAME
+# The cursor opens on CONTINUE (row 3), so QUIT TO MENU is 4 rows down.
++40 key down press
++20 key down press
++20 key down press
++20 key down press
++30 log R1-PAUSE-AT-QUIT
++10 key enter press
+
+sync menu
+150 log AT-MAIN-MENU
+# main menu: 0 Race Menu, 1 Quick Race
++20 key down press
++20 key enter press
+
+200 log AT-QUICK-RACE
+# rows: Car(0) Track(1) ... OK on the bottom row
++20 key down press
++20 key right press
++20 key right press
++20 key right press
++20 key right press
++30 log TRACK-CYCLED
+# up from Track -> Car, up from Car wraps to the bottom row (OK)
++20 key up press
++20 key up press
++30 log AT-OK
++10 key enter press
+
+sync race
+240 log R2-RUNNING
++10 quit

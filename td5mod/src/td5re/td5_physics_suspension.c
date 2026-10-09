@@ -1106,6 +1106,15 @@ static uint32_t traffic_route_heading_delta(int slot)
 
     int16_t span_normalized = *(int16_t *)(ref_actor + 0x082);  /* track_span_normalized */
     if (span_normalized < 0) span_normalized = 0;
+    /* [STALE SPAN GUARD 2026-10-09] ref_slot is a DIFFERENT actor from the one
+     * the caller validated, and its +0x82 carries no upper bound at all -- the
+     * negative clamp above was the only guard on a read into a table whose
+     * length this file never consults. A span from a longer previous track (see
+     * td5_ai_invalidate_actor_track_state) or a TD6 track whose LEFT/RIGHT.TRK
+     * is shorter than its strip both land past the end. Treat an out-of-range
+     * span exactly like a missing table: no heading delta. */
+    if (!td5_ai_route_span_valid(rs[RS_ROUTE_TABLE_PTR_PHYS], (int)span_normalized))
+        return 0;
     uint8_t route_angle = route_table[(int)span_normalized * 3 + 1];
     int32_t yaw_accum   = ((const TD5_Actor *)ref_actor)->euler_accum.yaw;
 
