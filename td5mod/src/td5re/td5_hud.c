@@ -655,6 +655,33 @@ static int16_t s_minimap_seg_branch[MINIMAP_SEG_MAX]; /* 0x4B0A74 */
 
 /* --- Text rendering state --- */
 static TD5_GlyphRecord *s_glyph_table;  /* 0x4A2CB8: heap, 64 entries + tex ptr */
+
+/* [ROUND 1013 F1b] The glyph table is 64 x 16-byte records followed by a 4-byte
+ * texture-page slot at BYTE offset 0x400. It was written and read as
+ * `((void **)table)[0x100]`, which is byte offset 0x800 on x86_64: 0x404 bytes
+ * past the end of the 0x404-byte block, so every launch overran its calloc'd
+ * block by 8 bytes (heap corruption) and a launch whose block ended a mapped
+ * heap segment died here with an access violation (log/crash.log, RIP in
+ * td5_hud_init_font_atlas, `mov %rax,0x800(%r10)`). The slot is a texture PAGE
+ * INDEX (an int), not a pointer, so it is stored as one at the original byte
+ * offset through memcpy. */
+_Static_assert(sizeof(TD5_GlyphRecord) * TD5_HUD_FONT_GLYPH_COUNT == TD5_HUD_GLYPH_TEXPAGE_OFS,
+               "glyph records must end where the texture-page slot starts");
+_Static_assert(TD5_HUD_GLYPH_TEXPAGE_OFS + sizeof(int32_t) <= TD5_HUD_GLYPH_TABLE_SIZE,
+               "the texture-page slot must lie inside the glyph table block");
+
+static void hud_glyph_table_set_page(TD5_GlyphRecord *table, int page)
+{
+    const int32_t v = (int32_t)page;
+    memcpy((uint8_t *)table + TD5_HUD_GLYPH_TEXPAGE_OFS, &v, sizeof v);
+}
+
+static int hud_glyph_table_get_page(const TD5_GlyphRecord *table)
+{
+    int32_t v;
+    memcpy(&v, (const uint8_t *)table + TD5_HUD_GLYPH_TEXPAGE_OFS, sizeof v);
+    return (int)v;
+}
 static uint8_t *s_text_quad_buf;         /* 0x4A2CBC: heap, 0xB800 bytes */
 static int   s_queued_glyph_count;       /* 0x4A2CC0 */
 
@@ -1049,10 +1076,11 @@ void td5_hud_init_font_atlas(void)
 
     TD5_AtlasEntry *font_entry = td5_asset_find_atlas_entry(NULL, "font");
 
-    /* Store texture page pointer at table[0x100] (the +0x400 byte offset).
-     * In the original this is: glyph_table_ptr[0x100] = texture_page_ptr.
-     * We store the atlas entry pointer for the texture page. */
-    ((void **)s_glyph_table)[0x100] = (void *)(intptr_t)font_entry->texture_page;
+    /* Store the texture page at the +0x400 BYTE offset of the table. In the
+     * original this is: glyph_table_ptr[0x100] = texture_page_ptr (4-byte
+     * pointers); the port stores the page index itself. See
+     * hud_glyph_table_set_page for why this is not `((void **)table)[0x100]`. */
+    hud_glyph_table_set_page(s_glyph_table, (int)font_entry->texture_page);
 
     /* Build 4x16 glyph grid */
     float base_u = (float)font_entry->atlas_x;
@@ -2706,10 +2734,13 @@ void td5_hud_queue_text(int font_index, int x, int y, int centered,
         return; /* overflow guard */
     }
 
-    /* Select glyph table for font index (only font 0 used in race HUD) */
+    /* Select glyph table for font index (only font 0 used in race HUD). Only
+     * TD5_HUD_FONT_TABLES tables are allocated, so an index past them would read
+     * beyond the block: every caller passes 0, and anything else is held to 0. */
+    if (font_index < 0 || font_index >= TD5_HUD_FONT_TABLES) font_index = 0;
     int font_offset = font_index * TD5_HUD_GLYPH_TABLE_SIZE;
     TD5_GlyphRecord *glyphs = (TD5_GlyphRecord *)((uint8_t *)s_glyph_table + font_offset);
-    int tex_page = (int)(intptr_t)((void **)glyphs)[0x100];
+    int tex_page = hud_glyph_table_get_page(glyphs);
 
     /* Remap characters through ASCII table */
     for (int i = 0; i < len; i++) {

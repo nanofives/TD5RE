@@ -7,6 +7,7 @@
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"             /* GEO TRACK: land cover for plaza planting  */
 #include "td5_geo_buildings.h"   /* GEO TRACK: real area polygons             */
+#include "td5_geo_footways.h"    /* [1013 F1] real OSM footways = ring plaza paths */
 #include "td5_geo_attrs.h"       /* [1011 C3] GEO TRACK: OSM lit -> the lamps */
 
 /* [R8 CROSS item 1] The reveal row has to know how deep the street it reveals
@@ -625,6 +626,10 @@ static long s_geop_straddle, s_geop_r16_stood_down, s_geop_nopath;
  * hold one once it was cut clear of the two paths bordering it, and boundary
  * hedges NOT emitted because OSM records no barrier on that area. */
 static long s_geop_bed_thin, s_geop_hedge_nobarrier;
+/* [ROUND 1013 F1] ring plazas laid, and the real footway ways / segments that
+ * stood in for their derived paths. */
+static long s_geop_ring_areas, s_geop_real_ways, s_geop_real_segs;
+static long s_geop_real_buried, s_geop_real_capped;
 /* [ROUND 1009 item 10] Side-street frontage walls / flank blocks refused
  * because they would have stood inside a real OSM square. */
 static long s_geop_xwall_park;
@@ -1634,17 +1639,39 @@ static double tg_geop_out(const TG_NodeList *nl, int si, double side,
  * 16 + 12 x tier with the cap on top, for an A/B. */
 #define TD5_TG_GEOP_TIER 45.0
 #define TD5_TG_GEOP_LIFT 60.0
+/* [ROUND 1013 F1 follow-up] A RING PLAZA IS NOT CAPPED TO THE ROAD.
+ *
+ * MEASURED (MODELS.DAT, the lawn's vertices and triangle centres against the
+ * skirt and far-terrain meshes under them): with the cap below, 75 % of Plaza
+ * Miguel de Azcuenaga's lawn lay UNDER the terrain (lawn minus surface min -581,
+ * mean -134 raw) and only the odd green blob showed through. The cap pins every
+ * plaza surface to the HOST SPAN's road height + 400 raw (0.93 m), which is the
+ * right guard for an outline the road runs through and the wrong one for a
+ * square 100 m across whose far side stands on ground that rose more than 0.93 m
+ * from the road. A ring plaza's outline is already projected clear of the
+ * carriageway (tg_geop_project) and sits inside the hull inset, so the vertical
+ * guard has nothing left to guard; it is lifted RING_LIFT further to clear the
+ * far-terrain triangles that interpolate between their vertices (the cap off
+ * alone left 11 % under, worst -101 raw). Only points INSIDE a ring hull are
+ * affected -- td5_geob_in_plaza_ring is geometry, so it is thread-safe and no
+ * polygon plaza changes. Without the cap: lawn minus surface mean +106, 11 %
+ * under. TD5RE_GEO_PLAZA_RING_LIFT=0 restores the capped ground. */
+#define TD5_TG_GEOP_RING_LIFT 100.0
 static double tg_geop_ground_t(const TG_NodeList *nl, int si,
                                double x, double z, int tier)
 {
-    const double cap = nl->v[si].y + 400.0;
-    double y;
+    double cap = nl->v[si].y + 400.0;
+    double y, extra = 0.0;
+    if (td5_geob_in_plaza_ring(x, z) && td5_env_flag_on("TD5RE_GEO_PLAZA_RING_LIFT")) {
+        cap = 1e30;
+        extra = TD5_TG_GEOP_RING_LIFT;
+    }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZA_TIER")) {
-        y = tg_world_h(x, z) + TD5_TG_VERGE_LIFT + 12.0 * (double)tier;
+        y = tg_world_h(x, z) + TD5_TG_VERGE_LIFT + 12.0 * (double)tier + extra;
         if (y > cap) y = cap;
         return y;
     }
-    y = tg_world_h(x, z) + TD5_TG_GEOP_LIFT;
+    y = tg_world_h(x, z) + TD5_TG_GEOP_LIFT + extra;
     if (y > cap) y = cap;                /* cap the BASE, not the tiered top */
     return y + TD5_TG_GEOP_TIER * (double)tier;
 }
@@ -2043,6 +2070,192 @@ static int tg_geop_emit_trees(const TG_FBHook *h, const double *rx,
     return 1;
 }
 
+/* Clip the segment A-B to a convex CCW outline (Cyrus-Beck), in place. 0 when
+ * none of it is inside. The outline is the plaza's, already projected clear of
+ * the carriageway, so a clipped segment can never reach the road. */
+static int tg_geop_clip_to_ring(const double *rx, const double *rz, int n,
+                                double *ax, double *az, double *bx, double *bz)
+{
+    const double dx = *bx - *ax, dz = *bz - *az;
+    double t0 = 0.0, t1 = 1.0;
+    int i;
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        const double ex = rx[j] - rx[i], ez = rz[j] - rz[i];
+        const double nx = -ez, nz = ex;                 /* inward for CCW */
+        const double f0 = (*ax - rx[i]) * nx + (*az - rz[i]) * nz;
+        const double dn = dx * nx + dz * nz;
+        if (fabs(dn) < 1e-9) {
+            if (f0 < 0.0) return 0;                     /* parallel, outside */
+        } else {
+            const double t = -f0 / dn;
+            if (dn > 0.0) { if (t > t0) t0 = t; }       /* entering          */
+            else          { if (t < t1) t1 = t; }       /* leaving           */
+            if (t0 > t1) return 0;
+        }
+    }
+    {
+        const double x0 = *ax + dx * t0, z0 = *az + dz * t0;
+        const double x1 = *ax + dx * t1, z1 = *az + dz * t1;
+        *ax = x0; *az = z0; *bx = x1; *bz = z1;
+    }
+    return 1;
+}
+
+/* [ROUND 1013 F1 follow-up] REAL FOOTWAYS AS A RING PLAZA'S PATHS.
+ *
+ * tg_geop_emit_paths lays DERIVED radial paths, and its own header says so:
+ * "nothing here should be read as 'OSM says the path is here'". For a plaza
+ * mapped only as a ring that is the wrong fallback when OSM DOES say: La
+ * Plata's FOOTWAYS.JSON has five ways inside Plaza Miguel de Azcuenaga. The
+ * real footpath emitter (td5_tg_geo_street.c) already draws those same ways, at
+ * TG_GEOFP_LIFT = 16 raw above the ground -- which the plaza lawn (lift 60,
+ * tier 0) now covers. So the ways are laid again HERE, on tier 1 above the
+ * lawn, exactly as the derived paths are, and the derived paths are not laid
+ * for a plaza that has real ones.
+ *
+ * Each segment is CLIPPED to the plaza outline, which is already clear of the
+ * ring road, so a path never lands on the carriageway. (The first cut kept
+ * every segment that touched the outline whole, and the on-road guard threw the
+ * entire mesh away -- "rejected block mesh at span 319 (coverage 1484, 104
+ * verts, marked @280)" -- because one footway runs out across the ring road.)
+ * The clipped end meets the real emitter's quad, which is still visible
+ * outside the lawn. Kinds are the real emitter's own: plain footway, path,
+ * pedestrian street, cycleway. SIDEWALK is the kerbside pavement the city
+ * already draws, CROSSING is the zebra emitter's and STEPS has no mesh.
+ *
+ * Returns the number of segments laid, 0 when there are none (the caller falls
+ * back to the derived layout), -1 on a write failure. Reads the footway table
+ * only if it is ALREADY loaded: the scenery worker must not be the thread that
+ * loads it. */
+#define TD5_TG_GEOP_REAL_MAX   480
+#define TD5_TG_GEOP_UPM        430.0
+#define TD5_TG_GEOP_REAL_PIECE (6.0 * TD5_TG_GEOP_UPM)
+
+/* The LAWN's own surface height at (x, z): barycentric over the same ear-clip
+ * triangulation tg_geop_emit_lawn writes, whose corners sit on the ground at the
+ * OUTLINE vertices only. The lawn is a flat fan between them -- across a 100 m
+ * plaza that is a plane the real ground wanders 0.5 m away from -- so anything
+ * laid on the lawn has to follow THAT surface, not the terrain under it. The
+ * triangle the point is most inside of is used, so a point just off the outline
+ * extends the nearest plane instead of falling through. */
+static double tg_geop_lawn_y(const int *tri, int ntri, const double *rx,
+                             const double *rz, const double *lh, double x,
+                             double z)
+{
+    double best = -1e300, by = 0.0;
+    int k;
+    for (k = 0; k < ntri; k++) {
+        const int a = tri[k * 3], b = tri[k * 3 + 1], c = tri[k * 3 + 2];
+        const double d = (rz[b] - rz[c]) * (rx[a] - rx[c])
+                       + (rx[c] - rx[b]) * (rz[a] - rz[c]);
+        double u, w, m;
+        if (fabs(d) < 1e-9) continue;
+        u = ((rz[b] - rz[c]) * (x - rx[c]) + (rx[c] - rx[b]) * (z - rz[c])) / d;
+        w = ((rz[c] - rz[a]) * (x - rx[c]) + (rx[a] - rx[c]) * (z - rz[c])) / d;
+        m = u;
+        if (w < m) m = w;
+        if (1.0 - u - w < m) m = 1.0 - u - w;
+        if (m > best) { best = m; by = u * lh[a] + w * lh[b] + (1.0 - u - w) * lh[c]; }
+    }
+    return by;
+}
+
+static int tg_geop_emit_real_paths(const TG_FBHook *h, const double *rx,
+                                   const double *rz, int n)
+{
+    float v[TD5_TG_GEOP_REAL_MAX * 4 * 5];
+    unsigned int light[TD5_TG_GEOP_REAL_MAX * 4];
+    unsigned short cmd[3];
+    int tri[(TD5_GEOB_RING_MAX - 2) * 3];
+    double lh[TD5_GEOB_RING_MAX];
+    const unsigned kinds = (1u << TD5_GEO_FW_FOOTWAY) | (1u << TD5_GEO_FW_PATH)
+                         | (1u << TD5_GEO_FW_PEDESTRIAN) | (1u << TD5_GEO_FW_CYCLEWAY);
+    const int nf = td5_geo_footways_count();
+    const int fit = td5_env_flag_on("TD5RE_GEO_PLAZA_PATHFIT");
+    int i, k, nq = 0, nv = 0, ways = 0, ntri;
+
+    if (nf <= 0) return 0;
+    if (*h->nmesh >= h->maxmesh) return 0;
+    ntri = td5_geob_triangulate(rx, rz, n, tri, TD5_GEOB_RING_MAX - 2);
+    for (k = 0; k < n; k++) lh[k] = tg_geop_ground(h->nl, h->si, rx[k], rz[k]);
+    for (i = 0; i < nf && nq < TD5_TG_GEOP_REAL_MAX; i++) {
+        const TD5_GeoFootway *f = td5_geo_footways_get(i);
+        double hw;
+        int took = 0;
+        if (!f || f->kind < 0 || f->kind >= TD5_GEO_FW_KINDS
+            || !(kinds & (1u << (unsigned)f->kind))) continue;
+        hw = (f->width_m > 0.0) ? f->width_m * TD5_TG_GEOP_UPM * 0.5
+                                : TD5_TG_GEOP_PATH_W * 0.5;
+        if (hw < TD5_TG_GEOP_PATH_W * 0.25) hw = TD5_TG_GEOP_PATH_W * 0.25;
+        for (k = 0; k + 1 < f->count && nq < TD5_TG_GEOP_REAL_MAX; k++) {
+            double ax, az, bx, bz, dx, dz, len, ux, uz;
+            int pcs, j;
+            if (!td5_geo_footways_point(f, k, &ax, &az)) continue;
+            if (!td5_geo_footways_point(f, k + 1, &bx, &bz)) continue;
+            if (!tg_geop_clip_to_ring(rx, rz, n, &ax, &az, &bx, &bz)) continue;
+            dx = bx - ax; dz = bz - az;
+            len = hypot(dx, dz);
+            if (len < 1.0) continue;
+            ux = -dz / len * hw; uz = dx / len * hw;   /* half-width normal */
+            /* Cut into pieces a few metres long: the lawn bends at every
+             * triangle edge, and one long quad cannot follow a bend. */
+            pcs = (int)ceil(len / TD5_TG_GEOP_REAL_PIECE);
+            if (pcs < 1) pcs = 1;
+            for (j = 0; j < pcs && nq < TD5_TG_GEOP_REAL_MAX; j++) {
+                const double t0 = (double)j / (double)pcs;
+                const double t1 = (double)(j + 1) / (double)pcs;
+                const double x0 = ax + dx * t0, z0 = az + dz * t0;
+                const double x1 = ax + dx * t1, z1 = az + dz * t1;
+                const double px[4] = { x0 - ux, x1 - ux, x1 + ux, x0 + ux };
+                const double pz[4] = { z0 - uz, z1 - uz, z1 + uz, z0 + uz };
+                double ysum = 0.0, ymid;
+                int q;
+                for (q = 0; q < 4; q++) {
+                    const int o = nv * 5;
+                    const double y = (fit && ntri > 0)
+                        ? tg_geop_lawn_y(tri, ntri, rx, rz, lh, px[q], pz[q])
+                          + TD5_TG_GEOP_TIER
+                        : tg_geop_ground_t(h->nl, h->si, px[q], pz[q], 1);
+                    ysum += y;
+                    v[o + 0] = (float)px[q];
+                    v[o + 1] = (float)y;
+                    v[o + 2] = (float)pz[q];
+                    v[o + 3] = (float)(((q == 1 || q == 2) ? t1 : t0)
+                                       * len / TD5_TG_GEOP_PATH_W);
+                    v[o + 4] = (float)((q >= 2) ? 1.0 : 0.0);
+                    light[nv] = 0xFFFFFFFFu;
+                    nv++;
+                }
+                /* The measure the fit is judged on: a piece whose MIDDLE sits at
+                 * or under the lawn under it is hidden there (the wedges of the
+                 * first cut, wide at the road and a point at the far end). */
+                ymid = ysum * 0.25;
+                if (ntri > 0 && tg_geop_lawn_y(tri, ntri, rx, rz, lh,
+                                               (x0 + x1) * 0.5, (z0 + z1) * 0.5)
+                                    >= ymid)
+                    s_geop_real_buried++;
+                nq++;
+                took = 1;
+            }
+        }
+        ways += took;
+    }
+    if (nq <= 0) return 0;
+    if (nq >= TD5_TG_GEOP_REAL_MAX) s_geop_real_capped++;   /* never silent */
+    cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK;
+    cmd[1] = 0;
+    cmd[2] = (unsigned short)nq;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, 1, 0,
+                              0.0, 0.0, 0.0, 1.0, 0.0))
+        return -1;
+    tg_acct(TG_ACCT_PARK, h->si);
+    s_geop_real_ways += ways;
+    s_geop_real_segs += nq;
+    return nq;
+}
+
 /* One real area, laid as a plaza. */
 static int tg_geop_emit_one(const TG_FBHook *h, const TD5_GeoArea *a)
 {
@@ -2090,11 +2303,25 @@ static int tg_geop_emit_one(const TG_FBHook *h, const TD5_GeoArea *a)
      * outwardness is linear in position, so once the centre clears
      * minout + pad_r + a path half-width, the pad, every path and every bed
      * between them clear it too -- no second test needed. */
-    if (tg_geop_out(h->nl, h->si, side, cx, cz)
-        >= minout + pad_r + TD5_TG_GEOP_PATH_W) {
-        if (!tg_geop_emit_paths(h, rx, rz, pick, npath, cx, cz, pad_r)) return 0;
-    } else {
-        s_geop_nopath++;
+    {
+        /* [ROUND 1013 F1] A plaza mapped only as a ring takes its paths from the
+         * real FOOTWAYS.JSON ways inside it where there are any; the derived
+         * radial layout is only the fallback. TD5RE_GEO_PLAZA_REALPATH=0 pins
+         * the derived layout. */
+        int real = 0;
+        if (a->ring) s_geop_ring_areas++;
+        if (a->ring && td5_env_flag_on("TD5RE_GEO_PLAZA_REALPATH")) {
+            real = tg_geop_emit_real_paths(h, rx, rz, n);
+            if (real < 0) return 0;
+        }
+        if (real > 0) {
+            /* real paths stand in for the derived ones */
+        } else if (tg_geop_out(h->nl, h->si, side, cx, cz)
+            >= minout + pad_r + TD5_TG_GEOP_PATH_W) {
+            if (!tg_geop_emit_paths(h, rx, rz, pick, npath, cx, cz, pad_r)) return 0;
+        } else {
+            s_geop_nopath++;
+        }
     }
     if (!tg_geop_emit_hedge(h, rx, rz, n, side, minout, a)) return 0;
     if (!tg_geop_emit_trees(h, rx, rz, n, a, side, minout, pick, npath, cx, cz))
@@ -2123,13 +2350,24 @@ int tg_geo_emit_plaza(const TG_FBHook *h)
     return 1;
 }
 
-void tg_geo_plaza_report(void)
+static void tg_geo_plaza_report_impl(int from_stream);
+
+void tg_geo_plaza_report(void)          { tg_geo_plaza_report_impl(0); }
+
+/* [ROUND 1013 F1] The END-OF-STREAM call, for the same reason
+ * tg_geo_city_report_streamed exists: s_stream_pending is only cleared AFTER
+ * the worker returns, so the gate below read 1 on the one call that carries the
+ * real numbers and the whole "[GEO PLAZA] N real area(s) laid" census was silent
+ * on every streamed (= every geo) build. */
+void tg_geo_plaza_report_streamed(void) { tg_geo_plaza_report_impl(1); }
+
+static void tg_geo_plaza_report_impl(int from_stream)
 {
     if (!tg_geo_city_active()) return;
     /* [GEO ROUND 1009] Same reason tg_geo_city_report returns here: on a
      * streamed build the scenery has not run yet, so these would be zeros and
      * the real numbers come from the call at the end of the streamed pass. */
-    if (td5_trackgen_stream_pending()) return;
+    if (!from_stream && td5_trackgen_stream_pending()) return;
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] %ld real area(s) laid: %ld lawn triangle(s) "
               "from the OSM outline, %ld derived path(s), %ld bed(s), %ld "
               "boundary hedge quad(s), %ld interior tree(s)",
@@ -2143,6 +2381,20 @@ void tg_geo_plaza_report(void)
               "OFF on the geo path (tg_block_is_park)",
               s_geop_clamped, s_geop_straddle, s_geop_small,
               TD5_TG_GEOP_MIN_R, s_geop_nopath, s_geop_r16_stood_down);
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] %ld ring plaza(s) laid from a named "
+              "junction=circular ring (knob TD5RE_GEO_PLAZA_RING_FILL=%s); "
+              "%ld real OSM footway piece(s) of %ld way(s) stood in for the "
+              "derived paths (knob TD5RE_GEO_PLAZA_REALPATH=%s), %ld of them "
+              "buried under the lawn at their middle (path height follows the "
+              "lawn plane: knob TD5RE_GEO_PLAZA_PATHFIT=%s); %ld ring plaza "
+              "path mesh(es) hit the %d-piece cap",
+              s_geop_ring_areas,
+              td5_env_flag_on("TD5RE_GEO_PLAZA_RING_FILL") ? "on" : "off",
+              s_geop_real_segs, s_geop_real_ways,
+              td5_env_flag_on("TD5RE_GEO_PLAZA_REALPATH") ? "on" : "off",
+              s_geop_real_buried,
+              td5_env_flag_on("TD5RE_GEO_PLAZA_PATHFIT") ? "on" : "off",
+              s_geop_real_capped, TD5_TG_GEOP_REAL_MAX);
     /* [ROUND 1009 items 3 + 4] The two numbers those fixes are judged on. */
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] boundary: %ld area(s) got NO hedge because "
               "OSM records no barrier on them (knob TD5RE_GEO_PLAZA_HEDGE_OSM"
@@ -3761,6 +4013,8 @@ void tg_r9_city_reset(void)
     s_geop_hedges = s_geop_trees = s_geop_clamped = s_geop_small = 0;
     s_geop_straddle = s_geop_r16_stood_down = s_geop_nopath = 0;
     s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
+    s_geop_ring_areas = s_geop_real_ways = s_geop_real_segs = 0;
+    s_geop_real_buried = s_geop_real_capped = 0;
 }
 
 /* Merge [lo,hi] into span si / side s's band set, joining bands that touch. */

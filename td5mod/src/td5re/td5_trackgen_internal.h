@@ -6168,6 +6168,7 @@ int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
 int  tg_geo_open_space_at(int si, double x, double z, double half);
 int  tg_geo_emit_plaza(const TG_FBHook *h);       /* td5_tg_streets.c */
 void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
+void tg_geo_plaza_report_streamed(void);          /* td5_tg_streets.c, end of the streamed pass */
 
 /* [ROUND 1009 items 2 + 7] Two per-(span, side) tables the geo path needs
  * BEFORE the first facade query, decided in the single-threaded prepass for

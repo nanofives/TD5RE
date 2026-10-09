@@ -5323,6 +5323,6 @@ int td5_trackgen_stream_scenery(volatile int *cancel)
      * the node list exclusively (td5_trackgen_stream_discard is what releases
      * it), so no other build can be running. */
     tg_geo_city_report_streamed();
-    tg_geo_plaza_report();
+    tg_geo_plaza_report_streamed();
     return ok;
 }

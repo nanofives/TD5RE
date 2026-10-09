@@ -51,6 +51,11 @@
 #include "td5_geo.h"
 #include "td5_geo_route.h"
 #include "td5_geo_roads.h"       /* [1011 C2] the shared name classifier   */
+#include "td5_geo_buildings.h"   /* [1013 F1] the two-route staleness probe  */
+#include "td5_geo_footways.h"
+#include "td5_geo_avenues.h"
+#include "td5_geo_forks.h"
+#include "td5_geo_signals.h"
 #include "td5_geo_sidewalk.h"    /* [1011 C2] the per-place carriageway    */
 #include "deps/cjson/cJSON.h"
 
@@ -2093,6 +2098,27 @@ typedef struct {
  * interrupts a carriageway at a junction, and ending the avenue at the first
  * such gap would cut a long one in half at its first crossing. */
 #define GR_AV_MAX_MISS         4
+/* [ROUND 1013 F1] How many spans the chain may walk BEFORE IT HAS A SEED while
+ * it looks for the first span that agrees with the run the detector scored.
+ *
+ * ROOT CAUSE of "after the plaza the avenue was rendering only one lane".
+ * Mariano's second Diagonal 73 run (spans 335..591) starts at the plaza's exit
+ * mouth, where the two carriageways are still splayed out of the ring: span 335
+ * measures 19.30 m between them against the 11.7 m the run settles at. That is
+ * outside the seed cap (1728 u = 4.0 m around the mean) AND outside the band,
+ * so the first span was refused -- and an UNSEEDED chain gave up at its first
+ * refusal (`seeded && ++miss`), where a SEEDED one is allowed GR_AV_MAX_MISS.
+ * Zero spans sampled, 899 m of avenue dropped, one carriageway built.
+ *
+ * The run's END has the mirror-image flare (Diagonal 73's first run loses spans
+ * 256..260 to it) and was already handled, because by then the chain is seeded
+ * and the refused spans simply carry no row. This gives the START the same
+ * treatment: the flared spans carry no row either, and the avenue begins at the
+ * first span that does agree. 24 spans is 84 m, about three quarters of a La
+ * Plata block; a run whose first block never agrees with its own scored
+ * spacing is not a run this detector measured, so the scan stops there and the
+ * avenue is still refused honestly. */
+#define GR_AV_SEED_SCAN       24
 /* [ROUND 1012 D2] How far outside the band THE DETECTOR SCORED the per-span
  * chain may wander, on top of that band's own width.
  *
@@ -2117,6 +2143,19 @@ typedef struct {
  * avenida/diagonal gets, in tenths. See gr_mark_divided_carriageways for the
  * measurement that picked it; TD5RE_GEO_AVENUE_WIDE_X10 overrides for an A/B. */
 #define GR_AV_WIDE_X10        20
+
+/* [ROUND 1013 F1] A span of the per-span chain was refused. May the chain walk
+ * on past it? SEEDED: up to GR_AV_MAX_MISS consecutive refusals (an
+ * intersection's width). UNSEEDED: up to GR_AV_SEED_SCAN, so a run that starts
+ * in a plaza's splayed exit still finds its first agreeing span. */
+static int gr_av_gap_continue(int seeded, int *miss, int *scan)
+{
+    if (seeded) return ++*miss <= GR_AV_MAX_MISS;
+    /* TD5RE_GEO_AVENUE_SEED_SCAN=0 pins the round-1012 answer (give up at the
+     * first refusal before the seed) for a single-variable A/B. */
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_SEED_SCAN")) return 0;
+    return ++*scan <= GR_AV_SEED_SCAN;
+}
 
 /* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
  * convention gr_heading uses. */
@@ -3514,7 +3553,8 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                          - GR_AV_BAND_SLACK;
                     const double band_hi = med[j].gap_max_m * GR_UNITS_PER_METRE
                                          + GR_AV_BAND_SLACK;
-                    int miss = 0, seeded = 0, last_ok = s0 - 1;
+                    int miss = 0, seed_scan = 0, seeded = 0;
+                    int first_ok = -1, last_ok = s0 - 1;
                     for (s = s0; !why && s <= s1 &&
                                  s_last.n_av_span < GR_AV_MAX_SPANS; s++) {
                         double f = (spans1 > lead1)
@@ -3561,7 +3601,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                               : 0.0,
                                           got ? fabs(fabs(raw_off) - prev) : 0.0);
                             }
-                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            if (gr_av_gap_continue(seeded, &miss, &seed_scan)) continue;
                             break;
                         }
                         /* THE TWO CARRIAGEWAYS MUST NOT OVERLAP. The gap has to
@@ -3584,7 +3624,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                           band_lo, band_hi,
                                           band_lo / GR_UNITS_PER_METRE,
                                           band_hi / GR_UNITS_PER_METRE);
-                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            if (gr_av_gap_continue(seeded, &miss, &seed_scan)) continue;
                             break;
                         }
                         half = ((s < c->nodes && c->lanes_out)
@@ -3601,7 +3641,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                           a / GR_UNITS_PER_METRE, half,
                                           (double)plan * GR_LANE_WIDTH * 0.5,
                                           plan, GR_AV_MIN_MEDIAN, seeded);
-                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            if (gr_av_gap_continue(seeded, &miss, &seed_scan)) continue;
                             break;
                         }
                         if (gr_av_probe())
@@ -3616,6 +3656,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         prev_way = hit_way;
                         miss    = 0;
                         seeded  = 1;
+                        if (first_ok < 0) first_ok = s;
                         last_ok = s;
                         g = &s_last.av_span[s_last.n_av_span++];
                         g->av    = s_last.n_av;
@@ -3634,6 +3675,16 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     if (!why && kept < GR_AV_MIN_SPANS)
                         why = "the opposite carriageway is mapped over too few "
                               "of its spans";
+                    /* [ROUND 1013 F1] ... and by the unsampled flare in front
+                     * of the first span that agreed. */
+                    if (!why && first_ok > s0) {
+                        TD5_LOG_I(LOG_TAG, "geo route: avenue %s starts at span "
+                                  "%d, not the detector's %d: %d span(s) of "
+                                  "plaza mouth carry no opposite carriageway "
+                                  "that agrees with the run", med[j].name,
+                                  first_ok, s0, first_ok - s0);
+                        s0 = first_ok;
+                    }
                     if (why) {
                         s_last.n_av_span = base;
                         TD5_LOG_I(LOG_TAG, "geo route: avenue %s (%.0f m, spans "
@@ -4768,6 +4819,35 @@ int td5_geo_derived_migrate(const char *slug)
     return 1;
 }
 
+/* [ROUND 1013 F1] THE VECTOR LAYERS BELONG TO THE FRAME THE COMMIT JUST
+ * REPLACED.
+ *
+ * Six per-place layers (buildings + areas + plaza rings, roads, footways,
+ * signals, avenues, forks) each cache what they read from _route/ and each
+ * decide "already loaded" by the place SLUG alone. A commit rewrites _route/
+ * with a NEW frame (rotation + offset are chosen per route) and leaves the slug
+ * unchanged, so a second BUILD TRACK in the same session raced the FIRST route's
+ * buildings, roads and plaza rings in the SECOND route's coordinates.
+ * MEASURED with TD5RE_GEO_ROUTE_TEST=4 (two different routes of La Plata
+ * committed in one process, td5_geo_sync + each layer's sync after each): after
+ * commit 2 the route held 1072 nodes but the layers printed exactly what they
+ * had after commit 1 -- 1857 buildings + 30 areas, 5 rings with ring 0 at
+ * 319498,1021051, 2291 roads, 865 footways. Nothing between the commit and the
+ * next sync unloaded them (td5_geo_invalidate drops only the place and the
+ * route; td5_geo_place_slug() reads "" for a moment, but every sync that runs
+ * after td5_geo_sync has reloaded the place sees the same slug again).
+ * Each is lazily reloaded by its own sync on the next query, so dropping them
+ * here costs one reload and nothing else. */
+static void gr_drop_place_layers(void)
+{
+    td5_geob_unload();
+    td5_geo_roads_unload();
+    td5_geo_footways_unload();
+    td5_geo_signals_unload();
+    td5_geo_avenues_unload();
+    td5_geo_forks_unload();
+}
+
 int td5_geo_route_commit(void)
 {
     const GrCond *c = &s_last.cond;
@@ -5002,6 +5082,7 @@ done:
      * half-stale state either. */
     gr_graph_free();
     td5_geo_invalidate();
+    gr_drop_place_layers();
     td5_geo_places_rescan();
     td5_geo_select(s_last.slug);
 
@@ -5173,6 +5254,8 @@ static void gr_dump_cond(const char *out_path, GrCond *c)
     s_last.cond = saved;
 }
 
+static void gr_test_second_route(void);      /* level 4, defined below */
+
 static void gr_test_route_live(int level)
 {
     char path[512];
@@ -5269,7 +5352,76 @@ static void gr_test_route_live(int level)
         printf("  COMMIT rc              %d (0 = ok)\n", rc);
         printf("  commit_ms              %.1f\n",
                (double)(td5_plat_time_us() - t0) / 1000.0);
+        if (level >= 4 && rc == 0) gr_test_second_route();
     }
+}
+
+/* [ROUND 1013 F1] LEVEL 4: TWO ROUTES OF ONE PLACE IN ONE PROCESS.
+ *
+ * "a second BUILD TRACK in one session cannot use stale rings." The vector
+ * layers (buildings + areas + plaza rings, roads, footways, signals) are each
+ * keyed on the place SLUG alone, and a commit rewrites the frame they are in.
+ * This prints what each layer holds after the first commit and after the second,
+ * exactly as the next trackgen build would find it (td5_geo_sync, then
+ * td5_geob_sync, then the roads query). A layer that is stale prints the same
+ * numbers twice for two different routes. TD5RE_GEO_ROUTE_TEST_PTS2 is the
+ * second route, TD5RE_GEO_PLACE must name the place. */
+static void gr_probe_layers(const char *tag)
+{
+    double rcx = 0.0, rcz = 0.0, rr = 0.0, px = 0.0, pz = 0.0;
+    int nb = 0, nbf = 0, na = 0, naf = 0;
+    const TD5_GeoRoad *r0;
+
+    td5_geo_sync();
+    td5_geob_sync();
+    td5_geo_roads_sync(td5_geo_place_slug());
+    td5_geob_bind_stats(&nb, &nbf, &na, &naf);
+    td5_geob_plaza_ring_get(0, &rcx, &rcz, &rr);
+    r0 = td5_geo_roads_get(0);
+    if (r0) td5_geo_roads_point(r0, 0, &px, &pz);
+    {
+        double fx = 0.0, fz = 0.0;
+        const TD5_GeoFootway *f0;
+        td5_geo_footways_sync(td5_geo_place_slug());
+        f0 = td5_geo_footways_get(0);
+        if (f0) td5_geo_footways_point(f0, 0, &fx, &fz);
+        printf("  LAYERS %-15s route nodes %d | geob bound %d bldg + %d area, "
+               "%d ring(s), ring0 centre %.0f,%.0f | roads %d, road0 pt0 "
+               "%.0f,%.0f | footways %d, fw0 pt0 %.0f,%.0f\n",
+               tag, td5_geo_route_count(), nb, na, td5_geob_plaza_ring_count(),
+               rcx, rcz, td5_geo_roads_count(), px, pz,
+               td5_geo_footways_count(), fx, fz);
+    }
+}
+
+static void gr_test_second_route(void)
+{
+    const char *pts_env = getenv("TD5RE_GEO_ROUTE_TEST_PTS2");
+    TD5_GeoLatLon wp[GR_MAX_WAYPOINTS];
+    TD5_GeoRouteResult r;
+    int n = 0;
+
+    gr_probe_layers("after commit 1");
+    if (!pts_env || !pts_env[0]) return;
+    {
+        const char *p = pts_env;
+        while (*p && n < GR_MAX_WAYPOINTS) {
+            char *end = NULL;
+            wp[n].lat = strtod(p, &end);
+            if (end == p || *end != ',') break;
+            p = end + 1;
+            wp[n].lon = strtod(p, &end);
+            if (end == p) break;
+            n++;
+            p = end;
+            if (*p == ';') p++; else break;
+        }
+    }
+    if (n < 2) { printf("  LAYERS: TD5RE_GEO_ROUTE_TEST_PTS2 has %d point(s)\n", n); return; }
+    td5_geo_route_build(wp, n, &r);
+    printf("  route 2: verdict %d spans %d streets %s\n", (int)r.verdict, r.spans, r.streets);
+    printf("  COMMIT 2 rc            %d\n", td5_geo_route_commit());
+    gr_probe_layers("after commit 2");
 }
 
 static void gr_self_test(int level)
@@ -5310,7 +5462,7 @@ int td5_geo_route_is_stub(void)
 int td5_geo_route_init(void)
 {
 #ifndef TD5RE_RELEASE
-    const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 3);
+    const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 4);
     if (lvl > 0) {
         gr_self_test(lvl);
         td5_geo_route_shutdown();

@@ -10,6 +10,7 @@
 #include "td5_geo_roads.h"       /* GEO TRACK: OSM sidewalk tags (item 7)     */
 #include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
 #include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
+#include "td5_geo_avenues.h"     /* [1013 F1] which edge a divided avenue owns  */
 
 double tg_r14_keep(void)
 {
@@ -1655,6 +1656,8 @@ static long s_geo_cap_added;
  * only single-threaded per-build hook this module owns, and the load it drives
  * (two JSON files plus a nearest-node bind over every polygon) must not happen
  * lazily from inside an emitter. */
+static void tg_geo_rings_reset(void);
+
 static void tg_geo_city_build_begin(void)
 {
     s_geo_emitted = s_geo_shifted = s_geo_dropped_shift = 0;
@@ -1671,6 +1674,13 @@ static void tg_geo_city_build_begin(void)
     memset(s_geo_roof_kind, 0, sizeof(s_geo_roof_kind));
     s_geo_shift_max = s_geo_route_dev_max = 0.0;
     s_geo_city = s_geo_bld = 0;
+    /* [ROUND 1013 F1] THE SET-PIECE RING TABLE IS PER BUILD. It was a lazy
+     * static (-1 = not collected) that nothing ever put back to -1, so the
+     * rings of the FIRST route built in a process were used for every later
+     * one -- and a route's frame (rotation + offset) is chosen per route, so
+     * the second BUILD TRACK in one session vetoed set pieces at the first
+     * route's plaza coordinates. Collected again on the next query. */
+    tg_geo_rings_reset();
     if (!td5_geo_loaded()) { td5_geob_sync(); return; }   /* also drops a stale place */
     if (!td5_env_flag_on("TD5RE_GEO_CITY")) return;
     s_geo_city = td5_geob_sync();
@@ -1727,6 +1737,7 @@ int tg_geo_city_active(void) { return s_geo_city; }
 typedef struct { double cx, cz, r; } TG_GeoRing;
 static TG_GeoRing s_geo_ring[TG_GEO_RING_MAX];
 static int        s_geo_n_ring = -1;        /* -1 = not collected yet */
+static void tg_geo_rings_reset(void) { s_geo_n_ring = -1; }
 
 static void tg_geo_rings_collect(void)
 {
@@ -2988,6 +2999,11 @@ int tg_geo_emit_buildings(const TG_FBHook *h)
          i = td5_geob_next_building(i)) {
         const TD5_GeoBuilding *gb = td5_geob_building(i);
         if (!gb) continue;
+        /* [ROUND 1013 F1] a footprint standing in a plaza that is neither a
+         * landmark nor a small OSM building (a kiosk) is a plaza feature or a
+         * mapping artefact, not a building -- see geob_veto_plaza. Counted in
+         * the census as bind-time stats, so the emitter just skips it. */
+        if (gb->plaza_veto) continue;
         if (*h->nmesh >= h->maxmesh) {
             for (; i >= 0; i = td5_geob_next_building(i)) s_geo_dropped_slots++;
             break;
@@ -3039,6 +3055,18 @@ static void tg_geo_city_report_impl(int from_stream)
               s_geo_emitted, s_geo_measured, s_geo_estimated, s_geo_lm_real,
               s_geo_lm_fallback, s_geo_shifted, s_geo_shift_max,
               s_geo_dropped_shift, TD5_TG_GEO_MAX_SHIFT, s_geo_dropped_deg);
+    {   /* [ROUND 1013 F1] the plaza veto, as numbers in race.log. */
+        int vet = 0, ksm = 0, klm = 0;
+        td5_geob_plaza_veto_stats(&vet, &ksm, &klm);
+        TD5_LOG_I(LOG_TAG, "[GEO BUILD] plaza veto: %d bound footprint(s) "
+                  "standing in a plaza NOT emitted (knob TD5RE_GEO_PLAZA_BLD="
+                  "%s); %d kept as landmarks, %d kept as small OSM buildings; "
+                  "%d named plaza ring(s) closed to procedural frontage "
+                  "(knob TD5RE_GEO_PLAZA_RING=%s)",
+                  vet, td5_env_flag_on("TD5RE_GEO_PLAZA_BLD") ? "on" : "off",
+                  klm, ksm, td5_geob_plaza_ring_count(),
+                  td5_env_flag_on("TD5RE_GEO_PLAZA_RING") ? "on" : "off");
+    }
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted by source: %ld OSM footprint(s) "
               "/ %ld Overture footprint(s); height from Overture %ld, from the "
               "Open Buildings raster %ld; %ld bound building(s) cut by the "
@@ -4767,6 +4795,42 @@ void tg_r8_city_sidewalk_diag(const TG_FBHook *h)
  *
  * The caller-side gates (paved / TD5RE_AUTOTRACK_SIDEWALKS) are folded in here
  * too, so the guardrail does not have to reconstruct the call chain. */
+/* [ROUND 1013 F1] DOES A DIVIDED AVENUE OWN THIS EDGE?
+ *
+ * The kerb railing is ONE mesh per span with up to two quads, one per road edge.
+ * On an avenue the edge on the median's side is where the median island and the
+ * oncoming carriageway stand, so tg_carriageway_reach there is the whole
+ * cross-section (15..20 m against a 3.4 m road) and the on-road guard rejects
+ * the railing quad on that side -- as it must -- but it rejects the MESH, and
+ * the quad on the outer pavement edge, which is perfectly legal, went with it.
+ * MEASURED on Mariano's route: 253 of the 450 guard rejects inside the second
+ * Diagonal 73 run (spans 337..588) were this railing, one per span, and the same
+ * on the first run and on Avenida 13; the avenue spans had NO kerb railing on
+ * either side while every ordinary city span had both.
+ *
+ * The same ownership rule tg_city_pave_w already applies to the pavement ("a
+ * divided avenue owns its inner edge, the main road's pavement yields") now
+ * applies to the railing: it yields the median-side edge and keeps the other.
+ * One definition, here, because the roadside guardrail asks this predicate to
+ * decide whether it may stand down for a railing.
+ *
+ * Answers from the avenue's own sidecar with one span of slack each way, the
+ * slack tg_geo_avenue_reach takes. 0 on any build with no real place, before
+ * touching anything -- that is what keeps the synthetic gate byte-identical.
+ * TD5RE_GEO_AVENUE_RAIL=0 pins the old all-or-nothing mesh for an A/B. */
+static int tg_rail_avenue_owns_edge(int si, double sg)
+{
+    int e;
+    if (tg_geo_avenue_n() < 1) return 0;          /* MUST be the first statement */
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_RAIL")) return 0;
+    for (e = -1; e <= 1; e++) {
+        double off = 0.0;
+        if (!td5_geo_avenue_at(si + e, &off, NULL, NULL)) continue;
+        if (sg * off >= 0.0) return 1;            /* the avenue is on this side */
+    }
+    return 0;
+}
+
 int tg_rail_kerbfence_here(int si, double sg)
 {
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) return 0;
@@ -4809,6 +4873,7 @@ int tg_rail_kerbfence_here(int si, double sg)
         !tg_r14_fork_nostreet(si)) return 0;
     if (tg_biome_cell_index(si) != tg_biome_cell_index(si - 1)) return 0;
     if (tg_side_blocked(si, sg)) return 0;                /* fork corridor        */
+    if (tg_rail_avenue_owns_edge(si, sg)) return 0;       /* [1013 F1] median edge */
     return 1;
 }
 
