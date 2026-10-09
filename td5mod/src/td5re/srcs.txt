@@ -15,6 +15,7 @@ td5_geo_buildings.c
 td5_geo_signals.c
 td5_geo_footways.c
 td5_tg_geo_street.c
+td5_tg_geo_clear.c
 td5_geo_forks.c
 td5_geo_avenues.c
 td5_geo_sidewalk.c

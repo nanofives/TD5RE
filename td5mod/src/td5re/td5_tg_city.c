@@ -11,6 +11,7 @@
 #include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
 #include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
 #include "td5_geo_avenues.h"     /* [1013 F1] which edge a divided avenue owns  */
+#include "td5_tg_geo_clear.h"    /* [1014 C] real roads + far footway: no building on either */
 
 double tg_r14_keep(void)
 {
@@ -1888,16 +1889,26 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     const TG_Node *n = &nl->v[si];
     const double side = left ? 1.0 : -1.0;
     const double lx = n->tz * side, lz = -n->tx * side;
-    /* [1011 C2] PER SIDE: the probe measures from the back edge of the slab
-     * this side actually gets, so a street with a wide vereda one way and a
-     * kerb the other probes two different bands -- which is the whole point. */
-    const double base = n->width * 0.5 + tg_city_sidewalk_w_side_at(nl, si, left, b);
+    double base;
     double px[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
     double pz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
     int k, a, np = 0, nalong = 1;
     double ax = 0.0, az = 0.0;
 
     if (!s_geo_city) return 0;
+    /* [1011 C2] PER SIDE: the probe measures from the back edge of the slab
+     * this side actually gets, so a street with a wide vereda one way and a
+     * kerb the other probes two different bands -- which is the whole point.
+     *
+     * [ROUND 1014 C] ... and from where the wall ACTUALLY stands: the gap the
+     * frontage and the real footprints are set back to, which on a divided
+     * avenue is the far edge of the opposite carriageway's footway, not the
+     * race road's own pavement. The band used to start inside the opposite
+     * carriageway, so it asked about ground the wall never occupies and could
+     * miss a real building standing behind it. (Identical on a plain street.) */
+    base = n->width * 0.5
+         + tg_geo_building_clear_gap(nl, si, side,
+                                     tg_city_sidewalk_w_side_at(nl, si, left, b));
     if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP") && si + 1 < nl->count) {
         const TG_Node *n1 = &nl->v[si + 1];
         const double b1 = n1->width * 0.5
@@ -1926,6 +1937,20 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     if (s_geo_bld
         && td5_geob_points_in_building(si, px, pz, np,
                                        TD5_GEOB_WIN_B)) return 1;
+    /* [ROUND 1014 C] A REAL ROAD under the band is real geometry too: the far
+     * end of a divided avenue where the opposite carriageway peels off, a
+     * street joining a plaza ring, a cross street the network kept elsewhere.
+     * The frontage stands down there and the flank logic closes both ends with
+     * a corner return, exactly as for a real footprint. See td5_tg_geo_clear.h. */
+    if (tg_geo_clear_ready()) {
+        const double own = tg_geo_own_lateral(nl, si, side);
+        for (k = 0; k < np; k++)
+            if (tg_geo_foreign_road_at(px[k], pz[k], n->x, n->z, n->tx, n->tz,
+                                       own)) {
+                tg_geo_clear_note_wall();
+                return 1;
+            }
+    }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
     return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
 }
@@ -2180,6 +2205,10 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
     if (!s_geo_city || !nl || nspans < 2) return;
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
     if (nspans > nl->count) nspans = nl->count;
+
+    /* [ROUND 1014 C] the real-road index, single-threaded and BEFORE the
+     * stand-down loop below (and so before any scenery worker exists). */
+    tg_geo_clear_prepare();
 
     /* --- item 7 / [1011 C2]: pavement width per SIDE from the nearest way -- */
     if (td5_env_flag_on("TD5RE_GEO_SIDEWALK")
@@ -2687,10 +2716,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     if (!td5_geob_ring_simple(rx, rz, n_ring)) { s_geo_dropped_deg++; return 1; }
 
     /* --- clear the carriageway and the pavement, by the least nudge that does */
-    gap = tg_carriageway_clear_gap(nl, si, side,
-                                   tg_city_sidewalk_w_side_at(nl, si,
-                                                              side > 0.0, h->b),
-                                   TD5_TG_CARRIAGEWAY_MARGIN);
+    gap = tg_geo_building_clear_gap(nl, si, side,
+                                    tg_city_sidewalk_w_side_at(nl, si,
+                                                               side > 0.0, h->b));
     minout = n->width * 0.5 + gap;
     for (k = 0; k < n_ring; k++) {
         need = minout - tg_geo_outward(nl, si, side, rx[k], rz[k]);
@@ -2704,6 +2732,31 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     }
     for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
     cx /= (double)n_ring; cz /= (double)n_ring;
+
+    /* [ROUND 1014 C] A footprint standing ON a real road that is not the race
+     * road (Overture's ML footprints overlap a carriageway now and then; a
+     * conditioned route moves the nearest street) is not a building there. Half
+     * of its sample points (vertices, edge midpoints, centroid) on the road is
+     * the test: a footprint that merely grazes a kerb is kept. */
+    if (tg_geo_clear_ready()) {
+        const double own = tg_geo_own_lateral(nl, si, side);
+        int on = 0, ns = 0;
+        if (tg_geo_foreign_road_at(cx, cz, n->x, n->z, n->tx, n->tz, own)) on++;
+        ns++;
+        for (k = 0; k < n_ring; k++) {
+            const int j = (k + 1) % n_ring;
+            if (tg_geo_foreign_road_at(rx[k], rz[k], n->x, n->z, n->tx, n->tz, own))
+                on++;
+            if (tg_geo_foreign_road_at((rx[k] + rx[j]) * 0.5, (rz[k] + rz[j]) * 0.5,
+                                       n->x, n->z, n->tx, n->tz, own)) on++;
+            ns += 2;
+        }
+        if (on * 2 >= ns) {
+            tg_geo_clear_note_footprint();
+            s_geo_dropped_deg++;
+            return 1;
+        }
+    }
 
     /* --- a landmark OSM does not describe in 3D: the prefab table ---------
      * Tried BEFORE the extrusion, because a stamped set piece REPLACES the
@@ -3056,6 +3109,7 @@ static void tg_geo_city_report_impl(int from_stream)
               "%d + %d too far; decimated %d ring(s)/%d point(s)",
               nb, meas, est, lm, roofs, na, plaza, bb, ab,
               td5_geob_bound_spans(), bf, af, dp, dpt);
+    tg_geo_clear_report();
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted %ld real building(s): %ld measured "
               "/ %ld estimated, %ld real landmark(s) extruded, %ld landmark(s) "
               "left to the prefab table; nudged %ld clear of the carriageway "
@@ -3209,9 +3263,8 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * setback everywhere else, and keeps the whole building (front, caps and the
      * step wall, which all derive from set0/set1) off any carriageway. */
     {
-        const double gap = tg_carriageway_clear_gap(nl, si, side,
-                               tg_city_sidewalk_w_side_at(nl, si, side > 0.0, b),
-                               TD5_TG_CARRIAGEWAY_MARGIN);
+        const double gap = tg_geo_building_clear_gap(nl, si, side,
+                               tg_city_sidewalk_w_side_at(nl, si, side > 0.0, b));
         set0 = n0->width * 0.5 + gap;
         set1 = n1->width * 0.5 + gap;
         /* [R13 JUNCTION item 3] "BUILDINGS OVERLAPPING INTO THE ROAD" on a
