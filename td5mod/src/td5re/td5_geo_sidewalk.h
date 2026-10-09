@@ -78,11 +78,21 @@ const char *td5_geo_sw_source_name(int src);
 typedef struct {
     int    klass;            /* TD5_GEO_RC_* of the nearest way              */
     int    present;          /* 0 = sidewalk=no HERE: kerb strip, no pavement */
-    double half_carriage_m;  /* half the carriageway (width tag, else lanes)  */
+    /* TWO HALF-WIDTHS, AND THEY ARE NOT INTERCHANGEABLE. `half_carriage_m` is
+     * OSM's own (the width tag, else lanes), in the OSM frame -- it is what a
+     * distance measured BETWEEN TWO OSM POLYLINES has to be reduced by.
+     * `half_road_m` is the road the generator actually built at this span, and
+     * it is what anything measured from the GENERATED centreline subtracts --
+     * the facade probe and the building-line rule both. Using OSM's figure
+     * there would place the building line against a carriageway that is not
+     * the one the slab abuts, and the two would disagree by the difference. */
+    double half_carriage_m;
+    double half_road_m;
     double tag_m;            /* 1: this side's measured tag, 0 = untagged     */
     double footway_m;        /* 2: mapped footway offset, 0 = none (not landed) */
     double facade_m;         /* 3: centreline -> first building, 0 = unmeasured */
     int    facade_ok;        /* 3: the facade genuinely IS the frontage       */
+    int    divided;          /* 4: a divided avenue is detected here          */
 } TD5_GeoSwIn;
 
 /* Select the per-place building-line table. NULL/"" selects the generic one.

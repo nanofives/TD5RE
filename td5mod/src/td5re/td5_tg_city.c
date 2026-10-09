@@ -2075,6 +2075,16 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
                 memset(&in, 0, sizeof in);
                 in.klass           = f.klass;
                 in.half_carriage_m = f.half_carriage_m;
+                /* The road the generator BUILT at this span, metres. Anything
+                 * measured from this centreline -- the facade probe, the
+                 * building line -- subtracts this one, not OSM's. */
+                in.half_road_m     = n->width * 0.5 / upm;
+                /* A divided avenue's building line describes a cross-section
+                 * the frontage rule does not model; the sidecar knows where
+                 * one is, so the rule is told rather than left to guess. */
+                in.divided         = tg_geo_avenue_n() > 0
+                                  && tg_geo_avenue_reach(nl, si, s ? 1.0 : -1.0)
+                                     > tg_road_half_width(nl, si);
                 in.present         = (s ? present_l : present_r) > 0.5;
                 in.tag_m           = s ? tag_l : tag_r;
                 /* FOOTWAY HOOK (source 2): round 1011 C4 owns the geometry.

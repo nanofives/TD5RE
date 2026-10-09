@@ -126,6 +126,35 @@ const char *td5_geo_sw_source_name(int src)
 
 static int geo_sw_sane(double m) { return m > GEO_SW_SANE_MIN && m < GEO_SW_SANE_MAX; }
 
+/* THE FRONTAGE RULE'S OWN CEILING, METRES, and why it is not the one above.
+ *
+ * A measurement may legitimately be wide -- if OSM says the pavement is 9 m,
+ * it is 9 m. The RULE is different: it is a SUBTRACTION of one number from
+ * another, and when the two describe different cross-sections the difference
+ * is not a pavement, it is the error between them. Measured on La Plata, round
+ * 1011: the avenue classes take the 30 m building line, which in this city
+ * describes a DIVIDED avenue -- two carriageways and a median -- while the rule
+ * subtracts the ONE 7 m carriageway the generator built, and hands back 11.5 m
+ * a side. 652 primary + 170 secondary + 183 tertiary spans came out that way
+ * and every one of them was then clamped to the engine's 6 m ceiling.
+ *
+ * Clamping is the wrong answer twice over: it reports `frontage-rule` for a
+ * number the rule did not produce, and it lays a 6 m slab on a street that has
+ * no such thing. So the rule DECLINES above this figure instead, and the class
+ * default -- round 1009's answer, and a safe one -- takes the span.
+ *
+ * The ceiling is the engine's own clamp (TD5_TG_GEO_SW_MAX, 6 m) on purpose:
+ * "if the rule's answer would have to be clamped, the rule is wrong here" is a
+ * self-consistent test, where any other figure would be a second arbitrary one.
+ *
+ * NOT DONE, and this is where it would go: modelling the divided cross-section
+ * properly. td5_geo_avenues.c already knows the offset to the opposite
+ * carriageway and its lane count, so (line - near - median - far) / 2 is
+ * computable. Until then a divided span declines on the same rule as any other
+ * over-wide one, and `divided` below makes that decline explicit rather than
+ * incidental. */
+#define GEO_SW_FRONTAGE_MAX_M 6.0
+
 double td5_geo_sw_resolve(const TD5_GeoSwIn *in, int *src_out)
 {
     int src = TD5_GEO_SWSRC_NONE;
@@ -176,7 +205,10 @@ double td5_geo_sw_resolve(const TD5_GeoSwIn *in, int *src_out)
      * that is not a pavement. `facade_ok` is that judgement; this module does
      * not second-guess it, it only subtracts the carriageway. */
     if (src == TD5_GEO_SWSRC_NONE && in->facade_ok && in->facade_m > 0.0) {
-        const double m = in->facade_m - in->half_carriage_m;
+        /* half_road_m, not half_carriage_m: the probe marched out from the
+         * GENERATED centreline, so the carriageway it has to clear is the one
+         * the generator built. */
+        const double m = in->facade_m - in->half_road_m;
         if (geo_sw_sane(m)) {
             w = m;
             src = TD5_GEO_SWSRC_FACADE;
@@ -188,14 +220,23 @@ double td5_geo_sw_resolve(const TD5_GeoSwIn *in, int *src_out)
      * plan itself implies. Behind its own knob so the rule can be taken out of
      * the stack and the three measurements above tested on their own. */
     if (src == TD5_GEO_SWSRC_NONE
-        && td5_env_flag_on("TD5RE_GEO_SW_FRONTAGE")) {
+        && td5_env_flag_on("TD5RE_GEO_SW_FRONTAGE")
+        /* A DIVIDED AVENUE DECLINES, EXPLICITLY. Its building line spans two
+         * carriageways and a median, and this rule subtracts one carriageway;
+         * the real footway is outside the OPPOSITE carriageway, which no
+         * pavement emitter reaches (td5_tg_city.c, the ROUND 1010 AVENUES
+         * block, and tg_pavement_side_width returns 0 on that edge). The
+         * over-wide ceiling below would catch most of these anyway -- saying it
+         * here makes the reason attributable instead of incidental. */
+        && !in->divided) {
         const double line = td5_geo_sw_building_line_m(in->klass);
         if (line > 0.0) {
-            const double m = line * 0.5 - in->half_carriage_m;
-            if (geo_sw_sane(m)) {
-                w = m;
-                src = TD5_GEO_SWSRC_FRONTAGE;
-            }
+            /* half_road_m: the line is placed against the road the generator
+             * BUILT, so road + 2 x pavement == the building line exactly, and
+             * the facade cannot land anywhere but on the back edge of the slab. */
+            const double m = line * 0.5 - in->half_road_m;
+            if (geo_sw_sane(m) && m <= GEO_SW_FRONTAGE_MAX_M)
+                { w = m; src = TD5_GEO_SWSRC_FRONTAGE; }
         }
     }
 
