@@ -2644,6 +2644,7 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
 {
     const TG_Node *n = &h->nl->v[h->si];
     double ux, uz, vx, vz, tmin = 0.0, tmax = 0.0, vmin = 0.0, vmax = 0.0, y;
+    double hx_fit = 0.0, hz_fit = 0.0;
     int k, pf;
 
     if (!td5_env_flag_on("TD5RE_GEO_LM_PREFAB")) return 0;
@@ -2666,13 +2667,67 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
     {
         const double hx = (-tmin < tmax ? -tmin : tmax);
         const double hz = (-vmin < vmax ? -vmin : vmax);
-        pf = tg_prefab_fit(2.0 * hx, 2.0 * hz, gb->id_hash);
+        /* [ROUND 1014 C] "ONLY IF the piece's own footprint FITS INSIDE the real
+         * one" was claimed above and never tested: the piece is fitted to the
+         * ring's principal-axis half-extents, which are the half-extents of its
+         * BOUNDING BOX, so on an L-shaped or wedge-shaped ring the rectangle's
+         * corners stand outside the ring -- over the pavement, the kerb or the
+         * far carriageway (level091 e19 s20: a landmark whose corner stood on the
+         * opposite carriageway). Try the piece at 100/85/70/55% of the box and
+         * take the first whose four corners are inside the ring AND outside the
+         * carriageway line; none fits -> the plain extrusion, which IS the ring.
+         * TD5RE_GEO_PREFAB_FIT=0 restores the unchecked fit. */
+        const TG_Node *nd = &h->nl->v[h->si];
+        const double sd = (gb->host_side > 0) ? 1.0 : -1.0;
+        const double minout = nd->width * 0.5
+            + tg_geo_building_clear_gap(h->nl, h->si, sd,
+                    tg_city_sidewalk_w_side_at(h->nl, h->si, sd > 0.0, h->b));
+        static const double k_scale[4] = { 1.0, 0.85, 0.70, 0.55 };
+        int si4;
+        pf = -1;
+        for (si4 = 0; si4 < 4 && pf < 0; si4++) {
+            double fx = hx * k_scale[si4], fz = hz * k_scale[si4];
+            int c, ok = 1;
+            pf = tg_prefab_fit(2.0 * fx, 2.0 * fz, gb->id_hash);
+            if (pf < 0) continue;
+            if (!td5_env_flag_on("TD5RE_GEO_PREFAB_FIT")) break;
+            /* the piece's OWN extents, not the box it was fitted to */
+            fx = tg_prefab_half_width(pf);
+            fz = tg_prefab_half_depth(pf);
+            for (c = 0; c < 4 && ok; c++) {
+                const double sx = (c & 1) ? 1.0 : -1.0, sz = (c & 2) ? 1.0 : -1.0;
+                const double qx = cx + ux * fx * sx + vx * fz * sz;
+                const double qz = cz + uz * fx * sx + vz * fz * sz;
+                if (!td5_geob_point_in_ring(rx, rz, n_ring, qx, qz)) ok = 0;
+                else if (tg_geo_outward(h->nl, h->si, sd, qx, qz) < minout) ok = 0;
+            }
+            if (!ok) pf = -1;
+        }
+        hx_fit = (pf >= 0) ? tg_prefab_half_width(pf) : hx;
+        hz_fit = (pf >= 0) ? tg_prefab_half_depth(pf) : hz;
     }
     if (pf < 0) { s_geo_lm_nofit++; return 0; }
 
     y = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
     if (y > n->y + tg_city_kerb_h(h->b) + 400.0)
         y = n->y + tg_city_kerb_h(h->b) + 400.0;
+    /* [ROUND 1014 C] "buildings float and don't follow terrain height change."
+     * A stamped set piece stands on ONE plane, taken at the footprint's centroid,
+     * so on a slope its downhill edge hangs in the air (MEASURED: 2.8 m under a
+     * La Plata landmark). Seat it on the LOWEST ground under the rectangle it
+     * occupies instead -- the uphill side buries a little, which nobody sees,
+     * where the downhill side showed daylight. TD5RE_GEO_BLD_FOUNDATION=0
+     * restores the centroid plane. */
+    if (td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION")) {
+        int cxn, czn;
+        for (cxn = -1; cxn <= 1; cxn += 2)
+            for (czn = -1; czn <= 1; czn += 2) {
+                const double qx = cx + ux * hx_fit * cxn + (-uz) * hz_fit * czn;
+                const double qz = cz + uz * hx_fit * cxn + ux * hz_fit * czn;
+                const double gy = tg_world_h(qx, qz) + tg_city_kerb_h(h->b);
+                if (gy < y) y = gy;
+            }
+    }
     y -= TD5_TG_GEO_BASE_SINK;
 
     h->moff[(*h->nmesh)++] = h->blk->len;
