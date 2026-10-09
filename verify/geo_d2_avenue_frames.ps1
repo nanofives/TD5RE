@@ -59,8 +59,13 @@ $gfx = @("--Windowed=1","--VSync=0","--CarDamage=0","--Lighting=0","--Quality=0"
 
 $lvl = Join-Path $wt "re\assets\levels\level091"
 if (Test-Path $lvl) { Remove-Item $lvl -Recurse -Force }
-Get-ChildItem (Join-Path $wt "log") -Filter "d2av_${Arm}_span_*.png" -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+# Delete ONLY the spans this run is about to capture. A blanket wildcard delete
+# here threw away four earlier frames that were still the evidence for a
+# different span, and the run looked clean because it reported only its own.
+foreach ($s in ($Spans -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $q = Join-Path $wt "log\d2av_${Arm}_span_$s.png"
+    if (Test-Path $q) { Remove-Item -LiteralPath $q -Force -ErrorAction SilentlyContinue }
+}
 foreach ($f in @("race.log","engine.log","frontend.log")) {
     $p0 = Join-Path $wt "log\$f"
     for ($t = 0; $t -lt 20 -and (Test-Path $p0); $t++) {
