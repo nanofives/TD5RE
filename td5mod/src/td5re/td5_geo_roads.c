@@ -215,6 +215,53 @@ static int geo_roads_sidewalk_sides(const cJSON *r)
     return TD5_GEO_SW_NONE;      /* both spelled out as absent */
 }
 
+/* [ROUND 1011 C2] OSM free-text metres -> a number, or 0.
+ *
+ * The same leading-number read the lane count and `width` already use, pulled
+ * out so the four sidewalk:*:width spellings share it. A value that does not
+ * start with a number, or that lands outside a plausible pavement, is 0 --
+ * "untagged" -- rather than a silently wrong measurement. */
+static double geo_roads_tag_m(const cJSON *tags, const char *key,
+                              double lo, double hi)
+{
+    const cJSON *v = tags ? cJSON_GetObjectItem(tags, key) : NULL;
+    double m = 0.0;
+    if (!v) return 0.0;
+    if (cJSON_IsString(v) && v->valuestring[0]) {
+        char *end = NULL;
+        m = strtod(v->valuestring, &end);
+        if (end == v->valuestring) return 0.0;
+    } else if (cJSON_IsNumber(v)) {
+        m = v->valuedouble;
+    } else {
+        return 0.0;
+    }
+    return (m > lo && m < hi) ? m : 0.0;
+}
+
+/* [ROUND 1011 C2] The MEASURED per-side pavement width, METRES.
+ *
+ * Most specific first: a side's own `sidewalk:<side>:width` beats the
+ * both-sides spellings, and `sidewalk:both:width` beats the bare
+ * `sidewalk:width` (which OSM uses for the same "both sides" meaning but which
+ * a mapper also reaches for on a one-sided street). A pavement narrower than
+ * 0.3 m or wider than 20 m is not a pavement, so it reads as untagged.
+ *
+ * INERT ON LA PLATA by construction: 0 of the cache's 17909 elements carry any
+ * of the four. Kept because the alternative is a reader that cannot be handed a
+ * measurement even when one exists. */
+static void geo_roads_sidewalk_widths(const cJSON *r, double *l_m, double *r_m)
+{
+    const cJSON *tags = r ? cJSON_GetObjectItem(r, "tags") : NULL;
+    const double both = geo_roads_tag_m(tags, "sidewalk:both:width", 0.3, 20.0);
+    const double bare = geo_roads_tag_m(tags, "sidewalk:width", 0.3, 20.0);
+    const double common = (both > 0.0) ? both : bare;
+    const double l = geo_roads_tag_m(tags, "sidewalk:left:width", 0.3, 20.0);
+    const double g = geo_roads_tag_m(tags, "sidewalk:right:width", 0.3, 20.0);
+    *l_m = (l > 0.0) ? l : common;
+    *r_m = (g > 0.0) ? g : common;
+}
+
 /* Units per metre of the cache's frame, from PLACE.JSON's cell_units / cell_m.
  * Derived rather than hardcoded at 430 so a cache built at another scale still
  * converts a tagged `width` correctly. 0 means "unknown": the caller then
@@ -390,10 +437,14 @@ static int geo_roads_load(const char *slug)
          * width". */
         out->sidewalk = TD5_GEO_SW_UNKNOWN;
         out->tag_width_m = 0.0;
+        out->sw_tag_l_m = out->sw_tag_r_m = 0.0;
         if (read_tags) {
             out->sidewalk = geo_roads_sidewalk(geo_roads_str(r, "sidewalk"));
             if (out->sidewalk == TD5_GEO_SW_UNKNOWN)
                 out->sidewalk = geo_roads_sidewalk_sides(r);
+            /* [ROUND 1011 C2] the measured per-side width, under the same
+             * read_tags gate as the rest of the tag round. */
+            geo_roads_sidewalk_widths(r, &out->sw_tag_l_m, &out->sw_tag_r_m);
             {   /* OSM width=* is free text; the same leading-number read the
                  * lane count uses. Kept RAW in metres -- what it means for the
                  * pavement is the consumer's decision, not this reader's. */
@@ -489,16 +540,19 @@ static double geo_roads_seg_d2(double px, double pz, double ax, double az,
     return (px - cx) * (px - cx) + (pz - cz) * (pz - cz);
 }
 
-int td5_geo_roads_pavement_at(double x, double z, double max_dist,
-                              double *left_m, double *right_m,
-                              double *dirx, double *dirz)
+/* The nearest drivable way to (x,z) within `max_dist`, and its unit direction
+ * there. Shared by both pavement queries so they can never disagree about which
+ * way a span IS. NULL when nothing is in range. */
+static const TD5_GeoRoad *geo_roads_nearest(double x, double z,
+                                            double max_dist,
+                                            double *dirx, double *dirz)
 {
     const double max2 = max_dist * max_dist;
     double best2 = -1.0, bdx = 0.0, bdz = 1.0;
     const TD5_GeoRoad *best = NULL;
     int i, k;
 
-    if (s_roads.n < 1) return 0;
+    if (s_roads.n < 1) return NULL;
     for (i = 0; i < s_roads.n; i++) {
         const TD5_GeoRoad *r = &s_roads.road[i];
         /* Bbox reject, inflated by max_dist so a way whose box misses the
@@ -521,6 +575,42 @@ int td5_geo_roads_pavement_at(double x, double z, double max_dist,
             }
         }
     }
+    if (!best) return NULL;
+    if (dirx) *dirx = bdx;
+    if (dirz) *dirz = bdz;
+    return best;
+}
+
+int td5_geo_roads_pavement_facts_at(double x, double z, double max_dist,
+                                    TD5_GeoPavementAt *out)
+{
+    double dx = 0.0, dz = 1.0;
+    const TD5_GeoRoad *r = geo_roads_nearest(x, z, max_dist, &dx, &dz);
+    if (!r || !out) return 0;
+    out->dirx = dx;
+    out->dirz = dz;
+    out->klass = r->klass;
+    out->sidewalk = r->sidewalk;
+    out->lanes = r->lanes;
+    out->tag_l_m = r->sw_tag_l_m;
+    out->tag_r_m = r->sw_tag_r_m;
+    /* OSM defines highway `width` as the CARRIAGEWAY's width, so when it is
+     * tagged it IS the measurement the frontage rule wants to subtract; the
+     * lane count is the fallback, at the same 3.5 m/lane the pre-1011 surplus
+     * branch below already assumed. */
+    out->half_carriage_m = (r->tag_width_m > 0.0)
+                         ? r->tag_width_m * 0.5
+                         : (double)r->lanes * TD5_GEO_ROADS_LANE_M * 0.5;
+    return 1;
+}
+
+int td5_geo_roads_pavement_at(double x, double z, double max_dist,
+                              double *left_m, double *right_m,
+                              double *dirx, double *dirz)
+{
+    double bdx = 0.0, bdz = 1.0;
+    const TD5_GeoRoad *best = geo_roads_nearest(x, z, max_dist, &bdx, &bdz);
+
     if (!best) return 0;
 
     {

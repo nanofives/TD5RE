@@ -90,6 +90,15 @@ typedef struct {
     int    sidewalk;       /* TD5_GEO_SW_*, relative to the WAY's direction   */
     double width;          /* world units: lanes * TD5_TG_LANE_WIDTH          */
     double tag_width_m;    /* OSM width=*, METRES, 0 when untagged            */
+    /* [ROUND 1011 C2] the MEASURED per-side pavement width, METRES, 0 when
+     * untagged. Relative to the WAY's direction like `sidewalk` above. Filled
+     * from sidewalk:left:width / sidewalk:right:width, else the both-sides
+     * spellings sidewalk:both:width / sidewalk:width. ZERO ways carry any of
+     * the four on the La Plata cache (verified against the raw Overpass bodies:
+     * 0 of 17909 elements), so these are inert there by construction -- they
+     * exist so a place that DOES measure its pavements gets the measurement
+     * instead of the frontage rule. */
+    double sw_tag_l_m, sw_tag_r_m;
     double minx, minz, maxx, maxz;   /* bbox, so a caller can reject cheaply  */
 } TD5_GeoRoad;
 
@@ -144,5 +153,36 @@ int  td5_geo_roads_pavement_at(double x, double z, double max_dist,
 /* The per-class pavement default in METRES, exposed so a report can print the
  * table it is actually using instead of restating it. */
 double td5_geo_roads_pavement_default_m(int klass);
+
+/* [ROUND 1011 C2] THE RAW FACTS AT A POINT, with no width decided.
+ *
+ * td5_geo_roads_pavement_at above answers with ONE rule: the highway class's
+ * default, with `sidewalk` choosing which sides get it. That rule is now the
+ * LAST of five (see td5_geo_sidewalk.h), and the ones above it need facts this
+ * reader has but that query throws away -- the measured tags, the carriageway,
+ * the class. So this is the reader's half: find the nearest way and report what
+ * OSM actually says there. Nothing is resolved here; td5_geo_sidewalk.c owns
+ * the priority order, and the split is the point -- a reader that decides a
+ * width cannot be asked what the data said.
+ *
+ * Returns 1 on a hit within `max_dist` world units, 0 otherwise (out untouched). */
+typedef struct {
+    double dirx, dirz;       /* the way's unit direction at the nearest segment */
+    double half_carriage_m;  /* half the carriageway, METRES: the `width` tag
+                              * when present (OSM defines it as the carriageway),
+                              * else lanes * TD5_GEO_ROADS_LANE_M              */
+    double tag_l_m, tag_r_m; /* sidewalk:<side>:width, METRES, 0 = untagged,
+                              * relative to the WAY's direction                */
+    int    klass;            /* TD5_GEO_RC_*                                   */
+    int    sidewalk;         /* TD5_GEO_SW_*, relative to the WAY's direction  */
+    int    lanes;
+} TD5_GeoPavementAt;
+
+int  td5_geo_roads_pavement_facts_at(double x, double z, double max_dist,
+                                     TD5_GeoPavementAt *out);
+
+/* Metres of carriageway per lane. The figure the pre-1011 surplus branch in
+ * td5_geo_roads_pavement_at already used, named rather than repeated. */
+#define TD5_GEO_ROADS_LANE_M 3.5
 
 #endif /* TD5_GEO_ROADS_H */
