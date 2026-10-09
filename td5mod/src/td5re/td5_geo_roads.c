@@ -262,6 +262,42 @@ static void geo_roads_sidewalk_widths(const cJSON *r, double *l_m, double *r_m)
     *r_m = (g > 0.0) ? g : common;
 }
 
+/* [ROUND 1011 C2] The street's KIND from its NAME -- see TD5_GEO_NAMEK_* for
+ * why this is an int and not a stored string.
+ *
+ * Prefix only, and case-insensitively, because that is how the name is built:
+ * "Avenida 44", "Av. 7", "Diagonal 73", "Calle 15". A name that merely CONTAINS
+ * one of these words is not classified by it -- "Pasaje Diagonal" is a pasaje.
+ * The English and Portuguese prefixes are there so the rule is not La
+ * Plata-only; a place whose table has no row simply never asks. */
+int td5_geo_roads_namek_of(const char *s)
+{
+    static const struct { const char *p; int k; } k_pre[] = {
+        { "diagonal",  TD5_GEO_NAMEK_DIAGONAL },
+        { "avenida",   TD5_GEO_NAMEK_AVENIDA  },
+        { "avenue",    TD5_GEO_NAMEK_AVENIDA  },
+        { "boulevard", TD5_GEO_NAMEK_AVENIDA  },
+        { "av. ",      TD5_GEO_NAMEK_AVENIDA  },
+        { "av ",       TD5_GEO_NAMEK_AVENIDA  },
+        { "calle",     TD5_GEO_NAMEK_CALLE    },
+        { "street",    TD5_GEO_NAMEK_CALLE    },
+        { "rua",       TD5_GEO_NAMEK_CALLE    },
+        { NULL, 0 }
+    };
+    int i, k;
+    if (!s || !s[0]) return TD5_GEO_NAMEK_UNKNOWN;
+    while (*s == ' ') s++;
+    for (i = 0; k_pre[i].p; i++) {
+        const char *a = s, *b = k_pre[i].p;
+        for (k = 0; b[k]; k++) {
+            const char c = (a[k] >= 'A' && a[k] <= 'Z') ? (char)(a[k] + 32) : a[k];
+            if (c != b[k]) break;
+        }
+        if (!b[k]) return k_pre[i].k;
+    }
+    return TD5_GEO_NAMEK_UNKNOWN;
+}
+
 /* Units per metre of the cache's frame, from PLACE.JSON's cell_units / cell_m.
  * Derived rather than hardcoded at 430 so a cache built at another scale still
  * converts a tagged `width` correctly. 0 means "unknown": the caller then
@@ -438,6 +474,12 @@ static int geo_roads_load(const char *slug)
         out->sidewalk = TD5_GEO_SW_UNKNOWN;
         out->tag_width_m = 0.0;
         out->sw_tag_l_m = out->sw_tag_r_m = 0.0;
+        /* [1011 C2] The name is read, CLASSIFIED and dropped -- the string
+         * never enters the pool. Outside `read_tags` with the rest of the tag
+         * round, so TD5RE_GEO_ROAD_TAGS=0 still reproduces the pre-1009 road. */
+        out->namek = read_tags
+                   ? td5_geo_roads_namek_of(geo_roads_str(r, "name"))
+                   : TD5_GEO_NAMEK_UNKNOWN;
         if (read_tags) {
             out->sidewalk = geo_roads_sidewalk(geo_roads_str(r, "sidewalk"));
             if (out->sidewalk == TD5_GEO_SW_UNKNOWN)
@@ -590,6 +632,7 @@ int td5_geo_roads_pavement_facts_at(double x, double z, double max_dist,
     out->dirx = dx;
     out->dirz = dz;
     out->klass = r->klass;
+    out->namek = r->namek;
     out->sidewalk = r->sidewalk;
     out->lanes = r->lanes;
     out->tag_l_m = r->sw_tag_l_m;

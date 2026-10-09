@@ -88,6 +88,7 @@ typedef struct {
      * the one the slab abuts, and the two would disagree by the difference. */
     double half_carriage_m;
     double half_road_m;
+    int    namek;            /* TD5_GEO_NAMEK_*, beats `klass` for the line  */
     double tag_m;            /* 1: this side's measured tag, 0 = untagged     */
     double footway_m;        /* 2: mapped footway offset, 0 = none (not landed) */
     double facade_m;         /* 3: centreline -> first building, 0 = unmeasured */
@@ -104,6 +105,32 @@ void td5_geo_sw_place(const char *slug);
  * pavements. 0 means the place has no rule for this class, which turns source 4
  * off for it. Exposed so a report can print the table it is actually using. */
 double td5_geo_sw_building_line_m(int klass);
+
+/* The same, but asked with the street's KIND as well -- and the kind WINS where
+ * the place states one. The class is only a proxy for the name (La Plata
+ * reserves 18 m for a Calle and 30 m for an Avenida or Diagonal), and on this
+ * route the proxy demonstrably breaks: "Calle 14" is highway=primary and
+ * "Calle 50" is tertiary, so both would take the avenue line. 0 = no rule. */
+double td5_geo_sw_building_line_for(int klass, int namek);
+
+/* [ROUND 1011 C2] THE REAL CARRIAGEWAY for this place and street kind, METRES,
+ * or 0 when the place states none.
+ *
+ * Not a pavement question at first glance, but it is the same table and the
+ * same source. OSM tags `width` on only 50 of La Plata's 2291 ways, so the
+ * route builder sized every street from the `lanes` field -- 2 on 2064 of them
+ * -- and built a 7 m road where the city has 10 m. That is why the streets read
+ * as too narrow, AND why the building-line rule had 11 m of slack to hand the
+ * pavement. One wrong number, two symptoms.
+ *
+ * MEASURED, not assumed: of the 50 width tags on this cache, 37 are "10", and
+ * by street kind the calles are 34 x width=10 against 2.5 / 7 / 8 as the three
+ * outliers. So 10 m is what a La Plata calle is, stated by the mappers who
+ * bothered to measure one.
+ *
+ * A TAGGED width on the way always wins over this -- the table is the stand-in
+ * for the 98% of ways nobody measured. */
+double td5_geo_sw_carriageway_m(int klass, int namek);
 
 /* The slug the table above is currently selected for. Never NULL. */
 const char *td5_geo_sw_place_name(void);

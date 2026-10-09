@@ -13,9 +13,36 @@
 #include "td5_platform.h"
 #include "td5_config.h"          /* td5_env_flag_on / _off */
 #include "td5_geo_roads.h"       /* TD5_GEO_RC_*, the class default table */
+#include "td5_geo_footways.h"    /* source 2, owned by round 1011 C4       */
 #include "td5_geo_sidewalk.h"
 
 #define LOG_TAG "geo"
+
+/* ------------------------------------------- source 2: the footway stub --- */
+
+/* A WEAK "there is no footway here", so the resolver can be written against
+ * C4's contract before C4's geometry exists.
+ *
+ * Round 1011 splits the footway work: C4 lands highway=footway geometry and the
+ * real td5_geo_footways.c, C2 (this round) lands the priority slot that
+ * consumes it. A weak definition is what lets both be true at once -- the
+ * linker drops this one the moment a strong definition is linked, so C4's
+ * module replaces it with NO edit on this side and no #ifdef to forget.
+ *
+ * It must stay BYTE-HONEST while it stands: returning 0 and writing nothing is
+ * the same answer "the place has no mapped footways" will give, so the branch
+ * that reads it is exercised identically either way. */
+#if defined(__GNUC__)
+__attribute__((weak))
+int td5_geo_footway_sidewalk_near(double x, double z, double nx, double nz,
+                                  double max_m, double *out_dist_m,
+                                  double *out_width_m)
+{
+    (void)x; (void)z; (void)nx; (void)nz; (void)max_m;
+    (void)out_dist_m; (void)out_width_m;
+    return 0;
+}
+#endif
 
 /* ------------------------------------------------- the building-line table --- */
 
@@ -51,6 +78,15 @@
 typedef struct {
     const char *slug;                        /* "" = the generic fallback */
     double      line_m[TD5_GEO_RC_MOTORWAY + 1];
+    /* [1011 C2] BY NAME, which is what the plan actually states, indexed by
+     * TD5_GEO_NAMEK_*. A non-zero entry BEATS the class row above: the class is
+     * only a proxy for the name, and on La Plata's own route it gets "Calle 14"
+     * (primary) and "Calle 50" (tertiary) wrong. 0 = no rule for that kind
+     * here, which falls back to the class. */
+    double      name_m[TD5_GEO_NAMEK_DIAGONAL + 1];
+    /* [1011 C2] The REAL CARRIAGEWAY by street kind, METRES -- see
+     * td5_geo_sw_carriageway_m. Same indexing as name_m; 0 = no rule. */
+    double      carriage_m[TD5_GEO_NAMEK_DIAGONAL + 1];
 } GeoSwPlaceRule;
 
 /* Index by TD5_GEO_RC_*: UNKNOWN, SERVICE, LIVING, RESIDENTIAL, UNCLASSIFIED,
@@ -60,13 +96,26 @@ static const GeoSwPlaceRule k_place_rules[] = {
      * is an alley inside a block and has no reserved line, so it keeps the
      * class default. */
     { "la_plata",
-      { 18.0,  0.0, 18.0, 18.0, 18.0, 30.0, 30.0, 30.0, 30.0,  0.0 } },
+      { 18.0,  0.0, 18.0, 18.0, 18.0, 30.0, 30.0, 30.0, 30.0,  0.0 },
+      /* UNKNOWN, CALLE, AVENIDA, DIAGONAL -- the 1882 plan, stated by name. */
+      {  0.0, 18.0, 30.0, 30.0 },
+      /* Carriageway: 10 m, which is what 34 of the 37 measured calles say.
+       * The avenidas and diagonales take the same per-carriageway figure --
+       * a divided one is then 10 + median + 10, which is the 30 m line with
+       * a 10 m median, and that is the cross-section the city has. */
+      {  0.0, 10.0, 10.0, 10.0 } },
     /* THE GENERIC ROW, for every other place. Deliberately a European/Latin
      * American town centre rather than a second La Plata: narrower on the small
      * classes, and it only ever has to beat the class default, which is the
      * thing it replaces. A place that wants its real plan adds a row above. */
     { "",
-      { 16.0,  0.0, 14.0, 16.0, 18.0, 20.0, 25.0, 28.0, 30.0,  0.0 } },
+      { 16.0,  0.0, 14.0, 16.0, 18.0, 20.0, 25.0, 28.0, 30.0,  0.0 },
+      /* No name rule generically: outside a planned grid a street called
+       * "Avenue" carries no reserved width, so the class is the better guide.
+       * And no carriageway rule either -- without a plan to point at, the
+       * `lanes` field is the honest answer and the route keeps using it. */
+      {  0.0,  0.0,  0.0,  0.0 },
+      {  0.0,  0.0,  0.0,  0.0 } },
 };
 
 static const GeoSwPlaceRule *s_rule;
@@ -99,6 +148,25 @@ double td5_geo_sw_building_line_m(int klass)
     if (!s_rule) td5_geo_sw_place("");
     if (klass < 0 || klass > TD5_GEO_RC_MOTORWAY) return 0.0;
     return s_rule->line_m[klass];
+}
+
+double td5_geo_sw_carriageway_m(int klass, int namek)
+{
+    (void)klass;                 /* no class row today: the plan states a KIND */
+    if (!s_rule) td5_geo_sw_place("");
+    if (namek > TD5_GEO_NAMEK_UNKNOWN && namek <= TD5_GEO_NAMEK_DIAGONAL)
+        return s_rule->carriage_m[namek];
+    return 0.0;
+}
+
+double td5_geo_sw_building_line_for(int klass, int namek)
+{
+    if (!s_rule) td5_geo_sw_place("");
+    if (namek > TD5_GEO_NAMEK_UNKNOWN && namek <= TD5_GEO_NAMEK_DIAGONAL) {
+        const double m = s_rule->name_m[namek];
+        if (m > 0.0) return m;        /* the plan states it by name: use that */
+    }
+    return td5_geo_sw_building_line_m(klass);
 }
 
 /* ------------------------------------------------------------ the sources --- */
@@ -192,7 +260,13 @@ double td5_geo_sw_resolve(const TD5_GeoSwIn *in, int *src_out)
      * filling this field -- the priority slot, the sanity clamp and the census
      * bucket are already here and already reported. */
     if (src == TD5_GEO_SWSRC_NONE && in->footway_m > 0.0) {
-        const double m = in->footway_m - in->half_carriage_m;
+        /* The caller has already folded C4's two outputs into one reach --
+         * dist + (width > 0 ? width/2 : 0) -- because `dist` reaches the
+         * footway's CENTRELINE, not its near edge. half_road_m, not
+         * half_carriage_m: the query is anchored on the span node, so the reach
+         * is measured from the GENERATED centreline and the carriageway it has
+         * to clear is the one the generator built. */
+        const double m = in->footway_m - in->half_road_m;
         if (geo_sw_sane(m)) {
             w = m;
             src = TD5_GEO_SWSRC_FOOTWAY;
@@ -229,7 +303,7 @@ double td5_geo_sw_resolve(const TD5_GeoSwIn *in, int *src_out)
          * over-wide ceiling below would catch most of these anyway -- saying it
          * here makes the reason attributable instead of incidental. */
         && !in->divided) {
-        const double line = td5_geo_sw_building_line_m(in->klass);
+        const double line = td5_geo_sw_building_line_for(in->klass, in->namek);
         if (line > 0.0) {
             /* half_road_m: the line is placed against the road the generator
              * BUILT, so road + 2 x pavement == the building line exactly, and

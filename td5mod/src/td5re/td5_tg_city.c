@@ -9,6 +9,7 @@
 #include "td5_geo_buildings.h"   /* GEO TRACK: real footprints and areas      */
 #include "td5_geo_roads.h"       /* GEO TRACK: OSM sidewalk tags (item 7)     */
 #include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
+#include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
 
 double tg_r14_keep(void)
 {
@@ -1924,6 +1925,10 @@ int tg_geo_wall_down(int si, int left)
  * the outward ray leaves the block and measures the NEXT street's buildings.
  * cos(12 deg) between this span's tangent and the next one's. */
 #define TD5_TG_GEO_FACE_COS       0.978
+/* [1011 C2] How far out a mapped footway may be and still be THIS road's
+ * pavement, metres (source 2). Past a La Plata half-block there is no reading
+ * under which the footway belongs to this street. */
+#define TD5_TG_GEO_FOOTWAY_MAX_M 20.0
 
 /* OSM'S LEFT IS NOT THE GENERATOR'S LEFT, and which way round it goes is a
  * fact about the cache's frame rather than a convention anyone chose.
@@ -2074,6 +2079,7 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
 
                 memset(&in, 0, sizeof in);
                 in.klass           = f.klass;
+                in.namek           = f.namek;
                 in.half_carriage_m = f.half_carriage_m;
                 /* The road the generator BUILT at this span, metres. Anything
                  * measured from this centreline -- the facade probe, the
@@ -2087,10 +2093,22 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
                                      > tg_road_half_width(nl, si);
                 in.present         = (s ? present_l : present_r) > 0.5;
                 in.tag_m           = s ? tag_l : tag_r;
-                /* FOOTWAY HOOK (source 2): round 1011 C4 owns the geometry.
-                 * Until a reader lands, the slot stays 0 and the resolver skips
-                 * it -- see the hook note in td5_geo_sidewalk.c. */
-                in.footway_m       = 0.0;
+                /* SOURCE 2, THE MAPPED FOOTWAY. Asked against round 1011 C4's
+                 * contract (td5_geo_footways.h); a weak stub answers 0 until
+                 * that module is linked, so this costs nothing while it is
+                 * absent and needs no edit when it arrives. The outward normal
+                 * for this side is the same (tz,-tx) pair every emitter uses.
+                 * The two outputs fold into ONE reach here, because `dist`
+                 * reaches the footway's centreline rather than its near edge. */
+                {
+                    const double sgn = s ? 1.0 : -1.0;
+                    double fd = 0.0, fw = 0.0;
+                    if (td5_geo_footway_sidewalk_near(n->x, n->z,
+                                                      n->tz * sgn, -n->tx * sgn,
+                                                      TD5_TG_GEO_FOOTWAY_MAX_M,
+                                                      &fd, &fw))
+                        in.footway_m = fd + ((fw > 0.0) ? fw * 0.5 : 0.0);
+                }
                 /* FACADE (source 3): a measurement only where the facade is
                  * genuinely the frontage. Straightness was required to measure
                  * it at all; here it must also AGREE with a neighbour, which is
