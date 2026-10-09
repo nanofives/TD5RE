@@ -14,6 +14,18 @@ must survive.
 ON %s=EN %s
 ```
 
+**Status: applied in the C3 worktree, deliberately NOT committed.**
+
+`re/assets/frontend/lang/es_AR.txt` *is* tracked by git (contrary to what the
+`/fix` guard's whitelist comment implies — that comment claims only
+`re/assets/static/**.dat` is tracked, which is out of date). But the `/fix`
+workflow forbids any `re/` path in a fix commit, so the edit is left in the
+worktree and recorded here instead.
+
+At merge, either apply the line above by hand, or `git checkout` the C3
+worktree's copy of that one file. The exact insertion point used was directly
+after `%s OPTIONS=OPCIONES DE %s`.
+
 ## Context for the translator
 
 | Key | Where it shows | Example | Budget |
