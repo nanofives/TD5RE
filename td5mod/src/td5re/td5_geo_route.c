@@ -408,7 +408,19 @@ typedef struct {
      * usable limit. Parsed by the shared reader so the route and the street
      * network cannot disagree about what "60 mph" means. */
     int    maxspeed_kph;
+    /* [ROUND 1012 D2] `lanes` AFTER the round-1011 place carriageway floor, and
+     * the raw OSM count BEFORE it. Both are kept because the floor is right for
+     * an undivided street and wrong for one carriageway of a divided pair; see
+     * gr_mark_divided_carriageways. `divided` is 1 when this way has a
+     * same-name, different-id, ANTI-parallel one-way partner at median
+     * distance -- i.e. when it is half of a street, not a whole one. */
+    int    lanes_osm;
+    int    divided;
 } GrRoad;
+
+/* Defined with the rest of the divided-avenue geometry (it needs gr_bearing,
+ * gr_road_near_at and gr_same_way), called at the end of the graph load. */
+static void gr_mark_divided_carriageways(void);
 
 static struct {
     char    slug[64];
@@ -722,6 +734,10 @@ static int gr_graph_load(const char *slug)
          * every cached _route/ is invalidated. TD5RE_GEO_REAL_CARRIAGEWAY=0
          * restores the raw `lanes` field for an A/B. */
         out->lanes  = (la && cJSON_IsNumber(la) && la->valueint != 0) ? la->valueint : 2;
+        /* [ROUND 1012 D2] remembered before the place floor below can raise it;
+         * one carriageway of a divided avenue is given this back. */
+        out->lanes_osm = out->lanes;
+        out->divided   = 0;
         if (td5_env_flag_on("TD5RE_GEO_REAL_CARRIAGEWAY")) {
             const int    nk = td5_geo_roads_namek_of(
                                   (nm && cJSON_IsString(nm)) ? nm->valuestring : NULL);
@@ -844,6 +860,9 @@ static int gr_graph_load(const char *slug)
         return 0;
     }
     s_g.gen = 0;
+    /* [ROUND 1012 D2] before anything reads `lanes`: a carriageway of a divided
+     * street takes its own OSM count back off the place floor. */
+    gr_mark_divided_carriageways();
     snprintf(s_g.slug, sizeof s_g.slug, "%s", slug);
     TD5_LOG_I(LOG_TAG, "geo route: graph %s: %d way(s), %d point(s), %d node(s), "
               "%d edge(s)%s", path, s_g.n_roads, s_g.n_pts, s_g.n_nodes,
@@ -2118,6 +2137,150 @@ static int gr_same_way(int a, int b)
     return s_g.road[a].id == s_g.road[b].id;
 }
 
+/* ======================================================================== *
+ * [ROUND 1012 D2] WHICH WAYS ARE HALF OF A STREET
+ * ======================================================================== *
+ *
+ * ROOT CAUSE of "the median built 0.93 m" on Diagonal 73.
+ *
+ * Round 1011 C2 gave every La Plata way the city's real carriageway as a FLOOR:
+ * a calle has 10 m of asphalt whatever `lanes` says, so an uncounted or
+ * under-counted way is raised to round(10 * upm / 1500) = 3 lanes = 10.47 m.
+ * That is right for a whole street and wrong for HALF of one. Diagonal 73 is
+ * mapped as two one-way ways, each tagged lanes=1 (floored to 2 by geo_fetch),
+ * 11.39 m between their centrelines. Building both at the 10.47 m calle
+ * carriageway spends 10.47 of that 11.39 and leaves a 0.92 m median -- which is
+ * the 0.93 m the race log reported, and is why the avenue reads as one slab of
+ * asphalt with a painted line down it.
+ *
+ * The 10 m figure describes the street. A divided street's 30 m line is spent
+ * on pavement + carriageway + median + carriageway + pavement, so each
+ * carriageway must take ITS OWN OSM count. With 2 lanes a side the same
+ * 11.39 m gives 11.39 - 3.49 - 3.49 = 4.41 m of median, and the 30 m line then
+ * leaves (30 - 6.98 - 4.41 - 6.98) / 2 = 5.8 m of vereda a side, which is a La
+ * Plata diagonal.
+ *
+ * So the floor is withheld from a way that is half of a street, and the test is
+ * geometric because no tag states it (`median` is false on all 2291 La Plata
+ * ways and `junction` is only ever circular/roundabout).
+ *
+ * ANTI-PARALLEL ONLY, and that is the whole guard against round 1010's false
+ * positives. A one-way street drawn as a chain of slices pairs with ITSELF at
+ * median distance -- that is how Calle 54 reported a 21 m median -- but every
+ * slice of one chain runs the SAME way (Calle 54: oneway dir=1 on bearing
+ * ~+42 deg at every slice). Two carriageways of a divided pair run OPPOSITE.
+ * gr_route_owns_way, the detector's equivalent guard, is not available here:
+ * this runs at graph load, before there is a route. Anti-parallelism does not
+ * need one, and it is also a stronger statement.
+ *
+ * Three samples by ARCLENGTH and at least two agreeing on the same side, so a
+ * single hairpin vertex cannot carry a way on its own. */
+
+/* Point and forward bearing at fraction `f` of way `r`'s arclength. */
+static int gr_way_at_frac(const GrRoad *r, double f,
+                          double *px, double *pz, double *br)
+{
+    double total = 0.0, acc = 0.0, want;
+    int i;
+    for (i = 0; i + 1 < r->count; i++)
+        total += hypot(s_g.px[r->first + i + 1] - s_g.px[r->first + i],
+                       s_g.pz[r->first + i + 1] - s_g.pz[r->first + i]);
+    if (total <= 1e-9) return 0;
+    want = total * f;
+    for (i = 0; i + 1 < r->count; i++) {
+        const double ax = s_g.px[r->first + i],     az = s_g.pz[r->first + i];
+        const double bx = s_g.px[r->first + i + 1], bz = s_g.pz[r->first + i + 1];
+        const double seg = hypot(bx - ax, bz - az);
+        double t;
+        if (seg <= 1e-9) continue;
+        if (acc + seg < want && i + 2 < r->count) { acc += seg; continue; }
+        t = (want - acc) / seg;
+        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+        *px = ax + (bx - ax) * t;
+        *pz = az + (bz - az) * t;
+        *br = gr_bearing(ax, az, bx, bz);
+        return 1;
+    }
+    return 0;
+}
+
+/* Does way `ra` have a same-name, different-id, ANTI-parallel one-way partner
+ * at median distance over at least two of three arclength samples, all on the
+ * same side? `idx[g0..g1]` is the same-name group, so the scan is per name and
+ * not over the whole graph. */
+static int gr_way_divided(int ra, const int *idx, int g0, int g1)
+{
+    const GrRoad *A = &s_g.road[ra];
+    const double lo = GR_MED_MIN_M * GR_UNITS_PER_METRE;
+    const double hi = GR_MED_MAX_M * GR_UNITS_PER_METRE;
+    int t, hits = 0, side_sum = 0;
+    if (!A->oneway || A->ring || A->count < 2) return 0;
+    for (t = 1; t <= 3; t++) {
+        double px = 0.0, pz = 0.0, rbr = 0.0, lx, lz;
+        int b, side = 0, found = 0;
+        if (!gr_way_at_frac(A, (double)t * 0.25, &px, &pz, &rbr)) continue;
+        lx =  cos(rbr); lz = -sin(rbr);    /* left of travel, gr_bearing frame */
+        for (b = g0; b <= g1 && !found; b++) {
+            const int rb = idx[b];
+            const GrRoad *B = &s_g.road[rb];
+            double pbr = 0.0, cx = 0.0, cz = 0.0, d, dot;
+            if (!B->oneway || B->ring || B->count < 2) continue;
+            if (gr_same_way(ra, rb)) continue;
+            d = gr_road_near_at(B, px, pz, &pbr, &cx, &cz);
+            if (d < lo || d > hi) continue;
+            if (gr_angdiff_deg(rbr + M_PI, pbr) > GR_MED_ANTI_TOL_DEG) continue;
+            dot  = (cx - px) * lx + (cz - pz) * lz;
+            side = (dot > 0.0) ? 1 : -1;
+            found = 1;
+        }
+        if (found) { hits++; side_sum += side; }
+    }
+    return hits >= 2 && (side_sum == hits || side_sum == -hits);
+}
+
+static int gr_div_name_cmp(const void *a, const void *b)
+{
+    const char *na = s_g.road[*(const int *)a].name;
+    const char *nb = s_g.road[*(const int *)b].name;
+    if (!na) return nb ? 1 : 0;
+    if (!nb) return -1;
+    return strcmp(na, nb);
+}
+
+static void gr_mark_divided_carriageways(void)
+{
+    int *idx;
+    int i, g0, n_div = 0;
+    if (s_g.n_roads < 2) return;
+    idx = (int *)malloc((size_t)s_g.n_roads * sizeof(int));
+    if (!idx) return;
+    for (i = 0; i < s_g.n_roads; i++) idx[i] = i;
+    qsort(idx, (size_t)s_g.n_roads, sizeof(int), gr_div_name_cmp);
+    for (g0 = 0; g0 < s_g.n_roads; ) {
+        const char *nm = s_g.road[idx[g0]].name;
+        int g1 = g0, a;
+        while (g1 + 1 < s_g.n_roads && nm && s_g.road[idx[g1 + 1]].name &&
+               !strcmp(s_g.road[idx[g1 + 1]].name, nm)) g1++;
+        if (!nm || !nm[0] || g1 == g0) { g0 = g1 + 1; continue; }
+        for (a = g0; a <= g1; a++) {
+            GrRoad *A = &s_g.road[idx[a]];
+            if (!gr_way_divided(idx[a], idx, g0, g1)) continue;
+            A->divided = 1;
+            /* Give the way back its own OSM count: the place carriageway
+             * describes a whole street, and this is half of one. */
+            if (A->lanes_osm > 0) A->lanes = A->lanes_osm;
+            n_div++;
+        }
+        g0 = g1 + 1;
+    }
+    free(idx);
+    TD5_LOG_I(LOG_TAG, "geo route: %d of %d way(s) are one carriageway of a "
+              "divided street (same name, anti-parallel one-way partner "
+              "%.0f..%.0f m away): the place carriageway floor is withheld and "
+              "each keeps its own OSM lane count", n_div, s_g.n_roads,
+              GR_MED_MIN_M, GR_MED_MAX_M);
+}
+
 /* ---- [ROUND 1010 AVENUES] the ways the ROUTE ITSELF drives on --------------
  *
  * ROOT CAUSE of "you created branches instead of using the actual map", and the
@@ -3124,6 +3287,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     const int base = s_last.n_av_span;
                     int s0 = a < b ? a : b, s1 = a < b ? b : a, s, kept = 0;
                     const char *why = NULL;
+                    char fit_why[256];
 
                     /* Keep clear of the start grid and of the ring's tail, the
                      * same two margins every span-indexed sidecar respects. */
@@ -3132,6 +3296,76 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     if (s1 - s0 + 1 < GR_AV_MIN_SPANS)
                         why = "it does not reach the span floor clear of the "
                               "grid and the ring tail";
+
+                    /* ---- [ROUND 1012 D2] THE CROSS-SECTION MUST FIT ---------
+                     *
+                     * A divided street spends its reserved width on five
+                     * things: pavement, carriageway, median, carriageway,
+                     * pavement. If the city's building line cannot hold all
+                     * five, the route is NOT on a divided avenue here however
+                     * well the two ways pair -- it is on one street a mapper
+                     * drew as two lines, one per direction of travel.
+                     *
+                     * This is the gate GR_MED_MIN_M (4 m, "below this they are
+                     * the same road drawn twice") was reaching for with a
+                     * constant. The constant cannot see the street: MEASURED on
+                     * Mariano's route, Calle 14's last 280 m pairs at a rock-
+                     * steady 9.5 m, cover 1.00, five distinct anti-parallel OSM
+                     * ways, and clears every geometric gate -- but La Plata
+                     * reserves 18 m for a calle, and 9.5 + 3.49 + 3.49 = 16.5 m
+                     * of roadway would leave 0.77 m of vereda a side. The plan
+                     * says it is not divided; the geometry alone could not.
+                     *
+                     * The building line is the place's own figure and it checks
+                     * out against the map: marching perpendicular from the
+                     * centreline to the first building face over La Plata's
+                     * mapped footprints gives Diagonal 73 29.0 m, Avenida 19
+                     * 29.5 m, Avenida 7 31.5 m, Avenida 44 30.0 m against the
+                     * 30 m row, and Calle 54 20.0 m against the 18 m row.
+                     *
+                     * The pavement floor is the class default -- round 1009's
+                     * answer, 3 m on a La Plata avenida -- so this asks for no
+                     * constant of its own. */
+                    if (!why) {
+                        const int    nk    = td5_geo_roads_namek_of(med[j].name);
+                        const double line  = td5_geo_sw_building_line_for(
+                                                 TD5_GEO_RC_UNKNOWN, nk)
+                                           * GR_UNITS_PER_METRE;
+                        const double pav   = td5_geo_roads_pavement_default_m(
+                                                 TD5_GEO_RC_SECONDARY)
+                                           * GR_UNITS_PER_METRE;
+                        const double own_h = ((s0 < c->nodes && c->lanes_out)
+                                              ? (double)c->lanes_out[s0] : 2.0)
+                                           * GR_LANE_WIDTH * 0.5;
+                        const double far_h = (double)(med[j].peer_lanes > 0
+                                                      ? med[j].peer_lanes : 2)
+                                           * GR_LANE_WIDTH * 0.5;
+                        const double need  = med[j].gap_m * GR_UNITS_PER_METRE
+                                           + own_h + far_h + pav * 2.0;
+                        if (line > 0.0 && need > line) {
+                            snprintf(fit_why, sizeof fit_why,
+                                     "the street's %.0f m building line cannot "
+                                     "hold two carriageways and a median "
+                                     "(%.1f + %.1f + %.1f + 2 x %.1f = %.1f m) "
+                                     "-- this is one street drawn as two lines, "
+                                     "not a divided avenue",
+                                     line / GR_UNITS_PER_METRE,
+                                     own_h / GR_UNITS_PER_METRE, med[j].gap_m,
+                                     far_h / GR_UNITS_PER_METRE,
+                                     pav / GR_UNITS_PER_METRE,
+                                     need / GR_UNITS_PER_METRE);
+                            why = fit_why;
+                        } else if (gr_av_probe()) {
+                            TD5_LOG_I(LOG_TAG, "[AVPROBE] %s FITS: need %.1f m "
+                                      "of a %.0f m line, %.2f m of pavement a "
+                                      "side", med[j].name,
+                                      need / GR_UNITS_PER_METRE,
+                                      line / GR_UNITS_PER_METRE,
+                                      (line - med[j].gap_m * GR_UNITS_PER_METRE
+                                       - own_h - far_h) * 0.5
+                                      / GR_UNITS_PER_METRE);
+                        }
+                    }
                     if (gr_av_probe())
                         TD5_LOG_I(LOG_TAG, "[AVPROBE] %s raw %d..%d -> frac "
                                   "%.4f..%.4f -> spans %d..%d (%d), side %s, "
