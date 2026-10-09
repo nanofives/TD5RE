@@ -36,6 +36,7 @@
 #include "td5re.h"
 #include "td5_config.h"  /* td5_env_int/float/flag_* — TD5RE_* knob helpers */
 #include "td5_geo.h"       /* [GEO CORNERS] td5_geo_route_count -- geo-track gate */
+#include "td5_geo_attrs.h" /* [1011 C3] the OSM maxspeed cap, geo tracks only */
 #include "td5_trackgen.h"  /* [GEO CORNERS] td5_trackgen_is_auto_slot */
 #include <string.h>
 #include <math.h>
@@ -5768,6 +5769,46 @@ static void td5_ai_smart_speed(int slot) {
                       slot, nearest_gap, desired,
                       (int)self_speed, (int)peer_speed, (int)thr,
                       peer_slot, peer_du, lane_w);
+        }
+    }
+
+    /* [ROUND 1011 C3] THE POSTED SPEED LIMIT, from OSM `maxspeed`.
+     *
+     * WHY HERE AND NOT ONLY IN td5_ai_driver.c. The DRIVER model owns a real
+     * target-speed scalar and is the obvious place to cap one -- but DRIVER is
+     * NOT the default: main.c clamps [GameOptions]AIModel to <= 1, so the
+     * shipped AI is SMART and DRIVER is reachable only via TD5RE_AI_MODEL=2.
+     * A cap that lived only in the driver model would therefore be dead code
+     * in ordinary play, which is how this nearly shipped.
+     *
+     * LAST WORD ON THE THROTTLE, deliberately: it runs after the corner
+     * governor and the car-following ease-off so it can only ever LOWER the
+     * command. A limit must not be able to talk a car INTO a corner faster.
+     *
+     * Proportional lift rather than a throttle slam, same shape and the same
+     * 0x14 floor as the traffic governor, so the two read as one rule.
+     *
+     * GEO-ONLY BY CONSTRUCTION: td5_geo_attrs_speed_cap_units returns 0 unless
+     * this is a geo slot with a route and a limit is known for the span, so a
+     * shipped track and the synthetic auto track never enter the branch. */
+    {
+        const int cap = td5_geo_attrs_speed_cap_units(span_raw, 0);
+        if (cap > 0) {
+            const int32_t v = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            const int16_t thr_c = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+            if (v > cap && thr_c > 0) {
+                int cc = (int)(((long)thr_c * (long)cap) / (long)v);
+                if (cc < 0x14) cc = 0x14;
+                if (cc < (int)thr_c) {
+                    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cc;
+                    if ((g_ai_frame_counter % 120u) == 0u)
+                        TD5_LOG_I(LOG_TAG, "[GEO SPEED] smart slot=%d span=%d "
+                                  "limit=%d km/h cap=%d v=%d thr %d->%d",
+                                  slot, span_raw,
+                                  td5_geo_attrs_maxspeed(span_raw), cap,
+                                  (int)v, (int)thr_c, cc);
+                }
+            }
         }
     }
 }
