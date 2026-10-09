@@ -140,6 +140,11 @@ typedef struct {
     unsigned char lmsrc;      /* TD5_GEOB_LMSRC_* -- which tag decided it  */
     unsigned char part;       /* building:part -- a 3D-modelled sub-volume */
     unsigned char fsrc;       /* TD5_GEOB_FSRC_* -- whose footprint        */
+    /* [ROUND 1013 F1] Stands inside a plaza (a mapped square OR a named plaza
+     * ring) and is neither a landmark nor a small OSM-tagged building: the
+     * EMITTER skips it. The probes still see it, so the procedural frontage
+     * keeps standing down where the footprint was. See geob_veto_plaza. */
+    unsigned char plaza_veto;
     /* [ROUND 1009 item 9] STOREY COUNTS, which the reader never kept.
      * BUILDINGS.JSON carries `levels` on every record (286 of La Plata's 2326
      * footprints have it from OSM, the rest from the estimator's `levels_est`)
@@ -219,6 +224,21 @@ int  td5_geob_points_in_building(int span, const double *px, const double *pz,
                                  int np, int win);
 int  td5_geob_points_in_plaza(int span, const double *px, const double *pz,
                               int np, int win);
+
+/* [ROUND 1013 F1] PLAZA RINGS. A La Plata plaza is often mapped ONLY as a named
+ * junction=circular/roundabout loop of road ways with no leisure=park / place=
+ * square polygon, so the polygon test above cannot see it and the procedural
+ * frontage walled the square in. The ring group's CONVEX HULL is its interior
+ * (the loop is the street around the square, so every building across that
+ * street is outside it). td5_geob_points_in_plaza includes these. They are
+ * global, not span-bound: a point is in the hull or it is not.
+ * TD5RE_GEO_PLAZA_RING=0 drops them for a one-variable A/B. */
+int  td5_geob_in_plaza_ring(double x, double z);
+int  td5_geob_plaza_ring_count(void);
+/* The bind-time footprint veto: how many real footprints stand inside a plaza
+ * (polygon or ring) and were dropped, how many were kept because they are
+ * small OSM-tagged buildings / landmarks. TD5RE_GEO_PLAZA_BLD=0 keeps them all. */
+void td5_geob_plaza_veto_stats(int *vetoed, int *kept_small, int *kept_landmark);
 
 /* One ring vertex. `first` comes from the record; k is 0..n-1. The ring is
  * OPEN (the closing repeat of the source file is dropped) and wound

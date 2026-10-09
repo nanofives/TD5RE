@@ -16,6 +16,7 @@
 #include "td5_config.h"
 #include "td5_geo.h"
 #include "td5_geo_buildings.h"
+#include "td5_geo_roads.h"
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -48,6 +49,14 @@
  * the cap has to clear several times that. Still refuses a file that is not
  * what we think it is. */
 #define GEOB_MAX_JSON      (192 * 1024 * 1024)
+/* [ROUND 1013 F1] Named plaza rings kept, and hull vertices per ring. La Plata
+ * has 5 rings; the largest group's hull is a few dozen points. A ring whose hull
+ * would not fit is skipped and logged, never truncated into a wrong shape. */
+#define GEOB_PRING_MAX     32
+#define GEOB_PRING_PTS     128
+/* A footprint standing inside a plaza is kept only if it is a landmark or a
+ * small OSM-tagged building (a kiosk, a monument base, a bandstand): 60 m2. */
+#define GEOB_PLAZA_KEEP_M2 60.0
 
 static struct {
     int    loaded;
@@ -70,6 +79,19 @@ static struct {
     int    b_bound, b_far, a_bound, a_far;
 
     int    dec_polys, dec_points;   /* decimation cost */
+
+    /* [ROUND 1013 F1] named plaza RINGS, as convex hulls. See
+     * td5_geob_in_plaza_ring. 0 rings on a place whose plazas are all mapped
+     * as polygons, and on every synthetic build (nothing here is loaded). */
+    int    n_pring;
+    int    pring_on;                /* TD5RE_GEO_PLAZA_RING, latched at load */
+    struct {
+        double cx, cz, r;           /* centroid + max point distance        */
+        int    n;                   /* hull vertices                        */
+        double hx[GEOB_PRING_PTS], hz[GEOB_PRING_PTS];
+        char   name[48];
+    } pring[GEOB_PRING_MAX];
+    int    veto_n, veto_small, veto_landmark;
 } s_gb;
 
 /* ----------------------------------------------------------------- io ------ */
@@ -892,6 +914,263 @@ static int geob_load_areas(const char *slug)
 /* ------------------------------------------------------------- lifecycle --- */
 
 /* Defined with the rest of the binding below; the loader is the only caller. */
+/* ======================================================================== *
+ * [ROUND 1013 F1] PLAZAS THAT ARE ONLY A RING, AND WHAT STANDS IN ANY PLAZA
+ * ======================================================================== *
+ *
+ * "there's still buildings on the plazas."
+ *
+ * MEASURED on Mariano's route (MODELS.DAT + MESHTAG.BIN decode of the generated
+ * level, then a top-down plot of the meshes over the map): Plaza Miguel de
+ * Azcuenaga has NO leisure=park / place=square polygon -- it exists only as
+ * ten junction=circular road ways around an open centre -- and 80 tall meshes
+ * stood inside that ring: 47 `building` (the procedural frontage and back rows
+ * facing the square), 29 `cross` (the walls and flanks of side streets) and 4
+ * `city`. Every stand-down probe in the generator answers through
+ * td5_geob_points_in_plaza, which knew only POLYGONS, so the frontage walled the
+ * square in. The three square polygons that DO exist on the route (Plaza
+ * Mariano Moreno, Plaza Maximo Paz, the start park) had no procedural mesh in
+ * them already; this is the one the polygon test could not see.
+ *
+ * THE INTERIOR OF A RING IS ITS CONVEX HULL. The loop is the street around the
+ * square, so the hull of the named group's points is bounded by the road
+ * centreline and everything beyond it, across the street, is outside. (The disc
+ * the set-piece test uses -- centroid + max distance -- is fine for a
+ * conservative "no set piece here" but would swallow the frontage across the
+ * street: the ring's corner is 99 m out and its side 70 m.)
+ *
+ * THE REAL FOOTPRINTS are the other half. Overture adds 88k footprints and some
+ * are plaza features (kiosks, monuments, a bandstand), not buildings. A
+ * footprint is VETOED when most of its outline stands inside a plaza (polygon or
+ * ring) and it is neither a landmark nor a small OSM-tagged building (< 60 m2).
+ * The veto only stops EMISSION: the stand-down probes still see the footprint,
+ * so the procedural frontage that was standing down for it keeps standing down. */
+
+#define GEOB_NO_PLAZA  (-2147483647 - 1)
+
+static double geob_ring_area_m2(const TD5_GeoBuilding *b)
+{
+    double a;
+    if (b->n < 3 || !(s_gb.units_per_m > 0.0)) return b->area_m2;
+    a = fabs(td5_geob_ring_area(&s_gb.px[b->first], &s_gb.pz[b->first], b->n));
+    return a / (s_gb.units_per_m * s_gb.units_per_m);
+}
+
+/* Andrew's monotone chain over `n` points; writes at most `cap` hull vertices.
+ * Returns the hull size, 0 for a degenerate set, -1 when it would not fit.
+ * `ix` is scratch (n ints). */
+static int geob_hull(const double *x, const double *z, int n, int *ix,
+                     double *hx, double *hz, int cap)
+{
+    int i, k = 0, lo;
+    int *h;
+    /* indices sorted by (x, z): insertion sort, n is a few hundred */
+    for (i = 0; i < n; i++) {
+        int j = i;
+        while (j > 0 && (x[ix[j - 1]] > x[i] ||
+               (x[ix[j - 1]] == x[i] && z[ix[j - 1]] > z[i]))) {
+            ix[j] = ix[j - 1];
+            j--;
+        }
+        ix[j] = i;
+    }
+#define GEOB_CROSS(o, a, b) \
+    ((x[a] - x[o]) * (z[b] - z[o]) - (z[a] - z[o]) * (x[b] - x[o]))
+    h = (int *)malloc((size_t)(2 * n + 2) * sizeof(int));
+    if (!h) return -1;
+    for (i = 0; i < n; i++) {
+        while (k >= 2 && GEOB_CROSS(h[k - 2], h[k - 1], ix[i]) <= 0.0) k--;
+        h[k++] = ix[i];
+    }
+    lo = k + 1;
+    for (i = n - 2; i >= 0; i--) {
+        while (k >= lo && GEOB_CROSS(h[k - 2], h[k - 1], ix[i]) <= 0.0) k--;
+        h[k++] = ix[i];
+    }
+    k--;                                   /* last == first */
+#undef GEOB_CROSS
+    if (k < 3) { free(h); return 0; }
+    if (k > cap) { free(h); return -1; }
+    for (i = 0; i < k; i++) { hx[i] = x[h[i]]; hz[i] = z[h[i]]; }
+    free(h);
+    return k;
+}
+
+/* Collect every NAMED junction=circular/roundabout group as one hull. Same
+ * selection as td5_tg_city.c's tg_geo_rings_collect (the set-piece veto), so
+ * the two never disagree on which squares exist. */
+static void geob_collect_plaza_rings(void)
+{
+    int n, i, q, k;
+    int seen[GEOB_PRING_MAX], n_seen = 0;
+
+    s_gb.n_pring = 0;
+    s_gb.pring_on = td5_env_flag_on("TD5RE_GEO_PLAZA_RING");
+    if (!s_gb.pring_on) return;
+    td5_geo_roads_sync(td5_geo_place_slug());
+    n = td5_geo_roads_count();
+    for (i = 0; i < n && s_gb.n_pring < GEOB_PRING_MAX; i++) {
+        const TD5_GeoRoad *r = td5_geo_roads_get(i);
+        double *x, *z, cx = 0.0, cz = 0.0, rad = 0.0;
+        int *ix, np = 0, nh;
+        if (!r || !r->roundabout || r->count < 3 || r->name_id < 0) continue;
+        for (q = 0; q < n_seen; q++) if (seen[q] == r->name_id) break;
+        if (q < n_seen) continue;
+        if (n_seen < GEOB_PRING_MAX) seen[n_seen++] = r->name_id;
+        for (q = 0; q < n; q++) {
+            const TD5_GeoRoad *w = td5_geo_roads_get(q);
+            if (w && w->roundabout && w->name_id == r->name_id) np += w->count;
+        }
+        if (np < 3) continue;
+        x  = (double *)malloc((size_t)np * sizeof(double));
+        z  = (double *)malloc((size_t)np * sizeof(double));
+        ix = (int *)malloc((size_t)np * sizeof(int));
+        if (!x || !z || !ix) { free(x); free(z); free(ix); return; }
+        np = 0;
+        for (q = 0; q < n; q++) {
+            const TD5_GeoRoad *w = td5_geo_roads_get(q);
+            if (!w || !w->roundabout || w->name_id != r->name_id) continue;
+            for (k = 0; k < w->count; k++) {
+                double px, pz;
+                if (!td5_geo_roads_point(w, k, &px, &pz)) continue;
+                x[np] = px; z[np] = pz; cx += px; cz += pz; np++;
+            }
+        }
+        cx /= (double)np; cz /= (double)np;
+        for (k = 0; k < np; k++) {
+            const double d = hypot(x[k] - cx, z[k] - cz);
+            if (d > rad) rad = d;
+        }
+        nh = geob_hull(x, z, np, ix,
+                       s_gb.pring[s_gb.n_pring].hx, s_gb.pring[s_gb.n_pring].hz,
+                       GEOB_PRING_PTS);
+        if (nh >= 3 && rad > 0.0) {
+            s_gb.pring[s_gb.n_pring].cx = cx;
+            s_gb.pring[s_gb.n_pring].cz = cz;
+            s_gb.pring[s_gb.n_pring].r  = rad;
+            s_gb.pring[s_gb.n_pring].n  = nh;
+            snprintf(s_gb.pring[s_gb.n_pring].name,
+                     sizeof s_gb.pring[0].name, "ring #%d", r->name_id);
+            s_gb.n_pring++;
+        } else {
+            TD5_LOG_W(LOG_TAG, "geob: plaza ring group %d skipped (hull %d "
+                      "vertices, cap %d)", r->name_id, nh, GEOB_PRING_PTS);
+        }
+        free(x); free(z); free(ix);
+    }
+    TD5_LOG_I(LOG_TAG, "geob: %d named plaza ring(s) kept as hulls (their "
+              "interior is a plaza: no procedural frontage, no footprint "
+              "mass bigger than a kiosk)", s_gb.n_pring);
+}
+
+/* Index of the ring whose hull holds (x,z), or -1. */
+static int geob_plaza_ring_at(double x, double z)
+{
+    int i;
+    for (i = 0; i < s_gb.n_pring; i++) {
+        if (hypot(x - s_gb.pring[i].cx, z - s_gb.pring[i].cz)
+            > s_gb.pring[i].r + 1.0) continue;
+        if (td5_geob_point_in_ring(s_gb.pring[i].hx, s_gb.pring[i].hz,
+                                   s_gb.pring[i].n, x, z)) return i;
+    }
+    return -1;
+}
+
+int td5_geob_in_plaza_ring(double x, double z)
+{
+    if (!s_gb.loaded || !s_gb.pring_on) return 0;
+    return geob_plaza_ring_at(x, z) >= 0;
+}
+
+int td5_geob_plaza_ring_count(void) { return s_gb.loaded ? s_gb.n_pring : 0; }
+
+void td5_geob_plaza_veto_stats(int *vetoed, int *kept_small, int *kept_landmark)
+{
+    if (vetoed)        *vetoed        = s_gb.veto_n;
+    if (kept_small)    *kept_small    = s_gb.veto_small;
+    if (kept_landmark) *kept_landmark = s_gb.veto_landmark;
+}
+
+/* Which plaza holds the point? >= 0 an AREAS.JSON index, -(1 + r) for ring r,
+ * GEOB_NO_PLAZA for none. Polygon plazas are the ones td5_geob_area_is_plaza
+ * names. */
+static int geob_plaza_of_point(double x, double z)
+{
+    int i;
+    for (i = 0; i < s_gb.na; i++) {
+        const TD5_GeoArea *a = &s_gb.a[i];
+        if (!td5_geob_area_is_plaza(a)) continue;
+        if (hypot(x - a->cx, z - a->cz) > a->radius) continue;
+        if (td5_geob_point_in_ring(&s_gb.px[a->first], &s_gb.pz[a->first],
+                                   a->n, x, z)) return i;
+    }
+    i = s_gb.pring_on ? geob_plaza_ring_at(x, z) : -1;
+    return i >= 0 ? -(1 + i) : GEOB_NO_PLAZA;
+}
+
+/* Veto the bound footprints that stand in a plaza. Runs once per place load,
+ * after the bind, so only the footprints the emitter could ever reach are
+ * tested (~1.9k of 90k on La Plata). */
+static void geob_veto_plaza(void)
+{
+    const int nslot = s_gb.na + GEOB_PRING_MAX;
+    int *cnt, *keep, i, k, total = 0;
+
+    s_gb.veto_n = s_gb.veto_small = s_gb.veto_landmark = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZA_BLD")) return;
+    cnt  = (int *)calloc((size_t)nslot, sizeof(int));
+    keep = (int *)calloc((size_t)nslot, sizeof(int));
+    if (!cnt || !keep) { free(cnt); free(keep); return; }
+
+    for (i = 0; i < s_gb.nb; i++) {
+        TD5_GeoBuilding *b = &s_gb.b[i];
+        int in = 0, np = 0, which, slot;
+        if (b->host_span < 0 || b->n < 3) continue;
+        for (k = -1; k < b->n; k++) {
+            const double px = (k < 0) ? b->cx : s_gb.px[b->first + k];
+            const double pz = (k < 0) ? b->cz : s_gb.pz[b->first + k];
+            np++;
+            if (geob_plaza_of_point(px, pz) != GEOB_NO_PLAZA) in++;
+        }
+        if (in * 2 <= np) continue;                       /* mostly outside */
+        which = geob_plaza_of_point(b->cx, b->cz);
+        for (k = 0; k < b->n && which == GEOB_NO_PLAZA; k++)
+            which = geob_plaza_of_point(s_gb.px[b->first + k],
+                                        s_gb.pz[b->first + k]);
+        slot = which >= 0 ? which : s_gb.na + (-which - 1);
+        if (which == GEOB_NO_PLAZA || slot < 0 || slot >= nslot) continue;
+        total++;
+        if (b->landmark) { s_gb.veto_landmark++; keep[slot]++; continue; }
+        if (b->fsrc == TD5_GEOB_FSRC_OSM &&
+            geob_ring_area_m2(b) < GEOB_PLAZA_KEEP_M2) {
+            s_gb.veto_small++; keep[slot]++; continue;
+        }
+        b->plaza_veto = 1;
+        s_gb.veto_n++;
+        cnt[slot]++;
+    }
+    TD5_LOG_I(LOG_TAG, "geob: %d bound footprint(s) stand in a plaza: %d "
+              "dropped (not a landmark, not a small OSM building), %d kept as "
+              "landmarks, %d kept as small OSM buildings (< %.0f m2)",
+              total, s_gb.veto_n, s_gb.veto_landmark, s_gb.veto_small,
+              GEOB_PLAZA_KEEP_M2);
+    for (i = 0; i < nslot; i++) {
+        if (!cnt[i] && !keep[i]) continue;
+        if (i < s_gb.na)
+            TD5_LOG_I(LOG_TAG, "geob:   plaza area %d (kind %d, centre %.0f,%.0f "
+                      "r %.0f m): %d dropped, %d kept", i, (int)s_gb.a[i].kind,
+                      s_gb.a[i].cx, s_gb.a[i].cz,
+                      s_gb.a[i].radius / s_gb.units_per_m, cnt[i], keep[i]);
+        else
+            TD5_LOG_I(LOG_TAG, "geob:   plaza %s (centre %.0f,%.0f r %.0f m): "
+                      "%d dropped, %d kept", s_gb.pring[i - s_gb.na].name,
+                      s_gb.pring[i - s_gb.na].cx, s_gb.pring[i - s_gb.na].cz,
+                      s_gb.pring[i - s_gb.na].r / s_gb.units_per_m,
+                      cnt[i], keep[i]);
+    }
+    free(cnt); free(keep);
+}
+
 static void geob_bind_all(void);
 
 void td5_geob_unload(void)
@@ -936,7 +1215,9 @@ int td5_geob_sync(void)
         return 0;
     }
     s_gb.loaded = 1;
+    geob_collect_plaza_rings();
     geob_bind_all();
+    geob_veto_plaza();
     {
         int meas = 0, est = 0, lm = 0, roof = 0, plaza = 0, i;
         for (i = 0; i < s_gb.nb; i++) {
@@ -1341,6 +1622,12 @@ static int geob_points_hit(int span, const double *px, const double *pz, int np,
                     return 1;
             }
         }
+    }
+    /* [ROUND 1013 F1] a named plaza RING has no polygon to find above. Global,
+     * not span-windowed: the hull either holds the point or it does not. */
+    if (areas && s_gb.pring_on && s_gb.n_pring > 0) {
+        for (k = 0; k < np; k++)
+            if (geob_plaza_ring_at(px[k], pz[k]) >= 0) return 1;
     }
     return 0;
 }

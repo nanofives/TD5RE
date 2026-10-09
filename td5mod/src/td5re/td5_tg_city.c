@@ -2988,6 +2988,11 @@ int tg_geo_emit_buildings(const TG_FBHook *h)
          i = td5_geob_next_building(i)) {
         const TD5_GeoBuilding *gb = td5_geob_building(i);
         if (!gb) continue;
+        /* [ROUND 1013 F1] a footprint standing in a plaza that is neither a
+         * landmark nor a small OSM building (a kiosk) is a plaza feature or a
+         * mapping artefact, not a building -- see geob_veto_plaza. Counted in
+         * the census as bind-time stats, so the emitter just skips it. */
+        if (gb->plaza_veto) continue;
         if (*h->nmesh >= h->maxmesh) {
             for (; i >= 0; i = td5_geob_next_building(i)) s_geo_dropped_slots++;
             break;
@@ -3039,6 +3044,18 @@ static void tg_geo_city_report_impl(int from_stream)
               s_geo_emitted, s_geo_measured, s_geo_estimated, s_geo_lm_real,
               s_geo_lm_fallback, s_geo_shifted, s_geo_shift_max,
               s_geo_dropped_shift, TD5_TG_GEO_MAX_SHIFT, s_geo_dropped_deg);
+    {   /* [ROUND 1013 F1] the plaza veto, as numbers in race.log. */
+        int vet = 0, ksm = 0, klm = 0;
+        td5_geob_plaza_veto_stats(&vet, &ksm, &klm);
+        TD5_LOG_I(LOG_TAG, "[GEO BUILD] plaza veto: %d bound footprint(s) "
+                  "standing in a plaza NOT emitted (knob TD5RE_GEO_PLAZA_BLD="
+                  "%s); %d kept as landmarks, %d kept as small OSM buildings; "
+                  "%d named plaza ring(s) closed to procedural frontage "
+                  "(knob TD5RE_GEO_PLAZA_RING=%s)",
+                  vet, td5_env_flag_on("TD5RE_GEO_PLAZA_BLD") ? "on" : "off",
+                  klm, ksm, td5_geob_plaza_ring_count(),
+                  td5_env_flag_on("TD5RE_GEO_PLAZA_RING") ? "on" : "off");
+    }
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted by source: %ld OSM footprint(s) "
               "/ %ld Overture footprint(s); height from Overture %ld, from the "
               "Open Buildings raster %ld; %ld bound building(s) cut by the "

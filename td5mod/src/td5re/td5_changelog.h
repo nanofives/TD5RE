@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 9 (real places: avenues and squares)" },
+    { CL_ITEM,    "The second stretch of Diagonal 73, after the" },
+    { CL_ITEM,    "  plaza, is a divided avenue again, not one lane" },
+    { CL_ITEM,    "No building is built inside a plaza any more," },
+    { CL_ITEM,    "  not even one mapped only as a roundabout ring" },
+    { CL_ITEM,    "Kiosk-sized plaza features stay, big blocks go" },
     { CL_ITEM,    "A real divided avenue is now divided for its" },
     { CL_ITEM,    "  WHOLE length, not just one block of it" },
     { CL_ITEM,    "Its central median is the real width between" },
