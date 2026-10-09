@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: lights, limits, names)" },
+    { CL_ITEM,    "Street lamps now stand where the real map says" },
+    { CL_ITEM,    "  the street is lit, at a real 30 m spacing" },
+    { CL_ITEM,    "A street the map marks as unlit gets none" },
+    { CL_ITEM,    "Traffic obeys the real posted speed limit, and" },
+    { CL_ITEM,    "  rivals push harder on an avenue than a calle" },
+    { CL_ITEM,    "The HUD names the street you are driving on" },
+    { CL_ITEM,    "Accented street names read correctly now" },
+    { CL_ITEM,    "  (Azcuenaga keeps its accent, not a stray A)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: real street widths)" },
     { CL_ITEM,    "Streets are now as wide as the city actually" },
     { CL_ITEM,    "  built them. A La Plata calle is 10 m of road," },

@@ -95,6 +95,25 @@
 #define TD5_GEO_SURF_COBBLE  1   /* sett, cobblestone, unhewn_cobblestone   */
 #define TD5_GEO_SURF_LOOSE   2   /* dirt, unpaved, gravel, ground, sand     */
 
+/* [ROUND 1011 C3] OSM `lit=*`, the highest-count attribute this reader used to
+ * drop (1693 of La Plata's 2291 ways carry it).
+ *
+ * THREE STATES, NOT TWO, and the distinction is the whole point. OSM's `lit=no`
+ * is a surveyed statement that a street has NO lighting; an ABSENT tag is a
+ * statement about the survey, not about the street. La Plata's cache has 1693
+ * `yes` and ZERO `no`, so the NO branch is inert on this place and only the
+ * UNKNOWN default is observable here -- see TD5RE_GEO_LIT_DEFAULT in
+ * td5_geo_attrs.c for what UNKNOWN does. */
+#define TD5_GEO_LIT_UNKNOWN  0   /* no lit tag at all                       */
+#define TD5_GEO_LIT_NO       1   /* lit=no / none / disused                 */
+#define TD5_GEO_LIT_YES      2   /* lit=yes / 24-7 / automatic / sunset-... */
+
+/* Longest unique name on the La Plata cache is 43 bytes ("Pasaje Profesor
+ * Doctor Mario Egidio Teruggi"); 64 leaves room and keeps the interned pool a
+ * flat array. A longer name is truncated on a UTF-8 BOUNDARY, never mid
+ * sequence -- a dangling continuation byte would render as a replacement box. */
+#define TD5_GEO_ROADS_NAME_MAX   64
+
 typedef struct {
     int    first, count;   /* slice of the shared point pool                  */
     int    lanes;          /* 1..TD5_GEO_ROADS_LANES_MAX (see the note below) */
@@ -107,6 +126,9 @@ typedef struct {
     int    layer;          /* OSM layer=*, 0 at grade                         */
     int    sidewalk;       /* TD5_GEO_SW_*, relative to the WAY's direction   */
     int    namek;          /* TD5_GEO_NAMEK_*, from `name` at load time       */
+    int    lit;            /* TD5_GEO_LIT_*                                   */
+    int    maxspeed_kph;   /* OSM maxspeed in km/h; 0 = untagged or unlimited */
+    int    name_id;        /* interned name index, -1 when the way is unnamed */
     double width;          /* world units: lanes * TD5_TG_LANE_WIDTH          */
     double tag_width_m;    /* OSM width=*, METRES, 0 when untagged            */
     /* [ROUND 1011 C2] the MEASURED per-side pavement width, METRES, 0 when
@@ -210,5 +232,45 @@ int  td5_geo_roads_pavement_facts_at(double x, double z, double max_dist,
 /* Metres of carriageway per lane. The figure the pre-1011 surplus branch in
  * td5_geo_roads_pavement_at already used, named rather than repeated. */
 #define TD5_GEO_ROADS_LANE_M 3.5
+
+/* ------------------------------------------ [ROUND 1011 C3] lit/speed/name -- */
+
+/* THE INTERNED NAME POOL. OSM splits one street into a way per block -- La
+ * Plata's 1937 named ways carry only 187 distinct names -- so the name is held
+ * once and every way keeps an index. That makes "same street" a cheap integer
+ * compare, which is what a junction blade and the minimap both need: they must
+ * say "this cross street is NOT the one I am driving on" without strcmp, and
+ * without being fooled by the way split.
+ *
+ * Both accessors return a pointer into a pool owned by this module, valid until
+ * the next td5_geo_roads_sync()/_unload(). "" for an unnamed way or a bad id --
+ * never NULL, so a caller can print it without a guard. */
+int         td5_geo_roads_name_count(void);
+const char *td5_geo_roads_name_by_id(int id);
+const char *td5_geo_roads_name(const TD5_GeoRoad *r);
+
+/* THE NEAREST DRIVABLE WAY to (x, z), or NULL past `max_dist` world units.
+ *
+ * This is the lookup td5_geo_roads_pavement_at always did, lifted out so the
+ * lit / maxspeed / name queries cost one search instead of four. Same cost and
+ * same tie-break (first way wins), so it belongs in a prepass.
+ *
+ * `skip_name_id >= 0` rejects every way carrying that interned name. That is
+ * how a junction finds the CROSS street: pass the race street's name id and the
+ * answer cannot be another block of the road you are already on.
+ *
+ * `dirx`/`dirz` come back as the way's unit direction at the nearest segment
+ * (the same convention as pavement_at), `dist` as the distance in world units.
+ * Any of the three may be NULL. */
+const TD5_GeoRoad *td5_geo_roads_nearest(double x, double z, double max_dist,
+                                         int skip_name_id,
+                                         double *dirx, double *dirz,
+                                         double *dist);
+
+/* OSM `maxspeed=*` -> km/h, exposed for the ROUTE.JSON writer, which parses the
+ * same free text from its own DOM. 0 means "no usable limit": untagged,
+ * `none`, or a spelling this does not recognise. Never guesses a number for a
+ * way that carries no tag. */
+int td5_geo_roads_maxspeed_parse(const char *s);
 
 #endif /* TD5_GEO_ROADS_H */

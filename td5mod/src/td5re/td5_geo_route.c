@@ -404,6 +404,10 @@ typedef struct {
     double id;            /* OSM way id; double because it is > 2^31 for relations */
     int    has_id;
     char  *name;          /* may be NULL */
+    /* [ROUND 1011 C3] OSM maxspeed=* reduced to km/h, 0 when the way carries no
+     * usable limit. Parsed by the shared reader so the route and the street
+     * network cannot disagree about what "60 mph" means. */
+    int    maxspeed_kph;
 } GrRoad;
 
 static struct {
@@ -770,6 +774,15 @@ static int gr_graph_load(const char *slug)
         out->ring   = (jn && cJSON_IsString(jn) && jn->valuestring &&
                        (strcmp(jn->valuestring, "roundabout") == 0 ||
                         strcmp(jn->valuestring, "circular") == 0)) ? 1 : 0;
+        /* [ROUND 1011 C3] The posted limit for this way, through the SAME
+         * parser td5_geo_roads.c uses, so the AI cap and any street-network
+         * consumer cannot disagree about what a given tag means. */
+        {
+            const cJSON *ms = cJSON_GetObjectItem(r, "maxspeed");
+            out->maxspeed_kph = (ms && cJSON_IsString(ms))
+                              ? td5_geo_roads_maxspeed_parse(ms->valuestring)
+                              : 0;
+        }
         if (id && cJSON_IsNumber(id)) { out->id = id->valuedouble; out->has_id = 1; }
         if (nm && cJSON_IsString(nm) && nm->valuestring[0]) {
             size_t len = strlen(nm->valuestring) + 1u;
@@ -1462,6 +1475,22 @@ typedef struct {
     GrHB     heading;
     GrPts    nodes_xz;
     int     *lanes_out;
+    /* [ROUND 1011 C3] Per-node OSM attributes, sampled by ARCLENGTH off the
+     * same src_frac table lanes_out uses. Round 1009 R1 established why that
+     * matters: sampling by source INDEX put the lane count 745 m from where
+     * the map changes it, and a speed limit or a street name landing 745 m
+     * early is the same defect wearing a different hat.
+     *
+     *   maxspeed_out[i]  km/h, 0 = the way here carries no usable limit
+     *   name_out[i]      index into names[], -1 = unnamed here
+     *
+     * names[] is the route's OWN compact street table, interned here rather
+     * than pointed at the road graph, because the graph is freed before the
+     * writer runs. */
+    int     *maxspeed_out;
+    int     *name_out;
+    char   (*names)[TD5_GEO_ROADS_NAME_MAX];
+    int      n_names;
     int      n_sites;
     GrSite  *sites;
     int      n_level;
@@ -1475,6 +1504,36 @@ static void gr_cond_free(GrCond *c)
     gr_pts_free(&c->nodes_xz);
     free(c->lanes_out); free(c->sites); free(c->xsep);
     c->lanes_out = NULL; c->sites = NULL; c->xsep = NULL;
+    free(c->maxspeed_out); free(c->name_out); free(c->names);
+    c->maxspeed_out = NULL; c->name_out = NULL; c->names = NULL;
+    c->n_names = 0;
+}
+
+/* [ROUND 1011 C3] A route's own street table. La Plata's 5.2 km route touches
+ * 18 streets; 64 is headroom for a long cross-city route and still a 4 KB
+ * array. A full table drops NAMES, never nodes -- the node simply reads as
+ * unnamed, which every consumer already has to handle. */
+#define GR_ROUTE_NAMES_MAX 64
+
+static int gr_intern_name(GrCond *c, const char *s)
+{
+    int i;
+    if (!c->names || !s || !s[0]) return -1;
+    for (i = 0; i < c->n_names; i++)
+        if (!strcmp(c->names[i], s)) return i;
+    if (c->n_names >= GR_ROUTE_NAMES_MAX) return -1;
+    /* Truncate on a UTF-8 boundary: half a sequence renders as a replacement
+     * box. Same rule as td5_geo_roads.c's name copy. */
+    {
+        size_t n = strlen(s);
+        if (n >= TD5_GEO_ROADS_NAME_MAX) {
+            n = TD5_GEO_ROADS_NAME_MAX - 1u;
+            while (n > 0 && ((unsigned char)s[n] & 0xC0u) == 0x80u) n--;
+        }
+        memcpy(c->names[c->n_names], s, n);
+        c->names[c->n_names][n] = '\0';
+    }
+    return c->n_names++;
 }
 
 static void gr_add_reason(GrCond *c, const char *fmt, ...)
@@ -1500,7 +1559,9 @@ static void gr_add_warning(GrCond *c, const char *fmt, ...)
 /* geo_condition.condition_route. Raw (lat, lon) -> a TD5-legal centerline plus
  * a verdict. `allow_crossings` asserts the engine's crossing-safe localiser is
  * armed, so a LEVEL self-crossing stops being fatal. */
-static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
+static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in,
+                        const int *maxspeed_in, const char *const *names_in,
+                        int n_in,
                         double upm, int cs100, double span_length,
                         double lane_width, int allow_reverse, int allow_crossings,
                         GrCond *out)
@@ -1509,6 +1570,7 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     GrPts metric, cand, pts;
     double lat0 = 0.0, lon0 = 0.0, theta = 0.0, pca_deg, off_x, off_z, fix, h0;
     int *lane_src = NULL;
+    int *ms_src = NULL, *nm_src = NULL;
     double *widths_src = NULL, *widths = NULL, *src_frac = NULL;
     int i, reversed = 0, lead, n_lead, n_body, n_nodes, skip;
     GrScore sc_f, sc_r, orient;
@@ -1537,6 +1599,23 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     lane_src = (int *)malloc((size_t)n_in * sizeof(int));
     if (!lane_src) goto oom;
     for (i = 0; i < n_in; i++) lane_src[i] = lanes_in ? lanes_in[i] : 2;
+
+    /* [ROUND 1011 C3] The two new per-source-vertex attribute arrays, built
+     * here so the reversal below flips them with lane_src and the arclength
+     * sample reads all three through one index. The name is INTERNED into the
+     * route's own table as it is seen, which is both the compaction (La Plata's
+     * 1493 nodes resolve to 18 streets) and the lifetime fix. */
+    ms_src = (int *)malloc((size_t)n_in * sizeof(int));
+    nm_src = (int *)malloc((size_t)n_in * sizeof(int));
+    out->names = (char (*)[TD5_GEO_ROADS_NAME_MAX])
+                 malloc((size_t)GR_ROUTE_NAMES_MAX * TD5_GEO_ROADS_NAME_MAX);
+    if (!ms_src || !nm_src || !out->names) goto oom;
+    out->n_names = 0;
+    for (i = 0; i < n_in; i++) {
+        ms_src[i] = maxspeed_in ? maxspeed_in[i] : 0;
+        nm_src[i] = (names_in && names_in[i] && names_in[i][0])
+                  ? gr_intern_name(out, names_in[i]) : -1;
+    }
 
     /* -- 1. orientation --------------------------------------------------
      * Span 0 runs along +X (TD5_TG_AXIS_HEADING, and the walk does
@@ -1612,6 +1691,15 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
                 lane_src[i] = lane_src[n_in - 1 - i];
                 lane_src[n_in - 1 - i] = t;
             }
+            /* [ROUND 1011 C3] The new attribute arrays must flip WITH lane_src.
+             * `cand` is reversed above, so src_frac is measured in the reversed
+             * order and an unflipped attribute array would read the limit and
+             * the street name off the far end of the route. */
+            for (i = 0; i < n_in / 2; i++) {
+                const int a = ms_src[i], b = nm_src[i];
+                ms_src[i] = ms_src[n_in - 1 - i]; ms_src[n_in - 1 - i] = a;
+                nm_src[i] = nm_src[n_in - 1 - i]; nm_src[n_in - 1 - i] = b;
+            }
         } else {
             theta = th_f; orient = sc_f;
             for (i = 0; i < rot_f.n; i++) if (!gr_pts_push(&cand, rot_f.x[i], rot_f.z[i])) goto oom;
@@ -1675,9 +1763,12 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
      * nodes fell outside their own terrain. */
     gr_proj_off(&proj, off_x, off_z);
 
-    out->lanes_out = (int *)malloc((size_t)n_nodes * sizeof(int));
-    widths         = (double *)malloc((size_t)n_nodes * sizeof(double));
-    if (!out->lanes_out || !widths) goto oom;
+    out->lanes_out    = (int *)malloc((size_t)n_nodes * sizeof(int));
+    out->maxspeed_out = (int *)malloc((size_t)n_nodes * sizeof(int));
+    out->name_out     = (int *)malloc((size_t)n_nodes * sizeof(int));
+    widths            = (double *)malloc((size_t)n_nodes * sizeof(double));
+    if (!out->lanes_out || !out->maxspeed_out || !out->name_out || !widths)
+        goto oom;
     /* Node i holds pts[i - (n_lead-1)]; a lead node (negative index) takes the
      * road's first lane count. The fraction is the stored node's own position
      * along the body, which is what gr_src_at turns into a source vertex --
@@ -1686,7 +1777,13 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
         const int p = i - (n_lead - 1);
         const double f = (pts.n <= 1) ? 0.0
                        : (double)(p < 0 ? 0 : p) / (double)(pts.n - 1);
-        out->lanes_out[i] = lane_src[gr_src_at(f, src_frac, n_in)];
+        const int s = gr_src_at(f, src_frac, n_in);
+        out->lanes_out[i] = lane_src[s];
+        /* [ROUND 1011 C3] Same index, same arclength table -- so the limit and
+         * the street name change at the node the MAP changes them at, not the
+         * node the source-vertex count happens to land on. */
+        out->maxspeed_out[i] = ms_src[s];
+        out->name_out[i]     = nm_src[s];
         widths[i] = (double)out->lanes_out[i] * lane_width;
     }
 
@@ -1786,11 +1883,13 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in, int n_in,
     out->principal_axis_dev_deg = pca_deg;
     out->orientation = orient;
 
-    free(lane_src); free(widths_src); free(widths); free(src_frac);
+    free(lane_src); free(ms_src); free(nm_src);
+    free(widths_src); free(widths); free(src_frac);
     gr_pts_free(&metric); gr_pts_free(&cand); gr_pts_free(&pts);
     return 1;
 oom:
-    free(lane_src); free(widths_src); free(widths); free(src_frac);
+    free(lane_src); free(ms_src); free(nm_src);
+    free(widths_src); free(widths); free(src_frac);
     gr_pts_free(&metric); gr_pts_free(&cand); gr_pts_free(&pts);
     gr_cond_free(out);
     memset(out, 0, sizeof *out);
@@ -2593,6 +2692,11 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     GrCond *c = NULL;
     TD5_GeoLatLon *raw_ll = NULL;
     int *raw_lanes = NULL;
+    /* [ROUND 1011 C3] per-routed-vertex OSM attributes, LOCAL to this call:
+     * gr_condition interns the names, so neither array outlives it (unlike
+     * raw_lanes, which is handed to s_last below). */
+    int *raw_ms = NULL;
+    const char **raw_nm = NULL;
     double raw_len = 0.0;
 
     /* RETURN CONVENTION, and it is the opposite of the reflex: 0 means the
@@ -2712,9 +2816,13 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     raw_road  = (int *)malloc((size_t)n_seq * sizeof(int));
     raw_x     = (double *)malloc((size_t)n_seq * sizeof(double));
     raw_z     = (double *)malloc((size_t)n_seq * sizeof(double));
-    if (!raw_ll || !raw_lanes || !raw_road || !raw_x || !raw_z) {
+    raw_ms    = (int *)calloc((size_t)n_seq, sizeof(int));
+    raw_nm    = (const char **)calloc((size_t)n_seq, sizeof(const char *));
+    if (!raw_ll || !raw_lanes || !raw_road || !raw_x || !raw_z
+        || !raw_ms || !raw_nm) {
         free(wp_node); free(seq); free(raw_ll); free(raw_lanes);
         free(raw_road); free(raw_x); free(raw_z);
+        free(raw_ms); free(raw_nm);
         gr_result_set(out, TD5_GEO_ROUTE_ERROR, slug, "out of memory");
         return 0;
     }
@@ -2733,6 +2841,11 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
         gr_proj_to_latlon(&s_g.proj, s_g.nx[nd], s_g.nz[nd],
                           &raw_ll[i].lat, &raw_ll[i].lon);
         raw_lanes[i] = r ? r->lanes : 2;
+        /* [ROUND 1011 C3] the posted limit and the street name this vertex
+         * arrived on. The name is refined by the same-id walk below, which
+         * exists because OSM leaves the name off some slices of a split way. */
+        raw_ms[i] = r ? r->maxspeed_kph : 0;
+        raw_nm[i] = (r && r->name) ? r->name : NULL;
         /* [ROUND 1009 item 5] the way each vertex arrived on, and its position
          * in the PLACE frame: geo_forks.detect_medians' `road_ids` and
          * `pts_world`. */
@@ -2749,6 +2862,8 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
             for (q = 0; q < s_g.n_roads; q++) {
                 if (!s_g.road[q].has_id || s_g.road[q].id != r->id) continue;
                 if (s_g.road[q].name) {
+                    if (!raw_nm[i]) raw_nm[i] = s_g.road[q].name;   /* [1011 C3] */
+                    {
                     const size_t have = strlen(s_last.streets);
                     const char *nm = s_g.road[q].name;
                     const size_t nl = strlen(nm);
@@ -2757,6 +2872,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         have + nl + 5u < sizeof s_last.streets) {
                         if (have) strcat(s_last.streets, " > ");
                         strcat(s_last.streets, nm);
+                    }
                     }
                 }
                 break;
@@ -2771,9 +2887,14 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
      * section of gr_condition. */
     allow_rev = td5_env_flag_on("TD5RE_GEO_START_AT_CLICK") ? 0 : 1;
     c = &s_last.cond;
-    gr_condition(raw_ll, raw_lanes, n_seq, GR_UNITS_PER_METRE,
+    gr_condition(raw_ll, raw_lanes, raw_ms, raw_nm, n_seq, GR_UNITS_PER_METRE,
                  GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
                  allow_rev, allow_cross, c);
+    /* Both were only ever inputs to the conditioner, which copied what it
+     * needed (the names are interned into c->names). raw_nm's elements point
+     * into the road graph and are not owned here. */
+    free(raw_ms);  raw_ms = NULL;
+    free(raw_nm);  raw_nm = NULL;
 
     /* ---- [ROUND 1010 AVENUES] A DIVIDED AVENUE IS NOT A FORK ----------------
      *
@@ -3372,6 +3493,23 @@ static int gr_write_route(const char *dir)
         cJSON_AddItemToObject(root, "crossings", cr);
     }
 
+    /* [ROUND 1011 C3] The route's own street table, written ONCE and indexed
+     * per node, rather than a name repeated on all 1493 nodes. La Plata's
+     * route resolves to 18 entries, so this costs a few hundred bytes and
+     * keeps "same street" an integer compare for every reader.
+     *
+     * UTF-8: cJSON's printer copies every byte above 0x1F verbatim and never
+     * emits \uXXXX, and the file is written through td5_plat_file_open(.., "wb"),
+     * so "Azcuenaga" lands on disk as the same C3 A9 the cache holds. The
+     * mojibake this round was asked to chase is NOT produced here -- it comes
+     * from decoding those correct bytes one-per-glyph at DRAW time. */
+    if (c->names && c->n_names > 0) {
+        cJSON *sn = cJSON_CreateArray();
+        for (i = 0; i < c->n_names; i++)
+            cJSON_AddItemToArray(sn, cJSON_CreateString(c->names[i]));
+        cJSON_AddItemToObject(root, "street_names", sn);
+    }
+
     pts = cJSON_CreateArray();
     for (i = 0; i < c->nodes_xz.n; i++) {
         cJSON *p = cJSON_CreateObject();
@@ -3380,6 +3518,13 @@ static int gr_write_route(const char *dir)
         cJSON_AddNumberToObject(p, "x", gr_round_even(c->nodes_xz.x[i] * 1000.0) / 1000.0);
         cJSON_AddNumberToObject(p, "z", gr_round_even(c->nodes_xz.z[i] * 1000.0) / 1000.0);
         cJSON_AddNumberToObject(p, "lanes", c->lanes_out[i]);
+        /* [ROUND 1011 C3] Both omitted when there is nothing to say, so a
+         * route over untagged roads writes the same file it always did and an
+         * older reader is unaffected. */
+        if (c->maxspeed_out && c->maxspeed_out[i] > 0)
+            cJSON_AddNumberToObject(p, "maxspeed", c->maxspeed_out[i]);
+        if (c->name_out && c->name_out[i] >= 0)
+            cJSON_AddNumberToObject(p, "sn", c->name_out[i]);
         cJSON_AddItemToArray(pts, p);
     }
     cJSON_AddItemToObject(root, "points", pts);
@@ -4293,7 +4438,11 @@ static void gr_test_fixture(const char *path, int allow_cross)
     cJSON_Delete(root);
 
     t0 = td5_plat_time_us();
-    gr_condition(ll, lanes, n, GR_UNITS_PER_METRE, GR_CURVE_SAFETY_X100,
+    /* The fixture harness feeds lat/lon/lanes only -- it has no road graph, so
+     * there is no limit and no street name to carry. NULL means every node
+     * reads as unlimited and unnamed, which is the documented default. */
+    gr_condition(ll, lanes, NULL, NULL, n,
+                 GR_UNITS_PER_METRE, GR_CURVE_SAFETY_X100,
                  GR_SPAN_LENGTH, GR_LANE_WIDTH, 1, allow_cross, &c);
     printf("\nGEOROUTE fixture %s (%d raw points, allow_crossings=%d)\n", path, n, allow_cross);
     printf("  ok                     %d\n", c.ok);

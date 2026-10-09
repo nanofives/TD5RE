@@ -139,6 +139,38 @@ static void i18n_decode_field(char *s)
     *w = '\0';
 }
 
+/* [ROUND 1011 C3] Public UTF-8 decode. Contract in td5_i18n.h.
+ *
+ * Same sequence walk i18n_decode_field uses above, but it keeps the codepoint
+ * instead of flattening it to Latin-1, and it reports how far to advance so a
+ * draw loop can step by sequence rather than by byte. `*adv` is never 0: a
+ * malformed lead byte consumes one byte and yields U+FFFD, so a caller's loop
+ * always terminates on a hostile string. */
+int td5_utf8_next(const char *s, int *adv)
+{
+    const unsigned char *r = (const unsigned char *)s;
+    unsigned c;
+    if (adv) *adv = 1;
+    if (!r || !r[0]) return 0;
+    c = r[0];
+    if (c < 0x80) return (int)c;
+    if ((c & 0xE0) == 0xC0 && (r[1] & 0xC0) == 0x80) {
+        if (adv) *adv = 2;
+        return (int)(((c & 0x1Fu) << 6) | (r[1] & 0x3Fu));
+    }
+    if ((c & 0xF0) == 0xE0 && (r[1] & 0xC0) == 0x80 && (r[2] & 0xC0) == 0x80) {
+        if (adv) *adv = 3;
+        return (int)(((c & 0x0Fu) << 12) | ((r[1] & 0x3Fu) << 6) | (r[2] & 0x3Fu));
+    }
+    if ((c & 0xF8) == 0xF0 && (r[1] & 0xC0) == 0x80 && (r[2] & 0xC0) == 0x80
+        && (r[3] & 0xC0) == 0x80) {
+        if (adv) *adv = 4;
+        return (int)(((c & 0x07u) << 18) | ((r[1] & 0x3Fu) << 12)
+                   | ((r[2] & 0x3Fu) << 6) | (r[3] & 0x3Fu));
+    }
+    return 0xFFFD;      /* malformed: one byte consumed, loop still advances */
+}
+
 static void i18n_table_insert(const char *key, const char *val)
 {
     uint32_t idx = i18n_hash(key) & (I18N_HASH_N - 1);

@@ -24,6 +24,7 @@
 #include "td5_config.h"
 #include "td5_geo.h"
 #include "td5_geo_route.h"       /* td5_geo_derived_migrate */
+#include "td5_geo_roads.h"     /* [1011 C3] TD5_GEO_ROADS_NAME_MAX */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -400,6 +401,18 @@ static struct {
     int     n;
     double *x, *z;
     int    *lanes;
+    /* [ROUND 1011 C3] Per-node OSM attributes, both OPTIONAL. A cache whose
+     * ROUTE.JSON predates this round simply has neither, and every reader
+     * treats that as "unknown" and falls back to the spatial query against
+     * ROADS.JSON -- so the attributes work on an existing cache without the
+     * user having to rebuild the route first.
+     *
+     *   maxspeed[i]  km/h, 0 = no usable limit at this node
+     *   sn[i]        index into names[], -1 = unnamed at this node */
+    int    *maxspeed;
+    int    *sn;
+    char  (*names)[TD5_GEO_ROADS_NAME_MAX];
+    int     n_names;
     char    source[512];
     /* [OPTION B 2026-09-30] Grade separations planned by geo_condition.py. A
      * fixed array rather than a malloc: a route is capped at 3000 spans and a
@@ -420,12 +433,18 @@ static struct {
 /* Hard cap: s_struct[]/s_rn[] are indexed by node with no bounds check
  * (TD5_TG_MAX_SPANS = 3000), so an oversized route must be refused here. */
 #define GEO_ROUTE_MAX_NODES   3001
+/* [ROUND 1011 C3] Must match GR_ROUTE_NAMES_MAX in td5_geo_route.c, which is
+ * the writer. La Plata's 5.2 km route touches 18 streets. */
+#define GEO_ROUTE_NAMES_MAX   64
 
 static void geo_route_free(void)
 {
     free(s_route.x);
     free(s_route.z);
     free(s_route.lanes);
+    free(s_route.maxspeed);
+    free(s_route.sn);
+    free(s_route.names);
     memset(&s_route, 0, sizeof(s_route));
 }
 
@@ -560,7 +579,37 @@ static int geo_route_load(const char *path)
     s_route.x     = (double *)malloc((size_t)n * sizeof(double));
     s_route.z     = (double *)malloc((size_t)n * sizeof(double));
     s_route.lanes = (int *)malloc((size_t)n * sizeof(int));
-    if (!s_route.x || !s_route.z || !s_route.lanes) goto done;
+    s_route.maxspeed = (int *)calloc((size_t)n, sizeof(int));
+    s_route.sn       = (int *)malloc((size_t)n * sizeof(int));
+    if (!s_route.x || !s_route.z || !s_route.lanes
+        || !s_route.maxspeed || !s_route.sn) goto done;
+    for (i = 0; i < n; i++) s_route.sn[i] = -1;
+
+    /* [ROUND 1011 C3] The route's own street table, written once at file level
+     * with an index per node. Absent on any ROUTE.JSON built before this round,
+     * which is exactly the "unknown" case every reader already handles. */
+    {
+        const cJSON *sna = cJSON_GetObjectItem(root, "street_names");
+        if (sna && cJSON_IsArray(sna)) {
+            const int ns = cJSON_GetArraySize(sna);
+            const int cap = (ns > GEO_ROUTE_NAMES_MAX) ? GEO_ROUTE_NAMES_MAX : ns;
+            if (cap > 0) {
+                s_route.names = (char (*)[TD5_GEO_ROADS_NAME_MAX])
+                    malloc((size_t)cap * TD5_GEO_ROADS_NAME_MAX);
+                if (!s_route.names) goto done;
+                for (i = 0; i < cap; i++) {
+                    const cJSON *e = cJSON_GetArrayItem(sna, i);
+                    snprintf(s_route.names[i], TD5_GEO_ROADS_NAME_MAX, "%s",
+                             (e && cJSON_IsString(e) && e->valuestring)
+                                 ? e->valuestring : "");
+                }
+                s_route.n_names = cap;
+            }
+            if (ns > cap)
+                TD5_LOG_W(LOG_TAG, "geo: route %s names %d over the %d cap; "
+                          "the surplus reads as unnamed", path, ns, cap);
+        }
+    }
 
     for (i = 0; i < n; i++) {
         const cJSON *p  = cJSON_GetArrayItem(pts, i);
@@ -576,6 +625,21 @@ static int geo_route_load(const char *path)
         s_route.lanes[i] = (pl && cJSON_IsNumber(pl)) ? pl->valueint : 2;
         if (s_route.lanes[i] < 1)  s_route.lanes[i] = 1;
         if (s_route.lanes[i] > 12) s_route.lanes[i] = 12;
+        /* [ROUND 1011 C3] Both optional. Clamped rather than trusted: these
+         * drive an AI speed cap and a drawn sign, and a corrupt file must not
+         * be able to park the field at 5 km/h or index off the name table. */
+        {
+            const cJSON *pm = p ? cJSON_GetObjectItem(p, "maxspeed") : NULL;
+            const cJSON *ps = p ? cJSON_GetObjectItem(p, "sn") : NULL;
+            if (pm && cJSON_IsNumber(pm)) {
+                const int v = pm->valueint;
+                s_route.maxspeed[i] = (v >= 5 && v <= 200) ? v : 0;
+            }
+            if (ps && cJSON_IsNumber(ps)) {
+                const int v = ps->valueint;
+                s_route.sn[i] = (v >= 0 && v < s_route.n_names) ? v : -1;
+            }
+        }
         if (i > 0) {
             const double c = hypot(s_route.x[i] - s_route.x[i - 1],
                                    s_route.z[i] - s_route.z[i - 1]);
@@ -616,6 +680,36 @@ int td5_geo_route_node(int i, double *x, double *z, int *lanes)
     if (z) *z = s_route.z[i];
     if (lanes) *lanes = s_route.lanes[i];
     return 1;
+}
+
+/* [ROUND 1011 C3] The per-node OSM attributes, as the FILE holds them. These
+ * are raw readers: 0 / -1 means "this ROUTE.JSON does not say", which is the
+ * case for every cache built before this round. Deciding what to do about that
+ * (fall back to the spatial query against ROADS.JSON) is td5_geo_attrs.c's job,
+ * not this reader's. */
+int td5_geo_route_maxspeed(int i)
+{
+    if (!s_route.maxspeed || i < 0 || i >= s_route.n) return 0;
+    return s_route.maxspeed[i];
+}
+
+int td5_geo_route_name_id(int i)
+{
+    if (!s_route.sn || i < 0 || i >= s_route.n) return -1;
+    return s_route.sn[i];
+}
+
+int td5_geo_route_name_count(void) { return s_route.n ? s_route.n_names : 0; }
+
+const char *td5_geo_route_name_by_id(int id)
+{
+    if (!s_route.names || id < 0 || id >= s_route.n_names) return "";
+    return s_route.names[id];
+}
+
+const char *td5_geo_route_name(int i)
+{
+    return td5_geo_route_name_by_id(td5_geo_route_name_id(i));
 }
 
 int td5_geo_xsep_count(void) { return s_route.n ? s_route.xsep_n : 0; }

@@ -7,6 +7,7 @@
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"             /* GEO TRACK: land cover for plaza planting  */
 #include "td5_geo_buildings.h"   /* GEO TRACK: real area polygons             */
+#include "td5_geo_attrs.h"       /* [1011 C3] GEO TRACK: OSM lit -> the lamps */
 
 /* [R8 CROSS item 1] The reveal row has to know how deep the street it reveals
  * actually runs, so it can stand BEYOND it instead of across it. Both live
@@ -4214,10 +4215,22 @@ int tg_emit_fb_city(const TG_FBHook *h)
      * same 1-in-7 beat the prop layer used, so the spacing is unchanged -- only
      * the fixture under the glow is new. NIGHT ONLY (item 11): a lit lamp head
      * over a midday road is what gives the generated scenery away. */
-    if (h->b->prop_lamp && (h->si % 7) == 0 && !tg_span_in_bridge_run(h->si) &&
-        td5_trackgen_is_night() &&
-        td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
-        if (!TG_TI(TG_T_CITY_LAMP, tg_city_emit_lamp(h, sw))) return 0;
+    /* [ROUND 1011 C3] On a GEO track that beat is REPLACED, not added to: the
+     * map says which streets are lit (OSM `lit`, on 1693 of La Plata's 2291
+     * ways) and td5_geo_attrs_lamp_here folds that together with a realistic
+     * 30 m spacing. A street OSM tags lit=no therefore gets no lamps even in a
+     * city biome, which the biome flag alone could never express. With no geo
+     * place loaded td5_geo_attrs_ready() is 0 and the synthetic rule below is
+     * reached unchanged -- that is what keeps slot 60 byte-identical. */
+    {
+        const int lamp_here = td5_geo_attrs_ready()
+                            ? td5_geo_attrs_lamp_here(h->si)
+                            : (h->b->prop_lamp && (h->si % 7) == 0);
+        if (lamp_here && !tg_span_in_bridge_run(h->si) &&
+            td5_trackgen_is_night() &&
+            td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
+            if (!TG_TI(TG_T_CITY_LAMP, tg_city_emit_lamp(h, sw))) return 0;
+        }
     }
     /* [R11 item 7c] Backrows stand out to sw + depth + 2*3200 and the fork-back
      * massing further still -- both squarely inside the overpass arms now that

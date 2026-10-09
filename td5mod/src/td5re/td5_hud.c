@@ -48,6 +48,9 @@
 #include "td5_pending.h"    /* dev/QA pending-test list for the in-race overlay */
 #include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
 #include "td5_chaos.h"      /* [CHAOS CO-OP] per-pane role strip + swap countdown */
+#include "td5_geo.h"        /* [1011 C3] the route's per-node street names */
+#include "td5_geo_attrs.h"  /* [1011 C3] route-first/spatial-fallback resolver */
+#include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 
 #include <stdlib.h>
 #include <string.h>
@@ -3671,6 +3674,167 @@ static void hud_draw_wanted_banner_line(float cx, float caps_cy, float cap,
         }
         pen += g.advance;
     }
+}
+
+/* [ROUND 1011 C3] Draw one line of UTF-8 text, left-anchored at `x`.
+ *
+ * WHY A SEPARATE HELPER instead of td5_hud_queue_text. Every text path in this
+ * file reads `(unsigned char)s[k]` -- one BYTE, one glyph. That is correct for
+ * everything the HUD draws today, because the i18n catalog is decoded to
+ * Latin-1 once at load. It is wrong for an OSM street name, which is UTF-8 at
+ * runtime: "Azcuenaga" holds C3 A9 for its e-acute, and drawing those two
+ * bytes as two Latin-1 glyphs (A-tilde, copyright sign) IS the reported
+ * mojibake. So this decodes codepoints with td5_utf8_next and draws them with
+ * the non-folding glyph calls, which keep the accent instead of spelling a
+ * real street name wrong.
+ *
+ * Returns the width drawn, so a caller can right-align or centre by measuring
+ * first with `color = 0` suppressed (pass draw = 0). */
+static float hud_draw_utf8_line(float x, float baseline, float cap,
+                                const char *s, uint32_t color, int draw)
+{
+    float pen = x;
+    float off = cap * (1.0f / 16.0f);
+    int i = 0;
+    if (!s || !s[0]) return 0.0f;
+    if (off < 1.0f) off = 1.0f;
+
+    if (draw) {
+        /* Rasterise the whole line before drawing any of it: the glyphs share
+         * one GPU atlas page and the upload has to happen before the quads. */
+        int j = 0;
+        while (s[j]) {
+            int adv = 1;
+            const int cp = td5_utf8_next(s + j, &adv);
+            td5_glyph g;
+            if (!cp) break;
+            td5_hudfont_get_exact(cp, cap, &g);
+            j += adv;
+        }
+        td5_font_flush_uploads();
+    }
+
+    while (s[i]) {
+        int adv = 1;
+        const int cp = td5_utf8_next(s + i, &adv);
+        td5_glyph g;
+        if (!cp) break;
+        td5_hudfont_get_exact(cp, cap, &g);
+        if (draw && g.valid && g.w > 0.0f) {
+            const float gx = pen + g.xoff, gy = baseline + g.yoff;
+            td5_vui_quad(gx + off, gy + off, g.w, g.h, 0xFF000000u,
+                         g.page, g.u0, g.v0, g.u1, g.v1);
+            td5_vui_quad(gx, gy, g.w, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.valid ? g.advance : td5_hudfont_advance_exact(cp, cap);
+        i += adv;
+    }
+    return pen - x;
+}
+
+/* [ROUND 1011 C3] "ON <street>" -- the real street the player is driving on,
+ * from the route's own per-node name table.
+ *
+ * SOURCE. A geo track's span index IS its route node index (tg_geo_walk pushes
+ * node i for route node i), so the player's folded span indexes the name table
+ * directly. It reads the ROUTE and not the generator's prepass tables on
+ * purpose: a reused cached track skips generation entirely, and the route is
+ * loaded for every race either way.
+ *
+ * Nothing is drawn on a shipped track, on the synthetic auto track, or on a
+ * geo cache whose ROUTE.JSON predates round 1011 -- in all three the name is
+ * "" and this returns without emitting a quad. */
+static void hud_draw_street_line(int player_slot, int view_index);
+
+/* Draw every pane's street line from the FULL-SCREEN HUD overlay pass, the
+ * same shape and for the same reason as td5_hud_draw_damage_bars: a
+ * screen-space quad emitted inside the per-viewport 3D loop is remapped and
+ * clipped to that one pane. Self-gated -- a no-op on every non-geo track. */
+void td5_hud_draw_street_lines(void)
+{
+    int views = s_view_count;
+    if (g_replay_mode) return;
+    if (td5_geo_route_count() < 2) return;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+    for (int v = 0; v < views; v++) {
+        const int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        hud_draw_street_line(slot, v);
+    }
+}
+
+static void hud_draw_street_line(int player_slot, int view_index)
+{
+    const TD5_HudViewLayout *vl = &s_view_layout[view_index];
+    const char *name;
+    char buf[96];
+    float cap, w;
+
+    if (!td5_env_flag_on("TD5RE_HUD_STREET")) return;
+    if (td5_geo_route_count() < 2) return;
+    /* THROUGH THE ATTRS MODULE, not td5_geo_route_name directly. The route only
+     * carries names on a ROUTE.JSON written by round 1011 or later, so reading
+     * it raw drew NOTHING on every cache built before this round -- which is
+     * every cache that exists today. td5_geo_attrs_name falls back to the
+     * nearest mapped way, which is the whole reason the fallback exists. */
+    name = td5_geo_attrs_name(td5_game_get_slot_span(player_slot));
+#ifndef TD5RE_RELEASE
+    /* TD5RE_HUD_STREET_TEST=1 substitutes a name with a real UTF-8 accent.
+     *
+     * WHY THIS EXISTS. The accent path is the half of this feature that was
+     * actually broken, and La Plata's shipped route touches 18 streets of
+     * which NONE is accented -- the 9 accented names in that cache (Plaza
+     * Miguel de Azcuenaga, Plaza Espana, ...) are all off-route. So there is
+     * no way to photograph the fix by driving. This forces it.
+     *
+     * The literal is written as explicit hex escapes, not as source UTF-8:
+     * C3 A9 is e-acute, C3 B1 is n-tilde. That keeps this file pure ASCII (the
+     * house convention) and makes the bytes under test unambiguous rather than
+     * dependent on how an editor saved them. Correct output is "Azcuenaga"
+     * with an accented e; "AzcuA~(c)naga" means the decoder was bypassed.
+     *
+     * MIND THE SPLIT BEFORE THE TRAILING "a". A C hex escape is GREEDY, so
+     * "\xC3\xB1a" is ONE character of value 0xB1A, not n-tilde followed by
+     * 'a'. The first version of this line had exactly that bug and drew
+     * "Espa?[]" -- which, usefully, proved the rest of the chain correct:
+     * td5_utf8_next saw a lead byte with no continuation, returned U+FFFD
+     * without stalling, and the >U+01FF guard substituted '?'. Adjacent string
+     * literals end the escape without adding a byte. */
+    if (td5_env_flag_off("TD5RE_HUD_STREET_TEST"))
+        name = "Azcu\xC3\xA9naga / Espa\xC3\xB1" "a";
+#endif
+    if (!name || !name[0]) return;
+
+    snprintf(buf, sizeof buf, TR("ON %s"), name);
+
+    /* BOTTOM-CENTRE of the pane, and the position is not arbitrary: the
+     * minimap owns the bottom-LEFT corner and the speedo the bottom-RIGHT, so
+     * the first attempt at bottom-left drew the line underneath the minimap
+     * where no framedump could ever show it. The centre strip is free in every
+     * pane layout. */
+    cap = 11.0f * ((vl->scale_y > 0.0f) ? vl->scale_y : 1.0f);
+    if (cap < 8.0f)  cap = 8.0f;
+    if (cap > 28.0f) cap = 28.0f;
+    w = hud_draw_utf8_line(0.0f, 0.0f, cap, buf, 0, 0);
+    hud_draw_utf8_line(vl->center_x - w * 0.5f,
+                       vl->vp_int_bottom - cap * 1.1f,
+                       cap, buf, 0xFFE8E8F0u, 1);
+
+    /* One line per race, so a framedump that shows nothing can be told apart
+     * from a draw that never happened. */
+#ifndef TD5RE_RELEASE
+    {
+        static int s_said = -1;
+        if (s_said != g_td5.track_index) {
+            s_said = g_td5.track_index;
+            TD5_LOG_I("hud", "[GEO STREET] pane %d: \"%s\" (%d byte(s), %.0f px "
+                      "at cap %.1f) at (%.0f,%.0f)", view_index, buf,
+                      (int)strlen(buf), w, cap,
+                      vl->center_x - w * 0.5f, vl->vp_int_bottom - cap * 1.1f);
+        }
+    }
+#endif
 }
 
 /* [COP CHASE SCOREBOARD REMOVED 2026-08-19] The top-of-pane per-cop arrest

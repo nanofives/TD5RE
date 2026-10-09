@@ -47,6 +47,21 @@ unsigned td5_i18n_generation(void);
 extern const unsigned char td5_upper_latin1[256];
 #define TD5_TOUPPER(c) ((int)td5_upper_latin1[(unsigned char)(c)])
 
+/* [ROUND 1011 C3] Decode ONE UTF-8 codepoint from `s`, advancing `*adv` by the
+ * bytes consumed (always >= 1, so a caller's loop cannot stall). Returns the
+ * codepoint, or 0xFFFD for a malformed sequence.
+ *
+ * WHY THIS EXISTS. Every text path in the port reads `(unsigned char)s[k]` --
+ * one byte, one glyph. That is correct for the catalog, which is decoded to
+ * Latin-1 once at load by i18n_decode_field. It is WRONG for a string that is
+ * UTF-8 at runtime, which is what an OSM street name is: "Azcuenaga" holds
+ * C3 A9 for its e-acute, and drawing those two bytes as two Latin-1 glyphs
+ * (C3 = A-tilde, A9 = copyright sign) is exactly the reported mojibake. This
+ * is the decoder that prevents it.
+ *
+ * It does NOT fold: a caller that wants the accent dropped should say so. */
+int td5_utf8_next(const char *s, int *adv);
+
 #ifdef __cplusplus
 }
 #endif

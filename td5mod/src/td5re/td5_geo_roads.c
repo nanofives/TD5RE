@@ -58,10 +58,18 @@
  * budget, so this reader carries its own. */
 #define GEO_ROADS_MAX_FILE (64 * 1024 * 1024)
 
+/* [ROUND 1011 C3] Interned street names. La Plata's 1937 named ways carry 187
+ * distinct names because OSM splits a street at every junction, so the pool is
+ * tiny and the dedup is what makes "am I still on the same street?" an integer
+ * compare. 512 is roughly 2.7x the measured need. */
+#define GEO_ROADS_NAMES_MAX 512
+
 static struct {
     int          n, np;
     TD5_GeoRoad *road;
     double      *px, *pz;
+    char       (*name)[TD5_GEO_ROADS_NAME_MAX];
+    int          n_names;
     char         slug[64];
     char         source[320];
 } s_roads;
@@ -298,6 +306,104 @@ int td5_geo_roads_namek_of(const char *s)
     return TD5_GEO_NAMEK_UNKNOWN;
 }
 
+/* -------------------------------------- [ROUND 1011 C3] lit / speed / name -- */
+
+/* OSM `lit=*`. The vocabulary is open, but every value that is not an explicit
+ * denial means "there is lighting here": `yes`, `24/7`, `automatic`,
+ * `sunset-sunrise`, `limited`, `interval`, a lamp count. So the test is the
+ * denial, and everything else that is present is YES.
+ *
+ * MEASURED on La Plata: 1693 `yes`, 0 `no`, 598 untagged. The NO branch is
+ * therefore inert on this place and cannot be shown in a framedump here -- it
+ * is written because the next cache will have one, and TD5RE_GEO_LIT_FORCE_NO
+ * exercises it (see td5_geo_attrs.c). */
+static int geo_roads_lit(const char *s)
+{
+    if (!s || !s[0]) return TD5_GEO_LIT_UNKNOWN;
+    if (!strcmp(s, "no") || !strcmp(s, "none") || !strcmp(s, "disused"))
+        return TD5_GEO_LIT_NO;
+    return TD5_GEO_LIT_YES;
+}
+
+/* The implicit-limit table for the `CC:zone` spellings, in km/h.
+ *
+ * HONESTY NOTE. These are national defaults, not measurements, and this reader
+ * normally refuses to invent a number for an untagged way. `CC:urban` is
+ * different: it IS a tag, and what it says is "the limit here is this
+ * country's urban default" -- resolving it is reading the tag, not guessing.
+ * AR is listed explicitly because Argentine urban is 40, not the 50 that most
+ * of the world uses, and La Plata is the place this round was built on.
+ *
+ * INERT ON LA PLATA: the cache carries only the four plain numbers 20/30/40/60
+ * and no `CC:zone` spelling at all, so nothing below is reachable there. It is
+ * here so the next place does not silently lose its limits. */
+static int geo_roads_maxspeed_zone(const char *cc, const char *zone)
+{
+    const int ar = (cc && (cc[0] == 'A' || cc[0] == 'a')
+                       && (cc[1] == 'R' || cc[1] == 'r') && cc[2] == ':');
+    if (!strcmp(zone, "walk"))          return 7;
+    if (!strcmp(zone, "living_street")) return 20;
+    if (!strcmp(zone, "urban"))         return ar ? 40 : 50;
+    if (!strcmp(zone, "rural"))         return ar ? 110 : 90;
+    if (!strcmp(zone, "trunk"))         return ar ? 120 : 100;
+    if (!strcmp(zone, "motorway"))      return ar ? 130 : 110;
+    /* GB's national speed limit, the one widespread non-numeric that is not a
+     * zone word: 60 and 70 mph. */
+    if (!strcmp(zone, "nsl_single"))    return 96;
+    if (!strcmp(zone, "nsl_dual"))      return 112;
+    return 0;
+}
+
+int td5_geo_roads_maxspeed_parse(const char *s)
+{
+    char *end = NULL;
+    double v;
+    if (!s || !s[0]) return 0;
+
+    v = strtod(s, &end);
+    if (end != s && v > 0.0) {
+        /* A unit suffix may follow after optional spaces. OSM's only units are
+         * mph and knots; a bare number is km/h by definition of the tag. */
+        while (*end == ' ' || *end == '\t') end++;
+        if (!strncmp(end, "mph", 3))        v *= 1.609344;
+        else if (!strncmp(end, "knots", 5)) return 0;   /* not a road unit */
+        if (v < 5.0 || v > 200.0) return 0;             /* junk, not a limit */
+        return (int)(v + 0.5);
+    }
+
+    /* No leading number. Either an explicit "no limit" (which is not a cap and
+     * must not become one) or a `CC:zone` implicit limit. */
+    if (!strcmp(s, "none") || !strcmp(s, "signals") || !strcmp(s, "variable")
+        || !strcmp(s, "unknown") || !strcmp(s, "default"))
+        return 0;
+    if (!strcmp(s, "walk")) return 7;
+    {
+        const char *colon = strchr(s, ':');
+        if (colon && colon[1]) return geo_roads_maxspeed_zone(s, colon + 1);
+    }
+    return 0;
+}
+
+/* Copy `s` into `dst`, truncating on a UTF-8 BOUNDARY.
+ *
+ * snprintf would cut mid-sequence and leave a dangling continuation byte, which
+ * the glyph path turns into a replacement box at the end of every long name.
+ * The longest name on La Plata is 43 bytes so this never fires there, but a
+ * city with longer names must not be the thing that discovers it. */
+static void geo_roads_name_copy(char *dst, size_t cap, const char *s)
+{
+    size_t n = strlen(s);
+    if (n >= cap) {
+        n = cap - 1u;
+        /* Walk the cut back off any continuation byte (10xxxxxx). What it then
+         * points at is ASCII or a lead byte, and cutting THERE drops that whole
+         * sequence rather than half of it. */
+        while (n > 0 && ((unsigned char)s[n] & 0xC0u) == 0x80u) n--;
+    }
+    memcpy(dst, s, n);
+    dst[n] = '\0';
+}
+
 /* Units per metre of the cache's frame, from PLACE.JSON's cell_units / cell_m.
  * Derived rather than hardcoded at 430 so a cache built at another scale still
  * converts a tagged `width` correctly. 0 means "unknown": the caller then
@@ -348,11 +454,27 @@ static int geo_roads_lanes(const cJSON *r, double upm)
     return lanes;
 }
 
+/* Index of `s` in the name pool, adding it when new. -1 for an empty name or a
+ * full pool -- an overflowing pool loses NAMES, never ways. Linear scan: 187
+ * entries against 1937 ways is ~360k strcmp once at load, under a millisecond,
+ * and a hash here would be state nothing else needs. */
+static int geo_roads_intern(const char *s)
+{
+    int i;
+    if (!s || !s[0] || !s_roads.name) return -1;
+    for (i = 0; i < s_roads.n_names; i++)
+        if (!strcmp(s_roads.name[i], s)) return i;
+    if (s_roads.n_names >= GEO_ROADS_NAMES_MAX) return -1;
+    geo_roads_name_copy(s_roads.name[s_roads.n_names], TD5_GEO_ROADS_NAME_MAX, s);
+    return s_roads.n_names++;
+}
+
 void td5_geo_roads_unload(void)
 {
     free(s_roads.road);
     free(s_roads.px);
     free(s_roads.pz);
+    free(s_roads.name);
     memset(&s_roads, 0, sizeof(s_roads));
 }
 
@@ -394,7 +516,10 @@ static int geo_roads_load(const char *slug)
     s_roads.road = (TD5_GeoRoad *)malloc((size_t)n * sizeof(TD5_GeoRoad));
     s_roads.px   = (double *)malloc((size_t)GEO_ROADS_MAX_PTS * sizeof(double));
     s_roads.pz   = (double *)malloc((size_t)GEO_ROADS_MAX_PTS * sizeof(double));
-    if (!s_roads.road || !s_roads.px || !s_roads.pz) {
+    s_roads.name = (char (*)[TD5_GEO_ROADS_NAME_MAX])
+                   malloc((size_t)GEO_ROADS_NAMES_MAX * TD5_GEO_ROADS_NAME_MAX);
+    s_roads.n_names = 0;
+    if (!s_roads.road || !s_roads.px || !s_roads.pz || !s_roads.name) {
         TD5_LOG_E(LOG_TAG, "geo: out of memory for %d road(s)", n);
         cJSON_Delete(root);
         td5_geo_roads_unload();
@@ -480,7 +605,24 @@ static int geo_roads_load(const char *slug)
         out->namek = read_tags
                    ? td5_geo_roads_namek_of(geo_roads_str(r, "name"))
                    : TD5_GEO_NAMEK_UNKNOWN;
+        /* [ROUND 1011 C3] lit / maxspeed / name. Under `read_tags` with the
+         * rest of the tag round, and all three default to the pre-1011
+         * behaviour when it is off: UNKNOWN lighting, no speed cap, no name.
+         *
+         * `name` and `maxspeed` are TOP-LEVEL fields of the record
+         * (geo_fetch.py:1124 and :1157); only `lit` lives inside `tags`
+         * (ROAD_TAG_KEYS). The name must be COPIED here: geo_roads_str hands
+         * back a pointer into the cJSON DOM and that DOM is deleted below. */
+        out->lit          = TD5_GEO_LIT_UNKNOWN;
+        out->maxspeed_kph = 0;
+        out->name_id      = -1;
         if (read_tags) {
+            const cJSON *tags = cJSON_GetObjectItem(r, "tags");
+            out->lit = geo_roads_lit(geo_roads_str(tags, "lit"));
+            out->maxspeed_kph =
+                td5_geo_roads_maxspeed_parse(geo_roads_str(r, "maxspeed"));
+            out->name_id = geo_roads_intern(geo_roads_str(r, "name"));
+
             out->sidewalk = geo_roads_sidewalk(geo_roads_str(r, "sidewalk"));
             if (out->sidewalk == TD5_GEO_SW_UNKNOWN)
                 out->sidewalk = geo_roads_sidewalk_sides(r);
@@ -530,6 +672,27 @@ static int geo_roads_load(const char *slug)
               "%d roundabout way(s)%s",
               n_surf[0], n_surf[1], n_surf[2], roundabouts,
               read_tags ? "" : " [TD5RE_GEO_ROAD_TAGS=0: tags ignored]");
+    /* [ROUND 1011 C3] The attributable census for the three new attributes.
+     * A lamp that does not appear, a speed sign that never shows or a blank
+     * street blade should be traceable to a count here rather than guessed at
+     * from a framedump. Expected on La Plata: 1693 lit yes / 0 no, 1661 speed
+     * limits, 187 names. */
+    {
+        int lit_yes = 0, lit_no = 0, n_speed = 0, n_named = 0;
+        for (i = 0; i < s_roads.n; i++) {
+            if (s_roads.road[i].lit == TD5_GEO_LIT_YES) lit_yes++;
+            else if (s_roads.road[i].lit == TD5_GEO_LIT_NO) lit_no++;
+            if (s_roads.road[i].maxspeed_kph > 0) n_speed++;
+            if (s_roads.road[i].name_id >= 0) n_named++;
+        }
+        TD5_LOG_I(LOG_TAG, "geo: roads tags: lit %d yes / %d no / %d untagged; "
+                  "maxspeed on %d way(s); %d named way(s) -> %d distinct name(s)"
+                  "%s",
+                  lit_yes, lit_no, s_roads.n - lit_yes - lit_no, n_speed,
+                  n_named, s_roads.n_names,
+                  (s_roads.n_names >= GEO_ROADS_NAMES_MAX)
+                      ? " [NAME POOL FULL: later names dropped]" : "");
+    }
     return 1;
 }
 
@@ -582,12 +745,18 @@ static double geo_roads_seg_d2(double px, double pz, double ax, double az,
     return (px - cx) * (px - cx) + (pz - cz) * (pz - cz);
 }
 
-/* The nearest drivable way to (x,z) within `max_dist`, and its unit direction
- * there. Shared by both pavement queries so they can never disagree about which
- * way a span IS. NULL when nothing is in range. */
-static const TD5_GeoRoad *geo_roads_nearest(double x, double z,
-                                            double max_dist,
-                                            double *dirx, double *dirz)
+/* [ROUND 1011 C3] THE NEAREST-WAY SEARCH, lifted out of pavement_at unchanged.
+ *
+ * Byte-for-byte the same loop, the same bbox reject and the same tie-break
+ * (strict `d2 >= best2` means the FIRST way at a given distance wins), so
+ * pavement_at below returns exactly what it returned before this round. The
+ * only addition is `skip_name_id`, which pavement_at passes as -1.
+ *
+ * Contract and the reason it belongs in a prepass: td5_geo_roads.h. */
+const TD5_GeoRoad *td5_geo_roads_nearest(double x, double z, double max_dist,
+                                         int skip_name_id,
+                                         double *dirx, double *dirz,
+                                         double *dist)
 {
     const double max2 = max_dist * max_dist;
     double best2 = -1.0, bdx = 0.0, bdz = 1.0;
@@ -601,6 +770,11 @@ static const TD5_GeoRoad *geo_roads_nearest(double x, double z,
          * point by less than the search radius is still considered. */
         if (x < r->minx - max_dist || x > r->maxx + max_dist) continue;
         if (z < r->minz - max_dist || z > r->maxz + max_dist) continue;
+        /* "Not the street I am already on." Compared on the INTERNED id, not
+         * the way id, because OSM splits one street into a way per block and a
+         * way-id test would call the next block of the same road a cross
+         * street. */
+        if (skip_name_id >= 0 && r->name_id == skip_name_id) continue;
         for (k = 0; k + 1 < r->count; k++) {
             const double ax = s_roads.px[r->first + k];
             const double az = s_roads.pz[r->first + k];
@@ -620,6 +794,23 @@ static const TD5_GeoRoad *geo_roads_nearest(double x, double z,
     if (!best) return NULL;
     if (dirx) *dirx = bdx;
     if (dirz) *dirz = bdz;
+    if (dist) *dist = sqrt(best2);
+    return best;
+}
+
+int td5_geo_roads_name_count(void) { return s_roads.n_names; }
+
+const char *td5_geo_roads_name_by_id(int id)
+{
+    if (!s_roads.name || id < 0 || id >= s_roads.n_names) return "";
+    return s_roads.name[id];
+}
+
+const char *td5_geo_roads_name(const TD5_GeoRoad *r)
+{
+    return r ? td5_geo_roads_name_by_id(r->name_id) : "";
+}
+
     return best;
 }
 
@@ -627,7 +818,7 @@ int td5_geo_roads_pavement_facts_at(double x, double z, double max_dist,
                                     TD5_GeoPavementAt *out)
 {
     double dx = 0.0, dz = 1.0;
-    const TD5_GeoRoad *r = geo_roads_nearest(x, z, max_dist, &dx, &dz);
+    const TD5_GeoRoad *r = td5_geo_roads_nearest(x, z, max_dist, -1, &dx, &dz, NULL);
     if (!r || !out) return 0;
     out->dirx = dx;
     out->dirz = dz;
@@ -651,9 +842,8 @@ int td5_geo_roads_pavement_at(double x, double z, double max_dist,
                               double *left_m, double *right_m,
                               double *dirx, double *dirz)
 {
-    double bdx = 0.0, bdz = 1.0;
-    const TD5_GeoRoad *best = geo_roads_nearest(x, z, max_dist, &bdx, &bdz);
-
+    const TD5_GeoRoad *best =
+        td5_geo_roads_nearest(x, z, max_dist, -1, dirx, dirz, NULL);
     if (!best) return 0;
 
     {
@@ -691,7 +881,5 @@ int td5_geo_roads_pavement_at(double x, double z, double max_dist,
         if (left_m)  *left_m  = l;
         if (right_m) *right_m = r;
     }
-    if (dirx) *dirx = bdx;
-    if (dirz) *dirz = bdz;
-    return 1;
+    return 1;   /* dirx/dirz were written by the nearest-way search above */
 }
