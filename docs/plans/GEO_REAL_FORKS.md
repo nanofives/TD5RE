@@ -37,7 +37,15 @@ map"). This keeps the engine's fork machinery and changes what feeds it.
    constant over the whole window, lanes(A)+lanes(B) <= 8, bend <= 0.045 rad/span
    (`TD5_TG_FORK_MAX_TURN`), corridor on the -t side only (left corridors are parked
    in the engine, see `TD5RE_TG_NET_LEFT`). Every rejection is logged under
-   `TD5RE_GEO_FORK_DIAG=1`.
+   `TD5RE_GEO_FORK_DIAG=1`. **Every fork window, taper tail included, ends
+   `TG_RF_FINISH_GAP` (8) spans before the FINISH line**, so nothing is built in the
+   run-off past it: `tg_realfork_finish_span()` is the one place that says where the
+   finish is (pure `route spans - TD5RE_AUTOTRACK_RUNOFF` arithmetic, because
+   `tg_finish_span()` reads fork and tunnel tables that do not exist yet when the forks
+   are chosen). A finish the route itself fixes (round 1013 F3: ROUTE.JSON
+   `finish_span`, `td5_geo_route_finish_span()`) replaces that function's body and
+   nothing else. Checked with a simulated 100-span run-off: the fork at 820..857 is
+   refused as past the finish (finish 851) and the selector re-packs the rest.
 3. **Selection.** Weighted interval scheduling over the windows (weight = min(len,90),
    avenue x1.05, parallel x0.9): the FULL-width windows `F-8 .. R+2` of two forks stay
    `TG_RF_MIN_GAP` (6) nodes apart; their tapers may overlap and share nodes (the node

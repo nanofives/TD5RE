@@ -84,6 +84,9 @@
  * the road narrows after one and widens again before the next without having to
  * close), but their FULL-width windows F-8 .. R+2 stay at least this far apart. */
 #define TG_RF_MIN_GAP       6
+/* A fork's window (taper tail included) ends at least this many spans before the
+ * finish line, so the gantry never stands in a taper. */
+#define TG_RF_FINISH_GAP    8
 #define TG_RF_NODES         (TD5_TG_MAX_SPANS + 8)
 
 typedef struct {
@@ -247,13 +250,43 @@ static void rf_note(const char *what, int src, const char *name, int a, int b,
 
 static double rf_lane_w(void) { return (double)TD5_TG_LANE_WIDTH; }
 
+/* THE ONE PLACE that says where real forks must be over: the FINISH line. Every
+ * fork window ends before it, so nothing is built in the run-off past it (round
+ * 1013 F3 puts ~100 spans of real road there, itself a divided avenue).
+ *
+ * Pure on purpose: tg_finish_span() walks back out of the fork and tunnel tables,
+ * and those do not exist yet when the forks are chosen (this runs before the
+ * walk), so asking it from here would be stale on a second generation. This is the
+ * same `route spans - run-off` arithmetic without the walk-back. A finish that is
+ * fixed by the route itself (F3: ROUTE.JSON finish_span, td5_geo_route_finish_span)
+ * replaces the body of THIS function and nothing else. -1 = no finish known. */
+int tg_realfork_finish_span(void)
+{
+    const int nsp = s_rn - 1;
+    int runoff = td5_env_int("TD5RE_AUTOTRACK_RUNOFF", TD5_TG_RUNOFF_SPANS, 0, 600);
+    const int lo = TD5_TG_GRID_SPAN + 60;      /* shortest race worth having */
+    if (nsp <= lo) return -1;
+    if (nsp - runoff <= lo) runoff = nsp - lo;
+    return nsp - runoff;
+}
+
+/* The last span a fork WINDOW (taper tail included) may touch: before the finish,
+ * and inside the 24-span ring tail tg_fork_place keeps. */
+static int rf_window_limit(void)
+{
+    const int nsp = s_rn - 1;
+    int lim = nsp - 25 + 2 + s_rf_taper;
+    const int fin = tg_realfork_finish_span();
+    if (fin > 0 && fin - TG_RF_FINISH_GAP < lim) lim = fin - TG_RF_FINISH_GAP;
+    return lim;
+}
+
 /* Fill the derived window of a candidate and reject it when the route cannot
  * carry it. Every reason is logged under TD5RE_GEO_FORK_DIAG so "why is there no
  * fork there" is answerable from race.log, not from a guess. */
 static int rf_validate(RfCand *c)
 {
     int i, lo, hi;
-    const int nsp = s_rn - 1;
     double worst = 0.0;
 
     c->len = c->R - c->F - 1;
@@ -274,8 +307,9 @@ static int rf_validate(RfCand *c)
         rf_note("REJECT", c->src, c->name, c->F, c->R, "inside the start grid");
         return 0;
     }
-    if (c->R + 25 > nsp || c->w_end + 1 > s_rn - 1) {
-        rf_note("REJECT", c->src, c->name, c->F, c->R, "inside the ring tail");
+    if (c->w_end > rf_window_limit()) {
+        rf_note("REJECT", c->src, c->name, c->F, c->R,
+                "past the finish line (or inside the ring tail)");
         return 0;
     }
     /* The route's own lane count must be CONSTANT across the window, or the
