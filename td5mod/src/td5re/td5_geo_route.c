@@ -611,7 +611,7 @@ static int gr_graph_load(const char *slug)
 {
     char path[512];
     char *json;
-    cJSON *root, *arr;
+    cJSON *root, *arr, *road_it;
     int n, i, hsize;
 
     gr_graph_free();
@@ -651,18 +651,23 @@ static int gr_graph_load(const char *slug)
     s_g.pz   = (double *)malloc((size_t)GR_MAX_ROAD_PTS * sizeof(double));
     if (!s_g.road || !s_g.px || !s_g.pz) { cJSON_Delete(root); gr_graph_free(); return 0; }
 
-    for (i = 0; i < n; i++) {
-        const cJSON *r   = cJSON_GetArrayItem(arr, i);
-        const cJSON *pts = r ? cJSON_GetObjectItem(r, "points") : NULL;
-        const cJSON *ll  = r ? cJSON_GetObjectItem(r, "latlon") : NULL;
-        const cJSON *cl  = r ? cJSON_GetObjectItem(r, "class") : NULL;
-        const cJSON *la  = r ? cJSON_GetObjectItem(r, "lanes") : NULL;
-        const cJSON *ow  = r ? cJSON_GetObjectItem(r, "oneway") : NULL;
-        const cJSON *jn  = r ? cJSON_GetObjectItem(r, "junction") : NULL;
-        const cJSON *id  = r ? cJSON_GetObjectItem(r, "id") : NULL;
-        const cJSON *nm  = r ? cJSON_GetObjectItem(r, "name") : NULL;
+    /* [ROUND 1012 D2] walk the list; `i` still counts ENTRIES VISITED so the
+     * GR_MAX_ROADS cap means exactly what it meant when this was indexed. */
+    i = 0;
+    cJSON_ArrayForEach(road_it, arr) {
+        const cJSON *r   = road_it;
+        const cJSON *pts = cJSON_GetObjectItem(r, "points");
+        const cJSON *ll  = cJSON_GetObjectItem(r, "latlon");
+        const cJSON *cl  = cJSON_GetObjectItem(r, "class");
+        const cJSON *la  = cJSON_GetObjectItem(r, "lanes");
+        const cJSON *ow  = cJSON_GetObjectItem(r, "oneway");
+        const cJSON *jn  = cJSON_GetObjectItem(r, "junction");
+        const cJSON *id  = cJSON_GetObjectItem(r, "id");
+        const cJSON *nm  = cJSON_GetObjectItem(r, "name");
         GrRoad *out;
         int k, npt, keep = 1;
+
+        if (i++ >= n) break;
 
         if (!pts || !cJSON_IsArray(pts)) continue;
         npt = cJSON_GetArraySize(pts);
@@ -674,24 +679,32 @@ static int gr_graph_load(const char *slug)
          * pinned routing bbox. The test is run on lat/lon, so use the file's
          * own `latlon` when it has one and project back when it does not. */
         if (s_g.have_gbbox) {
+            /* [ROUND 1012 D2] cursors, not indices: see gr_reproject_arr. Both
+             * advance once per k exactly as the index did, so a `latlon` array
+             * SHORTER than `points` still falls through to the projected-point
+             * fallback on the entries it does not cover. */
+            const cJSON *pe = (pts && cJSON_IsArray(pts)) ? pts->child : NULL;
+            const cJSON *le = (ll  && cJSON_IsArray(ll))  ? ll->child  : NULL;
             keep = 0;
             for (k = 0; k < npt && !keep; k++) {
-                double qa, qo;
-                if (ll && cJSON_IsArray(ll) && k < cJSON_GetArraySize(ll)) {
-                    const cJSON *e = cJSON_GetArrayItem(ll, k);
-                    if (cJSON_GetArraySize(e) >= 2) {
-                        qa = cJSON_GetArrayItem(e, 0)->valuedouble;
-                        qo = cJSON_GetArrayItem(e, 1)->valuedouble;
-                    } else continue;
-                } else {
-                    const cJSON *p  = cJSON_GetArrayItem(pts, k);
-                    const cJSON *xx = p ? cJSON_GetObjectItem(p, "x") : NULL;
-                    const cJSON *zz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-                    if (!cJSON_IsNumber(xx) || !cJSON_IsNumber(zz)) continue;
-                    gr_proj_to_latlon(&s_g.proj, xx->valuedouble, zz->valuedouble,
-                                      &qa, &qo);
+                double qa = 0.0, qo = 0.0;
+                int have = 0;
+                if (le) {
+                    const cJSON *a0 = le->child;
+                    const cJSON *a1 = a0 ? a0->next : NULL;
+                    if (a0 && a1) { qa = a0->valuedouble; qo = a1->valuedouble; have = 1; }
+                } else if (pe) {
+                    const cJSON *xx = cJSON_GetObjectItem(pe, "x");
+                    const cJSON *zz = cJSON_GetObjectItem(pe, "z");
+                    if (cJSON_IsNumber(xx) && cJSON_IsNumber(zz)) {
+                        gr_proj_to_latlon(&s_g.proj, xx->valuedouble,
+                                          zz->valuedouble, &qa, &qo);
+                        have = 1;
+                    }
                 }
-                if (gr_in_bbox(qa, qo, s_g.gbbox)) keep = 1;
+                if (have && gr_in_bbox(qa, qo, s_g.gbbox)) keep = 1;
+                if (le) le = le->next;
+                if (pe) pe = pe->next;
             }
         }
         if (!keep) continue;
@@ -699,15 +712,17 @@ static int gr_graph_load(const char *slug)
         out = &s_g.road[s_g.n_roads];
         out->first = s_g.n_pts;
         out->count = 0;
-        for (k = 0; k < npt; k++) {
-            const cJSON *p  = cJSON_GetArrayItem(pts, k);
-            const cJSON *xx = p ? cJSON_GetObjectItem(p, "x") : NULL;
-            const cJSON *zz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-            if (!cJSON_IsNumber(xx) || !cJSON_IsNumber(zz)) continue;
-            s_g.px[s_g.n_pts] = xx->valuedouble;
-            s_g.pz[s_g.n_pts] = zz->valuedouble;
-            s_g.n_pts++;
-            out->count++;
+        {
+            const cJSON *p = pts->child;
+            for (k = 0; k < npt && p; k++, p = p->next) {
+                const cJSON *xx = cJSON_GetObjectItem(p, "x");
+                const cJSON *zz = cJSON_GetObjectItem(p, "z");
+                if (!cJSON_IsNumber(xx) || !cJSON_IsNumber(zz)) continue;
+                s_g.px[s_g.n_pts] = xx->valuedouble;
+                s_g.pz[s_g.n_pts] = zz->valuedouble;
+                s_g.n_pts++;
+                out->count++;
+            }
         }
         if (out->count < 1) { s_g.n_pts = out->first; continue; }
 
@@ -3752,9 +3767,19 @@ static cJSON *gr_json_proj(const GeoProj *p)
     return o;
 }
 
-static int gr_write_json(const char *path, cJSON *root)
+/* Consumes `root` either way.
+ *
+ * [ROUND 1012 D2] PRETTY IS FOR THE FILES A HUMAN OPENS. ROUTE.JSON,
+ * ROUTE_RAW.JSON, FORKS.JSON and AVENUES.JSON are small, are read by eye when
+ * something looks wrong, and stay indented. The REPROJECTED VECTOR LAYERS are
+ * machine-only derived copies of the source, and cJSON_Print spends roughly
+ * half the bytes on indentation: with the Overture + Open Buildings import
+ * taking La Plata's BUILDINGS.JSON from 2326 footprints to 90840, that is tens
+ * of megabytes of whitespace written, flushed and re-parsed on every build. */
+static int gr_write_json_ex(const char *path, cJSON *root, int pretty)
 {
-    char *txt = root ? cJSON_Print(root) : NULL;
+    char *txt = root ? (pretty ? cJSON_Print(root)
+                               : cJSON_PrintUnformatted(root)) : NULL;
     int ok = 0;
     if (txt) {
         ok = gr_write_atomic(path, txt, strlen(txt));
@@ -3762,6 +3787,11 @@ static int gr_write_json(const char *path, cJSON *root)
     }
     cJSON_Delete(root);
     return ok;
+}
+
+static int gr_write_json(const char *path, cJSON *root)
+{
+    return gr_write_json_ex(path, root, 1);
 }
 
 static int gr_write_route_raw(const char *dir)
@@ -4373,40 +4403,87 @@ static double gr_corridor_nodata_pct(const GrRaster *h, const GrPts *nodes,
 
 /* Re-project every world-unit coordinate of ONE array into the route frame,
  * in place. Returns the entry count, or -1 when the key is absent or is not
- * an array. */
+ * an array.
+ *
+ * WALK THE LIST, NEVER INDEX IT. A cJSON array is a singly-linked list and
+ * cJSON_GetArrayItem walks it from the head every call (get_array_item,
+ * deps/cjson/cJSON.c:1888), so `for (i = 0; i < n; i++) GetArrayItem(arr, i)`
+ * is O(n^2) in POINTER CHASES, not in work. It cost nothing while La Plata's
+ * BUILDINGS.JSON held 2326 footprints (2.7M hops, lost in the noise). The
+ * Overture + Open Buildings import takes that to 90840, which is 4.1 BILLION
+ * hops for this one loop, on a linked list that misses cache on every step.
+ * cJSON_ArrayForEach is the same traversal done once. */
+
+/* [ROUND 1012 D2] A reprojected coordinate, quantised before it is stored.
+ *
+ * WHY: a rigid transform of a tidy source number produces an untidy one, and
+ * cJSON prints a double at %1.15g, so `281790.6` in the source comes back as
+ * `675022.43498297291` in the derived copy. That is 11 decimal places of a
+ * WORLD UNIT, and a world unit is 1/430 m -- so the derived file was spending
+ * nine characters per coordinate on 2e-14 metres.
+ *
+ * MEASURED on a 90840-footprint BUILDINGS.JSON: the derived copy came out
+ * LARGER than its own 34.9 MB source, at 50.3 MB, which is over the 48 MB
+ * GEOB_MAX_JSON the buildings reader refuses a file at -- so the layer would
+ * have been silently skipped and the track built with no buildings at all.
+ *
+ * REDUCING PRECISION DOES NOT HELP, and this was measured twice before it was
+ * understood. cJSON's print_number (deps/cjson/cJSON.c:553) tries "%1.15g" and
+ * only falls back to "%1.17g" when that does not round-trip. A La Plata world
+ * coordinate has SIX integer digits, so %1.15g always spends the remaining
+ * nine on decimals: the double nearest 675022.434 prints as
+ * "675022.433999999", which re-reads as a different double, so the check fails
+ * and 17 digits go out. Rounding the value to 3 decimals changed the digits
+ * and not the length (50.3 MB -> 50.5 MB).
+ *
+ * WHAT DOES WORK is print_number's INTEGER fast path at cJSON.c:573
+ * (`d == (double)item->valueint` -> "%d"). Quantising to a whole world unit
+ * makes every coordinate take it: "675022" instead of "675022.43399999989",
+ * 6 bytes instead of 18.
+ *
+ * THE COST, stated plainly: one world unit is 1/430 m = 2.3 mm, so a derived
+ * vertex can move by up to 1.2 mm from where the rigid transform put it. The
+ * SOURCE files are not touched, the route graph reads the SOURCE (gr_graph_load
+ * takes td5_geo_source_path), and the conditioner never sees these numbers --
+ * this is only the machine-readable copy the generator draws scenery from. A
+ * building facade placed 1 mm differently is not observable; a derived
+ * BUILDINGS.JSON the reader REFUSES is (see the measurement above). */
+static double gr_quant(double v)
+{
+    return gr_round_even(v);
+}
+
 static int gr_reproject_arr(cJSON *root, const char *array_key,
                             const GeoProj *np, const GeoProj *op)
 {
     cJSON *arr = root ? cJSON_GetObjectItem(root, array_key) : NULL;
-    int i, n;
+    cJSON *e;
+    int n = 0;
 
     if (!arr || !cJSON_IsArray(arr)) return -1;
-    n = cJSON_GetArraySize(arr);
-    for (i = 0; i < n; i++) {
-        cJSON *e = cJSON_GetArrayItem(arr, i);
-        cJSON *pts = e ? cJSON_GetObjectItem(e, "points") : NULL;
-        cJSON *ex = e ? cJSON_GetObjectItem(e, "x") : NULL;
-        cJSON *ez = e ? cJSON_GetObjectItem(e, "z") : NULL;
+    cJSON_ArrayForEach(e, arr) {
+        cJSON *pts = cJSON_GetObjectItem(e, "points");
+        cJSON *ex  = cJSON_GetObjectItem(e, "x");
+        cJSON *ez  = cJSON_GetObjectItem(e, "z");
         double la, lo, x, z;
+        n++;
         if (pts && cJSON_IsArray(pts)) {
-            const int m = cJSON_GetArraySize(pts);
-            int k;
-            for (k = 0; k < m; k++) {
-                cJSON *p  = cJSON_GetArrayItem(pts, k);
-                cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
-                cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
+            cJSON *p;
+            cJSON_ArrayForEach(p, pts) {
+                cJSON *px = cJSON_GetObjectItem(p, "x");
+                cJSON *pz = cJSON_GetObjectItem(p, "z");
                 if (!cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) continue;
                 gr_proj_to_latlon(op, px->valuedouble, pz->valuedouble, &la, &lo);
                 gr_proj_to_world(np, la, lo, &x, &z);
-                cJSON_SetNumberValue(px, x);
-                cJSON_SetNumberValue(pz, z);
+                cJSON_SetNumberValue(px, gr_quant(x));
+                cJSON_SetNumberValue(pz, gr_quant(z));
             }
         }
         if (cJSON_IsNumber(ex) && cJSON_IsNumber(ez)) {
             gr_proj_to_latlon(op, ex->valuedouble, ez->valuedouble, &la, &lo);
             gr_proj_to_world(np, la, lo, &x, &z);
-            cJSON_SetNumberValue(ex, x);
-            cJSON_SetNumberValue(ez, z);
+            cJSON_SetNumberValue(ex, gr_quant(x));
+            cJSON_SetNumberValue(ez, gr_quant(z));
         }
     }
     return n;
@@ -4648,7 +4725,9 @@ int td5_geo_derived_migrate(const char *slug)
             break;
         }
         snprintf(path, sizeof path, "%s/%s", dst_dir, k_fix[i].file);
-        if (!gr_write_json(path, tree)) { failed = 1; break; }  /* consumes */
+        /* COMPACT: a reprojected vector layer is a machine-only derived copy.
+         * See gr_write_json_ex. */
+        if (!gr_write_json_ex(path, tree, 0)) { failed = 1; break; }  /* consumes */
         wrote++;
         TD5_LOG_I(LOG_TAG, "geo route:   repaired %s (%d entries) into the "
                   "route frame", k_fix[i].file, n);
@@ -4857,7 +4936,9 @@ int td5_geo_route_commit(void)
     for (i = 0; i < GR_VEC_N; i++) {
         if (!vec[i]) continue;
         snprintf(path, sizeof path, "%s/%s", dst_dir, k_vec[i].file);
-        if (!gr_write_json(path, vec[i])) {          /* consumes the tree */
+        /* COMPACT: these are the reprojected machine-only vector layers.
+         * See gr_write_json_ex. */
+        if (!gr_write_json_ex(path, vec[i], 0)) {    /* consumes the tree */
             vec[i] = NULL;
             gr_commit_refuse("COULD NOT WRITE %s", k_vec[i].file);
             goto done;
