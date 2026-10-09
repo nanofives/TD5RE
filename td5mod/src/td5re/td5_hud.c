@@ -3792,9 +3792,17 @@ static void hud_draw_street_line(int player_slot, int view_index)
      * C3 A9 is e-acute, C3 B1 is n-tilde. That keeps this file pure ASCII (the
      * house convention) and makes the bytes under test unambiguous rather than
      * dependent on how an editor saved them. Correct output is "Azcuenaga"
-     * with an accented e; "AzcuA~(c)naga" means the decoder was bypassed. */
+     * with an accented e; "AzcuA~(c)naga" means the decoder was bypassed.
+     *
+     * MIND THE SPLIT BEFORE THE TRAILING "a". A C hex escape is GREEDY, so
+     * "\xC3\xB1a" is ONE character of value 0xB1A, not n-tilde followed by
+     * 'a'. The first version of this line had exactly that bug and drew
+     * "Espa?[]" -- which, usefully, proved the rest of the chain correct:
+     * td5_utf8_next saw a lead byte with no continuation, returned U+FFFD
+     * without stalling, and the >U+01FF guard substituted '?'. Adjacent string
+     * literals end the escape without adding a byte. */
     if (td5_env_flag_off("TD5RE_HUD_STREET_TEST"))
-        name = "Azcu\xC3\xA9naga / Espa\xC3\xB1a";
+        name = "Azcu\xC3\xA9naga / Espa\xC3\xB1" "a";
 #endif
     if (!name || !name[0]) return;
 
