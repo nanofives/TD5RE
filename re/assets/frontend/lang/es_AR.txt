@@ -219,6 +219,9 @@ SELECT GAME MODE=ELEGÍ EL MODO DE JUEGO
 P1 (HOST) CHOOSES THE GAME MODE=P1 (HOST) ELIGE EL MODO DE JUEGO
 MODE=MODO
 %s OPTIONS=OPCIONES DE %s
+# [ROUND 1011 C3] Race HUD: the real OSM street the car is on. The street name
+# itself is a proper noun and is never translated, only the preposition.
+ON %s=EN %s
 No options - select CONTINUE=Sin opciones - elegí CONTINUAR
 BACK TO MODE SELECT?=¿VOLVER A ELEGIR MODO?
 NEXT RACE=PRÓXIMA CARRERA
