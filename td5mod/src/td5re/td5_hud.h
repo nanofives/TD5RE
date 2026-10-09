@@ -66,7 +66,12 @@
 #define TD5_HUD_MAX_TEXT_GLYPHS  512
 #define TD5_HUD_GLYPH_QUAD_SIZE  0xB8    /* bytes per glyph quad */
 #define TD5_HUD_TEXT_BUF_SIZE    0x17000 /* 512 * 0xB8 */
-#define TD5_HUD_GLYPH_TABLE_SIZE 0x404   /* 64 glyphs * 16 bytes + 4 bytes tex ptr */
+/* The texture-page slot is ((void **)table)[0x100]: 0x400 bytes in on the original
+ * 32-bit build, 0x800 on this x86_64 one (a void * is 8 bytes). The old 0x404 left
+ * that store 1.5 KB past the block, a heap overflow on every race start that only
+ * FAULTED when the block sat near the end of a heap segment (access violation in
+ * td5_hud_init_font_atlas, 1 run in ~75). Sized for the pointer slot. */
+#define TD5_HUD_GLYPH_TABLE_SIZE (0x100 * (int)sizeof(void *) + (int)sizeof(void *)) /* 64 glyphs * 16 + a void * at [0x100] */
 
 #define TD5_HUD_FONT_GRID_COLS   16
 #define TD5_HUD_FONT_GRID_ROWS   4
