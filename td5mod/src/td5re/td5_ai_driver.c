@@ -795,13 +795,34 @@ static void driver_racecraft(int slot, TD5_Actor *self,
  *
  * The cap is a ceiling, never a floor: a car already going slower than the
  * limit (a corner, a car ahead) is left alone. */
-static double drv_geo_speed_cap(const TD5_Actor *actor, double want)
+static double drv_geo_speed_cap(int slot, const TD5_Actor *actor, double want)
 {
-    int cap;
+    int cap, span;
     if (!actor) return want;
-    cap = td5_geo_attrs_speed_cap_units((int)actor->track_span_normalized, 0);
+    span = (int)actor->track_span_normalized;
+    cap = td5_geo_attrs_speed_cap_units(span, 0);
     if (cap <= 0) return want;
-    return (want > (double)cap) ? (double)cap : want;
+    if (want <= (double)cap) return want;
+
+#ifndef TD5RE_RELEASE
+    /* Evidence that the cap BINDS, and what it bound to. Logged only when the
+     * posted limit actually changes under this car, so a 5 minute race emits
+     * one line per limit change rather than one per tick. Without this, "the
+     * AI respects maxspeed" is an assertion rather than a measurement. */
+    {
+        static int s_last_kph[TD5_MAX_RACER_SLOTS];
+        const int kph = td5_geo_attrs_maxspeed(span);
+        if (slot >= 0 && slot < TD5_MAX_RACER_SLOTS && s_last_kph[slot] != kph) {
+            s_last_kph[slot] = kph;
+            TD5_LOG_I(LOG_TAG, "[GEO SPEED] span %d: limit %d km/h -> cap %d "
+                      "units (x%d%%), target was %.0f -> %d",
+                      span, kph, cap,
+                      td5_env_int("TD5RE_GEO_AI_SPEED_MULT", 250, 100, 1000),
+                      want, cap);
+        }
+    }
+#endif
+    return (double)cap;
 }
 
 int td5_ai_driver_tick(int slot)
@@ -1114,7 +1135,7 @@ int td5_ai_driver_tick(int slot)
          * multiplier. This is the branch that matters most: it is the one that
          * floors the throttle down a clear straight, and a 40 km/h calle is
          * exactly where the map should stop an opponent doing that. */
-        target_speed = drv_geo_speed_cap(actor, target_speed);
+        target_speed = drv_geo_speed_cap(slot, actor, target_speed);
     } else {
         /* Corner / following: apply personality + hidden leash to the target. */
         double skill = (double)s_persona[slot].skill;
@@ -1141,7 +1162,7 @@ int td5_ai_driver_tick(int slot)
         /* [ROUND 1011 C3] Applied BEFORE err_frac, which is what the throttle
          * PI below integrates -- capping afterwards would leave the controller
          * chasing a target the car is not allowed to reach. */
-        target_speed = drv_geo_speed_cap(actor, target_speed);
+        target_speed = drv_geo_speed_cap(slot, actor, target_speed);
 
         double err_frac = (vmax > 1.0) ? (target_speed - v_abs) / vmax : 0.0;
         if (err_frac > s_thr_deadband) {

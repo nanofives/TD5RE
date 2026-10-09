@@ -49,6 +49,7 @@
 #include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
 #include "td5_chaos.h"      /* [CHAOS CO-OP] per-pane role strip + swap countdown */
 #include "td5_geo.h"        /* [1011 C3] the route's per-node street names */
+#include "td5_geo_attrs.h"  /* [1011 C3] route-first/spatial-fallback resolver */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 
 #include <stdlib.h>
@@ -3772,7 +3773,12 @@ static void hud_draw_street_line(int player_slot, int view_index)
 
     if (!td5_env_flag_on("TD5RE_HUD_STREET")) return;
     if (td5_geo_route_count() < 2) return;
-    name = td5_geo_route_name(td5_game_get_slot_span(player_slot));
+    /* THROUGH THE ATTRS MODULE, not td5_geo_route_name directly. The route only
+     * carries names on a ROUTE.JSON written by round 1011 or later, so reading
+     * it raw drew NOTHING on every cache built before this round -- which is
+     * every cache that exists today. td5_geo_attrs_name falls back to the
+     * nearest mapped way, which is the whole reason the fallback exists. */
+    name = td5_geo_attrs_name(td5_game_get_slot_span(player_slot));
     if (!name || !name[0]) return;
 
     snprintf(buf, sizeof buf, TR("ON %s"), name);

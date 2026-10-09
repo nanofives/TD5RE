@@ -61,6 +61,8 @@ static struct {
  * -2 is "never tried" (-1 is a legitimate track index during boot). */
 static int s_race_tried_track = -2;
 
+static void ga_race_ensure(void);
+
 /* ----------------------------------------------------------------- names -- */
 
 static int ga_intern(const char *s)
@@ -232,6 +234,9 @@ void td5_geo_attrs_prepare(const void *nlv, int nspans)
     }
 
     s_ga.ready = 1;
+    /* Claim the latch so a read during the race cannot decide these tables are
+     * stale and rebuild them from the route's thinner data. */
+    s_race_tried_track = g_td5.track_index;
 }
 
 /* ------------------------------------------------------ race-time rebuild -- */
@@ -379,7 +384,21 @@ int td5_geo_attrs_speed_cap_units(int span, int is_traffic)
 
 int td5_geo_attrs_ready(void) { return s_ga.ready; }
 
-static int ga_in(int si) { return s_ga.ready && si >= 0 && si < s_ga.nspans; }
+/* Every read-side query builds the race tables on first use.
+ *
+ * NOT just the speed cap, which is what this did at first and it was wrong:
+ * the HUD street line then read a route that carries no names until the user
+ * rebuilds it, found "", and drew nothing -- for every existing cache. The
+ * whole point of the spatial fallback is that it works on the cache the user
+ * already has, and it only works if the query path reaches it.
+ *
+ * Free after the first call (an int compare), and a no-op during generation,
+ * where prepare() has already filled the tables from the richer node list. */
+static int ga_in(int si)
+{
+    ga_race_ensure();
+    return s_ga.ready && si >= 0 && si < s_ga.nspans;
+}
 
 int td5_geo_attrs_lit(int si)
 {
