@@ -213,6 +213,48 @@ What helped: the 16 node linear taper (the stretch behind fork 0's rejoin, spans
 5, 1 events over the five seeds; the 80 is one car stuck at spans 137..143) and the
 gentler opening (the S at fork 2 that jammed 3 cars for 670 ticks).
 
+### Corridor-mouth spins: measured cause, four fixes tried, none kept (F2b time box)
+
+`verify/geo_fork_mouth.py` parses the strip and prints, per tick, each car's lateral
+position, velocity heading error, steering, rear slip and speed through a mouth; the
+AI lane brain was dumped per tick as well (temporary instrumentation, not kept).
+Seed 55, fork 1 (F=171), a spinner (slot 2) against clean cars (slots 3, 4):
+
+- Every car, spinner or clean, arrives at corridor step 0 with its VELOCITY 13..28
+  degrees off the corridor, pointing toward the main road, at lateral +0.5 (left half of
+  the 2-lane corridor), and goes from steering +0.1 to -1.0 (full lock) within two
+  ticks. Clean cars lose ~40% of their speed in those two ticks (446 -> 253, 351 -> 207),
+  rear slip 10000..16000, and recover; the spinner arrived at 613 units/tick, kept
+  sliding (rear slip 39000 at step 6) and parked on the right wall at step 8.
+- The corridor itself is smooth: its centreline heading is 0.0 degrees for steps 0..7
+  and 6.8 degrees only where the median opens (steps 9..), so this is not geometry.
+- The AI's lateral target is what flips. On the ring a car that rolled "take" holds the
+  take anchor (0.86 of the 4-lane road). In the last three ticks it falls to 0.70, then
+  0.30..0.60: (a) `td5_ai_smart_branch` scans from d = 1, so ON the fork span the pull is
+  gone (`bpull` 1.00 -> 0.00); (b) the ray avoidance term follows the MAIN ring, where the
+  road past F is only the left half, and pulls the target 0.15..0.20 left; (c) the
+  `[GEO CORNERS]` wall margin is measured on the look-ahead span (span + 2), which past F
+  is the narrow main half (margin 0.30), and clamps the 4-lane target to [0.30, 0.70]
+  (the exact 0.699 and 0.300 in the dump). The car then enters the corridor at corridor-
+  frame u 0.3..0.45 (its target is 0.62..0.8), leaning left.
+
+Tried, 5 seeds each, mouth-spin stalls (stalls starting F+4..F+14) and mean stalled ticks;
+baseline is 11 and 991:
+
+| change | mouth stalls | mean stalled ticks |
+|---|---|---|
+| keep the pull through the fork span + no leftward ray avoidance while a take is held | 20 | 1454 |
+| measure the wall margin on the current span while a pull is held | 24 | 1908 |
+| kinematic approach-speed cap into every real split, 400 units/tick at the split | 20 | 1922 |
+| same cap at 500 units/tick (cars rarely exceed it) | 11 | 1079 |
+
+Every one that changes what the field does near a mouth makes it worse, and the cap
+shows it is not arrival speed alone (a slower, tighter pack jams). So the table above is
+NOT a recipe; the next attempt should start from the frame hand-off, where the car's
+lateral state in the 4-lane ring frame has to become a corridor-frame state (u 0.70 in
+the ring is u 0.40 in the corridor) while three AI terms disagree about which road it is
+on, and should add a per-tick lateral-state trace to the harness first.
+
 Unverified by a negative control: the relaxed suspect-fork ceiling. This route has no
 far parallel road to trip it (80 m / 60 degrees finds no candidate, 60 m / 25 degrees finds
 the same five forks); the ceiling on an avenue span is that avenue's own measured reach.

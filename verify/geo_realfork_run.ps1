@@ -20,6 +20,7 @@ param([string]$Tag = "run",
       [int]$Opponents = 5,
       [int]$PlayerIsAI = 1,
       [int]$MaxSimTicks = 7000,
+      [string]$Modules = "track,driver,motion,progress",   # add "pose" for world x/z/yaw
       [int]$Track = 61,
       [string]$GeoPlace = "la_plata",      # "" = a synthetic track (-Track 60)
       [string]$Seed = "",
@@ -59,7 +60,8 @@ $gfx = @("--Lighting=0","--Quality=0","--SunShadows=0","--Reflections=0",
 $log = Join-Path $wt "log"
 New-Item -ItemType Directory -Force -Path $log | Out-Null
 $keep = @("race.log","engine.log","frontend.log","race_trace_track.csv",
-          "race_trace_driver.csv","race_trace_motion.csv","race_trace_progress.csv")
+          "race_trace_driver.csv","race_trace_motion.csv","race_trace_progress.csv",
+          "race_trace_pose.csv")
 foreach ($f in $keep) {
     $p0 = Join-Path $log $f
     for ($t = 0; $t -lt 20 -and (Test-Path $p0); $t++) {
@@ -72,7 +74,7 @@ if (Test-Path $lvl) { Remove-Item $lvl -Recurse -Force }
 $traceArgs = @()
 if (-not $GenOnly) {
     $traceArgs = @("--RaceTrace=1","--RaceTraceSlot=-1","--RaceTraceMaxSimTicks=$MaxSimTicks",
-                   "--RaceTraceMaxFrames=400000","--TraceModules=track,driver,motion,progress",
+                   "--RaceTraceMaxFrames=400000","--TraceModules=$Modules",
                    "--TraceStages=post_track,post_ai,post_physics,post_progress")
     if ($FastForward -gt 1.0) { $traceArgs += "--TraceFastForward=$FastForward" }
 }
