@@ -6161,6 +6161,11 @@ int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
 void tg_geo_city_report(void);                    /* td5_tg_city.c    */
 void tg_geo_city_report_streamed(void);           /* td5_tg_city.c    */
 int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
+/* [ROUND 1012 D2] Would a footprint of half-extent `half` centred at (x,z)
+ * stand in REAL open space -- a mapped plaza/park polygon, or inside a named
+ * junction=circular ring like Plaza Miguel de Azcuenaga, which has no polygon
+ * at all? 0 on a synthetic build before it touches anything. */
+int  tg_geo_open_space_at(int si, double x, double z, double half);
 int  tg_geo_emit_plaza(const TG_FBHook *h);       /* td5_tg_streets.c */
 void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
 

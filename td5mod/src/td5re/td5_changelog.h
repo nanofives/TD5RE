@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: avenues and squares)" },
+    { CL_ITEM,    "A real divided avenue is now divided for its" },
+    { CL_ITEM,    "  WHOLE length, not just one block of it" },
+    { CL_ITEM,    "Its central median is the real width between" },
+    { CL_ITEM,    "  the two carriageways, not a painted line" },
+    { CL_ITEM,    "An avenida the map never split is built wide," },
+    { CL_ITEM,    "  so the buildings stand back where they should" },
+    { CL_ITEM,    "No shipped set piece is dumped in a real plaza" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: the whole city is built)" },
     { CL_ITEM,    "Real places now build the buildings the street map" },
     { CL_ITEM,    "  never traced: La Plata goes from 2326 to 90840," },

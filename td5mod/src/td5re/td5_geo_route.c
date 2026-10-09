@@ -408,7 +408,28 @@ typedef struct {
      * usable limit. Parsed by the shared reader so the route and the street
      * network cannot disagree about what "60 mph" means. */
     int    maxspeed_kph;
+    /* [ROUND 1012 D2] `lanes` AFTER the round-1011 place carriageway floor, and
+     * the raw OSM count BEFORE it. Both are kept because the floor is right for
+     * an undivided street and wrong for one carriageway of a divided pair; see
+     * gr_mark_divided_carriageways. `divided` is 1 when this way has a
+     * same-name, different-id, ANTI-parallel one-way partner at median
+     * distance -- i.e. when it is half of a street, not a whole one. */
+    int    lanes_osm;
+    int    divided;
+    /* [ROUND 1012 D2] the other two inputs the carriageway resolution needs,
+     * kept because that resolution cannot finish until `divided` is known and
+     * `divided` is not known until every way is loaded. `width_lanes` is the
+     * lane count a TAGGED width implies (0 = no usable tag; a tag is a
+     * measurement of this way and wins outright), `counted` is lanes_src ==
+     * osm_lanes (a mapper counted them, so no table may lower it). */
+    int    width_lanes;
+    int    counted;
+    int    namek;
 } GrRoad;
+
+/* Defined with the rest of the divided-avenue geometry (it needs gr_bearing,
+ * gr_road_near_at and gr_same_way), called at the end of the graph load. */
+static void gr_mark_divided_carriageways(void);
 
 static struct {
     char    slug[64];
@@ -590,7 +611,7 @@ static int gr_graph_load(const char *slug)
 {
     char path[512];
     char *json;
-    cJSON *root, *arr;
+    cJSON *root, *arr, *road_it;
     int n, i, hsize;
 
     gr_graph_free();
@@ -630,18 +651,23 @@ static int gr_graph_load(const char *slug)
     s_g.pz   = (double *)malloc((size_t)GR_MAX_ROAD_PTS * sizeof(double));
     if (!s_g.road || !s_g.px || !s_g.pz) { cJSON_Delete(root); gr_graph_free(); return 0; }
 
-    for (i = 0; i < n; i++) {
-        const cJSON *r   = cJSON_GetArrayItem(arr, i);
-        const cJSON *pts = r ? cJSON_GetObjectItem(r, "points") : NULL;
-        const cJSON *ll  = r ? cJSON_GetObjectItem(r, "latlon") : NULL;
-        const cJSON *cl  = r ? cJSON_GetObjectItem(r, "class") : NULL;
-        const cJSON *la  = r ? cJSON_GetObjectItem(r, "lanes") : NULL;
-        const cJSON *ow  = r ? cJSON_GetObjectItem(r, "oneway") : NULL;
-        const cJSON *jn  = r ? cJSON_GetObjectItem(r, "junction") : NULL;
-        const cJSON *id  = r ? cJSON_GetObjectItem(r, "id") : NULL;
-        const cJSON *nm  = r ? cJSON_GetObjectItem(r, "name") : NULL;
+    /* [ROUND 1012 D2] walk the list; `i` still counts ENTRIES VISITED so the
+     * GR_MAX_ROADS cap means exactly what it meant when this was indexed. */
+    i = 0;
+    cJSON_ArrayForEach(road_it, arr) {
+        const cJSON *r   = road_it;
+        const cJSON *pts = cJSON_GetObjectItem(r, "points");
+        const cJSON *ll  = cJSON_GetObjectItem(r, "latlon");
+        const cJSON *cl  = cJSON_GetObjectItem(r, "class");
+        const cJSON *la  = cJSON_GetObjectItem(r, "lanes");
+        const cJSON *ow  = cJSON_GetObjectItem(r, "oneway");
+        const cJSON *jn  = cJSON_GetObjectItem(r, "junction");
+        const cJSON *id  = cJSON_GetObjectItem(r, "id");
+        const cJSON *nm  = cJSON_GetObjectItem(r, "name");
         GrRoad *out;
         int k, npt, keep = 1;
+
+        if (i++ >= n) break;
 
         if (!pts || !cJSON_IsArray(pts)) continue;
         npt = cJSON_GetArraySize(pts);
@@ -653,24 +679,32 @@ static int gr_graph_load(const char *slug)
          * pinned routing bbox. The test is run on lat/lon, so use the file's
          * own `latlon` when it has one and project back when it does not. */
         if (s_g.have_gbbox) {
+            /* [ROUND 1012 D2] cursors, not indices: see gr_reproject_arr. Both
+             * advance once per k exactly as the index did, so a `latlon` array
+             * SHORTER than `points` still falls through to the projected-point
+             * fallback on the entries it does not cover. */
+            const cJSON *pe = (pts && cJSON_IsArray(pts)) ? pts->child : NULL;
+            const cJSON *le = (ll  && cJSON_IsArray(ll))  ? ll->child  : NULL;
             keep = 0;
             for (k = 0; k < npt && !keep; k++) {
-                double qa, qo;
-                if (ll && cJSON_IsArray(ll) && k < cJSON_GetArraySize(ll)) {
-                    const cJSON *e = cJSON_GetArrayItem(ll, k);
-                    if (cJSON_GetArraySize(e) >= 2) {
-                        qa = cJSON_GetArrayItem(e, 0)->valuedouble;
-                        qo = cJSON_GetArrayItem(e, 1)->valuedouble;
-                    } else continue;
-                } else {
-                    const cJSON *p  = cJSON_GetArrayItem(pts, k);
-                    const cJSON *xx = p ? cJSON_GetObjectItem(p, "x") : NULL;
-                    const cJSON *zz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-                    if (!cJSON_IsNumber(xx) || !cJSON_IsNumber(zz)) continue;
-                    gr_proj_to_latlon(&s_g.proj, xx->valuedouble, zz->valuedouble,
-                                      &qa, &qo);
+                double qa = 0.0, qo = 0.0;
+                int have = 0;
+                if (le) {
+                    const cJSON *a0 = le->child;
+                    const cJSON *a1 = a0 ? a0->next : NULL;
+                    if (a0 && a1) { qa = a0->valuedouble; qo = a1->valuedouble; have = 1; }
+                } else if (pe) {
+                    const cJSON *xx = cJSON_GetObjectItem(pe, "x");
+                    const cJSON *zz = cJSON_GetObjectItem(pe, "z");
+                    if (cJSON_IsNumber(xx) && cJSON_IsNumber(zz)) {
+                        gr_proj_to_latlon(&s_g.proj, xx->valuedouble,
+                                          zz->valuedouble, &qa, &qo);
+                        have = 1;
+                    }
                 }
-                if (gr_in_bbox(qa, qo, s_g.gbbox)) keep = 1;
+                if (have && gr_in_bbox(qa, qo, s_g.gbbox)) keep = 1;
+                if (le) le = le->next;
+                if (pe) pe = pe->next;
             }
         }
         if (!keep) continue;
@@ -678,15 +712,17 @@ static int gr_graph_load(const char *slug)
         out = &s_g.road[s_g.n_roads];
         out->first = s_g.n_pts;
         out->count = 0;
-        for (k = 0; k < npt; k++) {
-            const cJSON *p  = cJSON_GetArrayItem(pts, k);
-            const cJSON *xx = p ? cJSON_GetObjectItem(p, "x") : NULL;
-            const cJSON *zz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-            if (!cJSON_IsNumber(xx) || !cJSON_IsNumber(zz)) continue;
-            s_g.px[s_g.n_pts] = xx->valuedouble;
-            s_g.pz[s_g.n_pts] = zz->valuedouble;
-            s_g.n_pts++;
-            out->count++;
+        {
+            const cJSON *p = pts->child;
+            for (k = 0; k < npt && p; k++, p = p->next) {
+                const cJSON *xx = cJSON_GetObjectItem(p, "x");
+                const cJSON *zz = cJSON_GetObjectItem(p, "z");
+                if (!cJSON_IsNumber(xx) || !cJSON_IsNumber(zz)) continue;
+                s_g.px[s_g.n_pts] = xx->valuedouble;
+                s_g.pz[s_g.n_pts] = zz->valuedouble;
+                s_g.n_pts++;
+                out->count++;
+            }
         }
         if (out->count < 1) { s_g.n_pts = out->first; continue; }
 
@@ -722,9 +758,16 @@ static int gr_graph_load(const char *slug)
          * every cached _route/ is invalidated. TD5RE_GEO_REAL_CARRIAGEWAY=0
          * restores the raw `lanes` field for an A/B. */
         out->lanes  = (la && cJSON_IsNumber(la) && la->valueint != 0) ? la->valueint : 2;
+        /* [ROUND 1012 D2] remembered before the place floor below can raise it;
+         * one carriageway of a divided avenue is given this back. */
+        out->lanes_osm   = out->lanes;
+        out->divided     = 0;
+        out->width_lanes = 0;
+        out->counted     = 0;
+        out->namek       = td5_geo_roads_namek_of(
+                               (nm && cJSON_IsString(nm)) ? nm->valuestring : NULL);
         if (td5_env_flag_on("TD5RE_GEO_REAL_CARRIAGEWAY")) {
-            const int    nk = td5_geo_roads_namek_of(
-                                  (nm && cJSON_IsString(nm)) ? nm->valuestring : NULL);
+            const int    nk = out->namek;
             const cJSON *wd = r ? cJSON_GetObjectItem(r, "width") : NULL;
             double m = 0.0;
             if (wd && cJSON_IsString(wd) && wd->valuestring[0]) {
@@ -739,7 +782,8 @@ static int gr_graph_load(const char *slug)
                 /* A TAGGED width is a measurement of this way: it wins
                  * outright, in both directions. */
                 const int lanes = (int)floor(m * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
-                if (lanes >= 1 && lanes <= GR_MAX_LANES) out->lanes = lanes;
+                if (lanes >= 1 && lanes <= GR_MAX_LANES)
+                    { out->lanes = lanes; out->width_lanes = lanes; }
             } else if (s_g.proj.upm > 0.0) {
                 /* THE PLACE TABLE IS A FLOOR, NEVER A CEILING.
                  *
@@ -760,6 +804,7 @@ static int gr_graph_load(const char *slug)
                 const cJSON *ls = r ? cJSON_GetObjectItem(r, "lanes_src") : NULL;
                 const int counted = ls && cJSON_IsString(ls) && ls->valuestring
                                  && strcmp(ls->valuestring, "osm_lanes") == 0;
+                out->counted = counted;
                 if (tm > 0.0) {
                     int lanes = (int)floor(tm * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
                     if (counted && lanes < out->lanes) lanes = out->lanes;
@@ -844,6 +889,9 @@ static int gr_graph_load(const char *slug)
         return 0;
     }
     s_g.gen = 0;
+    /* [ROUND 1012 D2] before anything reads `lanes`: a carriageway of a divided
+     * street takes its own OSM count back off the place floor. */
+    gr_mark_divided_carriageways();
     snprintf(s_g.slug, sizeof s_g.slug, "%s", slug);
     TD5_LOG_I(LOG_TAG, "geo route: graph %s: %d way(s), %d point(s), %d node(s), "
               "%d edge(s)%s", path, s_g.n_roads, s_g.n_pts, s_g.n_nodes,
@@ -2045,6 +2093,30 @@ typedef struct {
  * interrupts a carriageway at a junction, and ending the avenue at the first
  * such gap would cut a long one in half at its first crossing. */
 #define GR_AV_MAX_MISS         4
+/* [ROUND 1012 D2] How far outside the band THE DETECTOR SCORED the per-span
+ * chain may wander, on top of that band's own width.
+ *
+ * The way-id continuity test (gr_peer_offset_at) answers "is this still the
+ * same road". It does not answer "is this still the median we measured", and
+ * one way can do both. MEASURED on Mariano's route: Diagonal 73's chain holds
+ * 11.4..12.2 m for 240 spans and then splays monotonically to 21.9 m over its
+ * last ten as the carriageways separate into the Calle 14 junction -- every
+ * step small, every step on one way (OSM 719084446), so neither the step cap
+ * nor the id test stops it. The detector scored that run at 11.3..14.4 m.
+ *
+ * So the chain is also held to the band the detector scored, plus ONE LANE at
+ * each end. A lane rather than nothing because a run sampled at most 13 times
+ * does not see every narrowing -- Avenida 13's second run measured
+ * 14.7..14.7 m, spread zero, and must still be free to taper. A lane rather
+ * than more because that is what stops Diagonal 73 at 17.8 m, where its median
+ * stops being a median and starts being a junction mouth. The three runs on
+ * Mariano's route are then bounded at 7.8..17.9, 6.8..22.9 and 11.2..18.2 m,
+ * and only Diagonal 73's last three spans are refused. */
+#define GR_AV_BAND_SLACK  GR_LANE_WIDTH
+/* [ROUND 1012 D2] How much of the place's PER-CARRIAGEWAY figure an undivided
+ * avenida/diagonal gets, in tenths. See gr_mark_divided_carriageways for the
+ * measurement that picked it; TD5RE_GEO_AVENUE_WIDE_X10 overrides for an A/B. */
+#define GR_AV_WIDE_X10        20
 
 /* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
  * convention gr_heading uses. */
@@ -2096,6 +2168,255 @@ static int gr_same_way(int a, int b)
     if (a == b) return 1;
     if (!s_g.road[a].has_id || !s_g.road[b].has_id) return 0;
     return s_g.road[a].id == s_g.road[b].id;
+}
+
+/* ======================================================================== *
+ * [ROUND 1012 D2] WHICH WAYS ARE HALF OF A STREET
+ * ======================================================================== *
+ *
+ * ROOT CAUSE of "the median built 0.93 m" on Diagonal 73.
+ *
+ * Round 1011 C2 gave every La Plata way the city's real carriageway as a FLOOR:
+ * a calle has 10 m of asphalt whatever `lanes` says, so an uncounted or
+ * under-counted way is raised to round(10 * upm / 1500) = 3 lanes = 10.47 m.
+ * That is right for a whole street and wrong for HALF of one. Diagonal 73 is
+ * mapped as two one-way ways, each tagged lanes=1 (floored to 2 by geo_fetch),
+ * 11.39 m between their centrelines. Building both at the 10.47 m calle
+ * carriageway spends 10.47 of that 11.39 and leaves a 0.92 m median -- which is
+ * the 0.93 m the race log reported, and is why the avenue reads as one slab of
+ * asphalt with a painted line down it.
+ *
+ * The 10 m figure describes the street. A divided street's 30 m line is spent
+ * on pavement + carriageway + median + carriageway + pavement, so each
+ * carriageway must take ITS OWN OSM count. With 2 lanes a side the same
+ * 11.39 m gives 11.39 - 3.49 - 3.49 = 4.41 m of median, and the 30 m line then
+ * leaves (30 - 6.98 - 4.41 - 6.98) / 2 = 5.8 m of vereda a side, which is a La
+ * Plata diagonal.
+ *
+ * So the floor is withheld from a way that is half of a street, and the test is
+ * geometric because no tag states it (`median` is false on all 2291 La Plata
+ * ways and `junction` is only ever circular/roundabout).
+ *
+ * ANTI-PARALLEL ONLY, and that is the whole guard against round 1010's false
+ * positives. A one-way street drawn as a chain of slices pairs with ITSELF at
+ * median distance -- that is how Calle 54 reported a 21 m median -- but every
+ * slice of one chain runs the SAME way (Calle 54: oneway dir=1 on bearing
+ * ~+42 deg at every slice). Two carriageways of a divided pair run OPPOSITE.
+ * gr_route_owns_way, the detector's equivalent guard, is not available here:
+ * this runs at graph load, before there is a route. Anti-parallelism does not
+ * need one, and it is also a stronger statement.
+ *
+ * Three samples by ARCLENGTH and at least two agreeing on the same side, so a
+ * single hairpin vertex cannot carry a way on its own. */
+
+/* ---- the fit test, stated ONCE and asked twice ----------------------------
+ *
+ * A divided street spends its reserved width on five things: pavement,
+ * carriageway, median, carriageway, pavement. If the city's building line
+ * cannot hold all five, the route is NOT on a divided avenue there however well
+ * the two ways pair -- it is on ONE street a mapper drew as two lines, one per
+ * direction of travel.
+ *
+ * This is what GR_MED_MIN_M's 4 m constant ("below this they are the same road
+ * drawn twice") was reaching for, and a constant cannot see the street.
+ * MEASURED: Calle 14's last 280 m pairs at a rock-steady 9.5 m, cover 1.00,
+ * five distinct anti-parallel OSM ways, and clears every geometric gate -- but
+ * La Plata reserves 18 m for a calle, and 9.5 + 3.4 + 3.4 + 2 x 3.0 = 22.5 m
+ * does not fit. The plan says it is not divided; the geometry alone could not.
+ *
+ * The building line checks out against the map. Marching perpendicular from the
+ * centreline to the first mapped building face over La Plata's footprints:
+ * Diagonal 73 29.0 m, Avenida 19 29.5 m, Avenida 7 31.5 m, Avenida 44 30.0 m
+ * against the 30 m row; Calle 54 20.0 m against the 18 m row.
+ *
+ * The pavement floor is the class default -- round 1009's answer, 3 m on a La
+ * Plata avenida -- so this asks for no constant of its own. `gap` and the two
+ * half widths are WORLD UNITS; `need_out` is filled either way, for the log. */
+static int gr_divided_fits(int namek, double gap, double own_h, double far_h,
+                           double *need_out, double *line_out)
+{
+    const double line = td5_geo_sw_building_line_for(TD5_GEO_RC_UNKNOWN, namek)
+                      * GR_UNITS_PER_METRE;
+    const double pav  = td5_geo_roads_pavement_default_m(TD5_GEO_RC_SECONDARY)
+                      * GR_UNITS_PER_METRE;
+    const double need = gap + own_h + far_h + pav * 2.0;
+    if (need_out) *need_out = need;
+    if (line_out) *line_out = line;
+    if (line <= 0.0) return 1;        /* no rule for this street here */
+    return need <= line;
+}
+
+/* Point and forward bearing at fraction `f` of way `r`'s arclength. */
+static int gr_way_at_frac(const GrRoad *r, double f,
+                          double *px, double *pz, double *br)
+{
+    double total = 0.0, acc = 0.0, want;
+    int i;
+    for (i = 0; i + 1 < r->count; i++)
+        total += hypot(s_g.px[r->first + i + 1] - s_g.px[r->first + i],
+                       s_g.pz[r->first + i + 1] - s_g.pz[r->first + i]);
+    if (total <= 1e-9) return 0;
+    want = total * f;
+    for (i = 0; i + 1 < r->count; i++) {
+        const double ax = s_g.px[r->first + i],     az = s_g.pz[r->first + i];
+        const double bx = s_g.px[r->first + i + 1], bz = s_g.pz[r->first + i + 1];
+        const double seg = hypot(bx - ax, bz - az);
+        double t;
+        if (seg <= 1e-9) continue;
+        if (acc + seg < want && i + 2 < r->count) { acc += seg; continue; }
+        t = (want - acc) / seg;
+        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+        *px = ax + (bx - ax) * t;
+        *pz = az + (bz - az) * t;
+        *br = gr_bearing(ax, az, bx, bz);
+        return 1;
+    }
+    return 0;
+}
+
+/* Does way `ra` have a same-name, different-id, ANTI-parallel one-way partner
+ * at median distance over at least two of three arclength samples, all on the
+ * same side? `idx[g0..g1]` is the same-name group, so the scan is per name and
+ * not over the whole graph. */
+static int gr_way_divided(int ra, const int *idx, int g0, int g1)
+{
+    const GrRoad *A = &s_g.road[ra];
+    const double lo = GR_MED_MIN_M * GR_UNITS_PER_METRE;
+    const double hi = GR_MED_MAX_M * GR_UNITS_PER_METRE;
+    int t, hits = 0, side_sum = 0;
+    if (!A->oneway || A->ring || A->count < 2) return 0;
+    for (t = 1; t <= 3; t++) {
+        double px = 0.0, pz = 0.0, rbr = 0.0, lx, lz;
+        int b, side = 0, found = 0;
+        if (!gr_way_at_frac(A, (double)t * 0.25, &px, &pz, &rbr)) continue;
+        lx =  cos(rbr); lz = -sin(rbr);    /* left of travel, gr_bearing frame */
+        for (b = g0; b <= g1 && !found; b++) {
+            const int rb = idx[b];
+            const GrRoad *B = &s_g.road[rb];
+            double pbr = 0.0, cx = 0.0, cz = 0.0, d, dot;
+            if (!B->oneway || B->ring || B->count < 2) continue;
+            if (gr_same_way(ra, rb)) continue;
+            d = gr_road_near_at(B, px, pz, &pbr, &cx, &cz);
+            if (d < lo || d > hi) continue;
+            if (gr_angdiff_deg(rbr + M_PI, pbr) > GR_MED_ANTI_TOL_DEG) continue;
+            /* ... and the whole cross-section has to fit the street. */
+            if (!gr_divided_fits(A->namek, d,
+                                 (double)(A->lanes_osm > 0 ? A->lanes_osm : 2)
+                                     * GR_LANE_WIDTH * 0.5,
+                                 (double)(B->lanes_osm > 0 ? B->lanes_osm : 2)
+                                     * GR_LANE_WIDTH * 0.5, NULL, NULL))
+                continue;
+            dot  = (cx - px) * lx + (cz - pz) * lz;
+            side = (dot > 0.0) ? 1 : -1;
+            found = 1;
+        }
+        if (found) { hits++; side_sum += side; }
+    }
+    return hits >= 2 && (side_sum == hits || side_sum == -hits);
+}
+
+static int gr_div_name_cmp(const void *a, const void *b)
+{
+    const char *na = s_g.road[*(const int *)a].name;
+    const char *nb = s_g.road[*(const int *)b].name;
+    if (!na) return nb ? 1 : 0;
+    if (!nb) return -1;
+    return strcmp(na, nb);
+}
+
+static void gr_mark_divided_carriageways(void)
+{
+    int *idx;
+    int i, g0, n_div = 0, n_wide = 0;
+    if (s_g.n_roads < 2) return;
+    idx = (int *)malloc((size_t)s_g.n_roads * sizeof(int));
+    if (!idx) return;
+    for (i = 0; i < s_g.n_roads; i++) idx[i] = i;
+    qsort(idx, (size_t)s_g.n_roads, sizeof(int), gr_div_name_cmp);
+    for (g0 = 0; g0 < s_g.n_roads; ) {
+        const char *nm = s_g.road[idx[g0]].name;
+        int g1 = g0, a;
+        while (g1 + 1 < s_g.n_roads && nm && s_g.road[idx[g1 + 1]].name &&
+               !strcmp(s_g.road[idx[g1 + 1]].name, nm)) g1++;
+        if (!nm || !nm[0] || g1 == g0) { g0 = g1 + 1; continue; }
+        for (a = g0; a <= g1; a++) {
+            GrRoad *A = &s_g.road[idx[a]];
+            if (!gr_way_divided(idx[a], idx, g0, g1)) continue;
+            A->divided = 1;
+            n_div++;
+        }
+        g0 = g1 + 1;
+    }
+    free(idx);
+
+    /* ---- the carriageway, now that `divided` is known ----------------------
+     *
+     * [ROUND 1012 D2] Round 1011 C2's place table states a figure PER
+     * CARRIAGEWAY -- its own comment says so: "a divided one is then 10 +
+     * median + 10, which is the 30 m line with a 10 m median". The resolution
+     * at load time could not act on that, because whether a way IS one
+     * carriageway is not knowable until every way is loaded. So it applied the
+     * same 10 m to all three cases, which is right for exactly one of them:
+     *
+     *   DIVIDED       half a street. Takes its OWN OSM count, not the table --
+     *                 otherwise two 10.47 m carriageways eat the 11.39 m
+     *                 between Diagonal 73's centrelines and leave 0.92 m of
+     *                 median, which is the bug this round opened with.
+     *   AVENIDA or    a whole avenida, both directions, no mapped median. The
+     *   DIAGONAL,     table figure is per carriageway and this way holds both,
+     *   undivided     so it gets TWICE it -- 20.9 m, which against the 30 m
+     *                 line leaves 4.5 m of vereda a side. At the single
+     *                 figure it got 10.47 m, the frontage rule was asked for
+     *                 9.77 m of pavement, DECLINED on its own 6 m ceiling and
+     *                 fell through to the 3 m class default -- so the building
+     *                 line landed at 8.2 m from the centreline and a 30 m
+     *                 avenida was built as a 16.5 m street. That is "it is
+     *                 still rendered as one single street" for the stretches
+     *                 OSM never split.
+     *   everything    unchanged: the round-1011 answer.
+     *   else
+     *
+     * MEASURED on La Plata's 2291 ways: 394 avenida + 194 diagonal are
+     * divided, 158 avenida + 44 diagonal are not. The facade march gives
+     * Avenida 19 29.5 m, Avenida 7 31.5 m and Avenida 44 30.0 m of real
+     * building-to-building width, so the 30 m row they are being fitted to is
+     * the one the city has.
+     *
+     * A TAGGED width still wins outright in every case: it is a measurement of
+     * this way, and nothing derived may overrule one. A COUNTED lane number is
+     * still never lowered. */
+    if (td5_env_flag_on("TD5RE_GEO_REAL_CARRIAGEWAY") && s_g.proj.upm > 0.0) {
+        for (i = 0; i < s_g.n_roads; i++) {
+            GrRoad *A = &s_g.road[i];
+            if (A->width_lanes > 0) continue;        /* a measurement wins */
+            if (A->divided) {
+                /* TD5RE_GEO_DIVIDED_LANES=0 pins the round-1011 answer (the
+                 * place floor on both carriageways) for a one-knob A/B. */
+                if (A->lanes_osm > 0 && td5_env_flag_on("TD5RE_GEO_DIVIDED_LANES"))
+                    A->lanes = A->lanes_osm;
+                continue;
+            }
+            if (A->namek == TD5_GEO_NAMEK_AVENIDA ||
+                A->namek == TD5_GEO_NAMEK_DIAGONAL) {
+                const double tm = td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN,
+                                                           A->namek);
+                const double mul = (double)td5_env_int(
+                    "TD5RE_GEO_AVENUE_WIDE_X10", GR_AV_WIDE_X10, 10, 30) * 0.1;
+                int want;
+                if (tm <= 0.0) continue;
+                want = (int)floor(tm * mul * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
+                if (A->counted && want < A->lanes_osm) want = A->lanes_osm;
+                if (want >= 1 && want <= GR_MAX_LANES) { A->lanes = want; n_wide++; }
+            }
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "geo route: %d of %d way(s) are one carriageway of a "
+              "divided street (same name, anti-parallel one-way partner "
+              "%.0f..%.0f m away, cross-section inside the building line): each "
+              "keeps its OWN OSM lane count. %d undivided avenida/diagonal "
+              "way(s) carry BOTH carriageways and take twice the place figure",
+              n_div, s_g.n_roads, GR_MED_MIN_M, GR_MED_MAX_M, n_wide);
 }
 
 /* ---- [ROUND 1010 AVENUES] the ways the ROUTE ITSELF drives on --------------
@@ -2154,6 +2475,62 @@ static int gr_route_owns_way(int ri)
     return 0;
 }
 
+/* [ROUND 1012 D2] TD5RE_GEO_AVENUE_PROBE=1 dumps the detector's own working
+ * numbers: every vertex run it forms, every gate that refuses one with the
+ * value that failed, every sample's distance and side, and the per-span
+ * continuity chain. A gate is then fixed against a measurement instead of
+ * against a guess. DEFAULT OFF -- it is several hundred log lines. */
+static int gr_av_probe(void)
+{
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_flag_off("TD5RE_GEO_AVENUE_PROBE");
+    return s_on;
+}
+
+/* [ROUND 1012 D2] How many vertices on NO mapped way a run may bridge. A bare
+ * junction node carries no way and no name; two is what step 1b allowed before
+ * this round and nothing measured wants more. */
+#define GR_MED_BRIDGE_UNNAMED  2
+
+/* [ROUND 1012 D2] Are the vertices strictly between two same-name runs also on
+ * that street?
+ *
+ * ROOT CAUSE of "Diagonal 73 ... is still rendered as one single street".
+ *
+ * Step 1a keeps only runs of >= 2 CONSECUTIVE vertices on ONE way, and step 1b
+ * used to join two runs only when the index gap was at most 2. MEASURED on
+ * Mariano's route (TD5RE_GEO_AVENUE_PROBE, 102 route vertices): Diagonal 73
+ * occupies raw vertices 5..27, and because OSM splits it at every crossing,
+ * TEN of those vertices are a run of ONE and are dropped by 1a. What 1b then
+ * saw was three runs -- 5..8 (89 m), 15..17 (178 m), 20..26 (69 m) -- separated
+ * by gaps of 6 and 2 DROPPED vertices. The 6-vertex gap failed `<= 2`, so the
+ * street reached the scorer as three pieces, two of them under the 120 m floor.
+ * Only the middle 178 m survived, which is exactly the 51 spans (163..213) that
+ * got a median, and the rest of Diagonal 73 was built as a plain street.
+ *
+ * The index gap was the wrong question. A gap of dropped vertices that are all
+ * on the SAME STREET is not a gap at all. A gap containing a DIFFERENT street
+ * is a real break and must still split the run -- which is what keeps the two
+ * Avenida 13 runs apart across Plaza Maximo Paz, and what the round-1010 false
+ * positives needed. So the bridge is tested BY NAME, and only a vertex on no
+ * mapped way at all spends the old budget. */
+static int gr_run_bridge_ok(const int *road_id, int from, int to,
+                            const char *name)
+{
+    int q, unmapped = 0;
+    if (!name || !name[0]) return 0;
+    for (q = from + 1; q < to; q++) {
+        const int ri = road_id[q];
+        const char *nm = (ri >= 0 && ri < s_g.n_roads) ? s_g.road[ri].name : NULL;
+        if (nm && nm[0]) {
+            if (strcmp(nm, name)) return 0;      /* a DIFFERENT street: break */
+            continue;
+        }
+        if (++unmapped > GR_MED_BRIDGE_UNNAMED) return 0;
+    }
+    return 1;
+}
+
 /* geo_forks.detect_medians. `road_id[k]` is the way the route's k-th vertex
  * arrived on, `px/pz[k]` its position in the PLACE frame. Returns the number of
  * medians written to `out`, longest first then overlap-filtered, finally sorted
@@ -2167,27 +2544,56 @@ static int gr_detect_medians(const int *road_id, const double *px,
 
     if (n < 2 || !out || max < 1 || upm <= 0.0) return 0;
 
-    /* 1a. maximal runs of >= 2 consecutive vertices on one way. */
+    /* 1a. maximal runs of >= 2 consecutive vertices on one way (a single
+     * vertex may extend a run but may not start one -- see gr_run_bridge_ok). */
     for (i = 0; i < n; ) {
         int e = i;
         while (e + 1 < n && road_id[e + 1] == road_id[i]) e++;
-        if (e - i + 1 >= 2 && road_id[i] >= 0 && road_id[i] < s_g.n_roads &&
-            n_run < GR_MED_MAX_RUNS) {
-            /* 1b. join onto the previous run when the NAME matches and the gap
-             * is at most 2 vertices: OSM splits one avenue at every junction,
-             * so an avenue reaches the route as a dozen runs that are one road
-             * to a driver. */
+        if (road_id[i] >= 0 && road_id[i] < s_g.n_roads &&
+            (e - i + 1 >= 2 || n_run > 0)) {
+            /* 1b. join onto the previous run when the NAME matches and every
+             * vertex between the two is on that same street: OSM splits one
+             * avenue at every junction, so an avenue reaches the route as a
+             * dozen runs that are one road to a driver. [ROUND 1012 D2] a
+             * single-vertex group may EXTEND a run it belongs to even though
+             * it may not start one -- that is how the street's last slice
+             * (raw 27 on Diagonal 73) stops being thrown away. */
             const char *nm = s_g.road[road_id[i]].name;
             if (n_run > 0 && nm && s_g.road[run_r[n_run - 1]].name &&
                 !strcmp(nm, s_g.road[run_r[n_run - 1]].name) &&
-                i - run_b[n_run - 1] <= 2) {
+                gr_run_bridge_ok(road_id, run_b[n_run - 1], i, nm)) {
                 run_b[n_run - 1] = e;
-            } else {
+            } else if (e - i + 1 >= 2 && n_run < GR_MED_MAX_RUNS) {
                 run_a[n_run] = i; run_b[n_run] = e; run_r[n_run] = road_id[i];
                 n_run++;
+            } else if (gr_av_probe()) {
+                TD5_LOG_I(LOG_TAG, "  [AVPROBE] raw %3d..%-3d DROPPED by 1a: "
+                          "single vertex that joins no run (way %s)", i, e,
+                          nm ? nm : "(unnamed)");
             }
+        } else if (gr_av_probe()) {
+            const int ok = road_id[i] >= 0 && road_id[i] < s_g.n_roads;
+            TD5_LOG_I(LOG_TAG, "  [AVPROBE] raw %3d..%-3d DROPPED by 1a: %s "
+                      "(%d vertex/vertices, way %s)", i, e,
+                      (e - i + 1 < 2) ? "fewer than 2 consecutive vertices"
+                                      : "vertex is on no way",
+                      e - i + 1, ok && s_g.road[road_id[i]].name
+                               ? s_g.road[road_id[i]].name : "(unnamed)");
         }
         i = e + 1;
+    }
+    if (gr_av_probe()) {
+        TD5_LOG_I(LOG_TAG, "[AVPROBE] %d run(s) formed from %d route vertices",
+                  n_run, n);
+        for (i = 0; i < n_run; i++) {
+            double u = 0.0;
+            for (k = run_a[i]; k < run_b[i]; k++)
+                u += hypot(px[k + 1] - px[k], pz[k + 1] - pz[k]);
+            TD5_LOG_I(LOG_TAG, "  [AVPROBE] run %2d raw %3d..%-3d %7.1f m  %s",
+                      i, run_a[i], run_b[i], u / upm,
+                      s_g.road[run_r[i]].name ? s_g.road[run_r[i]].name
+                                              : "(unnamed)");
+        }
     }
 
     /* 2. score each merged run against its same-name peers. */
@@ -2217,7 +2623,13 @@ static int gr_detect_medians(const int *road_id, const double *px,
         for (k = k0; k < k1; k++)
             run_units += hypot(px[k + 1] - px[k], pz[k + 1] - pz[k]);
         run_m = run_units / upm;
-        if (run_m < GR_MED_MIN_LEN_M) continue;
+        if (run_m < GR_MED_MIN_LEN_M) {
+            if (gr_av_probe())
+                TD5_LOG_I(LOG_TAG, "[AVPROBE] \"%s\" raw %d..%d REJECT length: "
+                          "%.0f m < %.0f m", name, k0, k1, run_m,
+                          GR_MED_MIN_LEN_M);
+            continue;
+        }
 
         step = (k1 - k0) / 12;
         if (step < 1) step = 1;
@@ -2264,9 +2676,24 @@ static int gr_detect_medians(const int *road_id, const double *px,
                     peer_hits_id[slot] = cand_j; peer_hits_n[slot] = 0;
                 }
                 if (slot >= 0) peer_hits_n[slot]++;
+                if (gr_av_probe())
+                    TD5_LOG_I(LOG_TAG, "  [AVPROBE] \"%s\" raw %d..%d sample k=%d"
+                              " peer way %.0f at %.2f m on the %s", name, k0, k1,
+                              k, s_g.road[cand_j].id, cand_m,
+                              s_side[n_s - 1] > 0 ? "left" : "right");
+            } else if (gr_av_probe()) {
+                TD5_LOG_I(LOG_TAG, "  [AVPROBE] \"%s\" raw %d..%d sample k=%d "
+                          "NO PEER", name, k0, k1, k);
             }
         }
-        if (!total || (double)hits / (double)total < GR_MED_MIN_COVER) continue;
+        if (!total || (double)hits / (double)total < GR_MED_MIN_COVER) {
+            if (gr_av_probe())
+                TD5_LOG_I(LOG_TAG, "[AVPROBE] \"%s\" raw %d..%d REJECT cover: "
+                          "%d/%d = %.2f < %.2f", name, k0, k1, hits, total,
+                          total ? (double)hits / (double)total : 0.0,
+                          GR_MED_MIN_COVER);
+            continue;
+        }
 
         /* ---- [ROUND 1010 AVENUES] STABILITY: one side, bounded spread -------
          *
@@ -2452,12 +2879,32 @@ static int gr_poly_at(const GrPts *p, const double *frac, double f,
  * 3.73..15.11 m -- one carriageway for part of the run and a different way for
  * the rest. A median does not double in width over 3.5 m of road.
  *
- * A candidate further than GR_AV_MAX_STEP from `want` is refused outright, so
+ * A candidate further than the step cap from `want` is refused outright, so
  * the caller ends the run there: that is the honest reading of "the mapped
- * opposite carriageway stops here". */
+ * opposite carriageway stops here".
+ *
+ * [ROUND 1012 D2] THE CAP IS A PROXY; THE WAY ID IS THE THING.
+ *
+ * The cap exists to refuse A JUMP TO A DIFFERENT SLICE OF THE STREET, and it
+ * tests for that by distance because a flat step cap was the cheapest stand-in.
+ * It is not the question. MEASURED on Mariano's route: Avenida 13's 612 m run
+ * (raw 60..73) seeds at its 14.2 m MEAN, its first span measures 19.65 m under
+ * the wider seed cap, and ONE WAY (OSM 278250607) then tapers smoothly away
+ * from the race road -- 19.65, 17.63, 15.97, 15.44, 15.23, 15.21 m -- back
+ * towards the run's own measured range. The second step is 0.87 m per span,
+ * barely over GR_AV_MAX_STEP (375 units = 0.87 m), so the chain broke at span
+ * 385 with ONE span kept and the whole 612 m avenue was dropped.
+ *
+ * A single mapped way cannot be "a different slice of the street" -- it is the
+ * same OSM record the previous span used. So `want_way` (the id the previous
+ * span settled on, 0 for the seed) gets the RUN'S OWN MEASURED SPREAD as its
+ * cap, `cap_same`, instead of the flat step; everything else still has to
+ * clear `cap_other`. Both bounds are still inside GR_MED_MIN_M..GR_MED_MAX_M
+ * and the caller's overlap test, so neither can run away. */
 static int gr_peer_offset_at(const char *name, int want_side, double want,
-                             double cap, double x, double z,
-                             double tx, double tz, double *off, int *lanes)
+                             double cap_other, double cap_same, double want_way,
+                             double x, double z, double tx, double tz,
+                             double *off, int *lanes, double *way)
 {
     const double lx = tz, lz = -tx;        /* left of travel, tg_road_edge's  */
     const double lo = GR_MED_MIN_M * GR_UNITS_PER_METRE;
@@ -2468,7 +2915,7 @@ static int gr_peer_offset_at(const char *name, int want_side, double want,
     if (want < 0.0) want = -want;
     for (j = 0; j < s_g.n_roads; j++) {
         const GrRoad *pr = &s_g.road[j];
-        double cx = 0.0, cz = 0.0, d, dot, err;
+        double cx = 0.0, cz = 0.0, d, dot, err, allow;
         if (!pr->oneway || pr->ring) continue;
         if (!pr->name || strcmp(pr->name, name)) continue;
         if (gr_route_owns_way(j)) continue;
@@ -2477,12 +2924,16 @@ static int gr_peer_offset_at(const char *name, int want_side, double want,
         dot = (cx - x) * lx + (cz - z) * lz;
         if ((dot > 0.0 ? 1 : -1) != want_side) continue;
         err = (d > want) ? d - want : want - d;
+        allow = (pr->has_id && want_way != 0.0 && pr->id == want_way)
+              ? cap_same : cap_other;
+        if (err > allow) continue;
         if (err >= best) continue;
         best = err; best_d = d; best_j = j;
     }
-    if (best_j < 0 || best > cap) return 0;
+    if (best_j < 0) return 0;
     if (off)   *off   = best_d * (double)want_side;
     if (lanes) *lanes = s_g.road[best_j].lanes > 0 ? s_g.road[best_j].lanes : 2;
+    if (way)   *way   = s_g.road[best_j].has_id ? s_g.road[best_j].id : 0.0;
     return 1;
 }
 
@@ -2974,6 +3425,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     const int base = s_last.n_av_span;
                     int s0 = a < b ? a : b, s1 = a < b ? b : a, s, kept = 0;
                     const char *why = NULL;
+                    char fit_why[256];
 
                     /* Keep clear of the start grid and of the ring's tail, the
                      * same two margins every span-indexed sidecar respects. */
@@ -2982,6 +3434,52 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     if (s1 - s0 + 1 < GR_AV_MIN_SPANS)
                         why = "it does not reach the span floor clear of the "
                               "grid and the ring tail";
+
+                    /* [ROUND 1012 D2] THE CROSS-SECTION MUST FIT THE STREET.
+                     * Asked here over the RUN's mean spacing and the race
+                     * road's own CONDITIONED width, and again per way at graph
+                     * load. See gr_divided_fits for the measurement behind it. */
+                    if (!why) {
+                        const double own_h = ((s0 < c->nodes && c->lanes_out)
+                                              ? (double)c->lanes_out[s0] : 2.0)
+                                           * GR_LANE_WIDTH * 0.5;
+                        const double far_h = (double)(med[j].peer_lanes > 0
+                                                      ? med[j].peer_lanes : 2)
+                                           * GR_LANE_WIDTH * 0.5;
+                        double need = 0.0, line = 0.0;
+                        if (!gr_divided_fits(td5_geo_roads_namek_of(med[j].name),
+                                             med[j].gap_m * GR_UNITS_PER_METRE,
+                                             own_h, far_h, &need, &line)) {
+                            snprintf(fit_why, sizeof fit_why,
+                                     "the street's %.0f m building line cannot "
+                                     "hold two carriageways and a median "
+                                     "(%.1f + %.1f + %.1f + pavements = %.1f m)"
+                                     " -- this is one street drawn as two "
+                                     "lines, not a divided avenue",
+                                     line / GR_UNITS_PER_METRE,
+                                     own_h / GR_UNITS_PER_METRE, med[j].gap_m,
+                                     far_h / GR_UNITS_PER_METRE,
+                                     need / GR_UNITS_PER_METRE);
+                            why = fit_why;
+                        } else if (gr_av_probe()) {
+                            TD5_LOG_I(LOG_TAG, "[AVPROBE] %s FITS: need %.1f m "
+                                      "of a %.0f m line, %.2f m of pavement a "
+                                      "side", med[j].name,
+                                      need / GR_UNITS_PER_METRE,
+                                      line / GR_UNITS_PER_METRE,
+                                      (line - med[j].gap_m * GR_UNITS_PER_METRE
+                                       - own_h - far_h) * 0.5
+                                      / GR_UNITS_PER_METRE);
+                        }
+                    }
+                    if (gr_av_probe())
+                        TD5_LOG_I(LOG_TAG, "[AVPROBE] %s raw %d..%d -> frac "
+                                  "%.4f..%.4f -> spans %d..%d (%d), side %s, "
+                                  "seed %.1f m (%.1f..%.1f)", med[j].name,
+                                  med[j].k0, med[j].k1, f0, f1, s0, s1,
+                                  s1 - s0 + 1, want > 0 ? "left" : "right",
+                                  med[j].gap_m, med[j].gap_min_m,
+                                  med[j].gap_max_m);
 
                     /* The run's own measured spacing seeds the continuity
                      * chain, so the first span is anchored on the carriageway
@@ -3006,18 +3504,32 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     const double seed_cap = GR_AV_MAX_STEP
                         + (med[j].gap_max_m - med[j].gap_min_m) * GR_UNITS_PER_METRE;
                     double prev = med[j].gap_m * GR_UNITS_PER_METRE;
+                    /* [ROUND 1012 D2] the OSM way the previous span settled on.
+                     * Staying on it is the real continuity test; see
+                     * gr_peer_offset_at. 0 = none yet (the seed). */
+                    double prev_way = 0.0;
+                    /* [ROUND 1012 D2] the band the DETECTOR scored, widened by
+                     * its own spread and one lane. See GR_AV_BAND_SLACK. */
+                    const double band_lo = med[j].gap_min_m * GR_UNITS_PER_METRE
+                                         - GR_AV_BAND_SLACK;
+                    const double band_hi = med[j].gap_max_m * GR_UNITS_PER_METRE
+                                         + GR_AV_BAND_SLACK;
                     int miss = 0, seeded = 0, last_ok = s0 - 1;
                     for (s = s0; !why && s <= s1 &&
                                  s_last.n_av_span < GR_AV_MAX_SPANS; s++) {
                         double f = (spans1 > lead1)
                                  ? (double)(s - lead1) / (double)(spans1 - lead1)
                                  : 0.0;
-                        double qx, qz, qtx, qtz, off, a, half;
+                        double qx, qz, qtx, qtz, off, a, half, hit_way = 0.0;
                         int plan = 2;
                         GrAvSpan *g;
                         if (rev1) f = 1.0 - f;
-                        if (!gr_poly_at(&rawp, frac, f, &qx, &qz, &qtx, &qtz))
+                        if (!gr_poly_at(&rawp, frac, f, &qx, &qz, &qtx, &qtz)) {
+                            if (gr_av_probe())
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: "
+                                          "gr_poly_at failed", med[j].name, s);
                             continue;
+                        }
                         if (rev1) { qtx = -qtx; qtz = -qtz; }
                         /* The opposite carriageway has ENDED here (or jumped to
                          * a different way, which from the ground is the same
@@ -3026,7 +3538,29 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                          * the median end where the OSM ways end. */
                         if (!gr_peer_offset_at(med[j].name, want, prev,
                                                seeded ? GR_AV_MAX_STEP : seed_cap,
-                                               qx, qz, qtx, qtz, &off, &plan)) {
+                                               seed_cap, prev_way,
+                                               qx, qz, qtx, qtz, &off, &plan,
+                                               &hit_way)) {
+                            if (gr_av_probe()) {
+                                double raw_off = 0.0, raw_way = 0.0;
+                                int raw_lan = 0, got;
+                                got = gr_peer_offset_at(med[j].name, want, prev,
+                                                        1e30, 1e30, prev_way,
+                                                        qx, qz, qtx, qtz,
+                                                        &raw_off, &raw_lan,
+                                                        &raw_way);
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: NO "
+                                          "PEER within cap %.0f of want %.0f "
+                                          "(seeded=%d); uncapped nearest-to-want"
+                                          " = %s %.0f u (%.2f m) err %.0f",
+                                          med[j].name, s,
+                                          seeded ? GR_AV_MAX_STEP : seed_cap,
+                                          prev, seeded, got ? "found" : "NONE",
+                                          got ? raw_off : 0.0,
+                                          got ? fabs(raw_off) / GR_UNITS_PER_METRE
+                                              : 0.0,
+                                          got ? fabs(fabs(raw_off) - prev) : 0.0);
+                            }
                             if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
                             break;
                         }
@@ -3038,15 +3572,48 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                          * will build, so this is the same arithmetic
                          * td5_tg_avenue.c does and not an approximation of it. */
                         a    = (off < 0.0) ? -off : off;
+                        /* [ROUND 1012 D2] still the median the detector scored?
+                         * See GR_AV_BAND_SLACK. */
+                        if (a < band_lo || a > band_hi) {
+                            if (gr_av_probe())
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: OUT "
+                                          "OF BAND: %.0f u (%.2f m) outside "
+                                          "%.0f..%.0f u (%.2f..%.2f m)",
+                                          med[j].name, s, a,
+                                          a / GR_UNITS_PER_METRE,
+                                          band_lo, band_hi,
+                                          band_lo / GR_UNITS_PER_METRE,
+                                          band_hi / GR_UNITS_PER_METRE);
+                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            break;
+                        }
                         half = ((s < c->nodes && c->lanes_out)
                                 ? (double)c->lanes_out[s] : 2.0)
                              * GR_LANE_WIDTH * 0.5;
                         if (a < half + (double)plan * GR_LANE_WIDTH * 0.5
                                 + GR_AV_MIN_MEDIAN) {
+                            if (gr_av_probe())
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: "
+                                          "OVERLAP: gap %.0f u (%.2f m) < own "
+                                          "half %.0f + peer half %.0f (%d lane) "
+                                          "+ min median %.0f (seeded=%d)",
+                                          med[j].name, s, a,
+                                          a / GR_UNITS_PER_METRE, half,
+                                          (double)plan * GR_LANE_WIDTH * 0.5,
+                                          plan, GR_AV_MIN_MEDIAN, seeded);
                             if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
                             break;
                         }
-                        prev    = a;
+                        if (gr_av_probe())
+                            TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: OK off "
+                                      "%.0f u (%.2f m) peer %d lane(s) way %.0f"
+                                      "%s", med[j].name, s, off,
+                                      fabs(off) / GR_UNITS_PER_METRE, plan,
+                                      hit_way,
+                                      (prev_way != 0.0 && hit_way != prev_way)
+                                          ? " (CHANGED)" : "");
+                        prev     = a;
+                        prev_way = hit_way;
                         miss    = 0;
                         seeded  = 1;
                         last_ok = s;
@@ -3200,9 +3767,19 @@ static cJSON *gr_json_proj(const GeoProj *p)
     return o;
 }
 
-static int gr_write_json(const char *path, cJSON *root)
+/* Consumes `root` either way.
+ *
+ * [ROUND 1012 D2] PRETTY IS FOR THE FILES A HUMAN OPENS. ROUTE.JSON,
+ * ROUTE_RAW.JSON, FORKS.JSON and AVENUES.JSON are small, are read by eye when
+ * something looks wrong, and stay indented. The REPROJECTED VECTOR LAYERS are
+ * machine-only derived copies of the source, and cJSON_Print spends roughly
+ * half the bytes on indentation: with the Overture + Open Buildings import
+ * taking La Plata's BUILDINGS.JSON from 2326 footprints to 90840, that is tens
+ * of megabytes of whitespace written, flushed and re-parsed on every build. */
+static int gr_write_json_ex(const char *path, cJSON *root, int pretty)
 {
-    char *txt = root ? cJSON_Print(root) : NULL;
+    char *txt = root ? (pretty ? cJSON_Print(root)
+                               : cJSON_PrintUnformatted(root)) : NULL;
     int ok = 0;
     if (txt) {
         ok = gr_write_atomic(path, txt, strlen(txt));
@@ -3210,6 +3787,11 @@ static int gr_write_json(const char *path, cJSON *root)
     }
     cJSON_Delete(root);
     return ok;
+}
+
+static int gr_write_json(const char *path, cJSON *root)
+{
+    return gr_write_json_ex(path, root, 1);
 }
 
 static int gr_write_route_raw(const char *dir)
@@ -3821,40 +4403,87 @@ static double gr_corridor_nodata_pct(const GrRaster *h, const GrPts *nodes,
 
 /* Re-project every world-unit coordinate of ONE array into the route frame,
  * in place. Returns the entry count, or -1 when the key is absent or is not
- * an array. */
+ * an array.
+ *
+ * WALK THE LIST, NEVER INDEX IT. A cJSON array is a singly-linked list and
+ * cJSON_GetArrayItem walks it from the head every call (get_array_item,
+ * deps/cjson/cJSON.c:1888), so `for (i = 0; i < n; i++) GetArrayItem(arr, i)`
+ * is O(n^2) in POINTER CHASES, not in work. It cost nothing while La Plata's
+ * BUILDINGS.JSON held 2326 footprints (2.7M hops, lost in the noise). The
+ * Overture + Open Buildings import takes that to 90840, which is 4.1 BILLION
+ * hops for this one loop, on a linked list that misses cache on every step.
+ * cJSON_ArrayForEach is the same traversal done once. */
+
+/* [ROUND 1012 D2] A reprojected coordinate, quantised before it is stored.
+ *
+ * WHY: a rigid transform of a tidy source number produces an untidy one, and
+ * cJSON prints a double at %1.15g, so `281790.6` in the source comes back as
+ * `675022.43498297291` in the derived copy. That is 11 decimal places of a
+ * WORLD UNIT, and a world unit is 1/430 m -- so the derived file was spending
+ * nine characters per coordinate on 2e-14 metres.
+ *
+ * MEASURED on a 90840-footprint BUILDINGS.JSON: the derived copy came out
+ * LARGER than its own 34.9 MB source, at 50.3 MB, which is over the 48 MB
+ * GEOB_MAX_JSON the buildings reader refuses a file at -- so the layer would
+ * have been silently skipped and the track built with no buildings at all.
+ *
+ * REDUCING PRECISION DOES NOT HELP, and this was measured twice before it was
+ * understood. cJSON's print_number (deps/cjson/cJSON.c:553) tries "%1.15g" and
+ * only falls back to "%1.17g" when that does not round-trip. A La Plata world
+ * coordinate has SIX integer digits, so %1.15g always spends the remaining
+ * nine on decimals: the double nearest 675022.434 prints as
+ * "675022.433999999", which re-reads as a different double, so the check fails
+ * and 17 digits go out. Rounding the value to 3 decimals changed the digits
+ * and not the length (50.3 MB -> 50.5 MB).
+ *
+ * WHAT DOES WORK is print_number's INTEGER fast path at cJSON.c:573
+ * (`d == (double)item->valueint` -> "%d"). Quantising to a whole world unit
+ * makes every coordinate take it: "675022" instead of "675022.43399999989",
+ * 6 bytes instead of 18.
+ *
+ * THE COST, stated plainly: one world unit is 1/430 m = 2.3 mm, so a derived
+ * vertex can move by up to 1.2 mm from where the rigid transform put it. The
+ * SOURCE files are not touched, the route graph reads the SOURCE (gr_graph_load
+ * takes td5_geo_source_path), and the conditioner never sees these numbers --
+ * this is only the machine-readable copy the generator draws scenery from. A
+ * building facade placed 1 mm differently is not observable; a derived
+ * BUILDINGS.JSON the reader REFUSES is (see the measurement above). */
+static double gr_quant(double v)
+{
+    return gr_round_even(v);
+}
+
 static int gr_reproject_arr(cJSON *root, const char *array_key,
                             const GeoProj *np, const GeoProj *op)
 {
     cJSON *arr = root ? cJSON_GetObjectItem(root, array_key) : NULL;
-    int i, n;
+    cJSON *e;
+    int n = 0;
 
     if (!arr || !cJSON_IsArray(arr)) return -1;
-    n = cJSON_GetArraySize(arr);
-    for (i = 0; i < n; i++) {
-        cJSON *e = cJSON_GetArrayItem(arr, i);
-        cJSON *pts = e ? cJSON_GetObjectItem(e, "points") : NULL;
-        cJSON *ex = e ? cJSON_GetObjectItem(e, "x") : NULL;
-        cJSON *ez = e ? cJSON_GetObjectItem(e, "z") : NULL;
+    cJSON_ArrayForEach(e, arr) {
+        cJSON *pts = cJSON_GetObjectItem(e, "points");
+        cJSON *ex  = cJSON_GetObjectItem(e, "x");
+        cJSON *ez  = cJSON_GetObjectItem(e, "z");
         double la, lo, x, z;
+        n++;
         if (pts && cJSON_IsArray(pts)) {
-            const int m = cJSON_GetArraySize(pts);
-            int k;
-            for (k = 0; k < m; k++) {
-                cJSON *p  = cJSON_GetArrayItem(pts, k);
-                cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
-                cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
+            cJSON *p;
+            cJSON_ArrayForEach(p, pts) {
+                cJSON *px = cJSON_GetObjectItem(p, "x");
+                cJSON *pz = cJSON_GetObjectItem(p, "z");
                 if (!cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) continue;
                 gr_proj_to_latlon(op, px->valuedouble, pz->valuedouble, &la, &lo);
                 gr_proj_to_world(np, la, lo, &x, &z);
-                cJSON_SetNumberValue(px, x);
-                cJSON_SetNumberValue(pz, z);
+                cJSON_SetNumberValue(px, gr_quant(x));
+                cJSON_SetNumberValue(pz, gr_quant(z));
             }
         }
         if (cJSON_IsNumber(ex) && cJSON_IsNumber(ez)) {
             gr_proj_to_latlon(op, ex->valuedouble, ez->valuedouble, &la, &lo);
             gr_proj_to_world(np, la, lo, &x, &z);
-            cJSON_SetNumberValue(ex, x);
-            cJSON_SetNumberValue(ez, z);
+            cJSON_SetNumberValue(ex, gr_quant(x));
+            cJSON_SetNumberValue(ez, gr_quant(z));
         }
     }
     return n;
@@ -4096,7 +4725,9 @@ int td5_geo_derived_migrate(const char *slug)
             break;
         }
         snprintf(path, sizeof path, "%s/%s", dst_dir, k_fix[i].file);
-        if (!gr_write_json(path, tree)) { failed = 1; break; }  /* consumes */
+        /* COMPACT: a reprojected vector layer is a machine-only derived copy.
+         * See gr_write_json_ex. */
+        if (!gr_write_json_ex(path, tree, 0)) { failed = 1; break; }  /* consumes */
         wrote++;
         TD5_LOG_I(LOG_TAG, "geo route:   repaired %s (%d entries) into the "
                   "route frame", k_fix[i].file, n);
@@ -4305,7 +4936,9 @@ int td5_geo_route_commit(void)
     for (i = 0; i < GR_VEC_N; i++) {
         if (!vec[i]) continue;
         snprintf(path, sizeof path, "%s/%s", dst_dir, k_vec[i].file);
-        if (!gr_write_json(path, vec[i])) {          /* consumes the tree */
+        /* COMPACT: these are the reprojected machine-only vector layers.
+         * See gr_write_json_ex. */
+        if (!gr_write_json_ex(path, vec[i], 0)) {    /* consumes the tree */
             vec[i] = NULL;
             gr_commit_refuse("COULD NOT WRITE %s", k_vec[i].file);
             goto done;

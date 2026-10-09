@@ -1690,6 +1690,133 @@ static void tg_geo_city_build_begin(void)
  * reads it too, which is why it is not static. */
 int tg_geo_city_active(void) { return s_geo_city; }
 
+/* ======================================================================== *
+ * [ROUND 1012 D2] OPEN SPACE: where a shipped set piece may NOT stand
+ * ======================================================================== *
+ *
+ * "also there were landmarks on the plaza at the beginning of the race."
+ *
+ * tg_landmarks_place (td5_trackgen.c) picks a span by hash and stands one of
+ * the 24 shipped TD5 set pieces beside the road. It is the SYNTHETIC landmark
+ * path and it knows nothing about the real world: tg_prefab_place refuses only
+ * a bridge, a tunnel and the ends of the walk. On a geo track that puts a
+ * building-sized set piece wherever the hash says, including the middle of a
+ * real square -- L23.lm08, 34 x 27 m, at span 20 on Plaza Miguel de Azcuenaga.
+ *
+ * TWO KINDS OF OPEN SPACE, and the start plaza is the second kind:
+ *
+ *   1. A MAPPED AREA. AREAS.JSON carries 417 polygons with a kind, 82 of them
+ *      park; td5_geob_area_is_plaza already decides which count, and
+ *      td5_geob_points_in_plaza already answers for a point SET. The emitters
+ *      use the same pair, so a set piece and a plaza lawn cannot disagree
+ *      about where the square is.
+ *
+ *   2. A PLAZA RING. MEASURED: "Plaza Miguel de Azcuenaga" has NO polygon in
+ *      AREAS.JSON at all. It exists only as ten ROAD ways carrying that name
+ *      with junction=circular -- a traffic circle around an open centre. The
+ *      area test cannot see it, which is exactly why the set piece landed
+ *      there. So the ring itself is the test: the named group's point cloud
+ *      gives a centre and a radius, and nothing shipped stands inside it.
+ *
+ * The rings are collected once per build into a small table because
+ * tg_prefab_place is called from the landmark walk up to six times per
+ * landmark row and a per-call scan of 2291 ways would be the wrong shape. */
+
+#define TG_GEO_RING_MAX  32
+
+typedef struct { double cx, cz, r; } TG_GeoRing;
+static TG_GeoRing s_geo_ring[TG_GEO_RING_MAX];
+static int        s_geo_n_ring = -1;        /* -1 = not collected yet */
+
+static void tg_geo_rings_collect(void)
+{
+    int n, i, k, q;
+    /* THE ROADS LAYER IS NOT LOADED YET WHEN THE LANDMARK WALK RUNS.
+     *
+     * s_geo_city is latched off td5_geob_sync (buildings + areas), and the
+     * landmark walk runs before anything else asks td5_geo_roads.c for
+     * anything. MEASURED: the first cut collected 0 rings and L23.lm08 stayed
+     * on Plaza Miguel de Azcuenaga, while the AREA half of the test refused
+     * three other sites -- so the two halves were being asked at different
+     * points in the build. td5_geo_roads_sync is idempotent and a no-op once
+     * the slug matches, so asking for it here costs nothing on the second
+     * call and is the only thing that makes the first one answerable. */
+    td5_geo_roads_sync(td5_geo_place_slug());
+    n = td5_geo_roads_count();
+    if (n < 1) return;                 /* leave -1: retry on the next query */
+    s_geo_n_ring = 0;
+    for (i = 0; i < n && s_geo_n_ring < TG_GEO_RING_MAX; i++) {
+        const TD5_GeoRoad *r = td5_geo_roads_get(i);
+        double cx = 0.0, cz = 0.0, rad = 0.0;
+        int np = 0;
+        if (!r || !r->roundabout || r->count < 3 || r->name_id < 0) continue;
+        /* Every way of the ring carries the same name, so fold the WHOLE
+         * named group into one circle -- OSM splits the circle at each arm and
+         * a single arc's own centroid sits on the kerb, not in the middle. */
+        for (q = 0; q < n; q++) {
+            const TD5_GeoRoad *w = td5_geo_roads_get(q);
+            if (!w || !w->roundabout || w->name_id != r->name_id) continue;
+            for (k = 0; k < w->count; k++) {
+                double x, z;
+                if (!td5_geo_roads_point(w, k, &x, &z)) continue;
+                cx += x; cz += z; np++;
+            }
+        }
+        if (np < 3) continue;
+        cx /= (double)np; cz /= (double)np;
+        /* Already folded? The group is walked once per member way. */
+        for (q = 0; q < s_geo_n_ring; q++) {
+            const double dx = s_geo_ring[q].cx - cx, dz = s_geo_ring[q].cz - cz;
+            if (dx * dx + dz * dz < 1.0) break;
+        }
+        if (q < s_geo_n_ring) continue;
+        for (q = 0; q < n; q++) {
+            const TD5_GeoRoad *w = td5_geo_roads_get(q);
+            if (!w || !w->roundabout || w->name_id != r->name_id) continue;
+            for (k = 0; k < w->count; k++) {
+                double x, z, d;
+                if (!td5_geo_roads_point(w, k, &x, &z)) continue;
+                d = hypot(x - cx, z - cz);
+                if (d > rad) rad = d;
+            }
+        }
+        if (rad <= 0.0) continue;
+        s_geo_ring[s_geo_n_ring].cx = cx;
+        s_geo_ring[s_geo_n_ring].cz = cz;
+        s_geo_ring[s_geo_n_ring].r  = rad;
+        s_geo_n_ring++;
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [GEO PLAZA] %d plaza ring(s) (named "
+              "junction=circular/roundabout groups) closed to shipped set "
+              "pieces", s_geo_n_ring);
+}
+
+/* Would a footprint of half-extent `half` centred at (x,z) stand in real open
+ * space? `si` is only the span the window walk is anchored on. Returns 0 on a
+ * synthetic build before touching anything, which is what keeps the synthetic
+ * gate byte-identical. */
+int tg_geo_open_space_at(int si, double x, double z, double half)
+{
+    double px[5], pz[5];
+    int i;
+    if (!s_geo_city) return 0;                 /* MUST be the first statement */
+    if (half < 0.0) half = 0.0;
+    if (s_geo_n_ring < 0) tg_geo_rings_collect();
+    for (i = 0; i < s_geo_n_ring; i++) {
+        /* The piece's own extent counts: a set piece whose corner overhangs a
+         * plaza is still standing in the plaza. */
+        if (hypot(x - s_geo_ring[i].cx, z - s_geo_ring[i].cz)
+            < s_geo_ring[i].r + half) return 1;
+    }
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
+    px[0] = x;        pz[0] = z;
+    px[1] = x - half; pz[1] = z - half;
+    px[2] = x + half; pz[2] = z - half;
+    px[3] = x + half; pz[3] = z + half;
+    px[4] = x - half; pz[4] = z + half;
+    return td5_geob_points_in_plaza(si, px, pz, 5, TD5_GEOB_WIN_A);
+}
+
 /* Outward distance from the centreline at span si for a world point, on side
  * `side` (+1 left of travel). Negative means the point is on the OTHER side. */
 static double tg_geo_outward(const TG_NodeList *nl, int si, double side,

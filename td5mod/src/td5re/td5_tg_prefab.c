@@ -44,6 +44,10 @@ enum { TG_PREFAB_MAX = 64 };
 static TG_PrefabPlace s_pf[TG_PREFAB_MAX];
 static int s_pf_n;
 static long s_pf_emitted;
+/* [ROUND 1012 D2] how many hash-chosen sites were refused for standing in a
+ * real square. Reported, because "the landmark moved" and "the landmark never
+ * had anywhere to go" are different tracks. */
+static int s_pf_plaza_refused;
 
 /* [J7 item 1] "todavia hay edificios que no tienen lados" (Mariano,
  * 2026-10-03). Some of the shipped set pieces in td5_tg_prefab_data.h are OPEN
@@ -125,6 +129,7 @@ void tg_prefab_reset(void)
 {
     s_pf_n = 0;
     s_pf_emitted = 0;
+    s_pf_plaza_refused = 0;
 }
 
 int tg_prefab_count(void) { return s_pf_n; }
@@ -292,7 +297,9 @@ void tg_prefab_report(void)
 {
     int i;
     TD5_LOG_I(LOG_TAG, "trackgen: [PREFAB] %d placed, %ld emitted (of %d "
-              "available set pieces)", s_pf_n, s_pf_emitted, TD5_TG_PREFAB_N);
+              "available set pieces), %d site(s) refused for standing in a "
+              "real square", s_pf_n, s_pf_emitted, TD5_TG_PREFAB_N,
+              s_pf_plaza_refused);
     /* Name them. A bare count cannot distinguish "six plazas" from "four
      * landmarks and two plazas", and those are very different tracks. */
     for (i = 0; i < s_pf_n; i++) {
@@ -336,6 +343,24 @@ int tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
      * has already been conformed near the verge and falls away past it, so
      * using the road's y would float or bury a piece set back this far. */
     y = tg_world_h(x, z);
+
+    /* [ROUND 1012 D2] NOT IN A REAL SQUARE. "there were landmarks on the plaza
+     * at the beginning of the race." These are the SHIPPED TD5 set pieces, laid
+     * by the synthetic landmark walk, which knows nothing about the real world
+     * -- so on a geo track a 34 x 27 m building lands in the middle of Plaza
+     * Miguel de Azcuenaga because the hash said span 20. A square is where a
+     * city does NOT build; the real geometry that belongs there (a mapped
+     * monument, a lawn) comes from the geo emitters. Refusing here is enough on
+     * its own: the caller already tries several hash-chosen spans and gives up
+     * quietly, so the landmark simply moves down the street or does not appear.
+     *
+     * tg_geo_open_space_at returns 0 before touching anything on a synthetic
+     * build, so the synthetic byte-identity contract is unaffected. */
+    if (td5_env_flag_on("TD5RE_GEO_PREFAB_PLAZA")
+        && tg_geo_open_space_at(si, x, z, tg_prefab_half_depth(pf))) {
+        s_pf_plaza_refused++;
+        return 0;
+    }
 
     /* Local +X runs along the road and local +Z along the normal, so a building
      * exported facing its original street still faces this one. */
