@@ -1602,6 +1602,9 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
 /* Sink the base this far into the ground so uneven terrain under a big flat
  * footprint cannot show daylight under a wall. */
 #define TD5_TG_GEO_BASE_SINK  300.0
+/* [ROUND 1014 C] Deepest foundation a wall reaches down to meet the ground:
+ * 4300 = 10 m. Past that the ground is a cliff or a data error, not a slope. */
+#define TD5_TG_GEO_MAX_FOUND  4300.0
 /* How many points a stand-down probe samples across its depth band. Three --
  * front plane, middle, back plane -- is the fewest that cannot miss a polygon
  * edge falling anywhere inside the band.
@@ -2704,6 +2707,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     double q[12], t3[9];
     double shift = 0.0, need, H, by, minout, gap, rise, inv_tile;
     double wall_top, vrows, cx = 0.0, cz = 0.0;
+    double bot[TD5_GEOB_RING_MAX], found_max = 0.0;
     int n_ring = gb->n, k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
     int rows, storeys = 0, wall_page, roof_page, shape, convex;
 
@@ -2994,20 +2998,46 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     }
 
     /* --- WALLS: one quad per footprint edge ------------------------------- */
+    /* [ROUND 1014 C] FOUNDATION. "buildings float and don't follow terrain
+     * height change." The whole mass stood on ONE plane (the ground at the
+     * centroid), so on a slope the downhill corners hung in the air -- MEASURED
+     * on the audit of Mariano's build, up to 4.5 m under the 70 m-radius blocks.
+     * Each wall now reaches down, per VERTEX, to the world's ground under that
+     * vertex (never up: the uphill side keeps the plane and simply buries), at
+     * most TD5_TG_GEO_MAX_FOUND below it. A building:part that starts at its own
+     * min_height is floating by design and keeps its plane.
+     * TD5RE_GEO_BLD_FOUNDATION=0 restores the single plane. */
+    for (k = 0; k < n_ring; k++) {
+        bot[k] = by;
+        if (td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") && !(gb->min_height > 0.0)) {
+            const double g = tg_world_h(rx[k], rz[k]) + tg_city_kerb_h(h->b)
+                           - TD5_TG_GEO_BASE_SINK;
+            if (g < bot[k]) {
+                bot[k] = (g < by - TD5_TG_GEO_MAX_FOUND) ? by - TD5_TG_GEO_MAX_FOUND : g;
+                if (by - bot[k] > found_max) found_max = by - bot[k];
+            }
+        }
+    }
+    if (found_max > 1.0) { s_geo_found++; if (found_max > s_geo_found_max) s_geo_found_max = found_max; }
     for (k = 0; k < n_ring; k++) {
         const int j = (k + 1) % n_ring;
         const double elen = hypot(rx[j] - rx[k], rz[j] - rz[k]);
-        double ua;
+        double ua, vq;
         if (!(elen > 1.0)) continue;        /* duplicate vertex in the source */
         ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
-        q[0] = rx[k]; q[1]  = by;      q[2]  = rz[k];
-        q[3] = rx[j]; q[4]  = by;      q[5]  = rz[j];
+        q[0] = rx[k]; q[1]  = bot[k];  q[2]  = rz[k];
+        q[3] = rx[j]; q[4]  = bot[j];  q[5]  = rz[j];
         q[6] = rx[j]; q[7]  = wall_top; q[8]  = rz[j];
         q[9] = rx[k]; q[10] = wall_top; q[11] = rz[k];
+        /* The page rows stretch with the extra wall, so a foundation under a
+         * 12-storey block does not squash its windows. */
+        vq = vrows;
+        if (wall_top - by > 1.0)
+            vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - by);
         /* Storeys over the WALL, not over the building: with roof:height
          * tagged the eaves are below the top and repeating the full storey
          * count over the shorter wall would squash the windows. */
-        tg_geo_push_quad(v, light, &nv, q, ua, vrows, 0xFFFFFFFFu);
+        tg_geo_push_quad(v, light, &nv, q, ua, vq, 0xFFFFFFFFu);
         nquad++;
     }
     if (nquad < 3) { s_geo_dropped_deg++; return 1; }
