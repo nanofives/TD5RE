@@ -2045,6 +2045,26 @@ typedef struct {
  * interrupts a carriageway at a junction, and ending the avenue at the first
  * such gap would cut a long one in half at its first crossing. */
 #define GR_AV_MAX_MISS         4
+/* [ROUND 1012 D2] How far outside the band THE DETECTOR SCORED the per-span
+ * chain may wander, on top of that band's own width.
+ *
+ * The way-id continuity test (gr_peer_offset_at) answers "is this still the
+ * same road". It does not answer "is this still the median we measured", and
+ * one way can do both. MEASURED on Mariano's route: Diagonal 73's chain holds
+ * 11.4..12.2 m for 240 spans and then splays monotonically to 21.9 m over its
+ * last ten as the carriageways separate into the Calle 14 junction -- every
+ * step small, every step on one way (OSM 719084446), so neither the step cap
+ * nor the id test stops it. The detector scored that run at 11.3..14.4 m.
+ *
+ * So the chain is also held to the band the detector scored, plus ONE LANE at
+ * each end. A lane rather than nothing because a run sampled at most 13 times
+ * does not see every narrowing -- Avenida 13's second run measured
+ * 14.7..14.7 m, spread zero, and must still be free to taper. A lane rather
+ * than more because that is what stops Diagonal 73 at 17.8 m, where its median
+ * stops being a median and starts being a junction mouth. The three runs on
+ * Mariano's route are then bounded at 7.8..17.9, 6.8..22.9 and 11.2..18.2 m,
+ * and only Diagonal 73's last three spans are refused. */
+#define GR_AV_BAND_SLACK  GR_LANE_WIDTH
 
 /* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
  * convention gr_heading uses. */
@@ -2166,6 +2186,50 @@ static int gr_av_probe(void)
     return s_on;
 }
 
+/* [ROUND 1012 D2] How many vertices on NO mapped way a run may bridge. A bare
+ * junction node carries no way and no name; two is what step 1b allowed before
+ * this round and nothing measured wants more. */
+#define GR_MED_BRIDGE_UNNAMED  2
+
+/* [ROUND 1012 D2] Are the vertices strictly between two same-name runs also on
+ * that street?
+ *
+ * ROOT CAUSE of "Diagonal 73 ... is still rendered as one single street".
+ *
+ * Step 1a keeps only runs of >= 2 CONSECUTIVE vertices on ONE way, and step 1b
+ * used to join two runs only when the index gap was at most 2. MEASURED on
+ * Mariano's route (TD5RE_GEO_AVENUE_PROBE, 102 route vertices): Diagonal 73
+ * occupies raw vertices 5..27, and because OSM splits it at every crossing,
+ * TEN of those vertices are a run of ONE and are dropped by 1a. What 1b then
+ * saw was three runs -- 5..8 (89 m), 15..17 (178 m), 20..26 (69 m) -- separated
+ * by gaps of 6 and 2 DROPPED vertices. The 6-vertex gap failed `<= 2`, so the
+ * street reached the scorer as three pieces, two of them under the 120 m floor.
+ * Only the middle 178 m survived, which is exactly the 51 spans (163..213) that
+ * got a median, and the rest of Diagonal 73 was built as a plain street.
+ *
+ * The index gap was the wrong question. A gap of dropped vertices that are all
+ * on the SAME STREET is not a gap at all. A gap containing a DIFFERENT street
+ * is a real break and must still split the run -- which is what keeps the two
+ * Avenida 13 runs apart across Plaza Maximo Paz, and what the round-1010 false
+ * positives needed. So the bridge is tested BY NAME, and only a vertex on no
+ * mapped way at all spends the old budget. */
+static int gr_run_bridge_ok(const int *road_id, int from, int to,
+                            const char *name)
+{
+    int q, unmapped = 0;
+    if (!name || !name[0]) return 0;
+    for (q = from + 1; q < to; q++) {
+        const int ri = road_id[q];
+        const char *nm = (ri >= 0 && ri < s_g.n_roads) ? s_g.road[ri].name : NULL;
+        if (nm && nm[0]) {
+            if (strcmp(nm, name)) return 0;      /* a DIFFERENT street: break */
+            continue;
+        }
+        if (++unmapped > GR_MED_BRIDGE_UNNAMED) return 0;
+    }
+    return 1;
+}
+
 /* geo_forks.detect_medians. `road_id[k]` is the way the route's k-th vertex
  * arrived on, `px/pz[k]` its position in the PLACE frame. Returns the number of
  * medians written to `out`, longest first then overlap-filtered, finally sorted
@@ -2179,24 +2243,32 @@ static int gr_detect_medians(const int *road_id, const double *px,
 
     if (n < 2 || !out || max < 1 || upm <= 0.0) return 0;
 
-    /* 1a. maximal runs of >= 2 consecutive vertices on one way. */
+    /* 1a. maximal runs of >= 2 consecutive vertices on one way (a single
+     * vertex may extend a run but may not start one -- see gr_run_bridge_ok). */
     for (i = 0; i < n; ) {
         int e = i;
         while (e + 1 < n && road_id[e + 1] == road_id[i]) e++;
-        if (e - i + 1 >= 2 && road_id[i] >= 0 && road_id[i] < s_g.n_roads &&
-            n_run < GR_MED_MAX_RUNS) {
-            /* 1b. join onto the previous run when the NAME matches and the gap
-             * is at most 2 vertices: OSM splits one avenue at every junction,
-             * so an avenue reaches the route as a dozen runs that are one road
-             * to a driver. */
+        if (road_id[i] >= 0 && road_id[i] < s_g.n_roads &&
+            (e - i + 1 >= 2 || n_run > 0)) {
+            /* 1b. join onto the previous run when the NAME matches and every
+             * vertex between the two is on that same street: OSM splits one
+             * avenue at every junction, so an avenue reaches the route as a
+             * dozen runs that are one road to a driver. [ROUND 1012 D2] a
+             * single-vertex group may EXTEND a run it belongs to even though
+             * it may not start one -- that is how the street's last slice
+             * (raw 27 on Diagonal 73) stops being thrown away. */
             const char *nm = s_g.road[road_id[i]].name;
             if (n_run > 0 && nm && s_g.road[run_r[n_run - 1]].name &&
                 !strcmp(nm, s_g.road[run_r[n_run - 1]].name) &&
-                i - run_b[n_run - 1] <= 2) {
+                gr_run_bridge_ok(road_id, run_b[n_run - 1], i, nm)) {
                 run_b[n_run - 1] = e;
-            } else {
+            } else if (e - i + 1 >= 2 && n_run < GR_MED_MAX_RUNS) {
                 run_a[n_run] = i; run_b[n_run] = e; run_r[n_run] = road_id[i];
                 n_run++;
+            } else if (gr_av_probe()) {
+                TD5_LOG_I(LOG_TAG, "  [AVPROBE] raw %3d..%-3d DROPPED by 1a: "
+                          "single vertex that joins no run (way %s)", i, e,
+                          nm ? nm : "(unnamed)");
             }
         } else if (gr_av_probe()) {
             const int ok = road_id[i] >= 0 && road_id[i] < s_g.n_roads;
@@ -2506,12 +2578,32 @@ static int gr_poly_at(const GrPts *p, const double *frac, double f,
  * 3.73..15.11 m -- one carriageway for part of the run and a different way for
  * the rest. A median does not double in width over 3.5 m of road.
  *
- * A candidate further than GR_AV_MAX_STEP from `want` is refused outright, so
+ * A candidate further than the step cap from `want` is refused outright, so
  * the caller ends the run there: that is the honest reading of "the mapped
- * opposite carriageway stops here". */
+ * opposite carriageway stops here".
+ *
+ * [ROUND 1012 D2] THE CAP IS A PROXY; THE WAY ID IS THE THING.
+ *
+ * The cap exists to refuse A JUMP TO A DIFFERENT SLICE OF THE STREET, and it
+ * tests for that by distance because a flat step cap was the cheapest stand-in.
+ * It is not the question. MEASURED on Mariano's route: Avenida 13's 612 m run
+ * (raw 60..73) seeds at its 14.2 m MEAN, its first span measures 19.65 m under
+ * the wider seed cap, and ONE WAY (OSM 278250607) then tapers smoothly away
+ * from the race road -- 19.65, 17.63, 15.97, 15.44, 15.23, 15.21 m -- back
+ * towards the run's own measured range. The second step is 0.87 m per span,
+ * barely over GR_AV_MAX_STEP (375 units = 0.87 m), so the chain broke at span
+ * 385 with ONE span kept and the whole 612 m avenue was dropped.
+ *
+ * A single mapped way cannot be "a different slice of the street" -- it is the
+ * same OSM record the previous span used. So `want_way` (the id the previous
+ * span settled on, 0 for the seed) gets the RUN'S OWN MEASURED SPREAD as its
+ * cap, `cap_same`, instead of the flat step; everything else still has to
+ * clear `cap_other`. Both bounds are still inside GR_MED_MIN_M..GR_MED_MAX_M
+ * and the caller's overlap test, so neither can run away. */
 static int gr_peer_offset_at(const char *name, int want_side, double want,
-                             double cap, double x, double z,
-                             double tx, double tz, double *off, int *lanes)
+                             double cap_other, double cap_same, double want_way,
+                             double x, double z, double tx, double tz,
+                             double *off, int *lanes, double *way)
 {
     const double lx = tz, lz = -tx;        /* left of travel, tg_road_edge's  */
     const double lo = GR_MED_MIN_M * GR_UNITS_PER_METRE;
@@ -2522,7 +2614,7 @@ static int gr_peer_offset_at(const char *name, int want_side, double want,
     if (want < 0.0) want = -want;
     for (j = 0; j < s_g.n_roads; j++) {
         const GrRoad *pr = &s_g.road[j];
-        double cx = 0.0, cz = 0.0, d, dot, err;
+        double cx = 0.0, cz = 0.0, d, dot, err, allow;
         if (!pr->oneway || pr->ring) continue;
         if (!pr->name || strcmp(pr->name, name)) continue;
         if (gr_route_owns_way(j)) continue;
@@ -2531,12 +2623,16 @@ static int gr_peer_offset_at(const char *name, int want_side, double want,
         dot = (cx - x) * lx + (cz - z) * lz;
         if ((dot > 0.0 ? 1 : -1) != want_side) continue;
         err = (d > want) ? d - want : want - d;
+        allow = (pr->has_id && want_way != 0.0 && pr->id == want_way)
+              ? cap_same : cap_other;
+        if (err > allow) continue;
         if (err >= best) continue;
         best = err; best_d = d; best_j = j;
     }
-    if (best_j < 0 || best > cap) return 0;
+    if (best_j < 0) return 0;
     if (off)   *off   = best_d * (double)want_side;
     if (lanes) *lanes = s_g.road[best_j].lanes > 0 ? s_g.road[best_j].lanes : 2;
+    if (way)   *way   = s_g.road[best_j].has_id ? s_g.road[best_j].id : 0.0;
     return 1;
 }
 
@@ -3068,13 +3164,23 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     const double seed_cap = GR_AV_MAX_STEP
                         + (med[j].gap_max_m - med[j].gap_min_m) * GR_UNITS_PER_METRE;
                     double prev = med[j].gap_m * GR_UNITS_PER_METRE;
+                    /* [ROUND 1012 D2] the OSM way the previous span settled on.
+                     * Staying on it is the real continuity test; see
+                     * gr_peer_offset_at. 0 = none yet (the seed). */
+                    double prev_way = 0.0;
+                    /* [ROUND 1012 D2] the band the DETECTOR scored, widened by
+                     * its own spread and one lane. See GR_AV_BAND_SLACK. */
+                    const double band_lo = med[j].gap_min_m * GR_UNITS_PER_METRE
+                                         - GR_AV_BAND_SLACK;
+                    const double band_hi = med[j].gap_max_m * GR_UNITS_PER_METRE
+                                         + GR_AV_BAND_SLACK;
                     int miss = 0, seeded = 0, last_ok = s0 - 1;
                     for (s = s0; !why && s <= s1 &&
                                  s_last.n_av_span < GR_AV_MAX_SPANS; s++) {
                         double f = (spans1 > lead1)
                                  ? (double)(s - lead1) / (double)(spans1 - lead1)
                                  : 0.0;
-                        double qx, qz, qtx, qtz, off, a, half;
+                        double qx, qz, qtx, qtz, off, a, half, hit_way = 0.0;
                         int plan = 2;
                         GrAvSpan *g;
                         if (rev1) f = 1.0 - f;
@@ -3092,13 +3198,17 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                          * the median end where the OSM ways end. */
                         if (!gr_peer_offset_at(med[j].name, want, prev,
                                                seeded ? GR_AV_MAX_STEP : seed_cap,
-                                               qx, qz, qtx, qtz, &off, &plan)) {
+                                               seed_cap, prev_way,
+                                               qx, qz, qtx, qtz, &off, &plan,
+                                               &hit_way)) {
                             if (gr_av_probe()) {
-                                double raw_off = 0.0;
+                                double raw_off = 0.0, raw_way = 0.0;
                                 int raw_lan = 0, got;
                                 got = gr_peer_offset_at(med[j].name, want, prev,
-                                                        1e30, qx, qz, qtx, qtz,
-                                                        &raw_off, &raw_lan);
+                                                        1e30, 1e30, prev_way,
+                                                        qx, qz, qtx, qtz,
+                                                        &raw_off, &raw_lan,
+                                                        &raw_way);
                                 TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: NO "
                                           "PEER within cap %.0f of want %.0f "
                                           "(seeded=%d); uncapped nearest-to-want"
@@ -3122,6 +3232,21 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                          * will build, so this is the same arithmetic
                          * td5_tg_avenue.c does and not an approximation of it. */
                         a    = (off < 0.0) ? -off : off;
+                        /* [ROUND 1012 D2] still the median the detector scored?
+                         * See GR_AV_BAND_SLACK. */
+                        if (a < band_lo || a > band_hi) {
+                            if (gr_av_probe())
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: OUT "
+                                          "OF BAND: %.0f u (%.2f m) outside "
+                                          "%.0f..%.0f u (%.2f..%.2f m)",
+                                          med[j].name, s, a,
+                                          a / GR_UNITS_PER_METRE,
+                                          band_lo, band_hi,
+                                          band_lo / GR_UNITS_PER_METRE,
+                                          band_hi / GR_UNITS_PER_METRE);
+                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            break;
+                        }
                         half = ((s < c->nodes && c->lanes_out)
                                 ? (double)c->lanes_out[s] : 2.0)
                              * GR_LANE_WIDTH * 0.5;
@@ -3141,10 +3266,14 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         }
                         if (gr_av_probe())
                             TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: OK off "
-                                      "%.0f u (%.2f m) peer %d lane(s)",
-                                      med[j].name, s, off,
-                                      fabs(off) / GR_UNITS_PER_METRE, plan);
-                        prev    = a;
+                                      "%.0f u (%.2f m) peer %d lane(s) way %.0f"
+                                      "%s", med[j].name, s, off,
+                                      fabs(off) / GR_UNITS_PER_METRE, plan,
+                                      hit_way,
+                                      (prev_way != 0.0 && hit_way != prev_way)
+                                          ? " (CHANGED)" : "");
+                        prev     = a;
+                        prev_way = hit_way;
                         miss    = 0;
                         seeded  = 1;
                         last_ok = s;
