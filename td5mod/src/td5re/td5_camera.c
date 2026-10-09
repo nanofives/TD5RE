@@ -2616,6 +2616,103 @@ void td5_camera_freecam_exit(void)
     TD5_LOG_I(LOG_TAG, "Free camera: EXIT");
 }
 
+/* [ROUND 1014 A][DEV] FREE-CAM TOUR: put the free camera at fixed world poses and
+ * dump a PNG at each, so a geometry report ("level091 e16 s3 pos 69650,2636,-66333")
+ * can be LOOKED AT from the spot the reporter stood instead of from a chase camera
+ * that buildings block. TD5RE_FREECAM_TOUR="name:x,y,z,yawdeg,pitchdeg;name2:..."
+ * (x,y,z in world units, the same numbers a pick prints; yaw 0 = looking down +Z, 90 =
+ * +X). TD5RE_FREECAM_TOUR_PATH is a printf format with one %s (default
+ * log/tour_%s.png), TD5RE_FREECAM_TOUR_TICK the race sim tick to start at (default 30),
+ * TD5RE_FREECAM_TOUR_DWELL the frames each pose is held before the dump (default 90:
+ * streamed scenery needs a moment). The sim keeps running; only pane 0's camera moves.
+ * Never touches the sim, so a race is not changed by it. */
+#define TOUR_MAX 24
+static struct { char name[48]; double x, y, z, yaw, pitch; } s_tour[TOUR_MAX];
+static int s_tour_n = -1, s_tour_i = 0, s_tour_frames = 0;
+
+static void tour_parse(void)
+{
+    const char *e = getenv("TD5RE_FREECAM_TOUR");
+    s_tour_n = 0;
+    while (e && *e && s_tour_n < TOUR_MAX) {
+        char nm[48];
+        double x, y, z, yw, pt;
+        int used = 0;
+        if (sscanf(e, "%47[^:]:%lf,%lf,%lf,%lf,%lf%n", nm, &x, &y, &z, &yw, &pt, &used) < 6)
+            break;
+        snprintf(s_tour[s_tour_n].name, sizeof s_tour[s_tour_n].name, "%s", nm);
+        s_tour[s_tour_n].x = x; s_tour[s_tour_n].y = y; s_tour[s_tour_n].z = z;
+        s_tour[s_tour_n].yaw = yw * 3.14159265358979 / 180.0;
+        s_tour[s_tour_n].pitch = pt * 3.14159265358979 / 180.0;
+        s_tour_n++;
+        e += used;
+        if (*e == ';') e++;
+    }
+    TD5_LOG_I(LOG_TAG, "free-cam tour: %d pose(s)", s_tour_n);
+}
+
+/* Returns 1 when the tour owns the camera this frame. */
+static int tour_step(void)
+{
+    static int s_dwell = -1, s_tick0 = -1;
+    if (s_tour_n < 0) tour_parse();
+    if (s_tour_n == 0 || s_tour_i >= s_tour_n) return 0;
+    if (g_td5.game_state != TD5_GAMESTATE_RACE) return 0;
+    if (s_tick0 < 0) s_tick0 = td5_env_int("TD5RE_FREECAM_TOUR_TICK", 30, 0, 100000);
+    if (s_dwell < 0) s_dwell = td5_env_int("TD5RE_FREECAM_TOUR_DWELL", 90, 4, 100000);
+    if (g_td5.simulation_tick_counter < s_tick0) return 0;
+    {   /* TD5RE_FREECAM_TOUR_SPAN=N: start once the PLAYER has reached span N, and
+         * TD5RE_FREECAM_TOUR_FREEZE=1 pauses the sim there. A fork corridor (and
+         * the scenery around it) is only drawn while the player is near it, so a
+         * pose has to be taken with the car parked beside the geometry it looks at. */
+        static int s_span0 = -2, s_freeze = 0, s_started = 0;
+        if (s_span0 == -2) {
+            s_span0 = td5_env_int("TD5RE_FREECAM_TOUR_SPAN", -1, -1, 100000);
+            s_freeze = td5_env_int("TD5RE_FREECAM_TOUR_FREEZE", 0, 0, 1);
+        }
+        if (!s_started && s_span0 >= 0) {
+            const int ps = td5_game_get_player_slot(0);
+            const int sp = (ps >= 0) ? td5_game_get_slot_span(ps) : -1;
+            if (sp < s_span0) return 0;
+        }
+        if (!s_started) {
+            s_started = 1;
+            if (s_freeze) g_td5.paused = 1;
+            TD5_LOG_I(LOG_TAG, "free-cam tour: start (freeze=%d)", s_freeze);
+        }
+    }
+    if (s_tour_frames == 0) {
+        s_freecam_eye[0] = s_tour[s_tour_i].x * 256.0;
+        s_freecam_eye[1] = s_tour[s_tour_i].y * 256.0;
+        s_freecam_eye[2] = s_tour[s_tour_i].z * 256.0;
+        s_freecam_yaw = (float)s_tour[s_tour_i].yaw;
+        s_freecam_pitch = (float)s_tour[s_tour_i].pitch;
+    }
+    {
+        const double cp = cos((double)s_freecam_pitch);
+        const double sp = sin((double)s_freecam_pitch);
+        const double fx = sin((double)s_freecam_yaw) * cp, fz = cos((double)s_freecam_yaw) * cp;
+        int eye[3] = { (int)s_freecam_eye[0], (int)s_freecam_eye[1], (int)s_freecam_eye[2] };
+        int tgt[3] = { (int)(s_freecam_eye[0] + fx * 25600.0),
+                       (int)(s_freecam_eye[1] + sp * 25600.0),
+                       (int)(s_freecam_eye[2] + fz * 25600.0) };
+        SetCameraWorldPosition(eye);
+        OrientCameraTowardTarget(tgt, 0);
+    }
+    s_tour_frames++;
+    if (s_tour_frames == s_dwell) {
+        const char *fmt = getenv("TD5RE_FREECAM_TOUR_PATH");
+        char path[320];
+        snprintf(path, sizeof path, (fmt && fmt[0]) ? fmt : "log/tour_%s.png",
+                 s_tour[s_tour_i].name);
+        td5_plat_request_frame_dump(path);
+        TD5_LOG_I(LOG_TAG, "free-cam tour: pose %d '%s' dumped -> %s", s_tour_i,
+                  s_tour[s_tour_i].name, path);
+    }
+    if (s_tour_frames >= s_dwell + 6) { s_tour_i++; s_tour_frames = 0; }
+    return 1;
+}
+
 void td5_camera_freecam_apply(void)
 {
     if (!s_freecam_active) return;
@@ -2731,6 +2828,7 @@ void td5_camera_apply_view(int view)
     /* [FREE CAMERA] Dev free-roam takes over pane 0 while active. Other panes
      * fall through to the (frozen, sim-paused) normal pipeline. */
     if (v == 0 && s_freecam_active) { td5_camera_freecam_apply(); return; }
+    if (v == 0 && tour_step()) return;   /* [ROUND 1014 A] dev free-cam tour */
 
     /* [OVERHEAD SNAPSHOT] Dev-only static top-down for map screenshots. When
      * TD5RE_CAM_TOPDOWN=<altitude in world units> (>0), pane 0 looks (almost)
