@@ -1550,6 +1550,16 @@ typedef struct {
     int      n_xsep;
     GrXSep  *xsep;
     double   fwd_max_dev_deg, rev_max_dev_deg;   /* the orientation sort keys */
+    /* [ROUND 1013 F3] THE RUN-OFF. Set by td5_geo_route_build AFTER
+     * gr_condition (which zeroes the struct), never by the conditioner itself.
+     * finish_span is the conditioned span the user's LAST waypoint landed on,
+     * 0 = no run-off was built (disabled, or the cap refused it) and the
+     * generator keeps its old placement. The rest says what the road past the
+     * line is made of, for the log and for ROUTE.JSON. */
+    int      finish_span;
+    int      runoff_spans;          /* spans from the finish to the strip end */
+    double   runoff_real_m;         /* metres that follow a real OSM way      */
+    double   runoff_synth_m;        /* metres drawn as a straight fallback    */
 } GrCond;
 
 static void gr_cond_free(GrCond *c)
@@ -3009,6 +3019,306 @@ static int gr_median_opening_at(const char *name, double x, double z,
  * needs them back. */
 
 /* ======================================================================== *
+ * [ROUND 1013 F3] THE RUN-OFF: real road past the finish line
+ * ======================================================================== *
+ *
+ * "i see there's no proper finish line."
+ *
+ * MEASURED on Mariano's La Plata route (race.log of 2026-10-09): the strip is
+ * 951 spans and the finish was 951 -- the LAST span -- because the RUN-OFF row
+ * had rolled NONE. Three things followed from that one number:
+ *
+ *   1. The finish gantry is emitted by tg_emit_fb_track on span == finish, and
+ *      the emit loop only visits spans 0..950, so there was NO finish gantry.
+ *   2. The strip's backstop wall stands at ring-3 (td5_trackgen.c, the collision
+ *      sentinel), so span 951 was physically unreachable: the AI piled up
+ *      against the wall at ~948 and a player could never cross the line, i.e.
+ *      the race could not end at all.
+ *   3. Nothing marked the line.
+ *
+ * A shipped point-to-point track has road PAST its finish, and so should a geo
+ * one. The synthetic generator makes that road by shortening the race (finish =
+ * ring - RUN-OFF), which on a geo track would throw away the last 350 m of the
+ * route the user drew and put the line somewhere he never clicked. This does
+ * the opposite: the finish stays exactly where the last waypoint is, and the
+ * route is EXTENDED beyond it along the road that really continues there.
+ *
+ * WHAT "CONTINUES" MEANS. Depth-first from the last waypoint's graph node, most
+ * straight-ahead first, with two rules that match how a driver reads a street:
+ *   - staying on the street he was on beats a side street, by GR_RO_OFFWAY_DEG
+ *     of deflection (a named way that bends 30 degrees is still "the road"),
+ *   - a turn sharper than GR_RO_MAX_DEFL_DEG is never taken (no U-turns, no
+ *     doubling back down the street he just drove).
+ * A node already on the route or on the branch is never re-entered, so the
+ * extension cannot loop into the race road. When a branch dead-ends the walk
+ * backtracks to the next-best turn, so a cul-de-sac costs a different street
+ * rather than a short run-off. The walk is budgeted (GR_RO_BUDGET) so a pathological
+ * graph cannot stall BUILD.
+ *
+ * ONLY WHEN THE REAL ROAD GENUINELY RUNS OUT -- no unvisited continuation within
+ * the budget reaches the wanted length -- the shortfall is drawn as a straight
+ * along the last heading, and the log says so with the numbers. A run-off that
+ * is mostly invented is never reported as a real one.
+ *
+ * THE SPAN COUNT is TD5RE_GEO_RUNOFF_SPANS (default 104; 0 = off, restoring the
+ * old behaviour exactly). 104 rather than 100 because the strip's backstop wall
+ * stands 3 spans short of the end, so 104 leaves ~100 spans (~350 m) of
+ * drivable road between the line and the wall. */
+#define GR_RO_SPANS_DEFAULT  104
+/* A cap on graph nodes appended (the DFS depth) and on straight-fallback
+ * points. 1500 nodes is ~5 km of road at OSM's tightest spacing; the stack
+ * frame below is ~200 bytes so the recursion stays under 300 KB. */
+#define GR_RO_MAX_NODES      1500
+#define GR_RO_MAX_SYNTH      512
+#define GR_RO_BUDGET         40000
+/* Never turn more than this off the heading of travel, and prefer the street
+ * already being driven by this many degrees of deflection. */
+#define GR_RO_MAX_DEFL_DEG   100.0
+#define GR_RO_OFFWAY_DEG     45.0
+/* Heading of travel is measured over this much road behind the point, so one
+ * short OSM segment cannot swing it. ~5.8 m. */
+#define GR_RO_LOOKBACK       2500.0
+/* The conditioner resamples by CHORD, which falls short of arclength at every
+ * corner, so ask for a little more road than the span count strictly needs. */
+#define GR_RO_MARGIN         1.06
+/* Accept a real run-off this fraction of the wanted length without a straight. */
+#define GR_RO_ACCEPT_FRAC    0.90
+/* How far (in spans) either side of the arclength estimate the finish node is
+ * searched for in the conditioned route. */
+#define GR_RO_FINISH_WINDOW  30
+
+typedef struct {
+    int     want_spans;       /* what was asked for; 0 = disabled             */
+    int     n_real;           /* graph nodes appended to the walk             */
+    double  real_len;         /* world units of real road appended            */
+    int     n_synth;          /* straight-fallback points after them          */
+    double *sx, *sz;          /* those points, world units (malloc'd)         */
+    double  synth_len;
+    int     expansions;       /* DFS steps spent                              */
+    char    why[200];         /* why the real road stopped short ("" = it did not) */
+    char    street[96];       /* the street the real run-off ends on          */
+} GrRunoff;
+
+typedef struct {
+    int    *chain;            /* the user's walk, then the branch under test  */
+    int     n_user;
+    char   *used;             /* per graph node: on the walk or on the branch */
+    int    *best;             /* the longest branch seen                      */
+    int     n_best;
+    double  best_len;
+    double  want_len;
+    int     budget;
+    int     n_found;          /* chain length when the DFS succeeded          */
+} GrRoCtx;
+
+static int gr_runoff_spans(void)
+{
+    return td5_env_int("TD5RE_GEO_RUNOFF_SPANS", GR_RO_SPANS_DEFAULT, 0, 400);
+}
+
+/* Unit heading of travel at chain[n-1], measured from the first point at least
+ * GR_RO_LOOKBACK behind it. 0 when the chain has no length to measure. */
+static int gr_ro_heading(const int *chain, int n, double *hx, double *hz)
+{
+    const int last = chain[n - 1];
+    int k;
+    for (k = n - 2; k >= 0; k--) {
+        const double d = gr_dist(s_g.nx[chain[k]], s_g.nz[chain[k]],
+                                 s_g.nx[last], s_g.nz[last]);
+        if (d >= GR_RO_LOOKBACK || k == 0) {
+            if (d < 1.0) return 0;
+            *hx = (s_g.nx[last] - s_g.nx[chain[k]]) / d;
+            *hz = (s_g.nz[last] - s_g.nz[chain[k]]) / d;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The same STREET: the same OSM way, or the same name on both records (OSM
+ * splits one street into several ways, and a continuing street crosses the
+ * split without changing name). Unnamed ways match only themselves. */
+static int gr_ro_same_street(int a, int b)
+{
+    if (a < 0 || b < 0) return 0;
+    if (gr_same_way(a, b)) return 1;
+    return s_g.road[a].name && s_g.road[b].name &&
+           !strcmp(s_g.road[a].name, s_g.road[b].name);
+}
+
+/* Depth-first, most-straight-first. Returns 1 as soon as a branch of want_len
+ * exists (chain[n_user .. n_found-1] is then the extension). Otherwise 0, with
+ * the longest branch seen left in cx->best. */
+static int gr_ro_dfs(GrRoCtx *cx, int n, double len)
+{
+    enum { CAND_MAX = 12 };
+    const int u    = cx->chain[n - 1];
+    const int prev = (n >= 2) ? cx->chain[n - 2] : -1;
+    const int road_in = (prev >= 0) ? gr_edge_road(prev, u) : -1;
+    int    cv[CAND_MAX];
+    double cs[CAND_MAX];
+    double hx, hz;
+    int nc = 0, e, i;
+
+    if (len >= cx->want_len) { cx->n_found = n; return 1; }
+    if (n - cx->n_user >= GR_RO_MAX_NODES || cx->budget <= 0) return 0;
+    if (!gr_ro_heading(cx->chain, n, &hx, &hz)) return 0;
+
+    for (e = s_g.adj_head[u]; e >= 0; e = s_g.edge[e].next) {
+        const int v = s_g.edge[e].to;
+        double dx, dz, l, c, defl, score;
+        int k;
+        if (cx->used[v]) continue;
+        dx = s_g.nx[v] - s_g.nx[u];
+        dz = s_g.nz[v] - s_g.nz[u];
+        l  = hypot(dx, dz);
+        if (l < 1e-6) continue;
+        c = (dx * hx + dz * hz) / l;
+        if (c >  1.0) c =  1.0;
+        if (c < -1.0) c = -1.0;
+        defl = gr_deg(acos(c));
+        if (defl > GR_RO_MAX_DEFL_DEG) continue;
+        score = defl;
+        if (!gr_ro_same_street(road_in, s_g.edge[e].road)) score += GR_RO_OFFWAY_DEG;
+        /* Insertion sort, best (lowest) first. A node with more than CAND_MAX
+         * usable arms is not a street junction; the worst arms are dropped. */
+        if (nc == CAND_MAX && score >= cs[CAND_MAX - 1]) continue;
+        k = (nc < CAND_MAX) ? nc++ : CAND_MAX - 1;
+        while (k > 0 && cs[k - 1] > score) { cs[k] = cs[k - 1]; cv[k] = cv[k - 1]; k--; }
+        cs[k] = score; cv[k] = v;
+    }
+
+    for (i = 0; i < nc; i++) {
+        const int v = cv[i];
+        const double l = gr_dist(s_g.nx[u], s_g.nz[u], s_g.nx[v], s_g.nz[v]);
+        cx->budget--;
+        cx->used[v] = 1;
+        cx->chain[n] = v;
+        if (len + l > cx->best_len) {
+            cx->best_len = len + l;
+            cx->n_best = n + 1 - cx->n_user;
+            memcpy(cx->best, cx->chain + cx->n_user,
+                   (size_t)cx->n_best * sizeof(int));
+        }
+        if (gr_ro_dfs(cx, n + 1, len + l)) return 1;
+        cx->used[v] = 0;
+    }
+    return 0;
+}
+
+static void gr_runoff_free(GrRunoff *ro)
+{
+    free(ro->sx); free(ro->sz);
+    ro->sx = ro->sz = NULL;
+    ro->n_synth = 0;
+}
+
+/* Append the run-off to `seq` (graph nodes, capacity >= *n_seq + GR_RO_MAX_NODES)
+ * and describe any straight fallback in `ro`. On any failure to start (disabled,
+ * no heading, out of memory) it appends nothing and `ro` says why. */
+static void gr_runoff_extend(int *seq, int *n_seq, GrRunoff *ro)
+{
+    GrRoCtx cx;
+    const int n_user = *n_seq;
+    int found, n_tail, i;
+    double hx = 0.0, hz = 1.0, lx, lz, remaining;
+
+    memset(ro, 0, sizeof *ro);
+    ro->want_spans = gr_runoff_spans();
+    if (ro->want_spans <= 0) return;
+    if (n_user < 2) { snprintf(ro->why, sizeof ro->why, "the route has no direction"); return; }
+
+    memset(&cx, 0, sizeof cx);
+    cx.chain    = seq;
+    cx.n_user   = n_user;
+    cx.want_len = (double)ro->want_spans * GR_SPAN_LENGTH * GR_RO_MARGIN;
+    cx.budget   = GR_RO_BUDGET;
+    cx.used = (char *)calloc((size_t)s_g.n_nodes, 1);
+    cx.best = (int *)malloc((size_t)GR_RO_MAX_NODES * sizeof(int));
+    if (!cx.used || !cx.best) {
+        free(cx.used); free(cx.best);
+        snprintf(ro->why, sizeof ro->why, "out of memory");
+        return;
+    }
+    for (i = 0; i < n_user; i++) cx.used[seq[i]] = 1;
+
+    found = gr_ro_dfs(&cx, n_user, 0.0);
+    if (found) {
+        n_tail = cx.n_found - n_user;       /* the branch is already in seq    */
+    } else {
+        n_tail = cx.n_best;                 /* the longest branch seen instead */
+        if (n_tail > 0) memcpy(seq + n_user, cx.best, (size_t)n_tail * sizeof(int));
+    }
+    *n_seq = n_user + n_tail;
+    ro->n_real = n_tail;
+    ro->expansions = GR_RO_BUDGET - cx.budget;
+    {   /* the real length, measured on what was kept */
+        double len = 0.0;
+        for (i = n_user; i < *n_seq; i++)
+            len += gr_dist(s_g.nx[seq[i - 1]], s_g.nz[seq[i - 1]],
+                           s_g.nx[seq[i]],     s_g.nz[seq[i]]);
+        ro->real_len = len;
+    }
+    if (n_tail > 0) {
+        const int ri = gr_edge_road(seq[*n_seq - 2], seq[*n_seq - 1]);
+        if (ri >= 0 && s_g.road[ri].name)
+            snprintf(ro->street, sizeof ro->street, "%s", s_g.road[ri].name);
+    }
+    free(cx.used); free(cx.best);
+
+    remaining = cx.want_len - ro->real_len;
+    if (remaining <= (1.0 - GR_RO_ACCEPT_FRAC) * cx.want_len) return;   /* real enough */
+
+    /* The real road ran out. Say why, then draw the shortfall as a straight
+     * along the heading the road was last travelling. */
+    if (n_tail == 0)
+        snprintf(ro->why, sizeof ro->why, "no unvisited road continues from the "
+                 "last waypoint (%d step(s) tried)", ro->expansions);
+    else
+        snprintf(ro->why, sizeof ro->why, "the road ends or only loops back after "
+                 "%.0f m (%d step(s) tried)", ro->real_len / GR_UNITS_PER_METRE,
+                 ro->expansions);
+    if (!gr_ro_heading(seq, *n_seq, &hx, &hz)) return;
+    lx = s_g.nx[seq[*n_seq - 1]];
+    lz = s_g.nz[seq[*n_seq - 1]];
+    ro->n_synth = (int)ceil(remaining / GR_SPAN_LENGTH);
+    if (ro->n_synth > GR_RO_MAX_SYNTH) ro->n_synth = GR_RO_MAX_SYNTH;
+    ro->sx = (double *)malloc((size_t)ro->n_synth * sizeof(double));
+    ro->sz = (double *)malloc((size_t)ro->n_synth * sizeof(double));
+    if (!ro->sx || !ro->sz) { gr_runoff_free(ro); return; }
+    for (i = 0; i < ro->n_synth; i++) {
+        ro->sx[i] = lx + hx * GR_SPAN_LENGTH * (double)(i + 1);
+        ro->sz[i] = lz + hz * GR_SPAN_LENGTH * (double)(i + 1);
+    }
+    ro->synth_len = (double)ro->n_synth * GR_SPAN_LENGTH;
+}
+
+/* The conditioned span the user's last waypoint landed on. `f_est` is that
+ * waypoint's fraction of the raw polyline's arclength, which is close but not
+ * exact (the conditioner smooths bends, which moves nodes), so the answer is
+ * the conditioned node nearest to the waypoint within GR_RO_FINISH_WINDOW spans
+ * of the estimate. Returns the span, and the distance in metres in *off_m. */
+static int gr_runoff_finish_span(const GrCond *c, double lat, double lon,
+                                 double f_est, int *est_out, double *off_m)
+{
+    const int lead = c->lead_in_nodes;
+    const int est  = gr_span_of_frac(f_est, lead, c->spans);
+    double bx, bz, best = DBL_MAX;
+    int i, lo = est - GR_RO_FINISH_WINDOW, hi = est + GR_RO_FINISH_WINDOW, at = est;
+
+    if (lo < 0) lo = 0;
+    if (hi > c->nodes_xz.n - 1) hi = c->nodes_xz.n - 1;
+    gr_proj_to_world(&c->proj, lat, lon, &bx, &bz);
+    for (i = lo; i <= hi; i++) {
+        const double d = gr_dist(c->nodes_xz.x[i], c->nodes_xz.z[i], bx, bz);
+        if (d < best) { best = d; at = i; }
+    }
+    if (est_out) *est_out = est;
+    if (off_m) *off_m = (best < DBL_MAX) ? best / GR_UNITS_PER_METRE : -1.0;
+    return at;
+}
+
+/* ======================================================================== *
  * SECTION: build
  * ======================================================================== */
 
@@ -3020,6 +3330,9 @@ static struct {
     int    n_wp;
     TD5_GeoLatLon wp[GR_MAX_WAYPOINTS];
     int    n_raw;
+    /* [ROUND 1013 F3] how many of the n_raw points are the user's own route;
+     * the rest are run-off. == n_raw when there is none. */
+    int    n_user;
     TD5_GeoLatLon *raw_ll;
     int    *raw_lanes;
     double raw_length_units;
@@ -3188,6 +3501,11 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     int *raw_ms = NULL;
     const char **raw_nm = NULL;
     double raw_len = 0.0;
+    /* [ROUND 1013 F3] the run-off: the tail walked past the user's last
+     * waypoint, and how the raw arrays split into it and his own route. */
+    GrRunoff ro;
+    int n_user = 0, n_graph = 0;
+    double user_len = 0.0;
 
     /* RETURN CONVENTION, and it is the opposite of the reflex: 0 means the
      * CALL was made and `out->verdict` carries the answer, including every
@@ -3271,7 +3589,8 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     /* geo_route.RoadGraph.route -- each leg is an independent A*, which is what
      * lets the screen insert a waypoint and re-route only the two legs it
      * touches. */
-    seq    = (int *)malloc((size_t)s_g.n_nodes * sizeof(int));
+    /* [ROUND 1013 F3] room for the run-off tail the walk is extended by below */
+    seq    = (int *)malloc((size_t)(s_g.n_nodes + GR_RO_MAX_NODES) * sizeof(int));
     legbuf = (int *)malloc((size_t)s_g.n_nodes * sizeof(int));
     if (!seq || !legbuf) {
         free(wp_node); free(seq); free(legbuf);
@@ -3301,6 +3620,17 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
         return 0;
     }
 
+    /* [ROUND 1013 F3] THE RUN-OFF. Everything above is the route the user drew
+     * and it ends on his last waypoint; extend the walk past it along the road
+     * that really continues there, so the finish line can stand AT the waypoint
+     * with road left to coast to a stop on. See the RUN-OFF section. From here
+     * n_seq counts every raw point, n_graph the graph nodes among them, and
+     * n_user the ones the user's own route owns. */
+    n_user = n_seq;
+    gr_runoff_extend(seq, &n_seq, &ro);
+    n_graph = n_seq;
+    n_seq  += ro.n_synth;
+
     raw_ll    = (TD5_GeoLatLon *)malloc((size_t)n_seq * sizeof(TD5_GeoLatLon));
     raw_lanes = (int *)malloc((size_t)n_seq * sizeof(int));
     raw_road  = (int *)malloc((size_t)n_seq * sizeof(int));
@@ -3313,6 +3643,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
         free(wp_node); free(seq); free(raw_ll); free(raw_lanes);
         free(raw_road); free(raw_x); free(raw_z);
         free(raw_ms); free(raw_nm);
+        gr_runoff_free(&ro);
         gr_result_set(out, TD5_GEO_ROUTE_ERROR, slug, "out of memory");
         return 0;
     }
@@ -3324,7 +3655,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
      * is read back, so gr_detect_medians can refuse to pair the road with
      * itself. See gr_route_owns_way. */
     gr_own_ways_reset();
-    for (i = 0; i < n_seq; i++) {
+    for (i = 0; i < n_graph; i++) {
         const int nd = seq[i];
         const int ri = i ? gr_edge_road(seq[i - 1], nd) : gr_edge_road(nd, seq[1]);
         const GrRoad *r = (ri >= 0 && ri < s_g.n_roads) ? &s_g.road[ri] : NULL;
@@ -3345,6 +3676,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
         raw_z[i] = s_g.nz[nd];
         if (i) raw_len += gr_dist(s_g.nx[seq[i - 1]], s_g.nz[seq[i - 1]],
                                   s_g.nx[nd], s_g.nz[nd]);
+        if (i == n_user - 1) user_len = raw_len;    /* [ROUND 1013 F3] */
         /* geo_route.route resolves the name through the first road record
          * carrying the same OSM id, then de-duplicates consecutive repeats. */
         if (r && r->has_id) {
@@ -3371,20 +3703,102 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     }
     free(seq);
 
+    /* [ROUND 1013 F3] The straight fallback, when the real road ran out: raw
+     * points appended after the graph nodes, carrying the last real vertex's
+     * lanes, limit and street. They exist only so the conditioner sees one
+     * polyline; raw_road -1 marks them as belonging to no OSM way. */
+    for (i = 0; i < ro.n_synth; i++) {
+        const int k = n_graph + i;
+        gr_proj_to_latlon(&s_g.proj, ro.sx[i], ro.sz[i],
+                          &raw_ll[k].lat, &raw_ll[k].lon);
+        raw_lanes[k] = raw_lanes[n_graph - 1];
+        raw_ms[k]    = raw_ms[n_graph - 1];
+        raw_nm[k]    = raw_nm[n_graph - 1];
+        raw_road[k]  = -1;
+        raw_x[k]     = ro.sx[i];
+        raw_z[k]     = ro.sz[i];
+        raw_len += gr_dist(raw_x[k - 1], raw_z[k - 1], raw_x[k], raw_z[k]);
+    }
+
     allow_cross = td5_env_flag_on("TD5RE_GEO_ROUTE_XLEVEL");
     /* [ROUND 1009 item 1, follow-up] The user placed START. Honour it:
      * no orientation choice on the in-game path. See the orientation
      * section of gr_condition. */
     allow_rev = td5_env_flag_on("TD5RE_GEO_START_AT_CLICK") ? 0 : 1;
+    /* [ROUND 1013 F3] With a run-off the far end is NOT the finish, it is road
+     * past it, so flipping the route would put the run-off at the START. */
+    if (n_seq > n_user) allow_rev = 0;
     c = &s_last.cond;
     gr_condition(raw_ll, raw_lanes, raw_ms, raw_nm, n_seq, GR_UNITS_PER_METRE,
                  GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
                  allow_rev, allow_cross, c);
+    /* [ROUND 1013 F3] The cap is on the whole strip, and the run-off is extra
+     * road the user did not ask for: when it is what tips the route over the
+     * cap, build the route he drew without it rather than refusing it. */
+    if (n_seq > n_user && c->spans > GR_MAX_SPANS) {
+        TD5_LOG_W(LOG_TAG, "geo route: %d spans with the run-off is over the %d "
+                  "cap; building WITHOUT the run-off (the finish is the last "
+                  "span, as before round 1013)", c->spans, GR_MAX_SPANS);
+        gr_cond_free(c);
+        gr_runoff_free(&ro);
+        memset(&ro, 0, sizeof ro);
+        n_seq = n_graph = n_user;
+        raw_len = user_len;
+        gr_condition(raw_ll, raw_lanes, raw_ms, raw_nm, n_seq, GR_UNITS_PER_METRE,
+                     GR_CURVE_SAFETY_X100, GR_SPAN_LENGTH, GR_LANE_WIDTH,
+                     allow_rev, allow_cross, c);
+    }
     /* Both were only ever inputs to the conditioner, which copied what it
      * needed (the names are interned into c->names). raw_nm's elements point
      * into the road graph and are not owned here. */
     free(raw_ms);  raw_ms = NULL;
     free(raw_nm);  raw_nm = NULL;
+
+    /* ---- [ROUND 1013 F3] WHERE THE FINISH IS, and what is past it ----------
+     * The conditioner only knows one polyline. The finish is the user's last
+     * waypoint, which is raw point n_user-1, so find the conditioned node that
+     * point became and publish it (ROUTE.JSON `finish_span`). */
+    if (n_seq > n_user && c->nodes_xz.n > 1) {
+        const double f_est = (raw_len > 0.0) ? user_len / raw_len : 1.0;
+        int est = 0;
+        double off_m = 0.0;
+        const int fs = gr_runoff_finish_span(c, raw_ll[n_user - 1].lat,
+                                             raw_ll[n_user - 1].lon, f_est,
+                                             &est, &off_m);
+        c->finish_span    = fs;
+        c->runoff_spans   = c->spans - fs;
+        c->runoff_real_m  = ro.real_len / GR_UNITS_PER_METRE;
+        c->runoff_synth_m = ro.synth_len / GR_UNITS_PER_METRE;
+        TD5_LOG_I(LOG_TAG, "geo route: FINISH at span %d of %d (arclength estimate "
+                  "%d, conditioned node %.1f m from the waypoint); RUN-OFF %d "
+                  "span(s) = %.0f m past the line: %.0f m of real road%s%s, "
+                  "%.0f m of straight fallback (%d step(s) of search)",
+                  fs, c->spans, est, off_m, c->runoff_spans,
+                  (double)c->runoff_spans * GR_SPAN_LENGTH / GR_UNITS_PER_METRE,
+                  c->runoff_real_m, ro.street[0] ? " on " : "", ro.street,
+                  c->runoff_synth_m, ro.expansions);
+        if (ro.why[0])
+            TD5_LOG_W(LOG_TAG, "geo route: RUN-OFF: the real road does not reach "
+                      "the %d spans asked for -- %s; %.0f m of the run-off is a "
+                      "STRAIGHT along the last heading, not a road on the map",
+                      ro.want_spans, ro.why, c->runoff_synth_m);
+        if (fs <= c->lead_in_nodes + GR_GRID_SPAN + 60)
+            gr_add_reason(c, "the finish is span %d, too short to hold a grid and "
+                          "a race before it", fs);
+        else if (ro.n_synth > 0)
+            gr_add_warning(c, "run-off: %.0f m of the road past the finish is a "
+                           "straight, the map has no road there",
+                           c->runoff_synth_m);
+        else
+            gr_add_warning(c, "run-off: %d spans of real road past the finish%s%s",
+                           c->runoff_spans, ro.street[0] ? " on " : "", ro.street);
+        c->ok = (c->n_reasons == 0);
+    } else if (ro.want_spans > 0 && ro.why[0]) {
+        TD5_LOG_W(LOG_TAG, "geo route: NO RUN-OFF built (%s); the finish is the "
+                  "last span, as before round 1013", ro.why);
+    }
+    s_last.n_user = (n_seq > n_user) ? n_user : n_seq;
+    gr_runoff_free(&ro);
 
     /* ---- [ROUND 1010 AVENUES] A DIVIDED AVENUE IS NOT A FORK ----------------
      *
@@ -3778,7 +4192,10 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
     if (!c->ok) {
         snprintf(out->reason, sizeof out->reason, "%s", c->reason[0]);
         if (c->spans > GR_MAX_SPANS)                        out->verdict = TD5_GEO_ROUTE_TOO_LONG;
-        else if (c->spans < GR_GRID_SPAN + 150)             out->verdict = TD5_GEO_ROUTE_TOO_SHORT;
+        else if (c->spans < GR_GRID_SPAN + 150 ||
+                 (c->finish_span > 0 &&
+                  c->finish_span <= c->lead_in_nodes + GR_GRID_SPAN + 60))
+                                                            out->verdict = TD5_GEO_ROUTE_TOO_SHORT;
         else                                                out->verdict = TD5_GEO_ROUTE_ERROR;
     }
 
@@ -3863,6 +4280,10 @@ static int gr_write_route_raw(const char *dir)
         cJSON_AddItemToArray(wps, w);
     }
     cJSON_AddItemToObject(root, "waypoints", wps);
+    /* [ROUND 1013 F3] points[] from this index on are the run-off, not the
+     * user's route. Absent when there is none. */
+    if (s_last.n_user > 0 && s_last.n_user < s_last.n_raw)
+        cJSON_AddNumberToObject(root, "runoff_from_point", s_last.n_user);
     for (i = 0; i < s_last.n_raw; i++) {
         cJSON *p = cJSON_CreateObject();
         cJSON_AddNumberToObject(p, "lat", s_last.raw_ll[i].lat);
@@ -4021,6 +4442,16 @@ static int gr_write_route(const char *dir)
     cJSON_AddNumberToObject(root, "elevation_exaggeration", GR_ELEV_EXAGGERATION);
     cJSON_AddNumberToObject(root, "adjacent_skip", c->adjacent_skip);
     cJSON_AddNumberToObject(root, "lead_in_nodes", c->lead_in_nodes);
+    /* [ROUND 1013 F3] ADDITIVE: td5_geo.c reads an absent key as "this route has
+     * no run-off built into it" and the generator keeps its old placement. The
+     * strip is `spans` long and the RACE ends at finish_span; everything after
+     * it is road to coast to a stop on. */
+    if (c->finish_span > 0) {
+        cJSON_AddNumberToObject(root, "finish_span", c->finish_span);
+        cJSON_AddNumberToObject(root, "runoff_spans", c->runoff_spans);
+        cJSON_AddNumberToObject(root, "runoff_real_m", c->runoff_real_m);
+        cJSON_AddNumberToObject(root, "runoff_straight_m", c->runoff_synth_m);
+    }
     cJSON_AddItemToObject(root, "projection", gr_json_proj(&c->proj));
     cJSON_AddNumberToObject(root, "rotation_rad", gr_proj_theta(&c->proj));
     cJSON_AddNumberToObject(root, "offset_x", c->offset_x);

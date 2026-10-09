@@ -1195,6 +1195,21 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
             { TD5_TG_ROLL_CROSSINGS,      1 }, { TD5_TG_ROLL_CROSS_STREETS,  1 },
             { TD5_TG_ROLL_CROSS_MARKINGS, 1 }, { TD5_TG_ROLL_INTERSECTIONS,  1 },
             { TD5_TG_ROLL_SIDEWALKS,      1 }, { TD5_TG_ROLL_SNOW,           0 },
+            /* [ROUND 1013 F3] RUN-OFF is a CHOICE INDEX like the rest (2 =
+             * STANDARD, 100 spans), not a presence flag. "i see there's no
+             * proper finish line": the row rolled NONE (10% of seeds) on
+             * Mariano's race, which on a geo track put the finish on the very
+             * last span, behind the strip's backstop wall, so it could not even
+             * be crossed. A real place always has road past its finish. A geo
+             * route normally carries its own run-off (td5_geo_route_finish_span)
+             * and this row is then only what an OLD cache falls back to. */
+            { TD5_TG_ROLL_RUNOFF,         2 },
+            /* [ROUND 1013 F3] ...and the BANNERS row is what puts the START and
+             * FINISH gantries (and the painted finish line) on the track at all:
+             * k_tgr_w_even rolls it OFF on half of all seeds, which on a real
+             * place means a race that starts and ends with nothing marking
+             * either. It is the one "decorative" row that is also the finish. */
+            { TD5_TG_ROLL_BANNERS,        1 },
         };
         size_t k;
         for (k = 0; k < sizeof(k_geo_hold) / sizeof(k_geo_hold[0]); k++) {
@@ -2878,11 +2893,26 @@ int tg_finish_span(int ring)
     int lo = TD5_TG_GRID_SPAN + 60;      /* shortest race worth having */
     int fs, guard;
 
+    /* [ROUND 1013 F3] A GEO route carries its own finish: the line stands on the
+     * span the user's last waypoint landed on, and the road past it (extended
+     * along the real map at BUILD time, td5_geo_route.c) is the run-off. It is
+     * NOT `ring - runoff`: that would throw the last 350 m of the route the
+     * user drew away and put the line somewhere he never clicked. -1 = a route
+     * committed before round 1013, which keeps the old placement below. The
+     * 3-span margin is the strip's backstop wall (ring-3), which nothing can
+     * drive past, so a finish at or beyond it could never be crossed. */
+    const int geo_fs = td5_geo_route_finish_span();
+
     if (ring <= lo) return -1;
-    /* A short track cannot afford the full run-off; give it what is left after
-     * the minimum race distance rather than refusing to place a finish. */
-    if (ring - runoff <= lo) runoff = ring - lo;
-    fs = ring - runoff;
+    if (geo_fs > lo && geo_fs < ring - 3) {
+        fs = geo_fs;
+    } else {
+        /* A short track cannot afford the full run-off; give it what is left
+         * after the minimum race distance rather than refusing to place a
+         * finish. */
+        if (ring - runoff <= lo) runoff = ring - lo;
+        fs = ring - runoff;
+    }
 
     /* Never put the finish line inside a fork's split region (the line would
      * cross two separated half carriageways, so a banner over it would either

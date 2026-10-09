@@ -188,6 +188,20 @@ int  td5_geo_route_name_count(void);
 const char *td5_geo_route_name_by_id(int id);
 const char *td5_geo_route_name(int i);
 
+/* [ROUND 1013 F3] WHERE THE USER'S ROUTE ENDS, as a span index, with real road
+ * past it. td5_geo_route_build extends the route beyond the last waypoint along
+ * the road that actually continues there (a run-off), so the strip is longer
+ * than the race: the finish line stands at the waypoint and the road carries on.
+ * `finish_span` is that waypoint's span, and `runoff_*` say what the extension
+ * is made of.
+ *
+ * STRICTLY ADDITIVE, like the attributes above: a ROUTE.JSON written before this
+ * round has no `finish_span` key and this returns -1, which the generator reads
+ * as "no run-off was built into this route" and keeps its old placement (finish
+ * = ring - the RUN-OFF knob). Also -1 when no route is loaded or the stored
+ * value is not a span of THIS route. */
+int  td5_geo_route_finish_span(void);
+
 /* ------------------------------------------------- grade separations ------
  * [OPTION B 2026-09-30] docs/plans/GEO_TRACK_OSM_PLAN.md section 5, Option B.
  *
