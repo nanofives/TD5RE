@@ -4273,6 +4273,17 @@ static void gr_self_test(int level)
            gr_lead_in_nodes(), GR_LEAD_IN_SYNTH);
     gr_test_fixture("re/tools/geo_fixtures/la_plata_route_raw.json", 0);
     gr_test_fixture("re/tools/geo_fixtures/figure8_route_raw.json", 1);
+    {   /* [ROUND 1011 C2] An EXTRA fixture named by the environment.
+         *
+         * The two above are the PARITY BASELINE -- they are exactly what the
+         * Python wrote and a diff against the committed _ROUTE.json is the
+         * check they exist for, so neither may be edited to ask a new
+         * question. The carriageway change needs a different one asked over a
+         * REAL saved route ("does it still converge, and at how many spans"),
+         * and this is how to ask it without touching either. */
+        const char *extra = getenv("TD5RE_GEO_ROUTE_TEST_FIXTURE");
+        if (extra && extra[0]) gr_test_fixture(extra, 1);
+    }
     if (level >= 2) gr_test_route_live(level);
     printf("\n=== end ===\n");
     fflush(stdout);
