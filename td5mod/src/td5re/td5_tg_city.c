@@ -1659,6 +1659,10 @@ static double s_geo_h_err_sum, s_geo_h_err_max;
 /* [ROUND 1009 item 2] Flanks capped because the NEIGHBOUR's procedural wall
  * stood down for a real footprint / plaza. */
 static long s_geo_cap_added;
+/* [ROUND 1014 C] flanks the exact neighbour test closed that the predicate left open */
+static long s_geo_cap_exact;
+static long s_geo_found;           /* footprints whose walls reach below the base plane */
+static double s_geo_found_max;
 
 /* Per-build entry point. Called from tg_store_page_reset, which
  * td5_tg_pages.c runs at the top of the build -- before tg_world_build, before
@@ -1681,6 +1685,8 @@ static void tg_geo_city_build_begin(void)
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
     s_geo_h_err_sum = s_geo_h_err_max = 0.0;
     s_geo_cap_added = 0;
+    s_geo_cap_exact = 0;
+    s_geo_found = 0; s_geo_found_max = 0.0;
     memset(s_geo_roof_kind, 0, sizeof(s_geo_roof_kind));
     s_geo_shift_max = s_geo_route_dev_max = 0.0;
     s_geo_city = s_geo_bld = 0;
@@ -3181,14 +3187,66 @@ static void tg_geo_city_report_impl(int from_stream)
      * decision left open to the air. */
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] flanks: %ld corner return(s) added facing "
               "a span-side whose procedural wall stood down for real geometry "
-              "(knob TD5RE_GEO_WALL_CAP=%s)", s_geo_cap_added,
-              td5_env_flag_on("TD5RE_GEO_WALL_CAP") ? "on" : "off");
+              "(knob TD5RE_GEO_WALL_CAP=%s); %ld more closed because the "
+              "neighbour's wall does not actually stand (knob "
+              "TD5RE_GEO_CAP_EXACT=%s)", s_geo_cap_added,
+              td5_env_flag_on("TD5RE_GEO_WALL_CAP") ? "on" : "off",
+              s_geo_cap_exact,
+              td5_env_flag_on("TD5RE_GEO_CAP_EXACT") ? "on" : "off");
+    {   /* [ROUND 1014 C] item 18, as numbers in race.log. */
+        const double upm_f = td5_geob_units_per_m() > 1.0
+                           ? td5_geob_units_per_m() : 1.0;
+        TD5_LOG_I(LOG_TAG, "[GEO BUILD] foundation: %ld footprint(s) have a wall "
+                  "reaching below the base plane to meet sloping ground, worst "
+                  "%.2f m (knob TD5RE_GEO_BLD_FOUNDATION=%s)", s_geo_found,
+                  s_geo_found_max / upm_f,
+                  td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") ? "on" : "off");
+    }
 }
 
 /* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
- * the run/gap pattern or the branch-corridor exclusion skips this side. */
+ * the run/gap pattern or the branch-corridor exclusion skips this side.
+ *
+ * [ROUND 1014 C] `caps` = 0 skips the cap decision at the foot, which is what
+ * lets a NEIGHBOUR ask "does your wall actually stand" (tg_side_stands) without
+ * the two spans' cap decisions asking each other. */
+static void tg_side_geom_impl(const TG_NodeList *nl, int si, int left,
+                              const TG_Biome *b, TG_SideGeom *g, int caps);
+
 void tg_side_geom(const TG_NodeList *nl, int si, int left,
                          const TG_Biome *b, TG_SideGeom *g)
+{
+    tg_side_geom_impl(nl, si, left, b, g, 1);
+}
+
+/* [ROUND 1014 C] THE EXACT ANSWER to "does a procedural wall stand at (si, side)":
+ * the same code path the emitter runs (tg_building_for_span's gates, then
+ * tg_side_geom's `built`, then tg_emit_street_wall's bridge-water drop), not a
+ * reconstruction of its predicates. tg_side_built mirrors only SOME of the
+ * suppressions inside tg_side_geom -- the lone-stub rule, the minimum footprint,
+ * the real-road stand-down, the water drop are not in it -- so a run whose
+ * neighbour was suppressed by one of those had cap == 0 against a gap and was
+ * left with a bare front plane: the "building has no side face" report. */
+int tg_side_stands(const TG_NodeList *nl, int si, int left)
+{
+    TG_SideGeom g;
+    const TG_Biome *b;
+    if (!nl || si <= 0 || si + 1 >= nl->count) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    if (tg_up_clear_span(si)) return 0;
+    b = &k_biomes[tg_scenery_biome_index(si)];
+    if (b->billboard && b->tree_n > 0) return 0;
+    tg_side_geom_impl(nl, si, left, b, &g, 0);
+    if (!g.built) return 0;
+    if (td5_env_flag_on("TD5RE_R18_BUILDING_OVER_BRIDGE_WATER")
+        && (tg_point_over_bridge_water(nl, si, g.bx, g.bz)
+            || tg_point_over_bridge_water(nl, si, g.bx + g.ax, g.bz + g.az)))
+        return 0;
+    return 1;
+}
+
+static void tg_side_geom_impl(const TG_NodeList *nl, int si, int left,
+                              const TG_Biome *b, TG_SideGeom *g, int caps)
 {
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1 = &nl->v[si + 1];
@@ -3398,7 +3456,7 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * it. The table is read, not recomputed: tg_geo_city_prepare froze it
      * single-threaded before this loop went parallel, and it is empty on a
      * synthetic build. */
-    {
+    if (caps) {
         const int near_geo = tg_geo_wall_down(si - 1, left);
         const int far_geo  = tg_geo_wall_down(si + 1, left);
         g->cap_near = !tg_side_built(si - 1, left) || near_geo;
@@ -3406,6 +3464,17 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
         if ((near_geo && tg_side_built(si - 1, left))
             || (far_geo && tg_side_built(si + 1, left)))
             s_geo_cap_added++;
+        /* [ROUND 1014 C] On a GEO track the neighbour's own emitter has the
+         * last word: close the flank wherever its wall will not actually be
+         * there, whatever suppressed it. Synthetic builds keep the predicate
+         * (byte-identical); TD5RE_GEO_CAP_EXACT=0 restores it on a geo build. */
+        if (s_geo_city && td5_env_flag_on("TD5RE_GEO_CAP_EXACT")) {
+            const int cn = !tg_side_stands(nl, si - 1, left);
+            const int cf = !tg_side_stands(nl, si + 1, left);
+            if ((cn && !g->cap_near) || (cf && !g->cap_far)) s_geo_cap_exact++;
+            g->cap_near = cn;
+            g->cap_far  = cf;
+        }
     }
     g->built = 1;
 }
@@ -3855,7 +3924,9 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * boundary instead, which is what a run end is. */
         if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
             td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS") &&
-            tg_side_built(si + 1, s) && !tg_geo_wall_down(si + 1, s)) {
+            (s_geo_city && td5_env_flag_on("TD5RE_GEO_CAP_EXACT")
+                 ? tg_side_stands(nl, si + 1, s)
+                 : (tg_side_built(si + 1, s) && !tg_geo_wall_down(si + 1, s)))) {
             const int nrows = tg_facade_floors(si + 1, s, b);
             if (nrows > 0 && nrows != g->rows) {
                 const int hi = nrows > g->rows ? nrows : g->rows;
