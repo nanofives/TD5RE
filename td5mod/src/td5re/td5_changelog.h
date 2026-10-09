@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (crash racing a second track)" },
+    { CL_ITEM,    "Fixed a crash when you started a race on a SHORT" },
+    { CL_ITEM,    "  track straight after racing a much longer one" },
+    { CL_ITEM,    "Your car's position on the track is now cleared" },
+    { CL_ITEM,    "  the moment a new track loads, so nothing reads" },
+    { CL_ITEM,    "  the old track's data by mistake" },
+    { CL_ITEM,    "Trackside cameras no longer inherit the previous" },
+    { CL_ITEM,    "  track's anchor point on a track without them" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 8 (real places: divided avenues)" },
     { CL_ITEM,    "A divided avenue is now built from the real map" },
     { CL_ITEM,    "  instead of splitting the race into two paths" },

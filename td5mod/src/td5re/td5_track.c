@@ -4502,6 +4502,18 @@ int td5_track_load_strip(const void *data, size_t size)
     uint32_t *hdr;
     uint32_t span_offset, vertex_offset;
 
+    /* [STALE SPAN FIX 2026-10-09] A new strip means a new span space: every span
+     * index that was valid a moment ago now belongs to a track that no longer
+     * exists. Drop the actors' track position HERE, before anything can read it,
+     * because the race-init order does not: td5_game.c loads the level at step 4
+     * (:3506) and does not memset the actor pool until step 11 (:4094), and the
+     * load itself consumes those fields -- td5_track_load_routes() below installs
+     * the new LEFT/RIGHT.TRK and td5_ai_set_route_tables() refreshes every slot's
+     * route state against them. See td5_ai_invalidate_actor_track_state() for the
+     * crash this closes (Blue Ridge 3109 spans -> La Plata 1246 spans, 0xC0000005
+     * reading route row 1405 of a 1246-row table). */
+    td5_ai_invalidate_actor_track_state();
+
     if (s_strip_blob) {
         free(s_strip_blob);
         s_strip_blob = NULL;
@@ -4975,6 +4987,16 @@ int td5_track_get_surface_type(TD5_Actor *actor, int probe_index)
     /* Access the probe state within the actor.
      * Probes are at actor + 0x00, each 16 bytes, 8 probes total. */
     probe = (TD5_TrackProbe *)((uint8_t *)actor + probe_index * 16);
+    /* [STALE SPAN GUARD 2026-10-09] probe->span_index is seeded straight from
+     * actor->track_span_raw (td5_physics_suspension.c), so it inherits the same
+     * cross-race staleness the actor fields do -- and this is the one
+     * s_span_array access in this file with no length check (every sibling
+     * tests against s_span_count). At stride 0x18 and 4 wheels per tick per
+     * actor that is a wide exposure for a read the TD6 sub-path below already
+     * bounds. Same result for any in-range span; dry asphalt (the no-track
+     * answer this function already returns) past the end. */
+    if ((int)probe->span_index < 0 || (int)probe->span_index >= s_span_count)
+        return TD5_SURFACE_DRY_ASPHALT;
     sp = &s_span_array[probe->span_index];
     lane = probe->sub_lane_index;
     /* [task#15] TD6: return the per-lane SURFACE-GRID class (tagged 0x80) instead

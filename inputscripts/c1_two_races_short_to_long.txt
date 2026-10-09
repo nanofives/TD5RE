@@ -1,0 +1,36 @@
+# C1 CRASH repro, REVERSE order: race 1 on a SHORT track (Courmayeur /
+# level027, 600 route rows) then a LONG one (Blue Ridge / level017, 3109 rows).
+# Launch with --AutoRace=1 --DefaultTrack=7 --StartSpanOffset=500.
+
+sync race
+300 log R1-SETTLED
++10 key esc press
+# DEV SP pause rows: 3 CONTINUE ... 7 QUIT TO MENU
++40 key down press
++20 key down press
++20 key down press
++20 key down press
++30 log R1-PAUSE-AT-QUIT
++10 key enter press
+
+sync menu
+150 log AT-MAIN-MENU
++20 key down press
++20 key enter press
+
+200 log AT-QUICK-RACE
++20 key down press
+# 7 -> 6 -> 5 -> 4 -> 3 (Blue Ridge)
++20 key left press
++20 key left press
++20 key left press
++20 key left press
++30 log TRACK-CYCLED
++20 key up press
++20 key up press
++30 log AT-OK
++10 key enter press
+
+sync race
+240 log R2-RUNNING
++10 quit

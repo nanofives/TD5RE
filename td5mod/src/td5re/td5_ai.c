@@ -777,6 +777,28 @@ static int ai_route_byte(const uint8_t *table, int span, int k) {
     return (int)table[off];
 }
 
+/* [STALE SPAN GUARD 2026-10-09] Would ai_route_byte(table, span, *) have to
+ * clamp? Same size selection as ai_route_byte, so the two can never disagree.
+ * Lets a call site emit its own, more specific diagnostic before taking the
+ * safe default. A NULL table is NOT "out of range" here -- ai_route_byte
+ * already returns 0 for it and that case has its own meaning (no route data). */
+static int route_table_row_out_of_range(const uint8_t *table, int span) {
+    size_t sz;
+    if (!table) return 0;
+    if (span < 0) return 1;
+    sz = (table == g_route_tables[1]) ? g_route_table_sizes[1]
+                                      : g_route_table_sizes[0];
+    return ((size_t)(unsigned)span * 3u >= sz);
+}
+
+/* Public form of the guard above, for modules outside td5_ai.c that index a
+ * route table directly (td5_physics_suspension.c's traffic heading delta). */
+int td5_ai_route_span_valid(int32_t handle, int span) {
+    const uint8_t *t = td5_ai_route_table(handle);
+    if (!t) return 0;
+    return !route_table_row_out_of_range(t, span);
+}
+
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
     const uint8_t *rb = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
     int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
@@ -1229,6 +1251,69 @@ void td5_ai_bind_actor_table(void *actor_base) {
     g_actor_base = (char *)actor_base;
     g_route_state_base = g_route_state_storage;
     g_route_data = g_route_state_base;
+}
+
+/* [STALE SPAN FIX 2026-10-09] Drop every actor's per-track position when the
+ * span space changes (a new STRIP.DAT is loaded).
+ *
+ * An actor's track fields (+0x80 span_raw, +0x82 span_normalized, +0x84 accum,
+ * +0x86 high-water, +0x8C sub-lane) are INDICES into the CURRENT track's
+ * per-span tables, and nothing in the race-init order invalidates them when the
+ * track underneath changes:
+ *
+ *   td5_game.c:3506  step 4  td5_asset_load_level()      <- new track installed
+ *   td5_game.c:4094  step 11 memset(s_actor_memory,...)  <- actors finally zeroed
+ *
+ * Between those two steps the actors still carry the PREVIOUS race's spans, and
+ * the loader itself consumes them: td5_track_load_routes() installs the new
+ * LEFT/RIGHT.TRK and td5_ai_set_route_tables() immediately runs
+ * td5_ai_refresh_route_state() over every slot, which reaches
+ * td5_ai_classify_track_offset_clamp_v2() and indexes the NEW route table with
+ * the OLD span. The byte-faithful wrap there subtracts the span count exactly
+ * ONCE (`if (count > 0 && count <= i) i = i - count + 4;`), so a span that is
+ * more than one track-length out of range never comes back inside it.
+ *
+ * Field case (round 1011): race 1 on Blue Ridge (level017, 3109-span ring) left
+ * an actor at span 2647; race 2 on the La Plata geo track (level091, 1246 spans,
+ * a 3738-byte route table) wrapped that to row 1405 and read route_bytes[4215]
+ * -> 0xC0000005 at td5_ai.c:3429, during the load, before step 11 could run.
+ *
+ * Called from td5_track_load_strip() — the exact point where every previously
+ * valid span becomes meaningless, and the one place every track-load path
+ * (race init, auto track, geo BUILD, the placeholder load) goes through.
+ *
+ * On the FIRST load of a session this is a no-op: g_actor_base is still NULL
+ * (td5_ai_bind_actor_table runs at init step 11) and the actor pool is a
+ * zero-initialised static either way, so nothing observable changes and the
+ * golden traces are unaffected. g_active_actor_count is deliberately LEFT
+ * ALONE: the load-time refresh keeps running exactly as before, it just reads
+ * span 0 instead of a stale span. */
+void td5_ai_invalidate_actor_track_state(void) {
+    int slot;
+    int cleared = 0;
+    int max_seen = 0;
+
+    if (!g_actor_base) return;   /* nothing bound yet -> nothing stale */
+
+    for (slot = 0; slot < TD5_MAX_TOTAL_ACTORS; ++slot) {
+        char *actor = actor_ptr(slot);
+        {
+            int span = (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+            if (span > max_seen) max_seen = span;
+            if (span != 0 || ACTOR_I16(actor, ACTOR_SPAN_RAW) != 0) cleared++;
+        }
+        ACTOR_I16(actor, ACTOR_SPAN_RAW)        = 0;
+        ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED) = 0;
+        ACTOR_I16(actor, ACTOR_SPAN_ACCUM)      = 0;
+        ACTOR_I16(actor, ACTOR_SPAN_HIGH_WATER) = 0;
+        ACTOR_I8 (actor, ACTOR_SUB_LANE_INDEX)  = 0;
+    }
+
+    if (cleared > 0) {
+        TD5_LOG_I(LOG_TAG,
+                  "track load: invalidated stale track state on %d actor slot(s) "
+                  "(highest stale span_normalized=%d)", cleared, max_seen);
+    }
 }
 
 void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
@@ -3426,7 +3511,26 @@ static int td5_ai_classify_track_offset_clamp_v2(int param_1, int param_2) {
     /* SampleTrackTargetPoint(iVar5, route_bytes[iVar4*3], local_c,
      *                         cardef[+0x08] + param_2) */
     {
-        int route_byte_a = (int)route_bytes[(size_t)iVar4 * 3u];
+        /* [STALE SPAN GUARD 2026-10-09] SECOND LINE behind
+         * td5_ai_invalidate_actor_track_state(). The wrap above is the original's
+         * and subtracts the span count exactly ONCE, so a span more than one
+         * track-length out of range still lands past this track's route table.
+         * ai_route_byte() returns the identical byte for any in-range row and a
+         * safe 0 (never a fault) past the end; the one-shot WARN here names the
+         * slot and the span so a field occurrence is attributable instead of
+         * showing up as a bare 0xC0000005. */
+        if (route_table_row_out_of_range(route_bytes, iVar4)) {
+            static int s_classify_oob_warned = 0;
+            if (!s_classify_oob_warned) {
+                s_classify_oob_warned = 1;
+                TD5_LOG_W(LOG_TAG,
+                    "classify_track_offset_clamp: slot=%d span_normalized=%d -> route "
+                    "row %d is past the route table (strip spans=%d) -- stale span from "
+                    "a previous, longer track? clamping the read to 0",
+                    param_1, iVar3, iVar4, g_strip_span_count);
+            }
+        }
+        int route_byte_a = ai_route_byte(route_bytes, iVar4, 0);
         int bias_arg = (int)self_cd[4] + param_2; /* cardef+0x08 = hi bound */
         if (!td5_track_sample_target_point(iVar5, route_byte_a,
                                             &local_c[0], &local_c[2], bias_arg)) {
@@ -3443,7 +3547,9 @@ static int td5_ai_classify_track_offset_clamp_v2(int param_1, int param_2) {
         if (g_strip_span_count > 0 && g_strip_span_count <= iVar3c) {
             iVar3c = (span_norm - g_strip_span_count) + 4;
         }
-        route_byte_b = (int)route_bytes[(size_t)iVar3c * 3u];
+        /* [STALE SPAN GUARD 2026-10-09] Same single-subtraction wrap as the
+         * first sample above -> same exposure. See the WARN there. */
+        route_byte_b = ai_route_byte(route_bytes, iVar3c, 0);
         bias_arg2 = (int)self_cd[0] + param_2;
         if (!td5_track_sample_target_point(iVar5, route_byte_b,
                                             &local_c[0], &local_c[2], bias_arg2)) {
@@ -3541,11 +3647,20 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 
             if (classify_result == 1) {
                 int32_t signed_off = td5_track_compute_signed_offset(
-                    (int)peer_field80, 0x100, (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u]);
+                    /* [STALE SPAN GUARD 2026-10-09] peer_field82 is the PEER's
+                     * raw +0x82 -- no wrap, no clamp, and the old expression
+                     * also dereferenced td5_ai_route_table() without a NULL
+                     * test (it returns NULL for handle 0, which is exactly what
+                     * td5_track_load_routes installs while swapping tables). */
+                    (int)peer_field80, 0x100,
+                    ai_route_byte(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]),
+                                  (int)peer_field82, 0));
                 classify = (int32_t)peer_cd[0] + signed_off - 0x20;
             } else if (classify_result == 2) {
                 int32_t signed_off = td5_track_compute_signed_offset(
-                    (int)peer_field80, 0, (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u]);
+                    (int)peer_field80, 0,
+                    ai_route_byte(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]),
+                                  (int)peer_field82, 0));
                 classify = (int32_t)peer_cd[4] + signed_off - 0x20;
             } else {
                 classify = route_state_ptr[RS_TRACK_OFFSET_BIAS];
@@ -3679,13 +3794,20 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             peer_cd = (int16_t *)ACTOR_PTR(self, ACTOR_CAR_DEF_PTR);
             if (!peer_cd) continue;
 
+            /* [STALE SPAN GUARD 2026-10-09] peer_field82 is the PEER's raw +0x82
+             * with no wrap and no clamp, and the old expression also indexed the
+             * result of td5_ai_route_table() without a NULL test. Both reads now
+             * go through the bounds-checked accessor: identical byte in range,
+             * safe 0 past the end, one-shot WARN either way. */
             if (classify_result == 1) {
-                int peer_route_byte = (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u];
+                int peer_route_byte = ai_route_byte(
+                    td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]), (int)peer_field82, 0);
                 int32_t signed_off = td5_track_compute_signed_offset(
                     (int)peer_field80, 0x100, peer_route_byte);
                 classify = (int32_t)peer_cd[0] + signed_off - 0x20;
             } else if (classify_result == 2) {
-                int peer_route_byte = (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u];
+                int peer_route_byte = ai_route_byte(
+                    td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]), (int)peer_field82, 0);
                 int32_t signed_off = td5_track_compute_signed_offset(
                     (int)peer_field80, 0, peer_route_byte);
                 classify = (int32_t)peer_cd[4] + signed_off - 0x20;
@@ -4047,9 +4169,29 @@ void td5_ai_update_track_offset_bias(int slot) {
              * by InitActorTrackSegmentPlacement). Bounds check REMOVED
              * (was port-only insurance) for byte-faithfulness — original
              * has no clamp and trusts the peer-actor invariant. */
+            /* [STALE SPAN GUARD 2026-10-09] The invariant quoted above --
+             * "peer is an active actor whose SPAN_RAW was set by
+             * InitActorTrackSegmentPlacement" -- is exactly what a cross-race
+             * stale span breaks: the actor pool is not zeroed until race-init
+             * step 11, long after the new, possibly SHORTER strip is installed
+             * (see td5_ai_invalidate_actor_track_state). At stride 0x18 the
+             * overshoot is 24x the span error. The bound is re-added as a pure
+             * safety net: identical nibble for any in-range span, 0 (the
+             * already-initialised value) past the end, never a fault. */
             if (strips) {
                 int strip_idx = (int)peer_span_raw;
-                strip_nibble = strips[strip_idx * 0x18 + 3] & 0x0F;
+                if (strip_idx < 0 || strip_idx >= g_strip_span_count) {
+                    static int s_strip_oob_warned = 0;
+                    if (!s_strip_oob_warned) {
+                        s_strip_oob_warned = 1;
+                        TD5_LOG_W(LOG_TAG,
+                            "find_offset_peer: peer span_raw=%d outside the %d-span "
+                            "strip -- stale span from a previous track? skipping the "
+                            "strip-nibble read", strip_idx, g_strip_span_count);
+                    }
+                } else {
+                    strip_nibble = strips[strip_idx * 0x18 + 3] & 0x0F;
+                }
             }
             if (peer_sub_lane != strip_nibble) {
                 do_positive = 1;
@@ -5370,7 +5512,11 @@ static void td5_ai_smart_lane_bias(int slot) {
     {
         const uint8_t *rt = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         if (rt) {
-            int rb = (int)rt[(size_t)(unsigned)look_span * 3u];
+            /* [STALE SPAN GUARD 2026-10-09] look_span is wrapped by a SINGLE
+             * subtraction above, which cannot fold a span from a longer previous
+             * track back into range. Same bounds-checked read the sibling site
+             * ~175 lines below already uses. */
+            int rb = ai_route_byte(rt, look_span, 0);
             u_base = (double)rb / 256.0;
             if (u_base < 0.0) u_base = 0.0;
             if (u_base > 1.0) u_base = 1.0;
@@ -6419,7 +6565,12 @@ void td5_ai_update_track_behavior(int slot) {
                        TD5_ADAPTIVE_LOOKAHEAD_MAX_EXTEND = 6 };
                 const uint8_t *rt_probe = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
                 int probe_rb = 128;
-                if (rt_probe) probe_rb = (int)rt_probe[(size_t)(unsigned)lin_span * 3u];
+                /* [STALE SPAN GUARD 2026-10-09] lin_span is ring-modulo'd, so a
+                 * stale span cannot reach here -- but the ring is the STRIP's
+                 * length and some TD6-converted tracks ship LEFT/RIGHT.TRK
+                 * SHORTER than the strip (Scotland/level016: 2661 rows vs 2756
+                 * spans). Read through the accessor like the rest of the file. */
+                if (rt_probe) probe_rb = ai_route_byte(rt_probe, lin_span, 0);
                 int32_t actor_x_chk = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
                 int32_t actor_z_chk = ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
                 int target_x_probe = 0, target_z_probe = 0;
@@ -6437,7 +6588,12 @@ void td5_ai_update_track_behavior(int slot) {
                     for (int e = 0; e < TD5_ADAPTIVE_LOOKAHEAD_MAX_EXTEND; e++) {
                         lin_span = (lin_span + 1) % ring_len;
                         target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
-                        if (rt_probe) probe_rb = (int)rt_probe[(size_t)(unsigned)lin_span * 3u];
+                        /* [STALE SPAN GUARD 2026-10-09] lin_span is ring-modulo'd, so a
+                 * stale span cannot reach here -- but the ring is the STRIP's
+                 * length and some TD6-converted tracks ship LEFT/RIGHT.TRK
+                 * SHORTER than the strip (Scotland/level016: 2661 rows vs 2756
+                 * spans). Read through the accessor like the rest of the file. */
+                if (rt_probe) probe_rb = ai_route_byte(rt_probe, lin_span, 0);
                         extended = e + 1;
                         if (!td5_track_sample_target_point(target_span, probe_rb,
                                                             &target_x_probe, &target_z_probe, 0))
@@ -6489,7 +6645,8 @@ void td5_ai_update_track_behavior(int slot) {
                  * junction spans. */
                 const uint8_t *route_bytes = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
                 if (route_bytes) {
-                    route_byte = (int)route_bytes[(size_t)(unsigned)lin_span * 3u];
+                    /* [STALE SPAN GUARD 2026-10-09] see the rt_probe reads above. */
+                    route_byte = ai_route_byte(route_bytes, lin_span, 0);
                 }
                 TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
                           slot, lin_span, target_span, route_byte);

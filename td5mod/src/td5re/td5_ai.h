@@ -83,6 +83,17 @@ void td5_ai_set_route_tables(const uint8_t *left_route, size_t left_size,
                              const uint8_t *right_route, size_t right_size);
 void     td5_ai_refresh_route_state(void);
 void     td5_ai_init_race_actor_runtime(void);
+/* [STALE SPAN FIX 2026-10-09] Zero every actor's per-track position (span_raw,
+ * span_normalized, accum, high-water, sub-lane). Called by td5_track_load_strip()
+ * when a new strip replaces the old one, so nothing can index the NEW track's
+ * per-span tables with the PREVIOUS track's spans during the load (the actor pool
+ * is not zeroed until race-init step 11, long after the track is installed).
+ * No-op before the actor table is bound. See the comment on the definition. */
+void     td5_ai_invalidate_actor_track_state(void);
+/* [STALE SPAN GUARD 2026-10-09] Non-zero when `span` is a real row of the route
+ * table named by `handle`. For modules outside td5_ai.c that index a route table
+ * directly and need the same bound td5_ai.c's internal accessor applies. */
+int      td5_ai_route_span_valid(int32_t handle, int span);
 int32_t *td5_ai_get_route_state(int slot);
 
 /* [x64 Stage 2] RS_ROUTE_TABLE_PTR (slot 0x00) holds a small HANDLE, not a
