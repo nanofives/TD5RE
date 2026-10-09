@@ -383,6 +383,53 @@ float td5_hudfont_advance(int cp, float cap_px)
     return (float)adv * (cap_px / cap);
 }
 
+/* ---- [ROUND 1011 C3] exact (non-folding) HUD glyphs ---------------------- *
+ *
+ * The two entry points above FOLD the acute accents away (fold_accent_cp), and
+ * for stylised game menus that is a deliberate, documented choice. It is the
+ * wrong choice for a REAL-WORLD PROPER NOUN: the OSM street is called
+ * "Azcuenaga" with an e-acute, and a street blade that silently spells it
+ * without one is wrong in the way a misspelt road sign is wrong.
+ *
+ * These are the same calls without the fold. They are safe because
+ * detect_watermark() already routes every accented Latin-1 codepoint the HUD
+ * face lacks -- or watermarks -- to the fallback face, which carries real
+ * outlines; and the glyph cache keys on the codepoint, so a folded 'e' and an
+ * unfolded e-acute occupy different slots and cannot collide.
+ *
+ * SEPARATE ENTRY POINTS, not a global toggle: nothing about the existing menu
+ * text changes, so this cannot regress a screen nobody re-tested. */
+/* The glyph cache key keeps only 9 bits of codepoint ((cp & 0x1FF) << 12), so
+ * anything from U+0200 up ALIASES onto another glyph's slot. The folding entry
+ * points never saw one; these can, because a street name is whatever the map
+ * says. Substituting '?' is wrong-looking but honest, and it cannot corrupt a
+ * cache slot that another character is using. */
+static int hudfont_exact_cp(int cp)
+{
+    return (cp >= 0 && cp <= 0x1FF) ? cp : '?';
+}
+
+void td5_hudfont_get_exact(int cp, float cap_px, td5_glyph *out)
+{
+    out->valid = 0;
+    if (!td5_hudfont_ready()) return;
+    cp = hudfont_exact_cp(cp);
+    stbtt_fontinfo *fi; float cap;
+    pick_hud_font(cp, &fi, &cap);
+    font_rasterize(fi, cap, 1, cp, cap_px, out);
+}
+
+float td5_hudfont_advance_exact(int cp, float cap_px)
+{
+    if (!td5_hudfont_ready()) return 0.0f;
+    cp = hudfont_exact_cp(cp);
+    stbtt_fontinfo *fi; float cap;
+    pick_hud_font(cp, &fi, &cap);
+    int adv = 0, lsb = 0;
+    stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
+    return (float)adv * (cap_px / cap);
+}
+
 /* ---- tertiary title face (Lunatica) ------------------------------------- */
 
 int td5_titlefont_ready(void)

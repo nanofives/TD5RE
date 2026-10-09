@@ -8576,6 +8576,11 @@ static void frame_render(void)
      * steering-direction arrow). Self-gated: no-op unless the optional aid is
      * enabled for the pane's player. */
     td5_hud_draw_laneassist_indicator();
+    /* [ROUND 1011 C3] "ON <street>" per pane, from the route's real OSM street
+     * names. Same overlay-pass reason as the two above: a screen-space quad
+     * emitted inside the per-viewport 3D loop is clipped to one pane.
+     * Self-gated (no-op on every track that is not a real place). */
+    td5_hud_draw_street_lines();
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op

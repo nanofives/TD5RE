@@ -48,6 +48,21 @@ int   td5_hudfont_ready(void);
 void  td5_hudfont_get(int codepoint, float cap_px, td5_glyph *out);
 float td5_hudfont_advance(int codepoint, float cap_px);
 
+/* [ROUND 1011 C3] The same two calls WITHOUT the acute-accent fold.
+ *
+ * The folding versions above render a-acute as plain 'a', which is a
+ * deliberate choice for stylised menu text and the wrong one for a real-world
+ * proper noun -- an OSM street blade reading "Azcuenaga" where the map says
+ * e-acute is misspelt in the way a real road sign would be. The fallback face
+ * already carries real accented outlines (detect_watermark routes them there),
+ * so these just stop throwing the accent away.
+ *
+ * Pass a real CODEPOINT, not a byte: decode UTF-8 with td5_utf8_next() first.
+ * A codepoint past U+01FF renders as '?' -- the shared glyph cache keys on only
+ * 9 bits, so anything above that would alias onto another glyph's slot. */
+void  td5_hudfont_get_exact(int codepoint, float cap_px, td5_glyph *out);
+float td5_hudfont_advance_exact(int codepoint, float cap_px);
+
 /* ---- Tertiary title face (Lunatica, re/assets/frontend/title.ttf) ---------
  * The display typeface for the big header at the top of every frontend screen.
  * Shares the same glyph cache + GPU atlas page as the menu/HUD faces (so

@@ -6,6 +6,7 @@
  */
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"
+#include "td5_geo_attrs.h"     /* [1011 C3] the per-span OSM attribute prepass */
 
 /* [PICK] Human name for an auto-track texture page id, for the dev geometry
  * picker's HUD/clipboard. Defined ENTIRELY in terms of the TD5_TG_PAGE_*
@@ -3499,6 +3500,13 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * (tg_facade_built consults the mouth table) and precede the per-entry
          * loop. No-op with no geo place loaded. */
         tg_geo_city_prepare(nl, nspans);
+        /* [ROUND 1011 C3] Same contract and the same reason again: the OSM
+         * lit / maxspeed / name answer for every span is decided here, while
+         * this is still the only thread, because the nearest-way query is
+         * O(ways) and the lamp beat and the sign emitters that read it run on
+         * workers. No-op with no geo place loaded. */
+        td5_geo_attrs_prepare(nl, nspans);
+        td5_geo_attrs_report(nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
         /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is

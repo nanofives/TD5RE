@@ -215,6 +215,12 @@ void td5_hud_draw_laneassist_indicator(void);
  * when the DAMAGE BAR toggle is off. Replaces the old per-pane status-text draw
  * that was clipped to one viewport and invisible in split-screen. */
 void td5_hud_draw_damage_bars(void);
+
+/* [ROUND 1011 C3] "ON <street>" per pane, from the route's own OSM street
+ * names. Same overlay-pass contract as the damage bars above and the same
+ * reason. Self-gated: a no-op on every shipped track, on the synthetic auto
+ * track, and on a geo cache whose ROUTE.JSON predates round 1011. */
+void td5_hud_draw_street_lines(void);
 void td5_hud_clear_player_identities(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);

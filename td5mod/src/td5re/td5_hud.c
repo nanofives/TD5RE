@@ -48,6 +48,8 @@
 #include "td5_pending.h"    /* dev/QA pending-test list for the in-race overlay */
 #include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
 #include "td5_chaos.h"      /* [CHAOS CO-OP] per-pane role strip + swap countdown */
+#include "td5_geo.h"        /* [1011 C3] the route's per-node street names */
+#include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 
 #include <stdlib.h>
 #include <string.h>
@@ -3671,6 +3673,120 @@ static void hud_draw_wanted_banner_line(float cx, float caps_cy, float cap,
         }
         pen += g.advance;
     }
+}
+
+/* [ROUND 1011 C3] Draw one line of UTF-8 text, left-anchored at `x`.
+ *
+ * WHY A SEPARATE HELPER instead of td5_hud_queue_text. Every text path in this
+ * file reads `(unsigned char)s[k]` -- one BYTE, one glyph. That is correct for
+ * everything the HUD draws today, because the i18n catalog is decoded to
+ * Latin-1 once at load. It is wrong for an OSM street name, which is UTF-8 at
+ * runtime: "Azcuenaga" holds C3 A9 for its e-acute, and drawing those two
+ * bytes as two Latin-1 glyphs (A-tilde, copyright sign) IS the reported
+ * mojibake. So this decodes codepoints with td5_utf8_next and draws them with
+ * the non-folding glyph calls, which keep the accent instead of spelling a
+ * real street name wrong.
+ *
+ * Returns the width drawn, so a caller can right-align or centre by measuring
+ * first with `color = 0` suppressed (pass draw = 0). */
+static float hud_draw_utf8_line(float x, float baseline, float cap,
+                                const char *s, uint32_t color, int draw)
+{
+    float pen = x;
+    float off = cap * (1.0f / 16.0f);
+    int i = 0;
+    if (!s || !s[0]) return 0.0f;
+    if (off < 1.0f) off = 1.0f;
+
+    if (draw) {
+        /* Rasterise the whole line before drawing any of it: the glyphs share
+         * one GPU atlas page and the upload has to happen before the quads. */
+        int j = 0;
+        while (s[j]) {
+            int adv = 1;
+            const int cp = td5_utf8_next(s + j, &adv);
+            td5_glyph g;
+            if (!cp) break;
+            td5_hudfont_get_exact(cp, cap, &g);
+            j += adv;
+        }
+        td5_font_flush_uploads();
+    }
+
+    while (s[i]) {
+        int adv = 1;
+        const int cp = td5_utf8_next(s + i, &adv);
+        td5_glyph g;
+        if (!cp) break;
+        td5_hudfont_get_exact(cp, cap, &g);
+        if (draw && g.valid && g.w > 0.0f) {
+            const float gx = pen + g.xoff, gy = baseline + g.yoff;
+            td5_vui_quad(gx + off, gy + off, g.w, g.h, 0xFF000000u,
+                         g.page, g.u0, g.v0, g.u1, g.v1);
+            td5_vui_quad(gx, gy, g.w, g.h, color, g.page, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += g.valid ? g.advance : td5_hudfont_advance_exact(cp, cap);
+        i += adv;
+    }
+    return pen - x;
+}
+
+/* [ROUND 1011 C3] "ON <street>" -- the real street the player is driving on,
+ * from the route's own per-node name table.
+ *
+ * SOURCE. A geo track's span index IS its route node index (tg_geo_walk pushes
+ * node i for route node i), so the player's folded span indexes the name table
+ * directly. It reads the ROUTE and not the generator's prepass tables on
+ * purpose: a reused cached track skips generation entirely, and the route is
+ * loaded for every race either way.
+ *
+ * Nothing is drawn on a shipped track, on the synthetic auto track, or on a
+ * geo cache whose ROUTE.JSON predates round 1011 -- in all three the name is
+ * "" and this returns without emitting a quad. */
+static void hud_draw_street_line(int player_slot, int view_index);
+
+/* Draw every pane's street line from the FULL-SCREEN HUD overlay pass, the
+ * same shape and for the same reason as td5_hud_draw_damage_bars: a
+ * screen-space quad emitted inside the per-viewport 3D loop is remapped and
+ * clipped to that one pane. Self-gated -- a no-op on every non-geo track. */
+void td5_hud_draw_street_lines(void)
+{
+    int views = s_view_count;
+    if (g_replay_mode) return;
+    if (td5_geo_route_count() < 2) return;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+    for (int v = 0; v < views; v++) {
+        const int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        hud_draw_street_line(slot, v);
+    }
+}
+
+static void hud_draw_street_line(int player_slot, int view_index)
+{
+    const TD5_HudViewLayout *vl = &s_view_layout[view_index];
+    const char *name;
+    char buf[96];
+    float cap, w;
+
+    if (!td5_env_flag_on("TD5RE_HUD_STREET")) return;
+    if (td5_geo_route_count() < 2) return;
+    name = td5_geo_route_name(td5_game_get_slot_span(player_slot));
+    if (!name || !name[0]) return;
+
+    snprintf(buf, sizeof buf, TR("ON %s"), name);
+
+    /* Bottom-left of the pane, under everything the race HUD stacks at the
+     * top and clear of the centre countdown. */
+    cap = 11.0f * ((vl->scale_y > 0.0f) ? vl->scale_y : 1.0f);
+    if (cap < 8.0f)  cap = 8.0f;
+    if (cap > 28.0f) cap = 28.0f;
+    w = hud_draw_utf8_line(0.0f, 0.0f, cap, buf, 0, 0);
+    (void)w;
+    hud_draw_utf8_line(vl->vp_int_left + 10.0f,
+                       vl->vp_int_bottom - cap * 0.8f,
+                       cap, buf, 0xFFE8E8F0u, 1);
 }
 
 /* [COP CHASE SCOREBOARD REMOVED 2026-08-19] The top-of-pane per-cop arrest
