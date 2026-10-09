@@ -102,13 +102,15 @@ includers, no new compiler warnings per -W class.
   frame times) across repeated races. Report: `log/selftest_report.{csv,md}`;
   process exit code 0/1. Runner: `pwsh scripts/selftest.ps1 [-Suite full]`.
   See `td5mod/src/td5re/td5_selftest.c`; thresholds via `TD5RE_SELFTEST_*`.
-- **Golden traces** (full suite): two pinned-config races (Moscow + TD6 Pelton)
-  run with the fixed RaceTrace seed and hash their per-tick trace CSVs against
-  `td5mod/src/td5re/trace_goldens.txt`. A mismatch = the SIM changed — a
-  regression, or an intentional physics/AI change that must re-record via
-  `TD5RE_TRACE_GOLDEN_UPDATE=1 pwsh scripts/selftest.ps1 -Suite full` (commit
-  the file with the change). This is the behavioral regression net; CI can't
-  run it (no game assets on runners) — CI gates on the structure lint instead.
+- **Golden traces: RETIRED 2026-08-07, by design.** No `k_races` scenario sets
+  `.trace_golden`, so `trace_goldens.txt` is never read and a full suite prints no
+  golden rows. The behavioral net is now the invariant checker on every race row
+  (`ok (N samp) air=.. spd=.. jmp=.. prog=.. span=..`, `st_invariants_*` in
+  `td5_selftest.c`), which is robust to intentional physics/AI tuning. CI can't
+  run the suite (no game assets on runners), so CI gates on the structure lint.
+  For a byte-level check of the generated tracks use
+  `verify/geo_tags_identity.ps1 -Arm synthetic -NoControl` (move
+  `re/assets/geo/SELECTED.TXT` aside first).
 - **Live-control socket** (dev builds): `td5re.exe --Control=1` (or `[Control]
   Enabled=1`) opens a localhost UDP command socket (`127.0.0.1:37060`,
   `TD5RE_CONTROL_PORT` override; default OFF) so an external process can drive
@@ -177,12 +179,14 @@ comment — regenerate after adding/splitting modules with
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_geo.c` | GEO TRACK: real-world terrain source for the auto-track |
 | `td5_geo_roads.c` | GEO TRACK: real OSM road graph (ROADS.JSON) reader (PORT-ONLY) |
+| `td5_geo_attrs.c` | GEO TRACK: the per-span OSM ATTRIBUTE authority (PORT-ONLY) |
 | `td5_geo_buildings.c` | GEO TRACK: real OSM building footprints and area |
 | `td5_geo_signals.c` | GEO TRACK: traffic-signal nodes + the lamp cycle |
 | `td5_geo_footways.c` | GEO TRACK: real OSM pedestrian ways (FOOTWAYS.JSON) |
 | `td5_tg_geo_street.c` | GEO TRACK street-level reality from real OSM data |
 | `td5_geo_forks.c` | GEO TRACK: CONFIRMED FORKS for a real place (PORT-ONLY). |
 | `td5_geo_avenues.c` | GEO TRACK: DIVIDED AVENUES for a real place (PORT-ONLY). |
+| `td5_geo_sidewalk.c` | GEO TRACK: where a pavement's WIDTH comes from |
 | `td5_geo_route.c` | GEO TRACK: route + condition, in C (PORT-ONLY) |
 | `td5_geo_tiles.c` | OUTBOUND-ONLY OSM raster tile client. See td5_geo_tiles.h |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
