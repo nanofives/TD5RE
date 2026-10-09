@@ -45,8 +45,11 @@
 #define GEO_FW_MAX_FILE  (32 * 1024 * 1024)
 
 /* The uniform grid that makes the per-span-side query cheap. Sized so the
- * whole place is at most this many cells on a side; a place is a couple of
- * kilometres across, so 128 puts a cell at roughly 20 m. */
+ * whole place is at most this many cells on a side. MEASURED on la_plata:
+ * 3813 segments over a 129x114 grid of 26148 units, i.e. 60.8 m cells -- the
+ * rotated route frame spans about 7.8 km, rather more than the fetch radius
+ * suggests. A query asks about a few metres, so it touches one or two cells
+ * and a few dozen segments instead of all 3813. */
 #define GEO_FW_GRID_MAX   128
 #define GEO_FW_CELL_MIN_M 10.0
 
