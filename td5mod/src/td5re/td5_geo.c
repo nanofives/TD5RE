@@ -23,6 +23,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_geo.h"
+#include "td5_geo_route.h"       /* td5_geo_derived_migrate */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -703,6 +704,16 @@ void td5_geo_sync(void)
      * own value; with no override this reads the knob exactly as before. */
     const char *slug = td5_geo_wanted_slug();
     if (!slug) slug = "";
+
+    /* [ROUND 1011 C4] Bring an OLD derived frame up to the current schema
+     * before anything reads it. The all-or-nothing stamp stops a derived layer
+     * being mixed with a source one, but cannot tell that a derived frame
+     * written by an earlier build has WRONG CONTENTS -- a _route/ committed
+     * before this round has an unreprojected SIGNALS.JSON nodes[] and no
+     * FOOTWAYS.JSON. Idempotent, a no-op for a current or absent derived
+     * frame, and it must precede td5_geo_load below. Contract in
+     * td5_geo_route.h. */
+    if (slug[0]) td5_geo_derived_migrate(slug);
 
     if (strcmp(slug, s_geo.loaded ? s_geo.slug : "")) {
         if (!slug[0]) {

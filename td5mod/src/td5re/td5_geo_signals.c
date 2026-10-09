@@ -23,9 +23,17 @@
  * would grow a lamp on every zebra crossing in La Plata. `signals[]`
  * membership is therefore byte-identical to before.
  *
- * This reader counts `nodes[]` and reports it, and reads nothing from it. A
- * count in the log is how the next workstream finds out the data is already on
- * disk; a silent array is how it gets fetched twice.
+ * 2026-10-09, round 1011 C4. That next workstream arrived: `nodes[]` is now
+ * READ, in the same pass, into two tables beside `signals[]` -- crossings and
+ * bus stops. One pass because SIGNALS.JSON is a single 450 KB file and the
+ * alternative (a second module slurping and parsing it again) buys separation
+ * that nothing needs and costs a second parse of every byte.
+ *
+ * `signals[]` MEMBERSHIP IS STILL UNTOUCHED, which is the invariant this split
+ * exists to protect: tg_emit_geo_signals masts a traffic-light head at every
+ * entry of s_sig, so a crossing or a bus stop entering that table would grow a
+ * lamp on every zebra in La Plata. They go in their own arrays and their own
+ * emitters.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +60,14 @@ static GeoSignal *s_sig;
 static int        s_sig_count;
 static char       s_sig_slug[64];
 static char       s_sig_source[512];
+
+/* The two nodes[] tables. Same caps as the signals one: 583 crossings and 370
+ * bus stops in the whole of La Plata, so GEO_SIGNALS_MAX is three orders of
+ * magnitude of headroom and a file claiming more is a parse error. */
+static TD5_GeoCrossing *s_xing;
+static int              s_xing_count;
+static TD5_GeoBusStop  *s_stop;
+static int              s_stop_count;
 
 /* Read a whole file into a malloc'd NUL-terminated buffer, for cJSON. Same
  * shape as td5_geo.c's geo_slurp; duplicated rather than exported because that
@@ -88,8 +104,117 @@ void td5_geo_signals_unload(void)
     free(s_sig);
     s_sig = NULL;
     s_sig_count = 0;
+    free(s_xing);
+    s_xing = NULL;
+    s_xing_count = 0;
+    free(s_stop);
+    s_stop = NULL;
+    s_stop_count = 0;
     s_sig_slug[0] = '\0';
     s_sig_source[0] = '\0';
+}
+
+/* geo_fetch's `paint` verdict, READ rather than re-derived from `crossing` +
+ * `crossing:markings`. The rule has exactly one home (_crossing_paint in
+ * re/tools/geo_fetch.py); a second copy here is how the two drift. A cache
+ * that predates the field has no `paint` and lands on UNKNOWN, which the
+ * emitter treats as "no data, draw nothing". */
+static int sig_paint_of(const cJSON *e)
+{
+    const cJSON *p = e ? cJSON_GetObjectItem(e, "paint") : NULL;
+    const char *s = (p && cJSON_IsString(p)) ? p->valuestring : NULL;
+
+    if (!s)                     return TD5_GEO_XP_UNKNOWN;
+    if (!strcmp(s, "marked"))   return TD5_GEO_XP_MARKED;
+    if (!strcmp(s, "unmarked")) return TD5_GEO_XP_UNMARKED;
+    if (!strcmp(s, "signals"))  return TD5_GEO_XP_SIGNALS;
+    return TD5_GEO_XP_UNKNOWN;
+}
+
+static int sig_true(const cJSON *e, const char *key)
+{
+    const cJSON *v = e ? cJSON_GetObjectItem(e, key) : NULL;
+    if (!v) return 0;
+    if (cJSON_IsBool(v))   return cJSON_IsTrue(v) ? 1 : 0;
+    if (cJSON_IsNumber(v)) return v->valuedouble != 0.0 ? 1 : 0;
+    /* A string survives here only on a hand-edited cache; treat the OSM
+     * negatives as negative rather than as "non-empty, therefore yes". */
+    if (cJSON_IsString(v))
+        return (v->valuestring[0]
+                && strcmp(v->valuestring, "no")
+                && strcmp(v->valuestring, "false")
+                && strcmp(v->valuestring, "0")) ? 1 : 0;
+    return 0;
+}
+
+/* Fill s_xing / s_stop from the `nodes[]` array. Never fails the load: a
+ * malformed or absent nodes[] leaves both tables empty and the signals half
+ * works exactly as before. */
+static void sig_load_nodes(const cJSON *nd)
+{
+    int n, i;
+
+    if (!nd || !cJSON_IsArray(nd)) return;
+    n = cJSON_GetArraySize(nd);
+    if (n <= 0 || n > GEO_SIGNALS_MAX) return;
+
+    s_xing = (TD5_GeoCrossing *)malloc((size_t)n * sizeof(TD5_GeoCrossing));
+    s_stop = (TD5_GeoBusStop *)malloc((size_t)n * sizeof(TD5_GeoBusStop));
+    if (!s_xing || !s_stop) {
+        free(s_xing); s_xing = NULL;
+        free(s_stop); s_stop = NULL;
+        return;
+    }
+
+    for (i = 0; i < n; i++) {
+        const cJSON *e  = cJSON_GetArrayItem(nd, i);
+        const cJSON *pk = e ? cJSON_GetObjectItem(e, "kind") : NULL;
+        const cJSON *px = e ? cJSON_GetObjectItem(e, "x") : NULL;
+        const cJSON *pz = e ? cJSON_GetObjectItem(e, "z") : NULL;
+        const char *kind;
+
+        if (!pk || !cJSON_IsString(pk)) continue;
+        if (!px || !pz || !cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) continue;
+        kind = pk->valuestring;
+
+        if (!strcmp(kind, "crossing")) {
+            TD5_GeoCrossing *c = &s_xing[s_xing_count++];
+            c->x       = px->valuedouble;
+            c->z       = pz->valuedouble;
+            c->paint   = sig_paint_of(e);
+            c->tactile = sig_true(e, "tactile_paving");
+        } else if (!strcmp(kind, "bus_stop")) {
+            TD5_GeoBusStop *b = &s_stop[s_stop_count++];
+            b->x       = px->valuedouble;
+            b->z       = pz->valuedouble;
+            b->shelter = sig_true(e, "shelter");
+            b->bench   = sig_true(e, "bench");
+            b->bin     = sig_true(e, "bin");
+            b->lit     = sig_true(e, "lit");
+        }
+        /* Every other kind -- mini_roundabout, speed_camera, traffic_calming,
+         * street_lamp -- is still carried in the cache and still read by
+         * nothing. Named here so the next workstream finds them the same way
+         * this one found the crossings. */
+    }
+}
+
+int td5_geo_crossings_count(void) { return s_xing_count; }
+
+int td5_geo_crossing_get(int i, TD5_GeoCrossing *out)
+{
+    if (i < 0 || i >= s_xing_count || !out) return 0;
+    *out = s_xing[i];
+    return 1;
+}
+
+int td5_geo_bus_stops_count(void) { return s_stop_count; }
+
+int td5_geo_bus_stop_get(int i, TD5_GeoBusStop *out)
+{
+    if (i < 0 || i >= s_stop_count || !out) return 0;
+    *out = s_stop[i];
+    return 1;
 }
 
 int td5_geo_signals_count(void) { return s_sig_count; }
@@ -138,10 +263,14 @@ int td5_geo_signals_sync(void)
         return 0;
     }
 
-    {   /* Counted before the signals walk so an early return still reports
-         * it: a cache at tag_schema 1 simply has no `nodes` and reports 0. */
+    {   /* Read before the signals walk so EVERY early return below still
+         * leaves the crossing and bus-stop tables filled: a place whose
+         * signals[] is empty or malformed still has its zebras and its bus
+         * stops, and they are not the signals half's to lose. A cache at
+         * tag_schema 1 simply has no `nodes` and reports 0. */
         const cJSON *nd = cJSON_GetObjectItem(root, "nodes");
         if (nd && cJSON_IsArray(nd)) other = cJSON_GetArraySize(nd);
+        sig_load_nodes(nd);
     }
     arr = cJSON_GetObjectItem(root, "signals");
     if (!arr || !cJSON_IsArray(arr)) {
@@ -199,11 +328,29 @@ int td5_geo_signals_sync(void)
               bad ? " (some entries skipped, see the file)" : "");
     if (bad)
         TD5_LOG_W(LOG_TAG, "signals: %d of %d entries were malformed", bad, n);
-    if (other > 0)
-        TD5_LOG_I(LOG_TAG, "signals: the cache also carries %d non-signal "
-                  "highway node(s) (crossings / stop / give_way / humps) in "
-                  "nodes[]; nothing reads them yet -- they are NOT masted as "
-                  "lamps, which is why they are a separate array", other);
+    if (other > 0) {
+        int nm = 0, nu = 0, ns = 0, nk = 0, j;
+        int sh = 0, be = 0, bi = 0;
+        for (j = 0; j < s_xing_count; j++) {
+            switch (s_xing[j].paint) {
+            case TD5_GEO_XP_MARKED:   nm++; break;
+            case TD5_GEO_XP_UNMARKED: nu++; break;
+            case TD5_GEO_XP_SIGNALS:  ns++; break;
+            default:                  nk++; break;
+            }
+        }
+        for (j = 0; j < s_stop_count; j++) {
+            sh += s_stop[j].shelter;
+            be += s_stop[j].bench;
+            bi += s_stop[j].bin;
+        }
+        TD5_LOG_I(LOG_TAG, "signals: nodes[] carries %d non-signal node(s): "
+                  "%d crossing(s) (marked=%d unmarked=%d signals=%d "
+                  "unknown=%d), %d bus stop(s) (shelter=%d bench=%d bin=%d). "
+                  "They are NOT masted as lamps, which is why they are a "
+                  "separate array", other, s_xing_count, nm, nu, ns, nk,
+                  s_stop_count, sh, be, bi);
+    }
     return s_sig_count;
 }
 

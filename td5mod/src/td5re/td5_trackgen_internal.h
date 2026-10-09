@@ -5911,6 +5911,28 @@ int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans, TG_Buf *blk, siz
 void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans);
 int  tg_emit_geo_signals(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
 void tg_geo_signals_report(int nspans);
+
+/* ================== GEO STREET LEVEL (round 1011 C4) ====================
+ * Zebras at real highway=crossing nodes, bus stops at real highway=bus_stop
+ * nodes, and mapped plaza/park paving from FOOTWAYS.JSON. Defined in
+ * td5_tg_geo_street.c; rationale there. Same three-part contract as the geo
+ * traffic lights above -- prepare single-threaded in the prepass, emit as a
+ * read-only table scan per span, report the census -- and INERT on a synthetic
+ * build for the same reason, so MODELS.DAT stays byte-identical. */
+void tg_geo_xings_prepare(const TG_NodeList *nl, int nspans);
+int  tg_emit_geo_xings(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+/* 1 when a REAL crossing covers span si, so the generator's own crossing rule
+ * stands down there. Always 0 on a synthetic build and before the prepass. */
+int  tg_geo_xing_owns_span(int si);
+
+void tg_geo_bus_stops_prepare(const TG_NodeList *nl, int nspans);
+int  tg_emit_geo_bus_stops(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+
+void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans);
+int  tg_emit_geo_footpaths(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+
+/* One report for all three. */
+void tg_geo_street_report(int nspans);
 /* ====================================================================== */
 /* Terrain emits at most a couple of meshes per span; this is headroom, and the
  * emitter's own budget check is asserted against it below. */

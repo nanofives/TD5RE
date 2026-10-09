@@ -4167,7 +4167,16 @@ int tg_emit_fb_city(const TG_FBHook *h)
         tg_verge_band_w(h->b) > 0.0) {
         if (!TG_TI(TG_T_CITY_VERGE, tg_city_emit_verge_band(h, tg_verge_band_w(h->b)))) return 0;
     }
+    /* [GEO STREET, round 1011 C4] REAL DATA WINS. Where OSM says a crossing
+     * is, tg_emit_geo_xings paints it with the markings OSM says it has, and
+     * the generator's own spacing rule stands down over a window around it.
+     * Two authorities painting one junction is worse than either alone: the
+     * synthetic rule's minimum gap is TD5_TG_XMIN_GAP spans, so without the
+     * stand-down a real zebra and a synthetic one land 8 spans apart and the
+     * street reads as a crossing every 30 m. Always 0 on a synthetic build,
+     * where this is the only authority there has ever been. */
     if (paved && tg_city_crossing_here(h->si) &&
+        !tg_geo_xing_owns_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
         if (!TG_TI(TG_T_CITY_CROSSING, tg_city_emit_crossing(h))) return 0;
     }
