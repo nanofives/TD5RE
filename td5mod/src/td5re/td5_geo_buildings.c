@@ -672,6 +672,7 @@ static int geob_load_buildings(const char *slug)
      * for a process run and this loop is 2047 iterations at La Plata. */
     const int tag_lm = td5_env_flag_on("TD5RE_GEO_LM_TAGS");
     int n, i;
+    const cJSON *e_next;
 
     td5_geo_place_path(path, sizeof(path), slug, "BUILDINGS.JSON");
     json = geob_slurp(path);
@@ -704,9 +705,16 @@ static int geob_load_buildings(const char *slug)
                                        sizeof(TD5_GeoBuilding));
     if (!s_gb.b) { cJSON_Delete(root); return 0; }
 
+    /* [ROUND 1012 D1] WALK the list, never cJSON_GetArrayItem(arr, i): that
+     * call starts at the head every time, so the loop was O(n^2) -- harmless
+     * at 2326 OSM footprints, 78 s of load at 90840 (MEASURED: R14 GENPERF
+     * "generation took 78.4 s" against 0.3 s, with every listed zone under
+     * 0.2 s). Same element order, so the load is unchanged. */
+    e_next = arr->child;
     for (i = 0; i < n; i++) {
-        const cJSON *e = cJSON_GetArrayItem(arr, i);
+        const cJSON *e = e_next;
         TD5_GeoBuilding *b = &s_gb.b[s_gb.nb];
+        e_next = e ? e->next : NULL;
         const char *hs;
         double h_m, mh_m, rh_m;
         int first = 0, rn;

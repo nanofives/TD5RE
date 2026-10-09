@@ -5322,7 +5322,7 @@ int td5_trackgen_stream_scenery(volatile int *cancel)
      * reads as a finding. No race to worry about -- the streaming worker holds
      * the node list exclusively (td5_trackgen_stream_discard is what releases
      * it), so no other build can be running. */
-    tg_geo_city_report();
+    tg_geo_city_report_streamed();
     tg_geo_plaza_report();
     return ok;
 }

@@ -8629,12 +8629,16 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
     fe_draw_small_text(bx * sx, (by - 14.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
                        0xFF8899AA, sx, sy);
     /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
-     * Google Open Buildings carries their credit too (both ODbL). Stacked
-     * above the OSM pair, one source per line, same width rule. */
+     * Google Open Buildings carries their credit too (both ODbL). NOT stacked
+     * straight above the OSM pair: the track name is drawn at y 81..106 and
+     * the first framedump showed both lines printed through "LA PLATA". They
+     * go ABOVE the name instead, in the gap right of the menu's decorative
+     * bars (which reach x 420 at that height). Small text is ~7.6 units a
+     * glyph, so each line stays under 28 characters to end before x 640. */
     if (td5_geob_place_has_extra(slug)) {
-        fe_draw_small_text(bx * sx, (by - 50.0f) * sy,
+        fe_draw_small_text((bx + 13.0f) * sx, (by - 80.0f) * sy,
                            TR(TD5_GEOB_CREDIT_BUILDINGS), 0xFF8899AA, sx, sy);
-        fe_draw_small_text(bx * sx, (by - 38.0f) * sy,
+        fe_draw_small_text((bx + 13.0f) * sx, (by - 68.0f) * sy,
                            TR(TD5_GEOB_CREDIT_HEIGHTS), 0xFF8899AA, sx, sy);
     }
     return 1;
@@ -8671,11 +8675,12 @@ static void at_draw_preview(float sx, float sy)
      * track is shown. Above the read-out so it never collides with it. */
     if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0]) {
         fe_draw_small_text(bx, by - 14 * sy, TD5_GEO_CREDIT, 0xFF8899AA, sx, sy);
-        /* [ROUND 1012 D1] + the building sources, when the place has them. */
+        /* [ROUND 1012 D1] + the building sources, when the place has them.
+         * Clear of the status line under the title (framedump-checked). */
         if (td5_geob_place_has_extra(getenv("TD5RE_GEO_PLACE"))) {
-            fe_draw_small_text(bx, by - 38 * sy, TR(TD5_GEOB_CREDIT_BUILDINGS),
+            fe_draw_small_text(bx, by - 44 * sy, TR(TD5_GEOB_CREDIT_BUILDINGS),
                                0xFF8899AA, sx, sy);
-            fe_draw_small_text(bx, by - 26 * sy, TR(TD5_GEOB_CREDIT_HEIGHTS),
+            fe_draw_small_text(bx, by - 32 * sy, TR(TD5_GEOB_CREDIT_HEIGHTS),
                                0xFF8899AA, sx, sy);
         }
     }

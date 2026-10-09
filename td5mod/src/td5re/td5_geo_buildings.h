@@ -315,7 +315,7 @@ int td5_geob_place_has_extra(const char *slug);
 
 /* The two credit lines that go with it (never NULL). */
 #define TD5_GEOB_CREDIT_BUILDINGS "BUILDINGS (C) OVERTURE MAPS"
-#define TD5_GEOB_CREDIT_HEIGHTS   "HEIGHTS (C) GOOGLE OPEN BUILDINGS"
+#define TD5_GEOB_CREDIT_HEIGHTS   "(C) GOOGLE OPEN BUILDINGS"
 
 /* How many ring points the loader decimated away, and how many polygons it
  * had to decimate at all -- the honest cost of TD5_GEOB_RING_MAX. */

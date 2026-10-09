@@ -6159,6 +6159,7 @@ unsigned int td5_trackgen_last_seed(void);
  * unless TD5RE_GEO_PLACE names a loadable place. */
 int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
 void tg_geo_city_report(void);                    /* td5_tg_city.c    */
+void tg_geo_city_report_streamed(void);           /* td5_tg_city.c    */
 int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
 int  tg_geo_emit_plaza(const TG_FBHook *h);       /* td5_tg_streets.c */
 void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
