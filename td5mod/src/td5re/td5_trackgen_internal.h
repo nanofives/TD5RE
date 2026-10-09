@@ -668,7 +668,9 @@ extern unsigned int s_selfcheck_regen_seed;
  * at span F into a main half [F+1..F+len] and a corridor appended after the ring
  * at [cbase..cbase+len-1], rejoining at span R. The loader (td5_track.c) already
  * iterates an N-entry jump table, so the whole chain is multi-fork. */
-#define TD5_TG_BRANCH_MAX 8   /* [FORK KINDS] was 4; the plan ladder has 6 entries */
+#define TD5_TG_BRANCH_MAX 12  /* [FORK KINDS] was 4; the plan ladder has 6 entries.
+                               * [ROUND 1013 F2] 8 -> 12: a real route has a fork per
+                               * block of a divided avenue, and the jump table holds 32 */
 /* sep = per-fork separation scale in [0,1] (item 10): how far the branch bows
  * away from the main carriageway, as a fraction of the widest bow tg_branch_bow
  * allows. Small = a divided AVENUE (the two carriageways stay close, split only
@@ -702,6 +704,10 @@ typedef struct {
     double fm, fb;        /* main_lanes/lanes, br_lanes/lanes (0.5 symmetric) */
     int side;             /* [TOPOLOGY-FIRST] -1 corridor right of travel (the
                            * shipped shape), +1 left. Only a BYPASS goes left. */
+    int real;             /* [ROUND 1013 F2] 1 + index into the REAL fork table
+                           * (td5_tg_realfork.c): the corridor's lateral is the
+                           * measured gap between two real carriageways, not a
+                           * bow. 0 = a synthetic / legacy fork.              */
 } TG_Fork;
 const char *tg_fork_kind_name(int kind);
 /* Stateless plan for fork ordinal `index`: kind, corridor length and
@@ -4214,6 +4220,24 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double
 int    tg_geo_avenue_n(void);
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
 int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
+/* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
+ * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
+ * real road close to and parallel with the route, as a FORK the player and the AI
+ * can take, with the corridor's lateral the MEASURED gap between the two
+ * carriageways. Every one of these is a no-op (0 / the raw value) with no geo
+ * place loaded, which is what keeps a synthetic build byte-identical. */
+int    tg_realfork_enabled(void);
+int    tg_realfork_finish_span(void);           /* THE finish rule: no real fork window reaches it */
+int    tg_realfork_build(void);                  /* once per build, before the walk */
+void   tg_realfork_reset(void);
+int    tg_realfork_n(void);
+int    tg_realfork_get(int i, int *F, int *len, int *lanes_a, int *lanes_b, double *sep);
+const char *tg_realfork_name(int i);
+double tg_realfork_med(int i, int k);            /* median width at corridor step k, >= 0 */
+int    tg_realfork_lanes_override(int node, int raw_lanes);
+double tg_realfork_node_adjust(int node, double *x, double *z);
+double tg_realfork_node_width(int node, int lanes, double lane_w);   /* ramped, not stepped */
+double tg_realfork_node_delta(int node);         /* lateral (+t) the walk moved node by */
 /* ===================== GUARDRAILS =====================
  * The car is already contained by collision WALLS derived from the STRIP rail
  * vertices, but nothing draws them, so the road ends at an invisible boundary.

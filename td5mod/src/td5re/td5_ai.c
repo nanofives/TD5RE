@@ -5312,6 +5312,31 @@ static void td5_ai_smart_branch(int slot) {
      * 5->7 so even low-skill / fast cars have runway to reach the outer sub-lanes
      * before the at-crossing route test (td5_track.c cases 8/11). */
     int look = 7 + (int)(skill * 8.0f); /* 7..15 spans — react early enough to lane-change before the fork */
+    /* [ROUND 1013 F2b] GEO TRACKS ONLY: a real route has long straights, so the
+     * field arrives at a fork at 180+ km/h (about 0.5 span per tick, so the 7..15
+     * span window above is ONE second or less). The slide onto the corridor then
+     * starts too late and the car goes in at full lock with its rear out
+     * (measured on Mariano's route, fork 2: the corridor's first 12 spans carry
+     * steering at +-98304 and rear slip 26000..34000 for the cars that arrive at
+     * 185 km/h, and the pile-up behind them). Look a fixed TIME ahead instead:
+     * `TD5RE_AI_BRANCH_LOOK_SEC` seconds of travel are added (0 = the old window).
+     * Zero change off a geo route, and no RNG, so the synthetic races and netplay
+     * are untouched. Capped at 40 spans. */
+    if (td5_geo_route_count() >= 2) {
+        static float s_look_sec = -1.0f;
+        if (s_look_sec < 0.0f)
+            s_look_sec = td5_env_float("TD5RE_AI_BRANCH_LOOK_SEC", 1.5f, 0.0f, 4.0f);
+        if (s_look_sec > 0.0f) {
+            const int32_t sp = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            if (sp > 0) {
+                /* speed is 24.8: (sp >> 8) world units per tick, 30 ticks a second */
+                const int extra = (int)((double)(sp >> 8) * 30.0 * (double)s_look_sec
+                                        / (double)TD5_TG_SPAN_LENGTH);
+                look += extra;
+                if (look > 40) look = 40;
+            }
+        }
+    }
 
     for (int d = 1; d <= look; d++) {
         int s = span + d;
@@ -5414,6 +5439,17 @@ static void td5_ai_smart_branch(int slot) {
                 if (take_threshold < 15)  take_threshold = 15;
                 if (take_threshold > 85)  take_threshold = 85;
                 take = (r >= take_threshold) ? 1 : 0;
+#ifndef TD5RE_RELEASE
+                /* [ROUND 1013 F2] DEV ONLY: pin slot 0's fork choice (0 = stay
+                 * main, 1 = take the corridor) so a framedump or a trace can be
+                 * taken ON a corridor deterministically. Unset = the roll above,
+                 * unchanged. Consumes the same RNG step either way. */
+                if (slot == 0) {
+                    static int s_force = -2;
+                    if (s_force == -2) s_force = td5_env_int("TD5RE_AI_BRANCH_FORCE_P0", -1, -1, 1);
+                    if (s_force >= 0) take = s_force;
+                }
+#endif
                 if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
                     g_smart_branch_commit_span[slot] = (int16_t)s;
                     g_smart_branch_commit_take[slot] = (int8_t)take;

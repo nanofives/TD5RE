@@ -90,6 +90,10 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
         double off = 0.0;
         int lanes = 2;
         if (!td5_geo_avenue_at(si + e, &off, &lanes, NULL)) continue;
+        /* [ROUND 1013 F2] The sidecar's offset is measured from the route
+         * carriageway's own centre. Over a REAL fork's window the walk moved the
+         * node toward the corridor, so the same road is that much nearer. */
+        off -= tg_realfork_node_delta(si + e);
         if (side * off < 0.0) continue;         /* avenue is on the other side */
         {
             const double out = (off < 0.0 ? -off : off)
@@ -116,17 +120,48 @@ static int tg_av_ends(int si, double *o0, double *o1, int *lanes, int *open)
 
 /* The opposite carriageway's road surface for span si. Pure mesh: no strip row,
  * no span record, no occupancy paint, so it is never drivable. */
+/* [ROUND 1013 F2] ONE END of the opposite carriageway, clipped.
+ *
+ * Over a REAL fork's window the race road is wider than the lanes it carries --
+ * it holds the corridor's lanes beside its own, so the fork can split -- and that
+ * widening reaches over the median into the real opposite carriageway's ground.
+ * The scenery road therefore starts where the race road ENDS, never inside it.
+ * Outside every window the race road is its own lanes, the clip never bites, and
+ * this returns exactly the near/far edges the old code used. */
+static int tg_av_end_clip(double off, int lanes, double node_w, double *centre,
+                          double *width)
+{
+    const double sg  = (off >= 0.0) ? 1.0 : -1.0;
+    const double a   = (off < 0.0) ? -off : off;
+    const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
+    const double re  = node_w * 0.5;
+    double edge_in = a - ohw, edge_out = a + ohw;   /* (near/far are Win32 macros) */
+    if (edge_in < re) edge_in = re;
+    if (edge_out < edge_in + 1.0) {  /* the race road swallows it at this end */
+        *centre = sg * (re + 0.5);
+        *width  = 1.0;
+        return 0;
+    }
+    *centre = sg * (edge_in + edge_out) * 0.5;
+    *width  = edge_out - edge_in;
+    return 1;
+}
+
 static int tg_av_emit_road(const TG_NodeList *nl, int si, double o0, double o1,
                            int lanes, TG_Buf *blk, size_t *moff, int *nmesh)
 {
     const double w0 = nl->v[si].width;
     const double w1 = nl->v[si + 1].width;
-    const double ow = (double)lanes * (double)TD5_TG_LANE_WIDTH;
-    double ws0, ws1, u_scale;
+    double ws0, ws1, u_scale, c0, c1, cw0, cw1;
+    int live0, live1;
 
     if (w0 < 1.0 || w1 < 1.0) return 1;
-    ws0 = ow / w0;
-    ws1 = ow / w1;
+    live0 = tg_av_end_clip(o0, lanes, w0, &c0, &cw0);
+    live1 = tg_av_end_clip(o1, lanes, w1, &c1, &cw1);
+    if (!live0 && !live1) return 1;          /* wholly under the race road */
+    o0 = c0; o1 = c1;
+    ws0 = cw0 / w0;
+    ws1 = cw1 / w1;
     /* u_scale is "the U reached at the right edge when wscale == 1". With
      * TD5RE_R17_ROADMARK_UV on (the default) tg_emit_road_quad_taper derives U
      * from the PHYSICAL width instead and lands on exactly `lanes`; passing
@@ -163,8 +198,15 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     const double sg1 = (o1 >= 0.0) ? 1.0 : -1.0;
     /* The race road's own edge on the avenue's side, and the scenery road's
      * near edge. The median is everything between them. */
-    const double in0  = sg0 * a->width * 0.5, out0 = o0 - sg0 * ohw;
-    const double in1  = sg1 * c->width * 0.5, out1 = o1 - sg1 * ohw;
+    const double in0  = sg0 * a->width * 0.5;
+    const double in1  = sg1 * c->width * 0.5;
+    /* [ROUND 1013 F2] Where a REAL fork's widened race road reaches past the
+     * opposite carriageway's near edge there is no median to build: clamp the
+     * edge to the race road's, so the island tapers to nothing instead of
+     * standing across tarmac (the old |out - in| read that overlap as a median). */
+    double out0 = o0 - sg0 * ohw, out1 = o1 - sg1 * ohw;
+    if (sg0 * (out0 - in0) < 0.0) out0 = in0;
+    if (sg1 * (out1 - in1) < 0.0) out1 = in1;
     const double mw0  = (out0 > in0 ? out0 - in0 : in0 - out0);
     const double mw1  = (out1 > in1 ? out1 - in1 : in1 - out1);
     /* cl is the more POSITIVE lateral, cr the more negative -- the convention
@@ -293,6 +335,11 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
 
     if (!(sw > 0.0)) return 1;
     if (!td5_env_flag_on("TD5RE_GEO_AVENUE_FARWALK")) return 1;
+    /* [ROUND 1013 F2] Over a real fork's widened window the race road can reach
+     * past the opposite carriageway's far edge; a footway there would be laid on
+     * tarmac. */
+    if ((e0 < 0.0 ? -e0 : e0) < a->width * 0.5 + 50.0 ||
+        (e1 < 0.0 ? -e1 : e1) < c->width * 0.5 + 50.0) return 1;
 
     /* TOP. */
     px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
@@ -399,16 +446,38 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
     if (!nl || si < 0 || si + 1 >= nl->count) return 1;
     if (tg_geo_avenue_n() < 1) return 1;
     if (!tg_av_ends(si, &o0, &o1, &lanes, &open)) return 1;
-    /* The sidecar's own floor is nominal (it only knows TD5_TG_LANE_WIDTH).
-     * Re-check against the REAL node width here, which is the authority: an
-     * offset inside the race road's own half width would lay the scenery
-     * carriageway in the live lanes. */
-    if ((o0 < 0.0 ? -o0 : o0) <= nl->v[si].width * 0.5) return 1;
+    /* [ROUND 1013 F2] The sidecar's offset is measured from the route
+     * carriageway's own centre. Over a REAL fork's window the walk moved the
+     * node toward the corridor (td5_tg_realfork.c), so the same real road sits
+     * that much nearer the node. Zero outside every window. */
+    o0 -= tg_realfork_node_delta(si);
+    o1 -= tg_realfork_node_delta(si + 1);
+    {
+        /* A span a REAL fork's corridor runs over: the fork draws the carriageway
+         * (it is DRIVEABLE there), the gore and the kerbed island, all from the
+         * same real offset, so drawing them again here would stack two roads.
+         * Only the footway beyond the far edge is still this module's -- it
+         * carries the real per-side width the fork's own branch pavement does
+         * not know. */
+        const int fi = tg_fork_of_main(si);
+        if (fi >= 0 && s_forks[fi].real > 0) {
+            const int    j  = si - s_forks[fi].F - 1;
+            const int    bl = s_forks[fi].br_lanes;
+            const double c0 = tg_fork_br_shift(fi, j,     nl->v[si].width);
+            const double c1 = tg_fork_br_shift(fi, j + 1, nl->v[si + 1].width);
+            tg_av_note(nl, si, c0, bl, open,
+                       tg_realfork_med(s_forks[fi].real - 1, j));
+            if (open) return 1;
+            return tg_av_emit_far_pavement(nl, si, c0, c1, bl, blk, moff, nmesh);
+        }
+    }
 
     {
         const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
         const double a   = (o0 < 0.0) ? -o0 : o0;
-        tg_av_note(nl, si, o0, lanes, open, a - nl->v[si].width * 0.5 - ohw);
+        double med = a - nl->v[si].width * 0.5 - ohw;
+        if (med < 0.0) med = 0.0;     /* a real fork's window: the race road is wider */
+        tg_av_note(nl, si, o0, lanes, open, med);
     }
     if (!tg_av_emit_road(nl, si, o0, o1, lanes, blk, moff, nmesh)) return 0;
     /* A real cross street cuts the median here, so it opens for the turn --

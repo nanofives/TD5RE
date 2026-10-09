@@ -138,6 +138,10 @@ void td5_geo_attrs_prepare(const void *nlv, int nspans)
     }
 
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+    /* [ROUND 1013 F2] The loop below reads nl->v[si]; the list only has `count`
+     * nodes. A caller that hands over the strip span count (ring + fork corridors)
+     * would walk off the end, so the callee bounds it as well. */
+    if (nspans > nl->count) nspans = nl->count;
 
     s_ga.lit      = (unsigned char *)calloc((size_t)nspans, 1);
     s_ga.lamp     = (unsigned char *)calloc((size_t)nspans, 1);

@@ -731,6 +731,15 @@ void tg_turn_map_build(const TG_NodeList *nl, int nspans)
     s_r14_turn_worst = 0.0;
     s_r14_turn_opened = 0;
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+    /* [ROUND 1013 F2] The caller passes the FULL strip span count, which with
+     * forks includes every corridor's pad + tail, but the centreline only holds
+     * the main ring: both loops below index nl->v[si + k], so the old bound read
+     * (nspans - ring) nodes past the end of the array. Harmless while that tail
+     * was a few dozen spans of allocation slack; with five real forks on a route
+     * (233 spans, 18 KB) it crosses the end of the allocation and the generation
+     * thread faulted at random (measured: tg_turn_map_build, RIP +0x9C77E, access
+     * past the heap block, ~1 run in 3). Corridor spans carry no bend or turn. */
+    if (nspans > nl->count - 1) nspans = nl->count - 1;
 
     /* [R11 CROSS item 16] Bend magnitude first, unconditionally -- it is filled
      * even with TD5RE_R8_CROSS_TURN=0, because how bent the road is does not

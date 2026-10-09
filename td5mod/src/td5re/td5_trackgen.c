@@ -3508,12 +3508,21 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
     {
         TG_ZONE_BEGIN(TG_ZONE_PREPASS);
         s_tg_progress = 10;
-        TG_TV(TG_T_PRE_TURNMAP,  tg_turn_map_build(nl, nspans));
-        TG_TV(TG_T_PRE_R8CROSS,  tg_r8_cross_report(nl, nspans));   /* [R8 CROSS] class sweep, opt-in */
-        TG_TV(TG_T_PRE_R10CROSS, tg_r10_cross_report(nl, nspans));  /* [R10 CROSS] side-street setback, opt-in */
-        TG_TV(TG_T_PRE_R11CITY,  tg_r11_city_report(nl, nspans));   /* [R11 CITY] frontage/junction dump, TD5RE_TG_REPORTS */
-        TG_TV(TG_T_PRE_R13JUNC,  tg_r13_junc_report(nl, nspans));   /* [R13 JUNCTION] bend-fold sweep, TD5RE_TG_REPORTS */
-        TG_TV(TG_T_PRE_R13FILL,  tg_r13_fill_report(nl, nspans));   /* [R13 FILL] exposed-rear sweep, opt-in */
+        /* [ROUND 1013 F2] `nspans` is the FULL strip count, fork pads + corridor
+         * tails included, but `nl` holds only the main ring's nodes. Every sweep
+         * below indexes nl->v[si (+k)], so each one is bounded by the RING, not by
+         * nspans: a corridor span has no node of its own (it rides node F+1+k).
+         * Passing nspans read (nspans - ring) nodes past the array -- a few dozen
+         * spans of allocation slack with one synthetic fork, but 233 spans with
+         * five real forks, which crossed the end of the heap block and faulted the
+         * generation thread (tg_turn_map_build, ~1 run in 3). */
+        const int nprep = (ring < nl->count - 1) ? ring : nl->count - 1;
+        TG_TV(TG_T_PRE_TURNMAP,  tg_turn_map_build(nl, nprep));
+        TG_TV(TG_T_PRE_R8CROSS,  tg_r8_cross_report(nl, nprep));   /* [R8 CROSS] class sweep, opt-in */
+        TG_TV(TG_T_PRE_R10CROSS, tg_r10_cross_report(nl, nprep));  /* [R10 CROSS] side-street setback, opt-in */
+        TG_TV(TG_T_PRE_R11CITY,  tg_r11_city_report(nl, nprep));   /* [R11 CITY] frontage/junction dump, TD5RE_TG_REPORTS */
+        TG_TV(TG_T_PRE_R13JUNC,  tg_r13_junc_report(nl, nprep));   /* [R13 JUNCTION] bend-fold sweep, TD5RE_TG_REPORTS */
+        TG_TV(TG_T_PRE_R13FILL,  tg_r13_fill_report(nl, nprep));   /* [R13 FILL] exposed-rear sweep, opt-in */
         tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
         tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
         /* [GEO SIGNALS] Decide the traffic-light placements while this is
@@ -3547,7 +3556,7 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * this is still the only thread, because the nearest-way query is
          * O(ways) and the lamp beat and the sign emitters that read it run on
          * workers. No-op with no geo place loaded. */
-        td5_geo_attrs_prepare(nl, nspans);
+        td5_geo_attrs_prepare(nl, nprep);   /* [ROUND 1013 F2] ring, see nprep above */
         td5_geo_attrs_report(nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
