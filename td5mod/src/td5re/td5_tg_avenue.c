@@ -411,6 +411,62 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
  * / 112 spans would otherwise read three per-avenue counts that nearly fit. */
 static long s_av_farwalk;
 
+/* [ROUND 1014 A] The footway's OUTER-edge lateral at both ends of span s and its width,
+ * exactly as tg_av_emit_far_pavement will lay it, or 0 when span s lays none. Asked of
+ * the neighbours so a run's two ends (a corridor mouth, an opening, the avenue's own
+ * ends) get an END CAP: an uncapped slab is hollow at its ends -- you look straight into
+ * it, which is the "side is empty" of the report. */
+static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
+                           double *sw)
+{
+    double a = 0.0, b = 0.0, o0, o1;
+    int la = 2, op = 0, fi, lanes, in_fork = 0;
+    double sg0, sg1, w;
+    if (!nl || s < 0 || s + 1 >= nl->count) return 0;
+    if (!td5_geo_avenue_at(s, &a, &la, &op)) return 0;
+    if (!td5_geo_avenue_at(s + 1, &b, NULL, NULL)) b = a;
+    a -= tg_realfork_node_delta(s);
+    b -= tg_realfork_node_delta(s + 1);
+    fi = tg_fork_of_main(s);
+    if (fi >= 0 && s_forks[fi].real > 0) {
+        const int j = s - s_forks[fi].F - 1;
+        o0 = tg_fork_br_shift(fi, j,     nl->v[s].width);
+        o1 = tg_fork_br_shift(fi, j + 1, nl->v[s + 1].width);
+        lanes = s_forks[fi].br_lanes;
+        in_fork = 1;
+        if (op && !td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 0;
+    } else {
+        if (op && !td5_env_flag_on("TD5RE_GEO_AVENUE_OPENING")) return 0;
+        o0 = a; o1 = b; lanes = la;
+    }
+    sg0 = (o0 >= 0.0) ? 1.0 : -1.0;
+    sg1 = (o1 >= 0.0) ? 1.0 : -1.0;
+    w = tg_geo_sidewalk_w_side(s, sg0 > 0.0);
+    if (!(w > 0.0)) return 0;
+    {
+        const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
+        const double m = in_fork ? -1.0 : 50.0;
+        const double x0 = o0 + sg0 * ohw, x1 = o1 + sg1 * ohw;
+        if ((x0 < 0.0 ? -x0 : x0) < nl->v[s].width * 0.5 + m ||
+            (x1 < 0.0 ? -x1 : x1) < nl->v[s + 1].width * 0.5 + m) return 0;
+        *e0 = x0; *e1 = x1;
+    }
+    *sw = w;
+    return 1;
+}
+
+/* Does span s's footway join span `other`'s at the shared node (`end` = 1: s's far
+ * end meets other's near end; 0: s's near end meets other's far end)? */
+static int tg_av_far_joins(const TG_NodeList *nl, int s, int other, int end)
+{
+    double a0, a1, aw, b0, b1, bw, ea, eb;
+    if (!tg_av_far_edges(nl, other, &b0, &b1, &bw)) return 0;
+    if (!tg_av_far_edges(nl, s, &a0, &a1, &aw)) return 0;
+    ea = end ? a1 : a0;
+    eb = end ? b0 : b1;
+    return (ea - eb < 60.0 && eb - ea < 60.0 && aw - bw < 60.0 && bw - aw < 60.0);
+}
+
 static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
                                    double o0, double o1, int lanes, int in_fork,
                                    TG_Buf *blk, size_t *moff, int *nmesh)
@@ -433,9 +489,21 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     const double cl1 = (e1 > f1) ? e1 : f1, cr1 = (e1 > f1) ? f1 : e1;
     const double H = (double)TD5_TG_KERB_H;
     const double b0 = a->y, b1 = c->y;      /* the far carriageway's own plane */
-    double px[12], py[12], pz[12], uu[12], vv[12];
+    double px[20], py[20], pz[20], uu[20], vv[20];
     int seg_page[2], seg_nq[2];
-    int n = 0;
+    int n = 0, cap_in = 0, cap_out = 0;
+    /* [ROUND 1014 A] The OUTER wall stops at the ground, not at the road plane. The
+     * skirt sits GROUND_DROP under the road, so a wall ending at the road plane left a
+     * gap under the slab you could see into from the verge side ("doesn't have proper
+     * depth"). The kerb (road-facing) wall keeps its base on the asphalt. The same
+     * depth is the base of the end caps. TD5RE_GEO_AVENUE_CAPS=0 restores both. */
+    const int    deep  = td5_env_flag_on("TD5RE_GEO_AVENUE_CAPS");
+    const double g0    = deep ? b0 - (double)TD5_TG_GROUND_DROP : b0;
+    const double g1    = deep ? b1 - (double)TD5_TG_GROUND_DROP : b1;
+    const double bl0   = (sg0 > 0.0) ? g0 : b0;   /* wall at cl: outer when the avenue is on +t */
+    const double bl1   = (sg1 > 0.0) ? g1 : b1;
+    const double br0   = (sg0 > 0.0) ? b0 : g0;   /* wall at cr: outer when the avenue is on -t */
+    const double br1   = (sg1 > 0.0) ? b1 : g1;
 
     if (getenv("TD5RE_GEO_FARWALK_DIAG"))
         TD5_LOG_I(LOG_TAG, "trackgen: [GEO FARWALK] span %d sw %.0f e0 %.0f e1 %.0f "
@@ -465,19 +533,38 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
 
     /* Wall facing +lateral. */
-    px[n]=a->x+a->tz*cl0; py[n]=b0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*cl0; py[n]=bl0;  pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
     px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
     px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*cl1; py[n]=b1;   pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=bl1;  pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=1.0; n++;
 
     /* Wall facing -lateral. */
-    px[n]=a->x+a->tz*cr0; py[n]=b0;   pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=1.0; n++;
-    px[n]=c->x+c->tz*cr1; py[n]=b1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=br0;  pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=br1;  pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
     px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
     px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
 
+    /* [ROUND 1014 A] END CAPS where the footway does not carry on at the same lateral
+     * and width (winding as tg_emit_avenue_divider's, derived there). */
+    if (deep) {
+        cap_in  = !tg_av_far_joins(nl, si, si - 1, 0);
+        cap_out = !tg_av_far_joins(nl, si, si + 1, 1);
+    }
+    if (cap_in) {
+        px[n]=a->x+a->tz*cl0; py[n]=g0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=g0;   pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    }
+    if (cap_out) {
+        px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=g1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=c->x+c->tz*cl1; py[n]=g1;   pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
+    }
+
     seg_page[0] = TD5_TG_PAGE_SIDEWALK;    seg_nq[0] = 1;
-    seg_page[1] = TD5_TG_PAGE_BRANCH_KERB; seg_nq[1] = 2;
+    seg_page[1] = TD5_TG_PAGE_BRANCH_KERB; seg_nq[1] = 2 + (cap_in ? 1 : 0) + (cap_out ? 1 : 0);
     moff[(*nmesh)++] = blk->len;
     if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2))
         return 0;
