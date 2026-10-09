@@ -3880,9 +3880,26 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     const char *why = NULL;
                     char fit_why[256];
 
-                    /* Keep clear of the start grid and of the ring's tail, the
-                     * same two margins every span-indexed sidecar respects. */
-                    if (s0 < lead1 + GR_GRID_SPAN) s0 = lead1 + GR_GRID_SPAN;
+                    /* Keep clear of the ring's tail, and of span 0.
+                     *
+                     * [ROUND 1014 C] "at the very start of the race, when
+                     * starting on an avenue, I need to see the whole avenue."
+                     * The run used to be cut at the END of the 24-span start
+                     * grid (the same margin every span-indexed sidecar
+                     * respects), so a race that STARTS on a divided avenue had
+                     * no opposite carriageway until span 24 and the procedural
+                     * frontage stood where it belongs: MEASURED on Mariano's
+                     * route, Diagonal 73 began at span 24 and 23 spans of
+                     * buildings stood on the far carriageway's ground in front
+                     * of the grid. The scenery road is not drivable, so nothing
+                     * about the grid needs the room. Span 0 stays clear (every
+                     * building emitter skips it). TD5RE_GEO_AVENUE_GRID=0
+                     * restores the old margin for an A/B. */
+                    {
+                        const int first = lead1 + (td5_env_flag_on("TD5RE_GEO_AVENUE_GRID")
+                                                   ? 1 : GR_GRID_SPAN);
+                        if (s0 < first) s0 = first;
+                    }
                     if (s1 > spans1 - 2)           s1 = spans1 - 2;
                     if (s1 - s0 + 1 < GR_AV_MIN_SPANS)
                         why = "it does not reach the span floor clear of the "
