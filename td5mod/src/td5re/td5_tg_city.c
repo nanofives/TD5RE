@@ -12,6 +12,7 @@
 #include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
 #include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
 #include "td5_geo_avenues.h"     /* [1013 F1] which edge a divided avenue owns  */
+#include "td5_tg_geo_clear.h"    /* [1014 C] real roads + far footway: no building on either */
 
 double tg_r14_keep(void)
 {
@@ -1602,6 +1603,9 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
 /* Sink the base this far into the ground so uneven terrain under a big flat
  * footprint cannot show daylight under a wall. */
 #define TD5_TG_GEO_BASE_SINK  300.0
+/* [ROUND 1014 C] Deepest foundation a wall reaches down to meet the ground:
+ * 4300 = 10 m. Past that the ground is a cliff or a data error, not a slope. */
+#define TD5_TG_GEO_MAX_FOUND  4300.0
 /* How many points a stand-down probe samples across its depth band. Three --
  * front plane, middle, back plane -- is the fewest that cannot miss a polygon
  * edge falling anywhere inside the band.
@@ -1665,6 +1669,10 @@ static double s_geo_h_err_sum, s_geo_h_err_max;
 /* [ROUND 1009 item 2] Flanks capped because the NEIGHBOUR's procedural wall
  * stood down for a real footprint / plaza. */
 static long s_geo_cap_added;
+/* [ROUND 1014 C] flanks the exact neighbour test closed that the predicate left open */
+static long s_geo_cap_exact;
+static long s_geo_found;           /* footprints whose walls reach below the base plane */
+static double s_geo_found_max;
 
 /* Per-build entry point. Called from tg_store_page_reset, which
  * td5_tg_pages.c runs at the top of the build -- before tg_world_build, before
@@ -1690,6 +1698,8 @@ static void tg_geo_city_build_begin(void)
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
     s_geo_h_err_sum = s_geo_h_err_max = 0.0;
     s_geo_cap_added = 0;
+    s_geo_cap_exact = 0;
+    s_geo_found = 0; s_geo_found_max = 0.0;
     memset(s_geo_roof_kind, 0, sizeof(s_geo_roof_kind));
     s_geo_shift_max = s_geo_route_dev_max = 0.0;
     s_geo_city = s_geo_bld = 0;
@@ -1898,16 +1908,26 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     const TG_Node *n = &nl->v[si];
     const double side = left ? 1.0 : -1.0;
     const double lx = n->tz * side, lz = -n->tx * side;
-    /* [1011 C2] PER SIDE: the probe measures from the back edge of the slab
-     * this side actually gets, so a street with a wide vereda one way and a
-     * kerb the other probes two different bands -- which is the whole point. */
-    const double base = n->width * 0.5 + tg_city_sidewalk_w_side_at(nl, si, left, b);
+    double base;
     double px[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
     double pz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
     int k, a, np = 0, nalong = 1;
     double ax = 0.0, az = 0.0;
 
     if (!s_geo_city) return 0;
+    /* [1011 C2] PER SIDE: the probe measures from the back edge of the slab
+     * this side actually gets, so a street with a wide vereda one way and a
+     * kerb the other probes two different bands -- which is the whole point.
+     *
+     * [ROUND 1014 C] ... and from where the wall ACTUALLY stands: the gap the
+     * frontage and the real footprints are set back to, which on a divided
+     * avenue is the far edge of the opposite carriageway's footway, not the
+     * race road's own pavement. The band used to start inside the opposite
+     * carriageway, so it asked about ground the wall never occupies and could
+     * miss a real building standing behind it. (Identical on a plain street.) */
+    base = n->width * 0.5
+         + tg_geo_building_clear_gap(nl, si, side,
+                                     tg_city_sidewalk_w_side_at(nl, si, left, b));
     if (td5_env_flag_on("TD5RE_GEO_MASS_DEEP") && si + 1 < nl->count) {
         const TG_Node *n1 = &nl->v[si + 1];
         const double b1 = n1->width * 0.5
@@ -1936,6 +1956,20 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
     if (s_geo_bld
         && td5_geob_points_in_building(si, px, pz, np,
                                        TD5_GEOB_WIN_B)) return 1;
+    /* [ROUND 1014 C] A REAL ROAD under the band is real geometry too: the far
+     * end of a divided avenue where the opposite carriageway peels off, a
+     * street joining a plaza ring, a cross street the network kept elsewhere.
+     * The frontage stands down there and the flank logic closes both ends with
+     * a corner return, exactly as for a real footprint. See td5_tg_geo_clear.h. */
+    if (tg_geo_clear_ready()) {
+        const double own = tg_geo_own_lateral(nl, si, side);
+        for (k = 0; k < np; k++)
+            if (tg_geo_foreign_road_at(px[k], pz[k], n->x, n->z, n->tx, n->tz,
+                                       own)) {
+                tg_geo_clear_note_wall();
+                return 1;
+            }
+    }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
     return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
 }
@@ -2190,6 +2224,10 @@ void tg_geo_city_prepare(const TG_NodeList *nl, int nspans)
     if (!s_geo_city || !nl || nspans < 2) return;
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
     if (nspans > nl->count) nspans = nl->count;
+
+    /* [ROUND 1014 C] the real-road index, single-threaded and BEFORE the
+     * stand-down loop below (and so before any scenery worker exists). */
+    tg_geo_clear_prepare();
 
     /* --- item 7 / [1011 C2]: pavement width per SIDE from the nearest way -- */
     if (td5_env_flag_on("TD5RE_GEO_SIDEWALK")
@@ -2616,6 +2654,7 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
 {
     const TG_Node *n = &h->nl->v[h->si];
     double ux, uz, vx, vz, tmin = 0.0, tmax = 0.0, vmin = 0.0, vmax = 0.0, y;
+    double hx_fit = 0.0, hz_fit = 0.0;
     int k, pf;
 
     if (!td5_env_flag_on("TD5RE_GEO_LM_PREFAB")) return 0;
@@ -2638,13 +2677,67 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
     {
         const double hx = (-tmin < tmax ? -tmin : tmax);
         const double hz = (-vmin < vmax ? -vmin : vmax);
-        pf = tg_prefab_fit(2.0 * hx, 2.0 * hz, gb->id_hash);
+        /* [ROUND 1014 C] "ONLY IF the piece's own footprint FITS INSIDE the real
+         * one" was claimed above and never tested: the piece is fitted to the
+         * ring's principal-axis half-extents, which are the half-extents of its
+         * BOUNDING BOX, so on an L-shaped or wedge-shaped ring the rectangle's
+         * corners stand outside the ring -- over the pavement, the kerb or the
+         * far carriageway (level091 e19 s20: a landmark whose corner stood on the
+         * opposite carriageway). Try the piece at 100/85/70/55% of the box and
+         * take the first whose four corners are inside the ring AND outside the
+         * carriageway line; none fits -> the plain extrusion, which IS the ring.
+         * TD5RE_GEO_PREFAB_FIT=0 restores the unchecked fit. */
+        const TG_Node *nd = &h->nl->v[h->si];
+        const double sd = (gb->host_side > 0) ? 1.0 : -1.0;
+        const double minout = nd->width * 0.5
+            + tg_geo_building_clear_gap(h->nl, h->si, sd,
+                    tg_city_sidewalk_w_side_at(h->nl, h->si, sd > 0.0, h->b));
+        static const double k_scale[4] = { 1.0, 0.85, 0.70, 0.55 };
+        int si4;
+        pf = -1;
+        for (si4 = 0; si4 < 4 && pf < 0; si4++) {
+            double fx = hx * k_scale[si4], fz = hz * k_scale[si4];
+            int c, ok = 1;
+            pf = tg_prefab_fit(2.0 * fx, 2.0 * fz, gb->id_hash);
+            if (pf < 0) continue;
+            if (!td5_env_flag_on("TD5RE_GEO_PREFAB_FIT")) break;
+            /* the piece's OWN extents, not the box it was fitted to */
+            fx = tg_prefab_half_width(pf);
+            fz = tg_prefab_half_depth(pf);
+            for (c = 0; c < 4 && ok; c++) {
+                const double sx = (c & 1) ? 1.0 : -1.0, sz = (c & 2) ? 1.0 : -1.0;
+                const double qx = cx + ux * fx * sx + vx * fz * sz;
+                const double qz = cz + uz * fx * sx + vz * fz * sz;
+                if (!td5_geob_point_in_ring(rx, rz, n_ring, qx, qz)) ok = 0;
+                else if (tg_geo_outward(h->nl, h->si, sd, qx, qz) < minout) ok = 0;
+            }
+            if (!ok) pf = -1;
+        }
+        hx_fit = (pf >= 0) ? tg_prefab_half_width(pf) : hx;
+        hz_fit = (pf >= 0) ? tg_prefab_half_depth(pf) : hz;
     }
     if (pf < 0) { s_geo_lm_nofit++; return 0; }
 
     y = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
     if (y > n->y + tg_city_kerb_h(h->b) + 400.0)
         y = n->y + tg_city_kerb_h(h->b) + 400.0;
+    /* [ROUND 1014 C] "buildings float and don't follow terrain height change."
+     * A stamped set piece stands on ONE plane, taken at the footprint's centroid,
+     * so on a slope its downhill edge hangs in the air (MEASURED: 2.8 m under a
+     * La Plata landmark). Seat it on the LOWEST ground under the rectangle it
+     * occupies instead -- the uphill side buries a little, which nobody sees,
+     * where the downhill side showed daylight. TD5RE_GEO_BLD_FOUNDATION=0
+     * restores the centroid plane. */
+    if (td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION")) {
+        int cxn, czn;
+        for (cxn = -1; cxn <= 1; cxn += 2)
+            for (czn = -1; czn <= 1; czn += 2) {
+                const double qx = cx + ux * hx_fit * cxn + (-uz) * hz_fit * czn;
+                const double qz = cz + uz * hx_fit * cxn + ux * hz_fit * czn;
+                const double gy = tg_world_h(qx, qz) + tg_city_kerb_h(h->b);
+                if (gy < y) y = gy;
+            }
+    }
     y -= TD5_TG_GEO_BASE_SINK;
 
     h->moff[(*h->nmesh)++] = h->blk->len;
@@ -2897,6 +2990,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     double q[12], t3[9];
     double shift = 0.0, need, H, by, minout, gap, rise, inv_tile;
     double wall_top, vrows, cx = 0.0, cz = 0.0;
+    double bot[TD5_GEOB_RING_MAX], found_max = 0.0;
     int n_ring = gb->n, k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
     int rows, storeys = 0, wall_page, roof_page, shape, convex;
     double lm_row_h = 0.0;          /* [1014 D20] >0: worship page cell height */
@@ -2916,10 +3010,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     if (!td5_geob_ring_simple(rx, rz, n_ring)) { tg_geo_lm_note(gb, si, "DROPPED ring not simple", 0.0); s_geo_dropped_deg++; return 1; }
 
     /* --- clear the carriageway and the pavement, by the least nudge that does */
-    gap = tg_carriageway_clear_gap(nl, si, side,
-                                   tg_city_sidewalk_w_side_at(nl, si,
-                                                              side > 0.0, h->b),
-                                   TD5_TG_CARRIAGEWAY_MARGIN);
+    gap = tg_geo_building_clear_gap(nl, si, side,
+                                    tg_city_sidewalk_w_side_at(nl, si,
+                                                               side > 0.0, h->b));
     minout = n->width * 0.5 + gap;
     for (k = 0; k < n_ring; k++) {
         need = minout - tg_geo_outward(nl, si, side, rx[k], rz[k]);
@@ -2933,6 +3026,32 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     }
     for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
     cx /= (double)n_ring; cz /= (double)n_ring;
+
+    /* [ROUND 1014 C] A footprint standing ON a real road that is not the race
+     * road (Overture's ML footprints overlap a carriageway now and then; a
+     * conditioned route moves the nearest street) is not a building there. Half
+     * of its sample points (vertices, edge midpoints, centroid) on the road is
+     * the test: a footprint that merely grazes a kerb is kept. */
+    if (tg_geo_clear_ready()) {
+        const double own = tg_geo_own_lateral(nl, si, side);
+        int on = 0, ns = 0;
+        if (tg_geo_foreign_road_at(cx, cz, n->x, n->z, n->tx, n->tz, own)) on++;
+        ns++;
+        for (k = 0; k < n_ring; k++) {
+            const int j = (k + 1) % n_ring;
+            if (tg_geo_foreign_road_at(rx[k], rz[k], n->x, n->z, n->tx, n->tz, own))
+                on++;
+            if (tg_geo_foreign_road_at((rx[k] + rx[j]) * 0.5, (rz[k] + rz[j]) * 0.5,
+                                       n->x, n->z, n->tx, n->tz, own)) on++;
+            ns += 2;
+        }
+        if (on * 2 >= ns) {
+            tg_geo_lm_note(gb, si, "DROPPED on a foreign road", 0.0);
+            tg_geo_clear_note_footprint();
+            s_geo_dropped_deg++;
+            return 1;
+        }
+    }
 
     /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
      * outline's own (already nudged) ring, so it inherits the carriageway
@@ -3178,20 +3297,46 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     }
 
     /* --- WALLS: one quad per footprint edge ------------------------------- */
+    /* [ROUND 1014 C] FOUNDATION. "buildings float and don't follow terrain
+     * height change." The whole mass stood on ONE plane (the ground at the
+     * centroid), so on a slope the downhill corners hung in the air -- MEASURED
+     * on the audit of Mariano's build, up to 4.5 m under the 70 m-radius blocks.
+     * Each wall now reaches down, per VERTEX, to the world's ground under that
+     * vertex (never up: the uphill side keeps the plane and simply buries), at
+     * most TD5_TG_GEO_MAX_FOUND below it. A building:part that starts at its own
+     * min_height is floating by design and keeps its plane.
+     * TD5RE_GEO_BLD_FOUNDATION=0 restores the single plane. */
+    for (k = 0; k < n_ring; k++) {
+        bot[k] = by;
+        if (td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") && !(gb->min_height > 0.0)) {
+            const double g = tg_world_h(rx[k], rz[k]) + tg_city_kerb_h(h->b)
+                           - TD5_TG_GEO_BASE_SINK;
+            if (g < bot[k]) {
+                bot[k] = (g < by - TD5_TG_GEO_MAX_FOUND) ? by - TD5_TG_GEO_MAX_FOUND : g;
+                if (by - bot[k] > found_max) found_max = by - bot[k];
+            }
+        }
+    }
+    if (found_max > 1.0) { s_geo_found++; if (found_max > s_geo_found_max) s_geo_found_max = found_max; }
     for (k = 0; k < n_ring; k++) {
         const int j = (k + 1) % n_ring;
         const double elen = hypot(rx[j] - rx[k], rz[j] - rz[k]);
-        double ua;
+        double ua, vq;
         if (!(elen > 1.0)) continue;        /* duplicate vertex in the source */
         ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
-        q[0] = rx[k]; q[1]  = by;      q[2]  = rz[k];
-        q[3] = rx[j]; q[4]  = by;      q[5]  = rz[j];
+        q[0] = rx[k]; q[1]  = bot[k];  q[2]  = rz[k];
+        q[3] = rx[j]; q[4]  = bot[j];  q[5]  = rz[j];
         q[6] = rx[j]; q[7]  = wall_top; q[8]  = rz[j];
         q[9] = rx[k]; q[10] = wall_top; q[11] = rz[k];
+        /* The page rows stretch with the extra wall, so a foundation under a
+         * 12-storey block does not squash its windows. */
+        vq = vrows;
+        if (wall_top - by > 1.0)
+            vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - by);
         /* Storeys over the WALL, not over the building: with roof:height
          * tagged the eaves are below the top and repeating the full storey
          * count over the shorter wall would squash the windows. */
-        tg_geo_push_quad(v, light, &nv, q, ua, vrows, 0xFFFFFFFFu);
+        tg_geo_push_quad(v, light, &nv, q, ua, vq, 0xFFFFFFFFu);
         nquad++;
     }
     if (nquad < 3) { s_geo_dropped_deg++; return 1; }
@@ -3303,6 +3448,7 @@ static void tg_geo_city_report_impl(int from_stream)
               "%d + %d too far; decimated %d ring(s)/%d point(s)",
               nb, meas, est, lm, roofs, na, plaza, bb, ab,
               td5_geob_bound_spans(), bf, af, dp, dpt);
+    tg_geo_clear_report();
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted %ld real building(s): %ld measured "
               "/ %ld estimated, %ld real landmark(s) extruded, %ld landmark(s) "
               "left to the prefab table; nudged %ld clear of the carriageway "
@@ -3395,14 +3541,66 @@ static void tg_geo_city_report_impl(int from_stream)
     }
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] flanks: %ld corner return(s) added facing "
               "a span-side whose procedural wall stood down for real geometry "
-              "(knob TD5RE_GEO_WALL_CAP=%s)", s_geo_cap_added,
-              td5_env_flag_on("TD5RE_GEO_WALL_CAP") ? "on" : "off");
+              "(knob TD5RE_GEO_WALL_CAP=%s); %ld more closed because the "
+              "neighbour's wall does not actually stand (knob "
+              "TD5RE_GEO_CAP_EXACT=%s)", s_geo_cap_added,
+              td5_env_flag_on("TD5RE_GEO_WALL_CAP") ? "on" : "off",
+              s_geo_cap_exact,
+              td5_env_flag_on("TD5RE_GEO_CAP_EXACT") ? "on" : "off");
+    {   /* [ROUND 1014 C] item 18, as numbers in race.log. */
+        const double upm_f = td5_geob_units_per_m() > 1.0
+                           ? td5_geob_units_per_m() : 1.0;
+        TD5_LOG_I(LOG_TAG, "[GEO BUILD] foundation: %ld footprint(s) have a wall "
+                  "reaching below the base plane to meet sloping ground, worst "
+                  "%.2f m (knob TD5RE_GEO_BLD_FOUNDATION=%s)", s_geo_found,
+                  s_geo_found_max / upm_f,
+                  td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") ? "on" : "off");
+    }
 }
 
 /* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
- * the run/gap pattern or the branch-corridor exclusion skips this side. */
+ * the run/gap pattern or the branch-corridor exclusion skips this side.
+ *
+ * [ROUND 1014 C] `caps` = 0 skips the cap decision at the foot, which is what
+ * lets a NEIGHBOUR ask "does your wall actually stand" (tg_side_stands) without
+ * the two spans' cap decisions asking each other. */
+static void tg_side_geom_impl(const TG_NodeList *nl, int si, int left,
+                              const TG_Biome *b, TG_SideGeom *g, int caps);
+
 void tg_side_geom(const TG_NodeList *nl, int si, int left,
                          const TG_Biome *b, TG_SideGeom *g)
+{
+    tg_side_geom_impl(nl, si, left, b, g, 1);
+}
+
+/* [ROUND 1014 C] THE EXACT ANSWER to "does a procedural wall stand at (si, side)":
+ * the same code path the emitter runs (tg_building_for_span's gates, then
+ * tg_side_geom's `built`, then tg_emit_street_wall's bridge-water drop), not a
+ * reconstruction of its predicates. tg_side_built mirrors only SOME of the
+ * suppressions inside tg_side_geom -- the lone-stub rule, the minimum footprint,
+ * the real-road stand-down, the water drop are not in it -- so a run whose
+ * neighbour was suppressed by one of those had cap == 0 against a gap and was
+ * left with a bare front plane: the "building has no side face" report. */
+int tg_side_stands(const TG_NodeList *nl, int si, int left)
+{
+    TG_SideGeom g;
+    const TG_Biome *b;
+    if (!nl || si <= 0 || si + 1 >= nl->count) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    if (tg_up_clear_span(si)) return 0;
+    b = &k_biomes[tg_scenery_biome_index(si)];
+    if (b->billboard && b->tree_n > 0) return 0;
+    tg_side_geom_impl(nl, si, left, b, &g, 0);
+    if (!g.built) return 0;
+    if (td5_env_flag_on("TD5RE_R18_BUILDING_OVER_BRIDGE_WATER")
+        && (tg_point_over_bridge_water(nl, si, g.bx, g.bz)
+            || tg_point_over_bridge_water(nl, si, g.bx + g.ax, g.bz + g.az)))
+        return 0;
+    return 1;
+}
+
+static void tg_side_geom_impl(const TG_NodeList *nl, int si, int left,
+                              const TG_Biome *b, TG_SideGeom *g, int caps)
 {
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1 = &nl->v[si + 1];
@@ -3477,9 +3675,8 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * setback everywhere else, and keeps the whole building (front, caps and the
      * step wall, which all derive from set0/set1) off any carriageway. */
     {
-        const double gap = tg_carriageway_clear_gap(nl, si, side,
-                               tg_city_sidewalk_w_side_at(nl, si, side > 0.0, b),
-                               TD5_TG_CARRIAGEWAY_MARGIN);
+        const double gap = tg_geo_building_clear_gap(nl, si, side,
+                               tg_city_sidewalk_w_side_at(nl, si, side > 0.0, b));
         set0 = n0->width * 0.5 + gap;
         set1 = n1->width * 0.5 + gap;
         /* [R13 JUNCTION item 3] "BUILDINGS OVERLAPPING INTO THE ROAD" on a
@@ -3613,7 +3810,7 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * it. The table is read, not recomputed: tg_geo_city_prepare froze it
      * single-threaded before this loop went parallel, and it is empty on a
      * synthetic build. */
-    {
+    if (caps) {
         const int near_geo = tg_geo_wall_down(si - 1, left);
         const int far_geo  = tg_geo_wall_down(si + 1, left);
         g->cap_near = !tg_side_built(si - 1, left) || near_geo;
@@ -3621,6 +3818,17 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
         if ((near_geo && tg_side_built(si - 1, left))
             || (far_geo && tg_side_built(si + 1, left)))
             s_geo_cap_added++;
+        /* [ROUND 1014 C] On a GEO track the neighbour's own emitter has the
+         * last word: close the flank wherever its wall will not actually be
+         * there, whatever suppressed it. Synthetic builds keep the predicate
+         * (byte-identical); TD5RE_GEO_CAP_EXACT=0 restores it on a geo build. */
+        if (s_geo_city && td5_env_flag_on("TD5RE_GEO_CAP_EXACT")) {
+            const int cn = !tg_side_stands(nl, si - 1, left);
+            const int cf = !tg_side_stands(nl, si + 1, left);
+            if ((cn && !g->cap_near) || (cf && !g->cap_far)) s_geo_cap_exact++;
+            g->cap_near = cn;
+            g->cap_far  = cf;
+        }
     }
     g->built = 1;
 }
@@ -4070,7 +4278,9 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * boundary instead, which is what a run end is. */
         if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
             td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS") &&
-            tg_side_built(si + 1, s) && !tg_geo_wall_down(si + 1, s)) {
+            (s_geo_city && td5_env_flag_on("TD5RE_GEO_CAP_EXACT")
+                 ? tg_side_stands(nl, si + 1, s)
+                 : (tg_side_built(si + 1, s) && !tg_geo_wall_down(si + 1, s)))) {
             const int nrows = tg_facade_floors(si + 1, s, b);
             if (nrows > 0 && nrows != g->rows) {
                 const int hi = nrows > g->rows ? nrows : g->rows;

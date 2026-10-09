@@ -29,6 +29,8 @@
  */
 #include "td5_trackgen_internal.h"   /* also supplies LOG_TAG */
 #include "td5_tg_world.h"
+#include "td5_geo.h"            /* [1014 C] geo track: is a place loaded */
+#include "td5_tg_geo_clear.h"    /* [1014 C] set pieces keep off carriageways and real roads */
 
 /* One recorded placement. Small and flat: the table is walked once per span
  * during emit, so a linear scan over a handful of entries costs nothing. */
@@ -48,6 +50,7 @@ static long s_pf_emitted;
  * real square. Reported, because "the landmark moved" and "the landmark never
  * had anywhere to go" are different tracks. */
 static int s_pf_plaza_refused;
+static int s_pf_geo_road_refused;   /* [1014 C] sites refused: a real road under the piece */
 
 /* [J7 item 1] "todavia hay edificios que no tienen lados" (Mariano,
  * 2026-10-03). Some of the shipped set pieces in td5_tg_prefab_data.h are OPEN
@@ -130,6 +133,7 @@ void tg_prefab_reset(void)
     s_pf_n = 0;
     s_pf_emitted = 0;
     s_pf_plaza_refused = 0;
+    s_pf_geo_road_refused = 0;
 }
 
 int tg_prefab_count(void) { return s_pf_n; }
@@ -153,6 +157,12 @@ int tg_prefab_add(int si, int pf, double ox, double oy, double oz, double yaw_c,
 /* Footprint half-extent ACROSS the road, i.e. along the prefab's local Z, which
  * tg_prefab_place aligns with the road normal. Used to set the standoff so the
  * near face lands on the clearance line rather than the centre doing. */
+double tg_prefab_half_width(int pf)
+{
+    if (pf < 0 || pf >= TD5_TG_PREFAB_N) return 0.0;
+    return k_tg_prefabs[pf].fx * 0.5;
+}
+
 double tg_prefab_half_depth(int pf)
 {
     if (pf < 0 || pf >= TD5_TG_PREFAB_N) return 0.0;
@@ -325,8 +335,9 @@ void tg_prefab_report(void)
     int i;
     TD5_LOG_I(LOG_TAG, "trackgen: [PREFAB] %d placed, %ld emitted (of %d "
               "available set pieces), %d site(s) refused for standing in a "
-              "real square", s_pf_n, s_pf_emitted, TD5_TG_PREFAB_N,
-              s_pf_plaza_refused);
+              "real square, %d for standing on a real road", s_pf_n,
+              s_pf_emitted, TD5_TG_PREFAB_N, s_pf_plaza_refused,
+              s_pf_geo_road_refused);
     /* Name them. A bare count cannot distinguish "six plazas" from "four
      * landmarks and two plazas", and those are very different tracks. */
     for (i = 0; i < s_pf_n; i++) {
@@ -364,12 +375,37 @@ int tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
     nz =  tx * (double)side;
 
     off = n->width * 0.5 + clearance + tg_prefab_half_depth(pf);
+    /* [ROUND 1014 C] "a building ... is in the middle of the street." The
+     * clearance is a FIXED number from the road's own edge, so on a geo track a
+     * piece sited beside a divided avenue stood on the opposite carriageway
+     * (MEASURED: 10.8 m^2 of it, level091 e19 s20). Take the gap every other
+     * building takes: the carriageway authority's reach, the avenue's far
+     * footway, a fork corridor. Geo only -- a synthetic build keeps its fixed
+     * clearance, byte for byte. */
+    if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_PREFAB_CLEAR")) {
+        /* This function's `side` points along (-tz, +tx); the carriageway
+         * authority's lateral is (+tz, -tx) for side +1, so the SAME physical
+         * side is -side there. */
+        const double g = tg_geo_building_clear_gap(nl, si, -(double)side, 0.0);
+        if (g > clearance) off += g - clearance;
+    }
     x = n->x + nx * off;
     z = n->z + nz * off;
     /* Stand it on the WORLD, not on the road: beside a graded road the terrain
      * has already been conformed near the verge and falls away past it, so
      * using the road's y would float or bury a piece set back this far. */
     y = tg_world_h(x, z);
+    /* [ROUND 1014 C] ... and on the LOWEST ground under its rectangle, so a
+     * slope shows no daylight under the downhill side (geo only). */
+    y = tg_geo_prefab_seat(nl, si, x, z, k_tg_prefabs[pf].fx, k_tg_prefabs[pf].fz, y);
+    /* [ROUND 1014 C] A real road under the piece refuses the site; the caller
+     * tries other hash-chosen spans and gives up quietly. */
+    if (td5_env_flag_on("TD5RE_GEO_PREFAB_CLEAR")
+        && tg_geo_prefab_blocked(nl, si, (double)side, x, z,
+                                 k_tg_prefabs[pf].fx, k_tg_prefabs[pf].fz)) {
+        s_pf_geo_road_refused++;
+        return 0;
+    }
 
     /* [ROUND 1012 D2] NOT IN A REAL SQUARE. "there were landmarks on the plaza
      * at the beginning of the race." These are the SHIPPED TD5 set pieces, laid
