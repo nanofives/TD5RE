@@ -811,9 +811,6 @@ const char *td5_geo_roads_name(const TD5_GeoRoad *r)
     return r ? td5_geo_roads_name_by_id(r->name_id) : "";
 }
 
-    return best;
-}
-
 int td5_geo_roads_pavement_facts_at(double x, double z, double max_dist,
                                     TD5_GeoPavementAt *out)
 {
