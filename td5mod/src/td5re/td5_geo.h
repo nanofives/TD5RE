@@ -171,6 +171,23 @@ int  td5_geo_route_count(void);            /* nodes, 0 when no route */
 int  td5_geo_route_node(int i, double *x, double *z, int *lanes);
 const char *td5_geo_route_source(void);    /* path it came from, "" if none */
 
+/* [ROUND 1011 C3] The per-node OSM attributes, as the FILE holds them.
+ *
+ * STRICTLY ADDITIVE, same contract as the grade separations below: a
+ * ROUTE.JSON written before this round carries neither key, and these then
+ * report "unknown" for every node -- 0 km/h and name id -1. That is not a
+ * failure, it is the honest answer, and td5_geo_attrs.c answers it by falling
+ * back to the spatial query against ROADS.JSON, so the attributes work on an
+ * existing cache without the user rebuilding the route first.
+ *
+ * The name accessors return a pointer into the loaded route, valid until the
+ * next route load/unload, and "" rather than NULL for an unnamed node. */
+int  td5_geo_route_maxspeed(int i);        /* km/h, 0 = the file does not say */
+int  td5_geo_route_name_id(int i);         /* -1 = unnamed at this node       */
+int  td5_geo_route_name_count(void);
+const char *td5_geo_route_name_by_id(int id);
+const char *td5_geo_route_name(int i);
+
 /* ------------------------------------------------- grade separations ------
  * [OPTION B 2026-09-30] docs/plans/GEO_TRACK_OSM_PLAN.md section 5, Option B.
  *
