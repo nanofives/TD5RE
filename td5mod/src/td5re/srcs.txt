@@ -12,6 +12,7 @@ td5_geo.c
 td5_geo_roads.c
 td5_geo_attrs.c
 td5_geo_buildings.c
+td5_geo_landmarks.c
 td5_geo_signals.c
 td5_geo_footways.c
 td5_tg_geo_street.c

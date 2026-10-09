@@ -114,6 +114,14 @@
 #define TD5_GEOB_LMSRC_TOURISM    9
 #define TD5_GEOB_LMSRC_COUNT     10
 
+/* [ROUND 1014 D20] WHAT KIND of landmark a footprint is, as opposed to which
+ * tag made it one (LMSRC). The 3D treatment differs by kind -- a cathedral is
+ * brick and slate with pointed spires, a ministry is not -- and the kind is
+ * what td5_geo_landmarks.c groups a building:part cluster under. WORSHIP is
+ * building=cathedral|church|chapel|basilica|... or amenity=place_of_worship. */
+#define TD5_GEOB_LMK_NONE     0
+#define TD5_GEOB_LMK_WORSHIP  1
+
 /* Human name of a TD5_GEOB_LMSRC_*, for the log. Never NULL. */
 const char *td5_geob_lmsrc_name(int src);
 
@@ -138,6 +146,7 @@ typedef struct {
     unsigned char roof;       /* TD5_GEOB_ROOF_*                           */
     unsigned char landmark;   /* OSM says this is a named landmark         */
     unsigned char lmsrc;      /* TD5_GEOB_LMSRC_* -- which tag decided it  */
+    unsigned char lmkind;     /* [ROUND 1014 D20] TD5_GEOB_LMK_* -- WHAT KIND of landmark */
     unsigned char part;       /* building:part -- a 3D-modelled sub-volume */
     unsigned char fsrc;       /* TD5_GEOB_FSRC_* -- whose footprint        */
     /* [ROUND 1013 F1] Stands inside a plaza (a mapped square OR a named plaza

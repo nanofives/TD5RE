@@ -7,6 +7,7 @@
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"             /* GEO TRACK: is a real place loaded?        */
 #include "td5_geo_buildings.h"   /* GEO TRACK: real footprints and areas      */
+#include "td5_geo_landmarks.h"   /* [1014 D20] landmark clusters + apron hull   */
 #include "td5_geo_roads.h"       /* GEO TRACK: OSM sidewalk tags (item 7)     */
 #include "td5_geo_sidewalk.h"    /* GEO TRACK: the five pavement-width sources */
 #include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
@@ -1647,6 +1648,12 @@ static long s_geo_roof_shaped, s_geo_roof_concave, s_geo_parts;
  * that only the land_* fixture exercises the difference at all. */
 static long s_geo_roof_kind[TD5_GEOB_ROOF_SKILLION + 1];
 static long s_geo_lm_prefab, s_geo_lm_nofit;
+/* [ROUND 1014 D20] landmark-cluster ledger: footprints that wore the worship
+ * materials, the aprons laid and their triangle count, duplicates skipped, and
+ * apron vertices pulled in because a real street was within reach. */
+static long s_geo_lm_styled, s_geo_lm_apron, s_geo_lm_apron_quads;
+static long s_geo_lm_vetoed, s_geo_lm_apron_pulled, s_geo_lm_apron_refused;
+static double s_geo_lm_apron_dev;
 static double s_geo_shift_max, s_geo_route_dev_max;
 /* [ROUND 1009 item 9] HEIGHT FIDELITY LEDGER -- the number item 9 asks for.
  * `err` is |built mass height - (height_m - min_height_m)| in world units,
@@ -1677,6 +1684,9 @@ static void tg_geo_city_build_begin(void)
     s_geo_dropped_slots = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
     s_geo_lm_prefab = s_geo_lm_nofit = 0;
+    s_geo_lm_styled = s_geo_lm_apron = s_geo_lm_apron_quads = 0;
+    s_geo_lm_vetoed = s_geo_lm_apron_pulled = s_geo_lm_apron_refused = 0;
+    s_geo_lm_apron_dev = 0.0;
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
     s_geo_h_err_sum = s_geo_h_err_max = 0.0;
     s_geo_cap_added = 0;
@@ -2644,6 +2654,224 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
     return 1;
 }
 
+/* [ROUND 1014 D20] One line per LANDMARK footprint saying what became of it.
+ * "The Cathedral is not visible" was undiagnosable from the census, which only
+ * counts: 90 landmarks bind, some are nudged, some dropped, and nothing said
+ * which. ~90 lines per build, emitted from scenery workers (the logger is
+ * thread-safe), not in a per-frame loop. */
+static void tg_geo_lm_note(const TD5_GeoBuilding *gb, int si, const char *what,
+                           double shift)
+{
+    const int kind = td5_geolm_kind(gb);
+    if (!gb->landmark && kind == TD5_GEOB_LMK_NONE) return;
+    TD5_LOG_I(LOG_TAG, "[GEO LM] way_hash=%08x %s span=%d side=%d lat=%.0f "
+              "ring=%d r=%.0f area=%.0fm2 h=%.0f hsrc=%d: %s (shift %.0f)",
+              gb->id_hash, gb->landmark ? (kind ? "anchor" : "landmark") : "part",
+              si, gb->host_side, gb->host_lat, gb->n, gb->radius,
+              gb->area_m2, gb->height, (int)gb->hsrc, what, shift);
+}
+
+/* ======================================================================== *
+ * [ROUND 1014 D20] LANDMARK CLUSTERS: what a cathedral looks like, and the
+ * open ground around it. Design: docs/plans/GEO_LANDMARKS.md.
+ *
+ * td5_geo_landmarks.c says WHICH footprints are one landmark (the outline and
+ * the building:part ways inside it). This is the other half: how that cluster
+ * is dressed. Before round 1014 every one of the cathedral's 26 ways was
+ * extruded as a generic office block -- glass-curtain-wall pages, house-roof
+ * pages -- so the two 110 m spires read as ordinary towers and Mariano's
+ * free-cam pick of one of them said "city p68+280".
+ * ======================================================================== */
+
+/* The WORSHIP palette, all from the shipped Moscow set-piece page block
+ * (TD5_TG_PAGE_LM_BASE + the prefab data's LOCAL index; the shipped page number
+ * in the comment is what the pick tool prints):
+ *   706  red brick, white lancet windows -- the cathedral is brick and cement
+ *   584  weathered stone gable with slit windows -- low masses, for variety
+ *   621  dark slate -- every cathedral part is tagged roof:colour=Black
+ * These indices are POSITIONAL against td5_tg_prefab_data.h, which is exactly
+ * why the assert below exists: regenerate the prefab set and this table has to
+ * be re-checked by eye against the page sheet, not silently re-textured. */
+#define TD5_TG_LM_WORSHIP_WALL   (TD5_TG_PAGE_LM_BASE + 147)
+#define TD5_TG_LM_WORSHIP_WALL2  (TD5_TG_PAGE_LM_BASE + 25)
+#define TD5_TG_LM_WORSHIP_ROOF   (TD5_TG_PAGE_LM_BASE + 62)
+typedef char tg_lm_worship_pages_fit[(TD5_TG_PREFAB_PAGES == 161) ? 1 : -1];
+/* One lancet-window page cell: 7 m across, 10 m up. A storey-count UV (3 m)
+ * would squash a Gothic window to a slit, and the 110 m spires would carry 36
+ * rows of them. */
+#define TD5_TG_LM_WORSHIP_CELL_W_M  7.0
+#define TD5_TG_LM_WORSHIP_ROW_H_M  10.0
+
+/* Returns 1 and the worship pages/cells when `gb` belongs to a worship
+ * cluster. TD5RE_GEO_LM_STYLE=0 restores the generic dressing for an A/B. */
+static int tg_geo_worship_style(const TD5_GeoBuilding *gb, int *wall,
+                                int *roof, double *cell_w, double *row_h)
+{
+    const double upm = td5_geob_units_per_m() > 1.0 ? td5_geob_units_per_m()
+                                                    : 430.0;
+    if (!td5_env_flag_on("TD5RE_GEO_LM_STYLE")) return 0;
+    if (td5_geolm_kind(gb) != TD5_GEOB_LMK_WORSHIP) return 0;
+    /* A low mass may take the stone page; towers and the nave never do. The
+     * choice is a hash of the way id, so it is stable across builds. */
+    *wall = (gb->height < 30.0 * upm && (gb->id_hash % 3u) == 0u)
+          ? TD5_TG_LM_WORSHIP_WALL2 : TD5_TG_LM_WORSHIP_WALL;
+    *roof = TD5_TG_LM_WORSHIP_ROOF;
+    *cell_w = TD5_TG_LM_WORSHIP_CELL_W_M * upm;
+    *row_h  = TD5_TG_LM_WORSHIP_ROW_H_M * upm;
+    s_geo_lm_styled++;
+    return 1;
+}
+
+/* THE APRON: paved open ground around a landmark outline.
+ *
+ * Mariano asked for "clear ground around it". Two parts of that are free --
+ * the stand-down probes already keep procedural frontage off a real footprint,
+ * and the plaza veto keeps small clutter out -- so what was missing is a
+ * SURFACE: without it the cathedral stood on bare terrain texture, the same
+ * grey the verges use, with nothing to say "this is a forecourt".
+ *
+ * Geometry: a ring of quads between an INNER ring (the footprint's convex hull
+ * scaled to 0.6, which lies inside the building and is hidden by it) and the
+ * OUTER ring (the hull pushed out by up to TD5_TG_GEO_APRON_M). Two rings, not
+ * one fan, so every vertex samples the world's own ground: a 130 x 90 m fan
+ * with only perimeter heights is a plane the terrain wanders away from.
+ *
+ * Clearance is per-vertex and measured, not assumed. A vertex keeps the full
+ * margin only if (a) it clears the host span's carriageway + pavement by the
+ * same minout the building was nudged to, and (b) no real street heavier than
+ * a service lane runs within TD5_TG_GEO_APRON_ROAD_M of it; else it tries half,
+ * a quarter, then none. At La Plata that is what stops the apron paving over
+ * Calle 15, which runs 9.6 m from the outline. */
+#define TD5_TG_GEO_APRON_M          12.0   /* metres */
+#define TD5_TG_GEO_APRON_ROAD_M      9.0   /* metres: half street + pavement */
+#define TD5_TG_GEO_APRON_LIFT       80.0   /* raw: over the 60 plaza lawn     */
+#define TD5_TG_GEO_APRON_INNER       0.6
+
+static int tg_geo_apron_road_clear(double x, double z, double clear)
+{
+    const int nw = td5_geo_roads_count();
+    int w, k;
+    for (w = 0; w < nw; w++) {
+        const TD5_GeoRoad *r = td5_geo_roads_get(w);
+        double px = 0.0, pz = 0.0;
+        int have = 0;
+        if (!r || r->klass <= TD5_GEO_RC_SERVICE || r->count < 2) continue;
+        if (x < r->minx - clear || x > r->maxx + clear
+            || z < r->minz - clear || z > r->maxz + clear) continue;
+        for (k = 0; k < r->count; k++) {
+            double qx, qz, dx, dz, len2, t, d;
+            if (!td5_geo_roads_point(r, k, &qx, &qz)) { have = 0; continue; }
+            if (have) {
+                dx = qx - px; dz = qz - pz;
+                len2 = dx * dx + dz * dz;
+                t = (len2 > 0.0) ? ((x - px) * dx + (z - pz) * dz) / len2 : 0.0;
+                if (t < 0.0) t = 0.0;
+                if (t > 1.0) t = 1.0;
+                d = hypot(x - (px + t * dx), z - (pz + t * dz));
+                if (d < clear) return 0;
+            }
+            px = qx; pz = qz; have = 1;
+        }
+    }
+    return 1;
+}
+
+static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
+                             const double *rx, const double *rz, int n_ring,
+                             double side, double minout)
+{
+    static const double k_fac[4] = { 1.0, 0.5, 0.25, 0.0 };
+    const double upm = td5_geob_units_per_m() > 1.0 ? td5_geob_units_per_m()
+                                                    : 430.0;
+    const double margin = TD5_TG_GEO_APRON_M * upm;
+    const double road_clear = TD5_TG_GEO_APRON_ROAD_M * upm;
+    const double inv_tile = 1.0 / 3000.0;
+    double hx[TD5_GEOB_RING_MAX + 2], hz[TD5_GEOB_RING_MAX + 2];
+    double ox[TD5_GEOB_RING_MAX + 2], oz[TD5_GEOB_RING_MAX + 2];
+    double ix[TD5_GEOB_RING_MAX + 2], iz[TD5_GEOB_RING_MAX + 2];
+    double fx[4][TD5_GEOB_RING_MAX + 2], fz[4][TD5_GEOB_RING_MAX + 2];
+    float  v[(TD5_GEOB_RING_MAX + 2) * 4 * 5];
+    unsigned int light[(TD5_GEOB_RING_MAX + 2) * 4];
+    unsigned short cmd[3];
+    double cx = 0.0, cz = 0.0;
+    int nh = 0, fn = 0, k, f, nv = 0;
+    const int have_roads = td5_geo_roads_count() > 0;
+
+    if (!td5_env_flag_on("TD5RE_GEO_LM_APRON")) return 1;
+    if (*h->nmesh >= h->maxmesh) { s_geo_lm_apron_refused++; return 1; }
+    /* Hull with ZERO margin first: its vertices are the base of the push. */
+    if (!td5_geolm_apron(rx, rz, n_ring, 0.0, hx, hz, &nh,
+                         TD5_GEOB_RING_MAX + 2)) { s_geo_lm_apron_refused++; return 1; }
+    for (k = 0; k < nh; k++) { cx += hx[k]; cz += hz[k]; }
+    cx /= (double)nh; cz /= (double)nh;
+    /* Each margin on the ladder is recomputed from the zero-margin hull, so a
+     * vertex's retreat never moves its neighbours. */
+    for (f = 0; f < 4; f++) {
+        if (!td5_geolm_apron(rx, rz, n_ring, margin * k_fac[f], fx[f], fz[f],
+                             &fn, TD5_GEOB_RING_MAX + 2) || fn != nh) {
+            s_geo_lm_apron_refused++;
+            return 1;
+        }
+    }
+    for (k = 0; k < nh; k++) {
+        int pick = 3;
+        for (f = 0; f < 3; f++) {
+            const double px = fx[f][k], pz = fz[f][k];
+            if (tg_geo_outward(h->nl, h->si, side, px, pz) < minout) continue;
+            if (have_roads && !tg_geo_apron_road_clear(px, pz, road_clear))
+                continue;
+            pick = f;
+            break;
+        }
+        if (pick > 0) s_geo_lm_apron_pulled++;
+        ox[k] = fx[pick][k]; oz[k] = fz[pick][k];
+        ix[k] = cx + (hx[k] - cx) * TD5_TG_GEO_APRON_INNER;
+        iz[k] = cz + (hz[k] - cz) * TD5_TG_GEO_APRON_INNER;
+    }
+    for (k = 0; k < nh; k++) {
+        const int j = (k + 1) % nh;
+        const double qx[4] = { ox[k], ox[j], ix[j], ix[k] };
+        const double qz[4] = { oz[k], oz[j], iz[j], iz[k] };
+        int q;
+        if (hypot(ox[j] - ox[k], oz[j] - oz[k]) < 1.0
+            && hypot(ix[j] - ix[k], iz[j] - iz[k]) < 1.0) continue;
+        for (q = 0; q < 4; q++) {
+            const int o = nv * 5;
+            const double g = tg_world_h(qx[q], qz[q]);
+            v[o + 0] = (float)qx[q];
+            v[o + 1] = (float)(g + TD5_TG_GEO_APRON_LIFT);
+            v[o + 2] = (float)qz[q];
+            v[o + 3] = (float)(qx[q] * inv_tile);
+            v[o + 4] = (float)(qz[q] * inv_tile);
+            light[nv] = 0xFFFFFFFFu;
+            nv++;
+        }
+    }
+    if (nv < 4) { s_geo_lm_apron_refused++; return 1; }
+    {   /* How far the outer ring's ground wanders: the number that says
+         * whether "flat enough to lay on" held. */
+        double lo = 1e300, hi = -1e300;
+        for (k = 0; k < nh; k++) {
+            const double g = tg_world_h(ox[k], oz[k]);
+            if (g < lo) lo = g;
+            if (g > hi) hi = g;
+        }
+        if (hi - lo > s_geo_lm_apron_dev) s_geo_lm_apron_dev = hi - lo;
+    }
+    cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK;
+    cmd[1] = 0;
+    cmd[2] = (unsigned short)(nv / 4);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, 1, 0,
+                              0.0, 0.0, 0.0, 1.0, 0.0))
+        return 0;
+    tg_acct(TG_ACCT_PARK, h->si);
+    s_geo_lm_apron++;
+    s_geo_lm_apron_quads += nv / 4;
+    tg_geo_lm_note(gb, h->si, "apron laid", 0.0);
+    return 1;
+}
+
 /* Emit ONE real footprint as one mesh. Returns 0 only on a buffer write
  * failure; a refusal (on the road, degenerate ring, mesh table full) is a
  * counted no-op success, matching the back-row contract. */
@@ -2655,7 +2883,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     const double side = (gb->host_side > 0) ? 1.0 : -1.0;
     const double lx = n->tz * side, lz = -n->tx * side;
     const double floor_h = tg_facade_floor_h(h->b);
-    const double cell_w  = tg_facade_cell_w(h->b);
+    double cell_w        = tg_facade_cell_w(h->b);
     double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
     double ax[TD5_GEOB_RING_MAX], az[TD5_GEOB_RING_MAX];   /* ridge / inset */
     int    tri[(TD5_GEOB_RING_MAX - 2) * 3];
@@ -2671,8 +2899,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     double wall_top, vrows, cx = 0.0, cz = 0.0;
     int n_ring = gb->n, k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
     int rows, storeys = 0, wall_page, roof_page, shape, convex;
+    double lm_row_h = 0.0;          /* [1014 D20] >0: worship page cell height */
 
-    if (n_ring < 3 || n_ring > TD5_GEOB_RING_MAX) { s_geo_dropped_deg++; return 1; }
+    if (n_ring < 3 || n_ring > TD5_GEOB_RING_MAX) { tg_geo_lm_note(gb, si, "DROPPED ring size", 0.0); s_geo_dropped_deg++; return 1; }
     if (si + 1 >= nl->count) return 1;
     if (*h->nmesh >= h->maxmesh) return 1;
 
@@ -2684,7 +2913,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
      * existed -- a self-intersecting footprint emitted a roof with two faces
      * wound against each other, and a footprint traced as a line emitted a
      * wall sheet with no roof at all. Counted with the other refusals. */
-    if (!td5_geob_ring_simple(rx, rz, n_ring)) { s_geo_dropped_deg++; return 1; }
+    if (!td5_geob_ring_simple(rx, rz, n_ring)) { tg_geo_lm_note(gb, si, "DROPPED ring not simple", 0.0); s_geo_dropped_deg++; return 1; }
 
     /* --- clear the carriageway and the pavement, by the least nudge that does */
     gap = tg_carriageway_clear_gap(nl, si, side,
@@ -2696,7 +2925,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
         need = minout - tg_geo_outward(nl, si, side, rx[k], rz[k]);
         if (need > shift) shift = need;
     }
-    if (shift > TD5_TG_GEO_MAX_SHIFT) { s_geo_dropped_shift++; return 1; }
+    if (shift > TD5_TG_GEO_MAX_SHIFT) { tg_geo_lm_note(gb, si, "DROPPED past shift cap", shift); s_geo_dropped_shift++; return 1; }
     if (shift > 0.0) {
         for (k = 0; k < n_ring; k++) { rx[k] += lx * shift; rz[k] += lz * shift; }
         s_geo_shifted++;
@@ -2704,6 +2933,14 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     }
     for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
     cx /= (double)n_ring; cz /= (double)n_ring;
+
+    /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
+     * outline's own (already nudged) ring, so it inherits the carriageway
+     * clearance the building was given. */
+    if (td5_geolm_is_anchor(gb)
+        && td5_geolm_kind(gb) == TD5_GEOB_LMK_WORSHIP) {
+        if (!tg_geo_emit_apron(h, gb, rx, rz, n_ring, side, minout)) return 0;
+    }
 
     /* --- a landmark OSM does not describe in 3D: the prefab table ---------
      * Tried BEFORE the extrusion, because a stamped set piece REPLACES the
@@ -2714,6 +2951,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
                                                   cx, cz);
         if (r < 0) return 0;
         if (r > 0) {
+            tg_geo_lm_note(gb, si, "emitted as shipped set piece", shift);
             s_geo_emitted++;
             s_geo_lm_fallback++;
             if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
@@ -2797,6 +3035,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     }
     wall_page = tg_facade_page_class(gb->id_hash, rows);
     roof_page = TD5_TG_PAGE_R3_BLOCK + 3;      /* the house-roof page */
+    /* [ROUND 1014 D20] a cathedral part is brick and slate, not an office. */
+    if (tg_geo_worship_style(gb, &wall_page, &roof_page, &cell_w, &lm_row_h))
+        storeys = 0;
 
     /* --- base Y: the WORLD's ground under the footprint, on the kerb ------ */
     by = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
@@ -2921,7 +3162,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
      * repeating the whole building's storeys over the shorter wall would squash
      * the windows -- the reason this was ever derived from a height). Falls back
      * to the page-floor ratio when the cache has no storey count. */
-    if (storeys > 0 && H > 1.0) {
+    if (lm_row_h > 1.0) {
+        vrows = (wall_top - by) / lm_row_h;       /* [1014 D20] worship cell */
+    } else if (storeys > 0 && H > 1.0) {
         vrows = (double)storeys * (wall_top - by) / H;
     } else {
         vrows = (wall_top - by) / ((floor_h > 1.0) ? floor_h : 1.0);
@@ -2965,6 +3208,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
                               0.0, 0.0, 0.0, 1.0, 0.0))
         return 0;
     tg_acct(TG_ACCT_BUILDING, si);
+    tg_geo_lm_note(gb, si, "emitted extruded", shift);
     s_geo_emitted++;
     if (gb->part) s_geo_parts++;
     if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
@@ -3013,6 +3257,9 @@ int tg_geo_emit_buildings(const TG_FBHook *h)
          * mapping artefact, not a building -- see geob_veto_plaza. Counted in
          * the census as bind-time stats, so the emitter just skips it. */
         if (gb->plaza_veto) continue;
+        /* [ROUND 1014 D20] a copy of a building a landmark outline already
+         * models with its own building:part ways (a conflation duplicate). */
+        if (td5_geolm_vetoed(gb)) { s_geo_lm_vetoed++; continue; }
         if (*h->nmesh >= h->maxmesh) {
             for (; i >= 0; i = td5_geob_next_building(i)) s_geo_dropped_slots++;
             break;
@@ -3125,6 +3372,27 @@ static void tg_geo_city_report_impl(int from_stream)
     }
     /* [ROUND 1009 item 2] How many flanks were closed that the old cap
      * decision left open to the air. */
+    {   /* [ROUND 1014 D20] landmark clusters. */
+        int anc = 0, prt = 0, vet = 0, ovf = 0, adp = 0;
+        td5_geolm_stats(&anc, &prt, &vet, &ovf, &adp);
+        TD5_LOG_I(LOG_TAG, "[GEO LM] %d cluster anchor(s) with %d building:part"
+                  "(s) (%d adopted from out of bind range, knob TD5RE_GEO_LM_ADOPT=%s); %ld footprint(s) dressed in the worship palette (knob "
+                  "TD5RE_GEO_LM_STYLE=%s), %ld duplicate(s) skipped (knob "
+                  "TD5RE_GEO_LM_CLUSTER=%s), %ld apron(s) laid of %ld quad(s) "
+                  "(knob TD5RE_GEO_LM_APRON=%s), %ld apron vertex(es) pulled "
+                  "back from a street or the route, %ld apron(s) refused, worst "
+                  "ground spread under an apron %.0f units%s",
+                  anc, prt, adp,
+                  td5_env_flag_on("TD5RE_GEO_LM_ADOPT") ? "on" : "off",
+                  s_geo_lm_styled,
+                  td5_env_flag_on("TD5RE_GEO_LM_STYLE") ? "on" : "off",
+                  s_geo_lm_vetoed,
+                  td5_env_flag_on("TD5RE_GEO_LM_CLUSTER") ? "on" : "off",
+                  s_geo_lm_apron, s_geo_lm_apron_quads,
+                  td5_env_flag_on("TD5RE_GEO_LM_APRON") ? "on" : "off",
+                  s_geo_lm_apron_pulled, s_geo_lm_apron_refused,
+                  s_geo_lm_apron_dev, ovf ? " (ANCHOR TABLE FULL)" : "");
+    }
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] flanks: %ld corner return(s) added facing "
               "a span-side whose procedural wall stood down for real geometry "
               "(knob TD5RE_GEO_WALL_CAP=%s)", s_geo_cap_added,

@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: landmarks)" },
+    { CL_ITEM,    "The La Plata cathedral is now red brick with white" },
+    { CL_ITEM,    "  lancet windows, black slate roofs and spires" },
+    { CL_ITEM,    "  on a paved forecourt, not a block of offices" },
+    { CL_ITEM,    "Its far end, 9 of 25 parts, was never built: it is" },
+    { CL_ITEM,    "  now, so the whole building stands" },
+    { CL_ITEM,    "One unfinished Moscow landmark no longer appears" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: driveable forks)" },
     { CL_ITEM,    "The other carriageway of a divided avenue is now" },
     { CL_ITEM,    "  a road you can drive, from one real median" },

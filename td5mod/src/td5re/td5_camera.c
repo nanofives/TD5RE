@@ -2732,6 +2732,33 @@ void td5_camera_apply_view(int view)
      * fall through to the (frozen, sim-paused) normal pipeline. */
     if (v == 0 && s_freecam_active) { td5_camera_freecam_apply(); return; }
 
+    /* [ROUND 1014 D20] Dev-only FIXED camera pose, render-only like the
+     * overhead snapshot below. TD5RE_CAM_FIXED="ex,ey,ez,tx,ty,tz" puts pane 0
+     * at eye (ex,ey,ez) looking at (tx,ty,tz), both in the world units the
+     * debug overlay's POS line prints. Exists because a landmark stands 100 m
+     * to the SIDE of the route: no chase view looks at it and the overhead
+     * snapshot clamps its pitch, so "is the Cathedral there" could not be a
+     * framedump. Compiled out of RELEASE with the rest of this block. */
+    if (v == 0) {
+        static int s_fixed = -1;
+        static double s_fx[6];
+        if (s_fixed < 0) {
+            const char *e = getenv("TD5RE_CAM_FIXED");
+            s_fixed = (e && sscanf(e, "%lf,%lf,%lf,%lf,%lf,%lf", &s_fx[0],
+                                   &s_fx[1], &s_fx[2], &s_fx[3], &s_fx[4],
+                                   &s_fx[5]) == 6) ? 1 : 0;
+        }
+        if (s_fixed > 0) {
+            int eye[3] = { (int)(s_fx[0] * 256.0), (int)(s_fx[1] * 256.0),
+                           (int)(s_fx[2] * 256.0) };
+            int tgt[3] = { (int)(s_fx[3] * 256.0), (int)(s_fx[4] * 256.0),
+                           (int)(s_fx[5] * 256.0) };
+            SetCameraWorldPosition(eye);
+            OrientCameraTowardTarget(tgt, 0);
+            return;
+        }
+    }
+
     /* [OVERHEAD SNAPSHOT] Dev-only static top-down for map screenshots. When
      * TD5RE_CAM_TOPDOWN=<altitude in world units> (>0), pane 0 looks (almost)
      * straight down at the followed car from that altitude. Render-only — never
