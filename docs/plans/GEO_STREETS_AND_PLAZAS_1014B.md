@@ -85,7 +85,11 @@ below). `TD5RE_GEO_FAR_STREETS=0` restores the old placement.
 ## Measurements
 
 * Census (arms accepted, same route): 58 before, 64 after; 22 start beyond an avenue.
-  Right-side streets along Diagonal 73 (spans 24..253): 0 before, 7 after (60, 114, 116, 169/172, 226, 228).
+  Right-side streets on Diagonal 73's runs (24..253, 337..588): 8 before, 14 after; on the
+  first run (24..253) 0 before and 7 after (spans 61, 113, 117, 168, 173, 225, 229).
+  Left-side span 61 slab + railing across the mouth: present before (laterals 3501 and 3573 at
+  spans 61 and 62), gone after (end caps at 60 and 63).
+  Plaza border roads: 17 plazas bound to the route, 98 ribbons over 65 real ways (0 before).
 * Synthetic slot 60: MODELS.DAT 12982584 B `298DB07B141160AAFED83C3941DD1580`, STRIP 144714 B,
   TEXTURES `F69A8CBB6A3FFCA4757360F5AC39234B`: identical on the parent exe and on this branch
   (SELECTED.TXT moved aside).
