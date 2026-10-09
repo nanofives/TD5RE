@@ -4119,6 +4119,24 @@ static int tg_r14_fork_nostreet(int si)
            tg_span_in_fork_clear(si);
 }
 
+/* [1014 B item 6] "a sidewalk sits on top of the crossing." The exception above
+ * is only true where the fork window REALLY has no street: it was written for
+ * the synthetic tg_r10_cross_gates, which refuses every side street inside the
+ * window. On a geo track the street comes from the real map and is laid on the
+ * side the corridor does not take (tg_geo_span_run_ok refuses the corridor
+ * side), so inside a real fork window a mouth is a street, the slab must break
+ * for it, and the railing with it. Asked per SIDE for that reason: on a geo
+ * track `!tg_facade_built` is exactly "the network opened a street here".
+ * TD5RE_GEO_FORK_MOUTH_PAVE=0 restores the blanket exception. Synthetic builds
+ * never reach the override (tg_net_geo() is 0), so slot 60 is unchanged. */
+static int tg_r14_fork_nostreet_s(int si, int left)
+{
+    if (!tg_r14_fork_nostreet(si)) return 0;
+    if (tg_net_geo() && !tg_facade_built(si, left) &&
+        td5_env_flag_on("TD5RE_GEO_FORK_MOUTH_PAVE")) return 0;
+    return 1;
+}
+
 double tg_pavement_side_width(const TG_NodeList *nl, int si,
                                      double side, double sw)
 {
@@ -4492,7 +4510,7 @@ int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
     /* [R14 BRANCH item 2a] and the same for a fork region, where the side
      * street this rule drops the slab FOR is suppressed wholesale. */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !tg_facade_built(si, s) &&
-        !tg_r13_approach_span(si) && !tg_r14_fork_nostreet(si))
+        !tg_r13_approach_span(si) && !tg_r14_fork_nostreet_s(si, s))
         return 0;
     return 1;
 }
@@ -4540,7 +4558,7 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
          * dither R11 GUARD hardened). See tg_r14_fork_nostreet. */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") &&
             !tg_facade_built(h->si, s) && !tg_r13_approach_span(h->si) &&
-            !tg_r14_fork_nostreet(h->si))
+            !tg_r14_fork_nostreet_s(h->si, s))
             continue;
         /* [R15 CITY item 6] "this sidewalk is on top of another crossing."
          *
@@ -4879,7 +4897,7 @@ int tg_rail_kerbfence_here(int si, double sg)
      * must break on the same spans or the railing floats -- see
      * tg_r14_fork_nostreet. */
     if (!tg_facade_built(si, sg > 0.0) && !tg_r13_approach_span(si) &&
-        !tg_r14_fork_nostreet(si)) return 0;
+        !tg_r14_fork_nostreet_s(si, sg > 0.0)) return 0;
     if (tg_biome_cell_index(si) != tg_biome_cell_index(si - 1)) return 0;
     if (tg_side_blocked(si, sg)) return 0;                /* fork corridor        */
     if (tg_rail_avenue_owns_edge(si, sg)) return 0;       /* [1013 F1] median edge */

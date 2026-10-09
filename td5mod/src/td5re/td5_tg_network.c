@@ -75,6 +75,7 @@ static TG_NetNode  s_nodes[TG_NET_MAX_NODES];
 static TG_NetEdge  s_edges[TG_NET_MAX_EDGES];
 static TG_NetMouth s_mouth[TD5_TG_MAX_SPANS + 8][2];   /* [si][0=left,1=right] */
 static int s_nn, s_ne, s_net_built, s_net_nspans;
+static int s_net_geo;          /* [1014 B] last build sourced its streets from the real map */
 static long s_stat_cand, s_stat_short, s_stat_tjunc, s_stat_water, s_stat_road;
 
 static const char *const k_ne_name[TG_NE_KIND_COUNT] = {
@@ -1347,7 +1348,7 @@ static void tg_net_geo_census(void)
 void tg_network_reset(void)
 {
     int s;
-    s_nn = s_ne = 0; s_net_built = 0; s_net_nspans = 0;
+    s_nn = s_ne = 0; s_net_built = 0; s_net_nspans = 0; s_net_geo = 0;
     s_stat_cand = s_stat_short = s_stat_tjunc = s_stat_water = s_stat_road = 0;
     s_gna = 0;
     s_gdropn = 0;          /* or a regenerate replays the FIRST build's ledger */
@@ -1360,6 +1361,12 @@ void tg_network_reset(void)
 }
 
 int tg_network_built(void) { return s_net_built; }
+
+/* [1014 B] Did the built network take its streets from a real OSM graph? The
+ * junction furniture that keys on "a mouth is open here" reads this to know a
+ * mouth is a REAL street rather than a hash-rhythm gap. 0 on every synthetic
+ * build, so anything gated on it leaves slot 60 byte-identical. */
+int tg_net_geo(void) { return s_net_built && s_net_geo; }
 
 void tg_network_build(const TG_NodeList *nl, int nspans_main)
 {
@@ -1403,6 +1410,7 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
      * the streets must stop at them, not the other way round. */
     tg_net_underpasses(nl, nspans_main);
     if (tg_net_geo_active()) {
+        s_net_geo = 1;
         /* [GEO PHASE 5] Real streets REPLACE the planted ones. The synthetic
          * generators that remain would each invent tarmac the place does not
          * have -- a forest lane on the R12 period, a back street closing a
