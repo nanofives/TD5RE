@@ -1622,6 +1622,13 @@ static long s_geo_emitted, s_geo_shifted, s_geo_dropped_shift;
 static long s_geo_dropped_deg, s_geo_lm_real, s_geo_lm_fallback;
 static long s_geo_measured, s_geo_estimated, s_geo_wall_suppressed;
 static long s_geo_backrow_suppressed;
+/* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
+ * new height sources, so an Overture A/B is a number in race.log. */
+static long s_geo_fp_overture, s_geo_h_overture, s_geo_h_raster;
+/* ... and the bound buildings a span's TG_SIDE_MAX_MESH slot budget cut. The
+ * loop below used to stop silently; with Overture a span can carry far more
+ * footprints than OSM ever gave it, so the cut has to be a number. */
+static long s_geo_dropped_slots;
 static long s_geo_roof_shaped, s_geo_roof_concave, s_geo_parts;
 /* One per TD5_GEOB_ROOF_*, indexed by the shape actually BUILT (so a concave
  * ring that fell back lands under FLAT). The census prints it, because
@@ -1654,6 +1661,8 @@ static void tg_geo_city_build_begin(void)
     s_geo_dropped_deg = s_geo_lm_real = s_geo_lm_fallback = 0;
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
+    s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
+    s_geo_dropped_slots = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
     s_geo_lm_prefab = s_geo_lm_nofit = 0;
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
@@ -2813,6 +2822,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     if (gb->part) s_geo_parts++;
     if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
     else                                     s_geo_measured++;
+    if (gb->fsrc == TD5_GEOB_FSRC_OVERTURE)  s_geo_fp_overture++;
+    if (gb->hsrc == TD5_GEOB_HSRC_OVERTURE)  s_geo_h_overture++;
+    if (gb->hsrc == TD5_GEOB_HSRC_RASTER)    s_geo_h_raster++;
     if (gb->landmark) {
         if (tg_geo_landmark_real(gb)) s_geo_lm_real++;
         else                          s_geo_lm_fallback++;
@@ -2849,7 +2861,10 @@ int tg_geo_emit_buildings(const TG_FBHook *h)
          i = td5_geob_next_building(i)) {
         const TD5_GeoBuilding *gb = td5_geob_building(i);
         if (!gb) continue;
-        if (*h->nmesh >= h->maxmesh) break;
+        if (*h->nmesh >= h->maxmesh) {
+            for (; i >= 0; i = td5_geob_next_building(i)) s_geo_dropped_slots++;
+            break;
+        }
         if (!tg_geo_emit_one(h, gb)) return 0;
     }
     return 1;
@@ -2857,7 +2872,18 @@ int tg_geo_emit_buildings(const TG_FBHook *h)
 
 /* Read-only build fact. One line, unconditional on a geo build, so "real vs
  * procedural" and "how far reality was nudged" are numbers in race.log. */
-void tg_geo_city_report(void)
+static void tg_geo_city_report_impl(int from_stream);
+
+void tg_geo_city_report(void)          { tg_geo_city_report_impl(0); }
+
+/* [ROUND 1012 D1] The END-OF-STREAM call. The gate below kept it silent too:
+ * s_stream_pending is only cleared by td5_trackgen_stream_discard, AFTER the
+ * worker returns, so at the point td5_trackgen.c makes this call it still
+ * reads 1 and the census was skipped on every streamed (= every geo) build.
+ * MEASURED: zero [GEO BUILD] lines in a clean-exit La Plata race.log. */
+void tg_geo_city_report_streamed(void) { tg_geo_city_report_impl(1); }
+
+static void tg_geo_city_report_impl(int from_stream)
 {
     int nb = 0, meas = 0, est = 0, lm = 0, roofs = 0, na = 0, plaza = 0;
     int bb = 0, bf = 0, ab = 0, af = 0, dp = 0, dpt = 0;
@@ -2868,7 +2894,7 @@ void tg_geo_city_report(void)
      * honest numbers come from the call at the end of the streamed pass
      * instead. Printing both leaves two contradictory censuses in one log,
      * which is how the zeros were read as a finding in the first place. */
-    if (td5_trackgen_stream_pending()) return;
+    if (!from_stream && td5_trackgen_stream_pending()) return;
     td5_geob_census(&nb, &meas, &est, &lm, &roofs, &na, &plaza);
     td5_geob_bind_stats(&bb, &bf, &ab, &af);
     td5_geob_decimation(&dp, &dpt);
@@ -2886,6 +2912,13 @@ void tg_geo_city_report(void)
               s_geo_emitted, s_geo_measured, s_geo_estimated, s_geo_lm_real,
               s_geo_lm_fallback, s_geo_shifted, s_geo_shift_max,
               s_geo_dropped_shift, TD5_TG_GEO_MAX_SHIFT, s_geo_dropped_deg);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted by source: %ld OSM footprint(s) "
+              "/ %ld Overture footprint(s); height from Overture %ld, from the "
+              "Open Buildings raster %ld; %ld bound building(s) cut by the "
+              "%d-mesh span budget",
+              s_geo_emitted - s_geo_fp_overture, s_geo_fp_overture,
+              s_geo_h_overture, s_geo_h_raster, s_geo_dropped_slots,
+              TG_SIDE_MAX_MESH);
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] roofs BUILT by shape: %ld flat, %ld apex "
               "(pyramidal/dome/onion/round), %ld gabled, %ld hipped, %ld "
               "skillion, %ld mansard, %ld with no roof tag",

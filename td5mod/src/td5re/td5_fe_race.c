@@ -44,6 +44,7 @@
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
 #include "td5_geo.h"
+#include "td5_geo_buildings.h"
 
 /* [CUP TRACK SELECT 2026-06-25] knob helper — defined just before
  * Screen_TrackSelection but used earlier in Screen_CarSelection. */
@@ -8627,6 +8628,19 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
     fe_draw_small_text(bx * sx, (by - 26.0f) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
     fe_draw_small_text(bx * sx, (by - 14.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
                        0xFF8899AA, sx, sy);
+    /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
+     * Google Open Buildings carries their credit too (both ODbL). NOT stacked
+     * straight above the OSM pair: the track name is drawn at y 81..106 and
+     * the first framedump showed both lines printed through "LA PLATA". They
+     * go ABOVE the name instead, in the gap right of the menu's decorative
+     * bars (which reach x 420 at that height). Small text is ~7.6 units a
+     * glyph, so each line stays under 28 characters to end before x 640. */
+    if (td5_geob_place_has_extra(slug)) {
+        fe_draw_small_text((bx + 13.0f) * sx, (by - 80.0f) * sy,
+                           TR(TD5_GEOB_CREDIT_BUILDINGS), 0xFF8899AA, sx, sy);
+        fe_draw_small_text((bx + 13.0f) * sx, (by - 68.0f) * sy,
+                           TR(TD5_GEOB_CREDIT_HEIGHTS), 0xFF8899AA, sx, sy);
+    }
     return 1;
 }
 
@@ -8659,8 +8673,17 @@ static void at_draw_preview(float sx, float sy)
 
     /* [GEO PHASE 4] ODbL: a real place must carry the OSM credit wherever its
      * track is shown. Above the read-out so it never collides with it. */
-    if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0])
+    if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0]) {
         fe_draw_small_text(bx, by - 14 * sy, TD5_GEO_CREDIT, 0xFF8899AA, sx, sy);
+        /* [ROUND 1012 D1] + the building sources, when the place has them.
+         * Clear of the status line under the title (framedump-checked). */
+        if (td5_geob_place_has_extra(getenv("TD5RE_GEO_PLACE"))) {
+            fe_draw_small_text(bx, by - 44 * sy, TR(TD5_GEOB_CREDIT_BUILDINGS),
+                               0xFF8899AA, sx, sy);
+            fe_draw_small_text(bx, by - 32 * sy, TR(TD5_GEOB_CREDIT_HEIGHTS),
+                               0xFF8899AA, sx, sy);
+        }
+    }
 
     /* Read-out under the panel. */
     if (s_at_status.done && s_at_status.ok) {

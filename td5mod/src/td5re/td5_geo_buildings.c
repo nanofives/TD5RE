@@ -28,12 +28,26 @@
 /* Refusal caps. A dense city centre holds ten thousand ways in a 2 km box (the
  * plan's section 9), and the whole point of these is that an oversized cache
  * degrades to "fewer real buildings" rather than to a failed build. */
-#define GEOB_MAX_BUILDINGS 8192
+/* [ROUND 1012 D1] RAISED for Overture. OSM alone gave La Plata 2326
+ * footprints; with the Overture buildings theme conflated in (geo_fetch.py
+ * conflate_extra_buildings) the same 29 km2 box holds 90840. The old 8192 cap
+ * would have kept every OSM record (they come first in the file) and dropped
+ * 91% of the Overture ones in FILE ORDER, i.e. most of the city. 262144 is
+ * 2.9x La Plata; a TD5_GeoBuilding is ~100 bytes and the array is sized by
+ * the file, not by this cap. */
+#define GEOB_MAX_BUILDINGS 262144
 #define GEOB_MAX_AREAS     2048
-#define GEOB_MAX_POINTS    262144
-/* BUILDINGS.JSON is 1.5 MB at La Plata; 48 MB covers a far denser place and
- * still refuses a file that is not what we think it is. */
-#define GEOB_MAX_JSON      (48 * 1024 * 1024)
+/* Ring pool hard ceiling. The pool GROWS (geob_pool_reserve) instead of being
+ * malloc'd at this size up front: La Plata needs 0.5 M points after Overture,
+ * and a 4 M x 16-byte pool on every geo load would be 64 MB for nothing. */
+#define GEOB_MAX_POINTS    (4 * 1024 * 1024)
+#define GEOB_POOL_INITIAL  65536
+/* BUILDINGS.JSON was 1.5 MB at La Plata with OSM only. With Overture it is
+ * tens of MB written compact by geo_fetch, and the derived _route/ copy is
+ * re-printed FORMATTED by td5_geo_route.c (cJSON_Print, 17-digit doubles), so
+ * the cap has to clear several times that. Still refuses a file that is not
+ * what we think it is. */
+#define GEOB_MAX_JSON      (192 * 1024 * 1024)
 
 static struct {
     int    loaded;
@@ -48,6 +62,7 @@ static struct {
 
     double *px, *pz;          /* shared ring point pool */
     int    npt;
+    int    pcap;              /* pool capacity, grows to GEOB_MAX_POINTS */
 
     int   *b_head, *a_head;   /* per-span chain heads, bound_spans entries */
     int   *b_next, *a_next;
@@ -540,6 +555,28 @@ static int geob_area_kind_of(const char *leisure, const char *landuse,
     return TD5_GEOA_KIND_OTHER;
 }
 
+/* Make room for `need` pool points. Doubling, so a 90k-footprint load costs
+ * a handful of reallocs. Returns 0 (ring rejected, the pool stays valid) at
+ * the hard ceiling or on allocation failure. */
+static int geob_pool_reserve(int need)
+{
+    int cap;
+    double *nx, *nz;
+    if (need <= s_gb.pcap) return 1;
+    if (need > GEOB_MAX_POINTS) return 0;
+    cap = s_gb.pcap > 0 ? s_gb.pcap : GEOB_POOL_INITIAL;
+    while (cap < need)
+        cap = (cap > GEOB_MAX_POINTS / 2) ? GEOB_MAX_POINTS : cap * 2;
+    nx = (double *)realloc(s_gb.px, (size_t)cap * sizeof(double));
+    if (!nx) return 0;
+    s_gb.px = nx;
+    nz = (double *)realloc(s_gb.pz, (size_t)cap * sizeof(double));
+    if (!nz) return 0;
+    s_gb.pz = nz;
+    s_gb.pcap = cap;
+    return 1;
+}
+
 /* Copy one `points` array into the shared pool as an OPEN, CCW ring.
  * Returns the number of pool points written (0 = rejected). */
 static int geob_push_ring(const cJSON *pts, int *out_first,
@@ -577,7 +614,7 @@ static int geob_push_ring(const cJSON *pts, int *out_first,
         n++;
     }
     if (n < 3) return 0;
-    if (s_gb.npt + n > GEOB_MAX_POINTS) return 0;
+    if (!geob_pool_reserve(s_gb.npt + n)) return 0;
 
     /* One winding for every ring, so the triangulator and the wall loop can
      * both assume it instead of each testing. */
@@ -635,6 +672,7 @@ static int geob_load_buildings(const char *slug)
      * for a process run and this loop is 2047 iterations at La Plata. */
     const int tag_lm = td5_env_flag_on("TD5RE_GEO_LM_TAGS");
     int n, i;
+    const cJSON *e_next;
 
     td5_geo_place_path(path, sizeof(path), slug, "BUILDINGS.JSON");
     json = geob_slurp(path);
@@ -667,9 +705,16 @@ static int geob_load_buildings(const char *slug)
                                        sizeof(TD5_GeoBuilding));
     if (!s_gb.b) { cJSON_Delete(root); return 0; }
 
+    /* [ROUND 1012 D1] WALK the list, never cJSON_GetArrayItem(arr, i): that
+     * call starts at the head every time, so the loop was O(n^2) -- harmless
+     * at 2326 OSM footprints, 78 s of load at 90840 (MEASURED: R14 GENPERF
+     * "generation took 78.4 s" against 0.3 s, with every listed zone under
+     * 0.2 s). Same element order, so the load is unchanged. */
+    e_next = arr->child;
     for (i = 0; i < n; i++) {
-        const cJSON *e = cJSON_GetArrayItem(arr, i);
+        const cJSON *e = e_next;
         TD5_GeoBuilding *b = &s_gb.b[s_gb.nb];
+        e_next = e ? e->next : NULL;
         const char *hs;
         double h_m, mh_m, rh_m;
         int first = 0, rn;
@@ -737,7 +782,17 @@ static int geob_load_buildings(const char *slug)
         hs = geob_str(e, "height_src");
         if (hs && !strcmp(hs, "osm_height"))      b->hsrc = TD5_GEOB_HSRC_OSM_HEIGHT;
         else if (hs && !strcmp(hs, "osm_levels")) b->hsrc = TD5_GEOB_HSRC_OSM_LEVELS;
+        else if (hs && !strncmp(hs, "overture_", 9))
+                                                  b->hsrc = TD5_GEOB_HSRC_OVERTURE;
+        else if (hs && !strcmp(hs, "openbuildings_raster"))
+                                                  b->hsrc = TD5_GEOB_HSRC_RASTER;
         else                                      b->hsrc = TD5_GEOB_HSRC_ESTIMATED;
+        {   /* [ROUND 1012 D1] absent on every pre-1012 record = OSM. */
+            const char *fs = geob_str(e, "footprint_src");
+            b->fsrc = (unsigned char)((fs && !strncmp(fs, "overture", 8))
+                                      ? TD5_GEOB_FSRC_OVERTURE
+                                      : TD5_GEOB_FSRC_OSM);
+        }
 
         /* [ROUND 1009 item 9] STOREY COUNTS. `levels` is on every record in a
          * tag_schema-2 cache; `levels_est` is the estimator's own guess and is
@@ -865,9 +920,7 @@ int td5_geob_sync(void)
     td5_geob_unload();
     snprintf(s_gb.slug, sizeof(s_gb.slug), "%s", slug);
     s_gb.storey_m = 3.0;
-    s_gb.px = (double *)malloc((size_t)GEOB_MAX_POINTS * sizeof(double));
-    s_gb.pz = (double *)malloc((size_t)GEOB_MAX_POINTS * sizeof(double));
-    if (!s_gb.px || !s_gb.pz) {
+    if (!geob_pool_reserve(GEOB_POOL_INITIAL)) {
         TD5_LOG_E(LOG_TAG, "geob: out of memory for the ring pool");
         td5_geob_unload();
         return 0;
@@ -917,6 +970,17 @@ int td5_geob_sync(void)
             }
             TD5_LOG_I(LOG_TAG, "geob: landmarks by deciding tag: %s",
                       off > 0 ? line : "(none)");
+        }
+        {   /* [ROUND 1012 D1] whose footprint, whose height. */
+            int hs[TD5_GEOB_HSRC_COUNT], fs[2];
+            td5_geob_source_census(hs, fs);
+            TD5_LOG_I(LOG_TAG, "geob: footprints %d OSM / %d Overture; heights "
+                      "%d OSM height / %d OSM levels / %d Overture / %d Open "
+                      "Buildings raster / %d estimated",
+                      fs[TD5_GEOB_FSRC_OSM], fs[TD5_GEOB_FSRC_OVERTURE],
+                      hs[TD5_GEOB_HSRC_OSM_HEIGHT], hs[TD5_GEOB_HSRC_OSM_LEVELS],
+                      hs[TD5_GEOB_HSRC_OVERTURE], hs[TD5_GEOB_HSRC_RASTER],
+                      hs[TD5_GEOB_HSRC_ESTIMATED]);
         }
         TD5_LOG_I(LOG_TAG, "geob: bound to %d route span(s): %d building(s) "
                   "on the route / %d past %.0f units, %d area(s) on the route "
@@ -970,6 +1034,84 @@ void td5_geob_ring(int first, int k, double *x, double *z)
  * centroid is 60 m off the road still has a near wall on the street, and that
  * wall is the thing the driver sees. The lateral that comes back is the
  * CENTROID's, because that is where the building's base sits. */
+/* [ROUND 1012 D1] ROUTE-NODE GRID for the bind. The plain search is
+ * O(ring vertices x route nodes): 0.5 M vertices x 875 nodes = 460 M distance
+ * tests on Overture-era La Plata. Nodes are bucketed in square cells of
+ * GEOB_GRID_CELL world units (>= both bind radii) and a vertex only tests the
+ * 3x3 cells around it. The answer is IDENTICAL to the full scan, ties
+ * included: a building only binds when its best vertex-to-node distance is
+ * <= max_near <= one cell, and every node that close sits in the 3x3 block;
+ * candidates are visited in ascending node index (the per-cell lists are
+ * built ascending and the 9 cells are merged by index), so the first minimum
+ * wins exactly as before. A vertex whose block holds no node within max_near
+ * can only lose to a vertex that has one, or be rejected, exactly as the full
+ * scan would. */
+#define GEOB_GRID_CELL 45000.0
+static struct {
+    int     n, nx, nz;
+    double  x0, z0;
+    double *rx, *rz;          /* node positions, index order             */
+    int    *cell_head;        /* nx*nz, first (lowest) node in the cell   */
+    int    *cell_tail;
+    int    *next;             /* n, next node in the same cell, ascending */
+} s_bg;
+
+static void geob_grid_free(void)
+{
+    free(s_bg.rx); free(s_bg.rz);
+    free(s_bg.cell_head); free(s_bg.cell_tail); free(s_bg.next);
+    memset(&s_bg, 0, sizeof(s_bg));
+}
+
+static int geob_grid_build(void)
+{
+    const int nr = td5_geo_route_count();
+    double x1, z1;
+    int i, n = 0;
+    geob_grid_free();
+    if (nr < 2) return 0;
+    s_bg.rx = (double *)malloc((size_t)nr * sizeof(double));
+    s_bg.rz = (double *)malloc((size_t)nr * sizeof(double));
+    s_bg.next = (int *)malloc((size_t)nr * sizeof(int));
+    if (!s_bg.rx || !s_bg.rz || !s_bg.next) { geob_grid_free(); return 0; }
+    for (i = 0; i < nr; i++) {
+        if (!td5_geo_route_node(i, &s_bg.rx[i], &s_bg.rz[i], NULL)) break;
+        n++;
+    }
+    /* The full scan stops at the first node the route cannot return; a grid
+     * over fewer nodes than td5_geo_route_count() would still match it, but
+     * keep the fallback honest and simple. */
+    if (n != nr) { geob_grid_free(); return 0; }
+    s_bg.n = n;
+    s_bg.x0 = x1 = s_bg.rx[0];
+    s_bg.z0 = z1 = s_bg.rz[0];
+    for (i = 1; i < n; i++) {
+        if (s_bg.rx[i] < s_bg.x0) s_bg.x0 = s_bg.rx[i];
+        if (s_bg.rz[i] < s_bg.z0) s_bg.z0 = s_bg.rz[i];
+        if (s_bg.rx[i] > x1) x1 = s_bg.rx[i];
+        if (s_bg.rz[i] > z1) z1 = s_bg.rz[i];
+    }
+    s_bg.nx = (int)((x1 - s_bg.x0) / GEOB_GRID_CELL) + 1;
+    s_bg.nz = (int)((z1 - s_bg.z0) / GEOB_GRID_CELL) + 1;
+    s_bg.cell_head = (int *)malloc((size_t)s_bg.nx * (size_t)s_bg.nz
+                                   * sizeof(int));
+    s_bg.cell_tail = (int *)malloc((size_t)s_bg.nx * (size_t)s_bg.nz
+                                   * sizeof(int));
+    if (!s_bg.cell_head || !s_bg.cell_tail) { geob_grid_free(); return 0; }
+    for (i = 0; i < s_bg.nx * s_bg.nz; i++)
+        s_bg.cell_head[i] = s_bg.cell_tail[i] = -1;
+    for (i = 0; i < n; i++) {           /* ascending: append at the tail */
+        const int gx = (int)((s_bg.rx[i] - s_bg.x0) / GEOB_GRID_CELL);
+        const int gz = (int)((s_bg.rz[i] - s_bg.z0) / GEOB_GRID_CELL);
+        const int c = gz * s_bg.nx + gx;
+        s_bg.next[i] = -1;
+        if (s_bg.cell_tail[c] < 0) s_bg.cell_head[c] = i;
+        else                       s_bg.next[s_bg.cell_tail[c]] = i;
+        s_bg.cell_tail[c] = i;
+    }
+    return 1;
+}
+
 static int geob_bind_ring(int first, int n, double cx, double cz,
                           double max_near, int *out_span, int *out_side,
                           double *out_lat)
@@ -979,14 +1121,43 @@ static int geob_bind_ring(int first, int n, double cx, double cz,
     int best = -1, k, i;
 
     if (nr < 2) return 0;
-    for (k = 0; k < n; k++) {
-        const double vx = s_gb.px[first + k], vz = s_gb.pz[first + k];
-        for (i = 0; i < nr; i++) {
-            double rx, rz, dx, dz, d2;
-            if (!td5_geo_route_node(i, &rx, &rz, NULL)) break;
-            dx = vx - rx; dz = vz - rz;
-            d2 = dx * dx + dz * dz;
-            if (best_d2 < 0.0 || d2 < best_d2) { best_d2 = d2; best = i; }
+    if (s_bg.n == nr && max_near <= GEOB_GRID_CELL) {
+        for (k = 0; k < n; k++) {
+            const double vx = s_gb.px[first + k], vz = s_gb.pz[first + k];
+            const int gx = (int)floor((vx - s_bg.x0) / GEOB_GRID_CELL);
+            const int gz = (int)floor((vz - s_bg.z0) / GEOB_GRID_CELL);
+            int cur[9], m = 0, a, b;
+            for (b = gz - 1; b <= gz + 1; b++) {
+                if (b < 0 || b >= s_bg.nz) continue;
+                for (a = gx - 1; a <= gx + 1; a++) {
+                    if (a < 0 || a >= s_bg.nx) continue;
+                    cur[m++] = s_bg.cell_head[b * s_bg.nx + a];
+                }
+            }
+            for (;;) {                  /* k-way merge by ascending index */
+                int pick = -1, j;
+                double dx, dz, d2;
+                for (j = 0; j < m; j++)
+                    if (cur[j] >= 0 && (pick < 0 || cur[j] < cur[pick]))
+                        pick = j;
+                if (pick < 0) break;
+                i = cur[pick];
+                cur[pick] = s_bg.next[i];
+                dx = vx - s_bg.rx[i]; dz = vz - s_bg.rz[i];
+                d2 = dx * dx + dz * dz;
+                if (best_d2 < 0.0 || d2 < best_d2) { best_d2 = d2; best = i; }
+            }
+        }
+    } else {
+        for (k = 0; k < n; k++) {
+            const double vx = s_gb.px[first + k], vz = s_gb.pz[first + k];
+            for (i = 0; i < nr; i++) {
+                double rx, rz, dx, dz, d2;
+                if (!td5_geo_route_node(i, &rx, &rz, NULL)) break;
+                dx = vx - rx; dz = vz - rz;
+                d2 = dx * dx + dz * dz;
+                if (best_d2 < 0.0 || d2 < best_d2) { best_d2 = d2; best = i; }
+            }
         }
     }
     if (best < 0 || sqrt(best_d2) > max_near) return 0;
@@ -1042,6 +1213,7 @@ static void geob_bind_all(void)
         return;
     }
     for (i = 0; i < nr; i++) { s_gb.b_head[i] = -1; s_gb.a_head[i] = -1; }
+    geob_grid_build();
 
     for (i = 0; i < s_gb.nb; i++) {
         TD5_GeoBuilding *b = &s_gb.b[i];
@@ -1069,6 +1241,8 @@ static void geob_bind_all(void)
             s_gb.a_far++;
         }
     }
+
+    geob_grid_free();         /* bind-time only; nothing reads it later */
 
     /* Walk backwards so each chain ends up in ASCENDING index order, which
      * makes the emitted mesh order a pure function of the cache file. */
@@ -1214,6 +1388,46 @@ void td5_geob_landmark_sources(int *out, int n)
     for (i = 0; i < s_gb.nb; i++) {
         const int s = s_gb.b[i].lmsrc;
         if (s > 0 && s < n) out[s]++;
+    }
+}
+
+int td5_geob_place_has_extra(const char *slug)
+{
+    static char last[64];
+    static int  last_val = -1;
+    char path[512];
+    char *json;
+    cJSON *root;
+    int v = 0;
+
+    if (!slug || !slug[0]) return 0;
+    if (last_val >= 0 && !strcmp(slug, last)) return last_val;
+    td5_geo_source_path(path, sizeof(path), slug, "PLACE.JSON");
+    json = geob_slurp(path);
+    if (json) {
+        root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            const cJSON *src = cJSON_GetObjectItem(root, "sources");
+            const cJSON *x = src ? cJSON_GetObjectItem(src, "extra_buildings")
+                                 : NULL;
+            v = cJSON_IsTrue(x) ? 1 : 0;
+            cJSON_Delete(root);
+        }
+    }
+    snprintf(last, sizeof(last), "%s", slug);
+    last_val = v;
+    return v;
+}
+
+void td5_geob_source_census(int *hsrc, int *fsrc)
+{
+    int i;
+    if (hsrc) for (i = 0; i < TD5_GEOB_HSRC_COUNT; i++) hsrc[i] = 0;
+    if (fsrc) fsrc[0] = fsrc[1] = 0;
+    for (i = 0; i < s_gb.nb; i++) {
+        if (hsrc && s_gb.b[i].hsrc < TD5_GEOB_HSRC_COUNT) hsrc[s_gb.b[i].hsrc]++;
+        if (fsrc) fsrc[s_gb.b[i].fsrc ? 1 : 0]++;
     }
 }
 

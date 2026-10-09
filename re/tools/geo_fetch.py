@@ -2040,6 +2040,344 @@ def estimate_building_heights(vec: dict, cover: Raster,
     return stats
 
 
+# ------------------------------------------------- extra building sources ---
+#
+# [ROUND 1012 D1] OSM has 2326 footprints for La Plata's 29 km2 box, and a facade
+# within 25 m of only 3-9% of street sides. Overture's buildings theme (OSM +
+# Esri + Microsoft + Google, already conflated by Overture) has the rest of the
+# city, and Google Open Buildings 2.5D Temporal has a measured height for every
+# pixel of it. geo_buildings_extra.py fetches both ONCE into _cache/; this is
+# the offline half that merges them into BUILDINGS.JSON, so a re-normalise is
+# free.
+#
+# FOOTPRINT RULE: OSM wins wherever it has the building. An Overture record is
+# dropped as a duplicate when (a) Overture itself says its source is the OSM
+# way we already hold, or (b) it overlaps an OSM footprint by
+# IoU >= XB_DEDUPE_IOU, or covers XB_DEDUPE_COVER of the smaller of the two.
+# (b) catches the Overture copy of an OSM way edited since Overture's
+# snapshot, and an ML footprint Overture kept beside a slightly different OSM
+# trace. Both thresholds are reported with the IoU histogram so a different
+# choice is attributable.
+#
+# HEIGHT LADDER (first that answers wins, recorded in `height_src`):
+#   osm_height / osm_levels    measured OSM tag (unchanged)
+#   overture_height            Overture `height` (Esri / OSM 3D sources)
+#   overture_floors            Overture `num_floors` x STOREY_HEIGHT_M
+#   openbuildings_raster       median of the 2023 building_height raster over
+#                              the footprint (>= XB_OB_MIN_M, floored to one
+#                              storey)
+#   estimated_*                the L1 estimator, as before
+XB_DEDUPE_IOU = 0.30
+XB_DEDUPE_COVER = 0.60
+# Below this the raster is reading ground, a courtyard or a tree, not a roof:
+# 4 m effective pixels blur a 1-storey house into its yard, so the median of a
+# real house sits around 2.5-3.5 m and an empty lot sits near 0.
+XB_OB_MIN_M = 2.0
+# Above the dataset's own ceiling ("height relative to the terrain in range
+# [0m, 100m]") a value is an artefact.
+XB_OB_MAX_M = 100.0
+# `footprint_src` spellings. Short because the field is on ~90k records.
+XB_DATASET_SHORT = {
+    "Google Open Buildings": "google",
+    "Microsoft ML Buildings": "microsoft",
+    "OpenStreetMap": "osm",
+    "Esri Community Maps": "esri",
+}
+# Keys an Overture record may DROP when they hold the reader's default (None /
+# False / 0): every reader uses .get() / cJSON_GetObjectItem, which see a
+# missing key exactly as that default. OSM records keep the full schema.
+XB_DEFAULT_DROP = ("name", "part", "landmark", "landmark_src", "layer",
+                   "roof_shape", "roof_height_m", "min_height_m", "levels",
+                   "colour", "roof_colour", "material", "roof_material",
+                   "ob_samples")
+
+
+def _xb_compact(b: dict) -> dict:
+    """An Overture record as written: default-valued keys dropped."""
+    if not str(b.get("footprint_src", "")).startswith("overture"):
+        return b
+    return {k: v for k, v in b.items()
+            if not (k in XB_DEFAULT_DROP and not v)}
+
+
+def _xb_numeric_id(gers: str) -> int:
+    """A stable NEGATIVE integer for an Overture GERS id. The C reader hashes a
+    numeric `id` for page picks (geob_id_hash), OSM way ids are positive, so a
+    negative 52-bit value can never collide with one and survives the double
+    round trip exactly."""
+    h = int(hashlib.sha256(gers.encode("utf-8")).hexdigest()[:13], 16)
+    return -(h + 1)
+
+
+def _xb_osm_way(sources) -> int | None:
+    """The OSM way id Overture says this record came from, else None."""
+    for s in sources or []:
+        if (s or {}).get("dataset") == "OpenStreetMap":
+            rid = (s.get("record_id") or "")
+            if rid.startswith("w"):
+                num = re.match(r"w(\d+)", rid)
+                if num:
+                    return int(num.group(1))
+    return None
+
+
+def _xb_dataset(sources) -> str:
+    """Which upstream dataset Overture took the GEOMETRY from."""
+    best = None
+    for s in sources or []:
+        s = s or {}
+        prop = s.get("property") or ""
+        if prop in ("", "/geometry", "geometry"):
+            return s.get("dataset") or "unknown"
+        best = best or s.get("dataset")
+    return best or "unknown"
+
+
+def _ob_grid(path: str):
+    z = np.load(path)
+    return (z["height"], float(z["north"]), float(z["west"]),
+            float(z["dlat"]), float(z["dlon"]))
+
+
+def _ob_median(grid, ring_ll) -> tuple[float | None, int]:
+    """Median raster height over a lat/lon ring, and the sample count."""
+    import shapely
+    h, north, west, dlat, dlon = grid
+    lats = [p[0] for p in ring_ll]
+    lons = [p[1] for p in ring_ll]
+    r0 = max(0, int(math.floor((north - max(lats)) / dlat)))
+    r1 = min(h.shape[0] - 1, int(math.ceil((north - min(lats)) / dlat)))
+    c0 = max(0, int(math.floor((min(lons) - west) / dlon)))
+    c1 = min(h.shape[1] - 1, int(math.ceil((max(lons) - west) / dlon)))
+    if r1 < r0 or c1 < c0:
+        return None, 0
+    poly = shapely.Polygon([(lo, la) for la, lo in ring_ll])
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    rr, cc = np.mgrid[r0:r1 + 1, c0:c1 + 1]
+    clat = north - rr * dlat
+    clon = west + cc * dlon
+    inside = shapely.contains_xy(poly, clon.ravel(), clat.ravel())
+    vals = h[r0:r1 + 1, c0:c1 + 1].ravel()[inside]
+    if vals.size == 0:
+        # Smaller than a cell: the cell under the centroid.
+        c = poly.centroid
+        r = int(round((north - c.y) / dlat))
+        k = int(round((c.x - west) / dlon))
+        if 0 <= r < h.shape[0] and 0 <= k < h.shape[1]:
+            vals = np.array([h[r, k]], np.float32)
+    vals = vals[~np.isnan(vals)]
+    if vals.size == 0:
+        return None, 0
+    return float(np.median(vals)), int(vals.size)
+
+
+def conflate_extra_buildings(vec: dict, proj: LocalProjection, out: str,
+                             bbox) -> dict | None:
+    """Merge the cached Overture footprints and Open Buildings heights into
+    vec["buildings"] in place. Offline: returns None (and changes nothing)
+    when the cached products are missing. See the block comment above."""
+    import geo_buildings_extra as xb
+    import shapely
+    from shapely.strtree import STRtree
+
+    prod = xb.products(out, bbox)
+    have_ov = prod["overture"] and os.path.exists(prod["overture"])
+    have_ob = os.path.exists(prod["ob"])
+    if not have_ov and not have_ob:
+        return None
+    stats: dict = {"osm_in": len(vec["buildings"])}
+
+    # --- OSM footprints in metres (the dedupe frame) ---------------------
+    osm_ll = []
+    osm_polys = []
+    osm_ids = {}
+    for i, b in enumerate(vec["buildings"]):
+        ll = [proj.world_to_latlon(p["x"], p["z"]) for p in b["points"]]
+        osm_ll.append(ll)
+        m = [proj.to_metres(la, lo) for la, lo in ll]
+        poly = shapely.Polygon(m) if len(m) >= 3 else shapely.Polygon()
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        osm_polys.append(poly)
+        if b.get("id") is not None and not b.get("part"):
+            osm_ids[b["id"]] = i
+        b.setdefault("footprint_src", "osm")
+    tree = STRtree(osm_polys)
+
+    # --- Overture ---------------------------------------------------------
+    added = []
+    by_ds: dict[str, int] = {}
+    ov_height_for_osm: dict[int, tuple[float, str]] = {}
+    iou_hist = [0] * 10
+    alt = {"iou>=0.10": 0, "iou>=0.30": 0, "iou>=0.50": 0}
+    if have_ov:
+        import pyarrow.parquet as pq
+        rows = pq.read_table(prod["overture"]).to_pylist()
+        stats["overture_rows"] = len(rows)
+        n_osm_same = n_iou = n_under = n_degen = 0
+        for r in rows:
+            if r.get("is_underground"):
+                n_under += 1
+                continue
+            h_ov, f_ov = r.get("height"), r.get("num_floors")
+            src = None
+            if h_ov and h_ov > 0:
+                src = (float(h_ov), "overture_height")
+            elif f_ov and f_ov > 0:
+                src = (float(f_ov) * STOREY_HEIGHT_M, "overture_floors")
+            way = _xb_osm_way(r.get("sources"))
+            if way is not None and way in osm_ids:
+                n_osm_same += 1
+                if src:
+                    ov_height_for_osm[osm_ids[way]] = src
+                continue
+            geom = shapely.from_wkb(r["geometry"])
+            parts = list(getattr(geom, "geoms", [geom]))
+            ds = _xb_dataset(r.get("sources"))
+            for k, g in enumerate(parts):
+                if g.geom_type != "Polygon" or g.is_empty:
+                    n_degen += 1
+                    continue
+                ring = list(g.exterior.coords)       # (lon, lat)
+                m = shapely.Polygon([proj.to_metres(la, lo) for lo, la in ring])
+                if not m.is_valid:
+                    m = m.buffer(0)
+                if m.is_empty or m.area < 4.0:
+                    n_degen += 1
+                    continue
+                best_iou, best_cov, best_i = 0.0, 0.0, -1
+                for j in tree.query(m):
+                    o = osm_polys[j]
+                    inter = m.intersection(o).area
+                    if inter <= 0.0:
+                        continue
+                    iou = inter / (m.area + o.area - inter)
+                    cov = inter / min(m.area, o.area)
+                    if iou > best_iou:
+                        best_iou, best_i = iou, int(j)
+                    best_cov = max(best_cov, cov)
+                if best_iou > 0.0:
+                    iou_hist[min(9, int(best_iou * 10))] += 1
+                    for t in (0.10, 0.30, 0.50):
+                        if best_iou >= t:
+                            alt["iou>=%.2f" % t] += 1
+                if best_iou >= XB_DEDUPE_IOU or best_cov >= XB_DEDUPE_COVER:
+                    n_iou += 1
+                    if src and best_i >= 0 and best_i not in ov_height_for_osm:
+                        ov_height_for_osm[best_i] = src
+                    continue
+                wpts = []
+                for lo, la in ring:
+                    x, z = proj.to_world(la, lo)
+                    # Whole world units (2.3 mm at 430/m): the decimals
+                    # were 2.5 MB of BUILDINGS.JSON for nothing.
+                    wpts.append({"x": int(round(x)), "z": int(round(z))})
+                gid = r.get("id") or ""
+                rec = {
+                    "id": _xb_numeric_id(gid + ("#%d" % k if k else "")),
+                    "gers_id": gid,
+                    "name": None,
+                    "class": r.get("class") or "yes",
+                    "part": False,
+                    "area_m2": round(m.area, 1),
+                    "height_m": round(src[0], 2) if src else None,
+                    "height_src": src[1] if src else None,
+                    "footprint_src": "overture:" + XB_DATASET_SHORT.get(
+                        ds, ds),
+                    "roof_shape": r.get("roof_shape"),
+                    "roof_height_m": ("%g" % r["roof_height"]
+                                      if r.get("roof_height") else None),
+                    "min_height_m": ("%g" % r["min_height"]
+                                     if r.get("min_height") else None),
+                    "levels": ("%d" % f_ov if f_ov else None),
+                    "colour": r.get("facade_color"),
+                    "roof_colour": r.get("roof_color"),
+                    "material": r.get("facade_material"),
+                    "roof_material": r.get("roof_material"),
+                    "layer": 0,
+                    "landmark": False,
+                    "landmark_src": None,
+                    "points": wpts,
+                    "_ll": [(la, lo) for lo, la in ring],
+                }
+                added.append(rec)
+                by_ds[ds] = by_ds.get(ds, 0) + 1
+        stats.update({
+            "overture_same_osm_way": n_osm_same,
+            "overture_dup_by_overlap": n_iou,
+            "overture_underground": n_under,
+            "overture_degenerate": n_degen,
+            "overture_added": len(added),
+            "overture_added_by_dataset": by_ds,
+            "dedupe_rule": "same OSM way, or IoU >= %.2f, or cover >= %.2f"
+                           % (XB_DEDUPE_IOU, XB_DEDUPE_COVER),
+            "dedupe_best_iou_histogram": iou_hist,
+            "dedupe_alt_thresholds": alt,
+        })
+
+    # --- heights ----------------------------------------------------------
+    grid = _ob_grid(prod["ob"]) if have_ob else None
+    hs: dict[str, int] = {}
+    val = []                 # (measured OSM height, raster median) pairs
+    for i, b in enumerate(vec["buildings"]):
+        measured = b.get("height_src") in ("osm_height", "osm_levels")
+        if grid is not None:
+            med, npx = _ob_median(grid, osm_ll[i])
+            if med is not None:
+                b["ob_height_m"] = round(med, 2)
+                b["ob_samples"] = npx
+            if measured and med is not None:
+                val.append((b["height_m"], med))
+        if measured:
+            continue
+        if i in ov_height_for_osm:
+            h, s = ov_height_for_osm[i]
+            b["height_m"], b["height_src"] = round(h, 2), s
+        elif b.get("ob_height_m") is not None and \
+                XB_OB_MIN_M <= b["ob_height_m"] <= XB_OB_MAX_M:
+            b["height_m"] = round(max(STOREY_HEIGHT_M, b["ob_height_m"]), 2)
+            b["height_src"] = "openbuildings_raster"
+        if b.get("height_src") and not b["height_src"].startswith("estimated"):
+            b["levels_est"] = round(b["height_m"] / STOREY_HEIGHT_M, 2)
+    for b in added:
+        ll = b.pop("_ll")
+        if grid is not None:
+            med, npx = _ob_median(grid, ll)
+            if med is not None:
+                b["ob_height_m"] = round(med, 2)
+                b["ob_samples"] = npx
+        if b["height_m"] is None and b.get("ob_height_m") is not None and \
+                XB_OB_MIN_M <= b["ob_height_m"] <= XB_OB_MAX_M:
+            b["height_m"] = round(max(STOREY_HEIGHT_M, b["ob_height_m"]), 2)
+            b["height_src"] = "openbuildings_raster"
+        if b["height_m"] is not None:
+            b["levels_est"] = round(b["height_m"] / STOREY_HEIGHT_M, 2)
+    vec["buildings"].extend(added)
+    for b in vec["buildings"]:
+        k = b.get("height_src") or "(estimator)"
+        hs[k] = hs.get(k, 0) + 1
+    stats["height_src_before_estimator"] = hs
+    stats["footprints"] = {"osm": stats["osm_in"],
+                           "overture": len(added),
+                           "total": len(vec["buildings"])}
+    if val:
+        a = np.array(val, np.float64)
+        d = a[:, 1] - a[:, 0]
+        stats["ob_vs_osm_measured"] = {
+            "n": int(len(a)),
+            "bias_m": round(float(d.mean()), 2),
+            "mae_m": round(float(np.abs(d).mean()), 2),
+            "median_abs_m": round(float(np.median(np.abs(d))), 2),
+            "corr": round(float(np.corrcoef(a[:, 0], a[:, 1])[0, 1]), 3)
+            if len(a) > 2 else None,
+        }
+    vec["counts"]["buildings"] = len(vec["buildings"])
+    vec["counts"]["buildings_osm"] = stats["osm_in"]
+    vec["counts"]["buildings_overture"] = len(added)
+    return stats
+
+
 # --------------------------------------------------------------------- main ---
 
 def fetch_place(name: str, lat: float, lon: float, radius_m: float,
@@ -2053,7 +2391,12 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                 land_cover: str | None = None,
                 canopy: bool | None = None,
                 levels_estimator: int = 2,
-                dem_probe: bool = True) -> dict:
+                dem_probe: bool = True,
+                extra_buildings: bool | None = None,
+                extra_online: bool = False,
+                extra_plan_only: bool = False,
+                overture_release: str | None = None,
+                extra_max_mb: float = 600.0) -> dict:
     slug = slugify(name)
     out = place_dir(slug, root)
     os.makedirs(out, exist_ok=True)
@@ -2070,6 +2413,8 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
         land_cover = prev.get("land_cover", "osm")
     if canopy is None:
         canopy = bool(prev.get("canopy", False))
+    if extra_buildings is None:
+        extra_buildings = bool(prev.get("extra_buildings", False))
 
     # Degrees for the requested radius, at this latitude.
     dlat = radius_m / 110_574.0
@@ -2131,6 +2476,40 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
               % ", ".join("%s x%d" % kv for kv in
                           sorted(vec["counts"]["landmark_by_tag"].items(),
                                  key=lambda kv: -kv[1])))
+
+    xb_stats = None
+    if extra_buildings:
+        print("\n[3b] extra buildings (Overture + Open Buildings heights)")
+        import geo_buildings_extra as xb
+        xb_prov = xb.fetch_extra(out, bbox, extra_online, overture_release,
+                                 int(extra_max_mb * 1024 * 1024),
+                                 extra_plan_only)
+        if extra_plan_only:
+            print("  plan only: %s" % json.dumps(xb_prov))
+            return {"plan": xb_prov}
+        xb_stats = conflate_extra_buildings(vec, proj, out, bbox)
+        if xb_stats is None:
+            print("  no cached products; BUILDINGS.JSON stays OSM-only")
+        else:
+            xb_stats["provenance"] = {
+                k: v for k, v in xb.products(out, bbox)["prov"].items()
+                if k != "requests"}
+            fp = xb_stats["footprints"]
+            print("  footprints: %d OSM + %d Overture = %d"
+                  % (fp["osm"], fp["overture"], fp["total"]))
+            for k in ("overture_rows", "overture_same_osm_way",
+                      "overture_dup_by_overlap", "overture_underground",
+                      "overture_degenerate"):
+                print("  %-26s %s" % (k, xb_stats.get(k)))
+            print("  added by dataset: %s"
+                  % xb_stats.get("overture_added_by_dataset"))
+            print("  dedupe best-IoU histogram (0.0..1.0 by 0.1): %s"
+                  % xb_stats.get("dedupe_best_iou_histogram"))
+            print("  heights before estimator: %s"
+                  % xb_stats["height_src_before_estimator"])
+            if xb_stats.get("ob_vs_osm_measured"):
+                print("  raster vs measured OSM heights: %s"
+                      % xb_stats["ob_vs_osm_measured"])
 
     print("\n[4/5] elevation")
     height, dem_prov = build_height_raster(proj, bbox, out, cell, dem_override,
@@ -2200,9 +2579,24 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
     # reader treats as "this place has no mapped pavements".
     write_json(os.path.join(out, "FOOTWAYS.JSON"),
                {"footways": vec["footways"]})
-    write_json(os.path.join(out, "BUILDINGS.JSON"),
-               {"buildings": vec["buildings"], "storey_height_m": STOREY_HEIGHT_M,
-                "height_provenance": bh})
+    bdoc = {"buildings": vec["buildings"], "storey_height_m": STOREY_HEIGHT_M,
+            "height_provenance": bh}
+    if xb_stats is None:
+        write_json(os.path.join(out, "BUILDINGS.JSON"), bdoc)
+    else:
+        # Optional, additive: every reader that predates round 1012 ignores it.
+        bdoc["conflation"] = xb_stats
+        bdoc["buildings"] = [_xb_compact(b) for b in vec["buildings"]]
+        # COMPACT, not indent=1: 90k records pretty-printed were 84 MB, past
+        # both the game's BUILDINGS.JSON cap and td5_geo_route.c's 64 MB
+        # source-read cap (GR_MAX_FILE), so a BUILD of the place would have
+        # silently dropped every building. An OSM-only place keeps the old
+        # byte-identical formatting.
+        path = os.path.join(out, "BUILDINGS.JSON")
+        with open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+            json.dump(bdoc, f, sort_keys=True, separators=(",", ":"))
+            f.write("\n")
+        os.replace(path + ".tmp", path)
     write_json(os.path.join(out, "AREAS.JSON"), {"areas": vec["areas"]})
     # `signals` keeps its exact old membership (highway=traffic_signals only);
     # `nodes` is the new array for the crossings / stop lines / humps the
@@ -2232,6 +2626,25 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                 "vintage": "live at fetch time",
                 "counts": vec["counts"],
             },
+            "buildings_extra": ({
+                "source": "Overture Maps buildings theme (OSM + Esri Community "
+                          "Maps + Microsoft ML + Google Open Buildings "
+                          "footprints, conflated by Overture) + Google Open "
+                          "Buildings 2.5D Temporal building_height",
+                "overture_release": xb_stats["provenance"].get(
+                    "overture", {}).get("release"),
+                "open_buildings_year": xb_stats["provenance"].get(
+                    "open_buildings", {}).get("year"),
+                "licence": "ODbL 1.0 (Overture); ODbL 1.0 chosen of the "
+                           "CC BY 4.0 / ODbL dual licence (Open Buildings)",
+                "citation": xb_stats["provenance"].get(
+                    "open_buildings", {}).get("citation"),
+                "footprints": xb_stats["footprints"],
+                "height_src": bh,
+            } if xb_stats else {
+                "source": "NOT WIRED for this place -- Overture buildings + "
+                          "Open Buildings heights (--extra-buildings on)",
+            }),
             "height": dem_prov,
             "cover": ({
                 "source": "ESA WorldCover 10 m v200 + OSM landuse/leisure overlay",
@@ -2262,14 +2675,23 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
         # from which keys happen to be present -- see TAG_SCHEMA.
         "sources": {"land_cover": land_cover, "canopy": bool(canopy),
                     "tag_schema": TAG_SCHEMA,
-                    "levels_estimator": levels_estimator},
+                    "levels_estimator": levels_estimator,
+                    "extra_buildings": bool(extra_buildings)},
         "tag_schema": TAG_SCHEMA,
         "attribution": [
             "Map data (c) OpenStreetMap contributors, ODbL 1.0",
             "Elevation: %s" % dem_prov.get("source"),
         ] + (["Land cover: ESA WorldCover 2021, CC-BY 4.0"] if wc_prov else [])
           + (["Tree canopy: Meta and WRI Global Canopy Height, CC-BY 4.0"]
-             if cn_prov else []),
+             if cn_prov else [])
+          + (["Buildings: Overture Maps Foundation, release %s, ODbL 1.0"
+              % xb_stats["provenance"].get("overture", {}).get("release"),
+              "Building heights: Google Open Buildings 2.5D Temporal %s, "
+              "ODbL 1.0. %s. Contains modified Copernicus Sentinel-2 data"
+              % (xb_stats["provenance"].get("open_buildings", {}).get("year"),
+                 xb_stats["provenance"].get("open_buildings", {}).get(
+                     "citation"))]
+             if xb_stats else []),
     }
     write_json(os.path.join(out, "PLACE.JSON"), place)
     print("\nwrote %s" % out)
@@ -2322,6 +2744,23 @@ def main(argv=None) -> int:
                          "uncached and its answer is not stored in PLACE.JSON, "
                          "so on a re-fetch it is one outbound request for "
                          "nothing")
+    ap.add_argument("--extra-buildings", choices=("on", "off"), default=None,
+                    help="merge Overture footprints + Open Buildings 2.5D "
+                         "heights into BUILDINGS.JSON from the cached products "
+                         "in _cache/ (see geo_buildings_extra.py). Default: as "
+                         "last built. Never touches the network by itself")
+    ap.add_argument("--fetch-extra", action="store_true",
+                    help="allow the ONE network session that fills the extra "
+                         "building products. Without it a missing product is "
+                         "a dry run that names every request it would make")
+    ap.add_argument("--extra-plan-only", action="store_true",
+                    help="stop after the extra-buildings metadata step and "
+                         "print the data budget")
+    ap.add_argument("--overture-release",
+                    help="pin an Overture release (default: the STAC 'latest' "
+                         "at fetch time, recorded in the provenance)")
+    ap.add_argument("--extra-max-mb", type=float, default=600.0,
+                    help="byte budget for the extra-buildings session")
     ap.add_argument("--probe-dem", action="store_true",
                     help="only report IGN elevation coverage, fetch nothing")
     a = ap.parse_args(argv)
@@ -2347,7 +2786,10 @@ def main(argv=None) -> int:
                 a.dem_smooth_m, a.land_cover,
                 None if a.canopy is None else a.canopy == "on",
                 1 if a.levels_estimator == "v1" else 2,
-                not a.skip_dem_probe)
+                not a.skip_dem_probe,
+                None if a.extra_buildings is None else a.extra_buildings == "on",
+                a.fetch_extra, a.extra_plan_only, a.overture_release,
+                a.extra_max_mb)
     return 0
 
 
