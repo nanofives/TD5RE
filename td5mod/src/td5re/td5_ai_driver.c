@@ -41,6 +41,7 @@
 #include "td5_race_state.h" /* td5_game_get_slot_state / _get_actor */
 #include "td5_track.h"      /* span geometry + laneassist_target look-ahead */
 #include "td5_ai.h"         /* td5_ai_route_speed_hint (authored corner speeds) */
+#include "td5_geo_attrs.h"  /* [1011 C3] the OSM maxspeed cap, geo tracks only */
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <stdlib.h>
@@ -782,6 +783,27 @@ static void driver_racecraft(int slot, TD5_Actor *self,
     *out_offset = baseline;
 }
 
+/* [ROUND 1011 C3] Clamp a target speed to the posted OSM limit for the span
+ * this car is on. Returns `want` unchanged on every track that is not a real
+ * place, and wherever the map posts no limit.
+ *
+ * GEO-ONLY BY CONSTRUCTION. td5_geo_attrs_speed_cap_units returns 0 unless the
+ * current track is a geo slot with a route AND a limit is known for that span,
+ * so a shipped track and the synthetic auto track reach the `cap <= 0` line and
+ * nothing about their AI changes. That is the invariant this feature has to
+ * hold, and it is held in ONE place rather than at each call site.
+ *
+ * The cap is a ceiling, never a floor: a car already going slower than the
+ * limit (a corner, a car ahead) is left alone. */
+static double drv_geo_speed_cap(const TD5_Actor *actor, double want)
+{
+    int cap;
+    if (!actor) return want;
+    cap = td5_geo_attrs_speed_cap_units((int)actor->track_span_normalized, 0);
+    if (cap <= 0) return want;
+    return (want > (double)cap) ? (double)cap : want;
+}
+
 int td5_ai_driver_tick(int slot)
 {
     driver_read_knobs();
@@ -1088,6 +1110,11 @@ int td5_ai_driver_tick(int slot)
         throttle = DRV_THROTTLE_FULL;   /* launch / clear straight: floor (builds vmax) */
         s_thr_integ[slot] = 0.0;
         target_speed = base_frac * vmax;
+        /* [ROUND 1011 C3] The posted limit on this span, times the racing
+         * multiplier. This is the branch that matters most: it is the one that
+         * floors the throttle down a clear straight, and a 40 km/h calle is
+         * exactly where the map should stop an opponent doing that. */
+        target_speed = drv_geo_speed_cap(actor, target_speed);
     } else {
         /* Corner / following: apply personality + hidden leash to the target. */
         double skill = (double)s_persona[slot].skill;
@@ -1111,6 +1138,10 @@ int td5_ai_driver_tick(int slot)
         if (eff > base_frac + 0.06) eff = base_frac + 0.06;   /* bounded mistake */
         if (eff < 0.05) eff = 0.05;
         target_speed = eff * vmax;
+        /* [ROUND 1011 C3] Applied BEFORE err_frac, which is what the throttle
+         * PI below integrates -- capping afterwards would leave the controller
+         * chasing a target the car is not allowed to reach. */
+        target_speed = drv_geo_speed_cap(actor, target_speed);
 
         double err_frac = (vmax > 1.0) ? (target_speed - v_abs) / vmax : 0.0;
         if (err_frac > s_thr_deadband) {

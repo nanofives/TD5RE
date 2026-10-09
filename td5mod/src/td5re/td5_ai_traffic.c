@@ -13,6 +13,7 @@
 #include "td5_bytes.h"
 #include "td5_math_util.h"
 #include "td5_track.h"
+#include "td5_geo_attrs.h"  /* [1011 C3] the OSM maxspeed cap, geo tracks only */
 #include "td5_physics.h"
 #include "td5_platform.h"
 #include "td5_sound.h"
@@ -5872,6 +5873,34 @@ void td5_ai_update_traffic_route_plan(int slot) {
     if (trf_unwall_should_yield(slot)) {
         cruise = (cruise * TRF_UNWALL_SCALE) / 100;
         if (cruise < 0x14) cruise = 0x14;   /* keep it rolling, never a dead stop */
+    }
+    /* [ROUND 1011 C3] THE POSTED SPEED LIMIT, from OSM `maxspeed`.
+     *
+     * Traffic is the one class of car that should actually obey the sign, so
+     * unlike the racers (which get the limit times a racing multiplier) this
+     * takes the real number. On La Plata that means civilian cars run at 40 on
+     * the calles and 60 on the avenidas, which is what the city is signed at.
+     *
+     * GEO-ONLY BY CONSTRUCTION: td5_geo_attrs_speed_cap_units returns 0 unless
+     * this is a geo slot with a route and a limit is known for the span, so a
+     * shipped track and the synthetic auto track never enter the branch and
+     * their traffic is untouched.
+     *
+     * It EASES OFF in proportion to the overshoot rather than shutting the
+     * throttle: a civilian car lifting reads as traffic, one that stops dead
+     * reads as a bug. The 0x14 floor is the same one every other governor in
+     * this function keeps, for the same reason. */
+    {
+        const int tspan = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        const int cap   = td5_geo_attrs_speed_cap_units(tspan, 1);
+        if (cap > 0) {
+            const int v = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+            if (v > cap) {
+                int cc = (int)(((long)cruise * (long)cap) / (long)v);
+                if (cc < 0x14) cc = 0x14;
+                if (cc < cruise) cruise = cc;
+            }
+        }
     }
     ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
     ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;

@@ -56,6 +56,11 @@ static struct {
     int            lamp_every;     /* the beat actually used, in spans */
 } s_ga;
 
+/* Which track index the race tables were last built for. Keyed on the index,
+ * not a bool, so race 2 on a different track can never read race 1's tables.
+ * -2 is "never tried" (-1 is a legitimate track index during boot). */
+static int s_race_tried_track = -2;
+
 /* ----------------------------------------------------------------- names -- */
 
 static int ga_intern(const char *s)
@@ -227,6 +232,147 @@ void td5_geo_attrs_prepare(const void *nlv, int nspans)
     }
 
     s_ga.ready = 1;
+}
+
+/* ------------------------------------------------------ race-time rebuild -- */
+
+/* The same tables, rebuilt at RACE start from the ROUTE's own nodes rather
+ * than the generator's node list. Rationale in td5_geo_attrs.h: a reused
+ * cached track never runs the generator's prepass, and that is the ordinary
+ * case once a place has been built.
+ *
+ * The tangent is taken from consecutive route nodes, which is what tg_geo_walk
+ * would have produced anyway -- it pushes route node i verbatim as span i. */
+void td5_geo_attrs_race_init(void)
+{
+    const int n = td5_geo_route_count();
+    int nspans, si, route_has_speed = 0, route_has_name = 0;
+    int64_t t0;
+
+    /* The generator may already have filled these in this very process, with
+     * the richer node-list tangents. Don't throw that away. */
+    if (s_ga.ready && s_ga.nspans >= n - 1) {
+        s_race_tried_track = g_td5.track_index;
+        return;
+    }
+
+    ga_free();
+    if (n < 2) return;
+    if (!td5_geo_loaded()) return;
+    if (!td5_env_flag_on("TD5RE_GEO_ATTRS")) return;
+    if (!td5_trackgen_is_geo_slot(g_td5.track_index)) {
+        TD5_LOG_I(LOG_TAG, "[GEO ATTRS] race: not a geo slot (track %d)",
+                  g_td5.track_index);
+        return;
+    }
+
+    for (si = 0; si < n; si++) {
+        if (td5_geo_route_maxspeed(si) > 0)  route_has_speed = 1;
+        if (td5_geo_route_name_id(si) >= 0)  route_has_name = 1;
+        if (route_has_speed && route_has_name) break;
+    }
+
+    /* Only pay for the roads layer when the route cannot answer on its own.
+     * Syncing it is idempotent -- the minimap may already have done it. */
+    if (!route_has_speed || !route_has_name)
+        td5_geo_roads_sync(td5_geo_place_slug());
+
+    nspans = n - 1;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    s_ga.lit      = (unsigned char *)calloc((size_t)nspans, 1);
+    s_ga.lamp     = (unsigned char *)calloc((size_t)nspans, 1);
+    s_ga.kph      = (short *)calloc((size_t)nspans, sizeof(short));
+    s_ga.name     = (short *)malloc((size_t)nspans * sizeof(short));
+    s_ga.cross[0] = (short *)malloc((size_t)nspans * sizeof(short));
+    s_ga.cross[1] = (short *)malloc((size_t)nspans * sizeof(short));
+    s_ga.names    = (char (*)[TD5_GEO_ROADS_NAME_MAX])
+                    malloc((size_t)GA_NAMES_MAX * TD5_GEO_ROADS_NAME_MAX);
+    if (!s_ga.lit || !s_ga.lamp || !s_ga.kph || !s_ga.name
+        || !s_ga.cross[0] || !s_ga.cross[1] || !s_ga.names) {
+        TD5_LOG_E(LOG_TAG, "[GEO ATTRS] race: out of memory for %d span(s)",
+                  nspans);
+        ga_free();
+        return;
+    }
+    for (si = 0; si < nspans; si++)
+        s_ga.name[si] = s_ga.cross[0][si] = s_ga.cross[1][si] = -1;
+    s_ga.nspans = nspans;
+    s_ga.lamp_every = 0;      /* lamps are a GENERATION decision, not a race one */
+
+    t0 = td5_plat_time_us();
+    for (si = 0; si < nspans; si++) {
+        double x = 0.0, z = 0.0;
+        const TD5_GeoRoad *r = NULL;
+        int kph = td5_geo_route_maxspeed(si);
+        const char *nm = td5_geo_route_name(si);
+
+        td5_geo_route_node(si, &x, &z, NULL);
+        if (kph <= 0 || !nm || !nm[0])
+            r = td5_geo_roads_nearest(x, z, GA_SEEK, -1, NULL, NULL, NULL);
+
+        if (kph > 0) s_ga.n_speed_from_route++;
+        else if (r && r->maxspeed_kph > 0) {
+            kph = r->maxspeed_kph;
+            s_ga.n_speed_from_roads++;
+        }
+        s_ga.kph[si] = (short)kph;
+
+        if (nm && nm[0]) {
+            s_ga.name[si] = (short)ga_intern(nm);
+            s_ga.n_name_from_route++;
+        } else if (r) {
+            const char *sn = td5_geo_roads_name(r);
+            if (sn && sn[0]) {
+                s_ga.name[si] = (short)ga_intern(sn);
+                s_ga.n_name_from_roads++;
+            }
+        }
+    }
+
+    s_ga.ready = 1;
+    TD5_LOG_I(LOG_TAG, "[GEO ATTRS] race: %d span(s) in %.1f ms "
+              "(route carries speed=%d name=%d); maxspeed %ld route / %ld "
+              "nearest-way; %d distinct name(s)",
+              nspans, (double)(td5_plat_time_us() - t0) / 1000.0,
+              route_has_speed, route_has_name,
+              s_ga.n_speed_from_route, s_ga.n_speed_from_roads, s_ga.n_names);
+}
+
+int td5_geo_attrs_kph_to_units(int kph)
+{
+    if (kph <= 0) return 0;
+    return (int)(((long)kph * 778L) / 256L);
+}
+
+/* Build the race tables on first use, once per track index.
+ *
+ * SELF-TRIGGERING ON PURPOSE. The alternative is a call in the race-init path,
+ * which lives in td5_game.c / td5_track.c -- and keying the latch on
+ * g_td5.track_index is also what makes this immune to the stale-state class of
+ * bug where race 2 on a different track reads race 1's tables. A track index
+ * that produced nothing is remembered too, so a shipped track does not retry
+ * the lookup on every AI tick. */
+static void ga_race_ensure(void)
+{
+    if (s_race_tried_track == g_td5.track_index) return;
+    s_race_tried_track = g_td5.track_index;
+    td5_geo_attrs_race_init();
+}
+
+int td5_geo_attrs_speed_cap_units(int span, int is_traffic)
+{
+    static int s_mult = -1;
+    int kph;
+    ga_race_ensure();
+    if (!s_ga.ready) return 0;
+    if (span < 0 || span >= s_ga.nspans) return 0;
+    kph = (int)s_ga.kph[span];
+    if (kph <= 0) return 0;
+    if (s_mult < 0)
+        s_mult = td5_env_int("TD5RE_GEO_AI_SPEED_MULT", 250, 100, 1000);
+    if (!is_traffic) kph = (kph * s_mult) / 100;
+    return td5_geo_attrs_kph_to_units(kph);
 }
 
 /* --------------------------------------------------------------- queries -- */

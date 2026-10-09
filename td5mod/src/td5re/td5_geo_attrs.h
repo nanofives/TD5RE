@@ -101,4 +101,42 @@ const char *td5_geo_attrs_cross_name(int si, int left);
 /* Census for the log, so a missing lamp or sign is traceable to a count. */
 void td5_geo_attrs_report(int nspans);
 
+/* ------------------------------------------------------- the AI speed cap -- */
+
+/* Build the per-span tables at RACE start, from the ROUTE's own nodes.
+ *
+ * WHY A SECOND ENTRY POINT. The generator's prepass above only runs when a
+ * track is GENERATED; a reused cached track skips it entirely, and that is the
+ * common case -- you generate a place once and race it repeatedly. The route is
+ * loaded for every race either way, and a geo track's span index IS its route
+ * node index, so the route alone is enough to rebuild the tables.
+ *
+ * Cheap when ROUTE.JSON carries the attributes (a table copy). Falls back to
+ * the O(spans x ways) spatial query only when it does not, and logs how long
+ * that took so the cost is never a mystery.
+ *
+ * Safe to call on any track: a no-op unless this is a geo slot with a route. */
+void td5_geo_attrs_race_init(void);
+
+/* km/h -> the engine's longitudinal_speed units.
+ *
+ * NOT an invented constant. The HUD speedometer converts the other way with
+ * the ORIGINAL's own formula, kph = (long_speed * 256 + 389) / 778 (recorded
+ * at td5_hud.c's speedometer notes, from the original's digit emitter), so the
+ * inverse is long_speed = kph * 778 / 256. The +389 is that formula's rounding
+ * term and carries no information in this direction. */
+int td5_geo_attrs_kph_to_units(int kph);
+
+/* The speed cap for a span in engine longitudinal_speed units, or 0 for "no
+ * cap" -- which is the answer on every shipped track, on the synthetic auto
+ * track, where the knob is off, and wherever the map posts no limit.
+ *
+ * TRAFFIC gets the REAL posted limit: a civilian car obeying the sign is the
+ * whole point. A RACER gets the limit times TD5RE_GEO_AI_SPEED_MULT percent
+ * (default 250), because an opponent in a racing game that crawled along at
+ * 40 km/h on a calle would be a bug, not realism. What the cap buys is the
+ * RELATIVE difference -- the AI runs harder on La Plata's 60 km/h avenidas
+ * than on its 40 km/h calles, which is what the map actually says. */
+int td5_geo_attrs_speed_cap_units(int span, int is_traffic);
+
 #endif /* TD5_GEO_ATTRS_H */

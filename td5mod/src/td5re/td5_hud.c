@@ -3777,16 +3777,33 @@ static void hud_draw_street_line(int player_slot, int view_index)
 
     snprintf(buf, sizeof buf, TR("ON %s"), name);
 
-    /* Bottom-left of the pane, under everything the race HUD stacks at the
-     * top and clear of the centre countdown. */
+    /* BOTTOM-CENTRE of the pane, and the position is not arbitrary: the
+     * minimap owns the bottom-LEFT corner and the speedo the bottom-RIGHT, so
+     * the first attempt at bottom-left drew the line underneath the minimap
+     * where no framedump could ever show it. The centre strip is free in every
+     * pane layout. */
     cap = 11.0f * ((vl->scale_y > 0.0f) ? vl->scale_y : 1.0f);
     if (cap < 8.0f)  cap = 8.0f;
     if (cap > 28.0f) cap = 28.0f;
     w = hud_draw_utf8_line(0.0f, 0.0f, cap, buf, 0, 0);
-    (void)w;
-    hud_draw_utf8_line(vl->vp_int_left + 10.0f,
-                       vl->vp_int_bottom - cap * 0.8f,
+    hud_draw_utf8_line(vl->center_x - w * 0.5f,
+                       vl->vp_int_bottom - cap * 1.1f,
                        cap, buf, 0xFFE8E8F0u, 1);
+
+    /* One line per race, so a framedump that shows nothing can be told apart
+     * from a draw that never happened. */
+#ifndef TD5RE_RELEASE
+    {
+        static int s_said = -1;
+        if (s_said != g_td5.track_index) {
+            s_said = g_td5.track_index;
+            TD5_LOG_I("hud", "[GEO STREET] pane %d: \"%s\" (%d byte(s), %.0f px "
+                      "at cap %.1f) at (%.0f,%.0f)", view_index, buf,
+                      (int)strlen(buf), w, cap,
+                      vl->center_x - w * 0.5f, vl->vp_int_bottom - cap * 1.1f);
+        }
+    }
+#endif
 }
 
 /* [COP CHASE SCOREBOARD REMOVED 2026-08-19] The top-of-pane per-cop arrest
