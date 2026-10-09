@@ -109,21 +109,49 @@ static long s_gx_in_cache, s_gx_placed;
 static long s_gx_drop_far, s_gx_drop_grid, s_gx_drop_struct;
 static long s_gx_drop_paint, s_gx_drop_surface, s_gx_drop_dup, s_gx_drop_budget;
 
-/* Longitudinal position of (wx,wz) within span si, as a fraction of that
- * span's own length. Projection onto the span tangent, which is the same frame
- * tg_road_edge's `f` parameter walks. Clamped: a node that projects outside
- * the span was assigned to si by nearest-NODE, and its paint belongs at the
- * end of si rather than nowhere. */
-static double tg_gx_frac(const TG_NodeList *nl, int si, double wx, double wz)
+/* Longitudinal position of (wx,wz) within span si, as a fraction of that span's
+ * own length, UNCLAMPED. Projection onto the span tangent, which is the same
+ * frame tg_road_edge's `f` parameter walks. A negative answer means the point
+ * lies behind node si, which is the half of the time tg_guard_nearest_node
+ * hands back the node AFTER the point rather than the one before it. */
+static double tg_gx_frac_raw(const TG_NodeList *nl, int si,
+                             double wx, double wz)
 {
     const TG_Node *a = &nl->v[si];
     const TG_Node *b = &nl->v[si + 1];
     const double dx = b->x - a->x, dz = b->z - a->z;
     const double len2 = dx * dx + dz * dz;
-    double t;
 
     if (len2 <= 0.0) return 0.5;
-    t = ((wx - a->x) * dx + (wz - a->z) * dz) / len2;
+    return ((wx - a->x) * dx + (wz - a->z) * dz) / len2;
+}
+
+/* The span that CONTAINS (wx,wz), and the fraction within it.
+ *
+ * tg_guard_nearest_node answers with the nearest NODE, which is the span
+ * BOUNDARY, so by symmetry about half of all points fall behind it -- and
+ * taking that node's span unconditionally pins those to f=0 and pushes the
+ * painted band off the real crossing by up to a whole span. Measured on
+ * la_plata before this: 9 of 14 placements reported f=0.00. Stepping back one
+ * span when the projection is negative puts the band on the crossing instead
+ * of at the start of the span after it. `*si` is updated in place; the
+ * returned fraction is clamped to [0,1] once the span is settled. */
+static double tg_gx_span_frac(const TG_NodeList *nl, int *si,
+                              double wx, double wz)
+{
+    double t = tg_gx_frac_raw(nl, *si, wx, wz);
+
+    if (t < 0.0 && *si > 0) {
+        const int prev = *si - 1;
+        const double tp = tg_gx_frac_raw(nl, prev, wx, wz);
+        /* Only if it really lands in the previous span. A point off the end
+         * of a bend can be behind BOTH, and then the original span is still
+         * the nearest thing to the truth. */
+        if (tp > 0.0) {
+            *si = prev;
+            t = tp;
+        }
+    }
     if (t < 0.0) t = 0.0;
     else if (t > 1.0) t = 1.0;
     return t;
@@ -175,6 +203,7 @@ void tg_geo_xings_prepare(const TG_NodeList *nl, int nspans)
     for (i = 0; i < n; i++) {
         TD5_GeoCrossing c;
         const TG_Node *nd;
+        double f;
         int si, j, dup = 0;
 
         if (!td5_geo_crossing_get(i, &c)) continue;
@@ -202,6 +231,11 @@ void tg_geo_xings_prepare(const TG_NodeList *nl, int nspans)
                 continue;
             }
         }
+        /* Settle WHICH span before any per-span gate runs: the correction can
+         * move the placement back one span, and a gate asked about the wrong
+         * span is a gate asked about the wrong road. */
+        f = tg_gx_span_frac(nl, &si, c.x, c.z);
+
         /* The lead-in is synthetic straight road the conditioner prepended,
          * not geography, and the start grid must stay clear of paint
          * regardless. Same two gates the signal heads take. */
@@ -221,7 +255,7 @@ void tg_geo_xings_prepare(const TG_NodeList *nl, int nspans)
         if (dup) { s_gx_drop_dup++; continue; }
 
         s_gx[s_gx_n].si    = si;
-        s_gx[s_gx_n].f     = tg_gx_frac(nl, si, c.x, c.z);
+        s_gx[s_gx_n].f     = f;
         s_gx[s_gx_n].paint = (c.paint == TD5_GEO_XP_SIGNALS)
                              ? TD5_GEO_XP_SIGNALS : TD5_GEO_XP_MARKED;
         s_gx_n++;
