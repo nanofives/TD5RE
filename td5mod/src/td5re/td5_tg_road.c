@@ -1003,10 +1003,17 @@ static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     int i, chunk0 = 0, forced = 0, too_close = 0, turns = 0, ramped = 0;
     int prev_lanes = 0;
 
+    /* [ROUND 1013 F2] The real forks the map has (td5_tg_realfork.c) are decided
+     * HERE, before the first node is pushed, because each one needs the ring's
+     * lane count and the route's position changed over its window. 0 and a no-op
+     * on a build with no fork, so the route is walked exactly as before. */
+    tg_realfork_build();
+
     for (i = 0; i < n; i++) {
         double x, z;
         int lanes;
         td5_geo_route_node(i, &x, &z, &lanes);
+        lanes = tg_realfork_lanes_override(i, lanes);   /* [ROUND 1013 F2] */
         /* [GEO 2026-09-30, Valparaiso] ONE LANE PER SEAM. A real street can go
          * from 2 to 5 lanes between two OSM nodes, and a seam that adds or
          * drops more than one lane is typed "both sides" (4/7), which needs a
@@ -1019,9 +1026,26 @@ static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
             else if (lanes < prev_lanes - 1) { lanes = prev_lanes - 1; ramped++; }
         }
         prev_lanes = lanes;
-        if (i > skip && tg_too_close(nl, x, z, (double)lanes * lane_w, lane_w, skip))
+        /* [ROUND 1013 F2] widen on the corridor's side only: the node moves half
+         * the added width, so the route carriageway's own edge stays put. The
+         * move is recorded as the node's JOG (jx/jz), which is what the tangent
+         * pass below subtracts: without it the shifted polyline kinks the node
+         * tangents by atan(1/2) = 27 deg over the lane ramp, the row directions
+         * and the AI's route-heading table follow the kink, and cars swerve at
+         * the ramp (measured: two racers stalled at span 747 under full lock). */
+        double jog_x = 0.0, jog_z = 0.0;
+        {
+            const double x0 = x, z0 = z;
+            tg_realfork_node_adjust(i, &x, &z);
+            jog_x = x - x0; jog_z = z - z0;
+        }
+        /* [ROUND 1013 F2b] the width is ramped, the lane count is its rounding */
+        const double node_w = tg_realfork_node_width(i, lanes, lane_w);
+        if (i > skip && tg_too_close(nl, x, z, node_w, lane_w, skip))
             too_close++;
-        if (!tg_nodes_push(nl, x, z, (double)lanes * lane_w, lanes)) return 0;
+        if (!tg_nodes_push(nl, x, z, node_w, lanes)) return 0;
+        nl->v[nl->count - 1].jx = jog_x;
+        nl->v[nl->count - 1].jz = jog_z;
         if (i >= 2) {
             const TG_Node *a = &nl->v[i - 2], *b = &nl->v[i - 1], *c = &nl->v[i];
             const double cr = fabs((b->x - a->x) * (c->z - b->z) - (b->z - a->z) * (c->x - b->x))

@@ -38,7 +38,22 @@ static int tg_geo_forks_n(void)
 {
     if (!td5_geo_loaded()) return 0;
     if (!td5_env_flag_on("TD5RE_GEO_FORKS")) return 0;
-    return td5_geo_forks_sync();     /* idempotent: keyed on the loaded slug */
+    {
+        /* idempotent: keyed on the loaded slug. A FORKS.JSON the user confirmed
+         * in the selector is authoritative, exactly as before. */
+        const int legacy = td5_geo_forks_sync();
+        if (legacy > 0) return legacy;
+    }
+    /* [ROUND 1013 F2] No confirmed file: the forks are the real ones the map
+     * has -- the opposite carriageway of a divided avenue and any real road
+     * running close to and parallel with the route (td5_tg_realfork.c). */
+    return tg_realfork_n();
+}
+
+/* Is geo fork `index` one of the REAL ones? (Only when no FORKS.JSON won.) */
+static int tg_geo_fork_is_real(int index)
+{
+    return td5_geo_forks_count() < 1 && index >= 0 && index < tg_realfork_n();
 }
 
 /* TG_ForkKind for the shape name FORKS.JSON carries. The mapping lives here,
@@ -61,6 +76,15 @@ static int tg_geo_fork_at(int index, int *F, int *kind, int *len, double *sep)
     int gf, gl, glanes;
     double gsep;
     if (index < 0 || index >= tg_geo_forks_n()) return 0;
+    if (tg_geo_fork_is_real(index)) {
+        int la = 0, lb = 0;
+        if (!tg_realfork_get(index, &gf, &gl, &la, &lb, &gsep)) return 0;
+        if (F)    *F    = gf;
+        if (len)  *len  = gl;
+        if (sep)  *sep  = gsep;
+        if (kind) *kind = TG_FORK_AVENUE;     /* symmetric, central divider */
+        return 1;
+    }
     if (!td5_geo_forks_get(index, &gf, &gl, &gsep, &glanes)) return 0;
     if (F)    *F    = gf;
     if (len)  *len  = gl;
@@ -393,9 +417,24 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             const int lanes = nl->v[F].lanes;
             int main_half, br_lanes;
             int q, uniform = 1;
+            /* [ROUND 1013 F2] A REAL fork's split is the two real carriageways'
+             * own lane counts, not a function of the total. */
+            const int is_real = tg_geo_fork_is_real((int)i);
+            if (is_real) {
+                int la = 0, lb = 0;
+                tg_realfork_get((int)i, NULL, NULL, &la, &lb, NULL);
+                main_half = la; br_lanes = lb;
+                if (la < 1 || lb < 1 || la + lb != lanes) {
+                    TD5_LOG_W(LOG_TAG, "trackgen: [REAL FORK] fork %u at F=%d "
+                              "skipped: the ring carries %d lane(s) at F, the "
+                              "real fork needs %d+%d", i, F, lanes, la, lb);
+                    pos = R + fork_gap;
+                    continue;
+                }
+            } else
             tg_fork_split_lanes(kind, lanes, &main_half, &br_lanes);
             if (main_half < 1 || br_lanes < 1) break;
-            if (lanes < tg_fork_kind_min_lanes(kind)) {
+            if (!is_real && lanes < tg_fork_kind_min_lanes(kind)) {
                 /* [FORK KINDS] backstop: the walk widens the road ahead of a
                  * fork window, but a rejected section can leave it narrow. */
                 TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
@@ -441,6 +480,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
             s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
         s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
+            s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] */
             s_fork_count++;
             off += 1 + L;
             pos = R + fork_gap;                   /* [R20] gap before the next fork */
@@ -675,6 +715,14 @@ double tg_fork_br_shift(int fi, int k, double w)
     const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
     const double f   = (len > 0) ? (double)k / (double)len : 0.0;
     const double bow = sin(f * TD5_TG_PI);
+    /* [ROUND 1013 F2] A REAL fork's corridor sits the real MEDIAN away from the
+     * main half: its inner edge is the main half's edge plus the measured gap
+     * between the two real carriageways, which is zero at both mouths. No bow,
+     * no sep -- those are what round 1010 removed. */
+    if (fi >= 0 && fi < s_fork_count && s_forks[fi].real > 0)
+        return (double)tg_fork_side(fi)
+             * (w * (1.0 - tg_fork_fb(fi)) * 0.5
+                + tg_realfork_med(s_forks[fi].real - 1, k));
     return (double)tg_fork_side(fi)
          * (w * (1.0 - tg_fork_fb(fi)) * 0.5 + w * tg_branch_bow(len, w) * sep * bow);
 }
@@ -1038,6 +1086,19 @@ void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
             for (f = 0; f < s_fork_count; f++)
                 if (tg_fork_is_bypass(f) && i >= s_forks[f].F - 1 && i <= s_forks[f].R + 1)
                     lim = TD5_TG_R8_LAT_MAX + w + 1.0;
+        }
+        {   /* [ROUND 1013 F2] On a GEO track a divided avenue's real opposite
+             * carriageway is a LEGITIMATE reach: it is the real road, beside the
+             * race road (scenery) or as a fork's own corridor (driveable). The
+             * ceiling above was derived for synthetic bows (0.25 + bow + 0.5
+             * roads) and read Avenida 13's 10-20 m median as "suspect fork
+             * geometry" -- 76 spans on Mariano's route before any real fork
+             * existed. The avenue's own reach is the ceiling there; everything
+             * else keeps the derived one. */
+            const double avl = tg_geo_avenue_reach(nl, i, -1.0);
+            const double avr = tg_geo_avenue_reach(nl, i, 1.0);
+            const double av  = (avl > avr) ? avl : avr;
+            if (av + 1.0 > lim) lim = av + 1.0;
         }
         if (rr < hi - 1.0 || rr > lim) {
             if (bad_reach < 8)
