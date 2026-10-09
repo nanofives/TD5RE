@@ -2154,6 +2154,18 @@ static int gr_route_owns_way(int ri)
     return 0;
 }
 
+/* [ROUND 1012 D2] TD5RE_GEO_AVENUE_PROBE=1 dumps the detector's own working
+ * numbers: every vertex run it forms, every gate that refuses one with the
+ * value that failed, every sample's distance and side, and the per-span
+ * continuity chain. A gate is then fixed against a measurement instead of
+ * against a guess. DEFAULT OFF -- it is several hundred log lines. */
+static int gr_av_probe(void)
+{
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_flag_off("TD5RE_GEO_AVENUE_PROBE");
+    return s_on;
+}
+
 /* geo_forks.detect_medians. `road_id[k]` is the way the route's k-th vertex
  * arrived on, `px/pz[k]` its position in the PLACE frame. Returns the number of
  * medians written to `out`, longest first then overlap-filtered, finally sorted
@@ -2186,8 +2198,29 @@ static int gr_detect_medians(const int *road_id, const double *px,
                 run_a[n_run] = i; run_b[n_run] = e; run_r[n_run] = road_id[i];
                 n_run++;
             }
+        } else if (gr_av_probe()) {
+            const int ok = road_id[i] >= 0 && road_id[i] < s_g.n_roads;
+            TD5_LOG_I(LOG_TAG, "  [AVPROBE] raw %3d..%-3d DROPPED by 1a: %s "
+                      "(%d vertex/vertices, way %s)", i, e,
+                      (e - i + 1 < 2) ? "fewer than 2 consecutive vertices"
+                                      : "vertex is on no way",
+                      e - i + 1, ok && s_g.road[road_id[i]].name
+                               ? s_g.road[road_id[i]].name : "(unnamed)");
         }
         i = e + 1;
+    }
+    if (gr_av_probe()) {
+        TD5_LOG_I(LOG_TAG, "[AVPROBE] %d run(s) formed from %d route vertices",
+                  n_run, n);
+        for (i = 0; i < n_run; i++) {
+            double u = 0.0;
+            for (k = run_a[i]; k < run_b[i]; k++)
+                u += hypot(px[k + 1] - px[k], pz[k + 1] - pz[k]);
+            TD5_LOG_I(LOG_TAG, "  [AVPROBE] run %2d raw %3d..%-3d %7.1f m  %s",
+                      i, run_a[i], run_b[i], u / upm,
+                      s_g.road[run_r[i]].name ? s_g.road[run_r[i]].name
+                                              : "(unnamed)");
+        }
     }
 
     /* 2. score each merged run against its same-name peers. */
@@ -2217,7 +2250,13 @@ static int gr_detect_medians(const int *road_id, const double *px,
         for (k = k0; k < k1; k++)
             run_units += hypot(px[k + 1] - px[k], pz[k + 1] - pz[k]);
         run_m = run_units / upm;
-        if (run_m < GR_MED_MIN_LEN_M) continue;
+        if (run_m < GR_MED_MIN_LEN_M) {
+            if (gr_av_probe())
+                TD5_LOG_I(LOG_TAG, "[AVPROBE] \"%s\" raw %d..%d REJECT length: "
+                          "%.0f m < %.0f m", name, k0, k1, run_m,
+                          GR_MED_MIN_LEN_M);
+            continue;
+        }
 
         step = (k1 - k0) / 12;
         if (step < 1) step = 1;
@@ -2264,9 +2303,24 @@ static int gr_detect_medians(const int *road_id, const double *px,
                     peer_hits_id[slot] = cand_j; peer_hits_n[slot] = 0;
                 }
                 if (slot >= 0) peer_hits_n[slot]++;
+                if (gr_av_probe())
+                    TD5_LOG_I(LOG_TAG, "  [AVPROBE] \"%s\" raw %d..%d sample k=%d"
+                              " peer way %.0f at %.2f m on the %s", name, k0, k1,
+                              k, s_g.road[cand_j].id, cand_m,
+                              s_side[n_s - 1] > 0 ? "left" : "right");
+            } else if (gr_av_probe()) {
+                TD5_LOG_I(LOG_TAG, "  [AVPROBE] \"%s\" raw %d..%d sample k=%d "
+                          "NO PEER", name, k0, k1, k);
             }
         }
-        if (!total || (double)hits / (double)total < GR_MED_MIN_COVER) continue;
+        if (!total || (double)hits / (double)total < GR_MED_MIN_COVER) {
+            if (gr_av_probe())
+                TD5_LOG_I(LOG_TAG, "[AVPROBE] \"%s\" raw %d..%d REJECT cover: "
+                          "%d/%d = %.2f < %.2f", name, k0, k1, hits, total,
+                          total ? (double)hits / (double)total : 0.0,
+                          GR_MED_MIN_COVER);
+            continue;
+        }
 
         /* ---- [ROUND 1010 AVENUES] STABILITY: one side, bounded spread -------
          *
@@ -2982,6 +3036,14 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     if (s1 - s0 + 1 < GR_AV_MIN_SPANS)
                         why = "it does not reach the span floor clear of the "
                               "grid and the ring tail";
+                    if (gr_av_probe())
+                        TD5_LOG_I(LOG_TAG, "[AVPROBE] %s raw %d..%d -> frac "
+                                  "%.4f..%.4f -> spans %d..%d (%d), side %s, "
+                                  "seed %.1f m (%.1f..%.1f)", med[j].name,
+                                  med[j].k0, med[j].k1, f0, f1, s0, s1,
+                                  s1 - s0 + 1, want > 0 ? "left" : "right",
+                                  med[j].gap_m, med[j].gap_min_m,
+                                  med[j].gap_max_m);
 
                     /* The run's own measured spacing seeds the continuity
                      * chain, so the first span is anchored on the carriageway
@@ -3016,8 +3078,12 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         int plan = 2;
                         GrAvSpan *g;
                         if (rev1) f = 1.0 - f;
-                        if (!gr_poly_at(&rawp, frac, f, &qx, &qz, &qtx, &qtz))
+                        if (!gr_poly_at(&rawp, frac, f, &qx, &qz, &qtx, &qtz)) {
+                            if (gr_av_probe())
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: "
+                                          "gr_poly_at failed", med[j].name, s);
                             continue;
+                        }
                         if (rev1) { qtx = -qtx; qtz = -qtz; }
                         /* The opposite carriageway has ENDED here (or jumped to
                          * a different way, which from the ground is the same
@@ -3027,6 +3093,24 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         if (!gr_peer_offset_at(med[j].name, want, prev,
                                                seeded ? GR_AV_MAX_STEP : seed_cap,
                                                qx, qz, qtx, qtz, &off, &plan)) {
+                            if (gr_av_probe()) {
+                                double raw_off = 0.0;
+                                int raw_lan = 0, got;
+                                got = gr_peer_offset_at(med[j].name, want, prev,
+                                                        1e30, qx, qz, qtx, qtz,
+                                                        &raw_off, &raw_lan);
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: NO "
+                                          "PEER within cap %.0f of want %.0f "
+                                          "(seeded=%d); uncapped nearest-to-want"
+                                          " = %s %.0f u (%.2f m) err %.0f",
+                                          med[j].name, s,
+                                          seeded ? GR_AV_MAX_STEP : seed_cap,
+                                          prev, seeded, got ? "found" : "NONE",
+                                          got ? raw_off : 0.0,
+                                          got ? fabs(raw_off) / GR_UNITS_PER_METRE
+                                              : 0.0,
+                                          got ? fabs(fabs(raw_off) - prev) : 0.0);
+                            }
                             if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
                             break;
                         }
@@ -3043,9 +3127,23 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                              * GR_LANE_WIDTH * 0.5;
                         if (a < half + (double)plan * GR_LANE_WIDTH * 0.5
                                 + GR_AV_MIN_MEDIAN) {
+                            if (gr_av_probe())
+                                TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: "
+                                          "OVERLAP: gap %.0f u (%.2f m) < own "
+                                          "half %.0f + peer half %.0f (%d lane) "
+                                          "+ min median %.0f (seeded=%d)",
+                                          med[j].name, s, a,
+                                          a / GR_UNITS_PER_METRE, half,
+                                          (double)plan * GR_LANE_WIDTH * 0.5,
+                                          plan, GR_AV_MIN_MEDIAN, seeded);
                             if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
                             break;
                         }
+                        if (gr_av_probe())
+                            TD5_LOG_I(LOG_TAG, "  [AVPROBE] %s span %d: OK off "
+                                      "%.0f u (%.2f m) peer %d lane(s)",
+                                      med[j].name, s, off,
+                                      fabs(off) / GR_UNITS_PER_METRE, plan);
                         prev    = a;
                         miss    = 0;
                         seeded  = 1;
