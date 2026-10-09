@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: pavements and crossings)" },
+    { CL_ITEM,    "Pedestrian crossings are now painted where the real" },
+    { CL_ITEM,    "  map says one is, with the markings it really has" },
+    { CL_ITEM,    "A zebra gets its bars. A signal-controlled crossing" },
+    { CL_ITEM,    "  gets its limit lines. An unmarked one gets nothing" },
+    { CL_ITEM,    "Bus stops stand on the real kerb, with a shelter, a" },
+    { CL_ITEM,    "  bench or a bin wherever the map records one" },
+    { CL_ITEM,    "Plaza, park and pedestrian-street paving follows the" },
+    { CL_ITEM,    "  mapped path instead of being guessed from scenery" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 8 (real places: divided avenues)" },
     { CL_ITEM,    "A divided avenue is now built from the real map" },
     { CL_ITEM,    "  instead of splitting the race into two paths" },

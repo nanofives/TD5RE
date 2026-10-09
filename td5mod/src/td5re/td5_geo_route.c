@@ -3599,31 +3599,16 @@ static double gr_corridor_nodata_pct(const GrRaster *h, const GrPts *nodes,
     return total ? (100.0 * (double)miss / (double)total) : 0.0;
 }
 
-/* Re-project every world-unit coordinate of a SOURCE vector layer into the
- * route frame and hand the tree back. Lossless: the two frames differ by a
- * rigid transform of the same plane. Returns NULL when the layer is absent or
- * unreadable; *count is the number of entries, -1 when the file is not there
- * at all (which is not a failure -- not every place has SIGNALS.JSON). */
-static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
-                               const char *array_key,
-                               const GeoProj *np, const GeoProj *op,
-                               int *count)
+/* Re-project every world-unit coordinate of ONE array into the route frame,
+ * in place. Returns the entry count, or -1 when the key is absent or is not
+ * an array. */
+static int gr_reproject_arr(cJSON *root, const char *array_key,
+                            const GeoProj *np, const GeoProj *op)
 {
-    char path[512];
-    char *json;
-    cJSON *root, *arr;
+    cJSON *arr = root ? cJSON_GetObjectItem(root, array_key) : NULL;
     int i, n;
 
-    if (count) *count = -1;
-    snprintf(path, sizeof path, "%s/%s", src_dir, file);
-    if (!td5_plat_file_exists(path)) return NULL;
-    json = gr_slurp(path, NULL);
-    if (!json) return NULL;
-    root = cJSON_Parse(json);
-    free(json);
-    if (!root) { if (count) *count = 0; return NULL; }
-    arr = cJSON_GetObjectItem(root, array_key);
-    if (!arr || !cJSON_IsArray(arr)) { if (count) *count = 0; cJSON_Delete(root); return NULL; }
+    if (!arr || !cJSON_IsArray(arr)) return -1;
     n = cJSON_GetArraySize(arr);
     for (i = 0; i < n; i++) {
         cJSON *e = cJSON_GetArrayItem(arr, i);
@@ -3652,6 +3637,49 @@ static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
             cJSON_SetNumberValue(ez, z);
         }
     }
+    return n;
+}
+
+/* Re-project every world-unit coordinate of a SOURCE vector layer into the
+ * route frame and hand the tree back. Lossless: the two frames differ by a
+ * rigid transform of the same plane. Returns NULL when the layer is absent or
+ * unreadable; *count is the number of entries in `array_key`, -1 when the file
+ * is not there at all (which is not a failure -- not every place has
+ * SIGNALS.JSON).
+ *
+ * TWO KEYS, because a file can hold TWO independent arrays of world
+ * coordinates. SIGNALS.JSON is the case, and it was a LATENT FRAME BUG until
+ * round 1011 C4: `signals[]` was reprojected and `nodes[]` -- added by the
+ * 2026-10-07 tag round -- was copied through untouched, so the derived file
+ * held two arrays in two different frames. Measured on la_plata before the
+ * fix: derived nodes[0] was (632414.63, -1088540.02), byte-for-byte the SOURCE
+ * value, while derived signals[0] had moved to (-131649.05, -1112948.13). It
+ * was harmless only because nothing read nodes[]; the moment the crossings and
+ * bus stops in it are drawn, every one of them lands in the wrong place. This
+ * is exactly the "MIXING FRAMES IS THE WORSE BUG" failure td5_geo.c:53-57
+ * names as the reason the resolver is all-or-nothing -- it just happened
+ * INSIDE one file, where that rule could not see it. `key2` may be NULL. */
+static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
+                               const char *array_key, const char *key2,
+                               const GeoProj *np, const GeoProj *op,
+                               int *count)
+{
+    char path[512];
+    char *json;
+    cJSON *root;
+    int n;
+
+    if (count) *count = -1;
+    snprintf(path, sizeof path, "%s/%s", src_dir, file);
+    if (!td5_plat_file_exists(path)) return NULL;
+    json = gr_slurp(path, NULL);
+    if (!json) return NULL;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) { if (count) *count = 0; return NULL; }
+    n = gr_reproject_arr(root, array_key, np, op);
+    if (n < 0) { if (count) *count = 0; cJSON_Delete(root); return NULL; }
+    if (key2) (void)gr_reproject_arr(root, key2, np, op);
     if (count) *count = n;
     return root;
 }
@@ -3729,20 +3757,31 @@ int td5_geo_route_commit(void)
     static const struct { const char *name; int bilinear; } k_rast[] = {
         { "HEIGHT.R16", 1 }, { "COVER.R8", 0 }, { "WATER.R8", 0 }, { "CANOPY.R8", 0 },
     };
-    static const struct { const char *file; const char *key; } k_vec[] = {
-        { "ROADS.JSON", "roads" }, { "BUILDINGS.JSON", "buildings" },
-        { "AREAS.JSON", "areas" }, { "SIGNALS.JSON",   "signals"   },
+    /* `key2` is a SECOND array of world coordinates in the same file; see
+     * gr_reproject_mem. `required` marks a layer whose presence-but-emptiness
+     * means the map data is damaged -- which FOOTWAYS.JSON is NOT: a place
+     * with no mapped pavement is an ordinary place, and refusing the whole
+     * BUILD over it would be a regression on every cache that has one. */
+    static const struct {
+        const char *file; const char *key; const char *key2; int required;
+    } k_vec[] = {
+        { "ROADS.JSON",     "roads",     NULL,    1 },
+        { "BUILDINGS.JSON", "buildings", NULL,    1 },
+        { "AREAS.JSON",     "areas",     NULL,    1 },
+        { "SIGNALS.JSON",   "signals",   "nodes", 1 },
+        { "FOOTWAYS.JSON",  "footways",  NULL,    0 },
     };
+#define GR_VEC_N ((int)(sizeof k_vec / sizeof k_vec[0]))
     GrRaster rast[4];
     int       rast_have[4];
-    cJSON    *vec[4];
-    int       vec_n[4];
+    cJSON    *vec[GR_VEC_N];
+    int       vec_n[GR_VEC_N];
     cJSON    *place = NULL;
 
     memset(rast, 0, sizeof rast);
     memset(rast_have, 0, sizeof rast_have);
     memset(vec, 0, sizeof vec);
-    for (i = 0; i < 4; i++) vec_n[i] = -1;
+    for (i = 0; i < GR_VEC_N; i++) vec_n[i] = -1;
     s_commit_reason[0] = '\0';
 
     if (!s_last.valid || !c->nodes_xz.n)
@@ -3833,9 +3872,9 @@ int td5_geo_route_commit(void)
     }
 
     /* -------- 3. re-project every vector layer INTO MEMORY ----------------- */
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < GR_VEC_N; i++)
         vec[i] = gr_reproject_mem(src_dir, k_vec[i].file, k_vec[i].key,
-                                  &c->proj, &oldp, &vec_n[i]);
+                                  k_vec[i].key2, &c->proj, &oldp, &vec_n[i]);
     /* GUARD 4: a present-but-empty layer. vec_n < 0 means "the place never had
      * this file", which is allowed; 0 entries from a file that exists is the
      * "ROADS.JSON held no usable road" state. */
@@ -3843,8 +3882,8 @@ int td5_geo_route_commit(void)
         gr_commit_refuse("ONLY %d ROAD(S) SURVIVED -- MAP DATA LOOKS DAMAGED", vec_n[0]);
         goto done;
     }
-    for (i = 1; i < 4; i++) {
-        if (vec_n[i] == 0) {
+    for (i = 1; i < GR_VEC_N; i++) {
+        if (k_vec[i].required && vec_n[i] == 0) {
             gr_commit_refuse("%s IS PRESENT BUT EMPTY -- MAP DATA LOOKS DAMAGED",
                              k_vec[i].file);
             goto done;
@@ -3868,7 +3907,7 @@ int td5_geo_route_commit(void)
             goto done;
         }
     }
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < GR_VEC_N; i++) {
         if (!vec[i]) continue;
         snprintf(path, sizeof path, "%s/%s", dst_dir, k_vec[i].file);
         if (!gr_write_json(path, vec[i])) {          /* consumes the tree */
@@ -3912,7 +3951,9 @@ int td5_geo_route_commit(void)
     rc = 0;
 
 done:
-    for (i = 0; i < 4; i++) { gr_raster_free(&rast[i]); if (vec[i]) cJSON_Delete(vec[i]); }
+    for (i = 0; i < 4; i++) gr_raster_free(&rast[i]);
+    for (i = 0; i < GR_VEC_N; i++) if (vec[i]) cJSON_Delete(vec[i]);
+#undef GR_VEC_N
     if (place) cJSON_Delete(place);
 
     /* The graph and everything td5_geo caches belong to the previous frame.
@@ -3931,10 +3972,11 @@ done:
         TD5_LOG_I(LOG_TAG, "geo route: committed %s -> %s: %d spans, %.2f km, "
                   "grid %dx%d cell %.0f, %ld nodata cell(s) overall, corridor "
                   "%ld/%ld missing (%.2f%%), roads %d buildings %d areas %d "
-                  "signals %d, %.0f ms", s_last.slug, dst_dir, c->spans,
-                  c->length_km, nw, nh, cell, nodata_total, corridor_miss,
-                  corridor_n, corridor_pct, vec_n[0], vec_n[1], vec_n[2],
-                  vec_n[3], (double)(td5_plat_time_us() - t_us) / 1000.0);
+                  "signals %d footways %d, %.0f ms", s_last.slug, dst_dir,
+                  c->spans, c->length_km, nw, nh, cell, nodata_total,
+                  corridor_miss, corridor_n, corridor_pct, vec_n[0], vec_n[1],
+                  vec_n[2], vec_n[3], vec_n[4],
+                  (double)(td5_plat_time_us() - t_us) / 1000.0);
     return rc;
 }
 
