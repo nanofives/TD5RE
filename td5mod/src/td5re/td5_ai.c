@@ -7436,9 +7436,52 @@ static void mp_cop_pick_target(int cop_slot); /* defined below */
 /**
  * Dispatch a single racer slot based on its state.
  */
+/* [ROUND 1013 F3] A GEO RACER THAT HAS CROSSED THE FINISH LINE IS FINISHED.
+ *
+ * g_slot_state (this module's table) is written once, at race init, and never
+ * again: the game flips ITS table (s_slot_state[].state = 2) when a car crosses
+ * the line, and nothing carries that across. So `case 0x02` below -- brake to a
+ * stop -- never ran for a car that finished a point-to-point race, and an AI car
+ * that crossed the line just kept racing. MEASURED on Mariano's La Plata route
+ * with the run-off built: five AI cars crossed span 955 at 102-127 km/h and
+ * ACCELERATED to 171-199 km/h over the next 113 spans, until the end wall at
+ * span 1069 stopped them (log/race_trace_motion.csv long_speed, 6 slots). That
+ * is exactly "AI parked against a wall" -- a run-off nobody brakes on is just a
+ * longer run to the wall.
+ *
+ * Gated to a GEO point-to-point race on purpose: this is a TD5RE track with a
+ * run-off built for it, and the shipped tracks and the synthetic auto track
+ * keep the behaviour they have always had (TD5RE_GEO_FINISH_BRAKE=0 pins the old
+ * behaviour here too, for a single-variable A/B). A DNF (companion_2 == 2) is
+ * not a finish and is left alone, which is what td5_game_slot_finished_at_line
+ * tests. */
+static int ai_geo_slot_finished(int slot)
+{
+    static int s_on = -1;
+    if (s_on < 0) {
+        s_on = td5_env_flag_on("TD5RE_GEO_FINISH_BRAKE");
+        TD5_LOG_I(LOG_TAG, "ai geo_finish_brake: TD5RE_GEO_FINISH_BRAKE=%d "
+                  "(AI cars brake once they cross a geo track's finish line)",
+                  s_on);
+    }
+    if (!s_on || g_track_is_circuit) return 0;
+    if (!td5_geo_loaded() || td5_geo_route_count() < 2) return 0;
+    return td5_game_get_slot_state(slot) == 2 && td5_game_slot_finished_at_line(slot);
+}
+
 static void ai_update_single_racer(int slot) {
     char *actor = actor_ptr(slot);
     int state = g_slot_state[slot];
+
+    if (state == 0 && ai_geo_slot_finished(slot)) {
+        static int s_logged[TD5_MAX_TOTAL_ACTORS];
+        if (!s_logged[slot]) {
+            s_logged[slot] = 1;
+            TD5_LOG_I(LOG_TAG, "geo_finish_brake: slot=%d crossed the finish "
+                      "line -> brake to a stop on the run-off", slot);
+        }
+        state = 2;
+    }
 
     /* [MP COP CHASE 2026-06-23] An AI-driven cop racer (g_cop_is_cop, COP_CHASING)
      * hunts the suspects via the dedicated cop driver (aggressive ram steering)

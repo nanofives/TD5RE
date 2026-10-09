@@ -817,6 +817,81 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg);
 }
 
+/* [ROUND 1013 F3] THE FINISH LINE ON THE ROAD. A GEO track's finish was a gantry
+ * and nothing else (and, for the route Mariano drove, not even that -- see the
+ * RUN-OFF note in td5_geo_route.c). A line a driver crosses has to be painted on
+ * the tarmac, so this lays a two-row chequered band across the carriageway on
+ * the finish span, directly under the banner.
+ *
+ * NO NEW PAGE. The gantry's own frame page (TD5_TG_PAGE_BANNER) already carries
+ * an 8x4-cell chequer band, white/near-black, in u 0.125..1 and v 0.25..0.75
+ * (td5_tg_pages.c, tg_emit_texture_page_fb_banner): cells 1..6 across (u
+ * 0.125..0.875) are an EVEN count, so quads butted edge to edge keep the
+ * colours alternating across the seam, and two cell rows of it (v 0.25..0.5) is
+ * the band. Adding a page would have changed TEXTURES.DAT for every track.
+ *
+ * GEO ONLY. The synthetic tracks keep the byte-identical MODELS.DAT the
+ * identity gate measures; this runs only when a geo route is loaded.
+ *
+ * Built like the zebra (tg_city_emit_crossing): corners from tg_road_edge so it
+ * follows the same curvature the asphalt does, lifted TD5_TG_CROSS_LIFT so it
+ * wins the depth test, marked DECAL so the on-road guard licenses it flush with
+ * the tarmac and nowhere else. The chequer squares are ~0.7 m, so the quad count
+ * follows the road width. */
+#define TD5_TG_FLINE_F0       0.04    /* band starts just inside the span     */
+#define TD5_TG_FLINE_F1       0.44    /* 600 raw (~1.4 m) deep: two cell rows */
+#define TD5_TG_FLINE_CELL     300.0   /* raw: ~0.7 m at 430 units per metre   */
+#define TD5_TG_FLINE_CELLS_Q  6       /* cells across per quad (page cells 1..6) */
+#define TD5_TG_FLINE_QMAX     10
+static int tg_emit_finish_line(const TG_FBHook *h)
+{
+    /* Half a texel in, so a quad never samples a neighbouring cell or the leg
+     * column to the left of the chequer (leg_col = 7 texels on a 64 page). */
+    const double ins = 0.5 / (double)TD5_TG_TEX_DIM;
+    const double u0 = 0.125 + ins, u1 = 0.875 - ins;   /* cells 1..6 of 8     */
+    const double v0 = 0.25  + ins, v1 = 0.50  - ins;   /* cell rows 2..3 of 8 */
+    const TG_Node *a = &h->nl->v[h->si];
+    const TG_Node *b = &h->nl->v[h->si + 1];
+    const double w = 0.5 * (a->width + b->width);
+    double px[4 * TD5_TG_FLINE_QMAX], py[4 * TD5_TG_FLINE_QMAX], pz[4 * TD5_TG_FLINE_QMAX];
+    double uu[4 * TD5_TG_FLINE_QMAX], vv[4 * TD5_TG_FLINE_QMAX];
+    double l0x, l0y, l0z, r0x, r0y, r0z, l1x, l1y, l1z, r1x, r1y, r1z;
+    int nq = (int)(w / (TD5_TG_FLINE_CELL * TD5_TG_FLINE_CELLS_Q) + 0.5);
+    int seg_page = TD5_TG_PAGE_BANNER, seg_nq, n = 0, q;
+
+    if (h->si + 1 >= h->nl->count) return 1;
+    if (nq < 1) nq = 1;
+    if (nq > TD5_TG_FLINE_QMAX) nq = TD5_TG_FLINE_QMAX;
+    if (*h->nmesh >= h->maxmesh) return 1;
+
+    tg_road_edge(h->nl, h->si, TD5_TG_FLINE_F0, 0.0, 1.0,
+                 &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
+    tg_road_edge(h->nl, h->si, TD5_TG_FLINE_F1, 0.0, 1.0,
+                 &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
+
+    for (q = 0; q < nq; q++) {
+        const double t0 = (double)q / (double)nq, t1 = (double)(q + 1) / (double)nq;
+        /* left -> right is t 0 -> 1, on both the near and the far row */
+        px[n] = l0x + (r0x - l0x) * t0; py[n] = l0y + (r0y - l0y) * t0 + TD5_TG_CROSS_LIFT;
+        pz[n] = l0z + (r0z - l0z) * t0; uu[n] = u0; vv[n] = v0; n++;
+        px[n] = l0x + (r0x - l0x) * t1; py[n] = l0y + (r0y - l0y) * t1 + TD5_TG_CROSS_LIFT;
+        pz[n] = l0z + (r0z - l0z) * t1; uu[n] = u1; vv[n] = v0; n++;
+        px[n] = l1x + (r1x - l1x) * t1; py[n] = l1y + (r1y - l1y) * t1 + TD5_TG_CROSS_LIFT;
+        pz[n] = l1z + (r1z - l1z) * t1; uu[n] = u1; vv[n] = v1; n++;
+        px[n] = l1x + (r1x - l1x) * t0; py[n] = l1y + (r1y - l1y) * t0 + TD5_TG_CROSS_LIFT;
+        pz[n] = l1z + (r1z - l1z) * t0; uu[n] = u0; vv[n] = v1; n++;
+    }
+    seg_nq = nq;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    {
+        const size_t d0 = h->blk->len;
+        const int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                         &seg_page, &seg_nq, 1);
+        tg_guard_mark(d0, h->blk->len, TG_GK_DECAL, h->si);
+        return r;
+    }
+}
+
 /* Group E -- track furniture: start/finish banners, branch mouths, run-off.
  * Exactly two gantries per track: one on the grid span and one on the finish
  * span (tg_finish_span, the same span the last LEVELINF checkpoint sits on --
@@ -833,7 +908,11 @@ int tg_emit_fb_track(const TG_FBHook *h)
     h->moff[(*h->nmesh)++] = h->blk->len;
     /* The finish span wins a tie: on a circuit the grid span and the finish can
      * be the same span, and that gantry marks the end of the race. */
-    return tg_emit_gantry(h->nl, h->si, h->blk, h->si == finish);
+    if (!tg_emit_gantry(h->nl, h->si, h->blk, h->si == finish)) return 0;
+    /* [ROUND 1013 F3] the painted line, under the finish banner, GEO only. */
+    if (h->si == finish && td5_geo_loaded() && td5_geo_route_count() >= 2)
+        return tg_emit_finish_line(h);
+    return 1;
 }
 
 int tg_emit_end_wall(const TG_NodeList *nl, int si, int at_far,

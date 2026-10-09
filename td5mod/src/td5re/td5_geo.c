@@ -421,6 +421,9 @@ static struct {
      * better than a growth path nothing exercises. */
     int          xsep_n;
     TD5_GeoXSep  xsep[TD5_GEO_XSEP_MAX];
+    /* [ROUND 1013 F3] span the user's last waypoint landed on, -1 when the file
+     * does not carry one (a route committed before the run-off existed). */
+    int          finish_span;
 } s_route;
 
 /* The engine's span length. Duplicated rather than pulling td5_trackgen.h into
@@ -658,6 +661,20 @@ static int geo_route_load(const char *path)
     }
     s_route.n = n;
     snprintf(s_route.source, sizeof(s_route.source), "%s", path);
+    /* [ROUND 1013 F3] Optional. A value that is not a span of this route (the
+     * grid must fit before it and the road must continue after it) is dropped
+     * and reported, never clamped: a wrong finish is worse than the old one. */
+    s_route.finish_span = -1;
+    {
+        const cJSON *fs = cJSON_GetObjectItem(root, "finish_span");
+        if (fs && cJSON_IsNumber(fs)) {
+            const int v = fs->valueint;
+            if (v > 0 && v < n - 2) s_route.finish_span = v;
+            else TD5_LOG_W(LOG_TAG, "geo: route %s finish_span %d is outside "
+                           "1..%d; ignored (the old RUN-OFF placement applies)",
+                           path, v, n - 3);
+        }
+    }
     ok = 1;
     TD5_LOG_I(LOG_TAG, "geo: route %s loaded: %d nodes (%d spans, %.2f km at "
               "the conditioner's scale)", path, n, n - 1,
@@ -710,6 +727,11 @@ const char *td5_geo_route_name_by_id(int id)
 const char *td5_geo_route_name(int i)
 {
     return td5_geo_route_name_by_id(td5_geo_route_name_id(i));
+}
+
+int td5_geo_route_finish_span(void)
+{
+    return s_route.n ? s_route.finish_span : -1;
 }
 
 int td5_geo_xsep_count(void) { return s_route.n ? s_route.xsep_n : 0; }
@@ -972,6 +994,14 @@ int td5_geo_preview_route(const char *slug)
     if (!pts || !cJSON_IsArray(pts) || (total = cJSON_GetArraySize(pts)) < 2) {
         cJSON_Delete(root);
         return 0;
+    }
+    /* [ROUND 1013 F3] The strip runs past the finish (the run-off), but the map
+     * shows the ROUTE: stop at the finish span so the finish marker sits on the
+     * line and not 350 m beyond it. An old file has no key and is unchanged. */
+    {
+        const cJSON *fs = cJSON_GetObjectItem(root, "finish_span");
+        if (fs && cJSON_IsNumber(fs) && fs->valueint > 1 && fs->valueint + 1 < total)
+            total = fs->valueint + 1;
     }
     /* Keep the LAST node whatever the stride, so the finish marker lands on the
      * real end of the route rather than wherever the decimation happened to stop. */

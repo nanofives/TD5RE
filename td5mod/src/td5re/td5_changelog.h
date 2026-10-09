@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: a proper finish line)" },
+    { CL_ITEM,    "A real route now ends under a FINISH banner with" },
+    { CL_ITEM,    "  a chequered line painted across the road" },
+    { CL_ITEM,    "The road carries on ~350 m past the line, so cars" },
+    { CL_ITEM,    "  cross it at speed and coast to a stop" },
+    { CL_ITEM,    "That run-off is the real street that continues" },
+    { CL_ITEM,    "  past your last point, not an invented straight" },
+    { CL_ITEM,    "Fixed: a route could finish behind the end wall," },
+    { CL_ITEM,    "  so the race never ended and cars piled up" },
+    { CL_ITEM,    "Press BUILD again to give an old route its run-off" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: avenues and squares)" },
     { CL_ITEM,    "A real divided avenue is now divided for its" },
     { CL_ITEM,    "  WHOLE length, not just one block of it" },
