@@ -293,6 +293,12 @@ ROAD_TAG_KEYS = (
     "lanes", "lanes:forward", "lanes:backward", "width", "surface",
     "smoothness", "tracktype", "maxspeed", "oneway", "junction", "roundabout",
     "sidewalk", "sidewalk:left", "sidewalk:right", "footway", "crossing",
+    # [ROUND 1011 C2] the MEASURED per-side pavement width. Zero ways carry any
+    # of these on the La Plata cache, so keeping them changes nothing there --
+    # they are here so that a place which DOES tag a width gets the real number
+    # instead of the frontage rule, and so the reader has something to read.
+    "sidewalk:width", "sidewalk:both:width",
+    "sidewalk:left:width", "sidewalk:right:width",
     "lit", "incline", "bridge", "bridge:structure", "tunnel", "covered",
     "layer", "access", "service", "motor_vehicle", "area", "lane_markings",
     "dual_carriageway", "divider", "destination", "destination:street",

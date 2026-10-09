@@ -16,6 +16,7 @@ td5_geo_footways.c
 td5_tg_geo_street.c
 td5_geo_forks.c
 td5_geo_avenues.c
+td5_geo_sidewalk.c
 td5_geo_route.c
 td5_geo_tiles.c
 td5_trackgen.c

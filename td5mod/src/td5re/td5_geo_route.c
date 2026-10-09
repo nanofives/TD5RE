@@ -50,6 +50,8 @@
 #include "td5_config.h"
 #include "td5_geo.h"
 #include "td5_geo_route.h"
+#include "td5_geo_roads.h"       /* [1011 C2] the shared name classifier   */
+#include "td5_geo_sidewalk.h"    /* [1011 C2] the per-place carriageway    */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -593,6 +595,9 @@ static int gr_graph_load(const char *slug)
                   "has no usable projection", slug);
         return 0;
     }
+    /* [1011 C2] Select the place's own table BEFORE any way is sized: the
+     * carriageway lookup below reads it per road. Idempotent. */
+    td5_geo_sw_place(slug);
     td5_geo_source_path(path, sizeof path, slug, "ROADS.JSON");   /* SOURCE */
     json = gr_slurp(path, NULL);
     if (!json) {
@@ -682,12 +687,82 @@ static int gr_graph_load(const char *slug)
         if (out->count < 1) { s_g.n_pts = out->first; continue; }
 
         out->cost   = gr_class_cost(cl && cJSON_IsString(cl) ? cl->valuestring : NULL);
-        /* geo_route.py reads the RAW `lanes` field: `int(r.get("lanes") or 2)`.
-         * It does NOT re-derive one from the tagged `width` the way
-         * td5_geo_roads.c does for the street network, and the difference is
-         * visible -- the lane count becomes the conditioner's road width and
-         * therefore its curvature limit. Parity wins here. */
+        /* [ROUND 1011 C2] THE CARRIAGEWAY IS THE REAL ONE, AND PARITY LOSES.
+         *
+         * What stood here, and why it is no longer right: "geo_route.py reads
+         * the RAW `lanes` field: int(r.get('lanes') or 2). It does NOT
+         * re-derive one from the tagged `width` ... Parity wins here."
+         *
+         * That parity produced a 7 m road everywhere, because OSM tags `lanes`
+         * on 2064 of La Plata's 2291 ways as 2 and tags `width` on only 50.
+         * The city's calles are 10 m -- 34 of the 37 measured ones say exactly
+         * "10". So the generated street was 3 m too narrow, which is both the
+         * reported "streets seem too narrow" AND the reason the building-line
+         * rule had 11 m of slack to hand the pavement. One wrong number, two
+         * symptoms, and parity with a retired Python path is not worth either.
+         *
+         * Order: a TAGGED width is a measurement and wins; else the place's own
+         * carriageway for this street KIND (by name, the same classifier the
+         * pavement reader uses, so the two cannot disagree); else the `lanes`
+         * field exactly as before. A place with no table keeps the old answer
+         * on every way, so this is La Plata-shaped, not a global change.
+         *
+         * THE LANE COUNT IS THE KNOB, NOT THE LANE WIDTH:
+         * TD5_TG_SPAN_LENGTH == TD5_TG_LANE_WIDTH is an engine invariant (a
+         * street's frontage run is an integer number of lanes), so 10 m becomes
+         * round(10 * upm / 1500) = 3 lanes = 10.47 m rather than 2 wide ones.
+         *
+         * CONSEQUENCES, stated because they are not local: the lane count is
+         * the conditioner's road width and therefore its CURVATURE LIMIT, so a
+         * route that converged at 2 lanes may converge differently at 3, and
+         * every cached _route/ is invalidated. TD5RE_GEO_REAL_CARRIAGEWAY=0
+         * restores the raw `lanes` field for an A/B. */
         out->lanes  = (la && cJSON_IsNumber(la) && la->valueint != 0) ? la->valueint : 2;
+        if (td5_env_flag_on("TD5RE_GEO_REAL_CARRIAGEWAY")) {
+            const int    nk = td5_geo_roads_namek_of(
+                                  (nm && cJSON_IsString(nm)) ? nm->valuestring : NULL);
+            const cJSON *wd = r ? cJSON_GetObjectItem(r, "width") : NULL;
+            double m = 0.0;
+            if (wd && cJSON_IsString(wd) && wd->valuestring[0]) {
+                char *end = NULL;
+                const double v = strtod(wd->valuestring, &end);
+                if (end != wd->valuestring && v > 0.5 && v < 120.0) m = v;
+            } else if (wd && cJSON_IsNumber(wd)
+                       && wd->valuedouble > 0.5 && wd->valuedouble < 120.0) {
+                m = wd->valuedouble;
+            }
+            if (m > 0.0 && s_g.proj.upm > 0.0) {
+                /* A TAGGED width is a measurement of this way: it wins
+                 * outright, in both directions. */
+                const int lanes = (int)floor(m * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
+                if (lanes >= 1 && lanes <= GR_MAX_LANES) out->lanes = lanes;
+            } else if (s_g.proj.upm > 0.0) {
+                /* THE PLACE TABLE IS A FLOOR, NEVER A CEILING.
+                 *
+                 * `lanes_src` says where the lane count came from, and the
+                 * distinction is the whole point: `osm_lanes` means a mapper
+                 * COUNTED them (950 of La Plata's 2291 ways), `highway_class`
+                 * means geo_fetch defaulted it (1341). Overriding a counted
+                 * count with a city-wide default is how a real four-lane
+                 * avenue gets narrowed to three -- measured, it would have hit
+                 * 22 ways at 4 lanes and one at 5.
+                 *
+                 * But a counted LANE number is not a carriageway either: a La
+                 * Plata calle tagged lanes=2 still has 10 m of asphalt, two
+                 * traffic lanes plus parking both sides (760 ways). So the
+                 * table raises a counted road to the city's carriageway and
+                 * never lowers it, while an uncounted one simply takes it. */
+                const double tm = td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN, nk);
+                const cJSON *ls = r ? cJSON_GetObjectItem(r, "lanes_src") : NULL;
+                const int counted = ls && cJSON_IsString(ls) && ls->valuestring
+                                 && strcmp(ls->valuestring, "osm_lanes") == 0;
+                if (tm > 0.0) {
+                    int lanes = (int)floor(tm * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
+                    if (counted && lanes < out->lanes) lanes = out->lanes;
+                    if (lanes >= 1 && lanes <= GR_MAX_LANES) out->lanes = lanes;
+                }
+            }
+        }
         out->oneway = (ow && cJSON_IsBool(ow)) ? (cJSON_IsTrue(ow) ? 1 : 0) : 0;
         /* [ROUND 1010 AVENUES] see GrRoad.ring. The field is null on all but 73
          * of La Plata's ways, so a missing/!string value is simply "not a
@@ -4424,6 +4499,17 @@ static void gr_self_test(int level)
            gr_lead_in_nodes(), GR_LEAD_IN_SYNTH);
     gr_test_fixture("re/tools/geo_fixtures/la_plata_route_raw.json", 0);
     gr_test_fixture("re/tools/geo_fixtures/figure8_route_raw.json", 1);
+    {   /* [ROUND 1011 C2] An EXTRA fixture named by the environment.
+         *
+         * The two above are the PARITY BASELINE -- they are exactly what the
+         * Python wrote and a diff against the committed _ROUTE.json is the
+         * check they exist for, so neither may be edited to ask a new
+         * question. The carriageway change needs a different one asked over a
+         * REAL saved route ("does it still converge, and at how many spans"),
+         * and this is how to ask it without touching either. */
+        const char *extra = getenv("TD5RE_GEO_ROUTE_TEST_FIXTURE");
+        if (extra && extra[0]) gr_test_fixture(extra, 1);
+    }
     if (level >= 2) gr_test_route_live(level);
     printf("\n=== end ===\n");
     fflush(stdout);
