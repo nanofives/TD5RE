@@ -731,10 +731,36 @@ static int gr_graph_load(const char *slug)
                        && wd->valuedouble > 0.5 && wd->valuedouble < 120.0) {
                 m = wd->valuedouble;
             }
-            if (m <= 0.0) m = td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN, nk);
             if (m > 0.0 && s_g.proj.upm > 0.0) {
+                /* A TAGGED width is a measurement of this way: it wins
+                 * outright, in both directions. */
                 const int lanes = (int)floor(m * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
                 if (lanes >= 1 && lanes <= GR_MAX_LANES) out->lanes = lanes;
+            } else if (s_g.proj.upm > 0.0) {
+                /* THE PLACE TABLE IS A FLOOR, NEVER A CEILING.
+                 *
+                 * `lanes_src` says where the lane count came from, and the
+                 * distinction is the whole point: `osm_lanes` means a mapper
+                 * COUNTED them (950 of La Plata's 2291 ways), `highway_class`
+                 * means geo_fetch defaulted it (1341). Overriding a counted
+                 * count with a city-wide default is how a real four-lane
+                 * avenue gets narrowed to three -- measured, it would have hit
+                 * 22 ways at 4 lanes and one at 5.
+                 *
+                 * But a counted LANE number is not a carriageway either: a La
+                 * Plata calle tagged lanes=2 still has 10 m of asphalt, two
+                 * traffic lanes plus parking both sides (760 ways). So the
+                 * table raises a counted road to the city's carriageway and
+                 * never lowers it, while an uncounted one simply takes it. */
+                const double tm = td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN, nk);
+                const cJSON *ls = r ? cJSON_GetObjectItem(r, "lanes_src") : NULL;
+                const int counted = ls && cJSON_IsString(ls) && ls->valuestring
+                                 && strcmp(ls->valuestring, "osm_lanes") == 0;
+                if (tm > 0.0) {
+                    int lanes = (int)floor(tm * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
+                    if (counted && lanes < out->lanes) lanes = out->lanes;
+                    if (lanes >= 1 && lanes <= GR_MAX_LANES) out->lanes = lanes;
+                }
             }
         }
         out->oneway = (ow && cJSON_IsBool(ow)) ? (cJSON_IsTrue(ow) ? 1 : 0) : 0;
