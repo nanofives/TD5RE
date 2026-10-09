@@ -69,7 +69,7 @@ typedef struct {
     int    surface;
 } TG_NetEdge;
 
-typedef struct { short edge; float skew, reach; } TG_NetMouth;
+typedef struct { short edge; float skew, reach, shift; } TG_NetMouth;   /* shift: [1014 B] origin offset past the race kerb */
 
 static TG_NetNode  s_nodes[TG_NET_MAX_NODES];
 static TG_NetEdge  s_edges[TG_NET_MAX_EDGES];
@@ -115,6 +115,37 @@ static void tg_net_paint_edge(const TG_NetEdge *e, unsigned bits)
                          e->width * 0.5, bits);
 }
 
+/* [1014 B item 8] WHERE A STREET LEAVES A DIVIDED AVENUE.
+ *
+ * Every street mouth used to start at the RACE kerb. On the avenue's own side
+ * that is the kerb at the median, so a real street that crosses a divided
+ * avenue (Calle 22 across Diagonal 73) could only ever be drawn on the race
+ * carriageway's side: the far half starts at the OTHER carriageway's outer
+ * kerb, 4.6 m + 1 lane further out, and was refused as "corridor" (the fork's
+ * window covers every opening, by design) or "short" (the connector between the
+ * two carriageways is 3000 units). The far-side street is the same street, so
+ * its origin is simply the outermost tarmac on that side: carriageway reach
+ * minus the race half width. 0 off an avenue, so every other street starts
+ * where it always did. GEO ONLY (callers are the geo placement). */
+static double tg_net_far_shift(const TG_NodeList *nl, int si, double sg)
+{
+    double r, hw;
+    if (!td5_env_flag_on("TD5RE_GEO_FAR_STREETS")) return 0.0;
+    if (!nl || si < 0 || si + 1 >= nl->count) return 0.0;
+    if (tg_geo_avenue_n() < 1) return 0.0;
+    r  = tg_geo_avenue_reach(nl, si, sg);
+    hw = tg_road_half_width(nl, si);
+    return (r - hw > 1.0) ? (r - hw) : 0.0;
+}
+
+double tg_net_mouth_shift(int si, int left)
+{
+    const TG_NetMouth *m;
+    if (!s_net_built || si < 0 || si >= TD5_TG_MAX_SPANS + 8) return 0.0;
+    m = &s_mouth[si][left ? 0 : 1];
+    return (m->edge >= 0) ? (double)m->shift : 0.0;
+}
+
 static void tg_net_set_mouth(int lo, int hi, int left, int edge, double skew, double reach)
 {
     int s;
@@ -123,6 +154,7 @@ static void tg_net_set_mouth(int lo, int hi, int left, int edge, double skew, do
         s_mouth[s][left ? 0 : 1].edge  = (short)edge;
         s_mouth[s][left ? 0 : 1].skew  = (float)skew;
         s_mouth[s][left ? 0 : 1].reach = (float)reach;
+        s_mouth[s][left ? 0 : 1].shift = 0.0f;
     }
 }
 
@@ -664,6 +696,7 @@ typedef struct {
     int    si, left, lanes, road, klass;
     int    surface;         /* TD5_GEO_SURF_* of the real way this arm is   */
     double skew, want;
+    double shift;           /* [1014 B] origin offset past the race kerb     */
 } TG_GeoArm;
 
 typedef struct {
@@ -679,7 +712,7 @@ static int       s_gna;
 static double    s_gcd[TD5_TG_MAX_SPANS / TG_GEO_COARSE + 2];
 
 static struct {
-    long ways, inbox, route, cand, street, avenue, cont, under, depart;
+    long ways, inbox, route, cand, street, avenue, cont, under, depart, beyond;
     long d_grid, d_struct, d_biome, d_park, d_corridor, d_skew,
          d_short, d_taken, d_fold, d_full, d_under;
     long why_road, why_street, why_water;
@@ -715,6 +748,9 @@ static const char *const k_gd_name[TG_GD_N] = {
  * about from the log. */
 static void tg_geo_drop_note(int si, int left, int why, double arg)
 {
+    if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO DROP] si %d %s %s %.0f", si,
+                  left ? "left" : "right", k_gd_name[why], arg);
     if (s_gdropn >= TG_GEO_DROP_MAX) return;
     s_gdrop[s_gdropn].si   = (short)si;
     s_gdrop[s_gdropn].left = (unsigned char)(left ? 1 : 0);
@@ -1042,8 +1078,8 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
                             double dx, double dz, int k0, int step,
                             double skewmax)
 {
-    double e[10], skew, run, kerb;
-    int left;
+    double e[10], skew, run, kerb, fshift;
+    int left, si_m;
     const TG_Biome *b;
 
     /* Which kerb: the outward normal of the LEFT side, dotted with the arm. */
@@ -1053,6 +1089,11 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
 
     skew = tg_geo_skew_of(e[6], e[7], dx, dz);
     s_gs.cand++;
+    if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO ARM] way %d (lanes %d) si %d %s junction (%.0f,%.0f) "
+                  "dir (%.2f,%.2f) skew %.0f deg k0 %d step %d%s",
+                  ridx, rd->lanes, h->si, left ? "left" : "right", h->x, h->z, dx, dz,
+                  skew * 180.0 / TD5_TG_PI, k0, step, h->kbwd < 0 ? " T" : "");
     if (fabs(skew) > skewmax) {
         s_gs.d_skew++; tg_geo_drop_note(h->si, left, TG_GD_SKEW, fabs(skew) * 180.0 / TD5_TG_PI); return;
     }
@@ -1061,14 +1102,52 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
      * the real road's bearing) and then shortened to start at the kerb, which
      * is where the drawn quad starts. */
     run  = tg_geo_straight_run(rd, k0, step, h->x, h->z, dx, dz);
-    kerb = (e[0] - h->x) * dx + (e[2] - h->z) * dz;
+    /* [1014 B item 8] the street's origin is the outermost tarmac on its side:
+     * on a divided avenue that is the FAR carriageway's kerb, not the race one.
+     *
+     * And the MOUTH SPAN moves with it. The hit is found at the junction on the
+     * OTHER carriageway's centre line (a T) or on the race one, but a street
+     * crossing at 45 degrees reaches the far kerb a whole carriageway further
+     * ALONG the road than it was found, so the span that owns the mouth is the
+     * one nearest where the street's centre line meets the far kerb -- measured
+     * on this arm's own bearing, not guessed. Without this the far half of a
+     * street was drawn 2300 units (three spans) off its real line. */
+    si_m   = h->si;
+    fshift = tg_net_far_shift(nl, si_m, left ? 1.0 : -1.0);
+    if (fshift > 0.0 && s_net_nspans > 2) {
+        const double sgn = left ? 1.0 : -1.0;
+        const TG_Node *nn = &nl->v[si_m];
+        const double dl = dx * nn->tz - dz * nn->tx;       /* lateral share of the arm */
+        if (fabs(dl) > 0.2) {
+            double latj, alj, t, jx, jz;
+            int ni;
+            tg_geo_lat(nl, si_m, h->x, h->z, &latj, &alj);
+            t = (sgn * (tg_road_half_width(nl, si_m) + fshift) - latj) / dl;
+            if (t > -3.0 * (double)TD5_TG_SPAN_LENGTH * 4.0 && t < 6.0 * (double)TD5_TG_SPAN_LENGTH * 4.0) {
+                jx = h->x + dx * t; jz = h->z + dz * t;
+                ni = tg_geo_nearest(nl, s_net_nspans, jx, jz);
+                if (ni > 0 && ni + 1 < nl->count && ni != si_m) {
+                    const double f2 = tg_net_far_shift(nl, ni, sgn);
+                    if (f2 > 0.0) { si_m = ni; fshift = f2; }
+                }
+            }
+        }
+        if (si_m != h->si) {
+            tg_city_edge_frame(nl, si_m, left ? 1.0 : -1.0, e);
+            skew = tg_geo_skew_of(e[6], e[7], dx, dz);
+        }
+    }
+    kerb = (e[0] + e[6] * fshift - h->x) * dx + (e[2] + e[7] * fshift - h->z) * dz;
     if (kerb < 0.0) kerb = 0.0;
     run -= kerb;
+    if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO ARM]   way %d si %d->%d %s run-from-kerb %.0f (kerb %.0f, shift %.0f)",
+                  ridx, h->si, si_m, left ? "left" : "right", run, kerb, fshift);
     if (run < TD5_TG_R8_CLAMP_MIN) {
-        s_gs.d_short++; tg_geo_drop_note(h->si, left, TG_GD_SHORT, run); return;
+        s_gs.d_short++; tg_geo_drop_note(si_m, left, TG_GD_SHORT, run); return;
     }
 
-    b = &k_biomes[tg_scenery_biome_index(h->si)];
+    b = &k_biomes[tg_scenery_biome_index(si_m)];
     {
         double cap = tg_city_crossst_reach(b, tg_city_sidewalk_w(b));
         /* [ROUND 1009 item 6] see TG_GEO_DEPTH_MAX. The real road's own
@@ -1081,9 +1160,10 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
     if (s_gna >= TG_GEO_MAX_ARMS) { s_gs.d_full++; return; }
     {
         TG_GeoArm *a = &s_garm[s_gna++];
-        a->si = h->si; a->left = left; a->lanes = rd->lanes;
+        a->si = si_m; a->left = left; a->lanes = rd->lanes;
         a->road = ridx; a->klass = rd->klass;
         a->skew = skew; a->want = run;
+        a->shift = fshift;
         a->surface = rd->surface;
     }
 }
@@ -1092,7 +1172,8 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
  * Each failure is COUNTED, never silent -- that is the whole point of sourcing
  * candidates from data nobody conditioned for this engine. */
 static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
-                              int si, int left, int run, int *lo_out, int *hi_out)
+                              int si, int left, int run, double fshift,
+                              int *lo_out, int *hi_out)
 {
     const double sg = left ? 1.0 : -1.0;
     const int lo = si - (run - 1) / 2, hi = lo + run - 1;
@@ -1119,7 +1200,9 @@ static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
             return (s_gs.d_biome++, tg_geo_drop_note(si, left, TG_GD_BIOME, 0.0), 0);
         if (tg_block_is_park(s, left))
             return (s_gs.d_park++, tg_geo_drop_note(si, left, TG_GD_PARK, 0.0), 0);
-        if (tg_side_corridor_here(nl, s, sg))
+        /* A street that starts at the OUTER kerb of the avenue (fshift > 0)
+         * leaves from beyond the corridor, so the corridor cannot be in its way. */
+        if (!(fshift > 0.0) && tg_side_corridor_here(nl, s, sg))
             return (s_gs.d_corridor++, tg_geo_drop_note(si, left, TG_GD_CORRIDOR, 0.0), 0);
         /* Inside the carriageway is what a second mouth on one (span,side)
          * amounts to: the table is single-valued and the emitters would draw
@@ -1247,10 +1330,14 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
 
         if (run < 1) run = 1;
         if (run > TG_GEO_MOUTH_SPANS) run = TG_GEO_MOUTH_SPANS;
-        if (!tg_geo_span_run_ok(nl, nspans, a->si, a->left, run, &lo, &hi)) continue;
+        if (!tg_geo_span_run_ok(nl, nspans, a->si, a->left, run, a->shift, &lo, &hi)) continue;
 
         width = (double)(hi - lo + 1) * (double)TD5_TG_LANE_WIDTH;
         tg_city_edge_frame(nl, a->si, sg, e);
+        if (a->shift > 0.0) {            /* [1014 B item 8] start at the far kerb */
+            e[0] += e[6] * a->shift;  e[2] += e[7] * a->shift;
+            e[3] += e[8] * a->shift;  e[5] += e[9] * a->shift;
+        }
         {
             const double cs = cos(a->skew), sn = sin(a->skew);
             ox = e[6] * cs - e[7] * sn;
@@ -1290,6 +1377,18 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         ed->surface = a->surface;
         tg_net_paint_edge(ed, TG_WO_STREET);
         tg_net_set_mouth(lo, hi, a->left, (int)(ed - s_edges), a->skew, reach);
+        if (a->shift > 0.0) {
+            int ms;
+            for (ms = lo; ms <= hi; ms++) {
+                /* each span's own shift: the avenue gap changes along the road */
+                const double sh = tg_net_far_shift(nl, ms, sg);
+                s_mouth[ms][a->left ? 0 : 1].shift = (float)(sh > 0.0 ? sh : a->shift);
+            }
+            s_gs.beyond++;
+        }
+        if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO PLACED] si %d %s run %d..%d reach %.0f kind %d",
+                      a->si, a->left ? "left" : "right", lo, hi, reach, kind);
         if (kind == TG_NE_AVENUE)            s_gs.avenue++;
         else if (kind == TG_NE_CONTINUATION) s_gs.cont++;
         else                                 s_gs.street++;
@@ -1313,13 +1412,13 @@ static void tg_net_geo_census(void)
               "%ld way(s), %ld near the route, %ld are the route itself; "
               "%ld junction arm(s) considered, %ld accepted "
               "(street %ld avenue %ld continuation %ld), %ld real deck(s), "
-              "%ld shared-carriageway departure(s); "
+              "%ld shared-carriageway departure(s), %ld street(s) start beyond an avenue; "
               "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
               "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
               "table-full %ld; march stops: road %ld street %ld water/steep %ld",
               td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
               s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
-              s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart,
+              s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart, s_gs.beyond,
               s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
@@ -1357,6 +1456,7 @@ void tg_network_reset(void)
         s_mouth[s][0].edge = s_mouth[s][1].edge = -1;
         s_mouth[s][0].skew = s_mouth[s][1].skew = 0.0f;
         s_mouth[s][0].reach = s_mouth[s][1].reach = 0.0f;
+        s_mouth[s][0].shift = s_mouth[s][1].shift = 0.0f;
     }
 }
 

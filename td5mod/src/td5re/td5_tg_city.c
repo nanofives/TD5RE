@@ -4023,6 +4023,9 @@ int tg_side_blocked(int si, double side)
  * TD5RE_R9_CITY_ARM_MEASURED=0 restores the blanket gate for an A/B. */
 int tg_side_corridor_here(const TG_NodeList *nl, int si, double side)
 {
+    /* [1014 B item 8] a street that starts beyond the avenue is clear of the
+     * corridor by construction (the network refused every other one). */
+    if (tg_net_mouth_shift(si, side > 0.0) > 0.0) return 0;
     if (!td5_env_flag_on("TD5RE_R9_CITY_ARM_MEASURED"))
         return tg_side_blocked(si, side);
     if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return 0;
@@ -4443,6 +4446,21 @@ void tg_city_edge_frame(const TG_NodeList *nl, int si, double sg,
         out[0] = nrx; out[1] = nry; out[2] = nrz;
         out[3] = frx; out[4] = fry; out[5] = frz;
         out[6] = -nux; out[7] = -nuz; out[8] = -fux; out[9] = -fuz;
+    }
+    /* [1014 B item 8] A street mouth on a DIVIDED AVENUE's own side leaves from
+     * the far carriageway's outer kerb, not the race kerb. The network records
+     * that offset per (span, side); every emitter that lays a street, its
+     * pavement arms, its flanks or its reveal building reads this frame, so
+     * moving the frame moves them together. 0 everywhere else (no mouth, no
+     * avenue, any synthetic build), so no other span sees a different frame. */
+    {
+        const double s0 = tg_net_mouth_shift(si, sg > 0.0);
+        if (s0 > 0.0) {
+            const double s1n = tg_net_mouth_shift(si + 1, sg > 0.0);
+            const double s1  = (s1n > 0.0) ? s1n : s0;
+            out[0] += out[6] * s0;  out[2] += out[7] * s0;
+            out[3] += out[8] * s1;  out[5] += out[9] * s1;
+        }
     }
 }
 
@@ -5516,6 +5534,7 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                 !tg_facade_built(h->si, s) && !tg_block_is_park(h->si, s))
                 set = tg_xstreet_reach_at(h->nl, h->si, sg,
                                           tg_block_arm_skew(h->si, s), b, sw)
+                    + tg_net_mouth_shift(h->si, s)
                     + TD5_TG_BACKROW_GAP
                     + (tg_facade_depth(b) + TD5_TG_BACKROW_GAP) * (double)r
                     + (double)(rh % 1800u);
@@ -5549,6 +5568,7 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                                       tg_city_side_base(h->si, s, sw));
                 const double term = tg_xstreet_reach_at(h->nl, h->si, sg,
                                         tg_block_arm_skew(h->si, s), b, sw)
+                                  + tg_net_mouth_shift(h->si, s)
                                   + (pw > 0.0 ? pw : sw);
                 if (term < set) { set = term; s_r15_backrow_close++; }
             }
