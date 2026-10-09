@@ -2093,6 +2093,27 @@ typedef struct {
  * interrupts a carriageway at a junction, and ending the avenue at the first
  * such gap would cut a long one in half at its first crossing. */
 #define GR_AV_MAX_MISS         4
+/* [ROUND 1013 F1] How many spans the chain may walk BEFORE IT HAS A SEED while
+ * it looks for the first span that agrees with the run the detector scored.
+ *
+ * ROOT CAUSE of "after the plaza the avenue was rendering only one lane".
+ * Mariano's second Diagonal 73 run (spans 335..591) starts at the plaza's exit
+ * mouth, where the two carriageways are still splayed out of the ring: span 335
+ * measures 19.30 m between them against the 11.7 m the run settles at. That is
+ * outside the seed cap (1728 u = 4.0 m around the mean) AND outside the band,
+ * so the first span was refused -- and an UNSEEDED chain gave up at its first
+ * refusal (`seeded && ++miss`), where a SEEDED one is allowed GR_AV_MAX_MISS.
+ * Zero spans sampled, 899 m of avenue dropped, one carriageway built.
+ *
+ * The run's END has the mirror-image flare (Diagonal 73's first run loses spans
+ * 256..260 to it) and was already handled, because by then the chain is seeded
+ * and the refused spans simply carry no row. This gives the START the same
+ * treatment: the flared spans carry no row either, and the avenue begins at the
+ * first span that does agree. 24 spans is 84 m, about three quarters of a La
+ * Plata block; a run whose first block never agrees with its own scored
+ * spacing is not a run this detector measured, so the scan stops there and the
+ * avenue is still refused honestly. */
+#define GR_AV_SEED_SCAN       24
 /* [ROUND 1012 D2] How far outside the band THE DETECTOR SCORED the per-span
  * chain may wander, on top of that band's own width.
  *
@@ -2117,6 +2138,19 @@ typedef struct {
  * avenida/diagonal gets, in tenths. See gr_mark_divided_carriageways for the
  * measurement that picked it; TD5RE_GEO_AVENUE_WIDE_X10 overrides for an A/B. */
 #define GR_AV_WIDE_X10        20
+
+/* [ROUND 1013 F1] A span of the per-span chain was refused. May the chain walk
+ * on past it? SEEDED: up to GR_AV_MAX_MISS consecutive refusals (an
+ * intersection's width). UNSEEDED: up to GR_AV_SEED_SCAN, so a run that starts
+ * in a plaza's splayed exit still finds its first agreeing span. */
+static int gr_av_gap_continue(int seeded, int *miss, int *scan)
+{
+    if (seeded) return ++*miss <= GR_AV_MAX_MISS;
+    /* TD5RE_GEO_AVENUE_SEED_SCAN=0 pins the round-1012 answer (give up at the
+     * first refusal before the seed) for a single-variable A/B. */
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_SEED_SCAN")) return 0;
+    return ++*scan <= GR_AV_SEED_SCAN;
+}
 
 /* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
  * convention gr_heading uses. */
@@ -3514,7 +3548,8 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                          - GR_AV_BAND_SLACK;
                     const double band_hi = med[j].gap_max_m * GR_UNITS_PER_METRE
                                          + GR_AV_BAND_SLACK;
-                    int miss = 0, seeded = 0, last_ok = s0 - 1;
+                    int miss = 0, seed_scan = 0, seeded = 0;
+                    int first_ok = -1, last_ok = s0 - 1;
                     for (s = s0; !why && s <= s1 &&
                                  s_last.n_av_span < GR_AV_MAX_SPANS; s++) {
                         double f = (spans1 > lead1)
@@ -3561,7 +3596,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                               : 0.0,
                                           got ? fabs(fabs(raw_off) - prev) : 0.0);
                             }
-                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            if (gr_av_gap_continue(seeded, &miss, &seed_scan)) continue;
                             break;
                         }
                         /* THE TWO CARRIAGEWAYS MUST NOT OVERLAP. The gap has to
@@ -3584,7 +3619,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                           band_lo, band_hi,
                                           band_lo / GR_UNITS_PER_METRE,
                                           band_hi / GR_UNITS_PER_METRE);
-                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            if (gr_av_gap_continue(seeded, &miss, &seed_scan)) continue;
                             break;
                         }
                         half = ((s < c->nodes && c->lanes_out)
@@ -3601,7 +3636,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                                           a / GR_UNITS_PER_METRE, half,
                                           (double)plan * GR_LANE_WIDTH * 0.5,
                                           plan, GR_AV_MIN_MEDIAN, seeded);
-                            if (seeded && ++miss <= GR_AV_MAX_MISS) continue;
+                            if (gr_av_gap_continue(seeded, &miss, &seed_scan)) continue;
                             break;
                         }
                         if (gr_av_probe())
@@ -3616,6 +3651,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         prev_way = hit_way;
                         miss    = 0;
                         seeded  = 1;
+                        if (first_ok < 0) first_ok = s;
                         last_ok = s;
                         g = &s_last.av_span[s_last.n_av_span++];
                         g->av    = s_last.n_av;
@@ -3634,6 +3670,16 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                     if (!why && kept < GR_AV_MIN_SPANS)
                         why = "the opposite carriageway is mapped over too few "
                               "of its spans";
+                    /* [ROUND 1013 F1] ... and by the unsampled flare in front
+                     * of the first span that agreed. */
+                    if (!why && first_ok > s0) {
+                        TD5_LOG_I(LOG_TAG, "geo route: avenue %s starts at span "
+                                  "%d, not the detector's %d: %d span(s) of "
+                                  "plaza mouth carry no opposite carriageway "
+                                  "that agrees with the run", med[j].name,
+                                  first_ok, s0, first_ok - s0);
+                        s0 = first_ok;
+                    }
                     if (why) {
                         s_last.n_av_span = base;
                         TD5_LOG_I(LOG_TAG, "geo route: avenue %s (%.0f m, spans "
