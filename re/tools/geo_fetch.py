@@ -2076,6 +2076,28 @@ XB_OB_MIN_M = 2.0
 # Above the dataset's own ceiling ("height relative to the terrain in range
 # [0m, 100m]") a value is an artefact.
 XB_OB_MAX_M = 100.0
+# `footprint_src` spellings. Short because the field is on ~90k records.
+XB_DATASET_SHORT = {
+    "Google Open Buildings": "google",
+    "Microsoft ML Buildings": "microsoft",
+    "OpenStreetMap": "osm",
+    "Esri Community Maps": "esri",
+}
+# Keys an Overture record may DROP when they hold the reader's default (None /
+# False / 0): every reader uses .get() / cJSON_GetObjectItem, which see a
+# missing key exactly as that default. OSM records keep the full schema.
+XB_DEFAULT_DROP = ("name", "part", "landmark", "landmark_src", "layer",
+                   "roof_shape", "roof_height_m", "min_height_m", "levels",
+                   "colour", "roof_colour", "material", "roof_material",
+                   "ob_samples")
+
+
+def _xb_compact(b: dict) -> dict:
+    """An Overture record as written: default-valued keys dropped."""
+    if not str(b.get("footprint_src", "")).startswith("overture"):
+        return b
+    return {k: v for k, v in b.items()
+            if not (k in XB_DEFAULT_DROP and not v)}
 
 
 def _xb_numeric_id(gers: str) -> int:
@@ -2248,7 +2270,9 @@ def conflate_extra_buildings(vec: dict, proj: LocalProjection, out: str,
                 wpts = []
                 for lo, la in ring:
                     x, z = proj.to_world(la, lo)
-                    wpts.append({"x": round(x, 1), "z": round(z, 1)})
+                    # Whole world units (2.3 mm at 430/m): the decimals
+                    # were 2.5 MB of BUILDINGS.JSON for nothing.
+                    wpts.append({"x": int(round(x)), "z": int(round(z))})
                 gid = r.get("id") or ""
                 rec = {
                     "id": _xb_numeric_id(gid + ("#%d" % k if k else "")),
@@ -2259,7 +2283,8 @@ def conflate_extra_buildings(vec: dict, proj: LocalProjection, out: str,
                     "area_m2": round(m.area, 1),
                     "height_m": round(src[0], 2) if src else None,
                     "height_src": src[1] if src else None,
-                    "footprint_src": "overture:" + ds,
+                    "footprint_src": "overture:" + XB_DATASET_SHORT.get(
+                        ds, ds),
                     "roof_shape": r.get("roof_shape"),
                     "roof_height_m": ("%g" % r["roof_height"]
                                       if r.get("roof_height") else None),
@@ -2556,10 +2581,22 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
                {"footways": vec["footways"]})
     bdoc = {"buildings": vec["buildings"], "storey_height_m": STOREY_HEIGHT_M,
             "height_provenance": bh}
-    if xb_stats is not None:
+    if xb_stats is None:
+        write_json(os.path.join(out, "BUILDINGS.JSON"), bdoc)
+    else:
         # Optional, additive: every reader that predates round 1012 ignores it.
         bdoc["conflation"] = xb_stats
-    write_json(os.path.join(out, "BUILDINGS.JSON"), bdoc)
+        bdoc["buildings"] = [_xb_compact(b) for b in vec["buildings"]]
+        # COMPACT, not indent=1: 90k records pretty-printed were 84 MB, past
+        # both the game's BUILDINGS.JSON cap and td5_geo_route.c's 64 MB
+        # source-read cap (GR_MAX_FILE), so a BUILD of the place would have
+        # silently dropped every building. An OSM-only place keeps the old
+        # byte-identical formatting.
+        path = os.path.join(out, "BUILDINGS.JSON")
+        with open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+            json.dump(bdoc, f, sort_keys=True, separators=(",", ":"))
+            f.write("\n")
+        os.replace(path + ".tmp", path)
     write_json(os.path.join(out, "AREAS.JSON"), {"areas": vec["areas"]})
     # `signals` keeps its exact old membership (highway=traffic_signals only);
     # `nodes` is the new array for the crossings / stop lines / humps the

@@ -52,6 +52,19 @@
 #define TD5_GEOB_HSRC_ESTIMATED  0   /* geo_fetch's area/class estimator */
 #define TD5_GEOB_HSRC_OSM_LEVELS 1   /* building:levels x storey height  */
 #define TD5_GEOB_HSRC_OSM_HEIGHT 2   /* a real height=* tag, measured    */
+/* [ROUND 1012 D1] Two more MEASURED sources, both from geo_fetch's conflation
+ * of Overture + Google Open Buildings (geo_buildings_extra.py). Kept distinct
+ * from the OSM codes on purpose: tg_geo_landmark_real treats only an OSM
+ * measurement as licence to extrude a landmark in 3D, and a satellite median
+ * over a cathedral is not that. */
+#define TD5_GEOB_HSRC_OVERTURE   3   /* Overture height / num_floors     */
+#define TD5_GEOB_HSRC_RASTER     4   /* Open Buildings 2.5D median, 2023 */
+#define TD5_GEOB_HSRC_COUNT      5
+
+/* Where a building's FOOTPRINT came from (BUILDINGS.JSON `footprint_src`,
+ * absent = OSM, i.e. every cache fetched before round 1012). */
+#define TD5_GEOB_FSRC_OSM        0
+#define TD5_GEOB_FSRC_OVERTURE   1
 
 /* roof:shape, collapsed to the silhouettes the emitter can build.
  *
@@ -126,6 +139,7 @@ typedef struct {
     unsigned char landmark;   /* OSM says this is a named landmark         */
     unsigned char lmsrc;      /* TD5_GEOB_LMSRC_* -- which tag decided it  */
     unsigned char part;       /* building:part -- a 3D-modelled sub-volume */
+    unsigned char fsrc;       /* TD5_GEOB_FSRC_* -- whose footprint        */
     /* [ROUND 1009 item 9] STOREY COUNTS, which the reader never kept.
      * BUILDINGS.JSON carries `levels` on every record (286 of La Plata's 2326
      * footprints have it from OSM, the rest from the estimator's `levels_est`)
@@ -286,6 +300,22 @@ void td5_geob_census(int *buildings, int *measured, int *estimated,
  * TD5_GEOB_LMSRC_COUNT counts indexed by TD5_GEOB_LMSRC_*. The sum is the
  * `landmarks` the census reports. */
 void td5_geob_landmark_sources(int *out, int n);
+
+/* [ROUND 1012 D1] Buildings by height source (`hsrc`, TD5_GEOB_HSRC_COUNT
+ * entries) and by footprint source (`fsrc`, 2 entries: OSM, Overture). Either
+ * pointer may be NULL. */
+void td5_geob_source_census(int *hsrc, int *fsrc);
+
+/* [ROUND 1012 D1] 1 when the place's SOURCE PLACE.JSON says its buildings were
+ * conflated with Overture + Google Open Buildings (`sources.extra_buildings`),
+ * so the screens that carry the OSM credit can add theirs (both ODbL, credit
+ * required). Reads a ~6 KB file once per slug and caches the answer, so it is
+ * safe to call every frame. Does not need the place to be loaded. */
+int td5_geob_place_has_extra(const char *slug);
+
+/* The two credit lines that go with it (never NULL). */
+#define TD5_GEOB_CREDIT_BUILDINGS "BUILDINGS (C) OVERTURE MAPS"
+#define TD5_GEOB_CREDIT_HEIGHTS   "HEIGHTS (C) GOOGLE OPEN BUILDINGS"
 
 /* How many ring points the loader decimated away, and how many polygons it
  * had to decimate at all -- the honest cost of TD5_GEOB_RING_MAX. */

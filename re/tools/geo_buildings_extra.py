@@ -565,6 +565,38 @@ def ob_plan(sess: Session, bbox, year: int = OB_YEAR) -> dict:
     return plan
 
 
+def _decode_tile(pg, data: bytes, index: int) -> np.ndarray:
+    """One TIFF tile -> (tl, tw, spp) array.
+
+    The Open Buildings GeoTIFFs are DEFLATE + PREDICTOR 3 (floating point),
+    which tifffile only decodes through the optional `imagecodecs` package.
+    Rather than pull a compiled codec suite into the fetch venv for one
+    predictor, this decodes it directly (Adobe Photoshop TIFF Technical Note
+    3): per row, the float bytes are stored byte-plane-major, most significant
+    plane first, then byte-wise horizontally differenced. Any other
+    compression/predictor goes to tifffile unchanged.
+    """
+    import zlib
+    comp = int(pg.compression)
+    pred = int(pg.predictor)
+    if comp in (8, 32946) and pred == 3:
+        tw, tl = pg.tilewidth, pg.tilelength
+        spp = 1 if pg.planarconfig == 2 else pg.samplesperpixel
+        bps = pg.dtype.itemsize
+        raw = np.frombuffer(zlib.decompress(data), np.uint8)
+        row = tw * spp * bps
+        raw = raw[:row * tl].reshape(tl, row)
+        raw = np.cumsum(raw, axis=1, dtype=np.uint8)
+        # (tl, bps, tw*spp) planes, MSB first -> big-endian floats.
+        planes = raw.reshape(tl, bps, tw * spp).transpose(0, 2, 1)
+        vals = np.ascontiguousarray(planes).view(">f%d" % bps)
+        return vals.reshape(tl, tw, spp).astype(np.float32)
+    arr, _, _ = pg.decode(data, index)
+    arr = np.asarray(arr)
+    return arr.reshape(arr.shape[-3], arr.shape[-2], -1) if arr.ndim >= 3 \
+        else arr[..., None]
+
+
 def ob_fetch(sess: Session, bbox, plan: dict, out_path: str) -> dict:
     """Read the planned tiles and resample the height band onto a regular
     lon/lat grid of OB_PRODUCT_M spacing over bbox (nearest). NaN = no tile."""
@@ -601,11 +633,7 @@ def ob_fetch(sess: Session, bbox, plan: dict, out_path: str) -> dict:
                     continue
                 fh.seek(off)
                 data = fh.read(cnt)
-                arr, _, _ = pg.decode(data, i)
-                arr = np.asarray(arr)
-                # tifffile returns (1, tl, tw, spp) for a chunky tile.
-                arr = arr.reshape(arr.shape[-3], arr.shape[-2], -1) \
-                    if arr.ndim >= 3 else arr[..., None]
+                arr = _decode_tile(pg, data, i)
                 band = arr[..., 0 if t["planar"] else t["band_index"]]
                 ti = i - (t["band_index"] * ntiles_plane if t["planar"] else 0)
                 ty, tx = divmod(ti, ntx)

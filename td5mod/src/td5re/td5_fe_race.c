@@ -44,6 +44,7 @@
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
 #include "td5_geo.h"
+#include "td5_geo_buildings.h"
 
 /* [CUP TRACK SELECT 2026-06-25] knob helper — defined just before
  * Screen_TrackSelection but used earlier in Screen_CarSelection. */
@@ -8627,6 +8628,15 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
     fe_draw_small_text(bx * sx, (by - 26.0f) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
     fe_draw_small_text(bx * sx, (by - 14.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
                        0xFF8899AA, sx, sy);
+    /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
+     * Google Open Buildings carries their credit too (both ODbL). Stacked
+     * above the OSM pair, one source per line, same width rule. */
+    if (td5_geob_place_has_extra(slug)) {
+        fe_draw_small_text(bx * sx, (by - 50.0f) * sy,
+                           TR(TD5_GEOB_CREDIT_BUILDINGS), 0xFF8899AA, sx, sy);
+        fe_draw_small_text(bx * sx, (by - 38.0f) * sy,
+                           TR(TD5_GEOB_CREDIT_HEIGHTS), 0xFF8899AA, sx, sy);
+    }
     return 1;
 }
 
@@ -8659,8 +8669,16 @@ static void at_draw_preview(float sx, float sy)
 
     /* [GEO PHASE 4] ODbL: a real place must carry the OSM credit wherever its
      * track is shown. Above the read-out so it never collides with it. */
-    if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0])
+    if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0]) {
         fe_draw_small_text(bx, by - 14 * sy, TD5_GEO_CREDIT, 0xFF8899AA, sx, sy);
+        /* [ROUND 1012 D1] + the building sources, when the place has them. */
+        if (td5_geob_place_has_extra(getenv("TD5RE_GEO_PLACE"))) {
+            fe_draw_small_text(bx, by - 38 * sy, TR(TD5_GEOB_CREDIT_BUILDINGS),
+                               0xFF8899AA, sx, sy);
+            fe_draw_small_text(bx, by - 26 * sy, TR(TD5_GEOB_CREDIT_HEIGHTS),
+                               0xFF8899AA, sx, sy);
+        }
+    }
 
     /* Read-out under the panel. */
     if (s_at_status.done && s_at_status.ok) {

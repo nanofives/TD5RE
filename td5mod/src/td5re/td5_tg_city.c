@@ -1622,6 +1622,9 @@ static long s_geo_emitted, s_geo_shifted, s_geo_dropped_shift;
 static long s_geo_dropped_deg, s_geo_lm_real, s_geo_lm_fallback;
 static long s_geo_measured, s_geo_estimated, s_geo_wall_suppressed;
 static long s_geo_backrow_suppressed;
+/* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
+ * new height sources, so an Overture A/B is a number in race.log. */
+static long s_geo_fp_overture, s_geo_h_overture, s_geo_h_raster;
 static long s_geo_roof_shaped, s_geo_roof_concave, s_geo_parts;
 /* One per TD5_GEOB_ROOF_*, indexed by the shape actually BUILT (so a concave
  * ring that fell back lands under FLAT). The census prints it, because
@@ -1654,6 +1657,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_dropped_deg = s_geo_lm_real = s_geo_lm_fallback = 0;
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
+    s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
     s_geo_lm_prefab = s_geo_lm_nofit = 0;
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
@@ -2813,6 +2817,9 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     if (gb->part) s_geo_parts++;
     if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
     else                                     s_geo_measured++;
+    if (gb->fsrc == TD5_GEOB_FSRC_OVERTURE)  s_geo_fp_overture++;
+    if (gb->hsrc == TD5_GEOB_HSRC_OVERTURE)  s_geo_h_overture++;
+    if (gb->hsrc == TD5_GEOB_HSRC_RASTER)    s_geo_h_raster++;
     if (gb->landmark) {
         if (tg_geo_landmark_real(gb)) s_geo_lm_real++;
         else                          s_geo_lm_fallback++;
@@ -2886,6 +2893,11 @@ void tg_geo_city_report(void)
               s_geo_emitted, s_geo_measured, s_geo_estimated, s_geo_lm_real,
               s_geo_lm_fallback, s_geo_shifted, s_geo_shift_max,
               s_geo_dropped_shift, TD5_TG_GEO_MAX_SHIFT, s_geo_dropped_deg);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted by source: %ld OSM footprint(s) "
+              "/ %ld Overture footprint(s); height from Overture %ld, from the "
+              "Open Buildings raster %ld",
+              s_geo_emitted - s_geo_fp_overture, s_geo_fp_overture,
+              s_geo_h_overture, s_geo_h_raster);
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] roofs BUILT by shape: %ld flat, %ld apex "
               "(pyramidal/dome/onion/round), %ld gabled, %ld hipped, %ld "
               "skillion, %ld mansard, %ld with no roof tag",

@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: the whole city is built)" },
+    { CL_ITEM,    "Real places now build the buildings the street map" },
+    { CL_ITEM,    "  never traced: La Plata goes from 2326 to 90840," },
+    { CL_ITEM,    "  from Overture Maps (OSM, Microsoft, Google)" },
+    { CL_ITEM,    "Building heights come from Google Open Buildings" },
+    { CL_ITEM,    "  satellite heights where the map has no number" },
+    { CL_ITEM,    "The map's own buildings and heights still win" },
+    { CL_ITEM,    "  wherever it has them" },
+    { CL_ITEM,    "The track preview credits both new sources" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: lights, limits, names)" },
     { CL_ITEM,    "Street lamps now stand where the real map says" },
     { CL_ITEM,    "  the street is lit, at a real 30 m spacing" },
