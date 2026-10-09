@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 9 (real places: driveable forks)" },
+    { CL_ITEM,    "Real parks and squares show their grass: on rising" },
+    { CL_ITEM,    "  ground the lawn used to sit under the terrain" },
+    { CL_ITEM,    "  (Parque Saavedra was bare ground colour)" },
+    { CL_ITEM,    "A big park has its trees all over it, not a row" },
+    { CL_ITEM,    "  of eight along one side" },
     { CL_ITEM,    "The other carriageway of a divided avenue is now" },
     { CL_ITEM,    "  a road you can drive, from one real median" },
     { CL_ITEM,    "  opening to the next, not just scenery" },
