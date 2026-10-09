@@ -92,9 +92,10 @@ below). `TD5RE_GEO_FAR_STREETS=0` restores the old placement.
 * All-AI race, 6 cars, 4x (`verify/geo_realfork_run.ps1`, report `geo_realfork_report.py`): every car
   reaches the finish area before and after. Stalls / contact events / incidents: 7 / 327 / 75 before,
   8 / 303 / 68 after (route 229..355 around the plaza ring 91 -> 16 events). Plateaus at 471..473
-  and 599..601 are stalls of two cars for about 2 s each. 471..473 (fork 3's ring spans, mouths
-  465 L, 477 R) shows in both after runs and not in the before run; contact INCIDENTS in that
-  corridor are equal (6 and 6) but the bounce count is 89 against 15, so one car sits against a
-  wall there longer. Not traced to a cause; the corridor geometry itself is untouched, the streets
-  beside it are wider. Worth a look in the next AI round.
+  and 599..601 are stalls of two cars for about 2 s each. The 471..473 ones were read from the
+  motion trace: span_raw 1437 is corridor step 9 of fork 3, speed 71 000 -> 0 in 20 ticks with
+  slip, i.e. the round-1013 corridor-mouth spin (open item in GEO_REAL_FORKS.md: ~half of all
+  AI races spin one or two cars 6..12 spans into a corridor). It shows in the after runs and not
+  the before run because a different set of cars takes that fork (fork 2/4/5 entries differ), not
+  because the corridor changed. Contact incidents in that corridor are equal (6 and 6).
 * Structure lint: warnings 84 -> 83, no new extern, no new game.h includers.
