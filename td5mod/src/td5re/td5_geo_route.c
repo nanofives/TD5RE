@@ -416,6 +416,15 @@ typedef struct {
      * distance -- i.e. when it is half of a street, not a whole one. */
     int    lanes_osm;
     int    divided;
+    /* [ROUND 1012 D2] the other two inputs the carriageway resolution needs,
+     * kept because that resolution cannot finish until `divided` is known and
+     * `divided` is not known until every way is loaded. `width_lanes` is the
+     * lane count a TAGGED width implies (0 = no usable tag; a tag is a
+     * measurement of this way and wins outright), `counted` is lanes_src ==
+     * osm_lanes (a mapper counted them, so no table may lower it). */
+    int    width_lanes;
+    int    counted;
+    int    namek;
 } GrRoad;
 
 /* Defined with the rest of the divided-avenue geometry (it needs gr_bearing,
@@ -736,11 +745,14 @@ static int gr_graph_load(const char *slug)
         out->lanes  = (la && cJSON_IsNumber(la) && la->valueint != 0) ? la->valueint : 2;
         /* [ROUND 1012 D2] remembered before the place floor below can raise it;
          * one carriageway of a divided avenue is given this back. */
-        out->lanes_osm = out->lanes;
-        out->divided   = 0;
+        out->lanes_osm   = out->lanes;
+        out->divided     = 0;
+        out->width_lanes = 0;
+        out->counted     = 0;
+        out->namek       = td5_geo_roads_namek_of(
+                               (nm && cJSON_IsString(nm)) ? nm->valuestring : NULL);
         if (td5_env_flag_on("TD5RE_GEO_REAL_CARRIAGEWAY")) {
-            const int    nk = td5_geo_roads_namek_of(
-                                  (nm && cJSON_IsString(nm)) ? nm->valuestring : NULL);
+            const int    nk = out->namek;
             const cJSON *wd = r ? cJSON_GetObjectItem(r, "width") : NULL;
             double m = 0.0;
             if (wd && cJSON_IsString(wd) && wd->valuestring[0]) {
@@ -755,7 +767,8 @@ static int gr_graph_load(const char *slug)
                 /* A TAGGED width is a measurement of this way: it wins
                  * outright, in both directions. */
                 const int lanes = (int)floor(m * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
-                if (lanes >= 1 && lanes <= GR_MAX_LANES) out->lanes = lanes;
+                if (lanes >= 1 && lanes <= GR_MAX_LANES)
+                    { out->lanes = lanes; out->width_lanes = lanes; }
             } else if (s_g.proj.upm > 0.0) {
                 /* THE PLACE TABLE IS A FLOOR, NEVER A CEILING.
                  *
@@ -776,6 +789,7 @@ static int gr_graph_load(const char *slug)
                 const cJSON *ls = r ? cJSON_GetObjectItem(r, "lanes_src") : NULL;
                 const int counted = ls && cJSON_IsString(ls) && ls->valuestring
                                  && strcmp(ls->valuestring, "osm_lanes") == 0;
+                out->counted = counted;
                 if (tm > 0.0) {
                     int lanes = (int)floor(tm * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
                     if (counted && lanes < out->lanes) lanes = out->lanes;
@@ -2084,6 +2098,10 @@ typedef struct {
  * Mariano's route are then bounded at 7.8..17.9, 6.8..22.9 and 11.2..18.2 m,
  * and only Diagonal 73's last three spans are refused. */
 #define GR_AV_BAND_SLACK  GR_LANE_WIDTH
+/* [ROUND 1012 D2] How much of the place's PER-CARRIAGEWAY figure an undivided
+ * avenida/diagonal gets, in tenths. See gr_mark_divided_carriageways for the
+ * measurement that picked it; TD5RE_GEO_AVENUE_WIDE_X10 overrides for an A/B. */
+#define GR_AV_WIDE_X10        20
 
 /* geo_forks._bearing: atan2 of (dx, dz), so 0 is +Z and pi/2 is +X -- the same
  * convention gr_heading uses. */
@@ -2176,6 +2194,43 @@ static int gr_same_way(int a, int b)
  * Three samples by ARCLENGTH and at least two agreeing on the same side, so a
  * single hairpin vertex cannot carry a way on its own. */
 
+/* ---- the fit test, stated ONCE and asked twice ----------------------------
+ *
+ * A divided street spends its reserved width on five things: pavement,
+ * carriageway, median, carriageway, pavement. If the city's building line
+ * cannot hold all five, the route is NOT on a divided avenue there however well
+ * the two ways pair -- it is on ONE street a mapper drew as two lines, one per
+ * direction of travel.
+ *
+ * This is what GR_MED_MIN_M's 4 m constant ("below this they are the same road
+ * drawn twice") was reaching for, and a constant cannot see the street.
+ * MEASURED: Calle 14's last 280 m pairs at a rock-steady 9.5 m, cover 1.00,
+ * five distinct anti-parallel OSM ways, and clears every geometric gate -- but
+ * La Plata reserves 18 m for a calle, and 9.5 + 3.4 + 3.4 + 2 x 3.0 = 22.5 m
+ * does not fit. The plan says it is not divided; the geometry alone could not.
+ *
+ * The building line checks out against the map. Marching perpendicular from the
+ * centreline to the first mapped building face over La Plata's footprints:
+ * Diagonal 73 29.0 m, Avenida 19 29.5 m, Avenida 7 31.5 m, Avenida 44 30.0 m
+ * against the 30 m row; Calle 54 20.0 m against the 18 m row.
+ *
+ * The pavement floor is the class default -- round 1009's answer, 3 m on a La
+ * Plata avenida -- so this asks for no constant of its own. `gap` and the two
+ * half widths are WORLD UNITS; `need_out` is filled either way, for the log. */
+static int gr_divided_fits(int namek, double gap, double own_h, double far_h,
+                           double *need_out, double *line_out)
+{
+    const double line = td5_geo_sw_building_line_for(TD5_GEO_RC_UNKNOWN, namek)
+                      * GR_UNITS_PER_METRE;
+    const double pav  = td5_geo_roads_pavement_default_m(TD5_GEO_RC_SECONDARY)
+                      * GR_UNITS_PER_METRE;
+    const double need = gap + own_h + far_h + pav * 2.0;
+    if (need_out) *need_out = need;
+    if (line_out) *line_out = line;
+    if (line <= 0.0) return 1;        /* no rule for this street here */
+    return need <= line;
+}
+
 /* Point and forward bearing at fraction `f` of way `r`'s arclength. */
 static int gr_way_at_frac(const GrRoad *r, double f,
                           double *px, double *pz, double *br)
@@ -2229,6 +2284,13 @@ static int gr_way_divided(int ra, const int *idx, int g0, int g1)
             d = gr_road_near_at(B, px, pz, &pbr, &cx, &cz);
             if (d < lo || d > hi) continue;
             if (gr_angdiff_deg(rbr + M_PI, pbr) > GR_MED_ANTI_TOL_DEG) continue;
+            /* ... and the whole cross-section has to fit the street. */
+            if (!gr_divided_fits(A->namek, d,
+                                 (double)(A->lanes_osm > 0 ? A->lanes_osm : 2)
+                                     * GR_LANE_WIDTH * 0.5,
+                                 (double)(B->lanes_osm > 0 ? B->lanes_osm : 2)
+                                     * GR_LANE_WIDTH * 0.5, NULL, NULL))
+                continue;
             dot  = (cx - px) * lx + (cz - pz) * lz;
             side = (dot > 0.0) ? 1 : -1;
             found = 1;
@@ -2250,7 +2312,7 @@ static int gr_div_name_cmp(const void *a, const void *b)
 static void gr_mark_divided_carriageways(void)
 {
     int *idx;
-    int i, g0, n_div = 0;
+    int i, g0, n_div = 0, n_wide = 0;
     if (s_g.n_roads < 2) return;
     idx = (int *)malloc((size_t)s_g.n_roads * sizeof(int));
     if (!idx) return;
@@ -2266,19 +2328,77 @@ static void gr_mark_divided_carriageways(void)
             GrRoad *A = &s_g.road[idx[a]];
             if (!gr_way_divided(idx[a], idx, g0, g1)) continue;
             A->divided = 1;
-            /* Give the way back its own OSM count: the place carriageway
-             * describes a whole street, and this is half of one. */
-            if (A->lanes_osm > 0) A->lanes = A->lanes_osm;
             n_div++;
         }
         g0 = g1 + 1;
     }
     free(idx);
+
+    /* ---- the carriageway, now that `divided` is known ----------------------
+     *
+     * [ROUND 1012 D2] Round 1011 C2's place table states a figure PER
+     * CARRIAGEWAY -- its own comment says so: "a divided one is then 10 +
+     * median + 10, which is the 30 m line with a 10 m median". The resolution
+     * at load time could not act on that, because whether a way IS one
+     * carriageway is not knowable until every way is loaded. So it applied the
+     * same 10 m to all three cases, which is right for exactly one of them:
+     *
+     *   DIVIDED       half a street. Takes its OWN OSM count, not the table --
+     *                 otherwise two 10.47 m carriageways eat the 11.39 m
+     *                 between Diagonal 73's centrelines and leave 0.92 m of
+     *                 median, which is the bug this round opened with.
+     *   AVENIDA or    a whole avenida, both directions, no mapped median. The
+     *   DIAGONAL,     table figure is per carriageway and this way holds both,
+     *   undivided     so it gets TWICE it -- 20.9 m, which against the 30 m
+     *                 line leaves 4.5 m of vereda a side. At the single
+     *                 figure it got 10.47 m, the frontage rule was asked for
+     *                 9.77 m of pavement, DECLINED on its own 6 m ceiling and
+     *                 fell through to the 3 m class default -- so the building
+     *                 line landed at 8.2 m from the centreline and a 30 m
+     *                 avenida was built as a 16.5 m street. That is "it is
+     *                 still rendered as one single street" for the stretches
+     *                 OSM never split.
+     *   everything    unchanged: the round-1011 answer.
+     *   else
+     *
+     * MEASURED on La Plata's 2291 ways: 394 avenida + 194 diagonal are
+     * divided, 158 avenida + 44 diagonal are not. The facade march gives
+     * Avenida 19 29.5 m, Avenida 7 31.5 m and Avenida 44 30.0 m of real
+     * building-to-building width, so the 30 m row they are being fitted to is
+     * the one the city has.
+     *
+     * A TAGGED width still wins outright in every case: it is a measurement of
+     * this way, and nothing derived may overrule one. A COUNTED lane number is
+     * still never lowered. */
+    if (td5_env_flag_on("TD5RE_GEO_REAL_CARRIAGEWAY") && s_g.proj.upm > 0.0) {
+        for (i = 0; i < s_g.n_roads; i++) {
+            GrRoad *A = &s_g.road[i];
+            if (A->width_lanes > 0) continue;        /* a measurement wins */
+            if (A->divided) {
+                if (A->lanes_osm > 0) A->lanes = A->lanes_osm;
+                continue;
+            }
+            if (A->namek == TD5_GEO_NAMEK_AVENIDA ||
+                A->namek == TD5_GEO_NAMEK_DIAGONAL) {
+                const double tm = td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN,
+                                                           A->namek);
+                const double mul = (double)td5_env_int(
+                    "TD5RE_GEO_AVENUE_WIDE_X10", GR_AV_WIDE_X10, 10, 30) * 0.1;
+                int want;
+                if (tm <= 0.0) continue;
+                want = (int)floor(tm * mul * s_g.proj.upm / GR_LANE_WIDTH + 0.5);
+                if (A->counted && want < A->lanes_osm) want = A->lanes_osm;
+                if (want >= 1 && want <= GR_MAX_LANES) { A->lanes = want; n_wide++; }
+            }
+        }
+    }
+
     TD5_LOG_I(LOG_TAG, "geo route: %d of %d way(s) are one carriageway of a "
               "divided street (same name, anti-parallel one-way partner "
-              "%.0f..%.0f m away): the place carriageway floor is withheld and "
-              "each keeps its own OSM lane count", n_div, s_g.n_roads,
-              GR_MED_MIN_M, GR_MED_MAX_M);
+              "%.0f..%.0f m away, cross-section inside the building line): each "
+              "keeps its OWN OSM lane count. %d undivided avenida/diagonal "
+              "way(s) carry BOTH carriageways and take twice the place figure",
+              n_div, s_g.n_roads, GR_MED_MIN_M, GR_MED_MAX_M, n_wide);
 }
 
 /* ---- [ROUND 1010 AVENUES] the ways the ROUTE ITSELF drives on --------------
@@ -3297,62 +3417,30 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
                         why = "it does not reach the span floor clear of the "
                               "grid and the ring tail";
 
-                    /* ---- [ROUND 1012 D2] THE CROSS-SECTION MUST FIT ---------
-                     *
-                     * A divided street spends its reserved width on five
-                     * things: pavement, carriageway, median, carriageway,
-                     * pavement. If the city's building line cannot hold all
-                     * five, the route is NOT on a divided avenue here however
-                     * well the two ways pair -- it is on one street a mapper
-                     * drew as two lines, one per direction of travel.
-                     *
-                     * This is the gate GR_MED_MIN_M (4 m, "below this they are
-                     * the same road drawn twice") was reaching for with a
-                     * constant. The constant cannot see the street: MEASURED on
-                     * Mariano's route, Calle 14's last 280 m pairs at a rock-
-                     * steady 9.5 m, cover 1.00, five distinct anti-parallel OSM
-                     * ways, and clears every geometric gate -- but La Plata
-                     * reserves 18 m for a calle, and 9.5 + 3.49 + 3.49 = 16.5 m
-                     * of roadway would leave 0.77 m of vereda a side. The plan
-                     * says it is not divided; the geometry alone could not.
-                     *
-                     * The building line is the place's own figure and it checks
-                     * out against the map: marching perpendicular from the
-                     * centreline to the first building face over La Plata's
-                     * mapped footprints gives Diagonal 73 29.0 m, Avenida 19
-                     * 29.5 m, Avenida 7 31.5 m, Avenida 44 30.0 m against the
-                     * 30 m row, and Calle 54 20.0 m against the 18 m row.
-                     *
-                     * The pavement floor is the class default -- round 1009's
-                     * answer, 3 m on a La Plata avenida -- so this asks for no
-                     * constant of its own. */
+                    /* [ROUND 1012 D2] THE CROSS-SECTION MUST FIT THE STREET.
+                     * Asked here over the RUN's mean spacing and the race
+                     * road's own CONDITIONED width, and again per way at graph
+                     * load. See gr_divided_fits for the measurement behind it. */
                     if (!why) {
-                        const int    nk    = td5_geo_roads_namek_of(med[j].name);
-                        const double line  = td5_geo_sw_building_line_for(
-                                                 TD5_GEO_RC_UNKNOWN, nk)
-                                           * GR_UNITS_PER_METRE;
-                        const double pav   = td5_geo_roads_pavement_default_m(
-                                                 TD5_GEO_RC_SECONDARY)
-                                           * GR_UNITS_PER_METRE;
                         const double own_h = ((s0 < c->nodes && c->lanes_out)
                                               ? (double)c->lanes_out[s0] : 2.0)
                                            * GR_LANE_WIDTH * 0.5;
                         const double far_h = (double)(med[j].peer_lanes > 0
                                                       ? med[j].peer_lanes : 2)
                                            * GR_LANE_WIDTH * 0.5;
-                        const double need  = med[j].gap_m * GR_UNITS_PER_METRE
-                                           + own_h + far_h + pav * 2.0;
-                        if (line > 0.0 && need > line) {
+                        double need = 0.0, line = 0.0;
+                        if (!gr_divided_fits(td5_geo_roads_namek_of(med[j].name),
+                                             med[j].gap_m * GR_UNITS_PER_METRE,
+                                             own_h, far_h, &need, &line)) {
                             snprintf(fit_why, sizeof fit_why,
                                      "the street's %.0f m building line cannot "
                                      "hold two carriageways and a median "
-                                     "(%.1f + %.1f + %.1f + 2 x %.1f = %.1f m) "
-                                     "-- this is one street drawn as two lines, "
-                                     "not a divided avenue",
+                                     "(%.1f + %.1f + %.1f + pavements = %.1f m)"
+                                     " -- this is one street drawn as two "
+                                     "lines, not a divided avenue",
                                      line / GR_UNITS_PER_METRE,
                                      own_h / GR_UNITS_PER_METRE, med[j].gap_m,
                                      far_h / GR_UNITS_PER_METRE,
-                                     pav / GR_UNITS_PER_METRE,
                                      need / GR_UNITS_PER_METRE);
                             why = fit_why;
                         } else if (gr_av_probe()) {
