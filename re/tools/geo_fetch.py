@@ -156,6 +156,22 @@ HIGHWAY_NONDRIVABLE = {
     "footway", "path", "cycleway", "pedestrian", "steps", "track",
     "bridleway", "corridor", "platform", "construction", "proposed",
 }
+# The PEDESTRIAN subset of the above. These stay fully non-drivable -- they are
+# still in HIGHWAY_NONDRIVABLE, so ROADS.JSON, the router and every drivable
+# reader see exactly what they saw before -- but instead of being counted and
+# thrown away they are written to their own FOOTWAYS.JSON layer.
+#
+# Measured on the La Plata cache (2.7 km radius): 865 ways carried a
+# non-drivable highway value and ALL 865 are in this subset -- footway 737,
+# steps 58, cycleway 38, path 26, pedestrian 6. Not one `track`, `bridleway`,
+# `corridor`, `platform`, `construction` or `proposed` way exists there. So the
+# old `highway_nondrivable: 865` census line was never about tracks and farm
+# roads; it was the entire mapped pavement network of a planned city, which is
+# the single biggest road-layer loss the 2026-10-08 attribute audit named.
+#
+# The rest of the set keeps being dropped: a `platform` is a railway object, and
+# `construction`/`proposed` describe a way that does not exist on the ground.
+HIGHWAY_PEDESTRIAN = {"footway", "path", "cycleway", "pedestrian", "steps"}
 
 # Storey height for the building:levels fallback. 3.0 m is the usual planning
 # figure for mixed residential/commercial and is an OPEN question in the plan
@@ -169,7 +185,12 @@ STOREY_HEIGHT_M = 3.0
 # to be present on the footprint it is looking at.
 #   1  the original Phase 1..5 set
 #   2  2026-10-07, round 1007: the full tag path (docs/plans/GEO_TAG_AUDIT.md)
-TAG_SCHEMA = 2
+#   3  2026-10-09, round 1011 C4: FOOTWAYS.JSON exists; node[] carries
+#      highway=bus_stop with its shelter/bench/bin tags; crossing nodes promote
+#      `crossing` / `crossing_markings` to fields. A schema-2 cache simply has
+#      no FOOTWAYS.JSON and no bus_stop nodes, which every reader added in this
+#      round treats as "this place has none" rather than as an error.
+TAG_SCHEMA = 3
 
 # ------------------------------------------------------------ landmark rule ---
 #
@@ -289,6 +310,30 @@ NODE_TAG_KEYS = (
     "highway", "traffic_signals", "traffic_signals:direction", "crossing",
     "crossing:markings", "button_operated", "tactile_paving",
     "traffic_calming", "direction", "stop", "give_way", "railway",
+    # Round 1011 C4, the transit keys. SAFE TO ADD WITHOUT MOVING signals[]:
+    # measured over the La Plata cache, the complete key set present on its 566
+    # highway=traffic_signals nodes is highway, crossing, traffic_signals,
+    # tactile_paving, source, button_operated, traffic_signals:sound,
+    # traffic_signals:vibration and traffic_calming. Not one of them carries any
+    # key below, so every signals[] record is byte-identical to schema 2. The
+    # counts these DO reach are the 370 bus-stop nodes: public_transport 370,
+    # bus 335, name 329, shelter 105, bench 62, ref 56, bin 39, lit 36.
+    "public_transport", "bus", "shelter", "shelter_type", "bench", "bin",
+    "name", "name:en", "name:es", "ref", "local_ref", "network", "operator",
+    "lit", "covered", "departures_board", "wheelchair", "bus_stop",
+)
+# A pedestrian way carries a different vocabulary from a drivable one: the
+# subtype (`footway=sidewalk` vs `=crossing`), the crossing paint, stair count
+# and handrail, segregation of a shared foot/cycle path. `width` and `surface`
+# overlap with ROAD_TAG_KEYS and are kept under the same spelling on purpose, so
+# a reader that already parses a road width parses a footway width identically.
+FOOTWAY_TAG_KEYS = (
+    "highway", "footway", "name", "name:en", "name:es",
+    "crossing", "crossing:markings", "crossing:island", "tactile_paving",
+    "width", "est_width", "surface", "smoothness", "lit", "covered",
+    "incline", "ramp", "step_count", "handrail", "segregated",
+    "foot", "bicycle", "horse", "wheelchair", "access", "motor_vehicle",
+    "bridge", "tunnel", "layer", "area", "indoor", "oneway", "material",
 )
 
 
@@ -1034,6 +1079,66 @@ def _oneway_dir(t: dict) -> int:
     return 0
 
 
+def _yes_tag(t: dict, key: str) -> bool:
+    """A yes/no OSM tag as a bool. Absent is False, and so is an EXPLICIT
+    negative: OSM really does carry `shelter=no` where a mapper surveyed that
+    there is none, and a bare truthiness test would build one there."""
+    return (t.get(key) or "").strip().lower() not in ("", "no", "false", "0")
+
+
+def _width_m(t: dict, key: str = "width") -> float | None:
+    """A width tag in METRES, or None when absent or unparseable.
+
+    OSM width is free text: "2", "2.5", "2 m", "1.8m" and the odd "3;4" all
+    occur on La Plata's 27 tagged pedestrian ways. Feet ("4'") are left
+    unparsed and return None rather than being read as 4 metres -- a silently
+    wrong width is worse than a missing one, because the fallback that replaces
+    a missing one is a measured class default.
+    """
+    v = (t.get(key) or "").strip().lower()
+    if not v:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*(m|metre|metres|meter|meters)?\s*$", v)
+    if not m:
+        return None
+    w = float(m.group(1))
+    # A pavement wider than a motorway or narrower than a kerbstone is a typo.
+    return w if 0.2 <= w <= 40.0 else None
+
+
+# How a crossing is PAINTED, decided from the two tags that describe the paint
+# and nothing else. Returned as a string that goes straight into the JSON, so
+# the rule lives here (where the raw tags are) and the C emitter only switches
+# on four known values instead of re-deriving them from a tag soup.
+#
+#   marked     paint a zebra. `crossing:markings` is the modern, explicit key
+#              and WINS over `crossing` when both are present: a mapper who
+#              wrote markings=no on a crossing=marked way is correcting the
+#              older tag, which is exactly why the newer key was introduced.
+#              `uncontrolled` is the legacy spelling of "marked, no signals".
+#   signals    signal-controlled, no marking stated. The lamp already comes
+#              from SIGNALS.JSON; this gets a stop bar, not a zebra.
+#   unmarked   explicitly NOT painted. Nothing is drawn.
+#   unknown    highway=crossing with no paint tag at all -- 309 of La Plata's
+#              583 crossing nodes. Deliberately NOT folded into `marked`:
+#              "most crossings in this city are painted" is a true statement
+#              about Argentina and not a fact in the data, and the whole point
+#              of this round is to replace the generator's own rule with real
+#              data. The C side carries a knob to opt them in.
+def _crossing_paint(t: dict) -> str:
+    c = (t.get("crossing") or "").strip().lower()
+    m = (t.get("crossing:markings") or "").strip().lower()
+    if m:
+        return "unmarked" if m in ("no", "none") else "marked"
+    if c in ("marked", "zebra", "uncontrolled"):
+        return "marked"
+    if c == "unmarked":
+        return "unmarked"
+    if c in ("traffic_signals", "signals"):
+        return "signals"
+    return "unknown"
+
+
 def convert_osm(osm: dict, proj: LocalProjection,
                 levels_estimator: int = 2) -> dict:
     """Split one Overpass response into the cache's vector layers, in world units.
@@ -1046,6 +1151,7 @@ def convert_osm(osm: dict, proj: LocalProjection,
     without the normaliser having to decide first what the tag is for.
     """
     roads: list[dict] = []
+    footways: list[dict] = []
     buildings: list[dict] = []
     areas: list[dict] = []
     signals: list[dict] = []
@@ -1067,7 +1173,14 @@ def convert_osm(osm: dict, proj: LocalProjection,
             # SIGNALS.JSON's membership must not change -- see below.
             kind = (hw if hw in ("traffic_signals", "crossing", "stop",
                                  "give_way", "mini_roundabout", "turning_circle",
-                                 "speed_camera", "traffic_mirror")
+                                 "speed_camera", "traffic_mirror",
+                                 # Round 1011 C4. 370 of La Plata's 374
+                                 # `node_ignored` were bus stops -- the query
+                                 # has asked for bare node["highway"] since the
+                                 # 2026-10-07 widening, so they were fetched and
+                                 # then refused one line later. Their
+                                 # shelter/bench/bin tags arrive free with them.
+                                 "bus_stop", "street_lamp")
                     else ("traffic_calming" if t.get("traffic_calming")
                           else None))
             if kind is None:
@@ -1093,9 +1206,34 @@ def convert_osm(osm: dict, proj: LocalProjection,
                 rec["direction"] = t.get("traffic_signals:direction")
                 signals.append(rec)
                 bump("signals")
-            else:
-                nodes.append(rec)
-                bump("nodes_" + kind)
+                continue
+            if kind == "crossing":
+                # PROMOTED to fields, for the same reason the building civic
+                # keys were in round 1007: `paint` is what the emitter switches
+                # on, and a reader should not have to know the rule lives one
+                # level down in `tags` -- nor re-implement it, which is how two
+                # spellings of one fact start.
+                rec["paint"] = _crossing_paint(t)
+                rec["crossing"] = t.get("crossing")
+                rec["crossing_markings"] = t.get("crossing:markings")
+                rec["tactile_paving"] = t.get("tactile_paving")
+                bump("crossing_paint_" + rec["paint"])
+            elif kind == "bus_stop":
+                # The street-furniture cluster, as BOOLS, because "is there a
+                # shelter" is the only question the emitter asks. OSM spells the
+                # negative explicitly (`shelter=no` is 0 here but common
+                # elsewhere), so a bare truthiness test would build a shelter
+                # where a mapper surveyed that there is none.
+                rec["shelter"] = _yes_tag(t, "shelter")
+                rec["bench"] = _yes_tag(t, "bench")
+                rec["bin"] = _yes_tag(t, "bin")
+                rec["lit"] = _yes_tag(t, "lit")
+                rec["public_transport"] = t.get("public_transport")
+                for f in ("shelter", "bench", "bin"):
+                    if rec[f]:
+                        bump("bus_stop_" + f)
+            nodes.append(rec)
+            bump("nodes_" + kind)
             continue
         if el.get("type") != "way":
             # Relations are not requested (see OVERPASS_QL) and would need ring
@@ -1115,7 +1253,60 @@ def convert_osm(osm: dict, proj: LocalProjection,
         hw = t.get("highway")
         if hw:
             if hw in HIGHWAY_NONDRIVABLE:
-                bump("highway_nondrivable")
+                if hw not in HIGHWAY_PEDESTRIAN:
+                    bump("highway_nondrivable")
+                    continue
+                # A MAPPED PAVEMENT, not a road. It goes to its own layer and
+                # NEVER to `roads`, so ROADS.JSON, the router, the median
+                # detector and every drivable reader are untouched: the
+                # non-drivable test above still rejects it before any of that.
+                sub = t.get("footway")
+                footways.append({
+                    "id": el.get("id"),
+                    "name": t.get("name"),
+                    # `class` is the OSM highway value (footway / steps /
+                    # cycleway / path / pedestrian) and `footway` the subtype
+                    # (sidewalk / crossing / traffic_island). Both, because
+                    # they answer different questions: `class` is what the
+                    # surface is, `footway` is what it is FOR, and only the
+                    # pairing distinguishes a mapped kerbside pavement
+                    # (footway + sidewalk) from a zebra (footway + crossing).
+                    "class": hw,
+                    "footway": sub,
+                    # Pre-resolved so no reader has to repeat the pairing.
+                    # SUBTYPE FIRST, then the highway value. A way tagged
+                    # footway=sidewalk or =crossing is that thing whatever its
+                    # highway value says; everything else falls back to its
+                    # class. The untagged majority stays `footway` rather than
+                    # being called a `path`: 621 of La Plata's 737 footways
+                    # carry no subtype, and they are ordinary city pavement,
+                    # not the 26 countryside ways that really are highway=path.
+                    "kind": ("sidewalk" if sub == "sidewalk"
+                             else "crossing" if sub == "crossing"
+                             else hw),
+                    "paint": (_crossing_paint(t) if sub == "crossing" else None),
+                    "width": t.get("width"),
+                    # PARSED, unlike the road layer's `width`. A footway width
+                    # is the ONE measured per-side pavement figure the
+                    # 2026-10-08 audit went looking for and could not find:
+                    # `sidewalk:width` is absent on all 2291 La Plata ways,
+                    # while 27 pedestrian ways carry a plain `width`.
+                    "width_m": _width_m(t),
+                    "surface": t.get("surface"),
+                    "lit": _yes_tag(t, "lit"),
+                    "covered": _yes_tag(t, "covered"),
+                    "bridge": bool(t.get("bridge")),
+                    "tunnel": bool(t.get("tunnel")),
+                    "layer": _int_tag(t, "layer"),
+                    "step_count": _int_tag(t, "step_count"),
+                    "area": _yes_tag(t, "area"),
+                    "closed": closed,
+                    "points": wpts,
+                    "latlon": [[round(la, 7), round(lo, 7)] for la, lo in ll],
+                    "tags": _keep_tags(t, FOOTWAY_TAG_KEYS),
+                })
+                bump("footways")
+                bump("footway_" + footways[-1]["kind"])
                 continue
             lanes, lanes_src = _lanes_for(t)
             junction = t.get("junction")
@@ -1318,8 +1509,8 @@ def convert_osm(osm: dict, proj: LocalProjection,
             sig[k] = sig.get(k, 0) + 1
         counts["ignored_kinds"] = dict(sorted(sig.items(), key=lambda kv: -kv[1])[:24])
 
-    return {"roads": roads, "buildings": buildings, "areas": areas,
-            "signals": signals, "nodes": nodes, "water": water,
+    return {"roads": roads, "footways": footways, "buildings": buildings,
+            "areas": areas, "signals": signals, "nodes": nodes, "water": water,
             "counts": counts, "levels_estimator": levels_estimator}
 
 
@@ -1993,6 +2184,16 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
         os.remove(os.path.join(out, "CANOPY.R8"))
     water.write(os.path.join(out, "WATER.R8"))
     write_json(os.path.join(out, "ROADS.JSON"), {"roads": vec["roads"]})
+    # A SEPARATE FILE, not a section of ROADS.JSON, for the same reason
+    # SIGNALS.JSON's `nodes[]` is separate from its `signals[]`: every existing
+    # reader of ROADS.JSON treats `roads[]` as the DRIVABLE network, and the
+    # router, the median detector and the mouth table would all have to learn a
+    # new "ignore these" rule for a benefit of zero. A reader that wants
+    # pavements opens a file named after them; one that does not never sees it.
+    # A place fetched before schema 3 has no FOOTWAYS.JSON at all, which the C
+    # reader treats as "this place has no mapped pavements".
+    write_json(os.path.join(out, "FOOTWAYS.JSON"),
+               {"footways": vec["footways"]})
     write_json(os.path.join(out, "BUILDINGS.JSON"),
                {"buildings": vec["buildings"], "storey_height_m": STOREY_HEIGHT_M,
                 "height_provenance": bh})
