@@ -2417,7 +2417,9 @@ static int tg_median_at_raw(const TG_NodeList *nl, int si, int br_lanes)
     if (!tg_median_fork_long_enough(fi)) return 0;
     tg_r12_median_gore_w(nl, si, fi, br_lanes, &gw0, &gw1);
     if (gw0 < 200.0 && gw1 < 200.0) return 0;              /* sliver */
-    if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi)) return 0;
+    /* [ROUND 1014 A] a real fork's median is always built (mirrors the emitter). */
+    if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi) &&
+        !(td5_env_flag_on("TD5RE_GEO_FORK_ISLAND") && s_forks[fi].real > 0)) return 0;
     return 1;
 }
 

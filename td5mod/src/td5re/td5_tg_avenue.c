@@ -86,6 +86,20 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
     int e;
     if (!nl || si < 0) return 0.0;
     if (tg_geo_avenue_n() < 1) return 0.0;
+    /* [ROUND 1014 A] Over a REAL fork's corridor spans the corridor IS the far
+     * carriageway, at ITS OWN lateral, which starts at the main half's edge and
+     * opens out to the real position over the median slope. The real
+     * carriageway's outer edge is up to a median-width (1.6 m at the mouth of
+     * fork 0) beyond it there, so answering with the real edge pushed the ground
+     * skirt's inner edge out by the same amount past where the corridor's
+     * pavement ends: a see-through wedge beside the first corridor spans
+     * ("sidewalk starts opening here ... its side is empty"). The fork loop in
+     * tg_carriageway_reach answers for the corridor's actual edge. */
+    if (td5_env_flag_on("TD5RE_GEO_FORK_REACH")) {
+        const int fi = tg_fork_of_main(si);
+        if (fi >= 0 && s_forks[fi].real > 0 && side * (double)s_forks[fi].side >= 0.0)
+            return 0.0;
+    }
     for (e = -1; e <= 1; e++) {
         double off = 0.0;
         int lanes = 2;
@@ -102,6 +116,15 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
         }
     }
     return best;
+}
+
+int tg_realfork_walk_owned(int fi, int mb)
+{
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_FARWALK")) return 0;
+    if (fi < 0 || fi >= s_fork_count || s_forks[fi].real <= 0) return 0;
+    if (tg_geo_avenue_n() < 1) return 0;
+    return tg_geo_sidewalk_w_side(mb, s_forks[fi].side > 0) > 0.0;
 }
 
 /* Both ends of span si, from the sidecar. The far end falls back to the near
@@ -178,6 +201,37 @@ static int tg_av_emit_road(const TG_NodeList *nl, int si, double o0, double o1,
     return 1;
 }
 
+/* [ROUND 1014 A] The paved gap of a real median OPENING: flush asphalt from the race
+ * road's edge to the opposite carriageway's near edge, on the same road page, so the
+ * two carriageways read as joined by a junction instead of separated by a slot. Pure
+ * mesh, never drivable (the race stays on its own carriageway). */
+static int tg_av_emit_opening(const TG_NodeList *nl, int si, double o0, double o1,
+                              int lanes, TG_Buf *blk, size_t *moff, int *nmesh)
+{
+    const double w0 = nl->v[si].width, w1 = nl->v[si + 1].width;
+    const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
+    const double sg0 = (o0 >= 0.0) ? 1.0 : -1.0, sg1 = (o1 >= 0.0) ? 1.0 : -1.0;
+    const double in0 = sg0 * w0 * 0.5, in1 = sg1 * w1 * 0.5;
+    double out0 = o0 - sg0 * ohw, out1 = o1 - sg1 * ohw;
+    double cw0, cw1, c0, c1, ws0, ws1;
+    if (w0 < 1.0 || w1 < 1.0) return 1;
+    if (sg0 * (out0 - in0) < 0.0) out0 = in0;
+    if (sg1 * (out1 - in1) < 0.0) out1 = in1;
+    cw0 = (out0 > in0) ? out0 - in0 : in0 - out0;
+    cw1 = (out1 > in1) ? out1 - in1 : in1 - out1;
+    if (cw0 < TG_AV_MIN_MEDIAN_W && cw1 < TG_AV_MIN_MEDIAN_W) return 1;
+    c0 = (in0 + out0) * 0.5; c1 = (in1 + out1) * 0.5;
+    ws0 = cw0 / w0; ws1 = cw1 / w1;
+    if (ws0 < 0.01) ws0 = 0.01;
+    if (ws1 < 0.01) ws1 = 0.01;
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_emit_road_quad_taper(nl, si, (cw0 / (double)TD5_TG_LANE_WIDTH) / ws0,
+                                 c0, c1, ws0, ws1, tg_road_page(si), blk))
+        return 0;
+    tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHROAD, si);
+    return 1;
+}
+
 /* The kerbed island between the two carriageways. Same three-quad prism as
  * tg_emit_avenue_divider -- top plus the two road-facing walls, because the
  * driver passes on one side and the scenery road is on the other and each face
@@ -188,6 +242,39 @@ static int tg_av_emit_road(const TG_NodeList *nl, int si, double o0, double o1,
  * fork gore: the two surfaces are separate quads with a real gap between them,
  * not one floor underlapping both, so filling it is what a real median does and
  * leaves no strip of bare ground beside either lane. */
+/* [ROUND 1014 A] Does the SCENERY island stand on span s? The same gates
+ * tg_av_emit_island and tg_emit_geo_avenue apply, asked of a neighbour so a run's two
+ * ends can be CAPPED (tg_emit_avenue_divider does the same with tg_r12_median_at). An
+ * uncapped prism is open at both ends: you look straight into the hollow kerb, and
+ * past it there is nothing -- "there is no geometry after this median". */
+static int tg_av_island_at(const TG_NodeList *nl, int s)
+{
+    double a = 0.0, b = 0.0;
+    int la = 2, lb = 2, op = 0, fi;
+    if (!nl || s < 0 || s + 1 >= nl->count) return 0;
+    if (!td5_geo_avenue_at(s, &a, &la, &op)) return 0;
+    if (!td5_geo_avenue_at(s + 1, &b, &lb, NULL)) b = a;
+    a -= tg_realfork_node_delta(s);
+    b -= tg_realfork_node_delta(s + 1);
+    fi = tg_fork_of_main(s);
+    if (fi >= 0 && s_forks[fi].real > 0) return 0;   /* the fork's own island */
+    if (op) return 0;
+    {
+        const double ohw = (double)la * (double)TD5_TG_LANE_WIDTH * 0.5;
+        const double sg0 = (a >= 0.0) ? 1.0 : -1.0, sg1 = (b >= 0.0) ? 1.0 : -1.0;
+        double out0 = a - sg0 * ohw, out1 = b - sg1 * ohw;
+        const double in0 = sg0 * nl->v[s].width * 0.5, in1 = sg1 * nl->v[s + 1].width * 0.5;
+        if (sg0 * (out0 - in0) < 0.0) out0 = in0;
+        if (sg1 * (out1 - in1) < 0.0) out1 = in1;
+        {
+            const double mw0 = (out0 > in0 ? out0 - in0 : in0 - out0);
+            const double mw1 = (out1 > in1 ? out1 - in1 : in1 - out1);
+            if (mw0 < TG_AV_MIN_MEDIAN_W && mw1 < TG_AV_MIN_MEDIAN_W) return 0;
+        }
+    }
+    return 1;
+}
+
 static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1,
                              int lanes, TG_Buf *blk, size_t *moff, int *nmesh)
 {
@@ -217,9 +304,12 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     double H = TG_AV_ISLAND_H;
     const double base0 = a->y - (double)TD5_TG_GROUND_DROP;
     const double base1 = c->y - (double)TD5_TG_GROUND_DROP;
-    double px[12], py[12], pz[12], uu[12], vv[12];
+    double px[20], py[20], pz[20], uu[20], vv[20];
     int seg_page[2], seg_nq[2];
     int n = 0;
+    const int caps_on = td5_env_flag_on("TD5RE_GEO_AVENUE_CAPS");
+    const int cap_in  = caps_on && !tg_av_island_at(nl, si - 1);
+    const int cap_out = caps_on && !tg_av_island_at(nl, si + 1);
     /* A planted top with a concrete KERB on both walls: grass up the side of a
      * median is the [R8 item 8] "grass as walls" mistake, and a real avenue
      * island is a cast kerb holding a planted strip. */
@@ -248,8 +338,22 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
     px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
 
+    /* [ROUND 1014 A] END CAPS, the faces tg_emit_avenue_divider closes its runs with
+     * (same winding, derived there). Leading: faces back down the road. */
+    if (cap_in) {
+        px[n]=a->x+a->tz*cl0; py[n]=base0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=base0;   pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=a->x+a->tz*cl0; py[n]=base0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    }
+    if (cap_out) {
+        px[n]=c->x+c->tz*cl1; py[n]=base1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=base1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=c->x+c->tz*cl1; py[n]=base1;   pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
+    }
     seg_page[0] = page;      seg_nq[0] = 1;
-    seg_page[1] = side_page; seg_nq[1] = 2;
+    seg_page[1] = side_page; seg_nq[1] = 2 + (cap_in ? 1 : 0) + (cap_out ? 1 : 0);
     /* Accounted as a FENCE (a linear median structure), the same inventory
      * bucket tg_emit_avenue_divider uses, so "how much median is on this
      * track" stays one number however it was built. */
@@ -308,7 +412,7 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
 static long s_av_farwalk;
 
 static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
-                                   double o0, double o1, int lanes,
+                                   double o0, double o1, int lanes, int in_fork,
                                    TG_Buf *blk, size_t *moff, int *nmesh)
 {
     const TG_Node *a = &nl->v[si];
@@ -333,13 +437,26 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     int seg_page[2], seg_nq[2];
     int n = 0;
 
+    if (getenv("TD5RE_GEO_FARWALK_DIAG"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [GEO FARWALK] span %d sw %.0f e0 %.0f e1 %.0f "
+                  "node w %.0f/%.0f%s", si, sw, e0, e1, a->width, c->width,
+                  (sw > 0.0) ? "" : " NO WIDTH");
     if (!(sw > 0.0)) return 1;
     if (!td5_env_flag_on("TD5RE_GEO_AVENUE_FARWALK")) return 1;
     /* [ROUND 1013 F2] Over a real fork's widened window the race road can reach
      * past the opposite carriageway's far edge; a footway there would be laid on
      * tarmac. */
-    if ((e0 < 0.0 ? -e0 : e0) < a->width * 0.5 + 50.0 ||
-        (e1 < 0.0 ? -e1 : e1) < c->width * 0.5 + 50.0) return 1;
+    /* [ROUND 1014 A] Over a real fork's corridor the corridor's outer edge IS the
+     * node's outer edge by construction (the node carries lanes(A)+lanes(B) and the
+     * corridor holds the B half), so the test `edge past the race road + 50` read the
+     * first corridor span (|e0| == w/2 exactly) as "the race road swallows it" and
+     * dropped the footway there: a one-span pavement hole at every corridor mouth.
+     * A footway is only taken out when the edge is genuinely INSIDE the race road. */
+    {
+        const double m = in_fork ? -1.0 : 50.0;
+        if ((e0 < 0.0 ? -e0 : e0) < a->width * 0.5 + m ||
+            (e1 < 0.0 ? -e1 : e1) < c->width * 0.5 + m) return 1;
+    }
 
     /* TOP. */
     px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
@@ -467,8 +584,13 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
             const double c1 = tg_fork_br_shift(fi, j + 1, nl->v[si + 1].width);
             tg_av_note(nl, si, c0, bl, open,
                        tg_realfork_med(s_forks[fi].real - 1, j));
-            if (open) return 1;
-            return tg_av_emit_far_pavement(nl, si, c0, c1, bl, blk, moff, nmesh);
+            /* [ROUND 1014 A] No `open` skip here any more. A merged fork's corridor
+             * runs ACROSS the real median openings (the opening is a cross street
+             * the corridor carriageway passes over, not a break in it), so the
+             * footway beside the corridor is continuous too -- skipping it left a
+             * pavement hole at every opening inside the window. */
+            if (open && !td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 1;
+            return tg_av_emit_far_pavement(nl, si, c0, c1, bl, 1, blk, moff, nmesh);
         }
     }
 
@@ -484,9 +606,21 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * and so does everything beyond it. [1011 C2] The far footway takes the
      * SAME gate as the island rather than one of its own: a car turning across
      * the median crosses the far carriageway and its pavement too, so a slab
-     * left standing here would be a kerb across the mouth of a real street. */
+     * left standing here would be a kerb across the mouth of a real street.
+     *
+     * [ROUND 1014 A] But NOTHING was laid in the gap: the opening stopped the
+     * island and the footway and put nothing in their place, so the ground skirt
+     * (which starts past the far carriageway) left a see-through slot between
+     * the two roads -- "there is no geometry after this median". The opening is
+     * now paved flush between the carriageways (a junction), and the footway
+     * runs on past it (no cross-street arm is drawn through it, so there is no
+     * mouth for a slab to block). TD5RE_GEO_AVENUE_OPENING=0 restores the slot. */
+    if (open && td5_env_flag_on("TD5RE_GEO_AVENUE_OPENING")) {
+        if (!tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh)) return 0;
+        return tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh);
+    }
     if (open) return 1;
-    if (!tg_av_emit_far_pavement(nl, si, o0, o1, lanes, blk, moff, nmesh))
+    if (!tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh))
         return 0;
     return tg_av_emit_island(nl, si, o0, o1, lanes, blk, moff, nmesh);
 }
