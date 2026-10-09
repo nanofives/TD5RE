@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: real pavement widths)" },
+    { CL_ITEM,    "Each side of a street now gets its own pavement" },
+    { CL_ITEM,    "  width instead of both sides sharing one" },
+    { CL_ITEM,    "Widths come from the map where it measures them," },
+    { CL_ITEM,    "  then from the real buildings along the block," },
+    { CL_ITEM,    "  then from the city's own building line" },
+    { CL_ITEM,    "In La Plata a calle now has the 4 m vereda it" },
+    { CL_ITEM,    "  really has, and an avenida a wider one" },
+    { CL_ITEM,    "Shopfronts, kerbs and corner pavements follow the" },
+    { CL_ITEM,    "  slab, so a narrow side no longer overhangs it" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 8 (real places: divided avenues)" },
     { CL_ITEM,    "A divided avenue is now built from the real map" },
     { CL_ITEM,    "  instead of splitting the race into two paths" },
