@@ -179,6 +179,8 @@ comment — regenerate after adding/splitting modules with
 | `td5_geo_roads.c` | GEO TRACK: real OSM road graph (ROADS.JSON) reader (PORT-ONLY) |
 | `td5_geo_buildings.c` | GEO TRACK: real OSM building footprints and area |
 | `td5_geo_signals.c` | GEO TRACK: traffic-signal nodes + the lamp cycle |
+| `td5_geo_footways.c` | GEO TRACK: real OSM pedestrian ways (FOOTWAYS.JSON) |
+| `td5_tg_geo_street.c` | GEO TRACK street-level reality from real OSM data |
 | `td5_geo_forks.c` | GEO TRACK: CONFIRMED FORKS for a real place (PORT-ONLY). |
 | `td5_geo_avenues.c` | GEO TRACK: DIVIDED AVENUES for a real place (PORT-ONLY). |
 | `td5_geo_route.c` | GEO TRACK: route + condition, in C (PORT-ONLY) |
