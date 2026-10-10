@@ -750,10 +750,41 @@ Plaza Dardo Rocha is built: F=1031 R=1129, 97 main spans, 172 corridor spans (32
 1075 before). Azcuenaga was rebuilt through the same path (114 spans beside 116). Frames at spans 1040 / 1060 /
 1095 / 1125 checked by eye (entry from Avenida 60, the arc with its kerb and lawn, the merge into Avenida 7 with its rail).
 
+### Per-fork harness verdicts (`verify/geo_fork_validate.ps1`, 3 seeds 11/22/33, 6 AI cars, forks on vs the same seed forks off)
+
+Master (cdce612c) against this branch (aim-continuity fix included). Forks are forced so each has cars on both arms.
+
+| fork | master | this branch | what changed |
+|---|---|---|---|
+| F=46 Diagonal 73 | WARN (crashes 3 vs 0) | WARN (stalls 2 vs 1, hits 7/1) | one pack, see below |
+| F=210 Plaza Azcuenaga | WARN (1 jam, spins 17 vs 12) | PASS (0 stalls, 0 jams, 0 spins) | governor |
+| F=328 Diagonal 73 | **FAIL** (hard hits 9 vs 0) | PASS (3 hits, 0 crashes) | governor + aim continuity |
+| F=901 Avenida 60 | PASS | PASS | |
+| F=1031 Plaza Dardo Rocha | **FAIL** when forced (needs variable length) | PASS (6 hits, 1 crash, 1 stall) | step 2 |
+| F=1130 Avenida 7 | WARN (hits 4 vs 0) | PASS (0 hits) | aim continuity |
+
+**Aim continuity** (`ai_corr_aim_rb`): the aim target a few spans ahead can be the 4-lane rejoin span (type 11) or
+the fork span (type 8) while the car is still on a 2-lane main half. The route byte is a fraction of the CURRENT
+span's width, so the aim jumped sideways by the width difference and the car drifted into the wall at the last main
+spans before the plaza rejoin (F=328 raw 325, F=1130 raw 1127: every hard hit was there). The byte is now rescaled
+to keep the aim's lateral position when the target span has a different lane count and shares an edge with the
+current one. F=328 and F=1130 went WARN/FAIL -> PASS with this alone.
+
+**F=46 stays WARN, not a geometry or aim fault.** Seed 33, corridor 0 k=47..70 (raw 1358..1381): the road is dead
+straight, 2 lanes, 3.49 m half-width. Slot 0 runs at 506 units/tick, a lane correction of -0.13 lock starts rear
+slip (rear_slip 818 -> 54790), the car slides, drops to ~80 units/tick and blocks the other lane; slot 4 arrives
+at 486 and stops behind it (233 ticks), slot 2 joins. Same instability as any 500 units/tick car with a steering
+input; the forks-off baseline has the same kind of incident on this stretch (6 hits, 1 stall, 2 spins).
+`TD5RE_AI_GOV_VMAX=<units/tick>` (default off) caps the speed on a corridor route: 440 and 480 both turn F=46 PASS but
+cost F=328 (window speed 64-70% of the forks-off window) and, at 440, F=210. Not shipped on by default. The
+fix belongs to the lane-correction gain at high speed (a speed-scaled steer limit on generated tracks), a
+dynamics change that deserves its own round.
+
 ### Knobs added
 
 `TD5RE_AI_CORRIDOR=0` (all path-following), `TD5RE_AI_CORR_GOV=0`, `TD5RE_AI_CORR_GOV_SCOPE=0|1`,
 `TD5RE_AI_GOV_LAT` (tenths of m/s^2, 140), `_BRAKE` (98), `_LOOK` (36), `_FLOOR` (340 units/tick),
+`TD5RE_AI_GOV_VMAX` (units/tick straight-line ceiling on a corridor route, default 0 = off),
 `TD5RE_AI_GOV_DIAG=<slot>` (dev: one log line a tick), `TD5RE_GEO_PLAZA_VARLEN=0`.
 
 ### What step 3 should relax first (measured, in order of value per risk)
