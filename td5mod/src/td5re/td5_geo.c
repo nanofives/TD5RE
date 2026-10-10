@@ -287,6 +287,27 @@ static int geo_u8_is_nodata(const GeoRaster *r, unsigned v)
 
 /* ------------------------------------------------------------- lifecycle --- */
 
+/* [ROUND 1015 F] See td5_geo.h. Reads the SOURCE PLACE.JSON, never the derived
+ * copy: the commit strips the `tiled` block from the derived one on purpose, so
+ * that a derived frame reads as an ordinary (window-sized) place. */
+int td5_geo_place_is_tiled(const char *slug)
+{
+    char path[512];
+    char *json;
+    cJSON *root;
+    int tiled = 0;
+    if (!slug || !slug[0]) return 0;
+    td5_geo_source_path(path, sizeof(path), slug, "PLACE.JSON");
+    json = geo_slurp(path);
+    if (!json) return 0;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return 0;
+    tiled = cJSON_IsObject(cJSON_GetObjectItem(root, "tiled"));
+    cJSON_Delete(root);
+    return tiled;
+}
+
 int td5_geo_load(const char *slug)
 {
     char path[512];
@@ -295,6 +316,21 @@ int td5_geo_load(const char *slug)
 
     td5_geo_unload();
     if (!slug || !slug[0]) return 0;
+
+    /* [ROUND 1015 F] A tiled place has no raceable SOURCE frame: its rasters
+     * cover the whole administrative area (hundreds of MB) in an unrotated
+     * frame the generator never sees. Only a BUILT derived frame races. */
+    if (td5_geo_place_is_tiled(slug)) {
+        char stamp[512];
+        td5_geo_derived_path(stamp, sizeof(stamp), slug, TD5_GEO_DERIVED_STAMP);
+        if (!td5_plat_file_exists(stamp)) {
+            TD5_LOG_E(LOG_TAG, "geo: \"%s\" is a TILED place (a whole administrative "
+                      "area) with no built track yet. Open GEOSPATIAL TRACK "
+                      "GENERATOR, place the points and press BUILD TRACK; the "
+                      "source frame is not raced directly.", slug);
+            return 0;
+        }
+    }
 
     snprintf(s_geo.slug, sizeof(s_geo.slug), "%s", slug);
 
@@ -761,6 +797,13 @@ static struct {
     char reason[GEO_PLACES_MAX][48];
 } s_places_bad;
 
+/* [ROUND 1015 F] Tiled places that have terrain but no built track: routable on
+ * the map, not raceable. See td5_geo.h. */
+static struct {
+    int  n;
+    char slug[GEO_PLACES_MAX][64];
+} s_places_build;
+
 /* [J8 GEO-PICK] Slot-driven place override. Empty = not active, and then the
  * env knob decides exactly as before. */
 static char s_force_slug[64];
@@ -896,6 +939,7 @@ int td5_geo_places_rescan(void)
     struct dirent *e;
     s_places.n = 0;
     s_places_bad.n = 0;
+    s_places_build.n = 0;
     if (!d) return 0;
     while ((e = readdir(d)) != NULL && s_places.n < GEO_PLACES_MAX) {
         char path[384];
@@ -917,6 +961,15 @@ int td5_geo_places_rescan(void)
         td5_geo_place_path(path, sizeof(path), e->d_name, "ROUTE.JSON");
         f = td5_plat_file_open(path, "rb");
         if (!f) {                            /* no route: not raceable yet */
+            /* [ROUND 1015 F] A TILED place with no built track is buildable
+             * from the map, so it is listed for routing (not for racing). */
+            if (td5_geo_place_is_tiled(e->d_name)) {
+                if (s_places_build.n < GEO_PLACES_MAX) {
+                    memcpy(s_places_build.slug[s_places_build.n], e->d_name, len + 1);
+                    s_places_build.n++;
+                }
+                continue;
+            }
             geo_place_note_incomplete(e->d_name, "NO ROUTE -- DRAW ONE IN geo_selector.py");
             continue;
         }
@@ -940,6 +993,9 @@ int td5_geo_places_rescan(void)
     return s_places.n;
 }
 
+int         td5_geo_places_buildable_count(void) { return s_places_build.n; }
+const char *td5_geo_places_buildable_slug(int i)
+{ return (i >= 0 && i < s_places_build.n) ? s_places_build.slug[i] : ""; }
 int         td5_geo_places_count(void) { return s_places.n; }
 const char *td5_geo_places_slug(int i) { return (i >= 0 && i < s_places.n) ? s_places.slug[i] : ""; }
 const char *td5_geo_places_name(int i) { return (i >= 0 && i < s_places.n) ? s_places.name[i] : ""; }

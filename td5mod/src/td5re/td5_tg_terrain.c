@@ -1859,10 +1859,10 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
     double len;
-    /* Up to (MAXPT-1) quads per side. */
-    double px[(TD5_TG_GROUND_MAXPT - 1) * 8], py[(TD5_TG_GROUND_MAXPT - 1) * 8];
-    double pz[(TD5_TG_GROUND_MAXPT - 1) * 8], uu[(TD5_TG_GROUND_MAXPT - 1) * 8];
-    double vv[(TD5_TG_GROUND_MAXPT - 1) * 8];
+    /* Up to (MAXPT-1) quads per side, and [ROUND 1015 A] room for one wedge triangle per side. */
+    double px[(TD5_TG_GROUND_MAXPT - 1) * 8 + 8], py[(TD5_TG_GROUND_MAXPT - 1) * 8 + 8];
+    double pz[(TD5_TG_GROUND_MAXPT - 1) * 8 + 8], uu[(TD5_TG_GROUND_MAXPT - 1) * 8 + 8];
+    double vv[(TD5_TG_GROUND_MAXPT - 1) * 8 + 8];
     /* [R9 TOPO C4] The SURFACE material comes from the ground-run authority,
      * not from this span's dithered biome roll. See tg_topo_ground_index. */
     int seg_page = tg_topo_surface_page_sloped(nl, si), seg_nq;
@@ -2008,6 +2008,37 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
             uu[n]=b1/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
             px[n]=bfx+gx*b0; py[n]=bfy-by0; pz[n]=bfz+gz*b0;
             uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
+        }
+        /* [ROUND 1015 A item 1] "the road at span 38 is not rendered ... it starts rendering
+         * after span 46, and there's a gap between that and the start of the road at 47"
+         * (Diagonal 73's far carriageway). Where the skirt's INNER edge is pulled out off the
+         * road edge to clear a carriageway that is not built yet -- the avenue's / fork's reach
+         * starts at span 46 or 47 and holds the inner edge 379 units out at the near end of
+         * slab 46 and 1809 at the far end -- the strip between the road edge and that edge is
+         * covered by nothing (the carriageway starts at the next node, the gore only on fork
+         * MAIN spans) and the sky shows through it. The same hole opens where an avenue or a
+         * fork ends. Fill it with a ground quad from the road edge to the inner edge on both
+         * ends of the slab. NOT on a fork's main spans: the gore floor lies at the same height
+         * there and a second ground under it would flicker. GEO tracks only (the synthetic
+         * forks keep their bytes); TD5RE_GEO_GROUND_WEDGE=0 restores the hole. */
+        if (td5_geo_loaded() && pa.n > 0 && pb.n > 0 &&
+            n + 4 <= (TD5_TG_GROUND_MAXPT - 1) * 8 + 8 &&
+            tg_fork_of_main(si) < 0 &&
+            td5_env_flag_on("TD5RE_GEO_GROUND_WEDGE")) {
+            /* at least one unit wide at each end: a quad with two coincident corners is
+             * a degenerate quad, and the renderer drops those (the wedge at the start of
+             * an avenue, where the near edge is flush, vanished) */
+            const double a0 = (pa.d[0] > 1.0) ? pa.d[0] : 1.0;
+            const double b0 = (pb.d[0] > 1.0) ? pb.d[0] : 1.0;
+            if (pa.d[0] > 50.0 || pb.d[0] > 50.0) {
+                const double dyn = pa.dy[0], dyf = pb.dy[0];
+                /* near-in at the road edge, near-out at the near inner edge, far-out at the
+                 * far inner edge, far-in at the road edge: the same ring the skirt uses */
+                px[n]=bnx;        py[n]=bny-dyn; pz[n]=bnz;        uu[n]=0.0;                         vv[n]=(double)si;     n++;
+                px[n]=bnx+ox*a0; py[n]=bny-dyn; pz[n]=bnz+oz*a0; uu[n]=a0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si;     n++;
+                px[n]=bfx+gx*b0; py[n]=bfy-dyf; pz[n]=bfz+gz*b0; uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
+                px[n]=bfx;        py[n]=bfy-dyf; pz[n]=bfz;        uu[n]=0.0;                         vv[n]=(double)si+1.0; n++;
+            }
         }
         side_n[s] += n;
     }

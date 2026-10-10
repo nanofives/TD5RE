@@ -80,6 +80,16 @@
  * (TD5RE_GEO_FORK_TAPER sets the length, TD5RE_GEO_FORK_TAPER_SMOOTH=1 a smoothstep
  * shape: measured no better than the linear 16 over 5 race seeds, see the doc.) */
 #define TG_RF_TAPER_DEF     16
+/* [ROUND 1015 A] The shortest ramp a fork may be built with at either end. A ramp is
+ * normally TG_RF_TAPER_DEF nodes; where the start grid, a lane-count change or the
+ * finish takes some of that room it is SHORTENED to what is left, down to this. 6
+ * nodes is 21 m for the 3.5 m of one lane (9.5 degrees): steeper than the 7 degrees
+ * of the full ramp, far gentler than the 45 degrees of the pre-F2b step. Below it the
+ * candidate is refused as before. TD5RE_GEO_FORK_TAPER_FIT=0 restores the old rule
+ * (full ramp or nothing, route lanes constant over the whole window). */
+#define TG_RF_TAPER_MIN     6
+/* How far down the avenue the FIRST fork of a run may slide its start to find a clean window. */
+#define TG_RF_START_SLIDE   24
 /* Two forks may share a taper (the node takes the larger of the two widths, so
  * the road narrows after one and widens again before the next without having to
  * close), but their FULL-width windows F-8 .. R+2 stay at least this far apart. */
@@ -95,6 +105,7 @@ typedef struct {
     int    len;                        /* R - F - 1                            */
     int    lanes_a, lanes_b;
     int    i0, w_end;                  /* node window: lane ramp .. last shifted node */
+    int    taper_in, taper_out;        /* [1015 A] the ramp lengths actually used     */
     double weight;
     char   name[64];
     double off[TG_RF_STEPS + 2];       /* signed lateral from A's centre, node F+j */
@@ -105,6 +116,7 @@ typedef struct {
     int    F, len, R;
     int    lanes_a, lanes_b;
     int    i0, w_end;
+    int    taper_in, taper_out;
     char   name[64];
     double med[TG_RF_STEPS + 2];       /* effective median width per step 0..len  */
     double med_real_lo, med_real_hi;   /* what the map says, before the taper     */
@@ -227,7 +239,9 @@ double tg_realfork_node_width(int node, int lanes, double lane_w)
     if (!tg_realfork_enabled() || node < 0 || node >= s_rn || s_node_fork[node] < 0
         || s_node_extra[node] <= 0.0)
         return (double)lanes * lane_w;
-    return ((double)s_rf[s_node_fork[node]].lanes_a + s_node_extra[node]) * lane_w;
+    /* [ROUND 1015 A] the route's own lanes AT THIS NODE plus what the ramp adds: the
+     * same lanes_a on every node of a round-1013 window, more on the 3-lane approach. */
+    return ((double)s_rl[node] + s_node_extra[node]) * lane_w;
 }
 
 double tg_realfork_node_delta(int node)
@@ -238,10 +252,11 @@ double tg_realfork_node_delta(int node)
 
 /* ---- candidate generation ------------------------------------------------ */
 
+static int s_rf_quiet;      /* [1015 A] silent while a start slides along the road */
 static void rf_note(const char *what, int src, const char *name, int a, int b,
                     const char *why)
 {
-    if (!s_rf_diag) return;
+    if (!s_rf_diag || s_rf_quiet) return;
     TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] %s %s \"%s\" spans %d..%d: %s",
               what, src == TG_RF_SRC_AVENUE ? "avenue"
                     : src == TG_RF_SRC_PARALLEL ? "parallel" : "plaza",
@@ -285,12 +300,120 @@ static int rf_window_limit(void)
     return lim;
 }
 
+/* [ROUND 1015 A] FIT THE NODE WINDOW to the room the route has.
+ *
+ * Round 1013 wanted the full taper (16 nodes) at both ends and a route lane count
+ * that never changes across the whole window, and refused the candidate otherwise.
+ * On Mariano's La Plata route that refused the fork he asked for FIRST: "as soon as I
+ * get into the avenue I should be able to drive on both parts". Diagonal 73's
+ * opposite carriageway exists from span 47, 23 spans after the start grid, and the
+ * route carries 3 lanes up to span 38 (Calle 40) and 2 after it, so the window of a
+ * fork at F=47 (nodes 23..) runs into the grid and across the lane change.
+ *
+ * The rule is now what the road actually needs, per end:
+ *   FULL WIDTH F-8 .. R+2   the route's lane count must equal lanes(A) (as before).
+ *   RAMP in front / behind  as long as the room allows, at most the full taper, at
+ *                           least TG_RF_TAPER_MIN. It may not start inside the start
+ *                           grid, may not run past the window limit (the finish), and
+ *                           may cross route nodes carrying MORE lanes than lanes(A)
+ *                           (up to lanes(A)+lanes(B)): the ramp then grows the road
+ *                           from the lanes it already has to the fork's width, see the
+ *                           node width in tg_realfork_build. A node with FEWER lanes than
+ *                           lanes(A) ends the ramp there.
+ * Returns 0 (candidate refused, reason logged) when the full-width window itself does
+ * not fit or a ramp is under TG_RF_TAPER_MIN. TD5RE_GEO_FORK_TAPER_FIT=0 restores the
+ * round-1013 rule exactly. */
+static int rf_fit_window(RfCand *c)
+{
+    const int fit = td5_env_flag_on("TD5RE_GEO_FORK_TAPER_FIT");
+    const int f0 = c->F - TG_RF_WIDEN, f1 = c->R + 2;     /* the full-width window */
+    int i, lo, hi, tin, tout;
+
+    if (!fit) {
+        c->taper_in = c->taper_out = s_rf_taper;
+        c->i0    = c->F - TG_RF_WIDEN - s_rf_taper;
+        c->w_end = c->R + 2 + s_rf_taper;
+        if (c->i0 < TD5_TG_GRID_SPAN + 2) {
+            rf_note("REJECT", c->src, c->name, c->F, c->R, "inside the start grid");
+            return 0;
+        }
+        if (c->w_end > rf_window_limit()) {
+            rf_note("REJECT", c->src, c->name, c->F, c->R,
+                    "past the finish line (or inside the ring tail)");
+            return 0;
+        }
+        lo = c->i0 - 1; if (lo < 0) lo = 0;
+        hi = c->w_end + 1; if (hi > s_rn - 1) hi = s_rn - 1;
+        for (i = lo; i <= hi; i++)
+            if (s_rl[i] != c->lanes_a) {
+                rf_note("REJECT", c->src, c->name, c->F, c->R,
+                        "the route's own lane count changes inside the window");
+                return 0;
+            }
+        return 1;
+    }
+
+    /* the full-width window itself: clear of the grid, short of the finish, constant lanes */
+    if (f0 < TD5_TG_GRID_SPAN + 2 + TG_RF_TAPER_MIN) {
+        rf_note("REJECT", c->src, c->name, c->F, c->R, "inside the start grid");
+        return 0;
+    }
+    if (f1 + TG_RF_TAPER_MIN > rf_window_limit() || c->R + 25 > s_rn - 1) {
+        rf_note("REJECT", c->src, c->name, c->F, c->R,
+                "past the finish line (or inside the ring tail)");
+        return 0;
+    }
+    /* the fork BODY F .. R+? keeps the route's own count exactly; the approach in front
+     * of F (the 8 uniform nodes) and the 2 behind R may carry more lanes than lanes(A), up
+     * to the fork's total, exactly as a ramp node may (a 3-lane junction flare in front of
+     * a 2+2 avenue): the width there is made up to lanes(A)+lanes(B) in tg_realfork_build. */
+    lo = c->F; if (lo < 0) lo = 0;
+    hi = c->R + 1; if (hi > s_rn - 1) hi = s_rn - 1;
+    for (i = lo; i <= hi; i++)
+        if (s_rl[i] != c->lanes_a) {
+            rf_note("REJECT", c->src, c->name, c->F, c->R,
+                    "the route's own lane count changes inside the window");
+            return 0;
+        }
+    for (i = f0 < 0 ? 0 : f0; i <= f1 && i < s_rn; i++) {
+        if (i >= c->F && i <= c->R + 1) continue;
+        if (s_rl[i] < c->lanes_a || s_rl[i] > c->lanes_a + c->lanes_b) {
+            rf_note("REJECT", c->src, c->name, c->F, c->R,
+                    "the route's own lane count changes inside the window");
+            return 0;
+        }
+    }
+    /* the ramps: walk outward while the room and the route allow */
+    for (tin = 0; tin < s_rf_taper; tin++) {
+        const int n = f0 - 1 - tin;
+        if (n < TD5_TG_GRID_SPAN + 2) break;
+        if (s_rl[n] < c->lanes_a || s_rl[n] > c->lanes_a + c->lanes_b) break;
+    }
+    for (tout = 0; tout < s_rf_taper; tout++) {
+        const int n = f1 + 1 + tout;
+        if (n > rf_window_limit() || n >= s_rn - 1) break;
+        if (s_rl[n] < c->lanes_a || s_rl[n] > c->lanes_a + c->lanes_b) break;
+    }
+    if (tin < TG_RF_TAPER_MIN || tout < TG_RF_TAPER_MIN) {
+        rf_note("REJECT", c->src, c->name, c->F, c->R,
+                tin < TG_RF_TAPER_MIN ? "no room for the lane ramp in front of it "
+                                        "(start grid or a narrower road)"
+                                      : "no room for the lane ramp behind it "
+                                        "(finish or a narrower road)");
+        return 0;
+    }
+    c->taper_in  = tin;  c->taper_out = tout;
+    c->i0    = f0 - tin;
+    c->w_end = f1 + tout;
+    return 1;
+}
+
 /* Fill the derived window of a candidate and reject it when the route cannot
  * carry it. Every reason is logged under TD5RE_GEO_FORK_DIAG so "why is there no
  * fork there" is answerable from race.log, not from a guess. */
 static int rf_validate(RfCand *c)
 {
-    int i, lo, hi;
+    int i;
     double worst = 0.0;
 
     c->len = c->R - c->F - 1;
@@ -304,29 +427,7 @@ static int rf_validate(RfCand *c)
     if (c->len < TG_RF_MINLEN || c->len > TG_RF_MAXLEN) return 0;
     /* The full width holds F-8 .. R+2 (the engine's own uniform window); the taper
      * runs s_rf_taper nodes in front of it and behind it. */
-    c->i0    = c->F - TG_RF_WIDEN - s_rf_taper;
-    c->w_end = c->R + 2 + s_rf_taper;
-    /* The start grid, and the 24-span tail margin tg_fork_place keeps. */
-    if (c->i0 < TD5_TG_GRID_SPAN + 2) {
-        rf_note("REJECT", c->src, c->name, c->F, c->R, "inside the start grid");
-        return 0;
-    }
-    if (c->w_end > rf_window_limit()) {
-        rf_note("REJECT", c->src, c->name, c->F, c->R,
-                "past the finish line (or inside the ring tail)");
-        return 0;
-    }
-    /* The route's own lane count must be CONSTANT across the window, or the
-     * lane arithmetic lanes(F) = lanes(F+1) + lanes(B0) has no single answer
-     * and the ramp starts from the wrong number. */
-    lo = c->i0 - 1; if (lo < 0) lo = 0;
-    hi = c->w_end + 1; if (hi > s_rn - 1) hi = s_rn - 1;
-    for (i = lo; i <= hi; i++)
-        if (s_rl[i] != c->lanes_a) {
-            rf_note("REJECT", c->src, c->name, c->F, c->R,
-                    "the route's own lane count changes inside the window");
-            return 0;
-        }
+    if (!rf_fit_window(c)) return 0;
     /* A fork on a sharp bend folds its shifted carriageways (the R6 "span 570"
      * report): the same per-span heading cap the placement loop logs. */
     for (i = c->F - TG_RF_WIDEN; i <= c->R + 2 && i + 2 < s_rn; i++) {
@@ -363,6 +464,52 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
     snprintf(c->name, sizeof c->name, "%s", name ? name : "");
     c->weight = 0.0;
     return c;
+}
+
+/* [ROUND 1015 A] One avenue candidate for the span range F..R: reads the real offsets from
+ * the sidecar, makes the candidate and validates it. Returns 1 when it was kept. */
+static int rf_avenue_try(const char *name, int F, int R, int merge, int *oom)
+{
+    int la = 0, lb_n[10], lb_best = 2, nb = 0, i, ok = 1;
+    RfCand *c;
+    memset(lb_n, 0, sizeof lb_n);
+    for (i = F; i <= R && ok; i++) {
+        double off = 0.0; int lb = 2, op = 0;
+        if (!td5_geo_avenue_at(i, &off, &lb, &op)) {
+            /* A hole in the sidecar inside the run: the real
+             * carriageway is not known there, so no fork over it. */
+            ok = 0; break;
+        }
+        if (off > 0.0) { ok = 0; break; }   /* +t side: see rf_validate */
+        if (lb >= 1 && lb < 10) lb_n[lb]++;
+    }
+    if (!ok) {
+        rf_note("REJECT", TG_RF_SRC_AVENUE, name, F, R,
+                "the opposite carriageway is missing or on the +t "
+                "side (left corridors are parked)");
+        return 0;
+    }
+    for (i = 1; i < 10; i++)
+        if (lb_n[i] > nb) { nb = lb_n[i]; lb_best = i; }
+    la = (F >= 0 && F < s_rn) ? s_rl[F] : 2;
+    c = rf_new_cand(TG_RF_SRC_AVENUE, name, F, R, la, lb_best);
+    if (!c) { *oom = 1; return 0; }
+    for (i = F; i <= R; i++) {
+        double off = 0.0;
+        td5_geo_avenue_at(i, &off, NULL, NULL);
+        c->off[i - F] = off;
+    }
+    if (!rf_validate(c)) return 0;
+    /* [ROUND 1014 A] Weighted by its FULL length unless the merge
+     * knob is off. The old cap of 90 made two 55-span blocks worth
+     * more than the 194-span run they are the halves of, so the
+     * selector kept alternate blocks (full-width windows of
+     * neighbouring blocks overlap across the 2-span median
+     * opening) and the other blocks were left as a scenery
+     * carriageway that looks drivable and is not. */
+    c->weight = (double)(merge ? c->len : (c->len > 90 ? 90 : c->len)) * 1.05;
+    s_ncand++;
+    return 1;
 }
 
 /* SOURCE 1: the divided avenues of AVENUES.JSON.
@@ -411,12 +558,18 @@ static void rf_gen_avenue(void)
                  * GRID_SPAN + 12 -- a clamp that always failed rf_validate's
                  * "inside the start grid" test, so a run that begins in the grid
                  * (Diagonal 73 at span 24) lost its first 34 spans of corridor. */
-                const int Fmin = merge ? TD5_TG_GRID_SPAN + 2 + TG_RF_WIDEN + s_rf_taper
+                /* [ROUND 1015 A] ... and with the ramp fitted to the room the grid
+                 * leaves (rf_fit_window), the earliest F is the one whose SHORTEST
+                 * ramp clears the grid: an avenue that opens at span 47 gets its
+                 * fork at 47, not at 50 -- or at 94 when the 3-lane approach made the
+                 * round-1014 window refuse every earlier start. */
+                const int fit = td5_env_flag_on("TD5RE_GEO_FORK_TAPER_FIT");
+                const int Fmin = merge ? TD5_TG_GRID_SPAN + 2 + TG_RF_WIDEN
+                                         + (fit ? TG_RF_TAPER_MIN : s_rf_taper)
                                        : TD5_TG_GRID_SPAN + 12;
                 const int F = (gate_a[g] > Fmin) ? gate_a[g] : Fmin;
                 const int R = gate_b[h];
-                int la = 0, lb_n[10], lb_best = 2, nb = 0, i, ok = 1;
-                RfCand *c;
+                int oom = 0;
                 /* BETWEEN consecutive gates: a fork is one block of the avenue,
                  * from one real opening (or run end) to the next. A block too
                  * short to be worth a fork is merged with the next one; the
@@ -425,44 +578,30 @@ static void rf_gen_avenue(void)
                  * is a worse picture of the map than two that each end at one. */
                 if (R - F - 1 < TG_RF_MINLEN) continue;
                 if (R - F - 1 > TG_RF_MAXLEN) break;
-                memset(lb_n, 0, sizeof lb_n);
-                for (i = F; i <= R && ok; i++) {
-                    double off = 0.0; int lb = 2, op = 0;
-                    if (!td5_geo_avenue_at(i, &off, &lb, &op)) {
-                        /* A hole in the sidecar inside the run: the real
-                         * carriageway is not known there, so no fork over it. */
-                        ok = 0; break;
+                if (!rf_avenue_try(name, F, R, merge, &oom) && !oom && g == 0 && fit) {
+                    /* [ROUND 1015 A] THE START SLIDES. The first gate is where the avenue's
+                     * opposite carriageway begins, and the road at that point is often
+                     * still turning onto the avenue (Diagonal 73 leaves Calle 40 at spans
+                     * 35..38; Avenida 60 and Avenida 7 leave a plaza ring), so the window of
+                     * a fork there holds a bend or a lane change and is refused. The fork
+                     * starts at the first span, at or after the gate, whose window is clean:
+                     * the avenue's opposite carriageway is a scenery road up to it and a
+                     * driveable one from it. */
+                    int slide;
+                    s_rf_quiet = 1;
+                    for (slide = 1; slide <= TG_RF_START_SLIDE && !oom; slide++) {
+                        if (R - (F + slide) - 1 < TG_RF_MINLEN) break;
+                        if (rf_avenue_try(name, F + slide, R, merge, &oom)) {
+                            s_rf_quiet = 0;
+                            rf_note("SLID", TG_RF_SRC_AVENUE, name, F, R,
+                                    "the start of the fork moved down the avenue past "
+                                    "a bend or a lane change");
+                            break;
+                        }
                     }
-                    if (off > 0.0) { ok = 0; break; }   /* +t side: see rf_validate */
-                    if (lb >= 1 && lb < 10) lb_n[lb]++;
+                    s_rf_quiet = 0;
                 }
-                if (!ok) {
-                    rf_note("REJECT", TG_RF_SRC_AVENUE, name, F, R,
-                            "the opposite carriageway is missing or on the +t "
-                            "side (left corridors are parked)");
-                    continue;
-                }
-                for (i = 1; i < 10; i++)
-                    if (lb_n[i] > nb) { nb = lb_n[i]; lb_best = i; }
-                la = (F >= 0 && F < s_rn) ? s_rl[F] : 2;
-                c = rf_new_cand(TG_RF_SRC_AVENUE, name, F, R, la, lb_best);
-                if (!c) return;
-                for (i = F; i <= R; i++) {
-                    double off = 0.0;
-                    td5_geo_avenue_at(i, &off, NULL, NULL);
-                    c->off[i - F] = off;
-                }
-                if (rf_validate(c)) {
-                    /* [ROUND 1014 A] Weighted by its FULL length unless the merge
-                     * knob is off. The old cap of 90 made two 55-span blocks worth
-                     * more than the 194-span run they are the halves of, so the
-                     * selector kept alternate blocks (full-width windows of
-                     * neighbouring blocks overlap across the 2-span median
-                     * opening) and the other blocks were left as a scenery
-                     * carriageway that looks drivable and is not. */
-                    c->weight = (double)(merge ? c->len : (c->len > 90 ? 90 : c->len)) * 1.05;
-                    s_ncand++;
-                }
+                if (oom) return;
                 if (!merge) break;      /* the old rule: the nearest long-enough gate only */
             }
     }
@@ -983,6 +1122,7 @@ static void rf_finalise(RfFork *f, const RfCand *c)
     f->src = c->src; f->F = c->F; f->R = c->R; f->len = c->len;
     f->lanes_a = c->lanes_a; f->lanes_b = c->lanes_b;
     f->i0 = c->i0; f->w_end = c->w_end;
+    f->taper_in = c->taper_in; f->taper_out = c->taper_out;
     snprintf(f->name, sizeof f->name, "%s", c->name);
 
     f->med_real_lo = 1e30; f->med_real_hi = 0.0;
@@ -1066,12 +1206,12 @@ int tg_realfork_build(void)
         rf_finalise(rf, c);
         /* Fill the node window the walk reads. */
         for (i = c->i0; i <= c->w_end && i < s_rn; i++) {
-            double fr = 1.0, extra;
+            double fr = 1.0, extra, want;
             if (i < 0) continue;
             if (i < c->F - TG_RF_WIDEN)
-                fr = (double)(i - c->i0) / (double)s_rf_taper;            /* widening */
+                fr = (double)(i - c->i0) / (double)c->taper_in;            /* widening */
             else if (i > c->R + 2)
-                fr = 1.0 - (double)(i - (c->R + 2)) / (double)s_rf_taper;  /* narrowing */
+                fr = 1.0 - (double)(i - (c->R + 2)) / (double)c->taper_out;  /* narrowing */
             if (fr < 0.0) fr = 0.0; else if (fr > 1.0) fr = 1.0;
             /* Smoothstep: zero slope at both ends of the taper, so the road edge
              * does not kink where the taper starts and stops (a linear ramp
@@ -1080,12 +1220,19 @@ int tg_realfork_build(void)
              * 131..134 behind fork 0). Same peak edge angle as the linear 16
              * at 24 nodes (1.5 x 7 m / 84 m). */
             if (s_rf_taper_smooth) fr = fr * fr * (3.0 - 2.0 * fr);
-            extra = (double)c->lanes_b * fr;
+            /* [ROUND 1015 A] The ramp grows the road from the lanes the route HAS at
+             * this node to the fork's width, so a node that already carries more than
+             * lanes(A) (the 3-lane approach to Diagonal 73) is only widened by what is
+             * still missing. With the route at lanes(A) -- every node of the round-1013
+             * windows -- this is lanes_b * fr exactly. */
+            want  = (double)c->lanes_a + (double)c->lanes_b * fr;
+            extra = want - (double)s_rl[i];
+            if (extra < 0.0) extra = 0.0;
             if (extra <= s_node_extra[i] && s_node_fork[i] >= 0) continue;  /* shared taper */
             s_node_fork[i]  = s_rf_n;
             s_node_extra[i] = extra;
             /* the lane COUNT is the rounded width; 0 = leave the route's own */
-            s_node_ovr[i] = (extra >= 0.5) ? c->lanes_a + (int)(extra + 0.5) : 0;
+            s_node_ovr[i] = (extra >= 0.5) ? s_rl[i] + (int)(extra + 0.5) : 0;
         }
         cov += rf->len;
         TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] %d: %s \"%s\" F=%d len=%d R=%d "

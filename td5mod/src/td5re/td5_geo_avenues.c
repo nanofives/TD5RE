@@ -13,6 +13,7 @@
  * lights. Every rejected row is logged with its reason and the rest are kept,
  * because losing one median is better than losing a whole track.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 #include "td5re.h"
 #include "td5_platform.h"
 #include "td5_geo.h"
+#include "td5_geo_roads.h"      /* [1015 A] the real cross streets, for the median openings */
 #include "td5_config.h"
 #include "td5_geo_avenues.h"
 #include "deps/cjson/cJSON.h"
@@ -125,6 +127,190 @@ static double av_num(const cJSON *o, const char *k, double dflt)
 {
     const cJSON *j = o ? cJSON_GetObjectItem(o, k) : NULL;
     return (j && cJSON_IsNumber(j)) ? j->valuedouble : dflt;
+}
+
+/* [ROUND 1015 A item 17] "there should be a drivable avenue on the street at level091 e224"
+ * (Avenida 60, span 899).
+ *
+ * The route commit starts an avenue's per-span table at the span its detector run begins
+ * on, which is the run's first route VERTEX. Avenida 60 begins at the exit of Plaza Maximo
+ * Paz: the route leaves the ring at span 896 and the first vertex on the avenue is span 904,
+ * so spans 896..903 are on the avenue's own first segment, with its opposite carriageway
+ * 12.3 m away, and carried no row: no scenery road, no median, and (because the fork starts
+ * at the first span of the table) no fork either. This walks each avenue's start BACKWARD on
+ * the same road graph, one span at a time, for as long as an anti-parallel way of the
+ * avenue's own street keeps the same side and stays within the per-span continuity step the
+ * commit uses (GR_AV_MAX_STEP, 375 units), up to GEOAV_BACKFILL spans and never into the
+ * previous avenue or the start grid's span 0. Needs no re-BUILD: it reads the existing
+ * cache. TD5RE_GEO_AVENUE_BACKFILL=0 keeps the file's first span. */
+#define GEOAV_BACKFILL        12
+#define GEOAV_STEP_MAX        375.0
+#define GEOAV_ANTI_COS        (-0.80)       /* peer direction . route tangent below this */
+#define GEOAV_MIN_MEDIAN      150.0
+static int av_peer_at(int name_id, double x, double z, double tx, double tz, int side,
+                      double prev_d, double own_half, double *off_out, int *lanes_out)
+{
+    int j, best_w = -1;
+    double best_err = 1e30, best_d = 0.0;
+    for (j = 0; j < td5_geo_roads_count(); j++) {
+        const TD5_GeoRoad *r = td5_geo_roads_get(j);
+        int k;
+        if (!r || r->name_id != name_id || r->count < 2) continue;
+        if (!r->oneway) continue;                    /* a half of a pair is one-way */
+        for (k = 0; k + 1 < r->count; k++) {
+            double ax, az, bx, bz, dx, dz, l2, t, cx, cz, lat, d, err, sx, sz, sl, dot;
+            if (!td5_geo_roads_point(r, k, &ax, &az) || !td5_geo_roads_point(r, k + 1, &bx, &bz))
+                continue;
+            dx = bx - ax; dz = bz - az;
+            l2 = dx * dx + dz * dz;
+            if (l2 < 1.0) continue;
+            t = ((x - ax) * dx + (z - az) * dz) / l2;
+            if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+            cx = ax + dx * t; cz = az + dz * t;
+            /* left of travel is (tz, -tx) */
+            lat = (cx - x) * tz - (cz - z) * tx;
+            if ((lat < 0.0 ? -1 : 1) != side) continue;
+            d = lat < 0.0 ? -lat : lat;
+            sl = sqrt(l2);
+            sx = dx / sl; sz = dz / sl;
+            if (r->oneway_dir < 0) { sx = -sx; sz = -sz; }
+            dot = sx * tx + sz * tz;
+            if (dot > GEOAV_ANTI_COS) continue;      /* not running against the route */
+            err = d > prev_d ? d - prev_d : prev_d - d;
+            if (err > GEOAV_STEP_MAX) continue;
+            if (d < own_half + (double)(r->lanes > 0 ? r->lanes : 2) * GEOAV_LANE_WIDTH * 0.5
+                    + GEOAV_MIN_MEDIAN) continue;    /* the two carriageways would touch */
+            if (err < best_err) { best_err = err; best_d = d; best_w = j; }
+        }
+    }
+    if (best_w < 0) return 0;
+    *off_out = (double)side * best_d;
+    if (lanes_out) { const TD5_GeoRoad *r = td5_geo_roads_get(best_w);
+                     *lanes_out = (r && r->lanes > 0 && r->lanes <= 8) ? r->lanes : 2; }
+    return 1;
+}
+
+static void av_backfill_starts(const char *slug)
+{
+    int i, total = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_BACKFILL")) return;
+    if (td5_geo_route_count() < 3) return;
+    if (!td5_geo_roads_sync(slug) || td5_geo_roads_count() < 1) return;
+
+    for (i = 0; i < s_n_av; i++) {
+        int base = -1, q, name_id = -1, k, added = 0;
+        GeoAvSpan add[GEOAV_BACKFILL];
+        double prev_d, x, z, xa, za, xb, zb, tx, tz, len;
+        int side, lq = 0;
+        for (q = 0; q < s_n_rows; q++) if (s_rows[q].av == i) { base = q; break; }
+        if (base < 0) continue;
+        for (k = 0; k < td5_geo_roads_name_count(); k++)
+            if (strcmp(td5_geo_roads_name_by_id(k), s_name[i]) == 0) { name_id = k; break; }
+        if (name_id < 0) continue;
+        side   = s_rows[base].off < 0.0 ? -1 : 1;
+        prev_d = s_rows[base].off < 0.0 ? -s_rows[base].off : s_rows[base].off;
+        for (k = 1; k <= GEOAV_BACKFILL; k++) {
+            const int sp = s_rows[base].span - k;
+            double off = 0.0;
+            int lanes = 2, own_lanes = 2;
+            if (sp < 1) break;
+            if (base > 0 && sp <= s_rows[base - 1].span) break;     /* the previous avenue */
+            if (td5_geo_route_node(sp - 1, &xa, &za, &lq) < 0) break;
+            td5_geo_route_node(sp,     &x,  &z,  &own_lanes);
+            td5_geo_route_node(sp + 1, &xb, &zb, &lq);
+            tx = xb - xa; tz = zb - za;
+            len = sqrt(tx * tx + tz * tz);
+            if (len < 1.0) break;
+            tx /= len; tz /= len;
+            if (!av_peer_at(name_id, x, z, tx, tz, side, prev_d,
+                            (double)(own_lanes > 0 ? own_lanes : 2) * GEOAV_LANE_WIDTH * 0.5,
+                            &off, &lanes)) break;
+            add[added].span = sp; add[added].av = i; add[added].lanes = lanes;
+            add[added].open = 0;  add[added].off = off;
+            prev_d = off < 0.0 ? -off : off;
+            added++;
+        }
+        if (added < 1) continue;
+        if (s_n_rows + added > GEOAV_MAX_SPANS) continue;
+        /* the new rows are DESCENDING in add[]; insert them ascending in front of `base` */
+        memmove(&s_rows[base + added], &s_rows[base],
+                (size_t)(s_n_rows - base) * sizeof s_rows[0]);
+        for (k = 0; k < added; k++) s_rows[base + k] = add[added - 1 - k];
+        s_n_rows += added;
+        s_s0[i] = s_rows[base].span;
+        total += added;
+        TD5_LOG_I(LOG_TAG, "avenues: %s starts at span %d, %d span(s) earlier than the file "
+                  "(its opposite carriageway is mapped from there)", s_name[i], s_s0[i], added);
+    }
+    if (total)
+        TD5_LOG_I(LOG_TAG, "avenues: %d span(s) back-filled at the start of the avenues", total);
+}
+
+/* [ROUND 1015 A item 13] THE MEDIAN OPENINGS, measured on the geometry the race is built
+ * from.
+ *
+ * AVENUES.JSON's `open` flag is written by the route commit (td5_geo_route.c,
+ * gr_median_opening_at), which asks "is a differently named way within half a span of the
+ * median midline" at a point of the RAW route polyline. Two things make that miss real cross
+ * streets. The point is located by arclength FRACTION, and the conditioner smooths and
+ * re-parameterises the route, so the point can sit a few spans away from the span it is
+ * written against (Calle 46 / Calle 17 across Diagonal 73 land at conditioned spans 398..400
+ * and 402..404; the file opens 395, 396 and 399). And half a span is 1.7 m from a street's
+ * CENTRE LINE, while a calle is 7 m wide and meets the avenue at 45 degrees: its footprint on
+ * the median is three spans long and a sampler that narrow catches one of them or none.
+ *
+ * So it is recomputed here, at load, from the CONDITIONED route nodes (the very nodes the
+ * generator walks) and the same road graph: span s is open when the nearest way that is not
+ * the avenue's own street passes within that way's own half carriageway (never under the old
+ * half span) of the median midline, at an angle to the avenue of at least GEOAV_OPEN_PARA_DEG
+ * (a way running ALONGSIDE the avenue is not a crossing). Needs no re-BUILD: it reads the
+ * existing cache. TD5RE_GEO_AVENUE_OPEN_REFINE=0 keeps the file's flags. */
+#define GEOAV_OPEN_PARA_COS  0.906          /* cos 25 deg */
+static void av_refine_openings(const char *slug)
+{
+    int i, q, changed = 0, now_open = 0, was_open = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_OPEN_REFINE")) return;
+    if (td5_geo_route_count() < 3) return;
+    if (!td5_geo_roads_sync(slug) || td5_geo_roads_count() < 1) return;
+
+    for (i = 0; i < s_n_av; i++) {
+        int name_id = -1, k;
+        for (k = 0; k < td5_geo_roads_name_count(); k++)
+            if (strcmp(td5_geo_roads_name_by_id(k), s_name[i]) == 0) { name_id = k; break; }
+        for (q = 0; q < s_n_rows; q++) {
+            GeoAvSpan *g = &s_rows[q];
+            double xa, za, xc, zc, xb, zb, tx, tz, len, mx, mz, dx = 0.0, dz = 0.0, dist = 0.0;
+            const TD5_GeoRoad *r;
+            int op = 0, lq = 0;
+            if (g->av != i) continue;
+            if (g->span < 1 || g->span + 1 >= td5_geo_route_count()) continue;
+            td5_geo_route_node(g->span - 1, &xa, &za, &lq);
+            td5_geo_route_node(g->span,     &xc, &zc, &lq);
+            td5_geo_route_node(g->span + 1, &xb, &zb, &lq);
+            tx = xb - xa; tz = zb - za;
+            len = sqrt(tx * tx + tz * tz);
+            if (len < 1.0) continue;
+            tx /= len; tz /= len;
+            /* left of travel is (tz, -tx); `off` is signed, + = left */
+            mx = xc + tz * (g->off * 0.5);
+            mz = zc - tx * (g->off * 0.5);
+            r = td5_geo_roads_nearest(mx, mz, 4.0 * GEOAV_LANE_WIDTH, name_id, &dx, &dz, &dist);
+            if (r) {
+                const double hw0 = 0.5 * GEOAV_LANE_WIDTH;           /* the old half span */
+                double hw = (double)(r->lanes > 0 ? r->lanes : 2) * GEOAV_LANE_WIDTH * 0.5;
+                const double dot = dx * tx + dz * tz;
+                if (hw < hw0) hw = hw0;
+                op = (dist <= hw) && ((dot < 0.0 ? -dot : dot) < GEOAV_OPEN_PARA_COS);
+            }
+            if (g->open) was_open++;
+            if (op) now_open++;
+            if ((g->open != 0) != (op != 0)) changed++;
+            g->open = op;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "avenues: median openings re-measured on the conditioned route: "
+              "%d span(s) open (the file said %d), %d row(s) changed", now_open, was_open,
+              changed);
 }
 
 int td5_geo_avenues_sync(void)
@@ -257,6 +443,8 @@ int td5_geo_avenues_sync(void)
 
     s_n_av = kept_av;
     snprintf(s_source, sizeof s_source, "%s", path);
+    av_backfill_starts(slug);          /* [ROUND 1015 A item 17] */
+    av_refine_openings(slug);          /* [ROUND 1015 A item 13] */
     TD5_LOG_I(LOG_TAG, "avenues: %d divided avenue(s) over %d span(s) from %s "
               "(route %d spans)%s", s_n_av, s_n_rows, path, route_spans,
               bad ? " -- some rows dropped, see the warnings above" : "");

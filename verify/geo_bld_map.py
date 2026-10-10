@@ -50,6 +50,8 @@ def main():
     ap.add_argument("--mark", default="", help="e,s of a mesh to outline in cyan")
     ap.add_argument("--roads", default="", help="_route/ROADS.JSON: draw OSM way centrelines")
     ap.add_argument("--bld", default="", help="_route/BUILDINGS.JSON: outline source footprints")
+    ap.add_argument("--areas", default="", help="_route/AREAS.JSON: outline park/plaza/common polygons [R1015 C]")
+    ap.add_argument("--lm", default="", help="comma list of OSM ids to draw thick (landmark outline + parts) [R1015 C]")
     a = ap.parse_args()
     cx, cz = [float(x) for x in a.pos.split(",")]
     h = a.half * a.upm
@@ -113,6 +115,30 @@ def main():
                     color="#7a00ff", lw=0.9, zorder=8)
             ax.text(sum(xs) / len(xs) / a.upm, sum(zs) / len(zs) / a.upm,
                     "%.0fm" % (bd.get("height_m") or 0), fontsize=6, color="#7a00ff", zorder=8)
+    if a.areas:
+        import json
+        for ar in json.load(open(a.areas, encoding="utf-8"))["areas"]:
+            pts = ar.get("points") or []
+            if not pts:
+                continue
+            xs = [q["x"] for q in pts]; zs = [q["z"] for q in pts]
+            if max(xs) < cx - h or min(xs) > cx + h or max(zs) < cz - h or min(zs) > cz + h:
+                continue
+            ax.plot([x / a.upm for x in xs] + [xs[0] / a.upm], [z / a.upm for z in zs] + [zs[0] / a.upm],
+                    "--", color="#008080", lw=1.6, zorder=7)
+            ax.text(sum(xs) / len(xs) / a.upm, sum(zs) / len(zs) / a.upm,
+                    "%s %s" % (ar.get("kind"), ar.get("name") or ""), fontsize=7, color="#008080", zorder=11)
+    if a.lm and a.bld:
+        import json
+        want_ids = set(int(x) for x in a.lm.split(","))
+        for bd in json.load(open(a.bld, encoding="utf-8"))["buildings"]:
+            if bd.get("id") in want_ids or bd.get("landmark"):
+                pts = bd.get("points") or []
+                xs = [q["x"] for q in pts]; zs = [q["z"] for q in pts]
+                if not pts or max(xs) < cx - h or min(xs) > cx + h or max(zs) < cz - h or min(zs) > cz + h:
+                    continue
+                ax.plot([x / a.upm for x in xs] + [xs[0] / a.upm], [z / a.upm for z in zs] + [zs[0] / a.upm],
+                        "-", color="#ff0000", lw=2.2, zorder=12)
     ax.plot([cx / a.upm], [cz / a.upm], "k+", ms=20)
     ax.set_xlim((cx - h) / a.upm, (cx + h) / a.upm)
     ax.set_ylim((cz - h) / a.upm, (cz + h) / a.upm)
