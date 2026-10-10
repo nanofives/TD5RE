@@ -33,6 +33,7 @@ param([string]$Tag = "run",
       [string]$Extra = "")
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+if ($GeoPlace -eq "none") { $GeoPlace = "" }   # [R1016 K] "none" = a synthetic track (-Track 60)
 
 Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
 if ($GeoPlace -ne "") { $env:TD5RE_GEO_PLACE = $GeoPlace }

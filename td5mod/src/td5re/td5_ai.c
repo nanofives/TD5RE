@@ -5098,6 +5098,14 @@ static void smart_build_path(int slot, int span_raw, int span_count, int n, int 
     ps[0] = ((span_raw % span_count) + span_count) % span_count;
     if (ai_corr_slot_on(slot)) {
         for (i = 1; i < n; i++) ps[i] = ai_path_next(slot, ps[i - 1]);
+    } else if (s_corr_on && slot >= g_traffic_slot_base) {
+        /* traffic on a generated track: it has no committed fork to follow, but a
+         * corridor's last span links on to the main road instead of running into the
+         * next corridor (the same walk smart_sense always did for traffic). */
+        for (i = 1; i < n; i++) {
+            int nx = td5_track_traffic_next_span(ps[i - 1], 0, 1, NULL);
+            ps[i] = (nx >= 0 && nx < span_count) ? nx : ((ps[i - 1] + 1) % span_count);
+        }
     } else {
         for (i = 1; i < n; i++)
             ps[i] = (((span_raw + i) % span_count) + span_count) % span_count;

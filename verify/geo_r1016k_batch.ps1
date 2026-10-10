@@ -19,6 +19,8 @@ param([string]$Tag = "run",
       [string]$DataDir = "",
       [string]$GeoPlace = "la_plata_partido",
       [int]$MaxWaitSec = 900,
+      [int]$Traffic = 0,
+      [int]$Track = 61,                 # 60 + GeoPlace none = the synthetic auto track
       [string]$Modules = "track,driver,motion,progress,pose")
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -36,7 +38,8 @@ for ($i = 0; $i -lt $SeedList.Count; $i++) {
     $s = $SeedList[$i]
     $a = @("-NoProfile", "-File", (Join-Path $rd "verify\geo_realfork_run.ps1"),
            "-Tag", "${Tag}_s$s", "-Exe", $Exe, "-Seed", "$s", "-GeoPlace", $GeoPlace,
-           "-GenWait", "180", "-RaceSecs", "600", "-Modules", $Modules, "-IdleStop", "40")
+           "-GenWait", "180", "-RaceSecs", "600", "-Modules", $Modules, "-IdleStop", "40",
+           "-Traffic", "$Traffic", "-Track", "$Track")
     if ($Extra -ne "") { $a += @("-Extra", $Extra) }
     $out = Join-Path $rd "harness_$Tag.txt"
     $procs += Start-Process -FilePath pwsh -ArgumentList $a -WorkingDirectory $rd `
