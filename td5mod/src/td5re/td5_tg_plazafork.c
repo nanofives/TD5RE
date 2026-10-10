@@ -3,9 +3,9 @@
  * A drivable corridor round the far side of a ring plaza.
  *
  * [ROUND 1015 E] Mariano, round 1015 item 9 (pick: level091 e53 s14 `road p0:ROAD`,
- * route node 216, 10.9 m beside the route -- the far carriageway of Diagonal 73,
- * which ends at Plaza Miguel de Azcuenaga): "if a road passes through a plaza by
- * default i should be able to drive to both sides of the plaza".
+ * route node 216, 10.9 m beside the route -- the scenery far carriageway of Diagonal 73,
+ * which ends at Plaza Miguel de Azcuenaga): "if a road passes through a plaza by default
+ * i should be able to drive to both sides of the plaza".
  *
  * WHAT WAS MISSING. A fork corridor is tied 1:1 to the MAIN node it rides: corridor
  * step k sits on node F+1+k at a lateral shift, and the strip rows, the road mesh,
@@ -19,36 +19,41 @@
  * 9 / 1 / 10 corridor spans appended after the ring, type 11 at R, the jump table,
  * lanes(F) = lanes(F+1) + lanes(B0)) and changes only where its geometry comes from:
  *
- *   rows 0..K1          classic: the main node's own centre line plus a lateral
- *                       (the corridor runs beside the road it split from, the
- *                       median opening at the rate every real fork uses);
- *   rows K1..K2         FREE: a chain of nodes of its own. The real ring way's far
- *                       arc, entered from the street's own axis and left onto the
- *                       exit street, rounded (Laplacian) so no corner is tighter
- *                       than a real junction, resampled so row k is a span long;
- *   rows K2..len        classic again, mirrored: it converges on the main road.
+ *   rows 0..k1          CLASSIC: the main node's own centre line plus a lateral. The
+ *                       corridor runs beside the road it split from, the median
+ *                       opening at the rate every real fork uses and held at the real
+ *                       gap the avenue sidecar gives -- these rows ARE the avenue's far
+ *                       carriageway, and the avenue code treats them as an avenue fork's;
+ *   rows k1..len-kx     FREE: a chain of nodes of its own. The real ring way's far arc,
+ *                       entered along the street's axis and left onto the exit street,
+ *                       rounded (Laplacian) so no corner is tighter than a real
+ *                       junction, resampled so a row is a span long;
+ *   rows len-kx..len    CLASSIC again, mirrored: it converges on the main road.
  *
- * The corridor therefore has exactly R-F-1 spans like every other fork, but they
- * are 3.5..4 m long on the ring (the far arc is a little longer than the near
- * one) instead of riding main nodes. Everything that needs the corridor's
- * position reads one view, tg_pf_view(): a node list whose v[F+1+k] is corridor
- * row k, so the emitters that already take (nl, mb) take (view, mb) with shift 0.
+ * A plaza fork may begin on the span after an avenue fork's rejoin and end on the one
+ * before the next avenue fork's split (rf_compat): the far carriageway of the avenue
+ * then runs on, through the cross street, round the ring and out the other side.
  *
- * THE MAIN ROAD over a plaza fork keeps the route's own carriageway and lanes. Only
- * the two throats carry the fork's widened cross-section (TG_PF_THROAT main spans
- * each); in between the route is the ordinary ring road, untouched, so the plaza
- * arc's lanes, sidewalks, lawn, ribbons and streets are exactly what they were.
+ * The corridor has exactly R-F-1 spans like every other fork; on the free rows they are
+ * far arc / free rows long (3.5 m on Azcuenaga). Everything that needs the corridor's
+ * position reads one view, tg_pf_view(): a node list whose v[F+1+k] is corridor row k,
+ * so the emitters that already take (nl, mb) take (view, mb) with shift 0.
  *
- * NOT A FORK, STILL: nothing here is invented. No lawn, ribbon or scenery is moved
- * to fake a road; the corridor is spans the car drives, built over the real OSM ring
- * way, and every consumer of the old lateral (reach, paint, routes, preview) is
+ * THE MAIN ROAD over a plaza fork keeps the route's own carriageway and lanes. Only the
+ * classic rows' main spans and TG_PF_WEDGE spans beyond them carry fork geometry
+ * (tg_fork_of_main); between them the ring road is untouched, so the plaza arc's lanes,
+ * sidewalks, lawn, ribbons and streets are exactly what they were.
+ *
+ * NOT FAKED: nothing is invented. No lawn, ribbon or scenery is moved to fake a road; the
+ * corridor is spans the car drives, built over the real OSM ring way, and every consumer
+ * of the old lateral (reach, paint, routes, preview, far-band apron, avenue scenery) is
  * taught the free geometry in its own place.
  *
- * KNOBS. TD5RE_GEO_FORK_PLAZA=0 turns plaza forks off (master's behaviour; it was
- * the report knob before). TD5RE_GEO_PLAZA_STRETCH_MAX (2.3) refuses a plaza whose
- * far arc would need spans longer than that many span lengths (Plaza Dardo Rocha:
- * 3x). TD5RE_GEO_PLAZA_SMOOTH (100) is the Laplacian pass count. TD5RE_GEO_FORK_DIAG=1
- * logs every refusal, TD5RE_GEO_PLAZA_DUMP=1 writes log/pf_chain_<n>.csv.
+ * KNOBS. TD5RE_GEO_FORK_PLAZA=0 turns plaza forks off (master's behaviour; it was the
+ * report knob before). TD5RE_GEO_PLAZA_STRETCH_MAX (1.6) refuses a plaza whose far arc
+ * would need spans longer than that many route spans (Plaza Dardo Rocha: 2.2x, measured: pile-ups).
+ * TD5RE_GEO_PLAZA_SMOOTH (300) is the Laplacian pass count. TD5RE_GEO_FORK_DIAG=1 logs
+ * every refusal, TD5RE_GEO_PLAZA_DUMP=1 writes log/pf_chain_<n>.csv.
  *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no geo
  * place loaded, and no tg_rand / tg_frand / tg_range is called here.
@@ -95,7 +100,7 @@ typedef struct {
     /* built */
     int    fi;                      /* index into s_forks            */
     TG_NodeList view;
-    double chain_m, min_r_m;
+    double chain_m, min_r_m, max_dev_m;
     int    built;
 } PfPlan;
 
@@ -535,8 +540,12 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
 {
     int r, nout = 0;
     const int taper = td5_env_int("TD5RE_GEO_FORK_TAPER", 16, 2, 48);
-    const double stretch_max = (double)td5_env_float("TD5RE_GEO_PLAZA_STRETCH_MAX", 2.3f, 1.0f, 8.0f);
-    const int smooth_it = td5_env_int("TD5RE_GEO_PLAZA_SMOOTH", 100, 0, 600);
+    const double stretch_max = (double)td5_env_float("TD5RE_GEO_PLAZA_STRETCH_MAX", 1.6f, 1.0f, 8.0f);
+    const int smooth_it = td5_env_int("TD5RE_GEO_PLAZA_SMOOTH", 300, 0, 800);
+    /* How many nodes before the street's bend the free chain leaves the avenue's line, and
+     * how many after the exit bend it rejoins: the longer, the wider the corner it takes. */
+    const int lead_in  = td5_env_int("TD5RE_GEO_PLAZA_LEAD_IN", 14, 0, 40);
+    const int lead_out = td5_env_int("TD5RE_GEO_PLAZA_LEAD_OUT", 10, 0, 40);
 
     s_diag = td5_env_flag_off("TD5RE_GEO_FORK_DIAG");
     if (!td5_env_flag_on("TD5RE_GEO_FORK_PLAZA")) return 0;
@@ -609,7 +618,9 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                             for (w = 0; w < nR && nout < max_out && s_nplan < PF_MAXPLAN; w++) {
                                 const int F = Fopt[v], Rr = Ropt[w];
                                 const int L = Rr - F - 1;
-                                const int k1 = (b_in - 4) - (F + 1), kx = Rr - b_out;
+                                const int li = (lead_in < b_in - (F + 1) - TG_PF_K1MIN) ? lead_in : b_in - (F + 1) - TG_PF_K1MIN;
+                                const int lo = (lead_out < Rr - b_out - 3) ? lead_out : Rr - b_out - 3;
+                                const int k1 = (b_in - li) - (F + 1), kx = Rr - (b_out + lo);
                                 const int i0 = F - TD5_TG_BRANCH_WIDEN - 2 - taper;
                                 const int nfree = L - k1 - kx;
                                 double tsx, tsz, tex, tez, psx, psz, pex, pez, len_m = 0, minr = 0, far_m = 0;
@@ -619,7 +630,7 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                 PfPlan *P;
                                 if (i0 < TD5_TG_GRID_SPAN + 2) { pf_note(label, F, Rr, "inside the start grid"); continue; }
                                 if (Rr + 2 + taper > win_hi) { pf_note(label, F, Rr, "past the finish line (or inside the ring tail)"); continue; }
-                                if (L < 40 || L > 470 || nfree < 12 || k1 < TG_PF_K1MIN) { pf_note(label, F, Rr, "window length out of range"); continue; }
+                                if (L < 40 || L > 470 || nfree < 12 || k1 < TG_PF_K1MIN || kx < 3) { pf_note(label, F, Rr, "window length or classic rows out of range"); continue; }
                                 la = s_rl[F + 1]; lb = pf_ring_lanes(R);
                                 /* The corridor is never wider than the road it splits from: the reader
                                  * gives every plaza-named ring way the plaza floor (3 lanes, 10.47 m),
@@ -789,7 +800,7 @@ static void pf_build_one(PfPlan *P, const TG_NodeList *nl)
     double len_m = 0.0, minr = 0.0, far_m = 0.0;
     double psx = 0, psz = 0, pex = 0, pez = 0, tsx = 0, tsz = 0, tex = 0, tez = 0;
     const char *why = "";
-    const int smooth_it = td5_env_int("TD5RE_GEO_PLAZA_SMOOTH", 100, 0, 600);
+    const int smooth_it = td5_env_int("TD5RE_GEO_PLAZA_SMOOTH", 300, 0, 800);
 
     P->built = 0;
     free(P->view.v); P->view.v = NULL; P->view.count = 0; P->view.cap = 0;
@@ -868,6 +879,14 @@ static void pf_build_one(PfPlan *P, const TG_NodeList *nl)
         P->lat[k] = (cx[k] - mn->x) * mn->tz - (cz[k] - mn->z) * mn->tx;
     }
     P->chain_m = len_m / PF_UPM; P->min_r_m = minr;
+    {   /* how far the rounded chain strays from the real ring way where it follows it */
+        double dev = 0.0, sp = 0.0; int q;
+        for (q = k1 + 30; q <= k2 - 30; q++) {
+            const double d = pf_ring_dist(ring, cx[q], cz[q], &sp);
+            if (d < 20.0 * PF_UPM && d > dev) dev = d;
+        }
+        P->max_dev_m = dev / PF_UPM;
+    }
     P->built = 1;
     free(cx); free(cz); free(cy);
 }
@@ -885,9 +904,9 @@ void tg_pf_finalize(const TG_NodeList *nl)
             built++;
             TD5_LOG_I(LOG_TAG, "trackgen: [PLAZA FORK] %d: \"%s\" F=%d len=%d R=%d (classic rows %d in / %d out) lanes %d+%d, ring "
                       "%.0f m (near %.0f far %.0f), free chain %.0f m over %d spans (%.2fx span), "
-                      "tightest corner %.1f m", fi, P->name, P->F, P->len, P->R, P->k1, P->kx, P->la, P->lb,
+                      "tightest corner %.1f m, strays %.1f m from the ring way", fi, P->name, P->F, P->len, P->R, P->k1, P->kx, P->la, P->lb,
                       P->ring_m, P->near_m, P->far_m, P->chain_m, P->K2 - P->k1,
-                      P->stretch, P->min_r_m);
+                      P->stretch, P->min_r_m, P->max_dev_m);
             if (td5_env_flag_off("TD5RE_GEO_PLAZA_DUMP")) {
                 char path[96]; FILE *fp;
                 snprintf(path, sizeof path, "log/pf_chain_%d.csv", fi);

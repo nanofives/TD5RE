@@ -389,15 +389,19 @@ goes round the far side of the ring:
 
 | rows (corridor step k) | geometry |
 |---|---|
-| `0..k1` (entry, classic) | the main node's ORIGINAL centre line (node minus its jog) plus the corridor lateral `(la+lb)*lw/2 + median(k)`; the median opens at 0.12 span/span and is held at the real gap the avenue sidecar gives (3.74 m on Diagonal 73), so these rows ARE the far carriageway, like an avenue fork |
-| `k1..len-kx` (free) | a node chain of its own: the ring's far arc, entered along the street's axis and left onto the exit street's axis, Laplacian-rounded (100 passes, 10 m pinned at each end, tightest corner reported and refused under 8 m), resampled to equal steps |
+| `0..k1` (entry, classic) | the main node's ORIGINAL centre line (node minus its jog) plus the corridor lateral `(la+lb)*lw/2 + median(k)`; the median opens at 0.12 span/span and is held at the real gap the avenue sidecar gives (3.74 m on Diagonal 73), so these rows ARE the far carriageway and the avenue code (island, far footway, scenery skip) treats them as an avenue fork's |
+| `k1..len-kx` (free) | a node chain of its own: the ring's far arc, entered along the street's axis and left onto the exit street's axis, Laplacian-rounded (300 passes, 10 m pinned at each end), resampled to equal steps |
 | `len-kx..len` (exit, classic) | mirrored: converges on the main half over the rate-limited median |
 
-`k1 = (last straight route node before the bend) - 4 - (F+1)`, `kx = R - (first straight node
-after the exit bend)`; the fork has exactly `R-F-1` spans like every other fork (span records,
-type 8 / 9 / 1 / 10 / 11, jump table, `lanes(F) = lanes(F+1) + lanes(B0)`), only the free rows'
-geometry differs. On the free rows a span is `far arc / free rows` long (3.5 m on Azcuenaga,
-1.00x a route span); the road texture's V runs at that rate (`tg_road_v_scale`).
+`k1 = (last straight route node before the bend) - TD5RE_GEO_PLAZA_LEAD_IN (14) - (F+1)`, `kx =
+R - (first straight node after the exit bend) - LEAD_OUT (10)`. The corridor leaves the avenue's
+line 14 nodes before the bend and rejoins 10 after it, so it takes the junction as a wide
+diagonal: tightest corner of the whole chain 24.9 m (13.4 m with lead 4/0 and 100 passes, the
+first cut: a car crashed at the exit mouth, seed 33, 245 events), straying at most 4.1 m from the ring way where it follows it
+(the lawn starts 9 m from the ring way). The fork has exactly `R-F-1` spans like every other
+fork (span records, type 8 / 9 / 1 / 10 / 11, jump table, `lanes(F) = lanes(F+1) + lanes(B0)`);
+on the free rows a span is `chain length / free rows` long (3.4 m on Azcuenaga, 0.97x a route
+span; the road texture's V runs at that rate, `tg_road_v_scale`).
 
 Everything that needed the corridor's position reads ONE view, `tg_pf_view(fi)`: a node list
 whose `v[F+1+k]` is corridor row k, so the emitters that already take `(nl, mb)` take
@@ -407,36 +411,60 @@ lateral were each taught the free geometry in their own place:
 | consumer | what changed |
 |---|---|
 | strip rows, jump table, `LEFT/RIGHT.TRK` heading bytes | rows from the view (`td5_trackgen.c`, `tg_emit_routes`) |
-| main half | `tg_fork_main_shift` / `tg_pf_main_wscale`: the route's own `la` lanes at every node width the throat ramps through |
-| ring road between the throats | NOT a fork span: `tg_fork_of_main`, `tg_span_in_fork_clear`, `tg_fork_side_at`, the far-band fork gate and the strip's main-half rows all stop at the throat, so the plaza arc's lanes, sidewalks, lawn, ribbons and streets are exactly what they were |
-| the corridor leaving the road (wedge, `TG_PF_WEDGE` = 7 spans) | a paved quad between the main half's right edge and the corridor's left edge (`tg_pf_emit_wedge`); the classic gore cannot, it is a lateral strip |
-| carriageway reach (skirt start, facade / tree clearance) | throat spans only (`tg_pf_reach`); the free rows are 100..180 m out |
+| main half | `tg_fork_main_shift` / `tg_pf_main_wscale`: the route's own `la` lanes at every node width the wedge ramps through |
+| ring road between the classic zones | NOT a fork span: `tg_fork_of_main`, `tg_span_in_fork_clear`, `tg_fork_side_at`, the far-band fork gate and the strip's main-half rows stop at the classic zone + wedge, so the plaza arc's lanes, sidewalks, lawn, ribbons and streets are exactly what they were |
+| the corridor leaving the road (wedge, `TG_PF_WEDGE` = 7 spans) | a paved quad between the main half's right edge and the corridor's left edge (`tg_pf_emit_wedge`); the classic gore cannot, it is a lateral strip; the skirt starts at the road's own edge there (reach 0), or the crotch of each mouth was a slot to the sky (found on the coverage map) |
+| carriageway reach | classic spans only (`tg_pf_reach`); the free rows are 100..180 m out |
 | occupancy raster + ground bed | the free rows are painted DRIVABLE and the terrain conformed under them BEFORE the plaza ribbons are laid, so the ribbons (round 1014 B) stop short of the corridor: no second road on the far arc |
 | far-band ground | the apron's ring points sample the natural terrain and its planes rose 1..3 m above the corridor (buried road: the car drove UNDER the surface); `tg_emit_far_band` pins ring 2 on the corridor crossing, 300 units under the road |
-| avenue scenery (road, island, far footway) | skipped where a corridor row lies within three lanes of it (`tg_pf_scenery_clash`) and over the wedge |
+| avenue scenery (road, island, far footway, reach) | skipped where a corridor row lies within three lanes of it (`tg_pf_scenery_clash`) and over the wedge |
 | preview points, geometry-safety ceiling, NETWORK.JSON | the corridor's own rows |
 
 ### Window rules (what the selector does)
 
 A plaza candidate is `(F, R)` from the route alone: the straight street before the entry bend
-and after the exit bend (heading within 1 degree over 9 nodes), the ring run (route nodes within 12 m of the
-ring way), and the free chain checked on the RAW route first (street axis meets the ring, corner
->= 8 m, stretch within `TD5RE_GEO_PLAZA_STRETCH_MAX`). Options per ring run: F ten nodes before the
-bend, and right after each avenue fork candidate that ends on that street (`F = R_avenue + 1`);
-R five nodes after the straight resumes, and right before each avenue fork candidate that starts
-on the exit street (`R = F_avenue - 1`). The corridor carries the ring way's OWN lanes (OSM
-lanes=2), which makes lanes(A)+lanes(B) equal to the avenue forks' 2+2, and that is what lets
-`rf_compat` allow end-to-end adjacency (full-width nodes of two forks overlap only when they
-agree). Without adjacency the usual 6-node gap applies.
+and after the exit bend (heading within 1 degree over 9 nodes), the ring run (route nodes within
+12 m of the ring way), and the free chain checked on the RAW route first (street axis meets the
+ring, corner >= 8 m, stretch within `TD5RE_GEO_PLAZA_STRETCH_MAX`). Options per ring run: F ten
+nodes before the bend, and right after each avenue fork candidate that ends on that street
+(`F = R_avenue + 1`); R five nodes after the straight resumes, and right before each avenue
+fork candidate that starts on the exit street (`R = F_avenue - 1`). The corridor carries
+`min(ring lanes, route lanes)` lanes (the reader gives every plaza-named ring way the 3-lane
+plaza floor, the street is 2), which makes lanes(A)+lanes(B) equal to the avenue forks' 2+2,
+and that is what lets `rf_compat` allow end-to-end adjacency (full-width nodes of two forks
+overlap only when they agree). Without adjacency the usual 6-node gap applies. On La Plata the
+selector chose avenue 0 (94..205) + PLAZA AZCUENAGA (206..342) + avenue (343..526): the far
+carriageway of Diagonal 73 runs on through both cross streets and round the ring, driveable end
+to end. Plaza Dardo Rocha is REFUSED (`[PLAZA FORK] REJECT`, 2.23x to 2.49x): its far arc is
+395 m against the route's 142 m, so a corridor with one span per main span has spans 7.8 m long.
+It was built once with the limit at 2.3 and the AI batch showed it: seed 22 had 2150 wall events
+and 8191 contact-ticks in the plaza window, seed 11 745 contact-ticks (the driver's corner cap
+reads the normalised span ring, which is 2.2x too short there). Building it needs a
+variable-length corridor (a jump table that maps more than one corridor span per main span) or a
+stretch-aware driver, see "What remains".
 
-Reasons are logged per refusal under `TD5RE_GEO_FORK_DIAG=1` (`[PLAZA FORK] REJECT ...`).
+Reasons are logged per refusal under `TD5RE_GEO_FORK_DIAG=1` (`[PLAZA FORK] REJECT ...`), and
+`[PLAZA FORK] summary` names every ring plaza the route runs along and whether it got a fork.
 
 ### Knobs
 
 `TD5RE_GEO_FORK_PLAZA=0` restores master (plaza report only). `TD5RE_GEO_PLAZA_STRETCH_MAX`
-(2.3) refuses a plaza whose far arc needs spans longer than that many route spans.
-`TD5RE_GEO_PLAZA_SMOOTH` (100) Laplacian passes. `TD5RE_GEO_PLAZA_DUMP=1` writes
-`log/pf_chain_<fork>.csv`. Tools: `verify/geo_r1015e_strip.py` (STRIP.DAT: types, lanes,
-continuity, clearance), `verify/geo_r1015e_run.ps1` (the 1013 harness with `|` separated
-`-Extra` and a window size, for free-cam tours).
+(1.6) refuses a plaza whose far arc needs spans longer than that many route spans (Azcuenaga
+needs 0.97x, Dardo Rocha 2.23x).
+`TD5RE_GEO_PLAZA_SMOOTH` (300) Laplacian passes, `TD5RE_GEO_PLAZA_LEAD_IN` (14) /
+`TD5RE_GEO_PLAZA_LEAD_OUT` (10) how early the chain leaves / how late it rejoins the avenue's line.
+`TD5RE_GEO_PLAZA_DUMP=1` writes `log/pf_chain_<fork>.csv`. Tools: `verify/geo_r1015e_strip.py`
+(STRIP.DAT: types, lanes, continuity, clearance), `verify/geo_r1015e_run.ps1` (the 1013 harness
+with `|` separated `-Extra` and a window size, for free-cam tours).
 
+### Traps found
+
+* **The scenery stream is not done when the race starts.** The corridor's entries are the LAST
+  of the 457 (worker finished in 16.6 s); at the harness's 4x fast-forward the car reaches span
+  273 before them, and the untextured fallback ribbon (flat grey, no lane paint) is drawn in
+  their place. Free-cam frames of a corridor need `-FastForward 1.0` (this is also the "free-cam
+  tour renders the corridor flat grey" of round 1014 A).
+* The far-band apron is a 3-quad planar patch per 4 spans whose ring points sample the natural
+  terrain: anything 100+ m out on a slope can be under it.
+* A coverage map (rasterise MODELS.DAT's quads by kind, magenta = no quad) finds the see-through
+  slots a frame misses.
