@@ -616,3 +616,188 @@ Steps that would work, in order:
    Azcuenaga window's event rate (17 / 18 / 12 events on seeds 11 / 22 / 33).
 4. Verify with `verify/geo_r1015e_run.ps1` + `geo_realfork_report.py --windows`, on seeds 11 / 22 /
    33; the pile-up signature of the stretched build was seed 22: 2150 events, 8191 contact-ticks.
+
+## Round 1016 K: corridor-aware AI, variable-length corridors, Plaza Dardo Rocha
+
+Brief (orchestrator): make forks and lanes much more permissive WITHOUT AI pile-ups. Diagnosis in the
+brief: "the AI reads the MAIN road's corner cap and lookahead even while on a corridor". Steps 1 and 2 of 3
+here; step 3 (relaxing the bend / lane-change / left-corridor vetoes) is NOT in this round.
+
+Harness: `verify/geo_r1016k_batch.ps1` runs N AI races of La Plata (`la_plata_partido`, slot 61) in
+parallel, one directory each (`_r1016k_run1..6` next to the worktree: a copy of `re/assets`, `horns`,
+`inputscripts`, `verify/*.ps1`), ~100 s for six seeds (`geo_realfork_run.ps1 -IdleStop 40` ends a run once
+the trace has been silent 40 s). Judges: `geo_r1016k_report.py` (one run), `geo_r1016k_cmp.py` (table over
+seeds), `geo_r1016k_inc.py` / `_stallmap.py` (where), `_corr.py` / `_geom.py` / `_aim.py` (one car through
+a corridor, the strip's bends, where the AI aims), `_progress.py` (race progress on a variable corridor).
+**Trap**: an AutoRace session starts a SECOND race when the first ends and `sim_tick` restarts; every judge
+reads the first race only (the round-1015 reports mixed the two for the seeds that finish early).
+
+### What was actually wrong (measured on the 1015 master, 3 seeds, 18 cars)
+
+1. **The branch-road ADAPT block undid every brake on a corridor.** `td5_ai_smart_speed` forces any
+   coasting/braking car on a span past the ring back to throttle 0xA0 with the brake OFF. The corner cap, the
+   wall ray and any governor that ran before it were therefore dead on every corridor.
+2. **The SMART corner cap is not a governor.** It scales the THROTTLE COMMAND by 0.45..1 and brakes only below
+   0.55; at 700..850 units/tick (190..230 km/h, what a 3.5 m-span avenue gives) that is no brake at all. Every
+   car reached Plaza Azcuenaga's corridor at 700..850 and met a 24 m bend 25 spans in: steering at the +-1.0
+   lock, rear slip 35000..50000, full lock + throttle against the wall for 100..250 ticks (no recovery on a
+   branch: `smart_on_branch` cancels scripts). 0 of 11 plaza passes were clean.
+3. **The corner/ray/heading look-ahead walked `span_raw + d`**: off a corridor's last span it runs into an
+   UNRELATED corridor, and from the main road it never followed the fork the car had committed to take.
+4. **Adjacent forks** (Diagonal 73's corridor ends at R=209, the plaza fork's F is 210): `td5_ai_smart_branch`
+   treated the REJOIN span (type 11) as a fork, rolled for it (burning an RNG step) and never saw the real fork
+   in time, so the car aimed at main span 213 while the walker put it on the corridor.
+5. **Heading rows**: the route-table heading was read at the PARALLEL MAIN span; a corridor that turns away
+   from the road (a plaza's far arc) fed `fwd_comp` a heading up to 90 degrees off.
+6. Every plaza pass arrived with the velocity 10..20 degrees off the corridor: the two median openings (6.8
+   degrees each, pinned at the mouths) make a 13.7 degree kink where one corridor ends and the next begins.
+   Geometry, not AI; an AI that brakes for it passes (see "What step 3 should relax first").
+
+### Step 1: the AI follows its PATH (all behind knobs, generated tracks only)
+
+`TD5RE_AI_CORRIDOR=0` restores everything in this list; shipped tracks are untouched by construction
+(`s_corr_on` needs a generated slot; 3 shipped tracks traced: driver/motion/track CSVs bit-identical to master).
+
+| piece | change |
+|---|---|
+| `ai_path_next` / `smart_build_path` | span+1, except a committed fork (type 8, `link_next`) and a corridor end (type 10, `link_next`); circuits wrap at the ring |
+| corner eval, ray sensors, heading look-ahead | read the spans the car WILL drive (they used `span_raw + d`) |
+| branch scan | walks the path, scans from d = 0 (the pull stays on the fork span), skips the merge span of the travel direction |
+| aim point | 6000 units down the path, in METRES not spans (a free corridor's spans can be 2.5x longer), crossing into the corridor with the car |
+| lane brain | on a corridor: the road frame, lane count and the geo wall margin of the CORRIDOR span (the margin was skipped on every branch) |
+| route heading | the corridor's own table row (`tg_emit_routes` already writes one per corridor span) |
+| traffic | its corner eval no longer runs into the next corridor |
+| **speed governor** (`TD5RE_AI_CORR_GOV=0` off) | along the path: bend radius over every 2-span window from the span headings, `v_corner = sqrt(a_lat * R)` floored at a yaw-authority minimum, allowed speed now = min over 36 spans of `sqrt(v_corner^2 + 2 a_brake d)`; coast over it, brake 8% over; runs LAST (after the ADAPT block) |
+
+Governor parameters, swept over 6 seeds each (`TD5RE_AI_GOV_LAT` 14 m/s^2, `_BRAKE` 9.8, `_LOOK` 36 spans,
+`_FLOOR` 340 units/tick, `TD5RE_AI_CORR_GOV_SCOPE` 1 = the whole route). Measured grip on this route: ~1.9 g in a
+26 m bend, braking ~1.2 g (110 tick finish stop). **The floor is the key parameter**: below ~200 units/tick the
+car has no yaw authority and stops against the corner's wall (the 90 degree street corners at 680..686 stalled
+52 times at floor 220); floor 230 -> 38 stalls, 260 -> 21, 300 -> 8, 340 -> 7, 400 -> 9. A governor limited to
+paths that touch a corridor (`SCOPE=0`) leaves the same stall sites on the ring (568..583, 800..815, 1084..1090)
+that master already had; the whole-route one removes them.
+
+#### Results (La Plata, all-AI field, 6 cars, damage off, Traffic 0; judge = `geo_r1016k_report.py`)
+
+12 seeds (11 22 33 44 55 66 | 77 88 99 111 122 133, the second six were not used to tune):
+
+| | master cdce612c | this branch |
+|---|---|---|
+| stall plateaus (>= 90 ticks within 2 spans) / ticks | 126 / 19670 | 10 / 1662 |
+| contact events / incidents (merged) | 2907 / 653 | 1180 / 482 |
+| corridor passes / clean (no contact event, no stall) | 154 / 25 | 202 / 127 |
+| spins (a pass that hit a wall and lost the speed, or reversed) | 19 | 4 |
+| mean tick to span 600 / 1100 | 2005 / 3588 | 2164 / 3776 (+8% / +5%) |
+
+The parent's 3 seeds (11 22 33): stalls 32 / 4924 ticks -> 1 / 100, events 697 -> 209, incidents 169 -> 122,
+clean 8 of 45 -> 28 of 47, spins 6 -> 0. Per fork on those seeds (passes / clean; master has no Dardo Rocha fork,
+its fork 4 is Avenida 7):
+
+| fork | master | this branch |
+|---|---|---|
+| 0 Diagonal 73 (F=46) | 11 / 4 | 11 / 5 |
+| 1 Plaza Azcuenaga (210) | 11 / 0, 3 stalled, 213 events | 6 / 0, 0 stalled, 20 events |
+| 2 Diagonal 73 (328) | 11 / 4 | 7 / 7 |
+| 3 Avenida 60 (901) | 5 / 0 | 10 / 8 |
+| 4 Plaza Dardo Rocha (1031) | (refused) | 6 / 1, 0 stalled, 7 events |
+| 5 Avenida 7 (1130) | 7 / 0 (4 spins) | 7 / 7 |
+
+Other tracks: the synthetic auto track (seed 99991, 3 seeds): stalls 89 -> 65, incidents 223 -> 180, clean 9/55
+-> 32/56, spins 15 -> 0; shipped tracks Moscow / Edinburgh / Newcastle: AI traces identical. With Traffic 6 (3
+seeds): stalls 42 -> 36, incidents 157 -> 133, clean 6/43 -> 26/52. Full selftest 64/0/0 (some runs show a WARN on
+a peak-jump threshold in a chaos/cop step with either exe; it is frame-timing noise).
+
+Not forks, now gone with the governor: the stall sites at 568..583, 800..815 and 1084..1090 (bends the cars
+crawled through on master). The plaza mouths still scrape (edge contacts, no stalls).
+
+### Step 2: variable-length corridors
+
+A corridor may have N spans beside M main spans. Used by the plaza (free) corridor only: its classic rows
+(entry 0..k1, exit) stay one per main node, its free rows are one per `TD5_TG_SPAN_LENGTH` of the arc.
+
+* **Plan** (`td5_tg_plazafork.c`): `nfree2 = round(chain length / 1500)` (12 .. 4x the main nodes), the chain is
+  validated again at that row count; `clen = k1 + nfree2 + kx`. `TG_Fork.clen` (== `len` for every other fork).
+  `TD5RE_GEO_PLAZA_STRETCH_MAX` now caps the arc / route ratio (default 3.0; Azcuenaga 0.98, Dardo Rocha
+  2.21); `TD5RE_GEO_PLAZA_VARLEN=0` + `STRETCH_MAX=1.6` give master's bytes back (hashes checked: STRIP 135144 B
+  EBE847F2, MODELS 15700624 B 2D3607EB, TEXTURES 1605328 B 5B4E005A, identical to master's exe).
+* **Two views** of a free corridor: `rview[F+1+k]` is corridor ROW k (strip rows, road mesh, routes, preview,
+  network paint) and `view[F+1+j]` the corridor beside MAIN node j (throat / wedge / reach / clash code), so the
+  1015 code that pairs a main span with the corridor next to it is unchanged. `tg_fork_row_node(fi, k)` = the
+  main node a row stands beside (identity for every other fork).
+* **Strip**: the corridor spans are appended as before (`cbase .. cbase + clen - 1`), the jump record covers
+  all of them, and a TRAILER after the vertex table carries the map: `u32 'CMRP', u32 n, per fork {u32 lo, n, m,
+  base, u16 off[n+1]}`, `off[k]` = main offset corridor span k stands beside (`off[n] = m`). Only forks with
+  N != M write one, so every other strip is byte-identical (synthetic gate: MODELS 12772392 B E2F1F33C, STRIP
+  144714 B, TEXTURES 1605328 B, identical to master's exe).
+* **Engine** (`td5_track.c`): `corr_map_*`. `td5_track_branch_to_main_span` (the normalised span), `main_to_branch_span`,
+  `count/branch_corridor_span`, `corridor_info` (main range = base .. base + m - 1), `branch_to_junction`,
+  `route_junction_path2a_match`, `apply_target_span_remap`, `resolve_actor_segment_boundary` read it.
+* **Progress** (decision): the accumulator `span_accum` and the high water the race order sorts by are in
+  MAIN-ROAD spans. After every chassis walker step the accumulator is restored to
+  `accum + (mainIndex(new) - mainIndex(old))` where `mainIndex(corridor span) = base + off[k]` and a main span is
+  itself; the walker's own +-1 is right everywhere else. So lap, finish, checkpoints, race position, the AI's
+  rubber band and the minimap read main spans on the corridor (verified: `|span_accum - span_norm| <= 2` on every
+  tick of 12 AI races; the 2 is the tick a car is between two spans). A car on the long way is not ahead of the
+  car on the short way; it gains main spans as it covers them.
+* **Recovery**: `td5_track_get_recovery_pose` stepped back with `from_span % ring`, which on a corridor span is an
+  unrelated main span (the breakdown path steps back 30); it now steps back ALONG the corridor and past its start
+  onto the main road it left.
+* Traffic spawns by main span -> corridor span through the same API (checked: Traffic 6 races spawn on
+  the 172-span corridor with `norm`/`acc` right).
+
+Plaza Dardo Rocha is built: F=1031 R=1129, 97 main spans, 172 corridor spans (32 classic rows in, 3 out, free chain
+478 m over 137 rows, span pitch 1.00x), tightest corner 26 m; Avenida 60's fork became F=901..1030 (it ended at
+1075 before). Azcuenaga was rebuilt through the same path (114 spans beside 116). Frames at spans 1040 / 1060 /
+1095 / 1125 checked by eye (entry from Avenida 60, the arc with its kerb and lawn, the merge into Avenida 7 with its rail).
+
+### Knobs added
+
+`TD5RE_AI_CORRIDOR=0` (all path-following), `TD5RE_AI_CORR_GOV=0`, `TD5RE_AI_CORR_GOV_SCOPE=0|1`,
+`TD5RE_AI_GOV_LAT` (tenths of m/s^2, 140), `_BRAKE` (98), `_LOOK` (36), `_FLOOR` (340 units/tick),
+`TD5RE_AI_GOV_DIAG=<slot>` (dev: one log line a tick), `TD5RE_GEO_PLAZA_VARLEN=0`.
+
+### What step 3 should relax first (measured, in order of value per risk)
+
+1. **Adjacent forks (R+1 == F)**: Diagonal 73 -> plaza -> Diagonal 73 is three forks back to back and each pins its
+   median to 0 at the shared span, so the corridor weaves in and out by 3.7 m with a 6.8 degree kink at each
+   throat (13.7 degrees where two meet). With the governor it passes (plaza mouths: edge scrapes, no stalls) but a
+   merged corridor with no pin at the shared junction would remove the last mouth incidents (fork 1: 20 events on 6
+   passes).
+2. **Constant lane count in the window** (Avenida 60 893..950, 893..1030 refused: "the route's own lane count
+   changes inside the window"): an AI-side non-issue now (the corridor reads its own lanes); the generator's
+   one-number lane arithmetic is the only reason.
+3. **Bend cap 0.044 rad/span**: Diagonal 73 209..236 and 315..327, Avenida 13 678..708 are rejected for 0.18..0.35
+   rad/span bends. The governor reads the bend of the path now, so the cap can follow geometry (does the shifted
+   carriageway fold? an offset of half a lane-pair from a 10 m radius bend is the limit), not a fixed number.
+4. **Left corridors**: still parked (walker sub-lane bookkeeping); needs engine work, not AI work. Last.
+
+### How step 4 (perpendicular block loops) and N-way / nested / overlapping corridors plug into this design
+
+Orchestrator constraints, answered against what exists after step 2. Nothing below is built; it says what the
+representation already carries and what each wish still needs.
+
+**Representation.** A corridor is a jump-table record `[lo, hi, base]` plus, when N != M, a `CorrMap`
+(`off[k]`, `first_k[j]`) read by `corr_map_*`; its geometry is a list of free rows (`rview`); AI, traffic,
+minimap and progress reach it only through `td5_track_branch_to_main_span`, `main_to_branch_span`,
+`count/branch_corridor_span`, `corridor_info`, `corr_progress_delta` and `ai_path_next`. None of that assumes
+one corridor per main span or non-overlapping windows: `count_branch_corridors` already enumerates every record
+that covers a main span (the original TD5 tracks use two). No rewrite is needed at this layer.
+
+| wish | what already works | what it still needs (cost) |
+|---|---|---|
+| (a) mouth at the SIDE of the road, 90 degrees | the free chain is arbitrary geometry; the AI aims 6000 units along the corridor's own rows and the governor reads the corridor's own bends (it already takes the route's 90 degree street corners at the 340 units/tick floor); N may be 3-6x M (the plan caps `nfree2` at 4x the main nodes: raise it; the map arrays hold 4000 spans per corridor) | the planner demands `k1 >= TG_PF_K1MIN` classic rows beside the road before the chain (`k1 = 0` + a chain pinned perpendicular to the road edge is a planner change, ~150 lines); the strip's type-8 span carries the lane the car must be in to take the branch (`sub_lane >= lanes(F+1)`), so the mouth lane has to be part of F's cross-section (a stub lane on the side), not a gap |
+| (d) the mouth as a GAP in the main road's wall/kerb | nothing | **engine work, the one hard blocker**: collision walls are the strip rows' own rail vertices, there is no per-span "open edge". A real gap needs a span flag (or a type) that drops one rail's wall in `wall_contact` plus a geometric (not sub-lane) branch decision in the walker. Without it the corridor must start from a widened F row (above) |
+| (b) sharp corners in a corridor | governor from the corridor's own heading steps; metre-based aim | a floor below 340 for 90 degree corners at low speed (the street corners already in the route stall below ~220: a floor under 260 is a regression) |
+| (c) 3-6x length | `N != M` map, progress in main spans, accumulator compensation | `TD5_TG_MAX_SPANS` 3000 (La Plata uses 2171 with both plazas), 12 forks (`TD5_TG_BRANCH_MAX`), the jump-record block (32 records) |
+| N-way (several corridors off one main span) | several records may cover a main span; per-record `CorrMap`; minimap and traffic spawner enumerate all of them | the walker: a type-8 span has ONE `link_next` and decides by `sub_lane >= lanes(F+1)`; a third way needs a second link (a trailer table keyed by span) and a lane BAND per destination (`resolve_neighbor` case 8, ~60 lines); the AI commit is one bit per slot (`g_smart_branch_commit_take`, `td5_ai_smart_branch` pull +-1): make it a way index and the anchor a lane-band centre; traffic's fork choice is a bit too; cross-section lanes(A)+lanes(B)+lanes(C) <= 8 (the rail range) |
+| (b) overlapping windows | the engine does not care | the generator: `tg_fork_of_main(si)` returns ONE fork, the main half's shift/width scale (`tg_fork_main_shift`) is one number per span, and `rf_select` forbids overlap. Needs a list of carriageways per node, i.e. the strip's lane arithmetic generalised from 2 parts to k. The biggest generator change |
+| nesting / corridor-to-corridor rejoin | `ai_path_next` follows any `link_next`; progress deltas use `corr_progress_index` | `corr_progress_index` returns the span itself for an UNMAPPED corridor (1:1): give every jump record a map entry (or a linear fallback) so a step between two corridors has a main-index on both ends; `corr_progress_delta` only fires when one end is mapped; `branch_to_main_span` maps to the PARENT's main index (a nested corridor's `base` = the parent's index at its mouth) |
+
+Limits to design around, with their cost: the AI branch decision is a per-slot boolean rolled once per fork when
+it comes into range (one RNG step, replicated seed): an index costs nothing, a lane-band anchor needs the lane
+brain to know the corridor's lane count at the mouth. Race progress is correct for any corridor that maps to main
+spans, so a nested or overlapping design only has to say which main span each corridor stands beside. The minimap
+draws a corridor per MAIN span (one point per main span, so a 6x corridor is subsampled 6:1: iterate the
+corridor's own spans instead, ~30 lines in `td5_hud.c`). Replay and netplay carry spans only (no new state).
+Verdict: no rewrite before step 4; the three items that cannot be avoided are the walker's wall-gap/multi-way
+junction (engine), the generator's k-carriageway cross-section (for overlap) and the planner's `k1 = 0` entry.

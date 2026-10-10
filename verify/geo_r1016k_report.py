@@ -14,8 +14,8 @@ Per run it prints
     ring spans F-4..F+4 / the rejoin R-10..R+8), ring windows, plain route,
   * per fork: car-passes on the corridor, how many passed CLEAN (no contact event, no
     plateau) and how many stalled,
-  * MOUTH SPINS: a pass that loses >= 45% of its speed inside the first 24 corridor
-    steps and ends the corridor slower than 25% of the entry speed, or reverses.
+  * SPINS: a pass that touched a wall, lost >= 45% of its speed inside the first 24 corridor
+    steps and ends the corridor slower than 25% of the entry speed, or that reverses.
 The one-line SUMMARY is what the before/after tables quote.
 """
 import argparse
@@ -185,7 +185,7 @@ def main():
             v_min = min(early) if early else v_in
             v_out = abs(sp.get(tb, 0))
             stalled = any(s == slot and pa <= tb + 5 and pb >= ta - 5 for s, pa, pb, _l, _h, _r in stalls)
-            spin = (v_min < 0.55 * v_in and v_out < 0.25 * v_in) or any(sp.get(t, 0) < -200 for t, _r, _c in inside)
+            spin = (nev > 0 and v_min < 0.55 * v_in and v_out < 0.25 * v_in) or any(sp.get(t, 0) < -200 for t, _r, _c in inside)
             rec["events"] += nev
             rec["stalled"] += 1 if stalled else 0
             rec["spin"] += 1 if spin else 0
