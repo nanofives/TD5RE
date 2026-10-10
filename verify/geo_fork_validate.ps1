@@ -43,12 +43,15 @@ param(
     [double]$FastForward = 8.0,            # TraceFastForward (1.0 = real time)
     [int]$MaxSimTicks = 5200,              # hard sim-tick cap per race
     [int]$StopSpan = 0,                    # end a race early when ALL cars passed this span_norm (0 = auto)
-    [int]$StallSecs = 90,                  # end a race early when no car advanced for this many WALL secs
+    [int]$StallSecs = 45,
+    [int]$RaceOverSecs = 8,                # wall secs without a new sim tick in the trace = the race has ended
+    [int]$StuckTicks = 900,                # sim ticks without advancing before a car stops holding the race open                  # end a race early when no car advanced for this many WALL secs
     [int]$GenWait = 900,                   # wall secs allowed for generate + race
     [int]$RaceSecs = 480,
     [string]$Place = "la_plata_partido",
     [int]$Track = 61,
     [int]$Opponents = 5,
+    [string]$Difficulty = "auto",          # AI tier per seed: auto = 1,2,0,1,2,0.. (the seed alone changes only the fork choice)
     [int]$ForceMode = 1,                   # TD5RE_AI_BRANCH_FORCE_MODE (1 = alternate arms by slot)
     [string]$Modules = "track,driver,motion,progress,pose,rotation",
     [switch]$NoAnalyze,
@@ -74,7 +77,7 @@ function Invoke-Analyzer([string]$dir) {
     $py = Find-Python
     $pyArgs = @((Join-Path $here "geo_fork_validate.py"), $dir, "--out", $Verdicts)
     if ($AnalyzeArgs -ne "") { $pyArgs += ($AnalyzeArgs -split ' ') }
-    & $py @pyArgs
+    & $py @pyArgs | Out-Host
     return $LASTEXITCODE
 }
 
@@ -85,7 +88,7 @@ if ($Analyze -ne "") {
 
 # ---- seeds -------------------------------------------------------------------
 $seedList = @()
-if ($Seeds -match '^\d+$' -and [int]$Seeds -le 12) {
+if ($Seeds -match '^[1-9]$') {            # a single digit 1..9 = a COUNT (11,22,33,...)
     $seedList = @(11, 22, 33, 44, 55, 66, 77, 88, 99, 110, 121, 132)[0..([int]$Seeds - 1)]
 } else {
     $seedList = $Seeds.Split(',') | ForEach-Object { [int]($_.Trim()) }
@@ -166,7 +169,7 @@ $gfx = @("--Lighting=0", "--Quality=0", "--SunShadows=0", "--Reflections=0",
          "--GIQuality=0", "--ShadowRays=0", "--ReflectionQuality=0",
          "--CarShadows=0", "--VFX=0", "--WorldBillboards=0", "--FoliageAA=0")
 
-function Add-EnvList([System.Collections.Specialized.StringDictionary]$e, [string]$list) {
+function Add-EnvList($e, [string]$list) {
     if ($list -eq "") { return }
     foreach ($kv in $list.Split(',')) {
         $p = $kv.Split('=', 2)
@@ -180,16 +183,18 @@ try {
         IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);' -ErrorAction Stop
 } catch { }
 
+function Get-Tier($run) {
+    if ($Difficulty -ne "auto") { return [int]$Difficulty }
+    $i = [array]::IndexOf($seedList, $run.seed)
+    return @(1, 2, 0)[[Math]::Max(0, $i) % 3]
+}
+
 function Start-Run($run) {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = Join-Path $run.dir "td5re.exe"
-    $psi.WorkingDirectory = $run.dir
-    $psi.UseShellExecute = $false
-    # Start from a clean TD5RE_* environment: knobs persist across shell launches.
-    foreach ($k in @($psi.EnvironmentVariables.Keys)) {
-        if ($k -like 'TD5RE_*') { $psi.EnvironmentVariables.Remove($k) }
-    }
-    $e = $psi.EnvironmentVariables
+    # Start-Process inherits THIS process's environment: clear every TD5RE_* first (knobs
+    # persist across shell launches), set this run's, launch, then clear again. Launches are
+    # sequential, so parallel runs cannot see each other's variables.
+    Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
+    $e = [ordered]@{}
     $e["TD5RE_GEO_PLACE"] = $Place
     $e["TD5RE_AUTOTRACK_REUSE"] = "0"
     $e["TD5RE_RT"] = "0"
@@ -205,8 +210,9 @@ function Start-Run($run) {
         if ($Deny -ne "") { $e["TD5RE_GEO_FORK_DENY"] = $Deny }
         Add-EnvList $e $ForkEnv
     }
+    foreach ($k in $e.Keys) { Set-Item "env:$k" $e[$k] }
     $a = @("--AutoRace=1", "--SkipIntro=1", "--DefaultTrack=$Track",
-           "--DefaultOpponents=$Opponents", "--Traffic=0", "--Difficulty=1",
+           "--DefaultOpponents=$Opponents", "--Traffic=0", "--Difficulty=$(Get-Tier $run)",
            "--PlayerIsAI=1", "--AutoThrottle=0", "--CarDamage=0",
            "--Windowed=1", "--VSync=0", "--SFXVolume=0", "--MusicVolume=0",
            "--RaceTrace=1", "--RaceTraceSlot=-1", "--RaceTraceMaxSimTicks=$MaxSimTicks",
@@ -214,8 +220,11 @@ function Start-Run($run) {
            "--TraceStages=post_track,post_ai,post_physics,post_progress")
     if ($FastForward -gt 1.0) { $a += "--TraceFastForward=$FastForward" }
     $a += $gfx
-    $psi.Arguments = ($a -join ' ')
-    $p = [System.Diagnostics.Process]::Start($psi)
+    $p = Start-Process -FilePath (Join-Path $run.dir "td5re.exe") -ArgumentList $a `
+            -WorkingDirectory $run.dir -PassThru `
+            -RedirectStandardOutput (Join-Path $run.dir "stdout.txt") `
+            -RedirectStandardError (Join-Path $run.dir "stderr.txt")
+    Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
     $run.proc = $p
     $run.pid = $p.Id
     $run.t0 = Get-Date
@@ -252,13 +261,34 @@ function Update-Progress($run) {
             $slot = $c[3]; $norm = 0; $tick = 0
             if (-not [int]::TryParse($c[5], [ref]$norm)) { continue }
             [void][int]::TryParse($c[1], [ref]$tick)
-            if ($tick -gt $run.lasttick) { $run.lasttick = $tick }
+            if ($tick -gt $run.lasttick) { $run.lasttick = $tick; $run.tickmoved = Get-Date }
             if (-not $run.maxspan.ContainsKey($slot) -or $norm -gt $run.maxspan[$slot]) {
-                $run.maxspan[$slot] = $norm; $moved = $true
+                $run.maxspan[$slot] = $norm; $run.advtick[$slot] = $tick; $moved = $true
             }
         }
         if ($moved) { $run.lastprog = Get-Date }
     } catch { }
+}
+
+# The race.log is flushed as it fills: the strip's own fork lines and the registry finish are
+# there long before the cars reach them. Returns 0 until they are.
+function Get-AutoStop($run) {
+    $f = Join-Path $run.dir "log\race.log"
+    if (-not (Test-Path $f)) { return 0 }
+    try {
+        $fs = New-Object IO.FileStream($f, 'Open', 'Read', 'ReadWrite')
+        $sr = New-Object IO.StreamReader($fs)
+        $txt = $sr.ReadToEnd(); $sr.Dispose()
+    } catch { return 0 }
+    $fin = [regex]::Match($txt, 'registry finish span=(\d+)')
+    if (-not $fin.Success) { return 0 }
+    $rej = [regex]::Matches($txt, 'trackgen: fork \d+ \w+ F=\d+ len=\d+ corridor=\d+\.\.\d+ rejoin=(\d+)')
+    $stop = [int]$fin.Groups[1].Value - 5
+    if ($rej.Count -gt 0) {
+        $mx = ($rej | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Maximum).Maximum + 40
+        if ($mx -lt $stop) { $stop = $mx }
+    }
+    return $stop
 }
 
 function Stop-Run($run, [string]$why) {
@@ -276,9 +306,9 @@ function Stop-Run($run, [string]$why) {
 # ---- plan the runs --------------------------------------------------------------
 $runs = @()
 foreach ($s in $seedList) {
-    $runs += [pscustomobject]@{ name = "fork_s$s"; arm = "fork"; seed = $s; dir = (Join-Path $setDir "fork_s$s"); state = "new"; why = ""; secs = 0 }
+    $runs += [pscustomobject]@{ name = "fork_s$s"; arm = "fork"; seed = $s; dir = (Join-Path $setDir "fork_s$s"); state = "new"; why = ""; secs = 0; proc = $null; pid = 0; t0 = $null; pos = 0L; maxspan = @{}; lastprog = $null; lasttick = 0; stopat = 0; advtick = @{}; tickmoved = $null }
     if ($Baseline -ne "none") {
-        $runs += [pscustomobject]@{ name = "base_s$s"; arm = "base"; seed = $s; dir = (Join-Path $setDir "base_s$s"); state = "new"; why = ""; secs = 0 }
+        $runs += [pscustomobject]@{ name = "base_s$s"; arm = "base"; seed = $s; dir = (Join-Path $setDir "base_s$s"); state = "new"; why = ""; secs = 0; proc = $null; pid = 0; t0 = $null; pos = 0L; maxspan = @{}; lastprog = $null; lasttick = 0; stopat = 0; advtick = @{}; tickmoved = $null }
     }
 }
 if ($Baseline -eq "reuse" -or $BaselineFrom -ne "") {
@@ -329,10 +359,30 @@ while ($queue.Count -gt 0 -or $active.Count -gt 0) {
         if ($r.proc.HasExited) { $r.state = "done"; $r.why = "exited"; $r.secs = [int]$age; continue }
         Update-Progress $r
         $stopAt = $StopSpan
-        if ($r.maxspan.Count -ge 1 -and $stopAt -gt 0) {
-            $allPast = ($r.maxspan.Count -ge ($Opponents + 1)) -and (@($r.maxspan.Values | Where-Object { $_ -lt $stopAt }).Count -eq 0)
-            if ($allPast) { Stop-Run $r "all cars past span $stopAt"; continue }
+        if ($stopAt -le 0) {
+            # auto: last built fork's rejoin + 40 spans, never past the registry finish
+            if (-not $r.stopat -or $r.stopat -le 0) {
+                if ($r.arm -eq "base") {
+                    # a forks-off race stops where its forks-on twin does (same window judged)
+                    $twin = $runs | Where-Object { $_.arm -eq "fork" -and $_.seed -eq $r.seed } | Select-Object -First 1
+                    if ($twin -and $twin.stopat -gt 0) { $r.stopat = $twin.stopat }
+                } else { $r.stopat = Get-AutoStop $r }
+            }
+            $stopAt = $r.stopat
         }
+        if ($r.maxspan.Count -ge 1 -and $stopAt -gt 0) {
+            # every car is either past the last fork or has not advanced for StuckTicks of SIM time
+            # (a jammed car must not hold the other five hostage; it is measured as a jam)
+            $pending = 0
+            foreach ($k in $r.maxspan.Keys) {
+                if ($r.maxspan[$k] -ge $stopAt) { continue }
+                if (($r.lasttick - $r.advtick[$k]) -ge $StuckTicks) { continue }
+                $pending++
+            }
+            if (($r.maxspan.Count -ge ($Opponents + 1)) -and $pending -eq 0) { Stop-Run $r "every car past span $stopAt or stuck $StuckTicks ticks"; continue }
+        }
+        # The sim itself stopped ticking: the race is over (finish/timeout), nothing more to measure.
+        if ($r.lasttick -gt 0 -and $r.tickmoved -and ((Get-Date) - $r.tickmoved).TotalSeconds -gt $RaceOverSecs) { Stop-Run $r "race over (no sim tick for ${RaceOverSecs}s)"; continue }
         if ($r.lasttick -gt 0 -and ((Get-Date) - $r.lastprog).TotalSeconds -gt $StallSecs) { Stop-Run $r "no progress for ${StallSecs}s"; continue }
         if ($age -gt ($GenWait + $RaceSecs)) { Stop-Run $r "wall-clock cap"; continue }
     }

@@ -42,21 +42,27 @@ import sys
 # corridor entries over the run-set or it is UNTESTED (reported WARN: nothing was learned).
 # ------------------------------------------------------------------------------------
 THRESHOLDS = {
-    "min_corridor_entries": 3,      # corridor entries over the whole run-set to count as tested
-    "trapped_fail": 1,              # cars that entered the window and never left it: FAIL at >= 1
-    "stall_extra_fail": 1,          # stalls in the window beyond the forks-off baseline: FAIL at >= 1
-    "spin_extra_fail": 2,           # spins beyond baseline: FAIL at >= 2, WARN at 1
-    "spin_extra_warn": 1,
-    "incident_per_pass_fail": 0.50,  # extra wall incidents per car-pass vs baseline
-    "incident_per_pass_warn": 0.20,
-    "mouth_incident_per_pass_fail": 0.34,   # same, entry + exit mouth zones only
-    "mouth_incident_per_pass_warn": 0.15,
-    "offroad_per_pass_fail": 0.34,   # corridor/window off-road episodes per car-pass beyond baseline
-    "offroad_per_pass_warn": 0.10,
-    "speed_ratio_fail": 0.55,        # window mean speed / forks-off window mean speed
+    # A fork needs corridor traffic or nothing was learned (UNTESTED, neither allowed nor denied).
+    "min_corridor_entries": 3,
+    # JAMS decide: they are what a pile-up looks like. Counted per car-pass, fork minus baseline.
+    "trapped_per_pass_fail": 0.10,   # cars that jammed >= 300 ticks or never got free
+    "trapped_extra_warn": 1,         # any single jam beyond the baseline
+    "stall_per_pass_fail": 0.25,     # plateaus >= 90 ticks making <= 2 spans
+    "stall_extra_warn": 1,
+    "speed_ratio_fail": 0.60,        # window mean speed / the same window with the forks off
     "speed_ratio_warn": 0.80,
+    # HARM: wall incidents graded by the speed they cost (HIT_LOSS / CRASH_FRAC below).
+    "crash_per_pass_fail": 0.25,
+    "crash_per_pass_warn": 0.10,
+    "hit_per_pass_fail": 0.50,
+    "hit_per_pass_warn": 0.25,
+    "spin_per_pass_fail": 0.34,
+    "spin_per_pass_warn": 0.15,
+    "offroad_per_pass_fail": 0.34,
+    "offroad_per_pass_warn": 0.10,
 }
 STALL_HOLD = 90        # ticks (3 s at 30 Hz)
+TRAP_TICKS = 300      # a plateau this long is a JAM (10 s at 30 Hz), not a bounce
 STALL_TOL = 2          # spans of progress a plateau may contain
 INCIDENT_GAP = 90      # ticks: one car's contacts closer than this are ONE incident
 WIDEN = 8              # TD5_TG_BRANCH_WIDEN: the approach a fork window keeps (F-8)
@@ -65,10 +71,15 @@ MOUTH_IN = (-WIDEN, 4)   # entry mouth: F-8 .. F+4
 MOUTH_OUT = (-4, TAIL)   # exit mouth:  R-4 .. R+2
 OFFROAD_LAT = 1.20     # |lateral| in span half-widths beyond which a car is off the road
 OFFROAD_MIN_TICKS = 4
-SPIN_DH_DEG = 100.0    # velocity heading vs span heading
-SPIN_MIN_TICKS = 6
-SPIN_MIN_SPEED = 30.0  # world units per tick x 256 / 256 = u/t: ignore a car that has stopped
+SPIN_BACK_DEG = 110.0    # nose vs span heading: pointing back along the road
+SPIN_SLIDE_DEG = 60.0    # nose vs own velocity: side-on slide
+SPIN_SLIDE_MIN_SPEED = 120.0   # u/t: a slow shunt is not a spin
+SPIN_MIN_TICKS = 4
 START_GRID_TICKS = 0   # trace rows before the cars first move are skipped via t0
+HIT_LOOK = 25          # ticks after an incident's last contact in which the speed loss is measured
+HIT_LOSS = 0.40        # an incident that costs >= 40% of the entry speed is a HIT
+CRASH_FRAC = 0.15      # ... one that leaves <= 15% of it (or reverses the car) is a CRASH
+HIT_MIN_SPEED = 120.0  # u/t: slower than this a wall touch is a shunt, not a hit
 FINISH_MARGIN = 100    # spans before ring end: a car at/after ring-FINISH_MARGIN is "at the finish"
 
 
@@ -172,6 +183,8 @@ class Run:
                                ("long_speed", "rear_slip"))
         self.pose = read_csv(os.path.join(lg, "race_trace_pose.csv"), "post_physics",
                              ("world_x", "world_z"))
+        self.rot = read_csv(os.path.join(lg, "race_trace_rotation.csv"), "post_physics",
+                            ("euler_yaw",))
         self.drv = read_csv(os.path.join(lg, "race_trace_driver.csv"), "post_ai",
                             ("steering_cmd",))
         self.strip = Strip(os.path.join(path, "STRIP.DAT"))
@@ -179,6 +192,10 @@ class Run:
         self.max_tick = max((s[-1][0] for s in self.track.values() if s), default=0)
         self.d_motion = {s: {t: v for t, v, _r in rows} for s, rows in self.motion.items()}
         self.d_pose = {s: {t: (x, z) for t, x, z in rows} for s, rows in self.pose.items()}
+        # the car's nose, degrees: (euler_yaw >> 8) & 0xFFF is the 4096-circle heading, the same
+        # convention as atan2(vx, vz) of the world position (checked against the velocity)
+        self.d_nose = {s: {t: (((e >> 8) & 0xFFF) * 360.0 / 4096.0) for t, e in rows}
+                       for s, rows in self.rot.items()}
         self.window = {}        # slot -> (t0, t1): from first movement to reaching the finish area
         self.finish_norm = None
 
@@ -218,8 +235,13 @@ def plateaus(seq, hold, tol):
     return out
 
 
+def angdiff(a, b):
+    return (a - b + 180.0) % 360.0 - 180.0
+
+
 def lateral(run, slot, tick, raw):
-    """(lateral offset in half-widths, velocity heading minus span heading in degrees, speed u/t)."""
+    """(lateral offset in half-widths, velocity heading minus span heading in degrees, speed u/t,
+    nose minus span heading, nose minus velocity heading)."""
     st = run.strip
     if not st.ok:
         return None
@@ -234,23 +256,58 @@ def lateral(run, slot, tick, raw):
     ln = math.hypot(tx, tz) or 1.0
     tx, tz = tx / ln, tz / ln
     lat = ((x - ax) * tz + (z - az) * -tx) / (hw or 1.0)
-    dh, spd = 0.0, 0.0
+    road = math.degrees(math.atan2(tx, tz))
+    dh = dn = nv = 0.0
+    spd = 0.0
+    nose = run.d_nose.get(slot, {}).get(tick)
     if pp:
         vx, vz = x - pp[0] / 256.0, z - pp[1] / 256.0
         spd = math.hypot(vx, vz) / 2.0
         if vx * vx + vz * vz > 1.0:
-            yaw = math.atan2(vx, vz)
-            dh = math.degrees((yaw - math.atan2(tx, tz) + math.pi) % (2 * math.pi) - math.pi)
-    return lat, dh, spd
+            vh = math.degrees(math.atan2(vx, vz))
+            dh = angdiff(vh, road)
+            if nose is not None:
+                nv = angdiff(nose, vh)
+    if nose is not None:
+        dn = angdiff(nose, road)
+    return lat, dh, spd, dn, nv
 
 
 def zone_filter(fk, raw, norm, ring):
     """Which part of the fork a sample sits in: 'ring' (main road window), 'corr' (corridor) or None."""
     if fk["c0"] <= raw <= fk["c1"]:
         return "corr"
-    if raw < ring and fk["F"] - WIDEN <= norm <= fk["R"] + TAIL:
+    if raw < ring and fk["lo"] <= norm <= fk["hi"]:
         return "ring"
     return None
+
+
+def close_incident(run, slot, m, inc):
+    """Grade a finished wall INCIDENT by what it cost: the speed lost over the following
+    HIT_LOOK ticks, relative to the speed just before it. A scrape that costs nothing is
+    not a hit; HIT_LOSS (40%) is a hit; a stop or a reversal (<= CRASH_FRAC of the entry
+    speed, or backwards) is a crash. Slow shunts (entry speed < HIT_MIN_SPEED) are ignored."""
+    if not inc:
+        return
+    dm = run.d_motion.get(slot, {})
+    v0 = inc["v0"]
+    if v0 < HIT_MIN_SPEED:
+        return
+    vmin = min((dm.get(inc["t0"] + k, 10**9) / 256.0 for k in range(0, inc["t1"] - inc["t0"] + HIT_LOOK)),
+               default=v0)
+    if vmin > 10**8:
+        return
+    loss = 1.0 - max(vmin, 0.0) / v0
+    kind = None
+    if vmin <= v0 * CRASH_FRAC or vmin < 0:
+        kind = "crash"
+    elif loss >= HIT_LOSS:
+        kind = "hit"
+    if kind:
+        m["hits"] += 1
+        if kind == "crash":
+            m["crashes"] += 1
+        m["hit_log"].append((slot, inc["t0"], inc["raw"], kind, round(v0), round(vmin)))
 
 
 def measure(run, fk):
@@ -259,7 +316,7 @@ def measure(run, fk):
     ring = run.ring or (run.strip.ring if run.strip.ok else 10**9)
     m = dict(passes=0, took=0, stayed=0, trapped=0, trapped_slots=[], stalls=[], events=0, incidents=0,
              mouth_in=0, mouth_out=0, body=0, contact_ticks=0, offroad=0, spins=[], speed_sum=0.0,
-             speed_n=0, speed_corr_sum=0.0, speed_corr_n=0, speed_ring_sum=0.0, speed_ring_n=0)
+             speed_n=0, speed_corr_sum=0.0, speed_corr_n=0, speed_ring_sum=0.0, speed_ring_n=0, hits=0, crashes=0, hit_log=[])
     for slot in run.slots:
         seq = run.track[slot]
         a, b = run.window.get(slot, (0, 10**9))
@@ -269,6 +326,7 @@ def measure(run, fk):
         last_t = -10**9
         zone_rows = []
         in_off = in_spin = 0
+        inc = None
         for t, raw, norm, c in seq:
             if t < a or t >= b:
                 prev_c = 0
@@ -276,7 +334,7 @@ def measure(run, fk):
             z = zone_filter(fk, raw, norm, ring)
             if z is None:
                 prev_c = 0
-                if entered and norm > fk["R"] + TAIL and raw < ring:
+                if entered and norm > fk["hi"] and raw < ring:
                     exited = True
                 in_off = in_spin = 0
                 continue
@@ -299,6 +357,10 @@ def measure(run, fk):
                         m["body"] += 1
                 if t - last_t > INCIDENT_GAP:
                     m["incidents"] += 1
+                    close_incident(run, slot, m, inc)
+                    inc = dict(t0=t, t1=t, raw=raw, v0=run.d_motion.get(slot, {}).get(t - 3, 0) / 256.0)
+                else:
+                    inc["t1"] = t
                 last_t = t
             prev_c = c
             mv = run.d_motion.get(slot, {}).get(t)
@@ -311,33 +373,35 @@ def measure(run, fk):
                     m["speed_ring_sum"] += v; m["speed_ring_n"] += 1
             lf = lateral(run, slot, t, raw)
             if lf:
-                lat, dh, spd = lf
+                lat, dh, spd, dn, nv = lf
                 if abs(lat) > OFFROAD_LAT:
                     in_off += 1
                     if in_off == OFFROAD_MIN_TICKS:
                         m["offroad"] += 1
                 else:
                     in_off = 0
-                if abs(dh) > SPIN_DH_DEG and spd > SPIN_MIN_SPEED / 256.0 * 256.0 * 0 + 1.0:
+                # SPIN: the nose points back along the road (> SPIN_BACK_DEG off the span heading)
+                # or the car is sliding side-on (nose > SPIN_SLIDE_DEG off its own velocity) at speed.
+                bad = abs(dn) > SPIN_BACK_DEG or (abs(nv) > SPIN_SLIDE_DEG and spd > SPIN_SLIDE_MIN_SPEED)
+                if bad:
                     in_spin += 1
                     if in_spin == SPIN_MIN_TICKS:
                         m["spins"].append((slot, t, raw))
                 else:
                     in_spin = 0
+        close_incident(run, slot, m, inc)
         if entered:
             m["passes"] += 1
             if took:
                 m["took"] += 1
             else:
                 m["stayed"] += 1
-            if not exited and not took and zone_rows and zone_rows[-1][2] <= fk["R"] + TAIL \
-               and zone_rows[-1][0] < run.max_tick - 5 and zone_rows[-1][2] < run.finish_norm:
-                m["trapped"] += 1; m["trapped_slots"].append(slot)
-            elif took and zone_rows and zone_rows[-1][0] < run.max_tick - 5 and zone_rows[-1][1] <= fk["c1"] \
-                    and zone_rows[-1][2] < run.finish_norm and not exited:
-                m["trapped"] += 1; m["trapped_slots"].append(slot)
             for p in plateaus(zone_rows, STALL_HOLD, STALL_TOL):
                 m["stalls"].append((slot,) + p)
+                # TRAPPED: a plateau that never ended (the trace ran out with the car still in
+                # the window and still not moving) or one that lasted TRAP_TICKS
+                if p[1] - p[0] + 1 >= TRAP_TICKS or p[1] >= zone_rows[-1][0] and zone_rows[-1][0] >= run.max_tick - 30:
+                    m["trapped"] += 1; m["trapped_slots"].append(slot)
     return m
 
 
@@ -350,7 +414,7 @@ def main_road_speed(run, forks):
         for t, raw, norm, _c in run.track[slot]:
             if t < a + 60 or t >= b or raw >= ring:
                 continue
-            if any(fk["F"] - WIDEN - 4 <= norm <= fk["R"] + TAIL + 4 for fk in forks.values()):
+            if any(fk["lo"] - 4 <= norm <= fk["hi"] + 4 for fk in forks.values()):
                 continue
             v = run.d_motion.get(slot, {}).get(t)
             if v is not None:
@@ -372,44 +436,47 @@ def add(dst, src):
 def judge(F, fk, fm, bm, n_seeds, main_speed):
     T = THRESHOLDS
     reasons, verdict = [], "PASS"
+    order = {"PASS": 0, "UNTESTED": 1, "WARN": 2, "FAIL": 3}
 
     def worse(level, why):
         nonlocal verdict
-        order = {"PASS": 0, "UNTESTED": 1, "WARN": 2, "FAIL": 3}
         reasons.append("%s: %s" % (level, why))
         if order[level] > order[verdict]:
             verdict = level
 
     passes = max(1, fm["passes"])
+    bpass = max(1, bm.get("passes", 0))
+
+    def delta(key):
+        """(extra count, extra per pass) of a counter, fork minus baseline, normalised per car-pass."""
+        f = len(fm[key]) if isinstance(fm[key], list) else fm[key]
+        b = bm.get(key, 0)
+        b = len(b) if isinstance(b, list) else b
+        return f, b, f / passes - b / bpass
+
+    def graded(key, label, fail_k, warn_k):
+        f, b, d = delta(key)
+        if d >= T[fail_k]:
+            worse("FAIL", "%s %d vs baseline %d (+%.2f per car-pass)" % (label, f, b, d))
+        elif d >= T[warn_k]:
+            worse("WARN", "%s %d vs baseline %d (+%.2f per car-pass)" % (label, f, b, d))
+
     if fm["took"] < T["min_corridor_entries"]:
         worse("UNTESTED", "only %d corridor entries over %d seed(s) (need %d)" % (fm["took"], n_seeds, T["min_corridor_entries"]))
-    if fm["trapped"] >= T["trapped_fail"] and fm["trapped"] > bm.get("trapped", 0):
-        worse("FAIL", "%d car(s) trapped in the window (slots %s), baseline %d" % (fm["trapped"], sorted(set(fm["trapped_slots"])), bm.get("trapped", 0)))
-    d_stall = len(fm["stalls"]) - len(bm.get("stalls", []))
-    if d_stall >= T["stall_extra_fail"]:
-        worse("FAIL", "%d stall(s) vs baseline %d" % (len(fm["stalls"]), len(bm.get("stalls", []))))
-    d_spin = len(fm["spins"]) - len(bm.get("spins", []))
-    if d_spin >= T["spin_extra_fail"]:
-        worse("FAIL", "%d spin(s) vs baseline %d" % (len(fm["spins"]), len(bm.get("spins", []))))
-    elif d_spin >= T["spin_extra_warn"]:
-        worse("WARN", "%d spin(s) vs baseline %d" % (len(fm["spins"]), len(bm.get("spins", []))))
-    bpass = max(1, bm.get("passes", 0))
-    d_inc = fm["incidents"] / passes - bm.get("incidents", 0) / bpass
-    if d_inc >= T["incident_per_pass_fail"]:
-        worse("FAIL", "incidents/pass +%.2f vs baseline (%d/%d vs %d/%d)" % (d_inc, fm["incidents"], passes, bm.get("incidents", 0), bpass))
-    elif d_inc >= T["incident_per_pass_warn"]:
-        worse("WARN", "incidents/pass +%.2f vs baseline (%d/%d vs %d/%d)" % (d_inc, fm["incidents"], passes, bm.get("incidents", 0), bpass))
-    fmo = (fm["mouth_in"] + fm["mouth_out"]) / passes
-    bmo = (bm.get("mouth_in", 0) + bm.get("mouth_out", 0)) / bpass
-    if fmo - bmo >= T["mouth_incident_per_pass_fail"]:
-        worse("FAIL", "mouth wall events/pass +%.2f (in %d out %d vs %d/%d)" % (fmo - bmo, fm["mouth_in"], fm["mouth_out"], bm.get("mouth_in", 0), bm.get("mouth_out", 0)))
-    elif fmo - bmo >= T["mouth_incident_per_pass_warn"]:
-        worse("WARN", "mouth wall events/pass +%.2f (in %d out %d vs %d/%d)" % (fmo - bmo, fm["mouth_in"], fm["mouth_out"], bm.get("mouth_in", 0), bm.get("mouth_out", 0)))
-    d_off = fm["offroad"] / passes - bm.get("offroad", 0) / bpass
-    if d_off >= T["offroad_per_pass_fail"]:
-        worse("FAIL", "off-road episodes/pass +%.2f (%d vs %d)" % (d_off, fm["offroad"], bm.get("offroad", 0)))
-    elif d_off >= T["offroad_per_pass_warn"]:
-        worse("WARN", "off-road episodes/pass +%.2f (%d vs %d)" % (d_off, fm["offroad"], bm.get("offroad", 0)))
+    f, b, d = delta("trapped")
+    if d >= T["trapped_per_pass_fail"]:
+        worse("FAIL", "%d car(s) jammed/trapped (slots %s) vs baseline %d (+%.2f per car-pass)" % (f, sorted(set(fm["trapped_slots"])), b, d))
+    elif f - b >= T["trapped_extra_warn"]:
+        worse("WARN", "%d car(s) jammed/trapped (slots %s) vs baseline %d" % (f, sorted(set(fm["trapped_slots"])), b))
+    f, b, d = delta("stalls")
+    if d >= T["stall_per_pass_fail"]:
+        worse("FAIL", "stalls %d vs baseline %d (+%.2f per car-pass)" % (f, b, d))
+    elif f - b >= T["stall_extra_warn"]:
+        worse("WARN", "stalls %d vs baseline %d" % (f, b))
+    graded("crashes", "crashes", "crash_per_pass_fail", "crash_per_pass_warn")
+    graded("hits", "hard hits (incl. crashes)", "hit_per_pass_fail", "hit_per_pass_warn")
+    graded("spins", "spins", "spin_per_pass_fail", "spin_per_pass_warn")
+    graded("offroad", "off-road episodes", "offroad_per_pass_fail", "offroad_per_pass_warn")
     fs = fm["speed_sum"] / fm["speed_n"] if fm["speed_n"] else 0.0
     bs = bm.get("speed_sum", 0.0) / bm["speed_n"] if bm.get("speed_n") else 0.0
     ratio = (fs / bs) if bs else None
@@ -418,8 +485,7 @@ def judge(F, fk, fm, bm, n_seeds, main_speed):
             worse("FAIL", "window mean speed %.0f%% of the forks-off window" % (100 * ratio))
         elif ratio < T["speed_ratio_warn"]:
             worse("WARN", "window mean speed %.0f%% of the forks-off window" % (100 * ratio))
-    return verdict, reasons, dict(speed=fs, base_speed=bs, ratio=ratio,
-                                  main_speed=main_speed)
+    return verdict, reasons, dict(speed=fs, base_speed=bs, ratio=ratio, main_speed=main_speed)
 
 
 def fmt_table(rows, head):
@@ -473,6 +539,17 @@ def main():
         r.set_finish(ring)
         r.finish_norm = max(0, ring - args.finish_margin)
         r.set_finish(ring)
+    # Windows F-8 .. R+2 of ADJACENT forks overlap (Diagonal 73 R=209 then the plaza at F=210):
+    # a shared span belongs to the earlier fork up to the midpoint of the overlap.
+    ordered = sorted(forks.values(), key=lambda f: f["F"])
+    for fk in ordered:
+        fk["lo"] = fk["F"] - WIDEN
+        fk["hi"] = fk["R"] + TAIL
+    for a_, b_ in zip(ordered, ordered[1:]):
+        if a_["hi"] >= b_["lo"]:
+            mid = (a_["hi"] + b_["lo"]) // 2
+            a_["hi"] = mid
+            b_["lo"] = mid + 1
     print("run-set %s: %d fork run(s) %s, %d baseline run(s) %s, ring %d, %d fork(s) built"
           % (setdir, len(fork_runs), sorted(fork_runs), len(base_runs), sorted(base_runs), ring, len(forks)))
     for r in list(fork_runs.values()) + list(base_runs.values()):
@@ -497,18 +574,18 @@ def main():
         results.append(dict(F=F, fk=fk, fm=fm, bm=bm, verdict=verdict, reasons=reasons, speed=sp, per_seed=per_seed))
 
     # ---- the table ---------------------------------------------------------------
-    head = ["fork", "kind", "F..R", "len", "corr", "entries(c/m)", "events in/body/out", "incid", "stall", "trap",
-            "spin", "offrd", "speed(u/t) f/b/main", "base incid/stall/spin", "verdict"]
+    head = ["fork", "kind", "F..R", "len", "corr", "enter c/m", "wall in/body/out", "hit/crash", "stall", "jam",
+            "spin", "offrd", "speed f/b/main", "BASE hit/crash/stall/spin", "verdict"]
     rows = []
     for x in results:
         fk, fm, bm, sp = x["fk"], x["fm"], x["bm"], x["speed"]
         rows.append([
             "%s" % (fk["name"] or fk["kind"])[:26], fk["kind"], "%d..%d" % (fk["F"], fk["R"]), fk["len"],
             "%d..%d" % (fk["c0"], fk["c1"]), "%d/%d" % (fm["took"], fm["stayed"]),
-            "%d/%d/%d" % (fm["mouth_in"], fm["body"], fm["mouth_out"]), fm["incidents"], len(fm["stalls"]),
-            fm["trapped"], len(fm["spins"]), fm["offroad"],
+            "%d/%d/%d" % (fm["mouth_in"], fm["body"], fm["mouth_out"]), "%d/%d" % (fm["hits"], fm["crashes"]),
+            len(fm["stalls"]), fm["trapped"], len(fm["spins"]), fm["offroad"],
             "%.0f/%.0f/%.0f" % (sp["speed"], sp["base_speed"], sp["main_speed"]),
-            "%d/%d/%d" % (bm.get("incidents", 0), len(bm.get("stalls", [])), len(bm.get("spins", []))),
+            "%d/%d/%d/%d" % (bm.get("hits", 0), bm.get("crashes", 0), len(bm.get("stalls", [])), len(bm.get("spins", []))),
             x["verdict"]])
     print()
     print(fmt_table(rows, head))
@@ -531,9 +608,12 @@ def main():
 
     # ---- machine-readable verdict file -------------------------------------------
     if args.out and not args.no_json:
-        allow_levels = {"PASS", "WARN"} if args.warn_allows else {"PASS"}
-        allow = [x["F"] for x in results if x["verdict"] in allow_levels]
-        deny = [x["F"] for x in results if x["verdict"] not in allow_levels]
+        allow = [x["F"] for x in results if x["verdict"] == "PASS"]
+        warn = [x["F"] for x in results if x["verdict"] == "WARN"]
+        deny = [x["F"] for x in results if x["verdict"] == "FAIL"]
+        untested = [x["F"] for x in results if x["verdict"] == "UNTESTED"]
+        if args.warn_allows:
+            allow, warn = allow + warn, []
         doc = dict(
             schema=1,
             generated=datetime.datetime.now().isoformat(timespec="seconds"),
@@ -543,7 +623,7 @@ def main():
             fork_env=meta.get("fork_env"), only=meta.get("only"),
             thresholds=THRESHOLDS,
             overall=worst,
-            allow=allow, deny=deny,
+            allow=allow, warn=warn, deny=deny, untested=untested,
             env=dict(TD5RE_GEO_FORK_ALLOW=",".join(str(f) for f in allow) if allow else "-1",
                      TD5RE_GEO_FORK_DENY=",".join(str(f) for f in deny)),
             forks=[dict(
