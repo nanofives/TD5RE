@@ -1206,7 +1206,7 @@ static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
      * tg_xstreet_here and then never emitted -- the two authorities must agree. */
     if (lo < 1 || hi >= nspans || hi + 1 >= nl->count)
         return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID, 0.0), 0);
-    if (lo < TD5_TG_FACADE_START_RUN
+    if (lo < tg_start_city_run()
         && td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
         return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID, 0.0), 0);
 
