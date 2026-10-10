@@ -9674,20 +9674,6 @@ static const CorrMap *corr_map_find_span(int span, int *k)
     return NULL;
 }
 
-/* The mapped corridor whose parallel main range holds `main_span`. */
-static const CorrMap *corr_map_find_main(int main_span, int *off)
-{
-    int j;
-    for (j = 0; j < s_cmap_n; j++) {
-        const CorrMap *c = &s_cmap[j];
-        if (c->n > 0 && main_span >= c->base && main_span < c->base + c->m) {
-            if (off) *off = main_span - c->base;
-            return c;
-        }
-    }
-    return NULL;
-}
-
 /* The main-road index a car on `span` has "covered": a main span is its own index, a
  * span of a mapped corridor is base + the offset it stands beside. */
 static int corr_progress_index(int span)
