@@ -605,8 +605,8 @@ Steps that would work, in order:
    `track_span_normalized` as an index into a ring point table (`s_pt_count`, main ring only).
    Build entries for corridor spans from the strip rows, take the radius from the corridor's own
    rows, and scale the lookahead in spans by `1/stretch` (a corridor span is 7.8 m, so 8 spans
-   look 62 m ahead instead of 28). Without this the cap sees a main-ring corner of 34 units R_ref
-   and drives the 14 m corridor corners at 145 km/h (the pile-ups measured at 2.2x).
+   look 62 m ahead instead of 28). Without this the cap is sqrt(R / R_ref) with R_ref = 34000 units and reads
+   the main ring, so it drives the 14 m corridor corners at 145 km/h (the pile-ups measured at 2.2x).
 2. **Progress**: a car on the stretched corridor advances one span per 7.8 m, so it gains span
    count 2.2x faster than on the main road: race position and rubber-banding see the long way as
    the short one. Weight the span count by the stretch, or leave it (taking the long way would
