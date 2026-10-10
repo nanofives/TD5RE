@@ -378,6 +378,7 @@ def measure(run, fk):
                     in_off += 1
                     if in_off == OFFROAD_MIN_TICKS:
                         m["offroad"] += 1
+                        m.setdefault("off_log", []).append((slot, t, raw, norm, z, round(lat, 2)))
                 else:
                     in_off = 0
                 # SPIN: the nose points back along the road (> SPIN_BACK_DEG off the span heading)
@@ -602,6 +603,8 @@ def main():
             print("    stall slot %d ticks %d..%d spans %d..%d" % (slot, t0, t1, lo, hi))
         for slot, t, raw in x["fm"]["spins"]:
             print("    spin  slot %d tick %d span_raw %d" % (slot, t, raw))
+        for slot, t, raw, norm, z, lat in x["fm"].get("off_log", []):
+            print("    offrd slot %d tick %d span_raw %d norm %d zone %s lat %.2f" % (slot, t, raw, norm, z, lat))
 
     worst = "PASS"
     order = {"PASS": 0, "UNTESTED": 1, "WARN": 2, "FAIL": 3}

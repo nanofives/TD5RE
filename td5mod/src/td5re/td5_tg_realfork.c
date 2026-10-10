@@ -65,7 +65,7 @@
 #define TG_RF_SRC_PLAZA     1
 #define TG_RF_SRC_PARALLEL  2
 
-#define TG_RF_STEPS         512   /* TD5_TG_BYPASS_MAXK: corridor steps/lateral */
+#define TG_RF_STEPS         700   /* corridor steps/lateral ([1017 R] was 512: a merged fork runs 518 spans) */
 #define TG_RF_MAXCAND       192
 #define TG_RF_MINLEN        24    /* spans: 84 m, TD5_TG_BRANCH_MIN_LEN         */
 #define TG_RF_MAXLEN        480
@@ -95,6 +95,7 @@
 /* A fork only the relaxed pass could build is worth this much of its length to the selector: where
  * it competes with a fork (or a plaza) the old rules built, the old one keeps the stretch. */
 #define TG_RF_RELAX_WEIGHT  0.9
+#define TG_RF_MERGE_WEIGHT  1.12   /* [1017 R] a merged avenue+plaza(+avenue) fork vs its parts (sum of the parts weighs 1.05 x avenue) */
 /* Two forks may share a taper (the node takes the larger of the two widths, so
  * the road narrows after one and widens again before the next without having to
  * close), but their FULL-width windows F-8 .. R+2 stay at least this far apart. */
@@ -116,6 +117,7 @@ typedef struct {
     double off[TG_RF_STEPS + 2];       /* signed lateral from A's centre, node F+j */
     int    pf;                         /* [ROUND 1015 E] plaza plan index, -1 = none */
     int    relaxed;                    /* [1017 R] built by the relaxed pass     */
+    int    merged;                     /* [1017 R] plaza fork that absorbed its adjacent avenue fork(s) */
 } RfCand;
 
 typedef struct {
@@ -131,6 +133,7 @@ typedef struct {
     int    contra;                     /* the real way flows AGAINST the race (log) */
     int    pf;                         /* [ROUND 1015 E] plaza plan index, -1 = none */
     int    relaxed;                    /* [1017 R] built by the relaxed pass     */
+    int    merged;                     /* [1017 R] plaza fork that absorbed its adjacent avenue fork(s) */
 } RfFork;
 
 static RfCand  s_cand[TG_RF_MAXCAND];
@@ -337,6 +340,7 @@ static int rf_window_limit(void)
  * window). */
 static int rf_lanevar(void) { return s_rf_relax && td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR"); }
 /* Is there any relaxation switched on, i.e. is a second (relaxed) pass worth making? */
+static int rf_relax_only(void) { return td5_env_flag_off("TD5RE_GEO_FORK_RELAX_ONLY"); }
 static int rf_relax_any(void) { return td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR") || td5_env_flag_on("TD5RE_GEO_FORK_BEND"); }
 
 /* The route lane count that most nodes of the fork body F..R+1 carry (ties to the
@@ -609,6 +613,7 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
     snprintf(c->name, sizeof c->name, "%s", name ? name : "");
     c->weight = 0.0;
     c->relaxed = s_rf_relax;
+    c->merged = 0;
     return c;
 }
 
@@ -776,7 +781,10 @@ static void rf_gen_avenue(void)
                 if (R - F - 1 < TG_RF_MINLEN) continue;
                 if (R - F - 1 > TG_RF_MAXLEN) break;
                 {
-                    int ok = rf_avenue_pair(name, g, F, R, merge, fit, &oom);
+                    /* TD5RE_GEO_FORK_RELAX_ONLY=1 (dev): skip the old-rules pass, so the relaxed
+                     * pass alone decides (exercises the relaxations on windows the old pass
+                     * accepts after a slide, and shows what they would build by themselves) */
+                    int ok = rf_relax_only() ? 0 : rf_avenue_pair(name, g, F, R, merge, fit, &oom);
                     /* [1017 R] refused under the round-1016 rules: offer it again relaxed */
                     if (!ok && !oom && rf_relax_any()) {
                         s_rf_relax = 1;
@@ -1149,7 +1157,7 @@ static void rf_gen_parallel(void)
                                              : ((F >= 0 && F < s_rn) ? s_rl[F] : 2), lb_best);
                 if (!c) { free(s_vt); s_vt = NULL; s_vtn = 0; return; }
                 for (k = F; k <= R; k++) c->off[k - F] = s_plat[k];
-                if (rf_validate(c)) {
+                if (!rf_relax_only() && rf_validate(c)) {
                     c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9;
                     s_ncand++;
                 } else if (rf_relax_any()) {
@@ -1273,7 +1281,7 @@ static void rf_plaza_report(void)
  * drives the most corridor. TD5RE_GEO_FORK_PLAZA=0 removes the source. */
 static void rf_gen_plaza(void)
 {
-    TG_PfCand pc[32];
+    TG_PfCand pc[96];
     int avF[64], avR[64], nav = 0, n, i;
     /* the avenue forks that are on offer: a plaza fork may begin where one ends and end
      * where one begins, so the far carriageway runs on round the ring */
@@ -1283,16 +1291,21 @@ static void rf_gen_plaza(void)
         for (q = 0; q < nav; q++) if (avF[q] == s_cand[i].F && avR[q] == s_cand[i].R) dup = 1;
         if (!dup) { avF[nav] = s_cand[i].F; avR[nav] = s_cand[i].R; nav++; }
     }
-    n = tg_pf_candidates(s_rx, s_rz, s_rl, s_rn, rf_window_limit(), avF, avR, nav, pc, 32);
+    n = tg_pf_candidates(s_rx, s_rz, s_rl, s_rn, rf_window_limit(), avF, avR, nav, pc, 96);
     for (i = 0; i < n; i++) {
         RfCand *c = rf_new_cand(TG_RF_SRC_PLAZA, pc[i].name, pc[i].F, pc[i].R,
                                 pc[i].lanes_a, pc[i].lanes_b);
         if (!c) return;
         c->len   = pc[i].len;
-        c->i0    = c->F - TG_RF_WIDEN - s_rf_taper;
-        c->w_end = c->R + 2 + s_rf_taper;
+        c->taper_in  = pc[i].tin  > 0 ? pc[i].tin  : s_rf_taper;     /* [1017 R] fitted ramps */
+        c->taper_out = pc[i].tout > 0 ? pc[i].tout : s_rf_taper;
+        c->i0    = c->F - TG_RF_WIDEN - c->taper_in;
+        c->w_end = c->R + 2 + c->taper_out;
         c->pf    = pc[i].plan;
-        c->weight = (double)c->len;
+        c->merged = pc[i].merged;
+        /* [1017 R step 1] a merged plaza fork is the avenue forks beside it AND the plaza as ONE
+         * corridor: worth a little more than the pieces so the selector prefers it where it fits */
+        c->weight = (double)c->len * (c->merged ? TG_RF_MERGE_WEIGHT : 1.0);
         s_ncand++;
     }
 }
@@ -1381,6 +1394,7 @@ static void rf_finalise(RfFork *f, const RfCand *c)
     f->lanes_a = c->lanes_a; f->lanes_b = c->lanes_b;
     f->pf = c->pf;
     f->relaxed = c->relaxed;
+    f->merged = c->merged;
     f->i0 = c->i0; f->w_end = c->w_end;
     f->taper_in = c->taper_in; f->taper_out = c->taper_out;
     snprintf(f->name, sizeof f->name, "%s", c->name);
@@ -1489,11 +1503,20 @@ int tg_realfork_build(void)
             if (c->pf >= 0) {
                 /* [ROUND 1015 E] a plaza fork widens the two throats only */
                 extra = tg_pf_node_extra(c->pf, i);
+                /* [ROUND 1017 R] a ramp node whose route carries another lane count than lanes(A)
+                 * (the 3-lane approach to a merged fork's avenue part, and its full-width nodes) is
+                 * made up to lanes(A)+lanes(B) from the lanes the route HAS, exactly as an avenue window is; with the route at lanes(A)
+                 * (every plaza throat of 1015/1016) this is the same number as before */
+                if (extra > 0.0 && s_rl[i] != c->lanes_a) {
+                    const double frp = extra / (double)c->lanes_b;
+                    extra = (double)c->lanes_a + (double)c->lanes_b * frp - (double)s_rl[i];
+                    if (extra < 0.0) extra = 0.0;
+                }
                 if (extra <= 0.0) continue;
                 if (extra <= s_node_extra[i] && s_node_fork[i] >= 0) continue;
                 s_node_fork[i]  = s_rf_n;
                 s_node_extra[i] = extra;
-                s_node_ovr[i] = (extra >= 0.5) ? c->lanes_a + (int)(extra + 0.5) : 0;
+                s_node_ovr[i] = (extra >= 0.5) ? s_rl[i] + (int)(extra + 0.5) : 0;
                 continue;
             }
             if (i < c->F - TG_RF_WIDEN)
@@ -1522,16 +1545,22 @@ int tg_realfork_build(void)
             /* the lane COUNT is the rounded width; 0 = leave the route's own */
             s_node_ovr[i] = (extra >= 0.5) ? s_rl[i] + (int)(extra + 0.5) : 0;
         }
+        if (td5_env_flag_off("TD5RE_GEO_FORK_NODEDUMP")) {      /* dev: the node window each fork wrote */
+            for (i = c->i0; i <= c->w_end && i < s_rn; i++)
+                if (i >= 0 && s_node_fork[i] == s_rf_n)
+                    TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] node %d fork %d route lanes %d extra %.3f ovr %d",
+                              i, s_rf_n, s_rl[i], s_node_extra[i], s_node_ovr[i]);
+        }
         cov += rf->len;
         TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] %d: %s \"%s\" F=%d len=%d R=%d "
                   "lanes %d+%d, median %.2f..%.2f m real (%.2f m built), "
-                  "ring window nodes %d..%d%s", s_rf_n,
+                  "ring window nodes %d..%d%s%s", s_rf_n,
                   rf->src == TG_RF_SRC_AVENUE ? "avenue"
                       : rf->src == TG_RF_SRC_PARALLEL ? "parallel" : "plaza",
                   rf->name, rf->F, rf->len, rf->R, rf->lanes_a, rf->lanes_b,
                   rf->med_real_lo / 430.0, rf->med_real_hi / 430.0,
                   rf->med_eff_hi / 430.0, rf->i0, rf->w_end,
-                  rf->relaxed ? " [RELAXED]" : "");
+                  rf->relaxed ? " [RELAXED]" : "", rf->merged ? " [MERGED]" : "");
         s_rf_n++;
     }
     TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] %d driveable fork(s) from the real "

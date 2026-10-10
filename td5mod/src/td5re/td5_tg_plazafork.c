@@ -65,7 +65,7 @@
 #include "td5_geo_avenues.h"      /* the real gap between the two carriageways of an avenue */
 
 #define PF_UPM          430.0
-#define PF_MAXPLAN      32
+#define PF_MAXPLAN      96
 #define PF_MAXRING      12
 #define PF_RING_MAX     1024
 #define PF_NODES        (TD5_TG_MAX_SPANS + 8)
@@ -107,6 +107,8 @@ typedef struct {
     TG_NodeList rview;              /* [1016 K] v[F+1+k]: corridor ROW k, k = 0..clen */
     double chain_m, min_r_m, max_dev_m;
     int    built;
+    int    tin, tout;               /* [1017 R] the lane ramps in front of F / behind R actually fitted */
+    int    merged;                  /* [1017 R] absorbed the avenue fork(s) next to it (classic rows run 0..k1 over the avenue) */
 } PfPlan;
 
 static PfRing  s_ring[PF_MAXRING];
@@ -583,7 +585,8 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                         snprintf(s_run_names[s_runs], sizeof s_run_names[0], "%s",
                                  R->name[0] ? R->name : "(unnamed ring)");
                     s_runs++;
-                    int Fopt[8], Ropt[8], nF = 0, nR = 0;
+                    int Fopt[16], Ropt[16], Fthr[16], Rthr[16], nF = 0, nR = 0;
+                    const int merge_on = td5_env_flag_on("TD5RE_GEO_FORK_MERGE_ADJ");   /* [1017 R step 1] */
                     char label[64];
                     snprintf(label, sizeof label, "%s",
                              R->name[0] ? R->name : "(unnamed ring)");
@@ -597,22 +600,44 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                         /* ENTRY options: F ten nodes before the street's bend (a short
                          * classic zone), and right after each avenue fork that ends on
                          * this street before the bend (the far carriageway runs on). */
-                        Fopt[nF++] = b_in - 10;
+                        Fopt[nF] = b_in - 10; Fthr[nF] = Fopt[nF]; nF++;
                         for (w = 0; w < nav && nF < 7; w++)
                             if (avR[w] + 1 <= b_in - 10 && avR[w] + 1 >= b_in - 70) {
                                 int dup = 0, q;
                                 for (q = 0; q < nF; q++) if (Fopt[q] == avR[w] + 1) dup = 1;
-                                if (!dup) Fopt[nF++] = avR[w] + 1;
+                                if (!dup) { Fopt[nF] = avR[w] + 1; Fthr[nF] = Fopt[nF]; nF++; }
                             }
+                        /* [ROUND 1017 R step 1] MERGE WITH THE AVENUE FORK THAT ENDS AT THE THROAT:
+                         * one more option per such fork, the fork's OWN split span. The plaza fork
+                         * then starts there and the avenue's far carriageway is its classic entry
+                         * rows (k1 grows by the avenue's length), so the median is the avenue's real
+                         * gap straight into the plaza chain: no rejoin and no second split at the
+                         * shared span, no pin to zero, no 13.7 degree weave. */
+                        if (merge_on) {
+                            /* the LONGEST such fork only: every shorter one is a prefix of it, and the
+                             * plan build (a free chain, twice) is the expensive part */
+                            int best = -1;
+                            for (w = 0; w < nav; w++)
+                                if (avR[w] + 1 <= b_in - 10 && avR[w] + 1 >= b_in - 70 && avF[w] < avR[w] + 1 - 24 &&
+                                    (best < 0 || avF[w] < avF[best])) best = w;
+                            if (best >= 0 && nF < 15) { Fopt[nF] = avF[best]; Fthr[nF] = avR[best] + 1; nF++; }
+                        }
                         /* EXIT options: R five nodes after the straight resumes, and just
                          * before each avenue fork that starts on the exit street. */
-                        Ropt[nR++] = b_out + TG_PF_K1MIN;
+                        Ropt[nR] = b_out + TG_PF_K1MIN; Rthr[nR] = Ropt[nR]; nR++;
                         for (w = 0; w < nav && nR < 7; w++)
                             if (avF[w] - 1 >= b_out + TG_PF_K1MIN && avF[w] - 1 <= b_out + 70) {
                                 int dup = 0, q;
                                 for (q = 0; q < nR; q++) if (Ropt[q] == avF[w] - 1) dup = 1;
-                                if (!dup) Ropt[nR++] = avF[w] - 1;
+                                if (!dup) { Ropt[nR] = avF[w] - 1; Rthr[nR] = Ropt[nR]; nR++; }
                             }
+                        if (merge_on) {
+                            int best = -1;
+                            for (w = 0; w < nav; w++)
+                                if (avF[w] - 1 >= b_out + TG_PF_K1MIN && avF[w] - 1 <= b_out + 70 && avR[w] > avF[w] + 24 &&
+                                    (best < 0 || avR[w] > avR[best])) best = w;
+                            if (best >= 0 && nR < 15) { Ropt[nR] = avR[best]; Rthr[nR] = avF[best] - 1; nR++; }
+                        }
                         if (s_diag) {
                             char ob[160]; int q, n = 0;
                             n += snprintf(ob + n, sizeof ob - n, "straight street nodes ..%d / %d.., avenue forks on offer %d; F options", b_in, b_out, nav);
@@ -624,11 +649,12 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                         for (v = 0; v < nF && nout < max_out && s_nplan < PF_MAXPLAN; v++)
                             for (w = 0; w < nR && nout < max_out && s_nplan < PF_MAXPLAN; w++) {
                                 const int F = Fopt[v], Rr = Ropt[w];
+                                const int merged = (Fthr[v] != F) || (Rthr[w] != Rr);   /* [1017 R] */
                                 const int L = Rr - F - 1;
                                 const int li = (lead_in < b_in - (F + 1) - TG_PF_K1MIN) ? lead_in : b_in - (F + 1) - TG_PF_K1MIN;
                                 const int lo = (lead_out < Rr - b_out - 3) ? lead_out : Rr - b_out - 3;
                                 const int k1 = (b_in - li) - (F + 1), kx = Rr - (b_out + lo);
-                                const int i0 = F - TD5_TG_BRANCH_WIDEN - 2 - taper;
+                                int tin = taper, tout = taper;
                                 const int nfree = L - k1 - kx;
                                 int nfree2;
                                 double tsx, tsz, tex, tez, psx, psz, pex, pez, len_m = 0, minr = 0, far_m = 0;
@@ -636,9 +662,18 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                 const char *why = "";
                                 int q, la, lb, bad = 0, a, b;
                                 PfPlan *P;
-                                if (i0 < TD5_TG_GRID_SPAN + 2) { pf_note(label, F, Rr, "inside the start grid"); continue; }
-                                if (Rr + 2 + taper > win_hi) { pf_note(label, F, Rr, "past the finish line (or inside the ring tail)"); continue; }
-                                if (L < 40 || L > 470 || nfree < 12 || k1 < TG_PF_K1MIN || kx < 3) { pf_note(label, F, Rr, "window length or classic rows out of range"); continue; }
+                                /* [1017 R] a merged fork's far ends are avenue ends: the lane ramp is
+                                 * fitted to the room there is (as rf_fit_window does), at least TAPER_MIN */
+                                if (merged) {
+                                    const int room_in  = F - (TD5_TG_BRANCH_WIDEN + 2) - (TD5_TG_GRID_SPAN + 2);
+                                    const int room_out = win_hi - (Rr + 2);
+                                    if (tin > room_in)   tin = room_in;
+                                    if (tout > room_out) tout = room_out;
+                                    if (tin < 6 || tout < 6) { pf_note(label, F, Rr, "merged: no room for the lane ramp (start grid or finish)"); continue; }
+                                }
+                                if (F - TD5_TG_BRANCH_WIDEN - 2 - tin < TD5_TG_GRID_SPAN + 2) { pf_note(label, F, Rr, "inside the start grid"); continue; }
+                                if (Rr + 2 + tout > win_hi) { pf_note(label, F, Rr, "past the finish line (or inside the ring tail)"); continue; }
+                                if (L < 40 || L > (merged ? 640 : 470) || nfree < 12 || k1 < TG_PF_K1MIN || kx < 3) { pf_note(label, F, Rr, "window length or classic rows out of range"); continue; }
                                 la = s_rl[F + 1]; lb = pf_ring_lanes(R);
                                 /* The corridor is never wider than the road it splits from: the reader
                                  * gives every plaza-named ring way the plaza floor (3 lanes, 10.47 m),
@@ -648,17 +683,21 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                 if (la < 1 || la + lb > 8) { pf_note(label, F, Rr, "lanes(A)+lanes(B) over the 8-lane rail range"); continue; }
                                 /* the route's own lane count is constant over the whole entry
                                  * (taper .. wedge) and the whole exit (wedge .. taper) */
-                                for (q = i0 - 1; q <= F + 2 + k1 + TG_PF_WEDGE && !bad; q++)
+                                /* [1017 R] a merged fork's avenue part was checked by the avenue fork's own
+                                 * window (rf_fit_window); only the plaza's throat is checked here */
+                                for (q = (merged ? Fthr[v] - (TD5_TG_BRANCH_WIDEN + 2) - taper : F - TD5_TG_BRANCH_WIDEN - 2 - tin) - 1;
+                                     q <= F + 2 + k1 + TG_PF_WEDGE && !bad; q++)
                                     if (q >= 0 && q < s_rn && s_rl[q] != la) bad = 1;
-                                for (q = Rr - 2 - kx - TG_PF_WEDGE; q <= Rr + 3 + taper && !bad; q++)
+                                for (q = Rr - 2 - kx - TG_PF_WEDGE; q <= (merged ? Rthr[w] : Rr) + 3 + taper && !bad; q++)
                                     if (q >= 0 && q < s_rn && s_rl[q] != la) bad = 1;
                                 if (bad) { pf_note(label, F, Rr, "the route's own lane count changes inside a throat"); continue; }
-                                if (!pf_straight(F - 8, b_in, b_in, 3.0) || !pf_straight(b_out, Rr + 8, b_out, 3.0)) {
+                                if (!pf_straight((merged ? Fthr[v] : F) - 8, b_in, b_in, 3.0) || !pf_straight(b_out, (merged ? Rthr[w] : Rr) + 8, b_out, 3.0)) {
                                     pf_note(label, F, Rr, "the street is not straight through the throat"); continue; }
                                 P = &s_plan[s_nplan];
                                 memset(P, 0, sizeof *P);
                                 P->F = F; P->R = Rr; P->len = L; P->la = la; P->lb = lb;
                                 P->k1 = k1; P->kx = kx; P->K2 = L - kx;
+                                P->tin = tin; P->tout = tout; P->merged = merged;
                                 P->med = (double *)calloc((size_t)(L + 2), sizeof(double));
                                 P->lat = (double *)calloc((size_t)(L + 2), sizeof(double));
                                 if (!P->med || !P->lat) { free(P->med); free(P->lat); P->med = P->lat = NULL; continue; }
@@ -725,6 +764,7 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                     memset(c0, 0, sizeof *c0);
                                     c0->F = F; c0->R = Rr; c0->len = L; c0->lanes_a = la; c0->lanes_b = lb;
                                     c0->k1 = k1; c0->kx = kx;
+                                    c0->tin = tin; c0->tout = tout; c0->merged = merged;
                                     c0->plan = s_nplan; c0->stretch = P->stretch; c0->clen = P->clen;
                                     c0->ring_m = P->ring_m; c0->near_m = P->near_m; c0->far_m = P->far_m;
                                     snprintf(c0->name, sizeof c0->name, "%s", label);
@@ -757,13 +797,14 @@ double tg_pf_node_extra(int plan, int node)
 {
     const PfPlan *P;
     double b, e = 0.0;
-    int F, R, T, i0, w_end, k1, kx;
+    int F, R, T, To, i0, w_end, k1, kx;
     if (plan < 0 || plan >= s_nplan) return 0.0;
     P = &s_plan[plan];
     b = (double)P->lb; F = P->F; R = P->R; k1 = P->k1; kx = P->kx;
-    T = td5_env_int("TD5RE_GEO_FORK_TAPER", 16, 2, 48);
+    T = P->tin > 0 ? P->tin : td5_env_int("TD5RE_GEO_FORK_TAPER", 16, 2, 48);
+    To = P->tout > 0 ? P->tout : T;
     i0 = F - (TD5_TG_BRANCH_WIDEN + 2) - T;
-    w_end = R + 2 + T;
+    w_end = R + 2 + To;
     if (node < i0 || node > w_end) return 0.0;
     if (node < F - (TD5_TG_BRANCH_WIDEN + 2))             /* ramp in */
         return b * (double)(node - i0) / (double)T;
@@ -778,7 +819,7 @@ double tg_pf_node_extra(int plan, int node)
         return e < 0.0 ? 0.0 : e;
     }
     if (node <= R + 2) return b;
-    return b * (1.0 - (double)(node - (R + 2)) / (double)T);
+    return b * (1.0 - (double)(node - (R + 2)) / (double)To);
 }
 
 /* ------------------------------------------------------------- the build */
