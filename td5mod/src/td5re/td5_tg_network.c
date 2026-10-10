@@ -137,6 +137,24 @@ static double tg_net_far_shift(const TG_NodeList *nl, int si, double sg)
     if (tg_geo_avenue_n() < 1) return 0.0;
     r  = tg_geo_avenue_reach(nl, si, sg);
     hw = tg_road_half_width(nl, si);
+    /* [1014 integ] Over a REAL fork's window the far carriageway IS the drivable
+     * corridor, and tg_geo_avenue_reach answers 0 there on purpose (round 1014 A:
+     * the corridor, not the scenery road, is what the skirt must clear). Without
+     * this the street's origin fell back to the race kerb and tg_side_corridor_here
+     * refused it as "corridor" -- 20 arms on La Plata, the far-side streets B had
+     * recovered across the long forks. The corridor's OUTER edge is the same
+     * "outermost tarmac on that side"; tg_carriageway_reach already folds it in.
+     * Real forks only: a synthetic fork's corridor still refuses streets. */
+    if (td5_env_flag_on("TD5RE_GEO_FAR_FORK") && !(r - hw > 1.0)) {
+        int i;
+        for (i = 0; i < s_fork_count; i++) {
+            if (s_forks[i].real <= 0) continue;
+            if (si < s_forks[i].F - 1 || si > s_forks[i].F + s_forks[i].len + 1) continue;
+            if (sg * (double)s_forks[i].side < 0.0) continue;
+            r = tg_carriageway_reach(nl, si, sg);
+            break;
+        }
+    }
     return (r - hw > 1.0) ? (r - hw) : 0.0;
 }
 

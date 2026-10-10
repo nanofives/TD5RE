@@ -416,6 +416,20 @@ static long s_av_farwalk;
  * the neighbours so a run's two ends (a corridor mouth, an opening, the avenue's own
  * ends) get an END CAP: an uncapped slab is hollow at its ends -- you look straight into
  * it, which is the "side is empty" of the report. */
+/* [1014 integ] Does a real street leave the far kerb at span s on the side the avenue
+ * (or the real fork's corridor) is on? Round 1014 B opens the pavement for it on the
+ * plain-avenue path (below); round 1014 A's real-fork path and its sidecar `open` path
+ * called the footway emitter straight, on the grounds that "no cross-street arm is
+ * drawn through it" -- true until B put the far-side streets there, whose first span
+ * then lay UNDER a raised slab with a kerb face across the mouth. `o` is the
+ * carriageway's signed lateral (the sidecar's, or the corridor's). */
+static int tg_av_far_mouth(int s, double o)
+{
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_MOUTH_OPEN")) return 0;
+    return tg_net_mouth_shift(s, o > 0.0) > 0.0 &&
+           tg_net_mouth_kind(s, o > 0.0) >= 0;
+}
+
 static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
                            double *sw)
 {
@@ -439,6 +453,7 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
         if (op && !td5_env_flag_on("TD5RE_GEO_AVENUE_OPENING")) return 0;
         o0 = a; o1 = b; lanes = la;
     }
+    if (tg_av_far_mouth(s, o0)) return 0;     /* no footway here: neighbours cap */
     sg0 = (o0 >= 0.0) ? 1.0 : -1.0;
     sg1 = (o1 >= 0.0) ? 1.0 : -1.0;
     w = tg_geo_sidewalk_w_side(s, sg0 > 0.0);
@@ -511,6 +526,7 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
                   (sw > 0.0) ? "" : " NO WIDTH");
     if (!(sw > 0.0)) return 1;
     if (!td5_env_flag_on("TD5RE_GEO_AVENUE_FARWALK")) return 1;
+    if (tg_av_far_mouth(si, o0)) return 1;    /* a street leaves here: leave it open */
     /* [ROUND 1013 F2] Over a real fork's widened window the race road can reach
      * past the opposite carriageway's far edge; a footway there would be laid on
      * tarmac. */

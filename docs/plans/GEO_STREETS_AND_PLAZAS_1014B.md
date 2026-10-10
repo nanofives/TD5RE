@@ -103,3 +103,24 @@ below). `TD5RE_GEO_FAR_STREETS=0` restores the old placement.
   the before run because a different set of cars takes that fork (fork 2/4/5 entries differ), not
   because the corridor changed. Contact incidents in that corridor are equal (6 and 6).
 * Structure lint: warnings 84 -> 83, no new extern, no new game.h includers.
+
+## Integration with round 1014 A (long avenue forks)
+
+Merged on `integ-1014`, A's one-long-fork-per-avenue windows (fork 0 = spans 50..226)
+made B's far-side streets disappear: census 64 accepted / 22 beyond an avenue / 0 corridor
+drops (B alone) became 50 / 6 / 20. Two causes, both found by reading the code, then
+confirmed by the census and by top-down and perspective frames at spans 61, 113, 117, 168:
+
+1. **Street origin.** A makes `tg_geo_avenue_reach` answer 0 over a real fork's spans (the
+   corridor, not the scenery road, is the far carriageway there), so `tg_net_far_shift`
+   returned 0, the street started at the race kerb and `tg_side_corridor_here` refused it
+   as `corridor`. `tg_net_far_shift` now takes `tg_carriageway_reach` (which folds the
+   corridor in) on a REAL fork's window on the corridor side. Synthetic forks
+   (`real == 0`) still refuse streets. `TD5RE_GEO_FAR_FORK=0` restores the old answer.
+2. **Footway across the mouth.** A's far footway on a real fork (`tg_av_emit_far_pavement`
+   with `in_fork`, and the sidecar `open` path) was laid with no mouth check, on the
+   grounds that no cross-street arm is drawn there. With B's streets starting at the
+   corridor's outer edge, the first span of each street lay under a raised slab with a
+   kerb face across the mouth (the item 6 defect again, on the far side). The footway now
+   breaks where `tg_net_mouth_shift > 0` and a mouth exists, and the neighbouring spans
+   get end caps through `tg_av_far_edges`. `TD5RE_GEO_FORK_MOUTH_OPEN=0` restores it.
