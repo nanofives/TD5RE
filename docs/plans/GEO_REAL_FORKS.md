@@ -559,3 +559,60 @@ span 3.40-3.52 m), geometry-safety clean.
 * Squares bounded by streets (Plaza Moreno, ...) are not rings; they are not handled.
 * The two mouths are still the spot where fast cars spin (13-17 corridor events per seed).
   Larger radii are the remedy; the driver's corner cap uses sqrt(R / 34000 units).
+
+### Rebased on master 4e97638d (round 1015 A-D + F): check
+
+Merged (not rebased) at `aadb5d13`; code merged without conflicts, group A's sliding windows kept.
+
+* Synthetic gate on the merged build: MODELS.DAT 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`
+  (master's new baseline), STRIP.DAT 144714 B, TEXTURES.DAT 1605328 B.
+* La Plata slot 61 census, seed 11: `72 accepted (street 63 avenue 8 continuation 1), 24 street(s)
+  start beyond an avenue, corridor 0`, identical to master. `[REAL FORK]`: 5 forks, 730 corridor
+  spans = master's 4 forks / 614 spans (F=46, 328, 901, 1130) + the plaza fork F=210 R=327 (116
+  spans), nothing dropped; the plaza fork sits end to end between avenue forks 0 (..209) and 2 (328..).
+* One AI seed (22), same exe, `TD5RE_GEO_FORK_PLAZA=0` (master behaviour) vs default:
+
+  | | plaza off | plaza on |
+  |---|---|---|
+  | plaza window (ring 202..329) events / incidents | 39 / 11 | 19 / 6 |
+  | plaza corridor events | 2 | 10 |
+  | whole route events / incidents | 323 / 70 | 217 / 70 |
+  | stall plateaus | 15 (one in the plaza, 227-229) | 12 (none in the plaza) |
+  | cars on the plaza corridor | n/a | 3 of 6 |
+
+### Plan: a plaza whose far arc is much longer than the route (Dardo Rocha)
+
+Refused today (`TD5RE_GEO_PLAZA_STRETCH_MAX` 1.6): arc 443..485 m over 51..64 route spans, 2.2x to
+2.5x. What the engine allows, from the code:
+
+* The jump table record `[branch_lo, branch_hi, main_target]` (td5_track.c
+  `td5_track_branch_corridor_span`) is strictly 1:1: main span m maps to corridor span
+  `branch_lo + (m - main_target)`, and the parallel main range is `[main_target, main_target +
+  (branch_hi - branch_lo)]`. A corridor therefore has exactly as many spans as the main window it
+  bypasses, and a longer arc can only make each span longer. No format change gives N corridor
+  spans for M main spans.
+* So the stretch can only be cut by making the route window longer, or by making the AI and the
+  progress logic aware of it.
+
+Tried first, cheapest: longer leads (`TD5RE_GEO_PLAZA_LEAD_IN/OUT` 40, GenOnly on the same route).
+Result: no change. The F option that would give the longest window (F=1031, right after the
+Avenida 60 fork) is refused with "the street's axis never meets the ring": the street bends before
+the plaza, so there is no straight run to lengthen. The 1068 option stays at 2.4x.
+
+Steps that would work, in order:
+
+1. **Corridor-aware driver tables** (td5_ai_driver.c): the corner cap and the lookahead read
+   `track_span_normalized` as an index into a ring point table (`s_pt_count`, main ring only).
+   Build entries for corridor spans from the strip rows, take the radius from the corridor's own
+   rows, and scale the lookahead in spans by `1/stretch` (a corridor span is 7.8 m, so 8 spans
+   look 62 m ahead instead of 28). Without this the cap sees a main-ring corner of 34 units R_ref
+   and drives the 14 m corridor corners at 145 km/h (the pile-ups measured at 2.2x).
+2. **Progress**: a car on the stretched corridor advances one span per 7.8 m, so it gains span
+   count 2.2x faster than on the main road: race position and rubber-banding see the long way as
+   the short one. Weight the span count by the stretch, or leave it (taking the long way would
+   then look like a shortcut to the position logic: checkpoints are by span index, so a car that
+   takes the corridor is not penalised for the extra 300 m).
+3. Lift `TD5RE_GEO_PLAZA_STRETCH_MAX` to 2.6 once 1 and 2 pass an AI batch with no more than the
+   Azcuenaga window's event rate (17 / 18 / 12 events on seeds 11 / 22 / 33).
+4. Verify with `verify/geo_r1015e_run.ps1` + `geo_realfork_report.py --windows`, on seeds 11 / 22 /
+   33; the pile-up signature of the stretched build was seed 22: 2150 events, 8191 contact-ticks.
