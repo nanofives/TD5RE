@@ -91,6 +91,7 @@
 #define TG_RF_TAPER_MIN     6
 /* How far down the avenue the FIRST fork of a run may slide its start to find a clean window. */
 #define TG_RF_START_SLIDE   24
+#define TG_RF_END_SLIDE     40   /* [1017 R] relaxed pass: how far short of its gate a block may end */
 /* A fork only the relaxed pass could build is worth this much of its length to the selector: where
  * it competes with a fork (or a plaza) the old rules built, the old one keeps the stretch. */
 #define TG_RF_RELAX_WEIGHT  0.9
@@ -336,7 +337,7 @@ static int rf_window_limit(void)
  * window). */
 static int rf_lanevar(void) { return s_rf_relax && td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR"); }
 /* Is there any relaxation switched on, i.e. is a second (relaxed) pass worth making? */
-static int rf_relax_any(void) { return td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR"); }
+static int rf_relax_any(void) { return td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR") || td5_env_flag_on("TD5RE_GEO_FORK_BEND"); }
 
 /* The route lane count that most nodes of the fork body F..R+1 carry (ties to the
  * lower count): lanes(A) of a window whose route lanes change. With constant route lanes it
@@ -463,6 +464,85 @@ static int rf_fit_window(RfCand *c)
     return 1;
 }
 
+/* [ROUND 1017 R step 3] THE BEND RULE FOLLOWS THE GEOMETRY.
+ *
+ * Round 1013 refused any window with a per-span heading change over 0.045 rad (the
+ * "span 570" report: a fork on a sharp bend folds its shifted carriageways). That is one
+ * number for two different questions, and the AI no longer needs it (the speed governor
+ * of round 1016 K reads the bend of the path the car will drive). What a bend can
+ * actually do to a fork is fold the footprint, and only on the INSIDE of the turn:
+ *
+ *   the footprint of a window node reaches la*lw/2 + lb*lw + median beyond the route
+ *   centre on the corridor (-t) side and la*lw/2 on the +t side (the route carriageway
+ *   keeps its own edge, see tg_realfork_node_adjust). A turn of theta rad/span has a
+ *   radius R = span / theta; the quads of an offset curve overlap (the road folds back
+ *   on itself) once the offset reaches R. So per node:
+ *       turning toward -t (cross > 0):  R >= margin * (la*lw/2 + lb*lw + median)
+ *       turning toward +t:              R >= margin * (la*lw/2)
+ *   scaled by the ramp fraction on the taper nodes. A turn away from the corridor is an
+ *   OUTER curve for it: always safe geometrically, so a right-hand corridor beside a
+ *   10 m radius LEFT corner is fine where the same corner turned right is not.
+ *   Two more limits stay: no turn over TD5RE_GEO_FORK_BEND_ABS (0.5 rad/span, a 7 m
+ *   radius) anywhere, and the two MOUTHS (F-1..F+6, R-6..R+2, where the corridor
+ *   opens and closes) keep 1.5x the old cap, because cars arrive there at speed.
+ * Every window the old cap accepted passes this rule too, and the relaxed pass only sees the ones it
+ * refused. TD5RE_GEO_FORK_BEND=0 restores the fixed 0.045 cap. Returns 1 when the window is safe, else 0 with `why` filled. */
+static int rf_bend_relaxed(void) { return s_rf_relax && td5_env_flag_on("TD5RE_GEO_FORK_BEND"); }
+
+static int rf_bend_check(const RfCand *c, char *why, size_t wn)
+{
+    const double lw = rf_lane_w();
+    const double margin = (double)td5_env_float("TD5RE_GEO_FORK_BEND_MARGIN", 1.3f, 1.0f, 4.0f);
+    const double abs_cap = (double)td5_env_float("TD5RE_GEO_FORK_BEND_ABS", 0.5f, 0.05f, 1.6f);
+    const double mouth_cap = (double)td5_env_float("TD5RE_GEO_FORK_MOUTH_BEND", (float)(TD5_TG_FORK_MAX_TURN * 1.5), 0.01f, 1.6f);
+    const double half_all = (double)(c->lanes_a + c->lanes_b) * lw * 0.5;
+    int n;
+    for (n = c->i0 + 1; n <= c->w_end && n + 1 < s_rn; n++) {
+        double ax, az, bx, bz, la, lb, d, th, fr = 1.0, med = 0.0, e_neg, e_pos, inner, rad;
+        int j;
+        if (n < 1) continue;
+        ax = s_rx[n] - s_rx[n - 1];     az = s_rz[n] - s_rz[n - 1];
+        bx = s_rx[n + 1] - s_rx[n];     bz = s_rz[n + 1] - s_rz[n];
+        la = sqrt(ax * ax + az * az); lb = sqrt(bx * bx + bz * bz);
+        if (la < 1.0 || lb < 1.0) continue;
+        d = (ax * bx + az * bz) / (la * lb);
+        if (d > 1.0) d = 1.0; else if (d < -1.0) d = -1.0;
+        th = acos(d);
+        if (th < 1e-4) continue;
+        if (n < c->F - TG_RF_WIDEN)
+            fr = (double)(n - c->i0) / (double)(c->taper_in > 0 ? c->taper_in : 1);
+        else if (n > c->R + 2)
+            fr = 1.0 - (double)(n - (c->R + 2)) / (double)(c->taper_out > 0 ? c->taper_out : 1);
+        if (fr < 0.0) fr = 0.0; else if (fr > 1.0) fr = 1.0;
+        j = n - c->F;
+        if (j >= 0 && j <= c->len + 1) {
+            const double a = (c->off[j] < 0.0) ? -c->off[j] : c->off[j];
+            med = a - half_all;
+            if (med < 0.0) med = 0.0;
+        }
+        e_pos = (double)c->lanes_a * lw * 0.5;
+        e_neg = e_pos + fr * ((double)c->lanes_b * lw + med);
+        inner = ((ax * bz - az * bx) > 0.0) ? e_neg : e_pos;
+        rad = 0.5 * (la + lb) / th;
+        if (th > abs_cap) {
+            snprintf(why, wn, "bend of %.3f rad/span at node %d (absolute cap %.2f)", th, n, abs_cap);
+            return 0;
+        }
+        if (rad < margin * inner) {
+            snprintf(why, wn, "bend of %.3f rad/span at node %d turns toward the corridor: "
+                     "radius %.1f m < %.1f m x %.2f footprint", th, n, rad / 430.0,
+                     inner / 430.0, margin);
+            return 0;
+        }
+        if (((n >= c->F - 1 && n <= c->F + 6) || (n >= c->R - 6 && n <= c->R + 2)) && th > mouth_cap) {
+            snprintf(why, wn, "bend of %.3f rad/span at node %d inside a mouth (cap %.3f)",
+                     th, n, mouth_cap);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* Fill the derived window of a candidate and reject it when the route cannot
  * carry it. Every reason is logged under TD5RE_GEO_FORK_DIAG so "why is there no
  * fork there" is answerable from race.log, not from a guess. */
@@ -483,6 +563,15 @@ static int rf_validate(RfCand *c)
     /* The full width holds F-8 .. R+2 (the engine's own uniform window); the taper
      * runs s_rf_taper nodes in front of it and behind it. */
     if (!rf_fit_window(c)) return 0;
+    /* [ROUND 1017 R step 3] the fold test (rf_bend_check) replaces the fixed cap */
+    if (rf_bend_relaxed()) {
+        char why[160];
+        if (!rf_bend_check(c, why, sizeof why)) {
+            rf_note("REJECT", c->src, c->name, c->F, c->R, why);
+            return 0;
+        }
+        return 1;
+    }
     /* A fork on a sharp bend folds its shifted carriageways (the R6 "span 570"
      * report): the same per-span heading cap the placement loop logs. */
     for (i = c->F - TG_RF_WIDEN; i <= c->R + 2 && i + 2 < s_rn; i++) {
@@ -594,6 +683,24 @@ static int rf_avenue_pair(const char *name, int g, int F, int R, int merge, int 
                 rf_note("SLID", TG_RF_SRC_AVENUE, name, F, R,
                         "the start of the fork moved down the avenue past "
                         "a bend or a lane change");
+                return 1;
+            }
+        }
+        s_rf_quiet = 0;
+    }
+    /* [1017 R step 3] THE END SLIDES TOO, in the relaxed pass: a block whose far end sits at a
+     * tight corner (the route turns off the avenue there) ends where the road is still straight
+     * enough instead of being refused whole. The corridor rejoins up to TG_RF_END_SLIDE spans
+     * short of the real gate; the next block (if any) still starts at the gate. */
+    if (!ok && !*oom && s_rf_relax && td5_env_flag_on("TD5RE_GEO_FORK_END_SLIDE")) {
+        int slide;
+        s_rf_quiet = 1;
+        for (slide = 1; slide <= TG_RF_END_SLIDE && !*oom; slide++) {
+            if ((R - slide) - F - 1 < TG_RF_MINLEN) break;
+            if (rf_avenue_try(name, F, R - slide, merge, oom)) {
+                s_rf_quiet = 0;
+                rf_note("SLID", TG_RF_SRC_AVENUE, name, F, R,
+                        "the END of the fork moved back up the avenue short of a bend");
                 return 1;
             }
         }
@@ -1053,6 +1160,23 @@ static void rf_gen_parallel(void)
                     if (rf_validate(c)) {
                         c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9 * TG_RF_RELAX_WEIGHT;
                         s_ncand++;
+                    } else if (td5_env_flag_on("TD5RE_GEO_FORK_END_SLIDE")) {
+                        /* the end slides back up the road, short of a corner */
+                        int slide;
+                        s_rf_quiet = 1;
+                        for (slide = 1; slide <= TG_RF_END_SLIDE; slide++) {
+                            if ((R - slide) - F - 1 < TG_RF_MINLEN) break;
+                            c->R = R - slide;
+                            if (rf_validate(c)) {
+                                c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9 * TG_RF_RELAX_WEIGHT;
+                                s_ncand++;
+                                s_rf_quiet = 0;
+                                rf_note("SLID", TG_RF_SRC_PARALLEL, c->name, F, R,
+                                        "the END of the fork moved back up the road short of a bend");
+                                break;
+                            }
+                        }
+                        s_rf_quiet = 0;
                     }
                     s_rf_relax = 0;
                 }
