@@ -1864,6 +1864,29 @@ static int tg_net_follow_on(void)
     return td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW");
 }
 
+/* [ROUND 1015 B item 12] Does (x,z) lie on the carriageway of any edge OTHER than `self`?
+ * Distance to each of its polyline segments against half its width. */
+static int tg_net_on_other_road(const TG_NetEdge *self, double x, double z)
+{
+    int i, k;
+    for (i = 0; i < s_ne; i++) {
+        const TG_NetEdge *o = &s_edges[i];
+        if (o == self || o->npoly < 2) continue;
+        for (k = 0; k + 1 < o->npoly; k++) {
+            const double ax = o->px[k], az = o->pz[k];
+            const double bx = o->px[k + 1], bz = o->pz[k + 1];
+            const double dx = bx - ax, dz = bz - az;
+            const double l2 = dx * dx + dz * dz;
+            double t = (l2 > 1e-9) ? ((x - ax) * dx + (z - az) * dz) / l2 : 0.0, ex, ez;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            ex = ax + dx * t - x; ez = az + dz * t - z;
+            if (ex * ex + ez * ez < o->width * o->width * 0.25) return 1;
+        }
+    }
+    return 0;
+}
+
 /* Tarmac for the polyline parts nothing else draws: back streets, and the
  * wandering half of a country loop (its first, straight segment is the R12
  * forest lane the terrain emitters already lay). Owned by the mouth span. */
@@ -1990,6 +2013,18 @@ int tg_net_emit_entry(const TG_FBHook *h)
                             const double ix0 = ex[m], iz0 = ez[m], ix1 = ex[m + 1], iz1 = ez[m + 1];
                             const double ox0 = ix0 + dx0 / l0 * sw, oz0 = iz0 + dz0 / l0 * sw;
                             const double ox1 = ix1 + dx1 / l1 * sw, oz1 = iz1 + dz1 / l1 * sw;
+                            /* [ROUND 1015 B item 12] No footway slab inside another carriageway.
+                             * Where two ring ways run side by side or cross (the Y at Plaza
+                             * Moreno, Calle 50 against the Calle 14 arc) each ribbon laid its
+                             * kerbs as if it were alone, so the inner footway of one ran across
+                             * the other's tarmac: 389 audited samples of pavement standing on
+                             * a ring-road surface, z-fighting with it. The slab section is
+                             * dropped when its centre lies on another edge's carriageway. */
+                            if (td5_env_flag_on("TD5RE_GEO_PLAZA_FW_CLEAR")
+                                && tg_net_on_other_road(e, 0.25 * (ix0 + ox0 + ix1 + ox1),
+                                                        0.25 * (iz0 + oz0 + iz1 + oz1))) {
+                                continue;
+                            }
                             /* top slab: near-in, near-out, far-out, far-in */
                             sx[sn] = ix0; sz[sn] = iz0; sy[sn] = y0 + H; su[sn] = 0.0; sv[sn] = v0; sn++;
                             sx[sn] = ox0; sz[sn] = oz0; sy[sn] = y0 + H; su[sn] = uw;  sv[sn] = v0; sn++;
