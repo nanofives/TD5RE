@@ -227,13 +227,41 @@ const char *tg_prefab_name(int pf)
  * while it is being reworked. The TD5RE_ prefix feeds the build-stamp env hash,
  * so flipping it regenerates instead of reusing a cached level. */
 static const unsigned char k_pf_parked[TD5_TG_PREFAB_N] = {
-    [17] = 1,   /* L23.lm17 */
+    [17] = 1,   /* L23.lm17 -- round 1014, Mariano's pick                           */
+    [5]  = 1,   /* L23.lm05 -- round 1015 C item 8, Mariano's pick (311 v / 18 cmds,
+                 * local pages 55..60 + LM_BASE = 614..619): free-standing wall
+                 * sheets and an unroofed ring tower                                */
+};
+
+/* [ROUND 1015 C item 8] "audit EVERY prefab in the landmark/set-piece pools for
+ * open geometry". verify/r1015c_prefab_audit.py, rule and the full table in
+ * docs/plans/GEO_LANDMARKS.md section 1: a piece is OPEN when >= 2 building-height
+ * (>= 6 m) wall edges end free in the air on the EFFECTIVE geometry (the shipped
+ * faces + the J7 closing quads). These are the pieces the audit finds open that
+ * Mariano did not name; kept in their own table so one knob
+ * (TD5RE_TG_PREFAB_PARK_AUDIT=0) takes them back out of the parked set while his
+ * two named pieces stay parked. */
+static const unsigned char k_pf_parked_audit[TD5_TG_PREFAB_N] = {
+    [0]  = 1,   /* L23.lm00 */
+    [6]  = 1,   /* L23.lm06 */
+    [8]  = 1,   /* L23.lm08 */
+    [9]  = 1,   /* L23.lm09 */
+    [13] = 1,   /* L23.lm13 */
+    [14] = 1,   /* L23.lm14 */
+    [16] = 1,   /* L23.lm16 */
+    [18] = 1,   /* L23.lm18 */
+    [19] = 1,   /* L23.lm19 */
+    [21] = 1,   /* L23.lm21 */
+    [22] = 1,   /* L23.lm22 */
+    [23] = 1,   /* L23.lm23 */
 };
 
 int tg_prefab_usable(int i)
 {
     if (i < 0 || i >= TD5_TG_PREFAB_N) return 0;
     if (k_pf_parked[i] && td5_env_flag_on("TD5RE_TG_PREFAB_PARK")) return 0;
+    if (k_pf_parked_audit[i] && td5_env_flag_on("TD5RE_TG_PREFAB_PARK")
+        && td5_env_flag_on("TD5RE_TG_PREFAB_PARK_AUDIT")) return 0;
     if (!td5_env_flag_on("TD5RE_TG_PREFAB_CLOSE")) return 1;
     return !k_pfclose_exclude[i];
 }

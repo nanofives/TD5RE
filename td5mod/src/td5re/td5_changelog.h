@@ -44,6 +44,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  any more: you can see it from Calle 14" },
     { CL_ITEM,    "Lone wall sheets on a plaza island are gone: a side" },
     { CL_ITEM,    "  street wall needs a real building behind it" },
+    { CL_ITEM,    "12 more unfinished Moscow landmarks no longer appear" },
+    { CL_ITEM,    "  (open walls, no backs): 14 of 24 are now parked" },
     { CL_DATE,    "October 9 (real places: streets and plazas)" },
     { CL_ITEM,    "A street that crosses a divided avenue now carries" },
     { CL_ITEM,    "  on to the far side instead of ending at the median" },
