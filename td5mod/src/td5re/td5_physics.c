@@ -3763,6 +3763,23 @@ void td5_physics_update_ai(TD5_Actor *actor)
         }
     }
 
+#ifndef TD5RE_RELEASE
+    {   /* DEV [R1017 S]: TD5RE_PHYS_DIAG=<slot> logs that AI car's axle forces EVERY tick */
+        static int s_pd = -2;
+        if (s_pd == -2) s_pd = td5_env_int("TD5RE_PHYS_DIAG", -1, -1, 15);
+        if (s_pd == (int)actor->slot_index) {
+            TD5_LOG_I(LOG_TAG,
+                "phys_diag: slot=%d vlong=%d steer=%d fl=%d fd=%d rl=%d rd=%d "
+                "glim_f=%d glim_r=%d fex=%d rex=%d omega=%d floadf=%d load_r=%d",
+                (int)actor->slot_index, (int)v_long, (int)actor->steering_command,
+                (int)front_lat, (int)front_drive, (int)rear_lat, (int)rear_drive,
+                (int)FP_TRUNC((front_load * (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF))),
+                (int)FP_TRUNC((rear_load * (int32_t)PHYS_S(actor, PHYS_TIRE_GRIP_COEFF))),
+                (int)actor->front_axle_slip_excess, (int)actor->rear_axle_slip_excess,
+                (int)actor->angular_velocity_yaw, (int)front_load, (int)rear_load);
+        }
+    }
+#endif
     /* --- 9. Yaw torque [VERBATIM @ 0x00405680-0x004056A0]
      * Original: M = (((cos_d * Wf) >> 12) * FRONT_LAT - REAR_LAT * Wr) / (I / 0x28c)
      * With the corrected front/rear semantic mapping (local_44 = front_lat,

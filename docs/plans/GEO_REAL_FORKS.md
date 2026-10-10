@@ -949,3 +949,37 @@ engine fault nobody has traced yet; it needs the instrumented drive below, readi
    where the fork is created; the sidecar offset sign already feeds `tg_fork_br_shift`.
 4. **Harness.** `geo_fork_validate.py` needs no change (F, R and the verdict are side-blind), but a human drive (lane assist off) must pass first:
    the harness is AI-only and would not see the walker fault.
+
+## Round 1017 S: AI steering stability at speed (F=46 Diagonal 73)
+
+Root cause (traced with `TD5RE_AI_LANE_DIAG` / `TD5RE_PHYS_DIAG`, seed 33, raw span 1352, 506 u/t): inside a fork
+corridor the lane brain moves its target by up to 0.12 of the road width per tick. The aim point is a fixed
+~5900 units ahead, so that is a heading error of ~3.4 degrees PER TICK whatever the speed. The faithful steering
+cascade integrates it with no speed term: -7616 then -15424 cmd in 2 ticks, front demand 3232 against a grip limit
+of 1535 (front slip 1697 -> 5861), 17 ticks of saturated understeer, then the rear axle lets go (rear slip 18 ->
+54790), yaw 70 degrees off the velocity, speed 506 -> 80, lane blocked. Same mechanism on the forks-off baseline.
+
+Fix (generated tracks only, `s_ylim_on_any`): past `TD5RE_AI_LANE_V0` (default 400) units/tick the corridor lane
+rate falls as V0/v, never below the main-road rate. `TD5RE_AI_LANE_V0=0` restores the old behaviour. Shipped
+tracks are untouched. Other candidates measured and left OFF by default (knobs kept): absolute steer cap by
+K/v^2, yaw-rate limiter `TD5RE_AI_STEER_YAWLIM`, avoidance release `TD5RE_AI_AVOID_RELEASE`, gain schedule
+`TD5RE_AI_GAIN_V0`, global speed cap `TD5RE_AI_GOV_VMAX` (rejected in 1016 K). Yaw limiter, avoid release and gain
+schedule all raised spins/stalls on 12 seeds.
+
+La Plata partido, forks on, no traffic, `verify/geo_r1017s_eval.py` totals (master -> V0=400):
+
+| seeds | stalls | stall ticks | events | incidents | spins | passes |
+|---|---|---|---|---|---|---|
+| 12 (11..133) | 33 -> 20 | 6267 -> 3877 | 1916 -> 1508 | 492 -> 489 | 2 -> 4 | 220 -> 226 |
+| 24 (101..124) | 76 -> 54 | 14574 -> 9408 | 3579 -> 2725 | 964 -> 931 | 10 -> 13 | 439 -> 436 |
+
+F=46 over the 24 seeds: stalls 6 -> 0, events 171 -> 24 (spins 0 -> 3). Spins are +3 over 24 seeds (Poisson noise at
+these counts is about +-3); the big rear-slide census (`verify/geo_r1017s_slides.py`) is unchanged at 88 -> 85, i.e.
+the fix is specific to the corridor aim step, not a general cure for high-speed rear slides. V0=150 was worse
+(stalls 76 -> 81) and V0=300 was worse than 400 on 12 seeds: the response is not monotonic, so 400 is picked on the
+24-seed totals.
+
+Gates: `geo_fork_validate.ps1` 3 seeds 6/6 PASS, 6 seeds 6/6 PASS (master also 6/6 on those seeds, F=46 stalls 2 -> 0,
+window speeds within 1%); synthetic auto-track AI race (3 seeds, SELECTED.TXT aside): stalls 6/7/35 -> 0/0/4, events
+229/203/10654 -> 58/71/160; synthetic MODELS.DAT 12772392 B E2F1F33C221D61CAB0EFF701484011F0; full selftest 64/0/0
+(idle machine); build_all OK, structure lint OK.
