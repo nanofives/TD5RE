@@ -80,6 +80,22 @@ int tg_geo_avenue_n(void)
  * in. One span of slack at each end, for the same reason the fork path takes
  * it: a caller asking about the mouth span must not see a narrower answer than
  * its neighbour or scenery pops in for a single span. */
+/* [ROUND 1015 A item 1] The ONE SPAN OF SLACK tg_geo_avenue_reach (and the rail ownership
+ * rule) take on either side of an avenue's rows is there so a caller asking about a mouth
+ * span does not see a narrower answer than its neighbour. At the avenue's ENTRY it made the
+ * span in front of the first row claim a carriageway that starts a node later: the ground
+ * skirt was pushed out and the pavement and railing stood down, over a span that has no
+ * carriageway at all -- "the road at span 38 is not rendered ... it starts rendering after
+ * span 46" (Diagonal 73, first span 47): a see-through hole beside the widened road. So the
+ * slack AHEAD (e = +1) is only taken by a span that is itself in the avenue.
+ * TD5RE_GEO_AVENUE_ENTRY_SLACK=1 restores it. */
+int tg_geo_avenue_slack_ok(int si, int e)
+{
+    if (e != 1) return 1;
+    if (td5_env_flag_off("TD5RE_GEO_AVENUE_ENTRY_SLACK")) return 1;
+    return td5_geo_avenue_at(si, NULL, NULL, NULL);
+}
+
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
 {
     double best = 0.0;
@@ -103,6 +119,7 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
     for (e = -1; e <= 1; e++) {
         double off = 0.0;
         int lanes = 2;
+        if (!tg_geo_avenue_slack_ok(si, e)) continue;
         if (!td5_geo_avenue_at(si + e, &off, &lanes, NULL)) continue;
         /* [ROUND 1013 F2] The sidecar's offset is measured from the route
          * carriageway's own centre. Over a REAL fork's window the walk moved the
@@ -116,6 +133,30 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
         }
     }
     return best;
+}
+
+/* [ROUND 1015 A] "there should be a break in the median (and the fork) at crossing
+ * streets ... real median openings at OSM cross streets must be open (paved), not
+ * grass across the street" (Mariano, picks 6 and 13). Is main span `si` inside a REAL
+ * fork's window AND on a real median opening of AVENUES.JSON?
+ *
+ * Round 1014 A merged the blocks of an avenue into ONE long corridor so the windows of
+ * neighbouring blocks stopped fighting; the cost was that the raised island and the
+ * gore ran straight across every cross street. The corridor itself stays continuous (a
+ * fork cannot be cut mid-way: its span records, jump table and AI choice are one
+ * unit), but the median between the two carriageways is the part that is NOT road, and
+ * at an opening it is paved flush and carries no island, the same treatment the
+ * scenery avenue gives it (tg_av_emit_opening). Both ends of the island get a cap
+ * through tg_median_at_raw, which mirrors this. TD5RE_GEO_FORK_OPENING=0 restores the
+ * unbroken median. */
+int tg_fork_opening_at(int si)
+{
+    int fi, op = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_OPENING")) return 0;
+    fi = tg_fork_of_main(si);
+    if (fi < 0 || s_forks[fi].real <= 0) return 0;
+    if (tg_geo_avenue_n() < 1) return 0;
+    return td5_geo_avenue_at(si, NULL, NULL, &op) && op;
 }
 
 int tg_realfork_walk_owned(int fi, int mb)
@@ -206,7 +247,8 @@ static int tg_av_emit_road(const TG_NodeList *nl, int si, double o0, double o1,
  * two carriageways read as joined by a junction instead of separated by a slot. Pure
  * mesh, never drivable (the race stays on its own carriageway). */
 static int tg_av_emit_opening(const TG_NodeList *nl, int si, double o0, double o1,
-                              int lanes, TG_Buf *blk, size_t *moff, int *nmesh)
+                              int lanes, TG_Buf *blk, size_t *moff, int *nmesh,
+                              double min_w)
 {
     const double w0 = nl->v[si].width, w1 = nl->v[si + 1].width;
     const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
@@ -219,7 +261,7 @@ static int tg_av_emit_opening(const TG_NodeList *nl, int si, double o0, double o
     if (sg1 * (out1 - in1) < 0.0) out1 = in1;
     cw0 = (out0 > in0) ? out0 - in0 : in0 - out0;
     cw1 = (out1 > in1) ? out1 - in1 : in1 - out1;
-    if (cw0 < TG_AV_MIN_MEDIAN_W && cw1 < TG_AV_MIN_MEDIAN_W) return 1;
+    if (cw0 < min_w && cw1 < min_w) return 1;
     c0 = (in0 + out0) * 0.5; c1 = (in1 + out1) * 0.5;
     ws0 = cw0 / w0; ws1 = cw1 / w1;
     if (ws0 < 0.01) ws0 = 0.01;
@@ -316,7 +358,18 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     const int page      = TD5_TG_PAGE_GREEN;
     const int side_page = TD5_TG_PAGE_BRANCH_KERB;
 
-    if (mw0 < TG_AV_MIN_MEDIAN_W && mw1 < TG_AV_MIN_MEDIAN_W) return 1;
+    if (mw0 < TG_AV_MIN_MEDIAN_W && mw1 < TG_AV_MIN_MEDIAN_W) {
+        /* [ROUND 1015 A] "the end of the median has no geometry, just void" (pick 3, span
+         * 77). Where the median tapers shut (the two carriageways meet at a Y, or the
+         * race road's fork ramp widens toward the far one) the island stops under 0.7 m
+         * -- and the sliver of gap between the two roads beyond it had NOTHING in it: the
+         * ground skirt starts outside the far carriageway, so you looked through the gap
+         * to the sky. Pave the sliver flush, like an opening, however thin it is.
+         * TD5RE_GEO_AVENUE_WEDGE=0 restores the empty gap. */
+        if (td5_env_flag_on("TD5RE_GEO_AVENUE_WEDGE") && (mw0 > 1.0 || mw1 > 1.0))
+            return tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh, 1.0);
+        return 1;
+    }
     if (td5_env_flag_on("TD5RE_MEDIAN_MIN_H") && H < TD5_TG_MEDIAN_MIN_H)
         H = TD5_TG_MEDIAN_MIN_H;
 
@@ -430,6 +483,142 @@ static int tg_av_far_mouth(int s, double o)
            tg_net_mouth_kind(s, o > 0.0) >= 0;
 }
 
+/* [ROUND 1015 A item 5] "this sidewalk is not properly aligned to the crossing road"
+ * (pick e22 s15, a far footway beside Diagonal 73 where a calle meets it).
+ *
+ * The footway is broken on the spans the street mouth table lists (tg_av_far_mouth), but a
+ * street that leaves the kerb at 45 degrees sweeps ALONG the road as it moves out, so at the
+ * footway's lateral it covers part of the span NEXT to the mouth: the slab ended square at a
+ * span boundary and its last metres stood on the street's tarmac, at an angle to the street's
+ * own edge. Round 1015 B audited it as `branchroad over city:101` and tried dropping the whole
+ * span, which leaves a 1500-unit hole.
+ *
+ * So the slab is CLIPPED instead: the street surface is the quad tg_city_emit_crossstreet lays
+ * (the mouth's kerb segment swept along its outward bearing for the mouth's reach), the inner
+ * and outer edge of the slab are sampled along the span against the mouths of the spans around
+ * it, and the slab keeps its longest free run, cut along the street's own oblique edge with an
+ * end cap on the cut. TD5RE_GEO_FAR_STREET_CLIP=0 restores the span-granular slab. */
+#define TG_AV_CLIP_N 16
+static int tg_av_pt_in_quad(const double *q, double x, double z)
+{
+    int i, pos = 0, neg = 0;
+    for (i = 0; i < 4; i++) {
+        const double ax = q[i * 2], az = q[i * 2 + 1];
+        const double bx = q[((i + 1) & 3) * 2], bz = q[((i + 1) & 3) * 2 + 1];
+        const double c = (bx - ax) * (z - az) - (bz - az) * (x - ax);
+        if (c > 0.0) pos = 1; else if (c < 0.0) neg = 1;
+    }
+    return !(pos && neg);
+}
+
+/* The slab's point at fraction u along span s on the line at lateral lat0 + (lat1 - lat0) u. */
+static void tg_av_slab_pt(const TG_NodeList *nl, int s, double u, double lat0, double lat1,
+                          double *x, double *z, double *y)
+{
+    const TG_Node *a = &nl->v[s], *c = &nl->v[s + 1];
+    const double lat = lat0 + (lat1 - lat0) * u;
+    const double tz = a->tz + (c->tz - a->tz) * u, tx = a->tx + (c->tx - a->tx) * u;
+    *x = a->x + (c->x - a->x) * u + tz * lat;
+    *z = a->z + (c->z - a->z) * u - tx * lat;
+    *y = a->y + (c->y - a->y) * u;
+}
+
+static int tg_av_blocked_at(const TG_NodeList *nl, int s, double u, double lat0, double lat1,
+                            const double q[][8], int nq)
+{
+    double x, z, y;
+    int k;
+    tg_av_slab_pt(nl, s, u, lat0, lat1, &x, &z, &y);
+    for (k = 0; k < nq; k++)
+        if (tg_av_pt_in_quad(q[k], x, z)) return 1;
+    return 0;
+}
+
+/* Longest free run [*from, *to] of the line (lat0 -> lat1) on span s; 0 when none,
+ * 1 = the whole span is free, 2 = clipped. */
+static int tg_av_line_free(const TG_NodeList *nl, int s, double lat0, double lat1,
+                           const double q[][8], int nq, double *from, double *to)
+{
+    unsigned blocked = 0;
+    int i, k, best0 = -1, best1 = -1, run0 = -1;
+    double lo, hi;
+    for (i = 0; i <= TG_AV_CLIP_N; i++)
+        if (tg_av_blocked_at(nl, s, (double)i / TG_AV_CLIP_N, lat0, lat1, q, nq))
+            blocked |= 1u << i;
+    if (!blocked) { *from = 0.0; *to = 1.0; return 1; }
+    for (i = 0; i <= TG_AV_CLIP_N + 1; i++) {
+        const int free_i = (i <= TG_AV_CLIP_N) && !(blocked & (1u << i));
+        if (free_i && run0 < 0) run0 = i;
+        if (!free_i && run0 >= 0) {
+            if (best0 < 0 || (i - 1 - run0) > (best1 - best0)) { best0 = run0; best1 = i - 1; }
+            run0 = -1;
+        }
+    }
+    if (best0 < 0) return 0;
+    lo = (double)best0 / TG_AV_CLIP_N;
+    hi = (double)best1 / TG_AV_CLIP_N;
+    if (best0 > 0) {                         /* bisect the cut between sample best0-1 (blocked) and best0 */
+        double f = (double)(best0 - 1) / TG_AV_CLIP_N, t = lo;
+        for (k = 0; k < 6; k++) {
+            const double m = 0.5 * (f + t);
+            if (tg_av_blocked_at(nl, s, m, lat0, lat1, q, nq)) f = m; else t = m;
+        }
+        lo = t;
+    }
+    if (best1 < TG_AV_CLIP_N) {              /* and between best1 and best1+1 (blocked) */
+        double f = hi, t = (double)(best1 + 1) / TG_AV_CLIP_N;
+        for (k = 0; k < 6; k++) {
+            const double m = 0.5 * (f + t);
+            if (tg_av_blocked_at(nl, s, m, lat0, lat1, q, nq)) t = m; else f = m;
+        }
+        hi = f;
+    }
+    *from = lo; *to = hi;
+    return 2;
+}
+
+/* The street quads of the mouths around span s on the footway's side. */
+static int tg_av_street_quads(const TG_NodeList *nl, int s, double sg, double q[][8])
+{
+    const int left = (sg > 0.0);
+    int m, nq = 0;
+    for (m = s - 3; m <= s + 3 && nq < 7; m++) {
+        double sk = 0.0, rr = 0.0, ef[10], no[2], fo[2], cs, sn;
+        if (m < 1 || m + 1 >= nl->count) continue;
+        if (!(tg_net_mouth_shift(m, left) > 0.0) || tg_net_mouth_kind(m, left) < 0) continue;
+        if (tg_net_mouth(m, left, &sk, &rr) < 0 || !(rr > 0.0)) continue;
+        tg_city_edge_frame(nl, m, sg, ef);
+        cs = cos(sk); sn = sin(sk);
+        no[0] = ef[6] * cs - ef[7] * sn; no[1] = ef[6] * sn + ef[7] * cs;
+        fo[0] = ef[8] * cs - ef[9] * sn; fo[1] = ef[8] * sn + ef[9] * cs;
+        q[nq][0] = ef[0];                q[nq][1] = ef[2];
+        q[nq][2] = ef[0] + no[0] * rr;   q[nq][3] = ef[2] + no[1] * rr;
+        q[nq][4] = ef[3] + fo[0] * rr;   q[nq][5] = ef[5] + fo[1] * rr;
+        q[nq][6] = ef[3];                q[nq][7] = ef[5];
+        nq++;
+    }
+    return nq;
+}
+
+/* Free part of span s's slab: 0 = none, 1 = whole span, 2 = clipped (ui/uo set). The slab's
+ * inner edge is at e, its outer at f (signed laterals at both ends of the span). */
+static int tg_av_far_clip(const TG_NodeList *nl, int s, double e0, double e1, double f0, double f1,
+                          double sg, double *ui0, double *ui1, double *uo0, double *uo1)
+{
+    double q[7][8];
+    int nq, ri, ro;
+    *ui0 = *uo0 = 0.0; *ui1 = *uo1 = 1.0;
+    if (!td5_env_flag_on("TD5RE_GEO_FAR_STREET_CLIP")) return 1;
+    if (!nl || s < 0 || s + 1 >= nl->count) return 1;
+    nq = tg_av_street_quads(nl, s, sg, q);
+    if (nq < 1) return 1;
+    ri = tg_av_line_free(nl, s, e0, e1, (const double (*)[8])q, nq, ui0, ui1);
+    ro = tg_av_line_free(nl, s, f0, f1, (const double (*)[8])q, nq, uo0, uo1);
+    if (!ri || !ro) return 0;
+    if (*ui1 - *ui0 < 0.06 && *uo1 - *uo0 < 0.06) return 0;
+    return (ri == 1 && ro == 1) ? 1 : 2;
+}
+
 static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
                            double *sw)
 {
@@ -464,6 +653,12 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
         const double x0 = o0 + sg0 * ohw, x1 = o1 + sg1 * ohw;
         if ((x0 < 0.0 ? -x0 : x0) < nl->v[s].width * 0.5 + m ||
             (x1 < 0.0 ? -x1 : x1) < nl->v[s + 1].width * 0.5 + m) return 0;
+        /* [ROUND 1015 A item 5] a street takes the whole span: no slab, the neighbours cap */
+        {
+            double u0, u1, v0, v1;
+            if (tg_av_far_clip(nl, s, x0, x1, x0 + sg0 * w, x1 + sg1 * w, sg0,
+                               &u0, &u1, &v0, &v1) == 0) return 0;
+        }
         *e0 = x0; *e1 = x1;
     }
     *sw = w;
@@ -480,6 +675,74 @@ static int tg_av_far_joins(const TG_NodeList *nl, int s, int other, int end)
     ea = end ? a1 : a0;
     eb = end ? b0 : b1;
     return (ea - eb < 60.0 && eb - ea < 60.0 && aw - bw < 60.0 && bw - aw < 60.0);
+}
+
+/* The clipped slab: same top + two walls + caps as tg_av_emit_far_pavement, with the near and
+ * far end of each of the two long edges taken at its own free fraction. A cut end always gets a
+ * cap; an uncut end gets one when the neighbouring footway does not join it. */
+static int tg_av_emit_far_clipped(const TG_NodeList *nl, int si, double e0, double e1,
+                                  double f0, double f1, double sg, double ui0, double ui1,
+                                  double uo0, double uo1, int deep, TG_Buf *blk,
+                                  size_t *moff, int *nmesh)
+{
+    const double H = (double)TD5_TG_KERB_H;
+    const double drop = deep ? (double)TD5_TG_GROUND_DROP : 0.0;
+    double px[20], py[20], pz[20], uu[20], vv[20];
+    double Xn[2], Zn[2], Yn[2], Xf[2], Zf[2], Yf[2];    /* [0] inner edge, [1] outer edge */
+    int seg_page[2], seg_nq[2], n = 0, cap_in, cap_out, hi, lo;
+
+    tg_av_slab_pt(nl, si, ui0, e0, e1, &Xn[0], &Zn[0], &Yn[0]);
+    tg_av_slab_pt(nl, si, ui1, e0, e1, &Xf[0], &Zf[0], &Yf[0]);
+    tg_av_slab_pt(nl, si, uo0, f0, f1, &Xn[1], &Zn[1], &Yn[1]);
+    tg_av_slab_pt(nl, si, uo1, f0, f1, &Xf[1], &Zf[1], &Yf[1]);
+    /* cl = the more POSITIVE lateral: the outer edge when the avenue is on +t */
+    hi = (sg > 0.0) ? 1 : 0;
+    lo = 1 - hi;
+    /* TOP: near-cl, near-cr, far-cr, far-cl */
+    px[n]=Xn[hi]; py[n]=Yn[hi]+H; pz[n]=Zn[hi]; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=Xn[lo]; py[n]=Yn[lo]+H; pz[n]=Zn[lo]; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=Xf[lo]; py[n]=Yf[lo]+H; pz[n]=Zf[lo]; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=Xf[hi]; py[n]=Yf[hi]+H; pz[n]=Zf[hi]; uu[n]=0.0; vv[n]=1.0; n++;
+    /* wall facing +lateral (the OUTER wall, down to the ground, when the avenue is on +t) */
+    {
+        const double bn = (sg > 0.0) ? Yn[hi] - drop : Yn[hi];
+        const double bf = (sg > 0.0) ? Yf[hi] - drop : Yf[hi];
+        px[n]=Xn[hi]; py[n]=bn;       pz[n]=Zn[hi]; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=Xn[hi]; py[n]=Yn[hi]+H; pz[n]=Zn[hi]; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=Xf[hi]; py[n]=Yf[hi]+H; pz[n]=Zf[hi]; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=Xf[hi]; py[n]=bf;       pz[n]=Zf[hi]; uu[n]=1.0; vv[n]=1.0; n++;
+    }
+    /* wall facing -lateral */
+    {
+        const double bn = (sg > 0.0) ? Yn[lo] : Yn[lo] - drop;
+        const double bf = (sg > 0.0) ? Yf[lo] : Yf[lo] - drop;
+        px[n]=Xn[lo]; py[n]=bn;       pz[n]=Zn[lo]; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=Xf[lo]; py[n]=bf;       pz[n]=Zf[lo]; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=Xf[lo]; py[n]=Yf[lo]+H; pz[n]=Zf[lo]; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=Xn[lo]; py[n]=Yn[lo]+H; pz[n]=Zn[lo]; uu[n]=0.0; vv[n]=0.0; n++;
+    }
+    cap_in  = (ui0 > 0.0 || uo0 > 0.0) || (deep && !tg_av_far_joins(nl, si, si - 1, 0));
+    cap_out = (ui1 < 1.0 || uo1 < 1.0) || (deep && !tg_av_far_joins(nl, si, si + 1, 1));
+    if (cap_in) {
+        px[n]=Xn[hi]; py[n]=Yn[hi]-drop; pz[n]=Zn[hi]; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=Xn[lo]; py[n]=Yn[lo]-drop; pz[n]=Zn[lo]; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=Xn[lo]; py[n]=Yn[lo]+H;    pz[n]=Zn[lo]; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=Xn[hi]; py[n]=Yn[hi]+H;    pz[n]=Zn[hi]; uu[n]=0.0; vv[n]=0.0; n++;
+    }
+    if (cap_out) {
+        px[n]=Xf[hi]; py[n]=Yf[hi]+H;    pz[n]=Zf[hi]; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=Xf[lo]; py[n]=Yf[lo]+H;    pz[n]=Zf[lo]; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=Xf[lo]; py[n]=Yf[lo]-drop; pz[n]=Zf[lo]; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=Xf[hi]; py[n]=Yf[hi]-drop; pz[n]=Zf[hi]; uu[n]=0.0; vv[n]=1.0; n++;
+    }
+    seg_page[0] = TD5_TG_PAGE_SIDEWALK;    seg_nq[0] = 1;
+    seg_page[1] = TD5_TG_PAGE_BRANCH_KERB; seg_nq[1] = 2 + (cap_in ? 1 : 0) + (cap_out ? 1 : 0);
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2))
+        return 0;
+    tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHROAD, si);
+    s_av_farwalk++;
+    return 1;
 }
 
 static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
@@ -540,6 +803,17 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
         const double m = in_fork ? -1.0 : 50.0;
         if ((e0 < 0.0 ? -e0 : e0) < a->width * 0.5 + m ||
             (e1 < 0.0 ? -e1 : e1) < c->width * 0.5 + m) return 1;
+    }
+
+    /* [ROUND 1015 A item 5] a street's tarmac over part of this span: clip the slab to the
+     * free run, cut along the street's own edge, and cap the cut. */
+    {
+        double ui0, ui1, uo0, uo1;
+        const int cl = tg_av_far_clip(nl, si, e0, e1, f0, f1, sg0, &ui0, &ui1, &uo0, &uo1);
+        if (cl == 0) return 1;
+        if (cl == 2)
+            return tg_av_emit_far_clipped(nl, si, e0, e1, f0, f1, sg0, ui0, ui1, uo0, uo1,
+                                          deep, blk, moff, nmesh);
     }
 
     /* TOP. */
@@ -719,7 +993,8 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * runs on past it (no cross-street arm is drawn through it, so there is no
      * mouth for a slab to block). TD5RE_GEO_AVENUE_OPENING=0 restores the slot. */
     if (open && td5_env_flag_on("TD5RE_GEO_AVENUE_OPENING")) {
-        if (!tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh)) return 0;
+        if (!tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh,
+                                TG_AV_MIN_MEDIAN_W)) return 0;
         return tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh);
     }
     if (open) return 1;

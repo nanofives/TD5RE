@@ -2412,6 +2412,7 @@ static int tg_median_at_raw(const TG_NodeList *nl, int si, int br_lanes)
     if (fi < 0) return 0;
     if (!tg_fork_is_avenue(fi) && !tg_r11_median_rise()) return 0;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER")) return 0;
+    if (tg_fork_opening_at(si)) return 0;    /* [ROUND 1015 A] a cross street cuts it */
     /* [R16 MEDIAN] short fork -> no median. True mirror of the emitter's own
      * tg_median_fork_long_enough early-return, so end caps agree. */
     if (!tg_median_fork_long_enough(fi)) return 0;
@@ -3634,7 +3635,7 @@ int tg_fork_gore_page(int fork_index)
 int tg_emit_gore(const TG_NodeList *nl, int si,
                         double shift_n, double shift_f,
                         double half_n, double half_f, int ground_page,
-                        TG_Buf *blk, int side)
+                        TG_Buf *blk, int side, int flush)
 {
     const double fs = (side > 0) ? 1.0 : -1.0;   /* [TOPOLOGY-FIRST] corridor side */
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
@@ -3654,8 +3655,12 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
      * appears to "start" on the bridge. The raised island (whole-run forks) is a
      * separate mesh and is untouched. TD5RE_R18_BRIDGE_GORE_FLUSH=0 restores the
      * dropped ground-style gore. */
-    if (ground_page == TD5_TG_PAGE_BRIDGE_DECK
-        && td5_env_flag_on("TD5RE_R18_BRIDGE_GORE_FLUSH")) {
+    /* [ROUND 1015 A] A real median OPENING on a real fork (a cross street cuts the
+     * avenue): the gap between the two carriageways is the street's own asphalt, so
+     * it is laid flush with them and abutting, exactly as the bridge-deck gore is. */
+    if (flush ||
+        (ground_page == TD5_TG_PAGE_BRIDGE_DECK
+         && td5_env_flag_on("TD5RE_R18_BRIDGE_GORE_FLUSH"))) {
         drop = 0.0;
         ov   = 0.0;
     }

@@ -5395,6 +5395,7 @@ static int tg_rail_avenue_owns_edge(int si, double sg)
     if (!td5_env_flag_on("TD5RE_GEO_AVENUE_RAIL")) return 0;
     for (e = -1; e <= 1; e++) {
         double off = 0.0;
+        if (!tg_geo_avenue_slack_ok(si, e)) continue;     /* [ROUND 1015 A] */
         if (!td5_geo_avenue_at(si + e, &off, NULL, NULL)) continue;
         if (sg * off >= 0.0) return 1;            /* the avenue is on this side */
     }
