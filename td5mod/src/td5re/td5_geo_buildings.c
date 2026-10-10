@@ -16,6 +16,7 @@
 #include "td5_config.h"
 #include "td5_geo.h"
 #include "td5_geo_buildings.h"
+#include "td5_geo_landmarks.h"
 #include "td5_geo_roads.h"
 #include "deps/cjson/cJSON.h"
 
@@ -399,6 +400,20 @@ static int geob_in_set(const char *v, const char *const *vals)
     if (!v || !v[0]) return 0;
     for (i = 0; vals[i]; i++) if (!strcmp(v, vals[i])) return 1;
     return 0;
+}
+
+/* [ROUND 1014 D20] A place of worship, by the two ways OSM says so: the
+ * building=* value (cathedral, church, ...) or amenity=place_of_worship. The
+ * La Plata cathedral carries both; a plain church often only the amenity. */
+static int geob_is_worship(const cJSON *e)
+{
+    static const char *const k_class[] = {
+        "cathedral", "church", "chapel", "basilica", "mosque", "synagogue",
+        "temple", "monastery", "shrine", NULL
+    };
+    const char *am = geob_str(e, "amenity");
+    if (am && !strcmp(am, "place_of_worship")) return 1;
+    return geob_in_set(geob_str(e, "class"), k_class);
 }
 
 /* THE TAG RULE, over the civic keys geo_fetch now promotes to fields.
@@ -796,6 +811,8 @@ static int geob_load_buildings(const char *slug)
             }
             b->landmark = (unsigned char)(src != TD5_GEOB_LMSRC_NONE);
             b->lmsrc    = (unsigned char)src;
+            b->lmkind   = (unsigned char)((src != TD5_GEOB_LMSRC_NONE && geob_is_worship(e))
+                                          ? TD5_GEOB_LMK_WORSHIP : TD5_GEOB_LMK_NONE);
         }
         b->part       = (unsigned char)(geob_true(e, "part") ? 1 : 0);
         b->host_span  = -1;
@@ -1343,6 +1360,7 @@ static void geob_bind_all(void);
 
 void td5_geob_unload(void)
 {
+    td5_geolm_reset();             /* [1014 D20] the grouping describes this set */
     free(s_gb.b);
     free(s_gb.a);
     free(s_gb.px);
@@ -1693,6 +1711,15 @@ static void geob_bind_all(void)
     }
 
     geob_grid_free();         /* bind-time only; nothing reads it later */
+
+    /* [ROUND 1014 D20] Group landmark clusters, and let a building:part that
+     * stands inside a bound landmark outline but was out of bind range ride on
+     * the outline's span. Must run before the chains below are built. */
+    {
+        const int adopted = td5_geolm_cluster(s_gb.b, s_gb.nb);
+        s_gb.b_bound += adopted;
+        s_gb.b_far   -= adopted;
+    }
 
     /* Walk backwards so each chain ends up in ASCENDING index order, which
      * makes the emitted mesh order a pure function of the cache file. */

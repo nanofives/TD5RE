@@ -1498,6 +1498,10 @@ enum { TG_NE_STREET = 0, TG_NE_AVENUE, TG_NE_BACKSTREET, TG_NE_CONTINUATION,
 void tg_network_reset(void);
 void tg_network_build(const TG_NodeList *nl, int nspans_main);
 int  tg_network_built(void);
+int  tg_net_geo(void);                 /* [1014 B] streets came from the real map */
+void   tg_geo_lane_profile_reset(void);
+int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
+double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
 void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
 int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
 int  tg_net_mouth_kind(int si, int left);                          /* TG_NE_* or -1  */
@@ -4219,6 +4223,10 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double
  * ways give. Contract and the root cause this replaces: td5_geo_avenues.h. */
 int    tg_geo_avenue_n(void);
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
+/* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
+ * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
+ * slab must not be laid on top of it. */
+int tg_realfork_walk_owned(int fi, int mb);
 int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
 /* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
  * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
@@ -5712,6 +5720,25 @@ int tg_r8_treeline_page(int g0);
 #define TD5_TG_SHORE_FAR_INSET  4000.0   /* inside the water plane's outer edge */
 #define TD5_TG_SHORE_FAR_HIGH   2600.0   /* crest above the sea surface         */
 int tg_emit_fb_terrain(const TG_FBHook *h);
+
+/* [ROUND 1014 E] THE DRAWN FAR-TERRAIN SURFACE, asked for by a plaza.
+ *
+ * The far band's apron is three coarse quads per side per 4-span group, whose
+ * ring points sit on tg_world_h but whose interior is a bilinear chord between
+ * them. Over a valley the chord stands ABOVE the true ground, so a park lawn laid
+ * on world_h + lift was hidden under the apron (Parque Saavedra: 98 % / 99 % of
+ * its two lawns, MODELS.DAT measured). tg_far_surface_cover() runs the real band
+ * computation for the groups near a bounding box in CAPTURE mode (nothing is
+ * written, the report counters are restored) and returns the apron quads that
+ * overlap it; tg_surf_height() is the highest of them at a point. */
+typedef struct {
+    double *x, *y, *z;       /* 4 entries per quad, ring order */
+    int nq, cap;
+} TG_Surf;
+int  tg_far_surface_cover(const TG_FBHook *h, double x0, double z0,
+                          double x1, double z1, TG_Surf *out);
+int  tg_surf_height(const TG_Surf *s, double x, double z, double *y);
+void tg_surf_free(TG_Surf *s);
 extern long s_r13_models_bytes;
 void tg_r13_band_report(const TG_NodeList *nl, int nspans);
 void tg_r14_band_report(const TG_NodeList *nl, int nspans);
@@ -6185,6 +6212,11 @@ int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
 void tg_geo_city_report(void);                    /* td5_tg_city.c    */
 void tg_geo_city_report_streamed(void);           /* td5_tg_city.c    */
 int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
+/* [ROUND 1014 E] Does the verge strip beside span si on this side lie inside a
+ * mapped park / plaza? Then the skirt slab there is grass, not the GROUND tile
+ * page. td5_tg_streets.c. */
+int  tg_geo_skirt_side_park(const TG_NodeList *nl, int si, int is_left);
+extern long s_geop_skirt_park_n;   /* skirt slabs given the lawn page (terrain.c) */
 /* [ROUND 1012 D2] Would a footprint of half-extent `half` centred at (x,z)
  * stand in REAL open space -- a mapped plaza/park polygon, or inside a named
  * junction=circular ring like Plaza Miguel de Azcuenaga, which has no polygon

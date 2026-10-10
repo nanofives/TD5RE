@@ -91,6 +91,8 @@ def main():
                     help="prefix whose race.log carries the fork table to bin by")
     ap.add_argument("--hold", type=int, default=90)
     ap.add_argument("--ring", type=int, default=951)
+    ap.add_argument("--finish", type=int, default=None,
+                    help="span_norm where a car is at the end of the route (default 940; La Plata round 1014 route: --ring 1261 --finish 1150)")
     args = ap.parse_args()
 
     tr = read_track(args.prefix + "_race_trace_track.csv")
@@ -107,7 +109,7 @@ def main():
     win = {}
     for slot, seq in tr.items():
         t0 = next((t for t, _r, n, _c in seq if n != seq[0][2]), seq[0][0])
-        t1 = next((t for t, _r, n, _c in seq if n >= FINISH_AREA), seq[-1][0] + 1)
+        t1 = next((t for t, _r, n, _c in seq if n >= (args.finish or FINISH_AREA)), seq[-1][0] + 1)
         win[slot] = (t0, t1)
 
     # --- fork entries ----------------------------------------------------------

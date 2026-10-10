@@ -41,6 +41,7 @@
 #include "td5_trackgen.h"        /* TD5_TG_LANE_WIDTH */
 #include "td5_geo.h"            /* td5_geo_place_path: SOURCE vs DERIVED */
 #include "td5_geo_roads.h"
+#include "td5_geo_sidewalk.h"   /* [1014 B] the place carriageway table */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -290,6 +291,8 @@ int td5_geo_roads_namek_of(const char *s)
         { "calle",     TD5_GEO_NAMEK_CALLE    },
         { "street",    TD5_GEO_NAMEK_CALLE    },
         { "rua",       TD5_GEO_NAMEK_CALLE    },
+        { "plaza ",    TD5_GEO_NAMEK_PLAZA    },
+        { "plazoleta", TD5_GEO_NAMEK_PLAZA    },
         { NULL, 0 }
     };
     int i, k;
@@ -492,6 +495,7 @@ static int geo_roads_load(const char *slug)
     int n, i, dropped_short = 0, truncated = 0, roundabouts = 0, n_surf[3];
 
     td5_geo_roads_unload();
+    td5_geo_sw_place(slug);       /* [1014 B] the carriageway table below is the place's */
     td5_geo_place_path(path, sizeof path, slug, "ROADS.JSON");
     json = geo_roads_slurp(path);
     if (!json) {
@@ -575,6 +579,31 @@ static int geo_roads_load(const char *slug)
         out->count  = kept;
         out->klass  = geo_roads_class(cl && cJSON_IsString(cl) ? cl->valuestring : NULL);
         out->lanes  = geo_roads_lanes(r, upm);
+        /* [1014 B items 6, 11] THE STREET IS AS WIDE AS THE PLACE'S CARRIAGEWAY.
+         * The route reader has applied the place table to the road the car
+         * drives since round 1011 (a calle is 10.47 m, 3 lanes) but this reader
+         * kept the raw OSM `lanes` -- 2 on 2064 of La Plata's 2291 ways -- so
+         * every cross street was drawn 7 m wide against a 10 m road it joins.
+         * Same rule as the route's: a TAGGED width wins, a counted lane number
+         * is never lowered, the table is a floor. A place with no table row
+         * returns 0 and is untouched. TD5RE_GEO_STREET_CARRIAGEWAY=0 for an A/B. */
+        if (upm > 0.0 && td5_env_flag_on("TD5RE_GEO_STREET_CARRIAGEWAY")) {
+            const cJSON *wd = cJSON_GetObjectItem(r, "width");
+            const cJSON *ls = cJSON_GetObjectItem(r, "lanes_src");
+            const int tagged = wd && ((cJSON_IsString(wd) && wd->valuestring[0] && atof(wd->valuestring) > 0.5)
+                                      || (cJSON_IsNumber(wd) && wd->valuedouble > 0.5));
+            const int counted = ls && cJSON_IsString(ls) && ls->valuestring
+                             && strcmp(ls->valuestring, "osm_lanes") == 0;
+            const int nk = read_tags
+                         ? td5_geo_roads_namek_of(geo_roads_str(r, "name"))
+                         : TD5_GEO_NAMEK_UNKNOWN;
+            const double tm = tagged ? 0.0 : td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN, nk);
+            if (tm > 0.0) {
+                int want = (int)floor(tm * upm / (double)TD5_TG_LANE_WIDTH + 0.5);
+                if (counted && want < out->lanes) want = out->lanes;
+                if (want >= 1 && want <= TD5_GEO_ROADS_LANES_MAX) out->lanes = want;
+            }
+        }
         out->width  = (double)out->lanes * (double)TD5_TG_LANE_WIDTH;
         out->oneway = geo_roads_bool(r, "oneway");
         out->bridge = geo_roads_bool(r, "bridge");

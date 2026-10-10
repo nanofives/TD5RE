@@ -258,3 +258,117 @@ on, and should add a per-tick lateral-state trace to the harness first.
 Unverified by a negative control: the relaxed suspect-fork ceiling. This route has no
 far parallel road to trip it (80 m / 60 degrees finds no candidate, 60 m / 25 degrees finds
 the same five forks); the ceiling on an avenue span is that avenue's own measured reach.
+
+## Round 1014 A: continuous avenues, median ends, mouths (merged forks)
+
+Mariano's six picks on La Plata (level091, master 22c2bfda), all decoded through
+MODELS.DAT (entry, slot) + MESHTAG.BIN (centre, radius, vertex count all matched the
+rebuild, so the rebuild IS his build): 2 and 9 `branch-road p0:ROAD` (the scenery
+opposite carriageway, not driveable), 3 `other p44:SIDEWALK` (the corridor's branch
+slab), 4 and 16 `road p2:GREEN+121` (a median island), 15 `other p44:SIDEWALK` in a
+corridor.
+
+### Causes (measured)
+
+1. **Flicker, "one block road, next block avenue" (2, 9, 15).** The avenue's real median
+   openings are 2 spans wide (`open` runs `58-59, 114-115, 169-170, 225-226`), so the
+   candidate blocks (`F=58 R=115`, `F=114 R=170`, ...) have full-width windows `F-8 .. R+2`
+   that overlap across the opening. `rf_select` keeps windows `TG_RF_MIN_GAP` apart, so
+   it took every other block, and the blocks in between were left as a scenery
+   carriageway that looks like road and has no span. 7 forks, 314 corridor spans, 40%
+   of the 784 avenue spans.
+2. **Start grid.** `F` was clamped to `GRID_SPAN + 12 = 36`, a value whose window
+   (`F - 8 - 16`) always failed "inside the start grid", so the first fork could not
+   begin before span 58 and 34 spans of avenue after the grid were scenery (item 2's
+   pick sits at span 52..55 in the widening taper, where the scenery quad is a 1.2 m
+   sliver beyond the widened race road).
+3. **Median (4, 15).** `tg_emit_avenue_divider` only fills kerb to kerb when the gore is
+   at most `TD5_TG_R11_MEDIAN_MAX` (6 m). A real median is 3.7..8.7 m, so beyond 6 m it
+   fell to the 0.32-scale island capped at 520 units with bare gore floor either side,
+   and the planted / barrier / kerbed ladder (`fork_index % 3`) changed the strip's
+   look from one avenue to the next.
+4. **Pavement at the mouth (3).** (a) `tg_geo_avenue_reach` reported the REAL opposite
+   carriageway's far edge over a real fork's corridor spans, up to a median-width (1.6 m
+   at the mouth) beyond the corridor's own edge, and the ground skirt starts at
+   `reach + 200`: a see-through wedge beside the first corridor spans (the cyan in the
+   free-cam frame). (b) The corridor's own branch slab (1081 units, biome width) and the
+   ring's far footway (real per-side width) were both laid on the same lateral, 40 units
+   apart. (c) `tg_av_emit_far_pavement` dropped the first corridor span: its
+   `|edge| < node half width + 50` test reads `3000 < 3050` for the span where the
+   corridor's outer edge IS the node's outer edge.
+5. **Median opening (16).** At an `open` span the scenery path emitted the opposite
+   carriageway and then NOTHING (no island, no footway, no fill), and the skirt starts
+   past the far carriageway: a slot to the sky between the two roads. The scenery island
+   was an open prism (no end caps), unlike the fork island.
+
+### What changed
+
+| | change | knob (default on, `=0` restores) |
+|---|---|---|
+| 1 | avenue candidates for EVERY gate pair, weighted by full length (cap 90 removed), so one fork runs through the 2-span openings | `TD5RE_GEO_FORK_MERGE` |
+| 2 | F clamp = `GRID + 2 + widen + taper` (50), the first F whose window clears the grid | (same knob) |
+| 3 | a real fork's island is always kerb to kerb, planted; `tg_median_at_raw` mirrors it | `TD5RE_GEO_FORK_ISLAND` |
+| 4a | avenue reach over a real corridor span = the corridor's own (fork loop answers) | `TD5RE_GEO_FORK_REACH` |
+| 4b | no branch slab where the ring's far footway lays the pavement (`tg_realfork_walk_owned`) | (MERGE) |
+| 4c | far footway only dropped when its edge is genuinely inside the race road (-1 not +50 in a fork) | (MERGE) |
+| 5 | paved flush opening between carriageways; footway continues; scenery island capped at both ends | `TD5RE_GEO_AVENUE_OPENING`, `TD5RE_GEO_AVENUE_CAPS` |
+
+Inside a merged fork the median opening is NOT an opening: the corridor is one carriageway
+across the cross street, the island is continuous, the footway is continuous.
+
+### Dev tooling
+
+`TD5RE_FREECAM_TOUR="name:x,y,z,yawdeg,pitchdeg;..."` (td5_camera.c, dev only) puts the
+free camera at world poses and dumps a PNG per pose; `TD5RE_FREECAM_TOUR_SPAN=N` starts it
+when the player reaches span N and `_FREEZE=1` pauses the sim there. **A fork corridor
+only draws while the player is near it**, so a pose far from the car shows void (cyan) where
+the corridor is; park the car in the fork first (`TD5RE_AI_BRANCH_FORCE_P0=1` +
+`_TOUR_SPAN`). `verify/geo_r1014a_tour.ps1` runs it, `verify/geo_r1014a_poses.py` turns a
+pick string into a pose (behind the pick, and a top-down one).
+
+### Measured (La Plata, Mariano's route, 784 avenue spans)
+
+`verify/geo_r1014a_coverage.py` reads MODELS.DAT + MESHTAG.BIN and says what each avenue span
+is made of (a `branch-road` page-0 mesh in a RING entry is a scenery carriageway: road
+surface, no span record).
+
+| | master 22c2bfda | this branch |
+|---|---|---|
+| forks / corridor spans | 7 / 314 | 4 / 587 |
+| avenue spans with a scenery carriageway ("looks driveable, is not") | 469 (60%) | 196 (25%) |
+| avenue spans with neither island nor opening fill | 291 | 61 |
+| avenue spans with no far footway | 42 | 2 |
+| first fork starts at | 58 | 50 |
+
+Scenery-only that is left, with the reason: 25..50 start grid; 226..253 and 335..364 bends of
+0.089 / 0.213 rad/span (cap 0.044, the shifted carriageways fold); 547..586, 699..725 and
+1032..1074 the route's own lane count changes inside the window (the fork's lane arithmetic
+needs one number). Those stretches keep the kerbed island with closed ends and the paved
+openings, and nothing is claimed drivable there.
+
+Synthetic gate (`verify/geo_tags_identity.ps1 -Arm synthetic`, SELECTED.TXT moved aside):
+MODELS.DAT 12982584 B `298DB07B141160AAFED83C3941DD1580`, STRIP.DAT 144714 B
+`0641EDB7787600D236AE7B51186888DD`, TEXTURES.DAT 1605328 B `F69A8CBB6A3FFCA4757360F5AC39234B`,
+identical between master's exe and this branch's. Self-test smoke 13/13.
+
+### AI races: what the long forks cost (3 seeds each way, 6 AI cars, damage off)
+
+`geo_realfork_run.ps1 -Seed N` (11, 22, 33), `geo_realfork_report.py --ring 1261 --finish 1150`.
+new_22 was cut by the harness deadline at tick 3613 (the others finish near 4500), so it
+understates the new arm.
+
+| | master | branch |
+|---|---|---|
+| contact incidents inside fork windows + corridors | 151 | 74 |
+| wall events inside fork windows + corridors (one stuck car in seed 11 is 395 of the new 569) | 577 | 569 |
+| wall events in the stretches BETWEEN forks | 763 | 1282 |
+| plateau stalls | 31 | 61 |
+
+Cause, measured: the cars reach span 240 at 630..860 units of speed (`long_speed / 256`)
+against 450..560 on master. Master's five mouths between spans 58 and 226 each cost the
+pack ~40% of its speed (the open mouth-spin item), so it never got up to speed; with one fork
+the cars run 175 spans without a mouth and arrive at the 0.089 rad/span bend at 250..275
+(and at 335, 565..610, 880..890) at ~280 km/h. The same bends stall cars on master (seeds
+11 and 22: spans 265..267), it is the pack's speed that changed. Not fixed here: it is the
+AI's corner-speed model, not the road (`td5_ai_driver.c`, `TD5RE_AI_DRIVER_CORNER_*`).
+`TD5RE_GEO_FORK_MERGE=0` brings master's selection back.

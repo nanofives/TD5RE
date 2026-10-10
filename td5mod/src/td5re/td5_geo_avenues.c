@@ -20,6 +20,7 @@
 #include "td5re.h"
 #include "td5_platform.h"
 #include "td5_geo.h"
+#include "td5_config.h"
 #include "td5_geo_avenues.h"
 #include "deps/cjson/cJSON.h"
 
@@ -213,8 +214,15 @@ int td5_geo_avenues_sync(void)
              * neighbours. The writer emits them in order; refusing here is
              * what makes a hand-edited file safe. */
             if (s_n_rows > 0 && sv <= s_rows[s_n_rows - 1].span) { bad++; continue; }
-            /* Inside the start grid is geometry under the grid lights. */
-            if (sv <= GEOAV_GRID_SPAN) { bad++; continue; }
+            /* Inside the start grid is geometry under the grid lights.
+             * [ROUND 1014 C] ... except that the scenery carriageway is not
+             * drivable and the writer (td5_geo_route.c) now starts an avenue at
+             * span 1 so a race that begins on one shows the whole avenue; only
+             * span 0, which no building emitter touches, stays refused.
+             * TD5RE_GEO_AVENUE_GRID=0 restores the 24-span margin. */
+            if (sv <= (td5_env_flag_on("TD5RE_GEO_AVENUE_GRID") ? 0 : GEOAV_GRID_SPAN)) {
+                bad++; continue;
+            }
             /* Past the ring is a span that does not exist. */
             if (route_spans > 0 && sv >= route_spans - 1) { bad++; continue; }
             /* An offset narrower than the two half-carriageways would put the

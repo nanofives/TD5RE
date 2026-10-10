@@ -1520,12 +1520,25 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * raising it would put a kerb lip 240 units into each live lane. The island
      * is inset from both edges by TD5_TG_R11_MEDIAN_INSET (> that overlap)
      * instead, which keeps every raised face inside the gore. */
-    const int    fill   = tg_r12_median_fill(gw0, gw1);
+    /* [ROUND 1014 A] A REAL fork's median is the map's own, whatever its width: a
+     * 4.4..8.7 m median is still ONE kerbed strip kerb to kerb. The round-11 rule
+     * above (fill only up to TD5_TG_R11_MEDIAN_MAX = 6 m, otherwise a 0.32-scale
+     * island capped at 520 units in the middle of bare gore floor) is about a
+     * SYNTHETIC split, where a wide gore is scenery between two roads. On fork 0
+     * of Mariano's route it built a 2.4 m strip with ground-coloured flush margins
+     * either side -- "median suddenly grows and has no side geometry" -- and the
+     * planted/barrier/kerbed ladder changed the median's look from one avenue to the
+     * next. TD5RE_GEO_FORK_ISLAND=0 restores that. */
+    const int    real_fk = td5_env_flag_on("TD5RE_GEO_FORK_ISLAND") &&
+                           fork_index >= 0 && fork_index < s_fork_count &&
+                           s_forks[fork_index].real > 0;
+    const int    fill   = real_fk ? 1 : tg_r12_median_fill(gw0, gw1);
     /* A CONCRETE BARRIER is narrow by nature, so filling a 2000-unit median
      * with one would be a lie about what the material is. Where the fill
      * applies, the treatment rolls between planted and kerbed only -- and a
      * planted top is still illegal in a bore, exactly as above. */
-    const int    treat  = !fill ? treat0
+    const int    treat  = real_fk ? 0
+                        : !fill ? treat0
                         : ((((unsigned)fork_index) & 1u)
                            || (tg_span_in_tunnel(si)
                                && td5_env_flag_on("TD5RE_R8_BORE_MEDIAN")))

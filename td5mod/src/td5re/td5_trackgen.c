@@ -3730,7 +3730,13 @@ static int tg_scenery_entry(int e)
                             &k_biomes[td5_env_flag_on("TD5RE_R14_FORK_PAVE")
                                       ? tg_scenery_biome_index(mb)
                                       : tg_biome_for_span(mb)];
-                        if (tg_city_sidewalk_w(cb) > 0.0 &&
+                        if (tg_realfork_walk_owned(fi, mb)) {
+                            /* [ROUND 1014 A] The ring's far footway (td5_tg_avenue.c)
+                             * already lays this pavement at the real per-side width;
+                             * the branch slab would be a second, narrower one on the
+                             * same lateral (measured: 1081 vs 1450 units, 40 units
+                             * apart, z-fighting) and it began at k=0 with an open end. */
+                        } else if (tg_city_sidewalk_w(cb) > 0.0 &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
                             if (!tg_emit_branch_sidewalk(nl, mb, ck, L, fi,
                                                          cb, &meshes,
