@@ -1142,11 +1142,14 @@ double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side)
     const PfPlan *P = pf_of(fi);
     double best = 0.0;
     int e;
+    int wedge;
+    const double wedge_max = (double)td5_env_int("TD5RE_PF_WEDGE_REACH_MAX", 9000, 0, 100000);
     if (!P || !P->built || !nl || !tg_pf_throat_span(fi, si)) return 0.0;
     /* the wedge spans answer 0: the corridor leaves the road there, the skirt starts at the
      * road's own edge and the paved wedge lies over it (the crotch of a mouth is ground, not
      * a slot to the sky) */
-    if (tg_pf_wedge_span(fi, si)) return 0.0;
+    wedge = tg_pf_wedge_span(fi, si);
+    if (wedge && wedge_max <= 0.0) return 0.0;
     if (side * (double)s_forks[fi].side < 0.0) return 0.0;
     for (e = 0; e <= 1; e++) {
         const int i = si + e;
@@ -1158,6 +1161,11 @@ double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side)
         d = sqrt(dx * dx + dz * dz) + (double)P->lb * pf_lw() * 0.5;
         if (d > best) best = d;
     }
+    /* [1017 R] a wedge span answers 0 (the skirt starts at the road's own edge, the paved wedge lies over
+     * the crotch) only while the corridor is FAR: with the corridor's outer edge within
+     * TD5RE_PF_WEDGE_REACH_MAX of the road (default 9000 = 21 m) the skirt, flat at road level there, lay over
+     * the corridor lanes (merged Diagonal 73 / Azcuenaga exit, spans 324..330: a stone slab on the road). 0 = the old rule. */
+    if (wedge && best > wedge_max) return 0.0;
     return best;
 }
 

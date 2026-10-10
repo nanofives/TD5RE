@@ -1000,3 +1000,20 @@ Same 6 seeds, run sets `masterB` (old rules), `piecesB` (`MERGE_ADJ=0`), `fullB`
 * Default build now: 2 forks, 790 corridor spans (46..565 = 518, 901..1174 = 272). Harness on exactly that set (`finalB`): 46..565 PASS
   (15 hits / 1 crash, 1 stall), 901..1174 PASS (13/0, 5 stalls, 0 jams). Census 72 arms accepted, 23 beyond an avenue, 1 dropped "corridor" (master 71 / 22 / 0).
 * Coverage: avenue spans unchanged (673 of 805, 95.5 % of the racing ones); route spans in a window 794 -> 794 (Avenida 13 no longer counted).
+
+### Round 1017 R, visual check of the merged forks (grey corridor, slab on the road, seam)
+
+Chase frames (`verify/geo_r1014b_frames.ps1 -Env "TD5RE_AI_BRANCH_FORCE_MODE=2;TD5RE_TG_DOUBLE_BUILD=0"`) at spans 205-215, 316-338, 558-573, 900-910, 1062-1080, 1124-1134, 1172-1180, branch vs master 24b01f00, every frame looked at.
+
+* **Grey untextured corridor (`rf_visA_span_212/331`): not geometry, a capture artefact.** Those frames came from a run with `STREAMED build` and
+  `scenery stream: the PLAYER CAUGHT UP -- ... the road ahead shows the untextured fallback ribbon until the worker gets there` (race.log line 755): the corridor
+  entries had not been decorated yet. Same spans with the scenery stream finished (the DOUBLE_BUILD=0 frames above, and any normal race) are textured with lane dashes on both
+  builds; MODELS.DAT shows `branch-road` page 0 (road) on every corridor entry, no page 44 / invalid page. The merged, relaxed and end-slid windows emit the same quads as master.
+* **Stone slab on the road at spans 316-330 (REAL, mine) and 1124-1132.** The exit wedge of a plaza fork answers `tg_pf_reach` 0 so the ground skirt starts
+  at the road edge. In a MERGED fork the exit wedge now sits right beside the avenue part (corridor edge 5-10 m from the road, `WEDGEDIAG`), and the flat ground skirt
+  then lay over the corridor lanes (a pavement-textured quad across the corridor at span 322-328, master has the avenue fork there). `tg_pf_reach` now answers the corridor's real reach on a
+  wedge span when the corridor edge is within `TD5RE_PF_WEDGE_REACH_MAX` (default 9000 = 21 m) of the road, and 0 beyond it as before (the crotch of a wide mouth stays ground).
+  `TD5RE_PF_WEDGE_REACH_MAX=0` restores the old rule. Frames 325 / 328 / 1127 / 1131 show a clean carriageway after the fix.
+* **Dark seam strip along the corridor's outer edge (span 329):** a 20 cm brown/olive sliver between the pavement slab and the ground, and the light-blue sky sliver
+  beside the sidewalk at 1131. Both are in master 24b01f00 too (same frames, same spans) and exist at every ground/kerb joint of the real-fork corridors:
+  pre-existing, not touched here.
