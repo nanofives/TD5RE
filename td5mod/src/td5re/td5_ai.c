@@ -4792,6 +4792,82 @@ static inline uint32_t smart_hash_u32(uint32_t x) {
 static int s_geo_gov  = 0;
 static int s_geo_edge = 900;
 
+/* ===== SECTION: SPEED-SCALED STEERING AUTHORITY (round 1017 S) ===============
+ * PORT-ONLY, GENERATED TRACKS ONLY (TD5RE_AI_STEER_CAP=2 also shipped tracks).
+ * The faithful steering cascade (td5_ai_update_steering_bias) is an INTEGRATOR on the
+ * heading error: every tick it adds sin(error) * 0x20000/0x10000 >> 12 to the
+ * steering command (~32 cmd units per angle unit of error), with a +-0x18000 (33.75
+ * degree) clamp and no speed term. Its loop gain is therefore ~ the car's yaw
+ * response, which grows with speed. Generated roads let the field run 500..1000
+ * units/tick; the cascade was tuned for hand-built TD5 routes where the same lane
+ * step arrives at a third of that speed. Measured on Diagonal 73 (F=46, raw 1352):
+ * a 350 unit (0.8 m) lateral-aim step at 506 units/tick is a 3.4 degree heading
+ * error; the cascade answers with -7616 cmd (2.6 degrees of steer) in ONE tick,
+ * which is already past the front axle's grip window at that speed (front slip
+ * 1697 on the same tick, 5000 within 3 ticks); the integrator keeps winding to
+ * -17000 (front saturated, no more lateral force to get), the car understeers 17
+ * ticks, then the rear lets go under full throttle (rear slip 18 -> 54790) and the
+ * yaw runs away to 70 degrees off the velocity. Over the 6 AI runs of the fork
+ * harness the steer a car can use before its front axle slips is ~25..30 angle
+ * units at 400 units/tick and ~15..20 at 600..800: the cornering relation
+ * delta = L * a_lat / v^2.
+ * The fix limits the steering command to what the front axle can use at the
+ * current speed: |cmd| <= 256 * K / v^2 (v in units/tick, K in angle units). Below
+ * v = sqrt(256 K / 0x18000) (~130 units/tick for the default K) the cap is the full
+ * lock, so low-speed play is untouched. TD5RE_AI_STEER_CAP=0 restores the old
+ * behaviour, =2 extends the cap to shipped tracks. TD5RE_AI_STEER_CAP_K (default
+ * 6500000), TD5RE_AI_STEER_CAP_MIN (cmd floor, default 1024). */
+static int s_lane_v0 = 150;           /* [R1017 S] corridor lane-change rate falls as v0/v past this speed (0 = off) */
+static int s_steer_cap_mode = 0;      /* 0 off, 1 generated tracks, 2 every track */
+static int s_steer_cap_on = 0;        /* resolved for this race */
+static int64_t s_steer_cap_k = 6500000;
+static int32_t s_steer_cap_min = 1024;
+static int32_t s_steer_cap_rslip = 0;   /* rear slip excess above which the cap is released */
+static uint32_t s_steer_cap_bind[16];
+
+static void ai_steer_cap_race_init(void)
+{
+    s_lane_v0        = td5_env_int("TD5RE_AI_LANE_V0", 150, 0, 5000);
+    s_steer_cap_mode = td5_env_int("TD5RE_AI_STEER_CAP", 0, 0, 2);
+    s_steer_cap_k    = td5_env_int("TD5RE_AI_STEER_CAP_K", 6500000, 1000, 2000000000);
+    s_steer_cap_min  = td5_env_int("TD5RE_AI_STEER_CAP_MIN", 1024, 0, 0x18000);
+    s_steer_cap_rslip = td5_env_int("TD5RE_AI_STEER_CAP_RSLIP", 0, 0, 1000000);
+    s_steer_cap_on   = (s_steer_cap_mode == 2) ||
+                       (s_steer_cap_mode == 1 && td5_trackgen_is_generated_slot(g_td5.track_index));
+    memset(s_steer_cap_bind, 0, sizeof(s_steer_cap_bind));
+    TD5_LOG_I(LOG_TAG, "steer_cap: %s (mode=%d K=%lld min=%d)",
+              s_steer_cap_on ? "ON" : "off", s_steer_cap_mode,
+              (long long)s_steer_cap_k, (int)s_steer_cap_min);
+}
+
+/* Clamp a racer's steering command to the speed-scaled authority. Called right after
+ * td5_ai_update_steering_bias on the racer path. */
+static void ai_steer_cap_apply(int slot, int route_state_slot_valid)
+{
+    char *actor;
+    int64_t v, cap;
+    int32_t cmd;
+    if (!s_steer_cap_on || !route_state_slot_valid) return;
+    if (slot < 0 || slot >= g_traffic_slot_base) return;
+    actor = actor_ptr(slot);
+    v = (int64_t)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) >> 8;
+    if (v < 0) v = -v;
+    if (v < 1) return;
+    /* A sliding rear axle needs the full lock back (counter-steer): the cap only
+     * guards the ENTRY to a slide, never the recovery from one. */
+    if (ACTOR_I32(actor, ACTOR_REAR_AXLE_SLIP) > s_steer_cap_rslip) return;
+    cap = (s_steer_cap_k * 256) / (v * v);
+    if (cap >= 0x18000) return;
+    if (cap < s_steer_cap_min) cap = s_steer_cap_min;
+    cmd = ACTOR_I32(actor, ACTOR_STEERING_CMD);
+    if (cmd > cap)       ACTOR_I32(actor, ACTOR_STEERING_CMD) = (int32_t)cap;
+    else if (cmd < -cap) ACTOR_I32(actor, ACTOR_STEERING_CMD) = (int32_t)-cap;
+    else return;
+    if (slot < 16 && s_steer_cap_bind[slot]++ == 0)
+        TD5_LOG_I(LOG_TAG, "steer_cap: slot=%d first bind v=%d cap=%d cmd=%d",
+                  slot, (int)v, (int)cap, (int)cmd);
+}
+
 /* ===== SECTION: CORRIDOR-AWARE AI (round 1016 K) ===========================
  * PORT-ONLY, GENERATED TRACKS ONLY (auto track + geo places). Until now the
  * racer AI read the MAIN road even while a car drove a fork corridor:
@@ -4836,6 +4912,7 @@ static void geo_gov_race_init(void)
 static void td5_ai_smart_race_init(void) {
     geo_gov_race_init();
     ai_corr_race_init();
+    ai_steer_cap_race_init();
     int tier = g_td5.difficulty_tier;
     float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
     /* [task#16] Decorrelate the replicated race seed (cf. td5_game_assign_wheel_
@@ -5994,10 +6071,34 @@ static void td5_ai_smart_lane_bias(int slot) {
     double cu = g_smart_lane_u[slot];
     if (cu < 0.0 || cu > 1.0) cu = u_self;     /* first sight / post-reset snap */
     double max_du = 0.022 + skill * 0.028;     /* ~2.2%..5% of road width per tick */
+#ifndef TD5RE_RELEASE
+    double dbg_cu0 = cu; int dbg_snap = 0;
+#endif
     if (on_branch) {
-        if (cu > best_u + 0.12 || cu < best_u - 0.12)
+        if (cu > best_u + 0.12 || cu < best_u - 0.12) {
             cu = u_self;                       /* shed a stale wide-road offset */
+#ifndef TD5RE_RELEASE
+            dbg_snap = 1;
+#endif
+        }
         max_du = 0.12;                         /* converge onto the branch line fast */
+        /* [R1017 S] The aim target is a fixed ~5900 units ahead, so a lateral step of
+         * du (fraction of the road width) is a heading error of du * w / 5900 whatever
+         * the speed, and the steering cascade answers a heading error in ONE tick with
+         * no speed term. 0.12 per tick on a 3000 unit road is 3.5 degrees PER TICK: at
+         * 150 units/tick the car turns into it, at 500 the front axle's grip window is
+         * ~1.2 degrees of steer and the answer saturates it (F=46 Diagonal 73, raw 1352:
+         * the target u jumps 0.42 -> 0.625, the aim moves 612 units in 2 ticks, front
+         * slip 0 -> 5000, rear lets go 17 ticks later, spin). Past ai_lane_v0 units/tick
+         * the corridor rate falls as v0 / v, never below the main-road rate. */
+        if (s_lane_v0 > 0) {
+            double v = fabs((double)ACTOR_I32(actor_ptr(slot), ACTOR_LONGITUDINAL_SPEED)) / 256.0;
+            if (v > (double)s_lane_v0) {
+                double main_du = 0.022 + skill * 0.028;
+                double du = 0.12 * (double)s_lane_v0 / v;
+                max_du = du > main_du ? du : main_du;
+            }
+        }
     }
     if (best_u > cu + max_du)      cu += max_du;
     else if (best_u < cu - max_du) cu -= max_du;
@@ -6007,6 +6108,15 @@ static void td5_ai_smart_lane_bias(int slot) {
     /* Bias = perpendicular shift from the route line to fraction `cu`. */
     int32_t cur = (int32_t)((cu - u_base) * cwidth);
     rs[RS_TRACK_OFFSET_BIAS] = cur;
+#ifndef TD5RE_RELEASE
+    {   /* DEV [R1017 S]: TD5RE_AI_LANE_DIAG=<slot> logs the lane brain EVERY tick */
+        static int s_ld = -2;
+        if (s_ld == -2) s_ld = td5_env_int("TD5RE_AI_LANE_DIAG", -1, -1, 15);
+        if (s_ld == slot)
+            TD5_LOG_I(LOG_TAG, "lane_diag: slot=%d span=%d br=%d cu0=%.3f best=%.3f self=%.3f base=%.3f cu=%.3f maxdu=%.3f snap=%d bias=%d w=%.0f",
+                      slot, span, on_branch, dbg_cu0, best_u, u_self, u_base, cu, max_du, dbg_snap, (int)cur, (double)cwidth);
+    }
+#endif
 
     if ((g_ai_frame_counter % 60u) == 0u) {
         TD5_LOG_I(LOG_TAG, "smart_lane: slot=%d skill=%.2f span=%d L=%d "
@@ -7288,6 +7398,7 @@ void td5_ai_update_track_behavior(int slot) {
     steer_weight = (threshold_result != 0) ? 0x10000 : 0x20000;
     steer_weight = td5_ai_td6_steer_weight(steer_weight);  /* [task#19] TD6: damp mid-band slam */
     td5_ai_update_steering_bias(rs, steer_weight);
+    ai_steer_cap_apply(slot, 1);   /* [R1017 S] speed-scaled steering authority */
     TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
               slot, threshold_result, steer_weight);
 }
