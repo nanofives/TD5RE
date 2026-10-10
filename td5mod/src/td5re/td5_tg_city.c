@@ -412,8 +412,15 @@ int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
          * with u 1..0 -- the seam is the axis and the halves match exactly. */
         const double x0 = (nq == 1 || q == 0) ? -half_w : 0.0;
         const double x1 = (nq == 1 || q == 1) ?  half_w : 0.0;
-        const double u0 = (q == 1) ? 1.0 : 0.0;
-        const double u1 = (q == 1) ? 0.0 : 1.0;
+        /* [ROUND 1015 D / item 11] The seam sat at u = 1.0, the page's right EDGE,
+         * and the sampler wraps: half of each texel row at the axis blended with
+         * column 0 (keyed, black), a 1 px dark line down the middle of every
+         * mirrored tree (luma 46 vs ~90 beside it, measured on a framedump).
+         * Half a texel in puts the axis on column 63's centre. */
+        const double ax = (nq == 2 && td5_env_flag_on("TD5RE_TREE_SEAM_INSET"))
+                        ? 63.5 / 64.0 : 1.0;
+        const double u0 = (q == 1) ? ax : 0.0;
+        const double u1 = (q == 1) ? 0.0 : ax;
         for (i = 0; i < 4; i++) {
             /* local: x across, y up. Quad loop order is near-bottom,
              * far-bottom, far-top, near-top, so 1 and 2 take the far edge. */
