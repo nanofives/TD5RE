@@ -174,8 +174,18 @@ void td5_geo_route_shutdown(void);
 int  td5_geo_route_snap(const char *slug, TD5_GeoLatLon p,
                         TD5_GeoLatLon *out, double *dist_m);
 
-/* The place a lat/lon falls in ("" when none), by PLACE.JSON bbox. */
+/* The place a lat/lon falls in ("" when none), by PLACE.JSON bbox and, for a
+ * place with a `boundary` (an administrative area), by its polygon. When two
+ * places hold the point the one with the larger bbox wins. */
 const char *td5_geo_route_place_at(TD5_GeoLatLon p);
+
+/* [ROUND 1015 F] The outline of a place's boundary polygon, for the map. Ring
+ * `ring` is written as lat,lon pairs into `latlon` (room for max_pts pairs);
+ * the return is the point count of that ring (more than max_pts means it was
+ * truncated), 0 when the place has no such ring. */
+int  td5_geo_route_place_ring_count(const char *slug);
+int  td5_geo_route_place_boundary(const char *slug, int ring,
+                                  double *latlon, int max_pts);
 
 /* The last build's result, or NULL. Same lifetime as `path` above. */
 const TD5_GeoRouteResult *td5_geo_route_last(void);
