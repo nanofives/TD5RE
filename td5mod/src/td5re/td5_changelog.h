@@ -47,6 +47,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  starts or ends, and at the tapered end of a median" },
     { CL_ITEM,    "Avenida 60 is drawn from its first span at the plaza" },
     { CL_ITEM,    "  exit, not 11 spans later" },
+    { CL_ITEM,    "An avenue's far pavement is cut along the street that" },
+    { CL_ITEM,    "  meets it, no square end standing on the road" },
     { CL_ITEM,    "The finish gantry and chequered line span both" },
     { CL_ITEM,    "  carriageways when the finish is on an avenue" },
     { CL_DATE,    "October 9 (real places: landmarks)" },
