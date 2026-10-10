@@ -111,7 +111,15 @@ void td5_geo_sw_place(const char *slug)
     snprintf(s_slug, sizeof s_slug, "%s", slug);
     s_rule = &k_place_rules[n - 1];               /* the generic row */
     for (i = 0; i < n; i++) {
-        if (k_place_rules[i].slug[0] && !strcmp(k_place_rules[i].slug, slug)) {
+        const size_t L = strlen(k_place_rules[i].slug);
+        /* [ROUND 1015 F] A row names a CITY, and a place fetched for the whole
+         * administrative area around it ("la_plata_partido") is the same city's
+         * plan: match the slug itself or "<slug>_<anything>". Without this the
+         * partido took the generic row and every calle lost its real 10 m
+         * carriageway (3 lanes -> 2), which changes the curvature limit the
+         * route is conditioned against. */
+        if (L && !strncmp(k_place_rules[i].slug, slug, L) &&
+            (slug[L] == '\0' || slug[L] == '_')) {
             s_rule = &k_place_rules[i];
             break;
         }

@@ -612,6 +612,212 @@ static int gr_place_read(const char *slug)
     return ok;
 }
 
+/* ======================================================================== *
+ * SECTION: TILED SOURCES  [ROUND 1015 F]
+ *
+ * A place fetched for a whole administrative area (re/tools/geo_region.py, the
+ * Partido de La Plata is ~900 km2) cannot be one file per layer: BUILDINGS.JSON
+ * alone would be ~150 MB of cJSON, and every raster is 100-360 MB. Its
+ * PLACE.JSON carries a `tiled` block instead, its vectors live in
+ * <slug>/tiles/<LAYER>_<ix>_<iz>.JSON with an INDEX.JSON, and its rasters are
+ * flat TD5GEOR1 files over the whole area that a reader seeks into.
+ *
+ * Nothing downstream ever sees the whole area. The two consumers of the SOURCE
+ * ask for a WINDOW:
+ *   - the router graph: the waypoints' box plus GR_TILED_GRAPH_MARGIN_M
+ *   - the commit: the route's box plus GR_TILED_WINDOW_MARGIN_M, in the route
+ *     frame, which becomes the ordinary window-sized _route/ derived frame the
+ *     track generator has always read.
+ * A place that is NOT tiled takes none of these paths: every branch below is
+ * guarded by the PLACE.JSON `tiled` block, so La Plata's 5.4 km cache builds
+ * byte-for-byte as it did.
+ * ======================================================================== */
+
+/* Metres of road graph kept around the waypoints' box. The route can detour
+ * off the straight line between its points, and 10.5 km is the span ceiling, so
+ * this is generous without being the whole partido (2.5k ways, not 25k). */
+#define GR_TILED_GRAPH_MARGIN_M   4000.0
+/* Metres of every layer kept around the route's box in the derived frame.
+ *
+ * HOW MUCH THE GENERATOR LOOKS AT: a building is bound to a road within
+ * TD5_GEOB_BIND_MAX_B = 43000 units (100 m); the far-ground apron reaches
+ * TD5_TG_FAR_REACH = 30000 units (70 m) from the road edge. The old whole-place
+ * frame of La Plata was a 5.4 km box around a 5.2 km route, i.e. 0 to 2.7 km of
+ * surround depending on the side, ~29 km2 of data for Mariano's route.
+ *
+ * 1500 m is 15x the longest reach and gives that route a 32 km2 window, so the
+ * derived frame is the size the generator, the loaders' caps and the build time
+ * were all tuned on -- while still covering the whole street grid the
+ * minimap and the side-street pass draw. A bigger margin only buys MORE
+ * buildings the track never reaches. */
+#define GR_TILED_WINDOW_MARGIN_M  1500.0
+/* Re-load the graph when a request comes within this of the loaded window's edge,
+ * so a drag across the map does not reload on every pixel. */
+#define GR_TILED_GRAPH_SLACK_M    1500.0
+
+typedef struct { int ix, iz, n; double x0, z0, x1, z1; } GrTileRow;
+
+#define GR_TIX_LAYERS 8
+static struct {
+    char       dir[300];             /* the source dir this index belongs to */
+    int        loaded;
+    int        nlayers;
+    char       name[GR_TIX_LAYERS][24];     /* "ROADS" ...                    */
+    char       key [GR_TIX_LAYERS][24];     /* "roads"                        */
+    char       key2[GR_TIX_LAYERS][24];     /* "nodes" or ""                  */
+    int        nrows[GR_TIX_LAYERS];
+    GrTileRow *rows[GR_TIX_LAYERS];
+} s_tix;
+
+static void gr_tix_free(void)
+{
+    int i;
+    for (i = 0; i < GR_TIX_LAYERS; i++) free(s_tix.rows[i]);
+    memset(&s_tix, 0, sizeof s_tix);
+}
+
+static int gr_tix_load(const char *src_dir)
+{
+    char path[512];
+    char *json;
+    cJSON *root, *layers, *l;
+    if (s_tix.loaded && !strcmp(s_tix.dir, src_dir)) return 1;
+    gr_tix_free();
+    snprintf(path, sizeof path, "%s/tiles/INDEX.JSON", src_dir);
+    json = gr_slurp(path, NULL);
+    if (!json) {
+        TD5_LOG_E(LOG_TAG, "geo route: tiled place has no readable %s", path);
+        return 0;
+    }
+    root = cJSON_Parse(json);
+    free(json);
+    layers = root ? cJSON_GetObjectItem(root, "layers") : NULL;
+    if (!layers || !cJSON_IsObject(layers)) {
+        if (root) cJSON_Delete(root);
+        TD5_LOG_E(LOG_TAG, "geo route: %s has no layers{}", path);
+        return 0;
+    }
+    cJSON_ArrayForEach(l, layers) {
+        const cJSON *k1 = cJSON_GetObjectItem(l, "key");
+        const cJSON *k2 = cJSON_GetObjectItem(l, "key2");
+        const cJSON *tl = cJSON_GetObjectItem(l, "tiles");
+        const cJSON *t;
+        int li = s_tix.nlayers, n = 0;
+        if (li >= GR_TIX_LAYERS || !l->string || !cJSON_IsString(k1) ||
+            !cJSON_IsArray(tl)) continue;
+        snprintf(s_tix.name[li], sizeof s_tix.name[li], "%s", l->string);
+        snprintf(s_tix.key[li],  sizeof s_tix.key[li],  "%s", k1->valuestring);
+        snprintf(s_tix.key2[li], sizeof s_tix.key2[li], "%s",
+                 cJSON_IsString(k2) ? k2->valuestring : "");
+        s_tix.rows[li] = (GrTileRow *)calloc((size_t)cJSON_GetArraySize(tl) + 1u,
+                                             sizeof(GrTileRow));
+        if (!s_tix.rows[li]) continue;
+        cJSON_ArrayForEach(t, tl) {
+            const cJSON *a = t->child;
+            double v[7];
+            int k;
+            for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
+            if (k < 7) continue;
+            s_tix.rows[li][n].ix = (int)v[0]; s_tix.rows[li][n].iz = (int)v[1];
+            s_tix.rows[li][n].n  = (int)v[2];
+            s_tix.rows[li][n].x0 = v[3]; s_tix.rows[li][n].z0 = v[4];
+            s_tix.rows[li][n].x1 = v[5]; s_tix.rows[li][n].z1 = v[6];
+            n++;
+        }
+        s_tix.nrows[li] = n;
+        s_tix.nlayers++;
+    }
+    cJSON_Delete(root);
+    snprintf(s_tix.dir, sizeof s_tix.dir, "%s", src_dir);
+    s_tix.loaded = 1;
+    return 1;
+}
+
+/* One layer of a tiled source, merged into the SAME document the monolithic
+ * file would have held, restricted to the tiles whose extent meets `win`
+ * (source-frame world units x0,z0,x1,z1; NULL = every tile). Returns NULL when
+ * the layer is not in the index, so the caller can tell "no such layer" from
+ * "a layer with nothing in the window" (an empty document).
+ *
+ * The tile extent is the extent of everything the tile holds, so a long way
+ * anchored in a tile outside the window is still found. Entries inside a
+ * selected tile but outside the window are kept: the callers filter by entry. */
+static cJSON *gr_tiled_load(const char *src_dir, const char *file,
+                            const double *win, int *out_tiles, int *out_entries)
+{
+    int li, r, tiles = 0, entries = 0;
+    cJSON *merged, *arr1, *arr2 = NULL;
+    size_t nl;
+
+    if (out_tiles) *out_tiles = 0;
+    if (out_entries) *out_entries = 0;
+    if (!gr_tix_load(src_dir)) return NULL;
+    for (li = 0; li < s_tix.nlayers; li++) {
+        nl = strlen(s_tix.name[li]);
+        if (!strncmp(file, s_tix.name[li], nl) && file[nl] == '.') break;
+    }
+    if (li >= s_tix.nlayers) return NULL;
+
+    merged = cJSON_CreateObject();
+    arr1 = cJSON_CreateArray();
+    cJSON_AddItemToObject(merged, s_tix.key[li], arr1);
+    if (s_tix.key2[li][0]) {
+        arr2 = cJSON_CreateArray();
+        cJSON_AddItemToObject(merged, s_tix.key2[li], arr2);
+    }
+    for (r = 0; r < s_tix.nrows[li]; r++) {
+        const GrTileRow *t = &s_tix.rows[li][r];
+        char path[512];
+        char *json;
+        cJSON *doc, *it, *k;
+        int pass;
+        if (win && (t->x1 < win[0] || t->x0 > win[2] ||
+                    t->z1 < win[1] || t->z0 > win[3])) continue;
+        snprintf(path, sizeof path, "%s/tiles/%s_%d_%d.JSON", src_dir,
+                 s_tix.name[li], t->ix, t->iz);
+        json = gr_slurp(path, NULL);
+        if (!json) {
+            TD5_LOG_W(LOG_TAG, "geo route: tile %s is missing or unreadable", path);
+            continue;
+        }
+        doc = cJSON_Parse(json);
+        free(json);
+        if (!doc) {
+            TD5_LOG_W(LOG_TAG, "geo route: tile %s is not valid JSON", path);
+            continue;
+        }
+        for (pass = 0; pass < 2; pass++) {
+            const char *key = pass ? s_tix.key2[li] : s_tix.key[li];
+            cJSON *src = key[0] ? cJSON_GetObjectItem(doc, key) : NULL;
+            cJSON *dst = pass ? arr2 : arr1;
+            if (!src || !cJSON_IsArray(src) || !dst) continue;
+            while ((it = src->child) != NULL) {
+                cJSON_DetachItemViaPointer(src, it);
+                cJSON_AddItemToArray(dst, it);
+                if (!pass) entries++;
+            }
+        }
+        /* Scalars every tile repeats (BUILDINGS: storey_height_m) are taken
+         * from the first tile that has them. */
+        for (k = doc->child; k; k = k->next) {
+            if (cJSON_IsNumber(k) && k->string &&
+                !cJSON_GetObjectItem(merged, k->string))
+                cJSON_AddNumberToObject(merged, k->string, k->valuedouble);
+        }
+        cJSON_Delete(doc);
+        tiles++;
+    }
+    if (out_tiles) *out_tiles = tiles;
+    if (out_entries) *out_entries = entries;
+    return merged;
+}
+
+/* The router's window, as a lat/lon box (W,S,E,N), asked for before a graph is
+ * loaded. Set by gr_graph_sync_pts and read by gr_graph_load; kept OUTSIDE s_g
+ * because gr_graph_load starts by clearing s_g. */
+static double s_win_ll[4];
+static int    s_win_ll_set;
+
 static int gr_graph_load(const char *slug)
 {
     char path[512];
@@ -629,6 +835,42 @@ static int gr_graph_load(const char *slug)
      * carriageway lookup below reads it per road. Idempotent. */
     td5_geo_sw_place(slug);
     td5_geo_source_path(path, sizeof path, slug, "ROADS.JSON");   /* SOURCE */
+    if (td5_geo_place_is_tiled(slug)) {
+        /* [ROUND 1015 F] Only the tiles under the requested window, then the
+         * ordinary per-way bbox filter below keeps the ways that touch it. */
+        char src_dir[300];
+        double win[4], x0, z0, x1, z1, la, lo;
+        int nt = 0, ne = 0, k;
+        td5_geo_source_path(src_dir, sizeof src_dir, slug, "");
+        { const size_t L = strlen(src_dir); if (L && src_dir[L - 1] == '/') src_dir[L - 1] = '\0'; }
+        if (!s_win_ll_set) {
+            TD5_LOG_E(LOG_TAG, "geo route: tiled place %s needs a graph window", slug);
+            gr_graph_free();
+            return 0;
+        }
+        s_g.have_gbbox = 1;
+        for (k = 0; k < 4; k++) s_g.gbbox[k] = s_win_ll[k];
+        x0 = z0 = 1e300; x1 = z1 = -1e300;
+        for (k = 0; k < 4; k++) {
+            la = (k & 1) ? s_win_ll[3] : s_win_ll[1];
+            lo = (k & 2) ? s_win_ll[2] : s_win_ll[0];
+            gr_proj_to_world(&s_g.proj, la, lo, &la, &lo);   /* x in la, z in lo */
+            if (la < x0) x0 = la;
+            if (la > x1) x1 = la;
+            if (lo < z0) z0 = lo;
+            if (lo > z1) z1 = lo;
+        }
+        win[0] = x0; win[1] = z0; win[2] = x1; win[3] = z1;
+        root = gr_tiled_load(src_dir, "ROADS.JSON", win, &nt, &ne);
+        TD5_LOG_I(LOG_TAG, "geo route: tiled graph window W%.4f S%.4f E%.4f N%.4f: "
+                  "%d tile(s), %d way(s) loaded", s_win_ll[0], s_win_ll[1],
+                  s_win_ll[2], s_win_ll[3], nt, ne);
+        if (!root) {
+            TD5_LOG_E(LOG_TAG, "geo route: tiled place %s has no ROADS layer", slug);
+            gr_graph_free();
+            return 0;
+        }
+    } else {
     json = gr_slurp(path, NULL);
     if (!json) {
         TD5_LOG_E(LOG_TAG, "geo route: no readable %s", path);
@@ -641,6 +883,7 @@ static int gr_graph_load(const char *slug)
         TD5_LOG_E(LOG_TAG, "geo route: %s is not valid JSON", path);
         gr_graph_free();
         return 0;
+    }
     }
     arr = cJSON_GetObjectItem(root, "roads");
     if (!arr || !cJSON_IsArray(arr) || (n = cJSON_GetArraySize(arr)) < 1) {
@@ -908,6 +1151,42 @@ static int gr_graph_sync(const char *slug)
 {
     if (!slug || !slug[0]) return 0;
     if (s_g.n_nodes && !strcmp(slug, s_g.slug)) return 1;
+    return gr_graph_load(slug);
+}
+
+/* [ROUND 1015 F] The graph for a set of points. A plain place has ONE graph
+ * (everything in ROADS.JSON); a TILED place has the graph of a WINDOW around
+ * the points, reloaded when a request comes near the loaded window's edge. The
+ * window is kept in s_g.win_ll so it survives between calls and dies with the
+ * graph (gr_graph_free clears s_g). */
+static int gr_graph_sync_pts(const char *slug, const TD5_GeoLatLon *pts, int n)
+{
+    double w = 1e9, s = 1e9, e = -1e9, nn = -1e9, mlat, slack_lat, slack_lon, c;
+    int i;
+    if (!slug || !slug[0]) return 0;
+    if (!td5_geo_place_is_tiled(slug)) return gr_graph_sync(slug);
+    if (!pts || n < 1) return 0;
+    for (i = 0; i < n; i++) {
+        if (pts[i].lon < w) w = pts[i].lon;
+        if (pts[i].lon > e) e = pts[i].lon;
+        if (pts[i].lat < s) s = pts[i].lat;
+        if (pts[i].lat > nn) nn = pts[i].lat;
+    }
+    mlat = 0.5 * (s + nn);
+    c = cos(mlat * GR_RAD_PER_DEG);
+    slack_lat = GR_TILED_GRAPH_SLACK_M / 110574.0;
+    slack_lon = GR_TILED_GRAPH_SLACK_M / (111320.0 * (c > 0.05 ? c : 0.05));
+    if (s_g.n_nodes && !strcmp(slug, s_g.slug) && s_g.have_gbbox &&
+        w - slack_lon >= s_g.gbbox[0] && s - slack_lat >= s_g.gbbox[1] &&
+        e + slack_lon <= s_g.gbbox[2] && nn + slack_lat <= s_g.gbbox[3])
+        return 1;
+    {
+        const double ml = GR_TILED_GRAPH_MARGIN_M / 110574.0;
+        const double mo = GR_TILED_GRAPH_MARGIN_M / (111320.0 * (c > 0.05 ? c : 0.05));
+        s_win_ll[0] = w - mo; s_win_ll[1] = s - ml;
+        s_win_ll[2] = e + mo; s_win_ll[3] = nn + ml;
+        s_win_ll_set = 1;
+    }
     return gr_graph_load(slug);
 }
 
@@ -3426,34 +3705,132 @@ static int gr_place_bounds(const char *slug, double *out)
     return ok;
 }
 
+/* [ROUND 1015 F] Every place the map can route in: the raceable ones, then the
+ * TILED places that have terrain but no built track yet (td5_geo.h). */
+static int gr_place_count_all(void)
+{
+    return td5_geo_places_count() + td5_geo_places_buildable_count();
+}
+
+static const char *gr_place_slug_at(int i)
+{
+    const int n = td5_geo_places_count();
+    return i < n ? td5_geo_places_slug(i) : td5_geo_places_buildable_slug(i - n);
+}
+
+/* The boundary rings of a place (PLACE.JSON `boundary.rings`, [[lat,lon],..]),
+ * or NULL. Only an administrative-area place (geo_region.py) has one. */
+static cJSON *gr_place_boundary(const char *slug, cJSON **out_root)
+{
+    char path[512];
+    char *json;
+    cJSON *root, *bd;
+    *out_root = NULL;
+    if (!slug || !slug[0]) return NULL;
+    td5_geo_source_path(path, sizeof path, slug, "PLACE.JSON");   /* SOURCE */
+    json = gr_slurp(path, NULL);
+    if (!json) return NULL;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return NULL;
+    bd = cJSON_GetObjectItem(root, "boundary");
+    bd = bd ? cJSON_GetObjectItem(bd, "rings") : NULL;
+    if (!bd || !cJSON_IsArray(bd)) { cJSON_Delete(root); return NULL; }
+    *out_root = root;
+    return bd;
+}
+
+/* Even-odd containment over every ring. 1 when the place has NO boundary (the
+ * bbox is then the whole truth, as it always was). */
+static int gr_place_contains(const char *slug, double lat, double lon)
+{
+    cJSON *root = NULL, *rings = gr_place_boundary(slug, &root), *ring;
+    int inside = 0;
+    if (!rings) return 1;
+    cJSON_ArrayForEach(ring, rings) {
+        const cJSON *a, *b;
+        if (!cJSON_IsArray(ring)) continue;
+        a = ring->child;
+        while (a && a->next) {
+            double la0, lo0, la1, lo1;
+            b = a->next;
+            la0 = a->child ? a->child->valuedouble : 0.0;
+            lo0 = (a->child && a->child->next) ? a->child->next->valuedouble : 0.0;
+            la1 = b->child ? b->child->valuedouble : 0.0;
+            lo1 = (b->child && b->child->next) ? b->child->next->valuedouble : 0.0;
+            if ((lo0 > lon) != (lo1 > lon) &&
+                lat < (la1 - la0) * (lon - lo0) / (lo1 - lo0) + la0)
+                inside = !inside;
+            a = b;
+        }
+    }
+    cJSON_Delete(root);
+    return inside;
+}
+
+int td5_geo_route_place_boundary(const char *slug, int ring, double *latlon, int max_pts)
+{
+    cJSON *root = NULL, *rings = gr_place_boundary(slug, &root), *r;
+    int n = 0;
+    if (!rings) return 0;
+    r = cJSON_GetArrayItem(rings, ring);
+    if (r && cJSON_IsArray(r)) {
+        const cJSON *pt;
+        cJSON_ArrayForEach(pt, r) {
+            if (latlon && n < max_pts && pt->child && pt->child->next) {
+                latlon[2 * n]     = pt->child->valuedouble;
+                latlon[2 * n + 1] = pt->child->next->valuedouble;
+            }
+            n++;
+        }
+    }
+    cJSON_Delete(root);
+    return n;
+}
+
+int td5_geo_route_place_ring_count(const char *slug)
+{
+    cJSON *root = NULL, *rings = gr_place_boundary(slug, &root);
+    int n = rings ? cJSON_GetArraySize(rings) : 0;
+    if (root) cJSON_Delete(root);
+    return n;
+}
+
 const char *td5_geo_route_place_at(TD5_GeoLatLon p)
 {
     static char slug[64];
-    const int n = td5_geo_places_count();
+    const int n = gr_place_count_all();
+    double best_area = -1.0;
     int i;
+    slug[0] = '\0';
+    /* More than one place can hold a point (a whole-partido place over the
+     * city-centre box it replaces): the LARGER bbox wins, ties go to the first
+     * in directory order, so a lone place answers exactly as before. */
     for (i = 0; i < n; i++) {
-        const char *s = td5_geo_places_slug(i);
-        double bb[4];
+        const char *s = gr_place_slug_at(i);
+        double bb[4], area;
         if (!gr_place_bounds(s, bb)) continue;
-        if (gr_in_bbox(p.lat, p.lon, bb)) {
+        if (!gr_in_bbox(p.lat, p.lon, bb)) continue;
+        if (!gr_place_contains(s, p.lat, p.lon)) continue;
+        area = (bb[2] - bb[0]) * (bb[3] - bb[1]);
+        if (area > best_area) {
+            best_area = area;
             snprintf(slug, sizeof slug, "%s", s);
-            return slug;
         }
     }
-    slug[0] = '\0';
     return slug;
 }
 
 int td5_geo_route_places(char slugs[][64], double bbox[][4], int max)
 {
-    const int n = td5_geo_places_count();
+    const int n = gr_place_count_all();
     int i, out = 0;
     for (i = 0; i < n; i++) {
         double bb[4];
         if (slugs && out >= max) break;
-        if (!gr_place_bounds(td5_geo_places_slug(i), bb)) continue;
+        if (!gr_place_bounds(gr_place_slug_at(i), bb)) continue;
         if (slugs) {
-            snprintf(slugs[out], 64, "%s", td5_geo_places_slug(i));
+            snprintf(slugs[out], 64, "%s", gr_place_slug_at(i));
             if (bbox) {
                 bbox[out][0] = bb[0]; bbox[out][1] = bb[1];
                 bbox[out][2] = bb[2]; bbox[out][3] = bb[3];
@@ -3470,7 +3847,7 @@ int td5_geo_route_snap(const char *slug, TD5_GeoLatLon p,
     double x, z;
     int n;
     if (!slug || !slug[0]) slug = td5_geo_route_place_at(p);
-    if (!gr_graph_sync(slug)) return 0;
+    if (!gr_graph_sync_pts(slug, &p, 1)) return 0;
     gr_proj_to_world(&s_g.proj, p.lat, p.lon, &x, &z);
     n = gr_nearest(x, z);
     if (n < 0) return 0;
@@ -3535,7 +3912,7 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
             return 0;
         }
     }
-    if (!gr_graph_sync(slug)) {
+    if (!gr_graph_sync_pts(slug, pts, n_pts)) {
         gr_result_set(out, TD5_GEO_ROUTE_NO_DATA, slug,
                       "this place has no readable road graph");
         return 0;
@@ -4742,6 +5119,108 @@ static int gr_raster_read(const char *path, GrRaster *out)
     return 1;
 }
 
+/* [ROUND 1015 F] The header of a raster, without its samples. A tiled place's
+ * rasters are 100-360 MB, so the commit must size its work from 72 bytes. */
+static int gr_raster_peek(const char *path, GrRaster *out)
+{
+    unsigned char h[GR_RASTER_HEADER];
+    TD5_File *f = td5_plat_file_open(path, "rb");
+    memset(out, 0, sizeof *out);
+    if (!f) return 0;
+    if (td5_plat_file_read(f, h, sizeof h) != sizeof h || memcmp(h, "TD5GEOR1", 8)) {
+        td5_plat_file_close(f);
+        return 0;
+    }
+    td5_plat_file_close(f);
+    out->kind     = gr_rd_i32(h + 8);
+    out->w        = gr_rd_i32(h + 12);
+    out->h        = gr_rd_i32(h + 16);
+    out->origin_x = gr_rd_f64(h + 20);
+    out->origin_z = gr_rd_f64(h + 28);
+    out->cell     = gr_rd_f64(h + 36);
+    out->scale    = gr_rd_f64(h + 44);
+    out->bias     = gr_rd_f64(h + 52);
+    out->nodata_raw = gr_rd_i32(h + 60);
+    out->rotation = gr_rd_f64(h + 64);
+    return out->w >= 1 && out->h >= 1 && (out->kind == 1 || out->kind == 2);
+}
+
+/* [ROUND 1015 F] The cells of a raster that cover the world rectangle
+ * [wx0,wx1] x [wz0,wz1] (plus `pad` cells), read row by row with a seek. The
+ * returned raster is that sub-grid: its origin is the origin of its first cell,
+ * so gr_regrid_mem samples it exactly as it would the whole raster -- a query
+ * inside the rectangle (+pad) lands on the same cell and the same four
+ * bilinear neighbours. A rectangle that misses the raster entirely gives a
+ * 0x0 grid, which every sampler below reads as "outside = nodata". */
+static int gr_raster_read_window(const char *path, double wx0, double wz0,
+                                 double wx1, double wz1, int pad, GrRaster *out)
+{
+    unsigned char h[GR_RASTER_HEADER];
+    TD5_File *f = td5_plat_file_open(path, "rb");
+    int w, hh, i0, i1, j0, j1, j, esz;
+    double origin_x, origin_z, cell;
+    size_t row_bytes;
+    unsigned char *dst;
+
+    memset(out, 0, sizeof *out);
+    if (!f) return 0;
+    if (td5_plat_file_read(f, h, sizeof h) != sizeof h || memcmp(h, "TD5GEOR1", 8)) {
+        td5_plat_file_close(f);
+        return 0;
+    }
+    out->kind     = gr_rd_i32(h + 8);
+    w             = gr_rd_i32(h + 12);
+    hh            = gr_rd_i32(h + 16);
+    origin_x      = gr_rd_f64(h + 20);
+    origin_z      = gr_rd_f64(h + 28);
+    cell          = gr_rd_f64(h + 36);
+    out->scale    = gr_rd_f64(h + 44);
+    out->bias     = gr_rd_f64(h + 52);
+    out->nodata_raw = gr_rd_i32(h + 60);
+    out->rotation = gr_rd_f64(h + 64);
+    out->cell     = cell;
+    if (w < 1 || hh < 1 || !(cell > 0.0) || (out->kind != 1 && out->kind != 2)) {
+        td5_plat_file_close(f);
+        return 0;
+    }
+    esz = out->kind == 1 ? 2 : 1;
+    i0 = (int)floor((wx0 - origin_x) / cell) - pad;
+    i1 = (int)ceil ((wx1 - origin_x) / cell) + pad + 1;
+    j0 = (int)floor((wz0 - origin_z) / cell) - pad;
+    j1 = (int)ceil ((wz1 - origin_z) / cell) + pad + 1;
+    if (i0 < 0) i0 = 0;
+    if (j0 < 0) j0 = 0;
+    if (i1 > w)  i1 = w;
+    if (j1 > hh) j1 = hh;
+    if (i1 <= i0 || j1 <= j0) {                 /* the rectangle misses it */
+        out->w = out->h = 0;
+        out->origin_x = origin_x; out->origin_z = origin_z;
+        out->data = malloc(1);
+        td5_plat_file_close(f);
+        return out->data != NULL;
+    }
+    out->w = i1 - i0;
+    out->h = j1 - j0;
+    out->origin_x = origin_x + (double)i0 * cell;
+    out->origin_z = origin_z + (double)j0 * cell;
+    row_bytes = (size_t)out->w * (size_t)esz;
+    out->data = malloc(row_bytes * (size_t)out->h);
+    if (!out->data) { td5_plat_file_close(f); return 0; }
+    dst = (unsigned char *)out->data;
+    for (j = j0; j < j1; j++, dst += row_bytes) {
+        const int64_t off = (int64_t)GR_RASTER_HEADER
+                          + ((int64_t)j * (int64_t)w + (int64_t)i0) * (int64_t)esz;
+        if (td5_plat_file_seek(f, off, 0) != 0 ||
+            td5_plat_file_read(f, dst, row_bytes) != row_bytes) {
+            free(out->data); out->data = NULL;
+            td5_plat_file_close(f);
+            return 0;
+        }
+    }
+    td5_plat_file_close(f);
+    return 1;
+}
+
 static int gr_raster_write(const char *path, const GrRaster *r)
 {
     const size_t n = (size_t)r->w * (size_t)r->h * (r->kind == 1 ? 2u : 1u);
@@ -4794,7 +5273,7 @@ static void gr_affine_old_from_new(const GeoProj *np, const GeoProj *op,
 static int gr_regrid_mem(const char *src_dir, const char *name, int bilinear,
                          const GeoProj *np, const GeoProj *op,
                          double ox, double oz, int nw, int nh,
-                         GrRaster *out, long *out_nodata)
+                         GrRaster *out, long *out_nodata, int tiled)
 {
     char path[512];
     GrRaster src;
@@ -4807,7 +5286,31 @@ static int gr_regrid_mem(const char *src_dir, const char *name, int bilinear,
 
     snprintf(path, sizeof path, "%s/%s", src_dir, name);
     if (!td5_plat_file_exists(path)) return -1;
-    if (!gr_raster_read(path, &src)) return 0;
+    if (tiled) {
+        /* [ROUND 1015 F] A tiled place's raster covers the whole area: read only
+         * the rows/columns the destination window maps onto. The four corners of
+         * the destination grid, pushed through the same affine the sampling loop
+         * uses, bound every cell it will ask for. */
+        GrRaster hdr;
+        double c[4][2], lo_x, hi_x, lo_z, hi_z;
+        int k;
+        if (!gr_raster_peek(path, &hdr)) return 0;
+        gr_affine_old_from_new(np, op, ox, oz, hdr.cell, a);
+        for (k = 0; k < 4; k++) {
+            const double fi = (k & 1) ? (double)(nw - 1) : 0.0;
+            const double fj = (k & 2) ? (double)(nh - 1) : 0.0;
+            c[k][0] = a[0] * fi + a[1] * fj + a[2];
+            c[k][1] = a[3] * fi + a[4] * fj + a[5];
+        }
+        lo_x = hi_x = c[0][0]; lo_z = hi_z = c[0][1];
+        for (k = 1; k < 4; k++) {
+            if (c[k][0] < lo_x) lo_x = c[k][0];
+            if (c[k][0] > hi_x) hi_x = c[k][0];
+            if (c[k][1] < lo_z) lo_z = c[k][1];
+            if (c[k][1] > hi_z) hi_z = c[k][1];
+        }
+        if (!gr_raster_read_window(path, lo_x, lo_z, hi_x, hi_z, 3, &src)) return 0;
+    } else if (!gr_raster_read(path, &src)) return 0;
 
     out->kind = src.kind; out->w = nw; out->h = nh;
     out->origin_x = ox; out->origin_z = oz; out->cell = src.cell;
@@ -4953,19 +5456,23 @@ static double gr_quant(double v)
 }
 
 static int gr_reproject_arr(cJSON *root, const char *array_key,
-                            const GeoProj *np, const GeoProj *op)
+                            const GeoProj *np, const GeoProj *op,
+                            const double *keep)
 {
     cJSON *arr = root ? cJSON_GetObjectItem(root, array_key) : NULL;
-    cJSON *e;
+    cJSON *e, *next;
     int n = 0;
 
     if (!arr || !cJSON_IsArray(arr)) return -1;
-    cJSON_ArrayForEach(e, arr) {
+    /* Manual walk, not cJSON_ArrayForEach: with `keep` an entry can be removed
+     * mid-walk, so the successor is read first. */
+    for (e = arr->child; e; e = next) {
         cJSON *pts = cJSON_GetObjectItem(e, "points");
         cJSON *ex  = cJSON_GetObjectItem(e, "x");
         cJSON *ez  = cJSON_GetObjectItem(e, "z");
         double la, lo, x, z;
-        n++;
+        double bx0 = 1e300, bz0 = 1e300, bx1 = -1e300, bz1 = -1e300;
+        next = e->next;
         if (pts && cJSON_IsArray(pts)) {
             cJSON *p;
             cJSON_ArrayForEach(p, pts) {
@@ -4976,6 +5483,10 @@ static int gr_reproject_arr(cJSON *root, const char *array_key,
                 gr_proj_to_world(np, la, lo, &x, &z);
                 cJSON_SetNumberValue(px, gr_quant(x));
                 cJSON_SetNumberValue(pz, gr_quant(z));
+                if (x < bx0) bx0 = x;
+                if (x > bx1) bx1 = x;
+                if (z < bz0) bz0 = z;
+                if (z > bz1) bz1 = z;
             }
         }
         if (cJSON_IsNumber(ex) && cJSON_IsNumber(ez)) {
@@ -4983,7 +5494,17 @@ static int gr_reproject_arr(cJSON *root, const char *array_key,
             gr_proj_to_world(np, la, lo, &x, &z);
             cJSON_SetNumberValue(ex, gr_quant(x));
             cJSON_SetNumberValue(ez, gr_quant(z));
+            bx0 = bx1 = x; bz0 = bz1 = z;
         }
+        /* [ROUND 1015 F] An entry whose box misses the window is dropped, so a
+         * tile's neighbours do not ride along into the derived frame. An entry
+         * with no coordinates at all is kept (nothing to test it by). */
+        if (keep && bx1 >= bx0 &&
+            (bx1 < keep[0] || bx0 > keep[2] || bz1 < keep[1] || bz0 > keep[3])) {
+            cJSON_Delete(cJSON_DetachItemViaPointer(arr, e));
+            continue;
+        }
+        n++;
     }
     return n;
 }
@@ -5010,7 +5531,7 @@ static int gr_reproject_arr(cJSON *root, const char *array_key,
 static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
                                const char *array_key, const char *key2,
                                const GeoProj *np, const GeoProj *op,
-                               int *count)
+                               int *count, const double *keep, int tiled)
 {
     char path[512];
     char *json;
@@ -5018,6 +5539,33 @@ static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
     int n;
 
     if (count) *count = -1;
+    if (tiled) {
+        /* [ROUND 1015 F] `keep` is the window in the NEW (route) frame. The
+         * tiles are indexed in the SOURCE frame, so the window's four corners
+         * are carried across (new -> lat/lon -> old) and boxed. */
+        double win[4], lo_x = 1e300, lo_z = 1e300, hi_x = -1e300, hi_z = -1e300;
+        int k, nt = 0, ne = 0;
+        for (k = 0; k < 4; k++) {
+            double la, lo, x, z;
+            gr_proj_to_latlon(np, (k & 1) ? keep[2] : keep[0],
+                                   (k & 2) ? keep[3] : keep[1], &la, &lo);
+            gr_proj_to_world(op, la, lo, &x, &z);
+            if (x < lo_x) lo_x = x;
+            if (x > hi_x) hi_x = x;
+            if (z < lo_z) lo_z = z;
+            if (z > hi_z) hi_z = z;
+        }
+        win[0] = lo_x; win[1] = lo_z; win[2] = hi_x; win[3] = hi_z;
+        root = gr_tiled_load(src_dir, file, win, &nt, &ne);
+        if (!root) return NULL;                   /* the place has no such layer */
+        n = gr_reproject_arr(root, array_key, np, op, keep);
+        if (n < 0) { if (count) *count = 0; cJSON_Delete(root); return NULL; }
+        if (key2) (void)gr_reproject_arr(root, key2, np, op, keep);
+        if (count) *count = n;
+        TD5_LOG_I(LOG_TAG, "geo route:   %s: %d tile(s), %d loaded -> %d in the window",
+                  file, nt, ne, n);
+        return root;
+    }
     snprintf(path, sizeof path, "%s/%s", src_dir, file);
     if (!td5_plat_file_exists(path)) return NULL;
     json = gr_slurp(path, NULL);
@@ -5025,9 +5573,9 @@ static cJSON *gr_reproject_mem(const char *src_dir, const char *file,
     root = cJSON_Parse(json);
     free(json);
     if (!root) { if (count) *count = 0; return NULL; }
-    n = gr_reproject_arr(root, array_key, np, op);
+    n = gr_reproject_arr(root, array_key, np, op, NULL);
     if (n < 0) { if (count) *count = 0; cJSON_Delete(root); return NULL; }
-    if (key2) (void)gr_reproject_arr(root, key2, np, op);
+    if (key2) (void)gr_reproject_arr(root, key2, np, op, NULL);
     if (count) *count = n;
     return root;
 }
@@ -5064,6 +5612,11 @@ static cJSON *gr_derived_place(const char *src_dir, const GeoProj *np,
      * immutable source the graph cannot widen and the pin is unnecessary. An
      * existing pin in a shipped source is still honoured (gr_place_read). */
     cJSON_DeleteItemFromObject(root, "route_graph_bbox");
+    /* [ROUND 1015 F] The derived frame is an ORDINARY window-sized place: the
+     * tiled index and the area's boundary describe the SOURCE and would only
+     * mislead a reader of this copy. */
+    cJSON_DeleteItemFromObject(root, "tiled");
+    cJSON_DeleteItemFromObject(root, "boundary");
     d = cJSON_CreateObject();
     cJSON_AddStringToObject(d, "frame", "route");
     cJSON_AddStringToObject(d, "derived_by", "td5_geo_route.c");
@@ -5214,7 +5767,7 @@ int td5_geo_derived_migrate(const char *slug)
     for (i = 0; !failed && i < (int)(sizeof k_fix / sizeof k_fix[0]); i++) {
         int n = -1;
         cJSON *tree = gr_reproject_mem(src_dir, k_fix[i].file, k_fix[i].key,
-                                       k_fix[i].key2, &newp, &oldp, &n);
+                                       k_fix[i].key2, &newp, &oldp, &n, NULL, 0);
         if (!tree) {
             /* Absent in the SOURCE too is fine and expected: a cache fetched
              * before tag_schema 3 has no FOOTWAYS.JSON to carry over, and the
@@ -5305,6 +5858,8 @@ int td5_geo_route_commit(void)
     long corridor_n = 0, corridor_miss = 0;
     int nw, nh, i, rc = 1;
     long nodata_total = 0;
+    int tiled = 0;
+    double keep_rect[4];
     const uint64_t t_us = td5_plat_time_us();
 
     /* Everything is built here and written in one go at the end. */
@@ -5357,11 +5912,14 @@ int td5_geo_route_commit(void)
 
     /* -------- 1. size the route-frame grid from the SOURCE lat/lon box ------ */
     cell = 0.0;
+    tiled = td5_geo_place_is_tiled(s_last.slug);
     {
         char hp[512];
         GrRaster probe;
         snprintf(hp, sizeof hp, "%s/HEIGHT.R16", src_dir);
-        if (!gr_raster_read(hp, &probe))
+        /* [ROUND 1015 F] A tiled place's terrain is hundreds of MB: take the
+         * cell size from its header instead of reading it. */
+        if (!(tiled ? gr_raster_peek(hp, &probe) : gr_raster_read(hp, &probe)))
             return gr_commit_refuse("THE PLACE HAS NO READABLE TERRAIN DATA");
         cell = probe.cell;
         gr_raster_free(&probe);
@@ -5382,8 +5940,26 @@ int td5_geo_route_commit(void)
             if (corners_z[i] < z0) z0 = corners_z[i];
             if (corners_z[i] > z1) z1 = corners_z[i];
         }
+        if (tiled) {
+            /* [ROUND 1015 F] THE WINDOW. The place is a whole administrative
+             * area; the derived frame is the route's box plus a surround, in
+             * the route frame (so it is axis-aligned with the track and no
+             * larger than a city-centre place always was). */
+            double rx0 = c->nodes_xz.x[0], rx1 = rx0, rz0 = c->nodes_xz.z[0], rz1 = rz0;
+            const double M = GR_TILED_WINDOW_MARGIN_M * c->proj.upm;
+            for (i = 1; i < c->nodes_xz.n; i++) {
+                if (c->nodes_xz.x[i] < rx0) rx0 = c->nodes_xz.x[i];
+                if (c->nodes_xz.x[i] > rx1) rx1 = c->nodes_xz.x[i];
+                if (c->nodes_xz.z[i] < rz0) rz0 = c->nodes_xz.z[i];
+                if (c->nodes_xz.z[i] > rz1) rz1 = c->nodes_xz.z[i];
+            }
+            x0 = rx0 - M; x1 = rx1 + M; z0 = rz0 - M; z1 = rz1 + M;
+        }
         nw = (int)ceil((x1 - x0) / cell) + 1;
         nh = (int)ceil((z1 - z0) / cell) + 1;
+        keep_rect[0] = x0; keep_rect[1] = z0;
+        keep_rect[2] = x0 + (double)(nw - 1) * cell;
+        keep_rect[3] = z0 + (double)(nh - 1) * cell;
     }
     /* GUARD 1: the 2x2 collapse. A grid this small means the bbox read as a
      * point, which is what a corrupted or re-derived PLACE.JSON looks like. */
@@ -5398,7 +5974,8 @@ int td5_geo_route_commit(void)
     for (i = 0; i < 4; i++) {
         long nd = 0;
         const int r = gr_regrid_mem(src_dir, k_rast[i].name, k_rast[i].bilinear,
-                                    &c->proj, &oldp, x0, z0, nw, nh, &rast[i], &nd);
+                                    &c->proj, &oldp, x0, z0, nw, nh, &rast[i], &nd,
+                                    tiled);
         if (r < 0) continue;                        /* this place has no such layer */
         if (!r) { gr_commit_refuse("COULD NOT RE-GRID %s", k_rast[i].name); goto done; }
         /* GUARD 2: every layer must land on ONE grid. td5_geo.c drops a mask
@@ -5428,7 +6005,8 @@ int td5_geo_route_commit(void)
     /* -------- 3. re-project every vector layer INTO MEMORY ----------------- */
     for (i = 0; i < GR_VEC_N; i++)
         vec[i] = gr_reproject_mem(src_dir, k_vec[i].file, k_vec[i].key,
-                                  k_vec[i].key2, &c->proj, &oldp, &vec_n[i]);
+                                  k_vec[i].key2, &c->proj, &oldp, &vec_n[i],
+                                  tiled ? keep_rect : NULL, tiled);
     /* GUARD 4: a present-but-empty layer. vec_n < 0 means "the place never had
      * this file", which is allowed; 0 entries from a file that exists is the
      * "ROADS.JSON held no usable road" state. */
@@ -5437,7 +6015,10 @@ int td5_geo_route_commit(void)
         goto done;
     }
     for (i = 1; i < GR_VEC_N; i++) {
-        if (k_vec[i].required && vec_n[i] == 0) {
+        /* A WINDOW of a big area can legitimately hold no plaza polygon or no
+         * signal (a country road): only a whole-place layer is "damaged" when
+         * empty. The road floor above still applies to both. */
+        if (!tiled && k_vec[i].required && vec_n[i] == 0) {
             gr_commit_refuse("%s IS PRESENT BUT EMPTY -- MAP DATA LOOKS DAMAGED",
                              k_vec[i].file);
             goto done;

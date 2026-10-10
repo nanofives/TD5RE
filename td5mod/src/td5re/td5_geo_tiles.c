@@ -293,6 +293,19 @@ void td5_geo_tiles_open(void)
      * the map. They park on the condition variable while the screen is shut
      * and cost nothing; `s_open` is what gates whether work can reach them. */
     InterlockedExchange(&s_running, 1);
+#ifndef TD5RE_RELEASE
+    /* [ROUND 1015 F] DEV: TD5RE_GEO_TILES_OFFLINE=1 starts no worker, so the
+     * screen is verified on a framedump (place outline, pins, route) with ZERO
+     * outbound requests -- tiles already in the on-disk cache still draw, the
+     * rest stay placeholders. Needed because panning to a part of a big place
+     * that was never looked at is exactly what would otherwise hit the tile
+     * server, and a test must not. */
+    if (getenv("TD5RE_GEO_TILES_OFFLINE") && atoi(getenv("TD5RE_GEO_TILES_OFFLINE")) == 1) {
+        s_open = 1;
+        TD5_LOG_I(LOG_TAG, "geo tiles: OFFLINE (TD5RE_GEO_TILES_OFFLINE=1), no workers");
+        return;
+    }
+#endif
     for (i = 0; i < TD5_GEO_TILE_WORKERS; i++) {
         if (!s_worker[i])
             s_worker[i] = td5_plat_thread_create(tile_worker, NULL);

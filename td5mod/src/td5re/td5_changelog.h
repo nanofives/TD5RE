@@ -31,6 +31,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 9 (real places: the whole Partido)" },
+    { CL_ITEM,    "The La Plata map now covers the whole Partido de La" },
+    { CL_ITEM,    "  Plata (886 km2: City Bell, Gonnet, Villa Elisa, Los" },
+    { CL_ITEM,    "  Hornos...), not a 5 km square round the centre" },
+    { CL_ITEM,    "The green outline on the map is the Partido boundary;" },
+    { CL_ITEM,    "  a point outside it says it is outside the data" },
+    { CL_ITEM,    "BUILD TRACK cuts the area around your route out of the" },
+    { CL_ITEM,    "  Partido, so loading stays as fast as before" },
 
     { CL_DATE,    "October 9 (grass and trees)" },
     { CL_ITEM,    "Trees on a random seed are no longer cut in half" },

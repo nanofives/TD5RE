@@ -279,6 +279,26 @@ const char *td5_geo_places_name(int i);  /* PLACE.JSON name, else the slug */
 void        td5_geo_force_place(const char *slug);
 const char *td5_geo_wanted_slug(void);   /* override, else env knob, else "" */
 
+/* -------------------------------------------- [ROUND 1015 F] TILED PLACES
+ * A place fetched for a whole administrative area (re/tools/geo_region.py) is
+ * too big to hold as one file per layer: its PLACE.JSON carries a `tiled`
+ * block, its vectors live in <slug>/tiles/ and its rasters are one flat file
+ * each over the whole area. It is NOT raced from its source frame -- the
+ * source frame is unrotated and tens of km across. A BUILD cuts a WINDOW around
+ * the route out of it and writes the usual _route/ derived frame, and that is
+ * what races.
+ *
+ * So a tiled place is in one of two states, and the resolver says which:
+ *   BUILDABLE  no derived frame yet. Not raceable (td5_geo_load refuses it, and
+ *              it is not in td5_geo_places_*), but the GEOSPATIAL screen can
+ *              route in it and BUILD TRACK will cut the frame.
+ *   RACEABLE   a derived frame exists (its _route/ROUTE.JSON), so it is in the
+ *              ordinary list like any other place.
+ * td5_geo_place_is_tiled reads the SOURCE PLACE.JSON. */
+int         td5_geo_place_is_tiled(const char *slug);
+int         td5_geo_places_buildable_count(void);
+const char *td5_geo_places_buildable_slug(int i);
+
 /* Place dirs that EXIST under re/assets/geo/ but cannot be raced. Surfaced so
  * the selector can say why a place the user fetched is not in the list rather
  * than silently omitting it. */
