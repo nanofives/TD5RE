@@ -6942,12 +6942,28 @@ void td5_ai_update_track_behavior(int slot) {
              * span) or on the main road with a committed fork inside the window
              * (the aim now crosses into the corridor with the car). */
             if (ai_corr_slot_on(slot)) {
-                int pth[5];
+                int pth[10];
                 int raw_i = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
                 if (raw_i >= 0 && raw_i < span_count) {
-                    smart_build_path(slot, raw_i, span_count, 5, pth);
-                    if (raw_i > ring_len || pth[4] != raw_i + 4)
-                        target_span = pth[4];
+                    /* 4 spans of 1500 units = 6000 units ahead; a free corridor's spans
+                     * can be 2.5x longer and the aim must not jump a whole corner. */
+                    int n = 0;
+                    double cum = 0.0;
+                    smart_build_path(slot, raw_i, span_count, 10, pth);
+                    if (raw_i <= ring_len) n = 4, cum = 5900.0;   /* main road: always 4 spans */
+                    while (n < 8 && cum < 5900.0) {
+                        double ax, az, bx, bz;
+                        if (pth[n + 1] != pth[n] + 1 ||
+                            !smart_span_mid(pth[n], span_count, &ax, &az) ||
+                            !smart_span_mid(pth[n + 1], span_count, &bx, &bz))
+                            cum += (double)TD5_TG_SPAN_LENGTH;
+                        else
+                            cum += sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+                        n++;
+                    }
+                    if (n < 1) n = 1;
+                    if (raw_i > ring_len || pth[n] != raw_i + n || n != 4)
+                        target_span = pth[n];
                 }
             }
 
