@@ -500,6 +500,7 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--finish-margin", type=int, default=FINISH_MARGIN)
     ap.add_argument("--no-json", action="store_true")
+    ap.add_argument("--hits", action="store_true", help="[R1016 K] list every graded hit: slot, tick, span_raw, kind, entry speed, minimum speed")
     ap.add_argument("--warn-allows", action="store_true", help="WARN forks go on the allow list (default: only PASS)")
     args = ap.parse_args()
 
@@ -592,6 +593,9 @@ def main():
     print()
     for x in results:
         print("fork F=%d %s: %s" % (x["F"], x["fk"]["name"] or x["fk"]["kind"], x["verdict"]))
+        if args.hits:
+            for h in x["fm"].get("hit_log", []):
+                print("    hit slot %d tick %d raw %d %s v0 %d vmin %d" % h)
         for r_ in x["reasons"]:
             print("    " + r_)
         for slot, t0, t1, lo, hi in x["fm"]["stalls"]:

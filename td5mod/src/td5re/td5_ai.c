@@ -5114,6 +5114,46 @@ static void smart_build_path(int slot, int span_raw, int span_count, int n, int 
 
 #define SMART_PATH_MAX 48
 
+/* [R1016 K] LATERAL CONTINUITY AT A JUNCTION SPAN. The aim point is `left + route_byte *
+ * (right - left) + bias`, with the byte and the bias in the frame of the CURRENT road. Where
+ * the target span is a fork / rejoin span (type 8 / 11) of another width, that frame moves:
+ * a car in the 2-lane main half aiming at the 4-lane rejoin span put its aim at 0.625 of
+ * 14 m, i.e. across the gore, and hit the wall (the validation harness: 6 hard hits at the
+ * main span before every plaza exit, 0 with the forks off). Express the same lateral
+ * position of the current frame in the target span: rb' = (rb * Wc - Lt) / (Rt - Lt),
+ * with Lt / Rt the target's rails measured in the current frame. Only for a junction
+ * target with a different lane count, so every other aim is untouched. */
+static int ai_corr_aim_rb(int slot, int raw, int target_span, int rb)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    int lcx, lcz, rcx, rcz, ltx, ltz, rtx, rtz, tt;
+    double ex, ez, wc, lt, rt, wt;
+    if (!ai_corr_slot_on(slot) || !strips || raw < 0 || target_span < 0 ||
+        raw >= td5_track_get_span_count() || target_span >= td5_track_get_span_count() || raw == target_span)
+        return rb;
+    tt = strips[(size_t)target_span * 0x18];
+    if (tt != 8 && tt != 11) return rb;
+    if (td5_track_get_span_lane_count(raw) == td5_track_get_span_lane_count(target_span)) return rb;
+    if (!td5_track_get_span_route_frame(raw, &lcx, &lcz, &rcx, &rcz) ||
+        !td5_track_get_span_route_frame(target_span, &ltx, &ltz, &rtx, &rtz)) return rb;
+    ex = (double)(rcx - lcx); ez = (double)(rcz - lcz);
+    wc = sqrt(ex * ex + ez * ez);
+    if (wc < 1.0) return rb;
+    ex /= wc; ez /= wc;
+    lt = ((double)(ltx - lcx)) * ex + ((double)(ltz - lcz)) * ez;
+    rt = ((double)(rtx - lcx)) * ex + ((double)(rtz - lcz)) * ez;
+    wt = rt - lt;
+    if (wt < 1.0) return rb;
+    /* the two roads must share an edge, or there is no continuity to keep */
+    if (fabs(lt) > 0.3 * wc && fabs(rt - wc) > 0.3 * wc) return rb;
+    {
+        double v = ((double)rb / 256.0 * wc - lt) / wt * 256.0;
+        if (v < -128.0) v = -128.0;
+        if (v > 384.0) v = 384.0;
+        return (int)v;
+    }
+}
+
 
 /* ===== SECTION: Smart Opponent AI (smart_*) sensing, branch/lane/speed ===== */
 
@@ -6004,6 +6044,7 @@ static int    s_gov_inited = 0;
 static int    s_gov_on = 1, s_gov_scope = 1, s_gov_look = 36;
 static double s_gov_lat_u = 6.69, s_gov_brk_u = 4.69;      /* units/tick^2 */
 static double s_gov_floor = 340.0;                          /* units/tick: below this a car has no yaw authority */
+static double s_gov_vmax = 0.0;                             /* units/tick: straight-line ceiling on a corridor route (0 = none) */
 
 static void ai_gov_read_knobs(void)
 {
@@ -6016,6 +6057,7 @@ static void ai_gov_read_knobs(void)
     s_gov_lat_u = (double)td5_env_int("TD5RE_AI_GOV_LAT", 140, 40, 400) / 10.0 * 430.0 / 900.0;
     s_gov_brk_u = (double)td5_env_int("TD5RE_AI_GOV_BRAKE", 98, 30, 200) / 10.0 * 430.0 / 900.0;
     s_gov_floor = (double)td5_env_int("TD5RE_AI_GOV_FLOOR", 340, 0, 600);
+    s_gov_vmax  = (double)td5_env_int("TD5RE_AI_GOV_VMAX", 0, 0, 900);
     TD5_LOG_I(LOG_TAG, "corridor_gov: %s scope=%d look=%d lat=%.2f brake=%.2f units/tick^2 floor=%.0f",
               s_gov_on ? "ON" : "off", s_gov_scope, s_gov_look, s_gov_lat_u, s_gov_brk_u, s_gov_floor);
 }
@@ -6071,6 +6113,7 @@ static double ai_gov_allowed(int slot, int span_raw, int span_count, double *out
     }
     if (out_bend) *out_bend = rmin;
     if (best > 1e17) return -1.0;
+    if (s_gov_vmax > 0.0 && best > s_gov_vmax) best = s_gov_vmax;
     return best * 256.0;
 }
 
@@ -7091,6 +7134,7 @@ void td5_ai_update_track_behavior(int slot) {
                     /* [STALE SPAN GUARD 2026-10-09] see the rt_probe reads above. */
                     route_byte = ai_route_byte(route_bytes, lin_span, 0);
                 }
+                route_byte = ai_corr_aim_rb(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), target_span, route_byte);
                 TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
                           slot, lin_span, target_span, route_byte);
 
