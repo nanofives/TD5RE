@@ -115,10 +115,17 @@ int tg_branches_enabled(void)
 int tg_span_in_fork_clear(int si)
 {
     int i;
-    for (i = 0; i < s_fork_count; i++)
+    for (i = 0; i < s_fork_count; i++) {
+        /* [ROUND 1015 E] a plaza fork clears its two throats; between them the
+         * route is the ordinary ring road and its scenery stays. */
+        if (s_forks[i].freec > 0) {
+            if (tg_pf_clear_span(i, si)) return 1;
+            continue;
+        }
         if (si >= s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2 &&
             si <= s_forks[i].R + 2)
             return 1;
+    }
     return 0;
 }
 
@@ -420,6 +427,8 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             /* [ROUND 1013 F2] A REAL fork's split is the two real carriageways'
              * own lane counts, not a function of the total. */
             const int is_real = tg_geo_fork_is_real((int)i);
+            /* [ROUND 1015 E] 1 + plaza plan when this real fork has a free corridor */
+            const int freec = is_real ? tg_realfork_free((int)i) : 0;
             if (is_real) {
                 int la = 0, lb = 0;
                 tg_realfork_get((int)i, NULL, NULL, &la, &lb, NULL);
@@ -447,6 +456,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
              * all 147 shipped forks obey it) needs ONE lane count across
              * the widened approach, the split and the rejoin. */
+            if (!freec)       /* a plaza fork's two throats were checked by its planner */
             for (q = F - TD5_TG_BRANCH_WIDEN - 2; q <= R + 2; q++)
                 if (q >= 0 && q < nl->count && nl->v[q].lanes != lanes) uniform = 0;
             if (!uniform) {
@@ -480,7 +490,8 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
             s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
         s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
-            s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] */
+            s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] (a plaza fork keeps it: its classic rows are an avenue fork's) */
+            s_forks[s_fork_count].freec = freec;                     /* [ROUND 1015 E] */
             s_fork_count++;
             off += 1 + L;
             pos = R + fork_gap;                   /* [R20] gap before the next fork */
@@ -488,6 +499,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
 
     }
     s_fork_placed = 1;
+    tg_pf_finalize(nl);        /* [ROUND 1015 E] the free corridors, from the final nodes */
 }
 
 /* Corridor length after the taper floor. Only the shapes that BOW need the
@@ -660,8 +672,21 @@ static int    tg_fork_gains(int fi)
     return fi >= 0 && fi < s_fork_count && s_forks[fi].kind == TG_FORK_WIDE
         && s_forks[fi].sep > TD5_TG_AVENUE_SEP_MAX;
 }
-double tg_fork_main_shift(int fi, double w)  { return -(double)tg_fork_side(fi) * w * (1.0 - tg_fork_fm(fi)) * 0.5; }
+double tg_fork_main_shift(int fi, double w)
+{
+    /* [ROUND 1015 E] a plaza fork's main half is the route's own carriageway (la
+     * lanes) wherever the node is wider than that: shift it back by the excess. */
+    if (tg_fork_is_free(fi)) {
+        const double wa = w * tg_pf_main_wscale(fi, w);
+        return -(double)tg_fork_side(fi) * (w - wa) * 0.5;
+    }
+    return -(double)tg_fork_side(fi) * w * (1.0 - tg_fork_fm(fi)) * 0.5;
+}
 double tg_fork_main_wscale(int fi)           { return tg_fork_fm(fi); }
+double tg_fork_main_wscale_w(int fi, double w)
+{
+    return tg_fork_is_free(fi) ? tg_pf_main_wscale(fi, w) : tg_fork_fm(fi);
+}
 int    s_fork_placed;
 double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
 
@@ -673,9 +698,14 @@ int tg_fork_side(int fi)
 int tg_fork_side_at(int si)
 {
     int f;
-    for (f = 0; f < s_fork_count; f++)
+    for (f = 0; f < s_fork_count; f++) {
+        if (s_forks[f].freec > 0) {          /* [ROUND 1015 E] throats only */
+            if (tg_pf_clear_span(f, si)) return s_forks[f].side > 0 ? 1 : -1;
+            continue;
+        }
         if (si >= s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2 && si <= s_forks[f].R + 2)
             return s_forks[f].side > 0 ? 1 : -1;
+    }
     return -1;
 }
 
@@ -715,6 +745,9 @@ double tg_fork_br_shift(int fi, int k, double w)
     const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
     const double f   = (len > 0) ? (double)k / (double)len : 0.0;
     const double bow = sin(f * TD5_TG_PI);
+    /* [ROUND 1015 E] a plaza fork's classic rows: the lateral of the corridor
+     * centre from the (jogged) main node, from the node's own width. */
+    if (tg_fork_is_free(fi)) return tg_pf_br_shift(fi, k, w);
     /* [ROUND 1013 F2] A REAL fork's corridor sits the real MEDIAN away from the
      * main half: its inner edge is the main half's edge plus the measured gap
      * between the two real carriageways, which is zero at both mouths. No bow,
@@ -972,6 +1005,11 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
     for (i = 0; i < s_fork_count; i++) {
         const int F = s_forks[i].F, L = s_forks[i].len;
         int k, e;
+        if (s_forks[i].freec > 0) {          /* [ROUND 1015 E] free corridor: throats only */
+            const double fr = tg_pf_reach(nl, i, si, side);
+            if (fr > reach) reach = fr;
+            continue;
+        }
         /* One span of slack past each mouth: at the fork and the rejoin the
          * corridor is still lined up with the road, but a caller asking about
          * the mouth span itself must not see a narrower answer than its
@@ -1086,6 +1124,14 @@ void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
             for (f = 0; f < s_fork_count; f++)
                 if (tg_fork_is_bypass(f) && i >= s_forks[f].F - 1 && i <= s_forks[f].R + 1)
                     lim = TD5_TG_R8_LAT_MAX + w + 1.0;
+        }
+        {   /* [ROUND 1015 E] a plaza corridor's throat: the corridor leaves the road at
+             * the entry T and its reach (measured to the corridor's far edge) is the
+             * distance to a real road, not a synthetic bow */
+            int f;
+            for (f = 0; f < s_fork_count; f++)
+                if (tg_fork_is_free(f) && tg_pf_throat_span(f, i) && rr + 1.0 > lim)
+                    lim = rr + 1.0;
         }
         {   /* [ROUND 1013 F2] On a GEO track a divided avenue's real opposite
              * carriageway is a LEGITIMATE reach: it is the real road, beside the
@@ -1214,9 +1260,11 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const TG_Node *c = &nl->v[mb + 1];
     const double sw = tg_city_sidewalk_w(b);
     const double kh = tg_city_kerb_h(b);
-    /* Branch centre and half width at each end, from the shared helpers. */
-    const double sh0 = tg_fork_br_shift(fi, k,     a->width);
-    const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
+    /* Branch centre and half width at each end, from the shared helpers. A plaza
+     * fork's corridor is laid in ITS OWN node chain (nl is that view): shift 0. */
+    const int    pfree = tg_fork_is_free(fi);
+    const double sh0 = pfree ? 0.0 : tg_fork_br_shift(fi, k,     a->width);
+    const double sh1 = pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
     const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] -1 right / +1 left */

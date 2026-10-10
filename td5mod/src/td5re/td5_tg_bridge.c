@@ -2410,6 +2410,7 @@ static int tg_median_at_raw(const TG_NodeList *nl, int si, int br_lanes)
     if (!nl || si < 0 || si + 1 >= nl->count) return 0;
     fi = tg_fork_of_main(si);
     if (fi < 0) return 0;
+    if (tg_fork_is_free(fi) && tg_pf_wedge_span(fi, si)) return 0;   /* [1015 E] the wedge has no island */
     if (!tg_fork_is_avenue(fi) && !tg_r11_median_rise()) return 0;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER")) return 0;
     if (tg_fork_opening_at(si)) return 0;    /* [ROUND 1015 A] a cross street cuts it */

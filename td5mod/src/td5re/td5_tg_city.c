@@ -90,6 +90,12 @@ double tg_r13_fold_cap(const TG_NodeList *nl, int si, double side,
  * count. Constant-width callers (main road wscale 1.0, fork half wscale 0.5)
  * pass u_scale = lanes/wscale via tg_emit_road_quad, so their U is byte-identical
  * to before. `u_scale` = the U reached at the right edge when wscale == 1.0. */
+/* [ROUND 1015 E] V advances one texture tile per span, so a plaza corridor whose spans
+ * are `stretch` times a span long (the far arc is longer than the near one) would draw
+ * its lane dashes `stretch` times too long. td5_trackgen.c sets this around the
+ * corridor's road quad; 1.0 (exact) everywhere else. */
+double tg_road_v_scale = 1.0;
+
 int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, double u_scale,
                                    double shift_near, double shift_far,
                                    double wscale_near, double wscale_far,
@@ -208,10 +214,10 @@ int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, double u_scale,
         }
 #endif
         /* Quad loop: near-left, near-right, far-right, far-left. */
-        px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0; vv[n]=si+f0; n++;
-        px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=ur0; vv[n]=si+f0; n++;
-        px[n]=frx; py[n]=fry; pz[n]=frz; uu[n]=ur1; vv[n]=si+f1; n++;
-        px[n]=flx; py[n]=fly; pz[n]=flz; uu[n]=0.0; vv[n]=si+f1; n++;
+        px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0; vv[n]=(si+f0)*tg_road_v_scale; n++;
+        px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=ur0; vv[n]=(si+f0)*tg_road_v_scale; n++;
+        px[n]=frx; py[n]=fry; pz[n]=frz; uu[n]=ur1; vv[n]=(si+f1)*tg_road_v_scale; n++;
+        px[n]=flx; py[n]=fly; pz[n]=flz; uu[n]=0.0; vv[n]=(si+f1)*tg_road_v_scale; n++;
         }
     }
 

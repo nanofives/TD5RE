@@ -198,6 +198,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_tg_branch.c` | auto-track BRANCHES: fork corridors, long diverging branch, carriageway query, branch pavement + avenue divider |
 | `td5_tg_avenue.c` | GEO TRACK: a DIVIDED AVENUE built from the real map |
 | `td5_tg_realfork.c` | GEO TRACK: DRIVEABLE FORKS FROM THE REAL MAP (PORT-ONLY). |
+| `td5_tg_plazafork.c` | GEO TRACK: PLAZA FORKS, free corridor round a ring (PORT-ONLY). |
 | `td5_tg_guard.c` | auto-track GUARD: on-road geometry backstop, MESHTAG sidecar, pavement provenance marks, over-water / coast audits |
 | `td5_tg_city.c` | auto-track CITY: bend-fold authority, facade walls, turn continuation, pavement geometry, run-end census, side-street occupancy, street furniture |
 | `td5_tg_streets.c` | auto-track SIDE STREETS: direction, occupancy, intersections, parks + houses, real intersections, infill, measurement sweeps |

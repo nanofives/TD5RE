@@ -2700,12 +2700,16 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const int si = F + k;
                     const TG_Node *a = &nl->v[si], *b = &nl->v[si + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                    int lvi = tg_append_row(&verts, &vtx_count, a, main_half,
-                                            a->width * tg_fork_main_wscale(fi),
+                    int lvi, rvi;
+                    /* [ROUND 1015 E] between a plaza fork's two throats the main
+                     * road is the ordinary ring span the span pass already wrote */
+                    if (tg_fork_is_free(fi) && !tg_pf_throat_span(fi, si)) continue;
+                    lvi = tg_append_row(&verts, &vtx_count, a, main_half,
+                                            a->width * tg_fork_main_wscale_w(fi, a->width),
                                             tg_fork_main_shift(fi, a->width),
                                             ox, oy, oz);
-                    int rvi = tg_append_row(&verts, &vtx_count, b, main_half,
-                                            b->width * tg_fork_main_wscale(fi),
+                    rvi = tg_append_row(&verts, &vtx_count, b, main_half,
+                                            b->width * tg_fork_main_wscale_w(fi, b->width),
                                             tg_fork_main_shift(fi, b->width),
                                             ox, oy, oz);
                     tg_patch_span(&spans, si, 1, main_half, lvi, rvi, -1, -1,
@@ -2727,7 +2731,11 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  *    row's point count comes from the SAME helper the road mesh
                  *    uses, so strip and mesh cannot drift apart. */
                 for (k = 0; k < L; k++) {
-                    const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
+                    /* [ROUND 1015 E] a plaza fork's corridor rows are its own node
+                     * chain (shift 0); every other fork's ride the main nodes. */
+                    const int pfree = tg_fork_is_free(fi) && tg_pf_view(fi) != NULL;
+                    const TG_NodeList *cnl = pfree ? tg_pf_view(fi) : nl;
+                    const TG_Node *a = &cnl->v[F + 1 + k], *b = &cnl->v[F + 2 + k];
                     const int ln = tg_fork_br_lanes_at(fi, k);
                     const double wn = tg_fork_br_wscale(fi, k);
                     const int lnf = tg_fork_br_lanes_at(fi, k + 1);
@@ -2749,11 +2757,11 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const int lanes_here = (lnf > ln) ? lnf : ln;
                     int lvi = tg_append_row(&verts, &vtx_count, a, lanes_here,
                                             a->width * wn,
-                                            tg_fork_br_shift(fi, k, a->width),
+                                            pfree ? 0.0 : tg_fork_br_shift(fi, k, a->width),
                                             ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, b, lanes_here,
                                             b->width * wf,
-                                            tg_fork_br_shift(fi, k + 1, b->width),
+                                            pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, b->width),
                                             ox, oy, oz);
                     int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
                     int nxt  = (k == L - 1) ? R : -1;
@@ -2881,7 +2889,14 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans,
          * Getting this wrong is not subtle: encoding a deflection here (128 =
          * straight) spawned every car pointing the wrong way, and with
          * auto-throttle they drove backwards off the start line into the void. */
-        double h = atan2(nl->v[ni].tx, nl->v[ni].tz) * 4096.0 / (2.0 * TD5_TG_PI);
+        const TG_Node *hn = &nl->v[ni];
+        {   /* [ROUND 1015 E] a plaza corridor's heading is its own chain's */
+            int ck2 = 0, fi2;
+            if (i > nl->count - 2 && (fi2 = tg_fork_of_corridor(i, &ck2)) >= 0 &&
+                tg_fork_is_free(fi2) && tg_pf_view(fi2))
+                hn = &tg_pf_view(fi2)->v[s_forks[fi2].F + 1 + ck2];
+        }
+        double h = atan2(hn->tx, hn->tz) * 4096.0 / (2.0 * TD5_TG_PI);
         int h12 = tg_round(h) & 0xFFF;
         int hb  = tg_round((double)h12 * 256.0 / 4140.0);   /* 4140 = 0x102C */
 
@@ -3703,11 +3718,15 @@ static int tg_scenery_entry(int e)
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
-                    if (!tg_emit_road_quad_taper(nl, mb, u_scale,
-                                           tg_fork_br_shift(fi, ck, nl->v[mb].width),
-                                           tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
+                    const int pfree = tg_fork_is_free(fi) && tg_pf_view(fi) != NULL;
+                    const TG_NodeList *cnl = pfree ? tg_pf_view(fi) : nl;   /* [ROUND 1015 E] */
+                    if (pfree) tg_road_v_scale = tg_pf_vscale(fi);
+                    if (!tg_emit_road_quad_taper(cnl, mb, u_scale,
+                                           pfree ? 0.0 : tg_fork_br_shift(fi, ck, nl->v[mb].width),
+                                           pfree ? 0.0 : tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
                                            wn, wf, tg_road_page(mb), &meshes))
                         ok = 0;
+                    tg_road_v_scale = 1.0;
                     /* [R7 GUARD] the branch carriageway is drivable; it sits deep
                      * inside the -side reach envelope, so mark it exempt. */
                     /* [R8 merge] GUARD replaced the blanket tg_guard_ex_mark()
@@ -3745,7 +3764,21 @@ static int tg_scenery_entry(int e)
                             &k_biomes[td5_env_flag_on("TD5RE_R14_FORK_PAVE")
                                       ? tg_scenery_biome_index(mb)
                                       : tg_biome_for_span(mb)];
-                        if (tg_realfork_walk_owned(fi, mb)) {
+                        if (pfree) {
+                            /* [ROUND 1015 E] a plaza corridor's own kerb: the same slab,
+                             * laid from the corridor's node chain at shift 0, on the
+                             * outer (town) side; no corridor trees (see the lawn). Where
+                             * the corridor still runs beside the avenue (the classic rows)
+                             * the ring's far footway lays the pavement, exactly as it does
+                             * for an avenue fork: no second slab on top of it. */
+                            if (tg_pf_classic_span(fi, ck) && tg_realfork_walk_owned(fi, mb)) {
+                                /* owned by the far footway (td5_tg_avenue.c) */
+                            } else if (tg_city_sidewalk_w(cb) > 0.0 &&
+                                td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
+                                if (!tg_emit_branch_sidewalk(cnl, mb, ck, L, fi, cb,
+                                                             &meshes, moff, &nmesh, si)) ok = 0;
+                            }
+                        } else if (tg_realfork_walk_owned(fi, mb)) {
                             /* [ROUND 1014 A] The ring's far footway (td5_tg_avenue.c)
                              * already lays this pavement at the real per-side width;
                              * the branch slab would be a second, narrower one on the
@@ -3771,12 +3804,12 @@ static int tg_scenery_entry(int e)
                         /* [R7 item 10] Dress the grass verge with the biome's own
                          * roadside trees. No-op on paved biomes (no billboard set)
                          * and inherently clear of the branch (clear_gap). */
-                        if (ok && !tg_emit_branch_flora(nl, mb, cb, &meshes,
+                        if (ok && !pfree && !tg_emit_branch_flora(nl, mb, cb, &meshes,
                                                         moff, &nmesh, si)) ok = 0;
                         /* [R22 CORRIDOR item 4] the corridor's own tree line,
                          * standing on the far-band ground the main road already
                          * lays past the fork. See tg_emit_corridor_flora. */
-                        if (ok && !tg_emit_corridor_flora(nl, mb, ck, L, fi, cb,
+                        if (ok && !pfree && !tg_emit_corridor_flora(nl, mb, ck, L, fi, cb,
                                                           &meshes, moff, &nmesh,
                                                           si)) ok = 0;
                     }
@@ -3809,11 +3842,27 @@ static int tg_scenery_entry(int e)
                     const int main_half = s_forks[fi].main_lanes;   /* [FORK KINDS] */
                     const int br_lanes  = s_forks[fi].br_lanes;
                     const int j = si - s_forks[fi].F - 1;   /* corridor step */
+                    if (tg_fork_is_free(fi)) {
+                        /* [ROUND 1015 E] the main half is the route's own la lanes at
+                         * every node width the throat ramps through */
+                        const double w0 = nl->v[si].width, w1 = nl->v[si + 1].width;
+                        const double ws0 = tg_pf_main_wscale(fi, w0), ws1 = tg_pf_main_wscale(fi, w1);
+                        if (!tg_emit_road_quad_taper(nl, si, (double)main_half / ws0,
+                                                     tg_fork_main_shift(fi, w0),
+                                                     tg_fork_main_shift(fi, w1),
+                                                     ws0, ws1, tg_road_page(si), &meshes))
+                            ok = 0;
+                    } else
                     if (!tg_emit_road_quad(nl, si, main_half,
                                            tg_fork_main_shift(fi, nl->v[si].width),
                                            tg_fork_main_shift(fi, nl->v[si + 1].width),
                                            tg_fork_main_wscale(fi), tg_road_page(si), &meshes))
                         ok = 0;
+                    if (ok && tg_fork_is_free(fi) && tg_pf_wedge_span(fi, si)) {
+                        /* [ROUND 1015 E] the corridor leaves the road here: the paved
+                         * wedge between the two edges, not a lateral gore */
+                        if (!tg_pf_emit_wedge(nl, fi, si, &meshes, moff, &nmesh)) ok = 0;
+                    } else
                     if (ok) {
                         /* Branch half widths from the SAME helper the corridor
                          * strip rows and mesh use, so the gore always meets the
@@ -4588,6 +4637,20 @@ static void tg_preview_emit_forks(const TG_NodeList *nl,
         const int L = s_forks[i].len;  (void)L;   /* [FORK KINDS] geometry now comes from the fork helpers */
         int si;
         if (F < 0 || R >= nl->count) continue;
+        if (tg_fork_is_free(i)) {            /* [ROUND 1015 E] the corridor's own rows */
+            int row;
+            for (row = 0; row <= s_forks[i].len; row++) {
+                TD5_TrackGenPoint p;
+                double px = 0.0, pz = 0.0;
+                if (!tg_pf_row_point(i, row, &px, &pz)) continue;
+                p.x = (float)px; p.z = (float)pz;
+                p.lanes = s_forks[i].br_lanes;
+                p.branch = i + 1;
+                p.node = -1;
+                sink->on_points(&p, 1, sink->ctx);
+            }
+            continue;
+        }
         for (si = F; si <= R; si++) {
             const TG_Node *n = &nl->v[si];
             const double lx = n->tz, lz = -n->tx;

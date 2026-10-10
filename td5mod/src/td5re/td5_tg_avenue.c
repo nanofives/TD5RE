@@ -121,6 +121,10 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
         int lanes = 2;
         if (!tg_geo_avenue_slack_ok(si, e)) continue;
         if (!td5_geo_avenue_at(si + e, &off, &lanes, NULL)) continue;
+        /* [ROUND 1015 E] a span whose scenery carriageway a plaza corridor replaces lays
+         * none (tg_emit_geo_avenue), so it must not push the skirt out past it either:
+         * the gap that left was a see-through slot at the crotch of the entry mouth. */
+        if (tg_pf_scenery_clash(nl, si + e, off - tg_realfork_node_delta(si + e))) continue;
         /* [ROUND 1013 F2] The sidecar's offset is measured from the route
          * carriageway's own centre. Over a REAL fork's window the walk moved the
          * node toward the corridor, so the same road is that much nearer. */
@@ -631,6 +635,7 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
     a -= tg_realfork_node_delta(s);
     b -= tg_realfork_node_delta(s + 1);
     fi = tg_fork_of_main(s);
+    if (fi >= 0 && tg_fork_is_free(fi) && tg_pf_wedge_span(fi, s)) return 0;   /* [1015 E] */
     if (fi >= 0 && s_forks[fi].real > 0) {
         const int j = s - s_forks[fi].F - 1;
         o0 = tg_fork_br_shift(fi, j,     nl->v[s].width);
@@ -946,6 +951,7 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * that much nearer the node. Zero outside every window. */
     o0 -= tg_realfork_node_delta(si);
     o1 -= tg_realfork_node_delta(si + 1);
+    if (tg_pf_scenery_clash(nl, si, 0.5 * (o0 + o1))) return 1;   /* [1015 E] the plaza corridor is the road here */
     {
         /* A span a REAL fork's corridor runs over: the fork draws the carriageway
          * (it is DRIVEABLE there), the gore and the kerbed island, all from the
@@ -954,6 +960,7 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
          * carries the real per-side width the fork's own branch pavement does
          * not know. */
         const int fi = tg_fork_of_main(si);
+        if (fi >= 0 && tg_fork_is_free(fi) && tg_pf_wedge_span(fi, si)) return 1;   /* [1015 E] no far footway where the corridor leaves */
         if (fi >= 0 && s_forks[fi].real > 0) {
             const int    j  = si - s_forks[fi].F - 1;
             const int    bl = s_forks[fi].br_lanes;
