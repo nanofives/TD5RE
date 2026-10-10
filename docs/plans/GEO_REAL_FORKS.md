@@ -833,6 +833,123 @@ corridor's own spans instead, ~30 lines in `td5_hud.c`). Replay and netplay carr
 Verdict: no rewrite before step 4; the three items that cannot be avoided are the walker's wall-gap/multi-way
 junction (engine), the generator's k-carriageway cross-section (for overlap) and the planner's `k1 = 0` entry.
 
+## Round 1017 R: step 3, the vetoes relaxed (each behind a knob, each fork judged by the harness)
+
+Base 91ecc831. La Plata Partido, level091, 6 seeds (11 22 33 44 55 66, 36 car-passes per fork),
+`verify/geo_fork_validate.ps1`, baseline = the same seeds forks off. Master config = the four knobs below set to 0.
+
+| step | commit | knob that restores the old rule | what it changed on La Plata |
+|---|---|---|---|
+| 2 lane-count changes inside a window | dfdd1303 | `TD5RE_GEO_FORK_LANEVAR=0` | nothing in the final set (LANEVAR=0 builds the same 3 forks). The Avenida 60 893..1075 window it was written for is now inside the merged 901..1174 fork |
+| 3 bend rule follows the geometry | 8971757e | `TD5RE_GEO_FORK_BEND=0` (+ `_END_SLIDE=0`, `_BEND_MARGIN`, `_BEND_ABS`, `_MOUTH_BEND`) | Avenida 13 707..790 (new, 82 spans, 2+3 lanes) and the merged Dardo Rocha 901..1174 (needs the relaxed mouths). BEND=0 loses both (4 forks, 786 spans) |
+| 1 adjacent forks merged | aebe01a9 | `TD5RE_GEO_FORK_MERGE_ADJ=0` | Diagonal 73 + Plaza Azcuenaga + Diagonal 73 (46..209, 210..327, 328..565) becomes ONE fork 46..565, Avenida 60 + Plaza Dardo Rocha + Avenida 7 (901..1030, 1031..1129, 1130..1174) becomes ONE fork 901..1174. No median pin and no weave at the throats |
+| verdict table | 945eefc4 | `TD5RE_GEO_FORK_VERDICTS=0`, `TD5RE_GEO_FORK_UNVERIFIED=0` | below |
+
+La Plata Partido: master 6 forks / 782 corridor spans, now 3 forks / 872 corridor spans (merged 46..565 = 518, 707..790 = 82, merged 901..1174 = 272).
+
+### Per-fork harness table, before and after (6 seeds, forks forced so every fork has cars on both arms)
+
+Hit/crash = wall incidents that cost >= 40 % / left <= 15 % of the entry speed. Enter c/m = corridor / main road. Spin counts include pile-up cars.
+
+| fork | config | enter c/m | hit/crash | stall | spin | speed fork / forks-off | BASE hit/crash/stall/spin | verdict |
+|---|---|---|---|---|---|---|---|---|
+| Diagonal 73 46..209 | master | 18/18 | 15/1 | 2 | 1 | 483 / 494 | 12/0/2/4 | PASS |
+| Plaza Azcuenaga 210..327 | master | 18/18 | 10/0 | 1 | 2 | 371 / 369 | 54/14/16/24 | PASS |
+| Diagonal 73 328..565 | master | 19/17 | 5/1 | 0 | 0 | 573 / 651 | 0/0/0/0 | PASS |
+| **46..565 merged** | now | 18/18 | 16/2 | 3 | 3 | 515 / 512 | 66/14/18/28 | **PASS** |
+| Avenida 13 707..790 | now (new) | 18/18 | 8/0 | 0 | 1 | 446 / 543 | 0/0/0/0 | PASS (WARN, 1 stall, in the pieces config: below) |
+| Avenida 60 901..1030 | master | 18/18 | 11/1 | 0 | 1 | 491 / 491 | 14/0/0/24 | PASS |
+| Plaza Dardo Rocha 1031..1129 | master | 19/17 | 14/2 | 3 | 2 | 400 / 385 | 34/10/12/12 | PASS |
+| Avenida 7 1130..1174 | master | 18/13 | 4/0 | 0 | 0 | 440 / 466 | 0/0/0/0 | PASS |
+| **901..1174 merged** | now | 18/18 | 12/4 | 5 | 12 | 458 / 447 | 48/10/12/36 | **WARN** (1 jam, seed 22) |
+| 901..1174 merged, `-Only 901` | now | 18/18 | 8/0 | 0 | 0 | 486 / 447 | 48/10/12/36 | PASS |
+
+Run sets (gitignored, `verify/out/`): `master6` (master config), `full6` (default build), `pieces6` (`MERGE_ADJ=0`), `m901_6` (`-Only 901`).
+
+The two WARN forks are kept on purpose (`verify/geo_fork_keep.json` holds the full reasons):
+
+* **901..1174 merged**: one jam in 36 passes, seed 22 only, and only in the full set. Two cars spin at the MAIN road's entry
+  corner of the plaza (spans 1064..1081, 620-780 u/t) and a third piles into them. The forks-off window has 36 spins / 12
+  stalls / 10 crashes there; with the fork it has 12 hits / 4 crashes. Alone, the same fork is clean over the same 6 seeds.
+  The corner is the route's own (a 90 degree turn onto the plaza ring), not the corridor's.
+* **707..790 Avenida 13**: PASS in the default build, WARN (one stall plus a spin) when the plaza forks are not merged.
+  The stall is the F=46 signature: a car at ~590 u/t on a straight 3-lane corridor saturates the steering on a lane
+  correction (steer -6700 .. -98304, rear_slip 14000 .. 55000, ticks 2273-2318, seed 55), the other car at the same speed
+  survives. It is the lane-correction rear-slip that round 1017 S fixes in `td5_ai*.c`. The fork's own geometry is clean (0 jams, 0 crashes beyond baseline).
+
+### The verdict table (`td5_geo_fork_verdicts.h`, `verify/geo_fork_verdicts_gen.py`)
+
+A committed, generated table of measured verdicts keyed by (place slug, route fingerprint, F, R). The fingerprint is an
+FNV-1a over the conditioned route's node x, z and lane count, logged as `[REAL FORK] route fingerprint XXXXXXXX`, so a
+record applies only to the exact route it was measured on (a different route finds no record). `tg_realfork_build`
+consults it right after `rf_select`:
+
+* a fork listed FAIL / UNTESTED / WARN (not kept) is refused and the selection runs again without it, so a merged fork that
+  fails falls back to the pieces it was made of (tested: marking 901..1174 FAIL builds 901..1030, 1031..1129, 1130..1174);
+* on a route WITH a record, a relaxed or merged fork the record does not list is refused too; a fork built by the
+  round-1016 rules and not listed is kept;
+* on a route with NO record nothing is refused unless `TD5RE_GEO_FORK_UNVERIFIED=0` (then no relaxed or merged fork is built);
+* `TD5RE_GEO_FORK_VERDICTS=0` ignores the table. The harness sets it to 0 for its fork arm: it MEASURES forks, the table must not hide them.
+
+Refresh: run `pwsh verify/geo_fork_validate.ps1 -Seeds "11,22,33,44,55,66" -Tag t -Verdicts verify/out/t.json` for each configuration, then
+`python verify/geo_fork_verdicts_gen.py verify/out/a.json verify/out/b.json ...` (the worst verdict per fork wins; `geo_fork_keep.json` promotes
+named WARN forks). La Plata Partido holds 9 records (route 4B56DECB): the six round-1016 pieces PASS, merged 46..565 PASS, 707..790 and 901..1174 WARN kept.
+
+### Coverage (La Plata Partido, ROUTE.JSON finish_span 1206, 104 spans of run-off after it)
+
+| | master | now |
+|---|---|---|
+| divided-avenue spans (AVENUES.JSON, 805) drivable on both carriageways | 673 = 83.6 % | 673 = 83.6 % |
+| ... of the 705 racing ones (before the finish) | 95.5 % | 95.5 % |
+| route spans 0..1206 inside a fork window | 794 = 65.8 % | 878 = 72.8 % (+ Avenida 13) |
+| forks / corridor spans | 6 / 782 | 3 / 872 |
+
+Avenue coverage did not move because round 1016 already reached every avenue span a gate pair can. The gain is the
+Avenida 13 corridor (+84 spans of a road that is not in AVENUES.JSON), two fewer mouths per plaza, and no median pin at the throats.
+What stays scenery-only, and why:
+
+* Avenida 7 1175..1206 (32 racing spans) and 1207..1306 (run-off): the avenue's next gates are 1211 and beyond, past the finish
+  (`REJECT ... past the finish line`); the slid candidate 1132..~1203 overlaps the merged 901..1174 fork and loses the selection.
+  Reaching it needs the merge to take the slid exit fork, or a finish gate at the last allowed R. Not built.
+* Avenida 13 807..859 (53 spans): its opposite carriageway is on the +t (LEFT) side. Left corridors, below.
+* Diagonal 73 40..46: the avenue's own start (the road is still turning onto it; 47 is the first avenue span).
+
+### Street census (race.log `[NET/GEO] real street census`)
+
+| | arms accepted | start beyond an avenue | dropped "corridor" |
+|---|---|---|---|
+| master | 71 (street 62) | 22 | 0 |
+| now | 73 (street 64) | 26 | 1 |
+
+More streets, not fewer: Avenida 13's corridor brings two far-side streets (739 and 769, left) and the merged forks keep every
+far-side street the 1014 fixes recovered. One arm (span 1132, right side) is refused as `corridor`: it sits in the exit WEDGE of the
+merged Dardo Rocha fork (the corridor merges back into the road there and `tg_pf_reach` answers 0 over wedge spans on purpose), where the
+old Avenida 7 fork starting at 1130 had a normal window. One master street (860, right) was not re-picked: the network's per-span walk shifts
+when streets appear at 739/769; no fork drops it (no DROP line).
+
+### Left corridors (step 4): not built, design and the exact change list
+
+Only one place on this route needs them (Avenida 13 807..859, 53 spans of the same avenue). The generator carries `TG_Fork.side` through
+every emitter (`tg_fork_main_shift`, `tg_fork_br_shift`, `tg_carriageway_reach`, `tg_side_*`, the corridor sidewalk / verge / flora / gore
+emitters with `tg_quads_mirror`, NETWORK.JSON), and the engine mirrors the type-8/11 decision (`fork_left_compute`, `resolve_neighbor`,
+`laneassist_step_forward`, `td5_track_laneassist_target`). What is NOT there, and why it stays parked
+(`docs/plans/AUTOTRACK_BRANCH_REWORK.md`, open since 2026-09-08): a lane-assisted drive through a LEFT fork ends with the car centred in a MAIN
+lane by the walker while it is physically in the gore (the walker's sub-lane bookkeeping for a low-lanes branch). That is an
+engine fault nobody has traced yet; it needs the instrumented drive below, reading code does not settle it. Order of work:
+
+1. **Engine (the blocker).** Instrument the walker at a left fork (player span, sub_lane, `li/ri` vertex indices, `td5_track_get_span_lane_world` per tick) on
+   a generated track with a left fork, then fix `resolve_neighbor` case 8/11 for `fork_is_left` (suspects: `k_quad_vertex_offsets[8]` and
+   `s_edge_mask_first[8]` assume the branch on the high-index side; the post-step `sub_lane -= br_lanes`). Proof = the same drive centred on the corridor lanes.
+2. **AI.** `td5_ai*.c` has no left-corridor awareness (`fork_is_left` exists only in `td5_track.c`): the branch commit is one bit per slot and the lane
+   anchor is the HIGH band (`sub_lane >= next_lanes`); the lane brain, `ai_corr_aim_rb` and the corridor governor need the LOW band for a left fork.
+   Round 1017 S owns `td5_ai*.c` today: do this after it merges.
+3. **Real-fork generator** (`td5_tg_realfork.c`): lift the two vetoes (`rf_avenue_try` `off > 0.0`, the parallel scan `s_plat[k] > 0.0`) behind a
+   `TD5RE_GEO_FORK_LEFT` knob; one sign per candidate (a window with mixed signs is refused); `RfCand.side`; `tg_realfork_node_adjust` moves the node
+   toward +t when left (`s_node_dt` positive); `rf_bend_check` swaps `e_neg`/`e_pos` (the footprint is on the +t side); set `s_forks[].side = +1`
+   where the fork is created; the sidecar offset sign already feeds `tg_fork_br_shift`.
+4. **Harness.** `geo_fork_validate.py` needs no change (F, R and the verdict are side-blind), but a human drive (lane assist off) must pass first:
+   the harness is AI-only and would not see the walker fault.
+
 ## Round 1017 S: AI steering stability at speed (F=46 Diagonal 73)
 
 Root cause (traced with `TD5RE_AI_LANE_DIAG` / `TD5RE_PHYS_DIAG`, seed 33, raw span 1352, 506 u/t): inside a fork
@@ -866,3 +983,37 @@ Gates: `geo_fork_validate.ps1` 3 seeds 6/6 PASS, 6 seeds 6/6 PASS (master also 6
 window speeds within 1%); synthetic auto-track AI race (3 seeds, SELECTED.TXT aside): stalls 6/7/35 -> 0/0/4, events
 229/203/10654 -> 58/71/160; synthetic MODELS.DAT 12772392 B E2F1F33C221D61CAB0EFF701484011F0; full selftest 64/0/0
 (idle machine); build_all OK, structure lint OK.
+
+### Round 1017 R, re-measured on master 24b01f00 (S's lane-change rate fix merged in)
+
+Same 6 seeds, run sets `masterB` (old rules), `piecesB` (`MERGE_ADJ=0`), `fullB` (default build), `o901B` / `o707B` (`-Only`), `finalB` (`-Only 46,901` = what the table builds).
+
+* Old rules, 6 forks: all PASS (F=46 now PASS, as S reported).
+* 46..565 merged: PASS. 901..1174 merged: PASS alone, WARN in the full set (1 jam in 36 passes). The jam moved: it is no longer the
+  plaza entry corner but two cars side by side on the corridor at span 1974 (470 u/t, dead straight 2-lane road) that both steer about -9000
+  and one saturates (steer -98304, rear_slip 40000). An AI steering transient at speed, not geometry; kept with that reason.
+* **707..790 Avenida 13: now DROPPED by default.** The rear-slip fix did not clear it: alone it is WARN with 3 stalls and 3 crashes in 36 passes
+  (speed 78 % of forks-off), and WARN in the pieces config; PASS only in the full set. The stalls are cars at ~550 u/t on the straight main half
+  (spans 742..762) whose steering runs away after a lane choice at the mouth, so the residual instability at >500 u/t is still in the AI
+  (a fix would extend S's `400/v` scaling beyond the lane-change rate to the lane-keeping / avoidance steer). With no clear reason to keep it the table
+  refuses it. `TD5RE_GEO_FORK_VERDICTS=0` builds it; re-measure it after the next AI change.
+* Default build now: 2 forks, 790 corridor spans (46..565 = 518, 901..1174 = 272). Harness on exactly that set (`finalB`): 46..565 PASS
+  (15 hits / 1 crash, 1 stall), 901..1174 PASS (13/0, 5 stalls, 0 jams). Census 72 arms accepted, 23 beyond an avenue, 1 dropped "corridor" (master 71 / 22 / 0).
+* Coverage: avenue spans unchanged (673 of 805, 95.5 % of the racing ones); route spans in a window 794 -> 794 (Avenida 13 no longer counted).
+
+### Round 1017 R, visual check of the merged forks (grey corridor, slab on the road, seam)
+
+Chase frames (`verify/geo_r1014b_frames.ps1 -Env "TD5RE_AI_BRANCH_FORCE_MODE=2;TD5RE_TG_DOUBLE_BUILD=0"`) at spans 205-215, 316-338, 558-573, 900-910, 1062-1080, 1124-1134, 1172-1180, branch vs master 24b01f00, every frame looked at.
+
+* **Grey untextured corridor (`rf_visA_span_212/331`): not geometry, a capture artefact.** Those frames came from a run with `STREAMED build` and
+  `scenery stream: the PLAYER CAUGHT UP -- ... the road ahead shows the untextured fallback ribbon until the worker gets there` (race.log line 755): the corridor
+  entries had not been decorated yet. Same spans with the scenery stream finished (the DOUBLE_BUILD=0 frames above, and any normal race) are textured with lane dashes on both
+  builds; MODELS.DAT shows `branch-road` page 0 (road) on every corridor entry, no page 44 / invalid page. The merged, relaxed and end-slid windows emit the same quads as master.
+* **Stone slab on the road at spans 316-330 (REAL, mine) and 1124-1132.** The exit wedge of a plaza fork answers `tg_pf_reach` 0 so the ground skirt starts
+  at the road edge. In a MERGED fork the exit wedge now sits right beside the avenue part (corridor edge 5-10 m from the road, `WEDGEDIAG`), and the flat ground skirt
+  then lay over the corridor lanes (a pavement-textured quad across the corridor at span 322-328, master has the avenue fork there). `tg_pf_reach` now answers the corridor's real reach on a
+  wedge span when the corridor edge is within `TD5RE_PF_WEDGE_REACH_MAX` (default 9000 = 21 m) of the road, and 0 beyond it as before (the crotch of a wide mouth stays ground).
+  `TD5RE_PF_WEDGE_REACH_MAX=0` restores the old rule. Frames 325 / 328 / 1127 / 1131 show a clean carriageway after the fix.
+* **Dark seam strip along the corridor's outer edge (span 329):** a 20 cm brown/olive sliver between the pavement slab and the ground, and the light-blue sky sliver
+  beside the sidewalk at 1131. Both are in master 24b01f00 too (same frames, same spans) and exist at every ground/kerb joint of the real-fork corridors:
+  pre-existing, not touched here.

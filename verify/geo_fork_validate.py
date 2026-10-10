@@ -378,6 +378,7 @@ def measure(run, fk):
                     in_off += 1
                     if in_off == OFFROAD_MIN_TICKS:
                         m["offroad"] += 1
+                        m.setdefault("off_log", []).append((slot, t, raw, norm, z, round(lat, 2)))
                 else:
                     in_off = 0
                 # SPIN: the nose points back along the road (> SPIN_BACK_DEG off the span heading)
@@ -602,6 +603,8 @@ def main():
             print("    stall slot %d ticks %d..%d spans %d..%d" % (slot, t0, t1, lo, hi))
         for slot, t, raw in x["fm"]["spins"]:
             print("    spin  slot %d tick %d span_raw %d" % (slot, t, raw))
+        for slot, t, raw, norm, z, lat in x["fm"].get("off_log", []):
+            print("    offrd slot %d tick %d span_raw %d norm %d zone %s lat %.2f" % (slot, t, raw, norm, z, lat))
 
     worst = "PASS"
     order = {"PASS": 0, "UNTESTED": 1, "WARN": 2, "FAIL": 3}
@@ -618,8 +621,17 @@ def main():
         untested = [x["F"] for x in results if x["verdict"] == "UNTESTED"]
         if args.warn_allows:
             allow, warn = allow + warn, []
+        fp = None
+        for r in fork_runs.values():
+            try:
+                m_ = re.search(r"route fingerprint ([0-9A-F]{8}) place (\S+)", open(os.path.join(r.path, "log", "race.log"), encoding="utf-8", errors="replace").read())
+            except OSError:
+                m_ = None
+            if m_:
+                fp = (m_.group(1), m_.group(2))
+                break
         doc = dict(
-            schema=1,
+            schema=2, route_fp=fp[0] if fp else None, route_place=fp[1] if fp else None,
             generated=datetime.datetime.now().isoformat(timespec="seconds"),
             run_set=os.path.basename(setdir.rstrip("/\\")),
             place=meta.get("place"), track=meta.get("track"), exe=meta.get("exe"),

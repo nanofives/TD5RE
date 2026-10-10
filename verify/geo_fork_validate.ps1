@@ -206,6 +206,7 @@ function Start-Run($run) {
     if ($run.arm -eq "base") {
         $e["TD5RE_GEO_REAL_FORKS"] = "0"
     } else {
+        $e["TD5RE_GEO_FORK_VERDICTS"] = "0"      # [1017 R] the harness MEASURES forks: the verdict table must not hide them
         if ($Only -ne "") { $e["TD5RE_GEO_FORK_ALLOW"] = $Only }
         if ($Deny -ne "") { $e["TD5RE_GEO_FORK_DENY"] = $Deny }
         Add-EnvList $e $ForkEnv

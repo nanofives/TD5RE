@@ -225,3 +225,10 @@ UNTESTED, not PASS.
   relative.
 * One `race.log` per race carries the fork table (`trackgen: fork ... corridor=a..b
   rejoin=R (ring=N)`); an exe that changes that line needs the regex in the analyzer.
+
+## Round 1017 R additions
+
+* The fork arm sets `TD5RE_GEO_FORK_VERDICTS=0` (the committed verdict table must not hide the forks the harness measures).
+* `fork_validate.json` is schema 2: `route_fp` and `route_place` (the `[REAL FORK] route fingerprint` the generator logs) identify the exact route.
+* `verify/geo_fork_verdicts_gen.py a.json b.json ...` turns run-sets into `td5_geo_fork_verdicts.h`; `verify/geo_fork_keep.json` holds the reason for every WARN fork kept.
+* Decide with 6 seeds (`-Seeds "11,22,33,44,55,66"`, ~140 s with a reused baseline ~80 s): a single jam or stall in 36 passes is below every FAIL line but is a WARN.

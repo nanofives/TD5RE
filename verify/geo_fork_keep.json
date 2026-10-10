@@ -1,0 +1,4 @@
+[
+ {"place": "la_plata_partido", "F": 901, "R": 1174,
+  "reason": "merged Avenida 60 + Plaza Dardo Rocha + Avenida 7: PASS alone over 6 seeds on BOTH the pre-24b01f00 and the post-24b01f00 AI (8 hits, 0 crashes, 0 stalls vs 48 hits / 10 crashes / 12 stalls forks-off); WARN only in the full set, 1 jam in 36 passes, at a different place each time (before: two cars spin at the plaza entry corner 1064..1081; after: two cars side by side on the corridor at span 1974 both steer -9000 and one saturates, rear_slip 40000, at 470 u/t on a dead straight 2-lane road). Both are AI steering transients, not geometry"}
+]

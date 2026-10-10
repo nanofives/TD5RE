@@ -4280,6 +4280,8 @@ typedef struct {
     int    k1, kx;            /* classic rows at the entry (0..k1) and the exit    */
     int    plan;              /* index of the plan this came from                 */
     int    clen;              /* [1016 K] corridor span count (free rows follow the arc, not the route) */
+    int    tin, tout;         /* [1017 R] the lane ramps in front of F / behind R this plan was fitted with */
+    int    merged;            /* [1017 R] 1 = absorbed the avenue fork(s) next to its throats (classic rows over the avenue) */
     double stretch;           /* corridor arc / main arc over the free rows       */
     double ring_m, near_m, far_m;
     char   name[64];
