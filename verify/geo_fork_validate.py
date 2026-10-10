@@ -621,8 +621,17 @@ def main():
         untested = [x["F"] for x in results if x["verdict"] == "UNTESTED"]
         if args.warn_allows:
             allow, warn = allow + warn, []
+        fp = None
+        for r in fork_runs.values():
+            try:
+                m_ = re.search(r"route fingerprint ([0-9A-F]{8}) place (\S+)", open(os.path.join(r.path, "log", "race.log"), encoding="utf-8", errors="replace").read())
+            except OSError:
+                m_ = None
+            if m_:
+                fp = (m_.group(1), m_.group(2))
+                break
         doc = dict(
-            schema=1,
+            schema=2, route_fp=fp[0] if fp else None, route_place=fp[1] if fp else None,
             generated=datetime.datetime.now().isoformat(timespec="seconds"),
             run_set=os.path.basename(setdir.rstrip("/\\")),
             place=meta.get("place"), track=meta.get("track"), exe=meta.get("exe"),

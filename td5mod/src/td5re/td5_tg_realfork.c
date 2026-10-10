@@ -60,6 +60,7 @@
 #include "td5_geo_avenues.h"      /* AVENUES.JSON: the real divided avenues   */
 #include "td5_geo_roads.h"        /* the real OSM road graph (parallel roads) */
 #include "td5_dev_forkfilter.h"   /* [1016 H] dev-only per-fork allow/deny */
+#include "td5_geo_fork_verdicts.h"  /* [1017 R] measured per-fork AI verdicts per route */
 
 #define TG_RF_SRC_AVENUE    0
 #define TG_RF_SRC_PLAZA     1
@@ -118,6 +119,7 @@ typedef struct {
     int    pf;                         /* [ROUND 1015 E] plaza plan index, -1 = none */
     int    relaxed;                    /* [1017 R] built by the relaxed pass     */
     int    merged;                     /* [1017 R] plaza fork that absorbed its adjacent avenue fork(s) */
+    int    denied;                     /* [1017 R] the verdict table refused it: the selector skips it */
 } RfCand;
 
 typedef struct {
@@ -614,6 +616,7 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
     c->weight = 0.0;
     c->relaxed = s_rf_relax;
     c->merged = 0;
+    c->denied = 0;
     return c;
 }
 
@@ -1348,6 +1351,7 @@ static int rf_select(int *pick)
     qsort(s_cand, (size_t)s_ncand, sizeof s_cand[0], rf_cmp_cand);
     for (i = 0; i < s_ncand; i++) {
         dp[i] = s_cand[i].weight; prv[i] = -1;
+        if (s_cand[i].denied) { dp[i] = -1e30; continue; }       /* [1017 R] refused by the verdict table */
         for (j = 0; j < i; j++) {
             /* The full-width windows (F-8 .. R+2) stay apart; the tapers on either
              * side of them may overlap, see TG_RF_MIN_GAP. */
@@ -1487,6 +1491,42 @@ int tg_realfork_build(void)
      * profile. See docs/plans/GEO_REAL_FORKS.md. */
 
     npick = rf_select(pick);
+    {   /* [ROUND 1017 R] THE VERDICT TABLE: measured per-fork AI verdicts for THIS route. */
+        const char *place = td5_geo_place_slug();
+        unsigned int fp = 2166136261u;
+        int it, known;
+        for (i = 0; i < s_rn; i++) {
+            const int v[3] = { (int)floor(s_rx[i] + 0.5), (int)floor(s_rz[i] + 0.5), s_rl[i] };
+            int q;
+            for (q = 0; q < 3; q++) { fp ^= (unsigned int)v[q]; fp *= 16777619u; }
+        }
+        place = place ? place : "";
+        known = td5_fork_verdict_route_known(place, fp);
+        TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] route fingerprint %08X place %s nodes %d (verdict record: %s)",
+                  fp, place, s_rn, known ? "yes" : "none");
+        if (td5_env_flag_on("TD5RE_GEO_FORK_VERDICTS")) {
+            for (it = 0; it < 12 && npick > 0; it++) {
+                int bad = 0;
+                for (f = 0; f < npick; f++) {
+                    RfCand *c = &s_cand[pick[f]];
+                    int v = known ? td5_fork_verdict_get(place, fp, c->F, c->R) : -1;
+                    const int fresh = c->relaxed || c->merged;
+                    int drop = 0;
+                    if (v == TD5_FV_FAIL || v == TD5_FV_UNTESTED || v == TD5_FV_WARN) drop = 1;
+                    else if (v < 0 && fresh && (known || !td5_env_flag_on("TD5RE_GEO_FORK_UNVERIFIED"))) drop = 1;
+                    if (drop) {
+                        c->denied = 1; bad = 1;
+                        TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] F=%d R=%d \"%s\" refused by the verdict table (%s); selecting again",
+                                  c->F, c->R, c->name,
+                                  v == TD5_FV_FAIL ? "FAIL" : v == TD5_FV_UNTESTED ? "UNTESTED" : v == TD5_FV_WARN ? "WARN"
+                                  : known ? "relaxed/merged fork not in the record" : "no record for this route, UNVERIFIED=0");
+                    }
+                }
+                if (!bad) break;
+                npick = rf_select(pick);
+            }
+        }
+    }
     for (f = 0; f < npick; f++) {
         RfFork *rf = &s_rf[s_rf_n];
         const RfCand *c = &s_cand[pick[f]];
