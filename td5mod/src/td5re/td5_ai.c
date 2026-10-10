@@ -4792,80 +4792,121 @@ static inline uint32_t smart_hash_u32(uint32_t x) {
 static int s_geo_gov  = 0;
 static int s_geo_edge = 900;
 
-/* ===== SECTION: SPEED-SCALED STEERING AUTHORITY (round 1017 S) ===============
- * PORT-ONLY, GENERATED TRACKS ONLY (TD5RE_AI_STEER_CAP=2 also shipped tracks).
- * The faithful steering cascade (td5_ai_update_steering_bias) is an INTEGRATOR on the
- * heading error: every tick it adds sin(error) * 0x20000/0x10000 >> 12 to the
- * steering command (~32 cmd units per angle unit of error), with a +-0x18000 (33.75
- * degree) clamp and no speed term. Its loop gain is therefore ~ the car's yaw
- * response, which grows with speed. Generated roads let the field run 500..1000
- * units/tick; the cascade was tuned for hand-built TD5 routes where the same lane
- * step arrives at a third of that speed. Measured on Diagonal 73 (F=46, raw 1352):
- * a 350 unit (0.8 m) lateral-aim step at 506 units/tick is a 3.4 degree heading
- * error; the cascade answers with -7616 cmd (2.6 degrees of steer) in ONE tick,
- * which is already past the front axle's grip window at that speed (front slip
- * 1697 on the same tick, 5000 within 3 ticks); the integrator keeps winding to
- * -17000 (front saturated, no more lateral force to get), the car understeers 17
- * ticks, then the rear lets go under full throttle (rear slip 18 -> 54790) and the
- * yaw runs away to 70 degrees off the velocity. Over the 6 AI runs of the fork
- * harness the steer a car can use before its front axle slips is ~25..30 angle
- * units at 400 units/tick and ~15..20 at 600..800: the cornering relation
- * delta = L * a_lat / v^2.
- * The fix limits the steering command to what the front axle can use at the
- * current speed: |cmd| <= 256 * K / v^2 (v in units/tick, K in angle units). Below
- * v = sqrt(256 K / 0x18000) (~130 units/tick for the default K) the cap is the full
- * lock, so low-speed play is untouched. TD5RE_AI_STEER_CAP=0 restores the old
- * behaviour, =2 extends the cap to shipped tracks. TD5RE_AI_STEER_CAP_K (default
- * 6500000), TD5RE_AI_STEER_CAP_MIN (cmd floor, default 1024). */
-static int s_lane_v0 = 150;           /* [R1017 S] corridor lane-change rate falls as v0/v past this speed (0 = off) */
-static int s_steer_cap_mode = 0;      /* 0 off, 1 generated tracks, 2 every track */
-static int s_steer_cap_on = 0;        /* resolved for this race */
-static int64_t s_steer_cap_k = 6500000;
-static int32_t s_steer_cap_min = 1024;
-static int32_t s_steer_cap_rslip = 0;   /* rear slip excess above which the cap is released */
-static uint32_t s_steer_cap_bind[16];
+/* ===== SECTION: YAW-ACCELERATION LIMITER (round 1017 S) ====================
+ * PORT-ONLY, GENERATED TRACKS ONLY (TD5RE_AI_STEER_YAWLIM=2 also shipped tracks).
+ * The faithful steering cascade (td5_ai_update_steering_bias) treats the steering command
+ * as a HEADING OFFSET: it integrates sin(error) * 0x20000/0x10000 >> 12 per tick
+ * (~0.8 angle units of command per angle unit of aim error per tick, no speed term) until
+ * yaw + steer points at the aim. At 150 units/tick the car turns into that at once. At
+ * 500+ units/tick (generated avenues) the front axle's grip window is ~1 degree of
+ * steering SLIP angle, so a 3.4 degree aim step is answered with a steering command twice
+ * as large as the front can use. Measured on Diagonal 73 (F=46, raw 1352, seed 33): the
+ * lane brain's target u jumps 0.42 -> 0.625, the aim moves 612 units in 2 ticks, the
+ * cascade commands -7616 then -15424 (front demand 3232 vs limit 1535, front slip
+ * 1697 -> 5861), the car holds the saturated front for 17 ticks while the yaw builds up,
+ * then the rear axle (also at its limit, 1650 of 1662) lets go: rear slip 18 -> 54790,
+ * yaw 70 degrees off the velocity, speed 506 -> 80, the lane is blocked for the cars behind.
+ * Over the fork-harness runs the steering a car can use before its front axle slips
+ * is not the absolute angle but the angle MINUS the kinematic one for the yaw rate it
+ * already has: steer_kin = L * omega / v (L = 809 units measured from 13488 unsaturated
+ * ticks, p20..p80 771..854), and the excess |steer - steer_kin| stays below ~10 units
+ * (1 degree) at v >= 400 without front slip (p99 9) and above ~14 with it.
+ * This limits the command to steer_kin(omega of the last tick) +- alpha(v), alpha =
+ * clamp(A0 / v, AMIN, AMAX) in angle units. Entering a corner the allowed steer rises as
+ * the car's own yaw rate builds, so a steady curve is never limited; a step of the aim
+ * on a straight is limited to what the front can turn into. Below VMIN (150 units/tick)
+ * and while the rear axle slides (counter-steering needs the full lock) it is inert.
+ * Knobs: TD5RE_AI_STEER_YAWLIM=0 off / 1 generated tracks (default) / 2 every track,
+ * _L (809), _A0 (6000), _AMIN (10), _AMAX (40), _VMIN (150). */
+static int s_ylim_mode = 0;
+static int s_ylim_on = 0;               /* resolved for this race */
+static int s_ylim_on_any = 0;           /* generated track (or mode 2): the [R1017 S] AI changes apply */
+static int s_ylim_L = 809, s_ylim_a0 = 6000, s_ylim_amin = 10, s_ylim_amax = 40, s_ylim_vmin = 150;
+static int s_lane_v0 = 0;               /* [R1017 S] corridor lane-change rate falls as v0/v past this speed (0 = off) */
+static int s_gain_v0 = 0;              /* [R1017 S] steering gain schedule: weight *= v0/v past v0 units/tick (0 = off) */
+static int s_gain_min = 25;            /* ... never below this percent of the faithful weight */
+static int s_avoid_rel = 25;            /* [R1017 S] corridor ray-avoidance RELEASE rate, 1/1000 of the road width per tick (0 = off) */
+static double s_avoid_filt[16];        /* filtered avoid_u per racer slot */
+static int s_avoid_filt_ok[16];
+static int32_t s_ylim_prev_yaw[16];
+static uint32_t s_ylim_bind[16];
+static int s_ylim_prev_ok[16];
 
 static void ai_steer_cap_race_init(void)
 {
-    s_lane_v0        = td5_env_int("TD5RE_AI_LANE_V0", 150, 0, 5000);
-    s_steer_cap_mode = td5_env_int("TD5RE_AI_STEER_CAP", 0, 0, 2);
-    s_steer_cap_k    = td5_env_int("TD5RE_AI_STEER_CAP_K", 6500000, 1000, 2000000000);
-    s_steer_cap_min  = td5_env_int("TD5RE_AI_STEER_CAP_MIN", 1024, 0, 0x18000);
-    s_steer_cap_rslip = td5_env_int("TD5RE_AI_STEER_CAP_RSLIP", 0, 0, 1000000);
-    s_steer_cap_on   = (s_steer_cap_mode == 2) ||
-                       (s_steer_cap_mode == 1 && td5_trackgen_is_generated_slot(g_td5.track_index));
-    memset(s_steer_cap_bind, 0, sizeof(s_steer_cap_bind));
-    TD5_LOG_I(LOG_TAG, "steer_cap: %s (mode=%d K=%lld min=%d)",
-              s_steer_cap_on ? "ON" : "off", s_steer_cap_mode,
-              (long long)s_steer_cap_k, (int)s_steer_cap_min);
+    s_ylim_mode = td5_env_int("TD5RE_AI_STEER_YAWLIM", 0, 0, 2);
+    s_ylim_L    = td5_env_int("TD5RE_AI_STEER_YAWLIM_L", 809, 100, 5000);
+    s_ylim_a0   = td5_env_int("TD5RE_AI_STEER_YAWLIM_A0", 6000, 100, 200000);
+    s_ylim_amin = td5_env_int("TD5RE_AI_STEER_YAWLIM_AMIN", 10, 1, 400);
+    s_ylim_amax = td5_env_int("TD5RE_AI_STEER_YAWLIM_AMAX", 40, 1, 400);
+    s_ylim_vmin = td5_env_int("TD5RE_AI_STEER_YAWLIM_VMIN", 150, 1, 5000);
+    s_lane_v0   = td5_env_int("TD5RE_AI_LANE_V0", 0, 0, 5000);
+    s_avoid_rel = td5_env_int("TD5RE_AI_AVOID_RELEASE", 0, 0, 1000);
+    s_gain_v0   = td5_env_int("TD5RE_AI_GAIN_V0", 0, 0, 5000);
+    s_gain_min  = td5_env_int("TD5RE_AI_GAIN_MIN", 25, 1, 100);
+    memset(s_avoid_filt_ok, 0, sizeof(s_avoid_filt_ok));
+    s_ylim_on_any = td5_trackgen_is_generated_slot(g_td5.track_index);
+    s_ylim_on   = (s_ylim_mode == 2) || (s_ylim_mode == 1 && s_ylim_on_any);
+    memset(s_ylim_bind, 0, sizeof(s_ylim_bind));
+    memset(s_ylim_prev_ok, 0, sizeof(s_ylim_prev_ok));
+    TD5_LOG_I(LOG_TAG, "steer_yawlim: %s (mode=%d L=%d A0=%d amin=%d amax=%d vmin=%d) lane_v0=%d",
+              s_ylim_on ? "ON" : "off", s_ylim_mode, s_ylim_L, s_ylim_a0, s_ylim_amin,
+              s_ylim_amax, s_ylim_vmin, s_lane_v0);
 }
 
-/* Clamp a racer's steering command to the speed-scaled authority. Called right after
- * td5_ai_update_steering_bias on the racer path. */
+/* Steering gain schedule: the cascade's per-tick weight is a loop gain on a plant whose gain
+ * grows with speed (yaw rate = v * steer / L). Past v0 units/tick scale it by v0 / v. */
+static int32_t ai_steer_gain_sched(int slot, int32_t w)
+{
+    int64_t v;
+    int pct;
+    if (s_gain_v0 <= 0 || !s_ylim_on_any || slot < 0 || slot >= g_traffic_slot_base || w == 0) return w;
+    v = (int64_t)ACTOR_I32(actor_ptr(slot), ACTOR_LONGITUDINAL_SPEED) >> 8;
+    if (v <= s_gain_v0) return w;
+    pct = (int)(100 * (int64_t)s_gain_v0 / v);
+    if (pct < s_gain_min) pct = s_gain_min;
+    return (int32_t)(((int64_t)w * pct) / 100);
+}
+
+/* Clamp a racer's steering command to steer_kin(omega) +- alpha(v). Called right after
+ * td5_ai_update_steering_bias on the racer path, once per AI tick per racer. */
 static void ai_steer_cap_apply(int slot, int route_state_slot_valid)
 {
     char *actor;
-    int64_t v, cap;
-    int32_t cmd;
-    if (!s_steer_cap_on || !route_state_slot_valid) return;
-    if (slot < 0 || slot >= g_traffic_slot_base) return;
+    int32_t yaw, cmd, v, om, lo, hi, kin;
+    int alpha;
+    if (!s_ylim_on || !route_state_slot_valid) return;
+    if (slot < 0 || slot >= 16 || slot >= g_traffic_slot_base) return;
     actor = actor_ptr(slot);
-    v = (int64_t)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) >> 8;
-    if (v < 0) v = -v;
-    if (v < 1) return;
-    /* A sliding rear axle needs the full lock back (counter-steer): the cap only
+    yaw = ACTOR_I32(actor, ACTOR_YAW_ACCUM);
+    if (!s_ylim_prev_ok[slot]) {
+        s_ylim_prev_yaw[slot] = yaw;
+        s_ylim_prev_ok[slot] = 1;
+        return;
+    }
+    /* yaw rate of the last tick in angle units (4096 per turn), wrapped to +-2048 */
+    om = (int32_t)((((yaw - s_ylim_prev_yaw[slot]) >> 8) + 2048) & 0xFFF) - 2048;
+    s_ylim_prev_yaw[slot] = yaw;
+    v = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) >> 8;
+    if (v < s_ylim_vmin) return;
+    /* A sliding rear axle needs the full lock back (counter-steer): the limiter
      * guards the ENTRY to a slide, never the recovery from one. */
-    if (ACTOR_I32(actor, ACTOR_REAR_AXLE_SLIP) > s_steer_cap_rslip) return;
-    cap = (s_steer_cap_k * 256) / (v * v);
-    if (cap >= 0x18000) return;
-    if (cap < s_steer_cap_min) cap = s_steer_cap_min;
+    if (ACTOR_I32(actor, ACTOR_REAR_AXLE_SLIP) > 0) return;
+    alpha = s_ylim_a0 / v;
+    if (alpha < s_ylim_amin) alpha = s_ylim_amin;
+    if (alpha > s_ylim_amax) alpha = s_ylim_amax;
+    kin = (int32_t)(((int64_t)om * s_ylim_L * 256) / v);     /* command units (angle units * 256) */
+    lo = kin - alpha * 256;
+    hi = kin + alpha * 256;
     cmd = ACTOR_I32(actor, ACTOR_STEERING_CMD);
-    if (cmd > cap)       ACTOR_I32(actor, ACTOR_STEERING_CMD) = (int32_t)cap;
-    else if (cmd < -cap) ACTOR_I32(actor, ACTOR_STEERING_CMD) = (int32_t)-cap;
+    if (cmd > hi)      ACTOR_I32(actor, ACTOR_STEERING_CMD) = hi;
+    else if (cmd < lo) ACTOR_I32(actor, ACTOR_STEERING_CMD) = lo;
     else return;
-    if (slot < 16 && s_steer_cap_bind[slot]++ == 0)
-        TD5_LOG_I(LOG_TAG, "steer_cap: slot=%d first bind v=%d cap=%d cmd=%d",
-                  slot, (int)v, (int)cap, (int)cmd);
+    if (ACTOR_I32(actor, ACTOR_STEERING_CMD) > 0x18000)  ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0x18000;
+    if (ACTOR_I32(actor, ACTOR_STEERING_CMD) < -0x18000) ACTOR_I32(actor, ACTOR_STEERING_CMD) = -0x18000;
+    if (s_ylim_bind[slot]++ == 0)
+        TD5_LOG_I(LOG_TAG, "steer_yawlim: slot=%d first bind v=%d om=%d alpha=%d cmd=%d -> %d",
+                  slot, (int)v, (int)om, alpha, (int)cmd, (int)ACTOR_I32(actor, ACTOR_STEERING_CMD));
 }
 
 /* ===== SECTION: CORRIDOR-AWARE AI (round 1016 K) ===========================
@@ -5810,6 +5851,7 @@ static void td5_ai_smart_lane_bias(int slot) {
     int on_branch = (ring_len > 0 && span_raw >= ring_len);
 
     td5_ai_smart_branch(slot);
+    if (!on_branch && slot >= 0 && slot < 16) s_avoid_filt_ok[slot] = 0;   /* [R1017 S] new corridor, new filter */
 
     if (span_count <= 0 || span < 0) {
         int32_t b = rs[RS_TRACK_OFFSET_BIAS];
@@ -5886,7 +5928,24 @@ static void td5_ai_smart_lane_bias(int slot) {
         smart_sense(slot, span_raw, span_count, skill, &se);
         double bpull = g_smart_branch_pull[slot];
         if (on_branch) {
-            target_u = u_base + se.avoid_u;                /* hold authored branch line + avoid */
+            double avoid = se.avoid_u;
+            /* [R1017 S] On a generated corridor the avoidance RELEASES at the main-road
+             * pace instead of in one tick. The ray brain drops avoid_u from -0.2 to 0 the
+             * tick the car it dodged is no longer sensed; the corridor's 0.12 of the road
+             * width per tick lane rate then moves the aim 612 units in 2 ticks (3.4 degrees
+             * per tick), which at 500 units/tick is twice what the front axle can turn
+             * into (F=46 raw 1352, see the yaw-limiter section). Engaging stays instant. */
+            if (corr_here && s_avoid_rel > 0 && slot >= 0 && slot < 16) {
+                double rel = (double)s_avoid_rel / 1000.0;
+                double f = s_avoid_filt_ok[slot] ? s_avoid_filt[slot] : avoid;
+                if (fabs(avoid) >= fabs(f)) f = avoid;                  /* engage / deepen: now */
+                else if (f > avoid + rel) f -= rel;                      /* release toward 0 or a smaller dodge */
+                else if (f < avoid - rel) f += rel;
+                else f = avoid;
+                s_avoid_filt[slot] = f; s_avoid_filt_ok[slot] = 1;
+                avoid = f;
+            }
+            target_u = u_base + avoid;                     /* hold authored branch line + avoid */
         } else if (bpull != 0.0) {
             /* [branch-lookahead 2026-06-23] Use the SAME proven anchors as the
              * rays-OFF path below (0.86 take / 0.18 stay). The old rays-ON anchors
@@ -7397,6 +7456,7 @@ void td5_ai_update_track_behavior(int slot) {
      * naturally leaves actors still. */
     steer_weight = (threshold_result != 0) ? 0x10000 : 0x20000;
     steer_weight = td5_ai_td6_steer_weight(steer_weight);  /* [task#19] TD6: damp mid-band slam */
+    steer_weight = ai_steer_gain_sched(slot, steer_weight); /* [R1017 S] speed-scaled loop gain */
     td5_ai_update_steering_bias(rs, steer_weight);
     ai_steer_cap_apply(slot, 1);   /* [R1017 S] speed-scaled steering authority */
     TD5_LOG_I(LOG_TAG, "track_behavior: slot=%d thr=%d weight=0x%X",
