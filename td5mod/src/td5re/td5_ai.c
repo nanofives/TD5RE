@@ -4840,7 +4840,7 @@ static void ai_steer_cap_race_init(void)
     s_ylim_amin = td5_env_int("TD5RE_AI_STEER_YAWLIM_AMIN", 10, 1, 400);
     s_ylim_amax = td5_env_int("TD5RE_AI_STEER_YAWLIM_AMAX", 40, 1, 400);
     s_ylim_vmin = td5_env_int("TD5RE_AI_STEER_YAWLIM_VMIN", 150, 1, 5000);
-    s_lane_v0   = td5_env_int("TD5RE_AI_LANE_V0", 0, 0, 5000);
+    s_lane_v0   = td5_env_int("TD5RE_AI_LANE_V0", 400, 0, 5000);   /* generated tracks only (see s_ylim_on_any) */
     s_avoid_rel = td5_env_int("TD5RE_AI_AVOID_RELEASE", 0, 0, 1000);
     s_gain_v0   = td5_env_int("TD5RE_AI_GAIN_V0", 0, 0, 5000);
     s_gain_min  = td5_env_int("TD5RE_AI_GAIN_MIN", 25, 1, 100);
@@ -6150,7 +6150,7 @@ static void td5_ai_smart_lane_bias(int slot) {
          * the target u jumps 0.42 -> 0.625, the aim moves 612 units in 2 ticks, front
          * slip 0 -> 5000, rear lets go 17 ticks later, spin). Past ai_lane_v0 units/tick
          * the corridor rate falls as v0 / v, never below the main-road rate. */
-        if (s_lane_v0 > 0) {
+        if (s_lane_v0 > 0 && s_ylim_on_any) {
             double v = fabs((double)ACTOR_I32(actor_ptr(slot), ACTOR_LONGITUDINAL_SPEED)) / 256.0;
             if (v > (double)s_lane_v0) {
                 double main_du = 0.022 + skill * 0.028;
