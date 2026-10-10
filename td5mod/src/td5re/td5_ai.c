@@ -5600,6 +5600,24 @@ static void td5_ai_smart_branch(int slot) {
                     if (s_force == -2) s_force = td5_env_int("TD5RE_AI_BRANCH_FORCE_P0", -1, -1, 1);
                     if (s_force >= 0) take = s_force;
                 }
+                /* [ROUND 1016 H] DEV ONLY, fork validation harness: pin EVERY car's
+                 * choice so each fork gets traffic on both arms. 1 = alternate by
+                 * slot parity, phase from (race seed, fork span): half the field
+                 * each way at every fork, 2 = everyone takes the corridor, 3 = everyone
+                 * stays on the main road. Unset = the roll above. Same RNG step. */
+                {
+                    static int s_fmode = -2;
+                    if (s_fmode == -2) s_fmode = td5_env_int("TD5RE_AI_BRANCH_FORCE_MODE", 0, 0, 3);
+                    if (s_fmode == 1) {
+                        /* half the field each way at EVERY fork; which half flips with the
+                         * race seed and the fork, so the seeds are not the same race */
+                        const uint32_t ph = (smart_hash_u32(td5_game_get_race_seed()
+                                              + (uint32_t)s * 2246822519u) >> 7) & 1u;
+                        take = (int)(((uint32_t)slot + ph) & 1u);
+                    }
+                    else if (s_fmode == 2) take = 1;
+                    else if (s_fmode == 3) take = 0;
+                }
 #endif
                 if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
                     g_smart_branch_commit_span[slot] = (int16_t)s;
