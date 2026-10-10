@@ -3853,8 +3853,12 @@ static int tg_scenery_entry(int e)
                             if (tg_span_in_tunnel(si) &&
                                 td5_env_flag_on("TD5RE_R8_BORE_MEDIAN"))
                                 gore_page = TD5_TG_PAGE_R8_BRIDGE + 0;
+                            /* [ROUND 1015 A] a real median opening: paved flush, no island */
+                            const int rf_open = tg_fork_opening_at(si);
+                            if (rf_open) gore_page = tg_road_page(si);
                             if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1,
-                                              gore_page, &meshes, tg_fork_side(fi)))
+                                              gore_page, &meshes, tg_fork_side(fi),
+                                              rf_open))
                                 ok = 0;
                             if (tg_span_in_tunnel(si))
                                 tg_acct(TG_ACCT_R8_BRIDGE, si);
@@ -3881,6 +3885,7 @@ static int tg_scenery_entry(int e)
                         if (ok && (tg_fork_is_avenue(fi)
                                    || tg_r11_median_rise()) &&
                             tg_median_bridge_uniform(nl, si, br_lanes) &&
+                            !tg_fork_opening_at(si) &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER"))
                             if (!tg_emit_avenue_divider(nl, si, fi, sh0, sh1,
                                                         gw0, gw1, br_lanes,

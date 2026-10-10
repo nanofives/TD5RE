@@ -13,6 +13,7 @@
  * lights. Every rejected row is logged with its reason and the rest are kept,
  * because losing one median is better than losing a whole track.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 #include "td5re.h"
 #include "td5_platform.h"
 #include "td5_geo.h"
+#include "td5_geo_roads.h"      /* [1015 A] the real cross streets, for the median openings */
 #include "td5_config.h"
 #include "td5_geo_avenues.h"
 #include "deps/cjson/cJSON.h"
@@ -125,6 +127,73 @@ static double av_num(const cJSON *o, const char *k, double dflt)
 {
     const cJSON *j = o ? cJSON_GetObjectItem(o, k) : NULL;
     return (j && cJSON_IsNumber(j)) ? j->valuedouble : dflt;
+}
+
+/* [ROUND 1015 A item 13] THE MEDIAN OPENINGS, measured on the geometry the race is built
+ * from.
+ *
+ * AVENUES.JSON's `open` flag is written by the route commit (td5_geo_route.c,
+ * gr_median_opening_at), which asks "is a differently named way within half a span of the
+ * median midline" at a point of the RAW route polyline. Two things make that miss real cross
+ * streets. The point is located by arclength FRACTION, and the conditioner smooths and
+ * re-parameterises the route, so the point can sit a few spans away from the span it is
+ * written against (Calle 46 / Calle 17 across Diagonal 73 land at conditioned spans 398..400
+ * and 402..404; the file opens 395, 396 and 399). And half a span is 1.7 m from a street's
+ * CENTRE LINE, while a calle is 7 m wide and meets the avenue at 45 degrees: its footprint on
+ * the median is three spans long and a sampler that narrow catches one of them or none.
+ *
+ * So it is recomputed here, at load, from the CONDITIONED route nodes (the very nodes the
+ * generator walks) and the same road graph: span s is open when the nearest way that is not
+ * the avenue's own street passes within that way's own half carriageway (never under the old
+ * half span) of the median midline, at an angle to the avenue of at least GEOAV_OPEN_PARA_DEG
+ * (a way running ALONGSIDE the avenue is not a crossing). Needs no re-BUILD: it reads the
+ * existing cache. TD5RE_GEO_AVENUE_OPEN_REFINE=0 keeps the file's flags. */
+#define GEOAV_OPEN_PARA_COS  0.906          /* cos 25 deg */
+static void av_refine_openings(const char *slug)
+{
+    int i, q, changed = 0, now_open = 0, was_open = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_OPEN_REFINE")) return;
+    if (td5_geo_route_count() < 3) return;
+    if (!td5_geo_roads_sync(slug) || td5_geo_roads_count() < 1) return;
+
+    for (i = 0; i < s_n_av; i++) {
+        int name_id = -1, k;
+        for (k = 0; k < td5_geo_roads_name_count(); k++)
+            if (strcmp(td5_geo_roads_name_by_id(k), s_name[i]) == 0) { name_id = k; break; }
+        for (q = 0; q < s_n_rows; q++) {
+            GeoAvSpan *g = &s_rows[q];
+            double xa, za, xc, zc, xb, zb, tx, tz, len, mx, mz, dx = 0.0, dz = 0.0, dist = 0.0;
+            const TD5_GeoRoad *r;
+            int op = 0, lq = 0;
+            if (g->av != i) continue;
+            if (g->span < 1 || g->span + 1 >= td5_geo_route_count()) continue;
+            td5_geo_route_node(g->span - 1, &xa, &za, &lq);
+            td5_geo_route_node(g->span,     &xc, &zc, &lq);
+            td5_geo_route_node(g->span + 1, &xb, &zb, &lq);
+            tx = xb - xa; tz = zb - za;
+            len = sqrt(tx * tx + tz * tz);
+            if (len < 1.0) continue;
+            tx /= len; tz /= len;
+            /* left of travel is (tz, -tx); `off` is signed, + = left */
+            mx = xc + tz * (g->off * 0.5);
+            mz = zc - tx * (g->off * 0.5);
+            r = td5_geo_roads_nearest(mx, mz, 4.0 * GEOAV_LANE_WIDTH, name_id, &dx, &dz, &dist);
+            if (r) {
+                const double hw0 = 0.5 * GEOAV_LANE_WIDTH;           /* the old half span */
+                double hw = (double)(r->lanes > 0 ? r->lanes : 2) * GEOAV_LANE_WIDTH * 0.5;
+                const double dot = dx * tx + dz * tz;
+                if (hw < hw0) hw = hw0;
+                op = (dist <= hw) && ((dot < 0.0 ? -dot : dot) < GEOAV_OPEN_PARA_COS);
+            }
+            if (g->open) was_open++;
+            if (op) now_open++;
+            if ((g->open != 0) != (op != 0)) changed++;
+            g->open = op;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "avenues: median openings re-measured on the conditioned route: "
+              "%d span(s) open (the file said %d), %d row(s) changed", now_open, was_open,
+              changed);
 }
 
 int td5_geo_avenues_sync(void)
@@ -257,6 +326,7 @@ int td5_geo_avenues_sync(void)
 
     s_n_av = kept_av;
     snprintf(s_source, sizeof s_source, "%s", path);
+    av_refine_openings(slug);          /* [ROUND 1015 A item 13] */
     TD5_LOG_I(LOG_TAG, "avenues: %d divided avenue(s) over %d span(s) from %s "
               "(route %d spans)%s", s_n_av, s_n_rows, path, route_spans,
               bad ? " -- some rows dropped, see the warnings above" : "");

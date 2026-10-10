@@ -135,6 +135,30 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
     return best;
 }
 
+/* [ROUND 1015 A] "there should be a break in the median (and the fork) at crossing
+ * streets ... real median openings at OSM cross streets must be open (paved), not
+ * grass across the street" (Mariano, picks 6 and 13). Is main span `si` inside a REAL
+ * fork's window AND on a real median opening of AVENUES.JSON?
+ *
+ * Round 1014 A merged the blocks of an avenue into ONE long corridor so the windows of
+ * neighbouring blocks stopped fighting; the cost was that the raised island and the
+ * gore ran straight across every cross street. The corridor itself stays continuous (a
+ * fork cannot be cut mid-way: its span records, jump table and AI choice are one
+ * unit), but the median between the two carriageways is the part that is NOT road, and
+ * at an opening it is paved flush and carries no island, the same treatment the
+ * scenery avenue gives it (tg_av_emit_opening). Both ends of the island get a cap
+ * through tg_median_at_raw, which mirrors this. TD5RE_GEO_FORK_OPENING=0 restores the
+ * unbroken median. */
+int tg_fork_opening_at(int si)
+{
+    int fi, op = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_OPENING")) return 0;
+    fi = tg_fork_of_main(si);
+    if (fi < 0 || s_forks[fi].real <= 0) return 0;
+    if (tg_geo_avenue_n() < 1) return 0;
+    return td5_geo_avenue_at(si, NULL, NULL, &op) && op;
+}
+
 int tg_realfork_walk_owned(int fi, int mb)
 {
     if (!td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 0;

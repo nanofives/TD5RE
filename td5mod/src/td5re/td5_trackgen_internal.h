@@ -4209,7 +4209,8 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b, double side
 #define TD5_TG_GORE_DROP      4.0    /* below road level, world units */
 #define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
 int tg_fork_gore_page(int fork_index);
-int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side);
+int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side, int flush);
+int tg_fork_opening_at(int si);   /* [1015 A] a real median opening on a real fork's main span */
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
@@ -4223,8 +4224,8 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double
  * ways give. Contract and the root cause this replaces: td5_geo_avenues.h. */
 int    tg_geo_avenue_n(void);
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
-/* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
 int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of an avenue's first row */
+/* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
  * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
  * slab must not be laid on top of it. */
 int tg_realfork_walk_owned(int fi, int mb);
