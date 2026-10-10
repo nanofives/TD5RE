@@ -31,6 +31,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 10 (real places: AI on forks, Dardo Rocha)" },
+    { CL_ITEM,    "AI opponents on real-map tracks now read the road they" },
+    { CL_ITEM,    "  are really driving, fork corridors included: they" },
+    { CL_ITEM,    "  brake for its bends and aim down the corridor, not" },
+    { CL_ITEM,    "  down the main road beside it (it used to put them" },
+    { CL_ITEM,    "  into the wall at the first plaza bend, at 200 km/h)" },
+    { CL_ITEM,    "La Plata, Plaza Dardo Rocha: you can drive BOTH sides" },
+    { CL_ITEM,    "  of this plaza too. Its far arc is built with as many" },
+    { CL_ITEM,    "  road spans as it needs, and your lap, position and" },
+    { CL_ITEM,    "  finish keep counting in main-road spans" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: the whole Partido)" },
     { CL_ITEM,    "The La Plata map now covers the whole Partido de La" },
     { CL_ITEM,    "  Plata (886 km2: City Bell, Gonnet, Villa Elisa, Los" },

@@ -492,8 +492,11 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
         s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
             s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] (a plaza fork keeps it: its classic rows are an avenue fork's) */
             s_forks[s_fork_count].freec = freec;                     /* [ROUND 1015 E] */
+            /* [ROUND 1016 K] a plaza fork's corridor has the spans its arc needs */
+            s_forks[s_fork_count].clen = freec ? tg_pf_plan_clen(freec - 1) : L;
+            if (s_forks[s_fork_count].clen < 2) s_forks[s_fork_count].clen = L;
+            off += 1 + s_forks[s_fork_count].clen;
             s_fork_count++;
-            off += 1 + L;
             pos = R + fork_gap;                   /* [R20] gap before the next fork */
         }
 
@@ -759,6 +762,22 @@ double tg_fork_br_shift(int fi, int k, double w)
     return (double)tg_fork_side(fi)
          * (w * (1.0 - tg_fork_fb(fi)) * 0.5 + w * tg_branch_bow(len, w) * sep * bow);
 }
+int tg_fork_clen(int fi)
+{
+    if (fi < 0 || fi >= s_fork_count) return 0;
+    return s_forks[fi].clen > 0 ? s_forks[fi].clen : s_forks[fi].len;
+}
+
+int tg_fork_row_node(int fi, int k)
+{
+    if (fi < 0 || fi >= s_fork_count) return 0;
+    if (tg_fork_is_free(fi)) {
+        const int n = tg_pf_row_node(fi, k);
+        if (n >= 0) return n;
+    }
+    return s_forks[fi].F + 1 + k;
+}
+
 double tg_fork_br_wscale(int fi, int k)
 {
     const double base = tg_fork_fb(fi);

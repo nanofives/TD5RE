@@ -713,6 +713,10 @@ typedef struct {
                            * its own (a free node chain round the real ring), not
                            * main node + lateral. 0 = every other fork. real is
                            * 0 on these so no avenue-only path touches them.  */
+    int clen;             /* [ROUND 1016 K] CORRIDOR SPAN COUNT. == len for every
+                           * fork whose corridor rides the main nodes one span per
+                           * span; a plaza fork's free corridor has the spans its
+                           * arc needs (N != len = M, the main spans it bypasses). */
 } TG_Fork;
 const char *tg_fork_kind_name(int kind);
 /* Stateless plan for fork ordinal `index`: kind, corridor length and
@@ -732,6 +736,8 @@ double tg_fork_main_wscale_w(int fi, double w);   /* [1015 E] width scale of the
 double tg_pf_br_shift(int fi, int k, double w);   /* [1015 E] classic-row lateral of a free corridor */
 double tg_fork_br_wscale(int fi, int k);
 int    tg_fork_br_lanes_at(int fi, int k);
+int    tg_fork_clen(int fi);                         /* [1016 K] corridor span count of fork fi */
+int    tg_fork_row_node(int fi, int k);              /* [1016 K] main node corridor row k stands beside (F+1+k unless variable length) */
 extern TG_Fork s_forks[TD5_TG_BRANCH_MAX];
 extern unsigned int s_fork_plan_seed;   /* [FORK KINDS] set by tg_srand */
 extern int s_fork_count;
@@ -4273,7 +4279,8 @@ typedef struct {
     int    lanes_a, lanes_b;
     int    k1, kx;            /* classic rows at the entry (0..k1) and the exit    */
     int    plan;              /* index of the plan this came from                 */
-    double stretch;           /* corridor metres per main span / one span length  */
+    int    clen;              /* [1016 K] corridor span count (free rows follow the arc, not the route) */
+    double stretch;           /* corridor arc / main arc over the free rows       */
     double ring_m, near_m, far_m;
     char   name[64];
 } TG_PfCand;
@@ -4286,7 +4293,10 @@ void   tg_pf_commit(int plan);                       /* this plan was selected *
 double tg_pf_node_extra(int plan, int node);         /* corridor lanes ramped into the node window */
 int    tg_fork_is_free(int fi);
 void   tg_pf_finalize(const TG_NodeList *nl);        /* after tg_fork_place filled s_forks */
-const TG_NodeList *tg_pf_view(int fi);               /* v[F+1+k] = corridor row k            */
+const TG_NodeList *tg_pf_view(int fi);               /* v[F+1+j] = the corridor beside MAIN node F+1+j (throats, wedges) */
+const TG_NodeList *tg_pf_rview(int fi);              /* [1016 K] v[F+1+k] = corridor ROW k (strip rows, mesh, routes, preview) */
+int    tg_pf_plan_clen(int plan);                    /* [1016 K] corridor spans of a plan */
+int    tg_pf_row_node(int fi, int k);                /* [1016 K] main node index corridor row k stands beside */
 int    tg_pf_throat_span(int fi, int si);            /* main span si has throat geometry     */
 int    tg_pf_wedge_span(int fi, int si);             /* ... and is a free-corridor wedge span */
 int    tg_pf_classic_span(int fi, int ck);            /* corridor span ck runs beside the road on both rows */

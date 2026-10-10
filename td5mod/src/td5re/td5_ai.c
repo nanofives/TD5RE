@@ -751,6 +751,9 @@ static int32_t ai_sin_fixed12(int32_t angle) {
  * exceeded the table and OOB-crashed (0xC0000005 — #20 Newcastle class). `table`
  * must be g_route_tables[0] or [1]. Pure safety bound: identical result for any
  * in-range span, only the crashing out-of-range read is replaced with 0. */
+/* [R1016 K] corridor-aware AI on for this race (see ai_corr_race_init). */
+static int s_corr_on = 0;
+
 static int ai_route_byte(const uint8_t *table, int span, int k) {
     if (!table || span < 0) return 0;
     size_t sz  = (table == g_route_tables[1]) ? g_route_table_sizes[1]
@@ -800,9 +803,24 @@ int td5_ai_route_span_valid(int32_t handle, int span) {
     return !route_table_row_out_of_range(t, span);
 }
 
+/* [R1016 K] The route-table row an actor's heading is read from. The original
+ * indexes it by the NORMALIZED span, i.e. the MAIN span a corridor runs beside; on
+ * a generated track the table also carries one row per corridor span (the
+ * corridor's own heading, tg_emit_routes), and a corridor that turns away from
+ * the main road (a plaza's far arc) is exactly where the main row is wrong. */
+static int16_t ai_route_row_for_actor(const char *actor) {
+    int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+    if (s_corr_on) {
+        int raw  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        int ring = td5_track_get_ring_length();
+        if (ring > 0 && raw > ring) return (int16_t)raw;
+    }
+    return sp;
+}
+
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
     const uint8_t *rb = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
-    int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+    int16_t sp = ai_route_row_for_actor(actor);
     if (rb && sp >= 0) {
         return (((int)ai_route_byte(rb, sp, 1) * 0x102C) >> 8) & 0xFFF;
     }
@@ -1843,7 +1861,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
      * Moscow's first branch), which clamps to the tail of the route table and
      * reads a heading ~180° off the car's motion — flipping fwd_comp sign and
      * triggering the emergency-brake path post-branch. */
-    span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
+    span = ai_route_row_for_actor(actor);
     if (span < 0) {
         span = 0;
     } else if ((size_t)span >= route_count) {
@@ -4774,6 +4792,30 @@ static inline uint32_t smart_hash_u32(uint32_t x) {
 static int s_geo_gov  = 0;
 static int s_geo_edge = 900;
 
+/* ===== SECTION: CORRIDOR-AWARE AI (round 1016 K) ===========================
+ * PORT-ONLY, GENERATED TRACKS ONLY (auto track + geo places). Until now the
+ * racer AI read the MAIN road even while a car drove a fork corridor:
+ *   - the corner / ray / heading look-ahead stepped `span_raw + d`, which on a
+ *     corridor runs off its last span into an UNRELATED corridor, and from the
+ *     main road never followed the fork the car had committed to take;
+ *   - the route table rows (heading) were indexed by the PARALLEL MAIN span, so
+ *     a corridor that turns away from the main road (a plaza's far arc) fed the
+ *     throttle controller a heading up to 90 degrees off the way the car goes;
+ *   - the lane brain measured the road frame, the lane count and the wall margin
+ *     on the parallel main span, and its geo wall margin was skipped on branches;
+ *   - the aim point was `norm + 4` remapped through the 1:1 jump record only.
+ * Everything below follows the car's PATH instead: span+1, except a committed
+ * fork (type 8, link_next) and a corridor end (type 10, link_next).
+ * TD5RE_AI_CORRIDOR=0 restores all of it (one knob, read once per race). */
+static void ai_corr_race_init(void)
+{
+    s_corr_on = td5_env_flag_on("TD5RE_AI_CORRIDOR")
+             && td5_trackgen_is_generated_slot(g_td5.track_index)
+             && td5_track_corridor_count() > 0;
+    TD5_LOG_I(LOG_TAG, "corridor_ai: %s (corridors=%d)",
+              s_corr_on ? "ON" : "off", td5_track_corridor_count());
+}
+
 static void geo_gov_race_init(void)
 {
     s_geo_edge = td5_env_int("TD5RE_AI_GEO_EDGE", 900, 0, 4000);
@@ -4793,6 +4835,7 @@ static void geo_gov_race_init(void)
  * genuinely faster/cleaner than others). */
 static void td5_ai_smart_race_init(void) {
     geo_gov_race_init();
+    ai_corr_race_init();
     int tier = g_td5.difficulty_tier;
     float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
     /* [task#16] Decorrelate the replicated race seed (cf. td5_game_assign_wheel_
@@ -5005,6 +5048,112 @@ static int smart_ray_step(int span, int span_count)
     return ((span + 1) % span_count + span_count) % span_count;
 }
 
+/* ---- [R1016 K] path walk (see the CORRIDOR-AWARE AI section) ---------------
+ * 1 when this slot's look-ahead should follow its PATH rather than modulo
+ * span_raw + d: corridor-aware AI on, and a RACER slot (traffic keeps its own
+ * fork handling, see td5_ai_traffic.c). */
+static inline int ai_corr_slot_on(int slot)
+{
+    return s_corr_on && slot >= 0 && slot < g_traffic_slot_base;
+}
+
+/* The span a car on `span` reaches next: a corridor's last span (type 10) links
+ * on to the main road, a fork span (type 8) links to the corridor when this slot
+ * has committed to TAKE it, everything else is span + 1 (a circuit wraps at the
+ * ring end, a point-to-point stops there). */
+static int ai_path_next(int slot, int span)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    const int sc   = td5_track_get_span_count();
+    const int ring = td5_track_get_ring_length();
+    uint8_t t;
+    int nx;
+    if (!strips || sc <= 0 || span < 0 || span >= sc) return span;
+    t = strips[(size_t)span * 0x18];
+    if (ring > 0 && span > ring) {                       /* on a corridor */
+        if (t == 10) {
+            nx = (int)*(const int16_t *)(const void *)(strips + (size_t)span * 0x18 + 8);
+            if (nx >= 0 && nx < sc) return nx;
+        }
+        return (span + 1 < sc) ? span + 1 : span;
+    }
+    if (t == 8 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+        g_smart_branch_commit_span[slot] == (int16_t)span &&
+        g_smart_branch_commit_take[slot]) {
+        nx = (int)*(const int16_t *)(const void *)(strips + (size_t)span * 0x18 + 8);
+        if (nx >= 0 && nx < sc) return nx;
+    }
+    nx = span + 1;
+    if (ring > 0 && nx >= ring)
+        nx = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 0 : ring - 1;
+    return nx;
+}
+
+/* ps[0..n-1] = the spans a slot's path visits from `span_raw` on. With the
+ * knob off (or a traffic slot) this is the old modulo walk, bit for bit. */
+static void smart_build_path(int slot, int span_raw, int span_count, int n, int *ps)
+{
+    int i;
+    if (n < 1) return;
+    ps[0] = ((span_raw % span_count) + span_count) % span_count;
+    if (ai_corr_slot_on(slot)) {
+        for (i = 1; i < n; i++) ps[i] = ai_path_next(slot, ps[i - 1]);
+    } else if (s_corr_on && slot >= g_traffic_slot_base) {
+        /* traffic on a generated track: it has no committed fork to follow, but a
+         * corridor's last span links on to the main road instead of running into the
+         * next corridor (the same walk smart_sense always did for traffic). */
+        for (i = 1; i < n; i++) {
+            int nx = td5_track_traffic_next_span(ps[i - 1], 0, 1, NULL);
+            ps[i] = (nx >= 0 && nx < span_count) ? nx : ((ps[i - 1] + 1) % span_count);
+        }
+    } else {
+        for (i = 1; i < n; i++)
+            ps[i] = (((span_raw + i) % span_count) + span_count) % span_count;
+    }
+}
+
+#define SMART_PATH_MAX 48
+
+/* [R1016 K] LATERAL CONTINUITY AT A JUNCTION SPAN. The aim point is `left + route_byte *
+ * (right - left) + bias`, with the byte and the bias in the frame of the CURRENT road. Where
+ * the target span is a fork / rejoin span (type 8 / 11) of another width, that frame moves:
+ * a car in the 2-lane main half aiming at the 4-lane rejoin span put its aim at 0.625 of
+ * 14 m, i.e. across the gore, and hit the wall (the validation harness: 6 hard hits at the
+ * main span before every plaza exit, 0 with the forks off). Express the same lateral
+ * position of the current frame in the target span: rb' = (rb * Wc - Lt) / (Rt - Lt),
+ * with Lt / Rt the target's rails measured in the current frame. Only for a junction
+ * target with a different lane count, so every other aim is untouched. */
+static int ai_corr_aim_rb(int slot, int raw, int target_span, int rb)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    int lcx, lcz, rcx, rcz, ltx, ltz, rtx, rtz, tt;
+    double ex, ez, wc, lt, rt, wt;
+    if (!ai_corr_slot_on(slot) || !strips || raw < 0 || target_span < 0 ||
+        raw >= td5_track_get_span_count() || target_span >= td5_track_get_span_count() || raw == target_span)
+        return rb;
+    tt = strips[(size_t)target_span * 0x18];
+    if (tt != 8 && tt != 11) return rb;
+    if (td5_track_get_span_lane_count(raw) == td5_track_get_span_lane_count(target_span)) return rb;
+    if (!td5_track_get_span_route_frame(raw, &lcx, &lcz, &rcx, &rcz) ||
+        !td5_track_get_span_route_frame(target_span, &ltx, &ltz, &rtx, &rtz)) return rb;
+    ex = (double)(rcx - lcx); ez = (double)(rcz - lcz);
+    wc = sqrt(ex * ex + ez * ez);
+    if (wc < 1.0) return rb;
+    ex /= wc; ez /= wc;
+    lt = ((double)(ltx - lcx)) * ex + ((double)(ltz - lcz)) * ez;
+    rt = ((double)(rtx - lcx)) * ex + ((double)(rtz - lcz)) * ez;
+    wt = rt - lt;
+    if (wt < 1.0) return rb;
+    /* the two roads must share an edge, or there is no continuity to keep */
+    if (fabs(lt) > 0.3 * wc && fabs(rt - wc) > 0.3 * wc) return rb;
+    {
+        double v = ((double)rb / 256.0 * wc - lt) / wt * 256.0;
+        if (v < -128.0) v = -128.0;
+        if (v > 384.0) v = 384.0;
+        return (int)v;
+    }
+}
+
 
 /* ===== SECTION: Smart Opponent AI (smart_*) sensing, branch/lane/speed ===== */
 
@@ -5024,6 +5173,21 @@ static int smart_forward_dir(int span, int span_count,
     double ax, az, bx, bz;
     if (!smart_span_mid(span,     span_count, &ax, &az)) return 0;
     if (!smart_span_mid(span + 1, span_count, &bx, &bz)) return 0;
+    double dx = bx - ax, dz = bz - az;
+    double d = sqrt(dx * dx + dz * dz);
+    if (d < 1.0) return 0;
+    *fx = dx / d; *fz = dz / d; *len = d;
+    return 1;
+}
+
+/* [R1016 K] Same, for an explicit (span, next span) pair on the car's path. For an
+ * ordinary step this is exactly smart_forward_dir; at a corridor end or a fork the
+ * "next" is the span the car really drives into. */
+static int smart_forward_dir_p(int span, int next, int span_count,
+                               double *fx, double *fz, double *len) {
+    double ax, az, bx, bz;
+    if (!smart_span_mid(span, span_count, &ax, &az)) return 0;
+    if (!smart_span_mid(next, span_count, &bx, &bz)) return 0;
     double dx = bx - ax, dz = bz - az;
     double d = sqrt(dx * dx + dz * dz);
     if (d < 1.0) return 0;
@@ -5070,9 +5234,12 @@ static double smart_ray_circle(double ox, double oz, double dx, double dz, doubl
 
     int D = 4 + (int)(skill * 8.0f);          /* look 4..12 spans ahead */
     int best_turn = 0, apex_d = 0;
+    int ps[SMART_PATH_MAX];                   /* [R1016 K] the spans the car will drive */
+    if (D + SMART_CORNER_WIN + 2 > SMART_PATH_MAX) D = SMART_PATH_MAX - SMART_CORNER_WIN - 2;
+    smart_build_path(slot, span_raw, span_count, D + SMART_CORNER_WIN + 2, ps);
     for (int d = 0; d <= D; d++) {
-        int s0 = ((span_raw + d) % span_count + span_count) % span_count;
-        int s1 = ((span_raw + d + SMART_CORNER_WIN) % span_count + span_count) % span_count;
+        int s0 = ps[d];
+        int s1 = ps[d + SMART_CORNER_WIN];
         int turn = smart_ang_signed(td5_track_get_primary_route_heading(s1)
                                     - td5_track_get_primary_route_heading(s0));
         int at = turn < 0 ? -turn : turn;
@@ -5103,10 +5270,9 @@ static double smart_ray_circle(double ox, double oz, double dx, double dz, doubl
      * rays are a further backstop. */
     double f0x, f0z, l0, f1x, f1z, l1, ex, ez, w, slx, slz;
     int inside_sign = 0;
-    if (smart_forward_dir(span_raw, span_count, &f0x, &f0z, &l0) &&
-        smart_forward_dir(span_raw + apex_d, span_count, &f1x, &f1z, &l1) &&
-        smart_span_frame(((span_raw % span_count) + span_count) % span_count,
-                         &slx, &slz, &ex, &ez, &w)) {
+    if (smart_forward_dir_p(ps[0], ps[1], span_count, &f0x, &f0z, &l0) &&
+        smart_forward_dir_p(ps[apex_d], ps[apex_d + 1], span_count, &f1x, &f1z, &l1) &&
+        smart_span_frame(ps[0], &slx, &slz, &ex, &ez, &w)) {
         double cx = f1x - f0x, cz = f1z - f0z;       /* centripetal-ish vector */
         double dot = cx * ex + cz * ez;              /* >0 -> inside is +u side */
         inside_sign = (dot > 0.0) ? 1 : -1;
@@ -5140,7 +5306,11 @@ static double smart_ray_circle(double ox, double oz, double dx, double dz, doubl
     double oz = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_Z) >> 8);
 
     double fx, fz, span_len;
-    if (!smart_forward_dir(span_raw, span_count, &fx, &fz, &span_len)) return;
+    int ps[SMART_PATH_MAX];                   /* [R1016 K] path of a corridor-aware racer */
+    const int pathmode = ai_corr_slot_on(slot);
+    if (pathmode) smart_build_path(slot, span_raw, span_count, SMART_RAY_SPANS + 2, ps);
+    if (pathmode ? !smart_forward_dir_p(ps[0], ps[1], span_count, &fx, &fz, &span_len)
+                 : !smart_forward_dir(span_raw, span_count, &fx, &fz, &span_len)) return;
     out->span_len = span_len;
 
     /* +u (right-rail) lateral axis at the current span. */
@@ -5158,9 +5328,10 @@ static double smart_ray_circle(double ox, double oz, double dx, double dz, doubl
     int s = ((span_raw % span_count) + span_count) % span_count;
     for (int d = 0; d <= SMART_RAY_SPANS; d++) {
         int lx, lz, rx, rz;
+        if (pathmode) s = ps[d];
         if (!td5_track_get_span_route_frame(s, &lx, &lz, &rx, &rz)) break;
         Lx[npts] = lx; Lz[npts] = lz; Rx[npts] = rx; Rz[npts] = rz; npts++;
-        s = smart_ray_step(s, span_count);
+        if (!pathmode) s = smart_ray_step(s, span_count);
     }
     if (npts < 2) return;
 
@@ -5338,12 +5509,32 @@ static void td5_ai_smart_branch(int slot) {
         }
     }
 
-    for (int d = 1; d <= look; d++) {
+    /* [R1016 K] A corridor-aware racer keeps its pull ON the fork span too
+     * (d = 0): scanning from d = 1 dropped the pull on the very span whose
+     * crossing decides the corridor, so the lane brain let go of the anchor in
+     * the last ticks before the mouth (measured, round 1013 F2b). */
+    /* [R1016 K] ...and it walks the car's PATH, not span_raw + d: a car on a
+     * corridor sees the fork that follows its rejoin (the round-1015 plaza fork
+     * begins one span after Diagonal 73's corridor ends and was never seen in
+     * time), and the REJOIN span of the car's own travel direction (type 11 going
+     * forward, type 8 going backward) is a merge, not a decision to roll for. */
+    const int cm = ai_corr_slot_on(slot);
+    int ps_scan[SMART_PATH_MAX];
+    if (cm) {
+        if (look > SMART_PATH_MAX - 1) look = SMART_PATH_MAX - 1;
+        smart_build_path(slot, span, span_count, look + 1, ps_scan);
+    }
+    for (int d = cm ? 0 : 1; d <= look; d++) {
         int s = span + d;
+        if (cm) s = ps_scan[d];
         if (s >= span_count) s -= span_count;
         if (s < 0) continue;
         uint8_t stype = strips[(size_t)s * 0x18];
-        if (stype != 8 && stype != 11) continue;
+        if (cm) {
+            if (stype != (g_td5.reverse_direction ? 11 : 8)) continue;
+        } else if (stype != 8 && stype != 11) {
+            continue;
+        }
 
         int main_span = (stype == 8) ? (s + 1) : (s - 1);
         if (main_span >= span_count) main_span -= span_count;
@@ -5553,12 +5744,22 @@ static void td5_ai_smart_lane_bias(int slot) {
     float skill = td5_ai_smart_skill(slot);
     int lookahead = 4 + (int)(skill * 8.0f);
 
+    /* [R1016 K] ON A CORRIDOR the road frame, the lane count and the wall margin
+     * belong to the corridor span the car is on / drives into next, not to the
+     * parallel MAIN span (norm), whose half-width road is a different road. */
+    const int corr_here = ai_corr_slot_on(slot) && on_branch && span_raw < span_count;
+
     double clx, clz, cex, cez, cwidth;
-    if (!smart_span_frame(span, &clx, &clz, &cex, &cez, &cwidth))
+    if (!smart_span_frame(corr_here ? span_raw : span, &clx, &clz, &cex, &cez, &cwidth))
         cwidth = SMART_LANE_FALLBACK_WIDTH;
 
     int look_span = span + 2;
     if (look_span >= span_count) look_span -= span_count;
+    if (corr_here) {
+        int pth[3];
+        smart_build_path(slot, span_raw, span_count, 3, pth);
+        look_span = pth[2];
+    }
     int L = td5_track_get_span_lane_count(look_span);
     if (L < 1) L = 1;
     if (L > SMART_MAX_LANES) L = SMART_MAX_LANES;
@@ -5767,9 +5968,11 @@ static void td5_ai_smart_lane_bias(int slot) {
      * keeps the car off the boundary whether the authored line hugs a rail, a
      * surface nudge went wide, or we're threading a tight branch. */
     double clamp_margin = rays_on ? SMART_RAY_MARGIN : WALL_MARGIN;
-    if (s_geo_gov && !on_branch) {
+    if (s_geo_gov && (!on_branch || corr_here)) {
         /* [GEO CORNERS] margin in track units, not road fraction (see the
-         * governor section): the car's own half-width must fit inside it. */
+         * governor section): the car's own half-width must fit inside it.
+         * [R1016 K] A corridor car is on the same real-world street width, so it
+         * gets the same margin (it used to be skipped on every branch). */
         double glx, glz, gex, gez, gw;
         int gs = span_count > 0 ? ((look_span % span_count) + span_count) % span_count : 0;
         if (smart_span_frame(gs, &glx, &glz, &gex, &gez, &gw)) {
@@ -5813,10 +6016,151 @@ static void td5_ai_smart_lane_bias(int slot) {
     }
 }
 
+/* ===== [R1016 K] CORRIDOR SPEED GOVERNOR ===================================
+ * MEASURED (round 1016 K, La Plata partido, all-AI field): every car reaches the
+ * Plaza Azcuenaga corridor at 700..850 units/tick (190..230 km/h) and then meets a
+ * 24 m radius 25 spans in. The SMART corner cap (smart_corner_eval) scales the
+ * THROTTLE COMMAND by up to ~0.8 and brakes only below a 0.55 cap, which at that
+ * speed is no governor at all: the cars understeer into the outside wall at k 8..25
+ * (steer at the +-1.0 lock, rear slip 35000..50000), stick there with full lock and
+ * throttle for 100..250 ticks, and the whole mouth swerve (a 0.5 half-width lateral
+ * jump in 7 spans at 460 units/tick) is the same overspeed trying to follow the
+ * corridor's first bend. Grip actually held on this route: ~1.9 g in a 26 m corner
+ * (car at 320 units/tick), braking ~1.2 g (5.5 units/tick^2, a 110 tick finish stop).
+ *
+ * The limit: along the car's PATH (ai_path_next, so it follows the committed fork
+ * and the corridor) take the centre-line bend radius R over every 2-span window,
+ * v_corner = sqrt(a_lat * R), and the speed allowed NOW is the minimum over the
+ * look-ahead of sqrt(v_corner^2 + 2 * a_brake * distance) -- the speed from which
+ * the car can still brake down to every corner in time. Over the limit: coast, far
+ * over: brake; near it: taper the throttle. It only ever LOWERS the command.
+ *
+ * A link between two roads (fork F -> corridor, corridor end -> main) is a lateral
+ * jog of the centre line, not a bend: those segments take the heading of their
+ * neighbour. Racers on generated tracks only; TD5RE_AI_CORR_GOV=0 turns it off,
+ * TD5RE_AI_CORR_GOV_SCOPE=0 limits it to paths that touch a corridor (1 = the whole
+ * route), TD5RE_AI_GOV_LAT / _BRAKE are in tenths of m/s^2, _LOOK in spans. */
+static int    s_gov_inited = 0;
+static int    s_gov_on = 1, s_gov_scope = 1, s_gov_look = 36;
+static double s_gov_lat_u = 6.69, s_gov_brk_u = 4.69;      /* units/tick^2 */
+static double s_gov_floor = 340.0;                          /* units/tick: below this a car has no yaw authority */
+static double s_gov_vmax = 0.0;                             /* units/tick: straight-line ceiling on a corridor route (0 = none) */
+
+static void ai_gov_read_knobs(void)
+{
+    if (s_gov_inited) return;
+    s_gov_inited = 1;
+    s_gov_on    = td5_env_flag_on("TD5RE_AI_CORR_GOV");
+    s_gov_scope = td5_env_int("TD5RE_AI_CORR_GOV_SCOPE", 1, 0, 1);
+    s_gov_look  = td5_env_int("TD5RE_AI_GOV_LOOK", 36, 8, 44);
+    /* m/s^2 -> units/tick^2: 430 units per metre, 30 ticks a second */
+    s_gov_lat_u = (double)td5_env_int("TD5RE_AI_GOV_LAT", 140, 40, 400) / 10.0 * 430.0 / 900.0;
+    s_gov_brk_u = (double)td5_env_int("TD5RE_AI_GOV_BRAKE", 98, 30, 200) / 10.0 * 430.0 / 900.0;
+    s_gov_floor = (double)td5_env_int("TD5RE_AI_GOV_FLOOR", 340, 0, 600);
+    s_gov_vmax  = (double)td5_env_int("TD5RE_AI_GOV_VMAX", 0, 0, 900);
+    TD5_LOG_I(LOG_TAG, "corridor_gov: %s scope=%d look=%d lat=%.2f brake=%.2f units/tick^2 floor=%.0f",
+              s_gov_on ? "ON" : "off", s_gov_scope, s_gov_look, s_gov_lat_u, s_gov_brk_u, s_gov_floor);
+}
+
+/* Speed (raw 24.8) this racer may carry now, or < 0 when there is nothing to
+ * limit it (no path geometry, or out of scope). *out_bend = tightest corner radius
+ * (units) found, for the log. */
+static int s_gov_dbg_i = 0, s_gov_dbg_span = 0;
+static double ai_gov_allowed(int slot, int span_raw, int span_count, double *out_bend)
+{
+    const int ring = td5_track_get_ring_length();
+    const double K12 = 2.0 * 3.14159265358979323846 / 4096.0;
+    int n = s_gov_look + 4, ps[SMART_PATH_MAX], hd[SMART_PATH_MAX], lk[SMART_PATH_MAX];
+    double mx[SMART_PATH_MAX], mz[SMART_PATH_MAX], ln[SMART_PATH_MAX];
+    int i, touch = 0;
+    double best = 1e18, cum = 0.0, rmin = 1e18;
+
+    if (n > SMART_PATH_MAX) n = SMART_PATH_MAX;
+    smart_build_path(slot, span_raw, span_count, n, ps);
+    for (i = 0; i < n; i++) {
+        if (!smart_span_mid(ps[i], span_count, &mx[i], &mz[i])) return -1.0;
+        hd[i] = td5_track_get_primary_route_heading(ps[i]);
+        if (ring > 0 && ps[i] > ring) touch = 1;
+    }
+    if (!s_gov_scope && !touch) return -1.0;
+    /* Heading comes from each span's own quad (a width change at a fork moves the
+     * centre line sideways without bending the road). A link between two roads
+     * (corridor end -> main, fork -> corridor) keeps its heading step: the median
+     * opens at a fixed slope, so each mouth really is a 7 degree kink and two
+     * adjacent forks make 14. Across a link the pitch is the nominal span length. */
+    for (i = 0; i + 1 < n; i++) {
+        const double ddx = mx[i + 1] - mx[i], ddz = mz[i + 1] - mz[i];
+        lk[i] = (ps[i + 1] != ps[i] + 1);
+        ln[i] = lk[i] ? (double)TD5_TG_SPAN_LENGTH : sqrt(ddx * ddx + ddz * ddz);
+        if (ln[i] < 1.0) ln[i] = (double)TD5_TG_SPAN_LENGTH;
+    }
+    for (i = 0; i + 2 < n; i++) {
+        int dh = (hd[i + 2] - hd[i]) & 0xFFF;
+        double ang, arc, R, vc, vl;
+        if (i >= s_gov_look) break;
+        if (dh > 0x800) dh -= 0x1000;
+        if (dh < 0) dh = -dh;
+        ang = (double)dh * K12;
+        arc = ln[i] + ln[i + 1];
+        R   = (ang > 1e-4) ? arc / ang : 1e12;      /* a link kink is a real kink for the car */
+        if (R < rmin) { rmin = R; s_gov_dbg_i = i; s_gov_dbg_span = ps[i + 1]; }
+        vc = sqrt(s_gov_lat_u * R);
+        if (vc < s_gov_floor) vc = s_gov_floor;     /* a car below ~220 units/tick cannot rotate:
+                                                     * it would stop against the corner's wall */
+        vl = sqrt(vc * vc + 2.0 * s_gov_brk_u * (cum + ln[i]));
+        cum += ln[i];
+        if (vl < best) best = vl;
+    }
+    if (out_bend) *out_bend = rmin;
+    if (best > 1e17) return -1.0;
+    if (s_gov_vmax > 0.0 && best > s_gov_vmax) best = s_gov_vmax;
+    return best * 256.0;
+}
+
+/* Lower the throttle / brake of a racer that is over its allowed speed. */
+static void ai_gov_apply(int slot, int span_raw, int span_count)
+{
+    char *actor = actor_ptr(slot);
+    double bend = 0.0, allow, v;
+    int16_t thr;
+    ai_gov_read_knobs();
+    if (!s_gov_on || !ai_corr_slot_on(slot)) return;
+    allow = ai_gov_allowed(slot, span_raw, span_count, &bend);
+    v   = (double)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+#ifndef TD5RE_RELEASE
+    {   /* DEV: TD5RE_AI_GOV_DIAG=<slot> logs that racer's governor state EVERY tick */
+        static int s_dg = -2;
+        if (s_dg == -2) s_dg = td5_env_int("TD5RE_AI_GOV_DIAG", -1, -1, 15);
+        if (s_dg == slot)
+            TD5_LOG_I(LOG_TAG, "gov_diag: slot=%d span=%d v=%.0f allow=%.0f thr=%d Rmin=%.0f at +%d (span %d)",
+                      slot, span_raw, v / 256.0, allow / 256.0, (int)thr, bend, s_gov_dbg_i, s_gov_dbg_span);
+    }
+#endif
+    if (allow <= 0.0) return;
+    if (v <= 0.0) return;
+    if (v > allow * 1.08) {
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 1;
+    } else if (v > allow) {
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;           /* lift */
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 0;
+    } else if (v > allow * 0.92 && thr > 0) {
+        const double k = (allow - v) / (0.08 * allow);         /* 1 at 0.92, 0 at 1.0 */
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)((double)thr * k);
+    } else {
+        return;
+    }
+    if ((g_ai_frame_counter % 30u) == 0u)
+        TD5_LOG_I(LOG_TAG, "corridor_gov: slot=%d span=%d v=%.0f allow=%.0f u/tick Rmin=%.0f at +%d (span %d)",
+                  slot, span_raw, v / 256.0, allow / 256.0, bend, s_gov_dbg_i, s_gov_dbg_span);
+}
+
 /* Speed brain (car-following): after route_threshold sets throttle, if a car
  * we can't yet clear sits ahead in our corridor and we're closing, ease the
  * throttle (or brake when very close). Never raises throttle. */
-static void td5_ai_smart_speed(int slot) {
+static void td5_ai_smart_speed_core(int slot) {
     char *actor = actor_ptr(slot);
     int span_count = td5_track_get_span_count();
     if (span_count <= 0) return;
@@ -5840,6 +6184,11 @@ static void td5_ai_smart_speed(int slot) {
              * low-skill REDUCTION still applies (slower = safer into a corner). */
             if (f > 1.0) {
                 int hs = (span_raw + 7) % span_count;
+                if (ai_corr_slot_on(slot)) {          /* [R1016 K] the span 7 ahead ON THE PATH */
+                    int ps[8];
+                    smart_build_path(slot, span_raw, span_count, 8, ps);
+                    hs = ps[7];
+                }
                 int hd = (td5_track_get_primary_route_heading(hs)
                           - td5_track_get_primary_route_heading(span_raw)) & 0xFFF;
                 if (hd > 0x800) hd -= 0x1000;
@@ -6010,6 +6359,19 @@ static void td5_ai_smart_speed(int slot) {
                 }
             }
         }
+    }
+}
+
+/* [R1016 K] The corridor speed governor runs LAST: the branch-road ADAPT block above
+ * forces a coasting car on any corridor back to throttle 0xA0 with the brake off, which
+ * would silently undo a governor that ran before it. */
+static void td5_ai_smart_speed(int slot) {
+    td5_ai_smart_speed_core(slot);
+    {
+        char *actor = actor_ptr(slot);
+        int span_count = td5_track_get_span_count();
+        if (span_count > 0)
+            ai_gov_apply(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), span_count);
     }
 }
 
@@ -6636,6 +6998,35 @@ void td5_ai_update_track_behavior(int slot) {
             int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
             int lin_span = ((int)span + 4) % ring_len;
             int target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
+            /* [R1016 K] Aim 4 spans down the car's PATH when that is not just
+             * raw + 4: on a corridor (the 1:1 remap only knew the parallel main
+             * span) or on the main road with a committed fork inside the window
+             * (the aim now crosses into the corridor with the car). */
+            if (ai_corr_slot_on(slot)) {
+                int pth[10];
+                int raw_i = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+                if (raw_i >= 0 && raw_i < span_count) {
+                    /* 4 spans of 1500 units = 6000 units ahead; a free corridor's spans
+                     * can be 2.5x longer and the aim must not jump a whole corner. */
+                    int n = 0;
+                    double cum = 0.0;
+                    smart_build_path(slot, raw_i, span_count, 10, pth);
+                    if (raw_i <= ring_len) n = 4, cum = 5900.0;   /* main road: always 4 spans */
+                    while (n < 8 && cum < 5900.0) {
+                        double ax, az, bx, bz;
+                        if (pth[n + 1] != pth[n] + 1 ||
+                            !smart_span_mid(pth[n], span_count, &ax, &az) ||
+                            !smart_span_mid(pth[n + 1], span_count, &bx, &bz))
+                            cum += (double)TD5_TG_SPAN_LENGTH;
+                        else
+                            cum += sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+                        n++;
+                    }
+                    if (n < 1) n = 1;
+                    if (raw_i > ring_len || pth[n] != raw_i + n || n != 4)
+                        target_span = pth[n];
+                }
+            }
 
             /* Adaptive lookahead (solo_mode_synth slot 0 only, 2026-05-22 v2).
              *
@@ -6743,6 +7134,7 @@ void td5_ai_update_track_behavior(int slot) {
                     /* [STALE SPAN GUARD 2026-10-09] see the rt_probe reads above. */
                     route_byte = ai_route_byte(route_bytes, lin_span, 0);
                 }
+                route_byte = ai_corr_aim_rb(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), target_span, route_byte);
                 TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
                           slot, lin_span, target_span, route_byte);
 

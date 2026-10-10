@@ -1020,7 +1020,7 @@ int tg_fork_of_corridor(int si, int *k)
 {
     int i;
     for (i = 0; i < s_fork_count; i++) {
-        int lo = s_forks[i].cbase, hi = lo + s_forks[i].len - 1;
+        int lo = s_forks[i].cbase, hi = lo + tg_fork_clen(i) - 1;      /* [1016 K] */
         if (si >= lo && si <= hi) { if (k) *k = si - lo; return i; }
     }
     return -1;

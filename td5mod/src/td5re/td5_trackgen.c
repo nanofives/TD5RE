@@ -2677,8 +2677,9 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
              * order, so their indices match the cbase computed above. */
             for (i = 0; ok && i < (unsigned)s_fork_count; i++) {
                 const int F = s_forks[i].F, L = s_forks[i].len;
+                const int CL = tg_fork_clen((int)i);          /* [ROUND 1016 K] corridor spans */
                 const int b0 = s_forks[i].cbase, R = s_forks[i].R;
-                const int sentinel_end = b0 + L - 1;
+                const int sentinel_end = b0 + CL - 1;
                 const int lanes = s_forks[i].lanes;          /* [LANES] */
                 const int main_half = s_forks[i].main_lanes;  /* [FORK KINDS] */
                 const int br_lanes  = s_forks[i].br_lanes;
@@ -2730,11 +2731,12 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  *    lanes over its interior -- see tg_branch_lane_gain). Each
                  *    row's point count comes from the SAME helper the road mesh
                  *    uses, so strip and mesh cannot drift apart. */
-                for (k = 0; k < L; k++) {
+                for (k = 0; k < CL; k++) {
                     /* [ROUND 1015 E] a plaza fork's corridor rows are its own node
-                     * chain (shift 0); every other fork's ride the main nodes. */
-                    const int pfree = tg_fork_is_free(fi) && tg_pf_view(fi) != NULL;
-                    const TG_NodeList *cnl = pfree ? tg_pf_view(fi) : nl;
+                     * chain (shift 0); every other fork's ride the main nodes.
+                     * [ROUND 1016 K] ...and there are as many as its arc needs. */
+                    const int pfree = tg_fork_is_free(fi) && tg_pf_rview(fi) != NULL;
+                    const TG_NodeList *cnl = pfree ? tg_pf_rview(fi) : nl;
                     const TG_Node *a = &cnl->v[F + 1 + k], *b = &cnl->v[F + 2 + k];
                     const int ln = tg_fork_br_lanes_at(fi, k);
                     const double wn = tg_fork_br_wscale(fi, k);
@@ -2763,10 +2765,10 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                             b->width * wf,
                                             pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, b->width),
                                             ox, oy, oz);
-                    int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
-                    int nxt  = (k == L - 1) ? R : -1;
+                    int type = (k == 0) ? 9 : ((k == CL - 1) ? 10 : 1);
+                    int nxt  = (k == CL - 1) ? R : -1;
                     int prv  = (k == 0) ? F : -1;
-                    tg_append_span(&spans, type, tg_surface_attr(F + 1 + k),
+                    tg_append_span(&spans, type, tg_surface_attr(tg_fork_row_node(fi, k)),
                                    lanes_here, lvi, rvi, nxt, prv, ox, oy, oz);
                 }
                 /* 5. REJOIN span R: full width, type 11, link_prev -> sentinel. */
@@ -2826,7 +2828,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
             tg_put_u32(out, (unsigned int)nrec);
             for (j = 0; j < nrec; j++) {
                 tg_put_u16(out, (unsigned)s_forks[j].cbase);
-                tg_put_u16(out, (unsigned)(s_forks[j].cbase + s_forks[j].len - 1));
+                tg_put_u16(out, (unsigned)(s_forks[j].cbase + tg_fork_clen(j) - 1));
                 tg_put_u16(out, (unsigned)(s_forks[j].F + 1));
             }
             tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4 - nrec * 6);
@@ -2843,6 +2845,38 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
             TD5_LOG_E(LOG_TAG, "trackgen: strip size mismatch (%zu vs %u)",
                       out->len, (unsigned)(vtx_off + vtx_count * 6));
             ok = 0;
+        }
+        /* [ROUND 1016 K] VARIABLE-LENGTH CORRIDORS: say which main span each corridor span
+         * stands beside (see the CorrMap note in td5_track.c). Only forks whose corridor
+         * has a different number of spans than the main stretch it bypasses write one, so
+         * a build without such a fork is byte-identical to before. */
+        if (ok) {
+            int j, nv = 0;
+            for (j = 0; j < s_fork_count; j++)
+                if (tg_fork_clen(j) != s_forks[j].len) nv++;
+            if (nv > 0) {
+                tg_put_u32(out, 0x50524D43u);
+                tg_put_u32(out, (unsigned int)nv);
+                for (j = 0; j < s_fork_count; j++) {
+                    const int cl = tg_fork_clen(j);
+                    int k;
+                    if (cl == s_forks[j].len) continue;
+                    tg_put_u32(out, (unsigned int)s_forks[j].cbase);
+                    tg_put_u32(out, (unsigned int)cl);
+                    tg_put_u32(out, (unsigned int)s_forks[j].len);
+                    tg_put_u32(out, (unsigned int)(s_forks[j].F + 1));
+                    for (k = 0; k < cl; k++) {
+                        int o = tg_fork_row_node(j, k) - (s_forks[j].F + 1);
+                        if (o < 0) o = 0;
+                        if (o > s_forks[j].len - 1) o = s_forks[j].len - 1;
+                        tg_put_u16(out, (unsigned)o);
+                    }
+                    tg_put_u16(out, (unsigned)s_forks[j].len);      /* off[n] = the rejoin */
+                    TD5_LOG_I(LOG_TAG, "trackgen: fork %d VARIABLE LENGTH: %d corridor spans beside %d main spans "
+                              "(%.2f spans a main span)", j, cl, s_forks[j].len,
+                              (double)cl / (double)(s_forks[j].len > 0 ? s_forks[j].len : 1));
+                }
+            }
         }
         *out_spans = emitted;
         TD5_LOG_I(LOG_TAG, "trackgen: strip = %d spans, %d vertices, %zu bytes",
@@ -2876,7 +2910,7 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans,
         int ni = i;
         if (ni > nl->count - 2) {
             int ck = 0, fi = tg_fork_of_corridor(i, &ck);
-            ni = (fi >= 0) ? s_forks[fi].F + 1 + ck : nl->count - 2;
+            ni = (fi >= 0) ? tg_fork_row_node(fi, ck) : nl->count - 2;      /* [1016 K] */
             if (ni > nl->count - 2) ni = nl->count - 2;
             if (ni < 0) ni = 0;
         }
@@ -2893,8 +2927,8 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans,
         {   /* [ROUND 1015 E] a plaza corridor's heading is its own chain's */
             int ck2 = 0, fi2;
             if (i > nl->count - 2 && (fi2 = tg_fork_of_corridor(i, &ck2)) >= 0 &&
-                tg_fork_is_free(fi2) && tg_pf_view(fi2))
-                hn = &tg_pf_view(fi2)->v[s_forks[fi2].F + 1 + ck2];
+                tg_fork_is_free(fi2) && tg_pf_rview(fi2))
+                hn = &tg_pf_rview(fi2)->v[s_forks[fi2].F + 1 + ck2];
         }
         double h = atan2(hn->tx, hn->tz) * 4096.0 / (2.0 * TD5_TG_PI);
         int h12 = tg_round(h) & 0xFFF;
@@ -3691,7 +3725,8 @@ static int tg_scenery_entry(int e)
             if (si >= ring) {
                 int ck = 0, fi = branch_active ? tg_fork_of_corridor(si, &ck) : -1;
                 if (fi >= 0) {
-                    const int mb = s_forks[fi].F + 1 + ck;  /* base main node */
+                    const int mb = tg_fork_row_node(fi, ck);          /* main node this span stands beside */
+                    const int mbv = s_forks[fi].F + 1 + ck;           /* [1016 K] its index in the corridor's own node list */
                     const int L  = s_forks[fi].len;
                     const int main_half = s_forks[fi].main_lanes;   /* [FORK KINDS] */
                     const int br_lanes  = s_forks[fi].br_lanes;
@@ -3718,10 +3753,10 @@ static int tg_scenery_entry(int e)
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
-                    const int pfree = tg_fork_is_free(fi) && tg_pf_view(fi) != NULL;
-                    const TG_NodeList *cnl = pfree ? tg_pf_view(fi) : nl;   /* [ROUND 1015 E] */
+                    const int pfree = tg_fork_is_free(fi) && tg_pf_rview(fi) != NULL;
+                    const TG_NodeList *cnl = pfree ? tg_pf_rview(fi) : nl;   /* [ROUND 1015 E] */
                     if (pfree) tg_road_v_scale = tg_pf_vscale(fi);
-                    if (!tg_emit_road_quad_taper(cnl, mb, u_scale,
+                    if (!tg_emit_road_quad_taper(cnl, pfree ? mbv : mb, u_scale,
                                            pfree ? 0.0 : tg_fork_br_shift(fi, ck, nl->v[mb].width),
                                            pfree ? 0.0 : tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
                                            wn, wf, tg_road_page(mb), &meshes))
@@ -3775,7 +3810,7 @@ static int tg_scenery_entry(int e)
                                 /* owned by the far footway (td5_tg_avenue.c) */
                             } else if (tg_city_sidewalk_w(cb) > 0.0 &&
                                 td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
-                                if (!tg_emit_branch_sidewalk(cnl, mb, ck, L, fi, cb,
+                                if (!tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                              &meshes, moff, &nmesh, si)) ok = 0;
                             }
                         } else if (tg_realfork_walk_owned(fi, mb)) {
@@ -4639,7 +4674,7 @@ static void tg_preview_emit_forks(const TG_NodeList *nl,
         if (F < 0 || R >= nl->count) continue;
         if (tg_fork_is_free(i)) {            /* [ROUND 1015 E] the corridor's own rows */
             int row;
-            for (row = 0; row <= s_forks[i].len; row++) {
+            for (row = 0; row <= tg_fork_clen(i); row++) {
                 TD5_TrackGenPoint p;
                 double px = 0.0, pz = 0.0;
                 if (!tg_pf_row_point(i, row, &px, &pz)) continue;

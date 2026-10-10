@@ -90,7 +90,11 @@ typedef struct {
     int    ring;
     int    F, R, len, la, lb;
     int    k1, kx;                  /* classic rows at the entry (0..k1) and the exit (len-kx..len) */
-    int    K2;                      /* first classic row at the exit = len - kx */
+    int    K2;                      /* first classic MAIN STEP at the exit = len - kx */
+    int    clen;                    /* [1016 K] corridor spans: k1 + nfree2 + kx (len = the MAIN spans bypassed) */
+    int    nfree2;                  /* free rows the arc needs at one span a row            */
+    int    K2c;                     /* first classic ROW at the exit = k1 + nfree2          */
+    double pitch;                   /* a free row's length / a main span's                  */
     double *med;                    /* classic median opening per row, world units (len+1)     */
     double *lat;                    /* signed lateral of the corridor row from its main node   */
     int    ie, ix;                  /* the route run along the ring  */
@@ -99,7 +103,8 @@ typedef struct {
     char   name[64];
     /* built */
     int    fi;                      /* index into s_forks            */
-    TG_NodeList view;
+    TG_NodeList view;               /* v[F+1+j]: the corridor beside MAIN node F+1+j (throats, wedges) */
+    TG_NodeList rview;              /* [1016 K] v[F+1+k]: corridor ROW k, k = 0..clen */
     double chain_m, min_r_m, max_dev_m;
     int    built;
 } PfPlan;
@@ -125,9 +130,11 @@ void tg_pf_reset(void)
     int i;
     for (i = 0; i < s_nplan; i++) {
         free(s_plan[i].view.v);
+        free(s_plan[i].rview.v);
         free(s_plan[i].med);
         free(s_plan[i].lat);
         s_plan[i].view.v = NULL;
+        s_plan[i].rview.v = NULL;
     }
     s_nplan = 0;
     s_nring = 0;
@@ -540,7 +547,7 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
 {
     int r, nout = 0;
     const int taper = td5_env_int("TD5RE_GEO_FORK_TAPER", 16, 2, 48);
-    const double stretch_max = (double)td5_env_float("TD5RE_GEO_PLAZA_STRETCH_MAX", 1.6f, 1.0f, 8.0f);
+    const double stretch_max = (double)td5_env_float("TD5RE_GEO_PLAZA_STRETCH_MAX", 3.0f, 1.0f, 8.0f);
     const int smooth_it = td5_env_int("TD5RE_GEO_PLAZA_SMOOTH", 300, 0, 800);
     /* How many nodes before the street's bend the free chain leaves the avenue's line, and
      * how many after the exit bend it rejoins: the longer, the wider the corner it takes. */
@@ -623,6 +630,7 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                 const int k1 = (b_in - li) - (F + 1), kx = Rr - (b_out + lo);
                                 const int i0 = F - TD5_TG_BRANCH_WIDEN - 2 - taper;
                                 const int nfree = L - k1 - kx;
+                                int nfree2;
                                 double tsx, tsz, tex, tez, psx, psz, pex, pez, len_m = 0, minr = 0, far_m = 0;
                                 double *cx, *cz;
                                 const char *why = "";
@@ -660,10 +668,23 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                 pf_tangent(a, &tsx, &tsz); pf_tangent(b, &tex, &tez);
                                 pf_classic_xz(&s_rx[a], &s_rz[a], tsx, tsz, la, lb, P->med[k1], &psx, &psz);
                                 pf_classic_xz(&s_rx[b], &s_rz[b], tex, tez, la, lb, P->med[L - kx], &pex, &pez);
-                                cx = (double *)malloc((size_t)(nfree + 2) * sizeof(double));
-                                cz = (double *)malloc((size_t)(nfree + 2) * sizeof(double));
+                                cx = (double *)malloc((size_t)(nfree * 4 + 16) * sizeof(double));
+                                cz = (double *)malloc((size_t)(nfree * 4 + 16) * sizeof(double));
                                 if (!cx || !cz) { free(cx); free(cz); free(P->med); free(P->lat); P->med = P->lat = NULL; continue; }
                                 if (!pf_free_chain(R, psx, psz, tsx, tsz, pex, pez, tex, tez, nfree, ie, ix,
+                                                   smooth_it, cx, cz, &len_m, &minr, &far_m, &why)) {
+                                    pf_note(label, F, Rr, why); free(cx); free(cz);
+                                    free(P->med); free(P->lat); P->med = P->lat = NULL; continue; }
+                                /* [ROUND 1016 K] The corridor has the spans its ARC needs: one a
+                                 * TD5_TG_SPAN_LENGTH, whatever number of main spans it bypasses (a
+                                 * 395 m far arc over 142 m of route was spans 7.8 m long). The same
+                                 * chain is built again at that row count to validate the corner. */
+                                nfree2 = (int)(len_m / (double)TD5_TG_SPAN_LENGTH + 0.5);
+                                if (!td5_env_flag_on("TD5RE_GEO_PLAZA_VARLEN")) nfree2 = nfree;
+                                if (nfree2 < 12) nfree2 = 12;
+                                if (nfree2 > nfree * 4) nfree2 = nfree * 4;
+                                if (nfree2 != nfree &&
+                                    !pf_free_chain(R, psx, psz, tsx, tsz, pex, pez, tex, tez, nfree2, ie, ix,
                                                    smooth_it, cx, cz, &len_m, &minr, &far_m, &why)) {
                                     pf_note(label, F, Rr, why); free(cx); free(cz);
                                     free(P->med); free(P->lat); P->med = P->lat = NULL; continue; }
@@ -673,13 +694,17 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                     for (j = a; j < b; j++)
                                         main_m += sqrt((s_rx[j + 1] - s_rx[j]) * (s_rx[j + 1] - s_rx[j])
                                                      + (s_rz[j + 1] - s_rz[j]) * (s_rz[j + 1] - s_rz[j]));
-                                    P->stretch = (len_m / (double)nfree) / (main_m / (double)(b - a));
+                                    P->stretch = len_m / main_m;                     /* arc / route over the free rows */
+                                    P->pitch   = (len_m / (double)nfree2) / (main_m / (double)(b - a));
+                                    P->nfree2  = nfree2;
+                                    P->K2c     = k1 + nfree2;
+                                    P->clen    = k1 + nfree2 + kx;
                                 }
                                 if (P->stretch > stretch_max || P->stretch < 0.5) {
                                     char w2[256];
-                                    snprintf(w2, sizeof w2, "the far arc needs %.2fx span length (limit %.2f): "
+                                    snprintf(w2, sizeof w2, "the far arc is %.2fx the route over the same stretch (limit %.2f): "
                                              "the corridor would be %.0f m of road over %d spans",
-                                             P->stretch, stretch_max, len_m / PF_UPM, nfree);
+                                             P->stretch, stretch_max, len_m / PF_UPM, nfree2);
                                     pf_note(label, F, Rr, w2);
                                     free(P->med); free(P->lat); P->med = P->lat = NULL; continue;
                                 }
@@ -700,7 +725,7 @@ int tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
                                     memset(c0, 0, sizeof *c0);
                                     c0->F = F; c0->R = Rr; c0->len = L; c0->lanes_a = la; c0->lanes_b = lb;
                                     c0->k1 = k1; c0->kx = kx;
-                                    c0->plan = s_nplan; c0->stretch = P->stretch;
+                                    c0->plan = s_nplan; c0->stretch = P->stretch; c0->clen = P->clen;
                                     c0->ring_m = P->ring_m; c0->near_m = P->near_m; c0->far_m = P->far_m;
                                     snprintf(c0->name, sizeof c0->name, "%s", label);
                                 }
@@ -778,6 +803,30 @@ const TG_NodeList *tg_pf_view(int fi)
     return (P && P->built) ? &P->view : NULL;
 }
 
+const TG_NodeList *tg_pf_rview(int fi)
+{
+    PfPlan *P = pf_of(fi);
+    return (P && P->built) ? &P->rview : NULL;
+}
+
+int tg_pf_plan_clen(int plan)
+{
+    if (plan < 0 || plan >= s_nplan || !s_plan[plan].used) return 0;
+    return s_plan[plan].clen;
+}
+
+/* The main node index corridor row k stands beside: one per row on the classic entry and
+ * exit rows, and the free rows spread over the nodes between (nfree main nodes carry
+ * nfree2 rows). -1 when fi is not a plaza fork. */
+int tg_pf_row_node(int fi, int k)
+{
+    const PfPlan *P = pf_of(fi);
+    if (!P) return -1;
+    if (k <= P->k1) return P->F + 1 + (k < 0 ? 0 : k);
+    if (k >= P->K2c) return P->F + 1 + P->K2 + (k - P->K2c);
+    return P->F + 1 + P->k1 + (int)(((long)(k - P->k1) * (long)(P->K2 - P->k1)) / (long)P->nfree2);
+}
+
 static void pf_set_node(TG_Node *n, double x, double y, double z, double tx, double tz,
                         double width, int lanes)
 {
@@ -788,15 +837,40 @@ static void pf_set_node(TG_Node *n, double x, double y, double z, double tx, dou
     n->lane_base = TD5_TG_HEIGHT_NIBBLE;
 }
 
+/* Position of the free chain at a fractional row t (0..nfree2), linearly between rows. */
+static void pf_chain_at(const double *fx, const double *fy, const double *fz, int n, double t,
+                        double *x, double *y, double *z)
+{
+    int i = (int)t;
+    double u;
+    if (i < 0) i = 0;
+    if (i >= n) i = n - 1;
+    u = t - (double)i;
+    if (u < 0.0) u = 0.0;
+    if (u > 1.0) u = 1.0;
+    *x = fx[i] + (fx[i + 1] - fx[i]) * u;
+    *y = fy[i] + (fy[i + 1] - fy[i]) * u;
+    *z = fz[i] + (fz[i + 1] - fz[i]) * u;
+}
+
+/* [ROUND 1016 K] THE TWO VIEWS.
+ *   rview  v[F+1+k], k = 0..clen: corridor ROW k. Rows 0..k1 are the classic entry rows
+ *          (one per main node), rows k1..K2c the free chain at one row a span, rows
+ *          K2c..clen the classic exit rows (one per main node again).
+ *   view   v[F+1+j], j = 0..len: the corridor beside MAIN node F+1+j. The throat/wedge
+ *          code (reach, wedge quad, scenery clash) pairs a main span with the corridor
+ *          next to it; on the classic rows that is the row itself, in between it is the
+ *          chain at the matching fraction. With clen == len the two are the same array. */
 static void pf_build_one(PfPlan *P, const TG_NodeList *nl)
 {
     const int F = P->F, R = P->R, L = P->len, k1 = P->k1, k2 = P->K2;
     const int la = P->la, lb = P->lb, nfree = k2 - k1;
+    const int nfree2 = P->nfree2, K2c = P->K2c, clen = P->clen;
     const double lw = pf_lw();
     const double wfull = (double)(la + lb) * lw;
     const PfRing *ring = &s_ring[P->ring];
-    double *cx, *cz, *cy;
-    int k, ok;
+    double *ex, *ez, *ey, *fx, *fz, *fy;
+    int k, j, ok;
     double len_m = 0.0, minr = 0.0, far_m = 0.0;
     double psx = 0, psz = 0, pex = 0, pez = 0, tsx = 0, tsz = 0, tex = 0, tez = 0;
     const char *why = "";
@@ -804,34 +878,48 @@ static void pf_build_one(PfPlan *P, const TG_NodeList *nl)
 
     P->built = 0;
     free(P->view.v); P->view.v = NULL; P->view.count = 0; P->view.cap = 0;
-    if (!nl || R + 1 >= nl->count || F < 1) return;
+    free(P->rview.v); P->rview.v = NULL; P->rview.count = 0; P->rview.cap = 0;
+    if (!nl || R + 1 >= nl->count || F < 1 || nfree2 < 2 || clen < 4) return;
     P->view.v = (TG_Node *)calloc((size_t)nl->count, sizeof(TG_Node));
-    if (!P->view.v) return;
+    {
+        const int rcount = (nl->count > F + clen + 4) ? nl->count : F + clen + 4;
+        P->rview.v = (TG_Node *)calloc((size_t)rcount, sizeof(TG_Node));
+        P->rview.count = rcount; P->rview.cap = rcount;
+    }
+    if (!P->view.v || !P->rview.v) { free(P->view.v); free(P->rview.v); P->view.v = P->rview.v = NULL; return; }
     P->view.count = nl->count; P->view.cap = nl->count;
-    cx = (double *)malloc((size_t)(L + 2) * sizeof(double));
-    cz = (double *)malloc((size_t)(L + 2) * sizeof(double));
-    cy = (double *)malloc((size_t)(L + 2) * sizeof(double));
-    if (!cx || !cz || !cy) { free(cx); free(cz); free(cy); return; }
+    ex = (double *)calloc((size_t)(L + 2), sizeof(double));
+    ez = (double *)calloc((size_t)(L + 2), sizeof(double));
+    ey = (double *)calloc((size_t)(L + 2), sizeof(double));
+    fx = (double *)calloc((size_t)(nfree2 + 2), sizeof(double));
+    fz = (double *)calloc((size_t)(nfree2 + 2), sizeof(double));
+    fy = (double *)calloc((size_t)(nfree2 + 2), sizeof(double));
+    if (!ex || !ez || !ey || !fx || !fz || !fy) {
+        free(ex); free(ez); free(ey); free(fx); free(fz); free(fy);
+        free(P->view.v); free(P->rview.v); P->view.v = P->rview.v = NULL;
+        return;
+    }
 
-    /* classic rows: the ORIGINAL route centre line (node minus its jog) plus the
-     * corridor's lateral, so they sit exactly where the avenue forks put theirs. */
-    for (k = 0; k <= L; k++) {
+    /* classic rows (entry steps 0..k1, exit steps k2..L): the ORIGINAL route centre line
+     * (node minus its jog) plus the corridor's lateral, so they sit exactly where the
+     * avenue forks put theirs. Indexed by MAIN step j. */
+    for (j = 0; j <= L; j++) {
         const TG_Node *n;
         double Ox, Oz, med;
-        if (k > k1 && k < k2) continue;
-        n = &nl->v[F + 1 + k];
+        if (j > k1 && j < k2) continue;
+        n = &nl->v[F + 1 + j];
         Ox = n->x - n->jx; Oz = n->z - n->jz;
-        med = P->med[k];
-        pf_classic_xz(&Ox, &Oz, n->tx, n->tz, la, lb, med, &cx[k], &cz[k]);
-        cy[k] = n->y;
+        med = P->med[j];
+        pf_classic_xz(&Ox, &Oz, n->tx, n->tz, la, lb, med, &ex[j], &ez[j]);
+        ey[j] = n->y;
     }
     {   /* the two poses the free chain is pinned to */
-        const TG_Node *a = &nl->v[F + 1 + k1], *b = &nl->v[F + 1 + k2];
-        psx = cx[k1]; psz = cz[k1]; tsx = a->tx; tsz = a->tz;
-        pex = cx[k2]; pez = cz[k2]; tex = b->tx; tez = b->tz;
+        const TG_Node *a2 = &nl->v[F + 1 + k1], *b2 = &nl->v[F + 1 + k2];
+        psx = ex[k1]; psz = ez[k1]; tsx = a2->tx; tsz = a2->tz;
+        pex = ex[k2]; pez = ez[k2]; tex = b2->tx; tez = b2->tz;
     }
-    ok = pf_free_chain(ring, psx, psz, tsx, tsz, pex, pez, tex, tez, nfree, P->ie, P->ix,
-                       smooth_it, &cx[k1], &cz[k1], &len_m, &minr, &far_m, &why);
+    ok = pf_free_chain(ring, psx, psz, tsx, tsz, pex, pez, tex, tez, nfree2, P->ie, P->ix,
+                       smooth_it, fx, fz, &len_m, &minr, &far_m, &why);
     if (!ok) {
         /* Never a hole in the strip: the fork is already in the table, so the corridor
          * stays a classic one (beside the road, median opening and closing at the
@@ -839,56 +927,84 @@ static void pf_build_one(PfPlan *P, const TG_NodeList *nl)
          * same chain on the raw route and accepted it. */
         TD5_LOG_W(LOG_TAG, "trackgen: [PLAZA FORK] \"%s\" F=%d: the free chain failed at build (%s); "
                   "the corridor falls back to a classic one beside the road", P->name, F, why);
-        for (k = k1 + 1; k < k2; k++) {
-            const TG_Node *n = &nl->v[F + 1 + k];
-            double med = P->med[k1] + (P->med[k2] - P->med[k1]) * (double)(k - k1) / (double)(nfree > 0 ? nfree : 1);
-            double Ox = n->x - n->jx, Oz = n->z - n->jz;
+        for (k = 0; k <= nfree2; k++) {
+            const double jj = (double)k1 + (double)k * (double)nfree / (double)nfree2;
+            int j0 = (int)jj;
+            const TG_Node *n;
+            double med = P->med[k1] + (P->med[k2] - P->med[k1]) * (double)k / (double)nfree2;
+            double Ox, Oz;
+            if (j0 < k1) j0 = k1;
+            if (j0 > k2) j0 = k2;
+            n = &nl->v[F + 1 + j0];
+            Ox = n->x - n->jx; Oz = n->z - n->jz;
             if (med > 4.0 * PF_UPM) med = 4.0 * PF_UPM;
-            pf_classic_xz(&Ox, &Oz, n->tx, n->tz, la, lb, med, &cx[k], &cz[k]);
-            cy[k] = n->y;
+            pf_classic_xz(&Ox, &Oz, n->tx, n->tz, la, lb, med, &fx[k], &fz[k]);
+            fy[k] = n->y;
         }
         len_m = 0.0; minr = 0.0;
     } else
     /* heights: terrain-following between the two route poses */
     {
         const double ys = nl->v[F + 1 + k1].y, ye = nl->v[F + 1 + k2].y;
-        const double ds = ys - tg_world_h(cx[k1], cz[k1]);
-        const double de = ye - tg_world_h(cx[k2], cz[k2]);
-        for (k = k1; k <= k2; k++) {
-            const double u = (double)(k - k1) / (double)(nfree > 0 ? nfree : 1);
-            cy[k] = tg_world_h(cx[k], cz[k]) + ds + (de - ds) * u;
+        const double ds = ys - tg_world_h(fx[0], fz[0]);
+        const double de = ye - tg_world_h(fx[nfree2], fz[nfree2]);
+        for (k = 0; k <= nfree2; k++) {
+            const double u = (double)k / (double)nfree2;
+            fy[k] = tg_world_h(fx[k], fz[k]) + ds + (de - ds) * u;
         }
-        cy[k1] = ys; cy[k2] = ye;
+        fy[0] = ys; fy[nfree2] = ye;
         TD5_LOG_I(LOG_TAG, "trackgen: [PLAZA FORK] heights: route y %.0f at row %d, %.0f at row %d; "
                   "terrain under them %.0f / %.0f (offsets %.0f / %.0f); mid-chain terrain %.0f road %.0f",
-                  ys, k1, ye, k2, ys - ds, ye - de, ds, de,
-                  tg_world_h(cx[(k1 + k2) / 2], cz[(k1 + k2) / 2]), cy[(k1 + k2) / 2]);
+                  ys, k1, ye, K2c, ys - ds, ye - de, ds, de,
+                  tg_world_h(fx[nfree2 / 2], fz[nfree2 / 2]), fy[nfree2 / 2]);
     }
-    for (k = 0; k <= L; k++) {
-        double tx, tz, l;
-        const int a = (k > 0) ? k - 1 : 0, b = (k < L) ? k + 1 : L;
-        const TG_Node *mn = &nl->v[F + 1 + k];
-        if (k <= k1 || k >= k2) { tx = mn->tx; tz = mn->tz; }
+    /* ---- rview: corridor rows ---- */
+    for (k = 0; k <= clen; k++) {
+        double x, y, z, tx, tz, l;
+        const TG_Node *mn;
+        int classic = 0;
+        if (k <= k1) { x = ex[k]; y = ey[k]; z = ez[k]; classic = 1; mn = &nl->v[F + 1 + k]; }
+        else if (k >= K2c) { const int jj = k2 + (k - K2c); x = ex[jj]; y = ey[jj]; z = ez[jj]; classic = 1; mn = &nl->v[F + 1 + jj]; }
+        else { const int t = k - k1; x = fx[t]; y = fy[t]; z = fz[t]; mn = &nl->v[tg_pf_row_node(P->fi, k)]; }
+        if (classic) { tx = mn->tx; tz = mn->tz; }
         else {
-            tx = cx[b] - cx[a]; tz = cz[b] - cz[a];
+            const int t = k - k1;
+            const int ta = (t > 0) ? t - 1 : 0, tb = (t < nfree2) ? t + 1 : nfree2;
+            tx = fx[tb] - fx[ta]; tz = fz[tb] - fz[ta];
             l = sqrt(tx * tx + tz * tz);
             if (l < 1e-9) { tx = mn->tx; tz = mn->tz; } else { tx /= l; tz /= l; }
         }
-        pf_set_node(&P->view.v[F + 1 + k], cx[k], cy[k], cz[k], tx, tz, wfull, lb);
+        pf_set_node(&P->rview.v[F + 1 + k], x, y, z, tx, tz, wfull, lb);
+    }
+    /* ---- view: the corridor beside each main node ---- */
+    for (j = 0; j <= L; j++) {
+        double x, y, z, tx, tz, l;
+        const TG_Node *mn = &nl->v[F + 1 + j];
+        if (j <= k1 || j >= k2) { x = ex[j]; y = ey[j]; z = ez[j]; tx = mn->tx; tz = mn->tz; }
+        else {
+            const double t = (double)(j - k1) * (double)nfree2 / (double)nfree;
+            const int ti = (int)(t + 0.5);                 /* the nearest row: with one row a node this is j - k1 */
+            const int ta = (ti > 0) ? ti - 1 : 0, tb = (ti + 1 < nfree2) ? ti + 1 : nfree2;
+            pf_chain_at(fx, fy, fz, nfree2, t, &x, &y, &z);
+            tx = fx[tb] - fx[ta]; tz = fz[tb] - fz[ta];
+            l = sqrt(tx * tx + tz * tz);
+            if (l < 1e-9) { tx = mn->tx; tz = mn->tz; } else { tx /= l; tz /= l; }
+        }
+        pf_set_node(&P->view.v[F + 1 + j], x, y, z, tx, tz, wfull, lb);
         /* lateral of the corridor centre from its (jogged) main node, + = left of travel */
-        P->lat[k] = (cx[k] - mn->x) * mn->tz - (cz[k] - mn->z) * mn->tx;
+        P->lat[j] = (x - mn->x) * mn->tz - (z - mn->z) * mn->tx;
     }
     P->chain_m = len_m / PF_UPM; P->min_r_m = minr;
     {   /* how far the rounded chain strays from the real ring way where it follows it */
         double dev = 0.0, sp = 0.0; int q;
-        for (q = k1 + 30; q <= k2 - 30; q++) {
-            const double d = pf_ring_dist(ring, cx[q], cz[q], &sp);
+        for (q = 30; q <= nfree2 - 30; q++) {
+            const double d = pf_ring_dist(ring, fx[q], fz[q], &sp);
             if (d < 20.0 * PF_UPM && d > dev) dev = d;
         }
         P->max_dev_m = dev / PF_UPM;
     }
     P->built = 1;
-    free(cx); free(cz); free(cy);
+    free(ex); free(ez); free(ey); free(fx); free(fz); free(fy);
 }
 
 void tg_pf_finalize(const TG_NodeList *nl)
@@ -903,10 +1019,11 @@ void tg_pf_finalize(const TG_NodeList *nl)
         if (P->built) {
             built++;
             TD5_LOG_I(LOG_TAG, "trackgen: [PLAZA FORK] %d: \"%s\" F=%d len=%d R=%d (classic rows %d in / %d out) lanes %d+%d, ring "
-                      "%.0f m (near %.0f far %.0f), free chain %.0f m over %d spans (%.2fx span), "
-                      "tightest corner %.1f m, strays %.1f m from the ring way", fi, P->name, P->F, P->len, P->R, P->k1, P->kx, P->la, P->lb,
-                      P->ring_m, P->near_m, P->far_m, P->chain_m, P->K2 - P->k1,
-                      P->stretch, P->min_r_m, P->max_dev_m);
+                      "%.0f m (near %.0f far %.0f), free chain %.0f m over %d spans (%d main spans bypassed, %.2fx the route, "
+                      "span %.2fx), corridor %d spans, tightest corner %.1f m, strays %.1f m from the ring way",
+                      fi, P->name, P->F, P->len, P->R, P->k1, P->kx, P->la, P->lb,
+                      P->ring_m, P->near_m, P->far_m, P->chain_m, P->nfree2, P->K2 - P->k1,
+                      P->stretch, P->pitch, P->clen, P->min_r_m, P->max_dev_m);
             if (td5_env_flag_off("TD5RE_GEO_PLAZA_DUMP")) {
                 char path[96]; FILE *fp;
                 snprintf(path, sizeof path, "log/pf_chain_%d.csv", fi);
@@ -914,8 +1031,8 @@ void tg_pf_finalize(const TG_NodeList *nl)
                 if (fp) {
                     int k;
                     fprintf(fp, "row,x,y,z,tx,tz\n");
-                    for (k = 0; k <= P->len; k++) {
-                        const TG_Node *n = &P->view.v[P->F + 1 + k];
+                    for (k = 0; k <= P->clen; k++) {
+                        const TG_Node *n = &P->rview.v[P->F + 1 + k];
                         fprintf(fp, "%d,%.1f,%.1f,%.1f,%.4f,%.4f\n", k, n->x, n->y, n->z, n->tx, n->tz);
                     }
                     fclose(fp);
@@ -1028,9 +1145,9 @@ int tg_pf_far_over(int fi, int g0, int g1)
 int tg_pf_row_point(int fi, int row, double *x, double *z)
 {
     const PfPlan *P = pf_of(fi);
-    if (!P || !P->built || row < 0 || row > P->len) return 0;
-    *x = P->view.v[P->F + 1 + row].x;
-    *z = P->view.v[P->F + 1 + row].z;
+    if (!P || !P->built || row < 0 || row > P->clen) return 0;
+    *x = P->rview.v[P->F + 1 + row].x;
+    *z = P->rview.v[P->F + 1 + row].z;
     return 1;
 }
 
@@ -1085,11 +1202,11 @@ void tg_pf_paint_network(int fi)
     int k;
     if (!P || !P->built) return;
     w = (double)P->lb * pf_lw();
-    for (k = 0; k <= P->len; k++) {
-        const TG_Node *c = &P->view.v[P->F + 1 + k];
+    for (k = 0; k <= P->clen; k++) {
+        const TG_Node *c = &P->rview.v[P->F + 1 + k];
         tg_world_occ_disc(c->x, c->z, w * 0.5 + 600.0, TG_WO_DRIVABLE);
-        if (k < P->len) {
-            const TG_Node *d = &P->view.v[P->F + 2 + k];
+        if (k < P->clen) {
+            const TG_Node *d = &P->rview.v[P->F + 2 + k];
             tg_world_conform_seg(c->x, c->z, c->y, d->x, d->z, d->y,
                                  w * 0.5 + TD5_TG_ROAD_BED_VERGE, 3500.0);
         }
@@ -1109,8 +1226,8 @@ int tg_pf_ray_hit(double ox, double oz, double ux, double uz, double tmin, doubl
         const PfPlan *P = &s_plan[p];
         int k;
         if (!P->used || !P->committed || !P->built) continue;
-        for (k = P->k1; k < P->K2; k++) {
-            const TG_Node *a = &P->view.v[P->F + 1 + k], *b = &P->view.v[P->F + 2 + k];
+        for (k = P->k1; k < P->K2c; k++) {
+            const TG_Node *a = &P->rview.v[P->F + 1 + k], *b = &P->rview.v[P->F + 2 + k];
             const double ex = b->x - a->x, ez = b->z - a->z;
             const double den = ux * ez - uz * ex;
             double t, u;
@@ -1132,7 +1249,7 @@ double tg_pf_vscale(int fi)
     const PfPlan *P = pf_of(fi);
     double v;
     if (!P) return 1.0;
-    v = P->stretch;
+    v = P->pitch > 0.0 ? P->pitch : P->stretch;
     if (v < 0.5) v = 0.5;
     if (v > 4.0) v = 4.0;
     return v;
@@ -1143,7 +1260,7 @@ int tg_pf_classic_span(int fi, int ck)
 {
     const PfPlan *P = pf_of(fi);
     if (!P || !P->built) return 0;
-    return ck < P->k1 || ck >= P->K2;
+    return ck < P->k1 || ck >= P->K2c;
 }
 
 /* [ROUND 1015 E] Would the scenery carriageway of an avenue stand ON a plaza corridor?
@@ -1163,8 +1280,8 @@ int tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat)
         int k;
         if (!P->used || !P->committed || !P->built) continue;
         if (si < P->F + 1 || si > P->F + P->len) continue;
-        for (k = P->k1; k <= P->K2; k++) {
-            const TG_Node *c = &P->view.v[P->F + 1 + k];
+        for (k = P->k1; k <= P->K2c; k++) {
+            const TG_Node *c = &P->rview.v[P->F + 1 + k];
             const double dx = c->x - x, dz = c->z - z;
             if (dx * dx + dz * dz < 3.0 * pf_lw() * 3.0 * pf_lw()) return 1;
         }

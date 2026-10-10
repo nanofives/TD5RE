@@ -28,10 +28,12 @@ param([string]$Tag = "run",
       [string]$FramedumpPath = "",
       [int]$AutoThrottle = 0,
       [double]$FastForward = 4.0,
+      [int]$IdleStop = 40,                 # [R1016 K] seconds of a silent trace that end the run (0 = off)
       # "NAME=VALUE,NAME=VALUE" extra env, NOT a hashtable (pwsh -File stringifies).
       [string]$Extra = "")
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+if ($GeoPlace -eq "none") { $GeoPlace = "" }   # [R1016 K] "none" = a synthetic track (-Track 60)
 
 Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
 if ($GeoPlace -ne "") { $env:TD5RE_GEO_PLACE = $GeoPlace }
@@ -117,8 +119,20 @@ if ($GenOnly) {
     $deadline = (Get-Date).AddSeconds($GenWait + $RaceSecs)
     $want = @()
     if ($FramedumpSpans -ne "") { $want = ($FramedumpSpans -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    # [R1016 K] -IdleStop N: leave as soon as the track trace has stopped growing for
+    # N seconds (the sim ended at MaxSimTicks or the race is over and the process
+    # idles). Without it every run waits out the whole GenWait+RaceSecs deadline.
+    $trk = Join-Path $log "race_trace_track.csv"
+    $lastLen = -1; $lastGrow = Get-Date
     while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 5
+        if ($IdleStop -gt 0 -and (Test-Path $trk)) {
+            $len = (Get-Item $trk).Length
+            if ($len -ne $lastLen) { $lastLen = $len; $lastGrow = Get-Date }
+            elseif ($len -gt 1000000 -and ((Get-Date) - $lastGrow).TotalSeconds -gt $IdleStop) {
+                Write-Host "trace idle for ${IdleStop}s -> stopping"; break
+            }
+        }
         if ($want.Count -gt 0) {
             $have = @($want | Where-Object { Test-Path (Join-Path $wt ($FramedumpPath -replace '%d', $_)) })
             if ($have.Count -eq $want.Count) { Write-Host "all frames captured"; break }

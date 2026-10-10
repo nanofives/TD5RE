@@ -4158,7 +4158,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         for (f = 0; f < s_fork_count; f++) {
             tg_acct_range(TG_ACCT_BRANCH, s_forks[f].F, s_forks[f].R);
             tg_acct_range(TG_ACCT_BRANCH, s_forks[f].cbase,
-                          s_forks[f].cbase + s_forks[f].len - 1);
+                          s_forks[f].cbase + tg_fork_clen(f) - 1);
         }
     }
     s_tg_reports_t0 = td5_plat_time_us();  /* [R14 GENPERF] diagnostic block */
