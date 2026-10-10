@@ -983,8 +983,8 @@ static void pf_build_one(PfPlan *P, const TG_NodeList *nl)
         if (j <= k1 || j >= k2) { x = ex[j]; y = ey[j]; z = ez[j]; tx = mn->tx; tz = mn->tz; }
         else {
             const double t = (double)(j - k1) * (double)nfree2 / (double)nfree;
-            const int ti = (int)t;
-            const int ta = (ti > 0) ? ti - 1 : 0, tb = (ti + 2 < nfree2) ? ti + 2 : nfree2;
+            const int ti = (int)(t + 0.5);                 /* the nearest row: with one row a node this is j - k1 */
+            const int ta = (ti > 0) ? ti - 1 : 0, tb = (ti + 1 < nfree2) ? ti + 1 : nfree2;
             pf_chain_at(fx, fy, fz, nfree2, t, &x, &y, &z);
             tx = fx[tb] - fx[ta]; tz = fz[tb] - fz[ta];
             l = sqrt(tx * tx + tz * tz);
