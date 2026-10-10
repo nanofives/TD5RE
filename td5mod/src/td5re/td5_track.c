@@ -45,6 +45,7 @@ static void td5_track_stream_selfcheck(void);
 #include "td5_material.h" /* [LIGHT2] page-class cache reset at track load */
 #include "td5_geo.h"      /* [XSPAN] geo-route presence gates crossing-safe locate */
 #include <string.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>   /* sscanf (TD5RE_LAMP_SCAN dev diagnostic) */
 #include <math.h>
@@ -156,6 +157,29 @@ static uint32_t        *s_strip_header = NULL;
 /** Jump table for segment boundary remapping */
 static int              s_jump_entry_count = 0;
 static uint8_t         *s_jump_entries = NULL; /* 6-byte entries */
+
+/* [R1016 K] VARIABLE-LENGTH CORRIDORS. A jump record maps corridor span s of
+ * [lo, hi] to main span base + (s - lo): one corridor span per main span. A plaza
+ * corridor whose far arc is 2.2x the route's length would need spans 7.7 m long
+ * for that, so the generator may give a corridor N spans for M main spans
+ * (N != M) and says so in a TRAILER after the vertex table:
+ *   u32 'CMRP' (0x50524D43), u32 nforks, then per fork
+ *   u32 lo, u32 n, u32 m, u32 base, u16 off[n + 1]
+ * off[k] is the main-span offset (0 .. m-1) corridor span k stands beside (non
+ * decreasing, off[n] = m = the rejoin). Everything that turns a corridor span into
+ * a main span, a main span into a corridor span, or a walker step into race
+ * progress reads this (corr_map_*). A track without the trailer (every shipped
+ * track and every 1:1 corridor) has s_cmap_n == 0 and takes the old arithmetic. */
+typedef struct {
+    int lo, hi, base, n, m;
+    uint16_t *off;       /* n + 1                                                    */
+    uint16_t *first_k;   /* m + 1: first corridor step standing beside main offset j */
+} CorrMap;
+static CorrMap *s_cmap = NULL;
+static int      s_cmap_n = 0;
+static void corr_map_free(void);
+static void corr_map_parse(const uint8_t *blob, size_t size, size_t vtx_end);
+static int  corr_progress_delta(int span0, int span1);
 
 /** Per-span median-divider lateral index (reverse-native forks): 0 = none, else
  *  the branch lane count = the lateral boundary that wall_contact walls off so a
@@ -3150,7 +3174,25 @@ int td5_track_get_recovery_pose(int from_span, int spans_back,
     /* Step back. On a closed circuit (ring length valid) wrap within the ring so
      * a recovery near the start/finish line lands just before it rather than at
      * span 0; on a point-to-point route clamp to the first span. */
-    if (ring > 1 && ring <= span_count) {
+    if (ring > 1 && ring <= span_count && from_span > ring && s_jump_entries && s_jump_entry_count > 0) {
+        /* [R1016 K] A corridor span is not ring + n: stepping back by modulo landed a
+         * broken-down car on an unrelated main span. Step back ALONG the corridor and,
+         * past its start, onto the main road it left. */
+        int j, found = 0;
+        target = from_span - spans_back;
+        for (j = 0; j < s_jump_entry_count && !found; j++) {
+            const uint16_t *e = (const uint16_t *)(s_jump_entries + j * 6);
+            if (from_span >= (int)e[0] && from_span <= (int)e[1]) {
+                found = 1;
+                if (target < (int)e[0]) {
+                    int over = (int)e[0] - target;           /* spans past the corridor start */
+                    target = (int)(int16_t)e[2] - over;      /* F + 1 is base; the fork span is base - 1 */
+                    if (target < 0) target = 0;
+                }
+            }
+        }
+        if (!found) target = ((from_span % ring) + ring) % ring;
+    } else if (ring > 1 && ring <= span_count) {
         int base = from_span % ring;
         if (base < 0) base += ring;
         target = ((base - spans_back) % ring + ring) % ring;
@@ -4540,6 +4582,7 @@ int td5_track_load_strip(const void *data, size_t size)
     s_strip_header = NULL;
     s_jump_entry_count = 0;
     s_jump_entries = NULL;
+    corr_map_free();
     td5_camera_bind_track_geometry(NULL, NULL);
     free_display_lists();
     if (s_span_display_list_indices) {
@@ -4633,6 +4676,8 @@ int td5_track_load_strip(const void *data, size_t size)
                   s_jump_entry_count, (int)hdr[1],
                   e0[0], e0[1], e0[2], e1[0], e1[1], e1[2]);
     }
+    if (s_jump_entries && s_jump_entry_count > 0 && g_active_td6_level == 0)
+        corr_map_parse(s_strip_blob, size, (size_t)vertex_offset + (size_t)s_secondary_count * 6u);
 
     /* [NATIVE REVERSE CIRCUIT 2026-06-29] Precompute the median-divider lateral
      * index per span. For each reverse fork (type-8 departure / type-11 rejoin)
@@ -6366,6 +6411,21 @@ void td5_track_update_actor_position(TD5_Actor *actor)
                 memcpy(track_state, saved, 16);
             }
         }
+        /* [R1016 K] A step into, along or out of a VARIABLE-LENGTH corridor covers a
+         * different number of main-road spans than the walker's +-1: restore the
+         * accumulator (and the high water the race order sorts by) to the main-road
+         * index the car really has covered, so position, lap and finish stay right. */
+        if (s_cmap_n > 0 && old_span >= 0 && old_span < s_span_count &&
+            (int)track_state[0] != old_span) {
+            const int d = corr_progress_delta(old_span, (int)track_state[0]);
+            if (d != INT_MIN) {
+                const int acc = (int)saved[2] + d;
+                if ((int)track_state[2] != acc) {
+                    track_state[2] = (int16_t)acc;
+                    track_state[3] = (acc > (int)saved[3]) ? (int16_t)acc : saved[3];
+                }
+            }
+        }
     }
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
@@ -8040,6 +8100,8 @@ void td5_track_resolve_actor_segment_boundary(TD5_Actor *actor)
          *   AX+= raw_span
          * Store AX (16-bit truncation) to +0x82 and +0x84. */
         int new_span = (anchor - low) + raw_span;
+        if (i < s_cmap_n && s_cmap[i].n > 0)                    /* [R1016 K] */
+            new_span = anchor + (int)s_cmap[i].off[raw_span - low];
         track_state[1] = (int16_t)new_span; /* +0x82 */
         track_state[2] = (int16_t)new_span; /* +0x84 */
         return;
@@ -8407,6 +8469,12 @@ int td5_track_apply_target_span_remap(int lin_span, int is_canonical_route)
         if (len <= 0) continue;
         range_hi = (int)range_lo + len - 1;
 
+        if (i < s_cmap_n && s_cmap[i].n > 0) {                  /* [R1016 K] */
+            range_hi = (int)range_lo + s_cmap[i].m - 2;
+            if (lin < (int)range_lo || lin > range_hi) continue;
+            target_span = (int)remap_dst + (int)s_cmap[i].first_k[lin - (int)range_lo];
+            break;
+        }
         if (lin < (int)range_lo || lin > range_hi) continue;
 
         cand = ((int)remap_dst - (int)range_lo) + lin;
@@ -9537,6 +9605,125 @@ int td5_track_get_ring_length(void)
     return g_td5.track_span_ring_length;
 }
 
+/* ===== [R1016 K] corridor map (see the CorrMap note at the top of the file) ====== */
+static void corr_map_free(void)
+{
+    int j;
+    for (j = 0; j < s_cmap_n; j++) { free(s_cmap[j].off); free(s_cmap[j].first_k); }
+    free(s_cmap);
+    s_cmap = NULL;
+    s_cmap_n = 0;
+}
+
+static void corr_map_parse(const uint8_t *blob, size_t size, size_t vtx_end)
+{
+    uint32_t magic, nf, f;
+    size_t pos = vtx_end;
+    int made = 0;
+    if (!blob || pos + 8 > size) return;
+    memcpy(&magic, blob + pos, 4);
+    if (magic != 0x50524D43u) return;
+    memcpy(&nf, blob + pos + 4, 4);
+    pos += 8;
+    if (nf == 0 || nf > 64u || s_jump_entry_count <= 0) return;
+    s_cmap = (CorrMap *)calloc((size_t)s_jump_entry_count, sizeof(CorrMap));
+    if (!s_cmap) return;
+    s_cmap_n = s_jump_entry_count;
+    for (f = 0; f < nf; f++) {
+        uint32_t lo, n, m, base;
+        int j, k, hit = -1;
+        CorrMap *c;
+        if (pos + 16 > size) break;
+        memcpy(&lo, blob + pos, 4); memcpy(&n, blob + pos + 4, 4);
+        memcpy(&m, blob + pos + 8, 4); memcpy(&base, blob + pos + 12, 4);
+        pos += 16;
+        if (n < 2 || n > 4000u || m < 1 || m > 4000u || pos + (size_t)(n + 1) * 2u > size) break;
+        for (j = 0; j < s_jump_entry_count; j++)
+            if ((int)((const uint16_t *)(s_jump_entries + j * 6))[0] == (int)lo) { hit = j; break; }
+        if (hit < 0) { pos += (size_t)(n + 1) * 2u; continue; }
+        c = &s_cmap[hit];
+        c->lo = (int)lo; c->n = (int)n; c->hi = (int)lo + (int)n - 1;
+        c->m = (int)m; c->base = (int)base;
+        c->off = (uint16_t *)malloc((size_t)(n + 1) * 2u);
+        c->first_k = (uint16_t *)malloc((size_t)(m + 1) * 2u);
+        if (!c->off || !c->first_k) { free(c->off); free(c->first_k); memset(c, 0, sizeof *c); pos += (size_t)(n + 1) * 2u; continue; }
+        memcpy(c->off, blob + pos, (size_t)(n + 1) * 2u);
+        pos += (size_t)(n + 1) * 2u;
+        /* inverse: the first corridor step standing beside main offset j; an offset no
+         * step names (n < m) takes the step whose run covers it */
+        for (j = 0; j <= (int)m; j++) c->first_k[j] = (uint16_t)(n - 1);
+        for (k = (int)n - 1; k >= 0; k--)
+            if ((int)c->off[k] <= (int)m) c->first_k[c->off[k]] = (uint16_t)k;
+        for (j = (int)m - 1; j >= 0; j--)
+            if (c->first_k[j] > c->first_k[j + 1]) c->first_k[j] = c->first_k[j + 1];
+        made++;
+        TD5_LOG_I(LOG_TAG, "corridor map: jump %d lo=%d n=%d beside main %d..%d (m=%d)",
+                  hit, c->lo, c->n, c->base, c->base + c->m - 1, c->m);
+    }
+    if (!made) corr_map_free();
+}
+
+/* The mapped corridor span `span` belongs to (k = its step), or NULL. */
+static const CorrMap *corr_map_find_span(int span, int *k)
+{
+    int j;
+    for (j = 0; j < s_cmap_n; j++) {
+        const CorrMap *c = &s_cmap[j];
+        if (c->n > 0 && span >= c->lo && span <= c->hi) { if (k) *k = span - c->lo; return c; }
+    }
+    return NULL;
+}
+
+/* The mapped corridor whose parallel main range holds `main_span`. */
+static const CorrMap *corr_map_find_main(int main_span, int *off)
+{
+    int j;
+    for (j = 0; j < s_cmap_n; j++) {
+        const CorrMap *c = &s_cmap[j];
+        if (c->n > 0 && main_span >= c->base && main_span < c->base + c->m) {
+            if (off) *off = main_span - c->base;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+/* The main-road index a car on `span` has "covered": a main span is its own index, a
+ * span of a mapped corridor is base + the offset it stands beside. */
+static int corr_progress_index(int span)
+{
+    int k = 0;
+    const CorrMap *c = corr_map_find_span(span, &k);
+    return c ? c->base + (int)c->off[k] : span;
+}
+
+/* Change in covered main-road index for a walker step span0 -> span1, when either end
+ * is in a mapped corridor; INT_MIN when the old +-1 per step is right. */
+static int corr_progress_delta(int span0, int span1)
+{
+    if (s_cmap_n <= 0) return INT_MIN;
+    if (!corr_map_find_span(span0, NULL) && !corr_map_find_span(span1, NULL)) return INT_MIN;
+    return corr_progress_index(span1) - corr_progress_index(span0);
+}
+
+int td5_track_corr_variable_count(void)
+{
+    int j, n = 0;
+    for (j = 0; j < s_cmap_n; j++) if (s_cmap[j].n > 0) n++;
+    return n;
+}
+
+/* Steps of the corridor span `span` (n) and the main spans it covers (m); 0 when `span`
+ * is not in a variable-length corridor. */
+int td5_track_corr_ratio(int span, int *n, int *m)
+{
+    const CorrMap *c = corr_map_find_span(span, NULL);
+    if (!c) return 0;
+    if (n) *n = c->n;
+    if (m) *m = c->m;
+    return 1;
+}
+
 /* [task#20 2026-06-13] TD6 branch->main span remap — faithful port of TD6.exe
  * FUN_0045d040 @ ghidra_td6. A branch corridor is a PARALLEL ALTERNATE to a run
  * of main-ring spans: the segment-remap table (the corrected "jump table",
@@ -9558,8 +9745,11 @@ int td5_track_branch_to_main_span(int span)
             int lo   = (int)((const uint16_t *)e)[0];
             int hi   = (int)((const uint16_t *)e)[1];
             int base = (int)((const uint16_t *)e)[2];
-            if (span >= lo && span <= hi)
+            if (span >= lo && span <= hi) {
+                if (j < s_cmap_n && s_cmap[j].n > 0)          /* [R1016 K] variable length */
+                    return base + (int)s_cmap[j].off[span - lo];
                 return span + (base - lo);
+            }
         }
     }
     return span;
@@ -9605,6 +9795,11 @@ int td5_track_main_to_branch_span(int main_span)
             int hi   = (int)((const uint16_t *)e)[1];
             int base = (int)((const uint16_t *)e)[2];
             int len  = hi - lo;
+            if (j < s_cmap_n && s_cmap[j].n > 0) {            /* [R1016 K] variable length */
+                if (main_span >= base && main_span < base + s_cmap[j].m)
+                    return lo + (int)s_cmap[j].first_k[main_span - base];
+                continue;
+            }
             if (main_span >= base && main_span <= base + len)
                 return lo + (main_span - base);
         }
@@ -9708,6 +9903,7 @@ int td5_track_count_branch_corridors(int main_span)
             int hi   = (int)((const uint16_t *)e)[1];
             int base = (int)((const uint16_t *)e)[2];
             int len  = hi - lo;
+            if (j < s_cmap_n && s_cmap[j].n > 0) len = s_cmap[j].m - 1;   /* [R1016 K] */
             if (main_span >= base && main_span <= base + len)
                 count++;
         }
@@ -9730,9 +9926,12 @@ int td5_track_branch_corridor_span(int main_span, int which)
             int hi   = (int)((const uint16_t *)e)[1];
             int base = (int)((const uint16_t *)e)[2];
             int len  = hi - lo;
+            if (j < s_cmap_n && s_cmap[j].n > 0) len = s_cmap[j].m - 1;   /* [R1016 K] */
             if (main_span >= base && main_span <= base + len) {
                 if (seen == which)
-                    return lo + (main_span - base);
+                    return (j < s_cmap_n && s_cmap[j].n > 0)
+                         ? lo + (int)s_cmap[j].first_k[main_span - base]
+                         : lo + (main_span - base);
                 seen++;
             }
         }
@@ -9774,6 +9973,7 @@ int td5_track_corridor_info(int idx, int *branch_lo, int *branch_hi,
         int base = (int)e[2];
         int len  = b_hi - b_lo;            /* corridor length (>= 0 for valid records) */
         if (len < 0) return 0;             /* malformed record (lo>hi) — skip */
+        if (idx < s_cmap_n && s_cmap[idx].n > 0) len = s_cmap[idx].m - 1;   /* [R1016 K] */
         if (branch_lo) *branch_lo = b_lo;
         if (branch_hi) *branch_hi = b_hi;
         if (main_lo)   *main_lo   = base;
@@ -10152,8 +10352,11 @@ int td5_track_branch_to_junction(int span_idx)
         int branch_lo   = (int)entry_u[0];
         int branch_hi   = (int)entry_u[1];
         int main_target = (int)entry_s[2];
-        if (span_idx >= branch_lo && span_idx <= branch_hi)
+        if (span_idx >= branch_lo && span_idx <= branch_hi) {
+            if (j < s_cmap_n && s_cmap[j].n > 0)                /* [R1016 K] */
+                return main_target + (int)s_cmap[j].off[span_idx - branch_lo];
             return main_target + (span_idx - branch_lo);
+        }
     }
     return -1;
 }
@@ -10196,6 +10399,7 @@ int td5_track_route_junction_path2a_match(int span_norm)
          * (branch_hi - branch_lo) - 1. Skip until in range. */
         if (span_norm < main_target) continue;
         int max_bound = main_target + (branch_hi - branch_lo) - 1;
+        if (j < s_cmap_n && s_cmap[j].n > 0) max_bound = main_target + s_cmap[j].m - 2;   /* [R1016 K] */
         if (span_norm > max_bound) continue;
 
         /* PATH 2a candidate: confirm with the -1 sentinel check.
@@ -10487,6 +10691,7 @@ void td5_track_shutdown(void)
     s_strip_header = NULL;
     s_jump_entry_count = 0;
     s_jump_entries = NULL;
+    corr_map_free();
     g_strip_span_count = 0;
     g_strip_total_segments = 0;
     g_strip_span_base = NULL;
