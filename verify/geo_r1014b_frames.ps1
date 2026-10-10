@@ -18,6 +18,7 @@ param([string]$Arm = "after",
       [string]$Env = "",
       [int]$GenWait = 900,
       [int]$RaceSecs = 240,
+      [string]$GeoPlace = "la_plata_partido",
       [int]$Regen = 1)
 
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -28,7 +29,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $wt "log") | Out-Null
 Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } |
     ForEach-Object { Remove-Item "env:$($_.Name)" }
 
-$env:TD5RE_GEO_PLACE        = "la_plata"
+$env:TD5RE_GEO_PLACE        = $GeoPlace
 $env:TD5RE_AUTOTRACK_REUSE  = "0"
 $env:TD5RE_TG_DOUBLE_BUILD  = "1"
 $env:TD5RE_RT               = "0"
