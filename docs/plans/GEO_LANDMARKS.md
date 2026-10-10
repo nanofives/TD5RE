@@ -54,6 +54,8 @@ seed whose walk used to place row 17 loses it. Seed 99991 slot 60 is unaffected
 |---|---|---|---|
 | `L23.lm12` | round J7 (generated `k_pfclose_exclude`) | open island 21.7 x 17.8 m, walls only 5.5 x 14.2 m: no sound closure from its own footprint | fix the geometry, then re-run `tg_prefab_audit.py` |
 | `L23.lm17` | round 1014 (hand `k_pf_parked`) | Mariano: geometry incomplete, to be reimplemented | author the missing faces (see `LANDMARK_GEN_HANDOFF.md`, `authored_fills.json`), delete its row in `k_pf_parked` |
+| `L23.lm05` | round 1015 C (hand `k_pf_parked`) | Mariano's pick `L91 e37 s4 ... p614+...+619 ... v311 c18`: 311 verts / 18 cmds = `lm05`, local pages 55..60 + LM_BASE. Free-standing wall sheets and an unroofed ring tower (2 building-height wall ends in the air) | author the missing faces, delete its row in `k_pf_parked` |
+| `lm00 lm06 lm08 lm09 lm13 lm14 lm16 lm18 lm19 lm21 lm22 lm23` | round 1015 C (`k_pf_parked_audit`) | the audit in section 6.1 finds them open (>= 2 free wall ends >= 6 m tall) | `TD5RE_TG_PREFAB_PARK_AUDIT=0`, or delete a row |
 
 ## 2. Item 20: what was wrong with the cathedral
 
@@ -234,3 +236,142 @@ byte size.
 Decode any pick the same way: rebuild, dump `(entry, slot)` from MODELS.DAT with
 `verify/r12geom_dumpmodels.py <MODELS.DAT> <span>`, match centre/radius/vertex/command
 counts, read `MESHTAG.BIN[entry*256+slot]` for the kind.
+
+## 6. Round 1015, group C (La Plata buildings, level091)
+
+> 4. "buildings are not aligned to the sidewalk, they look sloped: L91 e20 s43 city p20:STORE+16 pos 111235,11928,-40823 r11073 v84 c2"
+> 8. "remove TD5 (shipped set-piece) geometry that doesn't close out properly, like L91 e37 s4 skirt p614+...+619 pos 182670,4419,-108647 r7898 v311 c18 ... audit EVERY prefab"
+> 14. "there are still buildings inside Plaza Moreno: L91 e144 s14 road p381 ... e144 s26 city p383"
+> 15. "buildings cover La Catedral de La Plata: L91 e154 s23 city p21:STORE+281 pos 609957,19731,-605910 r11058 v84 c2"
+
+Tools (all offline, read MODELS.DAT + MESHTAG.BIN + `_route/*.JSON`): `verify/r1015c_decode.py`
+(pick -> mesh), `r1015c_find.py` / `r1015c_pages.py` (mesh by v/c or page), `r1015c_plaza_cover.py`
+(meshes inside plaza polygons / on a landmark cluster), `r1015c_prefab_audit.py`,
+`r1015c_tilt.py`, `r1015c_pave_gap.py`, `r1015c_align.py`, `r1015c_joint_step.py`
+(item 4), `r1015c_tour.ps1` (free-cam frames with the car parked beside the geometry:
+`-StartSpan N`, and `TD5RE_FREECAM_TOUR_TICK=500` so the streamed scenery is in before the first pose).
+
+### 6.1 Item 8: every shipped set piece, audited
+
+**Which piece the pick is.** `v311 c18` is `L23.lm05` (`k_tg_prefabs[5]`: 311 verts, 18 cmds,
+11508 x 12102 raw). Its local pages 55..60 are 614..619 once LM_BASE (559) is added, which is
+exactly the pick. The pick's own mesh is not in a rebuild of master (the walk places 4 pieces
+at La Plata, not the one Mariano drove past), so it is identified by the table, not by (entry, slot).
+
+**Rule.** The renderer draws everything double sided (`CullMode NONE` in `d3d12_backend.c`), so a
+back face is never the problem: a MISSING face is. Every near-vertical face projects to a line
+in XZ; duplicates (one per storey) merge; an endpoint no other wall touches (15 cm) is a wall
+that just stops. A piece is OPEN when >= 2 such free ends belong to building-height walls (>= 6 m).
+The geometry judged is the EFFECTIVE one: the shipped faces plus the J7 closing quads
+(`td5_tg_prefab_close_data.h`) the generator adds when `TD5RE_TG_PREFAB_CLOSE` is on.
+This is stricter than J7's own audit (`re/tools/tg_prefab_audit.py`, "no pair of opposed parallel
+walls"), which passes lm05. Ray parity (`--parity`) was tried and rejected: it scores every
+shipped piece 70-80 % odd because they are facade sheets, so it does not discriminate.
+
+| piece | faces (+closing quads) | wall edges | free wall ends | tall (>= 6 m) free ends | tallest free edge | verdict |
+|---|---|---|---|---|---|---|
+| `L23.lm00` | 258 (+0) | 35 | 14 | 2 | 9.8 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm01` | 194 (+0) | 30 | 2 | 0 | 3.4 m | kept |
+| `L23.lm02` | 126 (+0) | 39 | 11 | 1 | 6.1 m | kept |
+| `L23.lm03` | 139 (+0) | 22 | 8 | 0 | 3.6 m | kept |
+| `L23.lm04` | 82 (+6) | 16 | 3 | 1 | 7.3 m | kept |
+| `L23.lm05` | 84 (+0) | 12 | 4 | 2 | 7.3 m | **PARKED** round 1015 (Mariano's pick) |
+| `L23.lm06` | 56 (+0) | 14 | 5 | 5 | 7.4 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm07` | 78 (+0) | 20 | 0 | 0 | 0.0 m | kept |
+| `L23.lm08` | 62 (+0) | 27 | 9 | 2 | 10.4 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm09` | 51 (+0) | 9 | 5 | 5 | 7.3 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm10` | 40 (+0) | 18 | 1 | 1 | 7.3 m | kept |
+| `L23.lm11` | 63 (+0) | 6 | 2 | 0 | 4.9 m | kept |
+| `L23.lm12` | 40 (+0) | 5 | 2 | 0 | 5.9 m | excluded since J7 (`k_pfclose_exclude`) |
+| `L23.lm13` | 54 (+0) | 7 | 6 | 6 | 9.5 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm14` | 34 (+0) | 18 | 3 | 2 | 7.3 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm15` | 31 (+9) | 19 | 2 | 0 | 5.2 m | kept |
+| `L23.lm16` | 20 (+3) | 10 | 4 | 3 | 19.2 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm17` | 86 (+0) | 39 | 12 | 5 | 7.3 m | **PARKED** round 1014 (Mariano) |
+| `L23.lm18` | 71 (+0) | 14 | 5 | 4 | 7.3 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm19` | 77 (+0) | 33 | 6 | 4 | 7.5 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm20` | 64 (+0) | 9 | 4 | 0 | 5.8 m | kept |
+| `L23.lm21` | 53 (+0) | 10 | 5 | 5 | 7.3 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm22` | 50 (+5) | 16 | 3 | 3 | 7.3 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+| `L23.lm23` | 45 (+0) | 9 | 4 | 4 | 7.3 m | **PARKED** round 1015 audit (knob `TD5RE_TG_PREFAB_PARK_AUDIT`) |
+
+Calibration: Mariano's own two named pieces land at 2 (lm05) and 5 (lm17) tall free ends, and
+the pieces that read as complete in the 3D plots (lm01 spire on a plinth, lm03 plaza, lm07
+plaza + tower, lm11) land at 0. `lm00` (the onion-domed piece) is the borderline iconic one:
+2 free ends of 9.8 m on a low wing; it is parked because the rule is one rule, and it is the
+first row to restore if the decision is to keep it.
+
+**Scope: global, like lm17.** Both pools call `tg_prefab_usable`. Synthetic seed 99991 slot 60
+(`SELECTED.TXT` moved aside), MODELS.DAT, same exe:
+
+| variant | MODELS.DAT | delta vs master | `[PREFAB]` placed |
+|---|---|---|---|
+| master e7d89db0 (and `TD5RE_TG_PREFAB_PARK=0`) | 12982584 B `298DB07B141160AAFED83C3941DD1580` | 0 | 35 |
+| lm05 + lm17 parked (`TD5RE_TG_PREFAB_PARK_AUDIT=0`) | 12968552 B `9B6446DD...` | -14032 | 34 (lm05 was used once, span 1015) |
+| + 12 audit pieces (default) | 12757432 B `4465DF84...` | -225152 | 11 |
+
+STRIP.DAT (`0641EDB7...`) and TEXTURES.DAT are identical in all three. La Plata (level091) default
+vs master: MODELS.DAT 15442652 -> 15208892 B, `[PREFAB]` 9 placed -> 4 (that delta also contains
+items 14 and 15).
+
+### 6.2 Item 15: what covered the cathedral
+
+The pick (`e154 s23`, kind `building`, 84 verts, pages 21 + 281) is the procedural frontage wall
+(`tg_emit_street_wall`: ONE mesh per span), 48 m tall, standing between Calle 14 and the
+cathedral's apron, 25.9 m from the convex hull of the cathedral outline + its 25 parts. The
+cathedral outline, parts and apron were already clear (round 1014 D); the street face it is
+seen from was not. Fix: `td5_geolm_forecourt_near` (a MAJOR landmark = anchor owning >= 3
+building:parts; only the cathedral at La Plata): `tg_geo_mass_at` (frontage and back-row probe)
+stands down within 40 m of its hull, and a foreign real footprint with a vertex within 12 m of the
+hull is vetoed. Knobs: `TD5RE_GEO_LM_FORECOURT_M` (40, 0 = old), `TD5RE_GEO_LM_FORECOURT_PARTS` (3),
+`TD5RE_GEO_LM_BUILDING_CLEAR_M` (12, 0 = old).
+
+| La Plata, meshes (`r1015c_plaza_cover.py --major --apron 12 --forecourt 45`) | before | after |
+|---|---|---|
+| procedural frontage within 45 m of the cathedral hull | 30 | 0 |
+| real OSM/Overture footprints on the apron (<= 12 m, not the cathedral's own) | 1 | 0 |
+| `cross` walls within 45 m | 3 | 0 |
+
+Framedumps (free-cam tour, `log/tour_base_c_*` vs `log/tour_new1_c_*`): before, the street-level
+pose shows shopfronts and a 20-storey slab filling the view toward the cathedral; after, the
+red-brick Gothic mass stands behind a paved forecourt and the road sees all of it.
+
+### 6.3 Item 14: what the two "plaza" meshes are
+
+`e144 s14` / `s26` are `kind cross`, 12 verts, ONE command of 3 quads, pages 381 / 383 =
+`TD5_TG_PAGE_R8V_WALL_LOW + 0 / + 2`: the bare side-street frontage SHEET of `tg_cross_emit_sidewalls`
+(6.4 m long, 14.4 m tall, zero thickness). The pick's "road" label is the picker's; MESHTAG
+in the rebuild says `cross`. They are NOT in the Plaza Moreno polygon (the polygon starts at x =
+616483, the walls stand at 606173, 24 m west) and in no AREAS.JSON polygon at all: of 256 `cross`
+meshes, 0 are inside one, and 0 of the 326 procedural frontage meshes, 0 of 2592 real footprints.
+So the round 1012-1013 plaza veto / hull had nothing to catch. What they are is a lone wall on the
+traffic island between Calle 14, Diagonal 73 and the plaza ring, with lawn behind it.
+Fix: `tg_geo_xwall_unbacked` (td5_tg_streets.c): a side-street wall or flank block stands only when a
+real footprint is within reach (3/8/14 m on both sides of the wall, `TD5_GEOB_WIN_B`).
+`TD5RE_GEO_XWALL_BACKED=0` restores. La Plata `cross` meshes 256 -> 227; both picks gone.
+
+| meshes inside a plaza polygon (park/common/garden/grass/pitch/playground...) | before | after |
+|---|---|---|
+| procedural frontage / real footprints / cross walls / set pieces | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| props (street furniture) / `block` lawns (legitimate) | 21 / 92 | 21 / 92 |
+
+### 6.4 Item 4: sloped facades -- measured, no defect found in the geometry
+
+`e20 s43` (`kind building`) is the procedural frontage of span ~83 on the second Diagonal 73 run:
+two vertical walls (front + the tower's back wall), 20 storeys, 3.5 m wide. Measured:
+
+* every wall quad of every frontage mesh is exactly vertical (`r1015c_tilt.py`: 12402 quads, lean 0.0 deg for all).
+* the roofline follows the ROAD GRADE (the wall base is the world height under the setback line, the far end
+  adds the node-to-node rise): 1.25 deg at the pick, equal to the road's own ~2 %. Histogram over all frontage
+  quads (master): grade < 1 deg 10232, 1 deg 1529, 2 deg 193, >= 3 deg 448 (3.6 %), worst 17.5 deg (e146 s15).
+* the base sits on the pavement: at the pick the floor-0 vertices are within 2 cm of the slab
+  (`r1015c_pave_gap.py`); over 1602 measured base vertices 88 % are within +-0.25 m, worst 1.6 m (e148 s14).
+* joints between consecutive front walls: 936 measured, vertical step <= 0.1 m for 98 %, worst 0.33 m
+  (`r1015c_joint_step.py`); in plan 50 of 66 joints touch, the other 16 are 0.5 m apart (the R11 corner trim).
+* plan alignment with the road is ~6 deg off on the pick (the wall follows the chord of the bend).
+
+What could still read as "sloped": a 48 m wall seen from the road at a wide FOV (converging verticals),
+and the roofline on the 3.6 % of quads on a real slope (the roof is not levelled: a level roof needs a step
+filler quad at every joint, which is a design change, not a fix). No code change for this item; the
+measurement tools are committed so a specific location can be re-checked. If Mariano means a particular
+span, a second pick on a steep street is needed (the histogram's worst: e146 s15, e270 s17, e146 s28).

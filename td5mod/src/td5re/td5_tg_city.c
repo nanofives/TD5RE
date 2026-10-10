@@ -1664,6 +1664,8 @@ static long s_geo_lm_prefab, s_geo_lm_nofit;
  * apron vertices pulled in because a real street was within reach. */
 static long s_geo_lm_styled, s_geo_lm_apron, s_geo_lm_apron_quads;
 static long s_geo_lm_vetoed, s_geo_lm_apron_pulled, s_geo_lm_apron_refused;
+/* [ROUND 1015 C item 15] frontage span-sides that stood down in front of a major landmark */
+static long s_geo_lm_forecourt;
 static double s_geo_lm_apron_dev;
 static double s_geo_shift_max, s_geo_route_dev_max;
 /* [ROUND 1009 item 9] HEIGHT FIDELITY LEDGER -- the number item 9 asks for.
@@ -1701,6 +1703,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_lm_prefab = s_geo_lm_nofit = 0;
     s_geo_lm_styled = s_geo_lm_apron = s_geo_lm_apron_quads = 0;
     s_geo_lm_vetoed = s_geo_lm_apron_pulled = s_geo_lm_apron_refused = 0;
+    s_geo_lm_forecourt = 0;
     s_geo_lm_apron_dev = 0.0;
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
     s_geo_h_err_sum = s_geo_h_err_max = 0.0;
@@ -1976,6 +1979,24 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
                 tg_geo_clear_note_wall();
                 return 1;
             }
+    }
+    /* [ROUND 1015 C item 15] "buildings cover La Catedral": the procedural wall
+     * (and the back rows, which probe the same function) stands down in front of
+     * a MAJOR landmark -- the cathedral's outline, its 25 parts and its apron are
+     * not the only thing a building must not cover, the street face it is SEEN
+     * from is the other. Measured on La Plata before this: 30 frontage meshes
+     * within 45 m of the cathedral hull, the pick's 48 m tall block 25.9 m in
+     * front of it, between Calle 14 and the apron. TD5RE_GEO_LM_FORECOURT_M=0
+     * restores the old frontage. */
+    if (td5_geolm_forecourt_count() > 0) {
+        static double s_fm = -1.0;
+        if (s_fm < 0.0)
+            s_fm = (double)td5_env_float("TD5RE_GEO_LM_FORECOURT_M", 40.0f, 0.0f, 200.0f)
+                 * td5_geob_units_per_m();
+        if (s_fm > 0.0 && td5_geolm_forecourt_near(px, pz, np, s_fm)) {
+            s_geo_lm_forecourt++;
+            return 1;
+        }
     }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
     return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
@@ -3545,6 +3566,11 @@ static void tg_geo_city_report_impl(int from_stream)
                   td5_env_flag_on("TD5RE_GEO_LM_APRON") ? "on" : "off",
                   s_geo_lm_apron_pulled, s_geo_lm_apron_refused,
                   s_geo_lm_apron_dev, ovf ? " (ANCHOR TABLE FULL)" : "");
+        TD5_LOG_I(LOG_TAG, "[GEO LM] [R1015 C] %d major landmark hull(s); %ld "
+                  "frontage probe(s) stood down within %.0f m of one (knob "
+                  "TD5RE_GEO_LM_FORECOURT_M)", td5_geolm_forecourt_count(),
+                  s_geo_lm_forecourt,
+                  (double)td5_env_float("TD5RE_GEO_LM_FORECOURT_M", 40.0f, 0.0f, 200.0f));
     }
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] flanks: %ld corner return(s) added facing "
               "a span-side whose procedural wall stood down for real geometry "
