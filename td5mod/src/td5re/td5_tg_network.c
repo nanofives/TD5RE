@@ -738,6 +738,7 @@ static struct {
     long ways, inbox, route, cand, street, avenue, cont, under, depart, beyond;
     long d_grid, d_struct, d_biome, d_park, d_corridor, d_skew,
          d_short, d_taken, d_fold, d_full, d_under;
+    long fan_cut;           /* [1015 B] mouth spans cut: their normal is off the street's ray */
     long why_road, why_street, why_water;
 } s_gs;
 
@@ -1423,6 +1424,38 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
             }
             s_gs.beyond++;
         }
+        /* [ROUND 1015 B item 16] ONE street direction for the whole mouth run.
+         * The skew above was measured at the placing span and copied to every span
+         * of lo..hi, and each span's quad, pavement arms, flanks and zebra rotate
+         * THEIR OWN outward normal by it. On a straight road that is parallel; in a
+         * bend the normals themselves turn (La Plata span 805, the road swings 90
+         * degrees over spans 801..805), so the five quads FANNED: the ones at the
+         * bend's start pointed back across the carriageway and their pavement arms
+         * ("sidewalk clips through the middle of the road") ran over the road for 20 m.
+         * The street the march validated is a straight ray, so each span now gets
+         * the skew that turns ITS normal onto that ray, and a span whose normal is
+         * more than the skew ceiling off it (the ray would run along or back over the
+         * kerb) leaves the run. TD5RE_GEO_MOUTH_PARALLEL=0 restores the shared skew. */
+        if (td5_env_flag_on("TD5RE_GEO_MOUTH_PARALLEL")) {
+            int ms, cut = 0;
+            for (ms = lo; ms <= hi; ms++) {
+                double ef[10], nxm, nzm, nl2, sk;
+                if (ms < 0 || ms >= TD5_TG_MAX_SPANS + 8 || ms + 1 >= nl->count) continue;
+                tg_city_edge_frame(nl, ms, sg, ef);
+                nxm = ef[6] + ef[8]; nzm = ef[7] + ef[9];
+                nl2 = sqrt(nxm * nxm + nzm * nzm);
+                if (nl2 < 1e-6) continue;
+                sk = tg_geo_skew_of(nxm / nl2, nzm / nl2, ox, oz);
+                if (fabs(sk) > skewmax) {
+                    s_mouth[ms][a->left ? 0 : 1].edge = -1;
+                    s_mouth[ms][a->left ? 0 : 1].shift = 0.0f;
+                    cut++;
+                } else {
+                    s_mouth[ms][a->left ? 0 : 1].skew = (float)sk;
+                }
+            }
+            if (cut) s_gs.fan_cut += cut;
+        }
         if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
             TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO PLACED] si %d %s run %d..%d reach %.0f kind %d",
                       a->si, a->left ? "left" : "right", lo, hi, reach, kind);
@@ -1641,14 +1674,15 @@ static void tg_net_geo_census(void)
               "%ld shared-carriageway departure(s), %ld street(s) start beyond an avenue; "
               "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
               "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
-              "table-full %ld; march stops: road %ld street %ld water/steep %ld",
+              "table-full %ld; march stops: road %ld street %ld water/steep %ld; "
+              "mouth spans cut off a bend's fan %ld",
               td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
               s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
               s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart, s_gs.beyond,
               s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
-              s_gs.why_road, s_gs.why_street, s_gs.why_water);
+              s_gs.why_road, s_gs.why_street, s_gs.why_water, s_gs.fan_cut);
     /* The ledger: one line per refused arm, so a RUN of missing crossings
      * names its own rule instead of hiding inside a total. */
     {
