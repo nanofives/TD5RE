@@ -418,8 +418,15 @@ int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
          * with u 1..0 -- the seam is the axis and the halves match exactly. */
         const double x0 = (nq == 1 || q == 0) ? -half_w : 0.0;
         const double x1 = (nq == 1 || q == 1) ?  half_w : 0.0;
-        const double u0 = (q == 1) ? 1.0 : 0.0;
-        const double u1 = (q == 1) ? 0.0 : 1.0;
+        /* [ROUND 1015 D / item 11] The seam sat at u = 1.0, the page's right EDGE,
+         * and the sampler wraps: half of each texel row at the axis blended with
+         * column 0 (keyed, black), a 1 px dark line down the middle of every
+         * mirrored tree (luma 46 vs ~90 beside it, measured on a framedump).
+         * Half a texel in puts the axis on column 63's centre. */
+        const double ax = (nq == 2 && td5_env_flag_on("TD5RE_TREE_SEAM_INSET"))
+                        ? 63.5 / 64.0 : 1.0;
+        const double u0 = (q == 1) ? ax : 0.0;
+        const double u1 = (q == 1) ? 0.0 : ax;
         for (i = 0; i < 4; i++) {
             /* local: x across, y up. Quad loop order is near-bottom,
              * far-bottom, far-top, near-top, so 1 and 2 take the far edge. */
@@ -876,6 +883,20 @@ double tg_turn_bend(int si)
     return (double)s_turn_bend[si];
 }
 
+/* [ROUND 1015 B item 2] How many opening spans the START-IN-TOWN courtesy forces
+ * built on both sides. The synthetic track keeps TD5_TG_FACADE_START_RUN (60).
+ * On a REAL place the map decides what stands where: spans 25..59 of La Plata hold
+ * two real cross streets (way 136/2193 at span 37, way 1220/2192 at span 41) with
+ * OSM buildings along them, and the forced wall refused both as "grid" -- buildings
+ * along a road that was never drawn. Only the starting grid itself (TD5_TG_GRID_SPAN
+ * spans behind the line) stays reserved. TD5RE_GEO_START_STREETS=0 restores 60. */
+int tg_start_city_run(void)
+{
+    if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_START_STREETS"))
+        return TD5_TG_GRID_SPAN + 2;
+    return TD5_TG_FACADE_START_RUN;
+}
+
 int tg_facade_built(int si, int left)
 {
     /* [TOPOLOGY-FIRST] In a paved biome the frontage is open exactly where
@@ -884,7 +905,7 @@ int tg_facade_built(int si, int left)
      * Elsewhere the hash rhythm still shapes what the emitters draw. */
     if (tg_network_built() && si > 0 &&
         tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0) {
-        if (si < TD5_TG_FACADE_START_RUN &&
+        if (si < tg_start_city_run() &&
             td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
             return 1;
         {
@@ -1663,6 +1684,8 @@ static long s_geo_lm_prefab, s_geo_lm_nofit;
  * apron vertices pulled in because a real street was within reach. */
 static long s_geo_lm_styled, s_geo_lm_apron, s_geo_lm_apron_quads;
 static long s_geo_lm_vetoed, s_geo_lm_apron_pulled, s_geo_lm_apron_refused;
+/* [ROUND 1015 C item 15] frontage span-sides that stood down in front of a major landmark */
+static long s_geo_lm_forecourt;
 static double s_geo_lm_apron_dev;
 static double s_geo_shift_max, s_geo_route_dev_max;
 /* [ROUND 1009 item 9] HEIGHT FIDELITY LEDGER -- the number item 9 asks for.
@@ -1700,6 +1723,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_lm_prefab = s_geo_lm_nofit = 0;
     s_geo_lm_styled = s_geo_lm_apron = s_geo_lm_apron_quads = 0;
     s_geo_lm_vetoed = s_geo_lm_apron_pulled = s_geo_lm_apron_refused = 0;
+    s_geo_lm_forecourt = 0;
     s_geo_lm_apron_dev = 0.0;
     s_geo_h_n = s_geo_h_levels = s_geo_h_off = 0;
     s_geo_h_err_sum = s_geo_h_err_max = 0.0;
@@ -1975,6 +1999,24 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
                 tg_geo_clear_note_wall();
                 return 1;
             }
+    }
+    /* [ROUND 1015 C item 15] "buildings cover La Catedral": the procedural wall
+     * (and the back rows, which probe the same function) stands down in front of
+     * a MAJOR landmark -- the cathedral's outline, its 25 parts and its apron are
+     * not the only thing a building must not cover, the street face it is SEEN
+     * from is the other. Measured on La Plata before this: 30 frontage meshes
+     * within 45 m of the cathedral hull, the pick's 48 m tall block 25.9 m in
+     * front of it, between Calle 14 and the apron. TD5RE_GEO_LM_FORECOURT_M=0
+     * restores the old frontage. */
+    if (td5_geolm_forecourt_count() > 0) {
+        static double s_fm = -1.0;
+        if (s_fm < 0.0)
+            s_fm = (double)td5_env_float("TD5RE_GEO_LM_FORECOURT_M", 40.0f, 0.0f, 200.0f)
+                 * td5_geob_units_per_m();
+        if (s_fm > 0.0 && td5_geolm_forecourt_near(px, pz, np, s_fm)) {
+            s_geo_lm_forecourt++;
+            return 1;
+        }
     }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
     return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
@@ -3544,6 +3586,11 @@ static void tg_geo_city_report_impl(int from_stream)
                   td5_env_flag_on("TD5RE_GEO_LM_APRON") ? "on" : "off",
                   s_geo_lm_apron_pulled, s_geo_lm_apron_refused,
                   s_geo_lm_apron_dev, ovf ? " (ANCHOR TABLE FULL)" : "");
+        TD5_LOG_I(LOG_TAG, "[GEO LM] [R1015 C] %d major landmark hull(s); %ld "
+                  "frontage probe(s) stood down within %.0f m of one (knob "
+                  "TD5RE_GEO_LM_FORECOURT_M)", td5_geolm_forecourt_count(),
+                  s_geo_lm_forecourt,
+                  (double)td5_env_float("TD5RE_GEO_LM_FORECOURT_M", 40.0f, 0.0f, 200.0f));
     }
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] flanks: %ld corner return(s) added facing "
               "a span-side whose procedural wall stood down for real geometry "
@@ -5354,6 +5401,7 @@ static int tg_rail_avenue_owns_edge(int si, double sg)
     if (!td5_env_flag_on("TD5RE_GEO_AVENUE_RAIL")) return 0;
     for (e = -1; e <= 1; e++) {
         double off = 0.0;
+        if (!tg_geo_avenue_slack_ok(si, e)) continue;     /* [ROUND 1015 A] */
         if (!td5_geo_avenue_at(si + e, &off, NULL, NULL)) continue;
         if (sg * off >= 0.0) return 1;            /* the avenue is on this side */
     }

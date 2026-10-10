@@ -160,6 +160,13 @@ static int    s_have_route;
 static char   s_place_slug[GEO_PLACE_MAX][64];
 static double s_place_bbox[GEO_PLACE_MAX][4];   /* W, S, E, N */
 static int    s_n_places;
+/* [ROUND 1015 F] A place fetched for an administrative area carries its
+ * boundary polygon. Drawn as an outline INSTEAD of the bbox wash: a partido is
+ * ~40% of its bbox, and shading the corners would promise routing where the
+ * place has no data. First ring only (the mainland); lat/lon pairs. */
+#define GEO_RING_MAX 400
+static double s_place_ring[GEO_PLACE_MAX][GEO_RING_MAX][2];
+static int    s_place_ring_n[GEO_PLACE_MAX];
 
 /* Off-thread rebuild. The router is synchronous by contract but must finish
  * "well under a second"; we only move it off the main thread once a build has
@@ -730,6 +737,27 @@ static void geo_draw_places(float sx, float sy)
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (i = 0; i < s_n_places; i++) {
         float x0, y0, x1, y1, t;
+        if (s_place_ring_n[i] >= 4) {
+            /* the polygon, not the box -- see s_place_ring */
+            int k, budget = 4000;
+            float px = 0.0f, py = 0.0f;
+            for (k = 0; k < s_place_ring_n[i] && budget > 0; k++) {
+                float qx, qy;
+                geo_latlon_to_design(s_place_ring[i][k][0], s_place_ring[i][k][1],
+                                     sx, sy, &qx, &qy);
+                if (k > 0) {
+                    const int out_l = (px < GEO_MAP_X && qx < GEO_MAP_X);
+                    const int out_r = (px > GEO_MAP_X + GEO_MAP_W && qx > GEO_MAP_X + GEO_MAP_W);
+                    const int out_t = (py < GEO_MAP_Y && qy < GEO_MAP_Y);
+                    const int out_b = (py > GEO_MAP_Y + GEO_MAP_H && qy > GEO_MAP_Y + GEO_MAP_H);
+                    if (!(out_l || out_r || out_t || out_b))
+                        budget -= geo_stamp_line(px, py, qx, qy, 2.0f,
+                                                 GEO_COL_SHADE_ED, sx, sy, budget);
+                }
+                px = qx; py = qy;
+            }
+            continue;
+        }
         geo_latlon_to_design(s_place_bbox[i][3], s_place_bbox[i][0], sx, sy, &x0, &y0);
         geo_latlon_to_design(s_place_bbox[i][1], s_place_bbox[i][2], sx, sy, &x1, &y1);
         if (x1 < x0) { t = x0; x0 = x1; x1 = t; }
@@ -1015,6 +1043,22 @@ static void geo_screen_init(void)
     td5_geo_tiles_open();
 
     s_n_places = td5_geo_route_places(s_place_slug, s_place_bbox, GEO_PLACE_MAX);
+    {
+        int i;
+        for (i = 0; i < s_n_places; i++) {
+            double ll[2 * GEO_RING_MAX];
+            const int n = td5_geo_route_place_boundary(s_place_slug[i], 0, ll, GEO_RING_MAX);
+            int k;
+            s_place_ring_n[i] = 0;
+            if (n >= 4 && n <= GEO_RING_MAX) {
+                for (k = 0; k < n; k++) {
+                    s_place_ring[i][k][0] = ll[2 * k];
+                    s_place_ring[i][k][1] = ll[2 * k + 1];
+                }
+                s_place_ring_n[i] = n;
+            }
+        }
+    }
 
     /* Open on La Plata unless a cached place says otherwise -- the default
      * Mariano asked for, and the only place the shipped cache can route in. */

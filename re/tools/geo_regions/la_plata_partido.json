@@ -1,0 +1,9 @@
+{
+ "name": "La Plata (Partido)",
+ "slug": "la_plata_partido",
+ "relation": {"name": "Partido de La Plata", "admin_level": 5,
+              "near": [-34.92, -57.95], "near_m": 5000},
+ "min_ring_frac": 0.02,
+ "layers": {"extra_buildings": true, "canopy": true, "land_cover": "worldcover"},
+ "overture_release": null
+}

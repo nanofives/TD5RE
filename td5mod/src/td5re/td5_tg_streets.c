@@ -399,10 +399,74 @@ static int tg_r15_xrun_centre(const TG_NodeList *nl, int si, double sg,
     return si == (lo + hi) / 2;
 }
 
+/* [ROUND 1015 B items 2, 7] A REAL street follows the ground it crosses.
+ *
+ * The cross-street quad was ONE rectangle per span, kerb to reach (up to 19500
+ * units), at kerb height falling by at most TD5_TG_GROUND_DROP. On La Plata a
+ * diagonal street stays beside a CLIMBING avenue for tens of metres, so the
+ * main road's later spans (skirt = road level - GROUND_DROP out to the conformed
+ * bed, then the heightfield) and the far terrain rose over its far half:
+ * audited on the level, 151 of 1063 street meshes had ground or pavement above
+ * them, median 124 units, up to 1205 -- "the crossing road renders below the
+ * tiles texture", and a real street that was in the network but invisible
+ * (span 41 left: 60 to 280 units under the skirt of spans 44..50).
+ *
+ * So on a geo network the quad is cut into span-length pieces and every vertex
+ * past the kerb is lifted to the heightfield + TG_XST_FOLLOW_LIFT where that is
+ * higher than the old straight ramp. The heightfield carries the road-bed conform,
+ * so beside the avenue that IS road level, and out in the blocks it is the natural
+ * ground. The kerb edge is untouched, so the mouth and the pavement arms still
+ * meet it exactly. TD5RE_GEO_STREET_FOLLOW=0 restores the single rectangle. */
+#define TG_XST_SEG_MAX     16
+#define TG_XST_SEG_LEN     1500.0
+#define TG_XST_FOLLOW_LIFT 60.0
+
+static void tg_xstreet_push_follow(double *px, double *py, double *pz,
+                                   double *uu, double *vv, int *pn,
+                                   const double *e, double nox, double noz,
+                                   double fox, double foz, double reach,
+                                   double drop, double u_r, int si)
+{
+    int nseg = (int)ceil(reach / TG_XST_SEG_LEN), k;
+    if (nseg < 1) nseg = 1;
+    if (nseg > TG_XST_SEG_MAX) nseg = TG_XST_SEG_MAX;
+    for (k = 0; k < nseg; k++) {
+        const double f0 = (double)k / (double)nseg, f1 = (double)(k + 1) / (double)nseg;
+        double q[12], t[8];
+        int c;
+        for (c = 0; c < 4; c++) {
+            const int far_edge = (c >= 2);
+            const double f = (c == 1 || c == 2) ? f1 : f0;
+            const double x = far_edge ? e[3] + fox * reach * f : e[0] + nox * reach * f;
+            const double z = far_edge ? e[5] + foz * reach * f : e[2] + noz * reach * f;
+            double y = (far_edge ? e[4] : e[1]) + TD5_TG_VERGE_LIFT - drop * f;
+            if (f > 0.0) {
+                /* the envelope of the heightfield over half a cell round the vertex:
+                 * the ground meshes are triangulated on a 1500 lattice, so a point
+                 * between nodes sits above or below the exact height there */
+                const double hh = TG_WORLD_CELL * 0.5;
+                double g = tg_world_h(x, z), g1;
+                g1 = tg_world_h(x + hh, z); if (g1 > g) g = g1;
+                g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
+                g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
+                g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
+                g += TG_XST_FOLLOW_LIFT;
+                if (g > y) y = g;
+            }
+            q[c * 3 + 0] = x; q[c * 3 + 1] = y; q[c * 3 + 2] = z;
+            t[c * 2 + 0] = u_r * f;
+            t[c * 2 + 1] = far_edge ? (double)si + 1.0 : (double)si;
+        }
+        tg_city_push_quad(px, py, pz, uu, vv, pn, q, t);
+    }
+}
+
 static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
 {
-    double px[8], py[8], pz[8], uu[8], vv[8];
+    double px[2 * 4 * TG_XST_SEG_MAX], py[2 * 4 * TG_XST_SEG_MAX], pz[2 * 4 * TG_XST_SEG_MAX];
+    double uu[2 * 4 * TG_XST_SEG_MAX], vv[2 * 4 * TG_XST_SEG_MAX];
     double e[10], q[12], t[8];
+    const int follow = tg_net_geo() && td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW");
     /* [R4 CROSS item 9] Perpendicular lane markings: swap in the cross-street
      * page whose centre line runs DOWN the street (see tg_emit_texture_page_r4_cross).
      * Default ON; TD5RE_AUTOTRACK_CROSS_MARKINGS=0 restores the biome road page. */
@@ -462,6 +526,11 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         tg_block_rot2(e[6], e[7], ang, &nox, &noz);
         tg_block_rot2(e[8], e[9], ang, &fox, &foz);
 
+        if (follow) {
+            tg_xstreet_push_follow(px, py, pz, uu, vv, &n, e, nox, noz, fox, foz,
+                                   reach, drop, u_r, h->si);
+            continue;
+        }
         q[0] = e[0];                q[1]  = e[1] + TD5_TG_VERGE_LIFT;
         q[2] = e[2];
         q[3] = e[0] + nox * reach;  q[4]  = e[1] + TD5_TG_VERGE_LIFT - drop;
@@ -639,6 +708,9 @@ static long s_geop_real_buried, s_geop_real_capped;
 /* [ROUND 1009 item 10] Side-street frontage walls / flank blocks refused
  * because they would have stood inside a real OSM square. */
 static long s_geop_xwall_park;
+/* [ROUND 1015 C item 14] ... and refused because NO real building stands behind
+ * or beside them. */
+static long s_geop_xwall_unbacked;
 static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
 
 int tg_block_is_park(int si, int left)
@@ -1615,6 +1687,48 @@ static int tg_geo_xwall_in_plaza(int si, double bx, double bz,
         pz[k] = bz + oz * flen * t;
     }
     return td5_geob_points_in_plaza(si, px, pz, 5, TD5_GEOB_WIN_A);
+}
+
+/* [ROUND 1015 C item 14] "there are still buildings inside Plaza Moreno" (picks
+ * level091 e144 s14 / s26, pages 381 / 383, kind `cross`).
+ *
+ * MEASURED, not assumed (verify/r1015c_plaza_cover.py): both meshes are the BARE
+ * 3-quad side-street frontage sheet tg_cross_emit_sidewalls writes -- a 6.4 m long,
+ * 14 m tall, ZERO-thickness wall -- standing on the traffic island between Calle 14,
+ * Diagonal 73 and the Plaza Moreno ring, 24 m outside the plaza's own polygon and in
+ * no AREAS.JSON polygon at all (0 of 256 `cross` meshes lie inside one), so the
+ * polygon veto above could not see them. What they have in common is that NOTHING is
+ * behind them: in the synthetic grid the sheet is the street face of a block the
+ * back rows fill in, on a real map the island behind it is lawn, and a lone 14 m
+ * sheet in the grass reads as a building in the park.
+ *
+ * "Real where real exists": a side-street wall stands only if a real footprint is
+ * within reach of it. Probed on both sides of the wall (the building is behind it
+ * from the street, but the wall's own side is the street side), at three setbacks.
+ * Same footprint index and span window every other stand-down probe uses.
+ * TD5RE_GEO_XWALL_BACKED=0 restores the unconditional wall. */
+static int tg_geo_xwall_unbacked(int si, double bx, double bz,
+                                 double ox, double oz, double flen)
+{
+    static const double k_set_m[3] = { 3.0, 8.0, 14.0 };
+    double px[12], pz[12];
+    const double upm = td5_geob_units_per_m();
+    int np = 0, k, side, a;
+
+    if (!tg_geo_city_active()) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_XWALL_BACKED")) return 0;
+    if (!(upm > 0.0)) return 0;
+    for (a = 0; a < 2; a++) {
+        const double t = a ? 0.75 : 0.25;
+        const double cx = bx + ox * flen * t, cz = bz + oz * flen * t;
+        for (side = -1; side <= 1; side += 2)
+            for (k = 0; k < 3; k++) {
+                px[np] = cx + (-oz) * side * k_set_m[k] * upm;
+                pz[np] = cz + ( ox) * side * k_set_m[k] * upm;
+                np++;
+            }
+    }
+    return !td5_geob_points_in_building(si, px, pz, np, TD5_GEOB_WIN_B);
 }
 
 /* Outward distance from the centreline at span si, on side `side`. */
@@ -2650,7 +2764,9 @@ static void tg_geo_plaza_report_impl(int from_stream)
               "its paths (knob TD5RE_GEO_PLAZA_BEDCUT=%s); ground tiers "
               "lawn+%.0f / paving+%.0f raw (knob TD5RE_GEO_PLAZA_TIER=%s); "
               "%ld side-street wall(s)/flank block(s) refused for standing "
-              "inside a square (knob TD5RE_GEO_XWALL_PARK=%s)",
+              "inside a square (knob TD5RE_GEO_XWALL_PARK=%s), %ld more "
+              "because no real building stands behind them (knob "
+              "TD5RE_GEO_XWALL_BACKED=%s, round 1015 C)",
               s_geop_hedge_nobarrier,
               td5_env_flag_on("TD5RE_GEO_PLAZA_HEDGE_OSM") ? "on" : "off",
               s_geop_bed_thin,
@@ -2658,7 +2774,9 @@ static void tg_geo_plaza_report_impl(int from_stream)
               TD5_TG_GEOP_LIFT, TD5_TG_GEOP_LIFT + TD5_TG_GEOP_TIER,
               td5_env_flag_on("TD5RE_GEO_PLAZA_TIER") ? "on" : "off",
               s_geop_xwall_park,
-              td5_env_flag_on("TD5RE_GEO_XWALL_PARK") ? "on" : "off");
+              td5_env_flag_on("TD5RE_GEO_XWALL_PARK") ? "on" : "off",
+              s_geop_xwall_unbacked,
+              td5_env_flag_on("TD5RE_GEO_XWALL_BACKED") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1014 E] park lawn: %ld sub-triangle(s) at "
               "refinement level <= %ld (knob TD5RE_GEO_LAWN_SUBDIV=%s), ground "
               "uncapped (TD5RE_GEO_PARK_UNCAP=%s); trees: %ld planted of %ld "
@@ -2931,6 +3049,10 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
                 s_geop_xwall_park++;
                 continue;
             }
+            if (tg_geo_xwall_unbacked(h->si, cx, cz, ox, oz, flen)) {
+                s_geop_xwall_unbacked++;
+                continue;
+            }
             /* base -> outward*flen, sinking with the skirt, rising H. */
             tg_facade_push_grid(cx, by, cz, ox * flen, -drop, oz * flen,
                                 0.0, H, 0.0, cols, rows, 0, rows,
@@ -3114,6 +3236,11 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                 if (tg_geo_xwall_in_plaza(h->si, bxp, bzp, ox, oz,
                                           (double)TD5_TG_R8_FLANK_LEN)) {
                     s_geop_xwall_park++;
+                    continue;
+                }
+                if (tg_geo_xwall_unbacked(h->si, bxp, bzp, ox, oz,
+                                          (double)TD5_TG_R8_FLANK_LEN)) {
+                    s_geop_xwall_unbacked++;
                     continue;
                 }
                 if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
@@ -4281,6 +4408,7 @@ void tg_r9_city_reset(void)
     s_geop_tree_thin = s_geop_tree_capped = s_geop_apron_quads = 0;
     s_geop_skirt_park_n = 0;
     s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
+    s_geop_xwall_unbacked = 0;
     s_geop_ring_areas = s_geop_real_ways = s_geop_real_segs = 0;
     s_geop_real_buried = s_geop_real_capped = 0;
 }

@@ -598,8 +598,21 @@ static void tg_emit_texture_page_r3_block(TG_Buf *out, int which)
     /* Palette (BGR). */
     for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
         int b, g, r;
-        if (which == 0) {            /* mowed grass: green ramp, light->deep */
-            b = 40 + i * 3;  g = 96 + i * 8;  r = 44 + i * 4;
+        if (which == 0) {            /* mowed grass: green ramp, deep->light */
+            if (td5_env_flag_on("TD5RE_GEO_LAWN_PAL")) {
+                /* [ROUND 1015 D / item 10] Shipped-grass hue and value. The
+                 * original ramp (below) averaged RGB 86,180,71 over the texels
+                 * the grain actually uses -- H 112, S 0.60, V 0.71 -- while 366
+                 * opaque green pages across the shipped tracks sit at median
+                 * H 77, S 0.43, V 0.37 (p90 H 101, V 0.50): a lime-green nothing
+                 * else in the game comes near, the "radioactive" lawn. This ramp
+                 * averages RGB ~106,124,60 (H 76, S 0.52, V 0.49), i.e. the
+                 * olive of the Sydney GREEN page this track already uses for
+                 * its hedgerows, one notch lighter for a mown surface. */
+                r = 56 + (i * 24) / 5;  g = 76 + (i * 23) / 5;  b = 26 + (i * 16) / 5;
+            } else {
+                b = 40 + i * 3;  g = 96 + i * 8;  r = 44 + i * 4;
+            }
         } else if (which == 1) {     /* hedge: darker, denser green */
             b = 24 + i * 2;  g = 58 + i * 6;  r = 22 + i * 3;
         } else if (which == 2) {     /* house wall: warm plaster/brick */

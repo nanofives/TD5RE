@@ -43,6 +43,7 @@
 #define TG_NET_MAX_EDGES 2048
 #define TG_NET_MAX_NODES 4096
 #define TG_NET_POLY      16
+#define TG_NET_RIB_Q     256     /* [1015 B] ribbon quads per mesh once cut into span-length pieces */
 #define TG_NET_STEP      600.0
 #define TG_NET_MARGIN    500.0     /* clear air a street keeps off tarmac   */
 #define TG_NET_BACK_MAX  26000.0   /* longest back street                   */
@@ -737,6 +738,7 @@ static struct {
     long ways, inbox, route, cand, street, avenue, cont, under, depart, beyond;
     long d_grid, d_struct, d_biome, d_park, d_corridor, d_skew,
          d_short, d_taken, d_fold, d_full, d_under;
+    long fan_cut;           /* [1015 B] mouth spans cut: their normal is off the street's ray */
     long why_road, why_street, why_water;
 } s_gs;
 
@@ -1206,7 +1208,7 @@ static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
      * tg_xstreet_here and then never emitted -- the two authorities must agree. */
     if (lo < 1 || hi >= nspans || hi + 1 >= nl->count)
         return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID, 0.0), 0);
-    if (lo < TD5_TG_FACADE_START_RUN
+    if (lo < tg_start_city_run()
         && td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
         return (s_gs.d_grid++, tg_geo_drop_note(si, left, TG_GD_GRID, 0.0), 0);
 
@@ -1421,6 +1423,38 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
                 s_mouth[ms][a->left ? 0 : 1].shift = (float)(sh > 0.0 ? sh : a->shift);
             }
             s_gs.beyond++;
+        }
+        /* [ROUND 1015 B item 16] ONE street direction for the whole mouth run.
+         * The skew above was measured at the placing span and copied to every span
+         * of lo..hi, and each span's quad, pavement arms, flanks and zebra rotate
+         * THEIR OWN outward normal by it. On a straight road that is parallel; in a
+         * bend the normals themselves turn (La Plata span 805, the road swings 90
+         * degrees over spans 801..805), so the five quads FANNED: the ones at the
+         * bend's start pointed back across the carriageway and their pavement arms
+         * ("sidewalk clips through the middle of the road") ran over the road for 20 m.
+         * The street the march validated is a straight ray, so each span now gets
+         * the skew that turns ITS normal onto that ray, and a span whose normal is
+         * more than the skew ceiling off it (the ray would run along or back over the
+         * kerb) leaves the run. TD5RE_GEO_MOUTH_PARALLEL=0 restores the shared skew. */
+        if (td5_env_flag_on("TD5RE_GEO_MOUTH_PARALLEL")) {
+            int ms, cut = 0;
+            for (ms = lo; ms <= hi; ms++) {
+                double ef[10], nxm, nzm, nl2, sk;
+                if (ms < 0 || ms >= TD5_TG_MAX_SPANS + 8 || ms + 1 >= nl->count) continue;
+                tg_city_edge_frame(nl, ms, sg, ef);
+                nxm = ef[6] + ef[8]; nzm = ef[7] + ef[9];
+                nl2 = sqrt(nxm * nxm + nzm * nzm);
+                if (nl2 < 1e-6) continue;
+                sk = tg_geo_skew_of(nxm / nl2, nzm / nl2, ox, oz);
+                if (fabs(sk) > skewmax) {
+                    s_mouth[ms][a->left ? 0 : 1].edge = -1;
+                    s_mouth[ms][a->left ? 0 : 1].shift = 0.0f;
+                    cut++;
+                } else {
+                    s_mouth[ms][a->left ? 0 : 1].skew = (float)sk;
+                }
+            }
+            if (cut) s_gs.fan_cut += cut;
         }
         if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
             TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO PLACED] si %d %s run %d..%d reach %.0f kind %d",
@@ -1640,14 +1674,15 @@ static void tg_net_geo_census(void)
               "%ld shared-carriageway departure(s), %ld street(s) start beyond an avenue; "
               "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
               "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
-              "table-full %ld; march stops: road %ld street %ld water/steep %ld",
+              "table-full %ld; march stops: road %ld street %ld water/steep %ld; "
+              "mouth spans cut off a bend's fan %ld",
               td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
               s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
               s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart, s_gs.beyond,
               s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
-              s_gs.why_road, s_gs.why_street, s_gs.why_water);
+              s_gs.why_road, s_gs.why_street, s_gs.why_water, s_gs.fan_cut);
     /* The ledger: one line per refused arm, so a RUN of missing crossings
      * names its own rule instead of hiding inside a total. */
     {
@@ -1806,6 +1841,53 @@ int tg_net_mouth_surface(int si, int left)
 
 /* ---------------------------------------------------------- emission -- */
 
+/* [ROUND 1015 B items 2, 7] Height a drawn network road stands at: the heightfield's
+ * envelope over half a cell round (x,z), lifted. The ground meshes are triangulated on a
+ * 1500 lattice, so the exact height at an off-lattice point can sit BELOW the surface a
+ * viewer sees there; a road laid at world_h + 30 on a few far-apart polyline vertices was
+ * under the terrain for most of its length (34 of 53 ring/back-street meshes on La Plata).
+ * Geo only: callers gate on tg_net_follow_on() so the synthetic bytes stay as they were. */
+#define TG_NET_FOLLOW_LIFT 60.0
+#define TG_NET_FOLLOW_SEG  1500.0
+static double tg_net_ground_y(double x, double z)
+{
+    const double hh = TG_WORLD_CELL * 0.5;
+    double g = tg_world_h(x, z), g1;
+    g1 = tg_world_h(x + hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
+    return g + TG_NET_FOLLOW_LIFT;
+}
+
+static int tg_net_follow_on(void)
+{
+    return td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW");
+}
+
+/* [ROUND 1015 B item 12] Does (x,z) lie on the carriageway of any edge OTHER than `self`?
+ * Distance to each of its polyline segments against half its width. */
+static int tg_net_on_other_road(const TG_NetEdge *self, double x, double z)
+{
+    int i, k;
+    for (i = 0; i < s_ne; i++) {
+        const TG_NetEdge *o = &s_edges[i];
+        if (o == self || o->npoly < 2) continue;
+        for (k = 0; k + 1 < o->npoly; k++) {
+            const double ax = o->px[k], az = o->pz[k];
+            const double bx = o->px[k + 1], bz = o->pz[k + 1];
+            const double dx = bx - ax, dz = bz - az;
+            const double l2 = dx * dx + dz * dz;
+            double t = (l2 > 1e-9) ? ((x - ax) * dx + (z - az) * dz) / l2 : 0.0, ex, ez;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            ex = ax + dx * t - x; ez = az + dz * t - z;
+            if (ex * ex + ez * ez < o->width * o->width * 0.25) return 1;
+        }
+    }
+    return 0;
+}
+
 /* Tarmac for the polyline parts nothing else draws: back streets, and the
  * wandering half of a country loop (its first, straight segment is the R12
  * forest lane the terrain emitters already lay). Owned by the mouth span. */
@@ -1821,10 +1903,11 @@ int tg_net_emit_entry(const TG_FBHook *h)
             /* [1014 B] ONE mesh, vertices shared and MITRED at every bend, so a
              * ring road is a continuous ribbon and not a string of separate
              * rectangles with a notch at each joint. */
-            double px[4 * TG_NET_POLY], py[4 * TG_NET_POLY], pz[4 * TG_NET_POLY];
-            double uu[4 * TG_NET_POLY], vv[4 * TG_NET_POLY];
+            double px[4 * TG_NET_RIB_Q], py[4 * TG_NET_RIB_Q], pz[4 * TG_NET_RIB_Q];
+            double uu[4 * TG_NET_RIB_Q], vv[4 * TG_NET_RIB_Q];
             double lx[TG_NET_POLY], lz[TG_NET_POLY], rx[TG_NET_POLY], rz[TG_NET_POLY];
             int seg_page = TD5_TG_PAGE_R4_CROSS + 0, seg_nq = e->npoly - 1, n = 0, m;
+            const int follow = tg_net_follow_on();
             const double hw = e->width * 0.5;
             double vlen = 0.0;
             size_t off;
@@ -1845,18 +1928,49 @@ int tg_net_emit_entry(const TG_FBHook *h)
                 lx[m] = e->px[m] - nx * hw / ml; lz[m] = e->pz[m] - nz * hw / ml;
                 rx[m] = e->px[m] + nx * hw / ml; rz[m] = e->pz[m] + nz * hw / ml;
             }
-            for (m = 0; m + 1 < e->npoly; m++) {
-                const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
-                                     + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
-                const double y0 = tg_world_h(e->px[m], e->pz[m]) + 30.0;
-                const double y1 = tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
-                const double v0 = vlen / (double)TD5_TG_SPAN_LENGTH;
-                const double v1 = (vlen + sl) / (double)TD5_TG_SPAN_LENGTH;
-                px[n] = lx[m];     pz[n] = lz[m];     py[n] = y0; uu[n] = 0.0; vv[n] = v0; n++;
-                px[n] = rx[m];     pz[n] = rz[m];     py[n] = y0; uu[n] = 1.0; vv[n] = v0; n++;
-                px[n] = rx[m + 1]; pz[n] = rz[m + 1]; py[n] = y1; uu[n] = 1.0; vv[n] = v1; n++;
-                px[n] = lx[m + 1]; pz[n] = lz[m + 1]; py[n] = y1; uu[n] = 0.0; vv[n] = v1; n++;
-                vlen += sl;
+            {
+                /* [1015 B] span-length pieces when the road follows the ground (geo): one quad
+                 * per polyline segment, unless that would not fit the buffer */
+                int ksub[TG_NET_POLY], total = 0;
+                for (m = 0; m + 1 < e->npoly; m++) {
+                    const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
+                                         + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
+                    int k = follow ? (int)ceil(sl / TG_NET_FOLLOW_SEG) : 1;
+                    if (k < 1) k = 1;
+                    if (k > 24) k = 24;
+                    ksub[m] = k; total += k;
+                }
+                if (total > TG_NET_RIB_Q)
+                    for (m = 0; m + 1 < e->npoly; m++) ksub[m] = 1;
+                for (m = 0; m + 1 < e->npoly; m++) {
+                    const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
+                                         + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
+                    int j;
+                    for (j = 0; j < ksub[m]; j++) {
+                        const double t0 = (double)j / (double)ksub[m];
+                        const double t1 = (double)(j + 1) / (double)ksub[m];
+                        const double cx0 = e->px[m] + (e->px[m + 1] - e->px[m]) * t0;
+                        const double cz0 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t0;
+                        const double cx1 = e->px[m] + (e->px[m + 1] - e->px[m]) * t1;
+                        const double cz1 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t1;
+                        const double y0 = follow ? tg_net_ground_y(cx0, cz0)
+                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0;
+                        const double y1 = follow ? tg_net_ground_y(cx1, cz1)
+                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
+                        const double v0 = (vlen + sl * t0) / (double)TD5_TG_SPAN_LENGTH;
+                        const double v1 = (vlen + sl * t1) / (double)TD5_TG_SPAN_LENGTH;
+                        px[n] = lx[m] + (lx[m + 1] - lx[m]) * t0; pz[n] = lz[m] + (lz[m + 1] - lz[m]) * t0;
+                        py[n] = y0; uu[n] = 0.0; vv[n] = v0; n++;
+                        px[n] = rx[m] + (rx[m + 1] - rx[m]) * t0; pz[n] = rz[m] + (rz[m + 1] - rz[m]) * t0;
+                        py[n] = y0; uu[n] = 1.0; vv[n] = v0; n++;
+                        px[n] = rx[m] + (rx[m + 1] - rx[m]) * t1; pz[n] = rz[m] + (rz[m + 1] - rz[m]) * t1;
+                        py[n] = y1; uu[n] = 1.0; vv[n] = v1; n++;
+                        px[n] = lx[m] + (lx[m + 1] - lx[m]) * t1; pz[n] = lz[m] + (lz[m + 1] - lz[m]) * t1;
+                        py[n] = y1; uu[n] = 0.0; vv[n] = v1; n++;
+                    }
+                    vlen += sl;
+                }
+                seg_nq = n / 4;
             }
             if (*h->nmesh >= h->maxmesh - 1) return 1;
             off = h->blk->len;
@@ -1882,8 +1996,10 @@ int tg_net_emit_entry(const TG_FBHook *h)
                     for (m = 0; m + 1 < e->npoly; m++) {
                         const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
                                              + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
-                        const double y0 = tg_world_h(e->px[m], e->pz[m]) + 30.0;
-                        const double y1 = tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
+                        const double y0 = follow ? tg_net_ground_y(e->px[m], e->pz[m])
+                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0;
+                        const double y1 = follow ? tg_net_ground_y(e->px[m + 1], e->pz[m + 1])
+                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
                         const double v0 = vlen / (double)TD5_TG_SPAN_LENGTH;
                         const double v1 = (vlen + sl) / (double)TD5_TG_SPAN_LENGTH;
                         const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
@@ -1898,6 +2014,18 @@ int tg_net_emit_entry(const TG_FBHook *h)
                             const double ix0 = ex[m], iz0 = ez[m], ix1 = ex[m + 1], iz1 = ez[m + 1];
                             const double ox0 = ix0 + dx0 / l0 * sw, oz0 = iz0 + dz0 / l0 * sw;
                             const double ox1 = ix1 + dx1 / l1 * sw, oz1 = iz1 + dz1 / l1 * sw;
+                            /* [ROUND 1015 B item 12] No footway slab inside another carriageway.
+                             * Where two ring ways run side by side or cross (the Y at Plaza
+                             * Moreno, Calle 50 against the Calle 14 arc) each ribbon laid its
+                             * kerbs as if it were alone, so the inner footway of one ran across
+                             * the other's tarmac: 389 audited samples of pavement standing on
+                             * a ring-road surface, z-fighting with it. The slab section is
+                             * dropped when its centre lies on another edge's carriageway. */
+                            if (td5_env_flag_on("TD5RE_GEO_PLAZA_FW_CLEAR")
+                                && tg_net_on_other_road(e, 0.25 * (ix0 + ox0 + ix1 + ox1),
+                                                        0.25 * (iz0 + oz0 + iz1 + oz1))) {
+                                continue;
+                            }
                             /* top slab: near-in, near-out, far-out, far-in */
                             sx[sn] = ix0; sz[sn] = iz0; sy[sn] = y0 + H; su[sn] = 0.0; sv[sn] = v0; sn++;
                             sx[sn] = ox0; sz[sn] = oz0; sy[sn] = y0 + H; su[sn] = uw;  sv[sn] = v0; sn++;
@@ -1945,6 +2073,28 @@ int tg_net_emit_entry(const TG_FBHook *h)
             if (*h->nmesh >= h->maxmesh - 1) return 1;
             off = h->blk->len;
             h->moff[(*h->nmesh)++] = off;
+            if (tg_net_follow_on()) {
+                /* [1015 B] cut into span-length pieces, each end on the ground envelope */
+                double qx[4 * 24], qy[4 * 24], qz[4 * 24], qu[4 * 24], qv[4 * 24];
+                int ks = (int)ceil(len / TG_NET_FOLLOW_SEG), j, qn = 0;
+                if (ks < 1) ks = 1;
+                if (ks > 24) ks = 24;
+                for (j = 0; j < ks; j++) {
+                    const double t0 = (double)j / (double)ks, t1 = (double)(j + 1) / (double)ks;
+                    const double ax0 = e->px[k] + (e->px[k + 1] - e->px[k]) * t0;
+                    const double az0 = e->pz[k] + (e->pz[k + 1] - e->pz[k]) * t0;
+                    const double ax1 = e->px[k] + (e->px[k + 1] - e->px[k]) * t1;
+                    const double az1 = e->pz[k] + (e->pz[k + 1] - e->pz[k]) * t1;
+                    const double y0 = tg_net_ground_y(ax0, az0), y1 = tg_net_ground_y(ax1, az1);
+                    qx[qn] = ax0 - nx; qz[qn] = az0 - nz; qy[qn] = y0; qu[qn] = 0.0; qv[qn] = len * t0 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                    qx[qn] = ax0 + nx; qz[qn] = az0 + nz; qy[qn] = y0; qu[qn] = 1.0; qv[qn] = len * t0 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                    qx[qn] = ax1 + nx; qz[qn] = az1 + nz; qy[qn] = y1; qu[qn] = 1.0; qv[qn] = len * t1 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                    qx[qn] = ax1 - nx; qz[qn] = az1 - nz; qy[qn] = y1; qu[qn] = 0.0; qv[qn] = len * t1 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                }
+                seg_nq = qn / 4;
+                if (!tg_write_quad_mesh(h->blk, qx, qy, qz, qu, qv, qn, &seg_page, &seg_nq, 1))
+                    return 0;
+            } else
             if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
                 return 0;
             tg_guard_mark(off, h->blk->len, TG_GK_CROSS, h->si);

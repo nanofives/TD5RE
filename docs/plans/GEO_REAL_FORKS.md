@@ -468,3 +468,57 @@ with `|` separated `-Extra` and a window size, for free-cam tours).
   terrain: anything 100+ m out on a slope can be under it.
 * A coverage map (rasterise MODELS.DAT's quads by kind, magenta = no quad) finds the see-through
   slots a frame misses.
+
+## Round 1015 A: the window fits the room, the median breaks, the finish covers the avenue
+
+Mariano's picks 1, 3, 6, 13, 17, 18 on La Plata (level091). Master e7d89db0, route derived 2026-10-09 21:27
+(spans 1310, finish 1206): 3 real forks (F=94 / 343 / 945), census 71 arms accepted, 23 beyond an avenue, 0 corridor
+drops. Note: that route's lane profile (3 lanes up to span 38 and 245..311, 2 elsewhere) is what refused the first fork.
+
+**Window fit (`rf_fit_window`).** The full-width window F-8..R+2 and the ramps in front of and behind it used to need
+the route's lane count constant over `[F-8-16, R+2+16]`. Now: the fork body F..R+1 keeps the exact count `lanes(A)`; the
+approach nodes and the ramps may carry MORE lanes than `lanes(A)` (up to `lanes(A)+lanes(B)`): the node width is
+`max(route lanes, lanes(A) + lanes(B) * f)`, so a 3-lane flare is only widened by what is missing (`extra =
+want - route lanes`, the node moves half of `extra` toward the corridor). A node with FEWER lanes ends the ramp. Each
+ramp is as long as the grid (`GRID+2`), the finish and the lane profile allow, 6 nodes at least (`TG_RF_TAPER_MIN`,
+9.5 degrees), 16 at most. The first fork of a run SLIDES its start (up to 24 spans) to the first clean window, because
+the road where an avenue begins is usually still turning onto it (Diagonal 73 leaves Calle 40 at spans 35..38).
+`TD5RE_GEO_FORK_TAPER_FIT=0` restores the round-1014 rule.
+
+| | master e7d89db0 | now |
+|---|---|---|
+| Diagonal 73, first run | F=94 R=205 (spans 47..93 scenery only) | F=46 R=209 |
+| Diagonal 73, second run | F=343 R=526 | F=328 R=565 |
+| Avenida 60 | F=945 R=1063 | F=901 R=1075 |
+| Avenida 7 | none (window refused) | F=1130 R=1174 |
+
+Still scenery-only: Diagonal 73 spans 209..236 and 315..327 (bend of 0.18..0.23 rad/span in the window), Avenida 13
+(678..708, bend 0.47), Avenida 7 1115..1129 (bend) and 1175..1306 (the finish is at 1206, forks stop 8 spans short).
+
+**Openings.** `AVENUES.JSON open` was measured at a RAW-polyline point within 1.7 m of a street's centre line: for a calle
+at 45 degrees the footprint on the median is 3 spans long and the sampled span is a few spans off the written one. The
+generator now re-measures at load (`td5_geo_avenues.c av_refine_openings`): conditioned route node + median midline,
+nearest non-avenue way within its OWN half carriageway, parallel ways (<25 degrees) excluded. 32 -> 87 open spans over
+the five avenues. In a real fork's window an open span gets no island (the neighbours get end caps through
+`tg_median_at_raw`) and its gore floor is laid FLUSH with the road page (`tg_emit_gore(..., flush)`). The corridor itself
+does not break: it is one span chain, and a car cannot cross the paved gap. `TD5RE_GEO_FORK_OPENING=0`,
+`TD5RE_GEO_AVENUE_OPEN_REFINE=0`.
+
+**Start of an avenue.** `av_backfill_starts` walks each avenue's first row back up to 12 spans on the same road graph
+(same-name one-way way, anti-parallel, same side, 375 units per span): Avenida 60 now starts at 893 (was 904, the first
+route vertex after the plaza), Diagonal 73 at 39 (was 47). `TD5RE_GEO_AVENUE_BACKFILL=0`.
+
+**Holes.** `tg_geo_avenue_reach` took one span of slack ahead of the first row, so the pavement, railing and ground skirt
+stood down over a span with no carriageway (`TD5RE_GEO_AVENUE_ENTRY_SLACK=1` restores it), and the skirt's inner edge,
+pulled out to clear a carriageway that starts a node later, left an uncovered strip: `tg_emit_ground` now closes it with
+a ground quad from the road edge (not on a fork's main spans, whose gore floor is at the same height). A quad with two
+coincident corners is dropped by the renderer: the filler is at least 1 unit wide at both ends. A median that tapers to
+nothing (under 0.7 m) now gets a flush paved sliver instead of an empty gap (`TD5RE_GEO_AVENUE_WEDGE=0`).
+
+**Finish.** On a divided avenue (Avenida 7, span 1206) the gantry's far leg and the banner go to the far carriageway's
+outer edge and a second chequered band is laid on it (`TD5RE_GEO_FINISH_AVENUE=0`).
+
+**Not done.** Item 17 at span 853 (Avenida 13, 836..858): OSM does map the opposite carriageway 10 m away, but the route
+drives that stretch AGAINST the way's one-way direction, so the in-direction carriageway is on the LEFT, and left
+corridors are parked (`TD5RE_TG_NET_LEFT`). The detector also ends the run at 708 (the gap narrows from 15.6 to 9.7 m,
+outside the +-1 lane band).
