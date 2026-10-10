@@ -522,3 +522,40 @@ outer edge and a second chequered band is laid on it (`TD5RE_GEO_FINISH_AVENUE=0
 drives that stretch AGAINST the way's one-way direction, so the in-direction carriageway is on the LEFT, and left
 corridors are parked (`TD5RE_TG_NET_LEFT`). The detector also ends the run at 708 (the gap narrows from 15.6 to 9.7 m,
 outside the +-1 lane band).
+
+### Results (round 1015 E, master e7d89db0 route; same 3 seeds 11 / 22 / 33, all-AI field, 640 s)
+
+`verify/geo_r1015e_run.ps1` (the 1013 harness), base = master exe, after = this branch with the
+final defaults. Plaza window = ring spans 198..344 plus the corridor.
+
+| | base s11 / s22 / s33 | after s11 / s22 / s33 |
+|---|---|---|
+| plaza window wall events | 51 / 34 / 78 | 17 / 18 / 12 |
+| plaza window incidents | 15 / 14 / 15 | 5 / 6 / 5 |
+| plaza corridor events | 5 / 2 / 1 | 16 / 13 / 17 |
+| cars on the plaza corridor | 4 / 3 / 1 (of 6) | 4 / 3 / 4 |
+| whole-route wall events | 297 / 583 / 280 | 183 / 279 / 654 |
+| whole-route incidents | 70 / 74 / 73 | 63 / 65 / 65 |
+
+Stalls inside the plaza window: base had plateaus at spans 226-229 and 243-246 (3 seeds), after has
+none. The route total moves with seed chaos at spans 540-585 and 800-815, a pile-up site master
+already has (route 529..936 events, base 192 / 501 / 149, after 70 / 179 / 584: 842 against 833
+in sum). The corridor itself carries 13-17 events per seed (a 114 m corridor with a 25 m corner):
+more than master's 1-5, but they were 245 events in the first cut and 0 stalls at the mouths now.
+
+After merging master (integ-1015, group A's sliding fork windows) the plaza fork still builds:
+`[REAL FORK] 1: plaza Azcuenaga F=210 len=116 R=327 lanes 2+2` between avenue forks 0 (46..209) and
+2 (328..565), tightest corner 18.9 m, strays 4.2 m, strip check (types, lanes 2+2, continuity 0.00,
+span 3.40-3.52 m), geometry-safety clean.
+
+### What remains
+
+* **Plaza Dardo Rocha** (route spans ~1068..1128): the far arc is 395 m against the route's 142 m,
+  so a one-span-per-span corridor is 2.2x stretched. Needs a variable-length corridor (the jump
+  table maps one main span to several corridor spans, `track_span_normalized` ring tables to give
+  the driver the right corner radius) or a corridor-aware corner cap in the driver model.
+* Left-hand corridors (a far arc on the engine-left) are unsupported: the walker's sub-lane
+  bookkeeping is wrong there. Only plazas whose far arc is on the right are built.
+* Squares bounded by streets (Plaza Moreno, ...) are not rings; they are not handled.
+* The two mouths are still the spot where fast cars spin (13-17 corridor events per seed).
+  Larger radii are the remedy; the driver's corner cap uses sqrt(R / 34000 units).
