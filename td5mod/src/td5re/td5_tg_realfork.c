@@ -59,6 +59,7 @@
 #include "td5_geo.h"              /* is a place loaded, the conditioned route */
 #include "td5_geo_avenues.h"      /* AVENUES.JSON: the real divided avenues   */
 #include "td5_geo_roads.h"        /* the real OSM road graph (parallel roads) */
+#include "td5_dev_forkfilter.h"   /* [1016 H] dev-only per-fork allow/deny */
 
 #define TG_RF_SRC_AVENUE    0
 #define TG_RF_SRC_PLAZA     1
@@ -1274,6 +1275,10 @@ int tg_realfork_build(void)
     for (f = 0; f < npick; f++) {
         RfFork *rf = &s_rf[s_rf_n];
         const RfCand *c = &s_cand[pick[f]];
+        if (!td5_dev_forkfilter_allow(c->F)) {      /* [1016 H] dev-only allow/deny */
+            TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] F=%d \"%s\" filtered out (TD5RE_GEO_FORK_ALLOW/DENY)", c->F, c->name);
+            continue;
+        }
         rf_finalise(rf, c);
         /* Fill the node window the walk reads. */
         if (c->pf >= 0) tg_pf_commit(c->pf);
