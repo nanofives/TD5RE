@@ -983,3 +983,20 @@ Gates: `geo_fork_validate.ps1` 3 seeds 6/6 PASS, 6 seeds 6/6 PASS (master also 6
 window speeds within 1%); synthetic auto-track AI race (3 seeds, SELECTED.TXT aside): stalls 6/7/35 -> 0/0/4, events
 229/203/10654 -> 58/71/160; synthetic MODELS.DAT 12772392 B E2F1F33C221D61CAB0EFF701484011F0; full selftest 64/0/0
 (idle machine); build_all OK, structure lint OK.
+
+### Round 1017 R, re-measured on master 24b01f00 (S's lane-change rate fix merged in)
+
+Same 6 seeds, run sets `masterB` (old rules), `piecesB` (`MERGE_ADJ=0`), `fullB` (default build), `o901B` / `o707B` (`-Only`), `finalB` (`-Only 46,901` = what the table builds).
+
+* Old rules, 6 forks: all PASS (F=46 now PASS, as S reported).
+* 46..565 merged: PASS. 901..1174 merged: PASS alone, WARN in the full set (1 jam in 36 passes). The jam moved: it is no longer the
+  plaza entry corner but two cars side by side on the corridor at span 1974 (470 u/t, dead straight 2-lane road) that both steer about -9000
+  and one saturates (steer -98304, rear_slip 40000). An AI steering transient at speed, not geometry; kept with that reason.
+* **707..790 Avenida 13: now DROPPED by default.** The rear-slip fix did not clear it: alone it is WARN with 3 stalls and 3 crashes in 36 passes
+  (speed 78 % of forks-off), and WARN in the pieces config; PASS only in the full set. The stalls are cars at ~550 u/t on the straight main half
+  (spans 742..762) whose steering runs away after a lane choice at the mouth, so the residual instability at >500 u/t is still in the AI
+  (a fix would extend S's `400/v` scaling beyond the lane-change rate to the lane-keeping / avoidance steer). With no clear reason to keep it the table
+  refuses it. `TD5RE_GEO_FORK_VERDICTS=0` builds it; re-measure it after the next AI change.
+* Default build now: 2 forks, 790 corridor spans (46..565 = 518, 901..1174 = 272). Harness on exactly that set (`finalB`): 46..565 PASS
+  (15 hits / 1 crash, 1 stall), 901..1174 PASS (13/0, 5 stalls, 0 jams). Census 72 arms accepted, 23 beyond an avenue, 1 dropped "corridor" (master 71 / 22 / 0).
+* Coverage: avenue spans unchanged (673 of 805, 95.5 % of the racing ones); route spans in a window 794 -> 794 (Avenida 13 no longer counted).

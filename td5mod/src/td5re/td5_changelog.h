@@ -43,8 +43,7 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  finish keep counting in main-road spans" },
     { CL_ITEM,    "La Plata, Diagonal 73 + Plaza Azcuenaga and Avenida 60" },
     { CL_ITEM,    "  + Plaza Dardo Rocha + Avenida 7 are now ONE long fork" },
-    { CL_ITEM,    "  each (no weave where the avenue meets the plaza)," },
-    { CL_ITEM,    "  and the road beside Avenida 13 can be driven too" },
+    { CL_ITEM,    "  each (no weave where the avenue meets the plaza)" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 9 (real places: the whole Partido)" },
