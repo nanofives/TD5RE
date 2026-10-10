@@ -877,6 +877,20 @@ double tg_turn_bend(int si)
     return (double)s_turn_bend[si];
 }
 
+/* [ROUND 1015 B item 2] How many opening spans the START-IN-TOWN courtesy forces
+ * built on both sides. The synthetic track keeps TD5_TG_FACADE_START_RUN (60).
+ * On a REAL place the map decides what stands where: spans 25..59 of La Plata hold
+ * two real cross streets (way 136/2193 at span 37, way 1220/2192 at span 41) with
+ * OSM buildings along them, and the forced wall refused both as "grid" -- buildings
+ * along a road that was never drawn. Only the starting grid itself (TD5_TG_GRID_SPAN
+ * spans behind the line) stays reserved. TD5RE_GEO_START_STREETS=0 restores 60. */
+int tg_start_city_run(void)
+{
+    if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_START_STREETS"))
+        return TD5_TG_GRID_SPAN + 2;
+    return TD5_TG_FACADE_START_RUN;
+}
+
 int tg_facade_built(int si, int left)
 {
     /* [TOPOLOGY-FIRST] In a paved biome the frontage is open exactly where
@@ -885,7 +899,7 @@ int tg_facade_built(int si, int left)
      * Elsewhere the hash rhythm still shapes what the emitters draw. */
     if (tg_network_built() && si > 0 &&
         tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0) {
-        if (si < TD5_TG_FACADE_START_RUN &&
+        if (si < tg_start_city_run() &&
             td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
             return 1;
         {

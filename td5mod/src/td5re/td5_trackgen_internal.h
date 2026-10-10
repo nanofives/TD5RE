@@ -2532,6 +2532,7 @@ void tg_facade_block(int si, int left, unsigned int *block, unsigned int *phase,
  * TD5_TG_R8_TURN_GAP keeps any already-marked continuation 16 spans away, so no
  * entry the guard reads has been written by this pass. */
 int tg_facade_built(int si, int left);
+int tg_start_city_run(void);   /* [1015 B] spans forced built at the start: 60, or the grid on a real place */
 extern signed char s_turn_side[TD5_TG_MAX_SPANS];
 extern float s_turn_skew[TD5_TG_MAX_SPANS];
 extern int s_r14_turn_cand;
