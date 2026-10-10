@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (grass and trees)" },
+    { CL_ITEM,    "Trees on a random seed are no longer cut in half" },
+    { CL_ITEM,    "  down the middle: the half-tree pages are mirrored" },
+    { CL_ITEM,    "  on every seed (the roll turned it off on half)" },
+    { CL_ITEM,    "Generated park lawns use the olive of the original" },
+    { CL_ITEM,    "  game's grass, not a glowing lime green" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: landmarks)" },
     { CL_ITEM,    "The La Plata cathedral is now red brick with white" },
     { CL_ITEM,    "  lancet windows, black slate roofs and spires" },

@@ -932,6 +932,17 @@ static const unsigned char k_tgr_w_scarce[]    = { 12,  88 };
 static const unsigned char k_tgr_w_mostly_on[] = { 25,  75 };
 static const unsigned char k_tgr_w_even[]      = { 50,  50 };
 static const unsigned char k_tgr_w_rare[]      = { 70,  30 };
+/* [ROUND 1015 D / item 11] MIRROR TREES is NOT a taste roll. Four of the ten
+ * borrowed tree pages (variants 2, 3, 4, 9) are one HALF of a pair, flush at
+ * column 63, and mirror-and-duplicate is the only thing that makes them a tree:
+ * with it OFF every one of those trees is cut along a vertical line, which is
+ * the defect Mariano reported ("trees still render only one half"). The row sat
+ * on k_tgr_w_even, so it rolled OFF on 50% of seeds, on synthetic tracks and on
+ * every geo place alike (La Plata's seed rolled "MIRROR TREES = OFF"; all 251
+ * half-page trees on level091 were one quad). Always ON now; a human pin
+ * (TD5RE_AUTOTRACK_TREE_MIRROR=0 / the studio row) still wins, and
+ * TD5RE_AUTOTRACK_TREE_MIRROR_ROLL=1 restores the old 50/50 roll. */
+static const unsigned char k_tgr_w_always[]    = {  0, 100 };
 
 /* [GEOMLIB] ROAD SURFACE. 0 keeps the five procedural pages the generator has
  * always drawn; 1..8 swap in the Nth curated REAL page of each surface class
@@ -986,7 +997,7 @@ static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
  TGR_BOOL("TUNNEL LAMPS",  "TD5RE_AUTOTRACK_TUNNEL_LAMPS",   0x21010015u, k_tgr_w_mostly_on, 1),
  TGR_BOOL("BRIDGE STYLE",  "TD5RE_AUTOTRACK_BRIDGE_VARIETY", 0x21010016u, k_tgr_w_mostly_on, 1),
  TGR_BOOL("CLEAR VERGES",  "TD5RE_AUTOTRACK_FLORA_CLEAR",    0x21010017u, k_tgr_w_mostly_on, 1),
- TGR_BOOL("MIRROR TREES",  "TD5RE_AUTOTRACK_TREE_MIRROR",    0x21010018u, k_tgr_w_even,      1),
+ TGR_BOOL("MIRROR TREES",  "TD5RE_AUTOTRACK_TREE_MIRROR",    0x21010018u, k_tgr_w_always,    1),
  /* ---- PRESENCE from here down ------------------------------------------
   * [R22] Real weights + a restore RANK. Rank 1 is restored first when a seed
   * busts the presence budget, so the ordering is "what would a player miss
@@ -1162,7 +1173,11 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
             out->choice[i] = (unsigned char)e->legacy;
             out->value[i]  = e->vals[e->legacy];
         } else {
-            int c = tg_roll_pick_w(tg_roll_hash(seed, e->salt), e->w, e->n);
+            const unsigned char *w = e->w;
+            int c;
+            if (i == TD5_TG_ROLL_TREE_MIRROR && td5_env_flag_off("TD5RE_AUTOTRACK_TREE_MIRROR_ROLL"))
+                w = k_tgr_w_even;                    /* old 50/50 roll */
+            c = tg_roll_pick_w(tg_roll_hash(seed, e->salt), w, e->n);
             out->choice[i] = (unsigned char)c;
             out->value[i]  = e->vals[c];
         }
