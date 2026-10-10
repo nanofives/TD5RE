@@ -206,7 +206,8 @@ static int tg_av_emit_road(const TG_NodeList *nl, int si, double o0, double o1,
  * two carriageways read as joined by a junction instead of separated by a slot. Pure
  * mesh, never drivable (the race stays on its own carriageway). */
 static int tg_av_emit_opening(const TG_NodeList *nl, int si, double o0, double o1,
-                              int lanes, TG_Buf *blk, size_t *moff, int *nmesh)
+                              int lanes, TG_Buf *blk, size_t *moff, int *nmesh,
+                              double min_w)
 {
     const double w0 = nl->v[si].width, w1 = nl->v[si + 1].width;
     const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
@@ -219,7 +220,7 @@ static int tg_av_emit_opening(const TG_NodeList *nl, int si, double o0, double o
     if (sg1 * (out1 - in1) < 0.0) out1 = in1;
     cw0 = (out0 > in0) ? out0 - in0 : in0 - out0;
     cw1 = (out1 > in1) ? out1 - in1 : in1 - out1;
-    if (cw0 < TG_AV_MIN_MEDIAN_W && cw1 < TG_AV_MIN_MEDIAN_W) return 1;
+    if (cw0 < min_w && cw1 < min_w) return 1;
     c0 = (in0 + out0) * 0.5; c1 = (in1 + out1) * 0.5;
     ws0 = cw0 / w0; ws1 = cw1 / w1;
     if (ws0 < 0.01) ws0 = 0.01;
@@ -316,7 +317,18 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
     const int page      = TD5_TG_PAGE_GREEN;
     const int side_page = TD5_TG_PAGE_BRANCH_KERB;
 
-    if (mw0 < TG_AV_MIN_MEDIAN_W && mw1 < TG_AV_MIN_MEDIAN_W) return 1;
+    if (mw0 < TG_AV_MIN_MEDIAN_W && mw1 < TG_AV_MIN_MEDIAN_W) {
+        /* [ROUND 1015 A] "the end of the median has no geometry, just void" (pick 3, span
+         * 77). Where the median tapers shut (the two carriageways meet at a Y, or the
+         * race road's fork ramp widens toward the far one) the island stops under 0.7 m
+         * -- and the sliver of gap between the two roads beyond it had NOTHING in it: the
+         * ground skirt starts outside the far carriageway, so you looked through the gap
+         * to the sky. Pave the sliver flush, like an opening, however thin it is.
+         * TD5RE_GEO_AVENUE_WEDGE=0 restores the empty gap. */
+        if (td5_env_flag_on("TD5RE_GEO_AVENUE_WEDGE") && (mw0 > 1.0 || mw1 > 1.0))
+            return tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh, 1.0);
+        return 1;
+    }
     if (td5_env_flag_on("TD5RE_MEDIAN_MIN_H") && H < TD5_TG_MEDIAN_MIN_H)
         H = TD5_TG_MEDIAN_MIN_H;
 
@@ -719,7 +731,8 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * runs on past it (no cross-street arm is drawn through it, so there is no
      * mouth for a slab to block). TD5RE_GEO_AVENUE_OPENING=0 restores the slot. */
     if (open && td5_env_flag_on("TD5RE_GEO_AVENUE_OPENING")) {
-        if (!tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh)) return 0;
+        if (!tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh,
+                                TG_AV_MIN_MEDIAN_W)) return 0;
         return tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh);
     }
     if (open) return 1;
