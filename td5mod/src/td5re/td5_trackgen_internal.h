@@ -4224,6 +4224,7 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double
 int    tg_geo_avenue_n(void);
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
 /* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
+int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of an avenue's first row */
  * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
  * slab must not be laid on top of it. */
 int tg_realfork_walk_owned(int fi, int mb);

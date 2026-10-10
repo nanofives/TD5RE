@@ -80,6 +80,22 @@ int tg_geo_avenue_n(void)
  * in. One span of slack at each end, for the same reason the fork path takes
  * it: a caller asking about the mouth span must not see a narrower answer than
  * its neighbour or scenery pops in for a single span. */
+/* [ROUND 1015 A item 1] The ONE SPAN OF SLACK tg_geo_avenue_reach (and the rail ownership
+ * rule) take on either side of an avenue's rows is there so a caller asking about a mouth
+ * span does not see a narrower answer than its neighbour. At the avenue's ENTRY it made the
+ * span in front of the first row claim a carriageway that starts a node later: the ground
+ * skirt was pushed out and the pavement and railing stood down, over a span that has no
+ * carriageway at all -- "the road at span 38 is not rendered ... it starts rendering after
+ * span 46" (Diagonal 73, first span 47): a see-through hole beside the widened road. So the
+ * slack AHEAD (e = +1) is only taken by a span that is itself in the avenue.
+ * TD5RE_GEO_AVENUE_ENTRY_SLACK=1 restores it. */
+int tg_geo_avenue_slack_ok(int si, int e)
+{
+    if (e != 1) return 1;
+    if (td5_env_flag_off("TD5RE_GEO_AVENUE_ENTRY_SLACK")) return 1;
+    return td5_geo_avenue_at(si, NULL, NULL, NULL);
+}
+
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
 {
     double best = 0.0;
@@ -103,6 +119,7 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
     for (e = -1; e <= 1; e++) {
         double off = 0.0;
         int lanes = 2;
+        if (!tg_geo_avenue_slack_ok(si, e)) continue;
         if (!td5_geo_avenue_at(si + e, &off, &lanes, NULL)) continue;
         /* [ROUND 1013 F2] The sidecar's offset is measured from the route
          * carriageway's own centre. Over a REAL fork's window the walk moved the
