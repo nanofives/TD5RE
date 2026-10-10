@@ -43,6 +43,7 @@
 #define TG_NET_MAX_EDGES 2048
 #define TG_NET_MAX_NODES 4096
 #define TG_NET_POLY      16
+#define TG_NET_RIB_Q     256     /* [1015 B] ribbon quads per mesh once cut into span-length pieces */
 #define TG_NET_STEP      600.0
 #define TG_NET_MARGIN    500.0     /* clear air a street keeps off tarmac   */
 #define TG_NET_BACK_MAX  26000.0   /* longest back street                   */
@@ -1805,6 +1806,30 @@ int tg_net_mouth_surface(int si, int left)
 
 /* ---------------------------------------------------------- emission -- */
 
+/* [ROUND 1015 B items 2, 7] Height a drawn network road stands at: the heightfield's
+ * envelope over half a cell round (x,z), lifted. The ground meshes are triangulated on a
+ * 1500 lattice, so the exact height at an off-lattice point can sit BELOW the surface a
+ * viewer sees there; a road laid at world_h + 30 on a few far-apart polyline vertices was
+ * under the terrain for most of its length (34 of 53 ring/back-street meshes on La Plata).
+ * Geo only: callers gate on tg_net_follow_on() so the synthetic bytes stay as they were. */
+#define TG_NET_FOLLOW_LIFT 60.0
+#define TG_NET_FOLLOW_SEG  1500.0
+static double tg_net_ground_y(double x, double z)
+{
+    const double hh = TG_WORLD_CELL * 0.5;
+    double g = tg_world_h(x, z), g1;
+    g1 = tg_world_h(x + hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
+    return g + TG_NET_FOLLOW_LIFT;
+}
+
+static int tg_net_follow_on(void)
+{
+    return td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW");
+}
+
 /* Tarmac for the polyline parts nothing else draws: back streets, and the
  * wandering half of a country loop (its first, straight segment is the R12
  * forest lane the terrain emitters already lay). Owned by the mouth span. */
@@ -1820,10 +1845,11 @@ int tg_net_emit_entry(const TG_FBHook *h)
             /* [1014 B] ONE mesh, vertices shared and MITRED at every bend, so a
              * ring road is a continuous ribbon and not a string of separate
              * rectangles with a notch at each joint. */
-            double px[4 * TG_NET_POLY], py[4 * TG_NET_POLY], pz[4 * TG_NET_POLY];
-            double uu[4 * TG_NET_POLY], vv[4 * TG_NET_POLY];
+            double px[4 * TG_NET_RIB_Q], py[4 * TG_NET_RIB_Q], pz[4 * TG_NET_RIB_Q];
+            double uu[4 * TG_NET_RIB_Q], vv[4 * TG_NET_RIB_Q];
             double lx[TG_NET_POLY], lz[TG_NET_POLY], rx[TG_NET_POLY], rz[TG_NET_POLY];
             int seg_page = TD5_TG_PAGE_R4_CROSS + 0, seg_nq = e->npoly - 1, n = 0, m;
+            const int follow = tg_net_follow_on();
             const double hw = e->width * 0.5;
             double vlen = 0.0;
             size_t off;
@@ -1844,18 +1870,49 @@ int tg_net_emit_entry(const TG_FBHook *h)
                 lx[m] = e->px[m] - nx * hw / ml; lz[m] = e->pz[m] - nz * hw / ml;
                 rx[m] = e->px[m] + nx * hw / ml; rz[m] = e->pz[m] + nz * hw / ml;
             }
-            for (m = 0; m + 1 < e->npoly; m++) {
-                const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
-                                     + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
-                const double y0 = tg_world_h(e->px[m], e->pz[m]) + 30.0;
-                const double y1 = tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
-                const double v0 = vlen / (double)TD5_TG_SPAN_LENGTH;
-                const double v1 = (vlen + sl) / (double)TD5_TG_SPAN_LENGTH;
-                px[n] = lx[m];     pz[n] = lz[m];     py[n] = y0; uu[n] = 0.0; vv[n] = v0; n++;
-                px[n] = rx[m];     pz[n] = rz[m];     py[n] = y0; uu[n] = 1.0; vv[n] = v0; n++;
-                px[n] = rx[m + 1]; pz[n] = rz[m + 1]; py[n] = y1; uu[n] = 1.0; vv[n] = v1; n++;
-                px[n] = lx[m + 1]; pz[n] = lz[m + 1]; py[n] = y1; uu[n] = 0.0; vv[n] = v1; n++;
-                vlen += sl;
+            {
+                /* [1015 B] span-length pieces when the road follows the ground (geo): one quad
+                 * per polyline segment, unless that would not fit the buffer */
+                int ksub[TG_NET_POLY], total = 0;
+                for (m = 0; m + 1 < e->npoly; m++) {
+                    const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
+                                         + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
+                    int k = follow ? (int)ceil(sl / TG_NET_FOLLOW_SEG) : 1;
+                    if (k < 1) k = 1;
+                    if (k > 24) k = 24;
+                    ksub[m] = k; total += k;
+                }
+                if (total > TG_NET_RIB_Q)
+                    for (m = 0; m + 1 < e->npoly; m++) ksub[m] = 1;
+                for (m = 0; m + 1 < e->npoly; m++) {
+                    const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
+                                         + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
+                    int j;
+                    for (j = 0; j < ksub[m]; j++) {
+                        const double t0 = (double)j / (double)ksub[m];
+                        const double t1 = (double)(j + 1) / (double)ksub[m];
+                        const double cx0 = e->px[m] + (e->px[m + 1] - e->px[m]) * t0;
+                        const double cz0 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t0;
+                        const double cx1 = e->px[m] + (e->px[m + 1] - e->px[m]) * t1;
+                        const double cz1 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t1;
+                        const double y0 = follow ? tg_net_ground_y(cx0, cz0)
+                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0;
+                        const double y1 = follow ? tg_net_ground_y(cx1, cz1)
+                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
+                        const double v0 = (vlen + sl * t0) / (double)TD5_TG_SPAN_LENGTH;
+                        const double v1 = (vlen + sl * t1) / (double)TD5_TG_SPAN_LENGTH;
+                        px[n] = lx[m] + (lx[m + 1] - lx[m]) * t0; pz[n] = lz[m] + (lz[m + 1] - lz[m]) * t0;
+                        py[n] = y0; uu[n] = 0.0; vv[n] = v0; n++;
+                        px[n] = rx[m] + (rx[m + 1] - rx[m]) * t0; pz[n] = rz[m] + (rz[m + 1] - rz[m]) * t0;
+                        py[n] = y0; uu[n] = 1.0; vv[n] = v0; n++;
+                        px[n] = rx[m] + (rx[m + 1] - rx[m]) * t1; pz[n] = rz[m] + (rz[m + 1] - rz[m]) * t1;
+                        py[n] = y1; uu[n] = 1.0; vv[n] = v1; n++;
+                        px[n] = lx[m] + (lx[m + 1] - lx[m]) * t1; pz[n] = lz[m] + (lz[m + 1] - lz[m]) * t1;
+                        py[n] = y1; uu[n] = 0.0; vv[n] = v1; n++;
+                    }
+                    vlen += sl;
+                }
+                seg_nq = n / 4;
             }
             if (*h->nmesh >= h->maxmesh - 1) return 1;
             off = h->blk->len;
@@ -1881,8 +1938,10 @@ int tg_net_emit_entry(const TG_FBHook *h)
                     for (m = 0; m + 1 < e->npoly; m++) {
                         const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
                                              + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
-                        const double y0 = tg_world_h(e->px[m], e->pz[m]) + 30.0;
-                        const double y1 = tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
+                        const double y0 = follow ? tg_net_ground_y(e->px[m], e->pz[m])
+                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0;
+                        const double y1 = follow ? tg_net_ground_y(e->px[m + 1], e->pz[m + 1])
+                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
                         const double v0 = vlen / (double)TD5_TG_SPAN_LENGTH;
                         const double v1 = (vlen + sl) / (double)TD5_TG_SPAN_LENGTH;
                         const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
@@ -1944,6 +2003,28 @@ int tg_net_emit_entry(const TG_FBHook *h)
             if (*h->nmesh >= h->maxmesh - 1) return 1;
             off = h->blk->len;
             h->moff[(*h->nmesh)++] = off;
+            if (tg_net_follow_on()) {
+                /* [1015 B] cut into span-length pieces, each end on the ground envelope */
+                double qx[4 * 24], qy[4 * 24], qz[4 * 24], qu[4 * 24], qv[4 * 24];
+                int ks = (int)ceil(len / TG_NET_FOLLOW_SEG), j, qn = 0;
+                if (ks < 1) ks = 1;
+                if (ks > 24) ks = 24;
+                for (j = 0; j < ks; j++) {
+                    const double t0 = (double)j / (double)ks, t1 = (double)(j + 1) / (double)ks;
+                    const double ax0 = e->px[k] + (e->px[k + 1] - e->px[k]) * t0;
+                    const double az0 = e->pz[k] + (e->pz[k + 1] - e->pz[k]) * t0;
+                    const double ax1 = e->px[k] + (e->px[k + 1] - e->px[k]) * t1;
+                    const double az1 = e->pz[k] + (e->pz[k + 1] - e->pz[k]) * t1;
+                    const double y0 = tg_net_ground_y(ax0, az0), y1 = tg_net_ground_y(ax1, az1);
+                    qx[qn] = ax0 - nx; qz[qn] = az0 - nz; qy[qn] = y0; qu[qn] = 0.0; qv[qn] = len * t0 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                    qx[qn] = ax0 + nx; qz[qn] = az0 + nz; qy[qn] = y0; qu[qn] = 1.0; qv[qn] = len * t0 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                    qx[qn] = ax1 + nx; qz[qn] = az1 + nz; qy[qn] = y1; qu[qn] = 1.0; qv[qn] = len * t1 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                    qx[qn] = ax1 - nx; qz[qn] = az1 - nz; qy[qn] = y1; qu[qn] = 0.0; qv[qn] = len * t1 / (double)TD5_TG_SPAN_LENGTH; qn++;
+                }
+                seg_nq = qn / 4;
+                if (!tg_write_quad_mesh(h->blk, qx, qy, qz, qu, qv, qn, &seg_page, &seg_nq, 1))
+                    return 0;
+            } else
             if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
                 return 0;
             tg_guard_mark(off, h->blk->len, TG_GK_CROSS, h->si);
