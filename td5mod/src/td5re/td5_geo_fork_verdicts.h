@@ -31,9 +31,17 @@ typedef struct { const char *place; unsigned int fp; int F, R, verdict; } TD5_Fo
 
 /* GENERATED-BEGIN */
 static const TD5_ForkVerdict k_td5_fork_verdicts[] = {
-    { "", 0u, 0, 0, 0 }
+    { "la_plata_partido", 0x4B56DECBU, 46, 209, TD5_FV_PASS },   /* pieces6:PASS(6seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 46, 565, TD5_FV_PASS },   /* full6:PASS(6seeds) full1:PASS(3seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 210, 327, TD5_FV_PASS },   /* pieces6:PASS(6seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 328, 565, TD5_FV_PASS },   /* pieces6:PASS(6seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 707, 790, TD5_FV_WARN_KEEP },   /* pieces6:WARN(6seeds) full6:PASS(6seeds) full1:PASS(3seeds) KEEP: Avenida 13 relaxed fork: WARN only in 2 of 4 runs (1-2 stalls in 18-36 passes, 0 jams, 0 crashes beyond baseline); the stall is the known lane-correct (full text: verify/geo_fork_keep.json) */
+    { "la_plata_partido", 0x4B56DECBU, 901, 1030, TD5_FV_PASS },   /* pieces6:PASS(6seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 901, 1174, TD5_FV_WARN_KEEP },   /* full6:WARN(6seeds) m901_6:PASS(6seeds) full1:WARN(3seeds) KEEP: merged Avenida 60 + Plaza Dardo Rocha + Avenida 7: 1 jam in 36 passes (seed 22: two cars spin at the main road's entry corner of the plaza, spans 1064 (full text: verify/geo_fork_keep.json) */
+    { "la_plata_partido", 0x4B56DECBU, 1031, 1129, TD5_FV_PASS },   /* pieces6:PASS(6seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 1130, 1174, TD5_FV_PASS },   /* pieces6:PASS(6seeds) */
 };
-static const int k_td5_fork_verdicts_n = 0;
+static const int k_td5_fork_verdicts_n = 9;
 /* GENERATED-END */
 
 /* Does the table hold ANY record for this route? */

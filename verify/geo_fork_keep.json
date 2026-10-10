@@ -1,0 +1,6 @@
+[
+ {"place": "la_plata_partido", "F": 707, "R": 790,
+  "reason": "Avenida 13 relaxed fork: WARN only in 2 of 4 runs (1-2 stalls in 18-36 passes, 0 jams, 0 crashes beyond baseline); the stall is the known lane-correction rear-slip (steer saturates at ~590 u/t on a straight 3-lane corridor, seed 55 slot 1, same signature as the old F=46 WARN), being fixed by round 1017 S in td5_ai"},
+ {"place": "la_plata_partido", "F": 901, "R": 1174,
+  "reason": "merged Avenida 60 + Plaza Dardo Rocha + Avenida 7: 1 jam in 36 passes (seed 22: two cars spin at the main road's entry corner of the plaza, spans 1064..1081, at 620-780 u/t); forks-off has 36 spins / 12 stalls in the same window (12 hits with the fork vs 48 forks-off); -Only 901 6 seeds is PASS (0 stalls, 0 jams)"}
+]

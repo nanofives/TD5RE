@@ -63,7 +63,7 @@ def main():
         why = ""
         if v == "WARN" and (place, F, R) in keep:
             v = "KEEP"
-            why = " KEEP: " + keep[(place, F, R)]
+            why = " KEEP: " + keep[(place, F, R)][:150] + " (full text: verify/geo_fork_keep.json)"
         lines.append('    { "%s", 0x%sU, %d, %d, %s },   /* %s%s */' % (
             place, fp, F, R, CODE[v], " ".join(runsets[(F, R)]), why.replace("*/", "* /")))
     body = ("static const TD5_ForkVerdict k_td5_fork_verdicts[] = {\n" + "\n".join(lines) +
