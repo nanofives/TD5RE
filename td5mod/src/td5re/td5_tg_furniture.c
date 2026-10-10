@@ -942,8 +942,13 @@ int tg_emit_end_wall(const TG_NodeList *nl, int si, int at_far,
 int tg_fork_of_main(int si)
 {
     int i;
-    for (i = 0; i < s_fork_count; i++)
+    for (i = 0; i < s_fork_count; i++) {
+        if (s_forks[i].freec > 0) {              /* [ROUND 1015 E] throat spans only */
+            if (tg_pf_throat_span(i, si)) return i;
+            continue;
+        }
         if (si > s_forks[i].F && si <= s_forks[i].F + s_forks[i].len) return i;
+    }
     return -1;
 }
 

@@ -1711,6 +1711,7 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
     tg_net_bypass_plan(nl, nspans_main);
     for (f = 0; f < s_fork_count; f++) {
         const TG_Fork *fk = &s_forks[f];
+        if (tg_fork_is_free(f)) { tg_pf_paint_network(f); continue; }   /* [ROUND 1015 E] */
         for (k = 0; k <= fk->len; k++) {
             const int mb = fk->F + 1 + k;
             const TG_Node *n;

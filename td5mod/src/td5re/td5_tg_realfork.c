@@ -98,6 +98,7 @@ typedef struct {
     double weight;
     char   name[64];
     double off[TG_RF_STEPS + 2];       /* signed lateral from A's centre, node F+j */
+    int    pf;                         /* [ROUND 1015 E] plaza plan index, -1 = none */
 } RfCand;
 
 typedef struct {
@@ -110,6 +111,7 @@ typedef struct {
     double med_real_lo, med_real_hi;   /* what the map says, before the taper     */
     double med_eff_hi;
     int    contra;                     /* the real way flows AGAINST the race (log) */
+    int    pf;                         /* [ROUND 1015 E] plaza plan index, -1 = none */
 } RfFork;
 
 static RfCand  s_cand[TG_RF_MAXCAND];
@@ -165,6 +167,13 @@ int tg_realfork_get(int i, int *F, int *len, int *lanes_a, int *lanes_b,
     if (sep)     *sep     = (s_rf[i].src == TG_RF_SRC_AVENUE)
                                 ? TD5_TG_BRANCH_SEP_MIN : 1.0;
     return 1;
+}
+
+/* [ROUND 1015 E] 1 + plan index when real fork i is a PLAZA fork (free corridor), else 0. */
+int tg_realfork_free(int i)
+{
+    if (!tg_realfork_enabled() || i < 0 || i >= s_rf_n) return 0;
+    return s_rf[i].pf >= 0 ? s_rf[i].pf + 1 : 0;
 }
 
 const char *tg_realfork_name(int i)
@@ -360,6 +369,7 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
     memset(c->off, 0, sizeof c->off);
     c->src = src; c->F = F; c->R = R;
     c->lanes_a = lanes_a; c->lanes_b = lanes_b;
+    c->pf = -1;
     snprintf(c->name, sizeof c->name, "%s", name ? name : "");
     c->weight = 0.0;
     return c;
@@ -915,6 +925,38 @@ static void rf_plaza_report(void)
     }
 }
 
+/* ---- SOURCE 2 (built, [ROUND 1015 E]): plaza rings ----------------------------
+ *
+ * td5_tg_plazafork.c reads the ring plazas the route runs along and plans a drivable
+ * corridor round the far side (free geometry, see that file). Each plan is a candidate
+ * like any other: the selector keeps it when its window clears the avenue forks' and it
+ * drives the most corridor. TD5RE_GEO_FORK_PLAZA=0 removes the source. */
+static void rf_gen_plaza(void)
+{
+    TG_PfCand pc[32];
+    int avF[64], avR[64], nav = 0, n, i;
+    /* the avenue forks that are on offer: a plaza fork may begin where one ends and end
+     * where one begins, so the far carriageway runs on round the ring */
+    for (i = 0; i < s_ncand && nav < 64; i++) {
+        int q, dup = 0;
+        if (s_cand[i].src != TG_RF_SRC_AVENUE) continue;
+        for (q = 0; q < nav; q++) if (avF[q] == s_cand[i].F && avR[q] == s_cand[i].R) dup = 1;
+        if (!dup) { avF[nav] = s_cand[i].F; avR[nav] = s_cand[i].R; nav++; }
+    }
+    n = tg_pf_candidates(s_rx, s_rz, s_rl, s_rn, rf_window_limit(), avF, avR, nav, pc, 32);
+    for (i = 0; i < n; i++) {
+        RfCand *c = rf_new_cand(TG_RF_SRC_PLAZA, pc[i].name, pc[i].F, pc[i].R,
+                                pc[i].lanes_a, pc[i].lanes_b);
+        if (!c) return;
+        c->len   = pc[i].len;
+        c->i0    = c->F - TG_RF_WIDEN - s_rf_taper;
+        c->w_end = c->R + 2 + s_rf_taper;
+        c->pf    = pc[i].plan;
+        c->weight = (double)c->len;
+        s_ncand++;
+    }
+}
+
 /* ---- selection ----------------------------------------------------------- */
 
 static int rf_cmp_cand(const void *pa, const void *pb)
@@ -922,6 +964,21 @@ static int rf_cmp_cand(const void *pa, const void *pb)
     const RfCand *a = (const RfCand *)pa, *b = (const RfCand *)pb;
     if (a->F != b->F) return a->F - b->F;
     return a->R - b->R;
+}
+
+/* May fork i follow fork j (j sorts first)? The full-width windows stay apart by
+ * TG_RF_MIN_GAP, EXCEPT where a plaza fork meets an avenue fork end to end
+ * ([ROUND 1015 E]): the plaza fork begins on the span after the avenue fork's rejoin
+ * (or ends on the one before the next avenue fork's split) and both carry the same
+ * lanes(A)+lanes(B), so their overlapping full-width nodes agree and the far
+ * carriageway runs on through the cross street instead of ending 17 spans short of the
+ * ring (the pick that opened round 1015: a scenery carriageway at span 214). */
+static int rf_compat(const RfCand *j, const RfCand *i)
+{
+    if (i->F - TG_RF_WIDEN > j->R + 2 + TG_RF_MIN_GAP) return 1;
+    if ((i->pf >= 0) != (j->pf >= 0) && i->F == j->R + 1 &&
+        i->lanes_a == j->lanes_a && i->lanes_b == j->lanes_b) return 1;
+    return 0;
 }
 
 /* Weighted interval scheduling: windows may not overlap, and a window is the
@@ -941,7 +998,7 @@ static int rf_select(int *pick)
         for (j = 0; j < i; j++) {
             /* The full-width windows (F-8 .. R+2) stay apart; the tapers on either
              * side of them may overlap, see TG_RF_MIN_GAP. */
-            if (s_cand[i].F - TG_RF_WIDEN > s_cand[j].R + 2 + TG_RF_MIN_GAP &&
+            if (rf_compat(&s_cand[j], &s_cand[i]) &&
                 dp[j] + s_cand[i].weight > dp[i]) {
                 dp[i] = dp[j] + s_cand[i].weight; prv[i] = j;
             }
@@ -982,10 +1039,22 @@ static void rf_finalise(RfFork *f, const RfCand *c)
     memset(f, 0, sizeof *f);
     f->src = c->src; f->F = c->F; f->R = c->R; f->len = c->len;
     f->lanes_a = c->lanes_a; f->lanes_b = c->lanes_b;
+    f->pf = c->pf;
     f->i0 = c->i0; f->w_end = c->w_end;
     snprintf(f->name, sizeof f->name, "%s", c->name);
 
     f->med_real_lo = 1e30; f->med_real_hi = 0.0;
+    if (c->pf >= 0) {
+        /* [ROUND 1015 E] a plaza fork's classic rows: the plan's own profile (0 at both
+         * mouths, the opening rate, the real gap where the sidecar gives one). */
+        for (k = 0; k <= c->len; k++) {
+            f->med[k] = tg_pf_med(c->pf, k);
+            if (f->med[k] < f->med_real_lo) f->med_real_lo = f->med[k];
+            if (f->med[k] > f->med_real_hi) f->med_real_hi = f->med[k];
+            if (f->med[k] > f->med_eff_hi) f->med_eff_hi = f->med[k];
+        }
+        return;
+    }
     for (k = 0; k <= c->len; k++) {
         /* corridor step k sits on main node F+1+k; the sidecar's offset is the
          * distance between the two carriageway CENTRELINES, so the median is
@@ -1019,6 +1088,7 @@ void tg_realfork_reset(void)
     s_ncand = 0;
     s_rn = 0;
     s_rf_knob = -1;
+    tg_pf_reset();                     /* [ROUND 1015 E] */
 }
 
 int tg_realfork_build(void)
@@ -1048,6 +1118,7 @@ int tg_realfork_build(void)
     rf_gen_avenue();
     rf_gen_parallel();
     rf_plaza_report();
+    rf_gen_plaza();
     /* PLAZA (TD5RE_GEO_FORK_PLAZA) -- NOT BUILT, and the reason is a measured
      * one, not a deferral: the fork corridor is tied 1:1 to the MAIN node it
      * rides (corridor step k sits on node F+1+k at a lateral shift), and every
@@ -1065,9 +1136,20 @@ int tg_realfork_build(void)
         const RfCand *c = &s_cand[pick[f]];
         rf_finalise(rf, c);
         /* Fill the node window the walk reads. */
+        if (c->pf >= 0) tg_pf_commit(c->pf);
         for (i = c->i0; i <= c->w_end && i < s_rn; i++) {
             double fr = 1.0, extra;
             if (i < 0) continue;
+            if (c->pf >= 0) {
+                /* [ROUND 1015 E] a plaza fork widens the two throats only */
+                extra = tg_pf_node_extra(c->pf, i);
+                if (extra <= 0.0) continue;
+                if (extra <= s_node_extra[i] && s_node_fork[i] >= 0) continue;
+                s_node_fork[i]  = s_rf_n;
+                s_node_extra[i] = extra;
+                s_node_ovr[i] = (extra >= 0.5) ? c->lanes_a + (int)(extra + 0.5) : 0;
+                continue;
+            }
             if (i < c->F - TG_RF_WIDEN)
                 fr = (double)(i - c->i0) / (double)s_rf_taper;            /* widening */
             else if (i > c->R + 2)

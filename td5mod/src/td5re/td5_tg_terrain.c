@@ -3843,6 +3843,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
     double X[2][4], Y[2][4], Z[2][4], D[2][4], U[2], B[2];
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
+    int pin_j[2] = { -1, -1 };      /* [ROUND 1015 E] ring pinned on a plaza corridor, per end */
+    double pin_y[2] = { 0.0, 0.0 };
     int e, j, n = 0, nseg = 1;
     int seam_fix;   /* [R22 item 12] far-band group-boundary seam fix, set below */
     /* [R5 item 16] The height/stretch cure only applies where the ridge is an
@@ -4175,6 +4177,21 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             if (D[e][3] > d3cap) D[e][3] = d3cap;
         }
 
+        {   /* [ROUND 1015 E] A plaza fork's corridor crosses this band, 100..180 m out
+             * on the far side of the ring: pin ring 2 ON it, a little under the road,
+             * so the apron meets the corridor instead of rolling over it (the apron's
+             * ring points sample the natural terrain, and its planes between them rose
+             * 1..3 m above the road: the corridor surface was buried and the car drove
+             * under it). Nothing happens with no plaza fork built. */
+            double th = 0.0, ty = 0.0;
+            pin_j[e] = -1;
+            if (tg_pf_ray_hit(is_left ? lx : rx, is_left ? lz : rz, ux, uz,
+                              D[e][0] + 1500.0, 260000.0, &th, &ty)) {
+                if (th + 12000.0 > D[e][3]) D[e][3] = th + 12000.0;
+                if (D[e][1] > th - 3000.0) D[e][1] = D[e][0] + (th - D[e][0]) * 0.5;
+                D[e][2] = th; pin_j[e] = 2; pin_y[e] = ty - 300.0;
+            }
+        }
         for (j = 0; j < 4; j++) {
             const double ex = (is_left ? lx : rx) + ux * D[e][j];
             const double ez = (is_left ? lz : rz) + uz * D[e][j];
@@ -4206,6 +4223,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             /* [TOPOLOGY-FIRST] ring 0 is the seam under the skirt; every
              * other ring is the world's own ground there. */
             Y[e][j] = (j == 0) ? base : tg_world_h(ex, ez);
+            if (j == pin_j[e]) Y[e][j] = pin_y[e];      /* [ROUND 1015 E] */
             (void)yb; (void)ampj;
         }
 
@@ -4496,6 +4514,10 @@ static int tg_far_group_over_fork(int si)
     for (i = 0; i < s_fork_count; i++) {
         const int a = s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2;
         const int b = s_forks[i].R + TD5_TG_FAR_FORK_PAD;
+        if (s_forks[i].freec > 0) {          /* [ROUND 1015 E] throats only */
+            if (tg_pf_far_over(i, g0, g1)) return 1;
+            continue;
+        }
         if (g1 >= a && g0 <= b) return 1;   /* group overlaps the fork + bow */
     }
     return 0;

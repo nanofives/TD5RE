@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 9 (real places: plaza forks)" },
+    { CL_ITEM,    "La Plata, Plaza Azcuenaga: you can drive BOTH sides" },
+    { CL_ITEM,    "  of the plaza. The far carriageway of Diagonal 73" },
+    { CL_ITEM,    "  now runs on, round the far side of the ring, and" },
+    { CL_ITEM,    "  rejoins the road after the plaza (it used to end" },
+    { CL_ITEM,    "  17 spans short as a road you could not drive)" },
+    { CL_ITEM,    "The AI and traffic take either side of the plaza" },
+    { CL_ITEM,    "The ring is the real OSM ring road, 2 lanes, with" },
+    { CL_ITEM,    "  kerb, lawn on its inner side and the minimap shows it" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 9 (real places: landmarks)" },
     { CL_ITEM,    "The La Plata cathedral is now red brick with white" },
     { CL_ITEM,    "  lancet windows, black slate roofs and spires" },

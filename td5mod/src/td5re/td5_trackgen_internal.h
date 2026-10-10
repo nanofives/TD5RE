@@ -708,6 +708,11 @@ typedef struct {
                            * (td5_tg_realfork.c): the corridor's lateral is the
                            * measured gap between two real carriageways, not a
                            * bow. 0 = a synthetic / legacy fork.              */
+    int freec;            /* [ROUND 1015 E] 1 + index of a PLAZA fork plan
+                           * (td5_tg_plazafork.c): the corridor has geometry of
+                           * its own (a free node chain round the real ring), not
+                           * main node + lateral. 0 = every other fork. real is
+                           * 0 on these so no avenue-only path touches them.  */
 } TG_Fork;
 const char *tg_fork_kind_name(int kind);
 /* Stateless plan for fork ordinal `index`: kind, corridor length and
@@ -723,6 +728,8 @@ void tg_fork_split_lanes(int kind, int lanes, int *main_lanes, int *br_lanes);
 double tg_fork_main_shift(int fi, double w);
 double tg_fork_main_wscale(int fi);
 double tg_fork_br_shift(int fi, int k, double w);
+double tg_fork_main_wscale_w(int fi, double w);   /* [1015 E] width scale of the main half at node width w */
+double tg_pf_br_shift(int fi, int k, double w);   /* [1015 E] classic-row lateral of a free corridor */
 double tg_fork_br_wscale(int fi, int k);
 int    tg_fork_br_lanes_at(int fi, int k);
 extern TG_Fork s_forks[TD5_TG_BRANCH_MAX];
@@ -4240,12 +4247,58 @@ int    tg_realfork_build(void);                  /* once per build, before the w
 void   tg_realfork_reset(void);
 int    tg_realfork_n(void);
 int    tg_realfork_get(int i, int *F, int *len, int *lanes_a, int *lanes_b, double *sep);
+int    tg_realfork_free(int i);                 /* [1015 E] 1 + plaza plan when fork i has a free corridor */
 const char *tg_realfork_name(int i);
 double tg_realfork_med(int i, int k);            /* median width at corridor step k, >= 0 */
 int    tg_realfork_lanes_override(int node, int raw_lanes);
 double tg_realfork_node_adjust(int node, double *x, double *z);
 double tg_realfork_node_width(int node, int lanes, double lane_w);   /* ramped, not stepped */
 double tg_realfork_node_delta(int node);         /* lateral (+t) the walk moved node by */
+/* ================ [ROUND 1015 E] PLAZA FORKS (td5_tg_plazafork.c) ================
+ * A route that runs along a named/unnamed junction=circular ring gets a drivable
+ * corridor round the OTHER side of the ring, geometry of its own (free node chain)
+ * instead of main node + lateral. Everything here is 0 / the classic answer with no
+ * plaza fork planned, which keeps every other build byte-identical.
+ *
+ * Shape: the corridor is classic (a lateral from the main node, K1 rows) for the
+ * first rows after F and the last rows before R, where it runs beside the main
+ * road, and free in between (rows K1..K2), where it follows the real ring. */
+#define TG_PF_WEDGE     7     /* main spans after the classic rows where the corridor leaves the road */
+#define TG_PF_K1MIN     5     /* the fewest classic rows at either mouth                              */
+typedef struct {
+    int    F, R, len;
+    int    lanes_a, lanes_b;
+    int    k1, kx;            /* classic rows at the entry (0..k1) and the exit    */
+    int    plan;              /* index of the plan this came from                 */
+    double stretch;           /* corridor metres per main span / one span length  */
+    double ring_m, near_m, far_m;
+    char   name[64];
+} TG_PfCand;
+void   tg_pf_reset(void);
+int    tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
+                        int win_hi, const int *avF, const int *avR, int nav,
+                        TG_PfCand *out, int max_out);
+double tg_pf_med(int plan, int k);                   /* classic median opening of row k of plan, world units */
+void   tg_pf_commit(int plan);                       /* this plan was selected */
+double tg_pf_node_extra(int plan, int node);         /* corridor lanes ramped into the node window */
+int    tg_fork_is_free(int fi);
+void   tg_pf_finalize(const TG_NodeList *nl);        /* after tg_fork_place filled s_forks */
+const TG_NodeList *tg_pf_view(int fi);               /* v[F+1+k] = corridor row k            */
+int    tg_pf_throat_span(int fi, int si);            /* main span si has throat geometry     */
+int    tg_pf_wedge_span(int fi, int si);             /* ... and is a free-corridor wedge span */
+int    tg_pf_classic_span(int fi, int ck);            /* corridor span ck runs beside the road on both rows */
+int    tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat);   /* an avenue's scenery road would stand on a plaza corridor */
+int    tg_pf_clear_span(int fi, int si);             /* scenery clearance window            */
+double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* outermost corridor edge beside span si */
+double tg_pf_main_wscale(int fi, double w);          /* main half width scale at node width w   */
+int    tg_pf_emit_wedge(const TG_NodeList *nl, int fi, int si, TG_Buf *blk,
+                        size_t *moff, int *nmesh);
+void   tg_pf_paint_network(int fi);
+int    tg_pf_row_point(int fi, int row, double *x, double *z);   /* preview */
+double tg_pf_vscale(int fi);                         /* V scale of a free corridor's road texture (its span stretch) */
+extern double tg_road_v_scale;                       /* [1015 E] set around the corridor's road quad, 1.0 elsewhere */
+int    tg_pf_far_over(int fi, int g0, int g1);       /* far-band group g0..g1 overlaps a throat window */
+int    tg_pf_ray_hit(double ox, double oz, double ux, double uz, double tmin, double tmax, double *t_out, double *y_out);   /* [1015 E] where a ray crosses a free corridor */
 /* ===================== GUARDRAILS =====================
  * The car is already contained by collision WALLS derived from the STRIP rail
  * vertices, but nothing draws them, so the road ends at an invisible boundary.

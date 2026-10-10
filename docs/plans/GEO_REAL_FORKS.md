@@ -372,3 +372,71 @@ the cars run 175 spans without a mouth and arrive at the 0.089 rad/span bend at 
 11 and 22: spans 265..267), it is the pack's speed that changed. Not fixed here: it is the
 AI's corner-speed model, not the road (`td5_ai_driver.c`, `TD5RE_AI_DRIVER_CORNER_*`).
 `TD5RE_GEO_FORK_MERGE=0` brings master's selection back.
+
+## Round 1015 E: plaza forks (BUILT)
+
+Mariano, round 1015 item 9: "near plaza azcuenaga this road became undriveable (level091 L91
+e53 s14 road p0:ROAD pos 248795,-186,-185415), if a road passes through a plaza by default i
+should be able to drive to both sides of the plaza". The pick is route node 216, 10.9 m beside
+the route: the scenery far carriageway of Diagonal 73 (a `branch-road` page-0 mesh in a ring
+entry, no span record) in the 17 spans between the end of avenue fork 0 (R=205) and the ring.
+Module `td5_tg_plazafork.c`; the free-geometry corridor this document asked for above.
+
+### Shape
+
+A route that runs along a `junction=circular` ring (named or not) gets ONE fork whose corridor
+goes round the far side of the ring:
+
+| rows (corridor step k) | geometry |
+|---|---|
+| `0..k1` (entry, classic) | the main node's ORIGINAL centre line (node minus its jog) plus the corridor lateral `(la+lb)*lw/2 + median(k)`; the median opens at 0.12 span/span and is held at the real gap the avenue sidecar gives (3.74 m on Diagonal 73), so these rows ARE the far carriageway, like an avenue fork |
+| `k1..len-kx` (free) | a node chain of its own: the ring's far arc, entered along the street's axis and left onto the exit street's axis, Laplacian-rounded (100 passes, 10 m pinned at each end, tightest corner reported and refused under 8 m), resampled to equal steps |
+| `len-kx..len` (exit, classic) | mirrored: converges on the main half over the rate-limited median |
+
+`k1 = (last straight route node before the bend) - 4 - (F+1)`, `kx = R - (first straight node
+after the exit bend)`; the fork has exactly `R-F-1` spans like every other fork (span records,
+type 8 / 9 / 1 / 10 / 11, jump table, `lanes(F) = lanes(F+1) + lanes(B0)`), only the free rows'
+geometry differs. On the free rows a span is `far arc / free rows` long (3.5 m on Azcuenaga,
+1.00x a route span); the road texture's V runs at that rate (`tg_road_v_scale`).
+
+Everything that needed the corridor's position reads ONE view, `tg_pf_view(fi)`: a node list
+whose `v[F+1+k]` is corridor row k, so the emitters that already take `(nl, mb)` take
+`(view, mb)` with shift 0 (strip rows, road quad, branch sidewalk). The consumers of the old
+lateral were each taught the free geometry in their own place:
+
+| consumer | what changed |
+|---|---|
+| strip rows, jump table, `LEFT/RIGHT.TRK` heading bytes | rows from the view (`td5_trackgen.c`, `tg_emit_routes`) |
+| main half | `tg_fork_main_shift` / `tg_pf_main_wscale`: the route's own `la` lanes at every node width the throat ramps through |
+| ring road between the throats | NOT a fork span: `tg_fork_of_main`, `tg_span_in_fork_clear`, `tg_fork_side_at`, the far-band fork gate and the strip's main-half rows all stop at the throat, so the plaza arc's lanes, sidewalks, lawn, ribbons and streets are exactly what they were |
+| the corridor leaving the road (wedge, `TG_PF_WEDGE` = 7 spans) | a paved quad between the main half's right edge and the corridor's left edge (`tg_pf_emit_wedge`); the classic gore cannot, it is a lateral strip |
+| carriageway reach (skirt start, facade / tree clearance) | throat spans only (`tg_pf_reach`); the free rows are 100..180 m out |
+| occupancy raster + ground bed | the free rows are painted DRIVABLE and the terrain conformed under them BEFORE the plaza ribbons are laid, so the ribbons (round 1014 B) stop short of the corridor: no second road on the far arc |
+| far-band ground | the apron's ring points sample the natural terrain and its planes rose 1..3 m above the corridor (buried road: the car drove UNDER the surface); `tg_emit_far_band` pins ring 2 on the corridor crossing, 300 units under the road |
+| avenue scenery (road, island, far footway) | skipped where a corridor row lies within three lanes of it (`tg_pf_scenery_clash`) and over the wedge |
+| preview points, geometry-safety ceiling, NETWORK.JSON | the corridor's own rows |
+
+### Window rules (what the selector does)
+
+A plaza candidate is `(F, R)` from the route alone: the straight street before the entry bend
+and after the exit bend (heading within 1 degree over 9 nodes), the ring run (route nodes within 12 m of the
+ring way), and the free chain checked on the RAW route first (street axis meets the ring, corner
+>= 8 m, stretch within `TD5RE_GEO_PLAZA_STRETCH_MAX`). Options per ring run: F ten nodes before the
+bend, and right after each avenue fork candidate that ends on that street (`F = R_avenue + 1`);
+R five nodes after the straight resumes, and right before each avenue fork candidate that starts
+on the exit street (`R = F_avenue - 1`). The corridor carries the ring way's OWN lanes (OSM
+lanes=2), which makes lanes(A)+lanes(B) equal to the avenue forks' 2+2, and that is what lets
+`rf_compat` allow end-to-end adjacency (full-width nodes of two forks overlap only when they
+agree). Without adjacency the usual 6-node gap applies.
+
+Reasons are logged per refusal under `TD5RE_GEO_FORK_DIAG=1` (`[PLAZA FORK] REJECT ...`).
+
+### Knobs
+
+`TD5RE_GEO_FORK_PLAZA=0` restores master (plaza report only). `TD5RE_GEO_PLAZA_STRETCH_MAX`
+(2.3) refuses a plaza whose far arc needs spans longer than that many route spans.
+`TD5RE_GEO_PLAZA_SMOOTH` (100) Laplacian passes. `TD5RE_GEO_PLAZA_DUMP=1` writes
+`log/pf_chain_<fork>.csv`. Tools: `verify/geo_r1015e_strip.py` (STRIP.DAT: types, lanes,
+continuity, clearance), `verify/geo_r1015e_run.ps1` (the 1013 harness with `|` separated
+`-Extra` and a window size, for free-cam tours).
+
