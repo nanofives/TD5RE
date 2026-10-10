@@ -195,3 +195,6 @@ codemap/
 
 # Happy app per-machine project-pane state (not project source)
 .happy/
+
+# round 1016 H: fork validation run-sets (logs, traces, JSON verdicts)
+verify/out/
