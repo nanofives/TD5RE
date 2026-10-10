@@ -70,6 +70,16 @@ int  td5_geolm_is_anchor(const TD5_GeoBuilding *gb);
  * emitter skips it. */
 int  td5_geolm_vetoed(const TD5_GeoBuilding *gb);
 
+/* [ROUND 1015 C item 15] "buildings cover La Catedral": 1 when ANY of the `np`
+ * world points is within `margin` world units of a MAJOR landmark's hull (an
+ * anchor owning >= TD5RE_GEO_LM_FORECOURT_PARTS building:parts; the outline plus
+ * all its parts, convex). The procedural frontage and the side-street walls ask
+ * it so nothing stands on, or in front of, the cathedral. 0 on a synthetic build
+ * and whenever no major landmark exists. */
+int  td5_geolm_forecourt_near(const double *px, const double *pz, int np,
+                              double margin);
+int  td5_geolm_forecourt_count(void);
+
 /* Parts grouped under anchor `gb` (0 for a non-anchor). */
 int  td5_geolm_part_count(const TD5_GeoBuilding *gb);
 
