@@ -2871,11 +2871,30 @@ void td5_render_actors_for_view(int view_index)
          * against the main-road draw. This is what makes a fork read as a visible
          * alternate route instead of a road that only appears once you have
          * already committed to it. */
+        /* [ROUND 1021 A item 6] "a forked road far away stops rendering ... while the left
+         * road is visible fine". The main road is walked over the SAME reach as the actor
+         * cull's track window -- walk_window back and (n_entries * 4 - walk_window) ahead,
+         * about +-205 spans at the default view distance -- but a corridor span was drawn
+         * only within fwd_window / back_window = 64 spans of the player's normalised
+         * position, so a corridor stopped 140 spans before the main road did (the picks:
+         * corridor 900 from corridor 836, 64+ normalised spans apart). A corridor span
+         * now draws over the main road's own span window (the projector still
+         * frustum-culls the off-screen ones, s_submitted dedups). TD5RE_CORRIDOR_DRAW_FULL=0
+         * restores the 64-span window. TD6 keeps its perf-capped window. */
+        int corr_lo = -back_window, corr_hi = fwd_window;
+        static int s_corr_full = -1;
+        if (s_corr_full < 0) s_corr_full = td5_env_flag_on("TD5RE_CORRIDOR_DRAW_FULL") ? 1 : 0;
+        if (g_active_td6_level <= 0 && s_corr_full) {
+            const int span_lo = (start_entry << 2) - eff_player;
+            const int span_hi = ((start_entry + n_entries) << 2) - eff_player;
+            if (span_lo < corr_lo) corr_lo = span_lo;
+            if (span_hi > corr_hi) corr_hi = span_hi;
+        }
         if (total_spans > ring) {
             for (int span_index = ring; span_index < total_spans; span_index++) {
                 int norm = td5_track_branch_to_main_span(span_index);
                 int d = norm - player_span;
-                if (d < -back_window || d > fwd_window)
+                if (d < corr_lo || d > corr_hi)
                     continue;
                 const TD5_SpanDisplayList *display_list =
                     td5_track_get_display_list(span_index);
