@@ -37,6 +37,7 @@
  *   TD5RE_GEO_BLOCKLOOP_RFLOOR_M    tightest corner a loop may keep, metres (default 7)
  *   TD5RE_GEO_BLOCKLOOP_FLARE       extra width per side at the corridor's two ends, world units (default 0)
  *   TD5RE_GEO_BLOCKLOOP_FLARE_ROWS  rows (spans) it tapers over (default 5)
+ *   TD5RE_GEO_BLOCKLOOP_INNER_PAVE  pavement on the corridor's inner edge too, where clear of the road (default 1)
  *   TD5RE_GEO_BLOCKLOOP_LANES       corridor lanes (default 2; 0 = from the real ways)
  *   TD5RE_GEO_BLOCKLOOP_STRAIGHT_DEG  heading change allowed along a slip lane's road edge (default 5)
  *   TD5RE_GEO_BLOCKLOOP_LEAD_SPANS  straight lane before a corner's arc, spans beyond twice its tangent (default 6)
@@ -75,6 +76,7 @@ typedef struct {
     double len_m, main_m, ratio, min_r_m;
     int    ncorner, npath;
     double *cx, *cz, *cy;            /* clen+1 chain points                              */
+    unsigned char *inner;            /* [clen+1] the corridor's inner edge is clear of the road: a pavement may lie there */
     TG_NodeList rview;               /* v[F+1+k] = corridor row k                        */
     char   name[96];
 } BlPlan;
@@ -101,7 +103,7 @@ void tg_bl_reset(void)
 {
     int i;
     for (i = 0; i < s_nbl; i++) {
-        free(s_bl[i].cx); free(s_bl[i].cy); free(s_bl[i].cz);
+        free(s_bl[i].cx); free(s_bl[i].cy); free(s_bl[i].cz); free(s_bl[i].inner);
         free(s_bl[i].rview.v);
     }
     memset(s_bl, 0, sizeof s_bl);
@@ -796,8 +798,8 @@ static int bl_flush(const TG_NodeList *nl, BlPlan *P)
 
 static void bl_free_plan(BlPlan *P)
 {
-    free(P->cx); free(P->cy); free(P->cz);
-    P->cx = P->cy = P->cz = NULL;
+    free(P->cx); free(P->cy); free(P->cz); free(P->inner);
+    P->cx = P->cy = P->cz = NULL; P->inner = NULL;
     free(P->rview.v);
     P->rview.v = NULL; P->rview.count = P->rview.cap = 0;
 }
@@ -1046,6 +1048,32 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
                 nn->lanes = P->lb;
                 nn->lane_base = TD5_TG_HEIGHT_NIBBLE;
             }
+            /* the corridor's INNER edge (the side facing the road) carries a pavement wherever a pavement strip
+             * there is clear of the road's own carriageway and its pavement: not along the slip lane beside it */
+            P->inner = (unsigned char *)calloc((size_t)P->clen + 1, 1);
+            if (P->inner && td5_env_flag_on("TD5RE_GEO_BLOCKLOOP_INNER_PAVE")) {
+                const double sw = 1300.0;
+                for (k = 0; k <= P->clen; k++) {
+                    const TG_Node *nn = &P->rview.v[F + 1 + k];
+                    const double t = nn->width * 0.5 + sw * 0.5;
+                    const double qx = nn->x + nn->tz * t, qz = nn->z - nn->tx * t;
+                    double dmin = 1e30;
+                    int j;
+                    for (j = P->F - 6; j <= P->R + 6; j++) {
+                        double ax, az, bx, bz, dx, dz, l2, u, d;
+                        if (j < 0 || j + 1 >= nl->count) continue;
+                        ax = nl->v[j].x; az = nl->v[j].z; bx = nl->v[j + 1].x; bz = nl->v[j + 1].z;
+                        dx = bx - ax; dz = bz - az; l2 = dx * dx + dz * dz;
+                        u = l2 > 1e-9 ? ((qx - ax) * dx + (qz - az) * dz) / l2 : 0.0;
+                        if (u < 0.0) u = 0.0;
+                        if (u > 1.0) u = 1.0;
+                        d = sqrt((qx - ax - u * dx) * (qx - ax - u * dx) + (qz - az - u * dz) * (qz - az - u * dz))
+                            - 0.5 * nl->v[j].width;
+                        if (d < dmin) dmin = d;
+                    }
+                    P->inner[k] = (dmin > sw * 1.5 + 200.0) ? 1 : 0;
+                }
+            }
             /* the end rows are perpendicular to the road: the mouth's near edge lies ON the edge */
             memset(fk, 0, sizeof *fk);
             fk->F = P->F; fk->len = P->len; fk->R = P->R; fk->cbase = off + 1;
@@ -1109,6 +1137,13 @@ int tg_bl_row_node(int fi, int k)
     o = (int)(((long)k * (long)P->len) / (long)P->clen);
     if (o > P->len - 1) o = P->len - 1;
     return P->F + 1 + o;
+}
+
+int tg_bl_inner_ok(int fi, int k)
+{
+    const BlPlan *P = bl_of(fi);
+    if (!P || !P->inner || k < 0 || k >= P->clen) return 0;
+    return P->inner[k] && P->inner[k + 1];
 }
 
 int tg_bl_mouths(int fi, int *a1_lo, int *a1_hi, int *a2_lo, int *a2_hi)

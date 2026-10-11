@@ -1280,10 +1280,32 @@ int tg_r14_pave_face(void)
  * APPENDED corridor span, passed only so the element inventory brackets the
  * pavement at the corridor spans (>= ring) -- that is what proves, without a
  * frame, that scenery now reaches the branch. */
+static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
+                       int fi, const TG_Biome *b,
+                       TG_Buf *blk, size_t *moff, int *nmesh,
+                       int acct_si, double fs);
+
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
                                     int fi, const TG_Biome *b,
                                     TG_Buf *blk, size_t *moff, int *nmesh,
                                     int acct_si)
+{
+    return br_sidewalk(nl, mb, k, L, fi, b, blk, moff, nmesh, acct_si, (double)tg_fork_side(fi));
+}
+
+/* [ROUND 1018 L] the OTHER edge of a block-loop corridor: the corridor runs in a real street, so it has a
+ * pavement on both sides (the slip-lane rows beside the road are skipped by tg_bl_inner_ok). */
+int tg_emit_branch_sidewalk_inner(const TG_NodeList *nl, int mb, int k, int L,
+                                  int fi, const TG_Biome *b,
+                                  TG_Buf *blk, size_t *moff, int *nmesh, int acct_si)
+{
+    return br_sidewalk(nl, mb, k, L, fi, b, blk, moff, nmesh, acct_si, -(double)tg_fork_side(fi));
+}
+
+static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
+                       int fi, const TG_Biome *b,
+                       TG_Buf *blk, size_t *moff, int *nmesh,
+                       int acct_si, double fs)
 {
     const TG_Node *a = &nl->v[mb];
     const TG_Node *c = &nl->v[mb + 1];
@@ -1296,7 +1318,7 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const double sh1 = pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
-    const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] -1 right / +1 left */
+    /* fs: [TOPOLOGY-FIRST] -1 right / +1 left (the side of the fork; the inner edge of a block loop passes the opposite) */
     (void)L;
     const double e0  = sh0 + fs * h0;            /* outer edge, near */
     const double e1  = sh1 + fs * h1;            /* outer edge, far  */

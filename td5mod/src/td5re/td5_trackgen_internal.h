@@ -4234,6 +4234,8 @@ int tg_fork_opening_at(int si);   /* [1015 A] a real median opening on a real fo
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
+int tg_emit_branch_sidewalk_inner(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
+int tg_bl_inner_ok(int fi, int k);                        /* block loop: the corridor's other edge may carry a pavement at row k */
 int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L, int fi, double bw, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_branch_flora(const TG_NodeList *nl, int mb, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double sh0, double sh1, double half0, double half1, int br_lanes, TG_Buf *blk, size_t *moff, int *nmesh);

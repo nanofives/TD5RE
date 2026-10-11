@@ -3830,6 +3830,9 @@ static int tg_scenery_entry(int e)
                                 td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
                                 if (!tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                              &meshes, moff, &nmesh, si)) ok = 0;
+                                if (ok && tg_fork_is_loop(fi) && tg_bl_inner_ok(fi, ck) &&
+                                    !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
+                                                                   &meshes, moff, &nmesh, si)) ok = 0;
                             }
                         } else if (tg_realfork_walk_owned(fi, mb)) {
                             /* [ROUND 1014 A] The ring's far footway (td5_tg_avenue.c)

@@ -1984,6 +1984,7 @@ int tg_net_emit_entry(const TG_FBHook *h)
         const TG_NetEdge *e = &s_edges[i];
         int k, k0;
         if (e->mouth_si != h->si) continue;
+        if (e->loop) continue;      /* [ROUND 1018 L] a block loop's corridor is this street; no second carriageway */
         if (e->ribbon && e->npoly > 2) {
             /* [1014 B] ONE mesh, vertices shared and MITRED at every bend, so a
              * ring road is a continuous ribbon and not a string of separate
