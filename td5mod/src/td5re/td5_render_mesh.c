@@ -2476,6 +2476,18 @@ void td5_render_actors_for_view(int view_index)
             }
         }
     }
+#ifndef TD5RE_RELEASE
+    /* [ROUND 1019 T] Dev free-cam tour (fast mode): centre pane 0's walk on the
+     * span the pose looks at instead of the car, so a pose far down the route
+     * still draws its road, its fork corridors and its scenery. Render-only. */
+    if (view_index == 0) {
+        const int tour_span = td5_camera_tour_cull_span();
+        if (tour_span >= 0) {
+            player_span = tour_span;
+            player_branch_span = -1;
+        }
+    }
+#endif
     float view_dist_frac = td5_save_get_view_distance();
     /* [2026-06-08 split-screen perf] AI spectator panes (the extra split-screen
      * tiles beyond the local human players, view_index >= num_human_players)

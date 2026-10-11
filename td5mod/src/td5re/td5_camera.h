@@ -81,6 +81,14 @@ void td5_camera_freecam_exit(void);
 int  td5_camera_freecam_active(void);
 void td5_camera_freecam_apply(void);
 
+/* [ROUND 1019 T] Dev free-cam TOUR (fast mode): the main-ring span the track
+ * display-list walk of pane 0 is centred on while a tour pose is held, or -1 when
+ * the tour is not driving the render (then the walk follows the car). Read by
+ * td5_render_mesh.c; compiled out of RELEASE with the tour itself. */
+#ifndef TD5RE_RELEASE
+int  td5_camera_tour_cull_span(void);
+#endif
+
 /* Camera globals owned by td5_camera.c, read by the HUD/render side.
  *  g_subTickFraction     - render-frame extrapolation fraction [0,1).
  *  g_camWorldPos[v]       - finalized per-viewport camera world position.

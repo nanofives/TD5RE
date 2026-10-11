@@ -5104,7 +5104,13 @@ static unsigned int tg_env_hash(void)
             && strncmp(*e, "TD5RE_WINDOW_TITLE", 18) != 0 && strncmp(*e, "TD5RE_RT_", 9) != 0
             && strncmp(*e, "TD5RE_FRAME_CAP", 15) != 0 && strncmp(*e, "TD5RE_FRAMEDUMP", 15) != 0
             && strncmp(*e, "TD5RE_D3D12_", 12) != 0 && strncmp(*e, "TD5RE_TG_REPORTS", 16) != 0
-            && strncmp(*e, "TD5RE_R14_GENPROF", 17) != 0)
+            && strncmp(*e, "TD5RE_R14_GENPROF", 17) != 0
+            /* [ROUND 1019 T] Knobs that only steer the CAMERA or the race AI
+             * after the level exists. A tour changes its pose list on every
+             * launch; hashing those knobs made every tour a stamp miss and a
+             * full regenerate (~20 s) of a build that is byte-identical. */
+            && strncmp(*e, "TD5RE_FREECAM_", 14) != 0 && strncmp(*e, "TD5RE_CAM_FIXED", 15) != 0
+            && strncmp(*e, "TD5RE_AI_BRANCH_FORCE", 21) != 0 && strncmp(*e, "TD5RE_RACE_SEED", 15) != 0)
             h = tg_fnv1a(h, *e, strlen(*e));
     /* [J8 GEO-PICK] The slot-driven place override deliberately never reaches
      * the environment, so hash it here or two places would produce the same
