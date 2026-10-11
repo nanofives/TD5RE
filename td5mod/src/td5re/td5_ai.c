@@ -6275,6 +6275,7 @@ static int    s_gov_on = 1, s_gov_scope = 1, s_gov_look = 36;
 static double s_gov_lat_u = 6.69, s_gov_brk_u = 4.69;      /* units/tick^2 */
 static double s_gov_floor = 340.0;                          /* units/tick: below this a car has no yaw authority */
 static double s_gov_floor_loop = 260.0;                     /* [R1018 L] ... on a block loop's corridor (its corners are R >= 15 m arcs, not 4 m kinks) */
+static double s_merge_v = 0.0;                              /* [ROUND 1020 N] REJECTED, default off: units/tick cap through a block loop arrival mouth on the main road (TD5RE_AI_MERGE_V; 340 made the left loop 600..719 WARN with 3 jams in 12 seeds, 420 WARN with 1 stall, off = PASS) */
 static double s_gov_vmax = 0.0;                             /* units/tick: straight-line ceiling on a corridor route (0 = none) */
 
 static void ai_gov_read_knobs(void)
@@ -6290,6 +6291,7 @@ static void ai_gov_read_knobs(void)
     s_gov_floor = (double)td5_env_int("TD5RE_AI_GOV_FLOOR", 340, 0, 600);
     s_gov_floor_loop = (double)td5_env_int("TD5RE_AI_GOV_LOOP_FLOOR", 260, 0, 600);
     s_gov_vmax  = (double)td5_env_int("TD5RE_AI_GOV_VMAX", 0, 0, 900);
+    s_merge_v   = (double)td5_env_int("TD5RE_AI_MERGE_V", 0, 0, 900);
     TD5_LOG_I(LOG_TAG, "corridor_gov: %s scope=%d look=%d lat=%.2f brake=%.2f units/tick^2 floor=%.0f",
               s_gov_on ? "ON" : "off", s_gov_scope, s_gov_look, s_gov_lat_u, s_gov_brk_u, s_gov_floor);
 }
@@ -6345,6 +6347,13 @@ static double ai_gov_allowed(int slot, int span_raw, int span_count, double *out
         vl = sqrt(vc * vc + 2.0 * s_gov_brk_u * (cum + ln[i]));
         cum += ln[i];
         if (vl < best) best = vl;
+    }
+    if (s_merge_v > 0.0 && ring > 0 && span_raw < ring) {   /* [ROUND 1020 N] a loop's merge lane feeds cars in at ~140 units/tick: pass its mouth slower */
+        const int d = td5_track_loop_arrival_dist(span_raw, s_gov_look);
+        if (d >= 0) {
+            const double vl = sqrt(s_merge_v * s_merge_v + 2.0 * s_gov_brk_u * (double)d * (double)TD5_TG_SPAN_LENGTH);
+            if (vl < best) best = vl;
+        }
     }
     if (out_bend) *out_bend = rmin;
     if (best > 1e17) return -1.0;

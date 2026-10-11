@@ -71,6 +71,7 @@ STALL_TOL = 2          # spans of progress a plateau may contain
 INCIDENT_GAP = 90      # ticks: one car's contacts closer than this are ONE incident
 WIDEN = 8              # TD5_TG_BRANCH_WIDEN: the approach a fork window keeps (F-8)
 TAIL = 2               # R+2
+LOOP_TAIL = 14          # [1020 N] a block loop's merge dumps its cars onto the road at 140 units/tick among 500: the aftermath (a spin, a stall) lands AFTER R+2, so a loop is judged to R+14 (--loop-tail)
 MOUTH_IN = (-WIDEN, 4)   # entry mouth: F-8 .. F+4
 MOUTH_OUT = (-4, TAIL)   # exit mouth:  R-4 .. R+2
 OFFROAD_LAT = 1.20     # |lateral| in span half-widths beyond which a car is off the road
@@ -511,6 +512,7 @@ def main():
     ap.add_argument("setdir")
     ap.add_argument("--out", default=None)
     ap.add_argument("--finish-margin", type=int, default=FINISH_MARGIN)
+    ap.add_argument("--loop-tail", type=int, default=LOOP_TAIL, help="[1020 N] spans past a loop's arrival R that its window keeps (default %d; 2 = the older rule)" % LOOP_TAIL)
     ap.add_argument("--no-json", action="store_true")
     ap.add_argument("--hits", action="store_true", help="[R1016 K] list every graded hit: slot, tick, span_raw, kind, entry speed, minimum speed")
     ap.add_argument("--warn-allows", action="store_true", help="WARN forks go on the allow list (default: only PASS)")
@@ -557,7 +559,7 @@ def main():
     ordered = sorted(forks.values(), key=lambda f: f["F"])
     for fk in ordered:
         fk["lo"] = fk["F"] - WIDEN
-        fk["hi"] = fk["R"] + TAIL
+        fk["hi"] = fk["R"] + (args.loop_tail if fk["kind"] == "LOOP" else TAIL)
     # [1020 N] ...but two forks that genuinely OVERLAP (window F..R shared: a left loop beside a right loop, an N-way
     # split) keep their full windows: each is judged over every main span it covers, and a car that takes the OTHER
     # corridor is counted as such ("other" below), never cut off at a midpoint.

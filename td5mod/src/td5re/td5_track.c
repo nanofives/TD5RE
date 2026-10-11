@@ -9980,6 +9980,19 @@ int td5_track_loop_near_mouth(int span, int pad)
     return 0;
 }
 
+/* [ROUND 1020 N] distance in spans to the nearest loop arrival mouth (a2_lo..a2_hi) ahead of `span`, 0 inside it, -1 beyond `maxd`. */
+int td5_track_loop_arrival_dist(int span, int maxd)
+{
+    int i, best = -1;
+    for (i = 0; i < s_sl_n; i++) {
+        int d;
+        if (span > s_sl[i].a2_hi) continue;
+        d = span >= s_sl[i].a2_lo ? 0 : s_sl[i].a2_lo - span;
+        if (d <= maxd && (best < 0 || d < best)) best = d;
+    }
+    return best;
+}
+
 /* The block loop whose corridor holds `span` (index), or -1. */
 int td5_track_loop_of_corridor(int span)
 {

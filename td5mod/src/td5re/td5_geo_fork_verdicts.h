@@ -43,11 +43,11 @@ static const TD5_ForkVerdict k_td5_fork_verdicts[] = {
     { "la_plata_partido", 0x4B56DECBU, 901, 1174, TD5_FV_WARN_KEEP },   /* old6_a:PASS(6seeds) fin_old:WARN(6seeds) KEEP: merged Avenida 60 + Plaza Dardo Rocha + Avenida 7: PASS alone over 6 seeds on BOTH the pre-24b01f00 and the post-24b01f00 AI (8 hits, 0 crashes, 0 sta (full text: verify/geo_fork_keep.json) */
     { "la_plata_partido", 0x4B56DECBU, 1031, 1129, TD5_FV_PASS },   /* masterB:PASS(6seeds) piecesB:PASS(6seeds) */
     { "la_plata_partido", 0x4B56DECBU, 1130, 1174, TD5_FV_PASS },   /* masterB:PASS(6seeds) piecesB:PASS(6seeds) */
-    { "la_plata_partido", 0xFD6BE7C7U, 131, 360, TD5_FV_PASS },   /* cur6_a:PASS(6seeds) cur6_b:PASS(6seeds) cur6_c:PASS(6seeds) cur6_d:PASS(6seeds) cur6_f:PASS(6seeds) fin_cur:PASS(6seeds) */
-    { "la_plata_partido", 0xFD6BE7C7U, 561, 639, TD5_FV_PASS },   /* cur6_a:PASS(6seeds) fin_cur:PASS(6seeds) */
-    { "la_plata_partido", 0xFD6BE7C7U, 600, 719, TD5_FV_PASS },   /* cur6_b:PASS(6seeds) */
+    { "la_plata_partido", 0xFD6BE7C7U, 131, 360, TD5_FV_PASS },   /* n8_nomerge:PASS(12seeds) */
+    { "la_plata_partido", 0xFD6BE7C7U, 561, 639, TD5_FV_PASS },   /* n8_nomerge:PASS(12seeds) */
+    { "la_plata_partido", 0xFD6BE7C7U, 600, 719, TD5_FV_PASS },   /* n8_nomerge:PASS(12seeds) */
     { "la_plata_partido", 0xFD6BE7C7U, 844, 921, TD5_FV_PASS },   /* cur6_d:PASS(6seeds) */
-    { "la_plata_partido", 0xFD6BE7C7U, 855, 933, TD5_FV_WARN_KEEP },   /* cur6_e:PASS(6seeds) fin_cur:WARN(6seeds) KEEP: LEFT Avenida 53 (route FD6BE7C7): PASS alone over 6 seeds (cur6_e: 0 hits, 0 stalls, 0 jams, 0 spins, 0 off-road in 36 passes, both arms 18/18) and WA (full text: verify/geo_fork_keep.json) */
+    { "la_plata_partido", 0xFD6BE7C7U, 855, 933, TD5_FV_WARN_KEEP },   /* n8_nomerge:WARN(12seeds) KEEP: LEFT Avenida 53 (route FD6BE7C7): PASS alone over 6 seeds (cur6_e: 0 hits, 0 stalls, 0 jams, 0 spins, 0 off-road in 36 passes, both arms 18/18) and WA (full text: verify/geo_fork_keep.json) */
     { "la_plata_partido", 0xFD6BE7C7U, 922, 1009, TD5_FV_PASS },   /* cur6_c:PASS(6seeds) */
 };
 static const int k_td5_fork_verdicts_n = 18;
