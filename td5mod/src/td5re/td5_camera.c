@@ -2641,6 +2641,7 @@ void td5_camera_freecam_exit(void)
  *    (td5_camera_tour_cull_span, read by td5_render_mesh.c), so a pose 900 spans from the
  *    car still draws its road, its fork corridors and its scenery. Render-only: the sim
  *    is frozen and never sees it.
+ *    (TD5RE_FREECAM_TOUR_NOWAIT=1 skips the wait, to prove the manifest flags an incomplete capture.)
  *  - dwell defaults to 6 frames (nothing is streaming), TD5RE_FREECAM_TOUR_QUIT (default 1
  *    in fast mode) quits cleanly after the last pose so the logs flush, and every pose
  *    appends a line to TD5RE_FREECAM_TOUR_MANIFEST (default log/tour_manifest.csv) saying
@@ -2821,7 +2822,7 @@ static int tour_step(void)
         }
     }
     if (g_td5.simulation_tick_counter < s_tick0) return 0;
-    if (s_tour_fast && !tour_scenery_complete()) {
+    if (s_tour_fast && !tour_scenery_complete() && !td5_env_flag_off("TD5RE_FREECAM_TOUR_NOWAIT")) {
         static int s_wait_logged = 0;
         if (!s_wait_logged) {
             s_wait_logged = 1;
