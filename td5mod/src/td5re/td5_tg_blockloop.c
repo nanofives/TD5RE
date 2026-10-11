@@ -33,10 +33,13 @@
  *   TD5RE_GEO_BLOCKLOOP_MAX         most loops on a route (default 6)
  *   TD5RE_GEO_BLOCKLOOP_ONLY        "<span>[,<span>...]": only loops whose departure mouth is
  *                                    within 6 spans of one of these (harness / hand-picked)
- *   TD5RE_GEO_BLOCKLOOP_RMIN_M      corner radius wanted, metres (default 10)
+ *   TD5RE_GEO_BLOCKLOOP_RMIN_M      corner radius wanted, metres (default 22: measured on the AI, 10 m and 18 m hit walls)
  *   TD5RE_GEO_BLOCKLOOP_RFLOOR_M    tightest corner a loop may keep, metres (default 7)
- *   TD5RE_GEO_BLOCKLOOP_FLARE       mouth flare per side, world units (default 3000: a kerb return)
+ *   TD5RE_GEO_BLOCKLOOP_FLARE       extra width per side at the corridor's two ends, world units (default 0)
  *   TD5RE_GEO_BLOCKLOOP_FLARE_ROWS  rows (spans) it tapers over (default 5)
+ *   TD5RE_GEO_BLOCKLOOP_LANES       corridor lanes (default 2; 0 = from the real ways)
+ *   TD5RE_GEO_BLOCKLOOP_STRAIGHT_DEG  heading change allowed along a slip lane's road edge (default 5)
+ *   TD5RE_GEO_BLOCKLOOP_LEAD_SPANS  straight lane before a corner's arc, spans beyond twice its tangent (default 6)
  *   TD5RE_GEO_BLOCKLOOP_LMAX_M      longest loop, metres (default 420)
  *   TD5RE_GEO_BLOCKLOOP_RATIO_MIN/MAX  corridor length over the bypassed main length (1.4 .. 8)
  *   TD5RE_GEO_FORK_DIAG=1           why a candidate was refused
@@ -48,12 +51,12 @@
 #include "td5_tg_world.h"
 #include "td5_geo.h"
 #include "td5_geo_roads.h"
+#include "td5_dev_forkfilter.h"      /* the harness's per-fork allow / deny list, by F */
 
 #define BL_UPM        430.0          /* world units per metre (the place cache's scale) */
 #define BL_MAXPLAN    16
 #define BL_HSIZE      32768
 #define BL_JOIN_D2    (80.0 * 80.0)  /* two way vertices closer than this are one node  */
-#define BL_LEAD_SP    4.0            /* spans the corridor runs perpendicular to the road */
 
 typedef struct { double x, z; int head, hnext; int ri; double lat, dist; } BlNode;
 typedef struct { int to, way, next; float len; } BlEdge;
@@ -64,6 +67,8 @@ typedef struct {
     int    e1, e2;                   /* the two network edges (real street arms)        */
     int    si1, si2;                 /* mouth centre spans                               */
     int    a1_lo, a1_hi, a2_lo, a2_hi;
+    int    fl1, fl2;                 /* corridor spans flush with the road at the departure / arrival */
+    int    nabs, absorb[8];          /* drawn street stubs the corridor runs over: taken over by the loop */
     int    F, R, len, clen, lb;
     double flare;
     double len_m, main_m, ratio, min_r_m;
@@ -362,28 +367,6 @@ static int bl_edge_at(const TG_NodeList *nl, int si, double *ex, double *ey, dou
     return 1;
 }
 
-/* Main spans whose right edge lies against the mouth's near row: those within half the row's
- * width (plus the span's own half length) along the road from the mouth centre. */
-static void bl_mouth_range(const TG_NodeList *nl, int si, double half_row, int *lo, int *hi)
-{
-    double mx, my, mz, ox, oz;
-    int s, l = si, h = si;
-    if (!bl_edge_at(nl, si, &mx, &my, &mz, &ox, &oz)) { *lo = si; *hi = si; return; }
-    for (s = si - 10; s <= si + 10; s++) {
-        double ax, ay, az, bx, by, bz, oxx, ozz, u0, u1;
-        if (s < 1 || s + 2 >= nl->count) continue;
-        if (!bl_edge_at(nl, s, &ax, &ay, &az, &oxx, &ozz) || !bl_edge_at(nl, s + 1, &bx, &by, &bz, &oxx, &ozz)) continue;
-        u0 = (ax - mx) * nl->v[si].tx + (az - mz) * nl->v[si].tz;
-        u1 = (bx - mx) * nl->v[si].tx + (bz - mz) * nl->v[si].tz;
-        if (u0 > u1) { const double t = u0; u0 = u1; u1 = t; }
-        if (u1 > -half_row + 200.0 && u0 < half_row - 200.0) {
-            if (s < l) l = s;
-            if (s > h) h = s;
-        }
-    }
-    *lo = l; *hi = h;
-}
-
 static int bl_lanes_uniform(const TG_NodeList *nl, int lo, int hi)
 {
     int s;
@@ -395,20 +378,39 @@ static int bl_lanes_uniform(const TG_NodeList *nl, int lo, int hi)
 
 /* ------------------------------------------------------------ candidates */
 
-/* The graph node an arm's path starts from: walking its real way outward from the junction, the
- * first vertex that is right of the road and clear of every carriageway. The junction's own vertex
- * (and a shared-carriageway run's vertices) lie ON the road. */
+/* The graph node an arm's path starts from: leaving the arm's first way vertex (the junction's, on the
+ * road) outward over the graph -- through any way, because a real street often changes ways at the
+ * junction -- the first vertex that is right of the road and clear of every carriageway and that lies in
+ * the arm's direction. Depth-limited breadth-first, moving away from the road only. */
 static int bl_arm_node(const TG_NodeList *nl, const TG_NetArm *A)
 {
     const TD5_GeoRoad *r = td5_geo_roads_get(A->road);
-    int k, tries;
-    if (!r) return -1;
-    for (k = A->k0, tries = 0; k >= 0 && k < r->count && tries < 10; k += (A->step >= 0 ? 1 : -1), tries++) {
-        double x, z;
-        int n;
-        if (!td5_geo_roads_point(r, k, &x, &z)) break;
-        n = bl_node_find(x, z);
-        if (n >= 0 && bl_node_ok(nl, n, 4.0 * BL_UPM)) return n;
+    int q[256], depth[256], head = 0, tail = 0, k, n0;
+    double x0, z0, dx, dz, dl;
+    if (!r || !td5_geo_roads_point(r, A->k0, &x0, &z0)) return -1;
+    n0 = bl_node_find(x0, z0);
+    if (n0 < 0) return -1;
+    dx = A->bx - A->ax; dz = A->bz - A->az;
+    dl = sqrt(dx * dx + dz * dz);
+    if (dl < 1.0) return -1;
+    dx /= dl; dz /= dl;
+    q[tail] = n0; depth[tail] = 0; tail++;
+    while (head < tail) {
+        const int n = q[head], d = depth[head];
+        head++;
+        if (bl_node_ok(nl, n, 4.0 * BL_UPM)) {
+            const double ux = g_n[n].x - A->ax, uz = g_n[n].z - A->az;
+            const double ul = sqrt(ux * ux + uz * uz);
+            if (ul > 1.0 && (ux * dx + uz * dz) / ul > 0.7) return n;
+        }
+        if (d >= 4) continue;
+        for (k = g_n[n].head; k >= 0; k = g_e[k].next) {
+            const int m = g_e[k].to;
+            int i, seen = 0;
+            if (g_n[m].dist + 200.0 < g_n[n].dist) continue;          /* never back toward the road */
+            for (i = 0; i < tail; i++) if (q[i] == m) { seen = 1; break; }
+            if (!seen && tail < 256) { q[tail] = m; depth[tail] = d + 1; tail++; }
+        }
     }
     return -1;
 }
@@ -548,33 +550,90 @@ static int bl_simplify(double *px, double *pz, int n, double tol)
     return m;
 }
 
-/* Build the chain for a candidate: polyline -> fillet -> resample. Fills cx/cz/cy (clen+1). */
-static int bl_chain(const TG_NodeList *nl, BlPlan *P, const int *path, int np,
-                    double rwant, double rfloor)
-{
-    double e1x, e1y, e1z, o1x, o1z, e2x, e2y, e2z, o2x, o2z;
-    double px[300], pz[300], fx[2600], fz[2600];
-    double *cum;
-    int n = 0, i, nf, nc, k;
-    const double lead = BL_LEAD_SP * (double)TD5_TG_SPAN_LENGTH;
-    double total = 0.0, minr = 0.0, ys, ye;
+/* One SLIP LEG: the lane that runs flush against the road's right edge before it arcs into the street
+ * (departure) or after it has arced out of it (arrival). Its centre line is the road's right edge pushed
+ * out by half the lane's width, so the corridor's own left edge IS the road edge: a car moves onto it
+ * across the open rail at a shallow angle, and the 90 degree turn happens inside the corridor, on a real
+ * radius, instead of at the edge. */
+typedef struct {
+    double cx, cz;               /* the corner vertex: street axis x slip centre line */
+    double tf;                   /* tangent length of its fillet                      */
+    double qx[96], qz[96], qy[96];
+    int    nq, j0, j1;           /* points, and the main nodes the first / last one stands beside */
+} BlSlip;
 
-    if (!bl_edge_at(nl, P->si1, &e1x, &e1y, &e1z, &o1x, &o1z) ||
-        !bl_edge_at(nl, P->si2, &e2x, &e2y, &e2z, &o2x, &o2z)) return 0;
-    px[n] = e1x; pz[n] = e1z; n++;
-    px[n] = e1x + o1x * lead; pz[n] = e1z + o1z * lead; n++;
-    for (i = 0; i < np && n < 290; i++) {
-        const double x = g_n[path[i]].x, z = g_n[path[i]].z;
-        const double u1 = (x - e1x) * o1x + (z - e1z) * o1z;      /* outward distance from mouth 1 */
-        const double u2 = (x - e2x) * o2x + (z - e2z) * o2z;
-        if (u1 < lead + rwant * 0.5 && i < np / 2 + 1) continue;
-        if (u2 < lead + rwant * 0.5 && i >= np / 2) continue;
-        if (n > 0 && (px[n - 1] - x) * (px[n - 1] - x) + (pz[n - 1] - z) * (pz[n - 1] - z) < 150.0 * 150.0) continue;
-        px[n] = x; pz[n] = z; n++;
+static int bl_slip(const TG_NodeList *nl, int si, const TG_NetArm *A, double W, double R, int arrival, BlSlip *S)
+{
+    double ex, ey, ez, ox, oz, dx, dz, dl, a0x = A->ax, a0z = A->az, s_par, th, ct, upb, lead, rx, rz;
+    const double tx = nl->v[si].tx, tz = nl->v[si].tz;
+    int j;
+    memset(S, 0, sizeof *S);
+    if (!bl_edge_at(nl, si, &ex, &ey, &ez, &ox, &oz)) return 0;
+    rx = -tz; rz = tx;                                   /* the route's right of travel */
+    if (ox * rx + oz * rz < 0.9) { s_why = "the mouth's outward normal is not the right of travel"; return 0; }
+    dx = A->bx - A->ax; dz = A->bz - A->az;
+    dl = sqrt(dx * dx + dz * dz);
+    if (dl < 1.0) { s_why = "an arm with no length"; return 0; }
+    dx /= dl; dz /= dl;
+    if (dx * ox + dz * oz < 0.6) { s_why = "the street does not leave the road outward"; return 0; }
+    s_par = (W * 0.5 - ((a0x - ex) * ox + (a0z - ez) * oz)) / (dx * ox + dz * oz);
+    S->cx = a0x + dx * s_par; S->cz = a0z + dz * s_par;
+    ct = tx * (arrival ? -dx : dx) + tz * (arrival ? -dz : dz);
+    if (ct > 1.0) ct = 1.0;
+    if (ct < -1.0) ct = -1.0;
+    th = acos(ct);                                       /* the turn between the slip lane and the street */
+    if (th < 0.7 || th > kPi - 0.4) { s_why = "the street meets the road at too shallow an angle"; return 0; }
+    S->tf = R * tan(th * 0.5);
+    lead = 2.0 * S->tf + (double)td5_env_int("TD5RE_GEO_BLOCKLOOP_LEAD_SPANS", 6, 2, 20) * (double)TD5_TG_SPAN_LENGTH;  /* the lane before the corner is at least twice the fillet's tangent: the arc takes half of it */
+    upb = (S->cx - ex) * tx + (S->cz - ez) * tz;
+    for (j = si - 70; j <= si + 70; j++) {
+        double jx, jy, jz, jox, joz, u;
+        if (j < 1 || j + 2 >= nl->count || S->nq >= 96) continue;
+        if (!bl_edge_at(nl, j, &jx, &jy, &jz, &jox, &joz)) continue;
+        u = (jx - ex) * tx + (jz - ez) * tz;
+        if (arrival ? (u >= upb + 2.0 * S->tf && u <= upb + lead) : (u >= upb - lead && u <= upb - 2.0 * S->tf)) {
+            if (S->nq == 0) S->j0 = j;
+            S->j1 = j;
+            S->qx[S->nq] = jx + jox * W * 0.5; S->qz[S->nq] = jz + joz * W * 0.5; S->qy[S->nq] = jy;
+            S->nq++;
+        }
     }
-    px[n] = e2x + o2x * lead; pz[n] = e2z + o2z * lead; n++;
-    px[n] = e2x; pz[n] = e2z; n++;
-    n = bl_simplify(px, pz, n, 6.0 * BL_UPM);
+    if (S->nq < 3) { s_why = "the road edge beside the corner is not sampled"; return 0; }
+    return 1;
+}
+
+/* Build the chain for a candidate: slip lane -> corner -> real streets -> corner -> slip lane, then
+ * fillet, resample. Fills cx/cz/cy (clen+1). */
+static int bl_chain(const TG_NodeList *nl, BlPlan *P, const TG_NetArm *A, const TG_NetArm *B,
+                    const int *path, int np, double rwant, double rfloor)
+{
+    BlSlip S1, S2;
+    const double W = (double)P->lb * bl_lw();
+    double px[400], pz[400], py[400], fx[2600], fz[2600], sx[300], sz[300];
+    double *cum;
+    int n = 0, i, nf, nc, k, ns = 0, k_s1 = 0, k_s2 = 0;
+    double total = 0.0, minr = 0.0;
+
+    if (!bl_slip(nl, P->si1, A, W, rwant, 0, &S1)) return 0;
+    if (!bl_slip(nl, P->si2, B, W, rwant, 1, &S2)) return 0;
+    /* the street part: corner 1, the real way's vertices, corner 2 (simplified: a real junction has dual
+     * carriageways and kerb nodes a few metres apart, which are not corners a car drives) */
+    sx[ns] = S1.cx; sz[ns] = S1.cz; ns++;
+    for (i = 0; i < np && ns < 290; i++) {
+        const double x = g_n[path[i]].x, z = g_n[path[i]].z;
+        const double d1 = sqrt((x - S1.cx) * (x - S1.cx) + (z - S1.cz) * (z - S1.cz));
+        const double d2 = sqrt((x - S2.cx) * (x - S2.cx) + (z - S2.cz) * (z - S2.cz));
+        if (d1 < S1.tf + 1500.0 || d2 < S2.tf + 1500.0) continue;
+        if ((sx[ns - 1] - x) * (sx[ns - 1] - x) + (sz[ns - 1] - z) * (sz[ns - 1] - z) < 150.0 * 150.0) continue;
+        sx[ns] = x; sz[ns] = z; ns++;
+    }
+    sx[ns] = S2.cx; sz[ns] = S2.cz; ns++;
+    ns = bl_simplify(sx, sz, ns, 6.0 * BL_UPM);
+    for (i = 0; i < S1.nq; i++) { px[n] = S1.qx[i]; pz[n] = S1.qz[i]; py[n] = S1.qy[i]; n++; }
+    k_s1 = n;                                           /* index of corner 1 in the polyline */
+    for (i = 0; i < ns && n < 395; i++) { px[n] = sx[i]; pz[n] = sz[i]; py[n] = 1e30; n++; }
+    k_s2 = n - 1;                                       /* corner 2 */
+    for (i = 0; i < S2.nq && n < 399; i++) { px[n] = S2.qx[i]; pz[n] = S2.qz[i]; py[n] = S2.qy[i]; n++; }
     s_why = "";
     nf = bl_fillet(px, pz, n, rwant, rfloor, fx, fz, 2600, &minr, &P->ncorner);
     if (nf < 4) {
@@ -582,8 +641,7 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const int *path, int np,
         if (s_diag) {
             int q;
             for (q = 0; q < n; q++)
-                TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP]     polyline %d: (%.0f,%.0f) %s", q, px[q], pz[q],
-                          q ? "" : "mouth 1");
+                TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP]     polyline %d: (%.0f,%.0f)", q, px[q], pz[q]);
         }
         return 0;
     }
@@ -612,8 +670,7 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const int *path, int np,
         P->cx[i] = fx[k] + (fx[k + 1] - fx[k]) * u;
         P->cz[i] = fz[k] + (fz[k + 1] - fz[k]) * u;
     }
-    P->cx[0] = e1x; P->cz[0] = e1z; P->cx[nc] = e2x; P->cz[nc] = e2z;
-    free(cum);
+    P->cx[0] = S1.qx[0]; P->cz[0] = S1.qz[0]; P->cx[nc] = S2.qx[S2.nq - 1]; P->cz[nc] = S2.qz[S2.nq - 1];
     {   /* tightest corner of the RESAMPLED chain (circumradius of consecutive triples) */
         double mr = 1e300;
         for (i = 1; i < nc; i++) {
@@ -630,18 +687,110 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const int *path, int np,
         P->min_r_m = mr / BL_UPM;
     }
     P->len_m = total / BL_UPM;
-    /* heights: the terrain under the chain, offset so both ends meet the road edge */
-    ys = e1y; ye = e2y;
+    /* heights: the slip lanes take the road edge's own height, the streets between them the terrain
+     * under them (offset so the two meet), like every other free corridor */
     {
-        const double ds = ys - tg_world_h(P->cx[0], P->cz[0]);
-        const double de = ye - tg_world_h(P->cx[nc], P->cz[nc]);
-        for (i = 0; i <= nc; i++) {
-            const double u = (double)i / (double)nc;
-            P->cy[i] = tg_world_h(P->cx[i], P->cz[i]) + ds + (de - ds) * u;
+        double s_a = 0.0, s_b = total;                  /* arc lengths where the flush part at each end stops */
+        double ya, yb, ds, de, acc = 0.0, acc_c1 = 0.0, acc_c2 = 0.0;
+        int q, ia, ib;
+        for (q = 1; q < n; q++) {                        /* arc length of the polyline to corner 1, corner 2, its end */
+            acc += sqrt((px[q] - px[q - 1]) * (px[q] - px[q - 1]) + (pz[q] - pz[q - 1]) * (pz[q] - pz[q - 1]));
+            if (q == k_s1) acc_c1 = acc;
+            if (q == k_s2) acc_c2 = acc;
         }
-        P->cy[0] = ys; P->cy[nc] = ye;
+        s_a = acc_c1 - S1.tf;                           /* the fillet starts a tangent length before the corner */
+        s_b = total - ((acc - acc_c2) - S2.tf);         /* ... and ends one after corner 2 */
+        if (s_a < 0.0) s_a = 0.0;
+        if (s_b > total) s_b = total;
+        ia = (int)(s_a / (double)TD5_TG_SPAN_LENGTH); if (ia > nc) ia = nc;
+        ib = (int)((total - s_b) / (double)TD5_TG_SPAN_LENGTH); if (ib > nc) ib = nc;
+        ya = S1.qy[S1.nq - 1]; yb = S2.qy[0];
+        ds = ya - tg_world_h(P->cx[ia], P->cz[ia]);
+        de = yb - tg_world_h(P->cx[nc - ib], P->cz[nc - ib]);
+        for (i = 0; i <= nc; i++) {
+            const double sa = total * (double)i / (double)nc;
+            const double ui = (nc - ib <= ia) ? 1.0 : (i <= ia ? 0.0 : (i >= nc - ib ? 1.0 : (double)(i - ia) / (double)(nc - ib - ia)));
+            if (sa <= s_a && S1.nq > 1) {                /* flush with the road edge: the edge's own height, by distance */
+                const double fi = sa / (double)TD5_TG_SPAN_LENGTH;
+                const int q0 = (int)fi < S1.nq - 1 ? (int)fi : S1.nq - 2;
+                const double f = fi - (double)q0;
+                P->cy[i] = S1.qy[q0] + (S1.qy[q0 + 1] - S1.qy[q0]) * (f > 1.0 ? 1.0 : f);
+            } else if (sa >= s_b && S2.nq > 1) {
+                const double fi = (sa - s_b) / (double)TD5_TG_SPAN_LENGTH;
+                int q0 = (int)(fi < 0.0 ? 0.0 : fi); if (q0 > S2.nq - 2) q0 = S2.nq - 2;
+                {
+                    const double f = fi - (double)q0;
+                    P->cy[i] = S2.qy[q0] + (S2.qy[q0 + 1] - S2.qy[q0]) * (f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f));
+                }
+            } else {
+                P->cy[i] = tg_world_h(P->cx[i], P->cz[i]) + ds + (de - ds) * ui;
+            }
+        }
     }
+    free(cum);
+    P->a1_lo = S1.j0 - 1; P->a1_hi = S1.j1 + 1;
+    P->a2_lo = S2.j0 - 1; P->a2_hi = S2.j1 + 1;
+    P->npath = np;
     return 1;
+}
+
+/* How much of the corridor runs flush against the road's right edge (its left rail IS the road edge), and
+ * the main spans it lies against. Counted on the finished chain, so it is what the engine will meet. */
+static int bl_flush(const TG_NodeList *nl, BlPlan *P)
+{
+    const double W = (double)P->lb * bl_lw();
+    unsigned char *fr = (unsigned char *)calloc((size_t)P->clen + 2, 1);
+    int k, e, ok = 1;
+    if (!fr) return 0;
+    for (e = 0; e < 2; e++) {
+        const int si = e ? P->si2 : P->si1;
+        double ex[160], ez[160];
+        int jlo = si - 70, jhi = si + 70, nj = 0, j, j0 = 1 << 30, j1 = -1;
+        for (j = jlo; j <= jhi && nj < 160; j++) {
+            double a, b, c, ox, oz;
+            if (j < 1 || j + 2 >= nl->count || !bl_edge_at(nl, j, &a, &b, &c, &ox, &oz)) { ex[nj] = 1e30; ez[nj] = 1e30; nj++; continue; }
+            ex[nj] = a; ez[nj] = c; nj++;
+        }
+        for (k = e ? P->clen : 0; e ? k >= 0 : k <= P->clen; k += e ? -1 : 1) {
+            const int ka = k > 0 ? k - 1 : 0, kb = k < P->clen ? k + 1 : P->clen;
+            double tx = P->cx[kb] - P->cx[ka], tz = P->cz[kb] - P->cz[ka], l, lx, lz, best = 1e300;
+            int bj = -1;
+            l = sqrt(tx * tx + tz * tz);
+            if (l < 1e-9) break;
+            tx /= l; tz /= l;
+            lx = P->cx[k] + tz * W * 0.5; lz = P->cz[k] - tx * W * 0.5;       /* the row's left end */
+            for (j = 0; j + 1 < nj; j++) {
+                double ax = ex[j], az = ez[j], bx = ex[j + 1], bz = ez[j + 1], dx, dz, ll, t, qx, qz, d;
+                if (ax > 1e29 || bx > 1e29) continue;
+                dx = bx - ax; dz = bz - az; ll = dx * dx + dz * dz;
+                t = ll > 1e-9 ? ((lx - ax) * dx + (lz - az) * dz) / ll : 0.0;
+                if (t < 0.0) t = 0.0;
+                if (t > 1.0) t = 1.0;
+                qx = ax + dx * t - lx; qz = az + dz * t - lz;
+                d = qx * qx + qz * qz;
+                if (d < best) { best = d; bj = jlo + j; }
+            }
+            if (bj < 0 || best > 900.0 * 900.0) {            /* the corridor has left the road */
+                if (s_diag)
+                    TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP]     flush %s ends at row %d: left end (%.0f,%.0f) is %.0f from the road edge (centre (%.0f,%.0f), W %.0f)",
+                              e ? "arrival" : "departure", k, lx, lz, bj < 0 ? -1.0 : sqrt(best), P->cx[k], P->cz[k], W);
+                break;
+            }
+            fr[k] = 1;
+            if (bj < j0) j0 = bj;
+            if (bj > j1) j1 = bj;
+        }
+        if (j1 < 0) { ok = 0; break; }
+        if (e == 0) { P->a1_lo = j0 - 1; P->a1_hi = j1 + 2; }
+        else        { P->a2_lo = j0 - 1; P->a2_hi = j1 + 2; }
+    }
+    if (ok) {
+        for (k = 0; k < P->clen && fr[k] && fr[k + 1]; k++) P->fl1++;
+        for (k = P->clen - 1; k >= 0 && fr[k] && fr[k + 1]; k--) P->fl2++;
+        if (P->fl1 < 2 || P->fl2 < 2) ok = 0;
+    }
+    free(fr);
+    return ok;
 }
 
 static void bl_free_plan(BlPlan *P)
@@ -659,9 +808,10 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
     BlPlan cand[64];
     int ncand = 0, built = 0;
     const int max_loops = td5_env_int("TD5RE_GEO_BLOCKLOOP_MAX", 6, 0, BL_MAXPLAN);
-    const double rwant = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_RMIN_M", 10.0f, 4.0f, 40.0f) * BL_UPM;
+    const double rwant = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_RMIN_M", 22.0f, 4.0f, 40.0f) * BL_UPM;
     const double rfloor = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_RFLOOR_M", 7.0f, 3.0f, 30.0f) * BL_UPM;
-    const double flare = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_FLARE", 3000.0f, 0.0f, 9000.0f);
+    const double flare = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_FLARE", 0.0f, 0.0f, 9000.0f);
+    const int lanes_knob = td5_env_int("TD5RE_GEO_BLOCKLOOP_LANES", 2, 0, 4);
     const double lmax = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_LMAX_M", 420.0f, 60.0f, 1200.0f) * BL_UPM;
     const double rmin = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_RATIO_MIN", 1.4f, 1.0f, 8.0f);
     const double rmax = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_RATIO_MAX", 8.0f, 1.0f, 20.0f);
@@ -672,6 +822,7 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
     s_diag = td5_env_flag_off("TD5RE_GEO_FORK_DIAG");
     s_clear = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_CLEAR_M", 25.0f, 5.0f, 80.0f) * BL_UPM;
     if (!td5_env_flag_on("TD5RE_GEO_FORK_BLOCKLOOP") || max_loops < 1) return 0;
+    if (!tg_realfork_enabled()) return 0;     /* the harness's forks-off arm (TD5RE_GEO_REAL_FORKS=0) has no loops either */
     if (!td5_geo_loaded() || !nl || nl->count < 120) return 0;
     if (!td5_geo_roads_sync(td5_geo_place_slug())) return 0;
     if (!tg_net_geo()) return 0;
@@ -746,10 +897,10 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             }
             if (P->lb < 2) P->lb = 2;
             if (P->lb > 3) P->lb = 3;
+            if (lanes_knob > 0) P->lb = lanes_knob;     /* TD5RE_GEO_BLOCKLOOP_LANES: a slip lane beside the road wants 2 */
             P->flare = flare;
-            P->npath = np;
             P->main_m = main_m;
-            if (!bl_chain(nl, P, path, np, rwant, rfloor)) {
+            if (!bl_chain(nl, P, A, B, path, np, rwant, rfloor)) {
                 bl_note(what, A->si, B->si, s_why);
                 bl_free_plan(P);
                 continue;
@@ -762,12 +913,25 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
                 bl_free_plan(P);
                 continue;
             }
-            {
-                const double half_row = ((double)P->lb * bl_lw() + 2.0 * flare) * 0.5;
-                bl_mouth_range(nl, A->si, half_row, &lo1, &hi1);
-                bl_mouth_range(nl, B->si, half_row, &lo2, &hi2);
+            if (!bl_flush(nl, P)) { bl_note(what, A->si, B->si, "the corridor does not run flush with the road edge at a mouth"); bl_free_plan(P); continue; }
+            {   /* the road must be straight beside both slip lanes: a lane flush with a bend folds, and the bend is the road's own corner */
+                const double tol = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_STRAIGHT_DEG", 5.0f, 0.5f, 45.0f) * kPi / 180.0;
+                int e2, sj, bad = 0;
+                for (e2 = 0; e2 < 2 && !bad; e2++) {
+                    const int a = e2 ? P->a2_lo : P->a1_lo, b = e2 ? P->a2_hi : P->a1_hi, c = e2 ? P->si2 : P->si1;
+                    for (sj = a - 1; sj <= b + 1 && !bad; sj++) {
+                        double dd;
+                        if (sj < 1 || sj + 1 >= nl->count) { bad = 1; break; }
+                        dd = nl->v[sj].tx * nl->v[c].tx + nl->v[sj].tz * nl->v[c].tz;
+                        if (dd > 1.0) dd = 1.0;
+                        if (dd < -1.0) dd = -1.0;
+                        if (acos(dd) > tol) bad = 1;
+                    }
+                }
+                if (bad) { bl_note(what, A->si, B->si, "the road bends beside a slip lane"); bl_free_plan(P); continue; }
             }
-            P->a1_lo = lo1; P->a1_hi = hi1; P->a2_lo = lo2; P->a2_hi = hi2;
+            lo1 = P->a1_lo; hi1 = P->a1_hi; lo2 = P->a2_lo; hi2 = P->a2_hi;
+            (void)lo2; (void)hi1;
             P->F = lo1; P->R = hi2; P->len = P->R - P->F - 1;
             if (P->F < TD5_TG_GRID_SPAN + 8) { bl_note(what, A->si, B->si, "inside the start grid"); ok = 0; }
             if (ok && (P->R + 12 >= ring - 24 || (finish > 0 && P->R + 10 >= finish))) { bl_note(what, A->si, B->si, "past the finish line or inside the ring tail"); ok = 0; }
@@ -782,9 +946,24 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             }
             if (ok) {   /* the corridor stays clear of every other street and of every carriageway but its mouths */
                 int k;
-                for (k = 6; k <= P->clen - 6 && ok; k += 2) {
+                for (k = 2; k <= P->clen - 2 && ok; k += 2) {
                     const double hw = ((double)P->lb * bl_lw()) * 0.5;
-                    if (tg_net_near_other_street(P->cx[k], P->cz[k], hw, P->e1, P->e2)) { ok = 0; bl_note(what, A->si, B->si, "crosses another drawn street"); }
+                    const int oe = tg_net_near_other_street(P->cx[k], P->cz[k], hw, P->e1, P->e2);
+                    if (oe) {
+                        /* a drawn side-street STUB the corridor runs over (the slip lane passes the mouths of
+                         * other streets): the loop takes it over, its stub is not drawn. Anything else is a refusal. */
+                        TG_NetArm oa;
+                        int q2, have = 0;
+                        if (tg_net_arm_get(oe - 1, &oa) && !oa.left) {
+                            for (q2 = 0; q2 < P->nabs; q2++) if (P->absorb[q2] == oe - 1) have = 1;
+                            if (!have && P->nabs < 8) P->absorb[P->nabs++] = oe - 1;
+                            else if (!have) { ok = 0; bl_note(what, A->si, B->si, "runs over too many drawn streets"); }
+                        } else {
+                            char w[96];
+                            snprintf(w, sizeof w, "crosses another drawn street at row %d of %d (%.0f,%.0f)", k, P->clen, P->cx[k], P->cz[k]);
+                            ok = 0; bl_note(what, A->si, B->si, w);
+                        }
+                    }
                     else if (k > 16 && k < P->clen - 16 &&
                              tg_world_occ_near(P->cx[k], P->cz[k], hw + 600.0, TG_WO_DRIVABLE | TG_WO_ROAD)) { ok = 0; bl_note(what, A->si, B->si, "runs over a carriageway or another corridor"); }
                     else if (tg_world_is_water(P->cx[k], P->cz[k])) { ok = 0; bl_note(what, A->si, B->si, "runs into water"); }
@@ -813,6 +992,11 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             if (C->e1 == O->e1 || C->e1 == O->e2 || C->e2 == O->e1 || C->e2 == O->e2) clash = 1;
         }
         if (clash) { bl_free_plan(C); continue; }
+        if (!td5_dev_forkfilter_allow(C->si1)) {    /* dev-only allow/deny by the DEPARTURE MOUTH span (verify/geo_fork_validate.ps1 -Only 739): F moves with the flare */
+            TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d \"%s\" filtered out (TD5RE_GEO_FORK_ALLOW/DENY)", C->F, C->name);
+            bl_free_plan(C);
+            continue;
+        }
         if (off + 1 + C->clen >= TD5_TG_MAX_SPANS - 8) {
             bl_note(C->name, C->si1, C->si2, "the track would exceed the span budget");
             bl_free_plan(C);
@@ -859,10 +1043,11 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             built++;
             tg_net_loop_take(P->e1, P->a1_lo, P->a1_hi);
             tg_net_loop_take(P->e2, P->a2_lo, P->a2_hi);
+            for (q = 0; q < P->nabs; q++) tg_net_loop_take(P->absorb[q], -1, -2);
             tg_bl_paint_network(P->fi);
-            TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] %d: fork %d F=%d R=%d (mouths %d..%d / %d..%d) arms %d/%d lanes %d, "
+            TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] %d: fork %d F=%d R=%d (mouths %d..%d / %d..%d, flush spans %d / %d) arms %d/%d lanes %d, "
                       "corridor %d spans %.0f m over %.0f m of road (%.2fx), %d corner(s), tightest %.1f m, %d graph nodes",
-                      s_nbl, P->fi, P->F, P->R, P->a1_lo, P->a1_hi, P->a2_lo, P->a2_hi, P->e1, P->e2, P->lb,
+                      s_nbl, P->fi, P->F, P->R, P->a1_lo, P->a1_hi, P->a2_lo, P->a2_hi, P->fl1, P->fl2, P->e1, P->e2, P->lb,
                       P->clen, P->len_m, P->main_m, P->ratio, P->ncorner, P->min_r_m, P->npath);
             s_nbl++;
         }
@@ -990,6 +1175,8 @@ int tg_bl_slnk_write(TG_Buf *out)
         tg_put_u32(out, (unsigned int)P->a2_lo);
         tg_put_u32(out, (unsigned int)P->a2_hi);
         tg_put_u32(out, 0u);
+        tg_put_u32(out, (unsigned int)(s_forks[P->fi].cbase + P->fl1 - 1));
+        tg_put_u32(out, (unsigned int)(s_forks[P->fi].cbase + P->clen - P->fl2));
     }
     return n;
 }

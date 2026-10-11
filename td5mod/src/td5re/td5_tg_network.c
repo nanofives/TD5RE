@@ -1871,8 +1871,8 @@ int tg_net_arm_get(int i, TG_NetArm *out)
     return 1;
 }
 
-/* Is (x,z) within `half` of any network street polyline other than the two edges `ea`, `eb`
- * (the loop's own arms)? Half is the caller's own half width; the street's is added. */
+/* The network edge (index + 1) within `half` of (x,z) other than the two edges `ea`, `eb` (the loop's own
+ * arms), or 0. Half is the caller's own half width; the street's is added. */
 int tg_net_near_other_street(double x, double z, double half, int ea, int eb)
 {
     int i, k;
@@ -1890,7 +1890,7 @@ int tg_net_near_other_street(double x, double z, double half, int ea, int eb)
             if (t > 1.0) t = 1.0;
             ex = ax + dx * t - x; ez = az + dz * t - z;
             r = o->width * 0.5 + half;
-            if (ex * ex + ez * ez < r * r) return 1;
+            if (ex * ex + ez * ez < r * r) return i + 1;
         }
     }
     return 0;

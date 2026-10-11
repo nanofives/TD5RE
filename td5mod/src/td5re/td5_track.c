@@ -188,23 +188,27 @@ static int  corr_progress_delta(int span0, int span1);
  * axis is perpendicular to the road. Nothing in the 4-edge walker can step from a plain
  * road span onto a span on the other side of its rail, so the generator says where the
  * road is open in a TRAILER after the vertex table (before 'CMRP'):
- *   u32 'SLNK' (0x4B4E4C53), u32 nloops, then per loop 9 x u32
- *   D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side
+ *   u32 'SLNK' (0x4B4E4C53), u32 nloops, then per loop 11 x u32
+ *   D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, c1_hi, cN_lo
  * D / A are the departure / arrival MAIN spans (the F / R of the jump record), c0 / cN the
- * corridor's first / last span, a1_lo..a1_hi the main spans whose right rail the mouth
- * of c0 lies against, a2_lo..a2_hi the same for cN. side 0 = right of travel.
+ * corridor's first / last span, a1_lo..a1_hi the main spans whose right rail the corridor's
+ * first spans c0..c1_hi lie against (the corridor starts as a slip lane flush with the road's
+ * right edge and then arcs into the street), a2_lo..a2_hi the same for the last spans
+ * cN_lo..cN (it arcs out of the street into a merge lane and ends flush with the edge).
+ * side 0 = right of travel.
  * Two things read it, both only on the spans it names: (1) the walker, which before its
  * edge tests relocates a probe that has left the span it is on and lies inside the linked
  * span's lane quads (c0 <-> a1, cN <-> a2: a decision by CONTAINMENT, like geo_fork_decide,
  * so there is no sub-lane bookkeeping to get wrong); (2) the wall resolver, which stands
  * the rail down for a probe that is inside the span on the other side of it. A track
  * without the trailer has s_sl_n == 0 and takes no new branch anywhere. */
-typedef struct { int D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side; } SideLoop;
+typedef struct { int D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, c1_hi, cN_lo; } SideLoop;
 static SideLoop *s_sl = NULL;
 static int       s_sl_n = 0;
 static int16_t  *s_sl_of = NULL;       /* per span: loop * 4 + role (0 a1, 1 c0, 2 a2, 3 cN), or -1 */
 static int       s_sl_jumped = 0;      /* set by the walker when it relocated across a side link */
 static int       s_sl_off = -1;        /* TD5RE_GEO_BLOCKLOOP_ENGINE=0 turns the engine side off */
+static int       s_sl_jump_pct = 0;    /* TD5RE_AI_LOOP_JUMP_PCT: where in the opening the AI's path turns in (0 = first span) */
 static void sl_free(void);
 static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos);
 static int  sl_open(int span, int32_t px, int32_t pz);
@@ -2435,9 +2439,10 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
          * inside the span across the mouth is on road, not past a wall. */
         if ((hit_l || hit_r) && s_sl_n > 0 && sl_open(span_idx, px, pz)) { hit_l = hit_r = 0; }
 #ifndef TD5RE_RELEASE
-        if (s_sl_n > 0 && s_sl_of && (hit_l || hit_r) && actor->slot_index == td5_env_int("TD5RE_SL_DIAG", -1, -1, 7)) {
+        if (s_sl_n > 0 && s_sl_of && (hit_l || hit_r) && actor->slot_index == td5_env_int("TD5RE_SL_DIAG", -1, -1, 7) &&
+            (s_sl_of[span_idx] >= 0 || span_idx >= s_sl[0].c0 || (span_idx >= s_sl[0].a1_lo - 8 && span_idx <= s_sl[0].a2_hi + 3))) {
             static int s_sld = 0;
-            if (s_sld++ < 600)
+            if (s_sld++ < 4000)
                 TD5_LOG_I(LOG_TAG, "[SLDIAG] slot=%d span=%d(role %d) probe=%d p=(%d,%d) sub=%d hitL=%d penL=%d hitR=%d penR=%d",
                           actor->slot_index, span_idx, (int)s_sl_of[span_idx], pi, px, pz, sub_lane, hit_l, pen_l, hit_r, pen_r);
         }
@@ -9666,6 +9671,7 @@ int td5_track_get_ring_length(void)
 }
 
 /* ===== [R1018 L] side links: block-loop mouths (see the SideLoop note at the top of the file) ====== */
+#define SL_TOL 200   /* world units: the sliver between a mouth's near row and the road's rail */
 static void sl_free(void)
 {
     free(s_sl);    s_sl = NULL;
@@ -9680,41 +9686,46 @@ static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos)
     uint32_t magic, nl, i;
     size_t end;
     if (s_sl_off < 0) s_sl_off = td5_env_flag_on("TD5RE_GEO_BLOCKLOOP_ENGINE") ? 0 : 1;
+    s_sl_jump_pct = td5_env_int("TD5RE_AI_LOOP_JUMP_PCT", 25, 0, 100);
     if (!blob || pos + 8 > size) return pos;
     memcpy(&magic, blob + pos, 4);
     if (magic != 0x4B4E4C53u) return pos;
     memcpy(&nl, blob + pos + 4, 4);
-    if (nl == 0 || nl > 64u || pos + 8 + (size_t)nl * 36u > size) return pos;
-    end = pos + 8 + (size_t)nl * 36u;
+    if (nl == 0 || nl > 64u || pos + 8 + (size_t)nl * 44u > size) return pos;
+    end = pos + 8 + (size_t)nl * 44u;
     if (s_sl_off) return end;                      /* knob off: skip the bytes, ignore the loops */
     s_sl = (SideLoop *)calloc((size_t)nl, sizeof(SideLoop));
     s_sl_of = (int16_t *)malloc(sizeof(int16_t) * (size_t)(s_span_count > 0 ? s_span_count : 1));
     if (!s_sl || !s_sl_of) { sl_free(); return end; }
     for (i = 0; i < (uint32_t)s_span_count; i++) s_sl_of[i] = -1;
     for (i = 0; i < nl; i++) {
-        uint32_t w[9]; int j;
+        uint32_t w[11]; int j;
         SideLoop *L = &s_sl[s_sl_n];
-        memcpy(w, blob + pos + 8 + (size_t)i * 36u, 36u);
+        memcpy(w, blob + pos + 8 + (size_t)i * 44u, 44u);
         L->D = (int)w[0]; L->A = (int)w[1]; L->c0 = (int)w[2]; L->cN = (int)w[3];
         L->a1_lo = (int)w[4]; L->a1_hi = (int)w[5]; L->a2_lo = (int)w[6]; L->a2_hi = (int)w[7];
-        L->side = (int)w[8];
+        L->side = (int)w[8]; L->c1_hi = (int)w[9]; L->cN_lo = (int)w[10];
         if (L->c0 < 0 || L->cN < L->c0 || L->cN >= s_span_count ||
+            L->c1_hi < L->c0 || L->c1_hi > L->cN || L->cN_lo < L->c0 || L->cN_lo > L->cN ||
             L->a1_lo < 0 || L->a1_hi < L->a1_lo || L->a1_hi >= s_span_count ||
             L->a2_lo < 0 || L->a2_hi < L->a2_lo || L->a2_hi >= s_span_count) continue;
         for (j = L->a1_lo; j <= L->a1_hi; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 0);
-        s_sl_of[L->c0] = (int16_t)(s_sl_n * 4 + 1);
+        for (j = L->c0; j <= L->c1_hi; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 1);
         for (j = L->a2_lo; j <= L->a2_hi; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 2);
-        s_sl_of[L->cN] = (int16_t)(s_sl_n * 4 + 3);
-        TD5_LOG_I(LOG_TAG, "side link: loop %d D=%d A=%d corridor %d..%d mouths %d..%d / %d..%d side %d",
-                  s_sl_n, L->D, L->A, L->c0, L->cN, L->a1_lo, L->a1_hi, L->a2_lo, L->a2_hi, L->side);
+        for (j = L->cN_lo; j <= L->cN; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 3);
+        TD5_LOG_I(LOG_TAG, "side link: loop %d D=%d A=%d corridor %d..%d mouths %d..%d (flush %d..%d) / %d..%d (flush %d..%d) side %d",
+                  s_sl_n, L->D, L->A, L->c0, L->cN, L->a1_lo, L->a1_hi, L->c0, L->c1_hi, L->a2_lo, L->a2_hi, L->cN_lo, L->cN, L->side);
         s_sl_n++;
     }
     if (s_sl_n == 0) sl_free();
     return end;
 }
 
-/* Lane of `span` whose quad contains the integer world point (px, pz), or -1. */
-static int sl_lane_at(int span, int32_t px, int32_t pz)
+/* Lane of `span` whose quad contains the integer world point (px, pz) within `tol` world units
+ * (0 = strictly inside), or -1. The tolerance bridges the sliver that a mouth's near row leaves
+ * against the road's rail: the row is a chord of the road's edge, and a probe in the sliver is on
+ * neither span, so without it a slow car presses against a wall that is not there. */
+static int sl_lane_at(int span, int32_t px, int32_t pz, int32_t tol)
 {
     const TD5_StripSpan *sp;
     int lane, lc;
@@ -9731,9 +9742,10 @@ static int sl_lane_at(int span, int32_t px, int32_t pz)
         for (k = 0; k < 4; k++) { x[k] = sp->origin_x + v[k]->x; z[k] = sp->origin_z + v[k]->z; }
         for (k = 0; k < 4; k++) {
             const int j = (k + 1) & 3;
-            const int64_t cr = ((int64_t)x[j] - x[k]) * ((int64_t)pz - z[k])
-                             - ((int64_t)z[j] - z[k]) * ((int64_t)px - x[k]);
-            if (cr > 0) pos = 1; else if (cr < 0) neg = 1;
+            const int64_t ex = (int64_t)x[j] - x[k], ez = (int64_t)z[j] - z[k];
+            const int64_t cr = ex * ((int64_t)pz - z[k]) - ez * ((int64_t)px - x[k]);
+            const int64_t th = (tol > 0) ? (int64_t)tol * (int64_t)sqrt((double)(ex * ex + ez * ez)) : 0;
+            if (cr > th) pos = 1; else if (cr < -th) neg = 1;
         }
         if (!(pos && neg)) return lane;
     }
@@ -9748,9 +9760,9 @@ static int sl_targets(int span, int *lo, int *hi)
     if (e < 0) return 0;
     L = &s_sl[e >> 2];
     switch (e & 3) {
-    case 0: *lo = *hi = L->c0; return 1;
+    case 0: *lo = L->c0; *hi = L->c1_hi; return 1;
     case 1: *lo = L->a1_lo; *hi = L->a1_hi; return 1;
-    case 2: *lo = *hi = L->cN; return 1;
+    case 2: *lo = L->cN_lo; *hi = L->cN; return 1;
     default: *lo = L->a2_lo; *hi = L->a2_hi; return 1;
     }
 }
@@ -9761,9 +9773,9 @@ static int sl_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *ne
 {
     int lo, hi, s;
     if (!sl_targets(span, &lo, &hi)) return 0;
-    if (sl_lane_at(span, px, pz) >= 0) return 0;          /* still on this span */
+    if (sl_lane_at(span, px, pz, 0) >= 0) return 0;       /* still on this span */
     for (s = lo; s <= hi; s++) {
-        const int lane = sl_lane_at(s, px, pz);
+        const int lane = sl_lane_at(s, px, pz, SL_TOL);
         if (lane >= 0) { *new_span = s; *new_sub = lane; return 1; }
     }
     return 0;
@@ -9775,7 +9787,7 @@ static int sl_open(int span, int32_t px, int32_t pz)
     int lo, hi, s;
     if (!sl_targets(span, &lo, &hi)) return 0;
     for (s = lo; s <= hi; s++)
-        if (sl_lane_at(s, px, pz) >= 0) return 1;
+        if (sl_lane_at(s, px, pz, SL_TOL) >= 0) return 1;
     return 0;
 }
 
@@ -9795,7 +9807,23 @@ int td5_track_loop_mouth_target(int span, int *dep)
 {
     int i;
     for (i = 0; i < s_sl_n; i++)
-        if (span >= s_sl[i].a1_lo && span <= s_sl[i].a1_hi) { if (dep) *dep = s_sl[i].D; return s_sl[i].c0; }
+        if (span >= s_sl[i].a1_lo && span <= s_sl[i].a1_hi) {
+            /* the path only turns in from the middle of the opening: a car that aims into the street
+             * from its first span cuts the upstream corner and meets the road's wall */
+            if (span < s_sl[i].a1_lo + (s_sl[i].a1_hi - s_sl[i].a1_lo + 1) * s_sl_jump_pct / 100) return -1;
+            if (dep) *dep = s_sl[i].D;
+            return s_sl[i].c0;
+        }
+    return -1;
+}
+
+/* AI: `span` lies anywhere in a loop's departure mouth: its departure span D (the key of the car's fork
+ * commitment), else -1. */
+int td5_track_loop_in_mouth(int span)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if (span >= s_sl[i].a1_lo && span <= s_sl[i].a1_hi) return s_sl[i].D;
     return -1;
 }
 
