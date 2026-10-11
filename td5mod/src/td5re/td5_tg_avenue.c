@@ -772,8 +772,9 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     double e1 = o1 + sg1 * ohw, f1 = e1 + sg1 * sw;
     double cl0 = (e0 > f0) ? e0 : f0, cr0 = (e0 > f0) ? f0 : e0;
     double cl1 = (e1 > f1) ? e1 : f1, cr1 = (e1 > f1) ? f1 : e1;
-    int blend_in = 0, blend_out = 0;     /* [1021 B item 2] end joined to a neighbour that differs, or tapered to a point */
-    const double H = (double)TD5_TG_KERB_H;
+    int blend_in = 0, blend_out = 0;     /* [1021 B item 2] end joined to a neighbour that differs, or ramped down to the road */
+    int ramp_in = 0, ramp_out = 0;
+    double H0 = (double)TD5_TG_KERB_H, H1 = (double)TD5_TG_KERB_H;   /* slab height at the near / far end */
     const double b0 = a->y, b1 = c->y;      /* the far carriageway's own plane */
     double px[20], py[20], pz[20], uu[20], vv[20];
     int seg_page[2], seg_nq[2];
@@ -820,11 +821,14 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
      * (two different mapped pavements). tg_av_far_joins refuses a join over 60 units, so every
      * such boundary got a vertical end cap: a slab that appears out of nowhere.
      *
-     * Where the neighbour DOES carry a footway, both spans now take the MEAN of the two edges at
-     * their shared node (each side computes the same mean from the same raw numbers, so the slab is
-     * continuous and needs no cap). Where it does NOT (the run's real end, not a street mouth,
-     * which keeps its clipped cap), the end tapers to a point over this span instead of ending in a
-     * wall. TD5RE_GEO_FARWALK_BLEND=0 restores the capped ends. */
+     * Where the neighbour DOES carry a footway at the same lateral (within 400 units), both spans
+     * take the MEAN of the two edges at their shared node (each side computes the same mean from the
+     * same raw numbers, so the slab is continuous and needs no cap). Where the lateral steps (the
+     * mouth's 4.5 m) or the run really ends (not a street mouth: those keep their clipped cap), the
+     * end is a RAMP instead of a wall: the slab's top falls to road level over this span, so the
+     * footprint is unchanged (a taper to a point opened a hole to the sky where no ground lies) and
+     * the slab starts at the road's height and climbs to the kerb. TD5RE_GEO_FARWALK_BLEND=0
+     * restores the capped ends. */
     if (deep && td5_env_flag_on("TD5RE_GEO_FARWALK_BLEND")) {
         int k;
         for (k = 0; k < 2; k++) {                 /* 0 = near end (span si-1), 1 = far end (si+1) */
@@ -832,27 +836,32 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
             const double own_e = k ? e1 : e0;
             const double own_w = (k ? (f1 - e1) : (f0 - e0)) * (k ? sg1 : sg0);
             const double sgk   = k ? sg1 : sg0;
-            double ne0 = 0.0, ne1 = 0.0, nw = 0.0, he, hw;
+            double ne0 = 0.0, ne1 = 0.0, nw = 0.0;
+            int ramp = 0;
             if (nb < 0 || nb + 1 >= nl->count) continue;
             if (tg_av_far_edges(nl, nb, &ne0, &ne1, &nw)) {
                 const double ne = k ? ne0 : ne1;
                 if (fabs(ne - own_e) < 60.0 && fabs(nw - own_w) < 60.0) continue;   /* already joins */
-                if (fabs(ne - own_e) > 2500.0 || ne * own_e <= 0.0) continue;       /* too far: keep the cap */
-                he = 0.5 * (ne + own_e);
-                hw = 0.5 * (nw + own_w);
+                if (fabs(ne - own_e) > 400.0 || ne * own_e <= 0.0) {
+                    ramp = 1;                                  /* a real lateral step: ramp */
+                } else {
+                    const double he = 0.5 * (ne + own_e), hw = 0.5 * (nw + own_w);
+                    if (k) { e1 = he; f1 = he + sgk * hw; blend_out = 1; }
+                    else   { e0 = he; f0 = he + sgk * hw; blend_in  = 1; }
+                }
             } else if (tg_av_far_mouth(nb - 1, k ? o1 : o0) || tg_av_far_mouth(nb, k ? o1 : o0)
                        || tg_av_far_mouth(nb + 1, k ? o1 : o0)) {
-                continue;                                  /* a street leaves there: its clipped cap stays */
+                continue;                                      /* a street leaves there: its clipped cap stays */
             } else {
-                he = own_e;                                /* run end: taper to nothing */
-                hw = 0.0;
+                ramp = 1;                                      /* the run's end */
             }
-            if (k) { e1 = he; f1 = he + sgk * hw; blend_out = 1; }
-            else   { e0 = he; f0 = he + sgk * hw; blend_in  = 1; }
+            if (ramp) { if (k) { ramp_out = 1; blend_out = 1; } else { ramp_in = 1; blend_in = 1; } }
         }
         if (blend_in || blend_out) {
             cl0 = (e0 > f0) ? e0 : f0; cr0 = (e0 > f0) ? f0 : e0;
             cl1 = (e1 > f1) ? e1 : f1; cr1 = (e1 > f1) ? f1 : e1;
+            if (ramp_in)  H0 = 0.0;
+            if (ramp_out) H1 = 0.0;
             s_av_farwalk_blend++;
         }
     }
@@ -869,22 +878,22 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     }
 
     /* TOP. */
-    px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
-    px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
-    px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*cl0; py[n]=b0+H0; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=b0+H0; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=b1+H1; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=b1+H1; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
 
     /* Wall facing +lateral. */
     px[n]=a->x+a->tz*cl0; py[n]=bl0;  pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
-    px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cl0; py[n]=b0+H0; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=b1+H1; pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=0.0; n++;
     px[n]=c->x+c->tz*cl1; py[n]=bl1;  pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=1.0; n++;
 
     /* Wall facing -lateral. */
     px[n]=a->x+a->tz*cr0; py[n]=br0;  pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=1.0; n++;
     px[n]=c->x+c->tz*cr1; py[n]=br1;  pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
-    px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
-    px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=b1+H1; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=b0+H0; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
 
     /* [ROUND 1014 A] END CAPS where the footway does not carry on at the same lateral
      * and width (winding as tg_emit_avenue_divider's, derived there). */
@@ -895,12 +904,12 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     if (cap_in) {
         px[n]=a->x+a->tz*cl0; py[n]=g0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
         px[n]=a->x+a->tz*cr0; py[n]=g0;   pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=1.0; n++;
-        px[n]=a->x+a->tz*cr0; py[n]=b0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
-        px[n]=a->x+a->tz*cl0; py[n]=b0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=b0+H0; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=a->x+a->tz*cl0; py[n]=b0+H0; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
     }
     if (cap_out) {
-        px[n]=c->x+c->tz*cl1; py[n]=b1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=0.0; n++;
-        px[n]=c->x+c->tz*cr1; py[n]=b1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cl1; py[n]=b1+H1; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=b1+H1; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
         px[n]=c->x+c->tz*cr1; py[n]=g1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
         px[n]=c->x+c->tz*cl1; py[n]=g1;   pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
     }
