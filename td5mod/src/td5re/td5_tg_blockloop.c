@@ -628,7 +628,7 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const TG_NetArm *A, const 
 {
     BlSlip S1, S2;
     const double W = (double)P->lb * bl_lw();
-    double px[400], pz[400], py[400], fx[2600], fz[2600], sx[300], sz[300];
+    double px[400], pz[400], fx[2600], fz[2600], sx[300], sz[300];
     double *cum;
     int n = 0, i, nf, nc, k, ns = 0, k_s1 = 0, k_s2 = 0;
     double total = 0.0, minr = 0.0;
@@ -648,11 +648,11 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const TG_NetArm *A, const 
     }
     sx[ns] = S2.cx; sz[ns] = S2.cz; ns++;
     ns = bl_simplify(sx, sz, ns, 6.0 * BL_UPM);
-    for (i = 0; i < S1.nq; i++) { px[n] = S1.qx[i]; pz[n] = S1.qz[i]; py[n] = S1.qy[i]; n++; }
+    for (i = 0; i < S1.nq; i++) { px[n] = S1.qx[i]; pz[n] = S1.qz[i]; n++; }
     k_s1 = n;                                           /* index of corner 1 in the polyline */
-    for (i = 0; i < ns && n < 395; i++) { px[n] = sx[i]; pz[n] = sz[i]; py[n] = 1e30; n++; }
+    for (i = 0; i < ns && n < 395; i++) { px[n] = sx[i]; pz[n] = sz[i]; n++; }
     k_s2 = n - 1;                                       /* corner 2 */
-    for (i = 0; i < S2.nq && n < 399; i++) { px[n] = S2.qx[i]; pz[n] = S2.qz[i]; py[n] = S2.qy[i]; n++; }
+    for (i = 0; i < S2.nq && n < 399; i++) { px[n] = S2.qx[i]; pz[n] = S2.qz[i]; n++; }
     s_why = "";
     nf = bl_fillet(px, pz, n, rwant, rfloor, fx, fz, 2600, &minr, &P->ncorner);
     if (nf < 4) {

@@ -37,7 +37,7 @@ static const TD5_ForkVerdict k_td5_fork_verdicts[] = {
     { "la_plata_partido", 0x4B56DECBU, 328, 565, TD5_FV_PASS },   /* masterB:PASS(6seeds) piecesB:PASS(6seeds) */
     { "la_plata_partido", 0x4B56DECBU, 690, 788, TD5_FV_WARN },   /* sw_def6_690:PASS(6seeds) prod6_690:WARN(6seeds) prodB_690:WARN(6seeds) */
     { "la_plata_partido", 0x4B56DECBU, 707, 790, TD5_FV_WARN },   /* piecesB:WARN(6seeds) fullB:PASS(6seeds) o707B:WARN(6seeds) */
-    { "la_plata_partido", 0x4B56DECBU, 720, 788, TD5_FV_PASS },   /* l739:PASS(6seeds) prod6b_720:PASS(6seeds) prodB2_720:PASS(6seeds) */
+    { "la_plata_partido", 0x4B56DECBU, 720, 788, TD5_FV_PASS },   /* l739:PASS(6seeds) prod6b_720:PASS(6seeds) prodB2_720:PASS(6seeds) prod6c_720:PASS(6seeds) prodB3_720:PASS(6seeds) */
     { "la_plata_partido", 0x4B56DECBU, 901, 1030, TD5_FV_PASS },   /* masterB:PASS(6seeds) piecesB:PASS(6seeds) */
     { "la_plata_partido", 0x4B56DECBU, 901, 1174, TD5_FV_WARN_KEEP },   /* fullB:WARN(6seeds) o901B:PASS(6seeds) KEEP: merged Avenida 60 + Plaza Dardo Rocha + Avenida 7: PASS alone over 6 seeds on BOTH the pre-24b01f00 and the post-24b01f00 AI (8 hits, 0 crashes, 0 sta (full text: verify/geo_fork_keep.json) */
     { "la_plata_partido", 0x4B56DECBU, 1031, 1129, TD5_FV_PASS },   /* masterB:PASS(6seeds) piecesB:PASS(6seeds) */
