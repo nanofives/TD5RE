@@ -757,7 +757,7 @@ static int rf_avenue_try(const char *name, int F, int R, int merge, int *oom)
         int fw = 0, fa = 0;
         const int okf = rf_left_flow(c, &fw, &fa);
         if (s_rf_diag) {
-            char fb[96];
+            char fb[160];
             snprintf(fb, sizeof fb, "left corridor: the real way flows with the race on %d node(s), against it on %d%s",
                      fw, fa, okf ? "" : " -- refused (one-way, head-on)");
             rf_note(okf ? "LEFT" : "REJECT", TG_RF_SRC_AVENUE, name, F, R, fb);
@@ -1284,7 +1284,7 @@ static void rf_gen_parallel(void)
                     int fw = 0, fa = 0;
                     const int okf = rf_left_flow(c, &fw, &fa);
                     if (s_rf_diag) {
-                        char fb[96];
+                        char fb[160];
                         snprintf(fb, sizeof fb, "left corridor: the real way flows with the race on %d node(s), against it on %d%s",
                                  fw, fa, okf ? "" : " -- refused (one-way, head-on)");
                         rf_note(okf ? "LEFT" : "REJECT", TG_RF_SRC_PARALLEL, c->name, F, R, fb);
@@ -1681,7 +1681,7 @@ int tg_realfork_build(void)
                 for (f = 0; f < npick; f++) {
                     RfCand *c = &s_cand[pick[f]];
                     int v = known ? td5_fork_verdict_get(place, fp, c->F, c->R) : -1;
-                    const int fresh = c->relaxed || c->merged;
+                    const int fresh = c->relaxed || c->merged || c->side > 0;     /* [1019 V] a left fork is new: it needs a PASS record on a route that has one */
                     int drop = 0;
                     if (v == TD5_FV_FAIL || v == TD5_FV_UNTESTED || v == TD5_FV_WARN) drop = 1;
                     else if (v < 0 && fresh && (known || !td5_env_flag_on("TD5RE_GEO_FORK_UNVERIFIED"))) drop = 1;

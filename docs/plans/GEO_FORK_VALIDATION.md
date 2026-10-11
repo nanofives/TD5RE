@@ -232,3 +232,15 @@ UNTESTED, not PASS.
 * `fork_validate.json` is schema 2: `route_fp` and `route_place` (the `[REAL FORK] route fingerprint` the generator logs) identify the exact route.
 * `verify/geo_fork_verdicts_gen.py a.json b.json ...` turns run-sets into `td5_geo_fork_verdicts.h`; `verify/geo_fork_keep.json` holds the reason for every WARN fork kept.
 * Decide with 6 seeds (`-Seeds "11,22,33,44,55,66"`, ~140 s with a reused baseline ~80 s): a single jam or stall in 36 passes is below every FAIL line but is a WARN.
+
+## Round 1019 V additions
+
+* `-RouteDir <dir>`: race an older `_route/` (the harness copies it into every run dir instead of the place's own), e.g. the 10-10 route of rounds 1016-1018
+  (fingerprint 4B56DECB) to re-measure Avenida 13. `-Traffic N` turns traffic on (default 0).
+* `-ForkEnv` / `-CommonEnv` are `A=B,C=D` lists split on commas: a VALUE may not contain a comma (use `TD5RE_GEO_FORK_PRE_DENY="707 855-933"`, space or range separated).
+  `-Only` / `-Deny` take comma lists (they are one value).
+* Dev knobs: `TD5RE_GEO_FORK_PRE_DENY` removes real-fork candidates (by F, ranges allowed) BEFORE the weighted selection; `TD5RE_GEO_BLOCKLOOP_ONLY="L620"` forces a left loop at an arm span (`R620` right);
+  `TD5RE_WALKER_AUDIT=1` logs `[WALKAUD]` lines (per-tick walker-vs-geometry census and a static lane / recovery audit of every corridor span).
+* `python verify/geo_lf_trace.py <rundir> <slot> <tick0> <tick1>`: one car's span / lateral / speed / steering through a stretch;
+  `python verify/geo_lf_poses.py STRIP.DAT 124,131,1262 --top` + `geo_bl_tour.ps1 -Width 1280 -Height 720` for frames.
+* The verdict for LEFT forks is the same judge: F, R, PASS / WARN are side-blind.
