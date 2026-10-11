@@ -228,6 +228,12 @@ const char *tg_prefab_name(int pf)
  * so flipping it regenerates instead of reusing a cached level. */
 static const unsigned char k_pf_parked[TD5_TG_PREFAB_N] = {
     [17] = 1,   /* L23.lm17 -- round 1014, Mariano's pick                           */
+    [2]  = 1,   /* L23.lm02 -- round 1021 C item 13, Mariano's pick (456 v / 42 cmds, local
+                 * pages 18 + 30..35 = 577 591..594 589 + LM_BASE): "this geometry should not
+                 * be here, and it's incomplete, don't put it in the pool". The round 1015
+                 * audit passed it (1 tall free end, rule was >= 2); 11 free wall ends hang
+                 * 50.0 m of wall in the air in total, see DANGLE_H_M in
+                 * verify/r1015c_prefab_audit.py                                         */
     [5]  = 1,   /* L23.lm05 -- round 1015 C item 8, Mariano's pick (311 v / 18 cmds,
                  * local pages 55..60 + LM_BASE = 614..619): free-standing wall
                  * sheets and an unroofed ring tower                                */

@@ -1664,6 +1664,9 @@ static long s_geo_emitted, s_geo_shifted, s_geo_dropped_shift;
 static long s_geo_dropped_deg, s_geo_lm_real, s_geo_lm_fallback;
 static long s_geo_measured, s_geo_estimated, s_geo_wall_suppressed;
 static long s_geo_backrow_suppressed;
+/* [ROUND 1021 C items 4, 9, 14] real footprints dropped / back-row boxes skipped for standing on a laid
+ * cross-street carriageway, and ground-standing billboards lowered onto the heightfield */
+static long s_geo_dropped_street, s_geo_backrow_street, s_geo_prop_grounded;
 /* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
  * new height sources, so an Overture A/B is a number in race.log. */
 static long s_geo_fp_overture, s_geo_h_overture, s_geo_h_raster;
@@ -1717,6 +1720,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_dropped_deg = s_geo_lm_real = s_geo_lm_fallback = 0;
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
+    s_geo_dropped_street = s_geo_backrow_street = s_geo_prop_grounded = 0;
     s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_dropped_slots = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
@@ -3101,6 +3105,32 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
         }
     }
 
+    /* [ROUND 1021 C item 4] Mariano, level091 L91 e7 s31 city p68+278: "building in the middle of the
+     * crossing road". A footprint standing on a LAID side street's carriageway is not a building there:
+     * the street is one the generator drew from the real way's skew and reach, and on a diagonal it
+     * sweeps across the frontage of spans well away from its own mouth, where nothing asked. MEASURED on
+     * level091 before this test: this footprint had 70% of its plan area on a p101 street quad (and 13
+     * more >= 25%). The same rule as the real-road test above, over the street the generator laid:
+     * the centroid, or a third of the sample points (vertices, edge midpoints, centroid), on it drops
+     * the footprint. TD5RE_GEO_BLD_STREET_CLEAR=0 keeps them. */
+    if (td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") && tg_network_built()) {
+        int on = 0, ns = 1;
+        const int c_on = tg_xstreet_covers(nl, si, side, cx, cz);
+        on += c_on;
+        for (k = 0; k < n_ring; k++) {
+            const int j = (k + 1) % n_ring;
+            on += tg_xstreet_covers(nl, si, side, rx[k], rz[k]);
+            on += tg_xstreet_covers(nl, si, side, (rx[k] + rx[j]) * 0.5, (rz[k] + rz[j]) * 0.5);
+            ns += 2;
+        }
+        if (c_on || on * 3 >= ns) {
+            tg_geo_lm_note(gb, si, "DROPPED on a cross street", 0.0);
+            s_geo_dropped_street++;
+            s_geo_dropped_deg++;
+            return 1;
+        }
+    }
+
     /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
      * outline's own (already nudged) ring, so it inherits the carriageway
      * clearance the building was given. */
@@ -3547,6 +3577,12 @@ static void tg_geo_city_report_impl(int from_stream)
               "exactly, which is what the bind assumes)",
               s_geo_wall_suppressed, s_geo_backrow_suppressed,
               s_geo_route_dev_max);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld real footprint(s) dropped and %ld back-row box(es) "
+              "skipped for standing on a laid cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s); "
+              "%ld ground-standing billboard(s) lowered onto the heightfield (knob TD5RE_GEO_PROP_GROUND=%s)",
+              s_geo_dropped_street, s_geo_backrow_street,
+              td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off",
+              s_geo_prop_grounded, td5_env_flag_on("TD5RE_GEO_PROP_GROUND") ? "on" : "off");
     /* [ROUND 1009 item 9] HEIGHT FIDELITY. The error is |built - tagged| for
      * the mass height, in metres, so "heights are not fully correct" has a
      * number on both sides of the fix instead of a claim on one. */
@@ -4775,10 +4811,33 @@ int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
     tg_xstreet_audit(nl, si, side, gap - (double)P->w * 0.5,
                      pp == PP_LAMP ? "lamp-glow" : "prop-billboard", 1);
     moff[*pn] = b0;
-    if (!tg_emit_billboard_mesh(m, cx, n->y + (double)P->y_off, cz,
+    {
+        /* [ROUND 1021 C item 14] Mariano, level091 L91 e75 s16 prop p505 (a deer): "floating in the air".
+         * A ground-standing billboard (spectator, statue, animal: y_off 0) was set at the ROAD NODE's
+         * height. On a geo route the road rides an embankment or a plaza edge and the ground beside it
+         * drops away, so the billboard hung 1.9 m over the pavement (MEASURED: 24 of 24 deer on level091
+         * floated, up to 2.4 m). Ground it on the heightfield, the same envelope the cross street's
+         * follow quad uses (the ground meshes are cut on a 1500 lattice, so a point between nodes sits
+         * above or below the exact height). It only ever LOWERS the billboard, and only by more than
+         * half a metre, so a prop already on the ground does not move.
+         * TD5RE_GEO_PROP_GROUND=0 restores the node height. */
+        double by = n->y + (double)P->y_off;
+        if (td5_geo_loaded() && pp != PP_LAMP && P->y_off == 0 &&
+            td5_env_flag_on("TD5RE_GEO_PROP_GROUND")) {
+            const double hh = TG_WORLD_CELL * 0.5;
+            double g = tg_world_h(cx, cz), g1;
+            g1 = tg_world_h(cx + hh, cz); if (g1 > g) g = g1;
+            g1 = tg_world_h(cx - hh, cz); if (g1 > g) g = g1;
+            g1 = tg_world_h(cx, cz + hh); if (g1 > g) g = g1;
+            g1 = tg_world_h(cx, cz - hh); if (g1 > g) g = g1;
+            g += 60.0;
+            if (by - g > 215.0) { by = g; s_geo_prop_grounded++; }
+        }
+        if (!tg_emit_billboard_mesh(m, cx, by, cz,
                                 (double)P->w * 0.5, (double)P->h,
                                 tg_prop_slot(pp), P->tag))
-        return 0;
+            return 0;
+    }
     /* PP_LAMP is the streetlamp GLOW, emitted through this same helper by the
      * lamp fixture (and by the props layer when the biome puts glows there).
      * It is accounted as a LAMP at the fixture, so keep it out of the prop
@@ -5437,6 +5496,7 @@ int tg_rail_kerbfence_here(int si, double sg)
     if (tg_span_in_bridge_run(si)) return 0;            /* no pavement on a deck */
     if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0))
         return 0;                                        /* not a facade biome   */
+    if (tg_geo_urban_rails_off(si)) return 0;             /* [1021 C item 12] kerb only */
     if (tg_city_crossing_here(si)) return 0;              /* pedestrians cross    */
     /* [R13 RAIL item 5b] CONSEQUENCE 2. A frontage gap breaks the railing
      * because a gap is a side-street MOUTH -- but no street opens onto a bridge
@@ -6162,6 +6222,27 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
             bz = n0->z + lz0 * (n0->width * 0.5 + set);
+            /* [ROUND 1021 C item 9] Mariano, level091 L91 e33 s38 city p383: "buildings in the middle of a
+             * crossing road". This row is aimed past the end of ITS OWN mouth's street, measured straight
+             * out from the kerb. A street leaving a neighbouring span at 45 degrees has moved sideways by
+             * the same distance, so that street's carriageway runs through this slot. Same test as the
+             * real footprints (tg_xstreet_covers): the box's centre, or two of its four base corners, on a
+             * laid carriageway skips the slot (the other rows and spans are untouched).
+             * TD5RE_GEO_BLD_STREET_CLEAR=0 keeps the box. */
+            if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") &&
+                tg_network_built()) {
+                const double dep = tg_facade_depth(b);
+                const double ex1 = bx + (n1->x + lx1 * (n1->width * 0.5 + set) - bx);
+                const double ez1 = bz + (n1->z + lz1 * (n1->width * 0.5 + set) - bz);
+                const int c_on = tg_xstreet_covers(h->nl, h->si, sg,
+                                     0.5 * (bx + ex1) + lx0 * dep * 0.5,
+                                     0.5 * (bz + ez1) + lz0 * dep * 0.5);
+                const int k_on = tg_xstreet_covers(h->nl, h->si, sg, bx, bz)
+                               + tg_xstreet_covers(h->nl, h->si, sg, ex1, ez1)
+                               + tg_xstreet_covers(h->nl, h->si, sg, bx + lx0 * dep, bz + lz0 * dep)
+                               + tg_xstreet_covers(h->nl, h->si, sg, ex1 + lx1 * dep, ez1 + lz1 * dep);
+                if (c_on || k_on >= 2) { s_geo_backrow_street++; continue; }
+            }
             by = tg_world_h(bx, bz);               /* [TOPOLOGY-FIRST] */
             if (by > n0->y + 400.0) by = n0->y + 400.0;
             ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;

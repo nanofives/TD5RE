@@ -334,6 +334,56 @@ int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
     return inner_d < reach + TD5_TG_R10_XSTREET_MARGIN;
 }
 
+/* [ROUND 1021 C items 4 + 9] See the declaration. A street leaves its mouth span at the network's skew
+ * (up to ~45 degrees on La Plata's diagonals) and runs `reach` out, so at depth D it has moved D*tan(skew)
+ * along the road: it crosses the frontage of spans many metres from its own. The window is wide enough for
+ * the longest street (R8_XSTREET_MAX / span length) at 45 degrees. Pure function of the network. */
+#define TG_XSC_WIN 24
+
+int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z)
+{
+    const int left = (sg > 0.0) ? 1 : 0;
+    int lo, hi, m;
+
+    if (!nl || !tg_network_built()) return 0;
+    lo = si - TG_XSC_WIN; if (lo < 1) lo = 1;
+    hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
+    for (m = lo; m <= hi; m++) {
+        const TG_Biome *b;
+        double rr = 0.0, e[10], ang, nox, noz, fox, foz, reach;
+        double qx[4], qz[4];
+        int k, sgn = 0, in = 1;
+
+        if (!tg_xstreet_here(nl, m, sg, &rr)) continue;
+        /* the emitter's own per-side gates, in its own order (tg_city_emit_crossstreet) */
+        if (tg_facade_built(m, left)) continue;
+        if (tg_block_is_park(m, left)) continue;
+        if (tg_net_mouth_is_loop(m, left)) continue;
+        if (tg_side_corridor_here(nl, m, sg)) continue;
+        b = &k_biomes[tg_scenery_biome_index(m)];
+        tg_city_edge_frame(nl, m, sg, e);
+        ang = tg_block_arm_skew(m, left);
+        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, tg_city_sidewalk_w(b));
+        if (!(reach > 0.0)) continue;
+        tg_block_rot2(e[6], e[7], ang, &nox, &noz);
+        tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+        qx[0] = e[0];                qz[0] = e[2];
+        qx[1] = e[0] + nox * reach;  qz[1] = e[2] + noz * reach;
+        qx[2] = e[3] + fox * reach;  qz[2] = e[5] + foz * reach;
+        qx[3] = e[3];                qz[3] = e[5];
+        for (k = 0; k < 4; k++) {
+            const int j = (k + 1) & 3;
+            const double c = (qx[j] - qx[k]) * (z - qz[k]) - (qz[j] - qz[k]) * (x - qx[k]);
+            const int s = (c > 0.0) ? 1 : (c < 0.0 ? -1 : 0);
+            if (!s) continue;
+            if (!sgn) sgn = s;
+            else if (s != sgn) { in = 0; break; }
+        }
+        if (in) return 1;
+    }
+    return 0;
+}
+
 /* The instrument the diagnosis was made with: every furniture placement with the
  * laterals it was judged on, so "is this piece on tarmac" is a number per piece
  * rather than a frame of one of them. */
@@ -1103,6 +1153,9 @@ static int tg_block_emit_arm(const TG_FBHook *h,
     h->moff[(*h->nmesh)++] = h->blk->len;
     if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
         return 0;
+
+    /* [ROUND 1021 C item 12] no railing on a real city's pavement arm (kerb only). */
+    if (tg_geo_urban_rails_off(h->si)) return 1;
 
     /* Railing along the same edge, set back onto the slab (posts off the road). */
     n = 0; seg_page = TD5_TG_PAGE_FENCE;
