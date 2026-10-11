@@ -212,6 +212,7 @@ static int       s_sl_jump_pct = 0;    /* TD5RE_AI_LOOP_JUMP_PCT: where in the o
 static void sl_free(void);
 static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos);
 static int  sl_open(int span, int32_t px, int32_t pz);
+static int  sl_lane_at(int span, int32_t px, int32_t pz, int32_t tol);
 static int  sl_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *new_sub);
 
 /** Per-span median-divider lateral index (reverse-native forks): 0 = none, else
@@ -6493,6 +6494,61 @@ void td5_track_update_actor_position(TD5_Actor *actor)
         }
     }
 
+#ifndef TD5RE_RELEASE
+    {   /* [ROUND 1019 V] DEV: TD5RE_WALKER_AUDIT=1 -- is the chassis point inside the span the walker says it is on?
+         * Counts, per span class (0 main ring, 1 LEFT corridor, 2 RIGHT corridor, 3 block-loop corridor), the ticks a racer
+         * spent there, the ticks its chassis point was NOT inside any lane quad of its span (the walker is lost: the "centred in
+         * a main lane while physically in the gore" defect of docs/plans/AUTOTRACK_BRANCH_REWORK.md) and the ticks where the
+         * lane the point is in differs from the walker's sub_lane by more than one. Summary lines go to race.log. */
+        static int s_aud = -1;
+        static int8_t *s_cls = NULL;
+        static int s_cls_n = -1;
+        if (s_aud < 0) s_aud = td5_env_flag_off("TD5RE_WALKER_AUDIT");
+        if (s_aud && s_cls_n != s_span_count) {
+            int q, j;
+            free(s_cls);
+            s_cls = (int8_t *)calloc((size_t)(s_span_count > 0 ? s_span_count : 1), 1);
+            s_cls_n = s_span_count;
+            for (q = 0; s_cls && q < g_td5.track_span_ring_length && q < s_span_count; q++)
+                if (s_span_array[q].span_type == 8) {
+                    const int b = (int)s_span_array[q].link_next;
+                    const int c = fork_is_left(q) ? 1 : 2;
+                    for (j = b; j >= 0 && j < s_span_count && j < b + 800; j++) {
+                        s_cls[j] = (int8_t)c;
+                        if (s_span_array[j].span_type == 10) break;
+                    }
+                }
+            for (q = 0; s_cls && q < s_span_count; q++)
+                if (td5_track_loop_of_corridor(q) >= 0) s_cls[q] = 3;
+        }
+        if (s_aud && s_cls && actor->slot_index >= 0 && actor->slot_index < 6) {
+            static unsigned n[4], lost[4], lane_off[4], tick;
+            const int sp_i = (int)track_state[0];
+            const int sub = (int)((int8_t *)track_state)[12];
+            if (sp_i >= 0 && sp_i < s_span_count) {
+                const int cls = s_cls[sp_i];
+                const int32_t px = FP_TRUNC(pos_x), pz = FP_TRUNC(pos_z);
+                const int ln = sl_lane_at(sp_i, px, pz, 0);
+                n[cls]++;
+                if (ln < 0) {
+                    lost[cls]++;
+                    if (lost[cls] <= 6u)
+                        TD5_LOG_I(LOG_TAG, "[WALKAUD] slot=%d span=%d cls=%d sub=%d lanes=%d p=(%d,%d): chassis point is NOT inside the span",
+                                  (int)actor->slot_index, sp_i, cls, sub, span_lane_count(&s_span_array[sp_i]), px, pz);
+                } else if (ln - sub > 1 || sub - ln > 1) {
+                    lane_off[cls]++;
+                    if (lane_off[cls] <= 6u)
+                        TD5_LOG_I(LOG_TAG, "[WALKAUD] slot=%d span=%d cls=%d walker sub=%d but the point is in lane %d (lanes=%d)",
+                                  (int)actor->slot_index, sp_i, cls, sub, ln, span_lane_count(&s_span_array[sp_i]));
+                }
+                if ((++tick % 3000u) == 0u)
+                    TD5_LOG_I(LOG_TAG, "[WALKAUD] ticks main=%u/lost %u/lane %u, leftcorr=%u/%u/%u, rightcorr=%u/%u/%u, loop=%u/%u/%u",
+                              n[0], lost[0], lane_off[0], n[1], lost[1], lane_off[1], n[2], lost[2], lane_off[2], n[3], lost[3], lane_off[3]);
+            }
+        }
+    }
+#endif
+
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;
         if ((s_actor_position_log_counter % 60u) == 0u) {
@@ -9837,6 +9893,22 @@ int td5_track_loop_of_corridor(int span)
 }
 
 int td5_track_loop_count(void) { return s_sl_n; }
+
+/* [ROUND 1019 V] 1 when the block loop whose DEPARTURE span is `span` leaves through the road's LEFT side
+ * (SLNK side word 1), else 0. */
+int td5_track_loop_side(int span)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].D == span) return s_sl[i].side == 1 ? 1 : 0;
+    return 0;
+}
+
+/* [ROUND 1019 V] 1 when the corridor of the type-8 / type-11 fork span `span` lies on the LEFT of travel. */
+int td5_track_fork_is_left(int span)
+{
+    return fork_is_left(span) ? 1 : 0;
+}
 
 /* ===== [R1016 K] corridor map (see the CorrMap note at the top of the file) ====== */
 static void corr_map_free(void)

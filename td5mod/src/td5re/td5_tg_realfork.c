@@ -120,6 +120,7 @@ typedef struct {
     int    relaxed;                    /* [1017 R] built by the relaxed pass     */
     int    merged;                     /* [1017 R] plaza fork that absorbed its adjacent avenue fork(s) */
     int    denied;                     /* [1017 R] the verdict table refused it: the selector skips it */
+    int    side;                       /* [1019 V] -1 = corridor on the RIGHT (-t, the only side before 1019), +1 = LEFT (+t) */
 } RfCand;
 
 typedef struct {
@@ -136,6 +137,7 @@ typedef struct {
     int    pf;                         /* [ROUND 1015 E] plaza plan index, -1 = none */
     int    relaxed;                    /* [1017 R] built by the relaxed pass     */
     int    merged;                     /* [1017 R] plaza fork that absorbed its adjacent avenue fork(s) */
+    int    side;                       /* [1019 V] -1 right (-t) / +1 left (+t) */
 } RfFork;
 
 static RfCand  s_cand[TG_RF_MAXCAND];
@@ -193,6 +195,18 @@ int tg_realfork_get(int i, int *F, int *len, int *lanes_a, int *lanes_b,
     return 1;
 }
 
+/* [ROUND 1019 V] The side of fork i's corridor: -1 right of travel (-t), +1 left (+t). */
+int tg_realfork_side(int i)
+{
+    if (!tg_realfork_enabled() || i < 0 || i >= s_rf_n) return -1;
+    return s_rf[i].side > 0 ? 1 : -1;
+}
+
+/* [ROUND 1019 V] LEFT corridors (TD5RE_GEO_FORK_LEFT, default ON): a real way on the +t side of the route
+ * (an avenue's carriageway, a parallel road) is offered as a fork too. =0 restores the round-1018 rule that
+ * refused every window with a +t offset ("left corridors are parked"). */
+static int rf_left_on(void) { return td5_env_flag_on("TD5RE_GEO_FORK_LEFT"); }
+
 /* [ROUND 1015 E] 1 + plan index when real fork i is a PLAZA fork (free corridor), else 0. */
 int tg_realfork_free(int i)
 {
@@ -235,6 +249,19 @@ double tg_realfork_node_adjust(int node, double *x, double *z)
     s_node_dt[node] = 0.0;
     if (fi < 0 || s_node_extra[node] <= 0.0) return 0.0;
     delta = s_node_extra[node] * (double)TD5_TG_LANE_WIDTH * 0.5;
+    if (fi < s_rf_n && s_rf[fi].side > 0) {      /* [1019 V] a LEFT corridor: the node moves toward +t */
+        const int p = (node > 0) ? node - 1 : node;
+        const int q = (node + 1 < s_rn) ? node + 1 : node;
+        tx = s_rx[q] - s_rx[p];
+        tz = s_rz[q] - s_rz[p];
+        len = sqrt(tx * tx + tz * tz);
+        if (len < 1.0) return 0.0;
+        tx /= len; tz /= len;
+        *x +=  delta * tz;
+        *z += -delta * tx;
+        s_node_dt[node] = delta;
+        return delta;
+    }
     {
         const int p = (node > 0) ? node - 1 : node;
         const int q = (node + 1 < s_rn) ? node + 1 : node;
@@ -528,7 +555,9 @@ static int rf_bend_check(const RfCand *c, char *why, size_t wn)
         }
         e_pos = (double)c->lanes_a * lw * 0.5;
         e_neg = e_pos + fr * ((double)c->lanes_b * lw + med);
-        inner = ((ax * bz - az * bx) > 0.0) ? e_neg : e_pos;
+        /* a cross > 0 turns toward -t; a RIGHT corridor (-t) has the big footprint there, a LEFT one (+t) on the other side */
+        if (c->side > 0) inner = ((ax * bz - az * bx) > 0.0) ? e_pos : e_neg;
+        else             inner = ((ax * bz - az * bx) > 0.0) ? e_neg : e_pos;
         rad = 0.5 * (la + lb) / th;
         if (th > abs_cap) {
             snprintf(why, wn, "bend of %.3f rad/span at node %d (absolute cap %.2f)", th, n, abs_cap);
@@ -617,7 +646,67 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
     c->relaxed = s_rf_relax;
     c->merged = 0;
     c->denied = 0;
+    c->side = -1;
     return c;
+}
+
+
+/* [ROUND 1019 V] DOES THE REAL WAY OF A LEFT CORRIDOR FLOW WITH THE RACE?
+ *
+ * A right corridor is the ordinary opposite carriageway and flows AGAINST the race by construction (decided in
+ * round 1013, see "Direction of the real way" in docs/plans/GEO_REAL_FORKS.md). A LEFT corridor exists where the
+ * route is drawn against the one-way of its own carriageway and the other carriageway, on the +t side, flows with it: that
+ * is a natural thing to drive. The reverse (a left way that runs against the race on a one-way) would be driving head-on
+ * into traffic that the map says is one-way, so it is refused unless TD5RE_GEO_FORK_LEFT_CONTRA=1.
+ * For every node F..R of the window the way under the corridor centre line (the route node plus the measured offset, +t)
+ * is looked up in ROADS.JSON: nearest segment within 3 m that runs within 36 degrees of the route's heading either way.
+ * A two-way way (oneway_dir 0) counts as neither. `with`/`against` are returned; the fork is refused when against exceeds
+ * with and the knob is off. Returns 1 = accepted (also when nothing is known: the check only ever refuses on evidence). */
+static int rf_left_flow(const RfCand *c, int *with_n, int *against_n)
+{
+    const int nways = td5_geo_roads_count();
+    int i, w = 0, a = 0;
+    if (nways < 1 || !td5_geo_roads_sync(td5_geo_place_slug())) { if (with_n) *with_n = 0; if (against_n) *against_n = 0; return 1; }
+    for (i = c->F; i <= c->R && i < s_rn; i++) {
+        double tx, tz, tl, px, pz, best = 3.0 * 430.0;  /* 3 m */
+        int j, k, verdict = 0;
+        const int p = (i > 0) ? i - 1 : i, q = (i + 1 < s_rn) ? i + 1 : i;
+        tx = s_rx[q] - s_rx[p]; tz = s_rz[q] - s_rz[p];
+        tl = sqrt(tx * tx + tz * tz);
+        if (tl < 1.0) continue;
+        tx /= tl; tz /= tl;
+        px = s_rx[i] + c->off[i - c->F] * tz;      /* +t = (tz, -tx) */
+        pz = s_rz[i] - c->off[i - c->F] * tx;
+        for (j = 0; j < nways; j++) {
+            const TD5_GeoRoad *r = td5_geo_roads_get(j);
+            if (!r || r->count < 2 || r->roundabout) continue;
+            if (px < r->minx - best || px > r->maxx + best || pz < r->minz - best || pz > r->maxz + best) continue;
+            for (k = 0; k + 1 < r->count; k++) {
+                double ax = 0.0, az = 0.0, bx = 0.0, bz = 0.0, dx, dz, l2, t, qx, qz, d, sl, dot;
+                if (!td5_geo_roads_point(r, k, &ax, &az) || !td5_geo_roads_point(r, k + 1, &bx, &bz)) continue;
+                dx = bx - ax; dz = bz - az; l2 = dx * dx + dz * dz;
+                if (l2 < 1.0) continue;
+                t = ((px - ax) * dx + (pz - az) * dz) / l2;
+                if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+                qx = ax + t * dx; qz = az + t * dz;
+                d = sqrt((px - qx) * (px - qx) + (pz - qz) * (pz - qz));
+                if (d >= best) continue;
+                sl = sqrt(l2);
+                dot = (dx * tx + dz * tz) / sl;
+                if (dot > -0.8 && dot < 0.8) continue;           /* a cross street, not the carriageway */
+                best = d;
+                if (!r->oneway || r->oneway_dir == 0) verdict = 0;
+                else {
+                    if (r->oneway_dir < 0) dot = -dot;
+                    verdict = (dot > 0.0) ? 1 : -1;
+                }
+            }
+        }
+        if (verdict > 0) w++; else if (verdict < 0) a++;
+    }
+    if (with_n) *with_n = w;
+    if (against_n) *against_n = a;
+    return !(a > w) || td5_env_flag_off("TD5RE_GEO_FORK_LEFT_CONTRA");
 }
 
 /* [ROUND 1015 A] One avenue candidate for the span range F..R: reads the real offsets from
@@ -625,6 +714,8 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
 static int rf_avenue_try(const char *name, int F, int R, int merge, int *oom)
 {
     int la = 0, lb_n[10], lb_best = 2, nb = 0, i, ok = 1;
+    int side = 0;                         /* [1019 V] 0 = not decided yet (a run of zero offsets), -1 right, +1 left */
+    const char *why = NULL;
     RfCand *c;
     memset(lb_n, 0, sizeof lb_n);
     for (i = F; i <= R && ok; i++) {
@@ -634,13 +725,20 @@ static int rf_avenue_try(const char *name, int F, int R, int merge, int *oom)
              * carriageway is not known there, so no fork over it. */
             ok = 0; break;
         }
-        if (off > 0.0) { ok = 0; break; }   /* +t side: see rf_validate */
+        /* [1019 V] one side per window: -t (right) as before, or +t (left) when TD5RE_GEO_FORK_LEFT is on */
+        if (off > 0.0) {
+            if (side < 0) { ok = 0; why = "the opposite carriageway changes sides inside the window"; break; }
+            if (!rf_left_on()) { ok = 0; why = "on the +t side (left corridors are off: TD5RE_GEO_FORK_LEFT=0)"; break; }
+            side = 1;
+        } else if (off < 0.0) {
+            if (side > 0) { ok = 0; why = "the opposite carriageway changes sides inside the window"; break; }
+            side = -1;
+        }
         if (lb >= 1 && lb < 10) lb_n[lb]++;
     }
     if (!ok) {
         rf_note("REJECT", TG_RF_SRC_AVENUE, name, F, R,
-                "the opposite carriageway is missing or on the +t "
-                "side (left corridors are parked)");
+                why ? why : "the opposite carriageway is missing in the sidecar");
         return 0;
     }
     for (i = 1; i < 10; i++)
@@ -648,12 +746,24 @@ static int rf_avenue_try(const char *name, int F, int R, int merge, int *oom)
     la = rf_lanevar() ? rf_modal_lanes(F, R) : ((F >= 0 && F < s_rn) ? s_rl[F] : 2);
     c = rf_new_cand(TG_RF_SRC_AVENUE, name, F, R, la, lb_best);
     if (!c) { *oom = 1; return 0; }
+    c->side = side > 0 ? 1 : -1;
     for (i = F; i <= R; i++) {
         double off = 0.0;
         td5_geo_avenue_at(i, &off, NULL, NULL);
         c->off[i - F] = off;
     }
     if (!rf_validate(c)) return 0;
+    if (c->side > 0) {      /* [1019 V] a left corridor is offered only where its way flows with the race (or is two-way) */
+        int fw = 0, fa = 0;
+        const int okf = rf_left_flow(c, &fw, &fa);
+        if (s_rf_diag) {
+            char fb[96];
+            snprintf(fb, sizeof fb, "left corridor: the real way flows with the race on %d node(s), against it on %d%s",
+                     fw, fa, okf ? "" : " -- refused (one-way, head-on)");
+            rf_note(okf ? "LEFT" : "REJECT", TG_RF_SRC_AVENUE, name, F, R, fb);
+        }
+        if (!okf) return 0;
+    }
     /* [ROUND 1014 A] Weighted by its FULL length unless the merge
      * knob is off. The old cap of 90 made two 55-span blocks worth
      * more than the 194-span run they are the halves of, so the
@@ -1132,6 +1242,7 @@ static void rf_gen_parallel(void)
                                                                  : TD5_TG_GRID_SPAN + 12;
                 const int R = gates[h];
                 int lb_n[13], lb_best = 2, nb = 0, k;
+                int psd = 0;                                      /* [1019 V] the parallel road's side */
                 RfCand *c;
                 if (R - F - 1 < TG_RF_MINLEN) continue;
                 if (R - F - 1 > TG_RF_MAXLEN) break;
@@ -1143,15 +1254,22 @@ static void rf_gen_parallel(void)
                 memset(lb_n, 0, sizeof lb_n);
                 for (k = F; k <= R; k++) {
                     if (s_pw[k] < 0) { nb = -1; break; }
-                    if (s_plat[k] > 0.0) { nb = -2; break; }     /* +t side */
+                    if (s_plat[k] > 0.0) {                       /* +t side [1019 V] */
+                        if (!rf_left_on() || psd < 0) { nb = -2; break; }
+                        psd = 1;
+                    } else if (s_plat[k] < 0.0) {
+                        if (psd > 0) { nb = -3; break; }
+                        psd = -1;
+                    }
                     if (s_plb[k] >= 1 && s_plb[k] < 13) lb_n[s_plb[k]]++;
                 }
                 if (nb < 0) {
                     rf_note("REJECT", TG_RF_SRC_PARALLEL, rf_way_name(s_pw[(F + R) / 2]),
                             F, R, nb == -1 ? "the parallel road is not matched along "
                                              "the whole block"
+                                           : nb == -3 ? "the parallel road changes sides inside the window"
                                            : "the parallel road is on the +t side "
-                                             "(left corridors are parked)");
+                                             "(TD5RE_GEO_FORK_LEFT=0)");
                     break;
                 }
                 for (k = 1; k < 13; k++) if (lb_n[k] > nb) { nb = lb_n[k]; lb_best = k; }
@@ -1159,7 +1277,19 @@ static void rf_gen_parallel(void)
                                 rf_lanevar() ? rf_modal_lanes(F, R)
                                              : ((F >= 0 && F < s_rn) ? s_rl[F] : 2), lb_best);
                 if (!c) { free(s_vt); s_vt = NULL; s_vtn = 0; return; }
+                c->side = psd > 0 ? 1 : -1;
                 for (k = F; k <= R; k++) c->off[k - F] = s_plat[k];
+                if (c->side > 0) {      /* [1019 V] as for an avenue: a left corridor must not run head-on against a one-way */
+                    int fw = 0, fa = 0;
+                    const int okf = rf_left_flow(c, &fw, &fa);
+                    if (s_rf_diag) {
+                        char fb[96];
+                        snprintf(fb, sizeof fb, "left corridor: the real way flows with the race on %d node(s), against it on %d%s",
+                                 fw, fa, okf ? "" : " -- refused (one-way, head-on)");
+                        rf_note(okf ? "LEFT" : "REJECT", TG_RF_SRC_PARALLEL, c->name, F, R, fb);
+                    }
+                    if (!okf) break;
+                }
                 if (!rf_relax_only() && rf_validate(c)) {
                     c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9;
                     s_ncand++;
@@ -1291,6 +1421,7 @@ static void rf_gen_plaza(void)
     for (i = 0; i < s_ncand && nav < 64; i++) {
         int q, dup = 0;
         if (s_cand[i].src != TG_RF_SRC_AVENUE) continue;
+        if (s_cand[i].side > 0) continue;       /* [1019 V] a plaza fork's corridor is on the right: a left avenue fork is no neighbour */
         for (q = 0; q < nav; q++) if (avF[q] == s_cand[i].F && avR[q] == s_cand[i].R) dup = 1;
         if (!dup) { avF[nav] = s_cand[i].F; avR[nav] = s_cand[i].R; nav++; }
     }
@@ -1331,7 +1462,11 @@ static int rf_cmp_cand(const void *pa, const void *pb)
  * ring (the pick that opened round 1015: a scenery carriageway at span 214). */
 static int rf_compat(const RfCand *j, const RfCand *i)
 {
-    if (i->F - TG_RF_WIDEN > j->R + 2 + TG_RF_MIN_GAP) return 1;
+    if (i->F - TG_RF_WIDEN > j->R + 2 + TG_RF_MIN_GAP) {
+        /* [1019 V] the lane ramps of a left and a right fork may not share nodes: a node takes ONE side's extra width */
+        if (j->side != i->side && i->i0 <= j->w_end + 1) return 0;
+        return 1;
+    }
     if ((i->pf >= 0) != (j->pf >= 0) && i->F == j->R + 1 &&
         i->lanes_a == j->lanes_a && i->lanes_b == j->lanes_b) return 1;
     return 0;
@@ -1397,6 +1532,7 @@ static void rf_finalise(RfFork *f, const RfCand *c)
     f->src = c->src; f->F = c->F; f->R = c->R; f->len = c->len;
     f->lanes_a = c->lanes_a; f->lanes_b = c->lanes_b;
     f->pf = c->pf;
+    f->side = c->side > 0 ? 1 : -1;
     f->relaxed = c->relaxed;
     f->merged = c->merged;
     f->i0 = c->i0; f->w_end = c->w_end;

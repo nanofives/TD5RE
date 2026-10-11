@@ -491,7 +491,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             s_forks[s_fork_count].br_lanes = br_lanes;
             s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
             s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
-        s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
+        s_forks[s_fork_count].side = (is_real && !freec) ? tg_realfork_side((int)i) : -1;   /* [TOPOLOGY-FIRST] right unless a bypass goes left; [1019 V] or a real fork on the +t side */
             s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] (a plaza fork keeps it: its classic rows are an avenue fork's) */
             s_forks[s_fork_count].freec = freec;                     /* [ROUND 1015 E] */
             s_forks[s_fork_count].loopc = 0;                         /* [ROUND 1018 L] */

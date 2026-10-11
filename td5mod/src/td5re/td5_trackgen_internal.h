@@ -705,7 +705,8 @@ typedef struct {
     int br_lanes;         /* lanes(B0):  what the corridor takes             */
     double fm, fb;        /* main_lanes/lanes, br_lanes/lanes (0.5 symmetric) */
     int side;             /* [TOPOLOGY-FIRST] -1 corridor right of travel (the
-                           * shipped shape), +1 left. Only a BYPASS goes left. */
+                           * shipped shape), +1 left. A BYPASS or (1019 V) a real fork / block
+                           * loop on the +t side goes left. */
     int real;             /* [ROUND 1013 F2] 1 + index into the REAL fork table
                            * (td5_tg_realfork.c): the corridor's lateral is the
                            * measured gap between two real carriageways, not a
@@ -4265,6 +4266,7 @@ int    tg_realfork_build(void);                  /* once per build, before the w
 void   tg_realfork_reset(void);
 int    tg_realfork_n(void);
 int    tg_realfork_get(int i, int *F, int *len, int *lanes_a, int *lanes_b, double *sep);
+int    tg_realfork_side(int i);                 /* [1019 V] -1 right / +1 left of travel */
 int    tg_realfork_free(int i);                 /* [1015 E] 1 + plaza plan when fork i has a free corridor */
 const char *tg_realfork_name(int i);
 double tg_realfork_med(int i, int k);            /* median width at corridor step k, >= 0 */

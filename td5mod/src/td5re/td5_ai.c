@@ -4702,6 +4702,18 @@ int td5_ai_advance_track_script(int *rs) {
 static float   g_smart_skill[TD5_MAX_TOTAL_ACTORS];       /* 0..1 competence */
 static int8_t  g_smart_branch_pref[TD5_MAX_TOTAL_ACTORS]; /* -1/+1 per-car tie-break */
 static double  g_smart_branch_pull[TD5_MAX_TOTAL_ACTORS]; /* cached fork pull -1..+1 */
+static int8_t  g_smart_branch_left[TD5_MAX_TOTAL_ACTORS]; /* [1019 V] the fork the pull belongs to has its corridor on the LEFT */
+/* [1019 V] The lateral anchor of a committed fork choice, as a fraction of the road width (0 = left rail).
+ * A RIGHT corridor lies on the high lanes (take 0.86, stay 0.18); a LEFT one is the mirror (take 0.14,
+ * stay 0.82). TD5RE_AI_LEFT_ANCHOR=0 keeps the right-hand anchors everywhere (master). */
+static double smart_fork_anchor(int slot, double pull)
+{
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_flag_on("TD5RE_AI_LEFT_ANCHOR");
+    if (s_on && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot])
+        return (pull < 0.0) ? 0.82 : 0.14;
+    return (pull < 0.0) ? 0.18 : 0.86;
+}
 static double  g_smart_lane_u[TD5_MAX_TOTAL_ACTORS];      /* smoothed target lateral u (road fraction); -1 = uninit */
 static int8_t  g_smart_target_lane[TD5_MAX_TOTAL_ACTORS]; /* COMMITTED lane index; -1 = uninit */
 static int16_t g_smart_lane_dwell[TD5_MAX_TOTAL_ACTORS];  /* ticks since last committed lane switch */
@@ -4979,6 +4991,7 @@ static void td5_ai_smart_race_init(void) {
         g_smart_skill[s] = sk;
         g_smart_branch_pref[s] = (int8_t)(((h >> 17) & 1u) ? 1 : -1);
         g_smart_branch_pull[s] = 0.0;
+        g_smart_branch_left[s] = 0;
         g_smart_lane_u[s] = -1.0;   /* snap to the car's actual u on first sight */
         g_smart_target_lane[s] = -1;
         g_smart_lane_dwell[s] = 0;
@@ -5693,6 +5706,8 @@ static void td5_ai_smart_branch(int slot) {
         }
 
         double pref;
+        if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)       /* [1019 V] which side the corridor of THIS fork lies on */
+            g_smart_branch_left[slot] = (int8_t)((stype == 8 && (td5_track_fork_is_left(s) || td5_track_loop_side(s))) ? 1 : 0);
         if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
             g_cop_target[slot] >= 0 && g_cop_target[slot] < TD5_MAX_TOTAL_ACTORS) {
             /* [POLICE rewrite 2026-06-19] Chase branch policy: take whichever
@@ -5976,7 +5991,7 @@ static void td5_ai_smart_lane_bias(int slot) {
              * outer lanes so the fork actually routes onto the branch; 0.18 keeps a
              * "stay" equally decisive below the split threshold. SMART_RAY_MARGIN
              * (0.06) leaves headroom to 0.94, so neither anchor is clamped. */
-            double anchor = (bpull < 0.0) ? 0.18 : 0.86;
+            double anchor = smart_fork_anchor(slot, bpull);
             double w = (bpull < 0.0) ? -bpull : bpull; if (w > 1.0) w = 1.0;
             target_u = u_base * (1.0 - w) + anchor * w + se.avoid_u;
         } else {
@@ -6009,7 +6024,7 @@ static void td5_ai_smart_lane_bias(int slot) {
              * the high rail (0.86, just inside WALL_MARGIN) so the sub-lane reliably
              * lands in the branch range; the "stay" anchor hugs the low lanes (0.18)
              * so a committed main choice is equally decisive. */
-            double anchor = (pull < 0.0) ? 0.18 : 0.86;
+            double anchor = smart_fork_anchor(slot, pull);
             double w = (pull < 0.0) ? -pull : pull;   /* 0..1 */
             if (w > 1.0) w = 1.0;
             target_u = u_base * (1.0 - w) + anchor * w;

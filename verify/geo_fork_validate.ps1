@@ -49,6 +49,7 @@ param(
     [int]$GenWait = 900,                   # wall secs allowed for generate + race
     [int]$RaceSecs = 480,
     [string]$Place = "la_plata_partido",
+    [string]$RouteDir = "",                # [1019 V] a different _route/ (e.g. an older route) copied into every run dir
     [int]$Track = 61,
     [int]$Opponents = 5,
     [string]$Difficulty = "auto",          # AI tier per seed: auto = 1,2,0,1,2,0.. (the seed alone changes only the fork choice)
@@ -137,7 +138,10 @@ function Initialize-RunDir([string]$rd) {
     $src = Join-Path $assets "geo\$Place"
     $dst = Join-Path $ra "geo\$Place"
     foreach ($c in Get-ChildItem $src -Force) {
-        if ($c.Name -eq "_route") { Copy-Item $c.FullName (Join-Path $dst "_route") -Recurse }
+        if ($c.Name -eq "_route") {
+            $rsrc = if ($RouteDir -ne "") { $RouteDir } else { $c.FullName }
+            Copy-Item $rsrc (Join-Path $dst "_route") -Recurse
+        }
         elseif ($c.PSIsContainer) { New-Junction (Join-Path $dst $c.Name) $c.FullName }
         else { New-Item -ItemType HardLink -Path (Join-Path $dst $c.Name) -Target $c.FullName | Out-Null }
     }
