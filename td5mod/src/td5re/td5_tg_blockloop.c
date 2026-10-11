@@ -863,7 +863,10 @@ static int bl_overlap_ok(const BlPlan *C, const BlPlan *O)
     int i, j;
     if (!td5_env_flag_on("TD5RE_GEO_FORK_OVERLAP")) return 0;
     {   /* the four mouth ranges of C against the four of O */
-        const int m = td5_env_int("TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP", 6, 0, 40);
+        /* opposite sides never touch: the mouths only have to be different spans (the engine keeps one side-link entry per main
+         * span); the same side needs a gap so a slip lane does not run beside the other loop's street */
+        const int m = (C->sd == O->sd) ? td5_env_int("TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP", 6, 0, 40)
+                                       : td5_env_int("TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP_OPP", 1, 0, 40);
         const int cl[2] = { C->a1_lo, C->a2_lo }, ch[2] = { C->a1_hi, C->a2_hi };
         const int ol[2] = { O->a1_lo, O->a2_lo }, oh[2] = { O->a1_hi, O->a2_hi };
         for (c1 = 0; c1 < 2; c1++)
@@ -1133,7 +1136,11 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             if (C->F - 3 <= O->R + 3 && O->F - 3 <= C->R + 3 && !bl_overlap_ok(C, O)) clash = 1;
             if (C->e1 == O->e1 || C->e1 == O->e2 || C->e2 == O->e1 || C->e2 == O->e2) clash = 1;
         }
-        if (clash) { bl_free_plan(C); continue; }
+        if (clash) {
+            TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d R=%d (%s) \"%s\" dropped: its window or an arm clashes with a loop already taken (mouths %d..%d / %d..%d)",
+                      C->F, C->R, C->sd > 0 ? "left" : "right", C->name, C->a1_lo, C->a1_hi, C->a2_lo, C->a2_hi);
+            bl_free_plan(C); continue;
+        }
         if (!td5_dev_forkfilter_allow(C->si1)) {    /* dev-only allow/deny by the DEPARTURE MOUTH span (verify/geo_fork_validate.ps1 -Only 739): F moves with the flare */
             TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d \"%s\" filtered out (TD5RE_GEO_FORK_ALLOW/DENY)", C->F, C->name);
             bl_free_plan(C);
