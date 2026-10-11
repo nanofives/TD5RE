@@ -4258,6 +4258,7 @@ int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *mo
  * place loaded, which is what keeps a synthetic build byte-identical. */
 int    tg_realfork_enabled(void);
 int    tg_realfork_finish_span(void);           /* THE finish rule: no real fork window reaches it */
+unsigned int tg_realfork_route_fp(void);         /* FNV of this build's conditioned route (0 = none) */
 int    tg_realfork_build(void);                  /* once per build, before the walk */
 void   tg_realfork_reset(void);
 int    tg_realfork_n(void);

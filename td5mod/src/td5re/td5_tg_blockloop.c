@@ -51,6 +51,7 @@
 #include "td5_tg_world.h"
 #include "td5_geo.h"
 #include "td5_geo_roads.h"
+#include "td5_geo_fork_verdicts.h"   /* measured per-route fork verdicts (round 1017 R) */
 #include "td5_dev_forkfilter.h"      /* the harness's per-fork allow / deny list, by F */
 
 #define BL_UPM        430.0          /* world units per metre (the place cache's scale) */
@@ -996,6 +997,22 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d \"%s\" filtered out (TD5RE_GEO_FORK_ALLOW/DENY)", C->F, C->name);
             bl_free_plan(C);
             continue;
+        }
+        if (td5_env_flag_on("TD5RE_GEO_FORK_VERDICTS")) {   /* the verdict table: PASS only builds on a route that has a record */
+            const char *place = td5_geo_place_slug();
+            const unsigned int fp = tg_realfork_route_fp();
+            const int known = fp && td5_fork_verdict_route_known(place ? place : "", fp);
+            const int v = known ? td5_fork_verdict_get(place ? place : "", fp, C->F, C->R) : -1;
+            int drop = 0;
+            if (v == TD5_FV_FAIL || v == TD5_FV_UNTESTED || v == TD5_FV_WARN) drop = 1;
+            else if (v < 0 && (known || !td5_env_flag_on("TD5RE_GEO_FORK_UNVERIFIED"))) drop = 1;
+            if (drop) {
+                TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d R=%d \"%s\" refused by the verdict table (%s)", C->F, C->R, C->name,
+                          v == TD5_FV_FAIL ? "FAIL" : v == TD5_FV_UNTESTED ? "UNTESTED" : v == TD5_FV_WARN ? "WARN"
+                          : known ? "not in the record for this route" : "no record for this route, UNVERIFIED=0");
+                bl_free_plan(C);
+                continue;
+            }
         }
         if (off + 1 + C->clen >= TD5_TG_MAX_SPANS - 8) {
             bl_note(C->name, C->si1, C->si2, "the track would exceed the span budget");

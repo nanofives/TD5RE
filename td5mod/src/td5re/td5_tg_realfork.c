@@ -1451,12 +1451,18 @@ void tg_realfork_reset(void)
     tg_pf_reset();                     /* [ROUND 1015 E] */
 }
 
+/* [ROUND 1018 L] the route fingerprint of this build (0 = none computed), for the block-loop verdict lookup */
+static unsigned int s_route_fp;
+static int s_route_fp_set;
+unsigned int tg_realfork_route_fp(void) { return s_route_fp_set ? s_route_fp : 0u; }
+
 int tg_realfork_build(void)
 {
     int n, i, npick, pick[TG_RF_MAXCAND], f;
     long cov = 0;
 
     tg_realfork_reset();
+    s_route_fp_set = 0;
     s_rf_knob = tg_realfork_enabled() ? 1 : 0;   /* answered from the env just now */
     if (!s_rf_knob) return 0;
 
@@ -1501,6 +1507,7 @@ int tg_realfork_build(void)
             for (q = 0; q < 3; q++) { fp ^= (unsigned int)v[q]; fp *= 16777619u; }
         }
         place = place ? place : "";
+        s_route_fp = fp; s_route_fp_set = 1;
         known = td5_fork_verdict_route_known(place, fp);
         TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] route fingerprint %08X place %s nodes %d (verdict record: %s)",
                   fp, place, s_rn, known ? "yes" : "none");
