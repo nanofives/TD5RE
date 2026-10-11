@@ -32,7 +32,7 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
     { CL_DATE,    "October 11 (real places: turn off into side streets)" },
-    { CL_ITEM,    "La Plata, Avenida 13 (span ~690): you can now turn OFF" },
+    { CL_ITEM,    "La Plata, Avenida 13 (span ~720): you can now turn OFF" },
     { CL_ITEM,    "  the road into a real side street, drive round the" },
     { CL_ITEM,    "  block and come back to the road further on. The way" },
     { CL_ITEM,    "  in is a slip lane that leaves the road edge, no fork" },

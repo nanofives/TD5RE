@@ -38,6 +38,7 @@
  *   TD5RE_GEO_BLOCKLOOP_FLARE       extra width per side at the corridor's two ends, world units (default 0)
  *   TD5RE_GEO_BLOCKLOOP_FLARE_ROWS  rows (spans) it tapers over (default 5)
  *   TD5RE_GEO_BLOCKLOOP_APPROACH_SPANS/_DEG  no more than this much route bend (default 20 degrees) in the spans before the departure (14)
+ *   TD5RE_GEO_BLOCKLOOP_LIFT        the streets between the slip lanes stand this far above the ground envelope (default 60)
  *   TD5RE_GEO_BLOCKLOOP_INNER_PAVE  pavement on the corridor's inner edge too, where clear of the road (default 1)
  *   TD5RE_GEO_BLOCKLOOP_LANES       corridor lanes (default 2; 0 = from the real ways)
  *   TD5RE_GEO_BLOCKLOOP_STRAIGHT_DEG  heading change allowed along a slip lane's road edge (default 5)
@@ -81,6 +82,20 @@ typedef struct {
     TG_NodeList rview;               /* v[F+1+k] = corridor row k                        */
     char   name[96];
 } BlPlan;
+
+/* The ground the viewer sees at (x,z): the heightfield's envelope over half a cell round it. The ground meshes are
+ * triangulated on a lattice, so the exact height at an off-lattice point can sit BELOW the surface drawn there;
+ * a street laid at tg_world_h alone ran under the ground in patches (round 1018 L, frames of the 720..788 loop). */
+static double bl_env_h(double x, double z)
+{
+    const double hh = TG_WORLD_CELL * 0.5;
+    double g = tg_world_h(x, z), g1;
+    g1 = tg_world_h(x + hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
+    return g;
+}
 
 static BlPlan  s_bl[BL_MAXPLAN];
 static int     s_nbl;
@@ -709,8 +724,8 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const TG_NetArm *A, const 
         ia = (int)(s_a / (double)TD5_TG_SPAN_LENGTH); if (ia > nc) ia = nc;
         ib = (int)((total - s_b) / (double)TD5_TG_SPAN_LENGTH); if (ib > nc) ib = nc;
         ya = S1.qy[S1.nq - 1]; yb = S2.qy[0];
-        ds = ya - tg_world_h(P->cx[ia], P->cz[ia]);
-        de = yb - tg_world_h(P->cx[nc - ib], P->cz[nc - ib]);
+        ds = ya - bl_env_h(P->cx[ia], P->cz[ia]);
+        de = yb - bl_env_h(P->cx[nc - ib], P->cz[nc - ib]);
         for (i = 0; i <= nc; i++) {
             const double sa = total * (double)i / (double)nc;
             const double ui = (nc - ib <= ia) ? 1.0 : (i <= ia ? 0.0 : (i >= nc - ib ? 1.0 : (double)(i - ia) / (double)(nc - ib - ia)));
@@ -727,7 +742,15 @@ static int bl_chain(const TG_NodeList *nl, BlPlan *P, const TG_NetArm *A, const 
                     P->cy[i] = S2.qy[q0] + (S2.qy[q0 + 1] - S2.qy[q0]) * (f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f));
                 }
             } else {
-                P->cy[i] = tg_world_h(P->cx[i], P->cz[i]) + ds + (de - ds) * ui;
+                {   /* [ROUND 1018 L] ... and lifted off the ground by the network's own margin, ramped in over 6 spans from each flush end */
+                    const double lift = td5_env_float("TD5RE_GEO_BLOCKLOOP_LIFT", 60.0f, 0.0f, 400.0f);
+                    double r1 = (double)(i - ia) / 6.0, r2 = (double)((nc - ib) - i) / 6.0, ramp;
+                    if (r1 < 0.0) r1 = 0.0;
+                    if (r2 < 0.0) r2 = 0.0;
+                    ramp = r1 < r2 ? r1 : r2;
+                    if (ramp > 1.0) ramp = 1.0;
+                    P->cy[i] = bl_env_h(P->cx[i], P->cz[i]) + ds + (de - ds) * ui + lift * ramp;
+                }
             }
         }
     }
