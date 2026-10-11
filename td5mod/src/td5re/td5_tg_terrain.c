@@ -4545,6 +4545,7 @@ static int tg_far_group_over_fork(int si)
     for (i = 0; i < s_fork_count; i++) {
         const int a = s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2;
         const int b = s_forks[i].R + TD5_TG_FAR_FORK_PAD;
+        if (s_forks[i].loopc > 0) continue;   /* [ROUND 1018 L] */
         if (s_forks[i].freec > 0) {          /* [ROUND 1015 E] throats only */
             if (tg_pf_far_over(i, g0, g1)) return 1;
             continue;

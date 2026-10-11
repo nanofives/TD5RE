@@ -3936,6 +3936,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TG_ZONE_BEGIN(TG_ZONE_NETWORK);
         tg_fork_place(&nl, nl.count - 1);
         tg_network_build(&nl, nl.count - 1);
+        tg_bl_build(&nl, nl.count - 1);            /* [ROUND 1018 L] block loops, from the accepted street arms */
         tg_network_write(dir, &nl, nl.count - 1);
         TG_ZONE_END(TG_ZONE_NETWORK);
         tg_world_freeze();
@@ -4156,7 +4157,8 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
          * call site, so they are accounted here where the table is complete. */
         int f;
         for (f = 0; f < s_fork_count; f++) {
-            tg_acct_range(TG_ACCT_BRANCH, s_forks[f].F, s_forks[f].R);
+            if (s_forks[f].loopc == 0)     /* [ROUND 1018 L] a loop's F..R is untouched main road */
+                tg_acct_range(TG_ACCT_BRANCH, s_forks[f].F, s_forks[f].R);
             tg_acct_range(TG_ACCT_BRANCH, s_forks[f].cbase,
                           s_forks[f].cbase + tg_fork_clen(f) - 1);
         }

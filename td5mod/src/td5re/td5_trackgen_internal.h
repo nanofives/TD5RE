@@ -668,7 +668,7 @@ extern unsigned int s_selfcheck_regen_seed;
  * at span F into a main half [F+1..F+len] and a corridor appended after the ring
  * at [cbase..cbase+len-1], rejoining at span R. The loader (td5_track.c) already
  * iterates an N-entry jump table, so the whole chain is multi-fork. */
-#define TD5_TG_BRANCH_MAX 12  /* [FORK KINDS] was 4; the plan ladder has 6 entries.
+#define TD5_TG_BRANCH_MAX 20  /* [FORK KINDS] was 4; the plan ladder has 6 entries.
                                * [ROUND 1013 F2] 8 -> 12: a real route has a fork per
                                * block of a divided avenue, and the jump table holds 32 */
 /* sep = per-fork separation scale in [0,1] (item 10): how far the branch bows
@@ -692,6 +692,8 @@ typedef enum {
     TG_FORK_MAJOR,        /* main narrows to 1-2 lanes, corridor takes the rest */
     TG_FORK_BYPASS,       /* [TOPOLOGY-FIRST] corridor follows a planned lateral
                            * profile (a real street of the network), not a bow */
+    TG_FORK_LOOP,         /* [ROUND 1018 L] BLOCK LOOP: leaves the road SIDEWAYS through a
+                           * real cross street and rejoins through another one */
     TG_FORK_KIND_COUNT
 } TG_ForkKind;
 typedef struct {
@@ -713,6 +715,10 @@ typedef struct {
                            * its own (a free node chain round the real ring), not
                            * main node + lateral. 0 = every other fork. real is
                            * 0 on these so no avenue-only path touches them.  */
+    int loopc;            /* [ROUND 1018 L] 1 + index of a BLOCK LOOP plan (td5_tg_blockloop.c):
+                           * the corridor leaves through the road's side, the main road is
+                           * not touched (F = first span of the departure mouth, R = last
+                           * span of the arrival mouth). 0 = every other fork.            */
     int clen;             /* [ROUND 1016 K] CORRIDOR SPAN COUNT. == len for every
                            * fork whose corridor rides the main nodes one span per
                            * span; a plaza fork's free corridor has the spans its
@@ -4294,6 +4300,32 @@ double tg_pf_med(int plan, int k);                   /* classic median opening o
 void   tg_pf_commit(int plan);                       /* this plan was selected */
 double tg_pf_node_extra(int plan, int node);         /* corridor lanes ramped into the node window */
 int    tg_fork_is_free(int fi);
+/* [ROUND 1018 L] BLOCK LOOPS (td5_tg_blockloop.c). A loop is a TG_Fork with loopc > 0: its corridor
+ * spans are appended like any fork's, but the main road is NOT touched (no widening, no half
+ * carriageway, no gore): the corridor leaves through the road's right side at a real cross street
+ * and rejoins through another. The engine is told where the road is open by the SLNK trailer. */
+typedef struct {
+    int    edge, kind, si, lo, hi, left, road, k0, step, loop;
+    double width, skew, reach;
+    double ax, az, bx, bz;     /* the edge's first / last polyline point            */
+} TG_NetArm;
+int    tg_net_edge_count(void);
+int    tg_net_arm_get(int i, TG_NetArm *out);
+int    tg_net_near_other_street(double x, double z, double half, int ea, int eb);
+void   tg_net_loop_take(int e, int lo, int hi);
+int    tg_net_mouth_is_loop(int si, int left);
+void   tg_bl_reset(void);
+int    tg_bl_build(const TG_NodeList *nl, int ring);        /* after tg_network_build: plan + append the loops */
+int    tg_fork_is_loop(int fi);
+const TG_NodeList *tg_bl_rview(int fi);                     /* v[F+1+k] = loop corridor row k                 */
+const TG_NodeList *tg_fork_rview(int fi);                   /* free (plaza) or loop corridor rows, else NULL   */
+int    tg_bl_row_node(int fi, int k);                       /* main node corridor row k stands beside          */
+void   tg_bl_paint_network(int fi);                         /* occupancy + ground bed under the corridor       */
+int    tg_bl_slnk_write(TG_Buf *out);                       /* the SLNK trailer; number of loops written       */
+int    tg_bl_mouths(int fi, int *a1_lo, int *a1_hi, int *a2_lo, int *a2_hi);
+double tg_bl_reach(const TG_NodeList *nl, int si, double side);   /* outermost loop tarmac beside mouth span si (right side) */
+int    tg_bl_mouth_span(int si);                            /* si lies in a loop's mouth window (clear of facade) */
+int    tg_bl_corridor_near(double x, double z, double half);  /* a loop corridor row lies within half of (x,z) */
 void   tg_pf_finalize(const TG_NodeList *nl);        /* after tg_fork_place filled s_forks */
 const TG_NodeList *tg_pf_view(int fi);               /* v[F+1+j] = the corridor beside MAIN node F+1+j (throats, wedges) */
 const TG_NodeList *tg_pf_rview(int fi);              /* [1016 K] v[F+1+k] = corridor ROW k (strip rows, mesh, routes, preview) */

@@ -70,6 +70,10 @@ typedef struct {
      * every synthetic edge -- which is the no-op, so a synthetic build reads
      * exactly as it did. See tg_net_mouth_surface. */
     int    surface;
+    /* [ROUND 1018 L] the real way and direction this street arm came from, so a block
+     * loop can follow it past the stub; loop = 1 once a drivable block loop took the
+     * street over (its stub is then not drawn as scenery). -1 / 0 for every other edge. */
+    int    road, k0, kstep, loop;
 } TG_NetEdge;
 
 typedef struct { short edge; float skew, reach, shift; } TG_NetMouth;   /* shift: [1014 B] origin offset past the race kerb */
@@ -104,6 +108,7 @@ static TG_NetEdge *tg_net_edge_new(int a, int b, int kind, double width)
     memset(e, 0, sizeof(*e));
     e->a = a; e->b = b; e->kind = kind; e->width = width;
     e->mouth_si = -1; e->rejoin_si = -1; e->mouth_lo = e->mouth_hi = -1;
+    e->road = -1; e->k0 = -1; e->kstep = 0; e->loop = 0;
     e->npoly = 2;
     e->px[0] = s_nodes[a].x; e->pz[0] = s_nodes[a].z; e->py[0] = s_nodes[a].y;
     e->px[1] = s_nodes[b].x; e->pz[1] = s_nodes[b].z; e->py[1] = s_nodes[b].y;
@@ -718,6 +723,7 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
 typedef struct {
     int    si, left, lanes, road, klass;
     int    surface;         /* TD5_GEO_SURF_* of the real way this arm is   */
+    int    k0, kstep;       /* [R1018 L] first way vertex past the junction, and the index step */
     double skew, want;
     double shift;           /* [1014 B] origin offset past the race kerb     */
 } TG_GeoArm;
@@ -1189,6 +1195,7 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
         a->skew = skew; a->want = run;
         a->shift = fshift;
         a->surface = rd->surface;
+        a->k0 = k0; a->kstep = step;
     }
 }
 
@@ -1413,6 +1420,7 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         ed->mouth_lo = lo;    ed->mouth_hi   = hi;
         ed->skew = a->skew;   ed->reach      = reach;
         ed->surface = a->surface;
+        ed->road = a->road; ed->k0 = a->k0; ed->kstep = a->kstep;
         tg_net_paint_edge(ed, TG_WO_STREET);
         tg_net_set_mouth(lo, hi, a->left, (int)(ed - s_edges), a->skew, reach);
         if (a->shift > 0.0) {
@@ -1837,6 +1845,83 @@ int tg_net_mouth_surface(int si, int left)
      * page and "there is no real street here" and "the real street is paved"
      * want the same answer. */
     return e < 0 ? TD5_GEO_SURF_SMOOTH : s_edges[e].surface;
+}
+
+/* ------------------------------------------------ [ROUND 1018 L] block loops -- */
+
+/* A read-only view of every REAL street arm the network accepted, for the block-loop planner
+ * (td5_tg_blockloop.c). Index i is the network edge; returns 0 for an edge that is not a
+ * street arm of a real way (a synthetic edge, a plaza ribbon, an underpass, ...). */
+int tg_net_edge_count(void) { return s_net_built ? s_ne : 0; }
+
+int tg_net_arm_get(int i, TG_NetArm *out)
+{
+    const TG_NetEdge *e;
+    if (!s_net_built || i < 0 || i >= s_ne || !out) return 0;
+    e = &s_edges[i];
+    if (e->road < 0 || e->mouth_si < 0 || e->mouth_lo < 0 || e->npoly < 2) return 0;
+    if (e->kind != TG_NE_STREET && e->kind != TG_NE_AVENUE && e->kind != TG_NE_CONTINUATION) return 0;
+    out->edge = i; out->kind = e->kind; out->si = e->mouth_si;
+    out->lo = e->mouth_lo; out->hi = e->mouth_hi; out->left = e->mouth_left;
+    out->road = e->road; out->k0 = e->k0; out->step = e->kstep;
+    out->width = e->width; out->skew = e->skew; out->reach = e->reach;
+    out->loop = e->loop;
+    out->ax = e->px[0]; out->az = e->pz[0];
+    out->bx = e->px[e->npoly - 1]; out->bz = e->pz[e->npoly - 1];
+    return 1;
+}
+
+/* Is (x,z) within `half` of any network street polyline other than the two edges `ea`, `eb`
+ * (the loop's own arms)? Half is the caller's own half width; the street's is added. */
+int tg_net_near_other_street(double x, double z, double half, int ea, int eb)
+{
+    int i, k;
+    for (i = 0; i < s_ne; i++) {
+        const TG_NetEdge *o = &s_edges[i];
+        if (i == ea || i == eb || o->npoly < 2) continue;
+        if (o->kind == TG_NE_UNDERPASS) continue;
+        for (k = 0; k + 1 < o->npoly; k++) {
+            const double ax = o->px[k], az = o->pz[k];
+            const double bx = o->px[k + 1], bz = o->pz[k + 1];
+            const double dx = bx - ax, dz = bz - az;
+            const double l2 = dx * dx + dz * dz;
+            double t = (l2 > 1e-9) ? ((x - ax) * dx + (z - az) * dz) / l2 : 0.0, ex, ez, r;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            ex = ax + dx * t - x; ez = az + dz * t - z;
+            r = o->width * 0.5 + half;
+            if (ex * ex + ez * ez < r * r) return 1;
+        }
+    }
+    return 0;
+}
+
+/* A block loop took the street of edge `e` over: its mouth stays in the table (the frontage
+ * and the pavement keep opening there) but the stub is not drawn as scenery any more, and the
+ * mouth is widened to the spans [lo, hi] when those are free. */
+void tg_net_loop_take(int e, int lo, int hi)
+{
+    int s;
+    if (e < 0 || e >= s_ne) return;
+    s_edges[e].loop = 1;
+    s_edges[e].drivable = 1;
+    for (s = lo; s <= hi; s++) {
+        const int left = s_edges[e].mouth_left ? 0 : 1;
+        if (s < 0 || s >= TD5_TG_MAX_SPANS + 8) continue;
+        if (s_mouth[s][left].edge < 0) {
+            s_mouth[s][left].edge  = (short)e;
+            s_mouth[s][left].skew  = (float)s_edges[e].skew;
+            s_mouth[s][left].reach = (float)s_edges[e].reach;
+            s_mouth[s][left].shift = 0.0f;
+        }
+    }
+}
+
+/* Does the street mouth at (si, side) belong to a drivable block loop? */
+int tg_net_mouth_is_loop(int si, int left)
+{
+    const int e = tg_net_mouth(si, left, NULL, NULL);
+    return e >= 0 && s_edges[e].loop;
 }
 
 /* ---------------------------------------------------------- emission -- */

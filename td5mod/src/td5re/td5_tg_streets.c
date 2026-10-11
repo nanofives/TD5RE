@@ -4623,6 +4623,7 @@ void tg_r9_city_report(const TG_NodeList *nl, int nspans)
         for (f = 0; f < s_fork_count; f++) {
             int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
             int hi = s_forks[f].R + 2;
+            if (s_forks[f].loopc > 0) continue;   /* [ROUND 1018 L] */
             if (lo < 1) lo = 1;
             if (hi > ring - 1) hi = ring - 1;
             for (si = lo; si <= hi; si++) {
@@ -4761,6 +4762,7 @@ void tg_r14_branch_report(const TG_NodeList *nl, int nspans)
     for (f = 0; f < s_fork_count; f++) {
         int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
         int hi = s_forks[f].R + 2;
+        if (s_forks[f].loopc > 0) continue;   /* [ROUND 1018 L] */
         if (lo < 2) lo = 2;
         if (hi > ring - 2) hi = ring - 2;
         for (si = lo; si <= hi; si++) {

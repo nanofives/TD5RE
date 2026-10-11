@@ -2687,6 +2687,15 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 int k;
 
                 /* 1. FORK span F: full width, type 8, link_next -> corridor. */
+                if (tg_fork_is_loop(fi)) {
+                    /* [ROUND 1018 L] a block loop does not touch the road: span F keeps its own
+                     * rows, only its type (8: the AI's fork scan finds it) and link_next change.
+                     * The engine never sends a sub-lane into link_next here (the lane count is
+                     * uniform), the side link does the crossing. */
+                    unsigned char *r = spans.b + (size_t)F * 24;
+                    r[0] = 8;
+                    r[8] = (unsigned char)(b0 & 0xFF); r[9] = (unsigned char)((b0 >> 8) & 0xFF);
+                } else
                 {
                     const TG_Node *a = &nl->v[F], *b = &nl->v[F + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
@@ -2699,6 +2708,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 /* 2. MAIN half carriageway [F+1 .. F+L]. */
                 for (k = 1; k <= L; k++) {
                     const int si = F + k;
+                    if (tg_fork_is_loop(fi)) continue;   /* [ROUND 1018 L] the road is untouched */
                     const TG_Node *a = &nl->v[si], *b = &nl->v[si + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                     int lvi, rvi;
@@ -2735,8 +2745,8 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     /* [ROUND 1015 E] a plaza fork's corridor rows are its own node
                      * chain (shift 0); every other fork's ride the main nodes.
                      * [ROUND 1016 K] ...and there are as many as its arc needs. */
-                    const int pfree = tg_fork_is_free(fi) && tg_pf_rview(fi) != NULL;
-                    const TG_NodeList *cnl = pfree ? tg_pf_rview(fi) : nl;
+                    const int pfree = tg_fork_rview(fi) != NULL;     /* [ROUND 1018 L] plaza OR block loop */
+                    const TG_NodeList *cnl = pfree ? tg_fork_rview(fi) : nl;
                     const TG_Node *a = &cnl->v[F + 1 + k], *b = &cnl->v[F + 2 + k];
                     const int ln = tg_fork_br_lanes_at(fi, k);
                     const double wn = tg_fork_br_wscale(fi, k);
@@ -2772,6 +2782,13 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                    lanes_here, lvi, rvi, nxt, prv, ox, oy, oz);
                 }
                 /* 5. REJOIN span R: full width, type 11, link_prev -> sentinel. */
+                if (tg_fork_is_loop(fi)) {
+                    unsigned char *r = spans.b + (size_t)R * 24;       /* [ROUND 1018 L] type + link only */
+                    if (R >= 0 && R < ring) {
+                        r[0] = 11;
+                        r[10] = (unsigned char)(sentinel_end & 0xFF); r[11] = (unsigned char)((sentinel_end >> 8) & 0xFF);
+                    }
+                } else
                 {
                     const TG_Node *a = &nl->v[R], *b = &nl->v[R + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
@@ -2850,17 +2867,18 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
          * stands beside (see the CorrMap note in td5_track.c). Only forks whose corridor
          * has a different number of spans than the main stretch it bypasses write one, so
          * a build without such a fork is byte-identical to before. */
+        if (ok) tg_bl_slnk_write(out);       /* [ROUND 1018 L] side links of the block loops (no bytes without any) */
         if (ok) {
             int j, nv = 0;
             for (j = 0; j < s_fork_count; j++)
-                if (tg_fork_clen(j) != s_forks[j].len) nv++;
+                if (tg_fork_clen(j) != s_forks[j].len || tg_fork_is_loop(j)) nv++;
             if (nv > 0) {
                 tg_put_u32(out, 0x50524D43u);
                 tg_put_u32(out, (unsigned int)nv);
                 for (j = 0; j < s_fork_count; j++) {
                     const int cl = tg_fork_clen(j);
                     int k;
-                    if (cl == s_forks[j].len) continue;
+                    if (cl == s_forks[j].len && !tg_fork_is_loop(j)) continue;
                     tg_put_u32(out, (unsigned int)s_forks[j].cbase);
                     tg_put_u32(out, (unsigned int)cl);
                     tg_put_u32(out, (unsigned int)s_forks[j].len);
@@ -2927,8 +2945,8 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans,
         {   /* [ROUND 1015 E] a plaza corridor's heading is its own chain's */
             int ck2 = 0, fi2;
             if (i > nl->count - 2 && (fi2 = tg_fork_of_corridor(i, &ck2)) >= 0 &&
-                tg_fork_is_free(fi2) && tg_pf_rview(fi2))
-                hn = &tg_pf_rview(fi2)->v[s_forks[fi2].F + 1 + ck2];
+                tg_fork_rview(fi2))
+                hn = &tg_fork_rview(fi2)->v[s_forks[fi2].F + 1 + ck2];
         }
         double h = atan2(hn->tx, hn->tz) * 4096.0 / (2.0 * TD5_TG_PI);
         int h12 = tg_round(h) & 0xFFF;
@@ -3753,9 +3771,9 @@ static int tg_scenery_entry(int e)
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
-                    const int pfree = tg_fork_is_free(fi) && tg_pf_rview(fi) != NULL;
-                    const TG_NodeList *cnl = pfree ? tg_pf_rview(fi) : nl;   /* [ROUND 1015 E] */
-                    if (pfree) tg_road_v_scale = tg_pf_vscale(fi);
+                    const int pfree = tg_fork_rview(fi) != NULL;
+                    const TG_NodeList *cnl = pfree ? tg_fork_rview(fi) : nl;   /* [ROUND 1015 E] plaza / [1018 L] block loop */
+                    if (pfree && tg_fork_is_free(fi)) tg_road_v_scale = tg_pf_vscale(fi);
                     if (!tg_emit_road_quad_taper(cnl, pfree ? mbv : mb, u_scale,
                                            pfree ? 0.0 : tg_fork_br_shift(fi, ck, nl->v[mb].width),
                                            pfree ? 0.0 : tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
@@ -4672,6 +4690,7 @@ static void tg_preview_emit_forks(const TG_NodeList *nl,
         const int L = s_forks[i].len;  (void)L;   /* [FORK KINDS] geometry now comes from the fork helpers */
         int si;
         if (F < 0 || R >= nl->count) continue;
+        if (tg_fork_is_loop(i)) continue;    /* [ROUND 1018 L] preview shows the route; loops are planned later */
         if (tg_fork_is_free(i)) {            /* [ROUND 1015 E] the corridor's own rows */
             int row;
             for (row = 0; row <= tg_fork_clen(i); row++) {

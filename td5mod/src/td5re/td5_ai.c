@@ -5195,6 +5195,13 @@ static int ai_path_next(int slot, int span)
         }
         return (span + 1 < sc) ? span + 1 : span;
     }
+    {   /* [ROUND 1018 L] a committed block loop: any span of its departure mouth leads into the corridor */
+        int dep = -1;
+        const int c0 = td5_track_loop_mouth_target(span, &dep);
+        if (c0 >= 0 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+            g_smart_branch_commit_span[slot] == (int16_t)dep && g_smart_branch_commit_take[slot])
+            return c0;
+    }
     if (t == 8 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
         g_smart_branch_commit_span[slot] == (int16_t)span &&
         g_smart_branch_commit_take[slot]) {
@@ -5645,6 +5652,10 @@ static void td5_ai_smart_branch(int slot) {
     for (int d = cm ? 0 : 1; d <= look; d++) {
         int s = span + d;
         if (cm) s = ps_scan[d];
+        if (cm && d == 0) {   /* [ROUND 1018 L] inside a block loop's departure mouth: the fork is still D */
+            int dep = -1;
+            if (span < td5_track_get_ring_length() && td5_track_loop_mouth_target(span, &dep) >= 0) s = dep;
+        }
         if (s >= span_count) s -= span_count;
         if (s < 0) continue;
         uint8_t stype = strips[(size_t)s * 0x18];
