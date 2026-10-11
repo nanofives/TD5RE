@@ -232,3 +232,76 @@ UNTESTED, not PASS.
 * `fork_validate.json` is schema 2: `route_fp` and `route_place` (the `[REAL FORK] route fingerprint` the generator logs) identify the exact route.
 * `verify/geo_fork_verdicts_gen.py a.json b.json ...` turns run-sets into `td5_geo_fork_verdicts.h`; `verify/geo_fork_keep.json` holds the reason for every WARN fork kept.
 * Decide with 6 seeds (`-Seeds "11,22,33,44,55,66"`, ~140 s with a reused baseline ~80 s): a single jam or stall in 36 passes is below every FAIL line but is a WARN.
+
+## Fast tours (round 1019 T)
+
+`verify/geo_tour.ps1` replaces the per-round tour scripts (`geo_r1014a_tour.ps1`,
+`geo_r1015b_tour.ps1`, `geo_bl_tour.ps1` are now thin wrappers with the same parameters). It
+looks at a geo track from free-cam poses: ONE launch captures every pose of a list, anywhere
+along the route, then the game quits cleanly (logs flushed). Dev builds only, compiled out of RELEASE.
+
+```
+pwsh verify/geo_tour.ps1 -Tag x -Poses poses.txt                  # world and/or span poses
+pwsh verify/geo_tour.ps1 -Tag x -Picks picks.txt                  # "name x y z" per line (a pick's pos)
+pwsh verify/geo_tour.ps1 -Tag x -Spans 561,922 -Back 4 -TopDown   # a view of each span, plus a top-down
+pwsh verify/geo_tour.ps1 -Tag ab -Poses p.txt -Extra @{TD5RE_GEO_FORK_MERGE="0"}   # an A/B knob
+pwsh verify/geo_tour.ps1 -Tag x -Poses p.txt -Rebuild             # geo SOURCE data changed, exe did not
+```
+
+* **Poses** (`;` or newlines, `#` comments), one of
+  `name:x,y,z,yawdeg,pitchdeg` (world units, the numbers a pick prints, yaw 0 = looking down +Z) or
+  `name:@span,lateral,height,yawrel,pitch`: the eye is at the centre of strip span `span`
+  (a corridor span >= ring works), `lateral` world units to the RIGHT of the road, `height` above
+  it, looking `yawrel` degrees off the road direction. Spans of a loop or fork come from the
+  `side link: loop` / `fork ... corridor=a..b` lines of `log/race.log`.
+* **Output** `<Out>/tour_<Tag>_<name>.png` (`-Out` default `log`, 1280x720, `-Width/-Height`), the
+  pose list `<Out>/tour_<Tag>_poses.txt`, and `<Out>/tour_<Tag>_manifest.csv`: per pose the span,
+  the cull span, `complete`, the stream state, the sim tick and the eye. Names must be unique.
+* **Knobs only through `-Extra`** (hashtable, or the string `"TD5RE_A=1|TD5RE_B=2"` from
+  `pwsh -File`): like `geo_tags_identity.ps1` the script CLEARS every `TD5RE_*` first. A knob that
+  changes the BUILD changes the GENSTAMP, so the next launch rebuilds once; knobs that only steer
+  the camera or the race AI (`TD5RE_FREECAM_*`, `TD5RE_CAM_FIXED`, `TD5RE_AI_BRANCH_FORCE*`,
+  `TD5RE_RACE_SEED`) are no longer hashed. `-Opponents`, `-AutoThrottle`, `-StartSpanOffset`,
+  `-Dwell`, `-Track`, `-GeoPlace` (default: `re/assets/geo/SELECTED.TXT`), `-Timeout` exist too.
+* **Fail-safe**: after the run the script prints, per pose, `ok` / `INCOMPLETE-SCENERY` /
+  `MISSING` / `NO-MANIFEST-ROW`, how the level was obtained (`REUSED` or `BUILT`), and exits 1 if
+  any pose is not `ok` or the game had to be killed at `-Timeout`. `TD5RE_FREECAM_TOUR_NOWAIT=1`
+  (via `-Extra`) skips the scenery wait on purpose: use it to see what an incomplete capture looks
+  like (grey fallback ribbon, flagged `INCOMPLETE-SCENERY`).
+
+How it is fast (`td5_camera.c` `tour_step`, `td5_render_mesh.c`):
+
+1. **No regeneration on a matching level.** The GENSTAMP env hash used to include every
+   `TD5RE_*` variable, so a different pose list was a stamp miss and a full rebuild; the old
+   scripts also set `TD5RE_AUTOTRACK_REUSE=0` and deleted the level dir. The new script does neither:
+   the stamp reuses the level until the exe, the spec, the route nodes or a hashed knob changes. The
+   stamp does NOT cover the geo source files (roads, footprints): after changing data without a code
+   change pass `-Rebuild` once (it drops `GENSTAMP.TXT`).
+2. **No stream waiting.** A reused level loads the whole MODELS.DAT from disk, so there is no
+   stream. A cold build streams; the tour starts only when `td5_tgstream_active()` is 0 and
+   `td5_track_scenery_undecorated_from_span()` is -1, and the first pose waits exactly that long.
+3. **Poses far from the car draw.** The track display-list walk is centred on the car's span, so a
+   pose 900 spans away used to show sky (the old scripts parked the car with
+   `TD5RE_FREECAM_TOUR_SPAN` + `_FREEZE`, one launch per region). In fast mode the sim is frozen at
+   once and `td5_camera_tour_cull_span()` (read by `td5_render_mesh.c` for pane 0) re-centres the walk
+   on the pose's span; a corridor span maps to its parallel main span, so the corridor draws through the
+   existing branch-visibility loop. Render-only: the sim never sees it, nothing in a race changes.
+4. **Dwell 6 frames** (the old 90 waited for the stream), one request per pose, quit after the last.
+
+Measured on this machine (La Plata partido, slot 61, 1280x720, RT off, min graphics):
+
+| | cold (exe or knob changed, one build) | warm (reused level) |
+|---|---|---|
+| fast tour, 20 poses spread over the route | 23 s (22 s to the first pose) | 10-11 s |
+| fast tour, 40 poses (20 + top-downs) | | 12.7 s |
+| fast tour, 12 corridor poses (loops F=561 and F=922) | | 11 s |
+| old script, the same 20 poses, ONE launch | 31 s, but the far frames are sky (c440 and c1070 inspected) | n/a (regenerates every launch) |
+| old script, SPAN=930 + FREEZE, 4 poses (2 regions) | 119 s | n/a |
+
+The old scripts can only draw poses within about 128 spans of the car, so a 20-pose tour over the
+1256-span route took ~10 launches (the round children measured 9-10 min per tour). The fast tour
+frames of the poses both tools can draw (c944) match the old ones.
+
+Gotchas: the HUD in the frames is the frozen CAR's (street name, speed), not the pose's. PNGs are
+uncompressed (constant size, ~3.7 MB at 1280x720). A tour that is killed while a cold build is
+streaming leaves no MODELS.DAT, so the next launch rebuilds (correct, just slow).
