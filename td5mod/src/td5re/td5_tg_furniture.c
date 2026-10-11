@@ -1006,6 +1006,7 @@ int tg_fork_of_main(int si)
 {
     int i;
     for (i = 0; i < s_fork_count; i++) {
+        if (s_forks[i].loopc > 0) continue;      /* [ROUND 1018 L] a block loop has no main half */
         if (s_forks[i].freec > 0) {              /* [ROUND 1015 E] throat spans only */
             if (tg_pf_throat_span(i, si)) return i;
             continue;

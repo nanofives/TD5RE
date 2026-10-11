@@ -5195,6 +5195,20 @@ static int ai_path_next(int slot, int span)
         }
         return (span + 1 < sc) ? span + 1 : span;
     }
+    if (td5_track_loop_in_mouth(span) >= 0) {
+        /* [ROUND 1018 L] inside a block loop's departure mouth: a committed car turns into the street from
+         * the middle of the opening (td5_track_loop_mouth_target), never at the type-8 span D itself, which
+         * is the opening's first span and would make it cut the upstream corner */
+        int dep = -1;
+        const int c0 = td5_track_loop_mouth_target(span, &dep);
+        if (c0 >= 0 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+            g_smart_branch_commit_span[slot] == (int16_t)dep && g_smart_branch_commit_take[slot])
+            return c0;
+        nx = span + 1;
+        if (ring > 0 && nx >= ring)
+            nx = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 0 : ring - 1;
+        return nx;
+    }
     if (t == 8 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
         g_smart_branch_commit_span[slot] == (int16_t)span &&
         g_smart_branch_commit_take[slot]) {
@@ -5645,6 +5659,10 @@ static void td5_ai_smart_branch(int slot) {
     for (int d = cm ? 0 : 1; d <= look; d++) {
         int s = span + d;
         if (cm) s = ps_scan[d];
+        if (cm && d == 0) {   /* [ROUND 1018 L] inside a block loop's departure mouth: the fork is still D */
+            int dep = -1;
+            if (span < td5_track_get_ring_length() && (dep = td5_track_loop_in_mouth(span)) >= 0) s = dep;
+        }
         if (s >= span_count) s -= span_count;
         if (s < 0) continue;
         uint8_t stype = strips[(size_t)s * 0x18];
@@ -6213,6 +6231,7 @@ static int    s_gov_inited = 0;
 static int    s_gov_on = 1, s_gov_scope = 1, s_gov_look = 36;
 static double s_gov_lat_u = 6.69, s_gov_brk_u = 4.69;      /* units/tick^2 */
 static double s_gov_floor = 340.0;                          /* units/tick: below this a car has no yaw authority */
+static double s_gov_floor_loop = 260.0;                     /* [R1018 L] ... on a block loop's corridor (its corners are R >= 15 m arcs, not 4 m kinks) */
 static double s_gov_vmax = 0.0;                             /* units/tick: straight-line ceiling on a corridor route (0 = none) */
 
 static void ai_gov_read_knobs(void)
@@ -6226,6 +6245,7 @@ static void ai_gov_read_knobs(void)
     s_gov_lat_u = (double)td5_env_int("TD5RE_AI_GOV_LAT", 140, 40, 400) / 10.0 * 430.0 / 900.0;
     s_gov_brk_u = (double)td5_env_int("TD5RE_AI_GOV_BRAKE", 98, 30, 200) / 10.0 * 430.0 / 900.0;
     s_gov_floor = (double)td5_env_int("TD5RE_AI_GOV_FLOOR", 340, 0, 600);
+    s_gov_floor_loop = (double)td5_env_int("TD5RE_AI_GOV_LOOP_FLOOR", 260, 0, 600);
     s_gov_vmax  = (double)td5_env_int("TD5RE_AI_GOV_VMAX", 0, 0, 900);
     TD5_LOG_I(LOG_TAG, "corridor_gov: %s scope=%d look=%d lat=%.2f brake=%.2f units/tick^2 floor=%.0f",
               s_gov_on ? "ON" : "off", s_gov_scope, s_gov_look, s_gov_lat_u, s_gov_brk_u, s_gov_floor);
@@ -6274,8 +6294,11 @@ static double ai_gov_allowed(int slot, int span_raw, int span_count, double *out
         R   = (ang > 1e-4) ? arc / ang : 1e12;      /* a link kink is a real kink for the car */
         if (R < rmin) { rmin = R; s_gov_dbg_i = i; s_gov_dbg_span = ps[i + 1]; }
         vc = sqrt(s_gov_lat_u * R);
-        if (vc < s_gov_floor) vc = s_gov_floor;     /* a car below ~220 units/tick cannot rotate:
-                                                     * it would stop against the corner's wall */
+        {   /* [ROUND 1018 L] on a block loop's corridor the floor is lower: its corners are real arcs */
+            const double fl = (td5_track_loop_of_corridor(ps[i + 1]) >= 0) ? s_gov_floor_loop : s_gov_floor;
+            if (vc < fl) vc = fl;                    /* a car below ~220 units/tick cannot rotate:
+                                                      * it would stop against the corner's wall */
+        }
         vl = sqrt(vc * vc + 2.0 * s_gov_brk_u * (cum + ln[i]));
         cum += ln[i];
         if (vl < best) best = vl;

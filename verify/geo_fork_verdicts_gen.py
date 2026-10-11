@@ -28,6 +28,8 @@ CODE = {"PASS": "TD5_FV_PASS", "WARN": "TD5_FV_WARN", "FAIL": "TD5_FV_FAIL", "UN
 
 def main():
     args = sys.argv[1:]
+    merge = "--merge" in args          # keep the table's existing records; add / replace only the forks in these run-sets
+    args = [a for a in args if a != "--merge"]
     if args == ["--check"]:
         s = open(HDR, encoding="utf-8").read()
         print(s[s.index("GENERATED-BEGIN"):s.index("GENERATED-END")])
@@ -58,6 +60,13 @@ def main():
     if not rec:
         sys.exit("nothing to write")
     lines = []
+    old_lines = {}
+    if merge:
+        cur = open(HDR, encoding="utf-8").read()
+        for ln in cur[cur.index("/* GENERATED-BEGIN */"):cur.index("/* GENERATED-END */")].splitlines():
+            m = re.match(r'\s*\{ "([^"]+)", 0x([0-9A-Fa-f]+)U, (\d+), (\d+), ', ln)
+            if m and not (m.group(1) == place and m.group(2).upper() == fp.upper() and (int(m.group(3)), int(m.group(4))) in rec):
+                old_lines[(m.group(1), m.group(2).upper(), int(m.group(3)), int(m.group(4)))] = ln.rstrip()
     for (F, R) in sorted(rec):
         v = rec[(F, R)]
         why = ""
@@ -66,6 +75,12 @@ def main():
             why = " KEEP: " + keep[(place, F, R)][:150] + " (full text: verify/geo_fork_keep.json)"
         lines.append('    { "%s", 0x%sU, %d, %d, %s },   /* %s%s */' % (
             place, fp, F, R, CODE[v], " ".join(runsets[(F, R)]), why.replace("*/", "* /")))
+    keyed = dict(old_lines)
+    for ln in lines:
+        m = re.match(r'\s*\{ "([^"]+)", 0x([0-9A-Fa-f]+)U, (\d+), (\d+), ', ln)
+        keyed[(m.group(1), m.group(2).upper(), int(m.group(3)), int(m.group(4)))] = ln.rstrip()
+    if merge:
+        lines = [keyed[k] for k in sorted(keyed)]
     body = ("static const TD5_ForkVerdict k_td5_fork_verdicts[] = {\n" + "\n".join(lines) +
             "\n};\nstatic const int k_td5_fork_verdicts_n = %d;\n" % len(lines))
     s = open(HDR, encoding="utf-8").read()

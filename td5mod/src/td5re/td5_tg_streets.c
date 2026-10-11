@@ -507,6 +507,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         double ang, nox, noz, fox, foz, reach, drop, u_r;
         if (tg_facade_built(h->si, s)) continue;
         if (tg_block_is_park(h->si, s)) continue;   /* a park, not a through st */
+        if (tg_net_mouth_is_loop(h->si, s)) continue;   /* [ROUND 1018 L] a block loop's corridor IS this street */
         /* [R9 CITY item 4] measured, not blanket. The street, its pavement arms
          * and its flanking blocks must all use the SAME gate, or a frontage gap
          * that opens across a fork mouth gets a kerb dropped for a side street
@@ -1155,6 +1156,7 @@ int tg_r11_arm_side(const TG_NodeList *nl, int si, int s)
     if (!tg_block_arm_span_ok(si)) return 0;
     if (tg_facade_built(si, s)) return 0;          /* built = no junction */
     if (tg_block_is_park(si, s)) return 0;         /* a park, not a street */
+    if (tg_net_mouth_is_loop(si, s)) return 0;     /* [ROUND 1018 L] no pavement arm down a street a block loop took over */
     if (tg_side_corridor_here(nl, si, sg)) return 0;
     /* [R16 CITY item 1] pavement corner, blind to the outskirts density ramp:
      * a ramp-retracted frontage still carries the raised pavement, so its arm
@@ -4623,6 +4625,7 @@ void tg_r9_city_report(const TG_NodeList *nl, int nspans)
         for (f = 0; f < s_fork_count; f++) {
             int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
             int hi = s_forks[f].R + 2;
+            if (s_forks[f].loopc > 0) continue;   /* [ROUND 1018 L] */
             if (lo < 1) lo = 1;
             if (hi > ring - 1) hi = ring - 1;
             for (si = lo; si <= hi; si++) {
@@ -4761,6 +4764,7 @@ void tg_r14_branch_report(const TG_NodeList *nl, int nspans)
     for (f = 0; f < s_fork_count; f++) {
         int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
         int hi = s_forks[f].R + 2;
+        if (s_forks[f].loopc > 0) continue;   /* [ROUND 1018 L] */
         if (lo < 2) lo = 2;
         if (hi > ring - 2) hi = ring - 2;
         for (si = lo; si <= hi; si++) {

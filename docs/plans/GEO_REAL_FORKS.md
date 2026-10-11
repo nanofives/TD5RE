@@ -1017,3 +1017,105 @@ Chase frames (`verify/geo_r1014b_frames.ps1 -Env "TD5RE_AI_BRANCH_FORCE_MODE=2;T
 * **Dark seam strip along the corridor's outer edge (span 329):** a 20 cm brown/olive sliver between the pavement slab and the ground, and the light-blue sky sliver
   beside the sidewalk at 1131. Both are in master 24b01f00 too (same frames, same spans) and exist at every ground/kerb joint of the real-fork corridors:
   pre-existing, not touched here.
+
+
+## Round 1018 L: fork rework step 4, BLOCK-LOOP forks (turn off into a real side street and rejoin)
+
+Mariano: "allow driving on lanes that are not starting as a divergence of an existing lane, like driving straight into a perpendicular fork".
+A block loop leaves the route at a real OSM intersection, follows the real street grid (cross street, parallel street, cross street) and rejoins
+the route through a second cross street. Every path rejoins; there are no dead ends. The main road is not touched at all.
+Code: `td5_tg_blockloop.c` (generator), `td5_track.c` "SIDE LINKS" (engine), `td5_ai.c` (loop mouth + governor). `TD5RE_GEO_FORK_BLOCKLOOP=0` = master exactly.
+
+### Engine: the open edge and the lateral mouth
+
+* **SLNK trailer** (11 u32 per loop: D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, last departure flush corridor row, first arrival flush row), written before `CMRP`.
+  No loops = no bytes, so every other strip is byte-identical (synthetic MODELS.DAT 12772392 B `E2F1F33C...` unchanged).
+* **Walker**: `update_position_recursive` asks `sl_try_cross` first. A probe that lies in a loop's departure window (main spans a1_lo..a1_hi) and inside a corridor row quad
+  (containment, `SL_TOL` 200 units so a car pressed against the rail in the sliver between the mouth row and the road edge still crosses) is moved into that corridor span; the same
+  at the arrival. `td5_track_loop_in_mouth / _mouth_target / _departure / _of_corridor / _count` are the public queries (AI, HUD).
+* **Wall**: the infinite half-plane contact of the chassis span's rail is skipped where `sl_open` says the rail is the opening (otherwise a car in the sliver hit the road's own rail).
+* **Progress**: corridor spans map to main-road indexes through the existing corridor map (`CMRP`, forced on for loops), so position, lap, finish, checkpoints and the HUD read main spans.
+  Recovery steps the car back along the corridor and then onto the main road, as for any corridor. The minimap draws the corridor (visible in the frames).
+* **First design, and why it was dropped.** A corridor whose first span stands perpendicular to the road put cars into the wall at 400+ u/t (a car cannot turn 90 degrees inside its width).
+  The shipped geometry is a **slip lane**: the corridor runs flush against the road's right edge (its left rail IS the road edge) for 14 spans, then arcs away with R = 22 m
+  (10 m and 18 m hit walls on the AI) into the street, and merges the same way at the other end.
+
+### Generator
+
+* Street graph from ROADS.JSON (way vertices closer than 80 units are one node), a BFS finds the node that is "the arm" of each accepted RIGHT arm (outward, away from the road),
+  Dijkstra with 25 m clearance from the route, Douglas-Peucker 6 m, fillets (R 22 m, floor 7 m), resample to 1500-unit spans, slip lanes at both ends.
+* A candidate is **refused** (`TD5RE_GEO_FORK_DIAG=1` prints why) when: the lane count changes at a mouth, a fork/bridge/tunnel lies in the bypassed stretch, the corridor crosses a drawn street other than the
+  ones it takes over (their stubs are not drawn any more) or a carriageway, it runs into water, it is inside the start grid or the finish tail, the road bends beside a slip lane (more than 5 degrees along the flush part),
+  the corridor is shorter than 1.4 x or longer than 8 x the bypassed road, or **the route bends more than 20 degrees in the 14 spans before the departure** (see below).
+* Emitted as a `TG_FORK_LOOP` fork: F (first departure span, type 8) and R (type 11) patched in place in the ring, the corridor appended (type 9 ... 10) with its own node chain (`tg_fork_rview`),
+  jump record and variable-length corridor map. The preview skips loops (they are planned later).
+* Plan selection: scored list, windows may not overlap, each street arm is used once, the dev allow/deny filter (`TD5RE_GEO_FORK_ALLOW`) matches by the departure arm's span.
+* **Verdict table**: loops consult `td5_geo_fork_verdicts.h` exactly like real forks (a route with a record builds only PASS / KEEP loops; a route without one keeps the UNVERIFIED knob permissive).
+  `verify/geo_fork_verdicts_gen.py --merge` adds run-sets to the table without dropping the records that came from run-sets no longer on disk.
+
+### Why the approach window rule exists (measured)
+
+The first La Plata loop was F=690 R=788. Alone (`-Only 710`, 9 seeds) it PASSed. In the full production set (forks 46..565 and 901..1174 present) it WARNed in two seed sets:
+3 cars piled up at spans 682-684 for about 300 ticks (`prod6`, `prodB`, slot 0 trapped), 4 stalls vs 0. The route turns 93 degrees at spans 684-689, right before the departure,
+and the AI lane-choice window (`look` = 7..15 spans + 1.5 s of travel in `td5_ai_smart_branch`) overlaps that corner: a pack arriving bunched at 370 u/t takes the corner on the branch anchors instead of the racing line.
+With `TD5RE_AI_BRANCH_LOOK_SEC` 0 and 0.6 the stall at the corner stayed, and the same full set with `TD5RE_GEO_FORK_BLOCKLOOP=0` has no stall there, so it is the loop that adds the lane-choice
+conflict at a 90 degree corner. Real forks never see it (their window must be straight: "bend of 0.228 rad/span in the window (cap 0.044)"). Block loops now refuse a departure with more than
+`TD5RE_GEO_BLOCKLOOP_APPROACH_DEG` (20) of route bend in the `TD5RE_GEO_BLOCKLOOP_APPROACH_SPANS` (14) spans before it. That drops 690..788 (recorded WARN in the table) and keeps the next loop on the same streets.
+
+### AI
+
+* `ai_path_next`: inside a loop's departure mouth a committed car turns into the street from the middle of the opening (`td5_track_loop_mouth_target`, `TD5RE_AI_LOOP_JUMP_PCT` 25), not at the type-8 span D itself (that cut the corner upstream).
+* `td5_ai_smart_branch`: while the car is in the mouth the fork it is deciding about is still D (virtual d = 0).
+* Corridor governor: floor 260 u/t on a loop corridor (`TD5RE_AI_GOV_LOOP_FLOOR`; 340 elsewhere): its corners are real R >= 15 m arcs, not the 4 m kinks the 340 floor protects.
+
+### Scenery (frames checked by hand, below)
+
+* Road quad, kerb and pavement come from the existing plaza / free-corridor path (`tg_fork_rview`). New: the **inner** edge gets a pavement too (`tg_emit_branch_sidewalk_inner`,
+  `TD5RE_GEO_BLOCKLOOP_INNER_PAVE`), only where a pavement strip there is clear of the road's carriageway and its own pavement (`tg_bl_inner_ok`), so not along the slip lane.
+* The street the loop takes over is not drawn twice: `tg_city_emit_crossstreet`, the pavement arms (`tg_r11_arm_side`) and the network ribbon (`tg_net_emit_entry`) skip a mouth whose edge is `loop`.
+  The frontage and the main pavement keep opening at the mouth (the mouth table still holds it). Buildings avoid the corridor because it is built on real ways, which `td5_tg_geo_clear.c` already clears.
+* Street height: the heightfield ENVELOPE over half a cell (the ground meshes sit on a lattice) + 60 units, ramped in over 6 spans from each slip lane (`TD5RE_GEO_BLOCKLOOP_LIFT`). Before this, patches of ground covered the asphalt
+  (frame `tour_m2_c2208`, gone after the fix).
+* HUD: on a loop corridor the street line names the nearest real way under the car (`td5_geo_roads_nearest`), not the main road's name ("ON Calle 12" on the parallel leg, "ON Calle 57" on the arrival cross street).
+
+### Validation (La Plata, `verify/geo_fork_validate.ps1`, 6 AI + the player, forks-on vs forks-off)
+
+| run set | what | loop F..R | passes / took | stalls | jam | spins | wall hits / crashes | speed vs forks-off |
+|---|---|---|---|---|---|---|---|---|
+| `l739` (loop alone) | 6 seeds | 720..788 | 36 / 18 | 0 | 0 | 0 | 1 / 0 | 0.68 |
+| `prod6b`, `prod6c`, `prod6d` (production set: forks 46, 720, 901) | 6 seeds each | 720..788 | 36 / 18 | 0 | 0 | 0 | 1-2 / 0 | 0.69 |
+| `prodB2`, `prodB3` (seeds 77, 88, 99, 101, 202, 303) | 6 seeds each | 720..788 | 36 / 18 | 0 | 0 | 0 | 1-3 / 0 | 0.69 |
+| `sw_def6` (first loop alone) | 6 seeds | 690..788 | 36 / 18 | 0 | 0 | 0 | 8 / 0 | 0.80 |
+| `prod6`, `prodB` (first loop, production set) | 6 seeds each | 690..788 | 36 / 18 | 4 | 1 | 0 | 11 / 1 | 0.77 |
+
+The harness derives the race from the seed only through the fork-choice phase and the AI tier by run index, so 6 seeds are about 3 distinct races, not 6 independent ones.
+Production set before / after (same seeds; loop off with `TD5RE_GEO_FORK_BLOCKLOOP=0` vs loop on), forks 46 + 901 + loop:
+
+| seeds | | passes | stalls | events | spins | wall hits | crashes |
+|---|---|---|---|---|---|---|---|
+| 11..66 | before (`prod6n`) | 72 | 6 | 295 | 5 | 28 | 1 |
+| 11..66 | after (`prod6d`) | 108 | 4 (0 in the loop) | 440 (120 in the loop) | 9 | 32 (1 in the loop) | 5 |
+| 77..303 | before (`prodBn`) | 72 | 0 | 138 | 3 | 12 | 0 |
+| 77..303 | after (`prodB3`) | 108 | 1 | 292 (121 in the loop) | 5 | 20 (3 in the loop) | 1 |
+
+The loop itself adds no stall and 1-3 wall hits. Fork 901 (the existing WARN_KEEP merged Avenida 60 + Plaza Dardo Rocha + Avenida 7) moves between PASS and WARN from one seed set to the other
+(`prod6d` WARN with 1 jam, `prodB3` PASS), as it did before this round: the loop changes when the pack gets there, the fork's own rows are unchanged.
+
+Loops found / built / passed on La Plata: 13 right arms, 37 arm pairs tried, 1 candidate (720..788: 139 spans, 484 m over 104 m of road = 4.62x, 4 corners, tightest 19.8 m), 1 built, 1 PASS.
+Before the approach rule the finder had 2 candidates (690..788 and 720..788, overlapping windows) and built 690..788, which WARNed in the production set. With every real fork forced on
+(`TD5RE_GEO_FORK_VERDICTS=0`) there are 0 candidates: the forks occupy the stretches the finder needs. Rejections among the 37 pairs: 14 "no path over the real grid that stays right of the road",
+8 "the road bends beside a slip lane", 4 "a fork, bridge or tunnel in the bypassed stretch", 4 "corridor too short" (1.15x to 1.32x), 3 "past the finish line", 2 "a 93 degree bend within 14 spans of the departure", 2 "0.1 m corner".
+Most "no path" pairs are blocks longer than the loop length cap (`TD5RE_GEO_BLOCKLOOP_LMAX_M`, 420 m): arm 710 to arm 841 is a 140 m x 460 m rectangle.
+
+### Frames looked at (free-cam tour `verify/geo_bl_tour.ps1` + `verify/geo_bl_poses.py`, scenery stream finished, `TD5RE_TG_DOUBLE_BUILD=0`)
+
+Departure slip lane (spans 718-740, top and chase views), the first corner, the straight legs of Calle 12 and Calle 57, the arrival arc and merge (spans 766-796), corridor 2175..2313 end to end, for both loops (690..788 and 720..788).
+Fixed while looking: ground covering the asphalt in patches (height), a stray pavement band and a second asphalt carriageway across the mouth (the stub of the street the loop took over), pavement on one side only.
+The red frame border in the frames is the street speed-limit warning, not a defect.
+
+### What remains
+
+* Left-hand loops and N-way loops (a loop with a branch inside it) are not built: the finder takes RIGHT arms only.
+* Coverage on La Plata is one loop: the real forks occupy the rest of the route and the length cap rejects the larger blocks. A finder that trades a real fork for a loop, or fits two loops in one window, is the next step.
+* No synthetic facade massing is generated along the loop's own streets (real OSM buildings stand there where they exist).
+* The inner pavement test is geometric (clear of the road); it does not know about other drawn streets crossing the corridor (the finder refuses those).

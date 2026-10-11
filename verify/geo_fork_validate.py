@@ -61,6 +61,10 @@ THRESHOLDS = {
     "offroad_per_pass_fail": 0.34,
     "offroad_per_pass_warn": 0.10,
 }
+# [round 1018 L] A BLOCK LOOP (kind LOOP) is a detour on purpose: a corridor 2.5 to 4 times the stretch it
+# bypasses, with four real corners. Its window speed is lower than the straight road's by construction, so
+# the speed test is relaxed for it; every other test (jams, stalls, hits, crashes, spins, off-road) is unchanged.
+LOOP_SPEED = {"speed_ratio_fail": 0.40, "speed_ratio_warn": 0.60}
 STALL_HOLD = 90        # ticks (3 s at 30 Hz)
 TRAP_TICKS = 300      # a plateau this long is a JAM (10 s at 30 Hz), not a bounce
 STALL_TOL = 2          # spans of progress a plateau may contain
@@ -482,6 +486,8 @@ def judge(F, fk, fm, bm, n_seeds, main_speed):
     bs = bm.get("speed_sum", 0.0) / bm["speed_n"] if bm.get("speed_n") else 0.0
     ratio = (fs / bs) if bs else None
     if ratio is not None:
+        if fk.get("kind") == "LOOP":
+            T = dict(T, **LOOP_SPEED)
         if ratio < T["speed_ratio_fail"]:
             worse("FAIL", "window mean speed %.0f%% of the forks-off window" % (100 * ratio))
         elif ratio < T["speed_ratio_warn"]:

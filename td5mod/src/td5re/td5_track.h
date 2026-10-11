@@ -143,6 +143,14 @@ int              td5_track_branch_blacklisted(int span);
  * on success, 0 if idx is out of range / no table / malformed record. */
 /* [R1016 K] variable-length corridors (N spans beside M main spans): how many the track
  * has, and for a corridor span its n and m (0 when it is a plain 1:1 corridor). */
+/* [R1018 L] block loops (side links): `span` is the departure span of a loop -> its first
+ * corridor span (and the arrival main span in *arrival), else -1; the loop whose corridor holds
+ * `span` (or -1); how many loops the track has. */
+int              td5_track_loop_departure(int span, int *arrival);
+int              td5_track_loop_mouth_target(int span, int *dep);
+int              td5_track_loop_in_mouth(int span);
+int              td5_track_loop_of_corridor(int span);
+int              td5_track_loop_count(void);
 int              td5_track_corr_variable_count(void);
 int              td5_track_corr_ratio(int span, int *n, int *m);
 int              td5_track_corridor_count(void);

@@ -50,6 +50,7 @@
 #include "td5_chaos.h"      /* [CHAOS CO-OP] per-pane role strip + swap countdown */
 #include "td5_geo.h"        /* [1011 C3] the route's per-node street names */
 #include "td5_geo_attrs.h"  /* [1011 C3] route-first/spatial-fallback resolver */
+#include "td5_geo_roads.h"  /* [1018 L] the street under a car on a block-loop corridor */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 
 #include <stdlib.h>
@@ -3810,6 +3811,15 @@ static void hud_draw_street_line(int player_slot, int view_index)
      * every cache that exists today. td5_geo_attrs_name falls back to the
      * nearest mapped way, which is the whole reason the fallback exists. */
     name = td5_geo_attrs_name(td5_game_get_slot_span(player_slot));
+    {   /* [ROUND 1018 L] a block-loop corridor: span_norm names the MAIN road beside it, but the car is on a real cross
+         * street, so name the nearest real way under it instead (blank when the map has none). */
+        TD5_Actor *la = td5_game_get_actor(player_slot);
+        if (la && td5_track_loop_of_corridor((int)la->track_span_raw) >= 0) {
+            const TD5_GeoRoad *lr = td5_geo_roads_nearest((double)(la->world_pos.x >> 8), (double)(la->world_pos.z >> 8),
+                                                          6000.0, -1, NULL, NULL, NULL);
+            name = lr ? td5_geo_roads_name(lr) : "";
+        }
+    }
 #ifndef TD5RE_RELEASE
     /* TD5RE_HUD_STREET_TEST=1 substitutes a name with a real UTF-8 accent.
      *

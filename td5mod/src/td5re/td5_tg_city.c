@@ -4615,6 +4615,7 @@ static int tg_r14_branch_pave_here(int si)
     if (!tg_r14_fork_pave() || !tg_branches_enabled()) return 0;
     for (i = 0; i < s_fork_count; i++) {
         const TG_Biome *b;
+        if (s_forks[i].loopc > 0) continue;   /* [ROUND 1018 L] */
         if (si < s_forks[i].F + 1 || si > s_forks[i].F + s_forks[i].len) continue;
         b = &k_biomes[tg_scenery_biome_index(si)];
         if (tg_city_sidewalk_w(b) > 0.0 &&

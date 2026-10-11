@@ -116,6 +116,7 @@ int tg_span_in_fork_clear(int si)
 {
     int i;
     for (i = 0; i < s_fork_count; i++) {
+        if (s_forks[i].loopc > 0) continue;   /* [ROUND 1018 L] a block loop leaves the road alone */
         /* [ROUND 1015 E] a plaza fork clears its two throats; between them the
          * route is the ordinary ring road and its scenery stays. */
         if (s_forks[i].freec > 0) {
@@ -299,7 +300,7 @@ static const struct { int kind; int len; double sep; } k_fork_plan[6] = {
 const char *tg_fork_kind_name(int kind)
 {
     static const char *const k_names[TG_FORK_KIND_COUNT] =
-        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR", "BYPASS" };
+        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR", "BYPASS", "LOOP" };
     return (kind >= 0 && kind < TG_FORK_KIND_COUNT) ? k_names[kind] : "?";
 }
 
@@ -374,6 +375,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
 {
     s_fork_count = 0;
     s_fork_placed = 0;
+    tg_bl_reset();                     /* [ROUND 1018 L] the loops of the previous build */
     if (!nl || !tg_branches_enabled()) { s_fork_placed = 1; return; }
     {
         const int min_len = tg_branch_min_len();
@@ -492,6 +494,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
         s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
             s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] (a plaza fork keeps it: its classic rows are an avenue fork's) */
             s_forks[s_fork_count].freec = freec;                     /* [ROUND 1015 E] */
+            s_forks[s_fork_count].loopc = 0;                         /* [ROUND 1018 L] */
             /* [ROUND 1016 K] a plaza fork's corridor has the spans its arc needs */
             s_forks[s_fork_count].clen = freec ? tg_pf_plan_clen(freec - 1) : L;
             if (s_forks[s_fork_count].clen < 2) s_forks[s_fork_count].clen = L;
@@ -702,6 +705,7 @@ int tg_fork_side_at(int si)
 {
     int f;
     for (f = 0; f < s_fork_count; f++) {
+        if (s_forks[f].loopc > 0) continue;  /* [ROUND 1018 L] */
         if (s_forks[f].freec > 0) {          /* [ROUND 1015 E] throats only */
             if (tg_pf_clear_span(f, si)) return s_forks[f].side > 0 ? 1 : -1;
             continue;
@@ -736,6 +740,7 @@ int tg_fork_is_bypass(int fi)
 double tg_fork_br_shift(int fi, int k, double w)
 {
     const int    len = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].len : 1;
+    if (tg_fork_is_loop(fi)) { (void)k; (void)w; return 0.0; }   /* [ROUND 1018 L] rows are the loop's own nodes */
     /* [TOPOLOGY-FIRST] a BYPASS corridor is a planned lateral (world units,
      * right of travel negative), not a bow off the road width. */
     if (tg_fork_is_bypass(fi)) {
@@ -773,6 +778,10 @@ int tg_fork_row_node(int fi, int k)
     if (fi < 0 || fi >= s_fork_count) return 0;
     if (tg_fork_is_free(fi)) {
         const int n = tg_pf_row_node(fi, k);
+        if (n >= 0) return n;
+    }
+    if (tg_fork_is_loop(fi)) {            /* [ROUND 1018 L] */
+        const int n = tg_bl_row_node(fi, k);
         if (n >= 0) return n;
     }
     return s_forks[fi].F + 1 + k;
@@ -1024,6 +1033,7 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
     for (i = 0; i < s_fork_count; i++) {
         const int F = s_forks[i].F, L = s_forks[i].len;
         int k, e;
+        if (s_forks[i].loopc > 0) continue;  /* [ROUND 1018 L] the loop leaves through the mouth, the road is untouched */
         if (s_forks[i].freec > 0) {          /* [ROUND 1015 E] free corridor: throats only */
             const double fr = tg_pf_reach(nl, i, si, side);
             if (fr > reach) reach = fr;
@@ -1270,10 +1280,32 @@ int tg_r14_pave_face(void)
  * APPENDED corridor span, passed only so the element inventory brackets the
  * pavement at the corridor spans (>= ring) -- that is what proves, without a
  * frame, that scenery now reaches the branch. */
+static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
+                       int fi, const TG_Biome *b,
+                       TG_Buf *blk, size_t *moff, int *nmesh,
+                       int acct_si, double fs);
+
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
                                     int fi, const TG_Biome *b,
                                     TG_Buf *blk, size_t *moff, int *nmesh,
                                     int acct_si)
+{
+    return br_sidewalk(nl, mb, k, L, fi, b, blk, moff, nmesh, acct_si, (double)tg_fork_side(fi));
+}
+
+/* [ROUND 1018 L] the OTHER edge of a block-loop corridor: the corridor runs in a real street, so it has a
+ * pavement on both sides (the slip-lane rows beside the road are skipped by tg_bl_inner_ok). */
+int tg_emit_branch_sidewalk_inner(const TG_NodeList *nl, int mb, int k, int L,
+                                  int fi, const TG_Biome *b,
+                                  TG_Buf *blk, size_t *moff, int *nmesh, int acct_si)
+{
+    return br_sidewalk(nl, mb, k, L, fi, b, blk, moff, nmesh, acct_si, -(double)tg_fork_side(fi));
+}
+
+static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
+                       int fi, const TG_Biome *b,
+                       TG_Buf *blk, size_t *moff, int *nmesh,
+                       int acct_si, double fs)
 {
     const TG_Node *a = &nl->v[mb];
     const TG_Node *c = &nl->v[mb + 1];
@@ -1286,7 +1318,7 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const double sh1 = pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
-    const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] -1 right / +1 left */
+    /* fs: [TOPOLOGY-FIRST] -1 right / +1 left (the side of the fork; the inner edge of a block loop passes the opposite) */
     (void)L;
     const double e0  = sh0 + fs * h0;            /* outer edge, near */
     const double e1  = sh1 + fs * h1;            /* outer edge, far  */
