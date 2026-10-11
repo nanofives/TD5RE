@@ -1243,6 +1243,7 @@ static void rf_gen_parallel(void)
                 const int R = gates[h];
                 int lb_n[13], lb_best = 2, nb = 0, k;
                 int psd = 0;                                      /* [1019 V] the parallel road's side */
+                int nc0 = 0;
                 RfCand *c;
                 if (R - F - 1 < TG_RF_MINLEN) continue;
                 if (R - F - 1 > TG_RF_MAXLEN) break;
@@ -1290,6 +1291,7 @@ static void rf_gen_parallel(void)
                     }
                     if (!okf) break;
                 }
+                nc0 = s_ncand;
                 if (!rf_relax_only() && rf_validate(c)) {
                     c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9;
                     s_ncand++;
@@ -1315,6 +1317,31 @@ static void rf_gen_parallel(void)
                                 rf_note("SLID", TG_RF_SRC_PARALLEL, c->name, F, R,
                                         "the END of the fork moved back up the road short of a bend");
                                 break;
+                            }
+                        }
+                        s_rf_quiet = 0;
+                    }
+                    /* [1019 V] a LEFT parallel road whose first span sits at a corner (the route has just turned onto it, as at
+                     * Avenida 13 807 on the 10-10 route) starts down the road past the bend, the way an avenue's first gate
+                     * slides (rf_avenue_pair); the end may slide too. Left corridors only: right ones keep their master rules.
+                     * TD5RE_GEO_FORK_LEFT_SLIDE=0 turns it off. */
+                    if (s_ncand == nc0 && c->side > 0 && td5_env_flag_on("TD5RE_GEO_FORK_LEFT_SLIDE")) {
+                        int sl0, sl1, done = 0;
+                        s_rf_quiet = 1;
+                        for (sl0 = 1; sl0 <= TG_RF_START_SLIDE && !done; sl0++) {
+                            for (sl1 = 0; sl1 <= TG_RF_END_SLIDE && !done; sl1++) {
+                                int q2;
+                                c->F = F + sl0; c->R = R - sl1;
+                                if (c->R - c->F - 1 < TG_RF_MINLEN) break;
+                                for (q2 = c->F; q2 <= c->R; q2++) c->off[q2 - c->F] = s_plat[q2];
+                                if (rf_validate(c)) {
+                                    c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9 * TG_RF_RELAX_WEIGHT;
+                                    s_ncand++;
+                                    done = 1;
+                                    s_rf_quiet = 0;
+                                    rf_note("SLID", TG_RF_SRC_PARALLEL, c->name, F, R,
+                                            "the START (and END) of the left fork moved down the road past a bend");
+                                }
                             }
                         }
                         s_rf_quiet = 0;
@@ -1486,6 +1513,7 @@ static int rf_select(int *pick)
     qsort(s_cand, (size_t)s_ncand, sizeof s_cand[0], rf_cmp_cand);
     for (i = 0; i < s_ncand; i++) {
         dp[i] = s_cand[i].weight; prv[i] = -1;
+        if (td5_dev_forkfilter_predeny(s_cand[i].F)) s_cand[i].denied = 1;      /* [1019 V] dev: removed before the selection */
         if (s_cand[i].denied) { dp[i] = -1e30; continue; }       /* [1017 R] refused by the verdict table */
         for (j = 0; j < i; j++) {
             /* The full-width windows (F-8 .. R+2) stay apart; the tapers on either

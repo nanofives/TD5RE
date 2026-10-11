@@ -15,6 +15,7 @@
 
 #ifdef TD5RE_RELEASE
 static inline int td5_dev_forkfilter_allow(int F) { (void)F; return 1; }
+static inline int td5_dev_forkfilter_predeny(int F) { (void)F; return 0; }
 #else
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,15 @@ static inline int td5_dev_forkfilter_allow(int F)
     if (deny  && deny[0]  && td5_dev_forkfilter_has(deny,  F)) return 0;
     if (allow && allow[0] && !td5_dev_forkfilter_has(allow, F)) return 0;
     return 1;
+}
+
+/* [1019 V] TD5RE_GEO_FORK_PRE_DENY="707": the candidate with that F is removed BEFORE the weighted selection, so the
+ * selector builds the best set WITHOUT it (the DENY/ALLOW above only prune its result). For A/B-ing a fork that a
+ * neighbouring candidate would otherwise take the room of (a left corridor beside a right one). */
+static inline int td5_dev_forkfilter_predeny(int F)
+{
+    const char *pd = getenv("TD5RE_GEO_FORK_PRE_DENY");
+    return pd && pd[0] && td5_dev_forkfilter_has(pd, F);
 }
 #endif
 #endif /* TD5_DEV_FORKFILTER_H */

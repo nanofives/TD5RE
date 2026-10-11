@@ -1107,6 +1107,11 @@ static void fork_left_compute(void)
         if (t == 8)       { mn = i + 1; br = (int)s_span_array[i].link_next; }
         else if (t == 11) { mn = i - 1; br = (int)s_span_array[i].link_prev; }
         else continue;
+        if (s_sl_n > 0) {   /* [1019 V] a block loop's departure / arrival spans are not forks: the side link crosses, never the lane rule */
+            int q, loop_span = 0;
+            for (q = 0; q < s_sl_n; q++) if (s_sl[q].D == i || s_sl[q].A == i) loop_span = 1;
+            if (loop_span) continue;
+        }
         if (mn < 0 || mn >= s_span_count || br < 0 || br >= s_span_count) continue;
         {
             /* row centres of the main neighbour and the corridor end, and this
