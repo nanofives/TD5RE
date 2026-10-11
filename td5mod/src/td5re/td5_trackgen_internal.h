@@ -635,6 +635,11 @@ typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
 typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_LM_BASE + TD5_TG_LM_PAGES)
+/* [1021 D] Street-name plate pages, appended AFTER the fixed block and only
+ * written when the geo mast-arm emitter has plates (td5_tg_mastarm.c). The
+ * fixed count above is untouched, so synthetic and plate-less builds keep a
+ * byte-identical TEXTURES.DAT. */
+#define TD5_TG_MASTARM_PAGES_MAX 32
 /* LOAD-BEARING GUARD (pause-menu facade-texture fix, 2026-09-13): the auto
  * generated track occupies D3D pages [0 .. TD5_TG_PAGE_COUNT-1]. Every port
  * reserved range (car skins, static atlas, HUD, frontend, props) starts at
@@ -644,6 +649,8 @@ typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
  * silent corruption into a BUILD FAILURE: when it trips, move the whole
  * reserved block up in td5_page_map.h (raise TD5_PAGE_LEVEL_CEIL and the
  * bases together) rather than shrinking the generator. */
+_Static_assert(TD5_TG_PAGE_COUNT + TD5_TG_MASTARM_PAGES_MAX <= TD5_PAGE_LEVEL_CEIL,
+               "mast-arm plate pages would reach the reserved D3D page zone");
 _Static_assert(TD5_TG_PAGE_COUNT <= TD5_PAGE_LEVEL_CEIL,
                "auto-track page count reached the reserved D3D page zone — "
                "raise TD5_PAGE_LEVEL_CEIL and the reserved bases in td5_page_map.h");
@@ -6075,6 +6082,22 @@ int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans, TG_Buf *blk, siz
 void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans);
 int  tg_emit_geo_signals(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
 void tg_geo_signals_report(int nspans);
+
+/* ============ GEO MAST-ARM SIGNALS + STREET-NAME PLATES (1021 D) =========
+ * Defined in td5_tg_mastarm.c; rationale there. The plates are baked into EXTRA
+ * TEXTURES.DAT pages appended after TD5_TG_PAGE_COUNT, and only when a geo
+ * place with signals is loaded and TD5RE_GEO_MASTARM is on -- so every other
+ * build writes the page file it always did (tg_mastarm_plate_pages() == 0).
+ * The table is a pure function of the route/signals/roads caches, which is why
+ * it can be rebuilt wherever it is needed (see the file header). */
+int  tg_mastarm_enabled(void);
+void tg_mastarm_prepare(void);
+int  tg_mastarm_plan(int sig, double carriageway_width, int near_gantry, int *front, int *back);
+int  tg_mastarm_mesh_count(double carriageway_width);
+int  tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap, double base_y, int cf, int cb, TG_Buf *blk, size_t *moff, int *nmesh);
+int  tg_mastarm_plate_pages(void);
+void tg_mastarm_emit_plate_page(TG_Buf *out, int p);
+void tg_mastarm_report(void);
 
 /* ================== GEO STREET LEVEL (round 1011 C4) ====================
  * Zebras at real highway=crossing nodes, bus stops at real highway=bus_stop

@@ -73,4 +73,18 @@ int   td5_titlefont_ready(void);
 void  td5_titlefont_get(int codepoint, float cap_px, td5_glyph *out);
 float td5_titlefont_advance(int codepoint, float cap_px);
 
+/* ---- [ROUND 1021 D] generation-time text -> coverage bitmap ----------------
+ * Used by the track generator to bake a street-name plate into a TEXTURES.DAT
+ * page. Self-contained: no GPU atlas, no platform call, safe headless.
+ *
+ * td5_font_plate_fit_cap: the cap height (px) at which `line` (UTF-8) exactly
+ *   spans `w` pixels less `pad` on each side; 0 when no face is available.
+ * td5_font_plate_raster: render one or two UTF-8 lines centred in a w x h box
+ *   into `cov` (w*h bytes, 0..255 coverage, cleared first), one shared cap size
+ *   so a two-line plate reads as a block. Returns 1 on success, 0 when no face
+ *   is available. `cap_used` (optional) receives the cap height drawn. */
+float td5_font_plate_fit_cap(const char *line, int w, int pad);
+int   td5_font_plate_raster(const char *line1, const char *line2, int w, int h,
+                            int pad, unsigned char *cov, float *cap_used);
+
 #endif /* TD5_FONT_H */
