@@ -149,6 +149,8 @@ int              td5_track_branch_blacklisted(int span);
 int              td5_track_loop_departure(int span, int *arrival);
 int              td5_track_loop_mouth_target(int span, int *dep);
 int              td5_track_loop_in_mouth(int span);
+/* [ROUND 1020 N] 1 when `span` lies within `pad` spans of ANY block loop mouth (departure or arrival range). */
+int              td5_track_loop_near_mouth(int span, int pad);
 int              td5_track_loop_of_corridor(int span);
 int              td5_track_loop_count(void);
 int              td5_track_loop_side(int span);      /* [1019 V] 1 = the loop departing at span D leaves on the LEFT */

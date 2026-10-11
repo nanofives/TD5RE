@@ -1141,7 +1141,7 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
                       C->F, C->R, C->sd > 0 ? "left" : "right", C->name, C->a1_lo, C->a1_hi, C->a2_lo, C->a2_hi);
             bl_free_plan(C); continue;
         }
-        if (!td5_dev_forkfilter_allow(C->si1)) {    /* dev-only allow/deny by the DEPARTURE MOUTH span (verify/geo_fork_validate.ps1 -Only 739): F moves with the flare */
+        if (!td5_dev_forkfilter_allow2(C->F, C->si1)) {    /* dev-only allow/deny by the DEPARTURE MOUTH span (verify/geo_fork_validate.ps1 -Only 739): F moves with the flare */
             TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d \"%s\" filtered out (TD5RE_GEO_FORK_ALLOW/DENY)", C->F, C->name);
             bl_free_plan(C);
             continue;

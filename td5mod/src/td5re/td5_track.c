@@ -9971,6 +9971,15 @@ int td5_track_loop_in_mouth(int span)
     return -1;
 }
 
+/* [ROUND 1020 N] `span` lies within `pad` spans of any loop mouth (a1 departure, a2 arrival). */
+int td5_track_loop_near_mouth(int span, int pad)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if ((span >= s_sl[i].a1_lo - pad && span <= s_sl[i].a1_hi + pad) || (span >= s_sl[i].a2_lo - pad && span <= s_sl[i].a2_hi + pad)) return 1;
+    return 0;
+}
+
 /* The block loop whose corridor holds `span` (index), or -1. */
 int td5_track_loop_of_corridor(int span)
 {

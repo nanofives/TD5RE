@@ -16,6 +16,7 @@
 #ifdef TD5RE_RELEASE
 static inline int td5_dev_forkfilter_allow(int F) { (void)F; return 1; }
 static inline int td5_dev_forkfilter_predeny(int F) { (void)F; return 0; }
+static inline int td5_dev_forkfilter_allow2(int F, int alt) { (void)F; (void)alt; return 1; }
 #else
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,17 @@ static inline int td5_dev_forkfilter_allow(int F)
     const char *deny  = getenv("TD5RE_GEO_FORK_DENY");
     if (deny  && deny[0]  && td5_dev_forkfilter_has(deny,  F)) return 0;
     if (allow && allow[0] && !td5_dev_forkfilter_has(allow, F)) return 0;
+    return 1;
+}
+
+/* [1020 N] Same lists, but a candidate is named by EITHER of two spans (a block loop: its F and the centre span of its departure mouth;
+ * the log prints F, the original filter read the mouth centre, so a list written from the log matched nothing). */
+static inline int td5_dev_forkfilter_allow2(int F, int alt)
+{
+    const char *allow = getenv("TD5RE_GEO_FORK_ALLOW");
+    const char *deny  = getenv("TD5RE_GEO_FORK_DENY");
+    if (deny  && deny[0]  && (td5_dev_forkfilter_has(deny,  F) || td5_dev_forkfilter_has(deny,  alt))) return 0;
+    if (allow && allow[0] && !(td5_dev_forkfilter_has(allow, F) || td5_dev_forkfilter_has(allow, alt))) return 0;
     return 1;
 }
 

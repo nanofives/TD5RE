@@ -4834,6 +4834,8 @@ static int s_ylim_mode = 0;
 static int s_ylim_on = 0;               /* resolved for this race */
 static int s_ylim_on_any = 0;           /* generated track (or mode 2): the [R1017 S] AI changes apply */
 static int s_ylim_L = 809, s_ylim_a0 = 6000, s_ylim_amin = 10, s_ylim_amax = 40, s_ylim_vmin = 150;
+static int s_main_lane_pad = 14;        /* ...within this many spans of a block-loop mouth */
+static int s_main_lane_v0 = 0;          /* [R1020 N] the same v0/v rule on the MAIN road of a generated track, near block-loop mouths only (TD5RE_AI_MAIN_LANE_V0, default 450, 0 = off = master) */
 static int s_lane_v0 = 0;               /* [R1017 S] corridor lane-change rate falls as v0/v past this speed (0 = off) */
 static int s_gain_v0 = 0;              /* [R1017 S] steering gain schedule: weight *= v0/v past v0 units/tick (0 = off) */
 static int s_gain_min = 25;            /* ... never below this percent of the faithful weight */
@@ -4853,6 +4855,8 @@ static void ai_steer_cap_race_init(void)
     s_ylim_amax = td5_env_int("TD5RE_AI_STEER_YAWLIM_AMAX", 40, 1, 400);
     s_ylim_vmin = td5_env_int("TD5RE_AI_STEER_YAWLIM_VMIN", 150, 1, 5000);
     s_lane_v0   = td5_env_int("TD5RE_AI_LANE_V0", 400, 0, 5000);   /* generated tracks only (see s_ylim_on_any) */
+    s_main_lane_v0 = td5_env_int("TD5RE_AI_MAIN_LANE_V0", 450, 0, 5000);
+    s_main_lane_pad = td5_env_int("TD5RE_AI_MAIN_LANE_PAD", 14, 0, 200);
     s_avoid_rel = td5_env_int("TD5RE_AI_AVOID_RELEASE", 0, 0, 1000);
     s_gain_v0   = td5_env_int("TD5RE_AI_GAIN_V0", 0, 0, 5000);
     s_gain_min  = td5_env_int("TD5RE_AI_GAIN_MIN", 25, 1, 100);
@@ -5815,7 +5819,10 @@ static void td5_ai_smart_branch(int slot) {
                                 if (q >= 0 && q < ring_len && strips[(size_t)q * 0x18] == (g_td5.reverse_direction ? 11 : 8)) ord++;
                             if (ord > 2) ord = 2;
                         }
-                        take = (int)((((uint32_t)slot >> ord) + ph) & 1u);
+                        /* ord 1 / 2 use a bit pattern that takes exactly 3 of the 6 slots and covers all four (took, took) combinations
+                         * with the parity rule of the first fork: slot*3>>1 = 0 1 1 0 0 1, slot*5>>2 = 0 1 0 1 1 0 */
+                        const uint32_t sb = (ord == 0) ? (uint32_t)slot : (ord == 1) ? (((uint32_t)slot * 3u) >> 1) : (((uint32_t)slot * 5u) >> 2);
+                        take = (int)((sb + ph) & 1u);
                     }
                     else if (s_fmode == 2) take = 1;
                     else if (s_fmode == 3) take = 0;
@@ -6201,6 +6208,16 @@ static void td5_ai_smart_lane_bias(int slot) {
                 double du = 0.12 * (double)s_lane_v0 / v;
                 max_du = du > main_du ? du : main_du;
             }
+        }
+    }
+    if (!on_branch && s_main_lane_v0 > 0 && s_ylim_on_any && td5_track_loop_near_mouth(span_raw, s_main_lane_pad)) {
+        /* [R1020 N] A main-road swing at 600+ units/tick (a route-table swap to dodge a car merging from a loop's arrival lane,
+         * u 0.63 -> 0.37) is 0.044 of the width per tick = 130 units sideways per tick: the heading step the corridor rule above
+         * was written against. Same v0 / v fall-off, floored at 0.008 so a swap still completes inside a few spans. */
+        const double v = fabs((double)ACTOR_I32(actor_ptr(slot), ACTOR_LONGITUDINAL_SPEED)) / 256.0;
+        if (v > (double)s_main_lane_v0) {
+            double du = max_du * (double)s_main_lane_v0 / v;
+            max_du = du > 0.008 ? du : 0.008;
         }
     }
     if (best_u > cu + max_du)      cu += max_du;
