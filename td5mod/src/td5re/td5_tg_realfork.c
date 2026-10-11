@@ -50,6 +50,12 @@
  *                                      with the route, connected at both ends.
  * TD5RE_GEO_REAL_FORKS=0 turns all of it off (the round-1012 behaviour).
  *
+ * [ROUND 1019 V] LEFT CORRIDORS. A real way on the +t side of the route (an avenue whose AVENUES.JSON offset is positive, a parallel
+ * road on the left) is offered as a fork too (RfCand.side = +1; TD5RE_GEO_FORK_LEFT=0 restores "left corridors are parked"). One side per
+ * window; the node moves toward +t; the bend rule swaps its inner footprint; the real way must flow WITH the race (rf_left_flow,
+ * TD5RE_GEO_FORK_LEFT_CONTRA=1 allows against); a left parallel road whose first span sits on a bend slides its start
+ * (TD5RE_GEO_FORK_LEFT_SLIDE). docs/plans/GEO_REAL_FORKS.md, "Round 1019 V".
+ *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no
  * geo place loaded, before any file is opened or any table written, and no
  * tg_rand / tg_frand / tg_range call is made here: the single RNG stream is

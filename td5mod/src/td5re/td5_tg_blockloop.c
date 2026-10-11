@@ -49,6 +49,11 @@
  *   TD5RE_GEO_BLOCKLOOP_LMAX_M      longest loop, metres (default 420)
  *   TD5RE_GEO_BLOCKLOOP_RATIO_MIN/MAX  corridor length over the bypassed main length (1.4 .. 8)
  *   TD5RE_GEO_FORK_DIAG=1           why a candidate was refused
+ *   [1019 V] LEFT-hand loops: TD5RE_GEO_BLOCKLOOP_LEFT (default 1; 0 = master exactly) lets the finder take the network's
+ *   LEFT arms. A loop is built on ONE side (s_sd: -1 right, +1 left): the slip lane runs flush with that edge, the pavement
+ *   on the inner edge is on the side facing the road, TG_Fork.side and the SLNK side word carry it. ONLY accepts "L620" / "R620"
+ *   as well as "620". The one-way flow of the path is logged per candidate; TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a left
+ *   loop that runs against a one-way street (default off: right loops ignore the flow too).
  *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no geo place
  * loaded, and no tg_rand / tg_frand / tg_range is called here.

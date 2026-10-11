@@ -1215,8 +1215,13 @@ Corridor span coverage 86 -> 305. The right loop 922 is displaced by Avenida 53 
   `TD5RE_GEO_FORK_LEFT=0 TD5RE_GEO_BLOCKLOOP_LEFT=0` (default build: 14347684 B `A2A82C4F...`, STRIP 100990 B). Race level: 12-seed totals identical in every column but stall ticks (+28, the line-crossing tail).
 * shipped tracks bit-identical: `verify/shipped_trace.ps1`, 6 AI, 1500 / 2500 ticks, pose + motion + track + driver CSVs, master exe vs new exe: Moscow (0) 54,004 rows, Newcastle (5) and Honolulu (8) 90,004 rows each: 0 differing rows.
 * street census (race.log `real street census`): arms accepted 70 -> 72 (street 58 -> 58, avenue 11 -> 13), shared-carriageway departures 13 -> 14. Not degraded.
-* verdict table: 6 new records for FD6BE7C7 (Diagonal 74, Avenida 53, loops 561, 600, 844, 922: all PASS) and the left Avenida 13 821..856 WARN for 4B56DECB (`verify/geo_fork_verdicts_gen.py --merge`;
-  901..1174 and 46..565 were re-measured PASS on the current AI and replaced the old WARN_KEEP / merged entries).
+* verdict table: 6 records for FD6BE7C7 (Diagonal 74 PASS, Avenida 53 WARN_KEEP, loops 561 / 600 / 844 / 922 PASS) and the left Avenida 13 821..856 WARN for 4B56DECB (`verify/geo_fork_verdicts_gen.py --merge` over the forced
+  half-and-half run sets AND the production sets; the worst verdict wins, so 901..1174 stays WARN_KEEP as on master). Avenida 53 is PASS alone over 6 seeds and WARN in the production set on the mean-speed rule only (78 % of the forks-off window against the 80 % line;
+  0 hits, 0 stalls, 0 jams in any run), kept with that reason in `verify/geo_fork_keep.json`.
+* production sets, 6 seeds, verdict table on (`fin_cur`, `fin_old`): FD6BE7C7 Diagonal 74 PASS, right loop 561 PASS, Avenida 53 WARN (speed, kept); 4B56DECB 46..565 PASS, loop 720..788 PASS, 901..1174 WARN (1 jam, kept, as before).
+* human slot with lane assist (the scenario of the 2026-09-08 note): `verify/player_laneassist.ps1`, PlayerIsAI=0, AutoThrottle, LaneAssist, no opponents, 3500 ticks: the player passes Diagonal 74 on the main half and drives the left corridor of Avenida 53
+  (191 corridor ticks, spans 1486..1562) and the audit counts 1 tick outside the span and 0 lane mismatches on it (main road 6 of 20,809).
+* `build_all.bat` (dev + release + structure lint): OK, warnings 84 = baseline, extern 3 = baseline. Full self-test: 64 PASS / 0 WARN / 0 FAIL, exit 0 (234 s).
 
 ### Frames looked at (free-cam tours, `verify/geo_bl_tour.ps1 -Width 1280 -Height 720` + `geo_lf_poses.py`, `TD5RE_TG_DOUBLE_BUILD=0`; `TD5RE_FREECAM_TOUR_SPAN` is the car's NORMALISED span, so a corridor pose needs the car parked on the main span beside it)
 
@@ -1227,6 +1232,6 @@ the street legs named "Avenida 51" and "Calle 18" on the HUD, a gentle real kink
 
 ### What remains
 
-* A human drive through a left corridor with lane assist off (the walker is clean for the AI and the static audit passes, nobody has driven it): Diagonal 74 mouth at span 131, the left loop at 600.
+* A human drive through a left corridor with lane assist OFF (the walker is clean for the AI, for the lane-assisted human slot and in the static audit; nobody has steered one by hand): Diagonal 74 mouth at span 131, the left loop at 600.
 * Left Avenida 13 (old route) and the left loops under six cars at once (ForceMode 2) WARN; both are AI behaviour at a corner next to the mouth / a street kink, not geometry.
 * N-way loops (a branch inside a loop), nested and overlapping corridors, a left plaza fork (plaza corridors are right-hand), coverage on routes where the finder has no left arm.
