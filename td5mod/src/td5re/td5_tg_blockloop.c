@@ -37,6 +37,7 @@
  *   TD5RE_GEO_BLOCKLOOP_RFLOOR_M    tightest corner a loop may keep, metres (default 7)
  *   TD5RE_GEO_BLOCKLOOP_FLARE       extra width per side at the corridor's two ends, world units (default 0)
  *   TD5RE_GEO_BLOCKLOOP_FLARE_ROWS  rows (spans) it tapers over (default 5)
+ *   TD5RE_GEO_BLOCKLOOP_APPROACH_SPANS/_DEG  no more than this much route bend (default 20 degrees) in the spans before the departure (14)
  *   TD5RE_GEO_BLOCKLOOP_INNER_PAVE  pavement on the corridor's inner edge too, where clear of the road (default 1)
  *   TD5RE_GEO_BLOCKLOOP_LANES       corridor lanes (default 2; 0 = from the real ways)
  *   TD5RE_GEO_BLOCKLOOP_STRAIGHT_DEG  heading change allowed along a slip lane's road edge (default 5)
@@ -941,6 +942,26 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             if (ok && P->len < 6) { bl_note(what, A->si, B->si, "the two mouths overlap"); ok = 0; }
             if (ok && (!bl_lanes_uniform(nl, P->F - 2, P->a1_hi + 2) || !bl_lanes_uniform(nl, P->a2_lo - 2, P->R + 2))) {
                 bl_note(what, A->si, B->si, "the route's lane count changes at a mouth"); ok = 0; }
+            if (ok) {   /* the AI picks its lane in the spans BEFORE the mouth: no sharp corner there (a pack arriving at a 90 degree
+                         * corner that is also the lane choice piled up: round 1018 L, F=690 at span 684-689) */
+                const int app = td5_env_int("TD5RE_GEO_BLOCKLOOP_APPROACH_SPANS", 14, 0, 40);
+                const double lim = (double)td5_env_float("TD5RE_GEO_BLOCKLOOP_APPROACH_DEG", 20.0f, 1.0f, 180.0f) * kPi / 180.0;
+                double turn = 0.0;
+                int j;
+                for (j = P->F - app; j < P->a1_hi && j + 1 < nl->count; j++) {
+                    double d;
+                    if (j < 0) continue;
+                    d = atan2(nl->v[j + 1].tz, nl->v[j + 1].tx) - atan2(nl->v[j].tz, nl->v[j].tx);
+                    while (d > kPi) d -= 2.0 * kPi;
+                    while (d < -kPi) d += 2.0 * kPi;
+                    turn += fabs(d);
+                }
+                if (turn > lim) {
+                    char w[96];
+                    snprintf(w, sizeof w, "a %.0f degree bend within %d spans of the departure", turn * 180.0 / kPi, app);
+                    bl_note(what, A->si, B->si, w); ok = 0;
+                }
+            }
             if (ok) {
                 int s;
                 for (s = P->F - 2; s <= P->R + 2 && ok; s++)
