@@ -1229,6 +1229,9 @@ Diagonal 74 left fork: the mouth (spans 118..146: the corridor peels off to the 
 and the kerb and pavement on the outer left), the exit 346..366 (the rejoin with a crossing). HUD "ON Diagonal 74" with "SPAN 150 (corridor 1275)", the minimap draws the corridor. Left Avenida 13 821..856 on the old route (6 poses): a 5-6 lane window
 with the corridor on the left. Right Diagonal 73 for comparison: the median is flat asphalt on both, i.e. the left corridor is the mirror of the right one. Left loop 600..719: the departure (a slip lane flush with the left edge, then the arc),
 the street legs named "Avenida 51" and "Calle 18" on the HUD, a gentle real kink at corridor 1690, the arrival merge; the minimap draws the loop.
+Avenida 53 left fork 855..933 (3 tours, 12 poses): the mouth (4+ lane approach, the corridor on the left, a cross street at the foot), mid-corridor chase (two lanes, kerb and pavement left, the main half to the right), the rejoin (a grass wedge in the gore, lanes converging, a cross street to the left).
+Left loop 844..921 (not in the default build, 6 poses): "Avenida 51" / "Calle 22" named on the HUD, the minimap draws it, the slip lane and the arrival read correctly; ragged ground triangles show beside the pavement where the loop passes a park and a street stub (the
+ground skirt at a junction mouth, cosmetic; the 600..719 loop and the existing right loops are clean there).
 
 ### What remains
 
