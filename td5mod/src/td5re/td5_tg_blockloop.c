@@ -49,6 +49,11 @@
  *   TD5RE_GEO_BLOCKLOOP_LMAX_M      longest loop, metres (default 420)
  *   TD5RE_GEO_BLOCKLOOP_RATIO_MIN/MAX  corridor length over the bypassed main length (1.4 .. 8)
  *   TD5RE_GEO_FORK_DIAG=1           why a candidate was refused
+ *   [1019 V] LEFT-hand loops: TD5RE_GEO_BLOCKLOOP_LEFT (default 1; 0 = master exactly) lets the finder take the network's
+ *   LEFT arms. A loop is built on ONE side (s_sd: -1 right, +1 left): the slip lane runs flush with that edge, the pavement
+ *   on the inner edge is on the side facing the road, TG_Fork.side and the SLNK side word carry it. ONLY accepts "L620" / "R620"
+ *   as well as "620". The one-way flow of the path is logged per candidate; TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a left
+ *   loop that runs against a one-way street (default off: right loops ignore the flow too).
  *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no geo place
  * loaded, and no tg_rand / tg_frand / tg_range is called here.
@@ -66,11 +71,12 @@
 #define BL_JOIN_D2    (80.0 * 80.0)  /* two way vertices closer than this are one node  */
 
 typedef struct { double x, z; int head, hnext; int ri; double lat, dist; } BlNode;
-typedef struct { int to, way, next; float len; } BlEdge;
+typedef struct { int to, way, next; float len; int ow; } BlEdge;   /* [1019 V] ow: +1 the way's one-way flow runs WITH this edge's direction, -1 AGAINST it, 0 two-way / untagged */
 
 typedef struct {
     int    used, built, committed;
     int    fi;
+    int    sd;                       /* [1019 V] -1 = the loop leaves through the road's RIGHT edge, +1 = the LEFT edge */
     int    e1, e2;                   /* the two network edges (real street arms)        */
     int    si1, si2;                 /* mouth centre spans                               */
     int    a1_lo, a1_hi, a2_lo, a2_hi;
@@ -105,6 +111,8 @@ static int     s_nbl;
 static int     s_diag;
 static const char *s_why = "";
 static double  s_clear;              /* least distance of a corridor node from the route's centre line */
+static int     s_ow_against, s_ow_with;   /* [1019 V] one-way edges of the candidate's path, for the diag line */
+static int     s_sd = -1;            /* [1019 V] the side being searched / built: -1 right, +1 left (read by bl_edge_at, bl_node_ok, bl_slip, bl_flush) */
 
 static BlNode *g_n;
 static BlEdge *g_e;
@@ -193,6 +201,8 @@ static int bl_node_add(double x, double z)
 
 static void bl_edge_add(int a, int b, int way, float len)
 {
+    const TD5_GeoRoad *rw = td5_geo_roads_get(way);
+    const int dir = (rw && rw->oneway && rw->oneway_dir != 0) ? (rw->oneway_dir > 0 ? 1 : -1) : 0;   /* the way's own vertex order a -> b */
     int k;
     if (a == b || a < 0 || b < 0) return;
     for (k = g_n[a].head; k >= 0; k = g_e[k].next)
@@ -203,9 +213,9 @@ static void bl_edge_add(int a, int b, int way, float len)
         if (!p) return;
         g_e = p; g_ecap = nc;
     }
-    g_e[g_ne].to = b; g_e[g_ne].way = way; g_e[g_ne].len = len; g_e[g_ne].next = g_n[a].head;
+    g_e[g_ne].to = b; g_e[g_ne].way = way; g_e[g_ne].len = len; g_e[g_ne].ow = dir; g_e[g_ne].next = g_n[a].head;
     g_n[a].head = g_ne++;
-    g_e[g_ne].to = a; g_e[g_ne].way = way; g_e[g_ne].len = len; g_e[g_ne].next = g_n[b].head;
+    g_e[g_ne].to = a; g_e[g_ne].way = way; g_e[g_ne].len = len; g_e[g_ne].ow = -dir; g_e[g_ne].next = g_n[b].head;
     g_n[b].head = g_ne++;
 }
 
@@ -303,10 +313,10 @@ static int bl_node_ok(const TG_NodeList *nl, int n, double margin)
 {
     const BlNode *g = &g_n[n];
     double reach;
-    if (g->ri < 0 || !(g->lat < 0.0)) return 0;
-    reach = tg_carriageway_reach(nl, g->ri, -1.0);
+    if (g->ri < 0 || !(s_sd < 0 ? g->lat < 0.0 : g->lat > 0.0)) return 0;
+    reach = tg_carriageway_reach(nl, g->ri, (double)s_sd);
     if (reach + margin < s_clear) reach = s_clear - margin;   /* nothing hugs the road: its other carriageway, a service lane */
-    return -g->lat > reach + margin;
+    return (s_sd < 0 ? -g->lat : g->lat) > reach + margin;
 }
 
 /* ------------------------------------------------------------ corner rounding */
@@ -384,7 +394,7 @@ static int bl_edge_at(const TG_NodeList *nl, int si, double *ex, double *ey, dou
 {
     double e[10];
     if (si < 0 || si + 1 >= nl->count) return 0;
-    tg_city_edge_frame(nl, si, -1.0, e);
+    tg_city_edge_frame(nl, si, (double)s_sd, e);
     *ex = e[0]; *ey = e[1]; *ez = e[2]; *ox = e[6]; *oz = e[7];
     return 1;
 }
@@ -524,15 +534,19 @@ static int bl_plan_cmp(const void *pa, const void *pb)
     return a->F - b->F;
 }
 
-static int bl_only_ok(int si)
+static int bl_only_ok(int si, int left)
 {
     const char *e = getenv("TD5RE_GEO_BLOCKLOOP_ONLY");
+    int side = 0;                                   /* [1019 V] "L620" = a LEFT loop only, "R620" = a right one only, "620" = either */
     if (!e || !e[0]) return 1;
     while (*e) {
+        if (*e == 'L' || *e == 'l') { side = 1; e++; continue; }
+        if (*e == 'R' || *e == 'r') { side = -1; e++; continue; }
         if (*e >= '0' && *e <= '9') {
             const int v = atoi(e);
-            if (si >= v - 6 && si <= v + 6) return 1;
+            if (si >= v - 6 && si <= v + 6 && (side == 0 || (side > 0) == (left != 0))) return 1;
             while (*e >= '0' && *e <= '9') e++;
+            side = 0;
         } else e++;
     }
     return 0;
@@ -591,7 +605,8 @@ static int bl_slip(const TG_NodeList *nl, int si, const TG_NetArm *A, double W, 
     int j;
     memset(S, 0, sizeof *S);
     if (!bl_edge_at(nl, si, &ex, &ey, &ez, &ox, &oz)) return 0;
-    rx = -tz; rz = tx;                                   /* the route's right of travel */
+    if (s_sd < 0) { rx = -tz; rz = tx; }                 /* the route's right of travel */
+    else          { rx = tz;  rz = -tx; }                /* [1019 V] ... or its left */
     if (ox * rx + oz * rz < 0.9) { s_why = "the mouth's outward normal is not the right of travel"; return 0; }
     dx = A->bx - A->ax; dz = A->bz - A->az;
     dl = sqrt(dx * dx + dz * dz);
@@ -788,7 +803,8 @@ static int bl_flush(const TG_NodeList *nl, BlPlan *P)
             l = sqrt(tx * tx + tz * tz);
             if (l < 1e-9) break;
             tx /= l; tz /= l;
-            lx = P->cx[k] + tz * W * 0.5; lz = P->cz[k] - tx * W * 0.5;       /* the row's left end */
+            /* the row's end toward the road: its LEFT end for a right loop (the road is on its left), its RIGHT end for a left one */
+            lx = P->cx[k] - (double)s_sd * tz * W * 0.5; lz = P->cz[k] + (double)s_sd * tx * W * 0.5;
             for (j = 0; j + 1 < nj; j++) {
                 double ax = ex[j], az = ez[j], bx = ex[j + 1], bz = ez[j + 1], dx, dz, ll, t, qx, qz, d;
                 if (ax > 1e29 || bx > 1e29) continue;
@@ -833,8 +849,9 @@ static void bl_free_plan(BlPlan *P)
 
 int tg_bl_build(const TG_NodeList *nl, int ring)
 {
-    TG_NetArm arms[96];
+    TG_NetArm arms[192];
     int na = 0, ne, i, j, e;
+    const int left_on = td5_env_flag_on("TD5RE_GEO_BLOCKLOOP_LEFT");     /* [1019 V] left-hand loops */
     BlPlan cand[64];
     int ncand = 0, built = 0;
     const int max_loops = td5_env_int("TD5RE_GEO_BLOCKLOOP_MAX", 6, 0, BL_MAXPLAN);
@@ -860,14 +877,16 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
 
     /* the accepted RIGHT arms of real streets */
     ne = tg_net_edge_count();
-    for (e = 0; e < ne && na < 96; e++) {
+    for (e = 0; e < ne && na < (left_on ? 192 : 96); e++) {
         TG_NetArm a;
         if (!tg_net_arm_get(e, &a)) continue;
-        if (a.left || a.loop) continue;
+        if (a.loop) continue;
+        if (a.left && !left_on) continue;
         if (fabs(a.skew) > skew_max) continue;      /* a street that leaves at a shallow angle is not a turn-in */
         arms[na++] = a;
     }
     if (na < 2) return 0;
+    s_sd = -1;
     if (!bl_graph_build(nl, ring)) return 0;
 
     if (td5_env_flag_off("TD5RE_GEO_BLOCKLOOP_DUMP")) {     /* graph + route + arms for verify/geo_bl_plot.py */
@@ -898,14 +917,38 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             int path[256];
             char what[48];
             if (B->si - A->si < 10 || B->si - A->si > 220) continue;
-            if (!bl_only_ok(A->si)) continue;
+            if ((A->left != 0) != (B->left != 0)) continue;       /* [1019 V] both arms on the same side of the road */
+            s_sd = A->left ? 1 : -1;
+            if (!bl_only_ok(A->si, A->left)) continue;
             snprintf(what, sizeof what, "arms %d/%d", A->edge, B->edge);
             ra = td5_geo_roads_get(A->road); rb = td5_geo_roads_get(B->road);
             if (!ra || !rb) continue;
             sn = bl_arm_node(nl, A); dn = bl_arm_node(nl, B);
             if (sn < 0 || dn < 0 || sn == dn) { bl_note(what, A->si, B->si, "an arm's way has no usable vertex right of the road"); continue; }
             np = bl_path(nl, sn, dn, lmax, path, 256, &lenp);
-            if (np < 2) { bl_note(what, A->si, B->si, "no path over the real grid that stays right of the road"); continue; }
+            if (np < 2) { bl_note(what, A->si, B->si, s_sd < 0 ? "no path over the real grid that stays right of the road" : "no path over the real grid that stays left of the road"); continue; }
+            {
+                /* [1019 V] the one-way flow along the path (map data): edges WITH / AGAINST the direction of travel round the loop.
+                 * Logged on every candidate. TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a LEFT loop that runs against a one-way
+                 * street (default 0: the round-1018 right loops ignore the flow too, and in La Plata's alternating one-way grid every
+                 * street on the left of this route runs the other way -- the check removes every left loop there). */
+                int q3, against = 0, with = 0;
+                for (q3 = 0; q3 + 1 < np; q3++) {
+                    int k3;
+                    for (k3 = g_n[path[q3]].head; k3 >= 0; k3 = g_e[k3].next)
+                        if (g_e[k3].to == path[q3 + 1]) {
+                            if (g_e[k3].ow < 0) against++; else if (g_e[k3].ow > 0) with++;
+                            break;
+                        }
+                }
+                s_ow_against = against; s_ow_with = with;
+                if (s_sd > 0 && against > 0 && td5_env_flag_off("TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY")) {
+                    char w[96];
+                    snprintf(w, sizeof w, "the path runs against a one-way street (%d edge(s) against, %d with)", against, with);
+                    bl_note(what, A->si, B->si, w);
+                    continue;
+                }
+            }
             for (q = A->si; q < B->si && q + 1 < nl->count; q++) {
                 const double dx = nl->v[q + 1].x - nl->v[q].x, dz = nl->v[q + 1].z - nl->v[q].z;
                 main_m += sqrt(dx * dx + dz * dz);
@@ -915,6 +958,7 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             P = &cand[ncand];
             memset(P, 0, sizeof *P);
             P->e1 = A->edge; P->e2 = B->edge; P->si1 = A->si; P->si2 = B->si;
+            P->sd = s_sd;
             P->lb = ra->lanes > rb->lanes ? ra->lanes : rb->lanes;
             for (q = 0; q + 1 < np; q++) {
                 int k;
@@ -1022,11 +1066,20 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             if (!ok) { bl_free_plan(P); continue; }
             snprintf(P->name, sizeof P->name, "%s", what);
             P->used = 1;
+            if (s_diag)
+                TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] CANDIDATE %s side %s F=%d R=%d (arms si %d -> %d), corridor %d spans %.0f m over %.0f m of road (%.2fx), %d corner(s), tightest %.1f m, one-way edges: %d with / %d against",
+                          what, s_sd > 0 ? "LEFT" : "right", P->F, P->R, A->si, B->si, P->clen, P->len_m, P->main_m, P->ratio, P->ncorner, P->min_r_m, s_ow_with, s_ow_against);
             ncand++;
         }
     }
     bl_graph_free();
-    TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] %d right arm(s), %d candidate loop(s)", na, ncand);
+    {
+        int nleft = 0;
+        for (i = 0; i < na; i++) if (arms[i].left) nleft++;
+        TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] %d right arm(s)%s, %d candidate loop(s)", na - nleft,
+                  left_on ? " + left arm(s) counted below" : "", ncand);
+        if (left_on) TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] %d left arm(s)", nleft);
+    }
     if (ncand < 1) return 0;
     qsort(cand, (size_t)ncand, sizeof cand[0], bl_plan_cmp);
 
@@ -1103,7 +1156,8 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
                 for (k = 0; k <= P->clen; k++) {
                     const TG_Node *nn = &P->rview.v[F + 1 + k];
                     const double t = nn->width * 0.5 + sw * 0.5;
-                    const double qx = nn->x + nn->tz * t, qz = nn->z - nn->tx * t;
+                    const double sg = (P->sd > 0) ? -1.0 : 1.0;       /* [1019 V] the road is on the corridor's left (right loop) or right (left loop) */
+                    const double qx = nn->x + sg * nn->tz * t, qz = nn->z - sg * nn->tx * t;
                     double dmin = 1e30;
                     int j;
                     for (j = P->F - 6; j <= P->R + 6; j++) {
@@ -1126,7 +1180,7 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             fk->F = P->F; fk->len = P->len; fk->R = P->R; fk->cbase = off + 1;
             fk->sep = 0.5; fk->lanes = nl->v[P->F].lanes; fk->kind = TG_FORK_LOOP;
             fk->main_lanes = nl->v[P->F].lanes; fk->br_lanes = P->lb;
-            fk->fm = 1.0; fk->fb = 1.0; fk->side = -1;
+            fk->fm = 1.0; fk->fb = 1.0; fk->side = (P->sd > 0) ? 1 : -1;      /* [1019 V] */
             fk->loopc = s_nbl + 1; fk->clen = P->clen;
             P->fi = s_fork_count;
             P->built = 1;
@@ -1273,7 +1327,7 @@ int tg_bl_slnk_write(TG_Buf *out)
         tg_put_u32(out, (unsigned int)P->a1_hi);
         tg_put_u32(out, (unsigned int)P->a2_lo);
         tg_put_u32(out, (unsigned int)P->a2_hi);
-        tg_put_u32(out, 0u);
+        tg_put_u32(out, (P->sd > 0) ? 1u : 0u);                  /* [1019 V] side: 0 right, 1 left */
         tg_put_u32(out, (unsigned int)(s_forks[P->fi].cbase + P->fl1 - 1));
         tg_put_u32(out, (unsigned int)(s_forks[P->fi].cbase + P->clen - P->fl2));
     }

@@ -1119,3 +1119,122 @@ The red frame border in the frames is the street speed-limit warning, not a defe
 * Coverage on La Plata is one loop: the real forks occupy the rest of the route and the length cap rejects the larger blocks. A finder that trades a real fork for a loop, or fits two loops in one window, is the next step.
 * No synthetic facade massing is generated along the loop's own streets (real OSM buildings stand there where they exist).
 * The inner pavement test is geometric (clear of the road); it does not know about other drawn streets crossing the corridor (the finder refuses those).
+
+## Round 1019 V: LEFT corridors (real forks) and LEFT block loops
+
+Base master 7a415889. Mariano: "do left-side corridors and loops next". Everything below is behind a knob that restores master
+(measured, see Gates); frames and harness tables are from the worktree `fix-1791729327-43525-28539`.
+
+### What was parked, and what turned out to be missing
+
+Round 1017 R parked left corridors for a walker fault nobody had traced ("a lane-assisted drive through a LEFT fork ends with the car
+centred in a MAIN lane while physically in the gore"). The earlier rounds' mirror work was already in (`fork_left_compute`, the mirrored type-8/11 decision in
+`resolve_neighbor`, `laneassist_*`, `TG_Fork.side` through every emitter), so the first step was to build a left corridor and watch it. The generator vetoes
+(`rf_avenue_try off > 0`, the parallel scan `s_plat > 0`) were the only thing keeping the engine from ever seeing a left corridor on a geo route.
+With them lifted, the AI drives left corridors with no walker fault. A new dev audit (`TD5RE_WALKER_AUDIT=1`, `td5_track.c`, compiled out of RELEASE) asks every tick
+whether the chassis point lies inside a lane quad of the span the walker says the car is on, per span class (main ring / LEFT corridor / right corridor / loop corridor):
+over the 6-seed sets below, 2,000+ left-corridor ticks per race with **0 ticks of lane mismatch and 1 tick outside the span** (a wall scrape at a mouth), 0.1 % lost on the main road.
+A static pass at load checks every corridor span: lane l's world centre (`td5_track_get_span_lane_world`, what the AI aims at and the HUD reads) lies inside lane l's quad,
+and `td5_track_get_recovery_pose(span, 6)` puts the car inside the span it names: 301 left-corridor spans / 602 lane centres and 184 loop spans / 368 centres, 0 failures.
+The fault of the 2026-09-08 note was seen on a SYNTHETIC bypass driven by lane assist; it is not reproduced on a real left fork driven by the AI, and a human drive is still the one thing this round could not do (What remains).
+
+### Engine / AI changes (all inert unless a left corridor exists)
+
+* `fork_left_compute` no longer treats a block loop's departure / arrival spans (SLNK D / A) as forks: a LEFT loop's first corridor span lies left of the road, which the
+  geometric test reads as "a left fork", and the type-8 lane rule would then have sent every car in the low lanes into the loop.
+* SLNK side word (it was always 0): 1 for a left loop. `td5_track_loop_side(D)`, `td5_track_fork_is_left(span)` are the public queries.
+* AI (`td5_ai.c`): the committed fork choice anchors at 0.86 (take) / 0.18 (stay) of the road width for a right corridor; a left corridor mirrors it, 0.14 / 0.82
+  (`smart_fork_anchor`, `g_smart_branch_left`). `TD5RE_AI_LEFT_ANCHOR=0` keeps the right-hand anchors.
+* Traffic (`td5_track.c`): `td5_track_traffic_fork_ahead` / `_next_span` answered "no fork" for a left corridor, so traffic ignored it and a car in the low lanes was
+  carried into the corridor by the walker without having decided. They now hand out the mirrored bands (the corridor is the LOW lanes, the main half's lane index drops by the corridor's lanes).
+  `TD5RE_TRAFFIC_LEFT_FORK=0` restores the old behaviour. Traffic on (3 seeds): `traffic_fork_choice ... main 10-11, branch 8-9`, left forks PASS.
+* Wall rails, the open rail of a loop mouth (`sl_open`), the walker relocation (`sl_try_cross`), lane quads, the corridor map (progress), recovery: geometric or index based and side-blind; verified by the audits above.
+
+### Generator
+
+* **Left real forks** (`td5_tg_realfork.c`, `TD5RE_GEO_FORK_LEFT`, default on): `RfCand.side` (+1 left) from the sign of the avenue's `off` (+t) or of the parallel road's lateral; one side per window
+  (a window that changes sides is refused); `tg_realfork_node_adjust` moves the node toward +t; `rf_bend_check` swaps the inner footprint; `tg_fork_place` writes `s_forks[].side`;
+  a left avenue fork is no neighbour for a plaza fork (plaza corridors are right-hand); two forks of opposite sides may not share lane ramps (a node takes one side's width).
+  `TD5RE_GEO_FORK_LEFT=0` = the round-1018 rule ("on the +t side, left corridors are parked").
+* **One-way check** (`rf_left_flow`): a right corridor is the ordinary opposite carriageway and flows AGAINST the race by decision (round 1013). A left corridor exists where the route is drawn
+  against its own carriageway's one-way, so the peer beside it flows WITH the race (measured with `verify/geo_peer_direction.py`: on Diagonal 74 the way 12 m to the map's right flows with the route). For every window node the way under the corridor
+  centre line (route node + the measured offset, +t) is looked up in ROADS.JSON (nearest segment within 3 m, within 36 degrees of the heading); a left window is refused when more nodes run AGAINST a one-way than WITH it
+  (`TD5RE_GEO_FORK_LEFT_CONTRA=1` allows it). Diagonal 74: 229 nodes with / 0 against, Avenida 13: 53 / 0, Avenida 53: all with. Race.log `[REAL FORK] LEFT ...` lines say it.
+* A LEFT parallel road whose first span sits on a bend (Avenida 13 807: the route has just turned onto it) slides its start (and end) down the road like an avenue's first gate does
+  (`TD5RE_GEO_FORK_LEFT_SLIDE=0` off; left only, so right forks keep their rules). Dev: `TD5RE_GEO_FORK_PRE_DENY="707 855-933"` removes candidates BEFORE the weighted selection (DENY / ALLOW only prune its result).
+* A left fork counts as "fresh" for the verdict table: on a route WITH a record it needs a PASS / KEEP entry, like a relaxed or merged fork.
+* **Left block loops** (`td5_tg_blockloop.c`, `TD5RE_GEO_BLOCKLOOP_LEFT`, default on): the finder takes the network's LEFT arms too, both arms of a pair on one side; the slip lane runs flush along the LEFT edge
+  (`s_sd` is the side being searched, read by `bl_edge_at` / `bl_node_ok` / `bl_slip` / `bl_flush`; the row end toward the road is its right end), the inner pavement is on the corridor's right, `fk->side = +1`, SLNK side = 1.
+  Everything else (arc R = 22 m, approach window rule, ratio, cost) is shared. `TD5RE_GEO_BLOCKLOOP_ONLY="L620"` forces a left loop at arm span 620 (`R620` a right one, `620` either).
+  Loops follow the real street grid and do NOT look at one-way tags: the existing right loops run 0 with / 1-3 against on this route, and on La Plata's alternating one-way grid every street on the left runs the other way.
+  The flow is logged on each candidate (`one-way edges: N with / M against`); `TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1` refuses a left loop that runs against one (that removes all of them here).
+
+### Results
+
+Harness: `verify/geo_fork_validate.ps1` (6 AI + the player, forks-on vs forks-off, forks forced onto both arms), seeds 11 22 33 44 55 66 = 36 car-passes per fork. New options: `-RouteDir <dir>` (race an older `_route/`), `-Traffic N`;
+tools: `verify/geo_lf_trace.py` (one car's path through a stretch), `verify/geo_lf_poses.py` (free-cam poses at chosen spans), `verify/shipped_trace.ps1` + `shipped_trace_cmp.py` (shipped-track identity).
+
+Route FD6BE7C7 (Mariano's current route, built 2026-10-11 02:53, finish 1137): **found** 2 left avenues (Diagonal 74 131..360 = 228 spans, Avenida 53 855..933 = 77) and left block loops (9 left arms; candidates 600..719 and,
+with Avenida 53 out of the way, 844..921); **built** both avenues and either left loop; **passed** all (6 seeds, forced half-and-half):
+
+| config (run set) | fork / loop | enter c/m | hit/crash | stall | jam | spin | speed fork / forks-off | verdict |
+|---|---|---|---|---|---|---|---|---|
+| `cur6_f` (`-Only 131`) | LEFT Diagonal 74 131..360 | 18/18 | 6/2 | 0 | 0 | 1 | 529 / 622 | PASS |
+| `cur6_e` (`-Only 855`) | LEFT Avenida 53 855..933 | 18/18 | 0/0 | 0 | 0 | 0 | 453 / 558 | PASS |
+| `cur6_b` | LEFT loop 600..719 (118 spans) | 18/18 | 2/2 | 0 | 0 | 0 | 442 / 663 | PASS |
+| `cur6_d` | LEFT loop 844..921 | 18/18 | 2/0 | 0 | 0 | 0 | 374 / 517 | PASS |
+| `cur6_a` | right loop 561..639 (master) | 18/18 | 8/0 | 0 | 0 | 0 | 360 / 457 | PASS |
+| `cur6_c` | right loop 922..1009 (master) | 18/18 | 10/0 | 0 | 0 | 0 | 371 / 359 | PASS |
+
+With every car forced into every corridor (`-ForceMode 2`, `cur6_g`) Diagonal 74 and the left loop WARN (D74: 6 stalls, 4 crashes, 10 spins in 36 passes; loop: 14 hits, speed 55 %) while Avenida 53 and the right loop 561 PASS.
+Six cars through a two-lane corridor at once is a harder test than the half-and-half the verdicts are measured with (round 1017 R's rule); D74's WARN is the same with the right loop in the set (`cur6_h`), so it is the fork and not the loop.
+Not recorded in the table; reported here. The loop's hits cluster at corridor 1690..1697, a real street kink.
+
+Route 4B56DECB (the 10-10 route of rounds 1016-1018, finish 1206): **found** the left Avenida 13 corridor 807..859 (parallel source; 53 nodes with the flow, 0 against); it needed the start slide (the route turns onto the avenue at 804, 0.26 rad/span);
+**built** 821..856 (34 spans, only with the right Avenida 13 fork 707..790 pre-denied: both want the same room); **WARN**: 13 hard hits in 36 passes (baseline 2), all at the mouth span 820/821 right after that corner
+(the baseline hits there too: a car at 330 u/t cannot take a 13 m radius). Recorded WARN, so the default build does not make it. The default build of this route is unchanged: same forks (46..565 merged, 901..1174 merged, loop 720..788) and the same AI totals to the digit (below).
+
+AI totals, production config (verdict table on, natural fork choice, 12 seeds 11..132, 6 AI, no traffic, `verify/geo_r1017s_eval.py`):
+
+| route | build | stalls | stall ticks | events | incidents | corridor passes | spins |
+|---|---|---|---|---|---|---|---|
+| FD6BE7C7 | master (right loops 922 + 561) | 45 | 9814 | 1083 | 468 | 81 | 0 |
+| FD6BE7C7 | knobs off (`FORK_LEFT=0 BLOCKLOOP_LEFT=0`) | 45 | 9842 | 1083 | 468 | 81 | 0 |
+| FD6BE7C7 | now (Diagonal 74 + Avenida 53 + right loop 561) | 75 | 15279 | 1483 | 539 | 126 | 0 |
+| 4B56DECB | master | 17 | 2569 | 1099 | 473 | 121 | 5 |
+| 4B56DECB | now | 17 | 2569 | 1099 | 473 | 121 | 5 |
+
+The +30 stalls on Mariano's route are not all the fork: 14 are the finish-line bin (span 1140+, cars parking at the line, 15 -> 29), 6 are one start-pack pile-up at span 65..68 (the same hard-tier race counted in four seeds: the AI's corner scan
+reads the widened road from span 107 on, a different throttle at tick 363 and a different pack by tick 600: chaos, not geometry, the strip is byte-identical up to span 106), 7 are inside the Diagonal 74 window, 3 near Avenida 53.
+Corridor span coverage 86 -> 305. The right loop 922 is displaced by Avenida 53 (they want the same stretch; the avenue is the longer corridor).
+
+### Gates (measured)
+
+* synthetic auto track (slot 60, `SELECTED.TXT` aside): MODELS.DAT 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`, STRIP.DAT `0641EDB7787600D236AE7B51186888DD`, TEXTURES.DAT `5B4E005A...`: identical to the master exe.
+* knobs off = master on Mariano's current route (`verify/geo_tags_identity.ps1 -Arm geo -Exe ...`): MODELS.DAT 14542580 B `4373116613FB00AC063D7954910F6D4B`, STRIP.DAT 75216 B `93AC520ACA279166D49117C7A3850DEF` for the master exe AND the new exe with
+  `TD5RE_GEO_FORK_LEFT=0 TD5RE_GEO_BLOCKLOOP_LEFT=0` (default build: 14347684 B `A2A82C4F...`, STRIP 100990 B). Race level: 12-seed totals identical in every column but stall ticks (+28, the line-crossing tail).
+* shipped tracks bit-identical: `verify/shipped_trace.ps1`, 6 AI, 1500 / 2500 ticks, pose + motion + track + driver CSVs, master exe vs new exe: Moscow (0) 54,004 rows, Newcastle (5) and Honolulu (8) 90,004 rows each: 0 differing rows.
+* street census (race.log `real street census`): arms accepted 70 -> 72 (street 58 -> 58, avenue 11 -> 13), shared-carriageway departures 13 -> 14. Not degraded.
+* verdict table: 6 records for FD6BE7C7 (Diagonal 74 PASS, Avenida 53 WARN_KEEP, loops 561 / 600 / 844 / 922 PASS) and the left Avenida 13 821..856 WARN for 4B56DECB (`verify/geo_fork_verdicts_gen.py --merge` over the forced
+  half-and-half run sets AND the production sets; the worst verdict wins, so 901..1174 stays WARN_KEEP as on master). Avenida 53 is PASS alone over 6 seeds and WARN in the production set on the mean-speed rule only (78 % of the forks-off window against the 80 % line;
+  0 hits, 0 stalls, 0 jams in any run), kept with that reason in `verify/geo_fork_keep.json`.
+* production sets, 6 seeds, verdict table on (`fin_cur`, `fin_old`): FD6BE7C7 Diagonal 74 PASS, right loop 561 PASS, Avenida 53 WARN (speed, kept); 4B56DECB 46..565 PASS, loop 720..788 PASS, 901..1174 WARN (1 jam, kept, as before).
+* human slot with lane assist (the scenario of the 2026-09-08 note): `verify/player_laneassist.ps1`, PlayerIsAI=0, AutoThrottle, LaneAssist, no opponents, 3500 ticks: the player passes Diagonal 74 on the main half and drives the left corridor of Avenida 53
+  (191 corridor ticks, spans 1486..1562) and the audit counts 1 tick outside the span and 0 lane mismatches on it (main road 6 of 20,809).
+* `build_all.bat` (dev + release + structure lint): OK, warnings 84 = baseline, extern 3 = baseline. Full self-test: 64 PASS / 0 WARN / 0 FAIL, exit 0 (234 s).
+
+### Frames looked at (free-cam tours, `verify/geo_bl_tour.ps1 -Width 1280 -Height 720` + `geo_lf_poses.py`, `TD5RE_TG_DOUBLE_BUILD=0`; `TD5RE_FREECAM_TOUR_SPAN` is the car's NORMALISED span, so a corridor pose needs the car parked on the main span beside it)
+
+Diagonal 74 left fork: the mouth (spans 118..146: the corridor peels off to the left of a 4-lane approach; a light-blue ground sliver at the kerb joint, as on every real-fork corridor), mid-corridor 200..320 (two corridor lanes, the main half
+and the kerb and pavement on the outer left), the exit 346..366 (the rejoin with a crossing). HUD "ON Diagonal 74" with "SPAN 150 (corridor 1275)", the minimap draws the corridor. Left Avenida 13 821..856 on the old route (6 poses): a 5-6 lane window
+with the corridor on the left. Right Diagonal 73 for comparison: the median is flat asphalt on both, i.e. the left corridor is the mirror of the right one. Left loop 600..719: the departure (a slip lane flush with the left edge, then the arc),
+the street legs named "Avenida 51" and "Calle 18" on the HUD, a gentle real kink at corridor 1690, the arrival merge; the minimap draws the loop.
+Avenida 53 left fork 855..933 (3 tours, 12 poses): the mouth (4+ lane approach, the corridor on the left, a cross street at the foot), mid-corridor chase (two lanes, kerb and pavement left, the main half to the right), the rejoin (a grass wedge in the gore, lanes converging, a cross street to the left).
+Left loop 844..921 (not in the default build, 6 poses): "Avenida 51" / "Calle 22" named on the HUD, the minimap draws it, the slip lane and the arrival read correctly; ragged ground triangles show beside the pavement where the loop passes a park and a street stub (the
+ground skirt at a junction mouth, cosmetic; the 600..719 loop and the existing right loops are clean there).
+
+### What remains
+
+* A human drive through a left corridor with lane assist OFF (the walker is clean for the AI, for the lane-assisted human slot and in the static audit; nobody has steered one by hand): Diagonal 74 mouth at span 131, the left loop at 600.
+* Left Avenida 13 (old route) and the left loops under six cars at once (ForceMode 2) WARN; both are AI behaviour at a corner next to the mouth / a street kink, not geometry.
+* N-way loops (a branch inside a loop), nested and overlapping corridors, a left plaza fork (plaza corridors are right-hand), coverage on routes where the finder has no left arm.
