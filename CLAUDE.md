@@ -119,6 +119,16 @@ includers, no new compiler warnings per -W class.
   (listener thread → ring, drained on the main thread at the top of
   `td5_game_tick`). Driver: the `td5re` MCP server in `scripts/td5re_mcp/`
   (or its stdlib `game_client.py` directly). Compiled out of RELEASE.
+- **Fast free-cam tours** (dev builds, round 1019 T): `pwsh verify/geo_tour.ps1 -Tag x
+  (-Poses file | -Picks file | -Spans 561,922 [-TopDown]) [-Extra @{TD5RE_KNOB=v}]`
+  captures EVERY pose of a list in ONE launch (world poses, picks, or span-relative
+  `name:@span,lateral,height,yawrel,pitch`, corridor spans included) and quits cleanly:
+  ~10 s warm, ~26 s cold for 20 poses, vs ~10 min with the old per-round tour scripts
+  (now thin wrappers). It reuses the built level (the GENSTAMP no longer hashes the
+  `TD5RE_FREECAM_*` knobs), starts only when the scenery is complete, centres the track
+  walk on each pose's span (render-only, sim frozen), and the manifest flags any pose
+  captured with incomplete scenery. Knobs go ONLY through `-Extra` (the script clears
+  `TD5RE_*`). Details: docs/plans/GEO_FORK_VALIDATION.md "Fast tours".
 
 ## Fast navigation (read this BEFORE grepping the 10k-line modules)
 

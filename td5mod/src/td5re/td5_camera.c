@@ -9,6 +9,7 @@
 #include "td5_camera.h"
 #include "td5_render.h"
 #include "td5_track.h"
+#include "td5_trackgen_stream.h"   /* [ROUND 1019 T] free-cam tour waits for the scenery stream */
 #include "td5_game.h"
 #include "td5_damage.h"   /* [CAR DAMAGE] end-of-race orbit around a finished/wrecked car */
 #include "td5_platform.h"
@@ -2625,50 +2626,221 @@ void td5_camera_freecam_exit(void)
  * log/tour_%s.png), TD5RE_FREECAM_TOUR_TICK the race sim tick to start at (default 30),
  * TD5RE_FREECAM_TOUR_DWELL the frames each pose is held before the dump (default 90:
  * streamed scenery needs a moment). The sim keeps running; only pane 0's camera moves.
- * Never touches the sim, so a race is not changed by it. */
-#define TOUR_MAX 24
-static struct { char name[48]; double x, y, z, yaw, pitch; } s_tour[TOUR_MAX];
+ * Never touches the sim, so a race is not changed by it.
+ *
+ * [ROUND 1019 T] FAST MODE (TD5RE_FREECAM_TOUR_FAST=1, driven by verify/geo_tour.ps1):
+ * one launch captures EVERY pose of a list, wherever it lies along the route.
+ *  - poses may also be SPAN-RELATIVE: "name:@span,lateral,height,yawrel,pitch" puts the
+ *    eye at the centre of strip span `span` (a corridor span >= ring works), `lateral`
+ *    world units to the RIGHT of the road, `height` above it, looking `yawrel` degrees
+ *    off the road direction. TD5RE_FREECAM_TOUR_FILE=path reads the list from a file
+ *    (';' or newlines, '#' comments) so a long list is not capped by the environment.
+ *  - the tour does not start until the scenery is COMPLETE (stream worker finished, deferred
+ *    passes run), so no pose ever shows the grey fallback ribbon.
+ *  - the track display-list walk is centred on the POSE's span, not on the car
+ *    (td5_camera_tour_cull_span, read by td5_render_mesh.c), so a pose 900 spans from the
+ *    car still draws its road, its fork corridors and its scenery. Render-only: the sim
+ *    is frozen and never sees it.
+ *    (TD5RE_FREECAM_TOUR_NOWAIT=1 skips the wait, to prove the manifest flags an incomplete capture.)
+ *  - dwell defaults to 6 frames (nothing is streaming), TD5RE_FREECAM_TOUR_QUIT (default 1
+ *    in fast mode) quits cleanly after the last pose so the logs flush, and every pose
+ *    appends a line to TD5RE_FREECAM_TOUR_MANIFEST (default log/tour_manifest.csv) saying
+ *    whether the scenery was complete at capture time. */
+#define TOUR_MAX 512
+typedef struct {
+    char name[48];
+    int span_mode;               /* 1: a = span, b = lateral, c = height, yaw relative to the road */
+    double a, b, c, yaw, pitch;  /* world mode: a,b,c = x,y,z (world units); radians */
+    int resolved, cull, span_used;
+    double ex, ey, ez, eyaw;     /* resolved eye (world units) and absolute yaw */
+} TourPose;
+static TourPose s_tour[TOUR_MAX];
 static int s_tour_n = -1, s_tour_i = 0, s_tour_frames = 0;
+static int s_tour_fast = 0, s_tour_cull = -1;
+
+int td5_camera_tour_cull_span(void) { return s_tour_cull; }
+
+static void tour_add(const char *tok)
+{
+    char nm[48];
+    double v[5];
+    int span_mode = 0;
+    const char *p = tok;
+    int n = 0;
+    while (*p == ' ' || *p == '\t' || *p == '\r') p++;
+    if (!*p || *p == '#' || s_tour_n >= TOUR_MAX) return;
+    while (*p && *p != ':' && n < 47) nm[n++] = *p++;
+    while (n > 0 && (nm[n - 1] == ' ' || nm[n - 1] == '\t')) n--;
+    nm[n] = 0;
+    if (*p != ':' || !nm[0]) return;
+    p++;
+    if (*p == '@') { span_mode = 1; p++; }
+    if (sscanf(p, "%lf,%lf,%lf,%lf,%lf", &v[0], &v[1], &v[2], &v[3], &v[4]) < 5) return;
+    memset(&s_tour[s_tour_n], 0, sizeof s_tour[s_tour_n]);
+    snprintf(s_tour[s_tour_n].name, sizeof s_tour[s_tour_n].name, "%s", nm);
+    s_tour[s_tour_n].span_mode = span_mode;
+    s_tour[s_tour_n].a = v[0]; s_tour[s_tour_n].b = v[1]; s_tour[s_tour_n].c = v[2];
+    s_tour[s_tour_n].yaw = v[3] * 3.14159265358979 / 180.0;
+    s_tour[s_tour_n].pitch = v[4] * 3.14159265358979 / 180.0;
+    s_tour_n++;
+}
 
 static void tour_parse(void)
 {
     const char *e = getenv("TD5RE_FREECAM_TOUR");
+    const char *file = getenv("TD5RE_FREECAM_TOUR_FILE");
+    char *buf = NULL;
     s_tour_n = 0;
-    while (e && *e && s_tour_n < TOUR_MAX) {
-        char nm[48];
-        double x, y, z, yw, pt;
-        int used = 0;
-        if (sscanf(e, "%47[^:]:%lf,%lf,%lf,%lf,%lf%n", nm, &x, &y, &z, &yw, &pt, &used) < 6)
-            break;
-        snprintf(s_tour[s_tour_n].name, sizeof s_tour[s_tour_n].name, "%s", nm);
-        s_tour[s_tour_n].x = x; s_tour[s_tour_n].y = y; s_tour[s_tour_n].z = z;
-        s_tour[s_tour_n].yaw = yw * 3.14159265358979 / 180.0;
-        s_tour[s_tour_n].pitch = pt * 3.14159265358979 / 180.0;
-        s_tour_n++;
-        e += used;
-        if (*e == ';') e++;
+    s_tour_fast = td5_env_int("TD5RE_FREECAM_TOUR_FAST", 0, 0, 1);
+    if (file && file[0]) {
+        FILE *f = fopen(file, "rb");
+        if (f) {
+            long len;
+            fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET);
+            if (len > 0 && len < (4 << 20) && (buf = (char *)malloc((size_t)len + 1)) != NULL) {
+                size_t got = fread(buf, 1, (size_t)len, f);
+                buf[got] = 0;
+                e = buf;
+            }
+            fclose(f);
+        } else {
+            TD5_LOG_W(LOG_TAG, "free-cam tour: cannot open TD5RE_FREECAM_TOUR_FILE '%s'", file);
+        }
     }
-    TD5_LOG_I(LOG_TAG, "free-cam tour: %d pose(s)", s_tour_n);
+    while (e && *e) {
+        char tok[256];
+        size_t n = 0;
+        while (*e && *e != ';' && *e != '\n' && n < sizeof tok - 1) tok[n++] = *e++;
+        tok[n] = 0;
+        while (*e && *e != ';' && *e != '\n') e++;   /* over-long token: skip the rest */
+        if (*e) e++;
+        tour_add(tok);
+    }
+    free(buf);
+    TD5_LOG_I(LOG_TAG, "free-cam tour: %d pose(s), fast=%d", s_tour_n, s_tour_fast);
+}
+
+/* Centre of span `s`, tolerating the junction span types the centre query refuses. */
+static int tour_span_centre(int s, int *x, int *y, int *z)
+{
+    static const int k_try[] = { 0, 1, -1, 2, -2 };
+    int i, n = td5_track_get_span_count();
+    for (i = 0; i < 5; i++) {
+        const int t = s + k_try[i];
+        if (t >= 0 && t < n && td5_track_get_span_center_world(t, x, y, z)) return 1;
+    }
+    return 0;
+}
+
+/* World eye, yaw and the render cull span of a pose; once per pose, after the track exists. */
+static void tour_resolve(TourPose *P)
+{
+    const int total = td5_track_get_span_count();
+    const int ring  = td5_track_get_ring_length();
+    int cx = 0, cy = 0, cz = 0;
+    P->resolved = 1;
+    P->cull = -1;
+    P->span_used = -1;
+    if (total <= 0) { P->ex = P->a; P->ey = P->b; P->ez = P->c; P->eyaw = P->yaw; return; }
+    if (P->span_mode) {
+        int s = (int)P->a, s0, s1, x0, y0, z0, x1, y1, z1;
+        double fx = 0.0, fz = 1.0, l;
+        if (s < 0) s = 0;
+        if (s >= total) s = total - 1;
+        P->span_used = s;
+        s0 = (s >= 2) ? s - 2 : 0;
+        s1 = (s + 2 < total) ? s + 2 : total - 1;
+        if (tour_span_centre(s, &cx, &cy, &cz) && tour_span_centre(s0, &x0, &y0, &z0) &&
+            tour_span_centre(s1, &x1, &y1, &z1)) {
+            fx = (double)(x1 - x0);
+            fz = (double)(z1 - z0);
+            l = sqrt(fx * fx + fz * fz);
+            if (l > 1e-6) { fx /= l; fz /= l; } else { fx = 0.0; fz = 1.0; }
+        }
+        P->ex = (double)cx + fz * P->b;            /* right = (fz, -fx) */
+        P->ey = (double)cy + P->c;
+        P->ez = (double)cz - fx * P->b;
+        P->eyaw = atan2(fx, fz) + P->yaw;
+    } else {
+        double best = 0.0;
+        int s, bs = -1;
+        P->ex = P->a; P->ey = P->b; P->ez = P->c; P->eyaw = P->yaw;
+        for (s = 0; s < total; s++) {
+            double dx, dz, d2;
+            int x, y, z;
+            if (!td5_track_get_span_center_world(s, &x, &y, &z)) continue;
+            dx = (double)x - P->ex; dz = (double)z - P->ez;
+            d2 = dx * dx + dz * dz;
+            if (bs < 0 || d2 < best) { best = d2; bs = s; }
+        }
+        P->span_used = bs;
+    }
+    if (P->span_used >= 0) {
+        int c = P->span_used;
+        if (ring > 0 && c >= ring) c = td5_track_branch_to_main_span(c);   /* corridor -> parallel main span */
+        if (ring > 0 && c >= ring) c = ring - 1;
+        if (c < 0) c = 0;
+        P->cull = c;
+    }
+}
+
+static int tour_scenery_complete(void)
+{
+    return !td5_tgstream_active() && td5_track_scenery_undecorated_from_span() < 0 &&
+           td5_track_get_models_display_list_count() > 0;
 }
 
 /* Returns 1 when the tour owns the camera this frame. */
 static int tour_step(void)
 {
-    static int s_dwell = -1, s_tick0 = -1;
+    static int s_dwell = -1, s_tick0 = -1, s_quit = 1, s_manifest_open = 0, s_quit_done = 0;
+    static char s_manifest[300];
     if (s_tour_n < 0) tour_parse();
-    if (s_tour_n == 0 || s_tour_i >= s_tour_n) return 0;
+    if (s_tour_n == 0) return 0;
+    if (s_tour_i >= s_tour_n) {
+        if (s_tour_fast && s_quit && !s_quit_done) {
+            FILE *mf;
+            s_quit_done = 1;
+            if (s_manifest[0] && (mf = fopen(s_manifest, "a")) != NULL) {
+                fprintf(mf, "DONE,%d\n", s_tour_n);
+                fclose(mf);
+            }
+            TD5_LOG_I(LOG_TAG, "free-cam tour: all %d pose(s) captured, requesting quit", s_tour_n);
+            g_td5.quit_requested = 1;
+        }
+        s_tour_cull = -1;
+        return 0;
+    }
     if (g_td5.game_state != TD5_GAMESTATE_RACE) return 0;
     if (s_tick0 < 0) s_tick0 = td5_env_int("TD5RE_FREECAM_TOUR_TICK", 30, 0, 100000);
-    if (s_dwell < 0) s_dwell = td5_env_int("TD5RE_FREECAM_TOUR_DWELL", 90, 4, 100000);
+    if (s_dwell < 0) {
+        s_dwell = td5_env_int("TD5RE_FREECAM_TOUR_DWELL", s_tour_fast ? 6 : 90, 4, 100000);
+        s_quit = td5_env_int("TD5RE_FREECAM_TOUR_QUIT", 1, 0, 1);
+        {
+            const char *m = getenv("TD5RE_FREECAM_TOUR_MANIFEST");
+            snprintf(s_manifest, sizeof s_manifest, "%s", (m && m[0]) ? m : "log/tour_manifest.csv");
+        }
+    }
     if (g_td5.simulation_tick_counter < s_tick0) return 0;
+    if (s_tour_fast && !tour_scenery_complete() && !td5_env_flag_off("TD5RE_FREECAM_TOUR_NOWAIT")) {
+        static int s_wait_logged = 0;
+        if (!s_wait_logged) {
+            s_wait_logged = 1;
+            TD5_LOG_I(LOG_TAG, "free-cam tour: waiting for the scenery to complete "
+                      "(stream active=%d, undecorated from span %d)", td5_tgstream_active(),
+                      td5_track_scenery_undecorated_from_span());
+        }
+        return 0;
+    }
     {   /* TD5RE_FREECAM_TOUR_SPAN=N: start once the PLAYER has reached span N, and
          * TD5RE_FREECAM_TOUR_FREEZE=1 pauses the sim there. A fork corridor (and
          * the scenery around it) is only drawn while the player is near it, so a
-         * pose has to be taken with the car parked beside the geometry it looks at. */
+         * pose has to be taken with the car parked beside the geometry it looks at.
+         * (FAST mode needs neither: it freezes at once and moves the cull centre.) */
         static int s_span0 = -2, s_freeze = 0, s_started = 0;
         if (s_span0 == -2) {
-            s_span0 = td5_env_int("TD5RE_FREECAM_TOUR_SPAN", -1, -1, 100000);
-            s_freeze = td5_env_int("TD5RE_FREECAM_TOUR_FREEZE", 0, 0, 1);
+            s_span0 = s_tour_fast ? -1 : td5_env_int("TD5RE_FREECAM_TOUR_SPAN", -1, -1, 100000);
+            s_freeze = s_tour_fast ? 1 : td5_env_int("TD5RE_FREECAM_TOUR_FREEZE", 0, 0, 1);
         }
         if (!s_started && s_span0 >= 0) {
             const int ps = td5_game_get_player_slot(0);
@@ -2678,15 +2850,20 @@ static int tour_step(void)
         if (!s_started) {
             s_started = 1;
             if (s_freeze) g_td5.paused = 1;
-            TD5_LOG_I(LOG_TAG, "free-cam tour: start (freeze=%d)", s_freeze);
+            TD5_LOG_I(LOG_TAG, "free-cam tour: start (freeze=%d fast=%d)", s_freeze, s_tour_fast);
         }
     }
-    if (s_tour_frames == 0) {
-        s_freecam_eye[0] = s_tour[s_tour_i].x * 256.0;
-        s_freecam_eye[1] = s_tour[s_tour_i].y * 256.0;
-        s_freecam_eye[2] = s_tour[s_tour_i].z * 256.0;
-        s_freecam_yaw = (float)s_tour[s_tour_i].yaw;
-        s_freecam_pitch = (float)s_tour[s_tour_i].pitch;
+    {
+        TourPose *P = &s_tour[s_tour_i];
+        if (!P->resolved) tour_resolve(P);
+        if (s_tour_frames == 0) {
+            s_freecam_eye[0] = P->ex * 256.0;
+            s_freecam_eye[1] = P->ey * 256.0;
+            s_freecam_eye[2] = P->ez * 256.0;
+            s_freecam_yaw = (float)P->eyaw;
+            s_freecam_pitch = (float)P->pitch;
+        }
+        s_tour_cull = s_tour_fast ? P->cull : -1;
     }
     {
         const double cp = cos((double)s_freecam_pitch);
@@ -2701,15 +2878,33 @@ static int tour_step(void)
     }
     s_tour_frames++;
     if (s_tour_frames == s_dwell) {
+        const TourPose *P = &s_tour[s_tour_i];
         const char *fmt = getenv("TD5RE_FREECAM_TOUR_PATH");
         char path[320];
-        snprintf(path, sizeof path, (fmt && fmt[0]) ? fmt : "log/tour_%s.png",
-                 s_tour[s_tour_i].name);
+        const int complete = tour_scenery_complete();
+        snprintf(path, sizeof path, (fmt && fmt[0]) ? fmt : "log/tour_%s.png", P->name);
         td5_plat_request_frame_dump(path);
-        TD5_LOG_I(LOG_TAG, "free-cam tour: pose %d '%s' dumped -> %s", s_tour_i,
-                  s_tour[s_tour_i].name, path);
+        TD5_LOG_I(LOG_TAG, "free-cam tour: pose %d '%s' dumped -> %s (cull span %d, "
+                  "scenery %s)", s_tour_i, P->name, path, P->cull,
+                  complete ? "complete" : "INCOMPLETE");
+        {
+            FILE *mf = fopen(s_manifest, s_manifest_open ? "a" : "w");
+            if (mf) {
+                if (!s_manifest_open)
+                    fprintf(mf, "idx,name,png,span,cull_span,complete,undecorated_from,"
+                                "models_dl,stream_active,sim_tick,eye_x,eye_y,eye_z,yaw_deg,pitch_deg\n");
+                fprintf(mf, "%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%.0f,%.0f,%.0f,%.2f,%.2f\n",
+                        s_tour_i, P->name, path, P->span_used, P->cull, complete,
+                        td5_track_scenery_undecorated_from_span(),
+                        td5_track_get_models_display_list_count(), td5_tgstream_active(),
+                        (int)g_td5.simulation_tick_counter, P->ex, P->ey, P->ez,
+                        P->eyaw * 180.0 / 3.14159265358979, P->pitch * 180.0 / 3.14159265358979);
+                fclose(mf);
+                s_manifest_open = 1;
+            }
+        }
     }
-    if (s_tour_frames >= s_dwell + 6) { s_tour_i++; s_tour_frames = 0; }
+    if (s_tour_frames >= s_dwell + (s_tour_fast ? 2 : 6)) { s_tour_i++; s_tour_frames = 0; }
     return 1;
 }
 
