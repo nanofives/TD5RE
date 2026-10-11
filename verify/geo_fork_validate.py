@@ -318,7 +318,7 @@ def measure(run, fk):
     """All the per-fork numbers for one run (one seed, one arm)."""
     ring = run.ring or run.strip.ring if run.strip.ok else (run.ring or 10**9)
     ring = run.ring or (run.strip.ring if run.strip.ok else 10**9)
-    m = dict(passes=0, took=0, stayed=0, trapped=0, trapped_slots=[], stalls=[], events=0, incidents=0,
+    m = dict(passes=0, took=0, stayed=0, other=0, trapped=0, trapped_slots=[], stalls=[], events=0, incidents=0,
              mouth_in=0, mouth_out=0, body=0, contact_ticks=0, offroad=0, spins=[], speed_sum=0.0,
              speed_n=0, speed_corr_sum=0.0, speed_corr_n=0, speed_ring_sum=0.0, speed_ring_n=0, hits=0, crashes=0, hit_log=[])
     for slot in run.slots:
@@ -326,6 +326,7 @@ def measure(run, fk):
         a, b = run.window.get(slot, (0, 10**9))
         entered = exited = False
         took = False
+        took_other = False      # [1020 N] left this fork's main window onto a DIFFERENT corridor (an N-way split)
         prev_c = 0
         last_t = -10**9
         zone_rows = []
@@ -340,6 +341,8 @@ def measure(run, fk):
                 prev_c = 0
                 if entered and norm > fk["hi"] and raw < ring:
                     exited = True
+                if entered and raw >= ring and fk["lo"] <= norm <= fk["hi"]:
+                    took_other = True
                 in_off = in_spin = 0
                 continue
             entered = True
@@ -399,6 +402,8 @@ def measure(run, fk):
             m["passes"] += 1
             if took:
                 m["took"] += 1
+            elif took_other:
+                m["other"] += 1
             else:
                 m["stayed"] += 1
             for p in plateaus(zone_rows, STALL_HOLD, STALL_TOL):
@@ -553,8 +558,11 @@ def main():
     for fk in ordered:
         fk["lo"] = fk["F"] - WIDEN
         fk["hi"] = fk["R"] + TAIL
+    # [1020 N] ...but two forks that genuinely OVERLAP (window F..R shared: a left loop beside a right loop, an N-way
+    # split) keep their full windows: each is judged over every main span it covers, and a car that takes the OTHER
+    # corridor is counted as such ("other" below), never cut off at a midpoint.
     for a_, b_ in zip(ordered, ordered[1:]):
-        if a_["hi"] >= b_["lo"]:
+        if a_["hi"] >= b_["lo"] and not (a_["R"] >= b_["F"]):
             mid = (a_["hi"] + b_["lo"]) // 2
             a_["hi"] = mid
             b_["lo"] = mid + 1
@@ -582,14 +590,14 @@ def main():
         results.append(dict(F=F, fk=fk, fm=fm, bm=bm, verdict=verdict, reasons=reasons, speed=sp, per_seed=per_seed))
 
     # ---- the table ---------------------------------------------------------------
-    head = ["fork", "kind", "F..R", "len", "corr", "enter c/m", "wall in/body/out", "hit/crash", "stall", "jam",
+    head = ["fork", "kind", "F..R", "len", "corr", "enter c/m/o", "wall in/body/out", "hit/crash", "stall", "jam",
             "spin", "offrd", "speed f/b/main", "BASE hit/crash/stall/spin", "verdict"]
     rows = []
     for x in results:
         fk, fm, bm, sp = x["fk"], x["fm"], x["bm"], x["speed"]
         rows.append([
             "%s" % (fk["name"] or fk["kind"])[:26], fk["kind"], "%d..%d" % (fk["F"], fk["R"]), fk["len"],
-            "%d..%d" % (fk["c0"], fk["c1"]), "%d/%d" % (fm["took"], fm["stayed"]),
+            "%d..%d" % (fk["c0"], fk["c1"]), "%d/%d/%d" % (fm["took"], fm["stayed"], fm["other"]),
             "%d/%d/%d" % (fm["mouth_in"], fm["body"], fm["mouth_out"]), "%d/%d" % (fm["hits"], fm["crashes"]),
             len(fm["stalls"]), fm["trapped"], len(fm["spins"]), fm["offroad"],
             "%.0f/%.0f/%.0f" % (sp["speed"], sp["base_speed"], sp["main_speed"]),

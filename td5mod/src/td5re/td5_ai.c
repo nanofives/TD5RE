@@ -5804,7 +5804,18 @@ static void td5_ai_smart_branch(int slot) {
                          * race seed and the fork, so the seeds are not the same race */
                         const uint32_t ph = (smart_hash_u32(td5_game_get_race_seed()
                                               + (uint32_t)s * 2246822519u) >> 7) & 1u;
-                        take = (int)(((uint32_t)slot + ph) & 1u);
+                        /* [ROUND 1020 N] N-way splits: a fork with other forks just before it (overlapping or chained
+                         * windows) decides on the next slot bit, so the cars that stayed on the main road at the first
+                         * fork (one parity of slots) still divide between "stay" and "take" at the second. A lone fork
+                         * keeps the parity rule (ord 0). */
+                        int ord = 0;
+                        if (td5_env_flag_on("TD5RE_AI_FORCE_SPREAD")) {
+                            const int ring_len = td5_track_get_ring_length();
+                            for (int q = s - 90; q < s; q++)
+                                if (q >= 0 && q < ring_len && strips[(size_t)q * 0x18] == (g_td5.reverse_direction ? 11 : 8)) ord++;
+                            if (ord > 2) ord = 2;
+                        }
+                        take = (int)((((uint32_t)slot >> ord) + ph) & 1u);
                     }
                     else if (s_fmode == 2) take = 1;
                     else if (s_fmode == 3) take = 0;
