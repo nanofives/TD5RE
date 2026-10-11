@@ -847,6 +847,48 @@ static void bl_free_plan(BlPlan *P)
     P->rview.v = NULL; P->rview.count = P->rview.cap = 0;
 }
 
+/* [ROUND 1020 N] Two loops whose windows overlap may share the stretch. The engine keeps one side-link entry per MAIN span
+ * (s_sl_of), so what must not overlap are the MOUTHS (departure and arrival ranges, plus the slip lanes' margin); the two
+ * corridors must also stay clear of each other everywhere (a left and a right loop never meet; two loops on one side are
+ * checked row against row). TD5RE_GEO_FORK_OVERLAP=0 restores the round-1019 rule (windows may not overlap). */
+static int bl_ranges_apart(int alo, int ahi, int blo, int bhi, int margin)
+{
+    return ahi + margin < blo || bhi + margin < alo;
+}
+
+static int bl_overlap_ok(const BlPlan *C, const BlPlan *O)
+{
+    int c1, c2;
+    double need;
+    int i, j;
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_OVERLAP")) return 0;
+    {   /* the four mouth ranges of C against the four of O */
+        /* opposite sides never touch: the mouths only have to be different spans (the engine keeps one side-link entry per main
+         * span); the same side needs a gap so a slip lane does not run beside the other loop's street */
+        const int m = (C->sd == O->sd) ? td5_env_int("TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP", 6, 0, 40)
+                                       : td5_env_int("TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP_OPP", 1, 0, 40);
+        const int cl[2] = { C->a1_lo, C->a2_lo }, ch[2] = { C->a1_hi, C->a2_hi };
+        const int ol[2] = { O->a1_lo, O->a2_lo }, oh[2] = { O->a1_hi, O->a2_hi };
+        for (c1 = 0; c1 < 2; c1++)
+            for (c2 = 0; c2 < 2; c2++)
+                if (!bl_ranges_apart(cl[c1], ch[c1], ol[c2], oh[c2], m)) return 0;
+        /* a mouth must not sit inside the other loop's departure..arrival run on the SAME side either (the slip lane
+         * of one would run beside the other's street) */
+        if (C->sd == O->sd && C->F - 3 <= O->R + 3 && O->F - 3 <= C->R + 3) {
+            const double clr = (double)td5_env_float("TD5RE_GEO_FORK_OVERLAP_CLEAR_M", 9.0f, 0.0f, 60.0f) * BL_UPM;
+            need = ((double)C->lb + (double)O->lb) * bl_lw() * 0.5 + 2.0 * 1300.0 + clr;
+            for (i = 0; i <= C->clen; i++)
+                for (j = 0; j <= O->clen; j++) {
+                    const double dx = C->cx[i] - O->cx[j], dz = C->cz[i] - O->cz[j];
+                    if (dx * dx + dz * dz < need * need) return 0;
+                }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] OVERLAP kept: F=%d R=%d (%s) beside F=%d R=%d (%s), mouths apart", C->F, C->R, C->sd > 0 ? "left" : "right",
+              O->F, O->R, O->sd > 0 ? "left" : "right");
+    return 1;
+}
+
 int tg_bl_build(const TG_NodeList *nl, int ring)
 {
     TG_NetArm arms[192];
@@ -1089,13 +1131,17 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
     for (i = 0; i < ncand && s_nbl < max_loops && s_fork_count < TD5_TG_BRANCH_MAX; i++) {
         BlPlan *C = &cand[i];
         int clash = 0, q, k;
-        for (q = 0; q < s_nbl; q++) {   /* windows may not overlap, and arms are used once */
+        for (q = 0; q < s_nbl; q++) {   /* windows may not overlap (unless [1020 N] they may), and arms are used once */
             const BlPlan *O = &s_bl[q];
-            if (C->F - 3 <= O->R + 3 && O->F - 3 <= C->R + 3) clash = 1;
+            if (C->F - 3 <= O->R + 3 && O->F - 3 <= C->R + 3 && !bl_overlap_ok(C, O)) clash = 1;
             if (C->e1 == O->e1 || C->e1 == O->e2 || C->e2 == O->e1 || C->e2 == O->e2) clash = 1;
         }
-        if (clash) { bl_free_plan(C); continue; }
-        if (!td5_dev_forkfilter_allow(C->si1)) {    /* dev-only allow/deny by the DEPARTURE MOUTH span (verify/geo_fork_validate.ps1 -Only 739): F moves with the flare */
+        if (clash) {
+            TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d R=%d (%s) \"%s\" dropped: its window or an arm clashes with a loop already taken (mouths %d..%d / %d..%d)",
+                      C->F, C->R, C->sd > 0 ? "left" : "right", C->name, C->a1_lo, C->a1_hi, C->a2_lo, C->a2_hi);
+            bl_free_plan(C); continue;
+        }
+        if (!td5_dev_forkfilter_allow2(C->F, C->si1)) {    /* dev-only allow/deny by the DEPARTURE MOUTH span (verify/geo_fork_validate.ps1 -Only 739): F moves with the flare */
             TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] F=%d \"%s\" filtered out (TD5RE_GEO_FORK_ALLOW/DENY)", C->F, C->name);
             bl_free_plan(C);
             continue;

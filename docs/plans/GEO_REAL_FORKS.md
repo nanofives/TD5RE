@@ -1238,3 +1238,83 @@ ground skirt at a junction mouth, cosmetic; the 600..719 loop and the existing r
 * A human drive through a left corridor with lane assist OFF (the walker is clean for the AI, for the lane-assisted human slot and in the static audit; nobody has steered one by hand): Diagonal 74 mouth at span 131, the left loop at 600.
 * Left Avenida 13 (old route) and the left loops under six cars at once (ForceMode 2) WARN; both are AI behaviour at a corner next to the mouth / a street kink, not geometry.
 * N-way loops (a branch inside a loop), nested and overlapping corridors, a left plaza fork (plaza corridors are right-hand), coverage on routes where the finder has no left arm.
+
+## Round 1020 N: overlapping loops (several corridors off one stretch)
+
+Base master 6ab99f28, branch `fix-1791749347-74906-12652`. Mariano: "allow for more than two forks at the same time". Scope that fitted the round: **overlapping windows of
+block loops (done, harness PASS)**. Not built: a third way off ONE main span (N-way split), nesting, and a loop beside a real fork (Avenida 53 + the F=922 loop). What the
+engine already does and where its limits are is below, so the next round starts from facts.
+
+### What changed
+
+* **Generator** (`td5_tg_blockloop.c`, `TD5RE_GEO_FORK_OVERLAP`, default on, `=0` = the round-1019 rule): two loops whose windows F..R overlap are both kept when their four MOUTH ranges
+  (departure and arrival, `a1_lo..a1_hi`, `a2_lo..a2_hi`) are apart: 6 spans on one side (`TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP`), 1 span on opposite sides (`..._GAP_OPP`), and on ONE side the two
+  corridors must stay `lb*lane + 2*1300 + 9 m` (`..._CLEAR_M`) apart row against row. Arms are still used once. Every refused candidate logs why (`[BLOCK LOOP] F=.. dropped: ...`), every kept
+  overlap logs `OVERLAP kept`. On Mariano's route (FD6BE7C7): right loop 561..639 + LEFT loop 600..719 (previously the second was dropped as a window clash), with Diagonal 74 and Avenida 53 as before.
+* **Engine: nothing new was needed for a pair.** The side-link trailer keys one entry per MAIN span (`s_sl_of`), so what must not overlap are the mouths, which the generator guarantees; the jump records,
+  corridor maps, progress (`corr_progress_*`), wall gaps and the walker relocation work per loop. The harness rows (progress, finish, `enter c/m/o`) show cars passing through both loops and finishing; the walker audit (`TD5RE_WALKER_AUDIT=1`) was NOT run this round, nor were respawn/recovery, minimap and replay checked on the pair.
+* **AI** (`td5_ai.c`): the dev force mode (`TD5RE_AI_BRANCH_FORCE_MODE=1`) now SPREADS across chained forks (`TD5RE_AI_FORCE_SPREAD`, default on): a fork with another fork up to 90 spans before it uses a bit pattern
+  that takes 3 of the 6 slots and mixes with the first fork's parity (`slot*3>>1`, `slot*5>>2`), so every (took, took) combination exists. Production fork choice is unchanged (private per-slot RNG per fork).
+  **Main-road lane-change rate near a loop mouth** (`TD5RE_AI_MAIN_LANE_V0`, default 450, `0` = master; `TD5RE_AI_MAIN_LANE_PAD` = 14 spans around any mouth): the round-1017 S rule (rate falls as v0/v past v0 units/tick) now also applies
+  on the main road within 14 spans of a loop's departure or arrival mouth, floor 0.008 of the width per tick. Reason: with both loops built the cars that stay on the road meet the other loop's merge lane; the original
+  overtake logic swaps route table (u 0.63 -> 0.37) at 600+ units/tick, which is 130 units sideways per tick, and the rear lets go (the first left-loop failures: rear slip from span 627 at 625 u/t, a collision at 639, a pile-up at 645..657).
+  Applying it to the WHOLE main road is rejected: the forks-off baseline got 28 stalls (D74 window) with it, so it is local to loop mouths (`td5_track_loop_near_mouth`).
+* **Rejected, default off** `TD5RE_AI_MERGE_V` (a speed cap through a loop's ARRIVAL mouth on the main road, `td5_track_loop_arrival_dist`): natural-choice totals improve (below) but the forced 12-seed set makes the left loop WARN
+  (340: 3 jams, 6 stalls; 420: 1 stall), off = PASS. Left in as a knob.
+* **Harness** (`verify/geo_fork_validate.py`): `enter c/m/o` (took this fork / stayed / left the window onto ANOTHER corridor), two forks whose windows really overlap keep their full windows (no midpoint cut), a LOOP is judged to R+14
+  (`--loop-tail`, default 14; the aftermath of a merge crash lands after R+2: a car spun at the arrival at 718 stopped at 726-733), `TD5RE_GEO_FORK_ALLOW/DENY` name a loop by its F (the departure mouth's first span, what the log prints) OR the mouth centre
+  (`td5_dev_forkfilter_allow2`; before, a list written from the log matched nothing).
+
+### Limits (hard) and cost
+
+* One side-link entry per main span: at most ONE loop mouth per span, 64 loops per track (`SLNK` parse), 12 forks/loops per generator run (`TD5_TG_BRANCH_MAX`), mouths of overlapping loops 6 spans apart on one side, 1 span on opposite sides.
+* A type-8 real fork still has ONE `link_next` (one corridor per fork span) and a lane band per destination is not built, so a THIRD way off the same main span (N-way) and a real fork with a loop mouth inside its own window
+  (the F=922 loop beside Avenida 53: its mouth 933..951 meets the avenue's ramp, `bl_lanes_uniform` fails and the arms at 931 / 1000 are not in the census with the avenue built) are not possible yet.
+* Nesting (a corridor off a corridor) is not built: `corr_progress_index` returns the span itself for an unmapped corridor, so a corridor-to-corridor step has no main index (design in "How step 4 ... plug into this design" above).
+* Cost: no new runtime state, no new per-tick work except one `td5_track_loop_near_mouth` scan (<= 64 loops) per AI lane decision on a loop track; generator: a pairwise check of the 4 mouth ranges per candidate pair (+ corridor rows on one side).
+
+### Results (route FD6BE7C7, level091, 6 AI, no traffic, harness `verify/geo_fork_validate.ps1`, forks forced half and half, tail R+14)
+
+12 seeds (11 22 33 44 55 66 77 88 99 110 121 132 = 72 car-passes, run set `n8_nomerge`), final default build:
+
+| fork | enter c/m/o | wall in/body/out | hit/crash | stall | jam | spin | speed fork / forks-off / main | BASE hit/crash/stall/spin | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| LEFT Diagonal 74 131..360 | 36/36/0 | 107/3/5 | 14/6 | 0 | 0 | 3 | 517 / 622 / 347 | 0/0/0/0 | PASS |
+| right loop 561..639 | 36/15/21 | 119/182/0 | 20/0 | 0 | 0 | 0 | 349 / 475 / 347 | 4/4/8/0 | PASS |
+| LEFT loop 600..719 | 21/51/0 | 0/125/0 | 0/0 | 0 | 0 | 0 | 459 / 671 / 347 | 0/0/0/0 | **PASS** |
+| LEFT Avenida 53 855..933 | 36/36/0 | 94/0/15 | 0/0 | 0 | 0 | 0 | 448 / 562 / 347 | 0/0/0/0 | WARN (speed 80 %, kept: `geo_fork_keep.json`) |
+
+`o` = 21 cars on the 561 row took the left loop instead (10 of 18 in the 6-seed run). The 6-seed set (`n5_v450loc`, 3 distinct races' worth) agrees: PASS PASS PASS WARN(speed).
+How it got there (6 seeds, left loop only): first overlapped build FAIL (6 stalls, 1 jam, 6 spins, speed 55 %: the merge collision at 639 / pile-up 645..657); spread fix WARN (1 stall); with the local lane-rate rule PASS.
+
+AI totals, natural fork choice, 12 seeds, `verify/geo_r1017s_eval.py` (`tot_*` run sets):
+
+| build | stalls | stall ticks | events | incidents | passes | clean | spins |
+|---|---|---|---|---|---|---|---|
+| master config (`TD5RE_GEO_FORK_OVERLAP=0 TD5RE_AI_MAIN_LANE_V0=0`: D74 + Av53 + right loop 561) | 70 | 14905 | 1482 | 541 | 126 | 74 | 0 |
+| now (+ left loop 600, lane rule) | 74 | 15279 | 2273 | 600 | 144 | 77 | 0 |
+| now + `TD5RE_AI_MERGE_V=340` (rejected) | 65 | 11181 | 1651 | 607 | 144 | 75 | 0 |
+
+The "now" row has 18 more corridor passes (the left loop) and +791 contact events, 469 of them one car in one seed (s132 slot 2: stopped at the left loop's arrival (spans 726..733) after a car merging out of the corridor at 717 spun
+the car behind it at 718, then 1700 ticks there; s33 and s55 have two shorter ones at 760 and 840). That is the open item: the natural-choice races show what the forced harness window (to R+14) does not fully cover, the arrival merge of a corridor that feeds cars in at 140 units/tick among cars at 500.
+
+### Gates (measured, idle machine)
+
+* knob-off identity: `verify/geo_tags_identity.ps1 -Arm geo -Extra @{TD5RE_GEO_FORK_OVERLAP='0'}` on FD6BE7C7: MODELS.DAT 14347684 B `A2A82C4F7D1BAB9CC7F97ECB8714D161` = master. Default build: 14640720 B `2FD0EC16059E34F26B212F8B864E9464` (STRIP 112644 B `B306133376B2D102B055F48683D55AFD`).
+* synthetic auto track (slot 60, `SELECTED.TXT` aside): MODELS.DAT 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`, STRIP `0641EDB7...`, TEXTURES `5B4E005A...`: identical for the master exe and the new exe.
+* shipped tracks, master exe vs new exe (`verify/shipped_trace.ps1`, 6 AI): Moscow (0) 54,004 rows and Honolulu (8) 90,004 rows: 0 differing rows. Newcastle (5): the first pair differed (6,484 of 90,004 rows from tick 2319) but master-vs-master (two runs of the same exe)
+  also differs there (27,174 rows) and a second master-vs-new pair is identical (0 of 90,004): that track is not deterministic run to run on this machine, so the first comparison says nothing.
+* full self-test `pwsh scripts/selftest.ps1 -Suite full`: 64 PASS / 0 WARN / 0 FAIL, exit 0 (234 s). `build_all.bat`: dev + release + structure lint OK (warnings 84 = baseline, extern 3, game.h includers 23).
+* street census: 175 arms considered, 72 accepted (street 58, avenue 13, continuation 1), same as master. Verdict table: records for 561..639 and 600..719 now cite the 12-seed run; Avenida 53 stays WARN_KEEP.
+
+### Frames looked at (`verify/geo_tour.ps1 -Poses`, scenery stream finished)
+
+LEFT loop departure (span 606: the slip lane leaves the left edge in a curve, kerb and pavement between it and the road, a cross street ahead), the loop's street (corridor 1740: two lanes, pavement both sides), the arrival (span 706: the left corridor
+running beside the road and merging in). The two "top" poses came out as low oblique views (the pose height is clamped), so the overlap of the four mouths on the road between 600 and 639 was read from the log and the harness rows, not from a plan view.
+
+### What remains
+
+* N-way (a third way off one main span), nesting, and a loop beside a real fork: the plan is the table under "How step 4 ... plug into this design" (second link table keyed by span, lane band per destination, `corr_progress_index` for corridor-to-corridor steps).
+* The arrival merge: corridor cars enter at 140 units/tick, main-road cars pass at 500. Natural-choice races still show a jam in 3 of 12 seeds around 726..760 and 840 (left loop arrival, and the Avenida 53 approach already present before this round). A merge lane that accelerates the corridor car,
+  or an arrival that is a real give-way for the corridor, would remove it; `TD5RE_AI_MERGE_V` helps natural totals and hurts the forced harness, which is unexplained.
+* A human drive through two loops back to back (nobody has steered the pair by hand).

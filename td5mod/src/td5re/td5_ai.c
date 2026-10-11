@@ -4834,6 +4834,8 @@ static int s_ylim_mode = 0;
 static int s_ylim_on = 0;               /* resolved for this race */
 static int s_ylim_on_any = 0;           /* generated track (or mode 2): the [R1017 S] AI changes apply */
 static int s_ylim_L = 809, s_ylim_a0 = 6000, s_ylim_amin = 10, s_ylim_amax = 40, s_ylim_vmin = 150;
+static int s_main_lane_pad = 14;        /* ...within this many spans of a block-loop mouth */
+static int s_main_lane_v0 = 0;          /* [R1020 N] the same v0/v rule on the MAIN road of a generated track, near block-loop mouths only (TD5RE_AI_MAIN_LANE_V0, default 450, 0 = off = master) */
 static int s_lane_v0 = 0;               /* [R1017 S] corridor lane-change rate falls as v0/v past this speed (0 = off) */
 static int s_gain_v0 = 0;              /* [R1017 S] steering gain schedule: weight *= v0/v past v0 units/tick (0 = off) */
 static int s_gain_min = 25;            /* ... never below this percent of the faithful weight */
@@ -4853,6 +4855,8 @@ static void ai_steer_cap_race_init(void)
     s_ylim_amax = td5_env_int("TD5RE_AI_STEER_YAWLIM_AMAX", 40, 1, 400);
     s_ylim_vmin = td5_env_int("TD5RE_AI_STEER_YAWLIM_VMIN", 150, 1, 5000);
     s_lane_v0   = td5_env_int("TD5RE_AI_LANE_V0", 400, 0, 5000);   /* generated tracks only (see s_ylim_on_any) */
+    s_main_lane_v0 = td5_env_int("TD5RE_AI_MAIN_LANE_V0", 450, 0, 5000);
+    s_main_lane_pad = td5_env_int("TD5RE_AI_MAIN_LANE_PAD", 14, 0, 200);
     s_avoid_rel = td5_env_int("TD5RE_AI_AVOID_RELEASE", 0, 0, 1000);
     s_gain_v0   = td5_env_int("TD5RE_AI_GAIN_V0", 0, 0, 5000);
     s_gain_min  = td5_env_int("TD5RE_AI_GAIN_MIN", 25, 1, 100);
@@ -5804,7 +5808,21 @@ static void td5_ai_smart_branch(int slot) {
                          * race seed and the fork, so the seeds are not the same race */
                         const uint32_t ph = (smart_hash_u32(td5_game_get_race_seed()
                                               + (uint32_t)s * 2246822519u) >> 7) & 1u;
-                        take = (int)(((uint32_t)slot + ph) & 1u);
+                        /* [ROUND 1020 N] N-way splits: a fork with other forks just before it (overlapping or chained
+                         * windows) decides on the next slot bit, so the cars that stayed on the main road at the first
+                         * fork (one parity of slots) still divide between "stay" and "take" at the second. A lone fork
+                         * keeps the parity rule (ord 0). */
+                        int ord = 0;
+                        if (td5_env_flag_on("TD5RE_AI_FORCE_SPREAD")) {
+                            const int ring_len = td5_track_get_ring_length();
+                            for (int q = s - 90; q < s; q++)
+                                if (q >= 0 && q < ring_len && strips[(size_t)q * 0x18] == (g_td5.reverse_direction ? 11 : 8)) ord++;
+                            if (ord > 2) ord = 2;
+                        }
+                        /* ord 1 / 2 use a bit pattern that takes exactly 3 of the 6 slots and covers all four (took, took) combinations
+                         * with the parity rule of the first fork: slot*3>>1 = 0 1 1 0 0 1, slot*5>>2 = 0 1 0 1 1 0 */
+                        const uint32_t sb = (ord == 0) ? (uint32_t)slot : (ord == 1) ? (((uint32_t)slot * 3u) >> 1) : (((uint32_t)slot * 5u) >> 2);
+                        take = (int)((sb + ph) & 1u);
                     }
                     else if (s_fmode == 2) take = 1;
                     else if (s_fmode == 3) take = 0;
@@ -6192,6 +6210,16 @@ static void td5_ai_smart_lane_bias(int slot) {
             }
         }
     }
+    if (!on_branch && s_main_lane_v0 > 0 && s_ylim_on_any && td5_track_loop_near_mouth(span_raw, s_main_lane_pad)) {
+        /* [R1020 N] A main-road swing at 600+ units/tick (a route-table swap to dodge a car merging from a loop's arrival lane,
+         * u 0.63 -> 0.37) is 0.044 of the width per tick = 130 units sideways per tick: the heading step the corridor rule above
+         * was written against. Same v0 / v fall-off, floored at 0.008 so a swap still completes inside a few spans. */
+        const double v = fabs((double)ACTOR_I32(actor_ptr(slot), ACTOR_LONGITUDINAL_SPEED)) / 256.0;
+        if (v > (double)s_main_lane_v0) {
+            double du = max_du * (double)s_main_lane_v0 / v;
+            max_du = du > 0.008 ? du : 0.008;
+        }
+    }
     if (best_u > cu + max_du)      cu += max_du;
     else if (best_u < cu - max_du) cu -= max_du;
     else                           cu = best_u;
@@ -6247,6 +6275,7 @@ static int    s_gov_on = 1, s_gov_scope = 1, s_gov_look = 36;
 static double s_gov_lat_u = 6.69, s_gov_brk_u = 4.69;      /* units/tick^2 */
 static double s_gov_floor = 340.0;                          /* units/tick: below this a car has no yaw authority */
 static double s_gov_floor_loop = 260.0;                     /* [R1018 L] ... on a block loop's corridor (its corners are R >= 15 m arcs, not 4 m kinks) */
+static double s_merge_v = 0.0;                              /* [ROUND 1020 N] REJECTED, default off: units/tick cap through a block loop arrival mouth on the main road (TD5RE_AI_MERGE_V; 340 made the left loop 600..719 WARN with 3 jams in 12 seeds, 420 WARN with 1 stall, off = PASS) */
 static double s_gov_vmax = 0.0;                             /* units/tick: straight-line ceiling on a corridor route (0 = none) */
 
 static void ai_gov_read_knobs(void)
@@ -6262,6 +6291,7 @@ static void ai_gov_read_knobs(void)
     s_gov_floor = (double)td5_env_int("TD5RE_AI_GOV_FLOOR", 340, 0, 600);
     s_gov_floor_loop = (double)td5_env_int("TD5RE_AI_GOV_LOOP_FLOOR", 260, 0, 600);
     s_gov_vmax  = (double)td5_env_int("TD5RE_AI_GOV_VMAX", 0, 0, 900);
+    s_merge_v   = (double)td5_env_int("TD5RE_AI_MERGE_V", 0, 0, 900);
     TD5_LOG_I(LOG_TAG, "corridor_gov: %s scope=%d look=%d lat=%.2f brake=%.2f units/tick^2 floor=%.0f",
               s_gov_on ? "ON" : "off", s_gov_scope, s_gov_look, s_gov_lat_u, s_gov_brk_u, s_gov_floor);
 }
@@ -6317,6 +6347,13 @@ static double ai_gov_allowed(int slot, int span_raw, int span_count, double *out
         vl = sqrt(vc * vc + 2.0 * s_gov_brk_u * (cum + ln[i]));
         cum += ln[i];
         if (vl < best) best = vl;
+    }
+    if (s_merge_v > 0.0 && ring > 0 && span_raw < ring) {   /* [ROUND 1020 N] a loop's merge lane feeds cars in at ~140 units/tick: pass its mouth slower */
+        const int d = td5_track_loop_arrival_dist(span_raw, s_gov_look);
+        if (d >= 0) {
+            const double vl = sqrt(s_merge_v * s_merge_v + 2.0 * s_gov_brk_u * (double)d * (double)TD5_TG_SPAN_LENGTH);
+            if (vl < best) best = vl;
+        }
     }
     if (out_bend) *out_bend = rmin;
     if (best > 1e17) return -1.0;
