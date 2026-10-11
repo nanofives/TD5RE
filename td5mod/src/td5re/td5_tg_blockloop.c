@@ -9,10 +9,13 @@
  * the route through a second cross street. Every loop rejoins: there are no dead ends.
  *
  * WHAT IT IS NOT. It is not a fork in the engine's sense (a widened cross-section that splits):
- * the main road is not touched at all. The corridor's first span stands against the road's
- * right edge with its axis perpendicular to the road, and its last span stands against the
- * edge again. The engine learns where the road is open from the SLNK trailer
- * (td5_track.c, "SIDE LINKS"): the walker relocates a probe that crosses the open rail, the
+ * the main road is not touched at all. The corridor starts as a SLIP LANE: its first spans run
+ * flush against the road's right edge (its left rail IS the road edge, 14 spans on La Plata),
+ * then arc away (R = 22 m) into the cross street, and it comes back the same way, merging
+ * flush at the other end. A perpendicular first span (the first design) put cars into the
+ * wall at 400+ units/tick: a car cannot turn 90 degrees inside its own width. The engine
+ * learns where the road is open from the SLNK trailer (td5_track.c, "SIDE LINKS"): the walker
+ * relocates a probe that crosses the open rail into the corridor span that contains it, the
  * wall resolver stands the rail down there.
  *
  * WHAT IT SHARES WITH A FORK. The span bookkeeping: F (the departure span, type 8, link_next =
@@ -26,7 +29,7 @@
  * of real streets (their mouths are validated against the raster and keep the frontage
  * open), joined by a shortest path over the real OSM way graph (ROADS.JSON). The corridor is
  * the way vertices, rounded with a minimum-radius fillet, resampled to one span per
- * TD5_TG_SPAN_LENGTH, with the mouth flared so a car can swing in.
+ * TD5_TG_SPAN_LENGTH, with the slip lanes added at both ends (bl_slip).
  *
  * KNOBS (all default ON / sane, =0 restores master exactly):
  *   TD5RE_GEO_FORK_BLOCKLOOP        master switch for the generator
