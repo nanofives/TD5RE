@@ -11,6 +11,7 @@ def opt(n, d):
     return float(sys.argv[sys.argv.index(n) + 1]) if n in sys.argv else d
 strip = a[0]; spans = [int(x) for x in a[1].split(",")]
 back, up, side = opt("--back", 5500), opt("--up", 1700), opt("--side", 0)
+tside, tup = opt("--tside", 0), opt("--tup", 9000)     # top-down pose: shifted toward the left by TSIDE, TUP above
 if "--back" in sys.argv: a = [x for x in a if x != str(int(back))]
 d = open(strip, "rb").read()
 span_off, ring, vtx_off, vtx_n, total = struct.unpack_from("<5I", d, 0)
@@ -26,11 +27,13 @@ def mid(s):
     return (((l[0] + r[0] + l2[0] + r2[0]) / 4), ((l[1] + r[1] + l2[1] + r2[1]) / 4), ((l[2] + r[2] + l2[2] + r2[2]) / 4))
 out = []
 for s in spans:
-    p = mid(s); q = mid(s + 3); r = mid(s - 3)
+    nsp = (len(d) - span_off) // 24 if vtx_off > span_off else 0
+    hi_ = max(0, min(s + 3, (vtx_off - span_off) // 24 - 1)); lo_ = max(0, s - 3)
+    p = mid(s); q = mid(hi_); r = mid(lo_)
     tx, tz = q[0] - r[0], q[2] - r[2]; l = math.hypot(tx, tz) or 1.0; tx /= l; tz /= l
     yaw = math.degrees(math.atan2(tx, tz))
     lx, lz = tz, -tx
     out.append("s%d:%d,%d,%d,%.1f,-12" % (s, p[0] - tx * back + lx * side, p[1] + up, p[2] - tz * back + lz * side, yaw))
     if "--top" in sys.argv:
-        out.append("s%d_top:%d,%d,%d,%.1f,-82" % (s, p[0] - tx * 400, p[1] + 9000, p[2] - tz * 400, yaw))
+        out.append("s%d_top:%d,%d,%d,%.1f,-82" % (s, p[0] - tx * 400 + lx * tside, p[1] + tup, p[2] - tz * 400 + lz * tside, yaw))
 print(";".join(out))

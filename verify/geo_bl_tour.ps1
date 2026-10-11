@@ -19,6 +19,7 @@ param([string]$Tag = "run",
       [string]$GeoPlace = "la_plata",
       [int]$Track = 61,
       [int]$Dwell = 90,
+      [int]$Width = 1280, [int]$Height = 720,   # [1019 V] the window (and so the frame) size
       [int]$GenWait = 900,
       [int]$RaceSecs = 240)
 
@@ -63,7 +64,7 @@ if (Test-Path $lvl) { Remove-Item $lvl -Recurse -Force }
 
 $args = @("--AutoRace=1","--SkipIntro=1","--DefaultTrack=$Track","--DefaultOpponents=5",
           "--Traffic=0","--PlayerIsAI=1","--AutoThrottle=0","--CarDamage=0",
-          "--Windowed=1","--VSync=0") + $gfx
+          "--Windowed=1","--VSync=0","--Width=$Width","--Height=$Height") + $gfx
 $p = Start-Process -FilePath (Join-Path $wt $Exe) -ArgumentList $args -WorkingDirectory $wt -PassThru
 Write-Host "pid=$($p.Id) tag=$Tag exe=$Exe poses=$($names.Count)"
 Start-Sleep -Seconds 2

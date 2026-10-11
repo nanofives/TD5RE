@@ -26,6 +26,11 @@ static int td5_dev_forkfilter_has(const char *list, int F)
     while (p && *p) {
         char *end;
         long v = strtol(p, &end, 10);
+        if (end != p && *end == '-') {                    /* [1019 V] "855-933": a range */
+            char *e2;
+            long hi = strtol(end + 1, &e2, 10);
+            if (e2 != end + 1) { if (F >= (int)v && F <= (int)hi) return 1; end = e2; }
+        } else
         if (end != p && (int)v == F) return 1;
         p = (*end == ',' || *end == ' ') ? end + 1 : (end == p ? p + 1 : end);
     }
@@ -41,7 +46,7 @@ static inline int td5_dev_forkfilter_allow(int F)
     return 1;
 }
 
-/* [1019 V] TD5RE_GEO_FORK_PRE_DENY="707": the candidate with that F is removed BEFORE the weighted selection, so the
+/* [1019 V] TD5RE_GEO_FORK_PRE_DENY="707" or "855-933" or "707 855" (space or comma separated; ranges allowed): the candidate with that F is removed BEFORE the weighted selection, so the
  * selector builds the best set WITHOUT it (the DENY/ALLOW above only prune its result). For A/B-ing a fork that a
  * neighbouring candidate would otherwise take the room of (a left corridor beside a right one). */
 static inline int td5_dev_forkfilter_predeny(int F)

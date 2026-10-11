@@ -26,6 +26,7 @@ param([ValidateSet("synthetic","geo")][string]$Arm = "synthetic",
       [string]$Tag = "run",
       [string]$Seed = "99991",
       [int]$Port = 37231,
+      [string]$Exe = "td5re.exe",            # [1019 V] e.g. td5re_master.exe, the reference build the knobs-off gate is judged against
       [hashtable]$Extra = @{},
       [int]$GenWait = 900,
       [int]$RaceSecs = 10,
@@ -74,7 +75,7 @@ foreach ($f in @("race.log","engine.log","frontend.log")) {
 }
 
 Write-Host "arm=$Arm tag=$Tag seed=$Seed slot=$slot level=$lvlName"
-$p = Start-Process -FilePath (Join-Path $wt "td5re.exe") `
+$p = Start-Process -FilePath (Join-Path $wt $Exe) `
       -ArgumentList (@("--AutoRace=1","--SkipIntro=1") +
                      $(if ($NoControl) { @("--VSync=0") } else { @("--Control=1") }) +
                      @("--DefaultTrack=$slot") + $gfx) `

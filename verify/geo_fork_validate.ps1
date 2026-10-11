@@ -52,6 +52,7 @@ param(
     [string]$RouteDir = "",                # [1019 V] a different _route/ (e.g. an older route) copied into every run dir
     [int]$Track = 61,
     [int]$Opponents = 5,
+    [int]$Traffic = 0,                     # [1019 V] --Traffic (0 = none, the standing harness setting)
     [string]$Difficulty = "auto",          # AI tier per seed: auto = 1,2,0,1,2,0.. (the seed alone changes only the fork choice)
     [int]$ForceMode = 1,                   # TD5RE_AI_BRANCH_FORCE_MODE (1 = alternate arms by slot)
     [string]$Modules = "track,driver,motion,progress,pose,rotation",
@@ -217,7 +218,7 @@ function Start-Run($run) {
     }
     foreach ($k in $e.Keys) { Set-Item "env:$k" $e[$k] }
     $a = @("--AutoRace=1", "--SkipIntro=1", "--DefaultTrack=$Track",
-           "--DefaultOpponents=$Opponents", "--Traffic=0", "--Difficulty=$(Get-Tier $run)",
+           "--DefaultOpponents=$Opponents", "--Traffic=$Traffic", "--Difficulty=$(Get-Tier $run)",
            "--PlayerIsAI=1", "--AutoThrottle=0", "--CarDamage=0",
            "--Windowed=1", "--VSync=0", "--SFXVolume=0", "--MusicVolume=0",
            "--RaceTrace=1", "--RaceTraceSlot=-1", "--RaceTraceMaxSimTicks=$MaxSimTicks",
