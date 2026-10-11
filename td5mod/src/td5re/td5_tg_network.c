@@ -745,6 +745,7 @@ static struct {
     long d_grid, d_struct, d_biome, d_park, d_corridor, d_skew,
          d_short, d_taken, d_fold, d_full, d_under;
     long fan_cut;           /* [1015 B] mouth spans cut: their normal is off the street's ray */
+    long joined;            /* [1021 B] streets lengthened to touch the street that stopped them */
     long why_road, why_street, why_water;
 } s_gs;
 
@@ -1407,6 +1408,26 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
             continue;
         }
 
+        /* [ROUND 1021 B item 17] "fix crossing roads that have other crossing roads: they must
+         * connect, not overlap or end in walls." tg_net_march stops the arm where its centre point
+         * comes within half-width + 200 of another street's paint (why == 2), so the two ended with
+         * a bare gap of up to half a street width + 200 (measured on span 460..470: 3000 units,
+         * 7 m) between them, in front of the flank wall. The street that was stopped is lengthened
+         * to the other street's near edge, so the pair is one junction. Only an arm that already
+         * cleared the minimum on its own (a stub that a neighbour cuts to nothing stays dropped),
+         * capped at the flat verge like every geo street. TD5RE_GEO_STREET_JOIN=0 restores it. */
+        if (why == 2 && reach >= pre - 0.5 && td5_env_flag_on("TD5RE_GEO_STREET_JOIN")) {
+            double ext = width * 0.5 + 200.0;
+            if (reach + ext > TG_GEO_DEPTH_MAX) ext = TG_GEO_DEPTH_MAX - reach;
+            if (ext > 0.0) {
+                reach += ext;
+                s_gs.joined++;
+                if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+                    TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO JOIN] si %d %s lengthened %.0f to meet the street that stopped it",
+                              a->si, a->left ? "left" : "right", ext);
+            }
+        }
+
         kind = tg_turn_open(a->si, a->left) ? TG_NE_CONTINUATION
              : ((a->lanes >= TG_GEO_AVENUE_LANES || a->klass >= TD5_GEO_RC_PRIMARY)
                 ? TG_NE_AVENUE : TG_NE_STREET);
@@ -1683,14 +1704,14 @@ static void tg_net_geo_census(void)
               "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
               "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
               "table-full %ld; march stops: road %ld street %ld water/steep %ld; "
-              "mouth spans cut off a bend's fan %ld",
+              "mouth spans cut off a bend's fan %ld; streets joined to a neighbour %ld",
               td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
               s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
               s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart, s_gs.beyond,
               s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
-              s_gs.why_road, s_gs.why_street, s_gs.why_water, s_gs.fan_cut);
+              s_gs.why_road, s_gs.why_street, s_gs.why_water, s_gs.fan_cut, s_gs.joined);
     /* The ledger: one line per refused arm, so a RUN of missing crossings
      * names its own rule instead of hiding inside a total. */
     {

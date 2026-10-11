@@ -4253,6 +4253,10 @@ int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of a
  * slab must not be laid on top of it. */
 int tg_realfork_walk_owned(int fi, int mb);
 int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
+/* [ROUND 1021 B item 5] clip a main-road kerb slab against the street mouths round span si (td5_tg_avenue.c):
+ * 0 = nothing free, 1 = whole span free, 2 = the clipped slab was emitted, -1 = out of memory */
+int    tg_av_main_pave_clip(const TG_NodeList *nl, int si, double sg, double e0, double e1,
+                            double f0, double f1, TG_Buf *blk, size_t *moff, int *nmesh);
 /* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
  * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
  * real road close to and parallel with the route, as a FORK the player and the AI

@@ -467,6 +467,8 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
  * because a reader comparing "87 / 228 / 336" against three avenues of 90 / 146
  * / 112 spans would otherwise read three per-avenue counts that nearly fit. */
 static long s_av_farwalk;
+static long s_av_pave_clipped;    /* [1021 B] main-road slabs cut along a street's edge */
+static long s_av_farwalk_blend;   /* [1021 B] spans whose footway end was joined/tapered instead of capped */
 
 /* [ROUND 1014 A] The footway's OUTER-edge lateral at both ends of span s and its width,
  * exactly as tg_av_emit_far_pavement will lay it, or 0 when span s lays none. Asked of
@@ -582,14 +584,14 @@ static int tg_av_line_free(const TG_NodeList *nl, int s, double lat0, double lat
 }
 
 /* The street quads of the mouths around span s on the footway's side. */
-static int tg_av_street_quads(const TG_NodeList *nl, int s, double sg, double q[][8])
+static int tg_av_street_quads(const TG_NodeList *nl, int s, double sg, double q[][8], int all)
 {
     const int left = (sg > 0.0);
     int m, nq = 0;
     for (m = s - 3; m <= s + 3 && nq < 7; m++) {
         double sk = 0.0, rr = 0.0, ef[10], no[2], fo[2], cs, sn;
         if (m < 1 || m + 1 >= nl->count) continue;
-        if (!(tg_net_mouth_shift(m, left) > 0.0) || tg_net_mouth_kind(m, left) < 0) continue;
+        if ((!all && !(tg_net_mouth_shift(m, left) > 0.0)) || tg_net_mouth_kind(m, left) < 0) continue;
         if (tg_net_mouth(m, left, &sk, &rr) < 0 || !(rr > 0.0)) continue;
         tg_city_edge_frame(nl, m, sg, ef);
         cs = cos(sk); sn = sin(sk);
@@ -607,14 +609,14 @@ static int tg_av_street_quads(const TG_NodeList *nl, int s, double sg, double q[
 /* Free part of span s's slab: 0 = none, 1 = whole span, 2 = clipped (ui/uo set). The slab's
  * inner edge is at e, its outer at f (signed laterals at both ends of the span). */
 static int tg_av_far_clip(const TG_NodeList *nl, int s, double e0, double e1, double f0, double f1,
-                          double sg, double *ui0, double *ui1, double *uo0, double *uo1)
+                          double sg, double *ui0, double *ui1, double *uo0, double *uo1, int all)
 {
     double q[7][8];
     int nq, ri, ro;
     *ui0 = *uo0 = 0.0; *ui1 = *uo1 = 1.0;
-    if (!td5_env_flag_on("TD5RE_GEO_FAR_STREET_CLIP")) return 1;
+    if (!all && !td5_env_flag_on("TD5RE_GEO_FAR_STREET_CLIP")) return 1;
     if (!nl || s < 0 || s + 1 >= nl->count) return 1;
-    nq = tg_av_street_quads(nl, s, sg, q);
+    nq = tg_av_street_quads(nl, s, sg, q, all);
     if (nq < 1) return 1;
     ri = tg_av_line_free(nl, s, e0, e1, (const double (*)[8])q, nq, ui0, ui1);
     ro = tg_av_line_free(nl, s, f0, f1, (const double (*)[8])q, nq, uo0, uo1);
@@ -662,7 +664,7 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
         {
             double u0, u1, v0, v1;
             if (tg_av_far_clip(nl, s, x0, x1, x0 + sg0 * w, x1 + sg1 * w, sg0,
-                               &u0, &u1, &v0, &v1) == 0) return 0;
+                               &u0, &u1, &v0, &v1, 0) == 0) return 0;
         }
         *e0 = x0; *e1 = x1;
     }
@@ -688,7 +690,7 @@ static int tg_av_far_joins(const TG_NodeList *nl, int s, int other, int end)
 static int tg_av_emit_far_clipped(const TG_NodeList *nl, int si, double e0, double e1,
                                   double f0, double f1, double sg, double ui0, double ui1,
                                   double uo0, double uo1, int deep, TG_Buf *blk,
-                                  size_t *moff, int *nmesh)
+                                  size_t *moff, int *nmesh, int main_slab)
 {
     const double H = (double)TD5_TG_KERB_H;
     const double drop = deep ? (double)TD5_TG_GROUND_DROP : 0.0;
@@ -726,8 +728,8 @@ static int tg_av_emit_far_clipped(const TG_NodeList *nl, int si, double e0, doub
         px[n]=Xf[lo]; py[n]=Yf[lo]+H; pz[n]=Zf[lo]; uu[n]=1.0; vv[n]=0.0; n++;
         px[n]=Xn[lo]; py[n]=Yn[lo]+H; pz[n]=Zn[lo]; uu[n]=0.0; vv[n]=0.0; n++;
     }
-    cap_in  = (ui0 > 0.0 || uo0 > 0.0) || (deep && !tg_av_far_joins(nl, si, si - 1, 0));
-    cap_out = (ui1 < 1.0 || uo1 < 1.0) || (deep && !tg_av_far_joins(nl, si, si + 1, 1));
+    cap_in  = (ui0 > 0.0 || uo0 > 0.0) || (!main_slab && deep && !tg_av_far_joins(nl, si, si - 1, 0));
+    cap_out = (ui1 < 1.0 || uo1 < 1.0) || (!main_slab && deep && !tg_av_far_joins(nl, si, si + 1, 1));
     if (cap_in) {
         px[n]=Xn[hi]; py[n]=Yn[hi]-drop; pz[n]=Zn[hi]; uu[n]=0.0; vv[n]=1.0; n++;
         px[n]=Xn[lo]; py[n]=Yn[lo]-drop; pz[n]=Zn[lo]; uu[n]=1.0; vv[n]=1.0; n++;
@@ -766,10 +768,11 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
      * to lay rather than a guess to lay. */
     const double sw = tg_geo_sidewalk_w_side(si, sg0 > 0.0);
     /* OUTER edge of the far carriageway, and the back edge of the slab. */
-    const double e0 = o0 + sg0 * ohw, f0 = e0 + sg0 * sw;
-    const double e1 = o1 + sg1 * ohw, f1 = e1 + sg1 * sw;
-    const double cl0 = (e0 > f0) ? e0 : f0, cr0 = (e0 > f0) ? f0 : e0;
-    const double cl1 = (e1 > f1) ? e1 : f1, cr1 = (e1 > f1) ? f1 : e1;
+    double e0 = o0 + sg0 * ohw, f0 = e0 + sg0 * sw;
+    double e1 = o1 + sg1 * ohw, f1 = e1 + sg1 * sw;
+    double cl0 = (e0 > f0) ? e0 : f0, cr0 = (e0 > f0) ? f0 : e0;
+    double cl1 = (e1 > f1) ? e1 : f1, cr1 = (e1 > f1) ? f1 : e1;
+    int blend_in = 0, blend_out = 0;     /* [1021 B item 2] end joined to a neighbour that differs, or tapered to a point */
     const double H = (double)TD5_TG_KERB_H;
     const double b0 = a->y, b1 = c->y;      /* the far carriageway's own plane */
     double px[20], py[20], pz[20], uu[20], vv[20];
@@ -810,15 +813,59 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
             (e1 < 0.0 ? -e1 : e1) < c->width * 0.5 + m) return 1;
     }
 
+    /* [ROUND 1021 B item 2] "sidewalk starts suddenly" (e10 s7, span 41: the first span of the
+     * fork's corridor). The footway's inner edge and width come from the corridor's own bow, and
+     * at the mouth they step: spans 38..40 lie at lateral -4960 / 2467 wide, span 41 at -3000 /
+     * 1290 wide (a 4.5 m jump), and along the run the width alternates 1290 / 2600 span by span
+     * (two different mapped pavements). tg_av_far_joins refuses a join over 60 units, so every
+     * such boundary got a vertical end cap: a slab that appears out of nowhere.
+     *
+     * Where the neighbour DOES carry a footway, both spans now take the MEAN of the two edges at
+     * their shared node (each side computes the same mean from the same raw numbers, so the slab is
+     * continuous and needs no cap). Where it does NOT (the run's real end, not a street mouth,
+     * which keeps its clipped cap), the end tapers to a point over this span instead of ending in a
+     * wall. TD5RE_GEO_FARWALK_BLEND=0 restores the capped ends. */
+    if (deep && td5_env_flag_on("TD5RE_GEO_FARWALK_BLEND")) {
+        int k;
+        for (k = 0; k < 2; k++) {                 /* 0 = near end (span si-1), 1 = far end (si+1) */
+            const int    nb    = k ? si + 1 : si - 1;
+            const double own_e = k ? e1 : e0;
+            const double own_w = (k ? (f1 - e1) : (f0 - e0)) * (k ? sg1 : sg0);
+            const double sgk   = k ? sg1 : sg0;
+            double ne0 = 0.0, ne1 = 0.0, nw = 0.0, he, hw;
+            if (nb < 0 || nb + 1 >= nl->count) continue;
+            if (tg_av_far_edges(nl, nb, &ne0, &ne1, &nw)) {
+                const double ne = k ? ne0 : ne1;
+                if (fabs(ne - own_e) < 60.0 && fabs(nw - own_w) < 60.0) continue;   /* already joins */
+                if (fabs(ne - own_e) > 2500.0 || ne * own_e <= 0.0) continue;       /* too far: keep the cap */
+                he = 0.5 * (ne + own_e);
+                hw = 0.5 * (nw + own_w);
+            } else if (tg_av_far_mouth(nb - 1, k ? o1 : o0) || tg_av_far_mouth(nb, k ? o1 : o0)
+                       || tg_av_far_mouth(nb + 1, k ? o1 : o0)) {
+                continue;                                  /* a street leaves there: its clipped cap stays */
+            } else {
+                he = own_e;                                /* run end: taper to nothing */
+                hw = 0.0;
+            }
+            if (k) { e1 = he; f1 = he + sgk * hw; blend_out = 1; }
+            else   { e0 = he; f0 = he + sgk * hw; blend_in  = 1; }
+        }
+        if (blend_in || blend_out) {
+            cl0 = (e0 > f0) ? e0 : f0; cr0 = (e0 > f0) ? f0 : e0;
+            cl1 = (e1 > f1) ? e1 : f1; cr1 = (e1 > f1) ? f1 : e1;
+            s_av_farwalk_blend++;
+        }
+    }
+
     /* [ROUND 1015 A item 5] a street's tarmac over part of this span: clip the slab to the
      * free run, cut along the street's own edge, and cap the cut. */
     {
         double ui0, ui1, uo0, uo1;
-        const int cl = tg_av_far_clip(nl, si, e0, e1, f0, f1, sg0, &ui0, &ui1, &uo0, &uo1);
+        const int cl = tg_av_far_clip(nl, si, e0, e1, f0, f1, sg0, &ui0, &ui1, &uo0, &uo1, 0);
         if (cl == 0) return 1;
         if (cl == 2)
             return tg_av_emit_far_clipped(nl, si, e0, e1, f0, f1, sg0, ui0, ui1, uo0, uo1,
-                                          deep, blk, moff, nmesh);
+                                          deep, blk, moff, nmesh, 0);
     }
 
     /* TOP. */
@@ -842,8 +889,8 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     /* [ROUND 1014 A] END CAPS where the footway does not carry on at the same lateral
      * and width (winding as tg_emit_avenue_divider's, derived there). */
     if (deep) {
-        cap_in  = !tg_av_far_joins(nl, si, si - 1, 0);
-        cap_out = !tg_av_far_joins(nl, si, si + 1, 1);
+        cap_in  = !blend_in  && !tg_av_far_joins(nl, si, si - 1, 0);
+        cap_out = !blend_out && !tg_av_far_joins(nl, si, si + 1, 1);
     }
     if (cap_in) {
         px[n]=a->x+a->tz*cl0; py[n]=g0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
@@ -870,6 +917,30 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHROAD, si);
     s_av_farwalk++;
     return 1;
+}
+
+/* [ROUND 1021 B item 5] "sidewalk in the middle of the crossing road" (e7 s14, span 24..29): the
+ * MAIN road's own kerb pavement is dropped on the spans a mouth lists, but a street leaving at 45
+ * degrees sweeps along the road as it moves out, so at the pavement's lateral it also covers part
+ * of the span NEXT to the mouth and the slab stood on the street's tarmac (audit: `city over
+ * city:101`, 97 of 124 overlap samples on Mariano's route). Same treatment round 1015 A gave the far
+ * footway: the slab is CLIPPED to its free run, cut along the street's own edge, with a cap on the
+ * cut. The inputs are signed laterals of the slab's inner (e) and outer (f) edge at both ends of
+ * span si; the street set is EVERY mouth within three spans (the far footway only looked at
+ * far-side ones). Returns 0 = no free run (leave the slab out), 1 = whole span free, 2 = it emitted
+ * the clipped slab (caller emits nothing for this side). TD5RE_GEO_PAVE_STREET_CLIP=0 restores. */
+int tg_av_main_pave_clip(const TG_NodeList *nl, int si, double sg, double e0, double e1,
+                         double f0, double f1, TG_Buf *blk, size_t *moff, int *nmesh)
+{
+    double ui0, ui1, uo0, uo1;
+    int cl;
+    if (!td5_env_flag_on("TD5RE_GEO_PAVE_STREET_CLIP")) return 1;
+    cl = tg_av_far_clip(nl, si, e0, e1, f0, f1, sg, &ui0, &ui1, &uo0, &uo1, 1);
+    if (cl != 2) return cl;
+    if (!tg_av_emit_far_clipped(nl, si, e0, e1, f0, f1, sg, ui0, ui1, uo0, uo1, 1,
+                                blk, moff, nmesh, 1)) return -1;
+    s_av_pave_clipped++;
+    return 2;
 }
 
 /* ---- the MEASUREMENT, logged ---------------------------------------------
@@ -924,10 +995,11 @@ static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
         TD5_LOG_I(LOG_TAG, "trackgen: [GEO AVENUE] %s spans %d..%d: opposite "
                   "carriageway %.1f..%.1f m away, median built %.2f..%.2f m "
                   "over %d span(s), %d opening(s) for real cross streets; "
-                  "far-side footway on %ld span(s) CUMULATIVE over the track",
+                  "far-side footway on %ld span(s) CUMULATIVE over the track "
+                  "(%ld joined/tapered instead of capped)",
                   name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
                   s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open,
-                  s_av_farwalk);
+                  s_av_farwalk, s_av_farwalk_blend);
         s_av_n = 0;        /* the next avenue starts its own accumulation */
         s_av_open = 0;
         break;
