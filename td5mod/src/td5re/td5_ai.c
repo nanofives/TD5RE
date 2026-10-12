@@ -6278,6 +6278,31 @@ static double s_gov_floor_loop = 260.0;                     /* [R1018 L] ... on 
 static double s_merge_v = 0.0;                              /* [ROUND 1020 N] REJECTED, default off: units/tick cap through a block loop arrival mouth on the main road (TD5RE_AI_MERGE_V; 340 made the left loop 600..719 WARN with 3 jams in 12 seeds, 420 WARN with 1 stall, off = PASS) */
 static double s_gov_vmax = 0.0;                             /* units/tick: straight-line ceiling on a corridor route (0 = none) */
 
+/* ===== [R1022 Q] REJOIN GIVE-WAY ============================================
+ * MEASURED (rounds 1020 N / 1021 A, harness + natural choice): a corridor car rejoining the road
+ * arrives at 140..420 units/tick among road cars at 500..640, and nothing in the AI knows the
+ * other car exists until the contact: the corridor path's car-following scans the corridor's own
+ * spans, the road car's scans the road's. Result: a road car hit at the rejoin span by a merging
+ * corridor car (F=429 R=638 seed 22: 636 u/t struck at 635 by a car joining at 419, spin, 120
+ * ticks stopped), merge crashes at 255..256 on Diagonal 73 (R=253), a jam at 726..733 below the
+ * left loop's arrival. Gap acceptance at the merge point, by TIME TO R, one rule for both sides:
+ *   t_m = signed distance to the rejoin span / speed of the road car, t_c = path distance of the
+ *   corridor car to it / its speed. The car that reaches R first goes first: a corridor car whose
+ *   t_c falls in [t_m, t_m + gap) is capped to the speed that puts it gap ticks behind (d_c /
+ *   (t_m + gap)); a road car in [t_c, t_c + gap) of a corridor car that is first eases off the same
+ *   way (floor higher, it keeps the road). Both sides use the same ordering, so only one yields.
+ *   A yielding corridor car creeps (_FLOOR) up to the give-way line _HOLD units before the rejoin
+ *   span and stops there (cap 1 unit/tick) until the road car is _CLEAR units past it: a creep floor
+ *   all the way to the span put the car under a road car that passed at 570 (measured, forced F=429).
+ *   A road car slower than _VSTOP is an obstacle for car-following, not traffic to give way to.
+ * Generated tracks only (s_ylim_on_any). TD5RE_AI_MERGE_YIELD=0 and TD5RE_AI_MERGE_MAIN=0 restore
+ * the old behaviour; _LOOK (spans), _GAP (ticks), _FLOOR / _FLOOR_MAIN (units/tick). */
+static int    s_mg_on = 1, s_mg_main_on = 1, s_mg_look = 26, s_mg_gap = 26;
+static double s_mg_floor = 150.0, s_mg_floor_m = 300.0;
+static double s_mg_hold = 3000.0;       /* units before the rejoin span where a yielding corridor car stops (the give-way line) */
+static double s_mg_clear = 3500.0;      /* units a road car must be past the rejoin span before a corridor car may enter behind it */
+static double s_mg_vstop = 150.0;       /* units/tick: a road car slower than this is an obstacle, not traffic to yield to */
+
 static void ai_gov_read_knobs(void)
 {
     if (s_gov_inited) return;
@@ -6292,6 +6317,17 @@ static void ai_gov_read_knobs(void)
     s_gov_floor_loop = (double)td5_env_int("TD5RE_AI_GOV_LOOP_FLOOR", 260, 0, 600);
     s_gov_vmax  = (double)td5_env_int("TD5RE_AI_GOV_VMAX", 0, 0, 900);
     s_merge_v   = (double)td5_env_int("TD5RE_AI_MERGE_V", 0, 0, 900);
+    s_mg_on       = td5_env_flag_on("TD5RE_AI_MERGE_YIELD");
+    s_mg_main_on  = td5_env_flag_on("TD5RE_AI_MERGE_MAIN");
+    s_mg_look     = td5_env_int("TD5RE_AI_MERGE_LOOK", 26, 4, 44);
+    s_mg_gap      = td5_env_int("TD5RE_AI_MERGE_GAP", 26, 4, 200);
+    s_mg_floor    = (double)td5_env_int("TD5RE_AI_MERGE_FLOOR", 150, 0, 900);
+    s_mg_floor_m  = (double)td5_env_int("TD5RE_AI_MERGE_FLOOR_MAIN", 300, 0, 900);
+    s_mg_hold     = (double)td5_env_int("TD5RE_AI_MERGE_HOLD", 3000, 0, 9000);
+    s_mg_clear    = (double)td5_env_int("TD5RE_AI_MERGE_CLEAR", 3500, 0, 9000);
+    s_mg_vstop    = (double)td5_env_int("TD5RE_AI_MERGE_VSTOP", 150, 0, 900);
+    TD5_LOG_I(LOG_TAG, "rejoin give-way: corridor yield %s, road ease %s, look=%d spans gap=%d ticks floor=%.0f/%.0f u/t",
+              s_mg_on ? "ON" : "off", s_mg_main_on ? "ON" : "off", s_mg_look, s_mg_gap, s_mg_floor, s_mg_floor_m);
     TD5_LOG_I(LOG_TAG, "corridor_gov: %s scope=%d look=%d lat=%.2f brake=%.2f units/tick^2 floor=%.0f",
               s_gov_on ? "ON" : "off", s_gov_scope, s_gov_look, s_gov_lat_u, s_gov_brk_u, s_gov_floor);
 }
@@ -6361,15 +6397,137 @@ static double ai_gov_allowed(int slot, int span_raw, int span_count, double *out
     return best * 256.0;
 }
 
+/* [R1022 Q] Racer `slot` is on a corridor whose path rejoins the road within s_mg_look spans:
+ * *R = the road span it joins, *d = path distance in track units from the car to that span's centre. */
+static int ai_merge_probe(int slot, int span_raw, int span_count, int ring, int *R, double *d)
+{
+    int ps[SMART_PATH_MAX];
+    double px, pz, mx, mz, cum;
+    int n = s_mg_look + 2, i, hit = -1;
+    char *a = actor_ptr(slot);
+    if (!a || ring <= 0 || span_raw < ring || span_raw >= span_count) return 0;
+    if (n > SMART_PATH_MAX) n = SMART_PATH_MAX;
+    smart_build_path(slot, span_raw, span_count, n, ps);
+    for (i = 1; i < n; i++)
+        if (ps[i - 1] >= ring && ps[i] < ring) { hit = i; break; }
+    if (hit < 0) return 0;
+    px = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_X) >> 8);
+    pz = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_Z) >> 8);
+    cum = 0.0;
+    for (i = 1; i <= hit; i++) {
+        if (!smart_span_mid(ps[i], span_count, &mx, &mz)) return 0;
+        cum += sqrt((mx - px) * (mx - px) + (mz - pz) * (mz - pz));
+        px = mx; pz = mz;
+    }
+    *R = ps[hit];
+    *d = cum;
+    return 1;
+}
+
+/* [R1022 Q] Signed distance along the road from the car to the centre of road span R (> 0 = the rejoin is
+ * still ahead). Beyond a few spans it is the straight distance, close in it is the projection on the road
+ * direction so a car already abreast / past the rejoin goes negative. */
+static double ai_merge_dist_to(char *a, int R, int span, int span_count)
+{
+    double mx, mz, fx, fz, len;
+    const double x = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_X) >> 8);
+    const double z = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_Z) >> 8);
+    if (!smart_span_mid(R, span_count, &mx, &mz)) return 1e9;
+    if (R - span > 3 || !smart_forward_dir(R, span_count, &fx, &fz, &len))
+        return sqrt((mx - x) * (mx - x) + (mz - z) * (mz - z));
+    return (mx - x) * fx + (mz - z) * fz;
+}
+
+/* Speed (raw 24.8) this racer may carry through a rejoin, or < 0 when no rejoin involves it. */
+static int s_mg_dbg = 0;
+static double ai_merge_allowed(int slot, int span_raw, int span_count)
+{
+    const int ring = td5_track_get_ring_length();
+    char *self = actor_ptr(slot);
+    const int n = g_active_actor_count > TD5_MAX_TOTAL_ACTORS ? TD5_MAX_TOTAL_ACTORS : g_active_actor_count;
+    const double gap = (double)s_mg_gap;
+    double best = 1e18;
+    int o, R, who = -1;
+    double dc;
+    if (!s_ylim_on_any || ring <= 0 || !self || span_raw < 0 || span_raw >= span_count) return -1.0;
+    if (span_raw >= ring) {
+        /* ---- corridor car: yield to a road car that reaches the rejoin first, within `gap` ticks ---- */
+        double vc, tc;
+        if (!s_mg_on || !ai_merge_probe(slot, span_raw, span_count, ring, &R, &dc)) return -1.0;
+        vc = fabs((double)ACTOR_I32(self, ACTOR_LONGITUDINAL_SPEED)) / 256.0;
+        tc = dc / (vc > 100.0 ? vc : 100.0);
+        for (o = 0; o < n; o++) {
+            char *a;
+            int so, g;
+            double vo, dm, tm, tg, v_a;
+            if (o == slot || o >= g_traffic_slot_base || !ai_peer_is_present(o)) continue;
+            a = actor_ptr(o);
+            if (!a) continue;
+            so = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+            if (so < 0 || so >= ring) continue;                       /* another corridor car: car-following's business */
+            g = R - so;
+            if (g < -3 || g > s_mg_look) continue;
+            vo = (double)ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) / 256.0;
+            if (vo < s_mg_vstop) continue;                            /* stopped / crawling: an obstacle, not traffic */
+            dm = ai_merge_dist_to(a, R, so, span_count);
+            tm = dm / vo;
+            /* a road car already past the rejoin only has to be `clear` units on (short of that: a gap in ticks) */
+            tg = (dm < 0.0 && s_mg_clear / vo < gap) ? s_mg_clear / vo : gap;
+            if (tm + tg <= 0.0) continue;                            /* it has cleared the merge */
+            if (tm > tc || tc >= tm + tg) continue;                  /* we are first, or far enough behind */
+            {
+                const double de = dc - s_mg_hold;                     /* distance to the give-way line */
+                v_a = (de > 0.0) ? de / (tm + tg) : 1.0;
+                if (de > 0.0 && v_a < s_mg_floor) v_a = s_mg_floor;
+            }
+            if (v_a < best) { best = v_a; who = o; }
+        }
+    } else if (s_mg_main_on) {
+        /* ---- road car: ease off for a corridor car that reaches the rejoin first, within `gap` ticks ---- */
+        double vs = (double)ACTOR_I32(self, ACTOR_LONGITUDINAL_SPEED) / 256.0;
+        for (o = 0; o < n; o++) {
+            char *a;
+            int so, g;
+            double vo, dself, ts, tc, v_a;
+            if (o == slot || o >= g_traffic_slot_base || !ai_peer_is_present(o)) continue;
+            a = actor_ptr(o);
+            if (!a) continue;
+            so = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+            if (so < ring || so >= span_count) continue;
+            if (!ai_merge_probe(o, so, span_count, ring, &R, &dc)) continue;
+            g = R - span_raw;
+            if (g < 0 || g > s_mg_look) continue;
+            vo = fabs((double)ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED)) / 256.0;
+            if (vo < s_mg_vstop) continue;                            /* stopped at its give-way line / crawling: it is not merging now */
+            tc = dc / vo;
+            dself = ai_merge_dist_to(self, R, span_raw, span_count);
+            if (dself <= 0.0) continue;
+            ts = dself / (vs > 100.0 ? vs : 100.0);
+            if (ts <= tc || ts >= tc + gap) continue;                /* we are first, or far enough behind */
+            v_a = dself / (tc + gap);
+            if (v_a < s_mg_floor_m) v_a = s_mg_floor_m;
+            if (v_a < best) { best = v_a; who = o; }
+        }
+    }
+    if (best > 1e17) return -1.0;
+    s_mg_dbg = who;
+    return best * 256.0;
+}
+
 /* Lower the throttle / brake of a racer that is over its allowed speed. */
 static void ai_gov_apply(int slot, int span_raw, int span_count)
 {
     char *actor = actor_ptr(slot);
     double bend = 0.0, allow, v;
     int16_t thr;
+    int mg = 0;
     ai_gov_read_knobs();
-    if (!s_gov_on || !ai_corr_slot_on(slot)) return;
-    allow = ai_gov_allowed(slot, span_raw, span_count, &bend);
+    if (!ai_corr_slot_on(slot) || (!s_gov_on && !s_mg_on && !s_mg_main_on)) return;
+    allow = s_gov_on ? ai_gov_allowed(slot, span_raw, span_count, &bend) : -1.0;
+    {   /* [R1022 Q] rejoin give-way: the stricter of the two caps */
+        const double ma = (s_mg_on || s_mg_main_on) ? ai_merge_allowed(slot, span_raw, span_count) : -1.0;
+        if (ma > 0.0 && (allow <= 0.0 || ma < allow)) { allow = ma; mg = 1; }
+    }
     v   = (double)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
     thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
 #ifndef TD5RE_RELEASE
@@ -6397,8 +6555,14 @@ static void ai_gov_apply(int slot, int span_raw, int span_count)
         return;
     }
     if ((g_ai_frame_counter % 30u) == 0u)
-        TD5_LOG_I(LOG_TAG, "corridor_gov: slot=%d span=%d v=%.0f allow=%.0f u/tick Rmin=%.0f at +%d (span %d)",
-                  slot, span_raw, v / 256.0, allow / 256.0, bend, s_gov_dbg_i, s_gov_dbg_span);
+    {
+        if (mg)
+            TD5_LOG_I(LOG_TAG, "rejoin_yield: slot=%d span=%d %s v=%.0f allow=%.0f u/tick for slot %d",
+                      slot, span_raw, span_raw >= td5_track_get_ring_length() ? "corridor" : "road", v / 256.0, allow / 256.0, s_mg_dbg);
+        else
+            TD5_LOG_I(LOG_TAG, "corridor_gov: slot=%d span=%d v=%.0f allow=%.0f u/tick Rmin=%.0f at +%d (span %d)",
+                      slot, span_raw, v / 256.0, allow / 256.0, bend, s_gov_dbg_i, s_gov_dbg_span);
+    }
 }
 
 /* Speed brain (car-following): after route_threshold sets throttle, if a car
