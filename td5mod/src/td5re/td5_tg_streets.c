@@ -471,6 +471,126 @@ static int tg_r15_xrun_centre(const TG_NodeList *nl, int si, double sg,
 #define TG_XST_SEG_LEN     1500.0
 #define TG_XST_FOLLOW_LIFT 60.0
 
+/* [ROUND 1023 A item 4] A STREET STANDS ON THE GROUND THAT IS DRAWN, NOT ON THE HEIGHTFIELD UNDER IT.
+ *
+ * The follow rule above lifts a street vertex to the heightfield envelope + 60. Past the 12000-unit skirt the ground
+ * that is DRAWN there is the far-terrain apron: three coarse quads per side per 4-span group whose ring points sit on
+ * the heightfield but whose interior is a flat chord between rings 10000..40000 apart (tg_far_surface_cover, round 1014
+ * E, measured the same for parks). Over the route's long cross street at spans 77..79 the chord is 221 units ABOVE the
+ * street at one end and 59 under it at the other: the street (p101 asphalt) is buried or coplanar with the ground tile
+ * page (p5) over most of its length -- "fighting to have asphalt and tiles texture on the road". Audited on the unmodified
+ * level: 59 of 200 cross-street meshes have a ground surface within 25 units of their top or above it.
+ *
+ * RULE. Every vertex of a followed street, and of the pavement arms flanking it, is lifted to the DRAWN ground there
+ * (skirts and apron, captured the same way plazas ask for it) + TG_XST_FOLLOW_LIFT. The mouth's kerb edge (f = 0) is
+ * never touched. TD5RE_GEO_STREET_APRON=0 restores the heightfield envelope alone. */
+static const TG_Surf *s_xst_apron;
+static long s_xst_apron_scopes, s_xst_apron_lifted;
+
+static void tg_xst_apron_lift(double x, double z, double *y)
+{
+    double ay;
+    if (s_xst_apron && tg_surf_height(s_xst_apron, x, z, &ay) &&
+        ay + TG_XST_FOLLOW_LIFT > *y) {
+        *y = ay + TG_XST_FOLLOW_LIFT;
+        s_xst_apron_lifted++;
+    }
+}
+
+/* The drawn ground of the WHOLE track, captured once (skirts + far-terrain apron: ~25000 quads) and shared by every
+ * street, arm and network edge of the build. A first cut captured per street (tg_far_surface_cover re-runs the band for
+ * ~60 spans round the box): 250 captures made the streamed build take over 14 minutes instead of 40 s. One capture of
+ * the whole route costs well under a second and every query after it is a scan of the same quad list.
+ * Keyed on the seed and node count, so a rebuild of another route re-captures. */
+static TG_Surf s_wcap;
+static unsigned s_wcap_key;
+static int s_wcap_ok;
+
+const TG_Surf *tg_street_apron_all(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const unsigned key = td5_trackgen_last_seed() ^ ((unsigned)nl->count * 2654435761u)
+                       ^ (unsigned)(long)(nl->v[nl->count / 2].x * 7.0);
+    double x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300;
+    int i;
+
+    if (!td5_env_flag_on("TD5RE_GEO_STREET_APRON")) return NULL;
+    if (s_wcap_ok && s_wcap_key == key) return &s_wcap;
+    tg_surf_free(&s_wcap);
+    memset(&s_wcap, 0, sizeof(s_wcap));
+    s_wcap_ok = 0;
+    for (i = 0; i < nl->count; i++) {
+        if (nl->v[i].x < x0) x0 = nl->v[i].x;
+        if (nl->v[i].x > x1) x1 = nl->v[i].x;
+        if (nl->v[i].z < z0) z0 = nl->v[i].z;
+        if (nl->v[i].z > z1) z1 = nl->v[i].z;
+    }
+    {
+        /* tg_far_surface_cover takes the spans round h->si (+- rad / 1500 + 8) and ignores the rest, so one call with a
+         * box over the whole route still sees only a window of it: walk the window along the track until every
+         * span has been seen, and merge the quads. */
+        const double rad = 0.5 * hypot(x1 - x0, z1 - z0) + 2.0 * tg_far_reach() + 4000.0;
+        int rs = (int)(rad / (double)TD5_TG_SPAN_LENGTH) + 8, c;
+        TG_FBHook hk = *h;
+        if (rs < 16) rs = 16;
+        for (c = rs / 2; c - rs / 2 < nl->count; c += rs) {
+            TG_Surf part;
+            hk.si = (c < nl->count - 2) ? c : nl->count - 2;
+            if (hk.si < 0) hk.si = 0;
+            hk.b = &k_biomes[tg_biome_for_span(hk.si)];
+            if (tg_far_surface_cover(&hk, x0 - 3000.0, z0 - 3000.0, x1 + 3000.0, z1 + 3000.0, &part) > 0) {
+                const int need = s_wcap.nq * 4 + part.nq * 4;
+                if (need > s_wcap.cap) {
+                    int nc = s_wcap.cap ? s_wcap.cap : 1024;
+                    double *nx, *ny, *nz;
+                    while (nc < need) nc *= 2;
+                    nx = (double *)realloc(s_wcap.x, (size_t)nc * sizeof(double));
+                    ny = (double *)realloc(s_wcap.y, (size_t)nc * sizeof(double));
+                    nz = (double *)realloc(s_wcap.z, (size_t)nc * sizeof(double));
+                    if (nx) s_wcap.x = nx;
+                    if (ny) s_wcap.y = ny;
+                    if (nz) s_wcap.z = nz;
+                    if (nx && ny && nz) s_wcap.cap = nc;
+                }
+                if (need <= s_wcap.cap) {
+                    memcpy(s_wcap.x + s_wcap.nq * 4, part.x, (size_t)part.nq * 4 * sizeof(double));
+                    memcpy(s_wcap.y + s_wcap.nq * 4, part.y, (size_t)part.nq * 4 * sizeof(double));
+                    memcpy(s_wcap.z + s_wcap.nq * 4, part.z, (size_t)part.nq * 4 * sizeof(double));
+                    s_wcap.nq += part.nq;
+                }
+            }
+            tg_surf_free(&part);
+            if (c >= nl->count) break;
+        }
+        if (s_wcap.nq <= 0) {
+            tg_surf_free(&s_wcap);
+            return NULL;
+        }
+    }
+    s_wcap_ok = 1;
+    s_wcap_key = key;
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] drawn ground of the whole track captured for streets: %d quad(s)",
+              s_wcap.nq);
+    return &s_wcap;
+}
+
+/* Open a scope: streets laid inside it stand on the drawn ground. Nothing to free (the capture is shared). */
+static int tg_xst_apron_begin(const TG_FBHook *h, double x0, double z0, double x1, double z1,
+                              TG_Surf *cap)
+{
+    (void)x0; (void)z0; (void)x1; (void)z1;
+    memset(cap, 0, sizeof(*cap));
+    s_xst_apron = tg_street_apron_all(h);
+    if (s_xst_apron) s_xst_apron_scopes++;
+    return 0;
+}
+
+static void tg_xst_apron_end(TG_Surf *cap, int open)
+{
+    (void)cap; (void)open;
+    s_xst_apron = NULL;
+}
+
 static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                                    double *uu, double *vv, int *pn,
                                    const double *e, double nox, double noz,
@@ -502,6 +622,7 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                 g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
                 g += TG_XST_FOLLOW_LIFT;
                 if (g > y) y = g;
+                tg_xst_apron_lift(x, z, &y);        /* [ROUND 1023 A item 4] the drawn ground */
             }
             q[c * 3 + 0] = x; q[c * 3 + 1] = y; q[c * 3 + 2] = z;
             t[c * 2 + 0] = u_r * f;
@@ -610,8 +731,24 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         tg_block_rot2(e[8], e[9], ang, &fox, &foz);
 
         if (follow) {
+            TG_Surf apron;
+            int apron_open;
+            {
+                const double bxs[4] = { e[0], e[3], e[0] + nox * reach, e[3] + fox * reach };
+                const double bzs[4] = { e[2], e[5], e[2] + noz * reach, e[5] + foz * reach };
+                double bx0 = bxs[0], bx1 = bxs[0], bz0 = bzs[0], bz1 = bzs[0];
+                int bi;
+                for (bi = 1; bi < 4; bi++) {
+                    if (bxs[bi] < bx0) { bx0 = bxs[bi]; }
+                    if (bxs[bi] > bx1) { bx1 = bxs[bi]; }
+                    if (bzs[bi] < bz0) { bz0 = bzs[bi]; }
+                    if (bzs[bi] > bz1) { bz1 = bzs[bi]; }
+                }
+                apron_open = tg_xst_apron_begin(h, bx0, bz0, bx1, bz1, &apron);
+            }
             tg_xstreet_push_follow(px, py, pz, uu, vv, &n, e, nox, noz, fox, foz,
                                    reach, drop, u_r, h->si);
+            tg_xst_apron_end(&apron, apron_open);
             if (split) {
                 if (!tg_xst_flush(h, px, py, pz, uu, vv, n, seg_page, marks)) return 0;
                 if (n > 0) { s_xst_arm_meshes++; emitted += n; }
@@ -807,6 +944,7 @@ static long s_geop_xwall_park;
  * or beside them. */
 static long s_geop_xwall_unbacked;
 static long s_geop_flank_street;      /* [ROUND 1021 C item 9] flank blocks on a laid carriageway */
+static long s_floor_street;           /* [ROUND 1023 A item 4] fork-back plaza floors not laid over a street */
 static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
 
 int tg_block_is_park(int si, int left)
@@ -892,6 +1030,22 @@ static int tg_city_emit_forkback_plaza(const TG_FBHook *h, double side,
         px[1]=n0->x+lx0*dn;    py[1]=n0->y; pz[1]=n0->z+lz0*dn;   uu[1]=u_d; vv[1]=(double)si;
         px[2]=n1->x+lx1*df;    py[2]=n1->y; pz[2]=n1->z+lz1*df;   uu[2]=u_d; vv[2]=(double)si + 1.0;
         px[3]=inx1;            py[3]=n1->y; pz[3]=inz1;            uu[3]=0.0; vv[3]=(double)si + 1.0;
+    }
+    /* [ROUND 1023 A item 4] A flat floor at the road node's height is laid over EVERYTHING in its footprint, and a
+     * side street crossing it is laid on the ground (+ the drawn apron): under a floor that stands 64..250 units above it.
+     * Audited on the unmodified level: 25 cross-street meshes with one of these 1500 x 9300 floors on top of them,
+     * 58 street/floor pairs -- "tiles over the road". A street wins: the floor is not laid (nor its dressing) where any of a 3 x 6
+     * grid of its footprint lies on a laid carriageway. TD5RE_GEO_FLOOR_STREET_CLEAR=0 restores it. */
+    if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_FLOOR_STREET_CLEAR")) {
+        int gu, gv, on = 0;
+        for (gu = 0; gu < 3 && !on; gu++)
+            for (gv = 0; gv < 6 && !on; gv++) {
+                const double u = 0.5 * (double)gu, v = 0.2 * (double)gv + 0.1;
+                const double ax = px[0] + (px[3] - px[0]) * u, az = pz[0] + (pz[3] - pz[0]) * u;
+                const double bx = px[1] + (px[2] - px[1]) * u, bz = pz[1] + (pz[2] - pz[1]) * u;
+                if (tg_xstreet_covers(h->nl, si, side, ax + (bx - ax) * v, az + (bz - az) * v)) on = 1;
+            }
+        if (on) { s_floor_street++; return 1; }
     }
     if (*h->nmesh < h->maxmesh) {
         seg_nq = 1;
@@ -1186,7 +1340,9 @@ static double tg_arm_ground(double x, double z)
     g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
     g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
     g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
-    return g + TG_XST_FOLLOW_LIFT;
+    g += TG_XST_FOLLOW_LIFT;
+    tg_xst_apron_lift(x, z, &g);
+    return g;
 }
 
 static int tg_block_emit_arm_follow(const TG_FBHook *h,
@@ -1205,8 +1361,17 @@ static int tg_block_emit_arm_follow(const TG_FBHook *h,
     const double kerb_over_street = TD5_TG_KERB_H - TD5_TG_VERGE_LIFT;
     int nseg = (int)ceil(reach / TG_XST_SEG_LEN), k, n, seg_page, seg_nq, lifted = 0;
 
+    TG_Surf apron;
+    int apron_open;
+
     if (nseg < 1) nseg = 1;
     if (nseg > TG_XST_SEG_MAX) nseg = TG_XST_SEG_MAX;
+    {
+        const double ex = cx + ox * reach, ez = cz + oz * reach;
+        apron_open = tg_xst_apron_begin(h,
+            (cx < ex ? cx : ex) - sw, (cz < ez ? cz : ez) - sw,
+            (cx > ex ? cx : ex) + sw, (cz > ez ? cz : ez) + sw, &apron);
+    }
     for (k = 0; k <= nseg; k++) {
         const double f = (double)k / (double)nseg;
         const double kx = cx + ox * reach * f, kz = cz + oz * reach * f;
@@ -1224,6 +1389,7 @@ static int tg_block_emit_arm_follow(const TG_FBHook *h,
             }
         }
     }
+    tg_xst_apron_end(&apron, apron_open);
     if (lifted) s_arm_follow_lifted++;
     s_arm_follow_n++;
 
@@ -3312,6 +3478,13 @@ static void tg_geo_plaza_report_impl(int from_stream)
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld cross-street arm(s) written as their own mesh, so the on-road "
               "guard judges an arm alone instead of deleting both (knob TD5RE_GEO_STREET_ARM_MESH=%s)",
               s_xst_arm_meshes, td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld street / arm / network-edge scope(s) asked the drawn ground (skirts + far apron) "
+              "for their height, %ld vertex lift(s) above the heightfield envelope (knob TD5RE_GEO_STREET_APRON=%s)",
+              s_xst_apron_scopes + tg_net_apron_edge_count(), s_xst_apron_lifted + tg_net_apron_lift_count(),
+              td5_env_flag_on("TD5RE_GEO_STREET_APRON") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld fork-back plaza floor(s) not laid over a cross-street carriageway "
+              "(knob TD5RE_GEO_FLOOR_STREET_CLEAR=%s)",
+              s_floor_street, td5_env_flag_on("TD5RE_GEO_FLOOR_STREET_CLEAR") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1023 A item 1] %ld lawn(s) clipped by the pavement band of every span they run "
               "along: %ld refined triangle(s) in, %ld out, %ld cut by a band, %ld removed whole "
               "(knob TD5RE_GEO_LAWN_CLIP=%s)",
