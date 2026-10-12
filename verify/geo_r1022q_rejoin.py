@@ -184,6 +184,8 @@ def main():
     ap.add_argument("--post", type=int, default=14)
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--forks", default="", help="comma list of F values to report (default all)")
+    ap.add_argument("--own-forks", action="store_true",
+                    help="every run has its OWN fork list (synthetic tracks differ per race seed): report only the TOTAL over all runs and forks")
     args = ap.parse_args()
     runs = []
     for d in sorted(os.listdir(args.setdir)):
@@ -203,6 +205,26 @@ def main():
         r.ring = ring
         r.set_finish(ring)
     want = {int(x) for x in args.forks.split(",") if x.strip()}
+    if args.own_forks:
+        tot = {}
+        n_forks = 0
+        for r in runs:
+            fs, rg = H.read_forks(os.path.join(r.path, "log", "race.log"))
+            r.ring = rg or ring
+            r.set_finish(r.ring)
+            for F, fk in sorted(fs.items()):
+                n_forks += 1
+                add(tot, measure_rejoin(r, fk, args.pre, args.post))
+        print("%d runs, %d forks (own fork list per run)" % (len(runs), n_forks))
+        print("%-22s %-9s %6s %8s %6s %6s %5s %6s %6s %5s %4s %5s" % (
+            "", "", "passes", "via corr", "pairs", "merge", "hit", "crash", "mhit", "stall", "jam", "spin"))
+        print("%-22s %-9s %6d %8d %6d %6d %5d %6d %6d %5d %4d %5d" % (
+            "TOTAL", "", tot["passes"], tot["via_corr"], tot["pairs"], tot["merge_pairs"], tot["hits"], tot["crashes"],
+            tot["merge_hits"], len(tot["stalls"]), tot["jams"], len(tot["spins"])))
+        if args.v:
+            for ev in sorted(tot["log"], key=lambda e: (e[0], e[1])):
+                print("    s%-3d t%-5d slots %d,%d raw %s norm %d %s %s(slot %s) v0 %d vmin %d dmin %d" % ev)
+        return 0
     print("run-set %s arm %s: %d runs %s ring %d window R-%d..R+%d" %
           (args.setdir, args.arm, len(runs), [r.seed for r in runs], ring, args.pre, args.post))
     head = "%-22s %-9s %6s %8s %6s %6s %5s %6s %6s %5s %4s %5s" % (

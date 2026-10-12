@@ -6299,6 +6299,7 @@ static double s_gov_vmax = 0.0;                             /* units/tick: strai
  * the old behaviour; _LOOK (spans), _GAP (ticks), _FLOOR / _FLOOR_MAIN (units/tick). */
 static int    s_mg_on = 1, s_mg_main_on = 1, s_mg_look = 26, s_mg_gap = 26;
 static double s_mg_floor = 150.0, s_mg_floor_m = 300.0;
+static int    s_mg_platoon = 1;         /* TD5RE_AI_MERGE_PLATOON=0: no leader coupling between corridor cars */
 static double s_mg_hold = 3000.0;       /* units before the rejoin span where a yielding corridor car stops (the give-way line) */
 static double s_mg_clear = 3500.0;      /* units a road car must be past the rejoin span before a corridor car may enter behind it */
 static double s_mg_vstop = 150.0;       /* units/tick: a road car slower than this is an obstacle, not traffic to yield to */
@@ -6323,6 +6324,7 @@ static void ai_gov_read_knobs(void)
     s_mg_gap      = td5_env_int("TD5RE_AI_MERGE_GAP", 26, 4, 200);
     s_mg_floor    = (double)td5_env_int("TD5RE_AI_MERGE_FLOOR", 150, 0, 900);
     s_mg_floor_m  = (double)td5_env_int("TD5RE_AI_MERGE_FLOOR_MAIN", 300, 0, 900);
+    s_mg_platoon  = td5_env_flag_on("TD5RE_AI_MERGE_PLATOON");
     s_mg_hold     = (double)td5_env_int("TD5RE_AI_MERGE_HOLD", 3000, 0, 9000);
     s_mg_clear    = (double)td5_env_int("TD5RE_AI_MERGE_CLEAR", 3500, 0, 9000);
     s_mg_vstop    = (double)td5_env_int("TD5RE_AI_MERGE_VSTOP", 150, 0, 900);
@@ -6481,6 +6483,30 @@ static double ai_merge_allowed(int slot, int span_raw, int span_count)
                 if (de > 0.0 && v_a < s_mg_floor) v_a = s_mg_floor;
             }
             if (v_a < best) { best = v_a; who = o; }
+        }
+        /* PLATOON: corridor cars close behind each other bump when the leader brakes (they react only inside 1..2
+         * spans, and a brake from 550 to 250 takes ~60 ticks). A follower for the same rejoin, 0.2 to 5 spans behind
+         * a corridor car that is slower than it, may not out-run that car by more than its spare distance. */
+        if (s_mg_platoon) {
+            for (o = 0; o < n; o++) {
+                char *a;
+                int so, R2;
+                double d2, sep, vo, v_a;
+                if (o == slot || o >= g_traffic_slot_base || !ai_peer_is_present(o)) continue;
+                a = actor_ptr(o);
+                if (!a) continue;
+                so = (int)ACTOR_I16(a, ACTOR_SPAN_RAW);
+                if (so < ring || so >= span_count) continue;
+                if (!ai_merge_probe(o, so, span_count, ring, &R2, &d2) || R2 != R) continue;
+                sep = dc - d2;                                        /* > 0: that car is ahead of us on the path */
+                if (sep < 300.0 || sep > 7500.0) continue;
+                vo = (double)ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) / 256.0;
+                if (vo < s_mg_vstop || vo >= vc) continue;
+                v_a = vo + (sep - 2400.0) * 0.02;
+                if (v_a < vo * 0.6) v_a = vo * 0.6;
+                if (v_a < s_mg_floor) v_a = s_mg_floor;
+                if (v_a < best) { best = v_a; who = o; }
+            }
         }
     } else if (s_mg_main_on) {
         /* ---- road car: ease off for a corridor car that reaches the rejoin first, within `gap` ticks ---- */
