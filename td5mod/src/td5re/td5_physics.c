@@ -915,6 +915,7 @@ void td5_physics_tick(void)
      * rides the merged control_bits word, so it fires on the same lockstep round
      * on every peer). Inert when TD5RE_STUCK_RECOVERY=0. */
     td5_physics_update_stuck_recovery();
+    td5_physics_update_ai_wedge();
 
     /* [TRAFFIC BATTLE ANTI-REVERSE] Same post-settle cadence: pull any human who
      * drove backward past their furthest point back to it (battle mode only; inert

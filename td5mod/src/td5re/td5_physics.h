@@ -121,6 +121,8 @@ void td5_physics_reset_actor_state(TD5_Actor *actor);
  * restricted to non-network play for v1. */
 int  td5_physics_recover_player(int slot);
 void td5_physics_update_stuck_recovery(void);
+void td5_physics_update_ai_wedge(void);        /* [ROUND 1024 H] AI wedge reset (TD5RE_AI_WEDGE_RESET) */
+void td5_physics_ai_wedge_reset_state(void);
 /* [TRAFFIC BATTLE ANTI-REVERSE] Snap a human who reversed past their furthest point
  * back onto the track there (battle mode only). Deterministic; called per sim tick. */
 void td5_physics_battle_antireverse_tick(void);
