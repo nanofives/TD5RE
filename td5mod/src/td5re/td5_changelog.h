@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 12 (real places: minimap, street paint, merges)" },
+    { CL_ITEM,    "Park footpaths: the mapped paths inside parks now lie on" },
+    { CL_ITEM,    "  the lawn, flush with it. They were buried under it." },
+    { CL_ITEM,    "Real cycleways and footways with no road or park beside" },
+    { CL_ITEM,    "  them are no longer drawn as lone strips in the ground." },
     { CL_ITEM,    "La Plata minimap: only streets that exist in the 3D" },
     { CL_ITEM,    "  world are drawn. A real street with no road built on" },
     { CL_ITEM,    "  it is no longer on the map." },

@@ -3644,6 +3644,10 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * (tg_facade_built consults the mouth table) and precede the per-entry
          * loop. No-op with no geo place loaded. */
         tg_geo_city_prepare(nl, nspans);
+        /* [ROUND 1024 F] park footpaths on the lawn + footpaths with context only; needs the pavement widths
+         * the city prepass just decided. Both are no-ops with their knobs off. */
+        tg_geo_park_prepare(nl, nprep);
+        tg_geo_footpaths_context(nl, nspans);
         /* [ROUND 1011 C3] Same contract and the same reason again: the OSM
          * lit / maxspeed / name answer for every span is decided here, while
          * this is still the only thread, because the nearest-way query is

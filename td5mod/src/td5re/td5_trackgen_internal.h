@@ -6148,6 +6148,15 @@ int  tg_emit_geo_bus_stops(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *m
 
 void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans);
 int  tg_emit_geo_footpaths(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+/* [ROUND 1024 F] Serial prepass AFTER tg_geo_city_prepare: tg_geo_park_prepare tables every park outline the
+ * plaza emitter will lay (projected exactly as it projects them) with the real footway pieces inside; then
+ * tg_geo_footpaths_context cuts those in-park parts out of the skirt-height footpath set and drops the strays
+ * (fragments with no drawn context) and the ones the road pavement already covers. See td5_tg_geo_street.c. */
+int    tg_geo_park_prepare(const TG_NodeList *nl, int nprep);
+int    tg_geo_park_cuts(double ax, double az, double bx, double bz, double *ta, double *tb, int max);
+double tg_geo_park_dist(double x, double z);
+int    tg_geo_fp_on_street(const TG_NodeList *nl, double x, double z, double nx, double nz, double half);
+void   tg_geo_footpaths_context(const TG_NodeList *nl, int nspans);
 
 /* One report for all three. */
 void tg_geo_street_report(int nspans);
