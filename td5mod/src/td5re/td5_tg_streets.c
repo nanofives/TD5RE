@@ -511,6 +511,36 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
     }
 }
 
+/* [ROUND 1023 A item 4] "crossing street level091 L91 e19 s2 road p5:GROUND is fighting to have asphalt and tiles
+ * texture on the road".
+ *
+ * ROOT CAUSE (measured with TD5RE_R8_GUARD_DIAG=80 and TD5RE_R7_GUARD_REPORT=1 on the unmodified build, entry 19):
+ * the carriageway of a cross street is ONE mesh holding BOTH arms of the street (left and right of the road, 8 pieces
+ * each on a 24000 reach). The on-road guard judges a mesh whole: three of these (spans 77, 78, 79, 64 vertices each,
+ * "rejected city mesh at span 81 (coverage 801 / 1992 / 3013)") overlap the opposite carriageway of the avenue that
+ * starts at span 81 on their RIGHT arm, so the guard deleted the mesh, and with it the perfectly legal LEFT arm, a
+ * 21000-unit street. What is left where the street was is the ground skirt, tile page p5, laid under the street
+ * on purpose: "tiles on the road". The same drop happened on the 3 streets at spans 408..410, 662/664 and 773/774
+ * (guard log, 10 street meshes in all).
+ *
+ * RULE. One mesh per ARM: the guard (and the pair guard) then judges each arm on its own, so an arm that really lies
+ * on another carriageway is dropped alone and the street that does not is kept. Geo networks only (the follow path
+ * is where the pieces are cut); TD5RE_GEO_STREET_ARM_MESH=0 restores one mesh for both arms. */
+static long s_xst_arm_meshes;
+
+static int tg_xst_flush(const TG_FBHook *h, double *px, double *py, double *pz,
+                        double *uu, double *vv, int n, int seg_page, int marks)
+{
+    int seg_nq;
+    if (n <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_CROSSING, h->si, n / 4);   /* side-street mouths */
+    if (marks) tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);  /* item 9 markings fired */
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
 static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
 {
     double px[2 * 4 * TG_XST_SEG_MAX], py[2 * 4 * TG_XST_SEG_MAX], pz[2 * 4 * TG_XST_SEG_MAX];
@@ -538,6 +568,8 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
      * SMOOTH, which leaves seg_page exactly as it was. */
     int seg_page = marks ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(h->si), seg_nq;
     int s, n = 0;
+    const int split = tg_net_geo() && td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH");   /* [R1023 A item 4] */
+    int emitted = 0;       /* quads written by the per-arm flushes */
 
     {
         int gp = tg_road_page_for_geo_surface(tg_net_mouth_surface(h->si, 1));
@@ -580,6 +612,11 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         if (follow) {
             tg_xstreet_push_follow(px, py, pz, uu, vv, &n, e, nox, noz, fox, foz,
                                    reach, drop, u_r, h->si);
+            if (split) {
+                if (!tg_xst_flush(h, px, py, pz, uu, vv, n, seg_page, marks)) return 0;
+                if (n > 0) { s_xst_arm_meshes++; emitted += n; }
+                n = 0;
+            }
             continue;
         }
         q[0] = e[0];                q[1]  = e[1] + TD5_TG_VERGE_LIFT;
@@ -595,17 +632,24 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         t[4] = u_r; t[5] = (double)h->si + 1.0;
         t[6] = 0.0; t[7] = (double)h->si + 1.0;
         tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+        if (split) {
+            if (!tg_xst_flush(h, px, py, pz, uu, vv, n, seg_page, marks)) return 0;
+            if (n > 0) { s_xst_arm_meshes++; emitted += n; }
+            n = 0;
+        }
     }
 
-    if (n <= 0) return 1;
-    if (*h->nmesh >= h->maxmesh) return 1;
-    seg_nq = n / 4;
-    tg_acct_n(TG_ACCT_CROSSING, h->si, n / 4);   /* side-street mouths */
-    if (marks) tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);  /* item 9 markings fired */
-    h->moff[(*h->nmesh)++] = h->blk->len;
-    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                            &seg_page, &seg_nq, 1))
-        return 0;
+    if (n <= 0 && !emitted) return 1;
+    if (n > 0) {
+        if (*h->nmesh >= h->maxmesh) return 1;
+        seg_nq = n / 4;
+        tg_acct_n(TG_ACCT_CROSSING, h->si, n / 4);   /* side-street mouths */
+        if (marks) tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);  /* item 9 markings fired */
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                &seg_page, &seg_nq, 1))
+            return 0;
+    }
 
     /* [R15 CROSS item 9] The median. Its own mesh because it is a different
      * page from the lane markings above, and its own SIDE loop because a run
@@ -1117,6 +1161,133 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
     return 1;
 }
 
+/* [ROUND 1023 A item 3] "sidewalk level091 L91 e8 s24 ... is not following the terrain height of the
+ * crossing street" (pick e8 s24, a single 19500 x 1620 quad falling 70 units over its length).
+ *
+ * ROOT CAUSE. Round 1015 B made the cross-street CARRIAGEWAY follow the ground on a geo network
+ * (tg_xstreet_push_follow: span-length pieces, every vertex lifted to the heightfield envelope + 60 where
+ * that is above the straight ramp), but the two PAVEMENT ARMS that flank it (this function) kept the old
+ * straight ramp: one quad per arm, `cy + KERB_H - drop`. On a street that climbs the ground, the arm's far
+ * end is 100..350 units UNDER the ground skirt and the far terrain (audited on the unmodified level: 55
+ * single-quad pavement slabs with a ground surface at or above their top, 348 units in the pick), so the
+ * pavement that is meant to stand a kerb above the street is buried beside it.
+ *
+ * RULE. An arm stands a constant kerb above the street it flanks, wherever that street is: its kerb edge is
+ * the street's own edge profile (same pieces, same vertices, same envelope) + (KERB_H - VERGE_LIFT), and its
+ * back edge never sinks under the ground behind it. Geo networks only: tg_net_geo() && the street's own
+ * TD5RE_GEO_STREET_FOLLOW; TD5RE_GEO_ARM_FOLLOW=0 restores the straight ramp. */
+static long s_arm_follow_n, s_arm_follow_lifted;
+static double tg_arm_ground(double x, double z)
+{
+    /* the same envelope tg_xstreet_push_follow lifts the carriageway to */
+    const double hh = TG_WORLD_CELL * 0.5;
+    double g = tg_world_h(x, z), g1;
+    g1 = tg_world_h(x + hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
+    g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
+    return g + TG_XST_FOLLOW_LIFT;
+}
+
+static int tg_block_emit_arm_follow(const TG_FBHook *h,
+                                    double cx, double cy, double cz,
+                                    double ox, double oz, double bx, double bz,
+                                    double reach, double sw)
+{
+    double px[4 * TG_XST_SEG_MAX], py[4 * TG_XST_SEG_MAX], pz[4 * TG_XST_SEG_MAX];
+    double uu[4 * TG_XST_SEG_MAX], vv[4 * TG_XST_SEG_MAX];
+    double yk[TG_XST_SEG_MAX + 1], yb[TG_XST_SEG_MAX + 1];   /* kerb-side top, back-side top, per cut */
+    double q[12], t[8];
+    const double drop = tg_xstreet_drop(reach);
+    const double ur = reach / (double)TD5_TG_SPAN_LENGTH;
+    const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
+    const double back = (sw * 0.35 < TD5_TG_ARM_SET) ? sw * 0.35 : TD5_TG_ARM_SET;
+    const double kerb_over_street = TD5_TG_KERB_H - TD5_TG_VERGE_LIFT;
+    int nseg = (int)ceil(reach / TG_XST_SEG_LEN), k, n, seg_page, seg_nq, lifted = 0;
+
+    if (nseg < 1) nseg = 1;
+    if (nseg > TG_XST_SEG_MAX) nseg = TG_XST_SEG_MAX;
+    for (k = 0; k <= nseg; k++) {
+        const double f = (double)k / (double)nseg;
+        const double kx = cx + ox * reach * f, kz = cz + oz * reach * f;
+        double ys = cy + TD5_TG_VERGE_LIFT - drop * f;        /* the street's own straight ramp */
+        yk[k] = cy + TD5_TG_KERB_H - drop * f;
+        yb[k] = yk[k];
+        if (k > 0) {
+            const double g = tg_arm_ground(kx, kz);
+            if (g > ys) { ys = g; lifted = 1; }                /* the street's edge, as it is drawn */
+            yk[k] = ys + kerb_over_street;
+            {   /* the slab must not sink under the ground behind the kerb either */
+                const double gb = tg_arm_ground(kx + bx * sw, kz + bz * sw);
+                yb[k] = (gb > yk[k]) ? gb : yk[k];
+                if (gb > yk[k]) lifted = 1;
+            }
+        }
+    }
+    if (lifted) s_arm_follow_lifted++;
+    s_arm_follow_n++;
+
+    n = 0; seg_page = TD5_TG_PAGE_SIDEWALK;
+    for (k = 0; k < nseg; k++) {
+        const double f0 = (double)k / (double)nseg, f1 = (double)(k + 1) / (double)nseg;
+        q[0]  = cx + ox * reach * f0;            q[1]  = yk[k];      q[2]  = cz + oz * reach * f0;
+        q[3]  = cx + ox * reach * f1;            q[4]  = yk[k + 1];  q[5]  = cz + oz * reach * f1;
+        q[6]  = cx + ox * reach * f1 + bx * sw;  q[7]  = yb[k + 1];  q[8]  = cz + oz * reach * f1 + bz * sw;
+        q[9]  = cx + ox * reach * f0 + bx * sw;  q[10] = yb[k];      q[11] = cz + oz * reach * f0 + bz * sw;
+        t[0] = ur * f0; t[1] = 0.0;  t[2] = ur * f1; t[3] = 0.0;
+        t[4] = ur * f1; t[5] = uw;   t[6] = ur * f0; t[7] = uw;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    tg_acct(TG_ACCT_SIDEWALK, h->si);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    {
+        const size_t p0 = h->blk->len;
+        const int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+        tg_pave_mark(p0, h->blk->len, TG_PVS_ARM, h->si);
+        if (!r) return 0;
+    }
+
+    /* Kerb face: from the street's edge level up to the slab, KERB_H tall, every cut. */
+    n = 0;
+    for (k = 0; k < nseg; k++) {
+        const double f0 = (double)k / (double)nseg, f1 = (double)(k + 1) / (double)nseg;
+        q[0]  = cx + ox * reach * f0; q[1]  = yk[k] - TD5_TG_KERB_H;     q[2]  = cz + oz * reach * f0;
+        q[3]  = cx + ox * reach * f1; q[4]  = yk[k + 1] - TD5_TG_KERB_H; q[5]  = cz + oz * reach * f1;
+        q[6]  = cx + ox * reach * f1; q[7]  = yk[k + 1];                 q[8]  = cz + oz * reach * f1;
+        q[9]  = cx + ox * reach * f0; q[10] = yk[k];                     q[11] = cz + oz * reach * f0;
+        t[0] = ur * f0; t[1] = 0.0; t[2] = ur * f1; t[3] = 0.0;
+        t[4] = ur * f1; t[5] = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
+        t[6] = ur * f0; t[7] = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+
+    if (tg_geo_urban_rails_off(h->si)) return 1;
+
+    n = 0; seg_page = TD5_TG_PAGE_FENCE;
+    for (k = 0; k < nseg; k++) {
+        const double f0 = (double)k / (double)nseg, f1 = (double)(k + 1) / (double)nseg;
+        q[0]  = cx + bx * back + ox * reach * f0; q[1]  = yk[k];                      q[2]  = cz + bz * back + oz * reach * f0;
+        q[3]  = cx + bx * back + ox * reach * f1; q[4]  = yk[k + 1];                  q[5]  = cz + bz * back + oz * reach * f1;
+        q[6]  = cx + bx * back + ox * reach * f1; q[7]  = yk[k + 1] + TD5_TG_FENCE_H; q[8]  = cz + bz * back + oz * reach * f1;
+        q[9]  = cx + bx * back + ox * reach * f0; q[10] = yk[k] + TD5_TG_FENCE_H;     q[11] = cz + bz * back + oz * reach * f0;
+        t[0] = ur * f0; t[1] = 1.0; t[2] = ur * f1; t[3] = 1.0;
+        t[4] = ur * f1; t[5] = 0.0; t[6] = ur * f0; t[7] = 0.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    tg_acct(TG_ACCT_FENCE, h->si);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
 static int tg_block_emit_arm(const TG_FBHook *h,
                              double cx, double cy, double cz,
                              double ox, double oz, double bx, double bz,
@@ -1128,6 +1299,11 @@ static int tg_block_emit_arm(const TG_FBHook *h,
     const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
     const double back = (sw * 0.35 < TD5_TG_ARM_SET) ? sw * 0.35 : TD5_TG_ARM_SET;
     int seg_page, seg_nq, n;
+
+    /* [ROUND 1023 A item 3] a geo street follows the ground; so does the pavement beside it */
+    if (tg_net_geo() && td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW") &&
+        td5_env_flag_on("TD5RE_GEO_ARM_FOLLOW"))
+        return tg_block_emit_arm_follow(h, cx, cy, cz, ox, oz, bx, bz, reach, sw);
 
     /* Slab top at kerb height: kerb-corner, kerb-outer, back-outer, back-corner.
      * "back" thickens the slab by sw away from the carriageway. */
@@ -2021,9 +2197,266 @@ static void tg_geop_lawn_split(TG_GeopLawn *lw, const double *p, int lvl)
     }
 }
 
+/* [ROUND 1023 A item 1] "grass level091 L91 e0 s54 p65 pos 16955,296,-5062 r37727 v192 c1 is clipping through
+ * the sidewalk level091 L91 e7 s13 road p44:SIDEWALK pos 44250,377,-238".
+ *
+ * ROOT CAUSE. The real park's outline (a ring of up to 48 points, here a 60000-unit strip along the road:
+ * x -5353..54663, 38 spans) is projected clear of the road ONCE, with the HOST span's clearance
+ * (tg_geop_project: half width + max(sidewalk, carriageway reach) + margin, measured at the span the area
+ * is emitted from). The pavement beside the road is not constant over 38 spans: per span and per side it is
+ * 1290 / 1648 / 2600 units wide (OSM-derived, tg_city_sidewalk_w_side_at). At the host span the lawn's road-side
+ * edge was held 3870 from the centre line, 980 units inside the 2600-wide slab that stands from span 28, and
+ * the lawn (ground + 60) is 20..70 units ABOVE the kerb-height pavement there (e7 s13: slab top 423..443, lawn
+ * 460..515), so the grass pokes through the paving. Audited on the unmodified level: 92 pavement meshes with
+ * a lawn triangle at or above their top (e0 s44..57 against e0 s15..60, e7 s13/s18/s22, e11 s19, e17 s19..28...).
+ *
+ * RULE. A lawn is clipped by the pavement it lies beside, span by span: the road-side boundary of the lawn is the
+ * band  [centre line .. half width + max(local sidewalk, local carriageway reach) + margin]  of EACH span it runs
+ * along, evaluated with that span's own numbers, not the host's. Done on the refined triangles (exact convex
+ * clipping: a triangle minus a span's band quad = up to 4 convex pieces), so the boundary follows the road where
+ * the width changes and no lawn triangle is left lapping a slab. TD5RE_GEO_LAWN_CLIP=0 restores the host-only
+ * projection. */
+#define TG_LC_WIN    120
+#define TG_LC_MAXV   12
+#define TG_LC_MAXQ   (2 * (2 * TG_LC_WIN + 2))
+#define TG_LC_MIN_AREA 150.0
+typedef struct { int n; double x[TG_LC_MAXV], z[TG_LC_MAXV]; } TG_LcPoly;
+static long s_lc_tri_in, s_lc_tri_out, s_lc_tri_cut, s_lc_tri_gone, s_lc_areas;
+
+/* the part of p on one side of the directed line a->b (keep_left: cross >= 0) */
+static void tg_lc_half(const TG_LcPoly *p, double ax, double az, double bx, double bz,
+                       int keep_left, TG_LcPoly *out)
+{
+    const double sg = keep_left ? 1.0 : -1.0;
+    int i;
+    out->n = 0;
+    for (i = 0; i < p->n; i++) {
+        const int j = (i + 1 == p->n) ? 0 : i + 1;
+        const double di = sg * ((bx - ax) * (p->z[i] - az) - (bz - az) * (p->x[i] - ax));
+        const double dj = sg * ((bx - ax) * (p->z[j] - az) - (bz - az) * (p->x[j] - ax));
+        if (di >= 0.0 && out->n < TG_LC_MAXV) { out->x[out->n] = p->x[i]; out->z[out->n] = p->z[i]; out->n++; }
+        if (((di > 0.0 && dj < 0.0) || (di < 0.0 && dj > 0.0)) && out->n < TG_LC_MAXV) {
+            const double f = di / (di - dj);
+            out->x[out->n] = p->x[i] + (p->x[j] - p->x[i]) * f;
+            out->z[out->n] = p->z[i] + (p->z[j] - p->z[i]) * f;
+            out->n++;
+        }
+    }
+}
+
+static double tg_lc_area(const TG_LcPoly *p)
+{
+    double a = 0.0;
+    int i;
+    for (i = 0; i < p->n; i++) {
+        const int j = (i + 1 == p->n) ? 0 : i + 1;
+        a += p->x[i] * p->z[j] - p->x[j] * p->z[i];
+    }
+    return 0.5 * (a < 0.0 ? -a : a);
+}
+
+/* p minus the convex CCW quad (qx,qz): the convex pieces outside it. -1 when the two do not really overlap
+ * (nothing to cut: the caller keeps p whole, so an untouched triangle is never fragmented). */
+static int tg_lc_subtract(const TG_LcPoly *p, const double *qx, const double *qz,
+                          TG_LcPoly *outs, int max_outs)
+{
+    TG_LcPoly cur = *p, side, rest, in = *p;
+    int i, no = 0;
+    for (i = 0; i < 4 && in.n >= 3; i++) {
+        const int j = (i + 1) & 3;
+        tg_lc_half(&in, qx[i], qz[i], qx[j], qz[j], 1, &rest);
+        in = rest;
+    }
+    if (in.n < 3 || tg_lc_area(&in) < TG_LC_MIN_AREA) return -1;
+    for (i = 0; i < 4 && cur.n >= 3; i++) {
+        const int j = (i + 1) & 3;
+        tg_lc_half(&cur, qx[i], qz[i], qx[j], qz[j], 0, &side);
+        if (side.n >= 3 && no < max_outs) outs[no++] = side;
+        tg_lc_half(&cur, qx[i], qz[i], qx[j], qz[j], 1, &rest);
+        cur = rest;
+    }
+    return no;
+}
+
+/* The road-side band of span j on `side`: the lawn may not stand inside it. */
+static double tg_lc_minout(const TG_NodeList *nl, int j, double side)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(j)];
+    return nl->v[j].width * 0.5
+         + tg_carriageway_clear_gap(nl, j, side,
+               tg_city_sidewalk_w_side_at(nl, j, side > 0.0, b),
+               TD5_TG_CARRIAGEWAY_MARGIN);
+}
+
+/* append the quad (x[0..3], z[0..3]) CCW; 0 when it is degenerate */
+static int tg_lc_addquad(double (*qx)[4], double (*qz)[4], int nq,
+                         const double *x, const double *z)
+{
+    const double area = (x[1] - x[0]) * (z[2] - z[0]) - (z[1] - z[0]) * (x[2] - x[0])
+                      + (x[2] - x[0]) * (z[3] - z[0]) - (z[2] - z[0]) * (x[3] - x[0]);
+    int k;
+    if (area == 0.0) return 0;
+    for (k = 0; k < 4; k++) {
+        const int m = (area > 0.0) ? k : 3 - k;
+        qx[nq][k] = x[m]; qz[nq][k] = z[m];
+    }
+    return 1;
+}
+
+static int tg_lc_bands(const TG_FBHook *h, double side, double x0, double z0, double x1, double z1,
+                       double (*qx)[4], double (*qz)[4])
+{
+    const TG_NodeList *nl = h->nl;
+    const int left = side > 0.0;
+    int lo = h->si - TG_LC_WIN, hi = h->si + TG_LC_WIN, j, nq = 0;
+    if (lo < 0) lo = 0;
+    if (hi > nl->count - 2) hi = nl->count - 2;
+    for (j = lo; j <= hi && nq + 2 <= TG_LC_MAXQ; j++) {
+        const TG_Node *a = &nl->v[j], *c = &nl->v[j + 1];
+        const double pad = 12000.0;
+        double mo, mo2, xs[4], zs[4];
+        if ((a->x < x0 - pad && c->x < x0 - pad) || (a->x > x1 + pad && c->x > x1 + pad) ||
+            (a->z < z0 - pad && c->z < z0 - pad) || (a->z > z1 + pad && c->z > z1 + pad)) continue;
+        mo = tg_lc_minout(nl, j, side);
+        mo2 = tg_lc_minout(nl, j + 1, side);
+        if (mo2 > mo) mo = mo2;
+        xs[0] = a->x; zs[0] = a->z; xs[1] = c->x; zs[1] = c->z;
+        xs[2] = c->x + c->tz * side * mo;  zs[2] = c->z - c->tx * side * mo;
+        xs[3] = a->x + a->tz * side * mo;  zs[3] = a->z - a->tx * side * mo;
+        if (tg_lc_addquad(qx, qz, nq, xs, zs)) nq++;
+        /* [ROUND 1023 A item 1] ... and the side street that leaves this span through the park: its
+         * carriageway and the two pavement arms that flank it (one pavement width past each end of the mouth)
+         * are laid over the lawn's outline just the same. The footprint is the one tg_city_emit_crossstreet and
+         * tg_block_emit_arm lay: kerb edge swept along the mouth's bearing for its reach. */
+        if (td5_env_flag_on("TD5RE_GEO_LAWN_CLIP_STREETS") &&
+            tg_net_mouth_kind(j, left) >= 0) {
+            double sk = 0.0, rr = 0.0;
+            if (tg_net_mouth(j, left, &sk, &rr) >= 0 && rr > 0.0) {
+                double ef[10], alx, alz, all, nox, noz, fox, foz;
+                const TG_Biome *b = &k_biomes[tg_biome_for_span(j)];
+                const double swj = tg_city_sidewalk_w_side_at(nl, j, left, b);
+                const double cs = cos(sk), sn = sin(sk);
+                tg_city_edge_frame(nl, j, side, ef);
+                alx = ef[3] - ef[0]; alz = ef[5] - ef[2];
+                all = sqrt(alx * alx + alz * alz);
+                if (all > 1e-6) {
+                    alx /= all; alz /= all;
+                    nox = ef[6] * cs - ef[7] * sn; noz = ef[6] * sn + ef[7] * cs;
+                    fox = ef[8] * cs - ef[9] * sn; foz = ef[8] * sn + ef[9] * cs;
+                    {
+                        const double p0x = ef[0] - alx * swj, p0z = ef[2] - alz * swj;
+                        const double p3x = ef[3] + alx * swj, p3z = ef[5] + alz * swj;
+                        xs[0] = p0x;             zs[0] = p0z;
+                        xs[1] = p0x + nox * rr;  zs[1] = p0z + noz * rr;
+                        xs[2] = p3x + fox * rr;  zs[2] = p3z + foz * rr;
+                        xs[3] = p3x;             zs[3] = p3z;
+                        if (tg_lc_addquad(qx, qz, nq, xs, zs)) nq++;
+                    }
+                }
+            }
+        }
+    }
+    return nq;
+}
+
+/* Clip the refined lawn in place (the arrays are replaced). Heights are NOT set here. */
+static void tg_geop_lawn_clip(const TG_FBHook *h, double side, TG_GeopLawn *lw)
+{
+    double qx[TG_LC_MAXQ][4], qz[TG_LC_MAXQ][4];
+    double bx0 = 1e300, bz0 = 1e300, bx1 = -1e300, bz1 = -1e300;
+    double *nx = NULL, *nz = NULL;
+    int nt = 0, cap = 0, i, nq;
+    long cut = 0, gone = 0;
+
+    if (lw->nt <= 0) return;
+    for (i = 0; i < lw->nt * 3; i++) {
+        if (lw->x[i] < bx0) bx0 = lw->x[i];
+        if (lw->x[i] > bx1) bx1 = lw->x[i];
+        if (lw->z[i] < bz0) bz0 = lw->z[i];
+        if (lw->z[i] > bz1) bz1 = lw->z[i];
+    }
+    nq = tg_lc_bands(h, side, bx0, bz0, bx1, bz1, qx, qz);
+    if (nq <= 0) return;
+    for (i = 0; i < lw->nt; i++) {
+        TG_LcPoly pieces[2][96];
+        int np[2] = { 1, 0 }, cur = 0, k, m, hit = 0;
+        double tx0 = 1e300, tz0 = 1e300, tx1 = -1e300, tz1 = -1e300;
+        for (k = 0; k < 3; k++) {
+            const double x = lw->x[i * 3 + k], z = lw->z[i * 3 + k];
+            if (x < tx0) tx0 = x;
+            if (x > tx1) tx1 = x;
+            if (z < tz0) tz0 = z;
+            if (z > tz1) tz1 = z;
+            pieces[0][0].x[k] = x; pieces[0][0].z[k] = z;
+        }
+        pieces[0][0].n = 3;
+        for (k = 0; k < nq; k++) {
+            const double *x = qx[k], *z = qz[k];
+            int nxt = 1 - cur, a;
+            double qx0 = x[0], qx1 = x[0], qz0 = z[0], qz1 = z[0];
+            for (a = 1; a < 4; a++) {
+                if (x[a] < qx0) qx0 = x[a];
+                if (x[a] > qx1) qx1 = x[a];
+                if (z[a] < qz0) qz0 = z[a];
+                if (z[a] > qz1) qz1 = z[a];
+            }
+            if (qx1 < tx0 || qx0 > tx1 || qz1 < tz0 || qz0 > tz1) continue;
+            np[nxt] = 0;
+            for (m = 0; m < np[cur]; m++) {
+                TG_LcPoly outs[5];
+                const int no = tg_lc_subtract(&pieces[cur][m], x, z, outs, 5);
+                int o;
+                if (no < 0) {                                    /* no real overlap: untouched */
+                    if (np[nxt] < 96) pieces[nxt][np[nxt]++] = pieces[cur][m];
+                    continue;
+                }
+                hit = 1;
+                for (o = 0; o < no && np[nxt] < 96; o++)
+                    if (tg_lc_area(&outs[o]) >= TG_LC_MIN_AREA) pieces[nxt][np[nxt]++] = outs[o];
+            }
+            cur = nxt;
+        }
+        if (!hit) {          /* not touched by any band: keep the triangle exactly as it was */
+            if (nt + 1 > cap) {
+                cap = cap ? cap * 2 : 1024;
+                nx = (double *)realloc(nx, (size_t)cap * 3 * sizeof(double));
+                nz = (double *)realloc(nz, (size_t)cap * 3 * sizeof(double));
+                if (!nx || !nz) { free(nx); free(nz); return; }
+            }
+            for (k = 0; k < 3; k++) { nx[nt * 3 + k] = lw->x[i * 3 + k]; nz[nt * 3 + k] = lw->z[i * 3 + k]; }
+            nt++;
+            continue;
+        }
+        cut++;
+        if (np[cur] == 0) gone++;
+        for (m = 0; m < np[cur]; m++) {
+            const TG_LcPoly *p = &pieces[cur][m];
+            for (k = 1; k + 1 < p->n; k++) {
+                if (nt + 1 > cap) {
+                    cap = cap ? cap * 2 : 1024;
+                    nx = (double *)realloc(nx, (size_t)cap * 3 * sizeof(double));
+                    nz = (double *)realloc(nz, (size_t)cap * 3 * sizeof(double));
+                    if (!nx || !nz) { free(nx); free(nz); return; }
+                }
+                nx[nt * 3 + 0] = p->x[0];     nz[nt * 3 + 0] = p->z[0];
+                nx[nt * 3 + 1] = p->x[k];     nz[nt * 3 + 1] = p->z[k];
+                nx[nt * 3 + 2] = p->x[k + 1]; nz[nt * 3 + 2] = p->z[k + 1];
+                nt++;
+            }
+        }
+    }
+    s_lc_areas++;
+    s_lc_tri_in += lw->nt; s_lc_tri_out += nt; s_lc_tri_cut += cut; s_lc_tri_gone += gone;
+    free(lw->x); free(lw->z); free(lw->y);
+    lw->x = nx; lw->z = nz;
+    lw->y = (double *)malloc((size_t)(nt > 0 ? nt : 1) * 3 * sizeof(double));
+    lw->nt = nt;
+    if (!lw->y) { tg_geop_lawn_free(lw); }
+}
+
 /* Build the refined lawn triangles + their ground heights. 0 when empty. */
 static int tg_geop_lawn_build(const TG_FBHook *h, const double *rx,
-                              const double *rz, int n, TG_GeopLawn *lw)
+                              const double *rz, int n, TG_GeopLawn *lw, double side)
 {
     int tri[(TD5_GEOB_RING_MAX - 2) * 3];
     int ntri, k, lvl = 0, mult, i;
@@ -2058,6 +2491,9 @@ static int tg_geop_lawn_build(const TG_FBHook *h, const double *rx,
         const double p[6] = { rx[a], rz[a], rx[b], rz[b], rx[c], rz[c] };
         tg_geop_lawn_split(lw, p, lvl);
     }
+    if (side != 0.0 && td5_env_flag_on("TD5RE_GEO_LAWN_CLIP"))      /* [ROUND 1023 A item 1] */
+        tg_geop_lawn_clip(h, side, lw);
+    if (lw->nt <= 0 || !lw->x) return 0;
     for (i = 0; i < lw->nt * 3; i++)
         lw->y[i] = tg_geop_ground(h->nl, h->si, lw->x[i], lw->z[i]);
     if ((long)lvl > s_geop_lawn_lvl) s_geop_lawn_lvl = lvl;
@@ -2667,7 +3103,7 @@ static int tg_geop_emit_one_body(const TG_FBHook *h, const TD5_GeoArea *a,
      * tiles at the same scale as a procedural park a block away. Was 3400 --
      * isotropic already, but 2.3x coarser than the generator's grass. */
     inv_tile = TD5_TG_GEOP_TILED() ? (1.0 / TD5_TG_GEOP_TILE) : (1.0 / 3400.0);
-    tg_geop_lawn_build(h, rx, rz, n, lw);
+    tg_geop_lawn_build(h, rx, rz, n, lw, side);
     if (!tg_geop_emit_lawn(h, lw, page, inv_tile)) return 0;
 
     /* Evenly spread path targets around the ring; a triangle or quad plaza gets
@@ -2869,6 +3305,18 @@ static void tg_geo_plaza_report_impl(int from_stream)
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1021 C item 9] %ld flank / gap-infill block(s) skipped for standing on a laid "
               "cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
               s_geop_flank_street, td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO ARM] [R1023 A item 3] %ld cross-street pavement arm(s) cut into span-length pieces "
+              "that follow the street's ground profile, %ld of them raised above the old straight ramp "
+              "(knob TD5RE_GEO_ARM_FOLLOW=%s)",
+              s_arm_follow_n, s_arm_follow_lifted, td5_env_flag_on("TD5RE_GEO_ARM_FOLLOW") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld cross-street arm(s) written as their own mesh, so the on-road "
+              "guard judges an arm alone instead of deleting both (knob TD5RE_GEO_STREET_ARM_MESH=%s)",
+              s_xst_arm_meshes, td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1023 A item 1] %ld lawn(s) clipped by the pavement band of every span they run "
+              "along: %ld refined triangle(s) in, %ld out, %ld cut by a band, %ld removed whole "
+              "(knob TD5RE_GEO_LAWN_CLIP=%s)",
+              s_lc_areas, s_lc_tri_in, s_lc_tri_out, s_lc_tri_cut, s_lc_tri_gone,
+              td5_env_flag_on("TD5RE_GEO_LAWN_CLIP") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1014 E] park lawn: %ld sub-triangle(s) at "
               "refinement level <= %ld (knob TD5RE_GEO_LAWN_SUBDIV=%s), ground "
               "uncapped (TD5RE_GEO_PARK_UNCAP=%s); trees: %ld planted of %ld "
