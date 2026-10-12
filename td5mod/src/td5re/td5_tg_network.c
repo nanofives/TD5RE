@@ -74,6 +74,11 @@ typedef struct {
      * loop can follow it past the stub; loop = 1 once a drivable block loop took the
      * street over (its stub is then not drawn as scenery). -1 / 0 for every other edge. */
     int    road, k0, kstep, loop;
+    /* [ROUND 1022 P item 1] a FRONTAGE road (a real way that runs beside the route and merges into
+     * it): taper = the last segment narrows to a point on the route's kerb line; fw_skip = footway
+     * sides NOT laid (bit 0 = the ribbon's -normal side, bit 1 = +normal), the side facing the route. */
+    int    taper, fw_skip;
+    int    fr;          /* frontage road: py[] holds the ground-skirt height model, the ribbon never sinks below it */
 } TG_NetEdge;
 
 typedef struct { short edge; float skew, reach, shift; } TG_NetMouth;   /* shift: [1014 B] origin offset past the race kerb */
@@ -1683,6 +1688,333 @@ static void tg_net_geo_plaza_roads(const TG_NodeList *nl, int nspans)
               "laid along the edge of %ld real way(s)", npz, laid, ways_used);
 }
 
+/* ============ [ROUND 1022 P item 1] FRONTAGE ROADS =========================
+ *
+ * "there is a road that joins the main road that is not rendered" (round 1021 item 15,
+ * La Plata spans 342..351): Calle 54 reaches the route from the side at a SHALLOW angle (16
+ * degrees), merges into it and then shares its carriageway for 17 spans before leaving at
+ * Avenida 13. The three real ways that meet at the Y node 12 m beside the route (Calle 54
+ * from the south-west, the primary_link from the west, and the diagonal that merges) were
+ * nowhere in the world:
+ *   - the crossing rule needs |sin| to the tangent >= cos(80 deg) and the merge is at 16 deg;
+ *   - the way spends 11 of its 17 samples ON the route, so tg_geo_road_hits calls it "the
+ *     route itself" (-1) and throws away even the shared-carriageway departure it found;
+ *   - the Y node lies 5240 units past the kerb, further than the T-end rule's one span of slack.
+ * A way that merges is not a street that crosses, so it needs its own kind of edge: the SAME
+ * mitred ribbon the plaza roads use, laid along the real way's own vertices from where it is
+ * free of every other road to where it meets the main pavement, with
+ *   - a MERGE TAPER: over the last segment the carriageway narrows to a point on the outer edge
+ *     of the main road's pavement, so its inner edge runs along that edge and it is a merge,
+ *     not a stub that ends in a square cut;
+ *   - a footway on the OUTER side only (the side facing the route is the main road's own);
+ *   - the ways it connects to by end vertex, up to TG_FR_HOPS hops, so the Y is not a dead end.
+ * Nothing is invented: every vertex is a sample of an OSM way. NOT drivable (scenery, like the
+ * plaza roads and the opposite carriageway of an avenue). Paint (TG_WO_STREET) and ground bed are
+ * laid like the plaza roads', so the later passes treat it as a street. Generic for any geo
+ * route: a way qualifies when a sample of it is inside the main kerb zone, the next one outside
+ * it and the way's bearing there is within 35 degrees of the route's tangent (a steeper way is a
+ * crossing and takes the arm path). TD5RE_GEO_FRONTAGE=0 restores master. */
+#define TG_FR_STEP   1800.0    /* resample step along a way                                    */
+#define TG_FR_KERB_CLEAR 300.0 /* clear air between the main pavement and the ribbon's inner edge */
+#define TG_FR_MAX    (tg_verge_reach())   /* the flat verge: past it the ground rises and falls away from a level road */
+#define TG_FR_SN_MAX 0.9       /* sin(64 deg): a way that meets the route squarer than this is a T  */
+#define TG_FR_RUN    5         /* inner samples (5 x 1800 = 21 m) a merge then shares the road for    */
+#define TG_FR_MAXS   160
+#define TG_FR_OPEN   48
+#define TG_FR_HOPS   2
+#define TG_FR_WAYS   16384
+
+typedef struct { double x, z, ux, uz, lat, alat, hk; int ni; } TG_FrS;
+typedef struct { double x, z; int hop; } TG_FrOpen;
+
+static TG_FrS    s_frs[TG_FR_MAXS];
+static TG_FrOpen s_fr_open[TG_FR_OPEN];
+static int       s_fr_nopen;
+static unsigned char s_fr_laid[TG_FR_WAYS];
+static long      s_fr_ribbons, s_fr_cont, s_fr_ways;
+
+/* Resample way `rd` every TG_FR_STEP; each sample knows its nearest route node, its signed
+ * lateral and the lateral of the outer edge of the main pavement on its side (`hk`). */
+static int tg_fr_sample(const TG_NodeList *nl, int nspans, const TD5_GeoRoad *rd)
+{
+    int n = 0, k;
+    for (k = 0; k + 1 < rd->count && n < TG_FR_MAXS; k++) {
+        double ax, az, bx, bz, len, ux, uz, t;
+        const int last_seg = (k + 2 >= rd->count);
+        if (!td5_geo_roads_point(rd, k, &ax, &az)) break;
+        if (!td5_geo_roads_point(rd, k + 1, &bx, &bz)) break;
+        len = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+        if (len < 1.0) continue;
+        ux = (bx - ax) / len; uz = (bz - az) / len;
+        for (t = 0.0; n < TG_FR_MAXS; t += TG_FR_STEP) {
+            const double tt = (t >= len) ? len : t;
+            TG_FrS *s;
+            double along, sw;
+            if (t >= len && !last_seg) break;
+            s = &s_frs[n++];
+            s->x = ax + ux * tt; s->z = az + uz * tt; s->ux = ux; s->uz = uz;
+            s->ni = tg_geo_nearest(nl, nspans, s->x, s->z);
+            if (s->ni >= 1 && s->ni + 1 < nl->count) {
+                tg_geo_lat(nl, s->ni, s->x, s->z, &s->lat, &along);
+                s->alat = fabs(s->lat);
+                sw = tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(s->ni)]);
+                if (!(sw > 0.0)) sw = 0.0;
+                /* + TG_FR_KERB_CLEAR: the ribbon's inner edge stops short of the pavement slab's outer edge */
+                s->hk = tg_carriageway_reach(nl, s->ni, s->lat >= 0.0 ? 1.0 : -1.0) + sw + TG_FR_KERB_CLEAR;
+            } else {
+                s->ni = -1; s->lat = s->alat = 1e9; s->hk = 0.0;
+            }
+            if (t >= len) break;
+        }
+    }
+    return n;
+}
+
+/* Height of the ground SKIRT at (x,z): the skirt of span `row` is the road edge's height minus the
+ * span's own cross-section profile (tg_ground_side, the same table tg_emit_ground reads), taken on
+ * the two rows that bound the point and blended along the span. Past the profile's last point the
+ * profile is flat (the far band is terrain, which tg_net_ground_y already follows). */
+static double tg_fr_skirt_y(const TG_NodeList *nl, int ni, double x, double z)
+{
+    double lat, along, yy[2], t;
+    int sp = ni, r;
+    tg_geo_lat(nl, sp, x, z, &lat, &along);
+    if (along < 0.0 && sp > 1) { sp--; tg_geo_lat(nl, sp, x, z, &lat, &along); }
+    t = along / (double)TD5_TG_SPAN_LENGTH;
+    if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+    for (r = 0; r < 2; r++) {
+        const int row = (sp + r + 1 < nl->count) ? sp + r : sp;
+        double l, a, nlx, nly, nlz, nrx, nry, nrz, ux, uz, ln, d, dy = 0.0;
+        TG_GroundProf pr;
+        int left, k;
+        tg_geo_lat(nl, row, x, z, &l, &a);
+        left = (l >= 0.0);
+        tg_road_edge(nl, row, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+        ux = nlx - nrx; uz = nlz - nrz;
+        ln = sqrt(ux * ux + uz * uz);
+        if (ln < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= ln; uz /= ln; }
+        if (!left) { ux = -ux; uz = -uz; }
+        d = (x - (left ? nlx : nrx)) * ux + (z - (left ? nlz : nrz)) * uz;
+        if (d < 0.0) d = 0.0;
+        tg_ground_side(nl, row, left, tg_water_side(row), &pr);
+        if (pr.n > 0) {
+            dy = pr.dy[pr.n - 1];
+            if (d <= pr.d[0]) dy = pr.dy[0];
+            else
+                for (k = 0; k + 1 < pr.n; k++)
+                    if (d <= pr.d[k + 1]) {
+                        const double span = pr.d[k + 1] - pr.d[k];
+                        dy = pr.dy[k] + (span > 1e-6 ? (pr.dy[k + 1] - pr.dy[k]) * (d - pr.d[k]) / span : 0.0);
+                        break;
+                    }
+        }
+        yy[r] = (left ? nly : nry) - dy;
+    }
+    return yy[0] + (yy[1] - yy[0]) * t;
+}
+
+/* Lay the free run that starts at sample `i0` and walks away from the route in direction `dir`.
+ * merge = 1: the run is tapered onto the pavement edge towards the inner neighbour `i0 - dir`.
+ * merge = 0: a continuation of a ribbon already laid (the way touches it at an end vertex).
+ * Returns 1 when an edge was made. */
+static int tg_fr_lay(const TG_NodeList *nl, int nspans, const TD5_GeoRoad *rd, int ridx,
+                     int n, int i0, int dir, int merge, int hop)
+{
+    const double w = rd->width * 0.5;
+    const int cap = merge ? TG_NET_POLY - 2 : TG_NET_POLY;
+    int idx[TG_NET_POLY], nk = 0, i, m, nq = 0, owner, ended;
+    double qx[TG_NET_POLY], qz[TG_NET_POLY];
+    double sn = 0.0, fsk = 0.0;
+    TG_NetEdge *ed;
+
+    for (i = i0; i >= 0 && i < n && nk < cap; i += dir) {
+        const TG_FrS *s = &s_frs[i];
+        if (s->ni < 0 || s->alat <= s->hk + w || s->alat > s->hk + TG_FR_MAX) break;
+        /* the start grid's frontage is forced built (tg_facade_built): nothing real stands there */
+        if (s->ni < tg_start_city_run()) break;
+        if (tg_world_is_water(s->x, s->z)) break;
+        /* the main road's own paint reaches 600 past its kerb: only test paint further out */
+        if (s->alat > s->hk + w + 4000.0
+            && tg_world_occ_near(s->x, s->z, w + 250.0 + 1400.0, TG_WO_ROAD | TG_WO_DRIVABLE | TG_WO_STREET)) break;
+        idx[nk++] = i;
+    }
+    ended = (i < 0 || i >= n);
+    if (td5_env_flag_off("TD5RE_GEO_FRONTAGE_DIAG"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE DIAG] way %d i0 %d dir %d merge %d run %d (stopped at i=%d of %d) ni0 %d startrun %d",
+                  ridx, i0, dir, merge, nk, i, n, s_frs[i0].ni, tg_start_city_run());
+    if (nk < 1) return 0;
+
+    for (m = nk - 1; m >= 0; m--) { qx[nq] = s_frs[idx[m]].x; qz[nq] = s_frs[idx[m]].z; nq++; }
+    if (merge) {
+        const TG_FrS *o = &s_frs[i0], *in = &s_frs[i0 - dir];
+        const double d = o->alat - in->alat;
+        double fa, fb, dx, dz, dl, nx, nz, rx, rz;
+        const TG_Node *rn;
+        if (in->ni < 0 || d < 300.0) return 0;
+        sn = fabs(o->ux * nl->v[o->ni].tz - o->uz * nl->v[o->ni].tx);
+        if (td5_env_flag_off("TD5RE_GEO_FRONTAGE_DIAG"))
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE DIAG] way %d merge: alat %.0f->%.0f hk %.0f w %.0f sn %.2f",
+                      ridx, o->alat, in->alat, o->hk, w, sn);
+        if (sn > TG_FR_SN_MAX) return 0;                 /* a T: the arm path owns it */
+        {
+            /* A MERGE stays on the road: the samples after the transition keep inside the main kerb
+             * zone for TG_FR_RUN samples and never cross to the other side. A street that crosses the
+             * route or ends at it is inside for two or three samples. */
+            int run = 0, jj;
+            for (jj = i0 - dir; jj >= 0 && jj < n; jj -= dir) {
+                const TG_FrS *q = &s_frs[jj];
+                if (q->ni < 0 || q->alat > q->hk + w) break;
+                if (q->lat * o->lat < 0.0 && q->alat > 0.6 * q->hk) { run = 0; break; }
+                run++;
+            }
+            if (td5_env_flag_off("TD5RE_GEO_FRONTAGE_DIAG"))
+                TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE DIAG] way %d inner run %d (need %d)", ridx, run, TG_FR_RUN);
+            if (run < TG_FR_RUN) return 0;
+        }
+        fa = (o->alat - (o->hk + w)) / d;                /* inner edge touches the pavement edge */
+        qx[nq] = o->x + (in->x - o->x) * fa; qz[nq] = o->z + (in->z - o->z) * fa; nq++;
+        {
+            /* the centre line reaches the pavement edge (alat = hk) on the first inner sample at or
+             * below it: interpolate on the segment that crosses it */
+            const TG_FrS *pv = o;
+            int jj, found = 0;
+            for (jj = i0 - dir; jj >= 0 && jj < n; jj -= dir) {
+                const TG_FrS *q = &s_frs[jj];
+                if (q->ni < 0) break;
+                if (q->alat <= o->hk) {
+                    const double dd = pv->alat - q->alat;
+                    fb = (dd > 1.0) ? (pv->alat - o->hk) / dd : 1.0;
+                    qx[nq] = pv->x + (q->x - pv->x) * fb; qz[nq] = pv->z + (q->z - pv->z) * fb; nq++;
+                    found = 1;
+                    break;
+                }
+                pv = q;
+            }
+            if (!found) return 0;
+        }
+        dx = qx[nq - 1] - qx[nq - 2]; dz = qz[nq - 1] - qz[nq - 2];
+        dl = sqrt(dx * dx + dz * dz);
+        if (dl < 1.0) return 0;
+        dx /= dl; dz /= dl;
+        nx = dz; nz = -dx;                               /* the emitter's side convention */
+        rn = &nl->v[o->ni];
+        rx = rn->x - qx[nq - 2]; rz = rn->z - qz[nq - 2];
+        fsk = (rx * nx + rz * nz > 0.0) ? 2.0 : 1.0;     /* skip the footway that faces the route */
+    }
+    if (nq < 3 && merge) return 0;
+    if (nq < 2) return 0;
+
+    owner = tg_geo_nearest(nl, nspans, qx[nq / 2], qz[nq / 2]);
+    if (owner < 1 || owner + 1 >= nl->count || owner >= nspans) return 0;
+    {
+        const int a0 = tg_net_node(qx[0], qz[0], tg_world_h(qx[0], qz[0]), 1, -1);
+        const int b0 = tg_net_node(qx[nq - 1], qz[nq - 1], tg_world_h(qx[nq - 1], qz[nq - 1]), 1, -1);
+        ed = tg_net_edge_new(a0, b0, TG_NE_BACKSTREET, rd->width);
+    }
+    if (!ed) return 0;
+    ed->npoly = nq;
+    for (m = 0; m < nq; m++) {
+        const int vni = tg_geo_nearest(nl, nspans, qx[m], qz[m]);
+        ed->px[m] = qx[m]; ed->pz[m] = qz[m];
+        ed->py[m] = (vni >= 1 && vni + 1 < nl->count)
+                  ? tg_fr_skirt_y(nl, vni, qx[m], qz[m]) + 45.0 : tg_world_h(qx[m], qz[m]);
+    }
+    ed->mouth_si = owner; ed->mouth_left = 0;
+    ed->surface = rd->surface;
+    ed->ribbon = 1;
+    ed->fr = 1;
+    ed->road = ridx;
+    ed->taper = merge ? 1 : 0;
+    ed->fw_skip = (int)fsk;
+    if (merge) s_fr_ribbons++; else s_fr_cont++;
+    if (ended && hop < TG_FR_HOPS && s_fr_nopen < TG_FR_OPEN) {
+        s_fr_open[s_fr_nopen].x = qx[0]; s_fr_open[s_fr_nopen].z = qz[0];
+        s_fr_open[s_fr_nopen].hop = hop; s_fr_nopen++;
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE] way %d (%s, lanes %d) %s: %d pt, owner span %d, "
+              "from (%.0f,%.0f), merge angle %.0f deg, hop %d%s", ridx,
+              rd->klass >= TD5_GEO_RC_PRIMARY ? "primary" : "street", rd->lanes,
+              merge ? "merge ribbon" : "continuation", nq, owner, qx[0], qz[0],
+              merge ? asin(sn) * 180.0 / TD5_TG_PI : 0.0, hop, ended ? ", open end" : "");
+    return 1;
+}
+
+static void tg_net_geo_frontage(const TG_NodeList *nl, int nspans)
+{
+    const int edge0 = s_ne;
+    int nr = td5_geo_roads_count(), r, i, hop, ei;
+    double rminx, rminz, rmaxx, rmaxz;
+
+    if (!td5_env_flag_on("TD5RE_GEO_FRONTAGE")) return;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) return;
+    if (nr > TG_FR_WAYS) nr = TG_FR_WAYS;
+    memset(s_fr_laid, 0, sizeof(s_fr_laid));
+    s_fr_nopen = 0; s_fr_ribbons = s_fr_cont = s_fr_ways = 0;
+    rminx = rmaxx = nl->v[0].x; rminz = rmaxz = nl->v[0].z;
+    for (i = 1; i <= nspans; i++) {
+        if (nl->v[i].x < rminx) rminx = nl->v[i].x;
+        if (nl->v[i].x > rmaxx) rmaxx = nl->v[i].x;
+        if (nl->v[i].z < rminz) rminz = nl->v[i].z;
+        if (nl->v[i].z > rmaxz) rmaxz = nl->v[i].z;
+    }
+    /* a way that already owns a street arm is a crossing, not a frontage road */
+    for (i = 0; i < s_ne; i++)
+        if (s_edges[i].road >= 0 && s_edges[i].road < nr) s_fr_laid[s_edges[i].road] = 2;
+
+    for (hop = 0; hop <= TG_FR_HOPS; hop++) {
+        for (r = 0; r < nr; r++) {
+            const TD5_GeoRoad *rd = td5_geo_roads_get(r);
+            const double w = rd ? rd->width * 0.5 : 0.0;
+            int n, laid = 0;
+            if (!rd || s_fr_laid[r] || rd->bridge || rd->tunnel || rd->layer != 0 || rd->count < 2) continue;
+            if (rd->klass < TD5_GEO_RC_LIVING) continue;     /* a service lane or alley is not frontage */
+            if (rd->maxx < rminx - TG_FR_MAX - 20000.0 || rd->minx > rmaxx + TG_FR_MAX + 20000.0
+                || rd->maxz < rminz - TG_FR_MAX - 20000.0 || rd->minz > rmaxz + TG_FR_MAX + 20000.0)
+                continue;
+            if (hop == 0) {
+                n = tg_fr_sample(nl, nspans, rd);
+                if (n < 3) continue;
+                s_fr_ways++;
+                for (i = 0; i + 1 < n; i++) {
+                    const TG_FrS *a = &s_frs[i], *b = &s_frs[i + 1];
+                    const int ia = (a->ni >= 0 && a->alat <= a->hk + w);
+                    const int ib = (b->ni >= 0 && b->alat <= b->hk + w);
+                    if (a->ni < 0 || b->ni < 0 || ia == ib) continue;
+                    if (td5_env_flag_off("TD5RE_GEO_FRONTAGE_DIAG"))
+                        TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE DIAG] way %d transition at sample %d/%d "
+                                  "(%.0f,%.0f) ia %d ib %d", r, i, n, a->x, a->z, ia, ib);
+                    if (ia) laid |= tg_fr_lay(nl, nspans, rd, r, n, i + 1, 1, 1, 0);
+                    else    laid |= tg_fr_lay(nl, nspans, rd, r, n, i, -1, 1, 0);
+                }
+            } else {
+                int e, o;
+                double ex[2], ez[2];
+                if (s_fr_nopen == 0) continue;
+                if (!td5_geo_roads_point(rd, 0, &ex[0], &ez[0])) continue;
+                if (!td5_geo_roads_point(rd, rd->count - 1, &ex[1], &ez[1])) continue;
+                n = -1;
+                for (e = 0; e < 2 && !laid; e++) {
+                    for (o = 0; o < s_fr_nopen && !laid; o++) {
+                        const double dx = ex[e] - s_fr_open[o].x, dz = ez[e] - s_fr_open[o].z;
+                        if (s_fr_open[o].hop != hop - 1 || dx * dx + dz * dz > 1500.0 * 1500.0) continue;
+                        if (n < 0) { n = tg_fr_sample(nl, nspans, rd); if (n < 2) break; }
+                        laid |= tg_fr_lay(nl, nspans, rd, r, n, e ? n - 1 : 0, e ? -1 : 1, 0, hop);
+                    }
+                }
+            }
+            if (laid) s_fr_laid[r] = 1;
+        }
+    }
+
+    /* the paint for the whole set, after every ribbon was laid (see the plaza roads). No ground
+     * conform: the ribbon rides on the ground skirt (tg_net_fr_y) instead of reshaping it, so the
+     * skirt, the verge and every span emitter beside it read the same terrain as before. */
+    for (ei = edge0; ei < s_ne; ei++)
+        tg_net_paint_edge(&s_edges[ei], TG_WO_STREET);
+    TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE] %ld way(s) sampled, %ld merge ribbon(s) and %ld "
+              "continuation ribbon(s) laid (%d edge(s))", s_fr_ways, s_fr_ribbons, s_fr_cont, s_ne - edge0);
+}
+
 /* Is this build sourcing its streets from real OSM roads? A route alone is not
  * enough: TD5RE_GEO_ROUTE can drive a conditioned polyline over the SYNTHETIC
  * world with no place cache behind it (td5_geo.h), and there is no road graph to
@@ -1808,6 +2140,7 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
          * (TD5RE_GEO_NET_SYNTH=1) rather than additive. */
         tg_net_geo_underpasses(nl, nspans_main);
         tg_net_geo_streets(nl, nspans_main);
+        tg_net_geo_frontage(nl, nspans_main);             /* [1022 P item 1] */
         tg_net_geo_plaza_roads(nl, nspans_main);          /* [1014 B] */
         if (td5_env_flag_off("TD5RE_GEO_NET_SYNTH")) {
             tg_net_back_streets();
@@ -1971,6 +2304,18 @@ static int tg_net_follow_on(void)
     return td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW");
 }
 
+/* [ROUND 1022 P item 1] a frontage road never sinks below the ground skirt (the skirt reads the span's
+ * own cross-section profile, which the terrain-height envelope of tg_net_ground_y can undershoot by
+ * up to ~80 units, burying the ribbon). e->py[m..m+1] hold the skirt model plus the lift. */
+static double tg_net_fr_y(const TG_NetEdge *e, int m, double t, double y)
+{
+    if (e->fr) {
+        const double ym = e->py[m] + (e->py[m + 1] - e->py[m]) * t;
+        if (ym > y) return ym;
+    }
+    return y;
+}
+
 /* [ROUND 1015 B item 12] Does (x,z) lie on the carriageway of any edge OTHER than `self`?
  * Distance to each of its polyline segments against half its width. */
 static int tg_net_on_other_road(const TG_NetEdge *self, double x, double z)
@@ -1989,6 +2334,38 @@ static int tg_net_on_other_road(const TG_NetEdge *self, double x, double z)
             if (t > 1.0) t = 1.0;
             ex = ax + dx * t - x; ez = az + dz * t - z;
             if (ex * ex + ez * ez < o->width * o->width * 0.25) return 1;
+        }
+    }
+    return 0;
+}
+
+/* [ROUND 1022 P item 2] Does the kerb line of a footway section (start, middle, end) lie more than
+ * `margin` INSIDE the carriageway of any edge other than `self`? A ring road's ways meet at shared nodes
+ * (Plaza Moreno: edge 68 splits into edges 60 and 69 at (402683,47607)); each ribbon lays its kerbs as if
+ * it were alone, and the check above tests only the CENTRE of the slab, which is a whole slab away from the
+ * other road, so the first section after a Y / a width step stood across the neighbour's tarmac: "a stray
+ * raised pavement arm sticking into the plaza approach road" (audit: 20 samples, dy +149). */
+static int tg_net_kerb_on_other_road(const TG_NetEdge *self, double x0, double z0, double x1, double z1,
+                                     double margin)
+{
+    const double px[3] = { x0, 0.5 * (x0 + x1), x1 };
+    const double pz[3] = { z0, 0.5 * (z0 + z1), z1 };
+    int i, k, q;
+    for (i = 0; i < s_ne; i++) {
+        const TG_NetEdge *o = &s_edges[i];
+        const double lim = o->width * 0.5 - margin;
+        if (o == self || o->npoly < 2 || !(lim > 0.0)) continue;
+        for (k = 0; k + 1 < o->npoly; k++) {
+            const double ax = o->px[k], az = o->pz[k];
+            const double dx = o->px[k + 1] - ax, dz = o->pz[k + 1] - az;
+            const double l2 = dx * dx + dz * dz;
+            for (q = 0; q < 3; q++) {
+                double t = (l2 > 1e-9) ? ((px[q] - ax) * dx + (pz[q] - az) * dz) / l2 : 0.0, ex, ez;
+                if (t < 0.0) t = 0.0;
+                if (t > 1.0) t = 1.0;
+                ex = ax + dx * t - px[q]; ez = az + dz * t - pz[q];
+                if (ex * ex + ez * ez < lim * lim) return 1;
+            }
         }
     }
     return 0;
@@ -2032,8 +2409,12 @@ int tg_net_emit_entry(const TG_FBHook *h)
                 ml = nx * (-d1z) + nz * d1x;                  /* cos(half the bend) */
                 ml = (ml < 0.0) ? -ml : ml;
                 ml = (ml < 0.62) ? 0.62 : ml;                 /* clamp the miter at ~1.6 x */
-                lx[m] = e->px[m] - nx * hw / ml; lz[m] = e->pz[m] - nz * hw / ml;
-                rx[m] = e->px[m] + nx * hw / ml; rz[m] = e->pz[m] + nz * hw / ml;
+                {
+                    /* [ROUND 1022 P item 1] a frontage road's merge taper: the last vertex has (almost) no width */
+                    const double hwm = (e->taper && m + 1 == e->npoly) ? hw * 0.04 : hw;
+                    lx[m] = e->px[m] - nx * hwm / ml; lz[m] = e->pz[m] - nz * hwm / ml;
+                    rx[m] = e->px[m] + nx * hwm / ml; rz[m] = e->pz[m] + nz * hwm / ml;
+                }
             }
             {
                 /* [1015 B] span-length pieces when the road follows the ground (geo): one quad
@@ -2060,10 +2441,10 @@ int tg_net_emit_entry(const TG_FBHook *h)
                         const double cz0 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t0;
                         const double cx1 = e->px[m] + (e->px[m + 1] - e->px[m]) * t1;
                         const double cz1 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t1;
-                        const double y0 = follow ? tg_net_ground_y(cx0, cz0)
-                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0;
-                        const double y1 = follow ? tg_net_ground_y(cx1, cz1)
-                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
+                        const double y0 = tg_net_fr_y(e, m, t0, follow ? tg_net_ground_y(cx0, cz0)
+                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0);
+                        const double y1 = tg_net_fr_y(e, m, t1, follow ? tg_net_ground_y(cx1, cz1)
+                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0);
                         const double v0 = (vlen + sl * t0) / (double)TD5_TG_SPAN_LENGTH;
                         const double v1 = (vlen + sl * t1) / (double)TD5_TG_SPAN_LENGTH;
                         px[n] = lx[m] + (lx[m + 1] - lx[m]) * t0; pz[n] = lz[m] + (lz[m + 1] - lz[m]) * t0;
@@ -2103,14 +2484,15 @@ int tg_net_emit_entry(const TG_FBHook *h)
                     for (m = 0; m + 1 < e->npoly; m++) {
                         const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
                                              + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
-                        const double y0 = follow ? tg_net_ground_y(e->px[m], e->pz[m])
-                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0;
-                        const double y1 = follow ? tg_net_ground_y(e->px[m + 1], e->pz[m + 1])
-                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0;
+                        const double y0 = tg_net_fr_y(e, m, 0.0, follow ? tg_net_ground_y(e->px[m], e->pz[m])
+                                                 : tg_world_h(e->px[m], e->pz[m]) + 30.0);
+                        const double y1 = tg_net_fr_y(e, m, 1.0, follow ? tg_net_ground_y(e->px[m + 1], e->pz[m + 1])
+                                                 : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0);
                         const double v0 = vlen / (double)TD5_TG_SPAN_LENGTH;
                         const double v1 = (vlen + sl) / (double)TD5_TG_SPAN_LENGTH;
                         const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
                         for (side = 0; side < 2; side++) {
+                            if (e->fw_skip & (1 << side)) continue;   /* [1022 P item 1] the side facing the route */
                             /* kerb edge (on the carriageway's edge) and the slab's outer edge,
                              * per end, from the mitred offsets above scaled out by sw */
                             const double *ex = side ? rx : lx, *ez = side ? rz : lz;
@@ -2131,6 +2513,11 @@ int tg_net_emit_entry(const TG_FBHook *h)
                             if (td5_env_flag_on("TD5RE_GEO_PLAZA_FW_CLEAR")
                                 && tg_net_on_other_road(e, 0.25 * (ix0 + ox0 + ix1 + ox1),
                                                         0.25 * (iz0 + oz0 + iz1 + oz1))) {
+                                continue;
+                            }
+                            /* [ROUND 1022 P item 2] ... and no kerb line inside a neighbour's carriageway */
+                            if (td5_env_flag_on("TD5RE_GEO_FW_JOINT")
+                                && tg_net_kerb_on_other_road(e, ix0, iz0, ix1, iz1, 200.0)) {
                                 continue;
                             }
                             /* top slab: near-in, near-out, far-out, far-in */
