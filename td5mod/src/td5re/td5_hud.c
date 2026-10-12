@@ -7474,8 +7474,8 @@ static int hud_minimap_street_labels(int actor_slot, float offset_x, float offse
     float ui, cap, px, pz, reach, mm_l, mm_t, mm_r, mm_b, keep;
     int nc = 0, placed = 0, i, j;
 
+    if (n <= 0 || !segs) return 0;     /* shipped tracks stop here, before any getenv */
     if (!hud_knob_on("TD5RE_MINIMAP_LABELS")) return 0;
-    if (n <= 0 || !segs) return 0;
     if (s_minimap_world_scale_x <= 0.0f || s_minimap_world_scale_y <= 0.0f) return 0;
     if (!td5_hudfont_ready()) return 0;
 
