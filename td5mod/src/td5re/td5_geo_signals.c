@@ -386,9 +386,26 @@ static const unsigned int k_sig_rgb[TD5_GEO_SIGNAL_PHASES] = {
  * td5_vfx_anim_time() (td5_vfx.c): a wall clock, NOT the simulation tick, so a
  * paused or rewound race does not freeze or rewind the lights and nothing in
  * the cycle can ever feed back into the sim. */
+/* [ROUND 1022 S] TD5RE_GEO_SIGNAL_SCALE=k stretches the whole cycle k times
+ * (default 1; a 6 gives a ~24 s green so the countdown reads like the real
+ * "25"). Cosmetic, read once. The cycle is kept in UNSCALED seconds -- the
+ * clock is divided by k here -- so every phase boundary and the countdown
+ * (which multiplies its remaining time back by k) follow from the one scale. */
+static float sig_scale(void)
+{
+    static float s_k = 0.0f;
+    if (s_k <= 0.0f) {
+        const char *e = getenv("TD5RE_GEO_SIGNAL_SCALE");
+        float k = e ? (float)atof(e) : 1.0f;
+        if (!(k >= 0.25f && k <= 20.0f)) k = 1.0f;
+        s_k = k;
+    }
+    return s_k;
+}
+
 static float sig_now_s(void)
 {
-    return (float)(td5_plat_time_us() % 3600000000ULL) * 1.0e-6f;
+    return (float)(td5_plat_time_us() % 3600000000ULL) * 1.0e-6f / sig_scale();
 }
 
 /* Which lamp is lit at cycle time `t` (0 <= t < SIG_T_PERIOD). */
@@ -469,7 +486,7 @@ int td5_geo_signal_countdown(unsigned int *rgb)
         if (rgb) *rgb = 0xFF000000u;
         return -1;
     }
-    v = (int)ceilf(rem);
+    v = (int)ceilf(rem * sig_scale());
     if (v < 1) v = 1;
     if (v > 99) v = 99;
     return v;

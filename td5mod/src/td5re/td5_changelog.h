@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 11 (real places: turn off into side streets)" },
+    { CL_ITEM,    "La Plata: the countdown box beside each light now counts" },
+    { CL_ITEM,    "  down (red digits to green, green digits to red) and the" },
+    { CL_ITEM,    "  sideways head at the arm tip shows the opposite colour" },
+    { CL_ITEM,    "La Plata: the minimap names the nearby streets (not the one" },
+    { CL_ITEM,    "  you are on), a few at a time, horizontal and readable" },
     { CL_ITEM,    "La Plata: traffic lights are now overhead mast arms. A" },
     { CL_ITEM,    "  pole at the corner, an arm over the road, two signal" },
     { CL_ITEM,    "  heads hanging from it and a blue plate with the name" },
