@@ -63,6 +63,7 @@
 #include "td5_geo_roads.h"
 #include "td5_geo_sidewalk.h"
 #include "td5_geo_avenues.h"      /* the real gap between the two carriageways of an avenue */
+#include "td5_geo_buildings.h"     /* [1023 B] far-arc footprints re-hosted on the plaza fork */
 
 #define PF_UPM          430.0
 #define PF_MAXPLAN      96
@@ -109,6 +110,7 @@ typedef struct {
     int    built;
     int    tin, tout;               /* [1017 R] the lane ramps in front of F / behind R actually fitted */
     int    merged;                  /* [1017 R] absorbed the avenue fork(s) next to it (classic rows run 0..k1 over the avenue) */
+    unsigned char *gap;             /* [1023 B] per row: a real street opens here, so no kerb slab stands across its mouth */
 } PfPlan;
 
 static PfRing  s_ring[PF_MAXRING];
@@ -135,6 +137,7 @@ void tg_pf_reset(void)
         free(s_plan[i].rview.v);
         free(s_plan[i].med);
         free(s_plan[i].lat);
+        free(s_plan[i].gap);
         s_plan[i].view.v = NULL;
         s_plan[i].rview.v = NULL;
     }
@@ -1310,6 +1313,151 @@ int tg_pf_classic_span(int fi, int ck)
     const PfPlan *P = pf_of(fi);
     if (!P || !P->built) return 0;
     return ck < P->k1 || ck >= P->K2c;
+}
+
+/* [ROUND 1023 B items 7 + 8] The FREE rows of a plaza corridor and their frame, for the
+ * far-arc scenery that has no main span of its own to stand beside (real cross streets,
+ * real frontage footprints; see td5_tg_network.c tg_net_geo_far_streets and
+ * td5_tg_plazafork.c tg_pf_rehost_buildings). Rows k0 <= k < k1 are the free ones. */
+int tg_pf_free_rows(int fi, int *k0, int *k1)
+{
+    const PfPlan *P = pf_of(fi);
+    if (!P || !P->built || P->K2c <= P->k1) return 0;
+    if (k0) *k0 = P->k1;
+    if (k1) *k1 = P->K2c;
+    return 1;
+}
+
+/* Row k's centre, unit tangent and half carriageway width, in world units. */
+int tg_pf_row_frame(int fi, int k, double *x, double *z, double *tx, double *tz, double *half)
+{
+    const PfPlan *P = pf_of(fi);
+    const TG_Node *c;
+    if (!P || !P->built || k < 0 || k > P->clen) return 0;
+    c = &P->rview.v[P->F + 1 + k];
+    if (x) *x = c->x;
+    if (z) *z = c->z;
+    if (tx) *tx = c->tx;
+    if (tz) *tz = c->tz;
+    if (half) *half = c->width * tg_fork_br_wscale(fi, k) * 0.5;
+    return 1;
+}
+
+void tg_pf_gap_mark(int fi, int k0, int k1)
+{
+    PfPlan *P = pf_of(fi);
+    int k;
+    if (!P || !P->built) return;
+    if (!P->gap) P->gap = (unsigned char *)calloc((size_t)P->clen + 2, 1);
+    if (!P->gap) return;
+    if (k0 < 0) k0 = 0;
+    if (k1 > P->clen) k1 = P->clen;
+    for (k = k0; k <= k1; k++) P->gap[k] = 1;
+}
+
+int tg_pf_gap_at(int fi, int k)
+{
+    const PfPlan *P = pf_of(fi);
+    if (!P || !P->gap || k < 0 || k > P->clen) return 0;
+    return P->gap[k];
+}
+
+/* ===================== [ROUND 1023 B item 8] FAR-ARC FRONTAGE =====================
+ * Mariano, level091 L91 e319 s5 p44:SIDEWALK pos 412368,2365,340681 (corridor span 1276, the far
+ * arc of Plaza Miguel de Azcuenaga): "there are no buildings nearby either". MEASURED: BUILDINGS.JSON
+ * holds 29 real footprints within 80 m of that pick (3..13 m tall), MODELS.DAT holds no building mesh
+ * within 80 m of it. A footprint is emitted by the span it is bound to, and the bind
+ * (geob_bind_ring, TD5_GEOB_BIND_MAX_B = 43000 = 100 m) walks the MAIN route's nodes only; the free
+ * arc is 100..180 m from the route (docs/plans/GEO_REAL_FORKS.md: the ring's other side is up to 182 m
+ * away), and a corridor span carries road only, so nothing ever stood on the town side of the arc.
+ *
+ * Each unbound footprint whose centre is on the OUTER (town) side of a free row, within
+ * TD5RE_PF_FAR_BLD_M (default 85 m) of it and clear of the corridor carriageway and its pavements,
+ * is re-hosted on the main span that row is mapped to (tg_pf_row_node, the same span the render cull
+ * and the AI use for that row), so it is drawn whenever the corridor is. Landmarks keep the normal
+ * path (their apron / prefab code measures from the host road). TD5RE_PF_FAR_BLD=0 = master's bytes. */
+#define PF_FARB_PAVE   1290.0       /* the corridor's kerb slab                       */
+#define PF_FARB_MARGIN 500.0        /* clear air beyond the slab                      */
+
+static double pf_pt_seg_d2(double px, double pz, double ax, double az, double bx, double bz)
+{
+    const double dx = bx - ax, dz = bz - az;
+    double t = ((px - ax) * dx + (pz - az) * dz) / (dx * dx + dz * dz + 1e-9), qx, qz;
+    if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+    qx = ax + dx * t - px; qz = az + dz * t - pz;
+    return qx * qx + qz * qz;
+}
+
+int tg_pf_rehost_buildings(const TG_NodeList *nl, int nspans)
+{
+    int fi, rehosted = 0, cand = 0, drop_clear = 0;
+    const int nb = td5_geob_building_count();
+    const double maxd = (double)td5_env_float("TD5RE_PF_FAR_BLD_M", 85.0f, 10.0f, 300.0f) * PF_UPM;
+
+    td5_geob_rehost_clear();
+    if (!td5_env_flag_on("TD5RE_PF_FAR_BLD") || !td5_geob_loaded() || nb <= 0) return 0;
+    for (fi = 0; fi < s_fork_count; fi++) {
+        int k0, k1, k, n, i;
+        double *rx, *rz, *hw, bx0 = 1e300, bx1 = -1e300, bz0 = 1e300, bz1 = -1e300;
+        const int fs = tg_fork_side(fi);
+        if (!tg_fork_is_free(fi) || tg_fork_is_loop(fi)) continue;
+        if (!tg_pf_free_rows(fi, &k0, &k1)) continue;
+        n = k1 - k0 + 1;
+        rx = (double *)malloc((size_t)n * 3 * sizeof(double));
+        if (!rx) continue;
+        rz = rx + n; hw = rz + n;
+        for (k = 0; k < n; k++) {
+            double tx, tz;
+            if (!tg_pf_row_frame(fi, k0 + k, &rx[k], &rz[k], &tx, &tz, &hw[k])) { rx[k] = rz[k] = 0.0; hw[k] = 0.0; }
+            if (rx[k] < bx0) bx0 = rx[k];
+            if (rx[k] > bx1) bx1 = rx[k];
+            if (rz[k] < bz0) bz0 = rz[k];
+            if (rz[k] > bz1) bz1 = rz[k];
+        }
+        for (i = 0; i < nb; i++) {
+            const TD5_GeoBuilding *gb = td5_geob_building(i);
+            double best = 1e300, lat, tx = 0.0, tz = 0.0, hwj = 0.0, cx, cz, vx[TD5_GEOB_RING_MAX], vz[TD5_GEOB_RING_MAX];
+            int j = -1, v, ok = 1, mn;
+            if (!gb || gb->host_span >= 0 || gb->plaza_veto || gb->landmark || gb->part) continue;
+            if (gb->n < 3 || gb->n > TD5_GEOB_RING_MAX) continue;
+            cx = gb->cx; cz = gb->cz;
+            if (cx < bx0 - maxd || cx > bx1 + maxd || cz < bz0 - maxd || cz > bz1 + maxd) continue;
+            for (k = 0; k < n; k++) {
+                const double dx = rx[k] - cx, dz = rz[k] - cz, d2 = dx * dx + dz * dz;
+                if (d2 < best) { best = d2; j = k; }
+            }
+            if (j < 0 || best > maxd * maxd) continue;
+            tg_pf_row_frame(fi, k0 + j, NULL, NULL, &tx, &tz, &hwj);
+            lat = (cx - rx[j]) * tz - (cz - rz[j]) * tx;       /* + = left of travel, the frame the pavements use */
+            if (lat * (double)fs <= 0.0) continue;             /* the plaza side, not the town side */
+            cand++;
+            for (v = 0; v < gb->n; v++) td5_geob_ring(gb->first, v, &vx[v], &vz[v]);
+            for (v = 0; v < gb->n && ok; v++) {                /* every vertex and edge midpoint clears the road + slab */
+                const double px[2] = { vx[v], 0.5 * (vx[v] + vx[(v + 1) % gb->n]) };
+                const double pz[2] = { vz[v], 0.5 * (vz[v] + vz[(v + 1) % gb->n]) };
+                int q;
+                for (q = 0; q < 2 && ok; q++) {
+                    for (k = (j > 12 ? j - 12 : 0); k + 1 < n && k <= j + 12; k++) {
+                        const double lim = hw[k] + PF_FARB_PAVE + PF_FARB_MARGIN;
+                        if (pf_pt_seg_d2(px[q], pz[q], rx[k], rz[k], rx[k + 1], rz[k + 1]) < lim * lim) { ok = 0; break; }
+                    }
+                }
+            }
+            if (!ok) { drop_clear++; continue; }
+            mn = tg_pf_row_node(fi, k0 + j);
+            if (mn < 1) mn = 1;
+            if (mn > nspans - 2) mn = nspans - 2;
+            {
+                const double mlat = (cx - nl->v[mn].x) * nl->v[mn].tz - (cz - nl->v[mn].z) * nl->v[mn].tx;
+                if (td5_geob_rehost(i, mn, mlat >= 0.0 ? 1 : -1, mlat < 0.0 ? -mlat : mlat)) rehosted++;
+            }
+        }
+        free(rx);
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [PLAZA FORK] far-arc frontage: %d candidate footprint(s) on the town side, "
+              "%d too close to the corridor, %d re-hosted on main spans (knob TD5RE_PF_FAR_BLD, reach %.0f m)",
+              cand, drop_clear, rehosted, maxd / PF_UPM);
+    return rehosted;
 }
 
 /* [ROUND 1015 E] Would the scenery carriageway of an avenue stand ON a plaza corridor?
