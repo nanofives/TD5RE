@@ -375,3 +375,50 @@ and the roofline on the 3.6 % of quads on a real slope (the roof is not levelled
 filler quad at every joint, which is a design change, not a fix). No code change for this item; the
 measurement tools are committed so a specific location can be re-checked. If Mariano means a particular
 span, a second pick on a steep street is needed (the histogram's worst: e146 s15, e270 s17, e146 s28).
+
+
+## 7. Round 1021, group C (buildings / set pieces / props / rails, La Plata level091)
+
+> 4. "building in the middle of the crossing road: L91 e7 s31 city p68+278 pos 43007,4120,-3438"
+> 9. "buildings in the middle of a crossing road: L91 e33 s38 city p383 pos 200422,5029,28460"
+> 11. "buildings on Plaza Moreno: L91 e65 s20 building p19:STORE+10 ... and e66 s25 building p19:STORE+7"
+> 12. "sidewalks near a park should not have guardrails: L91 e73 s9 city p46:FENCE ... in La Plata there's no guardrails anywhere in the city"
+> 13. "this geometry should not be here, and it's incomplete: L91 e77 s8 building p577+591+592+593+594+589 v456 c42"
+> 14. "this prop is floating in the air, seems like it's part of something else: L91 e75 s16 prop p505"
+
+Tools (offline, MODELS.DAT + MESHTAG.BIN + `_route/*.JSON`): `verify/r1021c_bld_on_street.py` (buildings on a laid
+cross street), `r1021c_plaza_band.py` (walls inside / near a plaza outline), `r1021c_lawn_under.py`,
+`r1021c_awning_wall.py`, `r1021c_prop_float.py`, `r1021c_rail_census.py`; decode a pick with `r1015c_decode.py`.
+Picks decoded on a rebuild at seed 99991: 4, 9, 11a, 12, 14 match by (centre, radius, vertex count); 11b is the same
+mesh at slot 27 (the pick said 25: slot numbers shift with the seed, the mesh does not). Item 13's mesh (456 v / 42 c)
+is not in a seed-99991 rebuild, but it is `L23.lm02` by the prefab table.
+
+| item | mesh (decoded) | root cause (measured) | fix, knob (0 = master) |
+|---|---|---|---|
+| 4 | real OSM extrusion, 74.7 m2 | 70% of its plan on a laid cross-street carriageway (p101): a diagonal street sweeps across the frontage of spans away from its own mouth; the existing "real road" veto only knows OSM ways, and the per-span street test only its own span | `tg_xstreet_covers` (td5_tg_streets.c): the emitter's own parallelogram for every mouth within 24 spans; centroid or a third of the sample points on it drops the footprint. `TD5RE_GEO_BLD_STREET_CLEAR` |
+| 9 | fork-backdrop block (`tg_city_emit_forkback`), 24.3 m2 | 97% of its plan on a cobble street quad (p43). Found by tracing the box function's return address: not the back rows, not the flank blocks, not the gap infill (all three also lacked the test and now have it) | same test at the 4 box emitters. same knob |
+| 11 | procedural frontage wall (`proc`) | both walls are 15 and 17 m OUTSIDE the OSM park outline and 0 buildings of any class stand on a lawn (p65); but (a) the span window of the plaza test (+/-72 spans from the polygon's filing span) never reaches the far side of a 351 x 341 m polygon: one frontage wall stood INSIDE Plaza Moreno, (b) filler between the route and the plaza reads as plaza | polygons tested globally (`TD5RE_GEO_PLAZA_WIDE`); procedural frontage and back rows keep 20 m clear of any plaza outline (`TD5RE_GEO_PLAZA_BAND_M`, 8-direction inflated probe). Real footprints keep their own rule |
+| 12 | kerb railing (`tg_city_emit_fence`) | the synthetic generator's Moscow kerb railing, bend guardrail and arm-pavement railing; none has a source in OSM | `tg_geo_urban_rails_off` (td5_tg_furniture.c): none on a kerbed (facade) biome; bridge parapets, tunnel walkway rail and rails over a deck / ramp / lifted span stay. `TD5RE_GEO_NO_URBAN_RAILS` |
+| 13 | `L23.lm02` (126 faces, 11 free wall ends) | the round 1015 rule needed >= 2 free ends of >= 6 m; lm02 has 1 (6.1 m) but 50.0 m of free wall end in total | parked (`k_pf_parked[2]`), and the audit rule gains `dangle_h >= 45 m` (catches only lm02 among the kept pieces). `TD5RE_TG_PREFAB_PARK_1021` |
+| 14 | p505 = the AWNING (TG_INFRA_CANOPY, page R9_INFRA 497 + 8), not a deer | a canopy is lifted 2.8 m and hangs from a shop front; the R13 filter asked the frontage PATTERN, but the wall is often not built on a geo route (real footprint, plaza, band). 11 of 24 had no wall within 4 m, this one none within 12 m | the pick is kept only if the procedural wall stands (`tg_side_stands`) or a real footprint stands within 10 m behind the kerb; else a bin or bench (same substitution as R13). `TD5RE_GEO_AWNING_WALL` |
+
+### 7.1 Before / after (his route, seed 99991, `verify/geo_tags_identity.ps1 -Arm geo`, `TD5RE_GEO_PLACE=la_plata_partido`)
+
+| measure | master 70375f9e | round 1021 C |
+|---|---|---|
+| MODELS.DAT | 8398608 B `8965ACC9...` | 7810848 B `438FA981...` (all six knobs off: 8398608 B `8965ACC9...`, STRIP / TEXTURES identical) |
+| kerb / arm fence meshes (page 46) | 745 (city 677, block 68), 959 quads; railed edges 901 | 0; railed edges 0 |
+| real + flank / back-row box meshes with >= 25% of the plan on a laid street | 26 (11 at >= 50%) | 4 |
+| procedural wall faces on a street carriageway | 52 (2 meshes) | 0 |
+| real footprints dropped / flank, infill, forkback blocks skipped | | 18 / 16 |
+| procedural frontage meshes: inside a plaza polygon / within 20 m | 1 / 42 (of 107) | 0 / 2 (of 66) |
+| real footprints inside / within 20 m of a plaza | 0 / 3 | 0 / 3 (unchanged on purpose) |
+| buildings on a plaza lawn (p65) | 0 | 0 |
+| awnings, and those with no wall within 4 m | 24, 11 | 10, 0 |
+| buildings on a REAL OSM road (>= 25%): real / proc / prefab | 2 / 0 / 1 | 2 / 0 / 0 |
+| `[NET/GEO] real street census`, `[REAL FORK]` lines | | identical (md5 of the sorted lines) |
+| synthetic seed 99991 slot 60 | 12772392 B `E2F1F33C...` | identical (lm02 is not placed at that seed; at others a walk row 17 ... of lm02 is lost) |
+
+Cost to know about: 41 of 107 procedural frontage meshes disappear (the plaza band and the global polygon test); the
+real footprints around the plazas are untouched. If that is too much, `TD5RE_GEO_PLAZA_BAND_M=10` keeps the pick's
+neighbours. The audit rule change is global like the park itself (`TD5RE_TG_PREFAB_PARK_1021=0` brings lm02 back).
