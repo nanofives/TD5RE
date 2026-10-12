@@ -321,3 +321,61 @@ streaming leaves no MODELS.DAT, so the next launch rebuilds (correct, just slow)
 ## Round 1022 Q additions
 
 `verify/geo_r1022q_rejoin.py <run-set>` reads the same run-sets and judges only the rejoin window R-24..R+14: car-car pairs (the wall-contact counters above do not see them), merge pairs (a corridor car meeting a road car), impacts (>= 25 % speed loss inside 8 ticks), stalls, jams, spins. The fork table's exit mouth is R-4..R+2 wall contacts only. Natural fork choice is `-ForceMode 0`. For the same exe and seeds the traces are byte-identical up to the finish, so a table repeats exactly; more seeds, not repeats, add information. Details and numbers: docs/plans/GEO_REAL_FORKS.md "Round 1022 Q".
+
+## Round 1024 H: why the plaza-merged fork F=89 failed on spins (28 vs 12)
+
+Route B9839962 (level091, ring 979): `[REAL FORK] 0: plaza "Plaza Miguel de Azcuenaga" F=89 len=572 R=662 [MERGED]`
+(avenue Diagonal 73 + the plaza + the exit avenue, corridor 980..1548) and Avenida 13 (F=790). Reproduced on master
+4b5edfd4: `pwsh verify/geo_fork_validate.ps1 -Seeds 11,22,33,44,55,66 -Tag h_master6` (124 s): F=89 FAIL
+`spins 28 vs baseline 12 (+0.44 per car-pass)`, hit/crash 33/6, stall 17, jam 4, speed 491/465. Seeds are 3 distinct
+races (44=11, 55=22, 66=33 repeat the tier and so the race): 0 + 5 + 11 spins, then 0 + 1 + 11.
+
+Where the 28 spins are (per run, `perseed` script of the round): s22 5 (3 on the ROAD at spans 365..374, 2 on the corridor at
+1246/1247), s55 1 (corridor 1199), s33 and s66 11 each, slot 3 on the ROAD at spans 397..413. Only 3 are on the corridor.
+ForceMode 3 (everybody on the road, fork built): 5 spins in 3 seeds, so the road itself is fine.
+
+**Cause 1 (a bug, fixed): `collision_detect_simple` distance wraps int32.** Slot 3 (road, span 360) went 407 -> 1160
+units/tick in ONE tick (position +1304 x, -359 z) with nothing near it. Bisected with per-step velocity logs in
+`td5_physics_update_vehicle_actor` (unchanged through the wall/pose steps) to `td5_physics_resolve_vehicle_contacts`: the
+pair was slot 3 and slot 4, an airborne (`wheel_contact_bitmask` 0x0F, SIMPLE dispatch) CORRIDOR car 65000 units (150 m)
+away on the plaza's far arc: the broadphase buckets by normalised span (>>2) and a corridor car carries the span of the road
+beside it. `dx*dx + dy*dy + dz*dz` with dx = 49738, dz = 42631 is 4.3e9, int32 wraps it negative, `dist_sq >= combined^2`
+passes, `td5_isqrt` of the wrapped value gives a normal and `dvA = +235213, dvB = -235213` is applied. 64-bit now
+(`td5_physics_collision.c`, knob `TD5RE_V2V_SIMPLE_I64`, default ON, 0 = master arithmetic).
+Any fork whose corridor leaves the road by more than 46340 units (107 m) can hit it; the plaza arc is the one that does.
+
+**Cause 2 (AI, mitigated): a wedged AI car is counted as a new spin every 40..80 ticks.** Seeds 33/66: slots 3 and 5 reach
+the road after the other four took the corridor (the baseline had them behind a 1200-tick pile-up at 338..341, so they never
+met). The corner governor (`TD5RE_AI_CORR_GOV`, whole route) holds both at one speed, 1250..1600 units apart (a car
+length), the follower closes at 8 units/tick under the leader's braking and touches from tick 1391 (`v2v_diag` pair 3-5 every tick),
+slot 3 spins at span 397 and slides into the 2-lane bend at 410..414 (half-width 1500 after the lane narrowing at 407/408),
+where it stays FACING BACKWARDS for 1500 ticks: steering at +-102400, throttle 255 / -256 flipping every 40..80 ticks,
+speed 0..66, wall contact on alternate ticks (`rec_state` is 0: the original's blind recovery script, reversing into one wall
+for 80 ticks and driving into the other for 40). `TD5RE_AI_RECOVERY_MAX` (150) never fires because the car reaches 66 units/tick
+(> 24) in every forward phase. Nine of slot 3's eleven spins, in each of two identical races, are that one car re-entering the
+nose-backwards test. The baseline has the same trap (12 trapped cars against 4), which is why a fork is graded against it.
+Not fixed: the follower's weak car-following at a one-span gap (`smart_speed_core`, gap in spans, lateral window 0.8 lane), and the
+governor equalising speeds. Both are general AI and touch every generated track.
+
+Mitigation (`td5_physics_assists.c`, `TD5RE_AI_WEDGE_RESET`, default 360 ticks = 12 s, 0 = off): an AI racer (never a human)
+on a GENERATED track whose furthest normalised span has not moved for 360 ticks is put back on the road in place with
+`td5_physics_recover_player` (the RESET CAR path: upright, nose along the track, speed 0), recovery script cancelled
+(`td5_ai_cancel_recovery_script`). 360 ticks is 4x the harness stall line; the longest stall that cleared on its own in these
+runs was 270.
+
+### Harness, same exe (`td5re_fix3.exe`), knobs on / off, 6 seeds
+
+| route | fork | master (or knobs off) | knobs on |
+|---|---|---|---|
+| B9839962 | F=89 plaza-merged | FAIL spins 28/12, hit/crash 33/6, stall 17, jam 4, speed 491/465 | PASS spins 14/10, hit/crash 29/4, stall 11, jam 2, speed 511/493 |
+| B9839962 | F=790 Avenida 13 | PASS | PASS (5/0 hits, 0 stalls) |
+| archived round1013 route (`-RouteDir _archive/round1013_mariano_route/_route`) | 5 forks | 5 WARN | the same 5 WARN (F=420 parallel: 1 spin vs 0) |
+| archived round1010 route | 6 forks | 5 PASS 1 WARN | identical table |
+
+Knobs off reproduce master's tables and traces (same rows up to the first finisher on every run, differing only after it, as the
+harness doc already says). Single knobs on B9839962 (6 seeds, baseline from master): `I64` alone F=89 WARN spins 24/12 (the s22 glitch gone, the
+s33 trap left, one hair under the 0.34 FAIL line); `TD5RE_AI_CORR_GOV=0` PASS but Avenida 13 WARN; `TD5RE_AI_CORR_GOV_SCOPE=0` PASS (spins 9)
+but it brings back the ring stall sites round 1016 K removed (568..583, 800..815, 1084..1090), which this window does not measure.
+
+Dev tooling used: `TD5RE_PHYS_DIAG=<slot>`, `TD5RE_AI_GOV_DIAG=<slot>`, `TD5RE_AI_LANE_DIAG=<slot>` (existing), `verify/geo_lf_trace.py`.
+A throwaway per-step velocity logger (not committed) was what located the impulse.

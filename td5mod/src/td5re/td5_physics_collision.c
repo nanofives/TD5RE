@@ -2171,6 +2171,23 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     int32_t dy = (FP_TRUNC(a->world_pos.y)) - (FP_TRUNC(b->world_pos.y));
     int32_t dz = (FP_TRUNC(a->world_pos.z)) - (FP_TRUNC(b->world_pos.z));
 
+    /* [ROUND 1024 H] dx*dx + dy*dy + dz*dz is int32: two cars more than 46340 units apart wrap it NEGATIVE,
+     * which passes the `>= combined^2` reject and fires a full impulse between cars that are nowhere near
+     * each other. The span-bucket broadphase pairs them on a generated fork: a corridor car carries the
+     * normalised span of the main road beside it, and a plaza's far arc is 150 m (65000 units) from the
+     * near arc. Measured (level091 B9839962, harness seed 22): a main-road car at span 360 and an airborne
+     * (wheel_contact_bitmask 0x0F -> SIMPLE dispatch) corridor car 65000 units away: dx*dx = 2.47e9, the sum
+     * wrapped, dvA = +235213 / dvB = -235213 in one tick, the main-road car went 407 -> 1160 units/tick,
+     * rear slip 77650, 5 spins and 2 stalls of the fork window. 64-bit sum; TD5RE_V2V_SIMPLE_I64=0 restores
+     * the int32 arithmetic (master). */
+    {
+        static int s_i64 = -1;
+        if (s_i64 < 0) s_i64 = td5_env_flag_on("TD5RE_V2V_SIMPLE_I64");
+        if (s_i64) {
+            const int64_t d64 = (int64_t)dx * dx + (int64_t)dy * dy + (int64_t)dz * dz;
+            if (d64 >= (int64_t)combined * combined) return;
+        }
+    }
     int32_t dist_sq = dx * dx + dy * dy + dz * dz;
     if (dist_sq >= combined * combined) return;
 

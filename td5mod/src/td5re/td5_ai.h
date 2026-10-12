@@ -239,6 +239,8 @@ void td5_ai_mark_actor_broken_down(int slot);
 /* Clear the broken-down/parked flag for `slot` (called by the manual reset-car
  * recovery so a knocked-out racer is no longer treated as wrecked). */
 void td5_ai_clear_actor_broken_down(int slot);
+/* [ROUND 1024 H] Cancel `slot`'s scripted recovery program (see td5_ai.c). */
+void td5_ai_cancel_recovery_script(int slot);
 /* Nearest chasing cop to a listener world pos (24.8), or -1 — drives the siren. */
 int  td5_ai_nearest_chasing_cop(int32_t listener_x, int32_t listener_z);
 

@@ -1053,6 +1053,21 @@ void td5_ai_clear_actor_broken_down(int slot) {
     TD5_LOG_I(LOG_TAG, "clear_broken_down: slot=%d (manual reset recovery)", slot);
 }
 
+/* [ROUND 1024 H] Drop `slot`'s scripted recovery program (the blind steer-lock / reverse-forward
+ * shuffle) and release the wheel. Used when a wedged AI car is put back on the road, so it does
+ * not resume the dead script on the next tick. */
+void td5_ai_cancel_recovery_script(int slot)
+{
+    int32_t *rs;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    rs = td5_ai_get_route_state(slot);
+    if (!rs) return;
+    rs[RS_SCRIPT_BASE_PTR] = 0;
+    rs[RS_SCRIPT_IP]       = 0;
+    rs[RS_SCRIPT_FLAGS]    = 0;
+    g_recovery_ticks[slot] = 0;
+}
+
 /* Nearest chasing cop to the given listener world position (24.8 fixed), or
  * -1 if none. td5_sound.c uses this to drive the (single) siren channel from
  * the closest active chase, then attenuates by that cop's distance. */

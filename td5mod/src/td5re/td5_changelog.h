@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 12 (real places: minimap, street paint, merges)" },
+    { CL_ITEM,    "Fork physics: two cars more than 150 m apart could be" },
+    { CL_ITEM,    "  treated as touching (a wrapped distance), launching a" },
+    { CL_ITEM,    "  road car at 1100 units/tick beside the plaza corridor." },
+    { CL_ITEM,    "  Fixed." },
+    { CL_ITEM,    "AI cars wedged for 12 s with no progress are put back" },
+    { CL_ITEM,    "  on the road, nose forward (generated tracks only)." },
     { CL_ITEM,    "La Plata minimap: only streets that exist in the 3D" },
     { CL_ITEM,    "  world are drawn. A real street with no road built on" },
     { CL_ITEM,    "  it is no longer on the map." },
