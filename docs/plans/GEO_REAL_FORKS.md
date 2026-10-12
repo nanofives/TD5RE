@@ -1318,3 +1318,52 @@ running beside the road and merging in). The two "top" poses came out as low obl
 * The arrival merge: corridor cars enter at 140 units/tick, main-road cars pass at 500. Natural-choice races still show a jam in 3 of 12 seeds around 726..760 and 840 (left loop arrival, and the Avenida 53 approach already present before this round). A merge lane that accelerates the corridor car,
   or an arrival that is a real give-way for the corridor, would remove it; `TD5RE_AI_MERGE_V` helps natural totals and hurts the forced harness, which is unexplained.
 * A human drive through two loops back to back (nobody has steered the pair by hand).
+
+## Round 1021 A: the median on every seed and on the left, a fork from the start, far corridors
+
+Base master 70375f9e, route fingerprint 7820EC8E (La Plata Partido, slot 61 / level091, 771 ring spans, finish 665; Diagonal 73 right fork F=40..253 and left fork F=429..638 on master).
+Mariano's picks decoded through MODELS.DAT (entry, slot): centre, radius, vertex and command counts of all five matched the rebuild, so the rebuild is his build.
+
+| pick | decoded | cause (measured) |
+|---|---|---|
+| 1: e12 s2 `road p0:ROAD` (span ~50) | the fork's GORE floor, laid as ROAD page 70 units below the road, no island in the whole window | **`[R21 ROLL] AVENUES = OFF`** at the default seed 99991 (`k_tgr_w_mostly_on`: 25 % of seeds). With the divider off nothing stood on the gore and R17 paved it as road: a flush strip. No `[R11 MEDIAN]` line existed in the log at all |
+| 18: e131 s6 `road p0:ROAD` (span ~525) | the same flush gore on the LEFT fork | same roll, plus: the divider and its placement mirror (`tg_r12_median_gore_w`) read `-(sh + h)` as the gore width, which is NEGATIVE on every span of a left real fork (signed frame), so a "sliver": no island on a left fork, rolls aside |
+| 3: e5 s6 `branch-road` (span ~21) | the scenery opposite carriageway of Diagonal 73 (spans 6..40, no span record) | the first fork's earliest F = GRID + 2 + 8 uniform + 6 ramp = 40 |
+| 6: e209 s3 / e225 s3 | corridor road meshes (spans ~836 and ~900, normalised ~108 and ~172) | `td5_render_mesh.c` drew a corridor span only within `fwd_window/back_window = 64` spans of the player's normalised span, the main road over `walk_window`, about +-205 spans |
+
+### What changed (all behind knobs, `=0` restores master)
+
+| item | change | knob |
+|---|---|---|
+| 1, 18 | AVENUES roll held ON on a geo place (the real map decides whether an avenue has a median, never the seed), like the other rows in `k_geo_hold` | `TD5RE_GEO_HOLD_AVENUE` |
+| 18 | left real fork: `tg_fork_left_real_median` (real forks with side +1 only): gore width `sh - h` instead of `-(sh + h)` in `tg_r12_median_gore_w`, and the divider (`tg_emit_avenue_divider`) builds its prism in the same signed frame (bl = sh - fs h, gw = fs bl, fill half width `-fs (mi - bl)/2`). Right forks and every synthetic fork evaluate the old expression bit for bit | `TD5RE_GEO_LEFT_MEDIAN` |
+| 3 | the fork WINDOW may overlap the start grid, the MOUTH F may not: F >= GRID + 2 (26), ramp nodes down to node 1 (`rf_grid_on`, `rf_node_floor`). Diagonal 73 now forks at F=26 (window nodes 2..271), 434 corridor spans (was 420). The grid cars stand on the avenue's widening, the START gantry (span 24) is in front of the median | `TD5RE_GEO_FORK_GRID` |
+| 3 | `td5_track_grid_main_lane` (generated levels only): a grid car's sub-lane is clamped into the MAIN band of a type-8 fork within 40 spans ahead (right corridor: the low lanes, left: the high ones), so the second column is not on the corridor half. Unchanged wherever the road has no more lanes than the main half | `TD5RE_GRID_MAIN_LANE` |
+| 6 | corridor spans draw over the main road's own span window (`start_entry*4 - eff_player .. (start_entry+n_entries)*4 - eff_player`) | `TD5RE_CORRIDOR_DRAW_FULL` |
+| dev | `TD5RE_FREECAM_TOUR_CULL_BEHIND=N` centres the tour's cull N spans behind the pose (a free camera N spans ahead of the car) | dev only |
+
+### Measured
+
+* **Knob-off identity on his route** (`verify/geo_tags_identity.ps1 -Arm geo`, all five knobs `=0`): MODELS.DAT 8398608 B `8965ACC965B8FEA1FE0C0F85D0D06981`, STRIP 81750 B `2AF7CC7DE36AFA32AAF323A0A995EE5D`, TEXTURES `5B4E005A...` = the master build of this session (the first geo run, before any edit). Default: MODELS.DAT 8629176 B `813ACA26A458A856F048B1B2A7C5A4AD`, STRIP 83340 B `208386E675A5D025BA2ECC8E8ACC6231`.
+* **Synthetic** (SELECTED.TXT aside): MODELS.DAT 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`, STRIP `0641EDB7...`, TEXTURES `5B4E005A...`: identical to master.
+* **Census** (`[NET/GEO] real street census`): 157 arms considered, 52 accepted (street 39, avenue 13) before and after; shared-carriageway departures 14 -> 13 (one now lies under the first window). `[REAL FORK]`: before F=40 len 212 corr 772..983 and F=429 corr 985..1192; after F=26 len 226 corr 772..997 and F=429 corr 999..1206.
+* **Islands** (a MODELS.DAT page-2 scan): the fork 0 window had 0 GREEN island meshes and fork 1 had 0; now both windows carry them except on the opening spans (left fork 524..527 and 536..539 are the paved cross-street gaps).
+* **Fork harness** (`verify/geo_fork_validate.ps1`, 6 AI, no traffic, seeds 11 22 33 44 55 66, 12 races at 6 jobs):
+
+| config | mode | F=26 / F=40 | F=429 |
+|---|---|---|---|
+| all knobs off (= master) | forced half and half | PASS, stalls 3, jams 0 | PASS, stalls 1, jams 0 |
+| all knobs off | natural choice | PASS, stalls 0 | PASS, stalls 0, jams 0 |
+| default (new) | forced half and half | PASS, stalls 6, **jams 2** (seed 33: three main-arm cars pile up at spans 78..90, 600+ ticks) | WARN, stalls 4 vs 2 (seed 22, run inside the 12-race parallel batch: the SAME seed alone has 0 stalls and WARNs only on hits 3 vs 1; `TD5RE_GEO_LEFT_MEDIAN=0` gives the identical single-seed result, so the island is not the cause) |
+| default (new) | natural choice | PASS, stalls 1, jams 0 | WARN, **1 car jammed 120 ticks at 638..640** |
+
+  The harness is not deterministic across machine load (seed 22 alone differs from seed 22 inside the batch), so a single event is not attributable to a knob.
+* **Arrival merge (round 1020 N)**: that route's loops do not exist on 7820EC8E (0 loop candidates), so the left-loop jam at 726..733 cannot occur. The same mechanism does show at the left fork's rejoin (R=638): seed 22, a main-road car at 636 u/t is hit at span 635 by the corridor car merging at 419 u/t (spin at 632, stopped 638..640 for 120 ticks, no wall contact). 1 car in 36 passes, 0 of 36 with the knobs off in the same harness. NOT fixed here: it needs the merge lane / give-way of the 1020 N notes ("What remains"), and one event is below what the harness can attribute.
+* **Frames looked at** (`verify/geo_tour.ps1`, scenery complete): span 44 (raised planted island with kerb, a carriageway each side), span 525 from 6000 back and a 14000-high plan view at 525 (left island, paved flat gap across the cross street, island again), the grid (spans 2, 12, 18 plan, 26: wide avenue under the grid, START gantry, island opening just after it), item 6 (`TD5RE_FREECAM_TOUR_CULL_BEHIND=100`, corridor span 836: master shows void, now the corridor road and its scenery are drawn).
+* `build_all.bat` dev + release OK, structure lint OK (extern 3, game.h includers 23, warnings 84 = baseline).
+
+### What remains
+
+* The start of a race on the avenue is AI-validated only (forced 6 seeds: one 3-car pile-up in the main arm at 78..90; natural 6 seeds: clean). Nobody has driven the grid by hand: check the countdown, the first 30 spans, the position after the first corner.
+* A merge give-way for corridor cars at a fork's rejoin (see above).
+* The scenery avenue's own carriageway before the left fork's mouth (spans 421..429) is still scenery-only (bend 0.267 rad/span refuses the window).
