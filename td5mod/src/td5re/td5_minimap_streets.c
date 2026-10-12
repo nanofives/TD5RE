@@ -133,7 +133,7 @@ static int mms_chord_ok(double x0, double z0, double x1, double z1)
 }
 
 /* 1 on success, 0 when the array is full (the caller must stop). */
-static int mms_push(double x0, double z0, double x1, double z1, int rank)
+static int mms_push(double x0, double z0, double x1, double z1, int rank, int name_id)
 {
     TD5_MMStreetSeg *s;
     if (s_mms.n >= s_mms.cap && !mms_reserve(s_mms.cap ? s_mms.cap * 2 : 8192)) return 0;
@@ -145,6 +145,7 @@ static int mms_push(double x0, double z0, double x1, double z1, int rank)
     s->minz = (float)((z0 < z1) ? z0 : z1);
     s->maxz = (float)((z0 < z1) ? z1 : z0);
     s->rank = (unsigned char)rank;
+    s->name_id = (short)((name_id >= 0 && name_id < 32767) ? name_id : -1);
     return 1;
 }
 
@@ -196,7 +197,7 @@ static int mms_build_geo(const char *slug)
         for (k = 0; td5_geo_roads_point(r, k, &px, &pz); k++) {
             if (k == 0) { qx = px; qz = pz; continue; }
             if (!mms_chord_ok(qx, qz, px, pz)) continue;   /* keep accumulating */
-            if (!mms_push(qx, qz, px, pz, rank)) {
+            if (!mms_push(qx, qz, px, pz, rank, r->name_id)) {
                 TD5_LOG_W(LOG_TAG, "minimap streets: hit the %d-segment ceiling "
                           "at way %d of %d; the rest of '%s' is not drawn",
                           MMS_MAX_SEGS, i, nroads, slug);
@@ -228,7 +229,7 @@ static int mms_build_auto(void)
             if (!td5_trackgen_street_edge_point(e, k, &x, &z)) break;
             if (k == 0) { qx = x; qz = z; continue; }
             if (!mms_chord_ok(qx, qz, x, z)) continue;
-            if (!mms_push(qx, qz, x, z, rank)) { full = 1; break; }
+            if (!mms_push(qx, qz, x, z, rank, -1)) { full = 1; break; }
             qx = x; qz = z;
         }
     }
@@ -302,3 +303,9 @@ int td5_mmstreets_count(void) { return s_mms.n; }
 const TD5_MMStreetSeg *td5_mmstreets_segs(void) { return s_mms.n ? s_mms.seg : NULL; }
 
 const char *td5_mmstreets_source(void) { return s_mms.source; }
+
+const char *td5_mmstreets_name(int id)
+{
+    if (id < 0 || !s_mms.n || strncmp(s_mms.source, "geo:", 4) != 0) return "";
+    return td5_geo_roads_name_by_id(id);
+}
