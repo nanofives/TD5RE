@@ -434,7 +434,7 @@ static int bl_fork_blocks(const BlPlan *P, int s)
     const TG_Fork *f;
     if ((tg_fork_side_at(s) > 0 ? 1 : -1) == (P->sd > 0 ? 1 : -1)) return 1;      /* the fork's corridor lies on the loop's side */
     if ((s >= P->a1_lo - m && s <= P->a1_hi + m) || (s >= P->a2_lo - m && s <= P->a2_hi + m)) {
-        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", 3, 0, 20);
+        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", 3, -10, 20);
         f = bl_fork_covering(s);
         if (!td5_env_flag_on("TD5RE_GEO_LOOP_FORK_NWAY") || !f || f->freec > 0) return 1;
         if (s < f->F + 1 + pad || s > f->R - 1 - pad) return 1;

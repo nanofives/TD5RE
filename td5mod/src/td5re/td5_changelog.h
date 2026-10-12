@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 11 (real places: turn off into side streets)" },
+    { CL_ITEM,    "La Plata: a side-street loop may now share a stretch" },
+    { CL_ITEM,    "  with an avenue fork on the OTHER side of the road: three" },
+    { CL_ITEM,    "  ways off one window (stay, avenue corridor, side street)" },
     { CL_ITEM,    "La Plata: traffic lights are now overhead mast arms. A" },
     { CL_ITEM,    "  pole at the corner, an arm over the road, two signal" },
     { CL_ITEM,    "  heads hanging from it and a blue plate with the name" },
