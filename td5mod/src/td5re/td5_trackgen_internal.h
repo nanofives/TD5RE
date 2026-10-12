@@ -4752,6 +4752,12 @@ int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side, double inner
  * (edge frame, network skew, network reach), so a diagonal street that sweeps across the neighbouring
  * spans' frontage is seen where the per-span "xstreet here" answer cannot see it. td5_tg_streets.c. */
 int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z);
+/* [ROUND 1023 C items 2 + 9] The laid cross-street SURFACES within TG_XSC_WIN spans of si on side sg, as quads
+ * (8 doubles each; kind[i] 0 = carriageway, 1 = pavement arm). td5_tg_streets.c. */
+int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, unsigned char *kind, int maxq);
+/* [ROUND 1023 C] The network's POLYLINE roads (ribbons, back streets, country lanes) as capsule segments
+ * (6 doubles each: x0 z0 x1 z1 half-width mouth-span-or-minus-1) that can reach the box. td5_tg_network.c. */
+int tg_net_polyroads(double bx0, double bz0, double bx1, double bz1, double *out, int maxseg);
 void tg_xstreet_audit(const TG_NodeList *nl, int si, double side, double inner_d, const char *what, int placed);
 int tg_block_is_park(int si, int left);
 /* Fork-back band sizing. Declared here rather than beside tg_city_emit_forkback

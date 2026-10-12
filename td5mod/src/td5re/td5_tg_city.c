@@ -1622,6 +1622,8 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
  * than the conditioner's own deviation from the real street centreline, less
  * than a block depth, so a nudge never pushes a frontage behind its neighbour. */
 #define TD5_TG_GEO_MAX_SHIFT  4500.0
+/* [ROUND 1023 C] how far tg_geo_footprint_clear may push a ring away from a road before dropping it */
+#define TD5_TG_GEO_FOOT_PUSH  3000.0
 /* Sanity ceiling on an extrusion. 60000 ~= 140 m; the tallest measured height
  * in the La Plata cache is 75 m. A footprint tagged past this is a data error
  * (a height in feet, a mast height on a building), and a 2 km tower beside the
@@ -1667,6 +1669,7 @@ static long s_geo_backrow_suppressed;
 /* [ROUND 1021 C items 4, 9] real footprints dropped / back-row boxes skipped for standing on a laid
  * cross-street carriageway */
 static long s_geo_dropped_street, s_geo_backrow_street, s_geo_plaza_band;
+static long s_geo_dropped_foot;     /* [R1023 C] footprints dropped / pushed by tg_geo_footprint_clear */
 static long s_geo_awning_nowall;     /* [1021 C item 14] awnings refused: the wall they hang from is not built */
 /* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
  * new height sources, so an Overture A/B is a number in race.log. */
@@ -1722,6 +1725,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
     s_geo_dropped_street = s_geo_backrow_street = s_geo_plaza_band = 0;
+    s_geo_dropped_foot = 0;
     s_geo_awning_nowall = 0;
     s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_dropped_slots = 0;
@@ -3171,6 +3175,30 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
         }
     }
 
+    /* [ROUND 1023 C items 2 + 9] Mariano, level091 L91 e105 s21 city p68+11: "this building is clipping in
+     * the middle of the road". The two tests above measure a footprint against the HOST span's straight
+     * frame (and the street test against single points of the carriageway only). A 12..70 m footprint on a
+     * bend, beside a fork corridor whose real position is not its analytic reach, or with an edge or a
+     * corner on a side street or the pavement arm that flanks it, passes both. MEASURED on level091 before
+     * this: 128 building / facade meshes intrude on a carriageway or a pavement band (verify/
+     * r1023c_bld_intrude.py), 61 of them real footprints. tg_geo_footprint_clear measures the whole ring
+     * against every laid span segment (ring AND corridor) with its pavement band, and against the laid
+     * side-street carriageways and arms by plan area: it pushes the ring away from a road (<= 3000 units)
+     * or drops the footprint. TD5RE_GEO_BLD_FOOTCLEAR=0 keeps the old behaviour byte for byte. */
+    {
+        const char *why = NULL;
+        if (tg_geo_footprint_clear(nl, si, side, tg_world_h(cx, cz), rx, rz, n_ring,
+                                   TD5_TG_GEO_FOOT_PUSH, &why)) {
+            tg_geo_lm_note(gb, si, why ? why : "DROPPED on a road", 0.0);
+            s_geo_dropped_foot++;
+            s_geo_dropped_deg++;
+            return 1;
+        }
+        cx = 0.0; cz = 0.0;
+        for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
+        cx /= (double)n_ring; cz /= (double)n_ring;
+    }
+
     /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
      * outline's own (already nudged) ring, so it inherits the carriageway
      * clearance the building was given. */
@@ -3621,6 +3649,9 @@ static void tg_geo_city_report_impl(int from_stream)
               "skipped for standing on a laid cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
               s_geo_dropped_street, s_geo_backrow_street,
               td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1023 C] %ld real footprint(s) dropped by the whole-footprint clearance "
+              "(laid roads incl. corridors, cross streets, pavement arms; knob TD5RE_GEO_BLD_FOOTCLEAR=%s)",
+              s_geo_dropped_foot, td5_env_flag_on("TD5RE_GEO_BLD_FOOTCLEAR") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld frontage / back-row probe(s) stood down only because they "
               "fall within the plaza surround band (knob TD5RE_GEO_PLAZA_BAND_M); %ld awning pick(s) "
               "swapped for a bin or bench because the wall they hang from is not built (knob "
@@ -6291,6 +6322,13 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
             ay = n1->y - n0->y;
             az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+            /* [ROUND 1023 C] ... and the whole box against every laid street, arm and road (the test above
+             * asks about the centre and the corners only). TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
+            if (td5_geo_loaded() &&
+                tg_geo_box_clear(h->nl, h->si, sg, by, bx, bz, ax, az, lx0, lz0, lx1, lz1, tg_facade_depth(b))) {
+                s_geo_backrow_street++;
+                continue;
+            }
 
             /* Columns from the row's OWN frontage length, which at a big setback
              * on a curve is appreciably longer than a span: the fixed 2 columns

@@ -50,6 +50,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "La Plata: a street that leaves the road at a bend is one" },
     { CL_ITEM,    "  clean band (the road at the start of the plaza), not a" },
     { CL_ITEM,    "  stack of overlapping wedges with doubled centre lines" },
+    { CL_DATE,    "October 12 (real places: buildings off the road)" },
+    { CL_ITEM,    "La Plata: a building can no longer stand on the road or" },
+    { CL_ITEM,    "  on its pavement. A real building that clipped a bend, a" },
+    { CL_ITEM,    "  fork road or a side street is moved clear of it or left" },
+    { CL_ITEM,    "  out, and a side-street wall stands behind the whole" },
+    { CL_ITEM,    "  pavement, not in the middle of it." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 11 (real places: roads that merge in)" },

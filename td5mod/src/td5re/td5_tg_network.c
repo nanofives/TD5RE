@@ -2307,6 +2307,34 @@ void tg_network_reset(void)
 
 int tg_network_built(void) { return s_net_built; }
 
+/* [ROUND 1023 C] The POLYLINE roads of the network -- a real way laid as one mitred ribbon, a back street and a
+ * country lane -- as capsule segments, for the whole-footprint clearance (td5_tg_geo_clear.c). The straight
+ * mouth streets are the quads tg_xstreet_collect hands back; these are the other carriageways the network
+ * lays (kind `cross` page 101 in MODELS.DAT), which a straight-quad test cannot see. out[j*6 ..]: x0 z0 x1 z1
+ * half-width and the mouth span (>= 0 when the edge lays a pavement on both kerbs, -1 when it does not).
+ * Only segments whose capsule can reach the box [bx0,bx1] x [bz0,bz1]. Pure function of the built network. */
+int tg_net_polyroads(double bx0, double bz0, double bx1, double bz1, double *out, int maxseg)
+{
+    int i, k, n = 0;
+    if (!s_net_built) return 0;
+    for (i = 0; i < s_ne; i++) {
+        const TG_NetEdge *e = &s_edges[i];
+        const int ribbon = (e->ribbon && e->npoly > 2);
+        if (e->loop) continue;                         /* a block loop's corridor is the road itself */
+        if (!ribbon && e->kind != TG_NE_BACKSTREET && !(e->kind == TG_NE_COUNTRY && e->npoly > 2)) continue;
+        for (k = (e->kind == TG_NE_COUNTRY && !ribbon) ? 1 : 0; k + 1 < e->npoly && n < maxseg; k++) {
+            const double hw = e->width * 0.5;
+            const double ax = e->px[k], az = e->pz[k], bx = e->px[k + 1], bz = e->pz[k + 1];
+            if ((ax < bx ? ax : bx) - hw > bx1 || (ax > bx ? ax : bx) + hw < bx0) continue;
+            if ((az < bz ? az : bz) - hw > bz1 || (az > bz ? az : bz) + hw < bz0) continue;
+            out[n * 6 + 0] = ax; out[n * 6 + 1] = az; out[n * 6 + 2] = bx; out[n * 6 + 3] = bz;
+            out[n * 6 + 4] = hw; out[n * 6 + 5] = ribbon ? (double)e->mouth_si : -1.0;
+            n++;
+        }
+    }
+    return n;
+}
+
 /* [1014 B] Did the built network take its streets from a real OSM graph? The
  * junction furniture that keys on "a mouth is open here" reads this to know a
  * mouth is a REAL street rather than a hash-rhythm gap. 0 on every synthetic

@@ -9,6 +9,7 @@
 #include "td5_geo_buildings.h"   /* GEO TRACK: real area polygons             */
 #include "td5_geo_footways.h"    /* [1013 F1] real OSM footways = ring plaza paths */
 #include "td5_geo_attrs.h"       /* [1011 C3] GEO TRACK: OSM lit -> the lamps */
+#include "td5_tg_geo_clear.h"    /* [1023 C] whole-footprint clearance for the procedural boxes and walls */
 
 /* [R8 CROSS item 1] The reveal row has to know how deep the street it reveals
  * actually runs, so it can stand BEYOND it instead of across it. Both live
@@ -430,6 +431,82 @@ int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double
     return 0;
 }
 
+/* [ROUND 1023 C items 2 + 9] The SURFACES behind tg_xstreet_covers, handed back as quads so a caller can
+ * test a whole footprint against them in one pass instead of asking 49 spans per sample point.
+ *
+ * Mariano, level091 (round 1023): "this facade is over the sidewalk" (e8 s26) and "this building is
+ * clipping in the middle of the road" (e105 s21). The footprint test that kept real buildings off a laid
+ * street asked about ONE point at a time (the centroid, or a third of the boundary samples) and only about
+ * the carriageway, so a big footprint with a corner or an edge on the street, and any footprint standing
+ * on the pavement ARM that flanks the street, got through. MEASURED on level091 before this: 33 real
+ * footprints overlap a side-street carriageway by 2..115 m2 and 32 more stand on a pavement arm.
+ *
+ * Each quad is 8 doubles (x0 z0 x1 z1 x2 z2 x3 z3). kind[] is 0 for a carriageway, 1 for a pavement arm:
+ * the arm is the slab tg_block_emit_arm lays at a mouth's corner (the main road's pavement turning down the
+ * street), `reach` long and the per-side pavement width wide, on the back side of the corner. Same gates,
+ * same frame, same skew and reach as tg_xstreet_covers / tg_block_emit_intersection, so it reports the slab
+ * that is laid. Returns the quad count (<= maxq). Pure function of the network. */
+int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, unsigned char *kind, int maxq)
+{
+    const int left = (sg > 0.0) ? 1 : 0;
+    int lo, hi, m, n = 0;
+
+    if (!nl || !tg_network_built()) return 0;
+    lo = si - TG_XSC_WIN; if (lo < 1) lo = 1;
+    hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
+    for (m = lo; m <= hi && n < maxq; m++) {
+        const TG_Biome *b;
+        double rr = 0.0, e[10], ang, nox, noz, fox, foz, reach, sw, sws, ax, az, al;
+        double *q;
+        int arms;
+
+        if (!tg_xstreet_here(nl, m, sg, &rr)) continue;
+        if (tg_facade_built(m, left)) continue;
+        if (tg_block_is_park(m, left)) continue;
+        if (tg_net_mouth_is_loop(m, left)) continue;
+        if (tg_side_corridor_here(nl, m, sg)) continue;
+        b = &k_biomes[tg_scenery_biome_index(m)];
+        sw = tg_city_sidewalk_w(b);
+        tg_city_edge_frame(nl, m, sg, e);
+        ang = tg_block_arm_skew(m, left);
+        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, sw);
+        if (!(reach > 0.0)) continue;
+        tg_block_rot2(e[6], e[7], ang, &nox, &noz);
+        tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+        q = &quad[n * 8];
+        q[0] = e[0];                q[1] = e[2];
+        q[2] = e[0] + nox * reach;  q[3] = e[2] + noz * reach;
+        q[4] = e[3] + fox * reach;  q[5] = e[5] + foz * reach;
+        q[6] = e[3];                q[7] = e[5];
+        kind[n++] = 0;
+
+        arms = tg_r11_arm_side(nl, m, left);
+        if (!arms || !(sw > 0.0)) continue;
+        sws = tg_city_side_base(m, left, sw);
+        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, sws);
+        ax = e[3] - e[0]; az = e[5] - e[2];
+        al = sqrt(ax * ax + az * az);
+        if (al < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= al; az /= al; }
+        if ((arms & 1) && n < maxq) {                 /* corner at the near node, slab goes back along -a */
+            q = &quad[n * 8];
+            q[0] = e[0];                      q[1] = e[2];
+            q[2] = e[0] + nox * reach;        q[3] = e[2] + noz * reach;
+            q[4] = e[0] + nox * reach - ax * sws; q[5] = e[2] + noz * reach - az * sws;
+            q[6] = e[0] - ax * sws;           q[7] = e[2] - az * sws;
+            kind[n++] = 1;
+        }
+        if ((arms & 2) && n < maxq) {                 /* corner at the far node, slab goes back along +a */
+            q = &quad[n * 8];
+            q[0] = e[3];                      q[1] = e[5];
+            q[2] = e[3] + fox * reach;        q[3] = e[5] + foz * reach;
+            q[4] = e[3] + fox * reach + ax * sws; q[5] = e[5] + foz * reach + az * sws;
+            q[6] = e[3] + ax * sws;           q[7] = e[5] + az * sws;
+            kind[n++] = 1;
+        }
+    }
+    return n;
+}
+
 /* The instrument the diagnosis was made with: every furniture placement with the
  * laterals it was judged on, so "is this piece on tarmac" is a number per piece
  * rather than a frame of one of them. */
@@ -807,6 +884,7 @@ static long s_geop_xwall_park;
  * or beside them. */
 static long s_geop_xwall_unbacked;
 static long s_geop_flank_street;      /* [ROUND 1021 C item 9] flank blocks on a laid carriageway */
+static long s_geop_xwall_street;      /* [ROUND 1023 C] cross frontage walls skipped for standing on a street / road */
 static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
 
 int tg_block_is_park(int si, int left)
@@ -1147,6 +1225,13 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
                            + tg_xstreet_covers(nl, si, side, bx + lx0 * depth, bz + lz0 * depth)
                            + tg_xstreet_covers(nl, si, side, ex1 + lx1 * depth, ez1 + lz1 * depth);
             if (c_on || k_on >= 2) { s_geop_flank_street++; return 1; }
+        }
+        /* [ROUND 1023 C] ... and the whole box against every laid street, arm and road (see the flank
+         * emitter). TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
+        if (td5_geo_loaded() &&
+            tg_geo_box_clear(nl, si, side, by, bx, bz, ax, az, lx0, lz0, lx1, lz1, depth)) {
+            s_geop_flank_street++;
+            return 1;
         }
         if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                 bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
@@ -2911,8 +2996,10 @@ static void tg_geo_plaza_report_impl(int from_stream)
               s_geop_xwall_unbacked,
               td5_env_flag_on("TD5RE_GEO_XWALL_BACKED") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1021 C item 9] %ld flank / gap-infill block(s) skipped for standing on a laid "
-              "cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
-              s_geop_flank_street, td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
+              "cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s); [R1023 C] %ld cross frontage wall(s) skipped "
+              "for standing on a street or road (knob TD5RE_GEO_BLD_FOOTCLEAR=%s)",
+              s_geop_flank_street, td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off",
+              s_geop_xwall_street, td5_env_flag_on("TD5RE_GEO_BLD_FOOTCLEAR") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1014 E] park lawn: %ld sub-triangle(s) at "
               "refinement level <= %ld (knob TD5RE_GEO_LAWN_SUBDIV=%s), ground "
               "uncapped (TD5RE_GEO_PARK_UNCAP=%s); trees: %ld planted of %ld "
@@ -3158,7 +3245,16 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
             double axr = e[3] - e[0], azr = e[5] - e[2];
             const double alr = sqrt(axr * axr + azr * azr);
             if (alr > 1e-6) { axr /= alr; azr /= alr; } else { axr = 0.0; azr = 0.0; }
-            const double xset = td5_env_flag_on("TD5RE_R10_XSIDEWALK") ? sw : 0.0;
+            /* [ROUND 1023 C item 2] Mariano, level091 L91 e8 s26 (cross p275 WALL_LOW, 20 quads, 19 m tall):
+             * "this facade is over the sidewalk". The wall is set back by `sw`, the BIOME's pavement width
+             * (900), but the arm slab it stands beside (tg_block_emit_intersection) is `sw_s`, the side's
+             * own OSM-derived width (1620..1737 there): the wall stood 900 from the carriageway edge,
+             * i.e. in the MIDDLE of a 1737-wide slab. MEASURED on level091: 24 of 67 cross frontage walls
+             * had >= 2 samples on a pavement arm. The setback is now the width the slab is laid with, the
+             * same tg_city_side_base the arm reads, so the lateral order is kerb -> pavement -> wall.
+             * TD5RE_GEO_XWALL_ARMW=0 keeps the biome width. */
+            const double xsw = td5_env_flag_on("TD5RE_GEO_XWALL_ARMW") ? tg_city_side_base(h->si, s, sw) : sw;
+            const double xset = td5_env_flag_on("TD5RE_R10_XSIDEWALK") ? xsw : 0.0;
             const double xdir = edge ? 1.0 : -1.0;   /* outside the mouth */
             const double cx = (edge ? e[3] : e[0]) + ox * off + axr * xdir * xset;
             const double cz = (edge ? e[5] : e[2]) + oz * off + azr * xdir * xset;
@@ -3187,6 +3283,15 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
             }
             if (tg_geo_xwall_unbacked(h->si, cx, cz, ox, oz, flen)) {
                 s_geop_xwall_unbacked++;
+                continue;
+            }
+            /* [ROUND 1023 C item 2] The wall's own base line against every laid street, arm and road: with the
+             * setback widened to the arm (above) the wall can now stand across ANOTHER street that leaves a
+             * neighbouring span (MEASURED on level091: 2 cross walls on a carriageway, one on a fork corridor).
+             * A 300-wide strip along the base that ignores the arm the wall abuts; never moved, the wall is
+             * skipped. TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
+            if (td5_geo_loaded() && tg_geo_wall_clear(h->nl, h->si, sg, by, cx, cz, ox, oz, flen)) {
+                s_geop_xwall_street++;
                 continue;
             }
             /* base -> outward*flen, sinking with the skirt, rising H. */
@@ -3352,7 +3457,10 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                                        + (unsigned)s * 40503u
                                        + (unsigned)c * 2246822519u
                                        + (unsigned)k * 668265263u);
-                const double set = sw + TD5_TG_R8_FLANK_SET;
+                /* [ROUND 1023 C item 2] the street's pavement arm is the side's own width, not the biome's:
+                 * a box set back by the biome width stands on the arm. TD5RE_GEO_XWALL_ARMW=0 keeps it. */
+                const double set = (td5_env_flag_on("TD5RE_GEO_XWALL_ARMW") ? tg_city_side_base(h->si, s, sw) : sw)
+                                 + TD5_TG_R8_FLANK_SET;
                 double y0, H, bxp, byp, bzp;
                 int rows, cols, page;
 
@@ -3395,6 +3503,17 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                                    + tg_xstreet_covers(h->nl, h->si, sg, bxp + bx * depth, bzp + bz * depth)
                                    + tg_xstreet_covers(h->nl, h->si, sg, bxp + fx + bx * depth, bzp + fz + bz * depth);
                     if (c_on || k_on >= 2) { s_geop_flank_street++; continue; }
+                }
+                /* [ROUND 1023 C] The centre / two-of-four-corners test above lets a box with an edge or a
+                 * corner on a street through (MEASURED on level091: 7 flank boxes had 1.4..7.3 m2 of their
+                 * roof on a laid carriageway, 4 on a pavement). The whole box against every laid street,
+                 * arm and road (never moved: a procedural box is simply skipped).
+                 * TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
+                if (td5_geo_loaded() &&
+                    tg_geo_box_clear(h->nl, h->si, sg, byp, bxp, bzp, ox * TD5_TG_R8_FLANK_LEN,
+                                     oz * TD5_TG_R8_FLANK_LEN, bx, bz, bx, bz, depth)) {
+                    s_geop_flank_street++;
+                    continue;
                 }
                 if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                         bxp, byp, bzp,
@@ -3644,6 +3763,12 @@ static int tg_r13_emit_gap_infill(const TG_FBHook *h)
                            + tg_xstreet_covers(h->nl, h->si, sg, bx + lx0 * depth, bz + lz0 * depth)
                            + tg_xstreet_covers(h->nl, h->si, sg, ex1 + lx1 * depth, ez1 + lz1 * depth);
             if (c_on || k_on >= 2) { s_geop_flank_street++; continue; }
+        }
+        /* [ROUND 1023 C] ... and the whole box against every laid street, arm and road. */
+        if (td5_geo_loaded() &&
+            tg_geo_box_clear(h->nl, h->si, sg, by, bx, bz, ax, az, lx0, lz0, lx1, lz1, depth)) {
+            s_geop_flank_street++;
+            continue;
         }
         flen = sqrt(ax * ax + az * az);
         cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
@@ -4579,6 +4704,7 @@ void tg_r9_city_reset(void)
     s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
     s_geop_xwall_unbacked = 0;
     s_geop_flank_street = 0;
+    s_geop_xwall_street = 0;
     s_geop_ring_areas = s_geop_real_ways = s_geop_real_segs = 0;
     s_geop_real_buried = s_geop_real_capped = 0;
 }
