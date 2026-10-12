@@ -714,10 +714,83 @@ static void tg_xst_apron_end(TG_Surf *cap, int open)
     s_xst_apron = NULL;
 }
 
+/* [ROUND 1024 G item 2] "the right-side pavement arm of the cross street at spans 77..79 is still dropped by the
+ * on-road guard because it overlaps the start of the divided avenue": CLIP IT instead of dropping it whole.
+ *
+ * ROOT CAUSE (measured, level091 route B9839962, entry 19): the street's reach (4321, tg_net_march) is where the CENTRE
+ * ray of the run meets painted road; its two kerb rays leave the main road at 45 degrees to the avenue's far carriageway
+ * (the opposite carriageway of Diagonal 73, scenery, which starts at span 81 and is part of tg_carriageway_reach), so the
+ * far corner of every arm runs 3000..3500 units INTO that carriageway. The guard judges a mesh whole, so the carriageway
+ * mesh of each of spans 77, 78 and 79, the median and the two pavement-arm meshes at the far corner were deleted
+ * (coverage 1412 / 2063 / 737 / 3013 / 3532 / 3481, log "on-road guard: rejected city/block mesh ... marked @77..79").
+ *
+ * RULE. Every ray a street arm is laid along (its two kerb rays, and the corner ray of a pavement arm) is marched out
+ * against the same authority the guard asks (tg_carriageway_reach in the frame of the nearest main-road node, tested
+ * the way tg_guard_mesh_scan measures a vertex) and cut where it meets the carriageway: the arm ends on the avenue's
+ * edge, slanted like the edge, instead of running through it. A ray that never meets it keeps its full reach, so every
+ * street that was legal is laid exactly as before. A ray that is cut to under TG_XST_CLIP_MIN is no arm at all.
+ * Geo networks only; TD5RE_GEO_STREET_RAYCLIP=0 restores the whole-mesh drop. */
+#define TG_XST_CLIP_STEP    150.0
+#define TG_XST_CLIP_CONTACT 350.0    /* depth into the carriageway that counts as meeting it (guard rejects past 700) */
+#define TG_XST_CLIP_MIN     900.0
+static long s_xst_clip_rays, s_xst_clip_cut, s_xst_clip_none;
+
+static int tg_xst_rayclip_on(void)
+{
+    return tg_net_geo() && td5_env_flag_on("TD5RE_GEO_STREET_RAYCLIP");
+}
+
+/* How far a point is INSIDE the carriageway authority: reach - |lateral| in the frame of the nearest node around `si`
+ * (positive = on it), exactly the guard's per-vertex measure. */
+static double tg_xst_carr_depth(const TG_NodeList *nl, int si, double x, double z)
+{
+    const int lo = (si - TD5_TG_R8_CLAMP_WIN < 0) ? 0 : si - TD5_TG_R8_CLAMP_WIN;
+    const int hi = (si + TD5_TG_R8_CLAMP_WIN > nl->count - 1) ? nl->count - 1 : si + TD5_TG_R8_CLAMP_WIN;
+    double best = 1e300, lat, r;
+    int i, ni = -1;
+    for (i = lo; i <= hi; i++) {
+        const double dx = x - nl->v[i].x, dz = z - nl->v[i].z, d2 = dx * dx + dz * dz;
+        if (d2 < best) { best = d2; ni = i; }
+    }
+    if (ni < 0) return -1e300;
+    lat = (x - nl->v[ni].x) * nl->v[ni].tz - (z - nl->v[ni].z) * nl->v[ni].tx;
+    r = tg_carriageway_reach(nl, ni, (lat >= 0.0) ? 1.0 : -1.0);
+    return r - (lat >= 0.0 ? lat : -lat);
+}
+
+/* The reach of one ray (origin cx,cz, unit direction ox,oz) after the cut; `reach` when nothing is met. */
+static double tg_xst_ray_reach(const TG_NodeList *nl, int si, double cx, double cz,
+                               double ox, double oz, double reach)
+{
+    double d, lo, hi, dep = 0.0;
+    int out = (tg_xst_carr_depth(nl, si, cx, cz) <= 0.0), it;
+    if (!(reach > 0.0)) return reach;
+    s_xst_clip_rays++;
+    for (d = TG_XST_CLIP_STEP; d <= reach; d += TG_XST_CLIP_STEP) {
+        dep = tg_xst_carr_depth(nl, si, cx + ox * d, cz + oz * d);
+        if (!out) { if (dep <= 0.0) out = 1; continue; }     /* still leaving the kerb zone */
+        if (dep <= TG_XST_CLIP_CONTACT) continue;
+        lo = d - TG_XST_CLIP_STEP; hi = d;                    /* contact: find the edge */
+        for (it = 0; it < 12; it++) {
+            const double mid = 0.5 * (lo + hi);
+            if (tg_xst_carr_depth(nl, si, cx + ox * mid, cz + oz * mid) > 0.0) hi = mid; else lo = mid;
+        }
+        s_xst_clip_cut++;
+        if (lo < TG_XST_CLIP_MIN) s_xst_clip_none++;
+        return lo;
+    }
+    if (!out && dep > TG_XST_CLIP_CONTACT) {      /* starts on the carriageway and never leaves it: no arm */
+        s_xst_clip_cut++; s_xst_clip_none++;
+        return 0.0;
+    }
+    return reach;
+}
+
 static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                                    double *uu, double *vv, int *pn,
                                    const double *e, double nox, double noz,
                                    double fox, double foz, double reach,
+                                   double reach_n, double reach_f,       /* [R1024 G] per-ray reach; == reach when uncut */
                                    double drop, double u_r, int si)
 {
     int nseg = (int)ceil(reach / TG_XST_SEG_LEN), k;
@@ -730,8 +803,8 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
         for (c = 0; c < 4; c++) {
             const int far_edge = (c >= 2);
             const double f = (c == 1 || c == 2) ? f1 : f0;
-            const double x = far_edge ? e[3] + fox * reach * f : e[0] + nox * reach * f;
-            const double z = far_edge ? e[5] + foz * reach * f : e[2] + noz * reach * f;
+            const double x = far_edge ? e[3] + fox * reach_f * f : e[0] + nox * reach_n * f;
+            const double z = far_edge ? e[5] + foz * reach_f * f : e[2] + noz * reach_n * f;
             double y = (far_edge ? e[4] : e[1]) + TD5_TG_VERGE_LIFT - drop * f;
             if (f > 0.0) {
                 /* the envelope of the heightfield over half a cell round the vertex:
@@ -748,7 +821,7 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                 tg_xst_apron_lift(x, z, &y);        /* [ROUND 1023 A item 4] the drawn ground */
             }
             q[c * 3 + 0] = x; q[c * 3 + 1] = y; q[c * 3 + 2] = z;
-            t[c * 2 + 0] = u_r * f;
+            t[c * 2 + 0] = (far_edge ? u_r * (reach_f / reach) : u_r * (reach_n / reach)) * f;
             t[c * 2 + 1] = far_edge ? (double)si + 1.0 : (double)si;
         }
         tg_city_push_quad(px, py, pz, uu, vv, pn, q, t);
@@ -855,6 +928,17 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         if (follow) {
             TG_Surf apron;
             int apron_open;
+            double reach_n = reach, reach_f = reach;
+            if (tg_xst_rayclip_on()) {      /* [ROUND 1024 G item 2] cut each kerb ray where it meets the avenue's carriageway */
+                reach_n = tg_xst_ray_reach(h->nl, h->si, e[0], e[2], nox, noz, reach);
+                reach_f = tg_xst_ray_reach(h->nl, h->si, e[3], e[5], fox, foz, reach);
+                if (reach_n < reach || reach_f < reach) {
+                    reach = (reach_n > reach_f) ? reach_n : reach_f;
+                    if (reach < TG_XST_CLIP_MIN) continue;       /* the whole arm lies on the carriageway */
+                    drop = tg_xstreet_drop(reach);
+                    u_r  = reach / (double)TD5_TG_LANE_WIDTH;
+                }
+            }
             {
                 const double bxs[4] = { e[0], e[3], e[0] + nox * reach, e[3] + fox * reach };
                 const double bzs[4] = { e[2], e[5], e[2] + noz * reach, e[5] + foz * reach };
@@ -869,7 +953,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
                 apron_open = tg_xst_apron_begin(h, bx0, bz0, bx1, bz1, &apron);
             }
             tg_xstreet_push_follow(px, py, pz, uu, vv, &n, e, nox, noz, fox, foz,
-                                   reach, drop, u_r, h->si);
+                                   reach, reach_n, reach_f, drop, u_r, h->si);
             tg_xst_apron_end(&apron, apron_open);
             if (split) {
                 if (!tg_xst_flush(h, px, py, pz, uu, vv, n, seg_page, marks)) return 0;
@@ -951,6 +1035,18 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
             cx = 0.5 * (e[0] + e[3]);
             cy = 0.5 * (e[1] + e[4]) + TD5_TG_VERGE_LIFT;
             cz = 0.5 * (e[2] + e[5]);
+            if (tg_xst_rayclip_on()) {           /* [ROUND 1024 G item 2] the island ends where the carriageway starts */
+                /* the island is 2 x HW wide: its two long edges are the rays that matter, not its axis */
+                const double hwm = TD5_TG_R15_MEDIAN_HW;
+                double rc = tg_xst_ray_reach(h->nl, h->si, cx - ax * hwm, cz - az * hwm, oxm, ozm, reach);
+                const double rc2 = tg_xst_ray_reach(h->nl, h->si, cx + ax * hwm, cz + az * hwm, oxm, ozm, reach);
+                if (rc2 < rc) rc = rc2;
+                if (rc < reach) {
+                    reach = rc;
+                    if (reach < TG_XST_CLIP_MIN) continue;
+                    drop = tg_xstreet_drop(reach);
+                }
+            }
 
             {
                 const double hw = TD5_TG_R15_MEDIAN_HW;
@@ -1773,17 +1869,34 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
         if (alen < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= alen; az /= alen; }
 
         if (near_corner) {                            /* corner at the near node */
+            double rc = reach;
             tg_block_arm_near(e, ang, &ox, &oz);
+            /* [ROUND 1024 G item 2] the arm lies along its corner's ray: cut it where that ray meets the carriageway */
+            if (tg_xst_rayclip_on()) {
+                double rb;
+                rc = tg_xst_ray_reach(h->nl, h->si, e[0], e[2], ox, oz, reach);
+                rb = tg_xst_ray_reach(h->nl, h->si, e[0] - ax * sw_s, e[2] - az * sw_s, ox, oz, reach);   /* the slab's back edge */
+                if (rb < rc) rc = rb;
+            }
             /* back = -along (onto the built side, off the carriageway). */
-            if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
-                                   reach, sw_s))
-                return 0;
+            if (rc >= TG_XST_CLIP_MIN || rc >= reach)
+                if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
+                                       rc, sw_s))
+                    return 0;
         }
         if (far_corner) {                             /* corner at the far node */
+            double rc = reach;
             tg_block_arm_far(e, ang, &ox, &oz);
-            if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
-                                   reach, sw_s))
-                return 0;
+            if (tg_xst_rayclip_on()) {
+                double rb;
+                rc = tg_xst_ray_reach(h->nl, h->si, e[3], e[5], ox, oz, reach);
+                rb = tg_xst_ray_reach(h->nl, h->si, e[3] + ax * sw_s, e[5] + az * sw_s, ox, oz, reach);
+                if (rb < rc) rc = rb;
+            }
+            if (rc >= TG_XST_CLIP_MIN || rc >= reach)
+                if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
+                                       rc, sw_s))
+                    return 0;
         }
     }
     return 1;
@@ -3609,6 +3722,10 @@ static void tg_geo_plaza_report_impl(int from_stream)
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld cross-street arm(s) written as their own mesh, so the on-road "
               "guard judges an arm alone instead of deleting both (knob TD5RE_GEO_STREET_ARM_MESH=%s)",
               s_xst_arm_meshes, td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1024 G item 2] %ld street-arm ray(s) marched against the carriageway authority, %ld cut "
+              "where they meet it (%ld of those left under %.0f units = no arm) (knob TD5RE_GEO_STREET_RAYCLIP=%s)",
+              s_xst_clip_rays, s_xst_clip_cut, s_xst_clip_none, TG_XST_CLIP_MIN,
+              td5_env_flag_on("TD5RE_GEO_STREET_RAYCLIP") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld street / arm / network-edge scope(s) asked the drawn ground (skirts + far apron) "
               "for their height, %ld vertex lift(s) above the heightfield envelope (knob TD5RE_GEO_STREET_APRON=%s)",
               s_xst_apron_scopes + tg_net_apron_edge_count(), s_xst_apron_lifted + tg_net_apron_lift_count(),
