@@ -693,6 +693,7 @@ static int         s_fp_n;
 
 static long s_fp_ways, s_fp_segs_seen, s_fp_placed;
 static long s_fp_drop_far, s_fp_drop_road, s_fp_drop_struct;
+static long s_fp_cut_street;   /* [1022 P] footway samples dropped for lying on a cross street */
 static long s_fp_drop_kind, s_fp_drop_cap, s_fp_drop_budget;
 
 /* Which kinds are OURS. SIDEWALK is excluded on purpose: a kerbside pavement
@@ -707,6 +708,26 @@ static long s_fp_drop_kind, s_fp_drop_cap, s_fp_drop_budget;
                              (1u << TD5_GEO_FW_PEDESTRIAN) | \
                              (1u << TD5_GEO_FW_CYCLEWAY))
 
+/* [ROUND 1022 P item 2] Is (x,z), or a point `half` to either side of it, on a laid CROSS STREET? A
+ * footway is paving laid at pavement height (+TG_GEOFP_LIFT over the ground); the road gate above clears
+ * only the MAIN carriageway, so a real footway segment that crosses a side street at the mouth (La Plata
+ * span ~250: a 10000-unit OSM footway across the street into Plaza Moreno) lay as a raised slab across
+ * the asphalt -- "a stray raised pavement arm sticking into the plaza approach road". */
+static int tg_fp_on_street(const TG_NodeList *nl, double x, double z, double nx, double nz, double half)
+{
+    int si, k;
+    if (!tg_network_built()) return 0;
+    si = tg_guard_nearest_node(nl, 0, nl->count - 1, x, z);
+    if (si < 1 || si + 1 >= nl->count) return 0;
+    for (k = 0; k < 3; k++) {
+        const double off = (k - 1) * half;
+        const double qx = x + nx * off, qz = z + nz * off;
+        const double sg = (tg_bs_lateral(nl, si, qx, qz) >= 0.0) ? 1.0 : -1.0;
+        if (tg_xstreet_covers(nl, si, sg, qx, qz)) return 1;
+    }
+    return 0;
+}
+
 void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans)
 {
     int n, i;
@@ -716,6 +737,7 @@ void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans)
     s_fp_n = 0;
     s_fp_ways = s_fp_segs_seen = s_fp_placed = 0;
     s_fp_drop_far = s_fp_drop_road = s_fp_drop_struct = 0;
+    s_fp_cut_street = 0;
     s_fp_drop_kind = s_fp_drop_cap = s_fp_drop_budget = 0;
 
     if (!td5_geo_loaded())                        return;   /* byte-identical */
@@ -808,6 +830,58 @@ void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans)
             d  = fabs(tg_bs_lateral(nl, si, bx, bz));
             by = nd->y - tg_infra_ground_dy(nl, si, side, d, 0.0);
 
+            {
+                /* [ROUND 1022 P item 2] cut the segment where it lies on a cross street: the runs that
+                 * stay off every street are laid, the part across the asphalt is not. A segment with no
+                 * sample on a street is laid whole, exactly as before. */
+                const double sdx = bx - ax, sdz = bz - az;
+                const double slen = sqrt(sdx * sdx + sdz * sdz);
+                const int ns = (int)ceil(slen / 700.0) < 1 ? 1 : ((int)ceil(slen / 700.0) > 48 ? 48 : (int)ceil(slen / 700.0));
+                unsigned char on[49];
+                int any = 0, q, r0 = -1;
+                if (td5_env_flag_on("TD5RE_GEO_FOOTPATH_STREET_CLIP") && slen > 1.0) {
+                    for (q = 0; q <= ns; q++) {
+                        const double t = (double)q / (double)ns;
+                        on[q] = (unsigned char)tg_fp_on_street(nl, ax + sdx * t, az + sdz * t,
+                                                                sdz / slen, -sdx / slen, half);
+                        any |= on[q];
+                    }
+                    if (any) {
+                        long cut = 0;
+                        for (q = 0; q <= ns + 1; q++) {
+                            const int live = (q <= ns) && !on[q];
+                            if (live && r0 < 0) r0 = q;
+                            if (!live && r0 >= 0) {
+                                const int r1 = q - 1;
+                                if (r1 > r0 && s_fp_n < TG_GEOFP_MAX_SEG) {
+                                    const double ta = (double)r0 / (double)ns, tb = (double)r1 / (double)ns;
+                                    const double cax = ax + sdx * ta, caz = az + sdz * ta;
+                                    const double cbx = ax + sdx * tb, cbz = az + sdz * tb;
+                                    const double da = fabs(tg_bs_lateral(nl, si, cax, caz));
+                                    const double db = fabs(tg_bs_lateral(nl, si, cbx, cbz));
+                                    s_fp[s_fp_n].si = si;
+                                    s_fp[s_fp_n].ax = cax; s_fp[s_fp_n].az = caz;
+                                    s_fp[s_fp_n].bx = cbx; s_fp[s_fp_n].bz = cbz;
+                                    s_fp[s_fp_n].ay = nd->y - tg_infra_ground_dy(nl, si, side, da, 0.0);
+                                    s_fp[s_fp_n].by = nd->y - tg_infra_ground_dy(nl, si, side, db, 0.0);
+                                    s_fp[s_fp_n].half = half;
+                                    s_fp[s_fp_n].page =
+                                        (f->surface == TD5_GEO_FW_SURF_LOOSE)
+                                        ? k_biomes[tg_scenery_biome_index(si)].ground_page
+                                        : TD5_TG_PAGE_SIDEWALK;
+                                    s_fp_n++;
+                                }
+                                r0 = -1;
+                            }
+                            if (q <= ns && on[q]) cut++;
+                        }
+                        s_fp_cut_street += cut;
+                        TD5_LOG_I(LOG_TAG, "[GEO FOOTPATHS] [1022 P] segment (%.0f,%.0f)-(%.0f,%.0f) cut where it lies on a "
+                                  "cross street: %ld of %d sample(s) on the asphalt", ax, az, bx, bz, cut, ns + 1);
+                        continue;
+                    }
+                }
+            }
             s_fp[s_fp_n].si   = si;
             s_fp[s_fp_n].ax   = ax;
             s_fp[s_fp_n].az   = az;

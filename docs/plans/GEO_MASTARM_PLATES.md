@@ -21,13 +21,22 @@ side, how far out) the pole now carries:
   `TD5_MESH_TAG_SIGNAL_LAMP + phase` tags, so the renderer's red/amber/green cycle is unchanged.
 * **Plate**, hung BELOW the arm from two short brackets (as in the photo), two faces: the **cross
   street** faces the driver who approaches, the **street you are driving on** is on the back.
-* **Cross-direction head** at the arm tip, turned a quarter. Its lamps use the same phase tags as the
-  main heads, so it shows the SAME state, not the opposite (the renderer colours a lamp from its tag
-  alone; there is no tag for "the other direction").
-* **Countdown display** on the arm next to the facing head: black box, dot-matrix "25". The face is the
-  additive lamp billboard tagged GREEN, so it is bright while the signal is green and dim otherwise.
-  The digits are STATIC: the renderer can recolour a lamp per frame from the wall clock but cannot swap
-  a texture, so a real countdown would need a renderer hook (digit pages + remaining-time lookup).
+* **Cross-direction head** at the arm tip, turned a quarter. Round 1022 S: its lamps carry their own
+  tag range (7..9) and are lit from the cycle half a period behind, so it is RED while the main heads
+  are green and GREEN while they are red, and each direction's amber lands on the other's
+  red-to-green amber (the ordinary no-all-red sequence). `TD5RE_GEO_SIGNAL_LIVE=0` gives the round
+  1021 same-state head back.
+* **Countdown display** on the arm next to the facing head: black box, two dot-matrix digits. Round
+  1022 S: it counts. The page is a digit ATLAS (10 cells of 16x21 texels, 5x7 dots on a 3-texel pitch,
+  grey ramp, `TD5_GEO_DIGIT_*` in td5_geo_signals.h) and the two digit billboards carry tags 10 (tens)
+  and 11 (ones). The renderer cannot swap a texture per frame but does not need to: td5_render_mesh.c
+  rewrites the 4 workspace vertices' UVs to the digit's cell and their diffuse to the digit colour,
+  from `td5_geo_signal_countdown()` (the lamp cycle's remaining time). Over red and the
+  red-to-green amber it counts down to green in RED digits (6 down to 1), over green it counts down to
+  the end of green in GREEN digits (4 down to 1), over the green-to-red amber it is blank (the real
+  La Plata units go dark there). The tens digit is blank below 10. The cycle is 11 s (red 4.0, amber
+  1.5, green 4.0, amber 1.5), unchanged, so the numbers are small. Which end of the arm is the
+  viewer's left uses the plate's measured rule (`far_left`).
 
 Everything over the carriageway is above `TD5_TG_GUARD_OVERHEAD` (4.4 m): head bottom 4.7 m, plate
 bottom 5.0 m, arm 5.7 m. The pole is the old footprint, so the on-road guard judges it exactly as
@@ -72,6 +81,10 @@ A TEXTURES.DAT page is 64x64, <= 256 colours, and the container has no other siz
 
 * `TD5RE_GEO_MASTARM=0` -> the old post light, byte for byte (default on).
 * `TD5RE_GEO_SIGNALS=0` still turns every signal off.
+* `TD5RE_GEO_SIGNAL_LIVE=0` (round 1022 S) -> the round 1021 display and cross head byte for byte: a
+  static "25" on its own page, the cross head lit like the main heads (default on).
+* `TD5RE_MINIMAP_LABELS=0` -> no street names on the minimap (default on; race time only, never
+  touches a build).
 * The old post stays for: no known street name, carriageway under 5.5 m, and within 6 spans of the
   finish gantry (an arm through the banner).
 
@@ -83,13 +96,17 @@ is the measured answer for both a left-side and a right-side pole (frames
 
 ## Not done / next
 
-* **Minimap street labels.** NOT a job for this page emitter: the minimap is drawn at race time, where
-  `td5_hudfont_get_exact` already draws UTF-8 (that is how "ON Diagonal 73" is drawn). The cheap plan:
-  `td5_minimap_streets.c` `mms_build_geo` keeps the way's `name_id` per segment (it already walks the
-  ways); `hud_minimap_streets` draws the name once per named road at the segment nearest the minimap
-  centre, rotated with the map, skipped when the label would overlap the route or an earlier label.
-  ~half a day; text at the minimap's 170 px is 7-8 px, so only the avenues are worth labelling.
-* A real counting-down display (see above) and an opposite-phase cross head.
+* **Minimap street labels (round 1022 S, done).** `td5_minimap_streets.c` keeps the interned way
+  name id per segment (`TD5_MMStreetSeg.name_id`, `td5_mmstreets_name`), `hud_minimap_street_labels`
+  (td5_hud.c) draws them after the street and route quads and before the dots. Rules: named ways of
+  rank STREET or MAJOR only, one label per name at the chord nearest the player (outside a keep-clear
+  box round the player dot), the street the player is ON left out (the "ON <street>" line says it),
+  nearest first, at most 5, horizontal text in the HUD face with a dark backing, shifted along x to
+  stay inside the window, a label overlapping an accepted one dropped. Horizontal rather than rotated
+  because the map rotates with the heading and rotated 7-10 px text shimmers. Knob
+  `TD5RE_MINIMAP_LABELS=0`.
+* The countdown is in step for every signal (one wall clock). A per-signal phase offset would need a
+  per-mesh key the renderer does not have.
 * Heads over the far (oncoming) half for the pole-on-the-oncoming-side case: today both are over the
   pole-side half, which for a left pole is the oncoming half (cosmetic, nothing obeys a light).
 * Street-name plate at junctions with no OSM signal node (corner nameplates on a plain post).

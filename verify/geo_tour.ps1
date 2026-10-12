@@ -12,7 +12,8 @@
 #                                         span `span` (a corridor span >= ring works), `lateral`
 #                                         world units to the RIGHT of the road, `height` above it,
 #                                         yawrel degrees off the road direction
-# -Picks: "name x y z" lines (a pick's `pos`); each yields a behind-and-above view and a
+# -Picks: one pick per line, "name x y z" OR the raw log line "pick: copied level091 L91 e10 s7 ... pos x,y,z ..."
+#         (prefix optional); each yields a behind-and-above view and a
 #         top-down view (name_top), via verify/geo_r1014a_poses.py.
 # -Spans: span numbers; each yields sN at span N-Back, 1800 up, looking along the road
 #         (-TopDown adds sN_top, 9000 up looking straight down).
@@ -78,15 +79,35 @@ if ($Poses) {
     }
 }
 if ($Picks) {
+    # One pick per line, either "name x y z" or the RAW string the game logs on a pick, e.g.
+    # "[INF][render] pick: copied level091 L91 e10 s7 branch-road p44:SIDEWALK+121 pos 61420,-574,9475 r1214 v16 c2"
+    # (with or without the "[INF][render] pick: copied" prefix). Raw lines are named pk<N>_e<entry>s<slot>.
     $a = @()
+    $n = 0
     foreach ($l in (Get-Content $Picks)) {
         $t = $l.Trim()
         if (-not $t -or $t.StartsWith('#')) { continue }
-        $a += ($t -split "[\s,]+")
+        $n++
+        if ($t -match '(?:^|\s)pos\s+(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)') {
+            $px = $Matches[1]; $py = $Matches[2]; $pz = $Matches[3]
+            $nm = "pk$n"
+            if ($t -match '(?:^|\s)e(\d+)\s+s(\d+)(?:\s|$)') { $nm = "pk${n}_e$($Matches[1])s$($Matches[2])" }
+            $a += @($nm, $px, $py, $pz)
+        } else {
+            $tok = @($t -split "[\s,]+" | Where-Object { $_ })
+            if ($tok.Count -ne 4) { throw "-Picks line $n is neither 'name x y z' nor a raw pick string with 'pos x,y,z': $t" }
+            $a += $tok
+        }
     }
+    if ($a.Count -eq 0) { throw "-Picks file $Picks has no pick lines" }
     $env:TD5RE_GEO_PLACE = $GeoPlace    # geo_r1014a_poses.py reads the route of this place
-    $conv = & python -I (Join-Path $wt "verify\geo_r1014a_poses.py") @a 2>$null
+    $errFile = Join-Path $Out "tour_${Tag}_poses_conv.err"
+    $conv = & python -I (Join-Path $wt "verify\geo_r1014a_poses.py") @a 2>$errFile
+    $rc = $LASTEXITCODE
     Remove-Item env:TD5RE_GEO_PLACE -ErrorAction SilentlyContinue
+    $convErr = if (Test-Path $errFile) { (Get-Content -Raw $errFile) } else { "" }
+    if ($rc -ne 0) { throw "geo_r1014a_poses.py failed (exit $rc) for place '$GeoPlace':`n$convErr" }
+    if ($convErr -and $convErr.Trim()) { Write-Host $convErr.TrimEnd() }
     foreach ($l in (($conv -join ";") -split "[;\r\n]+")) { if ($l.Trim()) { $lines.Add($l.Trim()) } }
 }
 foreach ($s in @($Spans -split "[,\s]+" | Where-Object { $_ } | ForEach-Object { [int]$_ })) {

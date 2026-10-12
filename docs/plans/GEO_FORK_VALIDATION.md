@@ -317,3 +317,7 @@ frames of the poses both tools can draw (c944) match the old ones.
 Gotchas: the HUD in the frames is the frozen CAR's (street name, speed), not the pose's. PNGs are
 uncompressed (constant size, ~3.7 MB at 1280x720). A tour that is killed while a cold build is
 streaming leaves no MODELS.DAT, so the next launch rebuilds (correct, just slow).
+
+## Round 1022 Q additions
+
+`verify/geo_r1022q_rejoin.py <run-set>` reads the same run-sets and judges only the rejoin window R-24..R+14: car-car pairs (the wall-contact counters above do not see them), merge pairs (a corridor car meeting a road car), impacts (>= 25 % speed loss inside 8 ticks), stalls, jams, spins. The fork table's exit mouth is R-4..R+2 wall contacts only. Natural fork choice is `-ForceMode 0`. For the same exe and seeds the traces are byte-identical up to the finish, so a table repeats exactly; more seeds, not repeats, add information. Details and numbers: docs/plans/GEO_REAL_FORKS.md "Round 1022 Q".
