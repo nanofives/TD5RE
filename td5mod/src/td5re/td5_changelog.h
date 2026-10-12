@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 11 (real places: roads that merge in)" },
+    { CL_ITEM,    "La Plata: a real road that joins the main road at a" },
+    { CL_ITEM,    "  shallow angle (Calle 54 beside the road, span 343) is now" },
+    { CL_ITEM,    "  drawn, with its own kerbs, and tapers into the main" },
+    { CL_ITEM,    "  road. No more raised pavement slab lying across a" },
+    { CL_ITEM,    "  side street, or stuck into the plaza approach road." },
+
     { CL_DATE,    "October 11 (real places: turn off into side streets)" },
     { CL_ITEM,    "La Plata: traffic lights are now overhead mast arms. A" },
     { CL_ITEM,    "  pole at the corner, an arm over the road, two signal" },
