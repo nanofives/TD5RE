@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (two separate generators)" },
+    { CL_ITEM,    "The GEOSPATIAL TRACK GENERATOR is its own track entry now," },
+    { CL_ITEM,    "  next to AUTO-GENERATED TRACK. Its button no longer shows" },
+    { CL_ITEM,    "  on every track, nor next to the AUTO TRACK STUDIO." },
+    { CL_ITEM,    "Quick Race: AUTO-GENERATED TRACK always races the" },
+    { CL_ITEM,    "  procedural track. It no longer loads the last real place." },
+    { CL_ITEM,    "AUTO TRACK STUDIO has no LOCATION row: real places are" },
+    { CL_ITEM,    "  built from the GEOSPATIAL TRACK GENERATOR only." },
+    { CL_ITEM,    "Quick Race gets the STUDIO / GEOSPATIAL buttons it was" },
+    { CL_ITEM,    "  missing, shown only on their own track entry." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 12 (real places: faster first race)" },
     { CL_ITEM,    "La Plata: the first race on a freshly built track waits" },
     { CL_ITEM,    "  about 7 s before the countdown, not 40 s. Same track." },

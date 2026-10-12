@@ -1,0 +1,11 @@
+# [R1026 L] SELECT TRACK parked on the AUTO-GENERATED entry (--DefaultTrack=60):
+# one DOWN reaches the AUTO TRACK STUDIO button, ENTER opens it, RIGHT on the
+# SECTION selector moves ROUTE -> TERRAIN, which used to start with a LOCATION row.
+sync menu
+300 log TRKSEL_ON_AUTO
++30 key down press
++60 key enter press
++300 log STUDIO_OPEN_ROUTE
++30 key right press
++150 log STUDIO_TERRAIN
++60 quit

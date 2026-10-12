@@ -1,0 +1,12 @@
+# [R1026 L] SELECT TRACK list sweep. Opens on slot 0 (plain track), then LEFT
+# wraps to the TOP of the cycler: the generated entries live there. Each pick
+# gets ~90 ticks so the slide-in settles and a framedump lands on it.
+sync menu
+240 log TRKSEL_SLOT0
++120 key left press
++120 log TRKSEL_LEFT1
++60 key left press
++120 log TRKSEL_LEFT2
++60 key left press
++120 log TRKSEL_LEFT3
++120 quit
