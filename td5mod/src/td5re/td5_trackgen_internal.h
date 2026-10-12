@@ -816,6 +816,10 @@ int tg_fork_of_main(int si);
 int tg_fork_of_corridor(int si, int *k);
 int tg_city_crossing_here(int si);   /* [R3 item 7] fence break gate */
 extern signed char s_xhere_memo[TD5_TG_MAX_SPANS];
+extern signed char s_xorph_memo[TD5_TG_MAX_SPANS];
+extern signed char s_xcov_state[TD5_TG_MAX_SPANS][2];
+extern double      s_xcov_q[TD5_TG_MAX_SPANS][2][8];
+extern int         s_xcov_armed;
 extern signed char s_xbase_memo[TD5_TG_MAX_SPANS];
 extern int s_xmemo_armed;
 void tg_xmemo_reset(int armed);

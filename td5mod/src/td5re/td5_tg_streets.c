@@ -390,9 +390,21 @@ int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
 
 /* [ROUND 1024 I] The window used to start at span 1, but a street can leave span 0 (level091: the 20000-unit street at
  * x 0..1500 runs past two real footprints that the tests never saw). Geo only: a synthetic build keeps span 1. */
+/* [1024 integ] The street guards below run once per span of a 49-span window for every sample point a caller
+ * asks about (park paths, footprints, furniture), on the scenery worker threads. getenv takes the CRT's process
+ * lock, so reading the knobs per span made two workers queue on it and the streamed build crawled (ready 0 after
+ * minutes on level091). The knobs are read ONCE per process here; values cannot change mid-run. */
+static int tg_xsc_env(volatile int *slot, const char *name)
+{
+    int v = *slot;
+    if (v < 0) { v = td5_env_flag_on(name) ? 1 : 0; *slot = v; }
+    return v;
+}
+static volatile int s_xsc_env_span0 = -1, s_xsc_env_orphan = -1, s_xsc_env_cross = -1, s_xsc_env_xbridge = -1;
+
 static int tg_xsc_lo_min(void)
 {
-    return (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_XSTREET_SPAN0")) ? 0 : 1;
+    return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_span0, "TD5RE_GEO_XSTREET_SPAN0")) ? 0 : 1;
 }
 
 /* [ROUND 1024 I] The EMITTER lays a side street on every paved span whose frontage is open (a gap) even where the
@@ -407,57 +419,118 @@ static int tg_xsc_lo_min(void)
  * Geo only; TD5RE_GEO_XSTREET_ORPHAN=0 restores the old arguments. */
 static const TG_Biome *tg_xst_reach_biome(int m)
 {
-    return (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_XSTREET_ORPHAN")) ? &k_biomes[tg_biome_for_span(m)]
+    return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_orphan, "TD5RE_GEO_XSTREET_ORPHAN")) ? &k_biomes[tg_biome_for_span(m)]
                                                                           : &k_biomes[tg_scenery_biome_index(m)];
 }
 
 static double tg_xst_reach_sw(const TG_NodeList *nl, int m, const TG_Biome *b)
 {
-    return (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_XSTREET_ORPHAN")) ? tg_city_sidewalk_w_at(nl, m, b)
+    return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_orphan, "TD5RE_GEO_XSTREET_ORPHAN")) ? tg_city_sidewalk_w_at(nl, m, b)
                                                                           : tg_city_sidewalk_w(b);
 }
 
-static int tg_xst_orphan(const TG_NodeList *nl, int m)
+static int tg_xst_orphan_raw(const TG_NodeList *nl, int m);
+
+/* [1024 integ] tg_xstreet_covers / _collect ask this for EVERY span of a 49-span window per sample point, and
+ * round 1024 F asks per park-path piece, so on level091 the streamed scenery workers spent minutes here (the
+ * countdown held at "ready 0"). Every input is fixed once the network is built, so it is memoised per span in
+ * the R14 GENPERF crossing memo (armed after the prepass, cleared by tg_xmemo_reset). Bytes unchanged. */
+/* The memo holds the orphan answer AND the frontage gate the callers apply next (tg_facade_built, which reads two
+ * knobs per call): bit 0 = an orphan street may stand on the right, bit 1 = on the left. A span whose frontage is
+ * built is rejected by the callers on the very next line, so folding it in changes no answer. */
+static int tg_xst_orphan(const TG_NodeList *nl, int m, int left)
 {
-    if (!td5_geo_loaded() || !td5_env_flag_on("TD5RE_GEO_XSTREET_ORPHAN")) return 0;
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) return 0;
+    int r;
+    if (s_xmemo_armed && m >= 0 && m < TD5_TG_MAX_SPANS) {
+        r = s_xorph_memo[m];
+        if (r < 0) {
+            r = 0;
+            if (tg_xst_orphan_raw(nl, m)) {
+                if (!tg_facade_built(m, 0)) r |= 1;
+                if (!tg_facade_built(m, 1)) r |= 2;
+            }
+            s_xorph_memo[m] = (signed char)r;
+        }
+        return (r >> (left ? 1 : 0)) & 1;
+    }
+    return tg_xst_orphan_raw(nl, m);
+}
+
+static int tg_xst_orphan_raw(const TG_NodeList *nl, int m)
+{
+    if (!td5_geo_loaded() || !tg_xsc_env(&s_xsc_env_orphan, "TD5RE_GEO_XSTREET_ORPHAN")) return 0;
+    if (!tg_xsc_env(&s_xsc_env_cross, "TD5RE_AUTOTRACK_CROSS_STREETS")) return 0;
     if (m < 0 || m + 1 >= nl->count) return 0;
     if (tg_span_in_bridge_run(m) || tg_up_xclear_span(m) || tg_r13_approach_span(m)) return 0;
     if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(m)]) > 0.0)) return 0;
-    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") && tg_span_near_bridge(m, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    if (tg_xsc_env(&s_xsc_env_xbridge, "TD5RE_AUTOTRACK_XBRIDGE_GATE") && tg_span_near_bridge(m, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    return 1;
+}
+
+/* The street quad tg_xstreet_covers tests at span m on one side: the emitter's own outer and per-side gates, frame,
+ * skew and reach. 1 = a street stands there (qx/qz filled), 0 = none. Pure function of the network. */
+static int tg_xcov_quad_raw(const TG_NodeList *nl, int m, double sg, double *qx, double *qz)
+{
+    const int left = (sg > 0.0) ? 1 : 0;
+    const TG_Biome *b;
+    double rr = 0.0, e[10], ang, nox, noz, fox, foz, reach;
+
+    if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m, left)) return 0;
+    /* the emitter's own per-side gates, in its own order (tg_city_emit_crossstreet) */
+    if (tg_facade_built(m, left)) return 0;
+    if (tg_block_is_park(m, left)) return 0;
+    if (tg_net_mouth_is_loop(m, left)) return 0;
+    if (tg_side_corridor_here(nl, m, sg)) return 0;
+    b = &k_biomes[tg_scenery_biome_index(m)];
+    tg_city_edge_frame(nl, m, sg, e);
+    ang = tg_block_arm_skew(m, left);
+    reach = tg_xstreet_reach_at(nl, m, sg, ang, tg_xst_reach_biome(m), tg_xst_reach_sw(nl, m, b));
+    if (!(reach > 0.0)) return 0;
+    tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
+    qx[0] = e[0];                qz[0] = e[2];
+    qx[1] = e[0] + nox * reach;  qz[1] = e[2] + noz * reach;
+    qx[2] = e[3] + fox * reach;  qz[2] = e[5] + foz * reach;
+    qx[3] = e[3];                qz[3] = e[5];
+    return 1;
+}
+
+/* [1024 integ] tg_xstreet_covers is asked once per sample point (park paths, footprints, boxes, furniture) and
+ * rebuilt the quad of all 49 window spans every time: 34791 calls cost 7.4 s of the streamed level091 build on
+ * master's gates and 72 s once round 1024 I let orphan streets through, so the scenery workers held the countdown
+ * at "ready 0". Every input is fixed once the network is built, so the quad is built once per (span, side) here,
+ * in the R14 GENPERF memo (armed after the prepass, cleared by tg_xmemo_reset). Bytes unchanged.
+ * State per entry: 0 = not built yet, 1 = no street, 2 = quad valid (published after the quad, release order). */
+static int tg_xcov_quad(const TG_NodeList *nl, int m, double sg, double *qx, double *qz)
+{
+    const int left = (sg > 0.0) ? 1 : 0;
+    int st, k;
+    if (!s_xcov_armed || m < 0 || m >= TD5_TG_MAX_SPANS || (sg != 1.0 && sg != -1.0))
+        return tg_xcov_quad_raw(nl, m, sg, qx, qz);
+    st = __atomic_load_n(&s_xcov_state[m][left], __ATOMIC_ACQUIRE);
+    if (st == 0) {
+        double tx[4], tz[4];
+        const int r = tg_xcov_quad_raw(nl, m, sg, tx, tz);
+        if (r) for (k = 0; k < 4; k++) { s_xcov_q[m][left][k * 2] = tx[k]; s_xcov_q[m][left][k * 2 + 1] = tz[k]; }
+        st = r ? 2 : 1;
+        __atomic_store_n(&s_xcov_state[m][left], (signed char)st, __ATOMIC_RELEASE);
+    }
+    if (st != 2) return 0;
+    for (k = 0; k < 4; k++) { qx[k] = s_xcov_q[m][left][k * 2]; qz[k] = s_xcov_q[m][left][k * 2 + 1]; }
     return 1;
 }
 
 int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z)
 {
-    const int left = (sg > 0.0) ? 1 : 0;
     int lo, hi, m;
 
     if (!nl || !tg_network_built()) return 0;
     lo = si - TG_XSC_WIN; if (lo < tg_xsc_lo_min()) lo = tg_xsc_lo_min();
     hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
     for (m = lo; m <= hi; m++) {
-        const TG_Biome *b;
-        double rr = 0.0, e[10], ang, nox, noz, fox, foz, reach;
         double qx[4], qz[4];
         int k, sgn = 0, in = 1;
 
-        if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m)) continue;
-        /* the emitter's own per-side gates, in its own order (tg_city_emit_crossstreet) */
-        if (tg_facade_built(m, left)) continue;
-        if (tg_block_is_park(m, left)) continue;
-        if (tg_net_mouth_is_loop(m, left)) continue;
-        if (tg_side_corridor_here(nl, m, sg)) continue;
-        b = &k_biomes[tg_scenery_biome_index(m)];
-        tg_city_edge_frame(nl, m, sg, e);
-        ang = tg_block_arm_skew(m, left);
-        reach = tg_xstreet_reach_at(nl, m, sg, ang, tg_xst_reach_biome(m), tg_xst_reach_sw(nl, m, b));
-        if (!(reach > 0.0)) continue;
-        tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
-        qx[0] = e[0];                qz[0] = e[2];
-        qx[1] = e[0] + nox * reach;  qz[1] = e[2] + noz * reach;
-        qx[2] = e[3] + fox * reach;  qz[2] = e[5] + foz * reach;
-        qx[3] = e[3];                qz[3] = e[5];
+        if (!tg_xcov_quad(nl, m, sg, qx, qz)) continue;
         for (k = 0; k < 4; k++) {
             const int j = (k + 1) & 3;
             const double c = (qx[j] - qx[k]) * (z - qz[k]) - (qz[j] - qz[k]) * (x - qx[k]);
@@ -500,7 +573,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
         double *q;
         int arms;
 
-        if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m)) continue;
+        if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m, left)) continue;
         if (tg_facade_built(m, left)) continue;
         if (tg_block_is_park(m, left)) continue;
         if (tg_net_mouth_is_loop(m, left)) continue;
