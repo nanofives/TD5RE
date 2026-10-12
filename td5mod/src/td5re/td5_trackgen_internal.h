@@ -3925,6 +3925,7 @@ int tg_r11_median_rise(void);
  * constant, so every span of a fork gets the same answer -- the placement
  * predicate and the emitter cannot disagree. TD5RE_MEDIAN_MIN_RUN=0 for A/B. */
 int tg_median_fork_long_enough(int fork_index);
+int tg_fork_left_real_median(int fork_index);   /* [ROUND 1021 A] left real fork: signed median frame */
 int tg_r12_median_cap(void);
 int tg_r12_geom_diag(void);
 extern long s_r12_median_caps;

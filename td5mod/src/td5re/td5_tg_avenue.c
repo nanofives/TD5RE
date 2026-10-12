@@ -91,6 +91,16 @@ int tg_geo_avenue_n(void)
  * TD5RE_GEO_AVENUE_ENTRY_SLACK=1 restores it. */
 int tg_geo_avenue_slack_ok(int si, int e)
 {
+    /* [ROUND 1021 A item 10] "complex intersections still have no geometry, after e63 s17 there's
+     * void" (La Plata, 203 m2 / 157 m2 top-down at spans 256-257, found by verify/geo_r1021a_voidup.py:
+     * only vertical triangles stood over it). The same slack TRAILING an avenue's last row made span
+     * 256, which has no carriageway at all (the last row's quad ends square at node 256), push its
+     * ground skirt's inner edge out to the far edge of a carriageway that is not there, leaving a bare
+     * strip between the road edge and the skirt. The slack BEHIND (e = -1) is now taken only by a
+     * span that is itself in the avenue, the mirror of the entry rule below.
+     * TD5RE_GEO_AVENUE_EXIT_SLACK=1 restores the old trailing slack. */
+    if (e == -1 && !td5_env_flag_off("TD5RE_GEO_AVENUE_EXIT_SLACK"))
+        return td5_geo_avenue_at(si, NULL, NULL, NULL);
     if (e != 1) return 1;
     if (td5_env_flag_off("TD5RE_GEO_AVENUE_ENTRY_SLACK")) return 1;
     return td5_geo_avenue_at(si, NULL, NULL, NULL);

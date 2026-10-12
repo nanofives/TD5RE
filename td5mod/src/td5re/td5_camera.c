@@ -2864,6 +2864,13 @@ static int tour_step(void)
             s_freecam_pitch = (float)P->pitch;
         }
         s_tour_cull = s_tour_fast ? P->cull : -1;
+        /* [ROUND 1021 A] TD5RE_FREECAM_TOUR_CULL_BEHIND=N: centre the walk N spans BEHIND the pose,
+         * as when the free camera sits N spans ahead of the car (the cull follows the CAR in the
+         * game, the pose is what is looked at). Item 6: a corridor 140 spans from the car. */
+        if (s_tour_cull > 0) {
+            const int behind = td5_env_int("TD5RE_FREECAM_TOUR_CULL_BEHIND", 0, 0, 2000);
+            s_tour_cull = (s_tour_cull > behind) ? s_tour_cull - behind : 0;
+        }
     }
     {
         const double cp = cos((double)s_freecam_pitch);

@@ -877,6 +877,16 @@ int tg_median_fork_long_enough(int fork_index)
     return 1;
 }
 
+/* [ROUND 1021 A item 18] Is fork `fi` a LEFT real fork whose median is built in the signed
+ * frame (see tg_r12_median_gore_w)? Real forks only, so every synthetic left fork keeps its
+ * old geometry byte for byte. TD5RE_GEO_LEFT_MEDIAN=0 restores the right-frame-only rule. */
+int tg_fork_left_real_median(int fi)
+{
+    if (fi < 0 || fi >= s_fork_count) return 0;
+    if (s_forks[fi].real <= 0 || s_forks[fi].side <= 0) return 0;
+    return td5_env_flag_on("TD5RE_GEO_LEFT_MEDIAN");
+}
+
 /* Lateral centre of the BRANCH (right) half carriageway at corridor step k with
  * separation scale `sep`: the right-half centre (-width/4) plus an outward bow
  * that is 0 at both ends (so it lines back up with the road halves at the fork
@@ -1564,8 +1574,11 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     /* The gore runs from the main road's right edge (lateral ~0) to the branch's
      * LEFT edge (sh+half, negative). Median centre = halfway; gore width = how
      * far that edge is from the road centre. */
-    const double bl0 = sh0 + half0, bl1 = sh1 + half1;   /* branch left edges */
-    const double gw0 = -bl0, gw1 = -bl1;                 /* gore widths (>=0)  */
+    /* [ROUND 1021 A item 18] fs = the side the corridor is on, in the gore's signed frame
+     * (-1 right, the only value before this round; +1 only for a LEFT real fork). */
+    const double fs  = tg_fork_left_real_median(fork_index) ? 1.0 : -1.0;
+    const double bl0 = sh0 - fs * half0, bl1 = sh1 - fs * half1;   /* branch inner edges */
+    const double gw0 = fs * bl0, gw1 = fs * bl1;         /* gore widths (>=0)  */
     /* [R22 item 11] "median only near the right track, none near the left." The
      * frame above measures the gore from lateral 0 (the ROAD CENTRE), but an
      * asymmetric split (fm != 0.5) shifts the main carriageway so its inner edge
@@ -1742,8 +1755,8 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
         /* [R22 item 11] Fill the FULL gore span [bl .. mi], so the road-side
          * face reaches the main carriageway's inner edge. (mi0-bl0)*0.5 reduces
          * to gw0*0.5 on a symmetric fork (mi == 0), keeping it byte-identical. */
-        const double f0 = (mi0 - bl0) * 0.5 - inset;
-        const double f1 = (mi1 - bl1) * 0.5 - inset;
+        const double f0 = (-fs) * ((mi0 - bl0) * 0.5) - inset;
+        const double f1 = (-fs) * ((mi1 - bl1) * 0.5) - inset;
         if (f0 > mw0) mw0 = f0;
         if (f1 > mw1) mw1 = f1;
     }

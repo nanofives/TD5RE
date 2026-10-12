@@ -5,6 +5,7 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"
 
 const char *const k_guard_kind_name[TG_GK_COUNT] = {
     "other", "skirt", "road", "branch-road", "tunnel", "gantry", "end-wall",
@@ -439,8 +440,17 @@ static int tg_guard_quad_bad(int cls, double intr, double dy_lo, double dy_hi)
      * the road around 627" exactly. A blanket skirt exemption licenses that; a
      * span-scoped one would instead have rejected the perfectly good ground the
      * same emitter lays UNDER the road. Height is the axis that separates them. */
-    if (cls == TG_GKC_UNDER)
-        return dy_hi > TD5_TG_GUARD_FLUSH;
+    if (cls == TG_GKC_UNDER) {
+        /* [ROUND 1021 A item 10] On a GEO place the skirt of the tail of a fork window (La Plata spans 256,
+         * 257: dy_hi = +150.2, 0.2 over the 150 limit, intrusion 1491 = the carriageway authority taking the
+         * WIDER end of a span whose width is still ramping back down) was rejected whole in the single
+         * streamed build and left a 157 m2 hole beside the road ("void after e63 s17"; the double build
+         * does not reject it). The R8 offenders this rule exists for lie +250..+450 over a road that doubles
+         * back, so geo places take 200. TD5RE_GEO_SKIRT_GUARD_TOL=0 restores the 150. */
+        double lim = TD5_TG_GUARD_FLUSH;
+        if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_SKIRT_GUARD_TOL")) lim = 200.0;
+        return dy_hi > lim;
+    }
     if (dy_lo > TD5_TG_GUARD_OVERHEAD)   return 0;   /* clears it overhead */
     return 1;
 }

@@ -415,6 +415,18 @@ static int rf_modal_lanes(int F, int R)
  * Returns 0 (candidate refused, reason logged) when the full-width window itself does
  * not fit or a ramp is under TG_RF_TAPER_MIN. TD5RE_GEO_FORK_TAPER_FIT=0 restores the
  * round-1013 rule exactly. */
+/* [ROUND 1021 A item 3] "if I start a race on an avenue, is it possible to start with a forked
+ * road?" The first fork of Diagonal 73 began at F=40, the earliest whose ramp clears the start
+ * grid (GRID+2 + 6 ramp + 8 uniform), 16 spans after the start line, so the opposite
+ * carriageway was scenery for the first 40 spans. With TD5RE_GEO_FORK_GRID (default on) the
+ * WINDOW may overlap the grid (the ramp and the uniform approach lie under the grid cars,
+ * the road there is the avenue's own widening) as long as the MOUTH F stays past the start line
+ * (GRID+2): the cars leave the grid on the wide road and the corridor opens in front of them.
+ * =0 restores the round-1015 rule (the whole window clears the grid). */
+static int rf_grid_on(void) { return td5_env_flag_on("TD5RE_GEO_FORK_GRID"); }
+/* the first route node a fork ramp / window may use */
+static int rf_node_floor(void) { return rf_grid_on() ? 1 : TD5_TG_GRID_SPAN + 2; }
+
 static int rf_fit_window(RfCand *c)
 {
     const int fit = td5_env_flag_on("TD5RE_GEO_FORK_TAPER_FIT");
@@ -448,7 +460,8 @@ static int rf_fit_window(RfCand *c)
     }
 
     /* the full-width window itself: clear of the grid, short of the finish, constant lanes */
-    if (f0 < TD5_TG_GRID_SPAN + 2 + TG_RF_TAPER_MIN) {
+    if (rf_grid_on() ? (c->F < TD5_TG_GRID_SPAN + 2 || f0 < rf_node_floor() + TG_RF_TAPER_MIN)
+                     : (f0 < TD5_TG_GRID_SPAN + 2 + TG_RF_TAPER_MIN)) {
         rf_note("REJECT", c->src, c->name, c->F, c->R, "inside the start grid");
         return 0;
     }
@@ -481,7 +494,7 @@ static int rf_fit_window(RfCand *c)
     /* the ramps: walk outward while the room and the route allow */
     for (tin = 0; tin < s_rf_taper; tin++) {
         const int n = f0 - 1 - tin;
-        if (n < TD5_TG_GRID_SPAN + 2) break;
+        if (n < rf_node_floor()) break;
         if (s_rl[n] < lane_lo || s_rl[n] > c->lanes_a + c->lanes_b) break;
     }
     for (tout = 0; tout < s_rf_taper; tout++) {
@@ -885,8 +898,10 @@ static void rf_gen_avenue(void)
                  * fork at 47, not at 50 -- or at 94 when the 3-lane approach made the
                  * round-1014 window refuse every earlier start. */
                 const int fit = td5_env_flag_on("TD5RE_GEO_FORK_TAPER_FIT");
-                const int Fmin = merge ? TD5_TG_GRID_SPAN + 2 + TG_RF_WIDEN
-                                         + (fit ? TG_RF_TAPER_MIN : s_rf_taper)
+                const int Fmin = merge ? (rf_grid_on() && fit
+                                           ? TD5_TG_GRID_SPAN + 2          /* [1021 A] the mouth clears the line, the window may not */
+                                           : TD5_TG_GRID_SPAN + 2 + TG_RF_WIDEN
+                                             + (fit ? TG_RF_TAPER_MIN : s_rf_taper))
                                        : TD5_TG_GRID_SPAN + 12;
                 const int F = (gate_a[g] > Fmin) ? gate_a[g] : Fmin;
                 const int R = gate_b[h];

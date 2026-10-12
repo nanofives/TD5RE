@@ -421,6 +421,8 @@ int  td5_track_get_recovery_pose(int from_span, int spans_back,
 void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out_pos);
 
 int  td5_track_span_lane_count_at(int span_index);
+/* [ROUND 1021 A] grid lane clamped into the MAIN half of a fork whose window lies under the start grid */
+int  td5_track_grid_main_lane(int span, int lane);
 
 /* [DRAG LENGTHEN] 1 if the drag strip was lengthened this load (clean spans
  * inserted mid-strip); insert-span = where they were inserted (ribbon paints +

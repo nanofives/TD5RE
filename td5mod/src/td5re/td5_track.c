@@ -3484,6 +3484,43 @@ int td5_track_span_lane_count_at(int span_index)
     return span_lane_count(&s_span_array[span_index]);
 }
 
+/* [ROUND 1021 A item 3] START ON AN AVENUE WITH A FORK AHEAD. A generated track's real fork may
+ * begin its window under the start grid (td5_tg_realfork.c rf_grid_on): the road at the grid is
+ * the avenue's widening, lanes(A) + lanes(B), and the original grid lanes (1 and 2) would put the
+ * second column of cars on the CORRIDOR half of it, the half the type-8 decision at F sends into
+ * link_next. A grid car is placed in the MAIN carriageway instead: the lane is clamped into the main
+ * band of the fork that lies within 40 spans ahead (right corridor: main = the low sub-lanes, a
+ * left one the high ones, fork_is_left). Where the road has no more lanes than the main half the
+ * lane is returned unchanged, so every span before the widening and every track without a fork
+ * near the grid is untouched. Generated tracks only (shipped TD5 forks keep their grid).
+ * TD5RE_GRID_MAIN_LANE=0 restores the original lanes. */
+int td5_track_grid_main_lane(int span, int lane)
+{
+    int q, lc, ring = g_td5.track_span_ring_length;
+    if (!s_span_array || span < 0 || span >= s_span_count || lane < 1) return lane;
+    if (!td5_trackgen_is_generated_slot(g_td5.track_index)) return lane;
+    if (!td5_env_flag_on("TD5RE_GRID_MAIN_LANE")) return lane;
+    if (ring <= 0 || ring > s_span_count) ring = s_span_count;
+    lc = span_lane_count(&s_span_array[span]);
+    for (q = span; q <= span + 40 && q + 1 < ring; q++) {
+        int la, k, loop_span = 0, lo, hi, out = lane;
+        if (s_span_array[q].span_type != 8) continue;
+        for (k = 0; k < s_sl_n; k++) if (s_sl[k].D == q) loop_span = 1;
+        if (loop_span) continue;
+        la = span_lane_count(&s_span_array[q + 1]);
+        if (la < 1 || la >= lc) return lane;
+        lo = fork_is_left(q) ? lc - la : 0;
+        hi = fork_is_left(q) ? lc - 1 : la - 1;
+        if (out < lo) out = lo;
+        if (out > hi) out = hi;
+        if (out != lane)
+            TD5_LOG_I(LOG_TAG, "grid lane: span %d (%d lanes) fork at %d main half %d..%d: lane %d -> %d",
+                      span, lc, q, lo, hi, lane, out);
+        return out;
+    }
+    return lane;
+}
+
 /* [LANE ASSIST 2026-06-28] Pure forward (span,sub_lane) step. Mirrors the
  * crossing-bit 0x01 (Forward) branch of resolve_neighbor() — itself a port of
  * UpdateActorTrackPosition @ 0x004440F0 — but does NOT mutate any actor state:
