@@ -4334,6 +4334,9 @@ int    tg_net_arm_get(int i, TG_NetArm *out);
 int    tg_net_near_other_street(double x, double z, double half, int ea, int eb);
 void   tg_net_loop_take(int e, int lo, int hi);
 int    tg_net_mouth_is_loop(int si, int left);
+/* [ROUND 1023 E item 12] 1 when a frontage merge ribbon lands on this (span, side): the main pavement slab
+ * is dropped there so the street meets the carriageway. */
+int    tg_net_fr_tip_here(int si, int left);
 void   tg_bl_reset(void);
 int    tg_bl_build(const TG_NodeList *nl, int ring);        /* after tg_network_build: plan + append the loops */
 int    tg_fork_is_loop(int fi);

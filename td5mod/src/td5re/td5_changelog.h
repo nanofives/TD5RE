@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (real places: minimap, street paint, merges)" },
+    { CL_ITEM,    "La Plata minimap: only streets that exist in the 3D" },
+    { CL_ITEM,    "  world are drawn. A real street with no road built on" },
+    { CL_ITEM,    "  it is no longer on the map." },
+    { CL_ITEM,    "Side streets: the dashed centre line now runs down the" },
+    { CL_ITEM,    "  street, not across it as a ladder of rungs." },
+    { CL_ITEM,    "A road that merges in (span 752) now reaches the main" },
+    { CL_ITEM,    "  carriageway: no raised pavement slab across its end." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 11 (real places: roads that merge in)" },
     { CL_ITEM,    "La Plata: a real road that joins the main road at a" },
     { CL_ITEM,    "  shallow angle (Calle 54 beside the road, span 343) is now" },

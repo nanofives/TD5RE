@@ -5124,6 +5124,7 @@ int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
      * pavement that is not there. */
     sw = tg_city_side_base(si, s, tg_city_sidewalk_w_at(nl, si, b));
     if (!(tg_pavement_side_width(nl, si, s ? 1.0 : -1.0, sw) > 0.0)) return 0;
+    if (tg_net_fr_tip_here(si, s)) return 0;       /* [1023 E item 12] a frontage merge lands here */
     /* [R13 RAIL item 5b] mirrors the emitter's own ramp exception above -- this
      * predicate exists to be the emitter's gate stated once, so it has to move
      * with it or the R12 end cap floats where the slab is not. */
@@ -5156,6 +5157,10 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         const double u_w = sw_s / (double)TD5_TG_SPAN_LENGTH;
         const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
         if (!(sw_s > 0.0)) continue;
+        /* [ROUND 1023 E item 12] a frontage merge ribbon lands on this span: the street meets the
+         * carriageway here, so no raised slab across its mouth (the slab ends are capped by
+         * tg_r12_pave_stands answering 0 for this span-side). */
+        if (tg_net_fr_tip_here(h->si, s)) continue;
         /* [R6 CROSS item 1] The raised pavement STOPS at a road intersection.
          * Where this side opens onto a side-street mouth (the frontage is a gap
          * here), the slab used to run straight across the mouth at kerb height,

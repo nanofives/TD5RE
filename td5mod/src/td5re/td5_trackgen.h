@@ -224,6 +224,7 @@ int td5_trackgen_street_edge_point(int edge, int k, double *x, double *z);
 /* TG_NE_* kind of `edge`, or -1. The HUD maps it to a draw weight; the enum
  * itself stays private to the generator. */
 int td5_trackgen_street_edge_kind(int edge);
+double td5_trackgen_street_edge_width(int edge);   /* [1023 E] carriageway width, 0 when unknown */
 
 /* [PICK] Human name for an auto-track texture page id (e.g. "GUARDRAIL",
  * "FLORA", "WALL_TOWER"), or NULL for reserved/unnamed slots. Valid only for
