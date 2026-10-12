@@ -1819,6 +1819,28 @@ static int geob_points_hit(int span, const double *px, const double *pz, int np,
             }
         }
     }
+    /* [ROUND 1021 C item 11] Mariano, "buildings on Plaza Moreno": a polygon is filed under ONE span (the
+     * nearest to one of its vertices) and the walk above reaches only +/- `win` spans from the span the
+     * caller asks about. Plaza Mariano Moreno at La Plata is 351 x 341 m (about 190 spans of route beside
+     * it) and its filing span sits at one end, so a frontage wall on the far side of it asked about a span
+     * the window never reached: MEASURED, one procedural wall of level091 (e101 s21, 4 faces) stood INSIDE
+     * the polygon, 130+ spans from its filing span. A point is in a plaza or it is not, wherever the route
+     * is, so the polygons are tested globally here (bounding circle first, 253 areas): the same
+     * geob_plaza_of_point the bind-time footprint veto already uses. TD5RE_GEO_PLAZA_WIDE=0 keeps the
+     * span window only. */
+    if (areas && td5_env_flag_on("TD5RE_GEO_PLAZA_WIDE")) {
+        for (k = 0; k < np; k++) {
+            int i;
+            for (i = 0; i < s_gb.na; i++) {
+                const TD5_GeoArea *a = &s_gb.a[i];
+                if (!td5_geob_area_is_plaza(a)) continue;
+                if (hypot(px[k] - a->cx, pz[k] - a->cz) > a->radius) continue;
+                if (td5_geob_point_in_ring(&s_gb.px[a->first], &s_gb.pz[a->first],
+                                           a->n, px[k], pz[k]))
+                    return 1;
+            }
+        }
+    }
     /* [ROUND 1013 F1] a named plaza RING has no polygon to find above. Global,
      * not span-windowed: the hull either holds the point or it does not. */
     if (areas && s_gb.pring_on && s_gb.n_pring > 0) {

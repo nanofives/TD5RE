@@ -845,6 +845,9 @@ int tg_span_in_bridge_run(int si);
  * guardrail (which yields the edge) long before the city emitters are defined.
  * Declared here rather than duplicated so the two can never disagree. */
 int tg_rail_kerbfence_here(int si, double sg);
+/* [ROUND 1021 C item 12] A real city has a kerb and no rail: on a geo route, is span si in a kerbed
+ * (facade) biome where no kerb railing, arm railing or bend guardrail may stand? td5_tg_furniture.c. */
+int tg_geo_urban_rails_off(int si);
 /* Largest heading change per span allowed on a bridge deck, radians. 0.03 =>
  * turn radius >= ~50000 units, a sweeping curve rather than a hairpin, so a
  * deliberate bridge that lands on a tight section is straightened out. */
@@ -4731,6 +4734,11 @@ int tg_r10_xstreet_guard(void);
 int tg_xstreet_here(const TG_NodeList *nl, int si, double side, double *preach);
 double tg_footway_reach(const TG_NodeList *nl, int si, double side);
 int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side, double inner_d);
+/* [ROUND 1021 C items 4 + 9] Does the plan point (x, z) lie on a laid cross-street CARRIAGEWAY whose mouth is
+ * within TG_XSC_WIN spans of si on side sg (+1 left)? The same parallelogram tg_city_emit_crossstreet lays
+ * (edge frame, network skew, network reach), so a diagonal street that sweeps across the neighbouring
+ * spans' frontage is seen where the per-span "xstreet here" answer cannot see it. td5_tg_streets.c. */
+int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z);
 void tg_xstreet_audit(const TG_NodeList *nl, int si, double side, double inner_d, const char *what, int placed);
 int tg_block_is_park(int si, int left);
 /* Fork-back band sizing. Declared here rather than beside tg_city_emit_forkback
@@ -5596,7 +5604,7 @@ int tg_infra_menu(const TG_Biome *b, int paved, int *out);
  * which needs the span and the kerb it is being placed on. */
 int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
                          int paved, int kind, unsigned int hh);
-int tg_infra_awning_filter(int si, double side, int paved, int kind, unsigned int hh);
+int tg_infra_awning_filter(const TG_NodeList *nl, int si, double side, int paved, int kind, unsigned int hh);
 /* ===================== [R9 INFRA] PONDS =====================
  * Asked for in ROUND 5 and unbuilt for four rounds. Small standing water away
  * from the road in the green biomes.

@@ -3232,7 +3232,7 @@ int tg_emit_fb_infra(const TG_FBHook *h)
         /* Roadworks replace the menu pick occasionally, on ONE side only, so
          * they read as a works site rather than a decoration. */
         kind = tg_infra_sign_filter(sb, si, side, paved, kind, hh);
-        kind = tg_infra_awning_filter(si, side, paved, kind, hh);
+        kind = tg_infra_awning_filter(nl, si, side, paved, kind, hh);
         if (((hh >> 13) & 0x3Fu) == 0u) kind = IP_WORKY;
         else if (((hh >> 19) & 0x3Fu) == 0u) kind = IP_REDTAPE;
 
