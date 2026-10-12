@@ -1,6 +1,6 @@
-/* td5_tg_mastarm.c -- GEO TRACK: OVERHEAD MAST-ARM TRAFFIC LIGHTS WITH
- * STREET-NAME PLATES, plus the TEXT -> TRACK PAGE emitter they need
- * (PORT-ONLY, no original counterpart).
+/* td5_tg_mastarm.c -- GEO TRACK: mast-arm traffic lights + street-name plates
+ * (PORT-ONLY, no original counterpart), with the TEXT -> TRACK PAGE emitter
+ * they need.
  *
  * [ROUND 1021 D] La Plata signals are not a lone head on a kerb post. The pole
  * stands at the corner, a horizontal arm reaches out over the carriageway, the
