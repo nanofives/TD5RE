@@ -1749,6 +1749,51 @@ void td5_geob_bind_stats(int *buildings_bound, int *buildings_far,
     if (areas_far)       *areas_far       = s_gb.a_far;
 }
 
+/* [ROUND 1023 B item 8] re-host an unbound footprint; see the header. The chain is kept in ASCENDING
+ * record order so the emitted mesh sequence stays a pure function of the cache and the fork plan. */
+static int s_rehosted;
+
+int td5_geob_rehost(int i, int span, int side, double lat)
+{
+    TD5_GeoBuilding *b;
+    int *pp;
+    if (!s_gb.loaded || !s_gb.b_head || i < 0 || i >= s_gb.nb) return 0;
+    if (span < 0 || span >= s_gb.bound_spans) return 0;
+    b = &s_gb.b[i];
+    if (b->host_span >= 0) return 0;                 /* already bound by the normal pass */
+    b->host_span = span;
+    b->host_side = (side > 0) ? 1 : -1;
+    b->host_lat  = lat;
+    b->far_host  = 1;
+    pp = &s_gb.b_head[span];
+    while (*pp >= 0 && *pp < i) pp = &s_gb.b_next[*pp];
+    s_gb.b_next[i] = *pp;
+    *pp = i;
+    s_gb.b_bound++; s_gb.b_far--;
+    s_rehosted++;
+    return 1;
+}
+
+void td5_geob_rehost_clear(void)
+{
+    int i;
+    if (!s_gb.loaded || !s_gb.b_head) { s_rehosted = 0; return; }
+    for (i = 0; i < s_gb.nb; i++) {
+        TD5_GeoBuilding *b = &s_gb.b[i];
+        int *pp;
+        if (!b->far_host) continue;
+        pp = &s_gb.b_head[b->host_span];
+        while (*pp >= 0 && *pp != i) pp = &s_gb.b_next[*pp];
+        if (*pp == i) *pp = s_gb.b_next[i];
+        s_gb.b_next[i] = -1;
+        b->host_span = -1; b->host_side = 0; b->host_lat = 0.0; b->far_host = 0;
+        s_gb.b_bound--; s_gb.b_far++;
+    }
+    s_rehosted = 0;
+}
+
+int td5_geob_rehost_count(void) { return s_rehosted; }
+
 int td5_geob_span_building(int span)
 {
     if (!s_gb.loaded || !s_gb.b_head || span < 0 || span >= s_gb.bound_spans)

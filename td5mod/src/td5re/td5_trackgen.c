@@ -3838,9 +3838,27 @@ static int tg_scenery_entry(int e)
                                 /* owned by the far footway (td5_tg_avenue.c) */
                             } else if (tg_city_sidewalk_w(cb) > 0.0 &&
                                 td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
-                                if (!tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
+                                /* [ROUND 1023 B item 8] no kerb slab across the mouth of a real street
+                                 * that opens on this row (tg_net_geo_far_streets marks those rows). */
+                                const int street_gap = tg_pf_gap_at(fi, ck);
+                                if (!street_gap &&
+                                    !tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                              &meshes, moff, &nmesh, si)) ok = 0;
                                 if (ok && tg_fork_is_loop(fi) && tg_bl_inner_ok(fi, ck) &&
+                                    !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
+                                                                   &meshes, moff, &nmesh, si)) ok = 0;
+                                /* [ROUND 1023 B item 7] Mariano, level091 L91 e313 s0 p0:ROAD (corridor span
+                                 * 1252, the far arc of Plaza Miguel de Azcuenaga): "there's no sidewalk near
+                                 * here". MEASURED in the MODELS.DAT dump of entries 300..330: every corridor
+                                 * span of the free arc has ONE p44 pavement mesh, on the outer (town) side;
+                                 * the plaza side, between the road and the lawn, has none, so the carriageway
+                                 * runs straight onto bare ground apron. A real ring plaza has a pavement on
+                                 * both sides of the ring road: the inner slab is the same kerb + slab on the
+                                 * other edge. Free rows only (the classic rows run beside the avenue's other
+                                 * carriageway). The inner slab runs on through a street mouth (the street opens
+                                 * on the town side only). TD5RE_PF_INNER_WALK=0 restores the one-sided arc. */
+                                if (ok && tg_fork_is_free(fi) && !tg_fork_is_loop(fi) &&
+                                    !tg_pf_classic_span(fi, ck) && td5_env_flag_on("TD5RE_PF_INNER_WALK") &&
                                     !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                                    &meshes, moff, &nmesh, si)) ok = 0;
                             }

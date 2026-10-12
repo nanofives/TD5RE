@@ -4354,6 +4354,11 @@ int    tg_pf_row_node(int fi, int k);                /* [1016 K] main node index
 int    tg_pf_throat_span(int fi, int si);            /* main span si has throat geometry     */
 int    tg_pf_wedge_span(int fi, int si);             /* ... and is a free-corridor wedge span */
 int    tg_pf_classic_span(int fi, int ck);            /* corridor span ck runs beside the road on both rows */
+int    tg_pf_free_rows(int fi, int *k0, int *k1);     /* [1023 B] free rows k0 <= k < k1 of a plaza corridor */
+int    tg_pf_row_frame(int fi, int k, double *x, double *z, double *tx, double *tz, double *half);
+void   tg_pf_gap_mark(int fi, int k0, int k1);        /* [1023 B] rows where a real street opens: no kerb slab */
+int    tg_pf_gap_at(int fi, int k);
+int    tg_pf_rehost_buildings(const TG_NodeList *nl, int nspans);   /* [1023 B] far-arc footprints -> main spans */
 int    tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat);   /* an avenue's scenery road would stand on a plaza corridor */
 int    tg_pf_clear_span(int fi, int si);             /* scenery clearance window            */
 double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* outermost corridor edge beside span si */

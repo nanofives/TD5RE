@@ -72,6 +72,53 @@ static void tg_block_rot2(double ux, double uz, double ang,
     *oz = ux * s + uz * c;
 }
 
+/* [ROUND 1023 B item 6] Mariano, level091 L91 e84 s9 city p101 pos 390704,2571,272898: "the crossing road at
+ * the beginning of the park/roundabout is not looking right". MEASURED on that build (MODELS.DAT dump of
+ * entries 83/84, the three p101 meshes at e83 s23, e84 s9, e84 s16): each of the three spans of one street
+ * mouth (335..337, the bend continuation edge 2) laid its own quad strip as a WEDGE, because the strip's near
+ * edge leaves along the span's NEAR node normal and its far edge along the FAR node normal, both rotated by
+ * the one skew. Round 1015 B item 16 already gives every span the skew that turns its BISECTOR normal onto
+ * the street's single ray, so the bisector rotated by that skew IS the ray; the near/far normals are the ray
+ * +/- half the route's turn over the span (+7.5 / -7.5 degrees where the route turns 23 degrees at node 336).
+ * Each strip therefore opened 15 degrees (1892 -> 4252 units wide over 8 quads) and the three overlapped
+ * almost completely: a triple-layered road slab with three competing dashed centre lines and z-fighting.
+ * Both edges now leave along the ray, so the strips tile as parallel bands. Geo builds only (the synthetic
+ * network keeps its radial look); TD5RE_GEO_ARM_PARALLEL=0 restores the wedges. */
+static int tg_arm_parallel_on(void)
+{
+    return tg_net_geo() && td5_env_flag_on("TD5RE_GEO_ARM_PARALLEL");
+}
+
+/* Outward directions of one span's street arm: near edge (nox,noz), far edge (fox,foz). */
+static void tg_block_arm_dirs(const double *e, double ang, double *nox, double *noz,
+                              double *fox, double *foz)
+{
+    if (tg_arm_parallel_on()) {
+        const double mx = e[6] + e[8], mz = e[7] + e[9];
+        const double ml = sqrt(mx * mx + mz * mz);
+        if (ml > 1e-6) {
+            tg_block_rot2(mx / ml, mz / ml, ang, nox, noz);
+            *fox = *nox; *foz = *noz;
+            return;
+        }
+    }
+    tg_block_rot2(e[6], e[7], ang, nox, noz);
+    tg_block_rot2(e[8], e[9], ang, fox, foz);
+}
+
+/* One edge of the arm: the near-node (corner at the gap start) or far-node (gap end) outward direction. */
+static void tg_block_arm_near(const double *e, double ang, double *ox, double *oz)
+{
+    double fx, fz;
+    tg_block_arm_dirs(e, ang, ox, oz, &fx, &fz);
+}
+
+static void tg_block_arm_far(const double *e, double ang, double *ox, double *oz)
+{
+    double nx, nz;
+    tg_block_arm_dirs(e, ang, &nx, &nz, ox, oz);
+}
+
 double tg_xstreet_drop(double d)
 {
     const double w = tg_verge_reach();
@@ -365,8 +412,7 @@ int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double
         ang = tg_block_arm_skew(m, left);
         reach = tg_xstreet_reach_at(nl, m, sg, ang, b, tg_city_sidewalk_w(b));
         if (!(reach > 0.0)) continue;
-        tg_block_rot2(e[6], e[7], ang, &nox, &noz);
-        tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+        tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
         qx[0] = e[0];                qz[0] = e[2];
         qx[1] = e[0] + nox * reach;  qz[1] = e[2] + noz * reach;
         qx[2] = e[3] + fox * reach;  qz[2] = e[5] + foz * reach;
@@ -574,8 +620,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw);
         drop  = tg_xstreet_drop(reach);
         u_r   = reach / (double)TD5_TG_LANE_WIDTH;
-        tg_block_rot2(e[6], e[7], ang, &nox, &noz);
-        tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+        tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
 
         if (follow) {
             tg_xstreet_push_follow(px, py, pz, uu, vv, &n, e, nox, noz, fox, foz,
@@ -633,8 +678,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
             ang   = tg_block_arm_skew(h->si, ms);
             reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw);
             drop  = tg_xstreet_drop(reach);
-            tg_block_rot2(e[6], e[7], ang, &nox, &noz);
-            tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+            tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
 
             /* Along-road unit and the kerb-line midpoint of this span: the
              * centre span's midpoint is the middle of the whole run. */
@@ -1302,14 +1346,14 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
         if (alen < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= alen; az /= alen; }
 
         if (near_corner) {                            /* corner at the near node */
-            tg_block_rot2(e[6], e[7], ang, &ox, &oz);
+            tg_block_arm_near(e, ang, &ox, &oz);
             /* back = -along (onto the built side, off the carriageway). */
             if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
                                    reach, sw_s))
                 return 0;
         }
         if (far_corner) {                             /* corner at the far node */
-            tg_block_rot2(e[8], e[9], ang, &ox, &oz);
+            tg_block_arm_far(e, ang, &ox, &oz);
             if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
                                    reach, sw_s))
                 return 0;
@@ -3065,7 +3109,7 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
         if (!near_corner && !far_corner) continue;    /* gap interior: no wall */
         tg_city_edge_frame(h->nl, h->si, sg, e);
         ang = tg_block_arm_skew(h->si, s);
-        tg_block_rot2(e[6], e[7], ang, &ox, &oz);     /* outward down the street */
+        tg_block_arm_near(e, ang, &ox, &oz);          /* outward down the street */
 
         /* One wall on each along-road edge of the gap: edge 0 = e[0] (near),
          * edge 1 = e[3] (far). Each runs outward `reach`, rising H. The near
@@ -3292,12 +3336,12 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
             if (c == 0) {
                 if (!near_corner) continue;
                 cx = e[0]; cy = e[1]; cz = e[2];
-                tg_block_rot2(e[6], e[7], ang, &ox, &oz);
+                tg_block_arm_near(e, ang, &ox, &oz);
                 bx = -ax; bz = -az;          /* back into the block before it */
             } else {
                 if (!far_corner) continue;
                 cx = e[3]; cy = e[4]; cz = e[5];
-                tg_block_rot2(e[8], e[9], ang, &ox, &oz);
+                tg_block_arm_far(e, ang, &ox, &oz);
                 bx = ax; bz = az;            /* back into the block after it  */
             }
 
@@ -4435,8 +4479,7 @@ void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
             const double ang = tg_block_arm_skew(si, isl);
             double nox, noz, fox, foz;
             tg_city_edge_frame(nl, si, inside, e);
-            tg_block_rot2(e[6], e[7], ang, &nox, &noz);
-            tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+            tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
             xkeep = tg_r13_quad_fold(e[0], e[2], e[3], e[5],
                                      nox, noz, fox, foz, xr);
             if (xkeep <= 0.0) xfold++;

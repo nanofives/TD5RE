@@ -3093,6 +3093,14 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     if (!td5_geob_ring_simple(rx, rz, n_ring)) { tg_geo_lm_note(gb, si, "DROPPED ring not simple", 0.0); s_geo_dropped_deg++; return 1; }
 
     /* --- clear the carriageway and the pavement, by the least nudge that does */
+    /* [ROUND 1023 B item 8] A far-arc footprint (gb->far_host) is hosted on a main span that is NOT beside
+     * it: "outward" and the carriageway gap below are measured from that span's road, which would shove the
+     * footprint by the difference or drop it. Its clearance from the plaza corridor was proven when it was
+     * re-hosted (tg_pf_rehost_buildings), so the nudge is skipped. */
+    if (gb->far_host) {
+        gap = 0.0;
+        minout = 0.0;
+    } else {
     gap = tg_geo_building_clear_gap(nl, si, side,
                                     tg_city_sidewalk_w_side_at(nl, si,
                                                                side > 0.0, h->b));
@@ -3100,6 +3108,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     for (k = 0; k < n_ring; k++) {
         need = minout - tg_geo_outward(nl, si, side, rx[k], rz[k]);
         if (need > shift) shift = need;
+    }
     }
     if (shift > TD5_TG_GEO_MAX_SHIFT) { tg_geo_lm_note(gb, si, "DROPPED past shift cap", shift); s_geo_dropped_shift++; return 1; }
     if (shift > 0.0) {
@@ -3116,7 +3125,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
      * of its sample points (vertices, edge midpoints, centroid) on the road is
      * the test: a footprint that merely grazes a kerb is kept. */
     if (tg_geo_clear_ready()) {
-        const double own = tg_geo_own_lateral(nl, si, side);
+        const double own = gb->far_host ? -1.0 : tg_geo_own_lateral(nl, si, side);   /* [1023 B] no own carriageway out there */
         int on = 0, ns = 0;
         if (tg_geo_foreign_road_at(cx, cz, n->x, n->z, n->tx, n->tz, own)) on++;
         ns++;
@@ -3271,7 +3280,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     by = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
     /* Same ceiling the procedural wall uses: a building must not float above
      * the road when the conformed bed and the raw heightfield disagree. */
-    if (by > n->y + tg_city_kerb_h(h->b) + 400.0)
+    if (!gb->far_host && by > n->y + tg_city_kerb_h(h->b) + 400.0)
         by = n->y + tg_city_kerb_h(h->b) + 400.0;
     /* A building:part starts where the part below it stops. */
     if (gb->min_height > 0.0) by += gb->min_height;
