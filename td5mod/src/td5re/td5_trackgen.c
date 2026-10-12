@@ -3645,7 +3645,16 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * place loaded. */
         tg_geo_xings_prepare(nl, nspans);
         tg_geo_bus_stops_prepare(nl, nspans);
+        /* [ROUND 1025 J] tg_geo_footpaths_prepare asks tg_xstreet_covers per sample (the 1022 P street clip), and
+         * that rebuilt the street quad of all 49 window spans on every call. Since round 1024 G/I (connector edge, ray
+         * clip, orphan streets) that rebuild cost ~30 s on level091 and held the first scenery entry back by that much.
+         * The quad is a pure function of the network and the pavement widths, and nothing in this call changes either,
+         * so memoise it for exactly this call and drop the memo again before tg_geo_city_prepare decides the widths. */
+        memset(s_xcov_state, 0, sizeof(s_xcov_state));
+        s_xcov_armed = td5_env_flag_on("TD5RE_TG_XMEMO");
         tg_geo_footpaths_prepare(nl, nspans);
+        s_xcov_armed = 0;
+        memset(s_xcov_state, 0, sizeof(s_xcov_state));
         /* [GEO ROUND 1009 items 2 + 7] Same contract and the same reason: the
          * OSM pavement widths and the per-(span, side) frontage stand-down are
          * decided here, while this is the only thread, because every facade,
