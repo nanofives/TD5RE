@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (real places: open the median)" },
+    { CL_ITEM,    "La Plata: where a cross street cuts the median of an" },
+    { CL_ITEM,    "  avenue (Diagonal 73 at spans 132-136, 188-192, ...) the" },
+    { CL_ITEM,    "  paved gap is now road you can drive: cross from one" },
+    { CL_ITEM,    "  carriageway to the other, no invisible wall in it." },
+
     { CL_DATE,    "October 11 (real places: roads that merge in)" },
     { CL_ITEM,    "La Plata: a real road that joins the main road at a" },
     { CL_ITEM,    "  shallow angle (Calle 54 beside the road, span 343) is now" },

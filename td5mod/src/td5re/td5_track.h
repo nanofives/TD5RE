@@ -155,6 +155,12 @@ int              td5_track_loop_near_mouth(int span, int pad);
 int              td5_track_loop_arrival_dist(int span, int maxd);
 int              td5_track_loop_of_corridor(int span);
 int              td5_track_loop_count(void);
+/* [R1023 D] median gaps of real forks: partner span across the gap (and the gap centre), -1 when none; run count */
+int              td5_track_gap_partner(int span, int32_t *cx, int32_t *cz);
+int              td5_track_gap_count(void);
+#ifndef TD5RE_RELEASE
+uint32_t         td5_track_dev_gap_drive_bits(const TD5_Actor *a);   /* DEV: TD5RE_GAP_DRIVE pure-pursuit across a median gap */
+#endif
 int              td5_track_loop_side(int span);      /* [1019 V] 1 = the loop departing at span D leaves on the LEFT */
 int              td5_track_fork_is_left(int span);   /* [1019 V] 1 = the fork span's corridor is on the LEFT */
 int              td5_track_corr_variable_count(void);

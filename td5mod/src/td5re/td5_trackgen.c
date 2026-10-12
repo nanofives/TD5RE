@@ -2877,6 +2877,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
          * stands beside (see the CorrMap note in td5_track.c). Only forks whose corridor
          * has a different number of spans than the main stretch it bypasses write one, so
          * a build without such a fork is byte-identical to before. */
+        if (ok) tg_fork_gap_write(out);      /* [ROUND 1023 D] median gaps of real forks (no bytes without any) */
         if (ok) tg_bl_slnk_write(out);       /* [ROUND 1018 L] side links of the block loops (no bytes without any) */
         if (ok) {
             int j, nv = 0;
@@ -5120,7 +5121,9 @@ static unsigned int tg_env_hash(void)
              * launch; hashing those knobs made every tour a stamp miss and a
              * full regenerate (~20 s) of a build that is byte-identical. */
             && strncmp(*e, "TD5RE_FREECAM_", 14) != 0 && strncmp(*e, "TD5RE_CAM_FIXED", 15) != 0
-            && strncmp(*e, "TD5RE_AI_BRANCH_FORCE", 21) != 0 && strncmp(*e, "TD5RE_RACE_SEED", 15) != 0)
+            && strncmp(*e, "TD5RE_AI_BRANCH_FORCE", 21) != 0 && strncmp(*e, "TD5RE_RACE_SEED", 15) != 0
+            /* [ROUND 1023 D] the median-gap ENGINE knob and the dev gap driver act on a built strip only */
+            && strncmp(*e, "TD5RE_GAP_DRIVE", 15) != 0 && strncmp(*e, "TD5RE_GEO_FORK_GAP_ENGINE", 25) != 0)
             h = tg_fnv1a(h, *e, strlen(*e));
     /* [J8 GEO-PICK] The slot-driven place override deliberately never reaches
      * the environment, so hash it here or two places would produce the same
