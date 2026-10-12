@@ -4245,6 +4245,7 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b, double side
 int tg_fork_gore_page(int fork_index);
 int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side, int flush);
 int tg_fork_opening_at(int si);   /* [1015 A] a real median opening on a real fork's main span */
+int tg_fork_gap_write(TG_Buf *out);   /* [1023 D] the MGAP trailer: real median openings the car can cross; runs written */
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);

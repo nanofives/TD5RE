@@ -215,6 +215,30 @@ static int  sl_open(int span, int32_t px, int32_t pz);
 static int  sl_lane_at(int span, int32_t px, int32_t pz, int32_t tol);
 static int  sl_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *new_sub);
 
+/* [R1023 D] MEDIAN GAPS. A real fork's main half and its corridor are separate spans with a rail
+ * each on the median side. Where the real map has a cross street through the median (round
+ * 1015 A paved that flush and took the island away) the generator says so in a TRAILER in front
+ * of 'SLNK' (the corridor map follows both):
+ *   u32 'MGAP' (0x5041474D), u32 nruns, then per run 5 x u32
+ *   main_lo, main_hi, corr_lo, corr_hi, side (0 = corridor on the right of travel, 1 = left)
+ * The main spans main_lo..main_hi and the corridor spans corr_lo..corr_hi stand side by side with
+ * only the (paved) median between them. Two things read it, only on the spans it names, exactly as
+ * the side links do: the walker relocates a probe that has left its span and lies inside a lane
+ * quad of the partner span (a decision by containment), and the wall resolver stands the rail down
+ * for a probe that is inside the partner span or inside the paved gap between the two. A track
+ * without the trailer has s_mg_n == 0 and takes no new branch anywhere. TD5RE_GEO_FORK_GAP_ENGINE=0
+ * skips the bytes and ignores the runs. */
+typedef struct { int m0, m1, c0, c1, side; } MedGap;
+static MedGap  *s_mg = NULL;
+static int      s_mg_n = 0;
+static int16_t *s_mg_of = NULL;        /* per span: run * 2 + role (0 main half, 1 corridor), or -1 */
+static int      s_mg_off = -1;
+static void   mg_free(void);
+static size_t mg_parse(const uint8_t *blob, size_t size, size_t pos);
+static int    mg_open(int span, int32_t px, int32_t pz);
+static int    mg_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *new_sub);
+static int    mg_point_in_gap(int32_t px, int32_t pz);
+
 /** Per-span median-divider lateral index (reverse-native forks): 0 = none, else
  *  the branch lane count = the lateral boundary that wall_contact walls off so a
  *  car cannot straddle the main/branch divide. Sized s_span_count, NULL otherwise. */
@@ -2305,6 +2329,9 @@ static void geo_rescue_offmap(TD5_Actor *actor)
 
     if (!located) return;
     if (h.inside || h.pushdist <= OOB_RESCUE_DIST) return;   /* on/near road */
+    /* [R1023 D] the paved gap of a real median opening is road with no span of its own: the nearest-quad
+     * distance (ranked toward the car's own span) reads it as open ground, so it is not an escape */
+    if (s_mg_n > 0 && mg_point_in_gap(cx, cz)) return;
     dx = (double)h.pushx; dz = (double)h.pushz;
     mag = sqrt(dx * dx + dz * dz);
     if (mag < 0.5) return;
@@ -2499,6 +2526,8 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         /* [R1018 L] the rail is OPEN where a block loop's mouth lies against it: a probe that is
          * inside the span across the mouth is on road, not past a wall. */
         if ((hit_l || hit_r) && s_sl_n > 0 && sl_open(span_idx, px, pz)) { hit_l = hit_r = 0; }
+        /* [R1023 D] ... and where a real cross street cuts the median: the paved gap and the span across it are road */
+        if ((hit_l || hit_r) && s_mg_n > 0 && mg_open(span_idx, px, pz)) { hit_l = hit_r = 0; }
 #ifndef TD5RE_RELEASE
         if (s_sl_n > 0 && s_sl_of && (hit_l || hit_r) && actor->slot_index == td5_env_int("TD5RE_SL_DIAG", -1, -1, 7) &&
             (s_sl_of[span_idx] >= 0 || span_idx >= s_sl[0].c0 || (span_idx >= s_sl[0].a1_lo - 8 && span_idx <= s_sl[0].a2_hi + 3))) {
@@ -4727,6 +4756,7 @@ int td5_track_load_strip(const void *data, size_t size)
     s_jump_entries = NULL;
     corr_map_free();
     sl_free();
+    mg_free();
     td5_camera_bind_track_geometry(NULL, NULL);
     free_display_lists();
     if (s_span_display_list_indices) {
@@ -4823,6 +4853,7 @@ int td5_track_load_strip(const void *data, size_t size)
     if (s_jump_entries && s_jump_entry_count > 0 && g_active_td6_level == 0) {
         /* [R1018 L] the side-link trailer (block loops) sits in front of the corridor map */
         size_t tpos = (size_t)vertex_offset + (size_t)s_secondary_count * 6u;
+        tpos = mg_parse(s_strip_blob, size, tpos);      /* [R1023 D] median gaps come first */
         tpos = sl_parse(s_strip_blob, size, tpos);
         corr_map_parse(s_strip_blob, size, tpos);
     }
@@ -6014,6 +6045,17 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
             int ns = 0, nsub = 0;
             if (sl_try_cross(span_idx, FP_TRUNC(pos_x), FP_TRUNC(pos_z), &ns, &nsub)) {
                 TD5_LOG_I(LOG_TAG, "side link: span %d -> %d lane %d", span_idx, ns, nsub);
+                span_idx = ns; sub_lane = nsub;
+                track_state[0] = (int16_t)ns;
+                ((int8_t *)track_state)[12] = (int8_t)nsub;
+                s_sl_jumped = 1;
+            }
+        }
+        /* [R1023 D] same for a median gap: the probe has crossed the paved opening into the partner span */
+        if (s_mg_n > 0 && span_idx >= 0 && span_idx < s_span_count && s_mg_of && s_mg_of[span_idx] >= 0) {
+            int ns = 0, nsub = 0;
+            if (mg_try_cross(span_idx, FP_TRUNC(pos_x), FP_TRUNC(pos_z), &ns, &nsub)) {
+                TD5_LOG_I(LOG_TAG, "median gap: span %d -> %d lane %d", span_idx, ns, nsub);
                 span_idx = ns; sub_lane = nsub;
                 track_state[0] = (int16_t)ns;
                 ((int8_t *)track_state)[12] = (int8_t)nsub;
@@ -10056,6 +10098,297 @@ int td5_track_fork_is_left(int span)
 {
     return fork_is_left(span) ? 1 : 0;
 }
+
+/* ===== [R1023 D] median gaps (see the MedGap note at the top of the file) ====== */
+#define MG_MIN_GAP 700   /* world units: a gap narrower than this is within SL_TOL of BOTH roads (the probe would flap) */
+
+static void mg_free(void)
+{
+    free(s_mg);    s_mg = NULL;
+    free(s_mg_of); s_mg_of = NULL;
+    s_mg_n = 0;
+}
+
+/* The facing edge of `span` (its right edge when `right`, else its left edge): near and far end in
+ * integer world units. Same quad corners as sl_lane_at (outermost lane), so type offsets agree. */
+static int mg_edge(int span, int right, int32_t *nx, int32_t *nz, int32_t *fx, int32_t *fz)
+{
+    const TD5_StripSpan *sp;
+    int lc, vl0, vl1, vr0, vr1;
+    const TD5_StripVertex *a, *b, *c, *d;
+    if (span < 0 || span >= s_span_count || !s_vertex_table) return 0;
+    sp = &s_span_array[span];
+    lc = span_lane_count(sp); if (lc < 1) lc = 1;
+    get_quad_vertices(sp, right ? lc - 1 : 0, &vl0, &vl1, &vr0, &vr1);
+    a = vertex_at(vl0); b = vertex_at(vl1); c = vertex_at(vr1); d = vertex_at(vr0);
+    if (!a || !b || !c || !d) return 0;
+    if (right) { *nx = sp->origin_x + b->x; *nz = sp->origin_z + b->z; *fx = sp->origin_x + c->x; *fz = sp->origin_z + c->z; }
+    else       { *nx = sp->origin_x + a->x; *nz = sp->origin_z + a->z; *fx = sp->origin_x + d->x; *fz = sp->origin_z + d->z; }
+    return 1;
+}
+
+/* The four corners of run g's paved gap: main facing edge (near of m0 .. far of m1) and the corridor's
+ * facing edge (near of c0 .. far of c1), as a loop. */
+static int mg_corners(const MedGap *g, int32_t x[4], int32_t z[4])
+{
+    int32_t anx, anz, afx, afz, bnx, bnz, bfx, bfz, t0, t1;
+    if (!mg_edge(g->m0, g->side == 0, &anx, &anz, &t0, &t1)) return 0;
+    if (!mg_edge(g->m1, g->side == 0, &t0, &t1, &afx, &afz)) return 0;
+    if (!mg_edge(g->c0, g->side != 0, &bnx, &bnz, &t0, &t1)) return 0;
+    if (!mg_edge(g->c1, g->side != 0, &t0, &t1, &bfx, &bfz)) return 0;
+    x[0] = anx; z[0] = anz; x[1] = afx; z[1] = afz; x[2] = bfx; z[2] = bfz; x[3] = bnx; z[3] = bnz;
+    return 1;
+}
+
+static int mg_in_tri(int32_t px, int32_t pz, int32_t ax, int32_t az, int32_t bx, int32_t bz, int32_t cx, int32_t cz)
+{
+    const int64_t d1 = (int64_t)(bx - ax) * (pz - az) - (int64_t)(bz - az) * (px - ax);
+    const int64_t d2 = (int64_t)(cx - bx) * (pz - bz) - (int64_t)(cz - bz) * (px - bx);
+    const int64_t d3 = (int64_t)(ax - cx) * (pz - cz) - (int64_t)(az - cz) * (px - cx);
+    return !(((d1 < 0) || (d2 < 0) || (d3 < 0)) && ((d1 > 0) || (d2 > 0) || (d3 > 0)));
+}
+
+/* Is (px, pz) inside the paved gap of run g? */
+static int mg_in_gap(const MedGap *g, int32_t px, int32_t pz)
+{
+    int32_t x[4], z[4];
+    if (!mg_corners(g, x, z)) return 0;
+    return mg_in_tri(px, pz, x[0], z[0], x[1], z[1], x[2], z[2]) ||
+           mg_in_tri(px, pz, x[0], z[0], x[2], z[2], x[3], z[3]);
+}
+
+/* Is (px, pz) inside the paved gap of ANY linked run? (The engine knob off: never.) */
+static int mg_point_in_gap(int32_t px, int32_t pz)
+{
+    int i;
+    if (s_mg_off || s_mg_n <= 0) return 0;
+    for (i = 0; i < s_mg_n; i++)
+        if (mg_in_gap(&s_mg[i], px, pz)) return 1;
+    return 0;
+}
+
+/* Parse the trailer at `pos`; returns the offset just past it (pos unchanged when there is none). */
+static size_t mg_parse(const uint8_t *blob, size_t size, size_t pos)
+{
+    uint32_t magic, nr, i;
+    size_t end;
+    int q, bad_gap = 0, bad_type = 0;
+    if (s_mg_off < 0) s_mg_off = td5_env_flag_on("TD5RE_GEO_FORK_GAP_ENGINE") ? 0 : 1;
+    if (!blob || pos + 8 > size) return pos;
+    memcpy(&magic, blob + pos, 4);
+    if (magic != 0x5041474Du) return pos;
+    memcpy(&nr, blob + pos + 4, 4);
+    if (nr == 0 || nr > 256u || pos + 8 + (size_t)nr * 20u > size) return pos;
+    end = pos + 8 + (size_t)nr * 20u;
+    s_mg = (MedGap *)calloc((size_t)nr, sizeof(MedGap));
+    s_mg_of = (int16_t *)malloc(sizeof(int16_t) * (size_t)(s_span_count > 0 ? s_span_count : 1));
+    if (!s_mg || !s_mg_of) { mg_free(); return end; }
+    for (q = 0; q < s_span_count; q++) s_mg_of[q] = -1;
+    for (i = 0; i < nr; i++) {
+        uint32_t w[5]; int j, ok = 1;
+        MedGap *g = &s_mg[s_mg_n];
+        int32_t x[4], z[4];
+        double d0, d1;
+        memcpy(w, blob + pos + 8 + (size_t)i * 20u, 20u);
+        g->m0 = (int)w[0]; g->m1 = (int)w[1]; g->c0 = (int)w[2]; g->c1 = (int)w[3]; g->side = (int)w[4];
+        if (g->m0 < 0 || g->m1 < g->m0 || g->m1 >= s_span_count ||
+            g->c0 < 0 || g->c1 < g->c0 || g->c1 >= s_span_count || g->side < 0 || g->side > 1) continue;
+        for (j = g->m0; j <= g->m1 && ok; j++) { const int t = s_span_array[j].span_type; if (t >= 8 && t <= 11) ok = 0; }
+        for (j = g->c0; j <= g->c1 && ok; j++) { const int t = s_span_array[j].span_type; if (t >= 8 && t <= 11) ok = 0; }
+        if (!ok) { bad_type++; continue; }
+        if (!mg_corners(g, x, z)) continue;
+        d0 = sqrt(((double)x[0] - x[3]) * ((double)x[0] - x[3]) + ((double)z[0] - z[3]) * ((double)z[0] - z[3]));
+        d1 = sqrt(((double)x[1] - x[2]) * ((double)x[1] - x[2]) + ((double)z[1] - z[2]) * ((double)z[1] - z[2]));
+        if (d0 < MG_MIN_GAP || d1 < MG_MIN_GAP) { bad_gap++; continue; }
+        for (j = g->m0; j <= g->m1; j++) s_mg_of[j] = (int16_t)(s_mg_n * 2 + 0);
+        for (j = g->c0; j <= g->c1; j++) s_mg_of[j] = (int16_t)(s_mg_n * 2 + 1);
+        TD5_LOG_I(LOG_TAG, "median gap: run %d main %d..%d <-> corridor %d..%d side %d, gap %.0f..%.0f units",
+                  s_mg_n, g->m0, g->m1, g->c0, g->c1, g->side, d0, d1);
+        s_mg_n++;
+    }
+    TD5_LOG_I(LOG_TAG, "median gaps: %d run(s) linked of %u in the strip (%d refused: sentinel span, %d: gap < %d units)",
+              s_mg_n, (unsigned)nr, bad_type, bad_gap, MG_MIN_GAP);
+    if (s_mg_n == 0) mg_free();
+    return end;
+}
+
+/* The spans across the gap from `span` (inclusive range lo..hi) and the run; 0 when `span` has none. */
+static int mg_targets(int span, int *lo, int *hi, const MedGap **gp)
+{
+    /* TD5RE_GEO_FORK_GAP_ENGINE=0: the runs stay parsed (the dev driver reads them) but no span has a partner */
+    const int e = (!s_mg_off && s_mg_n > 0 && s_mg_of && span >= 0 && span < s_span_count) ? (int)s_mg_of[span] : -1;
+    const MedGap *g;
+    if (e < 0) return 0;
+    g = &s_mg[e >> 1];
+    if (e & 1) { *lo = g->m0; *hi = g->m1; } else { *lo = g->c0; *hi = g->c1; }
+    *gp = g;
+    return 1;
+}
+
+/* A probe that has LEFT `span` and lies inside the span across the gap: the span and lane it is now on. */
+static int mg_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *new_sub)
+{
+    int lo, hi, s;
+    const MedGap *g;
+    if (!mg_targets(span, &lo, &hi, &g)) return 0;
+    if (sl_lane_at(span, px, pz, 0) >= 0) return 0;       /* still on this span */
+    for (s = lo; s <= hi; s++) {
+        const int lane = sl_lane_at(s, px, pz, SL_TOL);
+        if (lane >= 0) { *new_span = s; *new_sub = lane; return 1; }
+    }
+    return 0;
+}
+
+/* Is the probe standing in the span across the gap of `span`, or in the paved gap itself? Then the
+ * rail of `span` on that side is open there. */
+static int mg_open(int span, int32_t px, int32_t pz)
+{
+    int lo, hi, s;
+    const MedGap *g;
+    if (!mg_targets(span, &lo, &hi, &g)) return 0;
+    for (s = lo; s <= hi; s++)
+        if (sl_lane_at(s, px, pz, SL_TOL) >= 0) return 1;
+    return mg_in_gap(g, px, pz);
+}
+
+/* DEV/QA: the partner span across a median gap of `span` (a main span in a gap run, or a corridor span of
+ * one) and the gap's centre; -1 when `span` is in none. */
+int td5_track_gap_partner(int span, int32_t *cx, int32_t *cz)
+{
+    int lo, hi;
+    const MedGap *g;
+    int32_t x[4], z[4];
+    if (!mg_targets(span, &lo, &hi, &g) || !mg_corners(g, x, z)) return -1;
+    if (cx) *cx = (x[0] + x[1] + x[2] + x[3]) / 4;
+    if (cz) *cz = (z[0] + z[1] + z[2] + z[3]) / 4;
+    return (lo + hi) / 2;
+}
+
+int td5_track_gap_count(void) { return s_mg_n; }
+
+#ifndef TD5RE_RELEASE
+/* [R1023 D] DEV: TD5RE_GAP_DRIVE=<run> -- slot 0 is driven across median gap <run> by a pure-pursuit controller
+ * (steer + throttle bits, same downstream path as a keyboard) so the crossing goes through the REAL physics,
+ * walker and wall resolver. Leg 0 crosses main -> corridor: the main road's outer lane until TD5RE_GAP_DRIVE_TURN (1)
+ * spans before the gap, then the corridor lane TD5RE_GAP_DRIVE_AIM (3) spans into the run. TD5RE_GAP_DRIVE_BACK=1 then
+ * continues along the corridor and crosses back corridor -> main through the NEXT run of the same fork (leg 1).
+ * Speed hold TD5RE_GAP_DRIVE_SPEED (units/tick, default 110 = 28 km/h). One [GAPDRIVE] line per tick of a leg's
+ * window, a RESULT line per leg, then a clean quit (TD5RE_GAP_DRIVE_QUIT=0 keeps the game running).
+ * TD5RE_GAP_DRIVE_STEER_SIGN=-1 (default, MEASURED: STEER_LEFT turns toward +x) / 1 flips the steer sense.
+ * Compiled out of RELEASE. */
+uint32_t td5_track_dev_gap_drive_bits(const TD5_Actor *a)
+{
+    static int s_run = -2, s_leg = 0, s_done = 0, s_started = 0, s_cross_tick = -1, s_contacts = 0, s_ticks = 0;
+    static int s_prev_contact = 0, s_sign = -1, s_back = 0, s_quit = 1, s_lane = -1, s_reached = 0;
+    static double s_vmax = 0.0;
+    const MedGap *g;
+    int span, ring, lc, tx = 0, ty = 0, tz = 0, aim_span, hold, turn, aim, from_corr, ls;
+    double hx, hz, dx, dz, spd, vx, vz, err, yaw, v_target;
+    uint32_t bits = 0;
+    if (!a) return 0;
+    if (s_run == -2) {
+        s_run = td5_env_int("TD5RE_GAP_DRIVE", -1, -1, 255);
+        s_sign = td5_env_int("TD5RE_GAP_DRIVE_STEER_SIGN", -1, -1, 1);
+        s_lane = td5_env_int("TD5RE_GAP_DRIVE_LANE", -1, -1, 7);
+        s_quit = td5_env_int("TD5RE_GAP_DRIVE_QUIT", 1, 0, 1);
+        s_back = td5_env_int("TD5RE_GAP_DRIVE_BACK", 0, 0, 1);
+    }
+    if (s_run < 0 || s_run >= s_mg_n || s_done) return 0;
+    g = &s_mg[s_run];
+    span = (int)a->track_span_raw;
+    ring = g->m0 > 0 ? g_td5.track_span_ring_length : 0;
+    if (span < 0 || span >= s_span_count || ring <= 0) return 0;
+    turn = td5_env_int("TD5RE_GAP_DRIVE_TURN", 1, 0, 8);
+    aim  = td5_env_int("TD5RE_GAP_DRIVE_AIM", 3, 0, 12);
+    from_corr = (s_leg == 1);
+
+    vx = (double)a->linear_velocity_x / 256.0; vz = (double)a->linear_velocity_z / 256.0;
+    spd = sqrt(vx * vx + vz * vz);
+    yaw = (double)(a->display_angles.yaw & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    if (spd > 20.0) { hx = vx / spd; hz = vz / spd; } else { hx = sin(yaw); hz = cos(yaw); }
+
+    /* the aim point */
+    if (!from_corr) {
+        hold = (span < ring) && (span < g->m0 - turn);
+        if (hold) {
+            aim_span = span + 4; if (aim_span >= ring) aim_span = ring - 1;
+            lc = span_lane_count(&s_span_array[aim_span]);
+            ls = (g->side == 0) ? lc - 1 : 0;                         /* the main lane next to the median */
+        } else {
+            aim_span = g->c0 + aim;
+            if (span >= ring && span + 4 > aim_span) aim_span = span + 4;   /* on the corridor: keep aiming ahead along it */
+            if (aim_span >= s_span_count) aim_span = s_span_count - 1;
+            lc = span_lane_count(&s_span_array[aim_span]);
+            ls = (s_lane >= 0) ? s_lane : (g->side == 0 ? 0 : lc - 1); /* the corridor lane next to the median */
+            if (ls >= lc) ls = lc - 1;
+        }
+    } else {
+        hold = (span >= ring) && (span < g->c0 - turn);
+        if (hold) {
+            aim_span = span + 4; if (aim_span >= s_span_count) aim_span = s_span_count - 1;
+            lc = span_lane_count(&s_span_array[aim_span]);
+            ls = (g->side == 0) ? 0 : lc - 1;                          /* the corridor lane next to the median */
+        } else {
+            aim_span = g->m0 + aim;
+            if (span < ring && span + 4 > aim_span) aim_span = span + 4;
+            if (aim_span >= ring) aim_span = ring - 1;
+            lc = span_lane_count(&s_span_array[aim_span]);
+            ls = (g->side == 0) ? lc - 1 : 0;                          /* the main lane next to the median */
+        }
+    }
+    if (!td5_track_get_span_lane_world(aim_span, ls, &tx, &ty, &tz)) return 0;
+    dx = (double)FP_TRUNC(tx) - (double)FP_TRUNC(a->world_pos.x);   /* the lane centre is 24.8 */
+    dz = (double)FP_TRUNC(tz) - (double)FP_TRUNC(a->world_pos.z);
+    err = atan2(dx, dz) - atan2(hx, hz);
+    while (err > 3.14159265358979) err -= 6.28318530717959;
+    while (err < -3.14159265358979) err += 6.28318530717959;
+    err *= (double)s_sign;
+    /* MEASURED: STEER_LEFT turns the heading toward +x (atan2(x,z) grows), so x is on the LEFT when facing +z:
+     * an angle error below zero (target toward -x) is a RIGHT turn, hence the default sign -1. */
+    if (err > 0.03) bits |= (uint32_t)TD5_INPUT_STEER_RIGHT;
+    else if (err < -0.03) bits |= (uint32_t)TD5_INPUT_STEER_LEFT;
+    v_target = (double)td5_env_int("TD5RE_GAP_DRIVE_SPEED", 110, 20, 600);
+    if (spd < v_target) bits |= (uint32_t)TD5_INPUT_THROTTLE;
+    else if (spd > v_target * 1.4) bits |= (uint32_t)TD5_INPUT_BRAKE;
+
+    /* record */
+    {
+        const int a0 = from_corr ? g->c0 - 6 : g->m0 - 6, a1 = from_corr ? g->m1 + 12 : g->c1 + 12;
+        const int in_win = from_corr ? ((span >= ring && span >= a0) || (span < ring && span <= a1 && s_reached))
+                                     : ((span < ring && span >= a0) || span >= ring);
+        const int target_side = from_corr ? (span < ring) : (span >= ring);
+        if (spd > 10.0) s_started = 1;
+        if (s_started && in_win) {
+            const int contact = (int)a->track_contact_flag;
+            if (spd > s_vmax) s_vmax = spd;
+            if (contact && !s_prev_contact) s_contacts++;
+            s_prev_contact = contact;
+            s_ticks++;
+            if (from_corr && span >= ring && span >= g->c0) s_reached = 1;
+            if (target_side && s_cross_tick < 0) s_cross_tick = s_ticks;
+            if (s_ticks <= 500)
+                TD5_LOG_I(LOG_TAG, "[GAPDRIVE] run=%d leg=%d t=%d span=%d sub=%d contact=%d spd=%.0f err=%.2f steer=%c pos=(%d,%d)",
+                          s_run, s_leg, s_ticks, span, (int)((const int8_t *)a)[0x80 + 12], contact, spd, err * s_sign,
+                          (bits & TD5_INPUT_STEER_RIGHT) ? 'R' : ((bits & TD5_INPUT_STEER_LEFT) ? 'L' : '-'),
+                          FP_TRUNC(a->world_pos.x), FP_TRUNC(a->world_pos.z));
+        }
+        if (s_started && ((target_side && (from_corr ? span > g->m1 + 8 : span > g->c1 + 8)) || s_ticks > 900)) {
+            TD5_LOG_I(LOG_TAG, "[GAPDRIVE] RESULT run=%d leg=%d (%s) main %d..%d corr %d..%d: crossed=%d (first on the far side at tick %d of %d), "
+                      "wall contacts=%d, peak speed %.0f u/t, final span %d",
+                      s_run, s_leg, from_corr ? "corridor->main" : "main->corridor", g->m0, g->m1, g->c0, g->c1,
+                      s_cross_tick >= 0, s_cross_tick, s_ticks, s_contacts, s_vmax, span);
+            if (s_back && s_leg == 0 && s_run + 1 < s_mg_n && s_mg[s_run + 1].c0 > g->c1) {
+                s_leg = 1; s_run++; s_cross_tick = -1; s_contacts = 0; s_ticks = 0; s_prev_contact = 0; s_vmax = 0.0; s_reached = 0;
+            } else {
+                s_done = 1;
+                if (s_quit) g_td5.quit_requested = 1;
+            }
+        }
+    }
+    return bits;
+}
+#endif
+
 
 /* ===== [R1016 K] corridor map (see the CorrMap note at the top of the file) ====== */
 static void corr_map_free(void)

@@ -66,6 +66,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  over the road, no more flicker with the far ground)" },
     { CL_ITEM,    "La Plata: the far sidewalk of Diagonal 73 runs on round the" },
     { CL_ITEM,    "  plaza (spans 412 to 431) instead of stopping short" },
+    { CL_DATE,    "October 12 (real places: open the median)" },
+    { CL_ITEM,    "La Plata: where a cross street cuts the median of an" },
+    { CL_ITEM,    "  avenue (Diagonal 73 at spans 132-136, 188-192, ...) the" },
+    { CL_ITEM,    "  paved gap is now road you can drive: cross from one" },
+    { CL_ITEM,    "  carriageway to the other, no invisible wall in it." },
 
     { CL_DATE,    "October 11 (real places: roads that merge in)" },
     { CL_ITEM,    "La Plata: a real road that joins the main road at a" },

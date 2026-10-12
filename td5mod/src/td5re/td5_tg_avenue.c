@@ -173,6 +173,84 @@ int tg_fork_opening_at(int si)
     return td5_geo_avenue_at(si, NULL, NULL, &op) && op;
 }
 
+/* [ROUND 1023 D] "we need to keep reworking the fork to allow this absence of median to be
+ * driveable" (Mariano, level091 L91 e33 s8 skirt p0:ROAD pos 176300,4268,60270: the paved gap
+ * of a real cross street opening on Diagonal 73, main spans 133..134). Round 1015 A paved the
+ * median flush at every real opening and took the island away, so the two carriageways LOOK
+ * joined; but the main half and the corridor are separate span records, each with a rail on its
+ * median side, so the car met an invisible wall where the road is drawn. The MGAP trailer tells
+ * the engine where those openings are (td5_track.c, "MEDIAN GAPS"): per run of opening spans
+ *   u32 main_lo, main_hi, corr_lo, corr_hi, side (0 corridor right of travel, 1 left)
+ * 'MGAP', n, then n runs. No bytes at all without a run, so every other strip is byte-identical;
+ * TD5RE_GEO_FORK_GAP=0 writes none. Only spans well clear of the fork's sentinels (type 8/9/10/11)
+ * qualify: the partner of an opening must be a plain corridor span. */
+int tg_fork_gap_write(TG_Buf *out)
+{
+    enum { MAXRUN = 128 };
+    int run[MAXRUN][5];
+    int nrun = 0, fi, nsp = 0, tot_runs = 0, tot_spans = 0;
+
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_GAP")) return 0;
+    /* how many real openings the route has inside its real forks' windows, whether or not they qualify below */
+    for (fi = 0; fi < s_fork_count; fi++) {
+        const TG_Fork *f = &s_forks[fi];
+        int si, prev = 0;
+        if (f->real <= 0 || f->loopc > 0) continue;
+        for (si = f->F + 1; si <= f->F + f->len; si++) {
+            const int in = (tg_fork_of_main(si) == fi && tg_fork_opening_at(si)) ? 1 : 0;
+            if (in) { tot_spans++; if (!prev) tot_runs++; }
+            prev = in;
+        }
+    }
+    for (fi = 0; fi < s_fork_count; fi++) {
+        const TG_Fork *f = &s_forks[fi];
+        const int clen = tg_fork_clen(fi);
+        int si, m0 = -1, m1 = -1;
+        if (f->real <= 0 || f->loopc > 0 || clen < 8) continue;
+        for (si = f->F + 1; si <= f->F + f->len + 1; si++) {
+            const int in = (si >= f->F + 4 && si <= f->F + f->len - 3 && tg_fork_of_main(si) == fi &&
+                            tg_fork_opening_at(si)) ? 1 : 0;
+            if (!in && si <= f->F + f->len && tg_fork_of_main(si) == fi && tg_fork_opening_at(si))
+                TD5_LOG_I(LOG_TAG, "trackgen: [GAP] opening main span %d NOT linked (fork %d: within 4 spans of its start F=%d or 3 of its end R=%d)",
+                          si, fi, f->F, f->F + f->len + 1);
+            if (in) { if (m0 < 0) m0 = si; m1 = si; }
+            if ((!in || si == f->F + f->len + 1) && m0 >= 0) {
+                int k, kmin = -1, kmax = -1;
+                for (k = 0; k < clen; k++) {
+                    const int a = tg_fork_row_node(fi, k);
+                    const int b = (k + 1 < clen) ? tg_fork_row_node(fi, k + 1) : f->F + 1 + f->len;
+                    if (a < m1 + 1 && b > m0) { if (kmin < 0) kmin = k; kmax = k; }
+                }
+                if (kmin >= 2 && kmax <= clen - 3 && nrun < MAXRUN) {
+                    run[nrun][0] = m0; run[nrun][1] = m1;
+                    run[nrun][2] = f->cbase + kmin; run[nrun][3] = f->cbase + kmax;
+                    run[nrun][4] = (f->side > 0) ? 1 : 0;
+                    nsp += m1 - m0 + 1;
+                    nrun++;
+                } else {
+                    TD5_LOG_I(LOG_TAG, "trackgen: [GAP] opening main spans %d..%d NOT linked (corridor steps %d..%d of %d: too close to the fork's mouth or tail, or the run table is full)",
+                              m0, m1, kmin, kmax, clen);
+                }
+                m0 = m1 = -1;
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [GAP] real median openings inside real fork windows: %d run(s), %d span(s); driveable: %d run(s), %d span(s)",
+              tot_runs, tot_spans, nrun, nsp);
+    if (nrun == 0) return 0;
+    tg_put_u32(out, 0x5041474Du);                    /* 'MGAP' */
+    tg_put_u32(out, (unsigned int)nrun);
+    for (fi = 0; fi < nrun; fi++) {
+        int j;
+        for (j = 0; j < 5; j++) tg_put_u32(out, (unsigned int)run[fi][j]);
+        TD5_LOG_I(LOG_TAG, "trackgen: [GAP] median gap %d: main spans %d..%d <-> corridor spans %d..%d (side %s)",
+                  fi, run[fi][0], run[fi][1], run[fi][2], run[fi][3], run[fi][4] ? "left" : "right");
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [GAP] %d median gap run(s), %d main span(s) made driveable (knob TD5RE_GEO_FORK_GAP)",
+              nrun, nsp);
+    return nrun;
+}
+
 int tg_realfork_walk_owned(int fi, int mb)
 {
     if (!td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 0;

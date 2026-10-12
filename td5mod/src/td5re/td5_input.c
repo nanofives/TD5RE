@@ -964,6 +964,9 @@ void td5_input_poll_race_session(void)
              * server is off or nothing is held; compiled to a constant 0 in
              * release, so the sim path is untouched unless a client drives it. */
             s_control_bits[i] |= td5_control_race_bits(i);
+#ifndef TD5RE_RELEASE
+            if (i == 0) s_control_bits[i] |= td5_track_dev_gap_drive_bits(td5_game_get_actor(0));   /* [R1023 D] DEV: TD5RE_GAP_DRIVE */
+#endif
 
 #ifndef TD5RE_RELEASE
             /* [CHAOS CO-OP 2026-10-01] TD5RE_CHAOS_FAKE_PADS=1 — re-encode a
