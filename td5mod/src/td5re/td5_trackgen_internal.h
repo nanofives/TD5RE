@@ -635,6 +635,11 @@ typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
 typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_LM_BASE + TD5_TG_LM_PAGES)
+/* [1021 D] Street-name plate pages, appended AFTER the fixed block and only
+ * written when the geo mast-arm emitter has plates (td5_tg_mastarm.c). The
+ * fixed count above is untouched, so synthetic and plate-less builds keep a
+ * byte-identical TEXTURES.DAT. */
+#define TD5_TG_MASTARM_PAGES_MAX 32
 /* LOAD-BEARING GUARD (pause-menu facade-texture fix, 2026-09-13): the auto
  * generated track occupies D3D pages [0 .. TD5_TG_PAGE_COUNT-1]. Every port
  * reserved range (car skins, static atlas, HUD, frontend, props) starts at
@@ -644,6 +649,8 @@ typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
  * silent corruption into a BUILD FAILURE: when it trips, move the whole
  * reserved block up in td5_page_map.h (raise TD5_PAGE_LEVEL_CEIL and the
  * bases together) rather than shrinking the generator. */
+_Static_assert(TD5_TG_PAGE_COUNT + TD5_TG_MASTARM_PAGES_MAX <= TD5_PAGE_LEVEL_CEIL,
+               "mast-arm plate pages would reach the reserved D3D page zone");
 _Static_assert(TD5_TG_PAGE_COUNT <= TD5_PAGE_LEVEL_CEIL,
                "auto-track page count reached the reserved D3D page zone — "
                "raise TD5_PAGE_LEVEL_CEIL and the reserved bases in td5_page_map.h");
@@ -838,6 +845,9 @@ int tg_span_in_bridge_run(int si);
  * guardrail (which yields the edge) long before the city emitters are defined.
  * Declared here rather than duplicated so the two can never disagree. */
 int tg_rail_kerbfence_here(int si, double sg);
+/* [ROUND 1021 C item 12] A real city has a kerb and no rail: on a geo route, is span si in a kerbed
+ * (facade) biome where no kerb railing, arm railing or bend guardrail may stand? td5_tg_furniture.c. */
+int tg_geo_urban_rails_off(int si);
 /* Largest heading change per span allowed on a bridge deck, radians. 0.03 =>
  * turn radius >= ~50000 units, a sweeping curve rather than a hairpin, so a
  * deliberate bridge that lands on a tight section is straightened out. */
@@ -3915,6 +3925,7 @@ int tg_r11_median_rise(void);
  * constant, so every span of a fork gets the same answer -- the placement
  * predicate and the emitter cannot disagree. TD5RE_MEDIAN_MIN_RUN=0 for A/B. */
 int tg_median_fork_long_enough(int fork_index);
+int tg_fork_left_real_median(int fork_index);   /* [ROUND 1021 A] left real fork: signed median frame */
 int tg_r12_median_cap(void);
 int tg_r12_geom_diag(void);
 extern long s_r12_median_caps;
@@ -4253,6 +4264,10 @@ int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of a
  * slab must not be laid on top of it. */
 int tg_realfork_walk_owned(int fi, int mb);
 int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
+/* [ROUND 1021 B item 5] clip a main-road kerb slab against the street mouths round span si (td5_tg_avenue.c):
+ * 0 = nothing free, 1 = whole span free, 2 = the clipped slab was emitted, -1 = out of memory */
+int    tg_av_main_pave_clip(const TG_NodeList *nl, int si, double sg, double e0, double e1,
+                            double f0, double f1, TG_Buf *blk, size_t *moff, int *nmesh);
 /* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
  * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
  * real road close to and parallel with the route, as a FORK the player and the AI
@@ -4724,6 +4739,11 @@ int tg_r10_xstreet_guard(void);
 int tg_xstreet_here(const TG_NodeList *nl, int si, double side, double *preach);
 double tg_footway_reach(const TG_NodeList *nl, int si, double side);
 int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side, double inner_d);
+/* [ROUND 1021 C items 4 + 9] Does the plan point (x, z) lie on a laid cross-street CARRIAGEWAY whose mouth is
+ * within TG_XSC_WIN spans of si on side sg (+1 left)? The same parallelogram tg_city_emit_crossstreet lays
+ * (edge frame, network skew, network reach), so a diagonal street that sweeps across the neighbouring
+ * spans' frontage is seen where the per-span "xstreet here" answer cannot see it. td5_tg_streets.c. */
+int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z);
 void tg_xstreet_audit(const TG_NodeList *nl, int si, double side, double inner_d, const char *what, int placed);
 int tg_block_is_park(int si, int left);
 /* Fork-back band sizing. Declared here rather than beside tg_city_emit_forkback
@@ -5589,7 +5609,7 @@ int tg_infra_menu(const TG_Biome *b, int paved, int *out);
  * which needs the span and the kerb it is being placed on. */
 int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
                          int paved, int kind, unsigned int hh);
-int tg_infra_awning_filter(int si, double side, int paved, int kind, unsigned int hh);
+int tg_infra_awning_filter(const TG_NodeList *nl, int si, double side, int paved, int kind, unsigned int hh);
 /* ===================== [R9 INFRA] PONDS =====================
  * Asked for in ROUND 5 and unbuilt for four rounds. Small standing water away
  * from the road in the green biomes.
@@ -6075,6 +6095,22 @@ int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans, TG_Buf *blk, siz
 void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans);
 int  tg_emit_geo_signals(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
 void tg_geo_signals_report(int nspans);
+
+/* ============ GEO MAST-ARM SIGNALS + STREET-NAME PLATES (1021 D) =========
+ * Defined in td5_tg_mastarm.c; rationale there. The plates are baked into EXTRA
+ * TEXTURES.DAT pages appended after TD5_TG_PAGE_COUNT, and only when a geo
+ * place with signals is loaded and TD5RE_GEO_MASTARM is on -- so every other
+ * build writes the page file it always did (tg_mastarm_plate_pages() == 0).
+ * The table is a pure function of the route/signals/roads caches, which is why
+ * it can be rebuilt wherever it is needed (see the file header). */
+int  tg_mastarm_enabled(void);
+void tg_mastarm_prepare(void);
+int  tg_mastarm_plan(int sig, double carriageway_width, int near_gantry, int *front, int *back);
+int  tg_mastarm_mesh_count(double carriageway_width);
+int  tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap, double base_y, int cf, int cb, TG_Buf *blk, size_t *moff, int *nmesh);
+int  tg_mastarm_plate_pages(void);
+void tg_mastarm_emit_plate_page(TG_Buf *out, int p);
+void tg_mastarm_report(void);
 
 /* ================== GEO STREET LEVEL (round 1011 C4) ====================
  * Zebras at real highway=crossing nodes, bus stops at real highway=bus_stop

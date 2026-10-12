@@ -4693,6 +4693,8 @@ static void init_race_spawn_actors(void)
              * over-large lane id in the actor record on tracks where the spawn
              * table's lane (1, 2, 3) exceeds the actual span lane_count nibble.
              * [CONFIRMED @ 0x445F2A-32 disassembly pool14 session, pilot 0x00434350.] */
+            if (!drag_mode_spawn && !mp_cop_mode)
+                sub_lane = td5_track_grid_main_lane(span_index, sub_lane);   /* [ROUND 1021 A item 3] */
             {
                 int lane_count = td5_track_span_lane_count_at(span_index);
                 int clamped_sub_lane = sub_lane;

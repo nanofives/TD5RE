@@ -88,6 +88,22 @@ int tg_r11_street_crosses_here(const TG_NodeList *nl, int si, double sg)
     return tg_xstreet_here(nl, si, sg, NULL) ? 1 : 0;
 }
 
+/* [ROUND 1021 C item 12] Mariano, level091 L91 e73 s9 city p46:FENCE: "sidewalks near a park should
+ * not have guardrails" and "in La Plata there's no guardrails anywhere in the city". A real city is
+ * kerb only. The kerb railing (tg_city_emit_fence), the railing on a side street's arm pavement
+ * (tg_block_emit_arm) and the roadside bend guardrail are all inventions of the synthetic generator
+ * (a Moscow-style street edge); on a geo route none of them has a source in OSM. What stays: bridge
+ * parapets, the tunnel walkway rail, and the roadside rail over a deck / ramp / lifted span, which
+ * are structure, not street dressing. Kerbed = the biome carries a pavement, the same predicate
+ * tg_rail_kerbfence_here already uses. TD5RE_GEO_NO_URBAN_RAILS=0 restores the old rails. */
+int tg_geo_urban_rails_off(int si)
+{
+    if (!td5_geo_loaded()) return 0;                 /* synthetic: byte-identical */
+    if (!td5_env_flag_on("TD5RE_GEO_NO_URBAN_RAILS")) return 0;
+    if (si < 0) return 0;
+    return tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0;
+}
+
 int tg_guardrails_enabled(void)
 {
     /* [R8 merge] Flipped to default ON. The old default was "OFF until a frame
@@ -177,6 +193,10 @@ static int tg_span_needs_guardrail_raw(const TG_NodeList *nl, int si, int nspans
     if (tg_r13_approach_span(si)) return 1;
     if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
         return 1;
+
+    /* [ROUND 1021 C item 12] a kerbed city street is not railed for a bend (see tg_geo_urban_rails_off);
+     * the three structural tests above (bridge run, ramp approach, lifted span) have already answered. */
+    if (tg_geo_urban_rails_off(si)) return 0;
 
     /* Bend: heading change across this span, in tenths of a degree. */
     cross = nl->v[si].tx * nl->v[si + 1].tz - nl->v[si].tz * nl->v[si + 1].tx;
@@ -1276,6 +1296,8 @@ typedef struct {
     double side;    /* +1 left of travel, -1 right              */
     double gap;     /* clearance past the carriageway half-width */
     double base_y;  /* footing                                  */
+    int    mast;    /* [1021 D] 1 = mast arm with plates cf/cb   */
+    int    cf, cb;  /* [1021 D] plate cells, front / back face   */
 } TG_SignalPlace;
 
 static TG_SignalPlace *s_sigp;
@@ -1327,6 +1349,7 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
     n = td5_geo_signals_sync();
     s_sig_in_cache = n;
     if (n <= 0) return;
+    tg_mastarm_prepare();     /* [1021 D] street-name plates, before any plan */
 
     s_sigp = (TG_SignalPlace *)malloc((size_t)n * sizeof(TG_SignalPlace));
     if (!s_sigp) return;
@@ -1396,6 +1419,12 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
         s_sigp[s_sigp_n].side   = side;
         s_sigp[s_sigp_n].gap    = gap;
         s_sigp[s_sigp_n].base_y = base_y;
+        s_sigp[s_sigp_n].mast   = tg_mastarm_plan(i, nd->width,
+                                                  abs(si - tg_finish_span(
+                                                      (s_ring_len > 0) ? s_ring_len
+                                                                       : nspans)) <= 6,
+                                                  &s_sigp[s_sigp_n].cf,
+                                                  &s_sigp[s_sigp_n].cb);
         s_sigp_n++;
     }
     s_sig_placed = s_sigp_n;
@@ -1420,6 +1449,15 @@ int tg_emit_geo_signals(const TG_NodeList *nl, int si,
         int lamp;
 
         if (p->si != si) continue;
+        /* [1021 D] Overhead mast arm + street-name plate. Falls through to the
+         * post light when the entry cannot hold it, so a busy span still gets
+         * its signal. */
+        if (p->mast && *nmesh + tg_mastarm_mesh_count(n->width) <= maxmesh) {
+            if (!tg_emit_mastarm(nl, si, p->side, p->gap, p->base_y,
+                                 p->cf, p->cb, blk, moff, nmesh))
+                return 0;
+            continue;
+        }
         if (*nmesh + TD5_TG_SIG_MESHES > maxmesh) { s_sig_drop_budget++; break; }
 
         lx = n->tz * p->side;
@@ -1512,12 +1550,14 @@ void tg_geo_signals_report(int nspans)
                   s_sig_drop_struct, s_sig_drop_side, s_sig_drop_street,
                   s_sig_drop_dup, s_sig_drop_budget,
                   td5_geo_signals_source());
+    tg_mastarm_report();      /* [1021 D] plates + mast-arm census */
     /* Where each head stands, so a capture (StartSpanOffset) can be aimed at
      * one without guessing. */
     {
         int i;
         for (i = 0; i < s_sigp_n; i++)
-            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side",
-                      i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right");
+            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side%s",
+                      i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right",
+                      s_sigp[i].mast ? " mast-arm" : "");
     }
 }

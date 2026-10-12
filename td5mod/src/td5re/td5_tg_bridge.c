@@ -2393,6 +2393,18 @@ static void tg_r12_median_gore_w(const TG_NodeList *nl, int si, int fi,
                      * tg_fork_br_wscale(fi, j) * 0.5;
     const double h1  = nl->v[si + 1].width
                      * tg_fork_br_wscale(fi, j + 1) * 0.5;
+    /* [ROUND 1021 A item 18] The gore frame is SIGNED: a left corridor's shift is positive and
+     * its inner edge is sh - h, so -(sh + h) came out NEGATIVE on every span of a left real fork
+     * (Diagonal 73 left, F=429): "a sliver" to the island gate, no island, the R17 rule paved the
+     * bare gore as road, and the median read as flush tarmac across the cross streets. A left
+     * real fork now answers the same positive width (the distance from the road centre to the
+     * corridor's inner edge) a right one does. Right forks and every synthetic fork keep the
+     * old expression exactly. TD5RE_GEO_LEFT_MEDIAN=0 restores it. */
+    if (tg_fork_left_real_median(fi)) {
+        *gw0 = sh0 - h0;
+        *gw1 = sh1 - h1;
+        return;
+    }
     *gw0 = -(sh0 + h0);
     *gw1 = -(sh1 + h1);
 }

@@ -1664,6 +1664,10 @@ static long s_geo_emitted, s_geo_shifted, s_geo_dropped_shift;
 static long s_geo_dropped_deg, s_geo_lm_real, s_geo_lm_fallback;
 static long s_geo_measured, s_geo_estimated, s_geo_wall_suppressed;
 static long s_geo_backrow_suppressed;
+/* [ROUND 1021 C items 4, 9] real footprints dropped / back-row boxes skipped for standing on a laid
+ * cross-street carriageway */
+static long s_geo_dropped_street, s_geo_backrow_street, s_geo_plaza_band;
+static long s_geo_awning_nowall;     /* [1021 C item 14] awnings refused: the wall they hang from is not built */
 /* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
  * new height sources, so an Overture A/B is a number in race.log. */
 static long s_geo_fp_overture, s_geo_h_overture, s_geo_h_raster;
@@ -1717,6 +1721,8 @@ static void tg_geo_city_build_begin(void)
     s_geo_dropped_deg = s_geo_lm_real = s_geo_lm_fallback = 0;
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
+    s_geo_dropped_street = s_geo_backrow_street = s_geo_plaza_band = 0;
+    s_geo_awning_nowall = 0;
     s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_dropped_slots = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
@@ -2019,7 +2025,36 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
         }
     }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
-    return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
+    if (td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A)) return 1;
+    /* [ROUND 1021 C item 11] Mariano, level091 L91 e65 s20 / e66 s25 building p19:STORE: "buildings on Plaza
+     * Moreno ... nothing may stand inside a plaza polygon/hull". MEASURED: the polygon test above is right
+     * (both walls are 15 to 17 m OUTSIDE the OSM park outline, 0 buildings of any class stand on a plaza
+     * lawn page 65), but the procedural wall is a FILLER, not a mapped building, and the ground between
+     * the route and the plaza outline reads as the plaza: the lawn, the ring road and the trees are all
+     * there and the filler stands in the middle of it. So the plaza gets a SURROUND: no procedural frontage
+     * or back row within TD5RE_GEO_PLAZA_BAND_M of the outline (20 m, 0 = old). Real footprints keep their
+     * own rule (a mapped building across a street from a square is real); only the generator's filler
+     * keeps clear. The band is tested by shifting the probe set 8 ways, i.e. an inflated outline. */
+    {
+        static double s_band = -1.0;
+        if (s_band < 0.0)
+            s_band = (double)td5_env_float("TD5RE_GEO_PLAZA_BAND_M", 20.0f, 0.0f, 100.0f)
+                   * td5_geob_units_per_m();
+        if (s_band > 0.0) {
+            double qx[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG], qz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
+            static const double dx8[8] = { 1.0, -1.0, 0.0, 0.0, 0.7071, -0.7071, 0.7071, -0.7071 };
+            static const double dz8[8] = { 0.0, 0.0, 1.0, -1.0, 0.7071, 0.7071, -0.7071, -0.7071 };
+            int d;
+            for (d = 0; d < 8; d++) {
+                for (k = 0; k < np; k++) { qx[k] = px[k] + dx8[d] * s_band; qz[k] = pz[k] + dz8[d] * s_band; }
+                if (td5_geob_points_in_plaza(si, qx, qz, np, TD5_GEOB_WIN_A)) {
+                    s_geo_plaza_band++;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 /* The FRONTAGE band: front plane to back plane of the street wall's own mass.
@@ -3101,6 +3136,32 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
         }
     }
 
+    /* [ROUND 1021 C item 4] Mariano, level091 L91 e7 s31 city p68+278: "building in the middle of the
+     * crossing road". A footprint standing on a LAID side street's carriageway is not a building there:
+     * the street is one the generator drew from the real way's skew and reach, and on a diagonal it
+     * sweeps across the frontage of spans well away from its own mouth, where nothing asked. MEASURED on
+     * level091 before this test: this footprint had 70% of its plan area on a p101 street quad (and 13
+     * more >= 25%). The same rule as the real-road test above, over the street the generator laid:
+     * the centroid, or a third of the sample points (vertices, edge midpoints, centroid), on it drops
+     * the footprint. TD5RE_GEO_BLD_STREET_CLEAR=0 keeps them. */
+    if (td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") && tg_network_built()) {
+        int on = 0, ns = 1;
+        const int c_on = tg_xstreet_covers(nl, si, side, cx, cz);
+        on += c_on;
+        for (k = 0; k < n_ring; k++) {
+            const int j = (k + 1) % n_ring;
+            on += tg_xstreet_covers(nl, si, side, rx[k], rz[k]);
+            on += tg_xstreet_covers(nl, si, side, (rx[k] + rx[j]) * 0.5, (rz[k] + rz[j]) * 0.5);
+            ns += 2;
+        }
+        if (c_on || on * 3 >= ns) {
+            tg_geo_lm_note(gb, si, "DROPPED on a cross street", 0.0);
+            s_geo_dropped_street++;
+            s_geo_dropped_deg++;
+            return 1;
+        }
+    }
+
     /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
      * outline's own (already nudged) ring, so it inherits the carriageway
      * clearance the building was given. */
@@ -3547,6 +3608,15 @@ static void tg_geo_city_report_impl(int from_stream)
               "exactly, which is what the bind assumes)",
               s_geo_wall_suppressed, s_geo_backrow_suppressed,
               s_geo_route_dev_max);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld real footprint(s) dropped and %ld back-row box(es) "
+              "skipped for standing on a laid cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
+              s_geo_dropped_street, s_geo_backrow_street,
+              td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld frontage / back-row probe(s) stood down only because they "
+              "fall within the plaza surround band (knob TD5RE_GEO_PLAZA_BAND_M); %ld awning pick(s) "
+              "swapped for a bin or bench because the wall they hang from is not built (knob "
+              "TD5RE_GEO_AWNING_WALL=%s)", s_geo_plaza_band, s_geo_awning_nowall,
+              td5_env_flag_on("TD5RE_GEO_AWNING_WALL") ? "on" : "off");
     /* [ROUND 1009 item 9] HEIGHT FIDELITY. The error is |built - tagged| for
      * the mass height, in metres, so "heights are not fully correct" has a
      * number on both sides of the fix instead of a claim on one. */
@@ -5146,6 +5216,24 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         }
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
+        /* [ROUND 1021 B item 5] a street that leaves the kerb at an angle sweeps along the road as
+         * it moves out, so at the slab's lateral it also covers part of the span NEXT to its mouth
+         * and this slab stood on its tarmac ("sidewalk in the middle of the crossing road"). Clip
+         * the slab to its free run, cut along the street's own edge (td5_tg_avenue.c, the same
+         * clip the far footway uses). Geo builds only; a span with no mouth within three spans is
+         * untouched and takes the normal slab below. */
+        if (tg_geo_city_active() && *h->nmesh < h->maxmesh) {
+            const TG_Node *na = &h->nl->v[h->si], *nc = &h->nl->v[h->si + 1];
+            const double ce0 = (e[0] - na->x) * na->tz - (e[2] - na->z) * na->tx;
+            const double ce1 = (e[3] - nc->x) * nc->tz - (e[5] - nc->z) * nc->tx;
+            const double cf0 = (e[0] + e[6] * sw_s - na->x) * na->tz - (e[2] + e[7] * sw_s - na->z) * na->tx;
+            const double cf1 = (e[3] + e[8] * sw_s - nc->x) * nc->tz - (e[5] + e[9] * sw_s - nc->z) * nc->tx;
+            const int cr = tg_av_main_pave_clip(h->nl, h->si, sg, ce0, ce1, cf0, cf1,
+                                                h->blk, h->moff, h->nmesh);
+            if (cr < 0) return 0;
+            if (cr != 1) continue;          /* 0: a street takes the whole span, 2: clipped slab already written */
+        }
+
         /* Top slab: near-in, near-out, far-out, far-in. */
         q[0] = e[0];               q[1]  = e[1] + TD5_TG_KERB_H; q[2]  = e[2];
         q[3] = e[0] + e[6] * sw_s; q[4]  = e[1] + TD5_TG_KERB_H; q[5]  = e[2] + e[7] * sw_s;
@@ -5437,6 +5525,7 @@ int tg_rail_kerbfence_here(int si, double sg)
     if (tg_span_in_bridge_run(si)) return 0;            /* no pavement on a deck */
     if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0))
         return 0;                                        /* not a facade biome   */
+    if (tg_geo_urban_rails_off(si)) return 0;             /* [1021 C item 12] kerb only */
     if (tg_city_crossing_here(si)) return 0;              /* pedestrians cross    */
     /* [R13 RAIL item 5b] CONSEQUENCE 2. A frontage gap breaks the railing
      * because a gap is a side-street MOUTH -- but no street opens onto a bridge
@@ -6162,6 +6251,27 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
             bz = n0->z + lz0 * (n0->width * 0.5 + set);
+            /* [ROUND 1021 C item 9] Mariano, level091 L91 e33 s38 city p383: "buildings in the middle of a
+             * crossing road". This row is aimed past the end of ITS OWN mouth's street, measured straight
+             * out from the kerb. A street leaving a neighbouring span at 45 degrees has moved sideways by
+             * the same distance, so that street's carriageway runs through this slot. Same test as the
+             * real footprints (tg_xstreet_covers): the box's centre, or two of its four base corners, on a
+             * laid carriageway skips the slot (the other rows and spans are untouched).
+             * TD5RE_GEO_BLD_STREET_CLEAR=0 keeps the box. */
+            if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") &&
+                tg_network_built()) {
+                const double dep = tg_facade_depth(b);
+                const double ex1 = bx + (n1->x + lx1 * (n1->width * 0.5 + set) - bx);
+                const double ez1 = bz + (n1->z + lz1 * (n1->width * 0.5 + set) - bz);
+                const int c_on = tg_xstreet_covers(h->nl, h->si, sg,
+                                     0.5 * (bx + ex1) + lx0 * dep * 0.5,
+                                     0.5 * (bz + ez1) + lz0 * dep * 0.5);
+                const int k_on = tg_xstreet_covers(h->nl, h->si, sg, bx, bz)
+                               + tg_xstreet_covers(h->nl, h->si, sg, ex1, ez1)
+                               + tg_xstreet_covers(h->nl, h->si, sg, bx + lx0 * dep, bz + lz0 * dep)
+                               + tg_xstreet_covers(h->nl, h->si, sg, ex1 + lx1 * dep, ez1 + lz1 * dep);
+                if (c_on || k_on >= 2) { s_geo_backrow_street++; continue; }
+            }
             by = tg_world_h(bx, bz);               /* [TOPOLOGY-FIRST] */
             if (by > n0->y + 400.0) by = n0->y + 400.0;
             ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
@@ -6766,6 +6876,25 @@ int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
     return ((hh >> 3) & 1u) ? IP_BIN : IP_BENCH;
 }
 
+/* [ROUND 1021 C item 14] Is a REAL footprint standing within ~10 m behind the kerb of span si on `side`?
+ * The wall an awning hangs from may be a real building (the generator's own wall stands down wherever
+ * one is), so the awning is kept when either wall exists. Probes four depths from just past the kerb. */
+static int tg_geo_awning_real_wall(const TG_NodeList *nl, int si, double side)
+{
+    static const double k_d[4] = { 700.0, 1800.0, 3000.0, 4400.0 };
+    const TG_Node *n = &nl->v[si];
+    const double sg = side > 0.0 ? 1.0 : -1.0;
+    const double lx = n->tz * sg, lz = -n->tx * sg;
+    double px[4], pz[4];
+    int k;
+    if (!s_geo_bld || si < 0 || si >= nl->count) return 0;
+    for (k = 0; k < 4; k++) {
+        px[k] = n->x + lx * (n->width * 0.5 + k_d[k]);
+        pz[k] = n->z + lz * (n->width * 0.5 + k_d[k]);
+    }
+    return td5_geob_points_in_building(si, px, pz, 4, TD5_GEOB_WIN_B);
+}
+
 /* [R13 PROPS item 5a] The awning's half of the same rule: an awning is a claim
  * that there is a SHOP FRONT immediately behind it, so it may only be picked
  * where a facade actually stands on this side. The frontage authority is asked
@@ -6774,14 +6903,29 @@ int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
  * carriageways for three rounds. Refused picks SUBSTITUTE, so the furniture
  * total and the r9-infra run list are unchanged, exactly as R12's sign does.
  * `side` follows tg_emit_fb_infra's convention: > 0 is the left kerb. */
-int tg_infra_awning_filter(int si, double side, int paved, int kind,
+int tg_infra_awning_filter(const TG_NodeList *nl, int si, double side, int paved, int kind,
                                   unsigned int hh)
 {
     if (kind != IP_CANOPY) return kind;
     if (!td5_env_flag_on("TD5RE_R13_AWNING")) { s_r13_awn_kept++; return kind; }
     if (tg_facade_stands(si) && tg_facade_built(si, side > 0.0 ? 1 : 0)) {
-        s_r13_awn_kept++;
-        return kind;
+        /* [ROUND 1021 C item 14] Mariano, level091 L91 e75 s16 prop p505: "floating in the air, seems like
+         * it's part of something else". p505 is the AWNING (TG_INFRA_CANOPY, page R9_INFRA 497 + 8): a canopy
+         * lifted 2.8 m off the ground, hung from a shop front. The test above asks the frontage PATTERN
+         * (tg_facade_stands / tg_facade_built); on a geo route the wall the pattern promises is often not
+         * built, because a real footprint, a real road, a plaza or the plaza surround stood it down in
+         * tg_side_geom, and the canopy then hangs from nothing. MEASURED on level091 before this: 11 of 24
+         * awnings had NO building wall within 4 m, this one none within 12 m. Ask the wall that is
+         * ACTUALLY emitted (tg_side_stands, the same authority the neighbouring flanks use); a refused
+         * pick substitutes exactly like the pattern refusal below, so the furniture total is unchanged.
+         * TD5RE_GEO_AWNING_WALL=0 restores the pattern-only test. */
+        if (td5_geo_loaded() && nl && td5_env_flag_on("TD5RE_GEO_AWNING_WALL") &&
+            !tg_side_stands(nl, si, side > 0.0 ? 1 : 0) && !tg_geo_awning_real_wall(nl, si, side)) {
+            s_geo_awning_nowall++;
+        } else {
+            s_r13_awn_kept++;
+            return kind;
+        }
     }
     s_r13_awn_ctx++;
     /* Bit 4 is untouched by every other decision on this span (see the sign

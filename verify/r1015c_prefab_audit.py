@@ -37,6 +37,13 @@ import tg_prefab_audit as PA                      # noqa: E402
 U = 411.0                                           # raw units per metre (same as the audit)
 WELD = 3.0
 TALL_M = 6.0        # a free wall edge at least this tall is a BUILDING wall that stops in the air
+# [ROUND 1021 C item 13] "this geometry should not be here, and it's incomplete" -- level091 e77 s8 v456 c42
+# = L23.lm02 (126 faces, 11.0 x 8.5 m footprint, 10.5 m high). The round 1015 rule (>= 2 tall free ends)
+# passed it because its dangling walls are LOW: 11 free ends, only ONE >= 6 m (6.1 m), but 50.0 m of wall
+# end hanging in the air in total. The second criterion is the SUM: a piece whose free wall ends add up to
+# DANGLE_H_M or more is open however low each end is. Calibrated on the table: lm02 50.0 (new), the already
+# parked lm08 50.3 / lm13 47.6 / lm17 59.5 / lm00 66.8, and every kept piece <= 29.2 (lm03).
+DANGLE_H_M = 45.0
 MERGE_T = 3.0
 
 
@@ -270,7 +277,7 @@ def main():
     pfs = PA.parse_header(a.header)
     cq, cidx, cex = load_close()
     rows = []
-    print("%-10s %5s %5s %5s %8s %8s" % ("prefab", "faces", "wallS", "dangl", "dangl_h", "freeEdge") + " %8s %3s %5s %7s" % ("maxFreeH", "cq", "tallD", "tallDh"))
+    print("%-10s %5s %5s %5s %8s %8s" % ("prefab", "faces", "wallS", "dangl", "dangl_h", "freeEdge") + " %8s %3s %5s %7s %s" % ("maxFreeH", "cq", "tallD", "tallDh", "verdict"))
     for i, pf in enumerate(pfs):
         if a.only >= 0 and i != a.only:
             continue
@@ -298,9 +305,10 @@ def main():
         rows.append(dict(i=i, name=pf["name"], faces=len(fl), close_quads=nclose, wall_segs=nseg, dangling=dang,
                          max_free_edge_m=round(maxh, 1), tall_dangling=tall, tall_dangling_h_m=round(tallh, 1), excluded=(cex[i] if i < len(cex) else 0),
                          dangling_h_m=round(dh, 1), free_edge_m=round(ln, 1),
-                         odd_pct=round(pct, 2), height_m=round(pf["height"] / U, 1),
+                         odd_pct=round(pct, 2), open_verdict=("OPEN" if (tall >= 2 or dh >= DANGLE_H_M) else "ok"), height_m=round(pf["height"] / U, 1),
                          fp_m=[round(pf["fx"] / U, 1), round(pf["fz"] / U, 1)]))
-        print("%-10s %5d %5d %5d %8.1f %8.1f %8.1f %3d %5d %7.1f" % (pf["name"], len(fl), nseg, dang, dh, ln, maxh, nclose, tall, tallh), flush=True)
+        verdict = "OPEN" if (tall >= 2 or dh >= DANGLE_H_M) else "ok"
+        print("%-10s %5d %5d %5d %8.1f %8.1f %8.1f %3d %5d %7.1f %s" % (pf["name"], len(fl), nseg, dang, dh, ln, maxh, nclose, tall, tallh, verdict), flush=True)
         if a.png:
             render(pf, fl, [((e[0], y0, e[1]), (e[0], y0 + h, e[1])) for (e, y0, h) in wfree],
                    os.path.join(a.png, "prefab_%02d.png" % i), dang)

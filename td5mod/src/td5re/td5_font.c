@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 
 #include "td5_platform.h"   /* td5_plat_render_upload_texture, TD5_LOG_* */
 #include "td5_font.h"
@@ -491,4 +492,180 @@ void td5_font_flush_uploads(void)
     if (!s_ok || !s_dirty) return;
     td5_plat_render_upload_texture(ATLAS_PAGE, s_atlas, ATLAS_W, ATLAS_H, 2);
     s_dirty = 0;
+}
+
+/* ---- [ROUND 1021 D] generation-time text -> coverage bitmap ---------------- *
+ *
+ * The runtime glyph cache above rasterises into a GPU atlas and needs the
+ * platform renderer up. A street-name plate is baked into a TEXTURES.DAT page
+ * by the track generator, which also runs headless (geo autobuild, the tour
+ * harness), so this is a self-contained path: its own face, its own scratch,
+ * no atlas, no upload, no platform call. The same stb_truetype outlines, so
+ * the plates and the HUD agree about what an accented capital looks like.
+ *
+ * Face order is a bold neo-grotesque first (Arial Bold, the closest thing on a
+ * Windows box to the Helvetica Bold the real La Plata plates use), then the
+ * HUD and menu faces so a machine without it still draws SOMETHING. Output is
+ * deterministic for a given face, and a missing face just returns 0 so the
+ * caller keeps the old unnamed traffic light. */
+static int            s_plate_tried = 0, s_plate_ok = 0;
+static stbtt_fontinfo s_plate;
+static unsigned char *s_plate_buf = NULL;
+static float          s_plate_cap = 1.0f;
+
+static int plate_face(void)
+{
+    static const char *const k_face[3] = { FALLBACK_TTF, HUD_TTF, MENU_TTF };
+    int i;
+    if (s_plate_tried) return s_plate_ok;
+    s_plate_tried = 1;
+    for (i = 0; i < 3; i++) {
+        long len = 0;
+        unsigned char *b = read_file(k_face[i], &len);
+        if (b && stbtt_InitFont(&s_plate, b, stbtt_GetFontOffsetForIndex(b, 0))) {
+            s_plate_buf = b;
+            s_plate_cap = cap_units(&s_plate);
+            s_plate_ok  = 1;
+            TD5_LOG_I(LOG_TAG, "plate font: %s (cap_units=%.0f)", k_face[i],
+                      s_plate_cap);
+            return 1;
+        }
+        free(b);
+    }
+    TD5_LOG_W(LOG_TAG, "plate font: no TTF found -- street-name plates disabled");
+    return 0;
+}
+
+/* Decode one UTF-8 codepoint; malformed bytes come back as '?' and advance 1. */
+static int plate_utf8(const char *s, int *adv)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    if (p[0] < 0x80) { *adv = 1; return p[0]; }
+    if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+        *adv = 2; return ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+    }
+    if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+        *adv = 3; return ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    }
+    *adv = 1;
+    return '?';
+}
+
+/* Line width in cap-heights (so it scales linearly with the chosen size). */
+static float plate_line_caps(const char *s)
+{
+    float w = 0.0f;
+    int adv, cp, prev = 0;
+    while (*s) {
+        int a = 0, l = 0;
+        cp = plate_utf8(s, &adv);
+        s += adv;
+        if (cp > 0xFFFF) cp = '?';
+        stbtt_GetCodepointHMetrics(&s_plate, cp, &a, &l);
+        w += (float)a;
+        if (prev) w += (float)stbtt_GetCodepointKernAdvance(&s_plate, prev, cp);
+        prev = cp;
+    }
+    return w / s_plate_cap;
+}
+
+float td5_font_plate_fit_cap(const char *line, int w, int pad)
+{
+    float caps;
+    if (!line || !line[0] || !plate_face()) return 0.0f;
+    caps = plate_line_caps(line);
+    if (caps <= 0.0f) return 0.0f;
+    return (float)(w - 2 * pad) / caps;
+}
+
+/* Does the line carry an accented CAPITAL (U+00C0..U+00DE)? Those stand about
+ * 28% above the cap line, so the block needs headroom a plain line does not. */
+static int plate_has_tall(const char *s)
+{
+    int adv;
+    while (*s) {
+        const int cp = plate_utf8(s, &adv);
+        s += adv;
+        if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return 1;
+    }
+    return 0;
+}
+
+int td5_font_plate_raster(const char *line1, const char *line2, int w, int h,
+                          int pad, unsigned char *cov, float *cap_used)
+{
+    const char *line[2];
+    int nlines, k, tall = 0;
+    float cap, capmax, gap, block, top;
+
+    if (!cov || w <= 0 || h <= 0 || !line1 || !line1[0] || !plate_face())
+        return 0;
+    memset(cov, 0, (size_t)w * (size_t)h);
+    line[0] = line1;
+    line[1] = (line2 && line2[0]) ? line2 : NULL;
+    nlines  = line[1] ? 2 : 1;
+
+    for (k = 0; k < nlines; k++) tall |= plate_has_tall(line[k]);
+
+    /* One cap size for every line, so a two-line plate reads as one block. */
+    cap = 1e9f;
+    for (k = 0; k < nlines; k++) {
+        const float f = td5_font_plate_fit_cap(line[k], w, pad);
+        if (f < cap) cap = f;
+    }
+    capmax = (float)(h - 2 * pad);
+    if (nlines == 2) capmax = capmax / 2.4f;      /* cap + 0.4 gap + cap */
+    if (tall)        capmax = capmax / 1.28f;     /* headroom for the accent */
+    if (cap > capmax) cap = capmax;
+    if (cap < 3.0f)   cap = 3.0f;
+    if (cap_used) *cap_used = cap;
+    gap   = (nlines == 2) ? cap * 0.4f : 0.0f;
+    block = cap * (float)nlines + gap + (tall ? cap * 0.28f : 0.0f);
+    top   = ((float)h - block) * 0.5f + (tall ? cap * 0.28f : 0.0f);
+
+    for (k = 0; k < nlines; k++) {
+        const float scale = cap / s_plate_cap;
+        const float base  = top + cap * (float)(k + 1) + gap * (float)k;
+        const char *s = line[k];
+        float pen = ((float)w - plate_line_caps(s) * cap) * 0.5f;
+        int adv, cp, prev = 0;
+
+        while (*s) {
+            int ix0, iy0, ix1, iy1, gw, gh, a = 0, l = 0;
+            int pen_i;
+            float shift;
+
+            cp = plate_utf8(s, &adv);
+            s += adv;
+            if (cp > 0xFFFF) cp = '?';
+            if (prev) pen += scale * (float)stbtt_GetCodepointKernAdvance(&s_plate, prev, cp);
+            prev = cp;
+            pen_i = (int)floorf(pen);
+            shift = pen - (float)pen_i;
+            stbtt_GetCodepointHMetrics(&s_plate, cp, &a, &l);
+            stbtt_GetCodepointBitmapBoxSubpixel(&s_plate, cp, scale, scale, shift, 0.0f,
+                                                &ix0, &iy0, &ix1, &iy1);
+            gw = ix1 - ix0; gh = iy1 - iy0;
+            if (gw > 0 && gh > 0 && gw <= 64 && gh <= 64) {
+                unsigned char tmp[64 * 64];
+                int x, y;
+                memset(tmp, 0, (size_t)gw * (size_t)gh);
+                stbtt_MakeCodepointBitmapSubpixel(&s_plate, tmp, gw, gh, gw, scale, scale,
+                                                  shift, 0.0f, cp);
+                for (y = 0; y < gh; y++) {
+                    const int dy = (int)floorf(base) + iy0 + y;
+                    if (dy < 0 || dy >= h) continue;
+                    for (x = 0; x < gw; x++) {
+                        const int dx = pen_i + ix0 + x;
+                        unsigned char *d;
+                        if (dx < 0 || dx >= w) continue;
+                        d = &cov[(size_t)dy * (size_t)w + (size_t)dx];
+                        if (tmp[y * gw + x] > *d) *d = tmp[y * gw + x];
+                    }
+                }
+            }
+            pen += (float)a * scale;
+        }
+    }
+    return 1;
 }

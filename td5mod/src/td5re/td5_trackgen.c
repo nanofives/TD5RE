@@ -1225,10 +1225,20 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
              * place means a race that starts and ends with nothing marking
              * either. It is the one "decorative" row that is also the finish. */
             { TD5_TG_ROLL_BANNERS,        1 },
+            /* [ROUND 1021 A item 1] "the median is invisible / the same height as the main
+             * road" (La Plata, span 50, a real fork's window). AVENUES (the raised median
+             * island, TD5RE_AUTOTRACK_AVENUE_DIVIDER) rolled OFF at the default seed
+             * 99991 (k_tgr_w_mostly_on = 25 % OFF): no island on either real fork, and
+             * R17 paved the bare gore as road, so the median was a flush strip 70 units
+             * BELOW the road page. Whether a real avenue has a median is the map's call
+             * (AVENUES.JSON), never a seed's: held ON like the rows above.
+             * TD5RE_GEO_HOLD_AVENUE=0 restores the roll. */
+            { TD5_TG_ROLL_AVENUE,         1 },
         };
         size_t k;
         for (k = 0; k < sizeof(k_geo_hold) / sizeof(k_geo_hold[0]); k++) {
             const int id = k_geo_hold[k].id, want = k_geo_hold[k].want;
+            if (id == TD5_TG_ROLL_AVENUE && !td5_env_flag_on("TD5RE_GEO_HOLD_AVENUE")) continue;
             if (out->pinned[id] || out->choice[id] == want) continue;
             out->choice [id] = (unsigned char)want;
             out->value  [id] = k_tg_rolls[id].vals[want];
