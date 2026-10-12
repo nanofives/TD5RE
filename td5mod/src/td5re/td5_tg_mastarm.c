@@ -99,6 +99,9 @@ static int           s_ncell;
 static unsigned char s_pg[TD5_TG_MASTARM_PAGES_MAX][TD5_TG_TEX_TEXELS];
 static int           s_pg_rows[TD5_TG_MASTARM_PAGES_MAX];
 static int           s_npg;
+/* The countdown display page: grey ramp, one 64x64 dot-matrix canvas. */
+static unsigned char s_dsp[TD5_TG_TEX_TEXELS];
+static int           s_have_dsp;
 static PlSig        *s_sp;
 static int           s_nsig;
 
@@ -268,7 +271,7 @@ static int pl_alloc(int rows, int *row0)
             return p;
         }
     }
-    if (s_npg >= TD5_TG_MASTARM_PAGES_MAX) return -1;
+    if (s_npg >= TD5_TG_MASTARM_PAGES_MAX - 1) return -1;   /* one slot is the display */
     p = s_npg++;
     memset(s_pg[p], 0, sizeof s_pg[p]);
     s_pg_rows[p] = rows;
@@ -364,6 +367,7 @@ static void pl_reset(int plan_too)
     s_nsig = 0;
     s_ncell = 0;
     s_npg = 0;
+    s_have_dsp = 0;
     memset(s_pg_rows, 0, sizeof s_pg_rows);
     s_ma_sigs = s_ma_named = s_ma_cross = s_ma_cells = s_ma_two_line = 0;
     s_ma_abbrev = s_ma_nopage = s_ma_noface = 0;
@@ -436,30 +440,61 @@ static void pl_build(int verbose)
     }
 }
 
+/* The countdown display: a dot-matrix "25" on a 64x64 canvas, grey ramp (the
+ * billboard that carries it is additive and takes its colour from the lamp
+ * phase, so white here becomes green there). The quad is 0.40 x 0.26 m, so the
+ * glyphs are rasterised into a 64x42 box (the quad's aspect) and stretched to
+ * the canvas rows; a 4-texel dot pitch with a 3x3 core gives the matrix look.
+ * STATIC digits: the renderer can swap a lamp's colour per frame from the wall
+ * clock but not a texture, so the number does not count down. */
+static void pl_build_display(void)
+{
+    unsigned char cov[64 * 42];
+    int x, y;
+    memset(s_dsp, 0, sizeof s_dsp);
+    s_have_dsp = 0;
+    if (!td5_font_plate_raster("25", NULL, 64, 42, 2, cov, NULL)) return;
+    for (y = 0; y < 64; y++) {
+        for (x = 0; x < 64; x++) {
+            const int cx = (x / 4) * 4 + 2, cy = (y / 4) * 4 + 2;
+            const int sy = cy * 42 / 64;
+            const int core = (x % 4) < 3 && (y % 4) < 3;
+            if (core && cov[sy * 64 + cx] > 110)
+                s_dsp[y * TD5_TG_TEX_DIM + x] = 15;
+        }
+    }
+    s_have_dsp = 1;
+}
+
 void tg_mastarm_prepare(void)
 {
     pl_build(1);
+    if (s_ncell > 0) pl_build_display();
 }
 
 int tg_mastarm_plate_pages(void)
 {
     pl_build(0);
-    return s_npg;
+    if (s_ncell > 0) pl_build_display();
+    return s_npg + (s_have_dsp ? 1 : 0);
 }
 
 void tg_mastarm_emit_plate_page(TG_Buf *out, int p)
 {
     int i;
+    const int is_dsp = (p == s_npg);                    /* the page after the plates */
     tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
     tg_put_u8(out, 0);                                  /* opaque */
     tg_put_u32(out, TD5_TG_PAL_COUNT);
     for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
         unsigned char b, g, r;
-        pl_pal(i, &b, &g, &r);
+        if (is_dsp) b = g = r = (unsigned char)(i * 17);
+        else        pl_pal(i, &b, &g, &r);
         tg_put_u8(out, b); tg_put_u8(out, g); tg_put_u8(out, r);
     }
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++)
-        tg_put_u8(out, (p >= 0 && p < s_npg) ? s_pg[p][i] : 0u);
+        tg_put_u8(out, is_dsp ? s_dsp[i]
+                              : ((p >= 0 && p < s_npg) ? s_pg[p][i] : 0u));
 }
 
 /* ------------------------------------------------------------ the arm ---- */
@@ -506,7 +541,11 @@ int tg_mastarm_plan(int sig, double carriageway_width, int near_gantry,
 int tg_mastarm_mesh_count(double carriageway_width)
 {
     const int nh = (carriageway_width * 0.5 >= 3.8 * PL_UPM) ? 2 : 1;
-    return 2 + nh * (2 + TD5_GEO_SIGNAL_PHASES) + 1;
+    /* pole + arm, heads (housing, backplate, lamps), the cross-direction head
+     * (housing + lamps), the countdown (box + lit face), two plate brackets,
+     * the plate */
+    return 2 + nh * (2 + TD5_GEO_SIGNAL_PHASES) + (1 + TD5_GEO_SIGNAL_PHASES)
+             + 2 + 2 + 1;
 }
 
 /* One plate quad pair. `u0` is the inboard distance of the plate's near edge
@@ -635,11 +674,75 @@ int tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap,
         }
     }
 
-    /* PLATE, hung from the arm beside the pole, both faces named. */
-    moff[(*nmesh)++] = blk->len;
-    if (!ma_emit_plate(blk, pole, l, t, side, plate_u0,
-                       arm_y - MA_ARM_HT - M_(0.02), cf, cb))
-        return 0;
+    /* CROSS-DIRECTION HEAD, turned a quarter and mounted at the arm's tip so
+     * traffic on the cross street sees it. The lamps use the same phase tags as
+     * the main heads, so it shows the SAME state, not the opposite one: the
+     * renderer colours a lamp from its tag alone and there is no tag for "the
+     * other direction". Cosmetic. */
+    {
+        const double u  = reach - M_(0.22);
+        const double hx = pole[0] - l[0] * u;
+        const double hz = pole[1] - l[1] * u;
+        const double head_y = arm_y - MA_ARM_HT + M_(0.02) - MA_HEAD_H * 0.5;
+        const double off    = MA_HEAD_D * 0.5 + MA_LAMP_R * 0.35;
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_box_mesh(blk, hx, head_y, hz,
+                              MA_HEAD_W * 0.5, MA_HEAD_H * 0.5, MA_HEAD_D * 0.5,
+                              l[0], l[1], TD5_TG_PAGE_R11_SIGN_POST, MA_HEAD_W,
+                              0xFF242428u))
+            return 0;
+        for (lamp = 0; lamp < TD5_GEO_SIGNAL_PHASES; lamp++) {
+            const double ly = head_y + (1.0 - (double)lamp) * MA_LAMP_DY;
+            moff[(*nmesh)++] = blk->len;
+            if (!tg_emit_billboard_mesh(blk, hx - l[0] * off, ly - MA_LAMP_R,
+                                        hz - l[1] * off, MA_LAMP_R,
+                                        MA_LAMP_R * 2.0, tg_prop_slot(PP_LAMP),
+                                        TD5_MESH_TAG_SIGNAL_LAMP + lamp))
+                return 0;
+        }
+    }
+
+    /* COUNTDOWN DISPLAY on the arm just past the last facing head: a black box
+     * with a green dot-matrix face. The face is the additive lamp billboard
+     * tagged GREEN, so it is lit while the signal is green and dim otherwise;
+     * the digits themselves are static (see pl_build_display). */
+    if (s_have_dsp) {
+        const double u  = gap + hw * ((double)(nh - 1) + 0.5) / (double)nh + M_(0.62);
+        const double dx = pole[0] - l[0] * u;
+        const double dz = pole[1] - l[1] * u;
+        const double dh = M_(0.26);
+        const double dy = arm_y - MA_ARM_HT + M_(0.02) - dh * 0.5 - M_(0.06);
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_box_mesh(blk, dx, dy, dz, M_(0.24), dh * 0.5 + M_(0.03), M_(0.08),
+                              t[0], t[1], TD5_TG_PAGE_R11_SIGN_POST, MA_HEAD_W,
+                              0xFF161618u))
+            return 0;
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_billboard_mesh(blk, dx - t[0] * M_(0.10), dy - dh * 0.5,
+                                    dz - t[1] * M_(0.10), M_(0.20), dh,
+                                    TD5_TG_PAGE_COUNT + s_npg,
+                                    TD5_MESH_TAG_SIGNAL_LAMP + 2))
+            return 0;
+    }
+
+    /* PLATE, hung BELOW the arm from two short brackets (as in the photo),
+     * both faces named. Its bottom stays above the 4.4 m overhead line. */
+    {
+        const double drop  = M_(0.24);
+        const double ytop  = arm_y - MA_ARM_HT - drop;
+        const double bu[2] = { plate_u0 + M_(0.18), plate_u0 + MA_PLATE_W - M_(0.18) };
+        for (k = 0; k < 2; k++) {
+            moff[(*nmesh)++] = blk->len;
+            if (!tg_emit_box_mesh(blk, pole[0] - l[0] * bu[k], ytop + drop * 0.5 + M_(0.02),
+                                  pole[1] - l[1] * bu[k], M_(0.012), drop * 0.5 + M_(0.02),
+                                  M_(0.012), t[0], t[1], TD5_TG_PAGE_R11_SIGN_POST, 1.0e7,
+                                  0xFF606064u))
+                return 0;
+        }
+        moff[(*nmesh)++] = blk->len;
+        if (!ma_emit_plate(blk, pole, l, t, side, plate_u0, ytop, cf, cb))
+            return 0;
+    }
     return 1;
 }
 

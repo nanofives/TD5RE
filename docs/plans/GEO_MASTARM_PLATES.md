@@ -19,8 +19,15 @@ side, how far out) the pole now carries:
 * **Heads** (1 for a half-carriageway under 3.8 m, else 2) over the lane centres of the pole-side
   half, each with a dark backplate and the three lamp billboards. The lamps carry the same
   `TD5_MESH_TAG_SIGNAL_LAMP + phase` tags, so the renderer's red/amber/green cycle is unchanged.
-* **Plate**, hung from the arm beside the pole, two faces: the **cross street** faces the driver who
-  approaches, the **street you are driving on** is on the back.
+* **Plate**, hung BELOW the arm from two short brackets (as in the photo), two faces: the **cross
+  street** faces the driver who approaches, the **street you are driving on** is on the back.
+* **Cross-direction head** at the arm tip, turned a quarter. Its lamps use the same phase tags as the
+  main heads, so it shows the SAME state, not the opposite (the renderer colours a lamp from its tag
+  alone; there is no tag for "the other direction").
+* **Countdown display** on the arm next to the facing head: black box, dot-matrix "25". The face is the
+  additive lamp billboard tagged GREEN, so it is bright while the signal is green and dim otherwise.
+  The digits are STATIC: the renderer can recolour a lamp per frame from the wall clock but cannot swap
+  a texture, so a real countdown would need a renderer hook (digit pages + remaining-time lookup).
 
 Everything over the carriageway is above `TD5_TG_GUARD_OVERHEAD` (4.4 m): head bottom 4.7 m, plate
 bottom 5.0 m, arm 5.7 m. The pole is the old footprint, so the on-road guard judges it exactly as
@@ -82,7 +89,7 @@ is the measured answer for both a left-side and a right-side pole (frames
   ways); `hud_minimap_streets` draws the name once per named road at the segment nearest the minimap
   centre, rotated with the map, skipped when the label would overlap the route or an earlier label.
   ~half a day; text at the minimap's 170 px is 7-8 px, so only the avenues are worth labelling.
-* Plate hangers (two thin rods) and a countdown timer box like the photo.
+* A real counting-down display (see above) and an opposite-phase cross head.
 * Heads over the far (oncoming) half for the pole-on-the-oncoming-side case: today both are over the
   pole-side half, which for a left pole is the oncoming half (cosmetic, nothing obeys a light).
 * Street-name plate at junctions with no OSM signal node (corner nameplates on a plain post).
