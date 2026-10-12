@@ -762,6 +762,7 @@ static long s_geop_xwall_park;
 /* [ROUND 1015 C item 14] ... and refused because NO real building stands behind
  * or beside them. */
 static long s_geop_xwall_unbacked;
+static long s_geop_flank_street;      /* [ROUND 1021 C item 9] flank blocks on a laid carriageway */
 static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
 
 int tg_block_is_park(int si, int left)
@@ -1086,6 +1087,23 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
          * than the uniform wall it replaced. Stone/brick reads correctly there. */
         page = vary ? tg_facade_page_class(bh, TD5_TG_FACADE_TALL_ROWS - 1)
                     : tg_facade_page_class(bh, rows);
+        /* [ROUND 1021 C item 9] Mariano, level091 L91 e33 s38 city p383 (this is the emitter, found by
+         * tracing the box's return address): "buildings in the middle of a crossing road". On a divided
+         * avenue's fork span this backdrop block stands behind the corridor; a side street leaving a
+         * neighbouring span at 45 degrees has moved sideways by its depth and its carriageway runs
+         * through the slot. MEASURED: 97% of this box on a cobble street quad. Same test as the real
+         * footprints (tg_xstreet_covers): centre, or two of the four base corners, on a laid carriageway
+         * skips the block. TD5RE_GEO_BLD_STREET_CLEAR=0 keeps it. */
+        if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR")) {
+            const double ex1 = bx + ax, ez1 = bz + az;
+            const int c_on = tg_xstreet_covers(nl, si, side,
+                                 bx + 0.5 * ax + lx0 * depth * 0.5, bz + 0.5 * az + lz0 * depth * 0.5);
+            const int k_on = tg_xstreet_covers(nl, si, side, bx, bz)
+                           + tg_xstreet_covers(nl, si, side, ex1, ez1)
+                           + tg_xstreet_covers(nl, si, side, bx + lx0 * depth, bz + lz0 * depth)
+                           + tg_xstreet_covers(nl, si, side, ex1 + lx1 * depth, ez1 + lz1 * depth);
+            if (c_on || k_on >= 2) { s_geop_flank_street++; return 1; }
+        }
         if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                 bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
                                 depth, H, cols, rows, page, 1, si))
@@ -2832,6 +2850,9 @@ static void tg_geo_plaza_report_impl(int from_stream)
               td5_env_flag_on("TD5RE_GEO_XWALL_PARK") ? "on" : "off",
               s_geop_xwall_unbacked,
               td5_env_flag_on("TD5RE_GEO_XWALL_BACKED") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1021 C item 9] %ld flank / gap-infill block(s) skipped for standing on a laid "
+              "cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
+              s_geop_flank_street, td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1014 E] park lawn: %ld sub-triangle(s) at "
               "refinement level <= %ld (knob TD5RE_GEO_LAWN_SUBDIV=%s), ground "
               "uncapped (TD5RE_GEO_PARK_UNCAP=%s); trees: %ld planted of %ld "
@@ -3298,6 +3319,23 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                     s_geop_xwall_unbacked++;
                     continue;
                 }
+                /* [ROUND 1021 C item 9] Mariano, level091 L91 e33 s38 city p383 (8 quads, 19 m tall, 3.8 x
+                 * 7 m): "buildings in the middle of a crossing road". This is one of these flank blocks. It
+                 * is placed beside ITS street, but a street leaving a NEIGHBOURING span at 45 degrees has
+                 * moved sideways by its depth and its carriageway runs through this slot. Same test as the
+                 * real footprints (tg_xstreet_covers): centre, or two of the four base corners, on a laid
+                 * carriageway skips the block. TD5RE_GEO_BLD_STREET_CLEAR=0 keeps it. */
+                if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR")) {
+                    const double fx = ox * TD5_TG_R8_FLANK_LEN, fz = oz * TD5_TG_R8_FLANK_LEN;
+                    const int c_on = tg_xstreet_covers(h->nl, h->si, sg,
+                                         bxp + 0.5 * fx + bx * depth * 0.5,
+                                         bzp + 0.5 * fz + bz * depth * 0.5);
+                    const int k_on = tg_xstreet_covers(h->nl, h->si, sg, bxp, bzp)
+                                   + tg_xstreet_covers(h->nl, h->si, sg, bxp + fx, bzp + fz)
+                                   + tg_xstreet_covers(h->nl, h->si, sg, bxp + bx * depth, bzp + bz * depth)
+                                   + tg_xstreet_covers(h->nl, h->si, sg, bxp + fx + bx * depth, bzp + fz + bz * depth);
+                    if (c_on || k_on >= 2) { s_geop_flank_street++; continue; }
+                }
                 if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                         bxp, byp, bzp,
                                         ox * TD5_TG_R8_FLANK_LEN, 0.0,
@@ -3530,6 +3568,23 @@ static int tg_r13_emit_gap_infill(const TG_FBHook *h)
         ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
         ay = (n1->y - tg_xstreet_drop(set)) - by;
         az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+        /* [ROUND 1021 C item 9] Mariano, level091 L91 e33 s38 city p383: "buildings in the middle of a
+         * crossing road". The R15 refusal above asks about the street of THIS span only. A street that
+         * leaves a NEIGHBOURING span at 45 degrees has moved sideways by its depth, so its carriageway
+         * runs through this box (MEASURED on level091: 97% of this box's plan on a cobble street quad, 9
+         * such boxes of 24.3 m2). tg_xstreet_covers walks the mouths within 24 spans on this side:
+         * centre, or two of the four base corners, on a laid carriageway refuses the box, the same
+         * answer as above. TD5RE_GEO_BLD_STREET_CLEAR=0 keeps it. */
+        if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR")) {
+            const double ex1 = bx + ax, ez1 = bz + az;
+            const int c_on = tg_xstreet_covers(h->nl, h->si, sg,
+                                 bx + 0.5 * ax + lx0 * depth * 0.5, bz + 0.5 * az + lz0 * depth * 0.5);
+            const int k_on = tg_xstreet_covers(h->nl, h->si, sg, bx, bz)
+                           + tg_xstreet_covers(h->nl, h->si, sg, ex1, ez1)
+                           + tg_xstreet_covers(h->nl, h->si, sg, bx + lx0 * depth, bz + lz0 * depth)
+                           + tg_xstreet_covers(h->nl, h->si, sg, ex1 + lx1 * depth, ez1 + lz1 * depth);
+            if (c_on || k_on >= 2) { s_geop_flank_street++; continue; }
+        }
         flen = sqrt(ax * ax + az * az);
         cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
         page = tg_facade_page_class(rh, rows);
@@ -4464,6 +4519,7 @@ void tg_r9_city_reset(void)
     s_geop_skirt_park_n = 0;
     s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
     s_geop_xwall_unbacked = 0;
+    s_geop_flank_street = 0;
     s_geop_ring_areas = s_geop_real_ways = s_geop_real_segs = 0;
     s_geop_real_buried = s_geop_real_capped = 0;
 }

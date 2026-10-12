@@ -5597,7 +5597,7 @@ int tg_infra_menu(const TG_Biome *b, int paved, int *out);
  * which needs the span and the kerb it is being placed on. */
 int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
                          int paved, int kind, unsigned int hh);
-int tg_infra_awning_filter(int si, double side, int paved, int kind, unsigned int hh);
+int tg_infra_awning_filter(const TG_NodeList *nl, int si, double side, int paved, int kind, unsigned int hh);
 /* ===================== [R9 INFRA] PONDS =====================
  * Asked for in ROUND 5 and unbuilt for four rounds. Small standing water away
  * from the road in the green biomes.

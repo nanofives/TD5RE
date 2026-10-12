@@ -55,7 +55,7 @@ def main():
     for m in meshes:
         # the carriageway quads of tg_city_emit_crossstreet: kind city (or cross) on the
         # R4_CROSS lane-marking page (101), cut into span-length pieces by the follow mode
-        if m["kind"] not in ("city", "cross") or m["cmds"][0][0] != 101:
+        if m["kind"] not in ("city", "cross") or m["cmds"][0][0] not in (101, 40, 41, 42, 43):
             continue
         for typ, page, vs in A.faces(b, m):
             if len(vs) != 4:
@@ -93,8 +93,14 @@ def main():
     out = []
     tot = 0
     allr = []
+    def is_box(m):
+        """real extrusion, or a street flank / back-row box: kind city, ONE command on a wall-variant page"""
+        if A.classify(m) == "real":
+            return True
+        return (m["kind"] == "city" and len(m["cmds"]) == 1 and 273 <= m["cmds"][0][0] <= 392
+                and m["nv"] >= 24 and m["cmds"][0][1] == 0)
     for m in meshes:
-        if A.classify(m) != "real":
+        if not is_box(m):
             continue
         tot += 1
         vs = A.verts(b, m)
@@ -165,7 +171,7 @@ def main():
     n_any = sum(1 for r in allr if r[2] > 0.0)
     n_pave = sum(1 for r in allr if r[3] >= a.share)
     print("pavement-arm overlap >= %.2f of footprint: %d meshes; any street overlap: %d meshes" % (a.share, n_pave, n_any))
-    print("%d cross-street carriageway quads; %d real building meshes; %d cover >= %.2f of their footprint with a street"
+    print("%d cross-street carriageway quads; %d real + flank/back-row box meshes; %d cover >= %.2f of their footprint with a street"
           % (nq, tot, len(out), a.share))
     for o in out[:60]:
         print("  e%d s%d street=%.2f pavement=%.2f at (%d,%d) area %.1f m2" % o)

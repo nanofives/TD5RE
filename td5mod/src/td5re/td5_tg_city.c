@@ -1664,9 +1664,10 @@ static long s_geo_emitted, s_geo_shifted, s_geo_dropped_shift;
 static long s_geo_dropped_deg, s_geo_lm_real, s_geo_lm_fallback;
 static long s_geo_measured, s_geo_estimated, s_geo_wall_suppressed;
 static long s_geo_backrow_suppressed;
-/* [ROUND 1021 C items 4, 9, 14] real footprints dropped / back-row boxes skipped for standing on a laid
- * cross-street carriageway, and ground-standing billboards lowered onto the heightfield */
-static long s_geo_dropped_street, s_geo_backrow_street, s_geo_prop_grounded;
+/* [ROUND 1021 C items 4, 9] real footprints dropped / back-row boxes skipped for standing on a laid
+ * cross-street carriageway */
+static long s_geo_dropped_street, s_geo_backrow_street, s_geo_plaza_band;
+static long s_geo_awning_nowall;     /* [1021 C item 14] awnings refused: the wall they hang from is not built */
 /* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
  * new height sources, so an Overture A/B is a number in race.log. */
 static long s_geo_fp_overture, s_geo_h_overture, s_geo_h_raster;
@@ -1720,7 +1721,8 @@ static void tg_geo_city_build_begin(void)
     s_geo_dropped_deg = s_geo_lm_real = s_geo_lm_fallback = 0;
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
-    s_geo_dropped_street = s_geo_backrow_street = s_geo_prop_grounded = 0;
+    s_geo_dropped_street = s_geo_backrow_street = s_geo_plaza_band = 0;
+    s_geo_awning_nowall = 0;
     s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_dropped_slots = 0;
     s_geo_roof_shaped = s_geo_roof_concave = s_geo_parts = 0;
@@ -2023,7 +2025,35 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
         }
     }
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
-    return td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A);
+    if (td5_geob_points_in_plaza(si, px, pz, np, TD5_GEOB_WIN_A)) return 1;
+    /* [ROUND 1021 C item 11] Mariano, level091 L91 e65 s20 / e66 s25 building p19:STORE: "buildings on Plaza
+     * Moreno ... nothing may stand inside a plaza polygon/hull". MEASURED: the polygon test above is right
+     * (both walls are 15 to 17 m OUTSIDE the OSM park outline, 0 buildings of any class stand on a plaza
+     * lawn page 65), but the procedural wall is a FILLER, not a mapped building, and the ground between
+     * the route and the plaza outline reads as the plaza: the lawn, the ring road and the trees are all
+     * there and the filler stands in the middle of it. So the plaza gets a SURROUND: no procedural frontage
+     * or back row within TD5RE_GEO_PLAZA_BAND_M of the outline (20 m, 0 = old). Real footprints keep their
+     * own rule (a mapped building across a street from a square is real); only the generator's filler
+     * keeps clear. The band is tested by shifting the probe set 4 ways, i.e. an inflated outline. */
+    {
+        static double s_band = -1.0;
+        if (s_band < 0.0)
+            s_band = (double)td5_env_float("TD5RE_GEO_PLAZA_BAND_M", 20.0f, 0.0f, 100.0f)
+                   * td5_geob_units_per_m();
+        if (s_band > 0.0) {
+            double qx[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG], qz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
+            static const double dx4[4] = { 1.0, -1.0, 0.0, 0.0 }, dz4[4] = { 0.0, 0.0, 1.0, -1.0 };
+            int d;
+            for (d = 0; d < 4; d++) {
+                for (k = 0; k < np; k++) { qx[k] = px[k] + dx4[d] * s_band; qz[k] = pz[k] + dz4[d] * s_band; }
+                if (td5_geob_points_in_plaza(si, qx, qz, np, TD5_GEOB_WIN_A)) {
+                    s_geo_plaza_band++;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 /* The FRONTAGE band: front plane to back plane of the street wall's own mass.
@@ -3578,11 +3608,14 @@ static void tg_geo_city_report_impl(int from_stream)
               s_geo_wall_suppressed, s_geo_backrow_suppressed,
               s_geo_route_dev_max);
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld real footprint(s) dropped and %ld back-row box(es) "
-              "skipped for standing on a laid cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s); "
-              "%ld ground-standing billboard(s) lowered onto the heightfield (knob TD5RE_GEO_PROP_GROUND=%s)",
+              "skipped for standing on a laid cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
               s_geo_dropped_street, s_geo_backrow_street,
-              td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off",
-              s_geo_prop_grounded, td5_env_flag_on("TD5RE_GEO_PROP_GROUND") ? "on" : "off");
+              td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld frontage / back-row probe(s) stood down only because they "
+              "fall within the plaza surround band (knob TD5RE_GEO_PLAZA_BAND_M); %ld awning pick(s) "
+              "swapped for a bin or bench because the wall they hang from is not built (knob "
+              "TD5RE_GEO_AWNING_WALL=%s)", s_geo_plaza_band, s_geo_awning_nowall,
+              td5_env_flag_on("TD5RE_GEO_AWNING_WALL") ? "on" : "off");
     /* [ROUND 1009 item 9] HEIGHT FIDELITY. The error is |built - tagged| for
      * the mass height, in metres, so "heights are not fully correct" has a
      * number on both sides of the fix instead of a claim on one. */
@@ -4811,33 +4844,10 @@ int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
     tg_xstreet_audit(nl, si, side, gap - (double)P->w * 0.5,
                      pp == PP_LAMP ? "lamp-glow" : "prop-billboard", 1);
     moff[*pn] = b0;
-    {
-        /* [ROUND 1021 C item 14] Mariano, level091 L91 e75 s16 prop p505 (a deer): "floating in the air".
-         * A ground-standing billboard (spectator, statue, animal: y_off 0) was set at the ROAD NODE's
-         * height. On a geo route the road rides an embankment or a plaza edge and the ground beside it
-         * drops away, so the billboard hung 1.9 m over the pavement (MEASURED: 24 of 24 deer on level091
-         * floated, up to 2.4 m). Ground it on the heightfield, the same envelope the cross street's
-         * follow quad uses (the ground meshes are cut on a 1500 lattice, so a point between nodes sits
-         * above or below the exact height). It only ever LOWERS the billboard, and only by more than
-         * half a metre, so a prop already on the ground does not move.
-         * TD5RE_GEO_PROP_GROUND=0 restores the node height. */
-        double by = n->y + (double)P->y_off;
-        if (td5_geo_loaded() && pp != PP_LAMP && P->y_off == 0 &&
-            td5_env_flag_on("TD5RE_GEO_PROP_GROUND")) {
-            const double hh = TG_WORLD_CELL * 0.5;
-            double g = tg_world_h(cx, cz), g1;
-            g1 = tg_world_h(cx + hh, cz); if (g1 > g) g = g1;
-            g1 = tg_world_h(cx - hh, cz); if (g1 > g) g = g1;
-            g1 = tg_world_h(cx, cz + hh); if (g1 > g) g = g1;
-            g1 = tg_world_h(cx, cz - hh); if (g1 > g) g = g1;
-            g += 60.0;
-            if (by - g > 215.0) { by = g; s_geo_prop_grounded++; }
-        }
-        if (!tg_emit_billboard_mesh(m, cx, by, cz,
+    if (!tg_emit_billboard_mesh(m, cx, n->y + (double)P->y_off, cz,
                                 (double)P->w * 0.5, (double)P->h,
                                 tg_prop_slot(pp), P->tag))
-            return 0;
-    }
+        return 0;
     /* PP_LAMP is the streetlamp GLOW, emitted through this same helper by the
      * lamp fixture (and by the props layer when the biome puts glows there).
      * It is accounted as a LAMP at the fixture, so keep it out of the prop
@@ -6855,14 +6865,29 @@ int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
  * carriageways for three rounds. Refused picks SUBSTITUTE, so the furniture
  * total and the r9-infra run list are unchanged, exactly as R12's sign does.
  * `side` follows tg_emit_fb_infra's convention: > 0 is the left kerb. */
-int tg_infra_awning_filter(int si, double side, int paved, int kind,
+int tg_infra_awning_filter(const TG_NodeList *nl, int si, double side, int paved, int kind,
                                   unsigned int hh)
 {
     if (kind != IP_CANOPY) return kind;
     if (!td5_env_flag_on("TD5RE_R13_AWNING")) { s_r13_awn_kept++; return kind; }
     if (tg_facade_stands(si) && tg_facade_built(si, side > 0.0 ? 1 : 0)) {
-        s_r13_awn_kept++;
-        return kind;
+        /* [ROUND 1021 C item 14] Mariano, level091 L91 e75 s16 prop p505: "floating in the air, seems like
+         * it's part of something else". p505 is the AWNING (TG_INFRA_CANOPY, page R9_INFRA 497 + 8): a canopy
+         * lifted 2.8 m off the ground, hung from a shop front. The test above asks the frontage PATTERN
+         * (tg_facade_stands / tg_facade_built); on a geo route the wall the pattern promises is often not
+         * built, because a real footprint, a real road, a plaza or the plaza surround stood it down in
+         * tg_side_geom, and the canopy then hangs from nothing. MEASURED on level091 before this: 11 of 24
+         * awnings had NO building wall within 4 m, this one none within 12 m. Ask the wall that is
+         * ACTUALLY emitted (tg_side_stands, the same authority the neighbouring flanks use); a refused
+         * pick substitutes exactly like the pattern refusal below, so the furniture total is unchanged.
+         * TD5RE_GEO_AWNING_WALL=0 restores the pattern-only test. */
+        if (td5_geo_loaded() && nl && td5_env_flag_on("TD5RE_GEO_AWNING_WALL") &&
+            !tg_side_stands(nl, si, side > 0.0 ? 1 : 0)) {
+            s_geo_awning_nowall++;
+        } else {
+            s_r13_awn_kept++;
+            return kind;
+        }
     }
     s_r13_awn_ctx++;
     /* Bit 4 is untouched by every other decision on this span (see the sign
