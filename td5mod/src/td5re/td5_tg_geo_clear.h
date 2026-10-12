@@ -84,6 +84,30 @@ double tg_geo_prefab_seat(const TG_NodeList *nl, int si, double x, double z,
                           double fx, double fz, double y_centre);
 double tg_prefab_half_width(int pf);          /* td5_tg_prefab.c */
 
+/* [ROUND 1023 C items 2 + 9] The whole footprint against what is actually laid: every span segment's
+ * capsule (ring nodes, fork-corridor rows, plaza-fork rows) with that span's pavement beyond it, and the laid
+ * side-street carriageways and pavement arms. Pushes the ring in place away from the worst road penetration
+ * (<= `maxpush` units in total; 0 = never move it), returns 1 to DROP (`why` = reason for the ledger).
+ * `base_y` is the footprint's ground (a deck over it / an underpass under it is not a road it stands on).
+ * Returns 0 and leaves the ring alone when no place is loaded or TD5RE_GEO_BLD_FOOTCLEAR=0. */
+int tg_geo_footprint_clear(const TG_NodeList *nl, int si, double side, double base_y,
+                           double *rx, double *rz, int n, double maxpush, const char **why);
+
+/* A procedural box (tg_bg_building_box: front edge (bx,bz) + (ax,az), back vectors (lx0,lz0) / (lx1,lz1) of
+ * length `depth`) against the same: never moved, 1 = skip the box. */
+int tg_geo_box_clear(const TG_NodeList *nl, int si, double side, double by,
+                     double bx, double bz, double ax, double az,
+                     double lx0, double lz0, double lx1, double lz1, double depth);
+
+/* The street half of it on its own, for the procedural boxes: plan area (world units^2) of the polygon on
+ * the laid side streets' carriageways / pavement arms; 1 when either is large enough to drop the box. */
+int tg_geo_poly_street_overlap(const TG_NodeList *nl, int si, double side,
+                               const double *rx, const double *rz, int n, int arms,
+                               double *car_u2, double *arm_u2);
+/* A cross-street frontage wall's base line against the same, ignoring the pavement arm it abuts. */
+int tg_geo_wall_clear(const TG_NodeList *nl, int si, double side, double by,
+                      double cx, double cz, double ox, double oz, double flen);
+
 /* How many span-sides / real footprints the road probe removed, for the census. */
 void tg_geo_clear_note_wall(void);
 void tg_geo_clear_note_footprint(void);
