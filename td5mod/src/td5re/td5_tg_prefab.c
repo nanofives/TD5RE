@@ -265,7 +265,9 @@ static const unsigned char k_pf_parked_audit[TD5_TG_PREFAB_N] = {
 int tg_prefab_usable(int i)
 {
     if (i < 0 || i >= TD5_TG_PREFAB_N) return 0;
-    if (k_pf_parked[i] && td5_env_flag_on("TD5RE_TG_PREFAB_PARK")) return 0;
+    /* [ROUND 1021 C item 13] lm02 has its own un-park knob so the round can be A/B'd against master. */
+    if (k_pf_parked[i] && td5_env_flag_on("TD5RE_TG_PREFAB_PARK") &&
+        (i != 2 || td5_env_flag_on("TD5RE_TG_PREFAB_PARK_1021"))) return 0;
     if (k_pf_parked_audit[i] && td5_env_flag_on("TD5RE_TG_PREFAB_PARK")
         && td5_env_flag_on("TD5RE_TG_PREFAB_PARK_AUDIT")) return 0;
     if (!td5_env_flag_on("TD5RE_TG_PREFAB_CLOSE")) return 1;

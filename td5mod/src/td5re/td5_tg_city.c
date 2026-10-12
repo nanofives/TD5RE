@@ -2034,7 +2034,7 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
      * there and the filler stands in the middle of it. So the plaza gets a SURROUND: no procedural frontage
      * or back row within TD5RE_GEO_PLAZA_BAND_M of the outline (20 m, 0 = old). Real footprints keep their
      * own rule (a mapped building across a street from a square is real); only the generator's filler
-     * keeps clear. The band is tested by shifting the probe set 4 ways, i.e. an inflated outline. */
+     * keeps clear. The band is tested by shifting the probe set 8 ways, i.e. an inflated outline. */
     {
         static double s_band = -1.0;
         if (s_band < 0.0)
@@ -2042,10 +2042,11 @@ static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
                    * td5_geob_units_per_m();
         if (s_band > 0.0) {
             double qx[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG], qz[TD5_TG_GEO_PROBES * TD5_TG_GEO_ALONG];
-            static const double dx4[4] = { 1.0, -1.0, 0.0, 0.0 }, dz4[4] = { 0.0, 0.0, 1.0, -1.0 };
+            static const double dx8[8] = { 1.0, -1.0, 0.0, 0.0, 0.7071, -0.7071, 0.7071, -0.7071 };
+            static const double dz8[8] = { 0.0, 0.0, 1.0, -1.0, 0.7071, 0.7071, -0.7071, -0.7071 };
             int d;
-            for (d = 0; d < 4; d++) {
-                for (k = 0; k < np; k++) { qx[k] = px[k] + dx4[d] * s_band; qz[k] = pz[k] + dz4[d] * s_band; }
+            for (d = 0; d < 8; d++) {
+                for (k = 0; k < np; k++) { qx[k] = px[k] + dx8[d] * s_band; qz[k] = pz[k] + dz8[d] * s_band; }
                 if (td5_geob_points_in_plaza(si, qx, qz, np, TD5_GEOB_WIN_A)) {
                     s_geo_plaza_band++;
                     return 1;
@@ -6857,6 +6858,25 @@ int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
     return ((hh >> 3) & 1u) ? IP_BIN : IP_BENCH;
 }
 
+/* [ROUND 1021 C item 14] Is a REAL footprint standing within ~10 m behind the kerb of span si on `side`?
+ * The wall an awning hangs from may be a real building (the generator's own wall stands down wherever
+ * one is), so the awning is kept when either wall exists. Probes four depths from just past the kerb. */
+static int tg_geo_awning_real_wall(const TG_NodeList *nl, int si, double side)
+{
+    static const double k_d[4] = { 700.0, 1800.0, 3000.0, 4400.0 };
+    const TG_Node *n = &nl->v[si];
+    const double sg = side > 0.0 ? 1.0 : -1.0;
+    const double lx = n->tz * sg, lz = -n->tx * sg;
+    double px[4], pz[4];
+    int k;
+    if (!s_geo_bld || si < 0 || si >= nl->count) return 0;
+    for (k = 0; k < 4; k++) {
+        px[k] = n->x + lx * (n->width * 0.5 + k_d[k]);
+        pz[k] = n->z + lz * (n->width * 0.5 + k_d[k]);
+    }
+    return td5_geob_points_in_building(si, px, pz, 4, TD5_GEOB_WIN_B);
+}
+
 /* [R13 PROPS item 5a] The awning's half of the same rule: an awning is a claim
  * that there is a SHOP FRONT immediately behind it, so it may only be picked
  * where a facade actually stands on this side. The frontage authority is asked
@@ -6882,7 +6902,7 @@ int tg_infra_awning_filter(const TG_NodeList *nl, int si, double side, int paved
          * pick substitutes exactly like the pattern refusal below, so the furniture total is unchanged.
          * TD5RE_GEO_AWNING_WALL=0 restores the pattern-only test. */
         if (td5_geo_loaded() && nl && td5_env_flag_on("TD5RE_GEO_AWNING_WALL") &&
-            !tg_side_stands(nl, si, side > 0.0 ? 1 : 0)) {
+            !tg_side_stands(nl, si, side > 0.0 ? 1 : 0) && !tg_geo_awning_real_wall(nl, si, side)) {
             s_geo_awning_nowall++;
         } else {
             s_r13_awn_kept++;
