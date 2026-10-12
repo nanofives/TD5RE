@@ -417,7 +417,7 @@ is not in a seed-99991 rebuild, but it is `L23.lm02` by the prefab table.
 | awnings, and those with no wall within 4 m | 24, 11 | 10, 0 |
 | buildings on a REAL OSM road (>= 25%): real / proc / prefab | 2 / 0 / 1 | 2 / 0 / 0 |
 | `[NET/GEO] real street census`, `[REAL FORK]` lines | | identical (md5 of the sorted lines) |
-| synthetic seed 99991 slot 60 | 12772392 B `E2F1F33C...` | identical (lm02 is not placed at that seed; at others a walk row 17 ... of lm02 is lost) |
+| synthetic seed 99991 slot 60 | 12772392 B `E2F1F33C...` | identical (lm02 is not placed at that seed; any other seed whose walk placed lm02 loses it) |
 
 Cost to know about: 41 of 107 procedural frontage meshes disappear (the plaza band and the global polygon test); the
 real footprints around the plazas are untouched. If that is too much, `TD5RE_GEO_PLAZA_BAND_M=10` keeps the pick's
