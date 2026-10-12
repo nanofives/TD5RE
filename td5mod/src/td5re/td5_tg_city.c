@@ -5216,6 +5216,24 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         }
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
+        /* [ROUND 1021 B item 5] a street that leaves the kerb at an angle sweeps along the road as
+         * it moves out, so at the slab's lateral it also covers part of the span NEXT to its mouth
+         * and this slab stood on its tarmac ("sidewalk in the middle of the crossing road"). Clip
+         * the slab to its free run, cut along the street's own edge (td5_tg_avenue.c, the same
+         * clip the far footway uses). Geo builds only; a span with no mouth within three spans is
+         * untouched and takes the normal slab below. */
+        if (tg_geo_city_active() && *h->nmesh < h->maxmesh) {
+            const TG_Node *na = &h->nl->v[h->si], *nc = &h->nl->v[h->si + 1];
+            const double ce0 = (e[0] - na->x) * na->tz - (e[2] - na->z) * na->tx;
+            const double ce1 = (e[3] - nc->x) * nc->tz - (e[5] - nc->z) * nc->tx;
+            const double cf0 = (e[0] + e[6] * sw_s - na->x) * na->tz - (e[2] + e[7] * sw_s - na->z) * na->tx;
+            const double cf1 = (e[3] + e[8] * sw_s - nc->x) * nc->tz - (e[5] + e[9] * sw_s - nc->z) * nc->tx;
+            const int cr = tg_av_main_pave_clip(h->nl, h->si, sg, ce0, ce1, cf0, cf1,
+                                                h->blk, h->moff, h->nmesh);
+            if (cr < 0) return 0;
+            if (cr != 1) continue;          /* 0: a street takes the whole span, 2: clipped slab already written */
+        }
+
         /* Top slab: near-in, near-out, far-out, far-in. */
         q[0] = e[0];               q[1]  = e[1] + TD5_TG_KERB_H; q[2]  = e[2];
         q[3] = e[0] + e[6] * sw_s; q[4]  = e[1] + TD5_TG_KERB_H; q[5]  = e[2] + e[7] * sw_s;

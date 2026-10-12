@@ -1172,7 +1172,15 @@ int tg_road_page(int si)
 int tg_road_page_for_geo_surface(int geo_surf)
 {
     switch (geo_surf) {
-    case TD5_GEO_SURF_COBBLE: return tg_road_page_for(RS_COBBLE);
+    case TD5_GEO_SURF_COBBLE:
+        /* [ROUND 1021 B items 7, 8] A real `surface=sett` calle (La Plata has 68 of them) came out
+         * in the cobble ART: no lane paint and a texture nothing else in the city uses, so a street
+         * that crosses the avenue read as a different, unpaved-looking road. "wrong asphalt texture
+         * on a crossing road, it should match the city's street asphalt." On a geo build a cobble
+         * crossing now takes the city's own marked street page (-1 = leave the caller's page);
+         * loose / unpaved keeps its dirt art. TD5RE_GEO_XSTREET_ASPHALT=0 restores the cobble page. */
+        if (td5_env_flag_on("TD5RE_GEO_XSTREET_ASPHALT") && tg_geo_city_active()) return -1;
+        return tg_road_page_for(RS_COBBLE);
     /* RS_GRAVEL maps to the DIRT art anyway (see tg_rs_real_base), so loose
      * aggregate and bare earth share one page here too. */
     case TD5_GEO_SURF_LOOSE:  return tg_road_page_for(RS_DIRT);

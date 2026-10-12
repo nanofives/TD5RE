@@ -1233,8 +1233,24 @@ int tg_r11_arm_side(const TG_NodeList *nl, int si, int s)
      * a ramp-retracted frontage still carries the raised pavement, so its arm
      * still wraps the sidewalk down the side street (tg_r16_pave_corner_stands
      * == tg_r11_corner_stands when TD5RE_R16_RAMP_JUNCTION is off). */
-    return (tg_r16_pave_corner_stands(si - 1, s) ? 1 : 0)
-         | (tg_r16_pave_corner_stands(si + 1, s) ? 2 : 0);
+    {
+        int r = (tg_r16_pave_corner_stands(si - 1, s) ? 1 : 0)
+              | (tg_r16_pave_corner_stands(si + 1, s) ? 2 : 0);
+        /* [ROUND 1021 B item 8] "no sidewalk on a crossing road" (e35 s26: Calle 16 leaving the
+         * far kerb of Diagonal 73, bare ground on both sides of the tarmac). A street that starts
+         * beyond an avenue (mouth shift > 0) has its flank corners at spans whose MAIN pavement
+         * does not stand (the corridor owns that edge, so tg_r16_pave_corner_stands is 0 on both
+         * neighbours) and so no arm was ever laid for it. Its neighbours carry the far footway,
+         * which is clipped back along the street's edge, so the corner is open: lay the arm there.
+         * A neighbour that is itself a mouth span keeps no arm (the gap continues).
+         * TD5RE_GEO_FAR_STREET_ARMS=0 restores the arm-less far-side street. */
+        if (r != 3 && tg_geo_city_active() && tg_net_mouth_shift(si, s) > 0.0
+            && td5_env_flag_on("TD5RE_GEO_FAR_STREET_ARMS")) {
+            if (!(r & 1) && tg_net_mouth_kind(si - 1, s) < 0) r |= 1;
+            if (!(r & 2) && tg_net_mouth_kind(si + 1, s) < 0) r |= 2;
+        }
+        return r;
+    }
 }
 
 static int tg_block_emit_intersection(const TG_FBHook *h)
