@@ -154,6 +154,10 @@ typedef struct {
      * EMITTER skips it. The probes still see it, so the procedural frontage
      * keeps standing down where the footprint was. See geob_veto_plaza. */
     unsigned char plaza_veto;
+    /* [ROUND 1023 B item 8] Hosted on a MAIN span although it stands 100+ m from the route, on the town
+     * side of a plaza fork's free arc (td5_geob_rehost). The emitter then skips the clearance nudge and
+     * the base-height ceiling, both measured from the host span's own road, which is nowhere near it. */
+    unsigned char far_host;
     /* [ROUND 1009 item 9] STOREY COUNTS, which the reader never kept.
      * BUILDINGS.JSON carries `levels` on every record (286 of La Plata's 2326
      * footprints have it from OSM, the rest from the estimator's `levels_est`)
@@ -283,6 +287,13 @@ void td5_geob_ring(int first, int k, double *x, double *z);
  * Buildings and areas keep separate chains, each in ascending record order so
  * the emitted mesh sequence is a pure function of the cache file. A span with
  * nothing returns -1 immediately. */
+/* [ROUND 1023 B item 8] Re-host an UNBOUND footprint (it stood past TD5_GEOB_BIND_MAX_B of every route
+ * node, so it was never emitted) on main span `span`, for the far arc of a plaza fork whose free rows are
+ * 100-180 m from the route. Returns 1 when it was linked. td5_geob_rehost_clear undoes every re-host
+ * (the place stays loaded across rebuilds, so a stale host must not survive a changed fork plan). */
+int  td5_geob_rehost(int i, int span, int side, double lat);
+void td5_geob_rehost_clear(void);
+int  td5_geob_rehost_count(void);
 int  td5_geob_span_building(int span);
 int  td5_geob_next_building(int i);
 int  td5_geob_span_area(int span);

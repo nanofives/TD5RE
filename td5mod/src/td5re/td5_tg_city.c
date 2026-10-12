@@ -1622,6 +1622,8 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
  * than the conditioner's own deviation from the real street centreline, less
  * than a block depth, so a nudge never pushes a frontage behind its neighbour. */
 #define TD5_TG_GEO_MAX_SHIFT  4500.0
+/* [ROUND 1023 C] how far tg_geo_footprint_clear may push a ring away from a road before dropping it */
+#define TD5_TG_GEO_FOOT_PUSH  3000.0
 /* Sanity ceiling on an extrusion. 60000 ~= 140 m; the tallest measured height
  * in the La Plata cache is 75 m. A footprint tagged past this is a data error
  * (a height in feet, a mast height on a building), and a 2 km tower beside the
@@ -1667,6 +1669,7 @@ static long s_geo_backrow_suppressed;
 /* [ROUND 1021 C items 4, 9] real footprints dropped / back-row boxes skipped for standing on a laid
  * cross-street carriageway */
 static long s_geo_dropped_street, s_geo_backrow_street, s_geo_plaza_band;
+static long s_geo_dropped_foot;     /* [R1023 C] footprints dropped / pushed by tg_geo_footprint_clear */
 static long s_geo_awning_nowall;     /* [1021 C item 14] awnings refused: the wall they hang from is not built */
 /* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
  * new height sources, so an Overture A/B is a number in race.log. */
@@ -1722,6 +1725,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
     s_geo_backrow_suppressed = 0;
     s_geo_dropped_street = s_geo_backrow_street = s_geo_plaza_band = 0;
+    s_geo_dropped_foot = 0;
     s_geo_awning_nowall = 0;
     s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_dropped_slots = 0;
@@ -3093,6 +3097,14 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     if (!td5_geob_ring_simple(rx, rz, n_ring)) { tg_geo_lm_note(gb, si, "DROPPED ring not simple", 0.0); s_geo_dropped_deg++; return 1; }
 
     /* --- clear the carriageway and the pavement, by the least nudge that does */
+    /* [ROUND 1023 B item 8] A far-arc footprint (gb->far_host) is hosted on a main span that is NOT beside
+     * it: "outward" and the carriageway gap below are measured from that span's road, which would shove the
+     * footprint by the difference or drop it. Its clearance from the plaza corridor was proven when it was
+     * re-hosted (tg_pf_rehost_buildings), so the nudge is skipped. */
+    if (gb->far_host) {
+        gap = 0.0;
+        minout = 0.0;
+    } else {
     gap = tg_geo_building_clear_gap(nl, si, side,
                                     tg_city_sidewalk_w_side_at(nl, si,
                                                                side > 0.0, h->b));
@@ -3100,6 +3112,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     for (k = 0; k < n_ring; k++) {
         need = minout - tg_geo_outward(nl, si, side, rx[k], rz[k]);
         if (need > shift) shift = need;
+    }
     }
     if (shift > TD5_TG_GEO_MAX_SHIFT) { tg_geo_lm_note(gb, si, "DROPPED past shift cap", shift); s_geo_dropped_shift++; return 1; }
     if (shift > 0.0) {
@@ -3116,7 +3129,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
      * of its sample points (vertices, edge midpoints, centroid) on the road is
      * the test: a footprint that merely grazes a kerb is kept. */
     if (tg_geo_clear_ready()) {
-        const double own = tg_geo_own_lateral(nl, si, side);
+        const double own = gb->far_host ? -1.0 : tg_geo_own_lateral(nl, si, side);   /* [1023 B] no own carriageway out there */
         int on = 0, ns = 0;
         if (tg_geo_foreign_road_at(cx, cz, n->x, n->z, n->tx, n->tz, own)) on++;
         ns++;
@@ -3160,6 +3173,30 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
             s_geo_dropped_deg++;
             return 1;
         }
+    }
+
+    /* [ROUND 1023 C items 2 + 9] Mariano, level091 L91 e105 s21 city p68+11: "this building is clipping in
+     * the middle of the road". The two tests above measure a footprint against the HOST span's straight
+     * frame (and the street test against single points of the carriageway only). A 12..70 m footprint on a
+     * bend, beside a fork corridor whose real position is not its analytic reach, or with an edge or a
+     * corner on a side street or the pavement arm that flanks it, passes both. MEASURED on level091 before
+     * this: 128 building / facade meshes intrude on a carriageway or a pavement band (verify/
+     * r1023c_bld_intrude.py), 61 of them real footprints. tg_geo_footprint_clear measures the whole ring
+     * against every laid span segment (ring AND corridor) with its pavement band, and against the laid
+     * side-street carriageways and arms by plan area: it pushes the ring away from a road (<= 3000 units)
+     * or drops the footprint. TD5RE_GEO_BLD_FOOTCLEAR=0 keeps the old behaviour byte for byte. */
+    {
+        const char *why = NULL;
+        if (tg_geo_footprint_clear(nl, si, side, tg_world_h(cx, cz), rx, rz, n_ring,
+                                   TD5_TG_GEO_FOOT_PUSH, &why)) {
+            tg_geo_lm_note(gb, si, why ? why : "DROPPED on a road", 0.0);
+            s_geo_dropped_foot++;
+            s_geo_dropped_deg++;
+            return 1;
+        }
+        cx = 0.0; cz = 0.0;
+        for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
+        cx /= (double)n_ring; cz /= (double)n_ring;
     }
 
     /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
@@ -3271,7 +3308,7 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     by = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
     /* Same ceiling the procedural wall uses: a building must not float above
      * the road when the conformed bed and the raw heightfield disagree. */
-    if (by > n->y + tg_city_kerb_h(h->b) + 400.0)
+    if (!gb->far_host && by > n->y + tg_city_kerb_h(h->b) + 400.0)
         by = n->y + tg_city_kerb_h(h->b) + 400.0;
     /* A building:part starts where the part below it stops. */
     if (gb->min_height > 0.0) by += gb->min_height;
@@ -3612,6 +3649,9 @@ static void tg_geo_city_report_impl(int from_stream)
               "skipped for standing on a laid cross-street carriageway (knob TD5RE_GEO_BLD_STREET_CLEAR=%s)",
               s_geo_dropped_street, s_geo_backrow_street,
               td5_env_flag_on("TD5RE_GEO_BLD_STREET_CLEAR") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1023 C] %ld real footprint(s) dropped by the whole-footprint clearance "
+              "(laid roads incl. corridors, cross streets, pavement arms; knob TD5RE_GEO_BLD_FOOTCLEAR=%s)",
+              s_geo_dropped_foot, td5_env_flag_on("TD5RE_GEO_BLD_FOOTCLEAR") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld frontage / back-row probe(s) stood down only because they "
               "fall within the plaza surround band (knob TD5RE_GEO_PLAZA_BAND_M); %ld awning pick(s) "
               "swapped for a bin or bench because the wall they hang from is not built (knob "
@@ -5124,6 +5164,7 @@ int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
      * pavement that is not there. */
     sw = tg_city_side_base(si, s, tg_city_sidewalk_w_at(nl, si, b));
     if (!(tg_pavement_side_width(nl, si, s ? 1.0 : -1.0, sw) > 0.0)) return 0;
+    if (tg_net_fr_tip_here(si, s)) return 0;       /* [1023 E item 12] a frontage merge lands here */
     /* [R13 RAIL item 5b] mirrors the emitter's own ramp exception above -- this
      * predicate exists to be the emitter's gate stated once, so it has to move
      * with it or the R12 end cap floats where the slab is not. */
@@ -5156,6 +5197,10 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         const double u_w = sw_s / (double)TD5_TG_SPAN_LENGTH;
         const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
         if (!(sw_s > 0.0)) continue;
+        /* [ROUND 1023 E item 12] a frontage merge ribbon lands on this span: the street meets the
+         * carriageway here, so no raised slab across its mouth (the slab ends are capped by
+         * tg_r12_pave_stands answering 0 for this span-side). */
+        if (tg_net_fr_tip_here(h->si, s)) continue;
         /* [R6 CROSS item 1] The raised pavement STOPS at a road intersection.
          * Where this side opens onto a side-street mouth (the frontage is a gap
          * here), the slab used to run straight across the mouth at kerb height,
@@ -6277,6 +6322,13 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
             ay = n1->y - n0->y;
             az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+            /* [ROUND 1023 C] ... and the whole box against every laid street, arm and road (the test above
+             * asks about the centre and the corners only). TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
+            if (td5_geo_loaded() &&
+                tg_geo_box_clear(h->nl, h->si, sg, by, bx, bz, ax, az, lx0, lz0, lx1, lz1, tg_facade_depth(b))) {
+                s_geo_backrow_street++;
+                continue;
+            }
 
             /* Columns from the row's OWN frontage length, which at a big setback
              * on a curve is appreciably longer than a span: the fixed 2 columns

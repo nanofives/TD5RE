@@ -173,6 +173,84 @@ int tg_fork_opening_at(int si)
     return td5_geo_avenue_at(si, NULL, NULL, &op) && op;
 }
 
+/* [ROUND 1023 D] "we need to keep reworking the fork to allow this absence of median to be
+ * driveable" (Mariano, level091 L91 e33 s8 skirt p0:ROAD pos 176300,4268,60270: the paved gap
+ * of a real cross street opening on Diagonal 73, main spans 133..134). Round 1015 A paved the
+ * median flush at every real opening and took the island away, so the two carriageways LOOK
+ * joined; but the main half and the corridor are separate span records, each with a rail on its
+ * median side, so the car met an invisible wall where the road is drawn. The MGAP trailer tells
+ * the engine where those openings are (td5_track.c, "MEDIAN GAPS"): per run of opening spans
+ *   u32 main_lo, main_hi, corr_lo, corr_hi, side (0 corridor right of travel, 1 left)
+ * 'MGAP', n, then n runs. No bytes at all without a run, so every other strip is byte-identical;
+ * TD5RE_GEO_FORK_GAP=0 writes none. Only spans well clear of the fork's sentinels (type 8/9/10/11)
+ * qualify: the partner of an opening must be a plain corridor span. */
+int tg_fork_gap_write(TG_Buf *out)
+{
+    enum { MAXRUN = 128 };
+    int run[MAXRUN][5];
+    int nrun = 0, fi, nsp = 0, tot_runs = 0, tot_spans = 0;
+
+    if (!td5_env_flag_on("TD5RE_GEO_FORK_GAP")) return 0;
+    /* how many real openings the route has inside its real forks' windows, whether or not they qualify below */
+    for (fi = 0; fi < s_fork_count; fi++) {
+        const TG_Fork *f = &s_forks[fi];
+        int si, prev = 0;
+        if (f->real <= 0 || f->loopc > 0) continue;
+        for (si = f->F + 1; si <= f->F + f->len; si++) {
+            const int in = (tg_fork_of_main(si) == fi && tg_fork_opening_at(si)) ? 1 : 0;
+            if (in) { tot_spans++; if (!prev) tot_runs++; }
+            prev = in;
+        }
+    }
+    for (fi = 0; fi < s_fork_count; fi++) {
+        const TG_Fork *f = &s_forks[fi];
+        const int clen = tg_fork_clen(fi);
+        int si, m0 = -1, m1 = -1;
+        if (f->real <= 0 || f->loopc > 0 || clen < 8) continue;
+        for (si = f->F + 1; si <= f->F + f->len + 1; si++) {
+            const int in = (si >= f->F + 4 && si <= f->F + f->len - 3 && tg_fork_of_main(si) == fi &&
+                            tg_fork_opening_at(si)) ? 1 : 0;
+            if (!in && si <= f->F + f->len && tg_fork_of_main(si) == fi && tg_fork_opening_at(si))
+                TD5_LOG_I(LOG_TAG, "trackgen: [GAP] opening main span %d NOT linked (fork %d: within 4 spans of its start F=%d or 3 of its end R=%d)",
+                          si, fi, f->F, f->F + f->len + 1);
+            if (in) { if (m0 < 0) m0 = si; m1 = si; }
+            if ((!in || si == f->F + f->len + 1) && m0 >= 0) {
+                int k, kmin = -1, kmax = -1;
+                for (k = 0; k < clen; k++) {
+                    const int a = tg_fork_row_node(fi, k);
+                    const int b = (k + 1 < clen) ? tg_fork_row_node(fi, k + 1) : f->F + 1 + f->len;
+                    if (a < m1 + 1 && b > m0) { if (kmin < 0) kmin = k; kmax = k; }
+                }
+                if (kmin >= 2 && kmax <= clen - 3 && nrun < MAXRUN) {
+                    run[nrun][0] = m0; run[nrun][1] = m1;
+                    run[nrun][2] = f->cbase + kmin; run[nrun][3] = f->cbase + kmax;
+                    run[nrun][4] = (f->side > 0) ? 1 : 0;
+                    nsp += m1 - m0 + 1;
+                    nrun++;
+                } else {
+                    TD5_LOG_I(LOG_TAG, "trackgen: [GAP] opening main spans %d..%d NOT linked (corridor steps %d..%d of %d: too close to the fork's mouth or tail, or the run table is full)",
+                              m0, m1, kmin, kmax, clen);
+                }
+                m0 = m1 = -1;
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [GAP] real median openings inside real fork windows: %d run(s), %d span(s); driveable: %d run(s), %d span(s)",
+              tot_runs, tot_spans, nrun, nsp);
+    if (nrun == 0) return 0;
+    tg_put_u32(out, 0x5041474Du);                    /* 'MGAP' */
+    tg_put_u32(out, (unsigned int)nrun);
+    for (fi = 0; fi < nrun; fi++) {
+        int j;
+        for (j = 0; j < 5; j++) tg_put_u32(out, (unsigned int)run[fi][j]);
+        TD5_LOG_I(LOG_TAG, "trackgen: [GAP] median gap %d: main spans %d..%d <-> corridor spans %d..%d (side %s)",
+                  fi, run[fi][0], run[fi][1], run[fi][2], run[fi][3], run[fi][4] ? "left" : "right");
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [GAP] %d median gap run(s), %d main span(s) made driveable (knob TD5RE_GEO_FORK_GAP)",
+              nrun, nsp);
+    return nrun;
+}
+
 int tg_realfork_walk_owned(int fi, int mb)
 {
     if (!td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 0;
@@ -499,6 +577,51 @@ static int tg_av_far_mouth(int s, double o)
            tg_net_mouth_kind(s, o > 0.0) >= 0;
 }
 
+/* [ROUND 1023 A item 10] "sidewalk stopped before level091 L91 e107 s8 skirt p44:SIDEWALK+121 pos 460734,829,352025
+ * (ends early, should continue)" -- the far footway of Diagonal 73 (spans 411..662) begins at span 429 and, behind that,
+ * the pavement stops dead for 16 spans (413..428, 24000 units) with bare ground where it should run.
+ *
+ * ROOT CAUSE. Those spans lie over the free corridor of the plaza fork round Plaza Miguel de Azcuenaga (fork 0, F=89,
+ * len 572): the corridor leaves the route and comes back, converging on the avenue's far carriageway over the exit wedge
+ * (spans 419..425: tg_pf_wedge_span) and the last free rows (426..428: the corridor row is within three lanes of the
+ * scenery road's centre, tg_pf_scenery_clash). Round 1015 E stood the whole avenue scenery down there ("the plaza
+ * corridor is the road here") and, separately, returned before the far footway on every wedge span ("no far footway where
+ * the corridor leaves"). Both are right about the carriageway (the corridor IS the far carriageway) and wrong about the
+ * pavement: nothing else lays a footway beside the corridor -- corridor spans carry road only -- so the pavement
+ * simply ends. The classic rows either side already lay it from the corridor's own lateral
+ * (tg_fork_br_shift, the in-fork path of tg_av_far_edges), which is why it resumes at 429 and exists at 411/412.
+ *
+ * RULE. Where the corridor is the far carriageway, the footway runs on along ITS outer edge, from the lateral the corridor
+ * itself reports (tg_fork_br_shift is the corridor centre's lateral from the main node on every row), with the corridor's
+ * lanes and the pavement width of the span (the OSM table's, else the biome's: the table has no way near the plaza).
+ * TD5RE_GEO_PLAZA_FARWALK=0 restores the gap. */
+static long s_av_plazawalk;
+static int tg_av_plaza_walk(const TG_NodeList *nl, int si, double av_mid, double *o0, double *o1,
+                            int *lanes, int *pfi)
+{
+    int fi, i, j;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZA_FARWALK")) return 0;
+    if (!nl || si < 0 || si + 1 >= nl->count) return 0;
+    for (fi = -1, i = 0; i < s_fork_count; i++)
+        if (tg_fork_is_free(i) && si > s_forks[i].F && si <= s_forks[i].F + s_forks[i].len) { fi = i; break; }
+    if (fi < 0) return 0;
+    if (!tg_pf_wedge_span(fi, si) && !tg_pf_scenery_clash(nl, si, av_mid)) return 0;
+    j = si - s_forks[fi].F - 1;
+    *o0 = tg_fork_br_shift(fi, j,     nl->v[si].width);
+    *o1 = tg_fork_br_shift(fi, j + 1, nl->v[si + 1].width);
+    *lanes = s_forks[fi].br_lanes;
+    if (pfi) *pfi = fi;
+    return 1;
+}
+
+/* The pavement width of span si's far footway on side `left`: the table's, or (plaza walk only) the biome's */
+static double tg_av_walk_w(const TG_NodeList *nl, int si, int left, int plaza)
+{
+    double w = tg_geo_sidewalk_w_side(si, left);
+    if (w > 0.0 || !plaza) return w;
+    return tg_city_sidewalk_w_side_at(nl, si, left, &k_biomes[tg_biome_for_span(si)]);
+}
+
 /* [ROUND 1015 A item 5] "this sidewalk is not properly aligned to the crossing road"
  * (pick e22 s15, a far footway beside Diagonal 73 where a calle meets it).
  *
@@ -639,7 +762,7 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
                            double *sw)
 {
     double a = 0.0, b = 0.0, o0, o1;
-    int la = 2, op = 0, fi, lanes, in_fork = 0;
+    int la = 2, op = 0, fi, lanes, in_fork = 0, plaza = 0;
     double sg0, sg1, w;
     if (!nl || s < 0 || s + 1 >= nl->count) return 0;
     if (!td5_geo_avenue_at(s, &a, &la, &op)) return 0;
@@ -647,7 +770,12 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
     a -= tg_realfork_node_delta(s);
     b -= tg_realfork_node_delta(s + 1);
     fi = tg_fork_of_main(s);
+    if (tg_av_plaza_walk(nl, s, 0.5 * (a + b), &o0, &o1, &lanes, &plaza)) {   /* [ROUND 1023 A item 10] */
+        in_fork = 1;
+        plaza++;                                      /* fork index + 1 */
+    } else
     if (fi >= 0 && tg_fork_is_free(fi) && tg_pf_wedge_span(fi, s)) return 0;   /* [1015 E] */
+    else
     if (fi >= 0 && s_forks[fi].real > 0) {
         const int j = s - s_forks[fi].F - 1;
         o0 = tg_fork_br_shift(fi, j,     nl->v[s].width);
@@ -662,7 +790,7 @@ static int tg_av_far_edges(const TG_NodeList *nl, int s, double *e0, double *e1,
     if (tg_av_far_mouth(s, o0)) return 0;     /* no footway here: neighbours cap */
     sg0 = (o0 >= 0.0) ? 1.0 : -1.0;
     sg1 = (o1 >= 0.0) ? 1.0 : -1.0;
-    w = tg_geo_sidewalk_w_side(s, sg0 > 0.0);
+    w = tg_av_walk_w(nl, s, sg0 > 0.0, plaza);
     if (!(w > 0.0)) return 0;
     {
         const double ohw = (double)lanes * (double)TD5_TG_LANE_WIDTH * 0.5;
@@ -764,7 +892,7 @@ static int tg_av_emit_far_clipped(const TG_NodeList *nl, int si, double e0, doub
 
 static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
                                    double o0, double o1, int lanes, int in_fork,
-                                   TG_Buf *blk, size_t *moff, int *nmesh)
+                                   TG_Buf *blk, size_t *moff, int *nmesh, int plaza)
 {
     const TG_Node *a = &nl->v[si];
     const TG_Node *c = &nl->v[si + 1];
@@ -776,7 +904,7 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
      * prepass indexed its table by. 0 means the prepass had no answer here --
      * no mapped way in range, or a synthetic build -- and then there is nothing
      * to lay rather than a guess to lay. */
-    const double sw = tg_geo_sidewalk_w_side(si, sg0 > 0.0);
+    const double sw = tg_av_walk_w(nl, si, sg0 > 0.0, plaza);
     /* OUTER edge of the far carriageway, and the back edge of the slab. */
     double e0 = o0 + sg0 * ohw, f0 = e0 + sg0 * sw;
     double e1 = o1 + sg1 * ohw, f1 = e1 + sg1 * sw;
@@ -785,7 +913,11 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
     int blend_in = 0, blend_out = 0;     /* [1021 B item 2] end joined to a neighbour that differs, or ramped down to the road */
     int ramp_in = 0, ramp_out = 0;
     double H0 = (double)TD5_TG_KERB_H, H1 = (double)TD5_TG_KERB_H;   /* slab height at the near / far end */
-    const double b0 = a->y, b1 = c->y;      /* the far carriageway's own plane */
+    /* the far carriageway's own plane; beside a plaza corridor that is the CORRIDOR's height (it follows the ground,
+     * the main road's plane can be 270 units under the skirt there) [ROUND 1023 A item 10] */
+    const TG_NodeList *pv = (plaza > 0) ? tg_pf_view(plaza - 1) : NULL;
+    const double b0 = (pv && si + 1 < pv->count) ? pv->v[si].y     : a->y;
+    const double b1 = (pv && si + 1 < pv->count) ? pv->v[si + 1].y : c->y;
     double px[20], py[20], pz[20], uu[20], vv[20];
     int seg_page[2], seg_nq[2];
     int n = 0, cap_in = 0, cap_out = 0;
@@ -935,6 +1067,7 @@ static int tg_av_emit_far_pavement(const TG_NodeList *nl, int si,
      * and deleted. */
     tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHROAD, si);
     s_av_farwalk++;
+    if (plaza) s_av_plazawalk++;
     return 1;
 }
 
@@ -1015,10 +1148,12 @@ static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
                   "carriageway %.1f..%.1f m away, median built %.2f..%.2f m "
                   "over %d span(s), %d opening(s) for real cross streets; "
                   "far-side footway on %ld span(s) CUMULATIVE over the track "
-                  "(%ld joined/tapered instead of capped)",
+                  "(%ld joined/tapered instead of capped, %ld of them along a plaza fork's corridor [R1023 A item 10, "
+                  "TD5RE_GEO_PLAZA_FARWALK=%s])",
                   name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
                   s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open,
-                  s_av_farwalk, s_av_farwalk_blend);
+                  s_av_farwalk, s_av_farwalk_blend, s_av_plazawalk,
+                  td5_env_flag_on("TD5RE_GEO_PLAZA_FARWALK") ? "on" : "off");
         s_av_n = 0;        /* the next avenue starts its own accumulation */
         s_av_open = 0;
         break;
@@ -1042,6 +1177,12 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
      * that much nearer the node. Zero outside every window. */
     o0 -= tg_realfork_node_delta(si);
     o1 -= tg_realfork_node_delta(si + 1);
+    {   /* [ROUND 1023 A item 10] the corridor is the far carriageway here, so the footway follows ITS outer edge */
+        double c0, c1;
+        int bl, pfi = -1;
+        if (tg_av_plaza_walk(nl, si, 0.5 * (o0 + o1), &c0, &c1, &bl, &pfi))
+            return tg_av_emit_far_pavement(nl, si, c0, c1, bl, 1, blk, moff, nmesh, pfi + 1);
+    }
     if (tg_pf_scenery_clash(nl, si, 0.5 * (o0 + o1))) return 1;   /* [1015 E] the plaza corridor is the road here */
     {
         /* A span a REAL fork's corridor runs over: the fork draws the carriageway
@@ -1065,7 +1206,7 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
              * footway beside the corridor is continuous too -- skipping it left a
              * pavement hole at every opening inside the window. */
             if (open && !td5_env_flag_on("TD5RE_GEO_FORK_MERGE")) return 1;
-            return tg_av_emit_far_pavement(nl, si, c0, c1, bl, 1, blk, moff, nmesh);
+            return tg_av_emit_far_pavement(nl, si, c0, c1, bl, 1, blk, moff, nmesh, 0);
         }
     }
 
@@ -1093,7 +1234,7 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
     if (open && td5_env_flag_on("TD5RE_GEO_AVENUE_OPENING")) {
         if (!tg_av_emit_opening(nl, si, o0, o1, lanes, blk, moff, nmesh,
                                 TG_AV_MIN_MEDIAN_W)) return 0;
-        return tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh);
+        return tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh, 0);
     }
     if (open) return 1;
     /* [1014 B item 8] and where a street really leaves the far kerb: the sidecar's
@@ -1103,7 +1244,7 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
     if (tg_net_mouth_shift(si, o0 > 0.0) > 0.0 &&
         tg_net_mouth_kind(si, o0 > 0.0) >= 0)
         return tg_av_emit_island(nl, si, o0, o1, lanes, blk, moff, nmesh);
-    if (!tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh))
+    if (!tg_av_emit_far_pavement(nl, si, o0, o1, lanes, 0, blk, moff, nmesh, 0))
         return 0;
     return tg_av_emit_island(nl, si, o0, o1, lanes, blk, moff, nmesh);
 }

@@ -1531,3 +1531,75 @@ Synthetic auto track (slot 60, `SELECTED.TXT` aside, 6 seeds 11..66, all-AI, per
 * The unexplained forced / natural contradiction of `TD5RE_AI_MERGE_V` (1020 N) was not investigated: this give-way does not cap speed through the arrival mouth, it keeps a time gap, and both modes improve.
 * The corridor BODY hit at F=429 spans 1041..1058 (two cars side by side braking for a wall ray at ~540 u/t, then crossing lanes) exists on master too and is what keeps the forced harness verdict at WARN; the entry mouth pile-up at 433..438 likewise. Neither is rejoin work.
 * Loops (round 1020 N branch, not merged) are untested with this give-way.
+
+## Round 1023 D: the median opening is driveable (an opening in a real fork's median is road, not a wall)
+
+Mariano, round 1023 item 5: "we need to keep reworking the fork to allow this absence of median `level091 L91 e33 s8 skirt p0:ROAD pos 176300,4268,60270 r1100 v12 c1` to be driveable". Branch `fix-1791788475-4209-19567`, base master 0d834a7d. TD5RE-only.
+
+### The pick, decoded (not guessed)
+
+`verify/r12geom_dumpmodels.py` on the rebuilt `level091` (GENSTAMP `spans=1594 ring=979`, route fingerprint B9839962, the `_route/` the shared place had after 2026-10-12 03:51; the brief's 7820EC8E is the OLDER route, see the end): entry 33 (spans 132..135) slot 8 = 12 vertices, 3 quads, page 0, centre (176300.5, 4268.5, 60270), radius 1100: pos, r, v12 and c1 all equal the pick, so the rebuild is his build. MESHTAG.BIN[33*256+8] = 2 (`road`; the picker's "skirt" is its own label). It is the median floor `tg_emit_gore` lays on the road page (`td5_tg_bridge.c:3648`, called from `td5_trackgen.c:3989` with `rf_open = tg_fork_opening_at(si)`, round 1015 A): a paved flush strip between the main half's right edge and the corridor's left edge, over main spans 132..136 (the refined opening run; the raw sidecar says 133..134), where a real cross street (Calle 40) cuts Diagonal 73. Frames of the same pose: `log/tour_d0_pk1_e33s8.png` (island ends, paved gap, island again) and `log/tour_d0_pk1_e33s8_top.png`.
+
+### Cause (measured)
+
+The strip draws the opening as road but there is **no span under it**. A real fork is two separate span records (the main half F+1..F+len, the corridor `cbase..`), and each has a rail on the median side; the faithful rail resolver (`td5_track_resolve_wall_contacts`, the rail-LUT path forward custom tracks run) tests a wheel probe against the rails of the chassis span only. So the car met a wall at the edge of the paved gap. `verify/geo_gapdrive.ps1` (below) drives the player across it with the engine knob off: **0 of 12 gap runs crossed, 261..303 wall-contact events per run** (the car presses along the rail and is held at 5..20 u/t); frame `verify/out/gd_before_134.png` (car stopped on the paved gap at 5 u/t, steering right).
+
+Two more things stood in the way once the rail was open, both found by driving, not by reading: (a) the position walker has no lateral link between a main span and a corridor span (a plain interior span has no link that can jump), and (b) `geo_rescue_offmap` (the forward-custom off-map backstop) measured the distance to the nearest lane quad RANKED toward the car's own span (the XSPAN window), read the gap as open ground 1174 units from the road, and shoved the car back 1180 units sideways every 20 ticks (`OOB RESCUE probe: ... dist=1174`).
+
+### What changed (knobs default on; `=0` restores master byte for byte)
+
+| piece | change | knob |
+|---|---|---|
+| generator, `tg_fork_gap_write` (`td5_tg_avenue.c`) | for every real fork, the runs of main spans where `tg_fork_opening_at` holds (at least 4 spans after F and 3 before the fork's end), with the corridor spans standing beside them (`tg_fork_row_node`, so variable-length corridors map right), written as an `MGAP` trailer (`'MGAP', n, n x {main_lo, main_hi, corr_lo, corr_hi, side}`, 20 bytes per run) in front of `SLNK` / `CMRP`. No bytes without a run. Logs the census (`[GAP] real median openings inside real fork windows: N run(s) ...; driveable: M`) and one line for every opening it leaves out | `TD5RE_GEO_FORK_GAP=0` writes no trailer |
+| engine, `td5_track.c` "MEDIAN GAPS" (mirror of the block-loop side links) | (1) the walker (`update_position_recursive`) relocates a probe that has left its span and lies inside a lane quad of the partner span (containment, tolerance `SL_TOL` 200, the rule of `sl_try_cross`) and sets `s_sl_jumped` so the branch-commit anti-flicker revert does not undo it; (2) the wall resolver stands the rail down for a probe inside the partner span or inside the paved gap polygon (main facing edge x corridor facing edge, two triangles); (3) `geo_rescue_offmap` does not fire inside a gap polygon. A run is refused when the gap is under 700 units at either end (it would be within `SL_TOL` of both roads and the probe would flap) or when any span of it is a type 8..11 sentinel | `TD5RE_GEO_FORK_GAP_ENGINE=0` parses and ignores the runs (the dev driver still reads them) |
+| `td5_trackgen.c` `tg_env_hash` | `TD5RE_GAP_DRIVE*` and `TD5RE_GEO_FORK_GAP_ENGINE` do not enter the level stamp (they act on a built strip only) | |
+
+Left corridors (`side` 1) use the mirrored facing edges; the right and the left corridor were both driven (below).
+
+### Measured
+
+Census on Mariano's current route (B9839962, ring 979, Diagonal 73 + Avenida 13, all right-hand corridors): **14 real median openings (61 spans) lie inside real fork windows, 12 runs (57 spans) are made driveable**; the 2 not linked are main spans 660..661 and 833..834, the last 3 spans before a fork's rejoin (R=662, R=835) where the median is a taper to nothing. On the older route 7820EC8E (ring 771, Diagonal 73 right F=26 and LEFT F=429): 15 runs / 72 spans, 14 written, 12 linked (2 refused as narrower than 700 units: main 30..34 and 634, both at a mouth), 6 of them on the left corridor.
+
+`verify/geo_gapdrive.ps1` (new, dev builds; `td5_track_dev_gap_drive_bits`, `TD5RE_GAP_DRIVE=<run>`): the player (PlayerIsAI=0) is steered by pure pursuit through the real physics, walker and wall resolver, at 110 u/t (28 km/h): the main road's outer lane until 1 span before the run, then the corridor lane. One launch per run.
+
+| route | build | main -> corridor crossed | wall-contact events per run | corridor -> main (next run, `TD5RE_GAP_DRIVE_BACK=1`) |
+|---|---|---|---|---|
+| B9839962 (right) | engine off (= master physics) | 0 / 12 | 261..303 | - |
+| B9839962 (right) | default | **12 / 12** | 1 (11 runs), 0 (1 run) | 5 / 5 pairs, 0 events |
+| 7820EC8E (right, run 1) | off / default | 0 / 1 and 1 / 1 | 286 / 1 | - |
+| 7820EC8E (LEFT, runs 6..11) | off (runs 6, 11) / default | 0 / 2 and **6 / 6** | 281..311 / 1 | 3 / 3 pairs |
+
+The one event per run is the driver's own timing (it starts to turn one span before the opening and its right wheels touch the island's end kerb before the gap); the gap itself is clear. Frames (opened and read): `verify/out/gd_after_133.png` (car at 38 km/h on the paved gap, HUD span 132, island ahead on the left), `gd_after_137.png` (HUD `SPAN: 136 (corridor 1026) LANE: sub=0`, car on the far carriageway, the island behind it), `gd_before_134.png` (engine off: stopped on the gap, `SPD 5`).
+
+AI (`verify/geo_fork_validate.ps1`, 6 AI, no traffic, forced half and half, seeds 11 22 33 44 55 66, per-fork table):
+
+| route / fork | master exe | engine off | default |
+|---|---|---|---|
+| B9839962 plaza-merged F=89..662 | wall in/body/out 19/744/20, hit/crash 33/6, stall 17, jam 4, spin 28, **FAIL (spins 28 vs 12)** | identical | identical |
+| B9839962 Avenida 13 F=790..835 | 33/0/0, 5/0, stall 0, jam 0, spin 0, PASS | identical | identical |
+| 7820EC8E Diagonal 73 R F=26..253 | not run | body 294, stall 6, jam 2 (a car held 859 ticks at spans 85..87), PASS | body **15**, stall 5, jam **0**, PASS |
+| 7820EC8E Diagonal 73 L F=429..638 | not run | WARN | identical WARN |
+
+No AI car crosses a gap on the current route (0 crossings in 36 passes); on 7820EC8E one stalled car now crosses it (84 crossing log lines in seed 33) instead of being held against the rail, which is where the 294 -> 15 body wall events and 2 -> 0 jams come from. The F=89 FAIL (and the stalls at spans 80..87 on 7820EC8E) exist on the master exe too and are not touched here.
+
+Gates: `build_all.bat` dev + release OK, structure lint OK (extern 3, game.h includers 23, warnings 84 = baseline), `scripts/selftest.ps1` smoke exit 0. Identity, streamed build via `verify/geo_tour.ps1 -Rebuild` (master exe = the main tree's deployed `td5re.exe`):
+
+| route | master exe | this exe, `TD5RE_GEO_FORK_GAP=0` | this exe, default |
+|---|---|---|---|
+| B9839962 | MODELS 11619576 B `95fe7f3caa5c2d54c26fdeaeaa0cbefe`, STRIP 108150 B `3371f6a997aeeb322c9de67a52497232`, TEXTURES 1659356 B `a469196742ae4edcc5a2fdd6f2c881d1` | identical | MODELS, TEXTURES identical; STRIP 108398 B `a64150cad28b85f9095180dfd8ecde19` |
+| 7820EC8E | MODELS 8107408 B `2cf883038408847d253a2aa1af6b7ab2`, STRIP 83340 B `a7e60188363d85bc0ca7b31f757fff42`, TEXTURES 1655200 B `bf27b2aae0c2b5096690785ba7ec0730` | identical | MODELS, TEXTURES identical; STRIP 83628 B `40c9b2fae3a941be2944996f7b3ced18` |
+
+The default STRIP is the knob-off STRIP plus the trailer (+248 B = 8 + 12 runs x 20 on B9839962, +288 B = 8 + 14 x 20 on 7820EC8E). Synthetic gate (`geo_tags_identity.ps1 -Arm synthetic -NoControl`, SELECTED.TXT aside), master exe and this exe both: MODELS 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`, STRIP 144714 B `0641EDB7787600D236AE7B51186888DD`, TEXTURES 1605328 B `5B4E005A1E68797D735B282D718032CC`.
+
+### Not fixed / not verified
+
+* **Speed.** Everything above is 28 km/h. A car at race speed cannot turn across a 17 m opening (a ~20 degree diagonal needs ~9 m of run-up per 3.5 m of lateral); it meets the island's end kerb (still solid) exactly as it would in the real street. Not measured at 60+ km/h.
+* The AI does not use the gaps (no lane target through them): "AI need not use them". Only its safety was checked (table above).
+* Traffic cars follow fixed paths and never meet a gap; not exercised.
+* Human-driven only through the dev driver (steering bits through the real input path). Nobody has driven it by hand: `pending_to_test.csv` has the check list.
+* The openings at a fork's mouth / tail (4 spans) are left as they were.
+* The brief's route fingerprint 7820EC8E is not what the shared `_route/` held when the pick was taken: the pick decodes on B9839962 only. Both routes were measured.
+
+### Tooling
+
+`verify/geo_gapdrive.ps1 -Tag t [-Runs 0,4,11] [-Extra "TD5RE_GAP_DRIVE_BACK=1|TD5RE_GEO_FORK_GAP_ENGINE=0"] [-Width 1280 -Height 720]`: one launch per gap run, reads the runs from `log/race.log` (`median gap: run k main a..b <-> corridor c..d side s`, cached per route in `verify/out/gapruns_<place>_<route md5>.txt`), prints the RESULT line (crossed, first tick on the far side, wall events, peak speed) and writes `verify/out/gapdrive_<tag>/run<k>.log` (one `[GAPDRIVE]` line per tick). Knobs: `TD5RE_GAP_DRIVE_SPEED` (110), `_TURN` (1 span before the run), `_AIM` (3 spans into the corridor run), `_LANE`, `_BACK`, `_STEER_SIGN` (-1: STEER_LEFT turns toward +x, measured). Combine with `TD5RE_FRAMEDUMP_SPANS` + `TD5RE_FRAMEDUMP_SPAN_PATH` + `TD5RE_D3D12_CAPTURE=1` for frames of the crossing. A route to test left corridors: `verify/geo_n2_build.ps1 -Name lb -Pts "-34.921975,-57.966677;-34.920756,-57.942802"` (= 7820EC8E), copy its `_route/` over the place's.

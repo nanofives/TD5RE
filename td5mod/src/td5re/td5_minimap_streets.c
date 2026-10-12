@@ -45,6 +45,7 @@
 #include "td5_geo.h"
 #include "td5_geo_roads.h"
 #include "td5_minimap_streets.h"
+#include "deps/cjson/cJSON.h"       /* [1023 E] NETWORK.JSON fallback */
 
 #define LOG_TAG "hud"
 
@@ -174,16 +175,229 @@ static int mms_rank_for_edge(int kind)
     }
 }
 
+/* ===== SECTION: built-road mask (ROUND 1023 E item 11) ===================== */
+
+/* [ROUND 1023 E item 11] "On the minimap I see a road that doesn't exist."
+ *
+ * The geo source above is EVERY OSM way of the corridor, but the generator only
+ * builds the route, its fork corridors and the NETWORK.JSON side streets. On the
+ * La Plata route that is 8.46 km of drawn street inside the window of which 3.75
+ * km has a carriageway under it (verify/r1023e_minimap_phantom.py): 56 % of what
+ * the minimap shows is a street the 3D world has no road for, which is the
+ * "phantom road" Mariano flagged at span 703 (e175 s3).
+ *
+ * Rule: a chord is drawn only where something was BUILT under it. Built = a strip
+ * span (ring and fork corridors: td5_track_get_span_edges) or a street-network
+ * edge (live read-back, else the level's own NETWORK.JSON when the build was
+ * reused from disk). Each is stamped into a coarse byte raster at its own
+ * half-width plus MMS_BUILT_MARGIN, and a chord is cut into the runs of samples
+ * that land on a stamped cell, so a way that is built for 40 m and then stops is
+ * drawn for exactly those 40 m.
+ *
+ * Knob TD5RE_MINIMAP_BUILT_ONLY (default ON); =0 draws every OSM way as before.
+ * The raster lives only for the duration of mms_build_geo. */
+#define MMS_BUILT_CELL    1000.0
+#define MMS_BUILT_MARGIN  2000.0
+#define MMS_BUILT_STEP    1000.0
+#define MMS_BUILT_MAXCELL 24000000
+
+static struct { unsigned char *c; int w, h; double x0, z0; } s_bt;
+
+static void mms_built_close(void)
+{
+    free(s_bt.c);
+    memset(&s_bt, 0, sizeof s_bt);
+}
+
+static int mms_built_open(double minx, double minz, double maxx, double maxz)
+{
+    const double w = (maxx - minx) / MMS_BUILT_CELL + 2.0, h = (maxz - minz) / MMS_BUILT_CELL + 2.0;
+    mms_built_close();
+    if (w < 1.0 || h < 1.0 || w * h > (double)MMS_BUILT_MAXCELL) return 0;
+    s_bt.c = (unsigned char *)calloc((size_t)w * (size_t)h, 1);
+    if (!s_bt.c) return 0;
+    s_bt.w = (int)w; s_bt.h = (int)h; s_bt.x0 = minx; s_bt.z0 = minz;
+    return 1;
+}
+
+static void mms_built_stamp(double x, double z, double r)
+{
+    const int cx0 = (int)floor((x - r - s_bt.x0) / MMS_BUILT_CELL);
+    const int cx1 = (int)floor((x + r - s_bt.x0) / MMS_BUILT_CELL);
+    const int cz0 = (int)floor((z - r - s_bt.z0) / MMS_BUILT_CELL);
+    const int cz1 = (int)floor((z + r - s_bt.z0) / MMS_BUILT_CELL);
+    const double lim = r + 0.75 * MMS_BUILT_CELL;
+    int cx, cz;
+    for (cz = cz0; cz <= cz1; cz++) {
+        if (cz < 0 || cz >= s_bt.h) continue;
+        for (cx = cx0; cx <= cx1; cx++) {
+            double dx, dz;
+            if (cx < 0 || cx >= s_bt.w) continue;
+            dx = s_bt.x0 + ((double)cx + 0.5) * MMS_BUILT_CELL - x;
+            dz = s_bt.z0 + ((double)cz + 0.5) * MMS_BUILT_CELL - z;
+            if (dx * dx + dz * dz <= lim * lim)
+                s_bt.c[(size_t)cz * (size_t)s_bt.w + (size_t)cx] = 1;
+        }
+    }
+}
+
+/* Stamp the segment a->b with radius ra..rb, a disc every half cell. */
+static void mms_built_stamp_seg(double ax, double az, double ra, double bx, double bz, double rb)
+{
+    const double dx = bx - ax, dz = bz - az, len = sqrt(dx * dx + dz * dz);
+    const int n = (int)(len / (0.5 * MMS_BUILT_CELL)) + 1;
+    int k;
+    for (k = 0; k <= n; k++) {
+        const double t = (double)k / (double)n;
+        mms_built_stamp(ax + dx * t, az + dz * t, ra + (rb - ra) * t);
+    }
+}
+
+static int mms_built_at(double x, double z)
+{
+    const int cx = (int)floor((x - s_bt.x0) / MMS_BUILT_CELL);
+    const int cz = (int)floor((z - s_bt.z0) / MMS_BUILT_CELL);
+    if (cx < 0 || cx >= s_bt.w || cz < 0 || cz >= s_bt.h) return 0;
+    return s_bt.c[(size_t)cz * (size_t)s_bt.w + (size_t)cx];
+}
+
+/* Every strip span (ring + fork corridors), linked to its successor when the
+ * two centres are one span apart (a corridor's last span and the next
+ * corridor's first are not). Returns the number of spans stamped. */
+static int mms_built_stamp_strip(void)
+{
+    const int n = g_strip_span_count;
+    int i, stamped = 0, have_prev = 0;
+    double pcx = 0, pcz = 0, ph = 0;
+    for (i = 0; i < n; i++) {
+        int lx, lz, rx, rz;
+        double cx, cz, h;
+        td5_track_get_span_edges(i, &lx, &lz, &rx, &rz);
+        if (!lx && !lz && !rx && !rz) { have_prev = 0; continue; }
+        cx = 0.5 * ((double)lx + (double)rx);
+        cz = 0.5 * ((double)lz + (double)rz);
+        h  = 0.5 * sqrt(((double)rx - lx) * ((double)rx - lx) + ((double)rz - lz) * ((double)rz - lz))
+           + MMS_BUILT_MARGIN;
+        if (have_prev && (cx - pcx) * (cx - pcx) + (cz - pcz) * (cz - pcz) < 4500.0 * 4500.0)
+            mms_built_stamp_seg(pcx, pcz, ph, cx, cz, h);
+        else
+            mms_built_stamp(cx, cz, h);
+        pcx = cx; pcz = cz; ph = h; have_prev = 1;
+        stamped++;
+    }
+    return stamped;
+}
+
+/* The street network, from the generator's live arrays when this process built
+ * the level, else from the level's NETWORK.JSON (a build reused from disk never
+ * ran tg_network_build, so the live read-back is empty). Returns edges stamped. */
+static int mms_built_stamp_network(void)
+{
+    const int ne = td5_trackgen_street_edge_count();
+    int e, stamped = 0;
+    if (ne > 0) {
+        for (e = 0; e < ne; e++) {
+            const int np = td5_trackgen_street_edge_points(e);
+            const double hw = 0.5 * td5_trackgen_street_edge_width(e) + MMS_BUILT_MARGIN;
+            double qx = 0, qz = 0;
+            int k;
+            for (k = 0; k < np; k++) {
+                double x, z;
+                if (!td5_trackgen_street_edge_point(e, k, &x, &z)) break;
+                if (k > 0) mms_built_stamp_seg(qx, qz, hw, x, z, hw);
+                else mms_built_stamp(x, z, hw);
+                qx = x; qz = z;
+            }
+            stamped++;
+        }
+        return stamped;
+    }
+    {
+        char path[96];
+        TD5_File *f;
+        int64_t sz;
+        char *buf;
+        cJSON *root, *ej;
+        snprintf(path, sizeof path, "re/assets/levels/level%03d/NETWORK.JSON", td5_trackgen_level_number());
+        f = td5_plat_file_open(path, "rb");
+        if (!f) return 0;
+        sz = td5_plat_file_size(f);
+        if (sz <= 0 || sz > (int64_t)(32 << 20) ||
+            !(buf = (char *)malloc((size_t)sz + 1u))) { td5_plat_file_close(f); return 0; }
+        if (td5_plat_file_read(f, buf, (size_t)sz) != (size_t)sz) {
+            free(buf); td5_plat_file_close(f); return 0;
+        }
+        buf[sz] = '\0';
+        td5_plat_file_close(f);
+        root = cJSON_Parse(buf);
+        free(buf);
+        if (!root) return 0;
+        cJSON_ArrayForEach(ej, cJSON_GetObjectItem(root, "edges")) {
+            const cJSON *w = cJSON_GetObjectItem(ej, "w");
+            const double hw = 0.5 * (cJSON_IsNumber(w) ? w->valuedouble : 4500.0) + MMS_BUILT_MARGIN;
+            const cJSON *pt;
+            double qx = 0, qz = 0;
+            int k = 0;
+            cJSON_ArrayForEach(pt, cJSON_GetObjectItem(ej, "poly")) {
+                const cJSON *px = cJSON_GetArrayItem(pt, 0), *pz = cJSON_GetArrayItem(pt, 1);
+                if (!cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) break;
+                if (k > 0) mms_built_stamp_seg(qx, qz, hw, px->valuedouble, pz->valuedouble, hw);
+                else mms_built_stamp(px->valuedouble, pz->valuedouble, hw);
+                qx = px->valuedouble; qz = pz->valuedouble; k++;
+            }
+            stamped++;
+        }
+        cJSON_Delete(root);
+    }
+    return stamped;
+}
+
+/* Push the part of chord a->b that lies on built road: the chord is sampled
+ * every MMS_BUILT_STEP, and each run of built samples becomes one segment cut at
+ * the sample boundaries. Returns 1 on success, 0 when the array is full. The
+ * length left out (world units) accumulates in *dropped. */
+static int mms_push_built(double ax, double az, double bx, double bz, int rank, int name_id,
+                          double *dropped)
+{
+    const double dx = bx - ax, dz = bz - az, len = sqrt(dx * dx + dz * dz);
+    const int n = (len > MMS_BUILT_STEP) ? (int)ceil(len / MMS_BUILT_STEP) : 1;
+    int k, run0 = -1;
+    for (k = 0; k <= n; k++) {
+        const int on = (k < n) &&
+            mms_built_at(ax + dx * ((double)k + 0.5) / (double)n, az + dz * ((double)k + 0.5) / (double)n);
+        if (on && run0 < 0) run0 = k;
+        if (!on && run0 >= 0) {
+            const double t0 = (double)run0 / (double)n, t1 = (double)k / (double)n;
+            if (!mms_push(ax + dx * t0, az + dz * t0, ax + dx * t1, az + dz * t1, rank, name_id)) return 0;
+            run0 = -1;
+        }
+        if (!on && k < n && dropped) *dropped += len / (double)n;
+    }
+    return 1;
+}
+
 static int mms_build_geo(const char *slug)
 {
     double rminx = 0, rminz = 0, rmaxx = 0, rmaxz = 0;
-    int clipped = 0, nroads, i, have_bounds, full = 0;
+    int clipped = 0, nroads, i, have_bounds, full = 0, built_only = 0;
+    double dropped_len = 0.0;
 
     if (!td5_geo_roads_sync(slug)) return 0;
     nroads = td5_geo_roads_count();
     if (nroads <= 0) return 0;
 
     have_bounds = mms_route_bounds(&rminx, &rminz, &rmaxx, &rmaxz);
+
+    /* [ROUND 1023 E item 11] only where something was built (see the section above) */
+    if (have_bounds && g_strip_span_count > 0 && td5_env_flag_on("TD5RE_MINIMAP_BUILT_ONLY") &&
+        mms_built_open(rminx, rminz, rmaxx, rmaxz)) {
+        const int ns = mms_built_stamp_strip();
+        const int nn = mms_built_stamp_network();
+        built_only = 1;
+        TD5_LOG_I(LOG_TAG, "minimap streets: built-road mask from %d strip span(s) + %d network edge(s) "
+                  "(%s)", ns, nn, td5_trackgen_street_edge_count() > 0 ? "live" : "NETWORK.JSON");
+        if (ns <= 0) { built_only = 0; mms_built_close(); }
+    }
 
     for (i = 0; i < nroads && !full; i++) {
         const TD5_GeoRoad *r = td5_geo_roads_get(i);
@@ -197,7 +411,8 @@ static int mms_build_geo(const char *slug)
         for (k = 0; td5_geo_roads_point(r, k, &px, &pz); k++) {
             if (k == 0) { qx = px; qz = pz; continue; }
             if (!mms_chord_ok(qx, qz, px, pz)) continue;   /* keep accumulating */
-            if (!mms_push(qx, qz, px, pz, rank, r->name_id)) {
+            if (!(built_only ? mms_push_built(qx, qz, px, pz, rank, r->name_id, &dropped_len)
+                             : mms_push(qx, qz, px, pz, rank, r->name_id))) {
                 TD5_LOG_W(LOG_TAG, "minimap streets: hit the %d-segment ceiling "
                           "at way %d of %d; the rest of '%s' is not drawn",
                           MMS_MAX_SEGS, i, nroads, slug);
@@ -211,6 +426,10 @@ static int mms_build_geo(const char *slug)
     TD5_LOG_I(LOG_TAG, "minimap streets: %d segment(s) from %d OSM way(s) of "
               "'%s' (%d way(s) outside the route corridor)",
               s_mms.n, nroads, slug ? slug : "", clipped);
+    if (built_only)
+        TD5_LOG_I(LOG_TAG, "minimap streets: built-only left out %.0f m of street with no road under it",
+                  dropped_len / 430.0);
+    mms_built_close();
     return s_mms.n;
 }
 
@@ -272,7 +491,7 @@ int td5_mmstreets_sync(void)
      * moves when the auto track is regenerated in place -- which the first two
      * can miss, because a regenerate can land on the same allocation with the
      * same span count. */
-    edges = wild ? td5_trackgen_street_edge_count() : 0;
+    edges = (wild || geo) ? td5_trackgen_street_edge_count() : 0;
     if (s_mms.have &&
         s_mms.sig_slot  == slot &&
         s_mms.sig_strip == g_strip_span_base &&

@@ -2877,6 +2877,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
          * stands beside (see the CorrMap note in td5_track.c). Only forks whose corridor
          * has a different number of spans than the main stretch it bypasses write one, so
          * a build without such a fork is byte-identical to before. */
+        if (ok) tg_fork_gap_write(out);      /* [ROUND 1023 D] median gaps of real forks (no bytes without any) */
         if (ok) tg_bl_slnk_write(out);       /* [ROUND 1018 L] side links of the block loops (no bytes without any) */
         if (ok) {
             int j, nv = 0;
@@ -3838,9 +3839,27 @@ static int tg_scenery_entry(int e)
                                 /* owned by the far footway (td5_tg_avenue.c) */
                             } else if (tg_city_sidewalk_w(cb) > 0.0 &&
                                 td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
-                                if (!tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
+                                /* [ROUND 1023 B item 8] no kerb slab across the mouth of a real street
+                                 * that opens on this row (tg_net_geo_far_streets marks those rows). */
+                                const int street_gap = tg_pf_gap_at(fi, ck);
+                                if (!street_gap &&
+                                    !tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                              &meshes, moff, &nmesh, si)) ok = 0;
                                 if (ok && tg_fork_is_loop(fi) && tg_bl_inner_ok(fi, ck) &&
+                                    !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
+                                                                   &meshes, moff, &nmesh, si)) ok = 0;
+                                /* [ROUND 1023 B item 7] Mariano, level091 L91 e313 s0 p0:ROAD (corridor span
+                                 * 1252, the far arc of Plaza Miguel de Azcuenaga): "there's no sidewalk near
+                                 * here". MEASURED in the MODELS.DAT dump of entries 300..330: every corridor
+                                 * span of the free arc has ONE p44 pavement mesh, on the outer (town) side;
+                                 * the plaza side, between the road and the lawn, has none, so the carriageway
+                                 * runs straight onto bare ground apron. A real ring plaza has a pavement on
+                                 * both sides of the ring road: the inner slab is the same kerb + slab on the
+                                 * other edge. Free rows only (the classic rows run beside the avenue's other
+                                 * carriageway). The inner slab runs on through a street mouth (the street opens
+                                 * on the town side only). TD5RE_PF_INNER_WALK=0 restores the one-sided arc. */
+                                if (ok && tg_fork_is_free(fi) && !tg_fork_is_loop(fi) &&
+                                    !tg_pf_classic_span(fi, ck) && td5_env_flag_on("TD5RE_PF_INNER_WALK") &&
                                     !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                                    &meshes, moff, &nmesh, si)) ok = 0;
                             }
@@ -5120,7 +5139,9 @@ static unsigned int tg_env_hash(void)
              * launch; hashing those knobs made every tour a stamp miss and a
              * full regenerate (~20 s) of a build that is byte-identical. */
             && strncmp(*e, "TD5RE_FREECAM_", 14) != 0 && strncmp(*e, "TD5RE_CAM_FIXED", 15) != 0
-            && strncmp(*e, "TD5RE_AI_BRANCH_FORCE", 21) != 0 && strncmp(*e, "TD5RE_RACE_SEED", 15) != 0)
+            && strncmp(*e, "TD5RE_AI_BRANCH_FORCE", 21) != 0 && strncmp(*e, "TD5RE_RACE_SEED", 15) != 0
+            /* [ROUND 1023 D] the median-gap ENGINE knob and the dev gap driver act on a built strip only */
+            && strncmp(*e, "TD5RE_GAP_DRIVE", 15) != 0 && strncmp(*e, "TD5RE_GEO_FORK_GAP_ENGINE", 25) != 0)
             h = tg_fnv1a(h, *e, strlen(*e));
     /* [J8 GEO-PICK] The slot-driven place override deliberately never reaches
      * the environment, so hash it here or two places would produce the same

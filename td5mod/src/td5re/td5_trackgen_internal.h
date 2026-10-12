@@ -1529,6 +1529,8 @@ void tg_network_reset(void);
 void tg_network_build(const TG_NodeList *nl, int nspans_main);
 int  tg_network_built(void);
 int  tg_net_geo(void);                 /* [1014 B] streets came from the real map */
+long tg_net_apron_edge_count(void);    /* [R1023 A item 4] network edges that asked the drawn ground for their height */
+long tg_net_apron_lift_count(void);    /* ... and the vertices they lifted */
 void   tg_geo_lane_profile_reset(void);
 int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
 double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
@@ -4243,6 +4245,7 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b, double side
 int tg_fork_gore_page(int fork_index);
 int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side, int flush);
 int tg_fork_opening_at(int si);   /* [1015 A] a real median opening on a real fork's main span */
+int tg_fork_gap_write(TG_Buf *out);   /* [1023 D] the MGAP trailer: real median openings the car can cross; runs written */
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
@@ -4334,6 +4337,9 @@ int    tg_net_arm_get(int i, TG_NetArm *out);
 int    tg_net_near_other_street(double x, double z, double half, int ea, int eb);
 void   tg_net_loop_take(int e, int lo, int hi);
 int    tg_net_mouth_is_loop(int si, int left);
+/* [ROUND 1023 E item 12] 1 when a frontage merge ribbon lands on this (span, side): the main pavement slab
+ * is dropped there so the street meets the carriageway. */
+int    tg_net_fr_tip_here(int si, int left);
 void   tg_bl_reset(void);
 int    tg_bl_build(const TG_NodeList *nl, int ring);        /* after tg_network_build: plan + append the loops */
 int    tg_fork_is_loop(int fi);
@@ -4354,6 +4360,11 @@ int    tg_pf_row_node(int fi, int k);                /* [1016 K] main node index
 int    tg_pf_throat_span(int fi, int si);            /* main span si has throat geometry     */
 int    tg_pf_wedge_span(int fi, int si);             /* ... and is a free-corridor wedge span */
 int    tg_pf_classic_span(int fi, int ck);            /* corridor span ck runs beside the road on both rows */
+int    tg_pf_free_rows(int fi, int *k0, int *k1);     /* [1023 B] free rows k0 <= k < k1 of a plaza corridor */
+int    tg_pf_row_frame(int fi, int k, double *x, double *z, double *tx, double *tz, double *half);
+void   tg_pf_gap_mark(int fi, int k0, int k1);        /* [1023 B] rows where a real street opens: no kerb slab */
+int    tg_pf_gap_at(int fi, int k);
+int    tg_pf_rehost_buildings(const TG_NodeList *nl, int nspans);   /* [1023 B] far-arc footprints -> main spans */
 int    tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat);   /* an avenue's scenery road would stand on a plaza corridor */
 int    tg_pf_clear_span(int fi, int si);             /* scenery clearance window            */
 double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* outermost corridor edge beside span si */
@@ -4744,6 +4755,12 @@ int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side, double inner
  * (edge frame, network skew, network reach), so a diagonal street that sweeps across the neighbouring
  * spans' frontage is seen where the per-span "xstreet here" answer cannot see it. td5_tg_streets.c. */
 int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z);
+/* [ROUND 1023 C items 2 + 9] The laid cross-street SURFACES within TG_XSC_WIN spans of si on side sg, as quads
+ * (8 doubles each; kind[i] 0 = carriageway, 1 = pavement arm). td5_tg_streets.c. */
+int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, unsigned char *kind, int maxq);
+/* [ROUND 1023 C] The network's POLYLINE roads (ribbons, back streets, country lanes) as capsule segments
+ * (6 doubles each: x0 z0 x1 z1 half-width mouth-span-or-minus-1) that can reach the box. td5_tg_network.c. */
+int tg_net_polyroads(double bx0, double bz0, double bx1, double bz1, double *out, int maxseg);
 void tg_xstreet_audit(const TG_NodeList *nl, int si, double side, double inner_d, const char *what, int placed);
 int tg_block_is_park(int si, int left);
 /* Fork-back band sizing. Declared here rather than beside tg_city_emit_forkback
@@ -5864,6 +5881,7 @@ int  tg_far_surface_cover(const TG_FBHook *h, double x0, double z0,
                           double x1, double z1, TG_Surf *out);
 int  tg_surf_height(const TG_Surf *s, double x, double z, double *y);
 void tg_surf_free(TG_Surf *s);
+const TG_Surf *tg_street_apron_all(const TG_FBHook *h);   /* [R1023 A item 4] the drawn ground of the whole track, captured once */
 extern long s_r13_models_bytes;
 void tg_r13_band_report(const TG_NodeList *nl, int nspans);
 void tg_r14_band_report(const TG_NodeList *nl, int nspans);
