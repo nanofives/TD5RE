@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (real places: buildings off the road)" },
+    { CL_ITEM,    "La Plata: a building can no longer stand on the road or" },
+    { CL_ITEM,    "  on its pavement. A real building that clipped a bend, a" },
+    { CL_ITEM,    "  fork road or a side street is moved clear of it or left" },
+    { CL_ITEM,    "  out, and a side-street wall stands behind the whole" },
+    { CL_ITEM,    "  pavement, not in the middle of it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 11 (real places: roads that merge in)" },
     { CL_ITEM,    "La Plata: a real road that joins the main road at a" },
     { CL_ITEM,    "  shallow angle (Calle 54 beside the road, span 343) is now" },
