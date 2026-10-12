@@ -1367,3 +1367,19 @@ Mariano's picks decoded through MODELS.DAT (entry, slot): centre, radius, vertex
 * The start of a race on the avenue is AI-validated only (forced 6 seeds: one 3-car pile-up in the main arm at 78..90; natural 6 seeds: clean). Nobody has driven the grid by hand: check the countdown, the first 30 spans, the position after the first corner.
 * A merge give-way for corridor cars at a fork's rejoin (see above).
 * The scenery avenue's own carriageway before the left fork's mouth (spans 421..429) is still scenery-only (bend 0.267 rad/span refuses the window).
+
+### Round 1021 A, item 10: the void at the tail of fork 0 (spans 256-257)
+
+Group B (`GEO_STREETS_1021B.md`, "Not fixed" item 10) measured one real void on the route, 203 m2 south of spans 256-257, and could not find the cull. Found:
+
+* **It exists only in the single STREAMED build** (what the game runs), not in the `TD5RE_TG_DOUBLE_BUILD=1` build the identity scripts use (their MODELS.DAT has the skirt, and `geo_r1021b_void.py` reports nothing there either, which is why a rebuild through `geo_tags_identity.ps1` cannot see it; `verify/geo_tour.ps1` builds streamed).
+* **`geo_r1021b_void.py` counts a cell covered by any triangle, backface or vertical wall included.** `verify/geo_r1021a_voidup.py` (new) counts only UP-FACING triangles: the hole is 157 m2 at (385950, 24443), span 256, with only two vertical triangles over it. The top-down frame shows sky through it.
+* **Cull: the on-road guard** (`td5_tg_guard.c`, `[R8 item 7]` UNDER rule). `TD5RE_R8_GUARD_DIAG=256`: entry 64's two skirt meshes (kind skirt, marked @256 and @257) are `REJECT` with intr=1491, dy=[-71,+150.2]: the skirt of the span at the end of the fork window stands 0.2 above the 150 `TD5_TG_GUARD_FLUSH` over a carriageway authority that is wider than the road (`tg_road_half_width` takes the wider end of a span whose width is still ramping down the window tail). Spans 256 and 257 then have NO ground mesh at all (their slots hold only the road), exactly B's observation. race.log: `rejects by kind: skirt 3` streamed vs `1` double build.
+* A second, smaller cause: `tg_geo_avenue_slack_ok` gave the avenue's last row one span of slack TRAILING it (e = -1), so span 256, which has no carriageway, pushed its skirt's inner edge out to a far carriageway that is not there.
+
+| change | knob |
+|---|---|
+| the trailing avenue slack is taken only by a span that is itself in the avenue (mirror of the 1015 A entry rule) | `TD5RE_GEO_AVENUE_EXIT_SLACK=1` restores it |
+| on a geo place the UNDER-class limit is 200 instead of 150 (the R8 offenders lie +250..+450 over a road that doubles back) | `TD5RE_GEO_SKIRT_GUARD_TOL=0` restores 150 |
+
+Void (`geo_r1021a_voidup.py`, radius 9000, cell 300, streamed build via `geo_tour.ps1`, all other 1021 A knobs off), spans 240-275: **157.2 m2 at span 256 before; 92.5 m2 with the slack fix alone; 0 with the guard tolerance (alone or with the slack fix)**. The 345 m2 component at span 252 and the 5 m2 / 3 m2 ones at 253 / 258 are unchanged (they are in the up-facing count only, not a skirt). Frame: the hole is grass now (`tour_v10f_p10_top`). Gates: all seven 1021 A knobs `=0` on his route: MODELS.DAT 8398608 B `8965ACC9...` = master; default 8639092 B `3B0E0016BCDDC694BBB843DE29DCD161`, STRIP unchanged `208386E6...`; synthetic `E2F1F33C...` identical.

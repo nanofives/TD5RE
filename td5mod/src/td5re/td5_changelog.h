@@ -39,6 +39,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  the other carriageway from the first corner (the fork" },
     { CL_ITEM,    "  opens right after the start line; the grid stays on" },
     { CL_ITEM,    "  your carriageway)" },
+    { CL_ITEM,    "La Plata: the hole beside the road where Diagonal 73's" },
+    { CL_ITEM,    "  forked stretch ends (span ~256) is filled in" },
     { CL_ITEM,    "La Plata: a far-off fork road no longer vanishes while" },
     { CL_ITEM,    "  the main road is still in view" },
     { CL_ITEM,    "La Plata (your current route): the left turn-off round" },
