@@ -2542,6 +2542,8 @@ int tg_net_mouth_is_loop(int si, int left)
  * Geo only: callers gate on tg_net_follow_on() so the synthetic bytes stay as they were. */
 #define TG_NET_FOLLOW_LIFT 60.0
 #define TG_NET_FOLLOW_SEG  1500.0
+static const TG_Surf *s_net_apron;                      /* [ROUND 1023 A item 4] set around one edge's emission */
+static long s_net_apron_edges, s_net_apron_lifted;
 static double tg_net_ground_y(double x, double z)
 {
     const double hh = TG_WORLD_CELL * 0.5;
@@ -2550,7 +2552,28 @@ static double tg_net_ground_y(double x, double z)
     g1 = tg_world_h(x - hh, z); if (g1 > g) g = g1;
     g1 = tg_world_h(x, z + hh); if (g1 > g) g = g1;
     g1 = tg_world_h(x, z - hh); if (g1 > g) g = g1;
-    return g + TG_NET_FOLLOW_LIFT;
+    g += TG_NET_FOLLOW_LIFT;
+    if (s_net_apron) {                                  /* [ROUND 1023 A item 4] the drawn ground */
+        double ay;
+        if (tg_surf_height(s_net_apron, x, z, &ay) && ay + TG_NET_FOLLOW_LIFT > g) {
+            g = ay + TG_NET_FOLLOW_LIFT;
+            s_net_apron_lifted++;
+        }
+    }
+    return g;
+}
+
+/* [ROUND 1023 A item 4] A street's cross-section is flat across its width, and the drawn ground is not: a 4500-wide
+ * street laid on a chord that climbs 100 units across it was clear of the ground at its centre line and 6 units from it
+ * (coplanar, the "fight") along its high kerb. So the height of a piece is the highest ground under its centre AND both
+ * kerb points. Only while an apron scope is open (geo, TD5RE_GEO_STREET_APRON); otherwise the centre line alone. */
+static double tg_net_ground_yw(double cx, double cz, double lx, double lz, double rx, double rz)
+{
+    double y = tg_net_ground_y(cx, cz), t;
+    if (!s_net_apron) return y;
+    t = tg_net_ground_y(lx, lz); if (t > y) y = t;
+    t = tg_net_ground_y(rx, rz); if (t > y) y = t;
+    return y;
 }
 
 static int tg_net_follow_on(void)
@@ -2643,6 +2666,30 @@ static int tg_net_kerb_on_other_road(const TG_NetEdge *self, double x0, double z
 /* Tarmac for the polyline parts nothing else draws: back streets, and the
  * wandering half of a country loop (its first, straight segment is the R12
  * forest lane the terrain emitters already lay). Owned by the mouth span. */
+/* [ROUND 1023 A item 4] See tg_xst_apron_lift in td5_tg_streets.c: a network street stands on the ground that is DRAWN
+ * (skirts + far-terrain apron, captured per edge), not on the heightfield under it. The far part of the long cross
+ * street at spans 77..79 (p101, 28800 + 31600 units) lay 59 under .. 221 over the apron chord it crosses. Geo only. */
+static int tg_net_apron_begin(const TG_FBHook *h, const TG_NetEdge *e, TG_Surf *cap)
+{
+    memset(cap, 0, sizeof(*cap));
+    s_net_apron = NULL;
+    if (!tg_net_follow_on() || e->npoly < 2) return 0;
+    s_net_apron = tg_street_apron_all(h);
+    if (s_net_apron) s_net_apron_edges++;
+    return 0;                                        /* the capture is shared, nothing to free */
+}
+
+static void tg_net_apron_end(TG_Surf *cap, int open)
+{
+    (void)cap; (void)open;
+    s_net_apron = NULL;
+}
+
+#define NET_RET(v) do { tg_net_apron_end(&cap, cap_open); return (v); } while (0)
+
+long tg_net_apron_edge_count(void)   { return s_net_apron_edges; }
+long tg_net_apron_lift_count(void)   { return s_net_apron_lifted; }
+
 int tg_net_emit_entry(const TG_FBHook *h)
 {
     int i;
@@ -2650,8 +2697,13 @@ int tg_net_emit_entry(const TG_FBHook *h)
     for (i = 0; i < s_ne; i++) {
         const TG_NetEdge *e = &s_edges[i];
         int k, k0;
+        TG_Surf cap;
+        int cap_open = 0;
         if (e->mouth_si != h->si) continue;
         if (e->loop) continue;      /* [ROUND 1018 L] a block loop's corridor is this street; no second carriageway */
+        if (!(e->ribbon && e->npoly > 2) && e->kind != TG_NE_BACKSTREET &&
+            !(e->kind == TG_NE_COUNTRY && e->npoly > 2)) continue;       /* nothing is drawn for this edge */
+        cap_open = tg_net_apron_begin(h, e, &cap);                       /* [ROUND 1023 A item 4] */
         if (e->ribbon && e->npoly > 2) {
             /* [1014 B] ONE mesh, vertices shared and MITRED at every bend, so a
              * ring road is a continuous ribbon and not a string of separate
@@ -2711,9 +2763,15 @@ int tg_net_emit_entry(const TG_FBHook *h)
                         const double cz0 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t0;
                         const double cx1 = e->px[m] + (e->px[m + 1] - e->px[m]) * t1;
                         const double cz1 = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t1;
-                        const double y0 = tg_net_fr_y(e, m, t0, follow ? tg_net_ground_y(cx0, cz0)
+                        const double y0 = tg_net_fr_y(e, m, t0, follow
+                                                 ? tg_net_ground_yw(cx0, cz0,
+                                                       lx[m] + (lx[m + 1] - lx[m]) * t0, lz[m] + (lz[m + 1] - lz[m]) * t0,
+                                                       rx[m] + (rx[m + 1] - rx[m]) * t0, rz[m] + (rz[m + 1] - rz[m]) * t0)
                                                  : tg_world_h(e->px[m], e->pz[m]) + 30.0);
-                        const double y1 = tg_net_fr_y(e, m, t1, follow ? tg_net_ground_y(cx1, cz1)
+                        const double y1 = tg_net_fr_y(e, m, t1, follow
+                                                 ? tg_net_ground_yw(cx1, cz1,
+                                                       lx[m] + (lx[m + 1] - lx[m]) * t1, lz[m] + (lz[m + 1] - lz[m]) * t1,
+                                                       rx[m] + (rx[m + 1] - rx[m]) * t1, rz[m] + (rz[m + 1] - rz[m]) * t1)
                                                  : tg_world_h(e->px[m + 1], e->pz[m + 1]) + 30.0);
                         const double v0 = (vlen + sl * t0) / (double)TD5_TG_SPAN_LENGTH;
                         const double v1 = (vlen + sl * t1) / (double)TD5_TG_SPAN_LENGTH;
@@ -2730,11 +2788,11 @@ int tg_net_emit_entry(const TG_FBHook *h)
                 }
                 seg_nq = n / 4;
             }
-            if (*h->nmesh >= h->maxmesh - 1) return 1;
+            if (*h->nmesh >= h->maxmesh - 1) NET_RET(1);
             off = h->blk->len;
             h->moff[(*h->nmesh)++] = off;
             if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
-                return 0;
+                NET_RET(0);
             tg_guard_mark(off, h->blk->len, TG_GK_CROSS, h->si);
             tg_acct_range(TG_ACCT_CROSSING, h->si, h->si);
             /* [1014 B] and a raised footway on both kerbs, the same slab + kerb
@@ -2808,11 +2866,12 @@ int tg_net_emit_entry(const TG_FBHook *h)
                         size_t off2 = h->blk->len;
                         h->moff[(*h->nmesh)++] = off2;
                         if (!tg_write_quad_mesh(h->blk, sx, sy, sz, su, sv, sn, &spage, &snq, 1))
-                            return 0;
+                            NET_RET(0);
                         tg_guard_mark(off2, h->blk->len, TG_GK_CROSS, h->si);
                     }
                 }
             }
+            tg_net_apron_end(&cap, cap_open);
             continue;
         }
         if (e->kind == TG_NE_BACKSTREET) k0 = 0;
@@ -2840,7 +2899,7 @@ int tg_net_emit_entry(const TG_FBHook *h)
             uu[0] = 0.0; uu[1] = 1.0; uu[2] = 1.0; uu[3] = 0.0;
             vv[0] = vv[1] = 0.0; vv[2] = vv[3] = len / (double)TD5_TG_SPAN_LENGTH;
             }
-            if (*h->nmesh >= h->maxmesh - 1) return 1;
+            if (*h->nmesh >= h->maxmesh - 1) NET_RET(1);
             off = h->blk->len;
             h->moff[(*h->nmesh)++] = off;
             if (tg_net_follow_on()) {
@@ -2855,7 +2914,8 @@ int tg_net_emit_entry(const TG_FBHook *h)
                     const double az0 = e->pz[k] + (e->pz[k + 1] - e->pz[k]) * t0;
                     const double ax1 = e->px[k] + (e->px[k + 1] - e->px[k]) * t1;
                     const double az1 = e->pz[k] + (e->pz[k + 1] - e->pz[k]) * t1;
-                    const double y0 = tg_net_ground_y(ax0, az0), y1 = tg_net_ground_y(ax1, az1);
+                    const double y0 = tg_net_ground_yw(ax0, az0, ax0 - nx, az0 - nz, ax0 + nx, az0 + nz);
+                    const double y1 = tg_net_ground_yw(ax1, az1, ax1 - nx, az1 - nz, ax1 + nx, az1 + nz);
                     const double a0 = len * t0 / (double)TD5_TG_SPAN_LENGTH, a1 = len * t1 / (double)TD5_TG_SPAN_LENGTH;
                     qx[qn] = ax0 - nx; qz[qn] = az0 - nz; qy[qn] = y0; qu[qn] = along ? a0 : 0.0; qv[qn] = along ? 0.0 : a0; qn++;
                     qx[qn] = ax0 + nx; qz[qn] = az0 + nz; qy[qn] = y0; qu[qn] = along ? a0 : 1.0; qv[qn] = along ? 1.0 : a0; qn++;
@@ -2864,13 +2924,14 @@ int tg_net_emit_entry(const TG_FBHook *h)
                 }
                 seg_nq = qn / 4;
                 if (!tg_write_quad_mesh(h->blk, qx, qy, qz, qu, qv, qn, &seg_page, &seg_nq, 1))
-                    return 0;
+                    NET_RET(0);
             } else
             if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
-                return 0;
+                NET_RET(0);
             tg_guard_mark(off, h->blk->len, TG_GK_CROSS, h->si);
             tg_acct_range(TG_ACCT_CROSSING, h->si, h->si);
         }
+        tg_net_apron_end(&cap, cap_open);
     }
     return 1;
 }

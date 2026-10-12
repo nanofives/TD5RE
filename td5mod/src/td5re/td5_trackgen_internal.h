@@ -1529,6 +1529,8 @@ void tg_network_reset(void);
 void tg_network_build(const TG_NodeList *nl, int nspans_main);
 int  tg_network_built(void);
 int  tg_net_geo(void);                 /* [1014 B] streets came from the real map */
+long tg_net_apron_edge_count(void);    /* [R1023 A item 4] network edges that asked the drawn ground for their height */
+long tg_net_apron_lift_count(void);    /* ... and the vertices they lifted */
 void   tg_geo_lane_profile_reset(void);
 int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
 double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
@@ -5878,6 +5880,7 @@ int  tg_far_surface_cover(const TG_FBHook *h, double x0, double z0,
                           double x1, double z1, TG_Surf *out);
 int  tg_surf_height(const TG_Surf *s, double x, double z, double *y);
 void tg_surf_free(TG_Surf *s);
+const TG_Surf *tg_street_apron_all(const TG_FBHook *h);   /* [R1023 A item 4] the drawn ground of the whole track, captured once */
 extern long s_r13_models_bytes;
 void tg_r13_band_report(const TG_NodeList *nl, int nspans);
 void tg_r14_band_report(const TG_NodeList *nl, int nspans);
