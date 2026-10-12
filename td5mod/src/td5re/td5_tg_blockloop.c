@@ -86,6 +86,7 @@ typedef struct {
     double flare;
     double len_m, main_m, ratio, min_r_m;
     int    ncorner, npath;
+    int    beside_n;                 /* [1022 N2] bypassed-stretch spans that lie in a real fork on the other side */
     double *cx, *cz, *cy;            /* clen+1 chain points                              */
     unsigned char *inner;            /* [clen+1] the corridor's inner edge is clear of the road: a pavement may lie there */
     TG_NodeList rview;               /* v[F+1+k] = corridor row k                        */
@@ -406,6 +407,39 @@ static int bl_lanes_uniform(const TG_NodeList *nl, int lo, int hi)
     for (s = lo; s <= hi; s++)
         if (nl->v[s].lanes != nl->v[lo].lanes) return 0;
     return 1;
+}
+
+/* [ROUND 1022 N2] A loop beside a REAL fork. Span `s` of the loop's bypassed stretch lies in a real fork's cleared region (its widened
+ * approach through its rejoin). The loop may share the stretch when the fork's corridor is on the OTHER side of the road from the loop's:
+ * the main half keeps its free outer edge (the fork builder puts "main's left edge and branch's right edge on the road's edges"), so
+ * nothing of the loop's street meets the corridor. A MOUTH (departure / arrival, plus the slip lane's flush run and the uniform-lanes
+ * margin) must stand either on ordinary road, or -- TD5RE_GEO_LOOP_FORK_NWAY, the several-ways-off-one-window case -- inside the
+ * fork's CORE (F+1+pad .. R-1-pad: past the widened approach and short of the rejoin ramp), where the node's edge on the loop's
+ * side IS the main half's edge. 1 = the span blocks the loop. */
+static const TG_Fork *bl_fork_covering(int s)
+{
+    int i;
+    for (i = 0; i < s_fork_count; i++) {
+        const TG_Fork *f = &s_forks[i];
+        if (f->loopc > 0) continue;
+        if (f->freec > 0) { if (tg_pf_clear_span(i, s)) return f; continue; }
+        if (s >= f->F - TD5_TG_BRANCH_WIDEN - 2 && s <= f->R + 2) return f;
+    }
+    return NULL;
+}
+
+static int bl_fork_blocks(const BlPlan *P, int s)
+{
+    const int m = td5_env_int("TD5RE_GEO_LOOP_FORK_MOUTH_PAD", 4, 0, 30);
+    const TG_Fork *f;
+    if ((tg_fork_side_at(s) > 0 ? 1 : -1) == (P->sd > 0 ? 1 : -1)) return 1;      /* the fork's corridor lies on the loop's side */
+    if ((s >= P->a1_lo - m && s <= P->a1_hi + m) || (s >= P->a2_lo - m && s <= P->a2_hi + m)) {
+        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", 3, 0, 20);
+        f = bl_fork_covering(s);
+        if (!td5_env_flag_on("TD5RE_GEO_LOOP_FORK_NWAY") || !f || f->freec > 0) return 1;
+        if (s < f->F + 1 + pad || s > f->R - 1 - pad) return 1;
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------ candidates */
@@ -1076,8 +1110,14 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             }
             if (ok) {
                 int s;
-                for (s = P->F - 2; s <= P->R + 2 && ok; s++)
-                    if (tg_span_in_fork_clear(s) || tg_span_in_bridge_run(s) || tg_span_in_tunnel(s)) ok = 0;
+                const int beside = td5_env_flag_on("TD5RE_GEO_LOOP_FORK_BESIDE");   /* [1022 N2] a real fork on the OTHER side may share the stretch */
+                for (s = P->F - 2; s <= P->R + 2 && ok; s++) {
+                    if (tg_span_in_bridge_run(s) || tg_span_in_tunnel(s)) { ok = 0; break; }
+                    if (tg_span_in_fork_clear(s)) {
+                        if (!beside || bl_fork_blocks(P, s)) ok = 0;
+                        else P->beside_n++;
+                    }
+                }
                 if (!ok) bl_note(what, A->si, B->si, "a fork, bridge or tunnel is in the bypassed stretch");
             }
             if (ok) {   /* the corridor stays clear of every other street and of every carriageway but its mouths */
@@ -1109,8 +1149,9 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             snprintf(P->name, sizeof P->name, "%s", what);
             P->used = 1;
             if (s_diag)
-                TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] CANDIDATE %s side %s F=%d R=%d (arms si %d -> %d), corridor %d spans %.0f m over %.0f m of road (%.2fx), %d corner(s), tightest %.1f m, one-way edges: %d with / %d against",
-                          what, s_sd > 0 ? "LEFT" : "right", P->F, P->R, A->si, B->si, P->clen, P->len_m, P->main_m, P->ratio, P->ncorner, P->min_r_m, s_ow_with, s_ow_against);
+                TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] CANDIDATE %s side %s F=%d R=%d (arms si %d -> %d), corridor %d spans %.0f m over %.0f m of road (%.2fx), %d corner(s), tightest %.1f m, one-way edges: %d with / %d against%s",
+                          what, s_sd > 0 ? "LEFT" : "right", P->F, P->R, A->si, B->si, P->clen, P->len_m, P->main_m, P->ratio, P->ncorner, P->min_r_m, s_ow_with, s_ow_against,
+                          P->beside_n > 0 ? " [BESIDE REAL FORK]" : "");
             ncand++;
         }
     }

@@ -2811,10 +2811,10 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                       sentinel_end, ox, oy, oz);
                 }
                 TD5_LOG_I(LOG_TAG, "trackgen: fork %u %s F=%d len=%d corridor=%d..%d "
-                          "rejoin=%d sep=%.2f split %d->%d+%d%s (ring=%d)", i,
+                          "rejoin=%d sep=%.2f split %d->%d+%d%s (ring=%d) side=%c", i,
                           tg_fork_kind_name(s_forks[i].kind), F, L, b0,
                           sentinel_end, R, s_forks[i].sep, lanes, main_half, br_lanes,
-                          tg_fork_is_avenue((int)i) ? " divider" : "", ring);
+                          tg_fork_is_avenue((int)i) ? " divider" : "", ring, s_forks[i].side > 0 ? 'L' : 'R');
             }
         }
         s_ring_len = ring;
