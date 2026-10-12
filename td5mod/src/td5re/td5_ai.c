@@ -6299,7 +6299,7 @@ static double s_gov_vmax = 0.0;                             /* units/tick: strai
  * the old behaviour; _LOOK (spans), _GAP (ticks), _FLOOR / _FLOOR_MAIN (units/tick). */
 static int    s_mg_on = 1, s_mg_main_on = 1, s_mg_look = 26, s_mg_gap = 26;
 static double s_mg_floor = 150.0, s_mg_floor_m = 300.0;
-static int    s_mg_platoon = 1;         /* TD5RE_AI_MERGE_PLATOON=0: no leader coupling between corridor cars */
+static int    s_mg_platoon = 0;         /* TD5RE_AI_MERGE_PLATOON=1: couple a corridor car to a slower corridor car ahead of it (measured, NOT kept: see GEO_REAL_FORKS.md 1022 Q) */
 static double s_mg_hold = 3000.0;       /* units before the rejoin span where a yielding corridor car stops (the give-way line) */
 static double s_mg_clear = 3500.0;      /* units a road car must be past the rejoin span before a corridor car may enter behind it */
 static double s_mg_vstop = 150.0;       /* units/tick: a road car slower than this is an obstacle, not traffic to yield to */
@@ -6324,7 +6324,7 @@ static void ai_gov_read_knobs(void)
     s_mg_gap      = td5_env_int("TD5RE_AI_MERGE_GAP", 26, 4, 200);
     s_mg_floor    = (double)td5_env_int("TD5RE_AI_MERGE_FLOOR", 150, 0, 900);
     s_mg_floor_m  = (double)td5_env_int("TD5RE_AI_MERGE_FLOOR_MAIN", 300, 0, 900);
-    s_mg_platoon  = td5_env_flag_on("TD5RE_AI_MERGE_PLATOON");
+    s_mg_platoon  = td5_env_int("TD5RE_AI_MERGE_PLATOON", 0, 0, 1);
     s_mg_hold     = (double)td5_env_int("TD5RE_AI_MERGE_HOLD", 3000, 0, 9000);
     s_mg_clear    = (double)td5_env_int("TD5RE_AI_MERGE_CLEAR", 3500, 0, 9000);
     s_mg_vstop    = (double)td5_env_int("TD5RE_AI_MERGE_VSTOP", 150, 0, 900);
@@ -6484,9 +6484,11 @@ static double ai_merge_allowed(int slot, int span_raw, int span_count)
             }
             if (v_a < best) { best = v_a; who = o; }
         }
-        /* PLATOON: corridor cars close behind each other bump when the leader brakes (they react only inside 1..2
-         * spans, and a brake from 550 to 250 takes ~60 ticks). A follower for the same rejoin, 0.2 to 5 spans behind
-         * a corridor car that is slower than it, may not out-run that car by more than its spare distance. */
+        /* PLATOON (TD5RE_AI_MERGE_PLATOON=1, default OFF): corridor cars close behind each other bump when the leader
+         * brakes (they react only inside 1..2 spans, and a brake from 550 to 250 takes ~60 ticks). A follower for the
+         * same rejoin, 0.2 to 5 spans behind a corridor car that is slower than it, may not out-run that car by more
+         * than its spare distance. Measured: no gain on the side-by-side pairs that dominate the corridor hits, and
+         * 8 natural-choice crashes against 1 without it (30 seeds), so it is left off. */
         if (s_mg_platoon) {
             for (o = 0; o < n; o++) {
                 char *a;
