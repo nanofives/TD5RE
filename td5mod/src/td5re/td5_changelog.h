@@ -31,7 +31,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+
     { CL_DATE,    "October 11 (real places: turn off into side streets)" },
+    { CL_ITEM,    "La Plata: traffic lights are now overhead mast arms. A" },
+    { CL_ITEM,    "  pole at the corner, an arm over the road, two signal" },
+    { CL_ITEM,    "  heads hanging from it and a blue plate with the name" },
+    { CL_ITEM,    "  of the cross street (the street you are driving on is" },
+    { CL_ITEM,    "  on the back), a green countdown box and a sideways head" },
+    { CL_ITEM,    "  at the tip. The lights still cycle red/amber/green" },
     { CL_ITEM,    "La Plata (your current route): the left turn-off round" },
     { CL_ITEM,    "  the block at span ~600 and the right one at ~561 are" },
     { CL_ITEM,    "  now both on the track, overlapping: two ways off the" },

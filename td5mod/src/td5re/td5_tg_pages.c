@@ -3110,8 +3110,12 @@ static int tg_furniture_real_pages(void)
 
 static int tg_emit_textures(TG_Buf *out)
 {
-    TG_Buf pages[TD5_TG_PAGE_COUNT];
-    const unsigned int count = TD5_TG_PAGE_COUNT;
+    /* [1021 D] Street-name plate pages ride after the fixed block; 0 extra
+     * pages (the synthetic and knob-off case) leaves `count` exactly as it was
+     * and the page file byte-identical. */
+    TG_Buf pages[TD5_TG_PAGE_COUNT + TD5_TG_MASTARM_PAGES_MAX];
+    const int plate_pages = tg_mastarm_plate_pages();
+    const unsigned int count = TD5_TG_PAGE_COUNT + (unsigned int)plate_pages;
     unsigned int cursor = 4 + 4 * count;
     unsigned int i;
 
@@ -3413,6 +3417,11 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r9_pylon(&pages[TD5_TG_PAGE_R9_PYLON]);
     tg_emit_texture_page_r9_beam(&pages[TD5_TG_PAGE_R9_BEAM]);
     tg_emit_texture_page_r9_shore(&pages[TD5_TG_PAGE_R9_SHORE]);
+    {   /* [1021 D] street-name plates (geo mast-arm signals), extra pages */
+        int pl;
+        for (pl = 0; pl < plate_pages; pl++)
+            tg_mastarm_emit_plate_page(&pages[TD5_TG_PAGE_COUNT + pl], pl);
+    }
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {

@@ -1276,6 +1276,8 @@ typedef struct {
     double side;    /* +1 left of travel, -1 right              */
     double gap;     /* clearance past the carriageway half-width */
     double base_y;  /* footing                                  */
+    int    mast;    /* [1021 D] 1 = mast arm with plates cf/cb   */
+    int    cf, cb;  /* [1021 D] plate cells, front / back face   */
 } TG_SignalPlace;
 
 static TG_SignalPlace *s_sigp;
@@ -1327,6 +1329,7 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
     n = td5_geo_signals_sync();
     s_sig_in_cache = n;
     if (n <= 0) return;
+    tg_mastarm_prepare();     /* [1021 D] street-name plates, before any plan */
 
     s_sigp = (TG_SignalPlace *)malloc((size_t)n * sizeof(TG_SignalPlace));
     if (!s_sigp) return;
@@ -1396,6 +1399,12 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
         s_sigp[s_sigp_n].side   = side;
         s_sigp[s_sigp_n].gap    = gap;
         s_sigp[s_sigp_n].base_y = base_y;
+        s_sigp[s_sigp_n].mast   = tg_mastarm_plan(i, nd->width,
+                                                  abs(si - tg_finish_span(
+                                                      (s_ring_len > 0) ? s_ring_len
+                                                                       : nspans)) <= 6,
+                                                  &s_sigp[s_sigp_n].cf,
+                                                  &s_sigp[s_sigp_n].cb);
         s_sigp_n++;
     }
     s_sig_placed = s_sigp_n;
@@ -1420,6 +1429,15 @@ int tg_emit_geo_signals(const TG_NodeList *nl, int si,
         int lamp;
 
         if (p->si != si) continue;
+        /* [1021 D] Overhead mast arm + street-name plate. Falls through to the
+         * post light when the entry cannot hold it, so a busy span still gets
+         * its signal. */
+        if (p->mast && *nmesh + tg_mastarm_mesh_count(n->width) <= maxmesh) {
+            if (!tg_emit_mastarm(nl, si, p->side, p->gap, p->base_y,
+                                 p->cf, p->cb, blk, moff, nmesh))
+                return 0;
+            continue;
+        }
         if (*nmesh + TD5_TG_SIG_MESHES > maxmesh) { s_sig_drop_budget++; break; }
 
         lx = n->tz * p->side;
@@ -1512,12 +1530,14 @@ void tg_geo_signals_report(int nspans)
                   s_sig_drop_struct, s_sig_drop_side, s_sig_drop_street,
                   s_sig_drop_dup, s_sig_drop_budget,
                   td5_geo_signals_source());
+    tg_mastarm_report();      /* [1021 D] plates + mast-arm census */
     /* Where each head stands, so a capture (StartSpanOffset) can be aimed at
      * one without guessing. */
     {
         int i;
         for (i = 0; i < s_sigp_n; i++)
-            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side",
-                      i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right");
+            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side%s",
+                      i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right",
+                      s_sigp[i].mast ? " mast-arm" : "");
     }
 }

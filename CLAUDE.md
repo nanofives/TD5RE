@@ -216,6 +216,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_tg_terrain.c` | auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context |
 | `td5_tg_bridge.c` | auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness |
 | `td5_tg_furniture.c` | auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage, geo traffic lights |
+| `td5_tg_mastarm.c` | GEO TRACK: mast-arm traffic lights + street-name plates |
 | `td5_tg_prefab.c` | auto-track PREFABS: shipped set-piece geometry lifted out |
 | `td5_tg_pages.c` | auto-track TEXTURES.DAT: every page emitter (procedural + real shipped pages) |
 | `td5_trackgen_preview.c` | background route-preview worker (PORT-ONLY). |
