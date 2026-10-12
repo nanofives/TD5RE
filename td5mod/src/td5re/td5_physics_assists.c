@@ -23,6 +23,7 @@
 #include "td5_physics_internal.h"
 #include "td5_ai.h"
 #include "td5_track.h"
+#include "td5_trackgen.h"   /* [R1024 H] td5_trackgen_is_generated_slot (AI wedge reset scope) */
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* manual-recovery edge, FF signal consumers */
@@ -2557,6 +2558,76 @@ void td5_physics_update_stuck_recovery(void)
                     td5_camera_begin_recovery_glide(view);
             }
         }
+    }
+}
+
+/* ========================================================================
+ * [ROUND 1024 H] AI WEDGE RESET (PORT-ONLY, generated tracks only)
+ *
+ * MEASURED (level091 B9839962, fork harness seeds 33/66, plaza-merged fork F=89): an AI car
+ * tapped from behind at 330 units/tick spun on a 3-lane stretch, slid into the 2-lane bend at
+ * main span 410..414 (half-width 1500, the narrowing at 407/408) and sat there FACING BACKWARDS
+ * for 1200 ticks: steering at the +-102400 clamp, throttle flipping 255 / -256 every 40..80
+ * ticks, speed 0..66, wall contact every other tick. The scripted recovery (the original's
+ * blind steer-lock reverse/forward shuffle) never gets the car round: reversing into the wall for
+ * 80 ticks, driving forward 40 ticks into the other wall. TD5RE_AI_RECOVERY_MAX only aborts a
+ * script whose car stays under 24 units/tick, and this one reaches 66 in every forward phase, so
+ * the watchdog counter restarts. The harness counted the same car 9 times as a "spin"
+ * (a spin = 4 ticks of nose-backwards, and the shuffle keeps re-entering it).
+ *
+ * An AI racer on a generated track whose furthest normalised span has not moved for
+ * TD5RE_AI_WEDGE_RESET ticks (default 360 = 12 s, 0 = off) is put back on the road the way the
+ * human RESET CAR does it: in place, upright, velocities zero, nose along the track, ground-snapped
+ * (td5_physics_recover_player), and its recovery script is cancelled. Humans are never touched
+ * (the R / SELECT reset is theirs), shipped tracks never enter (generated slots only), a finished
+ * or paused car never counts. 360 ticks is four times the harness' "stall" line (90) and more than
+ * the longest single stall that cleared by itself on this route (slot 5, 270 ticks).
+ * ======================================================================== */
+static int     s_wedge_init = 0;
+static int     s_wedge_ticks = 360;
+static int     s_wedge_best[TD5_MAX_RACER_SLOTS];
+static int     s_wedge_idle[TD5_MAX_RACER_SLOTS];
+static int64_t s_wedge_last_tick = 0;     /* a smaller tick than last time = a new race: forget the old progress */
+
+void td5_physics_ai_wedge_reset_state(void)
+{
+    int i;
+    for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) { s_wedge_best[i] = -1; s_wedge_idle[i] = 0; }
+}
+
+void td5_physics_update_ai_wedge(void)
+{
+    int slot, nslots;
+    if (!s_wedge_init) {
+        s_wedge_init = 1;
+        s_wedge_ticks = td5_env_int("TD5RE_AI_WEDGE_RESET", 360, 0, 6000);
+        td5_physics_ai_wedge_reset_state();
+        TD5_LOG_I(LOG_TAG, "ai_wedge_reset: %s (TD5RE_AI_WEDGE_RESET=%d ticks)",
+                  s_wedge_ticks > 0 ? "ON" : "off", s_wedge_ticks);
+    }
+    if (s_wedge_ticks <= 0 || !g_actor_table_base || g_game_paused) return;
+    if ((int64_t)g_td5.simulation_tick_counter < s_wedge_last_tick) td5_physics_ai_wedge_reset_state();
+    s_wedge_last_tick = (int64_t)g_td5.simulation_tick_counter;
+    if (!td5_trackgen_is_generated_slot(g_td5.track_index)) return;
+    nslots = g_traffic_slot_base;
+    if (nslots > TD5_MAX_RACER_SLOTS) nslots = TD5_MAX_RACER_SLOTS;
+    for (slot = 0; slot < nslots; slot++) {
+        TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        int norm;
+        if (g_race_slot_state[slot] == 1 || !actor->car_definition_ptr ||
+            actor->finish_time != 0 || td5_game_slot_is_empty_racer(slot)) {
+            s_wedge_best[slot] = -1; s_wedge_idle[slot] = 0;
+            continue;
+        }
+        norm = (int)actor->track_span_normalized;
+        if (norm > s_wedge_best[slot]) { s_wedge_best[slot] = norm; s_wedge_idle[slot] = 0; continue; }
+        if (++s_wedge_idle[slot] < s_wedge_ticks) continue;
+        TD5_LOG_I(LOG_TAG, "ai_wedge_reset: slot=%d no progress past span %d for %d ticks (now span %d, raw %d) -> put back on the road",
+                  slot, s_wedge_best[slot], s_wedge_idle[slot], norm, (int)actor->track_span_raw);
+        if (td5_physics_recover_player(slot))
+            td5_ai_cancel_recovery_script(slot);
+        s_wedge_idle[slot] = 0;
+        s_wedge_best[slot] = norm;
     }
 }
 

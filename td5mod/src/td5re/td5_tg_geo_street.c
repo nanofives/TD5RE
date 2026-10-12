@@ -686,6 +686,7 @@ typedef struct {
     double ay, by;             /* ground height at each end             */
     double half;               /* half width, world units               */
     int    page;
+    int    way;                /* [R1024 F] index of the OSM way (td5_geo_footways_get) */
 } TG_FootSeg;
 
 static TG_FootSeg *s_fp;
@@ -865,6 +866,7 @@ void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans)
                                     s_fp[s_fp_n].ay = nd->y - tg_infra_ground_dy(nl, si, side, da, 0.0);
                                     s_fp[s_fp_n].by = nd->y - tg_infra_ground_dy(nl, si, side, db, 0.0);
                                     s_fp[s_fp_n].half = half;
+                                    s_fp[s_fp_n].way = i;
                                     s_fp[s_fp_n].page =
                                         (f->surface == TD5_GEO_FW_SURF_LOOSE)
                                         ? k_biomes[tg_scenery_biome_index(si)].ground_page
@@ -890,6 +892,7 @@ void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans)
             s_fp[s_fp_n].ay   = ay;
             s_fp[s_fp_n].by   = by;
             s_fp[s_fp_n].half = half;
+            s_fp[s_fp_n].way  = i;
             /* A loose-surfaced park path is not paving slabs. The three
              * surface buckets map onto pages that already exist: SMOOTH and
              * COBBLE both read as pavement at this scale, LOOSE takes the
@@ -903,6 +906,204 @@ void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans)
         }
     }
     s_fp_placed = s_fp_n;
+}
+
+/* ====================================================================== */
+/* SECTION: [ROUND 1024 F] footpaths with context only                    */
+/* ====================================================================== */
+
+/* [ROUND 1024 F1] "OSM cycleways 1016640879/880/881 and 1319964678/679, plus footway 1319964683, are drawn
+ * as thin tiled sidewalk strips standing alone in the city ground at e82 s24/s25 and e83 s13".
+ *
+ * MEASURED (ROADS.JSON + FOOTWAYS.JSON of La Plata against the generated MODELS.DAT). The five cycleways are
+ * the two paired bike lanes of Diagonal 73 (one per direction, 2.7 and 3.9 m from the OSM carriageways) and
+ * the cycleway that leaves their junction into Plaza Miguel de Azcuenaga. The generated route is the
+ * CONDITIONED route, 10-20 m off the real road on the bend there, so the bike lane is not beside any road
+ * that is drawn: way 1016640879 seg 0 is ONE quad 30762 units (71 m) long standing in the ground,
+ * 1319964678 seg 0 / 1319964683 seg 0 are 3.5-4.5 m stubs hanging off the junction, and 881 seg 2 is a 15 m
+ * strip beside a plaza ring street that is not drawn at that place. Each is laid at the SKIRT height profile
+ * (nd->y - tg_infra_ground_dy), which at the junction is 250-400 raw ABOVE the drawn ground, so they float
+ * as well as stand alone.
+ *
+ * RULE (what each way is, decided from where it lies relative to what IS drawn):
+ *   - lies inside the road's pavement band or within CTX (6 m) beyond its edge: the city pavement is what
+ *     the road draws there. The way MERGES into it and is not laid a second time (a cycle lane beside a road
+ *     is the road's pavement, not a separate ribbon floating at skirt height);
+ *   - lies beside a laid park polygon or a laid cross street (within CTX) and is nowhere stray: it is a
+ *     connector between drawn things and stays;
+ *   - any sample of a run farther than CTX from every drawn thing: the run is a stray fragment with no
+ *     context and is NOT drawn.
+ * A "run" is the chain of consecutive segments of one way that survived the earlier gates. Knob
+ * TD5RE_GEO_FOOTPATH_CONTEXT=0 restores the unfiltered set (master bytes). */
+#define TG_GEOFP_MERGE_M   1.5
+#define TG_GEOFP_CTX_M     6.0
+#define TG_GEOFP_CTX_STEP  600.0
+
+static long s_fp_ctx_runs, s_fp_ctx_run_kept, s_fp_ctx_run_stray, s_fp_ctx_seg_merged;
+static long s_fp_ctx_seg_stray, s_fp_ctx_seg_kept, s_fp_park_in, s_fp_park_cut_segs;
+
+int tg_geo_fp_on_street(const TG_NodeList *nl, double x, double z, double nx, double nz, double half)
+{
+    return tg_fp_on_street(nl, x, z, nx, nz, half);
+}
+
+/* the road-side band of span si on `side`: carriageway + pavement + clear margin. Same numbers the lawn clip
+ * (tg_lc_minout) and the plaza projection use, so "inside the pavement" means the same thing everywhere. */
+static double tg_fp_band_edge(const TG_NodeList *nl, int si, double side)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    return nl->v[si].width * 0.5
+         + tg_carriageway_clear_gap(nl, si, side,
+               tg_city_sidewalk_w_side_at(nl, si, side > 0.0, b),
+               TD5_TG_CARRIAGEWAY_MARGIN);
+}
+
+/* 0 = nothing drawn near, 1 = inside the road pavement band (merged), 2 = beside drawn context */
+static int tg_fp_ctx_class(const TG_NodeList *nl, double x, double z, double nx, double nz, double *edge_gap)
+{
+    const double merge = TG_GEOFP_MERGE_M * TG_GEOST_UPM;
+    const double ctx   = TG_GEOFP_CTX_M * TG_GEOST_UPM;
+    const int si = tg_guard_nearest_node(nl, 0, nl->count - 1, x, z);
+    double gap = 1e30;
+    if (si >= 1 && si + 1 < nl->count) {
+        const double lat = tg_bs_lateral(nl, si, x, z);
+        const double side = (lat >= 0.0) ? 1.0 : -1.0;
+        const double edge = tg_fp_band_edge(nl, si, side);
+        const double al = fabs(lat);
+        gap = al - edge;
+        /* within CTX of the pavement edge it is a ribbon laid beside the road: the road's own pavement
+         * covers it (merge). A bike lane 2..6 m outside the kerb was the lone strip of e82/e83. */
+        (void)merge;
+        if (al <= edge + ctx)   { if (edge_gap) *edge_gap = gap; return 1; }
+    }
+    if (edge_gap) *edge_gap = gap;
+    if (tg_geo_park_dist(x, z) <= ctx) return 2;
+    if (tg_fp_on_street(nl, x, z, nx, nz, ctx * 0.5)) return 2;
+    return 0;
+}
+
+/* The in-park part of a footway is laid by the plaza emitter ON THE LAWN (tg_geop_emit_park_paths, same
+ * outline); cut it out of the skirt-height set here so the two never draw the same ground. */
+static void tg_fp_park_cut(const TG_NodeList *nl)
+{
+    TG_FootSeg *out;
+    int i, n = 0;
+
+    out = (TG_FootSeg *)malloc((size_t)TG_GEOFP_MAX_SEG * sizeof(TG_FootSeg));
+    if (!out) return;
+    for (i = 0; i < s_fp_n; i++) {
+        const TG_FootSeg *s = &s_fp[i];
+        double ta[16], tb[16];
+        const int ni = tg_geo_park_cuts(s->ax, s->az, s->bx, s->bz, ta, tb, 16);
+        const double len = sqrt((s->bx - s->ax) * (s->bx - s->ax) + (s->bz - s->az) * (s->bz - s->az));
+        double u0 = 0.0;
+        int k;
+        if (ni <= 0) {
+            if (n < TG_GEOFP_MAX_SEG) out[n++] = *s;
+            continue;
+        }
+        s_fp_park_cut_segs++;
+        for (k = 0; k <= ni; k++) {
+            const double u1 = (k < ni) ? ta[k] : 1.0;
+            if (u1 > u0 && (u1 - u0) * len >= 150.0 && n < TG_GEOFP_MAX_SEG) {
+                TG_FootSeg c = *s;
+                const TG_Node *nd = &nl->v[s->si];
+                double mx, mz, la, lb, side;
+                c.ax = s->ax + (s->bx - s->ax) * u0;  c.az = s->az + (s->bz - s->az) * u0;
+                c.bx = s->ax + (s->bx - s->ax) * u1;  c.bz = s->az + (s->bz - s->az) * u1;
+                mx = (c.ax + c.bx) * 0.5; mz = (c.az + c.bz) * 0.5;
+                side = (tg_bs_lateral(nl, s->si, mx, mz) >= 0.0) ? 1.0 : -1.0;
+                la = fabs(tg_bs_lateral(nl, s->si, c.ax, c.az));
+                lb = fabs(tg_bs_lateral(nl, s->si, c.bx, c.bz));
+                c.ay = nd->y - tg_infra_ground_dy(nl, s->si, side, la, 0.0);
+                c.by = nd->y - tg_infra_ground_dy(nl, s->si, side, lb, 0.0);
+                out[n++] = c;
+            }
+            if (k < ni) u0 = tb[k];
+        }
+    }
+    s_fp_park_in = s_fp_n - n;
+    free(s_fp);
+    s_fp = out;
+    s_fp_n = n;
+}
+
+static void tg_fp_context_filter(const TG_NodeList *nl)
+{
+    unsigned char *keep;
+    int i, r0 = 0, logged = 0;
+
+    if (s_fp_n <= 0) return;
+    keep = (unsigned char *)calloc((size_t)s_fp_n, 1);
+    if (!keep) return;
+    while (r0 < s_fp_n) {
+        int r1 = r0, stray = 0, any_ctx = 0, k;
+        /* the run: consecutive entries of one way whose ends meet */
+        while (r1 + 1 < s_fp_n && s_fp[r1 + 1].way == s_fp[r0].way) {
+            const double dx = s_fp[r1 + 1].ax - s_fp[r1].bx, dz = s_fp[r1 + 1].az - s_fp[r1].bz;
+            if (dx * dx + dz * dz > 300.0 * 300.0) break;
+            r1++;
+        }
+        for (k = r0; k <= r1 && !stray; k++) {
+            const TG_FootSeg *s = &s_fp[k];
+            const double dx = s->bx - s->ax, dz = s->bz - s->az;
+            const double len = sqrt(dx * dx + dz * dz);
+            const int ns = (int)ceil(len / TG_GEOFP_CTX_STEP) < 1 ? 1 : (int)ceil(len / TG_GEOFP_CTX_STEP);
+            int q, all_merged = 1;
+            for (q = 0; q <= ns; q++) {
+                const double t = (double)q / (double)ns;
+                double eg = 0.0;
+                const int c = tg_fp_ctx_class(nl, s->ax + dx * t, s->az + dz * t,
+                                              len > 1.0 ? dz / len : 0.0, len > 1.0 ? -dx / len : 1.0, &eg);
+                if (c == 0) { stray = 1; break; }
+                if (c == 2) all_merged = 0;
+            }
+            if (!stray) { keep[k] = all_merged ? 2 : 1; any_ctx |= !all_merged; }
+        }
+        s_fp_ctx_runs++;
+        if (td5_env_flag_on("TD5RE_GEO_FOOTPATH_CTX_LOG") && logged < 400) {
+            const TG_FootSeg *a = &s_fp[r0], *b = &s_fp[r1];
+            logged++;
+            TD5_LOG_I(LOG_TAG, "[GEO FOOTPATHS] [1024 F] run way#%d span %d..%d (%.0f,%.0f)-(%.0f,%.0f) "
+                      "%d seg(s): %s", a->way, a->si, b->si, a->ax, a->az, b->bx, b->bz, r1 - r0 + 1,
+                      stray ? "STRAY (a sample has no drawn context within range) -> not drawn"
+                            : (any_ctx ? "beside drawn context -> kept"
+                                       : "inside the pavement band -> merged, not drawn twice"));
+        }
+        if (stray) {
+            s_fp_ctx_run_stray++;
+            s_fp_ctx_seg_stray += r1 - r0 + 1;
+            for (k = r0; k <= r1; k++) keep[k] = 0;
+        } else {
+            s_fp_ctx_run_kept++;
+        }
+        r0 = r1 + 1;
+    }
+    {
+        int n = 0;
+        for (i = 0; i < s_fp_n; i++) {
+            if (keep[i] == 1) { if (n != i) s_fp[n] = s_fp[i]; n++; s_fp_ctx_seg_kept++; }
+            else if (keep[i] == 2) s_fp_ctx_seg_merged++;
+        }
+        s_fp_n = n;
+    }
+    free(keep);
+}
+
+void tg_geo_footpaths_context(const TG_NodeList *nl, int nspans)
+{
+    (void)nspans;
+    s_fp_ctx_runs = s_fp_ctx_run_kept = s_fp_ctx_run_stray = s_fp_ctx_seg_merged = 0;
+    s_fp_ctx_seg_stray = s_fp_ctx_seg_kept = s_fp_park_in = s_fp_park_cut_segs = 0;
+    if (!s_fp || s_fp_n <= 0 || !nl) return;
+    if (td5_env_flag_on("TD5RE_GEO_PARK_PATHS")) tg_fp_park_cut(nl);
+    if (td5_env_flag_on("TD5RE_GEO_FOOTPATH_CONTEXT")) tg_fp_context_filter(nl);
+    s_fp_placed = s_fp_n;
+    TD5_LOG_I(LOG_TAG, "[GEO FOOTPATHS] [1024 F] %ld segment(s) cut out (laid on the park lawn instead, %ld "
+              "segment(s) touched a park); context filter: %ld run(s), %ld kept (%ld seg), %ld stray (%ld seg "
+              "not drawn), %ld seg merged into the road pavement | now %d segment(s)",
+              s_fp_park_in, s_fp_park_cut_segs, s_fp_ctx_runs, s_fp_ctx_run_kept, s_fp_ctx_seg_kept,
+              s_fp_ctx_run_stray, s_fp_ctx_seg_stray, s_fp_ctx_seg_merged, s_fp_n);
 }
 
 int tg_emit_geo_footpaths(const TG_NodeList *nl, int si,

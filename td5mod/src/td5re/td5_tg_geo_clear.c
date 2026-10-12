@@ -46,7 +46,7 @@ static int    s_nreg, s_regcap;
 static int    s_gw, s_gh;
 static double s_gx0, s_gz0;
 static int    s_ready;
-static long   s_walls, s_foot;
+static long   s_walls, s_foot, s_pushed;   /* [R1024 I] s_pushed: footprints moved clear of a road */
 
 static void gc_free(void)
 {
@@ -244,6 +244,16 @@ double tg_geo_building_clear_gap(const TG_NodeList *nl, int si, double side,
     return gap;
 }
 
+/* [ROUND 1024 I] exact polygon helpers, defined with the footprint clearance below */
+#ifndef FC_MAX_QUAD
+#define FC_MAX_QUAD   128
+#endif
+#ifndef FC_CLIP_MAX
+#define FC_CLIP_MAX 160
+#endif
+static double fc_poly_area(const double *x, const double *z, int n);
+static int fc_ring_in_quad(const double *rx, const double *rz, int n, const double *q, double *ox, double *oz);
+
 int tg_geo_prefab_blocked(const TG_NodeList *nl, int si, double side,
                           double x, double z, double fx, double fz)
 {
@@ -265,6 +275,10 @@ int tg_geo_prefab_blocked(const TG_NodeList *nl, int si, double side,
             const double pz = z + tz * (fx * 0.5 * i) + ( tx * side) * (fz * 0.5 * j);
             if (tg_geo_foreign_road_at(px, pz, n->x, n->z, tx, tz, own)) return 1;
         }
+    /* [ROUND 1024 I] ... and a LAID side street (level091 e145 s10: a 9 x 9 m set piece in the middle of a 4-way
+     * crossing of p101 streets). tg_geo_foreign_road_at knows the OSM ways, not the carriageways the cross-street
+     * emitter laid. The caller tries other spans. TD5RE_GEO_PREFAB_STREET=0 keeps the old test. */
+    if (tg_geo_rect_on_street(nl, si, x, z, tx * side, tz * side, fx * 0.5, fz * 0.5)) return 1;
     return 0;
 }
 
@@ -447,13 +461,163 @@ int tg_geo_poly_street_overlap(const TG_NodeList *nl, int si, double side,
     return car >= FC_CAR_M2 * upm * upm || (arms && arm >= FC_ARM_M2 * upm * upm);
 }
 
+static int fc_street_trim(const TG_NodeList *nl, int si, double side, double *rx, double *rz, int *pn, int nmax,
+                          int arms, const char **why, int *trimmed);
+
+/* ---- [ROUND 1024 I] EXACT STREET OVERLAP + TRIM ----------------------------------------------------
+ * tg_geo_poly_street_overlap samples the ring on a >= 700-unit grid, so a footprint that clips a street by
+ * a 0.3 .. 0.7 m sliver (the level091 sweep's 0.4 .. 1.0 m2 cases) reads 0.00 and stays, while one with 28 m2 on
+ * a street whose mouth is at span 0 is not seen at all. Here the overlap is exact (the ring clipped to each
+ * laid quad, Sutherland-Hodgman, which is right for a concave ring against a convex quad) and a footprint is
+ * TRIMMED, not dropped: the ring is clipped to the outside of the one quad edge that costs the least area, so
+ * the building keeps its place and loses the sliver on the street. It is dropped only when that costs more
+ * than 45% of its plan area (the street runs through the middle of it) or the ring cannot hold the new
+ * vertices. */
+#define FC_CLIP_MAX 160
+#define FC_TRIM_MIN_U2 (0.03 * 430.0 * 430.0)      /* less than this is the quad's edge rounding, not a sliver */
+#define FC_TRIM_KEEP   0.55
+
+static double fc_poly_area(const double *x, const double *z, int n)
+{
+    double a = 0.0;
+    int k;
+    for (k = 0; k < n; k++) { const int j = (k + 1) % n; a += x[k] * z[j] - x[j] * z[k]; }
+    return fabs(a) * 0.5;
+}
+
+/* Keep the part of (ix,iz) on the `keep` side (+1 / -1 of the signed cross product) of the line a->b. */
+static int fc_clip_half(const double *ix, const double *iz, int n, double ax, double az, double bx, double bz,
+                        double keep, double *ox, double *oz)
+{
+    int k, no = 0;
+    for (k = 0; k < n; k++) {
+        const int j = (k + 1) % n;
+        const double ck = keep * ((bx - ax) * (iz[k] - az) - (bz - az) * (ix[k] - ax));
+        const double cj = keep * ((bx - ax) * (iz[j] - az) - (bz - az) * (ix[j] - ax));
+        if (no > FC_CLIP_MAX - 3) return no;
+        if (ck >= 0.0) {
+            ox[no] = ix[k]; oz[no] = iz[k]; no++;
+            if (cj < 0.0) {
+                const double t = ck / (ck - cj);
+                ox[no] = ix[k] + (ix[j] - ix[k]) * t; oz[no] = iz[k] + (iz[j] - iz[k]) * t; no++;
+            }
+        } else if (cj >= 0.0) {
+            const double t = ck / (ck - cj);
+            ox[no] = ix[k] + (ix[j] - ix[k]) * t; oz[no] = iz[k] + (iz[j] - iz[k]) * t; no++;
+        }
+    }
+    return no;
+}
+
+/* Overlap polygon of the ring and a convex quad (8 doubles). Returns its vertex count. */
+static int fc_ring_in_quad(const double *rx, const double *rz, int n, const double *q, double *ox, double *oz)
+{
+    double ax[FC_CLIP_MAX], az[FC_CLIP_MAX], bx[FC_CLIP_MAX], bz[FC_CLIP_MAX];
+    const double *sx = rx, *sz = rz;
+    double ar = 0.0, keep;
+    int k, m = n, flip = 0;
+    for (k = 0; k < 4; k++) { const int j = (k + 1) & 3; ar += q[k * 2] * q[j * 2 + 1] - q[j * 2] * q[k * 2 + 1]; }
+    keep = (ar >= 0.0) ? 1.0 : -1.0;
+    for (k = 0; k < 4 && m >= 3; k++) {
+        const int j = (k + 1) & 3;
+        double *dx = flip ? bx : ax, *dz = flip ? bz : az;
+        m = fc_clip_half(sx, sz, m, q[k * 2], q[k * 2 + 1], q[j * 2], q[j * 2 + 1], keep, dx, dz);
+        sx = dx; sz = dz; flip = !flip;
+    }
+    if (m < 3) return 0;
+    for (k = 0; k < m; k++) { ox[k] = sx[k]; oz[k] = sz[k]; }
+    return m;
+}
+
+static int fc_street_trim(const TG_NodeList *nl, int si, double side, double *rx, double *rz, int *pn, int nmax,
+                          int arms, const char **why, int *trimmed)
+{
+    double quad[FC_MAX_QUAD * 8];
+    unsigned char qk[FC_MAX_QUAD];
+    double ox[FC_CLIP_MAX], oz[FC_CLIP_MAX], tx[FC_CLIP_MAX], tz[FC_CLIP_MAX], bx[FC_CLIP_MAX], bz[FC_CLIP_MAX];
+    double a0;
+    int nq, i, k, e, pass, n = *pn, did = 0;
+
+    if (!nl || n < 3 || !tg_network_built()) return 0;
+    nq = tg_xstreet_collect(nl, si, side, quad, qk, FC_MAX_QUAD);
+    if (nq <= 0) return 0;
+    a0 = fc_poly_area(rx, rz, n);
+    for (pass = 0; pass < 3; pass++) {
+        int changed = 0;
+        for (i = 0; i < nq; i++) {
+            const double *q = &quad[i * 8];
+            int no, bestN = 0, bestE = -1;
+            double bestA = -1.0, ovA, ar2 = 0.0, keep;
+            if (qk[i] && !arms) continue;
+            no = fc_ring_in_quad(rx, rz, n, q, ox, oz);
+            if (no < 3) continue;
+            ovA = fc_poly_area(ox, oz, no);
+            if (ovA < FC_TRIM_MIN_U2) continue;
+            /* clip to the outside of each quad edge; keep the clip that leaves the most building */
+            for (k = 0; k < 4; k++) { const int j = (k + 1) & 3; ar2 += q[k * 2] * q[j * 2 + 1] - q[j * 2] * q[k * 2 + 1]; }
+            keep = (ar2 >= 0.0) ? -1.0 : 1.0;               /* the side the quad's interior is NOT on */
+            for (e = 0; e < 4; e++) {
+                const int j = (e + 1) & 3;
+                const int m = fc_clip_half(rx, rz, n, q[e * 2], q[e * 2 + 1], q[j * 2], q[j * 2 + 1], keep, tx, tz);
+                const double am = (m >= 3) ? fc_poly_area(tx, tz, m) : 0.0;
+                if (am > bestA) {
+                    bestA = am; bestN = m; bestE = e;
+                    memcpy(bx, tx, sizeof(double) * (size_t)m);
+                    memcpy(bz, tz, sizeof(double) * (size_t)m);
+                }
+            }
+            if (bestE < 0 || bestN < 3 || bestN > nmax) { if (why) *why = "DROPPED on a street, the trim does not fit the ring"; return 1; }
+            if (bestA < FC_TRIM_KEEP * a0) { if (why) *why = "DROPPED on a street that runs through it"; return 1; }
+            memcpy(rx, bx, sizeof(double) * (size_t)bestN);
+            memcpy(rz, bz, sizeof(double) * (size_t)bestN);
+            n = bestN; did = 1; changed = 1;
+        }
+        if (!changed) break;
+    }
+    if (did) {
+        if (trimmed) *trimmed = 1;
+        *pn = n;
+    }
+    return 0;
+}
+
+/* [ROUND 1024 I] Is the rectangle (centre cx,cz; unit axis ux,uz; half extents hx along it, hz across) standing on a LAID
+side street or its pavement arm of either kerb? Exact area: >= 3 m2 of carriageway or >= 8 m2 of arm. */
+int tg_geo_rect_on_street(const TG_NodeList *nl, int si, double cx, double cz, double ux, double uz, double hx, double hz)
+{
+    double rx[4], rz[4], quad[FC_MAX_QUAD * 8], ox[FC_CLIP_MAX], oz[FC_CLIP_MAX], car = 0.0, arm = 0.0;
+    unsigned char qk[FC_MAX_QUAD];
+    int sg, nq, k, no;
+    if (!td5_geo_loaded() || !tg_network_built() || !td5_env_flag_on("TD5RE_GEO_PREFAB_STREET")) return 0;
+    for (k = 0; k < 4; k++) {
+        const double ii = (k == 0 || k == 3) ? -1.0 : 1.0, jj = (k < 2) ? -1.0 : 1.0;
+        rx[k] = cx + ux * hx * ii - uz * hz * jj;
+        rz[k] = cz + uz * hx * ii + ux * hz * jj;
+    }
+    for (sg = -1; sg <= 1; sg += 2) {
+        nq = tg_xstreet_collect(nl, si, (double)sg, quad, qk, FC_MAX_QUAD);
+        for (k = 0; k < nq; k++) {
+            no = fc_ring_in_quad(rx, rz, 4, &quad[k * 8], ox, oz);
+            if (no < 3) continue;
+            if (qk[k]) arm += fc_poly_area(ox, oz, no); else car += fc_poly_area(ox, oz, no);
+        }
+    }
+    return car >= 3.0 * 430.0 * 430.0 || arm >= 8.0 * 430.0 * 430.0;
+}
+
 static int fc_core(const TG_NodeList *nl, int si, double side, double base_y,
-                   double *rx, double *rz, int n, double maxpush, int arms, const char **why)
+                   double *rx, double *rz, int n, double maxpush, int arms, const char **why,
+                   int *pn_out, int nmax, int *trimmed)
 {
     double sx[FC_MAX_SAMP], sz[FC_MAX_SAMP], area, cell, total = 0.0;
     FcSeg  cand[FC_MAX_SEG];
     double x0, z0, x1, z1;
     int    ns, ni, k, i, pass, ncand, fk, kk;
+    /* [ROUND 1024 I] a REAL footprint (maxpush > 0 and a ring it may reshape) is cleared of every road without
+     * the 300 graze, and trimmed rather than dropped where it only clips a laid street. Walls and boxes keep
+     * the graze and the drop. TD5RE_GEO_BLD_FOOTTRIM=0 restores both. */
+    const int v2 = pn_out && maxpush > 0.0 && td5_env_flag_on("TD5RE_GEO_BLD_FOOTTRIM");
+    const double graze = v2 ? 0.0 : FC_GRAZE;
 
     if (!nl || n < 3 || !td5_geo_loaded()) return 0;
     if (!td5_env_flag_on("TD5RE_GEO_BLD_FOOTCLEAR")) return 0;
@@ -521,6 +685,41 @@ static int fc_core(const TG_NodeList *nl, int si, double side, double base_y,
                             a->y, b->y, base_y, x0, z0, x1, z1);
             }
         }
+        /* [ROUND 1024 I] A DIVIDED AVENUE's far carriageway and its far footway. Neither is a span of `nl`
+         * (the scenery carriageway is a mesh at the sidecar's lateral, tg_emit_geo_avenue) and neither is a
+         * fork row, so the capsules above never saw them: a footprint hosted beside the avenue was set back
+         * by tg_geo_building_clear_gap from ITS span's footway width, while the footway it stands beside is
+         * laid span by span at whatever width the neighbours' ways say (measured: 2600 beside a 1090 host).
+         * The capsule is the far carriageway's own half width + the WIDEST footway of the span and its two
+         * neighbours (the emitter blends a join to the mean of the two, never past the wider). */
+        if (td5_env_flag_on("TD5RE_GEO_BLD_AVCLEAR") && tg_geo_avenue_n() >= 1) {
+            for (i = 0; i + 1 < nl->count; i++) {
+                const TG_Node *a = &nl->v[i], *b = &nl->v[i + 1];
+                double off0 = 0.0, off1 = 0.0, w = 0.0, wj;
+                int lanes0 = 2, lanes1 = 2, open0 = 0, open1 = 0, j, fi;
+                double c0x, c0z, c1x, c1z;
+                if (fabs(b->x - a->x) > 6000.0 || fabs(b->z - a->z) > 6000.0) continue;
+                if (a->x < x0 - 30000.0 || a->x > x1 + 30000.0 || a->z < z0 - 30000.0 || a->z > z1 + 30000.0) continue;
+                if (!td5_geo_avenue_at(i, &off0, &lanes0, &open0)) continue;
+                fi = tg_fork_of_main(i);
+                if (fi >= 0 && s_forks[fi].real > 0) continue;        /* a real fork's corridor rows are the carriageway */
+                if (tg_pf_scenery_clash(nl, i, off0 - tg_realfork_node_delta(i))) continue;
+                off0 -= tg_realfork_node_delta(i);
+                if (td5_geo_avenue_at(i + 1, &off1, &lanes1, &open1)) off1 -= tg_realfork_node_delta(i + 1);
+                else { off1 = off0; lanes1 = lanes0; }
+                if (!open0)
+                    for (j = i - 1; j <= i + 1; j++) {
+                        if (j < 0 || j >= nl->count) continue;
+                        wj = tg_geo_sidewalk_w_side(j, off0 >= 0.0);
+                        if (wj > w) w = wj;
+                    }
+                c0x = a->x + a->tz * off0; c0z = a->z - a->tx * off0;
+                c1x = b->x + b->tz * off1; c1z = b->z - b->tx * off1;
+                fc_push_seg(cand, &ncand, c0x, c0z, c1x, c1z,
+                            0.5 * (double)(lanes0 > lanes1 ? lanes0 : lanes1) * (double)TD5_TG_LANE_WIDTH, w,
+                            a->y, b->y, base_y, x0, z0, x1, z1);
+            }
+        }
         /* the network's polyline roads: ribbons, back streets, country lanes */
         {
             double pr[6 * 96];
@@ -534,7 +733,7 @@ static int fc_core(const TG_NodeList *nl, int si, double side, double base_y,
         for (k = 0; k < ns; k++) {
             for (i = 0; i < ncand; i++) {
                 const FcSeg *g = &cand[i];
-                const double hw = g->hw + g->band - FC_GRAZE;
+                const double hw = g->hw + g->band - graze;
                 const double dx = g->x1 - g->x0, dz = g->z1 - g->z0;
                 const double L2 = dx * dx + dz * dz;
                 double t, px, pz, d, pen;
@@ -556,12 +755,19 @@ static int fc_core(const TG_NodeList *nl, int si, double side, double base_y,
         worst += 50.0;
         total += worst;
         if (total > maxpush) { if (why) *why = "DROPPED on a road past the push cap"; return 1; }
+        if (v2 && pass == 0) s_pushed++;
         for (k = 0; k < n; k++)  { rx[k] += ux * worst; rz[k] += uz * worst; }
         for (k = 0; k < ns; k++) { sx[k] += ux * worst; sz[k] += uz * worst; }
     }
     if (pass >= 6) { if (why) *why = "DROPPED on a road, push did not settle"; return 1; }
 
     /* --- STREETS: laid carriageway + pavement arm, by plan area -------------------------------- */
+    if (v2) {
+        int nn = n;
+        const int r = fc_street_trim(nl, si, side, rx, rz, &nn, nmax, arms, why, trimmed);
+        *pn_out = nn;
+        return r;
+    }
     if (tg_geo_poly_street_overlap(nl, si, side, rx, rz, n, arms, NULL, NULL)) {
         if (why) *why = "DROPPED on a cross street or its pavement arm";
         return 1;
@@ -572,7 +778,16 @@ static int fc_core(const TG_NodeList *nl, int si, double side, double base_y,
 int tg_geo_footprint_clear(const TG_NodeList *nl, int si, double side, double base_y,
                            double *rx, double *rz, int n, double maxpush, const char **why)
 {
-    return fc_core(nl, si, side, base_y, rx, rz, n, maxpush, 1, why);
+    return fc_core(nl, si, side, base_y, rx, rz, n, maxpush, 1, why, NULL, 0, NULL);
+}
+
+/* [ROUND 1024 I] tg_geo_footprint_clear for a REAL footprint whose ring may be reshaped: *pn comes back as the
+ * new vertex count (<= nmax), *trimmed is set to 1 when a laid street's edge cut a sliver off the ring. */
+int tg_geo_footprint_clear_ring(const TG_NodeList *nl, int si, double side, double base_y,
+                                double *rx, double *rz, int *pn, int nmax, double maxpush,
+                                const char **why, int *trimmed)
+{
+    return fc_core(nl, si, side, base_y, rx, rz, *pn, maxpush, 1, why, pn, nmax, trimmed);
 }
 
 /* A cross-street frontage wall's base line (cx,cz) + (ox,oz) * flen, as a 300-wide strip. It stands at the
@@ -586,7 +801,7 @@ int tg_geo_wall_clear(const TG_NodeList *nl, int si, double side, double by,
     qx[1] = cx + oz * 150.0;             qz[1] = cz - ox * 150.0;
     qx[2] = cx + ox * flen + oz * 150.0; qz[2] = cz + oz * flen - ox * 150.0;
     qx[3] = cx + ox * flen - oz * 150.0; qz[3] = cz + oz * flen + ox * 150.0;
-    return fc_core(nl, si, side, by, qx, qz, 4, 0.0, 0, NULL);
+    return fc_core(nl, si, side, by, qx, qz, 4, 0.0, 0, NULL, NULL, 0, NULL);
 }
 
 /* A procedural box (tg_bg_building_box: front edge (bx,bz) + (ax,az), back vectors (lx0,lz0)/(lx1,lz1) of
@@ -600,9 +815,10 @@ int tg_geo_box_clear(const TG_NodeList *nl, int si, double side, double by,
     qx[1] = bx + ax;                   qz[1] = bz + az;
     qx[2] = bx + ax + lx1 * depth;     qz[2] = bz + az + lz1 * depth;
     qx[3] = bx + lx0 * depth;          qz[3] = bz + lz0 * depth;
-    return tg_geo_footprint_clear(nl, si, side, by, qx, qz, 4, 0.0, NULL);
+    return fc_core(nl, si, side, by, qx, qz, 4, 0.0, 1, NULL, NULL, 0, NULL);
 }
 
+long tg_geo_clear_pushed(void)        { return s_pushed; }
 void tg_geo_clear_note_wall(void)      { s_walls++; }
 void tg_geo_clear_note_footprint(void) { s_foot++; }
 

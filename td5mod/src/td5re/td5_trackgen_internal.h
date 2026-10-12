@@ -816,6 +816,10 @@ int tg_fork_of_main(int si);
 int tg_fork_of_corridor(int si, int *k);
 int tg_city_crossing_here(int si);   /* [R3 item 7] fence break gate */
 extern signed char s_xhere_memo[TD5_TG_MAX_SPANS];
+extern signed char s_xorph_memo[TD5_TG_MAX_SPANS];
+extern signed char s_xcov_state[TD5_TG_MAX_SPANS][2];
+extern double      s_xcov_q[TD5_TG_MAX_SPANS][2][8];
+extern int         s_xcov_armed;
 extern signed char s_xbase_memo[TD5_TG_MAX_SPANS];
 extern int s_xmemo_armed;
 void tg_xmemo_reset(int armed);
@@ -2977,7 +2981,7 @@ int  tg_prefab_add(int si, int pf, double ox, double oy, double oz,
                    double yaw_c, double yaw_s);
 int  tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
                      int side, double clearance);
-int  tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
+int  tg_prefab_emit_span(const TG_NodeList *nl, int si, TG_Buf *meshes, size_t *moff, int *nmesh,
                          int entry);
 double      tg_prefab_half_depth(int pf);
 const char *tg_prefab_name(int pf);
@@ -6148,6 +6152,15 @@ int  tg_emit_geo_bus_stops(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *m
 
 void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans);
 int  tg_emit_geo_footpaths(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+/* [ROUND 1024 F] Serial prepass AFTER tg_geo_city_prepare: tg_geo_park_prepare tables every park outline the
+ * plaza emitter will lay (projected exactly as it projects them) with the real footway pieces inside; then
+ * tg_geo_footpaths_context cuts those in-park parts out of the skirt-height footpath set and drops the strays
+ * (fragments with no drawn context) and the ones the road pavement already covers. See td5_tg_geo_street.c. */
+int    tg_geo_park_prepare(const TG_NodeList *nl, int nprep);
+int    tg_geo_park_cuts(double ax, double az, double bx, double bz, double *ta, double *tb, int max);
+double tg_geo_park_dist(double x, double z);
+int    tg_geo_fp_on_street(const TG_NodeList *nl, double x, double z, double nx, double nz, double half);
+void   tg_geo_footpaths_context(const TG_NodeList *nl, int nspans);
 
 /* One report for all three. */
 void tg_geo_street_report(int nspans);

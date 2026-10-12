@@ -388,36 +388,149 @@ int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
  * the longest street (R8_XSTREET_MAX / span length) at 45 degrees. Pure function of the network. */
 #define TG_XSC_WIN 24
 
-int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z)
+/* [ROUND 1024 I] The window used to start at span 1, but a street can leave span 0 (level091: the 20000-unit street at
+ * x 0..1500 runs past two real footprints that the tests never saw). Geo only: a synthetic build keeps span 1. */
+/* [1024 integ] The street guards below run once per span of a 49-span window for every sample point a caller
+ * asks about (park paths, footprints, furniture), on the scenery worker threads. getenv takes the CRT's process
+ * lock, so reading the knobs per span made two workers queue on it and the streamed build crawled (ready 0 after
+ * minutes on level091). The knobs are read ONCE per process here; values cannot change mid-run. */
+static int tg_xsc_env(volatile int *slot, const char *name)
+{
+    int v = *slot;
+    if (v < 0) { v = td5_env_flag_on(name) ? 1 : 0; *slot = v; }
+    return v;
+}
+static volatile int s_xsc_env_span0 = -1, s_xsc_env_orphan = -1, s_xsc_env_cross = -1, s_xsc_env_xbridge = -1;
+
+static int tg_xsc_lo_min(void)
+{
+    return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_span0, "TD5RE_GEO_XSTREET_SPAN0")) ? 0 : 1;
+}
+
+/* [ROUND 1024 I] The EMITTER lays a side street on every paved span whose frontage is open (a gap) even where the
+ * network has no mouth: tg_xstreet_reach_at falls back to the biome's default reach, and tg_city_emit_crossstreet
+ * never asks tg_xstreet_here. So the street at span 0 of level091 (20220 units long, x 0..1500) existed for the
+ * mesh and not for tg_xstreet_here / _covers / _collect, which every guard asks. This answers the emitter's own
+ * outer gates (the per-side ones stay in the callers). Geo only; TD5RE_GEO_XSTREET_ORPHAN=0 restores the old set. */
+/* [ROUND 1024 I] ... and with the emitter's own reach inputs. tg_city_emit_crossstreet is handed the span's
+ * tg_city_sidewalk_w_at (the geo / wide-avenue width, up to 720 units wider than the biome's table field) and the
+ * span's BLENDED biome, so on a street the network has no mouth for (default reach) the quad here was 720 short
+ * of the mesh (19500 vs 20220 on level091's span-0 street). Network mouths carry their own reach and ignore both.
+ * Geo only; TD5RE_GEO_XSTREET_ORPHAN=0 restores the old arguments. */
+static const TG_Biome *tg_xst_reach_biome(int m)
+{
+    return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_orphan, "TD5RE_GEO_XSTREET_ORPHAN")) ? &k_biomes[tg_biome_for_span(m)]
+                                                                          : &k_biomes[tg_scenery_biome_index(m)];
+}
+
+static double tg_xst_reach_sw(const TG_NodeList *nl, int m, const TG_Biome *b)
+{
+    return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_orphan, "TD5RE_GEO_XSTREET_ORPHAN")) ? tg_city_sidewalk_w_at(nl, m, b)
+                                                                          : tg_city_sidewalk_w(b);
+}
+
+static int tg_xst_orphan_raw(const TG_NodeList *nl, int m);
+
+/* [1024 integ] tg_xstreet_covers / _collect ask this for EVERY span of a 49-span window per sample point, and
+ * round 1024 F asks per park-path piece, so on level091 the streamed scenery workers spent minutes here (the
+ * countdown held at "ready 0"). Every input is fixed once the network is built, so it is memoised per span in
+ * the R14 GENPERF crossing memo (armed after the prepass, cleared by tg_xmemo_reset). Bytes unchanged. */
+/* The memo holds the orphan answer AND the frontage gate the callers apply next (tg_facade_built, which reads two
+ * knobs per call): bit 0 = an orphan street may stand on the right, bit 1 = on the left. A span whose frontage is
+ * built is rejected by the callers on the very next line, so folding it in changes no answer. */
+static int tg_xst_orphan(const TG_NodeList *nl, int m, int left)
+{
+    int r;
+    if (s_xmemo_armed && m >= 0 && m < TD5_TG_MAX_SPANS) {
+        r = s_xorph_memo[m];
+        if (r < 0) {
+            r = 0;
+            if (tg_xst_orphan_raw(nl, m)) {
+                if (!tg_facade_built(m, 0)) r |= 1;
+                if (!tg_facade_built(m, 1)) r |= 2;
+            }
+            s_xorph_memo[m] = (signed char)r;
+        }
+        return (r >> (left ? 1 : 0)) & 1;
+    }
+    return tg_xst_orphan_raw(nl, m);
+}
+
+static int tg_xst_orphan_raw(const TG_NodeList *nl, int m)
+{
+    if (!td5_geo_loaded() || !tg_xsc_env(&s_xsc_env_orphan, "TD5RE_GEO_XSTREET_ORPHAN")) return 0;
+    if (!tg_xsc_env(&s_xsc_env_cross, "TD5RE_AUTOTRACK_CROSS_STREETS")) return 0;
+    if (m < 0 || m + 1 >= nl->count) return 0;
+    if (tg_span_in_bridge_run(m) || tg_up_xclear_span(m) || tg_r13_approach_span(m)) return 0;
+    if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(m)]) > 0.0)) return 0;
+    if (tg_xsc_env(&s_xsc_env_xbridge, "TD5RE_AUTOTRACK_XBRIDGE_GATE") && tg_span_near_bridge(m, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    return 1;
+}
+
+/* The street quad tg_xstreet_covers tests at span m on one side: the emitter's own outer and per-side gates, frame,
+ * skew and reach. 1 = a street stands there (qx/qz filled), 0 = none. Pure function of the network. */
+static int tg_xcov_quad_raw(const TG_NodeList *nl, int m, double sg, double *qx, double *qz)
 {
     const int left = (sg > 0.0) ? 1 : 0;
+    const TG_Biome *b;
+    double rr = 0.0, e[10], ang, nox, noz, fox, foz, reach;
+
+    if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m, left)) return 0;
+    /* the emitter's own per-side gates, in its own order (tg_city_emit_crossstreet) */
+    if (tg_facade_built(m, left)) return 0;
+    if (tg_block_is_park(m, left)) return 0;
+    if (tg_net_mouth_is_loop(m, left)) return 0;
+    if (tg_side_corridor_here(nl, m, sg)) return 0;
+    b = &k_biomes[tg_scenery_biome_index(m)];
+    tg_city_edge_frame(nl, m, sg, e);
+    ang = tg_block_arm_skew(m, left);
+    reach = tg_xstreet_reach_at(nl, m, sg, ang, tg_xst_reach_biome(m), tg_xst_reach_sw(nl, m, b));
+    if (!(reach > 0.0)) return 0;
+    tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
+    qx[0] = e[0];                qz[0] = e[2];
+    qx[1] = e[0] + nox * reach;  qz[1] = e[2] + noz * reach;
+    qx[2] = e[3] + fox * reach;  qz[2] = e[5] + foz * reach;
+    qx[3] = e[3];                qz[3] = e[5];
+    return 1;
+}
+
+/* [1024 integ] tg_xstreet_covers is asked once per sample point (park paths, footprints, boxes, furniture) and
+ * rebuilt the quad of all 49 window spans every time: 34791 calls cost 7.4 s of the streamed level091 build on
+ * master's gates and 72 s once round 1024 I let orphan streets through, so the scenery workers held the countdown
+ * at "ready 0". Every input is fixed once the network is built, so the quad is built once per (span, side) here,
+ * in the R14 GENPERF memo (armed after the prepass, cleared by tg_xmemo_reset). Bytes unchanged.
+ * State per entry: 0 = not built yet, 1 = no street, 2 = quad valid (published after the quad, release order). */
+static int tg_xcov_quad(const TG_NodeList *nl, int m, double sg, double *qx, double *qz)
+{
+    const int left = (sg > 0.0) ? 1 : 0;
+    int st, k;
+    if (!s_xcov_armed || m < 0 || m >= TD5_TG_MAX_SPANS || (sg != 1.0 && sg != -1.0))
+        return tg_xcov_quad_raw(nl, m, sg, qx, qz);
+    st = __atomic_load_n(&s_xcov_state[m][left], __ATOMIC_ACQUIRE);
+    if (st == 0) {
+        double tx[4], tz[4];
+        const int r = tg_xcov_quad_raw(nl, m, sg, tx, tz);
+        if (r) for (k = 0; k < 4; k++) { s_xcov_q[m][left][k * 2] = tx[k]; s_xcov_q[m][left][k * 2 + 1] = tz[k]; }
+        st = r ? 2 : 1;
+        __atomic_store_n(&s_xcov_state[m][left], (signed char)st, __ATOMIC_RELEASE);
+    }
+    if (st != 2) return 0;
+    for (k = 0; k < 4; k++) { qx[k] = s_xcov_q[m][left][k * 2]; qz[k] = s_xcov_q[m][left][k * 2 + 1]; }
+    return 1;
+}
+
+int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z)
+{
     int lo, hi, m;
 
     if (!nl || !tg_network_built()) return 0;
-    lo = si - TG_XSC_WIN; if (lo < 1) lo = 1;
+    lo = si - TG_XSC_WIN; if (lo < tg_xsc_lo_min()) lo = tg_xsc_lo_min();
     hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
     for (m = lo; m <= hi; m++) {
-        const TG_Biome *b;
-        double rr = 0.0, e[10], ang, nox, noz, fox, foz, reach;
         double qx[4], qz[4];
         int k, sgn = 0, in = 1;
 
-        if (!tg_xstreet_here(nl, m, sg, &rr)) continue;
-        /* the emitter's own per-side gates, in its own order (tg_city_emit_crossstreet) */
-        if (tg_facade_built(m, left)) continue;
-        if (tg_block_is_park(m, left)) continue;
-        if (tg_net_mouth_is_loop(m, left)) continue;
-        if (tg_side_corridor_here(nl, m, sg)) continue;
-        b = &k_biomes[tg_scenery_biome_index(m)];
-        tg_city_edge_frame(nl, m, sg, e);
-        ang = tg_block_arm_skew(m, left);
-        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, tg_city_sidewalk_w(b));
-        if (!(reach > 0.0)) continue;
-        tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
-        qx[0] = e[0];                qz[0] = e[2];
-        qx[1] = e[0] + nox * reach;  qz[1] = e[2] + noz * reach;
-        qx[2] = e[3] + fox * reach;  qz[2] = e[5] + foz * reach;
-        qx[3] = e[3];                qz[3] = e[5];
+        if (!tg_xcov_quad(nl, m, sg, qx, qz)) continue;
         for (k = 0; k < 4; k++) {
             const int j = (k + 1) & 3;
             const double c = (qx[j] - qx[k]) * (z - qz[k]) - (qz[j] - qz[k]) * (x - qx[k]);
@@ -452,7 +565,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
     int lo, hi, m, n = 0;
 
     if (!nl || !tg_network_built()) return 0;
-    lo = si - TG_XSC_WIN; if (lo < 1) lo = 1;
+    lo = si - TG_XSC_WIN; if (lo < tg_xsc_lo_min()) lo = tg_xsc_lo_min();
     hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
     for (m = lo; m <= hi && n < maxq; m++) {
         const TG_Biome *b;
@@ -460,7 +573,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
         double *q;
         int arms;
 
-        if (!tg_xstreet_here(nl, m, sg, &rr)) continue;
+        if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m, left)) continue;
         if (tg_facade_built(m, left)) continue;
         if (tg_block_is_park(m, left)) continue;
         if (tg_net_mouth_is_loop(m, left)) continue;
@@ -469,7 +582,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
         sw = tg_city_sidewalk_w(b);
         tg_city_edge_frame(nl, m, sg, e);
         ang = tg_block_arm_skew(m, left);
-        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, sw);
+        reach = tg_xstreet_reach_at(nl, m, sg, ang, tg_xst_reach_biome(m), tg_xst_reach_sw(nl, m, b));
         if (!(reach > 0.0)) continue;
         tg_block_rot2(e[6], e[7], ang, &nox, &noz);
         tg_block_rot2(e[8], e[9], ang, &fox, &foz);
@@ -714,10 +827,83 @@ static void tg_xst_apron_end(TG_Surf *cap, int open)
     s_xst_apron = NULL;
 }
 
+/* [ROUND 1024 G item 2] "the right-side pavement arm of the cross street at spans 77..79 is still dropped by the
+ * on-road guard because it overlaps the start of the divided avenue": CLIP IT instead of dropping it whole.
+ *
+ * ROOT CAUSE (measured, level091 route B9839962, entry 19): the street's reach (4321, tg_net_march) is where the CENTRE
+ * ray of the run meets painted road; its two kerb rays leave the main road at 45 degrees to the avenue's far carriageway
+ * (the opposite carriageway of Diagonal 73, scenery, which starts at span 81 and is part of tg_carriageway_reach), so the
+ * far corner of every arm runs 3000..3500 units INTO that carriageway. The guard judges a mesh whole, so the carriageway
+ * mesh of each of spans 77, 78 and 79, the median and the two pavement-arm meshes at the far corner were deleted
+ * (coverage 1412 / 2063 / 737 / 3013 / 3532 / 3481, log "on-road guard: rejected city/block mesh ... marked @77..79").
+ *
+ * RULE. Every ray a street arm is laid along (its two kerb rays, and the corner ray of a pavement arm) is marched out
+ * against the same authority the guard asks (tg_carriageway_reach in the frame of the nearest main-road node, tested
+ * the way tg_guard_mesh_scan measures a vertex) and cut where it meets the carriageway: the arm ends on the avenue's
+ * edge, slanted like the edge, instead of running through it. A ray that never meets it keeps its full reach, so every
+ * street that was legal is laid exactly as before. A ray that is cut to under TG_XST_CLIP_MIN is no arm at all.
+ * Geo networks only; TD5RE_GEO_STREET_RAYCLIP=0 restores the whole-mesh drop. */
+#define TG_XST_CLIP_STEP    150.0
+#define TG_XST_CLIP_CONTACT 350.0    /* depth into the carriageway that counts as meeting it (guard rejects past 700) */
+#define TG_XST_CLIP_MIN     900.0
+static long s_xst_clip_rays, s_xst_clip_cut, s_xst_clip_none;
+
+static int tg_xst_rayclip_on(void)
+{
+    return tg_net_geo() && td5_env_flag_on("TD5RE_GEO_STREET_RAYCLIP");
+}
+
+/* How far a point is INSIDE the carriageway authority: reach - |lateral| in the frame of the nearest node around `si`
+ * (positive = on it), exactly the guard's per-vertex measure. */
+static double tg_xst_carr_depth(const TG_NodeList *nl, int si, double x, double z)
+{
+    const int lo = (si - TD5_TG_R8_CLAMP_WIN < 0) ? 0 : si - TD5_TG_R8_CLAMP_WIN;
+    const int hi = (si + TD5_TG_R8_CLAMP_WIN > nl->count - 1) ? nl->count - 1 : si + TD5_TG_R8_CLAMP_WIN;
+    double best = 1e300, lat, r;
+    int i, ni = -1;
+    for (i = lo; i <= hi; i++) {
+        const double dx = x - nl->v[i].x, dz = z - nl->v[i].z, d2 = dx * dx + dz * dz;
+        if (d2 < best) { best = d2; ni = i; }
+    }
+    if (ni < 0) return -1e300;
+    lat = (x - nl->v[ni].x) * nl->v[ni].tz - (z - nl->v[ni].z) * nl->v[ni].tx;
+    r = tg_carriageway_reach(nl, ni, (lat >= 0.0) ? 1.0 : -1.0);
+    return r - (lat >= 0.0 ? lat : -lat);
+}
+
+/* The reach of one ray (origin cx,cz, unit direction ox,oz) after the cut; `reach` when nothing is met. */
+static double tg_xst_ray_reach(const TG_NodeList *nl, int si, double cx, double cz,
+                               double ox, double oz, double reach)
+{
+    double d, lo, hi, dep = 0.0;
+    int out = (tg_xst_carr_depth(nl, si, cx, cz) <= 0.0), it;
+    if (!(reach > 0.0)) return reach;
+    s_xst_clip_rays++;
+    for (d = TG_XST_CLIP_STEP; d <= reach; d += TG_XST_CLIP_STEP) {
+        dep = tg_xst_carr_depth(nl, si, cx + ox * d, cz + oz * d);
+        if (!out) { if (dep <= 0.0) out = 1; continue; }     /* still leaving the kerb zone */
+        if (dep <= TG_XST_CLIP_CONTACT) continue;
+        lo = d - TG_XST_CLIP_STEP; hi = d;                    /* contact: find the edge */
+        for (it = 0; it < 12; it++) {
+            const double mid = 0.5 * (lo + hi);
+            if (tg_xst_carr_depth(nl, si, cx + ox * mid, cz + oz * mid) > 0.0) hi = mid; else lo = mid;
+        }
+        s_xst_clip_cut++;
+        if (lo < TG_XST_CLIP_MIN) s_xst_clip_none++;
+        return lo;
+    }
+    if (!out && dep > TG_XST_CLIP_CONTACT) {      /* starts on the carriageway and never leaves it: no arm */
+        s_xst_clip_cut++; s_xst_clip_none++;
+        return 0.0;
+    }
+    return reach;
+}
+
 static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                                    double *uu, double *vv, int *pn,
                                    const double *e, double nox, double noz,
                                    double fox, double foz, double reach,
+                                   double reach_n, double reach_f,       /* [R1024 G] per-ray reach; == reach when uncut */
                                    double drop, double u_r, int si)
 {
     int nseg = (int)ceil(reach / TG_XST_SEG_LEN), k;
@@ -730,8 +916,8 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
         for (c = 0; c < 4; c++) {
             const int far_edge = (c >= 2);
             const double f = (c == 1 || c == 2) ? f1 : f0;
-            const double x = far_edge ? e[3] + fox * reach * f : e[0] + nox * reach * f;
-            const double z = far_edge ? e[5] + foz * reach * f : e[2] + noz * reach * f;
+            const double x = far_edge ? e[3] + fox * reach_f * f : e[0] + nox * reach_n * f;
+            const double z = far_edge ? e[5] + foz * reach_f * f : e[2] + noz * reach_n * f;
             double y = (far_edge ? e[4] : e[1]) + TD5_TG_VERGE_LIFT - drop * f;
             if (f > 0.0) {
                 /* the envelope of the heightfield over half a cell round the vertex:
@@ -748,7 +934,7 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                 tg_xst_apron_lift(x, z, &y);        /* [ROUND 1023 A item 4] the drawn ground */
             }
             q[c * 3 + 0] = x; q[c * 3 + 1] = y; q[c * 3 + 2] = z;
-            t[c * 2 + 0] = u_r * f;
+            t[c * 2 + 0] = (far_edge ? u_r * (reach_f / reach) : u_r * (reach_n / reach)) * f;
             t[c * 2 + 1] = far_edge ? (double)si + 1.0 : (double)si;
         }
         tg_city_push_quad(px, py, pz, uu, vv, pn, q, t);
@@ -855,6 +1041,17 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         if (follow) {
             TG_Surf apron;
             int apron_open;
+            double reach_n = reach, reach_f = reach;
+            if (tg_xst_rayclip_on()) {      /* [ROUND 1024 G item 2] cut each kerb ray where it meets the avenue's carriageway */
+                reach_n = tg_xst_ray_reach(h->nl, h->si, e[0], e[2], nox, noz, reach);
+                reach_f = tg_xst_ray_reach(h->nl, h->si, e[3], e[5], fox, foz, reach);
+                if (reach_n < reach || reach_f < reach) {
+                    reach = (reach_n > reach_f) ? reach_n : reach_f;
+                    if (reach < TG_XST_CLIP_MIN) continue;       /* the whole arm lies on the carriageway */
+                    drop = tg_xstreet_drop(reach);
+                    u_r  = reach / (double)TD5_TG_LANE_WIDTH;
+                }
+            }
             {
                 const double bxs[4] = { e[0], e[3], e[0] + nox * reach, e[3] + fox * reach };
                 const double bzs[4] = { e[2], e[5], e[2] + noz * reach, e[5] + foz * reach };
@@ -869,7 +1066,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
                 apron_open = tg_xst_apron_begin(h, bx0, bz0, bx1, bz1, &apron);
             }
             tg_xstreet_push_follow(px, py, pz, uu, vv, &n, e, nox, noz, fox, foz,
-                                   reach, drop, u_r, h->si);
+                                   reach, reach_n, reach_f, drop, u_r, h->si);
             tg_xst_apron_end(&apron, apron_open);
             if (split) {
                 if (!tg_xst_flush(h, px, py, pz, uu, vv, n, seg_page, marks)) return 0;
@@ -951,6 +1148,18 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
             cx = 0.5 * (e[0] + e[3]);
             cy = 0.5 * (e[1] + e[4]) + TD5_TG_VERGE_LIFT;
             cz = 0.5 * (e[2] + e[5]);
+            if (tg_xst_rayclip_on()) {           /* [ROUND 1024 G item 2] the island ends where the carriageway starts */
+                /* the island is 2 x HW wide: its two long edges are the rays that matter, not its axis */
+                const double hwm = TD5_TG_R15_MEDIAN_HW;
+                double rc = tg_xst_ray_reach(h->nl, h->si, cx - ax * hwm, cz - az * hwm, oxm, ozm, reach);
+                const double rc2 = tg_xst_ray_reach(h->nl, h->si, cx + ax * hwm, cz + az * hwm, oxm, ozm, reach);
+                if (rc2 < rc) rc = rc2;
+                if (rc < reach) {
+                    reach = rc;
+                    if (reach < TG_XST_CLIP_MIN) continue;
+                    drop = tg_xstreet_drop(reach);
+                }
+            }
 
             {
                 const double hw = TD5_TG_R15_MEDIAN_HW;
@@ -1773,17 +1982,34 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
         if (alen < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= alen; az /= alen; }
 
         if (near_corner) {                            /* corner at the near node */
+            double rc = reach;
             tg_block_arm_near(e, ang, &ox, &oz);
+            /* [ROUND 1024 G item 2] the arm lies along its corner's ray: cut it where that ray meets the carriageway */
+            if (tg_xst_rayclip_on()) {
+                double rb;
+                rc = tg_xst_ray_reach(h->nl, h->si, e[0], e[2], ox, oz, reach);
+                rb = tg_xst_ray_reach(h->nl, h->si, e[0] - ax * sw_s, e[2] - az * sw_s, ox, oz, reach);   /* the slab's back edge */
+                if (rb < rc) rc = rb;
+            }
             /* back = -along (onto the built side, off the carriageway). */
-            if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
-                                   reach, sw_s))
-                return 0;
+            if (rc >= TG_XST_CLIP_MIN || rc >= reach)
+                if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
+                                       rc, sw_s))
+                    return 0;
         }
         if (far_corner) {                             /* corner at the far node */
+            double rc = reach;
             tg_block_arm_far(e, ang, &ox, &oz);
-            if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
-                                   reach, sw_s))
-                return 0;
+            if (tg_xst_rayclip_on()) {
+                double rb;
+                rc = tg_xst_ray_reach(h->nl, h->si, e[3], e[5], ox, oz, reach);
+                rb = tg_xst_ray_reach(h->nl, h->si, e[3] + ax * sw_s, e[5] + az * sw_s, ox, oz, reach);
+                if (rb < rc) rc = rb;
+            }
+            if (rc >= TG_XST_CLIP_MIN || rc >= reach)
+                if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
+                                       rc, sw_s))
+                    return 0;
         }
     }
     return 1;
@@ -3367,6 +3593,494 @@ static int tg_geop_emit_real_paths(const TG_FBHook *h, const double *rx,
     return nq;
 }
 
+/* ====================================================================== */
+/* SECTION: [ROUND 1024 F2] park footpaths laid ON the lawn               */
+/* ====================================================================== */
+
+/* [ROUND 1024 F2] "46 real OSM footpath pieces inside parks lie UNDER the lawn".
+ *
+ * ROOT CAUSE. tg_emit_geo_footpaths (td5_tg_geo_street.c) lays every real footway at the SKIRT height profile,
+ * nd->y - tg_infra_ground_dy + 16 raw. The park lawn above is laid at tg_geop_ground_t = max(world height +
+ * 60, DRAWN far-terrain apron + 200 raw), since round 1023 A's apron lift. Wherever the apron stands above the
+ * skirt profile the whole footpath is buried by 100..700 raw, apron AND lawn. Measured on the level091 build
+ * (verify/r1024f_footpaths.py on MODELS.DAT): 81 footpath quads whose centre lies under a lawn triangle that is
+ * at or above their top, 57 distinct (way, segment) pieces, 44 of them single-quad skirt-height meshes
+ * (e0 s44..57, e17 s19..28, e18 s14..38, e166..e184, e238..e244).
+ *
+ * FIX. Round 1013 F1 already lays a RING plaza's real footways on the lawn (tg_geop_emit_real_paths, fitted to
+ * the lawn mesh, 45 raw over it); that was limited to ring plazas because it clips with a CONVEX test. The
+ * same is done here for EVERY laid park, by a table built once in the serial prepass:
+ *   - the park's outline, projected clear of the road exactly as tg_geop_emit_one_body will (same inputs,
+ *     same function, so the lawn and the paths agree to the unit);
+ *   - every footway piece inside that outline (any simple polygon: crossing parameters sorted, mid-point test),
+ *     cut where it lies on a laid cross street, mitred at the way's own vertices so two quads of one way
+ *     SHARE their corner pair instead of overlapping (an overlap is coplanar tiled paving = z-fighting).
+ * The emitter then lays the pieces on the lawn surface (tg_geop_lawn_y_mesh + TIER) and the footpath emitter
+ * drops the same in-park parts of its own set (tg_geo_footpaths_context), so the ground is drawn once.
+ * TD5RE_GEO_PARK_PATHS=0 restores the skirt-height set and the ring-plaza-only lawn paths (master bytes). */
+typedef struct {
+    double ax, az, bx, bz;        /* centre line of the piece                                   */
+    double oax, oaz, obx, obz;    /* half-width offset (left normal) at A and at B (mitred)     */
+    double pox, poz;              /* plain half-width offset of the segment                     */
+    double s0;                    /* arc length of A along its OSM segment, for the texture     */
+    double hw;                    /* half width                                                 */
+    int    way;                   /* index of the OSM way                                       */
+    int    slot;                  /* height tier 0..2 (crossing ways never share one)           */
+} TG_PkPiece;
+
+typedef struct {
+    int    area, n;
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    double minx, minz, maxx, maxz;
+    TG_PkPiece *p;
+    int    np, cap;
+} TG_PkArea;
+
+static TG_PkArea *s_pk;
+static int        s_pk_n, s_pk_cap;
+static long s_pk_pieces, s_pk_ways, s_pk_street_cut, s_pk_laid, s_pk_quads, s_pk_nobudget, s_pk_buried;
+
+#define TD5_TG_GEOP_PK_CHUNK 40
+
+static int tg_pk_cmp_d(const void *a, const void *b)
+{
+    const double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+static void tg_pk_free(void)
+{
+    int i;
+    for (i = 0; i < s_pk_n; i++) free(s_pk[i].p);
+    free(s_pk);
+    s_pk = NULL;
+    s_pk_n = s_pk_cap = 0;
+}
+
+/* parameters t in (0,1) where A-B crosses the outline */
+static int tg_pk_crossings(const double *rx, const double *rz, int n, double ax, double az,
+                           double bx, double bz, double *t, int max)
+{
+    const double dx = bx - ax, dz = bz - az;
+    int i, nt = 0;
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1 == n) ? 0 : i + 1;
+        const double ex = rx[j] - rx[i], ez = rz[j] - rz[i];
+        const double den = dx * ez - dz * ex;
+        double tt, uu;
+        if (fabs(den) < 1e-9) continue;
+        tt = ((rx[i] - ax) * ez - (rz[i] - az) * ex) / den;
+        uu = ((rx[i] - ax) * dz - (rz[i] - az) * dx) / den;
+        if (tt > 0.0 && tt < 1.0 && uu >= 0.0 && uu <= 1.0 && nt < max) t[nt++] = tt;
+    }
+    return nt;
+}
+
+/* the parts of A-B inside ONE outline (any simple polygon); intervals out as (ta, tb) */
+static int tg_pk_inside(const double *rx, const double *rz, int n, double ax, double az, double bx, double bz,
+                        double *ta, double *tb, int max)
+{
+    double t[2 + 2 * TD5_GEOB_RING_MAX];
+    int nt = 0, i, no = 0;
+    t[nt++] = 0.0;
+    nt += tg_pk_crossings(rx, rz, n, ax, az, bx, bz, t + nt, 2 * TD5_GEOB_RING_MAX);
+    t[nt++] = 1.0;
+    qsort(t, (size_t)nt, sizeof(double), tg_pk_cmp_d);
+    for (i = 0; i + 1 < nt; i++) {
+        double tm;
+        if (t[i + 1] - t[i] < 1e-9) continue;
+        tm = 0.5 * (t[i] + t[i + 1]);
+        if (td5_geob_point_in_ring(rx, rz, n, ax + (bx - ax) * tm, az + (bz - az) * tm)) {
+            if (no > 0 && fabs(tb[no - 1] - t[i]) < 1e-9) tb[no - 1] = t[i + 1];
+            else if (no < max) { ta[no] = t[i]; tb[no] = t[i + 1]; no++; }
+        }
+    }
+    return no;
+}
+
+/* The parts of A-B inside ANY prepared park outline, merged. Used by the footpath emitter to cut the in-park
+ * part out of its own skirt-height set. 0 when none (or no table). */
+int tg_geo_park_cuts(double ax, double az, double bx, double bz, double *ta, double *tb, int max)
+{
+    double t[2 + 256];
+    int nt = 0, i, k, no = 0;
+    const double lx = ax < bx ? ax : bx, hx = ax < bx ? bx : ax;
+    const double lz = az < bz ? az : bz, hz = az < bz ? bz : az;
+    int hit[64], nh = 0;
+    if (s_pk_n <= 0) return 0;
+    for (i = 0; i < s_pk_n && nh < 64; i++)
+        if (!(hx < s_pk[i].minx || lx > s_pk[i].maxx || hz < s_pk[i].minz || lz > s_pk[i].maxz)) hit[nh++] = i;
+    if (!nh) return 0;
+    t[nt++] = 0.0;
+    for (k = 0; k < nh && nt < 2 + 256 - 64; k++)
+        nt += tg_pk_crossings(s_pk[hit[k]].rx, s_pk[hit[k]].rz, s_pk[hit[k]].n, ax, az, bx, bz, t + nt, 64);
+    t[nt++] = 1.0;
+    qsort(t, (size_t)nt, sizeof(double), tg_pk_cmp_d);
+    for (i = 0; i + 1 < nt; i++) {
+        double tm, x, z;
+        int in = 0;
+        if (t[i + 1] - t[i] < 1e-9) continue;
+        tm = 0.5 * (t[i] + t[i + 1]);
+        x = ax + (bx - ax) * tm; z = az + (bz - az) * tm;
+        for (k = 0; k < nh && !in; k++)
+            in = td5_geob_point_in_ring(s_pk[hit[k]].rx, s_pk[hit[k]].rz, s_pk[hit[k]].n, x, z);
+        if (!in) continue;
+        if (no > 0 && fabs(tb[no - 1] - t[i]) < 1e-9) tb[no - 1] = t[i + 1];
+        else if (no < max) { ta[no] = t[i]; tb[no] = t[i + 1]; no++; }
+    }
+    return no;
+}
+
+/* Distance (world units) from (x,z) to the nearest prepared park outline; 0 inside; 1e30 with no table. */
+double tg_geo_park_dist(double x, double z)
+{
+    double best = 1e30;
+    int i, k;
+    for (i = 0; i < s_pk_n; i++) {
+        const TG_PkArea *pa = &s_pk[i];
+        if (td5_geob_point_in_ring(pa->rx, pa->rz, pa->n, x, z)) return 0.0;
+        for (k = 0; k < pa->n; k++) {
+            const int j = (k + 1 == pa->n) ? 0 : k + 1;
+            const double ex = pa->rx[j] - pa->rx[k], ez = pa->rz[j] - pa->rz[k];
+            const double l2 = ex * ex + ez * ez;
+            double u = (l2 > 1e-9) ? ((x - pa->rx[k]) * ex + (z - pa->rz[k]) * ez) / l2 : 0.0;
+            double d;
+            if (u < 0.0) u = 0.0;
+            if (u > 1.0) u = 1.0;
+            d = hypot(x - (pa->rx[k] + ex * u), z - (pa->rz[k] + ez * u));
+            if (d < best) best = d;
+        }
+    }
+    return best;
+}
+
+static const TG_PkArea *tg_pk_find(int area)
+{
+    int i;
+    for (i = 0; i < s_pk_n; i++)
+        if (s_pk[i].area == area) return &s_pk[i];
+    return NULL;
+}
+
+static void tg_pk_add(TG_PkArea *pa, const TG_PkPiece *pc)
+{
+    if (pa->np >= pa->cap) {
+        const int nc = pa->cap ? pa->cap * 2 : 64;
+        TG_PkPiece *np = (TG_PkPiece *)realloc(pa->p, (size_t)nc * sizeof(TG_PkPiece));
+        if (!np) return;
+        pa->p = np;
+        pa->cap = nc;
+    }
+    pa->p[pa->np++] = *pc;
+}
+
+/* the vertex q of p->q->r: the mitre offset (left normal, half-width scaled). 0 when the bend is too sharp
+ * for a mitre (the two quads then simply abut, as before). */
+static int tg_pk_mitre(double px, double pz, double qx, double qz, double rx, double rz, double hw,
+                       double *ox, double *oz)
+{
+    double d1x = qx - px, d1z = qz - pz, d2x = rx - qx, d2z = rz - qz;
+    double l1 = hypot(d1x, d1z), l2 = hypot(d2x, d2z), mx, mz, ml, c;
+    if (l1 < 1.0 || l2 < 1.0) return 0;
+    d1x /= l1; d1z /= l1; d2x /= l2; d2z /= l2;
+    mx = -d1z - d2z; mz = d1x + d2x;
+    ml = hypot(mx, mz);
+    if (ml < 1e-6) return 0;
+    mx /= ml; mz /= ml;
+    c = mx * (-d2z) + mz * d2x;
+    if (c < 0.6) return 0;
+    *ox = mx * hw / c;
+    *oz = mz * hw / c;
+    return 1;
+}
+
+static void tg_pk_build_area(const TG_NodeList *nl, TG_PkArea *pa)
+{
+    const unsigned kinds = (1u << TD5_GEO_FW_FOOTWAY) | (1u << TD5_GEO_FW_PATH)
+                         | (1u << TD5_GEO_FW_PEDESTRIAN) | (1u << TD5_GEO_FW_CYCLEWAY);
+    const int nf = td5_geo_footways_count();
+    int i, k;
+
+    for (i = 0; i < nf; i++) {
+        const TD5_GeoFootway *f = td5_geo_footways_get(i);
+        double hw;
+        int took = 0;
+        if (!f || f->kind < 0 || f->kind >= TD5_GEO_FW_KINDS || !(kinds & (1u << (unsigned)f->kind))) continue;
+        if (f->maxx < pa->minx || f->minx > pa->maxx || f->maxz < pa->minz || f->minz > pa->maxz) continue;
+        hw = (f->width_m > 0.0) ? f->width_m * TD5_TG_GEOP_UPM * 0.5 : TD5_TG_GEOP_PATH_W * 0.5;
+        if (hw < TD5_TG_GEOP_PATH_W * 0.25) hw = TD5_TG_GEOP_PATH_W * 0.25;
+        for (k = 0; k + 1 < f->count; k++) {
+            double ax, az, bx, bz, dx, dz, len, ux, uz, mit_ax = 0, mit_az = 0, mit_bx = 0, mit_bz = 0;
+            double ta[16], tb[16];
+            int have_ma = 0, have_mb = 0, ni, q;
+            if (!td5_geo_footways_point(f, k, &ax, &az)) continue;
+            if (!td5_geo_footways_point(f, k + 1, &bx, &bz)) continue;
+            dx = bx - ax; dz = bz - az;
+            len = hypot(dx, dz);
+            if (len < 1.0) continue;
+            ux = -dz / len * hw; uz = dx / len * hw;
+            if (k > 0) {
+                double px, pz;
+                if (td5_geo_footways_point(f, k - 1, &px, &pz))
+                    have_ma = tg_pk_mitre(px, pz, ax, az, bx, bz, hw, &mit_ax, &mit_az);
+            }
+            if (k + 2 < f->count) {
+                double rx2, rz2;
+                if (td5_geo_footways_point(f, k + 2, &rx2, &rz2))
+                    have_mb = tg_pk_mitre(ax, az, bx, bz, rx2, rz2, hw, &mit_bx, &mit_bz);
+            }
+            ni = tg_pk_inside(pa->rx, pa->rz, pa->n, ax, az, bx, bz, ta, tb, 16);
+            for (q = 0; q < ni; q++) {
+                const double ia = ta[q], ib = tb[q];
+                const double ilen = (ib - ia) * len;
+                unsigned char on[100];
+                int ns, s, r0 = -1;
+                if (ilen < 100.0) continue;
+                ns = (int)ceil(ilen / 700.0);
+                if (ns < 1) ns = 1;
+                if (ns > 96) ns = 96;
+                for (s = 0; s <= ns; s++) {
+                    const double t = (s == ns) ? ib : ia + (ib - ia) * (double)s / (double)ns;
+                    on[s] = (unsigned char)tg_geo_fp_on_street(nl, ax + dx * t, az + dz * t,
+                                                               dz / len, -dx / len, hw);
+                }
+                for (s = 0; s <= ns + 1; s++) {
+                    const int live = (s <= ns) && !on[s];
+                    if (live && r0 < 0) r0 = s;
+                    if (!live && r0 >= 0) {
+                        const int r1 = s - 1;
+                        if (r1 > r0) {
+                            const double t0 = (r0 == 0) ? ia : ia + (ib - ia) * (double)r0 / (double)ns;
+                            const double t1 = (r1 == ns) ? ib : ia + (ib - ia) * (double)r1 / (double)ns;
+                            TG_PkPiece pc;
+                            pc.ax = ax + dx * t0; pc.az = az + dz * t0;
+                            pc.bx = ax + dx * t1; pc.bz = az + dz * t1;
+                            pc.pox = ux; pc.poz = uz;
+                            pc.oax = (t0 == 0.0 && have_ma) ? mit_ax : ux;
+                            pc.oaz = (t0 == 0.0 && have_ma) ? mit_az : uz;
+                            pc.obx = (t1 == 1.0 && have_mb) ? mit_bx : ux;
+                            pc.obz = (t1 == 1.0 && have_mb) ? mit_bz : uz;
+                            pc.s0 = t0 * len;
+                            pc.hw = hw;
+                            pc.way = i;
+                            pc.slot = 0;
+                            tg_pk_add(pa, &pc);
+                            s_pk_pieces++;
+                            took = 1;
+                        }
+                        r0 = -1;
+                    }
+                    if (s <= ns && on[s]) s_pk_street_cut++;
+                }
+            }
+        }
+        s_pk_ways += took;
+    }
+}
+
+/* min distance between segments P0-P1 and Q0-Q1 (0 when they cross) */
+static double tg_pk_segdist(double p0x, double p0z, double p1x, double p1z,
+                            double q0x, double q0z, double q1x, double q1z)
+{
+    const double d1x = p1x - p0x, d1z = p1z - p0z, d2x = q1x - q0x, d2z = q1z - q0z;
+    const double den = d1x * d2z - d1z * d2x;
+    double best = 1e30;
+    int k;
+    if (fabs(den) > 1e-9) {
+        const double t = ((q0x - p0x) * d2z - (q0z - p0z) * d2x) / den;
+        const double u = ((q0x - p0x) * d1z - (q0z - p0z) * d1x) / den;
+        if (t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0) return 0.0;
+    }
+    for (k = 0; k < 4; k++) {
+        const double px = (k == 0) ? p0x : (k == 1) ? p1x : (k == 2) ? q0x : q1x;
+        const double pz = (k == 0) ? p0z : (k == 1) ? p1z : (k == 2) ? q0z : q1z;
+        const double ax = (k < 2) ? q0x : p0x, az = (k < 2) ? q0z : p0z;
+        const double ex = (k < 2) ? d2x : d1x, ez = (k < 2) ? d2z : d1z;
+        const double l2 = ex * ex + ez * ez;
+        double u = (l2 > 1e-9) ? ((px - ax) * ex + (pz - az) * ez) / l2 : 0.0, d;
+        if (u < 0.0) u = 0.0;
+        if (u > 1.0) u = 1.0;
+        d = hypot(px - (ax + ex * u), pz - (az + ez * u));
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+/* Two paths that cross lie in the same plane (lawn + TIER): coplanar tiled paving z-fights over the crossing.
+ * Give each way a height tier 0..2 (25 raw apart = 5.8 cm) so no two ways that touch share one: greedy colouring
+ * over the ways of the area, in way order. */
+#define TD5_TG_GEOP_PK_SLOT_STEP 25.0
+static void tg_pk_assign_slots(TG_PkArea *pa)
+{
+    int i, j, k;
+    /* pieces of one way are contiguous and ways ascend, so a way starts where the way index changes */
+    for (i = 0; i < pa->np; ) {
+        const int w = pa->p[i].way;
+        unsigned used = 0;
+        int end = i, s;
+        while (end < pa->np && pa->p[end].way == w) end++;
+        for (k = i; k < end; k++)
+            for (j = 0; j < i; j++) {
+                const TG_PkPiece *a = &pa->p[k], *b = &pa->p[j];
+                if (tg_pk_segdist(a->ax, a->az, a->bx, a->bz, b->ax, b->az, b->bx, b->bz) < a->hw + b->hw)
+                    used |= 1u << b->slot;
+            }
+        for (s = 0; s < 3 && (used & (1u << s)); s++) {}
+        if (s >= 3) s = 0;
+        for (k = i; k < end; k++) pa->p[k].slot = s;
+        i = end;
+    }
+}
+
+/* Serial prepass, after tg_geo_city_prepare (the pavement widths the projection reads are final). Builds the
+ * table for exactly the areas tg_geo_emit_plaza will lay. */
+int tg_geo_park_prepare(const TG_NodeList *nl, int nprep)
+{
+    int si;
+
+    tg_pk_free();
+    s_pk_pieces = s_pk_ways = s_pk_street_cut = s_pk_laid = s_pk_quads = s_pk_nobudget = s_pk_buried = 0;
+    if (!nl || nl->count < 3) return 0;
+    if (!tg_geo_city_active()) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PARK_PATHS")) return 0;
+    if (td5_geo_footways_sync(td5_geo_place_slug()) <= 0) return 0;
+
+    for (si = 1; si < nprep && si + 1 < nl->count; si++) {
+        int i;
+        if (tg_span_in_tunnel(si) || tg_span_in_bridge_run(si) || tg_up_clear_span(si)) continue;
+        for (i = td5_geob_span_area(si); i >= 0; i = td5_geob_next_area(i)) {
+            const TD5_GeoArea *a = td5_geob_area(i);
+            const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+            const double side = (a && a->host_side > 0) ? 1.0 : -1.0;
+            TG_PkArea *pa;
+            double minout;
+            int k;
+            if (!a || !td5_geob_area_is_plaza(a)) continue;
+            if (a->n < 3 || a->n > TD5_GEOB_RING_MAX) continue;
+            if (a->radius < TD5_TG_GEOP_MIN_R) continue;
+            if (tg_pk_find(i)) continue;
+            if (s_pk_n >= s_pk_cap) {
+                const int nc = s_pk_cap ? s_pk_cap * 2 : 32;
+                TG_PkArea *np = (TG_PkArea *)realloc(s_pk, (size_t)nc * sizeof(TG_PkArea));
+                if (!np) return 0;
+                s_pk = np;
+                s_pk_cap = nc;
+            }
+            pa = &s_pk[s_pk_n];
+            memset(pa, 0, sizeof(*pa));
+            pa->area = i;
+            pa->n = a->n;
+            for (k = 0; k < a->n; k++) td5_geob_ring(a->first, k, &pa->rx[k], &pa->rz[k]);
+            /* the SAME projection tg_geop_emit_one_body applies, counters aside */
+            minout = nl->v[si].width * 0.5
+                   + tg_carriageway_clear_gap(nl, si, side, tg_city_sidewalk_w_at(nl, si, b),
+                                              TD5_TG_CARRIAGEWAY_MARGIN);
+            {
+                const TG_Node *nd = &nl->v[si];
+                const double lx = nd->tz * side, lz = -nd->tx * side;
+                for (k = 0; k < a->n; k++) {
+                    const double o = tg_geop_out(nl, si, side, pa->rx[k], pa->rz[k]);
+                    if (o >= minout) continue;
+                    pa->rx[k] += lx * (minout - o);
+                    pa->rz[k] += lz * (minout - o);
+                }
+            }
+            pa->minx = pa->maxx = pa->rx[0];
+            pa->minz = pa->maxz = pa->rz[0];
+            for (k = 1; k < a->n; k++) {
+                if (pa->rx[k] < pa->minx) pa->minx = pa->rx[k];
+                if (pa->rx[k] > pa->maxx) pa->maxx = pa->rx[k];
+                if (pa->rz[k] < pa->minz) pa->minz = pa->rz[k];
+                if (pa->rz[k] > pa->maxz) pa->maxz = pa->rz[k];
+            }
+            s_pk_n++;
+            tg_pk_build_area(nl, pa);
+            tg_pk_assign_slots(pa);
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [1024 F2] park footpaths: %d park outline(s) tabled, %ld piece(s) of %ld "
+              "way(s) inside them (%ld sample(s) on a cross street left out)",
+              s_pk_n, s_pk_pieces, s_pk_ways, s_pk_street_cut);
+    return s_pk_n;
+}
+
+/* Lay the tabled pieces of area `a` on its lawn. Returns the number of quads laid, 0 when the area has none,
+ * -1 on a write failure. Pieces are cut into 6 m sub-pieces (the lawn bends at every triangle edge) and
+ * written in chunks, so a guard reject drops a patch of path, not every path of a park. */
+static int tg_geop_emit_park_paths(const TG_FBHook *h, const TD5_GeoArea *a, const TG_GeopLawn *lw)
+{
+    const TG_PkArea *pa;
+    float v[TD5_TG_GEOP_PK_CHUNK * 4 * 5];
+    unsigned int light[TD5_TG_GEOP_PK_CHUNK * 4];
+    unsigned short cmd[3];
+    const int ntri = lw ? lw->nt : 0;
+    int idx, nv = 0, nq = 0, laid = 0, i, j, q;
+    const TD5_GeoArea *a0 = td5_geob_area(0);
+
+    if (!a0) return 0;
+    idx = (int)(a - a0);
+    pa = tg_pk_find(idx);
+    if (!pa || pa->np <= 0) return 0;
+
+    for (i = 0; i < pa->np; i++) {
+        const TG_PkPiece *pc = &pa->p[i];
+        const double dx = pc->bx - pc->ax, dz = pc->bz - pc->az;
+        const double len = hypot(dx, dz);
+        int nsub = (int)ceil(len / TD5_TG_GEOP_REAL_PIECE);
+        if (nsub < 1) nsub = 1;
+        for (j = 0; j < nsub; j++) {
+            const double t0 = (double)j / (double)nsub, t1 = (double)(j + 1) / (double)nsub;
+            const double x0 = pc->ax + dx * t0, z0 = pc->az + dz * t0;
+            const double x1 = pc->ax + dx * t1, z1 = pc->az + dz * t1;
+            const double o0x = (j == 0) ? pc->oax : pc->pox, o0z = (j == 0) ? pc->oaz : pc->poz;
+            const double o1x = (j == nsub - 1) ? pc->obx : pc->pox, o1z = (j == nsub - 1) ? pc->obz : pc->poz;
+            const double px[4] = { x0 - o0x, x1 - o1x, x1 + o1x, x0 + o0x };
+            const double pz[4] = { z0 - o0z, z1 - o1z, z1 + o1z, z0 + o0z };
+            double ysum = 0.0, ymid;
+
+            if (nq >= TD5_TG_GEOP_PK_CHUNK) {
+                if (*h->nmesh + 4 >= h->maxmesh) { s_pk_nobudget++; goto done; }
+                cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK; cmd[1] = 0; cmd[2] = (unsigned short)nq;
+                h->moff[(*h->nmesh)++] = h->blk->len;
+                if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, 1, 0, 0.0, 0.0, 0.0, 1.0, 0.0)) return -1;
+                tg_acct(TG_ACCT_PARK, h->si);
+                laid += nq; nq = 0; nv = 0;
+            }
+            for (q = 0; q < 4; q++) {
+                const int o = nv * 5;
+                const double y = (ntri > 0)
+                    ? tg_geop_lawn_y_mesh(lw, px[q], pz[q]) + TD5_TG_GEOP_TIER + pc->slot * TD5_TG_GEOP_PK_SLOT_STEP
+                    : tg_geop_ground_t(h->nl, h->si, px[q], pz[q], 1) + pc->slot * TD5_TG_GEOP_PK_SLOT_STEP;
+                const double s0 = pc->s0 + len * ((q == 1 || q == 2) ? t1 : t0);
+                ysum += y;
+                v[o + 0] = (float)px[q];
+                v[o + 1] = (float)y;
+                v[o + 2] = (float)pz[q];
+                v[o + 3] = (float)(s0 / TD5_TG_GEOP_PATH_W);
+                v[o + 4] = (float)((q >= 2) ? 1.0 : 0.0);
+                light[nv] = 0xFFFFFFFFu;
+                nv++;
+            }
+            ymid = ysum * 0.25;
+            if (ntri > 0 && tg_geop_lawn_y_mesh(lw, (x0 + x1) * 0.5, (z0 + z1) * 0.5) >= ymid) s_pk_buried++;
+            nq++;
+        }
+    }
+done:
+    if (nq > 0) {
+        if (*h->nmesh + 4 >= h->maxmesh) { s_pk_nobudget++; return laid; }
+        cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK; cmd[1] = 0; cmd[2] = (unsigned short)nq;
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, 1, 0, 0.0, 0.0, 0.0, 1.0, 0.0)) return -1;
+        tg_acct(TG_ACCT_PARK, h->si);
+        laid += nq;
+    }
+    s_pk_laid += laid;
+    s_pk_quads += laid;
+    return laid;
+}
+
 /* One real area, laid as a plaza. */
 static int tg_geop_emit_one_body(const TG_FBHook *h, const TD5_GeoArea *a,
                                  TG_GeopLawn *lw)
@@ -3422,8 +4136,14 @@ static int tg_geop_emit_one_body(const TG_FBHook *h, const TD5_GeoArea *a,
          * radial layout is only the fallback. TD5RE_GEO_PLAZA_REALPATH=0 pins
          * the derived layout. */
         int real = 0;
+        /* [ROUND 1024 F2] a park in the prepared table takes its real footways from the table, laid on its
+         * lawn (any outline, not only a ring plaza); one not in it keeps the round 1013 behaviour. */
+        const int pk_area = td5_geob_area(0) && tg_pk_find((int)(a - td5_geob_area(0))) != NULL;
         if (a->ring) s_geop_ring_areas++;
-        if (a->ring && td5_env_flag_on("TD5RE_GEO_PLAZA_REALPATH")) {
+        if (pk_area) {
+            real = tg_geop_emit_park_paths(h, a, lw);
+            if (real < 0) return 0;
+        } else if (a->ring && td5_env_flag_on("TD5RE_GEO_PLAZA_REALPATH")) {
             real = tg_geop_emit_real_paths(h, rx, rz, n, lw);
             if (real < 0) return 0;
         }
@@ -3577,6 +4297,11 @@ static void tg_geo_plaza_report_impl(int from_stream)
               s_geop_real_buried,
               td5_env_flag_on("TD5RE_GEO_PLAZA_PATHFIT") ? "on" : "off",
               s_geop_real_capped, TD5_TG_GEOP_REAL_MAX);
+    if (s_pk_n > 0)
+        TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [1024 F2] %d park outline(s) tabled: %ld piece(s) of %ld way(s) -> %ld "
+                  "sub-piece quad(s) laid on the lawn, %ld buried at their middle, %ld chunk(s) lost to the "
+                  "mesh budget (knob TD5RE_GEO_PARK_PATHS)",
+                  s_pk_n, s_pk_pieces, s_pk_ways, s_pk_quads, s_pk_buried, s_pk_nobudget);
     /* [ROUND 1009 items 3 + 4] The two numbers those fixes are judged on. */
     TD5_LOG_I(LOG_TAG, "[GEO PLAZA] boundary: %ld area(s) got NO hedge because "
               "OSM records no barrier on them (knob TD5RE_GEO_PLAZA_HEDGE_OSM"
@@ -3609,6 +4334,10 @@ static void tg_geo_plaza_report_impl(int from_stream)
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld cross-street arm(s) written as their own mesh, so the on-road "
               "guard judges an arm alone instead of deleting both (knob TD5RE_GEO_STREET_ARM_MESH=%s)",
               s_xst_arm_meshes, td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1024 G item 2] %ld street-arm ray(s) marched against the carriageway authority, %ld cut "
+              "where they meet it (%ld of those left under %.0f units = no arm) (knob TD5RE_GEO_STREET_RAYCLIP=%s)",
+              s_xst_clip_rays, s_xst_clip_cut, s_xst_clip_none, TG_XST_CLIP_MIN,
+              td5_env_flag_on("TD5RE_GEO_STREET_RAYCLIP") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld street / arm / network-edge scope(s) asked the drawn ground (skirts + far apron) "
               "for their height, %ld vertex lift(s) above the heightfield envelope (knob TD5RE_GEO_STREET_APRON=%s)",
               s_xst_apron_scopes + tg_net_apron_edge_count(), s_xst_apron_lifted + tg_net_apron_lift_count(),

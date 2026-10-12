@@ -1669,6 +1669,7 @@ static long s_geo_backrow_suppressed;
 /* [ROUND 1021 C items 4, 9] real footprints dropped / back-row boxes skipped for standing on a laid
  * cross-street carriageway */
 static long s_geo_dropped_street, s_geo_backrow_street, s_geo_plaza_band;
+static long s_geo_trimmed;          /* [R1024 I] footprints a laid street's edge trimmed (kept) */
 static long s_geo_dropped_foot;     /* [R1023 C] footprints dropped / pushed by tg_geo_footprint_clear */
 static long s_geo_awning_nowall;     /* [1021 C item 14] awnings refused: the wall they hang from is not built */
 /* [ROUND 1012 D1] emitted real buildings by FOOTPRINT source and by the two
@@ -1726,6 +1727,7 @@ static void tg_geo_city_build_begin(void)
     s_geo_backrow_suppressed = 0;
     s_geo_dropped_street = s_geo_backrow_street = s_geo_plaza_band = 0;
     s_geo_dropped_foot = 0;
+    s_geo_trimmed = 0;
     s_geo_awning_nowall = 0;
     s_geo_fp_overture = s_geo_h_overture = s_geo_h_raster = 0;
     s_geo_dropped_slots = 0;
@@ -2805,6 +2807,10 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
     }
     if (pf < 0) { s_geo_lm_nofit++; return 0; }
 
+    /* [ROUND 1024 I] the stamped piece against every laid street (level091 e145 s10: the ring was cleared, the piece,
+     * fitted to the ring's box about its centroid, still stood in a 4-way crossing). Nothing fits -> the extruded ring. */
+    if (tg_geo_rect_on_street(h->nl, h->si, cx, cz, ux, uz, hx_fit, hz_fit)) { s_geo_lm_nofit++; return 0; }
+
     y = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
     if (y > n->y + tg_city_kerb_h(h->b) + 400.0)
         y = n->y + tg_city_kerb_h(h->b) + 400.0;
@@ -3187,12 +3193,23 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
      * or drops the footprint. TD5RE_GEO_BLD_FOOTCLEAR=0 keeps the old behaviour byte for byte. */
     {
         const char *why = NULL;
-        if (tg_geo_footprint_clear(nl, si, side, tg_world_h(cx, cz), rx, rz, n_ring,
-                                   TD5_TG_GEO_FOOT_PUSH, &why)) {
+        int trimmed = 0;
+        if (tg_geo_footprint_clear_ring(nl, si, side, tg_world_h(cx, cz), rx, rz, &n_ring, TD5_GEOB_RING_MAX,
+                                        TD5_TG_GEO_FOOT_PUSH, &why, &trimmed)) {
             tg_geo_lm_note(gb, si, why ? why : "DROPPED on a road", 0.0);
             s_geo_dropped_foot++;
             s_geo_dropped_deg++;
             return 1;
+        }
+        if (trimmed) {
+            /* [ROUND 1024 I] a trimmed ring must still be a simple polygon (the ear clipper and the roof ridge need one) */
+            if (n_ring < 3 || !td5_geob_ring_simple(rx, rz, n_ring)) {
+                tg_geo_lm_note(gb, si, "DROPPED trimmed ring not simple", 0.0);
+                s_geo_dropped_foot++;
+                s_geo_dropped_deg++;
+                return 1;
+            }
+            s_geo_trimmed++;
         }
         cx = 0.0; cz = 0.0;
         for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
@@ -3652,6 +3669,12 @@ static void tg_geo_city_report_impl(int from_stream)
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1023 C] %ld real footprint(s) dropped by the whole-footprint clearance "
               "(laid roads incl. corridors, cross streets, pavement arms; knob TD5RE_GEO_BLD_FOOTCLEAR=%s)",
               s_geo_dropped_foot, td5_env_flag_on("TD5RE_GEO_BLD_FOOTCLEAR") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1024 I] of the footprints that stand beside a road, %ld moved clear of one, "
+              "%ld trimmed by a laid street's edge and kept (knobs TD5RE_GEO_BLD_FOOTTRIM=%s, TD5RE_GEO_BLD_AVCLEAR=%s, "
+              "TD5RE_GEO_XSTREET_SPAN0=%s)",
+              tg_geo_clear_pushed(), s_geo_trimmed, td5_env_flag_on("TD5RE_GEO_BLD_FOOTTRIM") ? "on" : "off",
+              td5_env_flag_on("TD5RE_GEO_BLD_AVCLEAR") ? "on" : "off",
+              td5_env_flag_on("TD5RE_GEO_XSTREET_SPAN0") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO BUILD] [1021 C] %ld frontage / back-row probe(s) stood down only because they "
               "fall within the plaza surround band (knob TD5RE_GEO_PLAZA_BAND_M); %ld awning pick(s) "
               "swapped for a bin or bench because the wall they hang from is not built (knob "
@@ -3903,8 +3926,40 @@ static void tg_side_geom_impl(const TG_NodeList *nl, int si, int left,
     if (td5_env_flag_on("TD5RE_R11_CITY_CORNER")) {
         const double al = sqrt(g->ax * g->ax + g->az * g->az);
         const double sw = tg_city_sidewalk_w(b);
-        double tn = (tg_r11_arm_side(nl, si - 1, left) & 2) ? sw : 0.0;
-        double tf = (tg_r11_arm_side(nl, si + 1, left) & 1) ? sw : 0.0;
+        /* [ROUND 1024 I] The corner is trimmed by the width the ARM SLAB is laid with (tg_city_side_base of the mouth's
+         * span, the side's own OSM-derived width), not by the biome's 900: the same mismatch round 1023 C closed for the
+         * cross-street walls. MEASURED on level091 (e225 s30): a frontage wall on the span beside a mouth stood across
+         * 25.7 m2 of the neighbour's arm slab. TD5RE_GEO_WALL_ARMW=0 keeps the biome width. */
+        const int armw = td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_WALL_ARMW");
+        double tn = (tg_r11_arm_side(nl, si - 1, left) & 2) ? (armw ? tg_city_side_base(si - 1, left, sw) : sw) : 0.0;
+        double tf = (tg_r11_arm_side(nl, si + 1, left) & 1) ? (armw ? tg_city_side_base(si + 1, left, sw) : sw) : 0.0;
+        if (armw) {
+            /* an arm wider than a span (2440 against 1500 on level091 e225 s30) reaches the span AFTER the next one: walk the mouths
+             * up to 4 spans away and trim by what is left of each slab where it reaches this span's own end */
+            int kk;
+            double run = 0.0;
+            for (kk = 1; kk <= 4; kk++) {
+                const int m = si - kk;
+                double d;
+                if (m < 1) break;
+                if (kk > 1) run += sqrt((nl->v[m + 2].x - nl->v[m + 1].x) * (nl->v[m + 2].x - nl->v[m + 1].x) +
+                                        (nl->v[m + 2].z - nl->v[m + 1].z) * (nl->v[m + 2].z - nl->v[m + 1].z));
+                if (!(tg_r11_arm_side(nl, m, left) & 2)) continue;
+                d = tg_city_side_base(m, left, sw) - run;
+                if (d > tn) tn = d;
+            }
+            run = 0.0;
+            for (kk = 1; kk <= 4; kk++) {
+                const int m = si + kk;
+                double d;
+                if (m + 1 >= nl->count) break;
+                if (kk > 1) run += sqrt((nl->v[m - 1].x - nl->v[m].x) * (nl->v[m - 1].x - nl->v[m].x) +
+                                        (nl->v[m - 1].z - nl->v[m].z) * (nl->v[m - 1].z - nl->v[m].z));
+                if (!(tg_r11_arm_side(nl, m, left) & 1)) continue;
+                d = tg_city_side_base(m, left, sw) - run;
+                if (d > tf) tf = d;
+            }
+        }
         if (al > 1.0 && (tn > 0.0 || tf > 0.0)) {
             /* Two clamps, both measured on this span's OWN frontage length,
              * because that length is not the span length on a bend: the inside
@@ -3916,6 +3971,12 @@ static void tg_side_geom_impl(const TG_NodeList *nl, int si, int left,
             const double room = al - TD5_TG_R11_CORNER_MIN;
             double cap = al * TD5_TG_R11_CORNER_KEEP;
             double fn, ff;
+            /* [ROUND 1024 I] With the arm's true width the share cap would leave the arm slab under the rest of the
+             * wall (a 2600 arm against a 1500 span): trim all of it, and stand no wall where nothing is left. */
+            if (armw && tn + tf > cap) {
+                if (tn + tf >= al - TD5_TG_R11_CORNER_MIN) return;      /* g->built stays 0 */
+                cap = tn + tf;
+            }
             if (cap > room) cap = room;
             if (cap <= 0.0) { tn = 0.0; tf = 0.0; }
             else if (tn + tf > cap) {

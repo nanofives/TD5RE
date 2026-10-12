@@ -150,12 +150,22 @@ signed char s_xhere_memo[TD5_TG_MAX_SPANS];
 
 signed char s_xbase_memo[TD5_TG_MAX_SPANS];
 
+/* [1024 integ] orphan side-street memo (see tg_xst_orphan, td5_tg_streets.c). */
+signed char s_xorph_memo[TD5_TG_MAX_SPANS];
+/* [1024 integ] side-street quad memo (see tg_xcov_quad, td5_tg_streets.c). */
+signed char s_xcov_state[TD5_TG_MAX_SPANS][2];
+double      s_xcov_q[TD5_TG_MAX_SPANS][2][8];
+int         s_xcov_armed;   /* armed right after tg_geo_city_prepare, earlier than s_xmemo_armed */
+
 int         s_xmemo_armed;
 
 void tg_xmemo_reset(int armed)
 {
     memset(s_xhere_memo, -1, sizeof(s_xhere_memo));
     memset(s_xbase_memo, -1, sizeof(s_xbase_memo));
+    memset(s_xorph_memo, -1, sizeof(s_xorph_memo));
+    memset(s_xcov_state, 0, sizeof(s_xcov_state));
+    s_xcov_armed = armed && td5_env_flag_on("TD5RE_TG_XMEMO");
     /* TD5RE_TG_XMEMO=0: A/B the cache against the recomputing path. */
     s_xmemo_armed = armed && td5_env_flag_on("TD5RE_TG_XMEMO");
 }
@@ -3644,6 +3654,15 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * (tg_facade_built consults the mouth table) and precede the per-entry
          * loop. No-op with no geo place loaded. */
         tg_geo_city_prepare(nl, nspans);
+        /* [1024 integ] the side-street quads are final here (network mouths + the pavement widths the city
+         * prepass just decided), and the park / footpath prepares below ask tg_xstreet_covers per piece:
+         * arm the quad memo now (the other GENPERF memos still wait for the end of the prepass). */
+        memset(s_xcov_state, 0, sizeof(s_xcov_state));
+        s_xcov_armed = td5_env_flag_on("TD5RE_TG_XMEMO");
+        /* [ROUND 1024 F] park footpaths on the lawn + footpaths with context only; needs the pavement widths
+         * the city prepass just decided. Both are no-ops with their knobs off. */
+        tg_geo_park_prepare(nl, nprep);
+        tg_geo_footpaths_context(nl, nspans);
         /* [ROUND 1011 C3] Same contract and the same reason again: the OSM
          * lit / maxspeed / name answer for every span is decided here, while
          * this is still the only thread, because the nearest-way query is
@@ -4087,7 +4106,7 @@ static int tg_scenery_entry(int e)
              * tg_landmarks_place. Last in the span so a landmark never
              * displaces road, rail or pavement geometry when the entry runs
              * up against TG_MAX_MESHES_PER_ENTRY. */
-            if (ok && !tg_prefab_emit_span(si, &meshes, moff, &nmesh, e)) ok = 0;
+            if (ok && !tg_prefab_emit_span(nl, si, &meshes, moff, &nmesh, e)) ok = 0;
         }
         TG_ZONE_END(TG_ZONE_ENTRY_L1);
         TG_ZONE_BEGIN(TG_ZONE_ENTRY_L2);
