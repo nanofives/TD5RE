@@ -1383,3 +1383,85 @@ Group B (`GEO_STREETS_1021B.md`, "Not fixed" item 10) measured one real void on 
 | on a geo place the UNDER-class limit is 200 instead of 150 (the R8 offenders lie +250..+450 over a road that doubles back) | `TD5RE_GEO_SKIRT_GUARD_TOL=0` restores 150 |
 
 Void (`geo_r1021a_voidup.py`, radius 9000, cell 300, streamed build via `geo_tour.ps1`, all other 1021 A knobs off), spans 240-275: **157.2 m2 at span 256 before; 92.5 m2 with the slack fix alone; 0 with the guard tolerance (alone or with the slack fix)**. The 345 m2 component at span 252 and the 5 m2 / 3 m2 ones at 253 / 258 are unchanged (they are in the up-facing count only, not a skirt). Frame: the hole is grass now (`tour_v10f_p10_top`). Gates: all seven 1021 A knobs `=0` on his route: MODELS.DAT 8398608 B `8965ACC9...` = master; default 8639092 B `3B0E0016BCDDC694BBB843DE29DCD161`, STRIP unchanged `208386E6...`; synthetic `E2F1F33C...` identical.
+
+## Round 1022 N2: a block loop inside a real fork's window (three ways off one stretch)
+
+Base master c520ccc8, branch `fix-1791769708-127517-21604`. Brief: N-way splits, nested corridors, a loop beside a real fork (finishing round 1020 N). **Built: a block loop may share a real fork's window when the two corridors
+lie on opposite sides of the road, harness PASS on 5 loops over 3 routes.** Not built: same-span overlapping mouths (engine), nesting, a mouth inside a fork's ramp (measured WARN, below).
+
+### What was missing (measured, not assumed)
+
+* The engine needed nothing for this case. The side-link entry is per MAIN span and the type-8 fork is per span F, so a left loop mouth at spans 166..188 and a right fork at F=147 are different spans of the same window and the walker, the corridor maps (progress, finish, recovery), the wall
+  gap, the AI path and the minimap already treat them separately (the AI rolls once per fork when it comes into range: stay / avenue corridor, then stay / loop). The harness column `enter c/m/o` shows the three-way split on one window (Avenida 60 777..942: **14 / 10 / 12**).
+* The blocker was the generator: `tg_bl_build` refused a loop whose bypassed stretch F-2..R+2 touched ANY fork-cleared span (`tg_span_in_fork_clear`: a fork's F-6-2 .. R+2), so on every route with a real fork over the stretch the finder had 0 candidates
+  ("a fork, bridge or tunnel is in the bypassed stretch": 7 to 12 refusals per route in the search below).
+
+### What changed (generator only; `=0` restores master)
+
+| piece | rule | knob |
+|---|---|---|
+| a fork on the OTHER side | a loop's stretch may cross a real fork's cleared region when the fork's corridor is on the opposite side (`bl_fork_blocks`: `tg_fork_side_at` against the loop side). The fork builder keeps "main's left edge and branch's right edge on the road's edges" (`tg_fork_main_shift`), so the node's edge on the loop's side IS the main half's outer edge and the slip lane's flush frame (`tg_city_edge_frame`) is already right | `TD5RE_GEO_LOOP_FORK_BESIDE` (default on) |
+| mouths inside the window | a mouth (departure or arrival range, plus `TD5RE_GEO_LOOP_FORK_MOUTH_PAD` = 4 spans) must stand on ordinary road, or inside the fork's CORE `F+1+pad .. R-1-pad` (`TD5RE_GEO_LOOP_FORK_CORE_PAD` = 3; plaza forks excluded) | `TD5RE_GEO_LOOP_FORK_NWAY` (default on) |
+| same side as the fork's corridor | still refused (the loop's street would cross the corridor). A trial that allowed it with the mouths on ordinary road found no new candidate on 34 routes (the avenue windows are 100..570 spans long, so a same-side loop has no mouth outside them) and was removed | - |
+| log | `[BLOCK LOOP] CANDIDATE ... [BESIDE REAL FORK]`; the fork lines now end with `side=L/R` | - |
+
+Dev tooling: `verify/geo_n2_build.ps1` builds a geo route from waypoints in a PRIVATE run dir (never the shared `_route/`, 25-28 s, deterministic: the waypoints of the 10-10 route give fingerprint 4B56DECB and those of the 10-11 19:56 route give 7820EC8E, both reproduced exactly) and keeps its `_route/` and `race.log`;
+`verify/geo_n2_search.py <seed> <n> <tag>` builds n perturbed routes and prints forks (kind+side) and loop candidates; `verify/geo_n2_summ.py`. Route FD6BE7C7 (10-11 02:53) could not be rebuilt: its waypoints were never recorded and no copy of its `_route/` exists (not in `_archive/`, not in the harness dirs).
+Search of 68 perturbed routes (`s1_*`, `s2_*`, +-0.004 degrees around the two known routes): 36 have loop candidates; of the 48 `s2_*` routes (built by the exe that flags them) 20 admit candidates that exist only through this change, up to 6 on one route.
+
+### Routes used (private run dirs under verify/out/n2_routes, `_route/` kept)
+
+| route | fingerprint | real forks | loops built | loop inside a fork window |
+|---|---|---|---|---|
+| s2_05 | 135D7887 | AR 26..94, AL 147..295, AL 424..669 | right 166..238 | in AL 147..295 |
+| s2_16 | B02D4A27 | plaza 107..712, AR 777..942, AR 1030..1158 | left 802..881, left 1059..1138 | in AR 777..942 and AR 1030..1158 |
+| s2_00 | 8A7F6D71 | AL 88..251, 366..532, 658..895, 975..1142, 1199..1275 | right 111..191, right 997..1076 | in AL 88..251 and AL 975..1142 |
+
+(`A` avenue, `L`/`R` corridor side.) Mariano's current route 7820EC8E and the 10-10 route 4B56DECB build the same strip as master with the knobs on (no candidate is admitted: their forks are all right-hand and their loops are not in a window of the opposite side).
+
+### Harness (`verify/geo_fork_validate.ps1 -RouteDir ...`, 6 seeds, 6 AI, no traffic; `enter c/m/o` = took the fork / stayed / left the window onto another corridor)
+
+Forced half and half (`n2h_*`), loop rows and the fork that holds them (the other forks of each route are in the run dirs):
+
+| route | fork | enter c/m/o | hit/crash | stall | jam | spin | speed fork / forks-off | verdict |
+|---|---|---|---|---|---|---|---|---|
+| s2_05 | Avenida 13 147..295 (holds the loop) | 18/11/7 | 2/0 | 0 | 0 | 0 | 494 / 537 | PASS |
+| s2_05 | LOOP 166..238 | 7/11/0 | 1/0 | 0 | 0 | 0 | 410 / 551 | PASS |
+| s2_16 | Avenida 60 777..942 (holds the loop) | 14/10/12 | 10/0 | 0 | 0 | 0 | 488 / 559 | PASS |
+| s2_16 | LOOP 802..881 | 12/10/0 | 2/0 | 0 | 0 | 0 | 398 / 607 | PASS |
+| s2_16 | Avenida 60 1030..1158 (holds the loop) | 17/9/9 | 16/0 | 0 | 0 | 0 | 461 / 618 | WARN: hits 16 vs 0, speed 75 %. The same fork with the knob OFF: 12 hits vs 0, speed 79 %, WARN: pre-existing |
+| s2_16 | LOOP 1059..1138 | 9/9/0 | 0/0 | 0 | 0 | 0 | 403 / 663 | PASS |
+| s2_00 | Avenida 60 88..251 (holds the loop) | 18/9/9 | 8/3 | 6 | 3 | 3 | 415 / 438 | WARN: 3 jammed cars, stalls 6 vs 4. Knob OFF: stalls 8, jams 3, 17 spins (worse) |
+| s2_00 | LOOP 111..191 | 9/9/0 | 1/0 | 0 | 0 | 0 | 407 / 397 | PASS |
+| s2_00 | Avenida 44 975..1142 (holds the loop) | 18/6/12 | 3/0 | 0 | 0 | 0 | 507 / 603 | PASS |
+| s2_00 | LOOP 997..1076 | 12/6/0 | 2/0 | 0 | 0 | 0 | 370 / 606 | PASS |
+
+Natural fork choice (`n2n_*`, `-ForceMode 0`): all five loops PASS again (s2_05 loop 11/7/0, s2_16 loops 16/4/0 and 9/7/0, s2_00 loops 14/4/0 and 8/10/0) and all of s2_00 PASS. Avenida 60 777..942 PASS with 16/4/16. Two forks that hold a loop WARN:
+s2_16 1030..1158 (speed 75 %, the same WARN as with the knob off) and s2_05 Avenida 13 (1 stalled car at spans 282..284 after a spin at 278, 100 ticks; the knob-off run of the same seeds has 0 stalls there and 1 on Diagonal 73 elsewhere: one event, below what the harness can attribute).
+The other WARNs on these routes (F=26 Avenida 44, Diagonal 73 424..669, Avenida 13 366..532, Avenida 25 1199..1275) are forks that hold no loop and WARN identically with `TD5RE_GEO_LOOP_FORK_BESIDE=0`.
+Walker audit (`TD5RE_WALKER_AUDIT=1`, 3 seeds each of s2_05 and s2_16): lane mismatches 0 on the main road, the left and right corridors and the loops; ticks outside the span 0.1 % on the main road (17,159 ticks / 20 lost), 6 of 2,525 loop ticks, 5 of 7,316 right-corridor ticks.
+
+### Measured limits
+
+* **A mouth inside a fork's ramp (the F=922 case) is WARN.** `TD5RE_GEO_LOOP_FORK_CORE_PAD=-10` lets a mouth start in the widened approach / the rejoin (the uniform-lanes test passes there). On s2_03 it builds a left loop 572..651 four spans before the right fork 576..666: loop WARN (3 stalls, 16 hard hits vs 0, speed 53 %), fork WARN (17 hits vs 0). The AI has 4 spans between two decisions (the loop's D and the fork's F). Default stays 3, the range of the knob is -10..20.
+* **Several mouths on the SAME main span are not built.** The engine keeps one side-link entry per main span (`s_sl_of`): a left and a right loop whose mouth ranges overlap would overwrite each other's entry. Cost of lifting it: a second entry array in `sl_*` (~40 lines), a mouth chooser in `td5_ai.c` with a per-slot declined-loop mask (a car inside two mouths decides each loop once; ~50 lines), and `TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP_OPP` below 1. Three ways off one WINDOW (what is built) needs none of it.
+* **Nesting (a corridor off a corridor) is not built.** A loop whose host is a fork corridor needs the corridor's edge frame (the avenue forks ride main node + measured lateral, no `rview` rows) and `corr_progress_index` entries for the corridor-to-corridor step; no code was written.
+* The verdict table is keyed by route fingerprint: a route with a record builds only PASS / KEEP loops, so on 4B56DECB and FD6BE7C7 the new combinations stay out until the table is regenerated; an unknown route builds them (UNVERIFIED default). No records were added for the three scratch routes.
+
+### Gates (measured)
+
+* knob-off identity on Mariano's current route 7820EC8E (`verify/geo_tags_identity.ps1 -Arm geo`): master exe, new exe default and new exe `TD5RE_GEO_LOOP_FORK_BESIDE=0` all give MODELS.DAT 8122820 B `C0E01FE8D4A6F99F7904F5A1B672F9C8`, STRIP 83340 B `208386E6...`, TEXTURES `FB1941C7...`, the same street census line (157 arms, 52 accepted).
+* on a route where the feature acts (s2_05): master = `BESIDE=0` = 10109568 B `B6661FC92A135509DD12803FCE4E5D4C`; default 10247312 B `4C10FDBDD2BBCE67DE16743E51EE9979` (STRIP 92778 -> 101162 B). Street census identical in all three. 4B56DECB (a0): master = default, 15535836 B `D602BB0AC2A950CEA69A98E80C3BC5B6`.
+* synthetic auto track (SELECTED.TXT aside): MODELS.DAT 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`, STRIP `0641EDB7...`, TEXTURES `5B4E005A...`: identical for the master exe and the new exe.
+* shipped tracks, master exe vs new exe, 6 AI, pose + motion + track + driver (`verify/shipped_trace.ps1`, fresh master trace per pair): Moscow (0) 54,004 rows and Honolulu (8) 90,004 rows: 0 differing rows. Newcastle (5): 6,484 of 90,004 rows differ from tick 2319, and master against master (two runs of the same exe) differs in 6,417 rows from the same tick: the track is not deterministic run to run on this machine, so that pair says nothing.
+* full self-test: 64 PASS / 0 WARN / 0 FAIL, exit 0 (199 s). The first run had 63 / 1 / 0 (`chaos-coop-4seat` peak jump 8715 > 8000 while a sibling session's game was running; the known frame-timing WARN).
+* `build_all.bat`: dev + release + structure lint OK (extern 3, game.h includers 23, warnings 84 = baseline).
+
+### Frames looked at (`verify/geo_tour.ps1`, route s2_05, scenery complete)
+
+Right loop 166..238 inside the left fork Avenida 13 147..295: the approach (median lawn and the corridor on the left, the main half, pavement and frontage on the right), the departure mouth seen from the street side (the slip lane peels off the road's right edge, a pavement strip between, the street arc leaves toward the cross street), the arrival (the loop's street joins from behind a pavement, the cross street at the foot). The loop side is the side away from the avenue's corridor in every pose. The "top" poses of the tour are low oblique views (the pose height is clamped), so the geometry was judged from the chase / street-side poses and the harness.
+
+### What remains
+
+* Same-span overlapping mouths (three ways off one SPAN), nesting, a mouth inside a fork's ramp (needs a decision gap wider than 4 spans or a corridor-aware commit), loops beside a same-side fork (no candidate exists on the routes searched).
+* A human drive through a loop that starts inside a fork window (nobody has steered one by hand); the harness is AI only.
