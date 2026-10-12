@@ -7439,6 +7439,139 @@ static int hud_minimap_streets(float offset_x, float offset_z,
     return drawn;
 }
 
+/* [ROUND 1022 S] Street-NAME labels on the minimap (plan: GEO_MASTARM_PLATES.md,
+ * "Minimap street labels"). Race-time text, not a page emitter: the names are
+ * UTF-8 OSM strings drawn with the HUD face through hud_draw_utf8_line, so an
+ * accent stays an accent.
+ *
+ * WHAT GETS A LABEL. The minimap window is ~275 m across, so a 20-letter name
+ * is about the length of a block and only a handful of streets are in view at
+ * once. The rule is therefore: named streets of rank STREET or MAJOR (service
+ * roads and lanes stay silent), ONE label per name however many ways carry it,
+ * placed on the chord of that street nearest the player (outside a keep-clear
+ * box around the player dot), the street the player is driving ON left out (the
+ * "ON <street>" line already says it, and its label would sit on the route),
+ * nearest streets first, at most MM_LABELS_MAX, and a label that would overlap
+ * an accepted one or the player box is dropped. Labels are horizontal -- the
+ * map rotates with the heading, and text rotated through every angle shimmers
+ * and blurs at 7-10 px -- and are shifted along x to stay inside the window.
+ *
+ * Draw order matters: td5_vui_quad is immediate, so this runs AFTER the street
+ * and route quads (which are queued by hud_submit_quad as they are built and
+ * flushed in order) and BEFORE the dots, putting the text on top of the map and
+ * under the racers. Knob: TD5RE_MINIMAP_LABELS=0 turns it off. */
+typedef struct { int id; float d2, mx, my; int banned; } MmLabelCand;
+
+static int hud_minimap_street_labels(int actor_slot, float offset_x, float offset_z,
+                                     float cos_h, float sin_h, float mm_cx, float mm_cy)
+{
+    enum { CAND_MAX = 96, LABELS_MAX = 5 };
+    static MmLabelCand cand[CAND_MAX];
+    float rects[LABELS_MAX][4];
+    const int n = td5_mmstreets_count();
+    const TD5_MMStreetSeg *segs = td5_mmstreets_segs();
+    const char *own;
+    float ui, cap, px, pz, reach, mm_l, mm_t, mm_r, mm_b, keep;
+    int nc = 0, placed = 0, i, j;
+
+    if (!hud_knob_on("TD5RE_MINIMAP_LABELS")) return 0;
+    if (n <= 0 || !segs) return 0;
+    if (s_minimap_world_scale_x <= 0.0f || s_minimap_world_scale_y <= 0.0f) return 0;
+    if (!td5_hudfont_ready()) return 0;
+
+    ui  = s_minimap_width * (1.0f / 115.0f);
+    cap = 4.0f * ui;
+    if (cap < 6.0f) cap = 6.0f;
+    keep = 9.0f * ui;
+    mm_l = s_minimap_x;                      mm_t = s_minimap_y;
+    mm_r = s_minimap_x + s_minimap_width;    mm_b = s_minimap_y + s_minimap_height;
+    px = -offset_x;
+    pz = -offset_z;
+    {
+        const float hx = (s_minimap_width  * 0.5f) / s_minimap_world_scale_x;
+        const float hy = (s_minimap_height * 0.5f) / s_minimap_world_scale_y;
+        reach = sqrtf(hx * hx + hy * hy);
+    }
+    own = td5_geo_attrs_name(td5_game_get_slot_span(actor_slot));
+    if (!own) own = "";
+
+    for (i = 0; i < n; i++) {
+        const TD5_MMStreetSeg *s = &segs[i];
+        float wx0, wz0, wx1, wz1, ax, ay, bx, by, mx, my, dx, dy, d2;
+        MmLabelCand *c = NULL;
+
+        if (s->name_id < 0 || s->rank < TD5_MMS_RANK_STREET) continue;
+        if (s->maxx < px - reach || s->minx > px + reach ||
+            s->maxz < pz - reach || s->minz > pz + reach) continue;
+
+        wx0 = s->x0 + offset_x; wz0 = s->z0 + offset_z;
+        wx1 = s->x1 + offset_x; wz1 = s->z1 + offset_z;
+        ax = mm_cx + (wx0 * cos_h + wz0 * sin_h) * s_minimap_world_scale_x;
+        ay = mm_cy + (wz0 * cos_h - wx0 * sin_h) * s_minimap_world_scale_y;
+        bx = mm_cx + (wx1 * cos_h + wz1 * sin_h) * s_minimap_world_scale_x;
+        by = mm_cy + (wz1 * cos_h - wx1 * sin_h) * s_minimap_world_scale_y;
+        mx = (ax + bx) * 0.5f;
+        my = (ay + by) * 0.5f;
+        /* the midpoint must be well inside the window: a label is centred on it */
+        if (mx < mm_l + 6.0f * ui || mx > mm_r - 6.0f * ui ||
+            my < mm_t + cap     || my > mm_b - cap) continue;
+        dx = mx - mm_cx; dy = my - mm_cy;
+        d2 = dx * dx + dy * dy;
+        if (d2 < keep * keep) continue;
+
+        for (j = 0; j < nc; j++) if (cand[j].id == s->name_id) { c = &cand[j]; break; }
+        if (!c) {
+            if (nc >= CAND_MAX) continue;
+            c = &cand[nc++];
+            c->id = s->name_id;
+            c->d2 = d2; c->mx = mx; c->my = my;
+            c->banned = (strcmp(td5_mmstreets_name(s->name_id), own) == 0);
+        } else if (d2 < c->d2) {
+            c->d2 = d2; c->mx = mx; c->my = my;
+        }
+    }
+    if (nc == 0) return 0;
+
+    /* nearest first (insertion sort: nc is tiny) */
+    for (i = 1; i < nc; i++) {
+        MmLabelCand t = cand[i];
+        for (j = i - 1; j >= 0 && cand[j].d2 > t.d2; j--) cand[j + 1] = cand[j];
+        cand[j + 1] = t;
+    }
+
+    for (i = 0; i < nc && placed < LABELS_MAX; i++) {
+        const char *name;
+        float w, x0, base, r[4];
+        int clash = 0;
+        if (cand[i].banned) continue;
+        name = td5_mmstreets_name(cand[i].id);
+        if (!name[0]) continue;
+        w = hud_draw_utf8_line(0.0f, 0.0f, cap, name, 0u, 0);
+        if (w <= 0.0f || w > s_minimap_width - 8.0f * ui) continue;
+        x0 = cand[i].mx - w * 0.5f;
+        if (x0 < mm_l + 3.0f * ui)         x0 = mm_l + 3.0f * ui;
+        if (x0 + w > mm_r - 3.0f * ui)     x0 = mm_r - 3.0f * ui - w;
+        if (fabsf((x0 + w * 0.5f) - cand[i].mx) > w * 0.35f) continue;
+        base = cand[i].my + cap * 0.5f;
+        r[0] = x0 - 2.0f * ui;  r[1] = base - cap - 1.5f * ui;
+        r[2] = x0 + w + 2.0f * ui;  r[3] = base + 2.5f * ui;
+        /* keep-clear box round the player dot */
+        if (r[2] > mm_cx - keep && r[0] < mm_cx + keep &&
+            r[3] > mm_cy - keep && r[1] < mm_cy + keep) continue;
+        for (j = 0; j < placed; j++)
+            if (r[2] > rects[j][0] && r[0] < rects[j][2] &&
+                r[3] > rects[j][1] && r[1] < rects[j][3]) { clash = 1; break; }
+        if (clash) continue;
+        memcpy(rects[placed], r, sizeof r);
+        placed++;
+        /* dark backing so the text reads over the grey route and the grid */
+        td5_vui_quad(r[0], r[1], r[2] - r[0], r[3] - r[1], 0x8C0A140Eu, -1,
+                     0.0f, 0.0f, 0.0f, 0.0f);
+        hud_draw_utf8_line(x0, base, cap, name, 0xFFF2F6FFu, 1);
+    }
+    return placed;
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
     /* Faithful: the original disabled the whole minimap on circuit tracks via an
@@ -8159,6 +8292,9 @@ void td5_hud_render_minimap(int actor_slot)
                           cp_count, cp_drawn);
         }
     }
+
+    /* [ROUND 1022 S] Street-name labels over the map, under the racer dots. */
+    hud_minimap_street_labels(actor_slot, offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
 
     /* Render racer dot markers.
      *

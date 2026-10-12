@@ -1794,9 +1794,20 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
          * geo level090 raced with TD5RE_GEO_PLACE unset fall through to the
          * non-billboard path and draw the lenses as stray flat quads. */
         int signal_phase = -1;
+        int signal_cross = 0;    /* [R1022 S] lamp of the cross-street head */
+        int signal_digit = -1;   /* [R1022 S] countdown digit: 0 tens, 1 ones */
         if (billboard_tag >= TD5_MESH_TAG_SIGNAL_LAMP &&
             billboard_tag <  TD5_MESH_TAG_SIGNAL_LAMP + TD5_GEO_SIGNAL_PHASES) {
             signal_phase = billboard_tag - TD5_MESH_TAG_SIGNAL_LAMP;
+            billboard_tag = 2;
+        } else if (billboard_tag >= TD5_MESH_TAG_SIGNAL_CROSS &&
+                   billboard_tag <  TD5_MESH_TAG_SIGNAL_CROSS + TD5_GEO_SIGNAL_PHASES) {
+            signal_phase = billboard_tag - TD5_MESH_TAG_SIGNAL_CROSS;
+            signal_cross = 1;
+            billboard_tag = 2;
+        } else if (billboard_tag >= TD5_MESH_TAG_SIGNAL_DIGIT &&
+                   billboard_tag <  TD5_MESH_TAG_SIGNAL_DIGIT + TD5_GEO_SIGNAL_DIGITS) {
+            signal_digit = billboard_tag - TD5_MESH_TAG_SIGNAL_DIGIT;
             billboard_tag = 2;
         }
         if (billboard_tag == 1 || billboard_tag == 2) {
@@ -1818,11 +1829,53 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
              * shared state. Cosmetic in the strict sense: no simulation code
              * can observe this value, so a RaceTrace CSV is unaffected. */
             if (signal_phase >= 0) {
-                const uint32_t lamp = td5_geo_signal_lamp_colour(signal_phase);
+                const uint32_t lamp = signal_cross
+                    ? td5_geo_signal_cross_colour(signal_phase)
+                    : td5_geo_signal_lamp_colour(signal_phase);
                 const int vc = mesh->total_vertex_count;
                 if (g_rs->vtx_work && vc > 0 && vc <= g_rs->vtx_work_cap) {
                     for (int vi = 0; vi < vc; vi++)
                         g_rs->vtx_work[vi].lighting = lamp;
+                }
+            }
+            /* [ROUND 1022 S] COUNTDOWN DIGIT. The renderer cannot swap a
+             * texture page per frame, but a digit quad does not need to: every
+             * digit lives on ONE atlas page and the quad's UVs pick the cell.
+             * The workspace copy of the 4 vertices is rewritten here (corner
+             * order is the billboard emitter's: near-bottom, far-bottom,
+             * far-top, near-top = (u0,v1) (u1,v1) (u1,v0) (u0,v0)); the
+             * asset is never touched. Blank (tens of a 1-digit value, or the
+             * green-to-red amber) is a black diffuse, which on the opaque
+             * display page is the same black as the box around it. */
+            if (signal_digit >= 0) {
+                const int vc = mesh->total_vertex_count;
+                if (g_rs->vtx_work && vc == 4 && vc <= g_rs->vtx_work_cap) {
+                    unsigned int rgb = 0xFF000000u;
+                    const int val = td5_geo_signal_countdown(&rgb);
+                    int d = -1;
+                    if (val >= 0) {
+                        if (signal_digit == 0) d = (val >= 10) ? (val / 10) % 10 : -1;
+                        else                   d = val % 10;
+                    }
+                    if (d < 0) {
+                        for (int vi = 0; vi < 4; vi++)
+                            g_rs->vtx_work[vi].lighting = 0xFF000000u;
+                    } else {
+                        const float cu = (float)(d % TD5_GEO_DIGIT_COLS) * (float)TD5_GEO_DIGIT_CELL_W;
+                        const float cv = (float)(d / TD5_GEO_DIGIT_COLS) * (float)TD5_GEO_DIGIT_CELL_H;
+                        /* half a texel in from the cell edge: LINEAR + WRAP
+                         * must never reach the neighbouring cell */
+                        const float u0 = (cu + 0.5f) / 64.0f;
+                        const float u1 = (cu + (float)TD5_GEO_DIGIT_CELL_W - 0.5f) / 64.0f;
+                        const float v0 = (cv + 0.5f) / 64.0f;
+                        const float v1 = (cv + (float)TD5_GEO_DIGIT_CELL_H - 0.5f) / 64.0f;
+                        g_rs->vtx_work[0].tex_u = u0; g_rs->vtx_work[0].tex_v = v1;
+                        g_rs->vtx_work[1].tex_u = u1; g_rs->vtx_work[1].tex_v = v1;
+                        g_rs->vtx_work[2].tex_u = u1; g_rs->vtx_work[2].tex_v = v0;
+                        g_rs->vtx_work[3].tex_u = u0; g_rs->vtx_work[3].tex_v = v0;
+                        for (int vi = 0; vi < 4; vi++)
+                            g_rs->vtx_work[vi].lighting = rgb;
+                    }
                 }
             }
             /* Skip runtime vertex-lighting recompute for billboard meshes.

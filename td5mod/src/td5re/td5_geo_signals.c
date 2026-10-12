@@ -391,16 +391,33 @@ static float sig_now_s(void)
     return (float)(td5_plat_time_us() % 3600000000ULL) * 1.0e-6f;
 }
 
-int td5_geo_signal_lamp_phase_now(void)
+/* Which lamp is lit at cycle time `t` (0 <= t < SIG_T_PERIOD). */
+static int sig_phase_at(float t)
 {
-    const float t = fmodf(sig_now_s(), SIG_T_PERIOD);
     if (t < SIG_T_RED_END)    return 0;   /* red   */
     if (t < SIG_T_AMBER1_END) return 1;   /* amber, red -> green */
     if (t < SIG_T_GREEN_END)  return 2;   /* green */
     return 1;                             /* amber, green -> red */
 }
 
-unsigned int td5_geo_signal_lamp_colour(int phase)
+int td5_geo_signal_lamp_phase_now(void)
+{
+    return sig_phase_at(fmodf(sig_now_s(), SIG_T_PERIOD));
+}
+
+/* [ROUND 1022 S] The CROSS street's head runs the SAME four-step sequence half
+ * a period behind. With this cycle (red 4.0 / amber 1.5 / green 4.0 / amber 1.5)
+ * a half-period shift makes the cross direction RED for the whole of the main
+ * green and the main clearing amber, GREEN for the whole of the main red, and
+ * puts each direction's amber on the other's red-to-green amber: the ordinary
+ * no-all-red sequence, so the two heads are never both green and never both
+ * red for more than a beat. */
+int td5_geo_signal_cross_phase_now(void)
+{
+    return sig_phase_at(fmodf(sig_now_s() + 0.5f * SIG_T_PERIOD, SIG_T_PERIOD));
+}
+
+static unsigned int sig_colour(int phase, int lit_phase)
 {
     unsigned int rgb;
     float gain;
@@ -409,10 +426,51 @@ unsigned int td5_geo_signal_lamp_colour(int phase)
     if (phase < 0 || phase >= TD5_GEO_SIGNAL_PHASES) return 0xFF000000u;
 
     rgb  = k_sig_rgb[phase];
-    gain = (phase == td5_geo_signal_lamp_phase_now()) ? SIG_GAIN_ON
-                                                      : SIG_GAIN_OFF;
+    gain = (phase == lit_phase) ? SIG_GAIN_ON : SIG_GAIN_OFF;
     r = (unsigned int)((float)((rgb >> 16) & 0xFFu) * gain);
     g = (unsigned int)((float)((rgb >>  8) & 0xFFu) * gain);
     b = (unsigned int)((float)( rgb        & 0xFFu) * gain);
     return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+unsigned int td5_geo_signal_lamp_colour(int phase)
+{
+    return sig_colour(phase, td5_geo_signal_lamp_phase_now());
+}
+
+unsigned int td5_geo_signal_cross_colour(int phase)
+{
+    return sig_colour(phase, td5_geo_signal_cross_phase_now());
+}
+
+/* [ROUND 1022 S] The pedestrian-style countdown beside the facing head.
+ *
+ * What it counts: seconds until the MAIN direction's next change of right of
+ * way. Over the red and the red-to-green amber that is the time left to green
+ * (red digits, 6 down to 1); over green it is the time left to green's end
+ * (green digits, 4 down to 1); over the green-to-red amber the display is blank,
+ * the way the real La Plata units go dark while the lamp is amber. The digit is
+ * ceil(remaining), so the display reads 1 for the last second and never 0.
+ *
+ * Returns the two-digit value (1..99), or -1 for blank. */
+int td5_geo_signal_countdown(unsigned int *rgb)
+{
+    const float t = fmodf(sig_now_s(), SIG_T_PERIOD);
+    float rem;
+    int v;
+
+    if (t < SIG_T_AMBER1_END) {
+        rem = SIG_T_AMBER1_END - t;
+        if (rgb) *rgb = 0xFFFF2010u;
+    } else if (t < SIG_T_GREEN_END) {
+        rem = SIG_T_GREEN_END - t;
+        if (rgb) *rgb = 0xFF30FF40u;
+    } else {
+        if (rgb) *rgb = 0xFF000000u;
+        return -1;
+    }
+    v = (int)ceilf(rem);
+    if (v < 1) v = 1;
+    if (v > 99) v = 99;
+    return v;
 }

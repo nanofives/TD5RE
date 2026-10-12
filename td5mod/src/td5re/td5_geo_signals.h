@@ -52,6 +52,26 @@
 #define TD5_MESH_TAG_SIGNAL_LAMP  4
 #define TD5_GEO_SIGNAL_PHASES     3
 
+/* [ROUND 1022 S] Two more tag ranges, same safety argument as above (shipped
+ * levels carry 0..2 only).
+ *   CROSS  7..9   a lamp of the quarter-turned CROSS-street head: same
+ *                 red/amber/green order, but lit from the cycle half a period
+ *                 behind, so it shows red while the main heads show green.
+ *   DIGIT 10..11  one digit of the countdown display (10 = tens, 11 = ones).
+ *                 The quad's page is the digit atlas (below); the renderer
+ *                 rewrites its UVs and diffuse every frame. */
+#define TD5_MESH_TAG_SIGNAL_CROSS 7
+#define TD5_MESH_TAG_SIGNAL_DIGIT 10
+#define TD5_GEO_SIGNAL_DIGITS     2
+
+/* Digit atlas layout on the countdown page (64x64): a 4 x 3 grid of 16 x 21
+ * texel cells, cell k = digit k (0..9) in row-major order. 5x7 dot matrix on a
+ * 3 texel pitch. Shared by the page emitter and the renderer so the two can
+ * never disagree about where a digit lives. */
+#define TD5_GEO_DIGIT_CELL_W      16
+#define TD5_GEO_DIGIT_CELL_H      21
+#define TD5_GEO_DIGIT_COLS        4
+
 /* ----------------------------------------------------------- build time --- */
 
 /* Load SIGNALS.JSON for the place td5_geo_place_slug() reports, unloading any
@@ -112,6 +132,15 @@ int td5_geo_bus_stop_get(int i, TD5_GeoBusStop *out);
  * are additive, so "off" is a dim ember rather than a hole. Out-of-range phase
  * returns opaque black. */
 unsigned int td5_geo_signal_lamp_colour(int phase);
+
+/* The same for a lamp of the cross-street head (tags TD5_MESH_TAG_SIGNAL_CROSS+n). */
+unsigned int td5_geo_signal_cross_colour(int phase);
+int  td5_geo_signal_cross_phase_now(void);
+
+/* Countdown value now, 1..99, or -1 for a blank display; *rgb (optional)
+ * receives the ARGB the digits draw with (red while counting to green, green
+ * while counting to red). */
+int  td5_geo_signal_countdown(unsigned int *rgb);
 
 /* Which phase is lit right now (0 red / 1 amber / 2 green). Diagnostics and
  * tests only -- the renderer goes through td5_geo_signal_lamp_colour. */

@@ -46,6 +46,8 @@ typedef struct {
     float         x0, z0, x1, z1;   /* world units, one polyline chord       */
     float         minx, minz, maxx, maxz;  /* its bbox, so a cull is 4 compares */
     unsigned char rank;             /* TD5_MMS_RANK_*                         */
+    short         name_id;          /* [R1022 S] interned OSM name (see
+                                       td5_mmstreets_name), -1 = unnamed      */
 } TD5_MMStreetSeg;
 
 /* Make the overlay match the track that is loaded now, rebuilding only when the
@@ -61,6 +63,9 @@ int td5_mmstreets_count(void);
 /* The segment array, or NULL when empty. Valid until the next sync() that
  * actually rebuilds, i.e. for the rest of the frame. */
 const TD5_MMStreetSeg *td5_mmstreets_segs(void);
+/* [ROUND 1022 S] The street name for a segment's name_id, "" when unnamed or
+ * out of range. UTF-8; valid until the next geo roads sync. */
+const char *td5_mmstreets_name(int id);
 /* "geo:<slug>", "auto", or "" -- for the log line and for diagnostics. */
 const char *td5_mmstreets_source(void);
 
