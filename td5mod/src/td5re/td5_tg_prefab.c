@@ -51,6 +51,7 @@ static long s_pf_emitted;
  * had anywhere to go" are different tracks. */
 static int s_pf_plaza_refused;
 static int s_pf_geo_road_refused;   /* [1014 C] sites refused: a real road under the piece */
+static int s_pf_geo_street_refused; /* [R1024 I] pieces not drawn: standing on a laid side street / arm */
 
 /* [J7 item 1] "todavia hay edificios que no tienen lados" (Mariano,
  * 2026-10-03). Some of the shipped set pieces in td5_tg_prefab_data.h are OPEN
@@ -134,6 +135,7 @@ void tg_prefab_reset(void)
     s_pf_emitted = 0;
     s_pf_plaza_refused = 0;
     s_pf_geo_road_refused = 0;
+    s_pf_geo_street_refused = 0;
 }
 
 int tg_prefab_count(void) { return s_pf_n; }
@@ -332,7 +334,7 @@ int tg_prefab_write_at(TG_Buf *blk, int pf, double ox, double oy, double oz,
 /* Drain every placement recorded for span si into this entry's mesh buffer.
  * Mirrors the surrounding loop's contract: record the offset in moff BEFORE
  * appending, keep moff ascending, and guard-mark the byte range just written. */
-int tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
+int tg_prefab_emit_span(const TG_NodeList *nl, int si, TG_Buf *meshes, size_t *moff, int *nmesh,
                         int entry)
 {
     int i, ok = 1;
@@ -344,6 +346,15 @@ int tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
         if (s_pf[i].si != si) continue;
         if (*nmesh >= TG_MAX_MESHES_PER_ENTRY) break;
         d = &k_tg_prefabs[s_pf[i].pf];
+        /* [ROUND 1024 I] The set piece is SITED before the network exists (tg_landmarks_place), so tg_geo_prefab_blocked
+         * cannot see the side streets the cross-street emitter lays. Here they are known: a piece whose rectangle stands
+         * on a laid street or its pavement arm is not drawn (level091 e145 s10: a 9 m piece in a 4-way crossing).
+         * TD5RE_GEO_PREFAB_STREET=0 draws it. */
+        if (nl && tg_geo_rect_on_street(nl, si, s_pf[i].ox, s_pf[i].oz, s_pf[i].ca, s_pf[i].sa,
+                                        d->fx * 0.5, d->fz * 0.5)) {
+            s_pf_geo_street_refused++;
+            continue;
+        }
         m0 = meshes->len;
         moff[*nmesh] = m0;
         ok = tg_prefab_write(meshes, d, s_pf[i].pf,
@@ -374,6 +385,9 @@ void tg_prefab_report(void)
               "real square, %d for standing on a real road", s_pf_n,
               s_pf_emitted, TD5_TG_PREFAB_N, s_pf_plaza_refused,
               s_pf_geo_road_refused);
+    if (s_pf_geo_street_refused)
+        TD5_LOG_I(LOG_TAG, "trackgen: [PREFAB] [1024 I] %d set piece(s) not drawn: standing on a laid side street or its "
+                  "pavement arm (knob TD5RE_GEO_PREFAB_STREET)", s_pf_geo_street_refused);
     /* Name them. A bare count cannot distinguish "six plazas" from "four
      * landmarks and two plazas", and those are very different tracks. */
     for (i = 0; i < s_pf_n; i++) {

@@ -2977,7 +2977,7 @@ int  tg_prefab_add(int si, int pf, double ox, double oy, double oz,
                    double yaw_c, double yaw_s);
 int  tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
                      int side, double clearance);
-int  tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
+int  tg_prefab_emit_span(const TG_NodeList *nl, int si, TG_Buf *meshes, size_t *moff, int *nmesh,
                          int entry);
 double      tg_prefab_half_depth(int pf);
 const char *tg_prefab_name(int pf);

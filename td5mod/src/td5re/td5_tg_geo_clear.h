@@ -93,6 +93,17 @@ double tg_prefab_half_width(int pf);          /* td5_tg_prefab.c */
 int tg_geo_footprint_clear(const TG_NodeList *nl, int si, double side, double base_y,
                            double *rx, double *rz, int n, double maxpush, const char **why);
 
+/* [ROUND 1024 I] tg_geo_footprint_clear for a REAL footprint whose ring may be reshaped: the avenue's far
+ * carriageway + footway are roads too, a laid street's sliver is trimmed off (exact polygon clip) instead of the
+ * footprint being dropped, and *pn comes back as the new vertex count (<= nmax). *trimmed = 1 when it was cut.
+ * Knobs TD5RE_GEO_BLD_AVCLEAR / TD5RE_GEO_BLD_FOOTTRIM (default ON); both off = tg_geo_footprint_clear. */
+/* [ROUND 1024 I] a stamped rectangle (centre, unit axis, half extents) standing on a laid side street / arm */
+int tg_geo_rect_on_street(const TG_NodeList *nl, int si, double cx, double cz, double ux, double uz, double hx, double hz);
+long tg_geo_clear_pushed(void);          /* [R1024 I] footprints moved clear of a road */
+int tg_geo_footprint_clear_ring(const TG_NodeList *nl, int si, double side, double base_y,
+                                double *rx, double *rz, int *pn, int nmax, double maxpush,
+                                const char **why, int *trimmed);
+
 /* A procedural box (tg_bg_building_box: front edge (bx,bz) + (ax,az), back vectors (lx0,lz0) / (lx1,lz1) of
  * length `depth`) against the same: never moved, 1 = skip the box. */
 int tg_geo_box_clear(const TG_NodeList *nl, int si, double side, double by,

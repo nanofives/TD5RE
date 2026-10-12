@@ -4091,7 +4091,7 @@ static int tg_scenery_entry(int e)
              * tg_landmarks_place. Last in the span so a landmark never
              * displaces road, rail or pavement geometry when the entry runs
              * up against TG_MAX_MESHES_PER_ENTRY. */
-            if (ok && !tg_prefab_emit_span(si, &meshes, moff, &nmesh, e)) ok = 0;
+            if (ok && !tg_prefab_emit_span(nl, si, &meshes, moff, &nmesh, e)) ok = 0;
         }
         TG_ZONE_END(TG_ZONE_ENTRY_L1);
         TG_ZONE_BEGIN(TG_ZONE_ENTRY_L2);

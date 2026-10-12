@@ -388,13 +388,53 @@ int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
  * the longest street (R8_XSTREET_MAX / span length) at 45 degrees. Pure function of the network. */
 #define TG_XSC_WIN 24
 
+/* [ROUND 1024 I] The window used to start at span 1, but a street can leave span 0 (level091: the 20000-unit street at
+ * x 0..1500 runs past two real footprints that the tests never saw). Geo only: a synthetic build keeps span 1. */
+static int tg_xsc_lo_min(void)
+{
+    return (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_XSTREET_SPAN0")) ? 0 : 1;
+}
+
+/* [ROUND 1024 I] The EMITTER lays a side street on every paved span whose frontage is open (a gap) even where the
+ * network has no mouth: tg_xstreet_reach_at falls back to the biome's default reach, and tg_city_emit_crossstreet
+ * never asks tg_xstreet_here. So the street at span 0 of level091 (20220 units long, x 0..1500) existed for the
+ * mesh and not for tg_xstreet_here / _covers / _collect, which every guard asks. This answers the emitter's own
+ * outer gates (the per-side ones stay in the callers). Geo only; TD5RE_GEO_XSTREET_ORPHAN=0 restores the old set. */
+/* [ROUND 1024 I] ... and with the emitter's own reach inputs. tg_city_emit_crossstreet is handed the span's
+ * tg_city_sidewalk_w_at (the geo / wide-avenue width, up to 720 units wider than the biome's table field) and the
+ * span's BLENDED biome, so on a street the network has no mouth for (default reach) the quad here was 720 short
+ * of the mesh (19500 vs 20220 on level091's span-0 street). Network mouths carry their own reach and ignore both.
+ * Geo only; TD5RE_GEO_XSTREET_ORPHAN=0 restores the old arguments. */
+static const TG_Biome *tg_xst_reach_biome(int m)
+{
+    return (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_XSTREET_ORPHAN")) ? &k_biomes[tg_biome_for_span(m)]
+                                                                          : &k_biomes[tg_scenery_biome_index(m)];
+}
+
+static double tg_xst_reach_sw(const TG_NodeList *nl, int m, const TG_Biome *b)
+{
+    return (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_XSTREET_ORPHAN")) ? tg_city_sidewalk_w_at(nl, m, b)
+                                                                          : tg_city_sidewalk_w(b);
+}
+
+static int tg_xst_orphan(const TG_NodeList *nl, int m)
+{
+    if (!td5_geo_loaded() || !td5_env_flag_on("TD5RE_GEO_XSTREET_ORPHAN")) return 0;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) return 0;
+    if (m < 0 || m + 1 >= nl->count) return 0;
+    if (tg_span_in_bridge_run(m) || tg_up_xclear_span(m) || tg_r13_approach_span(m)) return 0;
+    if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(m)]) > 0.0)) return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") && tg_span_near_bridge(m, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    return 1;
+}
+
 int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double z)
 {
     const int left = (sg > 0.0) ? 1 : 0;
     int lo, hi, m;
 
     if (!nl || !tg_network_built()) return 0;
-    lo = si - TG_XSC_WIN; if (lo < 1) lo = 1;
+    lo = si - TG_XSC_WIN; if (lo < tg_xsc_lo_min()) lo = tg_xsc_lo_min();
     hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
     for (m = lo; m <= hi; m++) {
         const TG_Biome *b;
@@ -402,7 +442,7 @@ int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double
         double qx[4], qz[4];
         int k, sgn = 0, in = 1;
 
-        if (!tg_xstreet_here(nl, m, sg, &rr)) continue;
+        if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m)) continue;
         /* the emitter's own per-side gates, in its own order (tg_city_emit_crossstreet) */
         if (tg_facade_built(m, left)) continue;
         if (tg_block_is_park(m, left)) continue;
@@ -411,7 +451,7 @@ int tg_xstreet_covers(const TG_NodeList *nl, int si, double sg, double x, double
         b = &k_biomes[tg_scenery_biome_index(m)];
         tg_city_edge_frame(nl, m, sg, e);
         ang = tg_block_arm_skew(m, left);
-        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, tg_city_sidewalk_w(b));
+        reach = tg_xstreet_reach_at(nl, m, sg, ang, tg_xst_reach_biome(m), tg_xst_reach_sw(nl, m, b));
         if (!(reach > 0.0)) continue;
         tg_block_arm_dirs(e, ang, &nox, &noz, &fox, &foz);
         qx[0] = e[0];                qz[0] = e[2];
@@ -452,7 +492,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
     int lo, hi, m, n = 0;
 
     if (!nl || !tg_network_built()) return 0;
-    lo = si - TG_XSC_WIN; if (lo < 1) lo = 1;
+    lo = si - TG_XSC_WIN; if (lo < tg_xsc_lo_min()) lo = tg_xsc_lo_min();
     hi = si + TG_XSC_WIN; if (hi > nl->count - 2) hi = nl->count - 2;
     for (m = lo; m <= hi && n < maxq; m++) {
         const TG_Biome *b;
@@ -460,7 +500,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
         double *q;
         int arms;
 
-        if (!tg_xstreet_here(nl, m, sg, &rr)) continue;
+        if (!tg_xstreet_here(nl, m, sg, &rr) && !tg_xst_orphan(nl, m)) continue;
         if (tg_facade_built(m, left)) continue;
         if (tg_block_is_park(m, left)) continue;
         if (tg_net_mouth_is_loop(m, left)) continue;
@@ -469,7 +509,7 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
         sw = tg_city_sidewalk_w(b);
         tg_city_edge_frame(nl, m, sg, e);
         ang = tg_block_arm_skew(m, left);
-        reach = tg_xstreet_reach_at(nl, m, sg, ang, b, sw);
+        reach = tg_xstreet_reach_at(nl, m, sg, ang, tg_xst_reach_biome(m), tg_xst_reach_sw(nl, m, b));
         if (!(reach > 0.0)) continue;
         tg_block_rot2(e[6], e[7], ang, &nox, &noz);
         tg_block_rot2(e[8], e[9], ang, &fox, &foz);
