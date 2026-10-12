@@ -1465,3 +1465,69 @@ Right loop 166..238 inside the left fork Avenida 13 147..295: the approach (medi
 
 * Same-span overlapping mouths (three ways off one SPAN), nesting, a mouth inside a fork's ramp (needs a decision gap wider than 4 spans or a corridor-aware commit), loops beside a same-side fork (no candidate exists on the routes searched).
 * A human drive through a loop that starts inside a fork window (nobody has steered one by hand); the harness is AI only.
+## Round 1022 Q: the rejoin give-way (a corridor car merging back onto the road)
+
+Base master c520ccc8, route fingerprint 7820EC8E (La Plata Partido, slot 61: Diagonal 73 right fork F=26 R=253 and left fork F=429 R=638, no block loops). TD5RE-only (AI on generated tracks).
+
+### Cause (measured)
+
+Nothing in the AI knew the other car existed until the contact. The corridor car's look-ahead, car-following and lane brain read the CORRIDOR's spans, the road car's read the ROAD's, and the two paths meet at a type-10 link (`link_next` of the corridor's last span to the road span R). Cars joined at 140..420 units/tick among road cars at 500..640 (the 1020 N / 1021 A evidence), or side by side at 340..400 on the narrow F=26 rejoin, and met in the same lanes. Re-measured on this master with the new analyzer (below), forced half and half, 6 seeds, window R-24..R+14: F=429 one merge crash (corridor car vs road car at span 638, 514 -> -231 u/t, spin at 642, stall 647..649); F=26 stalls and spins at 258..265 right after the rejoin (R+5..R+12), which the harness' own window (R+2) does not cover.
+
+### What changed (all behind knobs, generated tracks only: `s_ylim_on_any`)
+
+`td5_ai.c`, section "[R1022 Q] REJOIN GIVE-WAY", called from `ai_gov_apply` (the governor already runs last, after the branch-road ADAPT block that would undo a brake) as a second cap beside the corner governor:
+
+* Gap acceptance at the rejoin span, by time to R, one rule for both sides. `t_m` = signed distance of a road car to the centre of R (projection on the road direction inside 3 spans, so a car abreast of R or past it goes negative) divided by its speed; `t_c` = path distance of the corridor car to R (sum of span-centre distances along `smart_build_path`, which already follows the type-10 link) divided by its speed (both speeds floored at 100 u/t). The car that reaches R first goes first.
+  * **Corridor car** with a road car such that `t_m <= t_c < t_m + gap` (gap 26 ticks): capped to the speed that puts it `gap` behind, `(d_c - hold) / (t_m + gap)`, floor 150 u/t, and it STOPS (cap 1 u/t) at the give-way line `hold` = 3000 units before R. A road car already past R only has to be `clear` = 3500 units on (gap = min(26, 3500 / v)). A road car slower than 150 u/t is an obstacle for car-following, not traffic to give way to.
+  * **Road car** with a corridor car such that `t_c < t_s < t_c + gap`: eases off to `d_s / (t_c + gap)`, floor 300 u/t (it keeps the road). A corridor car slower than 150 u/t (waiting at its line) is ignored.
+  * Both sides use the same ordering, so only one of the two yields; the yielder's slowing keeps the ordering (no flip-flop).
+* Knobs: `TD5RE_AI_MERGE_YIELD=0` (corridor side off), `TD5RE_AI_MERGE_MAIN=0` (road side off); `_GAP` (26 ticks), `_LOOK` (26 spans), `_HOLD` (3000), `_CLEAR` (3500), `_FLOOR` (150), `_FLOOR_MAIN` (300), `_VSTOP` (150); `TD5RE_AI_MERGE_PLATOON=1` (below, default OFF). Log: `rejoin_yield: slot= span= corridor|road v= allow= u/tick for slot N` (every 30th frame) and the `rejoin give-way:` line at race start.
+* No lane term: the gap is judged on arrival time alone, whatever lane the road car is in. The brief's "merge lane / taper use" and "main-road cars avoid moving into the merging lane" are NOT built; the road side only eases. A lane test would cut the yields further (side-by-side lanes are what the narrow F=26 rejoin has) and was not tried.
+* Loops: `ai_path_next` walks a corridor's type-10 link for block loops too, so the same probe applies; Mariano's current route has 0 loop candidates, so the loop arrival (round 1020 N, spans 726..733 on the old route) is NOT exercised by anything measured here.
+
+### Tooling
+
+* `verify/geo_r1022q_rejoin.py <run-set> [-v] [--forks F,..] [--own-forks]`: the same run-sets as `geo_fork_validate.py`, only the rejoin window R-24..R+14 (main `span_norm`; corridor cars carry the norm of the road beside them). Columns: passes / via corridor, car pairs closer than 1500 units, pairs where one car is (or was < 40 ticks ago) on the corridor and the other on the road ("merge"), IMPACTS (>= 25 % of a car's speed lost inside 8 ticks while a pair is in contact range = hit; left at <= 15 % or reversing = crash; "merge hit" = a hit among the merge pairs), stalls / jams (>= 90 / 300 ticks), spins. `--own-forks` for the synthetic track, whose fork list differs per race seed. The first version graded any 40 % speed loss within 25 ticks as a hit and counted the corner governor's own braking of two cars side by side in the corridor (686 -> 474 in 40 ticks) as a hit: the 8-tick snap is what separates a governor (about 5 units/tick^2) from an impact (15+).
+* `verify/geo_tour.ps1 -Picks <file>` now accepts RAW pick lines (`[INF][render] pick: copied level091 L91 e10 s7 branch-road p44:SIDEWALK+121 pos 61420,-574,9475 r1214 v16 c2`, with or without the prefix; named `pk<N>_e<entry>s<slot>`) next to the old `name x y z` form, and throws with the converter's stderr when `geo_r1014a_poses.py` fails (it used to swallow it with `2>$null` and report "no poses"). Tested on `_archive/round1021/picks_from_log.txt`: 21 picks -> 42 poses, 42/42 fully textured in 22 s; a bad `-GeoPlace` now prints the FileNotFoundError.
+
+### Things tried and dropped on the way (each measured)
+
+1. Creep floor all the way to R (cap `dc / (tm + gap)` floored at 150 u/t, no hold line): the F=429 forced set got WORSE (merge pairs 1 -> 5, three merge crashes): the corridor car crawled at 149 u/t into the merge span while a road car passed at 574 u/t. A yield has to be able to stop short of the road.
+2. A time gap for a road car that has already passed R: with `gap` = 26 ticks the corridor car waited until the road car was 9 spans past R. Past R the requirement is a distance (`clear`).
+3. Platoon coupling (`TD5RE_AI_MERGE_PLATOON=1`: a corridor car close behind a slower corridor car for the same R may not out-run it by more than its spare distance), written for the corridor convoy bumps (3 cars of the forced half and half in a 2-lane corridor, the leader braking from 548 to 250): no gain on the side-by-side pairs that dominate those hits, and worse natural totals (below). Left in as a default-OFF knob.
+
+### Results (La Plata, 6 AI, no traffic, `verify/geo_fork_validate.ps1`, rejoin window R-24..R+14, `geo_r1022q_rejoin.py`)
+
+Baseline = the master exe (`td5re_q_base.exe`, c520ccc8 sources), "default" = this branch. The harness is byte-deterministic for the same exe and seeds up to the finish (the first differing trace row between two runs of the SAME exe is after the finish, tick ~1880+), so repeats give identical tables and more SEEDS is what adds information.
+
+Forced half and half, seeds 11 22 33 44 55 66 (70 passes, 36 via the corridor):
+
+| fork | build | pairs | merge pairs | hit | crash | merge hit | stall | jam | spin | harness verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| F=26 R=253 | master | 7 | 0 | 5 | 2 | 0 | 3 | 1 | 4 | PASS |
+| F=26 R=253 | default | 6 | 0 | 3 | 2 | 0 | 3 | 1 | 5 | PASS |
+| F=429 R=638 | master | 7 | 1 | 1 | 1 | 1 | 1 | 0 | 1 | WARN (stalls 4 vs 2 at the entry mouth 433..438) |
+| F=429 R=638 | default | 6 | 0 | 4 | 0 | 0 | 0 | 0 | 0 | WARN (one car jammed 488..490: corridor BODY, raw 1052..1058) |
+| F=429 R=638 | + platoon | 6 | 0 | 5 | 1 | 0 | 0 | 0 | 0 | PASS |
+
+The F=26 stall/jam/spin cluster at 258..263 is the same in all three builds (seed 33, one chain): it begins with a corridor crash at norm 229 (tick 838, slots 3 and 5, 24 spans before R) and a spin at span 256 (R+3) 90 ticks later, exists on master too, and is NOT a give-way event; F=26 does not regress (PASS in every build). **F=429: the rejoin window is clean (no merge pair, no merge hit, no stall) but the forced harness verdict is WARN for a reason that is not the rejoin**: master's WARN is a pile-up at the ENTRY mouth (433..438, slot 0 spins at 431), the default's is a corridor-body car-car hit at spans 1041..1058 (norm 485..490) that master has too (spin at span 1065 tick 1423, hit at 1070 tick 1440, the same two cars), 50 ticks later and without the jam. The forced F=429 verdict flips with early-race timing; the platoon build happens to land on PASS, but the production (natural) numbers do not favour it.
+
+Natural fork choice (production), 30 seeds in two sets (12: 11 22 33 44 55 66 77 88 99 110 121 132, then 18: 143 154 165 ... 330; 338 passes, 189 via the corridor):
+
+| build | pairs | merge pairs | hit | crash | merge hit | stall | jam | spin |
+|---|---|---|---|---|---|---|---|---|
+| master | 66 | 18 | 33 | 10 | 10 | 11 | 1 | 21 |
+| default | 50 | 2 | 26 | 1 | 0 | 0 | 0 | 1 |
+| + platoon | 34 | 1 | 18 | 8 | 0 | 3 | 1 | 3 |
+
+Per fork, 30 seeds (master -> default): F=26 pairs 51 -> 35, merge 15 -> 0, crash 9 -> 1, stall 9 -> 0, spin 14 -> 0; F=429 pairs 15 -> 15, merge 3 -> 2, crash 1 -> 0, stall 2 -> 0, spin 7 -> 1. The harness verdict on the natural sets (no forks-off arm, so WARN everywhere): F=429 PASS in both default sets. Platoon's 8 crashes: 3 are one road-road incident at span 260 (R+7) repeated in seeds 33 / 132 / 297, 3 are corridor pairs at R-24 .. R-19, 2 more are road-road after the rejoin; none is a merge pair, but they are 8 against 1 and the knob stays off.
+
+Whole race, natural, 12 seeds (`geo_r1017s_eval.py`): events 441 -> 345, incidents 193 -> 163, passes 79 -> 81 (clean 62 -> 65), stalls 34 -> 37 (22089 -> 22354 ticks: the same stall clusters elsewhere on the route), mean tick to span 600 1987 -> 1986: no pace cost.
+
+Synthetic auto track (slot 60, `SELECTED.TXT` aside, 6 seeds 11..66, all-AI, per-seed fork list, `--own-forks`), rejoin windows of all 18 forks: master pairs 3, hit 1, stall 3 -> default pairs 1, hit 0, stall 0. Whole-race totals on the synthetic track (stalls 66 -> 82, stall ticks 28910 -> 35464, events 9522 -> 8590, incidents 233 -> 231, clean 25 -> 33 of 62 -> 59 passes) are NOT attributable: this track is not repeatable run to run on this machine (the SAME master exe, seed 22, gave 7 stalls / 1206 ticks and 23 stalls / 11838 ticks in two runs).
+
+### Open
+
+* The unexplained forced / natural contradiction of `TD5RE_AI_MERGE_V` (1020 N) was not investigated: this give-way does not cap speed through the arrival mouth, it keeps a time gap, and both modes improve.
+* The corridor BODY hit at F=429 spans 1041..1058 (two cars side by side braking for a wall ray at ~540 u/t, then crossing lanes) exists on master too and is what keeps the forced harness verdict at WARN; the entry mouth pile-up at 433..438 likewise. Neither is rejoin work.
+* Loops (round 1020 N branch, not merged) are untested with this give-way.
