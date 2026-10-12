@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (real places: pavements and ground)" },
+    { CL_ITEM,    "La Plata: park grass no longer pokes through the road" },
+    { CL_ITEM,    "  sidewalk (the lawn is cut back to each span's pavement)" },
+    { CL_ITEM,    "La Plata: the pavement beside a side street now follows the" },
+    { CL_ITEM,    "  street up and down the slope instead of sinking" },
+    { CL_ITEM,    "La Plata: side streets keep their asphalt (no ground tiles" },
+    { CL_ITEM,    "  over the road, no more flicker with the far ground)" },
+    { CL_ITEM,    "La Plata: the far sidewalk of Diagonal 73 runs on round the" },
+    { CL_ITEM,    "  plaza (spans 412 to 431) instead of stopping short" },
+
     { CL_DATE,    "October 11 (real places: roads that merge in)" },
     { CL_ITEM,    "La Plata: a real road that joins the main road at a" },
     { CL_ITEM,    "  shallow angle (Calle 54 beside the road, span 343) is now" },
