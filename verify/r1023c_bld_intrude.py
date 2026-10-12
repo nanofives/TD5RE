@@ -22,6 +22,8 @@ A mesh INTRUDES when it has >= --hits (default 2) distinct hit samples on that s
 Output: counts per (kind x class) and the worst offenders as pick-style strings, plus a JSON ledger.
 """
 from PIL import Image, ImageDraw
+import numpy as np
+from scipy.ndimage import distance_transform_edt
 import argparse, collections, json, math, os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import geo_bld_audit as A
@@ -187,7 +189,9 @@ def bclass(m):
     return "other"
 
 
-RAS = 100.0   # raster cell, units (0.23 m)
+RAS = 50.0    # raster cell, units (0.116 m). [R1024 I] was 100: a roof edge lying EXACTLY on a quad edge inflated to 1-2 cells
+MIN_DT = 2.0  # [R1024 I] an overlap whose deepest pixel is < MIN_DT cells from its own boundary is edge rounding (a footprint
+              # trimmed to a street edge), not an intrusion: 2 cells = 0.23 m inscribed radius = 0.46 m of penetration
 
 
 def footprint_overlap(b, m, base, carr, pave):
@@ -204,7 +208,7 @@ def footprint_overlap(b, m, base, carr, pave):
     xs = [p[0] for r in roofs for p in r]; zs = [p[1] for r in roofs for p in r]
     x0, z0, x1, z1 = min(xs), min(zs), max(xs), max(zs)
     W = int((x1 - x0) / RAS) + 2; H = int((z1 - z0) / RAS) + 2
-    if W * H > 4.0e6:
+    if W * H > 1.6e7:
         return None
     foot = Image.new("L", (W, H), 0); d = ImageDraw.Draw(foot)
     for r in roofs:
@@ -218,9 +222,12 @@ def footprint_overlap(b, m, base, carr, pave):
             dm.polygon([((p[0] - x0) / RAS, (p[1] - z0) / RAS) for p in q], fill=1); used += 1
         if not used:
             out.append(0.0); continue
-        f = foot.load(); k = mk.load(); n = 0
-        fb = foot.tobytes(); kb = mk.tobytes()
-        n = sum(1 for i in range(len(fb)) if fb[i] and kb[i])
+        F = np.frombuffer(foot.tobytes(), np.uint8).reshape(H, W) > 0
+        K = np.frombuffer(mk.tobytes(), np.uint8).reshape(H, W) > 0
+        both = F & K
+        n = int(both.sum())
+        if n and distance_transform_edt(np.pad(both, 1)).max() < MIN_DT:
+            n = 0
         out.append(n * RAS * RAS / (430.0 * 430.0))
     return out
 
