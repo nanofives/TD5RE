@@ -1703,7 +1703,6 @@ static long   s_r22_trim_relax, s_r22_trim_tight;
  * count under the OLD rule (no swap), so a lone post-fix number can't read as a
  * false green. Reported by tg_r23_slope_report, unconditional. */
 static long   s_r23_slope_seen, s_r23_slope_grass;
-static long   s_r1029v_slant_fill;   /* [ROUND 1029 V] fork-tail slant fills laid (tg_emit_ground) */
 
 /* [ROUND 1014 E] Capture mode of tg_emit_far_band and tg_emit_ground: when set,
  * the apron quads / the skirt slab quads are appended here instead of being
@@ -1859,11 +1858,6 @@ void tg_r23_slope_report(void)
         s_r23_slope_seen, s_r23_slope_grass,
         td5_env_flag_on("TD5RE_R23_SLOPE_GROUND") ? "on" : "off");
     s_r23_slope_seen = s_r23_slope_grass = 0;
-    if (td5_geo_loaded())
-        TD5_LOG_I(LOG_TAG, "trackgen: [R1029 V] %ld fork-tail slant fill(s) laid under a slab whose far "
-                  "edge is the rejoin's pulled-out profile (knob TD5RE_GEO_FORK_SLANT_FILL=%s)",
-                  s_r1029v_slant_fill, td5_env_flag_on("TD5RE_GEO_FORK_SLANT_FILL") ? "on" : "off");
-    s_r1029v_slant_fill = 0;
 }
 
 int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
@@ -2066,7 +2060,11 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
          * (the gore lies under the road edge there). Fill it here from the corridor's kerb
          * (or THIS span's clearance d0, which clears the corridor at both ends of the span:
          * tg_carriageway_reach takes the wider end) out to the slab's inner edge: never
-         * under the corridor or the gore.
+         * under the corridor or the gore. It also fires along a WIDENING corridor (the far
+         * row's clearance is one step, 180 units on Avenida 13's fork, wider than the near
+         * row's), where it lays ground in the margin between the kerb and d0: covered from
+         * above by the corridor's footway, and the ground under a street mouth's near edge
+         * (span 805, where the cut footway left a 4.0 m2 sliver of sky).
          * Geo tracks only; TD5RE_GEO_FORK_SLANT_FILL=0 restores the hole. */
         if (td5_geo_loaded() && pa.n > 0 && pb.n > 0 &&
             n + 4 <= (TD5_TG_GROUND_MAXPT - 1) * 8 + 8 &&
@@ -2091,7 +2089,6 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
             px[n]=bnx+ox*a1;         py[n]=bny-dyn; pz[n]=bnz+oz*a1;         uu[n]=a1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
             px[n]=bfx+gx*b0;         py[n]=bfy-dyf; pz[n]=bfz+gz*b0;         uu[n]=b0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
             px[n]=bfx+gx*c1;         py[n]=bfy-dyf; pz[n]=bfz+gz*c1;         uu[n]=c1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
-            if (!s_farcap) s_r1029v_slant_fill++;   /* the drawn-ground capture asks too */
         }
         side_n[s] += n;
     }

@@ -702,9 +702,9 @@ static int tg_guard_mesh_on_road_cls(const TG_NodeList *nl, int ring,
 }
 
 /* [ROUND 1029 V] "tiny triangles of sky show through the ground". La Plata (seed
- * 2054677019) span 664 sits on a dogleg (span 663 runs along +x, 664 at 45
- * degrees), so the inside-of-bend quads of span 664's ground skirt lie over span
- * 663's road in the guard's frame, and the guard rejected the WHOLE skirt
+ * 2054677019) span 664 follows a sidestep of the road (span 663 runs along +x
+ * while the cross-sections stand at 45 degrees), so a quad of span 664's ground
+ * skirt reads as lying over span 663's road, and the guard rejected the WHOLE skirt
  * (race.log "rejected skirt mesh at span 663 (coverage 1500, 32 verts, marked
  * @664)"): a 31.9 m2 strip of clear colour between the road edge and the cross
  * street at 664. MEASURED: only ONE quad was flagged, the first quad beside span
