@@ -368,6 +368,11 @@ static int  s_at_parent_screen = TD5_SCREEN_TRACK_SELECTION;
  * created unconditionally (so the QR_BTN_* indices above it never shift) and is
  * shown/hidden per frame by frontend_qr_refresh_auto_btn(). */
 static int  s_qr_auto_btn = -1;
+/* [ROUND 1026 L] Quick Race's GEOSPATIAL TRACK GENERATOR chip. Shares row 6 with
+ * the STUDIO chip above -- they are mutually exclusive (one shows on the
+ * AUTO-GENERATED entry, the other on the GEOSPATIAL entry) -- and, like it, is
+ * created unconditionally and shown per pick by frontend_qr_refresh_auto_btn(). */
+static int  s_qr_geo_btn = -1;
 /* [ARCADE 2026-06-26] ARCADE/SIMULATION selector on Track Selection — APPENDED
  * as the highest button index so the load-bearing 0..8 rows stay put. -1 = not
  * created this entry. Non-static: the value render lives in td5_frontend.c
@@ -720,14 +725,54 @@ void frontend_geo_pick_arm(int slot) {
 
 int frontend_geo_pick_slot(void) { return s_geo_pick_slot; }
 
+/* [ROUND 1026 L] The ONE geo slot the track selectors list as the GEOSPATIAL
+ * TRACK entry, or -1 when no real place is registered. Mariano: "on the track
+ * selector geospatial generator is still visible ... should be different from
+ * auto track studio, put it as different selectors". The generator used to be a
+ * button shown on EVERY track (baseline framedump: Moscow, London and the
+ * AUTO-GENERATED entry all carried it, next to the STUDIO button on the latter).
+ * It is now a selector entry of its own, mirroring the AUTO-GENERATED one: a
+ * single list position, not one row per place (round 1008 removed those), and
+ * its button exists only on that position.
+ *
+ * Which place it stands for: the one BUILD armed, else the place the generator
+ * last left in SELECTED.TXT / TD5RE_GEO_PLACE (BUILD writes both), else the
+ * first registered place. Registered = has a slot in the track registry, i.e.
+ * raceable. */
+int frontend_geo_entry_slot(void) {
+    const char *want;
+    int i, n, first = -1;
+    if (s_geo_pick_slot >= 0 && td5_track_registry_has_slot(s_geo_pick_slot))
+        return s_geo_pick_slot;
+    want = getenv("TD5RE_GEO_PLACE");
+    n = td5_geo_places_count();
+    for (i = 0; i < n; i++) {
+        const int slot = td5_trackgen_geo_slot_for_index(i);
+        if (slot < 0 || !td5_track_registry_has_slot(slot)) continue;
+        if (first < 0) first = slot;
+        if (want && want[0] && !strcmp(want, td5_geo_places_slug(i))) return slot;
+    }
+    return first;
+}
+
 static int frontend_track_excluded_from_selector(int track_index) {
     /* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] A real place's own slot is
      * NOT a browsable track any more -- the GEOSPATIAL TRACK GENERATOR row is
      * the single entry point. The one exception is the slot BUILD just armed
      * (see s_geo_pick_slot), so the player it handed back to SELECT TRACK can
-     * still read the preview, set the race options and press OK. */
-    if (td5_trackgen_is_geo_slot(track_index))
+     * still read the preview, set the race options and press OK.
+     * [ROUND 1026 L] With the generator's own selector entry (default) that
+     * exception is no longer the arm but the entry slot, which is always
+     * listed; TD5RE_GEO_OWN_SELECTOR=0 restores the armed-only rule. */
+    if (td5_trackgen_is_geo_slot(track_index)) {
+        if (td5_trackgen_geo_own_selector()) {
+            /* A network lobby never lists it: the peers would each have to hold
+             * (and build identically from) the host's real-place cache. */
+            if (s_network_active) return 1;
+            return track_index != frontend_geo_entry_slot();
+        }
         return track_index != s_geo_pick_slot;
+    }
     /* Custom slots (>=37) are selectable ONLY when the registry actually has a
      * track there. Otherwise an unregistered slot in [37, slot_max) would
      * resolve via td5_asset_level_number's native fallback to level001 and show
@@ -801,6 +846,7 @@ static int frontend_pick_random_track(int track_max) {
     for (int t = 0; t < track_max && n < (int)(sizeof(cand)/sizeof(cand[0])); t++) {
         if (t == s_selected_track) continue;                      /* prefer a change */
         if (frontend_track_excluded_from_selector(t)) continue;
+        if (td5_trackgen_is_geo_slot(t)) continue;  /* [R1026 L] RANDOMIZE never picks the geo entry */
         if (!frontend_track_level_exists(t)) continue;
         cand[n++] = t;
     }
@@ -809,6 +855,7 @@ static int frontend_pick_random_track(int track_max) {
          * button still resolves to a concrete, raceable track. */
         for (int t = 0; t < track_max && n < (int)(sizeof(cand)/sizeof(cand[0])); t++) {
             if (frontend_track_excluded_from_selector(t)) continue;
+            if (td5_trackgen_is_geo_slot(t) && t != s_selected_track) continue;
             if (!frontend_track_level_exists(t)) continue;
             cand[n++] = t;
         }
@@ -1196,6 +1243,33 @@ static void frontend_qr_refresh_auto_btn(void) {
     s_buttons[s_qr_auto_btn].disabled = show ? 0 : 1;
 }
 
+/* [ROUND 1026 L] Is the GEOSPATIAL TRACK GENERATOR button to be shown for the
+ * current pick? Only on the generator's own selector entry. The fallback keeps
+ * the generator reachable when no real place is registered at all (no entry to
+ * cycle onto), exactly as before this round. TD5RE_GEO_OWN_SELECTOR=0 = the
+ * round-1008 always-visible button. */
+static int frontend_geo_btn_wanted(void) {
+    if (!td5_trackgen_geo_own_selector()) return 1;
+    if (td5_trackgen_is_geo_slot(s_selected_track)) return 1;
+    return frontend_geo_entry_slot() < 0;
+}
+
+static void frontend_qr_refresh_geo_btn(void) {
+    int show;
+    if (s_qr_geo_btn < 0) return;
+    show = frontend_geo_btn_wanted();
+    s_buttons[s_qr_geo_btn].hidden   = show ? 0 : 1;
+    s_buttons[s_qr_geo_btn].disabled = show ? 0 : 1;
+}
+
+static void frontend_trksel_refresh_geo_btn(void) {
+    int show;
+    if (s_trksel_geo_btn < 0) return;
+    show = frontend_geo_btn_wanted();
+    s_buttons[s_trksel_geo_btn].hidden   = show ? 0 : 1;
+    s_buttons[s_trksel_geo_btn].disabled = show ? 0 : 1;
+}
+
 /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Same show/hide toggle for the Track
  * Selection screen's AUTO TRACK STUDIO button. Previously that button was created
  * ONLY when the auto slot was already the pick at screen init, so cycling ONTO the
@@ -1391,6 +1465,13 @@ void Screen_QuickRaceMenu(void) {
         s_qr_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
                                                QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32);
         frontend_qr_refresh_auto_btn();
+        /* [ROUND 1026 L] GEOSPATIAL TRACK GENERATOR chip on the same row: Quick
+         * Race had no way into the generator at all. Created after the studio
+         * chip so no existing index moves; the label is long for 208 px, the
+         * shared button loop condenses it (fe_fit_text_scale). */
+        s_qr_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
+                                              QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32);
+        frontend_qr_refresh_geo_btn();
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -1462,6 +1543,7 @@ void Screen_QuickRaceMenu(void) {
                 /* [AUTOTRACK QUICKRACE 2026-09-06] Grow/drop the STUDIO chip with
                  * the new pick, same as the other track-dependent rows above. */
                 frontend_qr_refresh_auto_btn();
+                frontend_qr_refresh_geo_btn();
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
@@ -1574,6 +1656,18 @@ void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(3);
                 s_at_parent_screen = TD5_SCREEN_QUICK_RACE;
                 td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+                return;
+            }
+
+            /* [ROUND 1026 L] GEOSPATIAL TRACK GENERATOR chip. Same focus-agreement
+             * guard as the studio chip; BACK and BUILD return HERE. */
+            if (s_qr_geo_btn >= 0 &&
+                s_button_index == s_qr_geo_btn &&
+                s_selected_button == s_qr_geo_btn &&
+                !s_buttons[s_qr_geo_btn].disabled) {
+                frontend_play_sfx(3);
+                frontend_geo_generator_set_parent(TD5_SCREEN_QUICK_RACE);
+                td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
                 return;
             }
 
@@ -7518,7 +7612,13 @@ static void trksel_build_main_buttons(void) {
      * condenses it (fe_fit_text_scale, floor 0.55) rather than clipping, so
      * Mariano's wording survives intact instead of being abbreviated. */
     s_trksel_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
-                                              120, 268, 224, 32);
+                                              120, td5_trackgen_geo_own_selector() ? 306 : 268,
+                                              224, 32);
+    /* [ROUND 1026 L] Hidden unless the GEOSPATIAL entry is the pick (see
+     * frontend_geo_entry_slot). It takes the STUDIO chip's row (306) so the two
+     * selectors carry their options button in the same place; with
+     * TD5RE_GEO_OWN_SELECTOR=0 the round-1008 row (268) is kept. */
+    frontend_trksel_refresh_geo_btn();
 
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
     /* Track-dependent row visibility (Direction hidden on forward-only tracks,
@@ -8106,6 +8206,9 @@ static void at_rebuild_view(void)
     s_at_view_n = 0;
     for (r = 0; r < AT_ROWS; r++) {
         if (k_at_rows[r].sect != (unsigned char)s_at_sect) continue;
+        /* [ROUND 1026 L] No LOCATION row: the studio builds the procedural world
+         * only; real places have their own GEOSPATIAL TRACK GENERATOR. */
+        if (k_at_rows[r].kind == AT_KIND_PLACE && td5_trackgen_studio_synthetic()) continue;
         want++;
         if (s_at_view_n < AT_VIS_ROWS) s_at_view[s_at_view_n++] = r;
     }
@@ -8673,11 +8776,11 @@ static void at_draw_preview(float sx, float sy)
 
     /* [GEO PHASE 4] ODbL: a real place must carry the OSM credit wherever its
      * track is shown. Above the read-out so it never collides with it. */
-    if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0]) {
+    if (td5_geo_wanted_slug()[0]) {
         fe_draw_small_text(bx, by - 14 * sy, TD5_GEO_CREDIT, 0xFF8899AA, sx, sy);
         /* [ROUND 1012 D1] + the building sources, when the place has them.
          * Clear of the status line under the title (framedump-checked). */
-        if (td5_geob_place_has_extra(getenv("TD5RE_GEO_PLACE"))) {
+        if (td5_geob_place_has_extra(td5_geo_wanted_slug())) {
             fe_draw_small_text(bx, by - 44 * sy, TR(TD5_GEOB_CREDIT_BUILDINGS),
                                0xFF8899AA, sx, sy);
             fe_draw_small_text(bx, by - 32 * sy, TR(TD5_GEOB_CREDIT_HEIGHTS),
@@ -9042,6 +9145,13 @@ void Screen_AutoTrackOptions(void) {
         }
         s_at_fav_mode     = 0;
         s_at_seed_editing = 0;
+        /* [ROUND 1026 L] The studio is the PROCEDURAL generator. Point the build
+         * target (and the place override) at the auto slot now, so the route
+         * preview this screen starts below does not inherit the place of a
+         * geo race that ran earlier in the session (set_target_slot leaves the
+         * override on that place until the next race entry). */
+        if (td5_trackgen_studio_synthetic())
+            td5_trackgen_set_target_slot(td5_trackgen_slot());
         at_build_buttons();
         frontend_set_cursor_visible(1);
         s_return_screen   = s_at_parent_screen;   /* track-select OR quick race */
@@ -9483,6 +9593,7 @@ void Screen_TrackSelection(void) {
                 /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Show/hide the AUTO
                  * TRACK STUDIO button for the newly selected track. */
                 frontend_trksel_refresh_auto_btn();
+                frontend_trksel_refresh_geo_btn();
                 s_inner_state = 5;
             }
 
@@ -9593,7 +9704,8 @@ void Screen_TrackSelection(void) {
              * on a focus change. */
             if (s_trksel_geo_btn >= 0 &&
                 s_button_index == s_trksel_geo_btn &&
-                s_selected_button == s_trksel_geo_btn) {
+                s_selected_button == s_trksel_geo_btn &&
+                !s_buttons[s_trksel_geo_btn].disabled) {
                 frontend_play_sfx(3);
                 frontend_geo_generator_set_parent(TD5_SCREEN_TRACK_SELECTION);
                 td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
@@ -9659,6 +9771,7 @@ void Screen_TrackSelection(void) {
                     /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] refresh for
                      * the randomly picked track too. */
                     frontend_trksel_refresh_auto_btn();
+                    frontend_trksel_refresh_geo_btn();
                     s_inner_state = 5;
                 } else {
                     TD5_LOG_W(LOG_TAG, "TrackSel RANDOM shortcut: no alternative track to pick");

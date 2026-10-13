@@ -5064,10 +5064,30 @@ void td5_trackgen_set_target_slot(int slot)
                   slot, td5_geo_places_count());
     s_target_slot  = TD5_TG_SLOT;
     s_target_level = TD5_TG_LEVEL_NUM;
-    /* Clearing the override hands the place decision back to TD5RE_GEO_PLACE,
-     * i.e. to the studio's LOCATION row -- which is the whole reason the geo
-     * slots never write that knob. */
-    td5_geo_force_place(NULL);
+    /* [ROUND 1026 L, Mariano: "when selecting auto track studio through the quick
+     * race it pulls from the geospatial generator"] The auto slot is the
+     * PROCEDURAL track. This used to clear the override, which hands the place
+     * decision to TD5RE_GEO_PLACE -- the studio's old LOCATION row -- and that
+     * knob is also what every geo BUILD leaves behind (td5_geo_select persists
+     * it to SELECTED.TXT, td5_geo_init reads it back each launch). So once a
+     * real place had been built, level090 was built FROM THAT PLACE. Now the
+     * auto slot pins the synthetic world. TD5RE_STUDIO_SYNTHETIC=0 restores the
+     * old "env knob decides" behaviour (dev harnesses that pick a place with
+     * TD5RE_GEO_PLACE and race slot 60). */
+    if (td5_trackgen_studio_synthetic())
+        td5_geo_force_synthetic();
+    else
+        td5_geo_force_place(NULL);
+}
+
+int td5_trackgen_studio_synthetic(void)
+{
+    return td5_env_flag_on("TD5RE_STUDIO_SYNTHETIC");
+}
+
+int td5_trackgen_geo_own_selector(void)
+{
+    return td5_env_flag_on("TD5RE_GEO_OWN_SELECTOR");
 }
 
 /* Registry row for whatever the current target is. The auto track and the geo

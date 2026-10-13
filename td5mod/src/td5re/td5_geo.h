@@ -277,6 +277,9 @@ const char *td5_geo_places_name(int i);  /* PLACE.JSON name, else the slug */
  * NULL or "" clears the override; while one is active it beats the env knob in
  * td5_geo_sync(). Set it immediately before a build and clear it after. */
 void        td5_geo_force_place(const char *slug);
+/* [ROUND 1026 L] Override that means "the synthetic world, whatever
+ * TD5RE_GEO_PLACE / SELECTED.TXT say". Cleared by td5_geo_force_place(NULL). */
+void        td5_geo_force_synthetic(void);
 const char *td5_geo_wanted_slug(void);   /* override, else env knob, else "" */
 
 /* -------------------------------------------- [ROUND 1015 F] TILED PLACES

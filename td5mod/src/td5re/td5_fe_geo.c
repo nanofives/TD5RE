@@ -1029,6 +1029,10 @@ static void geo_seed_dev_points(int variant)
 
 static void geo_screen_init(void)
 {
+    /* [ROUND 1026 L] The studio pins the synthetic world while it is open (see
+     * Screen_AutoTrackOptions init); this screen reads the place from its own
+     * map, so hand the decision back to the knob the way it was before. */
+    td5_geo_force_place(NULL);
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,

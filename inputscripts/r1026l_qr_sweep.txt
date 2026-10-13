@@ -1,0 +1,12 @@
+# [R1026 L] QUICK RACE track cycler sweep. Focus opens on CAR; one DOWN reaches
+# TRACK; LEFT from slot 0 wraps to the top of the range.
+sync menu
+240 log QR_SLOT0
++30 key down press
++60 key left press
++120 log QR_LEFT1
++60 key left press
++120 log QR_LEFT2
++60 key left press
++120 log QR_LEFT3
++120 quit
