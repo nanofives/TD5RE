@@ -4766,6 +4766,8 @@ static double smart_fork_anchor(int slot, double pull)
 {
     static int s_on = -1;
     if (s_on < 0) s_on = td5_env_flag_on("TD5RE_AI_LEFT_ANCHOR");
+    /* [ROUND 1029 X] "stay" at a SHARED loop mouth (a street opens on both sides): hold the middle of the road */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot] == 2) return 0.5;
     if (s_on && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot])
         return (pull < 0.0) ? 0.82 : 0.14;
     return (pull < 0.0) ? 0.18 : 0.86;
@@ -4784,6 +4786,13 @@ static int     g_smart_inited = 0;
  * branch (high sub-lanes), 0 to hold the main road (low sub-lanes). */
 static int16_t g_smart_branch_commit_span[TD5_MAX_TOTAL_ACTORS];
 static int8_t  g_smart_branch_commit_take[TD5_MAX_TOTAL_ACTORS];
+/* [ROUND 1029 X] SHARED LOOP MOUTHS. A left and a right block loop that open on the same main spans are ONE
+ * decision: stay, take the one, take the other. g_smart_loop_pair_key is the lower departure span of the pair
+ * the slot has decided (-1 = none), g_smart_loop_pair_pick the departure span D of the loop it takes (-1 =
+ * stays on the road). Rolled once (one step of the private branch RNG, like a single fork), held until no
+ * fork is in range. Only a track whose SLNK trailer has shared mouths reaches this (td5_track_loop_mate_dep). */
+static int16_t g_smart_loop_pair_key[TD5_MAX_TOTAL_ACTORS];
+static int16_t g_smart_loop_pair_pick[TD5_MAX_TOTAL_ACTORS];
 
 /* [task#16 netplay determinism 2026-06-15] Private per-car RNG for the branch
  * coin-flip. Seeded at race init from the REPLICATED race seed (decorrelated +
@@ -5057,6 +5066,8 @@ static void td5_ai_smart_race_init(void) {
         g_smart_lane_dwell[s] = 0;
         g_smart_branch_commit_span[s] = -1;   /* [task#16] no live fork commitment */
         g_smart_branch_commit_take[s] = 0;
+        g_smart_loop_pair_key[s] = -1;        /* [1029 X] no shared-mouth decision */
+        g_smart_loop_pair_pick[s] = -1;
         /* [task#16] Per-car private branch RNG seed: race seed mixed with the
          * slot index (deterministic, distinct per car). Guard against a 0 state
          * (a degenerate LCG fixed point would never advance). */
@@ -5273,10 +5284,18 @@ static int ai_path_next(int slot, int span)
          * the middle of the opening (td5_track_loop_mouth_target), never at the type-8 span D itself, which
          * is the opening's first span and would make it cut the upstream corner */
         int dep = -1;
+        if (td5_track_loop_has_shared()) {
+            /* [ROUND 1029 X] two loops may open on this span: turn in only into the one this car took */
+            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_commit_take[slot]) {
+                const int c1 = td5_track_loop_mouth_target_dep(span, g_smart_branch_commit_span[slot]);
+                if (c1 >= 0) return c1;
+            }
+        } else {
         const int c0 = td5_track_loop_mouth_target(span, &dep);
         if (c0 >= 0 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
             g_smart_branch_commit_span[slot] == (int16_t)dep && g_smart_branch_commit_take[slot])
             return c0;
+        }
         nx = span + 1;
         if (ring > 0 && nx >= ring)
             nx = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 0 : ring - 1;
@@ -5663,6 +5682,56 @@ static int td5_ai_branch_takeable(int branch_span, int span_count) {
  * always fell back to the main road ("AI avoids branches"). Congestion still
  * tilts the odds — a jammed main road makes the branch more likely — but a clear
  * fork is now a genuine coin-flip, weighted to actually use the branch. */
+/* [ROUND 1029 X] SHARED LOOP MOUTHS: decide stay / loop `da` / loop `db` (their departure spans, da < db)
+ * for `slot`, once. ONE step of the private branch RNG, exactly as one fork commitment: the take odds are
+ * the single-fork rule (45 % threshold, tilted by congestion: main vs the emptier loop), the loop is the
+ * emptier one, a tie split by the same roll. The dev force modes divide the field three ways. */
+static void smart_loop_pair_decide(int slot, int da, int db, int span_count)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    const int ba = (int)*(const int16_t *)(const void *)(strips + (size_t)da * 0x18 + 8);
+    const int bb = (int)*(const int16_t *)(const void *)(strips + (size_t)db * 0x18 + 8);
+    const int ta = td5_ai_branch_takeable(ba, span_count), tb = td5_ai_branch_takeable(bb, span_count);
+    int cm_ = 0, ca = 0, cb = 0, n = g_active_actor_count, i, pick = -1;
+    uint32_t roll;
+    int r, thr;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (i = 0; i < n; i++) {
+        int psp;
+        if (i == slot || !ai_peer_is_present(i)) continue;
+        psp = (int)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
+        if (smart_iabs(psp - (da + 1)) <= 2) cm_++;
+        if (ba >= 0 && smart_iabs(psp - ba) <= 2) ca++;
+        if (bb >= 0 && smart_iabs(psp - bb) <= 2) cb++;
+    }
+    roll = smart_branch_rand(slot);
+    r = (int)(roll % 100u);
+    thr = 45 - (cm_ - (ca < cb ? ca : cb)) * 15;
+    if (thr < 15) thr = 15;
+    if (thr > 85) thr = 85;
+    if ((ta || tb) && r >= thr) {
+        if (ta && tb) pick = (ca < cb) ? da : (cb < ca) ? db : (((roll / 100u) & 1u) ? db : da);
+        else pick = ta ? da : db;
+    }
+#ifndef TD5RE_RELEASE
+    {   /* the same dev pins as td5_ai_smart_branch (TD5RE_AI_BRANCH_FORCE_P0 / _MODE), three ways */
+        const int fp0 = td5_env_int("TD5RE_AI_BRANCH_FORCE_P0", -1, -1, 1);
+        const int fmode = td5_env_int("TD5RE_AI_BRANCH_FORCE_MODE", 0, 0, 3);
+        const uint32_t ph = smart_hash_u32(td5_game_get_race_seed() + (uint32_t)da * 2246822519u) >> 7;
+        if (slot == 0 && fp0 >= 0) pick = fp0 ? (((roll / 100u) & 1u) ? db : da) : -1;
+        if (fmode == 1) { const uint32_t w = ((uint32_t)slot + ph) % 3u; pick = (w == 0) ? -1 : (w == 1) ? da : db; }
+        else if (fmode == 2) pick = (((uint32_t)slot + ph) & 1u) ? db : da;
+        else if (fmode == 3) pick = -1;
+        if (pick == da && !ta) pick = -1;
+        if (pick == db && !tb) pick = -1;
+    }
+#endif
+    g_smart_loop_pair_key[slot] = (int16_t)da;
+    g_smart_loop_pair_pick[slot] = (int16_t)pick;
+    TD5_LOG_I(LOG_TAG, "ai_branch_commit: slot=%d fork=%d type=8 take=%d r=%d thr=%d main_c=%d branch_c=%d/%d "
+              "SHARED MOUTH pair %d/%d pick=%d", slot, pick >= 0 ? pick : da, pick >= 0 ? 1 : 0, r, thr, cm_, ca, cb, da, db, pick);
+}
+
 static void td5_ai_smart_branch(int slot) {
     g_smart_branch_pull[slot] = 0.0;
     const uint8_t *strips = (const uint8_t *)g_strip_span_base;
@@ -5724,6 +5793,7 @@ static void td5_ai_smart_branch(int slot) {
      * time), and the REJOIN span of the car's own travel direction (type 11 going
      * forward, type 8 going backward) is a merge, not a decision to roll for. */
     const int cm = ai_corr_slot_on(slot);
+    const int pair_on = cm && td5_track_loop_has_shared();     /* [1029 X] shared loop mouths on this track */
     int ps_scan[SMART_PATH_MAX];
     if (cm) {
         if (look > SMART_PATH_MAX - 1) look = SMART_PATH_MAX - 1;
@@ -5734,7 +5804,16 @@ static void td5_ai_smart_branch(int slot) {
         if (cm) s = ps_scan[d];
         if (cm && d == 0) {   /* [ROUND 1018 L] inside a block loop's departure mouth: the fork is still D */
             int dep = -1;
-            if (span < td5_track_get_ring_length() && (dep = td5_track_loop_in_mouth(span)) >= 0) s = dep;
+            if (span < td5_track_get_ring_length()) {
+                if (pair_on) {   /* [1029 X] two mouths may cover the span: the loop this car took, else either (it stays) */
+                    const int pref_d = (g_smart_loop_pair_key[slot] >= 0 && g_smart_loop_pair_pick[slot] >= 0)
+                                       ? g_smart_loop_pair_pick[slot] : g_smart_branch_commit_span[slot];
+                    dep = td5_track_loop_in_mouth_pref(span, pref_d);
+                } else {
+                    dep = td5_track_loop_in_mouth(span);
+                }
+                if (dep >= 0) s = dep;
+            }
         }
         if (s >= span_count) s -= span_count;
         if (s < 0) continue;
@@ -5743,6 +5822,22 @@ static void td5_ai_smart_branch(int slot) {
             if (stype != (g_td5.reverse_direction ? 11 : 8)) continue;
         } else if (stype != 8 && stype != 11) {
             continue;
+        }
+        /* [ROUND 1029 X] a loop whose departure mouth is SHARED with a loop on the other side: decide the pair as
+         * one three-way choice (once), then this scan stands on the loop the car takes. A cop on a chase keeps
+         * its own per-fork rule below. */
+        int pair_take = -1;
+        if (pair_on && cm && !g_td5.reverse_direction && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+            !(g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING)) {
+            const int mate = td5_track_loop_mate_dep(s);
+            if (mate >= 0 && mate < span_count) {
+                const int key = s < mate ? s : mate;
+                if (g_smart_loop_pair_key[slot] != (int16_t)key)
+                    smart_loop_pair_decide(slot, key, key == s ? mate : s, span_count);
+                if (g_smart_loop_pair_pick[slot] == (int16_t)mate) s = mate;   /* stand on the loop it takes */
+                stype = strips[(size_t)s * 0x18];
+                pair_take = (g_smart_loop_pair_pick[slot] == (int16_t)s) ? 1 : 0;
+            }
         }
 
         int main_span = (stype == 8) ? (s + 1) : (s - 1);
@@ -5768,6 +5863,14 @@ static void td5_ai_smart_branch(int slot) {
         double pref;
         if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)       /* [1019 V] which side the corridor of THIS fork lies on */
             g_smart_branch_left[slot] = (int8_t)((stype == 8 && (td5_track_fork_is_left(s) || td5_track_loop_side(s))) ? 1 : 0);
+        if (pair_take >= 0) {
+            /* [1029 X] the shared-mouth decision is already made (smart_loop_pair_decide): a car that takes a
+             * loop leans to that loop's side, a car that stays holds the middle (a street opens on both sides) */
+            g_smart_branch_commit_span[slot] = (int16_t)s;
+            g_smart_branch_commit_take[slot] = (int8_t)pair_take;
+            if (!pair_take) g_smart_branch_left[slot] = 2;
+            pref = pair_take ? +1.0 : -1.0;
+        } else
         if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
             g_cop_target[slot] >= 0 && g_cop_target[slot] < TD5_MAX_TOTAL_ACTORS) {
             /* [POLICE rewrite 2026-06-19] Chase branch policy: take whichever
@@ -5936,8 +6039,10 @@ static void td5_ai_smart_branch(int slot) {
     }
 
     /* No fork in range — drop any stale commitment so the next fork rolls afresh. */
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
         g_smart_branch_commit_span[slot] = -1;
+        g_smart_loop_pair_key[slot] = -1;    /* [1029 X] */
+    }
 }
 
 /* Lane brain: score candidate lanes (surface, occupancy, wall, racing-line,
