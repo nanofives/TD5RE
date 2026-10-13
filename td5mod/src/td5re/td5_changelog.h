@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (AI cars in a convoy)" },
+    { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
+    { CL_ITEM,    "  front. They used to judge the gap by counting track" },
+    { CL_ITEM,    "  sections, which on a long section meant no reaction at" },
+    { CL_ITEM,    "  all until the bumpers met. They now keep a real distance" },
+    { CL_ITEM,    "  that grows with speed, and brake when they are closing" },
+    { CL_ITEM,    "  too fast on the car ahead." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (airborne contacts between racers)" },
     { CL_ITEM,    "Racers: a car in the air, or a scripted one, no longer" },
     { CL_ITEM,    "  bumps another racer from half a car-width away. Racer-vs-" },

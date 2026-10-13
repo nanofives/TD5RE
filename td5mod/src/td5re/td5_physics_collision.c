@@ -1290,6 +1290,22 @@ static void actor_collision_box(const TD5_Actor *act,
     }
 }
 
+/* [ROUND 1028 S] Public view of that box for the AI car-following brain, so a
+ * follower can measure a real bumper-to-bumper gap (see td5_ai.c, ai_follow_*). */
+int td5_physics_actor_body_extent(const TD5_Actor *act, int32_t *half_w, int32_t *half_len)
+{
+    int32_t hw, fz, rz;
+    if (!act || !half_w || !half_len) return 0;
+    if (!act->car_definition_ptr) return 0;     /* slot never spawned */
+    actor_collision_box(act, &hw, &fz, &rz);
+    if (hw <= 0) return 0;
+    if (fz < 0) fz = -fz;
+    if (rz < 0) rz = -rz;
+    *half_w   = hw;
+    *half_len = fz > rz ? fz : rz;
+    return *half_len > 0;
+}
+
 /* ========================================================================
  * [ROUND 1026 M] Traffic narrowphase: a traffic contact needs REAL overlap.
  *
@@ -1573,7 +1589,7 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
     V2VWorldPoly wa, wb;
     double gap, cdist;
     int64_t sep;
-    int dy;
+    int dy, lon = 0, lat = 0;
     if (!v2v_gaplog_enabled() || (v2v_gaplog_level() < 2 && !v2v_pair_has_traffic(a, b))) return;
     v2v_poly_local(a, &pa);
     v2v_poly_local(b, &pb);
@@ -1587,6 +1603,17 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
         cdist = sqrt(dx * dx + dz * dz);
     }
     dy = FP_TRUNC(a->world_pos.y) - FP_TRUNC(b->world_pos.y);
+    /* [ROUND 1028 S] B's centre expressed in A's HEADING frame, so an analyser can tell a
+     * rear-end shunt (lon dominant, cars aligned, the one behind faster) from a side swipe.
+     * Same world->local rotation the detector uses (see v2v_poly_world). Model units. */
+    {
+        int32_t hh = FP_TRUNC(a->euler_accum.yaw);
+        int64_t cc = cos_fixed12(hh), ss = sin_fixed12(hh);
+        int64_t ddx = (int64_t)b->world_pos.x - (int64_t)a->world_pos.x;
+        int64_t ddz = (int64_t)b->world_pos.z - (int64_t)a->world_pos.z;
+        lon = (int)(((ss * ddx + cc * ddz) >> 12) / 256);   /* >0 = B ahead of A */
+        lat = (int)(((cc * ddx - ss * ddz) >> 12) / 256);
+    }
     /* Cross-check my local->world against the render matrix once in a while: world X
      * of A's first vertex via rotation_matrix (row-major: wx = m0*lx + m2*lz). */
     {
@@ -1601,7 +1628,8 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
     }
     TD5_LOG_I(LOG_TAG,
               "v2v_gap: path=%s tick=%u a=%d b=%d spanA=%d spanB=%d gap=%.1f sat=%.1f cdist=%.1f dy=%d "
-              "yawd=%d relv=%d wcbA=%d wcbB=%d vmA=%d vmB=%d ea=%d,%d eb=%d,%d hullA=%d hullB=%d sim=%u",
+              "yawd=%d relv=%d wcbA=%d wcbB=%d vmA=%d vmB=%d ea=%d,%d eb=%d,%d hullA=%d hullB=%d sim=%u "
+              "lon=%d lat=%d vlA=%d vlB=%d",
               path, s_v2v_gap_tick, (int)a->slot_index, (int)b->slot_index,
               a->track_span_normalized, b->track_span_normalized, gap, (double)sep / 256.0, cdist, dy,
               (FP_TRUNC(a->euler_accum.yaw - b->euler_accum.yaw)) & 0xFFF,
@@ -1609,7 +1637,8 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
                                         (int64_t)(a->linear_velocity_z - b->linear_velocity_z) * (a->linear_velocity_z - b->linear_velocity_z)) >> 16))),
               a->wheel_contact_bitmask, b->wheel_contact_bitmask, a->vehicle_mode, b->vehicle_mode,
               v2v_poly_ext(&pa, 0), v2v_poly_ext(&pa, 1), v2v_poly_ext(&pb, 0), v2v_poly_ext(&pb, 1),
-              pa.n, pb.n, (unsigned)g_td5.simulation_tick_counter);
+              pa.n, pb.n, (unsigned)g_td5.simulation_tick_counter,
+              lon, lat, (int)a->longitudinal_speed, (int)b->longitudinal_speed);
 }
 #define V2V_GAP_LOG(path, a, b) v2v_gap_log((path), (a), (b))
 #define V2V_PATH_SET(p) (s_v2v_path = (p))
