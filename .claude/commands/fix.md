@@ -1255,6 +1255,15 @@ done
 
 This keeps the worktree's runtime state bit-for-bit identical to what the user sees in the main tree.
 
+**Level hashes: a fresh worktree builds the SAME bytes as main (round 1028 R, 2026-10-13).** Rounds
+1025-1028 warned that a worktree builds level091 to a different hash. It does not: `be65458d` was the
+md5 and `61410E76` the sha256 prefix (what `verify/geo_tags_identity.ps1` prints) of ONE file. With the
+same exe and seed, main, fresh worktrees, gate builds and streamed builds all gave identical MODELS/STRIP/
+TEXTURES. Compare level builds with `python verify/geo_level_identity.py <dir> [<dir2>]`, which prints
+md5 AND sha256 plus the GENSTAMP `seed/spec/env/exe` fields and names the field that moved. A different
+`env=` alone does not mean different bytes, only a generation knob does. Note the robocopy above also
+copies main's last-built `re/assets/levels/level091`, which may be from an older exe (check `exe=`).
+
 ### Read the log to verify the fix
 
 After the harness exits, read the relevant log under `log/` (see the table in **Logging Rules** below). Match your edits to the right log file, read the tail (last 100–200 lines), and grep for the `TD5_LOG_I` lines you added. If the log contradicts the expected behavior, iterate — do NOT guess at runtime state when the log can tell you. For physics/AI fixes, also inspect `log/race_trace.csv` directly.

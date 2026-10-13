@@ -1709,6 +1709,8 @@ static long   s_r23_slope_seen, s_r23_slope_grass;
  * written (see TG_Surf). */
 static TG_Surf *s_farcap;
 long s_geop_skirt_park_n;   /* [ROUND 1014 E] skirt slabs given the lawn page */
+long s_geop_skirt_quad_n;   /* [ROUND 1029 U] ... single skirt quads given it by the per-quad park test */
+long s_geop_skirt_near_n;   /* [ROUND 1029 U] ... of which for BORDERING a laid park, not lying inside one */
 
 static void tg_farcap_push(const double *px, const double *py,
                            const double *pz, int nverts)
@@ -1876,6 +1878,7 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     int seg_page = tg_topo_surface_page_sloped(nl, si), seg_nq;
     int s, k, n = 0;
     int side_n[2] = { 0, 0 };         /* [ROUND 1014 E] vertices written per side */
+    int wedge_q[2] = { -1, -1 };      /* [ROUND 1029 U] quad index of each side's road-edge wedge, -1 = none */
     /* [R16 item B] Drop a side's grass skirt where a city frontage hides it end
      * to end. Precomputed for both sides so that if BOTH would cull we keep the
      * left one: the mesh must never come out empty (the skirt is the span's
@@ -2040,6 +2043,7 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
             const double b0 = (pb.d[0] > 1.0) ? pb.d[0] : 1.0;
             if (pa.d[0] > 50.0 || pb.d[0] > 50.0) {
                 const double dyn = pa.dy[0], dyf = pb.dy[0];
+                wedge_q[s] = n / 4;            /* [ROUND 1029 U] the road-edge filler of this side */
                 /* near-in at the road edge, near-out at the near inner edge, far-out at the
                  * far inner edge, far-in at the road edge: the same ring the skirt uses */
                 px[n]=bnx;        py[n]=bny-dyn; pz[n]=bnz;        uu[n]=0.0;                         vv[n]=(double)si;     n++;
@@ -2047,6 +2051,48 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                 px[n]=bfx+gx*b0; py[n]=bfy-dyf; pz[n]=bfz+gz*b0; uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
                 px[n]=bfx;        py[n]=bfy-dyf; pz[n]=bfz;        uu[n]=0.0;                         vv[n]=(double)si+1.0; n++;
             }
+        }
+        /* [ROUND 1029 V] "tiny triangles of sky show through the ground", La Plata (seed
+         * 2054677019) spans 661 and 834: the LAST span of a fork window, beside the rejoin.
+         * This slab's far edge is span si+1's profile (R8 item 11, so the seam between slabs
+         * closes), and at the rejoin that profile is pulled far out (d0 4505 beside the plaza
+         * fork's rejoin wedge at 662, 3362 beside the avenue's far carriageway at 835) while
+         * this span's own clearance d0 is a few hundred units. The inner edge therefore runs
+         * diagonally across the span, and the triangle between it and the corridor's kerb is
+         * covered by nothing: 13.1 m2 at 661, 14.0 m2 at 834 (with the cross street there).
+         * The wedge above fills that strip everywhere else but stands down on fork main spans
+         * (the gore lies under the road edge there). Fill it here from the corridor's kerb
+         * (or THIS span's clearance d0, which clears the corridor at both ends of the span:
+         * tg_carriageway_reach takes the wider end) out to the slab's inner edge: never
+         * under the corridor or the gore. It also fires along a WIDENING corridor (the far
+         * row's clearance is one step, 180 units on Avenida 13's fork, wider than the near
+         * row's), where it lays ground in the margin between the kerb and d0: covered from
+         * above by the corridor's footway, and the ground under a street mouth's near edge
+         * (span 805, where the cut footway left a 4.0 m2 sliver of sky).
+         * Geo tracks only; TD5RE_GEO_FORK_SLANT_FILL=0 restores the hole. */
+        if (td5_geo_loaded() && pa.n > 0 && pb.n > 0 &&
+            n + 4 <= (TD5_TG_GROUND_MAXPT - 1) * 8 + 8 &&
+            tg_fork_of_main(si) >= 0 &&
+            pb.d[0] > pa.d[0] + 50.0 &&
+            td5_env_flag_on("TD5RE_GEO_FORK_SLANT_FILL")) {
+            const double a0 = pa.d[0], b0 = pb.d[0];
+            const double dyn = pa.dy[0], dyf = pb.dy[0];
+            /* Beside a REAL fork the fill starts on the corridor's own kerb at each row (the
+             * corridor mesh's helpers), so the clearance margin between the kerb and d0 is
+             * covered too (at 834 a 200-unit strip that the cross street leaves open). A free
+             * or loop corridor has no per-row answer and starts at d0. */
+            const double sgn = is_left ? 1.0 : -1.0;
+            const double k0 = tg_fork_real_row_shift(nl, si, sgn, 0);
+            const double k1 = tg_fork_real_row_shift(nl, si, sgn, 1);
+            const double c0 = (k0 >= 0.0 && k0 < a0) ? k0 : a0;
+            const double c1 = (k1 >= 0.0 && k1 < a0) ? k1 : a0;
+            const double a1 = (a0 > c0 + 1.0) ? a0 : c0 + 1.0;
+            /* near end: from the kerb to the slab's own inner edge, at least 1 unit wide (a
+             * quad with two coincident corners is degenerate and the renderer drops it) */
+            px[n]=bnx+ox*c0;         py[n]=bny-dyn; pz[n]=bnz+oz*c0;         uu[n]=c0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
+            px[n]=bnx+ox*a1;         py[n]=bny-dyn; pz[n]=bnz+oz*a1;         uu[n]=a1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
+            px[n]=bfx+gx*b0;         py[n]=bfy-dyf; pz[n]=bfz+gz*b0;         uu[n]=b0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
+            px[n]=bfx+gx*c1;         py[n]=bfy-dyf; pz[n]=bfz+gz*c1;         uu[n]=c1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
         }
         side_n[s] += n;
     }
@@ -2062,6 +2108,70 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     {
         const int pk0 = side_n[0] > 0 && tg_geo_skirt_side_park(nl, si, 1);
         const int pk1 = side_n[1] > 0 && tg_geo_skirt_side_park(nl, si, 0);
+        /* [ROUND 1029 U item C2] ... and, per QUAD, the slabs of a side that failed the whole-side test but whose
+         * centre lies inside a mapped park (tg_geo_skirt_quad_park). The side test probes the verge at both span
+         * ends; a skirt reaches 24000 units out, so its outer slabs can lie inside a park the verge does not touch,
+         * and they kept the GROUND tile page there: the speckled ground beside the lawns of e83/e84 (span 334's
+         * outer slabs inside area 102, between lawn-paged skirts of spans 335+). One command per run of equal page,
+         * quads in their original order. TD5RE_GEO_PARK_SKIRT_QUAD=0 restores the side-only rule. */
+        if (!(pk0 && pk1) && n > 0 && n / 4 <= ((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4) {
+            const int lawn = TD5_TG_PAGE_R3_BLOCK + 0;
+            int qpage[((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4];
+            int nq_all = n / 4, q, extra = 0;
+            for (q = 0; q < nq_all; q++) {
+                const int sd = (q * 4 < side_n[0]) ? 0 : 1;
+                qpage[q] = (sd == 0 ? pk0 : pk1) ? lawn : seg_page;
+                if (qpage[q] != lawn) {
+                    /* MOSTLY inside: the centre and 3 of the 4 corners, so a slab the park's edge only clips
+                     * stays ground (one green wedge among grey slabs read worse than the grey) */
+                    const double cx = 0.25 * (px[q * 4] + px[q * 4 + 1] + px[q * 4 + 2] + px[q * 4 + 3]);
+                    const double cz = 0.25 * (pz[q * 4] + pz[q * 4 + 1] + pz[q * 4 + 2] + pz[q * 4 + 3]);
+                    if (tg_geo_skirt_quad_park(nl, si, cx, cz)) {
+                        int c, in = 0;
+                        for (c = 0; c < 4; c++) in += tg_geo_skirt_quad_park(nl, si, px[q * 4 + c], pz[q * 4 + c]);
+                        if (in >= 3) { qpage[q] = lawn; extra++; }
+                    }
+                    /* ... or the slab borders a laid park (tg_geo_skirt_quad_near_park): centre or any corner */
+                    if (qpage[q] != lawn) {
+                        int c, nb = tg_geo_skirt_quad_near_park(nl, si, cx, cz);
+                        for (c = 0; c < 4 && !nb; c++)
+                            nb = tg_geo_skirt_quad_near_park(nl, si, px[q * 4 + c], pz[q * 4 + c]);
+                        if (nb) { qpage[q] = lawn; extra++; s_geop_skirt_near_n++; }
+                    }
+                }
+            }
+            /* ... and the ground BETWEEN the road and that green is green too: every slab of the side inward of the
+             * outermost lawn slab (profile slabs run inner to outer; the wedge filler, last of a side, lies at the road
+             * edge). Without this the pick spot read as a grey band in front of a green one. Same knob as NEAR. */
+            if (extra > 0 && td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_NEAR")) {
+                int sd;
+                for (sd = 0; sd < 2; sd++) {
+                    const int q0 = sd ? side_n[0] / 4 : 0, q1 = sd ? nq_all : side_n[0] / 4;
+                    int outer = -1;
+                    if ((sd == 0 && pk0) || (sd == 1 && pk1)) continue;
+                    for (q = q0; q < q1; q++)
+                        if (qpage[q] == lawn && q != wedge_q[sd]) outer = q;
+                    if (outer < 0) continue;
+                    for (q = q0; q < q1; q++)
+                        if (qpage[q] != lawn && (q < outer || q == wedge_q[sd])) {
+                            qpage[q] = lawn; extra++; s_geop_skirt_near_n++;
+                        }
+                }
+            }
+            if (extra > 0) {
+                int pages_r[((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4], nq_r[((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4];
+                int nr = 0;
+                for (q = 0; q < nq_all; q++) {
+                    if (nr > 0 && pages_r[nr - 1] == qpage[q]) nq_r[nr - 1]++;
+                    else { pages_r[nr] = qpage[q]; nq_r[nr] = 1; nr++; }
+                }
+                tg_acct(TG_ACCT_TERRAIN, si);
+                if (tg_r14_up_ground_reach(si) > 0.0) tg_acct(TG_ACCT_R14_UP, si);
+                s_geop_skirt_park_n++;
+                s_geop_skirt_quad_n += extra;
+                return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, pages_r, nq_r, nr);
+            }
+        }
         if (pk0 || pk1) {
             const int lawn = TD5_TG_PAGE_R3_BLOCK + 0;
             if (pk0 && pk1) {

@@ -1290,6 +1290,22 @@ static void actor_collision_box(const TD5_Actor *act,
     }
 }
 
+/* [ROUND 1028 S] Public view of that box for the AI car-following brain, so a
+ * follower can measure a real bumper-to-bumper gap (see td5_ai.c, ai_follow_*). */
+int td5_physics_actor_body_extent(const TD5_Actor *act, int32_t *half_w, int32_t *half_len)
+{
+    int32_t hw, fz, rz;
+    if (!act || !half_w || !half_len) return 0;
+    if (!act->car_definition_ptr) return 0;     /* slot never spawned */
+    actor_collision_box(act, &hw, &fz, &rz);
+    if (hw <= 0) return 0;
+    if (fz < 0) fz = -fz;
+    if (rz < 0) rz = -rz;
+    *half_w   = hw;
+    *half_len = fz > rz ? fz : rz;
+    return *half_len > 0;
+}
+
 /* ========================================================================
  * [ROUND 1026 M] Traffic narrowphase: a traffic contact needs REAL overlap.
  *
@@ -1485,15 +1501,19 @@ static int v2v_rot_fix_for(const TD5_Actor *a, const TD5_Actor *b)
  *   0 = master (sphere is the whole test for racer pairs)
  *   1 = sphere path (collision_detect_simple) needs real hull overlap + vertical bound
  *   2 = 1 plus the corner-test path (collision_detect_full) rejects a contact whose hulls are apart
- * Default 1: ordinary racing (no airborne / scripted racer) stays bit-identical to master (shipped_trace A/B on
- * Moscow, 36001 rows, 0 differing). Level 2 only removes FULL-path contacts that fire with the hulls <= 2.2
- * units apart (box-vs-hull rounding), but that changes every race from the first start-grid touch on.
- * Shared hull SAT, int64, identical on every peer (netplay lockstep). */
+ * [ROUND 1029 Y] Default 2 (was 1). The corner test and the SAT test the SAME silhouette hulls; the corner
+ * test truncates the A->B delta and every rotated vertex to whole units, so it fires up to ~2 units early.
+ * Level 2 drops exactly those contacts (hulls <= 2.1 units apart, never one whose hulls overlap). Measured
+ * (verify/r1029y_fate.py, 20 deterministic races per level, REJ lines): 31 dropped, 28 = the same pair
+ * overlapping within a few ticks (26 on the next tick; the contact fires then, through the same bisection),
+ * 3 = slow passes that come within <= 2.1 units and never overlap; the first-impulse depth does not grow. The tick-161
+ * divergence of round 1027 N is one of the delayed cases (Moscow, slots 0/2 door to door, hulls 0.7 apart).
+ * TD5RE_RACER_SAT=1 = the round 1027 N default (sphere path only). Hull SAT, int64, identical on every peer. */
 static int racer_sat_level(void)
 {
-    static int s_init = 0, s_lvl = 1;
+    static int s_init = 0, s_lvl = 2;
     if (!s_init) {
-        s_lvl = td5_env_int("TD5RE_RACER_SAT", 1, 0, 2);
+        s_lvl = td5_env_int("TD5RE_RACER_SAT", 2, 0, 2);
         s_init = 1;
         TD5_LOG_I(LOG_TAG, "racer_sat: TD5RE_RACER_SAT=%d (0=master 1=sphere path 2=sphere+corner path)", s_lvl);
     }
@@ -1573,7 +1593,7 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
     V2VWorldPoly wa, wb;
     double gap, cdist;
     int64_t sep;
-    int dy;
+    int dy, lon = 0, lat = 0;
     if (!v2v_gaplog_enabled() || (v2v_gaplog_level() < 2 && !v2v_pair_has_traffic(a, b))) return;
     v2v_poly_local(a, &pa);
     v2v_poly_local(b, &pb);
@@ -1587,6 +1607,17 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
         cdist = sqrt(dx * dx + dz * dz);
     }
     dy = FP_TRUNC(a->world_pos.y) - FP_TRUNC(b->world_pos.y);
+    /* [ROUND 1028 S] B's centre expressed in A's HEADING frame, so an analyser can tell a
+     * rear-end shunt (lon dominant, cars aligned, the one behind faster) from a side swipe.
+     * Same world->local rotation the detector uses (see v2v_poly_world). Model units. */
+    {
+        int32_t hh = FP_TRUNC(a->euler_accum.yaw);
+        int64_t cc = cos_fixed12(hh), ss = sin_fixed12(hh);
+        int64_t ddx = (int64_t)b->world_pos.x - (int64_t)a->world_pos.x;
+        int64_t ddz = (int64_t)b->world_pos.z - (int64_t)a->world_pos.z;
+        lon = (int)(((ss * ddx + cc * ddz) >> 12) / 256);   /* >0 = B ahead of A */
+        lat = (int)(((cc * ddx - ss * ddz) >> 12) / 256);
+    }
     /* Cross-check my local->world against the render matrix once in a while: world X
      * of A's first vertex via rotation_matrix (row-major: wx = m0*lx + m2*lz). */
     {
@@ -1601,7 +1632,8 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
     }
     TD5_LOG_I(LOG_TAG,
               "v2v_gap: path=%s tick=%u a=%d b=%d spanA=%d spanB=%d gap=%.1f sat=%.1f cdist=%.1f dy=%d "
-              "yawd=%d relv=%d wcbA=%d wcbB=%d vmA=%d vmB=%d ea=%d,%d eb=%d,%d hullA=%d hullB=%d sim=%u",
+              "yawd=%d relv=%d wcbA=%d wcbB=%d vmA=%d vmB=%d ea=%d,%d eb=%d,%d hullA=%d hullB=%d sim=%u "
+              "lon=%d lat=%d vlA=%d vlB=%d",
               path, s_v2v_gap_tick, (int)a->slot_index, (int)b->slot_index,
               a->track_span_normalized, b->track_span_normalized, gap, (double)sep / 256.0, cdist, dy,
               (FP_TRUNC(a->euler_accum.yaw - b->euler_accum.yaw)) & 0xFFF,
@@ -1609,7 +1641,8 @@ static void v2v_gap_log(const char *path, const TD5_Actor *a, const TD5_Actor *b
                                         (int64_t)(a->linear_velocity_z - b->linear_velocity_z) * (a->linear_velocity_z - b->linear_velocity_z)) >> 16))),
               a->wheel_contact_bitmask, b->wheel_contact_bitmask, a->vehicle_mode, b->vehicle_mode,
               v2v_poly_ext(&pa, 0), v2v_poly_ext(&pa, 1), v2v_poly_ext(&pb, 0), v2v_poly_ext(&pb, 1),
-              pa.n, pb.n, (unsigned)g_td5.simulation_tick_counter);
+              pa.n, pb.n, (unsigned)g_td5.simulation_tick_counter,
+              lon, lat, (int)a->longitudinal_speed, (int)b->longitudinal_speed);
 }
 #define V2V_GAP_LOG(path, a, b) v2v_gap_log((path), (a), (b))
 #define V2V_PATH_SET(p) (s_v2v_path = (p))
@@ -2727,7 +2760,10 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
     }
 
     /* [ROUND 1026 M] the corner test says "touching": a traffic pair must really overlap. */
-    if (traffic_sat_reject(a, b)) return;
+    if (traffic_sat_reject(a, b)) {
+        V2V_GAP_LOG("REJ", a, b);   /* [ROUND 1029 Y] measurement: a corner-test contact the SAT gate dropped */
+        return;
+    }
     V2V_GAP_LOG("FULL", a, b);
 
     /* --- 7-iteration TOI binary search [listing 0x00408B5C-0x00408D23] ---
@@ -3227,6 +3263,88 @@ static void v2v_selfprobe_racers(void)
     TD5_LOG_I(LOG_TAG, "v2v_probe_r_sum: airborne cases=%d  sphere FP=%d FN=%d | new_sphere FP=%d FN=%d  (new_sphere stops above dy=%d)",
               a_sph.n, a_sph.fp, a_sph.fn, a_nsph.fp, a_nsph.fn, first_air_stop);
 }
+
+/* [ROUND 1029 Y] BOUNDARY probe for the FULL (corner-test) path, racer pair slot 0 vs slot 1, grounded.
+ * The grid probe above steps 100 units, so it cannot see the corner test and the hull SAT disagree by a
+ * couple of units at the contact boundary. Here, for every (A heading, relative heading, approach
+ * direction), B is moved along the ray from A's centre: the exact SAT boundary is found by bisection, then
+ * swept from 16 units inside to 16 units outside in 1/8-unit steps. Per sample, truth = hull SAT (sep <= 0).
+ *   cnr FP = corner test (rotation-fixed) fires with the hulls apart   -> what TD5RE_RACER_SAT=2 drops
+ *   cnr FN = corner test misses a real overlap                          -> MISS, no gate can add it back
+ *   full2  = corner test AND SAT (TD5RE_RACER_SAT=2): FP must be 0, FN = cnr FN.
+ * "v2v_probe_b:" per config with max FP gap / max FN depth, "v2v_probe_b_sum:" totals. */
+static void v2v_selfprobe_racers_boundary(void)
+{
+    TD5_Actor *pa = (TD5_Actor *)g_actor_table_base;
+    TD5_Actor *pb = (TD5_Actor *)(g_actor_table_base + (size_t)1 * TD5_ACTOR_STRIDE);
+    TD5_Actor A, B;
+    static const int yaw_a[]  = { 0, 600, 1234, 2900 };                       /* A heading, 12-bit units */
+    static const int rel_deg[] = { 0, 10, 30, 45, 60, 90, 135, 180 };
+    static const int dir_deg[] = { 0, 30, 60, 90, 120, 150, 180, 225, 270, 315 };   /* 0 = ahead of A, 90 = right */
+    int n = 0, fp = 0, fn = 0, fp2 = 0, fn2 = 0;
+    double fp_max = 0.0, fn_max = 0.0;
+    if (!pa->car_definition_ptr || !pb->car_definition_ptr || pb->slot_index >= g_traffic_slot_base) return;
+    memcpy(&A, pa, sizeof A);
+    memcpy(&B, pb, sizeof B);
+    A.wheel_contact_bitmask = 0; B.wheel_contact_bitmask = 0;
+    B.world_pos.y = A.world_pos.y;
+    for (size_t ia = 0; ia < sizeof yaw_a / sizeof yaw_a[0]; ia++) {
+        for (size_t ir = 0; ir < sizeof rel_deg / sizeof rel_deg[0]; ir++) {
+            for (size_t id = 0; id < sizeof dir_deg / sizeof dir_deg[0]; id++) {
+                int32_t h, c, sn, uc, us;
+                int64_t ux, uz, lo = 0, hi = (int64_t)4000 * 256;
+                int cfp = 0, cfn = 0;
+                double cfp_max = 0.0, cfn_max = 0.0;
+                A.euler_accum.yaw = (yaw_a[ia] << 8) + 77;                     /* a fractional accumulator too */
+                B.euler_accum.yaw = A.euler_accum.yaw + (int32_t)(((int64_t)rel_deg[ir] * 4096 / 360) << 8);
+                h = FP_TRUNC(A.euler_accum.yaw);
+                c = cos_fixed12(h); sn = sin_fixed12(h);
+                uc = cos_fixed12((dir_deg[id] * 4096) / 360); us = sin_fixed12((dir_deg[id] * 4096) / 360);
+                /* direction in A's frame (lat = us, fwd = uc), to world with the local->world map */
+                ux = ((int64_t)c * us + (int64_t)sn * uc) >> 12;
+                uz = ((int64_t)-sn * us + (int64_t)c * uc) >> 12;
+                for (int it = 0; it < 40 && hi - lo > 1; it++) {                /* SAT boundary (fp units) */
+                    int64_t mid = (lo + hi) / 2;
+                    B.world_pos.x = A.world_pos.x + (int32_t)((ux * mid) >> 12);
+                    B.world_pos.z = A.world_pos.z + (int32_t)((uz * mid) >> 12);
+                    if (v2v_actor_separation(&A, &B) > 0) hi = mid; else lo = mid;
+                }
+                for (int64_t d = lo - 16 * 256; d <= lo + 16 * 256; d += 32) {
+                    OBB_CornerData corners[8];
+                    int64_t sep;
+                    int touch, cnr;
+                    B.world_pos.x = A.world_pos.x + (int32_t)((ux * d) >> 12);
+                    B.world_pos.z = A.world_pos.z + (int32_t)((uz * d) >> 12);
+                    sep = v2v_actor_separation(&A, &B);
+                    touch = (sep <= 0);
+                    s_probe_rot = 1;
+                    memset(corners, 0, sizeof corners);
+                    cnr = obb_corner_test(&A, &B, A.world_pos.x, A.world_pos.z, B.world_pos.x, B.world_pos.z,
+                                          A.euler_accum.yaw, B.euler_accum.yaw, corners) != 0;
+                    s_probe_rot = -1;
+                    n++;
+                    if (cnr && !touch) { cfp++; if ((double)sep / 256.0 > cfp_max) cfp_max = (double)sep / 256.0; }
+                    if (!cnr && touch) { cfn++; if (-(double)sep / 256.0 > cfn_max) cfn_max = -(double)sep / 256.0; }
+                    {
+                        const int full2 = cnr && sep <= 0;                       /* collision_detect_full at level 2 */
+                        if (full2 && !touch) fp2++;
+                        if (!full2 && touch) fn2++;
+                    }
+                }
+                fp += cfp; fn += cfn;
+                if (cfp_max > fp_max) fp_max = cfp_max;
+                if (cfn_max > fn_max) fn_max = cfn_max;
+                if (cfp || cfn)
+                    TD5_LOG_I(LOG_TAG, "v2v_probe_b: yawA=%4d rel=%3d dir=%3d boundary=%.1f | cnr FP=%d (max gap %.2f) FN=%d (max depth %.2f)",
+                              yaw_a[ia], rel_deg[ir], dir_deg[id], (double)lo / 256.0, cfp, cfp_max, cfn, cfn_max);
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "v2v_probe_b_sum: samples=%d (1/8-unit steps, +-16 units around the SAT boundary, %d configs) | "
+              "corner test FP=%d (max gap %.2f) FN=%d (max depth %.2f) | corner+SAT (RACER_SAT=2) FP=%d FN=%d",
+              n, (int)(sizeof yaw_a / sizeof yaw_a[0] * sizeof rel_deg / sizeof rel_deg[0] * sizeof dir_deg / sizeof dir_deg[0]),
+              fp, fp_max, fn, fn_max, fp2, fn2);
+}
 #endif
 
 
@@ -3325,7 +3443,7 @@ void td5_physics_resolve_vehicle_contacts(void)
     s_v2v_tick++;
     V2V_TICK_BUMP();
 #ifndef TD5RE_RELEASE
-    if (s_v2v_tick == 90 && td5_env_flag_off("TD5RE_V2V_SELFPROBE")) { v2v_selfprobe(); v2v_selfprobe_racers(); }
+    if (s_v2v_tick == 90 && td5_env_flag_off("TD5RE_V2V_SELFPROBE")) { v2v_selfprobe(); v2v_selfprobe_racers(); v2v_selfprobe_racers_boundary(); }
     v2v_stage_tick(total);
 #endif
 

@@ -1535,6 +1535,11 @@ int  tg_network_built(void);
 int  tg_net_geo(void);                 /* [1014 B] streets came from the real map */
 long tg_net_apron_edge_count(void);    /* [R1023 A item 4] network edges that asked the drawn ground for their height */
 long tg_net_apron_lift_count(void);    /* ... and the vertices they lifted */
+/* [ROUND 1029 U] network footways laid on the ground: pieces, cross-fall clamps, closing faces. td5_tg_network.c */
+void tg_net_fw_follow_counts(long *pieces, long *clamped, long *faces);
+/* [ROUND 1029 U] the network's laid road + footway surfaces as quads (8 doubles each) reaching the box; for the
+ * park lawn clip. td5_tg_network.c */
+int  tg_net_footprint_quads(double bx0, double bz0, double bx1, double bz1, double *q, int maxq);
 void   tg_geo_lane_profile_reset(void);
 int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
 double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
@@ -1833,6 +1838,7 @@ int tg_branch_lane_gain_s(int k, int len, int base_lanes, double sep);
 #define TD5_TG_CARRIAGEWAY_MARGIN 300.0   /* house verge between road and prop */
 double tg_road_half_width(const TG_NodeList *nl, int si);
 double tg_carriageway_reach(const TG_NodeList *nl, int si, double side);
+double tg_fork_real_row_shift(const TG_NodeList *nl, int si, double side, int e);   /* [1029 V] one row, -1 = no real fork */
 int tg_on_carriageway(const TG_NodeList *nl, int si, double lateral, double margin);
 double tg_carriageway_clear_gap(const TG_NodeList *nl, int si, double side, double gap, double margin);
 void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans);
@@ -2024,6 +2030,7 @@ typedef struct { int v; } __attribute__((aligned(64))) TG_SlotInt;
 extern TG_SlotInt s_guard_ex_nx[TG_ACCT_SLOTS];
 #define s_guard_ex_n(t) (s_guard_ex_nx[(t)].v)
 extern long s_guard_rejects;
+extern long s_guard_row_frames;   /* [1029 T item 3] vertices judged in the frame of the node whose row they lie on */
 extern long s_guard_residual;
 extern long s_guard_rej_kind[TG_GK_COUNT];
 extern long s_guard_ex_scope_hits;
@@ -4268,6 +4275,7 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
 int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of an avenue's first row */
 int    tg_geo_avenue_before_cap(const TG_NodeList *nl, int si, double x, double z);   /* [1027 O] point is before the avenue's first carriageway section */
 double tg_carriageway_reach_at(const TG_NodeList *nl, int si, double side, double x, double z);   /* [1027 O] tg_carriageway_reach, cap-aware */
+double tg_geo_avenue_start_along(const TG_NodeList *nl, int si, double x, double z, int *ok);   /* [1029 T] signed distance past an avenue run's start edge */
 /* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
  * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
  * slab must not be laid on top of it. */
@@ -6393,6 +6401,13 @@ int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
  * page. td5_tg_streets.c. */
 int  tg_geo_skirt_side_park(const TG_NodeList *nl, int si, int is_left);
 extern long s_geop_skirt_park_n;   /* skirt slabs given the lawn page (terrain.c) */
+extern long s_geop_skirt_quad_n;   /* [ROUND 1029 U] single skirt quads given it per quad (terrain.c) */
+/* [ROUND 1029 U item C2] Does the skirt quad centred at (x,z) beside span si lie inside a mapped park / plaza?
+ * td5_tg_streets.c. 0 on a synthetic build. */
+int  tg_geo_skirt_quad_park(const TG_NodeList *nl, int si, double x, double z);
+/* ... or within ~9 m of a laid park outline (bordering green). td5_tg_streets.c */
+int  tg_geo_skirt_quad_near_park(const TG_NodeList *nl, int si, double x, double z);
+extern long s_geop_skirt_near_n;   /* [ROUND 1029 U] skirt quads given the lawn page for bordering a park */
 /* [ROUND 1012 D2] Would a footprint of half-extent `half` centred at (x,z)
  * stand in REAL open space -- a mapped plaza/park polygon, or inside a named
  * junction=circular ring like Plaza Miguel de Azcuenaga, which has no polygon

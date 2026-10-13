@@ -131,6 +131,13 @@ int  td5_physics_slot_is_human(int slot);
 void td5_physics_missing_wheel_correction(TD5_Actor *actor);
 void td5_physics_state0f_damping(TD5_Actor *actor);
 
+/* [ROUND 1028 S] Body half-extents of a car, MODEL units, from the SAME box the
+ * vehicle-vs-vehicle narrowphase tests (mesh hitbox when one is loaded, cardef
+ * extents otherwise). half_len is max(front_z, -rear_z). Lets the AI measure a
+ * real bumper-to-bumper gap instead of counting track spans. Returns 1 on
+ * success, 0 (outputs untouched) when the actor has no car bound yet. */
+int td5_physics_actor_body_extent(const TD5_Actor *act, int32_t *half_w, int32_t *half_len);
+
 /* --- Scripted-mode recovery animation (vehicle_mode==1) ---
  * Tier 2 port (2026-05-24) — driven from UpdateVehicleActor's vehicle_mode==1
  * branch in td5_physics_update_vehicle_actor. Mirrors orig

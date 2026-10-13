@@ -4766,6 +4766,9 @@ static double smart_fork_anchor(int slot, double pull)
 {
     static int s_on = -1;
     if (s_on < 0) s_on = td5_env_flag_on("TD5RE_AI_LEFT_ANCHOR");
+    /* [ROUND 1029 X] "stay" at a SHARED loop mouth (a street opens on both sides): hold the middle of the road */
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot] >= 2)
+        return g_smart_branch_left[slot] == 2 ? 0.5 : g_smart_branch_left[slot] == 3 ? 0.25 : 0.75;   /* 3/4: main half of a right/left fork */
     if (s_on && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot])
         return (pull < 0.0) ? 0.82 : 0.14;
     return (pull < 0.0) ? 0.18 : 0.86;
@@ -4784,6 +4787,13 @@ static int     g_smart_inited = 0;
  * branch (high sub-lanes), 0 to hold the main road (low sub-lanes). */
 static int16_t g_smart_branch_commit_span[TD5_MAX_TOTAL_ACTORS];
 static int8_t  g_smart_branch_commit_take[TD5_MAX_TOTAL_ACTORS];
+/* [ROUND 1029 X] SHARED LOOP MOUTHS. A left and a right block loop that open on the same main spans are ONE
+ * decision: stay, take the one, take the other. g_smart_loop_pair_key is the lower departure span of the pair
+ * the slot has decided (-1 = none), g_smart_loop_pair_pick the departure span D of the loop it takes (-1 =
+ * stays on the road). Rolled once (one step of the private branch RNG, like a single fork), held until no
+ * fork is in range. Only a track whose SLNK trailer has shared mouths reaches this (td5_track_loop_mate_dep). */
+static int16_t g_smart_loop_pair_key[TD5_MAX_TOTAL_ACTORS];
+static int16_t g_smart_loop_pair_pick[TD5_MAX_TOTAL_ACTORS];
 
 /* [task#16 netplay determinism 2026-06-15] Private per-car RNG for the branch
  * coin-flip. Seeded at race init from the REPLICATED race seed (decorrelated +
@@ -4901,9 +4911,13 @@ static int s_avoid_filt_ok[16];
 static int32_t s_ylim_prev_yaw[16];
 static uint32_t s_ylim_bind[16];
 static int s_ylim_prev_ok[16];
+static int s_fork_aim = 1;              /* [R1029 W] TD5RE_AI_FORK_AIM_FRAME: aim frame across a fork mouth (see ai_fork_aim_frame) */
+static int s_aim_ref[TD5_MAX_TOTAL_ACTORS];   /* [R1029 W] the span whose frame the lane brain's cu is in (-1 = none / on a corridor) */
 
 static void ai_steer_cap_race_init(void)
 {
+    s_fork_aim = td5_env_flag_on("TD5RE_AI_FORK_AIM_FRAME");
+    { int q; for (q = 0; q < TD5_MAX_TOTAL_ACTORS; q++) s_aim_ref[q] = -1; }
     s_ylim_mode = td5_env_int("TD5RE_AI_STEER_YAWLIM", 0, 0, 2);
     s_ylim_L    = td5_env_int("TD5RE_AI_STEER_YAWLIM_L", 809, 100, 5000);
     s_ylim_a0   = td5_env_int("TD5RE_AI_STEER_YAWLIM_A0", 6000, 100, 200000);
@@ -5057,6 +5071,8 @@ static void td5_ai_smart_race_init(void) {
         g_smart_lane_dwell[s] = 0;
         g_smart_branch_commit_span[s] = -1;   /* [task#16] no live fork commitment */
         g_smart_branch_commit_take[s] = 0;
+        g_smart_loop_pair_key[s] = -1;        /* [1029 X] no shared-mouth decision */
+        g_smart_loop_pair_pick[s] = -1;
         /* [task#16] Per-car private branch RNG seed: race seed mixed with the
          * slot index (deterministic, distinct per car). Guard against a 0 state
          * (a degenerate LCG fixed point would never advance). */
@@ -5268,15 +5284,31 @@ static int ai_path_next(int slot, int span)
         }
         return (span + 1 < sc) ? span + 1 : span;
     }
+    if (td5_track_loop_has_shared() && td5_track_loop_in_mouth(span) >= 0) {
+        /* [ROUND 1029 X] two loops (or a loop and a real fork's F) may share this span: turn in only into the loop
+         * this car took; otherwise fall through to the fork test below (a real fork's F may stand in the opening) */
+        if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_commit_take[slot]) {
+            const int c1 = td5_track_loop_mouth_target_dep(span, g_smart_branch_commit_span[slot]);
+            if (c1 >= 0) return c1;
+        }
+        if (!(t == 8 && td5_track_loop_departure(span, NULL) < 0)) {   /* not a real fork's F: stay on the road */
+            nx = span + 1;
+            if (ring > 0 && nx >= ring)
+                nx = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 0 : ring - 1;
+            return nx;
+        }
+    } else
     if (td5_track_loop_in_mouth(span) >= 0) {
         /* [ROUND 1018 L] inside a block loop's departure mouth: a committed car turns into the street from
          * the middle of the opening (td5_track_loop_mouth_target), never at the type-8 span D itself, which
          * is the opening's first span and would make it cut the upstream corner */
         int dep = -1;
+        {
         const int c0 = td5_track_loop_mouth_target(span, &dep);
         if (c0 >= 0 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
             g_smart_branch_commit_span[slot] == (int16_t)dep && g_smart_branch_commit_take[slot])
             return c0;
+        }
         nx = span + 1;
         if (ring > 0 && nx >= ring)
             nx = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 0 : ring - 1;
@@ -5357,6 +5389,63 @@ static int ai_corr_aim_rb(int slot, int raw, int target_span, int rb)
         if (v > 384.0) v = 384.0;
         return (int)v;
     }
+}
+
+/* [ROUND 1029 W item G] THE SAME CONTINUITY ONE SPAN FURTHER: AN AIM PAST THE FORK SPAN.
+ * Avenida 13's fork (route B9839962, F=790) took 11 hard hits over 6 seeds, all at the mouth (raw 789..790), on
+ * BOTH arms, against 0 with the forks off. Every hit is the same picture: the car sits in its half of the 4-lane
+ * fork window at |lat| 0.5 (where the lane brain wants it, cu 0.19 / 0.80), then three spans before F the steering
+ * yanks it OUTWARD (steer +-50000, 18-20 degrees of slip) into the outer rail at |lat| 0.8. The aim at raw 787 is
+ * span 791 (main) or 1550 (corridor): 2-lane spans PAST the fork span, so ai_corr_aim_rb above (a type 8 / 11
+ * target only) does not apply, and the aim is `rb(791) + bias` with the bias computed against the 4-lane route
+ * line: u_base 0.625 of 6000 (lat -750) there, 0.375 of the 3000-wide main span (lat +1875) at 791, so the same
+ * bias puts the aim ~2600 units further out, behind the wall. Here the aim is the lane brain's own target instead:
+ * fraction cu of the span it was computed on (s_aim_ref), re-expressed on the target span's rails (same projection
+ * as above), bias 0, kept 8% inside the target's rails. Only when the target lies beyond a fork span (type 8) from
+ * that reference, or on a corridor while the reference is on the ring, and the two lane counts differ: every other
+ * aim is untouched. Generated tracks (ai_corr_slot_on). TD5RE_AI_FORK_AIM_FRAME=0 restores the old aim. */
+static int ai_fork_aim_frame(int slot, int raw, int target_span, int *rb, int32_t *bias)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    const int span_count = td5_track_get_span_count();
+    const int ring = td5_track_get_ring_length();
+    int ref, crossed = 0, k, s;
+    int lrx, lrz, rrx, rrz, ltx, ltz, rtx, rtz;
+    double ex, ez, wr, lt, rt, wt, cu, u;
+    if (!s_fork_aim || !ai_corr_slot_on(slot) || !strips || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    ref = s_aim_ref[slot];
+    if (ref < 0 || ref >= ring || raw < 0 || raw >= ring || target_span < 0 || target_span >= span_count) return 0;
+    if (target_span == ref) return 0;
+    k = ref - raw; if (k < 0) k += ring;
+    if (k > 4) return 0;                                   /* a stale reference: the lane brain did not run this tick */
+    if (td5_track_get_span_lane_count(ref) == td5_track_get_span_lane_count(target_span)) return 0;
+    if (target_span >= ring) {
+        crossed = 1;                                       /* ring -> corridor */
+    } else {
+        for (s = ref, k = 0; s != target_span && k < 10; k++) {
+            if (strips[(size_t)s * 0x18] == 8) { crossed = 1; break; }
+            if (++s >= ring) s = 0;
+        }
+    }
+    if (!crossed) return 0;
+    cu = g_smart_lane_u[slot];
+    if (!(cu >= 0.0 && cu <= 1.0)) return 0;
+    if (!td5_track_get_span_route_frame(ref, &lrx, &lrz, &rrx, &rrz) ||
+        !td5_track_get_span_route_frame(target_span, &ltx, &ltz, &rtx, &rtz)) return 0;
+    ex = (double)(rrx - lrx); ez = (double)(rrz - lrz);
+    wr = sqrt(ex * ex + ez * ez);
+    if (wr < 1.0) return 0;
+    ex /= wr; ez /= wr;
+    lt = ((double)(ltx - lrx)) * ex + ((double)(ltz - lrz)) * ez;
+    rt = ((double)(rtx - lrx)) * ex + ((double)(rtz - lrz)) * ez;
+    wt = rt - lt;
+    if (wt < 1.0) return 0;
+    u = (cu * wr - lt) / wt;
+    if (u < 0.08) u = 0.08;
+    if (u > 0.92) u = 0.92;
+    *rb = (int)(u * 256.0);
+    *bias = 0;
+    return 1;
 }
 
 
@@ -5663,6 +5752,56 @@ static int td5_ai_branch_takeable(int branch_span, int span_count) {
  * always fell back to the main road ("AI avoids branches"). Congestion still
  * tilts the odds — a jammed main road makes the branch more likely — but a clear
  * fork is now a genuine coin-flip, weighted to actually use the branch. */
+/* [ROUND 1029 X] SHARED LOOP MOUTHS: decide stay / loop `da` / loop `db` (their departure spans, da < db)
+ * for `slot`, once. ONE step of the private branch RNG, exactly as one fork commitment: the take odds are
+ * the single-fork rule (45 % threshold, tilted by congestion: main vs the emptier loop), the loop is the
+ * emptier one, a tie split by the same roll. The dev force modes divide the field three ways. */
+static void smart_loop_pair_decide(int slot, int da, int db, int span_count)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    const int ba = (int)*(const int16_t *)(const void *)(strips + (size_t)da * 0x18 + 8);
+    const int bb = (int)*(const int16_t *)(const void *)(strips + (size_t)db * 0x18 + 8);
+    const int ta = td5_ai_branch_takeable(ba, span_count), tb = td5_ai_branch_takeable(bb, span_count);
+    int cm_ = 0, ca = 0, cb = 0, n = g_active_actor_count, i, pick = -1;
+    uint32_t roll;
+    int r, thr;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (i = 0; i < n; i++) {
+        int psp;
+        if (i == slot || !ai_peer_is_present(i)) continue;
+        psp = (int)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_RAW);
+        if (smart_iabs(psp - (da + 1)) <= 2) cm_++;
+        if (ba >= 0 && smart_iabs(psp - ba) <= 2) ca++;
+        if (bb >= 0 && smart_iabs(psp - bb) <= 2) cb++;
+    }
+    roll = smart_branch_rand(slot);
+    r = (int)(roll % 100u);
+    thr = 45 - (cm_ - (ca < cb ? ca : cb)) * 15;
+    if (thr < 15) thr = 15;
+    if (thr > 85) thr = 85;
+    if ((ta || tb) && r >= thr) {
+        if (ta && tb) pick = (ca < cb) ? da : (cb < ca) ? db : (((roll / 100u) & 1u) ? db : da);
+        else pick = ta ? da : db;
+    }
+#ifndef TD5RE_RELEASE
+    {   /* the same dev pins as td5_ai_smart_branch (TD5RE_AI_BRANCH_FORCE_P0 / _MODE), three ways */
+        const int fp0 = td5_env_int("TD5RE_AI_BRANCH_FORCE_P0", -1, -1, 1);
+        const int fmode = td5_env_int("TD5RE_AI_BRANCH_FORCE_MODE", 0, 0, 3);
+        const uint32_t ph = smart_hash_u32(td5_game_get_race_seed() + (uint32_t)da * 2246822519u) >> 7;
+        if (slot == 0 && fp0 >= 0) pick = fp0 ? (((roll / 100u) & 1u) ? db : da) : -1;
+        if (fmode == 1) { const uint32_t w = ((uint32_t)slot + ph) % 3u; pick = (w == 0) ? -1 : (w == 1) ? da : db; }
+        else if (fmode == 2) pick = (((uint32_t)slot + ph) & 1u) ? db : da;
+        else if (fmode == 3) pick = -1;
+        if (pick == da && !ta) pick = -1;
+        if (pick == db && !tb) pick = -1;
+    }
+#endif
+    g_smart_loop_pair_key[slot] = (int16_t)da;
+    g_smart_loop_pair_pick[slot] = (int16_t)pick;
+    TD5_LOG_I(LOG_TAG, "ai_branch_commit: slot=%d fork=%d type=8 take=%d r=%d thr=%d main_c=%d branch_c=%d/%d "
+              "SHARED MOUTH pair %d/%d pick=%d", slot, pick >= 0 ? pick : da, pick >= 0 ? 1 : 0, r, thr, cm_, ca, cb, da, db, pick);
+}
+
 static void td5_ai_smart_branch(int slot) {
     g_smart_branch_pull[slot] = 0.0;
     const uint8_t *strips = (const uint8_t *)g_strip_span_base;
@@ -5724,6 +5863,7 @@ static void td5_ai_smart_branch(int slot) {
      * time), and the REJOIN span of the car's own travel direction (type 11 going
      * forward, type 8 going backward) is a merge, not a decision to roll for. */
     const int cm = ai_corr_slot_on(slot);
+    const int pair_on = cm && td5_track_loop_has_shared();     /* [1029 X] shared loop mouths on this track */
     int ps_scan[SMART_PATH_MAX];
     if (cm) {
         if (look > SMART_PATH_MAX - 1) look = SMART_PATH_MAX - 1;
@@ -5734,7 +5874,16 @@ static void td5_ai_smart_branch(int slot) {
         if (cm) s = ps_scan[d];
         if (cm && d == 0) {   /* [ROUND 1018 L] inside a block loop's departure mouth: the fork is still D */
             int dep = -1;
-            if (span < td5_track_get_ring_length() && (dep = td5_track_loop_in_mouth(span)) >= 0) s = dep;
+            if (span < td5_track_get_ring_length()) {
+                if (pair_on) {   /* [1029 X] two mouths may cover the span: the loop this car took, else either (it stays) */
+                    const int pref_d = (g_smart_loop_pair_key[slot] >= 0 && g_smart_loop_pair_pick[slot] >= 0)
+                                       ? g_smart_loop_pair_pick[slot] : g_smart_branch_commit_span[slot];
+                    dep = td5_track_loop_in_mouth_pref(span, pref_d);
+                } else {
+                    dep = td5_track_loop_in_mouth(span);
+                }
+                if (dep >= 0) s = dep;
+            }
         }
         if (s >= span_count) s -= span_count;
         if (s < 0) continue;
@@ -5743,6 +5892,26 @@ static void td5_ai_smart_branch(int slot) {
             if (stype != (g_td5.reverse_direction ? 11 : 8)) continue;
         } else if (stype != 8 && stype != 11) {
             continue;
+        }
+        /* [ROUND 1029 X] a loop whose departure mouth is SHARED with a loop on the other side: decide the pair as
+         * one three-way choice (once), then this scan stands on the loop the car takes. A cop on a chase keeps
+         * its own per-fork rule below. */
+        int pair_take = -1, pair_fork = -1;
+        if (pair_on && cm && !g_td5.reverse_direction && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+            !(g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING)) {
+            int mate = td5_track_loop_mate_dep(s);
+            if (mate < 0) {   /* a loop paired with a real fork close to its mouth: s is the loop's D or the fork's F */
+                if ((mate = td5_track_loop_fork_mate(s)) >= 0) pair_fork = mate;
+                else if ((mate = td5_track_fork_loop_mate(s)) >= 0) pair_fork = s;
+            }
+            if (mate >= 0 && mate < span_count) {
+                const int key = s < mate ? s : mate;
+                if (g_smart_loop_pair_key[slot] != (int16_t)key)
+                    smart_loop_pair_decide(slot, key, key == s ? mate : s, span_count);
+                if (g_smart_loop_pair_pick[slot] == (int16_t)mate) s = mate;   /* stand on the loop it takes */
+                stype = strips[(size_t)s * 0x18];
+                pair_take = (g_smart_loop_pair_pick[slot] == (int16_t)s) ? 1 : 0;
+            }
         }
 
         int main_span = (stype == 8) ? (s + 1) : (s - 1);
@@ -5768,6 +5937,16 @@ static void td5_ai_smart_branch(int slot) {
         double pref;
         if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)       /* [1019 V] which side the corridor of THIS fork lies on */
             g_smart_branch_left[slot] = (int8_t)((stype == 8 && (td5_track_fork_is_left(s) || td5_track_loop_side(s))) ? 1 : 0);
+        if (pair_take >= 0) {
+            /* [1029 X] the shared-mouth decision is already made (smart_loop_pair_decide): a car that takes a
+             * loop leans to that loop's side, a car that stays holds the middle (a street opens on both sides) */
+            g_smart_branch_commit_span[slot] = (int16_t)s;
+            g_smart_branch_commit_take[slot] = (int8_t)pair_take;
+            /* stay: the middle of the road between two loop mouths, or the middle of the MAIN half at a loop + real fork
+             * (the fork's lane rule sends the corridor half of the widened road into the corridor) */
+            if (!pair_take) g_smart_branch_left[slot] = (int8_t)(pair_fork < 0 ? 2 : td5_track_fork_is_left(pair_fork) ? 4 : 3);
+            pref = pair_take ? +1.0 : -1.0;
+        } else
         if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&
             g_cop_target[slot] >= 0 && g_cop_target[slot] < TD5_MAX_TOTAL_ACTORS) {
             /* [POLICE rewrite 2026-06-19] Chase branch policy: take whichever
@@ -5936,8 +6115,10 @@ static void td5_ai_smart_branch(int slot) {
     }
 
     /* No fork in range — drop any stale commitment so the next fork rolls afresh. */
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
         g_smart_branch_commit_span[slot] = -1;
+        g_smart_loop_pair_key[slot] = -1;    /* [1029 X] */
+    }
 }
 
 /* Lane brain: score candidate lanes (surface, occupancy, wall, racing-line,
@@ -6280,6 +6461,8 @@ static void td5_ai_smart_lane_bias(int slot) {
     else if (best_u < cu - max_du) cu -= max_du;
     else                           cu = best_u;
     g_smart_lane_u[slot] = cu;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+        s_aim_ref[slot] = on_branch ? -1 : look_span;   /* [R1029 W] cu is a fraction of this span's road */
 
     /* Bias = perpendicular shift from the route line to fraction `cu`. */
     int32_t cur = (int32_t)((cu - u_base) * cwidth);
@@ -6649,6 +6832,197 @@ static void ai_gov_apply(int slot, int span_raw, int span_count)
     }
 }
 
+/* ========================================================================
+ * [ROUND 1028 S] CAR FOLLOWING MEASURED IN WORLD UNITS  (TD5RE_AI_FOLLOW_DIST)
+ *
+ * Mariano: "AI racers following each other in a convoy still make contact."
+ *
+ * The follow rule below (the `nearest_gap` block) measures the gap to the car
+ * in front as a COUNT OF TRACK SPANS, and acts only when that count is 1 or 2.
+ * Three consequences, all of which put a follower into the leader's bumper:
+ *
+ *   1. A span is not a distance. On the generated La Plata route spans run from
+ *      a few hundred to a few thousand model units, so "gap == 1" is anything
+ *      from touching to several car lengths, and the same rule is far too loose
+ *      on long spans and far too tight on short ones.
+ *   2. gap == 0 -- the leader on the SAME span, i.e. the closest a follower can
+ *      possibly be -- is deliberately EXCLUDED (see the [GAP>=1 2026-08-15] note
+ *      below). That exclusion is right for two cars level side by side and wrong
+ *      for a car sitting on another's rear bumper; the span index cannot tell
+ *      those apart.
+ *   3. There is no closing-speed term. The ease is gap/(desired+1) with a 0.66
+ *      floor, and the brake needs gap <= 1 AND a closing speed over 0x6000
+ *      (96 u/tick). A follower closing at 30-80 u/tick inside one span gets no
+ *      brake at all and only a mild lift.
+ *
+ * This block replaces that decision with the one a driver actually makes: the
+ * bumper-to-bumper clearance in model units, a desired clearance that grows
+ * with speed (a time headway), and a brake when the time-to-contact at the
+ * current closing speed drops below a threshold. "In front" and "in my lane"
+ * become geometry (longitudinal / lateral offset in the road frame against the
+ * two cars' real body half-extents) instead of span arithmetic, which fixes
+ * (2) honestly: a car level alongside has lon ~ 0 and is not followed, a car on
+ * our bumper has lon ~ one car length and is.
+ *
+ * Still only ever LOWERS the command, so the faithful throttle ceiling and the
+ * corner governor above stay the upper bound. Deterministic (no rng, same
+ * doubles the rest of the smart layer already uses) so netplay stays in step.
+ * TD5RE_AI_FOLLOW_DIST=0 restores the span-gap rule exactly.
+ * ======================================================================== */
+static int s_fd_init = 0;
+static int s_fd_on = 1;          /* TD5RE_AI_FOLLOW_DIST                       */
+static int s_fd_headway = 18;    /* TD5RE_AI_FOLLOW_HEADWAY   ticks of headway */
+static int s_fd_min = 400;       /* TD5RE_AI_FOLLOW_MIN       standing gap, units */
+/* The lateral window is a PERCENT OF (hwA + hwB), i.e. of the offset at which the
+ * two bodies would just touch side by side. 100 % = "we would collide if we were
+ * level"; the default 115 % adds a little slack so a leader drifting inside its
+ * own lane does not drop in and out of the follow set. It must stay well under a
+ * lane width (a 2-lane road is ~1000 units per lane against 632 of car) or a car
+ * being overtaken in the NEXT lane would be braked for. */
+static int s_fd_lat_pct = 115;   /* TD5RE_AI_FOLLOW_LAT_PCT   % of (hwA+hwB)   */
+static int s_fd_brake_ttc = 26;  /* TD5RE_AI_FOLLOW_BRAKE_TTC ticks to contact */
+static int s_fd_floor = 45;      /* TD5RE_AI_FOLLOW_FLOOR     % throttle floor */
+
+static void ai_follow_read_knobs(void)
+{
+    if (s_fd_init) return;
+    s_fd_init     = 1;
+    s_fd_on       = td5_env_flag_on("TD5RE_AI_FOLLOW_DIST");
+    s_fd_headway  = td5_env_int("TD5RE_AI_FOLLOW_HEADWAY",   18,  0, 200);
+    s_fd_min      = td5_env_int("TD5RE_AI_FOLLOW_MIN",      400,  0, 20000);
+    s_fd_lat_pct  = td5_env_int("TD5RE_AI_FOLLOW_LAT_PCT",  115, 10, 1000);
+    s_fd_brake_ttc= td5_env_int("TD5RE_AI_FOLLOW_BRAKE_TTC", 26,  0, 400);
+    s_fd_floor    = td5_env_int("TD5RE_AI_FOLLOW_FLOOR",     45,  0, 100);
+    TD5_LOG_I(LOG_TAG, "ai_follow_dist: %s (TD5RE_AI_FOLLOW_DIST) headway=%d ticks min=%d "
+              "lat=%d%% brake_ttc=%d floor=%d%%",
+              s_fd_on ? "ON (bumper gap in world units)" : "OFF (master span-gap rule)",
+              s_fd_headway, s_fd_min, s_fd_lat_pct, s_fd_brake_ttc, s_fd_floor);
+}
+
+/* Body half-extents of a slot, model units. Falls back to the measured stock car
+ * (632 x 1452) when the collision box is not bound yet, so the rule still has a
+ * sane scale on the first ticks of a race. */
+static void ai_follow_extent(char *actor, double *half_w, double *half_len)
+{
+    int32_t hw = 0, hl = 0;
+    if (actor && td5_physics_actor_body_extent((const TD5_Actor *)actor, &hw, &hl)) {
+        *half_w = (double)hw; *half_len = (double)hl;
+    } else {
+        *half_w = 316.0; *half_len = 726.0;
+    }
+}
+
+/* The nearest car genuinely IN FRONT of `slot`, measured in the road frame.
+ * Writes the bumper-to-bumper clearance (model units, negative when the bodies
+ * already overlap) and that car's longitudinal speed. Returns its slot, or -1.
+ * Candidates are the same peer set the span-gap rule scans (present, same
+ * traffic partition, within [-1 .. lookahead] spans), so this cannot react to a
+ * car on an unrelated part of the track. */
+static int ai_follow_nearest(int slot, int span_raw, int span_count, int lookahead,
+                             double *out_clear, int32_t *out_peer_v)
+{
+    char *self = actor_ptr(slot);
+    double fx, fz, flen, lx, lz, ex, ez, w;
+    double ox, oz, hw_s, hl_s;
+    int ps[SMART_PATH_MAX];
+    int best = -1, i, n;
+    double best_clear = 0.0;
+    const int pathmode = ai_corr_slot_on(slot);
+
+    if (!self || span_count <= 0) return -1;
+    if (pathmode) smart_build_path(slot, span_raw, span_count, 4, ps);
+    if (pathmode ? !smart_forward_dir_p(ps[0], ps[1], span_count, &fx, &fz, &flen)
+                 : !smart_forward_dir(span_raw, span_count, &fx, &fz, &flen)) return -1;
+    if (!smart_span_frame(((span_raw % span_count) + span_count) % span_count,
+                          &lx, &lz, &ex, &ez, &w)) return -1;
+
+    ox = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_X) >> 8);
+    oz = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_Z) >> 8);
+    ai_follow_extent(self, &hw_s, &hl_s);
+
+    n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (i = 0; i < n; i++) {
+        char *a;
+        double px, pz, dx, dz, lon, lat, hw_p, hl_p, clear;
+        int gap;
+        if (i == slot) continue;
+        if (td5_ai_traffic_pair_blocked(slot, i)) continue;
+        if (!ai_peer_is_present(i)) continue;
+        a = actor_ptr(i);
+        if (!a) continue;
+        gap = smart_span_gap(span_raw, (int)ACTOR_I16(a, ACTOR_SPAN_RAW), span_count);
+        if (gap < -1 || gap > lookahead) continue;
+        px = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_X) >> 8);
+        pz = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_Z) >> 8);
+        dx = px - ox; dz = pz - oz;
+        lon = dx * fx + dz * fz;          /* >0: ahead of us along the road */
+        lat = dx * ex + dz * ez;          /* across the road                */
+        if (lon <= 0.0) continue;         /* level or behind: not ours to follow */
+        ai_follow_extent(a, &hw_p, &hl_p);
+        if (fabs(lat) > (hw_s + hw_p) * (double)s_fd_lat_pct / 100.0) continue;
+        clear = lon - (hl_s + hl_p);
+        if (best < 0 || clear < best_clear) { best = i; best_clear = clear; }
+    }
+    if (best < 0) return -1;
+    *out_clear  = best_clear;
+    *out_peer_v = ACTOR_I32(actor_ptr(best), ACTOR_LONGITUDINAL_SPEED);
+    return best;
+}
+
+/* Ease / brake for the car in front. Returns 1 when one was found (whether or
+ * not the command changed), 0 when the road ahead is clear -- the same answer
+ * the span-gap rule's `have` flag gives, so the caller's early-out is unchanged. */
+static int ai_follow_apply(int slot, char *actor, int span_raw, int span_count,
+                           int lookahead, int aggression)
+{
+    double clear = 0.0, v, vp, dv, want, hf, r, f;
+    int32_t peer_v = 0, self_speed;
+    int16_t thr;
+    int peer = ai_follow_nearest(slot, span_raw, span_count, lookahead, &clear, &peer_v);
+    if (peer < 0) return 0;
+
+    self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    v  = (double)self_speed / 256.0;
+    vp = (double)peer_v / 256.0;
+    dv = v - vp;                                   /* >0 = closing */
+    if (v <= 0.0) return 1;                        /* stopped / reversing: nothing to ease */
+
+    /* Aggression shortens the headway the same way the span rule shortened
+     * `desired`: clean keeps a bigger cushion, aggressive tucks in. */
+    hf = (aggression <= 0) ? 1.25 : (aggression >= 2 ? 0.85 : 1.0);
+    want = (double)s_fd_min + v * (double)s_fd_headway * hf;
+    if (want < 1.0) want = 1.0;
+
+    /* Brake when the bodies would meet within BRAKE_TTC ticks at the current
+     * closing speed, or when they already touch and we are still closing. */
+    if (dv > 0.0 && (clear <= 0.0 || clear < dv * (double)s_fd_brake_ttc)) {
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+        ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 1;
+        if ((g_ai_frame_counter % 60u) == 0u)
+            TD5_LOG_I(LOG_TAG, "follow_brake: slot=%d span=%d peer=%d clear=%.0f "
+                      "closing=%.0f u/tick ttc=%.1f ticks",
+                      slot, span_raw, peer, clear, dv, clear > 0.0 ? clear / dv : 0.0);
+        return 1;
+    }
+    if (clear >= want) return 1;                   /* enough room: leave the throttle alone */
+
+    thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+    if (thr <= 0) return 1;                        /* already coasting/braking */
+    r = clear / want;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+    f = (double)s_fd_floor / 100.0 + (1.0 - (double)s_fd_floor / 100.0) * r;
+    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)((double)thr * f);
+    if ((g_ai_frame_counter % 60u) == 0u)
+        TD5_LOG_I(LOG_TAG, "follow_ease: slot=%d span=%d peer=%d clear=%.0f want=%.0f "
+                  "v=%.0f peer_v=%.0f thr %d->%d",
+                  slot, span_raw, peer, clear, want, v, vp,
+                  (int)thr, (int)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER));
+    return 1;
+}
+
 /* Speed brain (car-following): after route_threshold sets throttle, if a car
  * we can't yet clear sits ahead in our corridor and we're closing, ease the
  * throttle (or brake when very close). Never raises throttle. */
@@ -6765,6 +7139,16 @@ static void td5_ai_smart_speed_core(int slot) {
         }
     }
 
+    /* [ROUND 1028 S] The follow decision: world-unit clearance + closing speed
+     * (see the TD5RE_AI_FOLLOW_DIST block above) instead of the span count.
+     * Both arms answer the same question -- "is there a car in front of me?" --
+     * so the early-out below is the same shape either way. */
+    ai_follow_read_knobs();
+    if (s_fd_on) {
+        if (!ai_follow_apply(slot, actor, span_raw, span_count, lookahead, aggression))
+            return;
+    } else {
+
     if (!have) return;
 
     int32_t self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
@@ -6812,6 +7196,8 @@ static void td5_ai_smart_speed_core(int slot) {
                       peer_slot, peer_du, lane_w);
         }
     }
+
+    }   /* end of the TD5RE_AI_FOLLOW_DIST=0 (master span-gap) arm */
 
     /* [ROUND 1011 C3] THE POSTED SPEED LIMIT, from OSM `maxspeed`.
      *
@@ -7627,6 +8013,8 @@ void td5_ai_update_track_behavior(int slot) {
                     route_byte = ai_route_byte(route_bytes, lin_span, 0);
                 }
                 route_byte = ai_corr_aim_rb(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), target_span, route_byte);
+                (void)ai_fork_aim_frame(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), target_span,
+                                        &route_byte, &lateral_bias);          /* [R1029 W] */
                 TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
                           slot, lin_span, target_span, route_byte);
 
@@ -7897,6 +8285,29 @@ void td5_ai_dev_plant_encounter(int slot) {
  * other 1 is an orphan (see encounter_leak_fix_enabled) and is cleared, with a log
  * line, so a car can never be held braked by a cop that no longer exists. */
 static void td5_ai_encounter_sweep_orphans(void) {
+    /* [R1028 Q 2026-10-13] Transition log, OUTSIDE the leak-fix knob and ahead of
+     * the sweep: every 0->1 / 1->0 of the pull-over latch, with the cop that owns
+     * it and the phase it is in. The latch is written from six different sites, so
+     * this one place is the only way to read its whole history from a log.
+     * Grep: "pullover latch". */
+    {
+        static uint8_t s_prev[TD5_MAX_TOTAL_ACTORS];
+        for (int slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++) {
+            uint8_t now = g_encounter_active[slot] ? 1u : 0u;
+            if (now == s_prev[slot]) continue;
+            s_prev[slot] = now;
+            {
+                int owner = -1, ophase = -1;
+                for (int k = 0; k < TD5_MAX_TOTAL_ACTORS; k++)
+                    if (g_cop_is_cop[k] && g_cop_target[k] == slot) { owner = k; ophase = g_cop_phase[k]; break; }
+                TD5_LOG_I(LOG_TAG,
+                          "pullover latch slot=%d -> %s (cop=%d phase=%d)%s",
+                          slot, now ? "HELD (throttle forced off, steering still live)" : "released",
+                          owner, ophase,
+                          (now && owner < 0) ? "  <-- NO COP OWNS THIS LATCH" : "");
+            }
+        }
+    }
     if (!encounter_leak_fix_enabled()) return;
     for (int slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++) {
         int live = 0;
@@ -7912,6 +8323,27 @@ static void td5_ai_encounter_sweep_orphans(void) {
             TD5_LOG_W(LOG_TAG, "encounter latch ORPHAN cleared: slot=%d was held braked with no cop pulling it over", slot);
         }
     }
+}
+
+/* [R1028 Q 2026-10-13] Unconditional per-race clear of the pull-over latch.
+ *
+ * R1026 K put the clear inside cop_state_reset(), which is only ever reached from
+ * td5_ai_traffic_dynamic_race_init() -- i.e. only when BOTH [Traffic] Dynamic and
+ * the race's traffic option are on, and only when the race actually has traffic
+ * slots (td5_ai_init_traffic_actors returns early otherwise). A race with traffic
+ * OFF therefore never ran the per-race clear at all, and leaned entirely on the
+ * per-tick orphan sweep. The sweep does catch it, but one tick late and only while
+ * TD5RE_ENCOUNTER_LEAK_FIX is on; this makes the race-start state unconditional.
+ * Called from InitializeRaceSession. Same knob, so knob=0 is still the old code. */
+void td5_ai_race_reset_pullover_latches(void) {
+    int stale = 0;
+    if (!encounter_leak_fix_enabled()) return;
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) stale += (g_encounter_active[i] != 0);
+    if (stale)
+        TD5_LOG_W(LOG_TAG,
+                  "race start: cleared %d STALE pull-over latch(es) carried from the previous race "
+                  "(that car would have steered but never accelerated)", stale);
+    memset(g_encounter_active, 0, sizeof(g_encounter_active));
 }
 
 /* [DEBUG 2026-06-24] Cops normally chase HUMAN players only (state 1). This

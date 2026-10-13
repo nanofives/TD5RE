@@ -470,6 +470,18 @@ const uint32_t *td5_plat_input_default_action_bindings(void);
  *  [PORT ENHANCEMENT 2026-06] */
 const uint32_t *td5_plat_input_player_action_bindings(int slot);
 
+/** [R1028 Q 2026-10-13] Name of the per-action map the in-race poll last used for
+ *  this slot: "default", "default+legacy-buttons", "legacy-raw(axis-swap)",
+ *  "legacy-raw(button-remap)", "configured", "no-device" or "not-polled-yet".
+ *  Diagnostics only — printed by the no-throttle watchdog so a log from a session
+ *  where the pedals went dead names the map that moved them. */
+const char *td5_plat_input_js_map_name(int slot);
+
+/** [R1028 Q 2026-10-13] Last raw DirectInput axes (lX,lY,lZ,lRx,lRy,lRz) read for
+ *  this slot, in the 0..0x1F4 scale (centre 0xFA). Writes min(count,6) values and
+ *  returns how many; 0 when the slot has no device or has never been read. */
+int td5_plat_input_js_raw_axes(int slot, long *out, int count);
+
 /** Snapshot the device's rest state for capture (call when a remap begins). */
 void td5_plat_input_joystick_capture_begin(int device_slot);
 

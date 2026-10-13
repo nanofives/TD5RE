@@ -201,11 +201,18 @@ static int  corr_progress_delta(int span0, int span1);
  * span's lane quads (c0 <-> a1, cN <-> a2: a decision by CONTAINMENT, like geo_fork_decide,
  * so there is no sub-lane bookkeeping to get wrong); (2) the wall resolver, which stands
  * the rail down for a probe that is inside the span on the other side of it. A track
- * without the trailer has s_sl_n == 0 and takes no new branch anywhere. */
-typedef struct { int D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, c1_hi, cN_lo; } SideLoop;
+ * without the trailer has s_sl_n == 0 and takes no new branch anywhere.
+ * [ROUND 1029 X] SHARED MOUTHS: a left and a right loop may open on the SAME main spans (the two
+ * arms of one cross street). A main span then carries a second entry (s_sl_of2); the walker and
+ * the wall resolver try both, the AI decides the pair as one three-way choice (td5_ai.c,
+ * td5_track_loop_mate_dep). TD5RE_GEO_LOOP_SHARED_MOUTH=0: one entry per span (the later loop
+ * overwrites, as before). */
+typedef struct { int D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, c1_hi, cN_lo, mate, fmate; } SideLoop;
 static SideLoop *s_sl = NULL;
 static int       s_sl_n = 0;
 static int16_t  *s_sl_of = NULL;       /* per span: loop * 4 + role (0 a1, 1 c0, 2 a2, 3 cN), or -1 */
+static int16_t  *s_sl_of2 = NULL;      /* [1029 X] a second entry on a main span shared by two loops' mouths, or -1 */
+static int       s_sl_shared = -1;     /* [1029 X] TD5RE_GEO_LOOP_SHARED_MOUTH */
 static int       s_sl_jumped = 0;      /* set by the walker when it relocated across a side link */
 static int       s_sl_off = -1;        /* TD5RE_GEO_BLOCKLOOP_ENGINE=0 turns the engine side off */
 static int       s_sl_jump_pct = 0;    /* TD5RE_AI_LOOP_JUMP_PCT: where in the opening the AI's path turns in (0 = first span) */
@@ -1169,6 +1176,37 @@ static void walker_audit_static(void)
     free(cls);
 }
 #endif
+
+/* [ROUND 1029 X] after fork_left_compute: pair each loop with a REAL fork (type 8, not a loop) whose span F lies within
+ * TD5RE_AI_LOOP_FORK_PAIR spans of the loop's departure mouth, corridor on the other side (td5_track_loop_fork_mate).
+ * 0 = no pairs (the two decisions stay separate, as before). Also off with TD5RE_GEO_LOOP_SHARED_MOUTH=0. The close
+ * case is a mouth inside the fork's ramp (generator knob TD5RE_GEO_LOOP_FORK_RAMP); a round-1022 N2 loop whose mouth
+ * stands in a fork's core within the pad pairs too (its two decisions are just as close). */
+static void sl_pair_forks(void)
+{
+    int i, s;
+    const int pad = td5_env_int("TD5RE_AI_LOOP_FORK_PAIR", 12, 0, 40);
+    const int ring = g_td5.track_span_ring_length;
+    if (s_sl_n <= 0 || pad <= 0 || !s_sl_shared || !s_span_array || ring <= 0) return;
+    for (i = 0; i < s_sl_n; i++) {
+        SideLoop *L = &s_sl[i];
+        int best = -1;
+        if (L->mate >= 0) continue;                    /* a shared mouth already makes this a pair */
+        for (s = L->a1_lo - pad; s <= L->a1_hi + pad; s++) {
+            int q, isloop = 0;
+            if (s < 0 || s >= ring || s_span_array[s].span_type != 8) continue;
+            for (q = 0; q < s_sl_n; q++) if (s_sl[q].D == s) isloop = 1;
+            if (isloop) continue;
+            if ((fork_is_left(s) ? 1 : 0) == (L->side == 1 ? 1 : 0)) continue;   /* same side: not this case */
+            if (best < 0 || abs(s - L->D) < abs(best - L->D)) best = s;
+        }
+        if (best >= 0 && td5_track_fork_loop_mate(best) < 0) {
+            L->fmate = best;
+            TD5_LOG_I(LOG_TAG, "side link: loop %d (D=%d, mouth %d..%d) paired with the real fork at F=%d (one three-way decision)",
+                      i, L->D, L->a1_lo, L->a1_hi, best);
+        }
+    }
+}
 
 static void fork_left_compute(void)
 {
@@ -4868,6 +4906,7 @@ int td5_track_load_strip(const void *data, size_t size)
     free(s_fork_divider);
     s_fork_divider = NULL;
     fork_left_compute();                    /* [TOPOLOGY-FIRST] left corridors */
+    sl_pair_forks();                        /* [1029 X] a loop mouth in a real fork's decision zone */
 #ifndef TD5RE_RELEASE
     walker_audit_static();                  /* [1019 V] DEV: TD5RE_WALKER_AUDIT=1 */
 #endif
@@ -9899,8 +9938,19 @@ static void sl_free(void)
 {
     free(s_sl);    s_sl = NULL;
     free(s_sl_of); s_sl_of = NULL;
+    free(s_sl_of2); s_sl_of2 = NULL;
     s_sl_n = 0;
     s_sl_jumped = 0;
+}
+
+/* [1029 X] Record loop entry `e` on main span `j`: the first free entry, else (knob on) the second one,
+ * else the later loop overwrites (the pre-1029 rule). */
+static void sl_mark(int j, int e)
+{
+    if (s_sl_of[j] < 0 || !s_sl_of2) { s_sl_of[j] = (int16_t)e; return; }
+    if ((s_sl_of[j] >> 2) == (e >> 2)) return;
+    if (s_sl_of2[j] < 0) { s_sl_of2[j] = (int16_t)e; return; }
+    TD5_LOG_W(LOG_TAG, "side link: span %d already holds two loop mouths, loop %d dropped there", j, e >> 2);
 }
 
 /* Parse the trailer at `pos`; returns the offset just past it (pos unchanged when there is none). */
@@ -9909,6 +9959,7 @@ static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos)
     uint32_t magic, nl, i;
     size_t end;
     if (s_sl_off < 0) s_sl_off = td5_env_flag_on("TD5RE_GEO_BLOCKLOOP_ENGINE") ? 0 : 1;
+    if (s_sl_shared < 0) s_sl_shared = td5_env_flag_on("TD5RE_GEO_LOOP_SHARED_MOUTH");
     s_sl_jump_pct = td5_env_int("TD5RE_AI_LOOP_JUMP_PCT", 25, 0, 100);
     if (!blob || pos + 8 > size) return pos;
     memcpy(&magic, blob + pos, 4);
@@ -9921,6 +9972,10 @@ static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos)
     s_sl_of = (int16_t *)malloc(sizeof(int16_t) * (size_t)(s_span_count > 0 ? s_span_count : 1));
     if (!s_sl || !s_sl_of) { sl_free(); return end; }
     for (i = 0; i < (uint32_t)s_span_count; i++) s_sl_of[i] = -1;
+    if (s_sl_shared) {
+        s_sl_of2 = (int16_t *)malloc(sizeof(int16_t) * (size_t)(s_span_count > 0 ? s_span_count : 1));
+        if (s_sl_of2) for (i = 0; i < (uint32_t)s_span_count; i++) s_sl_of2[i] = -1;
+    }
     for (i = 0; i < nl; i++) {
         uint32_t w[11]; int j;
         SideLoop *L = &s_sl[s_sl_n];
@@ -9932,13 +9987,27 @@ static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos)
             L->c1_hi < L->c0 || L->c1_hi > L->cN || L->cN_lo < L->c0 || L->cN_lo > L->cN ||
             L->a1_lo < 0 || L->a1_hi < L->a1_lo || L->a1_hi >= s_span_count ||
             L->a2_lo < 0 || L->a2_hi < L->a2_lo || L->a2_hi >= s_span_count) continue;
-        for (j = L->a1_lo; j <= L->a1_hi; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 0);
-        for (j = L->c0; j <= L->c1_hi; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 1);
-        for (j = L->a2_lo; j <= L->a2_hi; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 2);
-        for (j = L->cN_lo; j <= L->cN; j++) s_sl_of[j] = (int16_t)(s_sl_n * 4 + 3);
+        L->mate = -1; L->fmate = -1;
+        for (j = L->a1_lo; j <= L->a1_hi; j++) sl_mark(j, s_sl_n * 4 + 0);
+        for (j = L->c0; j <= L->c1_hi; j++) sl_mark(j, s_sl_n * 4 + 1);
+        for (j = L->a2_lo; j <= L->a2_hi; j++) sl_mark(j, s_sl_n * 4 + 2);
+        for (j = L->cN_lo; j <= L->cN; j++) sl_mark(j, s_sl_n * 4 + 3);
         TD5_LOG_I(LOG_TAG, "side link: loop %d D=%d A=%d corridor %d..%d mouths %d..%d (flush %d..%d) / %d..%d (flush %d..%d) side %d",
                   s_sl_n, L->D, L->A, L->c0, L->cN, L->a1_lo, L->a1_hi, L->c0, L->c1_hi, L->a2_lo, L->a2_hi, L->cN_lo, L->cN, L->side);
         s_sl_n++;
+    }
+    if (s_sl_of2) {   /* [1029 X] two loops whose DEPARTURE mouths share main spans are one decision for the AI */
+        int a, b;
+        for (a = 0; a < s_sl_n; a++)
+            for (b = a + 1; b < s_sl_n; b++)
+                if (s_sl[a].a1_lo <= s_sl[b].a1_hi && s_sl[b].a1_lo <= s_sl[a].a1_hi &&
+                    s_sl[a].mate < 0 && s_sl[b].mate < 0 && s_sl[a].D != s_sl[b].D) {
+                    s_sl[a].mate = b; s_sl[b].mate = a;
+                    TD5_LOG_I(LOG_TAG, "side link: loops %d (D=%d) and %d (D=%d) share departure spans %d..%d",
+                              a, s_sl[a].D, b, s_sl[b].D,
+                              s_sl[a].a1_lo > s_sl[b].a1_lo ? s_sl[a].a1_lo : s_sl[b].a1_lo,
+                              s_sl[a].a1_hi < s_sl[b].a1_hi ? s_sl[a].a1_hi : s_sl[b].a1_hi);
+                }
     }
     if (s_sl_n == 0) sl_free();
     return end;
@@ -9975,10 +10044,12 @@ static int sl_lane_at(int span, int32_t px, int32_t pz, int32_t tol)
     return -1;
 }
 
-/* The spans a probe on `span` may cross to, as an inclusive range (lo..hi); 0 when `span` has no link. */
-static int sl_targets(int span, int *lo, int *hi)
+/* The spans a probe on `span` may cross to through its link `k` (0, or [1029 X] 1 = the second loop on a
+ * shared mouth), as an inclusive range (lo..hi); 0 when `span` has no such link. */
+static int sl_targets(int span, int k, int *lo, int *hi)
 {
-    const int e = (s_sl_n > 0 && s_sl_of && span >= 0 && span < s_span_count) ? (int)s_sl_of[span] : -1;
+    const int16_t *of = k ? s_sl_of2 : s_sl_of;
+    const int e = (s_sl_n > 0 && of && span >= 0 && span < s_span_count) ? (int)of[span] : -1;
     const SideLoop *L;
     if (e < 0) return 0;
     L = &s_sl[e >> 2];
@@ -9994,23 +10065,28 @@ static int sl_targets(int span, int *lo, int *hi)
  * and lane it is now on. */
 static int sl_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *new_sub)
 {
-    int lo, hi, s;
-    if (!sl_targets(span, &lo, &hi)) return 0;
+    int lo, hi, s, k;
+    if (!sl_targets(span, 0, &lo, &hi)) return 0;
     if (sl_lane_at(span, px, pz, 0) >= 0) return 0;       /* still on this span */
-    for (s = lo; s <= hi; s++) {
-        const int lane = sl_lane_at(s, px, pz, SL_TOL);
-        if (lane >= 0) { *new_span = s; *new_sub = lane; return 1; }
+    for (k = 0; k < 2; k++) {                             /* [1029 X] k = 1: the other loop of a shared mouth */
+        if (k && !sl_targets(span, 1, &lo, &hi)) break;
+        for (s = lo; s <= hi; s++) {
+            const int lane = sl_lane_at(s, px, pz, SL_TOL);
+            if (lane >= 0) { *new_span = s; *new_sub = lane; return 1; }
+        }
     }
     return 0;
 }
 
-/* Is the probe standing in the span across the side link of `span`? Then `span`'s rail is open there. */
+/* Is the probe standing in the span across a side link of `span`? Then `span`'s rail is open there. */
 static int sl_open(int span, int32_t px, int32_t pz)
 {
-    int lo, hi, s;
-    if (!sl_targets(span, &lo, &hi)) return 0;
-    for (s = lo; s <= hi; s++)
-        if (sl_lane_at(s, px, pz, SL_TOL) >= 0) return 1;
+    int lo, hi, s, k;
+    for (k = 0; k < 2; k++) {
+        if (!sl_targets(span, k, &lo, &hi)) break;
+        for (s = lo; s <= hi; s++)
+            if (sl_lane_at(s, px, pz, SL_TOL) >= 0) return 1;
+    }
     return 0;
 }
 
@@ -10047,6 +10123,73 @@ int td5_track_loop_in_mouth(int span)
     int i;
     for (i = 0; i < s_sl_n; i++)
         if (span >= s_sl[i].a1_lo && span <= s_sl[i].a1_hi) return s_sl[i].D;
+    return -1;
+}
+
+/* [ROUND 1029 X] SHARED MOUTHS. The loop whose departure span is `dep`: the departure span D of the loop
+ * whose departure mouth shares main spans with it (its "mate", the other side of the same cross street),
+ * else -1. Only a level built with shared mouths and TD5RE_GEO_LOOP_SHARED_MOUTH on has mates. */
+int td5_track_loop_mate_dep(int dep)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].D == dep) return s_sl[i].mate >= 0 ? s_sl[s_sl[i].mate].D : -1;
+    return -1;
+}
+
+/* [ROUND 1029 X] `span` lies in a loop's departure mouth: that loop's D, preferring the loop whose D is
+ * `prefer` when two mouths cover the span; else -1. */
+int td5_track_loop_in_mouth_pref(int span, int prefer)
+{
+    int i, first = -1;
+    for (i = 0; i < s_sl_n; i++)
+        if (span >= s_sl[i].a1_lo && span <= s_sl[i].a1_hi) {
+            if (s_sl[i].D == prefer) return prefer;
+            if (first < 0) first = s_sl[i].D;
+        }
+    return first;
+}
+
+/* [ROUND 1029 X] td5_track_loop_mouth_target for ONE loop (the one departing at `dep`): its first corridor
+ * span when `span` is in the turning-in part of that loop's opening, else -1. */
+int td5_track_loop_mouth_target_dep(int span, int dep)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].D == dep && span >= s_sl[i].a1_lo && span <= s_sl[i].a1_hi) {
+            if (span < s_sl[i].a1_lo + (s_sl[i].a1_hi - s_sl[i].a1_lo + 1) * s_sl_jump_pct / 100) return -1;
+            return s_sl[i].c0;
+        }
+    return -1;
+}
+
+/* [ROUND 1029 X] 1 when this track has at least one pair of loops sharing a departure mouth, or a loop paired
+ * with a real fork (s_sl[].fmate). */
+int td5_track_loop_has_shared(void)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++) if (s_sl[i].mate >= 0 || s_sl[i].fmate >= 0) return 1;
+    return 0;
+}
+
+/* [ROUND 1029 X] A loop whose departure mouth starts inside a REAL fork's decision zone (TD5RE_AI_LOOP_FORK_PAIR spans
+ * either side of the fork's span F, corridor on the other side of the road): the fork's F, else -1. The AI decides
+ * the loop and the fork as one three-way choice instead of two decisions a few spans apart. */
+int td5_track_loop_fork_mate(int dep)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].D == dep) return s_sl[i].fmate;
+    return -1;
+}
+
+/* the loop departing at `dep`, if any, whose fork mate is real fork span `f` */
+int td5_track_fork_loop_mate(int f)
+{
+    int i;
+    if (f < 0) return -1;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].fmate == f) return s_sl[i].D;
     return -1;
 }
 

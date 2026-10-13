@@ -3592,6 +3592,7 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
     tg_meshtag_reset(nentries);   /* [PICK] per-(entry,slot) kind sidecar */
 
     s_guard_rejects = 0;   /* [R7 GUARD] per-build tally, reported below */
+    s_guard_row_frames = 0;
     s_guard_residual = 0;
     s_guard_ex_scope_hits = 0;
     s_guard_unsorted = 0;  /* [R10] compaction health, reported below */
@@ -4546,6 +4547,10 @@ static int tg_scenery_end(TG_Buf *out)
                 TD5_LOG_I(LOG_TAG, "on-road guard: clean -- 0 scenery meshes in "
                           "the road over %d spans (%ld remaining)", nspans,
                           s_guard_residual);
+            if (tg_guard_enabled())
+                TD5_LOG_I(LOG_TAG, "on-road guard: [R1029 T item 3] %ld vertex test(s) moved to the frame of the node "
+                          "whose cross-section they lie on (knob TD5RE_GUARD_ROW_FRAME=%s)", s_guard_row_frames,
+                          td5_env_flag_on("TD5RE_GUARD_ROW_FRAME") ? "on" : "off");
             if (s_guard_residual && !tg_guard_report_only())
                 TD5_LOG_W(LOG_TAG, "on-road guard: RESIDUAL %ld non-exempt "
                           "on-road mesh(es) survived -- parse/compaction bug",

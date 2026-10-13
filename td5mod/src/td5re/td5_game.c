@@ -5025,6 +5025,11 @@ static void init_race_race_systems(void)
      * 0-5 (~125 spans too close to the player → "traffic spawns/encounters
      * happen earlier than the original"). The function self-gates on
      * g_racerCount <= 6, so a bare call is inert when traffic is disabled. */
+    /* [R1028 Q 2026-10-13] Clear the police pull-over latch for EVERY race, not
+     * just the ones that reach cop_state_reset() through the dynamic-traffic
+     * seeding below. A latch left at 1 by a race that ended mid pull-over makes
+     * the next race's human car steer normally and never accelerate. */
+    td5_ai_race_reset_pullover_latches();
     td5_ai_init_traffic_actors();
 
     /* [MP COP CHASE AI COP 2026-06-23] Arm the AI cop HERE — AFTER
