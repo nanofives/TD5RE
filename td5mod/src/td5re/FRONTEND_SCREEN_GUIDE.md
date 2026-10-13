@@ -301,3 +301,29 @@ work: the small-text box is ~13 design px tall, so `+29` already runs to `+42`
 and the two collide and spill past the button. One line per row is all a 48-tall
 frame holds. Reason strings are kept short in English **and** es-AR for the same
 reason. A confirm attempt on the greyed row plays `frontend_play_sfx(10)`.
+
+### SELECT TRACK / QUICK RACE: the two generated-track entries (round 1026 L)
+
+The TRACK cycler carries **two** generated entries, each with its own options
+button that exists only while that entry is the pick:
+
+| Entry | Slot / level | Options button | Builds |
+|---|---|---|---|
+| AUTO-GENERATED TRACK | 60 / level090 | AUTO TRACK STUDIO | always the procedural world (`TD5RE_STUDIO_SYNTHETIC`) |
+| the GEOSPATIAL entry (`LA PLATA (PARTIDO) (REAL)`) | 61+ / level091+ | GEOSPATIAL TRACK GENERATOR | the real place it names (`TD5RE_GEO_OWN_SELECTOR`) |
+
+* Which geo slot the entry stands for is `frontend_geo_entry_slot()` (td5_fe_race.c):
+  the slot BUILD armed, else the place in `SELECTED.TXT` / `TD5RE_GEO_PLACE`,
+  else the first registered place. One list position, not one row per place.
+* Both options buttons sit at x=120 w=224 on **row y=306** (SELECT TRACK) and on
+  QR row 6 (y=336). They are created unconditionally and shown/hidden per pick by
+  `frontend_trksel_refresh_{auto,geo}_btn` / `frontend_qr_refresh_{auto,geo}_btn`.
+* Neither RANDOMIZE nor a network lobby lands on the geo entry.
+* **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
+  STUDIO chip was created as button 17 and silently refused (`-1`) until round
+  1026. If you add a button past the last index of a screen, check the return value.
+* The studio has no LOCATION row. `td5_trackgen_set_target_slot(60)` pins the
+  synthetic world with `td5_geo_force_synthetic()`; clearing the override instead
+  lets a leftover `TD5RE_GEO_PLACE` (every geo BUILD writes it and SELECTED.TXT)
+  build level090 from the last real place.
+

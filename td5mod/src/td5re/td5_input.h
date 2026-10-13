@@ -270,6 +270,12 @@ uint32_t td5_input_get_control_bits(int slot);
 /* Overwrite a slot's control word. Used by the network lockstep path to push
  * host-merged authoritative input back into the per-slot store. */
 void     td5_input_set_control_bits(int slot, uint32_t bits);
+#ifndef TD5RE_RELEASE
+/* [R1026 K] DEV/selftest: action bits ORed into slot 0's polled word every tick
+ * (after the hardware poll, before the TD5RE_FAKE_PAD pad re-encode), so a harness
+ * can hold THROTTLE through the full human decode path with auto_throttle OFF. */
+void     td5_input_selftest_set_drive_bits(uint32_t bits);
+#endif
 int16_t  td5_input_get_analog_x(int slot);
 int16_t  td5_input_get_analog_y(int slot);
 int32_t  td5_input_get_steering_cmd(int slot);

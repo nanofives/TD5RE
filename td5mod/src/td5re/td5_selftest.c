@@ -60,6 +60,7 @@
 #include "td5_chaos.h"   /* [CHAOS CO-OP] read-only rotation-step query + config reset */
 #include "td5_input.h"   /* [CHAOS CO-OP] packed-axis constants for the fold check */
 #include "td5_camera.h"  /* [CHAOS CO-OP] per-view solved camera pose (pane check) */
+#include "td5_ai.h"      /* [R1026 K] pull-over latch query + dev plant (human-drive rows) */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
@@ -177,7 +178,25 @@ typedef struct {
      * rotation actually happened. Env knobs are set in st_apply_scenario and
      * cleared in st_reset_scenario_fields, so later rows are untouched. */
     int chaos_seats;
+    /* [R1026 K 2026-10-12] HUMAN-driven row (Mariano: "after one or two races
+     * joystick works but can't accelerate"). Every other row is driven by
+     * player_is_ai or by auto_throttle, which writes the throttle AFTER the input
+     * decode and so can never see a car whose throttle path is dead. 0 = not a
+     * human row; else slot 0 is a HUMAN holding THROTTLE through the full input
+     * decode as a PAD-SHAPED word (TD5RE_FAKE_PAD: packed axes + analog flags, the
+     * shape a real pad produces), auto_throttle OFF, lane assist steering. The row
+     * FAILS if the car does not reach ST_DRIVE_MIN_SPEED.
+     *   1 = plain
+     *   2 = a STALE pull-over latch is planted BEFORE the race launches (what a race
+     *       ended/aborted mid pull-over leaves behind for the next race)
+     *   3 = an ORPHAN latch (no cop behind it) is planted MID-race; it must be
+     *       cleared within a few ticks and the car must keep accelerating */
+    int human_drive;
 } RaceScenario;
+
+/* Peak |longitudinal speed| (FP_TRUNC units; a held-throttle human car measures 84
+ * at 0.8 s and 270+ at 1.8 s after GO) a human row must reach. */
+#define ST_DRIVE_MIN_SPEED  120
 
 /* [CHAOS CO-OP 2026-09-30] Pinned chaos-row knobs. TIME (3) is the only trigger
  * whose firing is independent of track class and of how far the cars drove, so
@@ -328,6 +347,26 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .ff=4, .depth=ST_DEPTH_RUN_5S },
+    /* [R1026 K] Four CONSECUTIVE human-driven races, throttle held through the real
+     * input decode as a pad-shaped word. Row 2 starts with a stale pull-over latch
+     * (carried from a race that ended mid pull-over); row 3 gets an orphan latch
+     * mid-race; row 4 proves the session is still healthy afterwards. */
+    { .name="pad-throttle-chain-1",  .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .human_drive=1, .depth=ST_DEPTH_RUN_5S },
+    { .name="pad-throttle-chain-2",  .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .human_drive=2, .depth=ST_DEPTH_RUN_5S },
+    { .name="pad-throttle-chain-3",  .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .human_drive=3, .depth=ST_DEPTH_RUN_5S },
+    { .name="pad-throttle-chain-4",  .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .human_drive=1, .depth=ST_DEPTH_RUN_5S },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -607,6 +646,8 @@ static void st_begin_step(const char *label, uint32_t timeout_ms)
               s_row_count + 1, s_n_screens + s_n_races, label);
 }
 
+static void st_drive_disarm(void);   /* [R1026 K] defined with the human-drive helpers below */
+
 /* Restore every scenario-touched INI field to its boot-time base value. */
 static void st_reset_scenario_fields(void)
 {
@@ -621,6 +662,7 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.spectate_screens  = s_base.spectate;
     g_td5.ini.player_is_ai      = s_base.player_is_ai;
     g_td5.ini.auto_throttle     = s_base.auto_throttle;
+    st_drive_disarm();                                  /* [R1026 K] human-drive row knobs */
     g_td5.ini.trace_fast_forward = s_base.fast_forward;
     /* [NEW SUITE] Only-sometimes-set overrides must not leak into the next row. */
     g_td5.ini.start_span_offset  = 0;
@@ -832,6 +874,73 @@ static void st_chaos_pane_sample(int racing_ticks)
             return;
         }
     }
+}
+
+/* ------------------------------------------------------------------------
+ * [R1026 K] Human-drive rows: state + sampling + verdict
+ * ---------------------------------------------------------------------- */
+static int s_drive_peak;          /* peak slot-0 speed seen this race             */
+static int s_drive_mode;          /* RaceScenario.human_drive of the running row  */
+static int s_drive_plant_rel;     /* rel tick the mid-race orphan was planted, -1 */
+static int s_drive_orphan_fail;   /* orphan still latched after the sweep window  */
+
+static void st_drive_arm(const RaceScenario *sc)
+{
+    g_td5.ini.auto_throttle = 0;                 /* the decode must run for real */
+    _putenv("TD5RE_FAKE_PAD=1");                 /* re-encode as a pad-shaped word */
+    td5_input_selftest_set_drive_bits((uint32_t)TD5_INPUT_THROTTLE);
+    s_drive_peak = 0;
+    s_drive_mode = sc->human_drive;
+    s_drive_plant_rel = -1;
+    s_drive_orphan_fail = 0;
+    if (sc->human_drive == 2)
+        td5_ai_dev_plant_encounter(0);           /* stale latch from "the previous race" */
+}
+
+static void st_drive_disarm(void)
+{
+    td5_input_selftest_set_drive_bits(0);
+    _putenv("TD5RE_FAKE_PAD=");
+    s_drive_mode = 0;
+}
+
+static void st_drive_sample(int rel)
+{
+    TD5_Actor *a = td5_game_get_actor(0);
+    int spd;
+    if (!a) return;
+    spd = (int)(a->longitudinal_speed >> 8);
+    if (spd < 0) spd = -spd;
+    if (spd > s_drive_peak) s_drive_peak = spd;
+    if (s_drive_mode == 3) {
+        if (s_drive_plant_rel < 0 && rel >= 150 && s_drive_peak >= ST_DRIVE_MIN_SPEED) {
+            td5_ai_dev_plant_encounter(0);
+            s_drive_plant_rel = rel;
+        } else if (s_drive_plant_rel >= 0 && rel >= s_drive_plant_rel + 4 &&
+                   td5_ai_is_encounter_active(0)) {
+            s_drive_orphan_fail = 1;
+        }
+    }
+}
+
+/* Returns ST_PASS/ST_FAIL; `note` receives the verdict text. */
+static int st_drive_result(char *note, size_t n)
+{
+    if (s_drive_peak < ST_DRIVE_MIN_SPEED) {
+        snprintf(note, n, "human drive: car never accelerated (peak %d < %d) "
+                 "-- throttle dead", s_drive_peak, ST_DRIVE_MIN_SPEED);
+        return ST_FAIL;
+    }
+    if (s_drive_mode == 3 && s_drive_plant_rel < 0) {
+        snprintf(note, n, "human drive: orphan latch never planted (peak %d)", s_drive_peak);
+        return ST_FAIL;
+    }
+    if (s_drive_orphan_fail) {
+        snprintf(note, n, "human drive: orphan pull-over latch survived 4 ticks");
+        return ST_FAIL;
+    }
+    snprintf(note, n, "human drive peak=%d mode=%d", s_drive_peak, s_drive_mode);
+    return ST_PASS;
 }
 
 static void st_inv_sample(void)
@@ -2359,6 +2468,7 @@ static void st_tick_races(uint32_t now)
         row = st_new_row(sc->name, 'R');
         if (row) row->repeat_group = sc->repeat_group;
         st_apply_scenario(sc);
+        if (sc->human_drive > 0) st_drive_arm(sc);   /* [R1026 K] after apply: it forces auto_throttle OFF */
         g_td5.ini.auto_race = 1;      /* the MENU state consumes this next frame */
         s_race_launch_ms = now;
         s_sub = SS_RACE_WAIT_START;
@@ -2419,6 +2529,19 @@ static void st_tick_races(uint32_t now)
                 /* [NEW SUITE] the invariant checker is the primary verdict. */
                 invstatus = st_inv_result(note, sizeof(note));
                 if (invstatus > status) status = invstatus;
+                /* [R1026 K] human-drive rows: the car MUST have accelerated. */
+                if (sc->human_drive > 0) {
+                    char dn[120];
+                    int ds = st_drive_result(dn, sizeof dn);
+                    if (ds == ST_FAIL) {
+                        status = ST_FAIL;
+                        snprintf(note, sizeof(note), "%s", dn);
+                    } else {
+                        /* bounded append (snprintf here trips -Wformat-truncation) */
+                        strncat(note, " ", sizeof(note) - strlen(note) - 1);
+                        strncat(note, dn, sizeof(note) - strlen(note) - 1);
+                    }
+                }
                 /* RUN_FINISH rows must actually reach the results screen. */
                 if (sc->natural_finish) {
                     if (td5_frontend_get_screen() == TD5_SCREEN_RACE_RESULTS) {
@@ -2511,6 +2634,8 @@ static void st_tick_races(uint32_t now)
              * non-chaos row and after the first sample. */
             if (sc->chaos_seats > 0)
                 st_chaos_pane_sample(tick - s_race_start_tick);
+            if (sc->human_drive > 0)
+                st_drive_sample(tick - s_race_start_tick);   /* [R1026 K] */
             s_last_sim_tick = tick;
         }
         /* [render golden] grab the composited frame at fixed sim ticks. */

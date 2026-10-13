@@ -129,6 +129,9 @@ int  frontend_geo_generator_parent_screen(void);
  * nothing is armed. */
 void frontend_geo_pick_arm(int slot);
 int  frontend_geo_pick_slot(void);
+/* [ROUND 1026 L] The one geo slot the track selectors list as the GEOSPATIAL
+ * TRACK entry (-1 = no real place registered). See td5_fe_race.c. */
+int  frontend_geo_entry_slot(void);
 /* 1 when CHAOS CO-OP may be picked with the CURRENT lobby roster (4/6/8 local
  * humans, no AI test players, not a network session). `why` (may be NULL) gets
  * a short reason line when the answer is 0. Shared with the MP MODE VOTE gate. */
@@ -484,7 +487,11 @@ void td5_frontend_set_screen(TD5_ScreenIndex index);
 void td5_frontend_show_net_disconnect(const char *reason);
 extern int g_net_disconnect_mode;          /* [2026-06-19] 1 = SessionLocked dialog shows the net-disconnect notice */
 extern char g_net_disconnect_reason[64];
-#define FE_MAX_BUTTONS 16
+/* [ROUND 1026 L] 16 -> 18. Quick Race already creates 16 buttons (QR_BTN_* 0..15),
+ * so the two chips it grows past them (AUTO TRACK STUDIO, and now GEOSPATIAL
+ * TRACK GENERATOR) were created at index 16/17 and silently refused by
+ * frontend_create_button (-1): the studio chip has never existed in Quick Race. */
+#define FE_MAX_BUTTONS 18
 
 typedef struct {
     int active;

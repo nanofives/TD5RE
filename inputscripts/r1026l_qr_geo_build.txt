@@ -1,0 +1,16 @@
+# [R1026 L] QUICK RACE parked on the GEOSPATIAL entry (--DefaultTrack=61, QR is
+# screen 7). Focus opens on CAR: CAR -> TRACK -> RACE OPTIONS -> GEOSPATIAL chip
+# (row 6) is three DOWNs, ENTER
+# opens the map, the dev seed (TD5RE_GEO_SEED=1) lays a route, RIGHT moves
+# CLEAR -> BUILD TRACK, ENTER builds and hands back to QUICK RACE on the entry.
+sync menu
+300 log QR_ON_GEO
++30 key down press
++30 key down press
++30 key down press
++60 key enter press
++300 log GEO_SETTLED
++8 key right press
++30 key enter press
++600 log AFTER_BUILD
++240 quit

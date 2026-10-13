@@ -201,6 +201,11 @@ void td5_ai_update_encounter_control(int slot);
  * here so the player's throttle write is not blocked for the entire Cop Chase
  * session (only while a tracked encounter is actually engaged). */
 int  td5_ai_is_encounter_active(int slot);
+#ifndef TD5RE_RELEASE
+/* [R1026 K] DEV/selftest: force the pull-over latch of `slot` to 1 with NO cop behind it,
+ * exactly the state a vanished / aborted pull-over leaves. */
+void td5_ai_dev_plant_encounter(int slot);
+#endif
 /* |ACTOR_LONGITUDINAL_SPEED| (raw 24.8 fixed, td5_ai.c) at/under which a
  * pulled-over target counts as stopped and the chase scheduler releases
  * the hold (td5_ai.c: td5_ai_update_special_encounter, COP_PULLOVER phase).

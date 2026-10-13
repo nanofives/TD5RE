@@ -823,6 +823,21 @@ void td5_geo_force_place(const char *slug)
     TD5_LOG_I(LOG_TAG, "geo: place override -> %s (env knob untouched)", s_force_slug);
 }
 
+/* [ROUND 1026 L] The override above can only name a place or hand the decision
+ * back to TD5RE_GEO_PLACE. The AUTO TRACK STUDIO needs the third answer, "no
+ * place at all", because TD5RE_GEO_PLACE is also what a geo BUILD leaves behind
+ * (td5_geo_select writes the knob AND SELECTED.TXT, and td5_geo_init reads the
+ * file back into the knob on every launch). Clearing the override on slot 60
+ * therefore let the last real place leak into the procedural level090. An
+ * override whose slug is empty is active and resolves to the synthetic world. */
+void td5_geo_force_synthetic(void)
+{
+    if (!s_force_active || s_force_slug[0])
+        TD5_LOG_I(LOG_TAG, "geo: place override -> SYNTHETIC (env knob untouched)");
+    s_force_active = 1;
+    s_force_slug[0] = '\0';
+}
+
 const char *td5_geo_wanted_slug(void)
 {
     const char *env;

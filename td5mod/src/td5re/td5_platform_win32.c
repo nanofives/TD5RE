@@ -979,6 +979,33 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
                 }
             }
 
+            /* [R1026 K 2026-10-12] Raw-axis trace, ~every 2 s of polling: the
+             * device's six axes BEFORE the action mapping and the packed word
+             * AFTER it. If a race's throttle is dead this line says whether the
+             * device reports it (raw Z/RZ move, word's Y field does not = mapping
+             * fault) or not (raw axes frozen = device/handle fault). */
+            {
+                static uint32_t s_js_raw_ctr[TD5_PLAT_MAX_JS_SLOTS];
+                if ((s_js_raw_ctr[slot]++ % 120u) == 0u)
+                    TD5_LOG_I(LOG_TAG,
+                              "joystick raw slot=%d X=%ld Y=%ld Z=%ld RX=%ld RY=%ld RZ=%ld "
+                              "btn0..9=0x%03X -> word=0x%08X ay=%d bound=%d",
+                              slot, (long)js.lX, (long)js.lY, (long)js.lZ,
+                              (long)js.lRx, (long)js.lRy, (long)js.lRz,
+                              (unsigned)(((js.rgbButtons[0] & 0x80) ? 1u : 0u) |
+                                         ((js.rgbButtons[1] & 0x80) ? 2u : 0u) |
+                                         ((js.rgbButtons[2] & 0x80) ? 4u : 0u) |
+                                         ((js.rgbButtons[3] & 0x80) ? 8u : 0u) |
+                                         ((js.rgbButtons[4] & 0x80) ? 16u : 0u) |
+                                         ((js.rgbButtons[5] & 0x80) ? 32u : 0u) |
+                                         ((js.rgbButtons[6] & 0x80) ? 64u : 0u) |
+                                         ((js.rgbButtons[7] & 0x80) ? 128u : 0u) |
+                                         ((js.rgbButtons[8] & 0x80) ? 256u : 0u) |
+                                         ((js.rgbButtons[9] & 0x80) ? 512u : 0u)),
+                              (unsigned)jbits, (int)(((int)ax_y) - TD5_PLAT_JS_AXIS_CENTER),
+                              ab ? 1 : 0);
+            }
+
             /* Pause / Escape always read from the keyboard (GetJS tail). */
             if (s_keyboard[0x19] & 0x80) jbits |= TD5_INPUT_PAUSE;   /* DIK_P   */
             if (s_keyboard[0x01] & 0x80) jbits |= TD5_INPUT_ESCAPE;  /* DIK_ESC */
@@ -1612,13 +1639,19 @@ void td5_plat_input_set_device(int slot, int device_index)
          * layer can identify it for XInput rumble routing. [#1 2026-06-15] */
         s_di_joystick_guid[slot] = s_device_guids[device_index];
 
+        /* [R1026 K 2026-10-12] Keep every HRESULT of the (re)create sequence: a
+         * pad that "steers but cannot accelerate" after a race or two is only
+         * diagnosable if the log says whether THIS race's device object got its
+         * range/deadzone/acquire. Logged once per create (one line per race). */
+        HRESULT hr_fmt = 0, hr_coop = 0, hr_rng = 0, hr_dz = 0, hr_acq = 0;
+
         /* DIJOYSTATE2 format — matches the struct the poll reads. */
-        IDirectInputDevice8_SetDataFormat(s_di_joystick[slot], &c_dfDIJoystick2);
+        hr_fmt = IDirectInputDevice8_SetDataFormat(s_di_joystick[slot], &c_dfDIJoystick2);
 
         /* Exclusive foreground: required for force feedback (td5_plat_ff_init
          * binds this slot's own device); input reads still work in this mode. */
         if (s_hwnd)
-            IDirectInputDevice8_SetCooperativeLevel(s_di_joystick[slot], s_hwnd,
+            hr_coop = IDirectInputDevice8_SetCooperativeLevel(s_di_joystick[slot], s_hwnd,
                 DISCL_EXCLUSIVE | DISCL_FOREGROUND);
 
         /* Absolute axis range [0, 0x1F4]=500 with a 10% deadzone, so the raw
@@ -1632,7 +1665,7 @@ void td5_plat_input_set_device(int slot, int device_index)
             range.diph.dwObj        = 0;
             range.lMin              = 0;
             range.lMax              = 0x1F4;
-            IDirectInputDevice8_SetProperty(s_di_joystick[slot], DIPROP_RANGE, &range.diph);
+            hr_rng = IDirectInputDevice8_SetProperty(s_di_joystick[slot], DIPROP_RANGE, &range.diph);
 
             DIPROPDWORD dz;
             dz.diph.dwSize       = sizeof(DIPROPDWORD);
@@ -1640,10 +1673,15 @@ void td5_plat_input_set_device(int slot, int device_index)
             dz.diph.dwHow        = DIPH_DEVICE;
             dz.diph.dwObj        = 0;
             dz.dwData            = 1000;  /* 10% of [0,10000] */
-            IDirectInputDevice8_SetProperty(s_di_joystick[slot], DIPROP_DEADZONE, &dz.diph);
+            hr_dz = IDirectInputDevice8_SetProperty(s_di_joystick[slot], DIPROP_DEADZONE, &dz.diph);
         }
 
-        IDirectInputDevice8_Acquire(s_di_joystick[slot]);
+        hr_acq = IDirectInputDevice8_Acquire(s_di_joystick[slot]);
+        TD5_LOG_I(LOG_TAG,
+                  "joystick create slot=%d device=%d hr: format=0x%08lX coop=0x%08lX "
+                  "range=0x%08lX deadzone=0x%08lX acquire=0x%08lX",
+                  slot, device_index, (unsigned long)hr_fmt, (unsigned long)hr_coop,
+                  (unsigned long)hr_rng, (unsigned long)hr_dz, (unsigned long)hr_acq);
     }
 
     TD5_LOG_I(LOG_TAG, "Input device selected: slot=%d device=%d name=%s (joystick created)",

@@ -205,6 +205,16 @@ int td5_trackgen_register_geo_places(void);
  * generated slot resets the target to the auto track. */
 void td5_trackgen_set_target_slot(int slot);
 
+/* [ROUND 1026 L] Two frontend-split knobs, both DEFAULT ON, OFF = master:
+ *  - TD5RE_STUDIO_SYNTHETIC: the AUTO TRACK STUDIO (slot 60) always builds the
+ *    procedural world; its LOCATION row is gone and a leftover geo place
+ *    (TD5RE_GEO_PLACE / SELECTED.TXT) can no longer leak into level090.
+ *  - TD5RE_GEO_OWN_SELECTOR: the GEOSPATIAL TRACK GENERATOR is its own entry in
+ *    the track selectors (and its button shows only there), not a button on
+ *    every track. */
+int td5_trackgen_studio_synthetic(void);
+int td5_trackgen_geo_own_selector(void);
+
 /* ------------------------------------------- [MINIMAP STREETS] ------------
  * Read-only walk of the street network td5_tg_network.c built for the auto
  * track, exposed so the in-race minimap can draw the side streets WITHOUT
