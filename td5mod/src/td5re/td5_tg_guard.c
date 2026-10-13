@@ -467,6 +467,12 @@ static void tg_guard_hit_keep(TG_GuardHit *h, int *have_bad, int bad,
     }
 }
 
+/* [ROUND 1029 V] When set, the opaque-quad loop of tg_guard_mesh_scan records each
+ * quad's own verdict here (index = quad, capacity s_guard_qbad_cap), so a caller
+ * can drop the illegal quads of a mesh instead of the whole mesh. NULL = off. */
+static unsigned char *s_guard_qbad;
+static int s_guard_qbad_cap;
+
 /* Scan the mesh at `off` against the carriageway under policy class `cls`.
  * Returns 1 when some part of it is illegal, filling *hit with the worst
  * offending group. When nothing is illegal *hit still carries the worst
@@ -670,6 +676,8 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
             const int qbad = tg_guard_quad_bad(cls, cover, dy_lo, dy_hi);
             tg_guard_hit_keep(&worst, &have_bad, qbad, cover, dy_lo, dy_hi, si0);
             if (qbad) bad = 1;
+            if (qbad && s_guard_qbad && (int)(vi / 4) < s_guard_qbad_cap)
+                s_guard_qbad[vi / 4] = 1;
         }
     }
     if (hit) *hit = worst;
@@ -691,6 +699,91 @@ static int tg_guard_mesh_on_road_cls(const TG_NodeList *nl, int ring,
         if (psi)    *psi = hit.si;
     }
     return bad;
+}
+
+/* [ROUND 1029 V] "tiny triangles of sky show through the ground". La Plata (seed
+ * 2054677019) span 664 sits on a dogleg (span 663 runs along +x, 664 at 45
+ * degrees), so the inside-of-bend quads of span 664's ground skirt lie over span
+ * 663's road in the guard's frame, and the guard rejected the WHOLE skirt
+ * (race.log "rejected skirt mesh at span 663 (coverage 1500, 32 verts, marked
+ * @664)"): a 31.9 m2 strip of clear colour between the road edge and the cross
+ * street at 664. MEASURED: only ONE quad was flagged, the first quad beside span
+ * 664's own road on the outside, and in plan it touches no road at all. Span 663
+ * is a SIDESTEP (its nodes run along +x, both cross-sections stand at 45 degrees),
+ * so in node 663's frame the far corner of 663's own road quad -- the corner this
+ * skirt quad starts from -- reads 1534 lateral, i.e. "on the carriageway". The
+ * per-vertex frame test cannot see a sheared span.
+ * So a flagged skirt quad is CONFIRMED against the span polygons themselves (each
+ * span's two node cross-sections at the guard's own carriageway reach, the
+ * separating-axis depth of tg_pair_sat_xz, the UNDER height rule): a confirmed
+ * quad is collapsed onto its first vertex (zero area, the renderer skips it, the
+ * byte layout is untouched), an unconfirmed one is a frame artefact and stays. A
+ * mesh whose every quad is confirmed is still dropped whole. Geo places only;
+ * TD5RE_GEO_GUARD_SKIRT_TRIM=0 restores the whole-mesh drop. */
+#define TG_GUARD_TRIM_MAXQ 64
+
+static double tg_pair_sat_xz(const double *A, const double *B);
+static int tg_pair_quad(const unsigned char *b, size_t off, size_t mlen, int q,
+                        double *xz, double *y0, double *y1);
+
+static int tg_guard_skirt_quad_confirmed(const TG_NodeList *nl, int win_lo, int win_hi,
+                                         const double *qxz, double qy_hi)
+{
+    const double lim = td5_env_flag_on("TD5RE_GEO_SKIRT_GUARD_TOL") ? 200.0 : TD5_TG_GUARD_FLUSH;
+    int s;
+    for (s = win_lo; s < win_hi && s + 1 < nl->count; s++) {
+        const TG_Node *a = &nl->v[s], *c = &nl->v[s + 1];
+        const double rl = tg_carriageway_reach(nl, s, 1.0), rr = tg_carriageway_reach(nl, s, -1.0);
+        const double ry = (a->y > c->y) ? a->y : c->y;
+        double P[8];
+        if (qy_hi - ry <= lim) continue;                 /* at or under the road: the skirt's job */
+        /* lateral L sits at (x + tz L, z - tx L), the frame tg_guard_mesh_scan measures in */
+        P[0] = a->x + a->tz * rl; P[1] = a->z - a->tx * rl;
+        P[2] = a->x - a->tz * rr; P[3] = a->z + a->tx * rr;
+        P[4] = c->x - c->tz * rr; P[5] = c->z + c->tx * rr;
+        P[6] = c->x + c->tz * rl; P[7] = c->z - c->tx * rl;
+        if (tg_pair_sat_xz(qxz, P) > TD5_TG_GUARD_PEN) return 1;
+    }
+    return 0;
+}
+
+static int tg_guard_skirt_trim(const TG_NodeList *nl, int ring, unsigned char *b,
+                               size_t off, size_t mlen, int win_lo, int win_hi, int cls,
+                               int *pfalse)
+{
+    static unsigned char qbad[TG_GUARD_TRIM_MAXQ];
+    const unsigned int vtxcnt = tg_rd_u32(b + off + 0x08);
+    const unsigned int vtxoff = tg_rd_u32(b + off + 0x30);
+    const int nq = (int)(vtxcnt / 4);
+    TG_GuardHit hit;
+    int q, nbad = 0, nconf = 0, k;
+
+    *pfalse = 0;
+    if (!td5_geo_loaded() || !td5_env_flag_on("TD5RE_GEO_GUARD_SKIRT_TRIM")) return -1;
+    if (nq <= 1 || nq > TG_GUARD_TRIM_MAXQ || (vtxcnt & 3u)) return -1;
+    if ((size_t)vtxoff + (size_t)vtxcnt * TD5_TG_VTX_SIZE > mlen) return -1;
+    memset(qbad, 0, sizeof(qbad));
+    s_guard_qbad = qbad; s_guard_qbad_cap = nq;
+    (void)tg_guard_mesh_scan(nl, ring, b, off, mlen, win_lo, win_hi, cls, &hit);
+    s_guard_qbad = NULL; s_guard_qbad_cap = 0;
+    for (q = 0; q < nq; q++) {
+        double xz[8], y0, y1;
+        if (!qbad[q]) continue;
+        nbad++;
+        if (!tg_pair_quad(b, off, mlen, q, xz, &y0, &y1)) return -1;
+        if (tg_guard_skirt_quad_confirmed(nl, win_lo, win_hi, xz, y1)) nconf++;
+        else qbad[q] = 0;                                /* a frame artefact: keep it */
+    }
+    if (nbad == 0) return -1;
+    if (nconf == nq) return -1;                          /* all of it: whole drop as before */
+    for (q = 0; q < nq; q++) {
+        unsigned char *v0 = b + off + vtxoff + (size_t)(q * 4) * TD5_TG_VTX_SIZE;
+        if (!qbad[q]) continue;
+        for (k = 1; k < 4; k++)
+            memcpy(v0 + (size_t)k * TD5_TG_VTX_SIZE, v0, 12);   /* x y z onto vertex 0 */
+    }
+    *pfalse = nbad - nconf;
+    return nconf;
 }
 
 int    s_r9_wet_total;
@@ -1631,6 +1724,17 @@ int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                                                 &depth, &si));
             s_tg_zone_us[TG_ZONE_GUARD_ROAD] += td5_plat_time_us() - s_tg_guard_t0;
             s_tg_zone_n[TG_ZONE_GUARD_ROAD]++;
+            if (onroad && kind == TG_GK_SKIRT) {    /* [ROUND 1029 V] confirm per quad, drop those only */
+                int nfalse = 0;
+                const int nc = tg_guard_skirt_trim(nl, ring, b, off, mlen, win_lo, win_hi, cls, &nfalse);
+                if (nc >= 0) {
+                    TD5_LOG_I(LOG_TAG, "on-road guard: [R1029 V] skirt marked @%d (flagged at span %d, "
+                              "coverage %.0f): %d quad(s) confirmed on a span polygon and dropped, %d "
+                              "flagged by the vertex frame only and kept, the rest of the slab kept",
+                              mark_si, si, depth, nc, nfalse);
+                    onroad = 0;
+                }
+            }
             if (onroad) {
                 keep = 0;
                 rejected++;

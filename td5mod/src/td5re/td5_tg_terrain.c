@@ -1703,6 +1703,7 @@ static long   s_r22_trim_relax, s_r22_trim_tight;
  * count under the OLD rule (no swap), so a lone post-fix number can't read as a
  * false green. Reported by tg_r23_slope_report, unconditional. */
 static long   s_r23_slope_seen, s_r23_slope_grass;
+static long   s_r1029v_slant_fill;   /* [ROUND 1029 V] fork-tail slant fills laid (tg_emit_ground) */
 
 /* [ROUND 1014 E] Capture mode of tg_emit_far_band and tg_emit_ground: when set,
  * the apron quads / the skirt slab quads are appended here instead of being
@@ -1858,6 +1859,11 @@ void tg_r23_slope_report(void)
         s_r23_slope_seen, s_r23_slope_grass,
         td5_env_flag_on("TD5RE_R23_SLOPE_GROUND") ? "on" : "off");
     s_r23_slope_seen = s_r23_slope_grass = 0;
+    if (td5_geo_loaded())
+        TD5_LOG_I(LOG_TAG, "trackgen: [R1029 V] %ld fork-tail slant fill(s) laid under a slab whose far "
+                  "edge is the rejoin's pulled-out profile (knob TD5RE_GEO_FORK_SLANT_FILL=%s)",
+                  s_r1029v_slant_fill, td5_env_flag_on("TD5RE_GEO_FORK_SLANT_FILL") ? "on" : "off");
+    s_r1029v_slant_fill = 0;
 }
 
 int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
@@ -2047,6 +2053,45 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                 px[n]=bfx+gx*b0; py[n]=bfy-dyf; pz[n]=bfz+gz*b0; uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
                 px[n]=bfx;        py[n]=bfy-dyf; pz[n]=bfz;        uu[n]=0.0;                         vv[n]=(double)si+1.0; n++;
             }
+        }
+        /* [ROUND 1029 V] "tiny triangles of sky show through the ground", La Plata (seed
+         * 2054677019) spans 661 and 834: the LAST span of a fork window, beside the rejoin.
+         * This slab's far edge is span si+1's profile (R8 item 11, so the seam between slabs
+         * closes), and at the rejoin that profile is pulled far out (d0 4505 beside the plaza
+         * fork's rejoin wedge at 662, 3362 beside the avenue's far carriageway at 835) while
+         * this span's own clearance d0 is a few hundred units. The inner edge therefore runs
+         * diagonally across the span, and the triangle between it and the corridor's kerb is
+         * covered by nothing: 13.1 m2 at 661, 14.0 m2 at 834 (with the cross street there).
+         * The wedge above fills that strip everywhere else but stands down on fork main spans
+         * (the gore lies under the road edge there). Fill it here from the corridor's kerb
+         * (or THIS span's clearance d0, which clears the corridor at both ends of the span:
+         * tg_carriageway_reach takes the wider end) out to the slab's inner edge: never
+         * under the corridor or the gore.
+         * Geo tracks only; TD5RE_GEO_FORK_SLANT_FILL=0 restores the hole. */
+        if (td5_geo_loaded() && pa.n > 0 && pb.n > 0 &&
+            n + 4 <= (TD5_TG_GROUND_MAXPT - 1) * 8 + 8 &&
+            tg_fork_of_main(si) >= 0 &&
+            pb.d[0] > pa.d[0] + 50.0 &&
+            td5_env_flag_on("TD5RE_GEO_FORK_SLANT_FILL")) {
+            const double a0 = pa.d[0], b0 = pb.d[0];
+            const double dyn = pa.dy[0], dyf = pb.dy[0];
+            /* Beside a REAL fork the fill starts on the corridor's own kerb at each row (the
+             * corridor mesh's helpers), so the clearance margin between the kerb and d0 is
+             * covered too (at 834 a 200-unit strip that the cross street leaves open). A free
+             * or loop corridor has no per-row answer and starts at d0. */
+            const double sgn = is_left ? 1.0 : -1.0;
+            const double k0 = tg_fork_real_row_shift(nl, si, sgn, 0);
+            const double k1 = tg_fork_real_row_shift(nl, si, sgn, 1);
+            const double c0 = (k0 >= 0.0 && k0 < a0) ? k0 : a0;
+            const double c1 = (k1 >= 0.0 && k1 < a0) ? k1 : a0;
+            const double a1 = (a0 > c0 + 1.0) ? a0 : c0 + 1.0;
+            /* near end: from the kerb to the slab's own inner edge, at least 1 unit wide (a
+             * quad with two coincident corners is degenerate and the renderer drops it) */
+            px[n]=bnx+ox*c0;         py[n]=bny-dyn; pz[n]=bnz+oz*c0;         uu[n]=c0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
+            px[n]=bnx+ox*a1;         py[n]=bny-dyn; pz[n]=bnz+oz*a1;         uu[n]=a1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
+            px[n]=bfx+gx*b0;         py[n]=bfy-dyf; pz[n]=bfz+gz*b0;         uu[n]=b0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
+            px[n]=bfx+gx*c1;         py[n]=bfy-dyf; pz[n]=bfz+gz*c1;         uu[n]=c1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
+            if (!s_farcap) s_r1029v_slant_fill++;   /* the drawn-ground capture asks too */
         }
         side_n[s] += n;
     }

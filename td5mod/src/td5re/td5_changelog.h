@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (sky showing through the ground)" },
+    { CL_ITEM,    "La Plata: no more patches of sky through the ground" },
+    { CL_ITEM,    "  where a fork rejoins the road (spans 661 and 834)," },
+    { CL_ITEM,    "  beside the side street at span 664, and in the thin" },
+    { CL_ITEM,    "  gap where a side street met the fork at span 805." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (AI cars in a convoy)" },
     { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
     { CL_ITEM,    "  front. They used to judge the gap by counting track" },

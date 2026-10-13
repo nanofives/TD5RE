@@ -1076,6 +1076,36 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
     return reach;
 }
 
+/* [ROUND 1029 V] The outer edge of a REAL fork's corridor at ONE row of main span si
+ * (e = 0 the near node si, e = 1 the far node si+1) on `side`, as a distance outward
+ * from that node's own road edge, from the SAME helpers the corridor mesh is laid
+ * with (tg_fork_br_shift / tg_fork_br_wscale at step k+e, node width). -1 when si is
+ * not inside a real classic fork's window on that side. tg_carriageway_reach above
+ * answers for the WHOLE span (the wider end), which is right for clearance but puts
+ * a street mouth one corridor step out of place on the narrower row. */
+double tg_fork_real_row_shift(const TG_NodeList *nl, int si, double side, int e)
+{
+    int i;
+    if (!tg_branches_enabled()) return -1.0;
+    if (!nl || si < 0 || si + 1 >= nl->count || e < 0 || e > 1) return -1.0;
+    for (i = 0; i < s_fork_count; i++) {
+        const int F = s_forks[i].F, L = s_forks[i].len;
+        int k, kk;
+        double w, out;
+        if (s_forks[i].real <= 0 || s_forks[i].loopc > 0 || s_forks[i].freec > 0) continue;
+        if (si < F - 1 || si > F + L + 1) continue;
+        if (side * (double)s_forks[i].side < 0.0) continue;
+        k = si - F - 1;
+        if (k < 0) k = 0;
+        if (k > L) k = L;
+        kk = (k + e > L) ? L : k + e;
+        w = nl->v[si + e].width;
+        out = fabs(tg_fork_br_shift(i, kk, w)) + w * tg_fork_br_wscale(i, kk) * 0.5;
+        return (out > w * 0.5) ? out - w * 0.5 : 0.0;
+    }
+    return -1.0;
+}
+
 /* Is `lateral` on (or within `margin` of) any carriageway at span si? */
 int tg_on_carriageway(const TG_NodeList *nl, int si, double lateral,
                              double margin)

@@ -5157,10 +5157,35 @@ void tg_city_edge_frame(const TG_NodeList *nl, int si, double sg,
      * moving the frame moves them together. 0 everywhere else (no mouth, no
      * avenue, any synthetic build), so no other span sees a different frame. */
     {
-        const double s0 = tg_net_mouth_shift(si, sg > 0.0);
+        double s0 = tg_net_mouth_shift(si, sg > 0.0);
         if (s0 > 0.0) {
             const double s1n = tg_net_mouth_shift(si + 1, sg > 0.0);
-            const double s1  = (s1n > 0.0) ? s1n : s0;
+            double s1  = (s1n > 0.0) ? s1n : s0;
+            /* [ROUND 1029 V] "tiny triangles of sky", La Plata (seed 2054677019): beside a
+             * REAL fork the shift is the corridor's outer kerb, and the network stores it per
+             * SPAN from tg_carriageway_reach, which takes the wider end. So while the corridor
+             * widens (180 units a step on Avenida 13's fork, spans 804..806) the street's near
+             * row stood one corridor step out: a 4.0 m2 sliver of sky between the corridor and
+             * the street. And the far row took span si+1's shift, which at the rejoin (span
+             * 835) is the avenue's far kerb 3000 further out, so span 834's street ran
+             * diagonally away from the corridor: a 14.0 m2 triangle. Each row now sits on the
+             * corridor's kerb at THAT row, from the corridor mesh's own helpers, wherever this
+             * span's shift comes from a real fork (the avenue's own reach is not wider). Every
+             * emitter reading this frame moves with it. TD5RE_GEO_MOUTH_ROW_SHIFT=0 = old rows. */
+            if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_MOUTH_ROW_SHIFT") &&
+                !(tg_geo_avenue_reach(nl, si, sg) - tg_road_half_width(nl, si) > 1.0)) {
+                const double r0 = tg_fork_real_row_shift(nl, si, sg, 0);
+                const double r1 = tg_fork_real_row_shift(nl, si, sg, 1);
+                if (r0 >= 0.0 && r1 >= 0.0) {
+                    s0 = r0;
+                    /* the far row too, unless the next span's shift is the avenue's own far kerb
+                     * (the rejoin): a street square to the corridor there runs over the start of
+                     * the avenue's carriageway and the guard drops it whole (measured at 834);
+                     * that row keeps the old shift and the slab's slant fill closes under it */
+                    if (!(tg_geo_avenue_reach(nl, si + 1, sg) - tg_road_half_width(nl, si + 1) > 1.0))
+                        s1 = r1;
+                }
+            }
             out[0] += out[6] * s0;  out[2] += out[7] * s0;
             out[3] += out[8] * s1;  out[5] += out[9] * s1;
         }
