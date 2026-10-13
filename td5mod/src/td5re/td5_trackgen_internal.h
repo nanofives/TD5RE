@@ -1535,6 +1535,11 @@ int  tg_network_built(void);
 int  tg_net_geo(void);                 /* [1014 B] streets came from the real map */
 long tg_net_apron_edge_count(void);    /* [R1023 A item 4] network edges that asked the drawn ground for their height */
 long tg_net_apron_lift_count(void);    /* ... and the vertices they lifted */
+/* [ROUND 1029 U] network footways laid on the ground: pieces, cross-fall clamps, closing faces. td5_tg_network.c */
+void tg_net_fw_follow_counts(long *pieces, long *clamped, long *faces);
+/* [ROUND 1029 U] the network's laid road + footway surfaces as quads (8 doubles each) reaching the box; for the
+ * park lawn clip. td5_tg_network.c */
+int  tg_net_footprint_quads(double bx0, double bz0, double bx1, double bz1, double *q, int maxq);
 void   tg_geo_lane_profile_reset(void);
 int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
 double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
@@ -6393,6 +6398,10 @@ int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
  * page. td5_tg_streets.c. */
 int  tg_geo_skirt_side_park(const TG_NodeList *nl, int si, int is_left);
 extern long s_geop_skirt_park_n;   /* skirt slabs given the lawn page (terrain.c) */
+extern long s_geop_skirt_quad_n;   /* [ROUND 1029 U] single skirt quads given it per quad (terrain.c) */
+/* [ROUND 1029 U item C2] Does the skirt quad centred at (x,z) beside span si lie inside a mapped park / plaza?
+ * td5_tg_streets.c. 0 on a synthetic build. */
+int  tg_geo_skirt_quad_park(const TG_NodeList *nl, int si, double x, double z);
 /* [ROUND 1012 D2] Would a footprint of half-extent `half` centred at (x,z)
  * stand in REAL open space -- a mapped plaza/park polygon, or inside a named
  * junction=circular ring like Plaza Miguel de Azcuenaga, which has no polygon

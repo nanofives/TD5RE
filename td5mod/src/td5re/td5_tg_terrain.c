@@ -1709,6 +1709,7 @@ static long   s_r23_slope_seen, s_r23_slope_grass;
  * written (see TG_Surf). */
 static TG_Surf *s_farcap;
 long s_geop_skirt_park_n;   /* [ROUND 1014 E] skirt slabs given the lawn page */
+long s_geop_skirt_quad_n;   /* [ROUND 1029 U] ... single skirt quads given it by the per-quad park test */
 
 static void tg_farcap_push(const double *px, const double *py,
                            const double *pz, int nverts)
@@ -2062,6 +2063,39 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     {
         const int pk0 = side_n[0] > 0 && tg_geo_skirt_side_park(nl, si, 1);
         const int pk1 = side_n[1] > 0 && tg_geo_skirt_side_park(nl, si, 0);
+        /* [ROUND 1029 U item C2] ... and, per QUAD, the slabs of a side that failed the whole-side test but whose
+         * centre lies inside a mapped park (tg_geo_skirt_quad_park). The side test probes the verge at both span
+         * ends; a skirt reaches 24000 units out, so its outer slabs can lie inside a park the verge does not touch,
+         * and they kept the GROUND tile page there: the speckled ground beside the lawns of e83/e84 (span 334's
+         * outer slabs inside area 102, between lawn-paged skirts of spans 335+). One command per run of equal page,
+         * quads in their original order. TD5RE_GEO_PARK_SKIRT_QUAD=0 restores the side-only rule. */
+        if (!(pk0 && pk1) && n > 0 && n / 4 <= ((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4) {
+            const int lawn = TD5_TG_PAGE_R3_BLOCK + 0;
+            int qpage[((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4];
+            int nq_all = n / 4, q, extra = 0;
+            for (q = 0; q < nq_all; q++) {
+                const int sd = (q * 4 < side_n[0]) ? 0 : 1;
+                qpage[q] = (sd == 0 ? pk0 : pk1) ? lawn : seg_page;
+                if (qpage[q] != lawn) {
+                    const double cx = 0.25 * (px[q * 4] + px[q * 4 + 1] + px[q * 4 + 2] + px[q * 4 + 3]);
+                    const double cz = 0.25 * (pz[q * 4] + pz[q * 4 + 1] + pz[q * 4 + 2] + pz[q * 4 + 3]);
+                    if (tg_geo_skirt_quad_park(nl, si, cx, cz)) { qpage[q] = lawn; extra++; }
+                }
+            }
+            if (extra > 0) {
+                int pages_r[((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4], nq_r[((TD5_TG_GROUND_MAXPT - 1) * 8 + 8) / 4];
+                int nr = 0;
+                for (q = 0; q < nq_all; q++) {
+                    if (nr > 0 && pages_r[nr - 1] == qpage[q]) nq_r[nr - 1]++;
+                    else { pages_r[nr] = qpage[q]; nq_r[nr] = 1; nr++; }
+                }
+                tg_acct(TG_ACCT_TERRAIN, si);
+                if (tg_r14_up_ground_reach(si) > 0.0) tg_acct(TG_ACCT_R14_UP, si);
+                s_geop_skirt_park_n++;
+                s_geop_skirt_quad_n += extra;
+                return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, pages_r, nq_r, nr);
+            }
+        }
         if (pk0 || pk1) {
             const int lawn = TD5_TG_PAGE_R3_BLOCK + 0;
             if (pk0 && pk1) {
