@@ -5196,6 +5196,7 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
      * padded 8-corner box keeps being written below for the suspension / AI lane
      * / separation consumers, so they stay byte-faithful. */
     mesh_box_store(slot, (int32_t)(int)max_x, (int32_t)(int)max_z);
+    mesh_height_store(slot, (int32_t)(int)max_y);   /* [ROUND 1027 N] vertical reach of the racer sphere gate */
 
     /* [SILHOUETTE HITBOX] Build the precise convex-hull silhouette for V2V.
      * hull_build_store lives in td5_physics_collision.c; declared here (not in

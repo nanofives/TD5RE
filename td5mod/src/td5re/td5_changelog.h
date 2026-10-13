@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (airborne contacts between racers)" },
+    { CL_ITEM,    "Racers: a car in the air, or a scripted one, no longer" },
+    { CL_ITEM,    "  bumps another racer from half a car-width away. Racer-vs-" },
+    { CL_ITEM,    "  racer contact now needs the two cars to really touch," },
+    { CL_ITEM,    "  as traffic already does. A car landing on another one" },
+    { CL_ITEM,    "  still crashes into it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 12 (cars that would not accelerate)" },
     { CL_ITEM,    "A police pull-over can no longer leave your car unable" },
     { CL_ITEM,    "  to accelerate. If a race ended or a cop vanished during" },
