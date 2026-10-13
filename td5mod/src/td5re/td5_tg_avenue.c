@@ -172,9 +172,65 @@ int tg_geo_avenue_before_cap(const TG_NodeList *nl, int si, double x, double z)
     return (x - nl->v[si].x) * nl->v[si].tx + (z - nl->v[si].z) * nl->v[si].tz < 0.0;
 }
 
+/* [ROUND 1029 T] "the corner at spans 77-79 is rough": a hairline of bare ground along the avenue's start edge (node 81),
+ * 30 units wide where Calle 39's span-78 kerb ray meets it and 66 at span 77's.
+ *
+ * ROOT CAUSE (measured on level091 seed 2054677019, _r1029t/capline.py): the 1027 O cap only asks about points NEAREST the
+ * avenue's FIRST node. On this bend the road is 6000 wide and the street's rays cross the cap line 4000-5000 units out to the
+ * left, where the nearest node is already 82: those points were judged with node 82's full avenue reach although they lie
+ * before node 81's cross-section, so the ray clip (tg_xst_ray_reach) cut the arm at the 81/82 bisector instead of at the
+ * carriageway's real start edge. The same early step put two city meshes "on the carriageway" for the guard (coverage 750,
+ * rejected at span 82, marked @82 and @83).
+ *
+ * RULE. A point nearest ANY of the first TG_AV_CAP_RUN nodes of an avenue run is before the carriageway when it is behind the
+ * run's FIRST node on that node's tangent, and is then judged with the reach of the node before the run. Only ever LOWERS the
+ * reach. TD5RE_GEO_AVENUE_CAP_RUN=0 restores the first-node-only cap. Returns the first node of the run, or -1. */
+#define TG_AV_CAP_RUN 4
+static int tg_geo_avenue_cap_first(const TG_NodeList *nl, int si, double x, double z)
+{
+    int f = si, k;
+    if (!nl || si < 1 || si >= nl->count) return -1;
+    if (!td5_env_flag_on("TD5RE_GEO_AVENUE_CAP") || !td5_env_flag_on("TD5RE_GEO_AVENUE_CAP_RUN")) return -1;
+    if (tg_geo_avenue_n() < 1) return -1;
+    if (!td5_geo_avenue_at(si, NULL, NULL, NULL)) return -1;
+    for (k = 0; k < TG_AV_CAP_RUN && f >= 1 && td5_geo_avenue_at(f - 1, NULL, NULL, NULL); k++) f--;
+    if (f < 1 || td5_geo_avenue_at(f - 1, NULL, NULL, NULL)) return -1;   /* deep inside the run: no start edge near */
+    if ((x - nl->v[f].x) * nl->v[f].tx + (z - nl->v[f].z) * nl->v[f].tz >= 0.0) return -1;
+    return f;
+}
+
+/* [ROUND 1029 T item 2] Signed along-road distance of (x,z) from the START EDGE (first node's cross-section) of the avenue run
+ * node si belongs to, when si is within TG_AV_CAP_RUN of that start; *ok = 0 otherwise. Negative = before the carriageway. */
+double tg_geo_avenue_start_along(const TG_NodeList *nl, int si, double x, double z, int *ok)
+{
+    int f = si, k;
+    double tx, tz, m, off = 0.0, lat;
+    *ok = 0;
+    if (!nl || si < 1 || si >= nl->count) return 0.0;
+    if (tg_geo_avenue_n() < 1 || !td5_geo_avenue_at(si, NULL, NULL, NULL)) return 0.0;
+    for (k = 0; k < TG_AV_CAP_RUN && f >= 1 && td5_geo_avenue_at(f - 1, NULL, NULL, NULL); k++) f--;
+    if (f < 1 || td5_geo_avenue_at(f - 1, NULL, NULL, NULL)) return 0.0;
+    if (!td5_geo_avenue_at(f, &off, NULL, NULL)) return 0.0;
+    tx = nl->v[f].tx; tz = nl->v[f].tz; m = sqrt(tx * tx + tz * tz);
+    if (m < 1e-9) return 0.0;
+    tx /= m; tz /= m;
+    lat = (x - nl->v[f].x) * tz - (z - nl->v[f].z) * tx;
+    if (lat * off <= 0.0) return 0.0;                   /* the other kerb: no avenue starts there */
+    *ok = 1;
+    return (x - nl->v[f].x) * tx + (z - nl->v[f].z) * tz;
+}
+
 double tg_carriageway_reach_at(const TG_NodeList *nl, int si, double side, double x, double z)
 {
     double r = tg_carriageway_reach(nl, si, side);
+    if (td5_env_flag_on("TD5RE_GEO_AVENUE_CAP_RUN")) {
+        const int f = tg_geo_avenue_cap_first(nl, si, x, z);
+        if (f >= 1) {
+            const double p = tg_carriageway_reach(nl, f - 1, side);
+            if (p < r) r = p;
+        }
+        return r;
+    }
     if (tg_geo_avenue_before_cap(nl, si, x, z)) {
         const double p = tg_carriageway_reach(nl, si - 1, side);
         if (p < r) r = p;
@@ -590,6 +646,7 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
 static long s_av_farwalk;
 static long s_av_pave_clipped;    /* [1021 B] main-road slabs cut along a street's edge */
 static long s_av_slab_tri_drop;   /* [1028 P A] triangular half-plane remnants refused */
+static long s_av_slab_tri_fill;   /* [1029 T 1] ...paved flush instead, at an avenue's start */
 static long s_av_farwalk_blend;   /* [1021 B] spans whose footway end was joined/tapered instead of capped */
 
 /* [ROUND 1014 A] The footway's OUTER-edge lateral at both ends of span s and its width,
@@ -1177,6 +1234,56 @@ static double tg_av_poly_area(const TG_AvP *p, int n)
     return a < 0.0 ? -0.5 * a : 0.5 * a;
 }
 
+/* [ROUND 1029 T item 1] A triangular slab remnant at an avenue's start, laid as FLAT asphalt on the road page, no walls: three
+ * quads round the centroid (corner, edge midpoint, centroid, edge midpoint), so no vertex is doubled. Faces up the way the
+ * street arms do (negative x/z shoelace). U stays inside one lane (no lane line), V runs along the span like the road's.
+ * 1 = written, 0 = too small to bother, -1 = out of memory. */
+static int tg_av_emit_tri_fill(const TG_NodeList *nl, int si, const TG_AvP *tri, const double *inx, const double *inz,
+                               TG_Buf *blk, size_t *moff, int *nmesh)
+{
+    const double lift = 0.5 * (double)TD5_TG_VERGE_LIFT;
+    double px[12], py[12], pz[12], uu[12], vv[12];
+    double ix = inx[1] - inx[0], iz = inz[1] - inz[0], il = sqrt(ix * ix + iz * iz), dmax = 1.0;
+    TG_AvP g, m[3];
+    int seg_page[1], seg_nq[1], k, c, n = 0;
+    if (il < 1.0 || tg_av_poly_area(tri, 3) < 1000.0) return 0;
+    ix /= il; iz /= il;
+    g.x = (tri[0].x + tri[1].x + tri[2].x) / 3.0;
+    g.y = (tri[0].y + tri[1].y + tri[2].y) / 3.0;
+    g.z = (tri[0].z + tri[1].z + tri[2].z) / 3.0;
+    for (k = 0; k < 3; k++) {
+        const TG_AvP *a = &tri[k], *b = &tri[(k + 1) % 3];
+        const double d = fabs((a->x - inx[0]) * iz - (a->z - inz[0]) * ix);
+        m[k].x = 0.5 * (a->x + b->x); m[k].y = 0.5 * (a->y + b->y); m[k].z = 0.5 * (a->z + b->z);
+        if (d > dmax) dmax = d;
+    }
+    for (k = 0; k < 3; k++) {
+        /* corner k, the midpoint of the edge leaving it, the centroid, the midpoint of the edge arriving at it */
+        const TG_AvP *q[4];
+        double sh = 0.0;
+        q[0] = &tri[k]; q[1] = &m[k]; q[2] = &g; q[3] = &m[(k + 2) % 3];
+        for (c = 0; c < 4; c++) {
+            const TG_AvP *a = q[c], *b = q[(c + 1) & 3];
+            sh += a->x * b->z - b->x * a->z;
+        }
+        for (c = 0; c < 4; c++) {
+            const TG_AvP *p = q[(sh > 0.0) ? 3 - c : c];
+            const double lat = fabs((p->x - inx[0]) * iz - (p->z - inz[0]) * ix);
+            const double al = ((p->x - inx[0]) * ix + (p->z - inz[0]) * iz) / il;
+            px[n] = p->x; py[n] = p->y + lift; pz[n] = p->z;
+            uu[n] = 0.2 + 0.6 * lat / (dmax > (double)TD5_TG_LANE_WIDTH ? dmax : (double)TD5_TG_LANE_WIDTH);
+            vv[n] = (double)si + al;
+            n++;
+        }
+    }
+    seg_page[0] = tg_road_page(si); seg_nq[0] = 3;
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 1)) return -1;
+    tg_guard_mark(moff[*nmesh - 1], blk->len, TG_GK_BRANCHROAD, si);
+    (void)nl;
+    return 1;
+}
+
 /* 0 = not handled / nothing to clip (caller falls back), 3 = it clipped and wrote the slab, -1 = out of memory,
  * -2 = nothing left of it */
 static int tg_av_slab_halfplane(const TG_NodeList *nl, int si, double sg, double e0, double e1,
@@ -1265,6 +1372,21 @@ static int tg_av_slab_halfplane(const TG_NodeList *nl, int si, double sg, double
          * round). So refuse it: -2 means "nothing left of it" and the caller emits nothing.
          * TD5RE_GEO_SLAB_TRI_DROP=0 restores the doubled-vertex triangle. */
         if ((cnt == 1 || ni == 1) && td5_env_flag_on("TD5RE_GEO_SLAB_TRI_DROP")) {
+            /* [ROUND 1029 T item 1] ...but at an AVENUE'S START refusing it leaves a HOLE. At La Plata span 80
+             * the remnant is the whole corner between Calle 39's far kerb ray, the main road's kerb and the
+             * start edge of the avenue's far carriageway (node 81): three asphalt edges. With nothing laid
+             * there the ground skirt shows through 70 units below the road, a 1.16 m2 light-grey triangle
+             * with a stepped edge: the "raised grey wedge" of the frame (top-down _r1029t/z_s80top.png).
+             * Pave it flush instead, so the street runs into the avenue. TD5RE_GEO_SLAB_TRI_FILL=0 restores
+             * the hole. */
+            double aoff = 0.0;
+            if (n == 3 && td5_env_flag_on("TD5RE_GEO_SLAB_TRI_FILL") &&
+                td5_geo_avenue_at(si + 1, &aoff, NULL, NULL) && !td5_geo_avenue_at(si, NULL, NULL, NULL) &&
+                aoff * sg > 0.0) {
+                const int r = tg_av_emit_tri_fill(nl, si, poly, inx, inz, blk, moff, nmesh);
+                if (r < 0) return -1;
+                if (r > 0) { s_av_slab_tri_fill++; return 3; }
+            }
             s_av_slab_tri_drop++;
             return -2;
         }
@@ -1358,13 +1480,15 @@ static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
                   "far-side footway on %ld span(s) CUMULATIVE over the track "
                   "(%ld joined/tapered instead of capped, %ld of them along a plaza fork's corridor [R1023 A item 10, "
                   "TD5RE_GEO_PLAZA_FARWALK=%s]); main slabs cut along a street %ld, "
-                  "triangular remnants refused %ld [R1028 P item A, TD5RE_GEO_SLAB_TRI_DROP=%s]",
+                  "triangular remnants refused %ld [R1028 P item A, TD5RE_GEO_SLAB_TRI_DROP=%s], "
+                  "paved flush at an avenue start %ld [R1029 T item 1, TD5RE_GEO_SLAB_TRI_FILL=%s]",
                   name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
                   s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open,
                   s_av_farwalk, s_av_farwalk_blend, s_av_plazawalk,
                   td5_env_flag_on("TD5RE_GEO_PLAZA_FARWALK") ? "on" : "off",
                   s_av_pave_clipped, s_av_slab_tri_drop,
-                  td5_env_flag_on("TD5RE_GEO_SLAB_TRI_DROP") ? "on" : "off");
+                  td5_env_flag_on("TD5RE_GEO_SLAB_TRI_DROP") ? "on" : "off",
+                  s_av_slab_tri_fill, td5_env_flag_on("TD5RE_GEO_SLAB_TRI_FILL") ? "on" : "off");
         s_av_n = 0;        /* the next avenue starts its own accumulation */
         s_av_open = 0;
         break;
