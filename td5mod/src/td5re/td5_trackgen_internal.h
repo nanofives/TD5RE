@@ -4269,6 +4269,7 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
 int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of an avenue's first row */
 int    tg_geo_avenue_before_cap(const TG_NodeList *nl, int si, double x, double z);   /* [1027 O] point is before the avenue's first carriageway section */
 double tg_carriageway_reach_at(const TG_NodeList *nl, int si, double side, double x, double z);   /* [1027 O] tg_carriageway_reach, cap-aware */
+double tg_geo_avenue_start_along(const TG_NodeList *nl, int si, double x, double z, int *ok);   /* [1029 T] signed distance past an avenue run's start edge */
 /* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
  * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
  * slab must not be laid on top of it. */

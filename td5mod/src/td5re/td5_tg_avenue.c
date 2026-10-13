@@ -199,6 +199,27 @@ static int tg_geo_avenue_cap_first(const TG_NodeList *nl, int si, double x, doub
     return f;
 }
 
+/* [ROUND 1029 T item 2] Signed along-road distance of (x,z) from the START EDGE (first node's cross-section) of the avenue run
+ * node si belongs to, when si is within TG_AV_CAP_RUN of that start; *ok = 0 otherwise. Negative = before the carriageway. */
+double tg_geo_avenue_start_along(const TG_NodeList *nl, int si, double x, double z, int *ok)
+{
+    int f = si, k;
+    double tx, tz, m, off = 0.0, lat;
+    *ok = 0;
+    if (!nl || si < 1 || si >= nl->count) return 0.0;
+    if (tg_geo_avenue_n() < 1 || !td5_geo_avenue_at(si, NULL, NULL, NULL)) return 0.0;
+    for (k = 0; k < TG_AV_CAP_RUN && f >= 1 && td5_geo_avenue_at(f - 1, NULL, NULL, NULL); k++) f--;
+    if (f < 1 || td5_geo_avenue_at(f - 1, NULL, NULL, NULL)) return 0.0;
+    if (!td5_geo_avenue_at(f, &off, NULL, NULL)) return 0.0;
+    tx = nl->v[f].tx; tz = nl->v[f].tz; m = sqrt(tx * tx + tz * tz);
+    if (m < 1e-9) return 0.0;
+    tx /= m; tz /= m;
+    lat = (x - nl->v[f].x) * tz - (z - nl->v[f].z) * tx;
+    if (lat * off <= 0.0) return 0.0;                   /* the other kerb: no avenue starts there */
+    *ok = 1;
+    return (x - nl->v[f].x) * tx + (z - nl->v[f].z) * tz;
+}
+
 double tg_carriageway_reach_at(const TG_NodeList *nl, int si, double side, double x, double z)
 {
     double r = tg_carriageway_reach(nl, si, side);

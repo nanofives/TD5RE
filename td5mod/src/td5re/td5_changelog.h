@@ -38,7 +38,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "The thin line of bare ground along the avenue's start" },
     { CL_ITEM,    "  edge is gone: the street now runs right up to it." },
     { CL_ITEM,    "The kerb pavement beside spans 82-83 is back (it was" },
-    { CL_ITEM,    "  wrongly judged to be on the road on the bend)." },
+    { CL_ITEM,    "  wrongly judged to be on the road on the bend). Same" },
+    { CL_ITEM,    "  fix fills the see-through gaps at span 663 and the" },
+    { CL_ITEM,    "  bare kerbs at the start of Avenida 13." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 13 (AI cars in a convoy)" },

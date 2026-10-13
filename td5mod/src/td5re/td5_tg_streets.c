@@ -926,20 +926,41 @@ static double tg_xst_ray_reach(const TG_NodeList *nl, int si, double cx, double 
 #define TG_XST_SNAP 450.0
 static long s_xst_snap;
 
+/* Has the point reached what the street runs into: the carriageway, or (`cap`) the start edge of an avenue run, which the far
+ * footway shares beyond the carriageway's outer edge (La Plata node 81: span 77's near ray crosses it 774 units past the far
+ * carriageway, at the footway's own start)? */
+static int tg_xst_snap_hit(const TG_NodeList *nl, int si, double x, double z, int cap)
+{
+    if (tg_xst_carr_depth(nl, si, x, z) > 0.0) return 1;
+    if (cap) {
+        const int lo = (si - TD5_TG_R8_CLAMP_WIN < 0) ? 0 : si - TD5_TG_R8_CLAMP_WIN;
+        const int hi = (si + TD5_TG_R8_CLAMP_WIN > nl->count - 1) ? nl->count - 1 : si + TD5_TG_R8_CLAMP_WIN;
+        double best = 1e300;
+        int i, ni = -1, ok = 0;
+        for (i = lo; i <= hi; i++) {
+            const double dx = x - nl->v[i].x, dz = z - nl->v[i].z, d2 = dx * dx + dz * dz;
+            if (d2 < best) { best = d2; ni = i; }
+        }
+        if (ni >= 0 && tg_geo_avenue_start_along(nl, ni, x, z, &ok) >= 0.0 && ok) return 1;
+    }
+    return 0;
+}
+
 static double tg_xst_ray_reach_snap(const TG_NodeList *nl, int si, double cx, double cz,
                                     double ox, double oz, double reach)
 {
     const double r = tg_xst_ray_reach(nl, si, cx, cz, ox, oz, reach);
     double d, lo, hi;
-    int it;
+    int it, cap;
     if (r < reach || !(reach > 0.0) || !td5_env_flag_on("TD5RE_GEO_STREET_RAY_SNAP")) return r;
-    if (tg_xst_carr_depth(nl, si, cx + ox * reach, cz + oz * reach) > 0.0) return r;    /* ends ON it: not ours to move */
+    if (tg_xst_snap_hit(nl, si, cx + ox * reach, cz + oz * reach, 0)) return r;    /* ends ON it: not ours to move */
+    cap = !tg_xst_snap_hit(nl, si, cx + ox * reach, cz + oz * reach, 1);           /* ...nor past an avenue's start edge */
     for (d = reach + TG_XST_CLIP_STEP * 0.5; d <= reach + TG_XST_SNAP; d += TG_XST_CLIP_STEP * 0.5) {
-        if (tg_xst_carr_depth(nl, si, cx + ox * d, cz + oz * d) <= 0.0) continue;
+        if (!tg_xst_snap_hit(nl, si, cx + ox * d, cz + oz * d, cap)) continue;
         lo = d - TG_XST_CLIP_STEP * 0.5; hi = d;
         for (it = 0; it < 12; it++) {
             const double mid = 0.5 * (lo + hi);
-            if (tg_xst_carr_depth(nl, si, cx + ox * mid, cz + oz * mid) > 0.0) hi = mid; else lo = mid;
+            if (tg_xst_snap_hit(nl, si, cx + ox * mid, cz + oz * mid, cap)) hi = mid; else lo = mid;
         }
         s_xst_snap++;
         return lo;

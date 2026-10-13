@@ -436,14 +436,15 @@ static double tg_guard_reach(const TG_NodeList *nl, int si, double side, int cls
  *
  * RULE. A vertex lying on a node's cross-section (|along| under TG_GUARD_ROW_EPS on that node's tangent, within the road's
  * reach plus a margin) belongs to THAT node's frame, which is the frame the emitter placed it in. Only the frame changes,
- * never the test. TD5RE_GUARD_ROW_FRAME=0 restores the nearest-node frame. */
+ * never the test. Geo places only (the synthetic track keeps its bytes; the same frame error can exist there and is not
+ * measured). TD5RE_GUARD_ROW_FRAME=0 restores the nearest-node frame. */
 #define TG_GUARD_ROW_EPS 4.0
 long s_guard_row_frames;
 static int tg_guard_row_node(const TG_NodeList *nl, int ring, int si, double x, double z)
 {
     static const int order[3] = { 0, -1, 1 };     /* its own nearest node's row first */
     int j;
-    if (!td5_env_flag_on("TD5RE_GUARD_ROW_FRAME")) return si;
+    if (!td5_geo_loaded() || !td5_env_flag_on("TD5RE_GUARD_ROW_FRAME")) return si;   /* geo places only: the synthetic gate stays byte-identical */
     for (j = 0; j < 3; j++) {
         const int k = si + order[j];
         double tx, tz, m, al, lat;
