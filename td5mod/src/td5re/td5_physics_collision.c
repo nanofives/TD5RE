@@ -1450,14 +1450,15 @@ static int traffic_sat_enabled(void)
     return s_on;
 }
 
-/* TD5RE_V2V_ROT_FIX: 0 = master rotation pairing, 1 = fixed for pairs involving traffic
- * (default), 2 = fixed for every pair. See obb_corner_test. */
+/* TD5RE_V2V_ROT_FIX: 0 = master rotation pairing, 1 = fixed for pairs involving traffic only,
+ * 2 = fixed for every pair (default since round 1026 integ: Mariano chose racers too; racer-vs-racer
+ * FULL contacts fired with a real gap 74.9 % of the time on master). See obb_corner_test. */
 static int v2v_rot_fix_for(const TD5_Actor *a, const TD5_Actor *b)
 {
     static int s_scope = -1;
     if (s_probe_rot >= 0) return s_probe_rot;
     if (s_scope < 0) {
-        s_scope = td5_env_int("TD5RE_V2V_ROT_FIX", 1, 0, 2);
+        s_scope = td5_env_int("TD5RE_V2V_ROT_FIX", 2, 0, 2);
         TD5_LOG_I(LOG_TAG, "v2v_rot_fix: TD5RE_V2V_ROT_FIX=%d (0=master 1=traffic pairs 2=all pairs)", s_scope);
     }
     if (s_scope == 0) return 0;
