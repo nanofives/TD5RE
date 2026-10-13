@@ -589,6 +589,7 @@ static int tg_av_emit_island(const TG_NodeList *nl, int si, double o0, double o1
  * / 112 spans would otherwise read three per-avenue counts that nearly fit. */
 static long s_av_farwalk;
 static long s_av_pave_clipped;    /* [1021 B] main-road slabs cut along a street's edge */
+static long s_av_slab_tri_drop;   /* [1028 P A] triangular half-plane remnants refused */
 static long s_av_farwalk_blend;   /* [1021 B] spans whose footway end was joined/tapered instead of capped */
 
 /* [ROUND 1014 A] The footway's OUTER-edge lateral at both ends of span s and its width,
@@ -1240,6 +1241,33 @@ static int tg_av_slab_halfplane(const TG_NodeList *nl, int si, double sg, double
         last = on_in[(first + 1) % n] ? (first + 1) % n : first;
         for (j = (last + 1) % n; j != first; j = (j + 1) % n) { if (cnt == 0) r1 = j; r2 = j; cnt++; }
         if (cnt < 1 || cnt > 2) return 0;
+        /* [ROUND 1028 P item A] A TRIANGULAR REMNANT IS NOT A PAVEMENT CORNER.
+         *
+         * Round 1027 O left "a small raised triangle of kerb pavement ... looks hollow from some
+         * angles" at the corner of spans 77-79, and this is it. When the street's half-planes leave
+         * only THREE corners, one of the four points the emitter needs is missing, so the code below
+         * doubles a vertex (cnt == 1 -> r2 = r1, or ni == 1 -> the kerb pair collapses) and
+         * tg_av_emit_far_pts dutifully writes the shape anyway.
+         *
+         * MEASURED on level091 seed 2054677019, span 80's left slab (MODELS.DAT entry 20 mesh 14):
+         * the TOP quad is `118151,4171 | 118197,5204 | 118197,5204 | 118560,4801` -- a doubled
+         * vertex, i.e. a triangle of 196758 raw2 = 1.16 m2 -- and the wall on the collapsed side is
+         * `118197,5204` four times over, a quad of ZERO area. Three of the triangle's edges get one
+         * single-sided face each, so from any angle that back-faces one of them you look into the
+         * open underside (the faces drop TD5_TG_GROUND_DROP below the road): "hollow". It also
+         * stands ON the drawn asphalt -- 6468 raw2 of it overlaps span 80's own road quads at
+         * +125..+163, a kerb-height lip in the carriageway.
+         *
+         * 1027 O's rule already says "Results of up to four corners are emitted; anything stranger
+         * falls back to the fractional clip". A 3-corner remnant squeezed into a 4-corner emitter IS
+         * the stranger case, and at a junction whose street has eaten the slab the right answer is no
+         * raised slab at all (the corner pavement arms, tg_block_emit_intersection, carry the footway
+         * round). So refuse it: -2 means "nothing left of it" and the caller emits nothing.
+         * TD5RE_GEO_SLAB_TRI_DROP=0 restores the doubled-vertex triangle. */
+        if ((cnt == 1 || ni == 1) && td5_env_flag_on("TD5RE_GEO_SLAB_TRI_DROP")) {
+            s_av_slab_tri_drop++;
+            return -2;
+        }
         if (cnt == 1) r2 = r1;
         uf = ((poly[first].x - na->x) * ux + (poly[first].z - na->z) * uz) / ul2;
         ul = ((poly[last].x - na->x) * ux + (poly[last].z - na->z) * uz) / ul2;
@@ -1329,11 +1357,14 @@ static void tg_av_note(const TG_NodeList *nl, int si, double off, int lanes,
                   "over %d span(s), %d opening(s) for real cross streets; "
                   "far-side footway on %ld span(s) CUMULATIVE over the track "
                   "(%ld joined/tapered instead of capped, %ld of them along a plaza fork's corridor [R1023 A item 10, "
-                  "TD5RE_GEO_PLAZA_FARWALK=%s])",
+                  "TD5RE_GEO_PLAZA_FARWALK=%s]); main slabs cut along a street %ld, "
+                  "triangular remnants refused %ld [R1028 P item A, TD5RE_GEO_SLAB_TRI_DROP=%s]",
                   name, s0, s1, s_av_olo / upm, s_av_ohi / upm,
                   s_av_wlo / upm, s_av_whi / upm, s_av_n, s_av_open,
                   s_av_farwalk, s_av_farwalk_blend, s_av_plazawalk,
-                  td5_env_flag_on("TD5RE_GEO_PLAZA_FARWALK") ? "on" : "off");
+                  td5_env_flag_on("TD5RE_GEO_PLAZA_FARWALK") ? "on" : "off",
+                  s_av_pave_clipped, s_av_slab_tri_drop,
+                  td5_env_flag_on("TD5RE_GEO_SLAB_TRI_DROP") ? "on" : "off");
         s_av_n = 0;        /* the next avenue starts its own accumulation */
         s_av_open = 0;
         break;

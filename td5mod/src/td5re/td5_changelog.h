@@ -51,6 +51,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  reason on one line (search for NO THROTTLE)." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (slivers of kerb left on the road)" },
+    { CL_ITEM,    "La Plata: where a side street eats the main road's raised" },
+    { CL_ITEM,    "  pavement down to a three-cornered scrap, that scrap is no" },
+    { CL_ITEM,    "  longer built. Two of them shipped, one on the asphalt at" },
+    { CL_ITEM,    "  span 80, each with a face of no width that read as hollow." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (airborne contacts between racers)" },
     { CL_ITEM,    "Racers: a car in the air, or a scripted one, no longer" },
     { CL_ITEM,    "  bumps another racer from half a car-width away. Racer-vs-" },
