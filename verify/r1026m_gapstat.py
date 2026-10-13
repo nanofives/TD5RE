@@ -49,7 +49,7 @@ def main():
     groups = defaultdict(list)
     for r in rows:
         groups[(klass(r[2], r[3], base), r[0])].append(r)
-        if r[0] != "MISS":
+        if r[0] not in ("MISS", "REJ"):   # [1029 Y] REJ = dropped by the SAT gate, not a contact
             groups[(klass(r[2], r[3], base), "ALL")].append(r)
     for key in sorted(groups):
         g = groups[key]

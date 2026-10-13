@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (racer bumps from a hair's width away)" },
+    { CL_ITEM,    "Two racers only bump when their bodies really touch, on" },
+    { CL_ITEM,    "  every collision path. The main test rounded positions" },
+    { CL_ITEM,    "  to whole units and could fire with the cars up to 3" },
+    { CL_ITEM,    "  units (about a centimetre) apart. Those bumps now land" },
+    { CL_ITEM,    "  one tick later, when the cars do meet, and a pass that" },
+    { CL_ITEM,    "  never touches no longer gets a nudge." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (AI cars in a convoy)" },
     { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
     { CL_ITEM,    "  front. They used to judge the gap by counting track" },
