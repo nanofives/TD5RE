@@ -201,6 +201,12 @@ void td5_ai_update_encounter_control(int slot);
  * here so the player's throttle write is not blocked for the entire Cop Chase
  * session (only while a tracked encounter is actually engaged). */
 int  td5_ai_is_encounter_active(int slot);
+/* [R1028 Q 2026-10-13] Unconditional race-start clear of every pull-over latch.
+ * Call from InitializeRaceSession BEFORE td5_ai_init_traffic_actors(): R1026 K's
+ * clear rides inside cop_state_reset(), which only runs on the dynamic-traffic
+ * seeding path, so a traffic-off race never ran it. Gated by the same
+ * TD5RE_ENCOUNTER_LEAK_FIX knob. */
+void td5_ai_race_reset_pullover_latches(void);
 #ifndef TD5RE_RELEASE
 /* [R1026 K] DEV/selftest: force the pull-over latch of `slot` to 1 with NO cop behind it,
  * exactly the state a vanished / aborted pull-over leaves. */

@@ -135,6 +135,30 @@ static int     s_joystick_bound[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
  * of the fixed X=steer/Y=throttle/buttons default. See TD5_JSBIND_* in the .h. */
 static uint32_t s_js_action_bind[TD5_PLAT_MAX_JS_SLOTS][TD5_JSBIND_ACTIONS];
 static int      s_js_action_set[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+/* [R1028 Q 2026-10-13] Which per-action map the in-race poll is actually using for
+ * each slot ("default", "default+legacy-buttons", "legacy-raw(...)", "configured").
+ * Pure diagnostics: the no-throttle watchdog in td5_input.c prints it so a log from
+ * a failing session names the map that lost the pedals. s_js_map_logged is the
+ * one-line-per-change latch (compared by POINTER — every value is a literal). */
+static const char *s_js_map_name[TD5_PLAT_MAX_JS_SLOTS]   = { NULL };
+static const char *s_js_map_logged[TD5_PLAT_MAX_JS_SLOTS] = { NULL };
+/* Last successfully read raw axes (lX,lY,lZ,lRx,lRy,lRz) per slot, 0..0x1F4. */
+static long s_js_raw_axis[TD5_PLAT_MAX_JS_SLOTS][6];
+static int  s_js_raw_valid[TD5_PLAT_MAX_JS_SLOTS] = { 0 };
+
+/* [R1028 Q 2026-10-13] TD5RE_JS_LEGACY_BUTTONS_ONLY (default ON): a legacy
+ * Config.td5 row that only remaps BUTTONS must not drag the pedals off the
+ * triggers onto the left stick's Y axis. See the decision block in the poll. */
+static int js_legacy_buttons_only(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_JS_LEGACY_BUTTONS_ONLY");
+        TD5_LOG_I(LOG_TAG, "joystick legacy button-only remap keeps the default axis map: %s",
+                  s ? "ON" : "off (any legacy remap takes the raw X/Y path)");
+    }
+    return s;
+}
 
 /* [PORT ENHANCEMENT 2026-06-07] Built-in DEFAULT per-action gamepad mapping.
  * Applied to any joystick that has no explicit Control-Options per-action config
@@ -911,21 +935,76 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             uint32_t jbits = 0;
             long ax_x, ax_y;
 
+            /* [R1028 Q] Snapshot the raw axes for the no-throttle watchdog. */
+            s_js_raw_axis[slot][0] = js.lX;  s_js_raw_axis[slot][1] = js.lY;
+            s_js_raw_axis[slot][2] = js.lZ;  s_js_raw_axis[slot][3] = js.lRx;
+            s_js_raw_axis[slot][4] = js.lRy; s_js_raw_axis[slot][5] = js.lRz;
+            s_js_raw_valid[slot] = 1;
+
             /* Pick the per-action binding source. Explicit Control-Options
-             * config (s_js_action_set) always wins. Otherwise default to the
-             * built-in Xbox-style gamepad map (k_default_js_action_bind) — UNLESS
-             * a legacy Config.td5 9-slot mapping was explicitly remapped (axis
-             * swap or a real button value 2..10), which keeps the old raw-axis
-             * decode in the else-branch for imported wheels/pads. */
+             * config (s_js_action_set) always wins. Otherwise use the built-in
+             * Xbox-style gamepad map (k_default_js_action_bind); a legacy
+             * Config.td5 9-slot mapping routes to the raw-axis decode in the
+             * else-branch, for imported 2-axis wheels/pads.
+             *
+             * [R1028 Q 2026-10-13] "the car steers but cannot accelerate" — this
+             * branch is one of the two code paths that produce EXACTLY that, and
+             * until now it took it silently. The raw legacy path below reads
+             * THROTTLE from js.lY (the left stick's Y axis) while STEERING keeps
+             * coming from js.lX, so a modern pad whose pedals live on the TRIGGERS
+             * (Z axis, the default map) loses its throttle completely and keeps
+             * full steering: the left stick Y just sits in the deadzone forever.
+             * The old gate flipped a pad into that path on ANY Config.td5 button
+             * value in 2..10 — i.e. a saved BUTTON remap silently moved the pedals
+             * off the triggers. Split the two cases:
+             *   - a real 2-axis import (lb[1]==5 && lb[2]==4 = the axis swap) still
+             *     gets the raw legacy path, which is what it was written for;
+             *   - a BUTTON-only legacy row keeps the default AXIS map (steer = left
+             *     stick X, accel/brake = triggers) and only overlays its 6 remapped
+             *     buttons, so the player's remap survives and the pedals do not move.
+             * Knob TD5RE_JS_LEGACY_BUTTONS_ONLY (default ON; 0 = the old
+             * any-remap-takes-the-raw-path behaviour). */
             const uint32_t *ab;
+            uint32_t ab_merged[TD5_JSBIND_ACTIONS];
+            const char *map_path;
             if (s_js_action_set[slot]) {
                 ab = s_js_action_bind[slot];
+                map_path = "configured";
             } else {
                 const int32_t *lb = s_joystick_bindings[slot];
-                int legacy_remap = (s_joystick_bound[slot] && lb[1] == 5 && lb[2] == 4);
-                for (int k = 0; !legacy_remap && k < 6; k++)
-                    if (lb[3 + k] >= 2 && lb[3 + k] <= 10) legacy_remap = 1;
-                ab = legacy_remap ? NULL : k_default_js_action_bind;
+                int axis_swap = (s_joystick_bound[slot] && lb[1] == 5 && lb[2] == 4);
+                int btn_remap = 0;
+                if (s_joystick_bound[slot])
+                    for (int k = 0; !btn_remap && k < 6; k++)
+                        if (lb[3 + k] >= 2 && lb[3 + k] <= 10) btn_remap = 1;
+                if (axis_swap || (btn_remap && !js_legacy_buttons_only())) {
+                    ab = NULL;
+                    map_path = axis_swap ? "legacy-raw(axis-swap)"
+                                         : "legacy-raw(button-remap)";
+                } else if (btn_remap) {
+                    memcpy(ab_merged, k_default_js_action_bind, sizeof(ab_merged));
+                    for (int k = 0; k < 6; k++)
+                        if (lb[3 + k] >= 2 && lb[3 + k] <= 10)
+                            ab_merged[4 + k] =
+                                TD5_JSBIND_BUTTON | (uint32_t)(lb[3 + k] - 2);
+                    ab = ab_merged;
+                    map_path = "default+legacy-buttons";
+                } else {
+                    ab = k_default_js_action_bind;
+                    map_path = "default";
+                }
+            }
+            /* One line per change of the live map, so a "no throttle" log always
+             * says WHICH map the race was reading and where ACCELERATE came from. */
+            s_js_map_name[slot] = map_path;
+            if (s_js_map_logged[slot] != map_path) {
+                s_js_map_logged[slot] = map_path;
+                TD5_LOG_I(LOG_TAG,
+                          "joystick map slot=%d path=%s accel=0x%X brake=0x%X steerL=0x%X "
+                          "(axis codes: 0x200|(axis<<1)|dir, 0x100|button)",
+                          slot, map_path,
+                          ab ? (unsigned)ab[2] : 0u, ab ? (unsigned)ab[3] : 0u,
+                          ab ? (unsigned)ab[0] : 0u);
             }
 
             if (ab) {
@@ -2003,6 +2082,30 @@ void td5_plat_input_set_action_bindings(int slot, const uint32_t *codes, int cou
     for (; i < TD5_JSBIND_ACTIONS; i++) s_js_action_bind[slot][i] = TD5_JSBIND_NONE;
     s_js_action_set[slot] = 1;
     TD5_LOG_I(LOG_TAG, "Action bindings set: slot=%d", slot);
+}
+
+/* [R1028 Q 2026-10-13] Name of the per-action map the in-race poll last used for
+ * this slot. "no-device" when the slot has no joystick, "not-polled-yet" before the
+ * first successful GetDeviceState. Read by the no-throttle watchdog (td5_input.c). */
+const char *td5_plat_input_js_map_name(int slot)
+{
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS) return "?";
+    if (!s_di_joystick[slot]) return "no-device";
+    return s_js_map_name[slot] ? s_js_map_name[slot] : "not-polled-yet";
+}
+
+/* [R1028 Q 2026-10-13] Raw DirectInput axes of this slot's device, as the poll saw
+ * them on its last successful read, in the 0..0x1F4 (centre 0xFA) scale. Lets the
+ * no-throttle watchdog say whether the DEVICE reported a pedal at all. Returns 0 if
+ * the slot has no device or has never read one. */
+int td5_plat_input_js_raw_axes(int slot, long *out, int count)
+{
+    int i;
+    if (slot < 0 || slot >= TD5_PLAT_MAX_JS_SLOTS || !out || count <= 0) return 0;
+    if (!s_di_joystick[slot] || !s_js_raw_valid[slot]) return 0;
+    if (count > 6) count = 6;
+    for (i = 0; i < count; i++) out[i] = s_js_raw_axis[slot][i];
+    return count;
 }
 
 const uint32_t *td5_plat_input_default_action_bindings(void)

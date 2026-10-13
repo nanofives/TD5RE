@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (joystick steers but cannot accelerate)" },
+    { CL_ITEM,    "A controller whose buttons were remapped keeps its" },
+    { CL_ITEM,    "  accelerate and brake on the triggers instead of" },
+    { CL_ITEM,    "  silently moving them to the left stick." },
+    { CL_ITEM,    "Every race now starts with the police pull-over hold" },
+    { CL_ITEM,    "  cleared, even races with the traffic turned off." },
+    { CL_ITEM,    "If a car ever loses its throttle, the log names the" },
+    { CL_ITEM,    "  reason on one line (search for NO THROTTLE)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (airborne contacts between racers)" },
     { CL_ITEM,    "Racers: a car in the air, or a scripted one, no longer" },
     { CL_ITEM,    "  bumps another racer from half a car-width away. Racer-vs-" },
