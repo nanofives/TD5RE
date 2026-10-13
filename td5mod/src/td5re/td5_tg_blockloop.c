@@ -436,7 +436,10 @@ static int bl_fork_blocks(const BlPlan *P, int s)
     const TG_Fork *f;
     if ((tg_fork_side_at(s) > 0 ? 1 : -1) == (P->sd > 0 ? 1 : -1)) return 1;      /* the fork's corridor lies on the loop's side */
     if ((s >= P->a1_lo - m && s <= P->a1_hi + m) || (s >= P->a2_lo - m && s <= P->a2_hi + m)) {
-        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", 3, -10, 20);
+        /* [ROUND 1029 X] TD5RE_GEO_LOOP_FORK_RAMP=1: a mouth may stand in the fork's widened approach / rejoin ramp
+         * (core pad -10, the round-1022 N2 measurement); the AI then decides the loop and the fork as one three-way
+         * choice (td5_track.c sl_pair_forks). Default off: measured below in GEO_REAL_FORKS.md "Round 1029 X". */
+        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", td5_env_flag_off("TD5RE_GEO_LOOP_FORK_RAMP") ? -10 : 3, -10, 20);
         f = bl_fork_covering(s);
         if (!td5_env_flag_on("TD5RE_GEO_LOOP_FORK_NWAY") || !f || f->freec > 0) return 1;
         if (s < f->F + 1 + pad || s > f->R - 1 - pad) return 1;

@@ -207,7 +207,7 @@ static int  corr_progress_delta(int span0, int span1);
  * the wall resolver try both, the AI decides the pair as one three-way choice (td5_ai.c,
  * td5_track_loop_mate_dep). TD5RE_GEO_LOOP_SHARED_MOUTH=0: one entry per span (the later loop
  * overwrites, as before). */
-typedef struct { int D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, c1_hi, cN_lo, mate; } SideLoop;
+typedef struct { int D, A, c0, cN, a1_lo, a1_hi, a2_lo, a2_hi, side, c1_hi, cN_lo, mate, fmate; } SideLoop;
 static SideLoop *s_sl = NULL;
 static int       s_sl_n = 0;
 static int16_t  *s_sl_of = NULL;       /* per span: loop * 4 + role (0 a1, 1 c0, 2 a2, 3 cN), or -1 */
@@ -1176,6 +1176,37 @@ static void walker_audit_static(void)
     free(cls);
 }
 #endif
+
+/* [ROUND 1029 X] after fork_left_compute: pair each loop with a REAL fork (type 8, not a loop) whose span F lies within
+ * TD5RE_AI_LOOP_FORK_PAIR spans of the loop's departure mouth, corridor on the other side (td5_track_loop_fork_mate).
+ * 0 = no pairs (the two decisions stay separate, as before). Also off with TD5RE_GEO_LOOP_SHARED_MOUTH=0. The close
+ * case is a mouth inside the fork's ramp (generator knob TD5RE_GEO_LOOP_FORK_RAMP); a round-1022 N2 loop whose mouth
+ * stands in a fork's core within the pad pairs too (its two decisions are just as close). */
+static void sl_pair_forks(void)
+{
+    int i, s;
+    const int pad = td5_env_int("TD5RE_AI_LOOP_FORK_PAIR", 12, 0, 40);
+    const int ring = g_td5.track_span_ring_length;
+    if (s_sl_n <= 0 || pad <= 0 || !s_sl_shared || !s_span_array || ring <= 0) return;
+    for (i = 0; i < s_sl_n; i++) {
+        SideLoop *L = &s_sl[i];
+        int best = -1;
+        if (L->mate >= 0) continue;                    /* a shared mouth already makes this a pair */
+        for (s = L->a1_lo - pad; s <= L->a1_hi + pad; s++) {
+            int q, isloop = 0;
+            if (s < 0 || s >= ring || s_span_array[s].span_type != 8) continue;
+            for (q = 0; q < s_sl_n; q++) if (s_sl[q].D == s) isloop = 1;
+            if (isloop) continue;
+            if ((fork_is_left(s) ? 1 : 0) == (L->side == 1 ? 1 : 0)) continue;   /* same side: not this case */
+            if (best < 0 || abs(s - L->D) < abs(best - L->D)) best = s;
+        }
+        if (best >= 0 && td5_track_fork_loop_mate(best) < 0) {
+            L->fmate = best;
+            TD5_LOG_I(LOG_TAG, "side link: loop %d (D=%d, mouth %d..%d) paired with the real fork at F=%d (one three-way decision)",
+                      i, L->D, L->a1_lo, L->a1_hi, best);
+        }
+    }
+}
 
 static void fork_left_compute(void)
 {
@@ -4875,6 +4906,7 @@ int td5_track_load_strip(const void *data, size_t size)
     free(s_fork_divider);
     s_fork_divider = NULL;
     fork_left_compute();                    /* [TOPOLOGY-FIRST] left corridors */
+    sl_pair_forks();                        /* [1029 X] a loop mouth in a real fork's decision zone */
 #ifndef TD5RE_RELEASE
     walker_audit_static();                  /* [1019 V] DEV: TD5RE_WALKER_AUDIT=1 */
 #endif
@@ -9955,7 +9987,7 @@ static size_t sl_parse(const uint8_t *blob, size_t size, size_t pos)
             L->c1_hi < L->c0 || L->c1_hi > L->cN || L->cN_lo < L->c0 || L->cN_lo > L->cN ||
             L->a1_lo < 0 || L->a1_hi < L->a1_lo || L->a1_hi >= s_span_count ||
             L->a2_lo < 0 || L->a2_hi < L->a2_lo || L->a2_hi >= s_span_count) continue;
-        L->mate = -1;
+        L->mate = -1; L->fmate = -1;
         for (j = L->a1_lo; j <= L->a1_hi; j++) sl_mark(j, s_sl_n * 4 + 0);
         for (j = L->c0; j <= L->c1_hi; j++) sl_mark(j, s_sl_n * 4 + 1);
         for (j = L->a2_lo; j <= L->a2_hi; j++) sl_mark(j, s_sl_n * 4 + 2);
@@ -10131,12 +10163,34 @@ int td5_track_loop_mouth_target_dep(int span, int dep)
     return -1;
 }
 
-/* [ROUND 1029 X] 1 when this track has at least one pair of loops sharing a departure mouth. */
+/* [ROUND 1029 X] 1 when this track has at least one pair of loops sharing a departure mouth, or a loop paired
+ * with a real fork (s_sl[].fmate). */
 int td5_track_loop_has_shared(void)
 {
     int i;
-    for (i = 0; i < s_sl_n; i++) if (s_sl[i].mate >= 0) return 1;
+    for (i = 0; i < s_sl_n; i++) if (s_sl[i].mate >= 0 || s_sl[i].fmate >= 0) return 1;
     return 0;
+}
+
+/* [ROUND 1029 X] A loop whose departure mouth starts inside a REAL fork's decision zone (TD5RE_AI_LOOP_FORK_PAIR spans
+ * either side of the fork's span F, corridor on the other side of the road): the fork's F, else -1. The AI decides
+ * the loop and the fork as one three-way choice instead of two decisions a few spans apart. */
+int td5_track_loop_fork_mate(int dep)
+{
+    int i;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].D == dep) return s_sl[i].fmate;
+    return -1;
+}
+
+/* the loop departing at `dep`, if any, whose fork mate is real fork span `f` */
+int td5_track_fork_loop_mate(int f)
+{
+    int i;
+    if (f < 0) return -1;
+    for (i = 0; i < s_sl_n; i++)
+        if (s_sl[i].fmate == f) return s_sl[i].D;
+    return -1;
 }
 
 /* [ROUND 1020 N] `span` lies within `pad` spans of any loop mouth (a1 departure, a2 arrival). */

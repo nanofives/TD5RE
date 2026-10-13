@@ -4767,7 +4767,8 @@ static double smart_fork_anchor(int slot, double pull)
     static int s_on = -1;
     if (s_on < 0) s_on = td5_env_flag_on("TD5RE_AI_LEFT_ANCHOR");
     /* [ROUND 1029 X] "stay" at a SHARED loop mouth (a street opens on both sides): hold the middle of the road */
-    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot] == 2) return 0.5;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot] >= 2)
+        return g_smart_branch_left[slot] == 2 ? 0.5 : g_smart_branch_left[slot] == 3 ? 0.25 : 0.75;   /* 3/4: main half of a right/left fork */
     if (s_on && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_left[slot])
         return (pull < 0.0) ? 0.82 : 0.14;
     return (pull < 0.0) ? 0.18 : 0.86;
@@ -5279,18 +5280,26 @@ static int ai_path_next(int slot, int span)
         }
         return (span + 1 < sc) ? span + 1 : span;
     }
+    if (td5_track_loop_has_shared() && td5_track_loop_in_mouth(span) >= 0) {
+        /* [ROUND 1029 X] two loops (or a loop and a real fork's F) may share this span: turn in only into the loop
+         * this car took; otherwise fall through to the fork test below (a real fork's F may stand in the opening) */
+        if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_commit_take[slot]) {
+            const int c1 = td5_track_loop_mouth_target_dep(span, g_smart_branch_commit_span[slot]);
+            if (c1 >= 0) return c1;
+        }
+        if (!(t == 8 && td5_track_loop_departure(span, NULL) < 0)) {   /* not a real fork's F: stay on the road */
+            nx = span + 1;
+            if (ring > 0 && nx >= ring)
+                nx = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 0 : ring - 1;
+            return nx;
+        }
+    } else
     if (td5_track_loop_in_mouth(span) >= 0) {
         /* [ROUND 1018 L] inside a block loop's departure mouth: a committed car turns into the street from
          * the middle of the opening (td5_track_loop_mouth_target), never at the type-8 span D itself, which
          * is the opening's first span and would make it cut the upstream corner */
         int dep = -1;
-        if (td5_track_loop_has_shared()) {
-            /* [ROUND 1029 X] two loops may open on this span: turn in only into the one this car took */
-            if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS && g_smart_branch_commit_take[slot]) {
-                const int c1 = td5_track_loop_mouth_target_dep(span, g_smart_branch_commit_span[slot]);
-                if (c1 >= 0) return c1;
-            }
-        } else {
+        {
         const int c0 = td5_track_loop_mouth_target(span, &dep);
         if (c0 >= 0 && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
             g_smart_branch_commit_span[slot] == (int16_t)dep && g_smart_branch_commit_take[slot])
@@ -5826,10 +5835,14 @@ static void td5_ai_smart_branch(int slot) {
         /* [ROUND 1029 X] a loop whose departure mouth is SHARED with a loop on the other side: decide the pair as
          * one three-way choice (once), then this scan stands on the loop the car takes. A cop on a chase keeps
          * its own per-fork rule below. */
-        int pair_take = -1;
+        int pair_take = -1, pair_fork = -1;
         if (pair_on && cm && !g_td5.reverse_direction && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
             !(g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING)) {
-            const int mate = td5_track_loop_mate_dep(s);
+            int mate = td5_track_loop_mate_dep(s);
+            if (mate < 0) {   /* a loop paired with a real fork close to its mouth: s is the loop's D or the fork's F */
+                if ((mate = td5_track_loop_fork_mate(s)) >= 0) pair_fork = mate;
+                else if ((mate = td5_track_fork_loop_mate(s)) >= 0) pair_fork = s;
+            }
             if (mate >= 0 && mate < span_count) {
                 const int key = s < mate ? s : mate;
                 if (g_smart_loop_pair_key[slot] != (int16_t)key)
@@ -5868,7 +5881,9 @@ static void td5_ai_smart_branch(int slot) {
              * loop leans to that loop's side, a car that stays holds the middle (a street opens on both sides) */
             g_smart_branch_commit_span[slot] = (int16_t)s;
             g_smart_branch_commit_take[slot] = (int8_t)pair_take;
-            if (!pair_take) g_smart_branch_left[slot] = 2;
+            /* stay: the middle of the road between two loop mouths, or the middle of the MAIN half at a loop + real fork
+             * (the fork's lane rule sends the corridor half of the widened road into the corridor) */
+            if (!pair_take) g_smart_branch_left[slot] = (int8_t)(pair_fork < 0 ? 2 : td5_track_fork_is_left(pair_fork) ? 4 : 3);
             pref = pair_take ? +1.0 : -1.0;
         } else
         if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING &&

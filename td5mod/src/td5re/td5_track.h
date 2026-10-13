@@ -161,6 +161,10 @@ int              td5_track_loop_mate_dep(int dep);
 int              td5_track_loop_in_mouth_pref(int span, int prefer);
 int              td5_track_loop_mouth_target_dep(int span, int dep);
 int              td5_track_loop_has_shared(void);
+/* [ROUND 1029 X] a loop paired with a real fork whose F lies close to its mouth (TD5RE_AI_LOOP_FORK_PAIR):
+ * loop D -> the fork's F, and fork F -> the loop's D; -1 when unpaired */
+int              td5_track_loop_fork_mate(int dep);
+int              td5_track_fork_loop_mate(int f);
 /* [R1023 D] median gaps of real forks: partner span across the gap (and the gap centre), -1 when none; run count */
 int              td5_track_gap_partner(int span, int32_t *cx, int32_t *cz);
 int              td5_track_gap_count(void);
