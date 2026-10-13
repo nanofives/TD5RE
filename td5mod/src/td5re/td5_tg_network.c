@@ -2926,6 +2926,242 @@ static void tg_net_apron_end(TG_Surf *cap, int open)
 long tg_net_apron_edge_count(void)   { return s_net_apron_edges; }
 long tg_net_apron_lift_count(void)   { return s_net_apron_lifted; }
 
+/* [ROUND 1029 U item B] "span 668 looked wrong": the cross street's pavement read as TERRACES on the slope.
+ *
+ * ROOT CAUSE (level091, entry 167 mesh 71 and entry 165 mesh 42, the ring-way footways of tg_net_emit_entry). The
+ * footway slab of a ribbon was one quad per POLYLINE segment, with the SAME height y0 + KERB_H at its kerb edge and at
+ * its outer edge, y0 being the ground at the centre-line vertex. Two faults follow:
+ *   - across the street: on cross-sloping ground the outer edge stands off the ground. MEASURED at span 668: outer
+ *     edge 8728 over a skirt at 8179 (549 raw = 1.3 m in the air) on the low side, 24 raw UNDER the skirt on the
+ *     high side;
+ *   - along it: the carriageway is cut into TG_NET_FOLLOW_SEG pieces on the ground envelope of its centre AND both
+ *     kerbs, the slab was not, so between two polyline vertices the slab sagged below the carriageway it borders
+ *     (165.42: slab 8239..8280 against a carriageway at 8326).
+ * FIX. The slab is cut into the carriageway's own pieces. Its kerb edge stands KERB_H above the carriageway height at
+ * that piece (the same sample the ribbon took, so the kerb face is a real kerb everywhere), its outer edge KERB_H above
+ * the ground under the outer edge. The slab therefore parallels the ground: on flat ground nothing changes shape, on a
+ * slope it no longer steps. It never falls faster than TG_NET_FW_FALL across its width; where that binds, a face closes
+ * the edge down to the drawn ground. Geo only (follow); TD5RE_GEO_NET_FW_FOLLOW=0 restores the flat polyline slab. */
+#define TG_NET_FW_FALL 0.25      /* steepest cross-fall a footway slab takes before it stands on a face */
+#define TG_NET_FW_SINK 20.0      /* the closing face reaches this far under the drawn ground            */
+static long s_net_fw_pieces, s_net_fw_clamped, s_net_fw_faces;
+
+void tg_net_fw_follow_counts(long *pieces, long *clamped, long *faces)
+{
+    *pieces = s_net_fw_pieces; *clamped = s_net_fw_clamped; *faces = s_net_fw_faces;
+}
+
+/* One ribbon's two footways, laid on the ground (see above). lx..rz are the carriageway's mitred kerb points, the
+ * same arrays the ribbon was laid from. Returns 0 on a write failure. */
+static int tg_net_emit_fw_follow(const TG_FBHook *h, const TG_NetEdge *e, const double *lx, const double *lz,
+                                 const double *rx, const double *rz, double sw)
+{
+    const double H = (double)TD5_TG_KERB_H;
+    const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
+    const double fall = sw * TG_NET_FW_FALL;
+    int ksub[TG_NET_POLY], total = 0, m, side, j, sn = 0, snq = 0, cap, ok = 1;
+    int spage = TD5_TG_PAGE_SIDEWALK;
+    double *sx, *sy, *sz, *su, *sv, vlen = 0.0;
+
+    for (m = 0; m + 1 < e->npoly; m++) {
+        const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
+                             + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
+        int k = (int)ceil(sl / TG_NET_FOLLOW_SEG);
+        if (k < 1) k = 1;
+        if (k > 24) k = 24;
+        ksub[m] = k; total += k;
+    }
+    if (total > TG_NET_RIB_Q) {                          /* the ribbon's own fallback: one piece per segment */
+        for (m = 0; m + 1 < e->npoly; m++) ksub[m] = 1;
+        total = e->npoly - 1;
+    }
+    cap = total * 2 * 12;                                /* per piece and side: top, kerb face, closing face */
+    sx = (double *)malloc((size_t)cap * 5 * sizeof(double));
+    if (!sx) return 1;
+    sy = sx + cap; sz = sy + cap; su = sz + cap; sv = su + cap;
+
+    for (m = 0; m + 1 < e->npoly; m++) {
+        const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
+                             + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));
+        for (side = 0; side < 2; side++) {
+            const double *ex = side ? rx : lx, *ez = side ? rz : lz;
+            const double dx0 = ex[m]     - e->px[m],     dz0 = ez[m]     - e->pz[m];
+            const double dx1 = ex[m + 1] - e->px[m + 1], dz1 = ez[m + 1] - e->pz[m + 1];
+            const double l0 = sqrt(dx0 * dx0 + dz0 * dz0) + 1e-9;
+            const double l1 = sqrt(dx1 * dx1 + dz1 * dz1) + 1e-9;
+            const double ix0 = ex[m], iz0 = ez[m], ix1 = ex[m + 1], iz1 = ez[m + 1];
+            const double ox0 = ix0 + dx0 / l0 * sw, oz0 = iz0 + dz0 / l0 * sw;
+            const double ox1 = ix1 + dx1 / l1 * sw, oz1 = iz1 + dz1 / l1 * sw;
+            if (e->fw_skip & (1 << side)) continue;
+            /* the same two drop rules as the flat slab, judged on the whole segment */
+            if (td5_env_flag_on("TD5RE_GEO_PLAZA_FW_CLEAR")
+                && tg_net_on_other_road(e, 0.25 * (ix0 + ox0 + ix1 + ox1), 0.25 * (iz0 + oz0 + iz1 + oz1)))
+                continue;
+            if (td5_env_flag_on("TD5RE_GEO_FW_JOINT") && tg_net_kerb_on_other_road(e, ix0, iz0, ix1, iz1, 200.0))
+                continue;
+            for (j = 0; j < ksub[m]; j++) {
+                const double t[2] = { (double)j / (double)ksub[m], (double)(j + 1) / (double)ksub[m] };
+                double ix[2], iz[2], ox[2], oz[2], yc[2], yo[2], yg[2], vv[2];
+                int q, face = 0;
+                for (q = 0; q < 2; q++) {
+                    const double cxq = e->px[m] + (e->px[m + 1] - e->px[m]) * t[q];
+                    const double czq = e->pz[m] + (e->pz[m + 1] - e->pz[m]) * t[q];
+                    ix[q] = ix0 + (ix1 - ix0) * t[q]; iz[q] = iz0 + (iz1 - iz0) * t[q];
+                    ox[q] = ox0 + (ox1 - ox0) * t[q]; oz[q] = oz0 + (oz1 - oz0) * t[q];
+                    /* the carriageway's height at this piece end: the very sample the ribbon was laid at */
+                    yc[q] = tg_net_fr_y(e, m, t[q], tg_net_ground_yw(cxq, czq,
+                                 lx[m] + (lx[m + 1] - lx[m]) * t[q], lz[m] + (lz[m + 1] - lz[m]) * t[q],
+                                 rx[m] + (rx[m + 1] - rx[m]) * t[q], rz[m] + (rz[m + 1] - rz[m]) * t[q]));
+                    yg[q] = tg_net_ground_y(ox[q], oz[q]);                    /* drawn ground + lift */
+                    yo[q] = yg[q] + H;
+                    if (yo[q] < yc[q] + H - fall) {                           /* steeper than FW_FALL */
+                        yo[q] = yc[q] + H - fall;
+                        s_net_fw_clamped++;
+                    }
+                    if (yo[q] - (yg[q] + H) > 40.0) face = 1;
+                    vv[q] = (vlen + sl * t[q]) / (double)TD5_TG_SPAN_LENGTH;
+                }
+                /* top slab: near-in, near-out, far-out, far-in */
+                sx[sn] = ix[0]; sz[sn] = iz[0]; sy[sn] = yc[0] + H; su[sn] = 0.0; sv[sn] = vv[0]; sn++;
+                sx[sn] = ox[0]; sz[sn] = oz[0]; sy[sn] = yo[0];     su[sn] = uw;  sv[sn] = vv[0]; sn++;
+                sx[sn] = ox[1]; sz[sn] = oz[1]; sy[sn] = yo[1];     su[sn] = uw;  sv[sn] = vv[1]; sn++;
+                sx[sn] = ix[1]; sz[sn] = iz[1]; sy[sn] = yc[1] + H; su[sn] = 0.0; sv[sn] = vv[1]; sn++;
+                /* kerb face: bottom on the asphalt, top at the slab */
+                sx[sn] = ix[0]; sz[sn] = iz[0]; sy[sn] = yc[0];     su[sn] = 0.0; sv[sn] = vv[0]; sn++;
+                sx[sn] = ix[0]; sz[sn] = iz[0]; sy[sn] = yc[0] + H; su[sn] = H / (double)TD5_TG_SPAN_LENGTH; sv[sn] = vv[0]; sn++;
+                sx[sn] = ix[1]; sz[sn] = iz[1]; sy[sn] = yc[1] + H; su[sn] = H / (double)TD5_TG_SPAN_LENGTH; sv[sn] = vv[1]; sn++;
+                sx[sn] = ix[1]; sz[sn] = iz[1]; sy[sn] = yc[1];     su[sn] = 0.0; sv[sn] = vv[1]; sn++;
+                snq += 2;
+                if (face) {
+                    /* closing face: from the slab's outer edge down under the drawn ground */
+                    const double b0 = yg[0] - TG_NET_FOLLOW_LIFT - TG_NET_FW_SINK;
+                    const double b1 = yg[1] - TG_NET_FOLLOW_LIFT - TG_NET_FW_SINK;
+                    sx[sn] = ox[0]; sz[sn] = oz[0]; sy[sn] = b0;    su[sn] = 0.0; sv[sn] = vv[0]; sn++;
+                    sx[sn] = ox[0]; sz[sn] = oz[0]; sy[sn] = yo[0]; su[sn] = (yo[0] - b0) / (double)TD5_TG_SPAN_LENGTH; sv[sn] = vv[0]; sn++;
+                    sx[sn] = ox[1]; sz[sn] = oz[1]; sy[sn] = yo[1]; su[sn] = (yo[1] - b1) / (double)TD5_TG_SPAN_LENGTH; sv[sn] = vv[1]; sn++;
+                    sx[sn] = ox[1]; sz[sn] = oz[1]; sy[sn] = b1;    su[sn] = 0.0; sv[sn] = vv[1]; sn++;
+                    snq++;
+                    s_net_fw_faces++;
+                }
+                s_net_fw_pieces++;
+            }
+        }
+        vlen += sl;
+    }
+    if (snq > 0 && *h->nmesh < h->maxmesh - 1) {
+        size_t off2 = h->blk->len;
+        h->moff[(*h->nmesh)++] = off2;
+        ok = tg_write_quad_mesh(h->blk, sx, sy, sz, su, sv, sn, &spage, &snq, 1);
+        if (ok) tg_guard_mark(off2, h->blk->len, TG_GK_CROSS, h->si);
+    }
+    free(sx);
+    return ok;
+}
+
+/* [ROUND 1029 U item D] The SURFACES the network draws for its polyline roads (carriageway + the footway slabs a
+ * ribbon lays on its kerbs), as quads, for the park lawn clip (td5_tg_streets.c tg_lc_bands). A real park polygon runs
+ * to the kerb line of the streets round it, and the lawn (laid 200 raw over the drawn ground) was clipped only by the
+ * ROUTE's pavement band and the mouth streets, so a ring way's footway beside a park lay UNDER the grass: 365 m2 of
+ * network footway buried by a lawn on level091 (e211.22, e238.42, e215.34, e167.51, e165.42 ...).
+ * Same mitred kerb points, same pavement width and the same drop rules the emitter uses, so a quad is reported only
+ * where a surface IS laid. q[n*8 ..] = x0 z0 x1 z1 x2 z2 x3 z3 (ring order, either winding). Only quads whose box
+ * reaches [bx0,bx1] x [bz0,bz1]. Pure function of the built network. */
+int tg_net_footprint_quads(double bx0, double bz0, double bx1, double bz1, double *q, int maxq)
+{
+    const int pave = td5_env_flag_on("TD5RE_GEO_PLAZA_ROAD_PAVE");
+    int i, m, side, n = 0;
+
+    if (!s_net_built) return 0;
+    for (i = 0; i < s_ne && n < maxq; i++) {
+        const TG_NetEdge *e = &s_edges[i];
+        const int ribbon = (e->ribbon && e->npoly > 2);
+        double ex0 = 1e300, ez0 = 1e300, ex1 = -1e300, ez1 = -1e300, reach;
+        if (e->loop || e->npoly < 2) continue;
+        if (!ribbon && e->kind != TG_NE_BACKSTREET && !(e->kind == TG_NE_COUNTRY && e->npoly > 2)) continue;
+        for (m = 0; m < e->npoly; m++) {
+            if (e->px[m] < ex0) ex0 = e->px[m];
+            if (e->px[m] > ex1) ex1 = e->px[m];
+            if (e->pz[m] < ez0) ez0 = e->pz[m];
+            if (e->pz[m] > ez1) ez1 = e->pz[m];
+        }
+        reach = e->width + 4000.0;                       /* half width at a 1.6x mitre + any pavement */
+        if (ex0 - reach > bx1 || ex1 + reach < bx0 || ez0 - reach > bz1 || ez1 + reach < bz0) continue;
+        if (ribbon) {
+            double lx[TG_NET_POLY], lz[TG_NET_POLY], rx[TG_NET_POLY], rz[TG_NET_POLY];
+            const double hw = e->width * 0.5;
+            const double swb = tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(e->mouth_si)]);
+            const double sw  = (swb > 0.0) ? swb : 1290.0;
+            for (m = 0; m < e->npoly; m++) {             /* the emitter's mitred kerb points, verbatim */
+                double d0x = 0, d0z = 0, d1x = 0, d1z = 0, tx, tz, tl, nx, nz, ml = 1.0;
+                if (m > 0) { d0x = e->px[m] - e->px[m - 1]; d0z = e->pz[m] - e->pz[m - 1]; tl = sqrt(d0x * d0x + d0z * d0z); if (tl > 1e-6) { d0x /= tl; d0z /= tl; } }
+                if (m + 1 < e->npoly) { d1x = e->px[m + 1] - e->px[m]; d1z = e->pz[m + 1] - e->pz[m]; tl = sqrt(d1x * d1x + d1z * d1z); if (tl > 1e-6) { d1x /= tl; d1z /= tl; } }
+                if (m == 0) { d0x = d1x; d0z = d1z; }
+                if (m + 1 == e->npoly) { d1x = d0x; d1z = d0z; }
+                tx = d0x + d1x; tz = d0z + d1z;
+                tl = sqrt(tx * tx + tz * tz);
+                if (tl < 1e-6) { tx = d1x; tz = d1z; tl = 1.0; }
+                tx /= tl; tz /= tl;
+                nx = tz; nz = -tx;
+                ml = nx * (-d1z) + nz * d1x;
+                ml = (ml < 0.0) ? -ml : ml;
+                ml = (ml < 0.62) ? 0.62 : ml;
+                {
+                    const double hwm = (e->taper && m + 1 == e->npoly) ? hw * 0.04 : hw;
+                    lx[m] = e->px[m] - nx * hwm / ml; lz[m] = e->pz[m] - nz * hwm / ml;
+                    rx[m] = e->px[m] + nx * hwm / ml; rz[m] = e->pz[m] + nz * hwm / ml;
+                }
+                if (e->xs >= 0) {
+                    lx[m] = s_xs[e->xs].lx[m]; lz[m] = s_xs[e->xs].lz[m];
+                    rx[m] = s_xs[e->xs].rx[m]; rz[m] = s_xs[e->xs].rz[m];
+                }
+            }
+            for (m = 0; m + 1 < e->npoly && n < maxq; m++) {
+                double *o = &q[n * 8];
+                o[0] = lx[m];     o[1] = lz[m];     o[2] = lx[m + 1]; o[3] = lz[m + 1];
+                o[4] = rx[m + 1]; o[5] = rz[m + 1]; o[6] = rx[m];     o[7] = rz[m];
+                n++;
+                if (!pave) continue;
+                for (side = 0; side < 2 && n < maxq; side++) {
+                    const double *ex = side ? rx : lx, *ez = side ? rz : lz;
+                    const double dx0 = ex[m]     - e->px[m],     dz0 = ez[m]     - e->pz[m];
+                    const double dx1 = ex[m + 1] - e->px[m + 1], dz1 = ez[m + 1] - e->pz[m + 1];
+                    const double l0 = sqrt(dx0 * dx0 + dz0 * dz0) + 1e-9;
+                    const double l1 = sqrt(dx1 * dx1 + dz1 * dz1) + 1e-9;
+                    const double ix0 = ex[m], iz0 = ez[m], ix1 = ex[m + 1], iz1 = ez[m + 1];
+                    const double ox0 = ix0 + dx0 / l0 * sw, oz0 = iz0 + dz0 / l0 * sw;
+                    const double ox1 = ix1 + dx1 / l1 * sw, oz1 = iz1 + dz1 / l1 * sw;
+                    if (e->fw_skip & (1 << side)) continue;
+                    if (td5_env_flag_on("TD5RE_GEO_PLAZA_FW_CLEAR")
+                        && tg_net_on_other_road(e, 0.25 * (ix0 + ox0 + ix1 + ox1), 0.25 * (iz0 + oz0 + iz1 + oz1)))
+                        continue;
+                    if (td5_env_flag_on("TD5RE_GEO_FW_JOINT") && tg_net_kerb_on_other_road(e, ix0, iz0, ix1, iz1, 200.0))
+                        continue;
+                    o = &q[n * 8];
+                    o[0] = ix0; o[1] = iz0; o[2] = ix1; o[3] = iz1;
+                    o[4] = ox1; o[5] = oz1; o[6] = ox0; o[7] = oz0;
+                    n++;
+                }
+            }
+        } else {
+            const int k0 = (e->kind == TG_NE_COUNTRY) ? 1 : 0;
+            for (m = k0; m + 1 < e->npoly && n < maxq; m++) {  /* the segment path's own rectangle */
+                const double dx = e->px[m + 1] - e->px[m], dz = e->pz[m + 1] - e->pz[m];
+                const double len = sqrt(dx * dx + dz * dz);
+                double nx, nz, *o;
+                if (len < 1.0) continue;
+                nx = dz / len * e->width * 0.5; nz = -dx / len * e->width * 0.5;
+                o = &q[n * 8];
+                o[0] = e->px[m] - nx;     o[1] = e->pz[m] - nz;
+                o[2] = e->px[m] + nx;     o[3] = e->pz[m] + nz;
+                o[4] = e->px[m + 1] + nx; o[5] = e->pz[m + 1] + nz;
+                o[6] = e->px[m + 1] - nx; o[7] = e->pz[m + 1] - nz;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
 int tg_net_emit_entry(const TG_FBHook *h)
 {
     int i;
@@ -3050,7 +3286,10 @@ int tg_net_emit_entry(const TG_FBHook *h)
                 int sn = 0, side;
                 int spage = TD5_TG_PAGE_SIDEWALK, snq = 0;
                 vlen = 0.0;
-                if (td5_env_flag_on("TD5RE_GEO_PLAZA_ROAD_PAVE")) {
+                if (td5_env_flag_on("TD5RE_GEO_PLAZA_ROAD_PAVE") && follow
+                    && td5_env_flag_on("TD5RE_GEO_NET_FW_FOLLOW")) {      /* [ROUND 1029 U item B] */
+                    if (!tg_net_emit_fw_follow(h, e, lx, lz, rx, rz, sw)) NET_RET(0);
+                } else if (td5_env_flag_on("TD5RE_GEO_PLAZA_ROAD_PAVE")) {
                     for (m = 0; m + 1 < e->npoly; m++) {
                         const double sl = sqrt((e->px[m + 1] - e->px[m]) * (e->px[m + 1] - e->px[m])
                                              + (e->pz[m + 1] - e->pz[m]) * (e->pz[m + 1] - e->pz[m]));

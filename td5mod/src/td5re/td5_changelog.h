@@ -43,6 +43,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  bare kerbs at the start of Avenida 13." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (La Plata pavements and park paths)" },
+    { CL_ITEM,    "Side-street pavements on a slope follow the ground" },
+    { CL_ITEM,    "  instead of standing out as flat steps, and their kerb" },
+    { CL_ITEM,    "  is a full kerb along the whole street." },
+    { CL_ITEM,    "Park grass no longer covers the pavement of the streets" },
+    { CL_ITEM,    "  round a park, and park paths no longer sink under it." },
+    { CL_ITEM,    "Ground inside a mapped park is grass, not grey tiles," },
+    { CL_ITEM,    "  even far from the road." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (AI cars in a convoy)" },
     { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
     { CL_ITEM,    "  front. They used to judge the gap by counting track" },
