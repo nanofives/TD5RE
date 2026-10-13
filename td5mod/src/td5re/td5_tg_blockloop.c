@@ -55,6 +55,12 @@
  *   as well as "620". The one-way flow of the path is logged per candidate; TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a left
  *   loop that runs against a one-way street (default off: right loops ignore the flow too).
  *
+ *   [1029 X] TD5RE_GEO_LOOP_SHARED_MOUTH (default 1; 0 = round 1028): a left and a right loop may open on the SAME main
+ *   spans (the two arms of one cross street); the engine keeps two side-link entries per span, the AI decides the
+ *   pair as one three-way choice. TD5RE_GEO_LOOP_FORK_RAMP (default 1; 0 = round 1028): a departure mouth may stand
+ *   in a real fork's widened approach (other side of the road), decided together with the fork
+ *   (TD5RE_AI_LOOP_FORK_PAIR, spans, default 12; 0 = two separate decisions).
+ *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no geo place
  * loaded, and no tg_rand / tg_frand / tg_range is called here.
  */
@@ -87,6 +93,8 @@ typedef struct {
     double len_m, main_m, ratio, min_r_m;
     int    ncorner, npath;
     int    beside_n;                 /* [1022 N2] bypassed-stretch spans that lie in a real fork on the other side */
+    int    sh[2];                    /* [1029 X] the departure / arrival mouth shares main spans with another loop's mouth */
+    int    npend, pend_q[4], pend_m[4];   /* [1029 X] the taken loops' mouths this candidate would share (marked when it is taken) */
     double *cx, *cz, *cy;            /* clen+1 chain points                              */
     unsigned char *inner;            /* [clen+1] the corridor's inner edge is clear of the road: a pavement may lie there */
     TG_NodeList rview;               /* v[F+1+k] = corridor row k                        */
@@ -437,6 +445,15 @@ static int bl_fork_blocks(const BlPlan *P, int s)
         const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", 3, -10, 20);
         f = bl_fork_covering(s);
         if (!td5_env_flag_on("TD5RE_GEO_LOOP_FORK_NWAY") || !f || f->freec > 0) return 1;
+        /* [ROUND 1029 X] TD5RE_GEO_LOOP_FORK_RAMP (default on): a DEPARTURE mouth may stand in the fork's widened
+         * APPROACH (before the core), because the AI then decides the loop and the fork as one three-way choice
+         * (td5_track.c sl_pair_forks, TD5RE_AI_LOOP_FORK_PAIR); before, the two decisions came 2..4 spans apart and
+         * the round-1022 N2 trial of this placement WARNed. An arrival mouth, or anything in the rejoin ramp, keeps
+         * the core rule (not measured). =0 restores the round-1022 rule. */
+        if (td5_env_flag_on("TD5RE_GEO_LOOP_FORK_RAMP") && td5_env_int("TD5RE_AI_LOOP_FORK_PAIR", 12, 0, 40) > 0 &&
+            td5_env_flag_on("TD5RE_GEO_LOOP_SHARED_MOUTH") &&
+            s >= P->a1_lo - m && s <= P->a1_hi + m && s < f->F + 1 + pad && P->a1_lo >= f->F - TD5_TG_BRANCH_WIDEN - 2)
+            return 0;
         if (s < f->F + 1 + pad || s > f->R - 1 - pad) return 1;
     }
     return 0;
@@ -890,7 +907,7 @@ static int bl_ranges_apart(int alo, int ahi, int blo, int bhi, int margin)
     return ahi + margin < blo || bhi + margin < alo;
 }
 
-static int bl_overlap_ok(const BlPlan *C, const BlPlan *O)
+static int bl_overlap_ok(BlPlan *C, const BlPlan *O, int oq)
 {
     int c1, c2;
     double need;
@@ -903,6 +920,22 @@ static int bl_overlap_ok(const BlPlan *C, const BlPlan *O)
                                        : td5_env_int("TD5RE_GEO_FORK_OVERLAP_MOUTH_GAP_OPP", 1, 0, 40);
         const int cl[2] = { C->a1_lo, C->a2_lo }, ch[2] = { C->a1_hi, C->a2_hi };
         const int ol[2] = { O->a1_lo, O->a2_lo }, oh[2] = { O->a1_hi, O->a2_hi };
+        /* [ROUND 1029 X] SHARED MOUTHS: on OPPOSITE sides two mouths may share main spans (the left and the right
+         * arm of one cross street); the engine keeps a second side-link entry per span (td5_track.c, s_sl_of2).
+         * What must stay distinct are the spans patched in place in the ring (a loop's F is type 8 with its own
+         * link_next, its R type 11 with its own link_prev), and a mouth may share its spans with ONE other mouth
+         * only (two entries per span; the AI decides a pair, not a triple). */
+        const int shared = C->sd != O->sd && td5_env_flag_on("TD5RE_GEO_LOOP_SHARED_MOUTH");
+        if (shared) {
+            if (C->F == O->F || C->R == O->R || C->F == O->R || C->R == O->F) return 0;
+            for (c1 = 0; c1 < 2; c1++)
+                for (c2 = 0; c2 < 2; c2++) {
+                    if (bl_ranges_apart(cl[c1], ch[c1], ol[c2], oh[c2], 0)) continue;   /* no span in common */
+                    if (C->sh[c1] || O->sh[c2] || C->npend >= 4) return 0;        /* that mouth is already shared */
+                    C->sh[c1] = 1;                                                /* C is a candidate copy: dropped if refused */
+                    C->pend_q[C->npend] = oq; C->pend_m[C->npend] = c2; C->npend++;
+                }
+        } else
         for (c1 = 0; c1 < 2; c1++)
             for (c2 = 0; c2 < 2; c2++)
                 if (!bl_ranges_apart(cl[c1], ch[c1], ol[c2], oh[c2], m)) return 0;
@@ -918,8 +951,8 @@ static int bl_overlap_ok(const BlPlan *C, const BlPlan *O)
                 }
         }
     }
-    TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] OVERLAP kept: F=%d R=%d (%s) beside F=%d R=%d (%s), mouths apart", C->F, C->R, C->sd > 0 ? "left" : "right",
-              O->F, O->R, O->sd > 0 ? "left" : "right");
+    TD5_LOG_I(LOG_TAG, "trackgen: [BLOCK LOOP] OVERLAP kept: F=%d R=%d (%s) beside F=%d R=%d (%s), %s", C->F, C->R, C->sd > 0 ? "left" : "right",
+              O->F, O->R, O->sd > 0 ? "left" : "right", C->npend > 0 ? "SHARED MOUTH (same main spans, opposite sides)" : "mouths apart");
     return 1;
 }
 
@@ -1174,7 +1207,7 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
         int clash = 0, q, k;
         for (q = 0; q < s_nbl; q++) {   /* windows may not overlap (unless [1020 N] they may), and arms are used once */
             const BlPlan *O = &s_bl[q];
-            if (C->F - 3 <= O->R + 3 && O->F - 3 <= C->R + 3 && !bl_overlap_ok(C, O)) clash = 1;
+            if (C->F - 3 <= O->R + 3 && O->F - 3 <= C->R + 3 && !bl_overlap_ok(C, O, q)) clash = 1;
             if (C->e1 == O->e1 || C->e1 == O->e2 || C->e2 == O->e1 || C->e2 == O->e2) clash = 1;
         }
         if (clash) {
@@ -1209,6 +1242,7 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             continue;
         }
         /* take the plan */
+        for (q = 0; q < C->npend; q++) s_bl[C->pend_q[q]].sh[C->pend_m[q]] = 1;   /* [1029 X] those mouths are shared now */
         s_bl[s_nbl] = *C;
         memset(C, 0, sizeof *C);
         {
