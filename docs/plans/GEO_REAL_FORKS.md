@@ -1603,3 +1603,33 @@ The default STRIP is the knob-off STRIP plus the trailer (+248 B = 8 + 12 runs x
 ### Tooling
 
 `verify/geo_gapdrive.ps1 -Tag t [-Runs 0,4,11] [-Extra "TD5RE_GAP_DRIVE_BACK=1|TD5RE_GEO_FORK_GAP_ENGINE=0"] [-Width 1280 -Height 720]`: one launch per gap run, reads the runs from `log/race.log` (`median gap: run k main a..b <-> corridor c..d side s`, cached per route in `verify/out/gapruns_<place>_<route md5>.txt`), prints the RESULT line (crossed, first tick on the far side, wall events, peak speed) and writes `verify/out/gapdrive_<tag>/run<k>.log` (one `[GAPDRIVE]` line per tick). Knobs: `TD5RE_GAP_DRIVE_SPEED` (110), `_TURN` (1 span before the run), `_AIM` (3 spans into the corridor run), `_LANE`, `_BACK`, `_STEER_SIGN` (-1: STEER_LEFT turns toward +x, measured). Combine with `TD5RE_FRAMEDUMP_SPANS` + `TD5RE_FRAMEDUMP_SPAN_PATH` + `TD5RE_D3D12_CAPTURE=1` for frames of the crossing. A route to test left corridors: `verify/geo_n2_build.ps1 -Name lb -Pts "-34.921975,-57.966677;-34.920756,-57.942802"` (= 7820EC8E), copy its `_route/` over the place's.
+
+## Round 1029 W: Avenida 13 on route B9839962, one-way and the fork mouth
+
+**One-way.** On B9839962 the route drives Avenida 13 (spans 775..956) WITH its OSM one-way (ways 271163040, 283603022).
+Measured two ways: the per-span nearest way under the route (scratch `route_oneway.py`) and
+`verify/geo_peer_direction.py ... "Avenida 13"` (the other carriageway is on the MAP's left and flows against the race:
+the normal opposite carriageway). So the round-1015 A note (span 853 driven against the one-way) belongs to the older
+route, and the LEFT Avenida 13 fork (old route 4B56DECB, 821..856) does not exist here. The route builder ignores
+one-way tags on purpose (`td5_geo_route.c`, gr graph load); on B9839962 that leaves Calle 24 (spans 0..79) driven
+against its one-way. Not changed.
+
+**Fork mouth.** The Avenida 13 fork that exists (F=790..835, right corridor onto the opposite carriageway) was WARN:
+11 hard hits / 6 seeds, all at raw 789..790 on BOTH arms, 0 with forks off. Cause: at raw 787 the steering aim is
+span 791 (main) or 1550 (corridor), 2-lane spans past the type-8 span, and `ai_corr_aim_rb` only converts a type 8/11
+target. The aim was `rb(791) + bias` with the bias computed against the 4-lane route line (u 0.625 of 6000 = lat -750)
+while 791's route line is u 0.375 of 3000 (lat +1875): the aim landed ~2600 units outside the rail and the car was
+yanked outward (steer +-50000, 18-20 degrees of slip). `ai_fork_aim_frame` (td5_ai.c) aims at the lane brain's own cu
+re-expressed on the target span's rails when the target lies past a type-8 span (or on a corridor) and the lane counts
+differ. Knob `TD5RE_AI_FORK_AIM_FRAME=0` = the old aim (measured: identical harness table to the base exe).
+
+| run set (6 seeds) | F=89 plaza: wall in/body/out, hits | F=790 Avenida 13: wall in, hits, speed | verdicts |
+|---|---|---|---|
+| base exe, seeds 11..66 | 70/77/19, 25 | 38, 11, 371 | PASS / WARN |
+| fix, seeds 11..66 | 10/85/15, 32 | 12, 0, 397 | PASS / PASS |
+| base exe, seeds 77..132 | 75/76/17, 23 | 49, 12, 355 | PASS / WARN |
+| fix, seeds 77..132 | 13/82/15, 28 | 18, 0, 386 | PASS / PASS |
+
+The extra plaza hits sit at raw 407 (type 5), 663 (after the rejoin) and corridor 1298: no type-8 span is near them,
+so the new rule cannot act there; they are knock-on (the field arrives in a different order). Forks-off baseline for
+the plaza window is 82 hits.
