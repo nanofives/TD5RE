@@ -6649,6 +6649,197 @@ static void ai_gov_apply(int slot, int span_raw, int span_count)
     }
 }
 
+/* ========================================================================
+ * [ROUND 1028 S] CAR FOLLOWING MEASURED IN WORLD UNITS  (TD5RE_AI_FOLLOW_DIST)
+ *
+ * Mariano: "AI racers following each other in a convoy still make contact."
+ *
+ * The follow rule below (the `nearest_gap` block) measures the gap to the car
+ * in front as a COUNT OF TRACK SPANS, and acts only when that count is 1 or 2.
+ * Three consequences, all of which put a follower into the leader's bumper:
+ *
+ *   1. A span is not a distance. On the generated La Plata route spans run from
+ *      a few hundred to a few thousand model units, so "gap == 1" is anything
+ *      from touching to several car lengths, and the same rule is far too loose
+ *      on long spans and far too tight on short ones.
+ *   2. gap == 0 -- the leader on the SAME span, i.e. the closest a follower can
+ *      possibly be -- is deliberately EXCLUDED (see the [GAP>=1 2026-08-15] note
+ *      below). That exclusion is right for two cars level side by side and wrong
+ *      for a car sitting on another's rear bumper; the span index cannot tell
+ *      those apart.
+ *   3. There is no closing-speed term. The ease is gap/(desired+1) with a 0.66
+ *      floor, and the brake needs gap <= 1 AND a closing speed over 0x6000
+ *      (96 u/tick). A follower closing at 30-80 u/tick inside one span gets no
+ *      brake at all and only a mild lift.
+ *
+ * This block replaces that decision with the one a driver actually makes: the
+ * bumper-to-bumper clearance in model units, a desired clearance that grows
+ * with speed (a time headway), and a brake when the time-to-contact at the
+ * current closing speed drops below a threshold. "In front" and "in my lane"
+ * become geometry (longitudinal / lateral offset in the road frame against the
+ * two cars' real body half-extents) instead of span arithmetic, which fixes
+ * (2) honestly: a car level alongside has lon ~ 0 and is not followed, a car on
+ * our bumper has lon ~ one car length and is.
+ *
+ * Still only ever LOWERS the command, so the faithful throttle ceiling and the
+ * corner governor above stay the upper bound. Deterministic (no rng, same
+ * doubles the rest of the smart layer already uses) so netplay stays in step.
+ * TD5RE_AI_FOLLOW_DIST=0 restores the span-gap rule exactly.
+ * ======================================================================== */
+static int s_fd_init = 0;
+static int s_fd_on = 1;          /* TD5RE_AI_FOLLOW_DIST                       */
+static int s_fd_headway = 18;    /* TD5RE_AI_FOLLOW_HEADWAY   ticks of headway */
+static int s_fd_min = 400;       /* TD5RE_AI_FOLLOW_MIN       standing gap, units */
+/* The lateral window is a PERCENT OF (hwA + hwB), i.e. of the offset at which the
+ * two bodies would just touch side by side. 100 % = "we would collide if we were
+ * level"; the default 115 % adds a little slack so a leader drifting inside its
+ * own lane does not drop in and out of the follow set. It must stay well under a
+ * lane width (a 2-lane road is ~1000 units per lane against 632 of car) or a car
+ * being overtaken in the NEXT lane would be braked for. */
+static int s_fd_lat_pct = 115;   /* TD5RE_AI_FOLLOW_LAT_PCT   % of (hwA+hwB)   */
+static int s_fd_brake_ttc = 26;  /* TD5RE_AI_FOLLOW_BRAKE_TTC ticks to contact */
+static int s_fd_floor = 45;      /* TD5RE_AI_FOLLOW_FLOOR     % throttle floor */
+
+static void ai_follow_read_knobs(void)
+{
+    if (s_fd_init) return;
+    s_fd_init     = 1;
+    s_fd_on       = td5_env_flag_on("TD5RE_AI_FOLLOW_DIST");
+    s_fd_headway  = td5_env_int("TD5RE_AI_FOLLOW_HEADWAY",   18,  0, 200);
+    s_fd_min      = td5_env_int("TD5RE_AI_FOLLOW_MIN",      400,  0, 20000);
+    s_fd_lat_pct  = td5_env_int("TD5RE_AI_FOLLOW_LAT_PCT",  115, 10, 1000);
+    s_fd_brake_ttc= td5_env_int("TD5RE_AI_FOLLOW_BRAKE_TTC", 26,  0, 400);
+    s_fd_floor    = td5_env_int("TD5RE_AI_FOLLOW_FLOOR",     45,  0, 100);
+    TD5_LOG_I(LOG_TAG, "ai_follow_dist: %s (TD5RE_AI_FOLLOW_DIST) headway=%d ticks min=%d "
+              "lat=%d%% brake_ttc=%d floor=%d%%",
+              s_fd_on ? "ON (bumper gap in world units)" : "OFF (master span-gap rule)",
+              s_fd_headway, s_fd_min, s_fd_lat_pct, s_fd_brake_ttc, s_fd_floor);
+}
+
+/* Body half-extents of a slot, model units. Falls back to the measured stock car
+ * (632 x 1452) when the collision box is not bound yet, so the rule still has a
+ * sane scale on the first ticks of a race. */
+static void ai_follow_extent(char *actor, double *half_w, double *half_len)
+{
+    int32_t hw = 0, hl = 0;
+    if (actor && td5_physics_actor_body_extent((const TD5_Actor *)actor, &hw, &hl)) {
+        *half_w = (double)hw; *half_len = (double)hl;
+    } else {
+        *half_w = 316.0; *half_len = 726.0;
+    }
+}
+
+/* The nearest car genuinely IN FRONT of `slot`, measured in the road frame.
+ * Writes the bumper-to-bumper clearance (model units, negative when the bodies
+ * already overlap) and that car's longitudinal speed. Returns its slot, or -1.
+ * Candidates are the same peer set the span-gap rule scans (present, same
+ * traffic partition, within [-1 .. lookahead] spans), so this cannot react to a
+ * car on an unrelated part of the track. */
+static int ai_follow_nearest(int slot, int span_raw, int span_count, int lookahead,
+                             double *out_clear, int32_t *out_peer_v)
+{
+    char *self = actor_ptr(slot);
+    double fx, fz, flen, lx, lz, ex, ez, w;
+    double ox, oz, hw_s, hl_s;
+    int ps[SMART_PATH_MAX];
+    int best = -1, i, n;
+    double best_clear = 0.0;
+    const int pathmode = ai_corr_slot_on(slot);
+
+    if (!self || span_count <= 0) return -1;
+    if (pathmode) smart_build_path(slot, span_raw, span_count, 4, ps);
+    if (pathmode ? !smart_forward_dir_p(ps[0], ps[1], span_count, &fx, &fz, &flen)
+                 : !smart_forward_dir(span_raw, span_count, &fx, &fz, &flen)) return -1;
+    if (!smart_span_frame(((span_raw % span_count) + span_count) % span_count,
+                          &lx, &lz, &ex, &ez, &w)) return -1;
+
+    ox = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_X) >> 8);
+    oz = (double)(ACTOR_I32(self, ACTOR_WORLD_POS_Z) >> 8);
+    ai_follow_extent(self, &hw_s, &hl_s);
+
+    n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (i = 0; i < n; i++) {
+        char *a;
+        double px, pz, dx, dz, lon, lat, hw_p, hl_p, clear;
+        int gap;
+        if (i == slot) continue;
+        if (td5_ai_traffic_pair_blocked(slot, i)) continue;
+        if (!ai_peer_is_present(i)) continue;
+        a = actor_ptr(i);
+        if (!a) continue;
+        gap = smart_span_gap(span_raw, (int)ACTOR_I16(a, ACTOR_SPAN_RAW), span_count);
+        if (gap < -1 || gap > lookahead) continue;
+        px = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_X) >> 8);
+        pz = (double)(ACTOR_I32(a, ACTOR_WORLD_POS_Z) >> 8);
+        dx = px - ox; dz = pz - oz;
+        lon = dx * fx + dz * fz;          /* >0: ahead of us along the road */
+        lat = dx * ex + dz * ez;          /* across the road                */
+        if (lon <= 0.0) continue;         /* level or behind: not ours to follow */
+        ai_follow_extent(a, &hw_p, &hl_p);
+        if (fabs(lat) > (hw_s + hw_p) * (double)s_fd_lat_pct / 100.0) continue;
+        clear = lon - (hl_s + hl_p);
+        if (best < 0 || clear < best_clear) { best = i; best_clear = clear; }
+    }
+    if (best < 0) return -1;
+    *out_clear  = best_clear;
+    *out_peer_v = ACTOR_I32(actor_ptr(best), ACTOR_LONGITUDINAL_SPEED);
+    return best;
+}
+
+/* Ease / brake for the car in front. Returns 1 when one was found (whether or
+ * not the command changed), 0 when the road ahead is clear -- the same answer
+ * the span-gap rule's `have` flag gives, so the caller's early-out is unchanged. */
+static int ai_follow_apply(int slot, char *actor, int span_raw, int span_count,
+                           int lookahead, int aggression)
+{
+    double clear = 0.0, v, vp, dv, want, hf, r, f;
+    int32_t peer_v = 0, self_speed;
+    int16_t thr;
+    int peer = ai_follow_nearest(slot, span_raw, span_count, lookahead, &clear, &peer_v);
+    if (peer < 0) return 0;
+
+    self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
+    v  = (double)self_speed / 256.0;
+    vp = (double)peer_v / 256.0;
+    dv = v - vp;                                   /* >0 = closing */
+    if (v <= 0.0) return 1;                        /* stopped / reversing: nothing to ease */
+
+    /* Aggression shortens the headway the same way the span rule shortened
+     * `desired`: clean keeps a bigger cushion, aggressive tucks in. */
+    hf = (aggression <= 0) ? 1.25 : (aggression >= 2 ? 0.85 : 1.0);
+    want = (double)s_fd_min + v * (double)s_fd_headway * hf;
+    if (want < 1.0) want = 1.0;
+
+    /* Brake when the bodies would meet within BRAKE_TTC ticks at the current
+     * closing speed, or when they already touch and we are still closing. */
+    if (dv > 0.0 && (clear <= 0.0 || clear < dv * (double)s_fd_brake_ttc)) {
+        ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
+        ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
+        ACTOR_U8(actor, ACTOR_THROTTLE_STATE)   = 1;
+        if ((g_ai_frame_counter % 60u) == 0u)
+            TD5_LOG_I(LOG_TAG, "follow_brake: slot=%d span=%d peer=%d clear=%.0f "
+                      "closing=%.0f u/tick ttc=%.1f ticks",
+                      slot, span_raw, peer, clear, dv, clear > 0.0 ? clear / dv : 0.0);
+        return 1;
+    }
+    if (clear >= want) return 1;                   /* enough room: leave the throttle alone */
+
+    thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
+    if (thr <= 0) return 1;                        /* already coasting/braking */
+    r = clear / want;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+    f = (double)s_fd_floor / 100.0 + (1.0 - (double)s_fd_floor / 100.0) * r;
+    ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)((double)thr * f);
+    if ((g_ai_frame_counter % 60u) == 0u)
+        TD5_LOG_I(LOG_TAG, "follow_ease: slot=%d span=%d peer=%d clear=%.0f want=%.0f "
+                  "v=%.0f peer_v=%.0f thr %d->%d",
+                  slot, span_raw, peer, clear, want, v, vp,
+                  (int)thr, (int)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER));
+    return 1;
+}
+
 /* Speed brain (car-following): after route_threshold sets throttle, if a car
  * we can't yet clear sits ahead in our corridor and we're closing, ease the
  * throttle (or brake when very close). Never raises throttle. */
@@ -6765,6 +6956,16 @@ static void td5_ai_smart_speed_core(int slot) {
         }
     }
 
+    /* [ROUND 1028 S] The follow decision: world-unit clearance + closing speed
+     * (see the TD5RE_AI_FOLLOW_DIST block above) instead of the span count.
+     * Both arms answer the same question -- "is there a car in front of me?" --
+     * so the early-out below is the same shape either way. */
+    ai_follow_read_knobs();
+    if (s_fd_on) {
+        if (!ai_follow_apply(slot, actor, span_raw, span_count, lookahead, aggression))
+            return;
+    } else {
+
     if (!have) return;
 
     int32_t self_speed = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
@@ -6812,6 +7013,8 @@ static void td5_ai_smart_speed_core(int slot) {
                       peer_slot, peer_du, lane_w);
         }
     }
+
+    }   /* end of the TD5RE_AI_FOLLOW_DIST=0 (master span-gap) arm */
 
     /* [ROUND 1011 C3] THE POSTED SPEED LIMIT, from OSM `maxspeed`.
      *
