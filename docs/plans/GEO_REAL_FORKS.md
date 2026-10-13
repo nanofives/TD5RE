@@ -1603,3 +1603,79 @@ The default STRIP is the knob-off STRIP plus the trailer (+248 B = 8 + 12 runs x
 ### Tooling
 
 `verify/geo_gapdrive.ps1 -Tag t [-Runs 0,4,11] [-Extra "TD5RE_GAP_DRIVE_BACK=1|TD5RE_GEO_FORK_GAP_ENGINE=0"] [-Width 1280 -Height 720]`: one launch per gap run, reads the runs from `log/race.log` (`median gap: run k main a..b <-> corridor c..d side s`, cached per route in `verify/out/gapruns_<place>_<route md5>.txt`), prints the RESULT line (crossed, first tick on the far side, wall events, peak speed) and writes `verify/out/gapdrive_<tag>/run<k>.log` (one `[GAPDRIVE]` line per tick). Knobs: `TD5RE_GAP_DRIVE_SPEED` (110), `_TURN` (1 span before the run), `_AIM` (3 spans into the corridor run), `_LANE`, `_BACK`, `_STEER_SIGN` (-1: STEER_LEFT turns toward +x, measured). Combine with `TD5RE_FRAMEDUMP_SPANS` + `TD5RE_FRAMEDUMP_SPAN_PATH` + `TD5RE_D3D12_CAPTURE=1` for frames of the crossing. A route to test left corridors: `verify/geo_n2_build.ps1 -Name lb -Pts "-34.921975,-57.966677;-34.920756,-57.942802"` (= 7820EC8E), copy its `_route/` over the place's.
+
+## Round 1029 X: fork engine limits (two mouths on one span, a mouth in a fork's ramp, nesting)
+
+Base integ-1028 bcea1edc. Open item K of round 1022 N2: "the engine keeps ONE side-link per main span, so (1) two mouths on the same main span (left + right, or two loops) cannot exist, (2) nested forks (a corridor off a corridor) are not supported, (3) a mouth inside a fork ramp is rejected (F=922 case WARN: 4 spans between decisions)". **(1) built and default on, (3) built and default on, (2) design only.** TD5RE-only.
+
+### (1) Shared mouths: a left and a right loop off the same corner
+
+What the case is: a cross street meets the route on both sides at one intersection. Each side has its own arm, so the finder already produced a LEFT and a RIGHT loop candidate from the same intersection (`arms 63/65` right F=804 and `arms 64/66` left F=805 on route x1_07), and their mouths cover the same main spans at both ends. `bl_overlap_ok` refused the second (`..._MOUTH_GAP_OPP` = 1: mouths on opposite sides had to be different spans) because `s_sl_of` holds one entry per span: the later loop's parse overwrote the first one's mouth.
+
+| piece | change | where |
+|---|---|---|
+| engine | a second side-link entry per main span (`s_sl_of2`, `sl_mark`); `sl_targets(span, k, ...)`; the walker's `sl_try_cross` and the wall resolver's `sl_open` try both entries (containment decides which corridor a probe is in; a left and a right corridor never overlap). Two loops whose departure mouths share spans are recorded as MATES (`SideLoop.mate`, log `side link: loops a (D=..) and b (D=..) share departure spans ..`) | `td5_track.c` SIDE LINKS |
+| queries | `td5_track_loop_mate_dep`, `td5_track_loop_in_mouth_pref` (the covering mouth, preferring the loop the car took), `td5_track_loop_mouth_target_dep` (one loop's turn-in target), `td5_track_loop_has_shared` | `td5_track.c/.h` |
+| generator | on OPPOSITE sides two mouths may share spans when the four in-place spans differ (a loop's F is type 8 with its own `link_next`, its R type 11 with its own `link_prev`: `C->F != O->F`, `C->R != O->R`, `C->F != O->R`, `C->R != O->F`), and a mouth shares with ONE other mouth only (`BlPlan.sh[]`, pending marks applied when the candidate is taken). Log `OVERLAP kept ... SHARED MOUTH`. Same side: unchanged (gap 6) | `td5_tg_blockloop.c` `bl_overlap_ok` |
+| AI | the pair is ONE decision: `smart_loop_pair_decide` rolls once on the private branch RNG (one step, like one fork): take or stay by the single-fork rule (threshold 45, tilted by congestion main vs the emptier loop), which loop = the emptier one, a tie split by the same roll. `g_smart_loop_pair_key/_pick` hold it until no fork is in range. The scan then stands on the loop the car takes (a car taking the later D is not re-rolled at the earlier one); `ai_path_next` turns in only into the committed loop; a car that stays holds the middle of the road (anchor 0.5, `g_smart_branch_left = 2`) instead of the single-loop "far side" anchor. Dev force modes split the field three ways (`TD5RE_AI_BRANCH_FORCE_MODE=1`: slot + phase mod 3). Cops on a chase keep their per-fork rule | `td5_ai.c` |
+| knob | `TD5RE_GEO_LOOP_SHARED_MOUTH` (default 1). `=0`: generator refuses the overlap, the engine keeps one entry (later overwrites), no mates, no AI pair logic | all three |
+
+Routes: `verify/geo_n2_search.py 1029 24 x1_` (24 perturbed La Plata routes) builds a shared-mouth pair on 4: x1_07 (right 804..878 + left 805..877, both ends shared), x1_08 (59/60), x1_11 (977/978), x1_14 (62/63). Waypoints of x1_07: `-34.92676,-57.97761;-34.92739,-57.95167;-34.92063,-57.93712` (fingerprint 419D697A).
+
+Harness (`verify/geo_fork_validate.ps1 -RouteDir`, 6 seeds, 6 AI, no traffic, forced split, `TD5RE_WALKER_AUDIT=1`):
+
+| route | loop | enter c/m/o | hit/crash | stall | jam | spin | verdict | same route, knob OFF (only one loop built) |
+|---|---|---|---|---|---|---|---|---|
+| x1_07 | right 804..878 | 12/12/12 | 2/0 | 0 | 0 | 0 | PASS | not built |
+| x1_07 | left 805..877 | 12/12/12 | 0/0 | 0 | 0 | 0 | PASS | 18/18/0, 1/0, PASS |
+| x1_11 | right 977..1057 | 12/12/12 | 3/0 | 0 | 0 | 0 | PASS | not built |
+| x1_11 | left 978..1056 | 12/12/12 | 2/0 | 0 | 0 | 0 | PASS | 18/18/0, 5/1, 1 stall, WARN |
+| x1_14 | right 62..141 | 12/12/12 | 0/0 | 0 | 0 | 0 | PASS | not built |
+| x1_14 | left 63..142 | 12/12/12 | 2/0 | 0 | 0 | 0 | PASS | 18/18/0, 4/0, PASS |
+
+`12/12/12` = 12 car-passes took this loop, 12 stayed on the road, 12 left the window through the OTHER loop: the three-way split. Every other fork of those routes has the same verdict with the knob on and off (x1_07 F=49 WARN 11 hits and F=142 WARN 1 stall in both; x1_11 F=876 WARN 9 hits in both; x1_14 F=163 WARN 18 hits on / 22 off). Walker audit, x1_07, 6 races: 0 lane mismatches on the main road, corridors and loops; loop ticks outside their span 1..7 of ~3,000 per race (the round-1022 N2 level); static audit 401 loop spans, 0 lane centres or recovery poses outside their span. race.log shows probes crossing into both loops of the pair and back (`side link: span 813 -> 2296` etc.).
+
+Frames (`verify/geo_tour.ps1`, x1_07 route copied over the place's `_route/`, scenery complete, `verify/out/r1029x/frames/`): `tour_x07pair_s812.png` (the departure from behind: the main road straight on, a slip lane peeling off LEFT and another RIGHT at the same spans), `_dep_mouth_l` / `_dep_mouth_r` (each arc into its street), `_s812_top` (the six-lane cross-section at 812: slip lane + road + slip lane), `_s868.png` (the arrival: both loops merging back at the same spans), `_lcorr_in` / `_rcorr_in` (each corridor 7 rows in). The right corridor runs close past a building face at row 7; `tour_x07ralone_rcorr_in.png` (the right loop built ALONE, knob off + `TD5RE_GEO_BLOCKLOOP_ONLY=R824`) shows the same building in the same place, so it is the single loop's scenery, not the pairing (not investigated further).
+
+### (3) A departure mouth in a fork's ramp, decided together with the fork
+
+The round-1022 N2 measurement (s2_03: a left loop 4 spans before a right fork, WARN) came from two decisions a few spans apart. Now:
+
+* **AI** (`td5_track.c` `sl_pair_forks`, after `fork_left_compute`): a loop whose departure mouth has a REAL fork's F (type 8, not a loop, corridor on the other side) within `TD5RE_AI_LOOP_FORK_PAIR` (12) spans is paired with it (`side link: loop i (D=.., mouth ..) paired with the real fork at F=..`), and `smart_loop_pair_decide` makes the stay / loop / fork choice once. A car that stays holds the middle of the fork's MAIN half (anchor 0.25 for a right fork, 0.75 for a left one: the fork's lane rule sends the corridor half into the corridor). `ai_path_next` now lets a real fork's F that stands inside a loop opening route the car into the fork's corridor (before, the mouth branch returned span + 1 first).
+* **Generator** (`bl_fork_blocks`, `TD5RE_GEO_LOOP_FORK_RAMP`, default 1): a DEPARTURE mouth may stand in the fork's widened approach (before the core, from F - 6 - 2), only with the pairing and shared mouths on. Arrival mouths and the rejoin ramp keep the core rule (`TD5RE_GEO_LOOP_FORK_CORE_PAD`): not measured.
+
+On the 24 routes the ramp rule adds one loop: x1_04 left 59..137 (D=59, the right avenue Avenida 7's F=61 two spans later). The pairing also catches six existing round-1022 N2 loops whose mouth stands in a fork's core 7..10 spans after F (x1_00, 06, 09, 16, 18, 21).
+
+| run (6 seeds, forced) | loop | fork | other forks |
+|---|---|---|---|
+| x1_04, ramp loop + pairing | 59..137: 12/12/12, 4/0, PASS | Avenida 7 61..147: 12/12/12, 4/0, PASS | F=426, 876, 982 FAIL |
+| x1_04, ramp loop, pairing OFF (`TD5RE_AI_LOOP_FORK_PAIR=0`) | 18/0/18, 2/0, PASS | 18/0/18, 1/0, WARN | the same FAILs |
+| x1_04, knob OFF (no ramp loop, = the round-1028 build) | not built | 18/18/0, 9/0, WARN | the same FAILs (pre-existing: Plaza Azcuenaga 876..981 and Diagonal 73 982 jam at spans 979..985 in every arm) |
+| x1_09 core loop 98..177 + pairing | 12/11/13, 4/0, 1 stall, WARN | Avenida 60 90..198: 13/11/12, 12/1, WARN | F=540 FAIL (both) |
+| x1_09, pairing OFF | 8/10/18, 10/0, WARN | 18/10/8, 23/1, 1 stall, FAIL | |
+| x1_06 core loop 990..1069 + pairing | 12/12/0, 1/0, PASS | Avenida 7 980..1090: 12/12/12, 2/0, PASS | F=808 FAIL (both, speed 54 %) |
+| x1_06, pairing OFF | 11/7/0, 1/0, PASS | 18/7/11, 6/1, PASS | |
+
+Without the pairing, the forced split at a loop + fork 2 spans apart sends no car straight on (18/0/18): each decision splits the field in two and the second one only sees the cars the first left behind. With it the field splits three ways and both PASS.
+
+### (2) Nesting (a corridor off a corridor): design, not built
+
+Not cheap. What a loop off a fork corridor needs, by layer:
+
+* **Generator (the big part).** Loops are found from the street network's ARMS, and the network (`td5_tg_network.c`, mouth table, census) is built along the ROUTE's nodes only: no arm is ever keyed to a corridor. Nesting needs the arm march run along a corridor's own node chain (`tg_fork_rview` for plaza / loop corridors; avenue forks have NO rview: their corridor rides the main node + `tg_fork_br_shift`, so an edge frame per corridor row must be built first), with its own mouth table keyed by (fork, row), the frontage / pavement / building clears that read the mouth table taught the same key, and `bl_flush` / `bl_slip` taking the corridor's edge. Estimated 300+ lines and a new census.
+* **Strip / engine.** The nested loop's D and A are CORRIDOR spans (> ring). The SLNK fields and `s_sl_of` (sized to every span) already allow it, the walker's relocation is span-agnostic. Its jump record's base must be the PARENT's main index at D (`td5_track_branch_to_main_span(D)`), with a CMRP map (loops already force one) so `corr_progress_index` has a main index on both ends of a corridor-to-corridor step; `corr_progress_delta` already fires when either end is mapped. Recovery (`td5_track_get_recovery_pose`) must step back through the parent corridor, not jump to the ring.
+* **AI.** `ai_path_next` on a corridor only follows type 10 (`return span + 1` otherwise): a type-8 D on a corridor with a commitment must follow `link_next`; the scan's mouth override is gated `span < ring` and must accept corridor spans; `td5_ai_smart_branch` already finds a type 8 on its path anywhere. ~40 lines.
+* **Minimap / HUD.** A nested corridor maps to main spans through its parent, so the per-main-span corridor drawing overlays it on the parent's (acceptable).
+
+Recommendation: do it as its own round, starting with the network march along a plaza corridor (it has an rview), since that is where a real street leaves a corridor on La Plata.
+
+### Gates (measured)
+
+* Mariano's route B9839962 (`verify/geo_tags_identity.ps1 -Arm geo -Seed 2054677019`): base exe (integ-1028), new exe default and new exe `TD5RE_GEO_LOOP_SHARED_MOUTH=0` all MODELS.DAT 12385464 B sha256 `850D39CA91AE2165...` / md5 `E95DD20FE63CFA2F9162F31CD30BEBB6`, STRIP 108398 B sha256 `6F98E92E...` (`verify/geo_level_identity.py`: bytes IDENTICAL). The route has 0 loop candidates, so the knobs cannot act there.
+* Pair route x1_07: base exe = new exe knob OFF: MODELS.DAT 18156844 B md5 `69029E8FC8EDDD4AB928C8D7637396B0`, STRIP 156986 B md5 `45EAD5CA5E3DC390E9E47D3AAAC27522`. Default: MODELS 18301604 B md5 `BA983448...`, STRIP 165354 B md5 `71F61A12...` (the second loop).
+* Synthetic (SELECTED.TXT aside): MODELS.DAT 12772392 B `E2F1F33C221D61CAB0EFF701484011F0`, STRIP `0641EDB7...`, TEXTURES `5B4E005A...`.
+* Shipped tracks, base exe vs new exe (`verify/shipped_trace.ps1`, 6 AI): Moscow (0) and Honolulu (8) 54,004 rows each, 0 differing.
+
+### Tooling
+
+`verify/r1029x_route_search.py <seed> <count> <tag> "<KNOB=v,...>" [NN,...]`: the routes of `geo_n2_search.py` rebuilt with extra generator knobs; prints the summary plus the engine's pair lines. Gotcha found: PowerShell splatting (`python x.py @d`) of a ONE-element result passes the string character by character; never splat a path list into a delete tool.
