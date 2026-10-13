@@ -47,6 +47,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  built from the GEOSPATIAL TRACK GENERATOR only." },
     { CL_ITEM,    "Quick Race gets the STUDIO / GEOSPATIAL buttons it was" },
     { CL_ITEM,    "  missing, shown only on their own track entry." },
+    { CL_DATE,    "October 12 (traffic collisions)" },
+    { CL_ITEM,    "Traffic: a crash with a traffic car now needs the two" },
+    { CL_ITEM,    "  cars to really touch. Passing a car in the next lane," },
+    { CL_ITEM,    "  or meeting one at an angle, no longer bumps you or" },
+    { CL_ITEM,    "  crashes you from half a car-width away." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 12 (real places: faster first race)" },
