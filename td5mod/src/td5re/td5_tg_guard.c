@@ -126,6 +126,8 @@ static int tg_guard_diag_span(void)
 {
     return td5_env_int("TD5RE_R8_GUARD_DIAG", 0, 0, 100000);
 }
+/* [ROUND 1029 T] set only around the DIAG re-scan of a REJECTED mesh: dump each vertex's frame. Per thread (entries build in parallel). */
+static __thread int s_guard_vdump;
 
 void tg_guard_ex_reset(void) { s_guard_ex_n(tg_tslot()) = 0; }
 
@@ -423,6 +425,44 @@ static double tg_guard_reach(const TG_NodeList *nl, int si, double side, int cls
     return tg_carriageway_reach(nl, si, side);
 }
 
+/* [ROUND 1029 T item 3] "city meshes @82/@83 (coverage 750) still guard-rejected" (La Plata, the corner at spans 77-79).
+ *
+ * ROOT CAUSE (TD5RE_R8_GUARD_DIAG=82 with the per-vertex dump below): the two meshes are the main road's own kerb
+ * pavement slabs of spans 82 and 83, on the INSIDE of a bend, inner edge exactly on the road edge. Their far-inner corner
+ * is node 83's road-edge point, so it lies ON node 83's cross-section; but on the inside of the bend node 82's centre is
+ * nearer (2705 against 3000), so the vertex was judged in node 82's straight frame: lateral 2249 instead of 3000, t 0.749,
+ * a false 750 units of coverage, and the slab was deleted. What was left is the ground skirt 70 units below the road
+ * beside spans 82-83, a sunken bare strip.
+ *
+ * RULE. A vertex lying on a node's cross-section (|along| under TG_GUARD_ROW_EPS on that node's tangent, within the road's
+ * reach plus a margin) belongs to THAT node's frame, which is the frame the emitter placed it in. Only the frame changes,
+ * never the test. TD5RE_GUARD_ROW_FRAME=0 restores the nearest-node frame. */
+#define TG_GUARD_ROW_EPS 4.0
+long s_guard_row_frames;
+static int tg_guard_row_node(const TG_NodeList *nl, int ring, int si, double x, double z)
+{
+    static const int order[3] = { 0, -1, 1 };     /* its own nearest node's row first */
+    int j;
+    if (!td5_env_flag_on("TD5RE_GUARD_ROW_FRAME")) return si;
+    for (j = 0; j < 3; j++) {
+        const int k = si + order[j];
+        double tx, tz, m, al, lat;
+        if (k < 0 || k >= ring || k >= nl->count) continue;
+        tx = nl->v[k].tx; tz = nl->v[k].tz;
+        m = sqrt(tx * tx + tz * tz);
+        if (m < 1e-9) continue;
+        tx /= m; tz /= m;
+        al = (x - nl->v[k].x) * tx + (z - nl->v[k].z) * tz;
+        if (al > TG_GUARD_ROW_EPS || al < -TG_GUARD_ROW_EPS) continue;
+        lat = (x - nl->v[k].x) * tz - (z - nl->v[k].z) * tx;
+        if ((lat < 0.0 ? -lat : lat) > tg_carriageway_reach(nl, k, (lat >= 0.0) ? 1.0 : -1.0) + 2.0 * (double)TD5_TG_LANE_WIDTH)
+            continue;
+        if (k != si) s_guard_row_frames++;
+        return k;
+    }
+    return si;
+}
+
 /* Is a quad with this intrusion, height band and policy class illegal? */
 static int tg_guard_quad_bad(int cls, double intr, double dy_lo, double dy_hi)
 {
@@ -596,6 +636,7 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
             vz = (double)tg_rd_f32(vp + 8);
             si = tg_guard_nearest_node(nl, win_lo, win_hi, vx, vz);
             if (si < 0 || si >= ring) continue;
+            si = tg_guard_row_node(nl, ring, si, vx, vz);
             lateral = (vx - nl->v[si].x) * nl->v[si].tz
                     - (vz - nl->v[si].z) * nl->v[si].tx;
             r = tg_guard_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, cls);
@@ -604,6 +645,10 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
                 const double rc = tg_carriageway_reach_at(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, vx, vz);
                 if (rc < r) r = rc;
             }
+            if (s_guard_vdump)   /* [ROUND 1029 T] TD5RE_R8_GUARD_DIAG: why a rejected mesh was judged on the road */
+                TD5_LOG_I(LOG_TAG, "guard-diag:   v%u (%.0f,%.0f,%.0f) node %d lat %.0f reach %.0f (half %.0f) t %.3f",
+                          vi + (unsigned)k, vx, vy, vz, si, lateral, r, tg_road_half_width(nl, si),
+                          (r > 0.0) ? lateral / r : 0.0);
             if (!(r > 0.0)) continue;
             t[n] = lateral / r;
             dy[n] = vy - nl->v[si].y;
@@ -1717,13 +1762,19 @@ int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                 if (audit ? (h.intr > TD5_TG_GUARD_PEN
                              && tg_guard_quad_bad(TG_GKC_SCENERY, h.intr,
                                                   h.dy_lo, h.dy_hi))
-                          : (d <= 2 && h.intr > -1e299))
+                          : (d <= 2 && h.intr > -1e299)) {
                     TD5_LOG_I(LOG_TAG, "guard-diag: entry@%d mesh %d kind=%s "
                               "cls=%d mark_si=%d verts=%u intr=%.0f si=%d "
                               "dy=[%.0f,%.0f] %s", s0, oi,
                               k_guard_kind_name[kind], cls, mark_si,
                               tg_rd_u32(b + off + 0x08), h.intr, h.si, h.dy_lo,
                               h.dy_hi, badv ? "REJECT" : "keep");
+                    if (badv && !audit) {
+                        s_guard_vdump = 1;
+                        (void)tg_guard_mesh_scan(nl, ring, b, off, mlen, win_lo, win_hi, cls, &h);
+                        s_guard_vdump = 0;
+                    }
+                }
             }
         }
 

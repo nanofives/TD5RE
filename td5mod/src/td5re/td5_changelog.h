@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
+    { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
+    { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },
+    { CL_ITEM,    "The thin line of bare ground along the avenue's start" },
+    { CL_ITEM,    "  edge is gone: the street now runs right up to it." },
+    { CL_ITEM,    "The kerb pavement beside spans 82-83 is back (it was" },
+    { CL_ITEM,    "  wrongly judged to be on the road on the bend)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (AI cars in a convoy)" },
     { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
     { CL_ITEM,    "  front. They used to judge the gap by counting track" },

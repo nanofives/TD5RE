@@ -912,6 +912,41 @@ static double tg_xst_ray_reach(const TG_NodeList *nl, int si, double cx, double 
     return reach;
 }
 
+/* [ROUND 1029 T item 2] A STREET THAT STOPS A HAIR SHORT OF THE CARRIAGEWAY IT RUNS INTO MEETS IT.
+ *
+ * La Plata Calle 39, span 77's arm: its near kerb ray is never cut (no contact within its reach) because that reach (4321,
+ * tg_net_march, measured on the run's CENTRE ray) ends 93 units along the ray before the start edge of the avenue's far
+ * carriageway (node 81). That left the last 66 units (perpendicular) of bare ground between the street's end and the
+ * avenue, the outer half of the hairline seam along the cap (_r1029t/capline.py, s = 2465..3286).
+ *
+ * RULE. A carriageway arm ray that ends uncut is marched on for up to TG_XST_SNAP more; if it meets the carriageway there it
+ * is cut at the edge exactly as a ray that met it inside its reach would be. Nothing changes for a ray that meets nothing.
+ * Only the carriageway's own rays (the emitter and tg_xstreet_laid_quad, which must agree); pavement arms keep the plain
+ * clip. TD5RE_GEO_STREET_RAY_SNAP=0 restores the plain clip. */
+#define TG_XST_SNAP 450.0
+static long s_xst_snap;
+
+static double tg_xst_ray_reach_snap(const TG_NodeList *nl, int si, double cx, double cz,
+                                    double ox, double oz, double reach)
+{
+    const double r = tg_xst_ray_reach(nl, si, cx, cz, ox, oz, reach);
+    double d, lo, hi;
+    int it;
+    if (r < reach || !(reach > 0.0) || !td5_env_flag_on("TD5RE_GEO_STREET_RAY_SNAP")) return r;
+    if (tg_xst_carr_depth(nl, si, cx + ox * reach, cz + oz * reach) > 0.0) return r;    /* ends ON it: not ours to move */
+    for (d = reach + TG_XST_CLIP_STEP * 0.5; d <= reach + TG_XST_SNAP; d += TG_XST_CLIP_STEP * 0.5) {
+        if (tg_xst_carr_depth(nl, si, cx + ox * d, cz + oz * d) <= 0.0) continue;
+        lo = d - TG_XST_CLIP_STEP * 0.5; hi = d;
+        for (it = 0; it < 12; it++) {
+            const double mid = 0.5 * (lo + hi);
+            if (tg_xst_carr_depth(nl, si, cx + ox * mid, cz + oz * mid) > 0.0) hi = mid; else lo = mid;
+        }
+        s_xst_snap++;
+        return lo;
+    }
+    return r;
+}
+
 static void tg_xstreet_push_follow(double *px, double *py, double *pz,
                                    double *uu, double *vv, int *pn,
                                    const double *e, double nox, double noz,
@@ -987,8 +1022,8 @@ int tg_xstreet_laid_quad(const TG_NodeList *nl, int si, const double *ef, double
     if (!tg_arm_parallel_on() || !td5_env_flag_on("TD5RE_GEO_SLAB_STREET_RAYS")) return 0;
     tg_block_arm_dirs(ef, sk, &nox, &noz, &fox, &foz);
     if (td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW") && tg_xst_rayclip_on()) {
-        rn = tg_xst_ray_reach(nl, si, ef[0], ef[2], nox, noz, rr);
-        rf = tg_xst_ray_reach(nl, si, ef[3], ef[5], fox, foz, rr);
+        rn = tg_xst_ray_reach_snap(nl, si, ef[0], ef[2], nox, noz, rr);
+        rf = tg_xst_ray_reach_snap(nl, si, ef[3], ef[5], fox, foz, rr);
         if (rn < rr || rf < rr) {
             if ((rn > rf ? rn : rf) < TG_XST_CLIP_MIN) return 2;    /* the emitter lays no arm here */
         }
@@ -1085,9 +1120,9 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
             int apron_open;
             double reach_n = reach, reach_f = reach;
             if (tg_xst_rayclip_on()) {      /* [ROUND 1024 G item 2] cut each kerb ray where it meets the avenue's carriageway */
-                reach_n = tg_xst_ray_reach(h->nl, h->si, e[0], e[2], nox, noz, reach);
-                reach_f = tg_xst_ray_reach(h->nl, h->si, e[3], e[5], fox, foz, reach);
-                if (reach_n < reach || reach_f < reach) {
+                reach_n = tg_xst_ray_reach_snap(h->nl, h->si, e[0], e[2], nox, noz, reach);
+                reach_f = tg_xst_ray_reach_snap(h->nl, h->si, e[3], e[5], fox, foz, reach);
+                if (reach_n != reach || reach_f != reach) {     /* [R1029 T] != : a snapped ray can be LONGER */
                     reach = (reach_n > reach_f) ? reach_n : reach_f;
                     if (reach < TG_XST_CLIP_MIN) continue;       /* the whole arm lies on the carriageway */
                     drop = tg_xstreet_drop(reach);
@@ -4390,6 +4425,9 @@ static void tg_geo_plaza_report_impl(int from_stream)
               "where they meet it (%ld of those left under %.0f units = no arm) (knob TD5RE_GEO_STREET_RAYCLIP=%s)",
               s_xst_clip_rays, s_xst_clip_cut, s_xst_clip_none, TG_XST_CLIP_MIN,
               td5_env_flag_on("TD5RE_GEO_STREET_RAYCLIP") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1029 T item 2] %ld uncut street-arm ray(s) ended under %.0f units short of a carriageway "
+              "and were run on to meet it (knob TD5RE_GEO_STREET_RAY_SNAP=%s)",
+              s_xst_snap, TG_XST_SNAP, td5_env_flag_on("TD5RE_GEO_STREET_RAY_SNAP") ? "on" : "off");
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld street / arm / network-edge scope(s) asked the drawn ground (skirts + far apron) "
               "for their height, %ld vertex lift(s) above the heightfield envelope (knob TD5RE_GEO_STREET_APRON=%s)",
               s_xst_apron_scopes + tg_net_apron_edge_count(), s_xst_apron_lifted + tg_net_apron_lift_count(),

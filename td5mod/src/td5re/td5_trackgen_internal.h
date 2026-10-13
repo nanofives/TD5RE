@@ -2024,6 +2024,7 @@ typedef struct { int v; } __attribute__((aligned(64))) TG_SlotInt;
 extern TG_SlotInt s_guard_ex_nx[TG_ACCT_SLOTS];
 #define s_guard_ex_n(t) (s_guard_ex_nx[(t)].v)
 extern long s_guard_rejects;
+extern long s_guard_row_frames;   /* [1029 T item 3] vertices judged in the frame of the node whose row they lie on */
 extern long s_guard_residual;
 extern long s_guard_rej_kind[TG_GK_COUNT];
 extern long s_guard_ex_scope_hits;
