@@ -4663,6 +4663,25 @@ int tg_geo_skirt_quad_park(const TG_NodeList *nl, int si, double x, double z)
     return td5_geob_points_in_plaza(si, &x, &z, 1, TD5_GEOB_WIN_A);
 }
 
+/* [ROUND 1029 U item C2, orchestrator follow-up] Mariano's pick (round 1023: "e83 s2 skirt p5:GROUND pos
+ * 390243,2499,268362") is NOT inside a mapped park: it is residential land (AREAS.JSON area 114), the speckled city
+ * skirt between the road and the ring street, with the grass of area 102 a street's width beyond. The complaint is
+ * the tile page itself on a city skirt that BORDERS green. So a skirt slab within `TD5_TG_SKIRT_PARK_NEAR` of a laid
+ * park outline (tg_geo_park_dist, the prepared outlines the lawns are built from) is grass too. Same gates as above;
+ * TD5RE_GEO_PARK_SKIRT_NEAR=0 keeps the inside-only rule. */
+#define TD5_TG_SKIRT_PARK_NEAR 4000.0       /* ~9 m: across a pavement and a side street */
+int tg_geo_skirt_quad_near_park(const TG_NodeList *nl, int si, double x, double z)
+{
+    if (!tg_geo_city_active()) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PARK_SKIRT")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_QUAD")) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_NEAR")) return 0;
+    if (si < 0 || si + 1 >= nl->count) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    return tg_geo_park_dist(x, z) <= TD5_TG_SKIRT_PARK_NEAR;
+}
+
 static int tg_geop_emit_one(const TG_FBHook *h, const TD5_GeoArea *a)
 {
     TG_GeopLawn lw;
@@ -4839,9 +4858,12 @@ static void tg_geo_plaza_report_impl(int from_stream)
               td5_env_flag_on("TD5RE_GEO_PARK_APRON") ? "on" : "off",
               s_geop_skirt_park_n,
               td5_env_flag_on("TD5RE_GEO_PARK_SKIRT") ? "on" : "off");
-    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1029 U item C2] %ld skirt quad(s) inside a mapped park took the lawn page one "
-              "by one (knob TD5RE_GEO_PARK_SKIRT_QUAD=%s)",
-              s_geop_skirt_quad_n, td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_QUAD") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1029 U item C2] %ld skirt quad(s) inside or bordering a mapped park took the "
+              "lawn page one by one, %ld of them for bordering one within %.0f units (knobs "
+              "TD5RE_GEO_PARK_SKIRT_QUAD=%s TD5RE_GEO_PARK_SKIRT_NEAR=%s)",
+              s_geop_skirt_quad_n, s_geop_skirt_near_n, TD5_TG_SKIRT_PARK_NEAR,
+              td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_QUAD") ? "on" : "off",
+              td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_NEAR") ? "on" : "off");
     /* First span each bound plaza is attached to, so a capture
      * (StartSpanOffset) can be aimed at one without guessing. */
     {
@@ -6527,6 +6549,7 @@ void tg_r9_city_reset(void)
     s_geop_tree_thin = s_geop_tree_capped = s_geop_apron_quads = 0;
     s_geop_skirt_park_n = 0;
     s_geop_skirt_quad_n = 0;
+    s_geop_skirt_near_n = 0;
     s_geop_bed_thin = s_geop_hedge_nobarrier = s_geop_xwall_park = 0;
     s_geop_xwall_unbacked = 0;
     s_geop_flank_street = 0;

@@ -6402,6 +6402,9 @@ extern long s_geop_skirt_quad_n;   /* [ROUND 1029 U] single skirt quads given it
 /* [ROUND 1029 U item C2] Does the skirt quad centred at (x,z) beside span si lie inside a mapped park / plaza?
  * td5_tg_streets.c. 0 on a synthetic build. */
 int  tg_geo_skirt_quad_park(const TG_NodeList *nl, int si, double x, double z);
+/* ... or within ~9 m of a laid park outline (bordering green). td5_tg_streets.c */
+int  tg_geo_skirt_quad_near_park(const TG_NodeList *nl, int si, double x, double z);
+extern long s_geop_skirt_near_n;   /* [ROUND 1029 U] skirt quads given the lawn page for bordering a park */
 /* [ROUND 1012 D2] Would a footprint of half-extent `half` centred at (x,z)
  * stand in REAL open space -- a mapped plaza/park polygon, or inside a named
  * junction=circular ring like Plaza Miguel de Azcuenaga, which has no polygon
