@@ -2077,9 +2077,15 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                 const int sd = (q * 4 < side_n[0]) ? 0 : 1;
                 qpage[q] = (sd == 0 ? pk0 : pk1) ? lawn : seg_page;
                 if (qpage[q] != lawn) {
+                    /* MOSTLY inside: the centre and 3 of the 4 corners, so a slab the park's edge only clips
+                     * stays ground (one green wedge among grey slabs read worse than the grey) */
                     const double cx = 0.25 * (px[q * 4] + px[q * 4 + 1] + px[q * 4 + 2] + px[q * 4 + 3]);
                     const double cz = 0.25 * (pz[q * 4] + pz[q * 4 + 1] + pz[q * 4 + 2] + pz[q * 4 + 3]);
-                    if (tg_geo_skirt_quad_park(nl, si, cx, cz)) { qpage[q] = lawn; extra++; }
+                    if (tg_geo_skirt_quad_park(nl, si, cx, cz)) {
+                        int c, in = 0;
+                        for (c = 0; c < 4; c++) in += tg_geo_skirt_quad_park(nl, si, px[q * 4 + c], pz[q * 4 + c]);
+                        if (in >= 3) { qpage[q] = lawn; extra++; }
+                    }
                 }
             }
             if (extra > 0) {

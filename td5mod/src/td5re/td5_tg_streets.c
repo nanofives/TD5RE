@@ -4183,12 +4183,39 @@ static int tg_pk_mitre(double px, double pz, double qx, double qz, double rx, do
     return 1;
 }
 
+/* [ROUND 1029 U item D] is (x,z) on one of the network surfaces in q8 (n convex quads, any winding)? */
+static int tg_pk_on_net(const double *q8, int n, double x, double z)
+{
+    int i, k;
+    for (i = 0; i < n; i++) {
+        const double *o = &q8[i * 8];
+        int sg = 0, in = 1;
+        for (k = 0; k < 4 && in; k++) {
+            const int j = (k + 1) & 3;
+            const double c = (o[j * 2] - o[k * 2]) * (z - o[k * 2 + 1]) - (o[j * 2 + 1] - o[k * 2 + 1]) * (x - o[k * 2]);
+            const int s = (c > 0.0) ? 1 : (c < 0.0 ? -1 : 0);
+            if (!s) continue;
+            if (!sg) sg = s;
+            else if (s != sg) in = 0;
+        }
+        if (in) return 1;
+    }
+    return 0;
+}
+
+static long s_pk_net_cut;
+
 static void tg_pk_build_area(const TG_NodeList *nl, TG_PkArea *pa)
 {
     const unsigned kinds = (1u << TD5_GEO_FW_FOOTWAY) | (1u << TD5_GEO_FW_PATH)
                          | (1u << TD5_GEO_FW_PEDESTRIAN) | (1u << TD5_GEO_FW_CYCLEWAY);
     const int nf = td5_geo_footways_count();
     int i, k;
+    /* [ROUND 1029 U item D] the network's laid surfaces round this park: the lawn is clipped by them
+     * (tg_lc_bands), so a path piece left on one would float over the street's own paving */
+    static double s_pk_q8[TG_LC_NETQ * 8];          /* serial prepass only */
+    const int nnet = (td5_env_flag_on("TD5RE_GEO_LAWN_CLIP_NET"))
+        ? tg_net_footprint_quads(pa->minx, pa->minz, pa->maxx, pa->maxz, s_pk_q8, TG_LC_NETQ) : 0;
 
     for (i = 0; i < nf; i++) {
         const TD5_GeoFootway *f = td5_geo_footways_get(i);
@@ -4232,6 +4259,10 @@ static void tg_pk_build_area(const TG_NodeList *nl, TG_PkArea *pa)
                     const double t = (s == ns) ? ib : ia + (ib - ia) * (double)s / (double)ns;
                     on[s] = (unsigned char)tg_geo_fp_on_street(nl, ax + dx * t, az + dz * t,
                                                                dz / len, -dx / len, hw);
+                    if (!on[s] && nnet > 0 && tg_pk_on_net(s_pk_q8, nnet, ax + dx * t, az + dz * t)) {
+                        on[s] = 1;
+                        s_pk_net_cut++;
+                    }
                 }
                 for (s = 0; s <= ns + 1; s++) {
                     const int live = (s <= ns) && !on[s];
@@ -4329,6 +4360,7 @@ int tg_geo_park_prepare(const TG_NodeList *nl, int nprep)
 
     tg_pk_free();
     s_pk_pieces = s_pk_ways = s_pk_street_cut = s_pk_laid = s_pk_quads = s_pk_nobudget = s_pk_buried = 0;
+    s_pk_net_cut = 0;
     if (!nl || nl->count < 3) return 0;
     if (!tg_geo_city_active()) return 0;
     if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
@@ -4780,11 +4812,12 @@ static void tg_geo_plaza_report_impl(int from_stream)
         long fwp = 0, fwc = 0, fwf = 0;
         tg_net_fw_follow_counts(&fwp, &fwc, &fwf);
         TD5_LOG_I(LOG_TAG, "[GEO PLAZA] [R1029 U] lawns clipped by %ld network road/footway quad(s) (%ld non-convex left "
-                  "out) (knob TD5RE_GEO_LAWN_CLIP_NET=%s); plaza paving lifted clear of its lawn: %ld of %ld polygon(s) "
+                  "out), %ld park-path sample(s) cut for lying on one (knob TD5RE_GEO_LAWN_CLIP_NET=%s); plaza paving lifted clear of its lawn: %ld of %ld polygon(s) "
                   "lifted, worst %.0f raw, %ld derived path mesh(es) laid on the lawn (knob TD5RE_GEO_PATH_OVER_LAWN=%s); "
                   "network footways on the ground: %ld piece(s), %ld corner(s) held at the %.0f%% cross-fall, %ld closing "
                   "face(s) (knob TD5RE_GEO_NET_FW_FOLLOW=%s)",
-                  s_lc_net_quads, s_lc_net_nonconvex, td5_env_flag_on("TD5RE_GEO_LAWN_CLIP_NET") ? "on" : "off",
+                  s_lc_net_quads, s_lc_net_nonconvex, s_pk_net_cut,
+                  td5_env_flag_on("TD5RE_GEO_LAWN_CLIP_NET") ? "on" : "off",
                   s_geop_lift_lifted, s_geop_lift_polys, s_geop_lift_max, s_geop_fit_meshes,
                   tg_geop_lift_on() ? "on" : "off", fwp, fwc, 25.0, fwf,
                   td5_env_flag_on("TD5RE_GEO_NET_FW_FOLLOW") ? "on" : "off");
