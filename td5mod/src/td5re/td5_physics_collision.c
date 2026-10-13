@@ -1381,6 +1381,7 @@ static int64_t v2v_sat_separation(const V2VWorldPoly *A, const V2VWorldPoly *B)
     return best;
 }
 
+#ifndef TD5RE_RELEASE
 /* Exact Euclidean gap between two convex polygons, model units (0 = overlap or
  * touching). Measurement only (double). */
 static double v2v_poly_gap_exact(const V2VWorldPoly *A, const V2VWorldPoly *B)
@@ -1411,6 +1412,7 @@ static double v2v_poly_gap_exact(const V2VWorldPoly *A, const V2VWorldPoly *B)
     }
     return sqrt(best) / 256.0;
 }
+#endif
 
 /* Separation of two actors' bodies at their CURRENT pose, 1/256 model units
  * (> 0 = apart by at least that much, <= 0 = overlapping). */
