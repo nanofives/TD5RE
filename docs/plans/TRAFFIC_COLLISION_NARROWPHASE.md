@@ -140,3 +140,78 @@ variance), so compare the log lines, not pixel positions.
   (`base`) nor with them on (`after`): killed at the timeout, the game's own log stops mid-race. Cause not
   investigated (not compared against a stock td5re_master.exe run), probably the AI finishing the race so
   the RaceTraceMaxSimTicks quit gate is never reached.
+
+## Round 1027 N: racer-vs-racer airborne contacts (`TD5RE_RACER_SAT`)
+
+Mariano: "Fix the remaining airborne racer contacts". Round 1026 M gated only pairs with a traffic car, so
+two racers on the sphere path (`collision_detect_simple`, dispatched for any car with
+`wheel_contact_bitmask >= 0x0F` or `vehicle_mode != 0`) still fired at a real gap.
+
+Fix: the same hull-SAT gate for racer pairs on the sphere path, plus a vertical bound. The bound is
+`1.5 * (hyA + hyB)` where hy is each car's mesh max|y| (about 150 to 250 units, `mesh_height_store` from the
+suspension envelope), capped by the old sphere reach and falling back to it when a height is unknown (traffic
+pairs keep the old sphere reach). All int64, no floats, identical on every peer.
+
+| knob | default | effect |
+|---|---|---|
+| `TD5RE_RACER_SAT` | 1 | 0 = master, 1 = sphere path needs real hull overlap + vertical bound, 2 = also reject FULL-path (corner test) racer contacts whose hulls are apart |
+| `TD5RE_RACER_SAT_VERT_PCT` | 150 | percent of (hyA + hyB) used as the vertical reach |
+| `TD5RE_V2V_PROBE_H` | 420 | dev: body height the airborne probe uses as ground truth |
+
+Why default 1 and not 2: level 2 removes FULL contacts that fire with the hulls <= 2.6 units apart (box-vs-hull
+rounding, not a real gap) but that changes every race from the first start-grid touch on.
+`verify/shipped_trace.ps1 -Extra` A/B (RaceTrace, seed fixed, 3000 ticks, 5 AI, Traffic 0):
+
+| run | Moscow (0) | Newcastle (5, jumps) |
+|---|---|---|
+| master vs `TD5RE_RACER_SAT=0` | IDENTICAL (108004 rows) | 4 rows differ, all the last tick (run-end truncation 33121 vs 33122 rows) |
+| master vs default (1) | IDENTICAL (108004 rows) | differs from tick 210 (airborne racer contacts exist) |
+| master vs 2 | differs from tick 161 | differs from tick 210 |
+
+### Measurement (5 AI races, Traffic=4, 5 opponents, `TD5RE_V2V_GAPLOG=2`, 4000 sim ticks; Moscow 0, Sydney 2,
+Newcastle 5 (jumps), Maui 6, Honolulu 8; Newcastle and Maui hit the 300 s timeout, the game log is still complete up to that point)
+
+```
+### base (td5re_master.exe = 7b221835)
+racer-racer      BP   contacts=   21 gap>0=   11 ( 52.4%) >50=    6 >200=    1 med(gap>0)=  77.7 p90= 128.0 max=  337.5
+racer-racer      FULL contacts= 1131 gap>0=   32 (  2.8%) >50=    0 >200=    0 med(gap>0)=   0.6 p90=   1.1 max=    2.2
+racer-racer      MISS contacts=   20
+racer-traffic    BP   contacts=  941 gap>0=    0
+racer-traffic    FULL contacts=  435 gap>0=    0
+racer-traffic    S20  contacts=  221 gap>0=    0
+### default (TD5RE_RACER_SAT=1)
+racer-racer      BP   contacts=   25 gap>0=    0 (  0.0%)                                                max=    0.0
+racer-racer      FULL contacts=  839 gap>0=   20 (  2.4%) >50=    0 >200=    0 med(gap>0)=   0.6 p90=   1.5 max=    2.6
+racer-racer      MISS contacts=   18
+racer-traffic    BP   contacts=  545 gap>0=    0
+racer-traffic    FULL contacts=  710 gap>0=    0
+racer-traffic    S20  contacts=  108 gap>0=    0
+### TD5RE_RACER_SAT=2
+racer-racer      BP   contacts=   38 gap>0=    0
+racer-racer      FULL contacts=  941 gap>0=    0 (  0.0%)
+racer-racer      MISS contacts=   17
+racer-traffic    BP   contacts=  505 gap>0=    0
+racer-traffic    FULL contacts=  447 gap>0=    0
+racer-traffic    S20  contacts=   69 gap>0=    0
+```
+
+Races are not tick-deterministic (AI start variance, see round 1026), so contact COUNTS differ between runs; read the
+gap columns. Racer-racer BP per track at default: Moscow 6, Sydney 7, Newcastle 10, Maui 0, Honolulu 2, all with a
+real overlap (gap 0). In the `TD5RE_RACER_SAT=2` Newcastle run the jump pile-up shows landings still register at dy up to 525
+(ticks 1853..1872, slot 0 onto slot 3, SAT overlap 21 .. 737 units deep).
+
+### Probe (`TD5RE_V2V_SELFPROBE=1`, `v2v_probe_r` rows, slot 0 vs slot 1)
+
+98 planar poses: `new_sphere FP=0 FN=0` (master sphere FP=16 FN=8, same grid as the traffic probe).
+128 airborne poses (8 landing layouts x dy 0..1500, both cars flagged airborne, truth = hulls overlap and dy < 420):
+master sphere FP=34 FN=0, new sphere FP=5 FN=0 (the 5 are the deliberate 150 % margin: dy 500 against a 514
+reach). The gap layouts (hulls 464 apart, 1100 lateral) fire 0 times at any dy; master fires at dy <= 400 for them.
+The sphere keeps firing up to dy 1100 over a centred car in master, new stops at 514.
+
+### Not fixed / not verified
+
+* The vertical bound is the mesh max|y| of each car, not a real 3-D body test. If the origin is not at mid-height
+  the bound is symmetric around it anyway; `TD5RE_RACER_SAT_VERT_PCT` scales it.
+* Level 1 leaves racer-racer FULL contacts with a hull gap <= 2.6 units (the corner test uses the mesh box, the SAT
+  the silhouette hull). Level 2 removes them.
+* Battle swept-wreck pass is traffic-only and untouched; the S17 anti-tunnel pass gets the ROT_FIX=2 rotation only.

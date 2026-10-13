@@ -1136,6 +1136,7 @@ static float actor_hitbox_scale(const TD5_Actor *act)
  * load) or TD5RE_MESH_HITBOX=0. Indexed by actor slot_index. */
 static int16_t s_mesh_box[TD5_MAX_TOTAL_ACTORS][3];    /* {half_w, front_z, rear_z(neg)} */
 static uint8_t s_mesh_box_valid[TD5_MAX_TOTAL_ACTORS];
+static int16_t s_mesh_hy[TD5_MAX_TOTAL_ACTORS];        /* [R1027 N] mesh max|y| (half height), 0 = unknown */
 
 static int mesh_hitbox_enabled(void)
 {
@@ -1148,6 +1149,16 @@ static int mesh_hitbox_enabled(void)
                        : "OFF (legacy cardef*scale box)");
     }
     return s_on;
+}
+
+/* [ROUND 1027 N] Record the mesh max|y| (half height) for a slot; the racer-pair sphere gate's vertical
+ * reach (see racer_sat_vert_reach). Called from the suspension envelope next to mesh_box_store. */
+void mesh_height_store(int slot, int32_t half_h)
+{
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (half_h < 0) half_h = 0;
+    if (half_h > 0x7FFF) half_h = 0x7FFF;
+    s_mesh_hy[slot] = (int16_t)half_h;
 }
 
 /* Record the PURE mesh AABB extents for a slot. Called from the suspension
@@ -1466,11 +1477,71 @@ static int v2v_rot_fix_for(const TD5_Actor *a, const TD5_Actor *b)
     return v2v_pair_has_traffic(a, b);
 }
 
-/* 1 when this pair must be SKIPPED because it involves traffic and the bodies
- * do not overlap. Margin 0: touching counts as overlap. */
+/* [ROUND 1027 N] TD5RE_RACER_SAT: the real-overlap requirement for RACER-vs-RACER pairs.
+ * Mariano: "Fix the remaining airborne racer contacts". Round 1026 M gated only pairs with a
+ * traffic car, so two racers on the bounding-sphere path (collision_detect_simple: dispatched
+ * for any airborne car, wheel_contact_bitmask >= 0x0F, or scripted car, vehicle_mode != 0)
+ * still fired an impulse at a real gap (measured 3 of 441, up to 383 units).
+ *   0 = master (sphere is the whole test for racer pairs)
+ *   1 = sphere path (collision_detect_simple) needs real hull overlap + vertical bound
+ *   2 = 1 plus the corner-test path (collision_detect_full) rejects a contact whose hulls are apart
+ * Default 1: ordinary racing (no airborne / scripted racer) stays bit-identical to master (shipped_trace A/B on
+ * Moscow, 36001 rows, 0 differing). Level 2 only removes FULL-path contacts that fire with the hulls <= 2.2
+ * units apart (box-vs-hull rounding), but that changes every race from the first start-grid touch on.
+ * Shared hull SAT, int64, identical on every peer (netplay lockstep). */
+static int racer_sat_level(void)
+{
+    static int s_init = 0, s_lvl = 1;
+    if (!s_init) {
+        s_lvl = td5_env_int("TD5RE_RACER_SAT", 1, 0, 2);
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "racer_sat: TD5RE_RACER_SAT=%d (0=master 1=sphere path 2=sphere+corner path)", s_lvl);
+    }
+    return s_lvl;
+}
+
+/* Vertical reach of the racer-pair sphere path. The gate is planar (hull SAT), so this only stops a
+ * car flung high over another from "touching" it. reach = (hyA + hyB) * pct / 100 where hy is the
+ * mesh max|y| of each car (a car body is ~340 high, so stacked cars touch at dy ~ hyA + hyB). Default
+ * 150 % = a landing registers a little BEFORE the bodies touch rather than after. Capped by the old
+ * sphere reach; falls back to it when a mesh height is unknown. */
+static int racer_sat_vert_pct(void)
+{
+    static int s_init = 0, s_pct = 150;
+    if (!s_init) {
+        s_pct = td5_env_int("TD5RE_RACER_SAT_VERT_PCT", 150, 10, 1000);
+        s_init = 1;
+        TD5_LOG_I(LOG_TAG, "racer_sat: vertical reach %d %% of (hyA+hyB) (TD5RE_RACER_SAT_VERT_PCT)", s_pct);
+    }
+    return s_pct;
+}
+
+static int32_t racer_sat_vert_reach(const TD5_Actor *a, const TD5_Actor *b, int32_t sphere_combined)
+{
+    int32_t hy = 0, reach;
+    if (a->slot_index < TD5_MAX_TOTAL_ACTORS) hy += s_mesh_hy[a->slot_index];
+    if (b->slot_index < TD5_MAX_TOTAL_ACTORS) hy += s_mesh_hy[b->slot_index];
+    if (hy <= 0) return sphere_combined;
+    reach = (int32_t)(((int64_t)hy * racer_sat_vert_pct()) / 100);
+    return reach < sphere_combined ? reach : sphere_combined;
+}
+
+/* 1 when the simple (sphere) path must use the SAT gate for this pair. */
+static int v2v_simple_sat_for(const TD5_Actor *a, const TD5_Actor *b)
+{
+    if (v2v_pair_has_traffic(a, b)) return traffic_sat_enabled();
+    return racer_sat_level() >= 1;
+}
+
+/* 1 when this pair must be SKIPPED because the bodies do not overlap (traffic pairs under
+ * TD5RE_TRAFFIC_SAT, racer pairs under TD5RE_RACER_SAT=2). Margin 0: touching counts as overlap. */
 static int traffic_sat_reject(const TD5_Actor *a, const TD5_Actor *b)
 {
-    if (!traffic_sat_enabled() || !v2v_pair_has_traffic(a, b)) return 0;
+    if (v2v_pair_has_traffic(a, b)) {
+        if (!traffic_sat_enabled()) return 0;
+    } else if (racer_sat_level() < 2) {
+        return 0;
+    }
     return v2v_actor_separation(a, b) > 0;
 }
 
@@ -2458,7 +2529,7 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
      * overlap fires even where the bounding sphere is too short to reach (nose-to-tail, head-on,
      * measured: the sphere missed 7 of 98 probe poses that really overlap). The sphere stays
      * the rule for racer-vs-racer and for TD5RE_TRAFFIC_SAT=0. */
-    const int sat_mode = traffic_sat_enabled() && v2v_pair_has_traffic(a, b);
+    const int sat_mode = v2v_simple_sat_for(a, b);   /* [ROUND 1027 N] racer pairs too (TD5RE_RACER_SAT) */
     if (sat_mode && v2v_actor_separation(a, b) > 0) return;
 
     int32_t radius_a = (int32_t)CDEF_S(a, CDEF_COLLISION_RADIUS);
@@ -2481,7 +2552,9 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     if (sat_mode) {
         /* bodies overlap in the plane (checked above); the vertical bound is the old sphere
          * reach, so a car flung over another one still does not "touch" it */
-        if (dy >= combined || dy <= -combined) return;
+        int32_t reach = combined;
+        if (!v2v_pair_has_traffic(a, b)) reach = racer_sat_vert_reach(a, b, combined);   /* [ROUND 1027 N] */
+        if (dy >= reach || dy <= -reach) return;
     } else {
         static int s_i64 = -1;
         if (s_i64 < 0) s_i64 = td5_env_flag_on("TD5RE_V2V_SIMPLE_I64");
@@ -3018,6 +3091,147 @@ static void v2v_selfprobe(void)
 
 #ifndef TD5RE_RELEASE
 /* ========================================================================
+ * [ROUND 1027 N] racer-vs-racer + airborne probe (runs right after v2v_selfprobe, same tick).
+ * A = slot 0, B = slot 1 (a racer), both copies, nothing applied to the real actors.
+ *  (1) planar poses, same grid as the traffic probe: ground truth = hull SAT.
+ *  (2) airborne poses: B stacked over A with dy 0..1500 and flagged airborne
+ *      (wheel_contact_bitmask 0x0F, the dispatch that selects the sphere path). Ground truth =
+ *      hull overlap AND dy < H (H = TD5RE_V2V_PROBE_H, default 420 model units: a car body).
+ * Columns: sphere = master collision_detect_simple (3-D sphere), new_sphere = the TD5RE_RACER_SAT gate.
+ * "v2v_probe_r:" per case, "v2v_probe_r_sum:" totals.
+ * ======================================================================== */
+static void v2v_selfprobe_racers(void)
+{
+    TD5_Actor *pa = (TD5_Actor *)g_actor_table_base;
+    TD5_Actor *pb = (TD5_Actor *)(g_actor_table_base + (size_t)1 * TD5_ACTOR_STRIDE);
+    TD5_Actor A, B;
+    V2VProbeTally t_mfull = {0,0,0}, t_rfull = {0,0,0}, t_sph = {0,0,0}, t_nfull = {0,0,0}, t_nsph = {0,0,0};
+    V2VProbeTally a_sph = {0,0,0}, a_nsph = {0,0,0};
+    int first_air_stop = -1;
+    const int H = td5_env_int("TD5RE_V2V_PROBE_H", 420, 50, 2000);
+    static const struct { const char *name; int rel_deg; int lat0, lat1, lat_step; int fwd0, fwd1, fwd_step; } sc[] = {
+        { "side-by-side",   0,   300, 1000, 100,    0,    0, 100 },
+        { "angled-30",     30,   300, 1300, 100,    0,    0, 100 },
+        { "angled-45",     45,   300, 1500, 100,    0,    0, 100 },
+        { "angled-60",     60,   300, 1500, 100,    0,    0, 100 },
+        { "oncoming-pass", 180,  300, 1000, 100,    0,    0, 100 },
+        { "head-on",       180,    0,    0, 100, 1000, 2000, 100 },
+        { "rear-end",        0,    0,    0, 100, 1000, 2000, 100 },
+        { "tail-angled-45", 45,  300,  300, 100,  900, 1900, 100 },
+        { "T-bone-90",      90,    0,    0, 100,  400, 1500, 100 },
+    };
+    /* airborne landings: B over A (lat/fwd offsets), several relative headings, dy sweep */
+    static const struct { const char *name; int rel_deg; int lat; int fwd; } ar[] = {
+        { "land-centre",     0,     0,    0 },
+        { "land-nose",       0,     0,  900 },
+        { "land-side",       0,   500,    0 },
+        { "land-side-ang",  40,   600,  200 },
+        { "land-T",         90,     0,  500 },
+        { "land-gap-side",   0,  1100,    0 },     /* beside, hulls apart */
+        { "land-gap-nose",   0,     0, 1700 },     /* ahead, hulls apart */
+        { "land-gap-ang",   45,  1000,  600 },
+    };
+    if (!pa->car_definition_ptr || !pb->car_definition_ptr || pb->slot_index >= g_traffic_slot_base) {
+        TD5_LOG_I(LOG_TAG, "v2v_probe_r: no racer pair (slot0 cdef=%p slot1 cdef=%p)",
+                  (void *)pa->car_definition_ptr, (void *)pb->car_definition_ptr);
+        return;
+    }
+    memcpy(&A, pa, sizeof A);
+    memcpy(&B, pb, sizeof B);
+    A.euler_accum.yaw = 600 << 8;
+    TD5_LOG_I(LOG_TAG, "v2v_probe_r: A slot=%d hull=%d  B slot=%d hull=%d  radius A=%d B=%d  H=%d  vert_pct=%d",
+              (int)A.slot_index, (int)s_hull_n[A.slot_index], (int)B.slot_index, (int)s_hull_n[B.slot_index],
+              (int)CDEF_S(&A, CDEF_COLLISION_RADIUS), (int)CDEF_S(&B, CDEF_COLLISION_RADIUS), H, racer_sat_vert_pct());
+    TD5_LOG_I(LOG_TAG, "v2v_probe_r: vertical reach A-B = %d (sphere combined %d)",
+              (int)racer_sat_vert_reach(&A, &B, ((((int32_t)CDEF_S(&A, CDEF_COLLISION_RADIUS)) + (int32_t)CDEF_S(&B, CDEF_COLLISION_RADIUS)) * 3) >> 2),
+              (int)(((((int32_t)CDEF_S(&A, CDEF_COLLISION_RADIUS)) + (int32_t)CDEF_S(&B, CDEF_COLLISION_RADIUS)) * 3) >> 2));
+    A.wheel_contact_bitmask = 0; B.wheel_contact_bitmask = 0;
+    for (size_t k = 0; k < sizeof sc / sizeof sc[0]; k++) {
+        for (int fwd = sc[k].fwd0; fwd <= sc[k].fwd1; fwd += sc[k].fwd_step) {
+            for (int lat = sc[k].lat0; lat <= sc[k].lat1; lat += sc[k].lat_step) {
+                int32_t h = FP_TRUNC(A.euler_accum.yaw);
+                int32_t c = cos_fixed12(h), sn = sin_fixed12(h);
+                int32_t dx = (c * lat + sn * fwd) >> 12;
+                int32_t dz = (-sn * lat + c * fwd) >> 12;
+                OBB_CornerData corners[8];
+                int m_full, r_full, sph, sat_rej, touch;
+                int64_t sep;
+                int32_t ra = (int32_t)CDEF_S(&A, CDEF_COLLISION_RADIUS), rb = (int32_t)CDEF_S(&B, CDEF_COLLISION_RADIUS);
+                int32_t comb = ((ra + rb) * 3) >> 2;
+                B.world_pos.x = A.world_pos.x + dx * 256;
+                B.world_pos.z = A.world_pos.z + dz * 256;
+                B.world_pos.y = A.world_pos.y;
+                B.euler_accum.yaw = A.euler_accum.yaw + (int32_t)(((int64_t)sc[k].rel_deg * 4096 / 360) << 8);
+                sep = v2v_actor_separation(&A, &B);
+                touch = (sep <= 0);
+                s_probe_rot = 0;
+                memset(corners, 0, sizeof corners);
+                m_full = obb_corner_test(&A, &B, A.world_pos.x, A.world_pos.z, B.world_pos.x, B.world_pos.z,
+                                         A.euler_accum.yaw, B.euler_accum.yaw, corners) != 0;
+                s_probe_rot = 1;
+                memset(corners, 0, sizeof corners);
+                r_full = obb_corner_test(&A, &B, A.world_pos.x, A.world_pos.z, B.world_pos.x, B.world_pos.z,
+                                         A.euler_accum.yaw, B.euler_accum.yaw, corners) != 0;
+                s_probe_rot = -1;
+                sph = ((int64_t)dx * dx + (int64_t)dz * dz) < (int64_t)comb * comb;
+                sat_rej = (sep > 0);
+                v2v_probe_tally(&t_mfull, m_full, touch);
+                v2v_probe_tally(&t_rfull, r_full, touch);
+                v2v_probe_tally(&t_sph, sph, touch);
+                v2v_probe_tally(&t_nfull, r_full && !sat_rej, touch);
+                v2v_probe_tally(&t_nsph, !sat_rej, touch);
+                TD5_LOG_I(LOG_TAG,
+                          "v2v_probe_r: %-14s rel=%3d lat=%5d fwd=%5d gap=%7.1f touch=%d | master_full=%d rot_full=%d sphere=%d | new_full=%d new_sphere=%d",
+                          sc[k].name, sc[k].rel_deg, lat, fwd, (double)sep / 256.0, touch, m_full, r_full, sph,
+                          r_full && !sat_rej, !sat_rej);
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "v2v_probe_r_sum: planar cases=%d  master_full FP=%d FN=%d | rot_full FP=%d FN=%d | sphere FP=%d FN=%d | new_full FP=%d FN=%d | new_sphere FP=%d FN=%d",
+              t_mfull.n, t_mfull.fp, t_mfull.fn, t_rfull.fp, t_rfull.fn, t_sph.fp, t_sph.fn,
+              t_nfull.fp, t_nfull.fn, t_nsph.fp, t_nsph.fn);
+
+    /* airborne: B above A, sphere path dispatch */
+    A.wheel_contact_bitmask = 0x0F;
+    B.wheel_contact_bitmask = 0x0F;
+    for (size_t k = 0; k < sizeof ar / sizeof ar[0]; k++) {
+        int air_stop = -1;
+        for (int dy = 0; dy <= 1500; dy += 100) {
+            int32_t h = FP_TRUNC(A.euler_accum.yaw);
+            int32_t c = cos_fixed12(h), sn = sin_fixed12(h);
+            int32_t dx = (c * ar[k].lat + sn * ar[k].fwd) >> 12;
+            int32_t dz = (-sn * ar[k].lat + c * ar[k].fwd) >> 12;
+            int32_t ra = (int32_t)CDEF_S(&A, CDEF_COLLISION_RADIUS), rb = (int32_t)CDEF_S(&B, CDEF_COLLISION_RADIUS);
+            int32_t comb = ((ra + rb) * 3) >> 2;
+            int64_t sep, d3;
+            int touch, sph, nsph, planar_ok;
+            B.world_pos.x = A.world_pos.x + dx * 256;
+            B.world_pos.z = A.world_pos.z + dz * 256;
+            B.world_pos.y = A.world_pos.y + dy * 256;
+            B.euler_accum.yaw = A.euler_accum.yaw + (int32_t)(((int64_t)ar[k].rel_deg * 4096 / 360) << 8);
+            sep = v2v_actor_separation(&A, &B);
+            planar_ok = (sep <= 0);
+            touch = planar_ok && dy < H;
+            d3 = (int64_t)dx * dx + (int64_t)dz * dz + (int64_t)dy * dy;
+            sph = d3 < (int64_t)comb * comb;
+            nsph = planar_ok && dy < racer_sat_vert_reach(&A, &B, comb);
+            v2v_probe_tally(&a_sph, sph, touch);
+            v2v_probe_tally(&a_nsph, nsph, touch);
+            if (nsph == 0 && air_stop < 0 && planar_ok) air_stop = dy;
+            TD5_LOG_I(LOG_TAG,
+                      "v2v_probe_r: AIR %-13s rel=%3d lat=%5d fwd=%5d dy=%5d gap=%7.1f touch=%d | sphere=%d new_sphere=%d",
+                      ar[k].name, ar[k].rel_deg, ar[k].lat, ar[k].fwd, dy, (double)sep / 256.0, touch, sph, nsph);
+        }
+        if (first_air_stop < 0 && air_stop >= 0) first_air_stop = air_stop;
+    }
+    TD5_LOG_I(LOG_TAG, "v2v_probe_r_sum: airborne cases=%d  sphere FP=%d FN=%d | new_sphere FP=%d FN=%d  (new_sphere stops above dy=%d)",
+              a_sph.n, a_sph.fp, a_sph.fn, a_nsph.fp, a_nsph.fn, first_air_stop);
+}
+#endif
+
+
+#ifndef TD5RE_RELEASE
+/* ========================================================================
  * [ROUND 1026 M] TD5RE_V2V_STAGE="start,end,lat,fwd,rel_deg" (dev builds): stage a NEAR-MISS.
  * At sim tick `start` the first live traffic car is pinned, motionless, at (lat,fwd) world
  * units to the right/ahead of slot 0 (in slot 0's heading at that moment), rel_deg off its
@@ -3111,7 +3325,7 @@ void td5_physics_resolve_vehicle_contacts(void)
     s_v2v_tick++;
     V2V_TICK_BUMP();
 #ifndef TD5RE_RELEASE
-    if (s_v2v_tick == 90 && td5_env_flag_off("TD5RE_V2V_SELFPROBE")) v2v_selfprobe();
+    if (s_v2v_tick == 90 && td5_env_flag_off("TD5RE_V2V_SELFPROBE")) { v2v_selfprobe(); v2v_selfprobe_racers(); }
     v2v_stage_tick(total);
 #endif
 
@@ -3591,6 +3805,7 @@ void td5_physics_hitbox_invalidate(int slot)
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
     s_mesh_box_valid[slot] = 0;
     s_hull_valid[slot] = 0;
+    s_mesh_hy[slot] = 0;
 }
 
 /* Hull point count for a slot (0 when no valid silhouette) - envelope log. */

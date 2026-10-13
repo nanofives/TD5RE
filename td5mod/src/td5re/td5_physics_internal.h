@@ -294,6 +294,7 @@ void    td5_physics_gentle_recovery_coast(TD5_Actor *actor);
 void    hull_build_store(int slot, const TD5_MeshVertex *verts, int n);
 int     wreck_immobile_enabled(void);                       /* traffic wreck anchoring knob */
 void    mesh_box_store(int slot, int32_t half_w, int32_t front_z);
+void    mesh_height_store(int slot, int32_t half_h);            /* [R1027 N] mesh |y| extent */
 void    td5_physics_hitbox_invalidate(int slot);            /* clear model box + hull for slot */
 int     td5_physics_hull_points(int slot);                  /* 0 when no valid silhouette */
 
