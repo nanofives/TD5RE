@@ -256,6 +256,7 @@ int32_t g_encounter_tracked_handle = -1;    /* -1 = none */
 int32_t g_encounter_enabled;                 /* master gate */
 static int32_t g_encounter_cooldown;                /* counts down from 300 */
 static int32_t g_encounter_active[TD5_MAX_TOTAL_ACTORS];
+static int encounter_leak_fix_enabled(void);   /* [R1026 K] defined above cop_end_chase */
 static int32_t g_encounter_control_active_latch;
 static int32_t g_encounter_steer_bias_latch;
 static int32_t g_encounter_phase_flag;              /* 0=acquisition, !0=tracking */
@@ -401,6 +402,15 @@ enum { COP_RAM_LUNGE = 0, COP_RAM_BACKUP = 1 };
     memset(g_actor_broken_ticks, 0, sizeof(g_actor_broken_ticks));
     memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
     memset(g_cop_cooldown, 0, sizeof(g_cop_cooldown));
+    /* [R1026 K] The pull-over latch is police-chase per-race state like the rest of
+     * this block; a stale 1 here brakes the next race's human car forever. */
+    if (encounter_leak_fix_enabled()) {
+        int stale = 0;
+        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) stale += (g_encounter_active[i] != 0);
+        if (stale)
+            TD5_LOG_W(LOG_TAG, "cop_state_reset: cleared %d STALE pull-over latch(es) carried from the previous race", stale);
+        memset(g_encounter_active, 0, sizeof(g_encounter_active));
+    }
     memset(s_cop_ram_phase, 0, sizeof(s_cop_ram_phase));
     memset(s_cop_ram_timer, 0, sizeof(s_cop_ram_timer));
     memset(s_cop_ram_stuck, 0, sizeof(s_cop_ram_stuck));
@@ -418,11 +428,42 @@ enum { COP_RAM_LUNGE = 0, COP_RAM_BACKUP = 1 };
     s_cop_spawn_counter = 0;
 }
 
+/* [R1026 K 2026-10-12] Mariano: "after one or two races joystick works but can't
+ * accelerate". g_encounter_active[slot] is the POLICE pull-over latch: while it is
+ * 1 the human input path (td5_input_update_player_control) overrides the player's
+ * throttle/brake with a forced stop and leaves STEERING alone -- a car that steers
+ * but never accelerates, on any input device. The latch was only ever cleared by
+ * the scheduler's own end-of-chase branches and by td5_ai_init (module boot), so
+ * any end that skipped them left it at 1 for good: a pulling cop recycled /
+ * despawned mid pull-over (cop_release -> cop_end_chase), a race ended or aborted
+ * during the pull-over, or an invalid target. cop_state_reset() (the per-race reset)
+ * did not touch it either, so the stale 1 rode into the next race, where no cop
+ * exists any more to ever clear it. Knob TD5RE_ENCOUNTER_LEAK_FIX (default ON; 0 =
+ * the previous behaviour, for A/B). */
+static int encounter_leak_fix_enabled(void) {
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_ENCOUNTER_LEAK_FIX");
+        TD5_LOG_I(LOG_TAG, "encounter latch leak fix: %s (TD5RE_ENCOUNTER_LEAK_FIX)",
+                  s ? "ON" : "off");
+    }
+    return s;
+}
+
 /* End the chase a cop is running: release its target's "pursued-by" lock and
  * return the cop to COP_IDLE — but it STAYS a cop (g_cop_is_cop kept) so it can
  * acquire the next car that passes it. */
 static void cop_end_chase(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    /* [R1026 K] A cop ending a PULLOVER must let go of the car it was holding,
+     * whatever the reason it ends (despawn/recycle, invalid target, race over). */
+    if (g_cop_phase[slot] == COP_PULLOVER && encounter_leak_fix_enabled()) {
+        int t = g_cop_target[slot];
+        if (t >= 0 && t < TD5_MAX_TOTAL_ACTORS && g_encounter_active[t]) {
+            g_encounter_active[t] = 0;
+            TD5_LOG_I(LOG_TAG, "cop_end_chase: cop=%d releases pull-over hold on slot %d", slot, t);
+        }
+    }
     /* [MULTI-COP 2026-06-29] No per-target pursuer lock to clear anymore — a car
      * can be chased by several cops at once; td5_ai_actor_is_pursued() scans cops. */
     g_cop_target[slot] = -1;
@@ -7843,6 +7884,36 @@ static inline void td5_enc_stop_tracked_audio(void) {
  * The "force the target to a stop" is signalled via g_encounter_active[target]
  * (consumed by the human input path + the AI racer path).
  * ======================================================================== */
+#ifndef TD5RE_RELEASE
+void td5_ai_dev_plant_encounter(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    g_encounter_active[slot] = 1;
+    TD5_LOG_W(LOG_TAG, "DEV: planted a pull-over latch on slot %d with no cop behind it", slot);
+}
+#endif
+
+/* [R1026 K 2026-10-12] Safety net for the pull-over latch: g_encounter_active[slot]
+ * may only be 1 while some cop is in COP_PULLOVER with that slot as its target. Any
+ * other 1 is an orphan (see encounter_leak_fix_enabled) and is cleared, with a log
+ * line, so a car can never be held braked by a cop that no longer exists. */
+static void td5_ai_encounter_sweep_orphans(void) {
+    if (!encounter_leak_fix_enabled()) return;
+    for (int slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++) {
+        int live = 0;
+        if (!g_encounter_active[slot]) continue;
+        for (int k = 0; k < TD5_MAX_TOTAL_ACTORS; k++) {
+            if (g_cop_is_cop[k] && g_cop_phase[k] == COP_PULLOVER && g_cop_target[k] == slot) {
+                live = 1;
+                break;
+            }
+        }
+        if (!live) {
+            g_encounter_active[slot] = 0;
+            TD5_LOG_W(LOG_TAG, "encounter latch ORPHAN cleared: slot=%d was held braked with no cop pulling it over", slot);
+        }
+    }
+}
+
 /* [DEBUG 2026-06-24] Cops normally chase HUMAN players only (state 1). This
  * default-OFF knob also lets a chase trigger on AI-driven racers (state 0) so
  * the chase/dodge/durability behaviour can be exercised headlessly (PlayerIsAI
@@ -8282,6 +8353,9 @@ void td5_ai_update_race_actors(void) {
         td5_ai_update_special_encounter();
     }
 
+    /* [R1026 K] Runs even when no traffic/cop scheduler is active (POLICE off, no
+     * traffic): a latch left at 1 with no cop pulling that car over is an orphan. */
+    td5_ai_encounter_sweep_orphans();
 }
 
 /* [item#2 2026-06-15] A/B knob: stop AI cars once a CIRCUIT race is over.

@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (cars that would not accelerate)" },
+    { CL_ITEM,    "A police pull-over can no longer leave your car unable" },
+    { CL_ITEM,    "  to accelerate. If a race ended or a cop vanished during" },
+    { CL_ITEM,    "  the pull-over, the car kept being held braked: it steered" },
+    { CL_ITEM,    "  but never accelerated, in the next race too. Fixed." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 12 (real places: faster first race)" },
     { CL_ITEM,    "La Plata: the first race on a freshly built track waits" },
     { CL_ITEM,    "  about 7 s before the countdown, not 40 s. Same track." },

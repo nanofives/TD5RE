@@ -105,6 +105,10 @@ const int32_t g_terrain_ff_coefficients[13] = {
 
 /** Live per-player packed input bitmask (mirrors gPlayerControlBits). */
 static uint32_t s_control_bits[TD5_MAX_RACER_SLOTS];
+#ifndef TD5RE_RELEASE
+static uint32_t s_selftest_drive_bits;     /* [R1026 K] see td5_input_selftest_set_drive_bits */
+void td5_input_selftest_set_drive_bits(uint32_t bits) { s_selftest_drive_bits = bits; }
+#endif
 
 /** Packed analog X per-player (decoded from bitmask when analog flag set). */
 static int16_t s_analog_x[TD5_MAX_RACER_SLOTS];
@@ -959,6 +963,9 @@ void td5_input_poll_race_session(void)
             if (td5_inputscript_active())
                 s_control_bits[i] |= td5_inputscript_race_bits(i);
 
+#ifndef TD5RE_RELEASE
+            if (i == 0) s_control_bits[i] |= s_selftest_drive_bits;   /* [R1026 K] selftest throttle */
+#endif
             /* [CONTROL 2026-07-21] Live-control hold_action bits overlay the same
              * way (identical downstream paths). Returns 0 whenever the control
              * server is off or nothing is held; compiled to a constant 0 in
@@ -986,7 +993,14 @@ void td5_input_poll_race_session(void)
              * first: on a real pad those positions are axis payload, never
              * buttons, so leaving the STEER, THROTTLE, BRAKE or RECOVER bits set
              * there would be a shape no device ever produces. */
-            if (chaos && td5_env_int("TD5RE_CHAOS_FAKE_PADS", 0, 0, 1) &&
+            /* [R1026 K 2026-10-12] TD5RE_FAKE_PAD=1 does the same for a plain
+             * (non-chaos) race: every harness seat is keyboard-bound, so the
+             * analog Path B decode (steer) and the analog Y throttle decode were
+             * unreachable by any automated run. With it on, scripted / socket
+             * `throttle` presses reach the car as a pad-shaped word, exactly the
+             * way a real pad delivers them. */
+            if (((chaos && td5_env_int("TD5RE_CHAOS_FAKE_PADS", 0, 0, 1)) ||
+                 td5_env_int("TD5RE_FAKE_PAD", 0, 0, 1)) &&
                 !(s_control_bits[i] & (uint32_t)TD5_INPUT_ANALOG_X_FLAG)) {
                 uint32_t w = s_control_bits[i];
                 int steer = 0, thr = 0, ax, ay;
