@@ -55,6 +55,12 @@
  *   as well as "620". The one-way flow of the path is logged per candidate; TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a left
  *   loop that runs against a one-way street (default off: right loops ignore the flow too).
  *
+ *   [1029 X] TD5RE_GEO_LOOP_SHARED_MOUTH (default 1; 0 = round 1028): a left and a right loop may open on the SAME main
+ *   spans (the two arms of one cross street); the engine keeps two side-link entries per span, the AI decides the
+ *   pair as one three-way choice. TD5RE_GEO_LOOP_FORK_RAMP (default 1; 0 = round 1028): a departure mouth may stand
+ *   in a real fork's widened approach (other side of the road), decided together with the fork
+ *   (TD5RE_AI_LOOP_FORK_PAIR, spans, default 12; 0 = two separate decisions).
+ *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no geo place
  * loaded, and no tg_rand / tg_frand / tg_range is called here.
  */
@@ -436,12 +442,18 @@ static int bl_fork_blocks(const BlPlan *P, int s)
     const TG_Fork *f;
     if ((tg_fork_side_at(s) > 0 ? 1 : -1) == (P->sd > 0 ? 1 : -1)) return 1;      /* the fork's corridor lies on the loop's side */
     if ((s >= P->a1_lo - m && s <= P->a1_hi + m) || (s >= P->a2_lo - m && s <= P->a2_hi + m)) {
-        /* [ROUND 1029 X] TD5RE_GEO_LOOP_FORK_RAMP=1: a mouth may stand in the fork's widened approach / rejoin ramp
-         * (core pad -10, the round-1022 N2 measurement); the AI then decides the loop and the fork as one three-way
-         * choice (td5_track.c sl_pair_forks). Default off: measured below in GEO_REAL_FORKS.md "Round 1029 X". */
-        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", td5_env_flag_off("TD5RE_GEO_LOOP_FORK_RAMP") ? -10 : 3, -10, 20);
+        const int pad = td5_env_int("TD5RE_GEO_LOOP_FORK_CORE_PAD", 3, -10, 20);
         f = bl_fork_covering(s);
         if (!td5_env_flag_on("TD5RE_GEO_LOOP_FORK_NWAY") || !f || f->freec > 0) return 1;
+        /* [ROUND 1029 X] TD5RE_GEO_LOOP_FORK_RAMP (default on): a DEPARTURE mouth may stand in the fork's widened
+         * APPROACH (before the core), because the AI then decides the loop and the fork as one three-way choice
+         * (td5_track.c sl_pair_forks, TD5RE_AI_LOOP_FORK_PAIR); before, the two decisions came 2..4 spans apart and
+         * the round-1022 N2 trial of this placement WARNed. An arrival mouth, or anything in the rejoin ramp, keeps
+         * the core rule (not measured). =0 restores the round-1022 rule. */
+        if (td5_env_flag_on("TD5RE_GEO_LOOP_FORK_RAMP") && td5_env_int("TD5RE_AI_LOOP_FORK_PAIR", 12, 0, 40) > 0 &&
+            td5_env_flag_on("TD5RE_GEO_LOOP_SHARED_MOUTH") &&
+            s >= P->a1_lo - m && s <= P->a1_hi + m && s < f->F + 1 + pad && P->a1_lo >= f->F - TD5_TG_BRANCH_WIDEN - 2)
+            return 0;
         if (s < f->F + 1 + pad || s > f->R - 1 - pad) return 1;
     }
     return 0;

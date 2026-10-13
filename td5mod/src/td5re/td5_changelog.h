@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (a side street on both sides at once)" },
+    { CL_ITEM,    "Geo tracks: where a cross street meets the route on both" },
+    { CL_ITEM,    "  sides, a block loop can now leave to the LEFT and another" },
+    { CL_ITEM,    "  to the RIGHT from the same corner, so there are three" },
+    { CL_ITEM,    "  ways from one spot. Before, only one of the two was" },
+    { CL_ITEM,    "  built. AI cars pick one of the three and stick to it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (AI cars in a convoy)" },
     { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
     { CL_ITEM,    "  front. They used to judge the gap by counting track" },
