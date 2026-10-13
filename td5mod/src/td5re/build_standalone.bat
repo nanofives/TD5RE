@@ -181,9 +181,31 @@ REM does (the workflow pipes gcc through `tee`). batch has no tee, so each
 REM compile's stderr goes to a temp file that is then echoed to the console and
 REM appended to the log. gcc's exit code must be captured BEFORE the `type`
 REM calls, which reset errorlevel. [2026-08-14]
+REM FAST INCREMENTAL COMPILE (TD5RE_FASTSRCS, set by fastbuild.bat).
+REM When defined, only those modules are recompiled this run and every other
+REM .o in !BUILDDIR! is reused as-is; the archive + link below still cover the
+REM FULL srcs.txt list, so the exe is complete. It is a COMPILE-SET override,
+REM never a module-list override -- which is why fastbuild.bat can be a 20-line
+REM wrapper instead of a copy of this file that drifts.
+REM NO HEADER DEPENDENCY TRACKING: after editing a .h, run the full build.
+set "COMPILE_SRCS=!TD5RE_SRCS!"
+if defined TD5RE_FASTSRCS (
+    REM Reusing .o files only works if a full build already populated BUILDDIR.
+    REM main.o is linked directly below, so its absence proves there is nothing
+    REM to reuse -- fail loudly instead of linking a half-built exe.
+    if not exist !BUILDDIR!\main.o (
+        echo ERROR: TD5RE_FASTSRCS set but !BUILDDIR!\main.o is missing.
+        echo        A fast build only recompiles the named modules and reuses the
+        echo        rest -- run build_standalone.bat !VARIANT! once first.
+        exit /b 1
+    )
+    set "COMPILE_SRCS=%TD5RE_FASTSRCS%"
+    echo [fast] recompiling only: %TD5RE_FASTSRCS%
+)
+
 set "CCERR=!BUILDDIR!\_cc_stderr.tmp"
 set FAIL=0
-for %%F in (!TD5RE_SRCS!) do (
+for %%F in (!COMPILE_SRCS!) do (
     echo Compiling %%~nF.c...
     "%GCC%" !CFLAGS! %SRCDIR%\%%F -o !BUILDDIR!\%%~nF.o 2> "!CCERR!"
     set "CCRC=!errorlevel!"
