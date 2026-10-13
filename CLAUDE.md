@@ -54,7 +54,29 @@ cd td5mod\src\td5re
 build_all.bat                 :: canonical — refresh ddraw_wrapper lib if stale, then DEV + RELEASE
 build_standalone.bat          :: DEV only     -> td5re.exe
 build_standalone.bat release  :: RELEASE only -> td5re_release.exe (-DTD5RE_RELEASE -DNDEBUG, stripped)
+fastbuild.bat td5_tg_city.c   :: FAST incremental — recompile only these modules, ~9 s
 ```
+
+**`fastbuild.bat` (fast incremental, ~9 s vs ~2.5 min).** Recompiles only the
+`.c` files you name, reuses every other `.o` already in `build\`, then archives
+and links the FULL `srcs.txt` list, so the exe is complete:
+
+```bat
+fastbuild.bat td5_tg_city.c                 :: DEV, one module
+fastbuild.bat td5_geo.c td5_tg_road.c       :: DEV, several
+fastbuild.bat release td5_tg_city.c         :: RELEASE (build_release\)
+set FASTSRCS=a.c b.c && fastbuild.bat       :: legacy env form
+```
+
+It sets `TD5RE_FASTSRCS` and calls `build_standalone.bat`, which resolves
+`srcs.txt` / `cflags.txt` / `link_libs.txt` exactly as always — so it carries no
+flag or module list of its own and cannot drift from the real build. It refuses
+to run when `build\main.o` is missing (nothing to reuse yet).
+
+**It does NOT track header dependencies.** After editing any `.h` (or
+`srcs.txt` / `cflags.txt`), run the full `build_standalone.bat` — a fast build
+would keep `.o` files compiled against the old header and link a mixed exe.
+`build_all.bat` stays the canonical final build.
 
 Both exes are **x86_64** (i686 retired 2026-07-30; toolchain parked in `_archive/`,
 last 32-bit tree in git history). The port has **no zlib dependency** — embedded
@@ -111,6 +133,21 @@ includers, no new compiler warnings per -W class.
   For a byte-level check of the generated tracks use
   `verify/geo_tags_identity.ps1 -Arm synthetic -NoControl` (move
   `re/assets/geo/SELECTED.TXT` aside first).
+- **Comparing generated-track bytes: same algorithm on both sides, then read
+  GENSTAMP.TXT.** `python verify/geo_level_identity.py <levelDir> [<other>]`
+  prints **both** the sha256 prefix and the md5, plus the build identity
+  (`seed=`/`spec=`/`env=`/`exe=`), and names which input moved.
+  ⚠️ `verify/geo_tags_identity.ps1` prints a **sha256** prefix while the round
+  memories record **md5** — the standing "a fresh worktree builds level091 to a
+  different hash (61410E76 vs main's be65458d)" warning was exactly that
+  mix-up: one 12332744-byte MODELS.DAT, md5 `BE65458D…`, sha256 `61410E76…`
+  (verified 2026-10-13 on the file itself).
+  **A fresh worktree is NOT a variable** — at 66a9f923 with main's exe, level091
+  (`-Seed 2054677019`) came out byte-identical in the main tree, in two fresh
+  worktrees, over both the gate and the streamed race path, and across three
+  different `env=` hashes; the 1.1 GB `re/assets/geo` cache was md5-identical in
+  both trees and unchanged by the build. Only a knob that changes generation
+  (e.g. `TD5RE_GEO_MASTARM=0`) moved the bytes.
 - **Live-control socket** (dev builds): `td5re.exe --Control=1` (or `[Control]
   Enabled=1`) opens a localhost UDP command socket (`127.0.0.1:37060`,
   `TD5RE_CONTROL_PORT` override; default OFF) so an external process can drive
