@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 12 (traffic collisions)" },
+    { CL_ITEM,    "Traffic: a crash with a traffic car now needs the two" },
+    { CL_ITEM,    "  cars to really touch. Passing a car in the next lane," },
+    { CL_ITEM,    "  or meeting one at an angle, no longer bumps you or" },
+    { CL_ITEM,    "  crashes you from half a car-width away." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 12 (real places: faster first race)" },
     { CL_ITEM,    "La Plata: the first race on a freshly built track waits" },
     { CL_ITEM,    "  about 7 s before the countdown, not 40 s. Same track." },
