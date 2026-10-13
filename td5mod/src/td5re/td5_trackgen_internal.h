@@ -1838,6 +1838,7 @@ int tg_branch_lane_gain_s(int k, int len, int base_lanes, double sep);
 #define TD5_TG_CARRIAGEWAY_MARGIN 300.0   /* house verge between road and prop */
 double tg_road_half_width(const TG_NodeList *nl, int si);
 double tg_carriageway_reach(const TG_NodeList *nl, int si, double side);
+double tg_fork_real_row_shift(const TG_NodeList *nl, int si, double side, int e);   /* [1029 V] one row, -1 = no real fork */
 int tg_on_carriageway(const TG_NodeList *nl, int si, double lateral, double margin);
 double tg_carriageway_clear_gap(const TG_NodeList *nl, int si, double side, double gap, double margin);
 void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans);
