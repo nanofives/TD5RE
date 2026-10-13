@@ -1936,6 +1936,23 @@ static long      s_fr_ribbons, s_fr_cont, s_fr_ways;
 static unsigned char s_fr_tip[TD5_TG_MAX_SPANS + 8][2];
 static long          s_fr_tips;
 
+/* [ROUND 1029 W item F] "the ribbon ends at the main road's PAVEMENT, not into the carriageway, so from the driver's seat it
+ * reads as a dead end" (Calle 54, level091 route B9839962, owner span 753). MEASURED on MODELS.DAT: the 1023 E tip did reach
+ * the carriageway edge, but only as a POINT. The taper ran straight from where the inner edge touches the pavement's outer
+ * edge (fa) to that point, so between the ribbon and the carriageway lay a wedge of ground 2000 units wide at fa narrowing
+ * to 0 at the tip over 7500 units (spans 752..757): grass, then a sliver of asphalt behind it. Now one more vertex J is put
+ * on the way where the ribbon's INNER EDGE reaches the carriageway edge (centre lateral = cr + w cos(theta), theta the way's
+ * angle to the route there), so over the last segment J -> tip the inner edge runs along the carriageway and the street's
+ * asphalt meets the road along its whole taper, like a merging lane. The few spans before J keep a gore of ground, which is
+ * what a real Y looks like. Scenery only (no corridor, cars cannot drive onto it). TD5RE_GEO_FRONTAGE_JOIN=0 restores the
+ * 1023 E taper. */
+static long          s_fr_joins;
+
+static int tg_fr_join_on(void)
+{
+    return td5_env_flag_on("TD5RE_GEO_FRONTAGE_JOIN");
+}
+
 int tg_net_fr_tip_here(int si, int left)
 {
     if (si < 0 || si >= TD5_TG_MAX_SPANS + 8) return 0;
@@ -2031,12 +2048,13 @@ static int tg_fr_lay(const TG_NodeList *nl, int nspans, const TD5_GeoRoad *rd, i
                      int n, int i0, int dir, int merge, int hop)
 {
     const double w = rd->width * 0.5;
-    const int cap = merge ? TG_NET_POLY - 2 : TG_NET_POLY;
+    const int join = merge && tg_fr_join_on();     /* [1029 W] one more vertex: J */
+    const int cap = merge ? TG_NET_POLY - (join ? 3 : 2) : TG_NET_POLY;
     int idx[TG_NET_POLY], nk = 0, i, m, nq = 0, owner, ended;
     double qx[TG_NET_POLY], qz[TG_NET_POLY];
     double sn = 0.0, fsk = 0.0;
     int tip_cr = 0;                  /* [1023 E] the taper reaches the carriageway edge */
-    TG_NetEdge *ed;
+    int ifa = -1;                    /* [1029 W] index of fa (inner edge on the pavement edge) in qx/qz */    TG_NetEdge *ed;
 
     for (i = i0; i >= 0 && i < n && nk < cap; i += dir) {
         const TG_FrS *s = &s_frs[i];
@@ -2083,6 +2101,7 @@ static int tg_fr_lay(const TG_NodeList *nl, int nspans, const TD5_GeoRoad *rd, i
             if (run < TG_FR_RUN) return 0;
         }
         fa = (o->alat - (o->hk + w)) / d;                /* inner edge touches the pavement edge */
+        ifa = nq;
         qx[nq] = o->x + (in->x - o->x) * fa; qz[nq] = o->z + (in->z - o->z) * fa; nq++;
         {
             /* the centre line reaches the pavement edge (alat = hk) on the first inner sample at or
@@ -2113,6 +2132,37 @@ static int tg_fr_lay(const TG_NodeList *nl, int nspans, const TD5_GeoRoad *rd, i
                         const double fc = (dd > 1.0) ? (pv->alat - o->cr) / dd : 1.0;
                         qx[nq - 1] = pv->x + (q->x - pv->x) * fc; qz[nq - 1] = pv->z + (q->z - pv->z) * fc;
                         tip_cr = 1;
+                        break;
+                    }
+                    pv = q;
+                }
+            }
+            if (join && tip_cr) {
+                /* [1029 W item F] J: the first point inward of o where the ribbon's inner edge reaches the carriageway
+                 * edge. The half width projects onto the route's lateral as w cos(theta), theta the way segment's angle
+                 * to the route tangent at that sample. Inserted between fa and the tip. */
+                pv = o;
+                for (jj = i0 - dir; jj >= 0 && jj < n; jj -= dir) {
+                    const TG_FrS *q = &s_frs[jj];
+                    double sq, tgt;
+                    if (q->ni < 0) break;
+                    sq = fabs(q->ux * nl->v[q->ni].tz - q->uz * nl->v[q->ni].tx);
+                    if (sq > 1.0) sq = 1.0;
+                    tgt = o->cr + w * sqrt(1.0 - sq * sq);
+                    if (!(tgt < pv->alat)) break;            /* J would sit outward of fa: leave the 1023 E taper */
+                    if (q->alat <= tgt) {
+                        const double dd = pv->alat - q->alat;
+                        const double fj = (dd > 1.0) ? (pv->alat - tgt) / dd : 1.0;
+                        const double jx = pv->x + (q->x - pv->x) * fj, jz = pv->z + (q->z - pv->z) * fj;
+                        const double ax = jx - qx[nq - 2], az = jz - qz[nq - 2];
+                        const double bx = qx[nq - 1] - jx, bz = qz[nq - 1] - jz;
+                        /* J strictly between fa and the tip along the polyline */
+                        if (ax * bx + az * bz > 0.0 && ax * ax + az * az > 1.0 && bx * bx + bz * bz > 1.0) {
+                            qx[nq] = qx[nq - 1]; qz[nq] = qz[nq - 1];
+                            qx[nq - 1] = jx; qz[nq - 1] = jz;
+                            nq++;
+                            s_fr_joins++;
+                        }
                         break;
                     }
                     pv = q;
@@ -2155,7 +2205,8 @@ static int tg_fr_lay(const TG_NodeList *nl, int nspans, const TD5_GeoRoad *rd, i
     ed->fw_skip = (int)fsk;
     if (merge && tip_cr) {
         /* the main slab goes on the spans the tapered segment covers, on the side it lands */
-        const int sa = tg_geo_nearest(nl, nspans, qx[nq - 2], qz[nq - 2]);
+        const int ia = (ifa >= 0) ? ifa : nq - 2;       /* [1029 W] from fa, also when J follows it */
+        const int sa = tg_geo_nearest(nl, nspans, qx[ia], qz[ia]);
         const int sb = tg_geo_nearest(nl, nspans, qx[nq - 1], qz[nq - 1]);
         const int side = (s_frs[i0].lat >= 0.0) ? 1 : 0;
         int sj;
@@ -2187,6 +2238,7 @@ static void tg_net_geo_frontage(const TG_NodeList *nl, int nspans)
     if (nr > TG_FR_WAYS) nr = TG_FR_WAYS;
     memset(s_fr_laid, 0, sizeof(s_fr_laid));
     s_fr_nopen = 0; s_fr_ribbons = s_fr_cont = s_fr_ways = 0;
+    s_fr_joins = 0;
     rminx = rmaxx = nl->v[0].x; rminz = rmaxz = nl->v[0].z;
     for (i = 1; i <= nspans; i++) {
         if (nl->v[i].x < rminx) rminx = nl->v[i].x;
@@ -2249,7 +2301,8 @@ static void tg_net_geo_frontage(const TG_NodeList *nl, int nspans)
     for (ei = edge0; ei < s_ne; ei++)
         tg_net_paint_edge(&s_edges[ei], TG_WO_STREET);
     TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO FRONTAGE] %ld way(s) sampled, %ld merge ribbon(s) and %ld "
-              "continuation ribbon(s) laid (%d edge(s))", s_fr_ways, s_fr_ribbons, s_fr_cont, s_ne - edge0);
+              "continuation ribbon(s) laid (%d edge(s)); %ld merge(s) join the carriageway along the taper "
+              "(TD5RE_GEO_FRONTAGE_JOIN)", s_fr_ways, s_fr_ribbons, s_fr_cont, s_ne - edge0, s_fr_joins);
 }
 
 /* Is this build sourcing its streets from real OSM roads? A route alone is not

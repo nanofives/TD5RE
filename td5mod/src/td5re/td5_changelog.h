@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (La Plata: Calle 54 and Avenida 13)" },
+    { CL_ITEM,    "Generated city tracks: a street that merges into the" },
+    { CL_ITEM,    "  race road now meets the asphalt along its taper, like" },
+    { CL_ITEM,    "  a merging lane, instead of a strip of grass with the" },
+    { CL_ITEM,    "  street touching the road at a single point." },
+    { CL_ITEM,    "AI racers no longer swerve into the outer wall just" },
+    { CL_ITEM,    "  before a fork on a generated track: they aimed past" },
+    { CL_ITEM,    "  the split with the wrong road width (Avenida 13 fork:" },
+    { CL_ITEM,    "  11 wall hits in 6 test races, now none)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (AI cars in a convoy)" },
     { CL_ITEM,    "AI racers no longer drive into the back of the car in" },
     { CL_ITEM,    "  front. They used to judge the gap by counting track" },

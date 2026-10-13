@@ -4901,9 +4901,13 @@ static int s_avoid_filt_ok[16];
 static int32_t s_ylim_prev_yaw[16];
 static uint32_t s_ylim_bind[16];
 static int s_ylim_prev_ok[16];
+static int s_fork_aim = 1;              /* [R1029 W] TD5RE_AI_FORK_AIM_FRAME: aim frame across a fork mouth (see ai_fork_aim_frame) */
+static int s_aim_ref[TD5_MAX_TOTAL_ACTORS];   /* [R1029 W] the span whose frame the lane brain's cu is in (-1 = none / on a corridor) */
 
 static void ai_steer_cap_race_init(void)
 {
+    s_fork_aim = td5_env_flag_on("TD5RE_AI_FORK_AIM_FRAME");
+    { int q; for (q = 0; q < TD5_MAX_TOTAL_ACTORS; q++) s_aim_ref[q] = -1; }
     s_ylim_mode = td5_env_int("TD5RE_AI_STEER_YAWLIM", 0, 0, 2);
     s_ylim_L    = td5_env_int("TD5RE_AI_STEER_YAWLIM_L", 809, 100, 5000);
     s_ylim_a0   = td5_env_int("TD5RE_AI_STEER_YAWLIM_A0", 6000, 100, 200000);
@@ -5357,6 +5361,63 @@ static int ai_corr_aim_rb(int slot, int raw, int target_span, int rb)
         if (v > 384.0) v = 384.0;
         return (int)v;
     }
+}
+
+/* [ROUND 1029 W item G] THE SAME CONTINUITY ONE SPAN FURTHER: AN AIM PAST THE FORK SPAN.
+ * Avenida 13's fork (route B9839962, F=790) took 11 hard hits over 6 seeds, all at the mouth (raw 789..790), on
+ * BOTH arms, against 0 with the forks off. Every hit is the same picture: the car sits in its half of the 4-lane
+ * fork window at |lat| 0.5 (where the lane brain wants it, cu 0.19 / 0.80), then three spans before F the steering
+ * yanks it OUTWARD (steer +-50000, 18-20 degrees of slip) into the outer rail at |lat| 0.8. The aim at raw 787 is
+ * span 791 (main) or 1550 (corridor): 2-lane spans PAST the fork span, so ai_corr_aim_rb above (a type 8 / 11
+ * target only) does not apply, and the aim is `rb(791) + bias` with the bias computed against the 4-lane route
+ * line: u_base 0.625 of 6000 (lat -750) there, 0.375 of the 3000-wide main span (lat +1875) at 791, so the same
+ * bias puts the aim ~2600 units further out, behind the wall. Here the aim is the lane brain's own target instead:
+ * fraction cu of the span it was computed on (s_aim_ref), re-expressed on the target span's rails (same projection
+ * as above), bias 0, kept 8% inside the target's rails. Only when the target lies beyond a fork span (type 8) from
+ * that reference, or on a corridor while the reference is on the ring, and the two lane counts differ: every other
+ * aim is untouched. Generated tracks (ai_corr_slot_on). TD5RE_AI_FORK_AIM_FRAME=0 restores the old aim. */
+static int ai_fork_aim_frame(int slot, int raw, int target_span, int *rb, int32_t *bias)
+{
+    const uint8_t *strips = (const uint8_t *)g_strip_span_base;
+    const int span_count = td5_track_get_span_count();
+    const int ring = td5_track_get_ring_length();
+    int ref, crossed = 0, k, s;
+    int lrx, lrz, rrx, rrz, ltx, ltz, rtx, rtz;
+    double ex, ez, wr, lt, rt, wt, cu, u;
+    if (!s_fork_aim || !ai_corr_slot_on(slot) || !strips || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    ref = s_aim_ref[slot];
+    if (ref < 0 || ref >= ring || raw < 0 || raw >= ring || target_span < 0 || target_span >= span_count) return 0;
+    if (target_span == ref) return 0;
+    k = ref - raw; if (k < 0) k += ring;
+    if (k > 4) return 0;                                   /* a stale reference: the lane brain did not run this tick */
+    if (td5_track_get_span_lane_count(ref) == td5_track_get_span_lane_count(target_span)) return 0;
+    if (target_span >= ring) {
+        crossed = 1;                                       /* ring -> corridor */
+    } else {
+        for (s = ref, k = 0; s != target_span && k < 10; k++) {
+            if (strips[(size_t)s * 0x18] == 8) { crossed = 1; break; }
+            if (++s >= ring) s = 0;
+        }
+    }
+    if (!crossed) return 0;
+    cu = g_smart_lane_u[slot];
+    if (!(cu >= 0.0 && cu <= 1.0)) return 0;
+    if (!td5_track_get_span_route_frame(ref, &lrx, &lrz, &rrx, &rrz) ||
+        !td5_track_get_span_route_frame(target_span, &ltx, &ltz, &rtx, &rtz)) return 0;
+    ex = (double)(rrx - lrx); ez = (double)(rrz - lrz);
+    wr = sqrt(ex * ex + ez * ez);
+    if (wr < 1.0) return 0;
+    ex /= wr; ez /= wr;
+    lt = ((double)(ltx - lrx)) * ex + ((double)(ltz - lrz)) * ez;
+    rt = ((double)(rtx - lrx)) * ex + ((double)(rtz - lrz)) * ez;
+    wt = rt - lt;
+    if (wt < 1.0) return 0;
+    u = (cu * wr - lt) / wt;
+    if (u < 0.08) u = 0.08;
+    if (u > 0.92) u = 0.92;
+    *rb = (int)(u * 256.0);
+    *bias = 0;
+    return 1;
 }
 
 
@@ -6280,6 +6341,8 @@ static void td5_ai_smart_lane_bias(int slot) {
     else if (best_u < cu - max_du) cu -= max_du;
     else                           cu = best_u;
     g_smart_lane_u[slot] = cu;
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
+        s_aim_ref[slot] = on_branch ? -1 : look_span;   /* [R1029 W] cu is a fraction of this span's road */
 
     /* Bias = perpendicular shift from the route line to fraction `cu`. */
     int32_t cur = (int32_t)((cu - u_base) * cwidth);
@@ -7830,6 +7893,8 @@ void td5_ai_update_track_behavior(int slot) {
                     route_byte = ai_route_byte(route_bytes, lin_span, 0);
                 }
                 route_byte = ai_corr_aim_rb(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), target_span, route_byte);
+                (void)ai_fork_aim_frame(slot, (int)ACTOR_I16(actor, ACTOR_SPAN_RAW), target_span,
+                                        &route_byte, &lateral_bias);          /* [R1029 W] */
                 TD5_LOG_I(LOG_TAG, "route_byte_pick: slot=%d lin=%d tspan=%d rb=%d",
                           slot, lin_span, target_span, route_byte);
 
