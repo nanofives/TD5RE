@@ -4266,6 +4266,8 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double
 int    tg_geo_avenue_n(void);
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
 int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of an avenue's first row */
+int    tg_geo_avenue_before_cap(const TG_NodeList *nl, int si, double x, double z);   /* [1027 O] point is before the avenue's first carriageway section */
+double tg_carriageway_reach_at(const TG_NodeList *nl, int si, double side, double x, double z);   /* [1027 O] tg_carriageway_reach, cap-aware */
 /* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
  * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
  * slab must not be laid on top of it. */
@@ -4275,6 +4277,8 @@ int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *mo
  * 0 = nothing free, 1 = whole span free, 2 = the clipped slab was emitted, -1 = out of memory */
 int    tg_av_main_pave_clip(const TG_NodeList *nl, int si, double sg, double e0, double e1,
                             double f0, double f1, TG_Buf *blk, size_t *moff, int *nmesh);
+/* [ROUND 1027 O] the cross-street quad exactly as tg_city_emit_crossstreet lays it (td5_tg_streets.c), for the slab clip */
+int    tg_xstreet_laid_quad(const TG_NodeList *nl, int si, const double *ef, double sk, double rr, double *q);
 /* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
  * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
  * real road close to and parallel with the route, as a FORK the player and the AI

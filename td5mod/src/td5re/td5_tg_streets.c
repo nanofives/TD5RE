@@ -668,12 +668,13 @@ void tg_xstreet_audit(const TG_NodeList *nl, int si, double side,
 #define TD5_TG_R15_MEDIAN_H   150.0     /* kerbed island, not a barrier       */
 
 static long s_r15_medians;
+static long s_r15_med_narrow;      /* [ROUND 1027 O] runs that are N spans but narrower than N lanes: no median */
 
 /* Is si the centre span of a contiguous cross-street run on this side, and how
  * many spans wide is that run? Reads tg_xstreet_here, which is the crossstreet
  * emitter's own gate set, so the run measured is the street actually laid. */
 static int tg_r15_xrun_centre(const TG_NodeList *nl, int si, double sg,
-                              int *plen)
+                              int *plen, double *pwidth)
 {
     int lo = si, hi = si;
     double r = 0.0;
@@ -682,6 +683,18 @@ static int tg_r15_xrun_centre(const TG_NodeList *nl, int si, double sg,
     while (lo > 0 && tg_xstreet_here(nl, lo - 1, sg, &r)) lo--;
     while (hi + 1 < nl->count && tg_xstreet_here(nl, hi + 1, sg, &r)) hi++;
     if (plen) *plen = hi - lo + 1;
+    if (pwidth) {
+        /* [ROUND 1027 O] the street's PHYSICAL width: the kerb chords of the run's spans laid end to end. A span is
+         * one lane (TD5_TG_LANE_WIDTH) wide only on a straight; on a bend the chords shrink, so "N spans" is not
+         * "N lanes". */
+        double w = 0.0, e[10];
+        int k;
+        for (k = lo; k <= hi; k++) {
+            tg_city_edge_frame(nl, k, sg, e);
+            w += sqrt((e[3] - e[0]) * (e[3] - e[0]) + (e[5] - e[2]) * (e[5] - e[2]));
+        }
+        *pwidth = w;
+    }
     return si == (lo + hi) / 2;
 }
 
@@ -867,7 +880,7 @@ static double tg_xst_carr_depth(const TG_NodeList *nl, int si, double x, double 
     }
     if (ni < 0) return -1e300;
     lat = (x - nl->v[ni].x) * nl->v[ni].tz - (z - nl->v[ni].z) * nl->v[ni].tx;
-    r = tg_carriageway_reach(nl, ni, (lat >= 0.0) ? 1.0 : -1.0);
+    r = tg_carriageway_reach_at(nl, ni, (lat >= 0.0) ? 1.0 : -1.0, x, z);   /* [ROUND 1027 O] the guard's own cap-aware measure */
     return r - (lat >= 0.0 ? lat : -lat);
 }
 
@@ -957,6 +970,35 @@ static void tg_xstreet_push_follow(double *px, double *py, double *pz,
  * on another carriageway is dropped alone and the street that does not is kept. Geo networks only (the follow path
  * is where the pieces are cut); TD5RE_GEO_STREET_ARM_MESH=0 restores one mesh for both arms. */
 static long s_xst_arm_meshes;
+
+/* [ROUND 1027 O] THE STREET AS IT IS LAID, for the pavement slabs that must stay off it.
+ *
+ * tg_av_street_quads (td5_tg_avenue.c) cuts the main road's own kerb slab, and the avenue's far footway, along "the
+ * street's oblique edge". It built that street from the OLD wedge rays (the span's near and far kerb normals, rotated by
+ * the mouth skew) and the network's reach, but since round 1023 B the carriageway is laid along PARALLEL rays (the
+ * bisector normal rotated by the skew, tg_block_arm_dirs) and since round 1024 G each ray is cut where it meets the avenue.
+ * At La Plata span 80 (the main road's left kerb beside Calle 39) the slab was cut along a ray leaning 19 degrees away
+ * from the street's edge, so 1.3 m x 1.5 km of it stood on the street's asphalt: the raised slanted slab in the road.
+ * This returns the quad the emitter really lays, from the same functions. 0 = use the old quad (synthetic network, or
+ * TD5RE_GEO_SLAB_STREET_RAYS=0), 2 = no street is laid there. q = kerb near, near ray end, far ray end, kerb far (x z pairs). */
+int tg_xstreet_laid_quad(const TG_NodeList *nl, int si, const double *ef, double sk, double rr, double *q)
+{
+    double nox, noz, fox, foz, rn = rr, rf = rr;
+    if (!tg_arm_parallel_on() || !td5_env_flag_on("TD5RE_GEO_SLAB_STREET_RAYS")) return 0;
+    tg_block_arm_dirs(ef, sk, &nox, &noz, &fox, &foz);
+    if (td5_env_flag_on("TD5RE_GEO_STREET_FOLLOW") && tg_xst_rayclip_on()) {
+        rn = tg_xst_ray_reach(nl, si, ef[0], ef[2], nox, noz, rr);
+        rf = tg_xst_ray_reach(nl, si, ef[3], ef[5], fox, foz, rr);
+        if (rn < rr || rf < rr) {
+            if ((rn > rf ? rn : rf) < TG_XST_CLIP_MIN) return 2;    /* the emitter lays no arm here */
+        }
+    }
+    q[0] = ef[0];                q[1] = ef[2];
+    q[2] = ef[0] + nox * rn;     q[3] = ef[2] + noz * rn;
+    q[4] = ef[3] + fox * rf;     q[5] = ef[5] + foz * rf;
+    q[6] = ef[3];                q[7] = ef[5];
+    return 1;
+}
 
 static int tg_xst_flush(const TG_FBHook *h, double *px, double *py, double *pz,
                         double *uu, double *vv, int n, int seg_page, int marks)
@@ -1120,11 +1162,21 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
             double mpx[12], mpy[12], mpz[12], muu[12], mvv[12];
             int mn = 0, mpage = TD5_TG_PAGE_SIDEWALK, mnq;
             int len = 0;
-            double rr = 0.0;
+            double rr = 0.0, run_w = 0.0;
 
             /* (b) the run must be genuinely wide, and this the centre of it. */
-            if (!tg_r15_xrun_centre(h->nl, h->si, sg, &len)) continue;
+            if (!tg_r15_xrun_centre(h->nl, h->si, sg, &len, &run_w)) continue;
             if (len < TD5_TG_R15_MEDIAN_MIN) continue;
+            /* [ROUND 1027 O] "Start a round on the corner at spans 77-79": the run 77..79 of Calle 39 is three spans
+             * but only 2547 units of kerb (spans of 1288, 852, 407 on the bend, 1.7 lanes, one ordinary street), and
+             * the island laid down its middle stood 150 high in the street with a slanted free end. A median is owed
+             * to a street that is MEDIAN_MIN lanes wide, not MEDIAN_MIN spans long. Geo networks only.
+             * TD5RE_GEO_STREET_MEDIAN_W=0 restores the span count. */
+            if (tg_net_geo() && td5_env_flag_on("TD5RE_GEO_STREET_MEDIAN_W") &&
+                run_w < 0.9 * (double)TD5_TG_R15_MEDIAN_MIN * (double)TD5_TG_LANE_WIDTH) {   /* 0.9: a straight run's chords sum to 4499.x */
+                s_r15_med_narrow++;
+                continue;
+            }
             /* (a) the report's own condition: it must cross on BOTH sides. */
             if (!tg_xstreet_here(h->nl, h->si, -sg, &rr)) continue;
             if (*h->nmesh >= h->maxmesh) break;
@@ -6679,6 +6731,8 @@ void tg_r15_streets_report(void)
               "(the gap is a side street) = %ld (knob TD5RE_R15_FILL_STREET=%s)",
               s_r15_fill_street,
               td5_env_flag_on("TD5RE_R15_FILL_STREET") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[ROUND 1027 O] %ld crossing run(s) of >= %d spans narrower than %d lanes got no median "
+              "(knob TD5RE_GEO_STREET_MEDIAN_W)", s_r15_med_narrow, TD5_TG_R15_MEDIAN_MIN, TD5_TG_R15_MEDIAN_MIN);
     TD5_LOG_I(LOG_TAG, "[R15 CROSS item 9] medians laid down wide crossings "
               "(>= %d spans of width, both kerbs open) = %ld (knob "
               "TD5RE_R15_XWIDE_MEDIAN=%s)", TD5_TG_R15_MEDIAN_MIN,

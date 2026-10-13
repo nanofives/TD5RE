@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 13 (the corner at spans 77-79)" },
+    { CL_ITEM,    "La Plata, Calle 39 where it meets the start of the avenue:" },
+    { CL_ITEM,    "  the street now runs right up to the avenue's carriageway" },
+    { CL_ITEM,    "  (no strip of bare ground), and no raised slab or median" },
+    { CL_ITEM,    "  stands in the street any more. Same fix at the other" },
+    { CL_ITEM,    "  streets that end at an avenue's start (spans 408-410)." },
     { CL_DATE,    "October 12 (cars that would not accelerate)" },
     { CL_ITEM,    "A police pull-over can no longer leave your car unable" },
     { CL_ITEM,    "  to accelerate. If a race ended or a cop vanished during" },

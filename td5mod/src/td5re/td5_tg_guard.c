@@ -599,6 +599,11 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
             lateral = (vx - nl->v[si].x) * nl->v[si].tz
                     - (vz - nl->v[si].z) * nl->v[si].tx;
             r = tg_guard_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, cls);
+            /* [ROUND 1027 O] a vertex before the first carriageway section of an avenue is not on it */
+            if (cls != TG_GKC_FURNITURE) {
+                const double rc = tg_carriageway_reach_at(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, vx, vz);
+                if (rc < r) r = rc;
+            }
             if (!(r > 0.0)) continue;
             t[n] = lateral / r;
             dy[n] = vy - nl->v[si].y;
