@@ -238,6 +238,13 @@ static int32_t s_rear_view[TD5_MAX_RACER_SLOTS];
 static uint8_t s_recovery_request[TD5_MAX_HUMAN_PLAYERS];
 static uint8_t s_recovery_held[TD5_MAX_HUMAN_PLAYERS];
 
+/* [R1028 Q 2026-10-13] No-throttle watchdog state (see the block at the end of
+ * td5_input_update_player_control). Cleared per race by
+ * td5_input_reset_accumulators so every race that loses its throttle gets its own
+ * "NO THROTTLE" line instead of being swallowed as a repeat of the last one. */
+static uint32_t s_nt_count[TD5_MAX_RACER_SLOTS];
+static int      s_nt_last_cause[TD5_MAX_RACER_SLOTS];
+
 /* [#6 support 2026-06-15] Per-local-player held-latches for the frontend
  * camera-button edge getters (td5_input_frontend_change_camera_pressed /
  * _front_view_pressed). Declared here so td5_input_init can zero them; defined
@@ -2396,6 +2403,100 @@ void td5_input_update_player_control(int slot)
         }
     }
 
+    /* ====================================================================
+     * [R1028 Q 2026-10-13] NO-THROTTLE WATCHDOG  (dev AND release)
+     *
+     * Mariano, twice: "after one or two races the joystick works but the car
+     * can't accelerate". Every mechanism that produces that symptom leaves
+     * STEERING alive and kills only the throttle, and they are indistinguishable
+     * from the outside. This fires ONE log line naming which of them is live, so
+     * the next time it happens the log answers it instead of another round of
+     * code reading. Grep the race log for:
+     *
+     *     NO THROTTLE
+     *
+     * Conditions: a human slot has had no forward throttle for N consecutive sim
+     * ticks (TD5RE_THROTTLE_DIAG, default 300 = ~10 s; 0 disables) while the car
+     * is essentially stationary and the race is not ending. Re-emitted only when
+     * the diagnosed cause changes, so a parked player costs one line per race.
+     * ==================================================================== */
+    {
+        static int s_nt_ticks_init = 0;
+        static int s_nt_ticks = 300;
+        if (!s_nt_ticks_init) {
+            s_nt_ticks = td5_env_int("TD5RE_THROTTLE_DIAG", 300, 0, 100000);
+            s_nt_ticks_init = 1;
+            TD5_LOG_I(LOG_TAG, "No-throttle watchdog: %d ticks (TD5RE_THROTTLE_DIAG, 0=off)",
+                      s_nt_ticks);
+        }
+        if (s_nt_ticks > 0 && slot >= 0 && slot < TD5_MAX_RACER_SLOTS &&
+            slot < g_td5.num_human_players && !g_td5.ini.player_is_ai) {
+            int moving  = (speed > 8);                 /* ~2.5 km/h in this scale */
+            int driving = (s_throttle[slot] > 0);
+            if (driving || moving || g_td5.race_end_fade_state != 0) {
+                s_nt_count[slot] = 0;
+            } else if (++s_nt_count[slot] >= (uint32_t)s_nt_ticks) {
+                /* Rank the known causes; the first match is the verdict. Keep the
+                 * order: an override that runs LAST in the decode wins the blame. */
+                int src   = td5_input_get_input_source(slot);
+                int cause = 0;
+                const char *cause_s;
+                if (encounter_active)          { cause = 1; cause_s = "POLICE-PULLOVER (g_encounter_active[slot]=1: a cop is holding this car stopped; if no cop is visible this is the stale-latch leak, see TD5RE_ENCOUNTER_LEAK_FIX)"; }
+                else if (s_handbrake[slot])    { cause = 2; cause_s = "HANDBRAKE-HELD (bit 0x100000 is set every tick: a stuck/mis-bound handbrake button forces throttle=-256 + brake)"; }
+                else if (src == 0 && g_td5.num_human_players == 1)
+                                               { cause = 3; cause_s = "DEVICE=KEYBOARD (the race is reading the keyboard, not a pad: the last device used in the MENU drives the race, td5_fe_mp_setup.c)"; }
+                else if (s_shift_penalty_ticks[slot] > 60 || s_shift_dip_ticks[slot] > 60)
+                                               { cause = 4; cause_s = "SHIFT-CUT stuck (shift penalty/dip window never expires)"; }
+                else if (src > 0 && (bits & TD5_INPUT_ANALOG_Y_FLAG))
+                                               { cause = 5; cause_s = "PAD PEDAL AXIS READS NEUTRAL (the device is live and steering decodes, but the throttle axis never leaves centre: check the 'joystick map' line below -- a legacy-raw map reads throttle from the left stick Y, not the triggers)"; }
+                else if (src > 0)              { cause = 6; cause_s = "PAD WORD HAS NO ANALOG-Y FLAG (the poll produced no throttle axis at all for this slot)"; }
+                else                           { cause = 7; cause_s = "UNKNOWN (none of the known throttle killers is set -- throttle is being zeroed downstream of the input decode)"; }
+
+                if (s_nt_last_cause[slot] != cause) {
+                    long ax[6] = { 0, 0, 0, 0, 0, 0 };
+                    int  nax   = td5_plat_input_js_raw_axes(slot, ax, 6);
+                    TD5_Actor *a_nt = td5_game_get_actor(slot);
+                    /* A headless AutoRace/selftest seat presses nothing at all, so
+                     * "car is stopped and not accelerating" is the EXPECTED state
+                     * there. Only a slot that is visibly being driven (a live input
+                     * word or a steering command) raises a WARNING; everything else
+                     * still gets the same line at INFO so the data is never lost. */
+                    int active = (bits != 0u) || (s_steering_cmd[slot] != 0);
+                    const char *fmt =
+                        "NO THROTTLE slot=%d for %u ticks active=%d -- cause=%s | device=%d \"%s\" map=%s "
+                        "| raw axes(n=%d, centre=250) X=%ld Y=%ld Z=%ld RX=%ld RY=%ld RZ=%ld "
+                        "| word=0x%08X analog_x=%d analog_y=%d | thr=%d brake=%u hb=%u "
+                        "encounter=%d gear=%u fade=%d shift_pen=%d shift_dip=%d";
+                    const char *dev_name = (src == 0) ? "keyboard"
+                        : (td5_input_get_device_name(src) ? td5_input_get_device_name(src) : "?");
+                    s_nt_last_cause[slot] = cause;
+                    if (active)
+                        TD5_LOG_W(LOG_TAG, fmt,
+                            slot, (unsigned)s_nt_count[slot], active, cause_s, src, dev_name,
+                            td5_plat_input_js_map_name(slot),
+                            nax, ax[0], ax[1], ax[2], ax[3], ax[4], ax[5],
+                            (unsigned)bits, (int)s_analog_x[slot], (int)s_analog_y[slot],
+                            (int)s_throttle[slot], (unsigned)s_brake[slot],
+                            (unsigned)s_handbrake[slot], encounter_active,
+                            a_nt ? (unsigned)a_nt->current_gear : 0u,
+                            (int)g_td5.race_end_fade_state,
+                            (int)s_shift_penalty_ticks[slot], (int)s_shift_dip_ticks[slot]);
+                    else
+                        TD5_LOG_I(LOG_TAG, fmt,
+                            slot, (unsigned)s_nt_count[slot], active, cause_s, src, dev_name,
+                            td5_plat_input_js_map_name(slot),
+                            nax, ax[0], ax[1], ax[2], ax[3], ax[4], ax[5],
+                            (unsigned)bits, (int)s_analog_x[slot], (int)s_analog_y[slot],
+                            (int)s_throttle[slot], (unsigned)s_brake[slot],
+                            (unsigned)s_handbrake[slot], encounter_active,
+                            a_nt ? (unsigned)a_nt->current_gear : 0u,
+                            (int)g_td5.race_end_fade_state,
+                            (int)s_shift_penalty_ticks[slot], (int)s_shift_dip_ticks[slot]);
+                }
+            }
+        }
+    }
+
     if (slot == 0) {
         s_control_log_counter++;
         if ((s_control_log_counter % 30u) == 0u) {
@@ -2436,6 +2537,9 @@ void td5_input_reset_accumulators(void)
      * playback. A race must start steering-neutral. */
     memset(s_steering_cmd, 0, sizeof(s_steering_cmd));
     memset(s_steer_ramp,  0, sizeof(s_steer_ramp));
+    /* [R1028 Q] Fresh race = fresh no-throttle verdict. */
+    memset(s_nt_count, 0, sizeof(s_nt_count));
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) s_nt_last_cause[i] = -1;
 }
 
 /* ========================================================================

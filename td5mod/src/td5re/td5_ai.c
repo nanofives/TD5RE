@@ -8100,6 +8100,29 @@ void td5_ai_dev_plant_encounter(int slot) {
  * other 1 is an orphan (see encounter_leak_fix_enabled) and is cleared, with a log
  * line, so a car can never be held braked by a cop that no longer exists. */
 static void td5_ai_encounter_sweep_orphans(void) {
+    /* [R1028 Q 2026-10-13] Transition log, OUTSIDE the leak-fix knob and ahead of
+     * the sweep: every 0->1 / 1->0 of the pull-over latch, with the cop that owns
+     * it and the phase it is in. The latch is written from six different sites, so
+     * this one place is the only way to read its whole history from a log.
+     * Grep: "pullover latch". */
+    {
+        static uint8_t s_prev[TD5_MAX_TOTAL_ACTORS];
+        for (int slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++) {
+            uint8_t now = g_encounter_active[slot] ? 1u : 0u;
+            if (now == s_prev[slot]) continue;
+            s_prev[slot] = now;
+            {
+                int owner = -1, ophase = -1;
+                for (int k = 0; k < TD5_MAX_TOTAL_ACTORS; k++)
+                    if (g_cop_is_cop[k] && g_cop_target[k] == slot) { owner = k; ophase = g_cop_phase[k]; break; }
+                TD5_LOG_I(LOG_TAG,
+                          "pullover latch slot=%d -> %s (cop=%d phase=%d)%s",
+                          slot, now ? "HELD (throttle forced off, steering still live)" : "released",
+                          owner, ophase,
+                          (now && owner < 0) ? "  <-- NO COP OWNS THIS LATCH" : "");
+            }
+        }
+    }
     if (!encounter_leak_fix_enabled()) return;
     for (int slot = 0; slot < TD5_MAX_TOTAL_ACTORS; slot++) {
         int live = 0;
@@ -8115,6 +8138,27 @@ static void td5_ai_encounter_sweep_orphans(void) {
             TD5_LOG_W(LOG_TAG, "encounter latch ORPHAN cleared: slot=%d was held braked with no cop pulling it over", slot);
         }
     }
+}
+
+/* [R1028 Q 2026-10-13] Unconditional per-race clear of the pull-over latch.
+ *
+ * R1026 K put the clear inside cop_state_reset(), which is only ever reached from
+ * td5_ai_traffic_dynamic_race_init() -- i.e. only when BOTH [Traffic] Dynamic and
+ * the race's traffic option are on, and only when the race actually has traffic
+ * slots (td5_ai_init_traffic_actors returns early otherwise). A race with traffic
+ * OFF therefore never ran the per-race clear at all, and leaned entirely on the
+ * per-tick orphan sweep. The sweep does catch it, but one tick late and only while
+ * TD5RE_ENCOUNTER_LEAK_FIX is on; this makes the race-start state unconditional.
+ * Called from InitializeRaceSession. Same knob, so knob=0 is still the old code. */
+void td5_ai_race_reset_pullover_latches(void) {
+    int stale = 0;
+    if (!encounter_leak_fix_enabled()) return;
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) stale += (g_encounter_active[i] != 0);
+    if (stale)
+        TD5_LOG_W(LOG_TAG,
+                  "race start: cleared %d STALE pull-over latch(es) carried from the previous race "
+                  "(that car would have steered but never accelerated)", stale);
+    memset(g_encounter_active, 0, sizeof(g_encounter_active));
 }
 
 /* [DEBUG 2026-06-24] Cops normally chase HUMAN players only (state 1). This
