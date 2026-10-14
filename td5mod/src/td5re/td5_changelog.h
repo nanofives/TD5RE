@@ -39,7 +39,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Pavements along streets that leave the road at a" },
     { CL_ITEM,    "  shallow angle are full width, not a thin sliver." },
     { CL_ITEM,    "The plaza ring's kerb no longer runs across the mouth" },
-    { CL_ITEM,    "  of a street that reaches it from the avenue." },
+    { CL_ITEM,    "  of a street that reaches it from the avenue, and that" },
+    { CL_ITEM,    "  street's pavement stops at the ring road's kerb." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
