@@ -61,32 +61,61 @@
  * Left margin 112 and the y=460 content floor are the standard bands.
  * ======================================================================== */
 
+/* [ROUND 1030 B item 3] "options for generation on the geo generator should
+ * be on the right of the map, make the map smaller and put the buttons on the
+ * right with pages and sections". The map gave up the right 244 px of its old
+ * 416 to the OPTIONS panel (392..628); the status box follows the map's width
+ * and grew a line, because its old one-line readout no longer fits 272 px. */
 #define GEO_MAP_X        112.0f
 #define GEO_MAP_Y         46.0f
-#define GEO_MAP_W        416.0f
-#define GEO_MAP_H        300.0f
-#define GEO_SIDE_X       534.0f            /* readout column, 534..628        */
-#define GEO_SIDE_W        94.0f
+#define GEO_MAP_W        272.0f
+#define GEO_MAP_H        286.0f
 #define GEO_STATUS_X     112.0f
-#define GEO_STATUS_Y     352.0f
-#define GEO_STATUS_W     516.0f
-#define GEO_STATUS_H      44.0f
+#define GEO_STATUS_Y     338.0f
+#define GEO_STATUS_W     272.0f
+#define GEO_STATUS_H      60.0f
 #define GEO_BTN_Y        404
 #define GEO_BTN_H         32
 #define GEO_BTN_CLEAR_X  112
 #define GEO_BTN_CLEAR_W   96
 #define GEO_BTN_BUILD_X  214
-#define GEO_BTN_BUILD_W  120
-#define GEO_BTN_BACK_X   340
+#define GEO_BTN_BUILD_W  140
+#define GEO_BTN_BACK_X   360
 #define GEO_BTN_BACK_W    96
 
-enum { GEO_BTN_CLEAR = 0, GEO_BTN_BUILD, GEO_BTN_BACK, GEO_BTN_COUNT };
+/* The OPTIONS panel: a section selector, up to GEO_OPT_VIS rows of the
+ * current section, a help box for the focused row, and DEFAULTS. */
+#define GEO_PANEL_X      392
+#define GEO_PANEL_W      236
+#define GEO_SECT_Y        46
+#define GEO_SECT_H        28
+#define GEO_ROW_Y0        80
+#define GEO_ROW_STEP      28
+#define GEO_ROW_H         24
+#define GEO_OPT_VIS        6
+#define GEO_HELP_Y       250.0f
+#define GEO_HELP_H        82.0f
+#define GEO_BTN_DEF_Y    338
+#define GEO_BTN_DEF_H     28
+
+/* Button indices. The first three keep their old numbers; the panel's come
+ * after them, 1 + GEO_OPT_VIS + 1 more, well inside FE_MAX_BUTTONS (18). */
+enum {
+    GEO_BTN_CLEAR = 0, GEO_BTN_BUILD, GEO_BTN_BACK,
+    GEO_BTN_SECT,
+    GEO_BTN_ROW0,
+    GEO_BTN_DEFAULTS = GEO_BTN_ROW0 + GEO_OPT_VIS,
+    GEO_BTN_COUNT
+};
 
 /* How many map pixels the pane shows across its width. Fixed rather than
  * "one map pixel per screen pixel" so the tile count stays bounded (5 x 4 at
  * every resolution) instead of growing to 77 tiles at 4K -- which would be a
- * burst of requests at OSM for no visible gain. */
-#define GEO_VIEW_MAP_PX  1024.0
+ * burst of requests at OSM for no visible gain.
+ * [ROUND 1030 B] Scaled with the pane: 1024 across the old 416 px pane, so
+ * the narrower pane shows LESS ground at the SAME metres per design pixel
+ * rather than squeezing the same ground into fewer pixels. */
+#define GEO_VIEW_MAP_PX  (1024.0 * (double)GEO_MAP_W / 416.0)
 
 #define GEO_MAX_PTS       32               /* start + finish + 30 middles     */
 #define GEO_PATH_MAX    8192
@@ -130,6 +159,12 @@ static int    s_zoom    = GEO_HOME_ZOOM;
 
 static TD5_GeoLatLon s_pts[GEO_MAX_PTS];   /* [0] START, [n-1] FINISH         */
 static int    s_n_pts;
+/* [ROUND 1030 B item 4] When each point was PLACED, parallel to s_pts. Route
+ * order and click order differ once middles exist (a middle is inserted
+ * before the finish), and RIGHT CLICK = "go back" undoes the newest PLACE,
+ * not the last point along the route. */
+static unsigned s_pt_seq[GEO_MAX_PTS];
+static unsigned s_seq_next;
 
 static int    s_drag_pt = -1;              /* marker being dragged, -1 = none */
 static int    s_panning;
@@ -152,6 +187,7 @@ static int    s_spans;
 static float  s_length_m;
 static TD5_GeoLatLon s_path[GEO_PATH_MAX];
 static int    s_n_path;
+static int    s_n_path_user;               /* [1030 B item 5] s_path up to FINISH */
 static TD5_GeoLatLon s_xmark[GEO_XMARK_MAX];
 static int    s_n_xmark;
 static int    s_have_route;
@@ -183,6 +219,7 @@ static TD5_GeoRouteResult s_bg_out;
 static TD5_GeoLatLon s_bg_path[GEO_PATH_MAX];
 static TD5_GeoLatLon s_bg_xmark[GEO_XMARK_MAX];
 static int           s_bg_n_path, s_bg_n_xmark;
+static int           s_bg_n_path_user;
 
 /* Where BACK goes, and where BUILD hands off to. Both are SELECT TRACK today;
  * kept as a variable so a future Quick Race entry point can set it like the
@@ -223,13 +260,6 @@ static double geo_my_to_lat(double my, int z)
 {
     const double y = 0.5 - my / geo_world_px(z);
     return 90.0 - 360.0 * atan(exp(-y * 2.0 * GEO_PI)) / GEO_PI;
-}
-
-/* Ground metres per map pixel at this latitude and zoom -- used for the
- * scale bar and for the "how far apart are these pins" readout. */
-static double geo_m_per_map_px(double lat, int z)
-{
-    return 156543.03392804097 * cos(lat * GEO_PI / 180.0) / (double)(1 << z);
 }
 
 /* ========================================================================
@@ -292,7 +322,7 @@ static int geo_in_map(float dx, float dy)
  * ======================================================================== */
 
 static void geo_adopt_result(const TD5_GeoRouteResult *r,
-                             const TD5_GeoLatLon *path, int n_path,
+                             const TD5_GeoLatLon *path, int n_path, int n_user,
                              const TD5_GeoLatLon *xm, int n_xm)
 {
     s_verdict  = r->verdict;
@@ -301,6 +331,7 @@ static void geo_adopt_result(const TD5_GeoRouteResult *r,
     snprintf(s_reason, sizeof(s_reason), "%s", r->reason);
     snprintf(s_place,  sizeof(s_place),  "%s", r->place_slug);
     s_n_path  = n_path;
+    s_n_path_user = n_user;
     s_n_xmark = n_xm;
     if (n_path > 0) memcpy(s_path,  path, (size_t)n_path * sizeof(s_path[0]));
     if (n_xm   > 0) memcpy(s_xmark, xm,   (size_t)n_xm   * sizeof(s_xmark[0]));
@@ -310,7 +341,7 @@ static void geo_adopt_result(const TD5_GeoRouteResult *r,
 static void geo_clear_result(void)
 {
     s_have_route = 0;
-    s_n_path = s_n_xmark = 0;
+    s_n_path = s_n_path_user = s_n_xmark = 0;
     s_spans = 0;
     s_length_m = 0.0f;
     s_place[0] = '\0';
@@ -321,7 +352,7 @@ static void geo_clear_result(void)
 /* Copy a router result into caller-owned arrays. The contract says path /
  * crossings stay valid only until the next call, so nothing may hold them. */
 static void geo_snapshot(const TD5_GeoRouteResult *r,
-                         TD5_GeoLatLon *path, int *n_path,
+                         TD5_GeoLatLon *path, int *n_path, int *n_user,
                          TD5_GeoLatLon *xm, int *n_xm)
 {
     int n = r->n_path, m = r->n_crossings;
@@ -332,6 +363,7 @@ static void geo_snapshot(const TD5_GeoRouteResult *r,
     if (m > 0 && r->crossings) memcpy(xm, r->crossings, (size_t)m * sizeof(xm[0]));
     else m = 0;
     *n_path = n;
+    *n_user = (r->n_path_user > 0 && r->n_path_user < n) ? r->n_path_user : n;
     *n_xm   = m;
 }
 
@@ -339,7 +371,8 @@ static void geo_bg_worker(void *arg)
 {
     (void)arg;
     if (td5_geo_route_build(s_bg_in, s_bg_n_in, &s_bg_out) == 0)
-        geo_snapshot(&s_bg_out, s_bg_path, &s_bg_n_path, s_bg_xmark, &s_bg_n_xmark);
+        geo_snapshot(&s_bg_out, s_bg_path, &s_bg_n_path, &s_bg_n_path_user,
+                     s_bg_xmark, &s_bg_n_xmark);
     else
         s_bg_out.verdict = TD5_GEO_ROUTE_ERROR;
     InterlockedExchange(&s_bg_done, 1);
@@ -375,9 +408,9 @@ static void geo_rebuild_route(void)
     t0 = td5_plat_time_us();
     if (td5_geo_route_build(s_pts, s_n_pts, &r) == 0) {
         TD5_GeoLatLon path[GEO_PATH_MAX], xm[GEO_XMARK_MAX];
-        int np = 0, nx = 0;
-        geo_snapshot(&r, path, &np, xm, &nx);
-        geo_adopt_result(&r, path, np, xm, nx);
+        int np = 0, nu = 0, nx = 0;
+        geo_snapshot(&r, path, &np, &nu, xm, &nx);
+        geo_adopt_result(&r, path, np, nu, xm, nx);
     } else {
         geo_clear_result();
         s_verdict = TD5_GEO_ROUTE_ERROR;
@@ -391,7 +424,8 @@ static void geo_collect_bg(void)
 {
     if (!InterlockedCompareExchange(&s_bg_done, 0, 1)) return;
     if (s_bg_thread) { td5_plat_thread_join(s_bg_thread); s_bg_thread = NULL; }
-    geo_adopt_result(&s_bg_out, s_bg_path, s_bg_n_path, s_bg_xmark, s_bg_n_xmark);
+    geo_adopt_result(&s_bg_out, s_bg_path, s_bg_n_path, s_bg_n_path_user,
+                     s_bg_xmark, s_bg_n_xmark);
     InterlockedExchange(&s_bg_busy, 0);
     if (s_rebuild_wanted) geo_rebuild_route();
 }
@@ -401,6 +435,20 @@ static void geo_collect_bg(void)
  * ======================================================================== */
 
 static void geo_mark_dirty(void) { s_rebuild_wanted = 1; }
+
+/* [ROUND 1030 B item 5] "red line on the preview extends past the finish line
+ * selected". It did: since round 1013 F3 the router walks a RUN-OFF of
+ * TD5RE_GEO_RUNOFF_SPANS (104) spans past the finish so the car has road to
+ * stop on, and hands back ONE polyline
+ * with that tail on the end. The red line now stops where the player's route
+ * ends (TD5_GeoRouteResult.n_path_user); the run-off still exists in the
+ * built track, it is just not drawn as if it were part of the route.
+ * TD5RE_GEO_MAP_TRIM_RUNOFF=0 draws the whole polyline again. */
+static int geo_route_draw_n(void)
+{
+    if (!td5_env_flag_on("TD5RE_GEO_MAP_TRIM_RUNOFF")) return s_n_path;
+    return (s_n_path_user > 0 && s_n_path_user <= s_n_path) ? s_n_path_user : s_n_path;
+}
 
 static int geo_pick_point(float dx, float dy, float sx, float sy)
 {
@@ -416,27 +464,119 @@ static int geo_pick_point(float dx, float dy, float sx, float sy)
     return best;
 }
 
-static void geo_insert_point(int at, double lat, double lon)
+static int geo_insert_point(int at, double lat, double lon)
 {
     int i;
-    if (s_n_pts >= GEO_MAX_PTS) { frontend_play_sfx(10); return; }
+    if (s_n_pts >= GEO_MAX_PTS) { frontend_play_sfx(10); return 0; }
     if (at < 0) at = 0;
     if (at > s_n_pts) at = s_n_pts;
-    for (i = s_n_pts; i > at; i--) s_pts[i] = s_pts[i - 1];
+    for (i = s_n_pts; i > at; i--) {
+        s_pts[i] = s_pts[i - 1];
+        s_pt_seq[i] = s_pt_seq[i - 1];
+    }
     s_pts[at].lat = lat;
     s_pts[at].lon = lon;
+    s_pt_seq[at] = s_seq_next++;
     s_n_pts++;
     geo_mark_dirty();
+    return 1;
 }
 
 static void geo_remove_point(int idx)
 {
     int i;
     if (idx < 0 || idx >= s_n_pts) return;
-    for (i = idx; i < s_n_pts - 1; i++) s_pts[i] = s_pts[i + 1];
+    for (i = idx; i < s_n_pts - 1; i++) {
+        s_pts[i] = s_pts[i + 1];
+        s_pt_seq[i] = s_pt_seq[i + 1];
+    }
     s_n_pts--;
     geo_mark_dirty();
 }
+
+static void geo_clear_points(void)
+{
+    s_n_pts = 0;
+    s_seq_next = 0;
+}
+
+/* [ROUND 1030 B item 4] "first click should be the start, second click should
+ * be the finish, third click and so on should be intermediate points, right
+ * click should go back". TD5RE_GEO_CLICK_ORDER (default ON); =0 restores the
+ * round-1007 rules: a click off the route APPENDED a point past the finish
+ * (so every click moved the finish) and right click deleted the marker under
+ * the cursor. */
+static int geo_click_order_on(void) { return td5_env_flag_on("TD5RE_GEO_CLICK_ORDER"); }
+
+/* Where a new MIDDLE point goes: the leg whose detour it lengthens least
+ * (cheapest insertion), measured in map pixels at the current zoom, which is
+ * planar to well under a percent over a city. Returns an index in
+ * 1 .. s_n_pts-1, so a middle can never land before START or after FINISH. */
+static int geo_cheapest_leg(double lat, double lon)
+{
+    const double px = geo_lon_to_mx(lon, s_zoom), py = geo_lat_to_my(lat, s_zoom);
+    double best = -1.0;
+    int i, at = s_n_pts - 1;
+    for (i = 0; i + 1 < s_n_pts; i++) {
+        const double ax = geo_lon_to_mx(s_pts[i].lon, s_zoom);
+        const double ay = geo_lat_to_my(s_pts[i].lat, s_zoom);
+        const double bx = geo_lon_to_mx(s_pts[i + 1].lon, s_zoom);
+        const double by = geo_lat_to_my(s_pts[i + 1].lat, s_zoom);
+        const double c = hypot(px - ax, py - ay) + hypot(bx - px, by - py)
+                       - hypot(bx - ax, by - ay);
+        if (best < 0.0 || c < best) { best = c; at = i + 1; }
+    }
+    return at;
+}
+
+/* A click that PLACES a point (not a drag, not on a marker). `leg` is what
+ * geo_hit_route_leg said for the click, -1 when it was off the route. Returns
+ * the route index the point went to, -1 when it was refused. */
+static int geo_place_click(double lat, double lon, int leg)
+{
+    int at;
+    if (!geo_click_order_on()) {
+        /* round-1007 rules, kept byte for byte behind the knob */
+        if (leg >= 0 && s_n_pts >= 2) at = leg;
+        else                          at = s_n_pts;
+    } else if (s_n_pts < 2) {
+        at = s_n_pts;                                   /* START, then FINISH */
+    } else {
+        /* a middle: on the leg the player clicked, else the cheapest one --
+         * never past the finish, which stays where the second click put it */
+        at = (leg >= 1 && leg <= s_n_pts - 1) ? leg : geo_cheapest_leg(lat, lon);
+    }
+    return geo_insert_point(at, lat, lon) ? at : -1;
+}
+
+/* RIGHT CLICK = go back: drop the most recently PLACED point. Undoing in
+ * placement order means a middle goes before the finish, and the finish
+ * before the start, which is exactly the reverse of how they were put down.
+ * Returns the route index it removed, -1 when there was nothing to undo. */
+static int geo_undo_last(void)
+{
+    int i, newest = -1;
+    for (i = 0; i < s_n_pts; i++)
+        if (newest < 0 || s_pt_seq[i] > s_pt_seq[newest]) newest = i;
+    if (newest < 0) return -1;
+    geo_remove_point(newest);
+    if (s_n_pts == 0) s_seq_next = 0;
+    return newest;
+}
+
+#ifndef TD5RE_RELEASE
+/* Stamp a route that arrived all at once (the dev seeds) in the order a player
+ * would have clicked it: START, FINISH, then the middles along the route. */
+static void geo_stamp_route_order(void)
+{
+    int i;
+    s_seq_next = 0;
+    if (s_n_pts <= 0) return;
+    s_pt_seq[0] = s_seq_next++;
+    if (s_n_pts >= 2) s_pt_seq[s_n_pts - 1] = s_seq_next++;
+    for (i = 1; i < s_n_pts - 1; i++) s_pt_seq[i] = s_seq_next++;
+}
+#endif
 
 /* Which LEG of the drawn route a click landed on, or -1. Returns the index of
  * the point the new middle point should be inserted BEFORE, so clicking the
@@ -472,10 +612,11 @@ static int geo_hit_route_leg(float dx, float dy, float sx, float sy)
     /* With a routed polyline on screen, prefer a hit on IT -- but map the hit
      * back to a leg by nearest pin, because the router hands back one flat
      * polyline with no per-leg boundaries in it. */
-    if (s_have_route && s_n_path > 1) {
+    if (s_have_route && geo_route_draw_n() > 1) {
         float hit_d2 = GEO_INSERT_R * GEO_INSERT_R;
         int   hit = -1;
-        for (i = 0; i < s_n_path; i++) {
+        const int n_drawn = geo_route_draw_n();   /* not the undrawn run-off */
+        for (i = 0; i < n_drawn; i++) {
             float px, py, ex, ey, d2;
             geo_latlon_to_design(s_path[i].lat, s_path[i].lon, sx, sy, &px, &py);
             ex = dx - px; ey = dy - py;
@@ -559,11 +700,15 @@ static void geo_handle_mouse(void)
         }
     }
 
-    /* Right click: remove the marker under the cursor. */
-    if (r_edge && over_map) {
-        const int hit = geo_pick_point(dx, dy, sx, sy);
+    /* Right click: go back one placement ([ROUND 1030 B item 4]); with
+     * TD5RE_GEO_CLICK_ORDER=0, remove the marker under the cursor. Not while
+     * a marker is being dragged: undoing the point under the hand would leave
+     * s_drag_pt pointing at a different one. */
+    if (r_edge && over_map && s_drag_pt < 0) {
+        const int hit = geo_click_order_on() ? geo_undo_last()
+                                             : geo_pick_point(dx, dy, sx, sy);
         if (hit >= 0) {
-            geo_remove_point(hit);
+            if (!geo_click_order_on()) geo_remove_point(hit);
             frontend_play_sfx(5);
         } else {
             frontend_play_sfx(10);
@@ -611,24 +756,229 @@ static void geo_handle_mouse(void)
          * drag is not: that was a pan, and ending it must not drop a pin. */
         if (was_pan && !s_moved_while_down && over_map) {
             double lat, lon;
-            int leg;
             geo_design_to_latlon(dx, dy, sx, sy, &lat, &lon);
-            leg = geo_hit_route_leg(dx, dy, sx, sy);
-            if (leg >= 0 && s_n_pts >= 2) {
-                geo_insert_point(leg, lat, lon);     /* between its neighbours */
+            if (geo_place_click(lat, lon, geo_hit_route_leg(dx, dy, sx, sy)) >= 0)
                 frontend_play_sfx(3);
-            } else if (s_n_pts < 2) {
-                geo_insert_point(s_n_pts, lat, lon); /* START, then FINISH     */
-                frontend_play_sfx(3);
-            } else {
-                /* Past the finish: extend the route rather than refuse. */
-                geo_insert_point(s_n_pts, lat, lon);
-                frontend_play_sfx(3);
-            }
         }
         (void)was_drag;
         s_moved_while_down = 0;
     }
+}
+
+/* ========================================================================
+ * SECTION: generation options ([ROUND 1030 B item 3])
+ *
+ * Every row is an EXISTING TD5RE_* knob the geo build already reads; nothing
+ * here adds generation behaviour. Same mechanism as the AUTO TRACK STUDIO
+ * (k_at_rows, td5_fe_race.c): the row writes the knob with _putenv_s, the
+ * generator reads it with getenv when the race launches, and tg_env_hash
+ * folds every TD5RE_* variable into the level's GENSTAMP, so a changed option
+ * is a stamp miss and level09x is REBUILT rather than reused.
+ *
+ * A row set back to its default REMOVES the variable instead of writing the
+ * default's digits, so an untouched panel leaves the environment exactly as
+ * it found it: same env hash, same reused level, same bytes as master.
+ *
+ * Two rows (AVENUES, RUN-OFF) are read by the ROUTER rather than the track
+ * builder -- td5_geo_route_build / commit -- so changing them re-routes the
+ * pins at once and the status box shows the new verdict. The rest act when
+ * the track is built.
+ *
+ * NOT persisted (same call as the studio): per-session generator settings,
+ * and an env var set on the command line for an A/B must still win.
+ * ======================================================================== */
+
+typedef enum { GEO_OPT_INT = 0, GEO_OPT_FLAG_ON } GeoOptKind;
+
+typedef struct {
+    const char *label;
+    const char *knob;
+    const int  *values;
+    const char *const *names;
+    int         n;
+    int         def;        /* what the reader does when the knob is unset    */
+    unsigned char kind;     /* GeoOptKind: how an existing value is parsed    */
+    unsigned char route;    /* 1 = read by the router: re-route on change     */
+    signed char parent;     /* row that must be ON for this one to matter     */
+    const char *help1, *help2;
+} GeoOpt;
+
+static const int k_go_off_on_v[] = { 0, 1 };
+static const char *const k_go_off_on_n[] = { "OFF", "ON" };
+/* TD5RE_AUTOTRACK_NIGHT: 2 is the reader's own "derive from the seed", which is
+ * also what unset means (tg_decide_night), so AUTO is the default entry. */
+static const int k_go_night_v[] = { 2, 0, 1 };
+static const char *const k_go_night_n[] = { "AUTO", "DAY", "NIGHT" };
+/* TD5RE_GEO_EXAGGERATION x100, clamp 100..400, default 150 (td5_geo.h). */
+static const int k_go_hills_v[] = { 100, 150, 200, 300 };
+static const char *const k_go_hills_n[] = { "REAL", "STANDARD", "HIGH", "EXTREME" };
+/* TD5RE_GEO_RUNOFF_SPANS, clamp 0..400, default 104 (GR_RO_SPANS_DEFAULT). */
+static const int k_go_runoff_v[] = { 0, 50, 104, 200 };
+static const char *const k_go_runoff_n[] = { "NONE", "SHORT", "STANDARD", "LONG" };
+/* TD5RE_GEO_BLOCKLOOP_MAX, clamp 0..BL_MAXPLAN, default 6. */
+static const int k_go_loops_v[] = { 1, 2, 3, 4, 6 };
+static const char *const k_go_loops_n[] = { "1", "2", "3", "4", "6" };
+/* TD5RE_GEO_PARK_TREES: ON = the big per-park cap (td5_tg_streets.c). */
+static const char *const k_go_trees_n[] = { "SPARSE", "DENSE" };
+/* TD5RE_GEO_LAMP_SPACING_M, clamp 8..200, default 30. */
+static const int k_go_lamps_v[] = { 15, 30, 60, 120 };
+static const char *const k_go_lamps_n[] = { "DENSE", "STANDARD", "SPARSE", "RARE" };
+
+/* Every `def` checked against its reader on master 78a6b25f:
+ * td5_env_flag_on -> ON, td5_env_int -> its stated default. */
+static const GeoOpt k_geo_opts[] = {
+    /* ---------------------------------------------------------- ROUTE --- */
+    { "TIME OF DAY",    "TD5RE_AUTOTRACK_NIGHT",     k_go_night_v,  k_go_night_n,  3, 2,   GEO_OPT_INT,     0, -1,
+      "Day or night race. AUTO picks",   "from the track seed." },
+    { "HILLS",          "TD5RE_GEO_EXAGGERATION",    k_go_hills_v,  k_go_hills_n,  4, 150, GEO_OPT_INT,     0, -1,
+      "How much the real relief is",     "exaggerated. REAL = true heights." },
+    { "AVENUES",        "TD5RE_GEO_AVENUES",         k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 1, -1,
+      "Build divided avenues with the",  "real median where the map has one." },
+    { "RUN-OFF",        "TD5RE_GEO_RUNOFF_SPANS",    k_go_runoff_v, k_go_runoff_n, 4, 104, GEO_OPT_INT,     1, -1,
+      "Road kept past the finish line",  "to slow down on." },
+    /* ---------------------------------------------------------- FORKS --- */
+#define GO_ROW_FORKS 4
+    { "FORKS",          "TD5RE_GEO_FORKS",           k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
+      "Driveable forks where the real",  "map has a second road beside you." },
+#define GO_ROW_LOOPS 5
+    { "BLOCK LOOPS",    "TD5RE_GEO_FORK_BLOCKLOOP",  k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_FORKS,
+      "Alternate roads: turn off and",   "drive round a city block." },
+    { "MAX LOOPS",      "TD5RE_GEO_BLOCKLOOP_MAX",   k_go_loops_v,  k_go_loops_n,  5, 6,   GEO_OPT_INT,     0, GO_ROW_LOOPS,
+      "Most block loops one track",      "may have." },
+    { "LEFT LOOPS",     "TD5RE_GEO_BLOCKLOOP_LEFT",  k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_LOOPS,
+      "Allow loops that leave the route", "to the left as well." },
+    { "PLAZA FORKS",    "TD5RE_GEO_FORK_PLAZA",      k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_FORKS,
+      "A second way round a plaza",      "where the street circles one." },
+    { "LEFT FORKS",     "TD5RE_GEO_FORK_LEFT",       k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_FORKS,
+      "Offer forks on the left side",    "of the road too." },
+    /* -------------------------------------------------------- STREETS --- */
+#define GO_ROW_SIGNALS 10
+    { "TRAFFIC LIGHTS", "TD5RE_GEO_SIGNALS",         k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
+      "Traffic lights at the junctions", "the map marks as signalled." },
+    { "MAST ARMS",      "TD5RE_GEO_MASTARM",         k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_SIGNALS,
+      "Lights hung over the road on an", "arm, with the street name plate." },
+    { "LIVE SIGNALS",   "TD5RE_GEO_SIGNAL_LIVE",     k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_SIGNALS,
+      "Signal heads count down and",     "change. OFF = a fixed display." },
+    { "CROSSWALKS",     "TD5RE_GEO_XINGS",           k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
+      "Zebra crossings and stop lines",  "from the map." },
+    { "BUS STOPS",      "TD5RE_GEO_BUSSTOPS",        k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
+      "Shelters, benches and bins at",   "the map's bus stops." },
+    { "FOOTPATHS",      "TD5RE_GEO_FOOTPATHS",       k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
+      "Pedestrian paths from the map,",  "in parks and plazas." },
+    /* ----------------------------------------------------------- CITY --- */
+#define GO_ROW_CITY 16
+    { "CITY",           "TD5RE_GEO_CITY",            k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
+      "Real city scenery from the map.", "BUILDINGS and PLAZAS need it." },
+    { "BUILDINGS",      "TD5RE_GEO_BUILDINGS",       k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_CITY,
+      "Real building footprints and",    "heights." },
+    { "PLAZAS",         "TD5RE_GEO_PLAZAS",          k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_CITY,
+      "Parks and plazas from the map,",  "with lawns and paths." },
+    { "PARK TREES",     "TD5RE_GEO_PARK_TREES",      k_go_off_on_v, k_go_trees_n,  2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_CITY,
+      "How many trees a park may",       "carry." },
+    { "STREET LAMPS",   "TD5RE_GEO_LAMP_SPACING_M",  k_go_lamps_v,  k_go_lamps_n,  4, 30,  GEO_OPT_INT,     0, -1,
+      "Distance between lamp posts on",  "lit streets (15/30/60/120 m)." },
+};
+#define GEO_OPTS ((int)(sizeof(k_geo_opts) / sizeof(k_geo_opts[0])))
+
+typedef struct { const char *name; int first, count; } GeoOptSect;
+static const GeoOptSect k_geo_sects[] = {
+    { "ROUTE",   0,  4 },
+    { "FORKS",   4,  6 },
+    { "STREETS", 10, 6 },
+    { "CITY",    16, 5 },
+};
+#define GEO_SECTS ((int)(sizeof(k_geo_sects) / sizeof(k_geo_sects[0])))
+
+static int s_opt_sect;                      /* current section */
+
+/* The value the reader would use right now: the env var parsed the way the
+ * reader parses it, or `def` when unset. */
+static int geo_opt_value(int row)
+{
+    const GeoOpt *o = &k_geo_opts[row];
+    const char *e = getenv(o->knob);
+    if (!e || !e[0]) return o->def;
+    if (o->kind == GEO_OPT_FLAG_ON) return (e[0] == '0') ? 0 : 1;
+    return atoi(e);
+}
+
+/* Index of the current value in the row's list; -1 = a value set outside the
+ * screen (command line) that the list does not carry, shown as its number. */
+static int geo_opt_index(int row)
+{
+    const GeoOpt *o = &k_geo_opts[row];
+    const int v = geo_opt_value(row);
+    int i;
+    for (i = 0; i < o->n; i++) if (o->values[i] == v) return i;
+    return -1;
+}
+
+static void geo_opt_write(int row, int value)
+{
+    const GeoOpt *o = &k_geo_opts[row];
+    char buf[24];
+    if (value == o->def) {
+        _putenv_s(o->knob, "");             /* removes it: default = unset */
+    } else {
+        snprintf(buf, sizeof buf, "%d", value);
+        _putenv_s(o->knob, buf);
+    }
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: option %s -> %d (%s=%s)", o->label, value,
+              o->knob, getenv(o->knob) ? getenv(o->knob) : "<unset>");
+    if (o->route && s_n_pts >= 2) geo_mark_dirty();
+}
+
+/* Step a row one value along its list, wrapping. */
+static void geo_opt_step(int row, int d)
+{
+    const GeoOpt *o = &k_geo_opts[row];
+    int i = geo_opt_index(row);
+    if (i < 0) i = (d > 0) ? -1 : 0;        /* off-list value: enter the list */
+    i = (i + d + o->n) % o->n;
+    geo_opt_write(row, o->values[i]);
+}
+
+/* 1 when the row's parent is switched off, so the row has no effect. */
+static int geo_opt_inactive(int row)
+{
+    const int p = k_geo_opts[row].parent;
+    return (p >= 0 && geo_opt_value(p) == 0) ? 1 : 0;
+}
+
+static int geo_opt_row_at(int slot)
+{
+    const GeoOptSect *s = &k_geo_sects[s_opt_sect];
+    return (slot >= 0 && slot < s->count) ? s->first + slot : -1;
+}
+
+/* Show the current section's rows on the GEO_OPT_VIS row buttons. Fixed
+ * buttons hidden past the section's end, so a page flip never rebuilds the
+ * button table and the focus stays where the player left it. */
+static void geo_opt_layout_rows(void)
+{
+    int k;
+    for (k = 0; k < GEO_OPT_VIS; k++) {
+        FE_Button *b = &s_buttons[GEO_BTN_ROW0 + k];
+        const int on = (geo_opt_row_at(k) >= 0);
+        b->hidden   = on ? 0 : 1;
+        b->disabled = on ? 0 : 1;
+    }
+    if (s_selected_button >= GEO_BTN_ROW0 && s_selected_button < GEO_BTN_ROW0 + GEO_OPT_VIS
+        && s_buttons[s_selected_button].disabled)
+        s_selected_button = GEO_BTN_SECT;
+}
+
+static void geo_opt_set_sect(int sect)
+{
+    s_opt_sect = ((sect % GEO_SECTS) + GEO_SECTS) % GEO_SECTS;
+    geo_opt_layout_rows();
+}
+
+static void geo_opt_defaults(void)
+{
+    int i;
+    for (i = 0; i < GEO_OPTS; i++)
+        if (getenv(k_geo_opts[i].knob)) geo_opt_write(i, k_geo_opts[i].def);
 }
 
 /* ========================================================================
@@ -790,10 +1140,11 @@ static void geo_draw_route(float sx, float sy)
 
     /* The routed polyline. Decimated to the screen: consecutive nodes closer
      * than a pixel add nothing and cost a draw call each. */
-    if (s_have_route && s_n_path > 1) {
+    if (s_have_route && geo_route_draw_n() > 1) {
         float px = 0.0f, py = 0.0f;
         int first = 1;
-        for (i = 0; i < s_n_path && budget > 0; i++) {
+        const int n_drawn = geo_route_draw_n();   /* [1030 B item 5] up to FINISH */
+        for (i = 0; i < n_drawn && budget > 0; i++) {
             float nx, ny, ex, ey;
             geo_latlon_to_design(s_path[i].lat, s_path[i].lon, sx, sy, &nx, &ny);
             if (first) { px = nx; py = ny; first = 0; continue; }
@@ -851,10 +1202,145 @@ static int geo_route_is_buildable(void)
     return s_have_route && s_verdict == TD5_GEO_ROUTE_OK && !td5_geo_route_is_stub();
 }
 
+/* Small text centred on a design-space x. fe_measure_small_text is in glyph
+ * units, drawn at min(sx, sy) (see mp_pos_small_centered, td5_fe_race.c). */
+static void geo_small_centered(float cx, float y, const char *t, uint32_t col,
+                               float sx, float sy)
+{
+    const float gsx = (sx < sy) ? sx : sy;
+    fe_draw_small_text(cx * sx - fe_measure_small_text(t) * 0.5f * gsx, y * sy,
+                       t, col, sx, sy);
+}
+
+/* Greedy word wrap of small text to `maxw` DESIGN px; returns the line count.
+ * Needed because the glyph width follows min(sx, sy): a line that fits at
+ * 16:9 is a third wider at 4:3, and the boxes here are only 272 / 236 wide. */
+#define GEO_WRAP_LEN 96
+static int geo_wrap_small(const char *s, float maxw, float sx, float sy,
+                          char out[][GEO_WRAP_LEN], int max_lines)
+{
+    const float k = ((sx < sy) ? sx : sy) / sx;   /* glyph units -> design px */
+    int n = 0;
+    size_t cl = 0;                                /* length of out[n] so far */
+    while (*s && n < max_lines) {
+        char trial[GEO_WRAP_LEN];
+        size_t w = 0, tl;
+        const char *wd;
+        while (*s == ' ') s++;
+        wd = s;
+        while (s[w] && s[w] != ' ') w++;
+        if (!w) break;
+        s += w;
+        if (w > GEO_WRAP_LEN / 2) w = GEO_WRAP_LEN / 2;   /* clip a runaway word */
+        /* the line with this word added, if it still fits the buffer */
+        tl = cl + (cl ? 1 : 0) + w;
+        if (cl && tl < GEO_WRAP_LEN) {
+            memcpy(trial, out[n], cl);
+            trial[cl] = ' ';
+            memcpy(trial + cl + 1, wd, w);
+            trial[tl] = '\0';
+        }
+        if (cl && (tl >= GEO_WRAP_LEN || fe_measure_small_text(trial) * k > maxw)) {
+            if (++n >= max_lines) break;           /* out[n-1] is complete */
+            cl = 0;
+        }
+        if (cl) { out[n][cl] = ' '; cl++; }
+        memcpy(out[n] + cl, wd, w);
+        cl += w;
+        out[n][cl] = '\0';
+    }
+    if (cl && n < max_lines) n++;
+    return n;
+}
+
+/* [ROUND 1030 B item 3] The OPTIONS panel right of the map. The frames come
+ * from the shared button render (the section selector and the rows are
+ * is_selector buttons, so they get the standard ◄► and LEFT/RIGHT cycling);
+ * this draws what is written on them and the help box under them. */
+static void geo_draw_panel(float sx, float sy)
+{
+    const float px = (float)GEO_PANEL_X, pw = (float)GEO_PANEL_W;
+    const GeoOptSect *sec = &k_geo_sects[s_opt_sect];
+    const int focus = s_selected_button - GEO_BTN_ROW0;
+    const int frow = (focus >= 0 && focus < GEO_OPT_VIS) ? geo_opt_row_at(focus) : -1;
+    char line[64];
+    int k;
+
+    /* section selector: name centred, page count by the right arrow */
+    fe_draw_option_arrows(GEO_BTN_SECT, sx, sy);
+    fe_draw_text_centered((px + pw * 0.5f) * sx,
+                          ((float)GEO_SECT_Y + (float)GEO_SECT_H * 0.5f - FE_TEXT_CAP_MID) * sy,
+                          TR(sec->name), 0xFFE3D708u, sx, sy);
+    snprintf(line, sizeof line, "%d/%d", s_opt_sect + 1, GEO_SECTS);
+    fe_draw_small_text((px + pw - 46.0f) * sx, ((float)GEO_SECT_Y + 10.0f) * sy,
+                       line, GEO_COL_DIM, sx, sy);
+
+    for (k = 0; k < GEO_OPT_VIS; k++) {
+        const int row = geo_opt_row_at(k);
+        const float ry = (float)(GEO_ROW_Y0 + k * GEO_ROW_STEP);
+        const GeoOpt *o;
+        int idx, off;
+        if (row < 0) continue;
+        o = &k_geo_opts[row];
+        idx = geo_opt_index(row);
+        off = geo_opt_inactive(row);
+        fe_draw_option_arrows(GEO_BTN_ROW0 + k, sx, sy);
+        fe_draw_small_text((px + 22.0f) * sx, (ry + 7.0f) * sy, TR(o->label),
+                           off ? 0xFF6A7280u : 0xFFE6ECF4u, sx, sy);
+        if (idx >= 0) snprintf(line, sizeof line, "%s", TR(o->names[idx]));
+        else          snprintf(line, sizeof line, "%d", geo_opt_value(row));
+        /* A value moved off its default is drawn green, so a glance at a page
+         * says what this build will do differently from the stock one. */
+        geo_small_centered(px + 176.0f, ry + 7.0f, line,
+                           off ? 0xFF6A7280u
+                               : (geo_opt_value(row) != o->def ? 0xFF7CE07Cu : 0xFFFFFFFFu),
+                           sx, sy);
+    }
+
+    /* help box for the focused row */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    geo_fill(px, GEO_HELP_Y, pw, GEO_HELP_H, 0xC0101018u, sx, sy);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    geo_frame_rect(px, GEO_HELP_Y, pw, GEO_HELP_H, GEO_COL_FRAME, sx, sy);
+    if (frow >= 0) {
+        const GeoOpt *o = &k_geo_opts[frow];
+        char help[2 * GEO_WRAP_LEN], wl[3][GEO_WRAP_LEN];
+        float y = GEO_HELP_Y + 5.0f;
+        int nl, j;
+        fe_draw_small_text((px + 6.0f) * sx, y * sy, TR(o->label), 0xFFE3D708u, sx, sy);
+        y += 14.0f;
+        snprintf(help, sizeof help, "%s %s", TR(o->help1), TR(o->help2));
+        nl = geo_wrap_small(help, pw - 12.0f, sx, sy, wl, 3);
+        for (j = 0; j < nl; j++, y += 12.0f)
+            fe_draw_small_text((px + 6.0f) * sx, y * sy, wl[j], 0xFFE6ECF4u, sx, sy);
+        y = GEO_HELP_Y + GEO_HELP_H - 16.0f;
+        if (geo_opt_inactive(frow)) {
+            snprintf(line, sizeof line, "%s %s", TR("NEEDS"), TR(k_geo_opts[o->parent].label));
+            fe_draw_small_text((px + 6.0f) * sx, y * sy, line, GEO_COL_BAD, sx, sy);
+        } else {
+            fe_draw_small_text((px + 6.0f) * sx, y * sy,
+                               o->route ? TR("CHANGES THE ROUTE NOW")
+                                        : TR("USED WHEN THE TRACK IS BUILT"),
+                               GEO_COL_DIM, sx, sy);
+        }
+    } else {
+        fe_draw_small_text((px + 6.0f) * sx, (GEO_HELP_Y + 5.0f) * sy,
+                           TR("GENERATION OPTIONS"), 0xFFE3D708u, sx, sy);
+        char wl[3][GEO_WRAP_LEN];
+        int nl, j;
+        nl = geo_wrap_small(TR("LEFT / RIGHT CHANGES A VALUE. CHANGED VALUES SHOW GREEN."),
+                            pw - 12.0f, sx, sy, wl, 3);
+        for (j = 0; j < nl; j++)
+            fe_draw_small_text((px + 6.0f) * sx, (GEO_HELP_Y + 19.0f + 12.0f * (float)j) * sy,
+                               wl[j], 0xFFE6ECF4u, sx, sy);
+        fe_draw_small_text((px + 6.0f) * sx, (GEO_HELP_Y + GEO_HELP_H - 16.0f) * sy,
+                           TR("USED WHEN THE TRACK IS BUILT"), GEO_COL_DIM, sx, sy);
+    }
+}
+
 void frontend_geo_generator_render(float sx, float sy)
 {
     char line[160];
-    const float side_x = GEO_SIDE_X;
 
     s_sx = sx; s_sy = sy;
 
@@ -916,69 +1402,94 @@ void frontend_geo_generator_render(float sx, float sy)
                            credit, 0xFFE8ECF0u, sx, sy);
     }
 
-    /* ---- side readout ---- */
+    /* [ROUND 1030 B item 6] "remove indicator on the top right for ZOOM
+     * POINTS METERS". The ZOOM / POINTS / metres readout that sat right of
+     * the map is gone (the panel lives there now). The tile state it also
+     * carried is kept, because a map that is still loading or offline must
+     * say so: a small tag at the map's TOP-LEFT corner, on its own plate,
+     * only while there is something to say. (Not on the credit plate: at
+     * 4:3 the credit runs two thirds of the 272 px pane and the two met.) */
     {
-        float y = GEO_MAP_Y + 2.0f;
-        const double mpp = geo_m_per_map_px(s_cen_lat, s_zoom);
-        snprintf(line, sizeof(line), "%s %d", TR("ZOOM"), s_zoom);
-        fe_draw_small_text(side_x * sx, y * sy, line, GEO_COL_DIM, sx, sy);
-        y += 13.0f;
-        snprintf(line, sizeof(line), "%s %d", TR("POINTS"), s_n_pts);
-        fe_draw_small_text(side_x * sx, y * sy, line, GEO_COL_DIM, sx, sy);
-        y += 13.0f;
-        /* Scale: ground metres across 100 map pixels, the cheapest honest
-         * statement of scale that needs no bar graphic. */
-        snprintf(line, sizeof(line), "%d M", (int)(mpp * 100.0));
-        fe_draw_small_text(side_x * sx, y * sy, line, GEO_COL_DIM, sx, sy);
-        y += 20.0f;
-        {
-            const int pend = td5_geo_tiles_pending();
-            const int fail = td5_geo_tiles_failed();
-            if (pend > 0) {
-                snprintf(line, sizeof(line), "%s %d", TR("LOADING"), pend);
-                fe_draw_small_text(side_x * sx, y * sy, line, 0xFFE3D708u, sx, sy);
-            } else if (fail > 0) {
-                fe_draw_small_text(side_x * sx, y * sy, TR("OFFLINE"),
-                                   GEO_COL_BAD, sx, sy);
-            }
+        const int pend = td5_geo_tiles_pending();
+        const int fail = td5_geo_tiles_failed();
+        const float gk = ((sx < sy) ? sx : sy) / sx;
+        if (pend > 0) snprintf(line, sizeof(line), "%s %d", TR("LOADING"), pend);
+        else if (fail > 0) snprintf(line, sizeof(line), "%s", TR("OFFLINE"));
+        else line[0] = '\0';
+        if (line[0]) {
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            geo_fill(GEO_MAP_X + 1.0f, GEO_MAP_Y + 1.0f,
+                     fe_measure_small_text(line) * gk + 8.0f, 14.0f, 0x99101018u, sx, sy);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_small_text((GEO_MAP_X + 4.0f) * sx, (GEO_MAP_Y + 2.0f) * sy, line,
+                               pend > 0 ? 0xFFE3D708u : GEO_COL_BAD, sx, sy);
         }
     }
 
-    /* ---- status ---- */
+    /* ---- status ----
+     * [ROUND 1030 B] Three short lines now: the box is 272 px wide, and the
+     * old one-line readout (verdict + spans + km + place side by side) was
+     * sized for 516. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     geo_fill(GEO_STATUS_X, GEO_STATUS_Y, GEO_STATUS_W, GEO_STATUS_H,
              0xC0101018u, sx, sy);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     geo_frame_rect(GEO_STATUS_X, GEO_STATUS_Y, GEO_STATUS_W, GEO_STATUS_H,
                    GEO_COL_FRAME, sx, sy);
-    if (s_n_pts < 2) {
-        fe_draw_text((GEO_STATUS_X + 6.0f) * sx, (GEO_STATUS_Y + 5.0f) * sy,
-                     TR("CLICK THE MAP TO PLACE START, THEN FINISH"),
-                     GEO_COL_DIM, sx, sy);
-        fe_draw_small_text((GEO_STATUS_X + 6.0f) * sx, (GEO_STATUS_Y + 27.0f) * sy,
-                           TR("DRAG TO PAN - WHEEL TO ZOOM - RIGHT CLICK REMOVES A POINT"),
-                           GEO_COL_DIM, sx, sy);
-    } else {
-        const uint32_t vc = (s_verdict == TD5_GEO_ROUTE_OK) ? GEO_COL_OK : GEO_COL_BAD;
-        fe_draw_text((GEO_STATUS_X + 6.0f) * sx, (GEO_STATUS_Y + 5.0f) * sy,
-                     geo_verdict_text(), vc, sx, sy);
-        snprintf(line, sizeof(line), "%d / %d %s   %.1f KM   %s",
-                 s_spans, TD5_GEO_ROUTE_MAX_SPANS, TR("SPANS"),
-                 (double)s_length_m / 1000.0,
-                 s_place[0] ? s_place : "-");
-        fe_draw_small_text((GEO_STATUS_X + 150.0f) * sx, (GEO_STATUS_Y + 8.0f) * sy,
-                           line, GEO_COL_DIM, sx, sy);
-        if (s_n_xmark > 0) {
-            snprintf(line, sizeof(line), "%d %s", s_n_xmark, TR("SELF CROSSINGS"));
-            fe_draw_small_text((GEO_STATUS_X + 6.0f) * sx,
-                               (GEO_STATUS_Y + 27.0f) * sy, line,
-                               GEO_COL_XMARK, sx, sy);
-        } else if (s_reason[0]) {
-            fe_draw_small_text((GEO_STATUS_X + 6.0f) * sx,
-                               (GEO_STATUS_Y + 27.0f) * sy, TR(s_reason),
+    {
+        const float lx = GEO_STATUS_X + 6.0f;
+        const int order = geo_click_order_on();
+        /* every hint <= ~27 characters: the width that fits 260 px at 4:3 */
+        if (s_n_pts < 2) {
+            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 5.0f) * sy,
+                               s_n_pts == 0 ? TR("CLICK TO PLACE THE START")
+                                            : TR("CLICK TO PLACE THE FINISH"),
+                               0xFFE8ECF0u, sx, sy);
+            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 19.0f) * sy,
+                               order ? TR("MORE CLICKS ADD MIDDLES")
+                                     : TR("CLICK LINE: MIDDLE POINT"),
                                GEO_COL_DIM, sx, sy);
+            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 33.0f) * sy,
+                               order ? TR("RIGHT CLICK: UNDO")
+                                     : TR("RIGHT CLICK: REMOVE"),
+                               GEO_COL_DIM, sx, sy);
+            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
+                               TR("WHEEL ZOOMS, DRAG PANS"),
+                               GEO_COL_DIM, sx, sy);
+        } else {
+            const uint32_t vc = (s_verdict == TD5_GEO_ROUTE_OK) ? GEO_COL_OK : GEO_COL_BAD;
+            fe_draw_text(lx * sx, (GEO_STATUS_Y - 3.0f) * sy, geo_verdict_text(), vc, sx, sy);
+            snprintf(line, sizeof(line), "%d / %d %s   %.1f KM",
+                     s_spans, TD5_GEO_ROUTE_MAX_SPANS, TR("SPANS"),
+                     (double)s_length_m / 1000.0);
+            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 21.0f) * sy,
+                               line, GEO_COL_DIM, sx, sy);
+            if (s_n_xmark > 0) {
+                snprintf(line, sizeof(line), "%d %s", s_n_xmark, TR("SELF CROSSINGS"));
+                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f) * sy, line,
+                                   GEO_COL_XMARK, sx, sy);
+            } else if (s_reason[0]) {
+                /* router reasons run to ~80 characters: two wrapped lines */
+                char wl[2][GEO_WRAP_LEN];
+                const int nl = geo_wrap_small(TR(s_reason), GEO_STATUS_W - 12.0f,
+                                              sx, sy, wl, 2);
+                int j;
+                for (j = 0; j < nl; j++)
+                    fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f + 13.0f * (float)j) * sy,
+                                       wl[j], GEO_COL_DIM, sx, sy);
+            } else {
+                snprintf(line, sizeof(line), "%s   %d %s", s_place[0] ? s_place : "-",
+                         s_n_pts, TR("POINTS"));
+                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f) * sy, line,
+                                   GEO_COL_DIM, sx, sy);
+            }
+            if (order && !s_reason[0])
+                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
+                                   TR("RIGHT CLICK: UNDO"), GEO_COL_DIM, sx, sy);
         }
     }
+
+    geo_draw_panel(sx, sy);
 
     /* The stub router must never be mistaken for the real one on a
      * screenshot. Said plainly, on the screen, every frame. */
@@ -1017,6 +1528,7 @@ static void geo_seed_dev_points(int variant)
         s_pts[i].lon = s_cen_lon + v[i * 2 + 1] * dlon;
     }
     s_n_pts = 3;
+    geo_stamp_route_order();
     geo_clear_result();
     geo_mark_dirty();
     TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_SEED - seeded 3 DEV points, "
@@ -1024,6 +1536,55 @@ static void geo_seed_dev_points(int variant)
               "(dev build only; not a user action)", variant,
               s_pts[0].lat, s_pts[0].lon, s_pts[1].lat, s_pts[1].lon,
               s_pts[2].lat, s_pts[2].lon);
+}
+
+/* The route order as the letters of the clicks that made each point
+ * (A = 1st click, B = 2nd, ...), e.g. "A C D B". */
+static void geo_click_order_str(char *out, size_t n)
+{
+    size_t o = 0;
+    int i;
+    out[0] = '\0';
+    for (i = 0; i < s_n_pts && o + 3 < n; i++) {
+        out[o++] = (char)('A' + (int)(s_pt_seq[i] % 26u));
+        out[o++] = ' ';
+        out[o] = '\0';
+    }
+}
+
+static void geo_click_selftest(void)
+{
+    /* place-relative offsets (dlat, dlon units), the seed's variant 0 for the
+     * first three, so the final route is one the router is known to accept */
+    static const double k_clk[4][2] = {
+        { -1.00, -1.00 },   /* A: START  */
+        {  1.00,  1.00 },   /* B: FINISH */
+        {  0.30,  0.00 },   /* C: middle */
+        {  0.60, -0.60 },   /* D: middle, nearer the START->C leg */
+    };
+    const double dlat = 0.010, dlon = 0.013;
+    char buf[80];
+    int i, ok = 1;
+    geo_clear_points();
+    for (i = 0; i < 4; i++) {
+        const int at = geo_place_click(s_cen_lat + k_clk[i][0] * dlat,
+                                       s_cen_lon + k_clk[i][1] * dlon, -1);
+        geo_click_order_str(buf, sizeof buf);
+        TD5_LOG_W(LOG_TAG, "GEO CLICK TEST: click %c -> route index %d, route "
+                  "order: %s(dev build only)", 'A' + i, at, buf);
+        /* the contract: A stays first, B stays last once placed */
+        if (s_pt_seq[0] != 0u) ok = 0;
+        if (i >= 1 && s_pt_seq[s_n_pts - 1] != 1u) ok = 0;
+    }
+    i = geo_undo_last();
+    geo_click_order_str(buf, sizeof buf);
+    TD5_LOG_W(LOG_TAG, "GEO CLICK TEST: right click -> removed route index %d, "
+              "route order: %s", i, buf);
+    if (strcmp(buf, "A C B ") != 0) ok = 0;
+    TD5_LOG_W(LOG_TAG, "GEO CLICK TEST: %s (knob TD5RE_GEO_CLICK_ORDER=%d)",
+              ok ? "PASS" : "FAIL", geo_click_order_on());
+    geo_clear_result();
+    geo_mark_dirty();
 }
 #endif
 
@@ -1041,6 +1602,37 @@ static void geo_screen_init(void)
                            GEO_BTN_BUILD_W, GEO_BTN_H);
     frontend_create_button(TR("BACK"), GEO_BTN_BACK_X, GEO_BTN_Y,
                            GEO_BTN_BACK_W, GEO_BTN_H);
+    /* [ROUND 1030 B item 3] the OPTIONS panel: section selector, rows, DEFAULTS.
+     * Created in enum order -- frontend_create_button hands out indices
+     * sequentially after frontend_reset_buttons. */
+    {
+        int k, b;
+        b = frontend_create_button("", GEO_PANEL_X, GEO_SECT_Y, GEO_PANEL_W, GEO_SECT_H);
+        if (b >= 0) s_buttons[b].is_selector = 1;
+        for (k = 0; k < GEO_OPT_VIS; k++) {
+            b = frontend_create_button("", GEO_PANEL_X, GEO_ROW_Y0 + k * GEO_ROW_STEP,
+                                       GEO_PANEL_W, GEO_ROW_H);
+            if (b >= 0) s_buttons[b].is_selector = 1;
+        }
+        b = frontend_create_button(TR("DEFAULTS"), GEO_PANEL_X + 38, GEO_BTN_DEF_Y,
+                                   GEO_PANEL_W - 76, GEO_BTN_DEF_H);
+        if (b != GEO_BTN_DEFAULTS)
+            TD5_LOG_E(LOG_TAG, "GEO GENERATOR: DEFAULTS button got index %d, "
+                      "expected %d -- the panel's button map is off", b, GEO_BTN_DEFAULTS);
+        /* the section table must tile k_geo_opts with no gap, and no section
+         * may hold more rows than there are row buttons */
+        for (k = 0, b = 0; k < GEO_SECTS; k++) {
+            if (k_geo_sects[k].first != b || k_geo_sects[k].count > GEO_OPT_VIS)
+                TD5_LOG_E(LOG_TAG, "GEO GENERATOR: option section %s is malformed "
+                          "(first %d, count %d)", k_geo_sects[k].name,
+                          k_geo_sects[k].first, k_geo_sects[k].count);
+            b = k_geo_sects[k].first + k_geo_sects[k].count;
+        }
+        if (b != GEO_OPTS)
+            TD5_LOG_E(LOG_TAG, "GEO GENERATOR: option sections cover %d of %d rows",
+                      b, GEO_OPTS);
+        geo_opt_set_sect(s_opt_sect);
+    }
 
     /* Tiles are fetched only between open and close, so the screen is the
      * only thing that can cause a request. */
@@ -1119,6 +1711,7 @@ static void geo_screen_init(void)
                 while (*p == ';' || *p == ' ') p++;
             }
             if (s_n_pts > 0) {
+                geo_stamp_route_order();
                 /* Centre the map on the first point, or the screen opens on the
                  * place centre with the route off the visible map. */
                 s_cen_lat = s_pts[0].lat;
@@ -1134,6 +1727,48 @@ static void geo_screen_init(void)
             }
         }
     }
+    /* [ROUND 1030 B] Framedump affordances for the OPTIONS panel (inject_key
+     * does not reach frontend menus): open on section N, focus button N. */
+    {
+        /* TD5RE_GEO_VIEW="lat,lon,zoom": where the map opens, so a seeded
+         * route can be framed whole rather than centred on its START. */
+        const char *v = getenv("TD5RE_GEO_VIEW");
+        double la, lo;
+        int z;
+        if (v && sscanf(v, "%lf,%lf,%d", &la, &lo, &z) == 3) {
+            s_cen_lat = la;
+            s_cen_lon = lo;
+            if (z >= TD5_GEO_TILE_MIN_Z && z <= TD5_GEO_TILE_MAX_Z) s_zoom = z;
+        }
+    }
+    {
+        const int sect = td5_env_int("TD5RE_GEO_PANEL_SECT", -1, -1, GEO_SECTS - 1);
+        const int foc  = td5_env_int("TD5RE_GEO_PANEL_FOCUS", -1, -1, GEO_BTN_COUNT - 1);
+        if (sect >= 0) geo_opt_set_sect(sect);
+        if (foc >= 0 && !s_buttons[foc].disabled) s_selected_button = foc;
+    }
+    /* TD5RE_GEO_PANEL_SET="row:value[,row:value]" sets rows through the SAME
+     * geo_opt_write the arrows call, so a headless BUILD can prove a panel
+     * choice reaches the track build. Consumed once (cleared after use). */
+    {
+        const char *ps = getenv("TD5RE_GEO_PANEL_SET");
+        if (ps && ps[0]) {
+            char buf[128];
+            char *tok, *ctx = NULL;
+            snprintf(buf, sizeof buf, "%s", ps);
+            _putenv_s("TD5RE_GEO_PANEL_SET", "");
+            for (tok = strtok_s(buf, ",", &ctx); tok; tok = strtok_s(NULL, ",", &ctx)) {
+                int row, val;
+                if (sscanf(tok, "%d:%d", &row, &val) == 2 && row >= 0 && row < GEO_OPTS)
+                    geo_opt_write(row, val);
+            }
+        }
+    }
+    /* [ROUND 1030 B item 4] Scripted clicks through the SAME place / undo
+     * functions the mouse calls, logged step by step, for a headless check of
+     * the click order. Leaves the 3-point route on the map. */
+    if (s_n_pts == 0 && td5_env_int("TD5RE_GEO_CLICK_TEST", 0, 0, 1))
+        geo_click_selftest();
 #endif
 
     s_drag_pt  = -1;
@@ -1314,17 +1949,39 @@ void Screen_GeoGenerator(void)
         return;
     }
 
+    /* [ROUND 1030 B item 3] LEFT/RIGHT on the section selector flips the page,
+     * on a row steps its value (keyboard, pad, or a click on a row's arrow
+     * zone -- the shared nav turns all three into the same arrow bits). */
+    {
+        const int d = frontend_option_delta();
+        const int slot = s_selected_button - GEO_BTN_ROW0;
+        if (d && s_selected_button == GEO_BTN_SECT) {
+            geo_opt_set_sect(s_opt_sect + d);
+            frontend_play_sfx(2);
+        } else if (d && slot >= 0 && slot < GEO_OPT_VIS && geo_opt_row_at(slot) >= 0) {
+            geo_opt_step(geo_opt_row_at(slot), d);
+            frontend_play_sfx(2);
+        }
+    }
+
     if (s_input_ready) {
         s_input_ready = 0;
         switch (s_button_index) {
         case GEO_BTN_CLEAR:
             if (s_n_pts > 0) {
-                s_n_pts = 0;
+                geo_clear_points();
                 geo_clear_result();
                 frontend_play_sfx(5);
             } else {
                 frontend_play_sfx(10);
             }
+            break;
+        case GEO_BTN_SECT:                      /* confirm = next page */
+            geo_opt_set_sect(s_opt_sect + 1);
+            break;
+        case GEO_BTN_DEFAULTS:
+            geo_opt_defaults();
+            frontend_play_sfx(5);
             break;
         case GEO_BTN_BUILD:
             geo_do_build();
@@ -1334,6 +1991,10 @@ void Screen_GeoGenerator(void)
             geo_leave(s_parent_screen);
             return;
         default:
+            /* confirm on a row (Enter, pad A, double click) = next value */
+            if (s_button_index >= GEO_BTN_ROW0 && s_button_index < GEO_BTN_ROW0 + GEO_OPT_VIS
+                && geo_opt_row_at(s_button_index - GEO_BTN_ROW0) >= 0)
+                geo_opt_step(geo_opt_row_at(s_button_index - GEO_BTN_ROW0), 1);
             break;
         }
     }
