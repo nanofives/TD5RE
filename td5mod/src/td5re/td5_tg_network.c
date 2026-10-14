@@ -200,6 +200,11 @@ static void tg_net_set_mouth(int lo, int hi, int left, int edge, double skew, do
     }
 }
 
+/* [ROUND 1030 F] distance along the ray before which another street's paint does not stop a
+ * march: the corner a V-junction arm shares with the street beside it (tg_net_geo_streets).
+ * 0 = tested from the first step, which is every march but that one. */
+static double s_march_street_from;
+
 /* Walk outward from (sx,sz) along unit (dx,dz), up to `want`. Returns the
  * clear reach and writes *why: 0 full, 1 carriageway ahead, 2 street met
  * (T-junction), 3 water/steep. `half` is the street's half width. */
@@ -212,7 +217,8 @@ static double tg_net_march(double sx, double sz, double dx, double dz,
         const double px = sx + dx * d, pz = sz + dz * d;
         /* Another street this close to the kerb: the two would cross.
          * Tested from the FIRST step (a leaning neighbour crosses early). */
-        if (tg_world_occ_near(px, pz, half + 200.0, TG_WO_STREET)) {
+        if (d >= s_march_street_from &&
+            tg_world_occ_near(px, pz, half + 200.0, TG_WO_STREET)) {
             *why = 2; return d;
         }
         if (tg_world_is_water(px, pz) || tg_world_slope(px, pz) >= TG_WORLD_STEEP_SLOPE) {
@@ -763,6 +769,8 @@ static struct {
     long fan_cut;           /* [1015 B] mouth spans cut: their normal is off the street's ray */
     long joined;            /* [1021 B] streets lengthened to touch the street that stopped them */
     long why_road, why_street, why_water;
+    long shared, shared_no; /* [1030 F] arms placed on a trimmed window beside another street's mouth (V junction), refused */
+    long reaim;             /* [1030 F] SHORT arms re-aimed along the chord of a gentle kink */
 } s_gs;
 
 /* [ROUND 1008 item 4] Per-arm drop ledger.
@@ -1106,6 +1114,44 @@ static double tg_geo_straight_run(const TD5_GeoRoad *rd, int k0, int step,
     return run;
 }
 
+/* [ROUND 1030 F item 13] RE-AIM A GENTLY KINKED ARM. The straight run above is measured on the
+ * bearing of the ONE way segment the junction was found on. Calle 20 south of Diagonal 73 (way
+ * 493, La Plata spans 227..230) leaves the junction on a 2265-unit segment, then bends 2.8 degrees
+ * for the next 58 650 units: that vertex is 2870 units off the first bearing, past the half width
+ * of 2250, so the run ended 390 units before the kerb and the street was dropped SHORT -- half of
+ * the "double crossing" of the report. When the run broke at a vertex whose CHORD from the
+ * junction is within TG_GEO_REAIM_DEG of the first bearing and keeps every vertex before it
+ * inside the half width, the arm is aimed along that chord instead: both ends are real OSM
+ * points, nothing is invented. Writes the chord and returns 1 when it gives a longer run. */
+#define TG_GEO_REAIM_DEG 10.0
+static int tg_geo_reaim_dir(const TD5_GeoRoad *rd, int k0, int step, double jx, double jz,
+                            double dx, double dz, double *cx_out, double *cz_out)
+{
+    const double halfw = rd->width * 0.5;
+    double run = 0.0, bx = 0.0, bz = 0.0, cx, cz, cl, run2;
+    int k, kb = -1;
+    if (step == 0) return 0;
+    for (k = k0; k >= 0 && k < rd->count; k += step) {      /* tg_geo_straight_run's walk, keeping the break */
+        double x, z, along, off;
+        if (!td5_geo_roads_point(rd, k, &x, &z)) break;
+        along = (x - jx) * dx + (z - jz) * dz;
+        off   = fabs((x - jx) * dz - (z - jz) * dx);
+        if (along <= run) continue;
+        if (off > halfw) { kb = k; bx = x; bz = z; break; }
+        run = along;
+    }
+    if (kb < 0) return 0;                                    /* the way simply ends: nothing to re-aim at */
+    cx = bx - jx; cz = bz - jz;
+    cl = sqrt(cx * cx + cz * cz);
+    if (cl < 1.0) return 0;
+    cx /= cl; cz /= cl;
+    if (cx * dx + cz * dz < cos(TG_GEO_REAIM_DEG * TD5_TG_PI / 180.0)) return 0;
+    run2 = tg_geo_straight_run(rd, k0, step, jx, jz, cx, cz);
+    if (!(run2 > run + 1.0)) return 0;
+    *cx_out = cx; *cz_out = cz;
+    return 1;
+}
+
 static int tg_geo_arm_cmp(const void *pa, const void *pb)
 {
     const TG_GeoArm *a = (const TG_GeoArm *)pa, *b = (const TG_GeoArm *)pb;
@@ -1123,7 +1169,7 @@ static int tg_geo_arm_cmp(const void *pa, const void *pb)
 static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
                             const TD5_GeoRoad *rd, int ridx,
                             double dx, double dz, int k0, int step,
-                            double skewmax)
+                            double skewmax, int reaim)
 {
     double e[10], skew, run, kerb, fshift;
     int left, si_m;
@@ -1191,6 +1237,21 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
         TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO ARM]   way %d si %d->%d %s run-from-kerb %.0f (kerb %.0f, shift %.0f)",
                   ridx, h->si, si_m, left ? "left" : "right", run, kerb, fshift);
     if (run < TD5_TG_R8_CLAMP_MIN) {
+        /* [ROUND 1030 F item 13] a kinked arm gets ONE more try along its chord (tg_geo_reaim_dir).
+         * Arms of a real CROSSING only (kbwd >= 0): a T is a way that ENDS at the route, and the
+         * short T arms are the median links between an avenue's two carriageways (Calle 20's own
+         * first vertex sits on Diagonal 73's far carriageway; re-aimed, that link ran back across
+         * the route and took the kerb from Calle 43). */
+        double cx, cz;
+        if (reaim && h->kbwd >= 0 && td5_env_flag_on("TD5RE_GEO_ARM_REAIM") &&
+            tg_geo_reaim_dir(rd, k0, step, h->x, h->z, dx, dz, &cx, &cz)) {
+            s_gs.reaim++;
+            if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+                TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO ARM]   way %d si %d re-aimed (%.3f,%.3f) -> (%.3f,%.3f)",
+                          ridx, h->si, dx, dz, cx, cz);
+            tg_geo_arm_push(nl, h, rd, ridx, cx, cz, k0, step, skewmax, 0);
+            return;
+        }
         s_gs.d_short++; tg_geo_drop_note(si_m, left, TG_GD_SHORT, run); return;
     }
 
@@ -1219,13 +1280,32 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
 /* Every hard invariant a real street has to clear before it may be marched.
  * Each failure is COUNTED, never silent -- that is the whole point of sourcing
  * candidates from data nobody conditioned for this engine. */
+/* [ROUND 1030 F item 13] SHARED-CORNER (V) JUNCTIONS. "this is a double crossing, it's only
+ * showing one crossing, maybe we need to rework the logic to accept complex intersections with
+ * multiple roads?" (Mariano, level091 e58, La Plata spans 224..230: Diagonal 73 through the corner
+ * of Calle 43 and Calle 20). On each side of the route the two grid streets leave the SAME kerb
+ * corner at about 90 degrees to each other, so their frontage windows overlap by one span (Calle 20
+ * north 224..227 against Calle 43 east 227..230) and the second was refused as TAKEN.
+ *
+ * The mouth table stays single-valued: the second street gets the window MINUS the spans the first
+ * one owns, provided those are one run of at most TG_GEO_SHARE_MAX spans at an END of the window and
+ * at least TG_GEO_SHARE_MIN_RUN spans are left. Whether the two bodies fan apart (a V) rather than
+ * cross is the caller's test, on the arms' real bearings. TD5RE_GEO_MULTI_JUNCTION=0 restores TAKEN. */
+#define TG_GEO_SHARE_MAX      2
+#define TG_GEO_SHARE_MIN_RUN  2
+#define TG_GEO_SHARE_SIN_MIN  0.5       /* the two streets at least 30 degrees apart          */
+#define TG_GEO_SHARE_CLEAR    15000.0   /* longest corner stretch the march may ignore paint  */
+
 static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
                               int si, int left, int run, double fshift,
-                              int *lo_out, int *hi_out)
+                              int *lo_out, int *hi_out, int *share_edge, int *share_hi)
 {
     const double sg = left ? 1.0 : -1.0;
-    const int lo = si - (run - 1) / 2, hi = lo + run - 1;
+    int lo = si - (run - 1) / 2, hi = lo + run - 1;
     int s;
+    const int multi = td5_env_flag_on("TD5RE_GEO_MULTI_JUNCTION");
+    int t0 = -1, t1 = -1, tn = 0, tedge = -1, tmix = 0;
+    *share_edge = -1; *share_hi = 0;
 
     /* Off the ends, or on the start grid. Spans below TD5_TG_FACADE_START_RUN
      * are FORCED built by tg_facade_built, so a mouth there would be claimed by
@@ -1255,8 +1335,28 @@ static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
         /* Inside the carriageway is what a second mouth on one (span,side)
          * amounts to: the table is single-valued and the emitters would draw
          * two overlapping quads out of one kerb. */
-        if (s_mouth[s][left ? 0 : 1].edge >= 0)
+        if (s_mouth[s][left ? 0 : 1].edge >= 0) {
+            if (!multi)
+                return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN, 0.0), 0);
+            if (tedge < 0) tedge = s_mouth[s][left ? 0 : 1].edge;
+            else if (tedge != s_mouth[s][left ? 0 : 1].edge) tmix = 1;
+            if (t0 < 0) t0 = s;
+            t1 = s; tn++;
+        }
+    }
+    if (tn > 0) {
+        /* one owner, one contiguous run of at most SHARE_MAX at an end, enough left over */
+        int nlo = lo, nhi = hi;
+        if (tmix || tn != t1 - t0 + 1 || tn > TG_GEO_SHARE_MAX)
             return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN, 0.0), 0);
+        if (t0 == lo)      { nlo = t1 + 1; *share_hi = 0; }   /* the other street is BEFORE this one */
+        else if (t1 == hi) { nhi = t0 - 1; *share_hi = 1; }   /* ... or AFTER it                       */
+        else
+            return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN, 0.0), 0);
+        if (nhi - nlo + 1 < TG_GEO_SHARE_MIN_RUN || si < nlo || si > nhi)
+            return (s_gs.d_taken++, tg_geo_drop_note(si, left, TG_GD_TAKEN, 0.0), 0);
+        lo = nlo; hi = nhi;
+        *share_edge = tedge;
     }
     *lo_out = lo; *hi_out = hi;
     return 1;
@@ -1361,9 +1461,9 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         for (h = 0; h < nh; h++) {
             const TG_GeoHit *q = &hits[h];
             if (q->si <= 0 || q->si >= nspans || q->si + 1 >= nl->count) continue;
-            tg_geo_arm_push(nl, q, rd, r,  q->dx,  q->dz, q->kfwd, q->sfwd, skewmax);
+            tg_geo_arm_push(nl, q, rd, r,  q->dx,  q->dz, q->kfwd, q->sfwd, skewmax, 1);
             if (q->kbwd >= 0)
-                tg_geo_arm_push(nl, q, rd, r, -q->dx, -q->dz, q->kbwd, q->sbwd, skewmax);
+                tg_geo_arm_push(nl, q, rd, r, -q->dx, -q->dz, q->kbwd, q->sbwd, skewmax, 1);
         }
     }
 
@@ -1372,8 +1472,8 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
     for (i = 0; i < s_gna; i++) {
         const TG_GeoArm *a = &s_garm[i];
         const double sg = a->left ? 1.0 : -1.0;
-        int run = a->lanes, lo = 0, hi = 0, why, na, nb, kind;
-        double e[10], ox, oz, reach, from, width, pre;
+        int run = a->lanes, lo = 0, hi = 0, why, na, nb, kind, share_edge = -1, share_hi = 0;
+        double e[10], ox, oz, reach, from, width, pre, street_from = 0.0;
         TG_NetEdge *ed;
 
         /* [1014 B items 6, 19] The frontage run is counted ALONG THE ROAD, but a
@@ -1392,7 +1492,8 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         }
         if (run < 1) run = 1;
         if (run > TG_GEO_MOUTH_SPANS) run = TG_GEO_MOUTH_SPANS;
-        if (!tg_geo_span_run_ok(nl, nspans, a->si, a->left, run, a->shift, &lo, &hi)) continue;
+        if (!tg_geo_span_run_ok(nl, nspans, a->si, a->left, run, a->shift, &lo, &hi,
+                                &share_edge, &share_hi)) continue;
 
         width = (double)(hi - lo + 1) * (double)TD5_TG_LANE_WIDTH;
         tg_city_edge_frame(nl, a->si, sg, e);
@@ -1412,7 +1513,38 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
             from = TD5_TG_R8_CLAMP_MIN
                  / (cs < TG_GEO_MARCH_COS_MIN ? TG_GEO_MARCH_COS_MIN : cs);
         }
+        /* [ROUND 1030 F item 13] a window trimmed beside another street's mouth (tg_geo_span_run_ok)
+         * is a V junction only if the two streets FAN APART from the shared kerb corner: the one
+         * before leans further back along the road than the one after, at least 30 degrees apart.
+         * Then the march may not be stopped by the other street's paint until the two bodies have
+         * separated -- (half widths + 200) / sin(angle) along the ray. */
+        if (share_edge >= 0) {
+            const TG_NetEdge *oe = &s_edges[share_edge];
+            const TG_Node *n = &nl->v[a->si];
+            double odx = s_nodes[oe->b].x - s_nodes[oe->a].x, odz = s_nodes[oe->b].z - s_nodes[oe->a].z;
+            const double ol = sqrt(odx * odx + odz * odz);
+            int fan = 0;
+            double sang = 0.0;
+            if (ol > 1.0) {
+                double cang, lean_new, lean_old;
+                odx /= ol; odz /= ol;
+                lean_new = ox * n->tx + oz * n->tz;
+                lean_old = odx * n->tx + odz * n->tz;
+                cang = ox * odx + oz * odz;
+                sang = sqrt(cang < 1.0 ? 1.0 - cang * cang : 0.0);
+                fan = share_hi ? (lean_new < lean_old) : (lean_new > lean_old);
+            }
+            if (!fan || sang < TG_GEO_SHARE_SIN_MIN) {
+                s_gs.shared_no++; s_gs.d_taken++;
+                tg_geo_drop_note(a->si, a->left, TG_GD_TAKEN, 0.0);
+                continue;
+            }
+            street_from = (width * 0.5 + oe->width * 0.5 + 200.0) / sang;
+            if (street_from > TG_GEO_SHARE_CLEAR) street_from = TG_GEO_SHARE_CLEAR;
+        }
+        s_march_street_from = street_from;
         reach = tg_net_march(e[0], e[2], ox, oz, a->want, width * 0.5, from, &why);
+        s_march_street_from = 0.0;
         if (why == 1) s_gs.why_road++;
         if (why == 2) s_gs.why_street++;
         if (why == 3) s_gs.why_water++;
@@ -1500,6 +1632,13 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
                 }
             }
             if (cut) s_gs.fan_cut += cut;
+        }
+        if (share_edge >= 0) {
+            s_gs.shared++;
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO V] si %d %s run %d..%d shares its kerb corner with edge %d "
+                      "(way %d, %s it), corner clear %.0f, reach %.0f",
+                      a->si, a->left ? "left" : "right", lo, hi, share_edge, a->road,
+                      share_hi ? "before" : "after", street_from, reach);
         }
         if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
             TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO PLACED] si %d %s run %d..%d reach %.0f kind %d",
@@ -2533,14 +2672,16 @@ static void tg_net_geo_census(void)
               "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
               "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
               "table-full %ld; march stops: road %ld street %ld water/steep %ld; "
-              "mouth spans cut off a bend's fan %ld; streets joined to a neighbour %ld",
+              "mouth spans cut off a bend's fan %ld; streets joined to a neighbour %ld; "
+              "V-junction arms placed %ld refused %ld; kinked arms re-aimed %ld",
               td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
               s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
               s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under, s_gs.depart, s_gs.beyond,
               s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
               s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
               s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
-              s_gs.why_road, s_gs.why_street, s_gs.why_water, s_gs.fan_cut, s_gs.joined);
+              s_gs.why_road, s_gs.why_street, s_gs.why_water, s_gs.fan_cut, s_gs.joined,
+              s_gs.shared, s_gs.shared_no, s_gs.reaim);
     /* The ledger: one line per refused arm, so a RUN of missing crossings
      * names its own rule instead of hiding inside a total. */
     {

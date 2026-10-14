@@ -4384,6 +4384,7 @@ void   tg_pf_gap_mark(int fi, int k0, int k1);        /* [1023 B] rows where a r
 int    tg_pf_gap_at(int fi, int k);
 int    tg_pf_rehost_buildings(const TG_NodeList *nl, int nspans);   /* [1023 B] far-arc footprints -> main spans */
 int    tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat);   /* an avenue's scenery road would stand on a plaza corridor */
+int    tg_pf_avenue_yield(int si, double lat);       /* [1030 F] free plaza window, corridor side: no scenery avenue */
 int    tg_pf_clear_span(int fi, int si);             /* scenery clearance window            */
 double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* outermost corridor edge beside span si */
 double tg_pf_main_wscale(int fi, double w);          /* main half width scale at node width w   */
