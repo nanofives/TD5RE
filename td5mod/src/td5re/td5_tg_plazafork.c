@@ -1485,3 +1485,34 @@ int tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat)
     }
     return 0;
 }
+
+/* [ROUND 1030 F item 18] "intersection around level091 L91 e83 s17 prop p0:ROAD pos 325579,-1194,-331763 looks
+ * wrong, it should be more similar to the beginning on the other side of the plaza" (Mariano).
+ *
+ * MEASURED (level091, master 78a6b25f): AVENUES.JSON starts the second Diagonal 73 run at main span 331, the exit of the
+ * Plaza Miguel de Azcuenaga fork (fork 1, free main steps k1 7 .. K2 120 = spans 238..350). tg_emit_geo_avenue laid
+ * that avenue's far carriageway, island and infill at laterals -1400..-6600 over spans 331..339 (the slab of the pick),
+ * because tg_pf_scenery_clash only stands the scenery down where a corridor ROW lies within three lanes of it, and the
+ * free arc is still 9000+ units out there. The same phantom pushed the real connector street (way 439, OSM 272846181)
+ * out past its far kerb (shift 5073, run-from-kerb 2290: SHORT), which is the street the entry side shows as E1.
+ *
+ * RULE. Inside a built plaza fork's FREE window, on the corridor's side, the side IS the plaza and the corridor IS the
+ * avenue's other carriageway, so the avenue lays no scenery road there and claims no reach (tg_geo_avenue_reach: skirt,
+ * main-road pavement yield, street far shift). `lat` is the scenery road's centre lateral, + = left. 0 on every build
+ * without a plaza fork. TD5RE_PF_AVENUE_YIELD=0 restores the clash-only stand-down. */
+int tg_pf_avenue_yield(int si, double lat)
+{
+    int p;
+    if (s_nplan < 1) return 0;
+    if (!td5_env_flag_on("TD5RE_PF_AVENUE_YIELD")) return 0;
+    for (p = 0; p < s_nplan; p++) {
+        const PfPlan *P = &s_plan[p];
+        const int k = si - P->F - 1;
+        if (!P->used || !P->committed || !P->built) continue;
+        if (P->fi < 0 || P->fi >= s_fork_count) continue;
+        if (k < P->k1 || k >= P->K2) continue;
+        if (lat * (double)s_forks[P->fi].side <= 0.0) continue;
+        return 1;
+    }
+    return 0;
+}

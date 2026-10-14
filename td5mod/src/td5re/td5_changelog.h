@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (La Plata double crossings, plaza exit)" },
+    { CL_ITEM,    "Where Diagonal 73 cuts a grid corner, BOTH crossing" },
+    { CL_ITEM,    "  streets are built now (Calle 43 and Calle 20 at" },
+    { CL_ITEM,    "  spans 224-230, same fix at spans 172 and 368)." },
+    { CL_ITEM,    "The Plaza Azcuenaga exit (spans 331-339) has no" },
+    { CL_ITEM,    "  phantom road slab any more: the real connector" },
+    { CL_ITEM,    "  street is built, like the one at the plaza entry." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },

@@ -135,6 +135,8 @@ double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
          * none (tg_emit_geo_avenue), so it must not push the skirt out past it either:
          * the gap that left was a see-through slot at the crotch of the entry mouth. */
         if (tg_pf_scenery_clash(nl, si + e, off - tg_realfork_node_delta(si + e))) continue;
+        /* [ROUND 1030 F item 18] ... nor where a plaza corridor's free arc replaces it (tg_pf_avenue_yield) */
+        if (tg_pf_avenue_yield(si + e, off - tg_realfork_node_delta(si + e))) continue;
         /* [ROUND 1013 F2] The sidecar's offset is measured from the route
          * carriageway's own centre. Over a REAL fork's window the walk moved the
          * node toward the corridor, so the same road is that much nearer. */
@@ -1519,6 +1521,7 @@ int tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk,
             return tg_av_emit_far_pavement(nl, si, c0, c1, bl, 1, blk, moff, nmesh, pfi + 1);
     }
     if (tg_pf_scenery_clash(nl, si, 0.5 * (o0 + o1))) return 1;   /* [1015 E] the plaza corridor is the road here */
+    if (tg_pf_avenue_yield(si, 0.5 * (o0 + o1))) return 1;        /* [1030 F item 18] ... and on its whole free arc */
     {
         /* A span a REAL fork's corridor runs over: the fork draws the carriageway
          * (it is DRIVEABLE there), the gore and the kerbed island, all from the
