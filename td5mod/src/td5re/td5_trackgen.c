@@ -1841,6 +1841,10 @@ int         s_stream_pending;    /* geometry done, scenery not started */
 
 char        s_stream_dir[256];   /* level dir, for the deferred write */
 
+/* [ROUND 1030 E item 9] build the streamed entries by road position, set by the
+ * consumer (td5_trackgen_stream.c owns the knob) before the worker starts */
+static int  s_stream_order_on;
+
 static int tg_nodes_reserve(TG_NodeList *nl, int need)
 {
     if (need <= nl->cap) return 1;
@@ -5547,10 +5551,198 @@ void td5_trackgen_stream_discard(void)
  * streamed build can be sha256-compared against TD5RE_AUTOTRACK_STREAM=0.
  *
  * Returns 1 only when the whole table was published. */
+/* ================= [ROUND 1030 E item 9] CORRIDOR PREVIEW PASS =================
+ * "the forked road to the right of span 27 doesn't have texture, it loads after
+ * a long delay". A fork corridor is appended after the ring (level091: ring 1874,
+ * corridors 1875..2903 = entries 468..725), so in index order the corridor beside
+ * the start grid was the LAST thing the worker made: MEASURED 115.8 s after the
+ * scenery began (build step 469/726), all that time the flat grey ribbon.
+ *
+ * WHY NOT JUST BUILD THE ENTRIES IN ROAD ORDER. Tried first and measured: entry
+ * content is NOT order-free. tg_r12_flora_accept is a first-come spacing dedup
+ * over spans si +/-3, and a corridor tree registers at the MAIN node it stands
+ * beside, so building a corridor before its main road flips which of two
+ * overlapping trees survives (level091: a tree at the fork-4 rejoin moved from
+ * entry 392 to entry 699, MODELS.DAT +176 bytes). Ascending order is the only
+ * order the file is defined by, and entry 468 mixes ring-tail spans 1872/1873
+ * with fork 0's first corridor span, so no reorder can keep it exact.
+ *
+ * WHAT THIS DOES INSTEAD. Corridor entries are cheap (MEASURED ~1.2 ms each
+ * against ~240 ms for a city entry). Before the ascending pass the worker builds
+ * every entry that holds a corridor span, nearest fork first, and PUBLISHES it for
+ * display; then it rolls back every build-global table an emitter reads (flora
+ * spacing registry, element-inventory mask, rail-edge ownership, page variety)
+ * plus the census counters, frees the preview block, and runs master's ascending
+ * pass unchanged. That pass alone writes MODELS.DAT, and it skips the publish for
+ * an entry the preview already showed. The byte-identity gate (knob on vs off,
+ * same seed) is what proves the rollback is complete. What the preview cannot
+ * know is the main road's trees beside it, so a previewed corridor can carry a
+ * tree the file does not; the count of previewed entries whose bytes differ from
+ * the file is logged, and it is a this-race-only display difference.
+ *
+ * Position of an entry along the drive: the lowest MAIN-RING position of its
+ * corridor spans (tg_fork_row_node), the pad span before a corridor taking its
+ * fork F. */
+static int tg_stream_entry_key(int e, int ring, int nspans, int *has_corr)
+{
+    int s0 = e * TD5_TG_SPANS_PER_ENTRY, i, key = 0x7FFFFFFF;
+    *has_corr = 0;
+    for (i = 0; i < TD5_TG_SPANS_PER_ENTRY && s0 + i < nspans; i++) {
+        const int si = s0 + i;
+        int pos = -1, ck = 0, fi;
+        if (si < ring || !s_scn.branch_active) continue;
+        fi = tg_fork_of_corridor(si, &ck);
+        if (fi >= 0) { pos = tg_fork_row_node(fi, ck); *has_corr = 1; }
+        else {
+            int f;
+            for (f = 0; f < s_fork_count; f++)
+                if (si == s_forks[f].cbase - 1) { pos = s_forks[f].F; break; }
+        }
+        if (pos >= 0 && pos < key) key = pos;
+    }
+    return key;
+}
+
+void td5_trackgen_stream_set_order(int on) { s_stream_order_on = on ? 1 : 0; }
+
+static unsigned int tg_stream_fnv(const unsigned char *b, size_t n)
+{
+    unsigned int h = 2166136261u;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 16777619u; }
+    return h;
+}
+
+/* The build-global state a scenery entry writes, as far as the next entries or
+ * the end-of-build census read it. Snapshot before the preview, restore after. */
+typedef struct {
+    int    flora_n, flora_rej;
+    long   r22_spans, r22_trees;
+    int    nrails, nbudget;
+    long   guard_rejects, guard_residual, guard_scope, guard_unsorted, guard_unsafe, guard_rows;
+    long   guard_kind[TG_GK_COUNT];
+    long   r11[6];
+    unsigned long long (*mask)[TG_ACCT_MASK_WORDS];
+    TG_AcctRow *rows;
+    unsigned char (*rail_edge)[2], (*rail_would)[2];
+    int    var_id[TG_VAR_AXIS_COUNT][TD5_TG_VAR_SLOTS];
+    long   var_hits[TG_VAR_AXIS_COUNT][TD5_TG_VAR_SLOTS];
+    int    var_n[TG_VAR_AXIS_COUNT];
+    long   var_spill[TG_VAR_AXIS_COUNT];
+} TG_StreamSnap;
+
+static int tg_stream_snap(TG_StreamSnap *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->mask       = malloc(sizeof(s_acct_mask));
+    s->rows       = malloc(sizeof(s_acct_rows));
+    s->rail_edge  = malloc(sizeof(s_rail_edge));
+    s->rail_would = malloc(sizeof(s_rail_would));
+    if (!s->mask || !s->rows || !s->rail_edge || !s->rail_would) {
+        free(s->mask); free(s->rows); free(s->rail_edge); free(s->rail_would);
+        memset(s, 0, sizeof(*s));
+        return 0;
+    }
+    memcpy(s->mask, s_acct_mask, sizeof(s_acct_mask));
+    memcpy(s->rows, s_acct_rows, sizeof(s_acct_rows));
+    memcpy(s->rail_edge, s_rail_edge, sizeof(s_rail_edge));
+    memcpy(s->rail_would, s_rail_would, sizeof(s_rail_would));
+    memcpy(s->var_id, s_var_id, sizeof(s_var_id));
+    memcpy(s->var_hits, s_var_hits, sizeof(s_var_hits));
+    memcpy(s->var_n, s_var_n, sizeof(s_var_n));
+    memcpy(s->var_spill, s_var_spill, sizeof(s_var_spill));
+    s->flora_n = s_r12_flora_n; s->flora_rej = s_r12_flora_rejects;
+    s->r22_spans = s_r22_corr_spans; s->r22_trees = s_r22_corr_trees;
+    s->nrails = s_scn.nrails; s->nbudget = s_scn.nbudget;
+    s->guard_rejects = s_guard_rejects; s->guard_residual = s_guard_residual;
+    s->guard_scope = s_guard_ex_scope_hits; s->guard_unsorted = s_guard_unsorted;
+    s->guard_unsafe = s_guard_unsafe; s->guard_rows = s_guard_row_frames;
+    memcpy(s->guard_kind, s_guard_rej_kind, sizeof(s->guard_kind));
+    s->r11[0] = s_r11_signs; s->r11[1] = s_r11_sign_skip_lamp; s->r11[2] = s_r11_sign_skip_street;
+    s->r11[3] = s_r11_sign_skip_side; s->r11[4] = s_r11_sign_left; s->r11[5] = s_r11_sign_right;
+    return 1;
+}
+
+static void tg_stream_restore(TG_StreamSnap *s)
+{
+    memcpy(s_acct_mask, s->mask, sizeof(s_acct_mask));
+    memcpy(s_acct_rows, s->rows, sizeof(s_acct_rows));
+    memcpy(s_rail_edge, s->rail_edge, sizeof(s_rail_edge));
+    memcpy(s_rail_would, s->rail_would, sizeof(s_rail_would));
+    memcpy(s_var_id, s->var_id, sizeof(s_var_id));
+    memcpy(s_var_hits, s->var_hits, sizeof(s_var_hits));
+    memcpy(s_var_n, s->var_n, sizeof(s_var_n));
+    memcpy(s_var_spill, s->var_spill, sizeof(s_var_spill));
+    s_r12_flora_n = s->flora_n; s_r12_flora_rejects = s->flora_rej;
+    s_r22_corr_spans = s->r22_spans; s_r22_corr_trees = s->r22_trees;
+    s_scn.nrails = s->nrails; s_scn.nbudget = s->nbudget;
+    s_guard_rejects = s->guard_rejects; s_guard_residual = s->guard_residual;
+    s_guard_ex_scope_hits = s->guard_scope; s_guard_unsorted = s->guard_unsorted;
+    s_guard_unsafe = s->guard_unsafe; s_guard_row_frames = s->guard_rows;
+    memcpy(s_guard_rej_kind, s->guard_kind, sizeof(s->guard_kind));
+    s_r11_signs = s->r11[0]; s_r11_sign_skip_lamp = s->r11[1]; s_r11_sign_skip_street = s->r11[2];
+    s_r11_sign_skip_side = s->r11[3]; s_r11_sign_left = s->r11[4]; s_r11_sign_right = s->r11[5];
+    free(s->mask); free(s->rows); free(s->rail_edge); free(s->rail_would);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Build + publish every corridor-carrying entry, nearest fork first; returns the
+ * per-entry preview hash table (0 = not previewed), or NULL when nothing ran. */
+static unsigned int *tg_stream_preview(volatile int *cancel, unsigned int t0)
+{
+    const int nentries = s_scn.nentries;
+    int *ord, *key, n = 0, i, j, f;
+    unsigned int *hash;
+    TG_StreamSnap snap;
+
+    if (!s_stream_order_on || !s_scn.branch_active || nentries <= 1) return NULL;
+    ord  = (int *)malloc(sizeof(int) * (size_t)nentries);
+    key  = (int *)malloc(sizeof(int) * (size_t)nentries);
+    hash = (unsigned int *)calloc((size_t)nentries, sizeof(unsigned int));
+    if (!ord || !key || !hash || !tg_stream_snap(&snap)) {
+        free(ord); free(key); free(hash);
+        return NULL;
+    }
+    for (i = 0; i < nentries; i++) {
+        int has;
+        key[i] = tg_stream_entry_key(i, s_scn.ring, s_scn.nspans, &has);
+        if (has) ord[n++] = i;
+    }
+    for (i = 1; i < n; i++) {            /* stable insertion sort on (key, index) */
+        const int v = ord[i];
+        for (j = i - 1; j >= 0 && key[ord[j]] > key[v]; j--) ord[j + 1] = ord[j];
+        ord[j + 1] = v;
+    }
+    td5_track_scenery_set_ordered(1);
+    for (i = 0; i < n && s_scn.ok; i++) {
+        const int e = ord[i];
+        if (cancel && *cancel) break;
+        tg_scenery_entry(e);
+        if (!s_scn.ok) break;
+        td5_track_scenery_publish_entry(e, s_scn.blocks[e].b, s_scn.blocks[e].len);
+        hash[e] = tg_stream_fnv(s_scn.blocks[e].b, s_scn.blocks[e].len) | 1u;
+        tg_buf_free(&s_scn.blocks[e]);
+        tg_meshtag_clear_entry(e);
+        for (f = 0; f < s_fork_count; f++)
+            if (e == (s_forks[f].cbase >> 2))
+                TD5_LOG_I(LOG_TAG, "trackgen: [R1030 E] fork %d corridor (spans %d..) decorated "
+                          "at %u ms (preview %d/%d)", f, s_forks[f].cbase,
+                          td5_plat_time_ms() - t0, i + 1, n);
+    }
+    tg_stream_restore(&snap);
+    TD5_LOG_I(LOG_TAG, "trackgen: [R1030 E] corridor preview: %d of %d entries built and shown "
+              "in %u ms, nearest fork first; build-global state rolled back for the ascending "
+              "pass (knob TD5RE_AUTOTRACK_STREAM_ORDER)", i, n, td5_plat_time_ms() - t0);
+    free(ord); free(key);
+    return hash;
+}
+
 int td5_trackgen_stream_scenery(volatile int *cancel)
 {
     TG_Buf models;
-    int e, nentries, ok = 1;
+    int e, nentries, ok = 1, prev_n = 0, prev_diff = 0, prev_swapped = 0;
+    unsigned int *preview;
+    unsigned int t0 = td5_plat_time_ms();
 
     if (!s_stream_pending) return 0;
     memset(&models, 0, sizeof(models));
@@ -5560,14 +5752,42 @@ int td5_trackgen_stream_scenery(volatile int *cancel)
         return 0;
     }
     nentries = s_scn.nentries;
+    preview = tg_stream_preview(cancel, t0);
+    if (!s_scn.ok) ok = 0;
 
     for (e = 0; e < nentries && s_scn.ok; e++) {
         if (cancel && *cancel) { ok = 0; break; }
         tg_scenery_entry(e);
         if (!s_scn.ok) { ok = 0; break; }
+        if (preview && preview[e]) {
+            /* already on screen: swap in the final bytes only if they differ */
+            prev_n++;
+            if ((tg_stream_fnv(s_scn.blocks[e].b, s_scn.blocks[e].len) | 1u) != preview[e]) {
+                prev_diff++;
+                if (td5_track_scenery_republish_entry(e, s_scn.blocks[e].b, s_scn.blocks[e].len))
+                    prev_swapped++;
+            }
+            continue;
+        }
         td5_track_scenery_publish_entry(e, s_scn.blocks[e].b,
                                         s_scn.blocks[e].len);
+        /* [R1030 E] time-to-decorated of each fork corridor's first entry: the
+         * number the item is measured by (worker clock, from the scenery begin) */
+        if (s_scn.branch_active) {
+            int f;
+            for (f = 0; f < s_fork_count; f++)
+                if (e == (s_forks[f].cbase >> 2))
+                    TD5_LOG_I(LOG_TAG, "trackgen: [R1030 E] fork %d corridor (spans %d..) "
+                              "decorated at %u ms, build step %d/%d (entry %d)", f,
+                              s_forks[f].cbase, td5_plat_time_ms() - t0, e + 1, nentries, e);
+        }
     }
+    if (preview)
+        TD5_LOG_I(LOG_TAG, "trackgen: [R1030 E] corridor preview vs file: %d previewed entr%s, "
+                  "%d differ from the ascending build, %d swapped on screen for the file's "
+                  "bytes (a preview misses the main road's trees beside it)",
+                  prev_n, prev_n == 1 ? "y" : "ies", prev_diff, prev_swapped);
+    free(preview);
 
     /* _end runs even after a cancel: it owns the per-entry buffers, and
      * skipping it would leak every one of them plus the side-terrain table. */

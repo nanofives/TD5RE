@@ -245,6 +245,8 @@ static size_t mg_parse(const uint8_t *blob, size_t size, size_t pos);
 static int    mg_open(int span, int32_t px, int32_t pz);
 static int    mg_try_cross(int span, int32_t px, int32_t pz, int *new_span, int *new_sub);
 static int    mg_point_in_gap(int32_t px, int32_t pz);
+static int    mg_nose_enabled(void);                                          /* [R1030 E] */
+static int    mg_nose_hit(int32_t px, int32_t pz, int32_t *pen, double *nx_out, double *nz_out);
 
 /** Per-span median-divider lateral index (reverse-native forks): 0 = none, else
  *  the branch lane count = the lateral boundary that wall_contact walls off so a
@@ -737,6 +739,14 @@ static int    s_scn_reserved;   /* entries reserved; 0 = not streaming      */
 static int    s_scn_ready;      /* entries SETTLED (published or rejected)  */
 static int    s_scn_geom;       /* of those, how many carried geometry      */
 static int    s_scn_overflow;   /* blob ran out; logged once                */
+/* [ROUND 1030 E] per-entry SETTLED flags, so entries may arrive out of index
+ * order (fork corridors built beside the main road they run along). s_scn_ready
+ * stays the CONTIGUOUS watermark (first unsettled entry), which is all the
+ * countdown hold and the camera tour need. Sized at reserve, never freed while a
+ * reader could see s_scn_reserved != 0 (reset zeroes that first). */
+static volatile uint8_t *s_scn_settled;
+static int    s_scn_settled_cap;
+static int    s_scn_ordered;    /* producer said: entries come out of order */
 
 static void scenery_stream_reset(void)
 {
@@ -745,6 +755,7 @@ static void scenery_stream_reset(void)
     s_scn_ready = 0;
     s_scn_geom = 0;
     s_scn_overflow = 0;
+    s_scn_ordered = 0;
 }
 
 int td5_track_scenery_reserve(int nentries, size_t blob_bytes)
@@ -772,6 +783,17 @@ int td5_track_scenery_reserve(int nentries, size_t blob_bytes)
     s_models_blob_size = blob_bytes;
     s_models_dl_count = nentries;
     scenery_stream_reset();
+    if (nentries > s_scn_settled_cap) {
+        uint8_t *f = (uint8_t *)realloc((void *)s_scn_settled, (size_t)nentries);
+        if (!f) {
+            TD5_LOG_W("track", "streamed scenery: settled-flag table failed (%d entries)", nentries);
+            free_models_dat_runtime();
+            return 0;
+        }
+        s_scn_settled = f;
+        s_scn_settled_cap = nentries;
+    }
+    memset((void *)s_scn_settled, 0, (size_t)nentries);
     /* Offset 0 is the universal "this entry has no block" marker, so no real
      * block may be placed there. */
     s_scn_cursor = TD5_SCN_SPANS_PER_ENTRY * 2;
@@ -808,7 +830,7 @@ int td5_track_scenery_publish_entry(int e, const void *bytes, size_t len)
         return 0;
     /* Ascending order is the generator's contract (see the section note). Out
      * of order would silently mis-report the watermark, so say so. */
-    if (e != s_scn_ready) {
+    if (e != s_scn_ready && (!s_scn_ordered || s_scn_settled[e])) {
         static int s_warned;
         if (!s_warned++)
             TD5_LOG_W("track", "streamed scenery: entry %d published out of "
@@ -899,9 +921,102 @@ int td5_track_scenery_publish_entry(int e, const void *bytes, size_t len)
 
 settled:
     TD5_SCN_PUBLISH_FENCE();
-    if (e == s_scn_ready)
-        s_scn_ready = e + 1;
+    s_scn_settled[e] = 1;
+    /* contiguous watermark: in ascending order this is exactly the old `e + 1`;
+     * out of order it sweeps over every entry that already arrived ahead of it */
+    while (s_scn_ready < s_scn_reserved && s_scn_settled[s_scn_ready])
+        s_scn_ready++;
     return kept;
+}
+
+void td5_track_scenery_set_ordered(int on)
+{
+    s_scn_ordered = on ? 1 : 0;
+}
+
+/* [ROUND 1030 E] Replace an entry that is already on screen (a corridor the
+ * worker previewed early) with its final bytes. Same relocation as publish. Safe
+ * against the readers because nothing is ever freed: the old block stays in the
+ * blob and its runtime mesh records stay valid, so a reader that raced the swap
+ * draws, for at most one frame, a mix of old and new meshes -- never a dangling
+ * one. The count moves in the direction that keeps every slot below it valid:
+ * grown after the new slots are written, shrunk before. */
+int td5_track_scenery_republish_entry(int e, const void *bytes, size_t len)
+{
+    TD5_MeshHeader *tmp[TD5_SCN_SLOTS_PER_ENTRY];
+    TD5_MeshHeader **slots;
+    uint8_t *blk;
+    size_t off;
+    uint32_t sub_count, old_count, j;
+
+    if (!s_scn_reserved || e < 0 || e >= s_scn_reserved || !s_scn_settled || !s_scn_settled[e])
+        return 0;
+    if (!bytes || len < 8u) return 0;
+    sub_count = *(const uint32_t *)bytes;
+    if (sub_count == 0 || sub_count > TD5_SCN_SLOTS_PER_ENTRY || len < 4u + (size_t)sub_count * 4u)
+        return 0;
+    off = (s_scn_cursor + 3u) & ~(size_t)3u;
+    if (off + len > s_models_blob_size) return 0;
+
+    blk = s_models_blob + off;
+    memcpy(blk, bytes, len);
+    s_scn_cursor = off + len;
+    for (j = 0; j < sub_count; j++) {
+        uint32_t *slot = (uint32_t *)(void *)(blk + 4 + j * 4);
+        uint32_t mesh_off = *slot, rec_off;
+        const uint8_t *rec;
+        TD5_MeshHeader *mesh;
+        tmp[j] = NULL;
+        if (mesh_off == 0) continue;
+        if (mesh_off < len && (size_t)mesh_off + TD5_MESH_DISK_SIZE <= len)
+            rec_off = (uint32_t)(off + mesh_off);
+        else if ((size_t)mesh_off + TD5_MESH_DISK_SIZE <= s_models_blob_size)
+            rec_off = mesh_off;
+        else { *slot = 0; continue; }
+        *slot = rec_off;
+        rec = s_models_blob + rec_off;
+        {
+            const uintptr_t rec_abs  = (uintptr_t)rec;
+            const uintptr_t blob_end = (uintptr_t)s_models_blob + s_models_blob_size;
+            const uint32_t cmd_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_COMMANDS);
+            const uint32_t vtx_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_VERTICES);
+            if ((cmd_off && rec_abs + cmd_off >= blob_end) ||
+                (vtx_off && rec_abs + vtx_off >= blob_end)) { *slot = 0; continue; }
+        }
+        mesh = td5_track_runtime_mesh_for(rec_off);
+        if (!mesh || mesh->command_count < 0 || mesh->command_count > 4096 ||
+            mesh->total_vertex_count < 0 || mesh->total_vertex_count > 65536) {
+            *slot = 0;
+            continue;
+        }
+        tmp[j] = mesh;
+    }
+    slots = s_models_dl_meshes + (size_t)e * TD5_SCN_SLOTS_PER_ENTRY;
+    old_count = s_models_dl[e].count;
+    if (sub_count < old_count) {
+        s_models_dl[e].count = sub_count;
+        TD5_SCN_PUBLISH_FENCE();
+    }
+    for (j = 0; j < sub_count; j++) slots[j] = tmp[j];
+    s_models_entry_offsets[e] = (uint32_t)off;
+    s_models_entry_sizes[e]   = (uint32_t)len;
+    s_models_dl[e].meshes = slots;
+    TD5_SCN_PUBLISH_FENCE();
+    s_models_dl[e].count = sub_count;
+    if (!old_count) s_scn_geom++;
+    return 1;
+}
+
+/* 1 when `span`'s entry has been published (with or without geometry) while a
+ * stream is in flight. 0 when not streaming, so the ribbon's old min_span rule
+ * is all that applies to every other track. */
+int td5_track_scenery_span_settled(int span)
+{
+    int e;
+    if (!s_scn_reserved || span < 0 || !s_scn_settled) return 0;
+    e = span / TD5_SCN_SPANS_PER_ENTRY;
+    if (e >= s_scn_reserved) return 0;
+    return s_scn_settled[e] != 0;
 }
 
 int td5_track_scenery_ready_entries(void)
@@ -2566,6 +2681,23 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
         if ((hit_l || hit_r) && s_sl_n > 0 && sl_open(span_idx, px, pz)) { hit_l = hit_r = 0; }
         /* [R1023 D] ... and where a real cross street cuts the median: the paved gap and the span across it are road */
         if ((hit_l || hit_r) && s_mg_n > 0 && mg_open(span_idx, px, pz)) { hit_l = hit_r = 0; }
+        /* [R1030 E item 10] ... and where the probe is in a median island just past a gap end, the wall it
+         * met is the island's NOSE, not the rail: resolve it there when that is the shallower of the two */
+        if ((hit_l || hit_r) && s_mg_n > 0 && mg_nose_enabled()) {
+            int32_t npen = 0;
+            double nnx = 0.0, nnz = 0.0;
+            const int32_t rpen = hit_r ? pen_r : pen_l;
+            if (mg_nose_hit(px, pz, &npen, &nnx, &nnz) && npen > rpen) {
+                const double rad = atan2(nnx, -nnz);
+                const int32_t wa = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+                td5_physics_wall_response(actor, wa, npen, hit_r ? 2 : 1,
+                                          probe_block[pi].x, probe_block[pi].z);
+                td5_physics_rebuild_pose(actor);
+                TD5_LOG_I(LOG_TAG, "wall_contact: slot=%d probe=%d MEDIAN NOSE span=%d pen=%d (rail would be %d) angle=%d",
+                          actor->slot_index, pi, span_idx, npen, rpen, wa);
+                continue;
+            }
+        }
 #ifndef TD5RE_RELEASE
         if (s_sl_n > 0 && s_sl_of && (hit_l || hit_r) && actor->slot_index == td5_env_int("TD5RE_SL_DIAG", -1, -1, 7) &&
             (s_sl_of[span_idx] >= 0 || span_idx >= s_sl[0].c0 || (span_idx >= s_sl[0].a1_lo - 8 && span_idx <= s_sl[0].a2_hi + 3))) {
@@ -10300,6 +10432,57 @@ static int mg_in_gap(const MedGap *g, int32_t px, int32_t pz)
            mg_in_tri(px, pz, x[0], z[0], x[2], z[2], x[3], z[3]);
 }
 
+/* [ROUND 1030 E item 10] THE MEDIAN NOSE. "crashing into the median at span 62 displaces the car instead
+ * of crashing". MEASURED (TD5RE_MEDIAN_DRIVE=62,300): run 0 opens the main road's right rail over spans
+ * 57..61 (mg_open), so a car angling into the gap has its right probes past the rail line with no contact;
+ * the tick its front probe leaves the gap's far end into the green island it is 413 units past the now
+ * closed rail, and the rail response shoves the whole car 417 units SIDEWAYS in one tick (speed 300 -> 240,
+ * then it slides on). The island's END FACE -- the line across the median from the main edge to the
+ * corridor edge at each end of the gap -- was never a wall. A probe inside the island within
+ * MG_NOSE_DEPTH of an end face is now resolved against that face when it is shallower than the rail, i.e.
+ * the way it actually came in: a head-on hit on the nose, with the approach speed taken along the road.
+ * TD5RE_MEDIAN_NOSE=0 restores master. */
+#define MG_NOSE_DEPTH 1200   /* world units past an end face that still count as "came through the nose" */
+
+static int mg_nose_enabled(void)
+{
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_flag_on("TD5RE_MEDIAN_NOSE");
+    return s_on;
+}
+
+/* The shallowest end-face penetration of (px,pz) into a median island, with the face's normal pointing
+ * back into the gap (the push direction). 0 when the point is not just past any gap end. */
+static int mg_nose_hit(int32_t px, int32_t pz, int32_t *pen, double *nx_out, double *nz_out)
+{
+    int i, end, found = 0;
+    double bd = 1e30, bnx = 0.0, bnz = 0.0;
+    if (s_mg_off || s_mg_n <= 0) return 0;
+    for (i = 0; i < s_mg_n; i++) {
+        int32_t x[4], z[4];
+        if (!mg_corners(&s_mg[i], x, z)) continue;
+        /* corners: 0 main near, 1 main far, 2 corridor far, 3 corridor near */
+        for (end = 0; end < 2; end++) {
+            const int ia = end ? 1 : 0, ib = end ? 2 : 3, ic = end ? 0 : 1;
+            const double ax = x[ia], az = z[ia], ux = (double)x[ib] - ax, uz = (double)z[ib] - az;
+            const double ul2 = ux * ux + uz * uz;
+            double s, nx, nz, nl, d;
+            if (ul2 < 1.0) continue;
+            s = (((double)px - ax) * ux + ((double)pz - az) * uz) / ul2;
+            if (s < 0.0 || s > 1.0) continue;                   /* not between the two carriageways */
+            nl = sqrt(ul2); nx = uz / nl; nz = -ux / nl;
+            if ((ax - x[ic]) * nx + (az - z[ic]) * nz < 0.0) { nx = -nx; nz = -nz; }  /* away from the gap */
+            d = ((double)px - ax) * nx + ((double)pz - az) * nz;
+            if (d <= 0.0 || d > MG_NOSE_DEPTH) continue;         /* in the gap, or deep in the island */
+            if (d < bd) { bd = d; bnx = -nx; bnz = -nz; found = 1; }
+        }
+    }
+    if (!found) return 0;
+    *pen = -(int32_t)(bd + 0.5);
+    *nx_out = bnx; *nz_out = bnz;
+    return 1;
+}
+
 /* Is (px, pz) inside the paved gap of ANY linked run? (The engine knob off: never.) */
 static int mg_point_in_gap(int32_t px, int32_t pz)
 {
@@ -10526,6 +10709,119 @@ uint32_t td5_track_dev_gap_drive_bits(const TD5_Actor *a)
                 s_done = 1;
                 if (s_quit) g_td5.quit_requested = 1;
             }
+        }
+    }
+    return bits;
+}
+
+/* [ROUND 1030 E item 10] DEV: TD5RE_MEDIAN_DRIVE="<span>,<speed>" -- slot 0 holds the main road's lane next to
+ * the median (TD5RE_MEDIAN_DRIVE_SIDE 1 = the median is on the RIGHT of travel, the shipped corridor side; 0 =
+ * left) at <speed> units/tick, then from <span>-3 steers at a point 2000 units past the median-side edge of span
+ * <span>+2, i.e. straight into the median. Same steer/throttle bits as a keyboard, so the impact goes through the
+ * real physics, walker and wall resolver. One [MEDDRIVE] line per tick from <span>-6 (span, the wheel probes'
+ * sub-lanes, wall-contact flag, speed, heading, and `edge` = how far the chassis centre is PAST the median-side
+ * edge of its own span, + = in the median), a RESULT line after TD5RE_MEDIAN_DRIVE_TICKS (240), then a clean
+ * quit (TD5RE_MEDIAN_DRIVE_QUIT=0 keeps running). Compiled out of RELEASE. */
+static double md_edge_dist(int span, int right, int32_t px, int32_t pz)
+{
+    int32_t nx, nz, fx, fz, cx = 0, cy = 0, cz = 0;
+    double ex, ez, el, ox, oz, s;
+    if (!mg_edge(span, right, &nx, &nz, &fx, &fz)) return 0.0;
+    ex = (double)fx - nx; ez = (double)fz - nz; el = sqrt(ex * ex + ez * ez);
+    if (el < 1.0) return 0.0;
+    ex /= el; ez /= el;
+    ox = ez; oz = -ex;                                   /* a perpendicular; orient it away from the road centre */
+    if (td5_track_get_span_lane_world(span, 0, &cx, &cy, &cz)) {
+        s = ((double)FP_TRUNC(cx) - nx) * ox + ((double)FP_TRUNC(cz) - nz) * oz;
+        if (s > 0) { ox = -ox; oz = -oz; }
+    }
+    return ((double)px - nx) * ox + ((double)pz - nz) * oz;
+}
+
+uint32_t td5_track_dev_median_drive_bits(const TD5_Actor *a)
+{
+    static int s_init = 0, s_span = -1, s_side = 1, s_quit = 1, s_done = 0, s_t = 0, s_max_t = 240;
+    static int s_contacts = 0, s_prev = 0, s_first_hit = -1, s_sign = -1;
+    static double s_speed = 200.0, s_vmax = 0.0, s_edge_max = -1e9, s_v_at_hit = -1.0, s_v_min_after = 1e9;
+    int span, ring, lc, ls, tx = 0, ty = 0, tz = 0, aim;
+    double vx, vz, spd, yaw, hx, hz, dx, dz, err, edge = 0.0;
+    uint32_t bits = 0;
+    if (!a) return 0;
+    if (!s_init) {
+        const char *e = getenv("TD5RE_MEDIAN_DRIVE");
+        s_init = 1;
+        if (e && e[0]) { int sp = -1, v = 200; if (sscanf(e, "%d,%d", &sp, &v) >= 1) { s_span = sp; s_speed = v; } }
+        s_side  = td5_env_int("TD5RE_MEDIAN_DRIVE_SIDE", 1, 0, 1);
+        s_quit  = td5_env_int("TD5RE_MEDIAN_DRIVE_QUIT", 1, 0, 1);
+        s_max_t = td5_env_int("TD5RE_MEDIAN_DRIVE_TICKS", 240, 10, 5000);
+        s_sign  = td5_env_int("TD5RE_GAP_DRIVE_STEER_SIGN", -1, -1, 1);
+    }
+    if (s_span < 0 || s_done) return 0;
+    span = (int)a->track_span_raw;
+    ring = g_td5.track_span_ring_length;
+    if (span < 0 || span >= s_span_count || ring <= 0 || s_span + 2 >= ring) return 0;
+
+    vx = (double)a->linear_velocity_x / 256.0; vz = (double)a->linear_velocity_z / 256.0;
+    spd = sqrt(vx * vx + vz * vz);
+    yaw = (double)(a->display_angles.yaw & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    if (spd > 20.0) { hx = vx / spd; hz = vz / spd; } else { hx = sin(yaw); hz = cos(yaw); }
+
+    if (span >= ring && s_t == 0) {
+        static int s_corr_logged = 0;
+        if (!s_corr_logged++)
+            TD5_LOG_I(LOG_TAG, "[MEDDRIVE] slot 0 entered corridor span %d before the window", span);
+    }
+    if (span < ring && span < s_span - 3) {
+        aim = span + 4; if (aim >= ring) aim = ring - 1;
+        lc = span_lane_count(&s_span_array[aim]);
+        /* the MAIN half's lane next to the median: on a full-width span before /
+         * at the fork the median-side half is the corridor's, so stay one lane in */
+        ls = s_side ? ((lc >= 4) ? lc / 2 - 1 : lc - 1) : 0;
+        if (!td5_track_get_span_lane_world(aim, ls, &tx, &ty, &tz)) return 0;
+        dx = (double)FP_TRUNC(tx); dz = (double)FP_TRUNC(tz);
+    } else {
+        int32_t nx, nz, fx, fz, cx = 0, cy = 0, cz = 0;
+        double mx, mz, ox, oz, ol;
+        aim = s_span + 2;
+        if (!mg_edge(aim, s_side, &nx, &nz, &fx, &fz) || !td5_track_get_span_lane_world(aim, 0, &cx, &cy, &cz)) return 0;
+        mx = 0.5 * ((double)nx + fx); mz = 0.5 * ((double)nz + fz);
+        ox = mx - FP_TRUNC(cx); oz = mz - FP_TRUNC(cz); ol = sqrt(ox * ox + oz * oz);
+        if (ol < 1.0) return 0;
+        dx = mx + ox / ol * 2000.0; dz = mz + oz / ol * 2000.0;
+    }
+    dx -= (double)FP_TRUNC(a->world_pos.x);
+    dz -= (double)FP_TRUNC(a->world_pos.z);
+    err = atan2(dx, dz) - atan2(hx, hz);
+    while (err > 3.14159265358979) err -= 6.28318530717959;
+    while (err < -3.14159265358979) err += 6.28318530717959;
+    err *= (double)s_sign;
+    if (err > 0.03) bits |= (uint32_t)TD5_INPUT_STEER_RIGHT;
+    else if (err < -0.03) bits |= (uint32_t)TD5_INPUT_STEER_LEFT;
+    if (spd < s_speed) bits |= (uint32_t)TD5_INPUT_THROTTLE;
+
+    if (span < ring && span >= s_span - 6) s_t = s_t ? s_t : 1;
+    if (s_t > 0) {
+        const int contact = (int)a->track_contact_flag;
+        if (span < ring) edge = md_edge_dist(span, s_side, FP_TRUNC(a->world_pos.x), FP_TRUNC(a->world_pos.z));
+        if (spd > s_vmax) s_vmax = spd;
+        if (contact && !s_prev) { s_contacts++; if (s_first_hit < 0) { s_first_hit = s_t; s_v_at_hit = spd; } }
+        s_prev = contact;
+        if (s_first_hit >= 0 && spd < s_v_min_after) s_v_min_after = spd;
+        if (span < ring && edge > s_edge_max) s_edge_max = edge;
+        TD5_LOG_I(LOG_TAG, "[MEDDRIVE] t=%d span=%d sub=%d,%d,%d,%d contact=%d spd=%.0f v=(%.0f,%.0f) yaw=%d edge=%.0f "
+                  "pos=(%d,%d,%d) steer=%c", s_t, span,
+                  (int)a->wheel_probes[0].sub_lane_index, (int)a->wheel_probes[1].sub_lane_index,
+                  (int)a->wheel_probes[2].sub_lane_index, (int)a->wheel_probes[3].sub_lane_index,
+                  contact, spd, vx, vz, (int)(a->display_angles.yaw & 0xFFF), edge,
+                  FP_TRUNC(a->world_pos.x), FP_TRUNC(a->world_pos.y), FP_TRUNC(a->world_pos.z),
+                  (bits & TD5_INPUT_STEER_RIGHT) ? 'R' : ((bits & TD5_INPUT_STEER_LEFT) ? 'L' : '-'));
+        if (++s_t > s_max_t) {
+            TD5_LOG_I(LOG_TAG, "[MEDDRIVE] RESULT span %d side %s: wall contacts=%d (first at t=%d, speed there %.0f, "
+                      "lowest after %.0f), deepest chassis edge %.0f units past the median edge, peak speed %.0f, final span %d",
+                      s_span, s_side ? "right" : "left", s_contacts, s_first_hit, s_v_at_hit,
+                      s_first_hit >= 0 ? s_v_min_after : -1.0, s_edge_max, s_vmax, span);
+            s_done = 1;
+            if (s_quit) g_td5.quit_requested = 1;
         }
     }
     return bits;

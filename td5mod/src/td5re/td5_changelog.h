@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (forks and medians)" },
+    { CL_ITEM,    "On a freshly built track the fork roads get their" },
+    { CL_ITEM,    "  texture and scenery in the first seconds instead" },
+    { CL_ITEM,    "  of up to two minutes after the start." },
+    { CL_ITEM,    "Driving into the end of a median island after a gap" },
+    { CL_ITEM,    "  is now a crash: the car stops at the island instead" },
+    { CL_ITEM,    "  of being shoved sideways and sliding on." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },

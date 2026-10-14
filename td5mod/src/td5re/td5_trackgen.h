@@ -292,6 +292,10 @@ int  td5_trackgen_stream_span_count(void);
  * whole table was published. */
 int  td5_trackgen_stream_scenery(volatile int *cancel);
 void td5_trackgen_stream_discard(void);        /* frees the stashed node list */
+/* [ROUND 1030 E] 1 = the worker builds entries by ROAD POSITION (a fork corridor
+ * next to the main road it runs beside) instead of ascending index. Set before
+ * the worker starts; the consumer owns the knob. Content-neutral. */
+void td5_trackgen_stream_set_order(int on);
 
 /* [S2 / Phase 2 streaming] Rebuild the main-road span records for `seed` and
  * return them as a blob of 24-byte records for the caller to free. Lets the

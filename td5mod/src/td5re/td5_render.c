@@ -3956,6 +3956,10 @@ void td5_render_fallback_strip_ribbon(int center_span, int window,
         }
         if (si < min_span) continue;            /* drag: only from the insertion point */
         if (max_span > 0 && si >= max_span) continue;  /* drag: not the shifted junk tail */
+        /* [ROUND 1030 E] streamed scenery: an entry past the watermark can already
+         * be decorated (fork corridors are built beside their main road), and its
+         * real road must not be painted over. Always 0 when not streaming. */
+        if (td5_track_scenery_span_settled(si)) continue;
         sp = td5_track_get_span(si);
         if (!sp) continue;
 
