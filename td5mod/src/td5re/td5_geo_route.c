@@ -4562,6 +4562,9 @@ int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult 
         memcpy(s_path_ll, raw_ll, (size_t)n_seq * sizeof(TD5_GeoLatLon));
         out->path = s_path_ll;
         out->n_path = n_seq;
+        /* [ROUND 1030 B item 5] where the player's own route ends inside it */
+        out->n_path_user = (s_last.n_user > 0 && s_last.n_user <= n_seq)
+                           ? s_last.n_user : n_seq;
     }
 
     /* Crossing markers, mapped back out of the CONDITIONED frame so the screen

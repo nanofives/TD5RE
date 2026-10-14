@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (geospatial track generator map)" },
+    { CL_ITEM,    "The map is smaller and an OPTIONS panel sits on its" },
+    { CL_ITEM,    "  right: ROUTE, FORKS, STREETS and CITY pages with" },
+    { CL_ITEM,    "  forks, block loops, avenues, lights and buildings." },
+    { CL_ITEM,    "Click 1 places the start, click 2 the finish, later" },
+    { CL_ITEM,    "  clicks add middle points. Right click undoes." },
+    { CL_ITEM,    "The red route line now stops at the finish marker." },
+    { CL_ITEM,    "The ZOOM / POINTS / metres readout is gone." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },
