@@ -1254,38 +1254,40 @@ static int frontend_geo_btn_wanted(void) {
     return frontend_geo_entry_slot() < 0;
 }
 
-static void frontend_qr_refresh_geo_btn(void) {
-    int show;
-    if (s_qr_geo_btn < 0) return;
-    show = frontend_geo_btn_wanted();
-    s_buttons[s_qr_geo_btn].hidden   = show ? 0 : 1;
-    s_buttons[s_qr_geo_btn].disabled = show ? 0 : 1;
-}
-
 /* [ROUND 1030 A2] Mariano: "auto-generated track selector should have below the
  * button saying Settings, and the selection for the Geospatial Track Generator
- * should be the title with a settings button below". On SELECT TRACK each
- * generated entry's options button now reads SETTINGS, because the entry itself
- * already names the generator (the panel title, see
- * frontend_trksel_generated_title). The geo button keeps its full name whenever
- * it is NOT sitting under the geo entry -- the TD5RE_GEO_OWN_SELECTOR=0 layout
- * and the no-place fallback show it on every track, where "SETTINGS" would not
- * say what it opens. */
+ * should be the title with a settings button below". On SELECT TRACK and QUICK
+ * RACE each generated entry's options button now reads SETTINGS, because the
+ * entry itself already names the generator (frontend_get_entry_title in
+ * td5_frontend.c). The geo button keeps its full name whenever it is NOT sitting
+ * under the geo entry -- the TD5RE_GEO_OWN_SELECTOR=0 layout and the no-place
+ * fallback show it on every track, where "SETTINGS" would not say what it
+ * opens. */
 static void frontend_btn_set_label(int idx, const char *label) {
     if (idx < 0 || idx >= s_button_count) return;
     strncpy(s_buttons[idx].label, label, sizeof(s_buttons[idx].label) - 1);
     s_buttons[idx].label[sizeof(s_buttons[idx].label) - 1] = '\0';
 }
 
-static void frontend_trksel_refresh_geo_btn(void) {
+/* Show/hide + label for a GEOSPATIAL TRACK GENERATOR button, shared by the
+ * SELECT TRACK and QUICK RACE copies so the two screens cannot drift apart. */
+static void frontend_refresh_geo_btn(int idx) {
     int show;
-    if (s_trksel_geo_btn < 0) return;
+    if (idx < 0) return;
     show = frontend_geo_btn_wanted();
-    s_buttons[s_trksel_geo_btn].hidden   = show ? 0 : 1;
-    s_buttons[s_trksel_geo_btn].disabled = show ? 0 : 1;
-    frontend_btn_set_label(s_trksel_geo_btn,
+    s_buttons[idx].hidden   = show ? 0 : 1;
+    s_buttons[idx].disabled = show ? 0 : 1;
+    frontend_btn_set_label(idx,
         (td5_trackgen_geo_own_selector() && td5_trackgen_is_geo_slot(s_selected_track))
             ? TR("SETTINGS") : TR("GEOSPATIAL TRACK GENERATOR"));
+}
+
+static void frontend_qr_refresh_geo_btn(void) {
+    frontend_refresh_geo_btn(s_qr_geo_btn);
+}
+
+static void frontend_trksel_refresh_geo_btn(void) {
+    frontend_refresh_geo_btn(s_trksel_geo_btn);
 }
 
 /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Same show/hide toggle for the Track
@@ -1479,14 +1481,18 @@ void Screen_QuickRaceMenu(void) {
          * rebuilds its whole button list on every track change -- Quick Race
          * cycles the track in place, so visibility is refreshed per frame by
          * frontend_qr_refresh_auto_btn() instead of at creation time. Row 6 is
-         * free (the AI Screens row that lives there is hidden). */
-        s_qr_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
+         * free (the AI Screens row that lives there is hidden).
+         * [ROUND 1030 A2] Labelled SETTINGS, as on SELECT TRACK: it only shows
+         * on the AUTO-GENERATED TRACK entry, which already names the studio. */
+        s_qr_auto_btn = frontend_create_button(TR("SETTINGS"),
                                                QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32);
         frontend_qr_refresh_auto_btn();
         /* [ROUND 1026 L] GEOSPATIAL TRACK GENERATOR chip on the same row: Quick
          * Race had no way into the generator at all. Created after the studio
          * chip so no existing index moves; the label is long for 208 px, the
-         * shared button loop condenses it (fe_fit_text_scale). */
+         * shared button loop condenses it (fe_fit_text_scale).
+         * [ROUND 1030 A2] frontend_qr_refresh_geo_btn relabels it SETTINGS while
+         * the geo entry is the pick (same rule as SELECT TRACK). */
         s_qr_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
                                               QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32);
         frontend_qr_refresh_geo_btn();

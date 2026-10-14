@@ -318,15 +318,24 @@ button that exists only while that entry is the pick:
 * Both options buttons sit at x=120 w=224 on **row y=306** (SELECT TRACK) and on
   QR row 6 (y=336). They are created unconditionally and shown/hidden per pick by
   `frontend_trksel_refresh_{auto,geo}_btn` / `frontend_qr_refresh_{auto,geo}_btn`.
-* **[Round 1030 A] On SELECT TRACK both options buttons read `SETTINGS`** (QR keeps
-  the long labels). The geo button falls back to `GEOSPATIAL TRACK GENERATOR`
+* **[Round 1030 A / A2] On SELECT TRACK and QUICK RACE both options buttons read
+  `SETTINGS`.** The geo button falls back to `GEOSPATIAL TRACK GENERATOR`
   whenever it is shown off the geo entry (`TD5RE_GEO_OWN_SELECTOR=0`, or no place
-  registered), set per pick in `frontend_trksel_refresh_geo_btn`. The geo entry's
-  panel title reads `GEOSPATIAL TRACK GENERATOR` and the place name is drawn small
-  under the title (y=108, centred on 492) by `frontend_render_track_selection_preview`;
-  the OSM credit in `td5_geo_draw_route` drops one line (by-14 / by-2) to make room.
-  Not under the map: the Pitbull logo covers x ~520..612 below y ~345. That override
-  is local to the panel, `frontend_get_track_name` still returns the place.
+  registered), set per pick by the shared `frontend_refresh_geo_btn` (both
+  `frontend_{trksel,qr}_refresh_geo_btn` call it). The geo entry's title reads
+  `GEOSPATIAL TRACK GENERATOR` with the place name in small text under it; both
+  screens get the pair from `frontend_get_entry_title` (td5_frontend.c).
+  SELECT TRACK draws the place under the panel title (y=108, centred on 492) in
+  `frontend_render_track_selection_preview`; the OSM credit in `td5_geo_draw_route`
+  drops one line (by-14 / by-2) to make room. Not under the map: the Pitbull logo
+  covers x ~520..612 below y ~345. QUICK RACE draws it with
+  `frontend_draw_qr_value_sub`: the title on ONE line, condensed horizontally from
+  the 4:3-locked glyph scale (`fe_glyph_sx`, scaling sx alone does nothing on a
+  wide window), plus the small line, the 36 px block centred on the TRACK row.
+  Wrapped to two lines it hit the wrapped car name at 640x480 and ran under
+  RANDOMIZE. QUICK RACE has no track map, so the north-up note below is SELECT
+  TRACK only. The override is selector-only, `frontend_get_track_name` still
+  returns the place (HUD, results).
 * The geo panel's route is plotted NORTH UP: `td5_geo_preview_route` undoes the
   build's `rotation_rad` (`TD5RE_GEO_PREVIEW_NORTH_UP=0` = world frame).
 * Neither RANDOMIZE nor a network lobby lands on the geo entry.
