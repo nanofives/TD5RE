@@ -564,6 +564,7 @@ static int geo_undo_last(void)
     return newest;
 }
 
+#ifndef TD5RE_RELEASE
 /* Stamp a route that arrived all at once (the dev seeds) in the order a player
  * would have clicked it: START, FINISH, then the middles along the route. */
 static void geo_stamp_route_order(void)
@@ -575,6 +576,7 @@ static void geo_stamp_route_order(void)
     if (s_n_pts >= 2) s_pt_seq[s_n_pts - 1] = s_seq_next++;
     for (i = 1; i < s_n_pts - 1; i++) s_pt_seq[i] = s_seq_next++;
 }
+#endif
 
 /* Which LEG of the drawn route a click landed on, or -1. Returns the index of
  * the point the new middle point should be inserted BEFORE, so clicking the
