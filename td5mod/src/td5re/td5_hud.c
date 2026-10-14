@@ -32,6 +32,7 @@
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
 #include "td5_minimap_streets.h" /* [MINIMAP STREETS] side streets under the route */
 #include "td5_track.h"
+#include "td5_trackgen.h" /* [1030 C] generated-slot gate for the varlen fork rows */
 #include "td5_camera.h"
 #include "td5_pick.h"     /* dev free-cam geometry picker HUD label */
 #include "td5_game.h"
@@ -240,6 +241,29 @@ static int hud_minimap_ahead_on(void)
     if (s < 0) {
         s = hud_knob_on("TD5RE_MINIMAP_AHEAD");
         TD5_LOG_I(LOG_TAG, "minimap forward look-ahead: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
+/* [ROUND 1030 C item 22] PORT-ONLY. "On the minimap near pos 981148,-741666 it
+ * renders a diagonal non existent road." The minimap models every fork as the
+ * original's same-length MIRROR of the main road (branch span = main span +
+ * delta). A generated track's fork corridors are NOT the same length as the main
+ * stretch they bypass (La Plata: 106 spans against 76, 344 against 347), so the
+ * mirror row ended mid-corridor and the merge connector joined that span to the
+ * wrong main span: a 38 430-unit diagonal across the block at the end of the
+ * span 953-1029 loop, and a 219 440-unit one at the span 577 merge. With this on
+ * (default) a generated track's branch rows end at their corridor's own type-10
+ * span, the merge connector goes to the main span that corridor really rejoins,
+ * the corridor is drawn whole at its own position, and a car on a corridor
+ * centres the walk on its own row. TD5RE_MINIMAP_VARLEN_FORKS=0 restores the
+ * mirror model. Shipped tracks never take this path. */
+static int hud_minimap_varlen_forks_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_MINIMAP_VARLEN_FORKS");
+        TD5_LOG_I(LOG_TAG, "minimap variable-length fork corridors: %s", s ? "on" : "off");
     }
     return s;
 }
@@ -653,6 +677,12 @@ static int   s_minimap_seg_branch_start; /* 0x4B0A5C */
 static int16_t s_minimap_seg_start[MINIMAP_SEG_MAX];  /* 0x4B0A70 */
 static int16_t s_minimap_seg_end[MINIMAP_SEG_MAX];    /* 0x4B0A72 */
 static int16_t s_minimap_seg_branch[MINIMAP_SEG_MAX]; /* 0x4B0A74 */
+/* [ROUND 1030 C item 22] PORT-ONLY. Set by the init on a generated track whose
+ * branch rows were re-measured from the strip (see minimap_varlen_fix_rows):
+ * a branch row then ends at its corridor's own type-10 span, and
+ * s_minimap_seg_merge holds the main span that corridor rejoins (-1 = none). */
+static int   s_minimap_varlen;
+static int16_t s_minimap_seg_merge[MINIMAP_SEG_MAX];
 
 /* --- Text rendering state --- */
 static TD5_GlyphRecord *s_glyph_table;  /* 0x4A2CB8: heap, 64 entries + tex ptr */
@@ -6792,6 +6822,29 @@ void td5_hud_render_overlays(float dt)
  * filters so vehicles on a DIFFERENT branch than the player aren't culled by
  * the +/-144 span gate (the port can't read +0x82 directly: it isn't kept
  * current per-frame for racers, only on traffic recycle). */
+/* Branch span -> main span through the appended mirror rows. The faithful rule
+ * takes the first row whose END is past the span, which assumes the rows are
+ * sorted by start; [ROUND 1030 C] on a re-measured generated track the rows are
+ * not (La Plata's span 953 fork owns corridor 2798..2903, listed before the
+ * 2507.. and 2678.. corridors), so a row must CONTAIN the span, and the span maps
+ * proportionally onto the main stretch the corridor bypasses. */
+static int minimap_branch_remap(int span)
+{
+    for (int si = s_minimap_seg_branch_start; si < s_minimap_seg_primary_end; si++) {
+        if (s_minimap_varlen) {
+            const int bs = s_minimap_seg_start[si], be = s_minimap_seg_end[si];
+            const int fm = s_minimap_seg_branch[si], mm = s_minimap_seg_merge[si];
+            if (span < bs || span > be || fm < 0) continue;
+            if (mm > fm && be > bs)
+                return fm + (int)((int64_t)(span - bs) * (mm - fm) / (be - bs));
+            return span + fm - bs;
+        }
+        if (span <= (int)s_minimap_seg_end[si])
+            return span + (int)s_minimap_seg_branch[si] - (int)s_minimap_seg_start[si];
+    }
+    return span;
+}
+
 static int minimap_normalize_span(int raw_span)
 {
     int ring_length = g_td5.track_span_ring_length;
@@ -6805,14 +6858,7 @@ static int minimap_normalize_span(int raw_span)
         if (g_active_td6_level > 0) {
             norm = td5_track_branch_to_main_span(raw_span);
         } else if (s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
-            for (int si = s_minimap_seg_branch_start;
-                 si < s_minimap_seg_primary_end; si++) {
-                if (norm <= (int)s_minimap_seg_end[si]) {
-                    norm += (int)s_minimap_seg_branch[si]
-                          - (int)s_minimap_seg_start[si];
-                    break;
-                }
-            }
+            norm = minimap_branch_remap(norm);
         }
     }
     return norm;
@@ -7200,6 +7246,10 @@ static void minimap_emit_fork_connectors(uint8_t *span_base, uint8_t *vert_base,
         int fork_main = (int)s_minimap_seg_branch[bi];   /* parent primary start */
         if (fork_main < 0 || br_last < br_first) continue;
         int merge_main = fork_main + (br_last - br_first);
+        /* [ROUND 1030 C] a re-measured corridor rejoins where its own type-10
+         * link says, not at fork + its length */
+        if (s_minimap_varlen && s_minimap_seg_merge[bi] >= 0)
+            merge_main = (int)s_minimap_seg_merge[bi];
         {   /* [RUN2 2026-09-26] one-shot geometry line per branch row */
             static unsigned char s_logged[64];
             int k = bi & 63;
@@ -7719,14 +7769,7 @@ void td5_hud_render_minimap(int actor_slot)
              * the strip jump table can. */
             remapped_span = td5_track_branch_to_main_span((int)player_span);
         } else if (s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
-            for (int si = s_minimap_seg_branch_start;
-                 si < s_minimap_seg_primary_end; si++) {
-                if (remapped_span <= (int)s_minimap_seg_end[si]) {
-                    remapped_span += (int)s_minimap_seg_branch[si]
-                                   - (int)s_minimap_seg_start[si];
-                    break;
-                }
-            }
+            remapped_span = minimap_branch_remap(remapped_span);
         }
     }
 
@@ -7808,6 +7851,11 @@ void td5_hud_render_minimap(int actor_slot)
         }
 
         local_a4 = far_idx + 1; /* advance by up to 6 */
+
+        /* [ROUND 1030 C] past the ring a generated strip holds only the fork
+         * corridors, which are drawn whole below; walking on would join the
+         * finish to a corridor and one corridor's end to the next one's start. */
+        if (s_minimap_varlen && near_idx >= ring_length) break;
 
         if (near_idx < 0 || far_idx < 0 ||
             near_idx >= g_strip_span_count ||
@@ -7940,8 +7988,10 @@ void td5_hud_render_minimap(int actor_slot)
          *
          * Restricted to primary rows (cur_seg < branch_start) so appended
          * back-link rows (seg_branch[new] = seg_start[K] per init) don't
-         * double-fire. */
-        if (cur_seg < s_minimap_seg_branch_start &&
+         * double-fire. [ROUND 1030 C] not on a re-measured generated track: its
+         * corridors are not same-length mirrors, so near+delta lands on the wrong
+         * corridor span (or in the next corridor); they are drawn whole below. */
+        if (!s_minimap_varlen && cur_seg < s_minimap_seg_branch_start &&
             s_minimap_seg_branch[cur_seg] != (int16_t)-1) {
             int delta = (int)s_minimap_seg_branch[cur_seg]
                       - (int)s_minimap_seg_start[cur_seg];
@@ -8083,7 +8133,7 @@ void td5_hud_render_minimap(int actor_slot)
                 /* Quad4: branch-collapsed connector, gated on LINK != -1
                  * (g_minimapSegmentSpanEnd[seg], @ 0x43ac23). cpB = cp + delta
                  * where delta = LINK - segStart (same delta as the branch quad). */
-                if (cur_seg < s_minimap_seg_branch_start &&
+                if (!s_minimap_varlen && cur_seg < s_minimap_seg_branch_start &&
                     s_minimap_seg_branch[cur_seg] != (int16_t)-1) {
                     int cpB = cp + ((int)s_minimap_seg_branch[cur_seg]
                                   - (int)s_minimap_seg_start[cur_seg]);
@@ -8128,8 +8178,9 @@ void td5_hud_render_minimap(int actor_slot)
      * mirror links (which TD6 has none of -> "branches missing on minimap").
      * Draw the appended TD6 corridor rows here, each at its own world position;
      * the window AABB cull inside minimap_emit_road_quad keeps only the corridors
-     * near the player. */
-    if (!circuit && g_active_td6_level > 0 && span_base && vert_base &&
+     * near the player. [ROUND 1030 C] Also a re-measured generated track's
+     * corridors (the branch-quad mirror draw above is off for them). */
+    if (!circuit && (g_active_td6_level > 0 || s_minimap_varlen) && span_base && vert_base &&
         s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
         int td6_branch_drawn = 0;
         for (int bi = s_minimap_seg_branch_start; bi < s_minimap_seg_primary_end; bi++) {
@@ -8694,6 +8745,37 @@ void td5_hud_init_minimap_layout(void)
         }
     }
     s_minimap_seg_primary_end = branch_write;
+
+    /* [ROUND 1030 C item 22] Re-measure a generated track's branch rows from the
+     * strip (see hud_minimap_varlen_forks_on). Its corridors keep the type-9 ..
+     * type-10 layout in [ring, total) and the type-10 span's +8 is the main span
+     * the corridor rejoins, so each mirror row's guessed end (fork + main length)
+     * is replaced by the corridor's real end and the rejoin is kept per row. */
+    s_minimap_varlen = 0;
+    for (int bi = 0; bi < MINIMAP_SEG_MAX; bi++) s_minimap_seg_merge[bi] = -1;
+    if (g_active_td6_level == 0 && hud_minimap_varlen_forks_on() &&
+        td5_trackgen_is_generated_slot(g_td5.track_index) && g_strip_span_base &&
+        s_minimap_seg_branch_start < s_minimap_seg_primary_end) {
+        const uint8_t *sb3 = (const uint8_t *)g_strip_span_base;
+        const int total = g_strip_span_count, ring = g_td5.track_span_ring_length;
+        int fixed = 0;
+        for (int bi = s_minimap_seg_branch_start; bi < s_minimap_seg_primary_end; bi++) {
+            const int bs = s_minimap_seg_start[bi];
+            int j = bs, link;
+            if (ring <= 0 || bs < ring || bs >= total) continue;
+            while (j < total && sb3[j * 24] != 10) j++;
+            if (j >= total) continue;
+            link = *(const int16_t *)(sb3 + j * 24 + 8);
+            TD5_LOG_I(LOG_TAG, "minimap_init: varlen fork row %d: fork %d corridor [%d..%d] "
+                      "(mirror said ..%d) rejoins %d (mirror said %d)",
+                      bi, (int)s_minimap_seg_branch[bi], bs, j, (int)s_minimap_seg_end[bi], link,
+                      (int)s_minimap_seg_branch[bi] + ((int)s_minimap_seg_end[bi] - bs));
+            s_minimap_seg_end[bi]   = (int16_t)j;
+            s_minimap_seg_merge[bi] = (int16_t)((link >= 0 && link < ring) ? link : -1);
+            fixed++;
+        }
+        s_minimap_varlen = fixed > 0;
+    }
 
     /* [task#10 2026-06-12] TD6 branch corridors. The TD5 mirror logic above does
      * NOT model TD6 branches: they are not same-length parallels of the main road

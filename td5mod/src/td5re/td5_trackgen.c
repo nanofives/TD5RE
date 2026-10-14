@@ -5194,7 +5194,9 @@ static unsigned int tg_env_hash(void)
             && strncmp(*e, "TD5RE_FREECAM_", 14) != 0 && strncmp(*e, "TD5RE_CAM_FIXED", 15) != 0
             && strncmp(*e, "TD5RE_AI_BRANCH_FORCE", 21) != 0 && strncmp(*e, "TD5RE_RACE_SEED", 15) != 0
             /* [ROUND 1023 D] the median-gap ENGINE knob and the dev gap driver act on a built strip only */
-            && strncmp(*e, "TD5RE_GAP_DRIVE", 15) != 0 && strncmp(*e, "TD5RE_GEO_FORK_GAP_ENGINE", 25) != 0)
+            && strncmp(*e, "TD5RE_GAP_DRIVE", 15) != 0 && strncmp(*e, "TD5RE_GEO_FORK_GAP_ENGINE", 25) != 0
+            /* [ROUND 1030 C] the in-race minimap knobs are HUD-only */
+            && strncmp(*e, "TD5RE_MINIMAP_", 14) != 0)
             h = tg_fnv1a(h, *e, strlen(*e));
     /* [J8 GEO-PICK] The slot-driven place override deliberately never reaches
      * the environment, so hash it here or two places would produce the same

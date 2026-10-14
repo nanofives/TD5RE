@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (in-race minimap)" },
+    { CL_ITEM,    "Crossing streets on the minimap now carry on past the" },
+    { CL_ITEM,    "  road (about 140 m) instead of stopping a few metres" },
+    { CL_ITEM,    "  from it. Streets with no road built still stay off." },
+    { CL_ITEM,    "Generated tracks: no more diagonal phantom roads where" },
+    { CL_ITEM,    "  a fork rejoins (the minimap now follows each fork's" },
+    { CL_ITEM,    "  real length), and the whole fork is drawn." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },
