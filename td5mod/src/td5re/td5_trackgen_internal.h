@@ -4390,6 +4390,14 @@ double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* out
 double tg_pf_main_wscale(int fi, double w);          /* main half width scale at node width w   */
 int    tg_pf_emit_wedge(const TG_NodeList *nl, int fi, int si, TG_Buf *blk,
                         size_t *moff, int *nmesh);
+int    tg_pf_median_row(const TG_NodeList *nl, int fi, int k);   /* [1030 G] free row k still carries the avenue's median */
+int    tg_pf_emit_median_row(const TG_NodeList *nl, int fi, int k, int si, TG_Buf *blk,
+                             size_t *moff, int *nmesh);         /* [1030 G] that island, kerb to kerb, on corridor span si */
+void   tg_pf_median_report(void);
+int    tg_pf_ray_edge_hit(double ox, double oz, double ux, double uz, double tmin, double tmax,
+                          double margin, double *t_out);   /* [1030 G] where a ray reaches a plaza corridor's kerb */
+int    tg_br_sidewalk_on_street(const TG_NodeList *main_nl, int main_si, const TG_NodeList *nl, int mb,
+                                int k, int fi, const TG_Biome *b, double fs);   /* [1030 G] a corridor slab lies on a laid street */
 void   tg_pf_paint_network(int fi);
 int    tg_pf_row_point(int fi, int row, double *x, double *z);   /* preview */
 double tg_pf_vscale(int fi);                         /* V scale of a free corridor's road texture (its span stretch) */

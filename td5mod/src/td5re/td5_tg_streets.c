@@ -407,6 +407,52 @@ static int tg_xsc_lo_min(void)
     return (td5_geo_loaded() && tg_xsc_env(&s_xsc_env_span0, "TD5RE_GEO_XSTREET_SPAN0")) ? 0 : 1;
 }
 
+/* [ROUND 1030 G item 15] Mariano, level091 L91 e65 s22 p44:SIDEWALK pos 273488,442,-281253: "sidewalk is not
+ * following the rest of the road sidewalk size". The pick is the pavement arm on the far side of a wide street
+ * that leaves main spans 260..262 at a shallow angle. MEASURED in MODELS.DAT: both arms of that street are 1290
+ * wide along the MAIN road (the slab's back edge is the corner + sw times the along-road unit), so their true
+ * width across the street is 1290 * sin(angle between the street and the road): 771 on the near arm (37 deg),
+ * 239 on the far one (11 deg). The pavement collapses to a sliver exactly where the street leaves obliquely.
+ *
+ * RULE. The back edge is taken PERPENDICULAR to the arm's own ray (on the same side as before), so the slab is
+ * sw wide across its street, like every other pavement. Only where that turns the slab OUTWARD, away from the
+ * main road: on the acute corner of a skewed street the perpendicular points back onto the carriageway, and the
+ * narrow wedge between the street and the road is the real shape of the ground there, so it is left as it was.
+ * A street within ~14 degrees of square keeps its old back edge untouched (the slab is already >= 97% of sw
+ * wide there), so only the oblique arms change. Geo city only; TD5RE_GEO_ARM_SQUARE=0 restores the along-road
+ * back edge. Shared by the emitter and tg_xstreet_collect, so the footprint clearance tests see the slab that
+ * is laid. */
+static volatile int s_xsc_env_armsq = -1, s_xsc_env_armpf = -1;
+static long s_arm_squared, s_arm_pf_clipped;
+
+/* [ROUND 1030 G item 16] A main-road street that reaches a plaza corridor (level091: the street off spans 260..262
+ * that meets Plaza Azcuenaga's ring at corridor spans 2105..2106) laid its pavement arm the street's full reach,
+ * straight across the corridor's two lanes: a raised slab lying on the crossing road. The arm (kerb ray and back
+ * ray) now stops at the corridor's kerb. Geo city only; TD5RE_GEO_ARM_PF_CLIP=0 restores the full reach. */
+static double tg_arm_pf_clip(double cx, double cz, double bx, double bz, double sw,
+                             double ox, double oz, double rc)
+{
+    double t;
+    const double rc0 = rc;
+    if (!tg_geo_city_active() || !tg_xsc_env(&s_xsc_env_armpf, "TD5RE_GEO_ARM_PF_CLIP")) return rc;
+    if (tg_pf_ray_edge_hit(cx, cz, ox, oz, 1.0, rc, 0.0, &t) && t < rc) rc = t;
+    if (tg_pf_ray_edge_hit(cx + bx * sw, cz + bz * sw, ox, oz, 1.0, rc, 0.0, &t) && t < rc) rc = t;
+    if (rc < rc0) s_arm_pf_clipped++;
+    return rc;
+}
+
+static int tg_arm_square_back(const double *e, int far_corner, double ox, double oz, double *bx, double *bz)
+{
+    const double nx = far_corner ? e[8] : e[6], nz = far_corner ? e[9] : e[7];
+    double px = -oz, pz = ox;
+    if (!tg_geo_city_active() || !tg_xsc_env(&s_xsc_env_armsq, "TD5RE_GEO_ARM_SQUARE")) return 0;
+    if (fabs(ox * *bz - oz * *bx) >= 0.97) return 0;  /* near square: already full width */
+    if (px * *bx + pz * *bz < 0.0) { px = -px; pz = -pz; }
+    if (px * nx + pz * nz <= 0.0) return 0;          /* acute corner: keep the wedge */
+    *bx = px; *bz = pz;
+    return 1;
+}
+
 /* [ROUND 1024 I] The EMITTER lays a side street on every paved span whose frontage is open (a gap) even where the
  * network has no mouth: tg_xstreet_reach_at falls back to the biome's default reach, and tg_city_emit_crossstreet
  * never asks tg_xstreet_here. So the street at span 0 of level091 (20220 units long, x 0..1500) existed for the
@@ -601,19 +647,23 @@ int tg_xstreet_collect(const TG_NodeList *nl, int si, double sg, double *quad, u
         al = sqrt(ax * ax + az * az);
         if (al < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= al; az /= al; }
         if ((arms & 1) && n < maxq) {                 /* corner at the near node, slab goes back along -a */
+            double bx = -ax, bz = -az;
+            tg_arm_square_back(e, 0, nox, noz, &bx, &bz);   /* [ROUND 1030 G item 15] the slab as laid */
             q = &quad[n * 8];
             q[0] = e[0];                      q[1] = e[2];
             q[2] = e[0] + nox * reach;        q[3] = e[2] + noz * reach;
-            q[4] = e[0] + nox * reach - ax * sws; q[5] = e[2] + noz * reach - az * sws;
-            q[6] = e[0] - ax * sws;           q[7] = e[2] - az * sws;
+            q[4] = e[0] + nox * reach + bx * sws; q[5] = e[2] + noz * reach + bz * sws;
+            q[6] = e[0] + bx * sws;           q[7] = e[2] + bz * sws;
             kind[n++] = 1;
         }
         if ((arms & 2) && n < maxq) {                 /* corner at the far node, slab goes back along +a */
+            double bx = ax, bz = az;
+            tg_arm_square_back(e, 1, fox, foz, &bx, &bz);
             q = &quad[n * 8];
             q[0] = e[3];                      q[1] = e[5];
             q[2] = e[3] + fox * reach;        q[3] = e[5] + foz * reach;
-            q[4] = e[3] + fox * reach + ax * sws; q[5] = e[5] + foz * reach + az * sws;
-            q[6] = e[3] + ax * sws;           q[7] = e[5] + az * sws;
+            q[4] = e[3] + fox * reach + bx * sws; q[5] = e[5] + foz * reach + bz * sws;
+            q[6] = e[3] + bx * sws;           q[7] = e[5] + bz * sws;
             kind[n++] = 1;
         }
     }
@@ -2090,32 +2140,36 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
         if (alen < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= alen; az /= alen; }
 
         if (near_corner) {                            /* corner at the near node */
-            double rc = reach;
+            double rc = reach, bx = -ax, bz = -az;
             tg_block_arm_near(e, ang, &ox, &oz);
+            if (tg_arm_square_back(e, 0, ox, oz, &bx, &bz)) s_arm_squared++;   /* [ROUND 1030 G item 15] */
             /* [ROUND 1024 G item 2] the arm lies along its corner's ray: cut it where that ray meets the carriageway */
             if (tg_xst_rayclip_on()) {
                 double rb;
                 rc = tg_xst_ray_reach(h->nl, h->si, e[0], e[2], ox, oz, reach);
-                rb = tg_xst_ray_reach(h->nl, h->si, e[0] - ax * sw_s, e[2] - az * sw_s, ox, oz, reach);   /* the slab's back edge */
+                rb = tg_xst_ray_reach(h->nl, h->si, e[0] + bx * sw_s, e[2] + bz * sw_s, ox, oz, reach);   /* the slab's back edge */
                 if (rb < rc) rc = rb;
             }
+            rc = tg_arm_pf_clip(e[0], e[2], bx, bz, sw_s, ox, oz, rc);   /* [ROUND 1030 G item 16] */
             /* back = -along (onto the built side, off the carriageway). */
             if (rc >= TG_XST_CLIP_MIN || rc >= reach)
-                if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
+                if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, bx, bz,
                                        rc, sw_s))
                     return 0;
         }
         if (far_corner) {                             /* corner at the far node */
-            double rc = reach;
+            double rc = reach, bx = ax, bz = az;
             tg_block_arm_far(e, ang, &ox, &oz);
+            if (tg_arm_square_back(e, 1, ox, oz, &bx, &bz)) s_arm_squared++;   /* [ROUND 1030 G item 15] */
             if (tg_xst_rayclip_on()) {
                 double rb;
                 rc = tg_xst_ray_reach(h->nl, h->si, e[3], e[5], ox, oz, reach);
-                rb = tg_xst_ray_reach(h->nl, h->si, e[3] + ax * sw_s, e[5] + az * sw_s, ox, oz, reach);
+                rb = tg_xst_ray_reach(h->nl, h->si, e[3] + bx * sw_s, e[5] + bz * sw_s, ox, oz, reach);
                 if (rb < rc) rc = rb;
             }
+            rc = tg_arm_pf_clip(e[3], e[5], bx, bz, sw_s, ox, oz, rc);   /* [ROUND 1030 G item 16] */
             if (rc >= TG_XST_CLIP_MIN || rc >= reach)
-                if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
+                if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, bx, bz,
                                        rc, sw_s))
                     return 0;
         }
@@ -4864,6 +4918,13 @@ static void tg_geo_plaza_report_impl(int from_stream)
               "that follow the street's ground profile, %ld of them raised above the old straight ramp "
               "(knob TD5RE_GEO_ARM_FOLLOW=%s)",
               s_arm_follow_n, s_arm_follow_lifted, td5_env_flag_on("TD5RE_GEO_ARM_FOLLOW") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO ARM] [R1030 G item 15] %ld oblique pavement arm(s) squared to their street, so the slab is "
+              "the full pavement width across it (knob TD5RE_GEO_ARM_SQUARE=%s)",
+              s_arm_squared, td5_env_flag_on("TD5RE_GEO_ARM_SQUARE") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[GEO ARM] [R1030 G item 16] %ld pavement arm(s) stopped at a plaza corridor's kerb instead of "
+              "crossing its lanes (knob TD5RE_GEO_ARM_PF_CLIP=%s)",
+              s_arm_pf_clipped, td5_env_flag_on("TD5RE_GEO_ARM_PF_CLIP") ? "on" : "off");
+    tg_pf_median_report();                     /* [R1030 G item 14] */
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld cross-street arm(s) written as their own mesh, so the on-road "
               "guard judges an arm alone instead of deleting both (knob TD5RE_GEO_STREET_ARM_MESH=%s)",
               s_xst_arm_meshes, td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH") ? "on" : "off");

@@ -3874,10 +3874,20 @@ static int tg_scenery_entry(int e)
                                 td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
                                 /* [ROUND 1023 B item 8] no kerb slab across the mouth of a real street
                                  * that opens on this row (tg_net_geo_far_streets marks those rows). */
-                                const int street_gap = tg_pf_gap_at(fi, ck);
+                                /* [ROUND 1030 G item 16] ... nor across a laid main-road street that reaches the
+                                 * corridor (tg_br_sidewalk_on_street), on either side of it. */
+                                const int street_gap = tg_pf_gap_at(fi, ck) ||
+                                    tg_br_sidewalk_on_street(nl, mb, cnl, mbv, ck, fi, cb, (double)tg_fork_side(fi));
+                                const int in_gap = tg_br_sidewalk_on_street(nl, mb, cnl, mbv, ck, fi, cb,
+                                                                            -(double)tg_fork_side(fi));
+                                /* [ROUND 1030 G item 14] the avenue's median island, carried on to the plaza */
+                                const int med_row = tg_fork_is_free(fi) && !tg_fork_is_loop(fi) &&
+                                                    tg_pf_median_row(nl, fi, ck);
                                 if (!street_gap &&
                                     !tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                              &meshes, moff, &nmesh, si)) ok = 0;
+                                if (ok && med_row &&
+                                    !tg_pf_emit_median_row(nl, fi, ck, si, &meshes, moff, &nmesh)) ok = 0;
                                 if (ok && tg_fork_is_loop(fi) && tg_bl_inner_ok(fi, ck) &&
                                     !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                                    &meshes, moff, &nmesh, si)) ok = 0;
@@ -3893,6 +3903,7 @@ static int tg_scenery_entry(int e)
                                  * on the town side only). TD5RE_PF_INNER_WALK=0 restores the one-sided arc. */
                                 if (ok && tg_fork_is_free(fi) && !tg_fork_is_loop(fi) &&
                                     !tg_pf_classic_span(fi, ck) && td5_env_flag_on("TD5RE_PF_INNER_WALK") &&
+                                    !med_row && !in_gap &&
                                     !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
                                                                    &meshes, moff, &nmesh, si)) ok = 0;
                             }
