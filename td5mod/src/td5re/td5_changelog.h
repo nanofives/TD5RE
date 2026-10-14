@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (Select Track)" },
+    { CL_ITEM,    "The map of a track you built in the GEOSPATIAL TRACK" },
+    { CL_ITEM,    "  GENERATOR is now north up, the same way you drew it." },
+    { CL_ITEM,    "The geospatial entry is titled GEOSPATIAL TRACK" },
+    { CL_ITEM,    "  GENERATOR, with the place name in small text under it." },
+    { CL_ITEM,    "Both generated tracks have a SETTINGS button under" },
+    { CL_ITEM,    "  them (was AUTO TRACK STUDIO / GEOSPATIAL TRACK ...)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },

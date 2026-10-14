@@ -1097,6 +1097,33 @@ int td5_geo_preview_route(const char *slug)
             s_preview.n++;
         }
     }
+    /* [ROUND 1030 A1] North up. A BUILD turns the route onto its principal axis
+     * (td5_geo_route.c gr_proj_to_world: x = (e cos t - n sin t) * upm + off_x,
+     * z = (e sin t + n cos t) * upm + off_z), so the raw x/z plot came out
+     * turned by rotation_rad -- -48.8 deg for La Plata -- while the GEOSPATIAL
+     * TRACK GENERATOR map the route was drawn on is north up. Undo the turn so
+     * the panel shows east right and north up, the way the player drew it. The
+     * offset is a pure translation and the panel re-centres on its own box, so
+     * only the rotation matters. TD5RE_GEO_PREVIEW_NORTH_UP=0 keeps the world
+     * frame. A route without the key (written before rotation existed) is
+     * already north up and is left alone. */
+    if (td5_env_int("TD5RE_GEO_PREVIEW_NORTH_UP", 1, 0, 1) != 0) {
+        const cJSON *rr = cJSON_GetObjectItem(root, "rotation_rad");
+        if (!rr || !cJSON_IsNumber(rr)) {
+            const cJSON *pj = cJSON_GetObjectItem(root, "projection");
+            rr = pj ? cJSON_GetObjectItem(pj, "rotation_rad") : NULL;
+        }
+        if (rr && cJSON_IsNumber(rr) && rr->valuedouble != 0.0) {
+            const double c = cos(rr->valuedouble), s = sin(rr->valuedouble);
+            for (i = 0; i < s_preview.n; i++) {
+                const double x = s_preview.x[i], z = s_preview.z[i];
+                s_preview.x[i] =  x * c + z * s;   /* east  */
+                s_preview.z[i] = -x * s + z * c;   /* north */
+            }
+            TD5_LOG_I(LOG_TAG, "geo: preview route %s turned north up (rotation %.4f rad)",
+                      slug, rr->valuedouble);
+        }
+    }
     cJSON_Delete(root);
     TD5_LOG_I(LOG_TAG, "geo: preview route %s -> %d of %d nodes (stride %d)",
               slug, s_preview.n, total, stride);

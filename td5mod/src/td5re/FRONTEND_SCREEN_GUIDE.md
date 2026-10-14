@@ -318,6 +318,17 @@ button that exists only while that entry is the pick:
 * Both options buttons sit at x=120 w=224 on **row y=306** (SELECT TRACK) and on
   QR row 6 (y=336). They are created unconditionally and shown/hidden per pick by
   `frontend_trksel_refresh_{auto,geo}_btn` / `frontend_qr_refresh_{auto,geo}_btn`.
+* **[Round 1030 A] On SELECT TRACK both options buttons read `SETTINGS`** (QR keeps
+  the long labels). The geo button falls back to `GEOSPATIAL TRACK GENERATOR`
+  whenever it is shown off the geo entry (`TD5RE_GEO_OWN_SELECTOR=0`, or no place
+  registered), set per pick in `frontend_trksel_refresh_geo_btn`. The geo entry's
+  panel title reads `GEOSPATIAL TRACK GENERATOR` and the place name is drawn small
+  under the title (y=108, centred on 492) by `frontend_render_track_selection_preview`;
+  the OSM credit in `td5_geo_draw_route` drops one line (by-14 / by-2) to make room.
+  Not under the map: the Pitbull logo covers x ~520..612 below y ~345. That override
+  is local to the panel, `frontend_get_track_name` still returns the place.
+* The geo panel's route is plotted NORTH UP: `td5_geo_preview_route` undoes the
+  build's `rotation_rad` (`TD5RE_GEO_PREVIEW_NORTH_UP=0` = world frame).
 * Neither RANDOMIZE nor a network lobby lands on the geo entry.
 * **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
   STUDIO chip was created as button 17 and silently refused (`-1`) until round

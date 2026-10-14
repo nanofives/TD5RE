@@ -1262,12 +1262,30 @@ static void frontend_qr_refresh_geo_btn(void) {
     s_buttons[s_qr_geo_btn].disabled = show ? 0 : 1;
 }
 
+/* [ROUND 1030 A2] Mariano: "auto-generated track selector should have below the
+ * button saying Settings, and the selection for the Geospatial Track Generator
+ * should be the title with a settings button below". On SELECT TRACK each
+ * generated entry's options button now reads SETTINGS, because the entry itself
+ * already names the generator (the panel title, see
+ * frontend_trksel_generated_title). The geo button keeps its full name whenever
+ * it is NOT sitting under the geo entry -- the TD5RE_GEO_OWN_SELECTOR=0 layout
+ * and the no-place fallback show it on every track, where "SETTINGS" would not
+ * say what it opens. */
+static void frontend_btn_set_label(int idx, const char *label) {
+    if (idx < 0 || idx >= s_button_count) return;
+    strncpy(s_buttons[idx].label, label, sizeof(s_buttons[idx].label) - 1);
+    s_buttons[idx].label[sizeof(s_buttons[idx].label) - 1] = '\0';
+}
+
 static void frontend_trksel_refresh_geo_btn(void) {
     int show;
     if (s_trksel_geo_btn < 0) return;
     show = frontend_geo_btn_wanted();
     s_buttons[s_trksel_geo_btn].hidden   = show ? 0 : 1;
     s_buttons[s_trksel_geo_btn].disabled = show ? 0 : 1;
+    frontend_btn_set_label(s_trksel_geo_btn,
+        (td5_trackgen_geo_own_selector() && td5_trackgen_is_geo_slot(s_selected_track))
+            ? TR("SETTINGS") : TR("GEOSPATIAL TRACK GENERATOR"));
 }
 
 /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Same show/hide toggle for the Track
@@ -7601,7 +7619,9 @@ static void trksel_build_main_buttons(void) {
      * the Quick Race chip) and let frontend_trksel_refresh_auto_btn() show/hide it,
      * so it appears the instant the auto slot is cycled onto -- not only after a
      * RACE OPTIONS round-trip. */
-    s_trksel_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
+    /* [ROUND 1030 A2] Labelled SETTINGS: it only ever shows under the
+     * AUTO-GENERATED TRACK entry, which already names what it configures. */
+    s_trksel_auto_btn = frontend_create_button(TR("SETTINGS"),
                                                120, 306, 224, 32);
     frontend_trksel_refresh_auto_btn();
 
@@ -8728,9 +8748,17 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
      * first framedump of this screen. Above the panel there is clear space
      * between the track name and the panel top, and splitting the string keeps
      * the attribution complete rather than truncating it to fit. */
-    fe_draw_small_text(bx * sx, (by - 26.0f) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
-    fe_draw_small_text(bx * sx, (by - 14.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
-                       0xFF8899AA, sx, sy);
+    {
+        /* [ROUND 1030 A2] With the generator's own selector the panel title is
+         * GEOSPATIAL TRACK GENERATOR and the place name sits on the small line
+         * under it (y 108), where the first credit line used to be, so the
+         * credit drops one line. Its last line ends at ~by+7, still above the
+         * route, which the fit keeps AT_PV_MARGIN (8) inside the panel. */
+        const float cy0 = td5_trackgen_geo_own_selector() ? -14.0f : -26.0f;
+        fe_draw_small_text(bx * sx, (by + cy0) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
+        fe_draw_small_text(bx * sx, (by + cy0 + 12.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
+                           0xFF8899AA, sx, sy);
+    }
     /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
      * Google Open Buildings carries their credit too (both ODbL). NOT stacked
      * straight above the OSM pair: the track name is drawn at y 81..106 and

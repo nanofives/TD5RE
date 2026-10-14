@@ -8751,7 +8751,7 @@ static void frontend_render_race_options_overlay(float sx, float sy) {
 }
 
 static void frontend_render_track_selection_preview(float sx, float sy) {
-    char track_name[80], city[80], country[80];
+    char track_name[80], city[80], country[80], place_name[80];
     const char *comma;
     /* Animation offsets for track-switch slide-in (state 9).
      * Original: state 8 @ 0x427630 uses single counter _DAT_0049522c (0..0x10=16 frames).
@@ -8791,6 +8791,17 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     }
 
     frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
+    /* [ROUND 1030 A2] The geo entry is the GEOSPATIAL TRACK GENERATOR's own
+     * selection, so its title names the generator -- the way the auto entry reads
+     * AUTO-GENERATED TRACK -- and the button under it is SETTINGS
+     * (frontend_trksel_refresh_geo_btn). The place it will build moves under the
+     * map, so the player still sees WHERE before pressing OK. Only here: every
+     * other surface (HUD, results, Quick Race) keeps the place name. */
+    place_name[0] = '\0';
+    if (td5_trackgen_geo_own_selector() && td5_trackgen_is_geo_slot(s_selected_track)) {
+        snprintf(place_name, sizeof(place_name), "%s", track_name);
+        snprintf(track_name, sizeof(track_name), "%s", TR("GEOSPATIAL TRACK GENERATOR"));
+    }
     /* Original: text surface 296x184 at (344,81), city at surf y=0, country at surf y=0x20=32
      * RE: 0x00427CD0-0x00427D56 — split at 0x2C; blit top 64 rows to screen (344,81) */
     comma = strchr(track_name, ',');
@@ -8807,7 +8818,22 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, city, 0xFFFFFFFF, sx, sy);
         fe_draw_text_centered(492.0f * sx, 113.0f * sy + txt_y_off, country, 0xFFFFFFFF, sx, sy);
     } else {
-        fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, track_name, 0xFFFFFFFF, sx, sy);
+        /* [ROUND 1030 A2] Condensed to the original 296-wide text surface
+         * (344..640) instead of running off the canvas: AUTO-GENERATED TRACK
+         * reached the right edge and LA PLATA (PARTIDO) (REAL) was clipped by it.
+         * A name that already fits gets fit = 1 and draws exactly as before. */
+        const float fit = fe_fit_text_scale(track_name, 288.0f * sx, sx, sy);
+        fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, track_name, 0xFFFFFFFF,
+                              sx * fit, sy);
+    }
+    if (place_name[0]) {
+        /* Small line right under the title, centred like it. Not under the map:
+         * there the Pitbull logo (x ~520..612, y ~345..435) covered the end of
+         * the name on the first framedump. td5_geo_draw_route moves the OSM
+         * credit down one line to make room (same own-selector test). */
+        const float gsx = (sx < sy) ? sx : sy;
+        fe_draw_small_text(492.0f * sx - fe_measure_small_text(place_name) * 0.5f * gsx,
+                           108.0f * sy + txt_y_off, place_name, 0xFFFFFFFF, sx, sy);
     }
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480).
