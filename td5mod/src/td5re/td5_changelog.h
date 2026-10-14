@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (La Plata medians and pavements)" },
+    { CL_ITEM,    "The avenue's green median now runs on up to the plaza" },
+    { CL_ITEM,    "  (Plaza Azcuenaga) instead of turning into a grey kerb" },
+    { CL_ITEM,    "  slab beside a strip of asphalt." },
+    { CL_ITEM,    "Pavements along streets that leave the road at a" },
+    { CL_ITEM,    "  shallow angle are full width, not a thin sliver." },
+    { CL_ITEM,    "The plaza ring's kerb no longer runs across the mouth" },
+    { CL_ITEM,    "  of a street that reaches it from the avenue." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },
