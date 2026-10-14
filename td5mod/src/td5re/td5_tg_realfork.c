@@ -1860,11 +1860,21 @@ int tg_realfork_build(void)
         /* Each pass only stops a shift SHRINKING faster than the rate (forward: the tails behind a rejoin; backward:
          * the heads in front of a split), so a designed ramp, which shrinks at most at its own rate, is never touched
          * and a shift is never made to grow where the fork did not ask for it. */
+        /* [R1030 H follow-up] TD5RE_GEO_FORK_SHIFT_SMOOTH_MIN (raw, default 0 = every step): only a step at least
+         * this big starts a clamp, which then runs until the shift has caught up with the raw one. Kept as an A/B
+         * knob only. MEASURED (fork harness, 12 seeds): the block loop F=952 stalls a car at spans 952..965 on one
+         * seed set with master's exe (12/34/56) and on another with this change (11/22/33); limiting the smoothing to
+         * the 1500 jump (MIN=1000) stalled two on 11/22/33. The loop's entry is fragile to the race state upstream,
+         * not to these nodes, so the default smooths every step. */
+        static double raw0[TG_RF_NODES];
+        const double minstep = (double)td5_env_int("TD5RE_GEO_FORK_SHIFT_SMOOTH_MIN", 0, 0, 6000);
+        memcpy(raw0, s_node_shift, (size_t)s_rn * sizeof(double));
         for (i = 1; i < s_rn; i++) {
             const int fi = s_node_fork[i];
             const double p = s_node_shift[i - 1], cur = s_node_shift[i];
             double rate = dflt, c;
             if (pin[i]) continue;
+            if (p == raw0[i - 1] && fabs(raw0[i - 1]) - fabs(raw0[i]) < minstep) continue;
             if (fi >= 0 && fi < s_rf_n && s_rf_rate[fi] > 0.0)  /* a plaza fork's throat ramps are 16-node ones: dflt */
                 rate = s_rf_rate[fi];
             c = (cur < p - rate) ? p - rate : (cur > p + rate) ? p + rate : cur;
@@ -1875,6 +1885,7 @@ int tg_realfork_build(void)
             const double p = s_node_shift[i + 1], cur = s_node_shift[i];
             double rate = dflt, c;
             if (pin[i]) continue;
+            if (p == raw0[i + 1] && fabs(raw0[i + 1]) - fabs(raw0[i]) < minstep) continue;
             if (fi >= 0 && fi < s_rf_n && s_rf_rate_in[fi] > 0.0)
                 rate = s_rf_rate_in[fi];
             c = (cur < p - rate) ? p - rate : (cur > p + rate) ? p + rate : cur;
