@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (La Plata traffic lights and START gantry)" },
+    { CL_ITEM,    "The START gantry's right column no longer stands in the" },
+    { CL_ITEM,    "  road: it clears the Diagonal 73 lane beside the grid." },
+    { CL_ITEM,    "Every junction now has a signal arm on the right before" },
+    { CL_ITEM,    "  it, a second arm across it and a small post light on" },
+    { CL_ITEM,    "  the left. 82 signal heads on the route instead of 15." },
+    { CL_ITEM,    "Street-name plates hang in the middle of the arm," },
+    { CL_ITEM,    "  between the two signal heads." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },

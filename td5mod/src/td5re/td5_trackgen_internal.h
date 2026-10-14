@@ -6140,6 +6140,8 @@ void tg_geo_signals_report(int nspans);
 int  tg_mastarm_enabled(void);
 void tg_mastarm_prepare(void);
 int  tg_mastarm_plan(int sig, double carriageway_width, int near_gantry, int *front, int *back);
+int  tg_mastarm_has_plate(int sig);   /* [1030 D] named node? no census side effect */
+int  tg_mastarm_front_cell(int sig);  /* [1030 D] its front plate cell, or -1      */
 int  tg_mastarm_mesh_count(double carriageway_width);
 int  tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap, double base_y, int cf, int cb, TG_Buf *blk, size_t *moff, int *nmesh);
 int  tg_mastarm_plate_pages(void);

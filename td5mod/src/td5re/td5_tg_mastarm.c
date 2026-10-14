@@ -585,11 +585,42 @@ int tg_mastarm_plan(int sig, double carriageway_width, int near_gantry,
     return 1;
 }
 
+/* [ROUND 1030 D] Does signal node `sig` carry a street name for a plate? Lets the
+ * junction layout pick a named node out of a cluster without touching the census. */
+int tg_mastarm_has_plate(int sig)
+{
+    if (!tg_mastarm_enabled() || sig < 0 || sig >= s_nsig || !s_sp) return 0;
+    return s_sp[sig].front >= 0 || s_sp[sig].back >= 0;
+}
+
+int tg_mastarm_front_cell(int sig)
+{
+    if (!tg_mastarm_enabled() || sig < 0 || sig >= s_nsig || !s_sp) return -1;
+    return s_sp[sig].front;
+}
+
+/* [ROUND 1030 D item 12] "the street indicator should be in between the two traffic
+ * lights in the middle of the crossing stick" (Mariano, level091 e57 s47 plate, span
+ * 229). The plate hung next to the pole with both heads further out on the arm. With
+ * the knob on the plate sits at the middle of the pole-side carriageway and the two
+ * heads hang one either side of it, so an arm always has two. TD5RE_GEO_MASTARM_MID=0
+ * restores the round 1021 layout (plate by the pole, heads over the lane centres). */
+static int ma_mid(void)
+{
+    return td5_env_flag_on("TD5RE_GEO_MASTARM_MID");
+}
+
+static int ma_nheads(double hw)
+{
+    if (ma_mid()) return 2;
+    return (hw >= 3.8 * PL_UPM) ? 2 : 1;
+}
+
 /* Meshes one arm needs, so the caller can fall back to the post light when the
  * entry's budget cannot hold it. */
 int tg_mastarm_mesh_count(double carriageway_width)
 {
-    const int nh = (carriageway_width * 0.5 >= 3.8 * PL_UPM) ? 2 : 1;
+    const int nh = ma_nheads(carriageway_width * 0.5);
     /* pole + arm, heads (housing, backplate, lamps), the cross-direction head
      * (housing + lamps), the countdown (box + lit face), two plate brackets,
      * the plate */
@@ -656,15 +687,50 @@ int tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap,
     const double l[2]  = { n->tz * side, -n->tx * side };
     const double hw    = n->width * 0.5;
     const double pole[2] = { n->x + l[0] * (hw + gap), n->z + l[1] * (hw + gap) };
-    const int nh = (hw >= 3.8 * PL_UPM) ? 2 : 1;
+    const int nh = ma_nheads(hw);
     const double road_y = n->y;
     const double arm_y  = road_y + MA_ARM_Y;
     const double top_y  = road_y + MA_POLE_TOP;
-    const double reach  = gap + hw + 0.4 * PL_UPM;   /* a little past the centreline */
-    double armlen = reach;
-    const double plate_u0 = MA_POLE_HW + M_(0.15);
+    double reach  = gap + hw + 0.4 * PL_UPM;         /* a little past the centreline */
+    double armlen;
+    double plate_u0 = MA_POLE_HW + M_(0.15);
+    double head_u[2], disp_u;
     int k, lamp;
 
+    if (ma_mid()) {
+        /* [1030 D item 12] Plate centred over the middle of the pole-side half, one
+         * head either side of it, clear of the plate by a backplate and a hand. The
+         * countdown and the cross head stay outboard of the far head; the arm grows
+         * when a narrow road would otherwise fold them onto it. */
+        const double dsep_min = MA_PLATE_W * 0.5 + MA_BP_HW + M_(0.12);
+        const double u_min    = MA_POLE_HW + MA_BP_HW + M_(0.10);
+        /* The RACE carriageway, which inside a fork window is not the node's full
+         * width about the node: the main half-carriageway is laid shifted and
+         * narrowed (tg_fork_main_shift / _wscale_w, the strip's own rows). Measured
+         * at level091 span 223 before this: heads 5.3 and 8.75 m right of the race
+         * road's centre, i.e. over the median and Diagonal 73's second carriageway. */
+        const int    fi    = tg_fork_of_main(si);
+        const double c_off = (fi >= 0) ? tg_fork_main_shift(fi, n->width) : 0.0;
+        const double mh    = (fi >= 0) ? n->width * tg_fork_main_wscale_w(fi, n->width) * 0.5
+                                       : hw;
+        /* u of the race road's pole-side half: edge at hw + gap - side*c_off - mh */
+        double uc   = hw + gap - side * c_off - mh * 0.5;
+        double dsep = mh * 0.25;
+        double tip;
+        if (dsep < dsep_min) dsep = dsep_min;
+        if (uc - dsep < u_min) uc = u_min + dsep;
+        head_u[0] = uc - dsep;
+        head_u[1] = uc + dsep;
+        plate_u0  = uc - MA_PLATE_W * 0.5;
+        disp_u    = head_u[1] + M_(0.62);
+        tip       = disp_u + M_(0.24) + M_(0.25) + MA_HEAD_W * 0.5 + M_(0.22);
+        if (reach < tip) reach = tip;
+    } else {
+        for (k = 0; k < nh; k++)
+            head_u[k] = gap + hw * ((double)k + 0.5) / (double)nh;
+        disp_u = head_u[nh - 1] + M_(0.62);
+    }
+    armlen = reach;
     if (armlen < plate_u0 + MA_PLATE_W + M_(0.3))
         armlen = plate_u0 + MA_PLATE_W + M_(0.3);
 
@@ -689,7 +755,7 @@ int tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap,
 
     /* HEADS over the lane centres of the pole-side half. */
     for (k = 0; k < nh; k++) {
-        const double u  = gap + hw * ((double)k + 0.5) / (double)nh;
+        const double u  = head_u[k];
         const double hx = pole[0] - l[0] * u;
         const double hz = pole[1] - l[1] * u;
         const double head_top = arm_y - MA_ARM_HT + M_(0.02);
@@ -759,7 +825,7 @@ int tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap,
      * (green digits counting down the green, red digits counting down the red).
      * LIVE=0: the round 1021 single additive face, static "25". */
     if (s_have_dsp) {
-        const double u  = gap + hw * ((double)(nh - 1) + 0.5) / (double)nh + M_(0.62);
+        const double u  = disp_u;
         const double dx = pole[0] - l[0] * u;
         const double dz = pole[1] - l[1] * u;
         const double dh = M_(0.26);
