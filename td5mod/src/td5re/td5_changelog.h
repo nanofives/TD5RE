@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 14 (La Plata streets and parks)" },
+    { CL_ITEM,    "Side streets that bend no longer stop a few metres in:" },
+    { CL_ITEM,    "  Avenida 44 (span 274) and Avenida 51 (span 605) now" },
+    { CL_ITEM,    "  carry on along the real map past their first bend." },
+    { CL_ITEM,    "The road no longer zigzags one lane sideways where a" },
+    { CL_ITEM,    "  divided avenue ends (span 579, also 845 and 1297)." },
+    { CL_ITEM,    "Side streets beside a road on an embankment now slope" },
+    { CL_ITEM,    "  down to the ground instead of floating (span 594)." },
+    { CL_ITEM,    "Park lawns sit on the ground instead of half a metre" },
+    { CL_ITEM,    "  above it (park beside spans 1709-1720 and the rest)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 13 (La Plata corner at spans 77-80)" },
     { CL_ITEM,    "The grey triangle where Calle 39 meets the avenue start" },
     { CL_ITEM,    "  is now paved: it was a hole showing the ground below." },

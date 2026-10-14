@@ -166,6 +166,27 @@ static double  s_node_dt[TG_RF_NODES];
  * node's width is (route lanes + extra) lanes and the node moves half of it toward
  * the corridor: continuous, where the lane COUNT can only step. */
 static double  s_node_extra[TG_RF_NODES];
+/* [ROUND 1030 H item 19] "width of the road is displaced here" (La Plata span 579, fork 1's rejoin).
+ *
+ * ROOT CAUSE. The node moves half the corridor width the walk ADDS there (extra = want - route lanes), so the
+ * shift is tied to the route's OWN lane count. Where that count steps inside the window or its taper the shift
+ * steps with it: fork 1 (F=230, R=578) carries route 2 + extra 2 to node 579 (shift 1500), then OSM's 6-lane
+ * blip at nodes 580..583 (capped to 4) makes extra 0 at node 580, so the centre line jumped 1500 (one lane) in
+ * one 1500 span and the four-lane road zigzagged; forks 2 and 3 jumped 844 where the route goes 2 -> 3 lanes
+ * at R+3, fork 4 749 at node 1578.
+ *
+ * RULE. The shift the walk applies (s_node_shift, signed along +t) may SHRINK by no more per node than the
+ * fork's own designed taper does (half its corridor width over its tail ramp walking forward, over its head
+ * ramp walking backward; the default 16-node taper on nodes no fork owns). Every designed ramp already
+ * satisfies it and is left bit-identical; only a step caused by a route lane change is spread out, and a shift
+ * is never made to grow. Nodes from a split to one past its rejoin are never moved (the corridor rides them,
+ * and a plaza fork's throats ramp inside that window); outside it a plaza fork's nodes take the default rate
+ * (its throat tails are 16-node ramps). The build logs how many split..rejoin nodes moved: it must be 0.
+ * TD5RE_GEO_FORK_SHIFT_SMOOTH=0 restores the per-node shift. */
+static double  s_node_shift[TG_RF_NODES];
+static double  s_rf_rate[TD5_TG_BRANCH_MAX];     /* per fork: the most its tail shift may shrink per node, -1 = plaza */
+static double  s_rf_rate_in[TD5_TG_BRANCH_MAX];  /* ... and its head shift, walked backward */
+static int     s_rf_shift_smooth;
 static int     s_rf_taper = TG_RF_TAPER_DEF;
 static int     s_rf_taper_smooth = 0;
 
@@ -253,6 +274,21 @@ double tg_realfork_node_adjust(int node, double *x, double *z)
     if (!tg_realfork_enabled() || node < 0 || node >= s_rn) return 0.0;
     fi = s_node_fork[node];
     s_node_dt[node] = 0.0;
+    if (s_rf_shift_smooth) {        /* [ROUND 1030 H item 19] the rate-limited shift, see s_node_shift */
+        const double d = s_node_shift[node];
+        const int p = (node > 0) ? node - 1 : node;
+        const int q = (node + 1 < s_rn) ? node + 1 : node;
+        if (d == 0.0) return 0.0;
+        tx = s_rx[q] - s_rx[p];
+        tz = s_rz[q] - s_rz[p];
+        len = sqrt(tx * tx + tz * tz);
+        if (len < 1.0) return 0.0;
+        tx /= len; tz /= len;
+        *x +=  d * tz;
+        *z += -d * tx;
+        s_node_dt[node] = d;
+        return d;
+    }
     if (fi < 0 || s_node_extra[node] <= 0.0) return 0.0;
     delta = s_node_extra[node] * (double)TD5_TG_LANE_WIDTH * 0.5;
     if (fi < s_rf_n && s_rf[fi].side > 0) {      /* [1019 V] a LEFT corridor: the node moves toward +t */
@@ -1633,6 +1669,7 @@ void tg_realfork_reset(void)
     s_ncand = 0;
     s_rn = 0;
     s_rf_knob = -1;
+    s_rf_shift_smooth = 0;             /* [ROUND 1030 H item 19] */
     tg_pf_reset();                     /* [ROUND 1015 E] */
 }
 
@@ -1663,8 +1700,10 @@ int tg_realfork_build(void)
         s_rx[i] = x; s_rz[i] = z; s_rl[i] = l;
         s_node_fork[i] = -1; s_node_ovr[i] = 0; s_node_dt[i] = 0.0;
         s_node_extra[i] = 0.0;
+        s_node_shift[i] = 0.0;
     }
     s_rn = n;
+    s_rf_shift_smooth = 0;          /* set after the windows are filled */
 
     rf_gen_avenue();
     rf_gen_parallel();
@@ -1727,6 +1766,11 @@ int tg_realfork_build(void)
             continue;
         }
         rf_finalise(rf, c);
+        {   /* [ROUND 1030 H item 19] the steepest shift change this fork's own ramps make per node, per end */
+            const double k = 0.5 * (double)TD5_TG_LANE_WIDTH * (double)c->lanes_b * (s_rf_taper_smooth ? 1.5 : 1.0);
+            s_rf_rate[s_rf_n]    = (c->pf >= 0) ? -1.0 : k / (double)(c->taper_out > 0 ? c->taper_out : 1) + 1.0;
+            s_rf_rate_in[s_rf_n] = (c->pf >= 0) ? -1.0 : k / (double)(c->taper_in > 0 ? c->taper_in : 1) + 1.0;
+        }
         /* Fill the node window the walk reads. */
         if (c->pf >= 0) tg_pf_commit(c->pf);
         for (i = c->i0; i <= c->w_end && i < s_rn; i++) {
@@ -1794,6 +1838,65 @@ int tg_realfork_build(void)
                   rf->med_eff_hi / 430.0, rf->i0, rf->w_end,
                   rf->relaxed ? " [RELAXED]" : "", rf->merged ? " [MERGED]" : "");
         s_rf_n++;
+    }
+    if (s_rf_n > 0 && td5_env_flag_on("TD5RE_GEO_FORK_SHIFT_SMOOTH")) {
+        /* [ROUND 1030 H item 19] see s_node_shift. Raw shift first, exactly what the per-node rule applies. */
+        const double dflt = 0.5 * (double)TD5_TG_LANE_WIDTH * 2.0 / (double)s_rf_taper + 1.0;
+        static unsigned char pin[TG_RF_NODES];   /* between a split and its rejoin: the corridor rides these */
+        double worst = 0.0;
+        int moved = 0, worst_at = -1, inner = 0;
+        memset(pin, 0, sizeof(pin));
+        for (f = 0; f < s_rf_n; f++)
+            for (i = s_rf[f].F; i <= s_rf[f].R + 1; i++)
+                if (i >= 0 && i < s_rn) pin[i] = 1;
+        for (i = 0; i < s_rn; i++) {
+            const int fi = s_node_fork[i];
+            s_node_shift[i] = 0.0;
+            if (fi >= 0 && fi < s_rf_n && s_node_extra[i] > 0.0) {
+                const double delta = s_node_extra[i] * (double)TD5_TG_LANE_WIDTH * 0.5;
+                s_node_shift[i] = (s_rf[fi].side > 0) ? delta : -delta;
+            }
+        }
+        /* Each pass only stops a shift SHRINKING faster than the rate (forward: the tails behind a rejoin; backward:
+         * the heads in front of a split), so a designed ramp, which shrinks at most at its own rate, is never touched
+         * and a shift is never made to grow where the fork did not ask for it. */
+        for (i = 1; i < s_rn; i++) {
+            const int fi = s_node_fork[i];
+            const double p = s_node_shift[i - 1], cur = s_node_shift[i];
+            double rate = dflt, c;
+            if (pin[i]) continue;
+            if (fi >= 0 && fi < s_rf_n && s_rf_rate[fi] > 0.0)  /* a plaza fork's throat ramps are 16-node ones: dflt */
+                rate = s_rf_rate[fi];
+            c = (cur < p - rate) ? p - rate : (cur > p + rate) ? p + rate : cur;
+            if (fabs(c) > fabs(cur)) { s_node_shift[i] = c; moved++; }
+        }
+        for (i = s_rn - 2; i >= 0; i--) {
+            const int fi = s_node_fork[i];
+            const double p = s_node_shift[i + 1], cur = s_node_shift[i];
+            double rate = dflt, c;
+            if (pin[i]) continue;
+            if (fi >= 0 && fi < s_rf_n && s_rf_rate_in[fi] > 0.0)
+                rate = s_rf_rate_in[fi];
+            c = (cur < p - rate) ? p - rate : (cur > p + rate) ? p + rate : cur;
+            if (fabs(c) > fabs(cur)) { s_node_shift[i] = c; moved++; }
+        }
+        for (i = 0; i < s_rn; i++) {
+            const int fi = s_node_fork[i];
+            double raw = 0.0, dv;
+            if (fi >= 0 && fi < s_rf_n && s_node_extra[i] > 0.0)
+                raw = s_node_extra[i] * (double)TD5_TG_LANE_WIDTH * 0.5 * ((s_rf[fi].side > 0) ? 1.0 : -1.0);
+            dv = fabs(s_node_shift[i] - raw);
+            if (dv > worst) { worst = dv; worst_at = i; }
+            if (dv > 0.5) {         /* a node between some fork's split and rejoin must keep its shift */
+                int f2;
+                for (f2 = 0; f2 < s_rf_n; f2++)
+                    if (i >= s_rf[f2].F && i <= s_rf[f2].R + 1) { inner++; break; }
+            }
+        }
+        s_rf_shift_smooth = 1;
+        TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] [R1030 H item 19] fork node shift rate-limited: %d clamp(s), "
+                  "largest change %.0f at node %d, %d node(s) inside a split..rejoin window moved (must be 0)",
+                  moved, worst, worst_at, inner);
     }
     TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] %d driveable fork(s) from the real "
               "map, %ld corridor span(s) (%d candidate(s) considered; knobs "

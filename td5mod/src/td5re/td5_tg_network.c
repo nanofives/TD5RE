@@ -83,6 +83,7 @@ typedef struct {
      * stretch of the SAME real street between the end of a mouth street and the start of its ribbon, laid with
      * explicit left/right cross-sections (s_xs[xs]) so it can change width and offset between its two ends. */
     int    way, conn, conn_a, conn_b, xs;
+    int    bend;        /* [ROUND 1030 H items 17, 21] a mouth street that stops where its real way bends (tg_net_geo_arm_tails) */
 } TG_NetEdge;
 
 typedef struct { short edge; float skew, reach, shift; } TG_NetMouth;   /* shift: [1014 B] origin offset past the race kerb */
@@ -742,6 +743,7 @@ typedef struct {
     int    k0, kstep;       /* [R1018 L] first way vertex past the junction, and the index step */
     double skew, want;
     double shift;           /* [1014 B] origin offset past the race kerb     */
+    int    bend;            /* [R1030 H] `want` is where the real way BENDS off the straight arm, not the depth cap */
 } TG_GeoArm;
 
 typedef struct {
@@ -1126,7 +1128,7 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
                             double skewmax)
 {
     double e[10], skew, run, kerb, fshift;
-    int left, si_m;
+    int left, si_m, bend;
     const TG_Biome *b;
 
     /* Which kerb: the outward normal of the LEFT side, dotted with the arm. */
@@ -1202,11 +1204,13 @@ static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
          * floor on how deep a geo street may go. */
         if (td5_env_flag_on("TD5RE_GEO_NET_DEPTH") && cap < TG_GEO_DEPTH_MAX)
             cap = TG_GEO_DEPTH_MAX;
+        bend = (run < cap);
         if (run > cap) run = cap;
     }
     if (s_gna >= TG_GEO_MAX_ARMS) { s_gs.d_full++; return; }
     {
         TG_GeoArm *a = &s_garm[s_gna++];
+        a->bend = bend;
         a->si = si_m; a->left = left; a->lanes = rd->lanes;
         a->road = ridx; a->klass = rd->klass;
         a->skew = skew; a->want = run;
@@ -1418,6 +1422,10 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         if (why == 3) s_gs.why_water++;
         pre   = reach;
         reach = tg_r13_fold_cap(nl, a->si, sg, a->skew, reach, "TD5RE_R13_FOLD_STREET");
+        if (td5_env_flag_off("TD5RE_GEO_NET_DIAG"))
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO MARCH] way %d si %d %s want %.0f march %.0f why %d fold %.0f skew %.0f deg",
+                      a->road, a->si, a->left ? "left" : "right", a->want, pre, why, reach,
+                      a->skew * 180.0 / TD5_TG_PI);
         if (reach < TD5_TG_R8_CLAMP_MIN) {
             if (reach < pre) { s_gs.d_fold++;  tg_geo_drop_note(a->si, a->left, TG_GD_FOLD, reach); }
             else             { s_gs.d_short++; tg_geo_drop_note(a->si, a->left, TG_GD_SHORT, reach); }
@@ -1458,6 +1466,7 @@ static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
         ed->skew = a->skew;   ed->reach      = reach;
         ed->surface = a->surface;
         ed->road = a->road; ed->k0 = a->k0; ed->kstep = a->kstep;
+        ed->bend = (a->bend && why == 0 && reach >= pre - 0.5);   /* [R1030 H] nothing stopped it but the bend */
         tg_net_paint_edge(ed, TG_WO_STREET);
         tg_net_set_mouth(lo, hi, a->left, (int)(ed - s_edges), a->skew, reach);
         if (a->shift > 0.0) {
@@ -2516,6 +2525,123 @@ static void tg_net_geo_connect(const TG_NodeList *nl, int nspans)
               s_conn_laid, s_conn_none);
 }
 
+/* ============ [ROUND 1030 H items 17, 21] A REAL STREET GOES ON PAST ITS FIRST BEND ============================
+ *
+ * Mariano: "road level091 L91 e68 s28 city p101 pos 257323,-452,-302454 r2681 v12 c1 is not continuing, texture and
+ * sidewalk stops after a few meters" and "road goes into the grass here level091 L91 e151 s16 road p101 pos
+ * 593491,9232,-633206 r2951 v12 c1".
+ *
+ * ROOT CAUSE (one for both, measured with TD5RE_GEO_NET_DIAG=1 on master 78a6b25f): a mouth street is ONE straight arm
+ * (the mouth table holds a bearing and a reach), and tg_geo_arm_push sets its reach to tg_geo_straight_run: how far
+ * the real way stays within half its width of the arm's ray. Way 407 (Avenida 44, mouth span 274 left) runs 4267 from
+ * the kerb before its vertex (256074,-301445) leaves the ray, then goes straight on west for another 17179 units; way
+ * 1002 (Avenida 51, mouth span 605 left) leaves at 67 degrees, curves round the plaza corner and runs west for 52300
+ * units. In both the march was free (why 0) and the arm stopped only because the way bent; nothing laid the rest, so
+ * the asphalt and its pavement ended in bare ground a few metres from the road. tg_net_geo_connect only joins an arm to
+ * a ribbon of its way that some other pass (plaza roads, far-arc streets) already laid, and neither way had one.
+ *
+ * RULE. After the connector pass, every mouth street that ended at its way's bend (march free, not capped by depth, no
+ * ribbon of the same way anywhere) gets the REST of the way as an ordinary mitred ribbon of that way (asphalt, both
+ * footways, ground follow, paint, conform, building clearance, minimap): from half a street width back inside the arm's
+ * end, through the arm's end point, then the way's own vertices resampled every TG_PZ_STEP, for as long as each sample is
+ * clear of the route, of every other street and of water, up to TD5RE_GEO_ARM_TAIL_M metres (default 70, the far-arc
+ * street reach). The first piece lies under the arm (the ribbon stands lower than the followed arm), so the joint is
+ * covered whichever way the street turns. TD5RE_GEO_ARM_TAIL=0 restores master's bytes. */
+#define TG_AT_STEP     TG_PZ_STEP
+static long s_at_laid, s_at_cand, s_at_short;
+
+static void tg_net_geo_arm_tails(const TG_NodeList *nl, int nspans)
+{
+    const int ne0 = s_ne;
+    const double maxl = (double)td5_env_float("TD5RE_GEO_ARM_TAIL_M", 70.0f, 5.0f, 300.0f) * 430.0;
+    int ei, edge0 = s_ne;
+
+    (void)nl; (void)nspans;
+    s_at_laid = s_at_cand = s_at_short = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_ARM_TAIL")) return;
+    for (ei = 0; ei < ne0; ei++) {
+        const TG_NetEdge *E = &s_edges[ei];
+        const TD5_GeoRoad *rd;
+        double qx[TG_NET_POLY], qz[TG_NET_POLY], ox, oz, len, hw, run = 0.0, lx, lz;
+        int nq = 0, ri, k, stop = 0, have = 0;
+
+        if (E->kind != TG_NE_STREET && E->kind != TG_NE_AVENUE && E->kind != TG_NE_CONTINUATION) continue;
+        if (!E->bend || E->ribbon || E->loop || E->road < 0 || E->npoly != 2 || E->kstep == 0) continue;
+        for (ri = 0; ri < s_ne && !have; ri++)
+            if (s_edges[ri].ribbon && (s_edges[ri].way >= 0 ? s_edges[ri].way : s_edges[ri].road) == E->road) have = 1;
+        if (have) continue;
+        rd = td5_geo_roads_get(E->road);
+        if (!rd || rd->count < 2) continue;
+        s_at_cand++;
+        ox = E->px[1] - E->px[0]; oz = E->pz[1] - E->pz[0];
+        len = sqrt(ox * ox + oz * oz);
+        if (len < 1.0) continue;
+        ox /= len; oz /= len;
+        hw = rd->width * 0.5;
+        qx[nq] = E->px[1] - ox * hw; qz[nq] = E->pz[1] - oz * hw; nq++;   /* under the arm's end */
+        qx[nq] = E->px[1];           qz[nq] = E->pz[1];           nq++;
+        lx = E->px[1]; lz = E->pz[1];
+        /* the way from the arm's first vertex on, in the arm's direction; samples still inside the arm are skipped */
+        for (k = E->k0; !stop && k >= 0 && k + E->kstep >= 0 && k + E->kstep < rd->count; k += E->kstep) {
+            double ax, az, bx, bz, sl, ux, uz, t;
+            if (!td5_geo_roads_point(rd, k, &ax, &az) || !td5_geo_roads_point(rd, k + E->kstep, &bx, &bz)) break;
+            sl = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+            if (sl < 1.0) continue;
+            ux = (bx - ax) / sl; uz = (bz - az) / sl;
+            for (t = 0.0; !stop; t += TG_AT_STEP) {
+                const int last_seg = !(k + 2 * E->kstep >= 0 && k + 2 * E->kstep < rd->count);
+                const double tt = (t >= sl) ? sl : t;
+                const double sx = ax + ux * tt, sz = az + uz * tt;
+                const double along = (sx - E->px[0]) * ox + (sz - E->pz[0]) * oz;
+                const double dl = sqrt((sx - lx) * (sx - lx) + (sz - lz) * (sz - lz));
+                if (t >= sl && !last_seg) break;
+                if (along > len + 300.0 && dl >= 600.0) {
+                    if (tg_world_is_water(sx, sz)
+                        || tg_world_occ_near(sx, sz, hw + 250.0, TG_WO_ROAD | TG_WO_DRIVABLE)
+                        || tg_conn_near_other(sx, sz, hw + 250.0, ei, -1)) { stop = 1; break; }
+                    qx[nq] = sx; qz[nq] = sz; nq++;
+                    run += dl; lx = sx; lz = sz;
+                    if (nq >= TG_NET_POLY || run >= maxl) { stop = 1; break; }
+                }
+                if (t >= sl) break;
+            }
+        }
+        if (nq < 4) { s_at_short++; continue; }
+        {
+            const int a0 = tg_net_node(qx[0], qz[0], tg_world_h(qx[0], qz[0]), 1, -1);
+            const int b0 = tg_net_node(qx[nq - 1], qz[nq - 1], tg_world_h(qx[nq - 1], qz[nq - 1]), 1, -1);
+            TG_NetEdge *ed = tg_net_edge_new(a0, b0, TG_NE_BACKSTREET, rd->width);
+            int m;
+            if (!ed) break;
+            ed->npoly = nq;
+            for (m = 0; m < nq; m++) {
+                ed->px[m] = qx[m]; ed->pz[m] = qz[m];
+                ed->py[m] = tg_world_h(qx[m], qz[m]);
+            }
+            ed->mouth_si = E->mouth_si; ed->mouth_left = 0;
+            ed->surface = rd->surface;
+            ed->ribbon = 1;
+            ed->way = E->road;
+            s_at_laid++;
+            TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO ARM TAIL] edge %d (%s, mouth span %d %s, way %d %s) goes on past its bend: "
+                      "%d point(s), %.0f units, owner span %d", ei, k_ne_name[E->kind], E->mouth_si,
+                      E->mouth_left ? "left" : "right", E->road, td5_geo_roads_name(rd), nq, run, ed->mouth_si);
+        }
+    }
+    for (ei = edge0; ei < s_ne; ei++) {
+        const TG_NetEdge *ed = &s_edges[ei];
+        int m;
+        tg_net_paint_edge(ed, TG_WO_STREET);
+        for (m = 0; m + 1 < ed->npoly; m++)
+            tg_world_conform_seg(ed->px[m], ed->pz[m], ed->py[m],
+                                 ed->px[m + 1], ed->pz[m + 1], ed->py[m + 1],
+                                 ed->width * 0.5 + 600.0, 2500.0);
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO ARM TAIL] %ld street(s) stopped at their way's bend, %ld continued along the "
+              "real way, %ld left as they were (nothing clear past the bend) (knob TD5RE_GEO_ARM_TAIL, up to %.0f m)",
+              s_at_cand, s_at_laid, s_at_short, maxl / 430.0);
+}
+
 static int tg_net_geo_active(void)
 {
     if (!td5_geo_loaded() || td5_geo_route_count() < 2) return 0;
@@ -2673,6 +2799,7 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
         tg_net_geo_far_streets(nl, nspans_main);          /* [1023 B item 8] cross streets off a plaza fork's free arc */
         tg_pf_rehost_buildings(nl, nspans_main);          /* [1023 B item 8] real frontage on the town side of it */
         tg_net_geo_connect(nl, nspans_main);              /* [1024 G item 1] a street and the ribbon of its own way */
+        tg_net_geo_arm_tails(nl, nspans_main);            /* [1030 H items 17, 21] ... and the rest of a way past its bend */
         if (td5_env_flag_off("TD5RE_GEO_NET_SYNTH")) {
             tg_net_back_streets();
             tg_net_country(nl, nspans_main);
