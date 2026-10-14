@@ -2047,11 +2047,13 @@ void tg_meshtag_reset(int nentries);
 void tg_meshtag_set(int entry, int slot, int kind);
 void tg_meshtag_fallback(int entry, int slot, size_t off);
 void tg_meshtag_write(const char *dir);
+void tg_meshtag_clear_entry(int entry);   /* [R1030 E] forget a preview build's tags */
 #else
 #define tg_meshtag_reset(n)          ((void)0)
 #define tg_meshtag_set(e, s, k)      ((void)0)
 #define tg_meshtag_fallback(e, s, o) ((void)0)
 #define tg_meshtag_write(dir)        ((void)0)
+#define tg_meshtag_clear_entry(e)    ((void)0)
 #endif
 
 /* ===================== [R9 CITY] PAVEMENT PROVENANCE MARKS =================

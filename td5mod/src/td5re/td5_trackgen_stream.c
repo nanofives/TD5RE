@@ -219,6 +219,11 @@ int td5_tgstream_begin(void)
 
     s_active = 1;
     s_begin_ms = td5_plat_time_ms();
+    /* [ROUND 1030 E item 9] TD5RE_AUTOTRACK_STREAM_ORDER (default ON): build a
+     * fork corridor's entries beside the main road it runs along instead of
+     * after the whole ring, so the fork next to the start grid is decorated in
+     * the first seconds instead of ~45 s in. =0 is master's ascending order. */
+    td5_trackgen_stream_set_order(td5_env_flag_on("TD5RE_AUTOTRACK_STREAM_ORDER"));
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_STREAM_FORCE_FALLBACK")) {
         tgstream_drain_synchronously("forced by knob");
@@ -250,7 +255,9 @@ void td5_tgstream_tick(void)
         if (!s_caught_up_warned) {
             int from = td5_track_scenery_undecorated_from_span();
             int span = td5_game_get_slot_span(0);
-            if (from >= 0 && span >= from) {
+            /* [R1030 E] a span past the watermark may already be decorated now
+             * (a fork corridor built out of order), so ask about the span itself */
+            if (from >= 0 && span >= from && !td5_track_scenery_span_settled(span)) {
                 s_caught_up_warned = 1;
                 TD5_LOG_W(LOG_TAG, "scenery stream: the PLAYER CAUGHT UP -- "
                           "span %d is past the decorated tail (%d), so the "
