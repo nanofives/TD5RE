@@ -32,17 +32,26 @@ ap.add_argument('--exe', default='td5re.exe')
 ap.add_argument('--extra', nargs='*', default=[])
 ap.add_argument('--rebuild', action='store_true')
 ap.add_argument('--median', default='')          # "<span>,<speed>" -> TD5RE_MEDIAN_DRIVE
+ap.add_argument('--gap', default='')             # "<run>" -> TD5RE_GAP_DRIVE (drive ACROSS a median gap)
 ap.add_argument('--secs', type=int, default=95)  # race seconds before the scripted quit
 ap.add_argument('--timeout', type=int, default=600)
 ap.add_argument('--trace', action='store_true')  # [Trace] RaceTrace=1 for slot 0
+ap.add_argument('--synthetic', action='store_true')  # level090, seed 99991, no place (move SELECTED.TXT aside first)
 a = ap.parse_args()
+if a.synthetic:
+    LVL = os.path.join(WT, 're', 'assets', 'levels', 'level090')
 
 env = {k: v for k, v in os.environ.items() if not k.upper().startswith('TD5RE_')}
-env['TD5RE_GEO_PLACE'] = 'la_plata_partido'
+if a.synthetic:
+    env['TD5RE_AUTOTRACK_SEED'] = '99991'
+else:
+    env['TD5RE_GEO_PLACE'] = 'la_plata_partido'
 env['TD5RE_RT'] = '0'
 env['TD5RE_WINDOW_TITLE'] = 'TD5RE r1030e %s' % a.tag
 if a.median:
     env['TD5RE_MEDIAN_DRIVE'] = a.median
+if a.gap:
+    env['TD5RE_GAP_DRIVE'] = a.gap
 for kv in a.extra:
     k, v = kv.split('=', 1)
     env[k if k.startswith('TD5RE_') else 'TD5RE_' + k] = v
@@ -69,10 +78,11 @@ with open(script, 'w') as fh:
 gfx = ['--Lighting=0', '--Quality=0', '--SunShadows=0', '--Reflections=0', '--WetRoads=0', '--StreetLights=0',
        '--CarLights=0', '--LegacyShadows=0', '--GIQuality=0', '--ShadowRays=0', '--ReflectionQuality=0',
        '--CarShadows=0', '--VFX=0', '--WorldBillboards=0', '--FoliageAA=0']
-args = [os.path.join(WT, a.exe), '--AutoRace=1', '--SkipIntro=1', '--DefaultTrack=61', '--DefaultOpponents=0',
+args = [os.path.join(WT, a.exe), '--AutoRace=1', '--SkipIntro=1',
+        '--DefaultTrack=%d' % (60 if a.synthetic else 61), '--DefaultOpponents=0',
         '--Traffic=0', '--CarDamage=0', '--Windowed=1', '--VSync=0', '--Width=1280', '--Height=720',
         '--InputScript=%s' % script.replace('\\', '/')] + gfx
-if a.median:
+if a.median or a.gap:
     args += ['--PlayerIsAI=0', '--AutoThrottle=0']
 else:
     args += ['--PlayerIsAI=1']
@@ -81,7 +91,7 @@ if a.trace:
 
 t0 = time.time()
 p = subprocess.Popen(args, cwd=WT, env=env)
-print('pid=%d tag=%s exe=%s extra=%s median=%s' % (p.pid, a.tag, a.exe, a.extra, a.median or '-'))
+print('pid=%d tag=%s exe=%s extra=%s median=%s gap=%s' % (p.pid, a.tag, a.exe, a.extra, a.median or '-', a.gap or '-'))
 
 user32 = ctypes.windll.user32
 sent = False
@@ -127,7 +137,7 @@ for f in ('race.log', 'engine.log'):
         shutil.copy(src, os.path.join(LOG, 'r1030e_%s_%s' % (a.tag, f)))
 rl = os.path.join(LOG, 'r1030e_%s_race.log' % a.tag)
 keys = ('[R1030 E]', 'scenery stream:', 'streamed scenery:', 'REUSED the on-disk', 'generated track ready',
-        '[MEDDRIVE] RESULT', 'median gap: run 0')
+        '[MEDDRIVE] RESULT', '[GAPDRIVE] RESULT', 'MEDIAN NOSE', 'median gap: run 0')
 if os.path.exists(rl):
     for line in open(rl, encoding='utf-8', errors='replace'):
         if any(k in line for k in keys):
