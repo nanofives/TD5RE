@@ -316,6 +316,11 @@ const char *td5_geo_places_incomplete_reason(int i);
  * TD5_GEO_PREVIEW_MAX points and cached by slug, so re-asking for the place
  * that is already shown costs one strcmp.
  *
+ * [ROUND 1030 A1] The nodes come back NORTH UP (x = east, z = north, world
+ * units), not in the turned world frame the BUILD writes, so the panel matches
+ * the GEOSPATIAL TRACK GENERATOR map. TD5RE_GEO_PREVIEW_NORTH_UP=0 restores the
+ * world frame.
+ *
  * Returns the point count (0 when the place has no usable route). */
 #define TD5_GEO_PREVIEW_MAX 2048
 int td5_geo_preview_route(const char *slug);
