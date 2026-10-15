@@ -409,6 +409,37 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
  * refresh reads this immediately after its bestlane call to force the wheel
  * airborne instead of letting it "ground" on a fictional extrapolated plane. */
 int td5_track_last_contact_was_capped(void);
+
+/* --- Table-parameterised strip height math (GEO FREE ROAM, roam F1-T6a) ---
+ * The strip's own integer height code with the vertex table passed in, so the
+ * roam locator can run it on a TILE's vertex array. PURE: no statics read or
+ * written (the strip's s_last_contact_capped is set only by the thin wrappers
+ * inside td5_track.c; here the "upward extrapolation cap fired" bit comes back
+ * through out_capped). `sp` is the quad's span record (type + lane count in
+ * byte +3 + origin + left/right vertex index), `vt` the vertex rows its
+ * indices point into. Indices are NOT bounds-checked, same as the strip. */
+
+/* Vertex indices of lane `sub_lane`'s quad: vl0/vl1 left pair, vr0/vr1 right pair
+ * (span-type offsets applied). */
+void td5_track_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
+                             int *vl0, int *vl1, int *vr0, int *vr1);
+/* Triangle-pick cross product (>0 -> triangle vl0,vr1,vl1; else vl0,vr0,vr1).
+ * local_x/z = FP_TRUNC(world) - span origin. */
+int64_t td5_track_diagonal_cross_v(const TD5_StripVertex *vt, int vl0_idx, int vr1_idx,
+                                   int32_t local_x, int32_t local_z);
+/* triangle_height(): 24.8 world height + int16 unit normal (out_normal may be NULL). */
+int32_t td5_track_tri_height_v(const TD5_StripVertex *vt,
+                               int va_idx, int vb_idx, int vc_idx,
+                               int32_t origin_x, int32_t origin_y, int32_t origin_z,
+                               int32_t pos_x, int32_t pos_z,
+                               int16_t *out_normal, int *out_capped);
+/* probe_span_lane_height(): picks the triangle of lane `sub_lane` exactly as the strip
+ * does (all span types, edge/interior rules) and returns its height. out_normal and
+ * out_capped may be NULL. out_capped is always written (0/1) when non-NULL. */
+int32_t td5_track_quad_height_v(const TD5_StripVertex *vt, const TD5_StripSpan *sp,
+                                int sub_lane, int32_t world_x, int32_t world_z,
+                                int16_t *out_normal, int *out_capped);
+
 int  td5_track_probe_height(int world_x, int world_z, int current_span,
                              int *out_y, int *out_surface_type);
 void td5_track_get_span_edges(int span_index,
