@@ -1242,7 +1242,7 @@ static inline int span_lane_count(const TD5_StripSpan *sp)
 /* [roam F1-T6a] DEV: TD5RE_ROAM_MIRROR_TEST=1 -- "strip mirror" test of the table-parameterised height math.
  * For every type-1 span of the loaded strip: copy its two vertex rows into a PRIVATE table (different
  * indices, different array) with a re-based mirror span record, then at 9 in-quad points per lane (bilinear
- * 3x3 over the lane quad) plus 4 extrapolated points (exercises the upward cap) require
+ * 3x3 over the lane quad) plus 8 extrapolated points (4 near, 4 far: exercises the upward cap) require
  * td5_track_quad_height_v(private table) == td5_track_compute_contact_height_with_normal(real strip):
  * same height, same int16 normal, same capped bit. Result line to race.log: "ROAM_MIRROR spans= lanes= points= mismatches=". */
 static void roam_mirror_test(void)
@@ -1250,7 +1250,9 @@ static void roam_mirror_test(void)
     static const float k_st[9][2] = {
         {0.15f,0.15f},{0.50f,0.15f},{0.85f,0.15f},{0.15f,0.50f},{0.50f,0.50f},
         {0.85f,0.50f},{0.15f,0.85f},{0.50f,0.85f},{0.85f,0.85f} };
-    static const float k_out[4][2] = { {-0.5f,0.5f},{1.5f,0.5f},{0.5f,-0.5f},{0.5f,1.5f} };
+    /* extrapolated points: near (+-0.5 of the quad) and far (+-25 quads, reaches the upward cap on a slope) */
+    static const float k_out[8][2] = { {-0.5f,0.5f},{1.5f,0.5f},{0.5f,-0.5f},{0.5f,1.5f},
+                                       {-25.0f,0.5f},{26.0f,0.5f},{0.5f,-25.0f},{0.5f,26.0f} };
     unsigned nspans = 0, nlanes = 0, npts = 0, bad = 0, skipped = 0, bad_logged = 0, capped_pts = 0;
     int q;
     if (!td5_env_flag_off("TD5RE_ROAM_MIRROR_TEST") || s_span_count <= 0 || !s_span_array || !s_vertex_table) return;
@@ -1276,7 +1278,7 @@ static void roam_mirror_test(void)
             td5_track_quad_vertices(sp, l, &v0, &v1, &v2, &v3);
             A = &s_vertex_table[v0]; B = &s_vertex_table[v1]; C = &s_vertex_table[v2]; D = &s_vertex_table[v3];
             nlanes++;
-            for (k = 0; k < 13; k++) {
+            for (k = 0; k < 17; k++) {
                 const float s = (k < 9) ? k_st[k][0] : k_out[k - 9][0];
                 const float t = (k < 9) ? k_st[k][1] : k_out[k - 9][1];
                 const float lx = (float)A->x + s * (float)(B->x - A->x), rx = (float)C->x + s * (float)(D->x - C->x);
