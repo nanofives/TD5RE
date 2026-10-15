@@ -29,11 +29,27 @@
 #include <stdint.h>
 #include "td5_geo_roads.h"
 
+/* [F1 T3] Raw tag facts the shared record parser does not keep, for the road
+ * world's drivable filter and tunnel kind (td5_roam_world.c decides; this only
+ * records what the record says). */
+#define TD5_ROAM_TAG_HW_BUS_STOP       0x0001u  /* class "bus_stop"            */
+#define TD5_ROAM_TAG_HW_RAZED          0x0002u  /* class "razed"               */
+#define TD5_ROAM_TAG_HW_SERVICES       0x0004u  /* class "services"            */
+#define TD5_ROAM_TAG_HW_RACEWAY        0x0008u  /* class "raceway"             */
+#define TD5_ROAM_TAG_AREA              0x0010u  /* tags.area = yes             */
+#define TD5_ROAM_TAG_SVC_PARKING_AISLE 0x0020u  /* tags.service = parking_aisle */
+#define TD5_ROAM_TAG_SVC_DRIVE_THROUGH 0x0040u  /* tags.service = drive-through */
+#define TD5_ROAM_TAG_SVC_DRIVEWAY      0x0080u  /* tags.service = driveway     */
+#define TD5_ROAM_TAG_SVC_ALLEY         0x0100u  /* tags.service = alley        */
+#define TD5_ROAM_TAG_ACCESS_PRIVATE    0x0200u  /* tags.access = private / no  */
+#define TD5_ROAM_TAG_TUNNEL_PASSAGE    0x0400u  /* tunnel_kind building_passage */
+
 /* One way of the session table. road.first / road.count is the slice of the
  * session point pool; road.name_id indexes the session name pool (-1 unnamed). */
 typedef struct {
     int64_t    way_id;   /* OSM way id (ROADS record "id"), -1 when absent */
     int        tile;     /* index into the session tile table              */
+    uint32_t   tagf;     /* TD5_ROAM_TAG_* bits                            */
     TD5_GeoRoad road;
 } TD5_RoamWay;
 
