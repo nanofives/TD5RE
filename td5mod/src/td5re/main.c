@@ -48,6 +48,7 @@
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode push */
 #include "td5_i18n.h"     /* [I18N] UI-language catalog load at boot */
 #include "td5_roam_cache.h" /* GEO FREE ROAM cache reader (dev census hook) */
+#include "td5_roam_ribbon.h" /* GEO FREE ROAM ribbons + heights (dev test hook) */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1686,6 +1687,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* GEO FREE ROAM (F1 T1) dev census: TD5RE_ROAM_CACHE_TEST=1 reads the casco
      * window of the La Plata cache, writes the census and exits. */
     if (td5_roam_cache_dev_census())
+        return 0;
+    /* GEO FREE ROAM (F1 T4) dev test: TD5RE_ROAM_RIBBON_TEST=1 builds every casco
+     * edge's ribbon, prints the census + determinism hashes and exits. */
+    if (td5_roam_ribbon_dev_test())
         return 0;
 #endif
 
