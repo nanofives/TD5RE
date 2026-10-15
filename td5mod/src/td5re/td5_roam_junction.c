@@ -285,6 +285,30 @@ static int pt_in_tri(double px, double pz, const TD5_RoamPatchVert *a,
     return d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0;
 }
 
+/* 1 when no two non-adjacent outline segments cross or touch. Ear clipping
+ * happily triangulates a self-crossing outline into overlapping triangles, so
+ * this gate runs first. O(n^2); outlines hold < 200 vertices. */
+static int outline_simple(const TD5_RoamPatchVert *pv, int n)
+{
+    int i, j;
+    for (i = 0; i < n; i++) {
+        const TD5_RoamPatchVert *a = &pv[i], *b = &pv[(i + 1) % n];
+        for (j = i + 1; j < n; j++) {
+            const TD5_RoamPatchVert *c = &pv[j], *d = &pv[(j + 1) % n];
+            double d1, d2, d3, d4;
+            if (j == i + 1 || (i == 0 && j == n - 1)) continue;   /* neighbours */
+            d1 = cross2(b->x - a->x, b->z - a->z, c->x - a->x, c->z - a->z);
+            d2 = cross2(b->x - a->x, b->z - a->z, d->x - a->x, d->z - a->z);
+            d3 = cross2(d->x - c->x, d->z - c->z, a->x - c->x, a->z - c->z);
+            d4 = cross2(d->x - c->x, d->z - c->z, b->x - c->x, b->z - c->z);
+            if (((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) &&
+                d1 != 0.0 && d2 != 0.0 && d3 != 0.0 && d4 != 0.0)
+                return 0;
+        }
+    }
+    return 1;
+}
+
 /* Ear clipping over the outline (CCW). Writes ntri = nout - 2 triangles into
  * out. Returns 1 on success. */
 static int ear_clip(const TD5_RoamPatchVert *pv, int nout, LTri *out, int *ntri)
@@ -578,20 +602,41 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
     if (!uf || !cuf || !nxt || !tail || !diam || !rdisc || !xs) goto done;
     for (i = 0; i < nn; i++) { uf[i] = cuf[i] = tail[i] = i; nxt[i] = -1; }
 
-    /* 1-2. Candidate pairs: short edges, overlapping discs. */
+    /* 1-2. Candidate pairs: short connections (an edge, or a chain of pieces
+     * through JOIN nodes, shorter than merge_len), overlapping discs. */
     {
         double rmax = 0.0;
-        for (i = 0; i < g->nedge; i++) {
-            const TD5_RoamEdge *e = &g->edge[i];
-            RoamPair q;
-            if (e->node_a == e->node_b || e->length >= P->merge_len) continue;
-            if (!is_cand(&g->node[e->node_a]) || !is_cand(&g->node[e->node_b])) continue;
-            if (mode[e->node_a] == MODE_SPLIT || mode[e->node_b] == MODE_SPLIT) continue;
-            q.a = e->node_a < e->node_b ? e->node_a : e->node_b;
-            q.b = e->node_a < e->node_b ? e->node_b : e->node_a;
-            q.kind = PAIR_EDGE;
-            if (!grow((void **)&pr, &cap_pr, npr + 1, sizeof *pr)) goto done;
-            pr[npr++] = q;
+        for (i = 0; i < nn; i++) {
+            const TD5_RoamNode *nd = &g->node[i];
+            if (!is_cand(nd) || mode[i] == MODE_SPLIT) continue;
+            for (k = 0; k < nd->nend; k++) {
+                const TD5_RoamEndRef *r0 = &g->node_end[nd->end_first + k];
+                int ce = r0->edge, cq = r0->end, steps = 0, fnode;
+                double len = 0.0;
+                RoamPair q;
+                for (;;) {
+                    const TD5_RoamEdge *e = &g->edge[ce];
+                    const TD5_RoamNode *fnd;
+                    const TD5_RoamEndRef *fr;
+                    len += e->length;
+                    fnode = cq == 0 ? e->node_b : e->node_a;
+                    fnd = &g->node[fnode];
+                    if (len >= P->merge_len || fnd->kind != TD5_ROAM_NODE_JOIN || fnd->nend != 2 ||
+                        ++steps >= ROAM_CHAIN_MAX) break;
+                    fr = &g->node_end[fnd->end_first];
+                    if (fr[0].edge == ce && fr[0].end == 1 - cq) { ce = fr[1].edge; cq = fr[1].end; }
+                    else { ce = fr[0].edge; cq = fr[0].end; }
+                }
+                /* Each pair is found from both ends; keep the one from the lower
+                 * index so the list does not depend on which end walked. */
+                if (len >= P->merge_len || fnode <= i || !is_cand(&g->node[fnode]) ||
+                    mode[fnode] == MODE_SPLIT) continue;
+                q.a = i;
+                q.b = fnode;
+                q.kind = PAIR_EDGE;
+                if (!grow((void **)&pr, &cap_pr, npr + 1, sizeof *pr)) goto done;
+                pr[npr++] = q;
+            }
         }
         for (i = 0; i < nn; i++) {
             if (!is_cand(&g->node[i])) continue;
@@ -737,15 +782,13 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
     }
     c->clusters = g->ncluster;
 
-    /* Internal edges: both ends in one cluster, every point near the centroid. */
-    for (i = 0; i < g->nedge; i++) {
-        TD5_RoamEdge *e = &g->edge[i];
-        const int ca = g->node[e->node_a].cluster, cb = g->node[e->node_b].cluster;
-        const TD5_RoamCluster *cl;
+    /* Internal edges: a connection (one edge, or a chain of pieces through JOIN
+     * nodes) from a member node to another member node of the same cluster,
+     * every point near the centroid. */
+    for (i = 0; i < g->ncluster; i++) {
+        const TD5_RoamCluster *cl = &g->cluster[i];
         double rc = 0.0, lim;
-        int q, inside = 1;
-        if (ca < 0 || ca != cb) continue;
-        cl = &g->cluster[ca];
+        int m, q;
         for (q = 0; q < cl->nnode; q++) {
             const TD5_RoamNode *nd = &g->node[g->cluster_node[cl->node_first + q]];
             const double dx = nd->x - cl->cx, dz = nd->z - cl->cz;
@@ -753,19 +796,48 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
             if (d > rc) rc = d;
         }
         lim = rc + 10.0 * TD5_ROAM_UPM;
-        for (q = 0; q < e->npt && inside; q++) {
-            const double dx = g->pt[e->pt_first + q].x - cl->cx, dz = g->pt[e->pt_first + q].z - cl->cz;
-            if (dx * dx + dz * dz > lim * lim) inside = 0;
+        for (m = 0; m < cl->nnode; m++) {
+            const int ni = g->cluster_node[cl->node_first + m];
+            const TD5_RoamNode *nd = &g->node[ni];
+            for (k = 0; k < nd->nend; k++) {
+                const TD5_RoamEndRef *r0 = &g->node_end[nd->end_first + k];
+                int pe[ROAM_CHAIN_MAX], np = 0, ce = r0->edge, cq = r0->end, fnode, inside = 1, z2;
+                for (;;) {
+                    const TD5_RoamEdge *e = &g->edge[ce];
+                    const TD5_RoamNode *fnd;
+                    const TD5_RoamEndRef *fr;
+                    pe[np++] = ce;
+                    fnode = cq == 0 ? e->node_b : e->node_a;
+                    fnd = &g->node[fnode];
+                    if (fnd->kind != TD5_ROAM_NODE_JOIN || fnd->nend != 2 || np >= ROAM_CHAIN_MAX) break;
+                    fr = &g->node_end[fnd->end_first];
+                    if (fr[0].edge == ce && fr[0].end == 1 - cq) { ce = fr[1].edge; cq = fr[1].end; }
+                    else { ce = fr[0].edge; cq = fr[0].end; }
+                }
+                if (fnode == ni || g->node[fnode].cluster != i) continue;
+                for (z2 = 0; z2 < np && inside; z2++) {
+                    const TD5_RoamEdge *e = &g->edge[pe[z2]];
+                    for (q = 0; q < e->npt && inside; q++) {
+                        const double dx = g->pt[e->pt_first + q].x - cl->cx;
+                        const double dz = g->pt[e->pt_first + q].z - cl->cz;
+                        if (dx * dx + dz * dz > lim * lim) inside = 0;
+                    }
+                }
+                if (!inside) continue;
+                for (z2 = 0; z2 < np; z2++) {
+                    TD5_RoamEdge *e = &g->edge[pe[z2]];
+                    if (e->end[0].kind == TD5_ROAM_END_INTERNAL) continue;   /* seen from the other end */
+                    for (q = 0; q < 2; q++) {
+                        e->end[q].kind = TD5_ROAM_END_INTERNAL;
+                        e->end[q].cluster = i;
+                        e->end[q].arm = -1;
+                        e->end[q].nrow = 0;
+                        e->end[q].s = q == 0 ? 0.0 : e->length;
+                    }
+                    c->internal_edges++;
+                }
+            }
         }
-        if (!inside || e->node_a == e->node_b) continue;
-        for (q = 0; q < 2; q++) {
-            e->end[q].kind = TD5_ROAM_END_INTERNAL;
-            e->end[q].cluster = ca;
-            e->end[q].arm = -1;
-            e->end[q].nrow = 0;
-            e->end[q].s = q == 0 ? 0.0 : e->length;
-        }
-        c->internal_edges++;
     }
 
     /* 6. Per cluster: arms, corners, cuts, rows, outline, triangles. */
@@ -1022,7 +1094,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
             en->arm = g->narm + m;
             en->cut = loc;
             /* A one-piece arm clamped to half its edge stores exactly 0.5 * L,
-             * the value the far end stores too (L - L/2 is exact). */
+             * the value the opposite end stores too (L - L/2 is exact). */
             en->s = am->a.end == 0 ? loc
                   : ((am->nchain == 1 && am->a.t == am->lim) ? am->lim : e->length - loc);
             en->nrow = e->lanes + 1;
@@ -1109,10 +1181,36 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                     TD5_RoamPt kept[16];
                     int nk = 0, s;
                     TD5_RoamPt last = en->row[a->end == 0 ? lanes : 0];
+                    /* Each arm's cut row as a line with its outward normal: a
+                     * corner point past either row (a curved arm bends away from
+                     * its straight kerb line) would fold the outline back. */
+                    const double oi = a->end == 0 ? 1.0 : -1.0, oj = aj->end == 0 ? 1.0 : -1.0;
+                    const int lj = enj->nrow - 1;
+                    const double ri_x = 0.5 * (en->row[0].x + en->row[lanes].x);
+                    const double ri_z = 0.5 * (en->row[0].z + en->row[lanes].z);
+                    const double rj_x = 0.5 * (enj->row[0].x + enj->row[lj].x);
+                    const double rj_z = 0.5 * (enj->row[0].z + enj->row[lj].z);
+                    /* And the angular sector, seen from the centroid, from this
+                     * arm's left kerb point to the next arm's right kerb point:
+                     * a corner point outside it, or one that steps backwards,
+                     * folds the outline (two carriageways that cross just
+                     * before a junction, Plaza Italia). */
+                    const double ang0 = atan2(last.z - cl->cz, last.x - cl->cx);
+                    double sector = atan2(nextpt.z - cl->cz, nextpt.x - cl->cx) - ang0, dlast = 0.0;
+                    while (sector <= 0.0) sector += 2.0 * ROAM_PI;
+                    while (sector > 2.0 * ROAM_PI) sector -= 2.0 * ROAM_PI;
                     for (s = 0; s < nq; s++) {
                         const double d0 = hypot(qp[s].x - last.x, qp[s].z - last.z);
                         const double d1 = hypot(qp[s].x - nextpt.x, qp[s].z - nextpt.z);
+                        const double pi_ = ((qp[s].x - ri_x) * en->dir_x + (qp[s].z - ri_z) * en->dir_z) * oi;
+                        const double pj_ = ((qp[s].x - rj_x) * enj->dir_x + (qp[s].z - rj_z) * enj->dir_z) * oj;
+                        double dq = atan2(qp[s].z - cl->cz, qp[s].x - cl->cx) - ang0;
+                        while (dq < 0.0) dq += 2.0 * ROAM_PI;
+                        while (dq >= 2.0 * ROAM_PI) dq -= 2.0 * ROAM_PI;
                         if (d0 < ROAM_OL_MIN_SEG || d1 < ROAM_OL_MIN_SEG) continue;
+                        if (na > 1 && (pi_ > 0.0 || pj_ > 0.0)) { c->corner_pts_past_cut++; continue; }
+                        if (na > 1 && (dq <= dlast || dq >= sector)) { c->corner_pts_out_of_sector++; continue; }
+                        dlast = dq;
                         kept[nk++] = qp[s];
                         last = qp[s];
                     }
@@ -1174,7 +1272,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
             int nt = 0;
             if (!tmp) goto done;
             c->fan_fallback++;
-            if (ear_clip(pt.pv, cl->nout, tmp, &nt)) {
+            if (outline_simple(pt.pv, cl->nout) && ear_clip(pt.pv, cl->nout, tmp, &nt)) {
                 for (m = 0; m < nt; m++)
                     if (!patch_add_tri(&pt, tmp[m].v[0], tmp[m].v[1], tmp[m].v[2])) { free(tmp); goto done; }
                 cl->flags |= TD5_ROAM_CL_EARCLIP;
@@ -1618,10 +1716,12 @@ int td5_roam_junction_dev_census(void)
                 c->max_diameter / TD5_ROAM_UPM, (long long)c->max_diameter_key,
                 c->max_component / TD5_ROAM_UPM);
         fprintf(f, "fan_ok %d\nfan_fallback %d\nearclip_ok %d\nearclip_fail %d\nclusters_no_arm %d\n"
-                "simple_fallback %d\nhull_fallback %d\nsplit_fallback %d\nchain_absorbed %d\n",
+                "simple_fallback %d\nhull_fallback %d\nsplit_fallback %d\nchain_absorbed %d\n"
+                "corner_pts_past_cut %d\ncorner_pts_out_of_sector %d\n",
                 c->fan_ok, c->fan_fallback, c->fan_fallback - c->earclip_fail - c->hull_fallback,
                 c->earclip_fail, c->clusters_no_arm, c->simple_fallback, c->hull_fallback,
-                c->split_fallback, c->chain_absorbed);
+                c->split_fallback, c->chain_absorbed, c->corner_pts_past_cut,
+                c->corner_pts_out_of_sector);
         fprintf(f, "fillets %d\ncorners_parallel %d\ncorners_far %d\ncorners_reflex %d\nbevels %d\n"
                 "fillet_shrunk %d\n",
                 c->fillets, c->corners_parallel, c->corners_far, c->corners_reflex, c->bevels,

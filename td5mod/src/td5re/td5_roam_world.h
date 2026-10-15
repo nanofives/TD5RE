@@ -207,6 +207,8 @@ typedef struct {
     int    hull_fallback;        /* simple clusters patched by the hull       */
     int    split_fallback;       /* multi-node clusters rebuilt per node      */
     int    chain_absorbed;       /* short pieces past a JOIN under a patch    */
+    int    corner_pts_past_cut;  /* fillet points dropped: past a cut row     */
+    int    corner_pts_out_of_sector; /* dropped: outside the arms' sector     */
     int    corners_parallel, corners_far, fillets, corners_reflex, bevels;
     int    fillet_shrunk;        /* fillet radius cut to fit the arm cut limit */
     int    tri_splits, patch_tris, patch_verts, recipe_overflow;
