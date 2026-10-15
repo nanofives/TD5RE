@@ -1332,7 +1332,7 @@ static void gr_components(int *out_comps, int *out_biggest)
  * SECTION: growable double-pair buffer
  * ======================================================================== */
 
-typedef struct { double *x, *z; int n, cap; } GrPts;
+/* GrPts is declared in td5_geo_route.h ([ROAM F1-T4] export of gr_resample). */
 
 static void gr_pts_free(GrPts *p) { free(p->x); free(p->z); p->x = p->z = NULL; p->n = p->cap = 0; }
 
@@ -1395,7 +1395,7 @@ static int gr_pts_push(GrPts *p, double x, double z)
  * nodes are exactly one span apart in EUCLIDEAN distance. Arc-length resampling
  * falls short at a corner -- measured 34.6 units at a 31.6 degree turn on the
  * La Plata route, which geo_audit R4 failed on. */
-static int gr_resample(const GrPts *in, double step, GrPts *out)
+int gr_resample(const GrPts *in, double step, GrPts *out)
 {
     int seg_i = 0;
     double t = 0.0;

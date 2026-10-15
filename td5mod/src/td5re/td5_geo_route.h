@@ -221,4 +221,15 @@ typedef struct {
 int gr_raster_read_window(const char *path, double wx0, double wz0,
                           double wx1, double wz1, int pad, GrRaster *out);
 
+/* ------------------------------------------------------ chord resampler ----
+ * [ROAM F1-T4] geo_condition._resample_uniform, exported for td5_roam_ribbon.c.
+ * Growable double-pair polyline (the route builder's own type) and the CHORD
+ * resampler: successive points are exactly `step` apart in Euclidean distance,
+ * the first point is in[0], and a leftover shorter than `step` at the far end is
+ * dropped. Pure; `out` is reset and grown with realloc (caller free()s out->x and
+ * out->z, and must zero-initialise `out` before the first call). Returns 1, or 0
+ * on out of memory. Exporting it changed no behaviour. */
+typedef struct { double *x, *z; int n, cap; } GrPts;
+int gr_resample(const GrPts *in, double step, GrPts *out);
+
 #endif /* TD5_GEO_ROUTE_H */
