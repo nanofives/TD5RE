@@ -274,4 +274,40 @@ const TD5_GeoRoad *td5_geo_roads_nearest(double x, double z, double max_dist,
  * way that carries no tag. */
 int td5_geo_roads_maxspeed_parse(const char *s);
 
+/* ----------------------------------------- [F1 T1] re-entrant record parsers -- */
+
+/* Cap on the points of one way, shared by the strip reader and the roam cache
+ * reader (td5_roam_cache.c). Longer ways are cut, and the cut is flagged by the
+ * caller. Measured longest on La Plata: 67 points. */
+#define TD5_GEO_ROADS_WAY_POINTS_MAX 512
+
+struct cJSON;
+
+/* PLACE.JSON cell_units / cell_m, units per metre. 0 when the place has no
+ * PLACE.JSON or the file does not say. Pure apart from reading that file. */
+double td5_geo_roads_units_per_metre(const char *slug);
+
+/* Whole-file read for a ROADS-family JSON: malloc'd, NUL-terminated, NULL on
+ * any error or when the file is over the reader's 64 MB cap. Caller frees. */
+char *td5_geo_roads_slurp(const char *path);
+
+/* ONE `roads[]` ELEMENT -> TD5_GeoRoad, every attribute the strip reader keeps:
+ * klass, lanes (a tagged width wins, else the counted lane number, clamped to
+ * TD5_GEO_ROADS_LANES_MAX), width, oneway + oneway_dir, bridge, tunnel, layer,
+ * roundabout, surface, sidewalk (+ the measured per-side widths), tag_width_m,
+ * namek, lit, maxspeed_kph.
+ *
+ * Re-entrant: no pool, no statics, no env read, no name interning. The caller
+ * owns first/count/bbox (td5_geo_roads_parse_points) and name_id (its own pool).
+ * The strip reader clears the tag group itself when TD5RE_GEO_ROAD_TAGS=0, so
+ * this function always reads the tags. Returns 1, or 0 when r/out is NULL. */
+int td5_geo_roads_parse_record(const struct cJSON *r, double upm, TD5_GeoRoad *out);
+
+/* The `points` array of one record, up to npt_max items, into px/pz. A vertex
+ * within 1 world unit of the last kept one is dropped, so a zero-length segment
+ * never reaches a caller. bbox = {minx, minz, maxx, maxz} of the kept points.
+ * Returns the number kept; fewer than 2 means the way is unusable. */
+int td5_geo_roads_parse_points(const struct cJSON *pts, int npt_max,
+                               double *px, double *pz, double bbox[4]);
+
 #endif /* TD5_GEO_ROADS_H */
