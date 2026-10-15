@@ -47,6 +47,7 @@
 #include "td5_rt.h"       /* [RT2 P8] td5_rt_apply_lighting_options() */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode push */
 #include "td5_i18n.h"     /* [I18N] UI-language catalog load at boot */
+#include "td5_roam_cache.h" /* GEO FREE ROAM cache reader (dev census hook) */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1681,6 +1682,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * exit if requested. Placed AFTER the [Network] reads so it honors GamePort
      * + EnableUPnP. */
     if (td5_net_selftest())
+        return 0;
+    /* GEO FREE ROAM (F1 T1) dev census: TD5RE_ROAM_CACHE_TEST=1 reads the casco
+     * window of the La Plata cache, writes the census and exits. */
+    if (td5_roam_cache_dev_census())
         return 0;
 #endif
 
