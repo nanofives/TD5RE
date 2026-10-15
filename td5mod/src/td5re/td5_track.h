@@ -170,6 +170,7 @@ int              td5_track_gap_partner(int span, int32_t *cx, int32_t *cz);
 int              td5_track_gap_count(void);
 #ifndef TD5RE_RELEASE
 uint32_t         td5_track_dev_gap_drive_bits(const TD5_Actor *a);   /* DEV: TD5RE_GAP_DRIVE pure-pursuit across a median gap */
+uint32_t         td5_track_dev_median_drive_bits(const TD5_Actor *a); /* [1030 E] DEV: TD5RE_MEDIAN_DRIVE, steer into a median */
 #endif
 int              td5_track_loop_side(int span);      /* [1019 V] 1 = the loop departing at span D leaves on the LEFT */
 int              td5_track_fork_is_left(int span);   /* [1019 V] 1 = the fork span's corridor is on the LEFT */
@@ -325,6 +326,14 @@ int  td5_track_scenery_streaming(void);
 /* First span with no scenery yet, or -1 if nothing is outstanding. The
  * renderer paints the fallback ribbon from here on. */
 int  td5_track_scenery_undecorated_from_span(void);
+/* [ROUND 1030 E] Entries may also arrive OUT of ascending order (the worker
+ * builds fork corridors beside the main road they run along). The contiguous
+ * watermark above keeps its meaning (first unsettled entry); these say whether a
+ * given span past it has already been decorated, so the ribbon skips it. */
+void td5_track_scenery_set_ordered(int on);
+int  td5_track_scenery_span_settled(int span);
+/* Swap an already-published entry for its final bytes (producer only). */
+int  td5_track_scenery_republish_entry(int e, const void *bytes, size_t len);
 
 /* --- Actor track position --- */
 void td5_track_update_actor_position(TD5_Actor *actor);

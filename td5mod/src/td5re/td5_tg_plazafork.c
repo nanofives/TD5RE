@@ -1244,6 +1244,196 @@ int tg_pf_emit_wedge(const TG_NodeList *nl, int fi, int si, TG_Buf *blk, size_t 
     }
 }
 
+/* ===================== [ROUND 1030 G item 14] THE MEDIAN RUNS ON TO THE PLAZA =====================
+ * Mariano, level091 L91 e521 s3 p44:SIDEWALK pos 251242,1376,-253805: "median approaching a plaza changed
+ * style". MEASURED on master's level091 (fork 1, Plaza Miguel de Azcuenaga, F=230, classic rows 0..6): over the
+ * classic rows the avenue's median is the real-fork island (tg_emit_avenue_divider: GREEN top, BRANCH_KERB
+ * walls, 300 tall, kerb to kerb). At row 7, the first FREE row, the corridor is still beside the road (gap
+ * 1260 units, and under 2600 up to row 24), but the island stops with a cap and the gap becomes the flat
+ * asphalt wedge (tg_pf_emit_wedge, main spans 238..244) plus the corridor's plaza-side kerb slab (br_sidewalk
+ * via TD5RE_PF_INNER_WALK, grey, 900 wide, 130 tall). Same gap, three different surfaces.
+ *
+ * RULE. While the corridor is still median-close to the road it split from -- both ends of a free row within
+ * [200, TD5_TG_R11_MEDIAN_MAX] of the road's DRAWN edge, in an unbroken run from the classic rows (or back from
+ * the exit's) -- that row carries the SAME island the classic rows do, kerb to kerb, and no plaza-side slab.
+ * The first row where the corridor opens out closes the island with a nose, and the plaza's own pavement
+ * starts there. Only where the classic rows got a real-fork island (same gates as the divider). Geo plaza forks
+ * only (nothing here exists on a synthetic build). TD5RE_PF_MEDIAN_RUN=0 restores master's rows. */
+#define PF_MED_ROAD_LAP  12.0     /* the island's road-side wall stands this far onto the tarmac, covering
+                                   * the main pavement's coplanar kerb face where one lies in the gap */
+static volatile int s_pf_med_env = -1;
+static long s_pf_med_rows, s_pf_med_caps;
+
+static int pf_med_on(void)
+{
+    int v = s_pf_med_env;
+    if (v < 0) { v = td5_env_flag_on("TD5RE_PF_MEDIAN_RUN") ? 1 : 0; s_pf_med_env = v; }
+    return v;
+}
+
+/* Main span i's drawn inner edge (the side facing the corridor) as a lateral off node j (j = i or i + 1):
+ * the main half's edge where the span carries this fork's geometry, the road's own edge elsewhere. */
+static double pf_main_edge_lat(const TG_NodeList *nl, int fi, int i, int j)
+{
+    const double w = nl->v[j].width, side = (double)tg_fork_side(fi);
+    if (tg_fork_of_main(i) == fi)
+        return tg_fork_main_shift(fi, w) + side * w * tg_pf_main_wscale(fi, w) * 0.5;
+    return side * w * 0.5;
+}
+
+/* Corridor row node k's inner edge point, and the gap from it to the main road's drawn edge measured along the
+ * corridor's lateral (toward the road), with the hit point and its road height. 0 = no hit in range. */
+static int pf_row_gap(const TG_NodeList *nl, const PfPlan *P, int fi, int k,
+                      double *px, double *pz, double *ux, double *uz, double *gap,
+                      double *qx, double *qy, double *qz)
+{
+    const TG_Node *c = &P->rview.v[P->F + 1 + k];
+    const double fin = -(double)tg_fork_side(fi);           /* lateral sign toward the road */
+    const double h = c->width * tg_fork_br_wscale(fi, k) * 0.5;
+    const double dx = c->tz * fin, dz = -c->tx * fin;
+    const int mb = tg_fork_row_node(fi, k);
+    double best = 1e300;
+    int i, any = 0;
+    *px = c->x + c->tz * (fin * h);
+    *pz = c->z - c->tx * (fin * h);
+    *ux = dx; *uz = dz;
+    for (i = mb - 6; i <= mb + 6; i++) {
+        const TG_Node *m0, *m1;
+        double la, lb, ax, az, bx, bz, ex, ez, den, s, u;
+        if (i < 0 || i + 1 >= nl->count || i + 1 >= s_ring_len) continue;
+        m0 = &nl->v[i]; m1 = &nl->v[i + 1];
+        la = pf_main_edge_lat(nl, fi, i, i);
+        lb = pf_main_edge_lat(nl, fi, i, i + 1);
+        ax = m0->x + m0->tz * la; az = m0->z - m0->tx * la;
+        bx = m1->x + m1->tz * lb; bz = m1->z - m1->tx * lb;
+        ex = bx - ax; ez = bz - az;
+        den = dx * ez - dz * ex;
+        if (den > -1e-9 && den < 1e-9) continue;
+        s = ((ax - *px) * ez - (az - *pz) * ex) / den;
+        u = ((ax - *px) * dz - (az - *pz) * dx) / den;
+        if (u < -1e-6 || u > 1.0 + 1e-6 || s < -50.0) continue;
+        if (s < best) {
+            best = s; any = 1;
+            *qx = ax + ex * u; *qz = az + ez * u;
+            *qy = m0->y + (m1->y - m0->y) * u;
+        }
+    }
+    if (!any) return 0;
+    *gap = best;
+    return 1;
+}
+
+static int pf_med_row_fits(const TG_NodeList *nl, const PfPlan *P, int fi, int k)
+{
+    int e;
+    if (tg_span_in_tunnel(tg_fork_row_node(fi, k))) return 0;
+    for (e = 0; e <= 1; e++) {
+        double px, pz, ux, uz, g, qx, qy, qz;
+        if (!pf_row_gap(nl, P, fi, k + e, &px, &pz, &ux, &uz, &g, &qx, &qy, &qz)) return 0;
+        if (g < 200.0 || g > TD5_TG_R11_MEDIAN_MAX) return 0;
+    }
+    return 1;
+}
+
+int tg_pf_median_row(const TG_NodeList *nl, int fi, int k)
+{
+    const PfPlan *P = pf_of(fi);
+    int j, run = 1;
+    if (!P || !P->built || !nl || !pf_med_on()) return 0;
+    if (tg_fork_is_loop(fi)) return 0;
+    if (k < P->k1 || k >= P->K2c || P->K2c > P->clen) return 0;
+    /* the island the classic rows carry: a real fork's (tg_emit_avenue_divider's own gates) */
+    if (!(s_forks[fi].real > 0) || !td5_env_flag_on("TD5RE_GEO_FORK_ISLAND") ||
+        !td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER")) return 0;
+    for (j = P->k1; j <= k && run; j++) run = pf_med_row_fits(nl, P, fi, j);
+    if (run) return 1;
+    for (j = k; j < P->K2c; j++) if (!pf_med_row_fits(nl, P, fi, j)) return 0;
+    return 1;
+}
+
+int tg_pf_emit_median_row(const TG_NodeList *nl, int fi, int k, int si,
+                          TG_Buf *blk, size_t *moff, int *nmesh)
+{
+    const PfPlan *P = pf_of(fi);
+    const int br_lanes = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].br_lanes : 0;
+    const double gore_drop = td5_env_flag_on("TD5RE_R22_GORE_DROP") ? TD5_TG_GROUND_DROP
+                                                                    : (double)TD5_TG_GORE_DROP;
+    double H = TD5_TG_R11_MEDIAN_H;
+    double Xp[2], Zp[2], Yp[2], Xq[2], Zq[2], Yq[2];
+    double hx[2], hz[2], hy[2], lx[2], lz[2], ly[2];
+    double px[20], py[20], pz[20], uu[20], vv[20];
+    int seg_page[2], seg_nq[2], n = 0, e, cap_in, cap_out, q_hi;
+    if (!P || !P->built) return 1;
+    if (td5_env_flag_on("TD5RE_MEDIAN_MIN_H") && H < TD5_TG_MEDIAN_MIN_H) H = TD5_TG_MEDIAN_MIN_H;
+    for (e = 0; e <= 1; e++) {
+        double ux, uz, g;
+        const TG_Node *c = &P->rview.v[P->F + 1 + k + e];
+        if (!pf_row_gap(nl, P, fi, k + e, &Xp[e], &Zp[e], &ux, &uz, &g, &Xq[e], &Yq[e], &Zq[e])) return 1;
+        Xq[e] += ux * PF_MED_ROAD_LAP; Zq[e] += uz * PF_MED_ROAD_LAP;
+        Yp[e] = c->y - gore_drop;
+        Yq[e] -= gore_drop;
+    }
+    /* the classic island before the first free row / after the last one meets this one face to face */
+    cap_in  = !tg_pf_median_row(nl, fi, k - 1) &&
+              !(k == P->k1 && tg_r12_median_at(nl, P->F + P->k1, br_lanes));
+    cap_out = !tg_pf_median_row(nl, fi, k + 1) &&
+              !(k + 1 == P->K2c && tg_r12_median_at(nl, P->F + 1 + P->K2, br_lanes));
+    /* winding is by lateral sign, as in tg_emit_avenue_divider: "hi" = the more positive lateral. The road is on
+     * the +lateral side of a RIGHT corridor. */
+    q_hi = tg_fork_side(fi) < 0;
+    for (e = 0; e <= 1; e++) {
+        if (q_hi) { hx[e] = Xq[e]; hz[e] = Zq[e]; hy[e] = Yq[e]; lx[e] = Xp[e]; lz[e] = Zp[e]; ly[e] = Yp[e]; }
+        else      { hx[e] = Xp[e]; hz[e] = Zp[e]; hy[e] = Yp[e]; lx[e] = Xq[e]; lz[e] = Zq[e]; ly[e] = Yq[e]; }
+    }
+    /* TOP */
+    px[n]=hx[0]; py[n]=hy[0]+H; pz[n]=hz[0]; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=lx[0]; py[n]=ly[0]+H; pz[n]=lz[0]; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=lx[1]; py[n]=ly[1]+H; pz[n]=lz[1]; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=hx[1]; py[n]=hy[1]+H; pz[n]=hz[1]; uu[n]=0.0; vv[n]=1.0; n++;
+    /* wall facing +lateral */
+    px[n]=hx[0]; py[n]=hy[0];   pz[n]=hz[0]; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=hx[0]; py[n]=hy[0]+H; pz[n]=hz[0]; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=hx[1]; py[n]=hy[1]+H; pz[n]=hz[1]; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=hx[1]; py[n]=hy[1];   pz[n]=hz[1]; uu[n]=1.0; vv[n]=1.0; n++;
+    /* wall facing -lateral */
+    px[n]=lx[0]; py[n]=ly[0];   pz[n]=lz[0]; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=lx[1]; py[n]=ly[1];   pz[n]=lz[1]; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=lx[1]; py[n]=ly[1]+H; pz[n]=lz[1]; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=lx[0]; py[n]=ly[0]+H; pz[n]=lz[0]; uu[n]=0.0; vv[n]=0.0; n++;
+    if (cap_in) {
+        px[n]=hx[0]; py[n]=hy[0];   pz[n]=hz[0]; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=lx[0]; py[n]=ly[0];   pz[n]=lz[0]; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=lx[0]; py[n]=ly[0]+H; pz[n]=lz[0]; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=hx[0]; py[n]=hy[0]+H; pz[n]=hz[0]; uu[n]=0.0; vv[n]=0.0; n++;
+        s_pf_med_caps++;
+    }
+    if (cap_out) {
+        px[n]=hx[1]; py[n]=hy[1]+H; pz[n]=hz[1]; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=lx[1]; py[n]=ly[1]+H; pz[n]=lz[1]; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=lx[1]; py[n]=ly[1];   pz[n]=lz[1]; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=hx[1]; py[n]=hy[1];   pz[n]=hz[1]; uu[n]=0.0; vv[n]=1.0; n++;
+        s_pf_med_caps++;
+    }
+    seg_page[0] = tg_r8_median_page(tg_fork_row_node(fi, k), TD5_TG_PAGE_GREEN); seg_nq[0] = 1;
+    seg_page[1] = TD5_TG_PAGE_BRANCH_KERB;                                     seg_nq[1] = n / 4 - 1;
+    moff[(*nmesh)++] = blk->len;
+    {
+        const size_t p0 = blk->len;
+        const int r = tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2);
+        tg_guard_mark(p0, blk->len, TG_GK_BRANCHROAD, si);
+        s_pf_med_rows++;
+        return r;
+    }
+}
+
+void tg_pf_median_report(void)
+{
+    if (s_pf_med_rows == 0 && s_pf_med_caps == 0) return;
+    TD5_LOG_I(LOG_TAG, "trackgen: [PLAZA FORK] [R1030 G item 14] %ld free row(s) carry the avenue's median island on "
+              "to the plaza (%ld nose cap(s)) instead of a kerb slab beside a wedge (knob TD5RE_PF_MEDIAN_RUN=%s)",
+              s_pf_med_rows, s_pf_med_caps, pf_med_on() ? "on" : "off");
+}
+
 /* Paint the corridor into the world raster and bed the ground under it, so no street
  * lands on it and the terrain meets the road: the free counterpart of the lateral
  * loop in tg_network_build. */
@@ -1292,6 +1482,39 @@ int tg_pf_ray_hit(double ox, double oz, double ux, double uz, double tmin, doubl
         }
     }
     if (any) { *t_out = bt; *y_out = by; }
+    return any;
+}
+
+/* [ROUND 1030 G item 16] The first place the ray (ox,oz)+t(ux,uz), tmin < t < tmax, reaches the CARRIAGEWAY EDGE
+ * of a built plaza corridor's free rows (either edge, plus `margin`), as t. A main-road street's pavement arm uses it
+ * to stop at the corridor's kerb instead of running across its lanes. 0 when no plaza fork is built. */
+int tg_pf_ray_edge_hit(double ox, double oz, double ux, double uz, double tmin, double tmax,
+                       double margin, double *t_out)
+{
+    int p, any = 0;
+    double bt = 1e300;
+    for (p = 0; p < s_nplan; p++) {
+        const PfPlan *P = &s_plan[p];
+        int k, e;
+        if (!P->used || !P->committed || !P->built) continue;
+        for (k = P->k1; k < P->K2c; k++) {
+            const TG_Node *a = &P->rview.v[P->F + 1 + k], *b = &P->rview.v[P->F + 2 + k];
+            const double ha = a->width * tg_fork_br_wscale(P->fi, k) * 0.5 + margin;
+            const double hb = b->width * tg_fork_br_wscale(P->fi, k + 1) * 0.5 + margin;
+            for (e = -1; e <= 1; e += 2) {
+                const double ax = a->x + a->tz * (e * ha), az = a->z - a->tx * (e * ha);
+                const double bx = b->x + b->tz * (e * hb), bz = b->z - b->tx * (e * hb);
+                const double ex = bx - ax, ez = bz - az;
+                const double den = ux * ez - uz * ex;
+                double t, u;
+                if (fabs(den) < 1e-9) continue;
+                t = ((ax - ox) * ez - (az - oz) * ex) / den;
+                u = ((ax - ox) * uz - (az - oz) * ux) / den;
+                if (t > tmin && t < tmax && u >= 0.0 && u <= 1.0 && t < bt) { bt = t; any = 1; }
+            }
+        }
+    }
+    if (any) *t_out = bt;
     return any;
 }
 
@@ -1482,6 +1705,37 @@ int tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat)
             const double dx = c->x - x, dz = c->z - z;
             if (dx * dx + dz * dz < 3.0 * pf_lw() * 3.0 * pf_lw()) return 1;
         }
+    }
+    return 0;
+}
+
+/* [ROUND 1030 F item 18] "intersection around level091 L91 e83 s17 prop p0:ROAD pos 325579,-1194,-331763 looks
+ * wrong, it should be more similar to the beginning on the other side of the plaza" (Mariano).
+ *
+ * MEASURED (level091, master 78a6b25f): AVENUES.JSON starts the second Diagonal 73 run at main span 331, the exit of the
+ * Plaza Miguel de Azcuenaga fork (fork 1, free main steps k1 7 .. K2 120 = spans 238..350). tg_emit_geo_avenue laid
+ * that avenue's far carriageway, island and infill at laterals -1400..-6600 over spans 331..339 (the slab of the pick),
+ * because tg_pf_scenery_clash only stands the scenery down where a corridor ROW lies within three lanes of it, and the
+ * free arc is still 9000+ units out there. The same phantom pushed the real connector street (way 439, OSM 272846181)
+ * out past its far kerb (shift 5073, run-from-kerb 2290: SHORT), which is the street the entry side shows as E1.
+ *
+ * RULE. Inside a built plaza fork's FREE window, on the corridor's side, the side IS the plaza and the corridor IS the
+ * avenue's other carriageway, so the avenue lays no scenery road there and claims no reach (tg_geo_avenue_reach: skirt,
+ * main-road pavement yield, street far shift). `lat` is the scenery road's centre lateral, + = left. 0 on every build
+ * without a plaza fork. TD5RE_PF_AVENUE_YIELD=0 restores the clash-only stand-down. */
+int tg_pf_avenue_yield(int si, double lat)
+{
+    int p;
+    if (s_nplan < 1) return 0;
+    if (!td5_env_flag_on("TD5RE_PF_AVENUE_YIELD")) return 0;
+    for (p = 0; p < s_nplan; p++) {
+        const PfPlan *P = &s_plan[p];
+        const int k = si - P->F - 1;
+        if (!P->used || !P->committed || !P->built) continue;
+        if (P->fi < 0 || P->fi >= s_fork_count) continue;
+        if (k < P->k1 || k >= P->K2) continue;
+        if (lat * (double)s_forks[P->fi].side <= 0.0) continue;
+        return 1;
     }
     return 0;
 }

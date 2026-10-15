@@ -80,6 +80,12 @@ typedef struct {
     int   n_warnings;
     char  warning[TD5_GEO_ROUTE_MAX_WARN][TD5_GEO_ROUTE_WARN_LEN];
     double build_ms;             /* wall time of td5_geo_route_build            */
+    /* [ROUND 1030 B item 5] path[0 .. n_path_user-1] is the route the player
+     * drew, ending on the node his FINISH snapped to; path[n_path_user ..] is
+     * the run-off the router walked past it (round 1013 F3). == n_path when
+     * no run-off was built. The map draws the red line over the first part
+     * only, so it stops at the finish marker. */
+    int   n_path_user;
 } TD5_GeoRouteResult;
 
 /* Route + condition through start, waypoints..., finish. `n_pts` >= 2.

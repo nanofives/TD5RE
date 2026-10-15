@@ -2047,11 +2047,13 @@ void tg_meshtag_reset(int nentries);
 void tg_meshtag_set(int entry, int slot, int kind);
 void tg_meshtag_fallback(int entry, int slot, size_t off);
 void tg_meshtag_write(const char *dir);
+void tg_meshtag_clear_entry(int entry);   /* [R1030 E] forget a preview build's tags */
 #else
 #define tg_meshtag_reset(n)          ((void)0)
 #define tg_meshtag_set(e, s, k)      ((void)0)
 #define tg_meshtag_fallback(e, s, o) ((void)0)
 #define tg_meshtag_write(dir)        ((void)0)
+#define tg_meshtag_clear_entry(e)    ((void)0)
 #endif
 
 /* ===================== [R9 CITY] PAVEMENT PROVENANCE MARKS =================
@@ -4382,11 +4384,20 @@ void   tg_pf_gap_mark(int fi, int k0, int k1);        /* [1023 B] rows where a r
 int    tg_pf_gap_at(int fi, int k);
 int    tg_pf_rehost_buildings(const TG_NodeList *nl, int nspans);   /* [1023 B] far-arc footprints -> main spans */
 int    tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat);   /* an avenue's scenery road would stand on a plaza corridor */
+int    tg_pf_avenue_yield(int si, double lat);       /* [1030 F] free plaza window, corridor side: no scenery avenue */
 int    tg_pf_clear_span(int fi, int si);             /* scenery clearance window            */
 double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* outermost corridor edge beside span si */
 double tg_pf_main_wscale(int fi, double w);          /* main half width scale at node width w   */
 int    tg_pf_emit_wedge(const TG_NodeList *nl, int fi, int si, TG_Buf *blk,
                         size_t *moff, int *nmesh);
+int    tg_pf_median_row(const TG_NodeList *nl, int fi, int k);   /* [1030 G] free row k still carries the avenue's median */
+int    tg_pf_emit_median_row(const TG_NodeList *nl, int fi, int k, int si, TG_Buf *blk,
+                             size_t *moff, int *nmesh);         /* [1030 G] that island, kerb to kerb, on corridor span si */
+void   tg_pf_median_report(void);
+int    tg_pf_ray_edge_hit(double ox, double oz, double ux, double uz, double tmin, double tmax,
+                          double margin, double *t_out);   /* [1030 G] where a ray reaches a plaza corridor's kerb */
+int    tg_br_sidewalk_on_street(const TG_NodeList *main_nl, int main_si, const TG_NodeList *nl, int mb,
+                                int k, int fi, const TG_Biome *b, double fs);   /* [1030 G] a corridor slab lies on a laid street */
 void   tg_pf_paint_network(int fi);
 int    tg_pf_row_point(int fi, int row, double *x, double *z);   /* preview */
 double tg_pf_vscale(int fi);                         /* V scale of a free corridor's road texture (its span stretch) */
@@ -6140,6 +6151,8 @@ void tg_geo_signals_report(int nspans);
 int  tg_mastarm_enabled(void);
 void tg_mastarm_prepare(void);
 int  tg_mastarm_plan(int sig, double carriageway_width, int near_gantry, int *front, int *back);
+int  tg_mastarm_has_plate(int sig);   /* [1030 D] named node? no census side effect */
+int  tg_mastarm_front_cell(int sig);  /* [1030 D] its front plate cell, or -1      */
 int  tg_mastarm_mesh_count(double carriageway_width);
 int  tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap, double base_y, int cf, int cb, TG_Buf *blk, size_t *moff, int *nmesh);
 int  tg_mastarm_plate_pages(void);

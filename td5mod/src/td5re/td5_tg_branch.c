@@ -1417,6 +1417,47 @@ static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     }
 }
 
+/* [ROUND 1030 G item 16] Mariano, level091 L91 e526 s8 p44:SIDEWALK pos 276977,809,-273388: "this sidewalk is
+ * on top of the crossing road". The pick is the plaza-side kerb slab of the plaza fork's corridor (br_sidewalk via
+ * TD5RE_PF_INNER_WALK, corridor span 2106). MEASURED: a wide real street leaves main spans 260..262 on the plaza
+ * side and runs NE across to the corridor (e65 s10/s15/s21, page 101); its carriageway passes under the slabs of
+ * spans 2105 and 2106, which stand 130 units proud across its mouth. Round 1023 B gave the TOWN-side slab a gap
+ * for the far-arc streets (tg_pf_gap_at); the plaza side was assumed to have none ("the street opens on the town
+ * side only"), and nothing asked the laid main-road streets at all.
+ *
+ * RULE (the footprint test real buildings already use, tg_xstreet_covers): a corridor slab whose centre, or two of
+ * its four inset corners, lie on a laid cross-street carriageway is not laid, so the street meets the corridor
+ * through an open kerb. Plaza corridors only, both slabs. TD5RE_PF_WALK_STREET_GAP=0 restores master's slabs. */
+int tg_br_sidewalk_on_street(const TG_NodeList *main_nl, int main_si, const TG_NodeList *nl, int mb,
+                             int k, int fi, const TG_Biome *b, double fs)
+{
+    static volatile int s_env = -1;
+    const TG_Node *a, *c;
+    const double sw = tg_city_sidewalk_w(b);
+    const double sg = (double)tg_fork_side(fi);
+    double h0, h1;
+    int env = s_env, hits = 0, q;
+    static const double kf[5][2] = { { 0.5, 0.5 }, { 0.15, 0.2 }, { 0.15, 0.8 }, { 0.85, 0.2 }, { 0.85, 0.8 } };
+
+    if (env < 0) { env = td5_env_flag_on("TD5RE_PF_WALK_STREET_GAP") ? 1 : 0; s_env = env; }
+    if (!env || !main_nl || !nl || !(sw > 0.0)) return 0;
+    if (!tg_fork_is_free(fi) || tg_fork_is_loop(fi) || !tg_geo_city_active()) return 0;
+    if (mb < 0 || mb + 1 >= nl->count) return 0;
+    a = &nl->v[mb]; c = &nl->v[mb + 1];
+    h0 = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
+    h1 = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    for (q = 0; q < 5; q++) {
+        const double f = kf[q][0], g = kf[q][1];
+        const double t0 = fs * (h0 + g * sw), t1 = fs * (h1 + g * sw);
+        const double x0 = a->x + a->tz * t0, z0 = a->z - a->tx * t0;
+        const double x1 = c->x + c->tz * t1, z1 = c->z - c->tx * t1;
+        const int on = tg_xstreet_covers(main_nl, main_si, sg, x0 + (x1 - x0) * f, z0 + (z1 - z0) * f);
+        if (on && q == 0) return 1;
+        hits += on;
+    }
+    return hits >= 2;
+}
+
 /* [R5 STRUCT item 10] Flat VERGE BAND along a branch corridor's OUTER edge.
  *
  * tg_emit_branch_sidewalk above lays a raised kerb+slab, but ONLY where the

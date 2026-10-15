@@ -212,6 +212,15 @@ void tg_meshtag_set(int entry, int slot, int kind)
     if (kind < 0 || kind > 0xFE) return;
     s_meshtag[(size_t)entry * TD5_TG_MESHTAG_STRIDE + slot] = (unsigned char)kind;
 }
+/* [ROUND 1030 E] The streamed preview pass builds an entry once for display and
+ * again for the file; the second build must start from an all-NONE row or the
+ * fallback below would keep the first build's tags. */
+void tg_meshtag_clear_entry(int entry)
+{
+    if (!s_meshtag || entry < 0 || entry >= s_meshtag_nentries) return;
+    memset(s_meshtag + (size_t)entry * TD5_TG_MESHTAG_STRIDE, TD5_TG_MESHTAG_NONE,
+           TD5_TG_MESHTAG_STRIDE);
+}
 /* Fill a slot the guard did not (still NONE) from the live guard marks, using
  * the UNCOMPACTED offset. Called at block assembly; no-op if already set. */
 void tg_meshtag_fallback(int entry, int slot, size_t off)
@@ -311,6 +320,7 @@ const char *td5_trackgen_mesh_kind_name(int entry, int slot)
 #define tg_meshtag_set(e, s, k)      ((void)0)
 #define tg_meshtag_fallback(e, s, o) ((void)0)
 #define tg_meshtag_write(dir)        ((void)0)
+#define tg_meshtag_clear_entry(e)    ((void)0)
 const char *td5_trackgen_mesh_kind_name(int entry, int slot)
 { (void)entry; (void)slot; return NULL; }
 #endif /* TD5RE_RELEASE */

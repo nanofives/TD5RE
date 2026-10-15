@@ -2288,6 +2288,25 @@ static void frontend_get_track_display_name(int track_index, int truncate_at_com
     out[di] = '\0';
 }
 
+/* [ROUND 1030 A2] What a track SELECTOR shows for an entry (SELECT TRACK panel
+ * title, QUICK RACE Track value). The geo entry is the GEOSPATIAL TRACK
+ * GENERATOR's own selection, so its title names the generator -- the way the
+ * auto entry reads AUTO-GENERATED TRACK -- and the button under it is SETTINGS
+ * (frontend_refresh_geo_btn, td5_fe_race.c). The place it will build goes to
+ * `place` for a small line under the title, so the player still sees WHERE
+ * before pressing OK. place[0] = '\0' for every other entry, and with
+ * TD5RE_GEO_OWN_SELECTOR=0. Selectors only: the HUD and results keep the place
+ * name as the track name. */
+static void frontend_get_entry_title(int slot, char *title, size_t tcap,
+                                     char *place, size_t pcap) {
+    frontend_get_track_display_name(slot, 0, title, tcap);
+    place[0] = '\0';
+    if (td5_trackgen_geo_own_selector() && td5_trackgen_is_geo_slot(slot)) {
+        snprintf(place, pcap, "%s", title);
+        snprintf(title, tcap, "%s", TR("GEOSPATIAL TRACK GENERATOR"));
+    }
+}
+
 /* Live selectable car count: 76 built-in + drop-in custom cars discovered in
  * re/assets/cars/custom_<name>/ (td5_customcar). Declared in td5_customcar.h and
  * defined here because TD5_CAR_COUNT is authoritative in the frontend. */
@@ -6329,8 +6348,27 @@ static void frontend_draw_value_text(float sx, float sy, int x, int y,
 /* reserve_right: canvas px to keep clear at the right of the value column (for the
  * Car/Track randomize chip, item #7) so a long wrapped name never slides under it.
  * 0 for every other row. */
-static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
-                                   const char *text, uint32_t color, int reserve_right) {
+/* [ROUND 1030 A2] `sub` (may be NULL) is a small-font line drawn under the value:
+ * the geo entry's place name under GEOSPATIAL TRACK GENERATOR. NULL draws
+ * exactly what frontend_draw_qr_value always drew. */
+#define FE_QR_SUB_H 14   /* canvas px reserved for the small subline */
+/* Small-font line at canvas y `cy`, left-aligned on the value column and
+ * condensed (same 0.55 floor as fe_fit_text_scale) to `avail` screen px. */
+static void frontend_draw_qr_subline(float sx, float sy, float cy, const char *sub,
+                                     uint32_t color, float avail) {
+    float dw, s = 1.0f;
+    if (!sub || !sub[0]) return;
+    dw = fe_measure_small_text(sub) * fe_glyph_sx(sx, sy);   /* screen px */
+    if (dw > avail && avail > 0.0f) {
+        s = avail / dw;
+        if (s < 0.55f) s = 0.55f;
+    }
+    fe_draw_small_text((float)FE_QR_VALUE_X * sx, (cy + 2.0f) * sy, sub, color,
+                       sx * s, sy * s);
+}
+static void frontend_draw_qr_value_sub(float sx, float sy, int row_btn_idx,
+                                       const char *text, const char *sub,
+                                       uint32_t color, int reserve_right) {
     if (row_btn_idx < 0 || row_btn_idx >= s_button_count) return;
     /* [2026-06-16] TTF-first: don't suppress on a deleted BodyText.png atlas. */
     if (!text || !text[0] || (!td5_font_ready() && s_font_page < 0)) return;
@@ -6339,11 +6377,28 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
     const float avail = (float)(FE_QR_SCREEN_W - FE_QR_VALUE_X - FE_QR_RIGHT_MARGIN
                                 - reserve_right) * sx;
     const int   by   = s_buttons[row_btn_idx].y;
+    float top;
+
+    /* With a subline the title stays on ONE line, condensed horizontally to the
+     * column (the SELECT TRACK title does the same): wrapped, the three lines
+     * reached the wrapped car name above on a 4:3 window and the second title
+     * line ran under the RANDOMIZE button. Title + subline (36 px) sit centred
+     * on the 32 px row. */
+    if (sub && sub[0]) {
+        /* Condense from the EFFECTIVE horizontal glyph scale: text is 4:3-locked
+         * to min(sx, sy), so on a wide window scaling sx alone changes nothing. */
+        const float fit = fe_fit_text_scale(text, avail, sx * gs, sy * gs);
+        const float gx  = fe_glyph_sx(sx * gs, sy * gs) * fit;
+        top = (float)by + (32.0f - FE_QR_VALUE_LINE_H - (float)FE_QR_SUB_H) * 0.5f;
+        fe_draw_text(vx, top * sy, text, color, gx, sy * gs);
+        frontend_draw_qr_subline(sx, sy, top + FE_QR_VALUE_LINE_H, sub, color, avail);
+        return;
+    }
 
     /* Fits on one line — center it on the 32px button. */
     if (fe_measure_text(text, sx * gs, sy * gs) <= avail) {
-        float ty = ((float)by + (32.0f - FE_QR_VALUE_LINE_H) * 0.5f) * sy;
-        fe_draw_text(vx, ty, text, color, sx * gs, sy * gs);
+        top = (float)by + (32.0f - FE_QR_VALUE_LINE_H) * 0.5f;
+        fe_draw_text(vx, top * sy, text, color, sx * gs, sy * gs);
         return;
     }
 
@@ -6370,9 +6425,14 @@ static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
         memcpy(l1, text, (size_t)cut); l1[cut] = '\0';
         snprintf(l2, sizeof(l2), "%s", text + cut);
     }
-    float top = (float)by + (32.0f - 2.0f * FE_QR_VALUE_LINE_H) * 0.5f;
+    top = (float)by + (32.0f - 2.0f * FE_QR_VALUE_LINE_H) * 0.5f;
     fe_draw_text(vx,  top * sy,                                  l1, color, sx * gs, sy * gs);
     fe_draw_text(vx, (top + FE_QR_VALUE_LINE_H) * sy,           l2, color, sx * gs, sy * gs);
+}
+
+static void frontend_draw_qr_value(float sx, float sy, int row_btn_idx,
+                                   const char *text, uint32_t color, int reserve_right) {
+    frontend_draw_qr_value_sub(sx, sy, row_btn_idx, text, NULL, color, reserve_right);
 }
 
 /* Value text centering: original draws to 224px panel at screen x=394 (canvasW/2+0x4A),
@@ -7056,6 +7116,7 @@ static void frontend_quickrace_widget_input(void) {
 static void frontend_render_quick_race_overlay(float sx, float sy) {
     char car_name[80];
     char track_name[80];
+    char place_name[80];
     char count[8];
     int car_locked;
     int track_locked;
@@ -7069,7 +7130,10 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
     frontend_quickrace_widget_input();
 
     snprintf(car_name, sizeof(car_name), "%s", frontend_get_car_display_name(s_selected_car));
-    frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
+    /* [ROUND 1030 A2] Same title as SELECT TRACK: the geo entry reads GEOSPATIAL
+     * TRACK GENERATOR with the place name on a small line under it. */
+    frontend_get_entry_title(s_selected_track, track_name, sizeof(track_name),
+                             place_name, sizeof(place_name));
     car_locked = (!s_cheat_unlock_all && !s_network_active &&
                   s_selected_car >= 0 && s_selected_car < 37 &&
                   s_car_lock_table[s_selected_car] != 0);
@@ -7092,7 +7156,8 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
      * the name; Direction shows Forwards/Backwards (only when the row is
      * visible); Players/Opponents show the count; Laps shows value+1. */
     frontend_draw_qr_value(sx, sy, QR_BTN_CAR,   car_locked   ? SNK_LockedTxt : car_name,   0xFFFFFFFF, rand_reserve);
-    frontend_draw_qr_value(sx, sy, QR_BTN_TRACK, track_locked ? SNK_LockedTxt : track_name, 0xFFFFFFFF, rand_reserve);
+    frontend_draw_qr_value_sub(sx, sy, QR_BTN_TRACK, track_locked ? SNK_LockedTxt : track_name,
+                               track_locked ? NULL : place_name, 0xFFFFFFFF, rand_reserve);
     if (!s_buttons[QR_BTN_DIRECTION].hidden) {
         frontend_draw_qr_value(sx, sy, QR_BTN_DIRECTION,
                                s_track_direction ? SNK_BackwardsButTxt : SNK_ForwardsButTxt,
@@ -8751,7 +8816,7 @@ static void frontend_render_race_options_overlay(float sx, float sy) {
 }
 
 static void frontend_render_track_selection_preview(float sx, float sy) {
-    char track_name[80], city[80], country[80];
+    char track_name[80], city[80], country[80], place_name[80];
     const char *comma;
     /* Animation offsets for track-switch slide-in (state 9).
      * Original: state 8 @ 0x427630 uses single counter _DAT_0049522c (0..0x10=16 frames).
@@ -8790,7 +8855,9 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
                      0xFFFFFFFF, sx * 0.8f, sy * 0.8f);
     }
 
-    frontend_get_track_display_name(s_selected_track, 0, track_name, sizeof(track_name));
+    /* [ROUND 1030 A2] Geo entry: generator title + place subline. */
+    frontend_get_entry_title(s_selected_track, track_name, sizeof(track_name),
+                             place_name, sizeof(place_name));
     /* Original: text surface 296x184 at (344,81), city at surf y=0, country at surf y=0x20=32
      * RE: 0x00427CD0-0x00427D56 — split at 0x2C; blit top 64 rows to screen (344,81) */
     comma = strchr(track_name, ',');
@@ -8807,7 +8874,22 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, city, 0xFFFFFFFF, sx, sy);
         fe_draw_text_centered(492.0f * sx, 113.0f * sy + txt_y_off, country, 0xFFFFFFFF, sx, sy);
     } else {
-        fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, track_name, 0xFFFFFFFF, sx, sy);
+        /* [ROUND 1030 A2] Condensed to the original 296-wide text surface
+         * (344..640) instead of running off the canvas: AUTO-GENERATED TRACK
+         * reached the right edge and LA PLATA (PARTIDO) (REAL) was clipped by it.
+         * A name that already fits gets fit = 1 and draws exactly as before. */
+        const float fit = fe_fit_text_scale(track_name, 288.0f * sx, sx, sy);
+        fe_draw_text_centered(492.0f * sx, 81.0f * sy + txt_y_off, track_name, 0xFFFFFFFF,
+                              sx * fit, sy);
+    }
+    if (place_name[0]) {
+        /* Small line right under the title, centred like it. Not under the map:
+         * there the Pitbull logo (x ~520..612, y ~345..435) covered the end of
+         * the name on the first framedump. td5_geo_draw_route moves the OSM
+         * credit down one line to make room (same own-selector test). */
+        const float gsx = (sx < sy) ? sx : sy;
+        fe_draw_small_text(492.0f * sx - fe_measure_small_text(place_name) * 0.5f * gsx,
+                           108.0f * sy + txt_y_off, place_name, 0xFFFFFFFF, sx, sy);
     }
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480).

@@ -716,6 +716,33 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
             }
         }
     }
+    /* [ROUND 1030 D item 8] "column ... is in the middle of the road" (Mariano, level091
+     * e6 s26 GANTRY_LEG, the START gantry at span 24). The race road's own edge is not the
+     * edge of the tarmac there: Diagonal 73's second carriageway (td5_tg_avenue.c, fork 0
+     * from F=26) is already laid beside it on the right, x 29243..31443 against the right
+     * leg's 29926, so the leg stood between the main lanes and the branch lanes. The legs
+     * go to tg_carriageway_reach on each side, the same authority facades, trees and rails
+     * clear (avenue + fork corridor folded in), and the panel and cap follow the edge.
+     * GEO only; TD5RE_GEO_GANTRY_REACH=0 restores the race-road-only gantry. */
+    if (td5_geo_loaded() && td5_env_flag_on("TD5RE_GEO_GANTRY_REACH")) {
+        const TG_Node *gn = &nl->v[si];
+        int sd;
+        for (sd = 0; sd < 2; sd++) {
+            const double sg   = sd ? -1.0 : 1.0;           /* +1 left, -1 right */
+            const double ex   = sd ? rx : lx, ez = sd ? rz : lz;
+            const double have = ((ex - gn->x) * dx + (ez - gn->z) * dz) * sg;
+            const double want = tg_carriageway_reach(nl, si, sg);
+            if (want > have + 1.0) {
+                const double ext = want - have;
+                if (sd) { rx -= dx * ext; rz -= dz * ext; }
+                else    { lx += dx * ext; lz += dz * ext; }
+                len += ext;
+                TD5_LOG_I(LOG_TAG, "trackgen: [GANTRY] span %d %s leg moved out %.1f m "
+                          "to the carriageway reach (%.1f m from the centreline)",
+                          si, sd ? "right" : "left", ext / 430.0, want / 430.0);
+            }
+        }
+    }
     /* Along-road unit is the lateral rotated 90 deg (left of travel is
      * (tz,-tx), so travel is (-dz, dx) in the same convention). */
     tx = -dz; tz = dx;
@@ -1298,6 +1325,7 @@ typedef struct {
     double base_y;  /* footing                                  */
     int    mast;    /* [1021 D] 1 = mast arm with plates cf/cb   */
     int    cf, cb;  /* [1021 D] plate cells, front / back face   */
+    char   role;    /* [1030 D] 'N' near arm, 'P' near post, 'F' far arm, 0 = one per node */
 } TG_SignalPlace;
 
 static TG_SignalPlace *s_sigp;
@@ -1328,6 +1356,279 @@ static double tg_sig_lateral(const TG_NodeList *nl, int si,
     return (wx - n->x) * n->tz - (wz - n->z) * n->tx;
 }
 
+/* ==========================================================================
+ * [ROUND 1030 D item 11] ONE LAYOUT PER JUNCTION.
+ *
+ * Mariano, level091 e57 s26 (the mast-arm pole at span 229): "traffic lights should
+ * be on the right side of the road when approaching an intersection, and a second
+ * pair on the opposite side of the intersection, on the other side of the lane
+ * there's the just stick smaller traffic light that were before synced without
+ * timer".
+ *
+ * The round 1021 placement put ONE head per OSM signal node, on whichever kerb the
+ * node's own lateral offset fell (head 2 of the census: span 229, LEFT), and dropped
+ * it outright when that kerb was a side-street mouth. So the side was a coin toss
+ * and a junction showed one arm or none. Now the nodes are grouped into junctions
+ * (all near-route nodes within TD5_TG_SIG_JUNC_SPANS spans of each other), the cross
+ * street's mouth run is read from the street authority (tg_xstreet_here, either
+ * side), and every junction gets:
+ *   N  a mast arm on the RIGHT kerb just before the mouth (Argentina drives on the
+ *      right), plate + countdown, heads facing the approaching driver;
+ *   F  a second mast arm ACROSS the junction, just after the mouth, on the far LEFT
+ *      corner (TD5RE_GEO_SIGNAL_FAR_SIDE=-1 puts it on the far right), also facing
+ *      the approaching driver;
+ *   P  the plain post light (the pre-1021 "stick" head) on the LEFT kerb before the
+ *      mouth, on the main lamp cycle and with no countdown.
+ * Each corner walks outward up to TD5_TG_SIG_CORNER_MAX spans until the existing
+ * gates pass (grid, structure, fork corridor, side-street mouth). Inside a real
+ * fork window (Diagonal 73 spans 26..229 and the other avenues) the right kerb is
+ * the second carriageway's: the near arm then stands on THAT carriageway's outer
+ * kerb, up to TD5_TG_SIG_FORK_GAP_MAX out (first build: 11 of 28 junctions fell to
+ * the left without this). Refused even there, it falls back to the left and the
+ * post is dropped, which is the old answer for that junction.
+ * GEO only and pure prepass: no tg_rand draw. TD5RE_GEO_SIGNAL_LAYOUT=0 restores the
+ * one-head-per-node placement bit for bit.
+ * ======================================================================= */
+#define TD5_TG_SIG_JUNC_SPANS  8   /* nodes this close (spans) are ONE junction  */
+#define TD5_TG_SIG_MOUTH_WIN  10   /* look this far for the junction's cross street */
+#define TD5_TG_SIG_CORNER_MAX  6   /* a corner may walk this far past the mouth  */
+
+enum { TG_SIGR_OK = 0, TG_SIGR_GRID, TG_SIGR_FAR, TG_SIGR_STRUCT, TG_SIGR_SIDE,
+       TG_SIGR_STREET, TG_SIGR_DUP };
+
+static long s_sig_junctions;   /* junction groups formed                     */
+static long s_sig_near_left;   /* near arm refused on the right, kept left   */
+static long s_sig_near_fork;   /* near arm on a fork corridor's outer kerb   */
+static long s_sig_roles[3];    /* placed N / P / F                           */
+static long s_sig_role_drop[3];
+
+static int tg_sig_layout_on(void)
+{
+    return td5_env_flag_on("TD5RE_GEO_SIGNAL_LAYOUT");
+}
+
+static int tg_sig_mouth_at(const TG_NodeList *nl, int s)
+{
+    if (s < 1 || s + 1 >= nl->count) return 0;
+    return tg_xstreet_here(nl, s, 1.0, NULL) || tg_xstreet_here(nl, s, -1.0, NULL);
+}
+
+/* Can a head stand at (si, side)? Fills *p (not mast / role) on TG_SIGR_OK. The gates
+ * are the one-per-node loop's, in its order; `dup_from` limits the duplicate check
+ * to placements of EARLIER junctions, since a junction's own corners are meant to
+ * face each other across a narrow mouth. */
+/* How far past the race road's edge a NEAR ARM may stand when a fork's second
+ * carriageway (Diagonal 73 and the other real avenues) occupies the right kerb: its
+ * outer kerb, if the corridor still runs beside the road (two lanes plus the
+ * median). The arm then spans corridor and median and its heads still hang over
+ * the race lanes (they are placed from the pole past `gap`). A corridor bowed
+ * further out than this is a separate street and keeps the left-hand fallback. */
+#define TD5_TG_SIG_FORK_GAP_MAX (14.0 * 430.0)
+
+static int tg_sig_stand(const TG_NodeList *nl, int si, double side, int nspans,
+                        int dup_from, int arm_over_fork, TG_SignalPlace *p)
+{
+    const TG_Node *nd;
+    const TG_Biome *b;
+    double gap, sw;
+    int j, blocked;
+
+    if (si <= TD5_TG_GRID_SPAN)                 return TG_SIGR_GRID;
+    if (si >= nspans || si + 1 >= nl->count)    return TG_SIGR_FAR;
+    if (tg_span_in_bridge_run(si) || tg_span_in_tunnel(si) || tg_up_clear_span(si))
+        return TG_SIGR_STRUCT;
+    blocked = tg_side_blocked(si, side);
+    if (blocked && !arm_over_fork)              return TG_SIGR_SIDE;
+    gap = tg_carriageway_clear_gap(nl, si, side,
+                                   TD5_TG_SIG_GAP - TD5_TG_SIG_HEAD_W * 0.5,
+                                   TD5_TG_CARRIAGEWAY_MARGIN)
+          + TD5_TG_SIG_HEAD_W * 0.5;
+    if (blocked && gap > TD5_TG_SIG_FORK_GAP_MAX) return TG_SIGR_SIDE;
+    /* The mouth test is per span, but a pole on the last span before a mouth stands
+     * on the street's corner. Measured: junction 12's near pole at span 583 (mouth
+     * 584..587, way 418's continuation) passed the per-span test and the on-road
+     * guard then judged it in span 584's frame and dropped it, leaving its arm
+     * hanging. So the neighbouring spans must be clear too, and the street quads
+     * are asked about the pole itself. */
+    for (j = -1; j <= 1; j++)
+        if (si + j >= 1 && si + j + 1 < nl->count &&
+            tg_xstreet_occupies(nl, si + j, side, gap - TD5_TG_SIG_HEAD_W * 0.5))
+            return TG_SIGR_STREET;
+    {
+        const TG_Node *pn = &nl->v[si];
+        const double r  = pn->width * 0.5 + gap;
+        const double px = pn->x + pn->tz * side * r;
+        const double pz = pn->z - pn->tx * side * r;
+        if (tg_xstreet_covers(nl, si, side, px, pz)) return TG_SIGR_STREET;
+    }
+    for (j = 0; j < dup_from; j++)
+        if (s_sigp[j].side == side && abs(s_sigp[j].si - si) < TD5_TG_SIG_SPAN_SEP)
+            return TG_SIGR_DUP;
+    nd = &nl->v[si];
+    b  = &k_biomes[tg_scenery_biome_index(si)];
+    sw = tg_city_sidewalk_w_at(nl, si, b);
+    p->si     = si;
+    p->side   = side;
+    p->gap    = gap;
+    p->base_y = (sw > 0.0) ? nd->y + tg_city_kerb_h(b)
+                           : nd->y - tg_infra_ground_dy(nl, si, side, gap, 0.0);
+    p->mast   = 0;
+    p->cf = p->cb = -1;
+    p->role   = 0;
+    return TG_SIGR_OK;
+}
+
+/* Walk a corner outward from `from` by `step` until a span accepts it. */
+static int tg_sig_corner(const TG_NodeList *nl, int from, int step, double side,
+                         int nspans, int dup_from, int arm_over_fork,
+                         TG_SignalPlace *p, int *why)
+{
+    int k, r = TG_SIGR_FAR;
+    for (k = 0; k <= TD5_TG_SIG_CORNER_MAX; k++) {
+        r = tg_sig_stand(nl, from + step * k, side, nspans, dup_from, arm_over_fork, p);
+        if (r == TG_SIGR_OK) return 1;
+        if (r == TG_SIGR_GRID && step < 0) break;   /* walking into the grid */
+    }
+    *why = r;
+    return 0;
+}
+
+static void tg_sig_count_drop(int why)
+{
+    switch (why) {
+    case TG_SIGR_GRID:   s_sig_drop_grid++;   break;
+    case TG_SIGR_STRUCT: s_sig_drop_struct++; break;
+    case TG_SIGR_SIDE:   s_sig_drop_side++;   break;
+    case TG_SIGR_STREET: s_sig_drop_street++; break;
+    case TG_SIGR_DUP:    s_sig_drop_dup++;    break;
+    default:             s_sig_drop_far++;    break;
+    }
+}
+
+static void tg_sig_layout(const TG_NodeList *nl, int nspans, int n)
+{
+    const int ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    const int fin  = tg_finish_span(ring);
+    const double far_side =
+        (td5_env_int("TD5RE_GEO_SIGNAL_FAR_SIDE", 1, -1, 1) < 0) ? -1.0 : 1.0;
+    int *ci = (int *)malloc((size_t)n * sizeof(int));
+    int *cs = (int *)malloc((size_t)n * sizeof(int));
+    int nc = 0, i, g0;
+
+    if (!ci || !cs) { free(ci); free(cs); return; }
+
+    for (i = 0; i < n; i++) {
+        double x, z, dx, dz;
+        int si, k;
+        if (!td5_geo_signals_get(i, &x, &z)) continue;
+        si = tg_guard_nearest_node(nl, 0, nl->count - 1, x, z);
+        if (si < 0 || si + 1 >= nl->count) { s_sig_drop_far++; continue; }
+        dx = x - nl->v[si].x; dz = z - nl->v[si].z;
+        if (dx * dx + dz * dz > TD5_TG_SIG_NEAR_MAX * TD5_TG_SIG_NEAR_MAX) {
+            s_sig_drop_far++;
+            continue;
+        }
+        if (si <= TD5_TG_GRID_SPAN) { s_sig_drop_grid++; continue; }
+        if (si >= nspans)           { s_sig_drop_far++;  continue; }
+        /* insertion by span, so a junction's nodes end up adjacent */
+        for (k = nc; k > 0 && cs[k - 1] > si; k--) { cs[k] = cs[k - 1]; ci[k] = ci[k - 1]; }
+        cs[k] = si; ci[k] = i; nc++;
+    }
+
+    for (g0 = 0; g0 < nc; ) {
+        int g1 = g0, rep = ci[g0], a, sum = 0, lo, hi, s, best = 1 << 30, m = -1;
+        const int jstart = s_sigp_n;
+        TG_SignalPlace pl;
+        double near_side = -1.0;
+        int why = TG_SIGR_FAR, have_near;
+
+        while (g1 + 1 < nc && cs[g1 + 1] - cs[g0] <= TD5_TG_SIG_JUNC_SPANS) g1++;
+        for (i = g0; i <= g1; i++) {
+            sum += cs[i];
+            if (rep == ci[g0] && !tg_mastarm_has_plate(rep) && tg_mastarm_has_plate(ci[i]))
+                rep = ci[i];
+        }
+        a = (sum + (g1 - g0 + 1) / 2) / (g1 - g0 + 1);
+        s_sig_junctions++;
+
+        /* The cross street's mouth run: nearest mouth span to the junction, grown
+         * while the neighbours are mouths too (either side, so a skewed street
+         * whose two mouths are offset still reads as one run). */
+        for (s = a - TD5_TG_SIG_MOUTH_WIN; s <= a + TD5_TG_SIG_MOUTH_WIN; s++)
+            if (tg_sig_mouth_at(nl, s) && abs(s - a) < best) { best = abs(s - a); m = s; }
+        if (m >= 0) {
+            lo = hi = m;
+            while (lo - 1 >= m - TD5_TG_SIG_MOUTH_WIN && tg_sig_mouth_at(nl, lo - 1)) lo--;
+            while (hi + 1 <= m + TD5_TG_SIG_MOUTH_WIN && tg_sig_mouth_at(nl, hi + 1)) hi++;
+        } else {
+            lo = hi = a;
+        }
+
+        /* N: near arm, right kerb first; over a fork's second carriageway from its
+         * outer kerb next; the left kerb last */
+        have_near = tg_sig_corner(nl, lo - 1, -1, -1.0, nspans, jstart, 0, &pl, &why);
+        if (!have_near) {
+            int why2 = TG_SIGR_FAR;
+            have_near = tg_sig_corner(nl, lo - 1, -1, -1.0, nspans, jstart, 1, &pl, &why2);
+            if (have_near) s_sig_near_fork++;
+        }
+        if (!have_near) {
+            int why2 = TG_SIGR_FAR;
+            have_near = tg_sig_corner(nl, lo - 1, -1, 1.0, nspans, jstart, 0, &pl, &why2);
+            if (have_near) { near_side = 1.0; s_sig_near_left++; }
+        }
+        if (have_near) {
+            pl.role = 'N';
+            pl.mast = tg_mastarm_plan(rep, nl->v[pl.si].width, abs(pl.si - fin) <= 6,
+                                      &pl.cf, &pl.cb);
+            s_sigp[s_sigp_n++] = pl;
+            s_sig_roles[0]++;
+        } else {
+            tg_sig_count_drop(why);
+            s_sig_role_drop[0]++;
+        }
+
+        /* P: the post light on the other kerb before the mouth */
+        if (tg_sig_corner(nl, lo - 1, -1, -near_side, nspans, jstart, 0, &pl, &why)) {
+            pl.role = 'P';
+            s_sigp[s_sigp_n++] = pl;
+            s_sig_roles[1]++;
+        } else {
+            tg_sig_count_drop(why);
+            s_sig_role_drop[1]++;
+        }
+
+        /* F: the second arm across the junction. Where a diagonal crosses two
+         * streets at once (Diagonal 73 over Calle 20 AND Calle 43 at span 229) the
+         * group's nodes name different cross streets: the near arm carries the
+         * first, the far arm another one. */
+        if (tg_sig_corner(nl, hi + 1, 1, far_side, nspans, jstart, 0, &pl, &why) ||
+            tg_sig_corner(nl, hi + 1, 1, -far_side, nspans, jstart, 0, &pl, &why)) {
+            int frep = rep;
+            for (i = g0; i <= g1; i++)
+                if (tg_mastarm_front_cell(ci[i]) >= 0 &&
+                    tg_mastarm_front_cell(ci[i]) != tg_mastarm_front_cell(rep)) {
+                    frep = ci[i];
+                    break;
+                }
+            pl.role = 'F';
+            pl.mast = tg_mastarm_plan(frep, nl->v[pl.si].width, abs(pl.si - fin) <= 6,
+                                      &pl.cf, &pl.cb);
+            s_sigp[s_sigp_n++] = pl;
+            s_sig_roles[2]++;
+        } else {
+            tg_sig_count_drop(why);
+            s_sig_role_drop[2]++;
+        }
+        TD5_LOG_I(LOG_TAG, "[GEO SIGNALS] junction %ld: %d node(s) spans %d..%d, mouth %s"
+                  " %d..%d -> %d placement(s)", s_sig_junctions, g1 - g0 + 1, cs[g0],
+                  cs[g1], (m >= 0) ? "run" : "none (centre)", lo, hi, s_sigp_n - jstart);
+        g0 = g1 + 1;
+    }
+    free(ci);
+    free(cs);
+}
+
 /* Decide, once per build and before any thread starts, which SIGNALS.JSON
  * nodes become heads and where. Clears to empty for a synthetic build. */
 void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
@@ -1341,6 +1642,9 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
     s_sig_drop_far = s_sig_drop_grid = s_sig_drop_struct = 0;
     s_sig_drop_side = s_sig_drop_street = s_sig_drop_dup = 0;
     s_sig_drop_budget = 0;
+    s_sig_junctions = s_sig_near_left = s_sig_near_fork = 0;
+    memset(s_sig_roles, 0, sizeof s_sig_roles);
+    memset(s_sig_role_drop, 0, sizeof s_sig_role_drop);
 
     if (!td5_geo_loaded())                     return;  /* byte-identical */
     if (!nl || nl->count < 2)                  return;
@@ -1351,8 +1655,15 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
     if (n <= 0) return;
     tg_mastarm_prepare();     /* [1021 D] street-name plates, before any plan */
 
-    s_sigp = (TG_SignalPlace *)malloc((size_t)n * sizeof(TG_SignalPlace));
+    /* [1030 D] up to three placements per junction, and a junction per node at most */
+    s_sigp = (TG_SignalPlace *)malloc((size_t)n * 3 * sizeof(TG_SignalPlace));
     if (!s_sigp) return;
+
+    if (tg_sig_layout_on()) {
+        tg_sig_layout(nl, nspans, n);
+        s_sig_placed = s_sigp_n;
+        return;
+    }
 
     for (i = 0; i < n; i++) {
         double x, z, lat, gap, sw, side, base_y;
@@ -1419,6 +1730,7 @@ void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
         s_sigp[s_sigp_n].side   = side;
         s_sigp[s_sigp_n].gap    = gap;
         s_sigp[s_sigp_n].base_y = base_y;
+        s_sigp[s_sigp_n].role   = 0;
         s_sigp[s_sigp_n].mast   = tg_mastarm_plan(i, nd->width,
                                                   abs(si - tg_finish_span(
                                                       (s_ring_len > 0) ? s_ring_len
@@ -1551,13 +1863,24 @@ void tg_geo_signals_report(int nspans)
                   s_sig_drop_dup, s_sig_drop_budget,
                   td5_geo_signals_source());
     tg_mastarm_report();      /* [1021 D] plates + mast-arm census */
+    if (tg_sig_layout_on())
+        TD5_LOG_I(LOG_TAG, "[GEO SIGNALS] layout: %ld junction(s) | near arm %ld "
+                  "(%ld from a fork corridor's outer kerb, %ld kept LEFT, right kerb "
+                  "refused) | near post %ld | far arm %ld | not placed: near %ld post "
+                  "%ld far %ld (knob TD5RE_GEO_SIGNAL_LAYOUT)",
+                  s_sig_junctions, s_sig_roles[0], s_sig_near_fork, s_sig_near_left,
+                  s_sig_roles[1],
+                  s_sig_roles[2], s_sig_role_drop[0], s_sig_role_drop[1],
+                  s_sig_role_drop[2]);
     /* Where each head stands, so a capture (StartSpanOffset) can be aimed at
      * one without guessing. */
     {
         int i;
         for (i = 0; i < s_sigp_n; i++)
-            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side%s",
+            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side%s%s",
                       i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right",
-                      s_sigp[i].mast ? " mast-arm" : "");
+                      s_sigp[i].mast ? " mast-arm" : "",
+                      s_sigp[i].role == 'N' ? " near" : s_sigp[i].role == 'P' ? " post"
+                                            : s_sigp[i].role == 'F' ? " far" : "");
     }
 }
