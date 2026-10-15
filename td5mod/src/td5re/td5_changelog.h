@@ -32,6 +32,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 15 (free roam groundwork)" },
+    { CL_ITEM,    "Dev builds only: the road cache for free roam is read" },
+    { CL_ITEM,    "  and counted. Nothing changes in the race." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 14 (forks and medians)" },
     { CL_ITEM,    "On a freshly built track the fork roads get their" },
     { CL_ITEM,    "  texture and scenery in the first seconds instead" },
