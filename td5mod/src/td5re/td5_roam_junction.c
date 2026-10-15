@@ -20,6 +20,16 @@
  *     bevel point sits at max(w) from the centroid along the gap bisector.
  *   - 2-arm nodes that turn more than 30 deg (BEND) are clusters too, so a
  *     sharp corner made by two ways gets a fillet instead of a mitre.
+ *   - Arms, the 30 m union and the internal-edge test walk through JOIN nodes:
+ *     OSM splits carriageways into 2-12 m pieces at junctions, and a cut row,
+ *     a union or an absorbed connector must not stop at such a split.
+ *   - A corner point past either arm's cut row, or outside the angular sector
+ *     between the two cut rows seen from the centroid, is dropped (curved arms,
+ *     carriageways that cross just before a junction).
+ *   - Fallbacks the design does not have, all counted in the census:
+ *     NORMAL -> SIMPLE (no corners, cut rows past every member node) -> HULL of
+ *     the cut rows -> SPLIT (one-node clusters). Ear clipping only runs on an
+ *     outline that passes outline_simple().
  */
 #include <stdio.h>
 #include <stdlib.h>
