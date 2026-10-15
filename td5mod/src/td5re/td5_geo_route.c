@@ -57,6 +57,7 @@
 #include "td5_geo_forks.h"
 #include "td5_geo_signals.h"
 #include "td5_geo_sidewalk.h"    /* [1011 C2] the per-place carriageway    */
+#include "td5_roam_height.h"     /* [ROAM F1-T2] dev-only height cross-check */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -5069,14 +5070,7 @@ static int gr_write_route(const char *dir)
  * routed or built on, and is the shape "unable to read road graph" takes. */
 #define GR_GUARD_MIN_ROADS   GR_GRAPH_MIN_WAYS
 
-typedef struct {
-    int      kind;               /* 1 = int16, 2 = uint8 */
-    int      w, h;
-    double   origin_x, origin_z, cell, scale, bias, rotation;
-    int      nodata_raw;
-    void    *data;
-} GrRaster;
-
+/* GrRaster itself is declared in td5_geo_route.h (exported for td5_roam_height.c). */
 #define GR_RASTER_HEADER 72
 
 static double gr_rd_f64(const unsigned char *p)
@@ -5155,8 +5149,8 @@ static int gr_raster_peek(const char *path, GrRaster *out)
  * inside the rectangle (+pad) lands on the same cell and the same four
  * bilinear neighbours. A rectangle that misses the raster entirely gives a
  * 0x0 grid, which every sampler below reads as "outside = nodata". */
-static int gr_raster_read_window(const char *path, double wx0, double wz0,
-                                 double wx1, double wz1, int pad, GrRaster *out)
+int gr_raster_read_window(const char *path, double wx0, double wz0,
+                          double wx1, double wz1, int pad, GrRaster *out)
 {
     unsigned char h[GR_RASTER_HEADER];
     TD5_File *f = td5_plat_file_open(path, "rb");
@@ -6497,6 +6491,12 @@ int td5_geo_route_init(void)
     const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 4);
     if (lvl > 0) {
         gr_self_test(lvl);
+        td5_geo_route_shutdown();
+        exit(0);
+    }
+    /* [ROAM F1-T2] TD5RE_ROAM_HEIGHT_TEST=1: source-window reader vs td5_geo_height. */
+    if (td5_env_int("TD5RE_ROAM_HEIGHT_TEST", 0, 0, 1) == 1) {
+        td5_roam_height_selftest();
         td5_geo_route_shutdown();
         exit(0);
     }
