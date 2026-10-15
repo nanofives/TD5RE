@@ -200,4 +200,25 @@ const TD5_GeoRouteResult *td5_geo_route_last(void);
  * a menu visit does not hold the memory for the rest of the session. */
 void td5_geo_route_drop_graph(void);
 
+/* ------------------------------------------------------- raster window ----
+ * [ROAM F1-T2] One TD5GEOR1 raster, or a window of one read by seek. Exported
+ * for td5_roam_height.c, which samples the SOURCE HEIGHT.R16 / WATER.R8 of a
+ * place without ever slurping them (HEIGHT.R16 is ~346 MB). The struct and the
+ * reader are the ones the route frame is built with; their behaviour is not
+ * changed by the export. */
+typedef struct {
+    int      kind;               /* 1 = int16, 2 = uint8 */
+    int      w, h;
+    double   origin_x, origin_z, cell, scale, bias, rotation;
+    int      nodata_raw;
+    void    *data;               /* malloc'd; the caller free()s it */
+} GrRaster;
+
+/* The cells of a raster that cover the world rectangle [wx0,wx1] x [wz0,wz1]
+ * plus `pad` cells, read row by row with a seek. The result's origin is the
+ * origin of its first cell. A rectangle that misses the raster gives a 0x0
+ * grid. Returns 1 on success, 0 on failure (out is then zeroed). */
+int gr_raster_read_window(const char *path, double wx0, double wz0,
+                          double wx1, double wz1, int pad, GrRaster *out);
+
 #endif /* TD5_GEO_ROUTE_H */
