@@ -65,6 +65,11 @@
 #define TD5_ROAM_CL_TAPER      0x10  /* 2-arm, lanes or layer differ          */
 #define TD5_ROAM_CL_BEND       0x20  /* 2-arm, sharp deflection               */
 #define TD5_ROAM_CL_CLAMPED    0x40  /* an arm cut hit half its edge          */
+#define TD5_ROAM_CL_SIMPLE     0x80  /* fallback outline: no fillets, cuts
+                                      * beyond every member node            */
+#define TD5_ROAM_CL_HULL      0x100  /* last resort: convex hull of the cut
+                                      * rows; a cut-row vertex inside the hull
+                                      * is not a patch vertex (ribbon overlaps) */
 
 /* Outline vertex kinds. */
 #define TD5_ROAM_PV_CUT     1   /* a cut-row lane boundary of an arm (shared)  */

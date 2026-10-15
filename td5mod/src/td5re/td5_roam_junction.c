@@ -190,14 +190,40 @@ static int uf_find(int *uf, int i)
 
 /* ------------------------------------------------------------ arms ---------- */
 
+/* An arm walks on through JOIN nodes: OSM often splits a carriageway into
+ * 2-12 m pieces right at a junction (La Plata ways 1449919888..894 at Av 44 x
+ * Calle 8), and a cut row must not be limited by such a piece. The chain stops
+ * at the first non-JOIN node, after ROAM_CHAIN_MAX pieces or past
+ * ROAM_CHAIN_LEN. */
+#define ROAM_CHAIN_MAX 16
+#define ROAM_CHAIN_LEN (200.0 * TD5_ROAM_UPM)
+
 typedef struct {
     TD5_RoamArm a;
-    uint64_t    ekey;
-    double      len;       /* edge length                                  */
-    double      lim;       /* cut limit = length / 2                       */
+    uint64_t    ekey;      /* key of the FIRST edge (sort tie-break)       */
+    double      len;       /* chain length                                 */
+    double      lim;       /* cut limit = chain length / 2                 */
     double      kx, kz;    /* the arm node position                        */
     int         klass;
+    int         nchain;
+    int         ce[ROAM_CHAIN_MAX];       /* edge of chain piece k         */
+    int         cq[ROAM_CHAIN_MAX];       /* the end it is entered from    */
+    double      ccum[ROAM_CHAIN_MAX + 1]; /* chain distance at piece start */
 } ArmTmp;
+
+/* The chain point at distance d from the arm node. */
+static void chain_point(const TD5_RoamGraph *g, const ArmTmp *a, double d, double *x, double *z)
+{
+    int k = 0;
+    while (k + 1 < a->nchain && d >= a->ccum[k + 1]) k++;
+    {
+        const TD5_RoamEdge *e = &g->edge[a->ce[k]];
+        double loc = d - a->ccum[k];
+        if (loc < 0.0) loc = 0.0;
+        if (loc > e->length) loc = e->length;
+        td5_roam_edge_point(g, e, a->cq[k] == 0 ? loc : e->length - loc, x, z, NULL, NULL);
+    }
+}
 
 static int arm_cmp(const void *x, const void *y)
 {
@@ -415,9 +441,109 @@ static int patch_split(Patch *p, double emax, int *overflow)
     return splits;
 }
 
+/* A cut row's lane vertices are collinear only up to rounding (place-frame
+ * coordinates are ~5e6, so the cross product carries an error of a few units^2).
+ * 50 units^2 over a 1500-unit lane is 0.03 units off the line. */
+#define ROAM_HULL_COLLINEAR 50.0
+
+/* Hull order: x, then z, then index. */
+static int hull_less(const TD5_RoamPatchVert *pv, int a, int b)
+{
+    if (pv[a].x != pv[b].x) return pv[a].x < pv[b].x;
+    if (pv[a].z != pv[b].z) return pv[a].z < pv[b].z;
+    return a < b;
+}
+
+/* Replace the patch by the convex hull of its CUT vertices (collinear ones kept,
+ * so a cut row on the hull keeps every lane vertex), fanned from the hull's
+ * centroid. Returns 1 on success. */
+static int patch_hull(Patch *p, int *nout)
+{
+    int *ix = NULL, *h = NULL, n = 0, k, m = 0, t;
+    Patch q;
+    memset(&q, 0, sizeof q);
+    ix = (int *)malloc((size_t)(*nout + 1) * sizeof(int));
+    h = (int *)malloc((size_t)(2 * *nout + 2) * sizeof(int));
+    if (!ix || !h) { free(ix); free(h); return 0; }
+    for (k = 0; k < *nout; k++) if (p->pv[k].kind == TD5_ROAM_PV_CUT) ix[n++] = k;
+    if (n < 3) { free(ix); free(h); return 0; }
+    for (k = 1; k < n; k++)                         /* insertion sort, n is small */
+        for (t = k; t > 0 && hull_less(p->pv, ix[t], ix[t - 1]); t--) {
+            const int tmp = ix[t]; ix[t] = ix[t - 1]; ix[t - 1] = tmp;
+        }
+#define HCROSS(o, a, b) cross2(p->pv[a].x - p->pv[o].x, p->pv[a].z - p->pv[o].z, \
+                               p->pv[b].x - p->pv[o].x, p->pv[b].z - p->pv[o].z)
+    for (k = 0; k < n; k++) {                       /* lower hull */
+        while (m >= 2 && HCROSS(h[m - 2], h[m - 1], ix[k]) < -ROAM_HULL_COLLINEAR) m--;
+        h[m++] = ix[k];
+    }
+    for (k = n - 2, t = m + 1; k >= 0; k--) {       /* upper hull */
+        while (m >= t && HCROSS(h[m - 2], h[m - 1], ix[k]) < -ROAM_HULL_COLLINEAR) m--;
+        h[m++] = ix[k];
+    }
+#undef HCROSS
+    m--;                                            /* last == first */
+    /* Drop repeats (collinear points on the vertical extremes). */
+    {
+        int w = 0;
+        for (k = 0; k < m; k++) {
+            int z2, dup = 0;
+            for (z2 = 0; z2 < w; z2++) if (h[z2] == h[k]) dup = 1;
+            if (!dup) h[w++] = h[k];
+        }
+        m = w;
+    }
+    if (m < 3) { free(ix); free(h); return 0; }
+    {
+        double sx = 0.0, sz = 0.0;
+        TD5_RoamPatchVert cv;
+        int ci;
+        for (k = 0; k < m; k++) {
+            if (patch_add_v(&q, &p->pv[h[k]]) < 0) goto fail;
+            sx += p->pv[h[k]].x;
+            sz += p->pv[h[k]].z;
+        }
+        for (k = 0; k < m; k++) {
+            const int a = h[k], b = h[(k + 1) % m];
+            int s, kind = TD5_ROAM_OL_KERB, arm = -1;
+            for (s = 0; s < p->nseg; s++)
+                if (p->seg[s].v[0] == a && p->seg[s].v[1] == b && p->seg[s].kind == TD5_ROAM_OL_CUT) {
+                    kind = TD5_ROAM_OL_CUT;
+                    arm = p->seg[s].arm;
+                    break;
+                }
+            if (!patch_add_seg(&q, k, (k + 1) % m, kind, arm)) goto fail;
+        }
+        pv_init(&cv, sx / (double)m, sz / (double)m, TD5_ROAM_PV_CENTRE);
+        cv.ref[0] = TD5_ROAM_HREF_CENTRE;
+        cv.w[0] = 1.0;
+        ci = patch_add_v(&q, &cv);
+        if (ci < 0) goto fail;
+        for (k = 0; k < m; k++)
+            if (!patch_add_tri(&q, ci, k, (k + 1) % m)) goto fail;
+    }
+    free(p->pv); free(p->tri); free(p->seg);
+    *p = q;
+    *nout = m;
+    free(ix);
+    free(h);
+    return 1;
+fail:
+    free(q.pv); free(q.tri); free(q.seg);
+    free(ix);
+    free(h);
+    return 0;
+}
+
 /* ------------------------------------------------------------ the builder --- */
 
-int td5_roam_junction_build(TD5_RoamGraph *g)
+/* Per-node patch mode (set by the fallback passes of td5_roam_junction_build). */
+#define MODE_NORMAL 0   /* fillets, cuts from the tangent points             */
+#define MODE_SIMPLE 1   /* no corners: cut rows beyond every member node,
+                         * joined by straight kerbs                          */
+#define MODE_SPLIT  2   /* never merged with another node                    */
+
+static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
 {
     TD5_RoamGraphCensus *c = &g->census;
     const TD5_RoamGraphParams *P = &g->prm;
@@ -460,6 +586,7 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
             RoamPair q;
             if (e->node_a == e->node_b || e->length >= P->merge_len) continue;
             if (!is_cand(&g->node[e->node_a]) || !is_cand(&g->node[e->node_b])) continue;
+            if (mode[e->node_a] == MODE_SPLIT || mode[e->node_b] == MODE_SPLIT) continue;
             q.a = e->node_a < e->node_b ? e->node_a : e->node_b;
             q.b = e->node_a < e->node_b ? e->node_b : e->node_a;
             q.kind = PAIR_EDGE;
@@ -483,6 +610,7 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
                 const double rr = rdisc[xs[i].n] + rdisc[xs[j].n];
                 RoamPair q;
                 if (dx * dx + dz * dz >= rr * rr) continue;
+                if (mode[xs[i].n] == MODE_SPLIT || mode[xs[j].n] == MODE_SPLIT) continue;
                 if (a->layer_max < b->layer_min || b->layer_max < a->layer_min) {
                     c->rejected_layer++;
                     continue;
@@ -643,6 +771,8 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
     /* 6. Per cluster: arms, corners, cuts, rows, outline, triangles. */
     for (i = 0; i < g->ncluster; i++) {
         TD5_RoamCluster *cl = &g->cluster[i];
+        const int simple = mode[g->cluster_node[cl->node_first]] == MODE_SIMPLE;
+        double simple_hw = 0.0;
         int na = 0, m, q;
         cl->layer = 127;
         cl->min_swept_margin = 1e30;
@@ -654,7 +784,7 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
                 const TD5_RoamEndRef *r = &g->node_end[nd->end_first + q];
                 const TD5_RoamEdge *e = &g->edge[r->edge];
                 ArmTmp *a;
-                double d, s, px, pz, dx, dz, len;
+                double d, px, pz, dx, dz, len;
                 if (e->end[r->end].kind == TD5_ROAM_END_INTERNAL) continue;
                 if (!grow((void **)&at, &cap_at, na + 1, sizeof *at)) goto done;
                 a = &at[na++];
@@ -664,14 +794,39 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
                 a->a.node = ni;
                 a->a.half_w = e->half_w;
                 a->ekey = e->key;
-                a->len = e->length;
-                a->lim = 0.5 * e->length;
                 a->kx = nd->x;
                 a->kz = nd->z;
                 a->klass = e->klass;
+                /* The chain through JOIN nodes. */
+                a->nchain = 1;
+                a->ce[0] = r->edge;
+                a->cq[0] = r->end;
+                a->ccum[0] = 0.0;
+                a->ccum[1] = e->length;
+                while (a->nchain < ROAM_CHAIN_MAX && a->ccum[a->nchain] < ROAM_CHAIN_LEN) {
+                    const TD5_RoamEdge *pe = &g->edge[a->ce[a->nchain - 1]];
+                    const int far_end = 1 - a->cq[a->nchain - 1];
+                    const int fn = far_end == 0 ? pe->node_a : pe->node_b;
+                    const TD5_RoamNode *fnd = &g->node[fn];
+                    const TD5_RoamEndRef *fr = &g->node_end[fnd->end_first];
+                    int nxt_e, nxt_q, z2, dup = 0;
+                    if (fnd->kind != TD5_ROAM_NODE_JOIN || fnd->nend != 2) break;
+                    if (fr[0].edge == a->ce[a->nchain - 1] && fr[0].end == far_end) {
+                        nxt_e = fr[1].edge; nxt_q = fr[1].end;
+                    } else {
+                        nxt_e = fr[0].edge; nxt_q = fr[0].end;
+                    }
+                    for (z2 = 0; z2 < a->nchain; z2++) if (a->ce[z2] == nxt_e) dup = 1;
+                    if (dup) break;
+                    a->ce[a->nchain] = nxt_e;
+                    a->cq[a->nchain] = nxt_q;
+                    a->ccum[a->nchain + 1] = a->ccum[a->nchain] + g->edge[nxt_e].length;
+                    a->nchain++;
+                }
+                a->len = a->ccum[a->nchain];
+                a->lim = 0.5 * a->len;
                 d = P->arm_dir_len < a->lim ? P->arm_dir_len : a->lim;
-                s = r->end == 0 ? d : e->length - d;
-                td5_roam_edge_point(g, e, s, &px, &pz, NULL, NULL);
+                chain_point(g, a, d, &px, &pz);
                 dx = px - nd->x;
                 dz = pz - nd->z;
                 len = sqrt(dx * dx + dz * dz);
@@ -686,6 +841,8 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
             }
         }
         if (cl->layer == 127) cl->layer = 0;
+        for (m = 0; m < na; m++) if (at[m].a.half_w > simple_hw) simple_hw = at[m].a.half_w;
+        if (simple) cl->flags |= TD5_ROAM_CL_SIMPLE;
         qsort(at, (size_t)na, sizeof *at, arm_cmp);
         c->cluster_by_arms[na < TD5_ROAM_ARM_HIST ? na : TD5_ROAM_ARM_HIST - 1]++;
         if (na == 0) {
@@ -706,6 +863,7 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
             double gap = na == 1 ? 2.0 * ROAM_PI : aj->a.ang - ai->a.ang;
             int parallel, toofar = 1;
             memset(co, 0, sizeof *co);
+            if (simple) { co->type = CORNER_DIRECT; continue; }
             while (gap <= 0.0) gap += 2.0 * ROAM_PI;
             parallel = fabs(cr) < sin_par;
             if (!parallel) {
@@ -798,6 +956,17 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
             ArmTmp *a = &at[m];
             const Corner *left = &cor[m], *right = &cor[(m + na - 1) % na];
             double t = a->a.half_w;
+            if (simple) {
+                /* The cut row lies beyond every member node by the widest
+                 * half width, so no arm's row cuts across the core. */
+                int z2;
+                for (z2 = 0; z2 < cl->nnode; z2++) {
+                    const TD5_RoamNode *mn = &g->node[g->cluster_node[cl->node_first + z2]];
+                    const double p = (mn->x - a->kx) * a->a.dir_x + (mn->z - a->kz) * a->a.dir_z
+                                   + simple_hw;
+                    if (p > t) t = p;
+                }
+            }
             if (left->type == CORNER_FILLET) {
                 const double p = (left->tix - a->kx) * a->a.dir_x + (left->tiz - a->kz) * a->a.dir_z;
                 if (p > t) t = p;
@@ -821,15 +990,41 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
         cl->narm = na;
         if (!grow((void **)&g->arm, &caps.cap_arm, g->narm + na, sizeof *g->arm)) goto done;
         for (m = 0; m < na; m++) {
-            TD5_RoamEdge *e = &g->edge[at[m].a.edge];
-            TD5_RoamEdgeEnd *en = &e->end[at[m].a.end];
-            g->arm[g->narm + m] = at[m].a;
+            ArmTmp *am = &at[m];
+            TD5_RoamEdge *e;
+            TD5_RoamEdgeEnd *en;
+            double loc;
+            int kk = 0, z2;
+            /* The chain piece that holds the cut; the pieces before it are
+             * under the patch and are absorbed. */
+            while (kk + 1 < am->nchain && am->a.t >= am->ccum[kk + 1]) kk++;
+            for (z2 = 0; z2 < kk; z2++) {
+                TD5_RoamEdge *ae = &g->edge[am->ce[z2]];
+                int qq;
+                for (qq = 0; qq < 2; qq++) {
+                    ae->end[qq].kind = TD5_ROAM_END_INTERNAL;
+                    ae->end[qq].cluster = i;
+                    ae->end[qq].arm = -1;
+                    ae->end[qq].nrow = 0;
+                    ae->end[qq].cut = 0.0;
+                    ae->end[qq].s = qq == 0 ? 0.0 : ae->length;
+                }
+                c->chain_absorbed++;
+            }
+            am->a.edge = am->ce[kk];
+            am->a.end = am->cq[kk];
+            e = &g->edge[am->a.edge];
+            en = &e->end[am->a.end];
+            loc = am->a.t - am->ccum[kk];
+            g->arm[g->narm + m] = am->a;
             en->kind = TD5_ROAM_END_CLUSTER;
             en->cluster = i;
             en->arm = g->narm + m;
-            en->cut = at[m].a.t;
-            en->s = at[m].a.end == 0 ? at[m].a.t
-                  : (at[m].a.t == at[m].lim ? at[m].lim : e->length - at[m].a.t);
+            en->cut = loc;
+            /* A one-piece arm clamped to half its edge stores exactly 0.5 * L,
+             * the value the far end stores too (L - L/2 is exact). */
+            en->s = am->a.end == 0 ? loc
+                  : ((am->nchain == 1 && am->a.t == am->lim) ? am->lim : e->length - loc);
             en->nrow = e->lanes + 1;
             td5_roam_edge_row(g, e, en->s, en->row, &en->dir_x, &en->dir_z);
             for (q = 0; q < en->nrow; q++) {
@@ -983,6 +1178,13 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
                 for (m = 0; m < nt; m++)
                     if (!patch_add_tri(&pt, tmp[m].v[0], tmp[m].v[1], tmp[m].v[2])) { free(tmp); goto done; }
                 cl->flags |= TD5_ROAM_CL_EARCLIP;
+            } else if (simple && patch_hull(&pt, &cl->nout)) {
+                /* Last resort on a SIMPLE cluster: the convex hull of the cut
+                 * rows, fanned from its centroid (convex, so always valid). */
+                cl->flags |= TD5_ROAM_CL_HULL;
+                c->hull_fallback++;
+                TD5_LOG_I(LOG_TAG, "ROAM_PATCH_HULL cluster %lld (%d arm(s)): hull of the cut rows",
+                          (long long)cl->key, na);
             } else {
                 cl->flags |= TD5_ROAM_CL_FAIL;
                 c->earclip_fail++;
@@ -1093,6 +1295,80 @@ done:
     free(pt.pv);
     free(pt.tri);
     free(pt.seg);
+    return ok;
+}
+
+/* Drop every junction output so a pass can run again from the graph alone. */
+static void junction_reset(TD5_RoamGraph *g)
+{
+    int i, q;
+    free(g->cluster);      g->cluster = NULL;      g->ncluster = 0;
+    free(g->cluster_node); g->cluster_node = NULL; g->ncluster_node = 0;
+    free(g->arm);          g->arm = NULL;          g->narm = 0;
+    free(g->pvert);        g->pvert = NULL;        g->npvert = 0;
+    free(g->ptri);         g->ptri = NULL;         g->nptri = 0;
+    free(g->outline);      g->outline = NULL;      g->noutline = 0;
+    for (i = 0; i < g->nnode; i++) g->node[i].cluster = -1;
+    for (i = 0; i < g->nedge; i++)
+        for (q = 0; q < 2; q++) {
+            TD5_RoamEdgeEnd *en = &g->edge[i].end[q];
+            if (en->kind != TD5_ROAM_END_CLUSTER && en->kind != TD5_ROAM_END_INTERNAL) continue;
+            en->kind = 0;
+            en->cluster = -1;
+            en->arm = -1;
+            en->nrow = 0;
+            en->s = 0.0;
+            en->cut = 0.0;
+        }
+    /* A chain may have turned a JOIN end into CLUSTER / INTERNAL. */
+    td5_roam_graph_refill_joins(g);
+}
+
+/* Up to three passes, each a pure function of the graph and the previous
+ * pass, so the fallback set is deterministic and local:
+ *   1. every cluster NORMAL;
+ *   2. a cluster with no valid triangulation is rebuilt SIMPLE (same members:
+ *      no corners, cut rows beyond every member node) -- the case of a
+ *      multi-node cluster whose arms leave from different nodes and cross
+ *      (_archive/roam/F1/T3/svg_v1 worst_*.png);
+ *   3. a multi-node cluster still failing is SPLIT: its nodes may not merge,
+ *      so each becomes a one-node cluster joined by short ribbons. */
+int td5_roam_junction_build(TD5_RoamGraph *g)
+{
+    const TD5_RoamGraphCensus keep = g->census;
+    unsigned char *mode = (unsigned char *)calloc((size_t)(g->nnode > 0 ? g->nnode : 1), 1);
+    double comp1 = 0.0;
+    int nsimple = 0, nsplit = 0, pass, i, k, ok;
+    if (!mode) return 0;
+    ok = junction_pass(g, mode);
+    comp1 = g->census.max_component;
+    for (pass = 2; ok && pass <= 3; pass++) {
+        int changed = 0;
+        for (i = 0; i < g->ncluster; i++) {
+            const TD5_RoamCluster *cl = &g->cluster[i];
+            const int m0 = mode[g->cluster_node[cl->node_first]];
+            int want;
+            if (!(cl->flags & TD5_ROAM_CL_FAIL) || cl->narm == 0) continue;
+            if (m0 == MODE_NORMAL) want = MODE_SIMPLE;
+            else if (m0 == MODE_SIMPLE && cl->nnode > 1) want = MODE_SPLIT;
+            else continue;
+            for (k = 0; k < cl->nnode; k++) mode[g->cluster_node[cl->node_first + k]] = (unsigned char)want;
+            changed++;
+            if (want == MODE_SIMPLE) nsimple++; else nsplit++;
+            TD5_LOG_I(LOG_TAG, "ROAM_CLUSTER_%s cluster %lld (%d nodes, %d arms): patch invalid, "
+                      "rebuilt %s", want == MODE_SIMPLE ? "SIMPLE" : "SPLIT", (long long)cl->key,
+                      cl->nnode, cl->narm, want == MODE_SIMPLE ? "with the simple outline"
+                                                               : "as one-node clusters");
+        }
+        if (!changed) break;
+        junction_reset(g);
+        g->census = keep;
+        ok = junction_pass(g, mode);
+    }
+    g->census.max_component = comp1;
+    g->census.simple_fallback = nsimple;
+    g->census.split_fallback = nsplit;
+    free(mode);
     return ok;
 }
 
@@ -1265,7 +1541,7 @@ int td5_roam_junction_dev_census(void)
     double *sig;
     int nsig = 0, i, k;
     int by_arm[TD5_ROAM_ARM_HIST], cas = 0, cas_fan = 0, cas_ear = 0, cas_fail = 0, cas_swept = 0;
-    int cas_multi = 0, cas_clamped = 0, cas_taper = 0, cas_bend = 0;
+    int cas_multi = 0, cas_clamped = 0, cas_taper = 0, cas_bend = 0, cas_simple = 0, cas_hull = 0;
     double cas_maxd = 0.0;
     int64_t cas_maxk = 0;
 
@@ -1304,6 +1580,8 @@ int td5_roam_junction_dev_census(void)
         if (cl->flags & TD5_ROAM_CL_CLAMPED) cas_clamped++;
         if (cl->flags & TD5_ROAM_CL_TAPER) cas_taper++;
         if (cl->flags & TD5_ROAM_CL_BEND) cas_bend++;
+        if (cl->flags & TD5_ROAM_CL_SIMPLE) cas_simple++;
+        if (cl->flags & TD5_ROAM_CL_HULL) cas_hull++;
         if (cl->nnode > 1) cas_multi++;
         if (cl->diameter > cas_maxd) { cas_maxd = cl->diameter; cas_maxk = cl->key; }
     }
@@ -1339,9 +1617,11 @@ int td5_roam_junction_dev_census(void)
         fprintf(f, "max_diameter_m %.2f (cluster %lld)\nmax_component_m %.2f\n",
                 c->max_diameter / TD5_ROAM_UPM, (long long)c->max_diameter_key,
                 c->max_component / TD5_ROAM_UPM);
-        fprintf(f, "fan_ok %d\nfan_fallback %d\nearclip_ok %d\nearclip_fail %d\nclusters_no_arm %d\n",
-                c->fan_ok, c->fan_fallback, c->fan_fallback - c->earclip_fail, c->earclip_fail,
-                c->clusters_no_arm);
+        fprintf(f, "fan_ok %d\nfan_fallback %d\nearclip_ok %d\nearclip_fail %d\nclusters_no_arm %d\n"
+                "simple_fallback %d\nhull_fallback %d\nsplit_fallback %d\nchain_absorbed %d\n",
+                c->fan_ok, c->fan_fallback, c->fan_fallback - c->earclip_fail - c->hull_fallback,
+                c->earclip_fail, c->clusters_no_arm, c->simple_fallback, c->hull_fallback,
+                c->split_fallback, c->chain_absorbed);
         fprintf(f, "fillets %d\ncorners_parallel %d\ncorners_far %d\ncorners_reflex %d\nbevels %d\n"
                 "fillet_shrunk %d\n",
                 c->fillets, c->corners_parallel, c->corners_far, c->corners_reflex, c->bevels,
@@ -1360,8 +1640,9 @@ int td5_roam_junction_dev_census(void)
             fprintf(f, "casco_arms_%d%s %d\n", k, k == TD5_ROAM_ARM_HIST - 1 ? "_plus" : "", by_arm[k]);
         fprintf(f, "casco_multi_node %d\ncasco_taper %d\ncasco_bend %d\ncasco_fan %d\n"
                 "casco_earclip %d\ncasco_fail %d\ncasco_swept_fail %d\ncasco_clamped %d\n"
-                "casco_max_diameter_m %.2f (cluster %lld)\n",
+                "casco_simple %d\ncasco_hull %d\ncasco_max_diameter_m %.2f (cluster %lld)\n",
                 cas_multi, cas_taper, cas_bend, cas_fan, cas_ear, cas_fail, cas_swept, cas_clamped,
+                cas_simple, cas_hull,
                 cas_maxd / TD5_ROAM_UPM, (long long)cas_maxk);
         fprintf(f, "json %s\n", jpath);
         fclose(f);
@@ -1369,6 +1650,24 @@ int td5_roam_junction_dev_census(void)
     dump_json(&g, jpath);
     TD5_LOG_I(LOG_TAG, "roam junction test: %d casco cluster(s); census %s", cas, path);
     td5_roam_graph_free(&g);
+    /* Locality: TD5RE_ROAM_JUNC_SUBWIN=1 also builds the WEST HALF of the casco
+     * bbox (same halo) to roam_clusters_sub.json; verify/roam-style compare in
+     * _archive/roam/F1/T3/locality.py checks the clusters well inside it. */
+    if (td5_env_int("TD5RE_ROAM_JUNC_SUBWIN", 0, 0, 1) == 1) {
+        TD5_RoamGraph g2;
+        double w2[4];
+        w2[0] = win[0];
+        w2[1] = win[1];
+        w2[2] = 0.5 * (win[0] + win[2]);
+        w2[3] = win[3];
+        if (td5_roam_graph_build(&g2, w2, 300.0 * TD5_ROAM_UPM, NULL)) {
+            snprintf(jpath, sizeof jpath, "%sroam_clusters_sub.json", dir ? dir : "");
+            dump_json(&g2, jpath);
+            TD5_LOG_I(LOG_TAG, "roam junction test: sub-window x <= %.0f: %d cluster(s) -> %s",
+                      w2[2], g2.ncluster, jpath);
+            td5_roam_graph_free(&g2);
+        }
+    }
     td5_roam_cache_session_end();
     return 1;
 }

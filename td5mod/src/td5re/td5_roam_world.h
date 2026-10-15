@@ -8,8 +8,12 @@
  *             a function of the key alone and every edge that meets it ends on
  *             the same double.
  *   - EDGE  = a maximal run of ONE way between two nodes. edge_key =
- *             (way_id << 16) | piece_ordinal. Row 0 is at the end with the SMALLER
- *             node key (node_a), and the polyline is stored a -> b.
+ *             (way_id << 16) | index of the piece's first vertex in the way
+ *             (cache point order). Deviation from the design's "piece ordinal":
+ *             a running piece count depends on which OTHER ways are loaded, so
+ *             it changed keys between a full and a sub-window build; the vertex
+ *             index depends on the way alone. Row 0 is at the end with the
+ *             SMALLER node key (node_a), and the polyline is stored a -> b.
  *   - JOIN  = a node with exactly two edge ends. Same lanes and a deflection of
  *             at most join_max_defl_deg: the ribbons continue through it on ONE
  *             shared row (TD5_ROAM_END_JOIN). A layer change alone (bridge start)
@@ -135,7 +139,7 @@ typedef struct {
 } TD5_RoamEdgeEnd;
 
 typedef struct {
-    uint64_t key;           /* (way_id << 16) | piece ordinal along the way      */
+    uint64_t key;           /* (way_id << 16) | first vertex index in the way    */
     int64_t  way_id;
     int      way;           /* cache way index (td5_roam_cache_way)              */
     int      node_a, node_b;/* graph node indices, key(a) <= key(b)              */
@@ -199,6 +203,10 @@ typedef struct {
     double max_component;      /* extent of the largest candidate proximity
                                 * component (bounds the halo T5 needs)          */
     int    fan_ok, fan_fallback, earclip_fail, clusters_no_arm;
+    int    simple_fallback;      /* clusters rebuilt with the simple outline  */
+    int    hull_fallback;        /* simple clusters patched by the hull       */
+    int    split_fallback;       /* multi-node clusters rebuilt per node      */
+    int    chain_absorbed;       /* short pieces past a JOIN under a patch    */
     int    corners_parallel, corners_far, fillets, corners_reflex, bevels;
     int    fillet_shrunk;        /* fillet radius cut to fit the arm cut limit */
     int    tri_splits, patch_tris, patch_verts, recipe_overflow;
@@ -250,6 +258,10 @@ void td5_roam_graph_free(TD5_RoamGraph *g);
 /* Attach traffic signals (place-frame x,z pairs): every edge end whose node is
  * within prm.signal_r of a signal gets signal = 1. Returns ends flagged. */
 int  td5_roam_graph_attach_signals(TD5_RoamGraph *g, const double *xz, int n);
+
+/* Builder-internal: rewrite every JOIN node's shared row (used when the
+ * junction builder reruns a pass, td5_roam_junction.c). */
+void td5_roam_graph_refill_joins(TD5_RoamGraph *g);
 
 /* Lookup by key (binary search). -1 when absent. */
 int  td5_roam_graph_find_node(const TD5_RoamGraph *g, int64_t key);

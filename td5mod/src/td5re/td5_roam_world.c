@@ -262,6 +262,13 @@ static void fill_join(TD5_RoamGraph *g, const TD5_RoamNode *nd)
     }
 }
 
+void td5_roam_graph_refill_joins(TD5_RoamGraph *g)
+{
+    int i;
+    for (i = 0; i < g->nnode; i++)
+        if (g->node[i].kind == TD5_ROAM_NODE_JOIN) fill_join(g, &g->node[i]);
+}
+
 /* ------------------------------------------------------------ build --------- */
 
 void td5_roam_graph_free(TD5_RoamGraph *g)
@@ -460,10 +467,17 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
                 e = &g->edge[g->nedge];
                 memset(e, 0, sizeof *e);
                 e->way_id = w->way_id;
-                e->key = ((uint64_t)w->way_id << 16) | (uint64_t)(ord & 0xFFFF);
-                if (ord > 0xFFFF)
-                    TD5_LOG_W(LOG_TAG, "ROAM_EDGE_ORD way %lld has more than 65536 pieces",
-                              (long long)w->way_id);
+                /* The piece "ordinal" is the index of its first vertex in the
+                 * way, not a running piece count: a count depends on which
+                 * OTHER ways are loaded (a long way gets more pieces when the
+                 * streets crossing it far away are in the halo), so it would
+                 * change an edge's key between two tile builds. A vertex index
+                 * depends on the way alone. */
+                {
+                    const int first_vertex = vidx[vstart[i] + start];
+                    e->key = ((uint64_t)w->way_id << 16) | (uint64_t)(first_vertex & 0xFFFF);
+                }
+                (void)ord;
                 e->way = sel[i].way;
                 e->node_a = td5_roam_graph_find_node(g, rev ? kb : ka);
                 e->node_b = td5_roam_graph_find_node(g, rev ? ka : kb);
