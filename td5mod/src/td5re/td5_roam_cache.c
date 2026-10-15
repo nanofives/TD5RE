@@ -423,7 +423,8 @@ int td5_roam_cache_dev_census(void)
     FILE *f;
     int i, touch = 0;
 
-    if (!td5_env_flag_on("TD5RE_ROAM_CACHE_TEST")) return 0;
+    /* td5_env_flag_on is ON when unset, so the opt-in must be the "1" test. */
+    if (!td5_env_flag_off("TD5RE_ROAM_CACHE_TEST")) return 0;
     for (i = 1; i < 4; i++) {
         const double x = k_casco_poly[i][0], z = k_casco_poly[i][1];
         if (x < win[0]) win[0] = x;
