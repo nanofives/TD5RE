@@ -53,6 +53,9 @@
 
 #define TD5_ROAM_HREF_CENTRE  (-1)   /* the cluster height H_c                */
 #define TD5_ROAM_HREF_NONE    (-2)   /* unused recipe slot                    */
+/* Terms per recipe. A fan vertex needs at most 3 (centre + two arms); 4 leaves
+ * room for split points of ear-clip triangles, and an overflow is counted. */
+#define TD5_ROAM_HREF_TERMS   4
 
 /* Cluster flags. */
 #define TD5_ROAM_CL_FAN        0x01  /* fan from the centroid                 */
@@ -89,8 +92,9 @@ typedef struct TD5_RoamPatchVert {
     double  x, z;
     int32_t xq, zq;             /* td5_roam_quant, place frame                 */
     int     kind;               /* TD5_ROAM_PV_*                               */
-    int     ref[3];             /* height recipe, TD5_ROAM_HREF_* or arm index */
-    double  w[3];
+    int     ref[TD5_ROAM_HREF_TERMS]; /* height recipe: TD5_ROAM_HREF_* or the
+                                       * LOCAL arm index (0..narm-1)            */
+    double  w[TD5_ROAM_HREF_TERMS];
 } TD5_RoamPatchVert;
 
 typedef struct TD5_RoamPatchTri {

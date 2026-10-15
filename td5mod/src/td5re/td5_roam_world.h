@@ -10,10 +10,11 @@
  *   - EDGE  = a maximal run of ONE way between two nodes. edge_key =
  *             (way_id << 16) | piece_ordinal. Row 0 is at the end with the SMALLER
  *             node key (node_a), and the polyline is stored a -> b.
- *   - JOIN  = a node with exactly two edge ends. Same lanes, same layer and a small
- *             deflection: the ribbons continue through it on ONE shared row
- *             (TD5_ROAM_END_JOIN). Otherwise it becomes a 2-arm cluster (a taper
- *             or a bend patch, td5_roam_junction.h).
+ *   - JOIN  = a node with exactly two edge ends. Same lanes and a deflection of
+ *             at most join_max_defl_deg: the ribbons continue through it on ONE
+ *             shared row (TD5_ROAM_END_JOIN). A layer change alone (bridge start)
+ *             stays a JOIN. Otherwise it becomes a 2-arm cluster (a TAPER when
+ *             the lanes differ, a BEND when it turns too sharply).
  *   - CLUSTER = the paved patch of a junction (td5_roam_junction.h).
  *
  * THE CUT-ROW CONTRACT (what T4, the ribbon builder, consumes).
@@ -85,14 +86,16 @@ static inline int32_t td5_roam_quant(double v)
 #define TD5_ROAM_DROP_PARKING_AISLE  6   /* service=parking_aisle             */
 #define TD5_ROAM_DROP_DRIVE_THROUGH  7   /* service=drive-through             */
 #define TD5_ROAM_DROP_NO_ID          8   /* no OSM way id: no edge identity   */
-#define TD5_ROAM_DROP_COUNT          9
+#define TD5_ROAM_DROP_DUP_ID         9   /* way id seen already (first kept)  */
+#define TD5_ROAM_DROP_DEGENERATE    10   /* all points in one 10-unit cell    */
+#define TD5_ROAM_DROP_COUNT         11
 
 /* ------------------------------------------------------------ the graph ----- */
 
 /* Node kinds. */
 #define TD5_ROAM_NODE_END       1   /* one edge end: a dead end                 */
 #define TD5_ROAM_NODE_JOIN      2   /* two ends, ribbons continue on one row    */
-#define TD5_ROAM_NODE_TAPER     3   /* two ends, lanes or layer differ: patch   */
+#define TD5_ROAM_NODE_TAPER     3   /* two ends, lanes differ: patch            */
 #define TD5_ROAM_NODE_BEND      4   /* two ends, deflection too sharp: patch    */
 #define TD5_ROAM_NODE_JUNCTION  5   /* three or more ends: patch                */
 
@@ -195,9 +198,11 @@ typedef struct {
     int64_t max_diameter_key;
     double max_component;      /* extent of the largest candidate proximity
                                 * component (bounds the halo T5 needs)          */
-    int    fan_ok, fan_fallback, earclip_fail;
-    int    corners_parallel, corners_far, fillets;
-    int    tri_splits, patch_tris, patch_verts;
+    int    fan_ok, fan_fallback, earclip_fail, clusters_no_arm;
+    int    corners_parallel, corners_far, fillets, corners_reflex, bevels;
+    int    fillet_shrunk;        /* fillet radius cut to fit the arm cut limit */
+    int    tri_splits, patch_tris, patch_verts, recipe_overflow;
+    int    ribbon_sharp_vertices;/* interior polyline turns > 45 deg          */
     int    swept_checked, swept_widened, swept_fail;
     int    ribbon_swept_checked, ribbon_swept_fail;
     int    short_edges_clamped;   /* edge ends whose cut hit half the edge      */
