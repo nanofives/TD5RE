@@ -156,6 +156,35 @@ static int roam_intern(const cJSON *r)
 
 /* ------------------------------------------------------------ parsing ------ */
 
+static int roam_str_is(const cJSON *o, const char *key, const char *val)
+{
+    const cJSON *v = o ? cJSON_GetObjectItem(o, key) : NULL;
+    return v && cJSON_IsString(v) && v->valuestring && !strcmp(v->valuestring, val);
+}
+
+/* [F1 T3] The raw tag facts behind TD5_ROAM_TAG_* (see the header). */
+static uint32_t roam_tag_bits(const cJSON *r)
+{
+    const cJSON *tags = cJSON_GetObjectItem(r, "tags");
+    uint32_t f = 0;
+    if (roam_str_is(r, "class", "bus_stop")) f |= TD5_ROAM_TAG_HW_BUS_STOP;
+    if (roam_str_is(r, "class", "razed"))    f |= TD5_ROAM_TAG_HW_RAZED;
+    if (roam_str_is(r, "class", "services")) f |= TD5_ROAM_TAG_HW_SERVICES;
+    if (roam_str_is(r, "class", "raceway"))  f |= TD5_ROAM_TAG_HW_RACEWAY;
+    if (roam_str_is(r, "tunnel_kind", "building_passage"))
+        f |= TD5_ROAM_TAG_TUNNEL_PASSAGE;
+    if (tags && cJSON_IsObject(tags)) {
+        if (roam_str_is(tags, "area", "yes"))              f |= TD5_ROAM_TAG_AREA;
+        if (roam_str_is(tags, "service", "parking_aisle")) f |= TD5_ROAM_TAG_SVC_PARKING_AISLE;
+        if (roam_str_is(tags, "service", "drive-through")) f |= TD5_ROAM_TAG_SVC_DRIVE_THROUGH;
+        if (roam_str_is(tags, "service", "driveway"))      f |= TD5_ROAM_TAG_SVC_DRIVEWAY;
+        if (roam_str_is(tags, "service", "alley"))         f |= TD5_ROAM_TAG_SVC_ALLEY;
+        if (roam_str_is(tags, "access", "private") || roam_str_is(tags, "access", "no"))
+            f |= TD5_ROAM_TAG_ACCESS_PRIVATE;
+    }
+    return f;
+}
+
 /* One ROADS record -> one session way. Returns 1 when the way was kept. Nothing
  * is committed to the session until the way is complete, so a failed record
  * leaves no half-written points behind. */
@@ -189,6 +218,7 @@ static int roam_add_way(const cJSON *r, double upm, int tile)
     memset(w, 0, sizeof *w);
     w->way_id = (idj && cJSON_IsNumber(idj)) ? (int64_t)idj->valuedouble : -1;
     w->tile = tile;
+    w->tagf = roam_tag_bits(r);
     w->road.first = first;
     w->road.count = kept;
     w->road.minx = bb[0];

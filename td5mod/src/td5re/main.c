@@ -49,6 +49,7 @@
 #include "td5_i18n.h"     /* [I18N] UI-language catalog load at boot */
 #include "td5_roam_cache.h" /* GEO FREE ROAM cache reader (dev census hook) */
 #include "td5_roam_ribbon.h" /* GEO FREE ROAM ribbons + heights (dev test hook) */
+#include "td5_roam_junction.h" /* GEO FREE ROAM junction census (dev hook) */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1691,6 +1692,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* GEO FREE ROAM (F1 T4) dev test: TD5RE_ROAM_RIBBON_TEST=1 builds every casco
      * edge's ribbon, prints the census + determinism hashes and exits. */
     if (td5_roam_ribbon_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F1 T3) dev census: TD5RE_ROAM_JUNC_TEST=1 builds the street
+     * graph + junction patches over the casco, writes the census + JSON, exits. */
+    if (td5_roam_junction_dev_census())
         return 0;
 #endif
 
