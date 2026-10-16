@@ -7355,25 +7355,36 @@ int32_t td5_track_tri_height_v(const TD5_StripVertex *vt,
  * calls this helper. Until that wires, the helper is unreferenced. We keep
  * the prototype in td5_track.h so the sibling worktree can pick it up
  * without a re-port. */
+/* [GEO FREE ROAM F2-B] Strip wrapper over the pure core below (vertex table as a
+ * parameter, like td5_track_tri_height_v): the roam contact provider evaluates the
+ * heading normal of a ROAMTILE triangle with the same integer + FPU sequence. */
 void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
                                            int16_t vc_idx, int16_t *out_normal)
 {
-    TD5_StripVertex *va, *vb, *vc;
+    if (!out_normal || !s_vertex_table)
+        return;
+    td5_track_segment_normal_v(s_vertex_table, va_idx, vb_idx, vc_idx, out_normal);
+}
+
+void td5_track_segment_normal_v(const TD5_StripVertex *vt, int va_idx, int vb_idx,
+                                int vc_idx, int16_t *out_normal)
+{
+    const TD5_StripVertex *va, *vb, *vc;
     int32_t e1_neg_x, e1_neg_y, e1_neg_z;   /* local_c/8/4 = va - vb  */
     int32_t e2_neg_x, e2_neg_y, e2_neg_z;   /* local_18/14/10 = va - vc */
     int32_t nx, ny, nz;                      /* local_24/1c/20 */
     double len_sq, inv_norm;
     int16_t unx, uny, unz;
 
-    if (!out_normal || !s_vertex_table)
+    if (!out_normal || !vt)
         return;
 
     /* g_trackVertexPool + idx*6 -- vertex_at clamps neither (orig doesn't
      * either; vertex indices come from the dispatcher's vertex-base + offset
      * arithmetic and are pre-validated upstream). */
-    va = vertex_at((int)va_idx);
-    vb = vertex_at((int)vb_idx);
-    vc = vertex_at((int)vc_idx);
+    va = &vt[va_idx];
+    vb = &vt[vb_idx];
+    vc = &vt[vc_idx];
 
     /* MOVSX-then-SUB sequences at 0x00445E51..0x00445EA8.
      * Orig computes negated edges; the cross-product of two negated vectors

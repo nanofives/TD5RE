@@ -94,6 +94,11 @@ typedef struct {
     long mirror_fallback, mirror_corner_cmp, mirror_corner_diff, mirror_corner_fallback;
     long mirror_head_cmp, mirror_head_diff, mirror_head_fallback;
     long mirror_dh_max;
+    long mirror_diff_walker, mirror_diff_same, mirror_corner_walker, mirror_corner_same;
+    /* slot 0 ground gaps (24.8): transformed wheel bottom - ground, chassis - ground */
+    long gap_n, rest_n, chassis_seen;
+    int32_t gap_min, rest_min, rest_max, chassis_min_above;
+    int64_t rest_sum;
 } TD5_RoamPhysStats;
 void td5_roam_physics_stats(TD5_RoamPhysStats *out);
 
