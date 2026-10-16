@@ -489,11 +489,22 @@ int td5_roam_collect(const TD5_RoamResident *rs, int32_t x, int32_t z, TD5_RoamC
  * SECTION: boundary edges
  * ========================================================================== */
 
+#define WALL_EX_MAX    24         /* edges one probe may suppress / refine before the search gives up       */
+#define WALL_SAMPLE    50.0       /* units between coverage samples along an edge (11 cm)                    */
+#define WALL_COVER_EPS 8.0        /* units: how far outside an edge the "is it covered" test point sits    */
+
+/* Per-search table: an edge whose outward side is another drivable surface is not a wall (design
+ * 2.4 with T3b: the wall is the boundary of the UNION of the drivable surface). Mode 0 drops the
+ * edge for this search, mode 1 replaces its distance by the nearest UNCOVERED part's. */
+typedef struct { uint32_t slot, bi; int mode; double d2, qx, qz, tpar; } WallEx;
+
 typedef struct {
     int      found;
     double   d2, tpar, qx, qz;      /* squared distance, parameter on the segment, foot point (tile-local of `slot`) */
     uint32_t slot, bi;
     int32_t  lx, lz;                /* the probe in that tile's frame */
+    int      nex;
+    WallEx   ex[WALL_EX_MAX];
 } WallBest;
 
 static void bedge_ends(const RoamTile *t, const RoamBEdge *be, int32_t *ax, int32_t *az, int32_t *bx, int32_t *bz)
@@ -511,6 +522,82 @@ static void bedge_ends(const RoamTile *t, const RoamBEdge *be, int32_t *ax, int3
     *bx = ox + v1->x; *bz = oz + v1->z;
 }
 
+static void own_centroid(const RoamTile *t, int is_tri, uint32_t idx, double *cx, double *cz)
+{
+    double sx = 0.0, sz = 0.0;
+    int k, n = 0;
+    if (is_tri) {
+        const RoamTri *tr = &t->tri[idx];
+        for (k = 0; k < 3; k++) { sx += (double)(tr->ox + t->vert[tr->v[k]].x); sz += (double)(tr->oz + t->vert[tr->v[k]].z); n++; }
+    } else {
+        const TD5_StripSpan *sp = &t->span[idx];
+        const int L = span_lanes(sp);
+        int vl0, vl1, vr0, vr1, j;
+        td5_track_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
+        for (j = 0; j <= L; j++) {
+            sx += (double)(sp->origin_x + t->vert[vl0 + j].x + sp->origin_x + t->vert[vr0 + j].x);
+            sz += (double)(sp->origin_z + t->vert[vl0 + j].z + sp->origin_z + t->vert[vr0 + j].z);
+            n += 2;
+        }
+    }
+    *cx = sx / n; *cz = sz / n;
+}
+
+/* Is the point (tile-local, on boundary edge `bi`) lying inside another drivable primitive of about
+ * the same level? Tested a hair outside the edge, away from its own primitive. A surface more than
+ * 1.5 m away vertically (a deck over a road) does not cover. */
+static int wall_point_covered(const TD5_RoamResident *rs, uint32_t slot, uint32_t bi, double qx, double qz)
+{
+    const RoamTile *t = rs->tile[slot];
+    const RoamBEdge *be = &t->bedge[bi];
+    const int is_tri = (be->prim & ROAM_PRIM_TRI) != 0;
+    const uint32_t pidx = is_tri ? (uint32_t)(be->prim & 0x7FFF) : (uint32_t)be->prim;
+    const uint32_t own = ROAM_PRIM_MAKE(slot, is_tri, pidx);
+    int32_t ax, az, bx, bz;
+    double dx, dz, len, nx, nz, cx, cz;
+    TD5_RoamCand cand[ROAM_LOC_CAND];
+    TD5_RoamHit eh;
+    int n, i;
+    bedge_ends(t, be, &ax, &az, &bx, &bz);
+    dx = (double)(bx - ax); dz = (double)(bz - az);
+    len = sqrt(dx * dx + dz * dz);
+    if (len < 1.0) return 0;
+    own_centroid(t, is_tri, pidx, &cx, &cz);
+    nx = -dz / len; nz = dx / len;
+    if ((cx - qx) * nx + (cz - qz) * nz > 0.0) { nx = -nx; nz = -nz; }          /* outward */
+    eval_prim(rs, slot, is_tri, pidx, -1, iround(qx), iround(qz), &eh);
+    n = collect_place(rs, (int64_t)t->org_x + iround(qx + nx * WALL_COVER_EPS),
+                      (int64_t)t->org_z + iround(qz + nz * WALL_COVER_EPS), cand, ROAM_LOC_CAND);
+    for (i = 0; i < n; i++) {
+        const int64_t dh = (int64_t)cand[i].h - (int64_t)eh.ground_y;
+        if (cand[i].prim != own && dh <= ROAM_DECK_DROP && dh >= -ROAM_DECK_DROP) return 1;
+    }
+    return 0;
+}
+
+/* Percentage (0..100) of boundary edge `bi` of resident slot `slot` that lies inside another
+ * drivable primitive (sampled every WALL_SAMPLE units): 100 = never a wall, 0 = a full wall. */
+int td5_roam_wall_coverage(const TD5_RoamResident *rs, uint32_t slot, uint32_t bi)
+{
+    const RoamTile *t;
+    const RoamBEdge *be;
+    int32_t ax, az, bx, bz;
+    double dx, dz, len;
+    int k, nsamp, cov = 0;
+    if (slot >= (uint32_t)rs->nslot || !(t = rs->tile[slot]) || bi >= t->nbedge) return 0;
+    be = &t->bedge[bi];
+    bedge_ends(t, be, &ax, &az, &bx, &bz);
+    dx = (double)(bx - ax); dz = (double)(bz - az);
+    len = sqrt(dx * dx + dz * dz);
+    nsamp = (int)(len / WALL_SAMPLE) + 1;
+    if (nsamp < 2) nsamp = 2;
+    for (k = 0; k <= nsamp; k++) {
+        const double tt = (double)k / (double)nsamp;
+        if (wall_point_covered(rs, slot, bi, (double)ax + tt * dx, (double)az + tt * dz)) cov++;
+    }
+    return (100 * cov) / (nsamp + 1);
+}
+
 static void wall_consider(const TD5_RoamResident *rs, uint32_t slot, uint32_t bi, int layer,
                           int32_t lx, int32_t lz, WallBest *best)
 {
@@ -518,16 +605,24 @@ static void wall_consider(const TD5_RoamResident *rs, uint32_t slot, uint32_t bi
     const RoamBEdge *be = &t->bedge[bi];
     int32_t ax, az, bx, bz;
     double dx, dz, len2, tt, qx, qz, ex, ez, d2;
+    int k;
     if (layer != LOC_NO_LAYER && (int)(int8_t)be->layer != layer) return;
-    bedge_ends(t, be, &ax, &az, &bx, &bz);
-    dx = (double)(bx - ax); dz = (double)(bz - az);
-    len2 = dx * dx + dz * dz;
-    tt = len2 > 0.0 ? ((double)(lx - ax) * dx + (double)(lz - az) * dz) / len2 : 0.0;
-    if (tt < 0.0) tt = 0.0;
-    if (tt > 1.0) tt = 1.0;
-    qx = (double)ax + tt * dx; qz = (double)az + tt * dz;
-    ex = qx - (double)lx; ez = qz - (double)lz;
-    d2 = ex * ex + ez * ez;
+    for (k = 0; k < best->nex; k++)
+        if (best->ex[k].slot == slot && best->ex[k].bi == bi) break;
+    if (k < best->nex) {
+        if (best->ex[k].mode == 0) return;
+        d2 = best->ex[k].d2; qx = best->ex[k].qx; qz = best->ex[k].qz; tt = best->ex[k].tpar;
+    } else {
+        bedge_ends(t, be, &ax, &az, &bx, &bz);
+        dx = (double)(bx - ax); dz = (double)(bz - az);
+        len2 = dx * dx + dz * dz;
+        tt = len2 > 0.0 ? ((double)(lx - ax) * dx + (double)(lz - az) * dz) / len2 : 0.0;
+        if (tt < 0.0) tt = 0.0;
+        if (tt > 1.0) tt = 1.0;
+        qx = (double)ax + tt * dx; qz = (double)az + tt * dz;
+        ex = qx - (double)lx; ez = qz - (double)lz;
+        d2 = ex * ex + ez * ez;
+    }
     if (best->found) {
         if (d2 > best->d2) return;
         if (d2 == best->d2) {
@@ -608,11 +703,13 @@ static void wall_scan_all(const TD5_RoamResident *rs, int64_t px, int64_t pz, in
 
 /* Nearest boundary edge: cell rings 0..3 around the probe in every candidate tile,
  * then a scan of every resident tile's BEDG (design 1.9 step 7). */
-static int wall_search(const TD5_RoamResident *rs, int64_t px, int64_t pz, int layer, WallBest *best)
+static int wall_search_raw(const TD5_RoamResident *rs, int64_t px, int64_t pz, int layer, WallBest *best,
+                           int brute)
 {
     RCand rc[9];
     int nc, ci, r;
-    memset(best, 0, sizeof *best);
+    best->found = 0;
+    if (brute) { wall_scan_all(rs, px, pz, layer, best, 0); return best->found; }
     nc = res_cands(rs, px, pz, (double)(LOC_WALL_RINGS + 1) * (double)ROAM_GRID_CELL, rc);
     for (r = 0; r <= LOC_WALL_RINGS; r++) {
         for (ci = 0; ci < nc; ci++) {
@@ -636,6 +733,49 @@ static int wall_search(const TD5_RoamResident *rs, int64_t px, int64_t pz, int l
     }
     if (best->found) return 1;
     wall_scan_all(rs, px, pz, layer, best, 1);
+    return best->found;
+}
+
+/* The nearest edge of the UNION's boundary: the raw nearest edge, unless its foot lies inside another
+ * drivable primitive. Then the edge is replaced by its nearest uncovered part (sampled), or dropped
+ * when none is left, and the search repeats. brute = reference scan over every edge (self-test). */
+static int wall_search(const TD5_RoamResident *rs, int64_t px, int64_t pz, int layer, WallBest *best, int brute)
+{
+    int iter;
+    memset(best, 0, sizeof *best);
+    for (iter = 0; iter <= WALL_EX_MAX; iter++) {
+        const RoamTile *t;
+        int k;
+        if (!wall_search_raw(rs, px, pz, layer, best, brute)) return 0;
+        for (k = 0; k < best->nex; k++)
+            if (best->ex[k].slot == best->slot && best->ex[k].bi == best->bi) break;
+        if (k < best->nex) return 1;                          /* an already refined (uncovered) part */
+        if (!wall_point_covered(rs, best->slot, best->bi, best->qx, best->qz)) return 1;
+        if (best->nex >= WALL_EX_MAX) return 1;               /* give up refining, keep the nearest */
+        t = rs->tile[best->slot];
+        {
+            WallEx *e = &best->ex[best->nex];
+            const RoamBEdge *be = &t->bedge[best->bi];
+            int32_t ax, az, bx, bz;
+            double dx, dz, len, bd2 = -1.0;
+            int s, nsamp;
+            bedge_ends(t, be, &ax, &az, &bx, &bz);
+            dx = (double)(bx - ax); dz = (double)(bz - az);
+            len = sqrt(dx * dx + dz * dz);
+            nsamp = (int)(len / WALL_SAMPLE) + 1;
+            if (nsamp < 2) nsamp = 2;
+            e->slot = best->slot; e->bi = best->bi; e->mode = 0;
+            for (s = 0; s <= nsamp; s++) {
+                const double tt = (double)s / (double)nsamp;
+                const double qx = (double)ax + tt * dx, qz = (double)az + tt * dz;
+                const double ex = qx - (double)best->lx, ez = qz - (double)best->lz;
+                const double d2 = ex * ex + ez * ez;
+                if (wall_point_covered(rs, best->slot, best->bi, qx, qz)) continue;
+                if (bd2 < 0.0 || d2 < bd2) { bd2 = d2; e->mode = 1; e->d2 = d2; e->qx = qx; e->qz = qz; e->tpar = tt; }
+            }
+            best->nex++;
+        }
+    }
     return best->found;
 }
 
@@ -774,7 +914,7 @@ int td5_roam_locate(const TD5_RoamResident *rs, int32_t x, int32_t z, int32_t y,
         /* design 1.9 step 6: on a deck, a surface far below is not ground, it is the
          * side of the bridge */
         if (has_y && hint_ok && hint_layer >= 1 && !from_above && cand[best].h < (int32_t)((int64_t)y - ROAM_DECK_DROP)) {
-            if (wall_search(rs, px, pz, hint_layer, &w)) {
+            if (wall_search(rs, px, pz, hint_layer, &w, 0)) {
                 fill_outside(rs, &w, out);
                 return 1;
             }
@@ -794,8 +934,8 @@ int td5_roam_locate(const TD5_RoamResident *rs, int32_t x, int32_t z, int32_t y,
         RCand rc[9];
         if (res_cands(rs, px, pz, 0.0, rc) == 0) return 0;
     }
-    if (!wall_search(rs, px, pz, hint_ok ? hint_layer : LOC_NO_LAYER, &w) &&
-        !(hint_ok && wall_search(rs, px, pz, LOC_NO_LAYER, &w)))
+    if (!wall_search(rs, px, pz, hint_ok ? hint_layer : LOC_NO_LAYER, &w, 0) &&
+        !(hint_ok && wall_search(rs, px, pz, LOC_NO_LAYER, &w, 0)))
         return 0;
     fill_outside(rs, &w, out);
     return 1;
@@ -960,6 +1100,83 @@ static int synth_decks(FILE *f, int *ntests)
     return fails;
 }
 
+/* Two flat 2-lane carriageways of one level that overlap (the Av 25 / Av 13 case of T3b): A is
+ * x -3000..3000 x z -750..750, B is x -1500..4500 x z 250..1750. A's right kerb (x = 3000) lies
+ * inside B for z 250..750, B's left kerb (x = -1500) inside A for the same z range. */
+static int synth_overlap(FILE *f, int *ntests)
+{
+    enum { NX = 34, NCELL = NX * NX, PER = 6 };
+    TD5_StripSpan sp[2];
+    TD5_StripVertex vt[12];
+    RoamEdgeRec er[2];
+    RoamBEdge be[4];
+    RoamTile t;
+    RoamGrid g;
+    TD5_RoamResident *rs = (TD5_RoamResident *)calloc(1, sizeof *rs);
+    uint32_t *gw = (uint32_t *)calloc(5u + NCELL + 1u + (size_t)NCELL * PER, sizeof(uint32_t));
+    int c, row, j, fails = 0, n = 0;
+    const int64_t X0 = 55000, Z0 = 55000;
+    static const int xl[2] = { -3000, -1500 }, zc[2] = { 0, 1000 };
+    if (!rs || !gw) { free(rs); free(gw); return 1; }
+    memset(sp, 0, sizeof sp); memset(vt, 0, sizeof vt); memset(er, 0, sizeof er); memset(be, 0, sizeof be);
+    memset(&t, 0, sizeof t); memset(&g, 0, sizeof g);
+    for (c = 0; c < 2; c++) {
+        sp[c].span_type = 1; sp[c].surface_attribute = 0x11; sp[c].pad_02[1] = 2;
+        sp[c].left_vertex_index = (uint16_t)(c * 6); sp[c].right_vertex_index = (uint16_t)(c * 6 + 3);
+        sp[c].link_next = sp[c].link_prev = -1;
+        sp[c].origin_x = (int32_t)X0; sp[c].origin_z = (int32_t)(Z0 + zc[c]); sp[c].origin_y = 1000;
+        for (row = 0; row < 2; row++)
+            for (j = 0; j < 3; j++) {
+                TD5_StripVertex *v = &vt[c * 6 + row * 3 + j];
+                v->x = (int16_t)(xl[c] + 3000 * j);
+                v->y = 0;
+                v->z = (int16_t)(row == 0 ? -750 : 750);
+            }
+        er[c].key = (uint64_t)(c + 1); er[c].lanes = 2;
+        er[c].span_first = (uint16_t)c; er[c].span_count = 1;
+    }
+    be[0].v[0] = 0; be[0].v[1] = 3; be[0].prim = 0; be[0].kind = ROAM_BEDGE_KERB;
+    be[1].v[0] = 2; be[1].v[1] = 5; be[1].prim = 0; be[1].kind = ROAM_BEDGE_KERB;
+    be[2].v[0] = 6; be[2].v[1] = 9; be[2].prim = 1; be[2].kind = ROAM_BEDGE_KERB;
+    be[3].v[0] = 8; be[3].v[1] = 11; be[3].prim = 1; be[3].kind = ROAM_BEDGE_KERB;
+    gw[0] = NX; gw[1] = NX; gw[2] = ROAM_GRID_CELL; gw[3] = 1; gw[4] = 0;
+    for (c = 0; c <= NCELL; c++) gw[5 + c] = (uint32_t)c * PER;
+    for (c = 0; c < NCELL; c++) {
+        uint32_t *it = gw + 5 + NCELL + 1 + (size_t)c * PER;
+        it[0] = (ROAM_ITEM_SPAN << 30) | 0u; it[1] = (ROAM_ITEM_SPAN << 30) | 1u;
+        for (j = 0; j < 4; j++) it[2 + j] = (ROAM_ITEM_BEDGE << 30) | (uint32_t)j;
+    }
+    t.span = sp; t.nspan = 2; t.vert = vt; t.nvert = 12; t.bedge = be; t.nbedge = 4; t.edge = er; t.nedge = 2;
+    t.grid = gw; t.ngrid_words = 5u + NCELL + 1u + NCELL * PER;
+    t.grid_nx = NX; t.grid_nz = NX; t.grid_cell = ROAM_GRID_CELL; t.grid_margin = 1;
+    t.grid_start = gw + 5; t.grid_item = gw + 5 + NCELL + 1; t.nitem = NCELL * PER;
+    g.c = 1.0; g.s = 0.0; g.tile = ROAM_TILE_UNITS;
+    td5_roam_resident_init(rs, &g, 0, 0, 0);
+    td5_roam_resident_add(rs, &t);
+#define SYN(desc, cond) do { n++; if (!(cond)) { fails++; fprintf(f, "  (f) synthetic FAIL: %s (prim %08x inside %d push %d,%d dist %d)\n", \
+        desc, h.prim, h.inside, h.push_x, h.push_z, h.push_dist); } } while (0)
+    {
+        TD5_RoamHit h;
+        const int cv0 = td5_roam_wall_coverage(rs, 0, 0), cv1 = td5_roam_wall_coverage(rs, 0, 1);
+        const int cv2 = td5_roam_wall_coverage(rs, 0, 2), cv3 = td5_roam_wall_coverage(rs, 0, 3);
+        memset(&h, 0, sizeof h);
+        SYN("A's left kerb is a full wall (coverage 0)", cv0 == 0);
+        SYN("A's right kerb is covered by B for a third of its length (20..45 %)", cv1 >= 20 && cv1 <= 45);
+        SYN("B's left kerb is covered by A for a third of its length (20..45 %)", cv2 >= 20 && cv2 <= 45);
+        SYN("B's right kerb is a full wall (coverage 0)", cv3 == 0);
+        td5_roam_locate(rs, w24(X0 + 3200, 0), w24(Z0 - 300, 0), 0, 0, ROAM_PRIM_NONE, &h);
+        SYN("outside past A's uncovered kerb part: push 200 units back in", !h.inside && h.push_x < 0 && abs(h.push_dist - 200) <= 1);
+        td5_roam_locate(rs, w24(X0 - 1700, 0), w24(Z0 + 900, 0), 0, 0, ROAM_PRIM_NONE, &h);
+        SYN("outside past B's uncovered kerb part: push 200 units back in", !h.inside && h.push_x > 0 && abs(h.push_dist - 200) <= 1);
+        td5_roam_locate(rs, w24(X0 - 1400, 0), w24(Z0 + 500, 0), 0, 0, ROAM_PRIM_NONE, &h);
+        SYN("inside the overlap: on a surface, no push", h.inside && h.push_dist == 0);
+    }
+#undef SYN
+    if (ntests) *ntests = n;
+    free(rs); free(gw);
+    return fails;
+}
+
 int td5_roam_locate_dev_test(void)
 {
     static const char place[] = "la_plata_partido";
@@ -975,7 +1192,7 @@ int td5_roam_locate_dev_test(void)
     LARGE_INTEGER qf, q0, q1;
     long a_tot = 0, a_self = 0, a_other = 0, a_fail = 0, a_deg = 0, a_dn = 0, a_tri = 0, a_quad = 0, a_dn_tri = 0, a_other_far = 0;
     int a_other_dh = 0;
-    long b_brute = 0, b_brute_bad = 0, b_sliver = 0;
+    long b_brute = 0, b_brute_bad = 0, b_sliver = 0, b_cov_full = 0, b_cov_part = 0, b_supp_mid = 0;
     long b_tot = 0, b_pass = 0, b_fail = 0, b_skip_in = 0, b_skip_other = 0, b_skip_tri = 0, b_deg = 0, b_deck = 0, b_deck_pass = 0, b_dist_fail = 0, b_dot_fail = 0;
     long c_gap_same = 0, c_graze = 0;
     long c_samp = 0, c_perm = 0, c_pair = 0, c_pair_dh_max = 0, c_gap = 0, c_both_in = 0, c_edgekey = 0;
@@ -1116,6 +1333,12 @@ int td5_roam_locate_dev_test(void)
             dx = (double)(bx - ax); dz = (double)(bz - az);
             len = sqrt(dx * dx + dz * dz);
             if (len < 2.0) { b_deg++; continue; }
+            {
+                /* union rule census: how much of this edge lies inside another drivable primitive */
+                const int cov = td5_roam_wall_coverage(rs, (uint32_t)i, bi);
+                if (cov >= 100) b_cov_full++; else if (cov > 0) b_cov_part++;
+                if (wall_point_covered(rs, (uint32_t)i, bi, 0.5 * ((double)ax + bx), 0.5 * ((double)az + bz))) { b_supp_mid++; continue; }
+            }
             mx = 0.5 * ((double)ax + bx) + t->org_x; mz = 0.5 * ((double)az + bz) + t->org_z;
             nx = -dz / len; nz = dx / len;
             prim_centroid(t, pidx, is_tri, &ccx, &ccz);
@@ -1144,8 +1367,7 @@ int td5_roam_locate_dev_test(void)
                 if (!dotok || (bi & 63u) == 0u) {
                     WallBest wb;
                     int lay = td5_roam_prim_layer(rs, prim);
-                    memset(&wb, 0, sizeof wb);
-                    wall_scan_all(rs, qx, qz, lay, &wb, 0);
+                    wall_search(rs, qx, qz, lay, &wb, 1);
                     b_brute++;
                     if (!wb.found || labs((long)iround(sqrt(wb.d2)) - (long)h.push_dist) > 1) {
                         b_brute_bad++; b_fail++;
@@ -1170,8 +1392,11 @@ int td5_roam_locate_dev_test(void)
                "probe landed on another surface (skipped) %ld; probe in a sliver between two surfaces, the nearest wall is genuinely another edge closer than 0.5 m "
                "(confirmed by brute force, not a failure) %ld; FAIL %ld (push against the inward normal %ld, push too long %ld, grid search != brute force %ld, "
                "of %ld brute-force comparisons: every failing case + every 64th edge); "
-               "patch kerb segment on no triangle that owns both ends (skipped) %ld; shorter than 2 units (skipped) %ld\n",
-            b_tot, b_pass, b_deck_pass, b_deck, b_skip_in, b_sliver, b_fail, b_dot_fail, b_dist_fail, b_brute_bad, b_brute, b_skip_tri, b_deg);
+               "patch kerb segment on no triangle that owns both ends (skipped) %ld; shorter than 2 units (skipped) %ld\n"
+               "(b) union rule: boundary edges lying wholly inside another drivable prim, never a wall: %ld; partly inside one (only the uncovered part pushes): %ld; "
+               "edges whose midpoint is covered, so not probed above: %ld\n",
+            b_tot, b_pass, b_deck_pass, b_deck, b_skip_in, b_sliver, b_fail, b_dot_fail, b_dist_fail, b_brute_bad, b_brute, b_skip_tri, b_deg,
+            b_cov_full, b_cov_part, b_supp_mid);
     fail_total += b_fail;
     fflush(f);
 
@@ -1390,6 +1615,12 @@ int td5_roam_locate_dev_test(void)
         const int sf = synth_decks(f, &nsyn);
         fprintf(f, "(e) synthetic deck-over-road tile (the casco has none): %d expectations (deck vs road by probe Y, by hint, without Y, deck side wall), FAIL %d\n", nsyn, sf);
         fail_total += sf;
+        nsyn = 0;
+        {
+            const int so = synth_overlap(f, &nsyn);
+            fprintf(f, "(f) synthetic overlapping carriageways: %d expectations (partial coverage of the overlapped kerbs, pushes from the uncovered parts), FAIL %d\n", nsyn, so);
+            fail_total += so;
+        }
         fflush(f);
     }
 

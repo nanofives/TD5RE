@@ -116,6 +116,12 @@ int td5_roam_collect(const TD5_RoamResident *rs, int32_t x, int32_t z,
 int td5_roam_prim_eval(const TD5_RoamResident *rs, uint32_t prim, int32_t x, int32_t z,
                        TD5_RoamHit *out);
 
+/* Percentage (0..100) of boundary edge `bi` of resident slot `slot` that lies inside another drivable
+ * primitive of about the same level (sampled every 11 cm). The wall rule is the boundary of the UNION
+ * of the drivable surface: an edge, or the part of one, inside another prim (overlapping carriageways,
+ * Y splits side by side) is not a wall and td5_roam_locate never pushes toward it. 100 = never a wall. */
+int td5_roam_wall_coverage(const TD5_RoamResident *rs, uint32_t slot, uint32_t bi);
+
 /* Layer of a primitive (ribbon edge layer; 0 for a patch), INT8_MIN for a bad id. */
 int td5_roam_prim_layer(const TD5_RoamResident *rs, uint32_t prim);
 /* The EDGE record of a ribbon prim, or NULL (patch / bad id). */
