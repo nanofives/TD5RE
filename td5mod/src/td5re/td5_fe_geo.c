@@ -48,6 +48,7 @@
 #include "td5_i18n.h"
 #include "td5_config.h"        /* shared TD5RE_* env-knob accessors */
 #include "td5_frontend_internal.h"
+#include "td5_roam_mode.h"     /* [GEO FREE ROAM F2-A] the FREE ROAM button */
 
 #include <math.h>
 #include <stdio.h>
@@ -82,6 +83,9 @@
 #define GEO_BTN_BUILD_W  140
 #define GEO_BTN_BACK_X   360
 #define GEO_BTN_BACK_W    96
+/* [GEO FREE ROAM F2-A] FREE ROAM sits right of BACK, under the options panel's edge (628). */
+#define GEO_BTN_ROAM_X   462
+#define GEO_BTN_ROAM_W   166
 
 /* The OPTIONS panel: a section selector, up to GEO_OPT_VIS rows of the
  * current section, a help box for the focused row, and DEFAULTS. */
@@ -105,6 +109,7 @@ enum {
     GEO_BTN_SECT,
     GEO_BTN_ROW0,
     GEO_BTN_DEFAULTS = GEO_BTN_ROW0 + GEO_OPT_VIS,
+    GEO_BTN_ROAM,                  /* [GEO FREE ROAM F2-A] created last, after DEFAULTS */
     GEO_BTN_COUNT
 };
 
@@ -1594,6 +1599,10 @@ static void geo_screen_init(void)
      * Screen_AutoTrackOptions init); this screen reads the place from its own
      * map, so hand the decision back to the knob the way it was before. */
     td5_geo_force_place(NULL);
+    /* [GEO FREE ROAM F2-A] arriving on the map ends any pending roam: BACK / ESC out of the
+     * roam car select returns here without a dedicated hook, and a stale ARMED session would
+     * turn the next ordinary race into a roam race */
+    td5_roam_cancel();
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,
@@ -1632,6 +1641,13 @@ static void geo_screen_init(void)
             TD5_LOG_E(LOG_TAG, "GEO GENERATOR: option sections cover %d of %d rows",
                       b, GEO_OPTS);
         geo_opt_set_sect(s_opt_sect);
+    }
+    {
+        /* [GEO FREE ROAM F2-A] FREE ROAM: drive the real city from the START pin (the first click) */
+        const int rb = frontend_create_button(TR("FREE ROAM"), GEO_BTN_ROAM_X, GEO_BTN_Y,
+                                              GEO_BTN_ROAM_W, GEO_BTN_H);
+        if (rb != GEO_BTN_ROAM)
+            TD5_LOG_E(LOG_TAG, "GEO GENERATOR: FREE ROAM button got index %d, expected %d", rb, GEO_BTN_ROAM);
     }
 
     /* Tiles are fetched only between open and close, so the screen is the
@@ -1879,6 +1895,38 @@ static int geo_commit_and_register(void)
     return slot;
 }
 
+/* [GEO FREE ROAM F2-A] The spawn for FREE ROAM: the START pin (the first click), as a point of a
+ * place that has built road tiles. 0 (button greyed) with no pin or outside the built tiles. */
+static int geo_roam_spawn(TD5_RoamSpawn *out)
+{
+    /* the lookup parses PLACE.JSON + ROAMGRID.JSON, so it is memoised on the pin (asked every frame) */
+    static struct { int valid; double lat, lon; int ok; TD5_RoamSpawn sp; } memo;
+    if (s_n_pts < 1) return 0;
+    if (!memo.valid || memo.lat != s_pts[0].lat || memo.lon != s_pts[0].lon) {
+        memset(&memo.sp, 0, sizeof memo.sp);
+        memo.ok = td5_roam_place_for_latlon(s_pts[0].lat, s_pts[0].lon, memo.sp.place,
+                                            sizeof memo.sp.place, &memo.sp.spawn_px, &memo.sp.spawn_pz);
+        memo.sp.spawn_yaw = -1;           /* along the nearest street */
+        memo.sp.car_index = 0;            /* the car-select screen fills it in */
+        memo.lat = s_pts[0].lat; memo.lon = s_pts[0].lon; memo.valid = 1;
+    }
+    if (memo.ok && out) *out = memo.sp;
+    return memo.ok;
+}
+
+/* FREE ROAM: arm the session, then the NORMAL car select (BACK there returns here, OK launches). */
+static void geo_do_roam(void)
+{
+    TD5_RoamSpawn sp;
+    if (!geo_roam_spawn(&sp)) { frontend_play_sfx(10); return; }
+    td5_roam_begin(&sp);
+    frontend_roam_prepare_car_select();
+    frontend_play_sfx(3);
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: FREE ROAM at %.5f,%.5f (%s) -> car select",
+              s_pts[0].lat, s_pts[0].lon, sp.place);
+    geo_leave(TD5_SCREEN_CAR_SELECTION);
+}
+
 static void geo_do_build(void)
 {
     if (geo_commit_and_register() >= 0) geo_leave(s_parent_screen);
@@ -1942,6 +1990,7 @@ void Screen_GeoGenerator(void)
 
     s_buttons[GEO_BTN_CLEAR].disabled = (s_n_pts > 0) ? 0 : 1;
     s_buttons[GEO_BTN_BUILD].disabled = geo_route_is_buildable() ? 0 : 1;
+    s_buttons[GEO_BTN_ROAM].disabled = geo_roam_spawn(NULL) ? 0 : 1;
 
     if (frontend_check_escape()) {
         frontend_play_sfx(5);
@@ -1989,6 +2038,9 @@ void Screen_GeoGenerator(void)
         case GEO_BTN_BACK:
             frontend_play_sfx(5);
             geo_leave(s_parent_screen);
+            return;
+        case GEO_BTN_ROAM:
+            geo_do_roam();
             return;
         default:
             /* confirm on a row (Enter, pad A, double click) = next value */

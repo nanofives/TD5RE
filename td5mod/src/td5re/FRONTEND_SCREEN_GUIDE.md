@@ -339,6 +339,14 @@ button that exists only while that entry is the pick:
 * The geo panel's route is plotted NORTH UP: `td5_geo_preview_route` undoes the
   build's `rotation_rad` (`TD5RE_GEO_PREVIEW_NORTH_UP=0` = world frame).
 * Neither RANDOMIZE nor a network lobby lands on the geo entry.
+* **FREE ROAM button (GEO FREE ROAM F2-A)** on the geo generator screen (`GEO_BTN_ROAM`, x462 w166,
+  right of BACK; created LAST so the panel's button map keeps its numbers). Enabled when the START
+  pin (`s_pts[0]`) lies in a built roam tile (`td5_roam_place_for_latlon`, memoised on the pin).
+  Press -> `td5_roam_begin` (arms the session) + `frontend_roam_prepare_car_select` (single race,
+  one human, no MP/net flow) -> the NORMAL `CAR_SELECTION`. There, with `td5_roam_armed()`: OK skips
+  track select / race options and launches (`s_selected_track = td5_roam_host_track()`,
+  `frontend_init_race_schedule`); BACK cancels the session and returns to the geo screen. Leaving
+  the race (pause row LEAVE FREE ROAM) comes back to the geo screen (`td5_game.c`, no results screen).
 * **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
   STUDIO chip was created as button 17 and silently refused (`-1`) until round
   1026. If you add a button past the last index of a screen, check the return value.

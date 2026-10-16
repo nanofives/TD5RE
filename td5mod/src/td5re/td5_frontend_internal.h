@@ -129,6 +129,10 @@ int  frontend_geo_generator_parent_screen(void);
  * nothing is armed. */
 void frontend_geo_pick_arm(int slot);
 int  frontend_geo_pick_slot(void);
+/* [GEO FREE ROAM F2-A] Entering CAR SELECT from the geo selector's FREE ROAM button: single race
+ * type, single local player, no net/MP flow. The car-select exit then launches the roam race
+ * (OK) or returns to the geo selector (BACK) -- td5_fe_race.c, off td5_roam_armed(). */
+void frontend_roam_prepare_car_select(void);
 /* [ROUND 1026 L] The one geo slot the track selectors list as the GEOSPATIAL
  * TRACK entry (-1 = no real place registered). See td5_fe_race.c. */
 int  frontend_geo_entry_slot(void);

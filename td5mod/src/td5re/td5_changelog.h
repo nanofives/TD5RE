@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "October 16 (free roam mode)" },
+    { CL_ITEM,    "New FREE ROAM button on the map screen, next to BACK:" },
+    { CL_ITEM,    "  pick the car, then drive off from the START pin on" },
+    { CL_ITEM,    "  the La Plata casco. Plain look for now, no traffic," },
+    { CL_ITEM,    "  no laps. The pause menu row LEAVE FREE ROAM comes" },
+    { CL_ITEM,    "  back to the map." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 15 (free roam groundwork)" },
     { CL_ITEM,    "Dev builds only: the road cache for free roam is read" },
     { CL_ITEM,    "  and counted. Nothing changes in the race." },
