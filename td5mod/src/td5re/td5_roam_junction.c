@@ -27,9 +27,18 @@
  *     between the two cut rows seen from the centroid, is dropped (curved arms,
  *     carriageways that cross just before a junction).
  *   - Fallbacks the design does not have, all counted in the census:
- *     NORMAL -> SIMPLE (no corners, cut rows past every member node) -> HULL of
- *     the cut rows -> SPLIT (one-node clusters). Ear clipping only runs on an
- *     outline that passes outline_simple().
+ *     NORMAL -> UNION (F1-T3b: the outline is the union of the paved pieces,
+ *     see "union outline" below) -> SIMPLE (no corners, cut rows past every
+ *     member node) -> HULL of the cut rows -> SPLIT (one-node clusters). Ear
+ *     clipping only runs on an outline that passes outline_simple(). On La
+ *     Plata (casco bbox + 300 m) UNION takes all 60 clusters NORMAL cannot
+ *     build, so SIMPLE / HULL / SPLIT stay at 0 (_archive/roam/F1/T3b).
+ *   - UNION may leave a hole in a patch (an unpaved island, walled): its
+ *     outline segments follow the outer ring's (TD5_ROAM_CL_HOLE).
+ *   - UNION cannot put a cut row on the outline when two arms overlap for
+ *     their whole length (OSM carriageways drawn closer than their widths, a
+ *     Y split whose gore lies past half the arm): those clusters are flagged
+ *     TD5_ROAM_CL_ROW_COVERED, both rows stay side by side near the junction.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -588,8 +597,11 @@ fail:
  * ribbon (the first U_AHEAD beyond the cut). That opens a Y split's gore: both
  * branches are cut past the point where their carriageways separate, and the
  * gore nose is the outline vertex between the two rows. Two carriageways that
- * overlap for their whole length (OSM draws them 3-4 m apart) never separate;
- * those arms go back to their first cut and the cluster is flagged ROW_COVERED.
+ * overlap for their whole length (OSM draws them 3-4 m apart) never separate:
+ * an arm still pushed at its limit becomes a PARTNER of the arms pushing it,
+ * partners ignore each other, all cuts restart, and a partner then takes the
+ * cut of the partner covering its row (rows side by side, neither ribbon under
+ * the other's stub). The cluster is flagged ROW_COVERED.
  * The union boundary is found by splitting every piece edge at every crossing
  * and keeping the sub-segments no other piece covers. Every reflex outline
  * vertex (a block corner) gets a kerb fillet; a fillet that needs more kerb
