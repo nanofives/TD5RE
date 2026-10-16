@@ -1,0 +1,32 @@
+sync race
+throttle 1
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++240 left 1
++60 left 0
++240 right 1
++60 right 0
++300 log roam_drive_done
+quit

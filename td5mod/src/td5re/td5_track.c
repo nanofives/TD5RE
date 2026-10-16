@@ -1173,7 +1173,11 @@ static int build_placeholder_display_lists(void)
 /** Get a vertex from the vertex table by index. */
 static inline TD5_StripVertex *vertex_at(int index)
 {
-    return &s_vertex_table[index];
+    /* [GEO FREE ROAM F2-A / F0b crash risk 4] no vertex table (strip unloaded, e.g. roam)
+     * is NULL, so the many `if (!v)` guards on this helper are live instead of dead. There
+     * is still no upper bound (the table length is not stored): callers keep passing
+     * indices taken from a bounds-checked span. */
+    return s_vertex_table ? &s_vertex_table[index] : NULL;
 }
 
 /** Get a span record by index. */

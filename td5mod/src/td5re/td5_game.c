@@ -39,6 +39,7 @@
 #include "td5_camera.h"
 #include "td5_pick.h"   /* dev free-cam geometry picker */
 #include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -1677,6 +1678,16 @@ int td5_game_tick(void) {
                 TD5_LOG_I(LOG_TAG, "Replay ended (result=%d) -> real results restored, replay flags cleared", result);
             }
 
+            /* [GEO FREE ROAM F2-A] leaving free roam (pause menu "LEAVE FREE ROAM", or END
+             * RACE NOW) goes back to the geo selector the player came from: no results screen */
+            if (td5_roam_active()) {
+                td5_roam_end();
+                g_td5.game_state = TD5_GAMESTATE_MENU;
+                TD5_LOG_I(LOG_TAG, "Race exited (result=%d) -> leave free roam -> geo selector", result);
+                td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+                return 0;
+            }
+
             if (g_td5.benchmark_active) {
                 /* [CONFIRMED @ 0x00428D80 WriteBenchmarkResultsTgaReport]:
                  * orig RunRaceFrame calls this on race-end when benchmark
@@ -2900,6 +2911,7 @@ static void init_race_modes_and_seed(void)
     if (g_td5.wanted_mode_enabled)   g_special_encounter = 0;
     if (g_td5.game_type != 0)        g_special_encounter = 0;
     if (g_track_is_circuit)          g_special_encounter = 0;
+    if (td5_roam_active())           g_special_encounter = 0;   /* roam: no timers, no checkpoints */
     TD5_LOG_I(LOG_TAG,
               "InitRace: g_special_encounter=%d (cp_timers=%d gt=%d circuit=%d "
               "net=%d split=%d wanted=%d cops/se_enabled=%d)",
@@ -3505,6 +3517,9 @@ static void init_race_level_and_assets(void)
      * so g_track_is_circuit / g_track_type_mode must be derived after this call. */
     loadscreen_phase(5, "Loading track data");
     td5_asset_load_level(g_td5.track_index);
+    /* [GEO FREE ROAM F2-A] the host level's LEVELINF must not turn roam into a circuit
+     * (lap counter, lap logic, checkpoint timers): roam is point-to-point with no finish */
+    if (td5_roam_active()) g_td5.track_type = TD5_TRACK_POINT_TO_POINT;
     g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     g_track_type_mode = g_track_is_circuit ? 1 : 0;
     /* [RT RESTART HANG FIX 2026-08-12] The models blob + mesh/texture caches were
@@ -3990,7 +4005,8 @@ static void init_race_track_resources(void)
             g_td5.drag_race_enabled)
             world_x = 30;
         g_trackType = g_track_is_circuit;   /* faithful: circuit forces orbit mode */
-        td5_camera_bind_trackside_profiles(world_x);
+        /* [GEO FREE ROAM F2-A / F0b crash risk 3] roam has no span table: bind nothing */
+        td5_camera_bind_trackside_profiles(td5_roam_active() ? 0 : world_x);
         InitializeTracksideCameraProfiles();   /* self-guards NULL -> count 0 */
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 6b: replay trackside cameras track=%d reverse=%d "
@@ -4482,6 +4498,13 @@ static void init_race_spawn_actors(void)
 
         for (int slot = 0; slot < racer_count; ++slot) {
             uint8_t *actor = s_actor_memory + slot * TD5_ACTOR_STRIDE;
+            /* [GEO FREE ROAM F2-A] no strip, no grid: the player goes to the spawn point
+             * (span fields -1 are written AFTER td5_ai_init_race_actor_runtime above,
+             * and AFTER td5_ai_invalidate_actor_track_state which writes 0). */
+            if (td5_roam_active()) {
+                if (slot == 0) td5_roam_session_spawn(slot, actor);
+                continue;
+            }
             int span_index;
             int world_x = 0;
             int world_y = 0;
@@ -5237,6 +5260,26 @@ static void init_race_viewports_and_hud(void)
 
 static void init_race_checkpoints(void)
 {
+    /* [GEO FREE ROAM F2-A] roam has no checkpoints, laps, timers or finish: zero every
+     * record the later race logic keys on (F0b game finding 5: a stale record would
+     * arm the P2P timer and DNF every slot on expiry) and disable the per-slot timer. */
+    if (td5_roam_active()) {
+        memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
+        s_levelinf_checkpoint_config = 0;
+        memset(s_levelinf_checkpoint_spans, 0, sizeof(s_levelinf_checkpoint_spans));
+        s_levelinf_track_subvariant = 0;
+        s_levelinf_span_count = 0;
+        s_td6_cp_count = 0;
+        s_td6_finish_span = 0;
+        g_special_encounter = 0;
+        for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+            TD5_Actor *ai = td5_game_get_actor(i);
+            s_metrics[i].timer_ticks = 0x7FFF;
+            if (ai) ai->pending_finish_timer = (uint16_t)0x7FFF;
+        }
+        TD5_LOG_I(LOG_TAG, "roam: checkpoints/laps/timers disabled (count=0, timers 0x7FFF)");
+        return;
+    }
     /* ---- Step 20: Load checkpoint timing from hardcoded table (0x46CBB0) ---- */
     {
         int tidx = g_td5.track_index;
@@ -5602,7 +5645,9 @@ static void init_race_checkpoints(void)
 }
 
 int td5_game_init_race_session(void) {
+    td5_roam_session_start();          /* GEO FREE ROAM: armed -> active + single-player overrides */
     init_race_modes_and_seed();
+    td5_roam_apply_overrides();        /* the mode setup above may re-derive some of them */
     init_race_slot_states();
     init_race_level_and_assets();
     init_race_track_resources();
@@ -6598,6 +6643,9 @@ static void frame_check_completion(void)
      * The port mirrors that cadence: advance_pending_finish_state runs once
      * per frame per active slot here, feeding the results of any finish
      * promotion into check_race_completion's aggregate scan below. */
+    /* [GEO FREE ROAM F2-A] roam never finishes: no lap/checkpoint/finish detector, no
+     * aggregate completion scan, no results (the only way out is "Leave free roam") */
+    if (td5_roam_active()) return;
     if (g_td5.race_end_fade_state == 0) {
         int pf;
         uint32_t frame_accum = td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt);
@@ -7058,6 +7106,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 int endrace_present = 1;
                 int freecam_present = 1;
 #endif
+                /* [GEO FREE ROAM F2-A] roam never finishes: no END RACE NOW (it would force a
+                 * results table out of span-less progress); the only way out is LEAVE FREE ROAM.
+                 * Must match the gate in td5_hud_init_pause_menu. */
+                if (td5_roam_active()) endrace_present = 0;
                 /* [FREE CAMERA 2026-08-04] FREE CAMERA sits directly under
                  * CONTINUE (dev builds only) — see the matching string-table
                  * order + skip in td5_hud_init_pause_menu. It's an action row,
@@ -7477,7 +7529,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
              * (0x00434FE0) unconditionally per sub-tick. UpdateActorTrackBehavior
              * does NOT check g_gamePaused — the AI cascade writes
              * steering_command (+0x30C) every paused sub-tick. */
-            td5_ai_tick();
+            if (!td5_roam_active()) td5_ai_tick();   /* roam: no AI (F0b td5_ai.c:2189 gate) */
 
             /* Physics during countdown: run on first + last 3 paused
              * sub-ticks; skip the middle ~117 sub-ticks.
@@ -7682,7 +7734,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
              * uses +0x82) dropped the car bodies (only shadows rendered)
              * and minimap plotted stale/off-road positions. */
             {
-                int norm_count = td5_game_get_total_actor_count();
+                int norm_count = td5_roam_active() ? 0 : td5_game_get_total_actor_count();   /* roam: span -1 stays -1 */
                 for (i = 0; i < norm_count; i++) {
                     TD5_Actor *lap_actor;
                     /* s_slot_state only covers racer slots 0..5; traffic
@@ -7769,7 +7821,9 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         if (td5_game_is_replay_active() && td5_replay_ghost_enabled()) {
             td5_replay_pose_tick((uint32_t)g_td5.simulation_tick_counter);
         } else {
-        td5_ai_tick();
+        /* [GEO FREE ROAM F2-A] one human racer, no AI/traffic/rubber band/cops: gating the
+         * whole tick also removes the phantom-peer search (every slot is span -1, dist 0) */
+        if (!td5_roam_active()) td5_ai_tick();
 
         /* [S26 2026-06-05] Race-end auto-brake for the HUMAN player(s). Once the
          * finish line triggers the end transition (race_end_fade_state > 0), the
@@ -7851,7 +7905,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             if (wview > 2) wview = 2;
             for (int wv = 0; wv < wview; wv++) {
                 TD5_Actor *wa = td5_game_get_actor(g_actorSlotForView[wv]);
-                if (wa) td5_vfx_update_ambient_density(wa, wv);
+                if (wa && !td5_roam_active()) td5_vfx_update_ambient_density(wa, wv);   /* roam: weather comes from the geo options */
             }
         }
 
@@ -7865,7 +7919,8 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * [CONFIRMED @ 0x40C120 + 0x43FAE0 function_callers]. */
 
         /* --- Update race order (bubble sort by span position) --- */
-        update_race_order();
+        if (!td5_roam_active())    /* roam: one racer, nothing to order (all spans -1 tie) */
+            update_race_order();
 
         /* --- Per-viewport camera update (post-physics) ---
          * Must run AFTER physics + AI + track + update_race_order,
@@ -7882,7 +7937,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * sub-tick. Capping at 6 left traffic span_normalized frozen → render
          * span-cull dropped car bodies (shadow-only) + off-road minimap dots. */
         {
-            int norm_count = td5_game_get_total_actor_count();
+            int norm_count = td5_roam_active() ? 0 : td5_game_get_total_actor_count();   /* roam: span -1 stays -1 */
             for (i = 0; i < norm_count; i++) {
                 TD5_Actor *lap_actor;
                 /* s_slot_state only covers racer slots 0..5; traffic
@@ -7931,7 +7986,8 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             if (s_metrics[i].post_finish_metric_base == 0) {
                 s_metrics[i].cumulative_timer++;
             }
-            tick_pending_finish_timer(i);
+            if (!td5_roam_active())    /* roam: no checkpoint timer */
+                tick_pending_finish_timer(i);
             accumulate_speed_bonus(i);
             decay_ultimate_timer(i);
             sync_actor_race_metrics(i);
@@ -8876,6 +8932,13 @@ static void reset_race_countdown(void)
     s_race_countdown_ticks   = 0;
     s_race_countdown_state   = 0;   /* hide indicator until level 2 is reached */
     set_countdown_indicator_state(0);
+    /* [GEO FREE ROAM F2-A] no countdown in roam: the car is live from the first tick */
+    if (td5_roam_active()) {
+        g_cameraTransitionActive = 0;
+        g_td5.paused = 0;
+        TD5_LOG_I(LOG_TAG, "roam: countdown skipped (timer=0, unpaused)");
+        return;
+    }
     TD5_LOG_I(LOG_TAG, "Race countdown reset: timer=0x%X", g_cameraTransitionActive);
 }
 

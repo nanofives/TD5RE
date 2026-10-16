@@ -574,7 +574,9 @@ void td5_ai_recycle_traffic_actor(void) {
         uint8_t strip_lane_count;
         int     left_branch; /* 1 = LEFT (queue_byte > strip_lane), 0 = RIGHT */
 
-        if (!strip) {
+        /* [GEO FREE ROAM F2-A / F0b crash risk 6] q_span (TRAFFIC.BUS) was only compared to -1:
+         * bound it by the loaded strip so a stale queue can never index past the span array */
+        if (!strip || q_span < 0 || q_span >= td5_track_get_span_count()) {
             /* Without strip records we cannot proceed; commit cursor and bail. */
             g_traffic_queue_ptr = qp + 4;
             return;
@@ -5694,7 +5696,9 @@ void td5_ai_update_traffic_route_plan(int slot) {
     {
         const uint8_t *rb = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         int16_t ref_span_norm = ACTOR_I16(ref_actor, ACTOR_SPAN_NORMALIZED);
-        if (rb && ref_span_norm >= 0) {
+        /* [GEO FREE ROAM F2-A / F0b crash risk 2] ">= 0" alone read past the end of the table
+         * for a synthetic id or a stale span from a longer previous track */
+        if (rb && ref_span_norm >= 0 && td5_ai_route_span_valid(rs[RS_ROUTE_TABLE_PTR], (int)ref_span_norm)) {
             route_byte_val = (int32_t)rb[(size_t)(unsigned)ref_span_norm * 3u + 1u];
         } else {
             route_byte_val = 0;

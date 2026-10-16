@@ -52,6 +52,7 @@
 #include "td5_roam_junction.h" /* GEO FREE ROAM junction census (dev hook) */
 #include "td5_roam_tile.h"   /* GEO FREE ROAM tile assembly + ROAMTILE (dev CLI) */
 #include "td5_roam_locate.h" /* GEO FREE ROAM locator (dev self-test) */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): dev CLI --Roam=1 */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1869,6 +1870,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
     }
+
+#ifndef TD5RE_RELEASE
+    /* GEO FREE ROAM (F2 A) dev CLI: --Roam=1 --RoamSpawn=<lat>,<lon> [--RoamYaw=n] arms free roam
+     * and the AutoRace path (after INI + CLI so it wins over both). Compiled out of RELEASE. */
+    td5_roam_dev_cli(lpCmdLine);
+#endif
 
     /* [I18N] Load the UI-language catalog once INI + CLI have settled. A
      * missing/bad catalog falls back to English (and resets the knob so the
