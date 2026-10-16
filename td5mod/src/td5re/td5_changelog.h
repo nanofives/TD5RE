@@ -43,6 +43,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  256 m tiles and written to disk (ROAMTILE files)." },
     { CL_ITEM,    "Dev builds only: free roam diagonal crossings and Y" },
     { CL_ITEM,    "  splits get a patch that follows the streets." },
+    { CL_ITEM,    "Dev builds only: the free roam locator finds the road" },
+    { CL_ITEM,    "  surface under any point and is checked offline." },
     { CL_ITEM,    "Dev builds only: one wide free roam junction no longer" },
     { CL_ITEM,    "  has 8 corner points thrown 150 m off in its tile." },
     { CL_BLANK,   "" },
