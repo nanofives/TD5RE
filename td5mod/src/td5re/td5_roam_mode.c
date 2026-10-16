@@ -38,6 +38,7 @@
 #define LOG_TAG "roam"
 
 #define ROAM_MAX_SLOTS   32      /* == TD5_MAX_TOTAL_ACTORS */
+#define ROAM_UPM         430.0   /* place units per metre */
 #define ROAM_RAD         0.017453292519943295
 #define ROAM_WGS_A       6378137.0
 #define ROAM_WGS_F       (1.0 / 298.257223563)
@@ -53,9 +54,10 @@ typedef struct {
     const struct TD5_RoamResident  *resident;
     uint64_t                        slot_edge[ROAM_MAX_SLOTS];
     int                             host_track;           /* -1 = not resolved */
+    double                          spawn_snap_m;         /* metres the spawn point moved onto the road, -1 = none found */
 } RoamSession;
 
-static RoamSession s_roam = { 0, 0, { {0}, 0, 0, 0, 0 }, 0, 0, NULL, { 0 }, -1 };
+static RoamSession s_roam = { 0, 0, { {0}, 0, 0, 0, 0 }, 0, 0, NULL, { 0 }, -1, 0.0 };
 
 /* ------------------------------------------------------------ small helpers -- */
 
@@ -265,7 +267,8 @@ int td5_roam_host_track(void)
 
 /* Yaw along the nearest street: the direction from this ribbon quad's span origin to
  * its linked next span (or from the previous one), through the resident locator.
- * -1 when there is no resident set, no hit, or the hit is a junction patch. */
+ * On a junction patch: out along the first arm of the patch node. -1 when there is no
+ * resident set, no hit, or nothing to read a direction from. */
 static int roam_street_yaw(int32_t px, int32_t pz)
 {
     const TD5_RoamResident *rs = s_roam.resident;
@@ -278,11 +281,21 @@ static int roam_street_yaw(int32_t px, int32_t pz)
     if (!td5_roam_locate(rs, FP_SCALE(px - s_roam.origin_x), FP_SCALE(pz - s_roam.origin_z),
                          0, 0, ROAM_PRIM_NONE, &hit))
         return -1;
-    if (hit.prim == ROAM_PRIM_NONE || hit.is_patch) return -1;
+    if (hit.prim == ROAM_PRIM_NONE) return -1;
     if (ROAM_PRIM_SLOT(hit.prim) >= (uint32_t)ROAM_RES_MAX) return -1;
     t = rs->tile[ROAM_PRIM_SLOT(hit.prim)];
     idx = (int)ROAM_PRIM_INDEX(hit.prim);
-    if (!t || idx < 0 || (uint32_t)idx >= t->nspan) return -1;
+    if (!t) return -1;
+    if (hit.is_patch) {
+        /* out along the first arm of the patch node. Arm bearings are (cos b, sin b) = (x, z) and a
+         * yaw has (sin y, cos y) = (x, z), so y = 1024 - b */
+        const RoamNodeRec *nd;
+        if (idx < 0 || (uint32_t)idx >= t->ntri || t->tri[idx].patch >= t->nnode) return -1;
+        nd = &t->node[t->tri[idx].patch];
+        if (nd->narm < 1) return -1;
+        return (1024 - (int)t->arm[nd->arm_first].bearing12) & 0xFFF;
+    }
+    if (idx < 0 || (uint32_t)idx >= t->nspan) return -1;
     a = &t->span[idx];
     if (a->link_next >= 0 && (uint32_t)a->link_next < t->nspan) {
         b = &t->span[a->link_next];
@@ -296,6 +309,86 @@ static int roam_street_yaw(int32_t px, int32_t pz)
     dz = (b->origin_z - a->origin_z) * sign;
     if (dx == 0 && dz == 0) return -1;
     return AngleFromVector12(dx, dz) & 0xFFF;
+}
+
+/* ---- spawn on road ---------------------------------------------------------
+ * A click can land anywhere on the map (Plaza Moreno's lawn is 108 m from the nearest
+ * carriageway). The spawn POINT is moved onto the drivable surface before the car is
+ * placed: the locator's push vector (to the nearest boundary edge) plus a margin inward
+ * along the same direction, taken at the first margin where the car's whole footprint
+ * (centre + 4 body corners at the street yaw) is on the surface. A click that is on the
+ * surface but too close to a kerb for the footprint gets a small ring search instead. */
+#define ROAM_SNAP_HALF_W    400      /* units, ~0.93 m: footprint half width  */
+#define ROAM_SNAP_HALF_L    950      /* units, ~2.2 m: footprint half length  */
+
+static int roam_inside(const TD5_RoamResident *rs, double wx, double wz)
+{
+    TD5_RoamHit h;
+    if (!td5_roam_locate(rs, (int32_t)(wx * 256.0), (int32_t)(wz * 256.0), 0, 0, ROAM_PRIM_NONE, &h))
+        return 0;
+    return h.prim != ROAM_PRIM_NONE && h.inside;
+}
+
+/* centre + 4 corners of a car at (wx, wz) heading `yaw12` all on the surface */
+static int roam_footprint_ok(const TD5_RoamResident *rs, double wx, double wz, int yaw12)
+{
+    const double y = (double)(yaw12 & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+    const double fx = sin(y), fz = cos(y), rx = fz, rz = -fx;
+    int i;
+    if (!roam_inside(rs, wx, wz)) return 0;
+    for (i = 0; i < 4; i++) {
+        const double l = (i & 1) ? ROAM_SNAP_HALF_L : -ROAM_SNAP_HALF_L;
+        const double w = (i & 2) ? ROAM_SNAP_HALF_W : -ROAM_SNAP_HALF_W;
+        if (!roam_inside(rs, wx + fx * l + rx * w, wz + fz * l + rz * w)) return 0;
+    }
+    return 1;
+}
+
+/* PLACE-frame spawn point -> the nearest drivable spot. Writes the moved point to *px,*pz and
+ * returns the distance moved in metres (0 = already fine), or -1 when no road could be found
+ * (no resident set, no tile under the click: the point is left alone). */
+static double roam_snap_to_road(int32_t *px, int32_t *pz, int fixed_yaw)
+{
+    static const int k_margin[] = { 645, 1075, 1505, 2150, 3010 };   /* 1.5 .. 7 m past the kerb */
+    const TD5_RoamResident *rs = s_roam.resident;
+    const double ox = (double)s_roam.origin_x, oz = (double)s_roam.origin_z;
+    const double wx = (double)*px - ox, wz = (double)*pz - oz;
+    TD5_RoamHit h;
+    double bx = wx, bz = wz;
+    int k, found = 0;
+    if (!rs) return -1.0;
+    if (!td5_roam_locate(rs, (int32_t)(wx * 256.0), (int32_t)(wz * 256.0), 0, 0, ROAM_PRIM_NONE, &h) ||
+        h.prim == ROAM_PRIM_NONE)
+        return -1.0;
+    if (!h.inside) {
+        const double m = sqrt((double)h.push_x * h.push_x + (double)h.push_z * h.push_z);
+        const double ux = m > 0.5 ? h.push_x / m : 1.0, uz = m > 0.5 ? h.push_z / m : 0.0;
+        for (k = 0; k < (int)(sizeof k_margin / sizeof k_margin[0]) && !found; k++) {
+            const double cx = wx + h.push_x + ux * k_margin[k], cz = wz + h.push_z + uz * k_margin[k];
+            int yaw = fixed_yaw >= 0 ? fixed_yaw : roam_street_yaw((int32_t)(cx + ox), (int32_t)(cz + oz));
+            if (yaw < 0) yaw = 0;
+            if (roam_footprint_ok(rs, cx, cz, yaw)) { bx = cx; bz = cz; found = 1; }
+        }
+    } else {
+        int yaw = fixed_yaw >= 0 ? fixed_yaw : roam_street_yaw(*px, *pz);
+        int r, a;
+        double best = 1e30;
+        if (yaw < 0) yaw = 0;
+        if (roam_footprint_ok(rs, wx, wz, yaw)) return 0.0;
+        /* on the surface but the footprint hangs over a kerb: nearest fitting spot on a ring */
+        for (r = 1; r <= 12 && !found; r++) {
+            for (a = 0; a < 16; a++) {
+                const double t = (double)a * (2.0 * 3.14159265358979323846 / 16.0);
+                const double cx = wx + cos(t) * r * 215.0, cz = wz + sin(t) * r * 215.0;
+                const double d = (cx - wx) * (cx - wx) + (cz - wz) * (cz - wz);
+                if (d < best && roam_footprint_ok(rs, cx, cz, yaw)) { best = d; bx = cx; bz = cz; found = 1; }
+            }
+        }
+    }
+    if (!found) return -1.0;
+    *px = (int32_t)floor(bx + ox + 0.5);
+    *pz = (int32_t)floor(bz + oz + 0.5);
+    return sqrt((bx - wx) * (bx - wx) + (bz - wz) * (bz - wz)) / ROAM_UPM;
 }
 
 /* The single-player overrides a roam race needs (no AI, no traffic, no cops, no net,
@@ -339,13 +432,29 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
 {
     TD5_Actor *a = (TD5_Actor *)actor_mem;
     int yaw = s_roam.spawn.spawn_yaw;
-    const int32_t wx = s_roam.spawn.spawn_px - s_roam.origin_x;
-    const int32_t wz = s_roam.spawn.spawn_pz - s_roam.origin_z;
+    int32_t px = s_roam.spawn.spawn_px, pz = s_roam.spawn.spawn_pz;
+    int32_t wx, wz;
     int auto_yaw = 0;
+    double moved;
     if (!a) return;
 
+    /* the click point -> the nearest drivable spot (the car must not start off the road) */
+    moved = roam_snap_to_road(&px, &pz, yaw);
+    if (moved > 0.0)
+        TD5_LOG_I(LOG_TAG, "roam: spawn snap to road: click place=(%d,%d) -> (%d,%d), moved %.1f m",
+                  (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)px, (int)pz, moved);
+    else if (moved == 0.0)
+        TD5_LOG_I(LOG_TAG, "roam: spawn snap: click place=(%d,%d) is on the road, footprint fits",
+                  (int)px, (int)pz);
+    else
+        TD5_LOG_W(LOG_TAG, "roam: spawn snap: no road found near place=(%d,%d) (%s), spawning on the click",
+                  (int)px, (int)pz, s_roam.resident ? "no tile under the click" : "no resident set");
+    s_roam.spawn_snap_m = moved;
+    wx = px - s_roam.origin_x;
+    wz = pz - s_roam.origin_z;
+
     if (yaw < 0) {
-        yaw = roam_street_yaw(s_roam.spawn.spawn_px, s_roam.spawn.spawn_pz);
+        yaw = roam_street_yaw(px, pz);
         auto_yaw = 1;
         if (yaw < 0) yaw = 0;
     }
@@ -371,9 +480,11 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     td5_roam_physics_spawn_snap(a);     /* task B: stand on the street under the spawn point */
 
     TD5_LOG_I(LOG_TAG, "roam: spawn slot=%d place=(%d,%d) world=(%d,%d) yaw=%d%s",
-              slot, (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)wx, (int)wz,
+              slot, (int)px, (int)pz, (int)wx, (int)wz,
               yaw, auto_yaw ? (s_roam.resident ? " (street)" : " (auto: no locator, 0)") : "");
 }
+
+double td5_roam_spawn_snap_m(void) { return s_roam.spawn_snap_m; }
 
 /* ------------------------------------------------------------ dev CLI -------- */
 
@@ -426,5 +537,21 @@ void td5_roam_dev_cli(const char *cmd)
     g_td5.ini.default_track    = td5_roam_host_track();
     g_td5.ini.default_opponents = 0;
     g_td5.ini.default_game_type = 0;
+}
+
+int td5_roam_selftest_arm(double lat, double lon)
+{
+    TD5_RoamSpawn sp;
+    memset(&sp, 0, sizeof sp);
+    snprintf(sp.place, sizeof sp.place, "%s", "la_plata_partido");
+    if (!td5_roam_place_has_tiles(sp.place) ||
+        !td5_roam_latlon_to_place(sp.place, lat, lon, &sp.spawn_px, &sp.spawn_pz)) {
+        TD5_LOG_E(LOG_TAG, "roam selftest: no roam tiles / projection for '%s'", sp.place);
+        return 0;
+    }
+    sp.spawn_yaw = -1;
+    sp.car_index = g_td5.ini.default_car;
+    td5_roam_begin(&sp);
+    return 1;
 }
 #endif

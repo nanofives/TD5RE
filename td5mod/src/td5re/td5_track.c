@@ -5020,8 +5020,17 @@ int td5_track_load_strip(const void *data, size_t size)
         s_span_display_list_indices = NULL;
     }
 
-    if (!data || size < TD5_STRIP_HEADER_DWORDS * 4)
+    if (!data || size < TD5_STRIP_HEADER_DWORDS * 4) {
+        /* [roam F2-D 2026-10-16] No strip (free roam hosts on a level without one): the globals the
+         * HUD minimap init and the AI walk (g_strip_*) still pointed at the PREVIOUS race's freed
+         * span array and its span count, so the roam row after another race in one session crashed in
+         * td5_hud_init_minimap_layout. The bind further down only runs for a real strip. */
+        g_strip_span_count = 0;
+        g_strip_total_segments = 0;
+        g_strip_span_base = NULL;
+        g_strip_vertex_base = NULL;
         return build_placeholder_display_lists();
+    }
 
     /* Allocate and copy the raw blob */
     s_strip_blob = (uint8_t *)malloc(size);
