@@ -18,6 +18,7 @@
 #include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_ai.h"
 #include "td5_track.h"
+#include "td5_roam_physics.h"   /* GEO FREE ROAM: the roam contact provider (F2-B) */
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
@@ -3544,6 +3545,10 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
     float *rot = actor->rotation_matrix.m;
     int resolved_surface = actor->surface_type_chassis;
     int resolved_surface_valid = 0;
+    /* [GEO FREE ROAM F2-B] the roam contact provider owns the ground (roam session), or
+     * compares + replaces the strip's answers (DEV strip mirror). 0 on every normal race. */
+    const int roam_live = td5_roam_physics_live();
+    const int roam_only = roam_live && !td5_roam_physics_mirror();
 
     /* [DIAGNOSTIC 2026-05-27 — lateral-leak unit test, slot 0] On a purely
      * LONGITUDINAL slope, two ground samples displaced purely LATERALLY
@@ -3717,126 +3722,146 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                 (int32_t)(int16_t)lrintf(by_tmp) * 256;
         }
 
-        /* Per-probe track position update [CONFIRMED @ 0x403720].
-         * Original calls FUN_004440F0 per probe with probe's own world pos.
-         * This gives each wheel its own span for accurate edge testing. */
-        td5_track_update_probe_position(&actor->wheel_probes[i],
-                                        actor->wheel_contact_pos[i].x,
-                                        actor->wheel_contact_pos[i].z);
-
-        /* Clamp per-wheel span after the probe walker (it can overflow
-         * independently of the chassis span walker). */
-        {
-            int max_sp = td5_track_get_span_count();  /* includes branch spans */
-            if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
-                actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
-        }
-
-        /* [FIX 2026-05-27 — slope-induced false ROLL] On slopes the RIGHT
-         * wheels (FR=probe1, RR=probe3) consistently over-walk one span
-         * FORWARD of their LEFT partners (FL=probe0, RL=probe2). Because the
-         * right wheels then sample the ground a span further along the slope,
-         * an UPHILL reads right-side-high (car lifts on the right) and a
-         * DOWNHILL reads right-side-low (car lifts on the left). At a dead
-         * stop on a slope this is a static ~9° roll (player overlay: SPD 0,
-         * ROLL 9.1). The original keeps each axle's left/right wheels on the
-         * SAME span, so the slope only ever produces PITCH, never a fake roll
-         * (orig L-R wheel delta is balanced; port is right-biased by ~2400fp).
-         *
-         * Snap each axle's right wheel onto its left partner's span. The
-         * wheel keeps its own lateral sub_lane, so genuine road camber is
-         * still sampled; the front-vs-rear span gap (true pitch) is untouched.
-         * Guard ±2 leaves real junction/branch transitions alone. Replaces an
-         * earlier chassis-clamp that only halved the split and risked
-         * flattening pitch. Processed in wheel order 0,1,2,3 so the left
-         * partner (i-1) is already walked. */
-        /* [FIX 2026-05-31 sub-lane-shift bounce] Axle right-wheel span-snap
-         * DISABLED. It papered over the slope-roll by forcing FR/RR onto the
-         * left partner's span, but at sub-lane-count transitions it toggles the
-         * right wheel's reference span on/off, producing the user-reported
-         * vertical bounce. The faithful 0x00403720 path walks each wheel
-         * independently and reads height from the walker's carried
-         * span+sub_lane (see the contact-height call below). */
-
-        /* Mirror the original's ComputeActorTrackContactNormalExtended
-         * prefix: write contact_vertex_A/B to the probe based on its
-         * (post-walker) span_index + sub_lane_index. */
-        td5_track_compute_probe_contact_vertices(&actor->wheel_probes[i]);
-
-        /* Compute wheel vertical force from the probed span surface. */
+        /* [GEO FREE ROAM F2-B] Wheel ground: in a roam session the roam contact
+         * provider answers (no strip, no walker); with the DEV strip mirror the
+         * strip answers first and the provider compares + replaces its answer. */
         int32_t wheel_y = actor->wheel_contact_pos[i].y;
         int32_t ground_y = 0;
-        int probe_span = actor->wheel_probes[i].span_index;
-
-        /* Per-wheel probe span bounds check.
-         *
-         * Use the FULL physical span count (td5_track_get_span_count) — branch
-         * spans are indices [ring_length, s_span_count) and must be probed
-         * directly, not rejected. The earlier `probe_span >= ring_length`
-         * fallback mis-classified branch spans as invalid and forced every
-         * wheel to read ground_y from span 0, which on Newcastle made all
-         * wheels report force > 0x800 → airborne bitmask 0x0F → chassis
-         * Y-snap skipped → car freefell through the branch road. */
-        {
-            int max_sp = td5_track_get_span_count();
-            if (probe_span < 0 || probe_span >= max_sp)
-                probe_span = actor->track_span_raw;
-            if (probe_span < 0 || probe_span >= max_sp)
-                probe_span = 0;  /* absolute fallback */
-        }
-
-        /* Ground height + surface normal at the wheel, using the BEST-FIT
-         * (geometrically containing) lane within the wheel's span — NOT the
-         * walker's stored sub_lane.
-         *
-         * [FIX 2026-05-27 — right-side-lift root cause] The per-wheel walker's
-         * stored sub_lane lands on the WRONG lane on slopes (the right wheels
-         * systematically), so the wheel reads a height a lane over — leaking
-         * the longitudinal slope into a sideways roll (uphill→right lifts,
-         * downhill→left lifts, ~9° even at a dead stop). Proven by a lateral-
-         * leak unit test: sampling the surface at the containing lane is
-         * balanced (R-L≈0 vs slope up to 21000), but the walked sub_lane is
-         * right-biased ~6000fp (96% of rows). The original's walker resolves
-         * the containing lane, so best-fit matches its result. The wheel keeps
-         * its own world XZ, so genuine road camber is still sampled; only the
-         * lane SELECTION is corrected.
-         *
-         * Also retrieves the span surface normal (orig FUN_00445A70 → actor+
-         * 0x250+i*8, the "wcv" consumed by UpdateVehicleSuspensionResponse). */
-        /* [FIX 2026-05-31] The BEST-FIT-lane rationale in the comment above is
-         * SUPERSEDED. Per-tick lane re-selection (bestlane) made best_lane jump
-         * discontinuously across sub-lane-count transitions, popping ground_y
-         * (the user-reported bounce). We now use the walker's carried sub_lane,
-         * faithful to 0x00403720 -> 0x00445450. If the slope-roll (2026-05-27)
-         * returns, the real bug is the walker's sub_lane carry in
-         * resolve_neighbor / update_position_recursive, not the height call. */
         int16_t span_normal[3] = {0, 4096, 0};  /* default: flat upward normal (magnitude 4096) */
-        {
-            ground_y = td5_track_compute_contact_height_bounded(
-                probe_span,
-                (int)actor->wheel_probes[i].sub_lane_index,
-                actor->wheel_contact_pos[i].x,
-                actor->wheel_contact_pos[i].z,
-                span_normal);
-            /* Resolve surface_type from the probe's span+lane attributes
-             * instead of echoing the stale actor->surface_type_chassis
-             * (which is zero on tick 1 from the actor memset). Use the
-             * first probe-index 4..7 (= wheel_probes[i]) on the first
-             * valid wheel, matching the original's pattern of picking the
-             * surface from the lead grounded wheel. */
+        int wheel_capped = 0;
+        if (roam_only) {
+            int wsurf = -1;
+            td5_roam_wheel_contact(actor, i, actor->wheel_contact_pos[i].x, actor->wheel_contact_pos[i].z,
+                                   wheel_y, &ground_y, span_normal, &wsurf, &wheel_capped);
             if (!resolved_surface_valid) {
-                resolved_surface = td5_track_get_surface_type(actor, 4 + i);
+                resolved_surface = wsurf;
                 resolved_surface_valid = 1;
             }
-        }
+        } else {
+            /* Per-probe track position update [CONFIRMED @ 0x403720].
+             * Original calls FUN_004440F0 per probe with probe's own world pos.
+             * This gives each wheel its own span for accurate edge testing. */
+            td5_track_update_probe_position(&actor->wheel_probes[i],
+                                            actor->wheel_contact_pos[i].x,
+                                            actor->wheel_contact_pos[i].z);
 
-        /* [FIX 2026-05-28 — fast-tilt out-of-bounds launch] Did the height probe
-         * just cap an upward out-of-quad extrapolation? If so this wheel is over
-         * a fictional plane extrapolated above its (mis-assigned) span — it must
-         * NOT be allowed to read "grounded", or the chassis Y-snap ratchets the
-         * car upward off-track. Force it airborne in the contact test below so
-         * the car falls under gravity instead, matching the original. */
-        int wheel_capped = td5_track_last_contact_was_capped();
+            /* Clamp per-wheel span after the probe walker (it can overflow
+             * independently of the chassis span walker). */
+            {
+                int max_sp = td5_track_get_span_count();  /* includes branch spans */
+                if (max_sp > 0 && actor->wheel_probes[i].span_index >= (int16_t)max_sp)
+                    actor->wheel_probes[i].span_index = (int16_t)(max_sp - 1);
+            }
+
+            /* [FIX 2026-05-27 — slope-induced false ROLL] On slopes the RIGHT
+             * wheels (FR=probe1, RR=probe3) consistently over-walk one span
+             * FORWARD of their LEFT partners (FL=probe0, RL=probe2). Because the
+             * right wheels then sample the ground a span further along the slope,
+             * an UPHILL reads right-side-high (car lifts on the right) and a
+             * DOWNHILL reads right-side-low (car lifts on the left). At a dead
+             * stop on a slope this is a static ~9° roll (player overlay: SPD 0,
+             * ROLL 9.1). The original keeps each axle's left/right wheels on the
+             * SAME span, so the slope only ever produces PITCH, never a fake roll
+             * (orig L-R wheel delta is balanced; port is right-biased by ~2400fp).
+             *
+             * Snap each axle's right wheel onto its left partner's span. The
+             * wheel keeps its own lateral sub_lane, so genuine road camber is
+             * still sampled; the front-vs-rear span gap (true pitch) is untouched.
+             * Guard ±2 leaves real junction/branch transitions alone. Replaces an
+             * earlier chassis-clamp that only halved the split and risked
+             * flattening pitch. Processed in wheel order 0,1,2,3 so the left
+             * partner (i-1) is already walked. */
+            /* [FIX 2026-05-31 sub-lane-shift bounce] Axle right-wheel span-snap
+             * DISABLED. It papered over the slope-roll by forcing FR/RR onto the
+             * left partner's span, but at sub-lane-count transitions it toggles the
+             * right wheel's reference span on/off, producing the user-reported
+             * vertical bounce. The faithful 0x00403720 path walks each wheel
+             * independently and reads height from the walker's carried
+             * span+sub_lane (see the contact-height call below). */
+
+            /* Mirror the original's ComputeActorTrackContactNormalExtended
+             * prefix: write contact_vertex_A/B to the probe based on its
+             * (post-walker) span_index + sub_lane_index. */
+            td5_track_compute_probe_contact_vertices(&actor->wheel_probes[i]);
+
+            /* Compute wheel vertical force from the probed span surface. */
+            int probe_span = actor->wheel_probes[i].span_index;
+
+            /* Per-wheel probe span bounds check.
+             *
+             * Use the FULL physical span count (td5_track_get_span_count) — branch
+             * spans are indices [ring_length, s_span_count) and must be probed
+             * directly, not rejected. The earlier `probe_span >= ring_length`
+             * fallback mis-classified branch spans as invalid and forced every
+             * wheel to read ground_y from span 0, which on Newcastle made all
+             * wheels report force > 0x800 → airborne bitmask 0x0F → chassis
+             * Y-snap skipped → car freefell through the branch road. */
+            {
+                int max_sp = td5_track_get_span_count();
+                if (probe_span < 0 || probe_span >= max_sp)
+                    probe_span = actor->track_span_raw;
+                if (probe_span < 0 || probe_span >= max_sp)
+                    probe_span = 0;  /* absolute fallback */
+            }
+
+            /* Ground height + surface normal at the wheel, using the BEST-FIT
+             * (geometrically containing) lane within the wheel's span — NOT the
+             * walker's stored sub_lane.
+             *
+             * [FIX 2026-05-27 — right-side-lift root cause] The per-wheel walker's
+             * stored sub_lane lands on the WRONG lane on slopes (the right wheels
+             * systematically), so the wheel reads a height a lane over — leaking
+             * the longitudinal slope into a sideways roll (uphill→right lifts,
+             * downhill→left lifts, ~9° even at a dead stop). Proven by a lateral-
+             * leak unit test: sampling the surface at the containing lane is
+             * balanced (R-L≈0 vs slope up to 21000), but the walked sub_lane is
+             * right-biased ~6000fp (96% of rows). The original's walker resolves
+             * the containing lane, so best-fit matches its result. The wheel keeps
+             * its own world XZ, so genuine road camber is still sampled; only the
+             * lane SELECTION is corrected.
+             *
+             * Also retrieves the span surface normal (orig FUN_00445A70 → actor+
+             * 0x250+i*8, the "wcv" consumed by UpdateVehicleSuspensionResponse). */
+            /* [FIX 2026-05-31] The BEST-FIT-lane rationale in the comment above is
+             * SUPERSEDED. Per-tick lane re-selection (bestlane) made best_lane jump
+             * discontinuously across sub-lane-count transitions, popping ground_y
+             * (the user-reported bounce). We now use the walker's carried sub_lane,
+             * faithful to 0x00403720 -> 0x00445450. If the slope-roll (2026-05-27)
+             * returns, the real bug is the walker's sub_lane carry in
+             * resolve_neighbor / update_position_recursive, not the height call. */
+            {
+                ground_y = td5_track_compute_contact_height_bounded(
+                    probe_span,
+                    (int)actor->wheel_probes[i].sub_lane_index,
+                    actor->wheel_contact_pos[i].x,
+                    actor->wheel_contact_pos[i].z,
+                    span_normal);
+                /* Resolve surface_type from the probe's span+lane attributes
+                 * instead of echoing the stale actor->surface_type_chassis
+                 * (which is zero on tick 1 from the actor memset). Use the
+                 * first probe-index 4..7 (= wheel_probes[i]) on the first
+                 * valid wheel, matching the original's pattern of picking the
+                 * surface from the lead grounded wheel. */
+                if (!resolved_surface_valid) {
+                    resolved_surface = td5_track_get_surface_type(actor, 4 + i);
+                    resolved_surface_valid = 1;
+                }
+            }
+
+            /* [FIX 2026-05-28 — fast-tilt out-of-bounds launch] Did the height probe
+             * just cap an upward out-of-quad extrapolation? If so this wheel is over
+             * a fictional plane extrapolated above its (mis-assigned) span — it must
+             * NOT be allowed to read "grounded", or the chassis Y-snap ratchets the
+             * car upward off-track. Force it airborne in the contact test below so
+             * the car falls under gravity instead, matching the original. */
+            wheel_capped = td5_track_last_contact_was_capped();
+            if (roam_live) {
+                int wsurf = (i == 0) ? resolved_surface : -1;   /* wheel 0 set the chassis surface */
+                td5_roam_wheel_contact(actor, i, actor->wheel_contact_pos[i].x, actor->wheel_contact_pos[i].z,
+                                       wheel_y, &ground_y, span_normal, &wsurf, &wheel_capped);
+                if (i == 0) resolved_surface = wsurf;
+            }
+        }
 
         /* [#20 2026-06-17] The old "S18" chassis-span ground reject lived here —
          * a TD6-only block that, on the false "displaced branch" premise, discarded
@@ -4069,6 +4094,15 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             body_pos[i]->y = FP_SCALE(world[1]);
             body_pos[i]->z = FP_SCALE(world[2]);
 
+            /* [GEO FREE ROAM F2-B] roam: the provider gives the corner's ground (with
+             * the corner's own Y for the deck pick); no walker, no span fields. */
+            const int32_t corner_y0 = body_pos[i]->y;
+            if (roam_only) {
+                td5_roam_corner_height(actor, i, body_pos[i]->x, body_pos[i]->z, corner_y0,
+                                       &body_pos[i]->y, 0);
+                continue;
+            }
+
             td5_track_update_probe_position(&actor->body_probes[i],
                                             body_pos[i]->x,
                                             body_pos[i]->z);
@@ -4114,6 +4148,9 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
                     }
                 }
             }
+            if (roam_live)   /* DEV strip mirror: compare + replace */
+                td5_roam_corner_height(actor, i, body_pos[i]->x, body_pos[i]->z, corner_y0,
+                                       &body_pos[i]->y, probe_span >= 0 && probe_span < max_sp);
         }
     }
 

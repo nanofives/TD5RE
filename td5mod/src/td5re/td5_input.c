@@ -40,6 +40,7 @@
 #include "td5_control.h"     /* live-control per-slot action bits (dev-only) */
 #include "td5_net.h"     /* td5_net_is_active/td5_net_local_slot — FFB netplay-vs-local branch */
 #include "td5_chaos.h"   /* [CHAOS CO-OP 2026-09-29] seat roles + the N-seat -> 2-car input fold */
+#include "td5_roam_physics.h"   /* [roam F2-B] DEV roam drive harness bits */
 
 /* Defined in td5_game.c */
 
@@ -981,6 +982,7 @@ void td5_input_poll_race_session(void)
 #ifndef TD5RE_RELEASE
             if (i == 0) s_control_bits[i] |= td5_track_dev_gap_drive_bits(td5_game_get_actor(0));   /* [R1023 D] DEV: TD5RE_GAP_DRIVE */
             if (i == 0) s_control_bits[i] |= td5_track_dev_median_drive_bits(td5_game_get_actor(0)); /* [R1030 E] DEV: TD5RE_MEDIAN_DRIVE */
+            if (i == 0) s_control_bits[i] |= td5_roam_dev_drive_bits(td5_game_get_actor(0));        /* [roam F2-B] DEV: TD5RE_ROAM_DRIVE */
 #endif
 
 #ifndef TD5RE_RELEASE
