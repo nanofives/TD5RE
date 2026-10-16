@@ -1498,7 +1498,8 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
         const TD5_RoamCluster *cl = &g->cluster[ci];
         double hc, arm_y[TD5_ROAM_ARM_MAX_LOCAL];
         int i, base, ntri0;
-        int32_t cox, coz, coy;
+        int32_t cox, coz, coy;   /* node position (cluster centroid, patch centre height) */
+        int32_t vox, voz, voy;   /* origin of the patch's int16 vertex offsets            */
         int surf = 0, bestarm = -1;
         double bw = -1.0;
         RoamNodeRec *nr;
@@ -1536,13 +1537,49 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
         cox = td5_roam_quant(cl->cx);
         coz = td5_roam_quant(cl->cz);
         coy = td5_roam_quant(hc);
+        /* Vertex-offset origin. The centroid, unless some vertex then leaves int16 (a UNION
+         * patch of a wide multi-arm cluster reaches > 76 m from its centroid, F1-T5b): the
+         * midpoint of the patch's own bounding box is then used, which halves the reach.
+         * The triangles carry this origin (RoamTri.ox/oy/oz), the NODE keeps the centroid. */
+        vox = cox; voz = coz; voy = coy;
+        {
+            int bad = 0;
+            int32_t mnx = INT32_MAX, mxx = INT32_MIN, mnz = INT32_MAX, mxz = INT32_MIN;
+            int32_t mny = INT32_MAX, mxy = INT32_MIN;
+            for (i = 0; i < cl->nvert; i++) {
+                const TD5_RoamPatchVert *pv = &g->pvert[cl->vert_first + i];
+                const int32_t yq = td5_roam_quant(td5_roam_patch_vert_y(pv, hc, arm_y));
+                if (!i16_ok(pv->xq - cox) || !i16_ok(pv->zq - coz) || !i16_ok(yq - coy)) bad = 1;
+                if (pv->xq < mnx) mnx = pv->xq;
+                if (pv->xq > mxx) mxx = pv->xq;
+                if (pv->zq < mnz) mnz = pv->zq;
+                if (pv->zq > mxz) mxz = pv->zq;
+                if (yq < mny) mny = yq;
+                if (yq > mxy) mxy = yq;
+            }
+            if (bad && cl->nvert > 0) {
+                vox = (int32_t)(((int64_t)mnx + mxx) >> 1);
+                voz = (int32_t)(((int64_t)mnz + mxz) >> 1);
+                voy = (int32_t)(((int64_t)mny + mxy) >> 1);
+                TD5_LOG_W(LOG_TAG, "ROAM_I16_REORIGIN cluster %lld at (%.0f, %.0f): vertex reach from the centroid exceeds int16, "
+                          "origin moved (%.1f, %.1f, %.1f) m to the patch bbox centre (flags 0x%x, %d arm(s), %d vert(s))",
+                          (long long)cl->key, cl->cx, cl->cz, (vox - cox) / TD5_ROAM_UPM, (voy - coy) / TD5_ROAM_UPM,
+                          (voz - coz) / TD5_ROAM_UPM, (unsigned)cl->flags, cl->narm, cl->nvert);
+                st->i16_reorigin++;
+            }
+        }
         base = (int)b.vert.n;
         for (i = 0; i < cl->nvert; i++) {
             const TD5_RoamPatchVert *pv = &g->pvert[cl->vert_first + i];
             const double yv = td5_roam_patch_vert_y(pv, hc, arm_y);
             const int yq = td5_roam_quant(yv);
-            const int dx = pv->xq - cox, dz = pv->zq - coz, dyv = yq - coy;
-            if (!i16_ok(dx) || !i16_ok(dyv) || !i16_ok(dz)) st->i16_overflow++;
+            const int dx = pv->xq - vox, dz = pv->zq - voz, dyv = yq - voy;
+            if (!i16_ok(dx) || !i16_ok(dyv) || !i16_ok(dz)) {
+                st->i16_overflow++;
+                TD5_LOG_W(LOG_TAG, "ROAM_I16 cluster %lld vert %d/%d kind %d: dx %d dy %d dz %d (%.1f, %.1f, %.1f m) flags 0x%x narm %d",
+                          (long long)cl->key, i, cl->nvert, (int)pv->kind, dx, dyv, dz,
+                          dx / TD5_ROAM_UPM, dyv / TD5_ROAM_UPM, dz / TD5_ROAM_UPM, (unsigned)cl->flags, cl->narm);
+            }
             if (tb_vert(&b, (int16_t)dx, (int16_t)dyv, (int16_t)dz) < 0) goto done;
             /* every cut vertex must be a vertex of its arm's ribbon row, same y */
             if (pv->kind == TD5_ROAM_PV_CUT && pv->ref[0] >= 0) {
@@ -1572,7 +1609,7 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
             tr->patch = (uint16_t)b.nodec.n;
             tr->surface = (uint8_t)surf;
             tr->flags = (uint8_t)(cl->flags & 0xFF);
-            tr->ox = cox - org_x; tr->oy = coy; tr->oz = coz - org_z;
+            tr->ox = vox - org_x; tr->oy = voy; tr->oz = voz - org_z;
         }
         /* wall edges: the patch kerb segments, each on a triangle that holds them */
         for (i = 0; i < cl->nol; i++) {
@@ -1978,7 +2015,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
     char lines[4096];
     long tot_quads = 0, tot_tris = 0, tot_bed = 0, tot_verts = 0, tot_bytes = 0, tot_ed = 0, tot_cl = 0;
     long tot_ok = 0, tot_fail = 0, tot_rb = 0, tot_pass2 = 0, tot_cut = 0, tot_cutbad = 0;
-    long tot_ovf = 0, tot_i16 = 0, tot_nobed = 0, tot_clfail = 0, tot_nohc = 0, tot_clamped = 0, tot_spread = 0;
+    long tot_ovf = 0, tot_i16 = 0, tot_reorg = 0, tot_nobed = 0, tot_clfail = 0, tot_nohc = 0, tot_clamped = 0, tot_spread = 0;
     long tot_ramp = 0, tot_pin = 0, tot_abs = 0, tot_bad = 0, tot_hfail = 0, tot_border = 0, tot_sig = 0, tot_arms = 0;
     double max_spread = 0.0, max_blend = 0.0, max_pdy = 0.0, max_over = 0.0;
     uint32_t max_ms = 0, sum_ms = 0;
@@ -2066,7 +2103,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
         tot_bytes += s->bytes; tot_ed += s->edges_rec; tot_cl += s->clusters; tot_arms += s->arms;
         if (s->passes > 1) tot_pass2++;
         tot_cut += s->cut_checked; tot_cutbad += s->cut_mismatch; tot_ovf += s->overflow;
-        tot_i16 += s->i16_overflow; tot_nobed += s->bedge_no_tri; tot_clfail += s->cluster_fail;
+        tot_i16 += s->i16_overflow; tot_reorg += s->i16_reorigin; tot_nobed += s->bedge_no_tri; tot_clfail += s->cluster_fail;
         tot_nohc += s->clusters_no_height; tot_clamped += s->arm_clamped; tot_spread += s->spread_clusters;
         tot_ramp += s->ramp_short + s->ramp_fail; tot_pin += s->pin_miss; tot_abs += s->ribbon_absorbed;
         tot_bad += s->ribbon_bad; tot_hfail += s->ribbon_height_fail; tot_border += s->border_quads;
@@ -2108,6 +2145,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
                 tot_abs, tot_bad, tot_hfail, tot_ramp, tot_pin, tot_clfail, tot_nohc);
         fprintf(f, "limits: overflow %ld, int16 offset overflow %ld, outline segment in no triangle %ld\n",
                 tot_ovf, tot_i16, tot_nobed);
+        fprintf(f, "patch vertex origin moved off the centroid to the bbox centre (int16 reach, F1-T5b): %ld cluster(s)\n", tot_reorg);
         fprintf(f, "owned quads with a vertex outside their tile: %ld; max overhang %.2f m (GRID margin is sized from it)\n",
                 tot_border, max_over);
         fprintf(f, "owned quad midpoints within 2 m of a tile border, per lattice phase (du,dv in S/4 steps):\n");

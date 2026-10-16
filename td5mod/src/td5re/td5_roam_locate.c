@@ -1192,6 +1192,7 @@ int td5_roam_locate_dev_test(void)
     LARGE_INTEGER qf, q0, q1;
     long a_tot = 0, a_self = 0, a_other = 0, a_fail = 0, a_deg = 0, a_dn = 0, a_tri = 0, a_quad = 0, a_dn_tri = 0, a_other_far = 0;
     int a_other_dh = 0;
+    long a_w_tri = 0, a_w_quad = 0, a_w_fail = 0;
     long b_brute = 0, b_brute_bad = 0, b_sliver = 0, b_cov_full = 0, b_cov_part = 0, b_supp_mid = 0;
     long b_tot = 0, b_pass = 0, b_fail = 0, b_skip_in = 0, b_skip_other = 0, b_skip_tri = 0, b_deg = 0, b_deck = 0, b_deck_pass = 0, b_dist_fail = 0, b_dot_fail = 0;
     long c_gap_same = 0, c_graze = 0;
@@ -1268,6 +1269,7 @@ int td5_roam_locate_dev_test(void)
                     a_quad++;
                 }
                 a_tot++;
+                if (t->tx == -14 && t->tz == 61) { if (is_tri) a_w_tri++; else a_w_quad++; }   /* the wide union cluster tile (T5b) */
                 x24 = w24(mx, ts->org_x); z24 = w24(mz, ts->org_z);
                 if (!td5_roam_prim_eval(rs, ROAM_PRIM_MAKE(i, is_tri, idx), x24, z24, &e) || !e.inside) { a_deg++; continue; }
                 if (e.normal[1] <= 0) { a_dn++; if (is_tri) a_dn_tri++; }
@@ -1291,6 +1293,7 @@ int td5_roam_locate_dev_test(void)
                         if (dh > a_other_dh) a_other_dh = dh;
                     } else {
                         a_fail++;
+                        if (t->tx == -14 && t->tz == 61) a_w_fail++;
                         if (shown++ < 8)
                             fprintf(f, "  (a) FAIL tile %d,%d %s %u lane %d: self in collect %d, located prim %08x in collect %d inside %d h %d want %d (self %d)\n",
                                     t->tx, t->tz, is_tri ? "tri" : "span", idx, l, self_in, h.prim, in_list, h.inside, h.ground_y, want, e.ground_y);
@@ -1303,6 +1306,8 @@ int td5_roam_locate_dev_test(void)
                "(deck rule honoured) %ld (of which the other surface is > 0.25 m from this one %ld, max %.2f m); FAIL %ld; own centroid not inside its own prim "
                "(degenerate) %ld; plane normals not pointing up after the locator's sign fix %ld (patch tris %ld)\n",
             a_tot, a_quad, a_tri, a_self, a_other, a_other_far, a_other_dh / 256.0 / 430.0, a_fail, a_deg, a_dn, a_dn_tri);
+    fprintf(f, "(a) tile -14,61 (the wide union cluster whose patch vertex origin is RoamTri.ox/oy/oz, not NODE.x/y/z): %ld lane quads + %ld patch tris probed, FAIL %ld\n",
+            a_w_quad, a_w_tri, a_w_fail);
     fail_total += a_fail;
     fflush(f);
 
