@@ -537,6 +537,85 @@ static int patch_split(Patch *p, double emax, int *overflow)
     return splits;
 }
 
+/* [F1-T10] SLIVERS. A patch triangle whose height over its longest edge is under
+ * ROAM_SLIVER_H units in the STORED (quantised) coordinates is a needle the
+ * locator cannot hit: its own centroid rounds outside it (the T6b self-test
+ * counted 22). Each one is replaced by flipping its longest edge with the patch
+ * triangle across it, when the two new triangles are CCW, taller than the sliver
+ * and within tri_edge_max (the vertices and their height recipes are unchanged,
+ * so the surface still meets every ribbon on the shared vertices). A sliver on the
+ * outline (no neighbour across) or one no flip improves is kept and counted. */
+#define ROAM_SLIVER_H 2.0
+
+static double q_cross(const TD5_RoamPatchVert *a, const TD5_RoamPatchVert *b, const TD5_RoamPatchVert *c)
+{
+    const double ax = (double)td5_roam_quant(a->x), az = (double)td5_roam_quant(a->z);
+    const double bx = (double)td5_roam_quant(b->x), bz = (double)td5_roam_quant(b->z);
+    const double cx = (double)td5_roam_quant(c->x), cz = (double)td5_roam_quant(c->z);
+    return (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+}
+
+/* Height over the longest edge, quantised frame; *k_out = index of the edge's
+ * first vertex in the triangle. */
+static double tri_q_height(const Patch *p, int t, int *k_out)
+{
+    const TD5_RoamPatchVert *v[3] = { &p->pv[p->tri[t].v[0]], &p->pv[p->tri[t].v[1]], &p->pv[p->tri[t].v[2]] };
+    double best = -1.0;
+    int k, bk = 0;
+    for (k = 0; k < 3; k++) {
+        const double d = vdist(v[k], v[(k + 1) % 3]);
+        if (d > best) { best = d; bk = k; }
+    }
+    if (k_out) *k_out = bk;
+    return best > 1e-9 ? fabs(q_cross(v[0], v[1], v[2])) / best : 0.0;
+}
+
+static void patch_desliver(Patch *p, double emax, int *flips, int *kept)
+{
+    int pass, t;
+    for (pass = 0; pass < 8; pass++) {
+        int changed = 0;
+        for (t = 0; t < p->ntri; t++) {
+            int k, t2, k2 = -1, u, v, w, x;
+            double h0;
+            h0 = tri_q_height(p, t, &k);
+            if (h0 >= ROAM_SLIVER_H) continue;
+            u = p->tri[t].v[k]; v = p->tri[t].v[(k + 1) % 3]; w = p->tri[t].v[(k + 2) % 3];
+            for (t2 = 0; t2 < p->ntri; t2++) {
+                if (t2 == t) continue;
+                for (k2 = 0; k2 < 3; k2++)
+                    if (p->tri[t2].v[k2] == v && p->tri[t2].v[(k2 + 1) % 3] == u) break;
+                if (k2 < 3) break;
+            }
+            if (t2 >= p->ntri) continue;
+            x = p->tri[t2].v[(k2 + 2) % 3];
+            /* (u, v, w) + (v, u, x) -> (w, u, x) + (w, x, v) */
+            if (q_cross(&p->pv[w], &p->pv[u], &p->pv[x]) <= 0.0 || q_cross(&p->pv[w], &p->pv[x], &p->pv[v]) <= 0.0)
+                continue;
+            if (vdist(&p->pv[w], &p->pv[x]) > emax) continue;
+            {
+                const int o0[3] = { p->tri[t].v[0], p->tri[t].v[1], p->tri[t].v[2] };
+                const int o1[3] = { p->tri[t2].v[0], p->tri[t2].v[1], p->tri[t2].v[2] };
+                double h1, h2;
+                p->tri[t].v[0] = w;  p->tri[t].v[1] = u;  p->tri[t].v[2] = x;
+                p->tri[t2].v[0] = w; p->tri[t2].v[1] = x; p->tri[t2].v[2] = v;
+                h1 = tri_q_height(p, t, NULL);
+                h2 = tri_q_height(p, t2, NULL);
+                if (h1 <= h0 || h2 <= h0) {             /* no better: undo */
+                    memcpy(p->tri[t].v, o0, sizeof o0);
+                    memcpy(p->tri[t2].v, o1, sizeof o1);
+                    continue;
+                }
+            }
+            (*flips)++;
+            changed = 1;
+        }
+        if (!changed) break;
+    }
+    for (t = 0; t < p->ntri; t++)
+        if (tri_q_height(p, t, NULL) < ROAM_SLIVER_H) (*kept)++;
+}
+
 /* A cut row's lane vertices are collinear only up to rounding (place-frame
  * coordinates are ~5e6, so the cross product carries an error of a few units^2).
  * 50 units^2 over a 1500-unit lane is 0.03 units off the line. */
@@ -2819,6 +2898,7 @@ patch_done:
             if (s < 0) goto done;
             c->tri_splits += s;
             c->recipe_overflow += ovf;
+            patch_desliver(&pt, P->tri_edge_max, &c->sliver_flips, &c->sliver_kept);
         }
 
         /* Publish vertices, triangles, outline. */
@@ -2891,11 +2971,12 @@ patch_done:
     TD5_LOG_I(LOG_TAG, "roam junctions: %d cluster(s) (%d multi-node), %d internal edge(s), "
               "%d union(s) by edge + %d by disc, %d refused (cap), %d refused (layer), "
               "max diameter %.1f m, fan %d, ear-clip %d, fail %d, fillets %d, "
-              "swept fail %d (widened %d), %d split(s)",
+              "swept fail %d (widened %d), %d split(s), slivers flipped %d left %d",
               c->clusters, c->multi_node_clusters, c->internal_edges, c->unions_edge,
               c->unions_disc, c->rejected_unions, c->rejected_layer,
               c->max_diameter / TD5_ROAM_UPM, c->fan_ok, c->fan_fallback - c->earclip_fail,
-              c->earclip_fail, c->fillets, c->swept_fail, c->swept_widened, c->tri_splits);
+              c->earclip_fail, c->fillets, c->swept_fail, c->swept_widened, c->tri_splits,
+              c->sliver_flips, c->sliver_kept);
     ok = 1;
 
 done:
@@ -3191,7 +3272,14 @@ int td5_roam_junction_dev_census(void)
         return 1;
     }
     td5_roam_cache_load_window(win, 300.0 * TD5_ROAM_UPM, &cc);
-    if (!td5_roam_graph_build(&g, win, 300.0 * TD5_ROAM_UPM, NULL)) {
+    {
+        /* [F1-T10] the casco census logs the divided-carriageway verdicts */
+        TD5_RoamGraphParams prm;
+        td5_roam_graph_params_default(&prm);
+        prm.log_median = 1;
+        if (!td5_roam_graph_build(&g, win, 300.0 * TD5_ROAM_UPM, &prm)) g.nedge = -1;
+    }
+    if (g.nedge < 0) {
         td5_roam_cache_session_end();
         return 1;
     }

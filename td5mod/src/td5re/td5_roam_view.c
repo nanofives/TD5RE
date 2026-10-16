@@ -16,9 +16,13 @@
  * strip's are about h0 = the ground height at the route origin
  * (td5_tg_world.c: strip y = tg_w_raw - h0). F1-T8b measured the difference on
  * level091: +18.4 .. +19.5 m at 12 spans, against h0 = 7969 units (18.5 m) in
- * that build's [WORLD] log line. The viewer subtracts the DEM height at route
- * (0,0); it leaves out the detail octave tg_w_raw adds there (|det| * relief *
- * 0.01, a fraction of a metre). TD5RE_ROAM_VIEW_DATUM=<units> overrides it.
+ * that build's [WORLD] log line. [F1-T10] The viewer subtracts that h0 itself
+ * (tg_world_geo_h0) when this process built the geo world. The DEM height at
+ * route (0,0), the fallback, leaves out the detail octave tg_w_raw adds there:
+ * on level091 (-Seed 2054677019, relief 23400) h0 = 8050 against a DEM 7906,
+ * 0.33 m, which is the whole "+0.30 m median" T8b's coverage.py measured with
+ * the DEM datum (F1-T10: median -0.03 m against h0). TD5RE_ROAM_VIEW_DATUM=<units>
+ * overrides both.
  * The lines are depth-tested against the track, so roam geometry a few cm under
  * the strip tarmac would vanish: the draw adds TD5RE_ROAM_VIEW_LIFT_CM (default
  * 50) on top. Display only; the real height difference is measured offline
@@ -46,6 +50,7 @@
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
 #include "td5_roam_view.h"
+#include "td5_tg_world.h"     /* tg_world_geo_h0: the strip's own datum */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -199,7 +204,9 @@ static void rv_world(const RoamTile *t, int32_t ox, int32_t oy, int32_t oz,
 static double rv_datum(const char *slug)
 {
     const char *o = getenv("TD5RE_ROAM_VIEW_DATUM");
+    double h0;
     if (o && o[0]) return atof(o);
+    if (tg_world_geo_h0(&h0)) return h0;
     if (td5_geo_loaded()) return td5_geo_height(0.0, 0.0);
     {
         static TD5_RoamHeight hc;     /* large (window table); used once per place */
@@ -252,8 +259,11 @@ static int rv_setup(const char *slug)
     s_lift = td5_env_int("TD5RE_ROAM_VIEW_LIFT_CM", 50, -1000, 1000) * (RV_UPM / 100.0);
     s_ready = 1;
     TD5_LOG_I(LOG_TAG, "roam view: place %s, route frame loaded, lattice %d units, "
-              "height datum %.0f units (geo rasters %s), display lift %.0f units",
-              slug, (int)s_grid.tile, s_datum, td5_geo_loaded() ? "loaded" : "not loaded", s_lift);
+              "height datum %.0f units (%s; geo rasters %s), display lift %.0f units",
+              slug, (int)s_grid.tile, s_datum,
+              (getenv("TD5RE_ROAM_VIEW_DATUM") && getenv("TD5RE_ROAM_VIEW_DATUM")[0]) ? "TD5RE_ROAM_VIEW_DATUM"
+              : tg_world_geo_h0(NULL) ? "the strip's h0" : "DEM at the route origin",
+              td5_geo_loaded() ? "loaded" : "not loaded", s_lift);
     return 1;
 }
 

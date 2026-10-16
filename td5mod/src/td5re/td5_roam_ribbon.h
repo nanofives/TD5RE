@@ -68,11 +68,14 @@
 #define ROAM_RIBF_BRIDGE      0x20u
 #define ROAM_RIBF_BORE        0x40u
 #define ROAM_RIBF_CHUNKED     0x80u   /* split at synthetic joins (edge > 1 km)      */
+#define ROAM_RIBF_UNTWIST     0x400u  /* [T10] rows dropped: a lane quad folded over   */
 
 /* A grade-separated crossing under this edge (design 1.5): the deck must clear
  * y_under by ROAM_XSEP_LIFT at the PLACE-frame point (x, z). y_under is the
  * solved height of the lower edge there (see roam_ribbon_y_at). */
 typedef struct { double x, z, y_under; } RoamCross;
+
+struct RoamRibbon;
 
 typedef struct {
     uint64_t       key;           /* (way_id << 16) | piece ordinal                    */
@@ -80,6 +83,7 @@ typedef struct {
     int            n;
     int64_t        node_a, node_b;/* node keys of the first / last point               */
     int            lanes;         /* carriageway lanes (td5_roam_lane_count), 1..12    */
+    double         lane_w;        /* [T10] lane width, units; 0 = ROAM_RIB_LANE_W      */
     int            surface;       /* TD5_GEO_SURF_*                                    */
     int            layer;         /* OSM layer                                         */
     int            bridge;        /* OSM bridge=yes                                    */
@@ -97,12 +101,32 @@ typedef struct {
      * bit for bit. NULL = the row is computed from the centreline. */
     const int32_t (*rowq_a)[2];
     const int32_t (*rowq_b)[2];
+    /* [F1-T10] HEIGHT COUPLING. Finished ribbons of HIGHER-priority edges of the
+     * same layer whose surface this one overlaps (two OSM ways drawn over each
+     * other: a slip road leaving at a shallow angle, a service road inside an
+     * avenue, a divided street whose carriageways touch). Inside the overlap this
+     * ribbon's rows take the leader's height; outside, a Lipschitz clamp at half
+     * the grade cap blends back to the free profile (roam_ribbon_build step 5b).
+     * Leaders are listed in priority order; the first that covers a row wins. */
+    const struct RoamRibbon *const *lead;
+    int            nlead;
+    /* [F1-T10] Junction patches this ribbon runs over that are NOT its own end
+     * clusters: triangles, 9 doubles each (x, y, z of three vertices, PLACE
+     * frame). A patch's heights come from its cluster height and its arms' pins,
+     * which are ground-only, so a patch leads without a build dependency. Tried
+     * after the ribbon leaders. */
+    const double  *ltri;
+    int            nltri;
+    /* [F1-T10] BORE: the pins (pin_a / pin_b) of a tunnel chain are already
+     * lowered by the caller; cross[] of a tunnel=1 edge holds the roads ABOVE it
+     * (y_under = their solved height), and the bore must clear them by
+     * ROAM_XSEP_LIFT. */
 } RoamEdgeIn;
 
 /* Per quad, for ownership. Midpoint of the quad's centre segment, PLACE frame. */
 typedef struct { int32_t mx, mz; } RoamQuadMeta;
 
-typedef struct {
+typedef struct RoamRibbon {
     uint64_t         key;
     int              status;
     unsigned         flags;
@@ -117,6 +141,16 @@ typedef struct {
      * ground = raw raster profile, target = smoothed + blended + lifted,
      * y = solved (double, before the integer quantisation). cx / cz = centre. */
     double          *cx, *cz, *ground, *target, *y;
+    double          *hw;           /* [F1-T10] half width per row (a leader's extent)  */
+    double          *tilt;         /* [F1-T10] cross slope per row (dy per unit along
+                                    * the row's left axis); 0 except on coupled rows */
+    int              couple_rows;  /* [F1-T10] rows that took a leader's height        */
+    double           couple_max_dy;/* [F1-T10] largest change the coupling made, units */
+    int              couple_lead;  /* [F1-T10] leaders that covered at least one row   */
+    int              couple_patch_rows; /* [F1-T10] of couple_rows: on a foreign patch */
+    int              couple_pin_clamped;/* [F1-T10] anchors held in a pin's cap cone   */
+    int              clear_n;      /* [F1-T10] structure crossings on this ribbon      */
+    double           clear_min;    /* [F1-T10] least vertical clearance there, units   */
     double           y_first, y_last;  /* solved height of row 0 / the last row (the
                                         * cut rows: a patch's arm_y recipe input)    */
     int32_t          yq_first, yq_last;/* the same, quantised                        */

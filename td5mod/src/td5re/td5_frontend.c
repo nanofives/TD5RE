@@ -59,6 +59,7 @@
 
 #define LOG_TAG "frontend"
 #include "td5_color.h"
+#include "td5_roam_mode.h"   /* [GEO FREE ROAM F2-A] car select BACK parent */
 #include "td5_frontend_internal.h"
 
 /* Forward declarations for functions used before definition */
@@ -4085,6 +4086,8 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         return frontend_geo_generator_parent_screen();
 
     case TD5_SCREEN_CAR_SELECTION:
+        /* [GEO FREE ROAM F2-A] entered from the geo map's FREE ROAM button: BACK / ESC return there */
+        if (td5_roam_armed()) return TD5_SCREEN_GEO_GENERATOR;
         if (s_network_active || s_previous_screen == TD5_SCREEN_NETWORK_LOBBY) {
             return TD5_SCREEN_NETWORK_LOBBY;
         }
