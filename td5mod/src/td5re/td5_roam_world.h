@@ -64,6 +64,8 @@
 
 #define TD5_ROAM_UPM        430.0   /* world units per metre (td5_geo_route.c:91) */
 #define TD5_ROAM_LANE_W     1500.0  /* one lane, TD5_TG_LANE_WIDTH                */
+#define TD5_ROAM_LANE_MIN_M 2.75    /* [T10] narrowest lane a divided carriageway may
+                                     * take to keep its OSM count (a real urban lane) */
 #define TD5_ROAM_ROW_MAX    (TD5_GEO_ROADS_LANES_MAX + 1)
 
 /* The design's explicit rounding (1.4): never the CRT rounding mode. */
@@ -149,7 +151,9 @@ typedef struct {
     /* Attributes (design 1.2), copied from the way. */
     int      klass;         /* TD5_GEO_RC_*                                      */
     int      lanes;         /* td5_roam_lane_count's answer                      */
-    double   half_w;        /* lanes * TD5_ROAM_LANE_W / 2                       */
+    double   half_w;        /* lanes * lane_w / 2                                */
+    double   lane_w;        /* [T10] lane width: TD5_ROAM_LANE_W, narrower on a
+                             * divided carriageway whose median is narrow        */
     int      oneway;        /* 0 two-way, +1 along a->b, -1 against a->b         */
     int      surface;       /* TD5_GEO_SURF_*                                    */
     int      layer;
@@ -186,6 +190,10 @@ typedef struct {
     /* Reference body for the swept-width check (2.5 rule 4), world units. */
     double body_half_w;         /* widest half width in the car table            */
     double body_lf;             /* rear axle to front corner, longest in table   */
+    int    log_median;          /* [T10] dev census only: log every divided way the
+                                 * T9 whole-way rule narrowed (ROAM_MEDIAN_T9) and
+                                 * every divided edge's verdict (ROAM_MEDIAN_EDGE).
+                                 * Not a build rule: not in the tile input hash.  */
 } TD5_RoamGraphParams;
 
 /* Census of one build (also logged). Arrays indexed by arm count are capped at
@@ -195,8 +203,12 @@ typedef struct {
     int    ways_in, ways_kept, drop[TD5_ROAM_DROP_COUNT];
     int    divided_ways;       /* [T9] carriageways given their own OSM count */
     int    wide_ways;          /* [T9] two-way avenidas at twice the figure   */
-    int    median_capped;      /* [T9] divided carriageways narrowed so the
-                                * median OSM draws stays open               */
+    int    median_capped;      /* [T9] divided carriageways the T9 whole-way
+                                * rule would narrow (census only since T10)  */
+    int    divided_edges;      /* [T10] edges of divided carriageways        */
+    int    median_capped_edges;/* [T10] of those, narrowed to keep the median */
+    double median_capped_len;  /* [T10] their length, units                  */
+    int    median_narrow_edges;/* [T10] edges on lanes narrower than 1500    */
     int    nodes, edges, joins, tapers, bends, junction_nodes, dead_ends;
     int    layer_cross_nodes;
     int    clusters, cluster_by_arms[TD5_ROAM_ARM_HIST];
@@ -218,6 +230,7 @@ typedef struct {
     int    corners_parallel, corners_far, fillets, corners_reflex, bevels;
     int    fillet_shrunk;        /* fillet radius cut to fit the arm cut limit */
     int    tri_splits, patch_tris, patch_verts, recipe_overflow;
+    int    sliver_flips, sliver_kept;  /* [T10] patch slivers flipped away / left */
     int    ribbon_sharp_vertices;/* interior polyline turns > 45 deg          */
     int    swept_checked, swept_widened, swept_fail;
     int    ribbon_swept_checked, ribbon_swept_fail;

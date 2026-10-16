@@ -1271,7 +1271,18 @@ int td5_roam_locate_dev_test(void)
                 a_tot++;
                 if (t->tx == -14 && t->tz == 61) { if (is_tri) a_w_tri++; else a_w_quad++; }   /* the wide union cluster tile (T5b) */
                 x24 = w24(mx, ts->org_x); z24 = w24(mz, ts->org_z);
-                if (!td5_roam_prim_eval(rs, ROAM_PRIM_MAKE(i, is_tri, idx), x24, z24, &e) || !e.inside) { a_deg++; continue; }
+                if (!td5_roam_prim_eval(rs, ROAM_PRIM_MAKE(i, is_tri, idx), x24, z24, &e) || !e.inside) {
+                    /* [F1-T10] list them: the builder is meant to emit none */
+                    if (a_deg < 40) {
+                        const int64_t ar2 = is_tri
+                            ? (cx[1] - cx[0]) * (cz[2] - cz[0]) - (cz[1] - cz[0]) * (cx[2] - cx[0])
+                            : (cx[2] - cx[0]) * (cz[3] - cz[1]) - (cz[2] - cz[0]) * (cx[3] - cx[1]);
+                        fprintf(f, "  (a) DEGENERATE tile %d,%d %s %u lane %d at (%lld, %lld): twice the area %lld units^2\n",
+                                t->tx, t->tz, is_tri ? "tri" : "span", idx, l, (long long)mx, (long long)mz, (long long)ar2);
+                    }
+                    a_deg++;
+                    continue;
+                }
                 if (e.normal[1] <= 0) { a_dn++; if (is_tri) a_dn_tri++; }
                 td5_roam_locate(rs, x24, z24, e.ground_y, 1, ROAM_PRIM_NONE, &h);
                 if (h.prim == ROAM_PRIM_MAKE(i, is_tri, idx) && h.inside) a_self++;

@@ -190,7 +190,7 @@ void roam_ribbon_free(RoamRibbon *r)
 {
     if (!r) return;
     free(r->span); free(r->vert); free(r->meta);
-    free(r->cx); free(r->cz); free(r->ground); free(r->target); free(r->y);
+    free(r->cx); free(r->cz); free(r->ground); free(r->target); free(r->y); free(r->hw); free(r->tilt);
     memset(r, 0, sizeof *r);
 }
 
@@ -306,6 +306,350 @@ static int rib_is_reversed(const RoamEdgeIn *in)
     return in->node_a > in->node_b;
 }
 
+/* ------------------------------------------------------ coupling (T10) ----- */
+
+/* Height of a finished ribbon's surface at (x, z), when the point lies on it:
+ * the solved centre profile at the point's projection on the centre polyline,
+ * plus the row's cross slope (tilt, coupled rows only) times the signed lateral
+ * offset. A point before row 0 or past the last row, or further out than the
+ * row half width, is not on it. A margin of `inset` units is taken off the half
+ * width (negative: the surface is extended sideways by that much). */
+static int rib_surface_at(const RoamRibbon *r, double x, double z, double inset,
+                          double *out_y)
+{
+    int i, best = -1;
+    double bd = 1e300, bu = 0.0;
+    if (!r || r->nrows < 2 || !r->cx || !r->y || !r->hw) return 0;
+    for (i = 0; i + 1 < r->nrows; i++) {
+        const double ax = r->cx[i], az = r->cz[i];
+        const double dx = r->cx[i + 1] - ax, dz = r->cz[i + 1] - az;
+        const double l2 = dx * dx + dz * dz;
+        double t, qx, qz, d;
+        if (l2 <= 1e-12) continue;
+        t = ((x - ax) * dx + (z - az) * dz) / l2;
+        if ((i == 0 && t < 0.0) || (i + 2 == r->nrows && t > 1.0)) continue;   /* past an end */
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+        qx = ax + dx * t - x; qz = az + dz * t - z;
+        d = qx * qx + qz * qz;
+        if (d < bd) { bd = d; best = i; bu = t; }
+    }
+    if (best < 0) return 0;
+    {
+        const double hw = r->hw[best] + bu * (r->hw[best + 1] - r->hw[best]) - inset;
+        if (hw <= 0.0 || bd > hw * hw) return 0;
+    }
+    *out_y = r->y[best] + bu * (r->y[best + 1] - r->y[best]);
+    if (r->tilt) {
+        const double dx = r->cx[best + 1] - r->cx[best], dz = r->cz[best + 1] - r->cz[best];
+        const double l = hypot(dx, dz);
+        if (l > 1e-9) {
+            const double qx = r->cx[best] + dx * bu, qz = r->cz[best] + dz * bu;
+            const double lat = ((x - qx) * dz - (z - qz) * dx) / l;      /* along (dz, -dx) */
+            *out_y += (r->tilt[best] + bu * (r->tilt[best + 1] - r->tilt[best])) * lat;
+        }
+    }
+    return 1;
+}
+
+/* Height of a patch triangle list at (x, z): the first triangle that holds the
+ * point (edges inclusive), its plane. Triangles are 9 doubles (x,y,z x3). */
+static int rib_patch_at(const double *tri, int ntri, double x, double z, double *out_y)
+{
+    int t;
+    for (t = 0; t < ntri; t++) {
+        const double *v = tri + 9 * t;
+        const double ax = v[0], ay = v[1], az = v[2], bx = v[3], by = v[4], bz = v[5];
+        const double cx = v[6], cy = v[7], cz = v[8];
+        const double den = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+        double l1, l2;
+        if (fabs(den) < 1e-9) continue;
+        l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / den;
+        l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / den;
+        if (l1 < -1e-9 || l2 < -1e-9 || l1 + l2 > 1.0 + 1e-9) continue;
+        *out_y = l1 * ay + l2 * by + (1.0 - l1 - l2) * cy;
+        return 1;
+    }
+    return 0;
+}
+
+/* Step 5b. Rows whose footprint lies on a leader take the leader's height there
+ * (the mean over the row's lane boundary and lane centre points that are on it;
+ * ribbon leaders first, in priority order, then foreign patches; the first that
+ * covers any point wins). A row point up to ROAM_COUPLE_REACH outside a leader
+ * ribbon counts: a follower that only grazes a kerb meets it at the same height.
+ *
+ * NO NEW GRADE ABOVE THE CAP. The pinned end rows are shared vertices and never
+ * move. The anchors are first held inside each pin's cap cone, then projected
+ * onto the cap-Lipschitz set (largest minorant, then smallest majorant, over the
+ * anchor rows: the pins, being inside every other anchor's cone, stay put). Every
+ * other row is clamped between the cap envelopes of those anchors: min/max of
+ * cap-Lipschitz functions is cap-Lipschitz, so a quad that was within the cap
+ * stays within it, and rows beyond the envelopes' reach keep their free profile.
+ * Where the leader itself is steeper than the cap allows along this ribbon the
+ * follower departs from it (counted in couple_pin_clamped). Returns 0 on OOM. */
+#define ROAM_COUPLE_REACH 1500.0    /* units (3.5 m): the leader is laterally flat, so its surface extends sideways exactly */
+static int rib_couple(const RoamEdgeIn *in, const double *rx, const double *rz,
+                      const double *arc, const double *seg, const double *HW, int n,
+                      int has_pa, int has_pb, double *Y, double *TILT, RoamRibbon *out)
+{
+    double *A = (double *)malloc((size_t)n * sizeof(double));
+    double *U = (double *)malloc((size_t)n * sizeof(double));
+    double *L = (double *)malloc((size_t)n * sizeof(double));
+    unsigned char *isa = (unsigned char *)calloc((size_t)n, 1);
+    double *sk = (double *)malloc((size_t)n * sizeof(double));   /* shortest run into row i */
+    double *ak = (double *)malloc((size_t)n * sizeof(double));   /* its running sum          */
+    unsigned leadmask = 0;
+    int i, j, nanch = 0;
+    double s_end;
+    if (!A || !U || !L || !isa || !sk || !ak) { free(A); free(U); free(L); free(isa); free(sk); free(ak); return 0; }
+    /* Every cap constraint below is measured over the SHORTEST of the centre and
+     * the two kerb runs between two rows: on a bend the inner kerb is shorter, so
+     * a centre profile exactly at the cap would put that kerb over it. */
+    for (i = 0; i < n; i++) {
+        const int a = i > 0 ? i - 1 : 0, b = i < n - 1 ? i + 1 : n - 1;
+        double dx = rx[b] - rx[a], dz = rz[b] - rz[a];
+        const double l = hypot(dx, dz);
+        if (l > 1e-9) { dx /= l; dz /= l; } else { dx = 1.0; dz = 0.0; }
+        L[i] = dz;
+        A[i] = -dx;
+    }
+    sk[0] = 0.0;
+    ak[0] = 0.0;
+    for (i = 1; i < n; i++) {
+        double m = seg[i];
+        int sd;
+        for (sd = -1; sd <= 1; sd += 2) {
+            const double ax = rx[i - 1] + L[i - 1] * HW[i - 1] * sd, az = rz[i - 1] + A[i - 1] * HW[i - 1] * sd;
+            const double bx = rx[i] + L[i] * HW[i] * sd, bz = rz[i] + A[i] * HW[i] * sd;
+            const double run = hypot(bx - ax, bz - az);
+            if (run < m) m = run;
+        }
+        sk[i] = m;
+        ak[i] = ak[i - 1] + m;
+    }
+    s_end = ak[n - 1];
+    (void)arc;
+    for (i = 0; i < n; i++) {
+        const int a = i > 0 ? i - 1 : 0, b = i < n - 1 ? i + 1 : n - 1;
+        double dx = rx[b] - rx[a], dz = rz[b] - rz[a];
+        const double l = hypot(dx, dz);
+        const int ns = 2 * out->lanes + 1;
+        double lx, lz;
+        int q;
+        if ((i == 0 && has_pa) || (i == n - 1 && has_pb)) continue;
+        if (l <= 1e-9) continue;
+        dx /= l; dz /= l;
+        lx = dz; lz = -dx;
+        for (q = -1; q < in->nlead; q++) {             /* -1: the patches first */
+            double sum = 0.0, st = 0.0, stt = 0.0, sty = 0.0;
+            int hits = 0, k;
+            if (q < 0 && (!in->ltri || in->nltri <= 0)) continue;
+            for (k = 0; k < ns; k++) {
+                const double t = -HW[i] + (double)k * (2.0 * HW[i] / (double)(ns - 1));
+                const double px = rx[i] + lx * t, pz = rz[i] + lz * t;
+                double yl;
+                const int on = q >= 0 ? rib_surface_at(in->lead[q], px, pz, -ROAM_COUPLE_REACH, &yl)
+                                      : rib_patch_at(in->ltri, in->nltri, px, pz, &yl);
+                if (on) { sum += yl; st += t; stt += t * t; sty += t * yl; hits++; }
+            }
+            if (hits > 0) {
+                /* the row follows the leader ACROSS too: a least-squares line
+                 * over the points on it (a flat row cannot match a leader it
+                 * crosses at an angle on a grade); the cross slope is capped */
+                const double mt = st / (double)hits, my = sum / (double)hits;
+                const double var = stt / (double)hits - mt * mt;
+                double tl = 0.0;
+                if (hits >= 2 && var > 1e3) tl = (sty / (double)hits - mt * my) / var;
+                if (tl > ROAM_GRADE_CAP) tl = ROAM_GRADE_CAP;
+                if (tl < -ROAM_GRADE_CAP) tl = -ROAM_GRADE_CAP;
+                TILT[i] = tl;
+                A[i] = my - tl * mt;
+                isa[i] = 1;
+                nanch++;
+                if (q < 0) out->couple_patch_rows++;
+                else if (q < 32) leadmask |= 1u << q;
+                break;
+            }
+        }
+    }
+    if (nanch > 0) {
+        const double cap = ROAM_GRADE_CAP * 0.97;   /* margin: the emitted end rows are T3 cut rows */
+        /* an anchor inside the cap cone of each pinned end row */
+        for (i = 0; i < n; i++) {
+            double lo = -1e300, hi = 1e300, v;
+            if (isa[i] != 1) continue;
+            if (has_pa) { lo = Y[0] - cap * ak[i]; hi = Y[0] + cap * ak[i]; }
+            if (has_pb) {
+                const double r = cap * (s_end - ak[i]);
+                if (Y[n - 1] - r > lo) lo = Y[n - 1] - r;
+                if (Y[n - 1] + r < hi) hi = Y[n - 1] + r;
+            }
+            if (lo > hi) {
+                /* the two pins are further apart than the cap allows (a PIN_MISS
+                 * chunk, solved at a raised cap): no anchor can do better than the
+                 * solver's uniform grade there */
+                isa[i] = 0;
+                TILT[i] = 0.0;
+                nanch--;
+                out->couple_pin_clamped++;
+                continue;
+            }
+            v = A[i] < lo ? lo : (A[i] > hi ? hi : A[i]);
+            if (v != A[i]) { out->couple_pin_clamped++; A[i] = v; }
+        }
+    }
+    if (nanch > 0) {
+        const double cap = ROAM_GRADE_CAP * 0.97;   /* margin: the emitted end rows are T3 cut rows */
+        int prev;
+        /* the pinned end rows are anchors too */
+        if (has_pa) { A[0] = Y[0]; isa[0] = 2; }
+        if (has_pb) { A[n - 1] = Y[n - 1]; isa[n - 1] = 2; }
+        /* anchors onto the cap-Lipschitz set: min-plus forward/backward (the largest
+         * minorant), then max-plus forward/backward (the smallest majorant of it) */
+        prev = -1;
+        for (i = 0; i < n; i++) {
+            if (!isa[i]) continue;
+            if (prev >= 0 && isa[i] == 1 && A[prev] + cap * (ak[i] - ak[prev]) < A[i]) A[i] = A[prev] + cap * (ak[i] - ak[prev]);
+            prev = i;
+        }
+        prev = -1;
+        for (i = n - 1; i >= 0; i--) {
+            if (!isa[i]) continue;
+            if (prev >= 0 && isa[i] == 1 && A[prev] + cap * (ak[prev] - ak[i]) < A[i]) A[i] = A[prev] + cap * (ak[prev] - ak[i]);
+            prev = i;
+        }
+        prev = -1;
+        for (i = 0; i < n; i++) {
+            if (!isa[i]) continue;
+            if (prev >= 0 && isa[i] == 1 && A[prev] - cap * (ak[i] - ak[prev]) > A[i]) A[i] = A[prev] - cap * (ak[i] - ak[prev]);
+            prev = i;
+        }
+        prev = -1;
+        for (i = n - 1; i >= 0; i--) {
+            if (!isa[i]) continue;
+            if (prev >= 0 && isa[i] == 1 && A[prev] - cap * (ak[prev] - ak[i]) > A[i]) A[i] = A[prev] - cap * (ak[prev] - ak[i]);
+            prev = i;
+        }
+        for (i = 0; i < n; i++) { U[i] = isa[i] ? A[i] : 1e300; L[i] = isa[i] ? A[i] : -1e300; }
+        for (i = 1; i < n; i++) {
+            if (U[i - 1] + cap * sk[i] < U[i]) U[i] = U[i - 1] + cap * sk[i];
+            if (L[i - 1] - cap * sk[i] > L[i]) L[i] = L[i - 1] - cap * sk[i];
+        }
+        for (i = n - 2; i >= 0; i--) {
+            if (U[i + 1] + cap * sk[i + 1] < U[i]) U[i] = U[i + 1] + cap * sk[i + 1];
+            if (L[i + 1] - cap * sk[i + 1] > L[i]) L[i] = L[i + 1] - cap * sk[i + 1];
+        }
+        for (i = 0; i < n; i++) {
+            double v = Y[i];
+            if (isa[i] == 2) continue;                  /* a pin stays exact */
+            if (isa[i] == 1) v = A[i];
+            else {
+                if (v < L[i]) v = L[i];
+                if (v > U[i]) v = U[i];
+            }
+            if (fabs(v - Y[i]) > out->couple_max_dy) out->couple_max_dy = fabs(v - Y[i]);
+            Y[i] = v;
+        }
+        for (j = 0; j < n; j++) if (isa[j] == 1) out->couple_rows++;
+        for (j = 0; j < 32; j++) if (leadmask & (1u << j)) out->couple_lead++;
+        /* The cross slope may only change as fast as the kerb lines allow: a kerb
+         * vertex rises |dY| + |dtilt| * hw between two rows, which must stay within
+         * the cap over THAT kerb's run (shorter on the inside of a bend). Budgets
+         * b_i = min over both kerbs of (cap * run - |Y_i - Y_i-1|) / hw; the tilts
+         * are projected onto that Lipschitz set (min-plus, then max-plus, both
+         * ways), pinned rows held flat. */
+        for (i = 0; i < n; i++) {
+            const int a = i > 0 ? i - 1 : 0, b = i < n - 1 ? i + 1 : n - 1;
+            double dx = rx[b] - rx[a], dz = rz[b] - rz[a];
+            const double l = hypot(dx, dz);
+            if (l > 1e-9) { dx /= l; dz /= l; } else { dx = 1.0; dz = 0.0; }
+            L[i] = dz;                                    /* L reused: row left axis x */
+            A[i] = -dx;                                   /* A reused: row left axis z */
+        }
+        for (i = 1; i < n; i++) {
+            const double hwm = HW[i] > HW[i - 1] ? HW[i] : HW[i - 1];
+            const double dy = fabs(Y[i] - Y[i - 1]);
+            double bud = 1e300;
+            int sd;
+            for (sd = -1; sd <= 1; sd += 2) {
+                const double ax = rx[i - 1] + L[i - 1] * HW[i - 1] * sd, az = rz[i - 1] + A[i - 1] * HW[i - 1] * sd;
+                const double bx = rx[i] + L[i] * HW[i] * sd, bz = rz[i] + A[i] * HW[i] * sd;
+                const double run = hypot(bx - ax, bz - az);
+                if (cap * run - dy < bud) bud = cap * run - dy;
+            }
+            if (bud < 0.0) bud = 0.0;
+            U[i] = hwm > 1e-9 ? bud / hwm : 0.0;          /* U reused: budget into row i */
+        }
+        U[0] = 0.0;
+        for (i = 0; i < n; i++) if (isa[i] == 2) TILT[i] = 0.0;
+        for (i = 1; i < n; i++) if (isa[i] != 2 && TILT[i] > TILT[i - 1] + U[i]) TILT[i] = TILT[i - 1] + U[i];
+        for (i = n - 2; i >= 0; i--) if (isa[i] != 2 && TILT[i] > TILT[i + 1] + U[i + 1]) TILT[i] = TILT[i + 1] + U[i + 1];
+        for (i = 1; i < n; i++) if (isa[i] != 2 && TILT[i] < TILT[i - 1] - U[i]) TILT[i] = TILT[i - 1] - U[i];
+        for (i = n - 2; i >= 0; i--) if (isa[i] != 2 && TILT[i] < TILT[i + 1] - U[i + 1]) TILT[i] = TILT[i + 1] - U[i + 1];
+    }
+    free(A); free(U); free(L); free(isa); free(sk); free(ak);
+    return 1;
+}
+
+/* [F1-T10] FOLDED QUADS. A lane quad must be a positively oriented quadrilateral
+ * (both of its triangles counter-clockwise in the stored frame). On a sharp turn
+ * next to a given end row (a mitred JOIN row after a 1.7 m dog-leg, service way
+ * 1322710577) the row before it crosses it and the quad folds into a bow-tie the
+ * locator cannot hit (T6b's 'degenerate span'). The non-end row of a folded END
+ * quad is dropped, repeatedly, until it does not fold or only the two end rows
+ * remain (interior folds on a hairpin are left alone: dropping rows there would
+ * cut the corner).
+ * Heights of the kept rows are unchanged, so a merged segment's grade is the mean
+ * of the capped ones. The row positions are formed exactly as step 6 forms them.
+ * Returns the new row count; arrays are compacted in place. */
+static void rib_row_vertex(const double *rx, const double *rz, int n, int row, int j, int L, double lane_w,
+                           int has_rf, int has_rl, const int32_t (*rowf)[2], const int32_t (*rowl)[2],
+                           double *vx, double *vz)
+{
+    const int a = row > 0 ? row - 1 : 0, b = row < n - 1 ? row + 1 : n - 1;
+    double dx = rx[b] - rx[a], dz = rz[b] - rz[a];
+    const double l = hypot(dx, dz);
+    const double t = ((double)L * 0.5 - (double)j) * lane_w;
+    if (row == 0 && has_rf) { *vx = rowf[j][0]; *vz = rowf[j][1]; return; }
+    if (row == n - 1 && has_rl) { *vx = rowl[j][0]; *vz = rowl[j][1]; return; }
+    if (l > 1e-9) { dx /= l; dz /= l; } else { dx = 0.0; dz = 1.0; }
+    *vx = rx[row] + dz * t;
+    *vz = rz[row] - dx * t;
+}
+
+static int rib_untwist(double *rx, double *rz, double *Y, double *HW, double *TILT, double *G, double *TS,
+                       int n, int L, double lane_w, int has_rf, int has_rl,
+                       const int32_t (*rowf)[2], const int32_t (*rowl)[2], unsigned *fl)
+{
+    int guard;
+    for (guard = 0; guard < 64 && n > 2; guard++) {
+        int i, j, drop = -1;
+        for (i = 0; i + 1 < n && drop < 0; i++) {
+            if (i != 0 && i + 2 != n) continue;      /* only the quads at a given end row */
+            for (j = 0; j < L && drop < 0; j++) {
+                double ax, az, bx, bz, cx, cz, dx, dz, c1, c2;
+                rib_row_vertex(rx, rz, n, i, j, L, lane_w, has_rf, has_rl, rowf, rowl, &ax, &az);
+                rib_row_vertex(rx, rz, n, i + 1, j, L, lane_w, has_rf, has_rl, rowf, rowl, &bx, &bz);
+                rib_row_vertex(rx, rz, n, i + 1, j + 1, L, lane_w, has_rf, has_rl, rowf, rowl, &cx, &cz);
+                rib_row_vertex(rx, rz, n, i, j + 1, L, lane_w, has_rf, has_rl, rowf, rowl, &dx, &dz);
+                c1 = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+                c2 = (cx - ax) * (dz - az) - (cz - az) * (dx - ax);
+                if (c1 <= 0.0 || c2 <= 0.0) drop = (i + 1 < n - 1) ? i + 1 : i;
+            }
+        }
+        if (drop <= 0 || drop >= n - 1) break;
+        for (i = drop; i + 1 < n; i++) {
+            rx[i] = rx[i + 1]; rz[i] = rz[i + 1]; Y[i] = Y[i + 1]; HW[i] = HW[i + 1];
+            G[i] = G[i + 1]; TS[i] = TS[i + 1];
+            if (TILT) TILT[i] = TILT[i + 1];
+        }
+        n--;
+        *fl |= ROAM_RIBF_UNTWIST;
+    }
+    return n;
+}
+
 /* -------------------------------------------------------------- build ------- */
 
 int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
@@ -313,7 +657,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     double *ox = NULL, *oz = NULL, *cum = NULL;     /* oriented raw polyline */
     GrPts trim, rs;
     double *rx = NULL, *rz = NULL, *seg = NULL, *G = NULL, *S = NULL, *T = NULL;
-    double *TS = NULL, *Y = NULL, *capv = NULL, *curvv = NULL;
+    double *TS = NULL, *Y = NULL, *capv = NULL, *curvv = NULL, *HW = NULL, *TILT = NULL;
     double *capw = NULL, *tw = NULL, *mw = NULL;    /* solve scratch */
     int32_t rowf[ROAM_RIB_MAX_LANES + 1][2], rowl[ROAM_RIB_MAX_LANES + 1][2];
     int      has_rf = 0, has_rl = 0;                /* T3 end rows given */
@@ -325,7 +669,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     int      has_pa, has_pb, attempt, nch = 1, ncr = 0, prefetched = 0;
     int      st = ROAM_RIB_BAD_INPUT;
     unsigned fl = 0;
-    double   box[4];
+    double   box[4], lane_w;
     int      chunk_b[64];
     int     *chunk_big = NULL;                      /* when > 63 chunks */
     int      cbn = 0;
@@ -338,6 +682,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     out->key = in->key;
     lanes = in->lanes < 1 ? 1 : (in->lanes > ROAM_RIB_MAX_LANES ? ROAM_RIB_MAX_LANES : in->lanes);
     out->lanes = lanes;
+    lane_w = in->lane_w > 0.0 ? in->lane_w : ROAM_RIB_LANE_W;
 
     /* 1. orient */
     ox = (double *)malloc((size_t)in->n * sizeof(double));
@@ -501,7 +846,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
 
     /* crossings under a bridge deck: where they sit on the ribbon, and the base
      * target there */
-    if (in->bridge && in->ncross > 0 && in->cross) {
+    if ((in->bridge || in->tunnel == 1) && in->ncross > 0 && in->cross) {
         cs    = (double *)malloc((size_t)in->ncross * sizeof(double));
         cbase = (double *)malloc((size_t)in->ncross * sizeof(double));
         cyu   = (double *)malloc((size_t)in->ncross * sizeof(double));
@@ -575,6 +920,19 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
                     if (v > TS[i] - T[i]) TS[i] = T[i] + v;
                 }
             }
+        } else if (in->tunnel == 1 && ncr > 0) {
+            /* [F1-T10] a bore under the roads in cross[]: every interior row
+             * at most (road above - lift) at the crossing, rising at the ramp
+             * grade away from a flat floor. The end rows are the caller's
+             * lowered pins (the chain through the JOIN nodes, td5_roam_tile.c). */
+            for (k = 0; k < ncr; k++) {
+                const double top = cyu[k] - ROAM_XSEP_LIFT;
+                for (i = 1; i < n - 1; i++) {
+                    double dd = fabs(arc[i] - cs[k]) - ROAM_RIB_DECK_FLAT * ROAM_RIB_STEP;
+                    if (dd < 0.0) dd = 0.0;
+                    if (top + rg * dd < TS[i]) TS[i] = top + rg * dd;
+                }
+            }
         } else if (in->tunnel == 1) {
             for (i = 1; i < n - 1; i++) {
                 double d = arc[i] < s_tot - arc[i] ? arc[i] : s_tot - arc[i];
@@ -594,14 +952,38 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
             if (rep & 2) fl |= ROAM_RIBF_REPAIR;
         }
 
+        out->clear_n = ncr;
         for (k = 0; k < ncr; k++) {
             const double ys = Y[csg[k]] + cu[k] * (Y[csg[k] + 1] - Y[csg[k]]);
-            if (ys < cyu[k] + ROAM_XSEP_LIFT - 1.0) clear_ok = 0;
+            const double cl = in->bridge ? ys - cyu[k] : cyu[k] - ys;
+            if (k == 0 || cl < out->clear_min) out->clear_min = cl;
+            if (cl < ROAM_XSEP_LIFT - 1.0) clear_ok = 0;
         }
         if (miss) fl |= ROAM_RIBF_PIN_MISS;
         if (clear_ok) break;
         if (attempt == 0) fl |= ROAM_RIBF_RAMP_SHORT;
         else              fl |= ROAM_RIBF_RAMP_FAIL;
+    }
+
+    /* 5b. [F1-T10] height coupling to the leaders (RoamEdgeIn.lead) */
+    HW = (double *)malloc((size_t)n * sizeof(double));
+    if (!HW) goto done;
+    for (i = 0; i < n; i++) HW[i] = (double)lanes * lane_w * 0.5;
+    if (((in->nlead > 0 && in->lead) || (in->nltri > 0 && in->ltri)) && !in->bridge && in->tunnel != 1) {
+        TILT = (double *)calloc((size_t)n, sizeof(double));
+        if (!TILT) goto done;
+        if (!rib_couple(in, rx, rz, arc, seg, HW, n, has_pa, has_pb, Y, TILT, out)) goto done;
+    }
+
+    /* 5c. [F1-T10] no folded lane quad */
+    {
+        const int n0 = n;
+        n = rib_untwist(rx, rz, Y, HW, TILT, G, TS, n, lanes, lane_w, has_rf, has_rl,
+                        (const int32_t (*)[2])rowf, (const int32_t (*)[2])rowl, &fl);
+        if (n != n0) {
+            nq = n - 1;
+            for (i = 1; i < n; i++) seg[i] = hypot(rx[i] - rx[i - 1], rz[i] - rz[i - 1]);
+        }
     }
 
     /* 6. quantise once, emit */
@@ -650,9 +1032,9 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
                 for (k = 0; k <= ns; k++) {
                     const int row = r0 + k;
                     for (j = 0; j < per_row; j++) {
-                        const double t = ((double)L * 0.5 - (double)j) * ROAM_RIB_LANE_W;
+                        const double t = ((double)L * 0.5 - (double)j) * lane_w;
                         int vx = roam_round(rx[row] + lxv[row] * t) - ox0;
-                        const int vy = Yc[row] - oy0;
+                        const int vy = (TILT ? roam_round(Y[row] + TILT[row] * t) : Yc[row]) - oy0;
                         int vz = roam_round(rz[row] + lzv[row] * t) - oz0;
                         if (row == 0 && has_rf) { vx = rowf[j][0] - ox0; vz = rowf[j][1] - oz0; }
                         if (row == n - 1 && has_rl) { vx = rowl[j][0] - ox0; vz = rowl[j][1] - oz0; }
@@ -698,8 +1080,8 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     out->nquad = nq;
     out->nchunks = nch;
     out->flags = fl;
-    out->cx = rx; out->cz = rz; out->ground = G; out->target = TS; out->y = Y;
-    rx = rz = G = TS = Y = NULL;
+    out->cx = rx; out->cz = rz; out->ground = G; out->target = TS; out->y = Y; out->hw = HW; out->tilt = TILT;
+    rx = rz = G = TS = Y = HW = TILT = NULL;
     rs.x = rs.z = NULL;
     st = ROAM_RIB_OK;
 
@@ -716,7 +1098,7 @@ done:
     free(seg); free(S); free(T); free(capv); free(curvv); free(wetv);
     free(capw); free(tw); free(mw);
     free(cs); free(cbase); free(cyu); free(cu); free(csg); free(arc); free(chunk_big);
-    free(G); free(TS); free(Y);
+    free(G); free(TS); free(Y); free(HW); free(TILT);
     return st;
 }
 
