@@ -38,7 +38,10 @@
  *                            ribbon IN THIS TILE or -1)
  *   VERT TD5_StripVertex[]   int16 offsets from the owning span's / tri's origin
  *   TRI  RoamTri[]           junction patch triangles (vertices in VERT, per-tri
- *                            origin = the cluster centroid, tile-local x/z)
+ *                            origin = the cluster centroid, tile-local x/z; when a
+ *                            patch reaches > 76 m from it (int16 limit, wide UNION
+ *                            patches) the midpoint of the patch bounding box, so the
+ *                            vertex origin is ALWAYS RoamTri.ox/oy/oz, never NODE.x/y/z)
  *   BEDG RoamBEdge[]         wall edges (kerbs, deck sides, dead-end caps)
  *   EDGE RoamEdgeRec[]       one record per contiguous run of owned quads
  *   NODE RoamNodeRec[]       owned junction clusters
@@ -239,6 +242,7 @@ typedef struct {
     int      spread_hist[5], pdy_hist[5];
     int      cut_checked, cut_mismatch;   /* patch cut vertex vs ribbon row      */
     int      i16_overflow;        /* a stored offset left int16                  */
+    int      i16_reorigin;        /* clusters whose vertex origin moved off the centroid (F1-T5b) */
     int      bedge_no_tri;        /* outline segment found in no triangle        */
     int      absorbed_row_edges;  /* absorbed edges that needed a shared row y   */
     double   max_overhang_m;      /* furthest an owned vertex lies outside the tile */
