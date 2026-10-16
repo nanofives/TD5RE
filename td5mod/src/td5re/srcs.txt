@@ -30,6 +30,7 @@ td5_roam_tile.c
 td5_roam_locate.c
 td5_roam_view.c
 td5_roam_mode.c
+td5_roam_physics.c
 td5_roam_render.c
 td5_geo_tiles.c
 td5_trackgen.c

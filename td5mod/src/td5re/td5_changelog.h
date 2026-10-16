@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 16 (free roam driving)" },
+    { CL_ITEM,    "Free roam: the car now drives on the La Plata casco" },
+    { CL_ITEM,    "  streets. Wheels sit on the road tiles, kerbs act as" },
+    { CL_ITEM,    "  walls (a corner may hang 35 cm over a kerb), bridges" },
+    { CL_ITEM,    "  keep you on the deck, and a car that leaves the road" },
+    { CL_ITEM,    "  is put back on it. Races are unchanged." },
+    { CL_BLANK,   "" },
 
     { CL_DATE,    "October 16 (free roam mode)" },
     { CL_ITEM,    "New FREE ROAM button on the map screen, next to BACK:" },

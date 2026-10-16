@@ -425,6 +425,8 @@ void td5_track_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
                              int *vl0, int *vl1, int *vr0, int *vr1);
 /* Triangle-pick cross product (>0 -> triangle vl0,vr1,vl1; else vl0,vr0,vr1).
  * local_x/z = FP_TRUNC(world) - span origin. */
+/* [roam F2-B] heading-normal core of td5_track_interpolate_segment_normal, vertex table as a parameter */
+void    td5_track_segment_normal_v(const TD5_StripVertex *vt, int va_idx, int vb_idx, int vc_idx, int16_t *out_normal);
 int64_t td5_track_diagonal_cross_v(const TD5_StripVertex *vt, int vl0_idx, int vr1_idx,
                                    int32_t local_x, int32_t local_z);
 /* triangle_height(): 24.8 world height + int16 unit normal (out_normal may be NULL). */

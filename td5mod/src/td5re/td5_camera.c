@@ -17,6 +17,7 @@
 #include "td5_asset.h"  /* td5_asset_level_number — fly-in per-level blocklist */
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM: replay trackside cameras are strip-only */
+#include "td5_roam_physics.h"   /* GEO FREE ROAM: roam ground under the chase camera (F2-B) */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5_fp.h"     /* FP_TRUNC/FP_SCALE — 24.8 fixed-point idiom macros */
 #include "td5re.h"
@@ -1355,6 +1356,19 @@ static int td5_camera_probe_ground_y(uintptr_t actor, int cam_x, int cam_z,
     TD5_TrackProbeState probe;
     int car_span = (int)(*(short *)(actor + 0x80));
     int car_y    = TD5_ACTOR_AT(actor)->world_pos.y;
+
+    /* [GEO FREE ROAM F2-B] no strip, no span walk: the roam road layer under the camera,
+     * the deck chosen at the car's height (a camera beside a bridge must not read the deck
+     * above or the street below). Same plausibility check as the strip path. */
+    if (td5_roam_active()) {
+        int ground_y = (int)td5_roam_ground(cam_x, cam_z, car_y, 1, NULL);
+        int dy = ground_y - car_y;
+        if (dy < 0) dy = -dy;
+        if (dy > TD5_CAM_GROUND_SANE_DY)
+            return 0;
+        *out_ground_y = ground_y;
+        return 1;
+    }
 
     memset(&probe, 0, sizeof(probe));
     probe.span_index     = (int16_t)car_span;

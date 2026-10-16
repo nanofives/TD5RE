@@ -16,6 +16,8 @@
  */
 
 #include "td5_track.h"
+#include "td5_roam_mode.h"      /* GEO FREE ROAM: td5_roam_active (contact early-outs) */
+#include "td5_roam_physics.h"   /* GEO FREE ROAM: the roam contact provider (F2-B) */
 #include "td5_track_internal.h"
 #include "td5_trackgen.h"   /* [S2] streaming self-check: regenerate + compare */
 #include "td5_track_registry.h" /* [R3 item 19] custom-track end-wall sentinels */
@@ -2577,6 +2579,9 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     static uint32_t s_wall_tick = 0;
     int diag_slot0 = 0;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) { td5_roam_resolve_walls(actor); return; }
+
     if (!actor || !s_span_array || !s_vertex_table) return;
 
     /* Traffic actors (slots 6+) follow fixed AI paths; their probe positions
@@ -3287,6 +3292,7 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
 
 static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
 {
+    if (td5_roam_active()) return;   /* [GEO FREE ROAM F2-B] no boundary sentinels in roam */
     if (!actor || !s_span_array || !s_vertex_table || s_span_count < 3) return;
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
 
@@ -5460,6 +5466,9 @@ int td5_track_get_surface_type(TD5_Actor *actor, int probe_index)
     TD5_StripSpan *sp;
     int lane;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_surface_type(actor, probe_index);
+
     if (!actor || !s_span_array)
         return TD5_SURFACE_DRY_ASPHALT;
 
@@ -6828,6 +6837,9 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     int16_t *track_state;
     int32_t pos_x, pos_z;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) { td5_roam_actor_locate(actor); return; }
+
     if (!actor || !s_span_array || s_span_count == 0)
         return;
 
@@ -6991,6 +7003,7 @@ void td5_track_update_actor_position(TD5_Actor *actor)
 void td5_track_update_probe_position(TD5_TrackProbeState *probe,
                                      int32_t world_x, int32_t world_z)
 {
+    if (td5_roam_active()) return;   /* [GEO FREE ROAM F2-B] no walker in roam (span fields stay -1) */
     if (!probe || !s_span_array || s_span_count == 0)
         return;
 
@@ -7137,7 +7150,11 @@ int64_t td5_track_diagonal_cross_v(const TD5_StripVertex *vt, int vl0_idx, int v
  * cannot be "grounded" on a fictional plane extrapolated above its span. */
 static int s_last_contact_capped = 0;
 
-int td5_track_last_contact_was_capped(void) { return s_last_contact_capped; }
+int td5_track_last_contact_was_capped(void)
+{
+    if (td5_roam_active()) return td5_roam_last_capped();   /* [GEO FREE ROAM F2-B] */
+    return s_last_contact_capped;
+}
 
 /* [roam F1-T6a] Pure core: vertex table is a parameter and the cap bit comes back
  * through out_capped (the strip wrapper below folds it into s_last_contact_capped).
@@ -7342,25 +7359,36 @@ int32_t td5_track_tri_height_v(const TD5_StripVertex *vt,
  * calls this helper. Until that wires, the helper is unreferenced. We keep
  * the prototype in td5_track.h so the sibling worktree can pick it up
  * without a re-port. */
+/* [GEO FREE ROAM F2-B] Strip wrapper over the pure core below (vertex table as a
+ * parameter, like td5_track_tri_height_v): the roam contact provider evaluates the
+ * heading normal of a ROAMTILE triangle with the same integer + FPU sequence. */
 void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
                                            int16_t vc_idx, int16_t *out_normal)
 {
-    TD5_StripVertex *va, *vb, *vc;
+    if (!out_normal || !s_vertex_table)
+        return;
+    td5_track_segment_normal_v(s_vertex_table, va_idx, vb_idx, vc_idx, out_normal);
+}
+
+void td5_track_segment_normal_v(const TD5_StripVertex *vt, int va_idx, int vb_idx,
+                                int vc_idx, int16_t *out_normal)
+{
+    const TD5_StripVertex *va, *vb, *vc;
     int32_t e1_neg_x, e1_neg_y, e1_neg_z;   /* local_c/8/4 = va - vb  */
     int32_t e2_neg_x, e2_neg_y, e2_neg_z;   /* local_18/14/10 = va - vc */
     int32_t nx, ny, nz;                      /* local_24/1c/20 */
     double len_sq, inv_norm;
     int16_t unx, uny, unz;
 
-    if (!out_normal || !s_vertex_table)
+    if (!out_normal || !vt)
         return;
 
     /* g_trackVertexPool + idx*6 -- vertex_at clamps neither (orig doesn't
      * either; vertex indices come from the dispatcher's vertex-base + offset
      * arithmetic and are pre-validated upstream). */
-    va = vertex_at((int)va_idx);
-    vb = vertex_at((int)vb_idx);
-    vc = vertex_at((int)vc_idx);
+    va = &vt[va_idx];
+    vb = &vt[vb_idx];
+    vc = &vt[vc_idx];
 
     /* MOVSX-then-SUB sequences at 0x00445E51..0x00445EA8.
      * Orig computes negated edges; the cross-product of two negated vectors
@@ -7584,6 +7612,8 @@ int32_t td5_track_compute_contact_height_with_normal(int span_index, int sub_lan
 {
     TD5_StripSpan *sp;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (span_index < 0 || span_index >= s_span_count)
         return 0;
 
@@ -7599,6 +7629,12 @@ int td5_track_probe_height(int world_x, int world_z, int current_span,
     int best_lane = 0;
     int best_score = 0x7FFFFFFF;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active() && out_y && out_surface_type) {
+        *out_y = td5_roam_ground_xz(world_x, world_z, NULL);
+        *out_surface_type = TD5_SURFACE_DRY_ASPHALT;
+        return 1;
+    }
     if (!out_y || !out_surface_type || !s_span_array || !s_vertex_table || s_span_count <= 0)
         return 0;
 
@@ -7660,6 +7696,8 @@ int32_t td5_track_compute_contact_height_bestlane(int span_index,
     TD5_StripSpan *sp;
     int lane_count, best_lane = 0, best_score = 0x7FFFFFFF;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (span_index < 0 || span_index >= s_span_count)
         return 0;
 
@@ -7710,6 +7748,8 @@ int32_t td5_track_compute_contact_height_bounded(int span_index, int carried_sub
     int lane_count, best_lane, best_score = 0x7FFFFFFF;
     int cand[3], nc = 0;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (span_index < 0 || span_index >= s_span_count)
         return 0;
 
@@ -7828,6 +7868,8 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
                                       int16_t *out_normal)
 {
     int max_sp = s_span_count;
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (max_sp <= 0 || !s_span_array || !s_vertex_table) {
         if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
         return 0;
@@ -8201,7 +8243,18 @@ static int64_t heading_diag_cross(int li_idx, int ri_plus1_idx,
  * 0x00434350 (spawn-only InitializeActorTrackPose) and hard-codes
  * heading_normal[1]=0 — that path is preserved for spawn-pose callers.
  */
+static void strip_runtime_heading_normal(TD5_Actor *actor);
+
+/* [GEO FREE ROAM F2-B] roam: the chassis primitive's normal (never y == 0); DEV
+ * mirror: the strip writes it, the provider compares and replaces it. */
 void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
+{
+    if (td5_roam_active()) { td5_roam_heading_normal(actor, 0); return; }
+    strip_runtime_heading_normal(actor);
+    if (td5_roam_physics_mirror()) td5_roam_heading_normal(actor, 1);
+}
+
+static void strip_runtime_heading_normal(TD5_Actor *actor)
 {
     int16_t *track_state;
     int16_t *out_normal;
@@ -12071,6 +12124,9 @@ void UpdateActorTrackPosition(short *probe, int *pos) {
 }
 
 void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
+    /* [GEO FREE ROAM F2-B] roam (camera, scripted/recovery mode): the provider. pos = {x, z}, the
+     * same reading as the strip path below (td5_physics.c's scripted refresh passes {x, y, z}). */
+    if (td5_roam_active()) { if (out_y && pos) *out_y = td5_roam_ground_xz(pos[0], pos[1], NULL); return; }
     /*
      * Compute terrain contact height at the probe's span/sub-lane
      * for the world position pos = {x, z}.

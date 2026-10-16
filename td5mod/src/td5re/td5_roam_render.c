@@ -60,6 +60,7 @@
 #if defined(__has_include)
 #  if __has_include("td5_roam_mode.h")
 #    include "td5_roam_mode.h"
+#    include "td5_roam_locate.h"   /* [F2-B] TD5_RoamResident: tiles come from the physics resident set */
 #    define RR_HAVE_MODE 1
 #  endif
 #endif
@@ -760,6 +761,19 @@ static int rr_dev_load(int tx, int tz)
     char path[512], err[160];
     int ok = 0;
     if (rr_find(tx, tz) >= 0 || rr_tried(tx, tz)) return 0;
+#ifdef RR_HAVE_MODE
+    /* [F2-B] the physics resident set already holds every casco tile in memory: bake from
+     * it instead of re-reading the file (the near-eye streaming policy stays here) */
+    {
+        const TD5_RoamResident *rs = td5_roam_resident();
+        const int slot = rs ? td5_roam_resident_find(rs, tx, tz) : -1;
+        if (slot >= 0 && rs->tile[slot]) {
+            ok = td5_roam_render_add_tile(rs->tile[slot]);
+            if (!ok) rr_mark_tried(tx, tz);
+            return ok;
+        }
+    }
+#endif
     td5_roam_tile_path(path, sizeof path, NULL, s_rr.place, tx, tz);
     memset(&t, 0, sizeof t);
     if (td5_roam_tile_read(path, &t, 0, err, sizeof err)) {

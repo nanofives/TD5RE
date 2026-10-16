@@ -33,6 +33,7 @@
 #include "td5_roam_mode.h"
 #include "deps/cjson/cJSON.h"
 #include "../../../re/include/td5_actor_struct.h"
+#include "td5_roam_physics.h"   /* task B: the resident set (road tiles + contact provider) */
 
 #define LOG_TAG "roam"
 
@@ -217,6 +218,7 @@ void td5_roam_end(void)
     s_roam.armed = 0;
     s_roam.active = 0;
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
+    td5_roam_physics_session_end();     /* task B: frees the resident set (no-op when not loaded) */
 }
 
 void td5_roam_cancel(void) { td5_roam_end(); }
@@ -323,6 +325,7 @@ void td5_roam_session_start(void)
 {
     if (!s_roam.armed) { s_roam.active = 0; return; }
     s_roam.active = 1;
+    td5_roam_physics_session_begin();   /* task B: registers the resident set before the spawn (street yaw) */
     td5_roam_apply_overrides();
     s_roam.spawn.car_index         = g_td5.car_index;
     TD5_LOG_I(LOG_TAG, "roam: session start place=%s car=%d host_track=%d origin=(%d,%d) "
@@ -365,6 +368,7 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     a->track_span_high_water = -1;
     a->track_sub_lane_index  = 0;
     td5_roam_set_slot_edge(slot, 0);
+    td5_roam_physics_spawn_snap(a);     /* task B: stand on the street under the spawn point */
 
     TD5_LOG_I(LOG_TAG, "roam: spawn slot=%d place=(%d,%d) world=(%d,%d) yaw=%d%s",
               slot, (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)wx, (int)wz,
