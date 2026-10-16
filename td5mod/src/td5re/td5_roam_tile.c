@@ -41,6 +41,7 @@
                                       * tile box grown by this (an arm leaves a cluster
                                       * whose centroid is inside the tile, <= 60 m)     */
 #define ROAM_GROW_PASSES   4
+#define ROAM_HC_PLANE      1         /* [F1-T10] sloped clusters take a plane (work_hc); in the stamp */
 
 static uint32_t fnv_add(uint32_t h, const void *p, size_t n)
 {
@@ -699,6 +700,7 @@ static uint32_t ctx_input_hash(TD5_RoamTileCtx *c, const double win[4], int *nti
     h = fnv_dbl(h, ROAM_CURV_CAP);   h = fnv_dbl(h, ROAM_XSEP_LIFT);
     h = fnv_dbl(h, ROAM_XSEP_RAMP_FRAC); h = fnv_dbl(h, ROAM_RIB_DECK_FLAT);
     h = fnv_dbl(h, ROAM_PAD_TOUCH_M);    h = fnv_dbl(h, ROAM_SPREAD_CLAMP_M);
+    h = fnv_u32(h, ROAM_HC_PLANE);
     h = fnv_u32(h, c->hdr_fnv);
     for (i = 0; i < c->nidx; i++) {
         IdxRow *r = &c->idx[i];
@@ -731,6 +733,8 @@ struct Work {
     uint8_t   *rev;                /* per edge: T4 built it reversed (a loop)          */
     double    *hc;                 /* per cluster: ground mean                         */
     double    *cspread;            /* per cluster: ground max - min                    */
+    double    *cgr;                /* [F1-T10] per cluster: ground plane gx, gz         */
+    uint8_t   *cpl;                /* [F1-T10] per cluster: 1 = heights from the plane  */
     uint8_t   *hcs;                /* per cluster: 0 unknown, 1 ok, 2 no sample        */
     double    *apin;               /* per global arm: pin height                       */
     uint8_t   *apins;              /* per global arm: 0 unknown, 1 ok, 2 failed        */
@@ -761,7 +765,7 @@ static void work_free(Work *w)
     if (!w) return;
     if (w->rib) for (i = 0; i < w->g.nedge; i++) roam_ribbon_free(&w->rib[i]);
     free(w->rib); free(w->sel); free(w->ebox); free(w->built); free(w->rev);
-    free(w->hc); free(w->cspread); free(w->hcs); free(w->apin); free(w->apins);
+    free(w->hc); free(w->cspread); free(w->cgr); free(w->cpl); free(w->hcs); free(w->apin); free(w->apins);
     free(w->px); free(w->pz);
     free(w->dep_first); free(w->dep_n); free(w->dep); free(w->depk); free(w->bstate); free(w->nlow); free(w->cbox);
     if (w->h_live) td5_roam_height_close(&w->h);
@@ -777,25 +781,41 @@ static int work_ground(Work *w, double x, double z, double *out)
     return roam_cluster_height(&w->h, pt, 1, out);
 }
 
-/* Cluster ground mean + spread; memoised. */
+/* Cluster ground mean + spread; memoised.
+ *
+ * [F1-T10] A SLOPED CLUSTER TAKES A PLANE, NOT ONE HEIGHT. With one H_c a
+ * cluster on a slope (933 of 2127 in the casco spread > 0.5 m) pinned every arm
+ * 0.5 m off its own ground towards the mean, uphill arms down and downhill arms
+ * up. Two such clusters a block apart then pinned the short street between them
+ * in opposite directions: a Calle 14 piece next to the unnamed primary 23406181,
+ * on a 12.5 % real slope, needed 28 % between its pins (a PIN_MISS piece) and the
+ * primary beside it rode 0.6 m over the ground, a 1.03 m step where they overlap.
+ * Now a cluster whose ground spread exceeds ROAM_SPREAD_CLAMP_M gets the
+ * least-squares plane through the same samples, its gradient capped at the grade
+ * cap. H_c is that plane at the centroid, the CENTRE term of every patch vertex
+ * recipe reads the plane at the vertex (work_vert_y) and an arm pins to the plane
+ * at its cut row (work_arm_pin). Not for a ROW_COVERED union: its covered cut row
+ * lies flat under the patch, so that patch stays flat at H_c as before. A cluster
+ * within the spread keeps its mean exactly. */
 static int work_hc(Work *w, int ci, double *out)
 {
     if (w->hcs[ci] == 0) {
         const TD5_RoamGraph *g = &w->g;
         const TD5_RoamCluster *cl = &g->cluster[ci];
         double sum = 0.0, gmin = 1e300, gmax = -1e300, gs;
+        double sx = 0.0, sz = 0.0;
         int k, n = 0, ok = 1;
         for (k = 0; k < cl->nnode && ok; k++) {
             const TD5_RoamNode *nd = &g->node[g->cluster_node[cl->node_first + k]];
             if (!work_ground(w, nd->x, nd->z, &gs)) { ok = 0; break; }
-            sum += gs; n++;
+            sum += gs; n++; sx += nd->x; sz += nd->z;
             if (gs < gmin) gmin = gs;
             if (gs > gmax) gmax = gs;
         }
         for (k = 0; k < cl->nout && ok; k++) {
             const TD5_RoamPatchVert *pv = &g->pvert[cl->vert_first + k];
             if (!work_ground(w, pv->x, pv->z, &gs)) { ok = 0; break; }
-            sum += gs; n++;
+            sum += gs; n++; sx += pv->x; sz += pv->z;
             if (gs < gmin) gmin = gs;
             if (gs > gmax) gmax = gs;
         }
@@ -804,11 +824,65 @@ static int work_hc(Work *w, int ci, double *out)
             w->hc[ci] = sum / (double)n;
             w->cspread[ci] = gmax - gmin;
             w->hcs[ci] = 1;
+            if (w->cspread[ci] > ROAM_SPREAD_CLAMP_M * TD5_ROAM_UPM && n >= 3 &&
+                !(cl->flags & (TD5_ROAM_CL_ROW_COVERED | TD5_ROAM_CL_HULL))) {
+                /* second pass over the same samples, centred on their mean */
+                const double mx = sx / (double)n, mz = sz / (double)n, my = sum / (double)n;
+                double sxx = 0.0, szz = 0.0, sxz = 0.0, sxy = 0.0, szy = 0.0, det;
+                for (k = 0; k < cl->nnode + cl->nout; k++) {
+                    double x, z;
+                    if (k < cl->nnode) {
+                        const TD5_RoamNode *nd = &g->node[g->cluster_node[cl->node_first + k]];
+                        x = nd->x; z = nd->z;
+                    } else {
+                        const TD5_RoamPatchVert *pv = &g->pvert[cl->vert_first + (k - cl->nnode)];
+                        x = pv->x; z = pv->z;
+                    }
+                    if (!work_ground(w, x, z, &gs)) break;
+                    x -= mx; z -= mz; gs -= my;
+                    sxx += x * x; szz += z * z; sxz += x * z; sxy += x * gs; szy += z * gs;
+                }
+                det = sxx * szz - sxz * sxz;
+                if (k == cl->nnode + cl->nout && det > 1e-6 * (sxx + szz) * (sxx + szz)) {
+                    double gx = (sxy * szz - szy * sxz) / det;
+                    double gz = (szy * sxx - sxy * sxz) / det;
+                    const double gm = hypot(gx, gz), capg = ROAM_GRADE_CAP * 0.97;
+                    if (gm > capg) { gx *= capg / gm; gz *= capg / gm; }
+                    w->cgr[2 * ci] = gx;
+                    w->cgr[2 * ci + 1] = gz;
+                    w->hc[ci] = my + gx * (cl->cx - mx) + gz * (cl->cz - mz);
+                    w->cpl[ci] = 1;
+                }
+            }
         }
     }
     if (w->hcs[ci] != 1) return 0;
     *out = w->hc[ci];
     return 1;
+}
+
+/* [F1-T10] The cluster's height at (x, z): its plane on a sloped cluster, H_c
+ * elsewhere. Valid after work_hc succeeded. */
+static double work_plane_y(const Work *w, int ci, double x, double z)
+{
+    const TD5_RoamCluster *cl = &w->g.cluster[ci];
+    if (!w->cpl[ci]) return w->hc[ci];
+    return w->hc[ci] + w->cgr[2 * ci] * (x - cl->cx) + w->cgr[2 * ci + 1] * (z - cl->cz);
+}
+
+/* [F1-T10] td5_roam_patch_vert_y with the CENTRE term read from the plane. */
+static double work_vert_y(const Work *w, int ci, const TD5_RoamPatchVert *v, double hc,
+                          const double *arm_y)
+{
+    double y = 0.0;
+    int k;
+    if (!w->cpl[ci]) return td5_roam_patch_vert_y(v, hc, arm_y);
+    for (k = 0; k < TD5_ROAM_HREF_TERMS; k++) {
+        if (v->ref[k] == TD5_ROAM_HREF_NONE) continue;
+        y += v->w[k] * (v->ref[k] == TD5_ROAM_HREF_CENTRE ? work_plane_y(w, ci, v->x, v->z)
+                                                          : arm_y[v->ref[k]]);
+    }
+    return y;
 }
 
 /* The pin height of one cluster arm (global arm index). When the cluster's ground
@@ -822,14 +896,16 @@ static int work_arm_pin(Work *w, int gi, double *out)
         const TD5_RoamEdge *e = &g->edge[a->edge];
         const TD5_RoamEdgeEnd *en = &e->end[a->end];
         const double clamp_u = ROAM_SPREAD_CLAMP_M * TD5_ROAM_UPM;
-        double hc, gr, dev;
+        double hc, gr, dev, rmx, rmz;
         const int ci = en->cluster;
         if (ci < 0 || !work_hc(w, ci, &hc) || en->nrow < 1) { w->apins[gi] = 2; return 0; }
-        if (!work_ground(w, 0.5 * (en->row[0].x + en->row[en->nrow - 1].x),
-                         0.5 * (en->row[0].z + en->row[en->nrow - 1].z), &gr)) {
+        rmx = 0.5 * (en->row[0].x + en->row[en->nrow - 1].x);
+        rmz = 0.5 * (en->row[0].z + en->row[en->nrow - 1].z);
+        if (!work_ground(w, rmx, rmz, &gr)) {
             w->apins[gi] = 2;
             return 0;
         }
+        hc = work_plane_y(w, ci, rmx, rmz);        /* [F1-T10] the plane at the cut row */
         dev = fabs(hc - gr);
         if (dev > w->st.max_blend_m * TD5_ROAM_UPM) w->st.max_blend_m = dev / TD5_ROAM_UPM;
         /* [F1-T9] Not on a ROW_COVERED patch: there an arm's cut row lies UNDER
@@ -1370,7 +1446,7 @@ static int work_patch_leads(Work *w, int ei, double **tri_out, int *ntri_out)
             for (q = 0; q < 3; q++) {
                 const TD5_RoamPatchVert *v = &g->pvert[pt->v[q]];
                 tri[9 * ntri + 3 * q + 0] = (double)v->xq;
-                tri[9 * ntri + 3 * q + 1] = (double)td5_roam_quant(td5_roam_patch_vert_y(v, hc, arm_y));
+                tri[9 * ntri + 3 * q + 1] = (double)td5_roam_quant(work_vert_y(w, ci, v, hc, arm_y));
                 tri[9 * ntri + 3 * q + 2] = (double)v->zq;
             }
             ntri++;
@@ -1521,10 +1597,12 @@ static int work_build(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int
         w->rev    = (uint8_t *)calloc((size_t)g->nedge + 1u, 1);
         w->hc     = (double *)calloc((size_t)g->ncluster + 1u, sizeof(double));
         w->cspread = (double *)calloc((size_t)g->ncluster + 1u, sizeof(double));
+        w->cgr    = (double *)calloc(2u * ((size_t)g->ncluster + 1u), sizeof(double));
+        w->cpl    = (uint8_t *)calloc((size_t)g->ncluster + 1u, 1);
         w->hcs    = (uint8_t *)calloc((size_t)g->ncluster + 1u, 1);
         w->apin   = (double *)calloc((size_t)g->narm + 1u, sizeof(double));
         w->apins  = (uint8_t *)calloc((size_t)g->narm + 1u, 1);
-        if (!w->rib || !w->built || !w->rev || !w->hc || !w->cspread || !w->hcs || !w->apin ||
+        if (!w->rib || !w->built || !w->rev || !w->hc || !w->cspread || !w->cgr || !w->cpl || !w->hcs || !w->apin ||
             !w->apins) return 0;
 
         /* pass 1: every selected ribbon, each after its dependencies (leaders,
@@ -2018,7 +2096,16 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
                     arm_y[i] = work_arm_pin(w, cl->arm_first + i, &pin) ? pin : hc;
                     st->ribbon_bad++;
                 }
-                dy = fabs(arm_y[i] - hc) / TD5_ROAM_UPM;
+                {
+                    /* [F1-T10] against the cluster height AT the arm (its plane
+                     * on a sloped cluster): a plane is not a crest */
+                    const TD5_RoamEdgeEnd *aen = &ae->end[a->end];
+                    double ref = hc;
+                    if (aen->nrow >= 1)
+                        ref = work_plane_y(w, ci, 0.5 * (aen->row[0].x + aen->row[aen->nrow - 1].x),
+                                           0.5 * (aen->row[0].z + aen->row[aen->nrow - 1].z));
+                    dy = fabs(arm_y[i] - ref) / TD5_ROAM_UPM;
+                }
                 if (dy > crest) crest = dy;
                 if (dy > st->max_patch_dy_m) st->max_patch_dy_m = dy;
                 if (ae->half_w > bw) { bw = ae->half_w; bestarm = i; }
@@ -2045,7 +2132,7 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
             int32_t mny = INT32_MAX, mxy = INT32_MIN;
             for (i = 0; i < cl->nvert; i++) {
                 const TD5_RoamPatchVert *pv = &g->pvert[cl->vert_first + i];
-                const int32_t yq = td5_roam_quant(td5_roam_patch_vert_y(pv, hc, arm_y));
+                const int32_t yq = td5_roam_quant(work_vert_y(w, ci, pv, hc, arm_y));
                 if (!i16_ok(pv->xq - cox) || !i16_ok(pv->zq - coz) || !i16_ok(yq - coy)) bad = 1;
                 if (pv->xq < mnx) mnx = pv->xq;
                 if (pv->xq > mxx) mxx = pv->xq;
@@ -2068,7 +2155,7 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
         base = (int)b.vert.n;
         for (i = 0; i < cl->nvert; i++) {
             const TD5_RoamPatchVert *pv = &g->pvert[cl->vert_first + i];
-            const double yv = td5_roam_patch_vert_y(pv, hc, arm_y);
+            const double yv = work_vert_y(w, ci, pv, hc, arm_y);
             const int yq = td5_roam_quant(yv);
             const int dx = pv->xq - vox, dz = pv->zq - voz, dyv = yq - voy;
             if (!i16_ok(dx) || !i16_ok(dyv) || !i16_ok(dz)) {
@@ -2637,7 +2724,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
     if (f) {
         fprintf(f, "\n%s\n", lines);
         fprintf(f, "max cluster ground spread %.2f m; clusters over %.1f m: %ld; arm pins clamped: %ld; "
-                   "max |H_c - ground at an arm cut row| %.2f m; max |patch centre - arm cut-row y| %.2f m\n",
+                   "max |H_c (plane on a sloped cluster) - ground at an arm cut row| %.2f m; max |H_c at the arm - arm cut-row y| %.2f m\n",
                 max_spread, ROAM_SPREAD_CLAMP_M, tot_spread, tot_clamped, max_blend, max_pdy);
         fprintf(f, "owned clusters by ground spread  (<=0.5 / <=1 / <=2 / <=4 / >4 m): %ld / %ld / %ld / %ld / %ld\n",
                 hist_spread[0], hist_spread[1], hist_spread[2], hist_spread[3], hist_spread[4]);
