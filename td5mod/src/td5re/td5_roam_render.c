@@ -206,8 +206,10 @@ static int rr_sb_of(const RoamTile *t, double px, double pz)
     roam_grid_uv(&s_rr.grid, px, pz, &u, &v);
     a = (int)floor((u - (double)t->tx * (double)s_rr.grid.tile) / q);
     b = (int)floor((v - (double)t->tz * (double)s_rr.grid.tile) / q);
-    if (a < 0) a = 0; if (a >= RR_SUB) a = RR_SUB - 1;
-    if (b < 0) b = 0; if (b >= RR_SUB) b = RR_SUB - 1;
+    if (a < 0) a = 0;
+    if (a >= RR_SUB) a = RR_SUB - 1;
+    if (b < 0) b = 0;
+    if (b >= RR_SUB) b = RR_SUB - 1;
     return b * RR_SUB + a;
 }
 
@@ -285,8 +287,10 @@ static int rr_ground_build(const RoamTile *t, RRGround *g)
     if (!g->h || !g->hole) { free(g->h); free(g->hole); memset(g, 0, sizeof *g); return 0; }
     for (c = 0; c < 4; c++) {
         rr_ground_point(t, (c & 1) ? G : 0, (c & 2) ? G : 0, G, &x, &z);
-        if (x < minx) minx = x; if (x > maxx) maxx = x;
-        if (z < minz) minz = z; if (z > maxz) maxz = z;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (z < minz) minz = z;
+        if (z > maxz) maxz = z;
     }
     if (!td5_roam_height_prefetch(s_rr.hc, minx - 2000.0, minz - 2000.0, maxx + 2000.0, maxz + 2000.0)) {
         free(g->h); free(g->hole); memset(g, 0, sizeof *g);
@@ -500,7 +504,7 @@ static RRTile *rr_bake(const RoamTile *t)
     }
     for (i = 0; i < t->nbedge; i++) {
         const RoamBEdge *be = &t->bedge[i];
-        int32_t ox, oy, oz;
+        int32_t ox = 0, oy = 0, oz = 0;
         float a[3], b2[3], al[3], bl[3];
         RRSb *b;
         TD5_MeshVertex *q;
@@ -880,7 +884,8 @@ int td5_roam_render_dev_poses(void)
     char *line, *save = NULL;
     double lat0 = 0, lon0 = 0, mdlat = 0, mdlon = 0, datum;
     TD5_RoamHeight *hc;
-    int cnt = 0;
+    int cnt = 0, rf = 0;
+    int32_t rf_ox = 0, rf_oz = 0;
     if (!in || !in[0]) return 0;
     if (!slug || !slug[0]) slug = "la_plata_partido";
     td5_geo_source_path(path, sizeof path, slug, "PLACE.JSON");
@@ -917,6 +922,30 @@ int td5_roam_render_dev_poses(void)
         fprintf(stderr, "roam poses: no height source\n"); free(buf); free(hc); return 1;
     }
     datum = td5_roam_view_datum_units(slug);
+    {   /* roam frame: TD5RE_ROAM_RENDER_POSES_SPAWN=lat,lon -> origin = the spawn tile's lattice corner */
+        const char *sp = getenv("TD5RE_ROAM_RENDER_POSES_SPAWN");
+        double slat, slon;
+        if (sp && sscanf(sp, "%lf,%lf", &slat, &slon) == 2) {
+            char gp[512];
+            TD5_File *gf;
+            RoamGrid grd;
+            int stx, stz, okg = 0;
+            double spx = (slon - lon0) * mdlon * 430.0, spz = (slat - lat0) * mdlat * 430.0;
+            td5_geo_source_path(gp, sizeof gp, slug, "roam/ROAMGRID.JSON");
+            gf = td5_plat_file_open(gp, "rb");
+            if (gf) {
+                const int64_t gn = td5_plat_file_size(gf);
+                char *gb = (gn > 0 && gn < 65536) ? (char *)malloc((size_t)gn + 1u) : NULL;
+                if (gb && td5_plat_file_read(gf, gb, (size_t)gn) == (size_t)gn) { gb[gn] = 0; okg = roam_grid_parse(gb, &grd); }
+                free(gb); td5_plat_file_close(gf);
+            }
+            if (!okg) { fprintf(stderr, "roam poses: no ROAMGRID\n"); td5_roam_height_close(hc); free(hc); free(buf); return 1; }
+            roam_grid_tile_of(&grd, spx, spz, &stx, &stz);
+            roam_grid_origin(&grd, stx, stz, &rf_ox, &rf_oz);
+            rf = 1;
+            fprintf(stderr, "roam poses: roam frame, spawn tile %d,%d origin %d,%d\n", stx, stz, (int)rf_ox, (int)rf_oz);
+        }
+    }
     snprintf(outp, sizeof outp, "%s.tour.txt", in);
     o = fopen(outp, "wb");
     for (line = strtok_s(buf, "\r\n;", &save); line && o; line = strtok_s(NULL, "\r\n;", &save)) {
@@ -933,6 +962,12 @@ int td5_roam_render_dev_poses(void)
         pz = (lat - lat0) * mdlat * 430.0;
         if (!td5_roam_height_prefetch(hc, px - 2000.0, pz - 2000.0, px + 2000.0, pz + 2000.0) ||
             !td5_roam_height_sample(hc, px, pz, &g, NULL)) { fprintf(stderr, "roam poses: no height at %s\n", nm); continue; }
+        if (rf) {   /* roam frame: world = place - origin, y = place height, yaw 0 = +Z (north) */
+            fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, (px - (double)rf_ox) * 256.0, (g + hm * 430.0) * 256.0,
+                    (pz - (double)rf_oz) * 256.0, yaw, pit);
+            cnt++;
+            continue;
+        }
         if (!td5_roam_view_frame(slug, px, pz, &xr, &zr) || !td5_roam_view_frame(slug, px, pz + 430.0, &xn, &zn)) continue;
         yr = yaw * 3.14159265358979 / 180.0 + atan2(xn - xr, zn - zr);   /* map north -> route +Z-relative */
         fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, xr * 256.0, (g + hm * 430.0 - datum) * 256.0, zr * 256.0,
