@@ -165,7 +165,7 @@ void td5_roam_edge_row(const TD5_RoamGraph *g, const TD5_RoamEdge *e, double s,
     nx = -dz;                      /* left of a->b */
     nz = dx;
     for (k = 0; k <= e->lanes; k++) {
-        const double off = -e->half_w + (double)k * TD5_ROAM_LANE_W;
+        const double off = -e->half_w + (double)k * e->lane_w;
         out[k].x = cx + nx * off;
         out[k].z = cz + nz * off;
     }
@@ -235,7 +235,7 @@ static void fill_join(TD5_RoamGraph *g, const TD5_RoamNode *nd)
     lanes = g->edge[r[0].edge].lanes;
     hw = g->edge[r[0].edge].half_w;
     for (k = 0; k <= lanes; k++) {
-        const double off = (-hw + (double)k * TD5_ROAM_LANE_W) * m;
+        const double off = (-hw + (double)k * g->edge[r[0].edge].lane_w) * m;
         p[k].x = nd->x + nx * off;
         p[k].z = nd->z + nz * off;
     }
@@ -315,6 +315,16 @@ void td5_roam_graph_free(TD5_RoamGraph *g)
  *   a tagged `width` wins in every case; a counted lane number is never lowered
  *   by the doubling.
  *
+ * [F1-T10] THE MEDIAN CAP IS PER EDGE, not per way. T9 capped a divided
+ * carriageway so it fitted the smallest of three centre-gap samples of the WHOLE
+ * way, so one convergence near a junction narrowed every block of a long avenue
+ * (72 ways in the casco). Now the way keeps its OSM count and each EDGE (the piece
+ * between two graph nodes, about a block) is capped by the centre gap measured
+ * along that piece only: every half row, to the nearest same-name anti-parallel
+ * partner (div_edge_gap), the first and last 10 m left out (they lie under the
+ * junction patch). Where two pieces end up with different counts the node between
+ * them is a TAPER (a 2-arm patch), the strip's own lane-change rule.
+ *
  * WINDOW INDEPENDENCE. The verdict reads only the way's own polyline and the
  * ways within 45 m of it. td5_roam_graph_build loads every cache tile that meets
  * (every selected way's box + 45 m) before deciding, and the candidates are
@@ -326,6 +336,7 @@ void td5_roam_graph_free(TD5_RoamGraph *g)
 #define ROAM_MED_ANTI_TOL_DEG 35.0    /* GR_MED_ANTI_TOL_DEG   */
 #define ROAM_AV_WIDE_X10      20      /* GR_AV_WIDE_X10        */
 #define ROAM_MED_KERB_M        0.5    /* least median kept between two carriageways */
+#define ROAM_MED_END_SKIP_M   10.0    /* [T10] gap samples skip this much at each edge end */
 
 typedef struct { int name_id; int64_t way_id; int way; } RoamNameRef;
 
@@ -448,13 +459,17 @@ static int div_way_divided(const TD5_RoamWay *A, const RoamNameRef *cand, int g0
     return hits >= 2 && (side_sum == hits || side_sum == -hits);
 }
 
-/* The lane count of every selected way (sel order). Returns 0 on out of memory. */
+/* The lane count of every selected way (sel order). A divided carriageway gets its
+ * OSM count here; div_edge_lanes caps each of its edges. grp_out[2*i] / [2*i+1] =
+ * the way's name group in *cand_out (g0, g1), or -1 when the way is not divided.
+ * The caller frees *cand_out. Returns 0 on out of memory. */
 static int div_way_lanes(const RoamSel *sel, int nsel, const double ubox[4], int *lanes_out,
-                         TD5_RoamGraphCensus *c)
+                         int *grp_out, RoamNameRef **cand_out, TD5_RoamGraphCensus *c, int logm)
 {
     const int ncache = td5_roam_cache_way_count();
     RoamNameRef *cand = (RoamNameRef *)malloc((size_t)(ncache > 0 ? ncache : 1) * sizeof *cand);
     int ncand = 0, i;
+    *cand_out = cand;
     if (!cand) return 0;
     for (i = 0; i < ncache; i++) {
         const TD5_RoamWay *w = td5_roam_cache_way(i);
@@ -470,11 +485,12 @@ static int div_way_lanes(const RoamSel *sel, int nsel, const double ubox[4], int
     for (i = 0; i < nsel; i++) {
         const TD5_RoamWay *w = td5_roam_cache_way(sel[i].way);
         int lanes = w->road.lanes;
+        grp_out[2 * i] = grp_out[2 * i + 1] = -1;
         if (!w->width_tagged) {
-            int divided = 0;
+            int divided = 0, g0 = 0, g1 = 0;
             double gap = 1e30;
             if (w->road.name_id >= 0 && div_partner_ok(w)) {
-                int lo = 0, hi = ncand, g0, g1;
+                int lo = 0, hi = ncand;
                 while (lo < hi) {               /* first entry of the name group */
                     const int mid = lo + (hi - lo) / 2;
                     if (cand[mid].name_id < w->road.name_id) lo = mid + 1; else hi = mid;
@@ -486,15 +502,19 @@ static int div_way_lanes(const RoamSel *sel, int nsel, const double ubox[4], int
             if (divided) {
                 if (w->lanes_osm > 0) lanes = w->lanes_osm;
                 {
-                    /* Keep the median OSM draws: two carriageways of this width
-                     * must fit the measured centre gap with a kerb between them.
-                     * The 1500-unit lane (3.49 m) is wider than a real lane, so
-                     * an OSM count that fits the real street can still pave over
-                     * a narrow median (Avenida 25: 4.8 m centre to centre at 2
-                     * lanes each = 7 m). Never below one lane. */
+                    /* The T9 whole-way cap, kept as a census figure only (the cap
+                     * itself is per edge now, div_edge_lanes). */
                     const int fit = (int)floor((gap - ROAM_MED_KERB_M * TD5_ROAM_UPM) / TD5_ROAM_LANE_W);
-                    if (fit < lanes) { lanes = fit < 1 ? 1 : fit; c->median_capped++; }
+                    if (fit < lanes) {
+                        c->median_capped++;
+                        if (logm)
+                            TD5_LOG_I(LOG_TAG, "ROAM_MEDIAN_T9 way %lld '%s' osm lanes %d, T9 whole-way lanes %d (gap %.2f m)",
+                                      (long long)w->way_id, td5_roam_cache_name(w->road.name_id) ? td5_roam_cache_name(w->road.name_id) : "?", lanes,
+                                      fit < 1 ? 1 : fit, gap / TD5_ROAM_UPM);
+                    }
                 }
+                grp_out[2 * i] = g0;
+                grp_out[2 * i + 1] = g1;
                 c->divided_ways++;
             } else if (!w->road.oneway && (w->road.namek == TD5_GEO_NAMEK_AVENIDA ||
                                            w->road.namek == TD5_GEO_NAMEK_DIAGONAL)) {
@@ -509,8 +529,42 @@ static int div_way_lanes(const RoamSel *sel, int nsel, const double ubox[4], int
         }
         lanes_out[i] = lanes;
     }
-    free(cand);
     return 1;
+}
+
+/* [F1-T10] The smallest centre gap along an edge to a same-name, anti-parallel
+ * (within ROAM_MED_ANTI_TOL_DEG) partner of the way's name group, sampled every
+ * half row between ROAM_MED_END_SKIP_M of each end (the whole edge when shorter
+ * than three times that). Partners further than ROAM_MED_MAX_M do not count.
+ * 1e30 when no sample sees a partner. Pure over the edge polyline and the cache. */
+static double div_edge_gap(const TD5_RoamGraph *g, const TD5_RoamEdge *e, const TD5_RoamWay *self,
+                           int rev, const RoamNameRef *cand, int g0, int g1)
+{
+    const double skip = ROAM_MED_END_SKIP_M * TD5_ROAM_UPM, hi = ROAM_MED_MAX_M * TD5_ROAM_UPM;
+    const double step = 0.5 * TD5_ROAM_LANE_W;
+    double s0 = skip, s1 = e->length - skip, s, best = 1e30;
+    int last = 0;
+    if (s1 - s0 < skip) { s0 = 0.0; s1 = e->length; }
+    for (s = s0; !last; s += step) {
+        double px, pz, tx, tz, eb;
+        int b;
+        if (s >= s1) { s = s1; last = 1; }
+        td5_roam_edge_point(g, e, s, &px, &pz, &tx, &tz);
+        eb = atan2(tx, tz);                       /* gr_bearing frame */
+        if (rev) eb += ROAM_PI;                   /* the WAY's direction, not a->b */
+        for (b = g0; b < g1; b++) {
+            const TD5_RoamWay *B = td5_roam_cache_way(cand[b].way);
+            double pbr = 0.0, cx = 0.0, cz = 0.0, d, dd;
+            if (!B || B->way_id == self->way_id) continue;
+            d = div_near_at(B, px, pz, &pbr, &cx, &cz);
+            if (d > hi || d >= best) continue;
+            dd = (eb + ROAM_PI) - pbr;
+            dd = atan2(sin(dd), cos(dd));
+            if (fabs(dd) * 180.0 / ROAM_PI > ROAM_MED_ANTI_TOL_DEG) continue;
+            best = d;
+        }
+    }
+    return best;
 }
 
 /* Is key a node? Binary search over the sorted node keys. */
@@ -527,6 +581,8 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
     TD5_RoamGraphCensus *c;
     RoamSel *sel = NULL;
     int *wlanes = NULL;                                 /* per sel: lane count  */
+    int *wgrp = NULL;                                   /* [T10] per sel: divided name group */
+    RoamNameRef *dcand = NULL;                          /* [T10] the name-group candidates  */
     double ubox[4];
     int nsel = 0;
     int *vstart = NULL, *vcount = NULL, *vidx = NULL;   /* filtered vertices per sel */
@@ -611,7 +667,8 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
     }
     if (nsel > 0) nsel = j;
     wlanes = (int *)malloc((size_t)(nsel + 1) * sizeof(int));
-    if (!wlanes || !div_way_lanes(sel, nsel, ubox, wlanes, c)) goto oom;
+    wgrp = (int *)malloc((size_t)(2 * nsel + 2) * sizeof(int));
+    if (!wlanes || !wgrp || !div_way_lanes(sel, nsel, ubox, wlanes, wgrp, &dcand, c, g->prm.log_median)) goto oom;
 
     /* 2. Filtered vertices: the first vertex of each run of equal node keys. */
     vstart = (int *)malloc((size_t)(nsel + 1) * sizeof(int));
@@ -786,7 +843,45 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
                 e->klass = w->road.klass;
                 e->lanes = wlanes[i] < 1 ? 1 : wlanes[i];
                 if (e->lanes > TD5_GEO_ROADS_LANES_MAX) e->lanes = TD5_GEO_ROADS_LANES_MAX;
-                e->half_w = (double)e->lanes * TD5_ROAM_LANE_W * 0.5;
+                e->lane_w = TD5_ROAM_LANE_W;
+                if (wgrp[2 * i] >= 0 && e->npt >= 2 && len > 0.0) {
+                    /* [F1-T10] the median of THIS piece: the carriageway must fit the
+                     * centre gap measured along it, with a 0.5 m kerb, i.e. a width of
+                     * gap - kerb (both carriageways of a pair take the same rule, so
+                     * half each side). The OSM lane count is kept while each lane can
+                     * be at least TD5_ROAM_LANE_MIN_M wide; lanes are narrowed first,
+                     * dropped only below that. Never below one lane of the minimum. */
+                    double gap;
+                    e->length = len;
+                    gap = div_edge_gap(g, e, w, rev, dcand, wgrp[2 * i], wgrp[2 * i + 1]);
+                    c->divided_edges++;
+                    if (gap < 1e29) {
+                        const double avail = gap - ROAM_MED_KERB_M * TD5_ROAM_UPM;
+                        const double lmin = TD5_ROAM_LANE_MIN_M * TD5_ROAM_UPM;
+                        if (avail < (double)e->lanes * TD5_ROAM_LANE_W) {
+                            int fit = (int)floor(avail / lmin);
+                            if (fit < 1) fit = 1;
+                            if (fit < e->lanes) {
+                                c->median_capped_edges++;
+                                c->median_capped_len += len;
+                                e->lanes = fit;
+                            }
+                            e->lane_w = avail / (double)e->lanes;
+                            if (e->lane_w > TD5_ROAM_LANE_W) e->lane_w = TD5_ROAM_LANE_W;
+                            if (e->lane_w < lmin) e->lane_w = lmin;
+                            if (e->lane_w < TD5_ROAM_LANE_W) c->median_narrow_edges++;
+                        }
+                    }
+                    if (g->prm.log_median) {
+                        double mx, mz;
+                        td5_roam_edge_point(g, e, 0.5 * len, &mx, &mz, NULL, NULL);
+                        TD5_LOG_I(LOG_TAG, "ROAM_MEDIAN_EDGE way %lld edge %llu lanes %d of %d, lane %.2f m, gap %.2f m, "
+                                  "length %.0f m, at (%.0f, %.0f)", (long long)w->way_id,
+                                  (unsigned long long)e->key, e->lanes, wlanes[i], e->lane_w / TD5_ROAM_UPM,
+                                  gap < 1e29 ? gap / TD5_ROAM_UPM : -1.0, len / TD5_ROAM_UPM, mx, mz);
+                    }
+                }
+                e->half_w = (double)e->lanes * e->lane_w * 0.5;
                 if (w->road.oneway) {
                     const int d = w->road.oneway_dir ? w->road.oneway_dir : 1;
                     e->oneway = rev ? -d : d;
@@ -872,7 +967,7 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
                 end_out_dir(g, e1, r[0].end, &u1x, &u1z);
                 end_out_dir(g, e2, r[1].end, &u2x, &u2z);
                 cd = -(u1x * u2x + u1z * u2z);       /* cos(deflection) */
-                if (e1->lanes != e2->lanes) {
+                if (e1->lanes != e2->lanes || fabs(e1->lane_w - e2->lane_w) > 0.5) {
                     nd->kind = TD5_ROAM_NODE_TAPER;
                     c->tapers++;
                 } else if (cd < cos_join) {
@@ -895,6 +990,8 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
 
     free(sel);
     free(wlanes);
+    free(wgrp);
+    free(dcand);
     free(vstart);
     free(vcount);
     free(vidx);
@@ -902,17 +999,21 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
     c->ms = td5_plat_time_ms() - t0;
     TD5_LOG_I(LOG_TAG, "roam graph: %d way(s) in window, %d kept, %d node(s) "
               "(%d junction, %d join, %d taper, %d bend, %d dead end), %d edge(s), "
-              "%d cluster(s), %d divided carriageway(s) at their own lanes (%d narrowed "
-              "to keep the median), %d wide avenue(s), %u ms",
+              "%d cluster(s), %d divided carriageway(s) at their own lanes (%d would be narrowed "
+              "whole by the T9 rule; per edge: %d of %d edges lose lanes, %.0f m, %d keep them on "
+              "narrower lanes), %d wide avenue(s), %u ms",
               c->ways_in, c->ways_kept, c->nodes, c->junction_nodes, c->joins,
               c->tapers, c->bends, c->dead_ends, c->edges, c->clusters, c->divided_ways,
-              c->median_capped, c->wide_ways, (unsigned)c->ms);
+              c->median_capped, c->median_capped_edges, c->divided_edges,
+              c->median_capped_len / TD5_ROAM_UPM, c->median_narrow_edges, c->wide_ways, (unsigned)c->ms);
     return 1;
 
 oom:
     TD5_LOG_E(LOG_TAG, "roam graph: build failed (out of memory or bad order)");
     free(sel);
     free(wlanes);
+    free(wgrp);
+    free(dcand);
     free(vstart);
     free(vcount);
     free(vidx);

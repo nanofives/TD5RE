@@ -16,7 +16,10 @@ layout come from validate_tiles.py (T5's reader, imported, not copied). Then:
       td5_roam_cache.c:166-186.
   (2) SEAMS. Two checks. (a) Lattice line: every row vertex within SEAM_TOL of a tile side
       (lattice u or v) must have an identical x,y,z partner in the built neighbour across
-      that side. (b) Closure: an open edge whose two ends are both held by another tile must
+      that side, when the neighbour holds any vertex within REACH_TOL of it ([F1-T10]: a
+      near miss is a crack; a vertex the neighbour has nothing near -- a kerb lying ON the
+      border, a quad straddling it that this tile owns -- has nothing to share and is
+      counted as informational). (b) Closure: an open edge whose two ends are both held by another tile must
       be open in that tile too (topology mismatch). Quads straddle the lattice line, so (a)
       is strict and (b) is the real seam test.
   (3) SHORT EDGES. No open edge (count 1 in one tile's mesh, kerb walls included) shorter
@@ -66,6 +69,7 @@ PLACE_DIR = os.path.join("re", "assets", "geo", "la_plata_partido")
 UPM = 430.0              # TD5_ROAM_UPM, world units per metre (td5_roam_world.h:65)
 CM = UPM / 100.0         # 1 cm in units
 SEAM_TOL = 2.0           # units: the rounded lattice corner moves a border row by <= 0.5 unit
+REACH_TOL = 430.0        # [F1-T10] units: a neighbour vertex this near a border vertex = a crack
 SAMPLE_TOL = 2.0         # units: ROADS points (float) against integer patch triangles
 CELL = 21500             # spatial index cell, 50 m
 PROBE = 8.0              # (4c) units across an open edge (~2 cm)
@@ -553,6 +557,20 @@ def main(argv):
             for side in lat.sides(key[0], key[1], p):
                 band[(key, side)].add(p)
     pairs = [(("U1"), ("U0"), 1, 0), (("V1"), ("V0"), 0, 1)]
+
+    def near_miss(nbt, p):
+        """[F1-T10] True when the neighbour across holds a vertex within REACH_TOL (1 m) of p
+        but not p itself: a crack in the seam. A vertex on the lattice line that the
+        neighbour has nothing near is legitimately unshared -- a kerb or lane line lying on
+        the border, or a quad that straddles it and is owned here (T9's 17 'lattice-line
+        mismatches' were all of these kinds: the nearest neighbour vertex was >= 3.7 m
+        away, F1-T10 seam17.py)."""
+        for q in nbt.pts:
+            if abs(q[0] - p[0]) <= REACH_TOL and abs(q[2] - p[2]) <= REACH_TOL:
+                return True
+        return False
+
+    seam_one_side = []
     seam_bad = []
     seam_checked = 0
     seam_vertices = 0
@@ -568,13 +586,22 @@ def main(argv):
             seam_checked += 1
             seam_vertices += len(a) + len(b)
             for p in a - b:
-                seam_bad.append((key, nb, side, p))
+                if near_miss(tiles[nb], p):
+                    seam_bad.append((key, nb, side, p))
+                else:
+                    seam_one_side.append((key, nb, side, p))
             for p in b - a:
-                seam_bad.append((nb, key, opp, p))
+                if near_miss(tiles[key], p):
+                    seam_bad.append((nb, key, opp, p))
+                else:
+                    seam_one_side.append((nb, key, opp, p))
     say("")
     say("(2) SEAMS: %d shared sides checked, %d border vertices compared, %d MISMATCHED, "
         "%d border vertices on the outer edge of the built set (informational)"
         % (seam_checked, seam_vertices, len(seam_bad), outer_vertices))
+    say("    [F1-T10] unpartnered lattice-line vertices the neighbour has nothing within %.0f m of "
+        "(a kerb on the border, a straddling quad owned here: nothing across to share): %d (informational)"
+        % (REACH_TOL / UPM, len(seam_one_side)))
     for key, nb, side, p in seam_bad[:TOP]:
         tag = " [ovf]" if p in tiles[key].ovf_pts or (nb in tiles and p in tiles[nb].ovf_pts) else ""
         say("    tile %s side %s -> %s  %s has no identical partner%s"
