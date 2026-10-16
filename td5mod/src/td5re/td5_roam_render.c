@@ -70,12 +70,15 @@
 #define RR_MAXMESH        (RR_SUB * RR_SUB)
 #define RR_UPM            430.0              /* units per metre                     */
 #define RR_MAX_LANES      16
-/* Pages of the loaded GENERATED level (td5_trackgen_internal.h TD5_TG_PAGE_*):
- * 0 = ROAD (asphalt, lane line at the u edge), 5 = GROUND. The kerb skirt uses the
- * 1x1 white page of the HUD (TD5 page map) with a grey vertex colour. Override
- * with TD5RE_ROAM_RENDER_PAGE_ROAD / _GROUND / _KERB for another level. */
-#define RR_PAGE_ROAD      0
-#define RR_PAGE_GROUND    5
+/* Pages of the HOST level (td5_roam_mode.h: roam loads a normal level only for its static
+ * pages and sky; default = schedule index 0, level023 "Moscow", 475 pages). Plain look: 91 is
+ * a featureless dark-grey asphalt (92..95 the same, 96/97 carry an edge line, 98/99 a
+ * crossing), 9 is a plain green lawn. Looked up on a contact sheet of
+ * re/assets/levels/level023/textures.src/pages. Another host needs other numbers:
+ * TD5RE_ROAM_RENDER_PAGE_ROAD / _GROUND / _KERB override. The kerb skirt uses the 1x1
+ * white page of the HUD (TD5 page map) with a grey vertex colour. */
+#define RR_PAGE_ROAD      91
+#define RR_PAGE_GROUND    9
 #define RR_PAGE_KERB      HUD_WHITE_TEX_PAGE
 
 typedef struct {
@@ -869,8 +872,8 @@ static void rr_autobegin(void)
 #ifndef TD5RE_RELEASE
 /* DEV pose generator. TD5RE_ROAM_RENDER_POSES=<file> with lines
  *   name:lat,lon,h_above_ground_m,yaw_deg,pitch_deg      (yaw 0 = north, as seen on the map)
- * writes <file>.tour.txt in the free-cam tour format (route-frame WORLD units = strip
- * units x 256, y from the place height minus the strip datum) and returns 1 (the caller
+ * writes <file>.tour.txt in the free-cam tour format (STRIP units, the numbers the POS line prints;
+ * the tour multiplies by 256 itself, y from the place height minus the strip datum) and returns 1 (the caller
  * exits). Only meaningful with a built geo level whose _route/ frame is the target of the
  * tour (verify/geo_tour.ps1 with TD5RE_ROAM_RENDER=1 TD5RE_ROAM_RENDER_HIDE_STRIP=1). */
 int td5_roam_render_dev_poses(void)
@@ -963,14 +966,14 @@ int td5_roam_render_dev_poses(void)
         if (!td5_roam_height_prefetch(hc, px - 2000.0, pz - 2000.0, px + 2000.0, pz + 2000.0) ||
             !td5_roam_height_sample(hc, px, pz, &g, NULL)) { fprintf(stderr, "roam poses: no height at %s\n", nm); continue; }
         if (rf) {   /* roam frame: world = place - origin, y = place height, yaw 0 = +Z (north) */
-            fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, (px - (double)rf_ox) * 256.0, (g + hm * 430.0) * 256.0,
-                    (pz - (double)rf_oz) * 256.0, yaw, pit);
+            fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, (px - (double)rf_ox), (g + hm * 430.0),
+                    (pz - (double)rf_oz), yaw, pit);
             cnt++;
             continue;
         }
         if (!td5_roam_view_frame(slug, px, pz, &xr, &zr) || !td5_roam_view_frame(slug, px, pz + 430.0, &xn, &zn)) continue;
         yr = yaw * 3.14159265358979 / 180.0 + atan2(xn - xr, zn - zr);   /* map north -> route +Z-relative */
-        fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, xr * 256.0, (g + hm * 430.0 - datum) * 256.0, zr * 256.0,
+        fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, xr, (g + hm * 430.0 - datum), zr,
                 yr * 180.0 / 3.14159265358979, pit);
         cnt++;
     }
