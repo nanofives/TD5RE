@@ -1,0 +1,32 @@
+# GEO FREE ROAM F2-A: geo selector (dev-seeded START pin, FREE ROAM button focused through
+# TD5RE_GEO_PANEL_FOCUS) -> normal car select -> OK -> roam race -> drive -> pause -> LEAVE
+# FREE ROAM -> back on the geo selector.
+sync menu
+300 log GEO_SETTLED
++8 key enter press
++900 log AT_CARSELECT
++30 key down press
++20 key down press
++20 key down press
++20 key down press
++30 key enter press
++1500 log AFTER_LAUNCH
+sync race
+60 throttle 1
++600 left 1
++60 left 0
++300 log DRIVEN
++10 key esc press
++120 log PAUSED
++10 key down press
++30 key down press
++30 key down press
++30 log ON_LEAVE_ROW
++10 key enter press
++600 log AFTER_LEAVE
+# back out of car select: FREE ROAM again, then BACK (esc) -> the session is cancelled
++10 key enter press
++900 log AT_CARSELECT_2
++10 key esc press
++600 log AFTER_BACK
++10 quit

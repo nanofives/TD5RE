@@ -7106,6 +7106,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 int endrace_present = 1;
                 int freecam_present = 1;
 #endif
+                /* [GEO FREE ROAM F2-A] roam never finishes: no END RACE NOW (it would force a
+                 * results table out of span-less progress); the only way out is LEAVE FREE ROAM.
+                 * Must match the gate in td5_hud_init_pause_menu. */
+                if (td5_roam_active()) endrace_present = 0;
                 /* [FREE CAMERA 2026-08-04] FREE CAMERA sits directly under
                  * CONTINUE (dev builds only) — see the matching string-table
                  * order + skip in td5_hud_init_pause_menu. It's an action row,

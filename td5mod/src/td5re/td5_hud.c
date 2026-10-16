@@ -8983,6 +8983,7 @@ void td5_hud_init_pause_menu(int page_index)
     int endrace_row = 1;
     int freecam_row = 1;   /* [FREE CAMERA] dev builds always expose the row */
 #endif
+    if (td5_roam_active()) endrace_row = 0;   /* [GEO FREE ROAM F2-A] matches td5_game.c */
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
