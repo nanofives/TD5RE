@@ -66,7 +66,9 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    1u
+#define ROAM_RULES_VERSION    2u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+                                     * pins, absorbed edges on the patch, SPLIT fallbacks,
+                                     * ROW_COVERED pins at H_c */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */

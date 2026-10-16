@@ -819,7 +819,12 @@ static int work_arm_pin(Work *w, int gi, double *out)
         }
         dev = fabs(hc - gr);
         if (dev > w->st.max_blend_m * TD5_ROAM_UPM) w->st.max_blend_m = dev / TD5_ROAM_UPM;
-        if (w->cspread[ci] > clamp_u && dev > clamp_u) {
+        /* [F1-T9] Not on a ROW_COVERED patch: there an arm's cut row lies UNDER
+         * the patch rather than on its outline, and the patch surface there is
+         * made from the other arms' pins, so a per-arm pin left the covered row
+         * standing off the patch (casco: up to 6 units; 0 with every arm at H_c). */
+        if (w->cspread[ci] > clamp_u && dev > clamp_u &&
+            !(g->cluster[ci].flags & TD5_ROAM_CL_ROW_COVERED)) {
             w->apin[gi] = gr + (hc > gr ? clamp_u : -clamp_u);
             w->st.arm_clamped++;
         } else {
