@@ -441,16 +441,16 @@ static int rib_couple(const RoamEdgeIn *in, const double *rx, const double *rz,
         if (l <= 1e-9) continue;
         dx /= l; dz /= l;
         lx = dz; lz = -dx;
-        for (q = 0; q <= in->nlead; q++) {
+        for (q = -1; q < in->nlead; q++) {             /* -1: the patches first */
             double sum = 0.0, st = 0.0, stt = 0.0, sty = 0.0;
             int hits = 0, k;
-            if (q == in->nlead && (!in->ltri || in->nltri <= 0)) break;
+            if (q < 0 && (!in->ltri || in->nltri <= 0)) continue;
             for (k = 0; k < ns; k++) {
                 const double t = -HW[i] + (double)k * (2.0 * HW[i] / (double)(ns - 1));
                 const double px = rx[i] + lx * t, pz = rz[i] + lz * t;
                 double yl;
-                const int on = q < in->nlead ? rib_surface_at(in->lead[q], px, pz, -ROAM_COUPLE_REACH, &yl)
-                                             : rib_patch_at(in->ltri, in->nltri, px, pz, &yl);
+                const int on = q >= 0 ? rib_surface_at(in->lead[q], px, pz, -ROAM_COUPLE_REACH, &yl)
+                                      : rib_patch_at(in->ltri, in->nltri, px, pz, &yl);
                 if (on) { sum += yl; st += t; stt += t * t; sty += t * yl; hits++; }
             }
             if (hits > 0) {
@@ -467,7 +467,7 @@ static int rib_couple(const RoamEdgeIn *in, const double *rx, const double *rz,
                 A[i] = my - tl * mt;
                 isa[i] = 1;
                 nanch++;
-                if (q == in->nlead) out->couple_patch_rows++;
+                if (q < 0) out->couple_patch_rows++;
                 else if (q < 32) leadmask |= 1u << q;
                 break;
             }
