@@ -6,7 +6,9 @@ layout come from validate_tiles.py (T5's reader, imported, not copied). Then:
 
   (1) COVERAGE. Every drivable way of the ROADS tiles whose polyline meets the casco
       polygon must own >= 1 quad (an EDGE record with span_count >= 1, key >> 16 = way id)
-      or lie inside a junction patch (every sample point inside a TRI of some tile).
+      or lie inside a junction patch (every sample point inside a TRI of some tile),
+      or [F1-T9] be an absorbed connector: its centreline, sampled every metre, within
+      COVER_TOL (1 m) of the drivable union (any tile's ribbon quads or patch triangles).
       Drivable = the td5_roam_world.c filter: td5_roam_way_drop_reason (:56-69: no id,
       class bus_stop/razed/services/raceway, tags.area=yes, service parking_aisle /
       drive-through), the dup-id rule (:340-349, first kept) and the degenerate rule
@@ -28,11 +30,21 @@ layout come from validate_tiles.py (T5's reader, imported, not copied). Then:
       different drivable prim (a lane quad or patch triangle that does not contain the edge):
       overlapping carriageways and side-by-side split rows.
 
+  (4c) [F1-T9] COVERED GAPS, NOT IN TOTAL. An open gap edge whose far side (probed a few
+      units across, away from its own prim) is drivable surface of another prim within
+      STEP_TOL in height: the wall rule is the boundary of the UNION, so this is no hole.
+  [F1-T9] A gap whose partner may live in a tile that was not built (a tile with an
+  unbuilt neighbour) counts as "edge of the built set", like `outer`. --inner x0,z0,x1,z1
+  counts gaps / arm rows in those tiles only: build a one-tile ring round the set and audit
+  with --inner = the original set to prove those are only the edge.
+  [F1-T9] A dead-end cap is ONE BEDG across the whole row; it walls every lane segment.
+
 Outputs audit_coverage.txt and casco_coverage_audit.png under --out (stdlib PNG writer). The
 PNG draws drivable ways grey, uncovered red, gaps orange, (4b) purple, seam mismatches magenta x.
 
 Usage:  python -I verify/roam/audit_coverage.py [--tiles DIR] [--roads DIR] [--grid FILE]
                                               [--poly FILE] [--out DIR] [--no-png]
+                                              [--inner x0,z0,x1,z1]
 Exit 0 when every check is 0 and the structure gate is clean, else 1.
 """
 import glob
@@ -56,6 +68,9 @@ CM = UPM / 100.0         # 1 cm in units
 SEAM_TOL = 2.0           # units: the rounded lattice corner moves a border row by <= 0.5 unit
 SAMPLE_TOL = 2.0         # units: ROADS points (float) against integer patch triangles
 CELL = 21500             # spatial index cell, 50 m
+PROBE = 8.0              # (4c) units across an open edge (~2 cm)
+COVER_TOL = 430.0        # (1) an absorbed way's centreline within 1 m of the drivable union
+STEP_TOL = 43.0          # (4c) a covering surface within 10 cm of the edge is continuous
 DROP_CLASS = ("bus_stop", "razed", "services", "raceway")
 DROP_SERVICE = ("parking_aisle", "drive-through")
 TOP = 10
@@ -171,6 +186,15 @@ def tile_mesh(t):
         else:
             s = t.spans[prim]
             o = (s[7], s[8], s[9])
+            # [T9] A dead-end cap is ONE BEDG across the whole row (row[0] -> row[L],
+            # td5_roam_tile.c slice_tile), while the mesh holds the row per lane.
+            # Wall every lane segment the cap spans, or each one reads as a gap.
+            L = s[2][1] & 0x0F
+            lo, hi = min(b[0], b[1]), max(b[0], b[1])
+            for base in (s[3], s[4]):
+                if base <= lo and hi <= base + L and hi - lo > 1:
+                    for k in range(lo, hi):
+                        t.bed.add(ekey(vw(t, k, *o), vw(t, k + 1, *o)))
         t.bed.add(ekey(vw(t, b[0], *o), vw(t, b[1], *o)))
 
 
@@ -265,6 +289,15 @@ def tri_contains(prep, x, z):
     return True
 
 
+def tri_contains_strict0(prep, x, z):
+    """Inside or on the border (0.5 unit slack): the (4c) probe test."""
+    sgn, edges = prep
+    for px, pz, ex, ez, ln in edges:
+        if sgn * (ex * (z - pz) - ez * (x - px)) / ln < -0.5:
+            return False
+    return True
+
+
 def tri_strictly_inside(prep, x, z):
     """Inside by more than SAMPLE_TOL: a point on a shared border does not count."""
     sgn, edges = prep
@@ -279,6 +312,12 @@ def fmt_pt(p):
 
 
 END_NAMES = {1: "DEAD", 2: "JOIN", 3: "CLUSTER"}   # EDGE.end_kind (td5_roam_world.h)
+# [T9] gap kinds whose partner may simply live in a tile that was not built
+BORDER_CATS = ("CLUSTER end, cluster not emitted in any built tile",
+               "JOIN end, partner row not present in any built tile",
+               "DEAD end, no wall cap (BEDG) at the row",
+               "not a ribbon row (patch outline or side edge)",
+               "row inside an EDGE run (neighbouring quad missing)")
 
 
 def classify_gap(t, key, e, node_keys):
@@ -290,7 +329,9 @@ def classify_gap(t, key, e, node_keys):
     rec = t.span_run.get(si)
     if rec is None:
         return "row of a span with no EDGE record"
-    at_start = side == "L" and si == rec[11]
+    # [T9] a run that starts mid-ribbon (row0 > 0: the quad before it is owned by
+    # another tile) does not start at the EDGE end, so its first row is no end row
+    at_start = side == "L" and si == rec[11] and rec[13] == 0
     at_end = side == "R" and si == rec[11] + rec[12] - 1
     if not (at_start or at_end):
         return "row inside an EDGE run (neighbouring quad missing)"
@@ -438,7 +479,47 @@ def main(argv):
             yield ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
         yield pts[-1]
 
-    n_quad = n_patch = 0
+    # [T9] The union test: a way absorbed into a junction (no quads of its own) is
+    # covered when its centreline, sampled every metre, stays within COVER_TOL of the
+    # drivable surface (any tile's ribbon quads or patch triangles). The old test asked
+    # for every sample strictly inside a PATCH, so a connector whose centreline runs
+    # under a neighbouring ribbon, or 0.3 m past a patch kerb, read as uncovered.
+    ugrid = defaultdict(list)
+    ulist = []
+    for t in tiles.values():
+        for f in t.faces:
+            prep = tri_prep(((f[0][0], f[0][2]), (f[1][0], f[1][2]), (f[2][0], f[2][2])))
+            if prep is None:
+                continue
+            idx = len(ulist)
+            ulist.append((f, prep))
+            xs = [q[0] for q in f]
+            zs = [q[2] for q in f]
+            for cx in range(math.floor((min(xs) - COVER_TOL) / CELL), math.floor((max(xs) + COVER_TOL) / CELL) + 1):
+                for cz in range(math.floor((min(zs) - COVER_TOL) / CELL), math.floor((max(zs) + COVER_TOL) / CELL) + 1):
+                    ugrid[(cx, cz)].append(idx)
+
+    def on_union(x, z):
+        for idx in ugrid.get((math.floor(x / CELL), math.floor(z / CELL)), ()):
+            f, prep = ulist[idx]
+            if tri_contains(prep, x, z):
+                return True
+            for a, b in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
+                dx, dz = b[0] - a[0], b[2] - a[2]
+                l2 = dx * dx + dz * dz
+                u = 0.0 if l2 < 1e-9 else max(0.0, min(1.0, ((x - a[0]) * dx + (z - a[2]) * dz) / l2))
+                if math.hypot(x - a[0] - dx * u, z - a[2] - dz * u) <= COVER_TOL:
+                    return True
+        return False
+
+    def fine_samples(pts):
+        for a, b in zip(pts, pts[1:]):
+            n = max(1, int(math.dist(a, b) / UPM))
+            for k in range(n):
+                yield (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+        yield pts[-1]
+
+    n_quad = n_patch = n_union = 0
     uncovered = []
     for w in inside:
         if quad_owned.get(w["id"], 0) > 0:
@@ -447,11 +528,15 @@ def main(argv):
         if all(in_patch(x, z) for x, z in samples(w["pts"])):
             n_patch += 1
             continue
+        if all(on_union(x, z) for x, z in fine_samples(w["pts"])):
+            n_union += 1
+            continue
         uncovered.append(w)
     uncovered.sort(key=lambda w: -w["len_m"])
     say("")
-    say("(1) COVERAGE: %d drivable ways in the casco; %d own quads; %d inside a patch; %d UNCOVERED"
-        % (len(inside), n_quad, n_patch, len(uncovered)))
+    say("(1) COVERAGE: %d drivable ways in the casco; %d own quads; %d inside a patch; %d on the "
+        "drivable union within %.0f m (absorbed connectors); %d UNCOVERED"
+        % (len(inside), n_quad, n_patch, n_union, COVER_TOL / UPM, len(uncovered)))
     for w in uncovered[:TOP]:
         say("    way %d  %-28s %8.1f m  (%s)" % (w["id"], w["name"][:28], w["len_m"], w["file"]))
     if len(uncovered) > TOP:
@@ -501,7 +586,13 @@ def main(argv):
     short_open = []
     short_kerb = []
     gaps = []
-    open_kerb = open_pair = open_outer = open_hole = 0
+    open_kerb = open_pair = open_outer = open_hole = open_border = 0
+    inner_rect = None
+    if opt.get("inner"):
+        inner_rect = [int(v) for v in opt["inner"].split(",")]
+
+    def in_rect(k):
+        return inner_rect[0] <= k[0] <= inner_rect[2] and inner_rect[1] <= k[1] <= inner_rect[3]
     inner = []   # every open edge that is not paired or outer, with its kind (overlap check)
     open_by_edge = defaultdict(list)     # exact edge -> the tiles where it is open
     vert_tiles = defaultdict(set)        # exact vertex -> the tiles that hold it
@@ -514,6 +605,10 @@ def main(argv):
     node_keys = set()
     for t in tiles.values():
         node_keys.update(n[0] for n in t.nodes)
+    xz_ys = defaultdict(set)              # (x, z) -> every y a vertex has there
+    for t in tiles.values():
+        for p in t.pts:
+            xz_ys[(p[0], p[2])].add(p[1])
     topo_mismatch = []
     for key, t in tiles.items():
         for b in t.bed:
@@ -543,7 +638,21 @@ def main(argv):
                 continue
             if any(k != key for k in vert_tiles[e[0]]) and any(k != key for k in vert_tiles[e[1]]):
                 topo_mismatch.append((key, e, ln))   # both ends are shared, the edge is not
+            if inner_rect and not in_rect(key):
+                continue                         # [T9] --inner: ring tiles are context only
             cat = classify_gap(t, key, e, node_keys)
+            if all(len(xz_ys.get((p[0], p[2]), ())) > 1 for p in e):
+                # [T9] the same x,z exists at another height: a partner that is
+                # there but does not meet (the JOIN-row y bug), never the border
+                cat = cat.split(",")[0] + ", partner row at a different height"
+            if not inner_rect and cat in BORDER_CATS and any(
+                    (key[0] + dx, key[1] + dz) not in tiles
+                    for dx in (-1, 0, 1) for dz in (-1, 0, 1)):
+                # [T9] the partner (cluster patch, JOIN row, next quad) belongs to a tile
+                # that was not built: edge of the built set, like `outer`. Proven for the
+                # casco by building the one-tile ring and auditing with --inner.
+                open_border += 1
+                continue
             gaps.append((key, e, ln, cat))
             inner.append((key, e, ln, "gap"))
     say("")
@@ -555,6 +664,8 @@ def main(argv):
     arm_total = 0
     arm_bad = []
     for key, t in tiles.items():
+        if inner_rect and not in_rect(key):
+            continue
         for a in t.arms:
             cut = a[2]
             if cut == 0xFFFF:
@@ -565,17 +676,22 @@ def main(argv):
                 continue
             L, rowL, rowR = t.span_geo[cut]
             ok = False
+            best_miss = None
             for row in (rowL, rowR):
                 segs = [ekey(row[k], row[k + 1]) for k in range(L)]
-                if all(s in t.tri_e or s in t.bed for s in segs):
+                miss = [s for s in segs if not (s in t.tri_e or s in t.bed)]
+                if not miss:
                     ok = True
                     break
+                if best_miss is None or len(miss) < len(best_miss):
+                    best_miss = miss
             if not ok:
-                arm_bad.append((key, a[0], cut, "cut row not in patch outline"))
+                arm_bad.append((key, a[0], cut, "cut row not in patch outline", best_miss))
     say("")
     say("(4) OPEN GAPS: %d open edges with no partner in any tile, not kerb, hole or outer edge "
-        "(closed across tiles: %d; kerb %d, hole %d, outer %d)"
-        % (len(gaps), open_pair, open_kerb, open_hole, open_outer))
+        "(closed across tiles: %d; kerb %d, hole %d, outer %d, edge of the built set %d)%s"
+        % (len(gaps), open_pair, open_kerb, open_hole, open_outer, open_border,
+           (" [--inner %s: gaps counted in those tiles only]" % opt["inner"]) if inner_rect else ""))
     cats = Counter(g[3] for g in gaps)
     for cat, n in cats.most_common():
         say("    %6d  %s" % (n, cat))
@@ -590,7 +706,7 @@ def main(argv):
     for key, e, ln, cat in gaps[:TOP]:
         tag = " [ovf]" if e[0] in tiles[key].ovf_pts or e[1] in tiles[key].ovf_pts else ""
         say("    tile %s gap %s-%s  %.1f units  [%s]%s" % (key, fmt_pt(e[0]), fmt_pt(e[1]), ln, cat, tag))
-    for key, ek, cut, why in arm_bad[:TOP]:
+    for key, ek, cut, why, _ in arm_bad[:TOP]:
         say("    tile %s arm edge %d cut span %d: %s" % (key, ek, cut, why))
     if len(gaps) > TOP:
         say("    ... %d more gaps" % (len(gaps) - TOP))
@@ -627,6 +743,100 @@ def main(argv):
         hit = inside_other(e)
         if hit is not None:
             overlap.append((key, e, ln, kind, hit))
+
+    # [T9] (4c) A GAP COVERED BY THE UNION. The wall rule is "the boundary of the UNION
+    # of the drivable surface" (T6b's locator drops a boundary edge lying inside another
+    # drivable prim). An unpaired open edge is a hole only when the surface just across
+    # it is NOT drivable. Probe three points (1/4, 1/2, 3/4) a few units across the edge,
+    # away from the edge's own prim; when every probe lies inside some drivable face the
+    # gap is covered (two carriageways that overlap at a Y split, a cut row under the
+    # neighbouring ribbon). Such a gap still counts when the covering surface stands more
+    # than STEP_TOL above or below the edge (a kerb-high step is not continuous road).
+    def own_face(t, e):
+        for f in t.faces:
+            if e[0] in f and e[1] in f:
+                return f
+        return None
+
+    def plane_y(f, x, z):
+        (ax, ay, az), (bx, by, bz), (qx, qy, qz) = f
+        den = (bz - qz) * (ax - qx) + (qx - bx) * (az - qz)
+        if abs(den) < 1e-9:
+            return None
+        l1 = ((bz - qz) * (x - qx) + (qx - bx) * (z - qz)) / den
+        l2 = ((qz - az) * (x - qx) + (ax - qx) * (z - qz)) / den
+        return l1 * ay + l2 * by + (1 - l1 - l2) * qy
+
+    def covered(t, e):
+        f0 = own_face(t, e)
+        if f0 is None:
+            return None
+        gx = sum(p[0] for p in f0) / 3.0
+        gz = sum(p[2] for p in f0) / 3.0
+        dx, dz = e[1][0] - e[0][0], e[1][2] - e[0][2]
+        ln = math.hypot(dx, dz)
+        if ln < 1e-9:
+            return None
+        nx, nz = -dz / ln, dx / ln
+        mx, mz = (e[0][0] + e[1][0]) / 2.0, (e[0][2] + e[1][2]) / 2.0
+        if nx * (gx - mx) + nz * (gz - mz) > 0:      # point away from the own prim
+            nx, nz = -nx, -nz
+        worst = 0.0
+        for s in (0.25, 0.5, 0.75):
+            x = e[0][0] + dx * s + nx * PROBE
+            z = e[0][2] + dz * s + nz * PROBE
+            y = e[0][1] + (e[1][1] - e[0][1]) * s
+            best = None
+            for idx in face_grid.get((math.floor(x / CELL), math.floor(z / CELL)), ()):
+                f, prep = face_list[idx]
+                if f is f0 or not tri_contains_strict0(prep, x, z):
+                    continue
+                py = plane_y(f, x, z)
+                if py is None:
+                    continue
+                if best is None or abs(py - y) < best:
+                    best = abs(py - y)
+            if best is None:
+                return None
+            worst = max(worst, best)
+        return worst
+
+    covered_gaps = []
+    open_gaps = []
+    for g in gaps:
+        step = covered(tiles[g[0]], g[1])
+        if step is not None and step <= STEP_TOL:
+            covered_gaps.append(g + (step,))
+        else:
+            open_gaps.append(g if step is None else g[:3] + (g[3] + " [covered, step %.0f units]" % step,))
+    say("")
+    say("(4c) GAPS COVERED BY THE DRIVABLE UNION (not in TOTAL): %d of %d; %d stay open "
+        "(probe %.0f units across, step tolerance %.0f units = %.0f cm)"
+        % (len(covered_gaps), len(gaps), len(open_gaps), PROBE, STEP_TOL, STEP_TOL / CM))
+    if covered_gaps:
+        steps = sorted(g[4] for g in covered_gaps)
+        say("    covered-gap height step: median %.0f, max %.0f units" % (steps[len(steps) // 2], steps[-1]))
+    for cat, n in Counter(g[3] for g in open_gaps).most_common():
+        say("    %6d  open: %s" % (n, cat))
+    for key, e, ln, cat in open_gaps[:TOP]:
+        say("    tile %s open gap %s-%s  %.1f units  [%s]" % (key, fmt_pt(e[0]), fmt_pt(e[1]), ln, cat))
+    gaps = open_gaps
+    # The same rule for an arm cut row that is not on its patch outline (a ROW_COVERED
+    # UNION patch: the row lies under the patch or the neighbouring carriageway).
+    arm_open = []
+    arm_cov = 0
+    for rec in arm_bad:
+        miss = rec[4] or []
+        steps = [covered(tiles[rec[0]], s) for s in miss]
+        if miss and all(s is not None and s <= STEP_TOL for s in steps):
+            arm_cov += 1
+        else:
+            arm_open.append(rec)
+    say("    arm cut rows off the outline: %d covered by the drivable union, %d open"
+        % (arm_cov, len(arm_open)))
+    for key, ek, cut, why, _ in arm_open[:TOP]:
+        say("    tile %s arm edge %d cut span %d: %s (not covered)" % (key, ek, cut, why))
+    arm_bad = arm_open
     by_kind = defaultdict(int)
     for x in overlap:
         by_kind[x[3]] += 1
@@ -641,8 +851,17 @@ def main(argv):
     if len(overlap) > TOP:
         say("    ... %d more" % (len(overlap) - TOP))
 
+    # [T9] (5) a junction cluster with no triangles is an unpaved junction (a FAIL
+    # patch that no fallback rebuilt); every one of its arms ends in the void.
+    empty = [(key, n[0], n[4], n[6]) for key, t in tiles.items() for n in t.nodes
+             if n[8] == 0 and (not inner_rect or in_rect(key))]
+    say("")
+    say("(5) EMPTY PATCHES: %d junction cluster(s) with no triangles" % len(empty))
+    for key, ck, narm, fl in empty[:TOP]:
+        say("    tile %s cluster %d (%d arms, flags 0x%x)" % (key, ck, narm, fl))
+
     total = len(uncovered) + len(seam_bad) + len(topo_mismatch) + len(short_open) + len(short_kerb) \
-        + len(gaps) + len(arm_bad) + struct_bad
+        + len(gaps) + len(arm_bad) + struct_bad + len(empty)
     say("")
     say("TOTAL problems: %d -> %s" % (total, "CLEAN" if total == 0 else "NOT CLEAN"))
 

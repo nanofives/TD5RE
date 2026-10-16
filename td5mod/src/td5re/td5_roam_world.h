@@ -193,6 +193,10 @@ typedef struct {
 #define TD5_ROAM_ARM_HIST 10
 typedef struct {
     int    ways_in, ways_kept, drop[TD5_ROAM_DROP_COUNT];
+    int    divided_ways;       /* [T9] carriageways given their own OSM count */
+    int    wide_ways;          /* [T9] two-way avenidas at twice the figure   */
+    int    median_capped;      /* [T9] divided carriageways narrowed so the
+                                * median OSM draws stays open               */
     int    nodes, edges, joins, tapers, bends, junction_nodes, dead_ends;
     int    layer_cross_nodes;
     int    clusters, cluster_by_arms[TD5_ROAM_ARM_HIST];
@@ -204,6 +208,8 @@ typedef struct {
                                 * component (bounds the halo T5 needs)          */
     int    fan_ok, fan_fallback, earclip_fail, clusters_no_arm;
     int    simple_fallback;      /* clusters rebuilt with the simple outline  */
+    int    absorbed_off_patch;   /* [T9] NORMAL patches failed: an absorbed
+                                  * edge left the patch (rebuilt UNION)       */
     int    hull_fallback;        /* simple clusters patched by the hull       */
     int    split_fallback;       /* multi-node clusters rebuilt per node      */
     int    chain_absorbed;       /* short pieces past a JOIN under a patch    */

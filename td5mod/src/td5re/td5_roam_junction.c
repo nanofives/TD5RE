@@ -405,6 +405,59 @@ static int patch_add_tri(Patch *p, int a, int b, int c)
     return 1;
 }
 
+/* [F1-T9] Distance from (x, z) to the triangulated patch (0 inside). */
+static double patch_dist(const Patch *p, double x, double z)
+{
+    double best = 1e300;
+    int t, k;
+    for (t = 0; t < p->ntri; t++) {
+        const TD5_RoamPatchVert *v[3];
+        double s[3];
+        int neg = 0, pos = 0;
+        for (k = 0; k < 3; k++) v[k] = &p->pv[p->tri[t].v[k]];
+        for (k = 0; k < 3; k++) {
+            const TD5_RoamPatchVert *a = v[k], *b = v[(k + 1) % 3];
+            s[k] = cross2(b->x - a->x, b->z - a->z, x - a->x, z - a->z);
+            if (s[k] < 0.0) neg = 1;
+            if (s[k] > 0.0) pos = 1;
+        }
+        if (!(neg && pos)) return 0.0;
+        for (k = 0; k < 3; k++) {
+            const TD5_RoamPatchVert *a = v[k], *b = v[(k + 1) % 3];
+            const double dx = b->x - a->x, dz = b->z - a->z, l2 = dx * dx + dz * dz;
+            double u = l2 > 1e-12 ? ((x - a->x) * dx + (z - a->z) * dz) / l2 : 0.0, d;
+            if (u < 0.0) u = 0.0; else if (u > 1.0) u = 1.0;
+            d = hypot(x - a->x - dx * u, z - a->z - dz * u);
+            if (d < best) best = d;
+        }
+    }
+    return best;
+}
+
+/* [F1-T9] 1 when every edge absorbed into cluster ci (INTERNAL ends) has its
+ * centreline on the patch, within tol, sampled every ROAM_ABSORB_STEP. */
+#define ROAM_ABSORB_TOL  (1.0 * TD5_ROAM_UPM)
+#define ROAM_ABSORB_STEP (2.0 * TD5_ROAM_UPM)
+static int absorbed_on_patch(const TD5_RoamGraph *g, int ci, const Patch *p, double tol)
+{
+    int i, q;
+    for (i = 0; i < g->nedge; i++) {
+        const TD5_RoamEdge *e = &g->edge[i];
+        if (e->end[0].kind != TD5_ROAM_END_INTERNAL || e->end[0].cluster != ci) continue;
+        for (q = 0; q + 1 < e->npt; q++) {
+            const TD5_RoamPt *a = &g->pt[e->pt_first + q], *b = &g->pt[e->pt_first + q + 1];
+            const double len = hypot(b->x - a->x, b->z - a->z);
+            const int n = len > ROAM_ABSORB_STEP ? (int)ceil(len / ROAM_ABSORB_STEP) : 1;
+            int s;
+            for (s = 0; s <= n; s++) {
+                const double f = (double)s / (double)n;
+                if (patch_dist(p, a->x + (b->x - a->x) * f, a->z + (b->z - a->z) * f) > tol) return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 static int patch_add_seg(Patch *p, int a, int b, int kind, int arm)
 {
     if (!grow((void **)&p->seg, &p->cap_seg, p->nseg + 1, sizeof *p->seg)) return 0;
@@ -1749,14 +1802,30 @@ out:
 static int union_emit(const TD5_RoamGraph *g, TD5_RoamCluster *cl, const ULoops *U, int na,
                       Patch *pt, TD5_RoamGraphCensus *c)
 {
-    const ULV *ov = U->v[0];
-    const int n0 = U->n[0];
+    const ULV *ov;
+    int n0 = 0;
     int k, q, li, base, total = 0, ret = -1;
     int *seq = NULL, *hs = NULL, *ho = NULL, nseq;
     TD5_RoamPatchVert *tmp = NULL;
     LTri *tri = NULL;
+    ULV *fv = (ULV *)malloc((size_t)(U->n[0] + 1) * sizeof(ULV));
     (void)na;
     pt->npv = pt->ntri = pt->nseg = 0;
+    if (!fv) goto out;
+    /* [F1-T9] The NORMAL outline's rule on the outer loop too: a non-cut vertex
+     * closer than ROAM_OL_MIN_SEG to the last kept one (or, at the end, to the
+     * first) is dropped, so no kerb wall comes out shorter than 1 cm (T7 (3) found
+     * a 2-unit UNION kerb). Cut vertices are always kept: they are ribbon rows. */
+    for (q = 0; q < U->n[0]; q++) {
+        const ULV *p = &U->v[0][q];
+        if (!p->tag && n0 > 0 &&
+            hypot(p->x - fv[n0 - 1].x, p->z - fv[n0 - 1].z) < ROAM_OL_MIN_SEG) continue;
+        if (!p->tag && q == U->n[0] - 1 && n0 > 0 &&
+            hypot(p->x - fv[0].x, p->z - fv[0].z) < ROAM_OL_MIN_SEG) continue;
+        fv[n0++] = *p;
+    }
+    if (n0 < 3) { ret = 0; goto out; }
+    ov = fv;
     /* Outer loop: cut vertices exactly as published, the rest lerp by path
      * length between the cut rows on either side. */
     for (q = 0; q < n0; q++) {
@@ -1911,11 +1980,12 @@ static int union_emit(const TD5_RoamGraph *g, TD5_RoamCluster *cl, const ULoops 
         }
         /* Area of the rings as emitted (outer CCW +, holes CW -). */
         for (li = 0, base = 0; li < U->nloop; li++) {
-            for (q = 0; q < U->n[li]; q++) {
-                const TD5_RoamPatchVert *a = &pt->pv[base + q], *b = &pt->pv[base + (q + 1) % U->n[li]];
+            const int nl = li == 0 ? n0 : U->n[li];      /* outer ring as filtered */
+            for (q = 0; q < nl; q++) {
+                const TD5_RoamPatchVert *a = &pt->pv[base + q], *b = &pt->pv[base + (q + 1) % nl];
                 want += 0.5 * cross2(a->x - cl->cx, a->z - cl->cz, b->x - cl->cx, b->z - cl->cz);
             }
-            base += U->n[li];
+            base += nl;
         }
         for (q = 0; q < nt; q++) {
             const TD5_RoamPatchVert *a = &tmp[tri[q].v[0]], *b = &tmp[tri[q].v[1]], *d = &tmp[tri[q].v[2]];
@@ -1934,7 +2004,7 @@ static int union_emit(const TD5_RoamGraph *g, TD5_RoamCluster *cl, const ULoops 
     cl->flags |= TD5_ROAM_CL_EARCLIP;
     ret = 1;
 out:
-    free(seq); free(hs); free(ho); free(tmp); free(tri);
+    free(seq); free(hs); free(ho); free(tmp); free(tri); free(fv);
     return ret;
 }
 
@@ -1946,6 +2016,13 @@ out:
                          * joined by straight kerbs                          */
 #define MODE_SPLIT  2   /* never merged with another node                    */
 #define MODE_UNION  3   /* outline = union of the paved pieces (T3b)         */
+/* [F1-T9] A SPLIT node that still fails as a one-node NORMAL patch walks the same
+ * fallbacks, still never merged: UNION, then SIMPLE (+ the one-node hull). */
+#define MODE_SPLIT_UNION  4
+#define MODE_SPLIT_SIMPLE 5
+#define MODE_IS_SPLIT(m)  ((m) == MODE_SPLIT || (m) == MODE_SPLIT_UNION || (m) == MODE_SPLIT_SIMPLE)
+#define MODE_IS_SIMPLE(m) ((m) == MODE_SIMPLE || (m) == MODE_SPLIT_SIMPLE)
+#define MODE_IS_UNION(m)  ((m) == MODE_UNION || (m) == MODE_SPLIT_UNION)
 
 static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
 {
@@ -1991,7 +2068,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
         double rmax = 0.0;
         for (i = 0; i < nn; i++) {
             const TD5_RoamNode *nd = &g->node[i];
-            if (!is_cand(nd) || mode[i] == MODE_SPLIT) continue;
+            if (!is_cand(nd) || MODE_IS_SPLIT(mode[i])) continue;
             for (k = 0; k < nd->nend; k++) {
                 const TD5_RoamEndRef *r0 = &g->node_end[nd->end_first + k];
                 int ce = r0->edge, cq = r0->end, steps = 0, fnode;
@@ -2013,7 +2090,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 /* Each pair is found from both ends; keep the one from the lower
                  * index so the list does not depend on which end walked. */
                 if (len >= P->merge_len || fnode <= i || !is_cand(&g->node[fnode]) ||
-                    mode[fnode] == MODE_SPLIT) continue;
+                    MODE_IS_SPLIT(mode[fnode])) continue;
                 q.a = i;
                 q.b = fnode;
                 q.kind = PAIR_EDGE;
@@ -2038,7 +2115,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 const double rr = rdisc[xs[i].n] + rdisc[xs[j].n];
                 RoamPair q;
                 if (dx * dx + dz * dz >= rr * rr) continue;
-                if (mode[xs[i].n] == MODE_SPLIT || mode[xs[j].n] == MODE_SPLIT) continue;
+                if (MODE_IS_SPLIT(mode[xs[i].n]) || MODE_IS_SPLIT(mode[xs[j].n])) continue;
                 if (a->layer_max < b->layer_min || b->layer_max < a->layer_min) {
                     c->rejected_layer++;
                     continue;
@@ -2226,8 +2303,8 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
     /* 6. Per cluster: arms, corners, cuts, rows, outline, triangles. */
     for (i = 0; i < g->ncluster; i++) {
         TD5_RoamCluster *cl = &g->cluster[i];
-        const int simple = mode[g->cluster_node[cl->node_first]] == MODE_SIMPLE;
-        const int umode = mode[g->cluster_node[cl->node_first]] == MODE_UNION;
+        const int simple = MODE_IS_SIMPLE(mode[g->cluster_node[cl->node_first]]);
+        const int umode = MODE_IS_UNION(mode[g->cluster_node[cl->node_first]]);
         double simple_hw = 0.0;
         int na = 0, m, q, ugood = 0;
         cl->layer = 127;
@@ -2695,7 +2772,12 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 for (m = 0; m < nt; m++)
                     if (!patch_add_tri(&pt, tmp[m].v[0], tmp[m].v[1], tmp[m].v[2])) { free(tmp); goto done; }
                 cl->flags |= TD5_ROAM_CL_EARCLIP;
-            } else if (simple && patch_hull(&pt, &cl->nout)) {
+            } else if (simple && cl->nnode == 1 && patch_hull(&pt, &cl->nout)) {
+                /* [F1-T9] One-node clusters only. A MULTI-node cluster that gets
+                 * here is nodes whose paved pieces do not form one patch (its
+                 * UNION came out as 2 outer loops); the hull of all their cut rows
+                 * paved a 60 m slab over the neighbouring ribbons, 10-40 cm off
+                 * their heights. It now FAILs this pass and is SPLIT next. */
                 /* Last resort on a SIMPLE cluster: the convex hull of the cut
                  * rows, fanned from its centroid (convex, so always valid). */
                 cl->flags |= TD5_ROAM_CL_HULL;
@@ -2710,6 +2792,23 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                           (long long)cl->key, na, cl->nout);
             }
             free(tmp);
+        }
+
+        /* [F1-T9] An absorbed edge must lie on the patch. Design 1.3 rule 4
+         * absorbs an edge with both ends in the cluster ("no ribbon"), but only
+         * the UNION outline paves internal edges; a NORMAL patch is just the arms
+         * and their fillets. A turning loop or a service connector that bulges
+         * out of the arm fan was left unpaved (T7 audit: ways 1386855175,
+         * 1320455895, ... 7-16 m off the road surface). Such a patch is invalid
+         * here, so the next pass rebuilds it UNION. */
+        if (mode[g->cluster_node[cl->node_first]] == MODE_NORMAL && pt.ntri > 0 &&
+            !(cl->flags & TD5_ROAM_CL_FAIL) && !absorbed_on_patch(g, i, &pt, ROAM_ABSORB_TOL)) {
+            cl->flags |= TD5_ROAM_CL_FAIL;
+            pt.npv = pt.ntri = pt.nseg = 0;
+            cl->nout = 0;
+            c->absorbed_off_patch++;
+            TD5_LOG_I(LOG_TAG, "ROAM_PATCH_ABSORB cluster %lld (%d arm(s)): an absorbed edge leaves "
+                      "the patch, rebuilt with the union outline", (long long)cl->key, na);
         }
 
 patch_done:
@@ -2843,8 +2942,9 @@ static void junction_reset(TD5_RoamGraph *g)
     td5_roam_graph_refill_joins(g);
 }
 
-/* Up to four passes, each a pure function of the graph and the previous
- * pass, so the fallback set is deterministic and local:
+/* Up to eight passes (F1-T9; was four), each a pure function of the graph and
+ * the previous pass, so the fallback set is deterministic and local. A SPLIT
+ * one-node cluster that still fails goes SPLIT_UNION then SPLIT_SIMPLE (F1-T9):
  *   1. every cluster NORMAL;
  *   2. a cluster with no valid triangulation is rebuilt UNION (same members:
  *      the outline is the union of its paved pieces, cuts pushed out until the
@@ -2856,7 +2956,8 @@ static void junction_reset(TD5_RoamGraph *g)
  *      so each becomes a one-node cluster joined by short ribbons. */
 int td5_roam_junction_build(TD5_RoamGraph *g)
 {
-    static const char *const mode_name[4] = { "NORMAL", "SIMPLE", "SPLIT", "UNION" };
+    static const char *const mode_name[6] = { "NORMAL", "SIMPLE", "SPLIT", "UNION",
+                                              "SPLIT_UNION", "SPLIT_SIMPLE" };
     const TD5_RoamGraphCensus keep = g->census;
     unsigned char *mode = (unsigned char *)calloc((size_t)(g->nnode > 0 ? g->nnode : 1), 1);
     double comp1 = 0.0;
@@ -2864,7 +2965,11 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
     if (!mode) return 0;
     ok = junction_pass(g, mode);
     comp1 = g->census.max_component;
-    for (pass = 2; ok && pass <= 4; pass++) {
+    /* [F1-T9] Up to 8 passes (was 4): a NORMAL cluster can now fail on an
+     * absorbed edge in a later pass (its members change when a neighbour is
+     * SPLIT), and must still get its UNION rebuild. The loop stops at the first
+     * pass that changes nothing, so a build that settled by pass 4 is unchanged. */
+    for (pass = 2; ok && pass <= 8; pass++) {
         int changed = 0;
         for (i = 0; i < g->ncluster; i++) {
             const TD5_RoamCluster *cl = &g->cluster[i];
@@ -2874,6 +2979,8 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
             if (m0 == MODE_NORMAL) want = MODE_UNION;
             else if (m0 == MODE_UNION) want = MODE_SIMPLE;
             else if (m0 == MODE_SIMPLE && cl->nnode > 1) want = MODE_SPLIT;
+            else if (m0 == MODE_SPLIT) want = MODE_SPLIT_UNION;
+            else if (m0 == MODE_SPLIT_UNION) want = MODE_SPLIT_SIMPLE;
             else continue;
             for (k = 0; k < cl->nnode; k++) mode[g->cluster_node[cl->node_first + k]] = (unsigned char)want;
             changed++;
@@ -2881,8 +2988,8 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
             else if (want == MODE_SPLIT) nsplit++;
             TD5_LOG_I(LOG_TAG, "ROAM_CLUSTER_%s cluster %lld (%d nodes, %d arms): patch invalid, "
                       "rebuilt %s", mode_name[want], (long long)cl->key, cl->nnode, cl->narm,
-                      want == MODE_UNION  ? "with the union outline" :
-                      want == MODE_SIMPLE ? "with the simple outline" : "as one-node clusters");
+                      MODE_IS_UNION(want)  ? "with the union outline" :
+                      MODE_IS_SIMPLE(want) ? "with the simple outline" : "as one-node clusters");
         }
         if (!changed) break;
         junction_reset(g);

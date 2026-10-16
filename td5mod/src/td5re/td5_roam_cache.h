@@ -51,6 +51,13 @@ typedef struct {
     int        tile;     /* index into the session tile table              */
     uint32_t   tagf;     /* TD5_ROAM_TAG_* bits                            */
     TD5_GeoRoad road;
+    /* [F1 T9] The record's own lane count, BEFORE the place floor of
+     * td5_roam_lane_count raised it (the strip's GrRoad.lanes_osm), and the two
+     * facts the floor read. The graph gives a divided avenue's carriageway its
+     * own count back (td5_roam_world.c, "divided carriageways"). */
+    int        lanes_osm;
+    uint8_t    width_tagged;   /* a measured `width` tag: nothing overrides it */
+    uint8_t    lanes_counted;  /* lanes_src = osm_lanes: never lowered         */
 } TD5_RoamWay;
 
 /* What one td5_roam_cache_load_window call did. */
