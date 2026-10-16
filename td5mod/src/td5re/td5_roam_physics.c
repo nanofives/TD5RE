@@ -738,6 +738,38 @@ int32_t td5_roam_ground(int32_t x, int32_t z, int32_t y, int has_y, int16_t *nor
     return h.ground_y;
 }
 
+/* Spawn (A's td5_roam_session_spawn, after td5_physics_reset_actor_state). The reset
+ * integrates the pose from the 0xC0000000 ground-snap sentinel, and with the provider live
+ * that already lands the car on the road (the locator's "lowest surface above the probe"
+ * rule = the street, not a bridge deck above it). This makes it explicit: when the chassis
+ * is still not within -1 m .. +3 m of the street under it, it is put RP_SPAWN_RIDE above it
+ * (the measured chassis-above-ground of a car at rest is 47-51 cm). Logs before/after. */
+#define RP_SPAWN_RIDE (215 * 256)   /* 24.8, 0.5 m */
+void td5_roam_physics_spawn_snap(TD5_Actor *a)
+{
+    const TD5_RoamResident *rs = rp_rs();
+    TD5_RoamHit h;
+    int32_t y0;
+    if (!a || !rs || !td5_roam_active()) return;
+    y0 = a->world_pos.y;
+    if (!td5_roam_locate(rs, a->world_pos.x, a->world_pos.z, (int32_t)0xC0000000, 1, ROAM_PRIM_NONE, &h) ||
+        h.prim == ROAM_PRIM_NONE) {
+        TD5_LOG_W(LOG_TAG, "roam physics: spawn (%d,%d) is over no resident tile, y left at %d",
+                  (int)FP_TRUNC(a->world_pos.x), (int)FP_TRUNC(a->world_pos.z), (int)FP_TRUNC(y0));
+        return;
+    }
+    if (y0 < h.ground_y - 430 * 256 || y0 > h.ground_y + 3 * 430 * 256) {
+        a->world_pos.y = h.ground_y + RP_SPAWN_RIDE;
+        a->render_pos.y = (float)a->world_pos.y * (1.0f / 256.0f);
+        a->linear_velocity_y = 0;
+        td5_physics_rebuild_pose(a);
+    }
+    TD5_LOG_I(LOG_TAG, "roam physics: spawn snap slot=%d at (%d,%d): y %d -> %d, street ground %d (%s, inside=%d)",
+              (int)a->slot_index, (int)FP_TRUNC(a->world_pos.x), (int)FP_TRUNC(a->world_pos.z),
+              (int)FP_TRUNC(y0), (int)FP_TRUNC(a->world_pos.y), (int)FP_TRUNC(h.ground_y),
+              y0 == a->world_pos.y ? "reset had snapped it" : "placed", (int)h.inside);
+}
+
 /* ============================================================================
  * SECTION: walls + the off-surface backstop (design 2.5)
  * ========================================================================== */

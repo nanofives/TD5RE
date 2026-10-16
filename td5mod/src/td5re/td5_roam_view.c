@@ -378,6 +378,29 @@ static void rv_draw_tile(const RoamTile *t, double cx, double cz, double r2, RvS
     }
 }
 
+/* [roam F2-C] The place -> route frame chain and the strip height datum, for the
+ * plain roam renderer's dev overlay (td5_roam_render.c, route mode). Same
+ * projections, same datum as the line viewer draws with. 0 when the place frames
+ * are not available. */
+int td5_roam_view_frame(const char *slug, double xs, double zs, double *xr, double *zr)
+{
+    if (!slug || !slug[0] || !rv_setup(slug)) return 0;
+    rv_place_to_route(&s_np, &s_op, xs, zs, xr, zr);
+    return 1;
+}
+
+int td5_roam_view_frame_inv(const char *slug, double xr, double zr, double *xs, double *zs)
+{
+    if (!slug || !slug[0] || !rv_setup(slug)) return 0;
+    rv_route_to_place(&s_np, &s_op, xr, zr, xs, zs);
+    return 1;
+}
+
+double td5_roam_view_datum_units(const char *slug)
+{
+    return (slug && slug[0] && rv_setup(slug)) ? s_datum : 0.0;
+}
+
 int td5_roam_view_wanted(void)
 {
     return td5_env_int("TD5RE_ROAM_VIEW", 0, 0, 1) != 0;

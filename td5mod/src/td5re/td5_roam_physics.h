@@ -69,6 +69,10 @@ int  td5_roam_wheel_contact(struct TD5_Actor *a, int i, int32_t x, int32_t z, in
 int  td5_roam_corner_height(struct TD5_Actor *a, int i, int32_t x, int32_t z, int32_t y,
                             int32_t *y_io, int strip_valid);
 
+/* Spawn: after td5_physics_reset_actor_state, make sure the car stands on the street
+ * under it (locator height + 0.5 m when the reset's sentinel snap did not land it). */
+void td5_roam_physics_spawn_snap(struct TD5_Actor *a);
+
 /* ---- td5_track.c early-outs (roam session only) ---------------------------- */
 /* chassis locate: side table, slot edge, span fields kept at -1. */
 void    td5_roam_actor_locate(struct TD5_Actor *a);

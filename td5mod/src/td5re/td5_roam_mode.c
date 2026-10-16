@@ -368,6 +368,7 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     a->track_span_high_water = -1;
     a->track_sub_lane_index  = 0;
     td5_roam_set_slot_edge(slot, 0);
+    td5_roam_physics_spawn_snap(a);     /* task B: stand on the street under the spawn point */
 
     TD5_LOG_I(LOG_TAG, "roam: spawn slot=%d place=(%d,%d) world=(%d,%d) yaw=%d%s",
               slot, (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)wx, (int)wz,
