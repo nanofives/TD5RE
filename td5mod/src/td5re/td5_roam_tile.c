@@ -1206,6 +1206,12 @@ static int work_end_y(Work *w, int ei, int end, double *y)
     return 0;
 }
 
+/* <=0.5 m, <=1, <=2, <=4, >4 */
+static int hist_bucket(double m)
+{
+    return m <= 0.5 ? 0 : (m <= 1.0 ? 1 : (m <= 2.0 ? 2 : (m <= 4.0 ? 3 : 4)));
+}
+
 static int tile_is(const RoamGrid *gr, double x, double z, int tx, int tz)
 {
     int a, b;
@@ -1308,11 +1314,16 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
     const uint32_t t0 = td5_plat_time_ms();
     int *tspan = NULL;                      /* per quad of the current ribbon          */
     int tspan_cap = 0;
+    int *cut_first = NULL, *cut_last = NULL;/* per edge: tile span of ribbon quad 0 / the last quad, -1 */
     uint8_t *owned = NULL;
     PBox *pspan = NULL, *ptri = NULL, *pbed = NULL;   /* lattice extents of the primitives */
 
     tb_init(&b);
     roam_grid_origin(gr, tx, tz, &org_x, &org_z);
+    cut_first = (int *)malloc(((size_t)g->nedge + 1u) * sizeof(int));
+    cut_last  = (int *)malloc(((size_t)g->nedge + 1u) * sizeof(int));
+    if (!cut_first || !cut_last) goto done;
+    for (ei = 0; ei < g->nedge; ei++) cut_first[ei] = cut_last[ei] = -1;
 
     /* carry the build-phase counters */
     st->ribbon_height_fail += w->st.ribbon_height_fail;
@@ -1352,6 +1363,8 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
             int next = (int)b.span.n;
             for (q = 0; q < nq; q++) tspan[q] = owned[q] ? next++ : -1;
             if (next > 32767) { st->overflow++; goto done; }
+            cut_first[ei] = tspan[0];
+            cut_last[ei]  = tspan[nq - 1];
         }
         first_end = (w->rev[ei] != 0) ? 1 : 0;      /* the T3 end at ribbon row 0 */
         for (blk = 0; blk * ROAM_RIB_BLOCK < nq; blk++) {
@@ -1495,18 +1508,29 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
         if (!work_hc(w, ci, &hc)) { st->clusters_no_height++; continue; }
         if (w->cspread[ci] > ROAM_SPREAD_CLAMP_M * TD5_ROAM_UPM) st->spread_clusters++;
         if (w->cspread[ci] / TD5_ROAM_UPM > st->max_spread_m) st->max_spread_m = w->cspread[ci] / TD5_ROAM_UPM;
-        for (i = 0; i < cl->narm; i++) {
-            const TD5_RoamArm *a = &g->arm[cl->arm_first + i];
-            const TD5_RoamEdge *ae = &g->edge[a->edge];
-            double dy;
-            if (!work_end_y(w, a->edge, a->end, &arm_y[i])) {
-                double pin;
-                arm_y[i] = work_arm_pin(w, cl->arm_first + i, &pin) ? pin : hc;
-                st->ribbon_bad++;
+        st->spread_hist[hist_bucket(w->cspread[ci] / TD5_ROAM_UPM)]++;
+        {
+            double crest = 0.0;
+            for (i = 0; i < cl->narm; i++) {
+                const TD5_RoamArm *a = &g->arm[cl->arm_first + i];
+                const TD5_RoamEdge *ae = &g->edge[a->edge];
+                double dy;
+                if (!work_end_y(w, a->edge, a->end, &arm_y[i])) {
+                    double pin;
+                    arm_y[i] = work_arm_pin(w, cl->arm_first + i, &pin) ? pin : hc;
+                    st->ribbon_bad++;
+                }
+                dy = fabs(arm_y[i] - hc) / TD5_ROAM_UPM;
+                if (dy > crest) crest = dy;
+                if (dy > st->max_patch_dy_m) st->max_patch_dy_m = dy;
+                if (ae->half_w > bw) { bw = ae->half_w; bestarm = i; }
             }
-            dy = fabs(arm_y[i] - hc) / TD5_ROAM_UPM;
-            if (dy > st->max_patch_dy_m) st->max_patch_dy_m = dy;
-            if (ae->half_w > bw) { bw = ae->half_w; bestarm = i; }
+            st->pdy_hist[hist_bucket(crest)]++;
+            if (crest > 2.0)
+                TD5_LOG_W(LOG_TAG, "ROAM_CREST cluster %lld at (%.0f, %.0f): arm cut rows differ %.2f m from the "
+                          "patch centre (ground spread %.2f m, %d arm(s), layer %d, flags 0x%x)",
+                          (long long)cl->key, cl->cx, cl->cz, crest, w->cspread[ci] / TD5_ROAM_UPM, cl->narm,
+                          cl->layer, (unsigned)cl->flags);
         }
         if (bestarm >= 0) surf = 0x10 | (rib_grip(g->edge[g->arm[cl->arm_first + bestarm].edge].surface) & 0x0F);
         cox = td5_roam_quant(cl->cx);
@@ -1595,7 +1619,12 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
             ang = atan2(a->dir_z, a->dir_x);
             q4 = td5_roam_quant(ang * 4096.0 / 6.283185307179586);
             ar->bearing12 = (int16_t)(((q4 % 4096) + 4096) % 4096);
-            ar->cut_span = 0xFFFFu;
+            {
+                /* the owned quad of the arm's edge that touches the cut row, if any */
+                const int first_end = ((a->end == 0) != (w->rev[a->edge] != 0));
+                const int cs = first_end ? cut_first[a->edge] : cut_last[a->edge];
+                ar->cut_span = cs >= 0 ? (uint16_t)cs : 0xFFFFu;
+            }
             ar->end = (uint8_t)a->end;
             ar->lanes = (uint8_t)ae->lanes;
             ar->flags = (uint8_t)(a->corner ? 1 : 0);
@@ -1616,25 +1645,6 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
     st->bedges = (int)b.bedge.n;
     if (tb_oom(&b)) goto done;
     if (b.ovf) { st->overflow++; goto done; }
-
-    /* arm cut_span: the first owned quad of the arm's edge at the arm's end */
-    {
-        size_t ni, ai = 0;
-        for (ni = 0; ni < b.nodec.n; ni++) {
-            RoamNodeRec *nr = &VEC_AT(b.nodec, RoamNodeRec, ni);
-            int j;
-            for (j = 0; j < nr->narm; j++, ai++) {
-                RoamArmRec *ar = &VEC_AT(b.armc, RoamArmRec, ai);
-                size_t er;
-                for (er = 0; er < b.edgec.n; er++) {
-                    const RoamEdgeRec *rec = &VEC_AT(b.edgec, RoamEdgeRec, er);
-                    if (rec->key != ar->edge_key) continue;
-                    if (ar->end == 0 && rec->row0 == 0) { ar->cut_span = rec->span_first; break; }
-                    if (ar->end == 1) ar->cut_span = (uint16_t)(rec->span_first + rec->span_count - 1);
-                }
-            }
-        }
-    }
 
     /* ---------------- names ---------------- */
     {
@@ -1863,7 +1873,7 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
     st->ms_assemble = td5_plat_time_ms() - t0;
 
 done:
-    free(tspan); free(owned); free(pspan); free(ptri); free(pbed);
+    free(tspan); free(owned); free(pspan); free(ptri); free(pbed); free(cut_first); free(cut_last);
     tb_free(&b);
     return ok;
 }
@@ -1892,7 +1902,7 @@ typedef struct {
     int tx, tz;
     TD5_RoamTileStats st;
     int ok, rb_ok;
-    char err[160];
+    char err[640];
 } TileRow;
 
 typedef struct {
@@ -1972,7 +1982,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
     long tot_ramp = 0, tot_pin = 0, tot_abs = 0, tot_bad = 0, tot_hfail = 0, tot_border = 0, tot_sig = 0, tot_arms = 0;
     double max_spread = 0.0, max_blend = 0.0, max_pdy = 0.0, max_over = 0.0;
     uint32_t max_ms = 0, sum_ms = 0;
-    long hug[16];
+    long hug[16], hist_spread[5] = { 0, 0, 0, 0, 0 }, hist_pdy[5] = { 0, 0, 0, 0, 0 };
 
     if (!cli_get(cmdline, "RoamBuildTiles", val, sizeof val)) return 0;
     cli_get(cmdline, "RoamPlace", place, sizeof place);
@@ -2068,6 +2078,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
         if (s->ms > max_ms) max_ms = s->ms;
         sum_ms += s->ms;
         for (k = 0; k < 16; k++) hug[k] += s->hug_phase[k];
+        for (k = 0; k < 5; k++) { hist_spread[k] += s->spread_hist[k]; hist_pdy[k] += s->pdy_hist[k]; }
         if (f)
             fprintf(f, "%d %d %d %d %d %d %d %d %d %u %d %d %u %.1f %.2f %.2f %.2f %d %d %s%s%s\n", r->tx, r->tz,
                     s->quads, s->tris, s->bedges, s->verts, s->edges_rec, s->clusters, s->arms, s->bytes,
@@ -2077,7 +2088,7 @@ int td5_roam_tile_dev_cli(const char *cmdline)
     }
     snprintf(lines, sizeof lines,
         "roam tiles TOTAL: %d tile(s) %ld ok %ld failed (%ld read back identical); %ld quads %ld tris %ld verts "
-        "%ld boundary edges %ld edge runs %ld clusters %ld arms %ld signals; %ld bytes; second window pass on %ld "
+        "%ld boundary edges %ld edges with owned quads %ld clusters %ld arms %ld signals; %ld bytes; second window pass on %ld "
         "tile(s); wall %u ms, per tile mean %u max %u ms",
         n, tot_ok, tot_fail, tot_rb, tot_quads, tot_tris, tot_verts, tot_bed, tot_ed, tot_cl, tot_arms, tot_sig,
         tot_bytes, tot_pass2, (unsigned)t0, (unsigned)(n ? sum_ms / (uint32_t)n : 0u), (unsigned)max_ms);
@@ -2087,6 +2098,10 @@ int td5_roam_tile_dev_cli(const char *cmdline)
         fprintf(f, "max cluster ground spread %.2f m; clusters over %.1f m: %ld; arm pins clamped: %ld; "
                    "max |H_c - ground at an arm cut row| %.2f m; max |patch centre - arm cut-row y| %.2f m\n",
                 max_spread, ROAM_SPREAD_CLAMP_M, tot_spread, tot_clamped, max_blend, max_pdy);
+        fprintf(f, "owned clusters by ground spread  (<=0.5 / <=1 / <=2 / <=4 / >4 m): %ld / %ld / %ld / %ld / %ld\n",
+                hist_spread[0], hist_spread[1], hist_spread[2], hist_spread[3], hist_spread[4]);
+        fprintf(f, "owned clusters by patch crest    (<=0.5 / <=1 / <=2 / <=4 / >4 m): %ld / %ld / %ld / %ld / %ld\n",
+                hist_pdy[0], hist_pdy[1], hist_pdy[2], hist_pdy[3], hist_pdy[4]);
         fprintf(f, "patch cut vertices checked against their ribbon row: %ld, mismatched: %ld\n", tot_cut, tot_cutbad);
         fprintf(f, "ribbons: absorbed %ld bad %ld height-fail %ld; RAMP_SHORT/FAIL %ld; pin-miss %ld; "
                    "cluster FAIL (no triangles) %ld; clusters without a ground sample %ld\n",

@@ -232,6 +232,9 @@ typedef struct {
     double   max_blend_m;         /* max |H_c - ground at an arm cut row|        */
     double   max_patch_dy_m;      /* max |arm cut-row y - patch centre y|        */
     int      arm_clamped;         /* arms whose pin was clamped to ground +- 0.5 m */
+    /* per owned cluster, buckets <=0.5 m, <=1, <=2, <=4, >4: ground spread, and the
+     * patch crest (largest |arm cut-row y - patch centre y|) */
+    int      spread_hist[5], pdy_hist[5];
     int      cut_checked, cut_mismatch;   /* patch cut vertex vs ribbon row      */
     int      i16_overflow;        /* a stored offset left int16                  */
     int      bedge_no_tri;        /* outline segment found in no triangle        */
