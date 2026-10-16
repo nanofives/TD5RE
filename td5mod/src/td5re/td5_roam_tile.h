@@ -69,9 +69,12 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    2u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    3u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
-                                     * ROW_COVERED pins at H_c */
+                                     * ROW_COVERED pins at H_c
+                                     * 3: F1-T10 height coupling of overlapping ribbons,
+                                     * bore chains under the road above, local divided-
+                                     * carriageway width, degenerate quads dropped */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */
@@ -250,6 +253,15 @@ typedef struct {
     int      hug_quads;           /* owned quad midpoints within 2 m of a border */
     int      hug_phase[16];       /* same, for 16 lattice phases (S/4 steps)     */
     int      overflow;            /* > 32767 spans/tris or > 65535 vertices      */
+    /* [F1-T10] height coupling + bores, over the OWNED quads' ribbons */
+    int      couple_ribbons;      /* owned ribbons that followed a leader        */
+    int      couple_rows;         /* their rows that took a leader's height      */
+    double   couple_max_dy_m;     /* largest change the coupling made            */
+    int      bore_cross;          /* owned bores: crossings with a road above    */
+    double   bore_min_clear_m;    /* least (road above - bore) at a crossing     */
+    double   max_grade;           /* steepest owned quad (dy / run)              */
+    int      grade_over_cap;      /* owned quads steeper than ROAM_GRADE_CAP     */
+    int      dep_cycles;          /* build-order cycles broken (should be 0)     */
     uint32_t ms;                  /* wall time of the build (not in the file)    */
     uint32_t ms_graph, ms_ribbon, ms_assemble;
 } TD5_RoamTileStats;
