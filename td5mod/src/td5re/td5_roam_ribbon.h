@@ -68,6 +68,7 @@
 #define ROAM_RIBF_BRIDGE      0x20u
 #define ROAM_RIBF_BORE        0x40u
 #define ROAM_RIBF_CHUNKED     0x80u   /* split at synthetic joins (edge > 1 km)      */
+#define ROAM_RIBF_UNTWIST     0x400u  /* [T10] rows dropped: a lane quad folded over   */
 
 /* A grade-separated crossing under this edge (design 1.5): the deck must clear
  * y_under by ROAM_XSEP_LIFT at the PLACE-frame point (x, z). y_under is the
@@ -82,6 +83,7 @@ typedef struct {
     int            n;
     int64_t        node_a, node_b;/* node keys of the first / last point               */
     int            lanes;         /* carriageway lanes (td5_roam_lane_count), 1..12    */
+    double         lane_w;        /* [T10] lane width, units; 0 = ROAM_RIB_LANE_W      */
     int            surface;       /* TD5_GEO_SURF_*                                    */
     int            layer;         /* OSM layer                                         */
     int            bridge;        /* OSM bridge=yes                                    */

@@ -592,6 +592,64 @@ static int rib_couple(const RoamEdgeIn *in, const double *rx, const double *rz,
     return 1;
 }
 
+/* [F1-T10] FOLDED QUADS. A lane quad must be a positively oriented quadrilateral
+ * (both of its triangles counter-clockwise in the stored frame). On a sharp turn
+ * next to a given end row (a mitred JOIN row after a 1.7 m dog-leg, service way
+ * 1322710577) the row before it crosses it and the quad folds into a bow-tie the
+ * locator cannot hit (T6b's 'degenerate span'). The non-end row of a folded END
+ * quad is dropped, repeatedly, until it does not fold or only the two end rows
+ * remain (interior folds on a hairpin are left alone: dropping rows there would
+ * cut the corner).
+ * Heights of the kept rows are unchanged, so a merged segment's grade is the mean
+ * of the capped ones. The row positions are formed exactly as step 6 forms them.
+ * Returns the new row count; arrays are compacted in place. */
+static void rib_row_vertex(const double *rx, const double *rz, int n, int row, int j, int L, double lane_w,
+                           int has_rf, int has_rl, const int32_t (*rowf)[2], const int32_t (*rowl)[2],
+                           double *vx, double *vz)
+{
+    const int a = row > 0 ? row - 1 : 0, b = row < n - 1 ? row + 1 : n - 1;
+    double dx = rx[b] - rx[a], dz = rz[b] - rz[a];
+    const double l = hypot(dx, dz);
+    const double t = ((double)L * 0.5 - (double)j) * lane_w;
+    if (row == 0 && has_rf) { *vx = rowf[j][0]; *vz = rowf[j][1]; return; }
+    if (row == n - 1 && has_rl) { *vx = rowl[j][0]; *vz = rowl[j][1]; return; }
+    if (l > 1e-9) { dx /= l; dz /= l; } else { dx = 0.0; dz = 1.0; }
+    *vx = rx[row] + dz * t;
+    *vz = rz[row] - dx * t;
+}
+
+static int rib_untwist(double *rx, double *rz, double *Y, double *HW, double *TILT, double *G, double *TS,
+                       int n, int L, double lane_w, int has_rf, int has_rl,
+                       const int32_t (*rowf)[2], const int32_t (*rowl)[2], unsigned *fl)
+{
+    int guard;
+    for (guard = 0; guard < 64 && n > 2; guard++) {
+        int i, j, drop = -1;
+        for (i = 0; i + 1 < n && drop < 0; i++) {
+            if (i != 0 && i + 2 != n) continue;      /* only the quads at a given end row */
+            for (j = 0; j < L && drop < 0; j++) {
+                double ax, az, bx, bz, cx, cz, dx, dz, c1, c2;
+                rib_row_vertex(rx, rz, n, i, j, L, lane_w, has_rf, has_rl, rowf, rowl, &ax, &az);
+                rib_row_vertex(rx, rz, n, i + 1, j, L, lane_w, has_rf, has_rl, rowf, rowl, &bx, &bz);
+                rib_row_vertex(rx, rz, n, i + 1, j + 1, L, lane_w, has_rf, has_rl, rowf, rowl, &cx, &cz);
+                rib_row_vertex(rx, rz, n, i, j + 1, L, lane_w, has_rf, has_rl, rowf, rowl, &dx, &dz);
+                c1 = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+                c2 = (cx - ax) * (dz - az) - (cz - az) * (dx - ax);
+                if (c1 <= 0.0 || c2 <= 0.0) drop = (i + 1 < n - 1) ? i + 1 : i;
+            }
+        }
+        if (drop <= 0 || drop >= n - 1) break;
+        for (i = drop; i + 1 < n; i++) {
+            rx[i] = rx[i + 1]; rz[i] = rz[i + 1]; Y[i] = Y[i + 1]; HW[i] = HW[i + 1];
+            G[i] = G[i + 1]; TS[i] = TS[i + 1];
+            if (TILT) TILT[i] = TILT[i + 1];
+        }
+        n--;
+        *fl |= ROAM_RIBF_UNTWIST;
+    }
+    return n;
+}
+
 /* -------------------------------------------------------------- build ------- */
 
 int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
@@ -611,7 +669,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     int      has_pa, has_pb, attempt, nch = 1, ncr = 0, prefetched = 0;
     int      st = ROAM_RIB_BAD_INPUT;
     unsigned fl = 0;
-    double   box[4];
+    double   box[4], lane_w;
     int      chunk_b[64];
     int     *chunk_big = NULL;                      /* when > 63 chunks */
     int      cbn = 0;
@@ -624,6 +682,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     out->key = in->key;
     lanes = in->lanes < 1 ? 1 : (in->lanes > ROAM_RIB_MAX_LANES ? ROAM_RIB_MAX_LANES : in->lanes);
     out->lanes = lanes;
+    lane_w = in->lane_w > 0.0 ? in->lane_w : ROAM_RIB_LANE_W;
 
     /* 1. orient */
     ox = (double *)malloc((size_t)in->n * sizeof(double));
@@ -909,11 +968,22 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     /* 5b. [F1-T10] height coupling to the leaders (RoamEdgeIn.lead) */
     HW = (double *)malloc((size_t)n * sizeof(double));
     if (!HW) goto done;
-    for (i = 0; i < n; i++) HW[i] = (double)lanes * ROAM_RIB_LANE_W * 0.5;
+    for (i = 0; i < n; i++) HW[i] = (double)lanes * lane_w * 0.5;
     if (((in->nlead > 0 && in->lead) || (in->nltri > 0 && in->ltri)) && !in->bridge && in->tunnel != 1) {
         TILT = (double *)calloc((size_t)n, sizeof(double));
         if (!TILT) goto done;
         if (!rib_couple(in, rx, rz, arc, seg, HW, n, has_pa, has_pb, Y, TILT, out)) goto done;
+    }
+
+    /* 5c. [F1-T10] no folded lane quad */
+    {
+        const int n0 = n;
+        n = rib_untwist(rx, rz, Y, HW, TILT, G, TS, n, lanes, lane_w, has_rf, has_rl,
+                        (const int32_t (*)[2])rowf, (const int32_t (*)[2])rowl, &fl);
+        if (n != n0) {
+            nq = n - 1;
+            for (i = 1; i < n; i++) seg[i] = hypot(rx[i] - rx[i - 1], rz[i] - rz[i - 1]);
+        }
     }
 
     /* 6. quantise once, emit */
@@ -962,7 +1032,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
                 for (k = 0; k <= ns; k++) {
                     const int row = r0 + k;
                     for (j = 0; j < per_row; j++) {
-                        const double t = ((double)L * 0.5 - (double)j) * ROAM_RIB_LANE_W;
+                        const double t = ((double)L * 0.5 - (double)j) * lane_w;
                         int vx = roam_round(rx[row] + lxv[row] * t) - ox0;
                         const int vy = (TILT ? roam_round(Y[row] + TILT[row] * t) : Yc[row]) - oy0;
                         int vz = roam_round(rz[row] + lzv[row] * t) - oz0;

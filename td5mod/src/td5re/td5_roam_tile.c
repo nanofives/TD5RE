@@ -911,6 +911,7 @@ static int work_edge_in(Work *w, int ei, const RoamCross *cross, int ncross, Roa
     in->node_a  = g->node[e->node_a].key;
     in->node_b  = g->node[e->node_b].key;
     in->lanes   = e->lanes;
+    in->lane_w  = e->lane_w;
     in->surface = e->surface;
     in->layer   = e->layer;
     in->bridge  = (e->bridge && e->layer >= 1) ? 1 : 0;
@@ -1123,7 +1124,7 @@ static int work_deps(Work *w, int ei)
         if (t >= 0 && !dep_push(w, t, ROAM_DEP_BORE)) return 0;
         /* a bore approach is shaped by the bore: neither follower nor leader */
         if (t < 0 && !edge_is_structure(e) && edge_has_ribbon(e)) {
-            const double pad = e->half_w + 2.0 * TD5_ROAM_LANE_W * 0.5 * TD5_GEO_ROADS_LANES_MAX;
+            const double pad = e->half_w + TD5_ROAM_LANE_W * 0.5 * TD5_GEO_ROADS_LANES_MAX;
             double bp[4];
             bp[0] = be[0] - pad; bp[1] = be[1] - pad; bp[2] = be[2] + pad; bp[3] = be[3] + pad;
             for (j = 0; j < g->nedge; j++) {
