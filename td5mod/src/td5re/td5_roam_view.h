@@ -20,7 +20,8 @@ int  td5_roam_view_wanted(void);
 
 /* Queue the resident road tiles near the camera as debug lines. The caller
  * resets and flushes the debug-line batch around the call. cam_x/y/z is the
- * free-cam eye in raw 24.8 world units (the collision wireframe's units). A
+ * render eye in strip units (g_cameraPos: 24.8 world / 256, the debug-line
+ * projector's space). A
  * no-op when the geo place has no ROAMTILE set. */
 void td5_roam_view_draw(int32_t cam_x, int32_t cam_y, int32_t cam_z);
 

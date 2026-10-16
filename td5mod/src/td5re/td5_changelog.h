@@ -45,6 +45,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  splits get a patch that follows the streets." },
     { CL_ITEM,    "Dev builds only: one wide free roam junction no longer" },
     { CL_ITEM,    "  has 8 corner points thrown 150 m off in its tile." },
+    { CL_ITEM,    "Dev builds only: TD5RE_ROAM_VIEW=1 draws the free roam" },
+    { CL_ITEM,    "  road outline on La Plata, on the level road." },
     { CL_BLANK,   "" },
     { CL_DATE,    "October 14 (forks and medians)" },
     { CL_ITEM,    "On a freshly built track the fork roads get their" },

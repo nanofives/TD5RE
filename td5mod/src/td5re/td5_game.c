@@ -8447,13 +8447,13 @@ static void frame_render(void)
          * render eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
          * Pane 0 only. Not gated on td5_camera_freecam_active(): the geo tour
          * (td5_camera.c tour_step) moves the eye without entering free-cam, so
-         * gating on it hid the overlay from every tour frame. Raw 24.8 eye =
-         * render eye / (1/256). */
+         * gating on it hid the overlay from every tour frame. The eye goes in
+         * RENDER-FLOAT units (world/256 = strip units, the space the debug-line
+         * projector and the ROAMTILE coordinates use), not the 24.8 world. */
         if (vp == 0 && td5_roam_view_wanted()) {
             td5_render_debug_lines_reset();
-            td5_roam_view_draw((int32_t)(g_cameraPos[0] / g_worldToRenderScale),
-                               (int32_t)(g_cameraPos[1] / g_worldToRenderScale),
-                               (int32_t)(g_cameraPos[2] / g_worldToRenderScale));
+            td5_roam_view_draw((int32_t)g_cameraPos[0], (int32_t)g_cameraPos[1],
+                               (int32_t)g_cameraPos[2]);
             td5_render_debug_lines_flush();
         }
 

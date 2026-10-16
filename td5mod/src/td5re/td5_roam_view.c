@@ -9,7 +9,20 @@
  * td5_geo_route.c gr_affine_old_from_new does (route -> lat/lon -> place), and
  * td5_roam_height.c roam_test_route_to_place is the same chain. This file adds the
  * inverse (place -> route) so a tile vertex lands where the level091 road is.
- * Coordinates are raw 24.8 world units, which is what the overlay takes.
+ * Coordinates are strip units (render-float, = 24.8 world / 256), the space
+ * td5_render_debug_line_world projects; the eye arrives in the same units.
+ *
+ * HEIGHT DATUM. ROAMTILE heights are about sea level (the source DEM). The
+ * strip's are about h0 = the ground height at the route origin
+ * (td5_tg_world.c: strip y = tg_w_raw - h0). F1-T8b measured the difference on
+ * level091: +18.4 .. +19.5 m at 12 spans, against h0 = 7969 units (18.5 m) in
+ * that build's [WORLD] log line. The viewer subtracts the DEM height at route
+ * (0,0); it leaves out the detail octave tg_w_raw adds there (|det| * relief *
+ * 0.01, a fraction of a metre). TD5RE_ROAM_VIEW_DATUM=<units> overrides it.
+ * The lines are depth-tested against the track, so roam geometry a few cm under
+ * the strip tarmac would vanish: the draw adds TD5RE_ROAM_VIEW_LIFT_CM (default
+ * 50) on top. Display only; the real height difference is measured offline
+ * (_archive/roam/F1/T8b/coverage.py).
  *
  * DRAW. Tiles within RV_REACH of the camera's tile (5 x 5 tiles, 256 m each) are
  * read once and kept in a small LRU (a missing file is cached as "not ok" so it
@@ -31,6 +44,7 @@
 #include "td5_geo.h"
 #include "td5_render.h"
 #include "td5_roam_tile.h"
+#include "td5_roam_height.h"
 #include "td5_roam_view.h"
 #include "deps/cjson/cJSON.h"
 
@@ -63,6 +77,8 @@ static RvProj   s_np, s_op;            /* route frame (np), place frame (op)    
 static RoamGrid s_grid;
 static char     s_slug[64];
 static int      s_ready;               /* 1 when the projections and grid loaded */
+static double   s_datum;               /* place height at the strip's y = 0      */
+static double   s_lift;                /* display lift, units                    */
 static RvSlot   s_slot[RV_SLOTS];
 static uint32_t s_tick;
 static int      s_log_tx = 0x7fffffff, s_log_tz = 0x7fffffff;
@@ -164,7 +180,7 @@ static void rv_route_to_place(const RvProj *np, const RvProj *op,
     *zs = (e2 * op->sn + n2 * op->cs) * op->upm + op->offz;
 }
 
-/* One world (raw 24.8, route frame) position of a tile vertex. ox/oz are
+/* One world (strip units, route frame) position of a tile vertex. ox/oz are
  * tile-local, oy absolute, exactly as the strip stores them. */
 static void rv_world(const RoamTile *t, int32_t ox, int32_t oy, int32_t oz,
                      const TD5_StripVertex *v, double w[3])
@@ -172,10 +188,37 @@ static void rv_world(const RoamTile *t, int32_t ox, int32_t oy, int32_t oz,
     const double px = (double)t->org_x + (double)ox + (double)v->x;
     const double pz = (double)t->org_z + (double)oz + (double)v->z;
     rv_place_to_route(&s_np, &s_op, px, pz, &w[0], &w[2]);
-    w[1] = (double)oy + (double)v->y;
+    w[1] = (double)oy + (double)v->y - s_datum + s_lift;
 }
 
 /* ------------------------------------------------------------ setup / tiles ---- */
+
+/* The strip's height datum: the DEM height at the route origin, from the loaded
+ * geo rasters when there are any, else from the place's source HEIGHT.R16
+ * through the T2 window reader. 0 when neither can be read. */
+static double rv_datum(const char *slug)
+{
+    const char *o = getenv("TD5RE_ROAM_VIEW_DATUM");
+    if (o && o[0]) return atof(o);
+    if (td5_geo_loaded()) return td5_geo_height(0.0, 0.0);
+    {
+        static TD5_RoamHeight hc;     /* large (window table); used once per place */
+        char hp[512], wp[512];
+        double xs, zs, h = 0.0;
+        const int ex100 = td5_env_int("TD5RE_GEO_EXAGGERATION",
+                                      TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400);
+        int ok = 0;
+        td5_geo_source_path(hp, sizeof hp, slug, "HEIGHT.R16");
+        td5_geo_source_path(wp, sizeof wp, slug, "WATER.R8");
+        rv_route_to_place(&s_np, &s_op, 0.0, 0.0, &xs, &zs);
+        if (td5_roam_height_open(&hc, hp, wp, (double)ex100 / 100.0)) {
+            ok = td5_roam_height_prefetch(&hc, xs - 4300.0, zs - 4300.0, xs + 4300.0, zs + 4300.0) &&
+                 td5_roam_height_sample(&hc, xs, zs, &h, NULL);
+            td5_roam_height_close(&hc);
+        }
+        return ok ? h : 0.0;
+    }
+}
 
 static int rv_setup(const char *slug)
 {
@@ -205,9 +248,12 @@ static int rv_setup(const char *slug)
     }
     free(json);
     (void)err;
+    s_datum = rv_datum(slug);
+    s_lift = td5_env_int("TD5RE_ROAM_VIEW_LIFT_CM", 50, -1000, 1000) * (RV_UPM / 100.0);
     s_ready = 1;
-    TD5_LOG_I(LOG_TAG, "roam view: place %s, route frame loaded, lattice %d units",
-              slug, (int)s_grid.tile);
+    TD5_LOG_I(LOG_TAG, "roam view: place %s, route frame loaded, lattice %d units, "
+              "height datum %.0f units (geo rasters %s), display lift %.0f units",
+              slug, (int)s_grid.tile, s_datum, td5_geo_loaded() ? "loaded" : "not loaded", s_lift);
     return 1;
 }
 
@@ -269,19 +315,23 @@ static void rv_draw_tile(const RoamTile *t, double cx, double cz, double r2, RvS
     uint32_t i, k;
     double w[4][3], wt[3][3];
 
-    /* ribbon quads: rails, rungs and the diagonal of each span, cyan */
+    /* ribbon quads, cyan: the WHOLE carriageway of each span. As in STRIP.DAT the
+     * left_vertex_index row runs ACROSS the road at the near end (lanes + 1
+     * vertices) and the right_vertex_index row is the far end, so L .. L+n is the
+     * near rung, L -> R the left rail and L+n -> R+n the right rail. */
     for (i = 0; i < t->nspan; i++) {
         const TD5_StripSpan *sp = &t->span[i];
         const uint32_t L = sp->left_vertex_index, R = sp->right_vertex_index;
-        if (L + 1 >= t->nvert || R + 1 >= t->nvert) continue;
+        const uint32_t n = sp->pad_02[1] & 0x0Fu;          /* lane count */
+        if (n < 1 || L + n >= t->nvert || R + n >= t->nvert) continue;
         rv_world(t, sp->origin_x, sp->origin_y, sp->origin_z, &t->vert[L],     w[0]);
-        rv_world(t, sp->origin_x, sp->origin_y, sp->origin_z, &t->vert[L + 1], w[1]);
+        rv_world(t, sp->origin_x, sp->origin_y, sp->origin_z, &t->vert[L + n], w[1]);
         rv_world(t, sp->origin_x, sp->origin_y, sp->origin_z, &t->vert[R],     w[2]);
-        rv_world(t, sp->origin_x, sp->origin_y, sp->origin_z, &t->vert[R + 1], w[3]);
-        rv_seg(w[0], w[1], RV_CYAN, cx, cz, r2, st);     /* left rail  */
-        rv_seg(w[2], w[3], RV_CYAN, cx, cz, r2, st);     /* right rail */
-        rv_seg(w[0], w[2], RV_CYAN, cx, cz, r2, st);     /* near rung  */
-        rv_seg(w[1], w[3], RV_CYAN, cx, cz, r2, st);     /* far rung   */
+        rv_world(t, sp->origin_x, sp->origin_y, sp->origin_z, &t->vert[R + n], w[3]);
+        rv_seg(w[0], w[2], RV_CYAN, cx, cz, r2, st);     /* left rail  */
+        rv_seg(w[1], w[3], RV_CYAN, cx, cz, r2, st);     /* right rail */
+        rv_seg(w[0], w[1], RV_CYAN, cx, cz, r2, st);     /* near rung  */
+        rv_seg(w[2], w[3], RV_CYAN, cx, cz, r2, st);     /* far rung   */
         rv_seg(w[0], w[3], RV_CYAN, cx, cz, r2, st);     /* diagonal   */
         st->spans++;
     }
