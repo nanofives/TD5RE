@@ -50,6 +50,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Dev builds only: free roam divided avenues keep their" },
     { CL_ITEM,    "  median, short street pieces meet without a step and" },
     { CL_ITEM,    "  turning loops by a junction are paved." },
+    { CL_ITEM,    "Dev builds only: TD5RE_ROAM_VIEW=1 draws the free roam" },
+    { CL_ITEM,    "  road outline on La Plata, on the level road." },
     { CL_ITEM,    "Dev builds only: free roam streets drawn over each" },
     { CL_ITEM,    "  other now share one height (no step on the road)," },
     { CL_ITEM,    "  the Avenida 32 tunnel runs 7 m under Avenida 1, and" },
