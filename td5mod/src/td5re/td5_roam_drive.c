@@ -41,12 +41,12 @@
 #define RV_M          430.0                       /* units per metre */
 #define RV_UPT_KMH    (430.0 / 30.0 / 3.6)        /* units per tick at 1 km/h (30 Hz sim) */
 #define RV_NP         9
-#define RV_MAXC       160
+#define RV_MAXC       320
 #define RV_MAXKEYS    128
 #define RV_UNIT_CM    (256.0 * 4.30)              /* 24.8 world units per cm */
 
 #define RV_ABOVE_REST_MAX_CM   5.0                /* wheel bottom above the ground at rest */
-#define RV_WHEEL_BELOW_MAX_CM  25.0               /* wheel bottom under the ground (tyre / suspension) */
+#define RV_WHEEL_BELOW_MAX_CM  30.0               /* wheel bottom under the ground (tyre / suspension) */
 #define RV_STUCK_TICKS         90                 /* 3 s */
 #define RV_STUCK_KMH           5.0
 
@@ -66,6 +66,7 @@ static const char *const k_rv_kind[4] = { "one-lane/service", "calle x calle", "
 typedef struct {
     int      mode;
     int      armed_tick_set;
+    int      env_checked, env_driven, env_reported;
     long     t0, tick_last;
     int      phase;                 /* route: 0 tour, 1 brake, 2 rest, 3 done ; corners: 0 idle, 1 run, 2 done */
     int      done, aborted;
@@ -73,7 +74,7 @@ typedef struct {
 
     /* knobs */
     double   kmh;
-    int      want_junctions, max_secs, per_kind, gap_m;
+    int      want_junctions, max_secs, per_kind, gap_m, max_arms;
 
     /* measured every sim tick (both modes) */
     long     samples, below_n, off_n;
@@ -84,7 +85,8 @@ typedef struct {
     int      ch_ok;
     long     stuck_t;               /* consecutive ticks throttle held and < 5 km/h */
     long     stuck_events;
-    int      rev_t, recoveries;
+    long     slow_rt;               /* consecutive ticks throttle held and < 3 km/h (retry trigger) */
+    int      rev_t, recoveries, retries_total;
 
     /* route */
     double   dir_x, dir_z, off0, dist_m;
@@ -97,6 +99,9 @@ typedef struct {
     uint64_t keys[RV_MAXKEYS];
     long     rest_t, log_t;
     double   kmh_max;
+    int      on_path;               /* following the planned path through a junction */
+    long     path_t0;
+    double   pth_x[RV_NP], pth_z[RV_NP], pth_ox, pth_oz, pth_defl;
 
     /* corners */
     RvCorner c[RV_MAXC];
@@ -108,6 +113,7 @@ typedef struct {
     long     runs, ok, stuck, pinch, hits, resc, known_fail;
     long     k_runs[4][2], k_ok[4][2], k_stuck[4][2], k_pinch[4][2], k_hits[4][2], k_resc[4][2], k_known[4][2];
     int      kind_n[4];
+    int      cand_n[4];             /* junctions with a valid candidate before the spacing / cap filter */
     FILE    *rep;
 } RvState;
 
@@ -261,6 +267,71 @@ static uint64_t rv_way_at(const TD5_RoamResident *rs, double x, double z)
     return h.edge_key >> 16;
 }
 
+/* Pure pursuit on a RV_NP-point polyline whose last point is followed by a straight run along
+ * (outx, outz): the arc length of the car's nearest point, aim `look` further. along_out > 0 once the
+ * nearest point is past (total - 40 m), i.e. on the exit ribbon; lat_out = distance to the polyline. */
+static void rv_pursue(const double *pxs, const double *pzs, double outx, double outz, double px, double pz,
+                      double look, double *tx, double *tz, double *along_out, double *lat_out)
+{
+    double best = 1e30, cum = 0.0, total = 0.0, s_car = 0.0, want;
+    int k;
+    for (k = 0; k < RV_NP - 1; k++) {
+        const double sx = pxs[k + 1] - pxs[k], sz = pzs[k + 1] - pzs[k];
+        const double len = sqrt(sx * sx + sz * sz);
+        double tt = len > 0.0 ? ((px - pxs[k]) * sx + (pz - pzs[k]) * sz) / (len * len) : 0.0, qx, qz, dd;
+        if (tt < 0.0) tt = 0.0;
+        if (tt > 1.0) tt = 1.0;
+        qx = pxs[k] + sx * tt; qz = pzs[k] + sz * tt;
+        dd = (px - qx) * (px - qx) + (pz - qz) * (pz - qz);
+        if (dd < best) { best = dd; s_car = cum + tt * len; }
+        cum += len;
+    }
+    total = cum;
+    want = s_car + look;
+    if (want > total) want = total + look;           /* past the end: keep going straight out */
+    cum = 0.0;
+    *tx = pxs[RV_NP - 1] + outx * (want - total);
+    *tz = pzs[RV_NP - 1] + outz * (want - total);
+    for (k = 0; k < RV_NP - 1; k++) {
+        const double sx = pxs[k + 1] - pxs[k], sz = pzs[k + 1] - pzs[k];
+        const double len = sqrt(sx * sx + sz * sz);
+        if (want <= cum + len && len > 0.0) {
+            *tx = pxs[k] + sx * (want - cum) / len;
+            *tz = pzs[k] + sz * (want - cum) / len;
+            break;
+        }
+        cum += len;
+    }
+    *along_out = s_car - (total - 40.0 * RV_M);
+    *lat_out = sqrt(best);
+}
+
+/* The planned path through a junction: [0] 45 m up the in-ribbon, [1..RV_NP-2] a quadratic Bezier from the
+ * in-ribbon end row through the point where the two street centre lines meet to the out-ribbon end row,
+ * [RV_NP-1] 40 m out along it. (ein, eout) are end-row centres, (inx, inz) / (outx, outz) the unit
+ * directions along each ribbon pointing AWAY from the junction. */
+static void rv_plan_path(double *pxs, double *pzs, double eix, double eiz, double inx, double inz,
+                         double eox, double eoz, double outx, double outz)
+{
+    const double ax_ = -inx, az_ = -inz, bx_ = -outx, bz_ = -outz;
+    const double det = ax_ * (-bz_) - az_ * (-bx_);
+    double qx = 0.5 * (eix + eox), qz = 0.5 * (eiz + eoz);
+    int q;
+    if (fabs(det) > 1e-6) {
+        const double tt = ((eox - eix) * (-bz_) - (eoz - eiz) * (-bx_)) / det;
+        if (tt > 0.0 && tt < 60.0 * RV_M) { qx = eix + ax_ * tt; qz = eiz + az_ * tt; }
+    }
+    pxs[0] = eix + inx * 45.0 * RV_M; pzs[0] = eiz + inz * 45.0 * RV_M;
+    for (q = 0; q <= RV_NP - 3; q++) {
+        const double u = (double)q / (double)(RV_NP - 3);
+        const double w0 = (1 - u) * (1 - u), w1 = 2 * u * (1 - u), w2 = u * u;
+        pxs[1 + q] = w0 * eix + w1 * qx + w2 * eox;
+        pzs[1 + q] = w0 * eiz + w1 * qz + w2 * eoz;
+    }
+    pxs[RV_NP - 1] = eox + outx * 40.0 * RV_M;
+    pzs[RV_NP - 1] = eoz + outz * 40.0 * RV_M;
+}
+
 static void rv_report_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void rv_report_line(const char *fmt, ...)
 {
@@ -325,7 +396,8 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
 {
     const double px = (double)FP_TRUNC(a->world_pos.x), pz = (double)FP_TRUNC(a->world_pos.z);
     const double kmh = rv_speed_upt(a) / RV_UPT_KMH;
-    double cx, cz, ax, az, hx, hz, look, tx, tz;
+    const int on_patch = s_rv.ch_ok && s_rv.ch.is_patch;
+    double cx, cz, ax, az, hx, hz, look, tx = px, tz = pz;
     uint32_t bits = 0;
 
     if (s_rv.phase == 3) return 0;
@@ -341,97 +413,109 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
     look = 14.0 * RV_M + rv_speed_upt(a) * 20.0;
 
     if (s_rv.phase == 0) {
-        if (s_rv.ch_ok && !s_rv.ch.is_patch && rv_street_axis(rs, &s_rv.ch, px, pz, &cx, &cz, &ax, &az)) {
-            double qx, qz, off;
+        double vt = s_rv.kmh;
+        if (on_patch && !s_rv.on_path) {
+            const uint32_t slot = ROAM_PRIM_SLOT(s_rv.ch.prim), idx = ROAM_PRIM_INDEX(s_rv.ch.prim);
+            const RoamTile *t = slot < (uint32_t)rs->nslot ? rs->tile[slot] : NULL;
+            if (t && idx < t->ntri && t->tri[idx].patch < t->nnode &&
+                (uint64_t)t->node[t->tri[idx].patch].cluster_key != s_rv.cl_key) {
+                /* a new junction: the arm we came in on is the one most opposite to the heading; the exit arm
+                 * is picked from the turn script (or homes back to the spawn past 1.4 km), preferring a
+                 * junction not seen yet, never the way we came. The car then follows a planned path in-end ->
+                 * out-end (the corner matrix path) instead of aiming straight at the exit (islands). */
+                const RoamNodeRec *nd = &t->node[t->tri[idx].patch];
+                const double hd = hypot(px - s_rv.sp_x, pz - s_rv.sp_z);
+                double wx, wz, bd = -1e9;
+                int k, bk = -1, ik = 0, turn = rv_turn_for(s_rv.crossings);
+                double idot = 2.0;
+                for (k = 0; k < nd->narm; k++) {
+                    const double b = (double)t->arm[nd->arm_first + k].bearing12 * (2.0 * RV_PI / 4096.0);
+                    const double d = cos(b) * s_rv.dir_x + sin(b) * s_rv.dir_z;
+                    if (d < idot) { idot = d; ik = k; }
+                }
+                if (hd > 1400.0 * RV_M) {
+                    wx = s_rv.sp_x - px; wz = s_rv.sp_z - pz;
+                    { const double m = hypot(wx, wz); if (m > 1.0) { wx /= m; wz /= m; } }
+                    turn = 99;
+                } else if (turn == 0) {
+                    wx = s_rv.dir_x; wz = s_rv.dir_z;
+                } else {
+                    wx = -s_rv.dir_z * turn; wz = s_rv.dir_x * turn;
+                }
+                s_rv.cl_key = (uint64_t)nd->cluster_key;
+                s_rv.cl_x = (double)t->org_x - rs->org_x + nd->x;
+                s_rv.cl_z = (double)t->org_z - rs->org_z + nd->z;
+                s_rv.crossings++;
+                if (!rv_key_seen(s_rv.cl_key) && s_rv.distinct < RV_MAXKEYS) s_rv.keys[s_rv.distinct++] = s_rv.cl_key;
+                for (k = 0; k < nd->narm; k++) {
+                    const RoamArmRec *ar = &t->arm[nd->arm_first + k];
+                    const double b = (double)ar->bearing12 * (2.0 * RV_PI / 4096.0);
+                    double score = cos(b) * wx + sin(b) * wz;
+                    const RoamTile *te = NULL;
+                    const RoamEdgeRec *er;
+                    if (k == ik && nd->narm > 1) continue;
+                    if ((er = rv_edge(rs, ar->edge_key, &te)) != NULL) {
+                        const int64_t far_key = (er->end_key[0] != nd->cluster_key) ? er->end_key[0] : er->end_key[1];
+                        if (far_key != nd->cluster_key && rv_key_seen((uint64_t)far_key)) score -= 1.2;
+                    }
+                    if (score > bd) { bd = score; bk = k; }
+                }
+                if (bk < 0) bk = (ik + 1) % (nd->narm > 0 ? nd->narm : 1);
+                {
+                    const RoamArmRec *ao = &t->arm[nd->arm_first + bk], *ai = &t->arm[nd->arm_first + ik];
+                    const double bo = (double)ao->bearing12 * (2.0 * RV_PI / 4096.0);
+                    const double bi = (double)ai->bearing12 * (2.0 * RV_PI / 4096.0);
+                    double inx = cos(bi), inz = sin(bi), outx = cos(bo), outz = sin(bo);
+                    double eix = 0, eiz = 0, eox = 0, eoz = 0;
+                    const int have_in = rv_edge_end_near(rs, ai->edge_key, s_rv.cl_x, s_rv.cl_z, &eix, &eiz, &inx, &inz);
+                    const int have_out = rv_edge_end_near(rs, ao->edge_key, s_rv.cl_x, s_rv.cl_z, &eox, &eoz, &outx, &outz);
+                    if (have_in && have_out) {
+                        rv_plan_path(s_rv.pth_x, s_rv.pth_z, eix, eiz, inx, inz, eox, eoz, outx, outz);
+                    } else {
+                        /* no ribbon end rows: straight from the car to 25 m past the node along the exit arm */
+                        int q;
+                        const double gx = s_rv.cl_x + outx * 25.0 * RV_M, gz = s_rv.cl_z + outz * 25.0 * RV_M;
+                        for (q = 0; q < RV_NP; q++) {
+                            s_rv.pth_x[q] = px + (gx - px) * q / (RV_NP - 1);
+                            s_rv.pth_z[q] = pz + (gz - pz) * q / (RV_NP - 1);
+                        }
+                    }
+                    s_rv.pth_ox = outx; s_rv.pth_oz = outz;
+                    s_rv.pth_defl = acos(fmax(-1.0, fmin(1.0, -(inx * outx + inz * outz)))) * 180.0 / RV_PI;
+                    s_rv.on_path = 1;
+                    s_rv.path_t0 = tick;
+                    TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] junction #%d (distinct %d) %016llx (%d arms) at (%.0f,%.0f): turn %d, in-arm %d, out-arm %d, "
+                              "deflection %.0f deg, heading (%.2f,%.2f), %.0f m driven",
+                              s_rv.crossings, s_rv.distinct, (unsigned long long)nd->cluster_key, (int)nd->narm, s_rv.cl_x, s_rv.cl_z,
+                              turn, ik, bk, s_rv.pth_defl, s_rv.dir_x, s_rv.dir_z, s_rv.dist_m);
+                }
+            }
+        }
+        if (s_rv.on_path) {
+            double along, lat;
+            rv_pursue(s_rv.pth_x, s_rv.pth_z, s_rv.pth_ox, s_rv.pth_oz, px, pz,
+                      (s_rv.pth_defl > 30.0 ? 10.0 : 14.0) * RV_M, &tx, &tz, &along, &lat);
+            if (s_rv.pth_defl > 30.0) vt = s_rv.kmh * 0.6 > 15.0 ? s_rv.kmh * 0.6 : 15.0;
+            if ((along > 12.0 * RV_M && !on_patch) || tick - s_rv.path_t0 > 20 * 30) {
+                s_rv.on_path = 0;
+                s_rv.dir_x = s_rv.pth_ox; s_rv.dir_z = s_rv.pth_oz;
+                s_rv.have_off = 0;
+            }
+        } else if (s_rv.ch_ok && !on_patch && rv_street_axis(rs, &s_rv.ch, px, pz, &cx, &cz, &ax, &az)) {
             if (ax * s_rv.dir_x + az * s_rv.dir_z < 0.0) { ax = -ax; az = -az; }
             if (ax * s_rv.dir_x + az * s_rv.dir_z < 0.82) {     /* > 35 deg off: a crossing street, keep going straight */
                 ax = s_rv.dir_x; az = s_rv.dir_z;
                 cx = px; cz = pz;
             }
             s_rv.dir_x = ax; s_rv.dir_z = az;
-            qx = s_rv.dir_z; qz = -s_rv.dir_x;
-            off = (px - cx) * qx + (pz - cz) * qz;
-            if (!s_rv.have_off) { s_rv.off0 = off; s_rv.have_off = 1; }
-            tx = cx + qx * s_rv.off0 + s_rv.dir_x * look;
-            tz = cz + qz * s_rv.off0 + s_rv.dir_z * look;
-        } else if (s_rv.ch_ok && s_rv.ch.is_patch) {
-            const uint32_t slot = ROAM_PRIM_SLOT(s_rv.ch.prim), idx = ROAM_PRIM_INDEX(s_rv.ch.prim);
-            const RoamTile *t = slot < (uint32_t)rs->nslot ? rs->tile[slot] : NULL;
-            if (t && idx < t->ntri && t->tri[idx].patch < t->nnode) {
-                const RoamNodeRec *nd = &t->node[t->tri[idx].patch];
-                if ((uint64_t)nd->cluster_key != s_rv.cl_key) {
-                    /* a new junction: pick the exit arm from the turn script (or home back to the
-                     * spawn past 1.4 km), never the way we came */
-                    const double hd = hypot(px - s_rv.sp_x, pz - s_rv.sp_z);
-                    double wx, wz;
-                    int k, bk = -1, bk_any = -1;
-                    double bd = -2.0, bd_any = -2.0;
-                    int turn = rv_turn_for(s_rv.crossings);
-                    if (hd > 1400.0 * RV_M) {
-                        wx = s_rv.sp_x - px; wz = s_rv.sp_z - pz;
-                        { const double m = hypot(wx, wz); if (m > 1.0) { wx /= m; wz /= m; } }
-                        turn = 99;
-                    } else if (turn == 0) {
-                        wx = s_rv.dir_x; wz = s_rv.dir_z;
-                    } else {
-                        wx = -s_rv.dir_z * turn; wz = s_rv.dir_x * turn;
-                    }
-                    for (k = 0; k < nd->narm; k++) {
-                        const double b = (double)t->arm[nd->arm_first + k].bearing12 * (2.0 * RV_PI / 4096.0);
-                        const double abx = cos(b), abz = sin(b);
-                        const double want = abx * wx + abz * wz;
-                        const double back = abx * s_rv.dir_x + abz * s_rv.dir_z;
-                        if (want > bd_any) { bd_any = want; bk_any = k; }
-                        if (back > -0.5 && want > bd) { bd = want; bk = k; }
-                    }
-                    if (bk < 0) bk = bk_any;
-                    s_rv.cl_key = (uint64_t)nd->cluster_key;
-                    s_rv.cl_x = (double)t->org_x - rs->org_x + nd->x;
-                    s_rv.cl_z = (double)t->org_z - rs->org_z + nd->z;
-                    s_rv.tgt_x = s_rv.tgt_z = 0.0;
-                    s_rv.crossings++;
-                    if (!rv_key_seen(s_rv.cl_key) && s_rv.distinct < RV_MAXKEYS) s_rv.keys[s_rv.distinct++] = s_rv.cl_key;
-                    if (bk >= 0) {
-                        const RoamArmRec *ar = &t->arm[nd->arm_first + bk];
-                        const double b = (double)ar->bearing12 * (2.0 * RV_PI / 4096.0);
-                        double ex = 0.0, ez = 0.0, ox = 0.0, oz = 0.0;
-                        s_rv.arm_x = cos(b); s_rv.arm_z = sin(b);
-                        if (rv_edge_end_near(rs, ar->edge_key, s_rv.cl_x, s_rv.cl_z, &ex, &ez, &ox, &oz)) {
-                            s_rv.arm_x = ox; s_rv.arm_z = oz;
-                            s_rv.tgt_x = ex + ox * 15.0 * RV_M; s_rv.tgt_z = ez + oz * 15.0 * RV_M;
-                        }
-                    } else {
-                        s_rv.arm_x = s_rv.dir_x; s_rv.arm_z = s_rv.dir_z;
-                    }
-                    if (s_rv.tgt_x == 0.0 && s_rv.tgt_z == 0.0) {
-                        s_rv.tgt_x = s_rv.cl_x + s_rv.arm_x * 25.0 * RV_M; s_rv.tgt_z = s_rv.cl_z + s_rv.arm_z * 25.0 * RV_M;
-                    }
-                    s_rv.have_off = 0;
-                    TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] junction #%d %016llx (%d arms) at (%.0f,%.0f): turn %d, heading (%.2f,%.2f) -> "
-                              "arm %d (%.2f,%.2f), %.0f m driven",
-                              s_rv.crossings, (unsigned long long)nd->cluster_key, (int)nd->narm, s_rv.cl_x, s_rv.cl_z,
-                              turn, s_rv.dir_x, s_rv.dir_z, bk, s_rv.arm_x, s_rv.arm_z, s_rv.dist_m);
-                }
-                tx = s_rv.tgt_x;
-                tz = s_rv.tgt_z;
-                s_rv.dir_x = s_rv.arm_x; s_rv.dir_z = s_rv.arm_z;
-            } else {
-                tx = px + s_rv.dir_x * look;
-                tz = pz + s_rv.dir_z * look;
-            }
-        } else {                                        /* nothing under the chassis: hold the direction */
+            tx = cx + s_rv.dir_x * look;                         /* the carriageway centre line */
+            tz = cz + s_rv.dir_z * look;
+        } else {                                                /* nothing under the chassis: hold the direction */
             tx = px + s_rv.dir_x * look;
             tz = pz + s_rv.dir_z * look;
         }
-        {
-            /* slow down for a turn: the target speed scales with how far the aim is off the heading */
-            double e = atan2(tx - px, tz - pz) - atan2(hx, hz), vt = s_rv.kmh;
-            while (e > RV_PI) e -= 2.0 * RV_PI;
-            while (e < -RV_PI) e += 2.0 * RV_PI;
-            if (fabs(e) > 0.25) vt = s_rv.kmh * 0.4 > 15.0 ? s_rv.kmh * 0.4 : 15.0;
-            bits = rv_steer_to(a, tx, tz, vt);
-        }
-        if (s_rv.crossings >= s_rv.want_junctions && s_rv.distinct >= s_rv.want_junctions && !s_rv.ch.is_patch) {
+        bits = rv_steer_to(a, tx, tz, vt);
+        if (s_rv.distinct >= s_rv.want_junctions && !on_patch && !s_rv.on_path) {
             s_rv.phase = 1;
             TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] %d junctions (%d distinct), %.0f m: braking to rest",
                       s_rv.crossings, s_rv.distinct, s_rv.dist_m);
@@ -451,27 +535,39 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
         if (tick - s_rv.rest_t >= 90) { s_rv.phase = 3; rv_finish("route done", 0); return 0; }
     }
 
-    /* stuck: throttle held and < 5 km/h for more than 3 s. Counted once per event; a reverse
-     * recovery then frees the car so the tour can go on (and the row still fails). */
+    /* A wedge: throttle held and < 3 km/h for 1.5 s -> reverse with the wheel turned away for 1.3 s, as a
+     * driver would (counted as a retry, reported). STUCK is the spec metric: throttle held and < 5 km/h
+     * for more than 3 s in a row, i.e. a wedge the retry did not free. */
     if (s_rv.rev_t > 0) {
         s_rv.rev_t--;
         bits = (uint32_t)TD5_INPUT_BRAKE | ((bits & TD5_INPUT_STEER_LEFT) ? (uint32_t)TD5_INPUT_STEER_RIGHT
                                                                            : (bits & TD5_INPUT_STEER_RIGHT) ? (uint32_t)TD5_INPUT_STEER_LEFT : 0u);
         s_rv.stuck_t = 0;
+        s_rv.slow_rt = 0;
     } else if (s_rv.phase == 0) {
         if ((bits & TD5_INPUT_THROTTLE) && kmh < RV_STUCK_KMH) {
             if (++s_rv.stuck_t == RV_STUCK_TICKS + 1) {
                 s_rv.stuck_events++;
                 TD5_LOG_W(LOG_TAG, "[ROAMSELFTEST] STUCK #%ld at world (%.0f,%.0f) after %d junctions: %.1f km/h for > 3 s with throttle",
                           s_rv.stuck_events, px, pz, s_rv.crossings, kmh);
-                if (++s_rv.recoveries > 3) { rv_finish("stuck, recoveries exhausted", 1); return 0; }
-                s_rv.rev_t = 40;
             }
         } else {
             s_rv.stuck_t = 0;
         }
+        if ((bits & TD5_INPUT_THROTTLE) && kmh < 3.0) {
+            if (++s_rv.slow_rt > 45) {
+                s_rv.slow_rt = 0;
+                s_rv.retries_total++;
+                TD5_LOG_W(LOG_TAG, "[ROAMSELFTEST] wedge #%d at world (%.0f,%.0f) edge %016llx patch=%d after %d junctions: reversing",
+                          s_rv.retries_total, px, pz, (unsigned long long)s_rv.ch.edge_key, (int)s_rv.ch.is_patch, s_rv.crossings);
+                if (s_rv.retries_total > 8 || s_rv.stuck_events > 2) { rv_finish("wedged, retries exhausted", 1); return 0; }
+                s_rv.rev_t = 40;
+            }
+        } else {
+            s_rv.slow_rt = 0;
+        }
     }
-    if (tick - s_rv.log_t >= 90 && !s_rv.done) {
+    if (tick - s_rv.log_t >= 150 && !s_rv.done) {
         s_rv.log_t = tick;
         TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] t=%ld pos=(%d,%d,%d) kmh=%.1f junctions=%d/%d edge=%016llx patch=%d inside=%d dist=%.0f m",
                   tick - s_rv.t0, (int)px, (int)FP_TRUNC(a->world_pos.y), (int)pz, kmh, s_rv.crossings, s_rv.distinct,
@@ -498,14 +594,14 @@ static int rv_kind_of(const RoamEdgeRec *ea, const RoamEdgeRec *eb, const char *
     return -1;
 }
 
-static void rv_pick_corners(const TD5_RoamResident *rs)
+/* One pass over every junction. gapk[kind] = minimum spacing between two picks of that kind, units. */
+static void rv_pick_pass(const TD5_RoamResident *rs, const double *gapk)
 {
     int ti;
     uint32_t ni;
-    const double gap = (double)s_rv.gap_m * RV_M;
-    uint32_t t_start = td5_plat_time_ms();
     s_rv.nc = 0;
     memset(s_rv.kind_n, 0, sizeof s_rv.kind_n);
+    memset(s_rv.cand_n, 0, sizeof s_rv.cand_n);
     for (ti = 0; ti < rs->nslot; ti++) {
         const RoamTile *t = rs->tile[ti];
         if (!t) continue;
@@ -515,7 +611,7 @@ static void rv_pick_corners(const TD5_RoamResident *rs)
             double best[4] = { 1e9, 1e9, 1e9, 1e9 };
             RvCorner cand[4];
             memset(cand, 0, sizeof cand);
-            if (nd->narm < 3 || nd->narm > 4 || (nd->flags & 0x04)) continue;
+            if (nd->narm < 3 || nd->narm > s_rv.max_arms || (nd->flags & 0x04)) continue;
             for (ai = 0; ai < nd->narm; ai++) {
                 for (ao = 0; ao < nd->narm; ao++) {
                     const RoamArmRec *A = &t->arm[nd->arm_first + ai], *B = &t->arm[nd->arm_first + ao];
@@ -571,19 +667,35 @@ static void rv_pick_corners(const TD5_RoamResident *rs)
             }
             for (kind = 0; kind < 4; kind++) {
                 int j, far_ok = 1;
+                if (best[kind] < 1e8) s_rv.cand_n[kind]++;
                 if (best[kind] > 1e8 || s_rv.kind_n[kind] >= s_rv.per_kind || s_rv.nc >= RV_MAXC) continue;
                 for (j = 0; j < s_rv.nc; j++)
-                    if (s_rv.c[j].kind == kind && hypot(s_rv.c[j].cx - cand[kind].cx, s_rv.c[j].cz - cand[kind].cz) < gap) far_ok = 0;
+                    if (s_rv.c[j].kind == kind && hypot(s_rv.c[j].cx - cand[kind].cx, s_rv.c[j].cz - cand[kind].cz) < gapk[kind]) far_ok = 0;
                 if (!far_ok) continue;
                 s_rv.c[s_rv.nc++] = cand[kind];
                 s_rv.kind_n[kind]++;
             }
         }
     }
+}
+
+/* Pick the matrix. A kind with no more candidate junctions than the per-kind target is taken whole (no spacing
+ * filter: the casco simply does not hold more); a kind with plenty is thinned to >= gap_m between picks so the
+ * matrix spreads over the city. */
+static void rv_pick_corners(const TD5_RoamResident *rs)
+{
+    double gapk[4] = { 0.0, 0.0, 0.0, 0.0 };
+    int k;
+    const uint32_t t_start = td5_plat_time_ms();
+    rv_pick_pass(rs, gapk);                       /* counts the candidates per kind (cand_n) */
+    for (k = 0; k < 4; k++) gapk[k] = (s_rv.cand_n[k] > s_rv.per_kind) ? (double)s_rv.gap_m * RV_M : 0.0;
+    rv_pick_pass(rs, gapk);
     TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] corners picked %d (want %d per kind, >= %d m apart) in %u ms: one-lane/service %d, "
-              "calle x calle %d, avenida x calle %d, diagonal x avenida %d",
+              "calle x calle %d, avenida x calle %d, diagonal x avenida %d; junctions with a candidate before the "
+              "spacing / cap filter: %d / %d / %d / %d",
               s_rv.nc, s_rv.per_kind, s_rv.gap_m, td5_plat_time_ms() - t_start,
-              s_rv.kind_n[0], s_rv.kind_n[1], s_rv.kind_n[2], s_rv.kind_n[3]);
+              s_rv.kind_n[0], s_rv.kind_n[1], s_rv.kind_n[2], s_rv.kind_n[3],
+              s_rv.cand_n[0], s_rv.cand_n[1], s_rv.cand_n[2], s_rv.cand_n[3]);
 }
 
 static void rv_corner_start(TD5_Actor *a, long tick)
@@ -639,7 +751,8 @@ static void rv_corner_end(long tick, int ok, int stuck, const char *why)
                    known && (!ok || stuck || pin || resc) ? "KNOWN" : "-", tick - s_rv.ct, hits, pin, stuck, s_rv.stalls,
                    s_rv.retries, resc, s_rv.vmin > 1e8 ? 0.0 : s_rv.vmin, s_rv.vmax);
     s_rv.phase = 0;
-    if (++s_rv.ci >= s_rv.nc) { s_rv.ci = 0; s_rv.si++; }
+    /* both speeds at one corner back to back: the second run needs no new tile meshes around the car */
+    if (++s_rv.si >= 2) { s_rv.si = 0; s_rv.ci++; }
 }
 
 static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
@@ -648,7 +761,7 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
     double px, pz, kmh, look, rx, rz, along_out, lat_out, tx, tz;
     uint32_t bits;
     if (s_rv.phase == 0) {
-        if (s_rv.si >= 2 || s_rv.nc == 0) {
+        if (s_rv.ci >= s_rv.nc) {
             int k, sp;
             TD5_LOG_I(LOG_TAG, "[ROAMCORNER] SUMMARY runs=%ld exit=%ld stuck=%ld pinches=%ld wall_hits=%ld rescues=%ld known=%ld",
                       s_rv.runs, s_rv.ok, s_rv.stuck, s_rv.pinch, s_rv.hits, s_rv.resc, s_rv.known_fail);
@@ -740,13 +853,16 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
 
 void td5_roam_drive_arm(int mode)
 {
+    const int ec = s_rv.env_checked, ed = s_rv.env_driven;
     memset(&s_rv, 0, sizeof s_rv);
+    s_rv.env_checked = ec; s_rv.env_driven = ed;
     s_rv.mode = mode;
-    s_rv.kmh = (double)td5_env_int("TD5RE_ROAM_SELFTEST_KMH", 36, 10, 120);
+    s_rv.kmh = (double)td5_env_int("TD5RE_ROAM_SELFTEST_KMH", 40, 10, 120);
     s_rv.want_junctions = td5_env_int("TD5RE_ROAM_SELFTEST_JUNCTIONS", 24, 1, 100);
-    s_rv.max_secs = td5_env_int("TD5RE_ROAM_SELFTEST_MAX_SECS", 300, 30, 3000);
-    s_rv.per_kind = td5_env_int("TD5RE_ROAM_SELFTEST_CORNERS_PER_KIND", 20, 1, 40);
+    s_rv.max_secs = td5_env_int("TD5RE_ROAM_SELFTEST_MAX_SECS", 420, 30, 3000);
+    s_rv.per_kind = td5_env_int("TD5RE_ROAM_SELFTEST_CORNERS_PER_KIND", 20, 1, 80);
     s_rv.gap_m = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_GAP_M", 120, 0, 1000);
+    s_rv.max_arms = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_MAX_ARMS", 4, 3, 8);
     s_rv.ch_hint = ROAM_PRIM_NONE;
 }
 
@@ -764,6 +880,27 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
     const TD5_RoamResident *rs;
     long tick;
     uint32_t bits;
+    if (s_rv.mode == TD5_RDRV_OFF && !s_rv.env_checked) {
+        /* standalone dev run: TD5RE_ROAM_SELFTEST_DRIVE=route|corners with --Roam=1 --RoamSpawn=... drives the
+         * same script without the director, logs the verdict and quits */
+        const char *m = getenv("TD5RE_ROAM_SELFTEST_DRIVE");
+        s_rv.env_checked = 1;
+        if (m && (!strcmp(m, "route") || !strcmp(m, "corners"))) {
+            td5_roam_drive_arm(!strcmp(m, "route") ? TD5_RDRV_ROUTE : TD5_RDRV_CORNERS);
+            s_rv.env_checked = 1;
+            s_rv.env_driven = 1;
+        }
+    }
+    if (s_rv.env_driven && s_rv.done) {
+        char note[128];
+        if (!s_rv.env_reported) {
+            s_rv.env_reported = 1;
+            td5_roam_drive_verdict(note, sizeof note, NULL);
+            TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] standalone verdict: %s", note);
+            g_td5.quit_requested = 1;
+        }
+        return 0;
+    }
     if (s_rv.mode == TD5_RDRV_OFF || s_rv.done || !a || !td5_roam_active()) return 0;
     rs = td5_roam_resident();
     if (!rs) return 0;
@@ -823,13 +960,13 @@ int td5_roam_drive_verdict(char *note, size_t n, int *known)
         if (status)
             snprintf(note, n, "roam FAIL: %.100s", bad);
         else
-            snprintf(note, n, "roam %d jn (%d distinct) %.1f km, snap %.0f m, rest %+.1f cm, below 0, stuck 0, resc 0, pinch 0",
-                     s_rv.crossings, s_rv.distinct, s_rv.dist_m / 1000.0, td5_roam_spawn_snap_m(), rest_max);
+            snprintf(note, n, "roam %d jn (%d distinct) %.1f km, snap %.0f m, rest %+.1f cm, below 0 stuck 0 resc 0 pinch 0 wedge %d",
+                     s_rv.crossings, s_rv.distinct, s_rv.dist_m / 1000.0, td5_roam_spawn_snap_m(), rest_max, s_rv.retries_total);
         TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] ROUTE VERDICT %s: junctions=%d distinct=%d dist=%.0f m vmax=%.0f km/h samples=%ld "
                   "chassis_above_min=%.1f cm below_n=%ld off_n=%ld wheel_gap_min=%.2f cm rest_n=%ld rest_gap_max=%.2f cm "
-                  "stuck=%ld rescues=%ld pinches=%ld teleports=%ld wall_hits=%ld spawn_snap=%.1f m %s",
+                  "stuck=%ld wedge_retries=%d rescues=%ld pinches=%ld teleports=%ld wall_hits=%ld spawn_snap=%.1f m %s",
                   status ? "FAIL" : "PASS", s_rv.crossings, s_rv.distinct, s_rv.dist_m, s_rv.kmh_max, s_rv.samples, above_min,
-                  s_rv.below_n, s_rv.off_n, gap_min, st.rest_n, rest_max, s_rv.stuck_events, resc, st.pinches, st.teleports,
+                  s_rv.below_n, s_rv.off_n, gap_min, st.rest_n, rest_max, s_rv.stuck_events, s_rv.retries_total, resc, st.pinches, st.teleports,
                   st.wall_hits, td5_roam_spawn_snap_m(), bad);
     } else if (s_rv.mode == TD5_RDRV_CORNERS) {
         const long fails = (s_rv.runs - s_rv.known_fail) - s_rv.ok;

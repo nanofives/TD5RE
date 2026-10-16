@@ -27,6 +27,7 @@
 #include "td5re.h"
 #include "td5_types.h"
 #include "td5_physics.h"
+#include "td5_track.h"          /* td5_track_quad_vertices */
 #include "td5_render.h"        /* AngleFromVector12 */
 #include "td5_roam_tile.h"
 #include "td5_roam_locate.h"
@@ -265,8 +266,8 @@ int td5_roam_host_track(void)
 
 /* ------------------------------------------------------------ session -------- */
 
-/* Yaw along the nearest street: the direction from this ribbon quad's span origin to
- * its linked next span (or from the previous one), through the resident locator.
+/* Yaw along the nearest street: the axis of the ribbon quad under the point (near-row centre
+ * to far-row centre, ribbon order), through the resident locator.
  * On a junction patch: out along the first arm of the patch node. -1 when there is no
  * resident set, no hit, or nothing to read a direction from. */
 static int roam_street_yaw(int32_t px, int32_t pz)
@@ -274,9 +275,7 @@ static int roam_street_yaw(int32_t px, int32_t pz)
     const TD5_RoamResident *rs = s_roam.resident;
     TD5_RoamHit hit;
     const RoamTile *t;
-    const TD5_StripSpan *a, *b;
-    int32_t dx, dz;
-    int idx, sign = 1;
+    int idx;
     if (!rs) return -1;
     if (!td5_roam_locate(rs, FP_SCALE(px - s_roam.origin_x), FP_SCALE(pz - s_roam.origin_z),
                          0, 0, ROAM_PRIM_NONE, &hit))
@@ -296,19 +295,21 @@ static int roam_street_yaw(int32_t px, int32_t pz)
         return (1024 - (int)t->arm[nd->arm_first].bearing12) & 0xFFF;
     }
     if (idx < 0 || (uint32_t)idx >= t->nspan) return -1;
-    a = &t->span[idx];
-    if (a->link_next >= 0 && (uint32_t)a->link_next < t->nspan) {
-        b = &t->span[a->link_next];
-    } else if (a->link_prev >= 0 && (uint32_t)a->link_prev < t->nspan) {
-        b = &t->span[a->link_prev];
-        sign = -1;
-    } else {
-        return -1;
+    {
+        /* the quad's own axis: near-row centre -> far-row centre, in ribbon order */
+        const TD5_StripSpan *sp = &t->span[idx];
+        int vl0, vl1, vr0, vr1, L;
+        double c0x, c0z, c1x, c1z;
+        L = sp->pad_02[1] & 0x0F;
+        if (L < 1) L = 1;
+        td5_track_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
+        c0x = 0.5 * (t->vert[vl0].x + t->vert[vl0 + L].x);
+        c0z = 0.5 * (t->vert[vl0].z + t->vert[vl0 + L].z);
+        c1x = 0.5 * (t->vert[vr0].x + t->vert[vr0 + L].x);
+        c1z = 0.5 * (t->vert[vr0].z + t->vert[vr0 + L].z);
+        if (c0x == c1x && c0z == c1z) return -1;
+        return (int)floor(atan2(c1x - c0x, c1z - c0z) * (4096.0 / (2.0 * 3.14159265358979323846)) + 0.5) & 0xFFF;
     }
-    dx = (b->origin_x - a->origin_x) * sign;
-    dz = (b->origin_z - a->origin_z) * sign;
-    if (dx == 0 && dz == 0) return -1;
-    return AngleFromVector12(dx, dz) & 0xFFF;
 }
 
 /* ---- spawn on road ---------------------------------------------------------
