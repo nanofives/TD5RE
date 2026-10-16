@@ -42,6 +42,7 @@
 #include "td5_ai.h"      /* for td5_ai_set_traffic_queue */
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_page_map.h"    /* D3D texture-page layout: STATIC_ATLAS_BASE, car/traffic bases */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM: td5_roam_active (level load drops the strip) */
 
 #include <stdlib.h>
 #include <math.h>
@@ -2473,9 +2474,18 @@ int td5_asset_load_level(int track_index)
               is_reverse, track_index,
               strip_names[0], left_names[0], right_names[0], traffic_names[0]);
 
-    strip_data = load_first_available_level_entry(track_index, strip_names, 1,
+    /* [GEO FREE ROAM F2-A] ROAM hosts on this level's sky / static pages / LEVELINF
+     * only: no strip, no routes, no MODELS.DAT, no traffic queue, no checkpoints.
+     * (A missing STRIP.DAT already takes the placeholder path below; the other
+     * tables are cleared explicitly so the previous race's cannot leak in.) */
+    const int roam_host = td5_roam_active();
+    strip_data = roam_host ? NULL
+               : load_first_available_level_entry(track_index, strip_names, 1,
                                                   &strip_sz, strip_source, sizeof(strip_source));
     if (!strip_data || strip_sz <= 0) {
+        if (roam_host)
+            TD5_LOG_I(LOG_TAG, "roam: host level %s loaded without its strip (no strip in roam)", zip_path);
+        else
         TD5_LOG_W(LOG_TAG, "no STRIP.DAT found in %s, using placeholder track", zip_path);
         ok = td5_track_load_strip(NULL, 0) ? ok : 0;
     } else {
@@ -2483,9 +2493,11 @@ int td5_asset_load_level(int track_index)
         ok = td5_track_load_strip(strip_data, (size_t)strip_sz) ? ok : 0;
     }
 
-    left_data = load_first_available_level_entry(track_index, left_names, 1, &left_sz, NULL, 0);
-    right_data = load_first_available_level_entry(track_index, right_names, 1, &right_sz, NULL, 0);
-    if ((left_data && left_sz > 0) || (right_data && right_sz > 0)) {
+    left_data = roam_host ? NULL : load_first_available_level_entry(track_index, left_names, 1, &left_sz, NULL, 0);
+    right_data = roam_host ? NULL : load_first_available_level_entry(track_index, right_names, 1, &right_sz, NULL, 0);
+    if (roam_host) {
+        td5_track_load_routes(NULL, 0, NULL, 0);   /* drop the previous race's LEFT/RIGHT.TRK */
+    } else if ((left_data && left_sz > 0) || (right_data && right_sz > 0)) {
         if (!td5_track_load_routes(left_data, (size_t)left_sz,
                                    right_data, (size_t)right_sz)) {
             TD5_LOG_W(LOG_TAG, "failed to load route tables from %s", zip_path);
@@ -2496,7 +2508,8 @@ int td5_asset_load_level(int track_index)
     {
         char models_source[256];
         static const char *s_models_names[1] = { "MODELS.DAT" };
-        models_data = load_first_available_level_entry(track_index, s_models_names, 1,
+        models_data = roam_host ? NULL
+                    : load_first_available_level_entry(track_index, s_models_names, 1,
                                                        &models_sz, models_source, sizeof(models_source));
         if (models_data && models_sz > 0) {
             int parsed = td5_track_parse_models_dat(models_data, (size_t)models_sz);
@@ -2518,7 +2531,7 @@ int td5_asset_load_level(int track_index)
      * build writes no MODELS.DAT, so the parse above found nothing and the
      * table is empty at this point -- which is exactly what reserve wants.
      * No-op for every non-streamed load. */
-    td5_tgstream_begin();
+    if (!roam_host) td5_tgstream_begin();
 
     {
         static const char *s_levelinf_names[1] = { "LEVELINF.DAT" };
@@ -2609,7 +2622,8 @@ int td5_asset_load_level(int track_index)
     }
     {
         static const char *s_checkpoint_names[1] = { "CHECKPT.NUM" };
-        void *cp_data = load_first_available_level_entry(track_index, s_checkpoint_names, 1,
+        void *cp_data = roam_host ? NULL
+                      : load_first_available_level_entry(track_index, s_checkpoint_names, 1,
                                                           &checkpoint_sz, NULL, 0);
         s_checkpoint_data_size = 0;
         memset(s_checkpoint_data, 0, sizeof(s_checkpoint_data));
@@ -2632,7 +2646,9 @@ int td5_asset_load_level(int track_index)
      * at original VA 0x00473820 (keyed on level_number - 1) and stores
      * both values in the track module so fwd_rev_handler can use them
      * instead of the wrong `(1, s_span_count - 2)` assumption. */
-    td5_track_bind_boundary_sentinels(td5_asset_level_number(track_index));
+    /* [GEO FREE ROAM F2-A] level 25's row is {-1, 9999} (both handlers off) and it is not a
+     * registry level, so no stale custom-track / end-wall state survives into roam. */
+    td5_track_bind_boundary_sentinels(roam_host ? 25 : td5_asset_level_number(track_index));
 
     /* ---- TRAFFIC.BUS: per-level traffic spawn queue ----
      * 4-byte records: int16 span, u8 flags (bit0 = oncoming direction),
@@ -2646,7 +2662,8 @@ int td5_asset_load_level(int track_index)
         free(s_traffic_queue_buf);
         s_traffic_queue_buf = NULL;
         td5_ai_set_traffic_queue(NULL, 0);
-        void *bus_data = load_first_available_level_entry(track_index, traffic_names, 1,
+        void *bus_data = roam_host ? NULL
+                       : load_first_available_level_entry(track_index, traffic_names, 1,
                                                           &bus_sz, NULL, 0);
         if (bus_data && bus_sz >= 4) {
             s_traffic_queue_buf = (uint8_t *)bus_data; /* ownership transferred */

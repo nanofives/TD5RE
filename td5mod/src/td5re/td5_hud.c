@@ -53,6 +53,7 @@
 #include "td5_geo_attrs.h"  /* [1011 C3] route-first/spatial-fallback resolver */
 #include "td5_geo_roads.h"  /* [1018 L] the street under a car on a block-loop corridor */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM: speedo-only HUD, relabelled pause row */
 
 #include <stdlib.h>
 #include <string.h>
@@ -3066,6 +3067,13 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
             flags |= TD5_HUD_CIRCUIT_LAPS;
         }
 
+        /* [GEO FREE ROAM F2-A] roam shows the speedometer only: no position, lap timers /
+         * counters, total timer, metric digits (odometer / checkpoint timer read the span)
+         * or U-turn warning (reads the span and the route table). The minimap is gated
+         * in td5_hud_render_minimap, the street label in td5_hud_draw_street_lines. */
+        if (td5_roam_active())
+            flags = TD5_HUD_SPEEDOMETER | TD5_HUD_RESERVED_5 | TD5_HUD_RESERVED_3;
+
         /* [PORT: N-way] every pane shows the same HUD element set. */
         for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
             *s_hud_flags[hv] = flags;
@@ -3816,6 +3824,7 @@ void td5_hud_draw_street_lines(void)
 {
     int views = s_view_count;
     if (g_replay_mode) return;
+    if (td5_roam_active()) return;   /* roam: the street is not a route span */
     if (td5_geo_route_count() < 2) return;
     if (views < 1) views = 1;
     if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
@@ -7634,6 +7643,7 @@ void td5_hud_render_minimap(int actor_slot)
      * dot loops already handle the circuit modulo-wrap span window. */
     int circuit = (g_track_is_circuit != 0);
     if (circuit && !g_td5.ini.circuit_minimap) return;
+    if (td5_roam_active()) return;   /* [GEO FREE ROAM F2-A] no minimap in roam (F5+ draws its own) */
 
     /* Guard against the span-wrap modulo dividing by zero before the track
      * strip is loaded (g_strip_span_count == 0) -- crashed on early race frames
@@ -9101,7 +9111,12 @@ void td5_hud_init_pause_menu(int page_index)
         /* [I18N] Translate AFTER the English-keyed gating strcmps above. The
          * PAUSETXT bitmap atlas + pause SDF font are ASCII-only, so pause-menu
          * catalog entries deliberately avoid accents ("SALIR AL MENU"). */
-        str = td5_tr(str);
+        {
+            /* [GEO FREE ROAM F2-A] the QUIT TO MENU row leaves free roam */
+            const int roam_quit = td5_roam_active() && strcmp(str, "QUIT TO MENU") == 0;
+            str = td5_tr(str);
+            if (roam_quit) str = "LEAVE FREE ROAM";
+        }
         int len = (int)strlen(str);
 
         if (pause_vec) {

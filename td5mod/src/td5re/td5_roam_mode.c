@@ -1,36 +1,196 @@
 /**
  * td5_roam_mode.c -- GEO FREE ROAM: the ROAM game mode (PORT-ONLY, F2 task A).
- * Contract: td5_roam_mode.h. STUB at the contract commit: state only, no gating yet.
+ * Contract: td5_roam_mode.h. Design: docs/plans/GEO_FREE_ROAM_DESIGN.md 0 item 7, 2.
+ *
+ * WHAT THIS MODULE OWNS. The session (place, spawn, chosen car, fixed world origin),
+ * the arm -> active life cycle, the single-player overrides a roam race needs, the
+ * player spawner, the lat/lon -> place-frame conversion the frontend click needs and
+ * the dev CLI. It does NOT own physics (task B: td5_roam_set_resident) or drawing
+ * (task C). The gates in the other modules ask td5_roam_active().
+ *
+ * WORLD FRAME. world = place - origin, in integer units of 1/430 m; the actor's
+ * world_pos is the 24.8 form (FP_SCALE). The origin is the (0,0) corner of the
+ * lattice tile that holds the spawn point (roam_grid_origin, the same rounding the
+ * ROAMTILE files use), fixed for the whole session (F2; dynamic rebasing is F9).
+ *
+ * NO FILE-SCOPE STATE OUTSIDE s_roam (the mode/session struct).
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include "td5_roam_mode.h"
-#include "td5_roam_locate.h"
+#include <math.h>
 
-#define ROAM_MAX_SLOTS 32   /* == TD5_MAX_TOTAL_ACTORS */
+#include "td5_platform.h"
+#include "td5_config.h"
+#include "td5_geo.h"
+#include "td5_fp.h"
+#include "td5re.h"
+#include "td5_types.h"
+#include "td5_physics.h"
+#include "td5_render.h"        /* AngleFromVector12 */
+#include "td5_roam_tile.h"
+#include "td5_roam_locate.h"
+#include "td5_roam_mode.h"
+#include "deps/cjson/cJSON.h"
+#include "../../../re/include/td5_actor_struct.h"
+
+#define LOG_TAG "roam"
+
+#define ROAM_MAX_SLOTS   32      /* == TD5_MAX_TOTAL_ACTORS */
+#define ROAM_RAD         0.017453292519943295
+#define ROAM_WGS_A       6378137.0
+#define ROAM_WGS_F       (1.0 / 298.257223563)
+
+/* The "projection" block of a PLACE.JSON (td5_roam_view.c rv_proj_load, same maths). */
+typedef struct { double lat0, lon0, upm, mdlat, mdlon, cs, sn, offx, offz; } RoamProj;
 
 typedef struct {
-    int                             active;
+    int                             armed;     /* begin() called, end() not yet */
+    int                             active;    /* a roam race session is running */
     TD5_RoamSpawn                   spawn;
-    int32_t                         origin_x, origin_z;
+    int32_t                         origin_x, origin_z;   /* PLACE units */
     const struct TD5_RoamResident  *resident;
     uint64_t                        slot_edge[ROAM_MAX_SLOTS];
+    int                             host_track;           /* -1 = not resolved */
 } RoamSession;
 
-static RoamSession s_roam;
+static RoamSession s_roam = { 0, 0, { {0}, 0, 0, 0, 0 }, 0, 0, NULL, { 0 }, -1 };
+
+/* ------------------------------------------------------------ small helpers -- */
+
+static char *roam_slurp(const char *path)
+{
+    TD5_File *f = td5_plat_file_open(path, "rb");
+    int64_t n;
+    char *buf;
+    if (!f) return NULL;
+    n = td5_plat_file_size(f);
+    if (n <= 0 || n > (int64_t)8 * 1024 * 1024) { td5_plat_file_close(f); return NULL; }
+    buf = (char *)malloc((size_t)n + 1u);
+    if (!buf) { td5_plat_file_close(f); return NULL; }
+    if (td5_plat_file_read(f, buf, (size_t)n) != (size_t)n) {
+        free(buf); td5_plat_file_close(f); return NULL;
+    }
+    buf[n] = '\0';
+    td5_plat_file_close(f);
+    return buf;
+}
+
+static int roam_proj_load(const char *slug, RoamProj *p)
+{
+    char path[512];
+    char *json;
+    cJSON *root, *pr, *a, *o, *u, *r, *ox, *oz;
+    double e2, s, w, phi, rot;
+    int ok = 0;
+    td5_geo_source_path(path, sizeof path, slug, "PLACE.JSON");
+    json = roam_slurp(path);
+    if (!json) return 0;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return 0;
+    pr = cJSON_GetObjectItem(root, "projection");
+    if (pr && cJSON_IsObject(pr)) {
+        a  = cJSON_GetObjectItem(pr, "lat0");
+        o  = cJSON_GetObjectItem(pr, "lon0");
+        u  = cJSON_GetObjectItem(pr, "units_per_metre");
+        r  = cJSON_GetObjectItem(pr, "rotation_rad");
+        ox = cJSON_GetObjectItem(pr, "offset_x");
+        oz = cJSON_GetObjectItem(pr, "offset_z");
+        if (cJSON_IsNumber(a) && cJSON_IsNumber(o)) {
+            p->lat0 = a->valuedouble;
+            p->lon0 = o->valuedouble;
+            p->upm  = cJSON_IsNumber(u) ? u->valuedouble : 430.0;
+            rot     = cJSON_IsNumber(r) ? r->valuedouble : 0.0;
+            p->cs   = cos(rot);
+            p->sn   = sin(rot);
+            p->offx = cJSON_IsNumber(ox) ? ox->valuedouble : 0.0;
+            p->offz = cJSON_IsNumber(oz) ? oz->valuedouble : 0.0;
+            e2  = ROAM_WGS_F * (2.0 - ROAM_WGS_F);
+            phi = p->lat0 * ROAM_RAD;
+            s   = sin(phi);
+            w   = 1.0 - e2 * s * s;
+            p->mdlat = ROAM_RAD * ROAM_WGS_A * (1.0 - e2) / pow(w, 1.5);
+            p->mdlon = ROAM_RAD * ROAM_WGS_A * cos(phi) / sqrt(w);
+            ok = 1;
+        }
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+static int roam_grid_load(const char *slug, RoamGrid *g)
+{
+    char path[512];
+    char *json;
+    int ok;
+    td5_geo_source_path(path, sizeof path, slug, "roam/ROAMGRID.JSON");
+    json = roam_slurp(path);
+    if (!json) return 0;
+    ok = roam_grid_parse(json, g);
+    free(json);
+    return ok;
+}
+
+int td5_roam_place_has_tiles(const char *slug)
+{
+    char path[512];
+    if (!slug || !slug[0]) return 0;
+    td5_geo_source_path(path, sizeof path, slug, "roam/ROAMGRID.JSON");
+    return td5_plat_file_exists(path);
+}
+
+int td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz)
+{
+    RoamProj p;
+    double e, n;
+    if (!slug || !px || !pz || !roam_proj_load(slug, &p)) return 0;
+    e = (lon - p.lon0) * p.mdlon;
+    n = (lat - p.lat0) * p.mdlat;
+    *px = (int32_t)floor((e * p.cs - n * p.sn) * p.upm + p.offx + 0.5);
+    *pz = (int32_t)floor((e * p.sn + n * p.cs) * p.upm + p.offz + 0.5);
+    return 1;
+}
+
+/* ----------------------------------------------------------- the contract ---- */
 
 int td5_roam_active(void) { return s_roam.active; }
+int td5_roam_armed(void)  { return s_roam.armed; }
 
 void td5_roam_begin(const TD5_RoamSpawn *s)
 {
+    RoamGrid g;
+    int tx = 0, tz = 0;
     if (!s) return;
     s_roam.spawn = *s;
-    s_roam.active = 1;
+    s_roam.spawn.place[sizeof s_roam.spawn.place - 1] = '\0';
+    s_roam.origin_x = s_roam.origin_z = 0;
+    /* world origin = the (0,0) corner of the lattice tile holding the spawn point */
+    if (roam_grid_load(s_roam.spawn.place, &g)) {
+        roam_grid_tile_of(&g, (double)s->spawn_px, (double)s->spawn_pz, &tx, &tz);
+        roam_grid_origin(&g, tx, tz, &s_roam.origin_x, &s_roam.origin_z);
+    } else {
+        TD5_LOG_W(LOG_TAG, "roam: no ROAMGRID.JSON for place '%s' (build tiles with "
+                  "--RoamBuildTiles=casco); origin left at 0,0", s_roam.spawn.place);
+    }
+    s_roam.armed = 1;
+    s_roam.active = 0;
+    memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
+    TD5_LOG_I(LOG_TAG, "roam: armed place=%s spawn=(%d,%d) yaw=%d tile=(%d,%d) origin=(%d,%d)",
+              s_roam.spawn.place, (int)s->spawn_px, (int)s->spawn_pz, (int)s->spawn_yaw,
+              tx, tz, (int)s_roam.origin_x, (int)s_roam.origin_z);
 }
 
 void td5_roam_end(void)
 {
+    if (s_roam.armed || s_roam.active)
+        TD5_LOG_I(LOG_TAG, "roam: session ended (armed=%d active=%d)", s_roam.armed, s_roam.active);
+    s_roam.armed = 0;
     s_roam.active = 0;
+    memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
 }
+
+void td5_roam_cancel(void) { td5_roam_end(); }
 
 void td5_roam_world_origin(int32_t *ox, int32_t *oz)
 {
@@ -40,7 +200,10 @@ void td5_roam_world_origin(int32_t *ox, int32_t *oz)
 
 const struct TD5_RoamResident *td5_roam_resident(void) { return s_roam.resident; }
 void td5_roam_set_resident(const struct TD5_RoamResident *rs) { s_roam.resident = rs; }
-const TD5_RoamSpawn *td5_roam_spawn(void) { return s_roam.active ? &s_roam.spawn : NULL; }
+const TD5_RoamSpawn *td5_roam_spawn(void)
+{
+    return (s_roam.armed || s_roam.active) ? &s_roam.spawn : NULL;
+}
 
 uint64_t td5_roam_slot_edge(int slot)
 {
@@ -51,3 +214,184 @@ void td5_roam_set_slot_edge(int slot, uint64_t edge_key)
 {
     if (slot >= 0 && slot < ROAM_MAX_SLOTS) s_roam.slot_edge[slot] = edge_key;
 }
+
+/* ------------------------------------------------------------ host level ----- */
+
+/* The roam world has no strip, but the race pipeline still wants a LEVEL for the
+ * sky, the static texture pages and LEVELINF (fog, environs). F2 hosts on an
+ * original track (schedule index, default 0 = Moscow, level023) and throws away its
+ * strip / routes / MODELS / traffic queue right after the load (td5_asset.c roam
+ * branch). TD5RE_ROAM_HOST_TRACK overrides. Never a generated slot (that would
+ * rebuild a level under the splash) and never a registry (custom) level. */
+int td5_roam_host_track(void)
+{
+    if (s_roam.host_track < 0)
+        s_roam.host_track = td5_env_int("TD5RE_ROAM_HOST_TRACK", 0, 0, 18);
+    return s_roam.host_track;
+}
+
+/* ------------------------------------------------------------ session -------- */
+
+/* Yaw along the nearest street: the direction from this ribbon quad's span origin to
+ * its linked next span (or from the previous one), through the resident locator.
+ * -1 when there is no resident set, no hit, or the hit is a junction patch. */
+static int roam_street_yaw(int32_t px, int32_t pz)
+{
+    const TD5_RoamResident *rs = s_roam.resident;
+    TD5_RoamHit hit;
+    const RoamTile *t;
+    const TD5_StripSpan *a, *b;
+    int32_t dx, dz;
+    int idx, sign = 1;
+    if (!rs) return -1;
+    if (!td5_roam_locate(rs, FP_SCALE(px - s_roam.origin_x), FP_SCALE(pz - s_roam.origin_z),
+                         0, 0, ROAM_PRIM_NONE, &hit))
+        return -1;
+    if (hit.prim == ROAM_PRIM_NONE || hit.is_patch) return -1;
+    if (ROAM_PRIM_SLOT(hit.prim) >= (uint32_t)ROAM_RES_MAX) return -1;
+    t = rs->tile[ROAM_PRIM_SLOT(hit.prim)];
+    idx = (int)ROAM_PRIM_INDEX(hit.prim);
+    if (!t || idx < 0 || (uint32_t)idx >= t->nspan) return -1;
+    a = &t->span[idx];
+    if (a->link_next >= 0 && (uint32_t)a->link_next < t->nspan) {
+        b = &t->span[a->link_next];
+    } else if (a->link_prev >= 0 && (uint32_t)a->link_prev < t->nspan) {
+        b = &t->span[a->link_prev];
+        sign = -1;
+    } else {
+        return -1;
+    }
+    dx = (b->origin_x - a->origin_x) * sign;
+    dz = (b->origin_z - a->origin_z) * sign;
+    if (dx == 0 && dz == 0) return -1;
+    return AngleFromVector12(dx, dz) & 0xFFF;
+}
+
+/* The single-player overrides a roam race needs (no AI, no traffic, no cops, no net,
+ * no laps / checkpoints). Idempotent: run at session start and again after
+ * init_race_modes_and_seed, which may re-derive some of them from the menu state. */
+void td5_roam_apply_overrides(void)
+{
+    if (!s_roam.active) return;
+    g_td5.track_index              = td5_roam_host_track();
+    g_td5.reverse_direction        = 0;     /* the host level's reverse texture swap never applies */
+    g_td5.num_human_players        = 1;
+    g_td5.num_ai_opponents         = 0;
+    g_td5.num_spectate_screens     = 0;
+    g_td5.traffic_enabled          = 0;
+    g_td5.special_encounter_enabled = 0;
+    g_td5.wanted_mode_enabled      = 0;
+    g_td5.time_trial_enabled       = 0;
+    g_td5.drag_race_enabled        = 0;
+    g_td5.network_active           = 0;
+    g_td5.track_span_ring_length   = 0;     /* stays 0: not reset when a strip unloads (F0b finding 2) */
+    g_td5.split_screen_mode        = 0;
+    g_td5.mp_mode_config.mode      = TD5_MP_MODE_RACE;
+}
+
+/* Race init, before anything reads the race modes: armed -> active + the overrides. */
+void td5_roam_session_start(void)
+{
+    if (!s_roam.armed) { s_roam.active = 0; return; }
+    s_roam.active = 1;
+    td5_roam_apply_overrides();
+    s_roam.spawn.car_index         = g_td5.car_index;
+    TD5_LOG_I(LOG_TAG, "roam: session start place=%s car=%d host_track=%d origin=(%d,%d) "
+              "(no strip, ring 0, 1 racer, no traffic/cops/checkpoints)",
+              s_roam.spawn.place, s_roam.spawn.car_index, g_td5.track_index,
+              (int)s_roam.origin_x, (int)s_roam.origin_z);
+}
+
+/* Place the player actor (td5_game.c spawn loop, after the AI runtime init). */
+void td5_roam_session_spawn(int slot, void *actor_mem)
+{
+    TD5_Actor *a = (TD5_Actor *)actor_mem;
+    int yaw = s_roam.spawn.spawn_yaw;
+    const int32_t wx = s_roam.spawn.spawn_px - s_roam.origin_x;
+    const int32_t wz = s_roam.spawn.spawn_pz - s_roam.origin_z;
+    int auto_yaw = 0;
+    if (!a) return;
+
+    if (yaw < 0) {
+        yaw = roam_street_yaw(s_roam.spawn.spawn_px, s_roam.spawn.spawn_pz);
+        auto_yaw = 1;
+        if (yaw < 0) yaw = 0;
+    }
+    yaw &= 0xFFF;
+
+    a->world_pos.x = FP_SCALE(wx);
+    a->world_pos.y = (int32_t)0xC0000000;   /* reset below snaps it to the ground */
+    a->world_pos.z = FP_SCALE(wz);
+    a->slot_index = (uint8_t)slot;
+    memset(&a->tire_track_emitter_FL, 0xFF, 4);   /* "no emitter acquired yet" (spawn loop) */
+    a->euler_accum.yaw = FP_SCALE(yaw);
+    td5_physics_reset_actor_state(a);
+
+    /* every span field -1 AFTER td5_ai_invalidate_actor_track_state (it writes 0), and
+     * after reset_actor_state (which walks the strip when one is loaded): the roam
+     * street piece lives in the side table, not in the int16 fields */
+    a->track_span_raw        = -1;
+    a->track_span_normalized = -1;
+    a->track_span_accumulated = -1;
+    a->track_span_high_water = -1;
+    a->track_sub_lane_index  = 0;
+    td5_roam_set_slot_edge(slot, 0);
+
+    TD5_LOG_I(LOG_TAG, "roam: spawn slot=%d place=(%d,%d) world=(%d,%d) yaw=%d%s",
+              slot, (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)wx, (int)wz,
+              yaw, auto_yaw ? (s_roam.resident ? " (street)" : " (auto: no locator, 0)") : "");
+}
+
+/* ------------------------------------------------------------ dev CLI -------- */
+
+#ifndef TD5RE_RELEASE
+static const char *roam_cli_value(const char *cmd, const char *key)
+{
+    const char *p = strstr(cmd, key);
+    return p ? p + strlen(key) : NULL;
+}
+
+void td5_roam_dev_cli(const char *cmd)
+{
+    const char *v;
+    TD5_RoamSpawn sp;
+    double lat, lon;
+    char slug[64] = "la_plata_partido";
+    int yaw = -1, n;
+    if (!cmd || !*cmd) return;
+    v = roam_cli_value(cmd, "--Roam=");
+    if (!v || atoi(v) == 0) return;
+
+    v = roam_cli_value(cmd, "--RoamPlace=");
+    if (v) {
+        n = 0;
+        while (v[n] && v[n] != ' ' && v[n] != '\t' && n < (int)sizeof slug - 1) { slug[n] = v[n]; n++; }
+        slug[n] = '\0';
+    }
+    v = roam_cli_value(cmd, "--RoamYaw=");
+    if (v) yaw = atoi(v);
+    v = roam_cli_value(cmd, "--RoamSpawn=");
+    if (!v || sscanf(v, "%lf,%lf", &lat, &lon) != 2) {
+        TD5_LOG_E(LOG_TAG, "roam: --Roam=1 needs --RoamSpawn=<lat>,<lon>");
+        return;
+    }
+    memset(&sp, 0, sizeof sp);
+    snprintf(sp.place, sizeof sp.place, "%s", slug);
+    if (!td5_roam_latlon_to_place(slug, lat, lon, &sp.spawn_px, &sp.spawn_pz)) {
+        TD5_LOG_E(LOG_TAG, "roam: no PLACE.JSON projection for '%s'", slug);
+        return;
+    }
+    sp.spawn_yaw = (yaw >= 0) ? (yaw & 0xFFF) : -1;
+    sp.car_index = g_td5.ini.default_car;
+    TD5_LOG_W(LOG_TAG, "roam: dev CLI --Roam=1 spawn=%.6f,%.6f -> place (%d,%d) (dev build only)",
+              lat, lon, (int)sp.spawn_px, (int)sp.spawn_pz);
+    td5_roam_begin(&sp);
+
+    /* straight into the race with the default car, like AutoRace */
+    g_td5.ini.auto_race        = 1;
+    g_td5.ini.skip_intro       = 1;
+    g_td5.ini.default_track    = td5_roam_host_track();
+    g_td5.ini.default_opponents = 0;
+    g_td5.ini.default_game_type = 0;
+}
+#endif

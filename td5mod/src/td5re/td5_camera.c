@@ -5724,6 +5724,10 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
     /* [x64 Stage 2] slot 0x00 holds a route-table HANDLE, not a pointer. */
     route_table = td5_ai_route_table(rs[0x00]); /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */
     if (!route_table) return 0;
+    /* [GEO FREE ROAM F2-A / F0b crash risk 1] the old lookup had no length check: a roam
+     * actor (span -1) indexed byte 196606 of the table, and a stale span from a longer
+     * previous track read past the end. Same guard td5_ai_route_speed_hint uses. */
+    if (!td5_ai_route_span_valid(rs[0x00], (int)span_norm)) return 0;
     rb   = route_table[(uint16_t)span_norm * 3u + 1u]; /* byte lookup [CONFIRMED @ 0x00434040] */
     diff = FP_TRUNC(actor_yaw) - (int)FP_TRUNC(rb * 0x102Cu);
     t    = ((uint32_t)diff - 0x800u) & 0xFFFu;
