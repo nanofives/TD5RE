@@ -77,6 +77,9 @@ void tg_world_freeze(void);      /* reads become pure; writes are refused    */
 double tg_world_h(double x, double z);
 double tg_world_h_base(double x, double z);
 double tg_world_sea_y(void);
+/* [F1-T10] h0 (raw height at the origin) of the last GEO world built in this
+ * process, valid after tg_world_free. 0 when none (or the last was synthetic). */
+int    tg_world_geo_h0(double *out);
 /* Water surface at (x,z): the river surface inside a channel, else the sea
  * level. Water exists where tg_world_h < tg_world_water_y. */
 double tg_world_water_y(double x, double z);
