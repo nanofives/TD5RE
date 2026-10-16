@@ -695,7 +695,7 @@ static int up_strip(UPrims *L, const double *px, const double *pz, int n, double
         nz = ux;
         if (have) {
             const double cr = cross2(pux, puz, ux, uz);
-            if (fabs(cr) > 1e-4) {
+            if (cr != 0.0) {                     /* up_add drops a degenerate one */
                 /* Outer side: the right kerb on a left turn, the left on a right. */
                 const double sg = cr > 0.0 ? -1.0 : 1.0;
                 double bx[3], bz[3];
@@ -852,7 +852,9 @@ static int u_pieces(const TD5_RoamGraph *g, int ci, const TD5_RoamCluster *cl, c
             const UEnd *a = &ue[k], *b = &ue[(k + 1) % ne];
             double gap = b->ang - a->ang, bx[3], bz[3];
             while (gap <= 0.0) gap += 2.0 * ROAM_PI;
-            if (gap <= ROAM_PI + 1e-3) continue;
+            /* Any gap past 180 deg, however slight: two near edges 0.03 deg
+             * off collinear leave a 5 m deep sliver notch otherwise. */
+            if (gap <= ROAM_PI) continue;
             bx[0] = nd->x - ox;                    bz[0] = nd->z - oz;
             bx[1] = bx[0] + -a->uz * a->hw;        bz[1] = bz[0] + a->ux * a->hw;     /* a's left  */
             bx[2] = bx[0] - -b->uz * b->hw;        bz[2] = bz[0] - b->ux * b->hw;     /* b's right */
@@ -965,7 +967,7 @@ static int u_union(const UPrims *L, ULoops *U, FILE *dbg)
             const double sz0 = (az < bz ? az : bz) - U_EPS, sz1 = (az > bz ? az : bz) + U_EPS;
             double tp[256];
             int ntp = 0;
-            if (rl < 0.05) continue;
+            if (rl < U_EPS) continue;
             tp[ntp++] = 0.0;
             tp[ntp++] = 1.0;
             for (p = 0; p < L->n; p++) {
@@ -996,9 +998,11 @@ static int u_union(const UPrims *L, ULoops *U, FILE *dbg)
                 double t1 = tp[p + 1];
                 USeg s;
                 int q2 = p + 1;
-                /* Skip split points closer than 0.05 units (one sub-segment). */
-                while ((t1 - t0) * rl < 0.05 && q2 + 1 < ntp) { q2++; t1 = tp[q2]; }
-                if ((t1 - t0) * rl < 0.05) break;
+                /* Merge split points closer than U_EPS (one sub-segment). The
+                 * shift this makes must stay well inside U_WELD, or two ends of
+                 * a sliver stop meeting at the weld. */
+                while ((t1 - t0) * rl < U_EPS && q2 + 1 < ntp) { q2++; t1 = tp[q2]; }
+                if ((t1 - t0) * rl < U_EPS) break;
                 p = q2 - 1;
                 if (u_covered(L, k, ax + rx * 0.5 * (t0 + t1), az + rz * 0.5 * (t0 + t1), rx / rl, rz / rl))
                     continue;
@@ -1128,8 +1132,12 @@ done:
     return ok;
 }
 
-/* Drop untagged vertices that are collinear with their neighbours or closer
- * than ROAM_OL_MIN_SEG to the next one. */
+/* Drop untagged vertices that are collinear with their neighbours, closer than
+ * ROAM_OL_MIN_SEG to the previous one, or the tip of a thin spike (the outline
+ * turns back by more than 170 deg and the spike's mouth is under U_SPIKE_W):
+ * a sliver between two piece edges a hair off collinear, which would put a
+ * wall into the paving. */
+#define U_SPIKE_W (0.25 * TD5_ROAM_UPM)
 static void u_simplify(ULV *v, int *n)
 {
     int changed = 1, guard = 0;
@@ -1140,12 +1148,14 @@ static void u_simplify(ULV *v, int *n)
             const ULV *a = &v[(k + *n - 1) % *n], *b = &v[k], *c = &v[(k + 1) % *n];
             const double abx = b->x - a->x, abz = b->z - a->z, bcx = c->x - b->x, bcz = c->z - b->z;
             const double acx = c->x - a->x, acz = c->z - a->z, acl = sqrt(acx * acx + acz * acz);
-            const double lab = sqrt(abx * abx + abz * abz);
+            const double lab = sqrt(abx * abx + abz * abz), lbc = sqrt(bcx * bcx + bcz * bcz);
             int drop = 0;
             if (b->tag) continue;
             if (acl > 1e-9 && fabs(cross2(acx, acz, b->x - a->x, b->z - a->z)) / acl < 0.5 &&
                 abx * bcx + abz * bcz > 0.0) drop = 1;
             else if (lab < ROAM_OL_MIN_SEG) drop = 1;
+            else if (lab > 0.0 && lbc > 0.0 && (abx * bcx + abz * bcz) / (lab * lbc) < -0.98481 &&
+                     acl < U_SPIKE_W) drop = 1;                  /* cos 170 deg */
             if (drop) {
                 /* The segment leaving a now comes from b's piece if a's was shorter. */
                 memmove(&v[k], &v[k + 1], (size_t)(*n - k - 1) * sizeof *v);
@@ -1182,8 +1192,8 @@ static int u_simple(const ULV *pv, int n)
  * need[m] gets the extra kerb length arm m must give for a full fillet.
  * Writes the new loop to *out (malloc'd). Returns its count, -1 on OOM. */
 static int u_fillet(const ULV *v, int n, const UPrims *L, const TD5_RoamGraphParams *P,
-                    double W, double LF, double *need, TD5_RoamGraphCensus *c,
-                    TD5_RoamCluster *cl, ULV **out)
+                    double W, double LF, const unsigned char *fixed, const unsigned char *pr,
+                    int na, double *need, TD5_RoamGraphCensus *c, TD5_RoamCluster *cl, ULV **out)
 {
     const int segs = P->fillet_segs < 1 ? 1 : (P->fillet_segs > 12 ? 12 : P->fillet_segs);
     unsigned char *cand = (unsigned char *)calloc((size_t)n, 1);
@@ -1195,8 +1205,14 @@ static int u_fillet(const ULV *v, int n, const UPrims *L, const TD5_RoamGraphPar
         const double ix = b->x - a->x, iz = b->z - a->z, ox = d->x - b->x, oz = d->z - b->z;
         const double cr = cross2(ix, iz, ox, oz);
         const double phi = atan2(fabs(cr), ix * ox + iz * oz);
+        const int fa = L->p[a->prim].arm, fb = L->p[b->prim].arm;
         if (b->tag || cr >= 0.0) continue;                  /* convex: no block corner */
         if (phi < U_STRAIGHT || ROAM_PI - phi < U_GORE_RAD) continue;
+        /* A corner made by two partner arms (they overlap all the way), or by
+         * a fixed arm, is where one stub pokes out of the other's kerb, not a
+         * block corner: the road goes on as their ribbons. */
+        if ((fa >= 0 && fixed[fa]) || (fb >= 0 && fixed[fb]) ||
+            (fa >= 0 && fb >= 0 && fa != fb && pr[fa * na + fb])) continue;
         cand[q] = 1;
     }
     for (q = 0; q < n; q++) {
@@ -1226,12 +1242,13 @@ static int u_fillet(const ULV *v, int n, const UPrims *L, const TD5_RoamGraphPar
         tl = r / tanh2;
         tlmax = ap < an ? ap : an;
         if (tl > tlmax) {
-            /* The short side ends on a cut row: that arm owes the difference. */
-            if (!cand[qa] && a->tag && tl > ap) {
+            /* The short side ends on a cut row and is that arm's own kerb:
+             * the arm owes the difference. */
+            if (!cand[qa] && a->tag && tl > ap && L->p[a->prim].arm == U_TAG_ARM(a->tag)) {
                 const int m = U_TAG_ARM(a->tag);
                 if (tl - ap > need[m]) need[m] = tl - ap;
             }
-            if (!cand[qd] && d->tag && tl > an) {
+            if (!cand[qd] && d->tag && tl > an && L->p[b->prim].arm == U_TAG_ARM(d->tag)) {
                 const int m = U_TAG_ARM(d->tag);
                 if (tl - an > need[m]) need[m] = tl - an;
             }
@@ -1411,6 +1428,45 @@ typedef struct {
     int iters, restarts, rounds, fixed, holes, row_cov, dropped_loops, pruned;
 } UStat;
 
+/* 1 when arm m must be pushed out at the current pieces: a piece covers a point
+ * of its cut row (lane vertices and lane midpoints), or a piece point reaches
+ * into its ribbon. Pieces of m's partners (pr[m * na + j]) and of fully fixed
+ * arms are ignored. who[j] = 1 for each arm whose pieces push m, *other = 1
+ * when a piece of no arm (internal edge, bevel) does. */
+static int u_needs_push(const TD5_RoamGraph *g, const TD5_RoamCluster *cl, const ArmTmp *at, int na,
+                        const double *t, const UPrims *L, const UPrims *A, int m,
+                        const unsigned char *fixed, const unsigned char *pr,
+                        unsigned char *who, int *other)
+{
+    TD5_RoamPt row[TD5_ROAM_ROW_MAX];
+    const int nrow = arm_cut_row(g, &at[m], t[m], row);
+    int r, p, v, a, push = 0;
+    memset(who, 0, (size_t)na);
+    *other = 0;
+    for (p = 0; p < L->n; p++) {
+        const UPrim *pp = &L->p[p];
+        int hit = 0;
+        if (pp->arm == m || (pp->arm >= 0 && (fixed[pp->arm] || pr[m * na + pp->arm]))) continue;
+        for (r = 0; r < 2 * nrow - 1 && !hit; r++) {
+            const double x = (r & 1 ? 0.5 * (row[r / 2].x + row[r / 2 + 1].x) : row[r / 2].x) - cl->cx;
+            const double z = (r & 1 ? 0.5 * (row[r / 2].z + row[r / 2 + 1].z) : row[r / 2].z) - cl->cz;
+            if (u_bbox_has(pp, x, z, 0.0) && u_depth(pp, x, z, NULL, NULL) > U_COVER) hit = 1;
+        }
+        for (v = 0; v < 2 * pp->n && !hit; v++) {
+            const int v0 = v / 2, v1 = (v / 2 + 1) % pp->n;
+            const double x = v & 1 ? 0.5 * (pp->x[v0] + pp->x[v1]) : pp->x[v0];
+            const double z = v & 1 ? 0.5 * (pp->z[v0] + pp->z[v1]) : pp->z[v0];
+            for (a = 0; a < A->n && !hit; a++)
+                if (A->p[a].arm == m && u_bbox_has(&A->p[a], x, z, 0.0) &&
+                    u_depth(&A->p[a], x, z, NULL, NULL) > U_COVER) hit = 1;
+        }
+        if (!hit) continue;
+        push = 1;
+        if (pp->arm >= 0) who[pp->arm] = 1; else *other = 1;
+    }
+    return push;
+}
+
 /* MODE_UNION, part 1: the final cuts (written to at[m].a.t) and the outline
  * loops (U->v[0] = outer, CCW; the rest = holes, CW), local frame. Returns 1 on
  * success, 0 when no valid outline was found (U empty), -1 on out of memory. */
@@ -1422,7 +1478,8 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
     UPrims L, A;
     TD5_RoamGraphCensus sc;
     double *t = NULL, *tb = NULL, *need = NULL;
-    unsigned char *fixed = NULL, *push = NULL;
+    unsigned char *fixed = NULL, *push = NULL, *pr = NULL, *who = NULL;
+    int *oth = NULL;
     FILE *dbgf = NULL;
     int *nodes = NULL, nnodes = 0, cap_nodes = 0, m, k, i, ret = -1, round;
     memset(&L, 0, sizeof L);
@@ -1434,7 +1491,10 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
     need = (double *)calloc((size_t)na, sizeof(double));
     fixed = (unsigned char *)calloc((size_t)na, 1);
     push = (unsigned char *)calloc((size_t)na, 1);
-    if (!t || !tb || !need || !fixed || !push) goto out;
+    pr = (unsigned char *)calloc((size_t)na * (size_t)na, 1);
+    who = (unsigned char *)calloc((size_t)na * (size_t)na, 1);
+    oth = (int *)calloc((size_t)na, sizeof(int));
+    if (!t || !tb || !need || !fixed || !push || !pr || !who || !oth) goto out;
     /* Nodes that get bevels: the members and every internal edge's ends. */
     for (k = 0; k < cl->nnode; k++) {
         if (!grow((void **)&nodes, &cap_nodes, nnodes + 1, sizeof *nodes)) goto out;
@@ -1457,51 +1517,68 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         int any = 0, nf, outer = -1;
         ULV *fl = NULL;
         /* Push cuts out while a row is covered or a piece reaches into a ribbon.
-         * A new arm that cannot get free (overlap to its limit) restarts all
-         * pushes from the base cuts with that arm left at its base cut. */
+         * An arm that reaches its limit still pushed makes PARTNERS of the arms
+         * pushing it (two carriageways OSM draws overlapping for their whole
+         * length, a Y split whose gore lies past half the arm): partners ignore
+         * each other from then on, and all pushes restart from the base cuts.
+         * An arm still pushed at its limit by no new arm is fully FIXED: it
+         * stays at its base cut and pushes nobody. */
         for (;;) {
             int changed = 0, newfix = 0, it;
             for (it = 0; it < U_MAXIT; it++) {
                 if (!u_pieces(g, ci, cl, at, na, t, &L, &A, nodes, nnodes)) goto out;
                 st->iters++;
-                memset(push, 0, (size_t)na);
-                for (m = 0; m < na; m++) {
-                    TD5_RoamPt row[TD5_ROAM_ROW_MAX];
-                    int nrow, r, p;
-                    if (fixed[m]) continue;
-                    nrow = arm_cut_row(g, &at[m], t[m], row);
-                    for (r = 0; r < 2 * nrow - 1 && !push[m]; r++) {
-                        const double x = (r & 1 ? 0.5 * (row[r / 2].x + row[r / 2 + 1].x) : row[r / 2].x) - cl->cx;
-                        const double z = (r & 1 ? 0.5 * (row[r / 2].z + row[r / 2 + 1].z) : row[r / 2].z) - cl->cz;
-                        for (p = 0; p < L.n && !push[m]; p++)
-                            if (L.p[p].arm != m && u_bbox_has(&L.p[p], x, z, 0.0) &&
-                                u_depth(&L.p[p], x, z, NULL, NULL) > U_COVER) push[m] = 1;
-                    }
-                    for (p = 0; p < L.n && !push[m]; p++) {
-                        const UPrim *pp = &L.p[p];
-                        int v, a;
-                        if (pp->arm == m) continue;
-                        for (v = 0; v < 2 * pp->n && !push[m]; v++) {
-                            const int v0 = v / 2, v1 = (v / 2 + 1) % pp->n;
-                            const double x = v & 1 ? 0.5 * (pp->x[v0] + pp->x[v1]) : pp->x[v0];
-                            const double z = v & 1 ? 0.5 * (pp->z[v0] + pp->z[v1]) : pp->z[v0];
-                            for (a = 0; a < A.n && !push[m]; a++)
-                                if (A.p[a].arm == m && u_bbox_has(&A.p[a], x, z, 0.0) &&
-                                    u_depth(&A.p[a], x, z, NULL, NULL) > U_COVER) push[m] = 1;
-                        }
-                    }
-                }
+                for (m = 0; m < na; m++)
+                    push[m] = !fixed[m] && u_needs_push(g, cl, at, na, t, &L, &A, m, fixed, pr,
+                                                         who + m * na, &oth[m]);
                 changed = newfix = 0;
                 for (m = 0; m < na; m++) {
+                    int j, fresh = 0;
                     if (!push[m]) continue;
-                    if (t[m] >= at[m].lim) { fixed[m] = 1; newfix = 1; st->fixed++; }
-                    else { t[m] = t[m] + U_STEP < at[m].lim ? t[m] + U_STEP : at[m].lim; changed = 1; }
+                    if (t[m] < at[m].lim) {
+                        t[m] = t[m] + U_STEP < at[m].lim ? t[m] + U_STEP : at[m].lim;
+                        changed = 1;
+                        continue;
+                    }
+                    for (j = 0; j < na; j++)
+                        if (who[m * na + j] && !pr[m * na + j]) {
+                            pr[m * na + j] = pr[j * na + m] = 1;
+                            fresh = 1;
+                        }
+                    if (!fresh) fixed[m] = 1;
+                    newfix = 1;
+                    st->fixed++;
                 }
                 if (newfix || !changed) break;
             }
             if (!newfix) break;
             st->restarts++;
             for (m = 0; m < na; m++) t[m] = tb[m];
+        }
+        /* An arm follows the partner whose stub covers its row (up to its own
+         * limit): its ribbon then starts beside that partner's row instead of
+         * running under the partner's stub. Twice, for chains of partners. */
+        for (k = 0; k < 2; k++) {
+            int moved = 0;
+            for (m = 0; m < na; m++) {
+                TD5_RoamPt row[TD5_ROAM_ROW_MAX];
+                double tj = t[m];
+                int nrow, r, p;
+                nrow = arm_cut_row(g, &at[m], t[m], row);
+                for (r = 0; r < nrow; r++)
+                    for (p = 0; p < L.n; p++) {
+                        const int ja = L.p[p].arm;
+                        const double x = row[r].x - cl->cx, z = row[r].z - cl->cz;
+                        if (ja < 0 || ja == m || !(pr[m * na + ja] || fixed[m]) || fixed[ja] || t[ja] <= tj)
+                            continue;
+                        if (u_bbox_has(&L.p[p], x, z, 0.0) && u_depth(&L.p[p], x, z, NULL, NULL) > U_COVER)
+                            tj = t[ja];
+                    }
+                if (tj > at[m].lim) tj = at[m].lim;
+                if (tj > t[m]) { t[m] = tj; moved = 1; }
+            }
+            if (!moved) break;
+            if (!u_pieces(g, ci, cl, at, na, t, &L, &A, nodes, nnodes)) goto out;
         }
         /* The union of the pieces at these cuts. */
         uloops_free(U);
@@ -1564,10 +1641,21 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         memset(need, 0, (size_t)na * sizeof(double));
         cl->min_swept_margin = 1e30;
         cl->flags &= ~TD5_ROAM_CL_SWEPT_FAIL;
-        nf = u_fillet(U->v[0], U->n[0], &L, P, W, LF, need, &sc, cl, &fl);
+        nf = u_fillet(U->v[0], U->n[0], &L, P, W, LF, fixed, pr, na, need, &sc, cl, &fl);
         if (nf < 0) goto out;
+#ifndef TD5RE_RELEASE
+        {
+            const char *dk = getenv("TD5RE_ROAM_UNION_DEBUG");
+            if (dk && strtoll(dk, NULL, 10) == (long long)cl->key)
+                for (m = 0; m < na; m++)
+                    TD5_LOG_I(LOG_TAG, "ROAM_UNION_DBG round %d arm %d edge %llu: t %.2f m (base %.2f, "
+                              "lim %.2f) fixed %d fillet need %.2f m", round, m,
+                              (unsigned long long)at[m].ekey, t[m] / TD5_ROAM_UPM, tb[m] / TD5_ROAM_UPM,
+                              at[m].lim / TD5_ROAM_UPM, fixed[m], need[m] / TD5_ROAM_UPM);
+        }
+#endif
         for (m = 0; m < na; m++)
-            if (!fixed[m] && need[m] > 1.0 && t[m] < at[m].lim) {
+            if (need[m] > 1.0 && t[m] < at[m].lim) {
                 any = 1;
                 t[m] = t[m] + need[m] + 0.5 * TD5_ROAM_UPM;
                 if (t[m] > at[m].lim) t[m] = at[m].lim;
@@ -1630,9 +1718,16 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         at[m].a.t = t[m];
     }
     st->holes = U->nloop - 1;
+    st->fixed = 0;
+    for (m = 0; m < na; m++) {
+        int j, any = fixed[m];
+        for (j = 0; j < na && !any; j++) any = pr[m * na + j];
+        st->fixed += any;
+    }
     ret = 1;
 out:
     free(L.p); free(A.p); free(t); free(tb); free(need); free(fixed); free(push); free(nodes);
+    free(pr); free(who); free(oth);
     return ret;
 }
 
