@@ -39,6 +39,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  free roam are built offline. Nothing changes in the race." },
     { CL_ITEM,    "Dev builds only: the free roam street graph and its" },
     { CL_ITEM,    "  junction patches are built and counted offline." },
+    { CL_ITEM,    "Dev builds only: the free roam road world is cut into" },
+    { CL_ITEM,    "  256 m tiles and written to disk (ROAMTILE files)." },
     { CL_BLANK,   "" },
     { CL_DATE,    "October 14 (forks and medians)" },
     { CL_ITEM,    "On a freshly built track the fork roads get their" },

@@ -386,6 +386,11 @@ const TD5_RoamWay *td5_roam_cache_way(int i)
     return (i >= 0 && i < s_roam.nway) ? &s_roam.way[i] : NULL;
 }
 
+const char *td5_roam_cache_name(int id)
+{
+    return (s_roam.live && id >= 0 && id < s_roam.nname) ? s_roam.name[id] : NULL;
+}
+
 int td5_roam_cache_point(const TD5_RoamWay *w, int k, double *x, double *z,
                          int64_t *node_key)
 {

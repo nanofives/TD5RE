@@ -83,6 +83,11 @@ const TD5_RoamWay *td5_roam_cache_way(int i);
 int  td5_roam_cache_point(const TD5_RoamWay *w, int k, double *x, double *z,
                           int64_t *node_key);
 
+/* [F1 T5] The interned name behind TD5_GeoRoad.name_id (session pool), NULL for
+ * -1 / out of range / no session. The id depends on load order, so a consumer
+ * that stores names must re-intern by string (the ROAMTILE writer does). */
+const char *td5_roam_cache_name(int id);
+
 /* The 10-unit node key of a place-frame point: (round_even(x/10), round_even(z/10))
  * packed as (kx << 32) | (uint32)kz. Same rule as the router's gr_node_of
  * (GR_SNAP = 10, nearbyint). Pure. */
