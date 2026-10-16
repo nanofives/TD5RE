@@ -25,5 +25,12 @@ int  td5_roam_view_wanted(void);
  * no-op when the geo place has no ROAMTILE set. */
 void td5_roam_view_draw(int32_t cam_x, int32_t cam_y, int32_t cam_z);
 
+/* [roam F2-C] place frame (xs, zs) -> the loaded strip's route frame (xr, zr), and
+ * the strip's height datum (place height at strip y = 0). 0 / 0.0 when the place
+ * projections or ROAMGRID are not available. */
+int    td5_roam_view_frame(const char *slug, double xs, double zs, double *xr, double *zr);
+int    td5_roam_view_frame_inv(const char *slug, double xr, double zr, double *xs, double *zs);
+double td5_roam_view_datum_units(const char *slug);
+
 #endif /* TD5RE_RELEASE */
 #endif /* TD5_ROAM_VIEW_H */
