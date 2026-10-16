@@ -56,6 +56,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  other now share one height (no step on the road)," },
     { CL_ITEM,    "  the Avenida 32 tunnel runs 7 m under Avenida 1, and" },
     { CL_ITEM,    "  divided avenues keep their lanes on narrower lanes." },
+    { CL_ITEM,    "  Junctions on a slope now follow the slope, and" },
+    { CL_ITEM,    "  the TD5RE_ROAM_VIEW outline sits at the road height." },
     { CL_BLANK,   "" },
     { CL_DATE,    "October 14 (forks and medians)" },
     { CL_ITEM,    "On a freshly built track the fork roads get their" },
