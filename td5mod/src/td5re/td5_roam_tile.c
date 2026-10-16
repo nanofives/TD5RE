@@ -1359,9 +1359,11 @@ static int work_bore(Work *w, int ei, RoamCross **list_out)
 
 /* [F1-T10] The arm heights of cluster ci WITHOUT its ribbons: a ribbon's cut row
  * is its pin (the solver never moves a pinned end row, nor does the coupling),
- * an absorbed edge's shared row is the mean of its two pins (work_end_y), and an
+ * an absorbed edge's shared row comes from its two pins (work_absorbed_y), and an
  * arm with no ribbon falls back to its pin or H_c, as the slice does. So a patch
  * is a leader whose surface is known before any ribbon is built. */
+static int work_absorbed_y(Work *w, int ei, double *y);
+
 static int work_patch_heights(Work *w, int ci, double *hc, double *arm_y)
 {
     const TD5_RoamGraph *g = &w->g;
@@ -1371,14 +1373,10 @@ static int work_patch_heights(Work *w, int ci, double *hc, double *arm_y)
     for (i = 0; i < cl->narm; i++) {
         const TD5_RoamArm *a = &g->arm[cl->arm_first + i];
         const TD5_RoamEdge *e = &g->edge[a->edge];
-        double pa, pb, pin;
+        double pin;
         if (e->end[0].kind != TD5_ROAM_END_INTERNAL && e->end[1].kind != TD5_ROAM_END_INTERNAL &&
             e->end[1].s - e->end[0].s < 1.0) {
-            const int ra = work_end_pin(w, a->edge, 0, &pa), rb = work_end_pin(w, a->edge, 1, &pb);
-            if (ra > 0 && rb > 0 && !(isnan(pa) && isnan(pb))) {
-                arm_y[i] = isnan(pa) ? pb : (isnan(pb) ? pa : 0.5 * (pa + pb));
-                continue;
-            }
+            if (work_absorbed_y(w, a->edge, &arm_y[i])) continue;
         } else if (work_end_pin(w, a->edge, a->end, &pin) > 0 && !isnan(pin)) {
             arm_y[i] = pin;
             continue;
@@ -1732,6 +1730,36 @@ static int rib_grip(int surface)
 
 /* y of end `end` (T3's end index) of edge ei: the ribbon's solved row height, the
  * shared row height of an absorbed edge, or the arm pin as a last resort. */
+/* [F1-T10] The one row an absorbed edge's two patches share: the mean of its two
+ * end pins, unless exactly one end is a cluster whose patch must stay flat (a
+ * ROW_COVERED or HULL cluster: a cut row of it lies UNDER its patch, flat at H_c).
+ * That side's pin then wins, and the slope goes into the other patch. The
+ * Diagonal 74 gore: cluster 1130465457611351 (ROW_COVERED, 17156) shares an
+ * absorbed row with 1128021621221683 1.35 m higher; the mean tilted the flat
+ * patch and the Diagonal 74 cut row under it stood 51-65 units off it.
+ * Returns 0 when neither end has a pin. Symmetric: both patches read the same. */
+static int work_absorbed_y(Work *w, int ei, double *y)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *e = &g->edge[ei];
+    double pa, pb;
+    const int ra = work_end_pin(w, ei, 0, &pa);
+    const int rb = work_end_pin(w, ei, 1, &pb);
+    int fa = 0, fb = 0;
+    if (ra <= 0 || rb <= 0) return 0;
+    if (isnan(pa) && isnan(pb)) return 0;
+    if (isnan(pa)) { *y = pb; return 1; }
+    if (isnan(pb)) { *y = pa; return 1; }
+    if (e->end[0].kind == TD5_ROAM_END_CLUSTER && e->end[0].cluster >= 0)
+        fa = (g->cluster[e->end[0].cluster].flags & (TD5_ROAM_CL_ROW_COVERED | TD5_ROAM_CL_HULL)) != 0;
+    if (e->end[1].kind == TD5_ROAM_END_CLUSTER && e->end[1].cluster >= 0)
+        fb = (g->cluster[e->end[1].cluster].flags & (TD5_ROAM_CL_ROW_COVERED | TD5_ROAM_CL_HULL)) != 0;
+    if (fa && !fb) *y = pa;
+    else if (fb && !fa) *y = pb;
+    else *y = 0.5 * (pa + pb);
+    return 1;
+}
+
 static int work_end_y(Work *w, int ei, int end, double *y)
 {
     const TD5_RoamGraph *g = &w->g;
@@ -1742,19 +1770,9 @@ static int work_end_y(Work *w, int ei, int end, double *y)
         return 1;
     }
     if (w->built[ei] && w->rib[ei].status == ROAM_RIB_ABSORBED) {
-        /* one row shared by the two patches (same x/z by construction): the mean of
-         * the two arm pins, so both sides compute the same y */
-        double pa, pb;
-        const int ra = work_end_pin(w, ei, 0, &pa);
-        const int rb = work_end_pin(w, ei, 1, &pb);
-        if (ra > 0 && rb > 0) {
-            if (isnan(pa) && isnan(pb)) return 0;
-            if (isnan(pa)) *y = pb;
-            else if (isnan(pb)) *y = pa;
-            else *y = 0.5 * (pa + pb);
-            return 1;
-        }
-        return 0;
+        /* one row shared by the two patches (same x/z by construction), so both
+         * sides compute the same y (work_absorbed_y) */
+        return work_absorbed_y(w, ei, y);
     }
     (void)e;
     return 0;
