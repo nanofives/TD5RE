@@ -152,6 +152,35 @@ int td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *
     return 1;
 }
 
+int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
+                             int32_t *px, int32_t *pz)
+{
+    char cand[64], path[512];
+    int n, pass;
+    if (!slug || cap < 2 || !px || !pz) return 0;
+    n = td5_geo_places_count();
+    /* the shipped roam place first, then every registered place */
+    for (pass = 0; pass <= n; pass++) {
+        const char *s = (pass == 0) ? "la_plata_partido" : td5_geo_places_slug(pass - 1);
+        RoamGrid g;
+        int tx, tz, ok;
+        int32_t x, z;
+        if (!s || !s[0]) continue;
+        snprintf(cand, sizeof cand, "%s", s);
+        if (!td5_roam_place_has_tiles(cand)) continue;
+        if (!td5_roam_latlon_to_place(cand, lat, lon, &x, &z)) continue;
+        if (!roam_grid_load(cand, &g)) continue;
+        roam_grid_tile_of(&g, (double)x, (double)z, &tx, &tz);
+        td5_roam_tile_path(path, sizeof path, NULL, cand, tx, tz);
+        ok = td5_plat_file_exists(path);
+        if (!ok) continue;
+        snprintf(slug, cap, "%s", cand);
+        *px = x; *pz = z;
+        return 1;
+    }
+    return 0;
+}
+
 /* ----------------------------------------------------------- the contract ---- */
 
 int td5_roam_active(void) { return s_roam.active; }

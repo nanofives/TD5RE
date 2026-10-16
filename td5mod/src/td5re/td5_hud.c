@@ -2394,7 +2394,7 @@ void td5_hud_draw_pause_action_confirm(void)
     const char *question = "";
     switch (action) {
         case 1: question = "RESTART RACE?";  break;
-        case 2: question = "QUIT TO MENU?";  break;
+        case 2: question = td5_roam_active() ? "LEAVE FREE ROAM?" : "QUIT TO MENU?";  break;   /* [GEO FREE ROAM F2-A] */
         case 3: question = "EXIT GAME?";     break;
         case 4: question = "BACK TO LOBBY?"; break;
         default: break;

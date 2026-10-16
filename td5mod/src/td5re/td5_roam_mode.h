@@ -23,6 +23,7 @@
 #define TD5_ROAM_MODE_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 struct TD5_RoamResident;   /* td5_roam_locate.h */
 
@@ -64,6 +65,11 @@ void td5_roam_session_spawn(int slot, void *actor);    /* places the player acto
 int  td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz);
 /* 1 when `slug` has road tiles to roam in (roam/ROAMGRID.JSON present). */
 int  td5_roam_place_has_tiles(const char *slug);
+/* The place a map point can be roamed in (F2 A, FREE ROAM button): the first known place whose
+ * ROAMGRID covers lat/lon AND whose ROAMTILE file for that tile exists. Fills `slug` (cap bytes)
+ * and the PLACE-frame point. 0 when the point is outside every built tile. */
+int  td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
+                               int32_t *px, int32_t *pz);
 
 #ifndef TD5RE_RELEASE
 /* Dev CLI: --Roam=1 --RoamSpawn=<lat>,<lon> [--RoamYaw=n] [--RoamPlace=slug]. Arms roam and

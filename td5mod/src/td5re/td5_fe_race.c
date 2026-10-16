@@ -44,6 +44,7 @@
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
 #include "td5_geo.h"
+#include "td5_roam_mode.h"   /* [GEO FREE ROAM F2-A] FREE ROAM car-select entry / launch */
 #include "td5_geo_buildings.h"
 
 /* [CUP TRACK SELECT 2026-06-25] knob helper — defined just before
@@ -724,6 +725,20 @@ void frontend_geo_pick_arm(int slot) {
 }
 
 int frontend_geo_pick_slot(void) { return s_geo_pick_slot; }
+
+/* [GEO FREE ROAM F2-A] The geo selector's FREE ROAM button hands over to the NORMAL car select.
+ * It must look like a fresh single local race: single-race type, one human, no MP / net flow
+ * (stale state from an earlier lobby or cup would hijack the car-select exit dispatch). */
+void frontend_roam_prepare_car_select(void) {
+    s_selected_game_type = 0;
+    s_two_player_mode    = 0;
+    s_mp_flow            = 0;
+    s_mp_simul           = 0;
+    s_network_active     = 0;
+    s_num_human_players  = 1;
+    ConfigureGameTypeFlags();
+    s_return_screen      = -1;
+}
 
 /* [ROUND 1026 L] The ONE geo slot the track selectors list as the GEOSPATIAL
  * TRACK entry, or -1 when no real place is registered. Mariano: "on the track
@@ -7067,6 +7082,12 @@ void Screen_CarSelection(void) {
                                     : (s_selected_game_type >= 1 && s_selected_game_type <= 6)
                                         ? TD5_SCREEN_SELECT_CUP
                                         : TD5_SCREEN_RACE_TYPE_MENU;
+                /* [GEO FREE ROAM F2-A] entered from the geo selector's FREE ROAM button: BACK
+                 * abandons the session and returns there */
+                if (td5_roam_armed()) {
+                    td5_roam_cancel();
+                    s_return_screen = TD5_SCREEN_GEO_GENERATOR;
+                }
                 s_inner_state = 0x14;
                 break;
             }
@@ -7271,6 +7292,19 @@ void Screen_CarSelection(void) {
     {
         int actual_car = (s_selected_game_type == 5) ?
                          s_masters_roster[s_selected_car] : s_selected_car;
+
+        /* [GEO FREE ROAM F2-A] OK in the roam flow: no track select, no race options -- launch the
+         * roam race with the picked car (the host level is pinned by td5_roam_session_start). */
+        if (td5_roam_armed() && s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
+            s_p1_car   = actual_car;
+            s_p1_paint = s_selected_paint;
+            s_selected_track = td5_roam_host_track();
+            TD5_LOG_I(LOG_TAG, "CarSelect: FREE ROAM car=%d paint=%d -> launch (host track %d)",
+                      actual_car, s_selected_paint, s_selected_track);
+            frontend_init_race_schedule();
+            frontend_init_display_mode_state();
+            return;
+        }
 
         /* [PORT ENHANCEMENT 2026-06] Multiplayer lobby flow: sequential per-player
          * car select. Each player picks in turn (join order); after the last,

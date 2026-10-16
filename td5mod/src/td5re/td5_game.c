@@ -4005,7 +4005,8 @@ static void init_race_track_resources(void)
             g_td5.drag_race_enabled)
             world_x = 30;
         g_trackType = g_track_is_circuit;   /* faithful: circuit forces orbit mode */
-        td5_camera_bind_trackside_profiles(world_x);
+        /* [GEO FREE ROAM F2-A / F0b crash risk 3] roam has no span table: bind nothing */
+        td5_camera_bind_trackside_profiles(td5_roam_active() ? 0 : world_x);
         InitializeTracksideCameraProfiles();   /* self-guards NULL -> count 0 */
         TD5_LOG_I(LOG_TAG,
                   "InitRace step 6b: replay trackside cameras track=%d reverse=%d "

@@ -16,6 +16,7 @@
 #include "td5_hud.h"
 #include "td5_asset.h"  /* td5_asset_level_number — fly-in per-level blocklist */
 #include "td5_ai.h"     /* td5_compute_heading_delta */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM: replay trackside cameras are strip-only */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5_fp.h"     /* FP_TRUNC/FP_SCALE — 24.8 fixed-point idiom macros */
 #include "td5re.h"
@@ -4363,6 +4364,10 @@ void td5_camera_bind_trackside_profiles(int pool_index_1based)
  * the chase camera so the played-back car always stays on screen. */
 int td5_camera_replay_trackside_ready(void)
 {
+    /* [GEO FREE ROAM F2-A / F0b crash risk 3] the trackside profiles index the raw strip span /
+     * vertex tables (g_spanTable is NULL with no strip) and match on the actor's span (-1):
+     * never ready in roam, so a replay falls back to the chase camera */
+    if (td5_roam_active()) return 0;
     return (g_tracksideCameraProfiles != NULL) && (g_tracksideCameraProfileCount > 0);
 }
 
