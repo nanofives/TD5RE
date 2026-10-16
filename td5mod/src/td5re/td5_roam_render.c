@@ -111,6 +111,8 @@ typedef struct {
     int       dev_mode;                      /* 0 off, 1 near, 2 all                */
     int       dev_loaded_all;
     int       dev_reach;
+    int       dev_overlay;                   /* 0 unread, 1 off, 2 on (env, read once)  */
+    int       dev_hide;                      /* same encoding, HIDE_STRIP               */
     int      *tried;                         /* (tx,tz) pairs that failed to read   */
     int       ntried, captried;
     /* stats */
@@ -802,10 +804,16 @@ static void rr_dev_stream(void)
 }
 
 #ifndef TD5RE_RELEASE
-static int rr_dev_overlay_on(void) { return td5_env_int("TD5RE_ROAM_RENDER", 0, 0, 1) != 0; }
+static int rr_dev_overlay_on(void)
+{
+    if (!s_rr.dev_overlay) s_rr.dev_overlay = td5_env_int("TD5RE_ROAM_RENDER", 0, 0, 1) ? 2 : 1;
+    return s_rr.dev_overlay == 2;
+}
 int td5_roam_render_hides_strip(void)
 {
-    return rr_dev_overlay_on() && td5_env_int("TD5RE_ROAM_RENDER_HIDE_STRIP", 0, 0, 1) != 0;
+    if (!rr_dev_overlay_on()) return 0;
+    if (!s_rr.dev_hide) s_rr.dev_hide = td5_env_int("TD5RE_ROAM_RENDER_HIDE_STRIP", 0, 0, 1) ? 2 : 1;
+    return s_rr.dev_hide == 2;
 }
 #else
 static int rr_dev_overlay_on(void) { return 0; }
@@ -853,6 +861,99 @@ static void rr_autobegin(void)
     s_rr.dev_mode = (mode && strcmp(mode, "all") == 0) ? 2 : 1;
     s_rr.dev_reach = td5_env_int("TD5RE_ROAM_RENDER_REACH", 2, 1, 6);
 }
+
+#ifndef TD5RE_RELEASE
+/* DEV pose generator. TD5RE_ROAM_RENDER_POSES=<file> with lines
+ *   name:lat,lon,h_above_ground_m,yaw_deg,pitch_deg      (yaw 0 = north, as seen on the map)
+ * writes <file>.tour.txt in the free-cam tour format (route-frame WORLD units = strip
+ * units x 256, y from the place height minus the strip datum) and returns 1 (the caller
+ * exits). Only meaningful with a built geo level whose _route/ frame is the target of the
+ * tour (verify/geo_tour.ps1 with TD5RE_ROAM_RENDER=1 TD5RE_ROAM_RENDER_HIDE_STRIP=1). */
+int td5_roam_render_dev_poses(void)
+{
+    const char *in = getenv("TD5RE_ROAM_RENDER_POSES");
+    const char *slug = td5_geo_place_slug();
+    char *buf = NULL, outp[600], path[512], wpath[512], hp[512];
+    TD5_File *f;
+    FILE *o;
+    int64_t n;
+    char *line, *save = NULL;
+    double lat0 = 0, lon0 = 0, mdlat = 0, mdlon = 0, datum;
+    TD5_RoamHeight *hc;
+    int cnt = 0;
+    if (!in || !in[0]) return 0;
+    if (!slug || !slug[0]) slug = "la_plata_partido";
+    td5_geo_source_path(path, sizeof path, slug, "PLACE.JSON");
+    {   /* place projection: lat0/lon0/m_per_deg from PLACE.JSON, scanned as text */
+        char *js; TD5_File *pf = td5_plat_file_open(path, "rb"); int64_t pn;
+        const char *k;
+        if (!pf) { fprintf(stderr, "roam poses: no %s
+", path); return 1; }
+        pn = td5_plat_file_size(pf);
+        js = (char *)malloc((size_t)pn + 1u);
+        if (!js || td5_plat_file_read(pf, js, (size_t)pn) != (size_t)pn) { td5_plat_file_close(pf); free(js); return 1; }
+        js[pn] = '\0'; td5_plat_file_close(pf);
+        k = strstr(js, "\"projection\"");
+        if (k) {
+            const char *a;
+            if ((a = strstr(k, "\"lat0\"")))          lat0  = atof(strchr(a, ':') + 1);
+            if ((a = strstr(k, "\"lon0\"")))          lon0  = atof(strchr(a, ':') + 1);
+            if ((a = strstr(k, "\"m_per_deg_lat\""))) mdlat = atof(strchr(a, ':') + 1);
+            if ((a = strstr(k, "\"m_per_deg_lon\""))) mdlon = atof(strchr(a, ':') + 1);
+        }
+        free(js);
+        if (mdlat <= 0.0 || mdlon <= 0.0) { fprintf(stderr, "roam poses: no projection
+"); return 1; }
+    }
+    f = td5_plat_file_open(in, "rb");
+    if (!f) { fprintf(stderr, "roam poses: cannot open %s
+", in); return 1; }
+    n = td5_plat_file_size(f);
+    buf = (char *)malloc((size_t)n + 1u);
+    if (!buf || td5_plat_file_read(f, buf, (size_t)n) != (size_t)n) { td5_plat_file_close(f); free(buf); return 1; }
+    buf[n] = '\0'; td5_plat_file_close(f);
+    hc = (TD5_RoamHeight *)calloc(1, sizeof *hc);
+    td5_geo_source_path(hp, sizeof hp, slug, "HEIGHT.R16");
+    td5_geo_source_path(wpath, sizeof wpath, slug, "WATER.R8");
+    if (!hc || !td5_roam_height_open(hc, hp, wpath,
+            (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0)) {
+        fprintf(stderr, "roam poses: no height source
+"); free(buf); free(hc); return 1;
+    }
+    datum = td5_roam_view_datum_units(slug);
+    snprintf(outp, sizeof outp, "%s.tour.txt", in);
+    o = fopen(outp, "wb");
+    for (line = strtok_s(buf, "
+;", &save); line && o; line = strtok_s(NULL, "
+;", &save)) {
+        char nm[48];
+        double lat, lon, hm, yaw, pit, px, pz, xr, zr, xn, zn, g = 0.0, yr;
+        const char *c = strchr(line, ':');
+        size_t l;
+        while (*line == ' ') line++;
+        if (!c || *line == '#') continue;
+        l = (size_t)(c - line); if (l >= sizeof nm) l = sizeof nm - 1;
+        memcpy(nm, line, l); nm[l] = '\0';
+        if (sscanf(c + 1, "%lf,%lf,%lf,%lf,%lf", &lat, &lon, &hm, &yaw, &pit) != 5) continue;
+        px = (lon - lon0) * mdlon * 430.0;
+        pz = (lat - lat0) * mdlat * 430.0;
+        if (!td5_roam_height_prefetch(hc, px - 2000.0, pz - 2000.0, px + 2000.0, pz + 2000.0) ||
+            !td5_roam_height_sample(hc, px, pz, &g, NULL)) { fprintf(stderr, "roam poses: no height at %s
+", nm); continue; }
+        if (!td5_roam_view_frame(slug, px, pz, &xr, &zr) || !td5_roam_view_frame(slug, px, pz + 430.0, &xn, &zn)) continue;
+        yr = yaw * 3.14159265358979 / 180.0 + atan2(xn - xr, zn - zr);   /* map north -> route +Z-relative */
+        fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f
+", nm, xr * 256.0, (g + hm * 430.0 - datum) * 256.0, zr * 256.0,
+                yr * 180.0 / 3.14159265358979, pit);
+        cnt++;
+    }
+    if (o) fclose(o);
+    td5_roam_height_close(hc); free(hc); free(buf);
+    fprintf(stderr, "roam poses: %d pose(s) -> %s (datum %.0f units)
+", cnt, outp, datum);
+    return 1;
+}
+#endif
 
 /* ------------------------------------------------------------------- draw ---- */
 

@@ -83,4 +83,9 @@ int  td5_roam_render_hides_strip(void);
 #define td5_roam_render_hides_strip() 0
 #endif
 
+#ifndef TD5RE_RELEASE
+/* DEV: TD5RE_ROAM_RENDER_POSES=<file> -> <file>.tour.txt (free-cam tour poses from lat/lon). 1 = handled, exit. */
+int td5_roam_render_dev_poses(void);
+#endif
+
 #endif /* TD5_ROAM_RENDER_H */
