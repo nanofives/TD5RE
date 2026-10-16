@@ -50,6 +50,7 @@
 #include "td5_roam_cache.h" /* GEO FREE ROAM cache reader (dev census hook) */
 #include "td5_roam_ribbon.h" /* GEO FREE ROAM ribbons + heights (dev test hook) */
 #include "td5_roam_junction.h" /* GEO FREE ROAM junction census (dev hook) */
+#include "td5_roam_tile.h"   /* GEO FREE ROAM tile assembly + ROAMTILE (dev CLI) */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1696,6 +1697,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* GEO FREE ROAM (F1 T3) dev census: TD5RE_ROAM_JUNC_TEST=1 builds the street
      * graph + junction patches over the casco, writes the census + JSON, exits. */
     if (td5_roam_junction_dev_census())
+        return 0;
+    /* GEO FREE ROAM (F1 T5) dev CLI: --RoamBuildTiles=x0,z0,x1,z1|casco builds the
+     * ROAMTILE files of those tiles, writes the census and exits. */
+    if (td5_roam_tile_dev_cli(lpCmdLine))
         return 0;
 #endif
 
