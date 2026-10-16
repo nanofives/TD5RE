@@ -70,6 +70,16 @@
 #define TD5_ROAM_CL_HULL      0x100  /* last resort: convex hull of the cut
                                       * rows; a cut-row vertex inside the hull
                                       * is not a patch vertex (ribbon overlaps) */
+#define TD5_ROAM_CL_UNION     0x200  /* outline = union of the paved pieces
+                                      * (stubs, internal edges, node bevels);
+                                      * cuts pushed out until the outline holds
+                                      * every cut row (F1-T3b)                 */
+#define TD5_ROAM_CL_ROW_COVERED 0x400 /* UNION: an arm's cut row is not wholly
+                                      * on the outline -- two carriageways that
+                                      * overlap for their whole length         */
+#define TD5_ROAM_CL_HOLE      0x800  /* UNION: the outline has a hole (an
+                                      * unpaved island, walled); its vertices
+                                      * follow the outer ring in the outline   */
 
 /* Outline vertex kinds. */
 #define TD5_ROAM_PV_CUT     1   /* a cut-row lane boundary of an arm (shared)  */
