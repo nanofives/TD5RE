@@ -26,7 +26,11 @@
  * than corner_max, gets NO corner: the outline joins the two cut rows directly
  * (deviation from the design's bevel point, see the module .c).
  * Triangulation: fan from the centroid when every fan triangle is CCW, else ear
- * clipping over the outline. Then every triangle edge longer than tri_edge_max
+ * clipping over the outline. A cluster with no valid NORMAL outline is rebuilt
+ * UNION (F1-T3b): outline = union of its paved pieces (arm stubs to the cut,
+ * internal edges, node bevels), cuts pushed out until the outline holds every
+ * cut row, fillets at the union's block corners, unpaved islands kept as holes
+ * (td5_roam_junction.c "union outline"). Then every triangle edge longer than tri_edge_max
  * is bisected (conforming, both neighbours split) so triangle_height's int32
  * products cannot overflow (design 1.3 step 7). Cut-row segments are one lane
  * (1500 units), so they are never split and the patch keeps the ribbon's
@@ -70,6 +74,16 @@
 #define TD5_ROAM_CL_HULL      0x100  /* last resort: convex hull of the cut
                                       * rows; a cut-row vertex inside the hull
                                       * is not a patch vertex (ribbon overlaps) */
+#define TD5_ROAM_CL_UNION     0x200  /* outline = union of the paved pieces
+                                      * (stubs, internal edges, node bevels);
+                                      * cuts pushed out until the outline holds
+                                      * every cut row (F1-T3b)                 */
+#define TD5_ROAM_CL_ROW_COVERED 0x400 /* UNION: an arm's cut row is not wholly
+                                      * on the outline -- two carriageways that
+                                      * overlap for their whole length         */
+#define TD5_ROAM_CL_HOLE      0x800  /* UNION: the outline has a hole (an
+                                      * unpaved island, walled); its vertices
+                                      * follow the outer ring in the outline   */
 
 /* Outline vertex kinds. */
 #define TD5_ROAM_PV_CUT     1   /* a cut-row lane boundary of an arm (shared)  */
