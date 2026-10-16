@@ -60,6 +60,9 @@ int  td5_roam_host_track(void);              /* schedule index of the level whos
 void td5_roam_session_start(void);           /* race init: armed -> active, force the single-player overrides */
 void td5_roam_apply_overrides(void);         /* the overrides alone (idempotent; re-asserted after the mode setup) */
 void td5_roam_session_spawn(int slot, void *actor);    /* places the player actor (td5_game.c spawn loop) */
+/* Metres the session's spawn point was moved onto the drivable surface (0 = the click was already
+ * on the road, -1 = no road found near it). The click is snapped by td5_roam_session_spawn (F2-D). */
+double td5_roam_spawn_snap_m(void);
 
 /* lat/lon -> PLACE frame units of `slug` (PLACE.JSON projection). 1 on success. */
 int  td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz);
@@ -75,6 +78,10 @@ int  td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
 /* Dev CLI: --Roam=1 --RoamSpawn=<lat>,<lon> [--RoamYaw=n] [--RoamPlace=slug]. Arms roam and
  * the AutoRace path with the default car. Call after the INI + CLI overrides are applied. */
 void td5_roam_dev_cli(const char *cmdline);
+/* Self-test entry (task F2-D, `roam` rows): arm a session at lat/lon of la_plata_partido with the
+ * current ini car, yaw along the street. Does not touch the AutoRace ini (the director owns it).
+ * 1 when armed. */
+int td5_roam_selftest_arm(double lat, double lon);
 #endif
 
 #endif /* TD5_ROAM_MODE_H */
