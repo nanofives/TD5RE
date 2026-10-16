@@ -7293,6 +7293,13 @@ void Screen_CarSelection(void) {
         int actual_car = (s_selected_game_type == 5) ?
                          s_masters_roster[s_selected_car] : s_selected_car;
 
+        /* [GEO FREE ROAM F2-A] BACK / ESC in the roam flow: abandon the session, return to the map */
+        if (td5_roam_armed() && s_return_screen == TD5_SCREEN_GEO_GENERATOR) {
+            td5_roam_cancel();
+            td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+            return;
+        }
+
         /* [GEO FREE ROAM F2-A] OK in the roam flow: no track select, no race options -- launch the
          * roam race with the picked car (the host level is pinned by td5_roam_session_start). */
         if (td5_roam_armed() && s_return_screen == TD5_SCREEN_TRACK_SELECTION) {

@@ -1599,6 +1599,10 @@ static void geo_screen_init(void)
      * Screen_AutoTrackOptions init); this screen reads the place from its own
      * map, so hand the decision back to the knob the way it was before. */
     td5_geo_force_place(NULL);
+    /* [GEO FREE ROAM F2-A] arriving on the map ends any pending roam: BACK / ESC out of the
+     * roam car select returns here without a dedicated hook, and a stale ARMED session would
+     * turn the next ordinary race into a roam race */
+    td5_roam_cancel();
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,
