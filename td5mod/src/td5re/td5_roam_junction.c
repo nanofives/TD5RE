@@ -1332,18 +1332,113 @@ static int u_simple(const ULV *pv, int n)
     return 1;
 }
 
+/* [F2-E] A block corner that the union outline draws as a RUN of short reflex
+ * segments (the node bevels of the pieces meeting there: 00064c21000864e3, a
+ * 44 deg diagonal corner drawn as 7 vertices 0.1-0.3 m apart) got one fillet per
+ * vertex, each cut to half its tiny neighbours, so the kerb turned 136 deg over
+ * 0.65 m: a sharp wedge a car hangs on. Such a run is replaced by the
+ * intersection of the two long kerb lines that enter and leave it, so u_fillet
+ * sees ONE corner and gives it the kerb radius (and the arm pushes it needs).
+ * A run: >= 2 consecutive untagged reflex vertices joined by segments shorter
+ * than U_RUN_SEG, turning >= U_STRAIGHT in all, whose kerb lines meet within
+ * U_RUN_REACH of both run ends. Knob TD5RE_ROAM_FILLET_RUNS (1; 0 = old rule).
+ * Returns the new count (vertices written to o), or n with o = copy of v. */
+#define U_RUN_SEG    (2.0 * TD5_ROAM_UPM)
+#define U_RUN_REACH  (3.0 * TD5_ROAM_UPM)
+static int u_merge_runs(const ULV *v, int n, ULV *o, const UPrims *L, const unsigned char *fixed,
+                        const unsigned char *pr, int na, int *merged, TD5_RoamCluster *cl)
+{
+    unsigned char *rf = (unsigned char *)calloc((size_t)n, 1);
+    int q, no = 0, start = -1;
+    *merged = 0;
+    if (!rf) { memcpy(o, v, (size_t)n * sizeof *v); return n; }
+    for (q = 0; q < n; q++) {
+        const ULV *a = &v[(q + n - 1) % n], *b = &v[q], *d = &v[(q + 1) % n];
+        rf[q] = !b->tag && cross2(b->x - a->x, b->z - a->z, d->x - b->x, d->z - b->z) < 0.0;
+    }
+    /* Start the scan at a vertex that is not inside a run, so no run wraps. */
+    for (q = 0; q < n && start < 0; q++) {
+        const ULV *b = &v[q], *d = &v[(q + 1) % n];
+        if (!rf[q] || hypot(d->x - b->x, d->z - b->z) >= U_RUN_SEG) start = (q + 1) % n;
+    }
+    if (start < 0) { free(rf); memcpy(o, v, (size_t)n * sizeof *v); return n; }
+    for (q = 0; q < n;) {
+        const int i = (start + q) % n;
+        int len = 1, ok = 0;
+        double X = 0.0, Z = 0.0, turn = 0.0;
+        if (rf[i]) {
+            /* extend the run while the next segment is short and the next vertex reflex */
+            while (len < n - 2) {
+                const ULV *b = &v[(i + len - 1) % n], *d = &v[(i + len) % n];
+                if (!rf[(i + len) % n] || hypot(d->x - b->x, d->z - b->z) >= U_RUN_SEG) break;
+                len++;
+            }
+        }
+        if (len >= 2) {
+            const int j = (i + len - 1) % n;
+            const ULV *a = &v[(i + n - 1) % n], *bi = &v[i], *bj = &v[j], *d = &v[(j + 1) % n];
+            const double ix = bi->x - a->x, iz = bi->z - a->z, ox = d->x - bj->x, oz = d->z - bj->z;
+            const double li = hypot(ix, iz), lo = hypot(ox, oz), cr = cross2(ix, iz, ox, oz);
+            const int fa = L->p[a->prim].arm, fb = L->p[bj->prim].arm;
+            int k;
+            for (k = 0; k < len; k++) {
+                const ULV *p0 = &v[(i + k + n - 1) % n], *p1 = &v[(i + k) % n], *p2 = &v[(i + k + 1) % n];
+                turn += atan2(fabs(cross2(p1->x - p0->x, p1->z - p0->z, p2->x - p1->x, p2->z - p1->z)),
+                              (p1->x - p0->x) * (p2->x - p1->x) + (p1->z - p0->z) * (p2->z - p1->z));
+            }
+            if (li > 0.0 && lo > 0.0 && cr < -1e-9 * li * lo && turn >= U_STRAIGHT &&
+                ROAM_PI - turn >= U_GORE_RAD &&
+                !((fa >= 0 && fixed[fa]) || (fb >= 0 && fixed[fb]) ||
+                  (fa >= 0 && fb >= 0 && fa != fb && pr[fa * na + fb]))) {
+                /* bi + s * (ix, iz) / li  ==  bj - u * (ox, oz) / lo */
+                const double ux = ix / li, uz = iz / li, wx = ox / lo, wz = oz / lo;
+                const double det = cross2(ux, uz, wx, wz);
+                if (fabs(det) > 1e-9) {
+                    const double rx = bj->x - bi->x, rz = bj->z - bi->z;
+                    const double s = cross2(rx, rz, wx, wz) / det, u = -cross2(rx, rz, ux, uz) / det;
+                    if (s >= 0.0 && u >= 0.0 && s <= U_RUN_REACH && u <= U_RUN_REACH &&
+                        s < li - ROAM_OL_MIN_SEG && u < lo - ROAM_OL_MIN_SEG) {
+                        X = bi->x + ux * s; Z = bi->z + uz * s; ok = 1;
+                    }
+                }
+            }
+            if (ok) {
+                o[no].x = X; o[no].z = Z; o[no].tag = 0; o[no].prim = bj->prim; no++;
+                (*merged)++;
+                TD5_LOG_D(LOG_TAG, "ROAM_FILLET_RUN cluster %lld: %d short reflex vertices (turn %.1f deg) "
+                          "merged into one block corner", (long long)cl->key, len, turn * 180.0 / ROAM_PI);
+                q += len;
+                continue;
+            }
+        }
+        o[no++] = v[i];
+        q++;
+    }
+    free(rf);
+    return no;
+}
+
 /* Kerb fillets at the reflex vertices (block corners) of the outer loop.
  * need[m] gets the extra kerb length arm m must give for a full fillet.
  * Writes the new loop to *out (malloc'd). Returns its count, -1 on OOM. */
-static int u_fillet(const ULV *v, int n, const UPrims *L, const TD5_RoamGraphParams *P,
+static int u_fillet(const ULV *v0, int n0, const UPrims *L, const TD5_RoamGraphParams *P,
                     double W, double LF, const unsigned char *fixed, const unsigned char *pr,
                     int na, double *need, TD5_RoamGraphCensus *c, TD5_RoamCluster *cl, ULV **out)
 {
     const int segs = P->fillet_segs < 1 ? 1 : (P->fillet_segs > 12 ? 12 : P->fillet_segs);
-    unsigned char *cand = (unsigned char *)calloc((size_t)n, 1);
-    ULV *o = (ULV *)malloc((size_t)n * (size_t)(segs + 2) * sizeof(ULV));
+    ULV *vm = (ULV *)malloc((size_t)(n0 > 0 ? n0 : 1) * sizeof(ULV));
+    const ULV *v = vm;
+    int n = n0, nmerged = 0;
+    unsigned char *cand = (unsigned char *)calloc((size_t)(n0 > 0 ? n0 : 1), 1);
+    ULV *o = (ULV *)malloc((size_t)(n0 > 0 ? n0 : 1) * (size_t)(segs + 2) * sizeof(ULV));
     int q, no = 0;
-    if (!cand || !o) { free(cand); free(o); return -1; }
+    if (!cand || !o || !vm) { free(cand); free(o); free(vm); return -1; }
+    if (td5_env_int("TD5RE_ROAM_FILLET_RUNS", 1, 0, 1) && n0 > 3) {
+        n = u_merge_runs(v0, n0, vm, L, fixed, pr, na, &nmerged, cl);
+        c->fillet_runs_merged += nmerged;
+    } else {
+        memcpy(vm, v0, (size_t)n0 * sizeof(ULV));
+    }
     for (q = 0; q < n; q++) {
         const ULV *a = &v[(q + n - 1) % n], *b = &v[q], *d = &v[(q + 1) % n];
         const double ix = b->x - a->x, iz = b->z - a->z, ox = d->x - b->x, oz = d->z - b->z;
@@ -1449,6 +1544,7 @@ static int u_fillet(const ULV *v, int n, const UPrims *L, const TD5_RoamGraphPar
     /* The same across the wrap (vertex n-1's T2 against vertex 0's T1). */
     if (no > 1 && fabs(o[no - 1].x - o[0].x) < 1e-6 && fabs(o[no - 1].z - o[0].z) < 1e-6) no--;
     free(cand);
+    free(vm);
     *out = o;
     return no;
 }
@@ -1472,6 +1568,17 @@ static double u_min_angle_sin(const TD5_RoamPatchVert *a, const TD5_RoamPatchVer
     if (ar2 / (ab * bc) < m) m = ar2 / (ab * bc);
     if (ar2 / (bc * ca) < m) m = ar2 / (bc * ca);
     return m;
+}
+
+/* [F2-E] every triangle CCW with more than 0.5 u^2 (the fan_valid bar) */
+static int tris_positive(const TD5_RoamPatchVert *pv, const LTri *t, int nt)
+{
+    int k;
+    for (k = 0; k < nt; k++) {
+        const TD5_RoamPatchVert *a = &pv[t[k].v[0]], *b = &pv[t[k].v[1]], *c = &pv[t[k].v[2]];
+        if (cross2(b->x - a->x, b->z - a->z, c->x - a->x, c->z - a->z) <= 1.0) return 0;
+    }
+    return nt > 0;
 }
 
 static int ear_clip_u(const TD5_RoamPatchVert *pv, int nout, LTri *out, int *ntri)
@@ -1815,11 +1922,36 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         } else {
             free(fl);
         }
+        /* [F2-E] The holes' corners are block corners too (an island between a
+         * diagonal and two streets, 00064c21000864e3): a square island corner held
+         * a car nose-on. A hole loop keeps the paving on its left like the outer
+         * loop, so its island corners are the same reflex vertices; they carry no
+         * cut rows, so no arm is pushed. Knob TD5RE_ROAM_FILLET_HOLES (1). */
+        if (td5_env_int("TD5RE_ROAM_FILLET_HOLES", 1, 0, 1)) {
+            for (k = 1; k < U->nloop; k++) {
+                ULV *hl = NULL;
+                int nh;
+                memset(need, 0, (size_t)na * sizeof(double));
+                nh = u_fillet(U->v[k], U->n[k], &L, P, W, LF, fixed, pr, na, need, &sc, cl, &hl);
+                if (nh < 0) goto out;
+                if (nh > 3 && u_simple(hl, nh)) {
+                    free(U->v[k]);
+                    U->v[k] = hl;
+                    U->n[k] = nh;
+                    U->cap[k] = nh;
+                    sc.hole_fillet_loops++;
+                } else {
+                    free(hl);
+                }
+            }
+        }
         c->swept_checked += sc.swept_checked;
         c->swept_fail += sc.swept_fail;
         c->swept_widened += sc.swept_widened;
         c->fillets += sc.fillets;
         c->fillet_shrunk += sc.fillet_shrunk;
+        c->fillet_runs_merged += sc.fillet_runs_merged;
+        c->hole_fillet_loops += sc.hole_fillet_loops;
         break;
     }
     if (!u_simple(U->v[0], U->n[0])) {
@@ -2674,7 +2806,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 cl->nout = 0;
                 cl->flags |= TD5_ROAM_CL_FAIL;
                 c->earclip_fail++;
-                TD5_LOG_W(LOG_TAG, "ROAM_PATCH_FAIL cluster %lld (%d arm(s)): no valid union outline",
+                TD5_LOG_I(LOG_TAG, "ROAM_PATCH_RETRY cluster %lld (%d arm(s)): no valid union outline",
                           (long long)cl->key, na);
             }
             goto patch_done;
@@ -2847,7 +2979,17 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
             int nt = 0;
             if (!tmp) goto done;
             c->fan_fallback++;
-            if (outline_simple(pt.pv, cl->nout) && ear_clip(pt.pv, cl->nout, tmp, &nt)) {
+            if (outline_simple(pt.pv, cl->nout) &&
+                (ear_clip(pt.pv, cl->nout, tmp, &nt) ||
+                 /* [F2-E] The first-ear clipper can strand a cut row's collinear lane
+                  * vertices as a zero-area remainder (1851298408837417: a 21 m way split
+                  * at the node, its 8 m piece clamped to a 4 m cut; the outline is
+                  * simple, the clipper stopped on arm 2's row). The UNION clipper (best
+                  * ear by smallest angle, strict inside test, diagonal crossing test)
+                  * gets it; its triangles are checked like the fan's. Knob
+                  * TD5RE_ROAM_EARCLIP_U (1; 0 = the old rule). */
+                 (td5_env_int("TD5RE_ROAM_EARCLIP_U", 1, 0, 1) && ear_clip_u(pt.pv, cl->nout, tmp, &nt) &&
+                  tris_positive(pt.pv, tmp, nt) && (c->earclip_u_rescued++, 1)))) {
                 for (m = 0; m < nt; m++)
                     if (!patch_add_tri(&pt, tmp[m].v[0], tmp[m].v[1], tmp[m].v[2])) { free(tmp); goto done; }
                 cl->flags |= TD5_ROAM_CL_EARCLIP;
@@ -2864,9 +3006,48 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 TD5_LOG_I(LOG_TAG, "ROAM_PATCH_HULL cluster %lld (%d arm(s)): hull of the cut rows",
                           (long long)cl->key, na);
             } else {
+#ifndef TD5RE_RELEASE
+                {
+                    /* DEV: TD5RE_ROAM_JUNC_DUMP=<cluster key> dumps the failing outline,
+                     * its arms + corners and the arm chains (first 80 m) as JSON. */
+                    const char *dk = getenv("TD5RE_ROAM_JUNC_DUMP");
+                    if (dk && strtoll(dk, NULL, 10) == (long long)cl->key) {
+                        char path[400];
+                        const char *dir = td5_plat_log_dir();
+                        FILE *df;
+                        snprintf(path, sizeof path, "%sroam_junc_dump.json", dir ? dir : "");
+                        if ((df = fopen(path, "w")) != NULL) {
+                            int z2, q2;
+                            fprintf(df, "{\"key\": %lld, \"cx\": %.3f, \"cz\": %.3f, \"simple\": %d, \"nnode\": %d,\n \"outline\": [",
+                                    (long long)cl->key, cl->cx, cl->cz, simple, cl->nnode);
+                            for (z2 = 0; z2 < cl->nout; z2++)
+                                fprintf(df, "%s[%.3f, %.3f, %d]", z2 ? ", " : "", pt.pv[z2].x, pt.pv[z2].z, pt.pv[z2].kind);
+                            fprintf(df, "],\n \"arms\": [");
+                            for (z2 = 0; z2 < na; z2++) {
+                                const ArmTmp *am = &at[z2];
+                                fprintf(df, "%s\n  {\"ekey\": %llu, \"node\": [%.3f, %.3f], \"dir\": [%.5f, %.5f], \"hw\": %.3f, "
+                                        "\"t\": %.3f, \"lim\": %.3f, \"ang\": %.5f, \"corner\": %d, \"cx\": %.3f, \"cz\": %.3f, "
+                                        "\"r\": %.3f, \"chain\": [", z2 ? "," : "", (unsigned long long)am->ekey, am->kx, am->kz,
+                                        am->a.dir_x, am->a.dir_z, am->a.half_w, am->a.t, am->lim, am->a.ang, cor[z2].type,
+                                        cor[z2].cx, cor[z2].cz, cor[z2].r);
+                                for (q2 = 0; q2 <= 16; q2++) {
+                                    double px2, pz2;
+                                    const double dd = am->len * (double)q2 / 16.0;
+                                    if (dd > 80.0 * TD5_ROAM_UPM) break;
+                                    chain_point(g, am, dd, &px2, &pz2);
+                                    fprintf(df, "%s[%.3f, %.3f]", q2 ? ", " : "", px2, pz2);
+                                }
+                                fprintf(df, "]}");
+                            }
+                            fprintf(df, "]}\n");
+                            fclose(df);
+                        }
+                    }
+                }
+#endif
                 cl->flags |= TD5_ROAM_CL_FAIL;
                 c->earclip_fail++;
-                TD5_LOG_W(LOG_TAG, "ROAM_PATCH_FAIL cluster %lld (%d arm(s), %d outline "
+                TD5_LOG_I(LOG_TAG, "ROAM_PATCH_RETRY cluster %lld (%d arm(s), %d outline "
                           "vertices): neither the fan nor ear clipping is valid",
                           (long long)cl->key, na, cl->nout);
             }
@@ -3077,6 +3258,12 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
         g->census = keep;
         ok = junction_pass(g, mode);
     }
+    /* [F2-E] A failed pass is retried with the next fallback (ROAM_PATCH_RETRY,
+     * INF); only a cluster that ends this loop with no patch is a failure. */
+    for (i = 0; i < g->ncluster; i++)
+        if ((g->cluster[i].flags & TD5_ROAM_CL_FAIL) && g->cluster[i].narm > 0)
+            TD5_LOG_W(LOG_TAG, "ROAM_PATCH_FAIL cluster %lld (%d node(s), %d arm(s)): no valid patch after every "
+                      "fallback", (long long)g->cluster[i].key, g->cluster[i].nnode, g->cluster[i].narm);
     g->census.max_component = comp1;
     g->census.simple_fallback = nsimple;
     g->census.split_fallback = nsplit;
@@ -3108,6 +3295,8 @@ static int casco_pip(double x, double z)
     }
     return inside;
 }
+
+int td5_roam_junction_in_casco(double x, double z) { return casco_pip(x, z); }
 
 /* Every SIGNALS tile whose INDEX extent meets the window: signals[] x,z. */
 static double *load_signals(const char *slug, const double win[4], int *n_out)
@@ -3355,6 +3544,9 @@ int td5_roam_junction_dev_census(void)
                 "fillet_shrunk %d\n",
                 c->fillets, c->corners_parallel, c->corners_far, c->corners_reflex, c->bevels,
                 c->fillet_shrunk);
+        fprintf(f, "fillet_runs_merged %d\n", c->fillet_runs_merged);
+        fprintf(f, "hole_fillet_loops %d\n", c->hole_fillet_loops);
+        fprintf(f, "earclip_u_rescued %d\n", c->earclip_u_rescued);
         fprintf(f, "swept_checked %d\nswept_widened %d\nswept_fail %d\n",
                 c->swept_checked, c->swept_widened, c->swept_fail);
         fprintf(f, "ribbon_swept_checked %d\nribbon_swept_fail %d\nribbon_sharp_vertices_gt45 %d\n",

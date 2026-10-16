@@ -37,6 +37,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  walls (a corner may hang 35 cm over a kerb), bridges" },
     { CL_ITEM,    "  keep you on the deck, and a car that leaves the road" },
     { CL_ITEM,    "  is put back on it. Races are unchanged." },
+    { CL_ITEM,    "Free roam: sharp junction corners are rounded. Where a" },
+    { CL_ITEM,    "  diagonal meets a plaza the kerb tip and the traffic" },
+    { CL_ITEM,    "  islands now have a kerb radius (was a knife edge a car" },
+    { CL_ITEM,    "  could hang on), so a hard turn scrapes off and goes on." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "October 16 (free roam mode)" },

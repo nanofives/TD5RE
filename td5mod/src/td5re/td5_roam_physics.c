@@ -27,6 +27,8 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
+#include "td5_roam_junction.h"   /* dev casco test (corner harness) */
+#include "td5_damage.h"          /* dev corner harness: repair between runs */
 #include "td5_geo_roads.h"      /* TD5_GEO_RC_* (dev corner matrix) */
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -52,6 +54,10 @@ typedef struct {
     int32_t     good_x, good_y, good_z;   /* last tick on the road with a wheel down */
     int         good_valid;
     int         settled;        /* ticks on the road with a wheel down since the last spawn / teleport */
+    long        wall_tick;      /* last wall contact (dev trace): sim tick, corner, angle, pen, edge */
+    int         wall_corner, wall_pinch;
+    int32_t     wall_angle, wall_pen;
+    uint64_t    wall_edge;
 } RoamSlotState;
 
 typedef struct {
@@ -821,6 +827,9 @@ void td5_roam_resolve_walls(TD5_Actor *a)
         const int32_t angle = rp_wall_angle(nx[deep], nz[deep]);
         if (pen > s_rp.st.wall_corner_pen_max) s_rp.st.wall_corner_pen_max = pen;
         if (pen > RP_PUSH_CAP) pen = RP_PUSH_CAP;
+        ss->wall_tick = (long)g_td5.simulation_tick_counter;
+        ss->wall_corner = deep; ss->wall_pinch = pinch;
+        ss->wall_angle = angle; ss->wall_pen = pen; ss->wall_edge = h->edge_key;
         if (pinch) {
             /* no translation this tick: the impulse of the deeper corner only */
             const int32_t sx = a->world_pos.x, sz = a->world_pos.z;
@@ -943,9 +952,22 @@ void td5_roam_resolve_walls(TD5_Actor *a)
  * through the junction (control point = where the two street centre lines meet) ending on the
  * out-ribbon end row, [RD_NP-1] 40 m out along it */
 #define RD_NP 9
-typedef struct { int kind; double cx, cz, inx, inz, outx, outz, defl; uint64_t cl, ein, eout; double px[RD_NP], pz[RD_NP]; } RdCorner;
+#define RD_PMAX 128                       /* [F2-E] a routed path (rd_route) has up to this many points */
+typedef struct {
+    int kind; double cx, cz, inx, inz, outx, outz, defl; uint64_t cl, ein, eout;
+    double eox, eoz;                      /* out-ribbon end row centre                              */
+    double lin, lout;                     /* approach / exit run, world units (45 m / 40 m; the acute
+                                           * set falls back to 30 and 20 m on short streets)        */
+    int np;                               /* path points (RD_NP for the Bezier)                     */
+    int route;                            /* 0 not checked, 1 Bezier on the road, 2 routed, 3 no route */
+    double off_m;                         /* metres of the Bezier off the drivable surface          */
+    double px[RD_PMAX], pz[RD_PMAX];
+} RdCorner;
+#define RD_MAXC_ACUTE 2048
 
-static const char *const k_rd_kind[4] = { "one-lane/service", "calle x calle", "avenida x calle", "diagonal x avenida" };
+#define RD_NK 5
+static const char *const k_rd_kind[RD_NK] = { "one-lane/service", "calle x calle", "avenida x calle", "diagonal x avenida",
+                                              "acute" };
 
 struct RoamDrive {
     double  kmh;
@@ -960,16 +982,37 @@ struct RoamDrive {
     int32_t lx, lz;
     long    rest_t, log_t;
     /* corners */
-    RdCorner c[RD_MAXC];
+    RdCorner *c;                  /* RD_MAXC (matrix) or RD_MAXC_ACUTE (acute set) entries */
+    int     cap;
     int     nc, ci, si;
     long    ct, stuck_t, slow_t, rev_t, stalls;
     int     retries;
-    long    tot_stalls, tot_retries, k_stalls[4][2], k_retries[4][2];
+    long    tot_stalls, tot_retries, k_stalls[RD_NK][2], k_retries[RD_NK][2];
     long    hits0, pinch0, resc0, tele0;
     double  vmin, vmax;
     long    runs, ok, stuck, pinch, hits, resc;
-    long    k_runs[4][2], k_ok[4][2], k_stuck[4][2], k_pinch[4][2], k_hits[4][2], k_resc[4][2];
+    long    k_runs[RD_NK][2], k_ok[RD_NK][2], k_stuck[RD_NK][2], k_pinch[RD_NK][2], k_hits[RD_NK][2], k_resc[RD_NK][2];
     FILE   *rep;
+    /* [F2-E] selection + trace knobs */
+    int      kmh_v[2], nkmh;        /* TD5RE_ROAM_CORNERS_KMH="40,80"                          */
+    uint64_t only[32];              /* TD5RE_ROAM_CORNERS_ONLY="<cluster hex>[,...]"           */
+    int      nonly;
+    int      acute;                 /* TD5RE_ROAM_CORNERS_SET=acute: every casco corner >= deg */
+    double   acute_deg;             /* TD5RE_ROAM_ACUTE_DEG (120)                              */
+    double   acute_max;             /* TD5RE_ROAM_ACUTE_MAX (160): median-nose U-turns above   */
+    FILE    *trc;                   /* TD5RE_ROAM_CORNER_TRACE=1: roam_corner_trace.csv        */
+    int      route_on;              /* TD5RE_ROAM_CORNER_ROUTE (1): off-road Bezier -> rd_route */
+    long     ext_ticks;             /* ticks the car sat inside 20 m of C at < 3 km/h          */
+    long     last_wh;               /* wall_hits + pinches at the previous harness call        */
+    RdCorner run;                   /* the current run's path                                  */
+    int      replan_on;             /* TD5RE_ROAM_CORNER_REPLAN (0): re-route from the car     */
+    int      recover_kmh;           /* TD5RE_ROAM_CORNER_RECOVER_KMH (30): speed after a replan */
+    int      replans, recover;
+    int      repair;                /* TD5RE_ROAM_CORNER_REPAIR (1): full repair per run       */
+    long     replan_t;
+    int      rev_done;
+    long     tot_replans;
+    int      truncated;             /* acute corners past RD_MAXC_ACUTE                        */
 };
 
 static double rd_speed_upt(const TD5_Actor *a)
@@ -1290,16 +1333,6 @@ static const RoamEdgeRec *rd_edge(uint64_t key, const RoamTile **tout)
 
 static int rd_is(const char *n, const char *pfx) { return strncmp(n, pfx, strlen(pfx)) == 0; }
 
-/* way of a world point: the locator's edge key >> 16 (way id), 0 = none / patch */
-static uint64_t rd_way_at(double x, double z)
-{
-    TD5_RoamHit h;
-    if (!td5_roam_locate(s_rp.rs, (int32_t)(x * 256.0), (int32_t)(z * 256.0), 0, 0, ROAM_PRIM_NONE, &h) ||
-        h.prim == ROAM_PRIM_NONE || !h.inside || h.is_patch)
-        return 0;
-    return h.edge_key >> 16;
-}
-
 static int rd_kind_of(const RoamEdgeRec *ea, const RoamEdgeRec *eb, const char *na, const char *nb, double defl)
 {
     const int av_a = rd_is(na, "Avenida"), av_b = rd_is(nb, "Avenida");
@@ -1316,9 +1349,92 @@ static int rd_kind_of(const RoamEdgeRec *ea, const RoamEdgeRec *eb, const char *
     return -1;
 }
 
+/* Path of a corner run A (in) -> B (out) at node nd: the in-ribbon end row and axis, the
+ * out-ribbon likewise, both arms' own ways under the approach and the exit. 0 when unusable. */
+/* [F2-E] the street at a world point is arm `key`'s street: the same way, or (relaxed, the
+ * acute set) any ribbon carrying the same non-empty name -- OSM splits one street into many
+ * ways, so 45 m up a diagonal is often the next way of the same Diagonal */
+static int rd_same_street(double x, double z, uint64_t key, int relax)
+{
+    TD5_RoamHit h;
+    const RoamTile *ta = NULL, *th = NULL;
+    const RoamEdgeRec *ea, *eh;
+    const char *na;
+    if (!td5_roam_locate(s_rp.rs, (int32_t)(x * 256.0), (int32_t)(z * 256.0), 0, 0, ROAM_PRIM_NONE, &h) ||
+        h.prim == ROAM_PRIM_NONE || !h.inside || h.is_patch)
+        return 0;
+    if ((h.edge_key >> 16) == (key >> 16)) return 1;
+    if (!relax || !(ea = rd_edge(key, &ta)) || !(eh = rd_edge(h.edge_key, &th))) return 0;
+    na = rd_name(ta, ea->name_id);
+    return na[0] && strcmp(na, rd_name(th, eh->name_id)) == 0;
+}
+
+static int rd_corner_path(const RoamTile *t, const RoamNodeRec *nd, const RoamArmRec *A, const RoamArmRec *B,
+                          RdCorner *o, int relax)
+{
+    double inx, inz, outx, outz, cx, cz, eix, eiz, eox, eoz;
+    memset(o, 0, sizeof *o);
+    cx = (double)t->org_x + nd->x - s_rp.rs->org_x;
+    cz = (double)t->org_z + nd->z - s_rp.rs->org_z;
+    /* the path runs on the ribbons' own centre lines (the arm bearing through the
+     * centroid can run along a kerb): in-ribbon end row and axis, out-ribbon likewise */
+    if (!rd_edge_end_near(A->edge_key, cx, cz, &eix, &eiz, &inx, &inz)) return 0;
+    if (!rd_edge_end_near(B->edge_key, cx, cz, &eox, &eoz, &outx, &outz)) return 0;
+    /* the approach and the exit must be on the arms' own ways */
+    {
+        static const double k_lin[3] = { 45.0, 30.0, 20.0 }, k_lout[3] = { 40.0, 30.0, 20.0 };
+        const int ntry = relax ? 3 : 1;
+        int q;
+        o->lin = o->lout = 0.0;
+        for (q = 0; q < ntry && o->lin == 0.0; q++)
+            if (rd_same_street(eix + inx * k_lin[q] * RD_M, eiz + inz * k_lin[q] * RD_M, A->edge_key, relax))
+                o->lin = k_lin[q] * RD_M;
+        for (q = 0; q < ntry && o->lout == 0.0; q++)
+            if (rd_same_street(eox + outx * k_lout[q] * RD_M, eoz + outz * k_lout[q] * RD_M, B->edge_key, relax))
+                o->lout = k_lout[q] * RD_M;
+        if (o->lin == 0.0 || o->lout == 0.0) return 0;
+    }
+    {
+        /* control point: E_in + t*(-in) meets E_out + u*(-out) */
+        const double ax_ = -inx, az_ = -inz, bx_ = -outx, bz_ = -outz;
+        const double det = ax_ * (-bz_) - az_ * (-bx_);
+        double qx = 0.5 * (eix + eox), qz = 0.5 * (eiz + eoz);
+        int q;
+        if (fabs(det) > 1e-6) {
+            const double tt = ((eox - eix) * (-bz_) - (eoz - eiz) * (-bx_)) / det;
+            if (tt > 0.0 && tt < 60.0 * RD_M) { qx = eix + ax_ * tt; qz = eiz + az_ * tt; }
+        }
+        o->px[0] = eix + inx * o->lin; o->pz[0] = eiz + inz * o->lin;
+        for (q = 0; q <= RD_NP - 3; q++) {
+            const double u = (double)q / (double)(RD_NP - 3);
+            const double w0 = (1 - u) * (1 - u), w1 = 2 * u * (1 - u), w2 = u * u;
+            o->px[1 + q] = w0 * eix + w1 * qx + w2 * eox;
+            o->pz[1 + q] = w0 * eiz + w1 * qz + w2 * eoz;
+        }
+        o->px[RD_NP - 1] = eox + outx * o->lout;
+        o->pz[RD_NP - 1] = eoz + outz * o->lout;
+    }
+    o->cx = cx; o->cz = cz;
+    o->inx = inx; o->inz = inz; o->outx = outx; o->outz = outz;
+    o->defl = acos(fmax(-1.0, fmin(1.0, -(inx * outx + inz * outz)))) * 180.0 / RD_PI;
+    o->cl = (uint64_t)nd->cluster_key;
+    o->ein = A->edge_key; o->eout = B->edge_key;
+    o->eox = eox; o->eoz = eoz;
+    o->np = RD_NP;
+    return 1;
+}
+
+static int rd_only_has(const struct RoamDrive *d, uint64_t cl)
+{
+    int k;
+    if (!d->nonly) return 1;
+    for (k = 0; k < d->nonly; k++) if (d->only[k] == cl) return 1;
+    return 0;
+}
+
 static void rd_pick_corners(struct RoamDrive *d)
 {
-    int ti, kind_n[4] = { 0, 0, 0, 0 };
+    int ti, kind_n[RD_NK] = { 0, 0, 0, 0, 0 };
     uint32_t ni;
     d->nc = 0;
     for (ti = 0; ti < s_rp.ntile; ti++) {
@@ -1330,64 +1446,34 @@ static void rd_pick_corners(struct RoamDrive *d)
             RdCorner cand[4];
             memset(cand, 0, sizeof cand);
             if (nd->narm < 3 || nd->narm > 4 || (nd->flags & 0x04)) continue;
+            if (!rd_only_has(d, (uint64_t)nd->cluster_key)) continue;
             for (ai = 0; ai < nd->narm; ai++) {
                 for (ao = 0; ao < nd->narm; ao++) {
                     const RoamArmRec *A = &t->arm[nd->arm_first + ai], *B = &t->arm[nd->arm_first + ao];
                     const RoamTile *ta = NULL, *tb = NULL;
                     const RoamEdgeRec *ea, *eb;
-                    double ia, oa, inx, inz, outx, outz, defl, cx, cz, eix, eiz, eox, eoz;
+                    double ia, oa, defl;
+                    RdCorner pc;
                     if (ai == ao) continue;
                     if (!(ea = rd_edge(A->edge_key, &ta)) || !(eb = rd_edge(B->edge_key, &tb))) continue;
                     if (ea->layer != 0 || eb->layer != 0) continue;
                     ia = (double)A->bearing12 * (2.0 * RD_PI / 4096.0);
                     oa = (double)B->bearing12 * (2.0 * RD_PI / 4096.0);
-                    inx = cos(ia); inz = sin(ia); outx = cos(oa); outz = sin(oa);
-                    defl = acos(fmax(-1.0, fmin(1.0, -(inx * outx + inz * outz)))) * 180.0 / RD_PI;
+                    defl = acos(fmax(-1.0, fmin(1.0, -(cos(ia) * cos(oa) + sin(ia) * sin(oa))))) * 180.0 / RD_PI;
                     kind = rd_kind_of(ea, eb, rd_name(ta, ea->name_id), rd_name(tb, eb->name_id), defl);
                     if (kind < 0 || fabs(defl - 90.0) >= best[kind]) continue;
-                    cx = (double)t->org_x + nd->x - s_rp.rs->org_x;
-                    cz = (double)t->org_z + nd->z - s_rp.rs->org_z;
-                    /* the path runs on the ribbons' own centre lines (the arm bearing through the
-                     * centroid can run along a kerb): in-ribbon end row and axis, out-ribbon likewise */
-                    if (!rd_edge_end_near(A->edge_key, cx, cz, &eix, &eiz, &inx, &inz)) continue;
-                    if (!rd_edge_end_near(B->edge_key, cx, cz, &eox, &eoz, &outx, &outz)) continue;
-                    defl = acos(fmax(-1.0, fmin(1.0, -(inx * outx + inz * outz)))) * 180.0 / RD_PI;
-                    if (rd_kind_of(ea, eb, rd_name(ta, ea->name_id), rd_name(tb, eb->name_id), defl) != kind) continue;
-                    if (fabs(defl - 90.0) >= best[kind]) continue;
-                    /* the approach and the exit must be on the arms' own ways */
-                    if (rd_way_at(eix + inx * 45.0 * RD_M, eiz + inz * 45.0 * RD_M) != (A->edge_key >> 16)) continue;
-                    if (rd_way_at(eox + outx * 40.0 * RD_M, eoz + outz * 40.0 * RD_M) != (B->edge_key >> 16)) continue;
-                    {
-                        /* control point: E_in + t*(-in) meets E_out + u*(-out) */
-                        const double ax_ = -inx, az_ = -inz, bx_ = -outx, bz_ = -outz;
-                        const double det = ax_ * (-bz_) - az_ * (-bx_);
-                        double qx = 0.5 * (eix + eox), qz = 0.5 * (eiz + eoz);
-                        int q;
-                        if (fabs(det) > 1e-6) {
-                            const double tt = ((eox - eix) * (-bz_) - (eoz - eiz) * (-bx_)) / det;
-                            if (tt > 0.0 && tt < 60.0 * RD_M) { qx = eix + ax_ * tt; qz = eiz + az_ * tt; }
-                        }
-                        cand[kind].px[0] = eix + inx * 45.0 * RD_M; cand[kind].pz[0] = eiz + inz * 45.0 * RD_M;
-                        for (q = 0; q <= RD_NP - 3; q++) {
-                            const double u = (double)q / (double)(RD_NP - 3);
-                            const double w0 = (1 - u) * (1 - u), w1 = 2 * u * (1 - u), w2 = u * u;
-                            cand[kind].px[1 + q] = w0 * eix + w1 * qx + w2 * eox;
-                            cand[kind].pz[1 + q] = w0 * eiz + w1 * qz + w2 * eoz;
-                        }
-                        cand[kind].px[RD_NP - 1] = eox + outx * 40.0 * RD_M;
-                        cand[kind].pz[RD_NP - 1] = eoz + outz * 40.0 * RD_M;
-                    }
-                    best[kind] = fabs(defl - 90.0);
-                    cand[kind].kind = kind; cand[kind].cx = cx; cand[kind].cz = cz;
-                    cand[kind].inx = inx; cand[kind].inz = inz; cand[kind].outx = outx; cand[kind].outz = outz;
-                    cand[kind].defl = defl; cand[kind].cl = (uint64_t)nd->cluster_key;
-                    cand[kind].ein = A->edge_key; cand[kind].eout = B->edge_key;
+                    if (!rd_corner_path(t, nd, A, B, &pc, 0)) continue;
+                    if (rd_kind_of(ea, eb, rd_name(ta, ea->name_id), rd_name(tb, eb->name_id), pc.defl) != kind) continue;
+                    if (fabs(pc.defl - 90.0) >= best[kind]) continue;
+                    best[kind] = fabs(pc.defl - 90.0);
+                    pc.kind = kind;
+                    cand[kind] = pc;
                 }
             }
             for (kind = 0; kind < 4; kind++) {
                 int j, far_ok = 1;
-                if (best[kind] > 1e8 || kind_n[kind] >= d->per_kind || d->nc >= RD_MAXC) continue;
-                for (j = 0; j < d->nc; j++)
+                if (best[kind] > 1e8 || kind_n[kind] >= d->per_kind || d->nc >= d->cap) continue;
+                for (j = 0; j < d->nc && !d->nonly; j++)
                     if (d->c[j].kind == kind &&
                         hypot(d->c[j].cx - cand[kind].cx, d->c[j].cz - cand[kind].cz) < 250.0 * RD_M) far_ok = 0;
                 if (!far_ok) continue;
@@ -1400,18 +1486,302 @@ static void rd_pick_corners(struct RoamDrive *d)
               "diagonal x avenida %d", d->nc, kind_n[0], kind_n[1], kind_n[2], kind_n[3]);
 }
 
+/* [F2-E] TD5RE_ROAM_CORNERS_SET=acute: EVERY corner of a casco junction (3+ arms, layer 0,
+ * node inside the casco polygon) whose turn deflection is >= acute_deg. A corner is the
+ * unordered arm pair (one kerb), driven from the lower arm index to the higher. A cluster whose
+ * node row repeats across tiles is listed once per pair. */
+static void rd_pick_acute(struct RoamDrive *d)
+{
+    int ti, dup = 0, nocasco = 0, nopath = 0, nopath_acute = 0, nmedian = 0;
+    uint32_t ni;
+    d->nc = 0;
+    for (ti = 0; ti < s_rp.ntile; ti++) {
+        const RoamTile *t = &s_rp.tiles[ti];
+        for (ni = 0; ni < t->nnode; ni++) {
+            const RoamNodeRec *nd = &t->node[ni];
+            int ai, ao;
+            if (nd->narm < 3 || (nd->flags & 0x04)) continue;
+            if (!rd_only_has(d, (uint64_t)nd->cluster_key)) continue;
+            if (!td5_roam_junction_in_casco((double)t->org_x + nd->x, (double)t->org_z + nd->z)) { nocasco++; continue; }
+            for (ai = 0; ai < nd->narm; ai++) {
+                /* a kerb corner is between two NEIGHBOUR arms (the ARM table is sorted
+                 * round the centroid): arm k and arm k+1 */
+                for (ao = (ai + 1) % nd->narm; ao == (ai + 1) % nd->narm; ao = -1) {
+                    const RoamArmRec *A = &t->arm[nd->arm_first + ai], *B = &t->arm[nd->arm_first + ao];
+                    const RoamTile *ta = NULL, *tb = NULL;
+                    const RoamEdgeRec *ea, *eb;
+                    RdCorner pc;
+                    int j, seen = 0;
+                    if (!(ea = rd_edge(A->edge_key, &ta)) || !(eb = rd_edge(B->edge_key, &tb))) continue;
+                    if (ea->layer != 0 || eb->layer != 0) continue;
+                    if (A->edge_key == B->edge_key) continue;
+                    if (!rd_corner_path(t, nd, A, B, &pc, 1)) {
+                        /* by the arm bearings: would this pair have been an acute corner? */
+                        const double ia = (double)A->bearing12 * (2.0 * RD_PI / 4096.0);
+                        const double oa = (double)B->bearing12 * (2.0 * RD_PI / 4096.0);
+                        const double bd = acos(fmax(-1.0, fmin(1.0, -(cos(ia) * cos(oa) + sin(ia) * sin(oa))))) *
+                                          180.0 / RD_PI;
+                        nopath++;
+                        if (bd >= d->acute_deg && bd < d->acute_max) {
+                            nopath_acute++;
+                            if (nopath_acute <= 40)
+                                TD5_LOG_I(LOG_TAG, "[ROAMCORNER] acute corner NOT driven (no usable path): cluster=%016llx "
+                                          "arms %016llx -> %016llx bearing defl %.0f", (unsigned long long)nd->cluster_key,
+                                          (unsigned long long)A->edge_key, (unsigned long long)B->edge_key, bd);
+                        }
+                        continue;
+                    }
+                    if (pc.defl < d->acute_deg) continue;
+                    /* 160+ deg: two near-parallel arms (a divided avenue's carriageways): the
+                     * builder joins their cut rows straight (CORNER_DIRECT, no kerb corner);
+                     * the turn is a U-turn round a median nose, counted, not driven */
+                    if (pc.defl >= d->acute_max) { nmedian++; continue; }
+                    for (j = 0; j < d->nc && !seen; j++)
+                        if (d->c[j].cl == pc.cl && ((d->c[j].ein == pc.ein && d->c[j].eout == pc.eout) ||
+                                                    (d->c[j].ein == pc.eout && d->c[j].eout == pc.ein)))
+                            seen = 1;
+                    if (seen) { dup++; continue; }
+                    if (d->nc >= d->cap) { d->truncated++; continue; }
+                    pc.kind = 4;
+                    d->c[d->nc++] = pc;
+                }
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "[ROAMCORNER] acute set: %d corner(s) with deflection %.0f..%.0f deg in the casco "
+              "(%d median-nose U-turns >= %.0f deg not driven, %d duplicate rows, %d node rows outside the casco, "
+              "%d neighbour-arm pairs with no usable path (%d of them acute by bearing), %d over the cap)", d->nc,
+              d->acute_deg, d->acute_max, nmedian, d->acute_max, dup, nocasco, nopath, nopath_acute, d->truncated);
+}
+
+/* [F2-E] Paved-surface route for a corner run. The Bezier through the point where the two
+ * street centre lines meet is a fine line through a plain crossing, but in a multi-node
+ * cluster (a diagonal meeting an avenue next to a block corner, a plaza) it can cut through
+ * an unpaved island, which then holds the scripted driver against its kerb (00064c21000864e3:
+ * the path crossed the walled triangle between the diagonal, the avenue and the street).
+ * When any 0.25 m sample of the Bezier is off the drivable surface, the run follows a
+ * shortest path on the locator's own drivable mask instead: 0.5 m cells, eroded by
+ * RD_ROUTE_CLEAR (1.5 m) so the car's body clears every kerb, with a cost that grows near a
+ * wall, string-pulled, ending on the exit ribbon's end row and 40 m out along it as before. */
+#define RD_ROUTE_CELL   (0.5 * RD_M)
+#define RD_ROUTE_CLEAR  3                 /* cells (1.5 m): the search                        */
+#define RD_ROUTE_LOS    5                 /* cells (2.5 m): a string-pulled shortcut          */
+#define RD_ROUTE_MAXN   (480 * 480)
+
+static int rd_paved(double x, double z)
+{
+    TD5_RoamHit h;
+    return td5_roam_locate(s_rp.rs, (int32_t)(x * 256.0), (int32_t)(z * 256.0), 0, 0, ROAM_PRIM_NONE, &h) &&
+           h.prim != ROAM_PRIM_NONE && h.inside;
+}
+
+/* metres of the path (start .. exit end row) that run off the drivable surface */
+static double rd_path_offroad_m(const RdCorner *c)
+{
+    double off = 0.0;
+    int k;
+    for (k = 0; k + 1 < c->np - 1; k++) {
+        const double sx = c->px[k + 1] - c->px[k], sz = c->pz[k + 1] - c->pz[k];
+        const double len = sqrt(sx * sx + sz * sz);
+        const int n = (int)(len / (0.25 * RD_M)) + 1;
+        int q;
+        for (q = 0; q < n; q++) {
+            const double u = (q + 0.5) / n;
+            if (!rd_paved(c->px[k] + sx * u, c->pz[k] + sz * u)) off += len / n / RD_M;
+        }
+    }
+    return off;
+}
+
+typedef struct { int nx, nz; double x0, z0; uint8_t *free_; uint16_t *dist; float *g; int32_t *from; } RdGrid;
+
+static int rd_cell_ok(const RdGrid *G, int ix, int iz) { return ix >= 0 && iz >= 0 && ix < G->nx && iz < G->nz; }
+
+/* straight segment between two cell centres keeps RD_ROUTE_LOS clear of every wall (a
+ * shortcut that grazes a corner is what the pursuit then cuts further) */
+static int rd_los(const RdGrid *G, int ax, int az, int bx, int bz)
+{
+    const int n = (abs(bx - ax) > abs(bz - az) ? abs(bx - ax) : abs(bz - az)) * 2 + 1;
+    int q;
+    for (q = 0; q <= n; q++) {
+        const int ix = (int)floor(ax + (bx - ax) * (double)q / n + 0.5);
+        const int iz = (int)floor(az + (bz - az) * (double)q / n + 0.5);
+        if (!rd_cell_ok(G, ix, iz) || G->dist[iz * G->nx + ix] <= 2 * RD_ROUTE_LOS) return 0;
+    }
+    return 1;
+}
+
+/* nearest free cell to (ix, iz) within 12 cells, -1 when none */
+static int rd_near_free(const RdGrid *G, int ix, int iz)
+{
+    int r, dx, dz, best = -1, bd = 1 << 30;
+    for (r = 0; r <= 12 && best < 0; r++)
+        for (dz = -r; dz <= r; dz++)
+            for (dx = -r; dx <= r; dx++) {
+                const int x = ix + dx, z = iz + dz;
+                if (!rd_cell_ok(G, x, z) || !G->free_[z * G->nx + x]) continue;
+                if (dx * dx + dz * dz < bd) { bd = dx * dx + dz * dz; best = z * G->nx + x; }
+            }
+    return best;
+}
+
+static int rd_route(RdCorner *c, double sx0, double sz0)
+{
+    RdGrid G;
+    double xmin, xmax, zmin, zmax;
+    int i, n, s, e, ok = 0, k;
+    int32_t *heap = NULL;
+    int hn = 0;
+    uint8_t *paved = NULL, *closed = NULL;
+    const double ex = c->eox, ez = c->eoz;
+    memset(&G, 0, sizeof G);
+    xmin = fmin(fmin(sx0, ex), c->cx) - 30.0 * RD_M; xmax = fmax(fmax(sx0, ex), c->cx) + 30.0 * RD_M;
+    zmin = fmin(fmin(sz0, ez), c->cz) - 30.0 * RD_M; zmax = fmax(fmax(sz0, ez), c->cz) + 30.0 * RD_M;
+    G.nx = (int)((xmax - xmin) / RD_ROUTE_CELL) + 1;
+    G.nz = (int)((zmax - zmin) / RD_ROUTE_CELL) + 1;
+    G.x0 = xmin; G.z0 = zmin;
+    n = G.nx * G.nz;
+    if (n > RD_ROUTE_MAXN) return 0;
+    paved = (uint8_t *)calloc((size_t)n, 1);
+    closed = (uint8_t *)calloc((size_t)n, 1);
+    G.free_ = (uint8_t *)calloc((size_t)n, 1);
+    G.dist = (uint16_t *)calloc((size_t)n, sizeof(uint16_t));
+    G.g = (float *)malloc((size_t)n * sizeof(float));
+    G.from = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    heap = (int32_t *)malloc((size_t)n * 8 * sizeof(int32_t));
+    if (!paved || !closed || !G.free_ || !G.dist || !G.g || !G.from || !heap) goto out;
+    for (i = 0; i < n; i++) {
+        const int ix = i % G.nx, iz = i / G.nx;
+        paved[i] = (uint8_t)rd_paved(G.x0 + (ix + 0.5) * RD_ROUTE_CELL, G.z0 + (iz + 0.5) * RD_ROUTE_CELL);
+    }
+    /* chamfer distance (cells x 2: 2 orthogonal, 3 diagonal) to the nearest unpaved cell */
+    for (i = 0; i < n; i++) G.dist[i] = paved[i] ? 60000 : 0;
+    for (k = 0; k < 2; k++) {
+        int iz0 = k ? G.nz - 1 : 0, ized = k ? -1 : G.nz, st = k ? -1 : 1, iz;
+        for (iz = iz0; iz != ized; iz += st) {
+            int ix0 = k ? G.nx - 1 : 0, ixed = k ? -1 : G.nx, ix;
+            for (ix = ix0; ix != ixed; ix += st) {
+                const int id = iz * G.nx + ix;
+                int d = G.dist[id];
+                static const int off[4][3] = { { -1, 0, 2 }, { 0, -1, 2 }, { -1, -1, 3 }, { 1, -1, 3 } };
+                int q;
+                for (q = 0; q < 4; q++) {
+                    const int x = ix + off[q][0] * st, z = iz + off[q][1] * st;
+                    if (rd_cell_ok(&G, x, z) && G.dist[z * G.nx + x] + off[q][2] < d) d = G.dist[z * G.nx + x] + off[q][2];
+                    else if (!rd_cell_ok(&G, x, z) && off[q][2] < d) d = off[q][2];   /* window edge counts as open */
+                }
+                G.dist[id] = (uint16_t)d;
+            }
+        }
+    }
+    for (i = 0; i < n; i++) G.free_[i] = G.dist[i] > 2 * RD_ROUTE_CLEAR;
+    s = rd_near_free(&G, (int)((sx0 - G.x0) / RD_ROUTE_CELL), (int)((sz0 - G.z0) / RD_ROUTE_CELL));
+    e = rd_near_free(&G, (int)((ex - G.x0) / RD_ROUTE_CELL), (int)((ez - G.z0) / RD_ROUTE_CELL));
+    if (s < 0 || e < 0) goto out;
+    /* A* (binary heap of cell ids keyed on g + h), 8-connected, cost x (1 + 4 / dist_m) near walls */
+    for (i = 0; i < n; i++) { G.g[i] = 1e30f; G.from[i] = -1; }
+    G.g[s] = 0.0f;
+#define RD_F(id) (G.g[id] + (float)hypot((double)((id) % G.nx - e % G.nx), (double)((id) / G.nx - e / G.nx)))
+    heap[hn++] = s;
+    while (hn > 0) {
+        int cur = heap[0], q;
+        heap[0] = heap[--hn];
+        for (q = 0;;) {                      /* sift down */
+            int l = 2 * q + 1, r = l + 1, m = q;
+            if (l < hn && RD_F(heap[l]) < RD_F(heap[m])) m = l;
+            if (r < hn && RD_F(heap[r]) < RD_F(heap[m])) m = r;
+            if (m == q) break;
+            { const int t = heap[q]; heap[q] = heap[m]; heap[m] = t; }
+            q = m;
+        }
+        if (closed[cur]) continue;
+        closed[cur] = 1;
+        if (cur == e) { ok = 1; break; }
+        for (q = 0; q < 8; q++) {
+            static const int dd[8][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } };
+            const int x = cur % G.nx + dd[q][0], z = cur / G.nx + dd[q][1];
+            int nid;
+            float ng;
+            if (!rd_cell_ok(&G, x, z)) continue;
+            nid = z * G.nx + x;
+            if (!G.free_[nid] || closed[nid]) continue;
+            ng = G.g[cur] + (float)((q < 4 ? 1.0 : 1.41421356) * (1.0 + 8.0 / (double)G.dist[nid]));
+            if (ng >= G.g[nid]) continue;
+            G.g[nid] = ng; G.from[nid] = cur;
+            if (hn < n * 8) {                /* push + sift up */
+                int p = hn++;
+                heap[p] = nid;
+                while (p > 0 && RD_F(heap[(p - 1) / 2]) > RD_F(heap[p])) {
+                    const int t = heap[p]; heap[p] = heap[(p - 1) / 2]; heap[(p - 1) / 2] = t;
+                    p = (p - 1) / 2;
+                }
+            }
+        }
+    }
+#undef RD_F
+    if (ok) {
+        /* walk back, then string-pull: keep a cell only when the line from the last kept one
+         * to the one after it leaves the free cells */
+        int *cells = (int *)malloc((size_t)n * sizeof(int)), nc = 0, a, np = 0;
+        if (!cells) { ok = 0; goto out; }
+        for (i = e; i >= 0; i = G.from[i]) cells[nc++] = i;
+        for (i = 0; i < nc / 2; i++) { const int t = cells[i]; cells[i] = cells[nc - 1 - i]; cells[nc - 1 - i] = t; }
+        c->px[np] = sx0; c->pz[np] = sz0; np++;
+        a = 0;
+        while (a < nc - 1 && np < RD_PMAX - 2) {
+            int b = a + 1;
+            while (b + 1 < nc && rd_los(&G, cells[a] % G.nx, cells[a] / G.nx, cells[b + 1] % G.nx, cells[b + 1] / G.nx) &&
+                   hypot((double)(cells[b + 1] % G.nx - cells[a] % G.nx), (double)(cells[b + 1] / G.nx - cells[a] / G.nx)) < 16.0)
+                b++;
+            c->px[np] = G.x0 + (cells[b] % G.nx + 0.5) * RD_ROUTE_CELL;
+            c->pz[np] = G.z0 + (cells[b] / G.nx + 0.5) * RD_ROUTE_CELL;
+            np++;
+            a = b;
+        }
+        c->px[np] = ex; c->pz[np] = ez; np++;
+        c->px[np] = ex + c->outx * c->lout; c->pz[np] = ez + c->outz * c->lout; np++;
+        c->np = np;
+        free(cells);
+    }
+out:
+    free(paved); free(closed); free(G.free_); free(G.dist); free(G.g); free(G.from); free(heap);
+    return ok;
+}
+
 static void rd_corner_start(struct RoamDrive *d, TD5_Actor *a, long tick)
 {
     const RdCorner *c = &d->c[d->ci];
-    const double v = (d->si ? 80.0 : 40.0) * RD_UPT_KMH;
+    const double v = (double)d->kmh_v[d->si] * RD_UPT_KMH;
     const double sx = c->px[0], sz = c->pz[0];
     const double tx = -c->inx, tz = -c->inz;
     RoamSlotState *ss = rp_slot(a);
     int k;
+    if (d->c[d->ci].route == 0) {
+        RdCorner *cw = &d->c[d->ci];
+        cw->off_m = rd_path_offroad_m(cw);
+        cw->route = 1;
+        if (cw->off_m > 0.0 && d->route_on) cw->route = rd_route(cw, cw->px[0], cw->pz[0]) ? 2 : 3;
+        TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d cluster=%016llx defl=%.0f: Bezier %.1f m off the road -> %s (%d points)",
+                  d->ci, (unsigned long long)cw->cl, cw->defl, cw->off_m,
+                  cw->route == 1 ? "kept" : cw->route == 2 ? "ROUTED on the paved mask" :
+                  d->route_on ? "NO ROUTE, Bezier kept" : "kept (route off)", cw->np);
+    }
+    if (d->trc) {
+        int q;
+        fprintf(d->trc, "#corner,%d,%016llx,%.1f,%.0f,%.0f", d->ci, (unsigned long long)c->cl, c->defl, c->cx, c->cz);
+        for (q = 0; q < c->np; q++) fprintf(d->trc, ",%.0f,%.0f", c->px[q], c->pz[q]);
+        fprintf(d->trc, "\n");
+    }
     a->world_pos.x = (int32_t)(sx * 256.0);
     a->world_pos.z = (int32_t)(sz * 256.0);
     a->euler_accum.yaw = FP_SCALE((int32_t)(atan2(tx, tz) * 4096.0 / (2.0 * RD_PI)) & 0xFFF);
     td5_physics_reset_actor_state(a);
+    /* [F2-E] Each run starts with an intact car: CarDamage is on by default and its
+     * health drives td5_damage_handling_scale and the knockout, so 100+ wall hits in
+     * one acute run used to leave the NEXT run a weaker or dead car (runs were not
+     * independent: 0004a39c0008b4d8 165 pinches in the full set, 0 alone).
+     * Knob TD5RE_ROAM_CORNER_REPAIR (1). */
+    if (d->repair) td5_damage_repair_actor((int)a->slot_index);
     a->linear_velocity_x = (int32_t)(tx * v * 256.0);
     a->linear_velocity_z = (int32_t)(tz * v * 256.0);
     for (k = 0; k < 8; k++) ss->hint[k] = ROAM_PRIM_NONE;
@@ -1419,7 +1789,9 @@ static void rd_corner_start(struct RoamDrive *d, TD5_Actor *a, long tick)
     ss->good_valid = 0;
     ss->settled = 0;
     d->ct = tick; d->stuck_t = 0; d->vmin = 1e9; d->vmax = 0.0;
-    d->slow_t = 0; d->rev_t = 0; d->stalls = 0; d->retries = 0;
+    d->slow_t = 0; d->rev_t = 0; d->stalls = 0; d->retries = 0; d->ext_ticks = 0;
+    d->run = *c;                          /* this run's path (a replan rewrites the copy) */
+    d->replans = 0; d->replan_t = tick; d->recover = 0; d->rev_done = 0;
     d->hits0 = s_rp.st.wall_hits; d->pinch0 = s_rp.st.pinches;
     d->resc0 = s_rp.st.rescues + s_rp.st.rescues_y; d->tele0 = s_rp.st.teleports;
     d->phase = 1;
@@ -1437,13 +1809,18 @@ static void rd_corner_end(struct RoamDrive *d, long tick, int ok, int stuck, con
     d->tot_stalls += d->stalls; d->tot_retries += d->retries;
     d->k_stalls[c->kind][sp] += d->stalls; d->k_retries[c->kind][sp] += d->retries;
     TD5_LOG_I(LOG_TAG, "[ROAMCORNER] RESULT #%d %s cluster=%016llx defl=%.0f v=%d km/h: %s (%s) ticks=%ld wall_hits=%ld "
-              "pinches=%ld stuck=%d stalls=%ld retries=%d rescues=%ld speed min/max near C %.0f/%.0f km/h",
-              d->ci, k_rd_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, ok ? "EXIT" : "NO EXIT", why,
-              tick - d->ct, hits, pin, stuck, d->stalls, d->retries, resc, d->vmin > 1e8 ? 0.0 : d->vmin, d->vmax);
-    if (d->rep)
-        fprintf(d->rep, "%d\t%s\t%016llx\t%.0f\t%d\t%s\t%s\t%ld\t%ld\t%ld\t%d\t%ld\t%d\t%ld\t%.0f\t%.0f\n",
-                d->ci, k_rd_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, ok ? "EXIT" : "NO_EXIT", why,
-                tick - d->ct, hits, pin, stuck, d->stalls, d->retries, resc, d->vmin > 1e8 ? 0.0 : d->vmin, d->vmax);
+              "pinches=%ld stuck=%d stalls=%ld retries=%d rescues=%ld speed min/max near C %.0f/%.0f km/h slow_near_C=%ld",
+              d->ci, k_rd_kind[c->kind], (unsigned long long)c->cl, c->defl, d->kmh_v[sp], ok ? "EXIT" : "NO EXIT", why,
+              tick - d->ct, hits, pin, stuck, d->stalls, d->retries, resc, d->vmin > 1e8 ? 0.0 : d->vmin, d->vmax,
+              d->ext_ticks);
+    if (d->rep) {
+        fprintf(d->rep, "%d\t%s\t%016llx\t%.0f\t%d\t%s\t%s\t%ld\t%ld\t%ld\t%d\t%ld\t%d\t%ld\t%.0f\t%.0f\t%ld\t%s\t%.1f\t%d\n",
+                d->ci, k_rd_kind[c->kind], (unsigned long long)c->cl, c->defl, d->kmh_v[sp], ok ? "EXIT" : "NO_EXIT", why,
+                tick - d->ct, hits, pin, stuck, d->stalls, d->retries, resc, d->vmin > 1e8 ? 0.0 : d->vmin, d->vmax,
+                d->ext_ticks, c->route == 1 ? "bezier" : c->route == 2 ? "routed" : c->route == 3 ? "NOROUTE" : "off",
+                c->off_m, d->replans);
+        fflush(d->rep);
+    }
     d->phase = 0;
     if (++d->ci >= d->nc) { d->ci = 0; d->si++; }
 }
@@ -1454,28 +1831,29 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
     double px, pz, kmh, look, rx, rz, along_out, lat_out, tx, tz;
     uint32_t bits;
     if (d->phase == 0) {
-        if (d->si >= 2 || d->nc == 0) {
+        if (d->si >= d->nkmh || d->nc == 0) {
             int k, sp;
             TD5_LOG_I(LOG_TAG, "[ROAMCORNER] SUMMARY runs=%ld exit=%ld stuck=%ld stalls=%ld retries=%ld pinches=%ld wall_hits=%ld rescues=%ld",
                       d->runs, d->ok, d->stuck, d->tot_stalls, d->tot_retries, d->pinch, d->hits, d->resc);
             if (d->rep) {
                 fprintf(d->rep, "\nSUMMARY runs=%ld exit=%ld stuck=%ld stalls=%ld retries=%ld pinches=%ld wall_hits=%ld rescues=%ld\n",
                         d->runs, d->ok, d->stuck, d->tot_stalls, d->tot_retries, d->pinch, d->hits, d->resc);
-                for (k = 0; k < 4; k++)
-                    for (sp = 0; sp < 2; sp++)
+                for (k = 0; k < RD_NK; k++)
+                    for (sp = 0; sp < d->nkmh; sp++)
                         fprintf(d->rep, "kind %-20s %2d km/h: runs %ld exit %ld stuck %ld stalls %ld retries %ld pinches %ld wall_hits %ld rescues %ld\n",
-                                k_rd_kind[k], sp ? 80 : 40, d->k_runs[k][sp], d->k_ok[k][sp], d->k_stuck[k][sp],
+                                k_rd_kind[k], d->kmh_v[sp], d->k_runs[k][sp], d->k_ok[k][sp], d->k_stuck[k][sp],
                                 d->k_stalls[k][sp], d->k_retries[k][sp], d->k_pinch[k][sp], d->k_hits[k][sp], d->k_resc[k][sp]);
                 fclose(d->rep);
                 d->rep = NULL;
             }
+            if (d->trc) { fclose(d->trc); d->trc = NULL; }
             rd_finish(d, "corner matrix done");
             return 0;
         }
         rd_corner_start(d, a, tick);
         return (uint32_t)TD5_INPUT_THROTTLE;
     }
-    c = &d->c[d->ci];
+    c = &d->run;
     px = (double)FP_TRUNC(a->world_pos.x);
     pz = (double)FP_TRUNC(a->world_pos.z);
     kmh = rd_speed_upt(a) / RD_UPT_KMH;
@@ -1483,13 +1861,14 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
     if (hypot(rx, rz) < 20.0 * RD_M) {
         if (kmh < d->vmin) d->vmin = kmh;
         if (kmh > d->vmax) d->vmax = kmh;
+        if (kmh < 3.0) d->ext_ticks++;
     }
     /* pure pursuit on the polyline: arc length of the car's nearest point, aim `look` further */
-    look = (d->si ? 16.0 : 10.0) * RD_M;
+    look = (d->kmh_v[d->si] >= 60 ? 16.0 : 10.0) * RD_M;
     {
         double best = 1e30, cum = 0.0, total = 0.0, s_car = 0.0, want;
         int k;
-        for (k = 0; k < RD_NP - 1; k++) {
+        for (k = 0; k < c->np - 1; k++) {
             const double sx = c->px[k + 1] - c->px[k], sz = c->pz[k + 1] - c->pz[k];
             const double len = sqrt(sx * sx + sz * sz);
             double tt = len > 0.0 ? ((px - c->px[k]) * sx + (pz - c->pz[k]) * sz) / (len * len) : 0.0, qx, qz, dd;
@@ -1504,9 +1883,9 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
         want = s_car + look;
         if (want > total) want = total + look;           /* past the end: keep going straight out */
         cum = 0.0;
-        tx = c->px[RD_NP - 1] + c->outx * (want - total);
-        tz = c->pz[RD_NP - 1] + c->outz * (want - total);
-        for (k = 0; k < RD_NP - 1; k++) {
+        tx = c->px[c->np - 1] + c->outx * (want - total);
+        tz = c->pz[c->np - 1] + c->outz * (want - total);
+        for (k = 0; k < c->np - 1; k++) {
             const double sx = c->px[k + 1] - c->px[k], sz = c->pz[k + 1] - c->pz[k];
             const double len = sqrt(sx * sx + sz * sz);
             if (want <= cum + len && len > 0.0) {
@@ -1516,14 +1895,31 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
             }
             cum += len;
         }
-        along_out = s_car - (total - 40.0 * RD_M);       /* > 0 once on the exit ribbon past its end row */
+        along_out = s_car - (total - c->lout);           /* > 0 once on the exit ribbon past its end row */
         lat_out = sqrt(best);
     }
-    bits = rd_steer_to(a, tx, tz, d->si ? 80.0 : 40.0);
+    /* [F2-E] TD5RE_ROAM_CORNER_REPLAN=1, a driver who missed the turn: once off the path by more
+     * than 8 m, or after backing off a wall, re-route on the paved mask from where the car IS
+     * (up to 6 times a run) and drive that at the recovery speed. Off by default: the matrix
+     * and the acute set report both drivers. */
+    if (d->replan_on && d->rev_t == 0 && d->replans < 6 && tick - d->replan_t > 30 &&
+        (lat_out > 8.0 * RD_M || d->rev_done)) {
+        RdCorner nr = *c;
+        d->rev_done = 0;
+        if (rd_route(&nr, px, pz)) {
+            d->run = nr;
+            d->replans++; d->tot_replans++; d->recover = 1;
+            TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d replan %d from (%.0f,%.0f): %d points", d->ci, d->replans, px, pz, nr.np);
+        }
+        d->replan_t = tick;
+    }
+    bits = rd_steer_to(a, tx, tz, d->recover && d->recover_kmh < d->kmh_v[d->si] ? (double)d->recover_kmh
+                                                                           : (double)d->kmh_v[d->si]);
     if (d->rev_t > 0) {
         /* reverse-and-retry, as a driver would: back off with the wheel turned away */
         const uint32_t steer = bits & (uint32_t)(TD5_INPUT_STEER_LEFT | TD5_INPUT_STEER_RIGHT);
         d->rev_t--;
+        if (d->rev_t == 0) d->rev_done = 1;
         bits = (uint32_t)TD5_INPUT_BRAKE;
         if (steer & TD5_INPUT_STEER_LEFT) bits |= (uint32_t)TD5_INPUT_STEER_RIGHT;
         else if (steer & TD5_INPUT_STEER_RIGHT) bits |= (uint32_t)TD5_INPUT_STEER_LEFT;
@@ -1538,7 +1934,18 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
         else d->slow_t = 0;
         if (d->slow_t > 45 && d->retries < 2) { d->retries++; d->rev_t = 40; d->slow_t = 0; }
     }
-    if (along_out > 30.0 * RD_M && lat_out < 6.0 * RD_M) rd_corner_end(d, tick, 1, 0, "exit reached");
+    if (d->trc) {
+        const RoamSlotState *ss = rp_slot(a);
+        const int wall_now = (s_rp.st.wall_hits + s_rp.st.pinches) != d->last_wh;
+        fprintf(d->trc, "%d,%d,%ld,%.0f,%.0f,%d,%d,%d,%.2f,%.0f,%.0f,%.0f,%.0f,%u,%d,%d,%d,%d,%d,%016llx,%d,%d\n",
+                d->ci, d->kmh_v[d->si], tick - d->ct, px, pz, (int)(a->display_angles.yaw & 0xFFF),
+                (int)a->linear_velocity_x, (int)a->linear_velocity_z, kmh, tx, tz, along_out, lat_out, (unsigned)bits,
+                wall_now, wall_now ? ss->wall_corner : -1, wall_now ? (int)ss->wall_angle : -1,
+                wall_now ? (int)ss->wall_pen : 0, wall_now ? ss->wall_pinch : 0,
+                (unsigned long long)(wall_now ? ss->wall_edge : 0), (int)a->angular_velocity_yaw, d->rev_t > 0);
+    }
+    d->last_wh = s_rp.st.wall_hits + s_rp.st.pinches;
+    if (along_out > 0.75 * c->lout && lat_out < 6.0 * RD_M) rd_corner_end(d, tick, 1, 0, "exit reached");
     else if (d->retries >= 2 && d->slow_t > 60) rd_corner_end(d, tick, 0, 1, "stuck after 2 retries");
     else if (tick - d->ct > 20 * 30) rd_corner_end(d, tick, 0, 0, "timeout");
     return bits;
@@ -1565,11 +1972,44 @@ uint32_t td5_roam_dev_drive_bits(TD5_Actor *a)
         d->t0 = g_td5.simulation_tick_counter;
         d->log_t = d->t0;
         if (s_rp.drv_mode == 2) {
-            rd_pick_corners(d);
+            const char *only = getenv("TD5RE_ROAM_CORNERS_ONLY");
+            const char *set = getenv("TD5RE_ROAM_CORNERS_SET");
+            const char *kl = getenv("TD5RE_ROAM_CORNERS_KMH");
+            d->kmh_v[0] = 40; d->kmh_v[1] = 80; d->nkmh = 2;
+            if (kl && kl[0]) {
+                int v0 = 0, v1 = 0;
+                const int n = sscanf(kl, "%d,%d", &v0, &v1);
+                if (n >= 1 && v0 > 0) { d->kmh_v[0] = v0; d->nkmh = 1; }
+                if (n >= 2 && v1 > 0) { d->kmh_v[1] = v1; d->nkmh = 2; }
+            }
+            while (only && *only && d->nonly < 32) {
+                char *end = NULL;
+                const unsigned long long k = strtoull(only, &end, 16);
+                if (end == only) break;
+                d->only[d->nonly++] = (uint64_t)k;
+                only = (*end == ',') ? end + 1 : end;
+            }
+            d->acute = set && strcmp(set, "acute") == 0;
+            d->route_on = td5_env_int("TD5RE_ROAM_CORNER_ROUTE", 1, 0, 1);
+            d->replan_on = td5_env_int("TD5RE_ROAM_CORNER_REPLAN", 0, 0, 1);
+            d->repair = td5_env_int("TD5RE_ROAM_CORNER_REPAIR", 1, 0, 1);
+            d->recover_kmh = td5_env_int("TD5RE_ROAM_CORNER_RECOVER_KMH", 30, 5, 200);
+            d->acute_deg = (double)td5_env_int("TD5RE_ROAM_ACUTE_DEG", 120, 30, 179);
+            d->acute_max = (double)td5_env_int("TD5RE_ROAM_ACUTE_MAX", 160, 31, 181);
+            d->cap = d->acute ? RD_MAXC_ACUTE : RD_MAXC;
+            d->c = (RdCorner *)calloc((size_t)d->cap, sizeof(RdCorner));
+            if (!d->c) d->cap = 0;
+            if (d->acute) rd_pick_acute(d); else rd_pick_corners(d);
             snprintf(path, sizeof path, "%sroam_corner_test.txt", dir ? dir : "");
             d->rep = fopen(path, "w");
             if (d->rep)
-                fprintf(d->rep, "idx\tkind\tcluster\tdefl\tkmh\tresult\twhy\tticks\twall_hits\tpinches\tstuck\tstalls\tretries\trescues\tvmin\tvmax\n");
+                fprintf(d->rep, "idx\tkind\tcluster\tdefl\tkmh\tresult\twhy\tticks\twall_hits\tpinches\tstuck\tstalls\tretries\trescues\tvmin\tvmax\tslow_near_C\troute\toff_m\treplans\n");
+            if (td5_env_int("TD5RE_ROAM_CORNER_TRACE", 0, 0, 1)) {
+                snprintf(path, sizeof path, "%sroam_corner_trace.csv", dir ? dir : "");
+                d->trc = fopen(path, "w");
+                if (d->trc)
+                    fprintf(d->trc, "idx,kmh_target,t,px,pz,yaw,vx,vz,kmh,tx,tz,along_out,lat_out,bits,wall,wcorner,wangle,wpen,wpinch,wedge,avyaw,rev\n");
+            }
         }
         TD5_LOG_W(LOG_TAG, "[ROAMDRIVE] dev drive harness: %s (kmh=%.0f secs=%d quit=%d)",
                   s_rp.drv_mode == 1 ? "street" : "corners", d->kmh, d->secs, d->quit);
