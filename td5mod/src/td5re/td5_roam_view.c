@@ -38,7 +38,7 @@
 
 #ifndef TD5RE_RELEASE
 
-#define RV_SLOTS        16
+#define RV_SLOTS        32             /* >= the 5 x 5 window, so it does not thrash */
 #define RV_REACH        2              /* tiles around the camera tile: 5 x 5     */
 #define RV_WHITE        0xFFFFFFFFu    /* boundary / wall edges                   */
 #define RV_CYAN         0xFF00FFFFu    /* ribbon quad and patch triangle edges    */
@@ -349,6 +349,10 @@ void td5_roam_view_draw(int32_t cam_x, int32_t cam_y, int32_t cam_z)
             if (sl->ok) rv_draw_tile(&sl->t, (double)cam_x, (double)cam_z, r2, &st);
         }
     }
+
+    if ((s_tick % 120u) == 1u)
+        TD5_LOG_I(LOG_TAG, "roam view: eye raw (%ld,%ld) place (%.0f,%.0f) tile %d,%d",
+                  (long)cam_x, (long)cam_z, cxs, czs, ctx_, ctz_);
 
     if (ctx_ != s_log_tx || ctz_ != s_log_tz) {
         s_log_tx = ctx_; s_log_tz = ctz_;

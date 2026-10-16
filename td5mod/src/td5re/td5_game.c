@@ -8444,9 +8444,12 @@ static void frame_render(void)
 
 #ifndef TD5RE_RELEASE
         /* [ROAM VIEW] GEO FREE ROAM dev viewer: the ROAMTILE road layer near the
-         * free-cam eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
-         * Pane 0 only, free camera only. Raw 24.8 eye = render eye / (1/256). */
-        if (vp == 0 && td5_camera_freecam_active() && td5_roam_view_wanted()) {
+         * render eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
+         * Pane 0 only. Not gated on td5_camera_freecam_active(): the geo tour
+         * (td5_camera.c tour_step) moves the eye without entering free-cam, so
+         * gating on it hid the overlay from every tour frame. Raw 24.8 eye =
+         * render eye / (1/256). */
+        if (vp == 0 && td5_roam_view_wanted()) {
             td5_render_debug_lines_reset();
             td5_roam_view_draw((int32_t)(g_cameraPos[0] / g_worldToRenderScale),
                                (int32_t)(g_cameraPos[1] / g_worldToRenderScale),
