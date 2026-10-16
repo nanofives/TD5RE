@@ -463,13 +463,35 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
         S[i] = sg / sw;
         T[i] = S[i];
     }
-    if (has_pa) {
+    const int blend_both = has_pa && has_pb && n - 1 < 2 * ROAM_RIB_BLEND_ROWS - 1;
+    if (blend_both) {
+        /* [F1 T9] The two end blends overlap (a short piece, e.g. a 10 m stub
+         * from a JOIN to a junction). Applied one after the other, the far end's
+         * blend reached row 0 and moved it off its pin, so the JOIN row stood up
+         * to 0.6 m away from the same row of the partner ribbon (304 open lane
+         * segments in the casco audit). Blended together instead, with the
+         * straight line between the pins where both weigh in: row 0 is pa and
+         * row n-1 is pb exactly, and the weights still sum to one. */
+        for (i = 0; i < n; i++) {
+            const int ia = i, ib = n - 1 - i;
+            const double wa = ia < ROAM_RIB_BLEND_ROWS
+                ? 0.5 * (1.0 + cos(M_PI * (double)ia / (double)ROAM_RIB_BLEND_ROWS)) : 0.0;
+            const double wb = ib < ROAM_RIB_BLEND_ROWS
+                ? 0.5 * (1.0 + cos(M_PI * (double)ib / (double)ROAM_RIB_BLEND_ROWS)) : 0.0;
+            const double f = n > 1 ? (double)i / (double)(n - 1) : 0.0;
+            const double mid = pa + (pb - pa) * f;
+            T[i] = (1.0 - wa) * (1.0 - wb) * T[i] + wa * (1.0 - wb) * pa
+                 + wb * (1.0 - wa) * pb + wa * wb * mid;
+        }
+        T[0] = pa;
+        T[n - 1] = pb;
+    } else if (has_pa) {
         for (i = 0; i < ROAM_RIB_BLEND_ROWS && i < n; i++) {
             const double w = 0.5 * (1.0 + cos(M_PI * (double)i / (double)ROAM_RIB_BLEND_ROWS));
             T[i] = T[i] * (1.0 - w) + pa * w;
         }
     }
-    if (has_pb) {
+    if (has_pb && !blend_both) {
         for (i = 0; i < ROAM_RIB_BLEND_ROWS && i < n; i++) {
             const int k = n - 1 - i;
             const double w = 0.5 * (1.0 + cos(M_PI * (double)i / (double)ROAM_RIB_BLEND_ROWS));

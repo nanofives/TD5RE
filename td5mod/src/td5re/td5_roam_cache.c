@@ -226,6 +226,16 @@ static int roam_add_way(const cJSON *r, double upm, int tile)
     w->road.maxx = bb[2];
     w->road.maxz = bb[3];
     td5_geo_roads_parse_record(r, upm, &w->road);
+    w->lanes_osm = w->road.lanes;
+    {
+        const cJSON *wd = cJSON_GetObjectItem(r, "width");
+        const cJSON *ls = cJSON_GetObjectItem(r, "lanes_src");
+        w->width_tagged = (uint8_t)(wd && ((cJSON_IsString(wd) && wd->valuestring[0]
+                                            && atof(wd->valuestring) > 0.5)
+                                           || (cJSON_IsNumber(wd) && wd->valuedouble > 0.5)));
+        w->lanes_counted = (uint8_t)(ls && cJSON_IsString(ls) && ls->valuestring
+                                     && strcmp(ls->valuestring, "osm_lanes") == 0);
+    }
     w->road.lanes = td5_roam_lane_count(r, upm, w->road.lanes, w->road.namek);
     w->road.width = (double)w->road.lanes * (double)TD5_TG_LANE_WIDTH;
     w->road.name_id = roam_intern(r);
