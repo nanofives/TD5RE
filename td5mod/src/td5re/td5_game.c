@@ -38,6 +38,7 @@
 #include "td5_carparam.h"   /* car mass/accel offsets + td5cp_heaviness_q8 (get_state) */
 #include "td5_camera.h"
 #include "td5_pick.h"   /* dev free-cam geometry picker */
+#include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -8442,6 +8443,20 @@ static void frame_render(void)
         }
 
 #ifndef TD5RE_RELEASE
+        /* [ROAM VIEW] GEO FREE ROAM dev viewer: the ROAMTILE road layer near the
+         * render eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
+         * Pane 0 only. Not gated on td5_camera_freecam_active(): the geo tour
+         * (td5_camera.c tour_step) moves the eye without entering free-cam, so
+         * gating on it hid the overlay from every tour frame. The eye goes in
+         * RENDER-FLOAT units (world/256 = strip units, the space the debug-line
+         * projector and the ROAMTILE coordinates use), not the 24.8 world. */
+        if (vp == 0 && td5_roam_view_wanted()) {
+            td5_render_debug_lines_reset();
+            td5_roam_view_draw((int32_t)g_cameraPos[0], (int32_t)g_cameraPos[1],
+                               (int32_t)g_cameraPos[2]);
+            td5_render_debug_lines_flush();
+        }
+
         /* [PICK] Resolve the hovered mesh, draw the highlight box, handle the
          * copy click. Own debug-line batch; runs on viewport 0 only (the free
          * camera is single-pane). No-op unless the free camera is flying. */
