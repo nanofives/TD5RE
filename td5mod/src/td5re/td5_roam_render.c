@@ -864,6 +864,14 @@ static void rr_autobegin(void)
         return;
     }
     if (!td5_roam_render_begin(slug, &f)) return;
+    if (rr_roam_active()) {
+        /* The host level's own fog is black (Moscow LEVELINF), which draws the far edge of the
+         * ground (the renderer's fixed 195000-unit far plane, ~450 m) as a black seam under the
+         * sky. A roam world is lit by the sky above it: fade the far ground to its horizon. */
+        const int rgb = td5_env_int("TD5RE_ROAM_RENDER_FOG_RGB", 0x5A5E66, 0, 0xFFFFFF);
+        const int on  = td5_env_int("TD5RE_ROAM_RENDER_FOG", 1, 0, 1);
+        if (on) td5_render_configure_fog((uint32_t)rgb, 1);
+    }
     mode = getenv("TD5RE_ROAM_RENDER_TILES");
     s_rr.dev_mode = (mode && strcmp(mode, "all") == 0) ? 2 : 1;
     s_rr.dev_reach = td5_env_int("TD5RE_ROAM_RENDER_REACH", 2, 1, 6);
