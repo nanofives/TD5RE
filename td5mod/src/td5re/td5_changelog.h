@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 17 (free roam hitch)" },
+    { CL_ITEM,    "Fixed the rare one-second freeze while driving: the" },
+    { CL_ITEM,    "  game no longer waits on the disk mid-frame (logs" },
+    { CL_ITEM,    "  and dev trace files are written in the background)." },
+    { CL_ITEM,    "Free roam drives one car: the five empty grid slots" },
+    { CL_ITEM,    "  that sat at the map origin are gone." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 17 (free roam streaming)" },
     { CL_ITEM,    "Free roam no longer loads the whole city up front:" },
     { CL_ITEM,    "  the drive starts once the streets round the spawn" },

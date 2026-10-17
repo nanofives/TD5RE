@@ -4109,6 +4109,11 @@ static void init_race_spawn_actors(void)
         } else {
             spawn_count = TD5_LEGACY_RACE_SLOTS;        /* legacy 6-slot grid */
         }
+        /* [GEO FREE ROAM F3-B] roam drives slot 0 alone: no decoration slots. With the
+         * legacy 6-slot grid, slots 1..5 sat zeroed at the world origin and physics,
+         * collision, render and the tile stream (their 9 tiles stayed resident) all
+         * still walked them. One actor, like a time trial: they no longer exist. */
+        if (td5_roam_active()) spawn_count = racer_count;
         TD5_LOG_I(LOG_TAG,
                   "InitRace: %d racers / %d actors (traffic_base=%d humans=%d opp=%d)",
                   racer_count, spawn_count, g_traffic_slot_base,
