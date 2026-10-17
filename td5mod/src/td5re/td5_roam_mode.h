@@ -56,7 +56,10 @@ void     td5_roam_set_slot_edge(int slot, uint64_t edge_key);
 /* ---- entry / session plumbing (frontend + game flow) ---- */
 int  td5_roam_armed(void);                   /* begin() called, session not ended */
 void td5_roam_cancel(void);                  /* = td5_roam_end(), for "back out of car select" */
-int  td5_roam_host_track(void);              /* schedule index of the level whose textures/sky host the roam world */
+int  td5_roam_host_track(void);              /* track index of the level whose textures/sky host the roam world */
+int  td5_roam_host_is_geo(void);             /* 1 when the host is the place's own geo level (F2-F) */
+void td5_roam_host_pages(int *road, int *ground, int *kerb);   /* page ids in the host's TEXTURES.DAT; kerb -1 = HUD white */
+int  td5_roam_host_sky_path(char *out, size_t n);              /* sky file override for the host, 0 = level's own */
 void td5_roam_session_start(void);           /* race init: armed -> active, force the single-player overrides */
 void td5_roam_apply_overrides(void);         /* the overrides alone (idempotent; re-asserted after the mode setup) */
 void td5_roam_session_spawn(int slot, void *actor);    /* places the player actor (td5_game.c spawn loop) */

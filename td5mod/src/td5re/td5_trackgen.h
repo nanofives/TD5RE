@@ -193,6 +193,19 @@ int td5_trackgen_geo_index_for_slot(int slot);
  * td5_trackgen_internal.h for TD5_GEO_SLOT_BASE. */
 int td5_trackgen_geo_slot_for_index(int gi);
 
+/* [GEO FREE ROAM F2-F] Roam hosts on the real place's OWN level directory (its sky, LEVELINF and
+ * texture pages), loaded exactly like a geo race but WITHOUT building anything and without its
+ * strip. Returns the geo track slot of place `slug` when that level dir already holds a built
+ * TEXTURES.DAT + LEVELINF.DAT + FORWSKY.png (a previous geo build of the place), else -1 (the
+ * caller falls back to a shipped host level). */
+int td5_trackgen_roam_host_slot(const char *slug);
+/* The page ids a plain road / lawn / kerb surface uses in that level's TEXTURES.DAT. */
+void td5_trackgen_roam_pages(int *road, int *ground, int *kerb);
+/* The FORWSKY a geo race on `slot` would draw for the TIME OF DAY options in force
+ * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): the level's own FORWSKY.png when its
+ * GENSTAMP time of day matches, else a shipped panorama from the day / night pool. 1 on success. */
+int td5_trackgen_roam_sky_path(int slot, char *out, size_t n);
+
 /* Register every raceable place under re/assets/geo/ as a selectable track.
  * Rescans the places first. Safe to call again (rows update in place); returns
  * the number registered. */

@@ -29,6 +29,7 @@
 #include "td5_physics.h"
 #include "td5_track.h"          /* td5_track_quad_vertices */
 #include "td5_render.h"        /* AngleFromVector12 */
+#include "td5_trackgen.h"
 #include "td5_roam_tile.h"
 #include "td5_roam_locate.h"
 #include "td5_roam_mode.h"
@@ -206,6 +207,7 @@ void td5_roam_begin(const TD5_RoamSpawn *s)
         TD5_LOG_W(LOG_TAG, "roam: no ROAMGRID.JSON for place '%s' (build tiles with "
                   "--RoamBuildTiles=casco); origin left at 0,0", s_roam.spawn.place);
     }
+    s_roam.host_track = -1;      /* re-resolved for this place */
     s_roam.armed = 1;
     s_roam.active = 0;
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
@@ -220,6 +222,7 @@ void td5_roam_end(void)
         TD5_LOG_I(LOG_TAG, "roam: session ended (armed=%d active=%d)", s_roam.armed, s_roam.active);
     s_roam.armed = 0;
     s_roam.active = 0;
+    s_roam.host_track = -1;
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
     td5_roam_physics_session_end();     /* task B: frees the resident set (no-op when not loaded) */
 }
@@ -251,17 +254,54 @@ void td5_roam_set_slot_edge(int slot, uint64_t edge_key)
 
 /* ------------------------------------------------------------ host level ----- */
 
-/* The roam world has no strip, but the race pipeline still wants a LEVEL for the
- * sky, the static texture pages and LEVELINF (fog, environs). F2 hosts on an
- * original track (schedule index, default 0 = Moscow, level023) and throws away its
- * strip / routes / MODELS / traffic queue right after the load (td5_asset.c roam
- * branch). TD5RE_ROAM_HOST_TRACK overrides. Never a generated slot (that would
- * rebuild a level under the splash) and never a registry (custom) level. */
+/* The roam world has no strip, but the race pipeline still wants a LEVEL for the sky, the
+ * static texture pages and LEVELINF. F2-F: the level is the REAL PLACE's own geo level
+ * (La Plata = level091, its geo track slot): its sky, LEVELINF and TEXTURES.DAT are loaded like a
+ * geo race, nothing is generated and its strip / routes / MODELS / traffic queue are thrown away
+ * (td5_asset.c roam branch). Needs the place to have been built once from the geo generator;
+ * without that (or for a place with no level dir) it falls back to a shipped level, schedule
+ * index 0 (Moscow, level023). TD5RE_ROAM_HOST_TRACK=<schedule index> forces a shipped host. */
 int td5_roam_host_track(void)
 {
-    if (s_roam.host_track < 0)
-        s_roam.host_track = td5_env_int("TD5RE_ROAM_HOST_TRACK", 0, 0, 18);
+    if (s_roam.host_track < 0) {
+        const int forced = td5_env_int("TD5RE_ROAM_HOST_TRACK", -1, -1, 18);
+        int slot = -1;
+        if (forced >= 0) {
+            s_roam.host_track = forced;
+        } else {
+            if (td5_geo_places_count() <= 0) td5_geo_places_rescan();   /* dev CLI: resolved before module init */
+            slot = td5_trackgen_roam_host_slot(s_roam.spawn.place);
+            s_roam.host_track = slot >= 0 ? slot : 0;
+        }
+        TD5_LOG_I(LOG_TAG, "roam: host level = track %d (%s)", s_roam.host_track,
+                  forced >= 0 ? "TD5RE_ROAM_HOST_TRACK" : slot >= 0 ? "the place's own geo level" : "shipped fallback");
+    }
     return s_roam.host_track;
+}
+
+int td5_roam_host_is_geo(void)
+{
+    return td5_trackgen_is_geo_slot(td5_roam_host_track());
+}
+
+/* Road / lawn / kerb pages of the host level. A geo host uses the geo track's own pages; a shipped
+ * fallback host uses Moscow's (looked up on a contact sheet of level023's textures.src/pages). */
+void td5_roam_host_pages(int *road, int *ground, int *kerb)
+{
+    if (td5_roam_host_is_geo()) {
+        td5_trackgen_roam_pages(road, ground, kerb);
+    } else {
+        if (road)   *road   = 91;
+        if (ground) *ground = 9;
+        if (kerb)   *kerb   = -1;     /* -1 = the HUD white page */
+    }
+}
+
+/* The sky file for the host level, or 0 to keep the level's own FORWSKY. */
+int td5_roam_host_sky_path(char *out, size_t n)
+{
+    if (!td5_roam_active() || !td5_roam_host_is_geo()) return 0;
+    return td5_trackgen_roam_sky_path(td5_roam_host_track(), out, n);
 }
 
 /* ------------------------------------------------------------ session -------- */

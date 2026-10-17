@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 17 (free roam look)" },
+    { CL_ITEM,    "Free roam now looks like La Plata: it uses the city's" },
+    { CL_ITEM,    "  own sky, road and grass textures instead of the" },
+    { CL_ITEM,    "  Moscow ones (no Moscow tower blocks on the horizon)." },
+    { CL_ITEM,    "  The TIME OF DAY option picks a day or night sky." },
+    { CL_ITEM,    "  Build La Plata once from the geo generator first." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 17 (free roam corners)" },
     { CL_ITEM,    "Free roam: the last knife-edge kerb tips are rounded" },
     { CL_ITEM,    "  (a plaza tip went from a 0.2 m to a 4 m kerb radius)," },
