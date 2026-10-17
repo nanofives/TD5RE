@@ -829,7 +829,7 @@ int td5_roam_route_latlon_to_place(double lat, double lon, int32_t *px, int32_t 
 static double rr_canon(double v)
 {
     char b[48];
-    snprintf(b, sizeof b, "%.10f", v);
+    snprintf(b, sizeof b, "%.8f", v);
     return strtod(b, NULL);
 }
 
@@ -1094,7 +1094,7 @@ static void rr_dump_edges(const char *what, const char *name)
     fprintf(f, "place=%s type=%d laps=%d waypoints=%d edges=%d length_m=%.1f hash=%08X\n", td5_roam_route_place(),
             rt.cur.type, rt.cur.laps, rt.cur.nwp, rt.res.nedge, rt.res.length_m, (unsigned)rt.res.hash);
     for (i = 0; i < rt.cur.nwp; i++)
-        fprintf(f, "wp %d kind=%d lat=%.10f lon=%.10f\n", i, rt.cur.wp[i].kind, rt.cur.wp[i].lat, rt.cur.wp[i].lon);
+        fprintf(f, "wp %d kind=%d lat=%.8f lon=%.8f\n", i, rt.cur.wp[i].kind, rt.cur.wp[i].lat, rt.cur.wp[i].lon);
     for (i = 0; i < rt.res.nedge; i++)
         fprintf(f, "edge %llu dir=%d\n", (unsigned long long)rt.res.edge[i].key, rt.res.edge[i].dir);
     fclose(f);
@@ -1126,7 +1126,7 @@ int td5_roam_route_save(const char *name)
         rt.res.nedge, (unsigned)rt.res.hash, rt.res.length_m);
     for (i = 0; i < rt.cur.nwp; i++) {
         const TD5_RouteWp *w = &rt.cur.wp[i];
-        n += (size_t)snprintf(buf + n, cap - n, "    { \"lat\": %.10f, \"lon\": %.10f, \"role\": \"%s\" }%s\n",
+        n += (size_t)snprintf(buf + n, cap - n, "    { \"lat\": %.8f, \"lon\": %.8f, \"role\": \"%s\" }%s\n",
             w->lat, w->lon, w->kind == TD5_ROUTE_WP_START ? "start" : (w->kind == TD5_ROUTE_WP_FINISH ? "finish" : "via"),
             i + 1 < rt.cur.nwp ? "," : "");
     }

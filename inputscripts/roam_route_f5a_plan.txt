@@ -16,11 +16,21 @@ sync race
 +10 key 0x03 press
 +40 key 0x44 press
 +30 key 0x1F press
-+30 key 0x14 press
++20 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++20 key 0x14 press
 +12 key 0x12 press
 +12 key 0x1F press
 +12 key 0x14 press
 +12 key 0x02 press
++30 key 0x44 press
 +12 key enter press
 +40 key 0x44 press
 +30 log f5a_saved

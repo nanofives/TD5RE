@@ -29,6 +29,7 @@
 #include "td5_hud.h"
 #include "td5_race_state.h"
 #include "td5_geo_roads.h"
+#include "td5_page_map.h"      /* HUD_WHITE_TEX_PAGE */
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
 #include "td5_roam_stream.h"
@@ -83,7 +84,8 @@ static struct {
     int      nlist, sel;
     int      saved_flash;
     /* mouse */
-    int      m_down, m_drag, m_pin, m_x0, m_y0, m_x, m_y, m_has;
+    int      m_down, m_drag, m_pin, m_x0, m_y0, m_x, m_y, m_has, m_btn;
+    long     map_frames;                /* frames since the map opened (dev mouse script clock) */
     double   m_cx0, m_cz0;
     uint32_t m_moved_ms;
     /* messages */
@@ -405,7 +407,7 @@ static void view_defaults(void)
 static void map_open_now(void)
 {
     if (u.map_open) return;
-    u.map_open = 1; u.mode = 0; u.open_pending = 4;
+    u.map_open = 1; u.mode = 0; u.open_pending = 4; u.map_frames = 0;
     view_defaults();
     td5_plat_set_os_cursor_visible(1);
     u.m_down = 0; u.m_drag = 0; u.m_pin = -1; u.m_has = 0;
@@ -500,6 +502,8 @@ static void name_input(void)
     }
 }
 
+static void fit_route(void);
+
 static void list_input(void)
 {
     if (ke(K_ESC)) { u.mode = 0; return; }
@@ -512,9 +516,7 @@ static void list_input(void)
             ui_toast("LOADED  %s   %.2f KM  %d STREETS%s", u.list[u.sel], r->length_m / 1000.0, r->nedge,
                      td5_roam_route_map_changed() ? "  MAP CHANGED" : "");
             u.mode = 0;
-            if (r->npt > 0) {   /* fit */
-                u.cx = r->px[r->npt / 2]; u.cz = r->pz[r->npt / 2];
-            }
+            fit_route();
         } else {
             ui_toast("COULD NOT LOAD %s", u.list[u.sel]);
         }
@@ -545,8 +547,37 @@ static void fit_route(void)
     u.cx = (minx + maxx) * 0.5; u.cz = (minz + maxz) * 0.5;
 }
 
+#ifndef TD5RE_RELEASE
+/* DEV: TD5RE_ROAM_ROUTE_MOUSE="frame:x,y,down/frame:x,y,down/..." replaces the real mouse while the map is
+ * open: the state at map frame N (frames since the map opened) is the last entry with frame <= N, x,y in
+ * render pixels. Lets a test run the click / drag code without a real pointer (a synthetic OS click would
+ * land on whatever window is on top). Inert when the variable is unset. */
+static int fake_mouse(int *mx, int *my, int *down)
+{
+    static int init, n;
+    static struct { long f; int x, y, d; } e[48];
+    int i, have = 0;
+    if (!init) {
+        const char *s = getenv("TD5RE_ROAM_ROUTE_MOUSE");
+        init = 1;
+        while (s && *s && n < 48) {
+            long f; int x, y, d, used = 0;
+            if (sscanf(s, "%ld:%d,%d,%d%n", &f, &x, &y, &d, &used) < 4) break;
+            e[n].f = f; e[n].x = x; e[n].y = y; e[n].d = d; n++;
+            s += used;
+            if (*s == '|' || *s == '/') s++;
+        }
+        if (n) TD5_LOG_W(LOG_TAG, "ROUTE_UI: dev mouse script with %d step(s) (TD5RE_ROAM_ROUTE_MOUSE)", n);
+    }
+    if (!n) return 0;
+    for (i = 0; i < n; i++) if (e[i].f <= u.map_frames) { *mx = e[i].x; *my = e[i].y; *down = e[i].d; have = 1; }
+    return have;
+}
+#endif
+
 static void map_input(double dt)
 {
+    u.map_frames++;
     Proj p;
     int wheel;
     int mx = 0, my = 0, cw = 0, ch = 0;
@@ -620,14 +651,25 @@ static void map_input(double dt)
     }
 
     /* ---- mouse ---- */
-    if (td5_plat_input_get_mouse_pos(&mx, &my, &cw, &ch) && cw > 0 && ch > 0) {
-        mx = (int)((float)mx * g_render_width_f / (float)cw);
-        my = (int)((float)my * g_render_height_f / (float)ch);
-        if (mx != u.m_x || my != u.m_y) u.m_moved_ms = td5_plat_time_ms();
-        u.m_x = mx; u.m_y = my; u.m_has = 1;
+    {
+        int fdown = 0, have = 0;
+#ifndef TD5RE_RELEASE
+        have = fake_mouse(&mx, &my, &fdown);
+#endif
+        if (!have && td5_plat_input_get_mouse_pos(&mx, &my, &cw, &ch) && cw > 0 && ch > 0) {
+            mx = (int)((float)mx * g_render_width_f / (float)cw);
+            my = (int)((float)my * g_render_height_f / (float)ch);
+            fdown = td5_plat_input_mouse_left_down();
+            have = 1;
+        }
+        if (have) {
+            if (mx != u.m_x || my != u.m_y) u.m_moved_ms = td5_plat_time_ms();
+            u.m_x = mx; u.m_y = my; u.m_has = 1;
+        }
+        u.m_btn = fdown;
     }
     if (u.m_has) {
-        const int down = td5_plat_input_mouse_left_down();
+        const int down = u.m_btn;
         const int in_map = u.m_y >= p.y0 && u.m_y <= p.y1;
         if (down && !u.m_down && in_map) {
             double X, Z;
@@ -650,7 +692,8 @@ static void map_input(double dt)
                     ui_toast("POINT MOVED");
                 else ui_toast("NO STREET WITHIN 250 M OF THAT SPOT");
             } else if (!u.m_drag) {
-                place_at(X, Z, 0);
+                if (u.m_pin >= 0) ui_toast("DRAG THE PIN TO MOVE IT, X TO REMOVE IT");
+                else if (in_map) place_at(X, Z, 0);
             }
             u.m_pin = -1; u.m_drag = 0;
         }
@@ -681,8 +724,8 @@ void td5_roam_route_ui_draw_overlay(void)
     min_rank = u.ppm < 0.075 ? 2 : (u.ppm < 0.19 ? 1 : 0);
     draw_streets(&p, (W * 0.5 + 40.0) / p.k, ((p.y1 - p.y0) * 0.5 + 40.0) / p.k, min_rank, (float)u.ppm, S);
     draw_route(&p, 4.0f * S, 7.0f * S, 70.0f * S);
-    draw_pins(&p, 8.0f * S, 1);
     if (have_car) draw_car(&p, px, pz, yaw, 9.0f * S);
+    draw_pins(&p, 8.0f * S, 1);
 
     /* bars */
     rb_rect(0, 0, W, top, 0xF0161B22);
@@ -757,7 +800,7 @@ void td5_roam_route_ui_draw_overlay(void)
     for (i = 0; i < td5_roam_route_wp_count(); i++) {
         const TD5_RouteWp *w = td5_roam_route_wp(i);
         float sx, sy;
-        char lab[8];
+        char lab[16];
         if (!w) continue;
         proj_pt(&p, w->snapped ? w->sx : (double)w->px, w->snapped ? w->sz : (double)w->pz, &sx, &sy);
         if (sy < p.y0 + 10.0f || sy > p.y1 - 6.0f || sx < 6.0f || sx > W - 6.0f) continue;
@@ -902,13 +945,64 @@ static float gnd_y(double wx_units, double wz_units, int *ok)
     return (float)td5_roam_ground(x24, z24, 0, 0, NULL) * (1.0f / 256.0f);
 }
 
+/* world-space quads: screen-space triangles with the debug lines' depth, drawn depth-tested and
+ * blended (TD5_PRESET_TRANSLUCENT_POINT_ZTEST) so the ribbon lies on the road and the car is in front */
+#define WQ_QUADS 900
+static TD5_D3DVertex wq_v[WQ_QUADS * 4];
+static uint16_t      wq_i[WQ_QUADS * 6];
+static int           wq_n;
+
+static void wq_flush(void)
+{
+    if (wq_n > 0) {
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT_ZTEST);
+        td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+        td5_plat_render_draw_tris(wq_v, wq_n * 4, wq_i, wq_n * 6);
+        wq_n = 0;
+    }
+}
+
+/* four world points (render-float: place - origin, y) in order around the quad */
+static void wq_quad(const float a[3], const float b[3], const float c[3], const float d[3], uint32_t col)
+{
+    TD5_D3DVertex *v;
+    uint16_t *ix;
+    const uint16_t base = (uint16_t)(wq_n * 4);
+    if (wq_n >= WQ_QUADS) wq_flush();
+    v = &wq_v[wq_n * 4];
+    if (!td5_render_project_world_vertex(a[0], a[1], a[2], col, &v[0]) ||
+        !td5_render_project_world_vertex(b[0], b[1], b[2], col, &v[1]) ||
+        !td5_render_project_world_vertex(c[0], c[1], c[2], col, &v[2]) ||
+        !td5_render_project_world_vertex(d[0], d[1], d[2], col, &v[3])) return;
+    ix = &wq_i[wq_n * 6];
+    ix[0] = base; ix[1] = (uint16_t)(base + 1); ix[2] = (uint16_t)(base + 2);
+    ix[3] = base; ix[4] = (uint16_t)(base + 2); ix[5] = (uint16_t)(base + 3);
+    wq_n++;
+}
+
+/* a flat strip from P0 to P1 (render-float xz, y0 / y1) of half width hw, shifted sideways by off */
+static void wq_strip(double x0, double z0, float y0, double x1, double z1, float y1, double hw, uint32_t col,
+                     double off)
+{
+    const double dx = x1 - x0, dz = z1 - z0, len = sqrt(dx * dx + dz * dz);
+    double rx, rz;
+    float a[3], b[3], c[3], d[3];
+    if (len < 1.0) return;
+    rx = dz / len; rz = -dx / len;
+    a[0] = (float)(x0 + rx * (off - hw)); a[1] = y0; a[2] = (float)(z0 + rz * (off - hw));
+    b[0] = (float)(x0 + rx * (off + hw)); b[1] = y0; b[2] = (float)(z0 + rz * (off + hw));
+    c[0] = (float)(x1 + rx * (off + hw)); c[1] = y1; c[2] = (float)(z1 + rz * (off + hw));
+    d[0] = (float)(x1 + rx * (off - hw)); d[1] = y1; d[2] = (float)(z1 + rz * (off - hw));
+    wq_quad(a, b, c, d, col);
+}
+
 void td5_roam_route_ui_draw_world(int view)
 {
     const TD5_RouteResult *r = td5_roam_route_result();
     double px, pz;
     int32_t ox, oz;
     int i, i0, i1, nwp = td5_roam_route_wp_count();
-    const float lift = 90.0f;               /* 0.2 m above the road */
+    const float lift = 70.0f;               /* 0.16 m above the road */
     const double M = 430.0;
     if (view != 0 || !td5_roam_active() || nwp < 1) return;
     if (!car_place(&px, &pz, NULL)) return;
@@ -941,48 +1035,40 @@ void td5_roam_route_ui_draw_world(int view)
 
     u.hint = route_nearest(r, px, pz, u.hint);
     if (u.hint < 0) return;
-    i0 = u.hint - 6 < 0 ? 0 : u.hint - 6;
+    i0 = u.hint;
+    while (i0 > 0 && r->dist_m[u.hint] - r->dist_m[i0] < 10.0) i0--;
     i1 = u.hint;
-    {   /* ~300 m ahead */
-        double acc = 0.0;
-        while (i1 + 1 < r->npt && acc < 300.0) { acc = r->dist_m[i1 + 1] - r->dist_m[u.hint]; i1++; }
-    }
+    while (i1 + 1 < r->npt && r->dist_m[i1 + 1] - r->dist_m[u.hint] < 320.0) i1++;
     {
-        double next_chev = r->dist_m[i0];
+        double next_chev = r->dist_m[i0] + 4.0;
         for (i = i0; i < i1; i++) {
-            const double ax = r->px[i], az = r->pz[i], bx = r->px[i + 1], bz = r->pz[i + 1];
+            const double ax = r->px[i] - ox, az = r->pz[i] - oz, bx = r->px[i + 1] - ox, bz = r->pz[i + 1] - oz;
             const double dx = bx - ax, dz = bz - az, len = sqrt(dx * dx + dz * dz);
             int ok_a, ok_b;
             float ya, yb;
-            double fx, fz, rxn, rzn;
             if (len < 1.0) continue;
-            ya = gnd_y(ax - ox, az - oz, &ok_a); yb = gnd_y(bx - ox, bz - oz, &ok_b);
+            ya = gnd_y(ax, az, &ok_a) + lift; yb = gnd_y(bx, bz, &ok_b) + lift;
             if (!ok_a || !ok_b) continue;
-            fx = dx / len; fz = dz / len; rxn = fz; rzn = -fx;
-            {
-                const float rax = (float)(ax - ox), raz = (float)(az - oz), rbx = (float)(bx - ox), rbz = (float)(bz - oz);
-                const float wd = (float)(0.9 * M);
-                const uint32_t amber = 0xFFFFB400, bright = 0xFFFFE070;
-                td5_render_debug_line_world(rax, ya + lift, raz, rbx, yb + lift, rbz, bright);
-                td5_render_debug_line_world(rax + (float)rxn * wd, ya + lift, raz + (float)rzn * wd,
-                                            rbx + (float)rxn * wd, yb + lift, rbz + (float)rzn * wd, amber);
-                td5_render_debug_line_world(rax - (float)rxn * wd, ya + lift, raz - (float)rzn * wd,
-                                            rbx - (float)rxn * wd, yb + lift, rbz - (float)rzn * wd, amber);
-            }
-            /* chevrons every 9 m */
+            wq_strip(ax, az, ya, bx, bz, yb, 0.85 * M, 0x70FFB400, 0.0);          /* the amber band    */
+            wq_strip(ax, az, ya, bx, bz, yb, 0.10 * M, 0xE0FFE070, 0.85 * M);     /* its bright edges  */
+            wq_strip(ax, az, ya, bx, bz, yb, 0.10 * M, 0xE0FFE070, -0.85 * M);
+            /* chevrons every 9 m: a V of two strips pointing along the route */
             while (next_chev < r->dist_m[i + 1]) {
                 const double t = (next_chev - r->dist_m[i]) / (r->dist_m[i + 1] - r->dist_m[i] + 1e-9);
+                const double fx = dx / len, fz = dz / len, rxn = fz, rzn = -fx;
                 const double cxp = ax + dx * t, czp = az + dz * t;
-                const float cy = ya + (yb - ya) * (float)t + lift;
-                const float tip_x = (float)(cxp - ox + fx * 1.6 * M), tip_z = (float)(czp - oz + fz * 1.6 * M);
-                const float wing = (float)(1.5 * M), back = (float)(0.9 * M);
-                const float b_x = (float)(cxp - ox) - (float)fx * back, b_z = (float)(czp - oz) - (float)fz * back;
-                td5_render_debug_line_world(b_x + (float)rxn * wing, cy, b_z + (float)rzn * wing, tip_x, cy, tip_z, 0xFFFFFFFF);
-                td5_render_debug_line_world(b_x - (float)rxn * wing, cy, b_z - (float)rzn * wing, tip_x, cy, tip_z, 0xFFFFFFFF);
+                const float cy = ya + (yb - ya) * (float)t + 8.0f;
+                const double tipx = cxp + fx * 1.5 * M, tipz = czp + fz * 1.5 * M;
+                const double w1x = cxp - fx * 0.5 * M + rxn * 1.3 * M, w1z = czp - fz * 0.5 * M + rzn * 1.3 * M;
+                const double w2x = cxp - fx * 0.5 * M - rxn * 1.3 * M, w2z = czp - fz * 0.5 * M - rzn * 1.3 * M;
+                wq_strip(w1x, w1z, cy, tipx, tipz, cy, 0.17 * M, 0xF0FFFFFF, 0.0);
+                wq_strip(tipx, tipz, cy, w2x, w2z, cy, 0.17 * M, 0xF0FFFFFF, 0.0);
                 next_chev += 9.0;
             }
         }
     }
+    wq_flush();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 /* ============================================================ frame ============ */
@@ -1002,6 +1088,7 @@ static void ui_end(void)
     if (u.map_open) td5_plat_set_os_cursor_visible(0);
     TD5_LOG_I(LOG_TAG, "ROUTE_UI: session end");
     td5_roam_route_reset();
+    if (!td5_roam_route_graph_building()) td5_roam_route_graph_free();   /* the planner graph is per session */
     memset(&u, 0, sizeof u);
 }
 

@@ -38,7 +38,7 @@
 #define TD5_ROUTE_CIRCUIT    1
 
 typedef struct {
-    double  lat, lon;        /* canonical: printed with %.10f and parsed back */
+    double  lat, lon;        /* canonical: rounded to 1e-8 deg (1 mm), printed with %.8f */
     int32_t px, pz;          /* PLACE frame units, derived from lat/lon        */
     int     kind;            /* TD5_ROUTE_WP_*                                  */
     /* where the planner snapped it (valid once the graph is ready) */

@@ -3597,6 +3597,13 @@ int debug_line_project(float wx, float wy, float wz, uint32_t argb,
     return 1;
 }
 
+/* [roam F5-A] world point -> a pre-transformed vertex with the debug lines' depth + rhw (so a
+ * depth-tested screen-space primitive lands on the road and is occluded like the lines). 0 = behind
+ * the near plane. Valid only during a pane's world pass. */
+int td5_render_project_world_vertex(float wx, float wy, float wz, uint32_t argb, struct TD5_D3DVertex *out) {
+    return debug_line_project(wx, wy, wz, argb, out);
+}
+
 /* Public world->screen projection for the dev geometry picker. See header. */
 int td5_render_project_world(float wx, float wy, float wz,
                              float *sx, float *sy, float *rhw) {
