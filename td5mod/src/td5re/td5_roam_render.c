@@ -74,8 +74,10 @@
 #define RR_MAXMESH        (RR_SUB * RR_SUB)
 #define RR_UPM            430.0              /* units per metre                     */
 #define RR_MAX_LANES      16
-/* Pages of the HOST level (td5_roam_mode.h: roam loads a normal level only for its static
- * pages and sky; default = schedule index 0, level023 "Moscow", 475 pages). Plain look: 91 is
+/* Pages of the HOST level (td5_roam_mode.h). F2-F: a roam session asks the mode for them
+ * (td5_roam_host_pages: the place's own geo level, TD5_TG_PAGE_ROAD / _GREEN / _SIDEWALK); the
+ * numbers below are the SHIPPED-LEVEL FALLBACK (level023 "Moscow", 475 pages) and the dev overlay
+ * defaults. Plain look: 91 is
  * a featureless dark-grey asphalt (92..95 the same, 96/97 carry an edge line, 98/99 a
  * crossing), 9 is a plain green lawn. Looked up on a contact sheet of
  * re/assets/levels/level023/textures.src/pages. Another host needs other numbers:
@@ -84,6 +86,9 @@
 #define RR_PAGE_ROAD      91
 #define RR_PAGE_GROUND    9
 #define RR_PAGE_KERB      HUD_WHITE_TEX_PAGE
+/* Junction patch UVs: units of road per page. 80000 (186 m) magnified the geo asphalt's grain into
+ * blotches; 24000 (56 m, +-22 m inside the stripe-free middle) keeps a patch uniform. */
+#define RR_PATCH_UV_UNITS 24000.0f
 
 typedef struct {
     int             tx, tz;
@@ -492,8 +497,8 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc)
          * middle of the page (the lane line sits on the u = 0 edge) */
         for (kk = 0; kk < 3; kk++)
             rr_put(b, q + kk, p[kk], col,
-                   0.5f + (p[kk][0] - p[0][0]) / 80000.0f,
-                   0.5f + (p[kk][2] - p[0][2]) / 80000.0f);
+                   0.5f + (p[kk][0] - p[0][0]) / RR_PATCH_UV_UNITS,
+                   0.5f + (p[kk][2] - p[0][2]) / RR_PATCH_UV_UNITS);
         b->ct++;
         rt->ntri++;
     }
@@ -758,9 +763,18 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
     }
     if (!s_rr.grid_ok) roam_grid_default(place, &s_rr.grid);
 
-    s_rr.page_road   = td5_env_int("TD5RE_ROAM_RENDER_PAGE_ROAD",   RR_PAGE_ROAD,   0, 1023);
-    s_rr.page_ground = td5_env_int("TD5RE_ROAM_RENDER_PAGE_GROUND", RR_PAGE_GROUND, 0, 1023);
-    s_rr.page_kerb   = td5_env_int("TD5RE_ROAM_RENDER_PAGE_KERB",   RR_PAGE_KERB,   0, 1023);
+    {   /* the host level's own road / lawn / kerb pages (the knobs override) */
+        int hr = RR_PAGE_ROAD, hg = RR_PAGE_GROUND, hk = RR_PAGE_KERB;
+#ifdef RR_HAVE_MODE
+        if (td5_roam_active()) {
+            td5_roam_host_pages(&hr, &hg, &hk);
+            if (hk < 0) hk = RR_PAGE_KERB;
+        }
+#endif
+        s_rr.page_road   = td5_env_int("TD5RE_ROAM_RENDER_PAGE_ROAD",   hr, 0, 1023);
+        s_rr.page_ground = td5_env_int("TD5RE_ROAM_RENDER_PAGE_GROUND", hg, 0, 1023);
+        s_rr.page_kerb   = td5_env_int("TD5RE_ROAM_RENDER_PAGE_KERB",   hk, 0, 1023);
+    }
     s_rr.use_ground  = td5_env_int("TD5RE_ROAM_RENDER_GROUND", 1, 0, 1);
     s_rr.cell_m      = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
     if (64 % s_rr.cell_m != 0) s_rr.cell_m = 16;            /* must divide a sub-block */

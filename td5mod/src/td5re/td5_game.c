@@ -3508,7 +3508,8 @@ static void init_race_level_and_assets(void)
      * for a level09x zip that no build ever wrote. set_target_slot resolves which
      * level dir to build into and selects the place, and it must run BEFORE the
      * generation worker starts -- the worker reads both. */
-    if (td5_trackgen_is_generated_slot(g_td5.track_index)) {
+    /* [GEO FREE ROAM F2-F] a roam session hosts on the place's already-built geo level: never rebuild it */
+    if (td5_trackgen_is_generated_slot(g_td5.track_index) && !td5_roam_active()) {
         td5_trackgen_set_target_slot(g_td5.track_index);
         if (drag_strip)
             TD5_LOG_I(LOG_TAG, "Auto track: skipped, drag race loads the drag strip (track_index=%d)",
@@ -5259,6 +5260,8 @@ static void init_race_viewports_and_hud(void)
         }
         snprintf(sky_path, sizeof(sky_path),
                  "re/assets/levels/level%03d/%s.png", level_num, sky_name);
+        /* [GEO FREE ROAM F2-F] roam on a geo host: the sky of the TIME OF DAY option in force */
+        if (td5_roam_active()) td5_roam_host_sky_path(sky_path, sizeof(sky_path));
         td5_render_load_sky(sky_path);
     }
 }
