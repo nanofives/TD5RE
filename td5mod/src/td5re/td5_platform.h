@@ -1049,6 +1049,11 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...);
 /** Flush all open log files to disk. */
 void td5_plat_log_flush(void);
 
+/** Write a whole small file (create/truncate) on the log writer thread, so the
+ *  caller never blocks on disk I/O; in order with the logs, drained at shutdown and
+ *  by td5_plat_log_flush. Synchronous when the writer is off (TD5RE_LOG_ASYNC=0). */
+void td5_plat_file_write_async(const char *path, const void *data, size_t n);
+
 /** Initialize the logging subsystem.  Creates log/ directory, rotates old
  *  sessions (keeps up to 5 previous), and opens fresh log files.
  *  Called from main before any other logging.  Safe to call multiple times. */

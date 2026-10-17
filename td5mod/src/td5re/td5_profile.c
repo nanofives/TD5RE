@@ -3,6 +3,7 @@
  * ========================================================================== */
 #include "td5_profile.h"
 #include "td5_platform.h"   /* TD5_LOG_* */
+#include "td5_hitchwatch.h"   /* [roam F3-B] DEV stall sampler heartbeat */
 
 #include <windows.h>
 #include <stdint.h>
@@ -46,6 +47,7 @@ int td5_profile_enabled(void) { return s_enabled; }
 
 void td5_profile_begin_frame(void)
 {
+    td5_hitch_beat("frame_begin");   /* DEV, off unless TD5RE_HITCH_WATCH_MS */
     if (!s_enabled) return;
     QueryPerformanceCounter(&s_prev);
     s_frame_begin = s_prev;   /* frame total spans begin_frame() -> end_frame() */
@@ -72,6 +74,7 @@ void td5_profile_mark(const char *zone)
     LARGE_INTEGER now;
     uint64_t dt_us;
     ProfZone *z;
+    td5_hitch_beat(zone);   /* DEV, off unless TD5RE_HITCH_WATCH_MS */
     if (!s_enabled || !zone || s_freq.QuadPart == 0) return;
     QueryPerformanceCounter(&now);
     dt_us = (uint64_t)((now.QuadPart - s_prev.QuadPart) * 1000000LL / s_freq.QuadPart);

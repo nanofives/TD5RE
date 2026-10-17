@@ -32,6 +32,7 @@
 #include "td5_roam_stream.h"
 #include "td5_roam_physics.h"   /* td5_roam_physics_note_frame */
 #include "td5_roam_mode.h"      /* td5_roam_active (the full-load memory samples) */
+#include "td5_hitchwatch.h"      /* [F3-B DEV] what the worker is doing, for the stall sampler */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -129,6 +130,7 @@ typedef struct {
     TD5_RoamStreamLoadscreenFn loadscreen;   /* registered by td5_game.c, survives sessions */
     RsSession *s;
     uint32_t   f2_t0, f2_next;               /* TD5RE_ROAM_STREAM=0: private-bytes samples (A/B) */
+    volatile const char *doing;              /* [F3-B DEV] the worker's current step (static strings) */
 } RoamStream;
 
 static RoamStream s_stream;
@@ -136,6 +138,10 @@ static RoamStream s_stream;
 /* ============================================================================
  * SECTION: small helpers
  * ========================================================================== */
+
+/* [F3-B DEV] the worker's current step, read by the stall sampler from its own thread */
+#define RS_DOING(str) (s_stream.doing = (str))
+static const char *rs_doing(void) { const char *d = (const char *)s_stream.doing; return d ? d : "none"; }
 
 static int rs_hash_of(int tx, int tz) { return (int)(((unsigned)tx * 73856093u ^ (unsigned)tz * 19349663u) & (RS_HASH - 1)); }
 
@@ -203,6 +209,7 @@ static TD5_RoamTileCtx *rs_ctx(RsSession *s)
     if (!s->ctx && !s->ctx_failed) {
         const uint32_t t0 = td5_plat_time_ms();
         const double m0 = rs_private_mb();
+        RS_DOING("ctx_open");
         s->ctx = td5_roam_tile_ctx_open(s->place, 0, NULL);
         if (!s->ctx) s->ctx_failed = 1;
         TD5_LOG_I(LOG_TAG, "ROAM_STREAM worker: tile builder context for %s %s in %u ms (private %+.1f MB)", s->place,
@@ -222,6 +229,7 @@ static int rs_build(RsSession *s, int tx, int tz, RoamTile **out, char *err, siz
     if (!rs_ctx(s)) { snprintf(err, errn, "no builder context"); return 0; }
     t = (RoamTile *)calloc(1, sizeof *t);
     if (!t) { snprintf(err, errn, "out of memory"); return 0; }
+    RS_DOING("build");
     if (!td5_roam_tile_build(s->ctx, tx, tz, t, &st)) { free(t); snprintf(err, errn, "build failed"); return 0; }
     rs_tile_path(s, tx, tz, path, sizeof path);
     td5_geo_source_path(dir, sizeof dir, s->place, "roam");
@@ -253,6 +261,7 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
     uint32_t t0 = td5_plat_time_ms();
     memset(r, 0, sizeof *r);
     r->idx = j->idx; r->kind = j->kind; r->layers = j->layers;
+    RS_DOING("read");
     if (!rs_read(s, tx, tz, &t, r->err, sizeof r->err)) {
         r->ms_read = td5_plat_time_ms() - t0;
         t0 = td5_plat_time_ms();
@@ -264,7 +273,7 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
         if (j->kind == RS_JOB_VERIFY) {
             uint32_t want = 0;
             t0 = td5_plat_time_ms();
-            if (!rs_ctx(s) || !td5_roam_tile_input_hash(s->ctx, tx, tz, &want)) {
+            if (!rs_ctx(s) || (RS_DOING("verify_hash"), !td5_roam_tile_input_hash(s->ctx, tx, tz, &want))) {
                 r->ms_verify = td5_plat_time_ms() - t0;
                 snprintf(r->err, sizeof r->err, "verify: no input hash");
                 rs_free_tile(t);
@@ -285,6 +294,7 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
     }
     if (j->layers & RS_SCEN) {
         t0 = td5_plat_time_ms();
+        RS_DOING("bake");
         r->baked = td5_roam_render_bake(t, s->hc_ok ? s->hc : NULL);
         r->ms_bake = td5_plat_time_ms() - t0;
     }
@@ -339,10 +349,11 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
     RsResult r;
     /* FIRST, before any build: adopt the main thread's rounding mode (td5_platform.h) */
     td5_plat_fpenv_apply(&s->fpenv);
+    RS_DOING("height_open");
     if (s->hc) s->hc_ok = td5_roam_render_open_height(s->hc);
     while (!InterlockedCompareExchange(&s->cancel, 0, 0)) {
         double m0;
-        if (!rs_take_job(s, &j)) { WaitForSingleObject(s->wake, 50); continue; }
+        if (!rs_take_job(s, &j)) { RS_DOING("idle"); WaitForSingleObject(s->wake, 50); continue; }
         m0 = rs_private_mb();
         rs_process(s, &j, &r);
         {
@@ -353,6 +364,7 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
                           "cache ways now %d)", j.kind == RS_JOB_VERIFY ? "verify" : "load", s->tile[j.idx].tx,
                           s->tile[j.idx].tz, dm, r.built, r.stale, s->ctx ? td5_roam_cache_way_count() : -1);
         }
+        RS_DOING("push");
         if (!rs_push_result(s, &r)) { rs_result_free(&r); break; }
     }
     if (s->ctx) { td5_roam_tile_ctx_close(s->ctx); s->ctx = NULL; }
@@ -615,10 +627,10 @@ static int rs_racer(RsSession *s, int slot, double *px, double *pz, double *lx, 
     return 1;
 }
 
-/* The racer slots the ROAD layer follows: every racer slot that has an actor, driven or
- * not. Roam drives slot 0 only, but slots 1..5 keep their actors (parked near the world
- * origin, never placed) and physics still refreshes their contacts; following them keeps
- * the tiles under them resident, so they behave exactly as with the whole casco loaded. */
+/* The racer slots the ROAD layer follows: every racer slot that has an actor (rs_racer
+ * returns 0 for the rest). Since F3-B a roam race spawns one actor (td5_game.c: no
+ * decoration slots), so this is slot 0 alone; the old parked slots 1..5 at the world
+ * origin no longer exist, and neither does the 3x3 they kept resident. */
 static int rs_racer_count(void)
 {
     return RS_RACERS;
@@ -823,6 +835,7 @@ int td5_roam_stream_begin(const char *place, const RoamGrid *g, TD5_RoamResident
     s_stream.s = s;
 
     td5_plat_fpenv_capture(&s->fpenv);
+    td5_hitch_set_worker_probe(rs_doing);   /* [F3-B DEV] */
     if (s->worker_on && s->wake && s->done) s->thread = CreateThread(NULL, 0, rs_thread_proc, s, 0, NULL);
     /* the worker never competes with the frame: a verify / build is a long CPU burst */
     if (s->thread) SetThreadPriority(s->thread, td5_env_int("TD5RE_ROAM_STREAM_PRIORITY", THREAD_PRIORITY_BELOW_NORMAL, -2, 2));

@@ -1204,13 +1204,17 @@ static void terrain_probe_trace_ensure_open(void)
     if (s_terrain_probe_trace_fp) return;
     s_terrain_probe_trace_fp = fopen("tools/frida_csv/terrain_probe_port.csv", "w");
     if (s_terrain_probe_trace_fp) {
+        /* [roam F3-B] fully buffered, no per-row fflush: the per-tick fflush was a synchronous
+         * WriteFile on the main thread every chase-camera tick, and under disk load NtWriteFile
+         * blocked it for up to ~1 s (the "camera solve" hitch; td5_hitchwatch stacks). The CRT
+         * flushes the buffer at exit, so a finished run's CSV is complete as before. */
+        setvbuf(s_terrain_probe_trace_fp, NULL, _IOFBF, 1u << 20);
         fprintf(s_terrain_probe_trace_fp,
             "sim_tick,view,actor_slot,actor_span,actor_sub_lane,"
             "pos_x,pos_y,pos_z,combined_angle,"
             "point_ax,point_az,point_bx,point_bz,point_cx,point_cz,"
             "norm_a_y,norm_b_y,norm_c_y,"
             "pitch_input,roll_input,orient1_y,stored_pitch,cam_y_offset\n");
-        fflush(s_terrain_probe_trace_fp);
     }
 }
 
@@ -1254,7 +1258,6 @@ static void terrain_probe_trace_emit(int view, const uint8_t *actor_addr,
         (int)g_camOrientShort[view][1],
         g_camStoredPitch[view],
         g_camOrbitOffset[view][1]);
-    fflush(s_terrain_probe_trace_fp);
 }
 
 /* Force the next snapshot to re-seed (prev := cur) for one view. */
