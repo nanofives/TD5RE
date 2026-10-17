@@ -1124,6 +1124,13 @@ static int sc_bld_apron_ok(void *uv, double x, double z)
     return 1;
 }
 
+/* [F4b] an apron piece clear of every drivable primitive (the apron's long hull edges
+ * otherwise lay the band across a street between two cleared vertices) */
+static int sc_bld_apron_quad_ok(void *uv, const double *qx, const double *qz)
+{
+    return !sc_on_road(((ScBldU *)uv)->c, qx, qz, 4, NULL);
+}
+
 /* landmark cluster answers for building `self` among the halo set (td5_geo_landmarks.c rules) */
 static void sc_lm_info(const ScBld *set, int n, int self, int *kind, int *anchor, int *veto)
 {
@@ -1577,6 +1584,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         e.corner_ok = sc_bld_corner_ok;
         e.rect_on_road = sc_bld_rect_on_road;
         e.apron_ok = sc_bld_apron_ok;
+        e.apron_quad_ok = sc_bld_apron_quad_ok;
         e.si = -1;
         e.acct = 0;
         e.st = &c->bst;
@@ -2063,6 +2071,8 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_LRU          24
 #define PV_KERB_IN      4.0          /* slab kerb edge off the kerb line, units (1 cm)    */
 #define PV_MITRE_MAX    2.5          /* outer-corner reach cap, multiples of the width   */
+#define PV_COLLAPSE_SEG 1.25         /* a piece longer than this many widths never folds */
+#define PV_COLLAPSE_RUN 3.5          /* a folded corner run is at most this many widths  */
 #define PV_FALL         0.25         /* TG_NET_FW_FALL: steepest cross-fall of a slab    */
 #define PV_BACK_SINK    344.0        /* back face reaches 0.8 m under the raster ground:
                                       * the drawn ground is dropped 0.4 m under it (roam
@@ -2070,7 +2080,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_W_MIN        320.0        /* TD5_TG_GEO_SW_MIN (0.75 m)                       */
 #define PV_W_MAX        2600.0       /* TD5_TG_GEO_SW_MAX (6 m)                          */
 #define PV_W_DEFAULT    860.0        /* 2 m: an outline no ribbon width reaches          */
-#define PV_W_SKIP       60.0         /* narrower than this (two roads 14 cm apart): none */
+#define PV_W_SKIP       200.0        /* narrower than this (0.47 m, a sliver between two roads): none */
 #define PV_MEDIAN_M     25.0         /* an opposite carriageway this near: a median      */
 #define PV_LAWN_MIN_M   2.5          /* a median narrower than this is paved             */
 #define PV_RAY_STEP     200.0
@@ -2589,15 +2599,38 @@ static int pv_offset_chain(PvChain *ch)
         na[k] = (k + 1 < ns) ? k + 1 : (ch->closed ? 0 : -1);
     }
     if (ch->closed && ns < 3) nalive = 0;
-    /* collapse, most-reversed first, until no outer piece runs backwards */
+    /* collapse, most-reversed first, until no outer piece runs backwards. Only a corner
+     * may collapse: a piece shorter than PV_COLLAPSE_SEG widths, into a run of collapsed
+     * pieces no longer than PV_COLLAPSE_RUN widths (a fillet arc and its tangents); a
+     * straight kerb never folds into a far point */
     while (nalive > 0) {
         int worst = -1;
         double wd = -1e-6;
         for (k = 0; k < ns; k++) {
-            double dd;
+            double dd, run, wm;
+            int j, q;
             if (!alive[k]) continue;
             dd = pv_seg_dir(ch, Ax, Az, Bx, Bz, k, pa[k], na[k]);
-            if (dd < wd) { worst = k; wd = dd; }
+            if (!(dd < wd)) continue;
+            wm = ch->w[k] > ch->w[(k + 1) % nv] ? ch->w[k] : ch->w[(k + 1) % nv];
+            run = hypot(ch->px[(k + 1) % nv] - ch->px[k], ch->pz[(k + 1) % nv] - ch->pz[k]);
+            if (!(wm > 1.0) || run > PV_COLLAPSE_SEG * wm) continue;
+            for (j = 1; j < ns; j++) {            /* the dead run this piece would join */
+                q = k - j;
+                if (q < 0) { if (!ch->closed) break; q += ns; }
+                if (alive[q]) break;
+                run += hypot(ch->px[(q + 1) % nv] - ch->px[q], ch->pz[(q + 1) % nv] - ch->pz[q]);
+                if (ch->w[q] > wm) wm = ch->w[q];
+            }
+            for (j = 1; j < ns; j++) {
+                q = k + j;
+                if (q >= ns) { if (!ch->closed) break; q -= ns; }
+                if (alive[q]) break;
+                run += hypot(ch->px[(q + 1) % nv] - ch->px[q], ch->pz[(q + 1) % nv] - ch->pz[q]);
+                if (ch->w[(q + 1) % nv] > wm) wm = ch->w[(q + 1) % nv];
+            }
+            if (run > PV_COLLAPSE_RUN * wm) continue;
+            worst = k; wd = dd;
         }
         if (worst < 0) break;
         if (nalive <= (ch->closed ? 3 : 1)) { if (ch->closed) nalive = 0; break; }
@@ -2852,12 +2885,25 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     const double ddx = kx[b] - kx[a], ddz = kz[b] - kz[a];
     int sb, k, cut = 0;
     if (ch->w[a] < PV_W_SKIP && ch->w[b] < PV_W_SKIP) return 1;
+    if ((ox[1] - ox[0]) * ddx + (oz[1] - oz[0]) * ddz < 0.0) {
+        /* an outer piece still running backwards (a reversal no corner rule may fold):
+         * a triangle to its midpoint, never a bow-tie */
+        ox[0] = ox[1] = 0.5 * (ox[0] + ox[1]);
+        oz[0] = oz[1] = 0.5 * (oz[0] + oz[1]);
+    }
     sb = sc_sb_of(c, 0.5 * (kx[a] + kx[b]), 0.5 * (kz[a] + kz[b]));
     /* the guard: the slab footprint off every drivable primitive, cut back, else dropped */
     for (;;) {
-        fx[0] = kx[a]; fz[0] = kz[a]; fx[1] = kx[b]; fz[1] = kz[b];
-        fx[2] = ox[1]; fz[2] = oz[1]; fx[3] = ox[0]; fz[3] = oz[0];
-        if (!sc_on_road(c, fx, fz, 4, NULL)) break;
+        /* the footprint as the census reads it: coincident corners merged (a collapsed
+         * corner piece is a triangle; a repeated vertex hides it from sc_in_convex) */
+        double qx[4] = { kx[a], kx[b], ox[1], ox[0] }, qz[4] = { kz[a], kz[b], oz[1], oz[0] };
+        int m = 0, j, d;
+        for (j = 0; j < 4; j++) {
+            for (d = 0; d < m; d++) if (fabs(fx[d] - qx[j]) < 1.0 && fabs(fz[d] - qz[j]) < 1.0) break;
+            if (d == m) { fx[m] = (double)(float)qx[j]; fz[m] = (double)(float)qz[j]; m++; }   /* as the census reads it */
+        }
+        if (m >= 3 && fabs(td5_geob_ring_area(fx, fz, m)) < 4.0) m = 2;    /* the census's collinear rule */
+        if (m < 2 || !sc_on_road(c, fx, fz, m, NULL)) break;
         if (++cut > 2) { c->st.pv_drop++; return 1; }
         for (k = 0; k < 2; k++) {
             const double bx = k ? kx[b] : kx[a], bz = k ? kz[b] : kz[a];
@@ -2882,7 +2928,8 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     /* kerb face: the road up to the slab */
     {
         const double ka[2] = { kx[a], kz[a] }, kb[2] = { kx[b], kz[b] };
-        if (!sc_on_road(c, (const double[2]){ ka[0], kb[0] }, (const double[2]){ ka[1], kb[1] }, 2, NULL)) {
+        if (!sc_on_road(c, (const double[2]){ (double)(float)ka[0], (double)(float)kb[0] },
+                        (const double[2]){ (double)(float)ka[1], (double)(float)kb[1] }, 2, NULL)) {
             x[0] = ka[0]; z[0] = ka[1]; y[0] = ch->py[a];
             x[1] = kb[0]; z[1] = kb[1]; y[1] = ch->py[b];
             x[2] = kb[0]; z[2] = kb[1]; y[2] = ch->py[b] + TD5_TG_KERB_H;
