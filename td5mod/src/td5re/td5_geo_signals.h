@@ -146,4 +146,11 @@ int  td5_geo_signal_countdown(unsigned int *rgb);
  * tests only -- the renderer goes through td5_geo_signal_lamp_colour. */
 int  td5_geo_signal_lamp_phase_now(void);
 
+/* [ROAM F4c] Session clock: seconds >= 0 drives the cycle from the roam session's time
+ * instead of the wall clock (< 0 restores the wall clock). The pure form of the same
+ * cycle for a non-render consumer: phase 0 red / 1 amber / 2 green; cross = 1 reads the
+ * cross street's head (half a period behind). */
+void td5_geo_signal_set_session_time(double seconds);
+int  td5_geo_signal_phase_at(double session_s, int cross);
+
 #endif /* TD5_GEO_SIGNALS_H */

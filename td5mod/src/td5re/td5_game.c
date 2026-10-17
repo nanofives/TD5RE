@@ -41,6 +41,7 @@
 #include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
+#include "td5_roam_furniture.h" /* GEO FREE ROAM street furniture (F4c): signal clock + lamp registry per frame */
 #include "td5_roam_route_ui.h" /* GEO FREE ROAM route planner (F5-A): keys, map overlay, guidance */
 #include "td5_roam_barrier.h"  /* GEO FREE ROAM route barriers (F6-A): panels + chevrons */
 #include "td5_roam_race.h"     /* GEO FREE ROAM sprint race (F6-B): flow, progress, results, barrier layer */
@@ -8299,6 +8300,9 @@ static void frame_render(void)
     }
     if (!td5_render_photobooth_active())
         td5_light_emit_vehicle_headlights();
+    /* [GEO FREE ROAM F4c] the signal cycle's session clock and the resident street lanterns as the lamp
+     * registry (inert outside a roam session). */
+    td5_roam_furn_frame();
     /* [LIGHT2] Street lamps: promote the nearest registered lamp fixtures to
      * real point lights (env-dark gated, same verdict as auto headlights). */
     if (!td5_render_photobooth_active())

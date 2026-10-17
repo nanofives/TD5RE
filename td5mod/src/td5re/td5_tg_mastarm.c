@@ -885,6 +885,22 @@ int tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap,
     return 1;
 }
 
+/* [ROAM F4c] pure wrappers over the file's text planner, for td5_roam_furniture.c's own
+ * atlas (no strip behaviour changes: these only expose pl_upper / pl_plan_text /
+ * pl_split2 to another module). */
+void tg_plate_upper(const char *in, char *out, size_t cap) { pl_upper(in, out, cap); }
+int  tg_plate_plan(const char *upper_name, char *l1, char *l2, size_t cap, int *abbreviated)
+{
+    int abbr = 0;
+    const int rows = pl_plan_text(upper_name, l1, l2, cap, &abbr);
+    if (abbreviated) *abbreviated = abbr;
+    return rows;
+}
+int  tg_plate_split2(const char *upper_one_line, char *l1, char *l2, size_t cap)
+{
+    return pl_split2(upper_one_line, l1, l2, cap);
+}
+
 void tg_mastarm_report(void)
 {
     if (!td5_geo_loaded()) return;

@@ -208,6 +208,7 @@ struct TD5_RoamScnSource {
     int       fp_on, plaza_on, bld_on, lm_prefab;
     /* reused per build */
     TG_TileCtx *ctx;
+    TD5_RoamFurnSource *furn;   /* [F4c] street furniture (td5_roam_furniture.c), this thread's */
 };
 
 static int64_t sc_tkey(int tx, int tz) { return ((int64_t)tx << 32) | (uint32_t)tz; }
@@ -581,6 +582,10 @@ struct TG_TileCtx {
     int      nlt, cap_lt;
     TD5_RoamScnStats st;
     TG_GeoBldStats   bst;
+    /* [F4c] furniture: first mesh of each sub-block that is furniture (meshes from there on are
+     * exempt from the F4a census, which judges them with its own overhead-aware one), and the lanterns */
+    int      furn_first[TD5_ROAM_SCN_NSB];
+    float   *lamp;  uint32_t nlamp;
 };
 
 static int sc_grow(void **p, int *cap, int need, size_t elem)
@@ -605,10 +610,11 @@ static void sc_ctx_reset(TG_TileCtx *c)
     c->nprim = c->nseg = c->nedge = 0;
     c->nroad = 0;
     c->nlt = 0;
+    free(c->lamp); c->lamp = NULL; c->nlamp = 0;
     if (c->canopy.data) free(c->canopy.data);
     memset(&c->canopy, 0, sizeof c->canopy);
     c->canopy_ok = 0;
-    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { c->sb[k].blk.len = 0; c->sb[k].blk.oom = 0; c->sb[k].nmesh = 0; }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { c->sb[k].blk.len = 0; c->sb[k].blk.oom = 0; c->sb[k].nmesh = 0; c->furn_first[k] = 0x7FFFFFFF; }
     memset(&c->st, 0, sizeof c->st);
     memset(&c->bst, 0, sizeof c->bst);
 }
@@ -937,6 +943,21 @@ int roam_edge_frame(const TG_TileCtx *c, int edge, int side, double along, RoamF
     return 1;
 }
 
+/* ---- [F4c] the ctx as the furniture emitters see it (declared in td5_roam_scenery.h) ---- */
+const RoamTile *roam_ctx_tile(const TG_TileCtx *c, int dx, int dz)
+{
+    if (dx < -1 || dx > 1 || dz < -1 || dz > 1) return NULL;
+    return c->road[(dz + 1) * 3 + (dx + 1)];
+}
+const RoamGrid *roam_ctx_grid(const TG_TileCtx *c) { return c->grid; }
+void roam_ctx_origin(const TG_TileCtx *c, int *tx, int *tz, int32_t *org_x, int32_t *org_z)
+{
+    if (tx) *tx = c->tx;
+    if (tz) *tz = c->tz;
+    if (org_x) *org_x = c->org_x;
+    if (org_z) *org_z = c->org_z;
+}
+
 /* ============================================================================
  * SECTION: sources for the emit (ground, canopy, sub-blocks)
  * ========================================================================== */
@@ -1014,6 +1035,21 @@ static int sc_owned_point(const TG_TileCtx *c, double x, double z)
     int tx, tz;
     roam_grid_tile_of(c->grid, x + (double)c->org_x, z + (double)c->org_z, &tx, &tz);
     return tx == c->tx && tz == c->tz;
+}
+
+int roam_ctx_on_road(const TG_TileCtx *c, const double *x, const double *z, int n)
+{
+    return sc_on_road((TG_TileCtx *)c, x, z, n, NULL);
+}
+int roam_ctx_owned(const TG_TileCtx *c, double x, double z) { return sc_owned_point(c, x, z); }
+int roam_ctx_sb_of(const TG_TileCtx *c, double x, double z) { return sc_sb_of(c, x, z); }
+double roam_ctx_ground(const TG_TileCtx *c, double x, double z) { return sc_ground((void *)c, x, z); }
+void *roam_ctx_mesh_begin(TG_TileCtx *c, int sb)
+{
+    ScSb *b = sc_sb(c, sb, 1);
+    if (!b) return NULL;
+    b->moff[b->nmesh++] = b->blk.len;
+    return &b->blk;
 }
 
 /* ============================================================================
@@ -1967,6 +2003,7 @@ void td5_roam_scn_free(TD5_RoamScenery *sc)
     if (!sc) return;
     free(sc->blob);
     free(sc->rec_off);
+    free(sc->lamp);
     free(sc);
 }
 
@@ -1976,19 +2013,26 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
     size_t total = 0, off = 0;
     int k, m;
     uint32_t nrec = 0, r = 0, h = 2166136261u;
+    int *rec_furn = NULL;
     if (!sc) return NULL;
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { total += c->sb[k].blk.len; nrec += (uint32_t)c->sb[k].nmesh; }
     sc->blob = (uint8_t *)malloc(total ? total : 1u);
     sc->rec_off = (uint32_t *)malloc((nrec ? nrec : 1u) * sizeof(uint32_t));
-    if (!sc->blob || !sc->rec_off) { td5_roam_scn_free(sc); return NULL; }
+    rec_furn = (int *)calloc(nrec ? nrec : 1u, sizeof(int));
+    if (!sc->blob || !sc->rec_off || !rec_furn) { free(rec_furn); td5_roam_scn_free(sc); return NULL; }
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
         const ScSb *b = &c->sb[k];
         if (b->blk.len) memcpy(sc->blob + off, b->blk.b, b->blk.len);
         sc->sb_first[k] = r;
         sc->sb_count[k] = (uint32_t)b->nmesh;
-        for (m = 0; m < b->nmesh; m++) sc->rec_off[r++] = (uint32_t)(off + b->moff[m]);
+        for (m = 0; m < b->nmesh; m++) {
+            rec_furn[r] = (m >= c->furn_first[k]);      /* [F4c] furniture: judged by its own census */
+            sc->rec_off[r++] = (uint32_t)(off + b->moff[m]);
+        }
         off += b->blk.len;
     }
+    sc->lamp = c->lamp; sc->nlamp = c->nlamp;           /* ownership moves to the layer */
+    c->lamp = NULL; c->nlamp = 0;
     sc->blob_bytes = total;
     sc->nrec = nrec;
     sc->tx = c->tx; sc->tz = c->tz;
@@ -2000,13 +2044,20 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
         h = sc_fnv(h, sc->sb_count, sizeof sc->sb_count);
         h = sc_fnv(h, sc->rec_off, (size_t)nrec * 4u);
         h = sc_fnv(h, sc->blob, total);
+        {   /* [F4c] the furniture rules, its lanterns (the light registry's feed) */
+            const uint32_t fr = TD5_ROAM_FURN_RULES;
+            h = sc_fnv(h, &fr, 4);
+            if (sc->nlamp) h = sc_fnv(h, sc->lamp, (size_t)sc->nlamp * 3u * sizeof(float));
+        }
     }
     /* the census, over the bytes that will be drawn */
     for (r = 0; r < nrec; r++) {
         const size_t ro = sc->rec_off[r];
         const size_t end = (r + 1 < nrec) ? sc->rec_off[r + 1] : total;
+        if (rec_furn[r]) continue;
         c->st.guard_overlaps += sc_census_record(c, sc->blob + ro, (end > ro && end <= total) ? end - ro : total - ro);
     }
+    free(rec_furn);
     c->st.meshes = (int)nrec;
     c->st.bytes = (uint32_t)(total + (size_t)nrec * 4u);
     c->st.hash = h;
@@ -2043,6 +2094,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     if (!sc_index_load(s)) TD5_LOG_W(LOG_TAG, "roam scenery: %s has no tiles/INDEX.JSON: no buildings", place);
     s->ctx = (TG_TileCtx *)calloc(1, sizeof(TG_TileCtx));
     if (!s->ctx) { td5_roam_scn_close(s); return NULL; }
+    s->furn = td5_roam_furn_open(place);      /* [F4c] NULL = no furniture (knob off / no data) */
     TD5_LOG_I(LOG_TAG, "roam scenery: source open place=%s upm=%.1f gap=%.0f units index rows B=%d A=%d F=%d",
               place, s->upm, s->gap, s->nrows[0], s->nrows[1], s->nrows[2]);
     return s;
@@ -2058,6 +2110,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     }
     for (k = 0; k < SC_ROAD_LRU; k++) if (s->road[k].t) { td5_roam_tile_free(s->road[k].t); free(s->road[k].t); }
     sc_ctx_free(s->ctx);
+    td5_roam_furn_close(s->furn);
     if (s->hc) { if (s->hc_open) td5_roam_height_close(s->hc); free(s->hc); }
     free(s);
 }
@@ -2145,6 +2198,12 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     if (td5_env_int("TD5RE_ROAM_SCN_FOOTPATHS", 1, 0, 1) &&
         !sc_emit_footpaths(s, c, fc, nfc, x0 - (double)c->org_x, z0 - (double)c->org_z,
                            x1 - (double)c->org_x, z1 - (double)c->org_z)) goto out;
+    /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own) */
+    if (s->furn) {
+        int k;
+        for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->furn_first[k] = c->sb[k].nmesh;
+        if (!td5_roam_furn_emit(s->furn, c, &c->st.furn, &c->lamp, &c->nlamp)) goto out;
+    }
     c->st.ms_emit = td5_plat_time_ms() - t1;
     sc = sc_assemble(c);
     if (sc) {
@@ -2251,7 +2310,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     int i, threadmode = 0, cap = 2048;
     FILE *f;
     uint32_t t0;
-    long tot[24];
+    long tot[24], ft[16];
     double shift_max = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
@@ -2281,6 +2340,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     j.ok = (int *)calloc((size_t)(j.n > 0 ? j.n : 1), sizeof(int));
     if (!j.rows || !j.ok) return 1;
     if (j.outdir[0]) td5_roam_mkdirs(j.outdir);
+    td5_roam_furn_atlas_prepare(j.place, &j.grid);        /* [F4c] main thread, before any worker */
     t0 = td5_plat_time_ms();
     if (threadmode > 0) {
         void *th;
@@ -2292,6 +2352,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         sc_cli_run(&j);
     }
     memset(tot, 0, sizeof tot);
+    memset(ft, 0, sizeof ft);
     if (!cens[0]) {
         const char *d = td5_plat_log_dir();
         snprintf(cens, sizeof cens, "%sroam_scenery_census.txt", d ? d : "");
@@ -2300,16 +2361,31 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     if (f) fprintf(f, "roam scenery census (F4a), place %s, %d tile(s), order %s, thread %d, rules %u\n"
                       "tx tz ok hash meshes bytes ms ms_src ms_emit road_tiles bld_seen bld_emitted bld_prefab apron "
                       "drop_road drop_shift drop_ring veto_plaza veto_lm nudged shift_max_m fp_ways fp_pieces fp_cut "
-                      "fp_merged areas lawn_tris lawn_cut trees trees_cut guard_overlaps\n",
+                      "fp_merged areas lawn_tris lawn_cut trees trees_cut guard_overlaps furn_meshes sig_clusters sig_arms "
+                      "sig_inbound mast_near post_left mast_far far_shared plates plate_one_face plate_none sig_drop_frame "
+                      "sig_drop_road sig_drop_dup lamps lamp_glow lamp_drop_road lamp_skip_class stops shelters benches bins "
+                      "stop_drop_far stop_drop_road zebras limit_lines xing_unknown xing_drop_far furn_guard\n",
                    j.place, j.n, j.reverse ? "reverse" : "forward", threadmode, TD5_ROAM_SCENERY_RULES);
     for (i = 0; i < j.n; i++) {
         const TD5_RoamScnStats *r = &j.rows[i];
-        if (f) fprintf(f, "%d %d %d %08x %d %u %u %u %u %d %d %d %d %d %d %d %d %d %d %d %.2f %d %d %d %d %d %d %d %d %d %d\n",
+        if (f) fprintf(f, "%d %d %d %08x %d %u %u %u %u %d %d %d %d %d %d %d %d %d %d %d %.2f %d %d %d %d %d %d %d %d %d %d "
+                          "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
                        j.list[i][0], j.list[i][1], j.ok[i], r->hash, r->meshes, r->bytes, r->ms, r->ms_src, r->ms_emit,
                        r->road_tiles, r->bld_seen, r->bld_emitted, r->bld_prefab, r->bld_apron, r->bld_drop_road,
                        r->bld_drop_shift, r->bld_drop_ring, r->bld_veto_plaza, r->bld_veto_lm, r->bld_nudged,
                        r->bld_shift_max / SC_UPM, r->fp_ways, r->fp_pieces, r->fp_cut_road, r->fp_merged, r->areas,
-                       r->lawn_tris, r->lawn_cut, r->trees, r->trees_cut, r->guard_overlaps);
+                       r->lawn_tris, r->lawn_cut, r->trees, r->trees_cut, r->guard_overlaps,
+                       r->furn.meshes, r->furn.sig_clusters, r->furn.sig_arms, r->furn.sig_inbound, r->furn.mast_near,
+                       r->furn.post_left, r->furn.mast_far, r->furn.far_shared, r->furn.plates, r->furn.plate_one_face,
+                       r->furn.plate_none, r->furn.sig_drop_frame, r->furn.sig_drop_road, r->furn.sig_drop_dup, r->furn.lamps,
+                       r->furn.lamp_glow, r->furn.lamp_drop_road, r->furn.lamp_skip_class, r->furn.stops, r->furn.shelters,
+                       r->furn.benches, r->furn.bins, r->furn.stop_drop_far, r->furn.stop_drop_road, r->furn.zebras,
+                       r->furn.limit_lines, r->furn.xing_unknown, r->furn.xing_drop_far, r->furn.guard_hits);
+        ft[0] += r->furn.meshes; ft[1] += r->furn.sig_clusters; ft[2] += r->furn.sig_inbound; ft[3] += r->furn.mast_near;
+        ft[4] += r->furn.post_left; ft[5] += r->furn.mast_far; ft[6] += r->furn.plates; ft[7] += r->furn.lamps;
+        ft[8] += r->furn.stops; ft[9] += r->furn.zebras; ft[10] += r->furn.limit_lines; ft[11] += r->furn.guard_hits;
+        ft[12] += r->furn.sig_drop_road + r->furn.sig_drop_frame + r->furn.sig_drop_dup;
+        ft[13] += r->furn.lamp_drop_road; ft[14] += r->furn.far_shared; ft[15] += r->furn.plate_none;
         tot[0] += j.ok[i]; tot[1] += r->meshes; tot[2] += r->bytes; tot[3] += r->bld_seen; tot[4] += r->bld_emitted;
         tot[5] += r->bld_prefab; tot[6] += r->bld_drop_road; tot[7] += r->bld_drop_shift; tot[8] += r->bld_veto_plaza;
         tot[9] += r->bld_veto_lm; tot[10] += r->fp_pieces; tot[11] += r->fp_cut_road; tot[12] += r->fp_merged;
@@ -2334,8 +2410,19 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  tot[6], tot[7], tot[21], tot[8], tot[9], tot[17], shift_max / SC_UPM, tot[10], tot[11], tot[12],
                  tot[13], tot[14], tot[19], tot[15], tot[20], tot[16]);
         TD5_LOG_I(LOG_TAG, "%s", line);
-        if (f) { fprintf(f, "# %s\n", line); fclose(f); }
+        if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam furniture: %ld meshes | signalised clusters %ld, approach arms %ld: near mast arms %ld, post lights %ld, "
+                 "far mast arms %ld (far shared with an opposite near arm %ld), plates %ld (arms with no plate cell %ld), "
+                 "signal heads dropped (road/frame/dup) %ld | lamps %ld (dropped on a road %ld) | bus stops %ld | zebras %ld, "
+                 "limit lines %ld | FURNITURE GUARD: %ld face(s) on the drivable surface",
+                 ft[0], ft[1], ft[2], ft[3], ft[4], ft[5], ft[14], ft[6], ft[15], ft[12], ft[7], ft[13], ft[8], ft[9], ft[10],
+                 ft[11]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        if (f) fclose(f);
     }
     free(j.list); free(j.rows); free(j.ok);
     return 1;

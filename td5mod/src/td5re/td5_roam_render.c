@@ -111,6 +111,8 @@ typedef struct {
     float            ssph[TD5_ROAM_SCN_NSB][4];
     TD5_SpanDisplayList sdl[TD5_ROAM_SCN_NSB];
     uint32_t         nscn;
+    float           *lamp;                   /* [F4c] lantern positions, RENDER frame (x, y, z), nlamp of them */
+    uint32_t        nlamp;
 } RRTile;
 
 typedef struct { RRTile *t; uint32_t tick; } RRRetired;
@@ -386,6 +388,7 @@ static void rr_free_tile(RRTile *rt)
     free(rt->smesh);
     free(rt->snorm);
     free(rt->sptr);
+    free(rt->lamp);
     td5_roam_scn_free(rt->scn);
     free(rt);
 }
@@ -459,6 +462,17 @@ static int rr_attach_scenery(RRTile *rt, TD5_RoamScenery *sc)
     const double offx = (double)sc->org_x - (double)s_rr.f.ox;
     const double offz = (double)sc->org_z - (double)s_rr.f.oz;
     const double offy = -s_rr.f.dy + s_rr.lift;
+    if (sc->nlamp) {      /* [F4c] the lanterns the light registry is fed from, in the render frame */
+        rt->lamp = (float *)malloc((size_t)sc->nlamp * 3u * sizeof(float));
+        if (rt->lamp) {
+            for (i = 0; i < sc->nlamp; i++) {
+                rt->lamp[i * 3 + 0] = (float)((double)sc->lamp[i * 3 + 0] + offx);
+                rt->lamp[i * 3 + 1] = (float)((double)sc->lamp[i * 3 + 1] + offy);
+                rt->lamp[i * 3 + 2] = (float)((double)sc->lamp[i * 3 + 2] + offz);
+            }
+            rt->nlamp = sc->nlamp;
+        }
+    }
     if (!sc->nrec) { rt->scn = sc; return 1; }
     rt->smesh = (TD5_MeshHeader *)calloc(sc->nrec, sizeof(TD5_MeshHeader));
     rt->sptr = (TD5_MeshHeader **)calloc(sc->nrec, sizeof(TD5_MeshHeader *));
@@ -912,6 +926,26 @@ void   td5_roam_render_free_baked(TD5_RoamBaked *b) { rr_free_tile((RRTile *)b);
 size_t td5_roam_render_baked_bytes(const TD5_RoamBaked *b) { return b ? ((const RRTile *)b)->bytes : 0u; }
 int    td5_roam_render_has_tile(int tx, int tz) { return rr_find(tx, tz) >= 0; }
 
+/* [F4c] The resident street lanterns within r (render-frame float units) of (cx, cz), up to cap, for the
+ * light registry. Main thread only (the tile table is the main thread's). */
+int td5_roam_render_lamps(float cx, float cz, float r, float (*out)[3], int cap)
+{
+    const float r2 = r * r;
+    int i, n = 0;
+    uint32_t k;
+    for (i = 0; i < s_rr.ntile && n < cap; i++) {
+        const RRTile *rt = s_rr.tile[i];
+        if (!rt->nlamp) continue;
+        for (k = 0; k < rt->nlamp && n < cap; k++) {
+            const float dx = rt->lamp[k * 3 + 0] - cx, dz = rt->lamp[k * 3 + 2] - cz;
+            if (dx * dx + dz * dz > r2) continue;
+            out[n][0] = rt->lamp[k * 3 + 0]; out[n][1] = rt->lamp[k * 3 + 1]; out[n][2] = rt->lamp[k * 3 + 2];
+            n++;
+        }
+    }
+    return n;
+}
+
 int td5_roam_render_open_height(TD5_RoamHeight *hc)
 {
     char path[512], wpath[512];
@@ -990,6 +1024,8 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
             if (!s_rr.hc_ok) TD5_LOG_W(LOG_TAG, "roam render: no height source at %s, ground off", path);
         }
     }
+    /* [F4c] the street-name plate atlas + its GPU pages, BEFORE any worker bakes a tile (main thread) */
+    if (!s_rr.f.route && td5_roam_scn_enabled()) td5_roam_furn_session_begin(place, &s_rr.grid);
     s_rr.began = 1;
     TD5_LOG_I(LOG_TAG, "roam render: begin place=%s frame origin=(%d,%d) dy=%.0f route=%d pages road=%d ground=%d "
               "kerb=%d ground=%s cell=%d m drop=%.0f units lift=%.0f R=%.0f m",
@@ -1008,6 +1044,7 @@ void td5_roam_render_end(void)
     free(s_rr.retired);
     if (s_rr.hc) { td5_roam_height_close(s_rr.hc); free(s_rr.hc); }
     td5_roam_scn_close(s_rr.scn);
+    td5_roam_furn_session_end();
     free(s_rr.tried);
     memset(&s_rr, 0, sizeof s_rr);
 }

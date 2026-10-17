@@ -83,6 +83,8 @@ int            td5_roam_render_install(TD5_RoamBaked *b);    /* main; takes owne
 void           td5_roam_render_free_baked(TD5_RoamBaked *b);
 size_t         td5_roam_render_baked_bytes(const TD5_RoamBaked *b);
 int            td5_roam_render_has_tile(int tx, int tz);
+/* [F4c] resident street lanterns within r of (cx, cz) (render-frame float units), for the light registry */
+int            td5_roam_render_lamps(float cx, float cz, float r, float (*out)[3], int cap);
 /* [F4a] the same bake plus the tile's SCENERY layer, built with `scn` (the caller's
  * td5_roam_scenery.h source, one per thread; NULL = road + ground only). */
 struct TD5_RoamScnSource;
