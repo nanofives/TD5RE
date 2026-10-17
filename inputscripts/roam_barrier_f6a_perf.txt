@@ -1,0 +1,4 @@
+# F6-A: perf run with the barrier knob on (autopilot drives the streets), logs BARRIER_DRAW every 600 drawn frames.
+sync race
++4000 log f6a_perf_done
+quit

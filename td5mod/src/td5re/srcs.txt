@@ -37,6 +37,7 @@ td5_roam_scenery.c
 td5_roam_stream.c
 td5_roam_route.c
 td5_roam_route_ui.c
+td5_roam_barrier.c
 td5_geo_tiles.c
 td5_trackgen.c
 td5_tg_world.c

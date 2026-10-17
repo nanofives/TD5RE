@@ -42,6 +42,7 @@
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
 #include "td5_roam_route_ui.h" /* GEO FREE ROAM route planner (F5-A): keys, map overlay, guidance */
+#include "td5_roam_barrier.h"  /* GEO FREE ROAM route barriers (F6-A): panels + chevrons */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -8526,6 +8527,7 @@ static void frame_render(void)
             td5_render_debug_lines_reset();
             td5_roam_route_ui_draw_world(vp);
             td5_render_debug_lines_flush();
+            td5_roam_barriers_draw(vp);   /* [F6-A] route barriers: translucent panels + chevrons; self-gated */
         }
 
 #ifndef TD5RE_RELEASE
