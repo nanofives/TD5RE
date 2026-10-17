@@ -1,0 +1,14 @@
+# F5-A: map zoom range + frame cost: zoom out to the whole casco, shot, zoom in to street level, shot, fit.
+sync race
++120 key 0x32 press
++30 key 0x0C 1
++150 key 0x0C 0
++30 key 0x44 press
++90 log f5a_zoom_out_hold
++30 key 0x0D 1
++300 key 0x0D 0
++30 key 0x44 press
++60 log f5a_zoom_in_hold
++30 key esc press
++30 log f5a_zoom_done
+quit

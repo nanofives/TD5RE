@@ -1,0 +1,9 @@
+# F5-A: a stored edge hash that no longer matches flags MAP CHANGED on load.
+sync race
++120 key 0x32 press
++30 key 0x26 press
++30 key down press
++30 key enter press
++60 key 0x44 press
++30 log f5a_stale_done
+quit

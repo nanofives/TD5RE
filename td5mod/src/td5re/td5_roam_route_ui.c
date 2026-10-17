@@ -542,7 +542,7 @@ static void fit_route(void)
         const double kx = g_render_width_f * 0.9 / w_m, kz = (g_render_height_f - top - bot) * 0.9 / h_m;
         u.ppm = kx < kz ? kx : kz;
         if (u.ppm < 0.04) u.ppm = 0.04;
-        if (u.ppm > 6.0) u.ppm = 6.0;
+        if (u.ppm > 3.0) u.ppm = 3.0;
     }
     u.cx = (minx + maxx) * 0.5; u.cz = (minz + maxz) * 0.5;
 }
@@ -601,7 +601,7 @@ static void map_input(double dt)
     wheel = td5_plat_input_get_mouse_wheel();
     if (wheel) u.ppm *= pow(1.18, (double)wheel / 120.0);
     if (u.ppm < 0.04) u.ppm = 0.04;
-    if (u.ppm > 6.0) u.ppm = 6.0;
+    if (u.ppm > 3.0) u.ppm = 3.0;
 
     if (ke(K_ESC) || ke(K_M)) {
         const int to_drive = ke(K_ESC);
@@ -797,7 +797,7 @@ void td5_roam_route_ui_draw_overlay(void)
             "BKSP UNDO   DEL CLEAR   C CAR   F FIT   S SAVE   L LOAD   M PAUSE MENU   ESC DRIVE",
             0xFFC8D0DA, 14.0f * S);
     /* pin labels */
-    for (i = 0; i < td5_roam_route_wp_count(); i++) {
+    for (i = 0; u.mode == 0 && i < td5_roam_route_wp_count(); i++) {
         const TD5_RouteWp *w = td5_roam_route_wp(i);
         float sx, sy;
         char lab[16];

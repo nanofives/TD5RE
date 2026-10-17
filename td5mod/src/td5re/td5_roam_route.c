@@ -826,11 +826,38 @@ int td5_roam_route_latlon_to_place(double lat, double lon, int32_t *px, int32_t 
     return td5_roam_latlon_to_place(td5_roam_route_place(), lat, lon, px, pz);
 }
 
-static double rr_canon(double v)
+/* A degree is held as an integer count of 1e-8 deg (1.1 mm). The game runs with a non-default FP
+ * rounding mode, so printf / strtod of a double does not round trip; integers do. */
+static int64_t rr_to_n(double v) { return (int64_t)floor(v * 1e8 + 0.5); }
+static double  rr_from_n(int64_t n) { return (double)n / 1e8; }
+static double  rr_canon(double v) { return rr_from_n(rr_to_n(v)); }
+
+/* "-34.92257679" from the integer count of 1e-8 deg */
+static void rr_fmt_deg(char *out, size_t cap, double v)
 {
-    char b[48];
-    snprintf(b, sizeof b, "%.8f", v);
-    return strtod(b, NULL);
+    const int64_t n = rr_to_n(v), a = n < 0 ? -n : n;
+    snprintf(out, cap, "%s%lld.%08lld", n < 0 ? "-" : "", (long long)(a / 100000000), (long long)(a % 100000000));
+}
+
+/* a decimal degree text -> canonical double (8 decimals, the 9th rounds); exact in any FP mode */
+static double rr_parse_deg(const char *p)
+{
+    int neg = 0, nd = 0, round_up = 0;
+    int64_t whole = 0, frac = 0, n;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '-') { neg = 1; p++; } else if (*p == '+') p++;
+    while (*p >= '0' && *p <= '9') { whole = whole * 10 + (*p - '0'); p++; }
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9') {
+            if (nd < 8) { frac = frac * 10 + (*p - '0'); nd++; }
+            else if (nd == 8) { round_up = (*p >= '5'); nd++; }
+            p++;
+        }
+    }
+    while (nd < 8) { frac *= 10; nd++; }
+    n = whole * 100000000 + frac + (round_up ? 1 : 0);
+    return rr_from_n(neg ? -n : n);
 }
 
 static void rr_wp_from_latlon(TD5_RouteWp *w, double lat, double lon, int kind)
@@ -1093,8 +1120,11 @@ static void rr_dump_edges(const char *what, const char *name)
     if (!f) return;
     fprintf(f, "place=%s type=%d laps=%d waypoints=%d edges=%d length_m=%.1f hash=%08X\n", td5_roam_route_place(),
             rt.cur.type, rt.cur.laps, rt.cur.nwp, rt.res.nedge, rt.res.length_m, (unsigned)rt.res.hash);
-    for (i = 0; i < rt.cur.nwp; i++)
-        fprintf(f, "wp %d kind=%d lat=%.8f lon=%.8f\n", i, rt.cur.wp[i].kind, rt.cur.wp[i].lat, rt.cur.wp[i].lon);
+    for (i = 0; i < rt.cur.nwp; i++) {
+        char la[32], lo[32];
+        rr_fmt_deg(la, sizeof la, rt.cur.wp[i].lat); rr_fmt_deg(lo, sizeof lo, rt.cur.wp[i].lon);
+        fprintf(f, "wp %d kind=%d lat=%s lon=%s\n", i, rt.cur.wp[i].kind, la, lo);
+    }
     for (i = 0; i < rt.res.nedge; i++)
         fprintf(f, "edge %llu dir=%d\n", (unsigned long long)rt.res.edge[i].key, rt.res.edge[i].dir);
     fclose(f);
@@ -1126,8 +1156,10 @@ int td5_roam_route_save(const char *name)
         rt.res.nedge, (unsigned)rt.res.hash, rt.res.length_m);
     for (i = 0; i < rt.cur.nwp; i++) {
         const TD5_RouteWp *w = &rt.cur.wp[i];
-        n += (size_t)snprintf(buf + n, cap - n, "    { \"lat\": %.8f, \"lon\": %.8f, \"role\": \"%s\" }%s\n",
-            w->lat, w->lon, w->kind == TD5_ROUTE_WP_START ? "start" : (w->kind == TD5_ROUTE_WP_FINISH ? "finish" : "via"),
+        char la[32], lo[32];
+        rr_fmt_deg(la, sizeof la, w->lat); rr_fmt_deg(lo, sizeof lo, w->lon);
+        n += (size_t)snprintf(buf + n, cap - n, "    { \"lat\": %s, \"lon\": %s, \"role\": \"%s\" }%s\n",
+            la, lo, w->kind == TD5_ROUTE_WP_START ? "start" : (w->kind == TD5_ROUTE_WP_FINISH ? "finish" : "via"),
             i + 1 < rt.cur.nwp ? "," : "");
     }
     n += (size_t)snprintf(buf + n, cap - n, "  ]\n}\n");
@@ -1165,8 +1197,7 @@ int td5_roam_route_load(const char *name)
     txt[sz] = '\0';
     td5_plat_file_close(f);
     root = cJSON_Parse(txt);
-    free(txt);
-    if (!root) { TD5_LOG_W(LOG_TAG, "ROUTE_LOAD: '%s' is not JSON", name); return 0; }
+    if (!root) { free(txt); TD5_LOG_W(LOG_TAG, "ROUTE_LOAD: '%s' is not JSON", name); return 0; }
     memset(&set, 0, sizeof set);
     set.type = TD5_ROUTE_SPRINT; set.laps = 1;
     it = cJSON_GetObjectItem(root, "type");
@@ -1178,7 +1209,18 @@ int td5_roam_route_load(const char *name)
     wps = cJSON_GetObjectItem(root, "waypoints");
     if (cJSON_IsArray(wps)) {
         cJSON *w;
+        /* lat / lon are read from the text with strtod: the vendored cJSON number parse is off by up to
+         * ~1e-8 on a 8-decimal degree, which would move a waypoint between a save and a load */
+        const char *scan = strstr(txt, "\"waypoints\"");
         cJSON_ArrayForEach(w, wps) {
+            double rlat = 0.0, rlon = 0.0;
+            int have_raw = 0;
+            if (scan) {
+                const char *a = strstr(scan, "\"lat\"");
+                const char *b = a ? strstr(a, "\"lon\"") : NULL;
+                const char *ca = a ? strchr(a, ':') : NULL, *cb = b ? strchr(b, ':') : NULL;
+                if (ca && cb) { rlat = rr_parse_deg(ca + 1); rlon = rr_parse_deg(cb + 1); have_raw = 1; scan = cb + 1; }
+            }
             cJSON *la = cJSON_GetObjectItem(w, "lat"), *lo = cJSON_GetObjectItem(w, "lon"), *ro = cJSON_GetObjectItem(w, "role");
             int kind = TD5_ROUTE_WP_MID;
             if (n >= TD5_ROUTE_MAX_WP || !cJSON_IsNumber(la) || !cJSON_IsNumber(lo)) continue;
@@ -1186,12 +1228,13 @@ int td5_roam_route_load(const char *name)
                 if (strcmp(ro->valuestring, "start") == 0) kind = TD5_ROUTE_WP_START;
                 else if (strcmp(ro->valuestring, "finish") == 0) kind = TD5_ROUTE_WP_FINISH;
             }
-            rr_wp_from_latlon(&set.wp[n], la->valuedouble, lo->valuedouble, kind);
+            rr_wp_from_latlon(&set.wp[n], have_raw ? rlat : la->valuedouble, have_raw ? rlon : lo->valuedouble, kind);
             n++;
         }
     }
     set.nwp = n;
     cJSON_Delete(root);
+    free(txt);
     if (n < 2) { TD5_LOG_W(LOG_TAG, "ROUTE_LOAD: '%s' has %d waypoint(s)", name, n); return 0; }
     if (!rr_ready_for_edit()) return 0;
     {
