@@ -1345,13 +1345,46 @@ static int u_simple(const ULV *pv, int n)
  * Returns the new count (vertices written to o), or n with o = copy of v. */
 #define U_RUN_SEG    (2.0 * TD5_ROAM_UPM)
 #define U_RUN_REACH  (3.0 * TD5_ROAM_UPM)
+#define U_RUN_DEV    (0.05 * TD5_ROAM_UPM)  /* a seam vertex this close to its chord ...   */
+#define U_SEAM_SEG   (0.5 * TD5_ROAM_UPM)   /* ... next to a segment this short            */
 static int u_merge_runs(const ULV *v, int n, ULV *o, const UPrims *L, const unsigned char *fixed,
                         const unsigned char *pr, int na, int *merged, TD5_RoamCluster *cl)
 {
-    unsigned char *rf = (unsigned char *)calloc((size_t)n, 1);
+    unsigned char *rf;
+    ULV *vs = (ULV *)malloc((size_t)n * sizeof(ULV));
     int q, no = 0, start = -1;
     *merged = 0;
-    if (!rf) { memcpy(o, v, (size_t)n * sizeof *v); return n; }
+    if (!vs) { memcpy(o, v, (size_t)n * sizeof *v); return n; }
+    /* First: a kerb drawn as near-collinear micro segments (union piece seams: a 2 deg
+     * turn over 0.05 m before the 00040ac20007a459 plaza tip) caps a fillet's tangent
+     * length at that micro segment (a 0.18 m fillet on a 138 deg corner). An untagged
+     * vertex turning < U_STRAIGHT, next to a segment under U_SEAM_SEG and within
+     * U_RUN_DEV of its neighbours' chord goes first, so the corner sees its real straight
+     * kerbs (an arc drawn in longer segments is left alone). */
+    memcpy(vs, v, (size_t)n * sizeof *v);
+    {
+        int changed = 1, guard = 0;
+        while (changed && n > 3 && guard++ < 64) {
+            changed = 0;
+            for (q = 0; q < n && n > 3; q++) {
+                const ULV *a = &vs[(q + n - 1) % n], *b = &vs[q], *d = &vs[(q + 1) % n];
+                const double acx = d->x - a->x, acz = d->z - a->z, acl = sqrt(acx * acx + acz * acz);
+                const double abx = b->x - a->x, abz = b->z - a->z, bdx = d->x - b->x, bdz = d->z - b->z;
+                double turn;
+                if (b->tag || acl < 1e-9) continue;
+                if (hypot(abx, abz) >= U_SEAM_SEG && hypot(bdx, bdz) >= U_SEAM_SEG) continue;
+                turn = atan2(fabs(cross2(abx, abz, bdx, bdz)), abx * bdx + abz * bdz);
+                if (turn >= U_STRAIGHT || fabs(cross2(acx, acz, abx, abz)) / acl >= U_RUN_DEV) continue;
+                memmove(&vs[q], &vs[q + 1], (size_t)(n - q - 1) * sizeof *vs);
+                n--;
+                changed = 1;
+                q--;
+            }
+        }
+    }
+    v = vs;
+    rf = (unsigned char *)calloc((size_t)n, 1);
+    if (!rf) { memcpy(o, v, (size_t)n * sizeof *v); free(vs); return n; }
     for (q = 0; q < n; q++) {
         const ULV *a = &v[(q + n - 1) % n], *b = &v[q], *d = &v[(q + 1) % n];
         rf[q] = !b->tag && cross2(b->x - a->x, b->z - a->z, d->x - b->x, d->z - b->z) < 0.0;
@@ -1361,7 +1394,7 @@ static int u_merge_runs(const ULV *v, int n, ULV *o, const UPrims *L, const unsi
         const ULV *b = &v[q], *d = &v[(q + 1) % n];
         if (!rf[q] || hypot(d->x - b->x, d->z - b->z) >= U_RUN_SEG) start = (q + 1) % n;
     }
-    if (start < 0) { free(rf); memcpy(o, v, (size_t)n * sizeof *v); return n; }
+    if (start < 0) { free(rf); memcpy(o, v, (size_t)n * sizeof *v); free(vs); return n; }
     for (q = 0; q < n;) {
         const int i = (start + q) % n;
         int len = 1, ok = 0;
@@ -1415,6 +1448,7 @@ static int u_merge_runs(const ULV *v, int n, ULV *o, const UPrims *L, const unsi
         q++;
     }
     free(rf);
+    free(vs);
     return no;
 }
 

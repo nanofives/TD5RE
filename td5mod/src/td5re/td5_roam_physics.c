@@ -54,6 +54,8 @@ typedef struct {
     int32_t     good_x, good_y, good_z;   /* last tick on the road with a wheel down */
     int         good_valid;
     int         settled;        /* ticks on the road with a wheel down since the last spawn / teleport */
+    int32_t     cin_x[4], cin_z[4];   /* [F2-E] each body corner's last position ON the road (24.8) */
+    uint8_t     cin_ok[4];
     long        wall_tick;      /* last wall contact (dev trace): sim tick, corner, angle, pen, edge */
     int         wall_corner, wall_pinch;
     int32_t     wall_angle, wall_pen;
@@ -76,6 +78,8 @@ typedef struct {
     uint32_t           *mgrid;              /* start[] + item[] of the mirror tile    */
     RoamSlotState       slot[RP_SLOTS];
     int                 last_capped;
+    int                 wall_side;          /* TD5RE_ROAM_WALL_SIDE (1), -1 = not read   */
+    int                 pinch_rescue;       /* TD5RE_ROAM_PINCH_RESCUE (1)               */
     TD5_RoamPhysStats   st;
     long                summary_tick, last_sim_tick;
 #ifndef TD5RE_RELEASE
@@ -84,7 +88,7 @@ typedef struct {
 #endif
 } RoamPhys;
 
-static RoamPhys s_rp = { .mirror_knob = -1
+static RoamPhys s_rp = { .mirror_knob = -1, .wall_side = -1
 #ifndef TD5RE_RELEASE
     , .drv_mode = -1
 #endif
@@ -464,6 +468,7 @@ static void rp_write_summary(const char *why)
                "nohit_wheels=%ld\noutside_wheels=%ld\nwall_corner_pen_max=%ld\n",
             s->ticks, s->wall_hits, s->pinches, s->rescues, s->rescues_y, s->teleports,
             s->nohit_wheels, s->outside_wheels, s->wall_corner_pen_max);
+    fprintf(f, "wall_side_flips=%ld\npinch_rescues=%ld\n", s->wall_side_flips, s->pinch_rescues);
     fprintf(f, "mirror_wheel_cmp=%ld\nmirror_wheel_diff_h=%ld\nmirror_wheel_diff_n=%ld\nmirror_wheel_diff_cap=%ld\n"
                "mirror_wheel_surf_cmp=%ld\nmirror_wheel_diff_surf=%ld\nmirror_wheel_fallback=%ld\nmirror_dh_max=%ld\n"
                "mirror_corner_cmp=%ld\nmirror_corner_diff=%ld\nmirror_corner_fallback=%ld\n"
@@ -787,16 +792,26 @@ static int32_t rp_wall_angle(double dx, double dz)
     return (int32_t)(atan2(dx, -dz) * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 }
 
+/* [F2-E] Forget where the body corners last touched the road (teleports, rescues, spawns). */
+static void rp_forget_corners(RoamSlotState *ss)
+{
+    ss->cin_ok[0] = ss->cin_ok[1] = ss->cin_ok[2] = ss->cin_ok[3] = 0;
+}
+
 void td5_roam_resolve_walls(TD5_Actor *a)
 {
     const TD5_RoamResident *rs = rp_rs();
     RoamSlotState *ss;
     TD5_Vec3_Fixed *corner;
     TD5_RoamHit hk[4];
-    int out[4], k, deep = -1, pinch = 0, pa = -1, pb = -1;
+    int out[4], k, deep = -1, pinch = 0, pa = -1, pb = -1, pinch_out = 0;
     double nx[4], nz[4];
     if (!a || !rs || !td5_roam_active()) return;
     if (a->slot_index >= RP_RACERS) return;
+    if (s_rp.wall_side < 0) {
+        s_rp.wall_side = td5_env_int("TD5RE_ROAM_WALL_SIDE", 1, 0, 1);
+        s_rp.pinch_rescue = td5_env_int("TD5RE_ROAM_PINCH_RESCUE", 1, 0, 1);
+    }
     ss = rp_slot(a);
     corner = &a->probe_FL;
 
@@ -805,11 +820,36 @@ void td5_roam_resolve_walls(TD5_Actor *a)
         if (!td5_roam_locate(rs, corner[k].x, corner[k].z, corner[k].y, 1, ss->hint[k], &hk[k]) ||
             hk[k].prim == ROAM_PRIM_NONE)
             continue;
-        if (hk[k].inside || hk[k].push_dist <= ROAM_KERB_OVERHANG) continue;
+        if (hk[k].inside) {
+            ss->cin_x[k] = corner[k].x; ss->cin_z[k] = corner[k].z; ss->cin_ok[k] = 1;
+            continue;
+        }
+        if (hk[k].push_dist <= ROAM_KERB_OVERHANG) continue;
         {
             const double m = sqrt((double)hk[k].push_x * hk[k].push_x + (double)hk[k].push_z * hk[k].push_z);
             if (m < 0.5) continue;
             nx[k] = hk[k].push_x / m; nz[k] = hk[k].push_z / m;
+        }
+        /* [F2-E] Thin walls. The push goes to the NEAREST boundary edge, so a corner that
+         * crossed more than half of a thin unpaved strip (a divided avenue's median, ~2.6 m)
+         * was pushed on THROUGH it to the far kerb; with both front corners in the median the
+         * pushes opposed, the pinch rule cancelled the translation, and the car slid down the
+         * median (000450330009de5d, 273 pinches in one run). A corner that was on the road on
+         * an earlier tick is pushed back to the side it came from: when the nearest edge's
+         * push points away from its last on-road position, the push is flipped and its length
+         * is that position's distance back along the flipped normal. Knob TD5RE_ROAM_WALL_SIDE. */
+        if (s_rp.wall_side && ss->cin_ok[k]) {
+            const double dx = (double)(ss->cin_x[k] - corner[k].x) / 256.0;
+            const double dz = (double)(ss->cin_z[k] - corner[k].z) / 256.0;
+            if (nx[k] * dx + nz[k] * dz < 0.0) {
+                const double back = -(nx[k] * dx + nz[k] * dz);
+                nx[k] = -nx[k]; nz[k] = -nz[k];
+                hk[k].push_dist = (int32_t)(back + 0.5) + ROAM_KERB_OVERHANG;
+                hk[k].push_x = (int32_t)floor(nx[k] * back + 0.5);
+                hk[k].push_z = (int32_t)floor(nz[k] * back + 0.5);
+                s_rp.st.wall_side_flips++;
+                if (hk[k].push_dist <= ROAM_KERB_OVERHANG) continue;
+            }
         }
         out[k] = 1;
         if (deep < 0 || hk[k].push_dist > hk[deep].push_dist) deep = k;
@@ -837,6 +877,7 @@ void td5_roam_resolve_walls(TD5_Actor *a)
             a->world_pos.x = sx; a->world_pos.z = sz;
             td5_physics_rebuild_pose(a);
             s_rp.st.pinches++;
+            pinch_out = s_rp.pinch_rescue;
             if (s_rp.st.pinches <= 40) {
                 int q;
                 for (q = 0; q < 4; q++)
@@ -883,6 +924,7 @@ void td5_roam_resolve_walls(TD5_Actor *a)
                 a->world_pos.x = ss->good_x; a->world_pos.y = ss->good_y; a->world_pos.z = ss->good_z;
                 a->linear_velocity_x = a->linear_velocity_y = a->linear_velocity_z = 0;
                 ss->settled = 0;
+                rp_forget_corners(ss);
                 td5_physics_rebuild_pose(a);
             }
             return;
@@ -892,7 +934,12 @@ void td5_roam_resolve_walls(TD5_Actor *a)
             if (!s_rp.st.chassis_seen || above < s_rp.st.chassis_min_above) s_rp.st.chassis_min_above = above;
             s_rp.st.chassis_seen = 1;
         }
-        if (!c.inside && c.push_dist > ROAM_RESCUE_DIST) {
+        /* [F2-E] After a pinch the body straddles a strip it cannot leave by corner pushes
+         * (the pushes oppose); when the chassis itself is off the road there, it is put
+         * back on its nearest surface whatever the distance. Knob TD5RE_ROAM_PINCH_RESCUE. */
+        if (!c.inside && (c.push_dist > ROAM_RESCUE_DIST || (pinch_out && c.push_dist > 0))) {
+            if (pinch_out && c.push_dist <= ROAM_RESCUE_DIST) s_rp.st.pinch_rescues++;
+            rp_forget_corners(ss);
             const double m = sqrt((double)c.push_x * c.push_x + (double)c.push_z * c.push_z);
             if (m > 0.5) {
                 const double ux = c.push_x / m, uz = c.push_z / m;
@@ -1009,6 +1056,8 @@ struct RoamDrive {
     int      recover_kmh;           /* TD5RE_ROAM_CORNER_RECOVER_KMH (30): speed after a replan */
     int      replans, recover;
     int      repair;                /* TD5RE_ROAM_CORNER_REPAIR (1): full repair per run       */
+    int      brake_on;              /* TD5RE_ROAM_CORNER_BRAKE (0): brake for the path's bends  */
+    double   a_lat, decel;          /* m/s^2: TD5RE_ROAM_CORNER_ALAT (60 = 6.0), _DECEL (70)    */
     long     replan_t;
     int      rev_done;
     long     tot_replans;
@@ -1788,6 +1837,7 @@ static void rd_corner_start(struct RoamDrive *d, TD5_Actor *a, long tick)
     ss->chassis_hint = ROAM_PRIM_NONE;
     ss->good_valid = 0;
     ss->settled = 0;
+    rp_forget_corners(ss);
     d->ct = tick; d->stuck_t = 0; d->vmin = 1e9; d->vmax = 0.0;
     d->slow_t = 0; d->rev_t = 0; d->stalls = 0; d->retries = 0; d->ext_ticks = 0;
     d->run = *c;                          /* this run's path (a replan rewrites the copy) */
@@ -1825,10 +1875,36 @@ static void rd_corner_end(struct RoamDrive *d, long tick, int ok, int stuck, con
     if (++d->ci >= d->nc) { d->ci = 0; d->si++; }
 }
 
+/* [F2-E] TD5RE_ROAM_CORNER_BRAKE=1, a driver who brakes for the bend: the highest speed (km/h)
+ * from which every path vertex ahead can still be taken at sqrt(a_lat * R), R from the turn at
+ * that vertex over its two half segments, braking at `decel`. The car still arrives at the set
+ * speed; only the bend itself is taken slower. */
+static double rd_bend_kmh(const struct RoamDrive *d, const RdCorner *c, double s_car)
+{
+    double best = 1e9, cum = 0.0;
+    int k;
+    for (k = 1; k + 1 < c->np; k++) {
+        const double ax = c->px[k] - c->px[k - 1], az = c->pz[k] - c->pz[k - 1];
+        const double bx = c->px[k + 1] - c->px[k], bz = c->pz[k + 1] - c->pz[k];
+        const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
+        double th, r_m, v_k, ahead_m, v_ok;
+        cum += la;
+        if (la < 1.0 || lb < 1.0 || cum < s_car) continue;
+        th = atan2(fabs(ax * bz - az * bx), ax * bx + az * bz);
+        if (th < 0.05) continue;
+        r_m = 0.5 * (la + lb) / RD_M / th;
+        v_k = sqrt(d->a_lat * r_m);                         /* m/s */
+        ahead_m = (cum - s_car) / RD_M;
+        v_ok = sqrt(v_k * v_k + 2.0 * d->decel * ahead_m) * 3.6;
+        if (v_ok < best) best = v_ok;
+    }
+    return best;
+}
+
 static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
 {
     const RdCorner *c;
-    double px, pz, kmh, look, rx, rz, along_out, lat_out, tx, tz;
+    double px, pz, kmh, look, rx, rz, along_out, lat_out, tx, tz, s_car_out = 0.0;
     uint32_t bits;
     if (d->phase == 0) {
         if (d->si >= d->nkmh || d->nc == 0) {
@@ -1896,6 +1972,7 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
             cum += len;
         }
         along_out = s_car - (total - c->lout);           /* > 0 once on the exit ribbon past its end row */
+        s_car_out = s_car;
         lat_out = sqrt(best);
     }
     /* [F2-E] TD5RE_ROAM_CORNER_REPLAN=1, a driver who missed the turn: once off the path by more
@@ -1913,8 +1990,14 @@ static uint32_t rd_corners(struct RoamDrive *d, TD5_Actor *a, long tick)
         }
         d->replan_t = tick;
     }
-    bits = rd_steer_to(a, tx, tz, d->recover && d->recover_kmh < d->kmh_v[d->si] ? (double)d->recover_kmh
-                                                                           : (double)d->kmh_v[d->si]);
+    {
+        double vset = d->recover && d->recover_kmh < d->kmh_v[d->si] ? (double)d->recover_kmh : (double)d->kmh_v[d->si];
+        if (d->brake_on) {
+            const double vb = rd_bend_kmh(d, c, s_car_out);
+            if (vb < vset) vset = vb < 8.0 ? 8.0 : vb;
+        }
+        bits = rd_steer_to(a, tx, tz, vset);
+    }
     if (d->rev_t > 0) {
         /* reverse-and-retry, as a driver would: back off with the wheel turned away */
         const uint32_t steer = bits & (uint32_t)(TD5_INPUT_STEER_LEFT | TD5_INPUT_STEER_RIGHT);
@@ -1993,6 +2076,9 @@ uint32_t td5_roam_dev_drive_bits(TD5_Actor *a)
             d->route_on = td5_env_int("TD5RE_ROAM_CORNER_ROUTE", 1, 0, 1);
             d->replan_on = td5_env_int("TD5RE_ROAM_CORNER_REPLAN", 0, 0, 1);
             d->repair = td5_env_int("TD5RE_ROAM_CORNER_REPAIR", 1, 0, 1);
+            d->brake_on = td5_env_int("TD5RE_ROAM_CORNER_BRAKE", 0, 0, 1);
+            d->a_lat = (double)td5_env_int("TD5RE_ROAM_CORNER_ALAT", 60, 10, 200) / 10.0;
+            d->decel = (double)td5_env_int("TD5RE_ROAM_CORNER_DECEL", 70, 10, 200) / 10.0;
             d->recover_kmh = td5_env_int("TD5RE_ROAM_CORNER_RECOVER_KMH", 30, 5, 200);
             d->acute_deg = (double)td5_env_int("TD5RE_ROAM_ACUTE_DEG", 120, 30, 179);
             d->acute_max = (double)td5_env_int("TD5RE_ROAM_ACUTE_MAX", 160, 31, 181);

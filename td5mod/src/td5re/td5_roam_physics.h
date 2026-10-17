@@ -93,6 +93,7 @@ int32_t td5_roam_ground(int32_t x, int32_t z, int32_t y, int has_y, int16_t *nor
 /* Counters (harnesses, the roam_phys.txt summary). */
 typedef struct {
     long ticks, wall_hits, pinches, rescues, rescues_y, teleports, nohit_wheels, outside_wheels;
+    long wall_side_flips, pinch_rescues;   /* [F2-E] thin-wall pushes flipped back, pinch rescues */
     long wall_corner_pen_max;
     long mirror_cmp, mirror_diff_h, mirror_diff_n, mirror_diff_cap, mirror_diff_surf, mirror_scmp;
     long mirror_fallback, mirror_corner_cmp, mirror_corner_diff, mirror_corner_fallback;

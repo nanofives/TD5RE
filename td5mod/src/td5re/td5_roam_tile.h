@@ -69,12 +69,16 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    3u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    4u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
                                      * ROW_COVERED pins at H_c
                                      * 3: F1-T10 height coupling of overlapping ribbons,
                                      * bore chains under the road above, local divided-
-                                     * carriageway width, degenerate quads dropped */
+                                     * carriageway width, degenerate quads dropped
+                                     * 4: F2-E union block corners drawn as a run of
+                                     * short reflex vertices get ONE kerb fillet, union
+                                     * holes (islands) get kerb fillets, a NORMAL outline
+                                     * the first-ear clipper strands is cut by ear_clip_u */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */
