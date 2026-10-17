@@ -2907,7 +2907,9 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     /* fence: a railing on a deck; elsewhere where nothing stands behind the slab */
     {
         int fence = deck;
-        if (!fence && e->s->pv->fence && !((fa | fb) & PV_VF_FACADE) && klass >= TD5_GEO_RC_LIVING &&
+        /* not on a junction outline: a block corner holds a building or a plaza, and the
+         * outline has no street class of its own */
+        if (!fence && e->s->pv->fence && !corner && !((fa | fb) & PV_VF_FACADE) && klass >= TD5_GEO_RC_LIVING &&
             klass <= TD5_GEO_RC_SECONDARY && hypot(ox[1] - ox[0], oz[1] - oz[0]) > 200.0) {
             const double mx = 0.5 * (ox[0] + ox[1]), mz = 0.5 * (oz[0] + oz[1]);
             const double ex = oz[1] - oz[0], ez = -(ox[1] - ox[0]), el = hypot(ex, ez);
