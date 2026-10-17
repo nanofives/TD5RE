@@ -68,7 +68,16 @@ degrees (it is almost all two-lane calles) and 4 where a Diagonal meets an Aveni
 arms (the diagonals cross at big multi-street junctions). A kind with no more candidates than the target is taken whole,
 a plentiful kind is thinned to >= 120 m apart.
 
-**F2-E (2026-10-17): the KNOWN exemption is removed; every run must pass.** On the rules-v4 tiles the
+**F2-E (2026-10-17), verdict changed:** each corner now runs three passes, held 40 km/h, held 80 km/h and a
+braking driver that arrives at 80 km/h and slows for the bend (bend speed sqrt(6.0 m/s^2 x R), braking 7.0 m/s^2,
+look-ahead 0.25 x km/h metres within 6-16 m). Pinches and rescues fail on every pass; exit and stuck are judged on
+the braking pass only (a held-speed 135 degree city corner is not a fair stuck test). A Bezier that leaves the road
+is routed on the paved mask first (00064c21000864e3: 16.4 m off, 18-point route). Note on the default set:
+`ok corners: 165 runs (11/20/20/4), brake exit 55/55 stuck 0, held exit 110/110 stuck 0, pinch 0, resc 0`;
+with 8 arms: brake 62/62, held 123/124 (00019ab000083a0f held 80 stops on the median nose, reported), pinch 0.
+`TD5RE_ROAM_SELFTEST_CORNER_BRAKE=0` restores the two held passes, all judged; `_CORNER_ROUTE=0` keeps the Bezier.
+
+**F2-E: the KNOWN exemption is removed; nothing is excused.** On the rules-v4 tiles the
 cluster below exits at 80 km/h (2 reverse retries, 0 pinches) and the default set is 110 / 110 exits, 0 pinches,
 0 rescues. The 8-arm pinches below are 0 with the F2-E wall probes (edge midpoints, tip rule); 00019ab000083a0f
 at 80 km/h now stops on the median nose instead of sliding through it (the 16 m look-ahead cuts the inside of the turn).

@@ -16,9 +16,13 @@
  *                     (rescues 0 incl. the spawn), pinches 0, teleports 0.
  *   TD5_RDRV_CORNERS  the design 2.5 corner matrix: up to N junctions of each kind (one-lane/
  *                     service, calle x calle, avenida x calle, diagonal x avenida), each
- *                     driven at 40 and 80 km/h on a planned path (F2-B's picker + pure
- *                     pursuit). Per run: exit reached, pinches 0, not stuck. No run is
- *                     excused (00064c21000864e3 @ 80 km/h was KNOWN until F2-E).
+ *                     driven on a planned path (F2-B's picker + pure pursuit; a path that
+ *                     leaves the road is routed on the paved mask) in three passes: held
+ *                     40 km/h, held 80 km/h, and a BRAKING driver that arrives at 80 km/h
+ *                     and slows for the bend. Pinches and rescues fail on every pass; exit
+ *                     and stuck are judged on the braking pass only (a held-speed 135 deg
+ *                     city corner is not a fair stuck test, orchestrator 2026-10-17).
+ *                     TD5RE_ROAM_SELFTEST_CORNER_BRAKE=0 = the old two held passes, all judged.
  *
  * Knobs (dev): TD5RE_ROAM_SELFTEST_JUNCTIONS (24), _KMH (36), _MAX_SECS (300),
  * _CORNERS_PER_KIND (20), _CORNER_GAP_M (120).

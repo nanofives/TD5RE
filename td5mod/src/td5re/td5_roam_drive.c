@@ -41,6 +41,7 @@
 #define RV_M          430.0                       /* units per metre */
 #define RV_UPT_KMH    (430.0 / 30.0 / 3.6)        /* units per tick at 1 km/h (30 Hz sim) */
 #define RV_NP         9
+#define RV_PMAX       64                          /* [F2-E] a routed corner path has up to this many points */
 #define RV_MAXC       320
 #define RV_MAXKEYS    128
 #define RV_UNIT_CM    (256.0 * 4.30)              /* 24.8 world units per cm */
@@ -49,15 +50,24 @@
 #define RV_WHEEL_BELOW_MAX_CM  30.0               /* wheel bottom under the ground (tyre / suspension) */
 #define RV_STUCK_TICKS         90                 /* 3 s */
 #define RV_STUCK_KMH           5.0
+/* [F2-E] corner matrix passes per corner: 0 held 40 km/h, 1 held 80 km/h, 2 BRAKING driver from 80 km/h */
+#define RV_PASS_MAX            3
+#define RV_BRAKE_ALAT          6.0                /* m/s^2: bend speed sqrt(a_lat * R) */
+#define RV_BRAKE_DECEL         7.0                /* m/s^2: braking towards that speed */
+#define RV_BRAKE_MIN_KMH       8.0
 
 typedef struct {
     int kind;
     double cx, cz, inx, inz, outx, outz, defl;
     uint64_t cl, ein, eout;
-    double px[RV_NP], pz[RV_NP];
+    int np;                           /* path points: RV_NP for the Bezier, more once routed */
+    int route;                        /* [F2-E] 0 not checked, 1 on the road, 2 routed, 3 off the road, no route */
+    double off_m;                     /* metres of the Bezier off the drivable surface */
+    double px[RV_PMAX], pz[RV_PMAX];
 } RvCorner;
 
 static const char *const k_rv_kind[4] = { "one-lane/service", "calle x calle", "avenida x calle", "diagonal x avenida" };
+static const char *const k_rv_pass[RV_PASS_MAX] = { "held 40", "held 80", "brake 80" };
 
 typedef struct {
     int      mode;
@@ -107,7 +117,10 @@ typedef struct {
     long     hits0, pinch0, resc0;
     double   vmin, vmax;
     long     runs, ok, stuck, pinch, hits, resc;
-    long     k_runs[4][2], k_ok[4][2], k_stuck[4][2], k_pinch[4][2], k_hits[4][2], k_resc[4][2];
+    long     b_runs, b_ok, b_stuck;     /* [F2-E] braking-driver runs: the stuck / exit verdict */
+    int      npass;                     /* 3 with the braking pass (TD5RE_ROAM_SELFTEST_CORNER_BRAKE), else 2 */
+    long     k_runs[4][RV_PASS_MAX], k_ok[4][RV_PASS_MAX], k_stuck[4][RV_PASS_MAX], k_pinch[4][RV_PASS_MAX],
+             k_hits[4][RV_PASS_MAX], k_resc[4][RV_PASS_MAX];
     int      kind_n[4];
     int      cand_n[4];             /* junctions with a valid candidate before the spacing / cap filter */
     FILE    *rep;
@@ -653,6 +666,8 @@ static void rv_pick_pass(const TD5_RoamResident *rs, const double *gapk)
                         }
                         cand[kind].px[RV_NP - 1] = eox + outx * 40.0 * RV_M;
                         cand[kind].pz[RV_NP - 1] = eoz + outz * 40.0 * RV_M;
+                        cand[kind].np = RV_NP;
+                        cand[kind].route = 0;
                     }
                     best[kind] = fabs(defl - 90.0);
                     cand[kind].kind = kind; cand[kind].cx = cx; cand[kind].cz = cz;
@@ -696,10 +711,25 @@ static void rv_pick_corners(const TD5_RoamResident *rs)
 
 static void rv_corner_start(TD5_Actor *a, long tick)
 {
-    const RvCorner *c = &s_rv.c[s_rv.ci];
-    const double v = (s_rv.si ? 80.0 : 40.0) * RV_UPT_KMH;
+    RvCorner *c = &s_rv.c[s_rv.ci];
+    const double v = (s_rv.si ? 80.0 : 40.0) * RV_UPT_KMH;   /* the braking pass arrives at 80 km/h too */
     const double tx = -c->inx, tz = -c->inz;
     TD5_RoamPhysStats st;
+    if (c->route == 0) {
+        /* [F2-E] a Bezier that cuts through a walled island or a median (00064c21000864e3: 17 m of
+         * it off the road) is not a fair path for any driver: route it on the paved mask, once per
+         * corner. Knob TD5RE_ROAM_SELFTEST_CORNER_ROUTE (1). */
+        int routed = 0;
+        c->off_m = 0.0;
+        if (td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_ROUTE", 1, 0, 1))
+            c->off_m = td5_roam_dev_route_path(c->px, c->pz, &c->np, RV_PMAX, c->cx, c->cz, c->outx, c->outz,
+                                               40.0 * RV_M, &routed);
+        c->route = routed == 1 ? 2 : routed == 2 ? 3 : 1;
+        if (c->off_m > 0.0)
+            TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d cluster=%016llx: Bezier %.1f m off the road -> %s (%d points)", s_rv.ci,
+                      (unsigned long long)c->cl, c->off_m, routed == 1 ? "ROUTED on the paved mask" : "NO ROUTE, kept",
+                      c->np);
+    }
     a->world_pos.x = (int32_t)(c->px[0] * 256.0);
     a->world_pos.z = (int32_t)(c->pz[0] * 256.0);
     a->euler_accum.yaw = FP_SCALE((int32_t)(atan2(tx, tz) * 4096.0 / (2.0 * RV_PI)) & 0xFFF);
@@ -718,10 +748,10 @@ static void rv_corner_start(TD5_Actor *a, long tick)
         char buf[400];
         size_t l = 0;
         int k;
-        for (k = 0; k < RV_NP && l < sizeof buf - 24; k++)
+        for (k = 0; k < c->np && l < sizeof buf - 24; k++)
             l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", c->px[k], c->pz[k]);
-        TD5_LOG_I(LOG_TAG, "[ROAMCORNER] start #%d cluster=%016llx v=%d km/h path%s", s_rv.ci, (unsigned long long)c->cl,
-                  s_rv.si ? 80 : 40, buf);
+        TD5_LOG_I(LOG_TAG, "[ROAMCORNER] start #%d cluster=%016llx v=%d km/h (%s) path%s", s_rv.ci,
+                  (unsigned long long)c->cl, s_rv.si ? 80 : 40, k_rv_pass[s_rv.si], buf);
     }
 }
 
@@ -741,23 +771,49 @@ static void rv_corner_end(long tick, int ok, int stuck, const char *why)
     s_rv.ok += ok; s_rv.stuck += stuck; s_rv.pinch += pin; s_rv.resc += resc;
     s_rv.k_ok[c->kind][sp] += ok; s_rv.k_stuck[c->kind][sp] += stuck;
     s_rv.k_pinch[c->kind][sp] += pin; s_rv.k_resc[c->kind][sp] += resc;
-    TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d %s cluster=%016llx defl=%.0f v=%d km/h: %s (%s) ticks=%ld wall_hits=%ld pinches=%ld "
+    if (sp == 2) { s_rv.b_runs++; s_rv.b_ok += ok; s_rv.b_stuck += stuck; }
+    TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d %s cluster=%016llx defl=%.0f v=%d km/h %s: %s (%s) ticks=%ld wall_hits=%ld pinches=%ld "
               "stuck=%d stalls=%ld retries=%d rescues=%ld speed min/max near C %.0f/%.0f km/h",
-              s_rv.ci, k_rv_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, ok ? "EXIT" : "NO EXIT", why,
-              tick - s_rv.ct, hits, pin, stuck, s_rv.stalls, s_rv.retries, resc, s_rv.vmin > 1e8 ? 0.0 : s_rv.vmin, s_rv.vmax);
-    rv_report_line("%d\t%s\t%016llx\t%.0f\t%d\t%s\t%s\t%ld\t%ld\t%ld\t%d\t%ld\t%d\t%ld\t%.0f\t%.0f\n",
-                   s_rv.ci, k_rv_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, ok ? "EXIT" : "NO_EXIT", why,
-                   tick - s_rv.ct, hits, pin, stuck, s_rv.stalls,
+              s_rv.ci, k_rv_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, k_rv_pass[sp],
+              ok ? "EXIT" : "NO EXIT", why, tick - s_rv.ct, hits, pin, stuck, s_rv.stalls, s_rv.retries, resc, s_rv.vmin > 1e8 ? 0.0 : s_rv.vmin, s_rv.vmax);
+    rv_report_line("%d\t%s\t%016llx\t%.0f\t%d\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%d\t%ld\t%d\t%ld\t%.0f\t%.0f\n",
+                   s_rv.ci, k_rv_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, sp == 2 ? "brake" : "held",
+                   ok ? "EXIT" : "NO_EXIT", why, tick - s_rv.ct, hits, pin, stuck, s_rv.stalls,
                    s_rv.retries, resc, s_rv.vmin > 1e8 ? 0.0 : s_rv.vmin, s_rv.vmax);
     s_rv.phase = 0;
-    /* both speeds at one corner back to back: the second run needs no new tile meshes around the car */
-    if (++s_rv.si >= 2) { s_rv.si = 0; s_rv.ci++; }
+    /* every pass at one corner back to back: the later runs need no new tile meshes around the car */
+    if (++s_rv.si >= s_rv.npass) { s_rv.si = 0; s_rv.ci++; }
+}
+
+/* [F2-E] The braking driver's speed (km/h): the highest from which every path vertex ahead of arc length
+ * s_car can still be taken at sqrt(RV_BRAKE_ALAT * R), R from the turn at that vertex over its two half
+ * segments, braking at RV_BRAKE_DECEL. */
+static double rv_bend_kmh(const RvCorner *c, double s_car)
+{
+    double best = 1e9, cum = 0.0;
+    int k;
+    for (k = 1; k + 1 < c->np; k++) {
+        const double ax = c->px[k] - c->px[k - 1], az = c->pz[k] - c->pz[k - 1];
+        const double bx = c->px[k + 1] - c->px[k], bz = c->pz[k + 1] - c->pz[k];
+        const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
+        double th, r_m, v_k, ahead_m, v_ok;
+        cum += la;
+        if (la < 1.0 || lb < 1.0 || cum < s_car) continue;
+        th = atan2(fabs(ax * bz - az * bx), ax * bx + az * bz);
+        if (th < 0.05) continue;
+        r_m = 0.5 * (la + lb) / RV_M / th;
+        v_k = sqrt(RV_BRAKE_ALAT * r_m);
+        ahead_m = (cum - s_car) / RV_M;
+        v_ok = sqrt(v_k * v_k + 2.0 * RV_BRAKE_DECEL * ahead_m) * 3.6;
+        if (v_ok < best) best = v_ok;
+    }
+    return best;
 }
 
 static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
 {
     const RvCorner *c;
-    double px, pz, kmh, look, rx, rz, along_out, lat_out, tx, tz;
+    double px, pz, kmh, look, rx, rz, along_out, lat_out, tx, tz, s_car = 0.0, vset;
     uint32_t bits;
     if (s_rv.phase == 0) {
         if (s_rv.ci >= s_rv.nc) {
@@ -767,9 +823,9 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
             rv_report_line("\nSUMMARY runs=%ld exit=%ld stuck=%ld pinches=%ld wall_hits=%ld rescues=%ld\n",
                            s_rv.runs, s_rv.ok, s_rv.stuck, s_rv.pinch, s_rv.hits, s_rv.resc);
             for (k = 0; k < 4; k++)
-                for (sp = 0; sp < 2; sp++)
-                    rv_report_line("kind %-20s %2d km/h: runs %ld exit %ld stuck %ld pinches %ld wall_hits %ld rescues %ld\n",
-                                   k_rv_kind[k], sp ? 80 : 40, s_rv.k_runs[k][sp], s_rv.k_ok[k][sp], s_rv.k_stuck[k][sp],
+                for (sp = 0; sp < s_rv.npass; sp++)
+                    rv_report_line("kind %-20s %-8s: runs %ld exit %ld stuck %ld pinches %ld wall_hits %ld rescues %ld\n",
+                                   k_rv_kind[k], k_rv_pass[sp], s_rv.k_runs[k][sp], s_rv.k_ok[k][sp], s_rv.k_stuck[k][sp],
                                    s_rv.k_pinch[k][sp], s_rv.k_hits[k][sp], s_rv.k_resc[k][sp]);
             if (s_rv.rep) { fclose(s_rv.rep); s_rv.rep = NULL; }
             rv_finish("corner matrix done", 0);
@@ -789,10 +845,18 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
     }
     /* pure pursuit on the polyline: arc length of the car's nearest point, aim `look` further */
     look = (s_rv.si ? 16.0 : 10.0) * RV_M;
+    if (s_rv.si == 2) {
+        /* [F2-E] the braking driver looks as far ahead as its speed needs: 10 m at 40 km/h (the held-40
+         * pass), 16 m from 64 km/h; a 16 m look at bend speed cut the inside of the turn into the kerb */
+        double lm = 0.25 * kmh;
+        if (lm < 6.0) lm = 6.0;
+        if (lm > 16.0) lm = 16.0;
+        look = lm * RV_M;
+    }
     {
-        double best = 1e30, cum = 0.0, total = 0.0, s_car = 0.0, want;
+        double best = 1e30, cum = 0.0, total = 0.0, want;
         int k;
-        for (k = 0; k < RV_NP - 1; k++) {
+        for (k = 0; k < c->np - 1; k++) {
             const double sx = c->px[k + 1] - c->px[k], sz = c->pz[k + 1] - c->pz[k];
             const double len = sqrt(sx * sx + sz * sz);
             double tt = len > 0.0 ? ((px - c->px[k]) * sx + (pz - c->pz[k]) * sz) / (len * len) : 0.0, qx, qz, dd;
@@ -807,9 +871,9 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
         want = s_car + look;
         if (want > total) want = total + look;           /* past the end: keep going straight out */
         cum = 0.0;
-        tx = c->px[RV_NP - 1] + c->outx * (want - total);
-        tz = c->pz[RV_NP - 1] + c->outz * (want - total);
-        for (k = 0; k < RV_NP - 1; k++) {
+        tx = c->px[c->np - 1] + c->outx * (want - total);
+        tz = c->pz[c->np - 1] + c->outz * (want - total);
+        for (k = 0; k < c->np - 1; k++) {
             const double sx = c->px[k + 1] - c->px[k], sz = c->pz[k + 1] - c->pz[k];
             const double len = sqrt(sx * sx + sz * sz);
             if (want <= cum + len && len > 0.0) {
@@ -823,7 +887,14 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
         lat_out = sqrt(best);
     }
     (void)rs;
-    bits = rv_steer_to(a, tx, tz, s_rv.si ? 80.0 : 40.0);
+    vset = s_rv.si ? 80.0 : 40.0;
+    if (s_rv.si == 2) {
+        /* [F2-E] the braking driver: arrives at 80 km/h, slows for the bend ahead (a held-speed
+         * 135 degree city corner is not a fair stuck test) */
+        const double vb = rv_bend_kmh(c, s_car);
+        if (vb < vset) vset = vb < RV_BRAKE_MIN_KMH ? RV_BRAKE_MIN_KMH : vb;
+    }
+    bits = rv_steer_to(a, tx, tz, vset);
     if (s_rv.rev_ct > 0) {
         /* reverse-and-retry, as a driver would: back off with the wheel turned away */
         const uint32_t steer = bits & (uint32_t)(TD5_INPUT_STEER_LEFT | TD5_INPUT_STEER_RIGHT);
@@ -862,6 +933,7 @@ void td5_roam_drive_arm(int mode)
     s_rv.per_kind = td5_env_int("TD5RE_ROAM_SELFTEST_CORNERS_PER_KIND", 20, 1, 80);
     s_rv.gap_m = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_GAP_M", 120, 0, 1000);
     s_rv.max_arms = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_MAX_ARMS", 4, 3, 8);
+    s_rv.npass = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_BRAKE", 1, 0, 1) ? 3 : 2;
     s_rv.ch_hint = ROAM_PRIM_NONE;
 }
 
@@ -916,7 +988,7 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
             rv_pick_corners(rs);
             snprintf(path, sizeof path, "%sroam_corner_test.txt", dir ? dir : "");
             s_rv.rep = fopen(path, "w");
-            rv_report_line("idx\tkind\tcluster\tdefl\tkmh\tresult\twhy\tticks\twall_hits\tpinches\tstuck\tstalls\tretries\trescues\tvmin\tvmax\n");
+            rv_report_line("idx\tkind\tcluster\tdefl\tkmh\tdriver\tresult\twhy\tticks\twall_hits\tpinches\tstuck\tstalls\tretries\trescues\tvmin\tvmax\n");
         }
     }
     if (tick == s_rv.tick_last) return 0;      /* one decision per sim tick */
@@ -967,12 +1039,27 @@ int td5_roam_drive_verdict(char *note, size_t n)
                   s_rv.below_n, s_rv.off_n, gap_min, st.rest_n, rest_max, s_rv.stuck_events, s_rv.retries_total, resc, st.pinches, st.teleports,
                   st.wall_hits, td5_roam_spawn_snap_m(), bad);
     } else if (s_rv.mode == TD5_RDRV_CORNERS) {
-        const long fails = s_rv.runs - s_rv.ok;
-        if (!s_rv.done || s_rv.aborted || s_rv.runs == 0 || fails > 0 || s_rv.pinch || s_rv.stuck || s_rv.resc)
-            status = 2;
-        snprintf(note, n, "%s corners: %ld runs (%d/%d/%d/%d per kind), exit %ld, pinch %ld, stuck %ld, resc %ld",
-                 status ? "FAIL" : "ok", s_rv.runs, s_rv.kind_n[0], s_rv.kind_n[1], s_rv.kind_n[2], s_rv.kind_n[3],
-                 s_rv.ok, s_rv.pinch, s_rv.stuck, s_rv.resc);
+        if (s_rv.npass == 3) {
+            /* [F2-E] pinches, rescues and wall wedges are judged on EVERY run (held 40, held 80 and the
+             * braking driver); exit and stuck only on the braking driver's runs (orchestrator, 2026-10-17).
+             * The held runs' exits and stuck events are reported, not judged. */
+            const long held = s_rv.runs - s_rv.b_runs, held_ok = s_rv.ok - s_rv.b_ok;
+            if (!s_rv.done || s_rv.aborted || s_rv.b_runs == 0 || s_rv.b_ok < s_rv.b_runs || s_rv.b_stuck ||
+                s_rv.pinch || s_rv.resc)
+                status = 2;
+            snprintf(note, n, "%s corners: %ld runs (%d/%d/%d/%d), brake exit %ld/%ld stuck %ld, held exit %ld/%ld "
+                     "stuck %ld, pinch %ld, resc %ld",
+                     status ? "FAIL" : "ok", s_rv.runs, s_rv.kind_n[0], s_rv.kind_n[1], s_rv.kind_n[2], s_rv.kind_n[3],
+                     s_rv.b_ok, s_rv.b_runs, s_rv.b_stuck, held_ok, held, s_rv.stuck - s_rv.b_stuck, s_rv.pinch,
+                     s_rv.resc);
+        } else {
+            const long fails = s_rv.runs - s_rv.ok;
+            if (!s_rv.done || s_rv.aborted || s_rv.runs == 0 || fails > 0 || s_rv.pinch || s_rv.stuck || s_rv.resc)
+                status = 2;
+            snprintf(note, n, "%s corners: %ld runs (%d/%d/%d/%d per kind), exit %ld, pinch %ld, stuck %ld, resc %ld",
+                     status ? "FAIL" : "ok", s_rv.runs, s_rv.kind_n[0], s_rv.kind_n[1], s_rv.kind_n[2], s_rv.kind_n[3],
+                     s_rv.ok, s_rv.pinch, s_rv.stuck, s_rv.resc);
+        }
     } else {
         snprintf(note, n, "roam drive not armed");
         status = 2;

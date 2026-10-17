@@ -114,6 +114,13 @@ void td5_roam_physics_stats(TD5_RoamPhysStats *out);
  * TD5RE_ROAM_DRIVE_SECS) | corners (the 90-degree corner matrix, design 2.5).
  * 0 when off or not in roam. */
 uint32_t td5_roam_dev_drive_bits(struct TD5_Actor *a);
+/* [F2-E] Dev harness helper (the corner selftest). (px, pz)[*np] is a corner path in world units:
+ * [0] the start, [*np - 2] the exit end row, [*np - 1] `lout` further out along (outx, outz). When it
+ * runs off the drivable surface it is replaced by an A* route on the paved mask (the F2-E corner
+ * harness's rd_route) of at most `cap` points. Returns the metres of the INPUT path off the road;
+ * *routed = 0 on the road, 1 routed, 2 off the road but no route (path kept). */
+double   td5_roam_dev_route_path(double *px, double *pz, int *np, int cap, double cx, double cz,
+                                 double outx, double outz, double lout, int *routed);
 #endif
 
 #endif /* TD5_ROAM_PHYSICS_H */

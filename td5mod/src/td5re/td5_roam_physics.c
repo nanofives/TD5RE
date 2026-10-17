@@ -1918,6 +1918,33 @@ out:
     return ok;
 }
 
+double td5_roam_dev_route_path(double *px, double *pz, int *np, int cap, double cx, double cz,
+                               double outx, double outz, double lout, int *routed)
+{
+    RdCorner *c;
+    double off;
+    int k;
+    *routed = 0;
+    if (!s_rp.rs || *np < 3 || *np > RD_PMAX) return 0.0;
+    c = (RdCorner *)calloc(1, sizeof *c);
+    if (!c) return 0.0;
+    c->np = *np;
+    for (k = 0; k < *np; k++) { c->px[k] = px[k]; c->pz[k] = pz[k]; }
+    c->cx = cx; c->cz = cz; c->outx = outx; c->outz = outz; c->lout = lout;
+    c->eox = px[*np - 2]; c->eoz = pz[*np - 2];
+    off = rd_path_offroad_m(c);
+    if (off > 0.0) {
+        *routed = 2;
+        if (rd_route(c, px[0], pz[0]) && c->np <= cap) {
+            *np = c->np;
+            for (k = 0; k < c->np; k++) { px[k] = c->px[k]; pz[k] = c->pz[k]; }
+            *routed = 1;
+        }
+    }
+    free(c);
+    return off;
+}
+
 static void rd_corner_start(struct RoamDrive *d, TD5_Actor *a, long tick)
 {
     const RdCorner *c = &d->c[d->ci];

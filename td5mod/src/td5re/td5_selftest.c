@@ -203,9 +203,9 @@ typedef struct {
      * on the road), slot 0 HUMAN with auto_throttle OFF, driven by td5_roam_drive_bits:
      *   1 = junction tour: >= 20 distinct junctions, brake to rest, then judge never-below-surface,
      *       rest height <= 5 cm, never stuck, never off-surface, rescues/pinches/teleports 0
-     *   2 = corner matrix: 90 degree turns at up to 20 junctions per kind at 40 and 80 km/h, 0 pinches
-     *       (every run must pass: the 134 degree cluster 00064c21000864e3 at 80 km/h was excused
-     *       as KNOWN until F2-E rounded its wedge) */
+     *   2 = corner matrix: 90 degree turns at up to 20 junctions per kind, held 40, held 80 and a
+     *       braking driver from 80 km/h: 0 pinches / rescues on every pass, exit + not stuck on the
+     *       braking pass (F2-E; nothing excused, 00064c21000864e3 was KNOWN until F2-E) */
     int roam;
 } RaceScenario;
 
