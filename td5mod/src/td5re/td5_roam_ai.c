@@ -148,7 +148,7 @@ int td5_roam_ai_count(void) { return A.on ? A.n : 0; }
 int td5_roam_ai_racing(void)
 {
     int k;
-    if (!A.on) return 0;
+    if (!A.on || !td5_roam_active()) return 0;
     for (k = 0; k < A.n; k++) if (A.car[k].live && !A.car[k].finished) return 1;
     return 0;
 }
@@ -580,8 +580,7 @@ void td5_roam_ai_race_end(void)
                   A.stats.finished, A.n, A.stats.stuck_long, A.stats.recoveries, A.stats.passes);
         td5_game_roam_set_racer_field(0);
     }
-    A.on = 0;
-    A.n = 0;
+    A.on = 0;                 /* A.n, the cars and the counters stay readable for the verdict */
     A.nst = 0;
     A.player_rank = 0;
 }
@@ -851,7 +850,7 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
         if (!c->live || !a || !ra_place_of(a, &x, &z)) continue;
         c->along = ra_race_along(c, x, z, &lat_m);
         c->lat_race = lat_m;
-        if (racing && lat_m > A.stats.max_lateral_m) A.stats.max_lateral_m = lat_m;
+        if (racing && !c->finished && lat_m > A.stats.max_lateral_m) A.stats.max_lateral_m = lat_m;   /* not the run-out */
         v = sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) /
             256.0 * RA_HZ / RA_M;
         if (racing && !c->finished) {

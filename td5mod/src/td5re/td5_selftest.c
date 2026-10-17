@@ -211,7 +211,10 @@ typedef struct {
      *   3 = [F6-B] SPRINT, full: a saved ~2.3 km route (Diagonal 74, the Plaza Moreno ring, the Plaza
      *       Italia roundabout) planned, saved, reloaded, raced through the setup panel + the 3-2-1, with
      *       2 scripted wrong turns into closed mouths that a barrier must stop; spawn at the route START
-     *   4 = [F6-B] SPRINT, smoke: ~0.4 km on Diagonal 74, 1 wrong turn */
+     *   4 = [F6-B] SPRINT, smoke: ~0.4 km on Diagonal 74, 1 wrong turn
+     *   5 = [F7] SPRINT + 5 AI, full: ~3.1 km (START 580 m further south), no wrong turns; every
+     *       opponent finishes, none stuck > 5 s, finish order + gaps in the note
+     *   6 = [F7] SPRINT + 5 AI, smoke: the smoke route with 5 opponents */
     int roam;
 } RaceScenario;
 
@@ -279,6 +282,11 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=4, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F7] smoke tier: the short sprint with 5 AI opponents (grid behind START, all must finish) */
+    { .name="roam-sprint-ai-smoke",  .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=6, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -414,6 +422,12 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=3, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F7] 5 AI opponents on a 3.1 km casco sprint (>= 10 junctions, Diagonal 74, the Plaza Moreno and
+     * Plaza Italia rings): every opponent finishes, none stuck > 5 s, no chassis past a barrier */
+    { .name="roam-sprint-ai",        .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=5, .depth=ST_DEPTH_ROAM_SPRINT },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -434,7 +448,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 7   /* r1..r5 + roam + roam-sprint-smoke */
+#define ST_SMOKE_RACES 8   /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke */
 
 typedef struct {
     const char *name;
@@ -803,7 +817,8 @@ static void st_roam_arm(const RaceScenario *sc)
     if (sc->roam >= 3) {
         /* [roam F6-B] sprint rows: spawn at the scripted route's START, the sprint test drives */
         double ll[8][2];
-        const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : TD5_RSPRINT_FULL;
+        const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : sc->roam == 5 ? TD5_RSPRINT_FULL_AI
+                       : sc->roam == 6 ? TD5_RSPRINT_SMOKE_AI : TD5_RSPRINT_FULL;
         td5_roam_sprint_route_waypoints(mode, ll, 8);
         td5_roam_sprint_test_arm(mode);
         if (!td5_roam_selftest_arm(ll[0][0], ll[0][1])) {

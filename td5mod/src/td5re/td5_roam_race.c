@@ -736,7 +736,7 @@ static float rr_draw_field(float W, float y, float S)
         if (ft > 0) {
             rr_fmt_time(t, sizeof t, ft);
             if (i == 0 || win <= 0) snprintf(line, sizeof line, "%d   %-6s   %s", i + 1, rr_racer_name(slot, nm, sizeof nm), t);
-            else snprintf(line, sizeof line, "%d   %-6s   %s   +%ld.%02ld", i + 1, rr_racer_name(slot, nm, sizeof nm), t,
+            else snprintf(line, sizeof line, "%d   %-6s   %s   GAP %ld.%02ld", i + 1, rr_racer_name(slot, nm, sizeof nm), t,
                           (ft - win) / TD5_RRACE_TICK_HZ, ((ft - win) % TD5_RRACE_TICK_HZ) * 100 / TD5_RRACE_TICK_HZ);
         } else if (td5_roam_ai_count() > 0) {
             const double togo = R.length_m - R.res.field_along_m[i];
@@ -772,7 +772,8 @@ static void rr_draw_positions(float W, float S)
         const uint32_t col = st[i].slot == 0 ? 0xFFFFE070 : 0xFFC8D0DA;
         if (st[i].slot == 0) snprintf(line, sizeof line, "%d  %s", i + 1, rr_racer_name(0, nm, sizeof nm));
         else if (st[i].finished) snprintf(line, sizeof line, "%d  %-6s  FINISHED", i + 1, rr_racer_name(st[i].slot, nm, sizeof nm));
-        else snprintf(line, sizeof line, "%d  %-6s  %+.0f M", i + 1, rr_racer_name(st[i].slot, nm, sizeof nm), d);
+        else snprintf(line, sizeof line, "%d  %-6s  %.0f M %s", i + 1, rr_racer_name(st[i].slot, nm, sizeof nm), fabs(d),
+                      d >= 0.0 ? "AHEAD" : "BEHIND");   /* the vector font has no '+' glyph */
         tx(x, y, line, col, 14.0f * S);
         y += 20.0f * S;
     }
