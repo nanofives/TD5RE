@@ -73,6 +73,7 @@ typedef struct {
     long   t0, hits0, stop_t;
     double max_past_m;            /* car centre past the panel line (toward the arm), m  */
     long   hits;
+    int    at_mouth;              /* reached the arm mouth, now driving into the arm */
     int    blocked;
 } SdWrongTurn;
 
@@ -306,7 +307,7 @@ static void sd_pick_wrong_turns(void)
             double lat, al, tx, tz, nx, nz, ex, ez, el, dot;
             if (b[i].kind != TD5_ROAM_BARRIER_MOUTH || len < 4.0 * SD_M) continue;
             al = sd_along(mx, mz, &lat);
-            if (al < lo || al > hi || lat < 2.0 * SD_M || lat > 25.0 * SD_M) continue;
+            if (al < lo || al > hi || lat < 2.0 * SD_M || lat > 40.0 * SD_M) continue;
             /* into the arm: from the route's nearest point out through the panel, along its normal */
             sd_tangent(al, &tx, &tz);
             nx = -(bz - az) / len; nz = (bx - ax) / len;
@@ -320,7 +321,7 @@ static void sd_pick_wrong_turns(void)
             dot = nx * ex + nz * ez;
             if (el <= 0.0 || fabs(dot) < 0.5 * el) continue;          /* the panel faces away from the route sideways */
             if (dot < 0.0) { nx = -nx; nz = -nz; }
-            if (fabs(nx * tx + nz * tz) > 0.5) continue;              /* not a side arm */
+            if (fabs(nx * tx + nz * tz) > 0.8) continue;              /* along the route (the other carriageway): not a side arm */
             cand_al[nc] = al; cand_i[nc] = i; nc++;
         }
         /* insertion sort by along */
@@ -633,8 +634,18 @@ static uint32_t sd_bits(TD5_Actor *a)
             return bits;
         }
         if (w->state == 2) {
-            /* drive at the arm 15 m beyond the panel */
-            bits = sd_steer_to(a, w->mx + w->cx * 15.0 * SD_M, w->mz + w->cz * 15.0 * SD_M, 25.0);
+            /* first to the arm's mouth 7 m before the panel (through the junction patch, not across the
+             * block corner), then at the arm 15 m beyond the panel */
+            if (!w->at_mouth && past > -2.5) w->at_mouth = 1;
+            if (!w->at_mouth) {
+                const double qx = w->mx - w->cx * 7.0 * SD_M, qz = w->mz - w->cz * 7.0 * SD_M;
+                if ((px - qx) * (px - qx) + (pz - qz) * (pz - qz) < (3.5 * SD_M) * (3.5 * SD_M)) w->at_mouth = 1;
+                bits = sd_steer_to(a, qx, qz, 20.0);
+            } else {
+                bits = sd_steer_to(a, w->mx + w->cx * 15.0 * SD_M, w->mz + w->cz * 15.0 * SD_M, 25.0);
+            }
+            D.ltx = w->at_mouth ? w->mx + w->cx * 15.0 * SD_M : w->mx - w->cx * 7.0 * SD_M;
+            D.ltz = w->at_mouth ? w->mz + w->cz * 15.0 * SD_M : w->mz - w->cz * 7.0 * SD_M;
             if (past > w->max_past_m) w->max_past_m = past;
             w->hits = ws.hits_slot0 - w->hits0;
             if (w->hits > 0 && k < 3.0) w->stop_t++;
