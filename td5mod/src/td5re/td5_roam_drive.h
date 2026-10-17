@@ -17,8 +17,8 @@
  *   TD5_RDRV_CORNERS  the design 2.5 corner matrix: up to N junctions of each kind (one-lane/
  *                     service, calle x calle, avenida x calle, diagonal x avenida), each
  *                     driven at 40 and 80 km/h on a planned path (F2-B's picker + pure
- *                     pursuit). Per run: exit reached, pinches 0, not stuck. The one cluster
- *                     the sibling task F2-E owns (00064c21000864e3 @ 80 km/h) is marked KNOWN.
+ *                     pursuit). Per run: exit reached, pinches 0, not stuck. No run is
+ *                     excused (00064c21000864e3 @ 80 km/h was KNOWN until F2-E).
  *
  * Knobs (dev): TD5RE_ROAM_SELFTEST_JUNCTIONS (24), _KMH (36), _MAX_SECS (300),
  * _CORNERS_PER_KIND (20), _CORNER_GAP_M (120).
@@ -46,8 +46,8 @@ uint32_t td5_roam_drive_bits(struct TD5_Actor *a);
 /* 1 once the script has finished (route done, matrix done, or aborted) */
 int      td5_roam_drive_done(void);
 /* The verdict. Returns 0 PASS / 1 WARN / 2 FAIL (the selftest's ST_* values) and a note that
- * fits 120 bytes. *known = number of KNOWN (sibling-owned) failures excused. */
-int      td5_roam_drive_verdict(char *note, size_t n, int *known);
+ * fits 120 bytes. */
+int      td5_roam_drive_verdict(char *note, size_t n);
 #endif
 
 #endif /* TD5_ROAM_DRIVE_H */

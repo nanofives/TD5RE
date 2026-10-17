@@ -50,10 +50,6 @@
 #define RV_STUCK_TICKS         90                 /* 3 s */
 #define RV_STUCK_KMH           5.0
 
-/* the diagonal x avenida cluster whose 80 km/h run the sibling task F2-E fixes (acute-junction wedge) */
-#define RV_KNOWN_CLUSTER   0x00064c21000864e3ULL
-#define RV_KNOWN_KMH       80
-
 typedef struct {
     int kind;
     double cx, cz, inx, inz, outx, outz, defl;
@@ -110,8 +106,8 @@ typedef struct {
     int      retries;
     long     hits0, pinch0, resc0;
     double   vmin, vmax;
-    long     runs, ok, stuck, pinch, hits, resc, known_fail;
-    long     k_runs[4][2], k_ok[4][2], k_stuck[4][2], k_pinch[4][2], k_hits[4][2], k_resc[4][2], k_known[4][2];
+    long     runs, ok, stuck, pinch, hits, resc;
+    long     k_runs[4][2], k_ok[4][2], k_stuck[4][2], k_pinch[4][2], k_hits[4][2], k_resc[4][2];
     int      kind_n[4];
     int      cand_n[4];             /* junctions with a valid candidate before the spacing / cap filter */
     FILE    *rep;
@@ -735,7 +731,6 @@ static void rv_corner_end(long tick, int ok, int stuck, const char *why)
     TD5_RoamPhysStats st;
     long hits, pin, resc;
     const int sp = s_rv.si;
-    const int known = (c->cl == RV_KNOWN_CLUSTER && (sp ? 80 : 40) == RV_KNOWN_KMH);
     td5_roam_physics_stats(&st);
     hits = st.wall_hits - s_rv.hits0;
     pin = st.pinches - s_rv.pinch0;
@@ -743,22 +738,16 @@ static void rv_corner_end(long tick, int ok, int stuck, const char *why)
     s_rv.runs++;
     s_rv.k_runs[c->kind][sp]++;
     s_rv.hits += hits; s_rv.k_hits[c->kind][sp] += hits;
-    if (known && (!ok || stuck || pin || resc)) {
-        /* the sibling task's wedge: reported, not failed */
-        s_rv.known_fail++; s_rv.k_known[c->kind][sp]++;
-    } else {
-        s_rv.ok += ok; s_rv.stuck += stuck; s_rv.pinch += pin; s_rv.resc += resc;
-        s_rv.k_ok[c->kind][sp] += ok; s_rv.k_stuck[c->kind][sp] += stuck;
-        s_rv.k_pinch[c->kind][sp] += pin; s_rv.k_resc[c->kind][sp] += resc;
-    }
-    TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d %s cluster=%016llx defl=%.0f v=%d km/h: %s (%s)%s ticks=%ld wall_hits=%ld pinches=%ld "
+    s_rv.ok += ok; s_rv.stuck += stuck; s_rv.pinch += pin; s_rv.resc += resc;
+    s_rv.k_ok[c->kind][sp] += ok; s_rv.k_stuck[c->kind][sp] += stuck;
+    s_rv.k_pinch[c->kind][sp] += pin; s_rv.k_resc[c->kind][sp] += resc;
+    TD5_LOG_I(LOG_TAG, "[ROAMCORNER] #%d %s cluster=%016llx defl=%.0f v=%d km/h: %s (%s) ticks=%ld wall_hits=%ld pinches=%ld "
               "stuck=%d stalls=%ld retries=%d rescues=%ld speed min/max near C %.0f/%.0f km/h",
               s_rv.ci, k_rv_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, ok ? "EXIT" : "NO EXIT", why,
-              known && (!ok || stuck || pin || resc) ? " KNOWN(F2-E)" : "",
               tick - s_rv.ct, hits, pin, stuck, s_rv.stalls, s_rv.retries, resc, s_rv.vmin > 1e8 ? 0.0 : s_rv.vmin, s_rv.vmax);
-    rv_report_line("%d\t%s\t%016llx\t%.0f\t%d\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%d\t%ld\t%d\t%ld\t%.0f\t%.0f\n",
+    rv_report_line("%d\t%s\t%016llx\t%.0f\t%d\t%s\t%s\t%ld\t%ld\t%ld\t%d\t%ld\t%d\t%ld\t%.0f\t%.0f\n",
                    s_rv.ci, k_rv_kind[c->kind], (unsigned long long)c->cl, c->defl, sp ? 80 : 40, ok ? "EXIT" : "NO_EXIT", why,
-                   known && (!ok || stuck || pin || resc) ? "KNOWN" : "-", tick - s_rv.ct, hits, pin, stuck, s_rv.stalls,
+                   tick - s_rv.ct, hits, pin, stuck, s_rv.stalls,
                    s_rv.retries, resc, s_rv.vmin > 1e8 ? 0.0 : s_rv.vmin, s_rv.vmax);
     s_rv.phase = 0;
     /* both speeds at one corner back to back: the second run needs no new tile meshes around the car */
@@ -773,15 +762,15 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
     if (s_rv.phase == 0) {
         if (s_rv.ci >= s_rv.nc) {
             int k, sp;
-            TD5_LOG_I(LOG_TAG, "[ROAMCORNER] SUMMARY runs=%ld exit=%ld stuck=%ld pinches=%ld wall_hits=%ld rescues=%ld known=%ld",
-                      s_rv.runs, s_rv.ok, s_rv.stuck, s_rv.pinch, s_rv.hits, s_rv.resc, s_rv.known_fail);
-            rv_report_line("\nSUMMARY runs=%ld exit=%ld stuck=%ld pinches=%ld wall_hits=%ld rescues=%ld known=%ld\n",
-                           s_rv.runs, s_rv.ok, s_rv.stuck, s_rv.pinch, s_rv.hits, s_rv.resc, s_rv.known_fail);
+            TD5_LOG_I(LOG_TAG, "[ROAMCORNER] SUMMARY runs=%ld exit=%ld stuck=%ld pinches=%ld wall_hits=%ld rescues=%ld",
+                      s_rv.runs, s_rv.ok, s_rv.stuck, s_rv.pinch, s_rv.hits, s_rv.resc);
+            rv_report_line("\nSUMMARY runs=%ld exit=%ld stuck=%ld pinches=%ld wall_hits=%ld rescues=%ld\n",
+                           s_rv.runs, s_rv.ok, s_rv.stuck, s_rv.pinch, s_rv.hits, s_rv.resc);
             for (k = 0; k < 4; k++)
                 for (sp = 0; sp < 2; sp++)
-                    rv_report_line("kind %-20s %2d km/h: runs %ld exit %ld stuck %ld pinches %ld wall_hits %ld rescues %ld known %ld\n",
+                    rv_report_line("kind %-20s %2d km/h: runs %ld exit %ld stuck %ld pinches %ld wall_hits %ld rescues %ld\n",
                                    k_rv_kind[k], sp ? 80 : 40, s_rv.k_runs[k][sp], s_rv.k_ok[k][sp], s_rv.k_stuck[k][sp],
-                                   s_rv.k_pinch[k][sp], s_rv.k_hits[k][sp], s_rv.k_resc[k][sp], s_rv.k_known[k][sp]);
+                                   s_rv.k_pinch[k][sp], s_rv.k_hits[k][sp], s_rv.k_resc[k][sp]);
             if (s_rv.rep) { fclose(s_rv.rep); s_rv.rep = NULL; }
             rv_finish("corner matrix done", 0);
             return 0;
@@ -905,7 +894,7 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
         char note[128];
         if (!s_rv.env_reported) {
             s_rv.env_reported = 1;
-            td5_roam_drive_verdict(note, sizeof note, NULL);
+            td5_roam_drive_verdict(note, sizeof note);
             TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] standalone verdict: %s", note);
             g_td5.quit_requested = 1;
         }
@@ -927,7 +916,7 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
             rv_pick_corners(rs);
             snprintf(path, sizeof path, "%sroam_corner_test.txt", dir ? dir : "");
             s_rv.rep = fopen(path, "w");
-            rv_report_line("idx\tkind\tcluster\tdefl\tkmh\tresult\twhy\tknown\tticks\twall_hits\tpinches\tstuck\tstalls\tretries\trescues\tvmin\tvmax\n");
+            rv_report_line("idx\tkind\tcluster\tdefl\tkmh\tresult\twhy\tticks\twall_hits\tpinches\tstuck\tstalls\tretries\trescues\tvmin\tvmax\n");
         }
     }
     if (tick == s_rv.tick_last) return 0;      /* one decision per sim tick */
@@ -940,12 +929,11 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
 
 /* ------------------------------------------------------------ verdict -------- */
 
-int td5_roam_drive_verdict(char *note, size_t n, int *known)
+int td5_roam_drive_verdict(char *note, size_t n)
 {
     TD5_RoamPhysStats st;
     int status = 0;
     td5_roam_physics_stats(&st);
-    if (known) *known = (int)s_rv.known_fail;
     if (s_rv.mode == TD5_RDRV_ROUTE) {
         const double rest_max = st.rest_n ? st.rest_max / RV_UNIT_CM : 0.0;
         const double gap_min = st.gap_n ? st.gap_min / RV_UNIT_CM : 0.0;
@@ -979,16 +967,12 @@ int td5_roam_drive_verdict(char *note, size_t n, int *known)
                   s_rv.below_n, s_rv.off_n, gap_min, st.rest_n, rest_max, s_rv.stuck_events, s_rv.retries_total, resc, st.pinches, st.teleports,
                   st.wall_hits, td5_roam_spawn_snap_m(), bad);
     } else if (s_rv.mode == TD5_RDRV_CORNERS) {
-        const long fails = (s_rv.runs - s_rv.known_fail) - s_rv.ok;
+        const long fails = s_rv.runs - s_rv.ok;
         if (!s_rv.done || s_rv.aborted || s_rv.runs == 0 || fails > 0 || s_rv.pinch || s_rv.stuck || s_rv.resc)
             status = 2;
         snprintf(note, n, "%s corners: %ld runs (%d/%d/%d/%d per kind), exit %ld, pinch %ld, stuck %ld, resc %ld",
                  status ? "FAIL" : "ok", s_rv.runs, s_rv.kind_n[0], s_rv.kind_n[1], s_rv.kind_n[2], s_rv.kind_n[3],
                  s_rv.ok, s_rv.pinch, s_rv.stuck, s_rv.resc);
-        if (s_rv.known_fail) {
-            size_t l = strlen(note);
-            snprintf(note + l, n - l, " KNOWN(F2-E) %ld", s_rv.known_fail);
-        }
     } else {
         snprintf(note, n, "roam drive not armed");
         status = 2;

@@ -68,7 +68,12 @@ degrees (it is almost all two-lane calles) and 4 where a Diagonal meets an Aveni
 arms (the diagonals cross at big multi-street junctions). A kind with no more candidates than the target is taken whole,
 a plentiful kind is thinned to >= 120 m apart.
 
-KNOWN: cluster `00064c21000864e3` (diagonal x avenida, 134 degrees) at 80 km/h wedges (stuck after 2 retries, 250 wall hits,
+**F2-E (2026-10-17): the KNOWN exemption is removed; every run must pass.** On the rules-v4 tiles the
+cluster below exits at 80 km/h (2 reverse retries, 0 pinches) and the default set is 110 / 110 exits, 0 pinches,
+0 rescues. The 8-arm pinches below are 0 with the F2-E wall probes (edge midpoints, tip rule); 00019ab000083a0f
+at 80 km/h now stops on the median nose instead of sliding through it (the 16 m look-ahead cuts the inside of the turn).
+
+Was KNOWN: cluster `00064c21000864e3` (diagonal x avenida, 134 degrees) at 80 km/h wedges (stuck after 2 retries, 250 wall hits,
 1 pinch-free stall). That is task F2-E's acute-junction wedge. The row reports it as `KNOWN(F2-E) 1` and does not
 fail on it; the same cluster at 40 km/h passes. A KNOWN run that passes is counted as a pass.
 
