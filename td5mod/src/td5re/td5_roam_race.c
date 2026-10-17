@@ -604,7 +604,7 @@ void td5_roam_race_draw_setup(void)
 {
     const float W = g_render_width_f, H = g_render_height_f, S = rr_scale();
     const TD5_RouteResult *r = td5_roam_route_result();
-    const float bw = 520.0f * S, bh = 330.0f * S, bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
+    const float bw = 520.0f * S, bh = 372.0f * S, bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
     static const char *const k_rows[ROW_N] = { "TYPE", "LAPS", "TRAFFIC", "COPS", "START RACE", "CANCEL" };
     char line[160], best[32];
     int i;

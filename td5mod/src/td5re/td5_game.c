@@ -7501,6 +7501,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * countdown; g_td5.paused stays 0 so this never enters the start-
          * countdown sub-tick below. */
         if (s_resume_countdown_ticks > 0) {
+            /* [GEO FREE ROAM F6-B] a roam sprint's 3-2-1 follows a teleport to the grid: keep the
+             * chase camera solving (the car is held) so it settles behind the car instead of
+             * showing the pre-teleport view until GO. Roam flavour only. */
+            if (s_resume_countdown_roam) td5_camera_solve_tick_all();
             tick_resume_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
