@@ -1009,7 +1009,9 @@ static void fu_arm_points(const TG_TileCtx *c, double px, double pz, FuArm *a)
         RoamFrame fr;
         if (!roam_nearest_edge(c, qx, qz, 8.0 * FU_UPM, &seg, &side, &along, &lat)) continue;
         if (!roam_edge_frame(c, seg, 1, along, &fr) || fr.key != a->key) continue;
-        if (fabs(lat) > (fr.half_carriage > 1.5 * FU_UPM ? fr.half_carriage : 1.5 * FU_UPM) * 0.9) continue;
+        /* the key already says it is OUR ribbon; the lateral gate only rejects a far part of it. A divided avenue's
+         * carriageway is offset from the cluster axis by half the median, 6+ m on Diagonal 74. */
+        if (fabs(lat) > 12.0 * FU_UPM) continue;
         a->d_cut = d; a->found = 1;
         break;
     }
