@@ -102,7 +102,31 @@ static struct {
     /* baseline counters */
     long     pinch0, resc0, tele0;
     TD5_RoamBarrierStats bst;
+    FILE    *trc;                 /* <log dir>roam_sprint_trace.csv, one row per driven tick */
+    double   along_s;             /* distance along the driver path (m) */
+    double   ltx, ltz;            /* last pursuit target, world units (trace) */
 } D;
+
+/* the planned polyline + every barrier, place frame, to <log dir>roam_sprint_route.csv */
+static void sd_dump_route(void)
+{
+    char path[512];
+    const char *dir = td5_plat_log_dir();
+    const TD5_RouteResult *r = td5_roam_route_result();
+    int i, n = 0;
+    int32_t ox, oz;
+    const TD5_RoamBarrier *b = td5_roam_barriers(&n);
+    FILE *f;
+    snprintf(path, sizeof path, "%sroam_sprint_route.csv", dir ? dir : "");
+    if (!(f = fopen(path, "w"))) return;
+    td5_roam_world_origin(&ox, &oz);
+    fprintf(f, "kind,i,x,z,x1,z1,dist_m,extra\n");
+    for (i = 0; i < r->npt; i++) fprintf(f, "pt,%d,%.0f,%.0f,,,%.1f,\n", i, r->px[i], r->pz[i], r->dist_m[i]);
+    for (i = 0; b && i < n; i++)
+        fprintf(f, "bar,%d,%.0f,%.0f,%.0f,%.0f,,%d %016llx\n", i, b[i].x0 / 256.0 + ox, b[i].z0 / 256.0 + oz,
+                b[i].x1 / 256.0 + ox, b[i].z1 / 256.0 + oz, b[i].kind, (unsigned long long)b[i].cluster_key);
+    fclose(f);
+}
 
 int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
 {
@@ -125,7 +149,11 @@ void td5_roam_sprint_test_arm(int mode)
     snprintf(D.route_name, sizeof D.route_name, "%s", mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : "selftest_sprint");
 }
 
-void td5_roam_sprint_test_disarm(void) { memset(&D, 0, sizeof D); }
+void td5_roam_sprint_test_disarm(void)
+{
+    if (D.trc) fclose(D.trc);
+    memset(&D, 0, sizeof D);
+}
 int  td5_roam_sprint_test_mode(void) { return D.mode; }
 int  td5_roam_sprint_test_done(void) { return D.mode && D.done; }
 
@@ -134,6 +162,7 @@ static void sd_finish(const char *why, int aborted)
     if (D.done) return;
     D.done = 1;
     D.aborted = aborted;
+    if (D.trc) { fclose(D.trc); D.trc = NULL; }
     snprintf(D.why, sizeof D.why, "%s", why);
     TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] done: %s%s", why, aborted ? " (ABORTED)" : "");
 }
@@ -165,10 +194,51 @@ static int sd_plan_save_load(void)
     return 1;
 }
 
+/* The DRIVER's path: the planned polyline without its junction-connector spikes. The planner adds a
+ * junction's node centre between two street pieces whose ends are not at the node (rr_connector), which
+ * on a straight crossing is a short sideways jog (7 m at Calle 12 x Calle 50 x Diagonal 74): fine for
+ * progress and drawing, but a pursuit driver at 10 m lookahead swerves into it. A point whose turn is
+ * sharper than 90 degrees with a leg under 15 m is dropped. */
+static TD5_RouteResult s_path;
+static double *s_ppx, *s_ppz, *s_pd;
+
+static void sd_build_path(void)
+{
+    const TD5_RouteResult *r = td5_roam_route_result();
+    int i, n = 0, dropped = 0;
+    free(s_ppx); free(s_ppz); free(s_pd);
+    memset(&s_path, 0, sizeof s_path);
+    s_ppx = (double *)malloc((size_t)(r->npt + 1) * sizeof(double));
+    s_ppz = (double *)malloc((size_t)(r->npt + 1) * sizeof(double));
+    s_pd  = (double *)malloc((size_t)(r->npt + 1) * sizeof(double));
+    if (!s_ppx || !s_ppz || !s_pd) return;
+    for (i = 0; i < r->npt; i++) {
+        /* a jog is two points that each turn back by more than 90 degrees: both go (judged on the
+         * ORIGINAL neighbours, so the first one dropped cannot hide the second) */
+        if (i >= 1 && i + 1 < r->npt) {
+            const double ax = r->px[i] - r->px[i - 1], az = r->pz[i] - r->pz[i - 1];
+            const double bx = r->px[i + 1] - r->px[i], bz = r->pz[i + 1] - r->pz[i];
+            const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
+            if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
+                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
+        }
+        s_ppx[n] = r->px[i]; s_ppz[n] = r->pz[i];
+        s_pd[n] = n ? s_pd[n - 1] + sqrt((s_ppx[n] - s_ppx[n - 1]) * (s_ppx[n] - s_ppx[n - 1]) +
+                                         (s_ppz[n] - s_ppz[n - 1]) * (s_ppz[n] - s_ppz[n - 1])) / SD_M : 0.0;
+        n++;
+    }
+    s_path.px = s_ppx; s_path.pz = s_ppz; s_path.dist_m = s_pd; s_path.npt = n;
+    s_path.length_m = n ? s_pd[n - 1] : 0.0; s_path.ok = n >= 2;
+    TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] driver path: %d of %d points (%d connector spikes dropped), %.1f m", n, r->npt, dropped,
+              s_path.length_m);
+}
+
+static const TD5_RouteResult *sd_path(void) { return s_path.npt >= 2 ? &s_path : td5_roam_route_result(); }
+
 /* nearest point of the planned polyline to (px, pz) (place frame): distance along (m), lateral (units) */
 static double sd_along(double px, double pz, double *lat_u)
 {
-    const TD5_RouteResult *r = td5_roam_route_result();
+    const TD5_RouteResult *r = sd_path();
     double best = 1e300, ba = 0.0;
     int i;
     for (i = 0; i + 1 < r->npt; i++) {
@@ -187,7 +257,7 @@ static double sd_along(double px, double pz, double *lat_u)
 /* the route's tangent at a distance along (unit, place frame) */
 static void sd_tangent(double along, double *tx, double *tz)
 {
-    const TD5_RouteResult *r = td5_roam_route_result();
+    const TD5_RouteResult *r = sd_path();
     int i = 0;
     while (i + 2 < r->npt && r->dist_m[i + 1] < along) i++;
     {
@@ -223,7 +293,7 @@ static void sd_pick_wrong_turns(void)
             sd_tangent(al, &tx, &tz);
             nx = -(bz - az) / len; nz = (bx - ax) / len;
             {
-                const TD5_RouteResult *r = td5_roam_route_result();
+                const TD5_RouteResult *r = sd_path();
                 int k = 0;
                 while (k + 2 < r->npt && r->dist_m[k + 1] < al) k++;
                 ex = mx - r->px[k]; ez = mz - r->pz[k];
@@ -246,7 +316,7 @@ static void sd_pick_wrong_turns(void)
             const TD5_RoamBarrier *bb = &b[cand_i[a]];
             const double ax = bb->x0 / 256.0, az = bb->z0 / 256.0, bx = bb->x1 / 256.0, bz = bb->z1 / 256.0;
             const double len = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
-            const TD5_RouteResult *r = td5_roam_route_result();
+            const TD5_RouteResult *r = sd_path();
             int k = 0;
             double nx = -(bz - az) / len, nz = (bx - ax) / len, ex, ez;
             if (cand_al[a] < last + gap) continue;
@@ -323,7 +393,16 @@ void td5_roam_sprint_test_frame(void)
             td5_roam_barriers_stats(&D.bst);
             td5_roam_physics_stats(&st);
             D.pinch0 = st.pinches; D.resc0 = st.rescues + st.rescues_y; D.tele0 = st.teleports;
+            sd_build_path();
             sd_pick_wrong_turns();
+            sd_dump_route();
+            {
+                char path[512];
+                const char *dir = td5_plat_log_dir();
+                snprintf(path, sizeof path, "%sroam_sprint_trace.csv", dir ? dir : "");
+                D.trc = fopen(path, "w");
+                if (D.trc) fprintf(D.trc, "tick,along_m,lat_m,px,pz,kmh,bits,wt,wt_state,drv_along,tx,tz,yaw\n");
+            }
             D.phase = 3; D.phase_frames = 0;
         }
         break;
@@ -369,7 +448,7 @@ static uint32_t sd_steer_to(const TD5_Actor *a, double tx, double tz, double kmh
 /* pursuit target on the route `look` m ahead of `along`, world units; plus a speed from the bend ahead */
 static void sd_route_target(double along, double look, double *tx, double *tz, double *kmh)
 {
-    const TD5_RouteResult *r = td5_roam_route_result();
+    const TD5_RouteResult *r = sd_path();
     int32_t ox, oz;
     int i = 0, j;
     double want = along + look, turn = 0.0, hx0 = 0.0, hz0 = 0.0;
@@ -440,7 +519,26 @@ static void sd_composition(const TD5_Actor *a)
     }
 }
 
+static uint32_t sd_bits(TD5_Actor *a);
+
 uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
+{
+    const long last = D.tick_last;
+    const uint32_t bits = sd_bits(a);
+    if (D.trc && a && D.tick_last != last) {
+        double along, lat;
+        int32_t ox, oz;
+        td5_roam_world_origin(&ox, &oz);
+        td5_roam_race_progress(&along, NULL, &lat);
+        fprintf(D.trc, "%ld,%.1f,%.1f,%.0f,%.0f,%.1f,%u,%d,%d,%.1f,%.0f,%.0f,%d\n", D.tick_last, along, lat,
+                a->world_pos.x / 256.0 + ox, a->world_pos.z / 256.0 + oz, sd_kmh(a), (unsigned)bits, D.active_wt,
+                D.active_wt >= 0 ? D.wt[D.active_wt].state : -1, D.along_s, D.ltx + ox, D.ltz + oz,
+                (int)(a->display_angles.yaw & 0xFFF));
+    }
+    return bits;
+}
+
+static uint32_t sd_bits(TD5_Actor *a)
 {
     const long tick = (long)g_td5.simulation_tick_counter;
     int32_t ox, oz;
@@ -454,7 +552,27 @@ uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
     if (tick - D.t_go > (D.mode == TD5_RSPRINT_SMOKE ? 150L : 480L) * 30L) { sd_finish("sprint timeout", 1); return 0; }
     td5_roam_world_origin(&ox, &oz);
     px = a->world_pos.x / 256.0; pz = a->world_pos.z / 256.0;
-    td5_roam_race_progress(&along, NULL, &lat);
+    {
+        /* the driver's own distance along ITS path, in a window round the last answer */
+        const TD5_RouteResult *r = sd_path();
+        double best = 1e300, ba = D.along_s;
+        int i;
+        for (i = 0; i + 1 < r->npt; i++) {
+            const double sx = r->px[i + 1] - r->px[i], sz = r->pz[i + 1] - r->pz[i];
+            const double l2 = sx * sx + sz * sz;
+            double t, qx, qz, d;
+            if (r->dist_m[i + 1] < D.along_s - 40.0 || r->dist_m[i] > D.along_s + 150.0) continue;
+            t = l2 > 0.0 ? ((px + ox - r->px[i]) * sx + (pz + oz - r->pz[i]) * sz) / l2 : 0.0;
+            if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+            qx = r->px[i] + sx * t; qz = r->pz[i] + sz * t;
+            d = (qx - px - ox) * (qx - px - ox) + (qz - pz - oz) * (qz - pz - oz);
+            if (d < best) { best = d; ba = r->dist_m[i] + t * (r->dist_m[i + 1] - r->dist_m[i]); }
+        }
+        D.along_s = ba;
+        along = ba;
+        lat = sqrt(best) / SD_M;
+        (void)lat;
+    }
     sd_composition(a);
     td5_roam_race_wall_stats(&ws);
     {
@@ -509,6 +627,7 @@ uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
 
     /* pursuit on the route */
     sd_route_target(along, 10.0 + sd_kmh(a) * 0.12, &tx, &tz, &kmh_t);
+    D.ltx = tx; D.ltz = tz;
     bits = sd_steer_to(a, tx, tz, kmh_t);
     /* a wedge: throttle held and under 4 km/h for 1.5 s -> back out 1.3 s with the wheel turned away */
     if (D.rev_t > 0) {
