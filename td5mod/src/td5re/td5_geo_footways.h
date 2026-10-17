@@ -97,6 +97,12 @@ int  td5_geo_footways_point(const TD5_GeoFootway *f, int k, double *x, double *z
 /* How many ways of each TD5_GEO_FW_* kind are loaded. Out-of-range kind is 0. */
 int  td5_geo_footways_kind_count(int kind);
 
+/* [roam F4a] The record classifiers, for free roam's per-tile reader: the `kind`
+ * and `surface` strings of a FOOTWAYS.JSON record -> TD5_GEO_FW_* /
+ * TD5_GEO_FW_SURF_*, the same rule the loader applies. Pure. */
+int  td5_geo_footways_kind_of(const char *s);
+int  td5_geo_footways_surface_of(const char *s);
+
 /* ============================ THE C2 CONTRACT ============================
  *
  * ROUND 1011 C2 CONSUMES THIS ONE. Signature fixed by the orchestrator so C2

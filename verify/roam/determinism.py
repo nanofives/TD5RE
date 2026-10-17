@@ -18,7 +18,11 @@ file byte for byte (design 1.10, risk 4):
                                                      window the cache tiles were read for)
 
 Usage (from anywhere):  python -I verify/roam/determinism.py [--root <project root>]
-        [--exe td5re.exe] [--work <dir>] [--arms A1,A2,R,T,N,G] [--keep]
+        [--exe td5re.exe] [--work <dir>] [--arms A1,A2,R,T,N,G] [--keep] [--scenery]
+
+--scenery (roam F4a): the same arms over the SCENERY layer instead
+(--RoamBuildScenery=casco from the ROAMTILE files on disk, SCENERY_<tx>_<tz>.BIN =
+record table + MODELS records + the layer hash). G does not apply to scenery.
 
 Exit code 0 when every non-control arm is byte identical to A1, 1 otherwise.
 The exe is run with cwd = the project root (it reads re/assets/geo relative to it).
@@ -35,11 +39,15 @@ TAGS = ["SPAN", "VERT", "TRI ", "BEDG", "EDGE", "NODE", "ARM ", "GRID", "SIGN", 
 HDR = 64
 
 
+PREFIX = "ROAMTILE_"
+VERB = "--RoamBuildTiles=casco"
+
+
 def run_arm(exe, root, out_dir, census, extra, log_path):
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir)
-    cmd = [exe, "--RoamBuildTiles=casco", "--RoamOut=" + out_dir, "--RoamCensus=" + census] + extra
+    cmd = [exe, VERB, "--RoamOut=" + out_dir, "--RoamCensus=" + census] + extra
     t0 = time.time()
     with open(log_path, "wb") as lg:
         rc = subprocess.run(cmd, cwd=root, stdout=lg, stderr=subprocess.STDOUT).returncode
@@ -60,6 +68,8 @@ def sections(buf):
 
 def masked(buf):
     """The image with the window-dependent bytes zeroed: header input_hash, STMP, trailer."""
+    if PREFIX != "ROAMTILE_":
+        return buf
     b = bytearray(buf)
     b[16:20] = b"\0\0\0\0"
     for tag, off, nb, _ in sections(buf) or []:
@@ -90,8 +100,8 @@ def where(buf, off):
 
 
 def compare(ref_dir, arm_dir, mask):
-    ref = sorted(f for f in os.listdir(ref_dir) if f.startswith("ROAMTILE_"))
-    got = set(f for f in os.listdir(arm_dir) if f.startswith("ROAMTILE_"))
+    ref = sorted(f for f in os.listdir(ref_dir) if f.startswith(PREFIX))
+    got = set(f for f in os.listdir(arm_dir) if f.startswith(PREFIX))
     same = 0
     diffs = []
     for f in ref:
@@ -106,7 +116,8 @@ def compare(ref_dir, arm_dir, mask):
             same += 1
         else:
             off = first_diff(a, b)
-            diffs.append((f, "differs at %s (len %d vs %d)" % (where(a, off), len(a), len(b)), off))
+            diffs.append((f, "differs at %s (len %d vs %d)" % (where(a, off) if PREFIX == "ROAMTILE_" else "byte %d" % off,
+                                                                  len(a), len(b)), off))
     extra = sorted(got - set(ref))
     return len(ref), same, diffs, extra
 
@@ -130,10 +141,16 @@ def main():
     ap.add_argument("--work", default=None)
     ap.add_argument("--arms", default="A1,A2,R,T,N,G")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--scenery", action="store_true", help="roam F4a: the SCENERY layer (SCENERY_*.BIN)")
     a = ap.parse_args()
+    global PREFIX, VERB
+    if a.scenery:
+        PREFIX = "SCENERY_"
+        VERB = "--RoamBuildScenery=casco"
+        a.arms = ",".join(x for x in a.arms.split(",") if x != "G")
     root = a.root
     exe = a.exe if os.path.isabs(a.exe) else os.path.join(root, a.exe)
-    work = a.work or os.path.join(root, "log", "roam_determinism")
+    work = a.work or os.path.join(root, "log", "roam_determinism" + ("_scenery" if a.scenery else ""))
     os.makedirs(work, exist_ok=True)
     arms = [x for x in a.arms.split(",") if x]
     if "A1" not in arms:
@@ -148,8 +165,8 @@ def main():
         out_dir = os.path.join(work, name)
         rc, secs = run_arm(exe, root, out_dir, os.path.join(work, "census_%s.txt" % name), extra,
                            os.path.join(work, "run_%s.log" % name))
-        nfiles = len([f for f in os.listdir(out_dir) if f.startswith("ROAMTILE_")])
-        total = sum(os.path.getsize(os.path.join(out_dir, f)) for f in os.listdir(out_dir) if f.startswith("ROAMTILE_"))
+        nfiles = len([f for f in os.listdir(out_dir) if f.startswith(PREFIX)])
+        total = sum(os.path.getsize(os.path.join(out_dir, f)) for f in os.listdir(out_dir) if f.startswith(PREFIX))
         print("\n[%s] %s: exit %d, %d file(s), %.1f MB, %.1f s" % (name, desc, rc, nfiles, total / 1e6, secs))
         if rc != 0 or nfiles == 0:
             print("  ARM FAILED TO RUN (see %s)" % os.path.join(work, "run_%s.log" % name))

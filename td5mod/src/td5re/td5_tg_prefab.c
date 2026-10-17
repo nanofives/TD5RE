@@ -28,6 +28,7 @@
  * silence with an exemption.
  */
 #include "td5_trackgen_internal.h"   /* also supplies LOG_TAG */
+#include "td5_tg_geo_bld.h"         /* [roam F4a] tg_prefab_write_piece */
 #include "td5_tg_world.h"
 #include "td5_geo.h"            /* [1014 C] geo track: is a place loaded */
 #include "td5_tg_geo_clear.h"    /* [1014 C] set pieces keep off carriageways and real roads */
@@ -83,9 +84,11 @@ static int tg_prefab_write(TG_Buf *blk, const TG_PrefabDef *d, int pf,
 {
     /* Big enough for the largest prefab (lm00, 975 verts) plus the most
      * closing quads any one piece takes (lm15, 8 -> 32 verts). */
-    static float        v[(1024 + 64) * 5];
-    static unsigned int lgt[1024 + 64];
-    static unsigned short cmd[(64 + 32) * 3];
+    /* [roam F4a] automatic, not static: the roam stream worker writes set pieces
+     * too, and every element read below is written first */
+    float        v[(1024 + 64) * 5];
+    unsigned int lgt[1024 + 64];
+    unsigned short cmd[(64 + 32) * 3];
     int nq, first, i, k, nv, ncmd;
 
     if (pf < 0 || pf >= TD5_TG_PREFAB_N
@@ -322,13 +325,19 @@ int tg_prefab_fit(double fx_max, double fz_max, unsigned int salt)
 int tg_prefab_write_at(TG_Buf *blk, int pf, double ox, double oy, double oz,
                        double ca, double sa)
 {
-    const TG_PrefabDef *d;
     if (!blk || pf < 0 || pf >= TD5_TG_PREFAB_N) return 1;
-    d = &k_tg_prefabs[pf];
-    if (!tg_prefab_write(blk, d, pf, ox, oy, oz, ca, sa))
+    if (!tg_prefab_write_piece(blk, pf, ox, oy, oz, ca, sa))
         return 0;
     s_pf_emitted++;
     return 1;
+}
+
+/* [roam F4a] the same write with no counter: safe on the roam stream worker */
+int tg_prefab_write_piece(TG_Buf *blk, int pf, double ox, double oy, double oz,
+                          double ca, double sa)
+{
+    if (!blk || pf < 0 || pf >= TD5_TG_PREFAB_N) return 1;
+    return tg_prefab_write(blk, &k_tg_prefabs[pf], pf, ox, oy, oz, ca, sa);
 }
 
 /* Drain every placement recorded for span si into this entry's mesh buffer.

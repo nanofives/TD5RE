@@ -83,6 +83,13 @@ int            td5_roam_render_install(TD5_RoamBaked *b);    /* main; takes owne
 void           td5_roam_render_free_baked(TD5_RoamBaked *b);
 size_t         td5_roam_render_baked_bytes(const TD5_RoamBaked *b);
 int            td5_roam_render_has_tile(int tx, int tz);
+/* [F4a] the same bake plus the tile's SCENERY layer, built with `scn` (the caller's
+ * td5_roam_scenery.h source, one per thread; NULL = road + ground only). */
+struct TD5_RoamScnSource;
+TD5_RoamBaked *td5_roam_render_bake_ex(const RoamTile *t, TD5_RoamHeight *hc, struct TD5_RoamScnSource *scn);
+/* the session's lattice / place (NULL before begin): the worker opens its scenery source with them */
+const RoamGrid *td5_roam_render_grid(void);
+const char    *td5_roam_render_place(void);
 void           td5_roam_render_retire_tick(void);            /* main, once per game tick */
 
 /* Scene hook: draw every baked tile near the eye. Called from
