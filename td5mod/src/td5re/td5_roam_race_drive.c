@@ -109,6 +109,7 @@ static struct {
     int      shots;               /* TD5RE_ROAM_SPRINT_SHOTS=1: frame dumps at the key moments */
     char     shot_done[8][24];
     int      nshot;
+    int      exit_ok;             /* ENTER on the results panel returned to free roam, barriers cleared */
 } D;
 
 /* one frame dump per name: <log dir>roam_sprint_<name>.png */
@@ -441,9 +442,18 @@ void td5_roam_sprint_test_frame(void)
             sd_finish("race ended without a finish", 1);
         }
         break;
-    case 4:   /* results panel up; with shots on, give it a moment for the frame dump */
-        if (!D.shots || D.phase_frames >= 120) { sd_finish("finished", 0); break; }
+    case 4:   /* results panel up: frame dump, then ENTER (keep roaming) must end the race at the finish */
         if (D.phase_frames == 60) sd_shot("6_results");
+        if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
+        if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
+        if (D.phase_frames >= 100) {
+            int nb = 0;
+            td5_roam_barriers(&nb);
+            D.exit_ok = td5_roam_race_state() == TD5_RRACE_OFF && nb == 0 && !td5_roam_barriers_visible();
+            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER: race state %d, barriers %d, visible %d -> %s",
+                      td5_roam_race_state(), nb, td5_roam_barriers_visible(), D.exit_ok ? "back to free roam" : "NOT EXITED");
+            sd_finish("finished", 0);
+        }
         break;
     default:
         break;
@@ -707,6 +717,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     for (i = 0; i < D.nwt; i++) blocked += D.wt[i].blocked;
 #define SD_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
     if (!D.done || D.aborted || !res->finished) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
+    if (res->finished && !D.exit_ok) SD_BAD("results ENTER did not return to free roam; ");
     if (D.saved_hash != D.loaded_hash) SD_BAD("reload hash %08X != %08X; ", (unsigned)D.loaded_hash, (unsigned)D.saved_hash);
     if (D.nkeys < want_jn) SD_BAD("%d junctions < %d; ", D.nkeys, want_jn);
     if (D.mode == TD5_RSPRINT_FULL && !D.saw_diag) SD_BAD("no diagonal; ");

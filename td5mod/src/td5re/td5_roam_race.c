@@ -692,9 +692,11 @@ void td5_roam_race_draw_hud(void)
         qb_rect(bx, 4.0f * S, bw, 64.0f * S, 0x90000000);
         rr_fmt_time(t, sizeof t, R.state == TD5_RRACE_RACING ? R.ticks : 0);
         tx_c(W * 0.5f, 6.0f * S, t, 0xFFFFFFFF, 26.0f * S);
-        if (R.ncp > 1) snprintf(line, sizeof line, "CHECKPOINT %d/%d   %.2f KM TO GO", R.cp_next < R.ncp - 1 ? R.cp_next + 1 : R.ncp - 1,
-                                R.ncp - 1, (togo > 0.0 ? togo : 0.0) / 1000.0);
-        else snprintf(line, sizeof line, "%.2f KM TO GO", (togo > 0.0 ? togo : 0.0) / 1000.0);
+        if (R.cp_next < R.ncp - 1)
+            snprintf(line, sizeof line, "CHECKPOINT %d/%d   %.2f KM TO GO", R.cp_next + 1, R.ncp - 1,
+                     (togo > 0.0 ? togo : 0.0) / 1000.0);
+        else
+            snprintf(line, sizeof line, "FINISH   %.2f KM TO GO", (togo > 0.0 ? togo : 0.0) / 1000.0);
         tx_c(W * 0.5f, 36.0f * S, line, 0xFFC8D0DA, 14.0f * S);
         /* progress bar */
         {
