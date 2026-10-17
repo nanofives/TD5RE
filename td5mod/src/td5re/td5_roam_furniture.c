@@ -1109,7 +1109,7 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
         nm[a] = m->name_id; bear[a] = ar->bearing12;
         fu_arm_points(c, px, pz, m);
         m->inbound = fu_arm_inbound(m);
-        if (owned_c && td5_env_flag_on("TD5RE_ROAM_FURN_DBG")) {
+        if (owned_c && td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 1) {
             int seg = -1, sd = 0;
             double al = 0, lt = 0, dd;
             unsigned long long nk = 0;
@@ -1484,6 +1484,11 @@ static int fu_emit_stops(FuEm *em, const FuStop *bs, int nb)
             }
         }
         st->stops++;
+        if (td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 2) {
+            int32_t ox, oz;
+            roam_ctx_origin(c, NULL, NULL, &ox, &oz);
+            TD5_LOG_I(LOG_TAG, "FURN_STOP place %.0f %.0f shelter %d bench %d bin %d", cx + (double)ox, cz + (double)oz, shelter, b->bench, b->bin);
+        }
     }
     return 1;
 }
@@ -1524,6 +1529,11 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         em->road_y = fr.py;
         if (!fu_quad(em, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1, 1)) return 0;
         if (x->paint != 2) st->zebras++; else st->limit_lines++;
+        if (td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 2) {
+            int32_t ox, oz;
+            roam_ctx_origin(c, NULL, NULL, &ox, &oz);
+            TD5_LOG_I(LOG_TAG, "FURN_XING place %.0f %.0f paint %d lanes %d", fr.px + (double)ox, fr.pz + (double)oz, x->paint, lanes);
+        }
     }
     return 1;
 }
