@@ -6,6 +6,10 @@
  * the tile owns (heights, roofs, landmark set pieces, the worship apron), the mapped
  * FOOTPATHS (footway / path / pedestrian / cycleway pieces whose midpoint it owns)
  * and the PLAZA LAWNS + PLAZA TREES of the AREAS polygons whose centroid it owns,
+ * and [F4b] the PAVEMENT along every kerb of the drivable surface the tile owns
+ * (slab at kerb height, kerb face, back face, fence or deck railing; junction corners
+ * follow the patch outline and its fillets; medians and traffic islands are filled
+ * and kerbed both sides; widths per (edge, side) from td5_geo_sw_resolve),
  * as MODELS.DAT mesh records (the generator's own writers), one record list per
  * 64 m sub-block (4 x 4 per tile). No texture page is created: every face names a
  * page of the geo host level's TEXTURES.DAT (TD5_TG_PAGE_*).
@@ -24,7 +28,8 @@
  * quad and tree trunk square is tested against the drivable primitives (ribbon
  * quads + junction patch triangles) of the tile and its 8 neighbours, exactly
  * (polygon overlap, not a sample). A building is nudged off the nearest street
- * first (the strip's carriageway + pavement clearance, TD5_TG_GEO_MAX_SHIFT cap),
+ * first (the strip's carriageway + pavement clearance, TD5_TG_GEO_MAX_SHIFT cap; a
+ * landmark set skips this nudge, TD5RE_ROAM_LM_WINS, F4b),
  * then dropped if it still overlaps; lawn triangles are refined and the
  * overlapping pieces dropped; footpath pieces on a road are cut. The census
  * re-checks every emitted footprint at the end (st.guard_overlaps, must be 0).
@@ -47,8 +52,10 @@
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
 
-/* Bumped BY HAND when a scenery rule changes (the determinism hash includes it). */
-#define TD5_ROAM_SCENERY_RULES  1u
+/* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
+ * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
+ *    landmark set that is cleared off the drivable surface only (no pavement gap). */
+#define TD5_ROAM_SCENERY_RULES  2u
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -85,6 +92,18 @@ typedef struct {
     int  fp_ways, fp_pieces, fp_cut_road, fp_merged, fp_struct;
     /* plazas */
     int  areas, lawn_tris, lawn_cut, trees, trees_cut;
+    /* [F4b] pavement: owned kerb pieces, those inside another drivable primitive, chains,
+     * emitted pieces (corner = on a junction patch outline), vertices merged into a corner
+     * point, island / median pieces, vertices clamped to half a gap, fences, deck railings,
+     * kerb faces, pieces cut back / dropped by the guard, kerb faces dropped, facade clips,
+     * ribbon kerbs whose way the cache lacks, (edge, side) widths per TD5_GEO_SWSRC_* */
+    int  pv_bedges, pv_interior, pv_chains, pv_pieces, pv_corner, pv_collapsed, pv_island, pv_median;
+    int  pv_free_clamp, pv_fence, pv_rail, pv_kerb, pv_cut, pv_drop, pv_kerb_cut, pv_noway;
+    int  pv_src[7];
+    uint32_t ms_pv;
+    /* [F4b] landmark sets let stand over a dead-end stub drawn to their wall (quads), and the
+     * census faces that meet only such a quad (booked here, NOT in guard_overlaps) */
+    int  bld_lm_stub, guard_lm;
     /* output */
     int  meshes, guard_overlaps;    /* guard_overlaps = emitted footprints on a road: 0 */
     uint32_t bytes, hash;
