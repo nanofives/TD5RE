@@ -46,6 +46,7 @@ int  td5_game_get_view_pan(int vp);
 int  td5_game_is_replay_active(void);
 int  td5_game_is_wanted_mode(void);
 int  td5_game_is_pause_menu_active(void);
+int  td5_game_resume_countdown_ticks(void);   /* [GEO FREE ROAM F6-B] resume / roam-sprint 3-2-1 ticks left */
 int  td5_game_cop_chase_is_cop(int slot);
 int  td5_game_cop_chase_is_suspect(int slot);
 /* Police car by IDENTITY (roster 33-36 TD5, 46-49 TD6 cp1..cp4), not by role. */

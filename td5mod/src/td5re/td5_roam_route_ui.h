@@ -28,6 +28,9 @@
 void td5_roam_route_ui_frame(void);
 int  td5_roam_route_ui_want_pause(void);      /* 1 once per M press while driving */
 int  td5_roam_route_ui_map_open(void);
+/* [F6-B] open / close the route map from the sprint flow (open also asks for the pause menu) */
+void td5_roam_route_ui_open_map(void);
+void td5_roam_route_ui_close_map(void);
 void td5_roam_route_ui_draw_overlay(void);
 void td5_roam_route_ui_draw_hud(void);
 void td5_roam_route_ui_draw_world(int view);

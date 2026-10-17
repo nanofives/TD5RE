@@ -63,6 +63,7 @@
 #include "td5_ai.h"      /* [R1026 K] pull-over latch query + dev plant (human-drive rows) */
 #include "td5_roam_mode.h"   /* [roam F2-D] `roam` rows: arm a free-roam session */
 #include "td5_roam_drive.h"  /* [roam F2-D] scripted drive + verdict */
+#include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
@@ -125,7 +126,8 @@ typedef enum {
     /* [roam F2-D] the scripted roam drives end themselves (td5_roam_drive_done); these are
      * only the leash: the junction tour is ~3 min of sim, the corner matrix ~160 runs of <= 20 s */
     ST_DEPTH_ROAM        = 4,
-    ST_DEPTH_ROAM_CORNERS = 5
+    ST_DEPTH_ROAM_CORNERS = 5,
+    ST_DEPTH_ROAM_SPRINT = 6     /* [roam F6-B] the sprint ends itself at the finish; leash only */
 } StDepth;
 
 /* -1 (or -2 where -1 is meaningful) = keep the boot-time base value. */
@@ -205,7 +207,11 @@ typedef struct {
      *       rest height <= 5 cm, never stuck, never off-surface, rescues/pinches/teleports 0
      *   2 = corner matrix: 90 degree turns at up to 20 junctions per kind, held 40, held 80 and a
      *       braking driver from 80 km/h: 0 pinches / rescues on every pass, exit + not stuck on the
-     *       braking pass (F2-E; nothing excused, 00064c21000864e3 was KNOWN until F2-E) */
+     *       braking pass (F2-E; nothing excused, 00064c21000864e3 was KNOWN until F2-E)
+     *   3 = [F6-B] SPRINT, full: a saved ~2.3 km route (Diagonal 74, the Plaza Moreno ring, the Plaza
+     *       Italia roundabout) planned, saved, reloaded, raced through the setup panel + the 3-2-1, with
+     *       2 scripted wrong turns into closed mouths that a barrier must stop; spawn at the route START
+     *   4 = [F6-B] SPRINT, smoke: ~0.4 km on Diagonal 74, 1 wrong turn */
     int roam;
 } RaceScenario;
 
@@ -263,11 +269,16 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=9, .difficulty=1, .checkpoint_timers=1,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .paint=1, .depth=ST_DEPTH_COUNTDOWN },
-    /* [roam F2-D] in the smoke tier (ST_SMOKE_RACES = 6): free roam in the casco, scripted junction tour */
+    /* [roam F2-D] in the smoke tier (ST_SMOKE_RACES = 7 with roam-sprint-smoke): free roam in the casco, scripted junction tour */
     { .name="roam",                  .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=1, .depth=ST_DEPTH_ROAM },
+    /* [roam F6-B] in the smoke tier too: a short sprint with one blocked wrong turn */
+    { .name="roam-sprint-smoke",     .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=4, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -397,6 +408,12 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=2, .depth=ST_DEPTH_ROAM_CORNERS },
+    /* [roam F6-B] the full sprint (full suite only): >= 8 junctions incl. a diagonal and two plazas,
+     * 2 wrong turns blocked by barriers, 0 pinches / stuck */
+    { .name="roam-sprint",           .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=3, .depth=ST_DEPTH_ROAM_SPRINT },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -417,7 +434,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 6   /* r1..r5 + roam */
+#define ST_SMOKE_RACES 7   /* r1..r5 + roam + roam-sprint-smoke */
 
 typedef struct {
     const char *name;
@@ -783,6 +800,19 @@ static void st_roam_arm(const RaceScenario *sc)
     s_roam_captured = 0;
     s_roam_status = ST_PASS;
     s_roam_note[0] = 0;
+    if (sc->roam >= 3) {
+        /* [roam F6-B] sprint rows: spawn at the scripted route's START, the sprint test drives */
+        double ll[8][2];
+        const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : TD5_RSPRINT_FULL;
+        td5_roam_sprint_route_waypoints(mode, ll, 8);
+        td5_roam_sprint_test_arm(mode);
+        if (!td5_roam_selftest_arm(ll[0][0], ll[0][1])) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
+        return;
+    }
     td5_roam_drive_arm(sc->roam == 2 ? TD5_RDRV_CORNERS : TD5_RDRV_ROUTE);
     if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
         s_roam_captured = 1;
@@ -794,6 +824,7 @@ static void st_roam_arm(const RaceScenario *sc)
 static void st_roam_disarm(void)
 {
     td5_roam_drive_disarm();
+    td5_roam_sprint_test_disarm();    /* [roam F6-B] */
     td5_roam_cancel();
     s_roam_row = 0;
 }
@@ -802,7 +833,14 @@ static void st_roam_capture(void)
 {
     if (s_roam_captured) return;
     s_roam_captured = 1;
-    s_roam_status = td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
+    s_roam_status = s_roam_row >= 3 ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
+                                    : td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
+}
+
+/* [roam F6-B] the running roam row's script has ended itself */
+static int st_roam_done(void)
+{
+    return s_roam_row >= 3 ? td5_roam_sprint_test_done() : td5_roam_drive_done();
 }
 /* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);
  * s_inv_max_jump = the real teleport detector (per-sample position delta cap —
@@ -1150,6 +1188,8 @@ static int st_depth_ticks(int depth)
         return td5_env_int("TD5RE_SELFTEST_ROAM_TICKS", 14000, 3000, 100000);
     case ST_DEPTH_ROAM_CORNERS:
         return td5_env_int("TD5RE_SELFTEST_ROAM_CORNER_TICKS", 150000, 10000, 1000000);
+    case ST_DEPTH_ROAM_SPRINT:    /* [roam F6-B] above the sprint's own 480 s (smoke 150 s) cap */
+        return td5_env_int("TD5RE_SELFTEST_ROAM_SPRINT_TICKS", 16000, 3000, 100000);
     default:
         return s_race_ticks;   /* RUN_FINISH uses natural_finish + long leash */
     }
@@ -2739,14 +2779,14 @@ static void st_tick_races(uint32_t now)
         }
         /* [roam F2-D] judge the scripted drive while the provider's counters still exist */
         if (sc->roam > 0 && !s_roam_captured &&
-            (td5_roam_drive_done() || tick - s_race_start_tick >= s_race_budget ||
+            (st_roam_done() || tick - s_race_start_tick >= s_race_budget ||
              (int32_t)(now - s_step_deadline_ms) >= 0))
             st_roam_capture();
         if (g_td5.game_state != TD5_GAMESTATE_RACE) {
             /* Natural finish (or knockout): the fade already returned us. */
             s_sub = SS_RACE_WAIT_MENU;
         } else if (!sc->natural_finish &&
-                   (tick - s_race_start_tick >= s_race_budget || (sc->roam > 0 && td5_roam_drive_done()))) {
+                   (tick - s_race_start_tick >= s_race_budget || (sc->roam > 0 && st_roam_done()))) {
             td5_game_selftest_end_race();
             s_step_deadline_ms = now + 30000u;
             s_sub = SS_RACE_WAIT_MENU;

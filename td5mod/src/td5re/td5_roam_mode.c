@@ -37,6 +37,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_roam_physics.h"   /* task B: the resident set (road tiles + contact provider) */
 #include "td5_roam_stream.h"    /* [F3] the start gate (spawn neighbourhood) */
+#include "td5_roam_race.h"      /* [F6-B] the sprint race is reset with the session */
 
 #define LOG_TAG "roam"
 
@@ -240,6 +241,7 @@ void td5_roam_end(void)
     s_roam.active = 0;
     s_roam.host_track = -1;
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
+    td5_roam_race_reset();              /* [F6-B] a race never outlives its session (barriers cleared) */
     td5_roam_physics_session_end();     /* task B: frees the resident set (no-op when not loaded) */
 }
 
@@ -475,6 +477,7 @@ void td5_roam_session_start(void)
 {
     if (!s_roam.armed) { s_roam.active = 0; return; }
     s_roam.active = 1;
+    td5_roam_race_reset();              /* [F6-B] a pause-menu RESTART re-inits the session: no race carries over */
     td5_roam_physics_session_begin();   /* task B: registers the resident set before the spawn (street yaw) */
     td5_roam_apply_overrides();
     s_roam.spawn.car_index         = g_td5.car_index;
@@ -485,6 +488,8 @@ void td5_roam_session_start(void)
 }
 
 /* Place the player actor (td5_game.c spawn loop, after the AI runtime init). */
+static void roam_place_actor(int slot, TD5_Actor *a, int32_t wx, int32_t wz, int yaw);
+
 void td5_roam_session_spawn(int slot, void *actor_mem)
 {
     TD5_Actor *a = (TD5_Actor *)actor_mem;
@@ -521,6 +526,28 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     }
     yaw &= 0xFFF;
 
+    roam_place_actor(slot, a, wx, wz, yaw);
+
+    TD5_LOG_I(LOG_TAG, "roam: spawn slot=%d place=(%d,%d) world=(%d,%d) yaw=%d%s",
+              slot, (int)px, (int)pz, (int)wx, (int)wz,
+              yaw, auto_yaw ? (s_roam.resident ? " (street)" : " (auto: no locator, 0)") : "");
+}
+
+/* [F6-B] A sprint's grid: the player put on a PLACE-frame point with a fixed yaw, through the
+ * same reset as the session spawn (no snap search: the route's START is on a street centre). */
+void td5_roam_place_actor(int slot, void *actor_mem, int32_t px, int32_t pz, int yaw12)
+{
+    TD5_Actor *a = (TD5_Actor *)actor_mem;
+    if (!a || !s_roam.active) return;
+    if (td5_roam_stream_active()) td5_roam_stream_wait_area(px, pz, -1);
+    roam_place_actor(slot, a, px - s_roam.origin_x, pz - s_roam.origin_z, yaw12 & 0xFFF);
+    TD5_LOG_I(LOG_TAG, "roam: actor placed slot=%d place=(%d,%d) yaw=%d (sprint grid)", slot, (int)px, (int)pz,
+              yaw12 & 0xFFF);
+}
+
+/* world_pos + yaw + the reset of a placed car (shared by the session spawn and the sprint grid) */
+static void roam_place_actor(int slot, TD5_Actor *a, int32_t wx, int32_t wz, int yaw)
+{
     a->world_pos.x = FP_SCALE(wx);
     a->world_pos.y = (int32_t)0xC0000000;   /* reset below snaps it to the ground */
     a->world_pos.z = FP_SCALE(wz);
@@ -545,10 +572,6 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     a->track_sub_lane_index  = 0;
     td5_roam_set_slot_edge(slot, 0);
     td5_roam_physics_spawn_snap(a);     /* task B: stand on the street under the spawn point */
-
-    TD5_LOG_I(LOG_TAG, "roam: spawn slot=%d place=(%d,%d) world=(%d,%d) yaw=%d%s",
-              slot, (int)px, (int)pz, (int)wx, (int)wz,
-              yaw, auto_yaw ? (s_roam.resident ? " (street)" : " (auto: no locator, 0)") : "");
 }
 
 double td5_roam_spawn_snap_m(void) { return s_roam.spawn_snap_m; }
