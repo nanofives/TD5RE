@@ -72,6 +72,10 @@ typedef struct {
     uint64_t    wall_edge;
 } RoamSlotState;
 
+#ifndef TD5RE_RELEASE
+typedef struct { int on; long t0, t1; FILE *f; } RpProbeLog;   /* [F3] DEV probe log */
+#endif
+
 typedef struct {
     int                 loaded, load_failed;
     char                place[64];
@@ -98,6 +102,7 @@ typedef struct {
     uint32_t            begin_ms;           /* [F3] session start time measurement        */
     int                 first_contact_logged;
 #ifndef TD5RE_RELEASE
+    RpProbeLog        probelog;             /* [F3] DEV TD5RE_ROAM_PROBELOG              */
     struct RoamDrive *drv;                  /* DEV drive harness state (heap)         */
     int               drv_mode;             /* -1 unread, 0 off, 1 street, 2 corners  */
 #endif
@@ -114,8 +119,6 @@ static RoamPhys s_rp = { .mirror_knob = -1, .wall_side = -1
 /* [F3 DEV] TD5RE_ROAM_PROBELOG=t0,t1: every provider locate between sim ticks t0..t1 to
  * <log>/roam_probe.txt (tile coordinates instead of slots, so two residency orders
  * compare line by line). */
-typedef struct { int on; long t0, t1; FILE *f; } RpProbeLog;
-static RpProbeLog s_rp_probelog = { -1, 0, 0, NULL };   /* DEV only: read once */
 
 static void rp_prim_tile(const TD5_RoamResident *rs, uint32_t prim, int *tx, int *tz)
 {
@@ -134,13 +137,13 @@ static const char *rp_prim_kind(uint32_t prim)
 static int rp_locate(const TD5_RoamResident *rs, int32_t x, int32_t z, int32_t y, int has_y, uint32_t hint,
                      TD5_RoamHit *out)
 {
-    RpProbeLog *pl = &s_rp_probelog;
+    RpProbeLog *pl = &s_rp.probelog;
     const int r = td5_roam_locate(rs, x, z, y, has_y, hint, out);
-    if (pl->on < 0) {
+    if (pl->on == 0) {                    /* 0 unread, 1 off, 2 on */
         const char *e = getenv("TD5RE_ROAM_PROBELOG");
-        pl->on = (e && sscanf(e, "%ld,%ld", &pl->t0, &pl->t1) == 2) ? 1 : 0;
+        pl->on = (e && sscanf(e, "%ld,%ld", &pl->t0, &pl->t1) == 2) ? 2 : 1;
     }
-    if (pl->on == 1) {
+    if (pl->on == 2) {
         const long tk = (long)g_td5.simulation_tick_counter;
         if (tk >= pl->t0 && tk <= pl->t1) {
             if (!pl->f) {
@@ -989,6 +992,10 @@ void td5_roam_resolve_walls(TD5_Actor *a)
             return;
         }
         ss->hold_on = 0;
+        /* an actor the stream does not follow (an unused racer slot roam never places, parked at
+         * the world origin) over a tile that is not streamed in: no walls, no backstop teleport;
+         * its wheels read flat ground at their own height (td5_roam_wheel_contact) */
+        if (td5_roam_stream_point_missing(a->world_pos.x, a->world_pos.z)) return;
     }
     if (a->slot_index >= RP_RACERS) return;
     if (s_rp.wall_side < 0) {

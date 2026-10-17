@@ -11,9 +11,11 @@
  * loops of td5_physics_refresh_wheel_contacts call it directly because they have
  * the probe's Y (a wheel under a bridge needs it to tell the deck from the road).
  *
- * RESIDENT SET (F2: no streaming). td5_roam_physics_session_begin loads every casco
- * ROAMTILE of the session's place once and registers the set with
- * td5_roam_set_resident. The WORLD frame is world = place - td5_roam_world_origin()
+ * RESIDENT SET. [F3] td5_roam_physics_session_begin creates the set and hands it to
+ * td5_roam_stream.c, which fills it round every racer and unloads behind them (and
+ * blocks the spawn until the spawn neighbourhood is in). TD5RE_ROAM_STREAM=0 keeps the
+ * F2 rule: every casco ROAMTILE of the session's place loaded once at begin. Either
+ * way the set is registered with td5_roam_set_resident. The WORLD frame is world = place - td5_roam_world_origin()
  * (the spawn tile origin, design 0 item 7); tiles keep their place origins and the
  * locator adds the world origin back, so no stored coordinate is rewritten.
  * td5_roam_physics_live() also begins the session lazily (and ends it once roam is

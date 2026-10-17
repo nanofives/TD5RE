@@ -34,9 +34,12 @@
  * the same raster, never z-fights it. Adjacent tiles share their border points
  * exactly, so there is no seam. Cells under a tunnel bore are left out.
  *
- * RESIDENCY. td5_roam_render_add_tile / _remove_tile are the interface for the
- * resident set (sibling B). The DEV loader at the bottom reads ROAMTILE files
- * itself so this task can be proven alone; it is the part to REPLACE.
+ * RESIDENCY. [F3] In a streamed session (td5_roam_stream.c) the stream worker bakes
+ * each tile (td5_roam_render_bake, its own height source) and the main thread installs
+ * it between frames (td5_roam_render_install); a dropped tile is retired for 3 ticks
+ * before it is freed. td5_roam_render_add_tile / _remove_tile stay for the F2 path
+ * (TD5RE_ROAM_STREAM=0), where the DEV loader at the bottom bakes near the eye on the
+ * main thread.
  *
  * State: one session struct (s_rr), no other file-scope mutable state.
  */

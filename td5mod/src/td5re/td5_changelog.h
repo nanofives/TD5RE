@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 17 (free roam streaming)" },
+    { CL_ITEM,    "Free roam no longer loads the whole city up front:" },
+    { CL_ITEM,    "  the drive starts once the streets round the spawn" },
+    { CL_ITEM,    "  are in, and the rest streams in round the car" },
+    { CL_ITEM,    "  as you drive, and out again behind it." },
+    { CL_ITEM,    "Free roam: a missing street tile is now built in" },
+    { CL_ITEM,    "  the background and saved, instead of being a hole." },
     { CL_DATE,    "October 17 (free roam corners)" },
     { CL_ITEM,    "Free roam: the last knife-edge kerb tips are rounded" },
     { CL_ITEM,    "  (a plaza tip went from a 0.2 m to a 4 m kerb radius)," },

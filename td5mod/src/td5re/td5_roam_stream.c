@@ -26,10 +26,12 @@
 #include "td5_camera.h"         /* g_cameraPos: the SCENERY centre */
 #include "td5_race_state.h"     /* td5_game_get_actor (read-only roster) */
 #include "td5_roam_tile.h"
+#include "td5_roam_cache.h"     /* worker-side census (way count) for the memory log */
 #include "td5_roam_locate.h"
 #include "td5_roam_render.h"
 #include "td5_roam_stream.h"
 #include "td5_roam_physics.h"   /* td5_roam_physics_note_frame */
+#include "td5_roam_mode.h"      /* td5_roam_active (the full-load memory samples) */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -117,6 +119,8 @@ typedef struct {
     uint32_t           next_stat_ms, next_log_ms;
     FILE              *csv;
     uint32_t           verify_ms_max, build_ms_max, bake_ms_max;
+    double             last_priv_mb;      /* main-thread memory jump attribution        */
+    int                last_installed, last_evicted;
     long               guard_tick[RS_SLOTS];
     uint8_t            guard_valid[RS_SLOTS], guard_hold[RS_SLOTS];
 } RsSession;
@@ -124,6 +128,7 @@ typedef struct {
 typedef struct {
     TD5_RoamStreamLoadscreenFn loadscreen;   /* registered by td5_game.c, survives sessions */
     RsSession *s;
+    uint32_t   f2_t0, f2_next;               /* TD5RE_ROAM_STREAM=0: private-bytes samples (A/B) */
 } RoamStream;
 
 static RoamStream s_stream;
@@ -191,6 +196,21 @@ static int rs_read(const RsSession *s, int tx, int tz, RoamTile **out, char *err
     return 1;
 }
 
+/* The worker's tile-builder context, opened on first use (a build or a verify). It holds
+ * the process-wide OSM cache session of td5_roam_cache.c for the rest of the session. */
+static TD5_RoamTileCtx *rs_ctx(RsSession *s)
+{
+    if (!s->ctx && !s->ctx_failed) {
+        const uint32_t t0 = td5_plat_time_ms();
+        const double m0 = rs_private_mb();
+        s->ctx = td5_roam_tile_ctx_open(s->place, 0, NULL);
+        if (!s->ctx) s->ctx_failed = 1;
+        TD5_LOG_I(LOG_TAG, "ROAM_STREAM worker: tile builder context for %s %s in %u ms (private %+.1f MB)", s->place,
+                  s->ctx ? "open" : "FAILED", (unsigned)(td5_plat_time_ms() - t0), rs_private_mb() - m0);
+    }
+    return s->ctx;
+}
+
 /* Build (tx,tz) with the worker's ctx and write the file (temp name + rename). */
 static int rs_build(RsSession *s, int tx, int tz, RoamTile **out, char *err, size_t errn)
 {
@@ -199,14 +219,7 @@ static int rs_build(RsSession *s, int tx, int tz, RoamTile **out, char *err, siz
     TD5_RoamTileStats st;
     *out = NULL;
     if (!s->build) { snprintf(err, errn, "build off (TD5RE_ROAM_STREAM_BUILD=0)"); return 0; }
-    if (!s->ctx && !s->ctx_failed) {
-        const uint32_t t0 = td5_plat_time_ms();
-        s->ctx = td5_roam_tile_ctx_open(s->place, 0, NULL);
-        if (!s->ctx) s->ctx_failed = 1;
-        TD5_LOG_I(LOG_TAG, "ROAM_STREAM worker: tile builder context for %s %s in %u ms", s->place,
-                  s->ctx ? "open" : "FAILED", (unsigned)(td5_plat_time_ms() - t0));
-    }
-    if (!s->ctx) { snprintf(err, errn, "no builder context"); return 0; }
+    if (!rs_ctx(s)) { snprintf(err, errn, "no builder context"); return 0; }
     t = (RoamTile *)calloc(1, sizeof *t);
     if (!t) { snprintf(err, errn, "out of memory"); return 0; }
     if (!td5_roam_tile_build(s->ctx, tx, tz, t, &st)) { free(t); snprintf(err, errn, "build failed"); return 0; }
@@ -251,11 +264,7 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
         if (j->kind == RS_JOB_VERIFY) {
             uint32_t want = 0;
             t0 = td5_plat_time_ms();
-            if (!s->ctx && !s->ctx_failed) {
-                s->ctx = td5_roam_tile_ctx_open(s->place, 0, NULL);
-                if (!s->ctx) s->ctx_failed = 1;
-            }
-            if (!s->ctx || !td5_roam_tile_input_hash(s->ctx, tx, tz, &want)) {
+            if (!rs_ctx(s) || !td5_roam_tile_input_hash(s->ctx, tx, tz, &want)) {
                 r->ms_verify = td5_plat_time_ms() - t0;
                 snprintf(r->err, sizeof r->err, "verify: no input hash");
                 rs_free_tile(t);
@@ -332,8 +341,18 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
     td5_plat_fpenv_apply(&s->fpenv);
     if (s->hc) s->hc_ok = td5_roam_render_open_height(s->hc);
     while (!InterlockedCompareExchange(&s->cancel, 0, 0)) {
+        double m0;
         if (!rs_take_job(s, &j)) { WaitForSingleObject(s->wake, 50); continue; }
+        m0 = rs_private_mb();
         rs_process(s, &j, &r);
+        {
+            /* attribution of process memory growth to worker jobs (> 2 MB in one job) */
+            const double dm = rs_private_mb() - m0;
+            if (dm > 2.0)
+                TD5_LOG_I(LOG_TAG, "ROAM_STREAM_MEM worker job %s tile %d,%d: private +%.1f MB (built=%d stale=%d, "
+                          "cache ways now %d)", j.kind == RS_JOB_VERIFY ? "verify" : "load", s->tile[j.idx].tx,
+                          s->tile[j.idx].tz, dm, r.built, r.stale, s->ctx ? td5_roam_cache_way_count() : -1);
+        }
         if (!rs_push_result(s, &r)) { rs_result_free(&r); break; }
     }
     if (s->ctx) { td5_roam_tile_ctx_close(s->ctx); s->ctx = NULL; }
@@ -596,14 +615,21 @@ static int rs_racer(RsSession *s, int slot, double *px, double *pz, double *lx, 
     return 1;
 }
 
+/* The racer slots the ROAD layer follows: every racer slot that has an actor, driven or
+ * not. Roam drives slot 0 only, but slots 1..5 keep their actors (parked near the world
+ * origin, never placed) and physics still refreshes their contacts; following them keeps
+ * the tiles under them resident, so they behave exactly as with the whole casco loaded. */
+static int rs_racer_count(void)
+{
+    return RS_RACERS;
+}
+
 static void rs_compute_wanted(RsSession *s)
 {
     int i, nr, have0 = 0;
     double p0x = 0, p0z = 0, l0x = 0, l0z = 0, sp0 = 0;
     for (i = 0; i < s->ntile; i++) { s->tile[i].want = 0; s->tile[i].keep = 0; s->tile[i].prio = 1 << 20; }
-    nr = g_td5.num_human_players + g_td5.num_ai_opponents;
-    if (nr < 1) nr = 1;
-    if (nr > RS_RACERS) nr = RS_RACERS;
+    nr = rs_racer_count();
     for (i = 0; i < nr; i++) {
         double px, pz, lx, lz, sp;
         if (!rs_racer(s, i, &px, &pz, &lx, &lz, &sp)) continue;
@@ -901,7 +927,22 @@ void td5_roam_stream_tick(void)
     uint32_t now;
     int applied;
     td5_roam_physics_note_frame();     /* session start time, streamed or not */
-    if (!s) return;
+    if (!s) {
+        /* F2 full load (TD5RE_ROAM_STREAM=0): the same private-bytes samples, for the A/B */
+        if (td5_roam_active()) {
+            td5_roam_render_retire_tick();   /* the F2 near-eye loader retires tiles too */
+            now = td5_plat_time_ms();
+            if (!s_stream.f2_t0) { s_stream.f2_t0 = now; s_stream.f2_next = now; }
+            if ((int)(now - s_stream.f2_next) >= 0) {
+                s_stream.f2_next = now + 1000u;
+                TD5_LOG_I(LOG_TAG, "ROAM_MEM t=%.1f private=%.1f MB (full load)",
+                          (double)(now - s_stream.f2_t0) / 1000.0, rs_private_mb());
+            }
+        } else {
+            s_stream.f2_t0 = 0;
+        }
+        return;
+    }
     now_us = td5_plat_time_us();
     now = td5_plat_time_ms();
     if (!s->first_tick_done) {
@@ -926,6 +967,16 @@ void td5_roam_stream_tick(void)
     }
     s->last_tick_us = now_us;
 
+    {
+        /* attribution of process memory growth seen between two frames (> 8 MB: a ~4 MB block
+         * comes and goes between frames all the time) */
+        const double pm = rs_private_mb();
+        if (s->last_priv_mb > 0.0 && pm - s->last_priv_mb > 8.0)
+            TD5_LOG_I(LOG_TAG, "ROAM_STREAM_MEM frame: private +%.1f MB since the last frame (that tick installed %d, "
+                      "evicted %d; resident road %d scenery %d)", pm - s->last_priv_mb, s->last_installed,
+                      s->last_evicted, s->st.road_tiles, s->st.scen_tiles);
+        s->last_priv_mb = pm;
+    }
     td5_roam_render_retire_tick();
     rs_compute_wanted(s);
     rs_update_requests(s);
@@ -937,7 +988,12 @@ void td5_roam_stream_tick(void)
         if (ms > s->st.install_worst_ms) s->st.install_worst_ms = ms;
     }
     s->prev_installed = applied > 0;
-    rs_evict(s, now);
+    s->last_installed = applied;
+    {
+        const long ev0 = s->st.evicted_road + s->st.evicted_scen;
+        rs_evict(s, now);
+        s->last_evicted = (int)(s->st.evicted_road + s->st.evicted_scen - ev0);
+    }
     if ((int)(now - s->next_stat_ms) >= 0) {
         s->next_stat_ms = now + (uint32_t)s->stat_ms;
         rs_stat_line(s, now);
@@ -1077,6 +1133,9 @@ int td5_roam_stream_guard(TD5_Actor *a)
     if (!s || !a || !s->gate_done) return 0;    /* before the spawn: the car is not placed yet */
     slot = (int)a->slot_index;
     if (slot < 0 || slot >= RS_SLOTS) slot = 0;
+    /* only the racers the stream follows (rs_compute_wanted); any other actor reads flat ground
+     * through td5_roam_stream_point_missing and must not pull tiles in or count as a miss */
+    if (slot >= rs_racer_count()) return 0;
     tick = (long)g_td5.simulation_tick_counter;
     if (s->guard_valid[slot] && s->guard_tick[slot] == tick) return s->guard_hold[slot];
     px = (double)FP_TRUNC(a->world_pos.x) + s->rs->org_x;
