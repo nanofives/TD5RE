@@ -717,6 +717,16 @@ static void rv_corner_start(TD5_Actor *a, long tick)
     s_rv.hits0 = st.wall_hits; s_rv.pinch0 = st.pinches;
     s_rv.resc0 = st.rescues + st.rescues_y + st.teleports;
     s_rv.phase = 1;
+    {
+        /* [F2-E] the planned path, so a run can be plotted over the tiles */
+        char buf[400];
+        size_t l = 0;
+        int k;
+        for (k = 0; k < RV_NP && l < sizeof buf - 24; k++)
+            l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", c->px[k], c->pz[k]);
+        TD5_LOG_I(LOG_TAG, "[ROAMCORNER] start #%d cluster=%016llx v=%d km/h path%s", s_rv.ci, (unsigned long long)c->cl,
+                  s_rv.si ? 80 : 40, buf);
+    }
 }
 
 static void rv_corner_end(long tick, int ok, int stuck, const char *why)
