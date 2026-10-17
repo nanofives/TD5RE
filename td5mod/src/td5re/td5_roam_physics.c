@@ -44,6 +44,10 @@
 #define RP_MAX_TILES    1024
 #define RP_MIRROR_CELL  (ROAM_GRID_CELL * 2)
 
+/* [F2-E] wall probes: the 4 body corners, then the midpoints of the front, rear, left and right
+ * body edges (TD5RE_ROAM_WALL_MIDS). */
+#define RP_WALL_PROBES 8
+
 typedef struct {
     uint32_t    hint[8];        /* 0..3 body corners, 4..7 wheels: previous prim  */
     TD5_RoamHit probe[8];       /* the last answer per probe (surface query)      */
@@ -54,8 +58,11 @@ typedef struct {
     int32_t     good_x, good_y, good_z;   /* last tick on the road with a wheel down */
     int         good_valid;
     int         settled;        /* ticks on the road with a wheel down since the last spawn / teleport */
-    int32_t     cin_x[4], cin_z[4];   /* [F2-E] each body corner's last position ON the road (24.8) */
-    uint8_t     cin_ok[4];
+    int32_t     cin_x[RP_WALL_PROBES], cin_z[RP_WALL_PROBES];   /* [F2-E] each wall probe's last position
+                                                                ON the road (24.8)                  */
+    uint8_t     cin_ok[RP_WALL_PROBES];
+    long        cin_tick[RP_WALL_PROBES];   /* [F2-E] sim tick of that position */
+    uint32_t    mhint[RP_WALL_PROBES - 4];  /* [F2-E] previous prim of the edge-midpoint probes */
     long        wall_tick;      /* last wall contact (dev trace): sim tick, corner, angle, pen, edge */
     int         wall_corner, wall_pinch;
     int32_t     wall_angle, wall_pen;
@@ -79,7 +86,9 @@ typedef struct {
     RoamSlotState       slot[RP_SLOTS];
     int                 last_capped;
     int                 wall_side;          /* TD5RE_ROAM_WALL_SIDE (1), -1 = not read   */
-    int                 pinch_rescue;       /* TD5RE_ROAM_PINCH_RESCUE (1)               */
+    int                 pinch_rescue;       /* TD5RE_ROAM_PINCH_RESCUE (0)               */
+    int                 wall_mids;          /* TD5RE_ROAM_WALL_MIDS (1)                  */
+    int                 pinch_tip;          /* TD5RE_ROAM_PINCH_TIP (1)                  */
     TD5_RoamPhysStats   st;
     long                summary_tick, last_sim_tick;
 #ifndef TD5RE_RELEASE
@@ -468,7 +477,8 @@ static void rp_write_summary(const char *why)
                "nohit_wheels=%ld\noutside_wheels=%ld\nwall_corner_pen_max=%ld\n",
             s->ticks, s->wall_hits, s->pinches, s->rescues, s->rescues_y, s->teleports,
             s->nohit_wheels, s->outside_wheels, s->wall_corner_pen_max);
-    fprintf(f, "wall_side_flips=%ld\npinch_rescues=%ld\n", s->wall_side_flips, s->pinch_rescues);
+    fprintf(f, "wall_side_flips=%ld\npinch_rescues=%ld\npinch_tips=%ld\n", s->wall_side_flips, s->pinch_rescues,
+            s->pinch_tips);
     fprintf(f, "mirror_wheel_cmp=%ld\nmirror_wheel_diff_h=%ld\nmirror_wheel_diff_n=%ld\nmirror_wheel_diff_cap=%ld\n"
                "mirror_wheel_surf_cmp=%ld\nmirror_wheel_diff_surf=%ld\nmirror_wheel_fallback=%ld\nmirror_dh_max=%ld\n"
                "mirror_corner_cmp=%ld\nmirror_corner_diff=%ld\nmirror_corner_fallback=%ld\n"
@@ -792,79 +802,189 @@ static int32_t rp_wall_angle(double dx, double dz)
     return (int32_t)(atan2(dx, -dz) * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
 }
 
+/* [F2-E] thin-wall side memory: used while at most this old (sim ticks, 1 s) and this far (units, 3 m) */
+#define ROAM_SIDE_TICKS 30
+#define ROAM_SIDE_DIST  1290.0
+#define ROAM_SIDE_STEP  32.0     /* units: locator step along a flipped normal (7.5 cm) */
+/* [F2-E] wall-tip pinch: the outside normals' sum must be at least this long (a tip of ~9 deg
+ * or wider), and each outside probe's normal within acos(RP_TIP_MIN_COS) of it */
+#define RP_TIP_MIN_SUM  0.15
+#define RP_TIP_MIN_COS  0.05
+
 /* [F2-E] Forget where the body corners last touched the road (teleports, rescues, spawns). */
 static void rp_forget_corners(RoamSlotState *ss)
 {
-    ss->cin_ok[0] = ss->cin_ok[1] = ss->cin_ok[2] = ss->cin_ok[3] = 0;
+    int k;
+    for (k = 0; k < RP_WALL_PROBES; k++) ss->cin_ok[k] = 0;
 }
 
 void td5_roam_resolve_walls(TD5_Actor *a)
 {
     const TD5_RoamResident *rs = rp_rs();
     RoamSlotState *ss;
-    TD5_Vec3_Fixed *corner;
-    TD5_RoamHit hk[4];
-    int out[4], k, deep = -1, pinch = 0, pa = -1, pb = -1, pinch_out = 0;
-    double nx[4], nz[4];
+    TD5_Vec3_Fixed corner[RP_WALL_PROBES];
+    TD5_RoamHit hk[RP_WALL_PROBES];
+    int out[RP_WALL_PROBES], k, np = 4, deep = -1, pinch = 0, pa = -1, pb = -1, pinch_out = 0, cen_in = 0, tip = 0;
+    double nx[RP_WALL_PROBES], nz[RP_WALL_PROBES], tip_ux = 0.0, tip_uz = 0.0;
+    int32_t tip_pen = 0;
     if (!a || !rs || !td5_roam_active()) return;
     if (a->slot_index >= RP_RACERS) return;
     if (s_rp.wall_side < 0) {
         s_rp.wall_side = td5_env_int("TD5RE_ROAM_WALL_SIDE", 1, 0, 1);
-        s_rp.pinch_rescue = td5_env_int("TD5RE_ROAM_PINCH_RESCUE", 1, 0, 1);
+        s_rp.pinch_rescue = td5_env_int("TD5RE_ROAM_PINCH_RESCUE", 0, 0, 1);
+        s_rp.wall_mids = td5_env_int("TD5RE_ROAM_WALL_MIDS", 1, 0, 1);
+        s_rp.pinch_tip = td5_env_int("TD5RE_ROAM_PINCH_TIP", 1, 0, 1);
     }
     ss = rp_slot(a);
-    corner = &a->probe_FL;
+    {
+        const TD5_Vec3_Fixed *c4 = &a->probe_FL;     /* FL, FR, RL, RR */
+        static const int8_t k_mid[4][2] = { { 0, 1 }, { 2, 3 }, { 0, 2 }, { 1, 3 } };
+        for (k = 0; k < 4; k++) corner[k] = c4[k];
+        /* [F2-E] A median nose narrower than the car passed BETWEEN the two front corners,
+         * the only places a wall was tested, and the chassis drove into the wedge
+         * (00019ab000083a0f at 80 km/h: 171 pinch ticks inside the nose). The midpoints of
+         * the four body edges are probes too. Knob TD5RE_ROAM_WALL_MIDS (1; 0 = corners only). */
+        if (s_rp.wall_mids) {
+            for (k = 0; k < 4; k++) {
+                const TD5_Vec3_Fixed *p = &c4[k_mid[k][0]], *q = &c4[k_mid[k][1]];
+                corner[4 + k].x = (int32_t)(((int64_t)p->x + q->x) / 2);
+                corner[4 + k].y = (int32_t)(((int64_t)p->y + q->y) / 2);
+                corner[4 + k].z = (int32_t)(((int64_t)p->z + q->z) / 2);
+            }
+            np = RP_WALL_PROBES;
+        }
+    }
+    if (s_rp.wall_side) {
+        TD5_RoamHit hc;
+        cen_in = td5_roam_locate(rs, a->world_pos.x, a->world_pos.z, a->world_pos.y, 1, ss->chassis_hint, &hc) &&
+                 hc.prim != ROAM_PRIM_NONE && hc.inside;
+    }
 
-    for (k = 0; k < 4; k++) {
+    for (k = 0; k < np; k++) {
+        uint32_t *hint = k < 4 ? &ss->hint[k] : &ss->mhint[k - 4];
         out[k] = 0;
-        if (!td5_roam_locate(rs, corner[k].x, corner[k].z, corner[k].y, 1, ss->hint[k], &hk[k]) ||
+        if (!td5_roam_locate(rs, corner[k].x, corner[k].z, corner[k].y, 1, *hint, &hk[k]) ||
             hk[k].prim == ROAM_PRIM_NONE)
             continue;
-        if (hk[k].inside) {
+        if (k >= 4) *hint = hk[k].prim;
+        /* A corner on the road, or hanging over its kerb by no more than the overhang, is on
+         * the road's side of every wall near it: its position is the side memory below. */
+        if (hk[k].inside || hk[k].push_dist <= ROAM_KERB_OVERHANG) {
             ss->cin_x[k] = corner[k].x; ss->cin_z[k] = corner[k].z; ss->cin_ok[k] = 1;
+            ss->cin_tick[k] = (long)g_td5.simulation_tick_counter;
             continue;
         }
-        if (hk[k].push_dist <= ROAM_KERB_OVERHANG) continue;
         {
             const double m = sqrt((double)hk[k].push_x * hk[k].push_x + (double)hk[k].push_z * hk[k].push_z);
             if (m < 0.5) continue;
             nx[k] = hk[k].push_x / m; nz[k] = hk[k].push_z / m;
         }
         /* [F2-E] Thin walls. The push goes to the NEAREST boundary edge, so a corner that
-         * crossed more than half of a thin unpaved strip (a divided avenue's median, ~2.6 m)
-         * was pushed on THROUGH it to the far kerb; with both front corners in the median the
-         * pushes opposed, the pinch rule cancelled the translation, and the car slid down the
-         * median (000450330009de5d, 273 pinches in one run). A corner that was on the road on
-         * an earlier tick is pushed back to the side it came from: when the nearest edge's
-         * push points away from its last on-road position, the push is flipped and its length
-         * is that position's distance back along the flipped normal. Knob TD5RE_ROAM_WALL_SIDE. */
-        if (s_rp.wall_side && ss->cin_ok[k]) {
-            const double dx = (double)(ss->cin_x[k] - corner[k].x) / 256.0;
-            const double dz = (double)(ss->cin_z[k] - corner[k].z) / 256.0;
-            if (nx[k] * dx + nz[k] * dz < 0.0) {
-                const double back = -(nx[k] * dx + nz[k] * dz);
-                nx[k] = -nx[k]; nz[k] = -nz[k];
-                hk[k].push_dist = (int32_t)(back + 0.5) + ROAM_KERB_OVERHANG;
-                hk[k].push_x = (int32_t)floor(nx[k] * back + 0.5);
-                hk[k].push_z = (int32_t)floor(nz[k] * back + 0.5);
-                s_rp.st.wall_side_flips++;
-                if (hk[k].push_dist <= ROAM_KERB_OVERHANG) continue;
+         * crossed more than half of a thin unpaved strip (a divided avenue's median, 1.6-3 m)
+         * was pushed on THROUGH it to the far kerb; with the far corner still pushed back the
+         * pushes opposed, the pinch rule cancelled the translation, and the car slid along
+         * inside the median (00019ab000083a0f, 203 pinch ticks at 80 km/h). Such a corner
+         * is pushed back to the side it came from instead. It has tunnelled when its nearest
+         * push points AWAY from every reference it has: the chassis centre when that is on
+         * the road, and the corner's own last position on the road or within the kerb
+         * overhang, while that memory is <= ROAM_SIDE_TICKS old and <= ROAM_SIDE_DIST away
+         * (both must agree: a car pivoting round an island tip has its centre beyond the far
+         * face while the corner came in through the near one). The push length is the
+         * distance to the road along the flipped normal, found by stepping the locator
+         * (ROAM_SIDE_STEP) up to ROAM_SIDE_DIST; no road there = the nearest push is kept.
+         * Knob TD5RE_ROAM_WALL_SIDE (1; 0 = nearest edge only). */
+        if (s_rp.wall_side) {
+            int refs = 0, away = 0;
+            if (cen_in) {
+                const double dx = (double)(a->world_pos.x - corner[k].x) / 256.0;
+                const double dz = (double)(a->world_pos.z - corner[k].z) / 256.0;
+                refs++; away += nx[k] * dx + nz[k] * dz < 0.0;
+            }
+            if (ss->cin_ok[k] && (long)g_td5.simulation_tick_counter - ss->cin_tick[k] <= ROAM_SIDE_TICKS) {
+                const double dx = (double)(ss->cin_x[k] - corner[k].x) / 256.0;
+                const double dz = (double)(ss->cin_z[k] - corner[k].z) / 256.0;
+                if (dx * dx + dz * dz <= ROAM_SIDE_DIST * ROAM_SIDE_DIST) { refs++; away += nx[k] * dx + nz[k] * dz < 0.0; }
+            }
+            if (refs && away == refs) {
+                double t;
+                TD5_RoamHit hm;
+                for (t = ROAM_SIDE_STEP; t <= ROAM_SIDE_DIST; t += ROAM_SIDE_STEP) {
+                    const int32_t qx = corner[k].x - (int32_t)floor(nx[k] * t * 256.0 + 0.5);
+                    const int32_t qz = corner[k].z - (int32_t)floor(nz[k] * t * 256.0 + 0.5);
+                    if (td5_roam_locate(rs, qx, qz, corner[k].y, 1, *hint, &hm) && hm.prim != ROAM_PRIM_NONE &&
+                        hm.inside)
+                        break;
+                }
+                if (t <= ROAM_SIDE_DIST) {
+#ifndef TD5RE_RELEASE
+                    if (s_rp.st.wall_side_flips < 60)
+                        TD5_LOG_I(LOG_TAG, "ROAM_WALL_SIDE slot=%d tick=%ld corner %d: nearest push (%d,%d) dist %d "
+                                  "flipped, road %.0f units back (refs %d%s)", a->slot_index,
+                                  (long)g_td5.simulation_tick_counter, k, hk[k].push_x, hk[k].push_z,
+                                  hk[k].push_dist, t, refs, cen_in ? ", centre on road" : "");
+#endif
+                    nx[k] = -nx[k]; nz[k] = -nz[k];
+                    hk[k].push_dist = (int32_t)(t + 0.5);
+                    hk[k].push_x = (int32_t)floor(nx[k] * t + 0.5);
+                    hk[k].push_z = (int32_t)floor(nz[k] * t + 0.5);
+                    s_rp.st.wall_side_flips++;
+                    if (hk[k].push_dist <= ROAM_KERB_OVERHANG) continue;
+                }
             }
         }
         out[k] = 1;
         if (deep < 0 || hk[k].push_dist > hk[deep].push_dist) deep = k;
     }
-    for (k = 0; k < 4 && !pinch; k++) {
+    for (k = 0; k < np && !pinch; k++) {
         int j;
         if (!out[k]) continue;
-        for (j = k + 1; j < 4; j++)
+        for (j = k + 1; j < np; j++)
             if (out[j] && nx[k] * nx[j] + nz[k] * nz[j] < 0.0) { pinch = 1; pa = k; pb = j; break; }
+    }
+
+    /* [F2-E] A pinch on a wall TIP (a median nose between the front-left corner and the front
+     * midpoint, 00019ab000083a0f) is not a corridor too narrow for the car: the outward normals
+     * of the two faces sum to a vector that points out past the tip, and one translation along
+     * it frees every outside probe. When the normals' sum is >= RP_TIP_MIN_SUM and every
+     * outside probe is pushed out by moving along it, the car moves that way by the largest
+     * pen_k / (u . n_k) (capped) and it is a wall hit, not a pinch. Two parallel walls (sum ~0)
+     * keep the pinch rule. Knob TD5RE_ROAM_PINCH_TIP (1; 0 = always the pinch rule). */
+    if (pinch && s_rp.pinch_tip) {
+        double ux = 0.0, uz = 0.0, ul, dist = 0.0;
+        int ok = 1;
+        for (k = 0; k < np; k++)
+            if (out[k]) { ux += nx[k]; uz += nz[k]; }
+        ul = sqrt(ux * ux + uz * uz);
+        if (ul >= RP_TIP_MIN_SUM) {
+            ux /= ul; uz /= ul;
+            for (k = 0; k < np && ok; k++) {
+                double ck, pk;
+                if (!out[k]) continue;
+                ck = ux * nx[k] + uz * nz[k];
+                pk = (double)(hk[k].push_dist - ROAM_KERB_OVERHANG);
+                if (ck < RP_TIP_MIN_COS) ok = 0;
+                else if (pk / ck > dist) dist = pk / ck;
+            }
+            if (ok) {
+                tip = 1; tip_ux = ux; tip_uz = uz;
+                tip_pen = (int32_t)(dist + 0.5);
+                pinch = 0;
+                s_rp.st.pinch_tips++;
+#ifndef TD5RE_RELEASE
+                if (s_rp.st.pinch_tips <= 40)
+                    TD5_LOG_I(LOG_TAG, "ROAM_WALL_TIP slot=%d tick=%ld probes %d/%d edges %016llx/%016llx: normals sum %.2f, "
+                              "moved %d units along (%.2f,%.2f)", (int)a->slot_index, (long)g_td5.simulation_tick_counter,
+                              pa, pb, (unsigned long long)hk[pa].edge_key, (unsigned long long)hk[pb].edge_key, ul,
+                              (int)tip_pen, ux, uz);
+#endif
+            }
+        }
     }
 
     if (deep >= 0) {
         const TD5_RoamHit *h = &hk[deep];
-        int32_t pen = h->push_dist - ROAM_KERB_OVERHANG;
-        const int32_t angle = rp_wall_angle(nx[deep], nz[deep]);
+        int32_t pen = tip ? tip_pen : h->push_dist - ROAM_KERB_OVERHANG;
+        const int32_t angle = tip ? rp_wall_angle(tip_ux, tip_uz) : rp_wall_angle(nx[deep], nz[deep]);
         if (pen > s_rp.st.wall_corner_pen_max) s_rp.st.wall_corner_pen_max = pen;
         if (pen > RP_PUSH_CAP) pen = RP_PUSH_CAP;
         ss->wall_tick = (long)g_td5.simulation_tick_counter;
@@ -880,7 +1000,7 @@ void td5_roam_resolve_walls(TD5_Actor *a)
             pinch_out = s_rp.pinch_rescue;
             if (s_rp.st.pinches <= 40) {
                 int q;
-                for (q = 0; q < 4; q++)
+                for (q = 0; q < np; q++)
                     TD5_LOG_W(LOG_TAG, "ROAM_WALL_PINCH   corner %d at (%d,%d,%d): prim %08x %s edge %016llx inside=%d "
                               "push (%d,%d) dist %d wall %u lateral %d lane %d",
                               q, (int)FP_TRUNC(corner[q].x), (int)FP_TRUNC(corner[q].y), (int)FP_TRUNC(corner[q].z),
@@ -936,7 +1056,8 @@ void td5_roam_resolve_walls(TD5_Actor *a)
         }
         /* [F2-E] After a pinch the body straddles a strip it cannot leave by corner pushes
          * (the pushes oppose); when the chassis itself is off the road there, it is put
-         * back on its nearest surface whatever the distance. Knob TD5RE_ROAM_PINCH_RESCUE. */
+         * back on its nearest surface whatever the distance. Knob TD5RE_ROAM_PINCH_RESCUE (0: off;
+         * the side rule, edge midpoints and the tip rule leave no pinch on the F2-D sets). */
         if (!c.inside && (c.push_dist > ROAM_RESCUE_DIST || (pinch_out && c.push_dist > 0))) {
             if (pinch_out && c.push_dist <= ROAM_RESCUE_DIST) s_rp.st.pinch_rescues++;
             rp_forget_corners(ss);
