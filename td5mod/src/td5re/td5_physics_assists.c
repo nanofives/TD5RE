@@ -24,6 +24,7 @@
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_trackgen.h"   /* [R1024 H] td5_trackgen_is_generated_slot (AI wedge reset scope) */
+#include "td5_roam_mode.h"  /* [GEO FREE ROAM F7] roam AI recovers itself: no span-based wedge reset */
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* manual-recovery edge, FF signal consumers */
@@ -2609,6 +2610,9 @@ void td5_physics_update_ai_wedge(void)
     if ((int64_t)g_td5.simulation_tick_counter < s_wedge_last_tick) td5_physics_ai_wedge_reset_state();
     s_wedge_last_tick = (int64_t)g_td5.simulation_tick_counter;
     if (!td5_trackgen_is_generated_slot(g_td5.track_index)) return;
+    /* [GEO FREE ROAM F7] roam spans are all -1 (no progress ever) and the reset walks the strip:
+     * the roam route driver has its own reverse-and-retry (td5_roam_ai.c) */
+    if (td5_roam_active()) return;
     nslots = g_traffic_slot_base;
     if (nslots > TD5_MAX_RACER_SLOTS) nslots = TD5_MAX_RACER_SLOTS;
     for (slot = 0; slot < nslots; slot++) {

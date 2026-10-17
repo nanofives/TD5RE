@@ -38,6 +38,8 @@
 #include "td5_roam_physics.h"   /* task B: the resident set (road tiles + contact provider) */
 #include "td5_roam_stream.h"    /* [F3] the start gate (spawn neighbourhood) */
 #include "td5_roam_race.h"      /* [F6-B] the sprint race is reset with the session */
+#include "td5_roam_ai.h"        /* [F7] the opponents' cars load with the session */
+#include "td5_asset.h"          /* [F7] td5_asset_get_car_zip_path: a known opponent car */
 
 #define LOG_TAG "roam"
 
@@ -459,7 +461,17 @@ void td5_roam_apply_overrides(void)
     g_td5.track_index              = td5_roam_host_track();
     g_td5.reverse_direction        = 0;     /* the host level's reverse texture swap never applies */
     g_td5.num_human_players        = 1;
-    g_td5.num_ai_opponents         = 0;
+    /* [F7] the opponents' cars load with the session (parked until a sprint asks for them:
+     * td5_roam_ai_session_init); a car index the loader does not know falls back to a fixed set */
+    g_td5.num_ai_opponents         = td5_roam_ai_preload();
+    {
+        static const int k_fallback[TD5_ROAM_AI_MAX] = { 11, 22, 7, 14, 3 };
+        int i;
+        for (i = 1; i <= TD5_ROAM_AI_MAX; i++) {
+            if (!td5_asset_get_car_zip_path(g_td5.ai_car_indices[i])) g_td5.ai_car_indices[i] = k_fallback[i - 1];
+            if (g_td5.ai_car_variants[i] < 0 || g_td5.ai_car_variants[i] > 3) g_td5.ai_car_variants[i] = 0;
+        }
+    }
     g_td5.num_spectate_screens     = 0;
     g_td5.traffic_enabled          = 0;
     g_td5.special_encounter_enabled = 0;
@@ -482,7 +494,7 @@ void td5_roam_session_start(void)
     td5_roam_apply_overrides();
     s_roam.spawn.car_index         = g_td5.car_index;
     TD5_LOG_I(LOG_TAG, "roam: session start place=%s car=%d host_track=%d origin=(%d,%d) "
-              "(no strip, ring 0, 1 racer, no traffic/cops/checkpoints)",
+              "(no strip, ring 0, 1 racer + parked opponents, no traffic/cops/checkpoints)",
               s_roam.spawn.place, s_roam.spawn.car_index, g_td5.track_index,
               (int)s_roam.origin_x, (int)s_roam.origin_z);
 }
