@@ -78,7 +78,9 @@
                                      * 4: F2-E union block corners drawn as a run of
                                      * short reflex vertices get ONE kerb fillet, union
                                      * holes (islands) get kerb fillets, a NORMAL outline
-                                     * the first-ear clipper strands is cut by ear_clip_u */
+                                     * the first-ear clipper strands is cut by ear_clip_u,
+                                     * near-straight seam vertices beside a block corner
+                                     * and 2-3 vertex sliver tips are dropped */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */
