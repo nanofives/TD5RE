@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 16 (free roam spawn + test)" },
+    { CL_ITEM,    "Free roam: clicking a spot off the road (a plaza lawn)" },
+    { CL_ITEM,    "  now puts the car on the nearest street, pointing" },
+    { CL_ITEM,    "  along it. New self-test row 'roam' drives 20+ junctions." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "October 16 (free roam driving)" },
     { CL_ITEM,    "Free roam: the car now drives on the La Plata casco" },
     { CL_ITEM,    "  streets. Wheels sit on the road tiles, kerbs act as" },
