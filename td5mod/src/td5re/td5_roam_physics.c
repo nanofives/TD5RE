@@ -900,8 +900,22 @@ int32_t td5_roam_ground(int32_t x, int32_t z, int32_t y, int has_y, int16_t *nor
     TD5_RoamHit h;
     if (normal) { normal[0] = 0; normal[1] = -4096; normal[2] = 0; }
     s_rp.last_capped = 0;
+#ifndef TD5RE_RELEASE
+    {   /* [F3 DEV] a ground query (camera, shadow, vfx) slower than 20 ms is logged: an
+         * intermittent ~1 s stall inside the camera solve was seen in F3-A and not explained */
+        const uint64_t tq0 = td5_plat_time_us();
+        const int okq = rs ? rp_locate(rs, x, z, y, has_y, ROAM_PRIM_NONE, &h) : 0;
+        const uint64_t tq = td5_plat_time_us() - tq0;
+        if (tq > 20000)
+            TD5_LOG_W(LOG_TAG, "ROAM_SLOW_GROUND %.1f ms at world (%d,%d) y=%d has_y=%d ok=%d prim=%08x inside=%d push=%d tiles=%d",
+                      (double)tq / 1000.0, (int)FP_TRUNC(x), (int)FP_TRUNC(z), (int)FP_TRUNC(y), has_y, okq,
+                      (unsigned)h.prim, (int)h.inside, (int)h.push_dist, rs ? rs->ntile : -1);
+        if (!rs || !okq || h.prim == ROAM_PRIM_NONE) return 0;
+    }
+#else
     if (!rs || !rp_locate(rs, x, z, y, has_y, ROAM_PRIM_NONE, &h) || h.prim == ROAM_PRIM_NONE)
         return 0;
+#endif
     if (normal) rp_phys_normal(h.normal, normal);
     s_rp.last_capped = h.capped;
     return h.ground_y;

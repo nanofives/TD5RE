@@ -824,6 +824,8 @@ int td5_roam_stream_begin(const char *place, const RoamGrid *g, TD5_RoamResident
 
     td5_plat_fpenv_capture(&s->fpenv);
     if (s->worker_on && s->wake && s->done) s->thread = CreateThread(NULL, 0, rs_thread_proc, s, 0, NULL);
+    /* the worker never competes with the frame: a verify / build is a long CPU burst */
+    if (s->thread) SetThreadPriority(s->thread, td5_env_int("TD5RE_ROAM_STREAM_PRIORITY", THREAD_PRIORITY_BELOW_NORMAL, -2, 2));
     if (!s->thread) {
         s->hc_ok = td5_roam_render_open_height(s->hc);
         TD5_LOG_W(LOG_TAG, "ROAM_STREAM: no worker thread (%s): tiles load on the main thread",
