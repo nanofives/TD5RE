@@ -60,6 +60,7 @@ typedef struct {
     int      sign;         /* chevrons point along +axis (+1) or -axis (-1)                  */
     double   len;          /* units                                                          */
     int      refined;      /* turn board: y taken from the live ground once                  */
+    double   dirx, dirz;   /* mouth: the route exit direction the chevrons follow             */
     uint64_t arm_key;      /* mouth: the arm's edge key and end (debug / census)             */
     int      arm_end;
 } BarAux;
@@ -443,6 +444,13 @@ static int arm_rows(const Pool *p, uint64_t key, int end, double cx, double cz, 
         int i;
         if (sqrt(dx * dx + dz * dz) > BAR_ROW_FAR_M * BAR_UPM) return 0;
         for (i = 0; i < n; i++) if (!row_fill(&out[i], cx, cz)) { n = i; break; }
+        /* the outward side of a row is where the ribbon goes (row 0 -> row 1), not away from the centroid: the
+         * centroid of a multi-node cluster is not always behind an arm's cut row */
+        if (n >= 2) {
+            const double ex = out[1].mx - out[0].mx, ez = out[1].mz - out[0].mz;
+            for (i = 0; i < n; i++)
+                if (out[i].ox * ex + out[i].oz * ez < 0.0) { out[i].ox = -out[i].ox; out[i].oz = -out[i].oz; }
+        }
     }
     return n;
 }
@@ -543,7 +551,8 @@ typedef struct {
     ArmId     tk[BAR_MAX_TAKEN];
     int       ntk;
     double    dirx, dirz;          /* the route's exit direction (arrow) */
-    int       have_dir;
+    double    idirx, idirz;        /* the route's entry travel direction (0 when the route starts here)           */
+    int       have_dir, have_in, have_out;
     int       degree;              /* planner graph degree, -1 unknown */
     int       origin;              /* 1 + index of the route cluster this one was glued to, 0 = a route cluster */
 } Cl;
@@ -801,21 +810,25 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
             if (!added) break;
         }
     }
-    /* arrow direction per cluster: the route's exit direction (first pass that has one) */
+    /* arrow directions per cluster: the entry and exit travel direction of its first pass (a start pocket has only an
+     * exit, a finish pocket only an entry) */
     for (a = 0; a < npass; a++) {
         Cl *c = &cl[ps[a].cl];
         int k;
         if (!c->node || c->have_dir) continue;
         if (ps[a].has_out && (k = cl_arm_index(&pool, c, ps[a].out.key, ps[a].out.end)) >= 0 && c->row[k].ok) {
-            c->dirx = c->row[k].ox; c->dirz = c->row[k].oz; c->have_dir = 1;
-        } else if (ps[a].has_in && (k = cl_arm_index(&pool, c, ps[a].in.key, ps[a].in.end)) >= 0 && c->row[k].ok) {
-            c->dirx = -c->row[k].ox; c->dirz = -c->row[k].oz; c->have_dir = 1;
+            c->dirx = c->row[k].ox; c->dirz = c->row[k].oz; c->have_out = 1;
         }
+        if (ps[a].has_in && (k = cl_arm_index(&pool, c, ps[a].in.key, ps[a].in.end)) >= 0 && c->row[k].ok) {
+            c->idirx = -c->row[k].ox; c->idirz = -c->row[k].oz; c->have_in = 1;
+        }
+        c->have_dir = c->have_in || c->have_out;
     }
-
     for (i = 0; i < ncl; i++)
         if (cl[i].origin > 0 && !cl[i].have_dir && cl[cl[i].origin - 1].have_dir) {
-            cl[i].dirx = cl[cl[i].origin - 1].dirx; cl[i].dirz = cl[cl[i].origin - 1].dirz; cl[i].have_dir = 1;
+            const Cl *o = &cl[cl[i].origin - 1];
+            cl[i].dirx = o->dirx; cl[i].dirz = o->dirz; cl[i].idirx = o->idirx; cl[i].idirz = o->idirz;
+            cl[i].have_in = o->have_in; cl[i].have_out = o->have_out; cl[i].have_dir = 1;
         }
 
     /* ---- mouth barriers -------------------------------------------------------- */
@@ -871,9 +884,18 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
                 }
                 continue;
             }
-            dotv = c->have_dir ? c->dirx * ax + c->dirz * az : 1.0;
+            /* the chevrons point along the barrier the way the route runs there: its exit direction, or its entry
+             * direction when that one lies clearer along this barrier (a cross street of a turn: the barrier is
+             * parallel to the road the car arrives on) */
+            {
+                const double de = c->have_out ? c->dirx * ax + c->dirz * az : 0.0;
+                const double di = c->have_in ? c->idirx * ax + c->idirz * az : 0.0;
+                dotv = fabs(de) >= fabs(di) ? de : di;
+                if (!c->have_dir) dotv = 1.0;
+            }
             sign = dotv >= 0.0 ? 1 : -1;
             if (!bar_add(&pb, TD5_ROAM_BARRIER_MOUTH, (uint64_t)c->key, sign, ar->edge_key, ar->end)) goto oom;
+            B.aux[B.n - 1].dirx = c->dirx; B.aux[B.n - 1].dirz = c->dirz;
             c->blocked[k] = 1;
             B.st.arms_blocked++;
             B.st.barriers_mouth++;
@@ -1026,6 +1048,31 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
         }
     }
 
+    /* arrow census: the chevrons of a mouth barrier point along (sign * axis); compare with the route direction nearest to it */
+    for (i = 0; i < B.n; i++) {
+        double mx, mz, best = 1e300, rx = 0.0, rz = 0.0, cosv;
+        int j;
+        if (B.pub[i].kind != TD5_ROAM_BARRIER_MOUTH) continue;
+        mx = 0.5 * (B.pl[i].x0 + B.pl[i].x1); mz = 0.5 * (B.pl[i].z0 + B.pl[i].z1);
+        for (j = 0; j + 1 < route->npt; j++) {
+            const double d2 = pt_seg_d2(mx, mz, route->px[j], route->pz[j], route->px[j + 1], route->pz[j + 1]);
+            if (d2 < best) {
+                const double dx = route->px[j + 1] - route->px[j], dz = route->pz[j + 1] - route->pz[j], l = sqrt(dx * dx + dz * dz);
+                best = d2;
+                if (l > 1e-6) { rx = dx / l; rz = dz / l; }
+            }
+        }
+        cosv = (B.aux[i].ax * rx + B.aux[i].az * rz) * (double)B.aux[i].sign;
+        /* a proxy: the nearest polyline direction is only trustworthy on the straight, within 15 m of the barrier */
+        if (cosv > 0.3) B.st.arrows_with++;
+        else if (cosv > -0.6 || best > 15.0 * BAR_UPM * 15.0 * BAR_UPM) B.st.arrows_side++;
+        else {
+            B.st.arrows_against++;
+            if (B.st.arrows_against <= 6)
+                TD5_LOG_W(LOG_TAG, "BARRIERS: chevrons of barrier %d (cluster %lld, arm edge %llX end %d) point against the nearest route direction: cos %.2f, route dir (%.2f,%.2f), axis (%.2f,%.2f) sign %d, cluster exit dir (%.2f,%.2f), nearest route point %.1f m away",
+                          i, (long long)B.pub[i].cluster_key, (unsigned long long)B.aux[i].arm_key, B.aux[i].arm_end, cosv, rx, rz, B.aux[i].ax, B.aux[i].az, B.aux[i].sign, B.aux[i].dirx, B.aux[i].dirz, sqrt(best) / BAR_UPM);
+        }
+    }
     td5_roam_world_origin(&ox, &oz);
     bar_derive(ox, oz);
     B.have = 1;
@@ -1033,10 +1080,11 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
     B.st.build_ms = (double)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "BARRIERS: built %d (mouth %d, turn %d) for %d clusters / %d passes, tiles read %d, arms total %d route %d blocked %d linked %d open %d "
               "(no row %d, planner-degree open %d), across route %d, missing cluster %d, board hit %d fallback %d outer-kerb %d dropped %d dup %d, "
-              "slid %d slide-fail %d, %.0f ms",
+              "slid %d slide-fail %d, arrows with/side/against the route %d/%d/%d, %.0f ms",
               B.n, B.st.barriers_mouth, B.st.barriers_turn, ncl, npass, pool.ntl, B.st.arms_total, B.st.arms_route, B.st.arms_blocked,
               B.st.arms_linked, B.st.arms_open, B.st.arm_no_row, B.st.degree_open, B.st.across_route, B.st.missing_cluster, pst.boards_hit,
-              pst.boards_fallback, pst.boards_alt, pst.boards_dropped, nboard_dup, B.st.slid, B.st.slide_fail, B.st.build_ms);
+              pst.boards_fallback, pst.boards_alt, pst.boards_dropped, nboard_dup, B.st.slid, B.st.slide_fail,
+              B.st.arrows_with, B.st.arrows_side, B.st.arrows_against, B.st.build_ms);
     B.st.boards_alt = pst.boards_alt; B.st.boards_dropped = pst.boards_dropped;
     for (i = 0; i < ncl; i++) { cl_free(&cl[i]); }
     free(cl); free(ps); free(re);
@@ -1299,6 +1347,7 @@ void td5_roam_barriers_draw(int view)
     const float ex = g_cameraPos[0], ez = g_cameraPos[2];
     const float lim2 = (float)(BAR_DRAW_M * BAR_UPM) * (float)(BAR_DRAW_M * BAR_UPM);
     uint32_t now;
+    uint64_t t_us0 = 0;
     float pulse;
     if (view != 0 || !td5_roam_active()) return;
     dev_frame();
@@ -1328,6 +1377,7 @@ void td5_roam_barriers_draw(int view)
         items[nitems].idx = i; items[nitems].d2 = d2; nitems++;
     }
     if (nitems == 0) return;
+    t_us0 = td5_plat_time_us();
     qsort(items, (size_t)nitems, sizeof items[0], cmp_far_first);
     now = td5_plat_time_ms();
     pulse = 0.86f + 0.14f * sinf((float)(now % 2400u) * (6.2831853f / 2400.0f));
@@ -1336,6 +1386,21 @@ void td5_roam_barriers_draw(int view)
     for (m = 0; m < nitems; m++) draw_glow(items[m].idx, pulse, now);
     q_flush(TD5_PRESET_ADDITIVE_WORLD);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+#ifndef TD5RE_RELEASE
+    {   /* DEV: CPU cost of this pass, logged every 600 drawn frames */
+        static double s_sum_ms, s_max_ms;
+        static uint32_t s_frames;
+        static int s_items_max;
+        const double ms = (double)(td5_plat_time_us() - t_us0) / 1000.0;
+        s_sum_ms += ms; if (ms > s_max_ms) s_max_ms = ms;
+        if (nitems > s_items_max) s_items_max = nitems;
+        if (++s_frames % 600u == 0u) {
+            TD5_LOG_I(LOG_TAG, "BARRIER_DRAW %u frames: %d barriers set, up to %d drawn at once, CPU avg %.3f ms max %.3f ms",
+                      (unsigned)s_frames, B.n, s_items_max, s_sum_ms / 600.0, s_max_ms);
+            s_sum_ms = 0.0; s_max_ms = 0.0; s_items_max = 0;
+        }
+    }
+#endif
 }
 
 /* ============================================================ census + dev test = */
@@ -1432,11 +1497,12 @@ int td5_roam_barriers_dev_test(void)
                         "  clusters passed %d, passes %d, ring edges on the route %d, one-way edges on the route %d\n"
                         "  arms: total %d, taken by the route %d, barriered %d, left linked %d, OPEN %d (planner-degree check: %d), no ribbon row %d\n"
                         "  mouth barriers slid outward along their arm: %d, none fit: %d; turn boards on the outer kerb %d, left out %d\n"
+                        "  chevrons on mouth barriers vs the nearest route direction: with %d, sideways %d, against %d\n"
                         "  barriers across the route polyline: %d   pass gaps: %d   cluster records missing: %d\n"
                         "  tiles read %d, build %.0f ms\n",
                     tr->name, res->length_m, res->nedge, (unsigned)res->hash, n, st.barriers_mouth, st.barriers_turn,
                     st.clusters_passed, st.passes, st.ring_edges, st.oneway_edges, st.arms_total, st.arms_route, st.arms_blocked,
-                    st.arms_linked, st.arms_open, st.degree_open, st.arm_no_row, st.slid, st.slide_fail, st.boards_alt, st.boards_dropped, st.across_route, st.pass_gaps, st.missing_cluster, st.tiles_read, st.build_ms);
+                    st.arms_linked, st.arms_open, st.degree_open, st.arm_no_row, st.slid, st.slide_fail, st.boards_alt, st.boards_dropped, st.arrows_with, st.arrows_side, st.arrows_against, st.across_route, st.pass_gaps, st.missing_cluster, st.tiles_read, st.build_ms);
         {
             FILE *jf;
             snprintf(path, sizeof path, "%sroam_barrier_%s.json", dir ? dir : "", tr->name);

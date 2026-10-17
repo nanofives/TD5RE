@@ -46,6 +46,7 @@
 #define LOG_TAG "ai"
 
 #include "td5_ai_internal.h"
+#include "td5_roam_mode.h"   /* [GEO FREE ROAM F3-B] td5_roam_active: one-actor roam layout */
 
 int32_t *g_route_state_base;     /* 0x4AFB60 */
 char    *g_actor_base;           /* 0x4AB108 */
@@ -2497,6 +2498,11 @@ void td5_ai_init_race_actor_runtime(void) {
     /* --- Active actor count --- */
     if (is_time_trial) {
         g_active_actor_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
+    } else if (td5_roam_active()) {
+        /* [GEO FREE ROAM F3-B] roam spawns one actor (td5_game.c, set just before this
+         * call): keep its count, or the 6-slot default below brings back the five
+         * zeroed decoration slots with no car definition behind them */
+        g_active_actor_count = g_td5.total_actor_count > 0 ? g_td5.total_actor_count : 1;
     } else if (g_traffic_slot_base > TD5_LEGACY_RACE_SLOTS) {
         /* [PORT ENHANCEMENT] big split-screen field. Traffic (if enabled) spawns
          * at g_traffic_slot_base..+TD5_MAX_TRAFFIC_SLOTS, so the active-actor

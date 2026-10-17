@@ -590,7 +590,12 @@ static void rp_write_summary(const char *why)
     const TD5_RoamPhysStats *s = &s_rp.st;
     const char *dir = td5_plat_log_dir();
     char path[512];
-    FILE *f;
+    char txt[4096];   /* [F3-B] formatted here, written by the log writer thread (no disk I/O on main) */
+    int n = 0;
+#define RP_AP(...) do { if (n < (int)sizeof txt) {                                   \
+        const int k_ = snprintf(txt + n, sizeof txt - (size_t)n, __VA_ARGS__);       \
+        if (k_ > 0) n += k_;                                                         \
+        if (n > (int)sizeof txt - 1) n = (int)sizeof txt - 1; } } while (0)
     TD5_LOG_I(LOG_TAG, "roam physics summary (%s): ticks=%ld wall_hits=%ld pinches=%ld rescues=%ld rescues_y=%ld "
               "teleports=%ld nohit_wheels=%ld outside_wheels=%ld | mirror cmp=%ld dh=%ld dn=%ld dcap=%ld "
               "dsurf=%ld/%ld fallback=%ld corner %ld/%ld (fb %ld) head %ld/%ld (fb %ld) max|dh|=%ld",
@@ -600,16 +605,14 @@ static void rp_write_summary(const char *why)
               s->mirror_corner_diff, s->mirror_corner_cmp, s->mirror_corner_fallback,
               s->mirror_head_diff, s->mirror_head_cmp, s->mirror_head_fallback, s->mirror_dh_max);
     snprintf(path, sizeof path, "%sroam_phys.txt", dir ? dir : "");
-    f = fopen(path, "w");
-    if (!f) return;
-    fprintf(f, "roam physics summary (%s)\nmode=%s\n", why, td5_roam_active() ? "roam" : "mirror");
-    fprintf(f, "ticks=%ld\nwall_hits=%ld\npinches=%ld\nrescues=%ld\nrescues_y=%ld\nteleports=%ld\n"
+    RP_AP("roam physics summary (%s)\nmode=%s\n", why, td5_roam_active() ? "roam" : "mirror");
+    RP_AP("ticks=%ld\nwall_hits=%ld\npinches=%ld\nrescues=%ld\nrescues_y=%ld\nteleports=%ld\n"
                "nohit_wheels=%ld\noutside_wheels=%ld\nwall_corner_pen_max=%ld\n",
             s->ticks, s->wall_hits, s->pinches, s->rescues, s->rescues_y, s->teleports,
             s->nohit_wheels, s->outside_wheels, s->wall_corner_pen_max);
-    fprintf(f, "wall_side_flips=%ld\npinch_rescues=%ld\npinch_tips=%ld\n", s->wall_side_flips, s->pinch_rescues,
+    RP_AP("wall_side_flips=%ld\npinch_rescues=%ld\npinch_tips=%ld\n", s->wall_side_flips, s->pinch_rescues,
             s->pinch_tips);
-    fprintf(f, "mirror_wheel_cmp=%ld\nmirror_wheel_diff_h=%ld\nmirror_wheel_diff_n=%ld\nmirror_wheel_diff_cap=%ld\n"
+    RP_AP("mirror_wheel_cmp=%ld\nmirror_wheel_diff_h=%ld\nmirror_wheel_diff_n=%ld\nmirror_wheel_diff_cap=%ld\n"
                "mirror_wheel_surf_cmp=%ld\nmirror_wheel_diff_surf=%ld\nmirror_wheel_fallback=%ld\nmirror_dh_max=%ld\n"
                "mirror_corner_cmp=%ld\nmirror_corner_diff=%ld\nmirror_corner_fallback=%ld\n"
                "mirror_head_cmp=%ld\nmirror_head_diff=%ld\nmirror_head_fallback=%ld\n",
@@ -617,15 +620,24 @@ static void rp_write_summary(const char *why)
             s->mirror_diff_surf, s->mirror_fallback, s->mirror_dh_max, s->mirror_corner_cmp,
             s->mirror_corner_diff, s->mirror_corner_fallback, s->mirror_head_cmp, s->mirror_head_diff,
             s->mirror_head_fallback);
-    fprintf(f, "mirror_wheel_diff_walker_lag=%ld\nmirror_wheel_diff_same_span=%ld\n"
+    RP_AP("mirror_wheel_diff_walker_lag=%ld\nmirror_wheel_diff_same_span=%ld\n"
                "mirror_corner_diff_walker_lag=%ld\nmirror_corner_diff_same_span=%ld\n",
             s->mirror_diff_walker, s->mirror_diff_same, s->mirror_corner_walker, s->mirror_corner_same);
-    fprintf(f, "wheel_gap_samples=%ld\nwheel_gap_min_cm=%.2f\nrest_samples=%ld\nrest_gap_min_cm=%.2f\n"
+    RP_AP("wheel_gap_samples=%ld\nwheel_gap_min_cm=%.2f\nrest_samples=%ld\nrest_gap_min_cm=%.2f\n"
                "rest_gap_max_cm=%.2f\nrest_gap_mean_cm=%.2f\nchassis_min_above_ground_cm=%.2f\n",
             s->gap_n, s->gap_min / 256.0 / 4.30, s->rest_n, s->rest_min / 256.0 / 4.30,
             s->rest_max / 256.0 / 4.30, s->rest_n ? (double)s->rest_sum / s->rest_n / 256.0 / 4.30 : 0.0,
             s->chassis_min_above / 256.0 / 4.30);
-    fclose(f);
+    {   /* CRLF, as the text-mode fopen("w") this replaced wrote it */
+        char out[2 * sizeof txt];
+        int i, m = 0;
+        for (i = 0; i < n; i++) {
+            if (txt[i] == '\n') out[m++] = '\r';
+            out[m++] = txt[i];
+        }
+        td5_plat_file_write_async(path, out, (size_t)m);
+    }
+#undef RP_AP
 }
 
 void td5_roam_physics_stats(TD5_RoamPhysStats *out)

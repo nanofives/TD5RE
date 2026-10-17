@@ -84,6 +84,7 @@ typedef struct {
     int ring_edges, oneway_edges;   /* route edges that are roundabout / one-way ribbons (plaza ring, divided avenue) */
     int slid, slide_fail;     /* mouth barriers moved outward along their arm (the cut row lay across the route) / none fit */
     int boards_alt, boards_dropped;   /* turn boards put on the outer kerb of the exit arm / left out (ahead and kerb both on the route) */
+    int arrows_with, arrows_side, arrows_against;   /* mouth-barrier chevrons vs the nearest route direction (against must be 0) */
     int arm_no_row;           /* arms with no ribbon row (edge without quads): nothing to close  */
     int tiles_read;
     double build_ms;

@@ -33,6 +33,7 @@ td5_roam_mode.c
 td5_roam_physics.c
 td5_roam_drive.c
 td5_roam_render.c
+td5_roam_scenery.c
 td5_roam_stream.c
 td5_roam_route.c
 td5_roam_route_ui.c
@@ -119,6 +120,7 @@ td5_selftest.c
 td5_control.c
 td5_trig_lut_data.c
 td5_profile.c
+td5_hitchwatch.c
 td5_jobs.c
 td5_rcmd.c
 td5_platform_win32.c

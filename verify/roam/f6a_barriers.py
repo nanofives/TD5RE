@@ -101,11 +101,17 @@ def cmd_poses(a):
         dx, dz, bi = route_dir_near(d['route'], cx, cz)
         items.append((bi, ck, cx, cz, dx, dz, len(bs), sum(1 for b in bs if b['kind'] == 1)))
     items.sort()
-    if '--ring' in a:
+    if '--near' in a:
+        lat, lon = [float(v) for v in a[a.index('--near') + 1].split(',')]
+        lat0, lon0, mlat, mlon = projection()
+        nx, nz = (lon - lon0) * mlon * UPM, (lat - lat0) * mlat * UPM
+        items = [t for t in items if t[6] >= 2]
+        items.sort(key=lambda t: (t[2] - nx) ** 2 + (t[3] - nz) ** 2)
+    elif '--ring' in a:
         items.sort(key=lambda t: (-t[6], t[0]))
     # spread the picks along the route
     pick = []
-    if '--ring' in a:
+    if '--ring' in a or '--near' in a:
         pick = items[:n]
     else:
         step = max(1, len(items) // n)
