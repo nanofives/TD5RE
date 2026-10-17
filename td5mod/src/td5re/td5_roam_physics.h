@@ -93,6 +93,8 @@ int32_t td5_roam_ground(int32_t x, int32_t z, int32_t y, int has_y, int16_t *nor
 /* Counters (harnesses, the roam_phys.txt summary). */
 typedef struct {
     long ticks, wall_hits, pinches, rescues, rescues_y, teleports, nohit_wheels, outside_wheels;
+    long wall_side_flips, pinch_rescues;   /* [F2-E] thin-wall pushes flipped back, pinch rescues */
+    long pinch_tips;                       /* [F2-E] wall-tip pinches resolved by one translation */
     long wall_corner_pen_max;
     long mirror_cmp, mirror_diff_h, mirror_diff_n, mirror_diff_cap, mirror_diff_surf, mirror_scmp;
     long mirror_fallback, mirror_corner_cmp, mirror_corner_diff, mirror_corner_fallback;
@@ -112,6 +114,13 @@ void td5_roam_physics_stats(TD5_RoamPhysStats *out);
  * TD5RE_ROAM_DRIVE_SECS) | corners (the 90-degree corner matrix, design 2.5).
  * 0 when off or not in roam. */
 uint32_t td5_roam_dev_drive_bits(struct TD5_Actor *a);
+/* [F2-E] Dev harness helper (the corner selftest). (px, pz)[*np] is a corner path in world units:
+ * [0] the start, [*np - 2] the exit end row, [*np - 1] `lout` further out along (outx, outz). When it
+ * runs off the drivable surface it is replaced by an A* route on the paved mask (the F2-E corner
+ * harness's rd_route) of at most `cap` points. Returns the metres of the INPUT path off the road;
+ * *routed = 0 on the road, 1 routed, 2 off the road but no route (path kept). */
+double   td5_roam_dev_route_path(double *px, double *pz, int *np, int cap, double cx, double cz,
+                                 double outx, double outz, double lout, int *routed);
 #endif
 
 #endif /* TD5_ROAM_PHYSICS_H */

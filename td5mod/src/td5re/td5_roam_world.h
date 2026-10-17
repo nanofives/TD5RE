@@ -229,6 +229,13 @@ typedef struct {
     int    corner_pts_out_of_sector; /* dropped: outside the arms' sector     */
     int    corners_parallel, corners_far, fillets, corners_reflex, bevels;
     int    fillet_shrunk;        /* fillet radius cut to fit the arm cut limit */
+    int    fillet_runs_merged;   /* [F2-E] union block corners drawn as a run of short reflex
+                                    vertices, merged into one corner before filleting */
+    int    hole_fillet_loops;    /* [F2-E] union hole loops (islands) whose corners got fillets */
+    int    earclip_u_rescued;    /* [F2-E] NORMAL outlines the first-ear clipper left, cut by ear_clip_u */
+    int    union_sliver_tips;    /* [F2-E] union sliver tips drawn as 2-3 vertices, dropped */
+    int    seam_corner_dropped;  /* [F2-E] near-straight seam vertices dropped beside a block corner */
+    int    fillet_tiny;          /* [F2-E] union block corners (>= 30 deg) left with a fillet under 1 m */
     int    tri_splits, patch_tris, patch_verts, recipe_overflow;
     int    sliver_flips, sliver_kept;  /* [T10] patch slivers flipped away / left */
     int    ribbon_sharp_vertices;/* interior polyline turns > 45 deg          */

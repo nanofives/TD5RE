@@ -160,6 +160,8 @@ int  td5_roam_junction_find(const TD5_RoamGraph *g, int64_t key);
  * writes <log dir>/roam_junc_census.txt and <log dir>/roam_clusters.json (every
  * casco cluster polygon), then returns 1 (the caller exits). 0 when not asked. */
 int  td5_roam_junction_dev_census(void);
+/* DEV ONLY. 1 when the PLACE-frame point lies inside F0a's casco polygon. */
+int  td5_roam_junction_in_casco(double x, double z);
 #endif
 
 #endif /* TD5_ROAM_JUNCTION_H */

@@ -203,8 +203,9 @@ typedef struct {
      * on the road), slot 0 HUMAN with auto_throttle OFF, driven by td5_roam_drive_bits:
      *   1 = junction tour: >= 20 distinct junctions, brake to rest, then judge never-below-surface,
      *       rest height <= 5 cm, never stuck, never off-surface, rescues/pinches/teleports 0
-     *   2 = corner matrix: 90 degree turns at up to 20 junctions per kind at 40 and 80 km/h, 0 pinches
-     *       (the sibling-owned 134 degree cluster at 80 km/h is KNOWN, reported, not failed) */
+     *   2 = corner matrix: 90 degree turns at up to 20 junctions per kind, held 40, held 80 and a
+     *       braking driver from 80 km/h: 0 pinches / rescues on every pass, exit + not stuck on the
+     *       braking pass (F2-E; nothing excused, 00064c21000864e3 was KNOWN until F2-E) */
     int roam;
 } RaceScenario;
 
@@ -772,7 +773,6 @@ static struct {
 static int  s_roam_row;           /* RaceScenario.roam of the running row, 0 = none */
 static int  s_roam_captured;
 static int  s_roam_status;
-static int  s_roam_known;
 static char s_roam_note[120];
 
 static void st_roam_arm(const RaceScenario *sc)
@@ -782,7 +782,6 @@ static void st_roam_arm(const RaceScenario *sc)
     s_roam_row = sc->roam;
     s_roam_captured = 0;
     s_roam_status = ST_PASS;
-    s_roam_known = 0;
     s_roam_note[0] = 0;
     td5_roam_drive_arm(sc->roam == 2 ? TD5_RDRV_CORNERS : TD5_RDRV_ROUTE);
     if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
@@ -803,7 +802,7 @@ static void st_roam_capture(void)
 {
     if (s_roam_captured) return;
     s_roam_captured = 1;
-    s_roam_status = td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note, &s_roam_known);
+    s_roam_status = td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
 }
 /* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);
  * s_inv_max_jump = the real teleport detector (per-sample position delta cap —
