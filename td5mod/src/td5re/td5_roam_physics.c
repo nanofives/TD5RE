@@ -27,6 +27,7 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
+#include "td5_roam_race.h"       /* [F6-B] racer-only race barriers join the wall push */
 #include "td5_roam_stream.h"     /* [F3] the streamed resident set */
 #include "td5_roam_junction.h"   /* dev casco test (corner harness) */
 #include "td5_damage.h"          /* dev corner harness: repair between runs */
@@ -1129,6 +1130,36 @@ void td5_roam_resolve_walls(TD5_Actor *a)
         }
         out[k] = 1;
         if (deep < 0 || hk[k].push_dist > hk[deep].push_dist) deep = k;
+    }
+    /* [F6-B] RACE BARRIERS (racers only, live during a roam sprint): a probe in or behind a closed
+     * mouth's panel is pushed back to the open side. Per probe the deeper of the road push and the
+     * barrier push wins, so the car still gets ONE combined push and the pinch / tip rules below see
+     * barrier and kerb alike. The panel has no kerb overhang: the push distance is stored as
+     * overhang + depth, so pen (= push_dist - overhang) is the barrier depth itself. */
+    if (td5_roam_race_barriers_live()) {
+        int bar_any = 0;
+        for (k = 0; k < np; k++) {
+            int32_t bx, bz, bd;
+            double m;
+            if (!td5_roam_race_wall_probe(a->slot_index, k, corner[k].x, corner[k].z, corner[k].y, &bx, &bz, &bd))
+                continue;
+            bd += ROAM_KERB_OVERHANG;
+            if (out[k] && hk[k].push_dist >= bd) continue;      /* the road push is deeper */
+            m = sqrt((double)bx * bx + (double)bz * bz);
+            if (m < 0.5) continue;
+            if (!out[k]) memset(&hk[k], 0, sizeof hk[k]);
+            nx[k] = bx / m; nz[k] = bz / m;
+            hk[k].push_x = bx; hk[k].push_z = bz; hk[k].push_dist = bd;
+            hk[k].edge_key = 0;                                  /* 0 = a race barrier (logs) */
+            out[k] = 1;
+            bar_any = 1;
+        }
+        if (bar_any) {
+            deep = -1;
+            for (k = 0; k < np; k++)
+                if (out[k] && (deep < 0 || hk[k].push_dist > hk[deep].push_dist)) deep = k;
+            td5_roam_race_wall_note_hit(a->slot_index);
+        }
     }
     for (k = 0; k < np && !pinch; k++) {
         int j;

@@ -43,6 +43,7 @@
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
 #include "td5_roam_route_ui.h" /* GEO FREE ROAM route planner (F5-A): keys, map overlay, guidance */
 #include "td5_roam_barrier.h"  /* GEO FREE ROAM route barriers (F6-A): panels + chevrons */
+#include "td5_roam_race.h"     /* GEO FREE ROAM sprint race (F6-B): flow, progress, results, barrier layer */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -693,6 +694,10 @@ static int      s_race_countdown_state;
  * frozen while tick_resume_countdown() drives the per-pane HUD digit. */
 static int      s_resume_countdown_ticks;
 static int      s_resume_countdown_state;   /* last digit pushed to the HUD */
+/* [GEO FREE ROAM F6-B] the same 3-2-1 freeze starts a roam sprint: its own digit length, and no
+ * audio hold / music restart at GO (the field is already live and audible). */
+static int      s_resume_countdown_per_digit = TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT;
+static int      s_resume_countdown_roam;
 /* [PAUSED-BY INDICATOR 2026-08-05] 0-based player slot that opened the
  * currently-active local pause menu, for the "PLAYER N PAUSED" label above the
  * shared split-screen pause panel. -1 = unknown. Only surfaced when >1 human. */
@@ -5694,6 +5699,8 @@ int td5_game_init_race_session(void) {
      * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
     s_resume_countdown_ticks = 0;  /* [RESUME COUNTDOWN 2026-08-05] no stale 3-2-1 */
+    s_resume_countdown_roam = 0;   /* [GEO FREE ROAM F6-B] */
+    s_resume_countdown_per_digit = TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT;
     s_resume_countdown_state = 0;
     s_pause_local_slot = -1;       /* [PAUSED-BY 2026-08-05] no stale opener */
     /* [S27] Clear controller-disconnect state for the new race. */
@@ -6805,6 +6812,17 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
     int ticks_this_frame = 0;
     s_pause_input_done = 0;  /* allow pause input once this frame */
     td5_roam_route_ui_frame();   /* [GEO FREE ROAM F5-A] route keys / map input; self-gated (no-op outside roam) */
+    td5_roam_race_frame();       /* [GEO FREE ROAM F6-B] sprint setup / results keys; self-gated */
+    {
+        /* [GEO FREE ROAM F6-B] a sprint grid asks for the 3-2-1: the resume-countdown freeze, roam flavour */
+        const int cd_digit = td5_roam_race_take_countdown();
+        if (cd_digit > 0) {
+            s_resume_countdown_per_digit = cd_digit;
+            s_resume_countdown_ticks = cd_digit * 3;
+            s_resume_countdown_state = 0;
+            s_resume_countdown_roam = 1;
+        }
+    }
 
     /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
      * Detected here, OUTSIDE the fixed-step loop, so a brief ESC tap exits a
@@ -7027,6 +7045,8 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             if (s_resume_countdown_ticks > 0) {
                 s_resume_countdown_ticks = 0;
                 s_resume_countdown_state = 0;
+                s_resume_countdown_roam = 0;   /* [GEO FREE ROAM F6-B] the sprint re-arms it on resume */
+                s_resume_countdown_per_digit = TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT;
                 set_countdown_indicator_state(0);
             }
             s_pause_menu_cursor = 3;  /* default to CONTINUE. [RADIO + END RACE
@@ -7075,6 +7095,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
              * multiple edge triggers from the sim tick loop. */
+            if (td5_roam_race_take_pause_close()) {   /* [GEO FREE ROAM F6-B] START RACE closes the menu (no menu input this frame) */
+                s_pause_menu_active = 0;
+                s_pause_input_done = 1;
+            }
             if (!s_pause_input_done && !td5_roam_route_ui_map_open()) {   /* [F5-A] the route map owns the keys while up */
                 s_pause_input_done = 1;
 
@@ -7392,6 +7416,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                      * the in-race music (same calls the immediate-resume path below
                      * makes now). */
                     s_resume_countdown_ticks = TD5_RESUME_COUNTDOWN_TICKS;
+                    s_resume_countdown_per_digit = TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT;
                     s_resume_countdown_state = 0;
                     td5_sound_set_sfx_muted(1);
                     td5_sound_set_paused(1);
@@ -7481,6 +7506,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * countdown; g_td5.paused stays 0 so this never enters the start-
          * countdown sub-tick below. */
         if (s_resume_countdown_ticks > 0) {
+            /* [GEO FREE ROAM F6-B] a roam sprint's 3-2-1 follows a teleport to the grid: keep the
+             * chase camera solving (the car is held) so it settles behind the car instead of
+             * showing the pre-teleport view until GO. Roam flavour only. */
+            if (s_resume_countdown_roam) td5_camera_solve_tick_all();
             tick_resume_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -7944,6 +7973,8 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         /* --- Update race order (bubble sort by span position) --- */
         if (!td5_roam_active())    /* roam: one racer, nothing to order (all spans -1 tie) */
             update_race_order();
+        else
+            td5_roam_race_tick();  /* [GEO FREE ROAM F6-B] sprint progress on the route polyline */
 
         /* --- Per-viewport camera update (post-physics) ---
          * Must run AFTER physics + AI + track + update_race_order,
@@ -8692,6 +8723,7 @@ static void frame_render(void)
      * Self-gated (no-op on every track that is not a real place). */
     td5_hud_draw_street_lines();
     td5_roam_route_ui_draw_hud();   /* [GEO FREE ROAM F5-A] route key hints + status; self-gated */
+    td5_roam_race_draw_hud();       /* [GEO FREE ROAM F6-B] sprint timer / checkpoints / results; self-gated */
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op
@@ -8987,8 +9019,8 @@ static void tick_resume_countdown(void)
 {
     int t = s_resume_countdown_ticks;   /* > 0 guaranteed by the caller's guard */
     /* PER_DIGIT ticks each for 3, 2, 1 (e.g. 45..31->3, 30..16->2, 15..1->1). */
-    int digit = (t > 2 * TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT) ? 3
-              : (t >     TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT) ? 2
+    int digit = (t > 2 * s_resume_countdown_per_digit) ? 3
+              : (t >     s_resume_countdown_per_digit) ? 2
               : 1;
     if (digit != s_resume_countdown_state) {
         s_resume_countdown_state = digit;
@@ -8999,6 +9031,13 @@ static void tick_resume_countdown(void)
     if (s_resume_countdown_ticks == 0) {
         set_countdown_indicator_state(0);
         s_resume_countdown_state = 0;
+        if (s_resume_countdown_roam) {
+            /* [GEO FREE ROAM F6-B] a roam sprint's start: audio was never held */
+            s_resume_countdown_roam = 0;
+            s_resume_countdown_per_digit = TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT;
+            TD5_LOG_I(LOG_TAG, "Resume countdown: GO (roam sprint)");
+            return;
+        }
         /* GO: bring audio + music back exactly like the immediate-resume path
          * (the arm site deferred these so the 3-2-1 plays over a silent field). */
         td5_sound_set_sfx_muted(0);
@@ -12696,6 +12735,8 @@ int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
  * cop-chase horn-siren refresh can be suspended while paused, letting it re-arm
  * cleanly on resume (see td5_sound_update_vehicle_looping_state). */
 int td5_game_is_pause_menu_active(void) { return s_pause_menu_active; }
+/* [GEO FREE ROAM F6-B] sim ticks left in the resume / roam-sprint 3-2-1 freeze (0 = none) */
+int td5_game_resume_countdown_ticks(void) { return s_resume_countdown_ticks; }
 /* [COP-CHASE 2026-06-21] 1 during the pre-race countdown (camera-transition timer
  * still running, cars held); 0 once the race is running. Lets the wanted-objective
  * banner hold solid through the countdown instead of burning its display timer. */

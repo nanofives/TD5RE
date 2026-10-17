@@ -35,6 +35,7 @@
 #include "td5_roam_stream.h"
 #include "td5_roam_route.h"
 #include "td5_roam_route_ui.h"
+#include "td5_roam_race.h"      /* [F6-B] RACE THIS ROUTE, the sprint locks route edits */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -66,6 +67,8 @@
 #define K_F 0x21
 #define K_S 0x1F
 #define K_L 0x26
+#define K_R 0x13
+#define K_A 0x1E
 
 #define PI_D 3.14159265358979323846
 
@@ -424,6 +427,15 @@ static void map_close(void)
 
 int td5_roam_route_ui_map_open(void) { return u.map_open; }
 
+void td5_roam_route_ui_open_map(void)
+{
+    if (!td5_roam_active() || u.map_open) return;
+    if (!td5_game_is_pause_menu_active()) u.want_pause = 1;
+    map_open_now();
+}
+
+void td5_roam_route_ui_close_map(void) { map_close(); }
+
 int td5_roam_route_ui_want_pause(void)
 {
     const int w = u.want_pause;
@@ -510,6 +522,16 @@ static void list_input(void)
     if (u.nlist == 0) return;
     if (ke(K_UP))   u.sel = (u.sel + u.nlist - 1) % u.nlist;
     if (ke(K_DOWN)) u.sel = (u.sel + 1) % u.nlist;
+    if (ke(K_R) && td5_roam_race_state() == TD5_RRACE_OFF) {     /* [F6-B] race a saved route */
+        if (td5_roam_route_load(u.list[u.sel])) {
+            u.mode = 0;
+            fit_route();
+            if (!td5_roam_race_open_setup()) ui_toast("%s IS NOT A PLANNED SPRINT", u.list[u.sel]);
+        } else {
+            ui_toast("COULD NOT LOAD %s", u.list[u.sel]);
+        }
+        return;
+    }
     if (ke(K_ENTER)) {
         if (td5_roam_route_load(u.list[u.sel])) {
             const TD5_RouteResult *r = td5_roam_route_result();
@@ -583,6 +605,7 @@ static void map_input(double dt)
     int mx = 0, my = 0, cw = 0, ch = 0;
     const int shift = kd(K_LSHIFT) || kd(K_RSHIFT);
 
+    if (td5_roam_race_setup_open()) return;          /* [F6-B] the sprint setup panel owns the keys */
     if (u.mode == 1) { name_input(); return; }
     if (u.mode == 2) { list_input(); return; }
 
@@ -607,6 +630,14 @@ static void map_input(double dt)
         const int to_drive = ke(K_ESC);
         map_close();
         (void)to_drive;
+        return;
+    }
+    if (td5_roam_race_state() != TD5_RRACE_OFF) {    /* [F6-B] a sprint runs: view only, A abandons it */
+        if (ke(K_A)) { td5_roam_race_abandon(); ui_toast("SPRINT ABANDONED"); }
+        return;
+    }
+    if (ke(K_R)) {                                   /* [F6-B] RACE THIS ROUTE */
+        if (!td5_roam_race_open_setup()) ui_toast("NEED A START, A FINISH AND A ROUTE BETWEEN THEM");
         return;
     }
     if (ke(K_ENTER) || ke(K_SPACE)) place_at(u.cx, u.cz, 0);
@@ -794,7 +825,8 @@ void td5_roam_route_ui_draw_overlay(void)
             "ARROWS PAN   + / - OR WHEEL ZOOM   ENTER OR CLICK PLACE   1 START   2 WAYPOINT   3 FINISH   X REMOVE   DRAG A PIN TO MOVE",
             0xFFC8D0DA, 14.0f * S);
     ui_text(14.0f * S, H - bot + 29.0f * S,
-            "BKSP UNDO   DEL CLEAR   C CAR   F FIT   S SAVE   L LOAD   M PAUSE MENU   ESC DRIVE",
+            td5_roam_race_state() >= TD5_RRACE_COUNTDOWN ? "SPRINT IN PROGRESS   A ABANDON THE SPRINT   M PAUSE MENU   ESC DRIVE"
+                                                   : "BKSP UNDO   DEL CLEAR   C CAR   F FIT   S SAVE   L LOAD   R RACE THIS ROUTE   M PAUSE MENU   ESC DRIVE",
             0xFFC8D0DA, 14.0f * S);
     /* pin labels */
     for (i = 0; u.mode == 0 && i < td5_roam_route_wp_count(); i++) {
@@ -833,10 +865,11 @@ void td5_roam_route_ui_draw_overlay(void)
             for (i = 0; i < 8 && first + i < u.nlist; i++)
                 ui_text(bx + 20.0f * S, by + 49.0f * S + 26.0f * S * (float)i, u.list[first + i], 0xFFFFFFFF, 17.0f * S);
         }
-        ui_text(bx + 16.0f * S, by + bh - 24.0f * S, "UP / DOWN   ENTER LOAD   ESC CANCEL", 0xFFB8C2CF, 13.0f * S);
+        ui_text(bx + 16.0f * S, by + bh - 24.0f * S, "UP / DOWN   ENTER LOAD   R RACE IT   ESC CANCEL", 0xFFB8C2CF, 13.0f * S);
     }
     rb_flush();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    td5_roam_race_draw_setup();     /* [F6-B] the sprint setup panel over the map (self-gated) */
 }
 
 /* ============================================================ the HUD line ===== */
@@ -847,6 +880,7 @@ void td5_roam_route_ui_draw_hud(void)
     char sum[96];
     const int paused = td5_game_is_pause_menu_active();
     if (!td5_roam_active() || u.map_open || W < 2.0f) return;
+    if (!paused && td5_roam_race_hide_route_hint()) return;   /* [F6-B] the sprint HUD owns the top line */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
     if (paused) {
         const float H = g_render_height_f;
@@ -1096,6 +1130,7 @@ static void drop_keys(void)
 {
     double px, pz;
     if (!car_place(&px, &pz, NULL)) return;
+    if (td5_roam_race_state() != TD5_RRACE_OFF) return;   /* [F6-B] no route edits during a sprint */
     if (ke(K_F6)) place_at(px, pz, 1);
     if (ke(K_F7)) place_at(px, pz, 2);
     if (ke(K_F8)) place_at(px, pz, 3);
