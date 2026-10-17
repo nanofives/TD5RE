@@ -1511,12 +1511,15 @@ static int work_build_rec(Work *w, int ei, int depth)
 /* Build the working set over `tile_box` (place frame): graph window grown until
  * every edge the tile touches is inside it, ribbons, crossings. `all` = global mode
  * (select every edge of `tile_box`, one pass). */
-static int work_build(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int all)
+/* The graph window of one build: the tile box grown until it holds every edge the
+ * tile selects (the passes loop of work_build). Leaves the graph built over the final
+ * window in w (w->win, w->passes). Split out of work_build unchanged so the [F3]
+ * stale test (td5_roam_tile_input_hash) runs exactly the same window rule. */
+static int work_window(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int all)
 {
     TD5_RoamCacheCensus cc;
-    double rect[4], win[4], hwin[4];
-    int pass, i, j;
-    const uint32_t t0 = td5_plat_time_ms();
+    double rect[4], win[4];
+    int pass, i;
 
     memcpy(win, tile_box, sizeof win);
     rect[0] = tile_box[0] - ROAM_PAD_TOUCH_M * TD5_ROAM_UPM;
@@ -1553,6 +1556,17 @@ static int work_build(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int
             TD5_LOG_W(LOG_TAG, "roam tile: window still growing after %d passes", ROAM_GROW_PASSES);
     }
     memcpy(w->win, win, sizeof w->win);
+    return 1;
+}
+
+static int work_build(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int all)
+{
+    double win[4], hwin[4];
+    int i, j;
+    const uint32_t t0 = td5_plat_time_ms();
+
+    if (!work_window(c, w, tile_box, all)) return 0;
+    memcpy(win, w->win, sizeof win);
     {
         /* signals inside the final window */
         double *sig = NULL;
@@ -1870,6 +1884,32 @@ int td5_roam_tile_build(TD5_RoamTileCtx *c, int tx, int tz, RoamTile *out,
     st->dep_cycles = w->st.dep_cycles;
     if (!c->have_global) work_free(w);
     st->ms = td5_plat_time_ms() - t0;
+    return ok;
+}
+
+/* [F3] The input hash a fresh build of (tx,tz) would stamp, without building it:
+ * the window rule of the build (work_window) and the same ctx_input_hash. Costs
+ * the graph phase only. 0 on failure (GLOBAL mode included: no per-tile window). */
+int td5_roam_tile_input_hash(TD5_RoamTileCtx *c, int tx, int tz, uint32_t *out)
+{
+    Work *w;
+    double corners[4][2], box[4];
+    int i, ok;
+    if (!c || !out || c->have_global) return 0;
+    w = (Work *)calloc(1, sizeof(Work));
+    if (!w) return 0;
+    roam_grid_corners(&c->grid, tx, tz, corners);
+    box[0] = box[2] = corners[0][0];
+    box[1] = box[3] = corners[0][1];
+    for (i = 1; i < 4; i++) {
+        if (corners[i][0] < box[0]) box[0] = corners[i][0];
+        if (corners[i][1] < box[1]) box[1] = corners[i][1];
+        if (corners[i][0] > box[2]) box[2] = corners[i][0];
+        if (corners[i][1] > box[3]) box[3] = corners[i][1];
+    }
+    ok = work_window(c, w, box, 0);
+    if (ok) *out = ctx_input_hash(c, w->win, NULL);
+    work_free(w);
     return ok;
 }
 

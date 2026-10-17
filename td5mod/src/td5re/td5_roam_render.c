@@ -34,9 +34,12 @@
  * the same raster, never z-fights it. Adjacent tiles share their border points
  * exactly, so there is no seam. Cells under a tunnel bore are left out.
  *
- * RESIDENCY. td5_roam_render_add_tile / _remove_tile are the interface for the
- * resident set (sibling B). The DEV loader at the bottom reads ROAMTILE files
- * itself so this task can be proven alone; it is the part to REPLACE.
+ * RESIDENCY. [F3] In a streamed session (td5_roam_stream.c) the stream worker bakes
+ * each tile (td5_roam_render_bake, its own height source) and the main thread installs
+ * it between frames (td5_roam_render_install); a dropped tile is retired for 3 ticks
+ * before it is freed. td5_roam_render_add_tile / _remove_tile stay for the F2 path
+ * (TD5RE_ROAM_STREAM=0), where the DEV loader at the bottom bakes near the eye on the
+ * main thread.
  *
  * State: one session struct (s_rr), no other file-scope mutable state.
  */
@@ -99,6 +102,9 @@ typedef struct {
     size_t          bytes;
 } RRTile;
 
+typedef struct { RRTile *t; uint32_t tick; } RRRetired;
+#define RR_RETIRE_TICKS   3u     /* D3D12_FRAME_COUNT (2) + 1, design 3.5 */
+
 typedef struct {
     int       began;
     char      place[64];
@@ -124,6 +130,13 @@ typedef struct {
     int       dev_hide;                      /* same encoding, HIDE_STRIP               */
     int      *tried;                         /* (tx,tz) pairs that failed to read   */
     int       ntried, captried;
+    /* [F3] streamed: tiles come from td5_roam_stream.c (no DEV loader); retired tiles
+     * wait RR_RETIRE_TICKS main-thread ticks before they are freed */
+    int       streamed;
+    int       fog_done;
+    RRRetired *retired;
+    int       nretired, capretired;
+    uint32_t  retire_clock;
     /* stats */
     uint32_t  st_frames;
     double    st_sum_ms, st_max_ms, st_last_ms;
@@ -280,7 +293,7 @@ static void rr_ground_point(const RoamTile *t, int i, int j, int G, double *px, 
     *pz = s_rr.grid.oz + s_rr.grid.s * u + s_rr.grid.c * v;
 }
 
-static int rr_ground_build(const RoamTile *t, RRGround *g)
+static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc)
 {
     const int G = (int)(256 / s_rr.cell_m);
     double minx = 1e18, minz = 1e18, maxx = -1e18, maxz = -1e18, x, z;
@@ -290,7 +303,7 @@ static int rr_ground_build(const RoamTile *t, RRGround *g)
     (void)S;
     memset(g, 0, sizeof *g);
     g->G = G;
-    if (!s_rr.use_ground || !s_rr.hc_ok) return 0;
+    if (!s_rr.use_ground || !hc) return 0;
     g->h = (double *)malloc((size_t)(G + 1) * (size_t)(G + 1) * sizeof(double));
     g->hole = (unsigned char *)calloc((size_t)G * (size_t)G, 1);
     if (!g->h || !g->hole) { free(g->h); free(g->hole); memset(g, 0, sizeof *g); return 0; }
@@ -301,7 +314,7 @@ static int rr_ground_build(const RoamTile *t, RRGround *g)
         if (z < minz) minz = z;
         if (z > maxz) maxz = z;
     }
-    if (!td5_roam_height_prefetch(s_rr.hc, minx - 2000.0, minz - 2000.0, maxx + 2000.0, maxz + 2000.0)) {
+    if (!td5_roam_height_prefetch(hc, minx - 2000.0, minz - 2000.0, maxx + 2000.0, maxz + 2000.0)) {
         free(g->h); free(g->hole); memset(g, 0, sizeof *g);
         return 0;
     }
@@ -309,7 +322,7 @@ static int rr_ground_build(const RoamTile *t, RRGround *g)
         for (i = 0; i <= G; i++) {
             double h;
             rr_ground_point(t, i, j, G, &x, &z);
-            if (td5_roam_height_sample(s_rr.hc, x, z, &h, NULL)) { g->h[j * (G + 1) + i] = h; ok++; }
+            if (td5_roam_height_sample(hc, x, z, &h, NULL)) { g->h[j * (G + 1) + i] = h; ok++; }
             else g->h[j * (G + 1) + i] = NAN;
         }
     }
@@ -360,8 +373,11 @@ static void rr_free_tile(RRTile *rt)
     free(rt);
 }
 
-/* Bake `t`. Returns the tile or NULL (nothing to draw / out of memory). */
-static RRTile *rr_bake(const RoamTile *t)
+/* Bake `t` with the ground from `hc` (NULL = no ground). Returns the tile or NULL
+ * (nothing to draw / out of memory). [F3] Thread-safe for a caller-owned `hc`: it
+ * reads only the session's fixed configuration (frame, grid, pages, knobs), never
+ * the tile table, so the stream worker bakes while the main thread draws. */
+static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc)
 {
     RRSb sb[RR_MAXMESH];
     RRGround gr;
@@ -412,7 +428,7 @@ static RRTile *rr_bake(const RoamTile *t)
                                        (double)t->org_z + oz + 0.5 * ((double)a->z + b->z));
         sb[besb[i]].nsq++;
     }
-    rr_ground_build(t, &gr);
+    rr_ground_build(t, &gr, hc);
     if (gr.h) {
         int a, b;
         for (b = 0; b < gr.G; b++) for (a = 0; a < gr.G; a++)
@@ -614,12 +630,53 @@ static int rr_find(int tx, int tz)
     return -1;
 }
 
+/* [F3] A dropped tile is RETIRED, not freed: the frame that is recording may still
+ * read its CPU vertices (design 3.5). td5_roam_render_retire_tick frees it after
+ * RR_RETIRE_TICKS more main-thread ticks. */
+static void rr_retire(RRTile *rt)
+{
+    if (!rt) return;
+    if (s_rr.nretired == s_rr.capretired) {
+        const int nc = s_rr.capretired ? s_rr.capretired * 2 : 32;
+        RRRetired *n = (RRRetired *)realloc(s_rr.retired, (size_t)nc * sizeof *n);
+        if (!n) { rr_free_tile(rt); return; }          /* no list: free now (the F2 behaviour) */
+        s_rr.retired = n; s_rr.capretired = nc;
+    }
+    s_rr.retired[s_rr.nretired].t = rt;
+    s_rr.retired[s_rr.nretired].tick = s_rr.retire_clock;
+    s_rr.nretired++;
+}
+
+void td5_roam_render_retire_tick(void)
+{
+    int i, n = 0;
+    s_rr.retire_clock++;
+    for (i = 0; i < s_rr.nretired; i++) {
+        if (s_rr.retire_clock - s_rr.retired[i].tick > RR_RETIRE_TICKS) rr_free_tile(s_rr.retired[i].t);
+        else s_rr.retired[n++] = s_rr.retired[i];
+    }
+    s_rr.nretired = n;
+}
+
 void td5_roam_render_remove_tile(int tx, int tz)
 {
     const int i = rr_find(tx, tz);
     if (i < 0) return;
-    rr_free_tile(s_rr.tile[i]);
+    rr_retire(s_rr.tile[i]);
     s_rr.tile[i] = s_rr.tile[--s_rr.ntile];
+}
+
+static int rr_insert(RRTile *rt)
+{
+    td5_roam_render_remove_tile(rt->tx, rt->tz);
+    if (s_rr.ntile == s_rr.captile) {
+        const int nc = s_rr.captile ? s_rr.captile * 2 : 64;
+        RRTile **nt = (RRTile **)realloc(s_rr.tile, (size_t)nc * sizeof *nt);
+        if (!nt) return 0;
+        s_rr.tile = nt; s_rr.captile = nc;
+    }
+    s_rr.tile[s_rr.ntile++] = rt;
+    return 1;
 }
 
 int td5_roam_render_add_tile(const RoamTile *t)
@@ -627,21 +684,52 @@ int td5_roam_render_add_tile(const RoamTile *t)
     RRTile *rt;
     uint32_t t0;
     if (!s_rr.began || !t) return 0;
-    td5_roam_render_remove_tile(t->tx, t->tz);
     t0 = td5_plat_time_ms();
-    rt = rr_bake(t);
-    if (!rt) return 0;
-    if (s_rr.ntile == s_rr.captile) {
-        const int nc = s_rr.captile ? s_rr.captile * 2 : 64;
-        RRTile **nt = (RRTile **)realloc(s_rr.tile, (size_t)nc * sizeof *nt);
-        if (!nt) { rr_free_tile(rt); return 0; }
-        s_rr.tile = nt; s_rr.captile = nc;
-    }
-    s_rr.tile[s_rr.ntile++] = rt;
+    rt = rr_bake(t, s_rr.hc_ok ? s_rr.hc : NULL);
+    if (!rt) { td5_roam_render_remove_tile(t->tx, t->tz); return 0; }
+    if (!rr_insert(rt)) { rr_free_tile(rt); return 0; }
     TD5_LOG_D(LOG_TAG, "ROAM_RENDER_TILE %d,%d meshes=%d road_quads=%u patch_tris=%u ground_quads=%u skirts=%u "
               "bytes=%.2f MB bake_ms=%u", rt->tx, rt->tz, rt->nmesh, rt->nroad, rt->ntri, rt->nground,
               rt->nskirt, (double)rt->bytes / 1048576.0, (unsigned)(td5_plat_time_ms() - t0));
     return 1;
+}
+
+/* ---- [F3] worker bake + main-thread install (td5_roam_stream.c) ---- */
+
+TD5_RoamBaked *td5_roam_render_bake(const RoamTile *t, TD5_RoamHeight *hc)
+{
+    if (!s_rr.began || !t) return NULL;
+    return (TD5_RoamBaked *)rr_bake(t, hc);
+}
+
+int td5_roam_render_install(TD5_RoamBaked *b)
+{
+    RRTile *rt = (RRTile *)b;
+    if (!rt) return 0;
+    if (!s_rr.began || !rr_insert(rt)) { rr_free_tile(rt); return 0; }
+    return 1;
+}
+
+void   td5_roam_render_free_baked(TD5_RoamBaked *b) { rr_free_tile((RRTile *)b); }
+size_t td5_roam_render_baked_bytes(const TD5_RoamBaked *b) { return b ? ((const RRTile *)b)->bytes : 0u; }
+int    td5_roam_render_has_tile(int tx, int tz) { return rr_find(tx, tz) >= 0; }
+
+int td5_roam_render_open_height(TD5_RoamHeight *hc)
+{
+    char path[512], wpath[512];
+    int ex100;
+    if (!s_rr.began || !hc || !s_rr.use_ground) return 0;
+    memset(hc, 0, sizeof *hc);
+    ex100 = td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400);
+    td5_geo_source_path(path, sizeof path, s_rr.place, "HEIGHT.R16");
+    td5_geo_source_path(wpath, sizeof wpath, s_rr.place, "WATER.R8");
+    return td5_roam_height_open(hc, path, wpath, (double)ex100 / 100.0);
+}
+
+void td5_roam_render_set_streamed(int on)
+{
+    s_rr.streamed = on ? 1 : 0;
+    if (on) s_rr.dev_mode = 0;
 }
 
 /* ---------------------------------------------------------------- session ---- */
@@ -718,6 +806,8 @@ void td5_roam_render_end(void)
     int i;
     for (i = 0; i < s_rr.ntile; i++) rr_free_tile(s_rr.tile[i]);
     free(s_rr.tile);
+    for (i = 0; i < s_rr.nretired; i++) rr_free_tile(s_rr.retired[i].t);
+    free(s_rr.retired);
     if (s_rr.hc) { td5_roam_height_close(s_rr.hc); free(s_rr.hc); }
     free(s_rr.tried);
     memset(&s_rr, 0, sizeof s_rr);
@@ -892,17 +982,30 @@ static void rr_autobegin(void)
         return;
     }
     if (!td5_roam_render_begin(slug, &f)) return;
+    mode = getenv("TD5RE_ROAM_RENDER_TILES");
+    s_rr.dev_mode = (mode && strcmp(mode, "all") == 0) ? 2 : 1;
+    s_rr.dev_reach = td5_env_int("TD5RE_ROAM_RENDER_REACH", 2, 1, 6);
+}
+
+/* The roam fog, applied on the first draw (after the host level's LEVELINF set its own):
+ * the host level's own fog is black (Moscow LEVELINF), which draws the far edge of the
+ * ground (the renderer's fixed 195000-unit far plane, ~450 m) as a black seam under the
+ * sky. A roam world is lit by the sky above it: fade the far ground to its horizon. */
+static void rr_first_draw_fog(void)
+{
+    if (s_rr.fog_done) return;
+    s_rr.fog_done = 1;
     if (rr_roam_active()) {
-        /* The host level's own fog is black (Moscow LEVELINF), which draws the far edge of the
-         * ground (the renderer's fixed 195000-unit far plane, ~450 m) as a black seam under the
-         * sky. A roam world is lit by the sky above it: fade the far ground to its horizon. */
         const int rgb = td5_env_int("TD5RE_ROAM_RENDER_FOG_RGB", 0x5A5E66, 0, 0xFFFFFF);
         const int on  = td5_env_int("TD5RE_ROAM_RENDER_FOG", 1, 0, 1);
         if (on) td5_render_configure_fog((uint32_t)rgb, 1);
     }
-    mode = getenv("TD5RE_ROAM_RENDER_TILES");
-    s_rr.dev_mode = (mode && strcmp(mode, "all") == 0) ? 2 : 1;
-    s_rr.dev_reach = td5_env_int("TD5RE_ROAM_RENDER_REACH", 2, 1, 6);
+}
+
+int td5_roam_render_ensure_begun(void)
+{
+    if (!s_rr.began) rr_autobegin();
+    return s_rr.began;
 }
 
 #ifndef TD5RE_RELEASE
@@ -1035,6 +1138,7 @@ void td5_roam_render_tiles(int view)
 
     if (!s_rr.began) rr_autobegin();
     if (!s_rr.began) return;
+    rr_first_draw_fog();
     t0 = td5_plat_time_us() ? (uint32_t)(td5_plat_time_us() & 0xFFFFFFFFu) : 0u;
     if (s_rr.dev_mode) rr_dev_stream();
 

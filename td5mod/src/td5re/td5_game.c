@@ -40,6 +40,7 @@
 #include "td5_pick.h"   /* dev free-cam geometry picker */
 #include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
+#include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -1498,6 +1499,10 @@ int td5_game_tick(void) {
      * does at step 8 (they ran at load against an empty table). Inert unless a
      * generated track is streaming. */
     td5_tgstream_tick();
+    /* [GEO FREE ROAM F3] Main-thread half of the roam tile stream: install what the
+     * worker loaded / built / baked (budgeted per frame), request, unload. Inert
+     * outside a streamed roam session. */
+    td5_roam_stream_tick();
 
     switch (g_td5.game_state) {
 
@@ -5647,7 +5652,14 @@ static void init_race_checkpoints(void)
     }
 }
 
+/* [GEO FREE ROAM F3] the stream's start gate draws the loading line through this */
+static void roam_stream_loadscreen(const char *label)
+{
+    loadscreen_phase(9, label);
+}
+
 int td5_game_init_race_session(void) {
+    td5_roam_stream_set_loadscreen(roam_stream_loadscreen);
     td5_roam_session_start();          /* GEO FREE ROAM: armed -> active + single-player overrides */
     init_race_modes_and_seed();
     td5_roam_apply_overrides();        /* the mode setup above may re-derive some of them */

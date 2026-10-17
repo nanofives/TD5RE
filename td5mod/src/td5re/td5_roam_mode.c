@@ -36,6 +36,7 @@
 #include "deps/cjson/cJSON.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_roam_physics.h"   /* task B: the resident set (road tiles + contact provider) */
+#include "td5_roam_stream.h"    /* [F3] the start gate (spawn neighbourhood) */
 
 #define LOG_TAG "roam"
 
@@ -479,6 +480,10 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     double moved;
     if (!a) return;
 
+    /* [F3] START GATE: the spawn tile and its ROAD neighbourhood must be resident before the
+     * snap and the street yaw read them (no-op when the session is not streamed) */
+    if (td5_roam_stream_active()) td5_roam_stream_wait_area(px, pz, -1);
+
     /* the click point -> the nearest drivable spot (the car must not start off the road) */
     moved = roam_snap_to_road(&px, &pz, yaw);
     if (moved > 0.0)
@@ -507,6 +512,12 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     a->slot_index = (uint8_t)slot;
     memset(&a->tire_track_emitter_FL, 0xFF, 4);   /* "no emitter acquired yet" (spawn loop) */
     a->euler_accum.yaw = FP_SCALE(yaw);
+    /* [F3] forget what the provider learnt about this slot before the car was placed
+     * (race init probes the unplaced actor): its hints depended on what was resident */
+    td5_roam_physics_forget_slot(slot);
+    /* ...and the airborne tick count those probes left (the engine only ever increments it, and a
+     * landing reads it): an unplaced car over no resident tile counted as airborne when streamed */
+    a->airborne_frame_counter = 0;
     td5_physics_reset_actor_state(a);
 
     /* every span field -1 AFTER td5_ai_invalidate_actor_track_state (it writes 0), and

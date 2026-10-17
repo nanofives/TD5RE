@@ -27,7 +27,9 @@
 #define TD5_ROAM_RENDER_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include "td5_roam_tile.h"
+#include "td5_roam_height.h"     /* [F3] TD5_RoamHeight: the worker's own ground source */
 
 /* The frame the baked meshes live in. x/z: render = place - (ox, oz); y: render =
  * place y - dy. DEV route mode (route != 0): x/z come from the place -> route
@@ -64,6 +66,24 @@ int  td5_roam_render_began(void);
  * replaces a baked tile with the same (tx, tz). Returns 1 on success. */
 int  td5_roam_render_add_tile(const RoamTile *t);
 void td5_roam_render_remove_tile(int tx, int tz);
+
+/* ---- [F3] streamed residency (td5_roam_stream.c) ----------------------------
+ * The stream worker BAKES (td5_roam_render_bake, any thread, with its own height
+ * source from td5_roam_render_open_height) and the main thread INSTALLS between
+ * frames (td5_roam_render_install, O(1): no bake on the main thread). A removed or
+ * replaced tile is retired and freed after 3 main-thread ticks
+ * (td5_roam_render_retire_tick), so no recorded frame reads freed vertices. The
+ * session's configuration is fixed at begin; the bake reads only that. */
+typedef struct TD5_RoamBaked TD5_RoamBaked;
+int            td5_roam_render_ensure_begun(void);           /* main: begin for the active roam session */
+void           td5_roam_render_set_streamed(int on);         /* 1 = no DEV loader (tiles come from the stream) */
+int            td5_roam_render_open_height(TD5_RoamHeight *hc);  /* a caller-owned height source; 0 = no ground */
+TD5_RoamBaked *td5_roam_render_bake(const RoamTile *t, TD5_RoamHeight *hc);   /* any thread; NULL = nothing */
+int            td5_roam_render_install(TD5_RoamBaked *b);    /* main; takes ownership (replaces same tx,tz) */
+void           td5_roam_render_free_baked(TD5_RoamBaked *b);
+size_t         td5_roam_render_baked_bytes(const TD5_RoamBaked *b);
+int            td5_roam_render_has_tile(int tx, int tz);
+void           td5_roam_render_retire_tick(void);            /* main, once per game tick */
 
 /* Scene hook: draw every baked tile near the eye. Called from
  * td5_render_actors_for_view right after the strip's span loop. */
