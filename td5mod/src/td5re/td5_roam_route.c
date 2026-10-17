@@ -140,6 +140,15 @@ void td5_roam_route_graph_free(void)
 
 int td5_roam_route_graph_ready(void) { return g.ready; }
 
+/* [F6-A] ribbon ends the planner graph has at node/cluster `key` (-1 = unknown key): an
+ * independent count for the barrier census (td5_roam_barrier.c). */
+int td5_roam_route_graph_node_degree(int64_t key)
+{
+    const int n = g.ready ? rr_find_node(key) : -1;
+    return n < 0 ? -1 : g.node[n].ninc;
+}
+
+
 void td5_roam_route_graph_stats(int *nedge, int *nnode, int *nseg, double *ms, double *km)
 {
     if (nedge) *nedge = g.nedge;
