@@ -100,6 +100,8 @@ typedef struct {
 void td5_roam_ai_stats(TD5_RoamAiStats *out);
 /* per opponent k (0..n-1): slot, finish ticks (0 = running), still-max ticks, recoveries */
 int  td5_roam_ai_car_info(int k, int *slot, long *finish_ticks, long *still_max, long *recoveries);
+/* 1 when opponent slot `slot` has crossed the finish: no longer a racer, the barriers let it through */
+int  td5_roam_ai_slot_finished(int slot);
 /* 1 when opponent slot `slot` is braking within `m` metres of a bend tighter than 50 km/h (DEV shots) */
 int  td5_roam_ai_braking_for_bend(int slot, double m);
 

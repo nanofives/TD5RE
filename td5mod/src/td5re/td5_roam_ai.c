@@ -714,7 +714,7 @@ static void ra_drive(RaCar *c, int hold)
     if (c->finished) {
         /* run-out: stop at this car's spot past the line */
         const double rem = c->stop_s - c->s;
-        const double vs = rem > 0.0 ? sqrt(2.0 * 3.5 * rem) : 0.0;
+        const double vs = rem > 0.0 ? sqrt(2.0 * 4.0 * rem) : 0.0;
         if (vs < vt) vt = vs;
     }
     if (vt < 0.0) vt = 0.0;
@@ -900,6 +900,9 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
                 c->finished = 1;
                 c->finish_ticks = race_ticks;
                 c->order = A.nfin++;
+                /* stop 30..70 m past the line, the first finisher farthest. A finished opponent is no
+                 * longer racing: the route barriers let it through (td5_roam_ai_slot_finished), the
+                 * closing panel past FINISH being ~40 m on, closer than a car stops from 100 km/h */
                 c->stop_s = A.length + 30.0 + 10.0 * (double)(A.n - 1 - c->order);
                 A.stats.finished++;
                 TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d FINISH #%d at %ld ticks (%.2f s), recoveries %ld, longest still %.1f s",
@@ -948,6 +951,15 @@ int td5_roam_ai_car_info(int k, int *slot, long *finish_ticks, long *still_max, 
     if (still_max) *still_max = A.car[k].still_max;
     if (recoveries) *recoveries = A.car[k].recoveries;
     return 1;
+}
+
+int td5_roam_ai_slot_finished(int slot)
+{
+    int k;
+    if (!A.on) return 0;
+    for (k = 0; k < A.n; k++)
+        if (A.car[k].slot == slot) return A.car[k].finished;
+    return 0;
 }
 
 int td5_roam_ai_braking_for_bend(int slot, double m)
