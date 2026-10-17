@@ -320,12 +320,14 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
 {
     int nb = 0;
     TD5_RoamBarrierStats bs;
+    uint32_t t0, t_bar, t_grid;
     if (!rr_route_ready()) {
         TD5_LOG_W(LOG_TAG, "ROAM_RACE: start refused (no planned sprint)");
         return 0;
     }
     if (s) R.setup = *s;
     R.setup.laps = 1;                         /* a sprint is one run A -> B */
+    t0 = td5_plat_time_ms();
     if (!rr_take_route()) return 0;
     rr_best_load();
 
@@ -334,6 +336,7 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     td5_roam_barriers_set_visible(1);
     td5_roam_race_wall_begin();
     td5_roam_barriers_stats(&bs);
+    t_bar = td5_plat_time_ms();
 
     memset(&R.res, 0, sizeof R.res);
     snprintf(R.res.name, sizeof R.res.name, "%s", R.name);
@@ -349,16 +352,18 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     R.split_ms = 0; R.go_ms = 0;
 
     rr_place_on_grid();
+    t_grid = td5_plat_time_ms();
     R.state = TD5_RRACE_COUNTDOWN;
     R.req_countdown = 1; R.cd_armed = 0; R.rearm = 0;
     R.req_pause_close = td5_game_is_pause_menu_active();
     if (td5_roam_route_ui_map_open()) td5_roam_route_ui_close_map();
     TD5_LOG_I(LOG_TAG, "ROAM_RACE: START route='%s' hash=%08X length=%.1f m points=%d checkpoints=%d grid place=(%d,%d) "
               "yaw=%d barriers=%d (mouth %d, turn %d, clusters %d, open arms %d, across route %d) traffic=%d cops=%d "
-              "best=%ld ticks",
+              "best=%ld ticks | barrier build %u ms (stats %.0f ms, %d tiles read), grid %u ms",
               R.name[0] ? R.name : "UNSAVED", (unsigned)R.hash, R.length_m, R.npt, R.ncp, (int)R.start_px,
               (int)R.start_pz, R.start_yaw, nb, bs.barriers_mouth, bs.barriers_turn, bs.clusters_passed, bs.arms_open,
-              bs.across_route, R.setup.traffic, R.setup.cops, R.best_ticks);
+              bs.across_route, R.setup.traffic, R.setup.cops, R.best_ticks, (unsigned)(t_bar - t0), bs.build_ms,
+              bs.tiles_read, (unsigned)(t_grid - t_bar));
     return 1;
 }
 
