@@ -1282,12 +1282,53 @@ done:
  * a sliver between two piece edges a hair off collinear, which would put a
  * wall into the paving. */
 #define U_SPIKE_W (0.25 * TD5_ROAM_UPM)
-static void u_simplify(ULV *v, int *n)
+/* [F2-E] The same sliver with its tip drawn as 2 or 3 vertices (the gap between
+ * two pieces that nearly touch: 00040ac20007a459 had three 0.8 m x 0.08 m block
+ * shards poking into the paving, tip turns 128 + 51 deg, and a 0.29 m wide one with
+ * its tip at 46 + 131 deg). The tip goes when the mouth is under U_TIP_W and the
+ * legs either side run back within 10 deg.
+ * Returns the number of tip vertices to drop at k (0 = none). */
+#define U_TIP_W (0.4 * TD5_ROAM_UPM)
+static int u_sliver_tip(const ULV *v, int n, int k)
 {
-    int changed = 1, guard = 0;
+    int w;
+    for (w = 2; w <= 3 && n - w >= 3; w++) {
+        const ULV *a = &v[(k + n - 1) % n], *b = &v[k], *c = &v[(k + w - 1) % n], *d = &v[(k + w) % n];
+        const double abx = b->x - a->x, abz = b->z - a->z, cdx = d->x - c->x, cdz = d->z - c->z;
+        const double lab = sqrt(abx * abx + abz * abz), lcd = sqrt(cdx * cdx + cdz * cdz);
+        int j, tagged = 0;
+        for (j = 0; j < w; j++) tagged |= v[(k + j) % n].tag;
+        if (tagged || lab <= 0.0 || lcd <= 0.0) continue;
+        if (hypot(d->x - a->x, d->z - a->z) < U_TIP_W &&
+            (abx * cdx + abz * cdz) / (lab * lcd) < -0.98481)   /* cos 170 deg */
+            return w;
+    }
+    return 0;
+}
+
+static int u_simplify(ULV *v, int *n)
+{
+    int changed = 1, guard = 0, ntips = 0;
+    const int tips = td5_env_int("TD5RE_ROAM_SLIVER_TIPS", 1, 0, 1);
     while (changed && *n > 3 && guard++ < 1000) {
         int k;
         changed = 0;
+        for (k = 0; k < *n && *n > 3; k++) {
+            const int w = tips ? u_sliver_tip(v, *n, k) : 0;
+            if (w) {
+                /* drop v[k .. k+w-1] (they may wrap past the end) */
+                int j;
+                for (j = 0; j < w; j++) {
+                    const int at = k < *n ? k : 0;
+                    memmove(&v[at], &v[at + 1], (size_t)(*n - at - 1) * sizeof *v);
+                    (*n)--;
+                }
+                changed = 1;
+                ntips++;
+                k = -1;
+                continue;
+            }
+        }
         for (k = 0; k < *n && *n > 3; k++) {
             const ULV *a = &v[(k + *n - 1) % *n], *b = &v[k], *c = &v[(k + 1) % *n];
             const double abx = b->x - a->x, abz = b->z - a->z, bcx = c->x - b->x, bcz = c->z - b->z;
@@ -1309,6 +1350,7 @@ static void u_simplify(ULV *v, int *n)
             }
         }
     }
+    return ntips;
 }
 
 static int u_simple(const ULV *pv, int n)
@@ -1347,13 +1389,42 @@ static int u_simple(const ULV *pv, int n)
 #define U_RUN_REACH  (3.0 * TD5_ROAM_UPM)
 #define U_RUN_DEV    (0.05 * TD5_ROAM_UPM)  /* a seam vertex this close to its chord ...   */
 #define U_SEAM_SEG   (0.5 * TD5_ROAM_UPM)   /* ... next to a segment this short            */
+#define U_SEAM_CDEV  (0.15 * TD5_ROAM_UPM)  /* ... or this close, near a block corner       */
+
+/* 1 when, walking the kerb from v[q] either way over at most U_RUN_REACH and only
+ * past near-straight untagged vertices, the walk reaches an untagged block corner
+ * (reflex) turning >= U_GORE_RAD and < 180 deg - U_GORE_RAD (a u_fillet candidate). */
+static int u_seam_by_corner(const ULV *v, int n, int q)
+{
+    int dir;
+    for (dir = -1; dir <= 1; dir += 2) {
+        double run = 0.0;
+        int s, j = q;
+        for (s = 1; s < n; s++) {
+            const int i = ((j + dir) % n + n) % n;
+            const ULV *a = &v[(i + n - 1) % n], *b = &v[i], *d = &v[(i + 1) % n];
+            const double ix = b->x - a->x, iz = b->z - a->z, ox = d->x - b->x, oz = d->z - b->z;
+            const double cr = cross2(ix, iz, ox, oz), phi = atan2(fabs(cr), ix * ox + iz * oz);
+            run += hypot(b->x - v[j].x, b->z - v[j].z);
+            if (run > U_RUN_REACH || b->tag) break;
+            if (phi >= U_STRAIGHT) {
+                if (cr < 0.0 && phi >= U_GORE_RAD && ROAM_PI - phi >= U_GORE_RAD) return 1;
+                break;
+            }
+            j = i;
+        }
+    }
+    return 0;
+}
+
 static int u_merge_runs(const ULV *v, int n, ULV *o, const UPrims *L, const unsigned char *fixed,
-                        const unsigned char *pr, int na, int *merged, TD5_RoamCluster *cl)
+                        const unsigned char *pr, int na, int *merged, int *seam, TD5_RoamCluster *cl)
 {
     unsigned char *rf;
     ULV *vs = (ULV *)malloc((size_t)n * sizeof(ULV));
     int q, no = 0, start = -1;
     *merged = 0;
+    *seam = 0;
     if (!vs) { memcpy(o, v, (size_t)n * sizeof *v); return n; }
     /* First: a kerb drawn as near-collinear micro segments (union piece seams: a 2 deg
      * turn over 0.05 m before the 00040ac20007a459 plaza tip) caps a fillet's tangent
@@ -1364,17 +1435,31 @@ static int u_merge_runs(const ULV *v, int n, ULV *o, const UPrims *L, const unsi
     memcpy(vs, v, (size_t)n * sizeof *v);
     {
         int changed = 1, guard = 0;
+        const int near_corner = td5_env_int("TD5RE_ROAM_SEAM_CORNER", 1, 0, 1);
         while (changed && n > 3 && guard++ < 64) {
             changed = 0;
             for (q = 0; q < n && n > 3; q++) {
                 const ULV *a = &vs[(q + n - 1) % n], *b = &vs[q], *d = &vs[(q + 1) % n];
                 const double acx = d->x - a->x, acz = d->z - a->z, acl = sqrt(acx * acx + acz * acz);
                 const double abx = b->x - a->x, abz = b->z - a->z, bdx = d->x - b->x, bdz = d->z - b->z;
-                double turn;
+                double turn, dev;
                 if (b->tag || acl < 1e-9) continue;
-                if (hypot(abx, abz) >= U_SEAM_SEG && hypot(bdx, bdz) >= U_SEAM_SEG) continue;
                 turn = atan2(fabs(cross2(abx, abz, bdx, bdz)), abx * bdx + abz * bdz);
-                if (turn >= U_STRAIGHT || fabs(cross2(acx, acz, abx, abz)) / acl >= U_RUN_DEV) continue;
+                if (turn >= U_STRAIGHT) continue;
+                dev = fabs(cross2(acx, acz, abx, abz)) / acl;
+                /* Seam vertices a little further out (0.52 m before the plaza tip once
+                 * the 0.38 m one is gone) cap the fillet just the same: also drop a
+                 * near-straight vertex within U_RUN_REACH (along the kerb, over
+                 * near-straight vertices only) of a block corner turning >= U_GORE_RAD,
+                 * when it sits within U_SEAM_CDEV of its neighbours' chord.
+                 * Knob TD5RE_ROAM_SEAM_CORNER (1; 0 = the short-segment rule only). */
+                if ((hypot(abx, abz) < U_SEAM_SEG || hypot(bdx, bdz) < U_SEAM_SEG) && dev < U_RUN_DEV) {
+                    /* the short-segment rule */
+                } else if (near_corner && dev < U_SEAM_CDEV && u_seam_by_corner(vs, n, q)) {
+                    (*seam)++;
+                } else {
+                    continue;
+                }
                 memmove(&vs[q], &vs[q + 1], (size_t)(n - q - 1) * sizeof *vs);
                 n--;
                 changed = 1;
@@ -1462,14 +1547,15 @@ static int u_fillet(const ULV *v0, int n0, const UPrims *L, const TD5_RoamGraphP
     const int segs = P->fillet_segs < 1 ? 1 : (P->fillet_segs > 12 ? 12 : P->fillet_segs);
     ULV *vm = (ULV *)malloc((size_t)(n0 > 0 ? n0 : 1) * sizeof(ULV));
     const ULV *v = vm;
-    int n = n0, nmerged = 0;
+    int n = n0, nmerged = 0, nseam = 0;
     unsigned char *cand = (unsigned char *)calloc((size_t)(n0 > 0 ? n0 : 1), 1);
     ULV *o = (ULV *)malloc((size_t)(n0 > 0 ? n0 : 1) * (size_t)(segs + 2) * sizeof(ULV));
     int q, no = 0;
     if (!cand || !o || !vm) { free(cand); free(o); free(vm); return -1; }
     if (td5_env_int("TD5RE_ROAM_FILLET_RUNS", 1, 0, 1) && n0 > 3) {
-        n = u_merge_runs(v0, n0, vm, L, fixed, pr, na, &nmerged, cl);
+        n = u_merge_runs(v0, n0, vm, L, fixed, pr, na, &nmerged, &nseam, cl);
         c->fillet_runs_merged += nmerged;
+        c->seam_corner_dropped += nseam;
     } else {
         memcpy(vm, v0, (size_t)n0 * sizeof(ULV));
     }
@@ -1529,7 +1615,16 @@ static int u_fillet(const ULV *v0, int n0, const UPrims *L, const TD5_RoamGraphP
             r = tl * tanh2;
             c->fillet_shrunk++;
         }
-        if (tl < ROAM_OL_MIN_SEG) { o[no++] = *b; continue; }
+        if (tl < ROAM_OL_MIN_SEG) {
+            if (ROAM_PI - th >= U_GORE_RAD) {
+                c->fillet_tiny++;
+                TD5_LOG_I(LOG_TAG, "ROAM_FILLET_TINY cluster %lld at (%.0f,%.0f): turn %.1f deg, no fillet "
+                          "(sides %.2f / %.2f m)", (long long)cl->key, b->x, b->z, 180.0 - th * 180.0 / ROAM_PI,
+                          lp / TD5_ROAM_UPM, ln / TD5_ROAM_UPM);
+            }
+            o[no++] = *b;
+            continue;
+        }
         ex = (a->x - b->x) / lp; ez = (a->z - b->z) / lp;     /* towards a */
         fx = (d->x - b->x) / ln; fz = (d->z - b->z) / ln;     /* towards d */
         {
@@ -1563,6 +1658,21 @@ static int u_fillet(const ULV *v0, int n0, const UPrims *L, const TD5_RoamGraphP
             o[no].x = t2x; o[no].z = t2z; o[no].tag = 0; o[no].prim = b->prim; no++;
             need_w = swept_need(r, W, LF);
             if (corridor - need_w < cl->min_swept_margin) cl->min_swept_margin = corridor - need_w;
+            if (r < 1.0 * TD5_ROAM_UPM && ROAM_PI - th >= U_GORE_RAD) {
+                c->fillet_tiny++;
+                TD5_LOG_I(LOG_TAG, "ROAM_FILLET_TINY cluster %lld at (%.0f,%.0f): turn %.1f deg, r %.2f m "
+                          "(sides %.2f / %.2f m)", (long long)cl->key, b->x, b->z, 180.0 - th * 180.0 / ROAM_PI,
+                          r / TD5_ROAM_UPM, lp / TD5_ROAM_UPM, ln / TD5_ROAM_UPM);
+            }
+#ifndef TD5RE_RELEASE
+            {
+                const char *dk = getenv("TD5RE_ROAM_UNION_DEBUG");
+                if (dk && strtoll(dk, NULL, 10) == (long long)cl->key)
+                    TD5_LOG_I(LOG_TAG, "ROAM_UNION_DBG fillet at (%.0f,%.0f): turn %.1f deg, r %.2f m, "
+                              "tangent %.2f m (sides %.2f / %.2f m)", b->x, b->z, 180.0 - th * 180.0 / ROAM_PI,
+                              r / TD5_ROAM_UPM, tl / TD5_ROAM_UPM, lp / TD5_ROAM_UPM, ln / TD5_ROAM_UPM);
+            }
+#endif
             if (need_w > corridor) {
                 cl->flags |= TD5_ROAM_CL_SWEPT_FAIL;
                 c->swept_fail++;
@@ -1799,7 +1909,7 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
     for (m = 0; m < na; m++) t[m] = tb[m] = at[m].a.t;
 
     for (round = 0;; round++) {
-        int any = 0, nf, outer = -1;
+        int any = 0, nf, outer = -1, ntips = 0;
         ULV *fl = NULL;
         /* Push cuts out while a row is covered or a piece reaches into a ribbon.
          * An arm that reaches its limit still pushed makes PARTNERS of the arms
@@ -1919,7 +2029,7 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
                 }
             }
             U->nloop = w;
-            for (k = 0; k < U->nloop; k++) u_simplify(U->v[k], &U->n[k]);
+            for (k = 0; k < U->nloop; k++) ntips += u_simplify(U->v[k], &U->n[k]);
         }
         /* Fillets on the outer loop. */
         memset(&sc, 0, sizeof sc);
@@ -1931,6 +2041,22 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
 #ifndef TD5RE_RELEASE
         {
             const char *dk = getenv("TD5RE_ROAM_UNION_DEBUG");
+            if (dk && strtoll(dk, NULL, 10) == (long long)cl->key) {
+                /* the outer loop as u_fillet saw it (last round wins) */
+                char path[400];
+                const char *dir = td5_plat_log_dir();
+                FILE *f;
+                snprintf(path, sizeof path, "%sroam_union_pre.json", dir ? dir : "");
+                f = fopen(path, "w");
+                if (f) {
+                    fprintf(f, "{\"round\": %d, \"loop\": [", round);
+                    for (i = 0; i < U->n[0]; i++)
+                        fprintf(f, "%s[%.4f, %.4f, %d, %d]", i ? ", " : "", U->v[0][i].x, U->v[0][i].z,
+                                U->v[0][i].tag, U->v[0][i].prim);
+                    fprintf(f, "]}\n");
+                    fclose(f);
+                }
+            }
             if (dk && strtoll(dk, NULL, 10) == (long long)cl->key)
                 for (m = 0; m < na; m++)
                     TD5_LOG_I(LOG_TAG, "ROAM_UNION_DBG round %d arm %d edge %llu: t %.2f m (base %.2f, "
@@ -1986,6 +2112,9 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         c->fillet_shrunk += sc.fillet_shrunk;
         c->fillet_runs_merged += sc.fillet_runs_merged;
         c->hole_fillet_loops += sc.hole_fillet_loops;
+        c->seam_corner_dropped += sc.seam_corner_dropped;
+        c->fillet_tiny += sc.fillet_tiny;
+        c->union_sliver_tips += ntips;
         break;
     }
     if (!u_simple(U->v[0], U->n[0])) {
@@ -3580,6 +3709,9 @@ int td5_roam_junction_dev_census(void)
                 c->fillet_shrunk);
         fprintf(f, "fillet_runs_merged %d\n", c->fillet_runs_merged);
         fprintf(f, "hole_fillet_loops %d\n", c->hole_fillet_loops);
+        fprintf(f, "union_sliver_tips %d\n", c->union_sliver_tips);
+        fprintf(f, "seam_corner_dropped %d\n", c->seam_corner_dropped);
+        fprintf(f, "fillet_tiny %d\n", c->fillet_tiny);
         fprintf(f, "earclip_u_rescued %d\n", c->earclip_u_rescued);
         fprintf(f, "swept_checked %d\nswept_widened %d\nswept_fail %d\n",
                 c->swept_checked, c->swept_widened, c->swept_fail);
