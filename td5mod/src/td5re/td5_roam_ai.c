@@ -259,6 +259,35 @@ static int ra_build_path(void)
         jx[nj] = A.rpx[i]; jz[nj] = A.rpz[i]; nj++;
     }
     if (nj < 2) { free(jx); free(jz); return 0; }
+    /* 1b. LATERAL jogs: the planner routes through a junction cluster's centre, which on a divided
+     * avenue sits in the median, 7..14 m off the carriageway, with long legs either side (measured on
+     * the F7 full route: 9.7 m off a 56 m chord at 671 m, 14 m off a 110 m chord at 2309 m; the
+     * opponents drove into the median nose there). A vertex is dropped when the heading before it
+     * (i-2 -> i-1) and after it (i+1 -> i+2) agree within 20 degrees, it lies > 1.5 m off the chord
+     * i-1 -> i+1 and that chord is < 150 m. A real turn changes heading and is kept. Repeated until
+     * nothing moves. */
+    {
+        int changed = 1, guard = 0;
+        while (changed && guard++ < 16) {
+            changed = 0;
+            for (i = 2; i + 2 < nj; i++) {
+                const double ax = jx[i - 1] - jx[i - 2], az = jz[i - 1] - jz[i - 2];
+                const double bx = jx[i + 2] - jx[i + 1], bz = jz[i + 2] - jz[i + 1];
+                const double cx0 = jx[i + 1] - jx[i - 1], cz0 = jz[i + 1] - jz[i - 1];
+                const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz), lc = sqrt(cx0 * cx0 + cz0 * cz0);
+                double dev;
+                if (la <= 0.0 || lb <= 0.0 || lc <= 0.0 || lc > 150.0 * RA_M) continue;
+                if ((ax * bx + az * bz) / (la * lb) < cos(20.0 * RA_PI / 180.0)) continue;
+                dev = fabs((jx[i] - jx[i - 1]) * cz0 - (jz[i] - jz[i - 1]) * cx0) / lc;
+                if (dev <= 1.5 * RA_M) continue;
+                memmove(&jx[i], &jx[i + 1], (size_t)(nj - i - 1) * sizeof(double));
+                memmove(&jz[i], &jz[i + 1], (size_t)(nj - i - 1) * sizeof(double));
+                nj--;
+                dropped++;
+                changed = 1;
+            }
+        }
+    }
     /* 2. behind START: the direction from START to the point >= 8 m on, reversed, along the street */
     k = 1;
     while (k + 1 < nj && hypot(jx[k] - jx[0], jz[k] - jz[0]) < 8.0 * RA_M) k++;
@@ -623,7 +652,9 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
         if (f <= 0.5 || f > 6.0 + v * 1.2) continue;
         if (fabs(l - c->lat) > 2.1) continue;
         vb = ((double)b->linear_velocity_x * tx + (double)b->linear_velocity_z * tz) / 256.0 * RA_HZ / RA_M;
-        if (vb < v - 0.5 && c->pass_dwell <= 0) {
+        /* slower than me, or (nearly) stopped: a stopped car ahead would otherwise hold the whole
+         * queue behind it at 0 km/h, nobody being faster than it (F7 full run, 682 m) */
+        if ((vb < v - 0.5 || vb < 1.5) && c->pass_dwell <= 0) {
             /* pass on the side away from it */
             const double side = (l - c->lat) > 0.0 ? -1.0 : 1.0;
             c->pass_off = ra_clamp(l + side * 2.5, -2.8, 2.8);
