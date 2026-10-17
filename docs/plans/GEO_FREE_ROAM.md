@@ -1,6 +1,6 @@
 # GEO FREE ROAM: drive the real city, race inside it (PORT-ONLY)
 
-Status: **F0 done (2026-10-15), F1 next.** Written 2026-10-15 from Mariano's answers
+Status: **F0, F1, F2 done (2026-10-17) on integ-roam; F3 (streaming) next.** Written 2026-10-15 from Mariano's answers
 (recorded in "Decisions" below). The technical design for F1-F4 is
 `GEO_FREE_ROAM_DESIGN.md` (F0c, with F0a numbers and the F0b span-consumer
 verdicts folded in); where the two disagree, the design doc wins.
@@ -164,8 +164,8 @@ the graph. Race setup gets traffic / cops toggles.
 | # | Phase | Delivers | Acceptance |
 |---|---|---|---|
 | F0 | **Measure + audit** (read-only) **DONE 2026-10-15** | F0a casco numbers + tile pick, F0b span-consumer table, F0c design (`GEO_FREE_ROAM_DESIGN.md`) | Done |
-| F1 | **Road world, offline** | Tasks T1-T8 of design section 6: cache reader, raster window, graph + junction patches, ribbons + heights, ROAMTILE + determinism harness, locator, coverage audit, dev viewer | Same bytes twice / reversed order / worker thread. 0 uncovered drivable ways in the casco polygon, 0 seam mismatches. Viewer PNGs looked at |
-| F2 | **Drive it (casco, flat look)** | ROAM mode, FREE ROAM button in the geo selector, car select, spawn on the clicked point, fixed world origin at the spawn tile, locator physics + invisible walls, all tiles loaded at once, plain road/ground render only | Selftest `roam` scenario: scripted drive across 20+ junctions, never falls through, never stuck, never leaves the surface, under bridges stays under. Corner test: 90-deg turns at 20 junctions per kind at 40 and 80 km/h, 0 pinches. Strip-mirror A/B on an identical road |
+| F1 | **Road world, offline** **DONE 2026-10-16** (T1-T10) | Tasks T1-T8 of design section 6: cache reader, raster window, graph + junction patches, ribbons + heights, ROAMTILE + determinism harness, locator, coverage audit, dev viewer | Same bytes twice / reversed order / worker thread. 0 uncovered drivable ways in the casco polygon, 0 seam mismatches. Viewer PNGs looked at |
+| F2 | **Drive it (casco, flat look)** **DONE 2026-10-17** (A mode/entry, B physics, C render, D selftest rows `roam` + `roam-corners`, E acute corners) | ROAM mode, FREE ROAM button in the geo selector, car select, spawn on the clicked point, fixed world origin at the spawn tile, locator physics + invisible walls, all tiles loaded at once, plain road/ground render only | Selftest `roam` scenario: scripted drive across 20+ junctions, never falls through, never stuck, never leaves the surface, under bridges stays under. Corner test: 90-deg turns at 20 junctions per kind at 40 and 80 km/h, 0 pinches. Strip-mirror A/B on an identical road |
 | F3 | **Tile streaming** | Tile worker, resident set, unload with hysteresis, memory budget, start gate | 10-minute scripted drive: private bytes flat after the first lap of tiles, no hitch > 1 frame on tile publish, no missing tile in front of the car |
 | F4 | **Scenery parity** (3-4 rounds, design 4.4) | Emitters ported to per-tile context: buildings, sidewalks, mast-arm lights + plates, trees, furniture | geo_tour poses on the casco look like today's geo track, side by side |
 | F5 | **Route planner** | Drive-and-drop keys, map overlay (reuse the geo selector map), route line on the minimap and the road, save / load by name | Plan, save, quit, reload, same route |
