@@ -32,6 +32,7 @@
 #include "td5_roam_stream.h"
 #include "td5_roam_physics.h"   /* td5_roam_physics_note_frame */
 #include "td5_roam_mode.h"      /* td5_roam_active (the full-load memory samples) */
+#include "td5_roam_scenery.h"   /* [F4a] the worker's scenery source              */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -103,6 +104,7 @@ typedef struct {
     int                ctx_failed;
     TD5_RoamHeight    *hc;                /* worker-owned                             */
     int                hc_ok;
+    TD5_RoamScnSource *scn;               /* [F4a] worker-owned scenery source        */
     RsJob              job[RS_MAX_JOBS];  int njob;        /* under cs */
     RsResult           res[RS_MAX_RESULTS]; int nres;      /* under cs */
     /* main-only inbox (results moved out of the shared queue) */
@@ -285,7 +287,7 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
     }
     if (j->layers & RS_SCEN) {
         t0 = td5_plat_time_ms();
-        r->baked = td5_roam_render_bake(t, s->hc_ok ? s->hc : NULL);
+        r->baked = td5_roam_render_bake_ex(t, s->hc_ok ? s->hc : NULL, s->scn);
         r->ms_bake = td5_plat_time_ms() - t0;
     }
     if (j->layers & RS_ROAD) r->road = t;
@@ -332,6 +334,20 @@ static int rs_push_result(RsSession *s, const RsResult *r)
     }
 }
 
+/* [F4a] a neighbour ROAD tile the scenery's guard needs and no file holds: built here */
+static RoamTile *rs_scn_build_road(void *u, int tx, int tz)
+{
+    RsSession *s = (RsSession *)u;
+    RoamTile *t = NULL;
+    char err[96];
+    return rs_build(s, tx, tz, &t, err, sizeof err) ? t : NULL;
+}
+
+static void rs_scn_open(RsSession *s)
+{
+    if (td5_roam_scn_enabled()) s->scn = td5_roam_scn_open(s->place, &s->grid, rs_scn_build_road, s);
+}
+
 static DWORD WINAPI rs_thread_proc(LPVOID param)
 {
     RsSession *s = (RsSession *)param;
@@ -340,6 +356,7 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
     /* FIRST, before any build: adopt the main thread's rounding mode (td5_platform.h) */
     td5_plat_fpenv_apply(&s->fpenv);
     if (s->hc) s->hc_ok = td5_roam_render_open_height(s->hc);
+    rs_scn_open(s);
     while (!InterlockedCompareExchange(&s->cancel, 0, 0)) {
         double m0;
         if (!rs_take_job(s, &j)) { WaitForSingleObject(s->wake, 50); continue; }
@@ -358,6 +375,8 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
     if (s->ctx) { td5_roam_tile_ctx_close(s->ctx); s->ctx = NULL; }
     if (s->hc && s->hc_ok) td5_roam_height_close(s->hc);
     s->hc_ok = 0;
+    td5_roam_scn_close(s->scn);
+    s->scn = NULL;
     return 0;
 }
 
@@ -828,6 +847,7 @@ int td5_roam_stream_begin(const char *place, const RoamGrid *g, TD5_RoamResident
     if (s->thread) SetThreadPriority(s->thread, td5_env_int("TD5RE_ROAM_STREAM_PRIORITY", THREAD_PRIORITY_BELOW_NORMAL, -2, 2));
     if (!s->thread) {
         s->hc_ok = td5_roam_render_open_height(s->hc);
+        rs_scn_open(s);
         TD5_LOG_W(LOG_TAG, "ROAM_STREAM: no worker thread (%s): tiles load on the main thread",
                   s->worker_on ? "CreateThread failed" : "TD5RE_ROAM_STREAM_WORKER=0");
     }
@@ -882,7 +902,8 @@ void td5_roam_stream_end(void)
     } else {
         if (s->ctx) td5_roam_tile_ctx_close(s->ctx);
         if (s->hc_ok) td5_roam_height_close(s->hc);
-        s->ctx = NULL; s->hc_ok = 0;
+        td5_roam_scn_close(s->scn);
+        s->ctx = NULL; s->hc_ok = 0; s->scn = NULL;
     }
     /* results nobody installed, then every resident tile */
     for (i = 0; i < s->nres; i++) rs_result_free(&s->res[i]);

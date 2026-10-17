@@ -59,6 +59,7 @@
 #include "td5_roam_ribbon.h"
 #include "td5_roam_view.h"
 #include "td5_roam_render.h"
+#include "td5_roam_scenery.h"   /* [F4a] the tile's SCENERY layer */
 
 #if defined(__has_include)
 #  if __has_include("td5_roam_mode.h")
@@ -100,6 +101,14 @@ typedef struct {
     float           cx, cy, cz, r;           /* whole-tile sphere                   */
     uint32_t        nroad, ntri, nground, nskirt;
     size_t          bytes;
+    /* [F4a] the SCENERY layer (td5_roam_scenery.c): runtime headers over the
+     * layer's MODELS records, one display list per 64 m sub-block */
+    TD5_RoamScenery *scn;
+    TD5_MeshHeader  *smesh;                  /* scn->nrec runtime headers           */
+    TD5_MeshHeader **sptr;                   /* pointers to them, sub-block order   */
+    float            ssph[TD5_ROAM_SCN_NSB][4];
+    TD5_SpanDisplayList sdl[TD5_ROAM_SCN_NSB];
+    uint32_t         nscn;
 } RRTile;
 
 typedef struct { RRTile *t; uint32_t tick; } RRRetired;
@@ -134,6 +143,8 @@ typedef struct {
      * wait RR_RETIRE_TICKS main-thread ticks before they are freed */
     int       streamed;
     int       fog_done;
+    TD5_RoamScnSource *scn;                  /* [F4a] main-thread scenery source (F2 path only) */
+    int       scn_failed;
     RRRetired *retired;
     int       nretired, capretired;
     uint32_t  retire_clock;
@@ -370,7 +381,73 @@ static void rr_free_tile(RRTile *rt)
     int k;
     if (!rt) return;
     for (k = 0; k < rt->nmesh; k++) free(rt->mesh[k]);
+    free(rt->smesh);
+    free(rt->sptr);
+    td5_roam_scn_free(rt->scn);
     free(rt);
+}
+
+/* [F4a] Runtime headers over the scenery records (td5_track_runtime_mesh_for's
+ * relocation: header bytes up to the links, links rebased off the record), moved
+ * from the TILE-LOCAL frame they were written in to the render frame: the vertices
+ * stay tile-local and mesh->origin (24.8, the renderer's own convention) carries
+ * the tile origin; bounding centres are render-float. Takes ownership of sc. */
+static int rr_attach_scenery(RRTile *rt, TD5_RoamScenery *sc)
+{
+    uint32_t i;
+    int k;
+    const double offx = (double)sc->org_x - (double)s_rr.f.ox;
+    const double offz = (double)sc->org_z - (double)s_rr.f.oz;
+    const double offy = -s_rr.f.dy + s_rr.lift;
+    if (!sc->nrec) { rt->scn = sc; return 1; }
+    rt->smesh = (TD5_MeshHeader *)calloc(sc->nrec, sizeof(TD5_MeshHeader));
+    rt->sptr = (TD5_MeshHeader **)calloc(sc->nrec, sizeof(TD5_MeshHeader *));
+    if (!rt->smesh || !rt->sptr) { free(rt->smesh); free(rt->sptr); rt->smesh = NULL; rt->sptr = NULL; td5_roam_scn_free(sc); return 0; }
+    for (i = 0; i < sc->nrec; i++) {
+        const uint8_t *rec = sc->blob + sc->rec_off[i];
+        TD5_MeshHeader *m = &rt->smesh[i];
+        uint32_t co, vo;
+        memcpy(m, rec, TD5_MESH_DISK_OFF_COMMANDS);
+        memcpy(&co, rec + TD5_MESH_DISK_OFF_COMMANDS, 4);
+        memcpy(&vo, rec + TD5_MESH_DISK_OFF_VERTICES, 4);
+        m->commands = co ? (TD5_PrimitiveCmd *)(void *)(rec + co) : NULL;
+        m->vertices = vo ? (TD5_MeshVertex *)(void *)(rec + vo) : NULL;
+        m->normals = NULL;
+        m->runtime_flags = 0;
+        m->origin_x = (float)((double)m->origin_x + offx * 256.0);
+        m->origin_y = (float)((double)m->origin_y + offy * 256.0);
+        m->origin_z = (float)((double)m->origin_z + offz * 256.0);
+        m->bounding_center_x = (float)((double)m->bounding_center_x + offx);
+        m->bounding_center_y = (float)((double)m->bounding_center_y + offy);
+        m->bounding_center_z = (float)((double)m->bounding_center_z + offz);
+        rt->sptr[i] = m;
+    }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+        float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+        uint32_t j;
+        rt->sdl[k].count = sc->sb_count[k];
+        rt->sdl[k].meshes = rt->sptr + sc->sb_first[k];
+        rt->ssph[k][3] = 0.0f;
+        for (j = 0; j < sc->sb_count[k]; j++) {
+            const TD5_MeshHeader *m = rt->sptr[sc->sb_first[k] + j];
+            const float c3[3] = { m->bounding_center_x, m->bounding_center_y, m->bounding_center_z };
+            int a;
+            for (a = 0; a < 3; a++) {
+                if (c3[a] - m->bounding_radius < lo[a]) lo[a] = c3[a] - m->bounding_radius;
+                if (c3[a] + m->bounding_radius > hi[a]) hi[a] = c3[a] + m->bounding_radius;
+            }
+        }
+        if (sc->sb_count[k]) {
+            const float dx = 0.5f * (hi[0] - lo[0]), dy = 0.5f * (hi[1] - lo[1]), dz = 0.5f * (hi[2] - lo[2]);
+            rt->ssph[k][0] = 0.5f * (lo[0] + hi[0]); rt->ssph[k][1] = 0.5f * (lo[1] + hi[1]);
+            rt->ssph[k][2] = 0.5f * (lo[2] + hi[2]);
+            rt->ssph[k][3] = sqrtf(dx * dx + dy * dy + dz * dz);
+        }
+    }
+    rt->scn = sc;
+    rt->nscn = sc->nrec;
+    rt->bytes += sc->blob_bytes + (size_t)sc->nrec * (sizeof(TD5_MeshHeader) + sizeof(void *) + 4u);
+    return 1;
 }
 
 /* Bake `t` with the ground from `hc` (NULL = no ground). Returns the tile or NULL
@@ -620,6 +697,52 @@ done_counts:
     return NULL;
 }
 
+/* [F4a] road + ground bake, then the SCENERY layer when a source is given (the
+ * caller's: one per baking thread). The tile sphere grows to hold both. */
+static RRTile *rr_bake_full(const RoamTile *t, TD5_RoamHeight *hc, TD5_RoamScnSource *src)
+{
+    RRTile *rt = rr_bake(t, hc);
+    TD5_RoamScenery *sc;
+    float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+    int k, a, any = 0;
+    if (!src || s_rr.f.route || !td5_roam_scn_enabled()) return rt;
+    sc = td5_roam_scn_build(src, t, hc);
+    if (!sc) return rt;
+    if (!rt) {
+        rt = (RRTile *)calloc(1, sizeof *rt);
+        if (!rt) { td5_roam_scn_free(sc); return NULL; }
+        rt->tx = t->tx; rt->tz = t->tz;
+        rt->dl.meshes = rt->vis;
+    }
+    if (!rr_attach_scenery(rt, sc)) return rt;
+    TD5_LOG_I(LOG_TAG, "ROAM_SCENERY tile %d,%d meshes=%d bytes=%.2f MB build_ms=%u (src %u emit %u) buildings=%d/%d "
+              "set_pieces=%d aprons=%d dropped_road=%d footpath_pieces=%d lawn_tris=%d trees=%d guard=%d hash=%08x",
+              t->tx, t->tz, sc->st.meshes, (double)sc->st.bytes / 1048576.0, (unsigned)sc->st.ms, (unsigned)sc->st.ms_src,
+              (unsigned)sc->st.ms_emit, sc->st.bld_emitted, sc->st.bld_seen, sc->st.bld_prefab, sc->st.bld_apron,
+              sc->st.bld_drop_road, sc->st.fp_pieces - sc->st.fp_cut_road - sc->st.fp_merged, sc->st.lawn_tris,
+              sc->st.trees, sc->st.guard_overlaps, sc->st.hash);
+    for (k = 0; k < rt->nmesh; k++)
+        for (a = 0; a < 3; a++) {
+            if (rt->sph[k][a] - rt->sph[k][3] < lo[a]) lo[a] = rt->sph[k][a] - rt->sph[k][3];
+            if (rt->sph[k][a] + rt->sph[k][3] > hi[a]) hi[a] = rt->sph[k][a] + rt->sph[k][3];
+            any = 1;
+        }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+        if (!rt->sdl[k].count) continue;
+        for (a = 0; a < 3; a++) {
+            if (rt->ssph[k][a] - rt->ssph[k][3] < lo[a]) lo[a] = rt->ssph[k][a] - rt->ssph[k][3];
+            if (rt->ssph[k][a] + rt->ssph[k][3] > hi[a]) hi[a] = rt->ssph[k][a] + rt->ssph[k][3];
+            any = 1;
+        }
+    }
+    if (any) {
+        const float dx = 0.5f * (hi[0] - lo[0]), dy = 0.5f * (hi[1] - lo[1]), dz = 0.5f * (hi[2] - lo[2]);
+        rt->cx = 0.5f * (lo[0] + hi[0]); rt->cy = 0.5f * (lo[1] + hi[1]); rt->cz = 0.5f * (lo[2] + hi[2]);
+        rt->r = sqrtf(dx * dx + dy * dy + dz * dz);
+    }
+    return rt;
+}
+
 /* ------------------------------------------------------------- tile table ---- */
 
 static int rr_find(int tx, int tz)
@@ -685,7 +808,12 @@ int td5_roam_render_add_tile(const RoamTile *t)
     uint32_t t0;
     if (!s_rr.began || !t) return 0;
     t0 = td5_plat_time_ms();
-    rt = rr_bake(t, s_rr.hc_ok ? s_rr.hc : NULL);
+    /* [F4a] the F2 path bakes on the main thread with the session's own scenery source */
+    if (!s_rr.scn && !s_rr.scn_failed && !s_rr.f.route && td5_roam_scn_enabled()) {
+        s_rr.scn = td5_roam_scn_open(s_rr.place, &s_rr.grid, NULL, NULL);
+        if (!s_rr.scn) s_rr.scn_failed = 1;
+    }
+    rt = rr_bake_full(t, s_rr.hc_ok ? s_rr.hc : NULL, s_rr.scn);
     if (!rt) { td5_roam_render_remove_tile(t->tx, t->tz); return 0; }
     if (!rr_insert(rt)) { rr_free_tile(rt); return 0; }
     TD5_LOG_D(LOG_TAG, "ROAM_RENDER_TILE %d,%d meshes=%d road_quads=%u patch_tris=%u ground_quads=%u skirts=%u "
@@ -701,6 +829,15 @@ TD5_RoamBaked *td5_roam_render_bake(const RoamTile *t, TD5_RoamHeight *hc)
     if (!s_rr.began || !t) return NULL;
     return (TD5_RoamBaked *)rr_bake(t, hc);
 }
+
+TD5_RoamBaked *td5_roam_render_bake_ex(const RoamTile *t, TD5_RoamHeight *hc, TD5_RoamScnSource *scn)
+{
+    if (!s_rr.began || !t) return NULL;
+    return (TD5_RoamBaked *)rr_bake_full(t, hc, scn);
+}
+
+const RoamGrid *td5_roam_render_grid(void) { return s_rr.began ? &s_rr.grid : NULL; }
+const char *td5_roam_render_place(void) { return s_rr.began ? s_rr.place : NULL; }
 
 int td5_roam_render_install(TD5_RoamBaked *b)
 {
@@ -809,6 +946,7 @@ void td5_roam_render_end(void)
     for (i = 0; i < s_rr.nretired; i++) rr_free_tile(s_rr.retired[i].t);
     free(s_rr.retired);
     if (s_rr.hc) { td5_roam_height_close(s_rr.hc); free(s_rr.hc); }
+    td5_roam_scn_close(s_rr.scn);
     free(s_rr.tried);
     memset(&s_rr, 0, sizeof s_rr);
 }
@@ -820,7 +958,7 @@ void td5_roam_render_stats(TD5_RoamRenderStats *o)
     o->tiles = s_rr.ntile;
     for (i = 0; i < s_rr.ntile; i++) {
         const RRTile *t = s_rr.tile[i];
-        o->meshes += t->nmesh;
+        o->meshes += t->nmesh + (int)t->nscn;
         o->road_quads += t->nroad; o->patch_tris += t->ntri;
         o->ground_quads += t->nground; o->skirt_quads += t->nskirt;
         o->bytes_mb += (double)t->bytes / 1048576.0;
@@ -1155,11 +1293,26 @@ void td5_roam_render_tiles(int view)
             t->vis[n++] = t->mesh[k];
             quads += (uint32_t)(t->mesh[k]->total_vertex_count / 4);
         }
-        if (n == 0) continue;
-        t->dl.count = (uint32_t)n;
-        t->dl.meshes = t->vis;
-        td5_render_span_display_list(&t->dl);
-        tiles++; meshes += n;
+        if (n > 0) {
+            t->dl.count = (uint32_t)n;
+            t->dl.meshes = t->vis;
+            td5_render_span_display_list(&t->dl);
+            meshes += n;
+        }
+        /* [F4a] the scenery layer, one display list per sub-block (the renderer culls each mesh) */
+        if (t->nscn) {
+            for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+                const float *s = t->ssph[k];
+                if (!t->sdl[k].count) continue;
+                dx = s[0] - ex; dy = s[1] - ey; dz = s[2] - ez;
+                if (sqrtf(dx * dx + dy * dy + dz * dz) - s[3] > R) continue;
+                if (!td5_render_is_sphere_visible(s[0], s[1], s[2], s[3])) continue;
+                td5_render_span_display_list(&t->sdl[k]);
+                meshes += (int)t->sdl[k].count;
+                n++;
+            }
+        }
+        if (n > 0) tiles++;
     }
 
     {
