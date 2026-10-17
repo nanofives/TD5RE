@@ -266,6 +266,10 @@ void td5_render_debug_line_world(float x0, float y0, float z0,
                                  float x1, float y1, float z1,
                                  uint32_t argb);
 void td5_render_debug_lines_flush(void);
+/* [roam F5-A] see td5_render.c: world -> pre-transformed vertex (depth + rhw), 0 when behind the near plane. */
+struct TD5_D3DVertex;
+int  td5_render_project_world_vertex(float wx, float wy, float wz, uint32_t argb, struct TD5_D3DVertex *out);
+
 void td5_render_debug_lines_reset(void);
 
 /* [dynamic-traffic] Whole-actor draw fade (0 = invisible, 255 = opaque /

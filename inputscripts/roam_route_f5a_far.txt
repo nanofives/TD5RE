@@ -1,0 +1,8 @@
+sync race
++120 key 0x32 press
++30 key left 1
++300 key left 0
++20 key 0x02 press
++40 key 0x44 press
++20 log f5a_far_done
+quit

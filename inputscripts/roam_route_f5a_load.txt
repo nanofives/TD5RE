@@ -1,0 +1,12 @@
+# F5-A: second process: open the map, load test1 from the list, shot, leave.
+sync race
++120 log f5a_load_begin
++30 key 0x32 press
++60 key 0x26 press
++40 key 0x44 press
++30 key enter press
++60 key 0x44 press
++30 log f5a_loaded
++30 key esc press
++60 log f5a_load_done
+quit

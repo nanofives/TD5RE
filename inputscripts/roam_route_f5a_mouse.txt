@@ -1,0 +1,7 @@
+# F5-A: the map's mouse path through the dev mouse script (TD5RE_ROAM_ROUTE_MOUSE): click START, click two
+# waypoints, drag the START pin. Needs TD5RE_ROAM_DRIVE=street so the car stands on a street at the click.
+sync race
++120 key 0x32 press
++240 key 0x44 press
++30 log f5a_mouse_done
+quit

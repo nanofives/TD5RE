@@ -41,6 +41,7 @@
 #include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
+#include "td5_roam_route_ui.h" /* GEO FREE ROAM route planner (F5-A): keys, map overlay, guidance */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -6797,6 +6798,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
      * injected accumulator piling up unused. */
     int ticks_this_frame = 0;
     s_pause_input_done = 0;  /* allow pause input once this frame */
+    td5_roam_route_ui_frame();   /* [GEO FREE ROAM F5-A] route keys / map input; self-gated (no-op outside roam) */
 
     /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
      * Detected here, OUTSIDE the fixed-step loop, so a brief ESC tap exits a
@@ -7008,7 +7010,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             }
             s_prev_freecam_start = start_now;
         }
-        if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
+        if ((esc_edge || pause_act_edge || td5_roam_route_ui_want_pause()) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
             /* [PAUSED-BY INDICATOR 2026-08-05] Attribute the pause to the pad
              * that fired it; keyboard ESC (no pad bit) is pane 0. Surfaced only
@@ -7067,7 +7069,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         if (s_pause_menu_active) {
             /* Process pause menu input ONCE per frame (not per tick) to avoid
              * multiple edge triggers from the sim tick loop. */
-            if (!s_pause_input_done) {
+            if (!s_pause_input_done && !td5_roam_route_ui_map_open()) {   /* [F5-A] the route map owns the keys while up */
                 s_pause_input_done = 1;
 
                 /* Nav edge-detection state (s_prev_down/up/left/right/enter/jb)
@@ -8513,6 +8515,14 @@ static void frame_render(void)
             }
         }
 
+        /* [GEO FREE ROAM F5-A] on-road route guidance (ribbon + chevrons + pin beacons) through the
+         * same debug-line batch; pane 0 only, self-gated (no-op outside roam / without a route). */
+        if (vp == 0 && td5_roam_active()) {
+            td5_render_debug_lines_reset();
+            td5_roam_route_ui_draw_world(vp);
+            td5_render_debug_lines_flush();
+        }
+
 #ifndef TD5RE_RELEASE
         /* [ROAM VIEW] GEO FREE ROAM dev viewer: the ROAMTILE road layer near the
          * render eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
@@ -8674,6 +8684,7 @@ static void frame_render(void)
      * emitted inside the per-viewport 3D loop is clipped to one pane.
      * Self-gated (no-op on every track that is not a real place). */
     td5_hud_draw_street_lines();
+    td5_roam_route_ui_draw_hud();   /* [GEO FREE ROAM F5-A] route key hints + status; self-gated */
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op
@@ -8706,7 +8717,9 @@ pause_overlays:
      * the per-viewport coloured player-identity borders/name plates, and the
      * disconnect modal — instead of those bleeding over the menu. (The race-end
      * fade below is the leaving-transition wipe and intentionally stays on top.) */
-    if (s_pause_menu_active) {
+    if (s_pause_menu_active && td5_roam_route_ui_map_open()) {
+        td5_roam_route_ui_draw_overlay();   /* [GEO FREE ROAM F5-A] the route map replaces the pause panel */
+    } else if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
         /* [PAUSED-BY INDICATOR 2026-08-05] "PLAYER N PAUSED" above the shared
          * split-screen pause panel. Self-gated (local >1-human only). */

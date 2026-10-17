@@ -54,6 +54,7 @@
 #include "td5_geo_roads.h"  /* [1018 L] the street under a car on a block-loop corridor */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM: speedo-only HUD, relabelled pause row */
+#include "td5_roam_route_ui.h" /* GEO FREE ROAM F5-A: roam minimap (street map + route) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -6591,7 +6592,8 @@ void td5_hud_render_overlays(float dt)
      * [REBASE MERGE: master's circuit-minimap knob + branch's per-view loop.] */
     if (g_track_type_mode == 0 || g_td5.ini.circuit_minimap) {
         for (int v = 0; v < s_view_count; v++) {
-            if (!(*s_hud_flags[v] & TD5_HUD_UTURN_WARNING)) continue;
+            /* [GEO FREE ROAM F5-A] roam keeps the span-reading U-turn flag off but still wants its minimap */
+            if (!(*s_hud_flags[v] & TD5_HUD_UTURN_WARNING) && !(td5_roam_active() && v == 0)) continue;
             hud_set_minimap_for_view(v);
             td5_hud_render_minimap(g_actor_slot_map[v]);
         }
@@ -7631,6 +7633,14 @@ static int hud_minimap_street_labels(int actor_slot, float offset_x, float offse
     return placed;
 }
 
+void td5_hud_prim_tris(const struct TD5_D3DVertex *v, int nv, const uint16_t *idx, int ni)
+{
+    if (!v || !idx || nv < 3 || ni < 3) return;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris((const TD5_D3DVertex *)v, nv, idx, ni);
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
     /* Faithful: the original disabled the whole minimap on circuit tracks via an
@@ -7643,7 +7653,10 @@ void td5_hud_render_minimap(int actor_slot)
      * dot loops already handle the circuit modulo-wrap span window. */
     int circuit = (g_track_is_circuit != 0);
     if (circuit && !g_td5.ini.circuit_minimap) return;
-    if (td5_roam_active()) return;   /* [GEO FREE ROAM F2-A] no minimap in roam (F5+ draws its own) */
+    if (td5_roam_active()) {   /* [GEO FREE ROAM F5-A] roam draws its own street map + the planned route */
+        td5_roam_route_ui_draw_minimap(s_minimap_x, s_minimap_y, s_minimap_width, s_minimap_height);
+        return;
+    }
 
     /* Guard against the span-wrap modulo dividing by zero before the track
      * strip is loaded (g_strip_span_count == 0) -- crashed on early race frames

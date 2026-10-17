@@ -69,6 +69,8 @@ double td5_roam_spawn_snap_m(void);
 
 /* lat/lon -> PLACE frame units of `slug` (PLACE.JSON projection). 1 on success. */
 int  td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz);
+/* [F5-A] PLACE frame units -> lat/lon of `slug` (the inverse of the above). 1 on success. */
+int  td5_roam_place_to_latlon(const char *slug, double px, double pz, double *lat, double *lon);
 /* 1 when `slug` has road tiles to roam in (roam/ROAMGRID.JSON present). */
 int  td5_roam_place_has_tiles(const char *slug);
 /* The place a map point can be roamed in (F2 A, FREE ROAM button): the first known place whose

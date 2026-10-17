@@ -158,6 +158,21 @@ int td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *
     return 1;
 }
 
+/* [F5-A] the inverse of td5_roam_latlon_to_place, in doubles (the route planner stores lat/lon). */
+int td5_roam_place_to_latlon(const char *slug, double px, double pz, double *lat, double *lon)
+{
+    RoamProj p;
+    double x, z, e, n;
+    if (!slug || !lat || !lon || !roam_proj_load(slug, &p)) return 0;
+    x = (px - p.offx) / p.upm;
+    z = (pz - p.offz) / p.upm;
+    e = x * p.cs + z * p.sn;
+    n = -x * p.sn + z * p.cs;
+    *lat = p.lat0 + n / p.mdlat;
+    *lon = p.lon0 + e / p.mdlon;
+    return 1;
+}
+
 int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
                              int32_t *px, int32_t *pz)
 {
