@@ -55,6 +55,7 @@
 #include "td5_roam_render.h" /* GEO FREE ROAM plain render (dev pose generator) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): dev CLI --Roam=1 */
 #include "td5_roam_route.h"  /* GEO FREE ROAM route planner (F5-A): dev test hook */
+#include "td5_roam_barrier.h" /* GEO FREE ROAM route barriers (F6-A): dev census hook */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1712,6 +1713,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 0;
     /* GEO FREE ROAM (F5-A) dev: TD5RE_ROAM_ROUTE_TEST=1 plans random routes + save/load round trip, exits. */
     if (td5_roam_route_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F6-A) dev: TD5RE_ROAM_BARRIER_TEST=1 plans the census routes, builds their barriers, writes the census, exits. */
+    if (td5_roam_barriers_dev_test())
         return 0;
     /* GEO FREE ROAM (F2-C) dev: TD5RE_ROAM_RENDER_POSES=<file> writes free-cam tour poses. */
     if (td5_roam_render_dev_poses())

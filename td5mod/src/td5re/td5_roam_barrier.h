@@ -71,12 +71,19 @@ void td5_roam_barriers_draw(int view);               /* per pane, in the world p
 
 typedef struct {
     int clusters_passed;      /* clusters the route goes through (start/finish pockets included) */
+    int clusters_expanded;    /* neighbour clusters glued to a route cluster (no ribbon between): sealed like the rest */
     int passes;               /* route transitions through a cluster                           */
     int barriers_mouth, barriers_turn;
     int arms_total, arms_route, arms_blocked;   /* arms of those clusters: all / taken / barriered */
+    int arms_linked;          /* arms left unbarriered on purpose: they lie along the route / have no ribbon row and only lead to another sealed cluster or a dead end */
     int arms_open;            /* arms neither taken nor barriered (must be 0)                   */
     int across_route;         /* barriers whose segment crosses the route polyline (must be 0)  */
     int missing_cluster;      /* a pass whose cluster record was not found in the tiles read    */
+    int degree_open;          /* ribbon ends the PLANNER graph counts at those clusters that are neither taken nor barriered (must be 0) */
+    int pass_gaps;            /* consecutive route edges that do not meet at one node key (must be 0)  */
+    int ring_edges, oneway_edges;   /* route edges that are roundabout / one-way ribbons (plaza ring, divided avenue) */
+    int slid, slide_fail;     /* mouth barriers moved outward along their arm (the cut row lay across the route) / none fit */
+    int boards_alt, boards_dropped;   /* turn boards put on the outer kerb of the exit arm / left out (ahead and kerb both on the route) */
     int arm_no_row;           /* arms with no ribbon row (edge without quads): nothing to close  */
     int tiles_read;
     double build_ms;

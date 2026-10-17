@@ -75,6 +75,8 @@ int  td5_roam_route_graph_building(void);
 void td5_roam_route_graph_free(void);
 /* Counters for the log / tests. */
 void td5_roam_route_graph_stats(int *nedge, int *nnode, int *nseg, double *ms, double *km);
+/* [F6-A] ribbon ends the planner graph has at a node / cluster key; -1 when the key is unknown. */
+int  td5_roam_route_graph_node_degree(int64_t key);
 
 /* Visit every street edge whose bbox meets a PLACE-frame window (map / minimap drawing).
  * xz = the edge's centre line, place frame int32 pairs. Returns the edges visited. */
