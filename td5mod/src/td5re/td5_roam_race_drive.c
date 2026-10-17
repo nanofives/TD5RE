@@ -105,7 +105,24 @@ static struct {
     FILE    *trc;                 /* <log dir>roam_sprint_trace.csv, one row per driven tick */
     double   along_s;             /* distance along the driver path (m) */
     double   ltx, ltz;            /* last pursuit target, world units (trace) */
+    int      shots;               /* TD5RE_ROAM_SPRINT_SHOTS=1: frame dumps at the key moments */
+    char     shot_done[8][24];
+    int      nshot;
 } D;
+
+/* one frame dump per name: <log dir>roam_sprint_<name>.png */
+static void sd_shot(const char *name)
+{
+    char path[512];
+    const char *dir = td5_plat_log_dir();
+    int i;
+    if (!D.shots) return;
+    for (i = 0; i < D.nshot; i++) if (!strcmp(D.shot_done[i], name)) return;
+    if (D.nshot < 8) snprintf(D.shot_done[D.nshot++], sizeof D.shot_done[0], "%s", name);
+    snprintf(path, sizeof path, "%sroam_sprint_%s.png", dir ? dir : "", name);
+    td5_plat_request_frame_dump(path);
+    TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] frame dump %s", path);
+}
 
 /* the planned polyline + every barrier, place frame, to <log dir>roam_sprint_route.csv */
 static void sd_dump_route(void)
@@ -146,6 +163,7 @@ void td5_roam_sprint_test_arm(int mode)
     D.hint = -1;
     D.ch_hint = ROAM_PRIM_NONE;
     D.want_wt = mode == TD5_RSPRINT_SMOKE ? 1 : 2;
+    D.shots = td5_env_int("TD5RE_ROAM_SPRINT_SHOTS", 0, 0, 1);
     snprintf(D.route_name, sizeof D.route_name, "%s", mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : "selftest_sprint");
 }
 
@@ -379,7 +397,8 @@ void td5_roam_sprint_test_frame(void)
         break;
     case 2:   /* the panel is up over the map under the pause menu: TRAFFIC on (inert), START RACE */
         if (td5_roam_race_state() != TD5_RRACE_SETUP) { sd_finish("setup panel closed by itself", 1); return; }
-        if (D.phase_frames < 30) break;
+        if (D.phase_frames == 25) sd_shot("1_setup");
+        if (D.phase_frames < (D.shots ? 45 : 30)) break;
         if (!td5_game_is_pause_menu_active() || !td5_roam_route_ui_map_open()) {
             if (D.phase_frames > 600) sd_finish("pause menu / route map never opened for the setup", 1);
             break;
@@ -407,12 +426,23 @@ void td5_roam_sprint_test_frame(void)
         }
         break;
     case 3:
+        if (td5_roam_race_state() == TD5_RRACE_COUNTDOWN && td5_game_resume_countdown_ticks() > 0 &&
+            td5_game_resume_countdown_ticks() <= 45)
+            sd_shot("2_countdown");
+        if (td5_roam_race_state() == TD5_RRACE_RACING && D.along_s > D.length_m * 0.30) sd_shot("3_midrace");
+        if (td5_roam_race_state() == TD5_RRACE_RACING && td5_roam_race_result()->ncp > 1 &&
+            td5_roam_race_result()->split_ticks[0] > 0 && td5_roam_race_result()->split_ticks[0] + 25 <= (long)
+            (g_td5.simulation_tick_counter - D.t_go))
+            sd_shot("4_split");
         if (td5_roam_race_state() == TD5_RRACE_FINISHED) {
-            D.phase = 4;
-            sd_finish("finished", 0);
+            D.phase = 4; D.phase_frames = 0;
         } else if (td5_roam_race_state() == TD5_RRACE_OFF) {
             sd_finish("race ended without a finish", 1);
         }
+        break;
+    case 4:   /* results panel up; with shots on, give it a moment for the frame dump */
+        if (!D.shots || D.phase_frames >= 120) { sd_finish("finished", 0); break; }
+        if (D.phase_frames == 60) sd_shot("6_results");
         break;
     default:
         break;
@@ -608,6 +638,7 @@ static uint32_t sd_bits(TD5_Actor *a)
             if (past > w->max_past_m) w->max_past_m = past;
             w->hits = ws.hits_slot0 - w->hits0;
             if (w->hits > 0 && k < 3.0) w->stop_t++;
+            if (w->stop_t == 6) sd_shot(D.active_wt == 0 ? "5_blocked_1" : "5_blocked_2");
             if ((w->hits > 0 && w->stop_t > 20) || tick - w->t0 > 8 * 30 || past > 4.0) {
                 w->blocked = w->hits > 0 && w->max_past_m < 0.5;
                 TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] wrong turn %d %s: barrier hits %ld, car centre max %.2f m %s the panel, %ld ticks",

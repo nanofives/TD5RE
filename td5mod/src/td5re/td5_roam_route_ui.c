@@ -825,7 +825,7 @@ void td5_roam_route_ui_draw_overlay(void)
             "ARROWS PAN   + / - OR WHEEL ZOOM   ENTER OR CLICK PLACE   1 START   2 WAYPOINT   3 FINISH   X REMOVE   DRAG A PIN TO MOVE",
             0xFFC8D0DA, 14.0f * S);
     ui_text(14.0f * S, H - bot + 29.0f * S,
-            td5_roam_race_state() != TD5_RRACE_OFF ? "SPRINT IN PROGRESS   A ABANDON THE SPRINT   M PAUSE MENU   ESC DRIVE"
+            td5_roam_race_state() >= TD5_RRACE_COUNTDOWN ? "SPRINT IN PROGRESS   A ABANDON THE SPRINT   M PAUSE MENU   ESC DRIVE"
                                                    : "BKSP UNDO   DEL CLEAR   C CAR   F FIT   S SAVE   L LOAD   R RACE THIS ROUTE   M PAUSE MENU   ESC DRIVE",
             0xFFC8D0DA, 14.0f * S);
     /* pin labels */
