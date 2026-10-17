@@ -737,12 +737,12 @@ static void rs_stat_line(RsSession *s, uint32_t now)
         s->next_log_ms = now + 10000u;
         TD5_LOG_I(LOG_TAG, "ROAM_STREAM t=%.0f s private=%.1f MB road=%d tiles (%.2f MB) scenery=%d tiles (%.2f MB) "
                   "pending=%d loaded=%ld built=%ld stale=%ld verified=%ld evicted=%ld/%ld miss=%ld hold=%ld "
-                  "frame median=%.1f worst=%.1f worst_publish=%.1f ms install_worst=%.2f ms | worker max: "
+                  "frame median=%.1f worst=%.1f worst_publish=%.1f ms install_worst=%.2f tick_worst=%.2f ms | worker max: "
                   "verify %u build %u bake %u ms",
                   t, pmb, s->st.road_tiles, s->st.road_mb, s->st.scen_tiles, s->st.scen_mb, pend, s->st.loaded,
                   s->st.built, s->st.stale, s->st.verified, s->st.evicted_road, s->st.evicted_scen, s->st.misses,
                   s->st.holds, rs_frame_pct(s, 0.5), s->st.frame_worst_ms, s->st.frame_worst_publish_ms,
-                  s->st.install_worst_ms, (unsigned)s->verify_ms_max, (unsigned)s->build_ms_max,
+                  s->st.install_worst_ms, s->st.tick_worst_ms, (unsigned)s->verify_ms_max, (unsigned)s->build_ms_max,
                   (unsigned)s->bake_ms_max);
     }
 }
@@ -857,11 +857,11 @@ static void rs_write_summary(RsSession *s)
     fprintf(f, "loaded=%ld\nbuilt=%ld\nstale=%ld\nverified=%ld\nfailed=%ld\nevicted_road=%ld\nevicted_scen=%ld\n"
                "road_min=%d\nroad_max=%d\nscen_min=%d\nscen_max=%d\nmisses=%ld\nholds=%ld\nsync_loads=%ld\n"
                "gate_ms=%.0f\nframes=%ld\nframe_median_ms=%.2f\nframe_p99_ms=%.2f\nframe_worst_ms=%.2f\n"
-               "frame_worst_publish_ms=%.2f\ninstall_worst_ms=%.3f\n",
+               "frame_worst_publish_ms=%.2f\ninstall_worst_ms=%.3f\ntick_worst_ms=%.3f\n",
             s->st.loaded, s->st.built, s->st.stale, s->st.verified, s->st.failed, s->st.evicted_road,
             s->st.evicted_scen, s->st.road_min, s->st.road_max, s->st.scen_min, s->st.scen_max, s->st.misses,
             s->st.holds, s->st.sync_loads, s->st.gate_ms, s->fcount, s->st.frame_median_ms, rs_frame_pct(s, 0.99),
-            s->st.frame_worst_ms, s->st.frame_worst_publish_ms, s->st.install_worst_ms);
+            s->st.frame_worst_ms, s->st.frame_worst_publish_ms, s->st.install_worst_ms, s->st.tick_worst_ms);
     fclose(f);
 }
 
@@ -923,7 +923,7 @@ void td5_roam_stream_stats(TD5_RoamStreamStats *out)
 void td5_roam_stream_tick(void)
 {
     RsSession *s = s_stream.s;
-    uint64_t now_us, t0;
+    uint64_t now_us, t0, t_req, t0_drain_end, t_ev;
     uint32_t now;
     int applied;
     td5_roam_physics_note_frame();     /* session start time, streamed or not */
@@ -981,12 +981,14 @@ void td5_roam_stream_tick(void)
     rs_compute_wanted(s);
     rs_update_requests(s);
     if (!s->thread) rs_inline_one(s);
-    t0 = td5_plat_time_us();
+    t_req = td5_plat_time_us();
+    t0 = t_req;
     applied = rs_drain(s, s->inst_road, s->inst_scen, 0);
     if (applied) {
         const double ms = (double)(td5_plat_time_us() - t0) / 1000.0;
         if (ms > s->st.install_worst_ms) s->st.install_worst_ms = ms;
     }
+    t0_drain_end = td5_plat_time_us();
     s->prev_installed = applied > 0;
     s->last_installed = applied;
     {
@@ -994,9 +996,20 @@ void td5_roam_stream_tick(void)
         rs_evict(s, now);
         s->last_evicted = (int)(s->st.evicted_road + s->st.evicted_scen - ev0);
     }
+    t_ev = td5_plat_time_us();
     if ((int)(now - s->next_stat_ms) >= 0) {
         s->next_stat_ms = now + (uint32_t)s->stat_ms;
         rs_stat_line(s, now);
+    }
+    {
+        /* the stream's own main-thread cost this frame */
+        const uint64_t t_end = td5_plat_time_us();
+        const double ms = (double)(t_end - now_us) / 1000.0;
+        if (s->warm && ms > s->st.tick_worst_ms) s->st.tick_worst_ms = ms;
+        if (ms > 20.0)
+            TD5_LOG_W(LOG_TAG, "ROAM_STREAM_SLOW_TICK %.1f ms (wanted+requests %.1f, install %.1f, evict %.1f, stats %.1f)",
+                      ms, (double)(t_req - now_us) / 1000.0, (double)(t0_drain_end - t_req) / 1000.0,
+                      (double)(t_ev - t0_drain_end) / 1000.0, (double)(t_end - t_ev) / 1000.0);
     }
 }
 

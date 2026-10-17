@@ -102,6 +102,7 @@ typedef struct {
     long     misses, holds, sync_loads;
     double   gate_ms;            /* the start gate's wait                         */
     double   frame_median_ms, frame_worst_ms, frame_worst_publish_ms, install_worst_ms;
+    double   tick_worst_ms;      /* the whole td5_roam_stream_tick on the main thread */
 } TD5_RoamStreamStats;
 void td5_roam_stream_stats(TD5_RoamStreamStats *out);
 
