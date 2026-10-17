@@ -54,6 +54,7 @@
 #include "td5_roam_locate.h" /* GEO FREE ROAM locator (dev self-test) */
 #include "td5_roam_render.h" /* GEO FREE ROAM plain render (dev pose generator) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): dev CLI --Roam=1 */
+#include "td5_roam_route.h"  /* GEO FREE ROAM route planner (F5-A): dev test hook */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1708,6 +1709,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* GEO FREE ROAM (F1 T6b) dev self-test: TD5RE_ROAM_LOCATE_TEST=1 loads every
      * casco ROAMTILE and runs the locator checks + timing, writes the report, exits. */
     if (td5_roam_locate_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F5-A) dev: TD5RE_ROAM_ROUTE_TEST=1 plans random routes + save/load round trip, exits. */
+    if (td5_roam_route_dev_test())
         return 0;
     /* GEO FREE ROAM (F2-C) dev: TD5RE_ROAM_RENDER_POSES=<file> writes free-cam tour poses. */
     if (td5_roam_render_dev_poses())
