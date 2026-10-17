@@ -60,6 +60,7 @@
 #include "td5_roam_view.h"
 #include "td5_roam_render.h"
 #include "td5_roam_scenery.h"   /* [F4a] the tile's SCENERY layer */
+#include "td5_light2.h"         /* [F4a] td5_light2_active: derived normals */
 
 #if defined(__has_include)
 #  if __has_include("td5_roam_mode.h")
@@ -105,6 +106,7 @@ typedef struct {
      * layer's MODELS records, one display list per 64 m sub-block */
     TD5_RoamScenery *scn;
     TD5_MeshHeader  *smesh;                  /* scn->nrec runtime headers           */
+    TD5_VertexNormal *snorm;                 /* derived flat normals (light2 only)  */
     TD5_MeshHeader **sptr;                   /* pointers to them, sub-block order   */
     float            ssph[TD5_ROAM_SCN_NSB][4];
     TD5_SpanDisplayList sdl[TD5_ROAM_SCN_NSB];
@@ -382,9 +384,67 @@ static void rr_free_tile(RRTile *rt)
     if (!rt) return;
     for (k = 0; k < rt->nmesh; k++) free(rt->mesh[k]);
     free(rt->smesh);
+    free(rt->snorm);
     free(rt->sptr);
     td5_roam_scn_free(rt->scn);
     free(rt);
+}
+
+/* [F4a] Flat face normals for the scenery meshes, the same rule as
+ * td5_track_derive_missing_normals (track_face_normal_up, sequential cursor,
+ * billboards and opcode 4 left without) -- the strip derives them for its
+ * generated scenery when light2 is active, so a roam building lights the same. */
+static void rr_face_normal_up(const TD5_MeshVertex *a, const TD5_MeshVertex *b, const TD5_MeshVertex *c, float out[3])
+{
+    float ux = b->pos_x - a->pos_x, uy = b->pos_y - a->pos_y, uz = b->pos_z - a->pos_z;
+    float vx = c->pos_x - a->pos_x, vy = c->pos_y - a->pos_y, vz = c->pos_z - a->pos_z;
+    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const float len2 = nx * nx + ny * ny + nz * nz;
+    float inv;
+    if (len2 < 1e-12f) { out[0] = out[1] = out[2] = 0.0f; return; }
+    inv = 1.0f / sqrtf(len2);
+    nx *= inv; ny *= inv; nz *= inv;
+    if (ny < -0.01f) { nx = -nx; ny = -ny; nz = -nz; }
+    out[0] = nx; out[1] = ny; out[2] = nz;
+}
+
+static void rr_scenery_normals(RRTile *rt)
+{
+    uint32_t i, total = 0, at = 0;
+    if (!td5_light2_active()) return;
+    for (i = 0; i < rt->nscn; i++) total += (uint32_t)rt->smesh[i].total_vertex_count;
+    if (!total) return;
+    rt->snorm = (TD5_VertexNormal *)calloc(total, sizeof(TD5_VertexNormal));
+    if (!rt->snorm) return;
+    for (i = 0; i < rt->nscn; i++) {
+        TD5_MeshHeader *m = &rt->smesh[i];
+        TD5_VertexNormal *nn = rt->snorm + at;
+        int ci, cursor = 0;
+        at += (uint32_t)m->total_vertex_count;
+        if (m->texture_page_id == 1 || m->texture_page_id == 2 || !m->vertices || !m->commands) continue;
+        for (ci = 0; ci < m->command_count; ci++) {
+            const TD5_PrimitiveCmd *cmd = &m->commands[ci];
+            const int needed = cmd->triangle_count * 3 + cmd->quad_count * 4;
+            int t, k;
+            float fn[3];
+            if (cursor + needed > m->total_vertex_count) break;
+            if (cmd->dispatch_type == 4) { cursor += needed; continue; }
+            for (t = 0; t < cmd->triangle_count; t++) {
+                const TD5_MeshVertex *v = m->vertices + cursor + t * 3;
+                rr_face_normal_up(&v[0], &v[1], &v[2], fn);
+                for (k = 0; k < 3; k++) { nn[cursor + t * 3 + k].nx = fn[0]; nn[cursor + t * 3 + k].ny = fn[1]; nn[cursor + t * 3 + k].nz = fn[2]; }
+            }
+            for (t = 0; t < cmd->quad_count; t++) {
+                const int q0 = cursor + cmd->triangle_count * 3 + t * 4;
+                const TD5_MeshVertex *v = m->vertices + q0;
+                rr_face_normal_up(&v[0], &v[1], &v[2], fn);
+                for (k = 0; k < 4; k++) { nn[q0 + k].nx = fn[0]; nn[q0 + k].ny = fn[1]; nn[q0 + k].nz = fn[2]; }
+            }
+            cursor += needed;
+        }
+        m->normals = nn;
+    }
+    rt->bytes += (size_t)total * sizeof(TD5_VertexNormal);
 }
 
 /* [F4a] Runtime headers over the scenery records (td5_track_runtime_mesh_for's
@@ -447,6 +507,7 @@ static int rr_attach_scenery(RRTile *rt, TD5_RoamScenery *sc)
     rt->scn = sc;
     rt->nscn = sc->nrec;
     rt->bytes += sc->blob_bytes + (size_t)sc->nrec * (sizeof(TD5_MeshHeader) + sizeof(void *) + 4u);
+    rr_scenery_normals(rt);
     return 1;
 }
 
@@ -1263,6 +1324,15 @@ int td5_roam_render_dev_poses(void)
 
 /* ------------------------------------------------------------------- draw ---- */
 
+/* one line when a single display list took > 30 ms to submit (a hitch hunt) */
+static void rr_note_slow(const RRTile *t, int sb, int n, uint64_t us)
+{
+    if (us < 30000u) return;
+    TD5_LOG_W(LOG_TAG, "ROAM_RENDER_SLOW tile %d,%d %s %d meshes: %.1f ms", t->tx, t->tz,
+              sb < 0 ? "road" : "scenery sub-block", n, (double)us / 1000.0);
+    (void)sb;
+}
+
 void td5_roam_render_tiles(int view)
 {
     uint32_t t0;
@@ -1294,10 +1364,12 @@ void td5_roam_render_tiles(int view)
             quads += (uint32_t)(t->mesh[k]->total_vertex_count / 4);
         }
         if (n > 0) {
+            const uint64_t q0 = td5_plat_time_us();
             t->dl.count = (uint32_t)n;
             t->dl.meshes = t->vis;
             td5_render_span_display_list(&t->dl);
             meshes += n;
+            rr_note_slow(t, -1, n, td5_plat_time_us() - q0);
         }
         /* [F4a] the scenery layer, one display list per sub-block (the renderer culls each mesh) */
         if (t->nscn) {
@@ -1307,7 +1379,11 @@ void td5_roam_render_tiles(int view)
                 dx = s[0] - ex; dy = s[1] - ey; dz = s[2] - ez;
                 if (sqrtf(dx * dx + dy * dy + dz * dz) - s[3] > R) continue;
                 if (!td5_render_is_sphere_visible(s[0], s[1], s[2], s[3])) continue;
-                td5_render_span_display_list(&t->sdl[k]);
+                {
+                    const uint64_t q0 = td5_plat_time_us();
+                    td5_render_span_display_list(&t->sdl[k]);
+                    rr_note_slow(t, k, (int)t->sdl[k].count, td5_plat_time_us() - q0);
+                }
                 meshes += (int)t->sdl[k].count;
                 n++;
             }

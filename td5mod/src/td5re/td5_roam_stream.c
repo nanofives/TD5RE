@@ -984,6 +984,8 @@ void td5_roam_stream_tick(void)
             s->fcount++;
             if (dt > s->st.frame_worst_ms) s->st.frame_worst_ms = dt;
             if (s->prev_installed && dt > s->st.frame_worst_publish_ms) s->st.frame_worst_publish_ms = dt;
+            if (dt > 150.0)
+                TD5_LOG_W(LOG_TAG, "ROAM_FRAME_HITCH at %u ms: %.0f ms since the last frame", (unsigned)now, dt);
         } else if ((int)(now - s->warm_ms) >= 0) {
             s->warm = 1;
         }

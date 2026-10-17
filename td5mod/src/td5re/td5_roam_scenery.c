@@ -73,7 +73,8 @@
 #define SC_HALO_M         400.0       /* records / raster window around the tile    */
 #define SC_CELL           6880.0      /* 16 m ctx grid                              */
 #define SC_FP_CHUNK       64          /* footpath quads per mesh                    */
-#define SC_CACHE_LRU      6           /* parsed OSM cache tiles kept, per layer     */
+#define SC_CACHE_LRU      48          /* slots per layer (array size)              */
+static const int k_sc_lru[3] = { 8, 48, 48 };   /* parsed OSM cache tiles kept: BUILDINGS (~2-3 MB each), AREAS, FOOTWAYS (tiny) */
 #define SC_ROAD_LRU       24          /* neighbour ROAD tiles kept                  */
 #define SC_LAYERS         3
 enum { SC_L_BLD = 0, SC_L_AREA = 1, SC_L_FOOT = 2 };
@@ -289,7 +290,18 @@ static int sc_pool_push(ScCache *c, int *cap, const double *x, const double *z, 
 
 /* Parse one OSM cache tile of `layer` into slot c. 1 on success (an empty or
  * missing file is an empty slot, also 1: "nothing there" is a stable answer). */
+static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int ix, int iz);
 static int sc_cache_load(TD5_RoamScnSource *s, ScCache *c, int layer, int ix, int iz)
+{
+    const uint32_t t0 = td5_plat_time_ms();
+    const int r = sc_cache_load_body(s, c, layer, ix, iz);
+    TD5_LOG_I(LOG_TAG, "ROAM_SCN_CACHE %s_%d_%d: %d record(s), %.1f MB kept, %u ms (from %u to %u ms)",
+              k_sc_layer[layer], ix, iz, c->n, (double)c->bytes / 1048576.0, (unsigned)(td5_plat_time_ms() - t0),
+              (unsigned)t0, (unsigned)td5_plat_time_ms());
+    return r;
+}
+
+static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int ix, int iz)
 {
     char rel[96], path[512];
     char *json;
@@ -399,18 +411,22 @@ static int sc_cache_window(TD5_RoamScnSource *s, int layer, double x0, double z0
         const ScIdxRow *row = &s->rows[layer][r];
         ScCache *hit = NULL, *victim = NULL;
         if (row->x1 < x0 || row->x0 > x1 || row->z1 < z0 || row->z0 > z1) continue;
-        for (k = 0; k < SC_CACHE_LRU; k++) {
+        for (k = 0; k < k_sc_lru[layer]; k++) {
             ScCache *c = &s->cache[layer][k];
             if (c->used && c->ix == row->ix && c->iz == row->iz) { hit = c; break; }
         }
         if (!hit) {
-            for (k = 0; k < SC_CACHE_LRU; k++) {
+            for (k = 0; k < k_sc_lru[layer]; k++) {
                 ScCache *c = &s->cache[layer][k];
                 if (c->pin) continue;
                 if (!c->used) { victim = c; break; }
                 if (!victim || c->clock < victim->clock) victim = c;
             }
-            if (!victim) continue;              /* every slot pinned: cap > LRU (never at casco scale) */
+            if (!victim) {                      /* every slot pinned: the window needs more than the LRU holds */
+                TD5_LOG_W(LOG_TAG, "ROAM_SCN_CACHE_FULL %s_%d_%d not loaded (%d slots pinned)", k_sc_layer[layer],
+                          row->ix, row->iz, k_sc_lru[layer]);
+                continue;
+            }
             sc_cache_load(s, victim, layer, row->ix, row->iz);
             hit = victim;
         }
@@ -1021,7 +1037,7 @@ typedef struct {
     TG_TileCtx *c;
     int    host, side;
     RoamFrame f;
-    double minout;
+    double minout, gap;
 } ScBldU;
 
 /* the ground callback for the building env: its user pointer is the ScBldU */
@@ -1030,15 +1046,12 @@ static double sc_ground_u(void *u, double x, double z)
     return sc_ground(((ScBldU *)u)->c, x, z);
 }
 
-static double sc_outward(const ScBldU *u, double x, double z)
-{
-    return (x - u->f.px) * u->f.nx + (z - u->f.pz) * u->f.nz;
-}
-
+static double sc_seg_need(TG_TileCtx *c, double x, double z, double gap, double *dir_x, double *dir_z);
 static int sc_bld_corner_ok(void *uv, double x, double z)
 {
     ScBldU *u = (ScBldU *)uv;
-    if (u->host && sc_outward(u, x, z) < u->minout) return 0;
+    double dx, dz;
+    if (sc_seg_need(u->c, x, z, u->gap, &dx, &dz) > 1.0) return 0;
     {
         const double px = x, pz = z;
         return !sc_on_road(u->c, &px, &pz, 1, NULL);
@@ -1116,6 +1129,100 @@ static void sc_lm_info(const ScBld *set, int n, int self, int *kind, int *anchor
     }
 }
 
+/* MAJOR worship landmarks of the halo set: the convex hull of the outline + every
+ * building:part under it (td5_geo_landmarks.c geolm_build_forecourts, same knobs).
+ * A foreign footprint within TD5RE_GEO_LM_BUILDING_CLEAR_M of one is not drawn. */
+#define SC_FC_MAX     8
+#define SC_FC_PTS     512
+typedef struct { int n; double x[SC_FC_PTS], z[SC_FC_PTS]; } ScHull;
+
+static double sc_hull_dist(const ScHull *h, double x, double z)
+{
+    double best = 1e300;
+    int i, inside = 1;
+    for (i = 0; i < h->n; i++) {
+        const int j = (i + 1) % h->n;
+        const double d = sc_seg_dist(x, z, h->x[i], h->z[i], h->x[j], h->z[j], NULL);
+        if (d < best) best = d;
+        if ((h->x[j] - h->x[i]) * (z - h->z[i]) - (h->z[j] - h->z[i]) * (x - h->x[i]) < 0.0) inside = 0;
+    }
+    return inside ? 0.0 : best;
+}
+
+static int sc_part_of(const ScBld *set, int a, int p)
+{
+    const TD5_GeoBuilding *an = set[a].b, *c = set[p].b;
+    const double slack = SC_LM_SLACK_M * SC_UPM;
+    double dmin = 1e300;
+    int j;
+    if (p == a || !c->part) return 0;
+    if (hypot(c->cx - an->cx, c->cz - an->cz) > an->radius + slack) return 0;
+    if (td5_geob_point_in_ring(set[a].px, set[a].pz, an->n, c->cx, c->cz)) return 1;
+    for (j = 0; j < an->n; j++) {
+        const int j2 = (j + 1) % an->n;
+        const double d = sc_seg_dist(c->cx, c->cz, set[a].px[j], set[a].pz[j], set[a].px[j2], set[a].pz[j2], NULL);
+        if (d < dmin) dmin = d;
+    }
+    return dmin <= slack;
+}
+
+typedef struct { double x, z; } ScP2;
+static int sc_p2_cmp(const void *pa, const void *pb)
+{
+    const ScP2 *a = (const ScP2 *)pa, *b = (const ScP2 *)pb;
+    if (a->x != b->x) return a->x < b->x ? -1 : 1;
+    return a->z < b->z ? -1 : (a->z > b->z);
+}
+
+/* convex hull of a point set (Andrew's monotone chain, CCW), any size up to SC_FC_PTS out */
+static int sc_hull_of(const double *px, const double *pz, int n, ScHull *h)
+{
+    ScP2 *p = (ScP2 *)malloc((size_t)(n > 0 ? n : 1) * sizeof(ScP2));
+    ScP2 *q = (ScP2 *)malloc((size_t)(2 * n + 2) * sizeof(ScP2));
+    int i, k = 0, t;
+    h->n = 0;
+    if (!p || !q || n < 3) { free(p); free(q); return 0; }
+    for (i = 0; i < n; i++) { p[i].x = px[i]; p[i].z = pz[i]; }
+    qsort(p, (size_t)n, sizeof(ScP2), sc_p2_cmp);
+    for (i = 0; i < n; i++) {
+        while (k >= 2 && sc_cross(q[k - 2].x, q[k - 2].z, q[k - 1].x, q[k - 1].z, p[i].x, p[i].z) <= 0.0) k--;
+        q[k++] = p[i];
+    }
+    for (i = n - 2, t = k + 1; i >= 0; i--) {
+        while (k >= t && sc_cross(q[k - 2].x, q[k - 2].z, q[k - 1].x, q[k - 1].z, p[i].x, p[i].z) <= 0.0) k--;
+        q[k++] = p[i];
+    }
+    k--;
+    if (k >= 3 && k <= SC_FC_PTS) {
+        for (i = 0; i < k; i++) { h->x[i] = q[i].x; h->z[i] = q[i].z; }
+        h->n = k;
+    }
+    free(p); free(q);
+    return h->n >= 3;
+}
+
+static int sc_forecourts(const ScBld *set, int nset, ScHull *fc)
+{
+    const int min_parts = td5_env_int("TD5RE_GEO_LM_FORECOURT_PARTS", 3, 1, 64);
+    double px[SC_FC_PTS * 2], pz[SC_FC_PTS * 2];
+    int a, p, k, nfc = 0;
+    if (!td5_env_flag_on("TD5RE_GEO_LM_CLUSTER")) return 0;
+    for (a = 0; a < nset && nfc < SC_FC_MAX; a++) {
+        const TD5_GeoBuilding *an = set[a].b;
+        int parts = 0, np = 0;
+        if (!an->landmark || an->part || an->lmkind != TD5_GEOB_LMK_WORSHIP || an->n < 3) continue;
+        for (p = 0; p < nset; p++) parts += sc_part_of(set, a, p);
+        if (parts < min_parts) continue;
+        for (k = 0; k < an->n && np < SC_FC_PTS * 2; k++) { px[np] = set[a].px[k]; pz[np] = set[a].pz[k]; np++; }
+        for (p = 0; p < nset; p++) {
+            if (!sc_part_of(set, a, p)) continue;
+            for (k = 0; k < set[p].b->n && np < SC_FC_PTS * 2; k++) { px[np] = set[p].px[k]; pz[np] = set[p].pz[k]; np++; }
+        }
+        if (sc_hull_of(px, pz, np, &fc[nfc])) nfc++;
+    }
+    return nfc;
+}
+
 static int sc_in_plaza(const ScArea *ar, int na, double x, double z)
 {
     int k;
@@ -1136,6 +1243,43 @@ static double sc_ring_area_m2(const double *x, const double *z, int n)
 /* clear ring (tile-local, in place) of the drivable surface: the host street's
  * carriageway + pavement first (the strip's nudge), then any primitive it still
  * overlaps. 0 = keep, 1 = drop (on a road), 2 = drop (past the shift cap). */
+/* How far (x, z) must move to stand kerb + gap clear of every street centreline
+ * segment near it, and which way (unit, away from the closest point of the worst
+ * one). 0 when it is clear. */
+static double sc_seg_need(TG_TileCtx *c, double x, double z, double gap, double *dir_x, double *dir_z)
+{
+    const double r = 15000.0 + gap;
+    int a0, b0, a1, b1, a, b, k;
+    double worst = 0.0;
+    c->gen++;
+    sc_cell_of(c, x - r, z - r, &a0, &b0);
+    sc_cell_of(c, x + r, z + r, &a1, &b1);
+    for (b = b0; b <= b1; b++)
+        for (a = a0; a <= a1; a++) {
+            const int cell = b * c->gnx + a;
+            for (k = c->sstart[cell]; k < c->sstart[cell + 1]; k++) {
+                const int si = c->sitem[k];
+                const ScSeg *s = &c->seg[si];
+                double t, d, need;
+                if (c->smark[si] == c->gen) continue;
+                c->smark[si] = c->gen;
+                d = sc_seg_dist(x, z, s->ax, s->az, s->bx, s->bz, &t);
+                need = s->hw + gap - d;
+                if (need > worst) {
+                    const double qx = s->ax + (s->bx - s->ax) * t, qz = s->az + (s->bz - s->az) * t;
+                    double ux = x - qx, uz = z - qz, l = hypot(ux, uz);
+                    if (!(l > 1e-6)) {               /* on the centreline: across the segment */
+                        const double sl = hypot(s->bx - s->ax, s->bz - s->az);
+                        if (!(sl > 1e-6)) continue;
+                        ux = (s->bz - s->az) / sl; uz = -(s->bx - s->ax) / sl; l = 1.0;
+                    }
+                    worst = need; *dir_x = ux / l; *dir_z = uz / l;
+                }
+            }
+        }
+    return worst;
+}
+
 static int sc_bld_clear(TG_TileCtx *c, ScBldU *u, double gap, double *rx, double *rz, int n,
                         double *shift_out)
 {
@@ -1143,16 +1287,23 @@ static int sc_bld_clear(TG_TileCtx *c, ScBldU *u, double gap, double *rx, double
     int k, it;
     const ScPrim *hit = NULL;
     *shift_out = 0.0;
-    if (u->host) {
+    (void)u;
+    /* the strip clears a footprint against its HOST span's straight frame; a roam
+     * footprint has no host, so every vertex is cleared against the street segments
+     * actually near it (kerb + gap from the nearest centreline), deepest first */
+    for (it = 0; it < 6; it++) {
+        double worst = 0.0, wx = 0.0, wz = 0.0;
         for (k = 0; k < n; k++) {
-            const double need = u->minout - sc_outward(u, rx[k], rz[k]);
-            if (need > shift) shift = need;
+            double dx, dz;
+            const double need = sc_seg_need(c, rx[k], rz[k], gap, &dx, &dz);
+            if (need > worst) { worst = need; wx = dx; wz = dz; }
         }
-        if (shift > SC_MAX_SHIFT) return 2;
-        if (shift > 0.0)
-            for (k = 0; k < n; k++) { rx[k] += u->f.nx * shift; rz[k] += u->f.nz * shift; }
-        total = shift;
+        if (!(worst > 1.0)) break;
+        if (total + worst > SC_MAX_SHIFT) return 2;
+        for (k = 0; k < n; k++) { rx[k] += wx * worst; rz[k] += wz * worst; }
+        total += worst;
     }
+    (void)shift;
     for (it = 0; it < 3; it++) {
         double cx = 0.0, cz = 0.0, push = 0.0, nx, nz;
         if (!sc_on_road(c, rx, rz, n, &hit)) { *shift_out = total; return 0; }
@@ -1195,7 +1346,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                              const ScArea *ar, int nar)
 {
     ScBld *set = NULL;
-    int nset = 0, cap = 0, i, k, l, dx, dz;
+    ScHull *fc = NULL;
+    int nset = 0, cap = 0, i, k, l, dx, dz, nfc = 0;
     const int64_t self = sc_tkey(c->tx, c->tz);
     /* the halo set: every building owned by the 3x3 (landmark anchors may sit next door) */
     for (dz = -1; dz <= 1; dz++)
@@ -1228,6 +1380,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         }
         set[k + 1] = t;
     }
+    fc = (ScHull *)malloc(SC_FC_MAX * sizeof(ScHull));
+    nfc = fc ? sc_forecourts(set, nset, fc) : 0;
     for (i = 0; i < nset; i++) {
         const TD5_GeoBuilding *gb = set[i].b;
         double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], cx = 0.0, cz = 0.0, shift = 0.0;
@@ -1254,6 +1408,14 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             }
         }
         sc_lm_info(set, nset, i, &kind, &anchor, &veto);
+        if (!veto && nfc > 0 && !gb->landmark && !gb->part && kind == TD5_GEOB_LMK_NONE) {
+            /* a foreign footprint on a major landmark's forecourt (geolm_build_forecourts) */
+            const double clear = (double)td5_env_float("TD5RE_GEO_LM_BUILDING_CLEAR_M", 12.0f, 0.0f, 100.0f) * SC_UPM;
+            int f;
+            for (k = 0; k < n && !veto; k++)
+                for (f = 0; f < nfc && !veto; f++)
+                    if (sc_hull_dist(&fc[f], set[i].px[k], set[i].pz[k]) <= clear) veto = 1;
+        }
         if (veto) { c->st.bld_veto_lm++; continue; }
         for (k = 0; k < n; k++) { rx[k] = set[i].px[k] - (double)c->org_x; rz[k] = set[i].pz[k] - (double)c->org_z; }
         if (!td5_geob_ring_simple(rx, rz, n)) { c->st.bld_drop_ring++; continue; }
@@ -1267,7 +1429,13 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
               && roam_edge_frame(c, edge, side, along, &u.f);
         u.side = side;
         u.minout = u.host ? u.f.half_carriage + s->gap : 0.0;
+        u.gap = s->gap;
         r = sc_bld_clear(c, &u, s->gap, rx, rz, n, &shift);
+        if (gb->landmark && !gb->part)       /* one line per landmark outline: what became of it */
+            TD5_LOG_I(LOG_TAG, "[ROAM LM] tile %d,%d way_hash=%08x kind=%d anchor=%d host=%d half=%.0f minout=%.0f "
+                      "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
+                      u.f.half_carriage, u.minout, gb->area_m2, gb->height,
+                      r == 2 ? "DROPPED past the shift cap" : r == 1 ? "DROPPED on a road" : "kept", shift);
         if (r == 2) { c->st.bld_drop_shift++; continue; }
         if (r == 1) { c->st.bld_drop_road++; continue; }
         if (shift > 0.0) { c->st.bld_nudged++; if (shift > c->st.bld_shift_max) c->st.bld_shift_max = shift; }
@@ -1276,7 +1444,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         cx /= n; cz /= n;
         sb = sc_sb_of(c, cx, cz);
         b = sc_sb(c, sb, 4);
-        if (!b) return 0;
+        if (!b) { free(set); free(fc); return 0; }
         memset(&e, 0, sizeof e);
         e.blk = &b->blk; e.moff = b->moff; e.nmesh = &b->nmesh; e.maxmesh = b->cap;
         e.b = &k_biomes[0];                         /* CITY: the geo city biome */
@@ -1297,8 +1465,9 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         e.st = &c->bst;
         {
             const long emitted0 = c->bst.emitted, prefab0 = c->bst.lm_prefab, apron0 = c->bst.lm_apron;
-            if (!tg_geo_emit_building_core(&e, gb, rx, rz, n, cx, cz, shift)) return 0;
-            if (b->blk.oom) return 0;
+            if (!tg_geo_emit_building_core(&e, gb, rx, rz, n, cx, cz, shift) || b->blk.oom) {
+                free(set); free(fc); return 0;
+            }
             if (c->bst.emitted > emitted0) c->st.bld_emitted++;
             if (c->bst.lm_prefab > prefab0) c->st.bld_prefab++;
             if (c->bst.lm_apron > apron0) c->st.bld_apron++;
@@ -1306,6 +1475,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         }
     }
     free(set);
+    free(fc);
     return 1;
 }
 
@@ -1895,7 +2065,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
 TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, TD5_RoamHeight *hc)
 {
     TG_TileCtx *c;
-    ScCache *bc[16], *ac[16], *fc[16];
+    ScCache *bc[SC_CACHE_LRU], *ac[SC_CACHE_LRU], *fc[SC_CACHE_LRU];
     ScArea *ar = NULL;
     int nbc, nac, nfc, nar = 0, cap = 0, l, i, dx, dz;
     double corner[4][2], x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300;
@@ -1933,9 +2103,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
      * cover whole records, so the tile box + one tile each side is exact) */
     {
         const double S = (double)s->grid.tile * 1.5;
-        nbc = sc_cache_window(s, SC_L_BLD, x0 - S, z0 - S, x1 + S, z1 + S, bc, 16);
-        nac = sc_cache_window(s, SC_L_AREA, x0 - S, z0 - S, x1 + S, z1 + S, ac, 16);
-        nfc = sc_cache_window(s, SC_L_FOOT, x0, z0, x1, z1, fc, 16);
+        nbc = sc_cache_window(s, SC_L_BLD, x0 - S, z0 - S, x1 + S, z1 + S, bc, k_sc_lru[SC_L_BLD]);
+        nac = sc_cache_window(s, SC_L_AREA, x0 - S, z0 - S, x1 + S, z1 + S, ac, k_sc_lru[SC_L_AREA]);
+        nfc = sc_cache_window(s, SC_L_FOOT, x0, z0, x1, z1, fc, k_sc_lru[SC_L_FOOT]);
     }
     /* the areas of the 3x3 (plaza veto, footpath lift) and the tile's own (lawns) */
     for (dz = -1; dz <= 1; dz++)

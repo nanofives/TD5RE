@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 17 (free roam buildings)" },
+    { CL_ITEM,    "Free roam has a city now: the real La Plata buildings" },
+    { CL_ITEM,    "  (heights, roofs, the cathedral's spires), plaza" },
+    { CL_ITEM,    "  lawns with their mapped paths and trees, and the" },
+    { CL_ITEM,    "  park and plaza footpaths, streamed in with the" },
+    { CL_ITEM,    "  streets. Nothing ever stands on a road you can drive." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 17 (free roam streaming)" },
     { CL_ITEM,    "Free roam no longer loads the whole city up front:" },
     { CL_ITEM,    "  the drive starts once the streets round the spawn" },
