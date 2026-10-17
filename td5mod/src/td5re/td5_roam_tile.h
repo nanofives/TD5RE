@@ -291,6 +291,11 @@ const RoamGrid *td5_roam_tile_ctx_grid(const TD5_RoamTileCtx *c);
 int  td5_roam_tile_build(TD5_RoamTileCtx *c, int tx, int tz, RoamTile *out,
                          TD5_RoamTileStats *st);
 
+/* [F3] The input hash a build of (tx,tz) would stamp now (the window rule of the
+ * build + the same hash), without building: the graph phase only. A cached file
+ * whose header input_hash differs is stale. 1 on success. */
+int  td5_roam_tile_input_hash(TD5_RoamTileCtx *c, int tx, int tz, uint32_t *out);
+
 /* Tile indices whose square meets the casco polygon (F0a's four ring corners),
  * sorted by (tx, tz). Returns the count written (<= cap). */
 int  td5_roam_casco_tiles(const RoamGrid *g, int (*out)[2], int cap);

@@ -27,6 +27,7 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
+#include "td5_roam_stream.h"     /* [F3] the streamed resident set */
 #include "td5_roam_junction.h"   /* dev casco test (corner harness) */
 #include "td5_damage.h"          /* dev corner harness: repair between runs */
 #include "td5_geo_roads.h"      /* TD5_GEO_RC_* (dev corner matrix) */
@@ -63,6 +64,8 @@ typedef struct {
     uint8_t     cin_ok[RP_WALL_PROBES];
     long        cin_tick[RP_WALL_PROBES];   /* [F2-E] sim tick of that position */
     uint32_t    mhint[RP_WALL_PROBES - 4];  /* [F2-E] previous prim of the edge-midpoint probes */
+    int         hold_on;        /* [F3] held by the stream guard (a tile under it is being built) */
+    int32_t     hold_x, hold_y, hold_z;
     long        wall_tick;      /* last wall contact (dev trace): sim tick, corner, angle, pen, edge */
     int         wall_corner, wall_pinch;
     int32_t     wall_angle, wall_pen;
@@ -91,6 +94,9 @@ typedef struct {
     int                 pinch_tip;          /* TD5RE_ROAM_PINCH_TIP (1)                  */
     TD5_RoamPhysStats   st;
     long                summary_tick, last_sim_tick;
+    int                 streamed;           /* [F3] tiles come from td5_roam_stream.c     */
+    uint32_t            begin_ms;           /* [F3] session start time measurement        */
+    int                 first_contact_logged;
 #ifndef TD5RE_RELEASE
     struct RoamDrive *drv;                  /* DEV drive harness state (heap)         */
     int               drv_mode;             /* -1 unread, 0 off, 1 street, 2 corners  */
@@ -187,11 +193,42 @@ int td5_roam_physics_session_begin(void)
     double ext = 0.0;
 
     if (s_rp.loaded) return 1;
+    s_rp.begin_ms = t0;
+    s_rp.first_contact_logged = 0;
     snprintf(s_rp.place, sizeof s_rp.place, "%s", (sp && sp->place[0]) ? sp->place : "la_plata_partido");
     if (!rp_read_grid(s_rp.place, &g)) {
         TD5_LOG_E(LOG_TAG, "roam physics: no roam/ROAMGRID.JSON for '%s' (run --RoamBuildTiles=casco)", s_rp.place);
         s_rp.load_failed = 1;
         return 0;
+    }
+    if (td5_roam_stream_enabled()) {
+        /* [F3] nothing loaded up front: the stream fills the set round the cars and the
+         * camera (the spawn neighbourhood first, td5_roam_stream_wait_area) */
+        s_rp.rs = (TD5_RoamResident *)calloc(1, sizeof(TD5_RoamResident));
+        if (!s_rp.rs) { s_rp.load_failed = 1; return 0; }
+        td5_roam_world_origin(&s_rp.org_x, &s_rp.org_z);
+        td5_roam_resident_init(s_rp.rs, &g, s_rp.org_x, s_rp.org_z, 0);
+        if (!td5_roam_stream_begin(s_rp.place, &g, s_rp.rs)) {
+            TD5_LOG_E(LOG_TAG, "roam physics: the tile stream did not start for '%s'", s_rp.place);
+            free(s_rp.rs);
+            s_rp.rs = NULL;
+            s_rp.load_failed = 1;
+            return 0;
+        }
+        s_rp.streamed = 1;
+        memset(s_rp.slot, 0, sizeof s_rp.slot);
+        for (i = 0; i < RP_SLOTS; i++) {
+            int k;
+            for (k = 0; k < 8; k++) s_rp.slot[i].hint[k] = ROAM_PRIM_NONE;
+            s_rp.slot[i].chassis_hint = ROAM_PRIM_NONE;
+        }
+        memset(&s_rp.st, 0, sizeof s_rp.st);
+        s_rp.summary_tick = 0;
+        s_rp.loaded = 1;
+        td5_roam_set_resident(s_rp.rs);
+        TD5_LOG_I(LOG_TAG, "roam physics: resident set place=%s STREAMED origin=(%d,%d), set up in %u ms",
+                  s_rp.place, (int)s_rp.org_x, (int)s_rp.org_z, (unsigned)(td5_plat_time_ms() - t0));
+        return 1;
     }
     list = (int (*)[2])malloc(2048 * sizeof(int[2]));
     s_rp.tiles = (RoamTile *)calloc(RP_MAX_TILES, sizeof(RoamTile));
@@ -260,6 +297,8 @@ void td5_roam_physics_session_end(void)
     int i;
     if (s_rp.loaded) rp_write_summary("session end");
     if (s_rp.rs && td5_roam_resident() == s_rp.rs) td5_roam_set_resident(NULL);
+    if (s_rp.streamed) td5_roam_stream_end();   /* [F3] frees the streamed tiles (they are in rs) */
+    s_rp.streamed = 0;
     if (s_rp.tiles) {
         for (i = 0; i < s_rp.ntile; i++) td5_roam_tile_free(&s_rp.tiles[i]);
         free(s_rp.tiles);
@@ -521,9 +560,29 @@ int td5_roam_wheel_contact(TD5_Actor *a, int i, int32_t x, int32_t z, int32_t y,
         s_rp.st.ticks++;
         if (++s_rp.summary_tick % 300 == 0) rp_write_summary("periodic");
     }
+    if (td5_roam_active()) {
+        if (!s_rp.first_contact_logged && a->slot_index == 0) {
+            s_rp.first_contact_logged = 1;
+            TD5_LOG_I(LOG_TAG, "ROAM_SESSION first wheel contact %u ms after the session began (%s)",
+                      (unsigned)(td5_plat_time_ms() - s_rp.begin_ms), s_rp.streamed ? "streamed" : "full load");
+        }
+        if (i == 0 && s_rp.streamed) td5_roam_stream_guard(a);   /* [F3] once per racer per tick */
+    }
     ok = td5_roam_locate(rs, x, z, y, 1, ss->hint[4 + i], &h);
     rp_phys_normal(h.normal, h.normal);
 
+    if (td5_roam_active() && s_rp.streamed && (!ok || h.prim == ROAM_PRIM_NONE) &&
+        td5_roam_stream_point_missing(x, z)) {
+        /* [F3] over a tile that is still streaming in: flat ground at the wheel's own
+         * height, never a fall (the guard holds the car until it arrives) */
+        *ground_y = y;
+        normal[0] = 0; normal[1] = -4096; normal[2] = 0;
+        *capped = 0;
+        *surface = TD5_SURFACE_DRY_ASPHALT;
+        ss->probe_ok[4 + i] = 0;
+        s_rp.last_capped = 0;
+        return 1;
+    }
     if (!td5_roam_active()) {
         /* MIRROR: only a probe on a type-1 span the strip would also be on is compared */
         int dh;
@@ -605,6 +664,12 @@ int td5_roam_corner_height(TD5_Actor *a, int i, int32_t x, int32_t z, int32_t y,
     if (!rs || !a || i < 0 || i > 3 || !y_io) return 0;
     ss = rp_slot(a);
     ok = td5_roam_locate(rs, x, z, y, 1, ss->hint[i], &h);
+    if (td5_roam_active() && s_rp.streamed && (!ok || h.prim == ROAM_PRIM_NONE) &&
+        td5_roam_stream_point_missing(x, z)) {
+        *y_io = y;                       /* [F3] still streaming in: level with the corner */
+        ss->probe_ok[i] = 0;
+        return 1;
+    }
     if (!td5_roam_active()) {
         if (!ok || h.prim == ROAM_PRIM_NONE || !h.inside || !strip_valid) {
             s_rp.st.mirror_corner_fallback++;
@@ -828,6 +893,23 @@ void td5_roam_resolve_walls(TD5_Actor *a)
     double nx[RP_WALL_PROBES], nz[RP_WALL_PROBES], tip_ux = 0.0, tip_uz = 0.0;
     int32_t tip_pen = 0;
     if (!a || !rs || !td5_roam_active()) return;
+    if (s_rp.streamed) {
+        /* [F3] ROAM_STREAM_HOLD: a tile under the car is still being built. Freeze it in
+         * place (no walls, no backstop teleport) until the stream installs the tile. */
+        ss = rp_slot(a);
+        if (td5_roam_stream_guard(a)) {
+            if (!ss->hold_on) {
+                ss->hold_on = 1;
+                ss->hold_x = a->world_pos.x; ss->hold_y = a->world_pos.y; ss->hold_z = a->world_pos.z;
+            }
+            a->world_pos.x = ss->hold_x; a->world_pos.y = ss->hold_y; a->world_pos.z = ss->hold_z;
+            a->linear_velocity_x = a->linear_velocity_y = a->linear_velocity_z = 0;
+            a->angular_velocity_roll = a->angular_velocity_yaw = a->angular_velocity_pitch = 0;
+            td5_physics_rebuild_pose(a);
+            return;
+        }
+        ss->hold_on = 0;
+    }
     if (a->slot_index >= RP_RACERS) return;
     if (s_rp.wall_side < 0) {
         s_rp.wall_side = td5_env_int("TD5RE_ROAM_WALL_SIDE", 1, 0, 1);
@@ -2233,6 +2315,7 @@ uint32_t td5_roam_dev_drive_bits(TD5_Actor *a)
             d->cap = d->acute ? RD_MAXC_ACUTE : RD_MAXC;
             d->c = (RdCorner *)calloc((size_t)d->cap, sizeof(RdCorner));
             if (!d->c) d->cap = 0;
+            if (s_rp.streamed) td5_roam_stream_pin_all();   /* [F3] picks from the whole casco */
             if (d->acute) rd_pick_acute(d); else rd_pick_corners(d);
             snprintf(path, sizeof path, "%sroam_corner_test.txt", dir ? dir : "");
             d->rep = fopen(path, "w");

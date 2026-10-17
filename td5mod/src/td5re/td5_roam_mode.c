@@ -35,6 +35,7 @@
 #include "deps/cjson/cJSON.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_roam_physics.h"   /* task B: the resident set (road tiles + contact provider) */
+#include "td5_roam_stream.h"    /* [F3] the start gate (spawn neighbourhood) */
 
 #define LOG_TAG "roam"
 
@@ -438,6 +439,10 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     int auto_yaw = 0;
     double moved;
     if (!a) return;
+
+    /* [F3] START GATE: the spawn tile and its ROAD neighbourhood must be resident before the
+     * snap and the street yaw read them (no-op when the session is not streamed) */
+    if (td5_roam_stream_active()) td5_roam_stream_wait_area(px, pz, -1);
 
     /* the click point -> the nearest drivable spot (the car must not start off the road) */
     moved = roam_snap_to_road(&px, &pz, yaw);

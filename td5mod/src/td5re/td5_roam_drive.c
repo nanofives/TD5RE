@@ -32,6 +32,7 @@
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
 #include "td5_roam_drive.h"
+#include "td5_roam_stream.h"     /* [F3] pin the casco for the corner matrix; miss counters */
 #include "td5_geo_roads.h"      /* TD5_GEO_RC_* */
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -99,6 +100,13 @@ typedef struct {
     int      have_dir, have_off, have_last;
     int32_t  lx, lz;
     double   sp_x, sp_z;            /* spawn, for homing */
+    /* [F3] TOUR (TD5RE_ROAM_SELFTEST_TOUR_M > 0): instead of homing past 1.4 km, drive round a
+     * square of that side centred on the spawn (corners on the lattice axes) for
+     * TD5RE_ROAM_SELFTEST_TOUR_SECS, then brake to rest. The streaming soak test. */
+    double   tour_m;
+    int      tour_secs, wp;
+    long     wp_t;
+    double   wp_x[4], wp_z[4];
     uint64_t cl_key;
     double   cl_x, cl_z, arm_x, arm_z, tgt_x, tgt_z;
     int      crossings, distinct;
@@ -418,6 +426,20 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
     if (!s_rv.have_dir) {
         s_rv.dir_x = hx; s_rv.dir_z = hz; s_rv.have_dir = 1;
         s_rv.sp_x = px; s_rv.sp_z = pz;
+        if (s_rv.tour_m > 0.0) {
+            static const int sg[4][2] = { { 1, 1 }, { 1, -1 }, { -1, -1 }, { -1, 1 } };
+            const double h = 0.5 * s_rv.tour_m * RV_M;
+            const double ux = rs->grid.c, uz = rs->grid.s, vx = -rs->grid.s, vz = rs->grid.c;
+            int k;
+            for (k = 0; k < 4; k++) {
+                s_rv.wp_x[k] = px + h * (sg[k][0] * ux + sg[k][1] * vx);
+                s_rv.wp_z[k] = pz + h * (sg[k][0] * uz + sg[k][1] * vz);
+            }
+            s_rv.wp = 0;
+            s_rv.wp_t = tick;
+            TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] tour: square %.0f m round the spawn (%.0f,%.0f), %d s, first corner (%.0f,%.0f)",
+                      s_rv.tour_m, px, pz, s_rv.tour_secs, s_rv.wp_x[0], s_rv.wp_z[0]);
+        }
     }
     look = 14.0 * RV_M + rv_speed_upt(a) * 20.0;
 
@@ -442,7 +464,19 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
                     const double d = cos(b) * s_rv.dir_x + sin(b) * s_rv.dir_z;
                     if (d < idot) { idot = d; ik = k; }
                 }
-                if (hd > 1400.0 * RV_M) {
+                if (s_rv.tour_m > 0.0) {
+                    /* [F3] tour: head for the current corner; next corner within 150 m (or after 4 min) */
+                    if (hypot(px - s_rv.wp_x[s_rv.wp], pz - s_rv.wp_z[s_rv.wp]) < 150.0 * RV_M ||
+                        tick - s_rv.wp_t > 240L * 30L) {
+                        s_rv.wp = (s_rv.wp + 1) & 3;
+                        s_rv.wp_t = tick;
+                        TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] tour: corner reached, next (%.0f,%.0f), %.0f m driven",
+                                  s_rv.wp_x[s_rv.wp], s_rv.wp_z[s_rv.wp], s_rv.dist_m);
+                    }
+                    wx = s_rv.wp_x[s_rv.wp] - px; wz = s_rv.wp_z[s_rv.wp] - pz;
+                    { const double m = hypot(wx, wz); if (m > 1.0) { wx /= m; wz /= m; } }
+                    turn = 99;
+                } else if (hd > 1400.0 * RV_M) {
                     wx = s_rv.sp_x - px; wz = s_rv.sp_z - pz;
                     { const double m = hypot(wx, wz); if (m > 1.0) { wx /= m; wz /= m; } }
                     turn = 99;
@@ -524,7 +558,8 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
             tz = pz + s_rv.dir_z * look;
         }
         bits = rv_steer_to(a, tx, tz, vt);
-        if (s_rv.distinct >= s_rv.want_junctions && !on_patch && !s_rv.on_path) {
+        if ((s_rv.tour_m > 0.0 ? tick - s_rv.t0 >= (long)s_rv.tour_secs * 30L : s_rv.distinct >= s_rv.want_junctions) &&
+            !on_patch && !s_rv.on_path) {
             s_rv.phase = 1;
             TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] %d junctions (%d distinct), %.0f m: braking to rest",
                       s_rv.crossings, s_rv.distinct, s_rv.dist_m);
@@ -934,6 +969,9 @@ void td5_roam_drive_arm(int mode)
     s_rv.gap_m = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_GAP_M", 120, 0, 1000);
     s_rv.max_arms = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_MAX_ARMS", 4, 3, 8);
     s_rv.npass = td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_BRAKE", 1, 0, 1) ? 3 : 2;
+    s_rv.tour_m = (double)td5_env_int("TD5RE_ROAM_SELFTEST_TOUR_M", 0, 0, 20000);
+    s_rv.tour_secs = td5_env_int("TD5RE_ROAM_SELFTEST_TOUR_SECS", 600, 30, 7200);
+    if (s_rv.tour_m > 0.0 && s_rv.max_secs < s_rv.tour_secs + 120) s_rv.max_secs = s_rv.tour_secs + 120;
     s_rv.ch_hint = ROAM_PRIM_NONE;
 }
 
@@ -985,6 +1023,8 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
         if (s_rv.mode == TD5_RDRV_CORNERS) {
             char path[512];
             const char *dir = td5_plat_log_dir();
+            td5_roam_stream_pin_all();       /* [F3] the matrix picks from (and teleports across) the whole casco */
+            rs = td5_roam_resident();
             rv_pick_corners(rs);
             snprintf(path, sizeof path, "%sroam_corner_test.txt", dir ? dir : "");
             s_rv.rep = fopen(path, "w");
@@ -1004,8 +1044,10 @@ uint32_t td5_roam_drive_bits(TD5_Actor *a)
 int td5_roam_drive_verdict(char *note, size_t n)
 {
     TD5_RoamPhysStats st;
+    TD5_RoamStreamStats sst;
     int status = 0;
     td5_roam_physics_stats(&st);
+    td5_roam_stream_stats(&sst);     /* [F3] zeros when the session is not streamed */
     if (s_rv.mode == TD5_RDRV_ROUTE) {
         const double rest_max = st.rest_n ? st.rest_max / RV_UNIT_CM : 0.0;
         const double gap_min = st.gap_n ? st.gap_min / RV_UNIT_CM : 0.0;
@@ -1015,7 +1057,9 @@ int td5_roam_drive_verdict(char *note, size_t n)
         size_t bl = 0;
 #define RV_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
         if (!s_rv.done || s_rv.aborted) RV_BAD("%s; ", s_rv.why[0] ? s_rv.why : "drive never finished");
-        if (s_rv.distinct < s_rv.want_junctions) RV_BAD("%d distinct junctions < %d; ", s_rv.distinct, s_rv.want_junctions);
+        if (s_rv.tour_m <= 0.0 && s_rv.distinct < s_rv.want_junctions)
+            RV_BAD("%d distinct junctions < %d; ", s_rv.distinct, s_rv.want_junctions);
+        if (sst.misses) RV_BAD("stream miss %ld; ", sst.misses);
         if (s_rv.below_n) RV_BAD("below surface %ld; ", s_rv.below_n);
         if (gap_min < -RV_WHEEL_BELOW_MAX_CM) RV_BAD("wheel %.1f cm under; ", -gap_min);
         if (st.rest_n == 0) RV_BAD("no rest sample; ");
@@ -1034,10 +1078,12 @@ int td5_roam_drive_verdict(char *note, size_t n)
                      s_rv.crossings, s_rv.distinct, s_rv.dist_m / 1000.0, td5_roam_spawn_snap_m(), rest_max, s_rv.retries_total);
         TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] ROUTE VERDICT %s: junctions=%d distinct=%d dist=%.0f m vmax=%.0f km/h samples=%ld "
                   "chassis_above_min=%.1f cm below_n=%ld off_n=%ld wheel_gap_min=%.2f cm rest_n=%ld rest_gap_max=%.2f cm "
-                  "stuck=%ld wedge_retries=%d rescues=%ld pinches=%ld teleports=%ld wall_hits=%ld spawn_snap=%.1f m %s",
+                  "stuck=%ld wedge_retries=%d rescues=%ld pinches=%ld teleports=%ld wall_hits=%ld spawn_snap=%.1f m "
+                  "| stream loaded=%ld built=%ld miss=%ld hold=%ld road %d..%d scenery %d..%d %s",
                   status ? "FAIL" : "PASS", s_rv.crossings, s_rv.distinct, s_rv.dist_m, s_rv.kmh_max, s_rv.samples, above_min,
                   s_rv.below_n, s_rv.off_n, gap_min, st.rest_n, rest_max, s_rv.stuck_events, s_rv.retries_total, resc, st.pinches, st.teleports,
-                  st.wall_hits, td5_roam_spawn_snap_m(), bad);
+                  st.wall_hits, td5_roam_spawn_snap_m(), sst.loaded, sst.built, sst.misses, sst.holds, sst.road_min,
+                  sst.road_max, sst.scen_min, sst.scen_max, bad);
     } else if (s_rv.mode == TD5_RDRV_CORNERS) {
         if (s_rv.npass == 3) {
             /* [F2-E] pinches, rescues and wall wedges are judged on EVERY run (held 40, held 80 and the
