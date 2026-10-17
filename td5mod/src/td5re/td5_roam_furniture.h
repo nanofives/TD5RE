@@ -59,7 +59,8 @@ typedef struct {
     int  sig_clusters, sig_arms, sig_inbound;        /* clusters, their arms, arms with approach traffic */
     int  mast_near, post_left, mast_far, far_shared;  /* N, P, F placed; F not needed (opposite arm has an N) */
     int  plates, plate_one_face, plate_none;          /* mast arms: both faces named / one cell / no cell */
-    int  sig_drop_frame, sig_drop_road, sig_drop_dup; /* no ribbon found / pole on the road / pole too near another */
+    int  sig_arms_absorbed;                           /* arms with no ribbon of their own (absorbed into the patch) */
+    int  sig_drop_frame, sig_drop_road, sig_drop_dup; /* ribbon not located / pole on the road / pole too near another */
     /* lamps */
     int  lamps, lamp_glow, lamp_drop_road, lamp_skip_class;
     /* bus stops */

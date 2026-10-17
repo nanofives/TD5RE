@@ -1107,9 +1107,25 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
         nm[a] = m->name_id; bear[a] = ar->bearing12;
         fu_arm_points(c, px, pz, m);
         m->inbound = fu_arm_inbound(m);
+        if (owned_c && td5_env_flag_on("TD5RE_ROAM_FURN_DBG")) {
+            int seg = -1, sd = 0;
+            double al = 0, lt = 0, dd;
+            unsigned long long nk = 0;
+            for (dd = 4.0; dd <= 30.0; dd += 6.0) {
+                RoamFrame fr;
+                if (roam_nearest_edge(c, px + m->ux * dd * FU_UPM, pz + m->uz * dd * FU_UPM, 8.0 * FU_UPM, &seg, &sd, &al, &lt) &&
+                    roam_edge_frame(c, seg, 1, al, &fr)) nk = (unsigned long long)fr.key;
+                else nk = 0;
+                TD5_LOG_I(LOG_TAG, "FURN_DBG cluster %lld arm %d key %llu rec=%d spans=%d klass=%d oneway=%d cut_span=%u | probe d=%.0f nearest key %llu lat %.0f",
+                          (long long)nr->cluster_key, a, (unsigned long long)m->key, m->rec != NULL, m->rec ? m->rec->span_count : -1,
+                          m->rec ? m->rec->klass : -1, m->rec ? (int)(int8_t)m->rec->oneway : 0, (unsigned)t->arm[nr->arm_first + (uint32_t)a].cut_span,
+                          dd, nk, lt);
+            }
+        }
         if (owned_c) {
             st->sig_arms++;
-            if (!m->found) st->sig_drop_frame++;
+            if (m->rec && !m->found) st->sig_drop_frame++;      /* an arm WITH a ribbon whose frame was not found */
+            if (!m->rec) st->sig_arms_absorbed++;
             if (m->inbound) st->sig_inbound++;
         }
     }
@@ -1443,9 +1459,9 @@ static int fu_emit_stops(FuEm *em, const FuStop *bs, int nb)
         if (shelter) {
             const double mid = fr.half_carriage + gap + FU_BS_SHEL_D * 0.5, bak = fr.half_carriage + gap + FU_BS_SHEL_D;
             if (!fu_box(em, fr.px + lx * mid, base_y + FU_BS_SHEL_H + FU_BS_ROOF_T * 0.5, fr.pz + lz * mid, FU_BS_SHEL_W * 0.5,
-                        FU_BS_ROOF_T * 0.5, FU_BS_SHEL_D * 0.5, fr.tx, fr.tz, TD5_TG_PAGE_R11_SIGN_POST, FU_BS_SHEL_W, 0xFF3A3E44u)) return 0;
+                        FU_BS_ROOF_T * 0.5, FU_BS_SHEL_D * 0.5, lx, lz, TD5_TG_PAGE_R11_SIGN_POST, FU_BS_SHEL_W, 0xFF3A3E44u)) return 0;
             if (!fu_box(em, fr.px + lx * bak, base_y + FU_BS_SHEL_H * 0.5, fr.pz + lz * bak, FU_BS_SHEL_W * 0.5, FU_BS_SHEL_H * 0.5,
-                        FU_BS_BACK_T * 0.5, fr.tx, fr.tz, TD5_TG_PAGE_R11_SIGN_POST, FU_BS_SHEL_W, 0xFF8A9096u)) return 0;
+                        FU_BS_BACK_T * 0.5, lx, lz, TD5_TG_PAGE_R11_SIGN_POST, FU_BS_SHEL_W, 0xFF8A9096u)) return 0;
             st->shelters++;
         }
         if (b->bench) {
@@ -1453,7 +1469,7 @@ static int fu_emit_stops(FuEm *em, const FuStop *bs, int nb)
             const double ex = fr.px + lx * d + fr.tx * FU_BS_SHEL_W * 0.22, ez = fr.pz + lz * d + fr.tz * FU_BS_SHEL_W * 0.22;
             if (!roam_ctx_on_road(c, &ex, &ez, 1)) {
                 if (!fu_box(em, ex, base_y + FU_BS_BENCH_H * 0.5, ez, FU_BS_BENCH_W * 0.5, FU_BS_BENCH_H * 0.5, FU_BS_BENCH_D * 0.5,
-                            fr.tx, fr.tz, TD5_TG_PAGE_R11_SIGN_POST, FU_BS_BENCH_W, 0xFF6B4A2Eu)) return 0;
+                            lx, lz, TD5_TG_PAGE_R11_SIGN_POST, FU_BS_BENCH_W, 0xFF6B4A2Eu)) return 0;
                 st->benches++;
             }
         }
