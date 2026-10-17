@@ -616,13 +616,19 @@ static int geob_pool_reserve(int need)
 
 /* Copy one `points` array into the shared pool as an OPEN, CCW ring.
  * Returns the number of pool points written (0 = rejected). */
-static int geob_push_ring(const cJSON *pts, int *out_first,
-                          double *out_cx, double *out_cz, double *out_r)
+/* [roam F4a] The PURE half of geob_push_ring: one `points` array -> an OPEN,
+ * CCW ring of at most TD5_GEOB_RING_MAX points in rx/rz, its centroid and radius.
+ * *dec_drop = points the decimation dropped (-1 when it did not decimate), set
+ * before any later refusal exactly where the old code counted it. Returns n (0 =
+ * rejected). Free roam parses its tiles with it (td5_geob_parse_building). */
+static int geob_ring_parse(const cJSON *pts, double *rx, double *rz,
+                           double *out_cx, double *out_cz, double *out_r,
+                           int *dec_drop)
 {
-    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
     int raw, n = 0, i, stride;
     double cx = 0.0, cz = 0.0, r = 0.0;
 
+    *dec_drop = -1;
     if (!pts || !cJSON_IsArray(pts)) return 0;
     raw = cJSON_GetArraySize(pts);
     /* geo_fetch closes every ring, so the last point repeats the first. */
@@ -640,7 +646,7 @@ static int geob_push_ring(const cJSON *pts, int *out_first,
      * closes across the middle of the building. */
     stride = (raw + TD5_GEOB_RING_MAX - 1) / TD5_GEOB_RING_MAX;
     if (stride < 1) stride = 1;
-    if (stride > 1) { s_gb.dec_polys++; s_gb.dec_points += raw - raw / stride; }
+    if (stride > 1) *dec_drop = raw - raw / stride;
     for (i = 0; i < raw && n < TD5_GEOB_RING_MAX; i += stride) {
         const cJSON *p = cJSON_GetArrayItem(pts, i);
         const cJSON *vx = p ? cJSON_GetObjectItem(p, "x") : NULL;
@@ -651,7 +657,6 @@ static int geob_push_ring(const cJSON *pts, int *out_first,
         n++;
     }
     if (n < 3) return 0;
-    if (!geob_pool_reserve(s_gb.npt + n)) return 0;
 
     /* One winding for every ring, so the triangulator and the wall loop can
      * both assume it instead of each testing. */
@@ -667,6 +672,23 @@ static int geob_push_ring(const cJSON *pts, int *out_first,
         const double d = hypot(rx[i] - cx, rz[i] - cz);
         if (d > r) r = d;
     }
+    *out_cx = cx; *out_cz = cz; *out_r = r;
+    return n;
+}
+
+/* Copy one `points` array into the shared pool as an OPEN, CCW ring.
+ * Returns the number of pool points written (0 = rejected). */
+static int geob_push_ring(const cJSON *pts, int *out_first,
+                          double *out_cx, double *out_cz, double *out_r)
+{
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    double cx, cz, r;
+    int n, i, dec;
+
+    n = geob_ring_parse(pts, rx, rz, &cx, &cz, &r, &dec);
+    if (dec >= 0) { s_gb.dec_polys++; s_gb.dec_points += dec; }
+    if (n == 0) return 0;
+    if (!geob_pool_reserve(s_gb.npt + n)) return 0;
 
     *out_first = s_gb.npt;
     for (i = 0; i < n; i++) {
@@ -698,6 +720,107 @@ static int geob_load_place_scale(const char *slug)
     }
     cJSON_Delete(root);
     return 1;
+}
+
+/* [roam F4a] Every field of one BUILDINGS.JSON record except the ring (which the
+ * caller has already parsed into b->cx/cz/radius), lifted out of
+ * geob_load_buildings unchanged so free roam reads its tiles with the same rules.
+ * `i` is the record's index (the id fallback), storey_m / upm the cache's. */
+static void geob_fill_building(const cJSON *e, int i, int tag_lm, double storey_m,
+                               double upm, TD5_GeoBuilding *b)
+{
+    const char *hs;
+    double h_m, mh_m, rh_m;
+
+    h_m  = geob_num_tag(e, "height_m", 0.0);
+    mh_m = geob_num_tag(e, "min_height_m", 0.0);
+    rh_m = geob_num_tag(e, "roof_height_m", 0.0);
+    /* A footprint with no usable height is not a building we can extrude;
+     * one storey is the floor rather than dropping it, since the footprint
+     * itself is the fact worth keeping. */
+    if (!(h_m > 0.0)) h_m = storey_m;
+    /* min_height is the BASE of the mass and height is its TOP, both
+     * measured from the ground (OSM Simple 3D Buildings). A part whose
+     * base is at or above its top is a tagging error; drop the base rather
+     * than extrude a mass the wrong way up. */
+    if (mh_m >= h_m) mh_m = 0.0;
+    b->height      = h_m  * upm;
+    b->min_height  = (mh_m > 0.0) ? mh_m * upm : 0.0;
+    b->roof_height = (rh_m > 0.0) ? rh_m * upm : 0.0;
+    b->area_m2    = geob_num(e, "area_m2", 0.0);
+    b->id_hash    = geob_id_hash(geob_num(e, "id", (double)i));
+    b->roof       = (unsigned char)geob_roof_of(geob_str(e, "roof_shape"));
+    /* LANDMARK.
+     *
+     * ON (the default): geo_fetch's own `landmark_src` is believed first,
+     * because it was decided against the WHOLE tag set including keys not
+     * promoted to fields. Then the C tag rule, for a cache land_relabel
+     * upgraded. Then the bare bool, which is all a tag_schema 1 cache has
+     * and carries no reason to report.
+     *
+     * OFF (TD5RE_GEO_LM_TAGS=0): the PRE-2026-10-07 rule, RECONSTRUCTED
+     * rather than approximated. The new cache's own `landmark` bool is no
+     * use for the A/B -- it already contains the tag decision -- but the
+     * old Python rule was `tourism or historic or (name and building in
+     * <narrow set>)` and every one of those fields is in the record, so it
+     * can be recomputed exactly and OR'd with the class rule the old
+     * reader applied. That makes the knob a true A/B on one cache instead
+     * of a third behaviour that resembles neither build. */
+    {
+        int src;
+        if (tag_lm) {
+            src = geob_lmsrc_of_string(geob_str(e, "landmark_src"));
+            if (!src) src = geob_tag_landmark_src(e);
+            if (!src && geob_true(e, "landmark"))
+                src = TD5_GEOB_LMSRC_FLAG;
+        } else if (geob_legacy_landmark(e)) {
+            src = TD5_GEOB_LMSRC_FLAG;
+        } else {
+            src = geob_class_is_landmark(geob_str(e, "class"))
+                ? TD5_GEOB_LMSRC_BUILDING : TD5_GEOB_LMSRC_NONE;
+        }
+        b->landmark = (unsigned char)(src != TD5_GEOB_LMSRC_NONE);
+        b->lmsrc    = (unsigned char)src;
+        b->lmkind   = (unsigned char)((src != TD5_GEOB_LMSRC_NONE && geob_is_worship(e))
+                                      ? TD5_GEOB_LMK_WORSHIP : TD5_GEOB_LMK_NONE);
+    }
+    b->part       = (unsigned char)(geob_true(e, "part") ? 1 : 0);
+    b->host_span  = -1;
+    b->host_side  = 0;
+
+    hs = geob_str(e, "height_src");
+    if (hs && !strcmp(hs, "osm_height"))      b->hsrc = TD5_GEOB_HSRC_OSM_HEIGHT;
+    else if (hs && !strcmp(hs, "osm_levels")) b->hsrc = TD5_GEOB_HSRC_OSM_LEVELS;
+    else if (hs && !strncmp(hs, "overture_", 9))
+                                              b->hsrc = TD5_GEOB_HSRC_OVERTURE;
+    else if (hs && !strcmp(hs, "openbuildings_raster"))
+                                              b->hsrc = TD5_GEOB_HSRC_RASTER;
+    else                                      b->hsrc = TD5_GEOB_HSRC_ESTIMATED;
+    {   /* [ROUND 1012 D1] absent on every pre-1012 record = OSM. */
+        const char *fs = geob_str(e, "footprint_src");
+        b->fsrc = (unsigned char)((fs && !strncmp(fs, "overture", 8))
+                                  ? TD5_GEOB_FSRC_OVERTURE
+                                  : TD5_GEOB_FSRC_OSM);
+    }
+
+    /* [ROUND 1009 item 9] STOREY COUNTS. `levels` is on every record in a
+     * tag_schema-2 cache; `levels_est` is the estimator's own guess and is
+     * the honest fallback for a footprint OSM never counted. Read through
+     * geob_num_tag because Overpass hands every tag back as a STRING.
+     * Clamped at 200: a levels tag of 1000 is a typo, and the emitter
+     * divides the wall height by this to lay the facade page. */
+    {
+        double lv = geob_num_tag(e, "levels", 0.0);
+        double rl = geob_num_tag(e, "roof_levels", 0.0);
+        double ml = geob_num_tag(e, "min_level", 0.0);
+        if (!(lv > 0.0)) lv = geob_num_tag(e, "levels_est", 0.0);
+        if (lv > 200.0) lv = 200.0;
+        if (rl > 200.0) rl = 200.0;
+        if (ml > 200.0) ml = 200.0;
+        b->levels      = (unsigned short)((lv > 0.0) ? (int)(lv + 0.5) : 0);
+        b->roof_levels = (unsigned short)((rl > 0.0) ? (int)(rl + 0.5) : 0);
+        b->min_level   = (unsigned short)((ml > 0.0) ? (int)(ml + 0.5) : 0);
+    }
 }
 
 static int geob_load_buildings(const char *slug)
@@ -752,8 +875,6 @@ static int geob_load_buildings(const char *slug)
         const cJSON *e = e_next;
         TD5_GeoBuilding *b = &s_gb.b[s_gb.nb];
         e_next = e ? e->next : NULL;
-        const char *hs;
-        double h_m, mh_m, rh_m;
         int first = 0, rn;
 
         rn = geob_push_ring(e ? cJSON_GetObjectItem(e, "points") : NULL,
@@ -762,100 +883,85 @@ static int geob_load_buildings(const char *slug)
         b->first = first;
         b->n     = rn;
 
-        h_m  = geob_num_tag(e, "height_m", 0.0);
-        mh_m = geob_num_tag(e, "min_height_m", 0.0);
-        rh_m = geob_num_tag(e, "roof_height_m", 0.0);
-        /* A footprint with no usable height is not a building we can extrude;
-         * one storey is the floor rather than dropping it, since the footprint
-         * itself is the fact worth keeping. */
-        if (!(h_m > 0.0)) h_m = s_gb.storey_m;
-        /* min_height is the BASE of the mass and height is its TOP, both
-         * measured from the ground (OSM Simple 3D Buildings). A part whose
-         * base is at or above its top is a tagging error; drop the base rather
-         * than extrude a mass the wrong way up. */
-        if (mh_m >= h_m) mh_m = 0.0;
-        b->height      = h_m  * s_gb.units_per_m;
-        b->min_height  = (mh_m > 0.0) ? mh_m * s_gb.units_per_m : 0.0;
-        b->roof_height = (rh_m > 0.0) ? rh_m * s_gb.units_per_m : 0.0;
-        b->area_m2    = geob_num(e, "area_m2", 0.0);
-        b->id_hash    = geob_id_hash(geob_num(e, "id", (double)i));
-        b->roof       = (unsigned char)geob_roof_of(geob_str(e, "roof_shape"));
-        /* LANDMARK.
-         *
-         * ON (the default): geo_fetch's own `landmark_src` is believed first,
-         * because it was decided against the WHOLE tag set including keys not
-         * promoted to fields. Then the C tag rule, for a cache land_relabel
-         * upgraded. Then the bare bool, which is all a tag_schema 1 cache has
-         * and carries no reason to report.
-         *
-         * OFF (TD5RE_GEO_LM_TAGS=0): the PRE-2026-10-07 rule, RECONSTRUCTED
-         * rather than approximated. The new cache's own `landmark` bool is no
-         * use for the A/B -- it already contains the tag decision -- but the
-         * old Python rule was `tourism or historic or (name and building in
-         * <narrow set>)` and every one of those fields is in the record, so it
-         * can be recomputed exactly and OR'd with the class rule the old
-         * reader applied. That makes the knob a true A/B on one cache instead
-         * of a third behaviour that resembles neither build. */
-        {
-            int src;
-            if (tag_lm) {
-                src = geob_lmsrc_of_string(geob_str(e, "landmark_src"));
-                if (!src) src = geob_tag_landmark_src(e);
-                if (!src && geob_true(e, "landmark"))
-                    src = TD5_GEOB_LMSRC_FLAG;
-            } else if (geob_legacy_landmark(e)) {
-                src = TD5_GEOB_LMSRC_FLAG;
-            } else {
-                src = geob_class_is_landmark(geob_str(e, "class"))
-                    ? TD5_GEOB_LMSRC_BUILDING : TD5_GEOB_LMSRC_NONE;
-            }
-            b->landmark = (unsigned char)(src != TD5_GEOB_LMSRC_NONE);
-            b->lmsrc    = (unsigned char)src;
-            b->lmkind   = (unsigned char)((src != TD5_GEOB_LMSRC_NONE && geob_is_worship(e))
-                                          ? TD5_GEOB_LMK_WORSHIP : TD5_GEOB_LMK_NONE);
-        }
-        b->part       = (unsigned char)(geob_true(e, "part") ? 1 : 0);
-        b->host_span  = -1;
-        b->host_side  = 0;
-
-        hs = geob_str(e, "height_src");
-        if (hs && !strcmp(hs, "osm_height"))      b->hsrc = TD5_GEOB_HSRC_OSM_HEIGHT;
-        else if (hs && !strcmp(hs, "osm_levels")) b->hsrc = TD5_GEOB_HSRC_OSM_LEVELS;
-        else if (hs && !strncmp(hs, "overture_", 9))
-                                                  b->hsrc = TD5_GEOB_HSRC_OVERTURE;
-        else if (hs && !strcmp(hs, "openbuildings_raster"))
-                                                  b->hsrc = TD5_GEOB_HSRC_RASTER;
-        else                                      b->hsrc = TD5_GEOB_HSRC_ESTIMATED;
-        {   /* [ROUND 1012 D1] absent on every pre-1012 record = OSM. */
-            const char *fs = geob_str(e, "footprint_src");
-            b->fsrc = (unsigned char)((fs && !strncmp(fs, "overture", 8))
-                                      ? TD5_GEOB_FSRC_OVERTURE
-                                      : TD5_GEOB_FSRC_OSM);
-        }
-
-        /* [ROUND 1009 item 9] STOREY COUNTS. `levels` is on every record in a
-         * tag_schema-2 cache; `levels_est` is the estimator's own guess and is
-         * the honest fallback for a footprint OSM never counted. Read through
-         * geob_num_tag because Overpass hands every tag back as a STRING.
-         * Clamped at 200: a levels tag of 1000 is a typo, and the emitter
-         * divides the wall height by this to lay the facade page. */
-        {
-            double lv = geob_num_tag(e, "levels", 0.0);
-            double rl = geob_num_tag(e, "roof_levels", 0.0);
-            double ml = geob_num_tag(e, "min_level", 0.0);
-            if (!(lv > 0.0)) lv = geob_num_tag(e, "levels_est", 0.0);
-            if (lv > 200.0) lv = 200.0;
-            if (rl > 200.0) rl = 200.0;
-            if (ml > 200.0) ml = 200.0;
-            b->levels      = (unsigned short)((lv > 0.0) ? (int)(lv + 0.5) : 0);
-            b->roof_levels = (unsigned short)((rl > 0.0) ? (int)(rl + 0.5) : 0);
-            b->min_level   = (unsigned short)((ml > 0.0) ? (int)(ml + 0.5) : 0);
-        }
+        geob_fill_building(e, i, tag_lm, s_gb.storey_m, s_gb.units_per_m, b);
 
         s_gb.nb++;
     }
     cJSON_Delete(root);
     return s_gb.nb > 0;
+}
+
+/* [roam F4a] Every field of one AREAS.JSON record except the ring, lifted out of
+ * geob_load_areas unchanged (free roam reads its tiles with it). */
+static void geob_fill_area(const cJSON *e, int i, int wide, TD5_GeoArea *a)
+{
+    const char *nm;
+
+    /* `natural` is new to this call (2026-10-07): the areas layer never
+     * carried it, because geo_fetch only consulted `natural` for water. */
+    a->kind  = (unsigned char)geob_area_kind_of(
+                   geob_str(e, "leisure"), geob_str(e, "landuse"),
+                   geob_str(e, "natural"), wide);
+    a->id_hash = geob_id_hash(geob_num(e, "id", (double)i));
+    nm = geob_str(e, "name");
+    a->named = (unsigned char)((nm && nm[0]) ? 1 : 0);
+    /* [ROUND 1009 item 4] The area's OWN barrier. "there's no such wall at
+     * the end of this park" -- and OSM agrees: 414 of La Plata's 417 areas
+     * carry no `barrier` at all. The field has always been in AREAS.JSON;
+     * this layer simply never read it, so the plaza emitter's boundary
+     * hedge was derived geometry with nothing behind it. */
+    {
+        const char *bv = geob_str(e, "barrier");
+        a->barrier = TD5_GEOA_BARRIER_NONE;
+        if (bv && bv[0]) {
+            if (!strcmp(bv, "hedge"))      a->barrier = TD5_GEOA_BARRIER_HEDGE;
+            else if (!strcmp(bv, "wall")
+                     || !strcmp(bv, "retaining_wall")
+                     || !strcmp(bv, "city_wall")) a->barrier = TD5_GEOA_BARRIER_WALL;
+            else                           a->barrier = TD5_GEOA_BARRIER_FENCE;
+        }
+    }
+}
+
+/* [roam F4a] Re-entrant record parsers for free roam (td5_geo_buildings.h). */
+int td5_geob_parse_building(const void *rec, int idx, int tag_lm, double storey_m,
+                            double upm, TD5_GeoBuilding *b, double *rx, double *rz,
+                            double *id_out)
+{
+    const cJSON *e = (const cJSON *)rec;
+    int n, dec;
+    memset(b, 0, sizeof *b);
+    n = geob_ring_parse(e ? cJSON_GetObjectItem(e, "points") : NULL, rx, rz,
+                        &b->cx, &b->cz, &b->radius, &dec);
+    if (n == 0) return 0;
+    b->first = 0;
+    b->n = n;
+    geob_fill_building(e, idx, tag_lm, storey_m, upm, b);
+    if (id_out) *id_out = geob_num(e, "id", (double)idx);
+    return n;
+}
+
+int td5_geob_parse_area(const void *rec, int idx, int wide, TD5_GeoArea *a,
+                        double *rx, double *rz, double *id_out)
+{
+    const cJSON *e = (const cJSON *)rec;
+    int n, dec;
+    memset(a, 0, sizeof *a);
+    if (!geob_true(e, "closed")) return 0;
+    n = geob_ring_parse(e ? cJSON_GetObjectItem(e, "points") : NULL, rx, rz,
+                        &a->cx, &a->cz, &a->radius, &dec);
+    if (n == 0) return 0;
+    a->first = 0;
+    a->n = n;
+    geob_fill_area(e, idx, wide, a);
+    a->host_span = -1;
+    if (id_out) *id_out = geob_num(e, "id", (double)idx);
+    return n;
+}
+
+double td5_geob_storey_m_of(const void *root)
+{
+    return geob_num((const cJSON *)root, "storey_height_m", 3.0);
 }
 
 static int geob_load_areas(const char *slug)
@@ -887,7 +993,6 @@ static int geob_load_areas(const char *slug)
         const cJSON *e = cJSON_GetArrayItem(arr, i);
         TD5_GeoArea *a = &s_gb.a[s_gb.na];
         int first = 0, rn;
-        const char *nm;
 
         /* An unclosed way is a fence or a hedge line, not an area. */
         if (!geob_true(e, "closed")) continue;
@@ -896,30 +1001,7 @@ static int geob_load_areas(const char *slug)
         if (rn == 0) continue;
         a->first = first;
         a->n     = rn;
-        /* `natural` is new to this call (2026-10-07): the areas layer never
-         * carried it, because geo_fetch only consulted `natural` for water. */
-        a->kind  = (unsigned char)geob_area_kind_of(
-                       geob_str(e, "leisure"), geob_str(e, "landuse"),
-                       geob_str(e, "natural"), wide);
-        a->id_hash = geob_id_hash(geob_num(e, "id", (double)i));
-        nm = geob_str(e, "name");
-        a->named = (unsigned char)((nm && nm[0]) ? 1 : 0);
-        /* [ROUND 1009 item 4] The area's OWN barrier. "there's no such wall at
-         * the end of this park" -- and OSM agrees: 414 of La Plata's 417 areas
-         * carry no `barrier` at all. The field has always been in AREAS.JSON;
-         * this layer simply never read it, so the plaza emitter's boundary
-         * hedge was derived geometry with nothing behind it. */
-        {
-            const char *bv = geob_str(e, "barrier");
-            a->barrier = TD5_GEOA_BARRIER_NONE;
-            if (bv && bv[0]) {
-                if (!strcmp(bv, "hedge"))      a->barrier = TD5_GEOA_BARRIER_HEDGE;
-                else if (!strcmp(bv, "wall")
-                         || !strcmp(bv, "retaining_wall")
-                         || !strcmp(bv, "city_wall")) a->barrier = TD5_GEOA_BARRIER_WALL;
-                else                           a->barrier = TD5_GEOA_BARRIER_FENCE;
-            }
-        }
+        geob_fill_area(e, i, wide, a);
         a->host_span = -1;
         a->host_side = 0;
         s_gb.na++;

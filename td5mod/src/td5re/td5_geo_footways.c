@@ -492,6 +492,9 @@ int td5_geo_footways_point(const TD5_GeoFootway *f, int k, double *x, double *z)
     return 1;
 }
 
+int td5_geo_footways_kind_of(const char *s)    { return fw_kind_of(s); }
+int td5_geo_footways_surface_of(const char *s) { return fw_surface_of(s); }
+
 int td5_geo_footways_kind_count(int kind)
 {
     if (kind < 0 || kind >= TD5_GEO_FW_KINDS) return 0;

@@ -13,6 +13,7 @@
 #include "td5_geo_footways.h"    /* GEO TRACK: mapped pavements (1011 C4)      */
 #include "td5_geo_avenues.h"     /* [1013 F1] which edge a divided avenue owns  */
 #include "td5_tg_geo_clear.h"    /* [1014 C] real roads + far footway: no building on either */
+#include "td5_tg_geo_bld.h"      /* [roam F4a] the extrusion core shared with free roam */
 
 double tg_r14_keep(void)
 {
@@ -2705,6 +2706,8 @@ static void tg_geo_push_tri(float *v, unsigned int *light, int *pn,
  * treats levels as a height SOURCE alongside height. At La Plata the difference
  * is Casa Curutchet (landmark, building:levels=3): literal reading hands a Le
  * Corbusier house to a generic prefab. */
+static int tg_geo_landmark_real(const TD5_GeoBuilding *b);
+int tg_geo_landmark_is_real(const TD5_GeoBuilding *b) { return tg_geo_landmark_real(b); }
 static int tg_geo_landmark_real(const TD5_GeoBuilding *b)
 {
     return b->landmark
@@ -2736,18 +2739,17 @@ static int tg_geo_landmark_real(const TD5_GeoBuilding *b)
  * when nothing fitted, -1 on a buffer write failure. Draw-free:
  * tg_prefab_fit is salted with the OSM way id hash. TD5RE_GEO_LM_PREFAB=0
  * restores the plain extrusion for an A/B. */
-static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
+static int tg_geo_emit_landmark_prefab(const TG_GeoBldEnv *e,
                                        const TD5_GeoBuilding *gb,
                                        const double *rx, const double *rz,
                                        int n_ring, double cx, double cz)
 {
-    const TG_Node *n = &h->nl->v[h->si];
     double ux, uz, vx, vz, tmin = 0.0, tmax = 0.0, vmin = 0.0, vmax = 0.0, y;
     double hx_fit = 0.0, hz_fit = 0.0;
     int k, pf;
 
     if (!td5_env_flag_on("TD5RE_GEO_LM_PREFAB")) return 0;
-    if (*h->nmesh >= h->maxmesh) return 0;
+    if (*e->nmesh >= e->maxmesh) return 0;
 
     tg_geo_ring_axis(rx, rz, n_ring, cx, cz, &ux, &uz);
     vx = -uz; vz = ux;
@@ -2776,13 +2778,9 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
          * take the first whose four corners are inside the ring AND outside the
          * carriageway line; none fits -> the plain extrusion, which IS the ring.
          * TD5RE_GEO_PREFAB_FIT=0 restores the unchecked fit. */
-        const TG_Node *nd = &h->nl->v[h->si];
-        const double sd = (gb->host_side > 0) ? 1.0 : -1.0;
-        const double minout = nd->width * 0.5
-            + tg_geo_building_clear_gap(h->nl, h->si, sd,
-                    tg_city_sidewalk_w_side_at(h->nl, h->si, sd > 0.0, h->b));
         static const double k_scale[4] = { 1.0, 0.85, 0.70, 0.55 };
         int si4;
+        if (e->prefab_begin) e->prefab_begin(e->u);
         pf = -1;
         for (si4 = 0; si4 < 4 && pf < 0; si4++) {
             double fx = hx * k_scale[si4], fz = hz * k_scale[si4];
@@ -2798,22 +2796,22 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
                 const double qx = cx + ux * fx * sx + vx * fz * sz;
                 const double qz = cz + uz * fx * sx + vz * fz * sz;
                 if (!td5_geob_point_in_ring(rx, rz, n_ring, qx, qz)) ok = 0;
-                else if (tg_geo_outward(h->nl, h->si, sd, qx, qz) < minout) ok = 0;
+                else if (e->corner_ok && !e->corner_ok(e->u, qx, qz)) ok = 0;
             }
             if (!ok) pf = -1;
         }
         hx_fit = (pf >= 0) ? tg_prefab_half_width(pf) : hx;
         hz_fit = (pf >= 0) ? tg_prefab_half_depth(pf) : hz;
     }
-    if (pf < 0) { s_geo_lm_nofit++; return 0; }
+    if (pf < 0) { e->st->lm_nofit++; return 0; }
 
     /* [ROUND 1024 I] the stamped piece against every laid street (level091 e145 s10: the ring was cleared, the piece,
      * fitted to the ring's box about its centroid, still stood in a 4-way crossing). Nothing fits -> the extruded ring. */
-    if (tg_geo_rect_on_street(h->nl, h->si, cx, cz, ux, uz, hx_fit, hz_fit)) { s_geo_lm_nofit++; return 0; }
+    if (e->rect_on_road && e->rect_on_road(e->u, cx, cz, ux, uz, hx_fit, hz_fit)) { e->st->lm_nofit++; return 0; }
 
-    y = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
-    if (y > n->y + tg_city_kerb_h(h->b) + 400.0)
-        y = n->y + tg_city_kerb_h(h->b) + 400.0;
+    y = e->ground(e->u, cx, cz) + tg_city_kerb_h(e->b);
+    if (e->have_pf_ceiling && y > e->pf_ceiling_y)
+        y = e->pf_ceiling_y;
     /* [ROUND 1014 C] "buildings float and don't follow terrain height change."
      * A stamped set piece stands on ONE plane, taken at the footprint's centroid,
      * so on a slope its downhill edge hangs in the air (MEASURED: 2.8 m under a
@@ -2827,16 +2825,16 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
             for (czn = -1; czn <= 1; czn += 2) {
                 const double qx = cx + ux * hx_fit * cxn + (-uz) * hz_fit * czn;
                 const double qz = cz + uz * hx_fit * cxn + ux * hz_fit * czn;
-                const double gy = tg_world_h(qx, qz) + tg_city_kerb_h(h->b);
+                const double gy = e->ground(e->u, qx, qz) + tg_city_kerb_h(e->b);
                 if (gy < y) y = gy;
             }
     }
     y -= TD5_TG_GEO_BASE_SINK;
 
-    h->moff[(*h->nmesh)++] = h->blk->len;
-    if (!tg_prefab_write_at(h->blk, pf, cx, y, cz, ux, uz)) return -1;
-    tg_acct(TG_ACCT_BUILDING, h->si);
-    s_geo_lm_prefab++;
+    e->moff[(*e->nmesh)++] = e->blk->len;
+    if (!tg_prefab_write_at(e->blk, pf, cx, y, cz, ux, uz)) return -1;
+    if (e->acct) tg_acct(TG_ACCT_BUILDING, e->si);
+    e->st->lm_prefab++;
     return 1;
 }
 
@@ -2845,16 +2843,21 @@ static int tg_geo_emit_landmark_prefab(const TG_FBHook *h,
  * counts: 90 landmarks bind, some are nudged, some dropped, and nothing said
  * which. ~90 lines per build, emitted from scenery workers (the logger is
  * thread-safe), not in a per-frame loop. */
-static void tg_geo_lm_note(const TD5_GeoBuilding *gb, int si, const char *what,
-                           double shift)
+static void tg_geo_lm_note_k(const TD5_GeoBuilding *gb, int kind, int si,
+                             const char *what, double shift)
 {
-    const int kind = td5_geolm_kind(gb);
     if (!gb->landmark && kind == TD5_GEOB_LMK_NONE) return;
     TD5_LOG_I(LOG_TAG, "[GEO LM] way_hash=%08x %s span=%d side=%d lat=%.0f "
               "ring=%d r=%.0f area=%.0fm2 h=%.0f hsrc=%d: %s (shift %.0f)",
               gb->id_hash, gb->landmark ? (kind ? "anchor" : "landmark") : "part",
               si, gb->host_side, gb->host_lat, gb->n, gb->radius,
               gb->area_m2, gb->height, (int)gb->hsrc, what, shift);
+}
+
+static void tg_geo_lm_note(const TD5_GeoBuilding *gb, int si, const char *what,
+                           double shift)
+{
+    tg_geo_lm_note_k(gb, td5_geolm_kind(gb), si, what, shift);
 }
 
 /* ======================================================================== *
@@ -2890,13 +2893,12 @@ typedef char tg_lm_worship_pages_fit[(TD5_TG_PREFAB_PAGES == 161) ? 1 : -1];
 
 /* Returns 1 and the worship pages/cells when `gb` belongs to a worship
  * cluster. TD5RE_GEO_LM_STYLE=0 restores the generic dressing for an A/B. */
-static int tg_geo_worship_style(const TD5_GeoBuilding *gb, int *wall,
-                                int *roof, double *cell_w, double *row_h)
+static int tg_geo_worship_style(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
+                                int *wall, int *roof, double *cell_w, double *row_h)
 {
-    const double upm = td5_geob_units_per_m() > 1.0 ? td5_geob_units_per_m()
-                                                    : 430.0;
+    const double upm = e->upm;
     if (!td5_env_flag_on("TD5RE_GEO_LM_STYLE")) return 0;
-    if (td5_geolm_kind(gb) != TD5_GEOB_LMK_WORSHIP) return 0;
+    if (e->lm_kind != TD5_GEOB_LMK_WORSHIP) return 0;
     /* A low mass may take the stone page; towers and the nave never do. The
      * choice is a hash of the way id, so it is stable across builds. */
     *wall = (gb->height < 30.0 * upm && (gb->id_hash % 3u) == 0u)
@@ -2904,7 +2906,7 @@ static int tg_geo_worship_style(const TD5_GeoBuilding *gb, int *wall,
     *roof = TD5_TG_LM_WORSHIP_ROOF;
     *cell_w = TD5_TG_LM_WORSHIP_CELL_W_M * upm;
     *row_h  = TD5_TG_LM_WORSHIP_ROW_H_M * upm;
-    s_geo_lm_styled++;
+    e->st->lm_styled++;
     return 1;
 }
 
@@ -2962,15 +2964,12 @@ static int tg_geo_apron_road_clear(double x, double z, double clear)
     return 1;
 }
 
-static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
-                             const double *rx, const double *rz, int n_ring,
-                             double side, double minout)
+static int tg_geo_emit_apron(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
+                             const double *rx, const double *rz, int n_ring)
 {
     static const double k_fac[4] = { 1.0, 0.5, 0.25, 0.0 };
-    const double upm = td5_geob_units_per_m() > 1.0 ? td5_geob_units_per_m()
-                                                    : 430.0;
+    const double upm = e->upm;
     const double margin = TD5_TG_GEO_APRON_M * upm;
-    const double road_clear = TD5_TG_GEO_APRON_ROAD_M * upm;
     const double inv_tile = 1.0 / 3000.0;
     double hx[TD5_GEOB_RING_MAX + 2], hz[TD5_GEOB_RING_MAX + 2];
     double ox[TD5_GEOB_RING_MAX + 2], oz[TD5_GEOB_RING_MAX + 2];
@@ -2981,13 +2980,12 @@ static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
     unsigned short cmd[3];
     double cx = 0.0, cz = 0.0;
     int nh = 0, fn = 0, k, f, nv = 0;
-    const int have_roads = td5_geo_roads_count() > 0;
 
     if (!td5_env_flag_on("TD5RE_GEO_LM_APRON")) return 1;
-    if (*h->nmesh >= h->maxmesh) { s_geo_lm_apron_refused++; return 1; }
+    if (*e->nmesh >= e->maxmesh) { e->st->lm_apron_refused++; return 1; }
     /* Hull with ZERO margin first: its vertices are the base of the push. */
     if (!td5_geolm_apron(rx, rz, n_ring, 0.0, hx, hz, &nh,
-                         TD5_GEOB_RING_MAX + 2)) { s_geo_lm_apron_refused++; return 1; }
+                         TD5_GEOB_RING_MAX + 2)) { e->st->lm_apron_refused++; return 1; }
     for (k = 0; k < nh; k++) { cx += hx[k]; cz += hz[k]; }
     cx /= (double)nh; cz /= (double)nh;
     /* Each margin on the ladder is recomputed from the zero-margin hull, so a
@@ -2995,7 +2993,7 @@ static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
     for (f = 0; f < 4; f++) {
         if (!td5_geolm_apron(rx, rz, n_ring, margin * k_fac[f], fx[f], fz[f],
                              &fn, TD5_GEOB_RING_MAX + 2) || fn != nh) {
-            s_geo_lm_apron_refused++;
+            e->st->lm_apron_refused++;
             return 1;
         }
     }
@@ -3003,13 +3001,11 @@ static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
         int pick = 3;
         for (f = 0; f < 3; f++) {
             const double px = fx[f][k], pz = fz[f][k];
-            if (tg_geo_outward(h->nl, h->si, side, px, pz) < minout) continue;
-            if (have_roads && !tg_geo_apron_road_clear(px, pz, road_clear))
-                continue;
+            if (e->apron_ok && !e->apron_ok(e->u, px, pz)) continue;
             pick = f;
             break;
         }
-        if (pick > 0) s_geo_lm_apron_pulled++;
+        if (pick > 0) e->st->lm_apron_pulled++;
         ox[k] = fx[pick][k]; oz[k] = fz[pick][k];
         ix[k] = cx + (hx[k] - cx) * TD5_TG_GEO_APRON_INNER;
         iz[k] = cz + (hz[k] - cz) * TD5_TG_GEO_APRON_INNER;
@@ -3023,7 +3019,7 @@ static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
             && hypot(ix[j] - ix[k], iz[j] - iz[k]) < 1.0) continue;
         for (q = 0; q < 4; q++) {
             const int o = nv * 5;
-            const double g = tg_world_h(qx[q], qz[q]);
+            const double g = e->ground(e->u, qx[q], qz[q]);
             v[o + 0] = (float)qx[q];
             v[o + 1] = (float)(g + TD5_TG_GEO_APRON_LIFT);
             v[o + 2] = (float)qz[q];
@@ -3033,44 +3029,41 @@ static int tg_geo_emit_apron(const TG_FBHook *h, const TD5_GeoBuilding *gb,
             nv++;
         }
     }
-    if (nv < 4) { s_geo_lm_apron_refused++; return 1; }
+    if (nv < 4) { e->st->lm_apron_refused++; return 1; }
     {   /* How far the outer ring's ground wanders: the number that says
          * whether "flat enough to lay on" held. */
         double lo = 1e300, hi = -1e300;
         for (k = 0; k < nh; k++) {
-            const double g = tg_world_h(ox[k], oz[k]);
+            const double g = e->ground(e->u, ox[k], oz[k]);
             if (g < lo) lo = g;
             if (g > hi) hi = g;
         }
-        if (hi - lo > s_geo_lm_apron_dev) s_geo_lm_apron_dev = hi - lo;
+        if (hi - lo > e->st->lm_apron_dev) e->st->lm_apron_dev = hi - lo;
     }
     cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK;
     cmd[1] = 0;
     cmd[2] = (unsigned short)(nv / 4);
-    h->moff[(*h->nmesh)++] = h->blk->len;
-    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, 1, 0,
+    e->moff[(*e->nmesh)++] = e->blk->len;
+    if (!tg_write_prefab_mesh(e->blk, v, light, nv, cmd, 1, 0,
                               0.0, 0.0, 0.0, 1.0, 0.0))
         return 0;
-    tg_acct(TG_ACCT_PARK, h->si);
-    s_geo_lm_apron++;
-    s_geo_lm_apron_quads += nv / 4;
-    tg_geo_lm_note(gb, h->si, "apron laid", 0.0);
+    if (e->acct) tg_acct(TG_ACCT_PARK, e->si);
+    e->st->lm_apron++;
+    e->st->lm_apron_quads += nv / 4;
+    tg_geo_lm_note_k(gb, e->lm_kind, e->si, "apron laid", 0.0);
     return 1;
 }
 
 /* Emit ONE real footprint as one mesh. Returns 0 only on a buffer write
  * failure; a refusal (on the road, degenerate ring, mesh table full) is a
  * counted no-op success, matching the back-row contract. */
-static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
+int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
+                              const double *rx, const double *rz, int n_ring,
+                              double cx, double cz, double shift)
 {
-    const TG_NodeList *nl = h->nl;
-    const int si = h->si;
-    const TG_Node *n = &nl->v[si];
-    const double side = (gb->host_side > 0) ? 1.0 : -1.0;
-    const double lx = n->tz * side, lz = -n->tx * side;
-    const double floor_h = tg_facade_floor_h(h->b);
-    double cell_w        = tg_facade_cell_w(h->b);
-    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    const int si = e->si;
+    const double floor_h = tg_facade_floor_h(e->b);
+    double cell_w        = tg_facade_cell_w(e->b);
     double ax[TD5_GEOB_RING_MAX], az[TD5_GEOB_RING_MAX];   /* ridge / inset */
     int    tri[(TD5_GEOB_RING_MAX - 2) * 3];
     /* Budget, worst case: a MANSARD writes 2 skirt triangles per ring edge
@@ -3081,12 +3074,413 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
     unsigned int light[TD5_GEOB_RING_MAX * 14];
     unsigned short cmd[6];
     double q[12], t3[9];
-    double shift = 0.0, need, H, by, minout, gap, rise, inv_tile;
-    double wall_top, vrows, cx = 0.0, cz = 0.0;
+    double H, by, rise, inv_tile;
+    double wall_top, vrows;
     double bot[TD5_GEOB_RING_MAX], found_max = 0.0;
-    int n_ring = gb->n, k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
+    int k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
     int rows, storeys = 0, wall_page, roof_page, shape, convex;
     double lm_row_h = 0.0;          /* [1014 D20] >0: worship page cell height */
+
+
+    /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
+     * outline's own (already nudged) ring, so it inherits the carriageway
+     * clearance the building was given. */
+    if (e->lm_anchor && e->lm_kind == TD5_GEOB_LMK_WORSHIP) {
+        if (!tg_geo_emit_apron(e, gb, rx, rz, n_ring)) return 0;
+    }
+
+    /* --- a landmark OSM does not describe in 3D: the prefab table ---------
+     * Tried BEFORE the extrusion, because a stamped set piece REPLACES the
+     * box rather than standing beside it. A refusal falls through and the
+     * footprint is extruded exactly as before. */
+    if (gb->landmark && !tg_geo_landmark_real(gb)) {
+        const int r = tg_geo_emit_landmark_prefab(e, gb, rx, rz, n_ring,
+                                                  cx, cz);
+        if (r < 0) return 0;
+        if (r > 0) {
+            tg_geo_lm_note_k(gb, e->lm_kind, si, "emitted as shipped set piece", shift);
+            e->st->emitted++;
+            e->st->lm_fallback++;
+            if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) e->st->estimated++;
+            else                                     e->st->measured++;
+            return 1;
+        }
+    }
+
+    /* --- height, floors, pages -------------------------------------------
+     *
+     * OSM's min_height is the BASE of the mass and height is its TOP, both
+     * measured from the ground (Simple 3D Buildings). The first cut read
+     * min_height as an offset and still extruded the FULL height above it, so
+     * a part tagged min_height=20 height=34 came out 34 m tall starting at
+     * 20 m -- 20 m too tall, and a three-part stack ended up three times the
+     * building. H is now the mass's OWN height. (It read 0 in practice
+     * anyway: geo_fetch stores the tag as a string, which the reader only
+     * started accepting today -- see geob_num_tag.) */
+    /* [ROUND 1009 item 9] "Building heights are not fully correct."
+     *
+     * MEASURED, and the arithmetic is the whole bug. `floor_h` is the FACADE
+     * PAGE's authored cell height corrected for aspect -- 2058 raw, 4.79 m at
+     * La Plata's 430 units/m -- while OSM's storey is 3 m. The old code used
+     * that page property as BOTH the floor under a height AND the quantum a
+     * height snaps to, so every measured height came out as a multiple of
+     * 4.79 m:
+     *
+     *   tagged 3.0 m  (182 footprints) -> floored to 4.79 m   +60%
+     *   tagged 9.0 m  (594)            -> 2 x 4.79 = 9.57 m   +6%
+     *   tagged 12.0 m (647)            -> 3 x 4.79 = 14.36 m  +20%
+     *   tagged 16.5 m (98)             -> 3 x 4.79 = 14.36 m  -13%
+     *
+     * Nothing about a texture cell is a fact about a building, so the snap is
+     * gone and the measured height is kept as tagged. The two things the page
+     * count was really needed for are separated:
+     *
+     *   PAGE CLASS  still keyed on the page-floor count, because that is what
+     *               tg_facade_page_class's low-rise/tower split is authored in.
+     *   UV ROWS     now the OSM STOREY count (`levels`, else height / storey
+     *               height), so one page cell is one real floor instead of one
+     *               4.79 m slab -- which is also why the windows were too big.
+     *
+     * The remaining floor is HALF A STOREY: below that a footprint is a shed,
+     * not a mass, and a zero-height extrusion is a sheet with no inside.
+     * TD5RE_GEO_BLD_HEIGHT=0 restores the snap for an A/B. */
+    {
+        const double storey = e->storey;
+        const int    honest = td5_env_flag_on("TD5RE_GEO_BLD_HEIGHT")
+                           && storey > 1.0;
+        const double unit   = honest ? storey : floor_h;
+        H = gb->height - gb->min_height;
+        if (H < unit * (honest ? 0.5 : 1.0)) H = unit * (honest ? 0.5 : 1.0);
+        if (H > TD5_TG_GEO_MAX_H) H = TD5_TG_GEO_MAX_H;
+        /* Page-floor count, for the palette split only. */
+        rows = (int)(H / floor_h + 0.5);
+        if (rows < 1) rows = 1;
+        if (!honest) {
+            /* The pre-1009 behaviour, verbatim: ordinary buildings snapped to a
+             * whole number of PAGE floors; a real landmark or a building:part
+             * kept its measured height. */
+            if (!tg_geo_landmark_real(gb) && !gb->part) H = (double)rows * floor_h;
+            storeys = 0;
+        } else {
+            storeys = (int)gb->levels - (int)gb->min_level;
+            if (storeys < 1) storeys = (int)(H / storey + 0.5);
+            if (storeys < 1) storeys = 1;
+            if (storeys > TD5_TG_GEO_MAX_STOREYS) storeys = TD5_TG_GEO_MAX_STOREYS;
+        }
+    }
+    /* The ledger reads H HERE, before the base sink raises it: the sink lowers
+     * the bottom edge and raises the top by the same amount, so it is not part
+     * of the height the tag asked for. */
+    {
+        const double want = gb->height - gb->min_height;
+        const double err  = fabs(H - want);
+        e->st->h_n++;
+        if (gb->levels > 0) e->st->h_levels++;
+        e->st->h_err_sum += err;
+        if (err > e->st->h_err_max) e->st->h_err_max = err;
+        if (err > 430.0) e->st->h_off++;          /* more than a metre out */
+    }
+    wall_page = tg_facade_page_class(gb->id_hash, rows);
+    roof_page = TD5_TG_PAGE_R3_BLOCK + 3;      /* the house-roof page */
+    /* [ROUND 1014 D20] a cathedral part is brick and slate, not an office. */
+    if (tg_geo_worship_style(e, gb, &wall_page, &roof_page, &cell_w, &lm_row_h))
+        storeys = 0;
+
+    /* --- base Y: the WORLD's ground under the footprint, on the kerb ------ */
+    by = e->ground(e->u, cx, cz) + tg_city_kerb_h(e->b);
+    /* Same ceiling the procedural wall uses: a building must not float above
+     * the road when the conformed bed and the raw heightfield disagree. */
+    if (e->have_ceiling && by > e->ceiling_y)
+        by = e->ceiling_y;
+    /* A building:part starts where the part below it stops. */
+    if (gb->min_height > 0.0) by += gb->min_height;
+    /* THE SINK LOWERS THE BASE, NOT THE TOP. It exists so uneven terrain
+     * under a big flat footprint cannot show daylight under a wall, which is
+     * a statement about the BOTTOM edge -- but it was applied to `by` before
+     * the top was derived from it, so every building came out 300 units (0.7
+     * m) shorter than its tag. MEASURED on the fixture's three-part stack:
+     * the plinth's top face landed at 6375 while the block above it started
+     * at 6675, leaving a 0.7 m ring of daylight between two masses that are
+     * supposed to meet. Raising the top by the same amount puts the tagged
+     * height back and closes the stack. */
+    H += TD5_TG_GEO_BASE_SINK;
+    by -= TD5_TG_GEO_BASE_SINK;
+
+    /* --- ROOF first: the writer consumes tris before quads per command ----
+     *
+     * WHERE THE ROOF'S HEIGHT COMES FROM. OSM says `height` INCLUDES the
+     * roof and `roof:height` is the roof's share of it, so a tagged
+     * roof:height lowers the eaves rather than stacking on top. Untagged, the
+     * old behaviour is kept and a default pitch is added ABOVE the walls --
+     * subtracting a made-up rise from an ESTIMATED height would shorten the
+     * building for no reason. */
+    shape  = (int)gb->roof;
+    convex = tg_geo_ring_convex(rx, rz, n_ring);
+    if (!convex && shape != TD5_GEOB_ROOF_FLAT
+        && shape != TD5_GEOB_ROOF_NONE) {
+        shape = TD5_GEOB_ROOF_FLAT;        /* a concave ridge cuts its walls */
+        e->st->roof_concave++;
+    }
+    rise = (double)TD5_TG_GEO_ROOF_RISE;
+    wall_top = by + H;
+    if (shape != TD5_GEOB_ROOF_FLAT && shape != TD5_GEOB_ROOF_NONE
+        && gb->roof_height > 0.0 && gb->roof_height < H * 0.8) {
+        rise = gb->roof_height;
+        wall_top = by + H - rise;          /* the roof is INSIDE the height */
+    }
+    /* Roof tile: one page every ~8 m of footprint, so a 30 m block reads as a
+     * tiled roof instead of one stretched image. */
+    inv_tile = 1.0 / 3400.0;
+    if (shape == TD5_GEOB_ROOF_MANSARD) {
+        /* A truncated pyramid: a steep skirt in to an inset ring, then a flat
+         * deck. A centroid pyramid (what a mansard used to get) is the one
+         * silhouette a mansard is NOT -- the whole point of the shape is the
+         * flat top. Insetting by half the rise puts the skirt at ~63 deg. */
+        double s = 1.0 - (rise * 0.5) / (gb->radius > 1.0 ? gb->radius : 1.0);
+        if (s < 0.35) s = 0.35;
+        if (s > 0.90) s = 0.90;
+        for (k = 0; k < n_ring; k++) {
+            ax[k] = cx + (rx[k] - cx) * s;
+            az[k] = cz + (rz[k] - cz) * s;
+        }
+    } else if (shape != TD5_GEOB_ROOF_FLAT && shape != TD5_GEOB_ROOF_NONE) {
+        tg_geo_roof_ridge(shape, rx, rz, n_ring, cx, cz, ax, az);
+    }
+
+    if (shape == TD5_GEOB_ROOF_FLAT || shape == TD5_GEOB_ROOF_NONE) {
+        const int nc = td5_geob_triangulate(rx, rz, n_ring, tri,
+                                            (TD5_GEOB_RING_MAX - 2));
+        for (k = 0; k < nc; k++) {
+            t3[0] = rx[tri[k*3+0]]; t3[1] = wall_top; t3[2] = rz[tri[k*3+0]];
+            t3[3] = rx[tri[k*3+1]]; t3[4] = wall_top; t3[5] = rz[tri[k*3+1]];
+            t3[6] = rx[tri[k*3+2]]; t3[7] = wall_top; t3[8] = rz[tri[k*3+2]];
+            /* The ear clipper can hand back a sliver on a ring with a nearly
+             * collinear corner (MEASURED: 1 of 4 triangles on the fixture's
+             * L-shaped footprint). It renders as nothing and reads as a
+             * zero-normal face in an audit, so drop it here rather than
+             * change the clipper, which every other caller relies on. */
+            if (tg_geo_tri_area2(t3) <= TD5_TG_GEO_TRI_MIN) continue;
+            tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
+            ntri++;
+        }
+    } else {
+        /* Every sloped shape is this one loop; see tg_geo_roof_ridge. The
+         * eaves edge and its two ridge points make a quad, written as two
+         * triangles and skipping whichever of them is degenerate -- which is
+         * how an apex reduces to the single triangle per edge the pyramid
+         * used to emit, with no separate code path. */
+        const double ry = wall_top + rise;
+        for (k = 0; k < n_ring; k++) {
+            const int j = (k + 1) % n_ring;
+            if (!(hypot(rx[j] - rx[k], rz[j] - rz[k]) > 1.0)) continue;
+            t3[0] = rx[k]; t3[1] = wall_top; t3[2] = rz[k];
+            t3[3] = rx[j]; t3[4] = wall_top; t3[5] = rz[j];
+            t3[6] = ax[j]; t3[7] = ry;       t3[8] = az[j];
+            if (tg_geo_tri_area2(t3) > TD5_TG_GEO_TRI_MIN) {
+                tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
+                ntri++;
+            }
+            t3[0] = rx[k]; t3[1] = wall_top; t3[2] = rz[k];
+            t3[3] = ax[j]; t3[4] = ry;       t3[5] = az[j];
+            t3[6] = ax[k]; t3[7] = ry;       t3[8] = az[k];
+            if (tg_geo_tri_area2(t3) > TD5_TG_GEO_TRI_MIN) {
+                tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
+                ntri++;
+            }
+        }
+        if (shape == TD5_GEOB_ROOF_MANSARD) {
+            const int nc = td5_geob_triangulate(ax, az, n_ring, tri,
+                                                (TD5_GEOB_RING_MAX - 2));
+            for (k = 0; k < nc; k++) {
+                t3[0] = ax[tri[k*3+0]]; t3[1] = ry; t3[2] = az[tri[k*3+0]];
+                t3[3] = ax[tri[k*3+1]]; t3[4] = ry; t3[5] = az[tri[k*3+1]];
+                t3[6] = ax[tri[k*3+2]]; t3[7] = ry; t3[8] = az[tri[k*3+2]];
+                if (tg_geo_tri_area2(t3) <= TD5_TG_GEO_TRI_MIN) continue;
+                tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
+                ntri++;
+            }
+        }
+        e->st->roof_shaped++;
+    }
+    if (shape >= 0 && shape <= TD5_GEOB_ROOF_SKILLION) e->st->roof_kind[shape]++;
+    /* [ROUND 1009 item 9] V extent = how many page cells repeat up the WALL.
+     * With the real storey count known that is the storey count, scaled by the
+     * wall's share of the mass (a tagged roof:height lowers the eaves, and
+     * repeating the whole building's storeys over the shorter wall would squash
+     * the windows -- the reason this was ever derived from a height). Falls back
+     * to the page-floor ratio when the cache has no storey count. */
+    if (lm_row_h > 1.0) {
+        vrows = (wall_top - by) / lm_row_h;       /* [1014 D20] worship cell */
+    } else if (storeys > 0 && H > 1.0) {
+        vrows = (double)storeys * (wall_top - by) / H;
+    } else {
+        vrows = (wall_top - by) / ((floor_h > 1.0) ? floor_h : 1.0);
+    }
+    if (!(vrows > 0.25)) vrows = 1.0;
+    if (ntri > 0) {
+        cmd[ncmd * 3 + 0] = (unsigned short)roof_page;
+        cmd[ncmd * 3 + 1] = (unsigned short)ntri;
+        cmd[ncmd * 3 + 2] = 0;
+        ncmd++;
+    }
+
+    /* --- WALLS: one quad per footprint edge ------------------------------- */
+    /* [ROUND 1014 C] FOUNDATION. "buildings float and don't follow terrain
+     * height change." The whole mass stood on ONE plane (the ground at the
+     * centroid), so on a slope the downhill corners hung in the air -- MEASURED
+     * on the audit of Mariano's build, up to 4.5 m under the 70 m-radius blocks.
+     * Each wall now reaches down, per VERTEX, to the world's ground under that
+     * vertex (never up: the uphill side keeps the plane and simply buries), at
+     * most TD5_TG_GEO_MAX_FOUND below it. A building:part that starts at its own
+     * min_height is floating by design and keeps its plane.
+     * TD5RE_GEO_BLD_FOUNDATION=0 restores the single plane. */
+    for (k = 0; k < n_ring; k++) {
+        bot[k] = by;
+        if (td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") && !(gb->min_height > 0.0)) {
+            const double g = e->ground(e->u, rx[k], rz[k]) + tg_city_kerb_h(e->b)
+                           - TD5_TG_GEO_BASE_SINK;
+            if (g < bot[k]) {
+                bot[k] = (g < by - TD5_TG_GEO_MAX_FOUND) ? by - TD5_TG_GEO_MAX_FOUND : g;
+                if (by - bot[k] > found_max) found_max = by - bot[k];
+            }
+        }
+    }
+    if (found_max > 1.0) { e->st->found++; if (found_max > e->st->found_max) e->st->found_max = found_max; }
+    for (k = 0; k < n_ring; k++) {
+        const int j = (k + 1) % n_ring;
+        const double elen = hypot(rx[j] - rx[k], rz[j] - rz[k]);
+        double ua, vq;
+        if (!(elen > 1.0)) continue;        /* duplicate vertex in the source */
+        ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
+        q[0] = rx[k]; q[1]  = bot[k];  q[2]  = rz[k];
+        q[3] = rx[j]; q[4]  = bot[j];  q[5]  = rz[j];
+        q[6] = rx[j]; q[7]  = wall_top; q[8]  = rz[j];
+        q[9] = rx[k]; q[10] = wall_top; q[11] = rz[k];
+        /* The page rows stretch with the extra wall, so a foundation under a
+         * 12-storey block does not squash its windows. */
+        vq = vrows;
+        if (wall_top - by > 1.0)
+            vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - by);
+        /* Storeys over the WALL, not over the building: with roof:height
+         * tagged the eaves are below the top and repeating the full storey
+         * count over the shorter wall would squash the windows. */
+        tg_geo_push_quad(v, light, &nv, q, ua, vq, 0xFFFFFFFFu);
+        nquad++;
+    }
+    if (nquad < 3) { e->st->dropped_deg++; return 1; }
+    cmd[ncmd * 3 + 0] = (unsigned short)wall_page;
+    cmd[ncmd * 3 + 1] = 0;
+    cmd[ncmd * 3 + 2] = (unsigned short)nquad;
+    ncmd++;
+
+    /* page_base 0: the commands above already name absolute pages, and the
+     * geometry is already in world coordinates, so origin (0,0,0) with no yaw
+     * passes it through untouched. */
+    e->moff[(*e->nmesh)++] = e->blk->len;
+    if (!tg_write_prefab_mesh(e->blk, v, light, nv, cmd, ncmd, 0,
+                              0.0, 0.0, 0.0, 1.0, 0.0))
+        return 0;
+    if (e->acct) tg_acct(TG_ACCT_BUILDING, si);
+    tg_geo_lm_note_k(gb, e->lm_kind, si, "emitted extruded", shift);
+    e->st->emitted++;
+    if (gb->part) e->st->parts++;
+    if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) e->st->estimated++;
+    else                                     e->st->measured++;
+    if (gb->fsrc == TD5_GEOB_FSRC_OVERTURE)  e->st->fp_overture++;
+    if (gb->hsrc == TD5_GEOB_HSRC_OVERTURE)  e->st->h_overture++;
+    if (gb->hsrc == TD5_GEOB_HSRC_RASTER)    e->st->h_raster++;
+    if (gb->landmark) {
+        if (tg_geo_landmark_real(gb)) e->st->lm_real++;
+        else                          e->st->lm_fallback++;
+    }
+    return 1;
+}
+
+/* [roam F4a] The strip's environment for the shared extrusion core: every callback
+ * computes exactly what tg_geo_emit_one / its helpers computed in place before the
+ * split (same calls, same arguments, same order relative to the emitted bytes). */
+typedef struct {
+    const TG_FBHook       *h;
+    const TD5_GeoBuilding *gb;
+    double side, minout;        /* the extrusion side + carriageway clearance */
+    double pf_sd, pf_minout;    /* the set-piece fit's own (prefab_begin)     */
+} TgStripBldU;
+
+static double tg_strip_bld_ground(void *u, double x, double z)
+{
+    (void)u;
+    return tg_world_h(x, z);
+}
+
+static void tg_strip_bld_pf_begin(void *uv)
+{
+    TgStripBldU *u = (TgStripBldU *)uv;
+    const TG_FBHook *h = u->h;
+    const TG_Node *nd = &h->nl->v[h->si];
+    u->pf_sd = (u->gb->host_side > 0) ? 1.0 : -1.0;
+    u->pf_minout = nd->width * 0.5
+        + tg_geo_building_clear_gap(h->nl, h->si, u->pf_sd,
+                tg_city_sidewalk_w_side_at(h->nl, h->si, u->pf_sd > 0.0, h->b));
+}
+
+static int tg_strip_bld_corner_ok(void *uv, double x, double z)
+{
+    const TgStripBldU *u = (const TgStripBldU *)uv;
+    return !(tg_geo_outward(u->h->nl, u->h->si, u->pf_sd, x, z) < u->pf_minout);
+}
+
+static int tg_strip_bld_rect_on_road(void *uv, double cx, double cz, double ux, double uz,
+                                     double hx, double hz)
+{
+    const TgStripBldU *u = (const TgStripBldU *)uv;
+    return tg_geo_rect_on_street(u->h->nl, u->h->si, cx, cz, ux, uz, hx, hz);
+}
+
+static int tg_strip_bld_apron_ok(void *uv, double x, double z)
+{
+    const TgStripBldU *u = (const TgStripBldU *)uv;
+    const double upm = td5_geob_units_per_m() > 1.0 ? td5_geob_units_per_m() : 430.0;
+    if (tg_geo_outward(u->h->nl, u->h->si, u->side, x, z) < u->minout) return 0;
+    if (td5_geo_roads_count() > 0 && !tg_geo_apron_road_clear(x, z, TD5_TG_GEO_APRON_ROAD_M * upm))
+        return 0;
+    return 1;
+}
+
+/* fold one core call's counters into the strip census statics */
+static void tg_strip_bld_fold(const TG_GeoBldStats *st)
+{
+    int k;
+    s_geo_emitted += st->emitted;        s_geo_measured += st->measured;
+    s_geo_estimated += st->estimated;    s_geo_parts += st->parts;
+    s_geo_lm_real += st->lm_real;        s_geo_lm_fallback += st->lm_fallback;
+    s_geo_lm_prefab += st->lm_prefab;    s_geo_lm_nofit += st->lm_nofit;
+    s_geo_lm_styled += st->lm_styled;    s_geo_lm_apron += st->lm_apron;
+    s_geo_lm_apron_quads += st->lm_apron_quads;
+    s_geo_lm_apron_pulled += st->lm_apron_pulled;
+    s_geo_lm_apron_refused += st->lm_apron_refused;
+    s_geo_dropped_deg += st->dropped_deg;
+    s_geo_roof_shaped += st->roof_shaped; s_geo_roof_concave += st->roof_concave;
+    for (k = 0; k <= TD5_GEOB_ROOF_SKILLION; k++) s_geo_roof_kind[k] += st->roof_kind[k];
+    s_geo_found += st->found;
+    s_geo_fp_overture += st->fp_overture; s_geo_h_overture += st->h_overture;
+    s_geo_h_raster += st->h_raster;
+    s_geo_h_n += st->h_n; s_geo_h_levels += st->h_levels; s_geo_h_off += st->h_off;
+    s_geo_h_err_sum += st->h_err_sum;
+    if (st->h_err_max > s_geo_h_err_max) s_geo_h_err_max = st->h_err_max;
+    if (st->found_max > s_geo_found_max) s_geo_found_max = st->found_max;
+    if (st->lm_apron_dev > s_geo_lm_apron_dev) s_geo_lm_apron_dev = st->lm_apron_dev;
+}
+
+static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Node *n = &nl->v[si];
+    const double side = (gb->host_side > 0) ? 1.0 : -1.0;
+    const double lx = n->tz * side, lz = -n->tx * side;
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    double shift = 0.0, need, minout, gap, cx = 0.0, cz = 0.0;
+    int n_ring = gb->n, k;
 
     if (n_ring < 3 || n_ring > TD5_GEOB_RING_MAX) { tg_geo_lm_note(gb, si, "DROPPED ring size", 0.0); s_geo_dropped_deg++; return 1; }
     if (si + 1 >= nl->count) return 1;
@@ -3216,320 +3610,41 @@ static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
         cx /= (double)n_ring; cz /= (double)n_ring;
     }
 
-    /* [ROUND 1014 D20] the open ground round a landmark outline. Laid with the
-     * outline's own (already nudged) ring, so it inherits the carriageway
-     * clearance the building was given. */
-    if (td5_geolm_is_anchor(gb)
-        && td5_geolm_kind(gb) == TD5_GEOB_LMK_WORSHIP) {
-        if (!tg_geo_emit_apron(h, gb, rx, rz, n_ring, side, minout)) return 0;
-    }
-
-    /* --- a landmark OSM does not describe in 3D: the prefab table ---------
-     * Tried BEFORE the extrusion, because a stamped set piece REPLACES the
-     * box rather than standing beside it. A refusal falls through and the
-     * footprint is extruded exactly as before. */
-    if (gb->landmark && !tg_geo_landmark_real(gb)) {
-        const int r = tg_geo_emit_landmark_prefab(h, gb, rx, rz, n_ring,
-                                                  cx, cz);
-        if (r < 0) return 0;
-        if (r > 0) {
-            tg_geo_lm_note(gb, si, "emitted as shipped set piece", shift);
-            s_geo_emitted++;
-            s_geo_lm_fallback++;
-            if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
-            else                                     s_geo_measured++;
-            return 1;
-        }
-    }
-
-    /* --- height, floors, pages -------------------------------------------
-     *
-     * OSM's min_height is the BASE of the mass and height is its TOP, both
-     * measured from the ground (Simple 3D Buildings). The first cut read
-     * min_height as an offset and still extruded the FULL height above it, so
-     * a part tagged min_height=20 height=34 came out 34 m tall starting at
-     * 20 m -- 20 m too tall, and a three-part stack ended up three times the
-     * building. H is now the mass's OWN height. (It read 0 in practice
-     * anyway: geo_fetch stores the tag as a string, which the reader only
-     * started accepting today -- see geob_num_tag.) */
-    /* [ROUND 1009 item 9] "Building heights are not fully correct."
-     *
-     * MEASURED, and the arithmetic is the whole bug. `floor_h` is the FACADE
-     * PAGE's authored cell height corrected for aspect -- 2058 raw, 4.79 m at
-     * La Plata's 430 units/m -- while OSM's storey is 3 m. The old code used
-     * that page property as BOTH the floor under a height AND the quantum a
-     * height snaps to, so every measured height came out as a multiple of
-     * 4.79 m:
-     *
-     *   tagged 3.0 m  (182 footprints) -> floored to 4.79 m   +60%
-     *   tagged 9.0 m  (594)            -> 2 x 4.79 = 9.57 m   +6%
-     *   tagged 12.0 m (647)            -> 3 x 4.79 = 14.36 m  +20%
-     *   tagged 16.5 m (98)             -> 3 x 4.79 = 14.36 m  -13%
-     *
-     * Nothing about a texture cell is a fact about a building, so the snap is
-     * gone and the measured height is kept as tagged. The two things the page
-     * count was really needed for are separated:
-     *
-     *   PAGE CLASS  still keyed on the page-floor count, because that is what
-     *               tg_facade_page_class's low-rise/tower split is authored in.
-     *   UV ROWS     now the OSM STOREY count (`levels`, else height / storey
-     *               height), so one page cell is one real floor instead of one
-     *               4.79 m slab -- which is also why the windows were too big.
-     *
-     * The remaining floor is HALF A STOREY: below that a footprint is a shed,
-     * not a mass, and a zero-height extrusion is a sheet with no inside.
-     * TD5RE_GEO_BLD_HEIGHT=0 restores the snap for an A/B. */
+    /* [roam F4a] the extrusion is the shared core (td5_tg_geo_bld.h); the strip
+     * feeds it exactly the values this function used to compute in place */
     {
-        const double storey = td5_geob_storey_units();
-        const int    honest = td5_env_flag_on("TD5RE_GEO_BLD_HEIGHT")
-                           && storey > 1.0;
-        const double unit   = honest ? storey : floor_h;
-        H = gb->height - gb->min_height;
-        if (H < unit * (honest ? 0.5 : 1.0)) H = unit * (honest ? 0.5 : 1.0);
-        if (H > TD5_TG_GEO_MAX_H) H = TD5_TG_GEO_MAX_H;
-        /* Page-floor count, for the palette split only. */
-        rows = (int)(H / floor_h + 0.5);
-        if (rows < 1) rows = 1;
-        if (!honest) {
-            /* The pre-1009 behaviour, verbatim: ordinary buildings snapped to a
-             * whole number of PAGE floors; a real landmark or a building:part
-             * kept its measured height. */
-            if (!tg_geo_landmark_real(gb) && !gb->part) H = (double)rows * floor_h;
-            storeys = 0;
-        } else {
-            storeys = (int)gb->levels - (int)gb->min_level;
-            if (storeys < 1) storeys = (int)(H / storey + 0.5);
-            if (storeys < 1) storeys = 1;
-            if (storeys > TD5_TG_GEO_MAX_STOREYS) storeys = TD5_TG_GEO_MAX_STOREYS;
-        }
+        TG_GeoBldStats st;
+        TG_GeoBldEnv e;
+        TgStripBldU u;
+        int r;
+        memset(&st, 0, sizeof st);
+        memset(&e, 0, sizeof e);
+        u.h = h; u.gb = gb; u.side = side; u.minout = minout; u.pf_minout = 0.0;
+        e.blk = h->blk; e.moff = h->moff; e.nmesh = h->nmesh; e.maxmesh = h->maxmesh;
+        e.b = h->b;
+        e.ground = tg_strip_bld_ground;
+        e.u = &u;
+        e.have_ceiling = !gb->far_host;
+        e.ceiling_y = n->y + tg_city_kerb_h(h->b) + 400.0;
+        e.have_pf_ceiling = 1;
+        e.pf_ceiling_y = n->y + tg_city_kerb_h(h->b) + 400.0;
+        e.upm = td5_geob_units_per_m() > 1.0 ? td5_geob_units_per_m() : 430.0;
+        e.storey = td5_geob_storey_units();
+        e.lm_kind = td5_geolm_kind(gb);
+        e.lm_anchor = td5_geolm_is_anchor(gb);
+        e.prefab_begin = tg_strip_bld_pf_begin;
+        e.corner_ok = tg_strip_bld_corner_ok;
+        e.rect_on_road = tg_strip_bld_rect_on_road;
+        e.apron_ok = tg_strip_bld_apron_ok;
+        e.si = si;
+        e.acct = 1;
+        e.st = &st;
+        r = tg_geo_emit_building_core(&e, gb, rx, rz, n_ring, cx, cz, shift);
+        tg_strip_bld_fold(&st);
+        return r;
     }
-    /* The ledger reads H HERE, before the base sink raises it: the sink lowers
-     * the bottom edge and raises the top by the same amount, so it is not part
-     * of the height the tag asked for. */
-    {
-        const double want = gb->height - gb->min_height;
-        const double err  = fabs(H - want);
-        s_geo_h_n++;
-        if (gb->levels > 0) s_geo_h_levels++;
-        s_geo_h_err_sum += err;
-        if (err > s_geo_h_err_max) s_geo_h_err_max = err;
-        if (err > 430.0) s_geo_h_off++;          /* more than a metre out */
-    }
-    wall_page = tg_facade_page_class(gb->id_hash, rows);
-    roof_page = TD5_TG_PAGE_R3_BLOCK + 3;      /* the house-roof page */
-    /* [ROUND 1014 D20] a cathedral part is brick and slate, not an office. */
-    if (tg_geo_worship_style(gb, &wall_page, &roof_page, &cell_w, &lm_row_h))
-        storeys = 0;
-
-    /* --- base Y: the WORLD's ground under the footprint, on the kerb ------ */
-    by = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
-    /* Same ceiling the procedural wall uses: a building must not float above
-     * the road when the conformed bed and the raw heightfield disagree. */
-    if (!gb->far_host && by > n->y + tg_city_kerb_h(h->b) + 400.0)
-        by = n->y + tg_city_kerb_h(h->b) + 400.0;
-    /* A building:part starts where the part below it stops. */
-    if (gb->min_height > 0.0) by += gb->min_height;
-    /* THE SINK LOWERS THE BASE, NOT THE TOP. It exists so uneven terrain
-     * under a big flat footprint cannot show daylight under a wall, which is
-     * a statement about the BOTTOM edge -- but it was applied to `by` before
-     * the top was derived from it, so every building came out 300 units (0.7
-     * m) shorter than its tag. MEASURED on the fixture's three-part stack:
-     * the plinth's top face landed at 6375 while the block above it started
-     * at 6675, leaving a 0.7 m ring of daylight between two masses that are
-     * supposed to meet. Raising the top by the same amount puts the tagged
-     * height back and closes the stack. */
-    H += TD5_TG_GEO_BASE_SINK;
-    by -= TD5_TG_GEO_BASE_SINK;
-
-    /* --- ROOF first: the writer consumes tris before quads per command ----
-     *
-     * WHERE THE ROOF'S HEIGHT COMES FROM. OSM says `height` INCLUDES the
-     * roof and `roof:height` is the roof's share of it, so a tagged
-     * roof:height lowers the eaves rather than stacking on top. Untagged, the
-     * old behaviour is kept and a default pitch is added ABOVE the walls --
-     * subtracting a made-up rise from an ESTIMATED height would shorten the
-     * building for no reason. */
-    shape  = (int)gb->roof;
-    convex = tg_geo_ring_convex(rx, rz, n_ring);
-    if (!convex && shape != TD5_GEOB_ROOF_FLAT
-        && shape != TD5_GEOB_ROOF_NONE) {
-        shape = TD5_GEOB_ROOF_FLAT;        /* a concave ridge cuts its walls */
-        s_geo_roof_concave++;
-    }
-    rise = (double)TD5_TG_GEO_ROOF_RISE;
-    wall_top = by + H;
-    if (shape != TD5_GEOB_ROOF_FLAT && shape != TD5_GEOB_ROOF_NONE
-        && gb->roof_height > 0.0 && gb->roof_height < H * 0.8) {
-        rise = gb->roof_height;
-        wall_top = by + H - rise;          /* the roof is INSIDE the height */
-    }
-    /* Roof tile: one page every ~8 m of footprint, so a 30 m block reads as a
-     * tiled roof instead of one stretched image. */
-    inv_tile = 1.0 / 3400.0;
-    if (shape == TD5_GEOB_ROOF_MANSARD) {
-        /* A truncated pyramid: a steep skirt in to an inset ring, then a flat
-         * deck. A centroid pyramid (what a mansard used to get) is the one
-         * silhouette a mansard is NOT -- the whole point of the shape is the
-         * flat top. Insetting by half the rise puts the skirt at ~63 deg. */
-        double s = 1.0 - (rise * 0.5) / (gb->radius > 1.0 ? gb->radius : 1.0);
-        if (s < 0.35) s = 0.35;
-        if (s > 0.90) s = 0.90;
-        for (k = 0; k < n_ring; k++) {
-            ax[k] = cx + (rx[k] - cx) * s;
-            az[k] = cz + (rz[k] - cz) * s;
-        }
-    } else if (shape != TD5_GEOB_ROOF_FLAT && shape != TD5_GEOB_ROOF_NONE) {
-        tg_geo_roof_ridge(shape, rx, rz, n_ring, cx, cz, ax, az);
-    }
-
-    if (shape == TD5_GEOB_ROOF_FLAT || shape == TD5_GEOB_ROOF_NONE) {
-        const int nc = td5_geob_triangulate(rx, rz, n_ring, tri,
-                                            (TD5_GEOB_RING_MAX - 2));
-        for (k = 0; k < nc; k++) {
-            t3[0] = rx[tri[k*3+0]]; t3[1] = wall_top; t3[2] = rz[tri[k*3+0]];
-            t3[3] = rx[tri[k*3+1]]; t3[4] = wall_top; t3[5] = rz[tri[k*3+1]];
-            t3[6] = rx[tri[k*3+2]]; t3[7] = wall_top; t3[8] = rz[tri[k*3+2]];
-            /* The ear clipper can hand back a sliver on a ring with a nearly
-             * collinear corner (MEASURED: 1 of 4 triangles on the fixture's
-             * L-shaped footprint). It renders as nothing and reads as a
-             * zero-normal face in an audit, so drop it here rather than
-             * change the clipper, which every other caller relies on. */
-            if (tg_geo_tri_area2(t3) <= TD5_TG_GEO_TRI_MIN) continue;
-            tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
-            ntri++;
-        }
-    } else {
-        /* Every sloped shape is this one loop; see tg_geo_roof_ridge. The
-         * eaves edge and its two ridge points make a quad, written as two
-         * triangles and skipping whichever of them is degenerate -- which is
-         * how an apex reduces to the single triangle per edge the pyramid
-         * used to emit, with no separate code path. */
-        const double ry = wall_top + rise;
-        for (k = 0; k < n_ring; k++) {
-            const int j = (k + 1) % n_ring;
-            if (!(hypot(rx[j] - rx[k], rz[j] - rz[k]) > 1.0)) continue;
-            t3[0] = rx[k]; t3[1] = wall_top; t3[2] = rz[k];
-            t3[3] = rx[j]; t3[4] = wall_top; t3[5] = rz[j];
-            t3[6] = ax[j]; t3[7] = ry;       t3[8] = az[j];
-            if (tg_geo_tri_area2(t3) > TD5_TG_GEO_TRI_MIN) {
-                tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
-                ntri++;
-            }
-            t3[0] = rx[k]; t3[1] = wall_top; t3[2] = rz[k];
-            t3[3] = ax[j]; t3[4] = ry;       t3[5] = az[j];
-            t3[6] = ax[k]; t3[7] = ry;       t3[8] = az[k];
-            if (tg_geo_tri_area2(t3) > TD5_TG_GEO_TRI_MIN) {
-                tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
-                ntri++;
-            }
-        }
-        if (shape == TD5_GEOB_ROOF_MANSARD) {
-            const int nc = td5_geob_triangulate(ax, az, n_ring, tri,
-                                                (TD5_GEOB_RING_MAX - 2));
-            for (k = 0; k < nc; k++) {
-                t3[0] = ax[tri[k*3+0]]; t3[1] = ry; t3[2] = az[tri[k*3+0]];
-                t3[3] = ax[tri[k*3+1]]; t3[4] = ry; t3[5] = az[tri[k*3+1]];
-                t3[6] = ax[tri[k*3+2]]; t3[7] = ry; t3[8] = az[tri[k*3+2]];
-                if (tg_geo_tri_area2(t3) <= TD5_TG_GEO_TRI_MIN) continue;
-                tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
-                ntri++;
-            }
-        }
-        s_geo_roof_shaped++;
-    }
-    if (shape >= 0 && shape <= TD5_GEOB_ROOF_SKILLION) s_geo_roof_kind[shape]++;
-    /* [ROUND 1009 item 9] V extent = how many page cells repeat up the WALL.
-     * With the real storey count known that is the storey count, scaled by the
-     * wall's share of the mass (a tagged roof:height lowers the eaves, and
-     * repeating the whole building's storeys over the shorter wall would squash
-     * the windows -- the reason this was ever derived from a height). Falls back
-     * to the page-floor ratio when the cache has no storey count. */
-    if (lm_row_h > 1.0) {
-        vrows = (wall_top - by) / lm_row_h;       /* [1014 D20] worship cell */
-    } else if (storeys > 0 && H > 1.0) {
-        vrows = (double)storeys * (wall_top - by) / H;
-    } else {
-        vrows = (wall_top - by) / ((floor_h > 1.0) ? floor_h : 1.0);
-    }
-    if (!(vrows > 0.25)) vrows = 1.0;
-    if (ntri > 0) {
-        cmd[ncmd * 3 + 0] = (unsigned short)roof_page;
-        cmd[ncmd * 3 + 1] = (unsigned short)ntri;
-        cmd[ncmd * 3 + 2] = 0;
-        ncmd++;
-    }
-
-    /* --- WALLS: one quad per footprint edge ------------------------------- */
-    /* [ROUND 1014 C] FOUNDATION. "buildings float and don't follow terrain
-     * height change." The whole mass stood on ONE plane (the ground at the
-     * centroid), so on a slope the downhill corners hung in the air -- MEASURED
-     * on the audit of Mariano's build, up to 4.5 m under the 70 m-radius blocks.
-     * Each wall now reaches down, per VERTEX, to the world's ground under that
-     * vertex (never up: the uphill side keeps the plane and simply buries), at
-     * most TD5_TG_GEO_MAX_FOUND below it. A building:part that starts at its own
-     * min_height is floating by design and keeps its plane.
-     * TD5RE_GEO_BLD_FOUNDATION=0 restores the single plane. */
-    for (k = 0; k < n_ring; k++) {
-        bot[k] = by;
-        if (td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") && !(gb->min_height > 0.0)) {
-            const double g = tg_world_h(rx[k], rz[k]) + tg_city_kerb_h(h->b)
-                           - TD5_TG_GEO_BASE_SINK;
-            if (g < bot[k]) {
-                bot[k] = (g < by - TD5_TG_GEO_MAX_FOUND) ? by - TD5_TG_GEO_MAX_FOUND : g;
-                if (by - bot[k] > found_max) found_max = by - bot[k];
-            }
-        }
-    }
-    if (found_max > 1.0) { s_geo_found++; if (found_max > s_geo_found_max) s_geo_found_max = found_max; }
-    for (k = 0; k < n_ring; k++) {
-        const int j = (k + 1) % n_ring;
-        const double elen = hypot(rx[j] - rx[k], rz[j] - rz[k]);
-        double ua, vq;
-        if (!(elen > 1.0)) continue;        /* duplicate vertex in the source */
-        ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
-        q[0] = rx[k]; q[1]  = bot[k];  q[2]  = rz[k];
-        q[3] = rx[j]; q[4]  = bot[j];  q[5]  = rz[j];
-        q[6] = rx[j]; q[7]  = wall_top; q[8]  = rz[j];
-        q[9] = rx[k]; q[10] = wall_top; q[11] = rz[k];
-        /* The page rows stretch with the extra wall, so a foundation under a
-         * 12-storey block does not squash its windows. */
-        vq = vrows;
-        if (wall_top - by > 1.0)
-            vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - by);
-        /* Storeys over the WALL, not over the building: with roof:height
-         * tagged the eaves are below the top and repeating the full storey
-         * count over the shorter wall would squash the windows. */
-        tg_geo_push_quad(v, light, &nv, q, ua, vq, 0xFFFFFFFFu);
-        nquad++;
-    }
-    if (nquad < 3) { s_geo_dropped_deg++; return 1; }
-    cmd[ncmd * 3 + 0] = (unsigned short)wall_page;
-    cmd[ncmd * 3 + 1] = 0;
-    cmd[ncmd * 3 + 2] = (unsigned short)nquad;
-    ncmd++;
-
-    /* page_base 0: the commands above already name absolute pages, and the
-     * geometry is already in world coordinates, so origin (0,0,0) with no yaw
-     * passes it through untouched. */
-    h->moff[(*h->nmesh)++] = h->blk->len;
-    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, ncmd, 0,
-                              0.0, 0.0, 0.0, 1.0, 0.0))
-        return 0;
-    tg_acct(TG_ACCT_BUILDING, si);
-    tg_geo_lm_note(gb, si, "emitted extruded", shift);
-    s_geo_emitted++;
-    if (gb->part) s_geo_parts++;
-    if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
-    else                                     s_geo_measured++;
-    if (gb->fsrc == TD5_GEOB_FSRC_OVERTURE)  s_geo_fp_overture++;
-    if (gb->hsrc == TD5_GEOB_HSRC_OVERTURE)  s_geo_h_overture++;
-    if (gb->hsrc == TD5_GEOB_HSRC_RASTER)    s_geo_h_raster++;
-    if (gb->landmark) {
-        if (tg_geo_landmark_real(gb)) s_geo_lm_real++;
-        else                          s_geo_lm_fallback++;
-    }
-    return 1;
 }
+
 
 /* Every real building bound to span si. Wired into tg_emit_fb_city (the CITY
  * dispatcher in td5_tg_streets.c) so the meshes are marked TG_GK_CITY and the
