@@ -59,7 +59,6 @@
 #define FU_M(m)         ((m) * TD5_TG_INFRA_M)        /* the generator's own metre (411 units)   */
 #define FU_KERB_H       65.0                          /* kerb top over the road, 0.15 m          */
 #define FU_OVERHEAD     (4.4 * FU_UPM)                /* nothing hangs lower than this over a road */
-#define FU_ROWS_PER_M   (1500.0 / 3.488)
 
 /* ---- signals: the strip's numbers (td5_tg_furniture.c / td5_tg_mastarm.c) ---- */
 #define FU_SIG_GAP       (TD5_TG_R11_SIGN_GAP + 0.5 * FU_M(0.34))   /* pole centre past the carriageway edge */
@@ -127,8 +126,6 @@
 #define FU_PAGE_BASE     (TD5_TG_PAGE_COUNT + TD5_TG_MASTARM_PAGES_MAX)
 #define FU_PAGES_MAX     (TD5_PAGE_LEVEL_CEIL - FU_PAGE_BASE - 1)   /* one slot is the digit display */
 #define FU_SIGN_CACHE    12
-
-#define FU_SIGN_CATALOGUE_TILES 1                     /* SIGNALS layer rows are read from tiles/INDEX.JSON */
 
 /* ============================================================================
  * SECTION: small helpers
@@ -211,8 +208,6 @@ typedef struct {
     int  page, y, h, lines, forced, uses;
     float cap;
 } FuCell;
-
-typedef struct { int ready, uploaded; char place[64]; } FuAtlasState;
 
 static struct {
     int           ready, uploaded;
@@ -1482,7 +1477,7 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
     int i;
     for (i = 0; i < nx; i++) {
         const FuXing *x = &xs[i];
-        int seg, side, lanes, seg2, seg3;
+        int seg, side, lanes;
         double along, lat, L, px[4], py[4], pz[4], uu[4], vv[4];
         int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1;
         RoamFrame fr, f0, f1;
@@ -1493,7 +1488,7 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         if (!roam_edge_frame(c, seg, 1, along - FU_X_HALF, &f0) || !roam_edge_frame(c, seg, 1, along + FU_X_HALF, &f1)) {
             st->xing_drop_far++; continue;
         }
-        (void)side; seg2 = seg; seg3 = seg; (void)seg2; (void)seg3;
+        (void)side;
         lanes = (int)(2.0 * fr.half_carriage / 1500.0 + 0.5);
         if (lanes < 1) lanes = 1;
         L = (double)lanes;
