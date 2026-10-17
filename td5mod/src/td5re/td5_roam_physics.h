@@ -50,6 +50,12 @@ struct TD5_Actor;
 int  td5_roam_physics_session_begin(void);
 void td5_roam_physics_session_end(void);
 
+/* [F3] spawn: drop the slot's hints / last answers (they came from the unplaced actor). */
+void td5_roam_physics_forget_slot(int slot);
+
+/* [F3] once per game frame (td5_roam_stream_tick): logs the session start time once. */
+void td5_roam_physics_note_frame(void);
+
 /* 1 when the provider owns racer contacts: a roam session (tiles loaded), or the
  * DEV mirror. */
 int  td5_roam_physics_live(void);

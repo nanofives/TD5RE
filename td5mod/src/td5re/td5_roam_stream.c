@@ -29,6 +29,7 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_render.h"
 #include "td5_roam_stream.h"
+#include "td5_roam_physics.h"   /* td5_roam_physics_note_frame */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -109,11 +110,13 @@ typedef struct {
     uint32_t           t_begin_ms;
     uint64_t           last_tick_us;
     int                first_tick_done, prev_installed, warm;
+    int                gate_done;         /* the spawn gate ran: the guard is live from now */
     uint32_t           warm_ms;
     uint32_t          *fhist;             /* RS_FRAME_BINS                            */
     long               fcount;
     uint32_t           next_stat_ms, next_log_ms;
     FILE              *csv;
+    uint32_t           verify_ms_max, build_ms_max, bake_ms_max;
     long               guard_tick[RS_SLOTS];
     uint8_t            guard_valid[RS_SLOTS], guard_hold[RS_SLOTS];
 } RsSession;
@@ -464,6 +467,9 @@ static void rs_apply(RsSession *s, RsResult *r, int force, int *n_road, int *n_s
         }
     }
     if (r->verified) s->st.verified++;
+    if (r->ms_verify > s->verify_ms_max) s->verify_ms_max = r->ms_verify;
+    if (r->ms_build > s->build_ms_max) s->build_ms_max = r->ms_build;
+    if (r->ms_bake > s->bake_ms_max) s->bake_ms_max = r->ms_bake;
     if (r->built) { s->st.built++; tl->built = 1; }
     if (r->stale) s->st.stale++;
     if (r->road) {
@@ -705,11 +711,13 @@ static void rs_stat_line(RsSession *s, uint32_t now)
         s->next_log_ms = now + 10000u;
         TD5_LOG_I(LOG_TAG, "ROAM_STREAM t=%.0f s private=%.1f MB road=%d tiles (%.2f MB) scenery=%d tiles (%.2f MB) "
                   "pending=%d loaded=%ld built=%ld stale=%ld verified=%ld evicted=%ld/%ld miss=%ld hold=%ld "
-                  "frame median=%.1f worst=%.1f worst_publish=%.1f ms install_worst=%.2f ms",
+                  "frame median=%.1f worst=%.1f worst_publish=%.1f ms install_worst=%.2f ms | worker max: "
+                  "verify %u build %u bake %u ms",
                   t, pmb, s->st.road_tiles, s->st.road_mb, s->st.scen_tiles, s->st.scen_mb, pend, s->st.loaded,
                   s->st.built, s->st.stale, s->st.verified, s->st.evicted_road, s->st.evicted_scen, s->st.misses,
                   s->st.holds, rs_frame_pct(s, 0.5), s->st.frame_worst_ms, s->st.frame_worst_publish_ms,
-                  s->st.install_worst_ms);
+                  s->st.install_worst_ms, (unsigned)s->verify_ms_max, (unsigned)s->build_ms_max,
+                  (unsigned)s->bake_ms_max);
     }
 }
 
@@ -892,6 +900,7 @@ void td5_roam_stream_tick(void)
     uint64_t now_us, t0;
     uint32_t now;
     int applied;
+    td5_roam_physics_note_frame();     /* session start time, streamed or not */
     if (!s) return;
     now_us = td5_plat_time_us();
     now = td5_plat_time_ms();
@@ -1001,6 +1010,7 @@ int td5_roam_stream_wait_area(int32_t px, int32_t pz, int ring)
     rs_loadscreen("Streaming streets");
     ready = rs_wait_tiles(s, idx, n, "start gate");
     for (k = 0; k < n; k++) s->tile[idx[k]].gate = 0;
+    s->gate_done = 1;
     s->st.gate_ms = (double)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "ROAM_STREAM_GATE spawn tile %d,%d + ring %d: %d/%d road tiles ready, waited %u ms, %u ms after "
               "the session began (the F2 full load read all %d casco tiles here)",
@@ -1051,7 +1061,7 @@ int td5_roam_stream_point_missing(int32_t x, int32_t z)
 {
     RsSession *s = s_stream.s;
     int i;
-    if (!s) return 0;
+    if (!s || !s->gate_done) return 0;
     i = rs_tile_of_place(s, (double)FP_TRUNC(x) + s->rs->org_x, (double)FP_TRUNC(z) + s->rs->org_z);
     return i >= 0 && !s->tile[i].road;
 }
@@ -1064,7 +1074,7 @@ int td5_roam_stream_guard(TD5_Actor *a)
     double px, pz, gu;
     long tick;
     static const int8_t off[5][2] = { { 0, 0 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } };
-    if (!s || !a) return 0;
+    if (!s || !a || !s->gate_done) return 0;    /* before the spawn: the car is not placed yet */
     slot = (int)a->slot_index;
     if (slot < 0 || slot >= RS_SLOTS) slot = 0;
     tick = (long)g_td5.simulation_tick_counter;

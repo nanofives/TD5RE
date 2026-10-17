@@ -224,7 +224,7 @@ static int rv_edge_end_near(const TD5_RoamResident *rs, uint64_t key, double cx,
                             double *ex, double *ez, double *ox, double *oz)
 {
     double best = 1e30;
-    int ti, found = 0;
+    int ti, found = 0, btx = 0, btz = 0;
     for (ti = 0; ti < rs->nslot; ti++) {
         const RoamTile *t = rs->tile[ti];
         uint32_t k;
@@ -253,8 +253,12 @@ static int rv_edge_end_near(const TD5_RoamResident *rs, uint64_t key, double cx,
                 else     { qx = nx0; qz = nz0; rx = fx0 - nx0; rz = fz0 - nz0; }
                 d2 = (qx - cx) * (qx - cx) + (qz - cz) * (qz - cz);
                 len = sqrt(rx * rx + rz * rz);
-                if (len < 1.0 || d2 >= best) continue;
+                /* [F3] an exact tie (the border row two tiles' records share) goes to the lower
+                 * (tx, tz), not to the lower resident slot: same pick whatever the load order */
+                if (len < 1.0 || d2 > best ||
+                    (d2 == best && (t->tx > btx || (t->tx == btx && t->tz >= btz)))) continue;
                 best = d2; *ex = qx; *ez = qz; *ox = rx / len; *oz = rz / len; found = 1;
+                btx = t->tx; btz = t->tz;
             }
         }
     }
@@ -263,15 +267,18 @@ static int rv_edge_end_near(const TD5_RoamResident *rs, uint64_t key, double cx,
 
 static const RoamEdgeRec *rv_edge(const TD5_RoamResident *rs, uint64_t key, const RoamTile **tout)
 {
+    /* [F3] the record of the lowest (tx, tz) tile that holds the edge: the same whatever the
+     * resident slot order (streaming fills slots in arrival order) */
+    const RoamEdgeRec *best = NULL;
     int i;
     uint32_t k;
     for (i = 0; i < rs->nslot; i++) {
         const RoamTile *t = rs->tile[i];
-        if (!t) continue;
+        if (!t || (best && (t->tx > (*tout)->tx || (t->tx == (*tout)->tx && t->tz > (*tout)->tz)))) continue;
         for (k = 0; k < t->nedge; k++)
-            if (t->edge[k].key == key) { *tout = t; return &t->edge[k]; }
+            if (t->edge[k].key == key) { *tout = t; best = &t->edge[k]; break; }
     }
-    return NULL;
+    return best;
 }
 
 /* way of a world point: the locator's edge key >> 16 (way id), 0 = none / patch */
@@ -643,12 +650,26 @@ static void rv_pick_pass(const TD5_RoamResident *rs, const double *gapk)
 {
     int ti;
     uint32_t ni;
+    int ord[ROAM_RES_MAX], nord = 0, oi;
     s_rv.nc = 0;
     memset(s_rv.kind_n, 0, sizeof s_rv.kind_n);
     memset(s_rv.cand_n, 0, sizeof s_rv.cand_n);
+    /* [F3] tiles in (tx, tz) order, not resident-slot order: a streamed set fills its slots
+     * in arrival order, and the spacing filter below keeps the FIRST pick of a kind */
     for (ti = 0; ti < rs->nslot; ti++) {
         const RoamTile *t = rs->tile[ti];
+        int j;
         if (!t) continue;
+        for (j = nord; j > 0; j--) {
+            const RoamTile *u = rs->tile[ord[j - 1]];
+            if (u->tx < t->tx || (u->tx == t->tx && u->tz < t->tz)) break;
+            ord[j] = ord[j - 1];
+        }
+        ord[j] = ti;
+        nord++;
+    }
+    for (oi = 0; oi < nord; oi++) {
+        const RoamTile *t = rs->tile[ord[oi]];
         for (ni = 0; ni < t->nnode; ni++) {
             const RoamNodeRec *nd = &t->node[ni];
             int ai, ao, kind;
