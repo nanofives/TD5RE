@@ -87,3 +87,6 @@ Verdicts: **parity**, **roam better**, **roam missing (BLOCKER)**, **roam missin
   EB199B9E...; STRIP md5 97C89979...; TEXTURES md5 2290C475...) [M `id_geo.txt`].
 - Synthetic level090 (SELECTED.TXT aside), base vs new: **bytes IDENTICAL**, MODELS sha256
   E2F1F33C221D61CAB0EFF701484011F0 [M `id_syn.txt`].
+- Smoke suite (`run.py gate_smoke --SelfTest=1 --VSync=0`, windowed, RT off, min graphics): **19 PASS / 0 WARN / 0 FAIL**, exit 0, 144 s.
+- Full suite (`--SelfTestSuite=1`): **83 PASS / 0 WARN / 0 FAIL**, exit 0, 793 s.
+- `build_all.bat`: DEV + RELEASE OK, structure lint OK (extern 3/3, td5_game.h includers 23/23, warnings 84/84).
