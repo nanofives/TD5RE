@@ -37,7 +37,7 @@
 
 #define LOG_TAG "roam"
 
-#define RP_SLOTS        32          /* == TD5_MAX_TOTAL_ACTORS                       */
+#define RP_SLOTS        40          /* [F10] 32 -> 40: traffic 6..29 + the cops after it */
 #define RP_RACERS       6           /* walls + backstop: racer slots only (as the strip) */
 #define RP_PUSH_CAP     600         /* units per tick, the strip's GEO_PUSH_CAP      */
 #define RP_RESCUE_IN    130         /* units (0.3 m) inside the boundary after a rescue */

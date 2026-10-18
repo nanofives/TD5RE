@@ -37,6 +37,7 @@
 #include "td5_roam_ai.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_traffic.h"
+#include "td5_roam_cops.h"       /* [F10] the cop slots answer td5_roam_traffic_parked / _alpha */
 #include "td5_roam_stream.h"     /* [F8b] the soak logs the stream residency beside private bytes */
 #include "td5_replay.h"          /* [F8b] the soak's leak rule takes the replay record buffer out */
 #include "../../../re/include/td5_actor_struct.h"
@@ -629,14 +630,14 @@ static RtCar *rt_car_of(int slot)
 int td5_roam_traffic_parked(int slot)
 {
     const RtCar *c = rt_car_of(slot);
-    if (!c) return -1;
+    if (!c) return td5_roam_cops_parked(slot);    /* [F10] the cop slots after the pool answer for themselves */
     return c->state == RT_PARKED;
 }
 
 int td5_roam_traffic_alpha(int slot)
 {
     const RtCar *c = rt_car_of(slot);
-    if (!c) return -1;
+    if (!c) return td5_roam_cops_alpha(slot);     /* [F10] */
     return c->state == RT_PARKED ? 0 : c->alpha;
 }
 

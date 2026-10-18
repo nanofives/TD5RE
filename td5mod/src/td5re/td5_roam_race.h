@@ -52,7 +52,7 @@ struct TD5_Actor;
 typedef struct {
     int laps;        /* 1 for a sprint; a circuit: 1..10 (mirrors the route's laps, td5_roam_route_set_type) */
     int traffic;     /* [F8] 0 off / 1 low / 2 high (td5_roam_traffic.c) */
-    int cops;        /* stored, inert until F10 */
+    int cops;        /* [F10] 0 off (the default) / 1 on: police on the route corridor (td5_roam_cops.c) */
     int opponents;   /* [F7] AI racers 0..5 (td5_roam_ai.h); 0 = a solo sprint */
 } TD5_RoamRaceSetup;
 
@@ -92,6 +92,7 @@ typedef struct {
 /* ---- state ------------------------------------------------------------------ */
 int  td5_roam_race_state(void);
 int  td5_roam_race_traffic_level(void);      /* [F8] the running race's TRAFFIC row: 0 off / 1 low / 2 high */
+int  td5_roam_race_cops(void);               /* [F10] the running race's COPS row: 1 on / 0 off (default) */
 int  td5_roam_race_running(void);            /* COUNTDOWN or RACING */
 int  td5_roam_race_barriers_live(void);      /* barrier collision on (COUNTDOWN, RACING; FINISHED while opponents still run) */
 void td5_roam_race_reset(void);              /* roam session start / end: back to OFF, barriers cleared */
@@ -130,6 +131,8 @@ int      td5_roam_race_hide_route_hint(void);    /* 1 = the route planner's HUD 
  * push_* convention) and returns 1. 0 for traffic, turn boards, or no race. */
 int  td5_roam_race_wall_probe(int slot, int probe, int32_t x, int32_t z, int32_t y,
                               int32_t *push_x, int32_t *push_z, int32_t *push_dist);
+/* [F10] the same test for a COP body probe (cops are racer-like: barriers block them). Plain world units out. */
+int  td5_roam_race_wall_probe_cop(int32_t x, int32_t z, int32_t y, int32_t *push_x, int32_t *push_z, int32_t *push_dist);
 void td5_roam_race_wall_begin(void);         /* race start: drop the side table (barriers rebuilt) */
 void td5_roam_race_wall_end(void);
 void td5_roam_race_wall_note_hit(int slot);  /* the resolver applied a barrier push to `slot` this tick */

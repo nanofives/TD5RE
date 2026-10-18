@@ -47,6 +47,7 @@
 #include "td5_roam_race.h"     /* GEO FREE ROAM sprint race (F6-B): flow, progress, results, barrier layer */
 #include "td5_roam_ai.h"       /* GEO FREE ROAM AI racers (F7): opponents on the route, parked while roaming */
 #include "td5_roam_traffic.h"  /* GEO FREE ROAM ambient traffic (F8): pool slots, lane follower, signals */
+#include "td5_roam_cops.h"     /* GEO FREE ROAM police (F10): cop slots after the traffic pool */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -3870,10 +3871,12 @@ static void init_race_level_and_assets(void)
      * is the master gate and is only set when some traffic option is actually on —
      * including the SP drag arm in InitRace above — so no extra drag test is needed
      * or wanted here. */
-    if (td5_roam_active() && td5_roam_traffic_pool() > 0) {
-        /* [GEO FREE ROAM F8] roam traffic: the car set into the pool slots (no cops yet) */
+    if (td5_roam_active() && (td5_roam_traffic_pool() > 0 || td5_roam_cops_pool() > 0)) {
+        /* [GEO FREE ROAM F8] roam traffic: the car set into the pool slots; [F10] then the police model into the
+         * cop slots after them (it also sets the cop mesh the traffic loader cleared) */
         loadscreen_phase(7, "Loading traffic");
         td5_roam_traffic_load_assets();
+        td5_roam_cops_load_assets();
     } else if (g_td5.traffic_enabled
         && !g_td5.time_trial_enabled) {
         /* [POLICE rewrite 2026-06-19] Traffic now runs in net races, so load its
@@ -4133,6 +4136,9 @@ static void init_race_spawn_actors(void)
          * empty racers (state 3, inert in contacts, render and lights) */
         if (td5_roam_active() && td5_roam_traffic_pool() > 0)
             spawn_count = g_traffic_slot_base + td5_roam_traffic_pool();
+        /* [GEO FREE ROAM F10] ...plus the cop slots right after the traffic pool */
+        if (td5_roam_active() && td5_roam_cops_pool() > 0)
+            spawn_count = td5_roam_cops_base() + td5_roam_cops_pool();
         TD5_LOG_I(LOG_TAG,
                   "InitRace: %d racers / %d actors (traffic_base=%d humans=%d opp=%d)",
                   racer_count, spawn_count, g_traffic_slot_base,
@@ -5777,6 +5783,7 @@ int td5_game_init_race_session(void) {
     /* [GEO FREE ROAM F7] the opponents' cars are loaded: park them until a sprint asks (self-gated) */
     td5_roam_ai_session_init();
     td5_roam_traffic_session_init();   /* [GEO FREE ROAM F8] the traffic pool parked (self-gated) */
+    td5_roam_cops_session_init();      /* [GEO FREE ROAM F10] the cop slots parked (self-gated) */
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
@@ -7897,6 +7904,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         else {
             td5_roam_ai_tick();    /* [GEO FREE ROAM F7] the opponents' route driver (no-op without a race) */
             td5_roam_traffic_tick();   /* [GEO FREE ROAM F8] ambient traffic: spawn ring + lane follower */
+            td5_roam_cops_tick();      /* [GEO FREE ROAM F10] police: patrol, notice, pursuit, bust */
         }
 
         /* [S26 2026-06-05] Race-end auto-brake for the HUMAN player(s). Once the
@@ -8749,6 +8757,7 @@ static void frame_render(void)
     td5_hud_draw_street_lines();
     td5_roam_route_ui_draw_hud();   /* [GEO FREE ROAM F5-A] route key hints + status; self-gated */
     td5_roam_race_draw_hud();       /* [GEO FREE ROAM F6-B] sprint timer / checkpoints / results; self-gated */
+    td5_roam_cops_draw_hud();       /* [GEO FREE ROAM F10] pursuit panel, bust meter, toasts; self-gated */
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op
@@ -12787,6 +12796,9 @@ int td5_game_roam_set_racer_field(int n_ai)
     /* [GEO FREE ROAM F8] the ambient traffic pool sits past the racer slots: keep it in the field */
     if (td5_roam_traffic_field_total() > g_td5.total_actor_count)
         g_td5.total_actor_count = td5_roam_traffic_field_total();
+    /* [GEO FREE ROAM F10] ...and the cop slots after it */
+    if (td5_roam_cops_field_total() > g_td5.total_actor_count)
+        g_td5.total_actor_count = td5_roam_cops_field_total();
     TD5_LOG_I(LOG_TAG, "roam: racer field = player + %d AI (actors %d, cars loaded for %d)", n_ai,
               g_td5.total_actor_count, loaded);
     return 1 + n_ai;

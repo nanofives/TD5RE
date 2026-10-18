@@ -760,8 +760,16 @@ static int rr_uturn(int e, int d, int e2, int d2, int node)
     return e == e2 && d != d2 && g.node[node].ninc > 1;
 }
 
-/* One leg S -> T. Appends to poly + refs. 1 on success. */
-static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs)
+/* [F10] the optional edge mask of a pursuit leg (NULL = every street): S's and T's own edges are always usable */
+static int rr_mask_ok(const uint8_t *edge_ok, int e, const RrSnap *S, const RrSnap *T)
+{
+    return !edge_ok || edge_ok[e] || e == S->edge || e == T->edge;
+}
+
+/* One leg S -> T. Appends to poly + refs. 1 on success. [F10] edge_ok: NULL, or a per-edge mask the leg
+ * must stay on (the cops' race corridor); start_dir: -1 = leave S either way, 0 / 1 = only along / against
+ * the edge (a car keeps its heading). The route planner passes NULL, -1: unchanged. */
+static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs, const uint8_t *edge_ok, int start_dir)
 {
     const int ns = g.nedge * 2;
     double *cost = (double *)malloc((size_t)ns * sizeof(double));
@@ -778,15 +786,15 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
     for (k = 0; k < ns; k++) { cost[k] = 1e300; parent[k] = -1; }
 
     if (S->edge == T->edge) {
-        if (rr_allowed(S->edge, 0) && T->along >= S->along) { best = T->along - S->along; best_state = -1; best_dw = 0; }
-        if (rr_allowed(S->edge, 1) && T->along <= S->along && S->along - T->along < best) {
+        if (rr_allowed(S->edge, 0) && start_dir != 1 && T->along >= S->along) { best = T->along - S->along; best_state = -1; best_dw = 0; }
+        if (rr_allowed(S->edge, 1) && start_dir != 0 && T->along <= S->along && S->along - T->along < best) {
             best = S->along - T->along; best_state = -1; best_dw = 1;
         }
     }
     {
         const RrEdge *se = &g.edge[S->edge];
-        if (rr_allowed(S->edge, 0)) { cost[S->edge * 2] = se->plen - S->along; rr_heap_push(&hp, cost[S->edge * 2], S->edge * 2); }
-        if (rr_allowed(S->edge, 1)) { cost[S->edge * 2 + 1] = S->along; rr_heap_push(&hp, cost[S->edge * 2 + 1], S->edge * 2 + 1); }
+        if (rr_allowed(S->edge, 0) && start_dir != 1) { cost[S->edge * 2] = se->plen - S->along; rr_heap_push(&hp, cost[S->edge * 2], S->edge * 2); }
+        if (rr_allowed(S->edge, 1) && start_dir != 0) { cost[S->edge * 2 + 1] = S->along; rr_heap_push(&hp, cost[S->edge * 2 + 1], S->edge * 2 + 1); }
     }
     while (rr_heap_pop(&hp, &it)) {
         const int s = it.s, e = s >> 1, d = s & 1;
@@ -804,7 +812,7 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
             const int e2 = inc >> 1, d2 = inc & 1;     /* leaving through end d2 = travelling in direction d2 */
             const int s2 = e2 * 2 + d2;
             double c2;
-            if (!rr_allowed(e2, d2) || rr_uturn(e, d, e2, d2, n)) continue;
+            if (!rr_allowed(e2, d2) || rr_uturn(e, d, e2, d2, n) || !rr_mask_ok(edge_ok, e2, S, T)) continue;
             c2 = it.c + g.edge[e2].plen;
             if (c2 < cost[s2]) { cost[s2] = c2; parent[s2] = s; rr_heap_push(&hp, c2, s2); }
         }
@@ -837,6 +845,41 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
 done:
     free(cost); free(parent); free(hp.h);
     return ok;
+}
+
+/* [F10] ONE leg between two PLACE points for a pursuit (td5_roam_route.h). */
+int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, double tx, double tz, double snap_m,
+                             const uint8_t *edge_ok, double **px, double **pz, int *npt, double *len_m)
+{
+    RrSnap S, T;
+    RrPoly poly = { NULL, NULL, 0, 0 };
+    RrERefs refs = { NULL, 0, 0 };
+    int start_dir = -1, i;
+    double L = 0.0;
+    if (px) *px = NULL;
+    if (pz) *pz = NULL;
+    if (npt) *npt = 0;
+    if (len_m) *len_m = 0.0;
+    if (!g.ready || !rr_snap(sx, sz, snap_m, &S) || !rr_snap(tx, tz, snap_m, &T)) return 0;
+    if (dir_x != 0.0 || dir_z != 0.0) {
+        /* the snapped segment's node0 -> node1 tangent against the car's heading */
+        const int sg = S.seg;
+        const double ex = (double)g.pt[2 * sg + 2] - g.pt[2 * sg], ez = (double)g.pt[2 * sg + 3] - g.pt[2 * sg + 1];
+        start_dir = (ex * dir_x + ez * dir_z) >= 0.0 ? 0 : 1;
+        if (!rr_allowed(S.edge, start_dir)) start_dir = -1;      /* a one-way the wrong way: either way out */
+    }
+    if (!rr_plan_leg(&S, &T, &poly, &refs, edge_ok, start_dir) &&
+        (start_dir < 0 || !rr_plan_leg(&S, &T, &poly, &refs, edge_ok, -1))) {
+        free(poly.x); free(poly.z); free(refs.r);
+        return 0;
+    }
+    free(refs.r);
+    for (i = 1; i < poly.n; i++) L += hypot(poly.x[i] - poly.x[i - 1], poly.z[i] - poly.z[i - 1]);
+    if (px) *px = poly.x; else free(poly.x);
+    if (pz) *pz = poly.z; else free(poly.z);
+    if (npt) *npt = poly.n;
+    if (len_m) *len_m = L / RR_UPM;
+    return poly.n >= 2;
 }
 
 /* ============================================================ the route ======= */
@@ -947,7 +990,7 @@ void td5_roam_route_replan(void)
         RrSnap sa, sb;
         if (!rr_snap((double)a->px, (double)a->pz, RR_SNAP_MAX_M, &sa) ||
             !rr_snap((double)b->px, (double)b->pz, RR_SNAP_MAX_M, &sb)) break;
-        if (!rr_plan_leg(&sa, &sb, &poly, &refs)) break;
+        if (!rr_plan_leg(&sa, &sb, &poly, &refs, NULL, -1)) break;
         ok_legs++;
     }
     rt.res.legs = nlegs; rt.res.legs_ok = ok_legs; rt.res.ok = (ok_legs == nlegs);
@@ -1534,3 +1577,16 @@ int td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int 
 }
 
 int td5_roam_route_graph_nsignal(void) { return g.ready ? g.nsig : 0; }
+
+/* [F10] edge index of a key (the edges are sorted by key), -1 when unknown */
+int td5_roam_route_graph_edge_index(uint64_t key)
+{
+    int lo = 0, hi = g.nedge - 1;
+    if (!g.ready) return -1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (g.edge[mid].key == key) return mid;
+        if (g.edge[mid].key < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
