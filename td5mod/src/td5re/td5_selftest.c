@@ -1191,7 +1191,7 @@ static int st_inv_result(char *note, size_t nsz)
 {
     int status = s_inv.active ? s_inv.worst : ST_PASS;
     int i, moved = 0, active = 0, stuck = 0;
-    char tele[104];
+    char tele[84];
     for (i = 0; i < ST_INV_MAX_SLOTS; i++) {
         if (!s_inv.seen[i]) continue;
         active++;
@@ -1227,9 +1227,9 @@ static int st_inv_result(char *note, size_t nsz)
      * how many active cars actually moved. This quantifies "cars fly/jump" the
      * generous FAIL thresholds don't trip. */
     if (s_roam_row)
-        snprintf(tele, sizeof(tele), "roam step=%dcm/t spd=%d nohit=%d out=%d tele=%d",
-                 (int)(s_inv_roam_step_max_m * 100.0), (int)(s_inv.peak_speed >> 8), (int)s_inv_roam_nohit,
-                 (int)s_inv_roam_outside, (int)s_inv_roam_tele);
+        snprintf(tele, sizeof(tele), "roam step=%ucm/t spd=%hu nohit=%hu out=%hu tele=%hu",
+                 (unsigned)(s_inv_roam_step_max_m * 100.0) & 0xFFFFu, (unsigned short)(s_inv.peak_speed >> 8),
+                 (unsigned short)s_inv_roam_nohit, (unsigned short)s_inv_roam_outside, (unsigned short)s_inv_roam_tele);
     else
         snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d span=%d",
                  s_inv.peak_air, (long long)(s_inv.peak_speed >> 8),
