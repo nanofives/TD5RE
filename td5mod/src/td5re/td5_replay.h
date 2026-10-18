@@ -49,6 +49,9 @@ int  td5_replay_ghost_enabled(void);
  * buffer and captures the actor count. No-op when ghost replay is disabled. */
 void td5_replay_begin_record(void);
 
+/* [roam F8b] stop recording and free the buffer (a race that offers no View Replay: free roam). */
+void td5_replay_discard(void);
+
 /* Switch to playback for a "View Replay" race. Keeps the buffer recorded by the
  * preceding race. No-op when ghost replay is disabled or nothing was recorded. */
 void td5_replay_begin_playback(void);

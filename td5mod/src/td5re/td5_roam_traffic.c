@@ -1589,7 +1589,8 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     {   /* the self-test's own rule: early-half average vs late-half average.
          * [F8b] Judged on private bytes LESS the replay record buffer: the recorder keeps every actor slot every
          * tick (30 in roam) and doubles its buffer, +32 MB at ~4.5 min and +64 MB at ~9 min of a soak, which is
-         * capped (TD5_REPLAY_MAX_TICKS) and freed at the next race, not a leak. The stream residency is logged
+         * capped (TD5_REPLAY_MAX_TICKS) and freed at the next race, not a leak. Free roam no longer records at all
+         * (td5_replay_discard at race init) so that series reads 0 there; the guard stays. The stream residency is logged
          * beside it (its LRU budgets bound it) but stays in the judged series, so a stream leak still WARNs. */
         const int n = T.priv_n < 1024 ? T.priv_n : 1024;
         double re = 0.0, rl = 0.0, se = 0.0, sl = 0.0;

@@ -37,6 +37,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  a circuit and its laps no longer carry over into it" },
     { CL_ITEM,    "  (a sprint was raced as 3 laps of a loop). Saved" },
     { CL_ITEM,    "  routes are kept: load them with L in the route map." },
+    { CL_ITEM,    "Free roam no longer records a replay it cannot show:" },
+    { CL_ITEM,    "  135 MB less memory after 9 minutes, 270 MB at 20." },
     { CL_DATE,    "October 18 (free roam circuits)" },
     { CL_ITEM,    "Free roam circuits: in the route map T switches" },
     { CL_ITEM,    "  SPRINT / CIRCUIT and [ ] set 1 to 10 laps (also in the" },

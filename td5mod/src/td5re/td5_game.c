@@ -4966,6 +4966,8 @@ static void init_race_race_systems(void)
      * of replay mode, so posed traffic still renders with a real model.
      * No-op when TD5RE_GHOST_REPLAY=0 (legacy input re-sim replay). */
     if (s_replay_mode) td5_replay_begin_playback();
+    else if (td5_roam_armed() || td5_roam_active())
+        td5_replay_discard();   /* [roam F8b] free roam has no View Replay: 30 slots a tick: 135 MB at 9 min, 270 MB at the cap */
     else               td5_replay_begin_record();
 
     /* [REPLAY FIX #18 2026-06-15] Replay correctness guard + diagnostic.

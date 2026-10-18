@@ -161,6 +161,19 @@ void td5_replay_begin_record(void)
     TD5_LOG_I(LOG_TAG, "recording begin: actors/frame=%d", s_actor_count);
 }
 
+void td5_replay_discard(void)
+{
+    free(s_buf);
+    s_buf = NULL;
+    s_frame_capacity = 0;
+    s_frame_count = 0;
+    s_capped_logged = 0;
+    s_pose_frame = NULL;
+    s_pose_count = 0;
+    s_recording = 0;
+    TD5_LOG_I(LOG_TAG, "recording off for this race (no View Replay), buffer freed");
+}
+
 void td5_replay_begin_playback(void)
 {
     if (!td5_replay_ghost_enabled()) return;
