@@ -5103,27 +5103,106 @@ void td5_trackgen_set_target_slot(int slot)
 /* ---- [GEO FREE ROAM F2-F] roam host: a real place's own level dir, read-only ---- */
 static unsigned int tg_fnv1a(unsigned int h, const void *p, size_t n);
 
+int td5_trackgen_roam_host_dir(int slot, char *out, size_t n)
+{
+    const int gi = td5_trackgen_geo_index_for_slot(slot);
+    const char *slug = (gi >= 0 && gi < td5_geo_places_count()) ? td5_geo_places_slug(gi) : NULL;
+    if (!slug || !slug[0] || !out || n < 8) return 0;
+    td5_geo_source_path(out, n, slug, "roam/HOST");
+    return TD5_GEO_LEVEL_BASE + gi;
+}
+
+/* Write `len` bytes to `path` unless the file already holds exactly those bytes. 1 = file current. */
+static int tg_host_put(const char *path, const unsigned char *b, size_t len)
+{
+    FILE *f = fopen(path, "rb");
+    int same = 0;
+    if (f) {
+        long sz;
+        fseek(f, 0, SEEK_END);
+        sz = ftell(f);
+        if (sz == (long)len) {
+            unsigned char *cur = (unsigned char *)malloc(len ? len : 1u);
+            fseek(f, 0, SEEK_SET);
+            if (cur && fread(cur, 1, len, f) == len && memcmp(cur, b, len) == 0) same = 1;
+            free(cur);
+        }
+        fclose(f);
+    }
+    if (same) return 1;
+    f = fopen(path, "wb");
+    if (!f) { TD5_LOG_E(LOG_TAG, "trackgen: roam host: cannot write %s", path); return 0; }
+    same = fwrite(b, 1, len, f) == len;
+    fclose(f);
+    TD5_LOG_I(LOG_TAG, "trackgen: roam host: wrote %s (%zu bytes)%s", path, len, same ? "" : " SHORT WRITE");
+    return same;
+}
+
+/* The roam LEVELINF.DAT: tg_emit_levelinf's layout with no strip behind it (point-to-point, no
+ * checkpoints, no spans; roam zeroes those records anyway). Smoke, weather, sky animation and fog
+ * are the strip's values, so the host's environment reads like a geo race's. */
+static int tg_emit_roam_host_levelinf(TG_Buf *out)
+{
+    int i;
+    tg_put_u32(out, 0u);                         /* 0x00 track_type: point-to-point */
+    tg_put_u32(out, 1);                          /* 0x04 smoke_enable */
+    tg_put_u32(out, 0);                          /* 0x08 checkpoint_count */
+    for (i = 0; i < 7; i++) tg_put_u32(out, 0);  /* 0x0C checkpoint_spans */
+    tg_put_u32(out, 2);                          /* 0x28 weather_type */
+    tg_put_u32(out, 0);                          /* 0x2C density_pair_count */
+    tg_put_u32(out, 0);                          /* 0x30 traffic_enable */
+    tg_put_zeros(out, 24);                       /* 0x34 density_pairs */
+    tg_put_zeros(out, 8);                        /* 0x4C pad */
+    tg_put_u32(out, (unsigned)td5_env_int("TD5RE_AUTOTRACK_SKY_ANIM", 36, -1, 64));   /* 0x54 */
+    tg_put_u32(out, 0);                          /* 0x58 total_span_count */
+    tg_put_u32(out, 0);                          /* 0x5C fog_enabled */
+    tg_put_zeros(out, 4);                        /* 0x60 fog rgb + pad */
+    return !out->oom;
+}
+
+/* [GEO FREE ROAM F11b] Make the roam host dir of `slot` current: TEXTURES.DAT + LEVELINF.DAT, rebuilt
+ * from code every session (a few ms) and rewritten only when the bytes differ, so a page-knob change
+ * reaches it and a fresh install needs nothing on disk. 1 = both files current. */
+static int tg_roam_host_prepare(int slot)
+{
+    char dir[384], path[448];
+    TG_Buf tex, inf;
+    int ok;
+    if (!td5_trackgen_roam_host_dir(slot, dir, sizeof dir)) return 0;
+    {   /* roam/ first: a place registered by a strip ROUTE.JSON may have no roam dir yet */
+        char *sl = strrchr(dir, '/');
+        if (sl) { *sl = '\0'; _mkdir(dir); *sl = '/'; }
+        _mkdir(dir);
+    }
+    memset(&tex, 0, sizeof tex);
+    memset(&inf, 0, sizeof inf);
+    ok = tg_emit_roam_host_textures(&tex) && tg_emit_roam_host_levelinf(&inf);
+    if (ok) {
+        snprintf(path, sizeof path, "%s/TEXTURES.DAT", dir);
+        ok = tg_host_put(path, tex.b, tex.len);
+        snprintf(path, sizeof path, "%s/LEVELINF.DAT", dir);
+        ok = tg_host_put(path, inf.b, inf.len) && ok;
+    }
+    tg_buf_free(&tex);
+    tg_buf_free(&inf);
+    return ok;
+}
+
 int td5_trackgen_roam_host_slot(const char *slug)
 {
-    static const char *const k_files[] = { "TEXTURES.DAT", "LEVELINF.DAT", "FORWSKY.png" };
     int gi, n = td5_geo_places_count();
     if (!slug || !slug[0]) return -1;
     for (gi = 0; gi < n && gi < TD5_GEO_SLOT_MAX; gi++) {
-        char path[256];
-        size_t i;
         const char *s = td5_geo_places_slug(gi);
         if (!s || strcmp(s, slug) != 0) continue;
-        for (i = 0; i < sizeof k_files / sizeof k_files[0]; i++) {
-            snprintf(path, sizeof path, "re/assets/levels/level%03d/%s", TD5_GEO_LEVEL_BASE + gi, k_files[i]);
-            if (!td5_plat_file_exists(path)) {
-                TD5_LOG_W(LOG_TAG, "trackgen: roam host: level%03d has no %s (build the place once "
-                          "from the geo generator), using a shipped host level",
-                          TD5_GEO_LEVEL_BASE + gi, k_files[i]);
-                return -1;
-            }
+        if (!tg_roam_host_prepare(TD5_GEO_SLOT_BASE + gi)) {
+            TD5_LOG_W(LOG_TAG, "trackgen: roam host: could not write re/assets/geo/%s/roam/HOST, "
+                      "using a shipped host level", slug);
+            return -1;
         }
         return TD5_GEO_SLOT_BASE + gi;
     }
+    TD5_LOG_W(LOG_TAG, "trackgen: roam host: '%s' is not a registered place, using a shipped host level", slug);
     return -1;
 }
 
@@ -5160,32 +5239,14 @@ int td5_trackgen_roam_sky_path(int slot, char *out, size_t n)
     const int gi = td5_trackgen_geo_index_for_slot(slot);
     const char *slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
     unsigned int seed;
-    int night, stamp_night = -1, variety, i, cnt, pass;
+    int night, variety, i, cnt, pass;
     const int *pool;
-    char path[256], stamp[256], line[256];
-    FILE *f;
-    if (!slug || !out || n < 8) return 0;
+    char path[256];
+    if (!slug || !slug[0] || !out || n < 8) return 0;
     seed = tg_roam_seed(slug);
     night = td5_trackgen_roam_is_night(slot);
-
-    snprintf(stamp, sizeof stamp, "re/assets/levels/level%03d/GENSTAMP.TXT", TD5_GEO_LEVEL_BASE + gi);
-    f = fopen(stamp, "r");
-    if (f) {
-        if (fgets(line, sizeof line, f)) {
-            const char *p = strstr(line, "night=");
-            if (p) stamp_night = atoi(p + 6);
-        }
-        fclose(f);
-    }
-    snprintf(path, sizeof path, "re/assets/levels/level%03d/FORWSKY.png", TD5_GEO_LEVEL_BASE + gi);
-    if (stamp_night == night && td5_plat_file_exists(path)) {
-        snprintf(out, n, "%s", path);
-        TD5_LOG_I(LOG_TAG, "trackgen: roam sky = the level's own FORWSKY (%s, matches the build)",
-                  night ? "NIGHT" : "DAY");
-        return 1;
-    }
-    /* the build on disk has the other time of day: pick from the matching pool, same indexing as
-     * tg_install_sky; a real city prefers the city panoramas (pass 0), then any dry one */
+    /* [F11b] always the pool: same indexing as tg_install_sky; a real city prefers the city
+     * panoramas (pass 0), then any dry one */
     variety = td5_env_flag_on("TD5RE_R8_VARIETY_SKY");
     pool = !variety ? k_sky_blind : (night ? k_sky_night : k_sky_day);
     cnt  = !variety ? (int)(sizeof k_sky_blind / sizeof k_sky_blind[0])
@@ -5200,8 +5261,8 @@ int td5_trackgen_roam_sky_path(int slot, char *out, size_t n)
             snprintf(path, sizeof path, "re/assets/levels/level%03d/FORWSKY.png", lvl);
             if (td5_plat_file_exists(path)) {
                 snprintf(out, n, "%s", path);
-                TD5_LOG_I(LOG_TAG, "trackgen: roam sky = shipped level%03d (%s pool, build on disk is %s)",
-                          lvl, night ? "NIGHT" : "DAY", stamp_night < 0 ? "unstamped" : (stamp_night ? "NIGHT" : "DAY"));
+                TD5_LOG_I(LOG_TAG, "trackgen: roam sky = shipped level%03d (%s pool)",
+                          lvl, night ? "NIGHT" : "DAY");
                 return 1;
             }
         }

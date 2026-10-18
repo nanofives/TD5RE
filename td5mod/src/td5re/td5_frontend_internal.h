@@ -137,6 +137,13 @@ void frontend_roam_prepare_car_select(void);
  * that entry's city-race launch (td5_fe_race.c): 1 = a roam race is armed, s_selected_track = host. */
 int  frontend_geo_generator_points(double (*ll)[2], int max);
 int  frontend_geo_entry_launch_roam(int opponents);
+/* [GEO FREE ROAM F11b] 1 in the only context the strip geo race is built in: local multiplayer
+ * (2+ humans, no network), or TD5RE_GEO_STRIP_BUILD=1 (dev). */
+int  frontend_geo_strip_context(void);
+/* [F11b] OK on a track selector with the GEOSPATIAL entry picked: single player = a route the city
+ * can race; local multiplayer = the strip, built on demand from the planned pins. 0 = refuse.
+ * 1 for any other track. */
+int  frontend_geo_entry_on_ok(void);
 /* [ROUND 1026 L] The one geo slot the track selectors list as the GEOSPATIAL
  * TRACK entry (-1 = no real place registered). See td5_fe_race.c. */
 int  frontend_geo_entry_slot(void);

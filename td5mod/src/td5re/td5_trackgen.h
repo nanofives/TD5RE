@@ -193,17 +193,22 @@ int td5_trackgen_geo_index_for_slot(int slot);
  * td5_trackgen_internal.h for TD5_GEO_SLOT_BASE. */
 int td5_trackgen_geo_slot_for_index(int gi);
 
-/* [GEO FREE ROAM F2-F] Roam hosts on the real place's OWN level directory (its sky, LEVELINF and
- * texture pages), loaded exactly like a geo race but WITHOUT building anything and without its
- * strip. Returns the geo track slot of place `slug` when that level dir already holds a built
- * TEXTURES.DAT + LEVELINF.DAT + FORWSKY.png (a previous geo build of the place), else -1 (the
- * caller falls back to a shipped host level). */
+/* [GEO FREE ROAM F2-F, F11b] Roam hosts on the real place's geo track slot (its level number, its
+ * LEVELINF and texture pages), WITHOUT building anything and without a strip. Since F11b the host
+ * files are roam's OWN, written from code into re/assets/geo/<slug>/roam/HOST/ (the strip build's
+ * fixed TEXTURES.DAT page block + a roam LEVELINF.DAT), so free roam never reads what a strip BUILD
+ * left in level09x. Returns the geo track slot of place `slug` once that host dir is complete, else
+ * -1 (the caller falls back to a shipped host level). */
 int td5_trackgen_roam_host_slot(const char *slug);
+/* The roam host dir of a geo slot (re/assets/geo/<slug>/roam/HOST, no trailing slash) and the level
+ * number whose TEXTURES.DAT / LEVELINF.DAT it stands in for; 0 when `slot` is not a registered place.
+ * td5_asset.c reads those two files from here while a roam session hosts on the slot. */
+int td5_trackgen_roam_host_dir(int slot, char *out, size_t n);
 /* The page ids a plain road / lawn / kerb surface uses in that level's TEXTURES.DAT. */
 void td5_trackgen_roam_pages(int *road, int *ground, int *kerb);
-/* The FORWSKY a geo race on `slot` would draw for the TIME OF DAY options in force
- * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): the level's own FORWSKY.png when its
- * GENSTAMP time of day matches, else a shipped panorama from the day / night pool. 1 on success. */
+/* The FORWSKY a roam session on `slot` draws for the TIME OF DAY options in force
+ * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): a shipped panorama from the day / night pool,
+ * city horizons first. 1 on success. */
 int td5_trackgen_roam_sky_path(int slot, char *out, size_t n);
 int td5_trackgen_roam_is_night(int slot);   /* [F4f] the roam session's day/night verdict (sky, ambient, lamps) */
 

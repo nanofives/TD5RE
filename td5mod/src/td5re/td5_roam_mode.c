@@ -308,12 +308,14 @@ void td5_roam_set_slot_edge(int slot, uint64_t edge_key)
 /* ------------------------------------------------------------ host level ----- */
 
 /* The roam world has no strip, but the race pipeline still wants a LEVEL for the sky, the
- * static texture pages and LEVELINF. F2-F: the level is the REAL PLACE's own geo level
- * (La Plata = level091, its geo track slot): its sky, LEVELINF and TEXTURES.DAT are loaded like a
- * geo race, nothing is generated and its strip / routes / MODELS / traffic queue are thrown away
- * (td5_asset.c roam branch). Needs the place to have been built once from the geo generator;
- * without that (or for a place with no level dir) it falls back to a shipped level, schedule
- * index 0 (Moscow, level023). TD5RE_ROAM_HOST_TRACK=<schedule index> forces a shipped host. */
+ * static texture pages and LEVELINF. F2-F: the level is the REAL PLACE's own geo track slot
+ * (La Plata = slot 61 / level091); nothing is generated and no strip / routes / MODELS / traffic
+ * queue is loaded (td5_asset.c roam branch). F11b: its TEXTURES.DAT + LEVELINF.DAT are roam's own,
+ * written from code at this resolution into re/assets/geo/<slug>/roam/HOST (td5_asset.c reads them
+ * from there) and the sky is a shipped panorama (td5_trackgen_roam_sky_path), so nothing a strip
+ * BUILD wrote is read. Only when that host dir cannot be written (or the place is not registered)
+ * does it fall back to a shipped level, schedule index 0 (Moscow, level023).
+ * TD5RE_ROAM_HOST_TRACK=<schedule index> forces a shipped host. */
 int td5_roam_host_track(void)
 {
     if (s_roam.host_track < 0) {
@@ -350,7 +352,7 @@ void td5_roam_host_pages(int *road, int *ground, int *kerb)
     }
 }
 
-/* The sky file for the host level, or 0 to keep the level's own FORWSKY. */
+/* The sky file for a geo host (a shipped panorama), or 0 to keep a shipped host's own FORWSKY. */
 int td5_roam_host_sky_path(char *out, size_t n)
 {
     if (!td5_roam_active() || !td5_roam_host_is_geo()) return 0;

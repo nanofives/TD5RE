@@ -3108,13 +3108,14 @@ static int tg_furniture_real_pages(void)
     return td5_env_flag_on("TD5RE_AUTOTRACK_REAL_FURNITURE");
 }
 
-static int tg_emit_textures(TG_Buf *out)
+/* [GEO FREE ROAM F11b] `plate_pages` is the strip's street-name plate count (tg_mastarm_plate_pages);
+ * the roam host passes 0 because roam uploads its own plate atlas above the plate block. */
+static int tg_emit_textures_n(TG_Buf *out, int plate_pages)
 {
     /* [1021 D] Street-name plate pages ride after the fixed block; 0 extra
      * pages (the synthetic and knob-off case) leaves `count` exactly as it was
      * and the page file byte-identical. */
     TG_Buf pages[TD5_TG_PAGE_COUNT + TD5_TG_MASTARM_PAGES_MAX];
-    const int plate_pages = tg_mastarm_plate_pages();
     const unsigned int count = TD5_TG_PAGE_COUNT + (unsigned int)plate_pages;
     unsigned int cursor = 4 + 4 * count;
     unsigned int i;
@@ -3478,6 +3479,19 @@ static int tg_emit_textures(TG_Buf *out)
     TD5_LOG_I(LOG_TAG, "trackgen: textures = %u page(s), %zu bytes",
               count, out->len);
     return !out->oom;
+}
+
+static int tg_emit_textures(TG_Buf *out)
+{
+    return tg_emit_textures_n(out, tg_mastarm_plate_pages());
+}
+
+/* [GEO FREE ROAM F11b] The roam host's TEXTURES.DAT: the same fixed page block a strip build writes,
+ * without the strip's street-name plate pages (they depend on the strip route). Pure: reads only
+ * the page tables and the TD5RE_* page knobs. Caller frees `out` with tg_buf_free. */
+int tg_emit_roam_host_textures(TG_Buf *out)
+{
+    return tg_emit_textures_n(out, 0);
 }
 
 /* ---------------------------------------------------------- config ------- */

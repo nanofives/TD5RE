@@ -1,0 +1,18 @@
+# [GEO FREE ROAM F11b] geo selector (pins seeded with TD5RE_GEO_SEED_LATLON, FREE ROAM focused with
+# TD5RE_GEO_PANEL_FOCUS=11) -> FREE ROAM -> normal car select -> OK -> free roam at the START pin ->
+# drive. Run on a FRESH copy (no level091, no _route/): the host level is roam's own (roam/HOST).
+sync menu
+900 log GEO_SETTLED
++8 key enter press
++1500 log AT_CARSELECT
++30 key down press
++60 key down press
++60 key down press
++60 key down press
++60 key enter press
++2400 log AFTER_LAUNCH
+sync race
+900 log ROAM_EXPECTED
++10 throttle 1
++1200 log DRIVEN
++10 quit

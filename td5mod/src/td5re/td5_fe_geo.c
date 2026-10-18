@@ -233,10 +233,11 @@ static int           s_bg_n_path_user;
  * AUTO TRACK STUDIO chip does (frontend_autotrack_parent_screen). */
 static int    s_parent_screen = TD5_SCREEN_TRACK_SELECTION;
 
-/* [GEO FREE ROAM F11a] 1 = the STRIP geo BUILD is on (TD5RE_GEO_STRIP_BUILD=1, read at screen
- * entry): BUILD TRACK and the generation OPTIONS panel as before. 0 (the default) = the button is
- * RACE ROUTE: the same pins raced inside the free-roam city, and the panel, whose rows only shape a
- * strip build, gives way to a short note. docs/plans/geo_free_roam/F11_PARITY.md. */
+/* [GEO FREE ROAM F11a, F11b] 1 = the STRIP geo BUILD is on, read at screen entry: local multiplayer
+ * (2+ humans, the only context the strip race is built in) or TD5RE_GEO_STRIP_BUILD=1 (dev). BUILD
+ * TRACK and the generation OPTIONS panel as before. 0 (single player) = the button is RACE ROUTE: the
+ * same pins raced inside the free-roam city, and the panel, whose rows only shape a strip build,
+ * gives way to a short note. docs/plans/geo_free_roam/F11_PARITY.md. */
 static int    s_strip;
 static int    geo_roam_spawn(TD5_RoamSpawn *out);
 static int    geo_race_city_ready(const char **why);
@@ -1688,7 +1689,7 @@ static void geo_screen_init(void)
      * roam car select returns here without a dedicated hook, and a stale ARMED session would
      * turn the next ordinary race into a roam race */
     td5_roam_cancel();
-    s_strip = td5_roam_strip_build_enabled();   /* [F11a] the strip BUILD only behind TD5RE_GEO_STRIP_BUILD=1 */
+    s_strip = frontend_geo_strip_context();   /* [F11b] the strip BUILD: local multiplayer (or the dev knob) */
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,
@@ -2113,7 +2114,8 @@ void Screen_GeoGenerator(void)
     {
         static int s_autobuild_done;
         const int want = td5_env_int("TD5RE_GEO_AUTOBUILD_N", 1, 1, 4);
-        if (td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
+        /* [F11b] only where BUILD is a strip BUILD (local multiplayer or TD5RE_GEO_STRIP_BUILD=1) */
+        if (s_strip && td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
             && s_autobuild_done < want && geo_route_is_buildable()) {
             int slot;
             TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - pressing "

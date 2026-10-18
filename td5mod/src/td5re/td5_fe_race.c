@@ -39,11 +39,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 #define LOG_TAG "frontend"
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
 #include "td5_geo.h"
+#include "td5_geo_route.h"  /* [F11b] the strip race built on demand (local multiplayer) */
 #include "td5_roam_mode.h"   /* [GEO FREE ROAM F2-A] FREE ROAM car-select entry / launch */
 #include "td5_roam_route.h"  /* [F11a] TD5_ROUTE_MAX_WP / TD5_ROUTE_SPRINT */
 #include "td5_roam_handoff.h" /* [F11a] the GEOSPATIAL entry races in the city */
@@ -742,44 +744,145 @@ void frontend_roam_prepare_car_select(void) {
     s_return_screen      = -1;
 }
 
-/* [GEO FREE ROAM F11a] The GEOSPATIAL entry (Quick Race, or SELECT TRACK in a single race) now
- * races IN THE CITY: arm a roam session at the route's START and hand the route over with AUTOSTART,
- * so the race begins on the street once the city's planner has it (td5_roam_handoff.h). The route is
- * the geo map's pins when it holds some, else the place's last city race (routes/geo_map.json), else
- * the last strip BUILD's _route/ROUTE_RAW.JSON. Opponents / traffic / cops follow the menus that
- * launched it (roam: at most 5 opponents, traffic OFF / LOW / HIGH).
+/* [GEO FREE ROAM F11b] The strip geo race is LOCAL MULTIPLAYER only (Mariano, 2026-10-18): 2+ humans
+ * on this machine, no network (free roam is single player, blocker B1 in F11_PARITY.md). Everything
+ * else on the GEOSPATIAL entry races in the city. TD5RE_GEO_STRIP_BUILD=1 (dev) opens the strip to
+ * every context, the way F11a left it. */
+int frontend_geo_strip_context(void)
+{
+    if (td5_roam_strip_build_enabled()) return 1;
+    return !s_network_active && (s_num_human_players > 1 || s_two_player_mode || s_mp_flow);
+}
+
+/* The route the GEOSPATIAL entry races: the geo map's pins when it holds 2..max of them, else the
+ * place's last city race (routes/geo_map.json, written by every city race). 0 when neither. */
+static int frontend_geo_entry_route(int slot, double (*ll)[2], int max, char *src, size_t cap)
+{
+    const int gi = td5_trackgen_geo_index_for_slot(slot);
+    const char *slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
+    int n = frontend_geo_generator_points(ll, max + 1);
+    if (n >= 2 && n <= max) {
+        if (src) snprintf(src, cap, "the geo map");
+        return n;
+    }
+    n = (slug && slug[0]) ? td5_roam_handoff_last_route(slug, ll, max, src, cap) : 0;
+    return n >= 2 ? n : 0;
+}
+
+/* Single player: 1 when the entry can race in the city (a route, its START inside a city map). */
+static int frontend_geo_entry_city_ready(void)
+{
+    double ll[TD5_ROUTE_MAX_WP][2];
+    char slug[64];
+    int32_t px, pz;
+    const int n = frontend_geo_entry_route(s_selected_track, ll, TD5_ROUTE_MAX_WP, NULL, 0);
+    if (s_selected_game_type != 0) {
+        TD5_LOG_W(LOG_TAG, "geo entry: game type %d has no city race (single player never builds a strip)",
+                  s_selected_game_type);
+        return 0;
+    }
+    if (n < 2) {
+        TD5_LOG_W(LOG_TAG, "geo entry: no route to race in the city (geo map empty, no saved city race)");
+        return 0;
+    }
+    if (!td5_roam_place_for_latlon(ll[0][0], ll[0][1], slug, sizeof slug, &px, &pz)) {
+        TD5_LOG_W(LOG_TAG, "geo entry: START %.5f,%.5f is outside every city map", ll[0][0], ll[0][1]);
+        return 0;
+    }
+    return 1;
+}
+
+/* Local multiplayer: build the strip from the planned pins on demand. The pins are committed
+ * (td5_geo_route_build + td5_geo_route_commit, what the geo map's BUILD TRACK does) only when they
+ * differ from the committed route's own waypoints (_route/ROUTE_RAW.JSON), so racing the same pins
+ * again keeps the level and its REUSE. With no pins, an already committed route is raced. 1 when a
+ * committed route is there to race. */
+#define FE_GEO_STRIP_PTS 32
+static int frontend_geo_entry_prepare_strip(void)
+{
+    double ll[FE_GEO_STRIP_PTS][2], cur[FE_GEO_STRIP_PTS][2];
+    TD5_GeoLatLon pts[FE_GEO_STRIP_PTS];
+    TD5_GeoRouteResult res;
+    char src[512] = "", path[512];
+    const int gi = td5_trackgen_geo_index_for_slot(s_selected_track);
+    const char *slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
+    int n, nc = 0, i, same;
+    uint32_t t0;
+    if (!slug || !slug[0]) return 0;
+    td5_geo_place_path(path, sizeof path, slug, "ROUTE.JSON");
+    n = frontend_geo_entry_route(s_selected_track, ll, FE_GEO_STRIP_PTS, src, sizeof src);
+    if (n < 2) {
+        const int have = td5_plat_file_exists(path);
+        TD5_LOG_I(LOG_TAG, "geo entry: strip race, no pins: %s", have ? "racing the committed route" :
+                  "no committed route either, refused");
+        return have;
+    }
+    if (td5_geo_derived_path(path, sizeof path, slug, "ROUTE_RAW.JSON"))
+        nc = td5_roam_handoff_read_waypoints(path, cur, FE_GEO_STRIP_PTS);
+    same = (nc == n);
+    for (i = 0; same && i < n; i++)
+        same = fabs(cur[i][0] - ll[i][0]) < 1e-9 && fabs(cur[i][1] - ll[i][1]) < 1e-9;
+    if (same) {
+        TD5_LOG_I(LOG_TAG, "geo entry: strip race on the committed route (%d pin(s) from %s, unchanged)", n, src);
+        return 1;
+    }
+    for (i = 0; i < n; i++) { pts[i].lat = ll[i][0]; pts[i].lon = ll[i][1]; }
+    t0 = td5_plat_time_ms();
+    memset(&res, 0, sizeof res);
+    if (td5_geo_route_build(pts, n, &res) != 0 || res.verdict != TD5_GEO_ROUTE_OK) {
+        TD5_LOG_W(LOG_TAG, "geo entry: the %d pin(s) from %s do not route (verdict %d): strip refused",
+                  n, src, (int)res.verdict);
+        return 0;
+    }
+    if (td5_geo_route_commit() != 0) {
+        TD5_LOG_W(LOG_TAG, "geo entry: commit refused: %s", td5_geo_route_commit_reason());
+        return 0;
+    }
+    td5_trackgen_register_geo_places();
+    td5_geo_preview_route("");            /* the selector's preview re-reads the new ROUTE.JSON */
+    TD5_LOG_I(LOG_TAG, "geo entry: strip BUILT ON DEMAND from %d pin(s) from %s in %u ms (%d spans)",
+              n, src, (unsigned)(td5_plat_time_ms() - t0), res.spans);
+    return 1;
+}
+
+/* OK on a track selector: 0 = refuse (the caller plays the error sound and stays). Not a geo slot = 1.
+ * Local multiplayer prepares the strip (above); single player needs a route the city can race. */
+int frontend_geo_entry_on_ok(void)
+{
+    if (!td5_trackgen_is_geo_slot(s_selected_track)) return 1;
+    if (frontend_geo_strip_context()) return frontend_geo_entry_prepare_strip();
+    return frontend_geo_entry_city_ready();
+}
+
+/* [GEO FREE ROAM F11a] The GEOSPATIAL entry (Quick Race, or SELECT TRACK in a single race) races IN
+ * THE CITY: arm a roam session at the route's START and hand the route over with AUTOSTART, so the
+ * race begins on the street once the city's planner has it (td5_roam_handoff.h). The route is the
+ * geo map's pins when it holds some, else the place's last city race (routes/geo_map.json).
+ * Opponents / traffic / cops follow the menus that launched it (roam: at most 5 opponents, traffic
+ * OFF / LOW / HIGH).
  *
- * Not taken (the strip race runs, as before): TD5RE_GEO_STRIP_BUILD=1, more than one human (roam is
- * single player: the split-screen blocker in F11_PARITY.md), a network session, a cup / time trial /
- * cop chase / drag type, or no route that can be raced in the city. Returns 1 when armed, with
+ * Not taken: local multiplayer (frontend_geo_strip_context: the strip race, built on demand) or a
+ * single player whose OK frontend_geo_entry_on_ok refused. Returns 1 when armed, with
  * s_selected_track moved to the roam host level. */
 int frontend_geo_entry_launch_roam(int opponents)
 {
     double ll[TD5_ROUTE_MAX_WP][2];
     char src[512] = "the geo map";
     TD5_RoamSpawn sp;
-    int n, gi, traffic;
-    const char *slug;
-    if (td5_roam_strip_build_enabled() || !td5_trackgen_is_geo_slot(s_selected_track)) return 0;
-    if (s_num_human_players != 1 || s_network_active || s_mp_flow || s_two_player_mode ||
-        s_selected_game_type != 0) {
-        TD5_LOG_I(LOG_TAG, "geo entry: strip race (humans=%d net=%d mp=%d type=%d: the city race is single player)",
-                  s_num_human_players, s_network_active, s_mp_flow, s_selected_game_type);
+    int n, traffic;
+    if (!td5_trackgen_is_geo_slot(s_selected_track) || frontend_geo_strip_context()) return 0;
+    if (s_selected_game_type != 0) {
+        TD5_LOG_E(LOG_TAG, "geo entry: game type %d reached the GEOSPATIAL entry in single player", s_selected_game_type);
         return 0;
     }
-    n = frontend_geo_generator_points(ll, TD5_ROUTE_MAX_WP + 1);
-    if (n < 2 || n > TD5_ROUTE_MAX_WP) {
-        gi = td5_trackgen_geo_index_for_slot(s_selected_track);
-        slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
-        n = slug ? td5_roam_handoff_last_route(slug, ll, TD5_ROUTE_MAX_WP, src, sizeof src) : 0;
-    }
+    n = frontend_geo_entry_route(s_selected_track, ll, TD5_ROUTE_MAX_WP, src, sizeof src);
     if (n < 2) {
-        TD5_LOG_W(LOG_TAG, "geo entry: no route to race in the city (geo map empty, no saved city race, no ROUTE_RAW.JSON)");
+        TD5_LOG_E(LOG_TAG, "geo entry: no route to race in the city (geo map empty, no saved city race)");
         return 0;
     }
     memset(&sp, 0, sizeof sp);
     if (!td5_roam_place_for_latlon(ll[0][0], ll[0][1], sp.place, sizeof sp.place, &sp.spawn_px, &sp.spawn_pz)) {
-        TD5_LOG_W(LOG_TAG, "geo entry: START %.5f,%.5f is outside every city map: strip race", ll[0][0], ll[0][1]);
+        TD5_LOG_E(LOG_TAG, "geo entry: START %.5f,%.5f is outside every city map", ll[0][0], ll[0][1]);
         return 0;
     }
     sp.spawn_yaw = -1;
@@ -844,6 +947,9 @@ static int frontend_track_excluded_from_selector(int track_index) {
             /* A network lobby never lists it: the peers would each have to hold
              * (and build identically from) the host's real-place cache. */
             if (s_network_active) return 1;
+            /* [F11b] single player races the entry in the city, which has a single race only:
+             * a cup / time trial / cop chase never lists it (it would need the strip) */
+            if (!frontend_geo_strip_context() && s_selected_game_type != 0) return 1;
             return track_index != frontend_geo_entry_slot();
         }
         return track_index != s_geo_pick_slot;
@@ -1786,7 +1892,9 @@ void Screen_QuickRaceMenu(void) {
                 int track_locked = (!s_cheat_unlock_all && !s_network_active &&
                                     s_selected_track >= 0 && s_selected_track < 37 &&
                                     s_track_lock_table[s_selected_track] != 0);
-                if (car_locked || track_locked) {
+                /* [F11b] the GEOSPATIAL entry: a city race (single player) or the strip built
+                 * on demand (local multiplayer); refused when neither can start */
+                if (car_locked || track_locked || !frontend_geo_entry_on_ok()) {
                     frontend_play_sfx(10); /* rejection */
                 } else {
                     /* Commit the selected direction; counts are read by
@@ -8781,6 +8889,106 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
  * instead of leaving an empty rectangle.
  *
  * Returns 1 if a route was plotted. */
+/* The map credits drawn with any preview of a real place (see the comments inside). */
+static void geo_draw_route_credit(const char *slug, float bx, float by, float sx, float sy)
+{
+    /* [GEO PHASE 4 / ODbL] The credit travels with the map, wherever it is shown.
+     * TWO LINES, ABOVE the panel. On one line under it (what the studio does in
+     * its wider rect) the full credit is ~228 canvas units from bx=412, so it ran
+     * off the 640-unit canvas and through the Pitbull logo -- measured on the
+     * first framedump of this screen. Above the panel there is clear space
+     * between the track name and the panel top, and splitting the string keeps
+     * the attribution complete rather than truncating it to fit. */
+    {
+        /* [ROUND 1030 A2] With the generator's own selector the panel title is
+         * GEOSPATIAL TRACK GENERATOR and the place name sits on the small line
+         * under it (y 108), where the first credit line used to be, so the
+         * credit drops one line. Its last line ends at ~by+7, still above the
+         * route, which the fit keeps AT_PV_MARGIN (8) inside the panel. */
+        const float cy0 = td5_trackgen_geo_own_selector() ? -14.0f : -26.0f;
+        fe_draw_small_text(bx * sx, (by + cy0) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
+        fe_draw_small_text(bx * sx, (by + cy0 + 12.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
+                           0xFF8899AA, sx, sy);
+    }
+    /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
+     * Google Open Buildings carries their credit too (both ODbL). NOT stacked
+     * straight above the OSM pair: the track name is drawn at y 81..106 and
+     * the first framedump showed both lines printed through "LA PLATA". They
+     * go ABOVE the name instead, in the gap right of the menu's decorative
+     * bars (which reach x 420 at that height). Small text is ~7.6 units a
+     * glyph, so each line stays under 28 characters to end before x 640. */
+    if (td5_geob_place_has_extra(slug)) {
+        fe_draw_small_text((bx + 13.0f) * sx, (by - 80.0f) * sy,
+                           TR(TD5_GEOB_CREDIT_BUILDINGS), 0xFF8899AA, sx, sy);
+        fe_draw_small_text((bx + 13.0f) * sx, (by - 68.0f) * sy,
+                           TR(TD5_GEOB_CREDIT_HEIGHTS), 0xFF8899AA, sx, sy);
+    }
+}
+
+/* [GEO FREE ROAM F11b] Single player races the entry in the city, so the panel shows THAT route:
+ * the pins (geo map, else routes/geo_map.json) as straight legs, north up, START and FINISH marked.
+ * The strip's ROUTE.JSON (below) is only what local multiplayer races. Returns 1 if plotted. */
+static int geo_draw_city_route(int place_index, float bx, float by, float bw, float bh,
+                               float sx, float sy)
+{
+    /* re-read at most twice a second (the saved route is a file read; the panel draws every frame) */
+    static double ll[TD5_ROUTE_MAX_WP][2];
+    static int n = 0, memo_place = -1;
+    static uint32_t memo_ms;
+    double min_x, max_x, min_z, max_z, k;
+    float ext_x, ext_z, scale, ox, oz, cx, cy, dot;
+    int i;
+    if (memo_place != place_index || td5_plat_time_ms() - memo_ms > 500u) {
+        n = frontend_geo_entry_route(td5_trackgen_geo_slot_for_index(place_index), ll, TD5_ROUTE_MAX_WP, NULL, 0);
+        memo_place = place_index;
+        memo_ms = td5_plat_time_ms();
+    }
+    if (n < 2) {
+        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f) * sy, TR("NO ROUTE YET"), 0xFF8899AA, sx, sy);
+        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f + 12.0f) * sy, TR("SET THE PINS IN SETTINGS"),
+                           0xFF8899AA, sx, sy);
+        return 0;
+    }
+    k = cos(ll[0][0] * 3.14159265358979323846 / 180.0);   /* metres east per degree, relative */
+    min_x = max_x = ll[0][1] * k;
+    min_z = max_z = ll[0][0];
+    for (i = 1; i < n; i++) {
+        const double x = ll[i][1] * k, z = ll[i][0];
+        if (x < min_x) min_x = x;
+        if (x > max_x) max_x = x;
+        if (z < min_z) min_z = z;
+        if (z > max_z) max_z = z;
+    }
+    ext_x = (float)(max_x - min_x);
+    ext_z = (float)(max_z - min_z);
+    if (ext_x < 1e-6f) ext_x = 1e-6f;
+    if (ext_z < 1e-6f) ext_z = 1e-6f;
+    scale = (bw - AT_PV_MARGIN * 2.0f) / ext_x;
+    if ((bh - AT_PV_MARGIN * 2.0f) / ext_z < scale) scale = (bh - AT_PV_MARGIN * 2.0f) / ext_z;
+    ox = (float)(min_x + max_x) * 0.5f;
+    oz = (float)(min_z + max_z) * 0.5f;
+    cx = bx + bw * 0.5f;
+    cy = by + bh * 0.5f;
+    dot = 1.0f * sx;
+    if (dot < 1.0f) dot = 1.0f;
+    for (i = 0; i + 1 < n; i++) {
+        const float x0 = cx + ((float)(ll[i][1] * k) - ox) * scale, z0 = cy - ((float)ll[i][0] - oz) * scale;
+        const float x1 = cx + ((float)(ll[i + 1][1] * k) - ox) * scale, z1 = cy - ((float)ll[i + 1][0] - oz) * scale;
+        const float len = sqrtf((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
+        const int steps = len > 1.0f ? (int)(len * 1.5f) : 1;
+        int t;
+        for (t = 0; t <= steps; t++) {
+            const float f = (float)t / (float)steps;
+            fe_draw_quad((x0 + (x1 - x0) * f) * sx, (z0 + (z1 - z0) * f) * sy, dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);
+        }
+    }
+    frontend_draw_marker_dot((cx + ((float)(ll[n - 1][1] * k) - ox) * scale) * sx,
+                             (cy - ((float)ll[n - 1][0] - oz) * scale) * sy, sx, sy, 1);
+    frontend_draw_marker_dot((cx + ((float)(ll[0][1] * k) - ox) * scale) * sx,
+                             (cy - ((float)ll[0][0] - oz) * scale) * sy, sx, sy, 0);
+    return 1;
+}
+
 int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
                        float sx, float sy)
 {
@@ -8789,6 +8997,11 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
     int i, n;
     const char *slug = td5_geo_places_slug(place_index);
 
+    if (!frontend_geo_strip_context()) {
+        const int drawn = geo_draw_city_route(place_index, bx, by, bw, bh, sx, sy);
+        geo_draw_route_credit(slug, bx, by, sx, sy);
+        return drawn;
+    }
     n = td5_geo_preview_route(slug);
     if (n < 2) {
         fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f) * sy,
@@ -8851,37 +9064,7 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
                                  (cy - ((float)szp - oz) * scale) * sy, sx, sy, 0);
     }
 
-    /* [GEO PHASE 4 / ODbL] The credit travels with the map, wherever it is shown.
-     * TWO LINES, ABOVE the panel. On one line under it (what the studio does in
-     * its wider rect) the full credit is ~228 canvas units from bx=412, so it ran
-     * off the 640-unit canvas and through the Pitbull logo -- measured on the
-     * first framedump of this screen. Above the panel there is clear space
-     * between the track name and the panel top, and splitting the string keeps
-     * the attribution complete rather than truncating it to fit. */
-    {
-        /* [ROUND 1030 A2] With the generator's own selector the panel title is
-         * GEOSPATIAL TRACK GENERATOR and the place name sits on the small line
-         * under it (y 108), where the first credit line used to be, so the
-         * credit drops one line. Its last line ends at ~by+7, still above the
-         * route, which the fit keeps AT_PV_MARGIN (8) inside the panel. */
-        const float cy0 = td5_trackgen_geo_own_selector() ? -14.0f : -26.0f;
-        fe_draw_small_text(bx * sx, (by + cy0) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
-        fe_draw_small_text(bx * sx, (by + cy0 + 12.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
-                           0xFF8899AA, sx, sy);
-    }
-    /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
-     * Google Open Buildings carries their credit too (both ODbL). NOT stacked
-     * straight above the OSM pair: the track name is drawn at y 81..106 and
-     * the first framedump showed both lines printed through "LA PLATA". They
-     * go ABOVE the name instead, in the gap right of the menu's decorative
-     * bars (which reach x 420 at that height). Small text is ~7.6 units a
-     * glyph, so each line stays under 28 characters to end before x 640. */
-    if (td5_geob_place_has_extra(slug)) {
-        fe_draw_small_text((bx + 13.0f) * sx, (by - 80.0f) * sy,
-                           TR(TD5_GEOB_CREDIT_BUILDINGS), 0xFF8899AA, sx, sy);
-        fe_draw_small_text((bx + 13.0f) * sx, (by - 68.0f) * sy,
-                           TR(TD5_GEOB_CREDIT_HEIGHTS), 0xFF8899AA, sx, sy);
-    }
+    geo_draw_route_credit(slug, bx, by, sx, sy);
     return 1;
 }
 
@@ -9776,7 +9959,8 @@ void Screen_TrackSelection(void) {
                 int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
                              s_track_lock_table[s_selected_track] != 0 &&
                              !s_network_active && !s_cheat_unlock_all);
-                if (locked) {
+                /* [F11b] the GEOSPATIAL entry: see frontend_geo_entry_on_ok */
+                if (locked || !frontend_geo_entry_on_ok()) {
                     frontend_play_sfx(10);
                 } else {
                     g_td5.reverse_direction = s_track_direction;

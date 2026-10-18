@@ -190,9 +190,5 @@ int td5_roam_handoff_last_route(const char *place, double (*ll)[2], int max, cha
         n = td5_roam_handoff_read_waypoints(path, ll, max);
         if (n >= 2) { if (src) snprintf(src, src_cap, "%s", path); return n; }
     }
-    if (td5_geo_derived_path(path, sizeof path, place, "ROUTE_RAW.JSON")) {
-        n = td5_roam_handoff_read_waypoints(path, ll, max);
-        if (n >= 2) { if (src) snprintf(src, src_cap, "%s", path); return n; }
-    }
-    return 0;
+    return 0;   /* [F11b] no fallback to a strip BUILD's _route/ROUTE_RAW.JSON (D4) */
 }

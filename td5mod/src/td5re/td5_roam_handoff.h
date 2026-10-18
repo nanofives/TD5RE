@@ -34,7 +34,8 @@ int  td5_roam_handoff_pending(void);
 void td5_roam_handoff_frame(void);
 
 /* The last raced city route of a place, for Quick Race: routes/geo_map.json of `place` (written by
- * every handoff), else the last strip BUILD's _route/ROUTE_RAW.JSON. Fills up to `max` lat/lon pairs.
+ * every handoff; F11b dropped the strip BUILD's _route/ROUTE_RAW.JSON fallback). Fills up to `max`
+ * lat/lon pairs.
  * Returns the count (0 = none). `src` (optional) names the file read. */
 int  td5_roam_handoff_last_route(const char *place, double (*ll)[2], int max, char *src, size_t src_cap);
 
@@ -42,8 +43,9 @@ int  td5_roam_handoff_last_route(const char *place, double (*ll)[2], int max, ch
  * [{ "lat":..., "lon":... }, ...] (a roam route). Returns the count. */
 int  td5_roam_handoff_read_waypoints(const char *path, double (*ll)[2], int max);
 
-/* The STRIP geo BUILD stays reachable only behind this knob: TD5RE_GEO_STRIP_BUILD=1 (default 0).
- * 0 = the geo selector's BUILD races in the city, Quick Race's geospatial entry launches a roam race. */
+/* TD5RE_GEO_STRIP_BUILD=1 (default 0, dev): the STRIP geo BUILD in every context. Without it the
+ * strip is local multiplayer only (frontend_geo_strip_context, F11b): a single player's geo selector
+ * BUILD races in the city and the GEOSPATIAL entry launches a roam race. */
 int  td5_roam_strip_build_enabled(void);
 
 #endif /* TD5_ROAM_HANDOFF_H */

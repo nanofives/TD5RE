@@ -13,6 +13,7 @@
 #include "td5_asset.h"
 #include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
 #include "td5_trackgen.h"        /* auto-track slot test: the generated track has no trak*.tga */
+#include "td5_roam_handoff.h"     /* [F11b] td5_roam_strip_build_enabled (AutoRace on the geo entry) */
 #include "td5_game.h"
 #include "td5_profile.h"
 #include "td5_input.h"
@@ -3901,6 +3902,29 @@ void td5_frontend_auto_race_setup(void) {
      * when the knob is unset. See frontend_chaos_dev_commit_from_env(). */
     frontend_chaos_dev_commit_from_env();
 #endif
+
+    /* [GEO FREE ROAM F11b] The strip geo race is local multiplayer only. AutoRace on the GEOSPATIAL
+     * entry does what the menus' OK does: DefaultPlayers>=2 builds the strip on demand from the
+     * planned pins (frontend_geo_entry_on_ok); one player races in the city (its route: the geo map's
+     * pins, else routes/geo_map.json), and with no route the city can race it is an error and track
+     * 0, never a strip. TD5RE_GEO_STRIP_BUILD=1 (dev: the level091 identity gate) races the committed
+     * ROUTE.JSON exactly as before. */
+    if (td5_trackgen_is_geo_slot(s_selected_track) && !td5_roam_strip_build_enabled()) {
+        const int humans_was = s_num_human_players;   /* only the context test reads it here */
+        s_num_human_players = g_td5.ini.default_players >= 2 ? g_td5.ini.default_players : 1;
+        if (frontend_geo_strip_context()) {
+            if (!frontend_geo_entry_on_ok())
+                TD5_LOG_E(LOG_TAG, "AutoRace: geo slot %d, %d humans: no route to build the strip from",
+                          s_selected_track, s_num_human_players);
+        } else if (!frontend_geo_entry_on_ok() ||
+                   !frontend_geo_entry_launch_roam(g_td5.ini.default_opponents)) {
+            TD5_LOG_E(LOG_TAG, "AutoRace: geo slot %d in single player has no city race; racing track 0 "
+                      "(the strip geo race is local multiplayer only, TD5RE_GEO_STRIP_BUILD=1 for dev)",
+                      s_selected_track);
+            s_selected_track = 0;
+        }
+        s_num_human_players = humans_was;
+    }
 
     /* Now trigger the race schedule (sets race_requested, assigns AI cars) */
     frontend_init_race_schedule();
