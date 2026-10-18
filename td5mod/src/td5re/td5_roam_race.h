@@ -50,7 +50,7 @@ struct TD5_Actor;
 
 typedef struct {
     int laps;        /* 1 for a sprint (circuits are F9) */
-    int traffic;     /* stored, inert until F8 */
+    int traffic;     /* [F8] 0 off / 1 low / 2 high (td5_roam_traffic.c) */
     int cops;        /* stored, inert until F10 */
     int opponents;   /* [F7] AI racers 0..5 (td5_roam_ai.h); 0 = a solo sprint */
 } TD5_RoamRaceSetup;
@@ -79,6 +79,7 @@ typedef struct {
 
 /* ---- state ------------------------------------------------------------------ */
 int  td5_roam_race_state(void);
+int  td5_roam_race_traffic_level(void);      /* [F8] the running race's TRAFFIC row: 0 off / 1 low / 2 high */
 int  td5_roam_race_running(void);            /* COUNTDOWN or RACING */
 int  td5_roam_race_barriers_live(void);      /* barrier collision on (COUNTDOWN, RACING; FINISHED while opponents still run) */
 void td5_roam_race_reset(void);              /* roam session start / end: back to OFF, barriers cleared */

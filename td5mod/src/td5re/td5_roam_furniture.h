@@ -48,7 +48,7 @@
 #include "td5_roam_tile.h"
 
 /* Bumped BY HAND when a furniture rule changes (mixed into the scenery hash). */
-#define TD5_ROAM_FURN_RULES  1u
+#define TD5_ROAM_FURN_RULES  2u   /* 2: [F8] each approach's facing heads show its signal group */
 
 typedef struct TG_TileCtx TG_TileCtx;
 typedef struct TD5_RoamFurnSource TD5_RoamFurnSource;
