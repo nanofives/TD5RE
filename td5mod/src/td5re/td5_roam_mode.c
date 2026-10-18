@@ -43,6 +43,7 @@
 #include "td5_asset.h"          /* [F7] td5_asset_get_car_zip_path: a known opponent car */
 #include "td5_roam_rebase.h"    /* [F9b] a new session starts the rebase counters */
 #include "td5_roam_partido.h"   /* [F9b] the place boundary + its streets (gate, spawn in a field) */
+#include "td5_roam_traffic.h"
 
 #define LOG_TAG "roam"
 
@@ -263,6 +264,7 @@ void td5_roam_end(void)
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
     td5_roam_race_reset();              /* [F6-B] a race never outlives its session (barriers cleared) */
     td5_roam_physics_session_end();     /* task B: frees the resident set (no-op when not loaded) */
+    td5_roam_traffic_session_end();     /* [F8] the traffic pool stops answering for its slots */
 }
 
 void td5_roam_cancel(void) { td5_roam_end(); }

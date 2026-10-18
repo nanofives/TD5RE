@@ -30,6 +30,7 @@
 #include "td5_roam_race.h"
 #include "td5_roam_lap.h"
 #include "td5_roam_ai.h"
+#include "td5_roam_traffic.h"
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -744,6 +745,7 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
         double bx, bz, f, l, vb;
         if (j == c->slot) continue;
         if (td5_game_get_slot_state(j) == 3) continue;
+        if (td5_roam_traffic_parked(j) == 1) continue;   /* [F8] a parked traffic car is not on the road */
         b = td5_game_get_actor(j);
         if (!b || !ra_place_of(b, &bx, &bz)) continue;
         f = ((bx - x) * tx + (bz - z) * tz) / RA_M;

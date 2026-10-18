@@ -49,6 +49,7 @@
 #include "td5_roam_render.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_furniture.h"
+#include "td5_roam_traffic.h"   /* [F8] td5_roam_signal_group: the head an approach obeys */
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -842,7 +843,8 @@ static int fu_emit_plate(FuEm *em, const double pole[2], const double l[2], cons
     return fu_quad(em, px, py, pz, uu, vv, 8, seg_page, seg_nq, 2, 0);
 }
 
-static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double base_y, const FuCell *cf, const FuCell *cb)
+static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double base_y, const FuCell *cf, const FuCell *cb,
+                      int grp)
 {
     const double t[2] = { n->tx, n->tz };
     const double l[2] = { n->tz * side, -n->tx * side };
@@ -883,7 +885,7 @@ static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double b
         for (lamp = 0; lamp < TD5_GEO_SIGNAL_PHASES; lamp++) {
             const double ly = head_y + (1.0 - (double)lamp) * FU_MA_LAMP_DY;
             if (!fu_bill(em, hx - t[0] * off, ly - FU_MA_LAMP_R, hz - t[1] * off, FU_MA_LAMP_R, FU_MA_LAMP_R * 2.0,
-                         tg_prop_slot(PP_LAMP), TD5_MESH_TAG_SIGNAL_LAMP + lamp)) return 0;
+                         tg_prop_slot(PP_LAMP), (grp ? TD5_MESH_TAG_SIGNAL_CROSS : TD5_MESH_TAG_SIGNAL_LAMP) + lamp)) return 0;
         }
     }
     {   /* the cross-street head at the arm's tip, lit half a period behind */
@@ -896,10 +898,11 @@ static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double b
         for (lamp = 0; lamp < TD5_GEO_SIGNAL_PHASES; lamp++) {
             const double ly = head_y + (1.0 - (double)lamp) * FU_MA_LAMP_DY;
             if (!fu_bill(em, hx - l[0] * off, ly - FU_MA_LAMP_R, hz - l[1] * off, FU_MA_LAMP_R, FU_MA_LAMP_R * 2.0,
-                         tg_prop_slot(PP_LAMP), TD5_MESH_TAG_SIGNAL_CROSS + lamp)) return 0;
+                         tg_prop_slot(PP_LAMP), (grp ? TD5_MESH_TAG_SIGNAL_LAMP : TD5_MESH_TAG_SIGNAL_CROSS) + lamp)) return 0;
         }
     }
-    if (s_at.ncell > 0) {   /* the countdown: a black box, two digit billboards the renderer re-points every frame */
+    /* [F8] the countdown counts the MAIN head: only on an approach that obeys it */
+    if (s_at.ncell > 0 && !grp) {   /* the countdown: a black box, two digit billboards the renderer re-points every frame */
         const double u = disp_u;
         const double dx = pole[0] - l[0] * u, dz = pole[1] - l[1] * u;
         const double dh = FU_M(0.26);
@@ -929,7 +932,7 @@ static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double b
 }
 
 /* ---- the post light: tg_emit_geo_signals' plain head (pole, housing, three lamps) ---- */
-static int fu_postlight(FuEm *em, const FuPt *n, double side, double gap, double base_y)
+static int fu_postlight(FuEm *em, const FuPt *n, double side, double gap, double base_y, int grp)
 {
     const double lx = n->tz * side, lz = -n->tx * side;
     const double cx = n->x + lx * (n->hw + gap), cz = n->z + lz * (n->hw + gap);
@@ -945,7 +948,7 @@ static int fu_postlight(FuEm *em, const FuPt *n, double side, double gap, double
     for (lamp = 0; lamp < TD5_GEO_SIGNAL_PHASES; lamp++) {
         const double ly = head_y + (1.0 - (double)lamp) * FU_SIG_LAMP_DY;
         if (!fu_bill(em, fx, ly - FU_SIG_LAMP_R, fz, FU_SIG_LAMP_R, FU_SIG_LAMP_R * 2.0, tg_prop_slot(PP_LAMP),
-                     TD5_MESH_TAG_SIGNAL_LAMP + lamp)) return 0;
+                     (grp ? TD5_MESH_TAG_SIGNAL_CROSS : TD5_MESH_TAG_SIGNAL_LAMP) + lamp)) return 0;
     }
     return 1;
 }
@@ -1134,6 +1137,8 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
         double base_y, pole[2];
         int e, best_e = -1;
         double best_dot = 0.82;                  /* within ~35 degrees of straight through */
+        /* [F8] the head this approach obeys: the ambient traffic stops at the same lamp (td5_roam_traffic.c) */
+        const int grp = td5_roam_signal_group(bear, na, a);
         if (!m->inbound) continue;
         if (fn || bn) {
             cf = fu_cell_find(fn, 0); cb = fu_cell_find(bn, 0);
@@ -1147,7 +1152,7 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
             if (roam_ctx_owned(c, pole[0], pole[1])) {
                 em->sb = roam_ctx_sb_of(c, pole[0], pole[1]);
                 if (at.hw * 2.0 >= FU_MA_MIN_WIDTH) {
-                    if (!fu_mastarm(em, &at, -1.0, FU_SIG_GAP, base_y, cf, cb)) return 0;
+                    if (!fu_mastarm(em, &at, -1.0, FU_SIG_GAP, base_y, cf, cb, grp)) return 0;
                     st->mast_near++;
 #ifndef TD5RE_RELEASE
                     if (td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 2) {   /* [F4f] where to stand to read this plate */
@@ -1163,7 +1168,7 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
                     if (cf && cb) { st->plates++; if (cf == cb && fn && bn && strcmp(fn, bn) != 0) st->plate_one_face++; }
                     else st->plate_none++;
                 } else {
-                    if (!fu_postlight(em, &at, -1.0, FU_SIG_GAP, base_y)) return 0;
+                    if (!fu_postlight(em, &at, -1.0, FU_SIG_GAP, base_y, grp)) return 0;
                     st->post_left++;
                 }
             }
@@ -1173,7 +1178,7 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
             taken[ntaken][0] = pole[0]; taken[ntaken][1] = pole[1]; ntaken++;
             if (roam_ctx_owned(c, pole[0], pole[1])) {
                 em->sb = roam_ctx_sb_of(c, pole[0], pole[1]);
-                if (!fu_postlight(em, &at, 1.0, FU_SIG_GAP, base_y)) return 0;
+                if (!fu_postlight(em, &at, 1.0, FU_SIG_GAP, base_y, grp)) return 0;
                 st->post_left++;
             }
         }
@@ -1191,7 +1196,7 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
                 taken[ntaken][0] = pole[0]; taken[ntaken][1] = pole[1]; ntaken++;
                 if (roam_ctx_owned(c, pole[0], pole[1])) {
                     em->sb = roam_ctx_sb_of(c, pole[0], pole[1]);
-                    if (!fu_mastarm(em, &at, 1.0, FU_SIG_GAP, base_y, cf, cb)) return 0;
+                    if (!fu_mastarm(em, &at, 1.0, FU_SIG_GAP, base_y, cf, cb, grp)) return 0;
                     st->mast_far++;
                 }
             }

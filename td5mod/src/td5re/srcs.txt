@@ -46,6 +46,7 @@ td5_roam_race_wall.c
 td5_roam_lap.c
 td5_roam_race_drive.c
 td5_roam_ai.c
+td5_roam_traffic.c
 td5_geo_tiles.c
 td5_trackgen.c
 td5_tg_world.c

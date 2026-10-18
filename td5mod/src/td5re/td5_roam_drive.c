@@ -32,6 +32,9 @@
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
 #include "td5_roam_drive.h"
+#include "td5_race_state.h"       /* [F8] the other cars, for the traffic-aware drive */
+#include "td5_roam_traffic.h"
+#include "td5_roam_route.h"        /* [F8] td5_roam_route_snap_xz: the soak move */
 #include "td5_roam_stream.h"     /* [F3] pin the casco for the corner matrix; miss counters */
 #include "td5_roam_rebase.h"     /* [F9b] the route tour's world-frame memory follows a rebase */
 #include "td5_geo_roads.h"      /* TD5_GEO_RC_* */
@@ -106,6 +109,9 @@ typedef struct {
      * TD5RE_ROAM_SELFTEST_TOUR_SECS, then brake to rest. The streaming soak test. */
     double   tour_m;
     int      tour_secs, wp;
+    int      traffic;               /* [F8] ambient traffic is on: shoves are reported, not judged */
+    long     traffic_waits;         /* [F8] ticks the drive held back for a car ahead          */
+    int      soak_moves;            /* [F8] wedges the soak got out of by moving the car on    */
     long     wp_t;
     double   wp_x[4], wp_z[4];
     uint64_t cl_key;
@@ -587,6 +593,29 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
         if (tick - s_rv.rest_t >= 90) { s_rv.phase = 3; rv_finish("route done", 0); return 0; }
     }
 
+    /* [F8] with ambient traffic: a car ahead in the way -> lift off and brake (a queue at a red light is not a wedge) */
+    if (s_rv.traffic && s_rv.phase == 0 && s_rv.rev_t == 0 && (bits & TD5_INPUT_THROTTLE)) {
+        const double v_ms = kmh / 3.6;
+        int j, total = td5_game_get_total_actor_count(), blocked = 0;
+        for (j = 1; j < total && !blocked; j++) {
+            const TD5_Actor *b;
+            double f, l, bx, bz;
+            if (j < 6 && td5_game_get_slot_state(j) == 3) continue;
+            if (td5_roam_traffic_parked(j) == 1) continue;
+            b = td5_game_get_actor(j);
+            if (!b) continue;
+            bx = (double)FP_TRUNC(b->world_pos.x) - px; bz = (double)FP_TRUNC(b->world_pos.z) - pz;
+            f = (bx * hx + bz * hz) / RV_M;
+            l = (bx * hz - bz * hx) / RV_M;
+            if (f > 0.5 && f < 7.0 + v_ms * 1.4 && fabs(l) < 2.2) blocked = 1;
+        }
+        if (blocked) {
+            bits &= ~(uint32_t)TD5_INPUT_THROTTLE;
+            if (kmh > 3.0) bits |= (uint32_t)TD5_INPUT_BRAKE;
+            s_rv.traffic_waits++;
+        }
+    }
+
     /* A wedge: throttle held and < 3 km/h for 1.5 s -> reverse with the wheel turned away for 1.3 s, as a
      * driver would (counted as a retry, reported). STUCK is the spec metric: throttle held and < 5 km/h
      * for more than 3 s in a row, i.e. a wedge the retry did not free. */
@@ -612,6 +641,25 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
                 s_rv.retries_total++;
                 TD5_LOG_W(LOG_TAG, "[ROAMSELFTEST] wedge #%d at world (%.0f,%.0f) edge %016llx patch=%d after %d junctions: reversing",
                           s_rv.retries_total, px, pz, (unsigned long long)s_rv.ch.edge_key, (int)s_rv.ch.is_patch, s_rv.crossings);
+                if ((s_rv.retries_total > 8 || s_rv.stuck_events > 2) && s_rv.traffic && s_rv.tour_m > 0.0) {
+                    /* [F8] the traffic soak keeps its anchor moving: a wedge the retries did not free (the tour wedges
+                     * at the same corners without traffic too) puts the car 30 m on toward the tour corner, counted */
+                    const double wx = s_rv.wp_x[s_rv.wp & 3] - px, wz = s_rv.wp_z[s_rv.wp & 3] - pz;
+                    const double wl = sqrt(wx * wx + wz * wz);
+                    int32_t ox, oz;
+                    double sx, sz;
+                    td5_roam_world_origin(&ox, &oz);
+                    if (wl > 1.0 && td5_roam_route_snap_xz(px + ox + wx / wl * 30.0 * RV_M, pz + oz + wz / wl * 30.0 * RV_M, 80.0,
+                                                           &sx, &sz, NULL, NULL)) {
+                        const int yaw = (int)floor(atan2(wx, wz) * (4096.0 / (2.0 * RV_PI)) + 0.5) & 0xFFF;
+                        td5_roam_place_actor(0, a, (int32_t)floor(sx + 0.5), (int32_t)floor(sz + 0.5), yaw);
+                        s_rv.soak_moves++;
+                        TD5_LOG_W(LOG_TAG, "[ROAMSELFTEST] soak: wedged at (%.0f,%.0f), car put 30 m on (move #%d)", px, pz, s_rv.soak_moves);
+                        s_rv.retries_total = 0; s_rv.stuck_events = 0; s_rv.rev_t = 0; s_rv.slow_rt = 0; s_rv.stuck_t = 0;
+                        s_rv.have_last = 0; s_rv.on_path = 0;
+                        return 0;
+                    }
+                }
                 if (s_rv.retries_total > 8 || s_rv.stuck_events > 2) { rv_finish("wedged, retries exhausted", 1); return 0; }
                 s_rv.rev_t = 40;
             }
@@ -1012,6 +1060,17 @@ void td5_roam_drive_arm(int mode)
     s_rv.ch_hint = ROAM_PRIM_NONE;
 }
 
+/* [F8] the TOUR mode without the env knobs (the roam-traffic soak rows) */
+void td5_roam_drive_set_traffic(int on) { s_rv.traffic = on ? 1 : 0; }
+int  td5_roam_drive_soak_moves(void) { return s_rv.soak_moves; }
+
+void td5_roam_drive_set_tour(double side_m, int secs)
+{
+    s_rv.tour_m = side_m > 0.0 ? side_m : 0.0;
+    s_rv.tour_secs = secs > 30 ? secs : 30;
+    if (s_rv.tour_m > 0.0 && s_rv.max_secs < s_rv.tour_secs + 120) s_rv.max_secs = s_rv.tour_secs + 120;
+}
+
 void td5_roam_drive_disarm(void)
 {
     if (s_rv.rep) fclose(s_rv.rep);
@@ -1100,16 +1159,22 @@ int td5_roam_drive_verdict(char *note, size_t n)
         if (s_rv.below_n) RV_BAD("below surface %ld; ", s_rv.below_n);
         if (gap_min < -RV_WHEEL_BELOW_MAX_CM) RV_BAD("wheel %.1f cm under; ", -gap_min);
         if (st.rest_n == 0) RV_BAD("no rest sample; ");
-        else if (rest_max > RV_ABOVE_REST_MAX_CM) RV_BAD("rest %.1f cm above; ", rest_max);
-        if (s_rv.stuck_events) RV_BAD("stuck %ld; ", s_rv.stuck_events);
-        if (s_rv.off_n) RV_BAD("off surface %ld ticks; ", s_rv.off_n);
-        if (resc) RV_BAD("rescues %ld; ", resc);
+        else if (rest_max > RV_ABOVE_REST_MAX_CM && !s_rv.traffic) RV_BAD("rest %.1f cm above; ", rest_max);
+        /* [F8] with ambient traffic the scripted car (which ignores traffic) is shoved by it: being stuck behind /
+         * against a car, pushed off the surface (and rescued), or resting on a car's bumper are reported, not judged */
+        if (s_rv.stuck_events && !s_rv.traffic) RV_BAD("stuck %ld; ", s_rv.stuck_events);
+        if (s_rv.off_n && !s_rv.traffic) RV_BAD("off surface %ld ticks; ", s_rv.off_n);
+        if (resc && !s_rv.traffic) RV_BAD("rescues %ld; ", resc);
         if (st.pinches) RV_BAD("pinches %ld; ", st.pinches);
         if (st.teleports) RV_BAD("teleports %ld; ", st.teleports);
 #undef RV_BAD
         status = bad[0] ? 2 : 0;
         if (status)
             snprintf(note, n, "roam FAIL: %.100s", bad);
+        else if (s_rv.traffic)
+            snprintf(note, n, "drive %d jn %.1f km, %d moves, waits %ld, rest %+.1f cm stuck %ld off %ld resc %ld",
+                     s_rv.crossings, s_rv.dist_m / 1000.0, s_rv.soak_moves, s_rv.traffic_waits, rest_max, s_rv.stuck_events,
+                     s_rv.off_n, resc);
         else
             snprintf(note, n, "roam %d jn (%d distinct) %.1f km, snap %.0f m, rest %+.1f cm, below 0 stuck 0 resc 0 pinch 0 wedge %d",
                      s_rv.crossings, s_rv.distinct, s_rv.dist_m / 1000.0, td5_roam_spawn_snap_m(), rest_max, s_rv.retries_total);

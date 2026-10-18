@@ -78,7 +78,12 @@ typedef struct {
     double   ms, km;
     int      ntiles;
     int    (*tiles)[2];          /* [F9b] the tiles read, sorted (tx, tz): the region this graph covers */
+    struct RrSig *sig; int nsig; /* [F8] signalised clusters (SIGN records), sorted by key */
 } RrGraph;
+
+/* [F8] one signalised cluster: its arms in the tile's ARM order (the furniture's order) */
+#define RR_SIG_ARMS 16
+typedef struct RrSig { int64_t key; int narm; int16_t bear[RR_SIG_ARMS]; uint64_t ekey[RR_SIG_ARMS]; } RrSig;
 
 static RrGraph g;
 
@@ -113,6 +118,11 @@ static int rr_cmp_i64(const void *a, const void *b)
 static int rr_cmp_cent(const void *a, const void *b)
 {
     const RrCent *x = (const RrCent *)a, *y = (const RrCent *)b;
+    return x->key < y->key ? -1 : (x->key > y->key ? 1 : 0);
+}
+static int rr_cmp_sig(const void *a, const void *b)
+{
+    const RrSig *x = (const RrSig *)a, *y = (const RrSig *)b;
     return x->key < y->key ? -1 : (x->key > y->key ? 1 : 0);
 }
 static int rr_cmp_cs(const void *a, const void *b)
@@ -152,6 +162,7 @@ static void rr_graph_free(RrGraph *gp)
 {
     free(gp->edge); free(gp->node); free(gp->inc); free(gp->pt); free(gp->cum); free(gp->seg_edge); free(gp->cs);
     free(gp->tiles);
+    free(gp->sig);
     memset(gp, 0, sizeof *gp);
 }
 
@@ -180,6 +191,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
     RrVec runs = { NULL, 0, 0, sizeof(RrRun) };
     RrVec pts  = { NULL, 0, 0, sizeof(int32_t) };
     RrVec cents = { NULL, 0, 0, sizeof(RrCent) };
+    RrVec sigs  = { NULL, 0, 0, sizeof(RrSig) };    /* [F8] */
     int i, e;
     const uint32_t t0 = td5_plat_time_ms();
     int64_t *keys = NULL;
@@ -234,6 +246,30 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
                 *pp = t.org_x + sp->origin_x + (int32_t)floor(cx + 0.5);
                 pp = (int32_t *)rr_vec_add(&pts); if (!pp) goto oom;
                 *pp = t.org_z + sp->origin_z + (int32_t)floor(cz + 0.5);
+            }
+        }
+        /* [F8] signalised clusters: the SIGN records' clusters with their ARM bearings (traffic) */
+        for (k = 0; k < t.nsign; k++) {
+            const int64_t sk = t.sign[k].cluster_key;
+            uint32_t q, j;
+            if (k > 0 && t.sign[k - 1].cluster_key == sk) continue;
+            for (j = 0; j < k; j++) if (t.sign[j].cluster_key == sk) break;
+            if (j < k) continue;
+            for (q = 0; q < t.nnode; q++) {
+                const RoamNodeRec *nr = &t.node[q];
+                RrSig *sg;
+                int a;
+                if (nr->cluster_key != sk) continue;
+                sg = (RrSig *)rr_vec_add(&sigs);
+                if (!sg) goto oom;
+                sg->key = sk;
+                sg->narm = nr->narm > RR_SIG_ARMS ? RR_SIG_ARMS : (int)nr->narm;
+                for (a = 0; a < sg->narm; a++) {
+                    if ((uint32_t)nr->arm_first + (uint32_t)a >= t.narm) { sg->narm = a; break; }
+                    sg->bear[a] = t.arm[nr->arm_first + (uint32_t)a].bearing12;
+                    sg->ekey[a] = t.arm[nr->arm_first + (uint32_t)a].edge_key;
+                }
+                break;
             }
         }
         for (k = 0; k < t.nnode; k++) {
@@ -388,19 +424,28 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
         gp->cs = (RrCellSeg *)cs.p; gp->ncs = cs.n;
     }
 
+    if (sigs.n > 0) {
+        RrSig *S = (RrSig *)sigs.p;
+        int u = 0;
+        qsort(S, (size_t)sigs.n, sizeof(RrSig), rr_cmp_sig);
+        for (i = 0; i < sigs.n; i++) if (i == 0 || S[i].key != S[u - 1].key) S[u++] = S[i];
+        gp->sig = S; gp->nsig = u;
+        sigs.p = NULL;
+    }
     free(keys); free(runs.p); free(pts.p); free(cents.p);
     snprintf(gp->place, sizeof gp->place, "%s", place);
     gp->ms = (double)(td5_plat_time_ms() - t0);
     gp->ready = 1;
     TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: place=%s tiles=%d edges=%d nodes=%d segments=%d road=%.1f km built in %.0f ms "
-              "(read %u, merge %u, nodes %u, grid %u)",
+              "(read %u, merge %u, nodes %u, grid %u) signal clusters=%d",
               place, ntiles, gp->nedge, gp->nnode, gp->ncs, gp->km, gp->ms, (unsigned)t_read, (unsigned)(t_merge - t_read),
-              (unsigned)(t_nodes - t_merge), (unsigned)((uint32_t)gp->ms - t_nodes));
+              (unsigned)(t_nodes - t_merge), (unsigned)((uint32_t)gp->ms - t_nodes), gp->nsig);
     return 1;
 
 oom:
     TD5_LOG_E(LOG_TAG, "ROUTE_GRAPH: out of memory");
 fail:
+    free(sigs.p);
     free(keys); free(runs.p); free(pts.p); free(cents.p);
     rr_graph_free(gp);
     return 0;
@@ -825,6 +870,10 @@ static struct {
     long       gen;
     int        hash_check, have_hash;     /* a loaded route whose stored hash is judged once it plans */
     uint32_t   want_hash;
+    /* [F9b x F8] the previous generation's edge / node keys by index: an index a consumer (traffic) kept from
+     * generation gen - 1 is translated through its key */
+    uint64_t  *prev_ekey; int prev_ne;
+    int64_t   *prev_nkey; int prev_nn;
 } rg;
 
 static int  rr_wp_snap(TD5_RouteWp *w);
@@ -1068,6 +1117,16 @@ static void rr_region_swap(void)
     if (!rg.next_ready) return;
     rg.next_ready = 0;
     if (!rg.next.ready) { rr_graph_free(&rg.next); return; }
+    {   /* [F9b x F8] keep the outgoing generation's keys for td5_roam_route_graph_remap_* */
+        int k;
+        free(rg.prev_ekey); free(rg.prev_nkey);
+        rg.prev_ekey = g.nedge > 0 ? (uint64_t *)malloc((size_t)g.nedge * sizeof(uint64_t)) : NULL;
+        rg.prev_nkey = g.nnode > 0 ? (int64_t *)malloc((size_t)g.nnode * sizeof(int64_t)) : NULL;
+        rg.prev_ne = rg.prev_ekey ? g.nedge : 0;
+        rg.prev_nn = rg.prev_nkey ? g.nnode : 0;
+        for (k = 0; k < rg.prev_ne; k++) rg.prev_ekey[k] = g.edge[k].key;
+        for (k = 0; k < rg.prev_nn; k++) rg.prev_nkey[k] = g.node[k].key;
+    }
     rr_graph_free(&g);
     g = rg.next;
     memset(&rg.next, 0, sizeof rg.next);
@@ -1119,6 +1178,32 @@ void td5_roam_route_graph_begin_async(const char *place)
 int  td5_roam_route_graph_building(void) { return rg.building != 0; }
 long td5_roam_route_graph_gen(void) { return rg.gen; }
 int  td5_roam_route_graph_pending(void) { return rg.queued; }
+
+/* [F9b x F8] An edge / node index of generation from_gen in the current graph: -1 when that key is not in it
+ * (or the index was -1), -2 when from_gen is not the previous generation (the caller re-resolves by position). */
+int td5_roam_route_graph_remap_edge(long from_gen, int e)
+{
+    int lo = 0, hi = g.nedge - 1;
+    uint64_t key;
+    if (from_gen == rg.gen) return e;
+    if (from_gen != rg.gen - 1) return -2;
+    if (e < 0 || e >= rg.prev_ne) return -1;
+    key = rg.prev_ekey[e];
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (g.edge[mid].key == key) return mid;
+        if (g.edge[mid].key < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+int td5_roam_route_graph_remap_node(long from_gen, int n)
+{
+    if (from_gen == rg.gen) return n;
+    if (from_gen != rg.gen - 1) return -2;
+    if (n < 0 || n >= rg.prev_nn) return -1;
+    return rr_find_node(rg.prev_nkey[n]);
+}
 int  td5_roam_route_graph_settled(void)
 {
     return g.ready && rg.queued == 0 && !rg.building && !rg.next_ready && rr_region_matches_graph();
@@ -1132,6 +1217,7 @@ void td5_roam_route_graph_free(void)
     rg.next_ready = 0;
     free(rg.t); rg.t = NULL; rg.n = rg.cap = 0;
     free(rg.blist); rg.blist = NULL; rg.nb = 0;
+    free(rg.prev_ekey); free(rg.prev_nkey); rg.prev_ekey = NULL; rg.prev_nkey = NULL; rg.prev_ne = rg.prev_nn = 0;
     rg.key = 0;
     rg.hash_check = 0;
 }
@@ -1784,3 +1870,66 @@ int td5_roam_route_dev_test(void)
     return 1;
 }
 #endif
+
+/* ============================================================ [F8] graph view ===
+ * Read-only access to the planner graph for the ambient traffic (td5_roam_traffic.c): the
+ * same directed street graph the A* walks, one-way included. Pointers stay valid until the
+ * graph is freed (session end). */
+
+int td5_roam_route_graph_nedge(void) { return g.ready ? g.nedge : 0; }
+int td5_roam_route_graph_nnode(void) { return g.ready ? g.nnode : 0; }
+
+int td5_roam_route_graph_edge_view(int e, TD5_RouteGEdge *out)
+{
+    const RrEdge *ed;
+    if (!g.ready || e < 0 || e >= g.nedge || !out) return 0;
+    ed = &g.edge[e];
+    out->key = ed->key;
+    out->node[0] = ed->node[0]; out->node[1] = ed->node[1];
+    out->pt = g.pt + 2 * ed->pt0;
+    out->cum = g.cum + ed->pt0;
+    out->npt = ed->npt;
+    out->plen = ed->plen;
+    out->oneway = ed->oneway;
+    out->klass = ed->klass; out->lanes = ed->lanes; out->flags = ed->flags;
+    return 1;
+}
+
+int td5_roam_route_graph_node_view(int n, TD5_RouteGNode *out)
+{
+    const RrNode *nd;
+    if (!g.ready || n < 0 || n >= g.nnode || !out) return 0;
+    nd = &g.node[n];
+    out->key = nd->key; out->x = nd->x; out->z = nd->z;
+    out->inc = g.inc + nd->first; out->ninc = nd->ninc;
+    return 1;
+}
+
+int td5_roam_route_graph_snap_edge(double px, double pz, double max_m, int *edge, double *along, double *dist_m)
+{
+    RrSnap s;
+    if (!rr_snap(px, pz, max_m, &s)) return 0;
+    if (edge) *edge = s.edge;
+    if (along) *along = s.along;
+    if (dist_m) *dist_m = s.d / RR_UPM;
+    return 1;
+}
+
+int td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int cap)
+{
+    int lo = 0, hi = g.nsig - 1;
+    if (!g.ready) return 0;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (g.sig[mid].key == key) {
+            const RrSig *sg = &g.sig[mid];
+            int a, n = sg->narm < cap ? sg->narm : cap;
+            for (a = 0; a < n; a++) { if (bear) bear[a] = sg->bear[a]; if (ekey) ekey[a] = sg->ekey[a]; }
+            return n > 0 ? n : 1;          /* signalised even with no arm record */
+        }
+        if (g.sig[mid].key < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
+int td5_roam_route_graph_nsignal(void) { return g.ready ? g.nsig : 0; }
