@@ -46,6 +46,7 @@
 #include "td5_roam_traffic.h"
 #include "td5_roam_cops.h"      /* [F10] the cop slots end with the session */
 #include "td5_roam_route_ui.h"  /* [F8b] the planner session ends with the roam session */
+#include "td5_roam_handoff.h"   /* [F11a] a frontend route handed to the session ends with it */
 
 #define LOG_TAG "roam"
 
@@ -269,6 +270,7 @@ void td5_roam_end(void)
     td5_roam_traffic_session_end();     /* [F8] the traffic pool stops answering for its slots */
     td5_roam_cops_session_end();        /* [F10] the cop slots too (and their g_cop_is_cop marks go) */
     td5_roam_route_ui_session_end();    /* [F8b] the route, its type + laps and the planner graph end with the session */
+    td5_roam_handoff_clear();           /* [F11a] a route the frontend handed over and the session never planted */
 }
 
 void td5_roam_cancel(void) { td5_roam_end(); }

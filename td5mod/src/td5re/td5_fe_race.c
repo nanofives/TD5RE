@@ -45,6 +45,8 @@
 #include "td5_frontend_internal.h"
 #include "td5_geo.h"
 #include "td5_roam_mode.h"   /* [GEO FREE ROAM F2-A] FREE ROAM car-select entry / launch */
+#include "td5_roam_route.h"  /* [F11a] TD5_ROUTE_MAX_WP / TD5_ROUTE_SPRINT */
+#include "td5_roam_handoff.h" /* [F11a] the GEOSPATIAL entry races in the city */
 #include "td5_geo_buildings.h"
 
 /* [CUP TRACK SELECT 2026-06-25] knob helper — defined just before
@@ -738,6 +740,64 @@ void frontend_roam_prepare_car_select(void) {
     s_num_human_players  = 1;
     ConfigureGameTypeFlags();
     s_return_screen      = -1;
+}
+
+/* [GEO FREE ROAM F11a] The GEOSPATIAL entry (Quick Race, or SELECT TRACK in a single race) now
+ * races IN THE CITY: arm a roam session at the route's START and hand the route over with AUTOSTART,
+ * so the race begins on the street once the city's planner has it (td5_roam_handoff.h). The route is
+ * the geo map's pins when it holds some, else the place's last city race (routes/geo_map.json), else
+ * the last strip BUILD's _route/ROUTE_RAW.JSON. Opponents / traffic / cops follow the menus that
+ * launched it (roam: at most 5 opponents, traffic OFF / LOW / HIGH).
+ *
+ * Not taken (the strip race runs, as before): TD5RE_GEO_STRIP_BUILD=1, more than one human (roam is
+ * single player: the split-screen blocker in F11_PARITY.md), a network session, a cup / time trial /
+ * cop chase / drag type, or no route that can be raced in the city. Returns 1 when armed, with
+ * s_selected_track moved to the roam host level. */
+int frontend_geo_entry_launch_roam(int opponents)
+{
+    double ll[TD5_ROUTE_MAX_WP][2];
+    char src[512] = "the geo map";
+    TD5_RoamSpawn sp;
+    int n, gi, traffic;
+    const char *slug;
+    if (td5_roam_strip_build_enabled() || !td5_trackgen_is_geo_slot(s_selected_track)) return 0;
+    if (s_num_human_players != 1 || s_network_active || s_mp_flow || s_two_player_mode ||
+        s_selected_game_type != 0) {
+        TD5_LOG_I(LOG_TAG, "geo entry: strip race (humans=%d net=%d mp=%d type=%d: the city race is single player)",
+                  s_num_human_players, s_network_active, s_mp_flow, s_selected_game_type);
+        return 0;
+    }
+    n = frontend_geo_generator_points(ll, TD5_ROUTE_MAX_WP + 1);
+    if (n < 2 || n > TD5_ROUTE_MAX_WP) {
+        gi = td5_trackgen_geo_index_for_slot(s_selected_track);
+        slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
+        n = slug ? td5_roam_handoff_last_route(slug, ll, TD5_ROUTE_MAX_WP, src, sizeof src) : 0;
+    }
+    if (n < 2) {
+        TD5_LOG_W(LOG_TAG, "geo entry: no route to race in the city (geo map empty, no saved city race, no ROUTE_RAW.JSON)");
+        return 0;
+    }
+    memset(&sp, 0, sizeof sp);
+    if (!td5_roam_place_for_latlon(ll[0][0], ll[0][1], sp.place, sizeof sp.place, &sp.spawn_px, &sp.spawn_pz)) {
+        TD5_LOG_W(LOG_TAG, "geo entry: START %.5f,%.5f is outside every city map: strip race", ll[0][0], ll[0][1]);
+        return 0;
+    }
+    sp.spawn_yaw = -1;
+    sp.car_index = frontend_current_car_index();
+    traffic = g_td5.traffic_volume >= 2 ? 2 : (g_td5.traffic_volume == 1 || g_td5.traffic_enabled) ? 1 : 0;
+    if (!g_td5.traffic_enabled) traffic = 0;
+    td5_roam_begin(&sp);
+    if (!td5_roam_handoff_set((const double (*)[2])ll, n, TD5_ROUTE_SPRINT, 1, TD5_HANDOFF_AUTOSTART,
+                              opponents < 0 ? -1 : (opponents > 5 ? 5 : opponents), traffic,
+                              g_td5.special_encounter_enabled ? 1 : 0)) {
+        td5_roam_cancel();
+        return 0;
+    }
+    s_selected_track = td5_roam_host_track();
+    TD5_LOG_I(LOG_TAG, "geo entry: RACE IN THE CITY %d point(s) from %s at %.5f,%.5f (%s), car=%d opponents=%d "
+              "traffic=%d cops=%d -> host track %d", n, src, ll[0][0], ll[0][1], sp.place, sp.car_index,
+              opponents, traffic, g_td5.special_encounter_enabled ? 1 : 0, s_selected_track);
+    return 1;
 }
 
 /* [ROUND 1026 L] The ONE geo slot the track selectors list as the GEOSPATIAL
@@ -1736,6 +1796,9 @@ void Screen_QuickRaceMenu(void) {
                      * Game Options' OK, which no longer owns this setting). */
                     g_td5.ini.laps = s_game_option_laps;
                     td5_ini_persist_options();
+                    /* [F11a] the GEOSPATIAL entry races in the city (no-op otherwise) */
+                    if (frontend_geo_entry_launch_roam(s_num_ai_opponents))
+                        g_td5.reverse_direction = 0;
                     TD5_LOG_I(LOG_TAG,
                               "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d",
                               s_selected_track, s_track_direction ? "Backwards" : "Forwards",
@@ -9971,6 +10034,7 @@ void Screen_TrackSelection(void) {
             /* Network: create session and go to lobby */
             td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
         } else if (s_return_screen == -1) {
+            (void)frontend_geo_entry_launch_roam(s_num_ai_opponents);   /* [F11a] GEOSPATIAL: race in the city */
             frontend_init_race_schedule();
             frontend_init_display_mode_state();
         } else {
