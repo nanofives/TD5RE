@@ -35,7 +35,7 @@ Verdicts: **parity**, **roam better**, **roam missing (BLOCKER)**, **roam missin
 | AI quality | normal TD5 AI on the strip; fork harness PASS on F=89 / F=790, 0 stall / spin / jam [R round 1028 S]. **No finish rate or lap time on a geo track exists anywhere** | 5/5 finish, 0 stuck on the 3.11 km roam-sprint-ai; 3 AI x 3 laps of 1.5 km, laps 109.96 / 109.50 / 109.53 s, 0 respawns [R F8c]. 7.48 km route: 3 and 5 opponents started and raced [M], finish NV (runs were 30 s) | roam measured, strip not: like-for-like NV. Opponents: roam 5 max vs strip up to 9 (roam missing, minor) |
 | Traffic | standard TRAFFIC option, not geo-aware (lanes / turns NV on level091) [S] | lane follower on the graph, turns at junctions, obeys signals, OFF / LOW / HIGH per race, 12-14 cars live in a 10-min soak, 0 off-surface [R F8] | roam better |
 | Cops | POLICE option / Cop Chase not gated on geo, NV on level091 [S] | patrol, pursuit, heat 1..5, bust; race COPS row, default OFF [R F10] | parity (roam has no Cop Chase *mode*, see modes) |
-| **Load time to first frame, same 7.48 km route** | Quick Race GEOSPATIAL with `TD5RE_GEO_STRIP_BUILD=1`, fresh level091: generation 3.7 s, ready in **3814 ms**, then the grid is held **11.15 s** waiting for scenery (1539 frames) before the 3-2-1 [M `out/qr_strip`, `hold_time.py`] | Quick Race GEOSPATIAL (city): first frame **3076 ms** after the session began, route planted 178 ms later, race started **288 ms** after the first frame [M `out/qr_city`]. Geo map RACE ROUTE (cold planner graph): first frame 3711 ms [M `out/geo_race`] | **roam better**: ~3.4 s vs ~15 s to the countdown |
+| **Load time to first frame, same 7.48 km route** | Quick Race GEOSPATIAL with `TD5RE_GEO_STRIP_BUILD=1`, fresh level091: generation 3.7 s, ready in **3814 ms**, then the grid is held **11.15 s** waiting for scenery (1539 frames) before the 3-2-1 [M `out/qr_strip`, `hold_time.py`] | Quick Race GEOSPATIAL (city): first frame **3076 ms** after the session began, route planted 178 ms later, race started **288 ms** after the first frame [M `out/qr_city`]. Geo map RACE ROUTE: first frame 3711 ms [M `out/geo_race`]; SELECT TRACK GEOSPATIAL right after the gates rebuilt level091: first frame 6523 ms, race started 768 ms later [M `out/trksel_city`]. So 3.1-6.5 s to the first frame across 3 runs | **roam better**: ~3.4 s vs ~15 s to the countdown |
 | Laps / circuits | none: a geo route is always point-to-point (`circuit=0`, td5_trackgen.c ~5054) [S] | SPRINT / CIRCUIT, laps 1..10 on the setup panel [S][R F9a] | roam better |
 | Saved routes | one ROUTE.JSON per place, overwritten by every BUILD [S] | by name in routes/, list / load / delete, MAP CHANGED check, best time + best lap per route. F11a saves every handed-over route as `geo_map` [M] | roam better |
 | Netplay | GEOSPATIAL entry never listed in a network lobby (td5_fe_race.c ~784) [S] | forced off [S] | parity (both missing) |
@@ -46,7 +46,7 @@ Verdicts: **parity**, **roam better**, **roam missing (BLOCKER)**, **roam missin
 | Minimap | geo streets + labels | own street map + the route [S]; cop markers open | parity |
 | Results / best times | normal results screen, no high scores for geo | own results panel, splits, best per route [S] | roam better |
 | Selftest / identity coverage | **0 selftest rows** on a geo track; the level091 identity gate (`verify/geo_tags_identity.ps1 -Arm geo`) and the fork harness are the only nets | 15 roam rows (smoke: roam, roam-sprint-smoke, roam-sprint-ai-smoke, roam-circuit-smoke, roam-traffic-smoke, roam-cops-smoke; full: roam-corners, roam-sprint, roam-sprint-ai, roam-circuit, roam-traffic, roam-sprint-traffic, roam-cops, roam-ram, roam-partido) [S] | roam better. The level091 gate keeps running with `TD5RE_GEO_STRIP_BUILD=1` |
-| Quick Race / SELECT TRACK entry | GEOSPATIAL entry + SETTINGS chip (opens the geo map) | F11a: the same entry launches the city race (1 human); the geo map's RACE ROUTE [M] | parity after F11a |
+| Quick Race / SELECT TRACK entry | GEOSPATIAL entry + SETTINGS chip (opens the geo map) | F11a: the same entry launches the city race (1 human): Quick Race [M `out/qr_city`, 5 AI], SELECT TRACK [M `out/trksel_city`, 5 AI]; the geo map's RACE ROUTE [M `out/geo_race`, 3 AI]. With `TD5RE_GEO_STRIP_BUILD=1` Quick Race's entry runs the strip race again [M `out/qr_strip`]. 2+ humans fall back to the strip by code (`frontend_geo_entry_launch_roam`), not run | parity after F11a |
 | Places | any registered geo place | needs `roam/ROAMGRID.JSON` + tiles; only la_plata_partido has them [S] | roam missing (minor): build tiles per place |
 | Force feedback / damage | normal | not gated (NV); every roam row runs with damage off; softer crash threshold in roam (F8e) | NV |
 
@@ -79,3 +79,11 @@ Verdicts: **parity**, **roam better**, **roam missing (BLOCKER)**, **roam missin
    entry once the BUILD code is deleted?
 3. Minor gaps worth closing before F11b: 24 vs 32 pins, 5 vs 9 opponents,
    weather, replays, Cop Chase / time trial on a real city, flora (F4d).
+
+## Gates run for F11a
+
+- level091, `-Seed 2054677019`, `TD5RE_GEO_STRIP_BUILD=1`, new exe vs `td5re_base.exe` (f5940f1c):
+  `verify/geo_level_identity.py` says **bytes IDENTICAL** (MODELS md5 A874E2E0..., sha256
+  EB199B9E...; STRIP md5 97C89979...; TEXTURES md5 2290C475...) [M `id_geo.txt`].
+- Synthetic level090 (SELECTED.TXT aside), base vs new: **bytes IDENTICAL**, MODELS sha256
+  E2F1F33C221D61CAB0EFF701484011F0 [M `id_syn.txt`].
