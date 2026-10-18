@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 18 (free roam route fix)" },
+    { CL_ITEM,    "Free roam: leaving free roam now ends the planned route." },
+    { CL_ITEM,    "  The next session starts with no route and as a SPRINT:" },
+    { CL_ITEM,    "  a circuit and its laps no longer carry over into it" },
+    { CL_ITEM,    "  (a sprint was raced as 3 laps of a loop). Saved" },
+    { CL_ITEM,    "  routes are kept: load them with L in the route map." },
     { CL_DATE,    "October 18 (free roam circuits)" },
     { CL_ITEM,    "Free roam circuits: in the route map T switches" },
     { CL_ITEM,    "  SPRINT / CIRCUIT and [ ] set 1 to 10 laps (also in the" },

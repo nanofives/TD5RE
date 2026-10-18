@@ -848,8 +848,12 @@ static void ra_drive(RaCar *c, int hold)
         if ((c->slow_t > 40 || (abs(herr) > 0x4E0 && v < 2.0 && c->cool_t == 0)) && c->cool_t == 0) {
             c->rec = 1; c->rec_t = 0; c->slow_t = 0;
             c->recoveries++; A.stats.recoveries++;
-            TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d recovery %ld at %.0f m along (herr %d, %.1f km/h): reverse",
-                      c->slot, c->recoveries, c->along, herr, v * 3.6);
+            {   /* [F8b] where, and the nearest traffic car (a wedge against traffic or against the street?) */
+                double td = -1.0;
+                const int ts = td5_roam_traffic_nearest(a->world_pos.x, a->world_pos.z, &td, NULL);
+                TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d recovery %ld at %.0f m along (herr %d, %.1f km/h): reverse | place (%.0f,%.0f) "
+                          "nearest traffic slot %d at %.1f m", c->slot, c->recoveries, c->along, herr, v * 3.6, x, z, ts, td);
+            }
         }
     }
     if (c->rec == 1) {
