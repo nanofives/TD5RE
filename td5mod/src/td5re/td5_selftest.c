@@ -65,6 +65,7 @@
 #include "td5_roam_drive.h"  /* [roam F2-D] scripted drive + verdict */
 #include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
 #include "td5_roam_physics.h" /* [roam F9a] the roam provider's wheel / teleport counters for the invariant note */
+#include "td5_roam_traffic.h" /* [roam F8] `roam-traffic` rows: ambient traffic verdict */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
@@ -128,7 +129,8 @@ typedef enum {
      * only the leash: the junction tour is ~3 min of sim, the corner matrix ~160 runs of <= 20 s */
     ST_DEPTH_ROAM        = 4,
     ST_DEPTH_ROAM_CORNERS = 5,
-    ST_DEPTH_ROAM_SPRINT = 6     /* [roam F6-B] the sprint ends itself at the finish; leash only */
+    ST_DEPTH_ROAM_SPRINT = 6,    /* [roam F6-B] the sprint ends itself at the finish; leash only */
+    ST_DEPTH_ROAM_SOAK   = 7     /* [roam F8] the 10-min traffic soak ends itself; leash only */
 } StDepth;
 
 /* -1 (or -2 where -1 is meaningful) = keep the boot-time base value. */
@@ -215,7 +217,12 @@ typedef struct {
      *   4 = [F6-B] SPRINT, smoke: ~0.4 km on Diagonal 74, 1 wrong turn
      *   5 = [F7] SPRINT + 5 AI, full: ~3.1 km (START 580 m further south), no wrong turns; every
      *       opponent finishes, none stuck > 5 s, finish order + gaps in the note
-     *   6 = [F7] SPRINT + 5 AI, smoke: the smoke route with 5 opponents */
+     *   6 = [F7] SPRINT + 5 AI, smoke: the smoke route with 5 opponents
+     *   7 = [F8] TRAFFIC SOAK, full: the junction tour driven as a 2.4 km square (F3-B soak) for 600 s with ambient
+     *       traffic: density held, 0 traffic off the surface (racer contacts excepted), 0 stuck > 10 s
+     *       left on the road, private bytes flat, red-light violations counted (WARN when > 0)
+     *   8 = [F8] TRAFFIC SOAK, smoke: the same for 90 s
+     *   9 = [F8] SPRINT + 5 AI + traffic HIGH, smoke route: the sprint still finishes, traffic on the road */
     int roam;
 } RaceScenario;
 
@@ -293,6 +300,11 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=8, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F8] smoke tier: 90 s of free roam with ambient traffic (the tour as a square round the spawn) */
+    { .name="roam-traffic-smoke",    .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=11, .depth=ST_DEPTH_ROAM_SOAK },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -440,6 +452,16 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=7, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F8] the 10-minute free-roam traffic soak (full suite only) */
+    { .name="roam-traffic",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=10, .depth=ST_DEPTH_ROAM_SOAK },
+    /* [roam F8] the smoke sprint with 5 AI and traffic HIGH (full suite only): it still finishes */
+    { .name="roam-sprint-traffic",   .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=12, .depth=ST_DEPTH_ROAM_SPRINT },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -460,7 +482,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 9   /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke */
+#define ST_SMOKE_RACES 10  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-traffic-smoke */
 
 typedef struct {
     const char *name;
@@ -807,6 +829,7 @@ static struct {
     int       peak_air;                       /* max airborne_frame_counter (any slot) */
     long long peak_speed;                     /* max |longitudinal_speed| raw (8.8) */
     long long peak_jump;                      /* max per-sample |pos delta| raw (24.8) */
+    int       peak_jump_slot;                 /* [roam F8] which slot made it */
     int       peak_span;                      /* max driven-slot folded track span (drag-trim check) */
 } s_inv;
 
@@ -818,6 +841,10 @@ static int  s_roam_captured;
 static int  s_roam_status;
 static char s_roam_note[120];
 
+/* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
+static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12; }  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic */
+static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
+
 static void st_roam_arm(const RaceScenario *sc)
 {
     g_td5.ini.auto_throttle = 0;                 /* slot 0 is a human: the scripted bits are the only input */
@@ -826,11 +853,14 @@ static void st_roam_arm(const RaceScenario *sc)
     s_roam_captured = 0;
     s_roam_status = ST_PASS;
     s_roam_note[0] = 0;
-    if (sc->roam >= 3) {
+    /* [roam F8] traffic: the knob density in free roam, HIGH in the traffic sprint row, the setup's otherwise */
+    td5_roam_traffic_force_density(-1);
+    td5_roam_traffic_force_race_level(sc->roam == 12 ? 2 : -1);
+    if (st_roam_is_sprint(sc->roam)) {
         /* [roam F6-B] sprint rows: spawn at the scripted route's START, the sprint test drives */
         double ll[8][2];
         const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : sc->roam == 5 ? TD5_RSPRINT_FULL_AI
-                       : sc->roam == 6 ? TD5_RSPRINT_SMOKE_AI : sc->roam == 7 ? TD5_RCIRCUIT_FULL
+                       : (sc->roam == 6 || sc->roam == 12) ? TD5_RSPRINT_SMOKE_AI : sc->roam == 7 ? TD5_RCIRCUIT_FULL
                        : sc->roam == 8 ? TD5_RCIRCUIT_SMOKE : TD5_RSPRINT_FULL;
         td5_roam_sprint_route_waypoints(mode, ll, 8);
         td5_roam_sprint_test_arm(mode);
@@ -842,6 +872,11 @@ static void st_roam_arm(const RaceScenario *sc)
         return;
     }
     td5_roam_drive_arm(sc->roam == 2 ? TD5_RDRV_CORNERS : TD5_RDRV_ROUTE);
+    if (sc->roam == 10 || sc->roam == 11)   /* [roam F8] the soak: a 2.4 km square round the spawn (F3-B soak) */
+    {
+        td5_roam_drive_set_tour(2400.0, td5_env_int("TD5RE_SELFTEST_ROAM_TRAFFIC_SECS", sc->roam == 10 ? 600 : 90, 30, 7200));
+        td5_roam_drive_set_traffic(1);
+    }
     if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
         s_roam_captured = 1;
         s_roam_status = ST_FAIL;
@@ -853,6 +888,8 @@ static void st_roam_disarm(void)
 {
     td5_roam_drive_disarm();
     td5_roam_sprint_test_disarm();    /* [roam F6-B] */
+    td5_roam_traffic_force_density(-1);       /* [roam F8] */
+    td5_roam_traffic_force_race_level(-1);
     td5_roam_cancel();
     s_roam_row = 0;
 }
@@ -861,14 +898,24 @@ static void st_roam_capture(void)
 {
     if (s_roam_captured) return;
     s_roam_captured = 1;
-    s_roam_status = s_roam_row >= 3 ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
-                                    : td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
+    s_roam_status = st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
+                                                  : td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
+    if (st_roam_has_traffic(s_roam_row)) {
+        /* [roam F8] the traffic verdict first, the drive's / sprint's after it */
+        char tn[120], dn[120];
+        const int ts = td5_roam_traffic_verdict(tn, sizeof tn, s_roam_row == 12);
+        size_t q;
+        snprintf(dn, sizeof dn, "%s", s_roam_note);
+        for (q = 0; dn[q]; q++) if (dn[q] == '|') dn[q] = '/';   /* the report is a markdown table */
+        snprintf(s_roam_note, sizeof s_roam_note, "%.70s; %.47s", tn, dn);
+        if (ts > s_roam_status) s_roam_status = ts;
+    }
 }
 
 /* [roam F6-B] the running roam row's script has ended itself */
 static int st_roam_done(void)
 {
-    return s_roam_row >= 3 ? td5_roam_sprint_test_done() : td5_roam_drive_done();
+    return st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_done() : td5_roam_drive_done();
 }
 /* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);
  * s_inv_max_jump = the real teleport detector (per-sample position delta cap —
@@ -1102,11 +1149,27 @@ static void st_inv_sample(void)
     }
     n = td5_game_get_total_actor_count();
     if (n > ST_INV_MAX_SLOTS) n = ST_INV_MAX_SLOTS;
+    {   /* [roam F8] a roam sprint start / end places the field (grid, run-out): a placement, not a jump */
+        static int s_last_rrs = -1, s_last_moves = -1;
+        const int rrs = s_roam_row ? td5_roam_race_state() : -1;
+        const int mv = s_roam_row ? td5_roam_drive_soak_moves() : -1;     /* and the soak's own moves */
+        if (rrs != s_last_rrs || mv != s_last_moves) {
+            int q;
+            for (q = 0; q < ST_INV_MAX_SLOTS; q++) { s_inv.haspos[q] = 0; s_inv.moving[q] = 0; }
+            s_last_rrs = rrs;
+            s_last_moves = mv;
+        }
+    }
     for (slot = 0; slot < n; slot++) {
         TD5_Actor *a;
         long long px, py, pz, vx, vy, vz;
         int prog;
         if (td5_game_get_slot_state(slot) == 3) continue;   /* empty grid slot */
+        if (td5_roam_traffic_parked(slot) == 1) {           /* [roam F8] a parked traffic car: its next spawn is a placement */
+            s_inv.haspos[slot] = 0;
+            s_inv.moving[slot] = 0;
+            continue;
+        }
         a = td5_game_get_actor(slot);
         if (!a) continue;
         px = a->world_pos.x; py = a->world_pos.y; pz = a->world_pos.z;
@@ -1138,7 +1201,7 @@ static void st_inv_sample(void)
             long long mj = llabs(dx);
             if (llabs(dy) > mj) mj = llabs(dy);
             if (llabs(dz) > mj) mj = llabs(dz);
-            if (mj > s_inv.peak_jump) s_inv.peak_jump = mj;
+            if (mj > s_inv.peak_jump) { s_inv.peak_jump = mj; s_inv.peak_jump_slot = slot; }
             if (s_roam_row) {
                 /* metres per SIM tick: the sampler runs once per frame and the 8x rows run several ticks in one */
                 unsigned dt = (unsigned)g_td5.simulation_tick_counter - s_inv_roam_tick;
@@ -1219,8 +1282,8 @@ static int st_inv_result(char *note, size_t nsz)
         snprintf(s_inv.desc, sizeof(s_inv.desc), "roam step %.1f m/tick", s_inv_roam_step_max_m);
     } else if (s_inv.active && !s_roam_row && status < ST_WARN && (s_inv.peak_jump >> 8) > s_inv_warn_jump) {
         status = ST_WARN;
-        snprintf(s_inv.desc, sizeof(s_inv.desc), "peak jump %lld > %d",
-                 (long long)(s_inv.peak_jump >> 8), s_inv_warn_jump);
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "peak jump %lld > %d (slot %d)",
+                 (long long)(s_inv.peak_jump >> 8), s_inv_warn_jump, s_inv.peak_jump_slot);
     }
     /* Telemetry, recorded even on PASS: peak airborne frames, peak body speed
      * and peak per-tick position jump (both truncated 24.8/8.8 -> display), and
@@ -1258,6 +1321,8 @@ static int st_depth_ticks(int depth)
         return td5_env_int("TD5RE_SELFTEST_ROAM_TICKS", 14000, 3000, 100000);
     case ST_DEPTH_ROAM_CORNERS:
         return td5_env_int("TD5RE_SELFTEST_ROAM_CORNER_TICKS", 150000, 10000, 1000000);
+    case ST_DEPTH_ROAM_SOAK:      /* [roam F8] above the soak's own 600 s + rest */
+        return td5_env_int("TD5RE_SELFTEST_ROAM_SOAK_TICKS", 24000, 3000, 300000);
     case ST_DEPTH_ROAM_SPRINT:    /* [roam F6-B] above the sprint's own 480 s (smoke 150 s) cap */
         return td5_env_int("TD5RE_SELFTEST_ROAM_SPRINT_TICKS", 16000, 3000, 100000);
     default:
@@ -1280,9 +1345,14 @@ static RaceScenario s_iso[ST_MAX_ISO];
 static char         s_iso_name[ST_MAX_ISO][48];
 static int          s_iso_count;
 
+/* [roam F8] DEV: TD5RE_SELFTEST_ROWS="name,name" runs only those race rows (no screens) */
+static int s_row_map[ST_RACE_COUNT];
+static int s_row_map_on;
+
 static const RaceScenario *st_race_at(int step)
 {
-    return (step < s_n_races) ? &k_races[step] : &s_iso[step - s_n_races];
+    if (step < s_n_races) return &k_races[s_row_map_on ? s_row_map[step] : step];
+    return &s_iso[step - s_n_races];
 }
 
 static void st_iso_push(const RaceScenario *v, const char *bad, const char *axis)
@@ -2507,6 +2577,23 @@ void td5_selftest_boot(void)
 
     s_n_races   = g_td5.ini.selftest_suite ? ST_RACE_COUNT : ST_SMOKE_RACES;
     s_n_screens = g_td5.ini.selftest_suite ? ST_SCREEN_COUNT_FULL : ST_SMOKE_SCREENS;
+    {   /* [roam F8] DEV row filter */
+        const char *only = getenv("TD5RE_SELFTEST_ROWS");
+        s_row_map_on = 0;
+        if (only && only[0]) {
+            int i, n = 0;
+            for (i = 0; i < ST_RACE_COUNT; i++) {
+                const char *q = strstr(only, k_races[i].name);
+                const size_t ln = strlen(k_races[i].name);
+                while (q && !((q == only || q[-1] == ',') && (q[ln] == ',' || q[ln] == 0))) q = strstr(q + 1, k_races[i].name);
+                if (q) s_row_map[n++] = i;
+            }
+            s_row_map_on = 1;
+            s_n_races = n;
+            s_n_screens = 0;
+            TD5_LOG_W(LOG_TAG, "TD5RE_SELFTEST_ROWS=%s: %d race row(s), no screens", only, n);
+        }
+    }
 
     s_active = 1;
     s_phase  = PH_WAIT_FIRST_MENU;

@@ -734,7 +734,8 @@ void td5_roam_race_frame(void)
             if (ke(K_LEFT)) R.setup.opponents = R.setup.opponents <= 0 ? mx : R.setup.opponents - 1;
             else R.setup.opponents = R.setup.opponents >= mx ? 0 : R.setup.opponents + 1;
         } else if (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER)) {
-            if (R.cursor == ROW_TRAFFIC) R.setup.traffic = !R.setup.traffic;
+            /* [F8] traffic OFF / LOW / HIGH */
+            if (R.cursor == ROW_TRAFFIC) R.setup.traffic = ke(K_LEFT) ? (R.setup.traffic + 2) % 3 : (R.setup.traffic + 1) % 3;
             else if (R.cursor == ROW_COPS) R.setup.cops = !R.setup.cops;
             else if (ke(K_ENTER) && R.cursor == ROW_START) { td5_roam_race_start(&R.setup); break; }
             else if (ke(K_ENTER) && R.cursor == ROW_CANCEL) { R.state = TD5_RRACE_OFF; break; }
@@ -863,7 +864,7 @@ void td5_roam_race_draw_setup(void)
             if (mx > 0) snprintf(line, sizeof line, "%d   (UP TO %d)", n, mx);
             else snprintf(line, sizeof line, "0   (NO CARS LOADED)");
         }
-        else if (i == ROW_TRAFFIC) snprintf(line, sizeof line, "%s   (COMING WITH TRAFFIC)", R.setup.traffic ? "ON" : "OFF");
+        else if (i == ROW_TRAFFIC) snprintf(line, sizeof line, "%s", R.setup.traffic >= 2 ? "HIGH" : (R.setup.traffic == 1 ? "LOW" : "OFF"));
         else if (i == ROW_COPS) snprintf(line, sizeof line, "%s   (COMING WITH COPS)", R.setup.cops ? "ON" : "OFF");
         if (line[0]) tx(bx + 200.0f * S, y, line, col, 18.0f * S);
     }
@@ -1072,4 +1073,11 @@ void td5_roam_race_draw_hud(void)
     }
     qb_flush();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* [F8] the TRAFFIC row of the race in progress: 0 off / 1 low / 2 high */
+int td5_roam_race_traffic_level(void)
+{
+    const int t = R.res.setup_traffic;
+    return t < 0 ? 0 : (t > 2 ? 2 : t);
 }

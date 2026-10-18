@@ -96,6 +96,29 @@ int  td5_roam_route_graph_links(double minx, double minz, double maxx, double ma
 int  td5_roam_route_snap_xz(double px, double pz, double max_m, double *sx, double *sz,
                             uint64_t *edge_key, double *dist_m);
 
+/* [F8] read-only view of the planner graph (the ambient traffic's lane follower). An edge's
+ * polyline runs node[0] -> node[1] (the ribbon centre line, place frame int32 x,z pairs), cum[] the
+ * distance along it in units; oneway 0 two-way, +1 node[0]->node[1], -1 against. A node's inc[] holds
+ * edge*2 + end (end 0 = the edge's node[0] side). */
+typedef struct {
+    uint64_t key;
+    int      node[2];
+    const int32_t *pt; const double *cum; int npt;
+    double   plen;
+    int      oneway, klass, lanes, flags;
+} TD5_RouteGEdge;
+typedef struct { int64_t key; double x, z; const int *inc; int ninc; } TD5_RouteGNode;
+int  td5_roam_route_graph_nedge(void);
+int  td5_roam_route_graph_nnode(void);
+int  td5_roam_route_graph_edge_view(int e, TD5_RouteGEdge *out);
+int  td5_roam_route_graph_node_view(int n, TD5_RouteGNode *out);
+/* nearest edge to a PLACE point within max_m: edge index, units along it, metres moved. 1 on success */
+int  td5_roam_route_graph_snap_edge(double px, double pz, double max_m, int *edge, double *along, double *dist_m);
+/* signalised cluster `key` (a node key): its arms' bearings (ARM bearing12) and edge keys in the tile's
+ * ARM order, up to cap. Returns the arm count (>= 1), 0 when the cluster has no signal. */
+int  td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int cap);
+int  td5_roam_route_graph_nsignal(void);
+
 /* ---- the route (one per roam session) ---------------------------------------- */
 void td5_roam_route_reset(void);                     /* clear waypoints, result, undo */
 int  td5_roam_route_wp_count(void);

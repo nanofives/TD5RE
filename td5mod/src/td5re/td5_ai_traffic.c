@@ -21,6 +21,7 @@
 #include "td5_race_state.h"  /* read-only game queries (was td5_game.h) */
 #include "td5re.h"
 #include "td5_config.h"
+#include "td5_roam_traffic.h"   /* [GEO FREE ROAM F8] roam traffic answers parked / alpha for its pool */
 #include <string.h>
 #include <math.h>
 #include <limits.h>
@@ -2614,6 +2615,10 @@ int td5_ai_traffic_dynamic_active(void)
 
 int td5_ai_traffic_dynamic_parked(int slot)
 {
+    {   /* [GEO FREE ROAM F8] a roam session's traffic pool answers for its own slots */
+        const int r = td5_roam_traffic_parked(slot);
+        if (r >= 0) return r;
+    }
     if (!td5_ai_traffic_dynamic_active()) return 0;
     if (slot < g_traffic_slot_base ||
         slot >= g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS ||
@@ -2623,6 +2628,10 @@ int td5_ai_traffic_dynamic_parked(int slot)
 
 int td5_ai_traffic_get_draw_alpha(int slot)
 {
+    {   /* [GEO FREE ROAM F8] roam traffic fades in / out on its own */
+        const int r = td5_roam_traffic_alpha(slot);
+        if (r >= 0) return r;
+    }
     if (!td5_ai_traffic_dynamic_active()) return 255;
     if (slot < g_traffic_slot_base ||
         slot >= g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS ||
