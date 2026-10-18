@@ -821,7 +821,7 @@ static int frontend_geo_entry_prepare_strip(void)
         nc = td5_roam_handoff_read_waypoints(path, cur, FE_GEO_STRIP_PTS);
     same = (nc == n);
     for (i = 0; same && i < n; i++)
-        same = fabs(cur[i][0] - ll[i][0]) < 1e-9 && fabs(cur[i][1] - ll[i][1]) < 1e-9;
+        same = fabs(cur[i][0] - ll[i][0]) < 1e-7 && fabs(cur[i][1] - ll[i][1]) < 1e-7;
     if (same) {
         TD5_LOG_I(LOG_TAG, "geo entry: strip race on the committed route (%d pin(s) from %s, unchanged)", n, src);
         return 1;
@@ -7719,6 +7719,8 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     int show;
     if (s_selected_track < 0)
         show = 1;                                             /* random/unset: keep the row */
+    else if (td5_trackgen_is_geo_slot(s_selected_track))
+        show = 0;   /* [F11b] the city sprint or the point-to-point strip; no level09x LEVELINF needed */
     else if (td5_asset_td6_level_for_slot(s_selected_track) > 0)
         show = frontend_track_is_circuit(s_selected_track);   /* TD6: reliable finish-span */
     else

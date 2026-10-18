@@ -5140,8 +5140,9 @@ static int tg_host_put(const char *path, const unsigned char *b, size_t len)
 
 /* The roam LEVELINF.DAT: tg_emit_levelinf's layout with no strip behind it (point-to-point, no
  * checkpoints, no spans; roam zeroes those records anyway). Smoke, weather, sky animation and fog
- * are the strip's values, so the host's environment reads like a geo race's. */
-static int tg_emit_roam_host_levelinf(TG_Buf *out)
+ * are the strip's values, so the host's environment reads like a geo race's: `sky_anim` is the
+ * R21 SKY roll a strip build of the place publishes for its seed. */
+static int tg_emit_roam_host_levelinf(TG_Buf *out, int sky_anim)
 {
     int i;
     tg_put_u32(out, 0u);                         /* 0x00 track_type: point-to-point */
@@ -5153,7 +5154,7 @@ static int tg_emit_roam_host_levelinf(TG_Buf *out)
     tg_put_u32(out, 0);                          /* 0x30 traffic_enable */
     tg_put_zeros(out, 24);                       /* 0x34 density_pairs */
     tg_put_zeros(out, 8);                        /* 0x4C pad */
-    tg_put_u32(out, (unsigned)td5_env_int("TD5RE_AUTOTRACK_SKY_ANIM", 36, -1, 64));   /* 0x54 */
+    tg_put_u32(out, (unsigned)sky_anim);         /* 0x54 sky_animation_index */
     tg_put_u32(out, 0);                          /* 0x58 total_span_count */
     tg_put_u32(out, 0);                          /* 0x5C fog_enabled */
     tg_put_zeros(out, 4);                        /* 0x60 fog rgb + pad */
@@ -5163,12 +5164,16 @@ static int tg_emit_roam_host_levelinf(TG_Buf *out)
 /* [GEO FREE ROAM F11b] Make the roam host dir of `slot` current: TEXTURES.DAT + LEVELINF.DAT, rebuilt
  * from code every session (a few ms) and rewritten only when the bytes differ, so a page-knob change
  * reaches it and a fresh install needs nothing on disk. 1 = both files current. */
+static unsigned int tg_roam_seed(const char *slug);
+
 static int tg_roam_host_prepare(int slot)
 {
     char dir[384], path[448];
     TG_Buf tex, inf;
+    TD5_TgRolls rolls;
     int ok;
     if (!td5_trackgen_roam_host_dir(slot, dir, sizeof dir)) return 0;
+    td5_trackgen_resolve_rolls(tg_roam_seed(td5_geo_places_slug(td5_trackgen_geo_index_for_slot(slot))), &rolls);
     {   /* roam/ first: a place registered by a strip ROUTE.JSON may have no roam dir yet */
         char *sl = strrchr(dir, '/');
         if (sl) { *sl = '\0'; _mkdir(dir); *sl = '/'; }
@@ -5176,7 +5181,7 @@ static int tg_roam_host_prepare(int slot)
     }
     memset(&tex, 0, sizeof tex);
     memset(&inf, 0, sizeof inf);
-    ok = tg_emit_roam_host_textures(&tex) && tg_emit_roam_host_levelinf(&inf);
+    ok = tg_emit_roam_host_textures(&tex) && tg_emit_roam_host_levelinf(&inf, rolls.value[TD5_TG_ROLL_SKY]);
     if (ok) {
         snprintf(path, sizeof path, "%s/TEXTURES.DAT", dir);
         ok = tg_host_put(path, tex.b, tex.len);
