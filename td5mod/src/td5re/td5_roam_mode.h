@@ -49,7 +49,7 @@ void td5_roam_set_resident(const struct TD5_RoamResident *rs);   /* B registers 
 const TD5_RoamSpawn *td5_roam_spawn(void);                       /* the session spawn; NULL unless armed or active */
 
 /* per-slot roam street-piece id (side table, design 2.2 / F0b "span fields -1"):
- * 0 = none. Slots 0..31 (TD5_MAX_TOTAL_ACTORS). */
+ * 0 = none. Slots 0..39 ([F10] traffic 6..29 + the cops after it). */
 uint64_t td5_roam_slot_edge(int slot);
 void     td5_roam_set_slot_edge(int slot, uint64_t edge_key);
 

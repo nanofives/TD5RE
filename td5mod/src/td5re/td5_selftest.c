@@ -66,6 +66,7 @@
 #include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
 #include "td5_roam_physics.h" /* [roam F9a] the roam provider's wheel / teleport counters for the invariant note */
 #include "td5_roam_traffic.h" /* [roam F8] `roam-traffic` rows: ambient traffic verdict */
+#include "td5_roam_cops.h"    /* [roam F10] `roam-cops` rows: pursuit / escape / bust drive */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
@@ -305,6 +306,12 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=11, .depth=ST_DEPTH_ROAM_SOAK },
+    /* [roam F10] smoke tier: speed past a parked patrol -> pursuit -> escape by distance; pass a second one, stop ->
+     * bust, fine, back on the street (no ambient traffic) */
+    { .name="roam-cops-smoke",       .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=14, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -462,6 +469,11 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=12, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F10] the cops pursuit / escape / bust drive with ambient traffic on (full suite only) */
+    { .name="roam-cops",             .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=13, .depth=ST_DEPTH_ROAM_SPRINT },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -482,7 +494,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 10  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-traffic-smoke */
+#define ST_SMOKE_RACES 11  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-traffic-smoke + roam-cops-smoke */
 
 typedef struct {
     const char *name;
@@ -844,6 +856,7 @@ static char s_roam_note[120];
 /* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
 static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12; }  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
+static int st_roam_is_cops(int row) { return row == 13 || row == 14; }   /* [roam F10] 13 full (traffic on), 14 smoke */
 
 static void st_roam_arm(const RaceScenario *sc)
 {
@@ -856,6 +869,19 @@ static void st_roam_arm(const RaceScenario *sc)
     /* [roam F8] traffic: the knob density in free roam, HIGH in the traffic sprint row, the setup's otherwise */
     td5_roam_traffic_force_density(-1);
     td5_roam_traffic_force_race_level(sc->roam == 12 ? 2 : -1);
+    /* [roam F10] free-roam patrols only in the cops rows: the other roam rows keep the drive they were written for */
+    td5_roam_cops_dev_force(st_roam_is_cops(sc->roam) ? -1 : 0, -1);
+    if (st_roam_is_cops(sc->roam)) {
+        /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
+        if (sc->roam == 14) td5_roam_traffic_force_density(0);
+        td5_roam_cops_test_arm(sc->roam == 13 ? TD5_RCOPS_FULL : TD5_RCOPS_SMOKE);
+        if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
+        return;
+    }
     if (st_roam_is_sprint(sc->roam)) {
         /* [roam F6-B] sprint rows: spawn at the scripted route's START, the sprint test drives */
         double ll[8][2];
@@ -888,6 +914,8 @@ static void st_roam_disarm(void)
 {
     td5_roam_drive_disarm();
     td5_roam_sprint_test_disarm();    /* [roam F6-B] */
+    td5_roam_cops_test_disarm();      /* [roam F10] */
+    td5_roam_cops_dev_force(-1, -1);
     td5_roam_traffic_force_density(-1);       /* [roam F8] */
     td5_roam_traffic_force_race_level(-1);
     td5_roam_cancel();
@@ -898,7 +926,8 @@ static void st_roam_capture(void)
 {
     if (s_roam_captured) return;
     s_roam_captured = 1;
-    s_roam_status = st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
+    s_roam_status = st_roam_is_cops(s_roam_row) ? td5_roam_cops_test_verdict(s_roam_note, sizeof s_roam_note)
+                  : st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
                                                   : td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
     if (st_roam_has_traffic(s_roam_row)) {
         /* [roam F8] the traffic verdict first, the drive's / sprint's after it */
@@ -915,6 +944,7 @@ static void st_roam_capture(void)
 /* [roam F6-B] the running roam row's script has ended itself */
 static int st_roam_done(void)
 {
+    if (st_roam_is_cops(s_roam_row)) return td5_roam_cops_test_done();
     return st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_done() : td5_roam_drive_done();
 }
 /* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);

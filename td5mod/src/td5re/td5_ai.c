@@ -9532,6 +9532,13 @@ void td5_ai_pre_tick(void) {
 /* [MP COP CHASE 2026-06-22] Arm a RACER slot as an AI-driven cop so the chase
  * driver (cop_drive) takes it over in td5_ai_update_actor and phys_top_speed
  * uncaps it (td5_ai_cop_is_chasing). is_ai==0 leaves the slot human-driven. */
+void td5_ai_roam_mark_cop(int slot, int is_cop) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    g_cop_is_cop[slot] = (uint8_t)(is_cop ? 1 : 0);
+    g_cop_phase[slot]  = COP_IDLE;
+    g_cop_target[slot] = -1;
+}
+
 void td5_ai_cop_chase_setup(int cop_slot, int is_ai) {
     if (cop_slot < 0 || cop_slot >= TD5_MAX_TOTAL_ACTORS) return;
     if (!is_ai) return;
