@@ -172,7 +172,7 @@ the graph. Race setup gets traffic / cops toggles.
 | F6 | **Sprint race with barriers** | Race start from a saved route, NFSU2 barriers + chevrons, racer-only collision layer, checkpoints, finish, results | Selftest: solo sprint completes, player cannot exit the route at any closed mouth |
 | F7 | **AI racers** | Driver Model on the route polyline, positions, rubber-band | 5 AI finish a 3 km casco sprint with no stuck cars, invariant checker green |
 | F8 | **Traffic** | Ambient traffic on the graph, signals obeyed, passes through barriers, race toggle | Traffic density holds steady over 10 min roam, no traffic inside buildings |
-| F9 | **Circuits + whole partido** | Laps, origin rebasing, partido tile index | Drive from the casco to City Bell without a hitch |
+| F9 | **Circuits + whole partido** | Laps, origin rebasing, partido tile index. **F9a circuits DONE 2026-10-18** (roam-F9a): SPRINT / CIRCUIT + laps 1-10 in the map and the setup, closing leg, open start line, lap tracker on the total distance (`td5_roam_lap.c`), AI laps, lap HUD / results, selftest rows `roam-circuit` + `roam-circuit-smoke`. Origin rebasing + partido index still open | Drive from the casco to City Bell without a hitch |
 | F10 | **Cops** | Police on the graph in roam, per-race toggle | |
 | F11 | **Retire strip BUILD** | Parity checklist (forks, signals, AI quality, load time) then remove | Mariano signs off |
 

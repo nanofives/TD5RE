@@ -906,6 +906,7 @@ void td5_roam_route_replan(void)
         ok_legs++;
     }
     rt.res.legs = nlegs; rt.res.legs_ok = ok_legs; rt.res.ok = (ok_legs == nlegs);
+    rt.res.closed = rt.res.ok && w->type == TD5_ROUTE_CIRCUIT && w->wp[w->nwp - 1].kind == TD5_ROUTE_WP_FINISH;
     rt.res.edge = refs.r; rt.res.nedge = refs.n;
     rt.res.px = poly.x; rt.res.pz = poly.z; rt.res.npt = poly.n;
     if (poly.n > 0) {
@@ -953,9 +954,11 @@ int td5_roam_route_map_changed(void) { return rt.map_changed; }
 
 void td5_roam_route_set_type(int type, int laps)
 {
-    rt.cur.type = type == TD5_ROUTE_CIRCUIT ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT;
-    rt.cur.laps = laps < 1 ? 1 : (laps > 99 ? 99 : laps);
-    td5_roam_route_replan();
+    const int t = type == TD5_ROUTE_CIRCUIT ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT;
+    const int changed = t != rt.cur.type;
+    rt.cur.type = t;
+    rt.cur.laps = laps < 1 ? 1 : (laps > TD5_ROUTE_MAX_LAPS ? TD5_ROUTE_MAX_LAPS : laps);
+    if (changed) td5_roam_route_replan();      /* the laps alone never change the polyline */
 }
 
 static void rr_push_undo(void)
@@ -1212,7 +1215,7 @@ int td5_roam_route_load(const char *name)
     it = cJSON_GetObjectItem(root, "type");
     if (cJSON_IsString(it) && strcmp(it->valuestring, "circuit") == 0) set.type = TD5_ROUTE_CIRCUIT;
     it = cJSON_GetObjectItem(root, "laps");
-    if (cJSON_IsNumber(it)) set.laps = it->valueint < 1 ? 1 : (it->valueint > 99 ? 99 : it->valueint);
+    if (cJSON_IsNumber(it)) set.laps = it->valueint < 1 ? 1 : (it->valueint > TD5_ROUTE_MAX_LAPS ? TD5_ROUTE_MAX_LAPS : it->valueint);
     it = cJSON_GetObjectItem(root, "edge_hash");
     if (cJSON_IsString(it)) { want_hash = (uint32_t)strtoul(it->valuestring, NULL, 16); have_hash = 1; }
     wps = cJSON_GetObjectItem(root, "waypoints");

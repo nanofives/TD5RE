@@ -69,6 +69,9 @@
 #define K_L 0x26
 #define K_R 0x13
 #define K_A 0x1E
+#define K_T 0x14
+#define K_LBRACKET 0x1A
+#define K_RBRACKET 0x1B
 
 #define PI_D 3.14159265358979323846
 
@@ -129,13 +132,20 @@ static void route_summary(char *out, size_t cap)
 {
     const TD5_RouteResult *r = td5_roam_route_result();
     const int n = td5_roam_route_wp_count();
-    if (n == 0)       snprintf(out, cap, "NO ROUTE");
-    else if (n == 1)  snprintf(out, cap, "1 POINT   ADD A FINISH");
-    else if (!r->ok)  snprintf(out, cap, "%d POINTS  NO ROUTE FOUND", n);
-    else if (r->length_m >= 1000.0)
-        snprintf(out, cap, "%d POINTS   %.2f KM   %d STREETS", n, r->length_m / 1000.0, r->nedge);
+    char kind[32];
+    if (td5_roam_route_type() == TD5_ROUTE_CIRCUIT)
+        snprintf(kind, sizeof kind, "CIRCUIT %d LAP%s   ", td5_roam_route_laps(), td5_roam_route_laps() == 1 ? "" : "S");
     else
-        snprintf(out, cap, "%d POINTS   %.0f M   %d STREETS", n, r->length_m, r->nedge);
+        kind[0] = '\0';
+    if (n == 0)       snprintf(out, cap, "%sNO ROUTE", kind);
+    else if (n == 1)  snprintf(out, cap, "%s1 POINT   ADD A FINISH", kind);
+    else if (!r->ok)  snprintf(out, cap, "%s%d POINTS  NO ROUTE FOUND", kind, n);
+    else if (r->length_m >= 1000.0)
+        { char tail[24];
+          if (r->closed) tail[0] = 0; else snprintf(tail, sizeof tail, "   %d STREETS", r->nedge);
+          snprintf(out, cap, "%s%d POINTS   %.2f KM%s%s", kind, n, r->length_m / 1000.0, r->closed ? " LAP" : "", tail); }
+    else
+        snprintf(out, cap, "%s%d POINTS   %.0f M%s   %d STREETS", kind, n, r->length_m, r->closed ? " LAP" : "", r->nedge);
 }
 
 /* ============================================================ batcher ========= */
@@ -425,7 +435,9 @@ static void map_close(void)
     TD5_LOG_I(LOG_TAG, "ROUTE_UI: map closed (waypoints=%d)", td5_roam_route_wp_count());
 }
 
+static void fit_route(void);
 int td5_roam_route_ui_map_open(void) { return u.map_open; }
+void td5_roam_route_ui_fit(void) { fit_route(); }      /* [F9a] DEV shots: frame the whole route */
 
 void td5_roam_route_ui_open_map(void)
 {
@@ -453,7 +465,7 @@ static void map_layout(float *top, float *bot)
 {
     const float S = ui_scale();
     *top = 34.0f * S;
-    *bot = 54.0f * S;
+    *bot = 74.0f * S;     /* [F9a] three hint lines */
 }
 
 static void map_proj(Proj *p)
@@ -640,6 +652,29 @@ static void map_input(double dt)
         if (!td5_roam_race_open_setup()) ui_toast("NEED A START, A FINISH AND A ROUTE BETWEEN THEM");
         return;
     }
+    if (ke(K_T)) {                                   /* [F9a] SPRINT <-> CIRCUIT */
+        const int circ = td5_roam_route_type() != TD5_ROUTE_CIRCUIT;
+        td5_roam_route_set_type(circ ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT, td5_roam_route_laps());
+        if (circ && td5_roam_route_wp_count() >= 2 && !td5_roam_route_result()->closed)
+            ui_toast("CIRCUIT: NO ROUTE BACK FROM THE FINISH TO THE START");
+        else if (circ && td5_roam_route_wp_count() >= 1 && td5_roam_route_wp(td5_roam_route_wp_count() - 1)->kind != TD5_ROUTE_WP_FINISH)
+            ui_toast("CIRCUIT: ADD A FINISH, THE ROUTE CLOSES BACK TO THE START");
+        else if (circ)
+            ui_toast("CIRCUIT   %d LAPS", td5_roam_route_laps());
+        else
+            ui_toast("SPRINT   A TO B");
+    }
+    if (ke(K_LBRACKET) || ke(K_RBRACKET)) {          /* [F9a] laps 1..10 */
+        if (td5_roam_route_type() != TD5_ROUTE_CIRCUIT) {
+            ui_toast("LAPS ARE FOR CIRCUITS: PRESS T");
+        } else {
+            int l = td5_roam_route_laps();
+            if (ke(K_LBRACKET)) l = l <= 1 ? TD5_ROUTE_MAX_LAPS : l - 1;
+            else l = l >= TD5_ROUTE_MAX_LAPS ? 1 : l + 1;
+            td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, l);
+            ui_toast("CIRCUIT   %d LAP%s", l, l == 1 ? "" : "S");
+        }
+    }
     if (ke(K_ENTER) || ke(K_SPACE)) place_at(u.cx, u.cz, 0);
     if (ke(0x02)) place_at(u.cx, u.cz, 1);
     if (ke(0x03)) place_at(u.cx, u.cz, 2);
@@ -824,6 +859,11 @@ void td5_roam_route_ui_draw_overlay(void)
     ui_text(14.0f * S, H - bot + 7.0f * S,
             "ARROWS PAN   + / - OR WHEEL ZOOM   ENTER OR CLICK PLACE   1 START   2 WAYPOINT   3 FINISH   X REMOVE   DRAG A PIN TO MOVE",
             0xFFC8D0DA, 14.0f * S);
+    ui_text(14.0f * S, H - bot + 51.0f * S,
+            td5_roam_route_type() == TD5_ROUTE_CIRCUIT
+                ? "T CIRCUIT (PRESS FOR SPRINT)   [ ] LAPS   THE ROUTE CLOSES FROM THE FINISH BACK TO THE START LINE"
+                : "T SPRINT (PRESS FOR A CIRCUIT)   A CIRCUIT RUNS LAPS ROUND A LOOP: START, WAYPOINTS, FINISH, BACK TO START",
+            0xFF9FB0C4, 13.0f * S);
     ui_text(14.0f * S, H - bot + 29.0f * S,
             td5_roam_race_state() >= TD5_RRACE_COUNTDOWN ? "SPRINT IN PROGRESS   A ABANDON THE SPRINT   M PAUSE MENU   ESC DRIVE"
                                                    : "BKSP UNDO   DEL CLEAR   C CAR   F FIT   S SAVE   L LOAD   R RACE THIS ROUTE   M PAUSE MENU   ESC DRIVE",
@@ -836,7 +876,7 @@ void td5_roam_route_ui_draw_overlay(void)
         if (!w) continue;
         proj_pt(&p, w->snapped ? w->sx : (double)w->px, w->snapped ? w->sz : (double)w->pz, &sx, &sy);
         if (sy < p.y0 + 10.0f || sy > p.y1 - 6.0f || sx < 6.0f || sx > W - 6.0f) continue;
-        if (w->kind == TD5_ROUTE_WP_START) snprintf(lab, sizeof lab, "S");
+        if (w->kind == TD5_ROUTE_WP_START) snprintf(lab, sizeof lab, "%s", td5_roam_route_type() == TD5_ROUTE_CIRCUIT ? "S/F" : "S");
         else if (w->kind == TD5_ROUTE_WP_FINISH) snprintf(lab, sizeof lab, "F");
         else snprintf(lab, sizeof lab, "%d", i);
         ui_text_c(sx, sy - 9.0f * S, lab, 0xFF000000, 15.0f * S);

@@ -69,6 +69,7 @@ double td5_roam_spawn_snap_m(void);
 /* [F6-B] put the player on a PLACE-frame point with a fixed yaw (0..4095), the session spawn's reset
  * without its snap search (the sprint grid). No-op unless a session is active. */
 void td5_roam_place_actor(int slot, void *actor, int32_t px, int32_t pz, int yaw12);
+long td5_roam_placements(void);    /* [F9a] how many actors td5_roam_place_actor has put down (self-test: a placement is not a jump) */
 
 /* lat/lon -> PLACE frame units of `slug` (PLACE.JSON projection). 1 on success. */
 int  td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz);

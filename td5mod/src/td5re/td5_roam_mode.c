@@ -547,10 +547,14 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
 
 /* [F6-B] A sprint's grid: the player put on a PLACE-frame point with a fixed yaw, through the
  * same reset as the session spawn (no snap search: the route's START is on a street centre). */
+static long s_placements;      /* [F9a] actors put somewhere by the sprint grid / regrid (a deliberate jump, not motion) */
+long td5_roam_placements(void) { return s_placements; }
+
 void td5_roam_place_actor(int slot, void *actor_mem, int32_t px, int32_t pz, int yaw12)
 {
     TD5_Actor *a = (TD5_Actor *)actor_mem;
     if (!a || !s_roam.active) return;
+    s_placements++;
     if (td5_roam_stream_active()) td5_roam_stream_wait_area(px, pz, -1);
     roam_place_actor(slot, a, px - s_roam.origin_x, pz - s_roam.origin_z, yaw12 & 0xFFF);
     TD5_LOG_I(LOG_TAG, "roam: actor placed slot=%d place=(%d,%d) yaw=%d (sprint grid)", slot, (int)px, (int)pz,

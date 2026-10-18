@@ -31,6 +31,7 @@ int  td5_roam_route_ui_map_open(void);
 /* [F6-B] open / close the route map from the sprint flow (open also asks for the pause menu) */
 void td5_roam_route_ui_open_map(void);
 void td5_roam_route_ui_close_map(void);
+void td5_roam_route_ui_fit(void);             /* [F9a] frame the whole route in the map (DEV shots) */
 void td5_roam_route_ui_draw_overlay(void);
 void td5_roam_route_ui_draw_hud(void);
 void td5_roam_route_ui_draw_world(int view);
