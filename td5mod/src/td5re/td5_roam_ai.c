@@ -1260,6 +1260,10 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
                 c->finished = 1;
                 c->finish_ticks = race_ticks;
                 c->order = A.nfin++;
+                /* [F8c] a finisher has done every lap: the finish fires RA_FINISH_EPS before the line, the lap
+                 * count only on it, so a car finishing in the race's last ticks read laps-1 (roam-circuit-smoke:
+                 * "opponent 1 laps 1/2" with 3/3 finished). ra_rank already counts a finisher as A.laps. */
+                if (A.circ) c->laps_done = A.laps;
                 /* stop 30..70 m past the line, the first finisher farthest. A finished opponent is no
                  * longer racing: the route barriers let it through (td5_roam_ai_slot_finished), the
                  * closing panel past FINISH being ~40 m on, closer than a car stops from 100 km/h */
