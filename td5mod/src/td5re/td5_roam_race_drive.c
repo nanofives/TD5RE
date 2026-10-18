@@ -108,17 +108,25 @@ static const double k_fig8_wp[][2] = {
     { -34.911484, -57.961065 },
     { -34.911635, -57.960862 },   /* FINISH Calle 10, just before the crossing: the lap closes through it */
 };
-/* [F9b] the partido rows: out of the casco on tiles built on demand, across world-origin rebases.
- * FULL: START at Plaza Moreno, via City Bell centre, FINISH back at Plaza Moreno.
- * SHORT: START at Plaza Moreno, FINISH north-west of the casco. */
+/* [F9b] the partido rows: out of the casco on tiles built on demand, across world-origin rebases. Via points
+ * keep the scripted driver on the main roads (Diagonal 74, Camino Parque Centenario): the shortest path out of
+ * Plaza Moreno turns from Calle 12 into the divided Avenida 44, the median-nose corner the scripted driver wedges
+ * on (F2-E open item), which is not what these rows test.
+ * FULL: Plaza Moreno -> Diagonal 74 -> Centenario -> City Bell centre -> back the same way -> Plaza Moreno.
+ * SHORT: Plaza Moreno -> Diagonal 74 -> Centenario at Gonnet (out of the casco, north-west). */
 static const double k_partido_wp[][2] = {
-    { -34.92125, -57.95475 },     /* START  Plaza Moreno                       */
-    { -34.86900, -58.04300 },     /* via    City Bell centre                   */
-    { -34.92200, -57.95550 },     /* FINISH Plaza Moreno                       */
+    { -34.92048, -57.95358 },     /* START  Calle 12, Plaza Moreno east side   */
+    { -34.90500, -57.95450 },     /* via    Diagonal 74                        */
+    { -34.88123, -58.00851 },     /* via    Camino Parque Centenario           */
+    { -34.86452, -58.04562 },     /* via    Centenario at City Bell centre     */
+    { -34.87771, -58.01661 },     /* via    Centenario, back                   */
+    { -34.90500, -57.95450 },     /* via    Diagonal 74, back                  */
+    { -34.92125, -57.95475 },     /* FINISH Plaza Moreno                       */
 };
 static const double k_partido_short_wp[][2] = {
-    { -34.92125, -57.95475 },     /* START  Plaza Moreno                       */
-    { -34.88900, -58.00800 },     /* FINISH north-west of the casco            */
+    { -34.92048, -57.95358 },     /* START  Calle 12, Plaza Moreno east side   */
+    { -34.90500, -57.95450 },     /* via    Diagonal 74                        */
+    { -34.88658, -58.00139 },     /* FINISH Camino Parque Centenario, Gonnet   */
 };
 #define SD_IS_PARTIDO(m) ((m) == TD5_RSPRINT_PARTIDO || (m) == TD5_RSPRINT_PARTIDO_SHORT)
 #define SD_IS_CIRC(m) ((m) == TD5_RCIRCUIT_FULL || (m) == TD5_RCIRCUIT_SMOKE)
