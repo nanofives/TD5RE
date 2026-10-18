@@ -38,7 +38,7 @@
 
 #define LOG_TAG "roam"
 
-#define RP_SLOTS        32          /* == TD5_MAX_TOTAL_ACTORS                       */
+#define RP_SLOTS        40          /* [F10] 32 -> 40: traffic 6..29 + the cops after it */
 #define RP_RACERS       6           /* walls + backstop: racer slots only (as the strip) */
 #define RP_PUSH_CAP     600         /* units per tick, the strip's GEO_PUSH_CAP      */
 #define RP_RESCUE_IN    130         /* units (0.3 m) inside the boundary after a rescue */
@@ -174,6 +174,62 @@ static int rp_locate(const TD5_RoamResident *rs, int32_t x, int32_t z, int32_t y
 }
 #else
 #define rp_locate td5_roam_locate
+#endif
+
+#ifndef TD5RE_RELEASE
+/* [F8c] DEV: raw side-table copy + its text form (td5_roam_physics.h). */
+static const TD5_RoamResident *rp_rs(void);
+typedef struct { int slot; long sim_tick; RoamSlotState ss; } RpSlotBlob;
+_Static_assert(sizeof(RpSlotBlob) <= TD5_ROAM_PHYS_SLOT_BLOB, "RpSlotBlob outgrew TD5_ROAM_PHYS_SLOT_BLOB");
+
+size_t td5_roam_physics_dev_slot_copy(int slot, void *out, size_t cap)
+{
+    RpSlotBlob *b = (RpSlotBlob *)out;
+    if (!out || cap < sizeof *b || slot < 0 || slot >= RP_SLOTS) return 0;
+    b->slot = slot;
+    b->sim_tick = (long)g_td5.simulation_tick_counter;
+    b->ss = s_rp.slot[slot];
+    return sizeof *b;
+}
+
+static void rp_dev_hit_print(FILE *f, const char *name, const TD5_RoamHit *h, uint32_t hint)
+{
+    const TD5_RoamResident *rs = rp_rs();
+    int ptx = 0, ptz = 0, htx = 0, htz = 0;
+    if (rs) { rp_prim_tile(rs, h->prim, &ptx, &ptz); rp_prim_tile(rs, hint, &htx, &htz); }
+    fprintf(f, "    %-7s prim=%d,%d:%u%s hint=%d,%d:%u%s edge=%016llx g=%d n=(%d,%d,%d) in=%d cap=%d patch=%d lane=%d layer=%d "
+               "along=%d lat=%d push=(%d,%d,%d) wall=%u\n",
+            name, ptx, ptz, (unsigned)ROAM_PRIM_INDEX(h->prim), rp_prim_kind(h->prim), htx, htz,
+            (unsigned)ROAM_PRIM_INDEX(hint), rp_prim_kind(hint), (unsigned long long)h->edge_key, (int)h->ground_y,
+            h->normal[0], h->normal[1], h->normal[2], (int)h->inside, (int)h->capped, (int)h->is_patch, (int)h->lane,
+            (int)h->layer, (int)h->along, (int)h->lateral, (int)h->push_x, (int)h->push_z, (int)h->push_dist,
+            (unsigned)h->wall);
+}
+
+void td5_roam_physics_dev_slot_print(void *file, const void *blob)
+{
+    FILE *f = (FILE *)file;
+    const RpSlotBlob *b = (const RpSlotBlob *)blob;
+    const RoamSlotState *ss;
+    static const char *const k_name[8] = { "corner0", "corner1", "corner2", "corner3", "wheel0", "wheel1", "wheel2", "wheel3" };
+    int k;
+    if (!f || !b) return;
+    ss = &b->ss;
+    fprintf(f, "  provider slot %d (copied at sim tick %ld): settled %d good %d (%d,%d,%d) hold %d wall tick %ld corner %d "
+               "pinch %d angle %d pen %d edge %016llx\n",
+            b->slot, b->sim_tick, ss->settled, ss->good_valid, (int)ss->good_x, (int)ss->good_y, (int)ss->good_z,
+            ss->hold_on, ss->wall_tick, ss->wall_corner, ss->wall_pinch, (int)ss->wall_angle, (int)ss->wall_pen,
+            (unsigned long long)ss->wall_edge);
+    for (k = 0; k < 8; k++) {
+        if (!ss->probe_ok[k]) { fprintf(f, "    %-7s (no answer)\n", k_name[k]); continue; }
+        rp_dev_hit_print(f, k_name[k], &ss->probe[k], ss->hint[k]);
+    }
+    if (ss->chassis_ok) rp_dev_hit_print(f, "chassis", &ss->chassis, ss->chassis_hint);
+    for (k = 0; k < RP_WALL_PROBES; k++)
+        if (ss->cin_ok[k])
+            fprintf(f, "    wallprobe%d last on-road (%d,%d) at tick %ld%s\n", k, (int)ss->cin_x[k], (int)ss->cin_z[k],
+                    ss->cin_tick[k], k >= 4 ? "" : " (corner)");
+}
 #endif
 
 /* ============================================================================

@@ -1217,6 +1217,8 @@ static void ui_end(void)
     memset(&u, 0, sizeof u);
 }
 
+void td5_roam_route_ui_session_end(void) { if (u.active) ui_end(); }   /* [F8b] see the header */
+
 static void drop_keys(void)
 {
     double px, pz;

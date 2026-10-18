@@ -135,6 +135,12 @@ uint32_t td5_roam_dev_drive_bits(struct TD5_Actor *a);
  * *routed = 0 on the road, 1 routed, 2 off the road but no route (path kept). */
 double   td5_roam_dev_route_path(double *px, double *pz, int *np, int cap, double cx, double cz,
                                  double outx, double outz, double lout, int *routed);
+/* [F8c] DEV: a raw copy of one slot's provider side table (cheap, every tick, for an after-the-fact
+ * ring buffer) and its text form (only when the ring is dumped). copy returns the bytes written
+ * (0 = cap too small). */
+#define TD5_ROAM_PHYS_SLOT_BLOB 2048
+size_t   td5_roam_physics_dev_slot_copy(int slot, void *out, size_t cap);
+void     td5_roam_physics_dev_slot_print(void *file, const void *blob);
 #endif
 
 #endif /* TD5_ROAM_PHYSICS_H */

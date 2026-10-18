@@ -865,7 +865,7 @@ void td5_roam_race_draw_setup(void)
             else snprintf(line, sizeof line, "0   (NO CARS LOADED)");
         }
         else if (i == ROW_TRAFFIC) snprintf(line, sizeof line, "%s", R.setup.traffic >= 2 ? "HIGH" : (R.setup.traffic == 1 ? "LOW" : "OFF"));
-        else if (i == ROW_COPS) snprintf(line, sizeof line, "%s   (COMING WITH COPS)", R.setup.cops ? "ON" : "OFF");
+        else if (i == ROW_COPS) snprintf(line, sizeof line, "%s", R.setup.cops ? "ON" : "OFF");
         if (line[0]) tx(bx + 200.0f * S, y, line, col, 18.0f * S);
     }
     tx(bx + 18.0f * S, by + bh - 26.0f * S, "UP / DOWN   LEFT / RIGHT CHANGE   ENTER SELECT   BKSP MAP   ESC DRIVE", 0xFFB8C2CF, 13.0f * S);
@@ -1074,6 +1074,9 @@ void td5_roam_race_draw_hud(void)
     qb_flush();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
+
+/* [F10] the COPS row of the race in progress */
+int td5_roam_race_cops(void) { return R.res.setup_cops ? 1 : 0; }
 
 /* [F8] the TRAFFIC row of the race in progress: 0 off / 1 low / 2 high */
 int td5_roam_race_traffic_level(void)

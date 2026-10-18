@@ -43,6 +43,7 @@
 #include "td5_render_internal.h"  /* PRIVATE core<->effects seam */
 #include "td5_geo_signals.h"      /* [GEO SIGNALS] lamp tag + live lamp colour */
 #include "td5_roam_render.h"       /* [ROAM F2-C] plain road + ground tiles */
+#include "td5_roam_cops.h"         /* [ROAM F10] the roam cops' light bar */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3642,6 +3643,12 @@ void td5_render_actors_for_view(int view_index)
                 td5_ai_cop_is_chasing(slot)) {
                 render_tracked_actor_marker(actor, &view_rot, &render_pos,
                                             td5_ai_cop_glow_intensity(slot));
+            }
+            /* [GEO FREE ROAM F10] a pursuing roam cop wears the same strobe (the POLICE option is off in roam;
+             * td5_roam_cops_glow is 0 outside a roam session) */
+            {
+                const int rg = td5_roam_cops_glow(slot);
+                if (rg > 0) render_tracked_actor_marker(actor, &view_rot, &render_pos, rg);
             }
 
             /* Wanted-mode damage indicator overlay — orig

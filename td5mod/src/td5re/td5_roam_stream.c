@@ -46,7 +46,7 @@
 #define RS_HASH0         4096           /* [F9b] initial hash size, power of two, grows at 50 % load */
 #define RS_MAX_JOBS      2048
 #define RS_MAX_RESULTS   512
-#define RS_SLOTS         32             /* == TD5_MAX_TOTAL_ACTORS                   */
+#define RS_SLOTS         40             /* [F10] 32 -> 40: traffic 6..29 + the cops after it */
 #define RS_RACERS        6
 #define RS_UPM           430.0
 #define RS_TICKS_PER_S   30.0

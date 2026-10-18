@@ -357,10 +357,9 @@ static int sd_plan_save_load(void)
         else if (i == n - 1) ok = td5_roam_route_set_finish_at(px, pz);
         else ok = td5_roam_route_add_at(px, pz);
     }
-    if (ok && SD_IS_CIRC(D.mode)) td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, D.laps);     /* [F9a] closes FINISH -> START */
-    /* [F9b] the route type outlives a clear: after the circuit rows it is still CIRCUIT, which would close the partido
-     * route back to START */
-    if (ok && SD_IS_PARTIDO(D.mode)) td5_roam_route_set_type(TD5_ROUTE_SPRINT, 1);
+    /* [F9a] a circuit closes FINISH -> START. [F8b] a sprint says SPRINT too: clear keeps the planner's type, and a
+     * circuit row run before this one left CIRCUIT x 3 (the smoke sprint was raced as 3 laps of a 1.2 km loop) */
+    if (ok) td5_roam_route_set_type(SD_IS_CIRC(D.mode) ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT, D.laps);
     if (ok && SD_IS_PARTIDO(D.mode) && !td5_roam_route_result()->ok) {
         D.mapping = 1;
         D.phase_frames = 0;
@@ -829,7 +828,8 @@ void td5_roam_sprint_test_frame(void)
             TD5_RoamRaceSetup s;
             TD5_RoamPhysStats st;
             memset(&s, 0, sizeof s);
-            s.laps = D.laps; s.traffic = 1; s.cops = 0;
+            s.laps = D.laps; s.traffic = 1;
+            s.cops = td5_env_int("TD5RE_ROAM_SPRINT_COPS", 0, 0, 1);   /* [F10] DEV: the sprint with COPS on */
             s.opponents = SD_IS_CIRC(D.mode) ? SD_CIRC_AI_N : (SD_IS_AI(D.mode) ? SD_AI_N : 0);   /* [F7] [F9a] */
             if (!td5_roam_race_start(&s)) { sd_finish("race start refused", 1); return; }
             td5_roam_barriers_stats(&D.bst);
@@ -1231,6 +1231,8 @@ static int sd_ai_verdict(char *note, size_t n, const char *bad, const TD5_RoamRa
         }
     }
     if (bad[0]) snprintf(note, n, "sprint-ai FAIL: %.100s", bad);
+    else if (as.respawns) snprintf(note, n, "%.2f km, %d jn, AI %d/%d fin, stuck 0, respawn %ld | %.70s", D.length_m / 1000.0, D.nkeys,
+                                   as.finished, as.n, as.respawns, ord);   /* [F8b] */
     else snprintf(note, n, "%.2f km, %d jn, AI %d/%d fin, stuck 0 | %.80s", D.length_m / 1000.0, D.nkeys, as.finished, as.n, ord);
     TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] VERDICT %s (AI): route='%s' length=%.1f m junctions=%d diagonal=%d plaza=%d order:%s | "
               "opponents=%d finished=%d stuck_long=%ld still_max=%.1f s recoveries=%ld passes=%ld follow_ticks=%ld "
@@ -1270,8 +1272,8 @@ static int sd_circuit_verdict(char *note, size_t n, const char *bad, const TD5_R
                                    res->field_ticks[i] > 0 ? (double)res->field_ticks[i] / 30.0 : 0.0);
     }
     if (bad[0]) snprintf(note, n, "circuit FAIL: %.100s", bad);
-    else snprintf(note, n, "circuit %.2f km x %d laps, laps %s, AI %d/%d fin, stuck 0, lap jumps 0, fig8 %s", D.lap_len / 1000.0, D.laps,
-                  laps_s, as.finished, as.n, D.mode == TD5_RCIRCUIT_FULL ? "ok" : "-");
+    else snprintf(note, n, "circuit %.2f km x %d laps, laps %s, AI %d/%d fin, stuck 0, lap jumps 0, fig8 %s%s", D.lap_len / 1000.0, D.laps,
+                  laps_s, as.finished, as.n, D.mode == TD5_RCIRCUIT_FULL ? "ok" : "-", as.respawns ? ", respawn" : "");   /* [F8b] */
     TD5_LOG_I(LOG_TAG, "[ROAMCIRCUIT] VERDICT %s: route='%s' lap=%.1f m laps=%d player_laps=%d lap_ticks=[%s] best_lap=%ld total=%ld ticks "
               "closed_after_reload=%d lap_jumps player=%ld/%ld opponents=%ld/%ld | opponents=%d finished=%d stuck_long=%ld recoveries=%ld "
               "max_lateral=%.1f m | order: %s | barrier hits=%ld chassis_past=%ld pinches=%ld rescues=%ld teleports=%ld stuck=%ld "

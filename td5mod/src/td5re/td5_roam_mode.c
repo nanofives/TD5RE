@@ -44,10 +44,12 @@
 #include "td5_roam_rebase.h"    /* [F9b] a new session starts the rebase counters */
 #include "td5_roam_partido.h"   /* [F9b] the place boundary + its streets (gate, spawn in a field) */
 #include "td5_roam_traffic.h"
+#include "td5_roam_cops.h"      /* [F10] the cop slots end with the session */
+#include "td5_roam_route_ui.h"  /* [F8b] the planner session ends with the roam session */
 
 #define LOG_TAG "roam"
 
-#define ROAM_MAX_SLOTS   32      /* == TD5_MAX_TOTAL_ACTORS */
+#define ROAM_MAX_SLOTS   40      /* [F10] 32 -> 40: traffic 6..29 + the cops after it (TD5_MAX_TOTAL_ACTORS is 80) */
 #define ROAM_GATE_STREET_M 300.0 /* [F9b] FREE ROAM accepts a point of the place with a street this close */
 #define ROAM_UPM         430.0   /* place units per metre */
 #define ROAM_RAD         0.017453292519943295
@@ -265,6 +267,8 @@ void td5_roam_end(void)
     td5_roam_race_reset();              /* [F6-B] a race never outlives its session (barriers cleared) */
     td5_roam_physics_session_end();     /* task B: frees the resident set (no-op when not loaded) */
     td5_roam_traffic_session_end();     /* [F8] the traffic pool stops answering for its slots */
+    td5_roam_cops_session_end();        /* [F10] the cop slots too (and their g_cop_is_cop marks go) */
+    td5_roam_route_ui_session_end();    /* [F8b] the route, its type + laps and the planner graph end with the session */
 }
 
 void td5_roam_cancel(void) { td5_roam_end(); }

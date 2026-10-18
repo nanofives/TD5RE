@@ -38,6 +38,9 @@
 #include "td5_roam_barrier.h"
 #include "td5_roam_traffic.h"
 #include "td5_roam_rebase.h"     /* [F9b] parked cars are held where they were parked */
+#include "td5_roam_cops.h"       /* [F10] the cop slots answer td5_roam_traffic_parked / _alpha */
+#include "td5_roam_stream.h"     /* [F8b] the soak logs the stream residency beside private bytes */
+#include "td5_replay.h"          /* [F8b] the soak's leak rule takes the replay record buffer out */
 #include "../../../re/include/td5_actor_struct.h"
 
 #if defined(_WIN32) && !defined(TD5RE_RELEASE)
@@ -126,6 +129,7 @@ static struct {
     /* DEV soak measures: private bytes after the warm-up / now / max, the tick's own cost */
     double  priv0_mb, priv_mb, priv_max_mb; int priv_n;
     float   priv_s[1024];                       /* one sample a second */
+    float   rep_s[1024], strm_s[1024];          /* [F8b] the same seconds: replay record buffer, stream resident MB */
     double  tick_us_sum, tick_us_max; long tick_n;
 } T;
 
@@ -647,14 +651,14 @@ static RtCar *rt_car_of(int slot)
 int td5_roam_traffic_parked(int slot)
 {
     const RtCar *c = rt_car_of(slot);
-    if (!c) return -1;
+    if (!c) return td5_roam_cops_parked(slot);    /* [F10] the cop slots after the pool answer for themselves */
     return c->state == RT_PARKED;
 }
 
 int td5_roam_traffic_alpha(int slot)
 {
     const RtCar *c = rt_car_of(slot);
-    if (!c) return -1;
+    if (!c) return td5_roam_cops_alpha(slot);     /* [F10] */
     return c->state == RT_PARKED ? 0 : c->alpha;
 }
 
@@ -1396,7 +1400,14 @@ void td5_roam_traffic_tick(void)
                 if (T.priv_n == 0) T.priv0_mb = mb;
                 T.priv_mb = mb;
                 if (mb > T.priv_max_mb) T.priv_max_mb = mb;
-                if (T.priv_n < (int)(sizeof T.priv_s / sizeof T.priv_s[0])) T.priv_s[T.priv_n] = (float)mb;
+                if (T.priv_n < (int)(sizeof T.priv_s / sizeof T.priv_s[0])) {
+                    TD5_RoamStreamStats ss;
+                    memset(&ss, 0, sizeof ss);
+                    td5_roam_stream_stats(&ss);
+                    T.priv_s[T.priv_n] = (float)mb;
+                    T.rep_s[T.priv_n] = (float)((double)td5_replay_buffer_bytes() / (1024.0 * 1024.0));
+                    T.strm_s[T.priv_n] = (float)(ss.road_mb + ss.scen_mb);
+                }
                 T.priv_n++;
             }
         }
@@ -1650,15 +1661,23 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
 {
     const TD5_RoamTrafficStats *s = &T.st;
     const long off_free = s->off_ticks - s->off_ticks_contact;
-    double dpriv = 0.0, early = 0.0, late = 0.0;
-    {   /* the self-test's own rule: early-half average vs late-half average */
+    double dpriv = 0.0, early = 0.0, late = 0.0, drep = 0.0, dstrm = 0.0;
+    {   /* the self-test's own rule: early-half average vs late-half average.
+         * [F8b] Judged on private bytes LESS the replay record buffer: the recorder keeps every actor slot every
+         * tick (30 in roam) and doubles its buffer, +32 MB at ~4.5 min and +64 MB at ~9 min of a soak, which is
+         * capped (TD5_REPLAY_MAX_TICKS) and freed at the next race, not a leak. Free roam no longer records at all
+         * (td5_replay_discard at race init) so that series reads 0 there; the guard stays. The stream residency is logged
+         * beside it (its LRU budgets bound it) but stays in the judged series, so a stream leak still WARNs. */
         const int n = T.priv_n < 1024 ? T.priv_n : 1024;
+        double re = 0.0, rl = 0.0, se = 0.0, sl = 0.0;
         int i;
         if (n >= 4) {
-            for (i = 0; i < n / 2; i++) early += T.priv_s[i];
-            for (i = n / 2; i < n; i++) late += T.priv_s[i];
+            for (i = 0; i < n / 2; i++) { early += T.priv_s[i] - T.rep_s[i]; re += T.rep_s[i]; se += T.strm_s[i]; }
+            for (i = n / 2; i < n; i++) { late += T.priv_s[i] - T.rep_s[i]; rl += T.rep_s[i]; sl += T.strm_s[i]; }
             early /= (double)(n / 2); late /= (double)(n - n / 2);
             dpriv = late - early;
+            drep = rl / (double)(n - n / 2) - re / (double)(n / 2);
+            dstrm = sl / (double)(n - n / 2) - se / (double)(n / 2);
         }
     }
     const double tick_ms = T.tick_n ? T.tick_us_sum / (double)T.tick_n / 1000.0 : 0.0;
@@ -1677,19 +1696,22 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     if (s->stuck_live > 0) RT_BAD("stuck>10s live %ld; ", s->stuck_live);
 #undef RT_BAD
     if (bad[0]) status = 2;
-    /* WARN: red-light violations; private bytes up > 32 MB early-half vs late-half (the traffic pool allocates
-     * nothing after race init: measured, the same series without cars follows the ROAD tile residency) */
+    /* WARN: red-light violations; private bytes less the replay buffer up > 32 MB early-half vs late-half (the
+     * traffic pool allocates nothing after race init) */
     else if (s->red_violations > 0 || dpriv > 32.0) status = 1;
-    {   /* the private-bytes series, one value every 30 s */
-        char ser[400];
+    {   /* the private-bytes series, one value every 30 s: private / replay buffer / stream resident */
+        char ser[700];
         size_t sl = 0;
         int i;
         const int n = T.priv_n < 1024 ? T.priv_n : 1024;
         ser[0] = 0;
-        for (i = 0; i < n && sl < sizeof ser - 8; i += 30) sl += (size_t)snprintf(ser + sl, sizeof ser - sl, " %.0f", T.priv_s[i]);
-        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] private MB every 30 s:%s", ser);
+        for (i = 0; i < n && sl < sizeof ser - 24; i += 30)
+            sl += (size_t)snprintf(ser + sl, sizeof ser - sl, " %.0f/%.0f/%.0f", T.priv_s[i], T.rep_s[i], T.strm_s[i]);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] private/replay/stream MB every 30 s:%s", ser);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] memory early-half -> late-half: private less replay %+.1f MB (judged), replay buffer %+.1f MB, "
+                  "stream resident %+.1f MB", dpriv, drep, dstrm);
     }
-    snprintf(note, n, "%straffic %d/%.1f/%d t%d red %ld/%ld off %ld+%ldhit bar %ld priv %+.0fMB %s%.40s",
+    snprintf(note, n, "%straffic %d/%.1f/%d t%d red %ld/%ld off %ld+%ldhit bar %ld priv-rep %+.0fMB %s%.40s",
              status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target, s->red_violations, s->sig_cross, off_free,
              s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s: live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "

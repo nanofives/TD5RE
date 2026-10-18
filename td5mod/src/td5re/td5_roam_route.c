@@ -712,8 +712,19 @@ static int rr_uturn(int e, int d, int e2, int d2, int node)
     return e == e2 && d != d2 && g.node[node].ninc > 1;
 }
 
-/* One leg S -> T. Appends to poly + refs. 1 on success. */
-static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs)
+/* [F10] the optional edge mask of a pursuit leg (NULL = every street): S's and T's own edges are always usable */
+static int rr_mask_ok(const uint8_t *edge_ok, int e, const RrSnap *S, const RrSnap *T)
+{
+    return !edge_ok || edge_ok[e] || e == S->edge || e == T->edge;
+}
+
+/* One leg S -> T. Appends to poly + refs. 1 on success. [F10] edge_ok: NULL, or a per-edge mask the leg
+ * must stay on (the cops' race corridor); start_dir: -1 = leave S either way, 0 / 1 = only along / against
+ * the edge (a car keeps its heading); ignore_ow: one-way streets usable both ways (a pursuing cop close to
+ * its target). The route planner passes NULL, -1, 0: unchanged. */
+#define RR_OK(e, d) (ignore_ow || rr_allowed((e), (d)))
+static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs, const uint8_t *edge_ok, int start_dir,
+                       int ignore_ow)
 {
     const int ns = g.nedge * 2;
     double *cost = (double *)malloc((size_t)ns * sizeof(double));
@@ -730,15 +741,15 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
     for (k = 0; k < ns; k++) { cost[k] = 1e300; parent[k] = -1; }
 
     if (S->edge == T->edge) {
-        if (rr_allowed(S->edge, 0) && T->along >= S->along) { best = T->along - S->along; best_state = -1; best_dw = 0; }
-        if (rr_allowed(S->edge, 1) && T->along <= S->along && S->along - T->along < best) {
+        if (RR_OK(S->edge, 0) && start_dir != 1 && T->along >= S->along) { best = T->along - S->along; best_state = -1; best_dw = 0; }
+        if (RR_OK(S->edge, 1) && start_dir != 0 && T->along <= S->along && S->along - T->along < best) {
             best = S->along - T->along; best_state = -1; best_dw = 1;
         }
     }
     {
         const RrEdge *se = &g.edge[S->edge];
-        if (rr_allowed(S->edge, 0)) { cost[S->edge * 2] = se->plen - S->along; rr_heap_push(&hp, cost[S->edge * 2], S->edge * 2); }
-        if (rr_allowed(S->edge, 1)) { cost[S->edge * 2 + 1] = S->along; rr_heap_push(&hp, cost[S->edge * 2 + 1], S->edge * 2 + 1); }
+        if (RR_OK(S->edge, 0) && start_dir != 1) { cost[S->edge * 2] = se->plen - S->along; rr_heap_push(&hp, cost[S->edge * 2], S->edge * 2); }
+        if (RR_OK(S->edge, 1) && start_dir != 0) { cost[S->edge * 2 + 1] = S->along; rr_heap_push(&hp, cost[S->edge * 2 + 1], S->edge * 2 + 1); }
     }
     while (rr_heap_pop(&hp, &it)) {
         const int s = it.s, e = s >> 1, d = s & 1;
@@ -747,7 +758,7 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
         if (it.c > cost[s]) continue;
         n = rr_end_node(e, d);
         for (dw = 0; dw < 2; dw++) {
-            if (!rr_allowed(T->edge, dw) || rr_start_node(T->edge, dw) != n) continue;
+            if (!RR_OK(T->edge, dw) || rr_start_node(T->edge, dw) != n) continue;
             if (rr_uturn(e, d, T->edge, dw, n)) continue;
             if (it.c + extra[dw] < best) { best = it.c + extra[dw]; best_state = s; best_dw = dw; }
         }
@@ -756,7 +767,7 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
             const int e2 = inc >> 1, d2 = inc & 1;     /* leaving through end d2 = travelling in direction d2 */
             const int s2 = e2 * 2 + d2;
             double c2;
-            if (!rr_allowed(e2, d2) || rr_uturn(e, d, e2, d2, n)) continue;
+            if (!RR_OK(e2, d2) || rr_uturn(e, d, e2, d2, n) || !rr_mask_ok(edge_ok, e2, S, T)) continue;
             c2 = it.c + g.edge[e2].plen;
             if (c2 < cost[s2]) { cost[s2] = c2; parent[s2] = s; rr_heap_push(&hp, c2, s2); }
         }
@@ -789,6 +800,79 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
 done:
     free(cost); free(parent); free(hp.h);
     return ok;
+}
+
+#undef RR_OK
+
+/* [F10] A driver's line from a planned polyline, td5_roam_ai.c's two cleanups (F7): (1) the junction-connector
+ * jogs, a point that turns back more than 90 degrees with a leg under 15 m; (2) the LATERAL jogs through a cluster
+ * centre that sits in a divided avenue's median 7..14 m off the carriageway: a vertex whose heading before and after
+ * agree within 20 degrees, more than 1.5 m off the chord of its neighbours, that chord under 150 m. Returns the count. */
+static int rr_driver_line(double *x, double *z, int n)
+{
+    int i, m = 0, changed = 1, guard = 0;
+    for (i = 0; i < n; i++) {
+        if (i >= 1 && i + 1 < n) {
+            const double ax = x[i] - x[i - 1], az = z[i] - z[i - 1], qx = x[i + 1] - x[i], qz = z[i + 1] - z[i];
+            const double la = sqrt(ax * ax + az * az), lb = sqrt(qx * qx + qz * qz);
+            if (la > 0.0 && lb > 0.0 && (ax * qx + az * qz) / (la * lb) < 0.0 && (la < 15.0 * RR_UPM || lb < 15.0 * RR_UPM)) continue;
+        }
+        if (m > 0 && fabs(x[i] - x[m - 1]) < 1.0 && fabs(z[i] - z[m - 1]) < 1.0) continue;
+        x[m] = x[i]; z[m] = z[i]; m++;
+    }
+    while (changed && guard++ < 16) {
+        changed = 0;
+        for (i = 2; i + 2 < m; i++) {
+            const double ax = x[i - 1] - x[i - 2], az = z[i - 1] - z[i - 2];
+            const double bx = x[i + 2] - x[i + 1], bz = z[i + 2] - z[i + 1];
+            const double cx = x[i + 1] - x[i - 1], cz = z[i + 1] - z[i - 1];
+            const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz), lc = sqrt(cx * cx + cz * cz);
+            if (la <= 0.0 || lb <= 0.0 || lc <= 0.0 || lc > 150.0 * RR_UPM) continue;
+            if ((ax * bx + az * bz) / (la * lb) < cos(20.0 * 3.14159265358979323846 / 180.0)) continue;
+            if (fabs((x[i] - x[i - 1]) * cz - (z[i] - z[i - 1]) * cx) / lc <= 1.5 * RR_UPM) continue;
+            memmove(&x[i], &x[i + 1], (size_t)(m - i - 1) * sizeof(double));
+            memmove(&z[i], &z[i + 1], (size_t)(m - i - 1) * sizeof(double));
+            m--;
+            changed = 1;
+        }
+    }
+    return m;
+}
+
+/* [F10] ONE leg between two PLACE points for a pursuit (td5_roam_route.h). */
+int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, double tx, double tz, double snap_m,
+                             const uint8_t *edge_ok, int ignore_ow, double **px, double **pz, int *npt, double *len_m)
+{
+    RrSnap S, T;
+    RrPoly poly = { NULL, NULL, 0, 0 };
+    RrERefs refs = { NULL, 0, 0 };
+    int start_dir = -1, i;
+    double L = 0.0;
+    if (px) *px = NULL;
+    if (pz) *pz = NULL;
+    if (npt) *npt = 0;
+    if (len_m) *len_m = 0.0;
+    if (!g.ready || !rr_snap(sx, sz, snap_m, &S) || !rr_snap(tx, tz, snap_m, &T)) return 0;
+    if (dir_x != 0.0 || dir_z != 0.0) {
+        /* the snapped segment's node0 -> node1 tangent against the car's heading */
+        const int sg = S.seg;
+        const double ex = (double)g.pt[2 * sg + 2] - g.pt[2 * sg], ez = (double)g.pt[2 * sg + 3] - g.pt[2 * sg + 1];
+        start_dir = (ex * dir_x + ez * dir_z) >= 0.0 ? 0 : 1;
+        if (!ignore_ow && !rr_allowed(S.edge, start_dir)) start_dir = -1;      /* a one-way the wrong way: either way out */
+    }
+    if (!rr_plan_leg(&S, &T, &poly, &refs, edge_ok, start_dir, ignore_ow) &&
+        (start_dir < 0 || !rr_plan_leg(&S, &T, &poly, &refs, edge_ok, -1, ignore_ow))) {
+        free(poly.x); free(poly.z); free(refs.r);
+        return 0;
+    }
+    free(refs.r);
+    poly.n = rr_driver_line(poly.x, poly.z, poly.n);
+    for (i = 1; i < poly.n; i++) L += hypot(poly.x[i] - poly.x[i - 1], poly.z[i] - poly.z[i - 1]);
+    if (px) *px = poly.x; else free(poly.x);
+    if (pz) *pz = poly.z; else free(poly.z);
+    if (npt) *npt = poly.n;
+    if (len_m) *len_m = L / RR_UPM;
+    return poly.n >= 2;
 }
 
 /* ============================================================ the route ======= */
@@ -1325,7 +1409,7 @@ void td5_roam_route_replan(void)
         if (!rr_covers((double)a->px, (double)a->pz) || !rr_covers((double)b->px, (double)b->pz)) break;
         if (!rr_snap((double)a->px, (double)a->pz, RR_SNAP_MAX_M, &sa) ||
             !rr_snap((double)b->px, (double)b->pz, RR_SNAP_MAX_M, &sb)) break;
-        if (!rr_plan_leg(&sa, &sb, &poly, &refs)) break;
+        if (!rr_plan_leg(&sa, &sb, &poly, &refs, NULL, -1, 0)) break;
         ok_legs++;
     }
     rt.res.legs = nlegs; rt.res.legs_ok = ok_legs; rt.res.ok = (ok_legs == nlegs);
@@ -1933,3 +2017,16 @@ int td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int 
 }
 
 int td5_roam_route_graph_nsignal(void) { return g.ready ? g.nsig : 0; }
+
+/* [F10] edge index of a key (the edges are sorted by key), -1 when unknown */
+int td5_roam_route_graph_edge_index(uint64_t key)
+{
+    int lo = 0, hi = g.nedge - 1;
+    if (!g.ready) return -1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (g.edge[mid].key == key) return mid;
+        if (g.edge[mid].key < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}

@@ -135,6 +135,18 @@ int  td5_roam_route_graph_snap_edge(double px, double pz, double max_m, int *edg
  * ARM order, up to cap. Returns the arm count (>= 1), 0 when the cluster has no signal. */
 int  td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int cap);
 int  td5_roam_route_graph_nsignal(void);
+/* [F10] edge index of an edge key, -1 when unknown */
+int  td5_roam_route_graph_edge_index(uint64_t key);
+/* [F10] ONE leg between two PLACE points over the planner graph (the cops' pursuit path): both ends snapped
+ * within snap_m metres; (dir_x, dir_z) the start's heading (0, 0 = leave either way along the snapped street;
+ * a one-way taken the wrong way leaves either way); ignore_ow 1 = one-way streets usable both ways (a pursuing cop
+ * close to its target); edge_ok NULL or a per-edge-index mask the leg stays on (the
+ * snapped ends' own edges are always usable). One-way respected, no U-turn except at a dead end, like a route
+ * leg. The polyline is a DRIVER'S line: td5_roam_ai.c's connector and median jogs are taken out (a divided avenue's
+ * cluster centre sits in the median). Writes a malloc'd polyline (place frame; caller free()s px and pz) and its length.
+ * 1 on success. */
+int  td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, double tx, double tz, double snap_m,
+                              const uint8_t *edge_ok, int ignore_ow, double **px, double **pz, int *npt, double *len_m);
 
 /* ---- the route (one per roam session) ---------------------------------------- */
 void td5_roam_route_reset(void);                     /* clear waypoints, result, undo */

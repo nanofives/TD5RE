@@ -32,6 +32,8 @@
 #include "td5_ai.h"    /* td5_ai_traffic_get_draw_alpha (dynamic-traffic fade) */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-SFX trigger (Item #12) */
 #include "td5_horns.h"   /* [SELECTABLE HORNS] catalogue, for the dev preview probe */
+#include "td5_roam_mode.h" /* [GEO FREE ROAM F10] the roam cops drive the siren in a roam session */
+#include "td5_roam_cops.h"
 
 /* Full actor struct needed for field-level access (engine speed, slip, position) */
 #include "../../../re/include/td5_actor_struct.h"
@@ -1158,12 +1160,17 @@ void td5_sound_stop_tracked_vehicle_audio(void)
 void td5_sound_update_police_siren(void)
 {
     int nearest;
+    if (td5_roam_active()) {
+        /* [GEO FREE ROAM F10] the roam cops: the nearest pursuer carries the one siren voice */
+        nearest = td5_roam_cops_siren_slot(s_listener_pos[0][0], s_listener_pos[0][2]);
+    } else {
     /* POLICE option off -> cops are silent. */
     if (!g_td5.special_encounter_enabled) return;
     /* Cop Chase game mode drives the siren via its own horn-toggle path. */
     if (td5_game_is_wanted_mode()) return;
 
     nearest = td5_ai_nearest_chasing_cop(s_listener_pos[0][0], s_listener_pos[0][2]);
+    }
     if (nearest < 0) {
         /* No active chase -> stop the siren (begin fade-out). Just leaving it
          * un-refreshed didn't reliably silence it, so stop it explicitly. */
