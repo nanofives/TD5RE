@@ -588,6 +588,22 @@ static void driver_build_path_table(void)
  * Per-race init
  * ---------------------------------------------------------------------- */
 
+/* [P4] One driver's personality from (slot, difficulty tier) alone. Shared with the free-roam
+ * route driver (td5_roam_ai.c, roam F7) so an opponent has the same character in both. */
+void td5_ai_driver_persona(int slot, int tier, float *skill, float *aggression,
+                           float *consistency, float *line_bias)
+{
+    float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
+    uint32_t h = drv_hash((uint32_t)slot * 2654435761u + (uint32_t)(tier + 1) * 40503u);
+    float sk = drv_clampf(base + ((float)(h & 0xFFFF) / 65535.0f - 0.5f) * 0.24f, 0.12f, 0.99f);
+    *skill      = sk;
+    *aggression = 0.25f + (float)((h >> 16) & 0xFF) / 255.0f * 0.70f;
+    /* consistency correlates with skill (aces make fewer mistakes) */
+    *consistency = drv_clampf(
+        (0.55f + (float)((h >> 8) & 0xFF) / 255.0f * 0.40f) * 0.6f + sk * 0.4f, 0.40f, 0.97f);
+    *line_bias  = ((float)((h >> 1) & 0x3FF) / 1023.0f - 0.5f) * 2.0f;
+}
+
 void td5_ai_driver_race_init(void)
 {
     driver_read_knobs();
@@ -616,17 +632,9 @@ void td5_ai_driver_race_init(void)
 
     /* [P4] Derive per-driver personalities from (slot, difficulty tier). */
     int tier = g_td5.difficulty_tier;
-    float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
-    for (int s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
-        uint32_t h = drv_hash((uint32_t)s * 2654435761u + (uint32_t)(tier + 1) * 40503u);
-        float sk = drv_clampf(base + ((float)(h & 0xFFFF) / 65535.0f - 0.5f) * 0.24f, 0.12f, 0.99f);
-        s_persona[s].skill      = sk;
-        s_persona[s].aggression = 0.25f + (float)((h >> 16) & 0xFF) / 255.0f * 0.70f;
-        /* consistency correlates with skill (aces make fewer mistakes) */
-        s_persona[s].consistency = drv_clampf(
-            (0.55f + (float)((h >> 8) & 0xFF) / 255.0f * 0.40f) * 0.6f + sk * 0.4f, 0.40f, 0.97f);
-        s_persona[s].line_bias  = ((float)((h >> 1) & 0x3FF) / 1023.0f - 0.5f) * 2.0f;
-    }
+    for (int s = 0; s < TD5_MAX_RACER_SLOTS; s++)
+        td5_ai_driver_persona(s, tier, &s_persona[s].skill, &s_persona[s].aggression,
+                              &s_persona[s].consistency, &s_persona[s].line_bias);
     TD5_LOG_I(LOG_TAG, "ai_driver_race_init: DRIVER mode, path_valid=%d tier=%d "
               "(s0 skill=%.2f aggr=%.2f cons=%.2f line=%.2f)",
               s_pt_valid, tier, (double)s_persona[0].skill, (double)s_persona[0].aggression,

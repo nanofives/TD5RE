@@ -52,6 +52,7 @@ typedef struct {
     int laps;        /* 1 for a sprint (circuits are F9) */
     int traffic;     /* stored, inert until F8 */
     int cops;        /* stored, inert until F10 */
+    int opponents;   /* [F7] AI racers 0..5 (td5_roam_ai.h); 0 = a solo sprint */
 } TD5_RoamRaceSetup;
 
 /* The last finished (or abandoned) run, for the results panel and the self-test. */
@@ -68,12 +69,18 @@ typedef struct {
     long     wrong_way_ticks, off_route_ticks;
     double   max_lateral_m;          /* farthest the car got from the route polyline    */
     int      setup_traffic, setup_cops;
+    /* [F7] the field: player + opponents in finishing order (rank 1 first), refreshed every tick */
+    int      nfield;
+    int      field_slot[6];
+    long     field_ticks[6];          /* finish time, 0 = not finished (yet)           */
+    double   field_along_m[6];
+    int      player_rank;             /* 1-based, 0 = solo                             */
 } TD5_RoamRaceResult;
 
 /* ---- state ------------------------------------------------------------------ */
 int  td5_roam_race_state(void);
 int  td5_roam_race_running(void);            /* COUNTDOWN or RACING */
-int  td5_roam_race_barriers_live(void);      /* barrier collision on (COUNTDOWN, RACING) */
+int  td5_roam_race_barriers_live(void);      /* barrier collision on (COUNTDOWN, RACING; FINISHED while opponents still run) */
 void td5_roam_race_reset(void);              /* roam session start / end: back to OFF, barriers cleared */
 const TD5_RoamRaceResult *td5_roam_race_result(void);
 /* Distance along the route (m), its length, lateral offset (m). 0 when not racing. */
@@ -124,8 +131,10 @@ void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 
 #ifndef TD5RE_RELEASE
 /* ---- DEV: the `roam-sprint` self-test (td5_roam_race_drive.c) ----------------- */
-#define TD5_RSPRINT_FULL   1
-#define TD5_RSPRINT_SMOKE  2
+#define TD5_RSPRINT_FULL      1
+#define TD5_RSPRINT_SMOKE     2
+#define TD5_RSPRINT_FULL_AI   3   /* [F7] 5 AI on a 3 km casco sprint, no scripted wrong turns */
+#define TD5_RSPRINT_SMOKE_AI  4   /* [F7] the smoke sprint with 5 AI */
 /* Arm before the roam session launches. The test plans + saves its route once the planner graph is
  * ready, loads it back by name, starts the race and drives it (pure pursuit on the polyline), with
  * scripted wrong turns into closed mouths that must be stopped by a barrier. */

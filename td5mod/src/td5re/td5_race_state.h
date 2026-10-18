@@ -47,6 +47,9 @@ int  td5_game_is_replay_active(void);
 int  td5_game_is_wanted_mode(void);
 int  td5_game_is_pause_menu_active(void);
 int  td5_game_resume_countdown_ticks(void);   /* [GEO FREE ROAM F6-B] resume / roam-sprint 3-2-1 ticks left */
+/* [GEO FREE ROAM F7] the one roam-only MUTATOR here: slot 0 + n_ai opponents live, the rest parked.
+ * No-op (0) outside a roam session. Returns the field size set. */
+int  td5_game_roam_set_racer_field(int n_ai);
 int  td5_game_cop_chase_is_cop(int slot);
 int  td5_game_cop_chase_is_suspect(int slot);
 /* Police car by IDENTITY (roster 33-36 TD5, 46-49 TD6 cp1..cp4), not by role. */

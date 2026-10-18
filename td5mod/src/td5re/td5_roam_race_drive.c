@@ -44,6 +44,7 @@
 #include "td5_roam_route_ui.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_race.h"
+#include "td5_roam_ai.h"          /* [F7] the AI rows: standings, braking, counters */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -63,6 +64,16 @@ static const double k_smoke_wp[][2] = {
     { -34.92790, -57.95408 },     /* START  Diagonal 74 nb, between Calle 58 and Calle 57 */
     { -34.92420, -57.95432 },     /* FINISH Diagonal 74 nb, between Calle 55 and Calle 54 */
 };
+/* [F7] the AI sprint: the FULL route started 580 m further south on Diagonal 74 (between the two
+ * Hipolito Yrigoyen crossings, 85 m of clear carriageway behind START for the grid), ~3.1 km */
+static const double k_full_ai_wp[][2] = {
+    { -34.93215, -57.95397 },     /* START  Diagonal 74 nb, between the Yrigoyen crossings  */
+    { -34.92048, -57.95358 },     /* via    Calle 12, Plaza Moreno east side              */
+    { -34.90950, -57.95520 },     /* FINISH Diagonal 74 nb, past the Plaza Italia ring    */
+};
+#define SD_IS_AI(m) ((m) == TD5_RSPRINT_FULL_AI || (m) == TD5_RSPRINT_SMOKE_AI)
+#define SD_IS_SMOKE(m) ((m) == TD5_RSPRINT_SMOKE || (m) == TD5_RSPRINT_SMOKE_AI)
+#define SD_AI_N 5
 
 typedef struct {
     int    barrier;               /* index in td5_roam_barriers()                         */
@@ -110,6 +121,8 @@ static struct {
     char     shot_done[8][24];
     int      nshot;
     int      exit_ok;             /* ENTER on the results panel returned to free roam, barriers cleared */
+    int      rear_cd;             /* [F7] rear view held on the grid (the field is behind START) */
+    int      ai_done;             /* [F7] every opponent through the line before the results ENTER */
 } D;
 
 /* one frame dump per name: <log dir>roam_sprint_<name>.png */
@@ -149,9 +162,10 @@ static void sd_dump_route(void)
 
 int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
 {
-    const double (*src)[2] = mode == TD5_RSPRINT_SMOKE ? k_smoke_wp : k_full_wp;
-    const int n = mode == TD5_RSPRINT_SMOKE ? (int)(sizeof k_smoke_wp / sizeof k_smoke_wp[0])
-                                            : (int)(sizeof k_full_wp / sizeof k_full_wp[0]);
+    const double (*src)[2] = SD_IS_SMOKE(mode) ? k_smoke_wp : (mode == TD5_RSPRINT_FULL_AI ? k_full_ai_wp : k_full_wp);
+    const int n = SD_IS_SMOKE(mode) ? (int)(sizeof k_smoke_wp / sizeof k_smoke_wp[0])
+                : mode == TD5_RSPRINT_FULL_AI ? (int)(sizeof k_full_ai_wp / sizeof k_full_ai_wp[0])
+                                              : (int)(sizeof k_full_wp / sizeof k_full_wp[0]);
     int i;
     for (i = 0; i < n && i < max; i++) { ll[i][0] = src[i][0]; ll[i][1] = src[i][1]; }
     return n;
@@ -164,15 +178,19 @@ void td5_roam_sprint_test_arm(int mode)
     D.active_wt = -1;
     D.hint = -1;
     D.ch_hint = ROAM_PRIM_NONE;
-    D.want_wt = mode == TD5_RSPRINT_SMOKE ? 1 : 2;
+    D.want_wt = SD_IS_AI(mode) ? 0 : (mode == TD5_RSPRINT_SMOKE ? 1 : 2);   /* [F7] AI rows: no wrong turns */
     D.shots = td5_env_int("TD5RE_ROAM_SPRINT_SHOTS", 0, 0, 1);
-    snprintf(D.route_name, sizeof D.route_name, "%s", mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : "selftest_sprint");
+    td5_roam_ai_force_player_spot(SD_IS_AI(mode) ? 3 : -1);   /* [F7] mid-pack, repeatable (play: random) */
+    snprintf(D.route_name, sizeof D.route_name, "%s",
+             mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
+             : mode == TD5_RSPRINT_SMOKE_AI ? "selftest_sprint_ai_smoke" : "selftest_sprint");
 }
 
 void td5_roam_sprint_test_disarm(void)
 {
     if (D.trc) fclose(D.trc);
     memset(&D, 0, sizeof D);
+    td5_roam_ai_force_player_spot(-1);
 }
 int  td5_roam_sprint_test_mode(void) { return D.mode; }
 int  td5_roam_sprint_test_done(void) { return D.mode && D.done; }
@@ -358,6 +376,26 @@ static void sd_pick_wrong_turns(void)
     }
 }
 
+/* [F7] the AI rows' frame dumps while racing: 3_pack = two or more opponents 8..90 m ahead of the camera
+ * car (after 5 s); 5_ai_braking = an opponent 10..70 m ahead braking within 30 m of a bend tighter than
+ * 50 km/h */
+static void sd_ai_shots(void)
+{
+    TD5_RoamStanding st[6];
+    double me = 0.0;
+    int n, i, ahead = 0;
+    if (!D.shots) return;
+    n = td5_roam_ai_standings(st, 6);
+    for (i = 0; i < n; i++) if (st[i].slot == 0) me = st[i].along_m;
+    for (i = 0; i < n; i++) {
+        const double d = st[i].along_m - me;
+        if (st[i].slot == 0 || st[i].finished) continue;
+        if (d > 8.0 && d < 90.0) ahead++;
+        if (d > 10.0 && d < 70.0 && td5_roam_ai_braking_for_bend(st[i].slot, 30.0)) sd_shot("5_ai_braking");
+    }
+    if (ahead >= 2 && (long)g_td5.simulation_tick_counter - D.t_go > 150) sd_shot("3_pack");
+}
+
 /* standalone dev run (no self-test director): TD5RE_ROAM_SPRINT_TEST=full|smoke with --Roam=1
  * --RoamSpawn=<the route START> arms the same script, logs the verdict and quits */
 static struct { int checked, driven, reported; } E;
@@ -367,8 +405,10 @@ void td5_roam_sprint_test_frame(void)
     if (!E.checked && !D.mode && td5_roam_active()) {
         const char *m = getenv("TD5RE_ROAM_SPRINT_TEST");
         E.checked = 1;
-        if (m && (!strcmp(m, "full") || !strcmp(m, "smoke"))) {
-            td5_roam_sprint_test_arm(!strcmp(m, "smoke") ? TD5_RSPRINT_SMOKE : TD5_RSPRINT_FULL);
+        if (m && (!strcmp(m, "full") || !strcmp(m, "smoke") || !strcmp(m, "ai") || !strcmp(m, "ai_smoke"))) {
+            td5_roam_sprint_test_arm(!strcmp(m, "smoke") ? TD5_RSPRINT_SMOKE : !strcmp(m, "ai") ? TD5_RSPRINT_FULL_AI
+                                     : !strcmp(m, "ai_smoke") ? TD5_RSPRINT_SMOKE_AI : TD5_RSPRINT_FULL);
+            td5_roam_ai_force_player_spot(-1);   /* [F7] standalone: the player's grid spot is drawn as in play */
             E.driven = 1;
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
         }
@@ -410,6 +450,7 @@ void td5_roam_sprint_test_frame(void)
             TD5_RoamPhysStats st;
             memset(&s, 0, sizeof s);
             s.laps = 1; s.traffic = 1; s.cops = 0;
+            s.opponents = SD_IS_AI(D.mode) ? SD_AI_N : 0;   /* [F7] */
             if (!td5_roam_race_start(&s)) { sd_finish("race start refused", 1); return; }
             td5_roam_barriers_stats(&D.bst);
             td5_roam_physics_stats(&st);
@@ -428,7 +469,14 @@ void td5_roam_sprint_test_frame(void)
         }
         break;
     case 3:
-        if (td5_roam_race_state() == TD5_RRACE_COUNTDOWN && td5_game_resume_countdown_ticks() > 0 &&
+        if (SD_IS_AI(D.mode)) {
+            /* [F7] the grid seen through the rear view (the field is behind START), the pack ahead, an
+             * opponent braking for a bend ahead of the camera car */
+            const int cd = td5_game_resume_countdown_ticks();
+            D.rear_cd = td5_roam_race_state() == TD5_RRACE_COUNTDOWN && cd > 30 && cd <= 75;
+            if (td5_roam_race_state() == TD5_RRACE_COUNTDOWN && cd > 30 && cd <= 45) sd_shot("2_grid");
+            if (td5_roam_race_state() == TD5_RRACE_RACING) sd_ai_shots();
+        } else if (td5_roam_race_state() == TD5_RRACE_COUNTDOWN && td5_game_resume_countdown_ticks() > 0 &&
             td5_game_resume_countdown_ticks() <= 45)
             sd_shot("2_countdown");
         if (td5_roam_race_state() == TD5_RRACE_RACING && D.along_s > D.length_m * 0.30) sd_shot("3_midrace");
@@ -443,6 +491,16 @@ void td5_roam_sprint_test_frame(void)
         }
         break;
     case 4:   /* results panel up: frame dump, then ENTER (keep roaming) must end the race at the finish */
+        if (SD_IS_AI(D.mode) && !D.ai_done) {
+            /* [F7] every opponent through the line (or 6 minutes of frames) before the results are judged */
+            if (!td5_roam_ai_racing() || D.phase_frames > 21600) {
+                D.ai_done = 1;
+                TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] opponents %s after the player's finish (%ld frames)",
+                          td5_roam_ai_racing() ? "STILL RUNNING" : "all through", D.phase_frames);
+                D.phase_frames = 0;
+            }
+            break;
+        }
         if (D.phase_frames == 60) sd_shot("6_results");
         if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
         if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
@@ -566,6 +624,7 @@ uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
 {
     const long last = D.tick_last;
     const uint32_t bits = sd_bits(a);
+    if (D.rear_cd && td5_roam_race_state() == TD5_RRACE_COUNTDOWN) return (uint32_t)TD5_INPUT_REAR_VIEW;   /* [F7] */
     if (D.trc && a && D.tick_last != last) {
         double along, lat;
         int32_t ox, oz;
@@ -700,6 +759,58 @@ static uint32_t sd_bits(TD5_Actor *a)
 
 /* ------------------------------------------------------------ verdict ------------- */
 
+/* [F7] the AI rows' verdict line: finishing order with the gap to the winner, the opponents' counters */
+static int sd_ai_verdict(char *note, size_t n, const char *bad, const TD5_RoamRaceResult *res,
+                         const TD5_RoamRaceWallStats *ws, long pinch, long resc, long tele)
+{
+    TD5_RoamAiStats as;
+    char ord[160] = "", full[400] = "";
+    size_t ol = 0, fl = 0;
+    int i;
+    const long win = res->nfield > 0 ? res->field_ticks[0] : 0;
+    td5_roam_ai_stats(&as);
+    for (i = 0; i < res->nfield && i < 6; i++) {
+        const int slot = res->field_slot[i];
+        const long ft = res->field_ticks[i];
+        char who[8];
+        if (slot == 0) snprintf(who, sizeof who, "YOU");
+        else snprintf(who, sizeof who, "C%d", slot);
+        if (ft <= 0) {
+            if (ol < sizeof ord) ol += (size_t)snprintf(ord + ol, sizeof ord - ol, "%s%d.%s DNF", i ? " " : "", i + 1, who);
+            if (fl < sizeof full) fl += (size_t)snprintf(full + fl, sizeof full - fl, " %d:%s=DNF(%.0fm)", i + 1, who,
+                                                         res->field_along_m[i]);
+        } else if (i == 0) {
+            const long cs = (ft * 100 + 15) / 30;
+            if (ol < sizeof ord) ol += (size_t)snprintf(ord + ol, sizeof ord - ol, "1.%s %ld:%02ld.%02ld", who, cs / 6000,
+                                                        (cs / 100) % 60, cs % 100);
+            if (fl < sizeof full) fl += (size_t)snprintf(full + fl, sizeof full - fl, " 1:%s=%ld", who, ft);
+        } else {
+            const long g = ((ft - win) * 100 + 15) / 30;
+            if (ol < sizeof ord) ol += (size_t)snprintf(ord + ol, sizeof ord - ol, " %d.%s+%ld.%02ld", i + 1, who, g / 100, g % 100);
+            if (fl < sizeof full) fl += (size_t)snprintf(full + fl, sizeof full - fl, " %d:%s=%ld(+%.2fs)", i + 1, who, ft,
+                                                         (double)(ft - win) / 30.0);
+        }
+    }
+    if (bad[0]) snprintf(note, n, "sprint-ai FAIL: %.100s", bad);
+    else snprintf(note, n, "%.2f km, %d jn, AI %d/%d fin, stuck 0 | %.80s", D.length_m / 1000.0, D.nkeys, as.finished, as.n, ord);
+    TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] VERDICT %s (AI): route='%s' length=%.1f m junctions=%d diagonal=%d plaza=%d order:%s | "
+              "opponents=%d finished=%d stuck_long=%ld still_max=%.1f s recoveries=%ld passes=%ld follow_ticks=%ld "
+              "lane_shrinks=%ld brake_ticks=%ld vmax=%.0f km/h max_lateral=%.1f m grid_rows=%d single=%d | barrier hits=%ld "
+              "contacts=%ld chassis_past=%ld max_pen=%.2f m | pinches=%ld rescues=%ld teleports=%ld player stuck=%ld %s",
+              bad[0] ? "FAIL" : "PASS", D.route_name, D.length_m, D.nkeys, D.saw_diag, D.saw_plaza, full, as.n, as.finished,
+              as.stuck_long, as.still_max_ticks / 30.0, as.recoveries, as.passes, as.follow_ticks, as.lane_shrinks,
+              as.brake_ticks, as.vmax_kmh, as.max_lateral_m, as.grid_rows, as.grid_single, ws->hits, ws->contacts,
+              ws->chassis_past, ws->max_pen_m, pinch, resc, tele, D.stuck_events, bad);
+    for (i = 0; i < as.n; i++) {
+        int slot;
+        long ft, sm, rc;
+        if (td5_roam_ai_car_info(i, &slot, &ft, &sm, &rc))
+            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT]   opponent slot %d: finish %ld ticks, longest still %.1f s, recoveries %ld",
+                      slot, ft, sm / 30.0, rc);
+    }
+    return bad[0] ? 2 : 0;
+}
+
 int td5_roam_sprint_test_verdict(char *note, size_t n)
 {
     const TD5_RoamRaceResult *res = td5_roam_race_result();
@@ -708,7 +819,8 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     char bad[120] = "", t[32];
     size_t bl = 0;
     int i, blocked = 0;
-    const int want_jn = D.mode == TD5_RSPRINT_SMOKE ? 3 : 8;
+    const int want_jn = SD_IS_SMOKE(D.mode) ? 3 : (D.mode == TD5_RSPRINT_FULL_AI ? 10 : 8);
+    const int full = D.mode == TD5_RSPRINT_FULL || D.mode == TD5_RSPRINT_FULL_AI;
     long pinch, resc, tele;
     if (!D.mode) { snprintf(note, n, "roam-sprint not armed"); return 2; }
     td5_roam_race_wall_stats(&ws);
@@ -720,8 +832,8 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     if (res->finished && !D.exit_ok) SD_BAD("results ENTER did not return to free roam; ");
     if (D.saved_hash != D.loaded_hash) SD_BAD("reload hash %08X != %08X; ", (unsigned)D.loaded_hash, (unsigned)D.saved_hash);
     if (D.nkeys < want_jn) SD_BAD("%d junctions < %d; ", D.nkeys, want_jn);
-    if (D.mode == TD5_RSPRINT_FULL && !D.saw_diag) SD_BAD("no diagonal; ");
-    if (D.mode == TD5_RSPRINT_FULL && !D.saw_plaza) SD_BAD("no plaza; ");
+    if (full && !D.saw_diag) SD_BAD("no diagonal; ");
+    if (full && !D.saw_plaza) SD_BAD("no plaza; ");
     if (D.nwt < D.want_wt) SD_BAD("%d/%d wrong turns planned; ", D.nwt, D.want_wt);
     if (blocked < D.nwt) SD_BAD("%d/%d wrong turns blocked; ", blocked, D.nwt);
     if (ws.chassis_past) SD_BAD("chassis past a barrier %ld ticks; ", ws.chassis_past);
@@ -729,7 +841,16 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     if (resc) SD_BAD("rescues %ld; ", resc);
     if (tele) SD_BAD("teleports %ld; ", tele);
     if (D.stuck_events) SD_BAD("stuck %ld; ", D.stuck_events);
+    if (SD_IS_AI(D.mode)) {
+        /* [F7] every opponent placed and through the line, none stuck > 5 s */
+        TD5_RoamAiStats as;
+        td5_roam_ai_stats(&as);
+        if (as.n < SD_AI_N) SD_BAD("grid %d/%d opponents; ", as.n, SD_AI_N);
+        if (as.finished < as.n) SD_BAD("opponents finished %d/%d; ", as.finished, as.n);
+        if (as.stuck_long) SD_BAD("opponents stuck>5s %ld; ", as.stuck_long);
+    }
 #undef SD_BAD
+    if (SD_IS_AI(D.mode)) return sd_ai_verdict(note, n, bad, res, &ws, pinch, resc, tele);
     {
         long ct = res->ticks;
         const long cs = (ct * 100 + 15) / 30;

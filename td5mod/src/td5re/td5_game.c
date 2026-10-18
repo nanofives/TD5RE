@@ -45,6 +45,7 @@
 #include "td5_roam_route_ui.h" /* GEO FREE ROAM route planner (F5-A): keys, map overlay, guidance */
 #include "td5_roam_barrier.h"  /* GEO FREE ROAM route barriers (F6-A): panels + chevrons */
 #include "td5_roam_race.h"     /* GEO FREE ROAM sprint race (F6-B): flow, progress, results, barrier layer */
+#include "td5_roam_ai.h"       /* GEO FREE ROAM AI racers (F7): opponents on the route, parked while roaming */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -5761,6 +5762,9 @@ int td5_game_init_race_session(void) {
         td5_benchmark_init_capture();
     }
 
+    /* [GEO FREE ROAM F7] the opponents' cars are loaded: park them until a sprint asks (self-gated) */
+    td5_roam_ai_session_init();
+
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
 
@@ -7877,6 +7881,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         /* [GEO FREE ROAM F2-A] one human racer, no AI/traffic/rubber band/cops: gating the
          * whole tick also removes the phantom-peer search (every slot is span -1, dist 0) */
         if (!td5_roam_active()) td5_ai_tick();
+        else td5_roam_ai_tick();   /* [GEO FREE ROAM F7] the opponents' route driver (no-op without a race) */
 
         /* [S26 2026-06-05] Race-end auto-brake for the HUMAN player(s). Once the
          * finish line triggers the end transition (race_end_fade_state > 0), the
@@ -12741,6 +12746,32 @@ int td5_game_is_wanted_mode(void) { return g_td5.wanted_mode_enabled; }
 int td5_game_is_pause_menu_active(void) { return s_pause_menu_active; }
 /* [GEO FREE ROAM F6-B] sim ticks left in the resume / roam-sprint 3-2-1 freeze (0 = none) */
 int td5_game_resume_countdown_ticks(void) { return s_resume_countdown_ticks; }
+
+/* [GEO FREE ROAM F7] The roam racer field: slot 0 (the player) plus `n_ai` AI racers in slots
+ * 1..n_ai. A roam session loads its opponents' cars at race init (td5_roam_apply_overrides asks for
+ * them) and then PARKS them: every racer slot past the field is disabled (state 3) and the actor
+ * count stops at the field, so physics, contacts, render, the tile stream and every other loop
+ * stop at slot 0 until a sprint asks for opponents. No-op outside a roam session. Returns the field
+ * size actually set (capped by the slots the session loaded). */
+int td5_game_roam_set_racer_field(int n_ai)
+{
+    int i, loaded = g_racer_count;
+    if (!td5_roam_active() || !g_actor_table_base) return 0;
+    if (loaded > TD5_LEGACY_RACE_SLOTS) loaded = TD5_LEGACY_RACE_SLOTS;
+    if (n_ai < 0) n_ai = 0;
+    if (n_ai > loaded - 1) n_ai = loaded - 1;
+    if (n_ai < 0) n_ai = 0;
+    for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_slot_state[i].state = (uint8_t)(i <= n_ai ? 0 : 3);
+        s_slot_state[i].companion_1 = 0;
+        s_slot_state[i].companion_2 = 0;
+        if (i < TD5_LEGACY_RACE_SLOTS) td5_physics_set_race_slot_state(i, 0);
+    }
+    g_td5.total_actor_count = 1 + n_ai;
+    TD5_LOG_I(LOG_TAG, "roam: racer field = player + %d AI (actors %d, cars loaded for %d)", n_ai,
+              g_td5.total_actor_count, loaded);
+    return 1 + n_ai;
+}
 /* [COP-CHASE 2026-06-21] 1 during the pre-race countdown (camera-transition timer
  * still running, cars held); 0 once the race is running. Lets the wanted-objective
  * banner hold solid through the countdown instead of burning its display timer. */

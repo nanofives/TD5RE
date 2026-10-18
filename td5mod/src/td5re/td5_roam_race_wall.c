@@ -36,6 +36,7 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_race.h"
+#include "td5_roam_ai.h"        /* [F7] finished opponents pass through */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -224,6 +225,7 @@ int td5_roam_race_wall_probe(int slot, int probe, int32_t x, int32_t z, int32_t 
     double best_pen = 0.0, bnx = 0.0, bnz = 0.0;
     int i, hit = 0;
     if (slot < 0 || slot >= RW_RACERS || !td5_roam_race_barriers_live()) return 0;
+    if (slot > 0 && td5_roam_ai_slot_finished(slot)) return 0;   /* [F7] a finished opponent is not racing */
     if (!rw_sync()) return 0;
     if (probe == 0) rw_chassis_check(slot);
     for (i = 0; i < W.nseg; i++) {

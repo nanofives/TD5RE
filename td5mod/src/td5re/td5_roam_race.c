@@ -36,6 +36,7 @@
 #include "td5_roam_route_ui.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_race.h"
+#include "td5_roam_ai.h"           /* [F7] the opponents: grid, driver, positions */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -63,7 +64,7 @@
 #define K_LEFT   0xCB
 #define K_RIGHT  0xCD
 
-enum { ROW_TYPE, ROW_LAPS, ROW_TRAFFIC, ROW_COPS, ROW_START, ROW_CANCEL, ROW_N };
+enum { ROW_TYPE, ROW_LAPS, ROW_OPP, ROW_TRAFFIC, ROW_COPS, ROW_START, ROW_CANCEL, ROW_N };
 
 static struct {
     int      state;
@@ -94,6 +95,9 @@ static struct {
     /* requests the game takes */
     int      req_pause_close, req_countdown;
     int      cd_armed, rearm;
+    /* [F7] the field's clock (runs on past the player's finish while opponents race) */
+    long     clock;
+    int      bar_hold;             /* the player finished, barriers stay up for the opponents */
     /* messages */
     uint32_t go_ms, split_ms;
     char     split_txt[96];
@@ -183,7 +187,10 @@ static void rr_best_save(void)
 
 int td5_roam_race_state(void) { return R.state; }
 int td5_roam_race_running(void) { return R.state == TD5_RRACE_COUNTDOWN || R.state == TD5_RRACE_RACING; }
-int td5_roam_race_barriers_live(void) { return td5_roam_active() && td5_roam_race_running(); }
+int td5_roam_race_barriers_live(void)
+{
+    return td5_roam_active() && (td5_roam_race_running() || (R.state == TD5_RRACE_FINISHED && R.bar_hold));
+}
 const TD5_RoamRaceResult *td5_roam_race_result(void) { return &R.res; }
 int td5_roam_race_setup_open(void) { return R.state == TD5_RRACE_SETUP; }
 
@@ -201,9 +208,11 @@ static void rr_to_off(const char *why)
         TD5_LOG_I(LOG_TAG, "ROAM_RACE: -> OFF (%s)", why);
     R.state = TD5_RRACE_OFF;
     R.req_pause_close = 0; R.req_countdown = 0; R.cd_armed = 0; R.rearm = 0;
+    R.bar_hold = 0;
     td5_roam_race_wall_end();
     td5_roam_barriers_set_visible(0);
     td5_roam_barriers_clear();
+    td5_roam_ai_race_end();          /* [F7] the opponents are parked again */
 }
 
 void td5_roam_race_reset(void)
@@ -212,6 +221,23 @@ void td5_roam_race_reset(void)
     rr_free_route();
     memset(&R.res, 0, sizeof R.res);
     R.setup.laps = 1;
+    R.setup.opponents = -1;          /* [F7] the default, once the session knows what it loaded */
+}
+
+/* [F7] the field (player + opponents) into the result, rank order */
+static void rr_field_snapshot(void)
+{
+    TD5_RoamStanding st[6];
+    const int n = td5_roam_ai_standings(st, 6);
+    int i;
+    if (n <= 0) return;
+    R.res.nfield = n;
+    R.res.player_rank = td5_roam_ai_player_rank();
+    for (i = 0; i < n; i++) {
+        R.res.field_slot[i] = st[i].slot;
+        R.res.field_ticks[i] = st[i].finished ? st[i].finish_ticks : 0;
+        R.res.field_along_m[i] = st[i].along_m;
+    }
 }
 
 void td5_roam_race_abandon(void)
@@ -247,6 +273,8 @@ int td5_roam_race_open_setup(void)
     if (R.state != TD5_RRACE_OFF) return 0;
     if (!td5_roam_route_ui_map_open()) td5_roam_route_ui_open_map();
     if (R.setup.laps < 1) R.setup.laps = 1;
+    if (R.setup.opponents < 0) R.setup.opponents = td5_roam_ai_default_opponents();
+    if (R.setup.opponents > td5_roam_ai_available()) R.setup.opponents = td5_roam_ai_available();
     R.cursor = ROW_START;
     R.setup_age = 0;
     R.state = TD5_RRACE_SETUP;
@@ -312,8 +340,12 @@ static int rr_take_route(void)
 static void rr_place_on_grid(void)
 {
     TD5_Actor *a = td5_game_get_actor(0);
+    int32_t px, pz;
+    int yaw;
     if (!a) return;
-    td5_roam_place_actor(0, a, R.start_px, R.start_pz, R.start_yaw);
+    /* [F7] with opponents the player stands on its drawn grid spot (START or behind it) */
+    if (td5_roam_ai_player_grid(&px, &pz, &yaw)) td5_roam_place_actor(0, a, px, pz, yaw);
+    else td5_roam_place_actor(0, a, R.start_px, R.start_pz, R.start_yaw);
 }
 
 int td5_roam_race_start(const TD5_RoamRaceSetup *s)
@@ -327,6 +359,7 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     }
     if (s) R.setup = *s;
     R.setup.laps = 1;                         /* a sprint is one run A -> B */
+    if (R.setup.opponents < 0) R.setup.opponents = td5_roam_ai_default_opponents();
     t0 = td5_plat_time_ms();
     if (!rr_take_route()) return 0;
     rr_best_load();
@@ -350,8 +383,15 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     R.along = 0.0; R.max_along = 0.0; R.lateral_m = 0.0; R.seg = 0; R.cp_next = 0;
     R.ticks = 0; R.wrong_t = 0; R.off_t = 0;
     R.split_ms = 0; R.go_ms = 0;
+    R.clock = 0; R.bar_hold = 0;
 
+    td5_roam_ai_race_end();          /* F5 from the results: the last race's field and spots go */
     rr_place_on_grid();
+    /* [F7] the opponents on the grid behind START (a short field when the street is tight) */
+    if (td5_roam_ai_race_start(R.px, R.pz, R.dist, R.npt, R.length_m, R.start_px, R.start_pz, R.start_yaw,
+                               R.setup.opponents) > 0)
+        rr_place_on_grid();          /* the player's drawn spot */
+    rr_field_snapshot();
     t_grid = td5_plat_time_ms();
     R.state = TD5_RRACE_COUNTDOWN;
     R.req_countdown = 1; R.cd_armed = 0; R.rearm = 0;
@@ -359,10 +399,11 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     if (td5_roam_route_ui_map_open()) td5_roam_route_ui_close_map();
     TD5_LOG_I(LOG_TAG, "ROAM_RACE: START route='%s' hash=%08X length=%.1f m points=%d checkpoints=%d grid place=(%d,%d) "
               "yaw=%d barriers=%d (mouth %d, turn %d, clusters %d, open arms %d, across route %d) traffic=%d cops=%d "
-              "best=%ld ticks | barrier build %u ms (stats %.0f ms, %d tiles read), grid %u ms",
+              "opponents=%d/%d best=%ld ticks | barrier build %u ms (stats %.0f ms, %d tiles read), grid %u ms",
               R.name[0] ? R.name : "UNSAVED", (unsigned)R.hash, R.length_m, R.npt, R.ncp, (int)R.start_px,
               (int)R.start_pz, R.start_yaw, nb, bs.barriers_mouth, bs.barriers_turn, bs.clusters_passed, bs.arms_open,
-              bs.across_route, R.setup.traffic, R.setup.cops, R.best_ticks, (unsigned)(t_bar - t0), bs.build_ms,
+              bs.across_route, R.setup.traffic, R.setup.cops, td5_roam_ai_count(), R.setup.opponents, R.best_ticks,
+              (unsigned)(t_bar - t0), bs.build_ms,
               bs.tiles_read, (unsigned)(t_grid - t_bar));
     return 1;
 }
@@ -404,7 +445,9 @@ static void rr_progress(TD5_Actor *a)
         const double sx = R.px[i + 1] - R.px[i], sz = R.pz[i + 1] - R.pz[i];
         const double l2 = sx * sx + sz * sz;
         double t = l2 > 0.0 ? ((cx - R.px[i]) * sx + (cz - R.pz[i]) * sz) / l2 : 0.0, qx, qz, d;
-        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+        /* [F7] behind START (a grid spot) the first segment extends back: negative distance along,
+         * the same measure as the opponents', so the grid order is right before GO */
+        if (t < 0.0 && i > 0) t = 0.0; else if (t > 1.0) t = 1.0;
         qx = R.px[i] + sx * t; qz = R.pz[i] + sz * t;
         d = (qx - cx) * (qx - cx) + (qz - cz) * (qz - cz);
         if (d < best) { best = d; bs = i; ba = R.dist[i] + t * (R.dist[i + 1] - R.dist[i]); }
@@ -439,8 +482,12 @@ static void rr_finish(void)
     R.res.best_ticks = R.best_ticks;
     R.res.new_best = R.name[0] && (R.best_ticks <= 0 || R.ticks < R.best_ticks);
     if (R.res.new_best) rr_best_save();
-    td5_roam_race_wall_end();
-    td5_roam_barriers_set_visible(0);
+    if (td5_roam_ai_racing()) {
+        R.bar_hold = 1;              /* [F7] opponents still run: their barriers stay */
+    } else {
+        td5_roam_race_wall_end();
+        td5_roam_barriers_set_visible(0);
+    }
     rr_fmt_time(t, sizeof t, R.ticks);
     rr_fmt_time(b, sizeof b, R.best_ticks);
     TD5_LOG_I(LOG_TAG, "ROAM_RACE: FINISH route='%s' time=%s (%ld ticks) best=%s%s wrong_way_ticks=%ld off_route_ticks=%ld "
@@ -452,18 +499,39 @@ static void rr_finish(void)
 void td5_roam_race_tick(void)
 {
     TD5_Actor *a;
-    if (R.state < TD5_RRACE_COUNTDOWN || R.state == TD5_RRACE_FINISHED || !td5_roam_active()) return;
+    if (!td5_roam_active()) return;
+    if (R.state == TD5_RRACE_FINISHED) {
+        /* [F7] the player is through; the field's clock runs on until every opponent is */
+        if (td5_roam_ai_racing()) {
+            R.clock++;
+            td5_roam_ai_progress(R.clock, 1, R.along, 1, R.res.ticks);
+            rr_field_snapshot();
+            if (!td5_roam_ai_racing()) TD5_LOG_I(LOG_TAG, "ROAM_RACE: every opponent is through (%ld ticks)", R.clock);
+        }
+        if (R.bar_hold && !td5_roam_ai_racing()) {
+            R.bar_hold = 0;
+            td5_roam_race_wall_end();
+            td5_roam_barriers_set_visible(0);
+        }
+        return;
+    }
+    if (R.state < TD5_RRACE_COUNTDOWN) return;
     a = td5_game_get_actor(0);
     if (!a) return;
     if (R.state == TD5_RRACE_COUNTDOWN) {
         /* the first unfrozen tick after the 3-2-1 the game armed is GO */
-        if (!R.cd_armed || R.rearm || td5_game_resume_countdown_ticks() > 0) return;
+        if (!R.cd_armed || R.rearm || td5_game_resume_countdown_ticks() > 0) {
+            td5_roam_ai_progress(0, 0, 0.0, 0, 0);   /* [F7] grid order */
+            return;
+        }
         R.state = TD5_RRACE_RACING;
         R.go_ms = td5_plat_time_ms();
         R.ticks = 0;
+        R.clock = 0;
         TD5_LOG_I(LOG_TAG, "ROAM_RACE: GO (sim tick %u)", (unsigned)g_td5.simulation_tick_counter);
     }
     R.ticks++;
+    R.clock = R.ticks;
     rr_progress(a);
     if (R.wrong_t > 15) R.res.wrong_way_ticks++;
     if (R.off_t > 10) R.res.off_route_ticks++;
@@ -490,6 +558,9 @@ void td5_roam_race_tick(void)
             break;
         }
     }
+    /* [F7] opponents' progress + positions, the player's finish (this tick) included */
+    td5_roam_ai_progress(R.clock, 1, R.along, R.state == TD5_RRACE_FINISHED, R.ticks);
+    rr_field_snapshot();
 }
 
 /* ============================================================ frame =========== */
@@ -518,9 +589,15 @@ void td5_roam_race_frame(void)
             TD5_LOG_I(LOG_TAG, "ROAM_RACE: setup closed");
             break;
         }
-        if (ke(K_UP))   { R.cursor = R.cursor <= ROW_TRAFFIC ? ROW_CANCEL : R.cursor - 1; }
-        if (ke(K_DOWN)) { R.cursor = R.cursor >= ROW_CANCEL ? ROW_TRAFFIC : R.cursor + 1; }
-        if (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER)) {
+        if (ke(K_UP))   { R.cursor = R.cursor <= ROW_OPP ? ROW_CANCEL : R.cursor - 1; }
+        if (ke(K_DOWN)) { R.cursor = R.cursor >= ROW_CANCEL ? ROW_OPP : R.cursor + 1; }
+        if (R.cursor == ROW_OPP && (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER))) {
+            /* [F7] 0..the cars this session loaded, wrapping */
+            const int mx = td5_roam_ai_available();
+            if (R.setup.opponents < 0) R.setup.opponents = td5_roam_ai_default_opponents();
+            if (ke(K_LEFT)) R.setup.opponents = R.setup.opponents <= 0 ? mx : R.setup.opponents - 1;
+            else R.setup.opponents = R.setup.opponents >= mx ? 0 : R.setup.opponents + 1;
+        } else if (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER)) {
             if (R.cursor == ROW_TRAFFIC) R.setup.traffic = !R.setup.traffic;
             else if (R.cursor == ROW_COPS) R.setup.cops = !R.setup.cops;
             else if (ke(K_ENTER) && R.cursor == ROW_START) { td5_roam_race_start(&R.setup); break; }
@@ -531,7 +608,7 @@ void td5_roam_race_frame(void)
     case TD5_RRACE_COUNTDOWN:
         /* the pause menu cancels the game's 3-2-1: run it again once the menu closes */
         if (paused && R.cd_armed && !R.req_pause_close) { R.rearm = 1; R.cd_armed = 0; }
-        if (!paused && R.rearm) { R.rearm = 0; R.req_countdown = 1; rr_place_on_grid(); }
+        if (!paused && R.rearm) { R.rearm = 0; R.req_countdown = 1; rr_place_on_grid(); td5_roam_ai_regrid(); }
         /* fall through */
     case TD5_RRACE_RACING:
         if (paused && td5_roam_route_ui_map_open() && ke(K_A)) { td5_roam_race_abandon(); break; }
@@ -604,8 +681,8 @@ void td5_roam_race_draw_setup(void)
 {
     const float W = g_render_width_f, H = g_render_height_f, S = rr_scale();
     const TD5_RouteResult *r = td5_roam_route_result();
-    const float bw = 520.0f * S, bh = 372.0f * S, bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
-    static const char *const k_rows[ROW_N] = { "TYPE", "LAPS", "TRAFFIC", "COPS", "START RACE", "CANCEL" };
+    const float bw = 520.0f * S, bh = 406.0f * S, bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
+    static const char *const k_rows[ROW_N] = { "TYPE", "LAPS", "OPPONENTS", "TRAFFIC", "COPS", "START RACE", "CANCEL" };
     char line[160], best[32];
     int i;
     if (R.state != TD5_RRACE_SETUP || W < 2.0f) return;
@@ -629,6 +706,12 @@ void td5_roam_race_draw_setup(void)
         line[0] = '\0';
         if (i == ROW_TYPE) snprintf(line, sizeof line, "SPRINT  A TO B");
         else if (i == ROW_LAPS) snprintf(line, sizeof line, "1");
+        else if (i == ROW_OPP) {
+            const int mx = td5_roam_ai_available();
+            const int n = R.setup.opponents < 0 ? td5_roam_ai_default_opponents() : R.setup.opponents;
+            if (mx > 0) snprintf(line, sizeof line, "%d   (UP TO %d)", n, mx);
+            else snprintf(line, sizeof line, "0   (NO CARS LOADED)");
+        }
         else if (i == ROW_TRAFFIC) snprintf(line, sizeof line, "%s   (COMING WITH TRAFFIC)", R.setup.traffic ? "ON" : "OFF");
         else if (i == ROW_COPS) snprintf(line, sizeof line, "%s   (COMING WITH COPS)", R.setup.cops ? "ON" : "OFF");
         if (line[0]) tx(bx + 200.0f * S, y, line, col, 18.0f * S);
@@ -638,16 +721,90 @@ void td5_roam_race_draw_setup(void)
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+/* [F7] "YOU" / "CPU n" */
+static const char *rr_racer_name(int slot, char *buf, size_t cap)
+{
+    if (slot == 0) return "YOU";
+    snprintf(buf, cap, "CPU %d", slot);
+    return buf;
+}
+
+/* [F7] the field under the results: rank, name, time and gap to the winner (or what is left to run) */
+static float rr_draw_field(float W, float y, float S)
+{
+    char line[160], t[32], nm[16];
+    int i;
+    const long win = R.res.nfield > 0 ? R.res.field_ticks[0] : 0;
+    tx_c(W * 0.5f, y, "FINISHING ORDER", 0xFFFFB400, 16.0f * S);
+    y += 24.0f * S;
+    for (i = 0; i < R.res.nfield && i < 6; i++) {
+        const int slot = R.res.field_slot[i];
+        const long ft = R.res.field_ticks[i];
+        const uint32_t col = slot == 0 ? 0xFFFFE070 : 0xFFFFFFFF;
+        if (ft > 0) {
+            rr_fmt_time(t, sizeof t, ft);
+            if (i == 0 || win <= 0) snprintf(line, sizeof line, "%d   %-6s   %s", i + 1, rr_racer_name(slot, nm, sizeof nm), t);
+            else snprintf(line, sizeof line, "%d   %-6s   %s   GAP %ld.%02ld", i + 1, rr_racer_name(slot, nm, sizeof nm), t,
+                          (ft - win) / TD5_RRACE_TICK_HZ, ((ft - win) % TD5_RRACE_TICK_HZ) * 100 / TD5_RRACE_TICK_HZ);
+        } else if (td5_roam_ai_count() > 0) {
+            const double togo = R.length_m - R.res.field_along_m[i];
+            snprintf(line, sizeof line, "%d   %-6s   RACING   %.2f KM TO GO", i + 1, rr_racer_name(slot, nm, sizeof nm),
+                     (togo > 0.0 ? togo : 0.0) / 1000.0);
+        } else {
+            snprintf(line, sizeof line, "%d   %-6s   DNF", i + 1, rr_racer_name(slot, nm, sizeof nm));
+        }
+        tx_c(W * 0.5f, y, line, col, 15.0f * S);
+        y += 22.0f * S;
+    }
+    return y;
+}
+
+/* [F7] position + the field, top right, while racing */
+static void rr_draw_positions(float W, float S)
+{
+    TD5_RoamStanding st[6];
+    const int n = td5_roam_ai_standings(st, 6);
+    char line[64], nm[16];
+    float x, y;
+    int i, rank = 0;
+    if (n <= 1) return;
+    for (i = 0; i < n; i++) if (st[i].slot == 0) rank = i + 1;
+    x = W - 230.0f * S;
+    y = 6.0f * S;
+    qb_rect(x - 8.0f * S, y - 2.0f * S, 222.0f * S, (52.0f + 20.0f * (float)n) * S, 0x90000000);
+    snprintf(line, sizeof line, "POS %d/%d", rank, n);
+    tx(x, y, line, 0xFFFFFFFF, 26.0f * S);
+    y += 38.0f * S;
+    for (i = 0; i < n; i++) {
+        const double d = st[i].along_m - R.along;
+        const uint32_t col = st[i].slot == 0 ? 0xFFFFE070 : 0xFFC8D0DA;
+        if (st[i].slot == 0) snprintf(line, sizeof line, "%d  %s", i + 1, rr_racer_name(0, nm, sizeof nm));
+        else if (st[i].finished) snprintf(line, sizeof line, "%d  %-6s  FINISHED", i + 1, rr_racer_name(st[i].slot, nm, sizeof nm));
+        else snprintf(line, sizeof line, "%d  %-6s  %.0f M %s", i + 1, rr_racer_name(st[i].slot, nm, sizeof nm), fabs(d),
+                      d >= 0.0 ? "AHEAD" : "BEHIND");   /* the vector font has no '+' glyph */
+        tx(x, y, line, col, 14.0f * S);
+        y += 20.0f * S;
+    }
+}
+
 static void rr_draw_results(float W, float H, float S)
 {
     const float bw = 520.0f * S;
     const int nrow = R.res.ncp > 1 ? R.res.ncp - 1 : 0;
-    const float bh = (210.0f + 24.0f * (float)(nrow > 8 ? 8 : nrow)) * S, bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
+    const int nfld = R.res.nfield > 1 ? R.res.nfield : 0;
+    const float bh = (210.0f + 24.0f * (float)(nrow > 8 ? 8 : nrow) + (nfld ? 34.0f + 22.0f * (float)nfld : 0.0f)) * S;
+    const float bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
     char line[160], t[32], b[32];
     int i;
     qb_rect(bx - 3.0f * S, by - 3.0f * S, bw + 6.0f * S, bh + 6.0f * S, 0xFFFFB400);
     qb_rect(bx, by, bw, bh, 0xF011161D);
-    tx_c(W * 0.5f, by + 14.0f * S, "SPRINT COMPLETE", 0xFFFFB400, 26.0f * S);
+    if (nfld && R.res.player_rank > 0) {
+        static const char *const k_ord[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
+        snprintf(line, sizeof line, "SPRINT COMPLETE   %s OF %d", k_ord[(R.res.player_rank - 1) % 6], nfld);
+        tx_c(W * 0.5f, by + 14.0f * S, line, 0xFFFFB400, 26.0f * S);
+    } else {
+        tx_c(W * 0.5f, by + 14.0f * S, "SPRINT COMPLETE", 0xFFFFB400, 26.0f * S);
+    }
     tx_c(W * 0.5f, by + 50.0f * S, R.name[0] ? R.name : "UNSAVED ROUTE", 0xFFB8C2CF, 16.0f * S);
     rr_fmt_time(t, sizeof t, R.res.ticks);
     snprintf(line, sizeof line, "TIME  %s", t);
@@ -666,6 +823,7 @@ static void rr_draw_results(float W, float H, float S)
         snprintf(line, sizeof line, "CHECKPOINT %d   %s", i + 1, t);
         tx_c(W * 0.5f, by + (172.0f + 24.0f * (float)i) * S, line, 0xFFFFFFFF, 15.0f * S);
     }
+    if (nfld) rr_draw_field(W, by + (178.0f + 24.0f * (float)(nrow > 8 ? 8 : nrow)) * S, S);
     tx_c(W * 0.5f, by + bh - 28.0f * S, "ENTER KEEP ROAMING   M ROUTE MAP   F5 RACE AGAIN", 0xFFFFE070, 15.0f * S);
 }
 
@@ -718,6 +876,7 @@ void td5_roam_race_draw_hud(void)
         }
         if (R.wrong_t > 15) tx_c(W * 0.5f, H * 0.32f, "WRONG WAY", 0xFFFF3B3B, 40.0f * S);
         else if (R.off_t > 10) tx_c(W * 0.5f, H * 0.32f, "OFF ROUTE", 0xFFFFB400, 34.0f * S);
+        rr_draw_positions(W, S);   /* [F7] */
     } else if (R.state == TD5_RRACE_FINISHED) {
         rr_draw_results(W, H, S);
     }
