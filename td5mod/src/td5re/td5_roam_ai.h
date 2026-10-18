@@ -106,6 +106,7 @@ typedef struct {
     int    grid_rows, grid_single;
     long   lap_jumps;            /* [F9a] ticks an opponent's lap count rose by more than 1 (must be 0) */
     int    circuit_laps;         /* [F9a] laps of this race (0 = sprint)                                 */
+    long   respawns;             /* [F8b] put back on the path after 4 recoveries at one spot (pinned)   */
 } TD5_RoamAiStats;
 void td5_roam_ai_stats(TD5_RoamAiStats *out);
 /* per opponent k (0..n-1): slot, finish ticks (0 = running), still-max ticks, recoveries */

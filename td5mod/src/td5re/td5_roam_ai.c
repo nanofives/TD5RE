@@ -66,10 +66,14 @@ typedef struct {
     int    rec, rec_t, slow_t, cool_t;
     long   still_t, still_max;
     long   recoveries;
+    double rec_along;                            /* [F8b] where the last recovery started     */
+    int    rec_same;                             /*       recoveries in a row at that spot    */
+    long   respawns;
     double v_t;                                  /* last target speed (trace)            */
     int    braking_bend;                         /* brake on with a bend < 50 km/h within 40 m */
     double bend_d;                               /* metres to that bend                   */
     double stop_s;                               /* where a finished car stops            */
+    double v_prev;                               /* [F8b] DEV: last tick's speed (impact log) */
     TD5_LapTrack lt;                             /* [F9a] circuit: total distance + laps  */
     int    laps_done;
     /* persona */
@@ -553,7 +557,8 @@ static void ra_place(int k)
     a->handbrake_flag = 0;
     c->steer = 0; c->thr_i = 0.0;
     c->rec = 0; c->rec_t = 0; c->slow_t = 0; c->cool_t = 0; c->still_t = 0;
-    c->di = 0; c->ri = 0; c->along = 0.0;
+    c->di = 0; c->ri = 0; c->along = 0.0; c->v_prev = 0.0;
+    c->rec_along = 0.0; c->rec_same = 0; c->respawns = 0;
     td5_roam_lap_reset(&c->lt); c->laps_done = 0;          /* [F9a] circuit: re-found on the next progress call */
     {
         double lat;
@@ -734,6 +739,44 @@ static double ra_lane_fit(double s, double off, int32_t y)
     return 0.0;
 }
 
+/* [F8b] a car pinned where reversing does not free it (roam-circuit: thrown off its lane at speed into a side
+ * street mouth, held between the race barrier and the street wall, 102 recoveries in place): put it back on its
+ * path 12..30 m behind, on its lane where that fits, clear of every car. 1 = placed. */
+static int ra_respawn(RaCar *c, TD5_Actor *a)
+{
+    double back;
+    for (back = 12.0; back <= 30.0; back += 6.0) {
+        const double s = c->s - back;
+        const double off = ra_lane_fit(s, c->lane, a->world_pos.y);
+        double x, z, lat;
+        int idx, yaw, j, ok = 1;
+        const int total = td5_game_get_total_actor_count();
+        ra_path_point(s, off, &x, &z, &idx);
+        yaw = ra_angle_of(A.tx[idx], A.tz[idx]);
+        if (!ra_footprint_ok(x, z, yaw)) continue;
+        for (j = 0; j < total && ok; j++) {
+            const TD5_Actor *b;
+            double bx, bz;
+            if (j == c->slot || td5_game_get_slot_state(j) == 3 || td5_roam_traffic_parked(j) == 1) continue;
+            b = td5_game_get_actor(j);
+            if (b && ra_place_of(b, &bx, &bz) && hypot(bx - x, bz - z) < 6.0 * RA_M) ok = 0;
+        }
+        if (!ok) continue;
+        td5_roam_place_actor(c->slot, a, (int32_t)floor(x + 0.5), (int32_t)floor(z + 0.5), yaw);
+        a->steering_command = 0; a->encounter_steering_cmd = 0; a->brake_flag = 0; a->handbrake_flag = 0;
+        c->steer = 0; c->thr_i = 0.0;
+        c->rec = 0; c->rec_t = 0; c->slow_t = 0; c->cool_t = 0; c->still_t = 0; c->v_prev = 0.0;
+        c->rec_same = 0; c->pass_dwell = 0;
+        c->s = ra_path_proj(x, z, &c->di, &lat);
+        c->lat = lat; c->off = off;
+        c->respawns++; A.stats.respawns++;
+        TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d RESPAWN %ld: pinned at %.0f m along after %ld recoveries, put back %.0f m on its path (lane %+.1f m)",
+                  c->slot, c->respawns, c->along, c->recoveries, back, off);
+        return 1;
+    }
+    return 0;
+}
+
 /* the field's speeds: a car ahead in my lane and slower -> follow cap + a pass request */
 static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
 {
@@ -787,6 +830,33 @@ static void ra_drive(RaCar *c, int hold)
         256.0 * RA_HZ / RA_M;
     if (v * 3.6 > A.stats.vmax_kmh) A.stats.vmax_kmh = v * 3.6;
     heading = ((int)a->euler_accum.yaw >> 8) & 0xFFF;
+#ifndef TD5RE_RELEASE
+    if (!hold && c->v_prev - v > 3.0) {
+        /* [F8b] DEV: an impact (over 11 km/h lost in one tick): what was hit */
+        int j, bj = -1, total = td5_game_get_total_actor_count();
+        double bd = 1e300, bv = 0.0, bf = 0.0, bl = 0.0;
+        for (j = 0; j < total; j++) {
+            const TD5_Actor *b;
+            double bx, bz, d;
+            if (j == c->slot || td5_game_get_slot_state(j) == 3 || td5_roam_traffic_parked(j) == 1) continue;
+            b = td5_game_get_actor(j);
+            if (!b || !ra_place_of(b, &bx, &bz)) continue;
+            d = hypot(bx - x, bz - z) / RA_M;
+            if (d < bd) {
+                const int i0 = ra_path_index(c->s);
+                bd = d; bj = j;
+                bv = sqrt((double)b->linear_velocity_x * b->linear_velocity_x + (double)b->linear_velocity_z * b->linear_velocity_z) /
+                     256.0 * RA_HZ / RA_M;
+                bf = ((bx - x) * A.tx[i0] + (bz - z) * A.tz[i0]) / RA_M;
+                bl = ((bx - x) * A.nx[i0] + (bz - z) * A.nz[i0]) / RA_M;
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d IMPACT %.1f -> %.1f km/h at %.0f m along (lat %.2f) | nearest actor slot %d%s at %.1f m "
+                  "(%.1f ahead, %.1f across) moving %.1f km/h", c->slot, c->v_prev * 3.6, v * 3.6, c->along, c->lat, bj,
+                  bj >= g_traffic_slot_base ? " (traffic)" : "", bd, bf, bl, bv * 3.6);
+    }
+    c->v_prev = v;
+#endif
 
     if (hold) {
         /* grid / 3-2-1: hold the brake, wheel straight */
@@ -846,10 +916,18 @@ static void ra_drive(RaCar *c, int hold)
         if (c->thr_i > 0.15 && v < 0.55) c->slow_t++;
         else if (c->slow_t > 0) c->slow_t--;
         if ((c->slow_t > 40 || (abs(herr) > 0x4E0 && v < 2.0 && c->cool_t == 0)) && c->cool_t == 0) {
+            /* [F8b] the 4th recovery within 4 m of the last one: reversing does not free it, respawn */
+            c->rec_same = (c->recoveries > 0 && fabs(c->along - c->rec_along) < 4.0) ? c->rec_same + 1 : 0;
+            c->rec_along = c->along;
+            if (c->rec_same >= 3 && ra_respawn(c, a)) return;
             c->rec = 1; c->rec_t = 0; c->slow_t = 0;
             c->recoveries++; A.stats.recoveries++;
-            TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d recovery %ld at %.0f m along (herr %d, %.1f km/h): reverse",
-                      c->slot, c->recoveries, c->along, herr, v * 3.6);
+            {   /* [F8b] where, and the nearest traffic car (a wedge against traffic or against the street?) */
+                double td = -1.0;
+                const int ts = td5_roam_traffic_nearest(a->world_pos.x, a->world_pos.z, &td, NULL);
+                TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d recovery %ld at %.0f m along (herr %d, %.1f km/h): reverse | place (%.0f,%.0f) "
+                          "nearest traffic slot %d at %.1f m", c->slot, c->recoveries, c->along, herr, v * 3.6, x, z, ts, td);
+            }
         }
     }
     if (c->rec == 1) {

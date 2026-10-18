@@ -65,6 +65,7 @@ static struct {
     int      nseg, cap;
     long     last_hit_tick[RW_RACERS];
     long     chassis_tick[RW_RACERS];
+    long     dbg_tick[RW_RACERS];          /* [F8b] DEV: contact log rate limit */
     TD5_RoamRaceWallStats st;
 } W;
 
@@ -248,6 +249,14 @@ int td5_roam_race_wall_probe(int slot, int probe, int32_t x, int32_t z, int32_t 
             best_pen = RW_THICK - d;
             bnx = -s->uz * s->side; bnz = s->ux * s->side;
             hit = 1;
+#ifndef TD5RE_RELEASE
+            if (W.dbg_tick[slot] + 30 <= (long)g_td5.simulation_tick_counter) {   /* [F8b] DEV: who touches which panel */
+                W.dbg_tick[slot] = (long)g_td5.simulation_tick_counter;
+                TD5_LOG_I(LOG_TAG, "ROAM_RACE_WALL: slot %d probe %d contact barrier %d cluster %016llx at %.1f of %.1f m, %.2f m %s "
+                          "(tick %ld)", slot, probe, i, (unsigned long long)W.src[i].cluster_key, t / RW_M, s->len / RW_M,
+                          fabs(d) / RW_M, d >= 0.0 ? "open side" : "closed side", (long)g_td5.simulation_tick_counter);
+            }
+#endif
         }
     }
     if (!hit) return 0;

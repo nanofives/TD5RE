@@ -41,6 +41,7 @@
 #include "td5_roam_ai.h"        /* [F7] the opponents' cars load with the session */
 #include "td5_asset.h"          /* [F7] td5_asset_get_car_zip_path: a known opponent car */
 #include "td5_roam_traffic.h"
+#include "td5_roam_route_ui.h"  /* [F8b] the planner session ends with the roam session */
 
 #define LOG_TAG "roam"
 
@@ -247,6 +248,7 @@ void td5_roam_end(void)
     td5_roam_race_reset();              /* [F6-B] a race never outlives its session (barriers cleared) */
     td5_roam_physics_session_end();     /* task B: frees the resident set (no-op when not loaded) */
     td5_roam_traffic_session_end();     /* [F8] the traffic pool stops answering for its slots */
+    td5_roam_route_ui_session_end();    /* [F8b] the route, its type + laps and the planner graph end with the session */
 }
 
 void td5_roam_cancel(void) { td5_roam_end(); }
