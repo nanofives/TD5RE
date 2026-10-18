@@ -2784,7 +2784,6 @@ static void tg_net_geo_arm_tails(const TG_NodeList *nl, int nspans)
 static int tg_net_geo_active(void)
 {
     if (!td5_geo_loaded() || td5_geo_route_count() < 2) return 0;
-    if (td5_env_flag_off("TD5RE_GEO_NET_SYNTH_ONLY")) return 0;
     return td5_geo_roads_sync(td5_geo_place_slug());
 }
 
@@ -2931,8 +2930,7 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
         /* [GEO PHASE 5] Real streets REPLACE the planted ones. The synthetic
          * generators that remain would each invent tarmac the place does not
          * have -- a forest lane on the R12 period, a back street closing a
-         * block the real grid already closes -- so they are opt-in
-         * (TD5RE_GEO_NET_SYNTH=1) rather than additive. */
+         * block the real grid already closes -- so they are not run at all. */
         tg_net_geo_underpasses(nl, nspans_main);
         tg_net_geo_streets(nl, nspans_main);
         tg_net_geo_frontage(nl, nspans_main);             /* [1022 P item 1] */
@@ -2941,10 +2939,6 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
         tg_pf_rehost_buildings(nl, nspans_main);          /* [1023 B item 8] real frontage on the town side of it */
         tg_net_geo_connect(nl, nspans_main);              /* [1024 G item 1] a street and the ribbon of its own way */
         tg_net_geo_arm_tails(nl, nspans_main);            /* [1030 H items 17, 21] ... and the rest of a way past its bend */
-        if (td5_env_flag_off("TD5RE_GEO_NET_SYNTH")) {
-            tg_net_back_streets();
-            tg_net_country(nl, nspans_main);
-        }
         tg_net_geo_census();
     } else {
         tg_net_city_streets(nl, nspans_main);

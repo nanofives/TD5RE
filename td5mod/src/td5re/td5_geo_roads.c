@@ -904,22 +904,6 @@ int td5_geo_roads_pavement_at(double x, double z, double max_dist,
         case TD5_GEO_SW_BOTH:  l = def;  r = def;  break;
         default:               break;              /* UNKNOWN: class default */
         }
-        /* SPECULATIVE, DEFAULT OFF. OSM defines highway `width` as the
-         * CARRIAGEWAY's width, so treating a surplus over the lane count as
-         * pavement is an inference, not a measurement -- and on this cache it
-         * would fire on 50 of 2291 ways. Behind its own knob so the claim can
-         * be tested rather than assumed. */
-        if (best->tag_width_m > 0.0
-            && td5_env_flag_off("TD5RE_GEO_SW_FROM_WIDTH")) {
-            const double carriage = (double)best->lanes * 3.5;
-            const double surplus = best->tag_width_m - carriage;
-            if (surplus > 2.0) {
-                double half = surplus * 0.5;
-                if (half > def * 1.5) half = def * 1.5;
-                if (half > l) l = half;
-                if (half > r) r = half;
-            }
-        }
         if (left_m)  *left_m  = l;
         if (right_m) *right_m = r;
     }

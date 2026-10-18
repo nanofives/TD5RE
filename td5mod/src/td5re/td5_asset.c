@@ -1326,6 +1326,24 @@ int td5_asset_read_entry_from_path(const char *entry_name,
     return result;
 }
 
+/* [GEO FREE ROAM F11b] The roam host's copy of a level file, or 0 to take the normal paths: only
+ * TEXTURES.DAT / LEVELINF.DAT (by base name, loose path or bare entry), only while a roam session
+ * hosts on a real place, and only for that place's own level number. */
+static int asset_roam_host_file(const char *entry_name, const char *zip_path, char *out, size_t cap)
+{
+    const char *base = strip_path(entry_name);
+    char dir[384], want[32];
+    int lvl;
+    if (!td5_roam_active() || !td5_roam_host_is_geo()) return 0;
+    if (td5_stricmp(base, "TEXTURES.DAT") != 0 && td5_stricmp(base, "LEVELINF.DAT") != 0) return 0;
+    lvl = td5_trackgen_roam_host_dir(td5_roam_host_track(), dir, sizeof dir);
+    if (lvl <= 0) return 0;
+    snprintf(want, sizeof want, "level%03d.zip", lvl);
+    if (td5_stricmp(strip_path(zip_path), want) != 0) return 0;
+    snprintf(out, cap, "%s/%s", dir, base);
+    return td5_plat_file_exists(out);
+}
+
 /* Raw asset fetch — every lookup path (assetsrc pack, loose file, extracted
  * level/asset, zip). Wrapped by td5_asset_open_and_read below, which is the
  * single place tracked carparam corrections are applied so that EVERY consumer
@@ -1342,6 +1360,26 @@ static void *asset_open_and_read_raw(const char *entry_name,
     }
 
     if (out_size) *out_size = 0;
+
+    /* [GEO FREE ROAM F11b] A roam session hosted on a real place reads that level's TEXTURES.DAT and
+     * LEVELINF.DAT from roam's own host dir (td5_trackgen_roam_host_dir), never from what a strip
+     * BUILD left in level09x. */
+    {
+        char host[512];
+        if (asset_roam_host_file(entry_name, zip_path, host, sizeof host)) {
+            int hsz = try_loose_file_size(host);
+            if (hsz >= 0) {
+                void *buf = malloc((size_t)hsz + 1u);
+                int nread = buf ? try_loose_file_read(host, buf, hsz) : -1;
+                if (nread >= 0) {
+                    TD5_LOG_I(LOG_TAG, "roam host: %s from %s", entry_name, host);
+                    if (out_size) *out_size = nread;
+                    return buf;
+                }
+                free(buf);
+            }
+        }
+    }
 
     /* Step 0: editable-source pack-on-load (retires binary .DAT). If an
      * editable source exists for this entry, encode it to the .DAT layout in

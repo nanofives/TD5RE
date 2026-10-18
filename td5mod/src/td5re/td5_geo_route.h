@@ -171,14 +171,9 @@ int  td5_geo_route_is_stub(void);
 int  td5_geo_route_init(void);
 void td5_geo_route_shutdown(void);
 
-/* Snap a click to the nearest drivable road of `slug` (NULL = auto-pick the
- * place whose bbox holds it). Writes the snapped point and its distance in
- * metres. Returns 1 when a road was found. The screen uses this to show where
- * a click will actually start, and to refuse one that is in the middle of a
- * field -- the same CLICK_MAX_SNAP_M test the Python selector runs. */
+/* A pin snaps to the nearest drivable road within this many metres, else the
+ * route is refused -- the same CLICK_MAX_SNAP_M test the Python selector runs. */
 #define TD5_GEO_ROUTE_SNAP_MAX_M 250.0
-int  td5_geo_route_snap(const char *slug, TD5_GeoLatLon p,
-                        TD5_GeoLatLon *out, double *dist_m);
 
 /* The place a lat/lon falls in ("" when none), by PLACE.JSON bbox and, for a
  * place with a `boundary` (an administrative area), by its polygon. When two
@@ -189,16 +184,8 @@ const char *td5_geo_route_place_at(TD5_GeoLatLon p);
  * `ring` is written as lat,lon pairs into `latlon` (room for max_pts pairs);
  * the return is the point count of that ring (more than max_pts means it was
  * truncated), 0 when the place has no such ring. */
-int  td5_geo_route_place_ring_count(const char *slug);
 int  td5_geo_route_place_boundary(const char *slug, int ring,
                                   double *latlon, int max_pts);
-
-/* The last build's result, or NULL. Same lifetime as `path` above. */
-const TD5_GeoRouteResult *td5_geo_route_last(void);
-
-/* Free the cached road graph (several MB). The screen may call this on exit so
- * a menu visit does not hold the memory for the rest of the session. */
-void td5_geo_route_drop_graph(void);
 
 /* ------------------------------------------------------- raster window ----
  * [ROAM F1-T2] One TD5GEOR1 raster, or a window of one read by seek. Exported

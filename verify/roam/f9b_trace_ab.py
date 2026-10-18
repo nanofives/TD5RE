@@ -5,7 +5,10 @@
 
 Each run goes through verify/roam/f2b_run.py (windowed, pushed back, RT off + minimum graphics, TD5RE_* cleared),
 5 opponents, auto throttle, RaceTrace capped at 400 sim ticks; the race_trace_*.csv files are compared byte for byte
-(sha256) and with f2b_tracecmp.py (render-frame column ignored)."""
+(sha256) and with f2b_tracecmp.py (render-frame column ignored).
+
+[F11b] A geo slot (61..) in a single-player AutoRace races in the free-roam city unless the strip is asked
+for, so its arm passes TD5RE_GEO_STRIP_BUILD=1 to both exes (the base exe ignores it: no such gate there)."""
 import glob, hashlib, os, subprocess, sys
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -17,8 +20,9 @@ for t in tracks:
     dirs = {}
     for name, exe in (("new", "td5re.exe"), ("base", "td5re_base.exe")):
         d = os.path.join(out, "ab_%s_%s" % (t, name))
+        geo = ["-e", "TD5RE_GEO_STRIP_BUILD=1"] if 61 <= int(t) < 61 + 12 else []
         subprocess.call([sys.executable, "-I", os.path.join(here, "f2b_run.py"), "--exe", os.path.join(root, exe), "--out", d,
-                         "--timeout", "300", "--", "--AutoRace=1", "--SkipIntro=1", "--DefaultTrack=" + t, "--DefaultOpponents=5",
+                         "--timeout", "300"] + geo + ["--", "--AutoRace=1", "--SkipIntro=1", "--DefaultTrack=" + t, "--DefaultOpponents=5",
                          "--AutoThrottle=1", "--RaceTrace=1", "--RaceTraceMaxFrames=40000", "--RaceTraceMaxSimTicks=400"], cwd=root)
         dirs[name] = d
     files = sorted(set(os.path.basename(f) for n in dirs for f in glob.glob(os.path.join(dirs[n], "race_trace_*.csv"))))

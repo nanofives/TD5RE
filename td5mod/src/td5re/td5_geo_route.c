@@ -482,8 +482,6 @@ static void gr_graph_free(void)
     memset(&s_g, 0, sizeof s_g);
 }
 
-void td5_geo_route_drop_graph(void) { gr_graph_free(); }
-
 static int gr_hash_key(long long kx, long long kz, int mask)
 {
     /* 64-bit mix; the table only has to spread, not to be cryptographic. */
@@ -3789,14 +3787,6 @@ int td5_geo_route_place_boundary(const char *slug, int ring, double *latlon, int
     return n;
 }
 
-int td5_geo_route_place_ring_count(const char *slug)
-{
-    cJSON *root = NULL, *rings = gr_place_boundary(slug, &root);
-    int n = rings ? cJSON_GetArraySize(rings) : 0;
-    if (root) cJSON_Delete(root);
-    return n;
-}
-
 const char *td5_geo_route_place_at(TD5_GeoLatLon p)
 {
     static char slug[64];
@@ -3840,26 +3830,6 @@ int td5_geo_route_places(char slugs[][64], double bbox[][4], int max)
         out++;
     }
     return out;
-}
-
-int td5_geo_route_snap(const char *slug, TD5_GeoLatLon p,
-                       TD5_GeoLatLon *out, double *dist_m)
-{
-    double x, z;
-    int n;
-    if (!slug || !slug[0]) slug = td5_geo_route_place_at(p);
-    if (!gr_graph_sync_pts(slug, &p, 1)) return 0;
-    gr_proj_to_world(&s_g.proj, p.lat, p.lon, &x, &z);
-    n = gr_nearest(x, z);
-    if (n < 0) return 0;
-    if (dist_m) *dist_m = gr_dist(s_g.nx[n], s_g.nz[n], x, z) / s_g.proj.upm;
-    if (out) gr_proj_to_latlon(&s_g.proj, s_g.nx[n], s_g.nz[n], &out->lat, &out->lon);
-    return 1;
-}
-
-const TD5_GeoRouteResult *td5_geo_route_last(void)
-{
-    return s_result.verdict == TD5_GEO_ROUTE_OK || s_result.n_path ? &s_result : NULL;
 }
 
 int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult *out)

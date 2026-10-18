@@ -2238,16 +2238,13 @@ int tg_geo_wall_down(int si, int left)
  *
  *     dot > 0  (span runs with the way)     generator-left  <- OSM right
  *     dot < 0  (span runs against the way)  generator-left  <- OSM left
- *
- * TD5RE_GEO_SW_SIDE_FLIP=1 swaps the pair, so the claim above is an A/B rather
- * than an assertion. */
+ */
 static void tg_geo_sw_sides(double tx, double tz, double dirx, double dirz,
                             double way_l, double way_r,
                             double *eng_l, double *eng_r)
 {
     const double dot = tx * dirx + tz * dirz;
-    int with = (dot >= 0.0);
-    if (td5_env_flag_off("TD5RE_GEO_SW_SIDE_FLIP")) with = !with;
+    const int with = (dot >= 0.0);
     *eng_l = with ? way_r : way_l;
     *eng_r = with ? way_l : way_r;
 }

@@ -2269,6 +2269,8 @@ int tg_finish_span(int ring);
  * stats so the track-select ticks land on the spans the level ships. */
 int tg_checkpoint_spans(int ring, int *cp_span);
 int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans, TG_Buf *out);
+/* [GEO FREE ROAM F11b] the roam host's TEXTURES.DAT (td5_tg_pages.c): the fixed page block only */
+int tg_emit_roam_host_textures(TG_Buf *out);
 /* ==========================================================================
  * MODELS.DAT -- road surface mesh
  *

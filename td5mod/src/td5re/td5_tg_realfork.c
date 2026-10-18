@@ -52,8 +52,7 @@
  *
  * [ROUND 1019 V] LEFT CORRIDORS. A real way on the +t side of the route (an avenue whose AVENUES.JSON offset is positive, a parallel
  * road on the left) is offered as a fork too (RfCand.side = +1; TD5RE_GEO_FORK_LEFT=0 restores "left corridors are parked"). One side per
- * window; the node moves toward +t; the bend rule swaps its inner footprint; the real way must flow WITH the race (rf_left_flow,
- * TD5RE_GEO_FORK_LEFT_CONTRA=1 allows against); a left parallel road whose first span sits on a bend slides its start
+ * window; the node moves toward +t; the bend rule swaps its inner footprint; the real way must flow WITH the race (rf_left_flow); a left parallel road whose first span sits on a bend slides its start
  * (TD5RE_GEO_FORK_LEFT_SLIDE). docs/plans/GEO_REAL_FORKS.md, "Round 1019 V".
  *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no
@@ -85,8 +84,8 @@
  * events and two pile-ups at spans 119..124 behind fork 0, none on the same stretch
  * with real forks off. The width now ramps linearly over this many nodes (16 =
  * 56 m, 7 m of width, about 7 degrees) and the lane COUNT follows it by rounding.
- * (TD5RE_GEO_FORK_TAPER sets the length, TD5RE_GEO_FORK_TAPER_SMOOTH=1 a smoothstep
- * shape: measured no better than the linear 16 over 5 race seeds, see the doc.) */
+ * (TD5RE_GEO_FORK_TAPER sets the length; a smoothstep shape measured no better than the
+ * linear 16 over 5 race seeds and was retired in F11b, see the doc.) */
 #define TG_RF_TAPER_DEF     16
 /* [ROUND 1015 A] The shortest ramp a fork may be built with at either end. A ramp is
  * normally TG_RF_TAPER_DEF nodes; where the start grid, a lane-count change or the
@@ -188,7 +187,6 @@ static double  s_rf_rate[TD5_TG_BRANCH_MAX];     /* per fork: the most its tail 
 static double  s_rf_rate_in[TD5_TG_BRANCH_MAX];  /* ... and its head shift, walked backward */
 static int     s_rf_shift_smooth;
 static int     s_rf_taper = TG_RF_TAPER_DEF;
-static int     s_rf_taper_smooth = 0;
 
 static int s_rf_diag;
 /* The two env knobs, read ONCE per build. tg_realfork_enabled() sits under every
@@ -411,7 +409,6 @@ static int rf_window_limit(void)
  * window). */
 static int rf_lanevar(void) { return s_rf_relax && td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR"); }
 /* Is there any relaxation switched on, i.e. is a second (relaxed) pass worth making? */
-static int rf_relax_only(void) { return td5_env_flag_off("TD5RE_GEO_FORK_RELAX_ONLY"); }
 static int rf_relax_any(void) { return td5_env_flag_on("TD5RE_GEO_FORK_LANEVAR") || td5_env_flag_on("TD5RE_GEO_FORK_BEND"); }
 
 /* The route lane count that most nodes of the fork body F..R+1 carry (ties to the
@@ -712,7 +709,7 @@ static RfCand *rf_new_cand(int src, const char *name, int F, int R,
  * round 1013, see "Direction of the real way" in docs/plans/GEO_REAL_FORKS.md). A LEFT corridor exists where the
  * route is drawn against the one-way of its own carriageway and the other carriageway, on the +t side, flows with it: that
  * is a natural thing to drive. The reverse (a left way that runs against the race on a one-way) would be driving head-on
- * into traffic that the map says is one-way, so it is refused unless TD5RE_GEO_FORK_LEFT_CONTRA=1.
+ * into traffic that the map says is one-way, so it is refused.
  * For every node F..R of the window the way under the corridor centre line (the route node plus the measured offset, +t)
  * is looked up in ROADS.JSON: nearest segment within 3 m that runs within 36 degrees of the route's heading either way.
  * A two-way way (oneway_dir 0) counts as neither. `with`/`against` are returned; the fork is refused when against exceeds
@@ -761,7 +758,7 @@ static int rf_left_flow(const RfCand *c, int *with_n, int *against_n)
     }
     if (with_n) *with_n = w;
     if (against_n) *against_n = a;
-    return !(a > w) || td5_env_flag_off("TD5RE_GEO_FORK_LEFT_CONTRA");
+    return !(a > w);
 }
 
 /* [ROUND 1015 A] One avenue candidate for the span range F..R: reads the real offsets from
@@ -951,10 +948,7 @@ static void rf_gen_avenue(void)
                 if (R - F - 1 < TG_RF_MINLEN) continue;
                 if (R - F - 1 > TG_RF_MAXLEN) break;
                 {
-                    /* TD5RE_GEO_FORK_RELAX_ONLY=1 (dev): skip the old-rules pass, so the relaxed
-                     * pass alone decides (exercises the relaxations on windows the old pass
-                     * accepts after a slide, and shows what they would build by themselves) */
-                    int ok = rf_relax_only() ? 0 : rf_avenue_pair(name, g, F, R, merge, fit, &oom);
+                    int ok = rf_avenue_pair(name, g, F, R, merge, fit, &oom);
                     /* [1017 R] refused under the round-1016 rules: offer it again relaxed */
                     if (!ok && !oom && rf_relax_any()) {
                         s_rf_relax = 1;
@@ -1349,7 +1343,7 @@ static void rf_gen_parallel(void)
                     if (!okf) break;
                 }
                 nc0 = s_ncand;
-                if (!rf_relax_only() && rf_validate(c)) {
+                if (rf_validate(c)) {
                     c->weight = (double)(c->len > 90 ? 90 : c->len) * 0.9;
                     s_ncand++;
                 } else if (rf_relax_any()) {
@@ -1690,7 +1684,6 @@ int tg_realfork_build(void)
 
     s_rf_diag = td5_env_int("TD5RE_GEO_FORK_DIAG", 0, 0, 2);   /* 2 = also the start slide */
     s_rf_taper = td5_env_int("TD5RE_GEO_FORK_TAPER", TG_RF_TAPER_DEF, 2, 48);
-    s_rf_taper_smooth = td5_env_flag_off("TD5RE_GEO_FORK_TAPER_SMOOTH");   /* default linear */
     n = td5_geo_route_count();
     if (n > TG_RF_NODES) n = TG_RF_NODES;
     for (i = 0; i < n; i++) {
@@ -1767,7 +1760,7 @@ int tg_realfork_build(void)
         }
         rf_finalise(rf, c);
         {   /* [ROUND 1030 H item 19] the steepest shift change this fork's own ramps make per node, per end */
-            const double k = 0.5 * (double)TD5_TG_LANE_WIDTH * (double)c->lanes_b * (s_rf_taper_smooth ? 1.5 : 1.0);
+            const double k = 0.5 * (double)TD5_TG_LANE_WIDTH * (double)c->lanes_b;
             s_rf_rate[s_rf_n]    = (c->pf >= 0) ? -1.0 : k / (double)(c->taper_out > 0 ? c->taper_out : 1) + 1.0;
             s_rf_rate_in[s_rf_n] = (c->pf >= 0) ? -1.0 : k / (double)(c->taper_in > 0 ? c->taper_in : 1) + 1.0;
         }
@@ -1800,13 +1793,6 @@ int tg_realfork_build(void)
             else if (i > c->R + 2)
                 fr = 1.0 - (double)(i - (c->R + 2)) / (double)c->taper_out;  /* narrowing */
             if (fr < 0.0) fr = 0.0; else if (fr > 1.0) fr = 1.0;
-            /* Smoothstep: zero slope at both ends of the taper, so the road edge
-             * does not kink where the taper starts and stops (a linear ramp
-             * changes the edge's heading by its whole slope in one span, which
-             * a car at 190 km/h answers with a rear slide: measured at spans
-             * 131..134 behind fork 0). Same peak edge angle as the linear 16
-             * at 24 nodes (1.5 x 7 m / 84 m). */
-            if (s_rf_taper_smooth) fr = fr * fr * (3.0 - 2.0 * fr);
             /* [ROUND 1015 A] The ramp grows the road from the lanes the route HAS at
              * this node to the fork's width, so a node that already carries more than
              * lanes(A) (the 3-lane approach to Diagonal 73) is only widened by what is
@@ -1820,12 +1806,6 @@ int tg_realfork_build(void)
             s_node_extra[i] = extra;
             /* the lane COUNT is the rounded width; 0 = leave the route's own */
             s_node_ovr[i] = (extra >= 0.5) ? s_rl[i] + (int)(extra + 0.5) : 0;
-        }
-        if (td5_env_flag_off("TD5RE_GEO_FORK_NODEDUMP")) {      /* dev: the node window each fork wrote */
-            for (i = c->i0; i <= c->w_end && i < s_rn; i++)
-                if (i >= 0 && s_node_fork[i] == s_rf_n)
-                    TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] node %d fork %d route lanes %d extra %.3f ovr %d",
-                              i, s_rf_n, s_rl[i], s_node_extra[i], s_node_ovr[i]);
         }
         cov += rf->len;
         TD5_LOG_I(LOG_TAG, "trackgen: [REAL FORK] %d: %s \"%s\" F=%d len=%d R=%d "

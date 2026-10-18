@@ -193,17 +193,22 @@ int td5_trackgen_geo_index_for_slot(int slot);
  * td5_trackgen_internal.h for TD5_GEO_SLOT_BASE. */
 int td5_trackgen_geo_slot_for_index(int gi);
 
-/* [GEO FREE ROAM F2-F] Roam hosts on the real place's OWN level directory (its sky, LEVELINF and
- * texture pages), loaded exactly like a geo race but WITHOUT building anything and without its
- * strip. Returns the geo track slot of place `slug` when that level dir already holds a built
- * TEXTURES.DAT + LEVELINF.DAT + FORWSKY.png (a previous geo build of the place), else -1 (the
- * caller falls back to a shipped host level). */
+/* [GEO FREE ROAM F2-F, F11b] Roam hosts on the real place's geo track slot (its level number, its
+ * LEVELINF and texture pages), WITHOUT building anything and without a strip. Since F11b the host
+ * files are roam's OWN, written from code into re/assets/geo/<slug>/roam/HOST/ (the strip build's
+ * fixed TEXTURES.DAT page block + a roam LEVELINF.DAT), so free roam never reads what a strip BUILD
+ * left in level09x. Returns the geo track slot of place `slug` once that host dir is complete, else
+ * -1 (the caller falls back to a shipped host level). */
 int td5_trackgen_roam_host_slot(const char *slug);
+/* The roam host dir of a geo slot (re/assets/geo/<slug>/roam/HOST, no trailing slash) and the level
+ * number whose TEXTURES.DAT / LEVELINF.DAT it stands in for; 0 when `slot` is not a registered place.
+ * td5_asset.c reads those two files from here while a roam session hosts on the slot. */
+int td5_trackgen_roam_host_dir(int slot, char *out, size_t n);
 /* The page ids a plain road / lawn / kerb surface uses in that level's TEXTURES.DAT. */
 void td5_trackgen_roam_pages(int *road, int *ground, int *kerb);
-/* The FORWSKY a geo race on `slot` would draw for the TIME OF DAY options in force
- * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): the level's own FORWSKY.png when its
- * GENSTAMP time of day matches, else a shipped panorama from the day / night pool. 1 on success. */
+/* The FORWSKY a roam session on `slot` draws for the TIME OF DAY options in force
+ * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): a shipped panorama from the day / night pool,
+ * city horizons first. 1 on success. */
 int td5_trackgen_roam_sky_path(int slot, char *out, size_t n);
 int td5_trackgen_roam_is_night(int slot);   /* [F4f] the roam session's day/night verdict (sky, ambient, lamps) */
 
@@ -219,15 +224,12 @@ int td5_trackgen_register_geo_places(void);
  * generated slot resets the target to the auto track. */
 void td5_trackgen_set_target_slot(int slot);
 
-/* [ROUND 1026 L] Two frontend-split knobs, both DEFAULT ON, OFF = master:
+/* [ROUND 1026 L] A frontend-split knob, DEFAULT ON, OFF = master (F11b retired its
+ * twin TD5RE_GEO_OWN_SELECTOR: the GEOSPATIAL entry is always its own selector entry):
  *  - TD5RE_STUDIO_SYNTHETIC: the AUTO TRACK STUDIO (slot 60) always builds the
  *    procedural world; its LOCATION row is gone and a leftover geo place
- *    (TD5RE_GEO_PLACE / SELECTED.TXT) can no longer leak into level090.
- *  - TD5RE_GEO_OWN_SELECTOR: the GEOSPATIAL TRACK GENERATOR is its own entry in
- *    the track selectors (and its button shows only there), not a button on
- *    every track. */
+ *    (TD5RE_GEO_PLACE / SELECTED.TXT) can no longer leak into level090. */
 int td5_trackgen_studio_synthetic(void);
-int td5_trackgen_geo_own_selector(void);
 
 /* ------------------------------------------- [MINIMAP STREETS] ------------
  * Read-only walk of the street network td5_tg_network.c built for the auto
