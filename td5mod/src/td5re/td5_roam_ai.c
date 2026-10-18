@@ -111,6 +111,8 @@ static struct {
     int    kd, rate;
     int    rb_on; double rb_behind_m, rb_ahead_m, rb_boost, rb_trim;
     int    see_traffic;                          /* [F8c] TD5RE_ROAM_AI_SEE_TRAFFIC (1; 0 = the pre-F8c blind test) */
+    int    brake_prop;                           /* [F8c] TD5RE_ROAM_AI_BRAKE_PROP (1; 0 = the idle -32 brake)      */
+    double headway;                              /* [F8c] TD5RE_ROAM_AI_HEADWAY, seconds of follow gap (0 = none)   */
     FILE  *trc;
 } A;
 
@@ -146,6 +148,8 @@ static void ra_read_knobs(void)
     A.rb_boost    = td5_env_int("TD5RE_ROAM_AI_RB_BOOST", 8, 0, 50) / 100.0;
     A.rb_trim     = td5_env_int("TD5RE_ROAM_AI_RB_TRIM", 8, 0, 50) / 100.0;
     A.see_traffic = td5_env_int("TD5RE_ROAM_AI_SEE_TRAFFIC", 1, 0, 1);
+    A.brake_prop  = td5_env_int("TD5RE_ROAM_AI_BRAKE_PROP", 1, 0, 1);
+    A.headway     = td5_env_int("TD5RE_ROAM_AI_HEADWAY", 80, 0, 300) / 100.0;   /* cs */
 }
 
 int td5_roam_ai_preload(void)
@@ -912,7 +916,10 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
             A.stats.passes++;
         }
         {
-            const double gap = f - 5.5;
+            /* [F8c] the gap kept grows with the speed of the car ahead (TD5RE_ROAM_AI_HEADWAY s): 5.5 m centre to
+             * centre (1 m between bumpers) was the gap at any speed, so a traffic car braking for its red light
+             * was rear-ended (roam-circuit: 64 -> 47 km/h into traffic 6, the heavy-crash scatter) */
+            const double gap = f - 5.5 - A.headway * (vb > 0.0 ? vb : 0.0);
             const double cv = (vb > 0.0 ? vb : 0.0) + (gap > 0.0 ? gap * 0.6 : gap * 1.5);
             if (cv < cap) cap = cv;
         }
@@ -1065,6 +1072,12 @@ static void ra_drive(RaCar *c, int hold)
             c->thr_i = ra_clamp(c->thr_i - 0.05, 0.0, 1.0);
             thr = 0;
             brake = v > 0.3;
+            /* [F8c] brake_flag with a zero command is the drivetrain's IDLE brake (-32 of 256, td5_physics.c AI
+             * brake path): the opponents could never shed more than ~4 m/s2. The command now grows with the
+             * speed error to the full -256 (what the span AI's stop-and-wait uses), 1.2 m/s over -> the idle
+             * brake, 5.2 m/s over or more -> full. TD5RE_ROAM_AI_BRAKE_PROP=0: the old idle brake. */
+            if (brake && A.brake_prop)
+                thr = -(int)(RA_THR_FULL * ra_clamp(0.125 + 0.875 * (-err - 1.2) / 4.0, 0.125, 1.0));
         } else {
             c->thr_i = ra_clamp(c->thr_i + 0.01 * err, 0.0, 1.0);
             thr = (int)(RA_THR_FULL * ra_clamp(c->thr_i, 0.0, 1.0));
