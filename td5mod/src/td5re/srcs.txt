@@ -34,6 +34,7 @@ td5_roam_physics.c
 td5_roam_drive.c
 td5_roam_render.c
 td5_roam_scenery.c
+td5_roam_furniture.c
 td5_roam_stream.c
 td5_roam_route.c
 td5_roam_route_ui.c

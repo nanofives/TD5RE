@@ -51,11 +51,12 @@
 #include <stdint.h>
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
+#include "td5_roam_furniture.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  2u
+#define TD5_ROAM_SCENERY_RULES  3u  /* F4b pavement + F4c furniture combined */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -83,6 +84,25 @@ int roam_nearest_edge(const TG_TileCtx *c, double x, double z, double max_d,
 /* The frame of edge `edge` at `along` on `side`. 1 on success. */
 int roam_edge_frame(const TG_TileCtx *c, int edge, int side, double along, RoamFrame *out);
 
+/* ---- [F4c] the ctx as the furniture emitters see it (td5_roam_furniture.c) ---- */
+/* The ROAD tile of the 3x3 at (dx, dz) in -1..1 (0,0 = the tile being built), NULL if absent. */
+const RoamTile *roam_ctx_tile(const TG_TileCtx *c, int dx, int dz);
+const RoamGrid *roam_ctx_grid(const TG_TileCtx *c);
+/* the tile being built: its index and the place-frame origin every x/z here is relative to */
+void   roam_ctx_origin(const TG_TileCtx *c, int *tx, int *tz, int32_t *org_x, int32_t *org_z);
+/* 1 when the polygon (n = 1 point, 2 segment, 3 / 4 polygon; tile-local) overlaps a drivable primitive */
+int    roam_ctx_on_road(const TG_TileCtx *c, const double *x, const double *z, int n);
+/* 1 when the tile-local point lies in the tile being built (ownership of a record anchored there) */
+int    roam_ctx_owned(const TG_TileCtx *c, double x, double z);
+/* the 64 m sub-block (0..TD5_ROAM_SCN_NSB-1) holding a tile-local point */
+int    roam_ctx_sb_of(const TG_TileCtx *c, double x, double z);
+/* ground height at a tile-local point (the scenery's own height source) */
+double roam_ctx_ground(const TG_TileCtx *c, double x, double z);
+/* Reserve one mesh record in sub-block `sb`: returns the TG_Buf* to write it into (its offset is
+ * recorded; void* because TG_Buf lives in td5_trackgen_internal.h), NULL on out of memory. The
+ * caller appends exactly one MODELS.DAT mesh record. */
+void  *roam_ctx_mesh_begin(TG_TileCtx *c, int sb);
+
 typedef struct {
     /* buildings */
     int  bld_seen, bld_emitted, bld_prefab, bld_drop_road, bld_drop_shift, bld_drop_ring;
@@ -109,6 +129,7 @@ typedef struct {
     uint32_t bytes, hash;
     uint32_t ms, ms_src, ms_emit;   /* worker time: total, OSM source, emit           */
     int  road_tiles;                /* ROAD tiles of the 3x3 that were available       */
+    TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
@@ -120,6 +141,8 @@ typedef struct TD5_RoamScenery {
     uint32_t sb_first[TD5_ROAM_SCN_NSB], sb_count[TD5_ROAM_SCN_NSB];   /* into rec_off */
     uint32_t *rec_off;                               /* record offsets in blob          */
     uint32_t nrec;
+    float    *lamp;                                  /* [F4c] lantern positions: tile-local x, place y, tile-local z */
+    uint32_t  nlamp;
     TD5_RoamScnStats st;
 } TD5_RoamScenery;
 
