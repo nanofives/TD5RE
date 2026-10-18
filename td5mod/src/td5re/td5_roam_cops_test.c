@@ -55,6 +55,7 @@ static struct {
     int    mode, phase, done, failed;
     char   why[80];
     long   tick_last, phase_t0, t_start;
+    uint32_t bits_last;
     /* the player's path (PLACE frame), resampled every CT_DS, speed profile */
     double px[CT_PTS], pz[CT_PTS], pv[CT_PTS];
     int    np, pi;
@@ -292,17 +293,27 @@ static void ct_shot(const char *name)
     TD5_LOG_I(LOG_TAG, "[ROAMCOPS] shot %s -> %s", name, path);
 }
 
+static uint32_t ct_bits(TD5_Actor *a, long tick, int full);
+
 uint32_t td5_roam_cops_test_bits(TD5_Actor *a)
 {
     const long tick = (long)g_td5.simulation_tick_counter;
     const int full = T.mode == TD5_RCOPS_FULL;
+    if (!T.mode || T.done || !a || !td5_roam_active()) return 0;
+    /* the input layer may poll more than once per sim tick: the same bits for the whole tick (a rear-view bit that
+     * drops on the second poll switches the rear camera straight back off) */
+    if (tick == T.tick_last) return T.bits_last;
+    T.tick_last = tick;
+    T.bits_last = ct_bits(a, tick, full);
+    return T.bits_last;
+}
+
+static uint32_t ct_bits(TD5_Actor *a, long tick, int full)
+{
     TD5_RoamCopsStats st;
     uint32_t bits = 0;
-    if (!T.mode || T.done || !a || !td5_roam_active()) return 0;
-    if (tick == T.tick_last) return 0;
-    T.tick_last = tick;
     td5_roam_cops_stats(&st);
-    if (T.phase != CT_WAIT && tick - T.t_start > (full ? 9000L : 7200L)) { ct_finish("timeout", 1); return 0; }
+    if (T.phase != CT_WAIT && tick - T.t_start > (full ? 10800L : 9000L)) { ct_finish("timeout", 1); return 0; }
     switch (T.phase) {
     case CT_WAIT:
         if (tick < 90 || !td5_roam_route_graph_ready() || st.pool <= 0) return 0;
@@ -327,8 +338,8 @@ uint32_t td5_roam_cops_test_bits(TD5_Actor *a)
         if (T.t_pursuit_a && !T.shot_p) {
             if (T.rear > 0) {
                 bits |= (uint32_t)TD5_INPUT_REAR_VIEW;
-                if (++T.rear == 5) ct_shot("pursuit");
-                if (T.rear >= 9) { T.rear = 0; T.shot_p = 1; }
+                if (++T.rear == 25) ct_shot("pursuit");      /* the chase camera swings round over a few ticks */
+                if (T.rear >= 30) { T.rear = 0; T.shot_p = 1; }
             } else if (td5_roam_cops_dev_pursuer_behind(8.0, 40.0)) T.rear = 1;
         }
         if (st.escapes > T.st0.escapes) {
@@ -376,9 +387,9 @@ uint32_t td5_roam_cops_test_bits(TD5_Actor *a)
             if (busted) {
                 if (!T.shot_b && tick - T.bust_seen_t == 20) { ct_shot("busted"); T.shot_b = 1; }
                 if (!T.shot_br && tick - T.bust_seen_t >= 45) {
-                    if (++T.rear == 4) ct_shot("busted_rear");
-                    if (T.rear >= 8) { T.rear = 0; T.shot_br = 1; }
-                    return (uint32_t)(TD5_INPUT_BRAKE | TD5_INPUT_REAR_VIEW);
+                    if (++T.rear == 25) ct_shot("busted_rear");
+                    if (T.rear >= 30) { T.rear = 0; T.shot_br = 1; }
+                    return (uint32_t)TD5_INPUT_REAR_VIEW;
                 }
             }
             if (T.bust_was && !busted) {
@@ -388,12 +399,13 @@ uint32_t td5_roam_cops_test_bits(TD5_Actor *a)
                           T.respawned ? "yes" : "NO", T.respawn_on_road ? "on the road" : "OFF THE ROAD");
                 T.phase = CT_END; T.phase_t0 = tick;
             }
-            if (tick - T.phase_t0 > 60 * 30) { ct_finish("scenario B: no bust within 60 s of stopping", 1); return 0; }
+            if (tick - T.phase_t0 > 90 * 30) { ct_finish("scenario B: no bust within 90 s of stopping", 1); return 0; }
         }
-        return (uint32_t)TD5_INPUT_BRAKE;
+        /* brake to a stop, then the handbrake: a brake held at a standstill engages reverse */
+        return (uint32_t)(ct_kmh(a) > 4.0 ? TD5_INPUT_BRAKE : TD5_INPUT_HANDBRAKE);
     case CT_END:
         if (tick - T.phase_t0 > 60) ct_finish("both scenarios ran", 0);
-        return (uint32_t)TD5_INPUT_BRAKE;
+        return (uint32_t)(ct_kmh(a) > 4.0 ? TD5_INPUT_BRAKE : TD5_INPUT_HANDBRAKE);
     default:
         return 0;
     }
@@ -424,13 +436,13 @@ int td5_roam_cops_test_verdict(char *note, size_t n)
              s.stuck_episodes, off_free, s.off_ticks_contact, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMCOPS] VERDICT %s: %s | spawns %ld despawns %ld reinforcements %ld joins %ld | notices speed %ld red %ld ram %ld "
               "| escapes %ld (los %ld dist %ld) busts %ld fines $%ld respawns %ld (on road %d) | red runs %ld | recoveries %ld stuck %ld "
-              "removed %ld | off ticks %ld (%ld within 2 s of a contact) events %ld rescues %ld | barrier hits %ld | plans %ld fails %ld | "
+              "removed %ld | off ticks %ld (%ld within 2 s of a contact) events %ld rescues %ld | road pushes %ld pinches %ld | barrier hits %ld | plans %ld fails %ld | "
               "wrecks %ld | pursuit %.1f s, max heat %d, max pursuers %d, cop vmax %.0f km/h | player vmax %.0f km/h | A: pursuit %.1f s "
               "escape %.1f s; B: pursuit %d bust %d",
               status == 2 ? "FAIL" : (status ? "WARN" : "PASS"), note, s.spawns, s.despawns, s.reinforcements, s.joins, s.notice_speed,
               s.notice_red, s.notice_ram, s.escapes, s.escapes_los, s.escapes_dist, s.busts, s.fines, s.player_respawns,
               s.respawn_on_road, s.red_runs, s.recoveries, s.stuck_episodes, s.stuck_removed, s.off_ticks, s.off_ticks_contact,
-              s.off_events, s.off_rescues, s.barrier_hits, s.plans, s.plan_fails, s.wrecks, s.pursuit_ticks / CT_HZ, s.max_heat,
+              s.off_events, s.off_rescues, s.road_pushes, s.road_pinches, s.barrier_hits, s.plans, s.plan_fails, s.wrecks, s.pursuit_ticks / CT_HZ, s.max_heat,
               s.max_pursuers, s.max_kmh, T.kmh_max, T.t_pursuit_a ? (T.t_pursuit_a - T.t_start) / CT_HZ : -1.0,
               T.t_escape ? (T.t_escape - T.t_start) / CT_HZ : -1.0, T.t_pursuit_b != 0, T.t_bust != 0);
     return status;

@@ -847,6 +847,41 @@ done:
     return ok;
 }
 
+/* [F10] A driver's line from a planned polyline, td5_roam_ai.c's two cleanups (F7): (1) the junction-connector
+ * jogs, a point that turns back more than 90 degrees with a leg under 15 m; (2) the LATERAL jogs through a cluster
+ * centre that sits in a divided avenue's median 7..14 m off the carriageway: a vertex whose heading before and after
+ * agree within 20 degrees, more than 1.5 m off the chord of its neighbours, that chord under 150 m. Returns the count. */
+static int rr_driver_line(double *x, double *z, int n)
+{
+    int i, m = 0, changed = 1, guard = 0;
+    for (i = 0; i < n; i++) {
+        if (i >= 1 && i + 1 < n) {
+            const double ax = x[i] - x[i - 1], az = z[i] - z[i - 1], qx = x[i + 1] - x[i], qz = z[i + 1] - z[i];
+            const double la = sqrt(ax * ax + az * az), lb = sqrt(qx * qx + qz * qz);
+            if (la > 0.0 && lb > 0.0 && (ax * qx + az * qz) / (la * lb) < 0.0 && (la < 15.0 * RR_UPM || lb < 15.0 * RR_UPM)) continue;
+        }
+        if (m > 0 && fabs(x[i] - x[m - 1]) < 1.0 && fabs(z[i] - z[m - 1]) < 1.0) continue;
+        x[m] = x[i]; z[m] = z[i]; m++;
+    }
+    while (changed && guard++ < 16) {
+        changed = 0;
+        for (i = 2; i + 2 < m; i++) {
+            const double ax = x[i - 1] - x[i - 2], az = z[i - 1] - z[i - 2];
+            const double bx = x[i + 2] - x[i + 1], bz = z[i + 2] - z[i + 1];
+            const double cx = x[i + 1] - x[i - 1], cz = z[i + 1] - z[i - 1];
+            const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz), lc = sqrt(cx * cx + cz * cz);
+            if (la <= 0.0 || lb <= 0.0 || lc <= 0.0 || lc > 150.0 * RR_UPM) continue;
+            if ((ax * bx + az * bz) / (la * lb) < cos(20.0 * 3.14159265358979323846 / 180.0)) continue;
+            if (fabs((x[i] - x[i - 1]) * cz - (z[i] - z[i - 1]) * cx) / lc <= 1.5 * RR_UPM) continue;
+            memmove(&x[i], &x[i + 1], (size_t)(m - i - 1) * sizeof(double));
+            memmove(&z[i], &z[i + 1], (size_t)(m - i - 1) * sizeof(double));
+            m--;
+            changed = 1;
+        }
+    }
+    return m;
+}
+
 /* [F10] ONE leg between two PLACE points for a pursuit (td5_roam_route.h). */
 int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, double tx, double tz, double snap_m,
                              const uint8_t *edge_ok, double **px, double **pz, int *npt, double *len_m)
@@ -874,6 +909,7 @@ int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, d
         return 0;
     }
     free(refs.r);
+    poly.n = rr_driver_line(poly.x, poly.z, poly.n);
     for (i = 1; i < poly.n; i++) L += hypot(poly.x[i] - poly.x[i - 1], poly.z[i] - poly.z[i - 1]);
     if (px) *px = poly.x; else free(poly.x);
     if (pz) *pz = poly.z; else free(poly.z);

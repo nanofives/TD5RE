@@ -97,7 +97,7 @@ static struct {
     double  vmax, v_patrol, limit_kmh, notice_m, notice_red_m, see_m, lose_s, escape_m, bust_s;
     double  r_spawn_min, r_spawn_max, r_despawn, r_despawn_pursuit;
     double  wb, a_lat, a_brake;
-    int     fine_base;
+    int     fine_base, log_every;
     int     force_dens, force_vmax;              /* DEV overrides (+1 encoded, 0 = knob) */
     /* the race corridor */
     int     race_on;                             /* a race with COPS on runs (the corridor applies) */
@@ -145,12 +145,13 @@ static void rc_read_knobs(void)
     C.escape_m    = td5_env_int("TD5RE_ROAM_COPS_ESCAPE_M", 320, 80, 2000);
     C.bust_s      = td5_env_int("TD5RE_ROAM_COPS_BUST_DS", 20, 3, 200) / 10.0;
     C.fine_base   = td5_env_int("TD5RE_ROAM_COPS_FINE", 100, 0, 100000);
+    C.log_every   = td5_env_int("TD5RE_ROAM_COPS_LOG", 0, 0, 60);     /* DEV: a pursuit line every N s */
     C.r_spawn_min = td5_env_int("TD5RE_ROAM_COPS_SPAWN_MIN_M", 120, 30, 400);
     C.r_spawn_max = td5_env_int("TD5RE_ROAM_COPS_SPAWN_MAX_M", 220, 60, 500);
     C.r_despawn   = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_M", 330, 80, 800);
     C.r_despawn_pursuit = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_PURSUIT_M", 450, 100, 2000);
     C.wb          = td5_env_int("TD5RE_ROAM_COPS_WB", 26, 10, 60) / 10.0;
-    C.a_lat       = td5_env_int("TD5RE_ROAM_COPS_ALAT", 60, 10, 150) / 10.0;
+    C.a_lat       = td5_env_int("TD5RE_ROAM_COPS_ALAT", 45, 10, 150) / 10.0;
     C.a_brake     = td5_env_int("TD5RE_ROAM_COPS_BRAKE", 55, 10, 150) / 10.0;
     if (C.r_spawn_max < C.r_spawn_min + 20.0) C.r_spawn_max = C.r_spawn_min + 20.0;
     if (C.r_despawn < C.r_spawn_max + 40.0) C.r_despawn = C.r_spawn_max + 40.0;
@@ -448,6 +449,31 @@ static int rc_set_path(RcCop *c, const double *qx, const double *qz, int nq, dou
         for (j = i - 2; j <= i + 2; j++) { sx += rx[j]; sz += rz[j]; }
         c->px[i] = sx / 5.0; c->pz[i] = sz / 5.0;
     }
+    {
+        /* a sample off the drivable surface (a turn through a junction centre that sits in a median, a cut corner):
+         * moved onto the road along the locator's push vector, 1 m inside the edge; then smoothed once more (+-1) */
+        const TD5_RoamResident *rs = td5_roam_resident();
+        int32_t ox, oz, moved = 0;
+        td5_roam_world_origin(&ox, &oz);
+        for (i = 1; rs && i < np; i++) {
+            TD5_RoamHit h;
+            if (!td5_roam_locate(rs, (int32_t)floor((c->px[i] - ox) * 256.0 + 0.5), (int32_t)floor((c->pz[i] - oz) * 256.0 + 0.5), 0, 0,
+                                 ROAM_PRIM_NONE, &h) || h.prim == ROAM_PRIM_NONE || h.inside)
+                continue;
+            {
+                const double l = sqrt((double)h.push_x * h.push_x + (double)h.push_z * h.push_z);
+                if (l <= 0.0 || h.push_dist > 12.0 * RC_M) continue;            /* not a sliver: leave it */
+                c->px[i] += h.push_x / l * (h.push_dist + 1.0 * RC_M);
+                c->pz[i] += h.push_z / l * (h.push_dist + 1.0 * RC_M);
+                moved++;
+            }
+        }
+        if (moved) {
+            for (i = 0; i < np; i++) { rx[i] = c->px[i]; rz[i] = c->pz[i]; }
+            for (i = 1; i + 1 < np; i++) { c->px[i] = (rx[i - 1] + rx[i] + rx[i + 1]) / 3.0; c->pz[i] = (rz[i - 1] + rz[i] + rz[i + 1]) / 3.0; }
+            C.st.path_fixes += moved;
+        }
+    }
     for (i = 0; i < np; i++) {
         const int a0 = i - 4 < 0 ? 0 : i - 4, a1 = i + 4 >= np ? np - 1 : i + 4;
         const int b0 = a0 + 1 < np ? a0 + 1 : a0, b1 = a1 - 1 > 0 ? a1 - 1 : a1;
@@ -522,12 +548,25 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
     rc_heading(a, &fx, &fz);
     C.st.plans++;
     c->plan_t = rc_tick();
-    ok = td5_roam_route_plan_path(x, z, fx, fz, gx, gz, 60.0, C.race_on ? C.mask : NULL, &qx, &qz, &nq, &len);
-    if (ok && nq >= 2) {
-        /* start the path at the car: its first point is the street under it */
-        qx[0] = x; qz[0] = z;
-        ok = rc_set_path(c, qx, qz, nq, v_cap, end_v);
-    } else ok = 0;
+    {
+        /* plan from a point AHEAD of the car on its heading (4..12 m, 0.6 s): at a junction the street under the car
+         * can snap to the crossing street, and a leg starting there threw the wheel to lock (F10 smoke run 2) */
+        const double la = rc_clamp(rc_speed_ms(a) * 0.6, 4.0, 12.0);
+        double sx = x + fx * la * RC_M, sz = z + fz * la * RC_M;
+        if (!rc_inside(sx, sz)) { sx = x; sz = z; }
+        ok = td5_roam_route_plan_path(sx, sz, fx, fz, gx, gz, 60.0, C.race_on ? C.mask : NULL, &qx, &qz, &nq, &len);
+        if (ok && nq >= 2) {
+            /* the car, then the planned line */
+            double *bx = (double *)malloc((size_t)(nq + 1) * sizeof(double)), *bz = (double *)malloc((size_t)(nq + 1) * sizeof(double));
+            if (bx && bz) {
+                bx[0] = x; bz[0] = z;
+                memcpy(bx + 1, qx, (size_t)nq * sizeof(double));
+                memcpy(bz + 1, qz, (size_t)nq * sizeof(double));
+                ok = rc_set_path(c, bx, bz, nq + 1, v_cap, end_v);
+            } else ok = 0;
+            free(bx); free(bz);
+        } else ok = 0;
+    }
     free(qx); free(qz);
     if (!ok) { C.st.plan_fails++; c->plan_fail++; return 0; }
     c->plan_fail = 0;
@@ -682,7 +721,8 @@ static int rc_spawn_at(RcCop *c, double x, double z, double tx, double tz, int s
     return 1;
 }
 
-/* one try to spawn a cop round (ax, az); `ahead` = prefer the player's heading (fx, fz). 1 when placed. */
+/* one try to spawn a cop round (ax, az); `ahead` = 1: a reinforcement, from BEHIND or beside the player (heading (fx, fz)),
+ * so it joins the chase instead of meeting the car head-on (an escape stays possible). 1 when placed. */
 static int rc_try_spawn(double ax, double az, double fx, double fz, int ahead, int state)
 {
     RcCop *c = rc_free_cop();
@@ -705,7 +745,7 @@ static int rc_try_spawn(double ax, double az, double fx, double fz, int ahead, i
         double th = rc_unit(&C.rng) * 2.0 * RC_PI;
         const double r = (C.r_spawn_min + rc_unit(&C.rng) * (C.r_spawn_max - C.r_spawn_min)) * RC_M;
         double px, pz;
-        if (ahead) th = atan2(fz, fx) + (rc_unit(&C.rng) - 0.5) * 2.4;     /* +-70 deg round the heading */
+        if (ahead) th = atan2(-fz, -fx) + (rc_unit(&C.rng) - 0.5) * 3.4;  /* behind / beside the player (+-97 deg round its back) */
         px = ax + cos(th) * r; pz = az + sin(th) * r;
         if (!td5_roam_route_graph_snap_edge(px, pz, 60.0, &e, &along, &dm)) return 0;
         if (!td5_roam_route_graph_edge_view(e, &E) || E.npt < 2 || E.plen < 30.0 * RC_M) return 0;
@@ -950,7 +990,15 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
         double want = c->state == RC_PATROL ? 1.3 : 0.0;
         if (c->pass_dwell > 0) { want = c->pass_off; c->pass_dwell--; }
         L = rc_clamp(4.0 + 0.4 * v, 5.0, 20.0);
-        if (c->np >= 2) want = rc_lane_fit(c, c->s + L, want);
+        if (c->np >= 2) {
+            /* a bend ahead (heading change over the next 15 m past 30 deg): the short look-ahead of td5_roam_traffic's
+             * turns, a long one cuts the corner over the kerb */
+            double x0, z0, x1, z1, tx0, tz0, tx1, tz1;
+            rc_path_point(c, c->s, 0.0, &x0, &z0, &tx0, &tz0);
+            rc_path_point(c, c->s + 15.0, 0.0, &x1, &z1, &tx1, &tz1);
+            if (tx0 * tx1 + tz0 * tz1 < 0.866) L = rc_clamp(2.5 + 0.3 * v, 3.5, 8.0);
+            want = rc_lane_fit(c, c->s + L, want);
+        }
         if (want > c->off + 0.05) c->off += 0.05;
         else if (want < c->off - 0.05) c->off -= 0.05;
         else c->off = want;
@@ -974,7 +1022,13 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
             if (db < 2.0) vt = rc_speed_ms(pl) * 0.8;
         }
     } else if (c->np >= 2) {
-        rc_path_point(c, c->s + L, c->off, &ax, &az, NULL, NULL);
+        /* the aim point and the line to it on the drivable surface, else a shorter look-ahead */
+        int k;
+        for (k = 0; k < 3; k++) {
+            rc_path_point(c, c->s + L, c->off, &ax, &az, NULL, NULL);
+            if (rc_inside(ax, az) && rc_inside(0.5 * (ax + x), 0.5 * (az + z))) break;
+            L *= 0.6;
+        }
     } else {
         ax = x + fx * L * RC_M; az = z + fz * L * RC_M;
     }
@@ -1052,25 +1106,35 @@ status:
         int32_t gy = 0;
         if (!rc_locate(x, z, a->world_pos.y, 1, &inside, &gy)) { rc_despawn(c, RC_WHY_UNRES); c->fade = -1; c->alpha = 0; return; }
         if (!inside) {
-            if (c->off_t == 0 && C.st.off_ticks < 200)
-                TD5_LOG_W(LOG_TAG, "ROAM_COPS_OFF slot %d at place (%.0f,%.0f) %s v=%.1f km/h lat=%.2f m contact %ld ticks ago",
-                          c->slot, x, z, c->state == RC_PURSUIT ? "pursuit" : "patrol", v * 3.6, c->lat, tick - c->last_contact);
+            if (c->off_t == 0 && C.st.off_ticks < 200) {
+                double qx = x, qz = z;
+                if (c->np >= 2) rc_path_point(c, c->s, 0.0, &qx, &qz, NULL, NULL);
+                TD5_LOG_W(LOG_TAG, "ROAM_COPS_OFF slot %d at place (%.0f,%.0f) %s v=%.1f km/h vt=%.1f lat=%.2f m s=%.1f/%.1f path point "
+                          "(%.0f,%.0f) %s, steer %d, contact %ld ticks ago | top surface here %s, car y %d ground %d", c->slot, x, z,
+                          c->state == RC_PURSUIT ? "pursuit" : "patrol", v * 3.6, c->v_t * 3.6, c->lat, c->s, rc_path_len(c), qx, qz,
+                          rc_inside(qx, qz) ? "on the road" : "OFF the road", (int)c->steer, tick - c->last_contact,
+                          rc_inside(x, z) ? "ON the road" : "off the road", (int)(a->world_pos.y >> 8), (int)(gy >> 8));
+            }
             C.st.off_ticks++;
             if (tick - c->last_contact < 60) C.st.off_ticks_contact++;
             if (++c->off_t > RC_OFF_TICKS) {
                 C.st.off_events++;
                 c->off_t = 0;
-                if (c->state == RC_PURSUIT && c->np >= 2) {
-                    double rx, rz, rtx, rtz, s2;
-                    for (s2 = c->s; s2 >= 0.0; s2 -= 4.0) {
-                        rc_path_point(c, s2, 0.0, &rx, &rz, &rtx, &rtz);
-                        if (rc_footprint_ok(rx, rz, rtx, rtz) && rc_clear_of_actors(rx, rz, 5.0, c->slot)) {
-                            rc_place_actor(c, a, rx, rz, rc_angle_of(rtx, rtz), v * 0.5);
-                            C.st.off_rescues++;
-                            break;
-                        }
+                if (c->state == RC_PURSUIT) {
+                    /* back on the nearest street centre, facing along its path (or the car's heading) */
+                    double rx, rz, dm, rtx = fx, rtz = fz;
+                    uint64_t key;
+                    int ok = 0;
+                    if (td5_roam_route_snap_xz(x, z, 30.0, &rx, &rz, &key, &dm)) {
+                        if (c->np >= 2) { double qx, qz; rc_path_point(c, c->s + 4.0, 0.0, &qx, &qz, &rtx, &rtz); }
+                        ok = rc_footprint_ok(rx, rz, rtx, rtz) && rc_clear_of_actors(rx, rz, 5.0, c->slot);
                     }
-                    if (s2 < 0.0) rc_despawn(c, RC_WHY_OFF);
+                    if (ok) {
+                        rc_place_actor(c, a, rx, rz, rc_angle_of(rtx, rtz), v * 0.5);
+                        c->np = 0; c->plan_t = -100000;
+                        C.st.off_rescues++;
+                        TD5_LOG_I(LOG_TAG, "ROAM_COPS: slot %d put back on the street %.1f m away", c->slot, dm);
+                    } else rc_despawn(c, RC_WHY_OFF);
                 } else rc_despawn(c, RC_WHY_OFF);
             }
         } else c->off_t = 0;
@@ -1104,6 +1168,54 @@ static void rc_barriers(RcCop *c, TD5_Actor *a)
             if (vn < 0.0) { a->linear_velocity_x -= (int32_t)(vn * nx); a->linear_velocity_z -= (int32_t)(vn * nz); }
         }
         C.st.barrier_hits++;
+    }
+    (void)c;
+}
+
+/* The ROAD EDGE is a wall for cops (racer-like; traffic slots skip the roam wall resolver): the 4 body corners against
+ * the drivable surface at the car's level, a corner a kerb overhang (0.35 m, the racers' ROAM_KERB_OVERHANG) past the
+ * edge pushes the car back along the locator's push vector, ONE push per tick, the velocity into the edge removed.
+ * The deepest corner's push, or with corners pushed opposite ways (a turn: the front outer corner and the rear inner
+ * one) the VECTOR SUM of every corner's push, so a narrow pinch nets out and a corner still moves the car in. */
+static void rc_road_walls(RcCop *c, TD5_Actor *a)
+{
+    const TD5_RoamResident *rs = td5_roam_resident();
+    const double tol = 0.35 * RC_M;
+    double fx, fz, bpx = 0.0, bpz = 0.0, bpen = 0.0, ox0 = 0.0, oz0 = 0.0, sx = 0.0, sz = 0.0;
+    int q, n = 0, pinch = 0;
+    if (!rs) return;
+    rc_heading(a, &fx, &fz);
+    for (q = 0; q < 4; q++) {
+        const double l = (q & 1) ? 2.2 : -2.2, w = (q & 2) ? 0.95 : -0.95;
+        const int32_t qx = a->world_pos.x + (int32_t)((fx * l + fz * w) * RC_M * 256.0);
+        const int32_t qz = a->world_pos.z + (int32_t)((fz * l - fx * w) * RC_M * 256.0);
+        TD5_RoamHit h;
+        double pd;
+        if (!td5_roam_locate(rs, qx, qz, a->world_pos.y, 1, ROAM_PRIM_NONE, &h) || h.prim == ROAM_PRIM_NONE || h.inside) continue;
+        pd = (double)h.push_dist;
+        if (pd <= tol) continue;
+        if (n > 0 && (h.push_x * ox0 + h.push_z * oz0) < 0.0) pinch = 1;
+        if (n == 0) { ox0 = h.push_x; oz0 = h.push_z; }
+        n++;
+        {
+            const double l2 = sqrt((double)h.push_x * h.push_x + (double)h.push_z * h.push_z);
+            const double px = l2 > 0.0 ? h.push_x / l2 * (pd - tol) : 0.0, pz = l2 > 0.0 ? h.push_z / l2 * (pd - tol) : 0.0;
+            sx += px; sz += pz;
+            if (pd - tol > bpen) { bpen = pd - tol; bpx = px; bpz = pz; }
+        }
+    }
+    if (n == 0 || bpen <= 0.0) return;
+    C.st.road_pushes++;
+    if (pinch) { bpx = sx; bpz = sz; C.st.road_pinches++; }
+    a->world_pos.x += (int32_t)floor(bpx * 256.0 + 0.5);
+    a->world_pos.z += (int32_t)floor(bpz * 256.0 + 0.5);
+    {
+        const double l = sqrt(bpx * bpx + bpz * bpz);
+        if (l > 0.0) {
+            const double nx = bpx / l, nz = bpz / l;
+            const double vn = a->linear_velocity_x * nx + a->linear_velocity_z * nz;
+            if (vn < 0.0) { a->linear_velocity_x -= (int32_t)(vn * nx); a->linear_velocity_z -= (int32_t)(vn * nz); }
+        }
     }
     (void)c;
 }
@@ -1306,9 +1418,25 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
         if (C.heat > C.st.max_heat) C.st.max_heat = C.heat;
     }
     if (npur > C.st.max_pursuers) C.st.max_pursuers = npur;
-    /* bust: the player stopped with a pursuer within 9 m */
-    if (vpl < 8.0 / 3.6 && dmin < 9.0) C.bust_meter += 1.0 / (C.bust_s * RC_HZ);
-    else C.bust_meter -= 2.0 / (C.bust_s * RC_HZ);
+#ifndef TD5RE_RELEASE
+    if (C.log_every && (tick - C.p_t0) % (C.log_every * 30L) == 0) {
+        char ln[400];
+        size_t q = 0;
+        for (i = 0; i < C.pool && q < sizeof ln - 60; i++) {
+            const RcCop *c = &C.cop[i];
+            const TD5_Actor *ca = td5_game_get_actor(c->slot);
+            if (c->state != RC_PURSUIT || !ca) continue;
+            q += (size_t)snprintf(ln + q, sizeof ln - q, " [%d %.0fm %.0fkmh vt%.0f %s s%.0f/%.0f r%d]", c->slot, c->d_player, rc_speed_ms(ca) * 3.6,
+                                  c->v_t * 3.6, c->sees ? "sees" : "-", c->s, rc_path_len(c), c->role);
+        }
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS_P t=%.0f s heat %d player %.0f km/h meter %.2f lost %.1f s:%s", (tick - C.p_t0) / RC_HZ, C.heat,
+                  vpl * 3.6, C.bust_meter, C.lost_t / RC_HZ, ln);
+    }
+#endif
+    /* bust: the player (nearly) stopped with a pursuer within 10 m. A boxing cop nudges the car, so "stopped" is
+     * under 10 km/h, and the meter drains at the rate it fills */
+    if (vpl < 10.0 / 3.6 && dmin < 10.0) C.bust_meter += 1.0 / (C.bust_s * RC_HZ);
+    else C.bust_meter -= 1.0 / (C.bust_s * RC_HZ);
     if (C.bust_meter < 0.0) C.bust_meter = 0.0;
     if (C.bust_meter >= 1.0) {
         C.bust_meter = 1.0;
@@ -1396,7 +1524,7 @@ void td5_roam_cops_tick(void)
         a = td5_game_get_actor(c->slot);
         if (!a) { rc_park(c); continue; }
         rc_drive(c, a, pl, plx, plz);
-        if (c->state != RC_PARKED) rc_barriers(c, a);
+        if (c->state != RC_PARKED) { rc_road_walls(c, a); rc_barriers(c, a); }
         if (c->d_player > (c->state == RC_PURSUIT ? C.r_despawn_pursuit : C.r_despawn)) rc_despawn(c, RC_WHY_FAR);
         if (per == 0 && !C.pursuit && c->fade >= 0 && c->state == RC_PATROL && !c->hold) rc_despawn(c, RC_WHY_LEVEL);
         /* a ram: the player into a cop, closing faster than 2.5 m/s */
@@ -1405,9 +1533,13 @@ void td5_roam_cops_tick(void)
             double cx, cz;
             rc_place_of(a, &cx, &cz);
             {
+                /* the PLAYER drives into the cop: closing faster than 2.5 m/s, and the player's own speed towards the
+                 * cop is the larger share (a cop boxing the car in is not a ram by the player) */
                 const double dxp = cx - plx, dzp = cz - plz, dl2 = sqrt(dxp * dxp + dzp * dzp);
                 const double closing = dl2 > 0.0 ? (rvx * dxp + rvz * dzp) / dl2 / 256.0 * RC_HZ / RC_M : 0.0;
-                if (closing > 2.5) ram = i;
+                const double v_pl = dl2 > 0.0 ? ((double)pl->linear_velocity_x * dxp + (double)pl->linear_velocity_z * dzp) / dl2 / 256.0 * RC_HZ / RC_M : 0.0;
+                const double v_cop = dl2 > 0.0 ? -((double)a->linear_velocity_x * dxp + (double)a->linear_velocity_z * dzp) / dl2 / 256.0 * RC_HZ / RC_M : 0.0;
+                if (closing > 2.5 && v_pl > v_cop) ram = i;
             }
         }
         if (c->fade > 0) { c->alpha += 255 / RC_FADE_TICKS; if (c->alpha >= 255) { c->alpha = 255; c->fade = 0; } }
@@ -1482,8 +1614,12 @@ int td5_roam_cops_siren_slot(int32_t wx, int32_t wz)
 
 uint32_t td5_roam_cops_filter_bits(int slot, uint32_t bits)
 {
+    const TD5_Actor *a;
     if (slot != 0 || !C.on || C.busted_t <= 0 || !td5_roam_active()) return bits;
-    return (bits & ~(uint32_t)(TD5_INPUT_THROTTLE | TD5_INPUT_RECOVER)) | (uint32_t)TD5_INPUT_BRAKE;
+    /* brake to a stop, then the handbrake (a brake held at a standstill engages reverse) */
+    a = td5_game_get_actor(0);
+    bits &= ~(uint32_t)(TD5_INPUT_THROTTLE | TD5_INPUT_RECOVER | TD5_INPUT_BRAKE);
+    return bits | (uint32_t)((a && rc_speed_ms(a) > 1.0) ? TD5_INPUT_BRAKE : TD5_INPUT_HANDBRAKE);
 }
 
 int td5_roam_cops_heat(void) { return C.pursuit ? C.heat : 0; }

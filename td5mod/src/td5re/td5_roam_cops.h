@@ -27,8 +27,8 @@
  * Driver Model's shape on a polyline (resampled path, corner speed sqrt(a_lat R), a backward braking pass, pure
  * pursuit steering, the traffic throttle law), up to TD5RE_ROAM_COPS_VMAX (125 km/h). Inside 30 m with line of sight
  * it drives at a box point beside the player instead. HEAT 1..5: 1 at the start, +1 per further offence and per 25 s
- * of chase. Pursuers wanted = 1 + heat (pool permitting): reinforcements spawn 140..260 m out, ahead of the player
- * when a street allows, and patrols within 200 m join from heat 2.
+ * of chase. Pursuers wanted = 1 + heat (pool permitting): reinforcements spawn 120..220 m out, behind or beside the
+ * player (they join the chase, they do not meet the car head-on), and patrols within 200 m join from heat 2.
  *
  * ESCAPE when no pursuer has seen the player for 6 + 2 x heat seconds, or every pursuer is farther than 320 m. The
  * cops switch off and go back to patrolling.
@@ -40,10 +40,12 @@
  * - a race: the car is released where it stands (the 3 s are the penalty), the pursuers drop back to patrol, 15 s
  *   of grace. No game over in either.
  *
- * WALLS. Cops are racer-like: a race's mouth barriers block them (td5_roam_race_wall_probe_cop on the 4 body
- * corners, the push applied before physics); traffic passes through them. Traffic slots skip the roam wall
- * resolver, so the cop driver keeps the car on the drivable surface itself; a cop off it for 1 s is put back on its
- * path (pursuit) or removed (patrol), counted either way.
+ * WALLS. Cops are racer-like. The ROAD EDGE is a wall for them: traffic slots skip the roam wall resolver, so this
+ * module pushes a cop's body corners back from the drivable-surface edge (the locator's push vector, the racers'
+ * 0.35 m kerb overhang, one push per tick: the deepest corner's, or the vector sum when corners push opposite ways). A race's mouth BARRIERS block them too
+ * (td5_roam_race_wall_probe_cop on the 4 body corners); traffic passes through them. Both pushes are applied before
+ * physics. A cop whose centre is still off the surface for 1 s is put back on a street (pursuit) or removed
+ * (patrol), counted either way.
  *
  * STATE. One file-scope struct, main thread only, inert outside a roam session.
  */
@@ -89,6 +91,8 @@ typedef struct {
     long   recoveries, stuck_episodes, stuck_removed;   /* stuck: under 1 km/h for > 5 s, not by the player */
     long   off_ticks, off_ticks_contact, off_events, off_rescues;
     long   barrier_hits;                      /* cop body probes pushed back by a race barrier        */
+    long   road_pushes, road_pinches;         /* cop ticks pushed back from the road edge (pinch: opposite pushes, summed) */
+    long   path_fixes;                        /* path samples moved back onto the road (median / corner cuts) */
     long   plans, plan_fails, wrecks;
     long   pursuit_ticks;
     int    max_heat, max_pursuers;
