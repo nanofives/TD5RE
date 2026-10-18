@@ -11427,6 +11427,16 @@ void td5_game_update_frame_timing(void) {
 
     /* Normalized frame delta time: 1.0 = one 30 Hz simulation tick. */
     frame_dt_seconds = (float)delta_ms / 1000.0f;
+#ifndef TD5RE_RELEASE
+    {
+        /* [F8c] DEV: TD5RE_FIXED_FRAME_US pins every frame's delta (e.g. 16667 = the 60 Hz vsync
+         * pacing) so the sim ticks per frame no longer follow the wall clock: a run with the
+         * monitors asleep (vsync presents at ~257 ms) or with --VSync=0 replays the paced one. */
+        static int s_fixed_us = -1;
+        if (s_fixed_us < 0) s_fixed_us = td5_env_int("TD5RE_FIXED_FRAME_US", 0, 0, 100000);
+        if (s_fixed_us > 0) frame_dt_seconds = (float)s_fixed_us / 1000000.0f;
+    }
+#endif
     frame_dt_normalized = frame_dt_seconds * 30.0f;
 
     /* TraceFastForward is a speed multiplier — 1.0 = real-time (default),
