@@ -338,7 +338,7 @@ static int fu_pick_cross(const int *nm, const int16_t *bear, int n, int a)
 {
     int j, best = -1;
     double bs = -1.0;
-    if (nm[a] < 0) return -1;
+    /* [F4f] an UNNAMED arm still gets a plate: it names the street it crosses (the best-named other arm) */
     for (j = 0; j < n; j++) {
         double s;
         if (j == a || nm[j] < 0 || nm[j] == nm[a]) continue;
@@ -1154,8 +1154,8 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
                         int ttx, ttz; int32_t ox, oz; double lat = 0, lon = 0;
                         const double b12 = atan2(at.tz, at.tx) * 4096.0 / 6.283185307179586;
                         roam_ctx_origin(c, &ttx, &ttz, &ox, &oz);
-                        td5_roam_place_to_latlon("la_plata_partido", (at.x - at.tx * 22.0 * FU_UPM) + ox,
-                                                 (at.z - at.tz * 22.0 * FU_UPM) + oz, &lat, &lon);
+                        td5_roam_place_to_latlon("la_plata_partido", (at.x - at.tx * 11.0 * FU_UPM) + ox,
+                                                 (at.z - at.tz * 11.0 * FU_UPM) + oz, &lat, &lon);
                         TD5_LOG_I(LOG_TAG, "FURN_PLATE spawn=%.6f,%.6f yaw=%d front='%s' back='%s'", lat, lon,
                                   ((1024 - (int)floor(b12 + 0.5)) & 0xFFF), cf ? cf->name : "-", cb ? cb->name : "-");
                     }
