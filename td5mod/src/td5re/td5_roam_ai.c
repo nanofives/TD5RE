@@ -31,6 +31,7 @@
 #include "td5_roam_lap.h"
 #include "td5_roam_ai.h"
 #include "td5_roam_traffic.h"
+#include "td5_roam_physics.h"     /* [F8c] DEV impact ring: the provider side table */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -109,6 +110,7 @@ static struct {
     double a_lat, a_brake, v_top, v_min, look0, lookk, look_min, look_max, wb, lane_m;
     int    kd, rate;
     int    rb_on; double rb_behind_m, rb_ahead_m, rb_boost, rb_trim;
+    int    see_traffic;                          /* [F8c] TD5RE_ROAM_AI_SEE_TRAFFIC (1; 0 = the pre-F8c blind test) */
     FILE  *trc;
 } A;
 
@@ -143,6 +145,7 @@ static void ra_read_knobs(void)
     A.rb_ahead_m  = td5_env_int("TD5RE_ROAM_AI_RB_AHEAD_M", 150, 20, 5000);
     A.rb_boost    = td5_env_int("TD5RE_ROAM_AI_RB_BOOST", 8, 0, 50) / 100.0;
     A.rb_trim     = td5_env_int("TD5RE_ROAM_AI_RB_TRIM", 8, 0, 50) / 100.0;
+    A.see_traffic = td5_env_int("TD5RE_ROAM_AI_SEE_TRAFFIC", 1, 0, 1);
 }
 
 int td5_roam_ai_preload(void)
@@ -165,6 +168,18 @@ int td5_roam_ai_racing(void)
     if (!A.on || !td5_roam_active()) return 0;
     for (k = 0; k < A.n; k++) if (A.car[k].live && !A.car[k].finished) return 1;
     return 0;
+}
+
+/* [F8c] Is slot j a car on the road? A racer slot past the field is disabled (state 3). A traffic slot is
+ * the traffic pool's to answer: td5_game_get_slot_state says 3 for EVERY slot >= TD5_MAX_RACER_SLOTS (16)
+ * and td5_game_roam_set_racer_field writes 3 into the pool slots 6..15 too, so the old "state 3 = skip"
+ * test made every traffic car invisible here. The opponents then never followed, passed or braked for
+ * traffic and drove into it at full speed (roam-circuit, F8b: slot 3 into traffic 10 / 9 at 80..100 km/h,
+ * the heavy-crash scatter launched it), and the IMPACT log reported no car near. */
+static int ra_on_road(int j)
+{
+    if (j < g_traffic_slot_base || !A.see_traffic) return td5_game_get_slot_state(j) != 3;   /* knob 0: the old test */
+    return td5_roam_traffic_parked(j) == 0;
 }
 
 static int ra_place_of(const TD5_Actor *a, double *px, double *pz)
@@ -545,6 +560,10 @@ void td5_roam_ai_session_init(void)
 
 /* ============================================================ race ============== */
 
+#ifndef TD5RE_RELEASE
+static void ra_ring_reset(void);
+#endif
+
 static void ra_place(int k)
 {
     RaCar *c = &A.car[k];
@@ -668,6 +687,9 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
     }
     td5_game_roam_set_racer_field(A.n);
     A.nfin = 0;
+#ifndef TD5RE_RELEASE
+    ra_ring_reset();
+#endif
     for (k = 0; k < A.n; k++) {
         RaCar *c = &A.car[k];
         memset(c, 0, sizeof *c);
@@ -757,7 +779,7 @@ static int ra_respawn(RaCar *c, TD5_Actor *a)
         for (j = 0; j < total && ok; j++) {
             const TD5_Actor *b;
             double bx, bz;
-            if (j == c->slot || td5_game_get_slot_state(j) == 3 || td5_roam_traffic_parked(j) == 1) continue;
+            if (j == c->slot || !ra_on_road(j)) continue;
             b = td5_game_get_actor(j);
             if (b && ra_place_of(b, &bx, &bz) && hypot(bx - x, bz - z) < 6.0 * RA_M) ok = 0;
         }
@@ -777,6 +799,92 @@ static int ra_respawn(RaCar *c, TD5_Actor *a)
     return 0;
 }
 
+#ifndef TD5RE_RELEASE
+/* [F8c] DEV: an after-the-fact ring of each opponent's state, one entry per driven tick (the actor as
+ * physics left it + the provider's side table for that slot), written out only when an IMPACT fires.
+ * A memcpy per car per tick, no file I/O until then: the run's timing stays what it was. */
+#define RA_RING 16
+typedef struct {
+    long          race_tick, sim_tick;
+    double        s, lat;
+    TD5_Actor     a;
+    unsigned char phys[TD5_ROAM_PHYS_SLOT_BLOB];
+} RaSnap;
+static struct { RaSnap e[RA_RING]; int head, n; } s_ring[TD5_ROAM_AI_MAX];
+
+static void ra_ring_reset(void) { memset(s_ring, 0, sizeof s_ring); }
+
+static void ra_ring_push(const RaCar *c, const TD5_Actor *a)
+{
+    const int k = (int)(c - A.car);
+    RaSnap *e;
+    if (k < 0 || k >= TD5_ROAM_AI_MAX) return;
+    e = &s_ring[k].e[s_ring[k].head];
+    e->race_tick = A.race_ticks; e->sim_tick = (long)g_td5.simulation_tick_counter;
+    e->s = c->s; e->lat = c->lat;
+    memcpy(&e->a, a, sizeof *a);
+    if (!td5_roam_physics_dev_slot_copy(c->slot, e->phys, sizeof e->phys)) memset(e->phys, 0, sizeof e->phys);
+    s_ring[k].head = (s_ring[k].head + 1) % RA_RING;
+    if (s_ring[k].n < RA_RING) s_ring[k].n++;
+}
+
+static void ra_ring_print_actor(FILE *f, const TD5_Actor *a)
+{
+    int w;
+    fprintf(f, "  pos (%d,%d,%d) vel (%d,%d,%d) euler r/y/p (%d,%d,%d) angvel r/y/p (%d,%d,%d) mode %d contact 0x%X prev 0x%X "
+               "air %d steer %d thr %d brake %d slip f/r %d/%d span %d\n",
+            (int)a->world_pos.x, (int)a->world_pos.y, (int)a->world_pos.z, (int)a->linear_velocity_x, (int)a->linear_velocity_y,
+            (int)a->linear_velocity_z, (int)a->euler_accum.roll, (int)a->euler_accum.yaw, (int)a->euler_accum.pitch,
+            (int)a->angular_velocity_roll, (int)a->angular_velocity_yaw, (int)a->angular_velocity_pitch, (int)a->vehicle_mode,
+            (unsigned)a->wheel_contact_bitmask, (unsigned)a->damage_lockout, (int)a->airborne_frame_counter,
+            (int)a->steering_command, (int)a->encounter_steering_cmd, (int)a->brake_flag, (int)a->front_axle_slip_excess,
+            (int)a->rear_axle_slip_excess, (int)a->track_span_raw);
+    for (w = 0; w < 4; w++)
+        fprintf(f, "  wheel%d hires (%d,%d,%d) contact (%d,%d,%d) n (%d,%d,%d) susp %d dv %d load %d probe (%d,%d,%d)\n", w,
+                (int)a->wheel_world_positions_hires[w].x, (int)a->wheel_world_positions_hires[w].y,
+                (int)a->wheel_world_positions_hires[w].z, (int)a->wheel_contact_pos[w].x, (int)a->wheel_contact_pos[w].y,
+                (int)a->wheel_contact_pos[w].z, a->wheel_contact_normals[w][0], a->wheel_contact_normals[w][1],
+                a->wheel_contact_normals[w][2], (int)a->wheel_suspension_pos[w], (int)a->wheel_spring_dv[w],
+                (int)a->wheel_load_accum[w], (int)(&a->probe_FL)[w].x, (int)(&a->probe_FL)[w].y, (int)(&a->probe_FL)[w].z);
+}
+
+static void ra_ring_dump(const RaCar *c, const TD5_Actor *now, double v_prev, double v)
+{
+    const int k = (int)(c - A.car);
+    char path[512];
+    const char *dir = td5_plat_log_dir();
+    FILE *f;
+    int i, n;
+    if (k < 0 || k >= TD5_ROAM_AI_MAX || (n = s_ring[k].n) <= 0) return;
+    snprintf(path, sizeof path, "%sroam_ai_impact_s%d_t%ld.txt", dir ? dir : "", c->slot, A.race_ticks);
+    f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "slot %d car %d IMPACT %.1f -> %.1f km/h at race tick %ld sim tick %ld, s %.2f along %.1f lat %.2f; "
+               "%d ring entries, oldest first, then NOW (the state after the impact tick's physics)\n",
+            c->slot, c->car_index, v_prev * 3.6, v * 3.6, A.race_ticks, (long)g_td5.simulation_tick_counter, c->s, c->along,
+            c->lat, n);
+    for (i = 0; i < n; i++) {
+        const RaSnap *e = &s_ring[k].e[(s_ring[k].head - n + i + RA_RING) % RA_RING];
+        fprintf(f, "[ring %d] race tick %ld sim tick %ld s %.2f lat %.2f\n", i - n, e->race_tick, e->sim_tick, e->s, e->lat);
+        ra_ring_print_actor(f, &e->a);
+        td5_roam_physics_dev_slot_print(f, e->phys);
+    }
+    {
+        unsigned char blob[TD5_ROAM_PHYS_SLOT_BLOB];
+        const RaSnap *last = &s_ring[k].e[(s_ring[k].head - 1 + RA_RING) % RA_RING];
+        const uint32_t *p0 = (const uint32_t *)&last->a, *p1 = (const uint32_t *)now;
+        fprintf(f, "[NOW] race tick %ld sim tick %ld\n", A.race_ticks, (long)g_td5.simulation_tick_counter);
+        ra_ring_print_actor(f, now);
+        if (td5_roam_physics_dev_slot_copy(c->slot, blob, sizeof blob)) td5_roam_physics_dev_slot_print(f, blob);
+        fprintf(f, "[DIFF last ring -> NOW] actor dwords that changed (offset: before -> after)\n");
+        for (i = 0; i < (int)(sizeof(TD5_Actor) / 4); i++)
+            if (p0[i] != p1[i]) fprintf(f, "  +0x%03X: %d -> %d\n", i * 4, (int)p0[i], (int)p1[i]);
+    }
+    fclose(f);
+    TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d impact ring -> %s", c->slot, path);
+}
+#endif
+
 /* the field's speeds: a car ahead in my lane and slower -> follow cap + a pass request */
 static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
 {
@@ -786,9 +894,7 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
     for (j = 0; j < total; j++) {
         const TD5_Actor *b;
         double bx, bz, f, l, vb;
-        if (j == c->slot) continue;
-        if (td5_game_get_slot_state(j) == 3) continue;
-        if (td5_roam_traffic_parked(j) == 1) continue;   /* [F8] a parked traffic car is not on the road */
+        if (j == c->slot || !ra_on_road(j)) continue;
         b = td5_game_get_actor(j);
         if (!b || !ra_place_of(b, &bx, &bz)) continue;
         f = ((bx - x) * tx + (bz - z) * tz) / RA_M;
@@ -838,7 +944,7 @@ static void ra_drive(RaCar *c, int hold)
         for (j = 0; j < total; j++) {
             const TD5_Actor *b;
             double bx, bz, d;
-            if (j == c->slot || td5_game_get_slot_state(j) == 3 || td5_roam_traffic_parked(j) == 1) continue;
+            if (j == c->slot || !ra_on_road(j)) continue;
             b = td5_game_get_actor(j);
             if (!b || !ra_place_of(b, &bx, &bz)) continue;
             d = hypot(bx - x, bz - z) / RA_M;
@@ -854,8 +960,10 @@ static void ra_drive(RaCar *c, int hold)
         TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d IMPACT %.1f -> %.1f km/h at %.0f m along (lat %.2f) | nearest actor slot %d%s at %.1f m "
                   "(%.1f ahead, %.1f across) moving %.1f km/h", c->slot, c->v_prev * 3.6, v * 3.6, c->along, c->lat, bj,
                   bj >= g_traffic_slot_base ? " (traffic)" : "", bd, bf, bl, bv * 3.6);
+        ra_ring_dump(c, a, c->v_prev, v);
     }
     c->v_prev = v;
+    if (!hold) ra_ring_push(c, a);
 #endif
 
     if (hold) {
