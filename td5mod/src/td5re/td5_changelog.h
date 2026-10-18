@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 17 (free roam street furniture)" },
+    { CL_ITEM,    "Free roam: traffic lights at the real signal junctions" },
+    { CL_ITEM,    "(mast arm with a blue street-name plate, countdown and" },
+    { CL_ITEM,    "red / amber / green on the right kerb, a post light on" },
+    { CL_ITEM,    "the left), street lamps along the streets, bus stops" },
+    { CL_ITEM,    "with shelters, zebra crossings. Lamps glow at night." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 17 (free roam sprint race)" },
     { CL_ITEM,    "Free roam: race your route. R in the route map (or in" },
     { CL_ITEM,    "  the pause menu, or on a saved route in the load list)" },
