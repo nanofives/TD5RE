@@ -881,6 +881,8 @@ static void st_roam_arm(const RaceScenario *sc)
     td5_roam_traffic_force_race_level(sc->roam == 12 ? 2 : -1);
     /* [roam F10] free-roam patrols only in the cops rows: the other roam rows keep the drive they were written for */
     td5_roam_cops_dev_force(st_roam_is_cops(sc->roam) ? -1 : 0, -1);
+    /* [roam F9b] the cops rows rebase the world every tile: their pursuits run across world-origin rebases */
+    td5_roam_rebase_force_tiles(st_roam_is_cops(sc->roam) ? 1 : -1);
     if (st_roam_is_cops(sc->roam)) {
         /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
         if (sc->roam == 14) td5_roam_traffic_force_density(0);
@@ -948,6 +950,18 @@ static void st_roam_capture(void)
         for (q = 0; dn[q]; q++) if (dn[q] == '|') dn[q] = '/';   /* the report is a markdown table */
         snprintf(s_roam_note, sizeof s_roam_note, "%.70s; %.47s", tn, dn);
         if (ts > s_roam_status) s_roam_status = ts;
+    }
+    if (st_roam_is_cops(s_roam_row)) {
+        /* [roam F9b] the cops rows run across world-origin rebases (threshold 1 tile): say how many, and none is a FAIL */
+        TD5_RoamRebaseStats rb;
+        char base[120];
+        td5_roam_rebase_stats(&rb);
+        snprintf(base, sizeof base, "%s", s_roam_note);
+        snprintf(s_roam_note, sizeof s_roam_note, "%.100s rb %ld", base, rb.count);
+        if (rb.count < 1 && s_roam_status < ST_FAIL) {
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "%.100s NO REBASE", base);
+        }
     }
 }
 

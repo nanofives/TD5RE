@@ -45,6 +45,9 @@ void td5_roam_rebase_listen(TD5_RoamRebaseFn fn);       /* idempotent; up to 16 
 void td5_roam_rebase_tick(void);
 /* Force one rebase to the player's tile now (DEV / selftest), even inside the threshold. */
 void td5_roam_rebase_force(void);
+/* Self-test override of the threshold (tiles, -1 = back to TD5RE_ROAM_REBASE_TILES): the cops rows rebase every
+ * tile so a pursuit runs across rebases. */
+void td5_roam_rebase_force_tiles(int tiles);
 /* A new roam session: counters reset. */
 void td5_roam_rebase_session_reset(void);
 /* Frame time feed (td5_roam_stream_tick): the worst frame that contained a rebase. */

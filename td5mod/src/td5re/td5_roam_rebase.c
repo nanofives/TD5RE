@@ -39,6 +39,7 @@ typedef struct {
     TD5_RoamRebaseFn    fn[RB_MAX_LISTEN];
     int                 nfn;
     int                 tiles;           /* threshold, -1 = not read */
+    int                 force_tiles;     /* DEV/selftest override + 1, 0 = the knob */
     RoamGrid            grid;
     int                 grid_ok;
     char                grid_place[64];
@@ -110,6 +111,7 @@ void td5_roam_rebase_session_reset(void)
 }
 
 void td5_roam_rebase_force(void) { s_rb.force = 1; }
+void td5_roam_rebase_force_tiles(int tiles) { s_rb.force_tiles = tiles < 0 ? 0 : tiles + 1; }
 
 void td5_roam_rebase_stats(TD5_RoamRebaseStats *out)
 {
@@ -257,7 +259,10 @@ void td5_roam_rebase_tick(void)
         s_rb.tiles = td5_env_int("TD5RE_ROAM_REBASE_TILES", 4, 0, 64);
         TD5_LOG_I(LOG_TAG, "ROAM_REBASE: threshold %d tile(s) (%s)", s_rb.tiles, s_rb.tiles ? "on" : "off: fixed origin");
     }
-    if ((!s_rb.tiles && !s_rb.force) || td5_roam_physics_rebase_inhibited()) { RB_TRACE(0); return; }
+    {
+        const int thr = s_rb.force_tiles ? s_rb.force_tiles - 1 : s_rb.tiles;
+        if ((!thr && !s_rb.force) || td5_roam_physics_rebase_inhibited()) { RB_TRACE(0); return; }
+    }
     a = td5_game_get_actor(0);
     g = rb_grid();
     if (!a || !g) { RB_TRACE(0); return; }
@@ -273,7 +278,7 @@ void td5_roam_rebase_tick(void)
     /* the origin is a lattice corner: its own tile is the one whose (0,0) corner it is */
     roam_grid_tile_of(g, (double)ox + 8.0 * (g->c - g->s), (double)oz + 8.0 * (g->s + g->c), &otx, &otz);
     d = abs(ptx - otx) > abs(ptz - otz) ? abs(ptx - otx) : abs(ptz - otz);
-    if (!s_rb.force && d <= s_rb.tiles) { RB_TRACE(0); return; }
+    if (!s_rb.force && d <= (s_rb.force_tiles ? s_rb.force_tiles - 1 : s_rb.tiles)) { RB_TRACE(0); return; }
     s_rb.force = 0;
     roam_grid_origin(g, ptx, ptz, &nox, &noz);
     rb_apply(nox, noz, ptx, ptz);
