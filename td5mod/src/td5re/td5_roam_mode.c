@@ -9,9 +9,10 @@
  * (task C). The gates in the other modules ask td5_roam_active().
  *
  * WORLD FRAME. world = place - origin, in integer units of 1/430 m; the actor's
- * world_pos is the 24.8 form (FP_SCALE). The origin is the (0,0) corner of the
+ * world_pos is the 24.8 form (FP_SCALE). The origin starts at the (0,0) corner of the
  * lattice tile that holds the spawn point (roam_grid_origin, the same rounding the
- * ROAMTILE files use), fixed for the whole session (F2; dynamic rebasing is F9).
+ * ROAMTILE files use); [F9b] td5_roam_rebase.c moves it to the player's tile corner
+ * when the car gets more than a few tiles away (td5_roam_set_world_origin).
  *
  * NO FILE-SCOPE STATE OUTSIDE s_roam (the mode/session struct).
  */
@@ -40,6 +41,8 @@
 #include "td5_roam_race.h"      /* [F6-B] the sprint race is reset with the session */
 #include "td5_roam_ai.h"        /* [F7] the opponents' cars load with the session */
 #include "td5_asset.h"          /* [F7] td5_asset_get_car_zip_path: a known opponent car */
+#include "td5_roam_rebase.h"    /* [F9b] a new session starts the rebase counters */
+#include "td5_roam_partido.h"   /* [F9b] the place boundary + its streets (gate, spawn in a field) */
 #include "td5_roam_traffic.h"
 #include "td5_roam_cops.h"      /* [F10] the cop slots end with the session */
 #include "td5_roam_route_ui.h"  /* [F8b] the planner session ends with the roam session */
@@ -47,6 +50,7 @@
 #define LOG_TAG "roam"
 
 #define ROAM_MAX_SLOTS   40      /* [F10] 32 -> 40: traffic 6..29 + the cops after it (TD5_MAX_TOTAL_ACTORS is 80) */
+#define ROAM_GATE_STREET_M 300.0 /* [F9b] FREE ROAM accepts a point of the place with a street this close */
 #define ROAM_UPM         430.0   /* place units per metre */
 #define ROAM_RAD         0.017453292519943295
 #define ROAM_WGS_A       6378137.0
@@ -200,6 +204,11 @@ int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
         roam_grid_tile_of(&g, (double)x, (double)z, &tx, &tz);
         td5_roam_tile_path(path, sizeof path, NULL, cand, tx, tz);
         ok = td5_plat_file_exists(path);
+        /* [F9b] no tile built there yet: any point of the place with a street within ROAM_GATE_STREET_M
+         * (the light OSM layer; the stream builds the tiles on demand behind the start gate) */
+        if (!ok && td5_roam_partido_load(cand) && td5_roam_partido_contains((double)x, (double)z) &&
+            td5_roam_partido_streets_ensure(cand))
+            ok = td5_roam_partido_nearest_street((double)x, (double)z, ROAM_GATE_STREET_M, NULL, NULL, NULL);
         if (!ok) continue;
         snprintf(slug, cap, "%s", cand);
         *px = x; *pz = z;
@@ -224,12 +233,21 @@ void td5_roam_begin(const TD5_RoamSpawn *s)
     /* world origin = the (0,0) corner of the lattice tile holding the spawn point */
     if (roam_grid_load(s_roam.spawn.place, &g)) {
         roam_grid_tile_of(&g, (double)s->spawn_px, (double)s->spawn_pz, &tx, &tz);
+#ifndef TD5RE_RELEASE
+        {   /* [F9b DEV] TD5RE_ROAM_ORIGIN_OFFSET=dtx,dtz: start the origin that many tiles off the spawn tile
+             * (a control for the rebase A/B: the engine's float paths round differently in another frame) */
+            const char *e = getenv("TD5RE_ROAM_ORIGIN_OFFSET");
+            int dtx = 0, dtz = 0;
+            if (e && sscanf(e, "%d,%d", &dtx, &dtz) == 2) { tx += dtx; tz += dtz; }
+        }
+#endif
         roam_grid_origin(&g, tx, tz, &s_roam.origin_x, &s_roam.origin_z);
     } else {
         TD5_LOG_W(LOG_TAG, "roam: no ROAMGRID.JSON for place '%s' (build tiles with "
                   "--RoamBuildTiles=casco); origin left at 0,0", s_roam.spawn.place);
     }
     s_roam.host_track = -1;      /* re-resolved for this place */
+    td5_roam_rebase_session_reset();
     s_roam.armed = 1;
     s_roam.active = 0;
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
@@ -259,6 +277,13 @@ void td5_roam_world_origin(int32_t *ox, int32_t *oz)
 {
     if (ox) *ox = s_roam.origin_x;
     if (oz) *oz = s_roam.origin_z;
+}
+
+/* [F9b] Only td5_roam_rebase.c moves the origin (it shifts every world position with it). */
+void td5_roam_set_world_origin(int32_t ox, int32_t oz)
+{
+    s_roam.origin_x = ox;
+    s_roam.origin_z = oz;
 }
 
 const struct TD5_RoamResident *td5_roam_resident(void) { return s_roam.resident; }
@@ -524,6 +549,18 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
 
     /* the click point -> the nearest drivable spot (the car must not start off the road) */
     moved = roam_snap_to_road(&px, &pz, yaw);
+    if (moved < 0.0 && td5_roam_stream_active() && td5_roam_partido_streets_ensure(s_roam.spawn.place)) {
+        /* [F9b] a click in a field, beyond the spawn neighbourhood's streets: move it to the nearest OSM street
+         * of the place, bring that neighbourhood in and snap there */
+        double sx, sz, dm;
+        if (td5_roam_partido_nearest_street((double)px, (double)pz, 3000.0, &sx, &sz, &dm)) {
+            TD5_LOG_I(LOG_TAG, "roam: spawn click place=(%d,%d) has no road in its neighbourhood: nearest street %.0f m away",
+                      (int)px, (int)pz, dm);
+            px = (int32_t)floor(sx + 0.5); pz = (int32_t)floor(sz + 0.5);
+            td5_roam_stream_wait_area(px, pz, -1);
+            moved = roam_snap_to_road(&px, &pz, yaw);
+        }
+    }
     if (moved > 0.0)
         TD5_LOG_I(LOG_TAG, "roam: spawn snap to road: click place=(%d,%d) -> (%d,%d), moved %.1f m",
                   (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)px, (int)pz, moved);
@@ -641,6 +678,13 @@ void td5_roam_dev_cli(const char *cmd)
     sp.car_index = g_td5.ini.default_car;
     TD5_LOG_W(LOG_TAG, "roam: dev CLI --Roam=1 spawn=%.6f,%.6f -> place (%d,%d) (dev build only)",
               lat, lon, (int)sp.spawn_px, (int)sp.spawn_pz);
+    {   /* [F9b] what the FREE ROAM button would say about this point (the geo selector's gate) */
+        char gslug[64];
+        int32_t gx, gz;
+        const int gok = td5_roam_place_for_latlon(lat, lon, gslug, sizeof gslug, &gx, &gz);
+        TD5_LOG_I(LOG_TAG, "roam: FREE ROAM gate for %.6f,%.6f: %s%s", lat, lon,
+                  gok ? "accepted, place " : "REFUSED (no street of a roamable place within 300 m)", gok ? gslug : "");
+    }
     td5_roam_begin(&sp);
 
     /* straight into the race with the default car, like AutoRace */

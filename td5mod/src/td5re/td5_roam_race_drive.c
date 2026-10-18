@@ -46,6 +46,8 @@
 #include "td5_roam_race.h"
 #include "td5_roam_ai.h"          /* [F7] the AI rows: standings, braking, counters */
 #include "td5_roam_lap.h"         /* [F9a] the circuit rows: the lap tracker simulation */
+#include "td5_roam_rebase.h"      /* [F9b] world-frame memories follow a rebase; the partido rows judge them */
+#include "td5_roam_stream.h"      /* [F9b] the partido rows judge stream misses / holds */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -106,6 +108,27 @@ static const double k_fig8_wp[][2] = {
     { -34.911484, -57.961065 },
     { -34.911635, -57.960862 },   /* FINISH Calle 10, just before the crossing: the lap closes through it */
 };
+/* [F9b] the partido rows: out of the casco on tiles built on demand, across world-origin rebases. Via points
+ * keep the scripted driver on the main roads (Diagonal 74, Camino Parque Centenario): the shortest path out of
+ * Plaza Moreno turns from Calle 12 into the divided Avenida 44, the median-nose corner the scripted driver wedges
+ * on (F2-E open item), which is not what these rows test.
+ * FULL: Plaza Moreno -> Diagonal 74 -> Centenario -> City Bell centre -> back the same way -> Plaza Moreno.
+ * SHORT: Plaza Moreno -> Diagonal 74 -> Centenario at Gonnet (out of the casco, north-west). */
+static const double k_partido_wp[][2] = {
+    { -34.92048, -57.95358 },     /* START  Calle 12, Plaza Moreno east side   */
+    { -34.90500, -57.95450 },     /* via    Diagonal 74                        */
+    { -34.88123, -58.00851 },     /* via    Camino Parque Centenario           */
+    { -34.86452, -58.04562 },     /* via    Centenario at City Bell centre     */
+    { -34.87771, -58.01661 },     /* via    Centenario, back                   */
+    { -34.90500, -57.95450 },     /* via    Diagonal 74, back                  */
+    { -34.92125, -57.95475 },     /* FINISH Plaza Moreno                       */
+};
+static const double k_partido_short_wp[][2] = {
+    { -34.92048, -57.95358 },     /* START  Calle 12, Plaza Moreno east side   */
+    { -34.90500, -57.95450 },     /* via    Diagonal 74                        */
+    { -34.88658, -58.00139 },     /* FINISH Camino Parque Centenario, Gonnet   */
+};
+#define SD_IS_PARTIDO(m) ((m) == TD5_RSPRINT_PARTIDO || (m) == TD5_RSPRINT_PARTIDO_SHORT)
 #define SD_IS_CIRC(m) ((m) == TD5_RCIRCUIT_FULL || (m) == TD5_RCIRCUIT_SMOKE)
 #define SD_IS_AI(m) ((m) == TD5_RSPRINT_FULL_AI || (m) == TD5_RSPRINT_SMOKE_AI || SD_IS_CIRC(m))
 #define SD_IS_SMOKE(m) ((m) == TD5_RSPRINT_SMOKE || (m) == TD5_RSPRINT_SMOKE_AI || (m) == TD5_RCIRCUIT_SMOKE)
@@ -171,6 +194,10 @@ static struct {
     long     mon_jumps;           /* monitor: ticks the player's lap count rose by more than 1     */
     int      mon_ai_laps[8];
     long     mon_ai_jumps;
+    int      mapping;             /* [F9b] partido rows: waypoints set, waiting for the region graph */
+    int      free_drive;          /* [F9b] partido rows: the route driven in free roam (no race, no barriers) */
+    int      arrived;             /* [F9b] reached the end of the route */
+    long     t_arrive;
 } D;
 
 /* one frame dump per name: <log dir>roam_sprint_<name>.png */
@@ -237,6 +264,15 @@ int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
         for (i = 0; i < cn && i < max; i++) { ll[i][0] = cs[i][0]; ll[i][1] = cs[i][1]; }
         return cn;
     }
+    if (SD_IS_PARTIDO(mode)) {
+        const double (*ps)[2] = mode == TD5_RSPRINT_PARTIDO ? k_partido_wp : k_partido_short_wp;
+        const int pn = mode == TD5_RSPRINT_PARTIDO ? (int)(sizeof k_partido_wp / sizeof k_partido_wp[0])
+                                                   : (int)(sizeof k_partido_short_wp / sizeof k_partido_short_wp[0]);
+        int i, n = sd_env_wp(ll, max);          /* TD5RE_ROAM_CIRCUIT_WP replaces them here too */
+        if (n >= 2) return n;
+        for (i = 0; i < pn && i < max; i++) { ll[i][0] = ps[i][0]; ll[i][1] = ps[i][1]; }
+        return pn;
+    }
     {
     const double (*src)[2] = SD_IS_SMOKE(mode) ? k_smoke_wp : (mode == TD5_RSPRINT_FULL_AI ? k_full_ai_wp : k_full_wp);
     const int n = SD_IS_SMOKE(mode) ? (int)(sizeof k_smoke_wp / sizeof k_smoke_wp[0])
@@ -248,6 +284,14 @@ int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
     }
 }
 
+/* [F9b] World-origin rebase: the wrong-turn panels and the last pursuit target are world units */
+static void sd_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    for (i = 0; i < D.nwt; i++) { D.wt[i].mx += sx; D.wt[i].mz += sz; }
+    D.ltx += sx; D.ltz += sz;
+}
+
 void td5_roam_sprint_test_arm(int mode)
 {
     memset(&D, 0, sizeof D);
@@ -255,14 +299,16 @@ void td5_roam_sprint_test_arm(int mode)
     D.active_wt = -1;
     D.hint = -1;
     D.ch_hint = ROAM_PRIM_NONE;
-    D.want_wt = SD_IS_AI(mode) ? 0 : (mode == TD5_RSPRINT_SMOKE ? 1 : 2);   /* [F7] AI rows: no wrong turns */
+    D.want_wt = (SD_IS_AI(mode) || SD_IS_PARTIDO(mode)) ? 0 : (mode == TD5_RSPRINT_SMOKE ? 1 : 2);   /* [F7] AI rows: no wrong turns */
+    td5_roam_rebase_listen(sd_world_shift);
     D.shots = td5_env_int("TD5RE_ROAM_SPRINT_SHOTS", 0, 0, 1);
     D.laps = SD_IS_CIRC(mode) ? td5_env_int("TD5RE_ROAM_CIRCUIT_LAPS", mode == TD5_RCIRCUIT_SMOKE ? 2 : 3, 1, TD5_RRACE_MAX_LAPS) : 1;
     td5_roam_ai_force_player_spot(SD_IS_CIRC(mode) ? 1 : (SD_IS_AI(mode) ? 3 : -1));   /* [F7] mid-pack, repeatable (play: random) */
     snprintf(D.route_name, sizeof D.route_name, "%s",
              mode == TD5_RCIRCUIT_FULL ? "selftest_circuit" : mode == TD5_RCIRCUIT_SMOKE ? "selftest_circuit_smoke"
              : mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
-             : mode == TD5_RSPRINT_SMOKE_AI ? "selftest_sprint_ai_smoke" : "selftest_sprint");
+             : mode == TD5_RSPRINT_SMOKE_AI ? "selftest_sprint_ai_smoke" : mode == TD5_RSPRINT_PARTIDO ? "selftest_partido"
+             : mode == TD5_RSPRINT_PARTIDO_SHORT ? "selftest_partido_short" : "selftest_sprint");
 }
 
 void td5_roam_sprint_test_disarm(void)
@@ -291,6 +337,18 @@ static int sd_plan_save_load(void)
     double ll[8][2];
     const int n = td5_roam_sprint_route_waypoints(D.mode, ll, 8);
     int i, ok = 1;
+    if (SD_IS_PARTIDO(D.mode) && D.mapping) {
+        /* [F9b] the waypoints are in; the planner region is being mapped (tiles built on the stream worker,
+         * the graph swapped in): wait for the route, then save / load it like every row */
+        if (!td5_roam_route_result()->ok || !td5_roam_route_graph_settled()) {
+            if (D.phase_frames > 30 * 60 * 6) { sd_finish("the partido route never planned (region not mapped)", 1); return 0; }
+            return -1;
+        }
+        TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] route planned after %ld frames of mapping: %.1f m, %d edges, graph gen %ld, %ld tiles built",
+                  D.phase_frames, td5_roam_route_result()->length_m, td5_roam_route_result()->nedge, td5_roam_route_graph_gen(),
+                  td5_roam_stream_plan_built());
+        goto planned;
+    }
     td5_roam_route_clear();
     for (i = 0; i < n && ok; i++) {
         int32_t px, pz;
@@ -302,6 +360,14 @@ static int sd_plan_save_load(void)
     /* [F9a] a circuit closes FINISH -> START. [F8b] a sprint says SPRINT too: clear keeps the planner's type, and a
      * circuit row run before this one left CIRCUIT x 3 (the smoke sprint was raced as 3 laps of a 1.2 km loop) */
     if (ok) td5_roam_route_set_type(SD_IS_CIRC(D.mode) ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT, D.laps);
+    if (ok && SD_IS_PARTIDO(D.mode) && !td5_roam_route_result()->ok) {
+        D.mapping = 1;
+        D.phase_frames = 0;
+        TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] %d waypoints set, the region is being mapped (%d tiles queued)", n,
+                  td5_roam_route_graph_pending());
+        return -1;
+    }
+planned:
     if (!ok || !td5_roam_route_result()->ok) { sd_finish("could not plan the scripted route", 1); return 0; }
     if (SD_IS_CIRC(D.mode) && !td5_roam_route_result()->closed) { sd_finish("the circuit has no closing leg back to START", 1); return 0; }
     D.saved_hash = td5_roam_route_result()->hash;
@@ -336,6 +402,9 @@ static void sd_build_path(void)
     const TD5_RouteResult *r = td5_roam_route_result();
     int i, n = 0, dropped = 0;
     const int copies = SD_IS_CIRC(D.mode) ? D.laps + 1 : 1;     /* [F9a] a circuit: the lap unrolled, one lap more than the race */
+    /* [F9b] a via point snapped beside a junction leaves a ~16 m out-and-back spike to the node; the partido drive has
+     * several of them, the casco rows keep the F6 15 m rule */
+    const double jog_m = SD_IS_PARTIDO(D.mode) ? 30.0 : 15.0;
     int c;
     free(s_ppx); free(s_ppz); free(s_pd);
     memset(&s_path, 0, sizeof s_path);
@@ -353,6 +422,11 @@ static void sd_build_path(void)
             const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
             if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
                 (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
+            /* [F9b] partido: an out-and-back spike to a junction node beside a via point (the points before and after
+             * coincide), up to jog_m long */
+            if (jog_m > 15.0 && la > 0.0 && lb > 0.0 && la < jog_m * SD_M && lb < jog_m * SD_M &&
+                (r->px[i + 1] - r->px[i - 1]) * (r->px[i + 1] - r->px[i - 1]) +
+                (r->pz[i + 1] - r->pz[i - 1]) * (r->pz[i + 1] - r->pz[i - 1]) < (3.0 * SD_M) * (3.0 * SD_M)) { dropped++; continue; }
         }
         if (c > 0 && i == 0) continue;                  /* the lap's first point is the previous lap's last */
         s_ppx[n] = r->px[i]; s_ppz[n] = r->pz[i];
@@ -663,10 +737,11 @@ void td5_roam_sprint_test_frame(void)
         const char *m = getenv("TD5RE_ROAM_SPRINT_TEST");
         E.checked = 1;
         if (m && (!strcmp(m, "full") || !strcmp(m, "smoke") || !strcmp(m, "ai") || !strcmp(m, "ai_smoke") ||
-                  !strcmp(m, "circuit") || !strcmp(m, "circuit_smoke"))) {
+                  !strcmp(m, "circuit") || !strcmp(m, "circuit_smoke") || !strcmp(m, "partido") || !strcmp(m, "partido_short"))) {
             td5_roam_sprint_test_arm(!strcmp(m, "smoke") ? TD5_RSPRINT_SMOKE : !strcmp(m, "ai") ? TD5_RSPRINT_FULL_AI
                                      : !strcmp(m, "ai_smoke") ? TD5_RSPRINT_SMOKE_AI : !strcmp(m, "circuit") ? TD5_RCIRCUIT_FULL
-                                     : !strcmp(m, "circuit_smoke") ? TD5_RCIRCUIT_SMOKE : TD5_RSPRINT_FULL);
+                                     : !strcmp(m, "circuit_smoke") ? TD5_RCIRCUIT_SMOKE : !strcmp(m, "partido") ? TD5_RSPRINT_PARTIDO
+                                     : !strcmp(m, "partido_short") ? TD5_RSPRINT_PARTIDO_SHORT : TD5_RSPRINT_FULL);
             td5_roam_ai_force_player_spot(-1);   /* [F7] standalone: the player's grid spot is drawn as in play */
             E.driven = 1;
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
@@ -686,13 +761,50 @@ void td5_roam_sprint_test_frame(void)
     case 0:   /* planner graph */
         if (td5_roam_route_graph_ready() && D.frames > 20) {
             if (D.mode == TD5_RCIRCUIT_FULL) sd_fig8_census();    /* [F9a] before the real circuit is planned */
-            if (!sd_plan_save_load()) return;
+            {
+                const int pr = sd_plan_save_load();
+                if (pr == 0) return;
+                if (pr < 0) break;            /* [F9b] mapping the partido region */
+            }
             D.phase = 1; D.phase_frames = 0;
         } else if (D.frames > 6000) {
             sd_finish("planner graph never ready", 1);
         }
         break;
     case 1:   /* open the setup panel the way the R key does */
+        if (SD_IS_PARTIDO(D.mode)) {
+            /* [F9b] the partido rows drive the planned route in FREE ROAM: the subject is the place (tiles built
+             * on demand, world-origin rebases, residency over a long drive), not the race barriers */
+            TD5_RoamPhysStats st;
+            char path[512];
+            const char *dir = td5_plat_log_dir();
+            if (D.shots) {
+                /* the route map over the partido (streets of the whole place, its outline, the route), then drive */
+                if (D.phase_frames == 1) { td5_roam_route_ui_open_map(); break; }
+                if (D.phase_frames == 6) { td5_roam_route_ui_fit(); break; }
+                if (D.phase_frames == 40) { sd_shot("p_map"); break; }
+                if (D.phase_frames == 50) { td5_roam_route_ui_close_map(); break; }
+                if (D.phase_frames < 60) break;
+                if (td5_game_is_pause_menu_active() || td5_roam_route_ui_map_open()) {
+                    if (D.phase_frames == 120) td5_plat_input_inject_key(0x01, 1);   /* ESC: back to driving */
+                    if (D.phase_frames == 124) td5_plat_input_inject_key(0x01, 0);
+                    if (D.phase_frames > 600) { sd_finish("the route map / pause menu never closed", 1); return; }
+                    break;
+                }
+            }
+            if (D.phase_frames < 10) break;
+            td5_roam_physics_stats(&st);
+            D.pinch0 = st.pinches; D.resc0 = st.rescues + st.rescues_y; D.tele0 = st.teleports;
+            sd_build_path();
+            sd_dump_route();
+            snprintf(path, sizeof path, "%sroam_sprint_trace.csv", dir ? dir : "");
+            D.trc = fopen(path, "w");
+            if (D.trc) fprintf(D.trc, "tick,along_m,lat_m,px,pz,kmh,bits,wt,wt_state,drv_along,tx,tz,yaw\n");
+            D.free_drive = 1;
+            D.phase = 3; D.phase_frames = 0;
+            TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] free-roam drive of the %.1f m route begins", s_path.length_m);
+            break;
+        }
         if (SD_IS_CIRC(D.mode) && D.shots) {
             /* [F9a] the planner map with the circuit (closing leg included) before the setup panel covers it */
             if (D.phase_frames == 1) { td5_roam_route_ui_open_map(); break; }
@@ -737,6 +849,11 @@ void td5_roam_sprint_test_frame(void)
         }
         break;
     case 3:
+        if (D.free_drive) {
+            if (D.along_s > s_path.length_m * 0.45 && D.along_s < s_path.length_m * 0.55) sd_shot("p_midway");
+            if (D.arrived) sd_finish("arrived", 0);
+            break;
+        }
         if (SD_IS_AI(D.mode)) {
             /* [F7] the grid seen through the rear view (the field is behind START), the pack ahead, an
              * opponent braking for a bend ahead of the camera car */
@@ -823,6 +940,24 @@ static uint32_t sd_steer_to(const TD5_Actor *a, double tx, double tz, double kmh
 }
 
 /* pursuit target on the route `look` m ahead of `along`, world units; plus a speed from the bend ahead */
+/* [F9b] the straight line from the car to a world-frame target stays on the drivable surface (8 samples) */
+static int sd_los_ok(const TD5_Actor *a, double tx, double tz)
+{
+    const TD5_RoamResident *rs = td5_roam_resident();
+    const double px = a->world_pos.x / 256.0, pz = a->world_pos.z / 256.0;
+    int k;
+    if (!rs) return 1;
+    for (k = 1; k <= 8; k++) {
+        const double f = (double)k / 8.0;
+        TD5_RoamHit h;
+        if (!td5_roam_locate(rs, (int32_t)floor((px + (tx - px) * f) * 256.0 + 0.5), (int32_t)floor((pz + (tz - pz) * f) * 256.0 + 0.5),
+                             a->world_pos.y, 1, ROAM_PRIM_NONE, &h))
+            return 0;
+        if (h.prim == ROAM_PRIM_NONE || !h.inside) return 0;
+    }
+    return 1;
+}
+
 static void sd_route_target(double along, double look, double *tx, double *tz, double *kmh)
 {
     const TD5_RouteResult *r = sd_path();
@@ -923,13 +1058,14 @@ static uint32_t sd_bits(TD5_Actor *a)
     double px, pz, along, lat, tx, tz, kmh_t;
     uint32_t bits;
     TD5_RoamRaceWallStats ws;
-    if (!D.mode || D.done || !a || D.phase != 3 || td5_roam_race_state() != TD5_RRACE_RACING) return 0;
+    if (!D.mode || D.done || !a || D.phase != 3 || (td5_roam_race_state() != TD5_RRACE_RACING && !D.free_drive)) return 0;
     if (tick == D.tick_last) return 0;
     D.tick_last = tick;
     if (!D.t_go) D.t_go = tick;
     {
         /* [F9a] a circuit gets laps x lap at a crawl of 25 km/h plus 90 s */
-        const long lim_s = SD_IS_CIRC(D.mode) ? (long)((double)D.laps * D.lap_len / 6.9) + 90L : (D.mode == TD5_RSPRINT_SMOKE ? 150L : 480L);
+        const long lim_s = SD_IS_CIRC(D.mode) ? (long)((double)D.laps * D.lap_len / 6.9) + 90L
+                         : SD_IS_PARTIDO(D.mode) ? (long)(D.length_m / 6.9) + 120L : (D.mode == TD5_RSPRINT_SMOKE ? 150L : 480L);
         if (tick - D.t_go > lim_s * 30L) { sd_finish("sprint timeout", 1); return 0; }
     }
     td5_roam_world_origin(&ox, &oz);
@@ -954,6 +1090,12 @@ static uint32_t sd_bits(TD5_Actor *a)
         along = ba;
         lat = sqrt(best) / SD_M;
         (void)lat;
+    }
+    if (D.free_drive && !D.arrived && along >= s_path.length_m - 12.0) {
+        D.arrived = 1;
+        D.t_arrive = tick;
+        TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] arrived: %.1f m in %ld ticks", along, tick - D.t_go);
+        return (uint32_t)TD5_INPUT_BRAKE;
     }
     sd_composition(a);
     td5_roam_race_wall_stats(&ws);
@@ -1020,6 +1162,17 @@ static uint32_t sd_bits(TD5_Actor *a)
 
     /* pursuit on the route */
     sd_route_target(along, 10.0 + sd_kmh(a) * 0.12, &tx, &tz, &kmh_t);
+    if (D.free_drive) {
+        /* [F9b] the partido drive meets tiny roundabouts and tight block loops the casco rows never see: shorten
+         * the lookahead until the straight line to the target stays on the road (never across a ring's island) */
+        double look = 10.0 + sd_kmh(a) * 0.12;
+        while (look > 4.0 && !sd_los_ok(a, tx, tz)) {
+            double k2;
+            look *= 0.6;
+            sd_route_target(along, look, &tx, &tz, &k2);
+            if (kmh_t > 25.0) kmh_t = 25.0;
+        }
+    }
     D.ltx = tx; D.ltz = tz;
     bits = sd_steer_to(a, tx, tz, kmh_t);
     /* a wedge: throttle held and under 4 km/h for 1.5 s -> back out 1.3 s with the wheel turned away */
@@ -1030,7 +1183,11 @@ static uint32_t sd_bits(TD5_Actor *a)
     }
     if ((bits & TD5_INPUT_THROTTLE) && sd_kmh(a) < 4.0) {
         D.slow_t++;
-        if (D.slow_t == 45) { D.rev_t = 40; D.retries++; TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] wedge at %.0f m along: backing out", along); }
+        if (D.slow_t == 45) {
+            D.rev_t = 40; D.retries++;
+            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] wedge at %.0f m along: backing out", along);
+            if (D.free_drive && along > 20.0) sd_shot("p_wedge");     /* [F9b] the first wedge of a partido drive past the start, for a look */
+        }
         if (D.slow_t == 90) D.stuck_events++;
     } else {
         D.slow_t = 0;
@@ -1137,6 +1294,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     size_t bl = 0;
     int i, blocked = 0;
     const int want_jn = SD_IS_CIRC(D.mode) ? (D.mode == TD5_RCIRCUIT_SMOKE ? 3 : 6)
+                      : D.mode == TD5_RSPRINT_PARTIDO ? 60 : D.mode == TD5_RSPRINT_PARTIDO_SHORT ? 15
                       : (SD_IS_SMOKE(D.mode) ? 3 : (D.mode == TD5_RSPRINT_FULL_AI ? 10 : 8));
     const int full = D.mode == TD5_RSPRINT_FULL || D.mode == TD5_RSPRINT_FULL_AI;
     long pinch, resc, tele;
@@ -1146,7 +1304,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     pinch = st.pinches - D.pinch0; resc = st.rescues + st.rescues_y - D.resc0; tele = st.teleports - D.tele0;
     for (i = 0; i < D.nwt; i++) blocked += D.wt[i].blocked;
 #define SD_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
-    if (!D.done || D.aborted || !res->finished) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
+    if (!D.done || D.aborted || (!res->finished && !D.arrived)) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
     if (res->finished && !D.exit_ok) SD_BAD("results ENTER did not return to free roam; ");
     if (D.saved_hash != D.loaded_hash) SD_BAD("reload hash %08X != %08X; ", (unsigned)D.loaded_hash, (unsigned)D.saved_hash);
     if (D.nkeys < want_jn) SD_BAD("%d junctions < %d; ", D.nkeys, want_jn);
@@ -1183,7 +1341,40 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
         if (as.finished < as.n) SD_BAD("opponents finished %d/%d; ", as.finished, as.n);
         if (as.stuck_long) SD_BAD("opponents stuck>5s %ld; ", as.stuck_long);
     }
+    if (SD_IS_PARTIDO(D.mode)) {
+        /* [F9b] off the casco on tiles built on demand, across rebases, without a stall */
+        TD5_RoamStreamStats ss;
+        TD5_RoamRebaseStats rb;
+        td5_roam_stream_stats(&ss);
+        td5_roam_rebase_stats(&rb);
+        if (ss.misses) SD_BAD("stream misses %ld; ", ss.misses);
+        if (ss.holds) SD_BAD("stream holds %ld; ", ss.holds);
+        if (rb.count < 1) SD_BAD("no rebase; ");
+        if (rb.far_actors) SD_BAD("actors past 4.19 M units %ld; ", rb.far_actors);
+        if (D.length_m < (D.mode == TD5_RSPRINT_PARTIDO ? 20000.0 : 3000.0)) SD_BAD("route %.0f m too short; ", D.length_m);
+    }
 #undef SD_BAD
+    if (SD_IS_PARTIDO(D.mode)) {
+        TD5_RoamStreamStats ss;
+        TD5_RoamRebaseStats rb;
+        long ct = D.arrived ? D.t_arrive - D.t_go : res->ticks;
+        const long cs = (ct * 100 + 15) / 30;
+        td5_roam_stream_stats(&ss);
+        td5_roam_rebase_stats(&rb);
+        snprintf(t, sizeof t, "%02ld:%02ld.%02ld", cs / 6000, (cs / 100) % 60, cs % 100);
+        if (bad[0]) snprintf(note, n, "partido FAIL: %.100s", bad);
+        else snprintf(note, n, "partido %.2f km %s, %d jn, rebases %ld (worst frame %.0f ms), built %ld, miss 0 hold 0",
+                      D.length_m / 1000.0, t, D.nkeys, rb.count, rb.frame_worst_ms, ss.built);
+        TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] VERDICT %s: route='%s' length=%.1f m time=%s (%ld ticks) junctions=%d rebases=%ld "
+                  "rebase_op_worst=%.3f ms rebase_frame_worst=%.1f ms max_world=%.0f m far_actors=%ld | stream loaded=%ld built=%ld "
+                  "miss=%ld hold=%ld sync=%ld frame median=%.1f worst=%.1f ms | pinches=%ld rescues=%ld teleports=%ld stuck=%ld "
+                  "vmax=%.0f km/h max_lateral=%.1f m off_route_ticks=%ld barriers mouth=%d hash saved=%08X loaded=%08X %s",
+                  bad[0] ? "FAIL" : "PASS", D.route_name, D.length_m, t, ct, D.nkeys, rb.count, rb.op_worst_ms,
+                  rb.frame_worst_ms, rb.max_world_m, rb.far_actors, ss.loaded, ss.built, ss.misses, ss.holds, ss.sync_loads,
+                  ss.frame_median_ms, ss.frame_worst_ms, pinch, resc, tele, D.stuck_events, D.kmh_max, res->max_lateral_m,
+                  res->off_route_ticks, D.bst.barriers_mouth, (unsigned)D.saved_hash, (unsigned)D.loaded_hash, bad);
+        return bad[0] ? 2 : 0;
+    }
     if (SD_IS_CIRC(D.mode)) return sd_circuit_verdict(note, n, bad, res, &ws, pinch, resc, tele);
     if (SD_IS_AI(D.mode)) return sd_ai_verdict(note, n, bad, res, &ws, pinch, resc, tele);
     {

@@ -37,6 +37,7 @@
 #include "td5_roam_ai.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_traffic.h"
+#include "td5_roam_rebase.h"     /* [F9b] parked cars are held where they were parked */
 #include "td5_roam_cops.h"       /* [F10] the cop slots answer td5_roam_traffic_parked / _alpha */
 #include "td5_roam_stream.h"     /* [F8b] the soak logs the stream residency beside private bytes */
 #include "td5_replay.h"          /* [F8b] the soak's leak rule takes the replay record buffer out */
@@ -104,6 +105,8 @@ static struct {
     int     on;                                  /* a roam session with a pool             */
     int     pool, base, loaded;
     int     ready;                               /* planner graph seen ready               */
+    long    gen;                                 /* [F9b] planner graph generation the cars' indices are in */
+    long    remapped, remap_lost;                /* [F9b] cars carried across a graph swap / despawned by it */
     RtCar   car[TD5_ROAM_TRAFFIC_POOL_MAX];
     uint32_t rng;
     long    spawn_count, tick_last;
@@ -585,6 +588,23 @@ static void rt_park(RtCar *c)
     }
 }
 
+/* [F9b] World-origin rebase. The graph, the lanes, the connectors and every spawn / despawn decision are in the
+ * PLACE frame (converted through the origin when used), and a LIVE car is an actor the rebase core already moved.
+ * A PARKED car keeps its last world position until a spawn re-places it: it is held there (the shift undone), so
+ * after a long drive it is not carried kilometres away from the origin. */
+static void rt_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    for (i = 0; i < T.pool; i++) {
+        TD5_Actor *a;
+        if (T.car[i].state == RT_LIVE) continue;
+        a = td5_game_get_actor(T.car[i].slot);
+        if (!a) continue;
+        a->world_pos.x -= FP_SCALE(sx); a->world_pos.z -= FP_SCALE(sz);
+        a->render_pos.x -= (float)sx;   a->render_pos.z -= (float)sz;
+    }
+}
+
 void td5_roam_traffic_session_init(void)
 {
     int i;
@@ -603,6 +623,7 @@ void td5_roam_traffic_session_init(void)
         T.pool = 0;
     }
     T.on = T.pool > 0;
+    td5_roam_rebase_listen(rt_world_shift);
     T.rng = 0x5EED0F08u;
     for (i = 0; i < T.pool; i++) {
         T.car[i].slot = T.base + i;
@@ -1398,6 +1419,58 @@ void td5_roam_traffic_tick(void)
 #endif
 }
 
+static void rt_despawn(RtCar *c, int why);
+
+/* [F9b] The planner graph is rebuilt off-thread as the region follows the car and swapped in: edge and node
+ * INDICES change, keys do not. Carry every live car's indices into the new generation and re-project its
+ * distance along the edge (the edge may have gained or lost runs at the region border). A car whose edge left
+ * the graph, or an older generation gap, fades out. */
+static void rt_remap(void)
+{
+    const long gen = td5_roam_route_graph_gen();
+    int i;
+    if (gen == T.gen) return;
+    for (i = 0; i < T.pool; i++) {
+        RtCar *c = &T.car[i];
+        int e, ne, nd;
+        if (c->state != RT_LIVE) continue;
+        e = td5_roam_route_graph_remap_edge(T.gen, c->e);
+        ne = c->ne >= 0 ? td5_roam_route_graph_remap_edge(T.gen, c->ne) : -1;
+        nd = td5_roam_route_graph_remap_node(T.gen, c->node);
+        if (e < 0 || nd < 0 || (c->ne >= 0 && ne < 0)) {
+            c->ne = ne >= 0 ? ne : -1;
+            if (e >= 0) c->e = e;
+            if (nd >= 0) c->node = nd;
+            if (e < 0 || nd < 0) { rt_despawn(c, RT_WHY_LOST); T.remap_lost++; continue; }
+        }
+        c->e = e; c->ne = ne; c->node = nd;
+        if (c->yield_node >= 0) c->yield_node = td5_roam_route_graph_remap_node(T.gen, c->yield_node);
+        if (c->seg == RT_SEG_EDGE) {
+            /* the distance along: the nearest point of the new polyline to the car (travel order) */
+            TD5_RouteGEdge E;
+            const TD5_Actor *a = td5_game_get_actor(c->slot);
+            double px, pz;
+            if (a && rt_edge(c->e, &E) && rt_place_of(a, &px, &pz)) {
+                double best = 1e300, bs = c->s;
+                int j;
+                for (j = 0; j + 1 < E.npt; j++) {
+                    const double x0 = E.pt[2 * j], z0 = E.pt[2 * j + 1], x1 = E.pt[2 * j + 2], z1 = E.pt[2 * j + 3];
+                    const double ex = x1 - x0, ez = z1 - z0, l2 = ex * ex + ez * ez;
+                    double t = l2 > 0.0 ? ((px - x0) * ex + (pz - z0) * ez) / l2 : 0.0, qx, qz, dd;
+                    if (t < 0.0) t = 0.0;
+                    if (t > 1.0) t = 1.0;
+                    qx = x0 + ex * t; qz = z0 + ez * t;
+                    dd = (qx - px) * (qx - px) + (qz - pz) * (qz - pz);
+                    if (dd < best) { best = dd; bs = E.cum[j] + t * (E.cum[j + 1] - E.cum[j]); }
+                }
+                c->s = c->d == 0 ? bs : E.plen - bs;
+            }
+        }
+        T.remapped++;
+    }
+    T.gen = gen;
+}
+
 static void rt_tick_body(void)
 {
     double ax[8], az[8];
@@ -1410,8 +1483,10 @@ static void rt_tick_body(void)
         if (!td5_roam_route_graph_building()) td5_roam_route_graph_begin_async(td5_roam_route_place());
         return;
     }
+    rt_remap();                /* [F9b] a planner graph swap renumbered the edges */
     if (!T.ready) {
         T.ready = 1;
+        T.gen = td5_roam_route_graph_gen();
 #ifndef TD5RE_RELEASE
         if (T.dbg_edge >= 0) { TD5_RouteGEdge DE; if (rt_edge(T.dbg_edge, &DE)) T.dbg_key = (long long)DE.key; }
         {   /* DEV: TD5RE_ROAM_TRAFFIC_DBG_PT=x,z (place) -> a 3 x 3 m grid at 10 cm through the locator */

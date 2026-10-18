@@ -43,6 +43,7 @@
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
 #include "td5_roam_furniture.h" /* GEO FREE ROAM street furniture (F4c): signal clock + lamp registry per frame */
 #include "td5_roam_route_ui.h" /* GEO FREE ROAM route planner (F5-A): keys, map overlay, guidance */
+#include "td5_roam_rebase.h"     /* [F9b] world-origin rebase at the top of each sim tick */
 #include "td5_roam_barrier.h"  /* GEO FREE ROAM route barriers (F6-A): panels + chevrons */
 #include "td5_roam_race.h"     /* GEO FREE ROAM sprint race (F6-B): flow, progress, results, barrier layer */
 #include "td5_roam_ai.h"       /* GEO FREE ROAM AI racers (F7): opponents on the route, parked while roaming */
@@ -6912,6 +6913,9 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
 
     while (g_td5.sim_time_accumulator > 0xFFFF &&
            ticks_this_frame < max_ticks_per_frame) {
+        /* [GEO FREE ROAM F9b] World-origin rebase at the TOP of the sim tick: every stored world
+         * position moves by a whole number of tiles before anything reads one. Self-gated (roam). */
+        td5_roam_rebase_tick();
         /* --- Input polling / lockstep exchange ---
          * Local-only play polls the controller every substep. Networked play:
          *  - decoupled (knob on): exchange ONE lockstep round HERE per sim tick,

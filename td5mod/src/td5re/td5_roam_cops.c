@@ -41,6 +41,7 @@
 #include "td5_roam_ai.h"        /* td5_roam_ai_count: the racer field when the session re-sets it */
 #include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
+#include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -104,7 +105,8 @@ static struct {
     /* the race corridor */
     int     race_on;                             /* a race with COPS on runs (the corridor applies) */
     uint8_t *mask; int mask_n; uint32_t mask_hash;
-    uint8_t *bad;                                /* graph edges a cop leg must not use (no road under the line), session */
+    uint8_t *bad; int bad_n;                     /* graph edges a cop leg must not use (no road under the line), session */
+    long    gen;                                 /* [F9b] planner graph generation the edge-indexed state is in */
     uint8_t *use; int use_n, use_dirty, use_race; /* the mask a leg is planned with: corridor (race) AND not bad */
     /* pursuit */
     int     pursuit, heat, offences, cause;
@@ -118,6 +120,7 @@ static struct {
     /* toasts */
     char    toast[96]; uint32_t toast_col; long toast_until;
     TD5_RoamCopsStats st;
+    long    st_regraphs;                         /* [F9b] planner graph swaps carried over */
 } C;
 
 /* ============================================================ helpers ============ */
@@ -294,6 +297,8 @@ static void rc_park(RcCop *c)
     }
 }
 
+static void rc_world_shift(int32_t sx, int32_t sz);
+
 void td5_roam_cops_session_init(void)
 {
     int i;
@@ -311,6 +316,7 @@ void td5_roam_cops_session_init(void)
         C.pool = 0;
     }
     C.on = C.pool > 0;
+    td5_roam_rebase_listen(rc_world_shift);   /* [F9b] */
     C.rng = 0x5EED0F10u;
     C.pl_e = -1; C.pl_node = -1; C.pl_red_node = -1;
     for (i = 0; i < C.pool; i++) {
@@ -331,7 +337,59 @@ void td5_roam_cops_session_end(void)
     for (i = 0; i < C.pool; i++) td5_ai_roam_mark_cop(C.cop[i].slot, 0);
     C.on = 0;
     free(C.mask); C.mask = NULL; C.mask_n = 0;
-    free(C.bad); C.bad = NULL; free(C.use); C.use = NULL; C.use_n = 0;
+    free(C.bad); C.bad = NULL; C.bad_n = 0; free(C.use); C.use = NULL; C.use_n = 0;
+}
+
+/* [F9b] The planner graph is rebuilt off-thread as its region follows the car and swapped in: edge and node INDICES
+ * change, keys do not. The cops' paths are PLACE-frame point lists (re-planned every 0.67 s in a pursuit) and need
+ * nothing; what is indexed by edge or node is carried over: the learned "no road under the line" set through the
+ * keys, the race corridor rebuilt from the route, the player's red-lamp watch remapped (or restarted). */
+static void rc_regraph(void)
+{
+    const long gen = td5_roam_route_graph_gen();
+    if (gen == C.gen) return;
+    if (C.bad) {
+        const int n = td5_roam_route_graph_nedge();
+        uint8_t *nb = n > 0 ? (uint8_t *)calloc((size_t)n, 1) : NULL;
+        int b, kept = 0, lost = 0;
+        for (b = 0; nb && b < C.bad_n; b++) {
+            int e;
+            if (!C.bad[b]) continue;
+            e = td5_roam_route_graph_remap_edge(C.gen, b);
+            if (e >= 0 && e < n) { nb[e] = 1; kept++; } else lost++;
+        }
+        free(C.bad);
+        C.bad = nb; C.bad_n = nb ? n : 0;
+        if (kept || lost) TD5_LOG_I(LOG_TAG, "ROAM_COPS: planner graph gen %ld -> %ld: %d bad edge(s) carried, %d left the graph",
+                                    C.gen, gen, kept, lost);
+    }
+    free(C.mask); C.mask = NULL; C.mask_n = 0; C.mask_hash = 0;     /* the corridor is rebuilt from the route */
+    C.use_dirty = 1;
+    if (C.pl_e >= 0) {
+        const int e = td5_roam_route_graph_remap_edge(C.gen, C.pl_e);
+        C.pl_e = e >= 0 ? e : -1;
+    }
+    if (C.pl_red_node >= 0) {
+        const int nn = td5_roam_route_graph_remap_node(C.gen, C.pl_red_node);
+        C.pl_red_node = nn >= 0 ? nn : -1;
+    }
+    C.gen = gen;
+    C.st_regraphs++;
+}
+
+/* [F9b] World-origin rebase: a live cop is an actor the rebase core moved, its path is PLACE frame. A PARKED cop keeps
+ * its last world position until a spawn re-places it: held there (the shift undone), so it is never carried far off. */
+static void rc_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    for (i = 0; i < C.pool; i++) {
+        TD5_Actor *a;
+        if (C.cop[i].state != RC_PARKED) continue;
+        a = td5_game_get_actor(C.cop[i].slot);
+        if (!a) continue;
+        a->world_pos.x -= FP_SCALE(sx); a->world_pos.z -= FP_SCALE(sz);
+        a->render_pos.x -= (float)sx;   a->render_pos.z -= (float)sz;
+    }
 }
 
 /* the leg mask: the race corridor (a race with COPS on) AND not a bad edge; NULL = every edge */
@@ -340,7 +398,7 @@ static const uint8_t *rc_use_mask(void)
     const int n = td5_roam_route_graph_nedge();
     int e;
     if (n <= 0) return NULL;
-    if (!C.bad) { C.bad = (uint8_t *)calloc((size_t)n, 1); C.use_dirty = 1; }
+    if (!C.bad) { C.bad = (uint8_t *)calloc((size_t)n, 1); C.bad_n = C.bad ? n : 0; C.use_dirty = 1; }
     if (!C.use || C.use_n != n) { free(C.use); C.use = (uint8_t *)malloc((size_t)n); C.use_n = n; C.use_dirty = 1; }
     if (!C.bad || !C.use) return C.race_on ? C.mask : NULL;
     if (C.use_race != C.race_on) { C.use_race = C.race_on; C.use_dirty = 1; }
@@ -1597,8 +1655,10 @@ void td5_roam_cops_tick(void)
     if (!td5_roam_route_graph_ready()) return;         /* td5_roam_traffic_tick starts the async build */
     if (!C.ready) {
         C.ready = 1;
+        C.gen = td5_roam_route_graph_gen();
         TD5_LOG_I(LOG_TAG, "ROAM_COPS: planner graph ready: %d edges", td5_roam_route_graph_nedge());
     }
+    rc_regraph();              /* [F9b] a planner graph swap renumbered the edges */
     pl = td5_game_get_actor(0);
     if (!pl) return;
     rc_place_of(pl, &plx, &plz);

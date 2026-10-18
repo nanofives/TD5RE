@@ -34,14 +34,16 @@
 #include "td5_roam_mode.h"      /* td5_roam_active (the full-load memory samples) */
 #include "td5_hitchwatch.h"      /* [F3-B DEV] what the worker is doing, for the stall sampler */
 #include "td5_roam_scenery.h"   /* [F4a] the worker's scenery source              */
+#include "td5_roam_partido.h"   /* [F9b] which lattice tiles are streamable (the place boundary) */
+#include "td5_roam_rebase.h"    /* [F9b] frame time of a rebase frame */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
 
 #define RS_ROAD          1u
 #define RS_SCEN          2u
-#define RS_MAX_TILES     2048
-#define RS_HASH          4096           /* power of two, > 2 x RS_MAX_TILES          */
+#define RS_MAX_TILES     2048           /* the casco list (pin-all harness)           */
+#define RS_HASH0         4096           /* [F9b] initial hash size, power of two, grows at 50 % load */
 #define RS_MAX_JOBS      2048
 #define RS_MAX_RESULTS   512
 #define RS_SLOTS         40             /* [F10] 32 -> 40: traffic 6..29 + the cops after it */
@@ -52,9 +54,10 @@
 #define RS_PRIO_GATE     (-100)
 #define RS_PRIO_URGENT   (-1000)
 #define RS_PRIO_VERIFY   100000         /* below every load                          */
+#define RS_PRIO_PLAN     50000          /* [F9b] planner tiles: below every load, above verify */
 #define RS_MISS_LOG      20
 
-enum { RS_JOB_LOAD = 1, RS_JOB_VERIFY = 2 };
+enum { RS_JOB_LOAD = 1, RS_JOB_VERIFY = 2, RS_JOB_PLAN = 3 };   /* PLAN [F9b]: make sure the file exists (build + write), install nothing */
 
 typedef struct {
     int        tx, tz;
@@ -66,15 +69,18 @@ typedef struct {
     uint8_t    verify;            /* 0 not yet, 1 queued, 2 done                     */
     uint8_t    failed;            /* no file and no build: given up this session     */
     uint8_t    built;             /* the worker built it this session                */
+    uint8_t    outside;           /* [F9b] not streamable (beyond the place boundary): never loaded */
+    uint8_t    plan;              /* [F9b] planner build: 0 none, 1 queued, 2 done (file there or failed) */
     uint32_t   out_ms[2];         /* when the layer left the keep ring (0 = inside)  */
     uint32_t   used_ms[2];        /* last time the layer was kept (LRU)              */
     int        prio;
 } RsTile;
 
-typedef struct { int idx, kind, prio; uint8_t layers; } RsJob;
+typedef struct { int idx, kind, prio; int tx, tz; uint8_t layers; } RsJob;   /* [F9b] tx,tz: the worker never reads the tile table */
 
 typedef struct {
     int            idx, kind;
+    int            tx, tz;
     uint8_t        layers;
     RoamTile      *road;          /* heap, owned by the result until installed       */
     TD5_RoamBaked *baked;
@@ -88,9 +94,12 @@ typedef struct {
     char               place[64];
     RoamGrid           grid;
     TD5_RoamResident  *rs;
-    RsTile            *tile;
-    int                ntile;
-    int16_t            hash[RS_HASH];
+    RsTile            *tile;               /* [F9b] grows on demand (main thread only)   */
+    int                ntile, captile;
+    int32_t           *hash;  int nhash;   /* [F9b] open addressing, power of two        */
+    int                partido;            /* [F9b] 1 = every tile of the place boundary, 0 = the casco list */
+    long               plan_built;         /* [F9b] tiles the planner asked for and the worker built */
+    int                ncasco;
     /* knobs */
     int   road_r, view_r, lead_ms, linger_ms, lru, verify, build, worker_on;
     int   inst_road, inst_scen, gate_ms, stat_ms, guard_m;
@@ -145,12 +154,12 @@ static RoamStream s_stream;
 #define RS_DOING(str) (s_stream.doing = (str))
 static const char *rs_doing(void) { const char *d = (const char *)s_stream.doing; return d ? d : "none"; }
 
-static int rs_hash_of(int tx, int tz) { return (int)(((unsigned)tx * 73856093u ^ (unsigned)tz * 19349663u) & (RS_HASH - 1)); }
+static int rs_hash_of(int tx, int tz, int nhash) { return (int)(((unsigned)tx * 73856093u ^ (unsigned)tz * 19349663u) & (unsigned)(nhash - 1)); }
 
 static int rs_find(const RsSession *s, int tx, int tz)
 {
-    int h = rs_hash_of(tx, tz), n;
-    for (n = 0; n < RS_HASH; n++, h = (h + 1) & (RS_HASH - 1)) {
+    int h = rs_hash_of(tx, tz, s->nhash), n;
+    for (n = 0; n < s->nhash; n++, h = (h + 1) & (s->nhash - 1)) {
         const int i = s->hash[h];
         if (i < 0) return -1;
         if (s->tile[i].tx == tx && s->tile[i].tz == tz) return i;
@@ -158,11 +167,63 @@ static int rs_find(const RsSession *s, int tx, int tz)
     return -1;
 }
 
-static int rs_tile_of_place(const RsSession *s, double px, double pz)
+static void rs_hash_put(int32_t *hash, int nhash, int tx, int tz, int idx)
+{
+    int h = rs_hash_of(tx, tz, nhash);
+    while (hash[h] >= 0) h = (h + 1) & (nhash - 1);
+    hash[h] = idx;
+}
+
+/* [F9b] Append a table entry for (tx,tz) (not present). The tile array and the hash grow; nothing
+ * outside the main thread holds an RsTile pointer or index-derived pointer across this call. -1 on
+ * out of memory. A tile beyond the place boundary gets an entry too, flagged `outside`, so the
+ * polygon test runs once per tile. */
+static int rs_add(RsSession *s, int tx, int tz, int outside)
+{
+    RsTile *t;
+    if (s->ntile >= s->captile) {
+        const int nc = s->captile ? s->captile * 2 : 1024;
+        RsTile *nt = (RsTile *)realloc(s->tile, (size_t)nc * sizeof *nt);
+        if (!nt) return -1;
+        s->tile = nt; s->captile = nc;
+    }
+    if ((s->ntile + 1) * 2 > s->nhash) {
+        const int nh = s->nhash * 2;
+        int32_t *h2 = (int32_t *)malloc((size_t)nh * sizeof(int32_t));
+        int i;
+        if (!h2) return -1;
+        for (i = 0; i < nh; i++) h2[i] = -1;
+        for (i = 0; i < s->ntile; i++) rs_hash_put(h2, nh, s->tile[i].tx, s->tile[i].tz, i);
+        free(s->hash);
+        s->hash = h2; s->nhash = nh;
+    }
+    t = &s->tile[s->ntile];
+    memset(t, 0, sizeof *t);
+    t->tx = tx; t->tz = tz;
+    t->outside = (uint8_t)(outside ? 1 : 0);
+    t->prio = 1 << 20;
+    rs_hash_put(s->hash, s->nhash, tx, tz, s->ntile);
+    return s->ntile++;
+}
+
+/* [F9b] The entry of (tx,tz), created on first use when the session streams the whole place; -1 for
+ * a tile that is not streamable (beyond the boundary, or outside the casco list in casco mode). */
+static int rs_get(RsSession *s, int tx, int tz)
+{
+    int i = rs_find(s, tx, tz);
+    if (i < 0) {
+        if (!s->partido) return -1;
+        i = rs_add(s, tx, tz, !td5_roam_partido_tile_ok(&s->grid, tx, tz));
+        if (i < 0) return -1;
+    }
+    return s->tile[i].outside ? -1 : i;
+}
+
+static int rs_tile_of_place(RsSession *s, double px, double pz)
 {
     int tx, tz;
     roam_grid_tile_of(&s->grid, px, pz, &tx, &tz);
-    return rs_find(s, tx, tz);
+    return rs_get(s, tx, tz);
 }
 
 static uint8_t rs_resident(const RsTile *t) { return (uint8_t)((t->road ? RS_ROAD : 0u) | (t->scen ? RS_SCEN : 0u)); }
@@ -257,13 +318,25 @@ static void rs_free_tile(RoamTile *t)
 
 static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
 {
-    const RsTile *tl = &s->tile[j->idx];
-    const int tx = tl->tx, tz = tl->tz;
+    const int tx = j->tx, tz = j->tz;     /* [F9b] never s->tile: main may grow it meanwhile */
     RoamTile *t = NULL;
     uint32_t t0 = td5_plat_time_ms();
     memset(r, 0, sizeof *r);
-    r->idx = j->idx; r->kind = j->kind; r->layers = j->layers;
+    r->idx = j->idx; r->kind = j->kind; r->layers = j->layers; r->tx = tx; r->tz = tz;
     RS_DOING("read");
+    if (j->kind == RS_JOB_PLAN) {
+        /* [F9b] the planner only needs the FILE: an existing one is left alone (the stream verifies the
+         * tiles it loads), a missing one is built and written */
+        char path[512];
+        rs_tile_path(s, tx, tz, path, sizeof path);
+        if (td5_plat_file_exists(path)) return;
+        RS_DOING("plan_build");
+        if (!rs_build(s, tx, tz, &t, r->err, sizeof r->err)) { r->failed = 1; return; }
+        r->built = 1;
+        r->ms_build = td5_plat_time_ms() - t0;
+        rs_free_tile(t);
+        return;
+    }
     if (!rs_read(s, tx, tz, &t, r->err, sizeof r->err)) {
         r->ms_read = td5_plat_time_ms() - t0;
         t0 = td5_plat_time_ms();
@@ -378,8 +451,8 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
             const double dm = rs_private_mb() - m0;
             if (dm > 2.0)
                 TD5_LOG_I(LOG_TAG, "ROAM_STREAM_MEM worker job %s tile %d,%d: private +%.1f MB (built=%d stale=%d, "
-                          "cache ways now %d)", j.kind == RS_JOB_VERIFY ? "verify" : "load", s->tile[j.idx].tx,
-                          s->tile[j.idx].tz, dm, r.built, r.stale, s->ctx ? td5_roam_cache_way_count() : -1);
+                          "cache ways now %d)", j.kind == RS_JOB_VERIFY ? "verify" : "load", j.tx,
+                          j.tz, dm, r.built, r.stale, s->ctx ? td5_roam_cache_way_count() : -1);
         }
         RS_DOING("push");
         if (!rs_push_result(s, &r)) { rs_result_free(&r); break; }
@@ -399,13 +472,15 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
 static void rs_submit(RsSession *s, int idx, int kind, uint8_t layers, int prio)
 {
     RsTile *t = &s->tile[idx];
-    if (!layers) return;
+    if (!layers && kind != RS_JOB_PLAN) return;
     EnterCriticalSection(&s->cs);
     if (s->njob < RS_MAX_JOBS) {
         s->job[s->njob].idx = idx; s->job[s->njob].kind = kind;
+        s->job[s->njob].tx = t->tx; s->job[s->njob].tz = t->tz;
         s->job[s->njob].layers = layers; s->job[s->njob].prio = prio;
         s->njob++;
         if (kind == RS_JOB_LOAD) t->pend |= layers;
+        else if (kind == RS_JOB_PLAN) t->plan = 1;
         else t->verify = 1;
     }
     LeaveCriticalSection(&s->cs);
@@ -439,6 +514,8 @@ static void rs_update_requests(RsSession *s)
             t->pend &= (uint8_t)~(j->layers & ~keep);
             j->layers = keep;
             j->prio = t->prio;
+        } else if (j->kind == RS_JOB_PLAN) {
+            /* [F9b] planner builds stay queued until done */
         } else if (!t->road) {                /* verify of a tile that left: re-queued if it comes back */
             t->verify = 0;
             s->job[i] = s->job[--s->njob];
@@ -504,6 +581,13 @@ static void rs_apply(RsSession *s, RsResult *r, int force, int *n_road, int *n_s
 {
     RsTile *tl = &s->tile[r->idx];
     const uint8_t keepm = (uint8_t)(tl->keep | tl->want | (tl->pinned || tl->gate ? RS_ROAD : 0u) | (tl->gate ? RS_SCEN : 0u));
+    if (r->kind == RS_JOB_PLAN) {           /* [F9b] nothing to install: the file is there (or never will be) */
+        tl->plan = 2;
+        if (r->built) { s->st.built++; s->plan_built++; tl->built = 1; }
+        if (r->failed) { s->st.failed++; TD5_LOG_W(LOG_TAG, "ROAM_STREAM: planner tile %d,%d not built (%s)", tl->tx, tl->tz, r->err); }
+        if (r->ms_build > s->build_ms_max) s->build_ms_max = r->ms_build;
+        return;
+    }
     if (r->kind == RS_JOB_LOAD) tl->pend &= (uint8_t)~r->layers;
     else if (tl->verify == 1) tl->verify = 2;
     if (r->failed) {
@@ -615,7 +699,7 @@ static void rs_mark(RsSession *s, double px, double pz, int R, uint8_t layer, in
     roam_grid_tile_of(&s->grid, px, pz, &ctx, &ctz);
     for (dz = -R - 1; dz <= R + 1; dz++)
         for (dx = -R - 1; dx <= R + 1; dx++) {
-            const int i = rs_find(s, ctx + dx, ctz + dz);
+            const int i = rs_get(s, ctx + dx, ctz + dz);
             const int d = abs(dx) > abs(dz) ? abs(dx) : abs(dz);
             RsTile *t;
             if (i < 0) continue;
@@ -783,6 +867,7 @@ static void rs_stat_line(RsSession *s, uint32_t now)
  * ========================================================================== */
 
 static int rs_knob(const char *name, int def, int lo, int hi) { return td5_env_int(name, def, lo, hi); }
+#define rs_knob_early rs_knob
 
 int td5_roam_stream_begin(const char *place, const RoamGrid *g, TD5_RoamResident *rs)
 {
@@ -799,20 +884,20 @@ int td5_roam_stream_begin(const char *place, const RoamGrid *g, TD5_RoamResident
     s->grid = *g;
     s->rs = rs;
     s->t_begin_ms = td5_plat_time_ms();
-    for (i = 0; i < RS_HASH; i++) s->hash[i] = -1;
+    /* [F9b] TD5RE_ROAM_STREAM_PARTIDO=1 (default): every lattice tile of the place boundary is
+     * streamable and gets its table entry the first time something wants it; 0 = the F3 casco list */
+    s->partido = rs_knob_early("TD5RE_ROAM_STREAM_PARTIDO", 1, 0, 1);
+    if (s->partido) td5_roam_partido_load(place);
+    s->nhash = RS_HASH0;
+    s->hash = (int32_t *)malloc((size_t)s->nhash * sizeof(int32_t));
     n = td5_roam_casco_tiles(g, list, RS_MAX_TILES);
-    s->tile = (RsTile *)calloc((size_t)(n > 0 ? n : 1), sizeof(RsTile));
     s->fhist = (uint32_t *)calloc(RS_FRAME_BINS, sizeof(uint32_t));
     s->hc = (TD5_RoamHeight *)calloc(1, sizeof(TD5_RoamHeight));
-    if (!s->tile || !s->fhist || !s->hc) { free(list); free(s->tile); free(s->fhist); free(s->hc); free(s); return 0; }
-    for (i = 0; i < n; i++) {
-        int h = rs_hash_of(list[i][0], list[i][1]);
-        s->tile[i].tx = list[i][0];
-        s->tile[i].tz = list[i][1];
-        while (s->hash[h] >= 0) h = (h + 1) & (RS_HASH - 1);
-        s->hash[h] = (int16_t)i;
-    }
-    s->ntile = n;
+    if (!s->hash || !s->fhist || !s->hc) { free(list); free(s->hash); free(s->fhist); free(s->hc); free(s); return 0; }
+    for (i = 0; i < s->nhash; i++) s->hash[i] = -1;
+    for (i = 0; i < n; i++)
+        if (rs_add(s, list[i][0], list[i][1], 0) < 0) { free(list); free(s->hash); free(s->tile); free(s->fhist); free(s->hc); free(s); return 0; }
+    s->ncasco = n;
     free(list);
 
     s->road_r      = rs_knob("TD5RE_ROAM_STREAM_ROAD_R", 1, 1, 4);
@@ -864,9 +949,10 @@ int td5_roam_stream_begin(const char *place, const RoamGrid *g, TD5_RoamResident
         TD5_LOG_W(LOG_TAG, "ROAM_STREAM: no worker thread (%s): tiles load on the main thread",
                   s->worker_on ? "CreateThread failed" : "TD5RE_ROAM_STREAM_WORKER=0");
     }
-    TD5_LOG_I(LOG_TAG, "ROAM_STREAM begin place=%s casco tiles=%d road_r=%d view_r=%d lead=%d ms linger=%d ms "
+    TD5_LOG_I(LOG_TAG, "ROAM_STREAM begin place=%s streamable=%s casco tiles=%d road_r=%d view_r=%d lead=%d ms linger=%d ms "
               "budget road=%.0f MB scenery=%.0f MB lru=%d verify=%d build=%d install/frame road=%d scenery=%d worker=%s",
-              place, n, s->road_r, s->view_r, s->lead_ms, s->linger_ms, s->road_budget / 1048576.0,
+              place, s->partido ? (td5_roam_partido_has_boundary() ? "place boundary" : "every tile (no boundary)") : "casco",
+              n, s->road_r, s->view_r, s->lead_ms, s->linger_ms, s->road_budget / 1048576.0,
               s->scen_budget / 1048576.0, s->lru, s->verify, s->build, s->inst_road, s->inst_scen,
               s->thread ? "thread" : "inline");
     return 1;
@@ -934,6 +1020,7 @@ void td5_roam_stream_end(void)
     if (s->cs_live) DeleteCriticalSection(&s->cs);
     free(s->inbox);
     free(s->tile);
+    free(s->hash);
     free(s->fhist);
     free(s->hc);
     free(s);
@@ -999,6 +1086,7 @@ void td5_roam_stream_tick(void)
             if (s->prev_installed && dt > s->st.frame_worst_publish_ms) s->st.frame_worst_publish_ms = dt;
             if (dt > 150.0)
                 TD5_LOG_W(LOG_TAG, "ROAM_FRAME_HITCH at %u ms: %.0f ms since the last frame", (unsigned)now, dt);
+            td5_roam_rebase_note_frame(dt);      /* [F9b] the frame that held a rebase */
         } else if ((int)(now - s->warm_ms) >= 0) {
             s->warm = 1;
         }
@@ -1103,7 +1191,7 @@ int td5_roam_stream_wait_area(int32_t px, int32_t pz, int ring)
     roam_grid_tile_of(&s->grid, (double)px, (double)pz, &ctx, &ctz);
     for (dz = -ring; dz <= ring; dz++)
         for (dx = -ring; dx <= ring; dx++) {
-            const int i = rs_find(s, ctx + dx, ctz + dz);
+            const int i = rs_get(s, ctx + dx, ctz + dz);
             if (i < 0) continue;
             s->tile[i].gate = 1;
             s->tile[i].prio = RS_PRIO_GATE + (abs(dx) > abs(dz) ? abs(dx) : abs(dz));
@@ -1122,9 +1210,33 @@ int td5_roam_stream_wait_area(int32_t px, int32_t pz, int ring)
     TD5_LOG_I(LOG_TAG, "ROAM_STREAM_GATE spawn tile %d,%d + ring %d: %d/%d road tiles ready, waited %u ms, %u ms after "
               "the session began (the F2 full load read all %d casco tiles here)",
               ctx, ctz, ring, ready, n, (unsigned)(td5_plat_time_ms() - t0), (unsigned)(td5_plat_time_ms() - s->t_begin_ms),
-              s->ntile);
+              s->ncasco);
     return ready;
 }
+
+/* [F9b] The route planner needs the ROAD file of (tx,tz) (td5_roam_route.c, a region of the place). 1 = the
+ * file exists now; 0 = queued for the worker (PLAN job, below every load); -1 = no session / not streamable /
+ * given up. */
+int td5_roam_stream_plan_tile(int tx, int tz)
+{
+    RsSession *s = s_stream.s;
+    char path[512];
+    int i;
+    if (!s) return -1;
+    i = rs_get(s, tx, tz);
+    if (i < 0) return -1;
+    if (s->tile[i].plan == 2) {
+        rs_tile_path(s, tx, tz, path, sizeof path);
+        return td5_plat_file_exists(path) ? 1 : -1;
+    }
+    if (s->tile[i].plan == 1) return 0;
+    rs_tile_path(s, tx, tz, path, sizeof path);
+    if (td5_plat_file_exists(path)) { s->tile[i].plan = 2; return 1; }
+    rs_submit(s, i, RS_JOB_PLAN, 0, RS_PRIO_PLAN);
+    return 0;
+}
+
+long td5_roam_stream_plan_built(void) { return s_stream.s ? s_stream.s->plan_built : 0; }
 
 /* Read + install one ROAD tile on the main thread now. 1 when resident afterwards. */
 static int rs_sync_road(RsSession *s, int idx)
@@ -1149,9 +1261,9 @@ int td5_roam_stream_pin_all(void)
     int *idx;
     const uint32_t t0 = td5_plat_time_ms();
     if (!s) return 0;
-    idx = (int *)malloc((size_t)(s->ntile > 0 ? s->ntile : 1) * sizeof(int));
+    idx = (int *)malloc((size_t)(s->ncasco > 0 ? s->ncasco : 1) * sizeof(int));
     if (!idx) return 0;
-    for (i = 0; i < s->ntile; i++) {
+    for (i = 0; i < s->ncasco; i++) {
         s->tile[i].pinned = 1;
         if (!rs_sync_road(s, i) && !s->tile[i].failed && !(s->tile[i].pend & RS_ROAD))
             rs_submit(s, i, RS_JOB_LOAD, RS_ROAD, 50);
@@ -1159,7 +1271,7 @@ int td5_roam_stream_pin_all(void)
     }
     ready = rs_wait_tiles(s, idx, n, "pin all");
     free(idx);
-    TD5_LOG_I(LOG_TAG, "ROAM_STREAM pin all: %d/%d casco road tiles resident and pinned in %u ms", ready, s->ntile,
+    TD5_LOG_I(LOG_TAG, "ROAM_STREAM pin all: %d/%d casco road tiles resident and pinned in %u ms", ready, s->ncasco,
               (unsigned)(td5_plat_time_ms() - t0));
     return ready;
 }
@@ -1169,8 +1281,15 @@ int td5_roam_stream_point_missing(int32_t x, int32_t z)
     RsSession *s = s_stream.s;
     int i;
     if (!s || !s->gate_done) return 0;
-    i = rs_tile_of_place(s, (double)FP_TRUNC(x) + s->rs->org_x, (double)FP_TRUNC(z) + s->rs->org_z);
-    return i >= 0 && !s->tile[i].road;
+    {
+        int tx, tz;
+        roam_grid_tile_of(&s->grid, (double)FP_TRUNC(x) + s->rs->org_x, (double)FP_TRUNC(z) + s->rs->org_z, &tx, &tz);
+        i = rs_find(s, tx, tz);
+    }
+    /* [F9b] a tile with no entry yet, inside the place, is missing too (it will be created and
+     * requested by the next wanted pass); one beyond the boundary has nothing to wait for */
+    if (i < 0) return 0;
+    return !s->tile[i].outside && !s->tile[i].road;
 }
 
 int td5_roam_stream_guard(TD5_Actor *a)

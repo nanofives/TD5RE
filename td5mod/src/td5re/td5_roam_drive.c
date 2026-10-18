@@ -36,6 +36,7 @@
 #include "td5_roam_traffic.h"
 #include "td5_roam_route.h"        /* [F8] td5_roam_route_snap_xz: the soak move */
 #include "td5_roam_stream.h"     /* [F3] pin the casco for the corner matrix; miss counters */
+#include "td5_roam_rebase.h"     /* [F9b] the route tour's world-frame memory follows a rebase */
 #include "td5_geo_roads.h"      /* TD5_GEO_RC_* */
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -1025,8 +1026,23 @@ static uint32_t rv_corners(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
 
 /* ------------------------------------------------------------ public ---------- */
 
+/* [F9b] World-origin rebase: the route tour's spawn, square, junction, target, path and last position
+ * are world units (the corner matrix inhibits rebasing instead: td5_roam_physics_rebase_inhibited). */
+static void rv_world_shift(int32_t sx, int32_t sz)
+{
+    int k;
+    if (s_rv.mode != TD5_RDRV_ROUTE) return;
+    s_rv.lx += sx; s_rv.lz += sz;
+    s_rv.sp_x += sx; s_rv.sp_z += sz;
+    for (k = 0; k < 4; k++) { s_rv.wp_x[k] += sx; s_rv.wp_z[k] += sz; }
+    s_rv.cl_x += sx; s_rv.cl_z += sz;
+    if (s_rv.tgt_x != 0.0 || s_rv.tgt_z != 0.0) { s_rv.tgt_x += sx; s_rv.tgt_z += sz; }
+    for (k = 0; k < RV_NP; k++) { s_rv.pth_x[k] += sx; s_rv.pth_z[k] += sz; }
+}
+
 void td5_roam_drive_arm(int mode)
 {
+    td5_roam_rebase_listen(rv_world_shift);
     const int ec = s_rv.env_checked, ed = s_rv.env_driven;
     memset(&s_rv, 0, sizeof s_rv);
     s_rv.env_checked = ec; s_rv.env_driven = ed;

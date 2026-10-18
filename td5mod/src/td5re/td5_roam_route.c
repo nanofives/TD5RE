@@ -26,7 +26,14 @@
 #include "td5_roam_tile.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_route.h"
+#include "td5_fp.h"
+#include "td5_types.h"
+#include "td5_race_state.h"     /* [F9b] td5_game_get_actor: the region follows the car */
+#include "td5_roam_partido.h"   /* [F9b] which tiles are in the place */
+#include "td5_roam_stream.h"    /* [F9b] missing region tiles are built by the stream worker */
+#include "td5_roam_race.h"      /* [F9b] no replan under a running race */
 #include "deps/cjson/cJSON.h"
+#include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
 
@@ -70,6 +77,7 @@ typedef struct {
     RrCellSeg *cs;  int ncs;
     double   ms, km;
     int      ntiles;
+    int    (*tiles)[2];          /* [F9b] the tiles read, sorted (tx, tz): the region this graph covers */
     struct RrSig *sig; int nsig; /* [F8] signalised clusters (SIGN records), sorted by key */
 } RrGraph;
 
@@ -131,22 +139,31 @@ static void rr_key_pos(int64_t key, double *x, double *z)
     *z = (double)(int32_t)(uint32_t)(key & 0xFFFFFFFFll) * 10.0;
 }
 
-static int rr_find_node(int64_t key)
+static int rr_find_node_in(const RrGraph *gp, int64_t key)
 {
-    int lo = 0, hi = g.nnode - 1;
+    int lo = 0, hi = gp->nnode - 1;
     while (lo <= hi) {
         const int mid = (lo + hi) / 2;
-        if (g.node[mid].key == key) return mid;
-        if (g.node[mid].key < key) lo = mid + 1; else hi = mid - 1;
+        if (gp->node[mid].key == key) return mid;
+        if (gp->node[mid].key < key) lo = mid + 1; else hi = mid - 1;
     }
     return -1;
 }
+static int rr_find_node(int64_t key) { return rr_find_node_in(&g, key); }
 
-void td5_roam_route_graph_free(void)
+static int rr_cmp_tile(const void *a, const void *b)
 {
-    free(g.edge); free(g.node); free(g.inc); free(g.pt); free(g.cum); free(g.seg_edge); free(g.cs);
-    free(g.sig);
-    memset(&g, 0, sizeof g);
+    const int *x = (const int *)a, *y = (const int *)b;
+    if (x[0] != y[0]) return x[0] < y[0] ? -1 : 1;
+    return x[1] < y[1] ? -1 : (x[1] > y[1] ? 1 : 0);
+}
+
+static void rr_graph_free(RrGraph *gp)
+{
+    free(gp->edge); free(gp->node); free(gp->inc); free(gp->pt); free(gp->cum); free(gp->seg_edge); free(gp->cs);
+    free(gp->tiles);
+    free(gp->sig);
+    memset(gp, 0, sizeof *gp);
 }
 
 int td5_roam_route_graph_ready(void) { return g.ready; }
@@ -169,61 +186,22 @@ void td5_roam_route_graph_stats(int *nedge, int *nnode, int *nseg, double *ms, d
     if (km)    *km    = g.km;
 }
 
-#ifdef _WIN32
-static int rr_scan_tiles(const char *place, int (**out)[2], int *n_out)
-{
-    char path[512], pat[560];
-    WIN32_FIND_DATAA fd;
-    HANDLE h;
-    int (*list)[2] = NULL;
-    int n = 0, cap = 0;
-    char *sl;
-    td5_roam_tile_path(path, sizeof path, NULL, place, 0, 0);
-    sl = strrchr(path, '/');
-    { char *bs = strrchr(path, '\\'); if (!sl || (bs && bs > sl)) sl = bs; }
-    if (!sl) return 0;
-    sl[1] = '\0';
-    snprintf(pat, sizeof pat, "%sROAMTILE_*_*.BIN", path);
-    h = FindFirstFileA(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    do {
-        int tx, tz;
-        if (sscanf(fd.cFileName, "ROAMTILE_%d_%d.BIN", &tx, &tz) != 2) continue;
-        if (n >= cap) {
-            int nc = cap ? cap * 2 : 512;
-            int (*nl)[2] = (int (*)[2])realloc(list, (size_t)nc * sizeof *list);
-            if (!nl) break;
-            list = nl; cap = nc;
-        }
-        list[n][0] = tx; list[n][1] = tz; n++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-    *out = list; *n_out = n;
-    return n > 0;
-}
-#else
-static int rr_scan_tiles(const char *place, int (**out)[2], int *n_out) { (void)place; (void)out; (void)n_out; return 0; }
-#endif
-
-static int rr_build_impl(const char *place)
+static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int ntiles)
 {
     RrVec runs = { NULL, 0, 0, sizeof(RrRun) };
     RrVec pts  = { NULL, 0, 0, sizeof(int32_t) };
     RrVec cents = { NULL, 0, 0, sizeof(RrCent) };
     RrVec sigs  = { NULL, 0, 0, sizeof(RrSig) };    /* [F8] */
-    int (*tiles)[2] = NULL;
-    int ntiles = 0, i, e;
+    int i, e;
     const uint32_t t0 = td5_plat_time_ms();
     int64_t *keys = NULL;
     int nkeys = 0;
     uint32_t t_read = 0, t_merge = 0, t_nodes = 0;
 
     if (!place || !place[0]) return 0;
-    if (g.ready && strcmp(g.place, place) == 0) return 1;
-    td5_roam_route_graph_free();
-
-    if (!rr_scan_tiles(place, &tiles, &ntiles)) {
-        TD5_LOG_W(LOG_TAG, "ROUTE_GRAPH: no ROAMTILE files for '%s'", place);
+    rr_graph_free(gp);
+    if (ntiles <= 0) {
+        TD5_LOG_W(LOG_TAG, "ROUTE_GRAPH: no ROAMTILE files for '%s' in the region", place);
         return 0;
     }
     for (i = 0; i < ntiles; i++) {
@@ -303,7 +281,11 @@ static int rr_build_impl(const char *place)
         }
         td5_roam_tile_free(&t);
     }
-    g.ntiles = ntiles;
+    gp->ntiles = ntiles;
+    gp->tiles = (int (*)[2])malloc((size_t)ntiles * sizeof *gp->tiles);
+    if (!gp->tiles) goto oom;
+    memcpy(gp->tiles, tiles, (size_t)ntiles * sizeof *gp->tiles);
+    qsort(gp->tiles, (size_t)ntiles, sizeof *gp->tiles, rr_cmp_tile);
     t_read = td5_plat_time_ms() - t0;
     if (runs.n == 0) goto fail;
 
@@ -317,53 +299,53 @@ static int rr_build_impl(const char *place)
             if (i == 0 || R[i].key != R[i - 1].key) nedge++;
             total_pts += R[i].n + 1;
         }
-        g.edge = (RrEdge *)calloc((size_t)nedge, sizeof(RrEdge));
-        g.pt = (int32_t *)malloc((size_t)total_pts * 2 * sizeof(int32_t));
-        g.cum = (double *)malloc((size_t)total_pts * sizeof(double));
-        g.seg_edge = (int *)malloc((size_t)total_pts * sizeof(int));
-        if (!g.edge || !g.pt || !g.cum || !g.seg_edge) goto oom;
-        g.nedge = 0; g.npt = 0;
+        gp->edge = (RrEdge *)calloc((size_t)nedge, sizeof(RrEdge));
+        gp->pt = (int32_t *)malloc((size_t)total_pts * 2 * sizeof(int32_t));
+        gp->cum = (double *)malloc((size_t)total_pts * sizeof(double));
+        gp->seg_edge = (int *)malloc((size_t)total_pts * sizeof(int));
+        if (!gp->edge || !gp->pt || !gp->cum || !gp->seg_edge) goto oom;
+        gp->nedge = 0; gp->npt = 0;
         for (i = 0; i < runs.n;) {
             int j = i;
-            RrEdge *ed = &g.edge[g.nedge];
+            RrEdge *ed = &gp->edge[gp->nedge];
             int prev_end_row = -1;
             ed->key = R[i].key; ed->end_key[0] = R[i].ek0; ed->end_key[1] = R[i].ek1;
             ed->oneway = R[i].oneway; ed->klass = R[i].klass; ed->lanes = R[i].lanes; ed->flags = R[i].flags;
-            ed->pt0 = g.npt;
+            ed->pt0 = gp->npt;
             while (j < runs.n && R[j].key == R[i].key) {
                 int first = (prev_end_row == R[j].row0) ? 1 : 0;   /* shared row: drop the duplicate */
                 int a;
                 for (a = first; a <= R[j].n; a++) {
-                    g.pt[2 * g.npt]     = P[2 * (R[j].off + a)];
-                    g.pt[2 * g.npt + 1] = P[2 * (R[j].off + a) + 1];
-                    g.npt++;
+                    gp->pt[2 * gp->npt]     = P[2 * (R[j].off + a)];
+                    gp->pt[2 * gp->npt + 1] = P[2 * (R[j].off + a) + 1];
+                    gp->npt++;
                 }
                 prev_end_row = R[j].row0 + R[j].n;
                 j++;
             }
-            ed->npt = g.npt - ed->pt0;
-            if (ed->npt >= 2) g.nedge++; else g.npt = ed->pt0;   /* a one-point edge is no edge */
+            ed->npt = gp->npt - ed->pt0;
+            if (ed->npt >= 2) gp->nedge++; else gp->npt = ed->pt0;   /* a one-point edge is no edge */
             i = j;
         }
     }
     /* cumulative distance + per-point edge index + length */
-    g.km = 0.0;
-    for (e = 0; e < g.nedge; e++) {
-        RrEdge *ed = &g.edge[e];
+    gp->km = 0.0;
+    for (e = 0; e < gp->nedge; e++) {
+        RrEdge *ed = &gp->edge[e];
         int a;
-        g.cum[ed->pt0] = 0.0;
-        g.seg_edge[ed->pt0] = e;
+        gp->cum[ed->pt0] = 0.0;
+        gp->seg_edge[ed->pt0] = e;
         for (a = 1; a < ed->npt; a++) {
-            const double dx = (double)g.pt[2 * (ed->pt0 + a)]     - g.pt[2 * (ed->pt0 + a - 1)];
-            const double dz = (double)g.pt[2 * (ed->pt0 + a) + 1] - g.pt[2 * (ed->pt0 + a - 1) + 1];
-            g.cum[ed->pt0 + a] = g.cum[ed->pt0 + a - 1] + sqrt(dx * dx + dz * dz);
-            g.seg_edge[ed->pt0 + a] = e;
+            const double dx = (double)gp->pt[2 * (ed->pt0 + a)]     - gp->pt[2 * (ed->pt0 + a - 1)];
+            const double dz = (double)gp->pt[2 * (ed->pt0 + a) + 1] - gp->pt[2 * (ed->pt0 + a - 1) + 1];
+            gp->cum[ed->pt0 + a] = gp->cum[ed->pt0 + a - 1] + sqrt(dx * dx + dz * dz);
+            gp->seg_edge[ed->pt0 + a] = e;
         }
-        ed->plen = g.cum[ed->pt0 + ed->npt - 1];
-        g.km += ed->plen / RR_UPM / 1000.0;
-        ed->minx = ed->maxx = g.pt[2 * ed->pt0]; ed->minz = ed->maxz = g.pt[2 * ed->pt0 + 1];
+        ed->plen = gp->cum[ed->pt0 + ed->npt - 1];
+        gp->km += ed->plen / RR_UPM / 1000.0;
+        ed->minx = ed->maxx = gp->pt[2 * ed->pt0]; ed->minz = ed->maxz = gp->pt[2 * ed->pt0 + 1];
         for (a = 1; a < ed->npt; a++) {
-            const int32_t x = g.pt[2 * (ed->pt0 + a)], z = g.pt[2 * (ed->pt0 + a) + 1];
+            const int32_t x = gp->pt[2 * (ed->pt0 + a)], z = gp->pt[2 * (ed->pt0 + a) + 1];
             if (x < ed->minx) ed->minx = x;
             if (x > ed->maxx) ed->maxx = x;
             if (z < ed->minz) ed->minz = z;
@@ -373,45 +355,45 @@ static int rr_build_impl(const char *place)
 
     t_merge = td5_plat_time_ms() - t0;
     /* ---- nodes ------------------------------------------------------------------ */
-    keys = (int64_t *)malloc((size_t)g.nedge * 2 * sizeof(int64_t));
+    keys = (int64_t *)malloc((size_t)gp->nedge * 2 * sizeof(int64_t));
     if (!keys) goto oom;
-    for (e = 0; e < g.nedge; e++) { keys[nkeys++] = g.edge[e].end_key[0]; keys[nkeys++] = g.edge[e].end_key[1]; }
+    for (e = 0; e < gp->nedge; e++) { keys[nkeys++] = gp->edge[e].end_key[0]; keys[nkeys++] = gp->edge[e].end_key[1]; }
     qsort(keys, (size_t)nkeys, sizeof(int64_t), rr_cmp_i64);
     {
         int u = 0;
         for (i = 0; i < nkeys; i++) if (i == 0 || keys[i] != keys[i - 1]) keys[u++] = keys[i];
         nkeys = u;
     }
-    g.node = (RrNode *)calloc((size_t)nkeys, sizeof(RrNode));
-    if (!g.node) goto oom;
-    g.nnode = nkeys;
-    for (i = 0; i < nkeys; i++) { g.node[i].key = keys[i]; rr_key_pos(keys[i], &g.node[i].x, &g.node[i].z); }
+    gp->node = (RrNode *)calloc((size_t)nkeys, sizeof(RrNode));
+    if (!gp->node) goto oom;
+    gp->nnode = nkeys;
+    for (i = 0; i < nkeys; i++) { gp->node[i].key = keys[i]; rr_key_pos(keys[i], &gp->node[i].x, &gp->node[i].z); }
     if (cents.n > 0) {
         const RrCent *C;
         qsort(cents.p, (size_t)cents.n, sizeof(RrCent), rr_cmp_cent);
         C = (const RrCent *)cents.p;
         for (i = 0; i < cents.n; i++) {
-            const int ni = rr_find_node(C[i].key);
-            if (ni >= 0) { g.node[ni].x = C[i].x; g.node[ni].z = C[i].z; }
+            const int ni = rr_find_node_in(gp, C[i].key);
+            if (ni >= 0) { gp->node[ni].x = C[i].x; gp->node[ni].z = C[i].z; }
         }
     }
-    for (e = 0; e < g.nedge; e++) {
-        g.edge[e].node[0] = rr_find_node(g.edge[e].end_key[0]);
-        g.edge[e].node[1] = rr_find_node(g.edge[e].end_key[1]);
-        g.node[g.edge[e].node[0]].ninc++;
-        g.node[g.edge[e].node[1]].ninc++;
+    for (e = 0; e < gp->nedge; e++) {
+        gp->edge[e].node[0] = rr_find_node_in(gp, gp->edge[e].end_key[0]);
+        gp->edge[e].node[1] = rr_find_node_in(gp, gp->edge[e].end_key[1]);
+        gp->node[gp->edge[e].node[0]].ninc++;
+        gp->node[gp->edge[e].node[1]].ninc++;
     }
     {
         int off = 0;
-        for (i = 0; i < g.nnode; i++) { g.node[i].first = off; off += g.node[i].ninc; g.node[i].ninc = 0; }
-        g.inc = (int *)malloc((size_t)off * sizeof(int));
-        if (!g.inc) goto oom;
-        g.ninc = off;
-        for (e = 0; e < g.nedge; e++) {
+        for (i = 0; i < gp->nnode; i++) { gp->node[i].first = off; off += gp->node[i].ninc; gp->node[i].ninc = 0; }
+        gp->inc = (int *)malloc((size_t)off * sizeof(int));
+        if (!gp->inc) goto oom;
+        gp->ninc = off;
+        for (e = 0; e < gp->nedge; e++) {
             int k;
             for (k = 0; k < 2; k++) {
-                RrNode *nd = &g.node[g.edge[e].node[k]];
-                g.inc[nd->first + nd->ninc++] = e * 2 + k;
+                RrNode *nd = &gp->node[gp->edge[e].node[k]];
+                gp->inc[nd->first + nd->ninc++] = e * 2 + k;
             }
         }
     }
@@ -420,12 +402,12 @@ static int rr_build_impl(const char *place)
     /* ---- snap grid: every polyline segment into the cells its bbox touches ------- */
     {
         RrVec cs = { NULL, 0, 0, sizeof(RrCellSeg) };
-        for (e = 0; e < g.nedge; e++) {
-            const RrEdge *ed = &g.edge[e];
+        for (e = 0; e < gp->nedge; e++) {
+            const RrEdge *ed = &gp->edge[e];
             int a;
             for (a = 0; a + 1 < ed->npt; a++) {
                 const int s = ed->pt0 + a;
-                const double x0 = g.pt[2 * s], z0 = g.pt[2 * s + 1], x1 = g.pt[2 * s + 2], z1 = g.pt[2 * s + 3];
+                const double x0 = gp->pt[2 * s], z0 = gp->pt[2 * s + 1], x1 = gp->pt[2 * s + 2], z1 = gp->pt[2 * s + 3];
                 const int cx0 = (int)floor((x0 < x1 ? x0 : x1) / RR_SNAP_CELL), cx1 = (int)floor((x0 < x1 ? x1 : x0) / RR_SNAP_CELL);
                 const int cz0 = (int)floor((z0 < z1 ? z0 : z1) / RR_SNAP_CELL), cz1 = (int)floor((z0 < z1 ? z1 : z0) / RR_SNAP_CELL);
                 int cx, cz;
@@ -439,7 +421,7 @@ static int rr_build_impl(const char *place)
             }
         }
         qsort(cs.p, (size_t)cs.n, sizeof(RrCellSeg), rr_cmp_cs);
-        g.cs = (RrCellSeg *)cs.p; g.ncs = cs.n;
+        gp->cs = (RrCellSeg *)cs.p; gp->ncs = cs.n;
     }
 
     if (sigs.n > 0) {
@@ -447,64 +429,34 @@ static int rr_build_impl(const char *place)
         int u = 0;
         qsort(S, (size_t)sigs.n, sizeof(RrSig), rr_cmp_sig);
         for (i = 0; i < sigs.n; i++) if (i == 0 || S[i].key != S[u - 1].key) S[u++] = S[i];
-        g.sig = S; g.nsig = u;
+        gp->sig = S; gp->nsig = u;
         sigs.p = NULL;
     }
-    free(keys); free(runs.p); free(pts.p); free(cents.p); free(tiles);
-    snprintf(g.place, sizeof g.place, "%s", place);
-    g.ms = (double)(td5_plat_time_ms() - t0);
-    g.ready = 1;
+    free(keys); free(runs.p); free(pts.p); free(cents.p);
+    snprintf(gp->place, sizeof gp->place, "%s", place);
+    gp->ms = (double)(td5_plat_time_ms() - t0);
+    gp->ready = 1;
     TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: place=%s tiles=%d edges=%d nodes=%d segments=%d road=%.1f km built in %.0f ms "
               "(read %u, merge %u, nodes %u, grid %u) signal clusters=%d",
-              place, ntiles, g.nedge, g.nnode, g.ncs, g.km, g.ms, (unsigned)t_read, (unsigned)(t_merge - t_read),
-              (unsigned)(t_nodes - t_merge), (unsigned)((uint32_t)g.ms - t_nodes), g.nsig);
+              place, ntiles, gp->nedge, gp->nnode, gp->ncs, gp->km, gp->ms, (unsigned)t_read, (unsigned)(t_merge - t_read),
+              (unsigned)(t_nodes - t_merge), (unsigned)((uint32_t)gp->ms - t_nodes), gp->nsig);
     return 1;
 
 oom:
     TD5_LOG_E(LOG_TAG, "ROUTE_GRAPH: out of memory");
 fail:
     free(sigs.p);
-    free(keys); free(runs.p); free(pts.p); free(cents.p); free(tiles);
-    td5_roam_route_graph_free();
+    free(keys); free(runs.p); free(pts.p); free(cents.p);
+    rr_graph_free(gp);
     return 0;
 }
 
-#ifdef _WIN32
-static volatile LONG s_building;
-static char s_async_place[64];
-
-static DWORD WINAPI rr_thread(LPVOID unused)
-{
-    (void)unused;
-    rr_build_impl(s_async_place);
-    MemoryBarrier();
-    InterlockedExchange(&s_building, 0);
-    return 0;
-}
-
-void td5_roam_route_graph_begin_async(const char *place)
-{
-    HANDLE h;
-    if (!place || !place[0] || s_building) return;
-    if (g.ready && strcmp(g.place, place) == 0) return;
-    snprintf(s_async_place, sizeof s_async_place, "%s", place);
-    InterlockedExchange(&s_building, 1);
-    h = CreateThread(NULL, 0, rr_thread, NULL, 0, NULL);
-    if (h) CloseHandle(h); else InterlockedExchange(&s_building, 0);
-}
-
-int td5_roam_route_graph_building(void) { return s_building != 0; }
-#else
-void td5_roam_route_graph_begin_async(const char *place) { (void)place; }
-int td5_roam_route_graph_building(void) { return 0; }
-#endif
+/* [F9b] the region manager (async build, swap, poll) lives after the route state below */
+static int rr_region_ensure(const char *place);
 
 int td5_roam_route_graph_ensure(const char *place)
 {
-#ifdef _WIN32
-    while (s_building) Sleep(1);
-#endif
-    return rr_build_impl(place);
+    return rr_region_ensure(place);
 }
 
 int td5_roam_route_graph_query(double minx, double minz, double maxx, double maxz,
@@ -964,6 +916,430 @@ int td5_roam_route_latlon_to_place(double lat, double lon, int32_t *px, int32_t 
     return td5_roam_latlon_to_place(td5_roam_route_place(), lat, lon, px, pz);
 }
 
+/* ============================================================ the region ====== */
+/* [F9b] THE PLANNER GRAPH COVERS A REGION, NOT EVERY TILE OF THE PLACE. The partido holds ~13,500
+ * lattice tiles and most have no ROAMTILE file until something builds it, so the graph is built from
+ * the files of a REGION: the casco list (always, so casco routes plan exactly as before), a ring round
+ * the car (RR_REG_CAR tiles), a ring round every waypoint (RR_REG_WP) and a corridor RR_REG_CORRIDOR_M
+ * either side of every leg (closing leg of a circuit included). A region tile with no file is queued
+ * on the stream worker (td5_roam_stream_plan_tile: build + write, below every load). The graph is
+ * rebuilt OFF the main thread from the files present and swapped in between frames
+ * (td5_roam_route_graph_poll); a swap bumps the generation, re-snaps the waypoints and replans.
+ * A waypoint whose tile the graph does not cover yet is kept unsnapped (the route is "mapping") until
+ * a swap covers it. */
+#define RR_REG_CAR          6            /* tiles round the car (1.5 km)                */
+#define RR_REG_WP           4            /* tiles round a waypoint (1 km)               */
+#define RR_REG_CORRIDOR_M   1500.0       /* either side of a leg                        */
+#define RR_REG_POLL_MS      400u
+#define RR_REG_REBUILD_MS   4000u        /* rebuild with what is there while builds still run */
+
+typedef struct { int tx, tz; uint8_t st; } RrRegTile;    /* st: 0 unknown, 1 queued, 2 file present, 3 absent */
+
+static struct {
+    char       place[64];
+    RoamGrid   grid;
+    int        grid_ok;
+    RrRegTile *t;  int n, cap;           /* the wanted region, sorted (tx, tz)            */
+    uint32_t   key;                       /* hash of the inputs it was computed from       */
+    int        queued, present;
+#ifdef _WIN32
+    volatile LONG building, next_ready;
+#else
+    int        building, next_ready;
+#endif
+    RrGraph    next;                      /* built off-thread, swapped in by the poll      */
+    int      (*blist)[2]; int nb;         /* the list the running build reads (owned)      */
+    char       bplace[64];
+    uint32_t   next_poll_ms, last_build_ms;
+    long       gen;
+    int        hash_check, have_hash;     /* a loaded route whose stored hash is judged once it plans */
+    uint32_t   want_hash;
+    /* [F9b x F8] the previous generation's edge / node keys by index: an index a consumer (traffic) kept from
+     * generation gen - 1 is translated through its key */
+    uint64_t  *prev_ekey; int prev_ne;
+    int64_t   *prev_nkey; int prev_nn;
+} rg;
+
+static int  rr_wp_snap(TD5_RouteWp *w);
+static void rr_region_swap(void);
+
+static const RoamGrid *rr_grid(const char *place)
+{
+    if (!rg.grid_ok || strcmp(rg.place, place) != 0) {
+        char path[512];
+        TD5_File *f;
+        snprintf(rg.place, sizeof rg.place, "%s", place);
+        rg.grid_ok = 0;
+        td5_geo_source_path(path, sizeof path, place, "roam/ROAMGRID.JSON");
+        f = td5_plat_file_open(path, "rb");
+        if (f) {
+            const int64_t n = td5_plat_file_size(f);
+            char *buf = (n > 0 && n < 65536) ? (char *)malloc((size_t)n + 1u) : NULL;
+            if (buf && td5_plat_file_read(f, buf, (size_t)n) == (size_t)n) { buf[n] = '\0'; rg.grid_ok = roam_grid_parse(buf, &rg.grid); }
+            free(buf);
+            td5_plat_file_close(f);
+        }
+        td5_roam_partido_load(place);
+    }
+    return rg.grid_ok ? &rg.grid : NULL;
+}
+
+static int rr_reg_cmp(const void *a, const void *b)
+{
+    const RrRegTile *x = (const RrRegTile *)a, *y = (const RrRegTile *)b;
+    if (x->tx != y->tx) return x->tx < y->tx ? -1 : 1;
+    return x->tz < y->tz ? -1 : (x->tz > y->tz ? 1 : 0);
+}
+
+static void rr_reg_add(int tx, int tz)
+{
+    if (rg.n >= rg.cap) {
+        const int nc = rg.cap ? rg.cap * 2 : 2048;
+        RrRegTile *nt = (RrRegTile *)realloc(rg.t, (size_t)nc * sizeof *nt);
+        if (!nt) return;
+        rg.t = nt; rg.cap = nc;
+    }
+    rg.t[rg.n].tx = tx; rg.t[rg.n].tz = tz; rg.t[rg.n].st = 0;
+    rg.n++;
+}
+
+static void rr_reg_ring(const RoamGrid *gr, double px, double pz, int R)
+{
+    int ctx, ctz, dx, dz;
+    roam_grid_tile_of(gr, px, pz, &ctx, &ctz);
+    for (dz = -R; dz <= R; dz++)
+        for (dx = -R; dx <= R; dx++)
+            if (td5_roam_partido_tile_ok(gr, ctx + dx, ctz + dz)) rr_reg_add(ctx + dx, ctz + dz);
+}
+
+/* every tile whose centre lies within RR_REG_CORRIDOR_M (+ half a tile diagonal) of segment a-b */
+static void rr_reg_corridor(const RoamGrid *gr, double ax, double az, double bx, double bz)
+{
+    const double M = RR_REG_CORRIDOR_M * RR_UPM + 0.71 * (double)gr->tile, S = (double)gr->tile;
+    const double ex = bx - ax, ez = bz - az, l2 = ex * ex + ez * ez;
+    double ua, va, ub, vb;
+    int tx, tz, tx0, tx1, tz0, tz1;
+    roam_grid_uv(gr, ax, az, &ua, &va);
+    roam_grid_uv(gr, bx, bz, &ub, &vb);
+    tx0 = (int)floor(((ua < ub ? ua : ub) - M) / S); tx1 = (int)floor(((ua > ub ? ua : ub) + M) / S);
+    tz0 = (int)floor(((va < vb ? va : vb) - M) / S); tz1 = (int)floor(((va > vb ? va : vb) + M) / S);
+    if ((long)(tx1 - tx0 + 1) * (long)(tz1 - tz0 + 1) > 400000L) return;      /* a waypoint pair across the world */
+    for (tx = tx0; tx <= tx1; tx++)
+        for (tz = tz0; tz <= tz1; tz++) {
+            double c[4][2], cx = 0.0, cz = 0.0, t, qx, qz;
+            int k;
+            roam_grid_corners(gr, tx, tz, c);
+            for (k = 0; k < 4; k++) { cx += 0.25 * c[k][0]; cz += 0.25 * c[k][1]; }
+            t = l2 > 0.0 ? ((cx - ax) * ex + (cz - az) * ez) / l2 : 0.0;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            qx = ax + ex * t - cx; qz = az + ez * t - cz;
+            if (qx * qx + qz * qz > M * M) continue;
+            if (td5_roam_partido_tile_ok(gr, tx, tz)) rr_reg_add(tx, tz);
+        }
+}
+
+/* the car's PLACE position (slot 0), else the session spawn */
+static int rr_reg_car(double *px, double *pz)
+{
+    const TD5_Actor *a = td5_roam_active() ? td5_game_get_actor(0) : NULL;
+    if (a) {
+        int32_t ox, oz;
+        td5_roam_world_origin(&ox, &oz);
+        *px = (double)FP_TRUNC(a->world_pos.x) + ox;
+        *pz = (double)FP_TRUNC(a->world_pos.z) + oz;
+        return 1;
+    }
+    {
+        const TD5_RoamSpawn *sp = td5_roam_spawn();
+        if (!sp) return 0;
+        *px = (double)sp->spawn_px; *pz = (double)sp->spawn_pz;
+        return 1;
+    }
+}
+
+/* Recompute the wanted region when its inputs changed (car tile in 2-tile steps, waypoints, type). */
+static void rr_region_update(const char *place)
+{
+    const RoamGrid *gr = rr_grid(place);
+    uint32_t h = 2166136261u;
+    double cx = 0.0, cz = 0.0;
+    int have_car, ctx = 0, ctz = 0, i, nlegs;
+    RrRegTile *old;
+    int nold;
+    if (!gr) return;
+    have_car = rr_reg_car(&cx, &cz);
+    if (have_car) roam_grid_tile_of(gr, cx, cz, &ctx, &ctz);
+#define RR_H(v) do { h ^= (uint32_t)(v); h *= 16777619u; } while (0)
+    RR_H(have_car); RR_H(ctx >> 1); RR_H(ctz >> 1);
+    RR_H(rt.cur.nwp); RR_H(rt.cur.type);
+    for (i = 0; i < rt.cur.nwp; i++) { RR_H(rt.cur.wp[i].px); RR_H(rt.cur.wp[i].pz); }
+#undef RR_H
+    if (rg.n > 0 && h == rg.key) return;
+    rg.key = h;
+    /* keep the known states of tiles that stay wanted */
+    old = rg.t; nold = rg.n;
+    rg.t = NULL; rg.n = 0; rg.cap = 0;
+    {
+        int (*casco)[2] = (int (*)[2])malloc(2048u * sizeof *casco);
+        const int nc = casco ? td5_roam_casco_tiles(gr, casco, 2048) : 0;
+        for (i = 0; i < nc; i++) rr_reg_add(casco[i][0], casco[i][1]);
+        free(casco);
+    }
+    if (have_car) rr_reg_ring(gr, cx, cz, RR_REG_CAR);
+    for (i = 0; i < rt.cur.nwp; i++) rr_reg_ring(gr, (double)rt.cur.wp[i].px, (double)rt.cur.wp[i].pz, RR_REG_WP);
+    nlegs = rt.cur.nwp - 1;
+    if (rt.cur.type == TD5_ROUTE_CIRCUIT && rt.cur.nwp > 1 && rt.cur.wp[rt.cur.nwp - 1].kind == TD5_ROUTE_WP_FINISH) nlegs++;
+    for (i = 0; i < nlegs; i++) {
+        const TD5_RouteWp *a = &rt.cur.wp[i], *b = &rt.cur.wp[(i + 1) % rt.cur.nwp];
+        rr_reg_corridor(gr, (double)a->px, (double)a->pz, (double)b->px, (double)b->pz);
+    }
+    if (rg.n > 1) {
+        int u = 0;
+        qsort(rg.t, (size_t)rg.n, sizeof *rg.t, rr_reg_cmp);
+        for (i = 0; i < rg.n; i++)
+            if (i == 0 || rg.t[i].tx != rg.t[u - 1].tx || rg.t[i].tz != rg.t[u - 1].tz) rg.t[u++] = rg.t[i];
+        rg.n = u;
+    }
+    if (old) {
+        int j = 0;
+        for (i = 0; i < rg.n; i++) {
+            while (j < nold && rr_reg_cmp(&old[j], &rg.t[i]) < 0) j++;
+            if (j < nold && old[j].tx == rg.t[i].tx && old[j].tz == rg.t[i].tz) rg.t[i].st = old[j].st;
+        }
+        free(old);
+    }
+}
+
+/* File states: present / queued on the stream worker / absent. */
+static void rr_region_refresh(const char *place)
+{
+    int i;
+    rg.queued = rg.present = 0;
+    for (i = 0; i < rg.n; i++) {
+        RrRegTile *t = &rg.t[i];
+        if (t->st == 0 || t->st == 1) {
+            const int r = td5_roam_stream_plan_tile(t->tx, t->tz);
+            if (r == 1) t->st = 2;
+            else if (r == 0) t->st = 1;
+            else {
+                char path[512];
+                td5_roam_tile_path(path, sizeof path, NULL, place, t->tx, t->tz);
+                t->st = td5_plat_file_exists(path) ? 2 : 3;
+            }
+        }
+        if (t->st == 1) rg.queued++;
+        if (t->st == 2) rg.present++;
+    }
+}
+
+/* 1 when the present region tiles are exactly the graph's tiles */
+static int rr_region_matches_graph(void)
+{
+    int i, k = 0;
+    if (!g.ready || g.ntiles != rg.present) return 0;
+    for (i = 0; i < rg.n; i++) {
+        if (rg.t[i].st != 2) continue;
+        if (k >= g.ntiles || g.tiles[k][0] != rg.t[i].tx || g.tiles[k][1] != rg.t[i].tz) return 0;
+        k++;
+    }
+    return 1;
+}
+
+static void rr_region_take_list(const char *place)
+{
+    int i;
+    free(rg.blist);
+    rg.blist = (int (*)[2])malloc((size_t)(rg.present > 0 ? rg.present : 1) * sizeof *rg.blist);
+    rg.nb = 0;
+    for (i = 0; rg.blist && i < rg.n; i++)
+        if (rg.t[i].st == 2) { rg.blist[rg.nb][0] = rg.t[i].tx; rg.blist[rg.nb][1] = rg.t[i].tz; rg.nb++; }
+    snprintf(rg.bplace, sizeof rg.bplace, "%s", place);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI rr_region_thread(LPVOID unused)
+{
+    (void)unused;
+    rr_build_into(&rg.next, rg.bplace, rg.blist, rg.nb);
+    MemoryBarrier();
+    InterlockedExchange(&rg.next_ready, 1);
+    InterlockedExchange(&rg.building, 0);
+    return 0;
+}
+#endif
+
+static void rr_region_start_build(const char *place)
+{
+    rr_region_take_list(place);
+    rg.last_build_ms = td5_plat_time_ms();
+#ifdef _WIN32
+    {
+        HANDLE h;
+        InterlockedExchange(&rg.building, 1);
+        h = CreateThread(NULL, 0, rr_region_thread, NULL, 0, NULL);
+        if (h) { CloseHandle(h); return; }
+        InterlockedExchange(&rg.building, 0);
+    }
+#endif
+    rr_build_into(&rg.next, rg.bplace, rg.blist, rg.nb);
+    rg.next_ready = 1;
+}
+
+static void rr_region_wait(void)
+{
+#ifdef _WIN32
+    while (rg.building) Sleep(1);
+    MemoryBarrier();
+#endif
+}
+
+/* swap the off-thread graph in (main thread, between frames), re-snap, replan */
+static void rr_region_swap(void)
+{
+    int i;
+    if (!rg.next_ready) return;
+    rg.next_ready = 0;
+    if (!rg.next.ready) { rr_graph_free(&rg.next); return; }
+    {   /* [F9b x F8] keep the outgoing generation's keys for td5_roam_route_graph_remap_* */
+        int k;
+        free(rg.prev_ekey); free(rg.prev_nkey);
+        rg.prev_ekey = g.nedge > 0 ? (uint64_t *)malloc((size_t)g.nedge * sizeof(uint64_t)) : NULL;
+        rg.prev_nkey = g.nnode > 0 ? (int64_t *)malloc((size_t)g.nnode * sizeof(int64_t)) : NULL;
+        rg.prev_ne = rg.prev_ekey ? g.nedge : 0;
+        rg.prev_nn = rg.prev_nkey ? g.nnode : 0;
+        for (k = 0; k < rg.prev_ne; k++) rg.prev_ekey[k] = g.edge[k].key;
+        for (k = 0; k < rg.prev_nn; k++) rg.prev_nkey[k] = g.node[k].key;
+    }
+    rr_graph_free(&g);
+    g = rg.next;
+    memset(&rg.next, 0, sizeof rg.next);
+    rg.gen++;
+    TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH_SWAP gen=%ld tiles=%d edges=%d %.1f km (region %d tiles, %d still queued)", rg.gen,
+              g.ntiles, g.nedge, g.km, rg.n, rg.queued);
+    if (rt.cur.nwp > 0 && td5_roam_race_state() < TD5_RRACE_COUNTDOWN) {
+        const uint32_t h0 = rt.res.hash;
+        const int ok0 = rt.res.ok;
+        for (i = 0; i < rt.cur.nwp; i++) rr_wp_snap(&rt.cur.wp[i]);
+        td5_roam_route_replan();
+        if (rg.hash_check && rt.res.ok) {
+            rt.map_changed = rg.have_hash && rg.want_hash != rt.res.hash;
+            rg.hash_check = 0;
+            TD5_LOG_I(LOG_TAG, "ROUTE_LOAD: '%s' planned once mapped: hash=%08X stored=%08X%s", rt.name,
+                      (unsigned)rt.res.hash, (unsigned)rg.want_hash, rt.map_changed ? " MAP CHANGED" : " (matches)");
+        }
+        if (rt.res.ok != ok0 || rt.res.hash != h0)
+            TD5_LOG_I(LOG_TAG, "ROUTE_PLAN after the graph swap: ok %d -> %d, hash %08X -> %08X", ok0, rt.res.ok,
+                      (unsigned)h0, (unsigned)rt.res.hash);
+    }
+}
+
+static int rr_region_ensure(const char *place)
+{
+    if (!place || !place[0]) return 0;
+    rr_region_wait();
+    rr_region_swap();
+    if (g.ready && strcmp(g.place, place) == 0) return 1;
+    rr_region_update(place);
+    rr_region_refresh(place);
+    rr_region_take_list(place);
+    rr_build_into(&rg.next, rg.bplace, rg.blist, rg.nb);
+    rg.last_build_ms = td5_plat_time_ms();
+    rg.next_ready = 1;
+    rr_region_swap();
+    return g.ready;
+}
+
+void td5_roam_route_graph_begin_async(const char *place)
+{
+    if (!place || !place[0] || rg.building) return;
+    if (g.ready && strcmp(g.place, place) == 0) return;
+    rr_region_update(place);
+    rr_region_refresh(place);
+    rr_region_start_build(place);
+}
+
+int  td5_roam_route_graph_building(void) { return rg.building != 0; }
+long td5_roam_route_graph_gen(void) { return rg.gen; }
+int  td5_roam_route_graph_pending(void) { return rg.queued; }
+
+/* [F9b x F8] An edge / node index of generation from_gen in the current graph: -1 when that key is not in it
+ * (or the index was -1), -2 when from_gen is not the previous generation (the caller re-resolves by position). */
+int td5_roam_route_graph_remap_edge(long from_gen, int e)
+{
+    int lo = 0, hi = g.nedge - 1;
+    uint64_t key;
+    if (from_gen == rg.gen) return e;
+    if (from_gen != rg.gen - 1) return -2;
+    if (e < 0 || e >= rg.prev_ne) return -1;
+    key = rg.prev_ekey[e];
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (g.edge[mid].key == key) return mid;
+        if (g.edge[mid].key < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+}
+
+int td5_roam_route_graph_remap_node(long from_gen, int n)
+{
+    if (from_gen == rg.gen) return n;
+    if (from_gen != rg.gen - 1) return -2;
+    if (n < 0 || n >= rg.prev_nn) return -1;
+    return rr_find_node(rg.prev_nkey[n]);
+}
+int  td5_roam_route_graph_settled(void)
+{
+    return g.ready && rg.queued == 0 && !rg.building && !rg.next_ready && rr_region_matches_graph();
+}
+
+void td5_roam_route_graph_free(void)
+{
+    rr_region_wait();
+    rr_graph_free(&g);
+    rr_graph_free(&rg.next);
+    rg.next_ready = 0;
+    free(rg.t); rg.t = NULL; rg.n = rg.cap = 0;
+    free(rg.blist); rg.blist = NULL; rg.nb = 0;
+    free(rg.prev_ekey); free(rg.prev_nkey); rg.prev_ekey = NULL; rg.prev_nkey = NULL; rg.prev_ne = rg.prev_nn = 0;
+    rg.key = 0;
+    rg.hash_check = 0;
+}
+
+void td5_roam_route_graph_poll(void)
+{
+    const char *place;
+    uint32_t now;
+    if (!td5_roam_active()) return;
+    if (rg.next_ready && !rg.building) rr_region_swap();
+    now = td5_plat_time_ms();
+    if ((int)(now - rg.next_poll_ms) < 0) return;
+    rg.next_poll_ms = now + RR_REG_POLL_MS;
+    place = td5_roam_route_place();
+    rr_region_update(place);
+    rr_region_refresh(place);
+    if (rg.building || rg.next_ready || rr_region_matches_graph() || rg.present <= 0) return;
+    if (rg.queued > 0 && g.ready && (uint32_t)(now - rg.last_build_ms) < RR_REG_REBUILD_MS) return;
+    rr_region_start_build(place);
+}
+
+/* 1 when the graph covers the tile of a PLACE point (or the point is outside the place: nothing to wait for) */
+static int rr_covers(double px, double pz)
+{
+    const RoamGrid *gr = rr_grid(td5_roam_route_place());
+    int tx, tz, lo, hi;
+    if (!gr || !g.ready) return 0;
+    roam_grid_tile_of(gr, px, pz, &tx, &tz);
+    if (!td5_roam_partido_tile_ok(gr, tx, tz)) return 1;
+    lo = 0; hi = g.ntiles - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (g.tiles[mid][0] == tx && g.tiles[mid][1] == tz) return 1;
+        if (g.tiles[mid][0] < tx || (g.tiles[mid][0] == tx && g.tiles[mid][1] < tz)) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
 /* A degree is held as an integer count of 1e-8 deg (1.1 mm). The game runs with a non-default FP
  * rounding mode, so printf / strtod of a double does not round trip; integers do. */
 static int64_t rr_to_n(double v) { return (int64_t)floor(v * 1e8 + 0.5); }
@@ -1029,6 +1405,8 @@ void td5_roam_route_replan(void)
     for (i = 0; i < nlegs; i++) {
         const TD5_RouteWp *a = &w->wp[i], *b = &w->wp[(i + 1) % w->nwp];
         RrSnap sa, sb;
+        /* [F9b] a waypoint the region graph does not cover yet: the leg waits for the next swap */
+        if (!rr_covers((double)a->px, (double)a->pz) || !rr_covers((double)b->px, (double)b->pz)) break;
         if (!rr_snap((double)a->px, (double)a->pz, RR_SNAP_MAX_M, &sa) ||
             !rr_snap((double)b->px, (double)b->pz, RR_SNAP_MAX_M, &sb)) break;
         if (!rr_plan_leg(&sa, &sb, &poly, &refs, NULL, -1, 0)) break;
@@ -1113,6 +1491,14 @@ static int rr_make_wp(TD5_RouteWp *w, int32_t px, int32_t pz, int kind)
     if (!td5_roam_route_place_to_latlon((double)px, (double)pz, &lat, &lon)) return 0;
     rr_wp_from_latlon(w, lat, lon, kind);
     if (!rr_wp_snap(w)) {
+        /* [F9b] a point of the place the region graph does not reach yet: kept unsnapped, the region grows
+         * round it (td5_roam_route_graph_poll) and the next swap snaps it and plans the route */
+        if (!rr_covers((double)w->px, (double)w->pz)) {
+            TD5_LOG_I(LOG_TAG, "ROUTE_EDIT: place (%d,%d) is beyond the mapped region: waypoint kept, mapping streets there",
+                      (int)px, (int)pz);
+            rg.next_poll_ms = 0;
+            return 1;
+        }
         TD5_LOG_W(LOG_TAG, "ROUTE_EDIT: no street within %.0f m of place (%d,%d)", RR_SNAP_MAX_M, (int)px, (int)pz);
         return 0;
     }
@@ -1387,6 +1773,19 @@ int td5_roam_route_load(const char *name)
     snprintf(rt.name, sizeof rt.name, "%s", name);
     rt.loaded_hash = want_hash;
     rt.map_changed = have_hash && want_hash != rt.res.hash;
+    /* [F9b] a route reaching beyond the mapped region plans after a graph swap: judge its hash then */
+    rg.hash_check = 0;
+    if (!rt.res.ok) {
+        int i, out = 0;
+        for (i = 0; i < n; i++) out += !rr_covers((double)set.wp[i].px, (double)set.wp[i].pz);
+        if (out) {
+            rt.map_changed = 0;
+            rg.hash_check = 1; rg.have_hash = have_hash; rg.want_hash = want_hash;
+            rg.next_poll_ms = 0;
+            TD5_LOG_I(LOG_TAG, "ROUTE_LOAD: '%s' reaches %d waypoint(s) beyond the mapped region: mapping streets", name, out);
+            return 1;
+        }
+    }
     rr_dump_edges("load", name);
     TD5_LOG_I(LOG_TAG, "ROUTE_LOAD: '%s' waypoints=%d edges=%d length=%.1f m hash=%08X stored=%08X%s",
               name, n, rt.res.nedge, rt.res.length_m, (unsigned)rt.res.hash, (unsigned)want_hash,

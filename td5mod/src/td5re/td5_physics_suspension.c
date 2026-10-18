@@ -4538,3 +4538,14 @@ void td5_physics_suspension_race_reset(void)
 {
     memset(s_prev_wheel_valid, 0, sizeof(s_prev_wheel_valid));
 }
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_physics_suspension_world_shift(int32_t sx, int32_t sz);
+void td5_physics_suspension_world_shift(int32_t sx, int32_t sz)
+{
+    int s, w;
+    for (s = 0; s < TD5_MAX_TOTAL_ACTORS; s++)
+        for (w = 0; w < 4; w++) { s_prev_wheel_tx[s][w] += FP_SCALE(sx); s_prev_wheel_tz[s][w] += FP_SCALE(sz); }
+}

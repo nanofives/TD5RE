@@ -10,7 +10,10 @@
  * THE PLANNER GRAPH. Roam has no process-wide graph: the T3 builder (td5_roam_world.c) is a
  * per-tile windowed pass that shares one cache session with the stream worker. The planner
  * must see the WHOLE casco (a route is not bounded by the resident set), so it builds its
- * own compact graph ONCE per place from the ROAMTILE files: every EDGE record (key, the two
+ * own compact graph from the ROAMTILE files. [F9b] Not every file of the place: a REGION (the casco,
+ * a ring round the car and each waypoint, a corridor along each leg), grown as the car and the
+ * waypoints move, its missing tiles built on the stream worker, the graph rebuilt off-thread and
+ * swapped in (td5_roam_route_graph_poll). From the files: every EDGE record (key, the two
  * end keys, oneway, klass) and the centre line of its ribbon quads, runs of one edge in
  * different tiles merged by key and ordered by row0. A* runs over directed edges: one-way
  * respected, no U-turn except at a dead end.
@@ -75,6 +78,20 @@ int  td5_roam_route_graph_ready(void);
 void td5_roam_route_graph_begin_async(const char *place);
 int  td5_roam_route_graph_building(void);
 void td5_roam_route_graph_free(void);
+/* [F9b] Per frame (td5_roam_route_ui_frame): grow the region round the car / the waypoints, queue its missing
+ * tiles on the stream worker, rebuild the graph off-thread and swap it in. */
+void td5_roam_route_graph_poll(void);
+/* [F9b] Graph generation: bumped by every swap (edge / node INDICES change, keys do not). */
+long td5_roam_route_graph_gen(void);
+/* [F9b x F8] Translate an edge / node INDEX a consumer kept from graph generation from_gen into the current
+ * graph (through its key): the new index, -1 when the key left the graph, -2 when from_gen is older than the
+ * previous generation (re-resolve by position). from_gen == current returns the index unchanged. */
+int  td5_roam_route_graph_remap_edge(long from_gen, int e);
+int  td5_roam_route_graph_remap_node(long from_gen, int n);
+/* [F9b] Region tiles still being built for the planner (the map shows "MAPPING STREETS"). */
+int  td5_roam_route_graph_pending(void);
+/* [F9b] 1 when the graph holds every file of the current region and nothing is queued or building. */
+int  td5_roam_route_graph_settled(void);
 /* Counters for the log / tests. */
 void td5_roam_route_graph_stats(int *nedge, int *nnode, int *nseg, double *ms, double *km);
 /* [F6-A] ribbon ends the planner graph has at a node / cluster key; -1 when the key is unknown. */

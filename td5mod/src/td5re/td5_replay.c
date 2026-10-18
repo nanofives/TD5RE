@@ -362,3 +362,19 @@ void td5_replay_pose_tick(uint32_t sim_tick)
         replay_pose_actor(a, &frame[slot], next_frame ? &next_frame[slot] : NULL, slot);
     }
 }
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_replay_world_shift(int32_t sx, int32_t sz)
+{
+    long i, n;
+    if (!s_buf || s_frame_count <= 0 || s_actor_count <= 0) return;
+    n = (long)s_frame_count * (long)s_actor_count;
+    for (i = 0; i < n; i++) {
+        s_buf[i].world_pos.x += (sx) * 256;
+        s_buf[i].world_pos.z += (sz) * 256;
+        s_buf[i].render_pos.x += (float)sx;
+        s_buf[i].render_pos.z += (float)sz;
+    }
+}

@@ -38,8 +38,10 @@ int  td5_roam_active(void);                  /* 1 while a free-roam session runs
 void td5_roam_begin(const TD5_RoamSpawn *s); /* called by the frontend; sets up the session */
 void td5_roam_end(void);
 
-/* world origin (design 0 item 7): fixed at the spawn tile origin for the whole session in F2 */
+/* world origin (design 0 item 7): the spawn tile origin at session start; [F9b] moved by
+ * td5_roam_rebase.c (the only caller of td5_roam_set_world_origin) as the car drives away */
 void td5_roam_world_origin(int32_t *ox, int32_t *oz);    /* PLACE units; world = place - origin */
+void td5_roam_set_world_origin(int32_t ox, int32_t oz);
 
 /* resident tile set, owned by task B. NULL until B registers one. */
 const struct TD5_RoamResident *td5_roam_resident(void);

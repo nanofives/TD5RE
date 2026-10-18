@@ -113,6 +113,7 @@ typedef struct {
     uint32_t         nscn;
     float           *lamp;                   /* [F4c] lantern positions, RENDER frame (x, y, z), nlamp of them */
     uint32_t        nlamp;
+    int32_t          sdx, sdz;               /* [F9b] world shift already applied (bake frame -> world) */
 } RRTile;
 
 typedef struct { RRTile *t; uint32_t tick; } RRRetired;
@@ -152,6 +153,10 @@ typedef struct {
     RRRetired *retired;
     int       nretired, capretired;
     uint32_t  retire_clock;
+    /* [F9b] world-origin rebase: tiles are BAKED in the session's first frame (f.ox/oz, fixed, so a
+     * worker bake never races a rebase) and drawn shifted by (draw_dx, draw_dz) world units */
+    int32_t   draw_dx, draw_dz;
+    long      rebases;
     /* stats */
     uint32_t  st_frames;
     double    st_sum_ms, st_max_ms, st_last_ms;
@@ -864,8 +869,57 @@ void td5_roam_render_remove_tile(int tx, int tz)
     s_rr.tile[i] = s_rr.tile[--s_rr.ntile];
 }
 
+/* [F9b] Move a tile's meshes, spheres and lanterns by (dx, dz) world units (render-float frame; mesh
+ * origins are 24.8 floats). Main thread, between frames. */
+static void rr_tile_shift(RRTile *rt, int32_t dx, int32_t dz)
+{
+    const double fx = (double)dx, fz = (double)dz;
+    int k;
+    uint32_t i;
+    if (!dx && !dz) return;
+    for (k = 0; k < rt->nmesh; k++) {
+        TD5_MeshHeader *m = rt->mesh[k];
+        m->origin_x = (float)((double)m->origin_x + fx * 256.0);
+        m->origin_z = (float)((double)m->origin_z + fz * 256.0);
+        m->bounding_center_x = (float)((double)m->bounding_center_x + fx);
+        m->bounding_center_z = (float)((double)m->bounding_center_z + fz);
+        rt->sph[k][0] = (float)((double)rt->sph[k][0] + fx);
+        rt->sph[k][2] = (float)((double)rt->sph[k][2] + fz);
+    }
+    for (i = 0; i < rt->nscn; i++) {
+        TD5_MeshHeader *m = &rt->smesh[i];
+        m->origin_x = (float)((double)m->origin_x + fx * 256.0);
+        m->origin_z = (float)((double)m->origin_z + fz * 256.0);
+        m->bounding_center_x = (float)((double)m->bounding_center_x + fx);
+        m->bounding_center_z = (float)((double)m->bounding_center_z + fz);
+    }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+        rt->ssph[k][0] = (float)((double)rt->ssph[k][0] + fx);
+        rt->ssph[k][2] = (float)((double)rt->ssph[k][2] + fz);
+    }
+    for (i = 0; i < rt->nlamp; i++) {
+        rt->lamp[i * 3 + 0] = (float)((double)rt->lamp[i * 3 + 0] + fx);
+        rt->lamp[i * 3 + 2] = (float)((double)rt->lamp[i * 3 + 2] + fz);
+    }
+    rt->cx = (float)((double)rt->cx + fx);
+    rt->cz = (float)((double)rt->cz + fz);
+    rt->sdx += dx; rt->sdz += dz;
+}
+
+/* [F9b] The world origin moved: every stored world position + (sx, sz). Resident tiles move now, a
+ * tile baked later is moved when it is installed (rr_insert). */
+void td5_roam_render_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    if (!s_rr.began) return;
+    s_rr.draw_dx += sx; s_rr.draw_dz += sz;
+    s_rr.rebases++;
+    for (i = 0; i < s_rr.ntile; i++) rr_tile_shift(s_rr.tile[i], sx, sz);
+}
+
 static int rr_insert(RRTile *rt)
 {
+    rr_tile_shift(rt, s_rr.draw_dx - rt->sdx, s_rr.draw_dz - rt->sdz);   /* [F9b] baked in the session frame */
     td5_roam_render_remove_tile(rt->tx, rt->tz);
     if (s_rr.ntile == s_rr.captile) {
         const int nc = s_rr.captile ? s_rr.captile * 2 : 64;
@@ -1127,7 +1181,7 @@ static int rr_dev_load(int tx, int tz)
 static void rr_eye_place(double *px, double *pz)
 {
     const double ex = (double)g_cameraPos[0], ez = (double)g_cameraPos[2];
-    *px = ex + (double)s_rr.f.ox; *pz = ez + (double)s_rr.f.oz;
+    *px = ex - (double)s_rr.draw_dx + (double)s_rr.f.ox; *pz = ez - (double)s_rr.draw_dz + (double)s_rr.f.oz;
 #ifndef TD5RE_RELEASE
     if (s_rr.f.route) td5_roam_view_frame_inv(s_rr.place, ex, ez, px, pz);
 #endif

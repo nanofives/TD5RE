@@ -117,4 +117,7 @@ int  td5_roam_render_hides_strip(void);
 int td5_roam_render_dev_poses(void);
 #endif
 
+/* [F9b] World-origin rebase: draw every tile shifted by a further (sx, sz) world units (td5_roam_rebase.c). */
+void td5_roam_render_world_shift(int32_t sx, int32_t sz);
+
 #endif /* TD5_ROAM_RENDER_H */

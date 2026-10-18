@@ -6370,3 +6370,17 @@ static void td5_physics_transform_track_vertex_by_matrix_c(
  *   0x0043E4C0  InsertTriangleIntoDepthSortBuckets  (density-match, verify in Phase 4)
  *   0x004431C0  LoadTrafficVehicleSkinTexture
  */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_physics_suspension_world_shift(int32_t sx, int32_t sz);   /* td5_physics_suspension.c */
+void td5_physics_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    for (i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+        s_prev_world_pos[i].x += FP_SCALE(sx);
+        s_prev_world_pos[i].z += FP_SCALE(sz);
+    }
+    td5_physics_suspension_world_shift(sx, sz);
+}
