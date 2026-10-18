@@ -34,7 +34,7 @@ static struct {
     int      n;
     int      type, laps, mode;
     int      opponents, traffic, cops;
-    uint32_t t_set, t_plant;
+    uint32_t t_set, t_plant, t_active;   /* t_active: the first frame of the active session */
     int      frames;
 } H;
 
@@ -97,6 +97,7 @@ void td5_roam_handoff_frame(void)
     const TD5_RouteResult *r;
     if (!H.pending || !td5_roam_active()) return;
     H.frames++;
+    if (H.frames == 1) H.t_active = td5_plat_time_ms();
     if (H.phase == 0) {
         if (!td5_roam_route_graph_ready() || H.frames < 5) return;
         if (!ho_plant()) {
@@ -106,8 +107,8 @@ void td5_roam_handoff_frame(void)
         }
         H.phase = 1;
         H.t_plant = td5_plat_time_ms();
-        TD5_LOG_I(LOG_TAG, "HANDOFF: %d waypoint(s) planted %u ms after the handoff (%d planner tile(s) pending)",
-                  td5_roam_route_wp_count(), (unsigned)(H.t_plant - H.t_set), td5_roam_route_graph_pending());
+        TD5_LOG_I(LOG_TAG, "HANDOFF: %d waypoint(s) planted %u ms after the session's first frame (%d planner tile(s) pending)",
+                  td5_roam_route_wp_count(), (unsigned)(H.t_plant - H.t_active), td5_roam_route_graph_pending());
         return;
     }
     r = td5_roam_route_result();
@@ -135,11 +136,11 @@ void td5_roam_handoff_frame(void)
         if (!td5_roam_race_start(&s))
             TD5_LOG_W(LOG_TAG, "HANDOFF: race start refused; free roam goes on");
         else
-            TD5_LOG_I(LOG_TAG, "HANDOFF: race started %u ms after the handoff", (unsigned)(td5_plat_time_ms() - H.t_set));
+            TD5_LOG_I(LOG_TAG, "HANDOFF: race started %u ms after the session's first frame", (unsigned)(td5_plat_time_ms() - H.t_active));
     } else if (!td5_roam_race_open_setup()) {
         TD5_LOG_W(LOG_TAG, "HANDOFF: the setup panel refused the route; free roam goes on");
     } else {
-        TD5_LOG_I(LOG_TAG, "HANDOFF: setup panel open %u ms after the handoff", (unsigned)(td5_plat_time_ms() - H.t_set));
+        TD5_LOG_I(LOG_TAG, "HANDOFF: setup panel open %u ms after the session's first frame", (unsigned)(td5_plat_time_ms() - H.t_active));
     }
 }
 
