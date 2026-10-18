@@ -44,10 +44,49 @@ typedef struct {
     char                grid_place[64];
     int                 force;
     int                 pending_frame;   /* a rebase ran since the last frame note */
+#ifndef TD5RE_RELEASE
+    int                 trace_on;        /* TD5RE_ROAM_REBASE_TRACE=1: -1 unread */
+    FILE               *trace;           /* <log>/roam_rebase_trace.csv: slot 0 per sim tick, PLACE frame */
+    long                trace_tick;
+#endif
     TD5_RoamRebaseStats st;
 } RoamRebase;
 
-static RoamRebase s_rb = { .tiles = -1 };
+static RoamRebase s_rb = { .tiles = -1
+#ifndef TD5RE_RELEASE
+    , .trace_on = -1
+#endif
+};
+
+#ifndef TD5RE_RELEASE
+/* DEV: one row per sim tick, after any rebase of that tick: slot 0 in the PLACE frame (exact: world/256 +
+ * origin) and the raw world value, so two runs (rebase on / off) compare tick by tick and a jump at a
+ * rebase shows as a place-frame step. */
+static void rb_trace(int rebased)
+{
+    TD5_Actor *a;
+    int32_t ox, oz;
+    const long tick = (long)g_td5.simulation_tick_counter;
+    if (s_rb.trace_on < 0) s_rb.trace_on = td5_env_int("TD5RE_ROAM_REBASE_TRACE", 0, 0, 1);
+    if (!s_rb.trace_on || tick == s_rb.trace_tick) return;
+    a = td5_game_get_actor(0);
+    if (!a) return;
+    if (!s_rb.trace) {
+        char path[512];
+        const char *dir = td5_plat_log_dir();
+        snprintf(path, sizeof path, "%sroam_rebase_trace.csv", dir ? dir : "");
+        s_rb.trace = fopen(path, "w");
+        if (!s_rb.trace) { s_rb.trace_on = 0; return; }
+        fprintf(s_rb.trace, "tick,origin_x,origin_z,world_x_fp,world_y_fp,world_z_fp,place_x,place_z,vx,vz,yaw,rebased\n");
+    }
+    s_rb.trace_tick = tick;
+    td5_roam_world_origin(&ox, &oz);
+    fprintf(s_rb.trace, "%ld,%d,%d,%d,%d,%d,%.4f,%.4f,%d,%d,%d,%d\n", tick, (int)ox, (int)oz, (int)a->world_pos.x,
+            (int)a->world_pos.y, (int)a->world_pos.z, (double)a->world_pos.x / 256.0 + ox, (double)a->world_pos.z / 256.0 + oz,
+            (int)a->linear_velocity_x, (int)a->linear_velocity_z, (int)(a->euler_accum.yaw >> 8 & 0xFFF), rebased);
+    if ((tick % 300) == 0) fflush(s_rb.trace);
+}
+#endif
 
 void td5_roam_rebase_listen(TD5_RoamRebaseFn fn)
 {
@@ -64,6 +103,10 @@ void td5_roam_rebase_session_reset(void)
     s_rb.st.threshold_tiles = keep_tiles;
     s_rb.force = 0;
     s_rb.pending_frame = 0;
+#ifndef TD5RE_RELEASE
+    if (s_rb.trace) { fclose(s_rb.trace); s_rb.trace = NULL; }
+    s_rb.trace_tick = -1;
+#endif
 }
 
 void td5_roam_rebase_force(void) { s_rb.force = 1; }
@@ -196,6 +239,12 @@ static void rb_apply(int32_t new_ox, int32_t new_oz, int ptx, int ptz)
               (int)new_oz, ptx, ptz, (int)sx, (int)sz, sx / RB_UPM, sz / RB_UPM, n, ms);
 }
 
+#ifndef TD5RE_RELEASE
+#define RB_TRACE(r) rb_trace(r)
+#else
+#define RB_TRACE(r) ((void)0)
+#endif
+
 void td5_roam_rebase_tick(void)
 {
     const RoamGrid *g;
@@ -208,11 +257,10 @@ void td5_roam_rebase_tick(void)
         s_rb.tiles = td5_env_int("TD5RE_ROAM_REBASE_TILES", 4, 0, 64);
         TD5_LOG_I(LOG_TAG, "ROAM_REBASE: threshold %d tile(s) (%s)", s_rb.tiles, s_rb.tiles ? "on" : "off: fixed origin");
     }
-    if (!s_rb.tiles && !s_rb.force) return;
-    if (td5_roam_physics_rebase_inhibited()) return;
+    if ((!s_rb.tiles && !s_rb.force) || td5_roam_physics_rebase_inhibited()) { RB_TRACE(0); return; }
     a = td5_game_get_actor(0);
     g = rb_grid();
-    if (!a || !g) return;
+    if (!a || !g) { RB_TRACE(0); return; }
     td5_roam_world_origin(&ox, &oz);
     px = (double)FP_TRUNC(a->world_pos.x) + (double)ox;
     pz = (double)FP_TRUNC(a->world_pos.z) + (double)oz;
@@ -225,8 +273,9 @@ void td5_roam_rebase_tick(void)
     /* the origin is a lattice corner: its own tile is the one whose (0,0) corner it is */
     roam_grid_tile_of(g, (double)ox + 8.0 * (g->c - g->s), (double)oz + 8.0 * (g->s + g->c), &otx, &otz);
     d = abs(ptx - otx) > abs(ptz - otz) ? abs(ptx - otx) : abs(ptz - otz);
-    if (!s_rb.force && d <= s_rb.tiles) return;
+    if (!s_rb.force && d <= s_rb.tiles) { RB_TRACE(0); return; }
     s_rb.force = 0;
     roam_grid_origin(g, ptx, ptz, &nox, &noz);
     rb_apply(nox, noz, ptx, ptz);
+    RB_TRACE(1);
 }

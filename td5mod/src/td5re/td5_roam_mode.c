@@ -223,6 +223,14 @@ void td5_roam_begin(const TD5_RoamSpawn *s)
     /* world origin = the (0,0) corner of the lattice tile holding the spawn point */
     if (roam_grid_load(s_roam.spawn.place, &g)) {
         roam_grid_tile_of(&g, (double)s->spawn_px, (double)s->spawn_pz, &tx, &tz);
+#ifndef TD5RE_RELEASE
+        {   /* [F9b DEV] TD5RE_ROAM_ORIGIN_OFFSET=dtx,dtz: start the origin that many tiles off the spawn tile
+             * (a control for the rebase A/B: the engine's float paths round differently in another frame) */
+            const char *e = getenv("TD5RE_ROAM_ORIGIN_OFFSET");
+            int dtx = 0, dtz = 0;
+            if (e && sscanf(e, "%d,%d", &dtx, &dtz) == 2) { tx += dtx; tz += dtz; }
+        }
+#endif
         roam_grid_origin(&g, tx, tz, &s_roam.origin_x, &s_roam.origin_z);
     } else {
         TD5_LOG_W(LOG_TAG, "roam: no ROAMGRID.JSON for place '%s' (build tiles with "

@@ -27,6 +27,7 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
+#include "td5_roam_drive.h"      /* [F9b] the corner matrix inhibits rebasing */
 #include "td5_roam_race.h"       /* [F6-B] racer-only race barriers join the wall push */
 #include "td5_roam_stream.h"     /* [F3] the streamed resident set */
 #include "td5_roam_junction.h"   /* dev casco test (corner harness) */
@@ -580,7 +581,7 @@ void td5_roam_physics_world_shift(int32_t sx, int32_t sz, int32_t new_ox, int32_
 int td5_roam_physics_rebase_inhibited(void)
 {
 #ifndef TD5RE_RELEASE
-    return s_rp.drv_mode == 2;
+    return s_rp.drv_mode == 2 || td5_roam_drive_mode() == TD5_RDRV_CORNERS;
 #else
     return 0;
 #endif
