@@ -64,6 +64,7 @@
 #include "td5_roam_mode.h"   /* [roam F2-D] `roam` rows: arm a free-roam session */
 #include "td5_roam_drive.h"  /* [roam F2-D] scripted drive + verdict */
 #include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
+#include "td5_roam_physics.h" /* [roam F9a] the roam provider's wheel / teleport counters for the invariant note */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
@@ -892,11 +893,15 @@ static void st_inv_flag(int level, const char *fmt, ...)
 
 static long s_inv_roam_placed;        /* [roam F9a] see st_inv_sample */
 static double s_inv_roam_step_max_m;
+static unsigned s_inv_roam_tick;      /* sim tick of the previous sample: a frame can run several (8x rows) */
+static long s_inv_roam_nohit, s_inv_roam_outside, s_inv_roam_tele;   /* the roam provider's own wheel / teleport counters */
 
 static void st_inv_reset(void)
 {
     s_inv_roam_step_max_m = 0.0;
     s_inv_roam_placed = td5_roam_placements();
+    s_inv_roam_tick = (unsigned)g_td5.simulation_tick_counter;
+    s_inv_roam_nohit = s_inv_roam_outside = s_inv_roam_tele = 0;
     memset(&s_inv, 0, sizeof(s_inv));
     s_inv.active = 1;
     s_inv.worst  = ST_PASS;
@@ -1134,7 +1139,16 @@ static void st_inv_sample(void)
             if (llabs(dy) > mj) mj = llabs(dy);
             if (llabs(dz) > mj) mj = llabs(dz);
             if (mj > s_inv.peak_jump) s_inv.peak_jump = mj;
-            if (s_roam_row && (double)mj / 256.0 / 430.0 > s_inv_roam_step_max_m) s_inv_roam_step_max_m = (double)mj / 256.0 / 430.0;
+            if (s_roam_row) {
+                /* metres per SIM tick: the sampler runs once per frame and the 8x rows run several ticks in one */
+                unsigned dt = (unsigned)g_td5.simulation_tick_counter - s_inv_roam_tick;
+                const double step = (double)mj / 256.0 / 430.0 / (double)(dt ? dt : 1u);
+                if (step > s_inv_roam_step_max_m) s_inv_roam_step_max_m = step;
+                if (step > 4.0)
+                    TD5_LOG_W(LOG_TAG, "roam step %.1f m/tick slot %d tick %u (%u ticks since the last sample) race state %d speed %d",
+                              step, slot, (unsigned)g_td5.simulation_tick_counter, dt, td5_roam_race_state(),
+                              (int)(a->longitudinal_speed >> 8));
+            }
             if (llabs(dx) > s_inv_max_jump || llabs(dy) > s_inv_max_jump ||
                 llabs(dz) > s_inv_max_jump)
                 st_inv_flag(ST_FAIL, "slot%d teleport dx=%lld dy=%lld dz=%lld",
@@ -1160,6 +1174,12 @@ static void st_inv_sample(void)
         if (!s_inv.seen[slot]) { s_inv.seen[slot] = 1; s_inv.prog0[slot] = prog; }
         s_inv.progN[slot] = prog;
     }
+    if (s_roam_row) {
+        TD5_RoamPhysStats rps;
+        s_inv_roam_tick = (unsigned)g_td5.simulation_tick_counter;
+        td5_roam_physics_stats(&rps);
+        s_inv_roam_nohit = rps.nohit_wheels; s_inv_roam_outside = rps.outside_wheels; s_inv_roam_tele = rps.teleports;
+    }
     { int s0 = td5_game_get_slot_span(0);   /* driven-slot span (drag-trim check) */
       if (s0 > s_inv.peak_span) s_inv.peak_span = s0; }
     s_inv.samples++;
@@ -1171,7 +1191,7 @@ static int st_inv_result(char *note, size_t nsz)
 {
     int status = s_inv.active ? s_inv.worst : ST_PASS;
     int i, moved = 0, active = 0, stuck = 0;
-    char tele[84];
+    char tele[104];
     for (i = 0; i < ST_INV_MAX_SLOTS; i++) {
         if (!s_inv.seen[i]) continue;
         active++;
@@ -1207,8 +1227,9 @@ static int st_inv_result(char *note, size_t nsz)
      * how many active cars actually moved. This quantifies "cars fly/jump" the
      * generous FAIL thresholds don't trip. */
     if (s_roam_row)
-        snprintf(tele, sizeof(tele), "air=%d spd=%lld step=%.2fm racers=%d (roam: no span/prog)",
-                 s_inv.peak_air, (long long)(s_inv.peak_speed >> 8), s_inv_roam_step_max_m, active);
+        snprintf(tele, sizeof(tele), "roam step=%dcm/t spd=%d nohit=%d out=%d tele=%d",
+                 (int)(s_inv_roam_step_max_m * 100.0), (int)(s_inv.peak_speed >> 8), (int)s_inv_roam_nohit,
+                 (int)s_inv_roam_outside, (int)s_inv_roam_tele);
     else
         snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d span=%d",
                  s_inv.peak_air, (long long)(s_inv.peak_speed >> 8),
@@ -2626,6 +2647,10 @@ static void st_tick_races(uint32_t now)
     switch (s_sub) {
     case SS_ENTER:
         if (g_td5.game_state != TD5_GAMESTATE_MENU) return;
+        {   /* DEV: TD5RE_SELFTEST_ONLY=<name substring> runs only the matching race rows (iteration speed) */
+            const char *only = getenv("TD5RE_SELFTEST_ONLY");
+            if (only && only[0] && !strstr(sc->name, only)) { st_next_step(); return; }
+        }
         /* One race can take a while on first asset load; generous budget. */
         st_begin_step(sc->name, 60000);
         row = st_new_row(sc->name, 'R');
