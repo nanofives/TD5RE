@@ -107,6 +107,7 @@ static struct {
     RtCar   car[TD5_ROAM_TRAFFIC_POOL_MAX];
     uint32_t rng;
     long    spawn_count, tick_last;
+    int     live_prev;                   /* [F8d] last tick's live count (dip diagnostics) */
     int     force_level, force_density;
     /* knobs */
     int     knobs;
@@ -1452,6 +1453,7 @@ static void rt_tick_body(void)
     if (target > T.max_live) target = T.max_live;
     if (target > T.pool) target = T.pool;
     T.st.target = target;
+    const long dsp0_far = T.st.despawn_far, dsp0_all = T.st.despawns;
 
     /* drive every live car; far ones fade out */
     for (i = 0; i < T.pool; i++) {
@@ -1468,7 +1470,8 @@ static void rt_tick_body(void)
             if (dd < dmin) dmin = dd;
             if (dd < 4.5 * RT_M) { c->last_contact = tick; T.st.racer_near++; }
         }
-        if (dmin > T.r_despawn * RT_M) rt_despawn(c, RT_WHY_FAR);
+        /* [F8d] no anchor resolved this tick (dmin stays 1e300): we cannot judge "far", so do not wipe the pool */
+        if (nanch > 0 && dmin > T.r_despawn * RT_M) rt_despawn(c, RT_WHY_FAR);
         if (per == 0 && c->fade >= 0) rt_despawn(c, RT_WHY_LEVEL);
         rt_drive(c, a);
         if (c->fade > 0) { c->alpha += 255 / RT_FADE_TICKS; if (c->alpha >= 255) { c->alpha = 255; c->fade = 0; } }
@@ -1557,6 +1560,14 @@ static void rt_tick_body(void)
     rt_shots();
 #endif
     T.st.live = live;
+#ifndef TD5RE_RELEASE
+    /* [F8d] DIP DIAGNOSTIC: a drop of 3+ live cars in one tick is logged with its causes */
+    if (T.live_prev - live >= 3)
+        TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_DIP tick %ld: live %d -> %d target %d per %d anchors %d racing %d | despawns this tick %ld (far %ld) "
+                  "unres %ld lost %ld off %ld", tick, T.live_prev, live, target, per, nanch, racing, T.st.despawns - dsp0_all,
+                  T.st.despawn_far - dsp0_far, T.st.despawn_unres, T.st.despawn_lost, T.st.despawn_off);
+#endif
+    T.live_prev = live;
     if (tick - T.st_t0 > RT_WARMUP) {
         T.st.samples++;
         T.live_sum += live;
