@@ -18,8 +18,9 @@
  * reinforcements still come with the heat. The smoke row runs with no ambient traffic, the full row with the knob
  * density.
  *
- * Shots (log dir): roam_cops_pursuit.png (rear view, a lit pursuer 8..40 m behind), roam_cops_busted.png (the
- * BUSTED banner), roam_cops_busted_rear.png (rear view during the hold).
+ * Shots (log dir, TD5RE_D3D12_CAPTURE=1 arms the capture): roam_cops_pursuit_{a,b,c}.png (rear view, a lit pursuer
+ * 8..40 m behind, 3 frames 4 ticks apart: the strobe flashes), roam_cops_busted.png (the BUSTED banner),
+ * roam_cops_busted_rear_{a,b,c}.png (rear view during the hold).
  *
  * ONE file-scope struct. Compiled out of RELEASE.
  */
@@ -338,8 +339,12 @@ static uint32_t ct_bits(TD5_Actor *a, long tick, int full)
         if (T.t_pursuit_a && !T.shot_p) {
             if (T.rear > 0) {
                 bits |= (uint32_t)TD5_INPUT_REAR_VIEW;
-                if (++T.rear == 25) ct_shot("pursuit");      /* the chase camera swings round over a few ticks */
-                if (T.rear >= 30) { T.rear = 0; T.shot_p = 1; }
+                /* the chase camera swings round over a few ticks; the strobe flashes, so 3 frames 4 ticks apart */
+                ++T.rear;
+                if (T.rear == 25) ct_shot("pursuit_a");
+                if (T.rear == 29) ct_shot("pursuit_b");
+                if (T.rear == 33) ct_shot("pursuit_c");
+                if (T.rear >= 34) { T.rear = 0; T.shot_p = 1; }
             } else if (td5_roam_cops_dev_pursuer_behind(8.0, 40.0)) T.rear = 1;
         }
         if (st.escapes > T.st0.escapes) {
@@ -387,8 +392,11 @@ static uint32_t ct_bits(TD5_Actor *a, long tick, int full)
             if (busted) {
                 if (!T.shot_b && tick - T.bust_seen_t == 20) { ct_shot("busted"); T.shot_b = 1; }
                 if (!T.shot_br && tick - T.bust_seen_t >= 45) {
-                    if (++T.rear == 25) ct_shot("busted_rear");
-                    if (T.rear >= 30) { T.rear = 0; T.shot_br = 1; }
+                    ++T.rear;
+                    if (T.rear == 25) ct_shot("busted_rear_a");
+                    if (T.rear == 29) ct_shot("busted_rear_b");
+                    if (T.rear == 33) ct_shot("busted_rear_c");
+                    if (T.rear >= 34) { T.rear = 0; T.shot_br = 1; }
                     return (uint32_t)TD5_INPUT_REAR_VIEW;
                 }
             }

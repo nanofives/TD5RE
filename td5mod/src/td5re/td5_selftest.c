@@ -869,6 +869,8 @@ static void st_roam_arm(const RaceScenario *sc)
     /* [roam F8] traffic: the knob density in free roam, HIGH in the traffic sprint row, the setup's otherwise */
     td5_roam_traffic_force_density(-1);
     td5_roam_traffic_force_race_level(sc->roam == 12 ? 2 : -1);
+    /* [roam F10] free-roam patrols only in the cops rows: the other roam rows keep the drive they were written for */
+    td5_roam_cops_dev_force(st_roam_is_cops(sc->roam) ? -1 : 0, -1);
     if (st_roam_is_cops(sc->roam)) {
         /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
         if (sc->roam == 14) td5_roam_traffic_force_density(0);
@@ -913,6 +915,7 @@ static void st_roam_disarm(void)
     td5_roam_drive_disarm();
     td5_roam_sprint_test_disarm();    /* [roam F6-B] */
     td5_roam_cops_test_disarm();      /* [roam F10] */
+    td5_roam_cops_dev_force(-1, -1);
     td5_roam_traffic_force_density(-1);       /* [roam F8] */
     td5_roam_traffic_force_race_level(-1);
     td5_roam_cancel();
