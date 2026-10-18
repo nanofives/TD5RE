@@ -1951,6 +1951,33 @@ int32_t npc_fatal_mag(void) {
     }
     return v;
 }
+/* [GEO FREE ROAM F8e] Gentler crash threshold in FREE ROAM (td5_roam_active(), roam races included). The faithful
+ * heavy gate (90000 racer-racer, npc_fatal_mag 60000 with traffic / cops) fires on a ~16 km/h rear-end (logged
+ * mags 63k-80k) and launches the racer; a city street has traffic, cops and other racers at every corner. In roam
+ * the heavy gate becomes TD5RE_ROAM_CRASH_HEAVY (0 = off: the faithful gates), and between it and
+ * ROAM_CRASH_RAMP_X times it the racer's scatter + lift are damped from ROAM_CRASH_MIN_PCT up to 100 %, so a
+ * real high-speed crash still scatters in full. Outside roam both accessors are no-ops (strip races unchanged). */
+#define ROAM_CRASH_HEAVY_DEFAULT  150000
+#define ROAM_CRASH_RAMP_X         2
+#define ROAM_CRASH_MIN_PCT        30
+int32_t roam_crash_heavy(void) {
+    static int32_t v = -1;
+    if (!td5_roam_active()) return 0;
+    if (v < 0) {
+        v = td5_env_int("TD5RE_ROAM_CRASH_HEAVY", ROAM_CRASH_HEAVY_DEFAULT, 0, 2000000);
+        TD5_LOG_I(LOG_TAG, "roam_crash_heavy: TD5RE_ROAM_CRASH_HEAVY=%d (0 = faithful gates)", v);
+    }
+    return v;
+}
+int roam_crash_pct(int32_t impact_mag) {
+    const int32_t g = roam_crash_heavy();
+    int64_t end, pct;
+    if (g <= 0 || impact_mag <= g) return 100;
+    end = (int64_t)g * ROAM_CRASH_RAMP_X;
+    if (impact_mag >= end) return 100;
+    pct = ROAM_CRASH_MIN_PCT + (int64_t)(100 - ROAM_CRASH_MIN_PCT) * (impact_mag - g) / (end - g);
+    return (int)pct;
+}
 /* [TRAFFIC BATTLE 2026-06-28] Public accessor so the battle scoring hook
  * (td5_game_battle_note_ram) shares the single npc-fatal-impact threshold with the
  * V2V heavy-hit gate (no constant duplication / drift). */

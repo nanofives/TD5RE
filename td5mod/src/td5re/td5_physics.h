@@ -228,6 +228,10 @@ void td5_physics_rebuild_pose(TD5_Actor *actor);
  * traffic car is "fatal" (TD5RE_NPC_FATAL_MAG). Shared with the battle-mode
  * scoring hook td5_game_battle_note_ram so both use one threshold. */
 int32_t td5_physics_npc_fatal_mag(void);
+#ifndef TD5RE_RELEASE
+/* [roam F8e] DEV: the last V2V contact (seq counts impulses; heavy = scatter branch taken; pct = racer damping) */
+void td5_physics_dev_last_v2v(long *seq, int *a, int *b, int32_t *mag, int *heavy, int *pct);
+#endif
 void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
 void td5_physics_set_xz_freeze(int freeze); /* 1=freeze XZ pos (countdown), 0=normal */
 void td5_physics_set_race_slot_state(int slot, int is_human); /* 1=player, 0=AI */
