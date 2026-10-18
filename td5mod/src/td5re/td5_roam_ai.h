@@ -63,6 +63,13 @@ int  td5_roam_ai_race_start(const double *px, const double *pz, const double *di
 void td5_roam_ai_regrid(void);               /* the sprint's 3-2-1 re-ran: back on the grid */
 void td5_roam_ai_race_end(void);             /* the race went OFF: park the opponents */
 int  td5_roam_ai_count(void);                /* opponents in this race */
+/* [F9a] The NEXT td5_roam_ai_race_start is a circuit of `laps` laps on a closed route whose lap is
+ * `lap_len_m` long (0 = a sprint, the default; consumed by the next race start). The route polyline passed
+ * to race_start is then ONE lap, closed. The driver's path is the lap unrolled `laps` times (a run-up of
+ * the lap's tail behind START, a run-out of the lap's start past the line), and each opponent's progress
+ * is the TOTAL distance of td5_roam_lap.h, so it laps, ranks and finishes on (laps, distance). */
+void td5_roam_ai_set_circuit(int laps, double lap_len_m);
+int  td5_roam_ai_car_laps(int k);            /* laps opponent k has completed (circuit), 0 for a sprint */
 int  td5_roam_ai_racing(void);               /* opponents still running (not finished) */
 
 /* Once per sim tick BEFORE physics (td5_game.c, the roam branch of the AI tick): commands. */
@@ -77,8 +84,9 @@ typedef struct {
     int    slot;             /* 0 = the player */
     int    finished;
     long   finish_ticks;     /* race ticks at the line */
-    double along_m;          /* distance along the route */
+    double along_m;          /* distance along the route (a circuit: TOTAL distance, laps included) */
     int    car_index;
+    int    laps_done;        /* [F9a] circuit: laps completed (0 for a sprint) */
 } TD5_RoamStanding;
 int  td5_roam_ai_standings(TD5_RoamStanding *out, int max);   /* count written (0 outside a race) */
 int  td5_roam_ai_player_rank(void);                           /* 1-based, 0 = no field */
@@ -96,6 +104,8 @@ typedef struct {
     double max_lateral_m;        /* farthest any opponent got from the route polyline          */
     long   brake_ticks;          /* ticks with the brake on, before a bend (profile braking)   */
     int    grid_rows, grid_single;
+    long   lap_jumps;            /* [F9a] ticks an opponent's lap count rose by more than 1 (must be 0) */
+    int    circuit_laps;         /* [F9a] laps of this race (0 = sprint)                                 */
 } TD5_RoamAiStats;
 void td5_roam_ai_stats(TD5_RoamAiStats *out);
 /* per opponent k (0..n-1): slot, finish ticks (0 = running), still-max ticks, recoveries */

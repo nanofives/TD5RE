@@ -735,8 +735,24 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
     /* ---- passes ---------------------------------------------------------------- */
 #define ENTRY_END(i) (route->edge[(i)].dir > 0 ? 0 : 1)
 #define EXIT_END(i)  (route->edge[(i)].dir > 0 ? 1 : 0)
+    /* [F9a] A CIRCUIT is closed: the route passes the start/finish line on every lap, so there is no start
+     * pocket and no finish pocket to seal. The edge after the last one is the first (the lap wraps), and
+     * the cluster a figure 8 crosses twice collects the arms of both passes (all four stay open). */
+    if (route->closed) {
+        const int last = route->nedge - 1;
+        if (re[last].found && re[0].found && re[last].key != re[0].key) {
+            const int ex = EXIT_END(last), en = ENTRY_END(0);
+            if (re[last].ek[ex] != re[0].ek[en]) B.st.pass_gaps++;
+            else if (re[last].kind[ex] == TD5_ROAM_END_CLUSTER || re[0].kind[en] == TD5_ROAM_END_CLUSTER) {
+                Pass *q = &ps[npass++];
+                q->ckey = re[last].ek[ex];
+                q->has_in = 1;  q->in.key = re[last].key; q->in.end = ex;
+                q->has_out = 1; q->out.key = re[0].key;   q->out.end = en;
+            }
+        }
+    }
     /* start pocket: the cluster behind the first edge */
-    if (re[0].found && re[0].kind[ENTRY_END(0)] == TD5_ROAM_END_CLUSTER) {
+    if (!route->closed && re[0].found && re[0].kind[ENTRY_END(0)] == TD5_ROAM_END_CLUSTER) {
         Pass *q = &ps[npass++];
         q->ckey = re[0].ek[ENTRY_END(0)];
         q->has_out = 1; q->out.key = re[0].key; q->out.end = ENTRY_END(0);
@@ -756,7 +772,7 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
     }
     {   /* finish pocket: the cluster past the last edge */
         const int last = route->nedge - 1;
-        if (re[last].found && re[last].kind[EXIT_END(last)] == TD5_ROAM_END_CLUSTER) {
+        if (!route->closed && re[last].found && re[last].kind[EXIT_END(last)] == TD5_ROAM_END_CLUSTER) {
             Pass *q = &ps[npass++];
             q->ckey = re[last].ek[EXIT_END(last)];
             q->has_in = 1; q->in.key = re[last].key; q->in.end = EXIT_END(last);

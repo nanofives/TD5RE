@@ -36,6 +36,7 @@
 
 #define TD5_ROUTE_SPRINT     0
 #define TD5_ROUTE_CIRCUIT    1
+#define TD5_ROUTE_MAX_LAPS   10      /* [F9a] circuit laps 1..10 */
 
 typedef struct {
     double  lat, lon;        /* canonical: rounded to 1e-8 deg (1 mm), printed with %.8f */
@@ -55,6 +56,7 @@ typedef struct {
 
 typedef struct {
     int      ok;             /* 1 = every leg planned                            */
+    int      closed;         /* [F9a] 1 = a circuit whose closing leg (FINISH back to START) is planned: the polyline is ONE lap, last point = first */
     int      legs, legs_ok;
     TD5_RouteEdgeRef *edge;  int nedge;
     double  *px, *pz;        /* polyline, place frame                            */

@@ -46,10 +46,11 @@ struct TD5_Actor;
 #define TD5_RRACE_FINISHED   4
 
 #define TD5_RRACE_MAX_CP     24      /* checkpoints = via points + the finish */
+#define TD5_RRACE_MAX_LAPS   10      /* [F9a] circuit laps 1..10 (= TD5_ROUTE_MAX_LAPS) */
 #define TD5_RRACE_TICK_HZ    30      /* sim ticks per second */
 
 typedef struct {
-    int laps;        /* 1 for a sprint (circuits are F9) */
+    int laps;        /* 1 for a sprint; a circuit: 1..10 (mirrors the route's laps, td5_roam_route_set_type) */
     int traffic;     /* stored, inert until F8 */
     int cops;        /* stored, inert until F10 */
     int opponents;   /* [F7] AI racers 0..5 (td5_roam_ai.h); 0 = a solo sprint */
@@ -75,6 +76,17 @@ typedef struct {
     long     field_ticks[6];          /* finish time, 0 = not finished (yet)           */
     double   field_along_m[6];
     int      player_rank;             /* 1-based, 0 = solo                             */
+    /* [F9a] a CIRCUIT: laps of the route's closed loop (td5_roam_lap.h). ncp / split_ticks stay 0 / unused. */
+    int      circuit;                 /* 1 = a circuit race                                              */
+    int      laps;                    /* laps to run                                                     */
+    int      laps_done;               /* laps the player completed                                       */
+    long     lap_ticks[TD5_RRACE_MAX_LAPS];   /* race ticks at the END of each completed lap (cumulative) */
+    long     best_lap_ticks;          /* the player's fastest lap this race, 0 = none                    */
+    long     best_lap_prev;           /* fastest lap saved for this route before this race, 0 = none     */
+    int      new_best_lap;
+    long     lap_jumps;               /* ticks the lap count rose by more than 1 (must be 0)             */
+    int      field_laps[6];           /* laps each field entry completed                                 */
+    double   lap_len_m;               /* the loop length                                                 */
 } TD5_RoamRaceResult;
 
 /* ---- state ------------------------------------------------------------------ */
@@ -85,6 +97,11 @@ void td5_roam_race_reset(void);              /* roam session start / end: back t
 const TD5_RoamRaceResult *td5_roam_race_result(void);
 /* Distance along the route (m), its length, lateral offset (m). 0 when not racing. */
 void td5_roam_race_progress(double *along_m, double *length_m, double *lateral_m);
+/* [F9a] a circuit race is on / its laps; `along_m` above is then the TOTAL distance (laps included)
+ * and `length_m` the race distance (laps x lap). Lap this racer is on, 1-based (0 = not a circuit). */
+int  td5_roam_race_circuit(void);
+int  td5_roam_race_laps(void);
+int  td5_roam_race_lap_now(void);
 
 /* ---- entry points ------------------------------------------------------------ */
 /* Open the setup panel for the current route (opens the route map when it is not up). 1 when the
@@ -135,6 +152,8 @@ void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 #define TD5_RSPRINT_SMOKE     2
 #define TD5_RSPRINT_FULL_AI   3   /* [F7] 5 AI on a 3 km casco sprint, no scripted wrong turns */
 #define TD5_RSPRINT_SMOKE_AI  4   /* [F7] the smoke sprint with 5 AI */
+#define TD5_RCIRCUIT_FULL     5   /* [F9a] 3-lap ~1.5 km circuit incl. a plaza ring, 3 AI */
+#define TD5_RCIRCUIT_SMOKE    6   /* [F9a] the same loop, 2 laps, 3 AI */
 /* Arm before the roam session launches. The test plans + saves its route once the planner graph is
  * ready, loads it back by name, starts the race and drives it (pure pursuit on the polyline), with
  * scripted wrong turns into closed mouths that must be stopped by a barrier. */

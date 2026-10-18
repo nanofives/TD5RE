@@ -28,6 +28,7 @@
 #include "td5_roam_route.h"
 #include "td5_roam_stream.h"
 #include "td5_roam_race.h"
+#include "td5_roam_lap.h"
 #include "td5_roam_ai.h"
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -68,6 +69,8 @@ typedef struct {
     int    braking_bend;                         /* brake on with a bend < 50 km/h within 40 m */
     double bend_d;                               /* metres to that bend                   */
     double stop_s;                               /* where a finished car stops            */
+    TD5_LapTrack lt;                             /* [F9a] circuit: total distance + laps  */
+    int    laps_done;
     /* persona */
     float  skill, aggr, cons, line_bias;
     int    car_index;
@@ -78,7 +81,11 @@ static struct {
     int     on, n;
     RaCar   car[TD5_ROAM_AI_MAX];
     /* the race polyline (copy) */
-    double *rpx, *rpz, *rd; int rn; double length;
+    double *rpx, *rpz, *rd; int rn; double length;       /* length = the race's FINISH distance (a circuit: laps x lap) */
+    /* [F9a] circuit: laps asked for the next start (req), laps of this race, the lap, the unrolled path's lap */
+    int     circ_req; double circ_req_len;
+    int     circ, laps; double lap_len, path_lap_len;
+    TD5_RoamLoop loop;
     /* the driver's path */
     double *px, *pz, *ps, *pv, *nx, *nz, *tx, *tz; int np;
     /* grid */
@@ -201,6 +208,7 @@ static void ra_free_path(void)
     A.rpx = A.rpz = A.rd = NULL;
     A.px = A.pz = A.ps = A.pv = A.nx = A.nz = A.tx = A.tz = NULL;
     A.rn = A.np = 0;
+    td5_roam_loop_free(&A.loop);
 }
 
 /* ============================================================ path ============== */
@@ -244,7 +252,7 @@ static int ra_build_path(void)
     double *jz = (double *)malloc((size_t)(A.rn + 1) * sizeof(double));
     double bx[64], bz[64], fx[64], fz[64];
     double *cx = NULL, *cz = NULL, *cs = NULL;
-    int nj = 0, nb, nf, nc, i, k, dropped = 0;
+    int nj = 0, nb = 0, nf = 0, nc, i, k, m, dropped = 0;
     double ux, uz, l, total;
     if (!jx || !jz) { free(jx); free(jz); return 0; }
     for (i = 0; i < A.rn; i++) {
@@ -290,6 +298,7 @@ static int ra_build_path(void)
             }
         }
     }
+    if (A.circ) goto ctrl_circuit;
     /* 2. behind START: the direction from START to the point >= 8 m on, reversed, along the street */
     k = 1;
     while (k + 1 < nj && hypot(jx[k] - jx[0], jz[k] - jz[0]) < 8.0 * RA_M) k++;
@@ -318,6 +327,53 @@ static int ra_build_path(void)
         const double s_start = cs[nb];
         for (i = 0; i < nc; i++) cs[i] -= s_start;
     }
+    goto ctrl_done;
+ctrl_circuit:
+    /* [F9a] a CIRCUIT: the lap's control points, closed. The path is the lap unrolled A.laps times, with the
+     * lap's TAIL as the run-up behind START (the grid) and the lap's START as the run-out past the line. */
+    {
+        const int laps = A.laps;
+        int kb, kf = 0;
+        double acc, Lp = 0.0;
+        if (nj > 2 && hypot(jx[0] - jx[nj - 1], jz[0] - jz[nj - 1]) < 3.0 * RA_M) nj--;
+        if (nj < 3) { free(jx); free(jz); return 0; }
+        for (i = 0; i < nj; i++) {
+            const int j = (i + 1) % nj;
+            Lp += hypot(jx[j] - jx[i], jz[j] - jz[i]) / RA_M;
+        }
+        acc = hypot(jx[0] - jx[nj - 1], jz[0] - jz[nj - 1]) / RA_M;
+        kb = 1;
+        for (i = nj - 1; i > 1 && acc < RA_BACK_M + 8.0; i--) {
+            acc += hypot(jx[i] - jx[i - 1], jz[i] - jz[i - 1]) / RA_M;
+            kb++;
+        }
+        acc = 0.0;
+        for (i = 1; i < nj && acc < RA_FWD_M + 8.0; i++) {
+            acc += hypot(jx[i] - jx[i - 1], jz[i] - jz[i - 1]) / RA_M;
+            kf++;
+        }
+        nb = kb; nf = kf;
+        nc = kb + laps * nj + 1 + kf;
+        cx = (double *)malloc((size_t)nc * sizeof(double));
+        cz = (double *)malloc((size_t)nc * sizeof(double));
+        cs = (double *)malloc((size_t)nc * sizeof(double));
+        if (!cx || !cz || !cs) { free(jx); free(jz); free(cx); free(cz); free(cs); return 0; }
+        k = 0;
+        for (i = nj - kb; i < nj; i++) { cx[k] = jx[i]; cz[k] = jz[i]; k++; }
+        for (m = 0; m < laps; m++)
+            for (i = 0; i < nj; i++) { cx[k] = jx[i]; cz[k] = jz[i]; k++; }
+        for (i = 0; i <= kf; i++) { cx[k] = jx[i]; cz[k] = jz[i]; k++; }
+        cs[0] = 0.0;
+        for (i = 1; i < nc; i++) cs[i] = cs[i - 1] + hypot(cx[i] - cx[i - 1], cz[i] - cz[i - 1]) / RA_M;
+        {
+            const double s_start = cs[nb];
+            for (i = 0; i < nc; i++) cs[i] -= s_start;
+        }
+        A.path_lap_len = Lp;
+        TD5_LOG_I(LOG_TAG, "ROAM_AI: circuit path: lap %.1f m (race lap %.1f m), %d laps unrolled, %d run-up + %d run-out control points",
+                  Lp, A.lap_len, laps, kb, kf);
+    }
+ctrl_done:
     free(jx); free(jz);
     /* 5. resample every RA_DS metres */
     total = cs[nc - 1] - cs[0];
@@ -467,6 +523,7 @@ void td5_roam_ai_session_init(void)
     ra_free_path();
     for (k = 0; k < TD5_ROAM_AI_MAX; k++) memset(&A.car[k], 0, sizeof A.car[k]);
     A.on = 0; A.n = 0; A.nst = 0; A.player_rank = 0;
+    A.circ = 0; A.circ_req = 0; A.laps = 0;
     A.loaded = 0;
     if (!td5_roam_active()) return;
     {
@@ -496,6 +553,7 @@ static void ra_place(int k)
     c->steer = 0; c->thr_i = 0.0;
     c->rec = 0; c->rec_t = 0; c->slow_t = 0; c->cool_t = 0; c->still_t = 0;
     c->di = 0; c->ri = 0; c->along = 0.0;
+    td5_roam_lap_reset(&c->lt); c->laps_done = 0;          /* [F9a] circuit: re-found on the next progress call */
     {
         double lat;
         c->s = ra_path_proj(A.grid_px[k], A.grid_pz[k], &c->di, &lat);
@@ -556,10 +614,24 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
     memcpy(A.rpz, pz, (size_t)npt * sizeof(double));
     memcpy(A.rd, dist, (size_t)npt * sizeof(double));
     A.rn = npt; A.length = length_m;
+    A.circ = 0; A.laps = 0; A.lap_len = 0.0; A.path_lap_len = 0.0;
+    if (A.circ_req > 0) {
+        /* [F9a] a circuit: the polyline is ONE closed lap, the race is `laps` of it */
+        if (!td5_roam_loop_init(&A.loop, px, pz, dist, npt, RA_M)) {
+            TD5_LOG_W(LOG_TAG, "ROAM_AI: the circuit lap is not a usable closed loop: no opponents");
+            A.circ_req = 0; ra_free_path(); return 0;
+        }
+        A.circ = 1; A.laps = A.circ_req; A.lap_len = A.loop.L;
+        A.length = A.lap_len * (double)A.laps;
+        if (fabs(A.lap_len - A.circ_req_len) > 1.0)
+            TD5_LOG_W(LOG_TAG, "ROAM_AI: circuit lap %.1f m differs from the race's %.1f m", A.lap_len, A.circ_req_len);
+    }
+    A.circ_req = 0;
     A.start_px = start_px; A.start_pz = start_pz; A.start_yaw = start_yaw;
     if (td5_roam_stream_active()) td5_roam_stream_wait_area(start_px, start_pz, -1);
     if (!ra_build_path()) { TD5_LOG_W(LOG_TAG, "ROAM_AI: no driver path (route too short?)"); ra_free_path(); return 0; }
     memset(&A.stats, 0, sizeof A.stats);
+    A.stats.circuit_laps = A.circ ? A.laps : 0;
     placed = ra_build_grid(n_ai);
     if (placed <= 0) { TD5_LOG_W(LOG_TAG, "ROAM_AI: no grid spot behind START fits a car: no opponents"); ra_free_path(); return 0; }
     A.n = placed;
@@ -866,7 +938,13 @@ static void ra_rank(void)
         A.st[n].along_m = c->along; A.st[n].car_index = c->car_index;
         n++;
     }
-    /* insertion sort: finished first by time, then by distance along */
+    if (A.circ) {
+        for (i = 0; i < n; i++) {
+            int l = A.st[i].finished ? A.laps : (int)floor((A.st[i].along_m > 0.0 ? A.st[i].along_m : 0.0) / A.lap_len);
+            A.st[i].laps_done = l > A.laps ? A.laps : l;
+        }
+    }
+    /* insertion sort: finished first by time, then by distance along (a circuit: total, i.e. laps first) */
     for (i = 1; i < n; i++) {
         t = A.st[i];
         j = i - 1;
@@ -906,8 +984,23 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
         TD5_Actor *a = td5_game_get_actor(c->slot);
         double x, z, lat_m, v;
         if (!c->live || !a || !ra_place_of(a, &x, &z)) continue;
-        c->along = ra_race_along(c, x, z, &lat_m);
+        if (A.circ) {
+            /* [F9a] the TOTAL distance of td5_roam_lap.h: continuous over the line, never double counted */
+            td5_roam_lap_update(&A.loop, &c->lt, x, z, RA_LOST_M);
+            c->along = c->lt.total;
+            lat_m = c->lt.lat_m;
+        } else {
+            c->along = ra_race_along(c, x, z, &lat_m);
+        }
         c->lat_race = lat_m;
+        if (A.circ && c->lt.init) {
+            const int now = td5_roam_lap_count(&A.loop, &c->lt, 0.0);
+            if (now > c->laps_done + 1) {
+                A.stats.lap_jumps++;
+                TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d lap count jumped %d -> %d (total %.1f m)", c->slot, c->laps_done, now, c->lt.total);
+            }
+            if (now > c->laps_done) c->laps_done = now;
+        }
         if (racing && !c->finished && lat_m > A.stats.max_lateral_m) A.stats.max_lateral_m = lat_m;   /* not the run-out */
         v = sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) /
             256.0 * RA_HZ / RA_M;
@@ -923,14 +1016,14 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
             }
             if (c->still_t > c->still_max) c->still_max = c->still_t;
             if (c->still_t > A.stats.still_max_ticks) A.stats.still_max_ticks = c->still_t;
-            if (c->along >= A.length - RA_FINISH_EPS && lat_m < RA_CP_RADIUS) {
+            if ((A.circ ? c->lt.max_total : c->along) >= A.length - RA_FINISH_EPS && lat_m < RA_CP_RADIUS) {
                 c->finished = 1;
                 c->finish_ticks = race_ticks;
                 c->order = A.nfin++;
                 /* stop 30..70 m past the line, the first finisher farthest. A finished opponent is no
                  * longer racing: the route barriers let it through (td5_roam_ai_slot_finished), the
                  * closing panel past FINISH being ~40 m on, closer than a car stops from 100 km/h */
-                c->stop_s = A.length + 30.0 + 10.0 * (double)(A.n - 1 - c->order);
+                c->stop_s = (A.circ ? A.path_lap_len * (double)A.laps : A.length) + 30.0 + 10.0 * (double)(A.n - 1 - c->order);
                 A.stats.finished++;
                 TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d FINISH #%d at %ld ticks (%.2f s), recoveries %ld, longest still %.1f s",
                           c->slot, c->order + 1, race_ticks, race_ticks / RA_HZ, c->recoveries, c->still_max / RA_HZ);
@@ -979,6 +1072,14 @@ int td5_roam_ai_car_info(int k, int *slot, long *finish_ticks, long *still_max, 
     if (recoveries) *recoveries = A.car[k].recoveries;
     return 1;
 }
+
+void td5_roam_ai_set_circuit(int laps, double lap_len_m)
+{
+    A.circ_req = laps > 0 ? laps : 0;
+    A.circ_req_len = lap_len_m;
+}
+
+int td5_roam_ai_car_laps(int k) { return (A.circ && k >= 0 && k < A.n) ? A.car[k].laps_done : 0; }
 
 void td5_roam_ai_force_player_spot(int spot) { A.grid_force = spot < 0 ? 0 : spot + 1; }
 
