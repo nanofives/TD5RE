@@ -1,5 +1,13 @@
 # F11 removal map: what the strip geo BUILD leaves behind (F11a, 2026-10-18)
 
+> **F11b status (2026-10-18):** the strip race stays for LOCAL MULTIPLAYER, so
+> sections 1 and 2 stay (the MP race runs them and its OPTIONS panel reaches
+> every knob's OFF arm). Closed: D1 + D2 (roam writes its own host files in
+> `re/assets/geo/<slug>/roam/HOST`, sky from the pool, no GENSTAMP read), D3
+> (a place registers from `roam/ROAMGRID.JSON`), D4 (no ROUTE_RAW fallback).
+> Open: D5, D6 (kept: the strip still commits), D8 (.ps1 strip arms need
+> `TD5RE_GEO_STRIP_BUILD=1`). What was deleted: F11B_DELETED.md.
+
 For F11b (the deletion). At roam-F11a the strip BUILD is only hidden behind
 `TD5RE_GEO_STRIP_BUILD=1` (`td5_roam_strip_build_enabled`, td5_roam_handoff.c);
 nothing is deleted. Line numbers are at f5940f1c + F11a and move: re-grep the
