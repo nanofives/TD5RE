@@ -90,14 +90,21 @@ static const double k_circ_smoke_wp[][2] = {
     { -34.908899, -57.957775 },
 };
 static const double k_fig8_wp[][2] = {
-    { -34.912231, -57.960060 },   /* START  Calle 10, 70 m after the crossing  */
-    { -34.913121, -57.960027 },
-    { -34.913164, -57.961109 },
+    { -34.912231, -57.960060 },   /* START  Calle 10, 70 m after the crossing */
+    { -34.912721, -57.959587 },
+    { -34.913288, -57.960211 },
+    { -34.913345, -57.960866 },
+    { -34.912832, -57.961556 },
     { -34.912274, -57.961140 },
-    { -34.910816, -57.959712 },
-    { -34.910504, -57.961241 },
-    { -34.911243, -57.961390 },
-    { -34.911665, -57.960822 },   /* FINISH Calle 10, just before the crossing: the lap closes through it */
+    { -34.911941, -57.960773 },
+    { -34.911211, -57.959965 },
+    { -34.910756, -57.959793 },
+    { -34.910333, -57.960361 },
+    { -34.910204, -57.960911 },
+    { -34.910671, -57.961424 },
+    { -34.911122, -57.961553 },
+    { -34.911484, -57.961065 },
+    { -34.911635, -57.960862 },   /* FINISH Calle 10, just before the crossing: the lap closes through it */
 };
 #define SD_IS_CIRC(m) ((m) == TD5_RCIRCUIT_FULL || (m) == TD5_RCIRCUIT_SMOKE)
 #define SD_IS_AI(m) ((m) == TD5_RSPRINT_FULL_AI || (m) == TD5_RSPRINT_SMOKE_AI || SD_IS_CIRC(m))
@@ -500,8 +507,14 @@ static int sd_selfcross(const TD5_RouteResult *r)
 {
     int i, j, n = 0;
     for (i = 0; i + 1 < r->npt; i++)
-        for (j = i + 3; j + 1 < r->npt; j++)
+        for (j = i + 3; j + 1 < r->npt; j++) {
+            /* the closing seam: the last segments meet the first ones, that is the lap, not a crossing */
+            if (i <= 2 && j + 3 >= r->npt) continue;
             if (sd_seg_cross(r->px[i], r->pz[i], r->px[i + 1], r->pz[i + 1], r->px[j], r->pz[j], r->px[j + 1], r->pz[j + 1])) n++;
+            /* a junction crossed twice: the planner threads both passes through the SAME centre point, so the two
+             * polylines touch at a shared vertex instead of crossing in a segment interior */
+            else if (hypot(r->px[i + 1] - r->px[j], r->pz[i + 1] - r->pz[j]) < 1.0 * SD_M && j > i + 3) n++;
+        }
     return n;
 }
 
