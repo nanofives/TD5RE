@@ -39,6 +39,7 @@
 #include "td5_roam_race.h"
 #include "td5_roam_traffic.h"   /* td5_roam_traffic_pool (the slot layout), td5_roam_signal_group */
 #include "td5_roam_ai.h"        /* td5_roam_ai_count: the racer field when the session re-sets it */
+#include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -98,11 +99,13 @@ static struct {
     double  vmax, v_patrol, limit_kmh, notice_m, notice_red_m, see_m, lose_s, escape_m, bust_s;
     double  r_spawn_min, r_spawn_max, r_despawn, r_despawn_pursuit;
     double  wb, a_lat, a_brake;
-    int     fine_base, log_every;
+    int     fine_base, log_every, offpath_dumped;
     int     force_dens, force_vmax;              /* DEV overrides (+1 encoded, 0 = knob) */
     /* the race corridor */
     int     race_on;                             /* a race with COPS on runs (the corridor applies) */
     uint8_t *mask; int mask_n; uint32_t mask_hash;
+    uint8_t *bad;                                /* graph edges a cop leg must not use (no road under the line), session */
+    uint8_t *use; int use_n, use_dirty, use_race; /* the mask a leg is planned with: corridor (race) AND not bad */
     /* pursuit */
     int     pursuit, heat, offences, cause;
     long    p_t0, lost_t, spawn_cd, grace_until, last_offence;
@@ -295,7 +298,7 @@ void td5_roam_cops_session_init(void)
 {
     int i;
     const int keep_loaded = C.loaded, keep_model = C.model, keep_fd = C.force_dens, keep_fv = C.force_vmax;
-    free(C.mask);
+    free(C.mask); free(C.bad); free(C.use);
     memset(&C, 0, sizeof C);
     C.force_dens = keep_fd; C.force_vmax = keep_fv;
     if (!td5_roam_active()) return;
@@ -328,6 +331,24 @@ void td5_roam_cops_session_end(void)
     for (i = 0; i < C.pool; i++) td5_ai_roam_mark_cop(C.cop[i].slot, 0);
     C.on = 0;
     free(C.mask); C.mask = NULL; C.mask_n = 0;
+    free(C.bad); C.bad = NULL; free(C.use); C.use = NULL; C.use_n = 0;
+}
+
+/* the leg mask: the race corridor (a race with COPS on) AND not a bad edge; NULL = every edge */
+static const uint8_t *rc_use_mask(void)
+{
+    const int n = td5_roam_route_graph_nedge();
+    int e;
+    if (n <= 0) return NULL;
+    if (!C.bad) { C.bad = (uint8_t *)calloc((size_t)n, 1); C.use_dirty = 1; }
+    if (!C.use || C.use_n != n) { free(C.use); C.use = (uint8_t *)malloc((size_t)n); C.use_n = n; C.use_dirty = 1; }
+    if (!C.bad || !C.use) return C.race_on ? C.mask : NULL;
+    if (C.use_race != C.race_on) { C.use_race = C.race_on; C.use_dirty = 1; }
+    if (C.use_dirty) {
+        for (e = 0; e < n; e++) C.use[e] = (uint8_t)(!C.bad[e] && (!C.race_on || (C.mask && e < C.mask_n && C.mask[e])));
+        C.use_dirty = 0;
+    }
+    return C.use;
 }
 
 int td5_roam_cops_field_total(void)
@@ -380,6 +401,7 @@ static void rc_corridor_update(int in_race)
     r = td5_roam_route_result();
     C.race_on = 1;
     if (C.mask && r && r->hash == C.mask_hash) return;
+    C.use_dirty = 1;
     n = td5_roam_route_graph_nedge();
     free(C.mask);
     C.mask = n > 0 ? (uint8_t *)calloc((size_t)n, 1) : NULL;
@@ -562,7 +584,7 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
         const int close_ow = c->state == RC_PURSUIT && hypot(gx - x, gz - z) < 150.0 * RC_M;
         if (c->turning) { sx = x; sz = z; hx = 0.0; hz = 0.0; }
         if (!rc_inside(sx, sz)) { sx = x; sz = z; }
-        ok = td5_roam_route_plan_path(sx, sz, hx, hz, gx, gz, 60.0, C.race_on ? C.mask : NULL, close_ow, &qx, &qz, &nq, &len);
+        ok = td5_roam_route_plan_path(sx, sz, hx, hz, gx, gz, 60.0, rc_use_mask(), close_ow, &qx, &qz, &nq, &len);
 #ifndef TD5RE_RELEASE
         if (ok && C.log_every) {
             const double straight = hypot(gx - sx, gz - sz) / RC_M;
@@ -590,6 +612,38 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
         } else ok = 0;
     }
     free(qx); free(qz);
+    if (ok) {
+        /* the first 80 m of the leg on the road (the sliver fix done): a graph line with no road under it (seen at the
+         * casco's south-west edge, F10 smoke run 12: 60 m of an edge over tile area with no ribbon) refuses the leg
+         * and bars that edge for the session's cop legs, so the next plan goes round it */
+        const TD5_RoamResident *rs = td5_roam_resident();
+        int32_t ox, oz;
+        int i, lim = (int)(80.0 / RC_DS);
+        td5_roam_world_origin(&ox, &oz);
+        if (lim > c->np) lim = c->np;
+        for (i = 1; rs && i < lim; i++) {
+            TD5_RoamHit h;
+            const int fnd = td5_roam_locate(rs, (int32_t)floor((c->px[i] - ox) * 256.0 + 0.5), (int32_t)floor((c->pz[i] - oz) * 256.0 + 0.5),
+                                            0, 0, ROAM_PRIM_NONE, &h) && h.prim != ROAM_PRIM_NONE;
+            if (fnd && (h.inside || h.push_dist <= 1.5 * RC_M)) continue;
+            if (!fnd && td5_roam_stream_point_missing((int32_t)floor((c->px[i] - ox) * 256.0 + 0.5),
+                                                      (int32_t)floor((c->pz[i] - oz) * 256.0 + 0.5))) break;   /* not streamed in yet */
+            {
+                int be;
+                double along, dm;
+                if (td5_roam_route_graph_snap_edge(c->px[i], c->pz[i], 15.0, &be, &along, &dm) && C.bad && be >= 0 &&
+                    be < td5_roam_route_graph_nedge() && !C.bad[be]) {
+                    C.bad[be] = 1; C.use_dirty = 1; C.st.bad_edges++;
+                    TD5_LOG_I(LOG_TAG, "ROAM_COPS: slot %d leg leaves the road %.0f m ahead at place (%.0f,%.0f) (%s): edge %d barred for cop legs",
+                              c->slot, i * RC_DS, c->px[i], c->pz[i], fnd ? "off the surface" : "no road", be);
+                }
+            }
+            c->np = 0;
+            ok = 0;
+            C.st.plan_offroad++;
+            break;
+        }
+    }
     if (!ok) { C.st.plan_fails++; c->plan_fail++; return 0; }
     c->plan_fail = 0;
     c->s = 0.0; c->pi = 0;
@@ -1003,7 +1057,7 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
             if (vc < vt) vt = vc;
         }
         if (vt < 0.0) vt = 0.0;
-        direct = c->sees && c->d_player < 30.0;
+        direct = c->sees && (c->d_player < 30.0 || (c->np < 2 && c->d_player < 80.0));   /* no leg: straight at it while in sight */
     }
     c->v_t = vt;
 
@@ -1133,6 +1187,33 @@ status:
             if (c->off_t == 0 && C.st.off_ticks < 200) {
                 double qx = x, qz = z;
                 if (c->np >= 2) rc_path_point(c, c->s, 0.0, &qx, &qz, NULL, NULL);
+#ifndef TD5RE_RELEASE
+                if (C.log_every && !C.offpath_dumped && c->np >= 2 && !rc_inside(qx, qz)) {
+                    /* DEV: the path that crosses non-road, every point with the locator's answer */
+                    char path[512];
+                    const char *dir = td5_plat_log_dir();
+                    FILE *f;
+                    int i;
+                    C.offpath_dumped = 1;
+                    snprintf(path, sizeof path, "%sroam_cops_offpath.csv", dir ? dir : "");
+                    f = fopen(path, "w");
+                    if (f) {
+                        const TD5_RoamResident *rs = td5_roam_resident();
+                        int32_t ox, oz;
+                        td5_roam_world_origin(&ox, &oz);
+                        fprintf(f, "i,x,z,v,found,inside,patch,edge,push_dist_m\n");
+                        for (i = 0; i < c->np; i++) {
+                            TD5_RoamHit h;
+                            int fnd = rs && td5_roam_locate(rs, (int32_t)floor((c->px[i] - ox) * 256.0 + 0.5), (int32_t)floor((c->pz[i] - oz) * 256.0 + 0.5),
+                                                            0, 0, ROAM_PRIM_NONE, &h) && h.prim != ROAM_PRIM_NONE;
+                            fprintf(f, "%d,%.0f,%.0f,%.1f,%d,%d,%d,%016llx,%.2f\n", i, c->px[i], c->pz[i], c->pv[i] * 3.6, fnd, fnd ? h.inside : 0,
+                                    fnd ? h.is_patch : 0, fnd ? (unsigned long long)h.edge_key : 0ull, fnd ? h.push_dist / RC_M : 0.0);
+                        }
+                        fclose(f);
+                        TD5_LOG_I(LOG_TAG, "ROAM_COPS: DEV off-road path of slot %d -> %s", c->slot, path);
+                    }
+                }
+#endif
                 TD5_LOG_W(LOG_TAG, "ROAM_COPS_OFF slot %d at place (%.0f,%.0f) %s v=%.1f km/h vt=%.1f lat=%.2f m s=%.1f/%.1f path point "
                           "(%.0f,%.0f) %s, steer %d, contact %ld ticks ago | top surface here %s, car y %d ground %d", c->slot, x, z,
                           c->state == RC_PURSUIT ? "pursuit" : "patrol", v * 3.6, c->v_t * 3.6, c->lat, c->s, rc_path_len(c), qx, qz,
