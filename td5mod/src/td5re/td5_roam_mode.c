@@ -672,6 +672,13 @@ void td5_roam_dev_cli(const char *cmd)
     sp.car_index = g_td5.ini.default_car;
     TD5_LOG_W(LOG_TAG, "roam: dev CLI --Roam=1 spawn=%.6f,%.6f -> place (%d,%d) (dev build only)",
               lat, lon, (int)sp.spawn_px, (int)sp.spawn_pz);
+    {   /* [F9b] what the FREE ROAM button would say about this point (the geo selector's gate) */
+        char gslug[64];
+        int32_t gx, gz;
+        const int gok = td5_roam_place_for_latlon(lat, lon, gslug, sizeof gslug, &gx, &gz);
+        TD5_LOG_I(LOG_TAG, "roam: FREE ROAM gate for %.6f,%.6f: %s%s", lat, lon,
+                  gok ? "accepted, place " : "REFUSED (no street of a roamable place within 300 m)", gok ? gslug : "");
+    }
     td5_roam_begin(&sp);
 
     /* straight into the race with the default car, like AutoRace */
