@@ -19,6 +19,7 @@
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_roam_physics.h"   /* GEO FREE ROAM: the roam contact provider (F2-B) */
+#include "td5_roam_mode.h"      /* [GEO FREE ROAM F8] td5_roam_active: traffic pose on the height-aware ground */
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
@@ -2099,8 +2100,12 @@ void integrate_traffic_pose(TD5_Actor *actor)
         int span  = (int)actor->track_span_raw;
         int lane  = (int)actor->track_sub_lane_index;
         int16_t surface_normal[3] = {0, 1, 0};  /* default: flat up */
-        int32_t ground_y = td5_track_compute_contact_height_with_normal(
-            span, lane, actor->world_pos.x, actor->world_pos.z, surface_normal);
+        /* [GEO FREE ROAM F8] roam traffic: the ground UNDER the car (height-aware, the road a car drives
+         * under a bridge on), not the XZ-only highest deck the strip-less contact query returns */
+        int32_t ground_y = td5_roam_active()
+            ? td5_roam_ground(actor->world_pos.x, actor->world_pos.z, actor->world_pos.y, 1, surface_normal)
+            : td5_track_compute_contact_height_with_normal(
+                  span, lane, actor->world_pos.x, actor->world_pos.z, surface_normal);
 
         /* Car height offset: signed int16 at car_definition + 0x86, shifted left 8.
          * Original (Y-DOWN): `ADD [world_pos_y], ECX` with ECX = MOVSX cdef[0x86] << 8.

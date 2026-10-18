@@ -32,6 +32,7 @@
 #include "td5_roam_junction.h"   /* dev casco test (corner harness) */
 #include "td5_damage.h"          /* dev corner harness: repair between runs */
 #include "td5_geo_roads.h"      /* TD5_GEO_RC_* (dev corner matrix) */
+#include "td5_roam_traffic.h"     /* [F8 DEV] wheel-under log: the nearest traffic car */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -734,7 +735,21 @@ int td5_roam_wheel_contact(TD5_Actor *a, int i, int32_t x, int32_t z, int32_t y,
         const int32_t gap = y - h.ground_y;
         const double sp = sqrt((double)a->linear_velocity_x * a->linear_velocity_x +
                                (double)a->linear_velocity_z * a->linear_velocity_z) / 256.0;
-        if (s_rp.st.gap_n == 0 || gap < s_rp.st.gap_min) s_rp.st.gap_min = gap;
+        if (s_rp.st.gap_n == 0 || gap < s_rp.st.gap_min) {
+#ifndef TD5RE_RELEASE
+            if (gap < -50 * 256 * 43 / 10) {   /* [F8 DEV] a new low under 50 cm: say where (traffic shoves?) */
+                double td = 0.0;
+                int32_t ty = 0;
+                const int ts = td5_roam_traffic_nearest(a->world_pos.x, a->world_pos.z, &td, &ty);
+                TD5_LOG_W(LOG_TAG, "ROAM_WHEEL_UNDER wheel %d %.1f cm under at world (%d,%d) tick %ld prim %08x patch %d | car y %d "
+                          "vy %d | nearest traffic slot %d %.1f m, its y - car y %.2f m",
+                          i, -(double)gap / 256.0 / 4.30, (int)FP_TRUNC(x), (int)FP_TRUNC(z), (long)g_td5.simulation_tick_counter,
+                          (unsigned)h.prim, (int)h.is_patch, (int)FP_TRUNC(a->world_pos.y), (int)a->linear_velocity_y, ts, td,
+                          ts >= 0 ? (double)(ty - a->world_pos.y) / 256.0 / 430.0 : 0.0);
+            }
+#endif
+            s_rp.st.gap_min = gap;
+        }
         s_rp.st.gap_n++;
         if (sp < 0.5 * 430.0 / 30.0 / 3.6) {      /* < 0.5 km/h: at rest */
             if (s_rp.st.rest_n == 0 || gap > s_rp.st.rest_max) s_rp.st.rest_max = gap;

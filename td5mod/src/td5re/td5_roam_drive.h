@@ -46,6 +46,8 @@ void     td5_roam_drive_arm(int mode);      /* before the roam race launches (re
 void     td5_roam_drive_disarm(void);
 /* [F8] after arm: the TOUR (a square of side_m round the spawn for secs, then rest) without the env knobs */
 void     td5_roam_drive_set_tour(double side_m, int secs);
+/* [F8] after arm: ambient traffic shares the road (rest / stuck / off-surface / rescues reported, not judged) */
+void     td5_roam_drive_set_traffic(int on);
 int      td5_roam_drive_mode(void);
 /* slot 0's control bits for this sim tick (0 when not armed / not in roam / done) */
 uint32_t td5_roam_drive_bits(struct TD5_Actor *a);

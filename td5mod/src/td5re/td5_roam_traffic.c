@@ -80,6 +80,8 @@ typedef struct {
     /* the junction ahead */
     int      sig_n, sig_g;                       /* signalised: group (0/1), -1 = no signal */
     int      node_deg, priority;                 /* arms at the node; 1 = my street outranks the rest */
+    int      sig2_g; double sig2_extra;          /* the signal past a short next edge, and how much further */
+    int32_t  probe_y;                            /* 24.8: the car's level for height-aware surface checks */
     int      stop_req;                           /* decided to stop for this phase         */
     int      committed;                          /* passed the decision point              */
     int      yield_node; long wait_since; int waiting;
@@ -113,9 +115,13 @@ static struct {
     long    st_t0;                               /* tick of the last stats reset      */
     int     bar_valid;
     int     shots, shot_done[3]; long shot_wait; char shot_name[24];   /* DEV shots */
-    int     trace_slot; FILE *trc;                                  /* DEV: TD5RE_ROAM_TRAFFIC_TRACE=<slot> */
+    long    launch_log_t[6];
+    int     ptrace;
+    int     trace_slot; FILE *trc;
+    int     dbg_edge; long long dbg_key;                                  /* DEV: TD5RE_ROAM_TRAFFIC_TRACE=<slot> */
     /* DEV soak measures: private bytes after the warm-up / now / max, the tick's own cost */
     double  priv0_mb, priv_mb, priv_max_mb; int priv_n;
+    float   priv_s[1024];                       /* one sample a second */
     double  tick_us_sum, tick_us_max; long tick_n;
 } T;
 
@@ -151,6 +157,9 @@ static void rt_read_knobs(void)
 #ifndef TD5RE_RELEASE
     T.shots       = td5_env_int("TD5RE_ROAM_TRAFFIC_SHOTS", 0, 0, 1);
     T.trace_slot  = td5_env_int("TD5RE_ROAM_TRAFFIC_TRACE", -1, -1, 31);
+    T.ptrace      = td5_env_int("TD5RE_ROAM_TRAFFIC_PTRACE", 0, 0, 1);
+    T.dbg_edge    = td5_env_int("TD5RE_ROAM_TRAFFIC_DBG_EDGE", -1, -1, 1 << 30);
+    T.dbg_key     = -1;
     {   /* DEV: force the race level (the sprint test harness has no setup panel) */
         const int fl = td5_env_int("TD5RE_ROAM_TRAFFIC_RACE", -1, -1, 2);
         if (fl >= 0 && !T.force_level) T.force_level = fl + 1;
@@ -333,6 +342,37 @@ static int rt_next_lane(const TD5_RouteGEdge *E, const TD5_RouteGEdge *F, int k,
     return nk;
 }
 
+/* The signal group an approach along (E, d) obeys at its end node, -1 when that node has no signal. */
+static int rt_sig_group(const TD5_RouteGEdge *E, int d)
+{
+    TD5_RouteGNode N;
+    int16_t bear[16];
+    uint64_t ek[16];
+    double ex, ez, etx, etz;
+    int na, a, arm = -1, best = 0x7FFF, ob;
+    if (!td5_roam_route_graph_node_view(rt_end_node(E, d), &N) || N.ninc < 2) return -1;
+    na = td5_roam_route_graph_signal(N.key, bear, ek, 16);
+    if (na <= 0) return -1;
+    rt_edge_pt(E, d, E->plen, 0.0, &ex, &ez, &etx, &etz);
+    ob = (int)floor(atan2(-etz, -etx) * (4096.0 / (2.0 * RT_PI)) + 0.5) & 0xFFF;   /* outward, atan2(dz,dx) */
+    for (a = 0; a < na; a++) if (ek[a] == E->key) { arm = a; break; }
+    if (arm < 0)
+        for (a = 0; a < na; a++) {
+            const int dd = abs(rt_ang12((int)bear[a] - ob));
+            if (dd < best) { best = dd; arm = a; }
+        }
+    return td5_roam_signal_group(bear, na, arm < 0 ? 0 : arm);
+}
+
+/* the lane of the CURRENT edge a car moves to before a turn (when the edge is long enough) */
+static int rt_turn_lane(const TD5_RouteGEdge *E, int k, int turn)
+{
+    const int n = rt_dir_lanes(E);
+    if (turn > 0) return n - 1;
+    if (turn < 0) return 0;
+    return k < n ? k : n - 1;
+}
+
 /* The connector from the end of lane `off0` of (E, d) to lane `nk` of (F, nd): a cubic, its length and
  * speed. Returns the samples (of 9, body edges +-0.8 m included) found off the drivable surface. */
 static int rt_build_conn(RtCar *c, const TD5_RouteGEdge *E, int d, double off0, const TD5_RouteGEdge *F, int nd, int nk,
@@ -363,17 +403,24 @@ static int rt_build_conn(RtCar *c, const TD5_RouteGEdge *E, int d, double off0, 
     } else c->v_conn = v_class;
     if (c->clen > 1.0 * RT_M)
     {
-        /* one sample every ~2.5 m (at least 9) */
-        int ns = (int)(c->clen / (2.5 * RT_M));
+        /* one sample every 0.5 m (a 1 m median gap with no OSM connector must not be crossed) */
+        int ns = (int)(c->clen / (0.5 * RT_M));
         if (ns < 9) ns = 9;
-        if (ns > 40) ns = 40;
+        if (ns > 160) ns = 160;
         for (j = 1; j <= ns; j++) {
             double x, z, tx, tz;
             int in0 = 0, in1 = 0, in2 = 0;
             rt_bez((const double (*)[2])c->bz, (double)j / (double)(ns + 1), &x, &z, &tx, &tz);
-            if (!rt_locate(x, z, 0, 0, &in0, NULL) || !in0) { off++; continue; }
-            rt_locate(x + tz * 0.8 * RT_M, z - tx * 0.8 * RT_M, 0, 0, &in1, NULL);
-            rt_locate(x - tz * 0.8 * RT_M, z + tx * 0.8 * RT_M, 0, 0, &in2, NULL);
+            /* height-aware at the car's level: a junction under a bridge is judged on ITS patch, not the deck's */
+            const int ok0 = rt_locate(x, z, c->probe_y, 1, &in0, NULL);
+            rt_locate(x + tz * 1.15 * RT_M, z - tx * 1.15 * RT_M, c->probe_y, 1, &in1, NULL);
+            rt_locate(x - tz * 1.15 * RT_M, z + tx * 1.15 * RT_M, c->probe_y, 1, &in2, NULL);
+#ifndef TD5RE_RELEASE
+            if (T.dbg_edge >= 0 && E->key == (uint64_t)T.dbg_key)
+                TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC_CONN dbg edge %llx -> %llx sample %d/%d at (%.0f,%.0f) ok %d in %d/%d/%d probe_y %d",
+                          (unsigned long long)E->key, (unsigned long long)F->key, j, ns, x, z, ok0, in0, in1, in2, (int)c->probe_y);
+#endif
+            if (!ok0 || !in0) { off++; continue; }
             if (!in1 || !in2) off++;
         }
     }
@@ -390,7 +437,7 @@ static void rt_plan_next(RtCar *c)
     double ex, ez, etx, etz, w[16], wsum = 0.0, r;
     int cand_e[16], cand_d[16], cand_turn[16], cand_off[16], nc = 0, i, pick = -1, min_off = 1 << 30;
     c->ne = -1; c->nd = 0; c->nk = 0; c->turn = 0; c->clen = 0.0; c->v_conn = c->v_class;
-    c->sig_n = -1; c->sig_g = -1; c->stop_req = 0; c->committed = 0; c->yield_node = -1; c->waiting = 0;
+    c->sig_n = -1; c->sig_g = -1; c->sig2_g = -1; c->stop_req = 0; c->committed = 0; c->yield_node = -1; c->waiting = 0;
     if (!rt_edge(c->e, &E)) return;
     c->node = rt_end_node(&E, c->d);
     if (!td5_roam_route_graph_node_view(c->node, &N)) return;
@@ -421,8 +468,12 @@ static void rt_plan_next(RtCar *c)
         w[nc] = cand_turn[nc] == 0 ? 4.0 : (cand_turn[nc] > 0 ? 2.0 : 1.5);
         if (fabs(ang) > 2.4) w[nc] = 0.25;       /* a hairpin: rare */
         if (F.klass <= 2) w[nc] *= 0.35;         /* service / living streets: rarely */
-        cand_off[nc] = rt_build_conn(c, &E, c->d, c->off_t, &F, d2, rt_next_lane(&E, &F, c->k, cand_turn[nc]),
-                                     rt_class_speed(F.klass));
+        {
+            const int lc = E.plen - c->s > 30.0 * RT_M;     /* room to change lanes first */
+            const int kt = lc ? rt_turn_lane(&E, c->k, cand_turn[nc]) : c->k;
+            cand_off[nc] = rt_build_conn(c, &E, c->d, lc ? rt_lane_off(&E, kt) : c->off_t, &F, d2,
+                                         rt_next_lane(&E, &F, kt, cand_turn[nc]), rt_class_speed(F.klass));
+        }
         if (cand_off[nc] < min_off) min_off = cand_off[nc];
         nc++;
     }
@@ -438,25 +489,19 @@ static void rt_plan_next(RtCar *c)
     if (pick < 0) for (i = nc - 1; i >= 0; i--) if (cand_off[i] == min_off) { pick = i; break; }
     c->ne = cand_e[pick]; c->nd = cand_d[pick]; c->turn = cand_turn[pick];
     rt_edge(c->ne, &F);
+    if (E.plen - c->s > 30.0 * RT_M) {                /* move to the turn's lane before the junction */
+        const int kt = rt_turn_lane(&E, c->k, c->turn);
+        if (kt != c->k) { c->k = kt; c->off_t = rt_lane_off(&E, kt); T.st.lane_changes++; }
+    }
     c->nk = rt_next_lane(&E, &F, c->k, c->turn);
     rt_build_conn(c, &E, c->d, c->off_t, &F, c->nd, c->nk, c->v_class);
-    /* the junction ahead: signal group of my arm */
-    {
-        int16_t bear[16];
-        uint64_t ek[16];
-        const int na = td5_roam_route_graph_signal(N.key, bear, ek, 16);
-        if (na > 0 && N.ninc >= 2) {
-            int a, arm = -1, best = 0x7FFF;
-            const int ob = (int)floor(atan2(-etz, -etx) * (4096.0 / (2.0 * RT_PI)) + 0.5) & 0xFFF;   /* outward, atan2(dz,dx) */
-            for (a = 0; a < na; a++) if (ek[a] == E.key) { arm = a; break; }
-            if (arm < 0)
-                for (a = 0; a < na; a++) {
-                    const int dd = abs(rt_ang12((int)bear[a] - ob));
-                    if (dd < best) { best = dd; arm = a; }
-                }
-            c->sig_n = c->node;
-            c->sig_g = td5_roam_signal_group(bear, na, arm < 0 ? 0 : arm);
-        }
+    /* the junction ahead: signal group of my arm; and, past a short next edge, the signal at ITS end */
+    c->sig_n = rt_sig_group(&E, c->d) >= 0 ? c->node : -1;
+    c->sig_g = rt_sig_group(&E, c->d);
+    c->sig2_g = -1;
+    if (F.plen < 45.0 * RT_M) {
+        c->sig2_g = rt_sig_group(&F, c->nd);
+        c->sig2_extra = c->clen + F.plen;
     }
 }
 
@@ -672,7 +717,28 @@ static void rt_place_actor(RtCar *c, TD5_Actor *a, double px, double pz, int yaw
     a->euler_accum.yaw = FP_SCALE(yaw12 & 0xFFF);
     td5_roam_physics_forget_slot(c->slot);
     a->airborne_frame_counter = 0;
-    td5_physics_reset_actor_state(a);
+    /* The racer reset (td5_physics_reset_actor_state) runs the RACER pose integrator, whose state leaked
+     * into the next racer's tick: a one-tick 1.7 m drop of the player's wheels on the tick a traffic car
+     * spawned (F8 soak, ROAM_WHEEL_UNDER). Traffic needs only its dynamics zeroed: the traffic pose
+     * (integrate_traffic_pose) sets y, angles and the matrix from the ground on the next physics tick. */
+    a->surface_contact_flags = 0;
+    a->vehicle_mode = 0;
+    a->angular_velocity_roll = a->angular_velocity_yaw = a->angular_velocity_pitch = 0;
+    a->linear_velocity_x = a->linear_velocity_y = a->linear_velocity_z = 0;
+    a->frame_counter = 0;
+    a->wheel_contact_bitmask = 0;
+    {
+        int q, in = 0;
+        int32_t gy = 0;
+        for (q = 0; q < 4; q++) { a->wheel_suspension_pos[q] = 0; a->wheel_spring_dv[q] = 0; a->wheel_load_accum[q] = 0; }
+        if (rt_locate(px, pz, 0, 0, &in, &gy)) a->world_pos.y = gy;
+    }
+    a->display_angles.roll = 0; a->euler_accum.roll = 0;
+    a->display_angles.pitch = 0; a->euler_accum.pitch = 0;
+    a->display_angles.yaw = (int16_t)FP_TRUNC(a->euler_accum.yaw);
+    a->render_pos.x = (float)a->world_pos.x * (1.0f / 256.0f);
+    a->render_pos.y = (float)a->world_pos.y * (1.0f / 256.0f);
+    a->render_pos.z = (float)a->world_pos.z * (1.0f / 256.0f);
     a->track_span_raw = -1;
     a->track_span_normalized = -1;
     a->track_span_accumulated = -1;
@@ -680,7 +746,6 @@ static void rt_place_actor(RtCar *c, TD5_Actor *a, double px, double pz, int yaw
     a->track_sub_lane_index = 0;
     a->vehicle_mode = 0;
     td5_roam_set_slot_edge(c->slot, 0);
-    td5_roam_physics_spawn_snap(a);
     a->linear_velocity_x = (int32_t)(sin(y) * vu);
     a->linear_velocity_z = (int32_t)(cos(y) * vu);
     a->steering_command = 0;
@@ -717,6 +782,17 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
         if (hypot(x - anx[i], z - anz[i]) < T.r_spawn_min * 0.8 * RT_M) return 0;
     ok = rt_locate(x, z, 0, 0, &inside, NULL);
     if (!ok || !inside) return 0;
+    {   /* not under (or on) a deck: one road surface at this point, so the spawn height is the right one */
+        TD5_RoamCand cand[4];
+        int32_t ox, oz;
+        const TD5_RoamResident *rs = td5_roam_resident();
+        td5_roam_world_origin(&ox, &oz);
+        int nc, q;
+        if (!rs) return 0;
+        nc = td5_roam_collect(rs, (int32_t)floor((x - ox) * 256.0 + 0.5), (int32_t)floor((z - oz) * 256.0 + 0.5), cand, 4);
+        for (q = 1; q < nc; q++)
+            if (abs(cand[q].h - cand[0].h) > 2 * 430 * 256) return 0;
+    }
     {   /* the body corners on the road too */
         const double rx = tz, rz = -tx;
         int q;
@@ -737,6 +813,12 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     c->v_class = rt_class_speed(E.klass) * (0.9 + 0.2 * rt_unit(&c->rng));
     c->born = (long)g_td5.simulation_tick_counter;
     c->last_contact = -100000;
+    {
+        int in = 0;
+        int32_t gy = 0;
+        rt_locate(x, z, 0, 0, &in, &gy);
+        c->probe_y = gy + 430 * 256 * 9 / 10;      /* about where the traffic pose puts the body */
+    }
     rt_plan_next(c);
     v = c->v_class * 0.8;
     rt_place_actor(c, a, x, z, rt_angle_of(tx, tz), v);
@@ -819,6 +901,7 @@ static void rt_track(RtCar *c, const TD5_Actor *a, double x, double z)
             c->off = c->off_t;
             c->s = 0.0;
             c->v_class = rt_class_speed(E.klass) * (0.9 + 0.2 * rt_unit(&c->rng));
+            c->probe_y = a->world_pos.y;
             rt_plan_next(c);
             c->s = rt_edge_proj(&E, c->d, 0.0, x, z, NULL);
             if (c->s > E.plen - 0.25 * RT_M && c->ne >= 0) continue;   /* a very short piece */
@@ -997,6 +1080,22 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
                 }
             }
         }
+        /* the signal past a short next edge: slow early enough to stop at ITS line (the car reaches it after
+         * this junction; its own stop logic takes over on that edge) */
+        if (c->ne >= 0 && c->sig2_g >= 0) {
+            const double d2 = d_end_now + c->sig2_extra / RT_M - RT_STOP_BACK_M;
+            const double ss = (double)tick / RT_HZ;
+            const double t2 = d2 > 0.0 ? (d2 + RT_STOP_BACK_M) / (v > 1.0 ? v : 1.0) : 0.0;
+            double tq;
+            int red = 0;
+            for (tq = 0.0; tq <= t2 + 0.5; tq += 0.25)
+                if (td5_geo_signal_phase_at(ss + tq, c->sig2_g) == 0) { red = 1; break; }
+            if (red && d2 > v * v / (2.0 * 6.5)) {
+                const double vs = sqrt(2.0 * T.a_brake * (d2 > 0.0 ? d2 : 0.0));
+                if (vs < vt) vt = vs;
+                if (v > 0.2 && d2 > 0.15) { const double ar = -v * v / (2.0 * d2); if (ar < a_req) a_req = ar; }
+            }
+        }
     } else if (c->v_conn < vt) vt = c->v_conn;
     cap = rt_gap_cap(c, a, x, z, v, &obstacle);
     if (cap < vt) { vt = cap; if (vt < 0.5) c->holding = 1; }
@@ -1011,7 +1110,8 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
             if (fabs(c->off_t) > 50.0) {
                 const double side = c->off_t > 0.0 ? 1.0 : -1.0;
                 rt_edge_pt(&E, c->d, c->s + 8.0 * RT_M, c->off_t, &lx, &lz, &ltx, &ltz);
-                if (rt_locate(lx, lz, 0, 0, &in1, NULL) && rt_locate(lx + ltz * side * 1.1 * RT_M, lz - ltx * side * 1.1 * RT_M, 0, 0, &in2, NULL) &&
+                if (rt_locate(lx, lz, a->world_pos.y, 1, &in1, NULL) &&
+                    rt_locate(lx + ltz * side * 1.1 * RT_M, lz - ltx * side * 1.1 * RT_M, a->world_pos.y, 1, &in2, NULL) &&
                     !(in1 && in2))
                     c->off_t *= 0.6;
             }
@@ -1262,6 +1362,7 @@ void td5_roam_traffic_tick(void)
                 if (T.priv_n == 0) T.priv0_mb = mb;
                 T.priv_mb = mb;
                 if (mb > T.priv_max_mb) T.priv_max_mb = mb;
+                if (T.priv_n < (int)(sizeof T.priv_s / sizeof T.priv_s[0])) T.priv_s[T.priv_n] = (float)mb;
                 T.priv_n++;
             }
         }
@@ -1286,6 +1387,38 @@ static void rt_tick_body(void)
     }
     if (!T.ready) {
         T.ready = 1;
+#ifndef TD5RE_RELEASE
+        if (T.dbg_edge >= 0) { TD5_RouteGEdge DE; if (rt_edge(T.dbg_edge, &DE)) T.dbg_key = (long long)DE.key; }
+        {   /* DEV: TD5RE_ROAM_TRAFFIC_DBG_PT=x,z (place) -> a 3 x 3 m grid at 10 cm through the locator */
+            const char *e = getenv("TD5RE_ROAM_TRAFFIC_DBG_PT");
+            double qx, qz;
+            if (e && sscanf(e, "%lf,%lf", &qx, &qz) == 2) {
+                int ix, iz, nout = 0, nres = 0;
+                for (iz = 15; iz >= -15; iz--) {
+                    char row[40];
+                    for (ix = -15; ix <= 15; ix++) {
+                        int in = 0;
+                        row[ix + 15] = rt_locate(qx + ix * 0.1 * RT_M, qz + iz * 0.1 * RT_M, 0, 0, &in, NULL) ? (in ? '#' : '.') : ' ';
+                    }
+                    row[31] = 0;
+                    TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC_DBG_MAP %+3d %s", iz, row);
+                }
+                for (iz = -15; iz <= 15; iz++)
+                    for (ix = -15; ix <= 15; ix++) {
+                        int in = 0;
+                        int32_t gy = 0;
+                        const double px = qx + ix * 0.1 * RT_M, pz = qz + iz * 0.1 * RT_M;
+                        if (!rt_locate(px, pz, 0, 0, &in, &gy)) continue;
+                        nres++;
+                        if (!in) {
+                            nout++;
+                            if (nout <= 12) TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC_DBG_PT outside at (%.0f,%.0f) [%d,%d] gy %d", px, pz, ix, iz, (int)gy);
+                        }
+                    }
+                TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC_DBG_PT grid round (%.0f,%.0f): %d resident points, %d outside", qx, qz, nres, nout);
+            }
+        }
+#endif
         TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC: planner graph ready: %d edges, %d nodes, %d signalised clusters",
                   td5_roam_route_graph_nedge(), td5_roam_route_graph_nnode(), td5_roam_route_graph_nsignal());
     }
@@ -1340,6 +1473,63 @@ static void rt_tick_body(void)
 
     rt_barrier_passes();
 #ifndef TD5RE_RELEASE
+    {   /* DEV: a racer thrown upward (a contact launch?) */
+        int k;
+        for (k = 0; k < 6; k++) {
+            const TD5_Actor *p = (k == 0 || racing) ? td5_game_get_actor(k) : NULL;
+            if (!p || (k > 0 && td5_game_get_slot_state(k) == 3)) continue;
+            {   /* high above the ground (riding on a car?) */
+                double px, pz;
+                int inside = 0;
+                int32_t gy = 0;
+                rt_place_of(p, &px, &pz);
+                if (rt_locate(px, pz, p->world_pos.y, 1, &inside, &gy) && p->world_pos.y - gy > 430 * 256 * 3 / 2 &&
+                    tick - T.launch_log_t[k] > 30) {
+                    double td = 0.0;
+                    int32_t ty = 0;
+                    const int ts = td5_roam_traffic_nearest(p->world_pos.x, p->world_pos.z, &td, &ty);
+                    T.launch_log_t[k] = tick;
+                    T.st.racer_launches++;
+                    if (T.st.racer_launches <= 30)
+                        TD5_LOG_W(LOG_TAG, "ROAM_RACER_HIGH slot %d %.2f m above the ground vy %d tick %ld | nearest traffic slot %d %.1f m, "
+                                  "its y - car y %.2f m", k, (double)(p->world_pos.y - gy) / 256.0 / RT_M, (int)p->linear_velocity_y, tick,
+                                  ts, td, ts >= 0 ? (double)(ty - p->world_pos.y) / 256.0 / RT_M : 0.0);
+                }
+            }
+            if (k == 0 && T.ptrace) {
+                static FILE *pf;
+                double px, pz, td = 0.0;
+                int inside = 0;
+                int32_t gy = 0, ty = 0;
+                const int ts = td5_roam_traffic_nearest(p->world_pos.x, p->world_pos.z, &td, &ty);
+                if (!pf) {
+                    char path[512];
+                    const char *dir = td5_plat_log_dir();
+                    snprintf(path, sizeof path, "%sroam_player_trace.csv", dir ? dir : "");
+                    pf = fopen(path, "w");
+                    if (pf) fprintf(pf, "tick,x,y,z,vy,ground,inside,vmode,air,wcm,tslot,tdist,tdy\n");
+                }
+                rt_place_of(p, &px, &pz);
+                rt_locate(px, pz, p->world_pos.y, 1, &inside, &gy);
+                if (pf) fprintf(pf, "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.2f\n", tick, (int)FP_TRUNC(p->world_pos.x),
+                                (int)FP_TRUNC(p->world_pos.y), (int)FP_TRUNC(p->world_pos.z), (int)p->linear_velocity_y, (int)FP_TRUNC(gy),
+                                inside, (int)p->vehicle_mode, (int)p->airborne_frame_counter, (int)p->wheel_contact_bitmask, ts, td,
+                                ts >= 0 ? (double)(ty - p->world_pos.y) / 256.0 / RT_M : 0.0);
+            }
+            if (p->linear_velocity_y > 40000 && tick - T.launch_log_t[k] > 30) {
+                double td = 0.0;
+                int32_t ty = 0;
+                const int ts = td5_roam_traffic_nearest(p->world_pos.x, p->world_pos.z, &td, &ty);
+                T.launch_log_t[k] = tick;
+                T.st.racer_launches++;
+                if (T.st.racer_launches <= 30)
+                    TD5_LOG_W(LOG_TAG, "ROAM_RACER_LAUNCH slot %d vy %d (%.1f m/s up) at world (%d,%d,%d) tick %ld | nearest traffic slot %d "
+                              "%.1f m, its y - car y %.2f m", k, (int)p->linear_velocity_y, p->linear_velocity_y / 256.0 * RT_HZ / RT_M,
+                              (int)FP_TRUNC(p->world_pos.x), (int)FP_TRUNC(p->world_pos.y), (int)FP_TRUNC(p->world_pos.z), tick, ts, td,
+                              ts >= 0 ? (double)(ty - p->world_pos.y) / 256.0 / RT_M : 0.0);
+            }
+        }
+    }
     rt_shots();
 #endif
     T.st.live = live;
@@ -1372,7 +1562,17 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
 {
     const TD5_RoamTrafficStats *s = &T.st;
     const long off_free = s->off_ticks - s->off_ticks_contact;
-    const double dpriv = T.priv_n ? T.priv_mb - T.priv0_mb : 0.0;
+    double dpriv = 0.0, early = 0.0, late = 0.0;
+    {   /* the self-test's own rule: early-half average vs late-half average */
+        const int n = T.priv_n < 1024 ? T.priv_n : 1024;
+        int i;
+        if (n >= 4) {
+            for (i = 0; i < n / 2; i++) early += T.priv_s[i];
+            for (i = n / 2; i < n; i++) late += T.priv_s[i];
+            early /= (double)(n / 2); late /= (double)(n - n / 2);
+            dpriv = late - early;
+        }
+    }
     const double tick_ms = T.tick_n ? T.tick_us_sum / (double)T.tick_n / 1000.0 : 0.0;
     char bad[96] = "";
     size_t bl = 0;
@@ -1387,28 +1587,56 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     }
     if (off_free > 0) RT_BAD("off surface %ld ticks; ", off_free);
     if (s->stuck_live > 0) RT_BAD("stuck>10s live %ld; ", s->stuck_live);
-    if (dpriv > 32.0) RT_BAD("private +%.0f MB; ", dpriv);
 #undef RT_BAD
     if (bad[0]) status = 2;
-    else if (s->red_violations > 0) status = 1;
-    snprintf(note, n, "%straffic %d/%.1f/%d (target %d) red %ld/%ld off %ld(+%ld hit) stuck 0 priv %+.1f MB tick %.2f ms%s%.40s",
+    /* WARN: red-light violations; private bytes up > 32 MB early-half vs late-half (the traffic pool allocates
+     * nothing after race init: measured, the same series without cars follows the ROAD tile residency) */
+    else if (s->red_violations > 0 || dpriv > 32.0) status = 1;
+    {   /* the private-bytes series, one value every 30 s */
+        char ser[400];
+        size_t sl = 0;
+        int i;
+        const int n = T.priv_n < 1024 ? T.priv_n : 1024;
+        ser[0] = 0;
+        for (i = 0; i < n && sl < sizeof ser - 8; i += 30) sl += (size_t)snprintf(ser + sl, sizeof ser - sl, " %.0f", T.priv_s[i]);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] private MB every 30 s:%s", ser);
+    }
+    snprintf(note, n, "%straffic %d/%.1f/%d t%d red %ld/%ld off %ld+%ldhit bar %ld priv %+.0fMB %s%.40s",
              status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target, s->red_violations, s->sig_cross, off_free,
-             s->off_ticks_contact, dpriv, tick_ms, bad[0] ? ": " : "", bad);
+             s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s: live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "
               "(far %ld dead-end %ld stuck %ld hold %ld off %ld unresident %ld lost %ld) | off-surface ticks %ld (%ld within 2 s of a racer "
               "contact, events %ld) | red violations %ld of %ld stop-line crossings at signals, red stops %ld | stuck>10s live %ld | "
-              "yield waits %ld | turns L%ld S%ld R%ld | connector off-patch plans %ld | barrier passes %ld | racer-near ticks %ld | "
-              "max lane offset %.2f m, vmax %.0f km/h, pose-vs-ground %.2f m | private %.1f -> %.1f MB (max %.1f, %d samples) | "
+              "yield waits %ld | turns L%ld S%ld R%ld, lane changes %ld | connector off-patch plans %ld | barrier passes %ld | racer-near ticks %ld | "
+              "max lane offset %.2f m, vmax %.0f km/h, pose-vs-ground %.2f m | private %.1f -> %.1f MB (max %.1f, %d samples, early-half avg %.1f late-half avg %.1f) | "
               "traffic tick mean %.3f ms max %.2f ms %s",
               status == 2 ? "FAIL" : (status ? "WARN" : "PASS"), s->live_min, s->live_mean, s->live_max, s->target, s->samples,
               s->spawns, s->despawns, s->despawn_far, s->despawn_dead_end, s->despawn_stuck, s->despawn_hold, s->despawn_off,
               s->despawn_unres, s->despawn_lost, s->off_ticks, s->off_ticks_contact, s->off_events, s->red_violations, s->sig_cross, s->sig_stops,
-              s->stuck_live, s->yield_waits, s->turns[0], s->turns[1], s->turns[2], s->conn_off_plans, s->barrier_passes,
-              s->racer_near, s->max_lat_m, s->max_kmh, s->max_ground_dy_m, T.priv0_mb, T.priv_mb, T.priv_max_mb, T.priv_n,
+              s->stuck_live, s->yield_waits, s->turns[0], s->turns[1], s->turns[2], s->lane_changes, s->conn_off_plans, s->barrier_passes,
+              s->racer_near, s->max_lat_m, s->max_kmh, s->max_ground_dy_m, T.priv0_mb, T.priv_mb, T.priv_max_mb, T.priv_n, early, late,
               tick_ms, T.tick_us_max / 1000.0, bad);
     return status;
 }
 #endif
+
+/* DEV: the live traffic car nearest a WORLD point (24.8 units): slot, metres, its world y. -1 when none */
+int td5_roam_traffic_nearest(int32_t wx, int32_t wz, double *dist_m, int32_t *wy)
+{
+    int i, best = -1;
+    double bd = 1e300;
+    for (i = 0; i < T.pool; i++) {
+        const TD5_Actor *a;
+        double d;
+        if (T.car[i].state != RT_LIVE) continue;
+        a = td5_game_get_actor(T.car[i].slot);
+        if (!a) continue;
+        d = hypot((double)(a->world_pos.x - wx), (double)(a->world_pos.z - wz)) / 256.0 / RT_M;
+        if (d < bd) { bd = d; best = T.car[i].slot; if (wy) *wy = a->world_pos.y; }
+    }
+    if (dist_m) *dist_m = bd;
+    return best;
+}
 
 void td5_roam_traffic_stats_reset(void)
 {

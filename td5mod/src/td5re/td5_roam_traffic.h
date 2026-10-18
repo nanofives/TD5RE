@@ -84,6 +84,8 @@ typedef struct {
     long   turns[3];                    /* left / straight / right connectors                       */
     long   conn_off_plans;              /* turns planned with no connector fully on the patch       */
     long   barrier_passes;              /* traffic crossings of a race barrier (racer-only walls)   */
+    long   lane_changes;                /* lane changes made before a turn                          */
+    long   racer_launches;              /* DEV: a racer going up faster than 6 m/s (contact launch?)  */
     long   racer_near;                  /* car-ticks with a racer within 4 m (contacts)             */
     double max_lat_m;                   /* largest |offset| from the lane's target                  */
     double max_kmh;
@@ -91,12 +93,14 @@ typedef struct {
 } TD5_RoamTrafficStats;
 void td5_roam_traffic_stats(TD5_RoamTrafficStats *out);
 void td5_roam_traffic_stats_reset(void);
+int  td5_roam_traffic_nearest(int32_t wx, int32_t wz, double *dist_m, int32_t *wy);   /* DEV */
 /* DEV shots: a live car holding at a red stop line (slot, place xz of the cluster), 0 when none */
 int  td5_roam_traffic_find_red_stop(int *slot, double *cx, double *cz);
 #ifndef TD5RE_RELEASE
-/* The self-test verdict over the session so far: 0 PASS / 1 WARN (red-light violations) / 2 FAIL (density
- * not held in free roam, a car off the surface without a racer contact, a car stuck > 10 s not removed,
- * private bytes +32 MB after the warm-up). race_row: only "traffic was on the road" for density. */
+/* The self-test verdict over the session so far: 0 PASS / 1 WARN (red-light violations, or private bytes up
+ * more than 32 MB early-half vs late-half average) / 2 FAIL (density not held in free roam, a car off the
+ * surface without a racer contact, a car stuck > 10 s not removed). race_row: only "traffic was on the road"
+ * for density. */
 int  td5_roam_traffic_verdict(char *note, size_t n, int race_row);
 #endif
 

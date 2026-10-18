@@ -217,7 +217,7 @@ typedef struct {
      *   5 = [F7] SPRINT + 5 AI, full: ~3.1 km (START 580 m further south), no wrong turns; every
      *       opponent finishes, none stuck > 5 s, finish order + gaps in the note
      *   6 = [F7] SPRINT + 5 AI, smoke: the smoke route with 5 opponents
-     *   7 = [F8] TRAFFIC SOAK, full: the junction tour driven as a 700 m square for 600 s with ambient
+     *   7 = [F8] TRAFFIC SOAK, full: the junction tour driven as a 2.4 km square (F3-B soak) for 600 s with ambient
      *       traffic: density held, 0 traffic off the surface (racer contacts excepted), 0 stuck > 10 s
      *       left on the road, private bytes flat, red-light violations counted (WARN when > 0)
      *   8 = [F8] TRAFFIC SOAK, smoke: the same for 90 s
@@ -817,6 +817,7 @@ static struct {
     int       peak_air;                       /* max airborne_frame_counter (any slot) */
     long long peak_speed;                     /* max |longitudinal_speed| raw (8.8) */
     long long peak_jump;                      /* max per-sample |pos delta| raw (24.8) */
+    int       peak_jump_slot;                 /* [roam F8] which slot made it */
     int       peak_span;                      /* max driven-slot folded track span (drag-trim check) */
 } s_inv;
 
@@ -858,8 +859,11 @@ static void st_roam_arm(const RaceScenario *sc)
         return;
     }
     td5_roam_drive_arm(sc->roam == 2 ? TD5_RDRV_CORNERS : TD5_RDRV_ROUTE);
-    if (sc->roam == 7 || sc->roam == 8)   /* [roam F8] the soak: a 700 m square round the spawn */
-        td5_roam_drive_set_tour(700.0, td5_env_int("TD5RE_SELFTEST_ROAM_TRAFFIC_SECS", sc->roam == 7 ? 600 : 90, 30, 7200));
+    if (sc->roam == 7 || sc->roam == 8)   /* [roam F8] the soak: a 2.4 km square round the spawn (F3-B soak) */
+    {
+        td5_roam_drive_set_tour(2400.0, td5_env_int("TD5RE_SELFTEST_ROAM_TRAFFIC_SECS", sc->roam == 7 ? 600 : 90, 30, 7200));
+        td5_roam_drive_set_traffic(1);
+    }
     if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
         s_roam_captured = 1;
         s_roam_status = ST_FAIL;
@@ -887,8 +891,10 @@ static void st_roam_capture(void)
         /* [roam F8] the traffic verdict first, the drive's / sprint's after it */
         char tn[120], dn[120];
         const int ts = td5_roam_traffic_verdict(tn, sizeof tn, s_roam_row == 9);
+        size_t q;
         snprintf(dn, sizeof dn, "%s", s_roam_note);
-        snprintf(s_roam_note, sizeof s_roam_note, "%.72s | %.44s", tn, dn);
+        for (q = 0; dn[q]; q++) if (dn[q] == '|') dn[q] = '/';   /* the report is a markdown table */
+        snprintf(s_roam_note, sizeof s_roam_note, "%.70s; %.47s", tn, dn);
         if (ts > s_roam_status) s_roam_status = ts;
     }
 }
@@ -1118,6 +1124,11 @@ static void st_inv_sample(void)
         long long px, py, pz, vx, vy, vz;
         int prog;
         if (td5_game_get_slot_state(slot) == 3) continue;   /* empty grid slot */
+        if (td5_roam_traffic_parked(slot) == 1) {           /* [roam F8] a parked traffic car: its next spawn is a placement */
+            s_inv.haspos[slot] = 0;
+            s_inv.moving[slot] = 0;
+            continue;
+        }
         a = td5_game_get_actor(slot);
         if (!a) continue;
         px = a->world_pos.x; py = a->world_pos.y; pz = a->world_pos.z;
@@ -1149,7 +1160,7 @@ static void st_inv_sample(void)
             long long mj = llabs(dx);
             if (llabs(dy) > mj) mj = llabs(dy);
             if (llabs(dz) > mj) mj = llabs(dz);
-            if (mj > s_inv.peak_jump) s_inv.peak_jump = mj;
+            if (mj > s_inv.peak_jump) { s_inv.peak_jump = mj; s_inv.peak_jump_slot = slot; }
             if (llabs(dx) > s_inv_max_jump || llabs(dy) > s_inv_max_jump ||
                 llabs(dz) > s_inv_max_jump)
                 st_inv_flag(ST_FAIL, "slot%d teleport dx=%lld dy=%lld dz=%lld",
@@ -1210,8 +1221,8 @@ static int st_inv_result(char *note, size_t nsz)
     }
     if (s_inv.active && status < ST_WARN && (s_inv.peak_jump >> 8) > s_inv_warn_jump) {
         status = ST_WARN;
-        snprintf(s_inv.desc, sizeof(s_inv.desc), "peak jump %lld > %d",
-                 (long long)(s_inv.peak_jump >> 8), s_inv_warn_jump);
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "peak jump %lld > %d (slot %d)",
+                 (long long)(s_inv.peak_jump >> 8), s_inv_warn_jump, s_inv.peak_jump_slot);
     }
     /* Telemetry, recorded even on PASS: peak airborne frames, peak body speed
      * and peak per-tick position jump (both truncated 24.8/8.8 -> display), and
