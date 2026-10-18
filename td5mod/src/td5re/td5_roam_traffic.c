@@ -112,6 +112,7 @@ static struct {
     long    spawn_count, tick_last;
     int     live_prev;                   /* [F8d] last tick's live count (dip diagnostics) */
     int     force_level, force_density;
+    int     dev_slot, dev_mode;                  /* [F8e] DEV ram test: a placed car, 1 held still / 2 free (hands off) */
     /* knobs */
     int     knobs;
     int     dens_free, dens_low, dens_high, max_live;
@@ -1434,6 +1435,7 @@ static void rt_remap(void)
         RtCar *c = &T.car[i];
         int e, ne, nd;
         if (c->state != RT_LIVE) continue;
+        if (T.dev_mode && c->slot == T.dev_slot) continue;   /* [F8e] */
         e = td5_roam_route_graph_remap_edge(T.gen, c->e);
         ne = c->ne >= 0 ? td5_roam_route_graph_remap_edge(T.gen, c->ne) : -1;
         nd = td5_roam_route_graph_remap_node(T.gen, c->node);
@@ -1539,6 +1541,15 @@ static void rt_tick_body(void)
         if (c->state != RT_LIVE) continue;
         a = td5_game_get_actor(c->slot);
         if (!a) { rt_park(c); continue; }
+        if (T.dev_mode && c->slot == T.dev_slot) {   /* [F8e] DEV ram-test car: held still, or left alone after the hit */
+            if (T.dev_mode == 1) {
+                a->linear_velocity_x = a->linear_velocity_z = 0;
+                a->angular_velocity_yaw = 0;
+                a->brake_flag = 1;
+            }
+            live++;
+            continue;
+        }
         rt_place_of(a, &x, &z);
         for (k = 0; k < nanch; k++) {
             const double dd = hypot(x - ax[k], z - az[k]);
@@ -1784,3 +1795,36 @@ int td5_roam_traffic_find_red_stop(int *slot, double *cx, double *cz)
     }
     return 0;
 }
+
+#ifndef TD5RE_RELEASE
+/* [F8e] DEV ram test: put a traffic-pool car at place (px,pz) heading yaw12, standing still, and hold it there until
+ * td5_roam_traffic_dev_release(). The slot, or -1 when the pool has no free car. */
+int td5_roam_traffic_dev_place(double px, double pz, int yaw12)
+{
+    RtCar *c = NULL;
+    TD5_Actor *a;
+    int i;
+    if (!T.on || !td5_roam_active()) return -1;
+    if (T.dev_mode) { for (i = 0; i < T.pool; i++) if (T.car[i].slot == T.dev_slot) c = &T.car[i]; }
+    for (i = 0; i < T.pool && !c; i++) if (T.car[i].state == RT_PARKED) c = &T.car[i];
+    if (!c) return -1;
+    a = td5_game_get_actor(c->slot);
+    if (!a) return -1;
+    memset(&c->e, 0, sizeof *c - offsetof(RtCar, e));
+    c->last_contact = -100000;
+    c->born = (long)g_td5.simulation_tick_counter;
+    rt_place_actor(c, a, px, pz, yaw12, 0.0);
+    c->state = RT_LIVE;
+    c->alpha = 255; c->fade = 0;
+    T.dev_slot = c->slot; T.dev_mode = 1;
+    return c->slot;
+}
+void td5_roam_traffic_dev_release(void) { if (T.dev_mode) T.dev_mode = 2; }
+void td5_roam_traffic_dev_clear(void)
+{
+    int i;
+    if (!T.dev_mode) return;
+    for (i = 0; i < T.pool; i++) if (T.car[i].slot == T.dev_slot) rt_park(&T.car[i]);
+    T.dev_mode = 0;
+}
+#endif

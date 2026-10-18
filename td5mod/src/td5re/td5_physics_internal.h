@@ -276,6 +276,8 @@ int32_t td5_physics_hard_catchup_mult(int slot);
 /* Crash FX / battle / police knob getters (V2V + wall response read these) */
 void    td5_physics_apply_acute_crash_fx(TD5_Actor *actor, int32_t impact_mag);
 int32_t npc_fatal_mag(void);
+int32_t roam_crash_heavy(void);          /* [roam F8e] 0 outside roam / knob 0 */
+int     roam_crash_pct(int32_t impact_mag);   /* [roam F8e] racer scatter/lift %, 100 outside roam */
 int     battle_ram_pct(void);
 int32_t battle_ram_cap(void);
 int32_t battle_ram_min_speed(void);

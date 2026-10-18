@@ -98,6 +98,10 @@ int  td5_roam_traffic_nearest(int32_t wx, int32_t wz, double *dist_m, int32_t *w
 /* DEV shots: a live car holding at a red stop line (slot, place xz of the cluster), 0 when none */
 int  td5_roam_traffic_find_red_stop(int *slot, double *cx, double *cz);
 #ifndef TD5RE_RELEASE
+/* [F8e] DEV ram test: a stand-still traffic car at place (px,pz) yaw12 (slot or -1), released to physics, cleared */
+int  td5_roam_traffic_dev_place(double px, double pz, int yaw12);
+void td5_roam_traffic_dev_release(void);
+void td5_roam_traffic_dev_clear(void);
 /* The self-test verdict over the session so far: 0 PASS / 1 WARN (red-light violations, or private bytes up
  * more than 32 MB early-half vs late-half average) / 2 FAIL (density not held in free roam, a car off the
  * surface without a racer contact, a car stuck > 10 s not removed). race_row: only "traffic was on the road"

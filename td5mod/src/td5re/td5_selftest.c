@@ -67,6 +67,7 @@
 #include "td5_roam_rebase.h" /* [roam F9b] the invariant checker carries its samples across a rebase */
 #include "td5_roam_physics.h" /* [roam F9a] the roam provider's wheel / teleport counters for the invariant note */
 #include "td5_roam_traffic.h" /* [roam F8] `roam-traffic` rows: ambient traffic verdict */
+#include "td5_roam_ram_test.h"  /* [roam F8e] `roam-ram` row: ram parked traffic at 20..90 km/h */
 #include "td5_roam_cops.h"    /* [roam F10] `roam-cops` rows: pursuit / escape / bust drive */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
@@ -480,6 +481,11 @@ static const RaceScenario k_races[] = {
      * roam): the region planner maps the route (tiles built on the stream worker when missing), the drive crosses
      * world-origin rebases; 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units, 0 pinches / rescues /
      * teleports / stuck */
+    /* [roam F8e] ram a stand-still traffic car at 20/35/50/70/90 km/h, rear + side: response kind / lift / spin / speed loss */
+    { .name="roam-ram",              .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=16, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="roam-partido",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
@@ -867,6 +873,7 @@ static char s_roam_note[120];
 static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15; }  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
 static int st_roam_is_cops(int row) { return row == 13 || row == 14; }   /* [roam F10] 13 full (traffic on), 14 smoke */
+static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
 
 static void st_roam_arm(const RaceScenario *sc)
 {
@@ -883,6 +890,17 @@ static void st_roam_arm(const RaceScenario *sc)
     td5_roam_cops_dev_force(st_roam_is_cops(sc->roam) ? -1 : 0, -1);
     /* [roam F9b] the cops rows rebase the world every tile: their pursuits run across world-origin rebases */
     td5_roam_rebase_force_tiles(st_roam_is_cops(sc->roam) ? 1 : -1);
+    if (st_roam_is_ram(sc->roam)) {
+        /* [roam F8e] the ram test: no ambient traffic, no patrols; the placed traffic car is the only other actor */
+        td5_roam_traffic_force_density(0);
+        td5_roam_ram_test_arm();
+        if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
+        return;
+    }
     if (st_roam_is_cops(sc->roam)) {
         /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
         if (sc->roam == 14) td5_roam_traffic_force_density(0);
@@ -927,6 +945,7 @@ static void st_roam_disarm(void)
     td5_roam_drive_disarm();
     td5_roam_sprint_test_disarm();    /* [roam F6-B] */
     td5_roam_cops_test_disarm();      /* [roam F10] */
+    td5_roam_ram_test_disarm();       /* [roam F8e] */
     td5_roam_cops_dev_force(-1, -1);
     td5_roam_traffic_force_density(-1);       /* [roam F8] */
     td5_roam_traffic_force_race_level(-1);
@@ -938,7 +957,8 @@ static void st_roam_capture(void)
 {
     if (s_roam_captured) return;
     s_roam_captured = 1;
-    s_roam_status = st_roam_is_cops(s_roam_row) ? td5_roam_cops_test_verdict(s_roam_note, sizeof s_roam_note)
+    s_roam_status = st_roam_is_ram(s_roam_row) ? td5_roam_ram_test_verdict(s_roam_note, sizeof s_roam_note)
+                  : st_roam_is_cops(s_roam_row) ? td5_roam_cops_test_verdict(s_roam_note, sizeof s_roam_note)
                   : st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
                                                   : td5_roam_drive_verdict(s_roam_note, sizeof s_roam_note);
     if (st_roam_has_traffic(s_roam_row)) {
@@ -968,6 +988,7 @@ static void st_roam_capture(void)
 /* [roam F6-B] the running roam row's script has ended itself */
 static int st_roam_done(void)
 {
+    if (st_roam_is_ram(s_roam_row)) return td5_roam_ram_test_done();
     if (st_roam_is_cops(s_roam_row)) return td5_roam_cops_test_done();
     return st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_done() : td5_roam_drive_done();
 }

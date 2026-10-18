@@ -49,6 +49,7 @@ td5_roam_ai.c
 td5_roam_traffic.c
 td5_roam_cops.c
 td5_roam_cops_test.c
+td5_roam_ram_test.c
 td5_geo_tiles.c
 td5_trackgen.c
 td5_tg_world.c
