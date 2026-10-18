@@ -5280,11 +5280,6 @@ int td5_trackgen_studio_synthetic(void)
     return td5_env_flag_on("TD5RE_STUDIO_SYNTHETIC");
 }
 
-int td5_trackgen_geo_own_selector(void)
-{
-    return td5_env_flag_on("TD5RE_GEO_OWN_SELECTOR");
-}
-
 /* Registry row for whatever the current target is. The auto track and the geo
  * places live in different registry tables (one struct vs an array), so this is
  * the single place that knows which one a build belongs to. */

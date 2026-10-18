@@ -2114,7 +2114,7 @@ void Screen_GeoGenerator(void)
     {
         static int s_autobuild_done;
         const int want = td5_env_int("TD5RE_GEO_AUTOBUILD_N", 1, 1, 4);
-        /* [F11b] only where BUILD is a strip BUILD (local multiplayer or TD5RE_GEO_STRIP_BUILD=1) */
+        /* [F11b] AUTOBUILD=1 is itself a dev strip request (td5_roam_strip_build_enabled), so s_strip is 1 */
         if (s_strip && td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
             && s_autobuild_done < want && geo_route_is_buildable()) {
             int slot;

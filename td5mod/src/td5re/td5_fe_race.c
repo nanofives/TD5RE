@@ -941,18 +941,15 @@ static int frontend_track_excluded_from_selector(int track_index) {
      * still read the preview, set the race options and press OK.
      * [ROUND 1026 L] With the generator's own selector entry (default) that
      * exception is no longer the arm but the entry slot, which is always
-     * listed; TD5RE_GEO_OWN_SELECTOR=0 restores the armed-only rule. */
+     * listed (F11b: the armed-only rule, TD5RE_GEO_OWN_SELECTOR=0, is gone). */
     if (td5_trackgen_is_geo_slot(track_index)) {
-        if (td5_trackgen_geo_own_selector()) {
-            /* A network lobby never lists it: the peers would each have to hold
-             * (and build identically from) the host's real-place cache. */
-            if (s_network_active) return 1;
-            /* [F11b] single player races the entry in the city, which has a single race only:
-             * a cup / time trial / cop chase never lists it (it would need the strip) */
-            if (!frontend_geo_strip_context() && s_selected_game_type != 0) return 1;
-            return track_index != frontend_geo_entry_slot();
-        }
-        return track_index != s_geo_pick_slot;
+        /* A network lobby never lists it: the peers would each have to hold
+         * (and build identically from) the host's real-place cache. */
+        if (s_network_active) return 1;
+        /* [F11b] single player races the entry in the city, which has a single race only:
+         * a cup / time trial / cop chase never lists it (it would need the strip) */
+        if (!frontend_geo_strip_context() && s_selected_game_type != 0) return 1;
+        return track_index != frontend_geo_entry_slot();
     }
     /* Custom slots (>=37) are selectable ONLY when the registry actually has a
      * track there. Otherwise an unregistered slot in [37, slot_max) would
@@ -1427,10 +1424,8 @@ static void frontend_qr_refresh_auto_btn(void) {
 /* [ROUND 1026 L] Is the GEOSPATIAL TRACK GENERATOR button to be shown for the
  * current pick? Only on the generator's own selector entry. The fallback keeps
  * the generator reachable when no real place is registered at all (no entry to
- * cycle onto), exactly as before this round. TD5RE_GEO_OWN_SELECTOR=0 = the
- * round-1008 always-visible button. */
+ * cycle onto), exactly as before this round. */
 static int frontend_geo_btn_wanted(void) {
-    if (!td5_trackgen_geo_own_selector()) return 1;
     if (td5_trackgen_is_geo_slot(s_selected_track)) return 1;
     return frontend_geo_entry_slot() < 0;
 }
@@ -1441,8 +1436,8 @@ static int frontend_geo_btn_wanted(void) {
  * RACE each generated entry's options button now reads SETTINGS, because the
  * entry itself already names the generator (frontend_get_entry_title in
  * td5_frontend.c). The geo button keeps its full name whenever it is NOT sitting
- * under the geo entry -- the TD5RE_GEO_OWN_SELECTOR=0 layout and the no-place
- * fallback show it on every track, where "SETTINGS" would not say what it
+ * under the geo entry -- the no-place
+ * fallback shows it on every track, where "SETTINGS" would not say what it
  * opens. */
 static void frontend_btn_set_label(int idx, const char *label) {
     if (idx < 0 || idx >= s_button_count) return;
@@ -1459,7 +1454,7 @@ static void frontend_refresh_geo_btn(int idx) {
     s_buttons[idx].hidden   = show ? 0 : 1;
     s_buttons[idx].disabled = show ? 0 : 1;
     frontend_btn_set_label(idx,
-        (td5_trackgen_geo_own_selector() && td5_trackgen_is_geo_slot(s_selected_track))
+        td5_trackgen_is_geo_slot(s_selected_track)
             ? TR("SETTINGS") : TR("GEOSPATIAL TRACK GENERATOR"));
 }
 
@@ -7852,12 +7847,10 @@ static void trksel_build_main_buttons(void) {
      * condenses it (fe_fit_text_scale, floor 0.55) rather than clipping, so
      * Mariano's wording survives intact instead of being abbreviated. */
     s_trksel_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
-                                              120, td5_trackgen_geo_own_selector() ? 306 : 268,
-                                              224, 32);
+                                              120, 306, 224, 32);
     /* [ROUND 1026 L] Hidden unless the GEOSPATIAL entry is the pick (see
      * frontend_geo_entry_slot). It takes the STUDIO chip's row (306) so the two
-     * selectors carry their options button in the same place; with
-     * TD5RE_GEO_OWN_SELECTOR=0 the round-1008 row (268) is kept. */
+     * selectors carry their options button in the same place. */
     frontend_trksel_refresh_geo_btn();
 
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
@@ -8907,7 +8900,7 @@ static void geo_draw_route_credit(const char *slug, float bx, float by, float sx
          * under it (y 108), where the first credit line used to be, so the
          * credit drops one line. Its last line ends at ~by+7, still above the
          * route, which the fit keeps AT_PV_MARGIN (8) inside the panel. */
-        const float cy0 = td5_trackgen_geo_own_selector() ? -14.0f : -26.0f;
+        const float cy0 = -14.0f;
         fe_draw_small_text(bx * sx, (by + cy0) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
         fe_draw_small_text(bx * sx, (by + cy0 + 12.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
                            0xFF8899AA, sx, sy);

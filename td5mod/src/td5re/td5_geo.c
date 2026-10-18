@@ -752,8 +752,6 @@ int td5_geo_route_name_id(int i)
     return s_route.sn[i];
 }
 
-int td5_geo_route_name_count(void) { return s_route.n ? s_route.n_names : 0; }
-
 const char *td5_geo_route_name_by_id(int id)
 {
     if (!s_route.names || id < 0 || id >= s_route.n_names) return "";
@@ -1135,8 +1133,6 @@ int td5_geo_preview_route(const char *slug)
               slug, s_preview.n, total, stride);
     return s_preview.n;
 }
-
-int td5_geo_preview_count(void) { return s_preview.n; }
 
 int td5_geo_preview_node(int i, double *x, double *z)
 {

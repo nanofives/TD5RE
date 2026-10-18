@@ -184,7 +184,6 @@ const char *td5_geo_route_source(void);    /* path it came from, "" if none */
  * next route load/unload, and "" rather than NULL for an unnamed node. */
 int  td5_geo_route_maxspeed(int i);        /* km/h, 0 = the file does not say */
 int  td5_geo_route_name_id(int i);         /* -1 = unnamed at this node       */
-int  td5_geo_route_name_count(void);
 const char *td5_geo_route_name_by_id(int id);
 const char *td5_geo_route_name(int i);
 
@@ -324,7 +323,6 @@ const char *td5_geo_places_incomplete_reason(int i);
  * Returns the point count (0 when the place has no usable route). */
 #define TD5_GEO_PREVIEW_MAX 2048
 int td5_geo_preview_route(const char *slug);
-int td5_geo_preview_count(void);
 int td5_geo_preview_node(int i, double *x, double *z);
 
 /* Attribution every geo track must show (ODbL). */

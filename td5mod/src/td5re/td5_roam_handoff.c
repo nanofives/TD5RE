@@ -40,6 +40,10 @@ static struct {
 
 int td5_roam_strip_build_enabled(void)
 {
+#ifndef TD5RE_RELEASE
+    /* [F11b] the dev BUILD harness (td5_fe_geo.c) presses the strip BUILD and races it: it is a strip request */
+    if (td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)) return 1;
+#endif
     return td5_env_int("TD5RE_GEO_STRIP_BUILD", 0, 0, 1);
 }
 

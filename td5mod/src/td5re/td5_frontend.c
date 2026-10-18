@@ -2296,14 +2296,13 @@ static void frontend_get_track_display_name(int track_index, int truncate_at_com
  * auto entry reads AUTO-GENERATED TRACK -- and the button under it is SETTINGS
  * (frontend_refresh_geo_btn, td5_fe_race.c). The place it will build goes to
  * `place` for a small line under the title, so the player still sees WHERE
- * before pressing OK. place[0] = '\0' for every other entry, and with
- * TD5RE_GEO_OWN_SELECTOR=0. Selectors only: the HUD and results keep the place
+ * before pressing OK. place[0] = '\0' for every other entry. Selectors only: the HUD and results keep the place
  * name as the track name. */
 static void frontend_get_entry_title(int slot, char *title, size_t tcap,
                                      char *place, size_t pcap) {
     frontend_get_track_display_name(slot, 0, title, tcap);
     place[0] = '\0';
-    if (td5_trackgen_geo_own_selector() && td5_trackgen_is_geo_slot(slot)) {
+    if (td5_trackgen_is_geo_slot(slot)) {
         snprintf(place, pcap, "%s", title);
         snprintf(title, tcap, "%s", TR("GEOSPATIAL TRACK GENERATOR"));
     }

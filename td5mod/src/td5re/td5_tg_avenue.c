@@ -87,8 +87,7 @@ int tg_geo_avenue_n(void)
  * skirt was pushed out and the pavement and railing stood down, over a span that has no
  * carriageway at all -- "the road at span 38 is not rendered ... it starts rendering after
  * span 46" (Diagonal 73, first span 47): a see-through hole beside the widened road. So the
- * slack AHEAD (e = +1) is only taken by a span that is itself in the avenue.
- * TD5RE_GEO_AVENUE_ENTRY_SLACK=1 restores it. */
+ * slack AHEAD (e = +1) is only taken by a span that is itself in the avenue. */
 int tg_geo_avenue_slack_ok(int si, int e)
 {
     /* [ROUND 1021 A item 10] "complex intersections still have no geometry, after e63 s17 there's
@@ -97,13 +96,10 @@ int tg_geo_avenue_slack_ok(int si, int e)
      * 256, which has no carriageway at all (the last row's quad ends square at node 256), push its
      * ground skirt's inner edge out to the far edge of a carriageway that is not there, leaving a bare
      * strip between the road edge and the skirt. The slack BEHIND (e = -1) is now taken only by a
-     * span that is itself in the avenue, the mirror of the entry rule below.
-     * TD5RE_GEO_AVENUE_EXIT_SLACK=1 restores the old trailing slack. */
-    if (e == -1 && !td5_env_flag_off("TD5RE_GEO_AVENUE_EXIT_SLACK"))
+     * span that is itself in the avenue, the mirror of the entry rule below. */
+    if (e == -1 || e == 1)
         return td5_geo_avenue_at(si, NULL, NULL, NULL);
-    if (e != 1) return 1;
-    if (td5_env_flag_off("TD5RE_GEO_AVENUE_ENTRY_SLACK")) return 1;
-    return td5_geo_avenue_at(si, NULL, NULL, NULL);
+    return 1;
 }
 
 double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side)
