@@ -2964,6 +2964,68 @@ static int tg_geo_apron_road_clear(double x, double z, double clear)
     return 1;
 }
 
+/* [roam F4b] The apron band with every piece checked (TG_GeoBldEnv.apron_quad_ok):
+ * each hull edge's quad is cut into pieces of at most one span length along the hull,
+ * a refused piece is left out. Roam only; the strip never sets the callback. */
+static int tg_geo_emit_apron_checked(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, int nh,
+                                     const double *ox, const double *oz, const double *ix, const double *iz)
+{
+    const double inv_tile = 1.0 / 3000.0;
+    float *v;
+    unsigned int *light;
+    unsigned short cmd[3];
+    int k, nq = 0, cap = 0, refused = 0;
+    for (k = 0; k < nh; k++) {
+        const int j = (k + 1) % nh;
+        const double L = hypot(ox[j] - ox[k], oz[j] - oz[k]);
+        cap += (int)ceil(L / (double)TD5_TG_SPAN_LENGTH) + 1;
+    }
+    v = (float *)malloc((size_t)cap * 4u * 5u * sizeof(float));
+    light = (unsigned int *)malloc((size_t)cap * 4u * sizeof(unsigned int));
+    if (!v || !light) { free(v); free(light); e->st->lm_apron_refused++; return 1; }
+    for (k = 0; k < nh; k++) {
+        const int j = (k + 1) % nh;
+        const double L = hypot(ox[j] - ox[k], oz[j] - oz[k]);
+        int np = (int)ceil(L / (double)TD5_TG_SPAN_LENGTH), p, q;
+        if (L < 1.0 && hypot(ix[j] - ix[k], iz[j] - iz[k]) < 1.0) continue;
+        if (np < 1) np = 1;
+        for (p = 0; p < np && nq < cap; p++) {
+            const double t0 = (double)p / np, t1 = (double)(p + 1) / np;
+            const double qx[4] = { ox[k] + (ox[j] - ox[k]) * t0, ox[k] + (ox[j] - ox[k]) * t1,
+                                   ix[k] + (ix[j] - ix[k]) * t1, ix[k] + (ix[j] - ix[k]) * t0 };
+            const double qz[4] = { oz[k] + (oz[j] - oz[k]) * t0, oz[k] + (oz[j] - oz[k]) * t1,
+                                   iz[k] + (iz[j] - iz[k]) * t1, iz[k] + (iz[j] - iz[k]) * t0 };
+            if (!e->apron_quad_ok(e->u, qx, qz)) { refused++; continue; }
+            for (q = 0; q < 4; q++) {
+                const int o = (nq * 4 + q) * 5;
+                const double g = e->ground(e->u, qx[q], qz[q]);
+                v[o + 0] = (float)qx[q];
+                v[o + 1] = (float)(g + TD5_TG_GEO_APRON_LIFT);
+                v[o + 2] = (float)qz[q];
+                v[o + 3] = (float)(qx[q] * inv_tile);
+                v[o + 4] = (float)(qz[q] * inv_tile);
+                light[nq * 4 + q] = 0xFFFFFFFFu;
+            }
+            nq++;
+        }
+    }
+    if (refused) e->st->lm_apron_pulled += refused;
+    if (nq < 1 || *e->nmesh >= e->maxmesh) { free(v); free(light); e->st->lm_apron_refused++; return 1; }
+    cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK;
+    cmd[1] = 0;
+    cmd[2] = (unsigned short)nq;
+    e->moff[(*e->nmesh)++] = e->blk->len;
+    if (!tg_write_prefab_mesh(e->blk, v, light, nq * 4, cmd, 1, 0, 0.0, 0.0, 0.0, 1.0, 0.0)) {
+        free(v); free(light);
+        return 0;
+    }
+    free(v); free(light);
+    e->st->lm_apron++;
+    e->st->lm_apron_quads += nq;
+    tg_geo_lm_note_k(gb, e->lm_kind, e->si, "apron laid (pieces checked)", 0.0);
+    return 1;
+}
+
 static int tg_geo_emit_apron(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
                              const double *rx, const double *rz, int n_ring)
 {
@@ -3010,6 +3072,8 @@ static int tg_geo_emit_apron(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
         ix[k] = cx + (hx[k] - cx) * TD5_TG_GEO_APRON_INNER;
         iz[k] = cz + (hz[k] - cz) * TD5_TG_GEO_APRON_INNER;
     }
+    if (e->apron_quad_ok)                               /* [roam F4b] see TG_GeoBldEnv */
+        return tg_geo_emit_apron_checked(e, gb, nh, ox, oz, ix, iz);
     for (k = 0; k < nh; k++) {
         const int j = (k + 1) % nh;
         const double qx[4] = { ox[k], ox[j], ix[j], ix[k] };

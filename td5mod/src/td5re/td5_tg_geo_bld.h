@@ -65,6 +65,11 @@ typedef struct {
     int      si;              /* span for tg_acct + the [GEO LM] note; -1 = none        */
     int      acct;            /* call tg_acct                                           */
     TG_GeoBldStats *st;
+    /* [roam F4b] apron piece (4 corners) acceptable (NULL = the strip: one quad per hull
+     * edge, unchecked between its vertices). When set, each apron quad is cut into
+     * pieces of at most one span length along the hull and a refused piece is left out,
+     * so a long hull edge never lays its band across a road between two vertices. */
+    int    (*apron_quad_ok)(void *u, const double *qx, const double *qz);
 } TG_GeoBldEnv;
 
 /* Extrude ONE cleared footprint (ring rx/rz[n_ring], CCW, centroid cx/cz, already moved
