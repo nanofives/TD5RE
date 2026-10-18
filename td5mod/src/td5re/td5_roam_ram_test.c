@@ -110,17 +110,6 @@ static double rr_kmh(const TD5_Actor *a)
            256.0 * RR_HZ / RR_M * 3.6;
 }
 
-static int rr_inside(double px, double pz)
-{
-    const TD5_RoamResident *rs = td5_roam_resident();
-    int32_t ox, oz;
-    TD5_RoamHit h;
-    if (!rs) return 0;
-    td5_roam_world_origin(&ox, &oz);
-    return td5_roam_locate(rs, (int32_t)floor((px - ox) * 256.0 + 0.5), (int32_t)floor((pz - oz) * 256.0 + 0.5), 0, 0,
-                           ROAM_PRIM_NONE, &h) && h.prim != ROAM_PRIM_NONE && h.inside;
-}
-
 /* resample the polyline every RR_DS; the speed profile is the straight-line cap (the rams are on straights) */
 static int rr_set_path(const double *qx, const double *qz, int nq, double cap)
 {
