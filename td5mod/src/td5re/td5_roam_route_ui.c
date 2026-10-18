@@ -141,7 +141,9 @@ static void route_summary(char *out, size_t cap)
     else if (n == 1)  snprintf(out, cap, "%s1 POINT   ADD A FINISH", kind);
     else if (!r->ok)  snprintf(out, cap, "%s%d POINTS  NO ROUTE FOUND", kind, n);
     else if (r->length_m >= 1000.0)
-        snprintf(out, cap, "%s%d POINTS   %.2f KM%s   %d STREETS", kind, n, r->length_m / 1000.0, r->closed ? " LAP" : "", r->nedge);
+        { char tail[24];
+          if (r->closed) tail[0] = 0; else snprintf(tail, sizeof tail, "   %d STREETS", r->nedge);
+          snprintf(out, cap, "%s%d POINTS   %.2f KM%s%s", kind, n, r->length_m / 1000.0, r->closed ? " LAP" : "", tail); }
     else
         snprintf(out, cap, "%s%d POINTS   %.0f M%s   %d STREETS", kind, n, r->length_m, r->closed ? " LAP" : "", r->nedge);
 }
@@ -433,7 +435,9 @@ static void map_close(void)
     TD5_LOG_I(LOG_TAG, "ROUTE_UI: map closed (waypoints=%d)", td5_roam_route_wp_count());
 }
 
+static void fit_route(void);
 int td5_roam_route_ui_map_open(void) { return u.map_open; }
+void td5_roam_route_ui_fit(void) { fit_route(); }      /* [F9a] DEV shots: frame the whole route */
 
 void td5_roam_route_ui_open_map(void)
 {

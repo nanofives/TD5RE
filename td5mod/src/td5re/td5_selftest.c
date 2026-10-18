@@ -287,6 +287,11 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=6, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F9a] smoke tier: a 2-lap 0.6 km block loop with 3 AI (the lap counter, the closing leg, save/load of type + laps) */
+    { .name="roam-circuit-smoke",    .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=8, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -428,6 +433,12 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=5, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam F9a] 3 laps of a ~1.5 km loop round Plaza Italia with 3 AI: every racer finishes 3 laps, lap counts never
+     * jump, none stuck; also the figure-8 census (both crossing directions open) and the lap tracker simulation */
+    { .name="roam-circuit",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=7, .depth=ST_DEPTH_ROAM_SPRINT },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -448,7 +459,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 8   /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke */
+#define ST_SMOKE_RACES 9   /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke */
 
 typedef struct {
     const char *name;
@@ -818,7 +829,8 @@ static void st_roam_arm(const RaceScenario *sc)
         /* [roam F6-B] sprint rows: spawn at the scripted route's START, the sprint test drives */
         double ll[8][2];
         const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : sc->roam == 5 ? TD5_RSPRINT_FULL_AI
-                       : sc->roam == 6 ? TD5_RSPRINT_SMOKE_AI : TD5_RSPRINT_FULL;
+                       : sc->roam == 6 ? TD5_RSPRINT_SMOKE_AI : sc->roam == 7 ? TD5_RCIRCUIT_FULL
+                       : sc->roam == 8 ? TD5_RCIRCUIT_SMOKE : TD5_RSPRINT_FULL;
         td5_roam_sprint_route_waypoints(mode, ll, 8);
         td5_roam_sprint_test_arm(mode);
         if (!td5_roam_selftest_arm(ll[0][0], ll[0][1])) {
@@ -878,8 +890,13 @@ static void st_inv_flag(int level, const char *fmt, ...)
     TD5_LOG_W(LOG_TAG, "invariant: %s", s_inv.desc);
 }
 
+static long s_inv_roam_placed;        /* [roam F9a] see st_inv_sample */
+static double s_inv_roam_step_max_m;
+
 static void st_inv_reset(void)
 {
+    s_inv_roam_step_max_m = 0.0;
+    s_inv_roam_placed = td5_roam_placements();
     memset(&s_inv, 0, sizeof(s_inv));
     s_inv.active = 1;
     s_inv.worst  = ST_PASS;
@@ -1066,10 +1083,18 @@ static int st_drive_result(char *note, size_t n)
     return ST_PASS;
 }
 
+/* [roam F9a] the generic checker's jump metric is span/strip shaped: a roam row's cars are put on a grid (and the
+ * opponents parked / unparked) with td5_roam_place_actor, which read as 24 m "jumps" (peak jump 10514 / 14490 WARNs on
+ * the AI rows). In a roam row the step metric restarts after every placement and is reported in metres. */
 static void st_inv_sample(void)
 {
     int n, slot;
     if (!s_inv.active) return;
+    if (s_roam_row && td5_roam_placements() != s_inv_roam_placed) {
+        int q;
+        s_inv_roam_placed = td5_roam_placements();
+        for (q = 0; q < ST_INV_MAX_SLOTS; q++) { s_inv.haspos[q] = 0; s_inv.moving[q] = 0; }
+    }
     n = td5_game_get_total_actor_count();
     if (n > ST_INV_MAX_SLOTS) n = ST_INV_MAX_SLOTS;
     for (slot = 0; slot < n; slot++) {
@@ -1109,6 +1134,7 @@ static void st_inv_sample(void)
             if (llabs(dy) > mj) mj = llabs(dy);
             if (llabs(dz) > mj) mj = llabs(dz);
             if (mj > s_inv.peak_jump) s_inv.peak_jump = mj;
+            if (s_roam_row && (double)mj / 256.0 / 430.0 > s_inv_roam_step_max_m) s_inv_roam_step_max_m = (double)mj / 256.0 / 430.0;
             if (llabs(dx) > s_inv_max_jump || llabs(dy) > s_inv_max_jump ||
                 llabs(dz) > s_inv_max_jump)
                 st_inv_flag(ST_FAIL, "slot%d teleport dx=%lld dy=%lld dz=%lld",
@@ -1167,7 +1193,11 @@ static int st_inv_result(char *note, size_t nsz)
         snprintf(s_inv.desc, sizeof(s_inv.desc), "peak speed %lld > %d",
                  (long long)(s_inv.peak_speed >> 8), s_inv_warn_speed);
     }
-    if (s_inv.active && status < ST_WARN && (s_inv.peak_jump >> 8) > s_inv_warn_jump) {
+    /* [roam F9a] a roam row is judged on metres per tick (a car at 200 km/h moves 1.9 m): WARN past 6 m */
+    if (s_inv.active && s_roam_row && status < ST_WARN && s_inv_roam_step_max_m > 6.0) {
+        status = ST_WARN;
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "roam step %.1f m/tick", s_inv_roam_step_max_m);
+    } else if (s_inv.active && !s_roam_row && status < ST_WARN && (s_inv.peak_jump >> 8) > s_inv_warn_jump) {
         status = ST_WARN;
         snprintf(s_inv.desc, sizeof(s_inv.desc), "peak jump %lld > %d",
                  (long long)(s_inv.peak_jump >> 8), s_inv_warn_jump);
@@ -1176,9 +1206,13 @@ static int st_inv_result(char *note, size_t nsz)
      * and peak per-tick position jump (both truncated 24.8/8.8 -> display), and
      * how many active cars actually moved. This quantifies "cars fly/jump" the
      * generous FAIL thresholds don't trip. */
-    snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d span=%d",
-             s_inv.peak_air, (long long)(s_inv.peak_speed >> 8),
-             (long long)(s_inv.peak_jump >> 8), moved, active, s_inv.peak_span);
+    if (s_roam_row)
+        snprintf(tele, sizeof(tele), "air=%d spd=%lld step=%.2fm racers=%d (roam: no span/prog)",
+                 s_inv.peak_air, (long long)(s_inv.peak_speed >> 8), s_inv_roam_step_max_m, active);
+    else
+        snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d span=%d",
+                 s_inv.peak_air, (long long)(s_inv.peak_speed >> 8),
+                 (long long)(s_inv.peak_jump >> 8), moved, active, s_inv.peak_span);
     if (status == ST_PASS)
         snprintf(note, nsz, "ok (%d samp) %s", s_inv.samples, tele);
     else

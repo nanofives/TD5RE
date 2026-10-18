@@ -45,6 +45,7 @@
 #include "td5_roam_barrier.h"
 #include "td5_roam_race.h"
 #include "td5_roam_ai.h"          /* [F7] the AI rows: standings, braking, counters */
+#include "td5_roam_lap.h"         /* [F9a] the circuit rows: the lap tracker simulation */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -71,9 +72,38 @@ static const double k_full_ai_wp[][2] = {
     { -34.92048, -57.95358 },     /* via    Calle 12, Plaza Moreno east side              */
     { -34.90950, -57.95520 },     /* FINISH Diagonal 74 nb, past the Plaza Italia ring    */
 };
-#define SD_IS_AI(m) ((m) == TD5_RSPRINT_FULL_AI || (m) == TD5_RSPRINT_SMOKE_AI)
-#define SD_IS_SMOKE(m) ((m) == TD5_RSPRINT_SMOKE || (m) == TD5_RSPRINT_SMOKE_AI)
+/* [F9a] the circuits (lat/lon from the cached OSM roads, found with a directed-graph search over the casco and
+ * checked in the game's own planner: _archive/roam/F9a/). FULL: ~1.5 km round Plaza Italia (the roundabout ring,
+ * Avenida 7, Calle 48, Calle 9, Avenida 44, back into the ring), 3 laps. SMOKE: a 0.6 km block loop (Calle 42,
+ * Calle 6, Calle 41, Avenida 7), 2 laps. FIG8: two block loops sharing the Calle 42 x Calle 10 junction, driven
+ * twice through it in two directions (census only: barriers + the lap tracker on the polyline). */
+static const double k_circ_full_wp[][2] = {
+    { -34.911916, -57.953726 },   /* START  Avenida 7, 150 m after the Plaza Italia ring       */
+    { -34.914504, -57.952042 },   /* via    Calle 48                                           */
+    { -34.914242, -57.955114 },   /* via    Calle 9                                            */
+    { -34.911784, -57.956370 },   /* FINISH Avenida 44, 112 m before the ring; the lap closes through it */
+};
+static const double k_circ_smoke_wp[][2] = {
+    { -34.908033, -57.956484 },
+    { -34.907202, -57.957607 },
+    { -34.908129, -57.958627 },
+    { -34.908899, -57.957775 },
+};
+static const double k_fig8_wp[][2] = {
+    { -34.912231, -57.960060 },   /* START  Calle 10, 70 m after the crossing  */
+    { -34.913121, -57.960027 },
+    { -34.913164, -57.961109 },
+    { -34.912274, -57.961140 },
+    { -34.910816, -57.959712 },
+    { -34.910504, -57.961241 },
+    { -34.911243, -57.961390 },
+    { -34.911665, -57.960822 },   /* FINISH Calle 10, just before the crossing: the lap closes through it */
+};
+#define SD_IS_CIRC(m) ((m) == TD5_RCIRCUIT_FULL || (m) == TD5_RCIRCUIT_SMOKE)
+#define SD_IS_AI(m) ((m) == TD5_RSPRINT_FULL_AI || (m) == TD5_RSPRINT_SMOKE_AI || SD_IS_CIRC(m))
+#define SD_IS_SMOKE(m) ((m) == TD5_RSPRINT_SMOKE || (m) == TD5_RSPRINT_SMOKE_AI || (m) == TD5_RCIRCUIT_SMOKE)
 #define SD_AI_N 5
+#define SD_CIRC_AI_N 3
 
 typedef struct {
     int    barrier;               /* index in td5_roam_barriers()                         */
@@ -118,11 +148,22 @@ static struct {
     double   along_s;             /* distance along the driver path (m) */
     double   ltx, ltz;            /* last pursuit target, world units (trace) */
     int      shots;               /* TD5RE_ROAM_SPRINT_SHOTS=1: frame dumps at the key moments */
-    char     shot_done[8][24];
+    char     shot_done[12][24];
     int      nshot;
     int      exit_ok;             /* ENTER on the results panel returned to free roam, barriers cleared */
     int      rear_cd;             /* [F7] rear view held on the grid (the field is behind START) */
     int      ai_done;             /* [F7] every opponent through the line before the results ENTER */
+    /* [F9a] circuit rows */
+    int      laps;                /* laps of the scripted circuit                                  */
+    int      circ_closed;         /* the reloaded route is a closed circuit with the saved type + laps */
+    char     f8_note[760];        /* figure-8 census verdict ("" = not run)                        */
+    int      f8_bad;              /* figure-8 census failures                                      */
+    double   lap_len;             /* the loop length (m)                                           */
+    long     tick_min_lap;        /* best lap seen by the monitor (ticks)                          */
+    int      mon_laps;            /* the monitor's last player lap count                           */
+    long     mon_jumps;           /* monitor: ticks the player's lap count rose by more than 1     */
+    int      mon_ai_laps[8];
+    long     mon_ai_jumps;
 } D;
 
 /* one frame dump per name: <log dir>roam_sprint_<name>.png */
@@ -133,7 +174,7 @@ static void sd_shot(const char *name)
     int i;
     if (!D.shots) return;
     for (i = 0; i < D.nshot; i++) if (!strcmp(D.shot_done[i], name)) return;
-    if (D.nshot < 8) snprintf(D.shot_done[D.nshot++], sizeof D.shot_done[0], "%s", name);
+    if (D.nshot < 12) snprintf(D.shot_done[D.nshot++], sizeof D.shot_done[0], "%s", name);
     snprintf(path, sizeof path, "%sroam_sprint_%s.png", dir ? dir : "", name);
     td5_plat_request_frame_dump(path);
     TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] frame dump %s", path);
@@ -160,8 +201,36 @@ static void sd_dump_route(void)
     fclose(f);
 }
 
+/* TD5RE_ROAM_CIRCUIT_WP="lat,lon;lat,lon;..." replaces the circuit's waypoints (START first, FINISH last) */
+static int sd_env_wp(double (*ll)[2], int max)
+{
+    const char *e = getenv("TD5RE_ROAM_CIRCUIT_WP");
+    int n = 0;
+    while (e && *e && n < max) {
+        char *end;
+        const double la = strtod(e, &end);
+        double lo;
+        if (end == e || *end != ',') break;
+        lo = strtod(end + 1, &end);
+        ll[n][0] = la; ll[n][1] = lo; n++;
+        e = end;
+        if (*e == ';') e++;
+    }
+    return n;
+}
+
 int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
 {
+    if (SD_IS_CIRC(mode)) {
+        const double (*cs)[2] = mode == TD5_RCIRCUIT_SMOKE ? k_circ_smoke_wp : k_circ_full_wp;
+        const int cn = mode == TD5_RCIRCUIT_SMOKE ? (int)(sizeof k_circ_smoke_wp / sizeof k_circ_smoke_wp[0])
+                                                  : (int)(sizeof k_circ_full_wp / sizeof k_circ_full_wp[0]);
+        int i, n = sd_env_wp(ll, max);
+        if (n >= 2) return n;
+        for (i = 0; i < cn && i < max; i++) { ll[i][0] = cs[i][0]; ll[i][1] = cs[i][1]; }
+        return cn;
+    }
+    {
     const double (*src)[2] = SD_IS_SMOKE(mode) ? k_smoke_wp : (mode == TD5_RSPRINT_FULL_AI ? k_full_ai_wp : k_full_wp);
     const int n = SD_IS_SMOKE(mode) ? (int)(sizeof k_smoke_wp / sizeof k_smoke_wp[0])
                 : mode == TD5_RSPRINT_FULL_AI ? (int)(sizeof k_full_ai_wp / sizeof k_full_ai_wp[0])
@@ -169,6 +238,7 @@ int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
     int i;
     for (i = 0; i < n && i < max; i++) { ll[i][0] = src[i][0]; ll[i][1] = src[i][1]; }
     return n;
+    }
 }
 
 void td5_roam_sprint_test_arm(int mode)
@@ -180,9 +250,11 @@ void td5_roam_sprint_test_arm(int mode)
     D.ch_hint = ROAM_PRIM_NONE;
     D.want_wt = SD_IS_AI(mode) ? 0 : (mode == TD5_RSPRINT_SMOKE ? 1 : 2);   /* [F7] AI rows: no wrong turns */
     D.shots = td5_env_int("TD5RE_ROAM_SPRINT_SHOTS", 0, 0, 1);
-    td5_roam_ai_force_player_spot(SD_IS_AI(mode) ? 3 : -1);   /* [F7] mid-pack, repeatable (play: random) */
+    D.laps = SD_IS_CIRC(mode) ? td5_env_int("TD5RE_ROAM_CIRCUIT_LAPS", mode == TD5_RCIRCUIT_SMOKE ? 2 : 3, 1, TD5_RRACE_MAX_LAPS) : 1;
+    td5_roam_ai_force_player_spot(SD_IS_CIRC(mode) ? 1 : (SD_IS_AI(mode) ? 3 : -1));   /* [F7] mid-pack, repeatable (play: random) */
     snprintf(D.route_name, sizeof D.route_name, "%s",
-             mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
+             mode == TD5_RCIRCUIT_FULL ? "selftest_circuit" : mode == TD5_RCIRCUIT_SMOKE ? "selftest_circuit_smoke"
+             : mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
              : mode == TD5_RSPRINT_SMOKE_AI ? "selftest_sprint_ai_smoke" : "selftest_sprint");
 }
 
@@ -220,13 +292,23 @@ static int sd_plan_save_load(void)
         else if (i == n - 1) ok = td5_roam_route_set_finish_at(px, pz);
         else ok = td5_roam_route_add_at(px, pz);
     }
+    if (ok && SD_IS_CIRC(D.mode)) td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, D.laps);     /* [F9a] closes FINISH -> START */
     if (!ok || !td5_roam_route_result()->ok) { sd_finish("could not plan the scripted route", 1); return 0; }
+    if (SD_IS_CIRC(D.mode) && !td5_roam_route_result()->closed) { sd_finish("the circuit has no closing leg back to START", 1); return 0; }
     D.saved_hash = td5_roam_route_result()->hash;
     if (!td5_roam_route_save(D.route_name)) { sd_finish("could not save the route", 1); return 0; }
     td5_roam_route_clear();
     if (!td5_roam_route_load(D.route_name)) { sd_finish("could not load the saved route", 1); return 0; }
     D.loaded_hash = td5_roam_route_result()->hash;
     D.length_m = td5_roam_route_result()->length_m;
+    if (SD_IS_CIRC(D.mode)) {
+        /* [F9a] save/load keeps the type and the laps: the reloaded route is still a closed circuit of D.laps laps */
+        D.circ_closed = td5_roam_route_type() == TD5_ROUTE_CIRCUIT && td5_roam_route_laps() == D.laps &&
+                        td5_roam_route_result()->closed;
+        D.lap_len = D.length_m;
+        TD5_LOG_I(LOG_TAG, "[ROAMCIRCUIT] reloaded: type=%d laps=%d (want %d) closed=%d lap=%.1f m",
+                  td5_roam_route_type(), td5_roam_route_laps(), D.laps, td5_roam_route_result()->closed, D.length_m);
+    }
     TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] route '%s' planned + saved + loaded: %.1f m, %d edges, hash saved %08X loaded %08X",
               D.route_name, D.length_m, td5_roam_route_result()->nedge, (unsigned)D.saved_hash, (unsigned)D.loaded_hash);
     return 1;
@@ -244,12 +326,15 @@ static void sd_build_path(void)
 {
     const TD5_RouteResult *r = td5_roam_route_result();
     int i, n = 0, dropped = 0;
+    const int copies = SD_IS_CIRC(D.mode) ? D.laps + 1 : 1;     /* [F9a] a circuit: the lap unrolled, one lap more than the race */
+    int c;
     free(s_ppx); free(s_ppz); free(s_pd);
     memset(&s_path, 0, sizeof s_path);
-    s_ppx = (double *)malloc((size_t)(r->npt + 1) * sizeof(double));
-    s_ppz = (double *)malloc((size_t)(r->npt + 1) * sizeof(double));
-    s_pd  = (double *)malloc((size_t)(r->npt + 1) * sizeof(double));
+    s_ppx = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
+    s_ppz = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
+    s_pd  = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
     if (!s_ppx || !s_ppz || !s_pd) return;
+    for (c = 0; c < copies; c++)
     for (i = 0; i < r->npt; i++) {
         /* a jog is two points that each turn back by more than 90 degrees: both go (judged on the
          * ORIGINAL neighbours, so the first one dropped cannot hide the second) */
@@ -260,6 +345,7 @@ static void sd_build_path(void)
             if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
                 (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
         }
+        if (c > 0 && i == 0) continue;                  /* the lap's first point is the previous lap's last */
         s_ppx[n] = r->px[i]; s_ppz[n] = r->pz[i];
         s_pd[n] = n ? s_pd[n - 1] + sqrt((s_ppx[n] - s_ppx[n - 1]) * (s_ppx[n] - s_ppx[n - 1]) +
                                          (s_ppz[n] - s_ppz[n - 1]) * (s_ppz[n] - s_ppz[n - 1])) / SD_M : 0.0;
@@ -396,6 +482,162 @@ static void sd_ai_shots(void)
     if (ahead >= 2 && (long)g_td5.simulation_tick_counter - D.t_go > 150) sd_shot("3_pack");
 }
 
+/* ------------------------------------------------------------ [F9a] figure 8 + lap tracker ---- */
+
+static int sd_seg_cross(double ax, double az, double bx, double bz, double cx, double cz, double dx, double dz)
+{
+    const double d1x = bx - ax, d1z = bz - az, d2x = dx - cx, d2z = dz - cz;
+    const double den = d1x * d2z - d1z * d2x;
+    double t, u;
+    if (fabs(den) < 1e-9) return 0;
+    t = ((cx - ax) * d2z - (cz - az) * d2x) / den;
+    u = ((cx - ax) * d1z - (cz - az) * d1x) / den;
+    return t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0;
+}
+
+/* proper crossings between non-adjacent segments of the polyline (a figure 8 has at least one) */
+static int sd_selfcross(const TD5_RouteResult *r)
+{
+    int i, j, n = 0;
+    for (i = 0; i + 1 < r->npt; i++)
+        for (j = i + 3; j + 1 < r->npt; j++)
+            if (sd_seg_cross(r->px[i], r->pz[i], r->px[i + 1], r->pz[i + 1], r->px[j], r->pz[j], r->px[j + 1], r->pz[j + 1])) n++;
+    return n;
+}
+
+/* The lap tracker on a polyline, no car: positions along the loop every 2 m with 1.5 m of sideways noise, from
+ * 30 m behind the line. The tracked TOTAL must follow the true arc length within 6 m the whole way (a jump at a
+ * self-crossing would break it), the lap count must rise by exactly 1 at each line crossing, backing 25 m behind the
+ * line after lap 1 and dithering 10 m each way over it 6 times after lap 2 must not count a lap twice. */
+static int sd_lap_sim(const TD5_RouteResult *r, int laps, char *note, size_t cap)
+{
+    TD5_RoamLoop lp;
+    TD5_LapTrack t;
+    double *seq = NULL;
+    int ns = 0, cap_s, i, k, bad = 0, prev_cnt = 0, jumps = 0, incs = 0, final_cnt = 0;
+    double worst = 0.0;
+    uint32_t rng = 20261018u;
+    if (!td5_roam_loop_init(&lp, r->px, r->pz, r->dist_m, r->npt, SD_M)) { snprintf(note, cap, "loop init failed"); return 1; }
+    cap_s = (int)(lp.L * (double)(laps + 2) / 2.0) + 800;
+    seq = (double *)malloc((size_t)cap_s * sizeof(double));
+    if (!seq) { td5_roam_loop_free(&lp); snprintf(note, cap, "out of memory"); return 1; }
+    {
+        double sv;
+        for (sv = -30.0; sv <= lp.L * (double)laps + 30.0 && ns < cap_s - 200; sv += 2.0) {
+            int lap_k;
+            seq[ns++] = sv;
+            for (lap_k = 1; lap_k <= laps && lap_k <= 2; lap_k++) {
+                const double line = lp.L * (double)lap_k;
+                double q;
+                if (!(sv < line && sv + 2.0 >= line)) continue;
+                if (lap_k == 1) {
+                    for (q = line + 6.0; q >= line - 25.0; q -= 2.0) seq[ns++] = q;
+                    for (q = line - 25.0; q <= line + 6.0; q += 2.0) seq[ns++] = q;
+                } else {
+                    int rep;
+                    for (rep = 0; rep < 6; rep++) {
+                        for (q = line + 10.0; q >= line - 10.0; q -= 2.0) seq[ns++] = q;
+                        for (q = line - 10.0; q <= line + 10.0; q += 2.0) seq[ns++] = q;
+                    }
+                }
+            }
+        }
+    }
+    td5_roam_lap_reset(&t);
+    for (i = 0; i < ns; i++) {
+        double w = fmod(seq[i], lp.L), x, z, ux, uz, off, dd;
+        int seg = 0, j;
+        double sl, f;
+        if (w < 0.0) w += lp.L;
+        while (seg + 1 < lp.n && lp.d[seg + 1] <= w) seg++;
+        j = (seg + 1) % lp.n;
+        sl = seg + 1 < lp.n ? lp.d[seg + 1] - lp.d[seg] : lp.L - lp.d[lp.n - 1];
+        f = sl > 0.0 ? (w - lp.d[seg]) / sl : 0.0;
+        x = lp.px[seg] + (lp.px[j] - lp.px[seg]) * f;
+        z = lp.pz[seg] + (lp.pz[j] - lp.pz[seg]) * f;
+        td5_roam_loop_dir(&lp, seg, &ux, &uz);
+        rng = rng * 1664525u + 1013904223u;
+        off = ((double)((rng >> 8) & 0xFFFF) / 65535.0 * 2.0 - 1.0) * 1.5;
+        x += -uz * off * SD_M; z += ux * off * SD_M;
+        td5_roam_lap_update(&lp, &t, x, z, 60.0);
+        dd = fabs(t.total - seq[i]);
+        if (dd > worst) worst = dd;
+        if (dd > 6.0) {
+            if (bad < 3) TD5_LOG_W(LOG_TAG, "[ROAMCIRCUIT] lap sim: sample %d true %.1f m tracked %.1f m", i, seq[i], t.total);
+            bad++;
+        }
+        k = td5_roam_lap_count(&lp, &t, 0.0);
+        if (k > prev_cnt + 1) jumps++;
+        if (k > prev_cnt) incs++;
+        prev_cnt = k;
+        final_cnt = k;
+    }
+    snprintf(note, cap, "lap sim %d samples, L=%.1f m, worst |total-true|=%.2f m, bad=%d, jumps=%d, increments=%d, final laps=%d (want %d)",
+             ns, lp.L, worst, bad, jumps, incs, final_cnt, laps);
+    free(seq);
+    td5_roam_loop_free(&lp);
+    return bad || jumps || incs != laps || final_cnt != laps;
+}
+
+/* The figure-8 census: plan the figure 8 as a circuit, build its barriers, check that nothing is left open and no barrier
+ * sits across the route (both crossing directions stay open), then run the lap tracker over its polyline. */
+static void sd_fig8_census(void)
+{
+    const int n = (int)(sizeof k_fig8_wp / sizeof k_fig8_wp[0]);
+    TD5_RoamBarrierStats bs;
+    const TD5_RouteResult *r;
+    char lapnote[200];
+    int i, ok = 1, cross = 0, nb = 0;
+    td5_roam_route_clear();
+    for (i = 0; i < n && ok; i++) {
+        int32_t px, pz;
+        if (!td5_roam_route_latlon_to_place(k_fig8_wp[i][0], k_fig8_wp[i][1], &px, &pz)) { ok = 0; break; }
+        if (i == 0) ok = td5_roam_route_set_start_at(px, pz);
+        else if (i == n - 1) ok = td5_roam_route_set_finish_at(px, pz);
+        else ok = td5_roam_route_add_at(px, pz);
+    }
+    if (ok) td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, 3);
+    r = td5_roam_route_result();
+    D.f8_bad = 0;
+    if (!ok || !r->ok || !r->closed) {
+        snprintf(D.f8_note, sizeof D.f8_note, "figure 8 not planned (ok %d, route ok %d, closed %d)", ok, r->ok, r->closed);
+        D.f8_bad = 1;
+    } else {
+        cross = sd_selfcross(r);
+        nb = td5_roam_barriers_build(r);
+        td5_roam_barriers_stats(&bs);
+        if (cross < 1) D.f8_bad++;
+        if (bs.arms_open || bs.degree_open || bs.across_route || bs.pass_gaps || bs.missing_cluster || nb < 1) D.f8_bad++;
+        D.f8_bad += sd_lap_sim(r, 3, lapnote, sizeof lapnote);
+        snprintf(D.f8_note, sizeof D.f8_note,
+                 "figure 8 %.0f m: self-crossings %d, barriers %d (clusters %d, passes %d), arms open %d, planner-degree open %d, across route %d, pass gaps %d | %s",
+                 r->length_m, cross, nb, bs.clusters_passed, bs.passes, bs.arms_open, bs.degree_open, bs.across_route, bs.pass_gaps, lapnote);
+    }
+    TD5_LOG_I(LOG_TAG, "[ROAMCIRCUIT] FIG8 %s: %s", D.f8_bad ? "FAIL" : "PASS", D.f8_note);
+    td5_roam_barriers_clear();
+    td5_roam_route_clear();
+}
+
+/* [F9a] per frame while a circuit races: the player's and every opponent's lap count may only rise one at a time */
+static void sd_circ_monitor(void)
+{
+    const TD5_RoamRaceResult *rr = td5_roam_race_result();
+    int k;
+    if (rr->laps_done > D.mon_laps + 1) {
+        D.mon_jumps++;
+        TD5_LOG_W(LOG_TAG, "[ROAMCIRCUIT] player lap count jumped %d -> %d", D.mon_laps, rr->laps_done);
+    }
+    if (rr->laps_done > D.mon_laps) D.mon_laps = rr->laps_done;
+    for (k = 0; k < 8; k++) {
+        const int l = td5_roam_ai_car_laps(k);
+        if (l > D.mon_ai_laps[k] + 1) {
+            D.mon_ai_jumps++;
+            TD5_LOG_W(LOG_TAG, "[ROAMCIRCUIT] opponent %d lap count jumped %d -> %d", k, D.mon_ai_laps[k], l);
+        }
+        if (l > D.mon_ai_laps[k]) D.mon_ai_laps[k] = l;
+    }
+}
+
 /* standalone dev run (no self-test director): TD5RE_ROAM_SPRINT_TEST=full|smoke with --Roam=1
  * --RoamSpawn=<the route START> arms the same script, logs the verdict and quits */
 static struct { int checked, driven, reported; } E;
@@ -405,9 +647,11 @@ void td5_roam_sprint_test_frame(void)
     if (!E.checked && !D.mode && td5_roam_active()) {
         const char *m = getenv("TD5RE_ROAM_SPRINT_TEST");
         E.checked = 1;
-        if (m && (!strcmp(m, "full") || !strcmp(m, "smoke") || !strcmp(m, "ai") || !strcmp(m, "ai_smoke"))) {
+        if (m && (!strcmp(m, "full") || !strcmp(m, "smoke") || !strcmp(m, "ai") || !strcmp(m, "ai_smoke") ||
+                  !strcmp(m, "circuit") || !strcmp(m, "circuit_smoke"))) {
             td5_roam_sprint_test_arm(!strcmp(m, "smoke") ? TD5_RSPRINT_SMOKE : !strcmp(m, "ai") ? TD5_RSPRINT_FULL_AI
-                                     : !strcmp(m, "ai_smoke") ? TD5_RSPRINT_SMOKE_AI : TD5_RSPRINT_FULL);
+                                     : !strcmp(m, "ai_smoke") ? TD5_RSPRINT_SMOKE_AI : !strcmp(m, "circuit") ? TD5_RCIRCUIT_FULL
+                                     : !strcmp(m, "circuit_smoke") ? TD5_RCIRCUIT_SMOKE : TD5_RSPRINT_FULL);
             td5_roam_ai_force_player_spot(-1);   /* [F7] standalone: the player's grid spot is drawn as in play */
             E.driven = 1;
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
@@ -426,6 +670,7 @@ void td5_roam_sprint_test_frame(void)
     switch (D.phase) {
     case 0:   /* planner graph */
         if (td5_roam_route_graph_ready() && D.frames > 20) {
+            if (D.mode == TD5_RCIRCUIT_FULL) sd_fig8_census();    /* [F9a] before the real circuit is planned */
             if (!sd_plan_save_load()) return;
             D.phase = 1; D.phase_frames = 0;
         } else if (D.frames > 6000) {
@@ -433,6 +678,13 @@ void td5_roam_sprint_test_frame(void)
         }
         break;
     case 1:   /* open the setup panel the way the R key does */
+        if (SD_IS_CIRC(D.mode) && D.shots) {
+            /* [F9a] the planner map with the circuit (closing leg included) before the setup panel covers it */
+            if (D.phase_frames == 1) { td5_roam_route_ui_open_map(); break; }
+            if (D.phase_frames == 6) { td5_roam_route_ui_fit(); break; }
+            if (D.phase_frames == 36) { sd_shot("0_planner"); break; }
+            if (D.phase_frames < 45) break;
+        }
         if (D.phase_frames < 10) break;
         if (!td5_roam_race_open_setup()) { sd_finish("setup refused the loaded route", 1); return; }
         D.phase = 2; D.phase_frames = 0;
@@ -449,8 +701,8 @@ void td5_roam_sprint_test_frame(void)
             TD5_RoamRaceSetup s;
             TD5_RoamPhysStats st;
             memset(&s, 0, sizeof s);
-            s.laps = 1; s.traffic = 1; s.cops = 0;
-            s.opponents = SD_IS_AI(D.mode) ? SD_AI_N : 0;   /* [F7] */
+            s.laps = D.laps; s.traffic = 1; s.cops = 0;
+            s.opponents = SD_IS_CIRC(D.mode) ? SD_CIRC_AI_N : (SD_IS_AI(D.mode) ? SD_AI_N : 0);   /* [F7] [F9a] */
             if (!td5_roam_race_start(&s)) { sd_finish("race start refused", 1); return; }
             td5_roam_barriers_stats(&D.bst);
             td5_roam_physics_stats(&st);
@@ -480,6 +732,15 @@ void td5_roam_sprint_test_frame(void)
             td5_game_resume_countdown_ticks() <= 45)
             sd_shot("2_countdown");
         if (td5_roam_race_state() == TD5_RRACE_RACING && D.along_s > D.length_m * 0.30) sd_shot("3_midrace");
+        if (SD_IS_CIRC(D.mode)) {
+            double al = 0.0;
+            td5_roam_race_progress(&al, NULL, NULL);
+            sd_circ_monitor();
+            if (td5_roam_race_state() == TD5_RRACE_RACING && D.lap_len > 0.0) {
+                if (al > D.lap_len + 6.0 && al < D.lap_len + 16.0) sd_shot("7_start_line");
+                if (al > D.lap_len * 1.45 && al < D.lap_len * 1.9) sd_shot("8_hud_lap2");
+            }
+        }
         if (td5_roam_race_state() == TD5_RRACE_RACING && td5_roam_race_result()->ncp > 1 &&
             td5_roam_race_result()->split_ticks[0] > 0 && td5_roam_race_result()->split_ticks[0] + 25 <= (long)
             (g_td5.simulation_tick_counter - D.t_go))
@@ -491,6 +752,7 @@ void td5_roam_sprint_test_frame(void)
         }
         break;
     case 4:   /* results panel up: frame dump, then ENTER (keep roaming) must end the race at the finish */
+        if (SD_IS_CIRC(D.mode)) sd_circ_monitor();
         if (SD_IS_AI(D.mode) && !D.ai_done) {
             /* [F7] every opponent through the line (or 6 minutes of frames) before the results are judged */
             if (!td5_roam_ai_racing() || D.phase_frames > 21600) {
@@ -649,7 +911,11 @@ static uint32_t sd_bits(TD5_Actor *a)
     if (tick == D.tick_last) return 0;
     D.tick_last = tick;
     if (!D.t_go) D.t_go = tick;
-    if (tick - D.t_go > (D.mode == TD5_RSPRINT_SMOKE ? 150L : 480L) * 30L) { sd_finish("sprint timeout", 1); return 0; }
+    {
+        /* [F9a] a circuit gets laps x lap at a crawl of 25 km/h plus 90 s */
+        const long lim_s = SD_IS_CIRC(D.mode) ? (long)((double)D.laps * D.lap_len / 6.9) + 90L : (D.mode == TD5_RSPRINT_SMOKE ? 150L : 480L);
+        if (tick - D.t_go > lim_s * 30L) { sd_finish("sprint timeout", 1); return 0; }
+    }
     td5_roam_world_origin(&ox, &oz);
     px = a->world_pos.x / 256.0; pz = a->world_pos.z / 256.0;
     {
@@ -811,15 +1077,49 @@ static int sd_ai_verdict(char *note, size_t n, const char *bad, const TD5_RoamRa
     return bad[0] ? 2 : 0;
 }
 
+/* [F9a] the circuit rows' verdict: laps, lap splits, the opponents' laps, the figure-8 census */
+static int sd_circuit_verdict(char *note, size_t n, const char *bad, const TD5_RoamRaceResult *res,
+                              const TD5_RoamRaceWallStats *ws, long pinch, long resc, long tele)
+{
+    TD5_RoamAiStats as;
+    char laps_s[200] = "", ord[200] = "";
+    size_t ll = 0, ol = 0;
+    int i;
+    td5_roam_ai_stats(&as);
+    for (i = 0; i < res->laps_done && i < TD5_RRACE_MAX_LAPS; i++) {
+        const long lt = res->lap_ticks[i] - (i > 0 ? res->lap_ticks[i - 1] : 0);
+        if (ll < sizeof laps_s) ll += (size_t)snprintf(laps_s + ll, sizeof laps_s - ll, "%s%.2fs", i ? " " : "", (double)lt / 30.0);
+    }
+    for (i = 0; i < res->nfield && i < 6; i++) {
+        if (ol < sizeof ord)
+            ol += (size_t)snprintf(ord + ol, sizeof ord - ol, "%s%d.%s L%d %.1fs", i ? " " : "", i + 1,
+                                   res->field_slot[i] == 0 ? "YOU" : "CPU", res->field_laps[i],
+                                   res->field_ticks[i] > 0 ? (double)res->field_ticks[i] / 30.0 : 0.0);
+    }
+    if (bad[0]) snprintf(note, n, "circuit FAIL: %.100s", bad);
+    else snprintf(note, n, "circuit %.2f km x %d laps, laps %s, AI %d/%d fin, stuck 0, lap jumps 0, fig8 %s", D.lap_len / 1000.0, D.laps,
+                  laps_s, as.finished, as.n, D.mode == TD5_RCIRCUIT_FULL ? "ok" : "-");
+    TD5_LOG_I(LOG_TAG, "[ROAMCIRCUIT] VERDICT %s: route='%s' lap=%.1f m laps=%d player_laps=%d lap_ticks=[%s] best_lap=%ld total=%ld ticks "
+              "closed_after_reload=%d lap_jumps player=%ld/%ld opponents=%ld/%ld | opponents=%d finished=%d stuck_long=%ld recoveries=%ld "
+              "max_lateral=%.1f m | order: %s | barrier hits=%ld chassis_past=%ld pinches=%ld rescues=%ld teleports=%ld stuck=%ld "
+              "junctions=%d plaza=%d | %s | %s",
+              bad[0] ? "FAIL" : "PASS", D.route_name, D.lap_len, D.laps, res->laps_done, laps_s, res->best_lap_ticks, res->ticks,
+              D.circ_closed, res->lap_jumps, D.mon_jumps, as.lap_jumps, D.mon_ai_jumps, as.n, as.finished, as.stuck_long, as.recoveries,
+              as.max_lateral_m, ord, ws->hits, ws->chassis_past, pinch, resc, tele, D.stuck_events, D.nkeys, D.saw_plaza,
+              D.f8_note[0] ? D.f8_note : "(no figure-8 census in this row)", bad);
+    return bad[0] ? 2 : 0;
+}
+
 int td5_roam_sprint_test_verdict(char *note, size_t n)
 {
     const TD5_RoamRaceResult *res = td5_roam_race_result();
     TD5_RoamRaceWallStats ws;
     TD5_RoamPhysStats st;
-    char bad[120] = "", t[32];
+    char bad[240] = "", t[32];
     size_t bl = 0;
     int i, blocked = 0;
-    const int want_jn = SD_IS_SMOKE(D.mode) ? 3 : (D.mode == TD5_RSPRINT_FULL_AI ? 10 : 8);
+    const int want_jn = SD_IS_CIRC(D.mode) ? (D.mode == TD5_RCIRCUIT_SMOKE ? 3 : 6)
+                      : (SD_IS_SMOKE(D.mode) ? 3 : (D.mode == TD5_RSPRINT_FULL_AI ? 10 : 8));
     const int full = D.mode == TD5_RSPRINT_FULL || D.mode == TD5_RSPRINT_FULL_AI;
     long pinch, resc, tele;
     if (!D.mode) { snprintf(note, n, "roam-sprint not armed"); return 2; }
@@ -833,7 +1133,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     if (D.saved_hash != D.loaded_hash) SD_BAD("reload hash %08X != %08X; ", (unsigned)D.loaded_hash, (unsigned)D.saved_hash);
     if (D.nkeys < want_jn) SD_BAD("%d junctions < %d; ", D.nkeys, want_jn);
     if (full && !D.saw_diag) SD_BAD("no diagonal; ");
-    if (full && !D.saw_plaza) SD_BAD("no plaza; ");
+    if ((full || D.mode == TD5_RCIRCUIT_FULL) && !D.saw_plaza) SD_BAD("no plaza; ");
     if (D.nwt < D.want_wt) SD_BAD("%d/%d wrong turns planned; ", D.nwt, D.want_wt);
     if (blocked < D.nwt) SD_BAD("%d/%d wrong turns blocked; ", blocked, D.nwt);
     if (ws.chassis_past) SD_BAD("chassis past a barrier %ld ticks; ", ws.chassis_past);
@@ -841,7 +1141,23 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     if (resc) SD_BAD("rescues %ld; ", resc);
     if (tele) SD_BAD("teleports %ld; ", tele);
     if (D.stuck_events) SD_BAD("stuck %ld; ", D.stuck_events);
-    if (SD_IS_AI(D.mode)) {
+    if (SD_IS_CIRC(D.mode)) {
+        /* [F9a] every racer round the loop D.laps times, laps never jumping, the reload kept type + laps */
+        TD5_RoamAiStats as;
+        int k;
+        td5_roam_ai_stats(&as);
+        if (!D.circ_closed) SD_BAD("reload lost type/laps/closure; ");
+        if (D.mode == TD5_RCIRCUIT_FULL && D.f8_bad) SD_BAD("figure-8 census failed; ");
+        if (res->laps_done != D.laps) SD_BAD("player laps %d/%d; ", res->laps_done, D.laps);
+        if (res->lap_jumps || D.mon_jumps) SD_BAD("player lap jumps %ld/%ld; ", res->lap_jumps, D.mon_jumps);
+        if (res->finished && res->laps_done == D.laps && res->lap_ticks[D.laps - 1] != res->ticks) SD_BAD("last lap tick != total; ");
+        if (as.n < SD_CIRC_AI_N) SD_BAD("grid %d/%d opponents; ", as.n, SD_CIRC_AI_N);
+        if (as.finished < as.n) SD_BAD("opponents finished %d/%d; ", as.finished, as.n);
+        if (as.stuck_long) SD_BAD("opponents stuck>5s %ld; ", as.stuck_long);
+        if (as.lap_jumps || D.mon_ai_jumps) SD_BAD("opponent lap jumps %ld/%ld; ", as.lap_jumps, D.mon_ai_jumps);
+        for (k = 0; k < as.n; k++)
+            if (td5_roam_ai_car_laps(k) != D.laps) SD_BAD("opponent %d laps %d/%d; ", k, td5_roam_ai_car_laps(k), D.laps);
+    } else if (SD_IS_AI(D.mode)) {
         /* [F7] every opponent placed and through the line, none stuck > 5 s */
         TD5_RoamAiStats as;
         td5_roam_ai_stats(&as);
@@ -850,6 +1166,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
         if (as.stuck_long) SD_BAD("opponents stuck>5s %ld; ", as.stuck_long);
     }
 #undef SD_BAD
+    if (SD_IS_CIRC(D.mode)) return sd_circuit_verdict(note, n, bad, res, &ws, pinch, resc, tele);
     if (SD_IS_AI(D.mode)) return sd_ai_verdict(note, n, bad, res, &ws, pinch, resc, tele);
     {
         long ct = res->ticks;
