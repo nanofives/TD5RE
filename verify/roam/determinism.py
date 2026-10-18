@@ -142,11 +142,14 @@ def main():
     ap.add_argument("--arms", default="A1,A2,R,T,N,G")
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--scenery", action="store_true", help="roam F4a: the SCENERY layer (SCENERY_*.BIN)")
+    ap.add_argument("--range", default=None, help="roam F9b: x0,z0,x1,z1 tile range instead of the casco (arm G does not apply)")
     a = ap.parse_args()
     global PREFIX, VERB
     if a.scenery:
         PREFIX = "SCENERY_"
         VERB = "--RoamBuildScenery=casco"
+    if a.range:
+        VERB = VERB.replace("=casco", "=" + a.range)
         a.arms = ",".join(x for x in a.arms.split(",") if x != "G")
     root = a.root
     exe = a.exe if os.path.isabs(a.exe) else os.path.join(root, a.exe)

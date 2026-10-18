@@ -127,7 +127,16 @@ static int bar_add(const PlBar *p, int kind, uint64_t ck, int sign, uint64_t arm
 
 /* ============================================================ WORLD frame ====== */
 
-static int32_t bar_w(double place_units, int32_t org) { return (int32_t)floor((place_units - (double)org) * 256.0 + 0.5); }
+/* place -> 24.8 world. [F9b] Clamped: on a long route a barrier more than ~19.5 km from the current world origin
+ * does not fit 24.8; it stays far away (at the clamp) instead of wrapping round to a phantom wall nearby. The
+ * origin follows the car (td5_roam_rebase.c), so every barrier near the car is exact. */
+static int32_t bar_w(double place_units, int32_t org)
+{
+    const double v = floor((place_units - (double)org) * 256.0 + 0.5);
+    if (v > 1073741824.0) return 1073741824;
+    if (v < -1073741824.0) return -1073741824;
+    return (int32_t)v;
+}
 
 static void bar_derive(int32_t ox, int32_t oz)
 {

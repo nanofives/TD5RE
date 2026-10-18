@@ -400,6 +400,9 @@ static void sd_build_path(void)
     const TD5_RouteResult *r = td5_roam_route_result();
     int i, n = 0, dropped = 0;
     const int copies = SD_IS_CIRC(D.mode) ? D.laps + 1 : 1;     /* [F9a] a circuit: the lap unrolled, one lap more than the race */
+    /* [F9b] a via point snapped beside a junction leaves a ~16 m out-and-back spike to the node; the partido drive has
+     * several of them, the casco rows keep the F6 15 m rule */
+    const double jog_m = SD_IS_PARTIDO(D.mode) ? 30.0 : 15.0;
     int c;
     free(s_ppx); free(s_ppz); free(s_pd);
     memset(&s_path, 0, sizeof s_path);
@@ -416,7 +419,7 @@ static void sd_build_path(void)
             const double bx = r->px[i + 1] - r->px[i], bz = r->pz[i + 1] - r->pz[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
             if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
-                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
+                (la < jog_m * SD_M || lb < jog_m * SD_M)) { dropped++; continue; }
         }
         if (c > 0 && i == 0) continue;                  /* the lap's first point is the previous lap's last */
         s_ppx[n] = r->px[i]; s_ppz[n] = r->pz[i];
@@ -768,6 +771,20 @@ void td5_roam_sprint_test_frame(void)
             TD5_RoamPhysStats st;
             char path[512];
             const char *dir = td5_plat_log_dir();
+            if (D.shots) {
+                /* the route map over the partido (streets of the whole place, its outline, the route), then drive */
+                if (D.phase_frames == 1) { td5_roam_route_ui_open_map(); break; }
+                if (D.phase_frames == 6) { td5_roam_route_ui_fit(); break; }
+                if (D.phase_frames == 40) { sd_shot("p_map"); break; }
+                if (D.phase_frames == 50) { td5_roam_route_ui_close_map(); break; }
+                if (D.phase_frames < 60) break;
+                if (td5_game_is_pause_menu_active() || td5_roam_route_ui_map_open()) {
+                    if (D.phase_frames == 120) td5_plat_input_inject_key(0x01, 1);   /* ESC: back to driving */
+                    if (D.phase_frames == 124) td5_plat_input_inject_key(0x01, 0);
+                    if (D.phase_frames > 600) { sd_finish("the route map / pause menu never closed", 1); return; }
+                    break;
+                }
+            }
             if (D.phase_frames < 10) break;
             td5_roam_physics_stats(&st);
             D.pinch0 = st.pinches; D.resc0 = st.rescues + st.rescues_y; D.tele0 = st.teleports;
@@ -915,6 +932,24 @@ static uint32_t sd_steer_to(const TD5_Actor *a, double tx, double tz, double kmh
 }
 
 /* pursuit target on the route `look` m ahead of `along`, world units; plus a speed from the bend ahead */
+/* [F9b] the straight line from the car to a world-frame target stays on the drivable surface (8 samples) */
+static int sd_los_ok(const TD5_Actor *a, double tx, double tz)
+{
+    const TD5_RoamResident *rs = td5_roam_resident();
+    const double px = a->world_pos.x / 256.0, pz = a->world_pos.z / 256.0;
+    int k;
+    if (!rs) return 1;
+    for (k = 1; k <= 8; k++) {
+        const double f = (double)k / 8.0;
+        TD5_RoamHit h;
+        if (!td5_roam_locate(rs, (int32_t)floor((px + (tx - px) * f) * 256.0 + 0.5), (int32_t)floor((pz + (tz - pz) * f) * 256.0 + 0.5),
+                             a->world_pos.y, 1, ROAM_PRIM_NONE, &h))
+            return 0;
+        if (h.prim == ROAM_PRIM_NONE || !h.inside) return 0;
+    }
+    return 1;
+}
+
 static void sd_route_target(double along, double look, double *tx, double *tz, double *kmh)
 {
     const TD5_RouteResult *r = sd_path();
@@ -1119,6 +1154,17 @@ static uint32_t sd_bits(TD5_Actor *a)
 
     /* pursuit on the route */
     sd_route_target(along, 10.0 + sd_kmh(a) * 0.12, &tx, &tz, &kmh_t);
+    if (D.free_drive) {
+        /* [F9b] the partido drive meets tiny roundabouts and tight block loops the casco rows never see: shorten
+         * the lookahead until the straight line to the target stays on the road (never across a ring's island) */
+        double look = 10.0 + sd_kmh(a) * 0.12;
+        while (look > 4.0 && !sd_los_ok(a, tx, tz)) {
+            double k2;
+            look *= 0.6;
+            sd_route_target(along, look, &tx, &tz, &k2);
+            if (kmh_t > 25.0) kmh_t = 25.0;
+        }
+    }
     D.ltx = tx; D.ltz = tz;
     bits = sd_steer_to(a, tx, tz, kmh_t);
     /* a wedge: throttle held and under 4 km/h for 1.5 s -> back out 1.3 s with the wheel turned away */
@@ -1129,7 +1175,11 @@ static uint32_t sd_bits(TD5_Actor *a)
     }
     if ((bits & TD5_INPUT_THROTTLE) && sd_kmh(a) < 4.0) {
         D.slow_t++;
-        if (D.slow_t == 45) { D.rev_t = 40; D.retries++; TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] wedge at %.0f m along: backing out", along); }
+        if (D.slow_t == 45) {
+            D.rev_t = 40; D.retries++;
+            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] wedge at %.0f m along: backing out", along);
+            if (D.free_drive && along > 20.0) sd_shot("p_wedge");     /* [F9b] the first wedge of a partido drive past the start, for a look */
+        }
         if (D.slow_t == 90) D.stuck_events++;
     } else {
         D.slow_t = 0;
