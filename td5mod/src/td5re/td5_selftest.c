@@ -2765,7 +2765,8 @@ static void st_tick_races(uint32_t now)
              * fade margins. Natural finishes get a much longer leash. */
             s_step_deadline_ms = now + (sc->natural_finish
                 ? 300000u
-                : (uint32_t)((float)s_race_budget / 30.0f / s_scenario_ff) * 1000u + 90000u);
+                : (uint32_t)((float)s_race_budget / 30.0f / s_scenario_ff) * 1000u + 90000u)
+                * (uint32_t)td5_env_int("TD5RE_SELFTEST_LEASH_X", 1, 1, 20);   /* [F8c] slow-frame runs (vsync, monitors off) */
         } else if ((int32_t)(now - s_step_deadline_ms) >= 0) {
             st_finish_row(row, ST_FAIL, "race never started (timeout)");
             g_td5.ini.auto_race = 0;
