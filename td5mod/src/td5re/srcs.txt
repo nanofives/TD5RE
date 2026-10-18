@@ -45,6 +45,7 @@ td5_roam_race.c
 td5_roam_race_wall.c
 td5_roam_lap.c
 td5_roam_race_drive.c
+td5_roam_handoff.c
 td5_roam_ai.c
 td5_roam_traffic.c
 td5_roam_cops.c

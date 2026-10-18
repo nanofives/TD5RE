@@ -38,6 +38,7 @@
 #include "td5_roam_race.h"
 #include "td5_roam_ai.h"           /* [F7] the opponents: grid, driver, positions */
 #include "td5_roam_lap.h"          /* [F9a] circuits: total distance + lap count */
+#include "td5_roam_handoff.h"      /* [F11a] the geo selector / Quick Race route, planted once the graph is up */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -699,6 +700,7 @@ void td5_roam_race_frame(void)
 #ifndef TD5RE_RELEASE
     td5_roam_sprint_test_frame();
 #endif
+    td5_roam_handoff_frame();    /* [F11a] plant the handed-over route, then the setup panel / the race */
 
     switch (R.state) {
     case TD5_RRACE_OFF:
