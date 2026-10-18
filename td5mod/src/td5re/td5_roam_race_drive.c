@@ -358,6 +358,9 @@ static int sd_plan_save_load(void)
         else ok = td5_roam_route_add_at(px, pz);
     }
     if (ok && SD_IS_CIRC(D.mode)) td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, D.laps);     /* [F9a] closes FINISH -> START */
+    /* [F9b] the route type outlives a clear: after the circuit rows it is still CIRCUIT, which would close the partido
+     * route back to START */
+    if (ok && SD_IS_PARTIDO(D.mode)) td5_roam_route_set_type(TD5_ROUTE_SPRINT, 1);
     if (ok && SD_IS_PARTIDO(D.mode) && !td5_roam_route_result()->ok) {
         D.mapping = 1;
         D.phase_frames = 0;
