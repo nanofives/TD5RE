@@ -82,4 +82,9 @@ int  td5_replay_playback_at_end(uint32_t sim_tick);
 int  td5_replay_actor_broken(int slot);       /* 1 = broken-down that frame */
 int  td5_replay_actor_smoke_tier(int slot);   /* 0..3 damage smoke tier      */
 
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_replay_world_shift(int32_t sx, int32_t sz);
+
 #endif /* TD5_REPLAY_H */

@@ -2858,3 +2858,16 @@ void td5_sound_set_paused(int paused)
                   g_td5.ini.music_volume);
     }
 }
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_sound_world_shift(int32_t sx, int32_t sz)
+{
+    const int32_t fx = (sx) * 256, fz = (sz) * 256;
+    int v;
+    for (v = 0; v < TD5_MAX_VIEWPORTS; v++) {
+        s_listener_pos[v][0] += fx;      s_listener_pos[v][2] += fz;
+        s_listener_prev_pos[v][0] += fx; s_listener_prev_pos[v][2] += fz;
+    }
+}

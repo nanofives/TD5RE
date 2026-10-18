@@ -3928,3 +3928,36 @@ void td5_vfx_advance_tracked_marker_phases(void) {
  *   0x004464B0  UpdateAmbientParticleDensityForSegment  [ARCH-DIVERGENCE: Particle]
  *   0x00446560  RenderAmbientParticleStreaks            [ARCH-DIVERGENCE: Particle]
  */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_vfx_world_shift(int32_t sx, int32_t sz)
+{
+    const int32_t fx = (sx) * 256, fz = (sz) * 256;
+    int v, i;
+    for (v = 0; v < TD5_MAX_VIEWPORTS; v++) {
+        uint8_t *bank = s_particle_banks[v];
+        for (i = 0; i < TD5_VFX_PARTICLE_SLOTS_PER_VIEW; i++) {
+            uint8_t *slot = bank + i * TD5_VFX_PARTICLE_SLOT_STRIDE;
+            if ((slot[0] & 0x80) == 0) continue;
+            PSLOT_WR32(slot, PSLOT_POS_X, PSLOT_RD32(slot, PSLOT_POS_X) + fx);
+            PSLOT_WR32(slot, PSLOT_POS_Z, PSLOT_RD32(slot, PSLOT_POS_Z) + fz);
+        }
+        s_weather_prev_cam[v][0] += (float)sx;
+        s_weather_prev_cam[v][2] += (float)sz;
+    }
+    if (s_tire_track_pool) {
+        for (i = 0; i < TD5_VFX_TIRE_TRACK_POOL_SIZE; i++) {
+            VfxTireTrackSlot *t = &s_tire_track_pool[i];
+            if ((t->control & 3) == 0) continue;
+            t->trail_x += fx;  t->trail_z += fz;
+            t->anchor_x += fx; t->anchor_z += fz;
+        }
+    }
+    for (i = 0; i < VFX_MAX_BREAK_EVENTS; i++) {
+        if (!s_break_events[i].alive) continue;
+        s_break_events[i].wx += (float)sx;
+        s_break_events[i].wz += (float)sz;
+    }
+}

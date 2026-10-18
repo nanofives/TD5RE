@@ -551,6 +551,41 @@ void td5_roam_physics_forget_slot(int slot)
     ss->chassis_hint = ROAM_PRIM_NONE;
 }
 
+#ifndef TD5RE_RELEASE
+struct RoamDrive;
+static void rd_world_shift(struct RoamDrive *d, int32_t sx, int32_t sz);
+#endif
+/* [F9b] World-origin rebase (td5_roam_rebase.c): the resident set's origin follows the new world origin
+ * (the locator adds it back, so no tile is touched) and every stored 24.8 WORLD position of the slot
+ * states moves by (sx, sz) world units. Hints are prim ids, frame-free. */
+void td5_roam_physics_world_shift(int32_t sx, int32_t sz, int32_t new_ox, int32_t new_oz)
+{
+    const int32_t fx = FP_SCALE(sx), fz = FP_SCALE(sz);
+    int i, k;
+    s_rp.org_x = new_ox; s_rp.org_z = new_oz;
+    if (s_rp.rs) { s_rp.rs->org_x = new_ox; s_rp.rs->org_z = new_oz; }
+    for (i = 0; i < RP_SLOTS; i++) {
+        RoamSlotState *ss = &s_rp.slot[i];
+        ss->good_x += fx; ss->good_z += fz;
+        ss->hold_x += fx; ss->hold_z += fz;
+        for (k = 0; k < RP_WALL_PROBES; k++) { ss->cin_x[k] += fx; ss->cin_z[k] += fz; }
+    }
+#ifndef TD5RE_RELEASE
+    if (s_rp.drv) rd_world_shift(s_rp.drv, sx, sz);
+#endif
+}
+
+/* [F9b] The DEV corner matrix teleports the car across the whole casco on paths stored in world units:
+ * no rebase while it runs. */
+int td5_roam_physics_rebase_inhibited(void)
+{
+#ifndef TD5RE_RELEASE
+    return s_rp.drv_mode == 2;
+#else
+    return 0;
+#endif
+}
+
 /* [F3] Session start time: the first game frame of an active roam session after the
  * session began, logged once per session in both modes (streamed / F2 full load). */
 void td5_roam_physics_note_frame(void)
@@ -1410,6 +1445,14 @@ struct RoamDrive {
     long     tot_replans;
     int      truncated;             /* acute corners past RD_MAXC_ACUTE                        */
 };
+
+/* [F9b] the DEV street follower's junction / target / last position are world units */
+static void rd_world_shift(struct RoamDrive *d, int32_t sx, int32_t sz)
+{
+    d->cl_x += sx; d->cl_z += sz;
+    if (d->tgt_x != 0.0 || d->tgt_z != 0.0) { d->tgt_x += sx; d->tgt_z += sz; }
+    d->lx += sx; d->lz += sz;
+}
 
 static double rd_speed_upt(const TD5_Actor *a)
 {

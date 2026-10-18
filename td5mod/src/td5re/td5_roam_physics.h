@@ -55,6 +55,12 @@ void td5_roam_physics_session_end(void);
 /* [F3] spawn: drop the slot's hints / last answers (they came from the unplaced actor). */
 void td5_roam_physics_forget_slot(int slot);
 
+/* [F9b] world-origin rebase: the resident set takes the new origin, slot states move by (sx, sz)
+ * world units. Called by td5_roam_rebase.c only. */
+void td5_roam_physics_world_shift(int32_t sx, int32_t sz, int32_t new_ox, int32_t new_oz);
+/* [F9b] 1 while a DEV harness keeps world-frame paths that a rebase would invalidate (corner matrix). */
+int  td5_roam_physics_rebase_inhibited(void);
+
 /* [F3] once per game frame (td5_roam_stream_tick): logs the session start time once. */
 void td5_roam_physics_note_frame(void);
 

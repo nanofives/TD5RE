@@ -285,4 +285,9 @@ int  td5_physics_shift_quality_bonus_pct(int slot);
  * (automatic gearbox / feature off / no such actor). HUD-facing. */
 int  td5_physics_shift_quality_hud_pct(int slot);
 
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_physics_world_shift(int32_t sx, int32_t sz);
+
 #endif /* TD5_PHYSICS_H */

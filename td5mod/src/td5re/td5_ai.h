@@ -321,4 +321,9 @@ void td5_ai_update_actor(int slot);
  *   0x384: special_encounter_state (int)
  * ======================================================================== */
 
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_ai_world_shift(int32_t sx, int32_t sz);
+
 #endif /* TD5_AI_H */

@@ -5804,3 +5804,33 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
  *     recovery — see td5_physics.c:996-1009). When port wires that branch,
  *     this function must come with it. Not currently observable.
  */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_camera_world_shift(int32_t sx, int32_t sz)
+{
+    const int fx = (int)FP_SCALE(sx), fz = (int)FP_SCALE(sz);
+    int v, k;
+    for (v = 0; v < TD5_MAX_VIEWPORTS; v++) {
+        TD5_CamPose *ps[2] = { &s_cam_pose_prev[v], &s_cam_pose_cur[v] };
+        for (k = 0; k < 2; k++) {
+            ps[k]->eye[0] += fx;    ps[k]->eye[2] += fz;
+            ps[k]->target[0] += fx; ps[k]->target[2] += fz;
+            ps[k]->anchor[0] += fx; ps[k]->anchor[2] += fz;
+        }
+        s_recov_last_eye[v][0] += fx; s_recov_last_eye[v][2] += fz;
+        s_recov_last_tgt[v][0] += fx; s_recov_last_tgt[v][2] += fz;
+        s_recov_from_eye[v][0] += fx; s_recov_from_eye[v][2] += fz;
+        s_recov_from_tgt[v][0] += fx; s_recov_from_tgt[v][2] += fz;
+        g_camWorldPos[v][0] += fx;    g_camWorldPos[v][2] += fz;
+        g_camAnchorX[v] += fx;        g_camAnchorZ[v] += fz;
+        g_camSplineState[v][0] += fx; g_camSplineState[v][2] += fz;
+    }
+    g_cameraPos[0] += (float)sx;
+    g_cameraPos[2] += (float)sz;
+#ifndef TD5RE_RELEASE
+    s_freecam_eye[0] += (double)fx;
+    s_freecam_eye[2] += (double)fz;
+#endif
+}

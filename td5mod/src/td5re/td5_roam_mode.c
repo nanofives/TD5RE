@@ -9,9 +9,10 @@
  * (task C). The gates in the other modules ask td5_roam_active().
  *
  * WORLD FRAME. world = place - origin, in integer units of 1/430 m; the actor's
- * world_pos is the 24.8 form (FP_SCALE). The origin is the (0,0) corner of the
+ * world_pos is the 24.8 form (FP_SCALE). The origin starts at the (0,0) corner of the
  * lattice tile that holds the spawn point (roam_grid_origin, the same rounding the
- * ROAMTILE files use), fixed for the whole session (F2; dynamic rebasing is F9).
+ * ROAMTILE files use); [F9b] td5_roam_rebase.c moves it to the player's tile corner
+ * when the car gets more than a few tiles away (td5_roam_set_world_origin).
  *
  * NO FILE-SCOPE STATE OUTSIDE s_roam (the mode/session struct).
  */
@@ -40,6 +41,7 @@
 #include "td5_roam_race.h"      /* [F6-B] the sprint race is reset with the session */
 #include "td5_roam_ai.h"        /* [F7] the opponents' cars load with the session */
 #include "td5_asset.h"          /* [F7] td5_asset_get_car_zip_path: a known opponent car */
+#include "td5_roam_rebase.h"    /* [F9b] a new session starts the rebase counters */
 
 #define LOG_TAG "roam"
 
@@ -227,6 +229,7 @@ void td5_roam_begin(const TD5_RoamSpawn *s)
                   "--RoamBuildTiles=casco); origin left at 0,0", s_roam.spawn.place);
     }
     s_roam.host_track = -1;      /* re-resolved for this place */
+    td5_roam_rebase_session_reset();
     s_roam.armed = 1;
     s_roam.active = 0;
     memset(s_roam.slot_edge, 0, sizeof s_roam.slot_edge);
@@ -253,6 +256,13 @@ void td5_roam_world_origin(int32_t *ox, int32_t *oz)
 {
     if (ox) *ox = s_roam.origin_x;
     if (oz) *oz = s_roam.origin_z;
+}
+
+/* [F9b] Only td5_roam_rebase.c moves the origin (it shifts every world position with it). */
+void td5_roam_set_world_origin(int32_t ox, int32_t oz)
+{
+    s_roam.origin_x = ox;
+    s_roam.origin_z = oz;
 }
 
 const struct TD5_RoamResident *td5_roam_resident(void) { return s_roam.resident; }
