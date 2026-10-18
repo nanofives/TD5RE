@@ -81,6 +81,7 @@ void td5_roam_furn_session_end(void);
 int  td5_roam_furn_plates_ready(void);
 
 int  td5_roam_furn_enabled(void);     /* TD5RE_ROAM_FURNITURE (default 1) */
+int  td5_roam_night_active(void);    /* [F4f] a roam session at night: ambient dimming + street lamps on, no DarkMode / StreetLights needed */
 int  td5_roam_furn_night(void);       /* lamps carry their glow: TD5RE_ROAM_NIGHT, else the roam sky's verdict */
 
 TD5_RoamFurnSource *td5_roam_furn_open(const char *place);

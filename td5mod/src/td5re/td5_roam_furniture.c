@@ -145,8 +145,10 @@ int td5_roam_furn_night(void)
 {
     const int k = td5_env_int("TD5RE_ROAM_NIGHT", -1, -1, 1);
     if (k >= 0) return k;
-    return 0;
+    return td5_trackgen_roam_is_night(td5_roam_host_track());   /* [F4f] the sky's verdict: no env knob needed */
 }
+
+int td5_roam_night_active(void) { return td5_roam_active() && td5_roam_furn_night(); }
 
 static char *fu_slurp(const char *path)
 {
@@ -222,16 +224,6 @@ static struct {
 } s_at;
 
 int td5_roam_furn_plates_ready(void) { return s_at.ready && s_at.ncell > 0; }
-
-static int fu_rows_of(const char *name)
-{
-    char up[FU_NAME_MAX], l1[FU_NAME_MAX], l2[FU_NAME_MAX];
-    int abbr = 0;
-    if (!name || !name[0]) return 0;
-    tg_plate_upper(name, up, sizeof up);
-    l2[0] = 0;
-    return tg_plate_plan(up, l1, l2, sizeof l1, &abbr);
-}
 
 /* the 5x7 dot-matrix digits of td5_tg_mastarm.c (the countdown page) */
 static const unsigned char k_fu_dot[10][7] = {
@@ -441,11 +433,10 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
             const char *own = nm[a] >= 0 ? names[nm[a]] : NULL;
             const char *crs = x >= 0 ? names[nm[x]] : NULL;
             const char *fn = crs ? crs : own, *bn = own ? own : crs;
-            int rf, rb;
             if (!fn && !bn) continue;
-            rf = fu_rows_of(fn); rb = fu_rows_of(bn);
-            if (!fu_want(want, &nw, fn, rf < rb)) s_at.cells_dropped++;
-            if (!fu_want(want, &nw, bn, rb < rf)) s_at.cells_dropped++;
+            /* ONE cell per distinct name, at its natural row count: a face is as tall as its own cell (F4f) */
+            if (!fu_want(want, &nw, fn, 0)) s_at.cells_dropped++;
+            if (!fu_want(want, &nw, bn, 0)) s_at.cells_dropped++;
         }
         s_at.arms += n;
     }
@@ -1145,8 +1136,7 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
         double best_dot = 0.82;                  /* within ~35 degrees of straight through */
         if (!m->inbound) continue;
         if (fn || bn) {
-            const int rf = fu_rows_of(fn), rb = fu_rows_of(bn);
-            cf = fu_cell_find(fn, rf < rb); cb = fu_cell_find(bn, rb < rf);
+            cf = fu_cell_find(fn, 0); cb = fu_cell_find(bn, 0);
             if (!cf) cf = cb;
             if (!cb) cb = cf;
         }
@@ -1159,6 +1149,17 @@ static int fu_emit_cluster(FuEm *em, const RoamTile *t, const RoamNodeRec *nr, d
                 if (at.hw * 2.0 >= FU_MA_MIN_WIDTH) {
                     if (!fu_mastarm(em, &at, -1.0, FU_SIG_GAP, base_y, cf, cb)) return 0;
                     st->mast_near++;
+#ifndef TD5RE_RELEASE
+                    if (td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 2) {   /* [F4f] where to stand to read this plate */
+                        int ttx, ttz; int32_t ox, oz; double lat = 0, lon = 0;
+                        const double b12 = atan2(at.tz, at.tx) * 4096.0 / 6.283185307179586;
+                        roam_ctx_origin(c, &ttx, &ttz, &ox, &oz);
+                        td5_roam_place_to_latlon("la_plata_partido", (at.x - at.tx * 22.0 * FU_UPM) + ox,
+                                                 (at.z - at.tz * 22.0 * FU_UPM) + oz, &lat, &lon);
+                        TD5_LOG_I(LOG_TAG, "FURN_PLATE spawn=%.6f,%.6f yaw=%d front='%s' back='%s'", lat, lon,
+                                  ((1024 - (int)floor(b12 + 0.5)) & 0xFFF), cf ? cf->name : "-", cb ? cb->name : "-");
+                    }
+#endif
                     if (cf && cb) { st->plates++; if (cf == cb && fn && bn && strcmp(fn, bn) != 0) st->plate_one_face++; }
                     else st->plate_none++;
                 } else {
@@ -1597,7 +1598,7 @@ void td5_roam_furn_frame(void)
     }
     /* street lamps: the nearest resident lanterns become the light registry; the light system promotes the
      * nearest few (TD5RE_LAMP_COUNT) to real lights, gated on the environment-dark verdict */
-    if (!td5_light_street_lights() && !td5_rt_active()) return;
+    if (!td5_light_street_lights() && !td5_rt_active() && !td5_roam_furn_night()) return;
     p = td5_game_get_actor(0);
     if (!p) return;
     td5_light_lamps_reset();
