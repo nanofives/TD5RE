@@ -75,6 +75,7 @@ typedef struct {
     double bend_d;                               /* metres to that bend                   */
     double stop_s;                               /* where a finished car stops            */
     double v_prev;                               /* [F8b] DEV: last tick's speed (impact log) */
+    int    yield_slot;                           /* [F8c] traffic slot a cross-traffic conflict capped last tick (0 = none) */
     TD5_LapTrack lt;                             /* [F9a] circuit: total distance + laps  */
     int    laps_done;
     /* persona */
@@ -113,6 +114,9 @@ static struct {
     int    see_traffic;                          /* [F8c] TD5RE_ROAM_AI_SEE_TRAFFIC (1; 0 = the pre-F8c blind test) */
     int    brake_prop;                           /* [F8c] TD5RE_ROAM_AI_BRAKE_PROP (1; 0 = the idle -32 brake)      */
     double headway;                              /* [F8c] TD5RE_ROAM_AI_HEADWAY, seconds of follow gap (0 = none)   */
+    int    impact_ring;                          /* [F8c] DEV TD5RE_ROAM_AI_IMPACT_RING (0; 1 = dump on IMPACT)    */
+    double cross_t;                              /* [F8c] TD5RE_ROAM_AI_CROSS, cross-traffic horizon s (0 = off)   */
+    long   cross_yields;                         /* [F8c] cross-traffic conflicts that capped a speed (log)      */
     FILE  *trc;
 } A;
 
@@ -150,6 +154,8 @@ static void ra_read_knobs(void)
     A.see_traffic = td5_env_int("TD5RE_ROAM_AI_SEE_TRAFFIC", 1, 0, 1);
     A.brake_prop  = td5_env_int("TD5RE_ROAM_AI_BRAKE_PROP", 1, 0, 1);
     A.headway     = td5_env_int("TD5RE_ROAM_AI_HEADWAY", 80, 0, 300) / 100.0;   /* cs */
+    A.impact_ring = td5_env_int("TD5RE_ROAM_AI_IMPACT_RING", 0, 0, 1);
+    A.cross_t     = td5_env_int("TD5RE_ROAM_AI_CROSS", 250, 0, 600) / 100.0;   /* cs */
 }
 
 int td5_roam_ai_preload(void)
@@ -805,8 +811,9 @@ static int ra_respawn(RaCar *c, TD5_Actor *a)
 
 #ifndef TD5RE_RELEASE
 /* [F8c] DEV: an after-the-fact ring of each opponent's state, one entry per driven tick (the actor as
- * physics left it + the provider's side table for that slot), written out only when an IMPACT fires.
- * A memcpy per car per tick, no file I/O until then: the run's timing stays what it was. */
+ * physics left it + the provider's side table for that slot), written out only when an IMPACT fires
+ * (log/roam_ai_impact_s<slot>_t<race tick>.txt). A memcpy per car per tick, no file I/O until then: the
+ * run's timing stays what it was. Knob TD5RE_ROAM_AI_IMPACT_RING=1 (default off). */
 #define RA_RING 16
 typedef struct {
     long          race_tick, sim_tick;
@@ -893,7 +900,7 @@ static void ra_ring_dump(const RaCar *c, const TD5_Actor *now, double v_prev, do
 static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
 {
     double cap = 1e9;
-    int j, total = td5_game_get_total_actor_count();
+    int j, total = td5_game_get_total_actor_count(), ys = 0;
     const double tx = A.tx[idx], tz = A.tz[idx], nx = A.nx[idx], nz = A.nz[idx];
     for (j = 0; j < total; j++) {
         const TD5_Actor *b;
@@ -903,6 +910,37 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
         if (!b || !ra_place_of(b, &bx, &bz)) continue;
         f = ((bx - x) * tx + (bz - z) * tz) / RA_M;
         l = ((bx - x) * nx + (bz - z) * nz) / RA_M + c->lat;
+        if (A.cross_t > 0.0 && j >= g_traffic_slot_base && f > -1.0 && f < 6.0 + v * A.cross_t) {
+            /* [F8c] CROSS / MERGING TRAFFIC. The lane test below only sees a car already in my lane: traffic crossing
+             * the route at a junction (it obeys its lights, the racers do not stop for them) or turning into it
+             * entered the lane too late to brake for (free-running roam-sprint-ai: slot 5 side-on into traffic 11
+             * at 77 km/h, slot 4 into traffic 14 merging at 46 degrees, both heavy crashes). Constant velocities,
+             * closest approach within cross_t s: when the two bodies would overlap there (within 5 m along my
+             * path and 2.4 m across), cap my speed to stop short of the point I would reach by then. Traffic only:
+             * racer against racer stays racing. */
+            const double rx = (bx - x) / RA_M, rz = (bz - z) / RA_M;
+            const double wx = (double)b->linear_velocity_x / 256.0 * RA_HZ / RA_M - v * tx;
+            const double wz = (double)b->linear_velocity_z / 256.0 * RA_HZ / RA_M - v * tz;
+            const double w2 = wx * wx + wz * wz;
+            if (w2 > 0.25) {
+                const double tc = -(rx * wx + rz * wz) / w2;
+                if (tc > 0.0 && tc <= A.cross_t) {
+                    const double qx = rx + wx * tc, qz = rz + wz * tc;
+                    const double lon = qx * tx + qz * tz, lat = qx * nx + qz * nz;
+                    if (fabs(lon) < 5.0 && fabs(lat) < 2.4) {
+                        const double fc = v * tc - 4.0;
+                        const double cv = fc > 0.0 ? sqrt(2.0 * A.a_brake * fc) : 0.0;
+                        if (cv < cap) cap = cv;
+                        if (cv < v - 1.0) {
+                            if (c->yield_slot != j && ++A.cross_yields <= 40)   /* the onset of a yield, not every tick of it */
+                                TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d yields to traffic slot %d (closest approach in %.1f s, %.1f m along, "
+                                          "%.1f m across): %.0f -> %.0f km/h", c->slot, j, tc, lon, lat, v * 3.6, cv * 3.6);
+                            ys = j;
+                        }
+                    }
+                }
+            }
+        }
         if (f <= 0.5 || f > 6.0 + v * 1.2) continue;
         if (fabs(l - c->lat) > 2.1) continue;
         vb = ((double)b->linear_velocity_x * tx + (double)b->linear_velocity_z * tz) / 256.0 * RA_HZ / RA_M;
@@ -924,6 +962,7 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
             if (cv < cap) cap = cv;
         }
     }
+    c->yield_slot = ys;
     if (cap < 1e8) A.stats.follow_ticks++;
     return cap;
 }
@@ -967,10 +1006,10 @@ static void ra_drive(RaCar *c, int hold)
         TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d IMPACT %.1f -> %.1f km/h at %.0f m along (lat %.2f) | nearest actor slot %d%s at %.1f m "
                   "(%.1f ahead, %.1f across) moving %.1f km/h", c->slot, c->v_prev * 3.6, v * 3.6, c->along, c->lat, bj,
                   bj >= g_traffic_slot_base ? " (traffic)" : "", bd, bf, bl, bv * 3.6);
-        ra_ring_dump(c, a, c->v_prev, v);
+        if (A.impact_ring) ra_ring_dump(c, a, c->v_prev, v);
     }
     c->v_prev = v;
-    if (!hold) ra_ring_push(c, a);
+    if (!hold && A.impact_ring) ra_ring_push(c, a);
 #endif
 
     if (hold) {
