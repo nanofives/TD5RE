@@ -340,8 +340,12 @@ static int rr_take_route(void)
 static void rr_place_on_grid(void)
 {
     TD5_Actor *a = td5_game_get_actor(0);
+    int32_t px, pz;
+    int yaw;
     if (!a) return;
-    td5_roam_place_actor(0, a, R.start_px, R.start_pz, R.start_yaw);
+    /* [F7] with opponents the player stands on its drawn grid spot (START or behind it) */
+    if (td5_roam_ai_player_grid(&px, &pz, &yaw)) td5_roam_place_actor(0, a, px, pz, yaw);
+    else td5_roam_place_actor(0, a, R.start_px, R.start_pz, R.start_yaw);
 }
 
 int td5_roam_race_start(const TD5_RoamRaceSetup *s)
@@ -381,10 +385,12 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     R.split_ms = 0; R.go_ms = 0;
     R.clock = 0; R.bar_hold = 0;
 
+    td5_roam_ai_race_end();          /* F5 from the results: the last race's field and spots go */
     rr_place_on_grid();
     /* [F7] the opponents on the grid behind START (a short field when the street is tight) */
-    td5_roam_ai_race_start(R.px, R.pz, R.dist, R.npt, R.length_m, R.start_px, R.start_pz, R.start_yaw,
-                           R.setup.opponents);
+    if (td5_roam_ai_race_start(R.px, R.pz, R.dist, R.npt, R.length_m, R.start_px, R.start_pz, R.start_yaw,
+                               R.setup.opponents) > 0)
+        rr_place_on_grid();          /* the player's drawn spot */
     rr_field_snapshot();
     t_grid = td5_plat_time_ms();
     R.state = TD5_RRACE_COUNTDOWN;
@@ -439,7 +445,9 @@ static void rr_progress(TD5_Actor *a)
         const double sx = R.px[i + 1] - R.px[i], sz = R.pz[i + 1] - R.pz[i];
         const double l2 = sx * sx + sz * sz;
         double t = l2 > 0.0 ? ((cx - R.px[i]) * sx + (cz - R.pz[i]) * sz) / l2 : 0.0, qx, qz, d;
-        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+        /* [F7] behind START (a grid spot) the first segment extends back: negative distance along,
+         * the same measure as the opponents', so the grid order is right before GO */
+        if (t < 0.0 && i > 0) t = 0.0; else if (t > 1.0) t = 1.0;
         qx = R.px[i] + sx * t; qz = R.pz[i] + sz * t;
         d = (qx - cx) * (qx - cx) + (qz - cz) * (qz - cz);
         if (d < best) { best = d; bs = i; ba = R.dist[i] + t * (R.dist[i + 1] - R.dist[i]); }

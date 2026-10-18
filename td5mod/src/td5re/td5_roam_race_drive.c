@@ -180,6 +180,7 @@ void td5_roam_sprint_test_arm(int mode)
     D.ch_hint = ROAM_PRIM_NONE;
     D.want_wt = SD_IS_AI(mode) ? 0 : (mode == TD5_RSPRINT_SMOKE ? 1 : 2);   /* [F7] AI rows: no wrong turns */
     D.shots = td5_env_int("TD5RE_ROAM_SPRINT_SHOTS", 0, 0, 1);
+    td5_roam_ai_force_player_spot(SD_IS_AI(mode) ? 3 : -1);   /* [F7] mid-pack, repeatable (play: random) */
     snprintf(D.route_name, sizeof D.route_name, "%s",
              mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
              : mode == TD5_RSPRINT_SMOKE_AI ? "selftest_sprint_ai_smoke" : "selftest_sprint");
@@ -189,6 +190,7 @@ void td5_roam_sprint_test_disarm(void)
 {
     if (D.trc) fclose(D.trc);
     memset(&D, 0, sizeof D);
+    td5_roam_ai_force_player_spot(-1);
 }
 int  td5_roam_sprint_test_mode(void) { return D.mode; }
 int  td5_roam_sprint_test_done(void) { return D.mode && D.done; }
@@ -406,6 +408,7 @@ void td5_roam_sprint_test_frame(void)
         if (m && (!strcmp(m, "full") || !strcmp(m, "smoke") || !strcmp(m, "ai") || !strcmp(m, "ai_smoke"))) {
             td5_roam_sprint_test_arm(!strcmp(m, "smoke") ? TD5_RSPRINT_SMOKE : !strcmp(m, "ai") ? TD5_RSPRINT_FULL_AI
                                      : !strcmp(m, "ai_smoke") ? TD5_RSPRINT_SMOKE_AI : TD5_RSPRINT_FULL);
+            td5_roam_ai_force_player_spot(-1);   /* [F7] standalone: the player's grid spot is drawn as in play */
             E.driven = 1;
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
         }

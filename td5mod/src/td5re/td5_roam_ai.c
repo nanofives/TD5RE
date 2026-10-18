@@ -85,6 +85,8 @@ static struct {
     int32_t start_px, start_pz; int start_yaw;
     double  grid_px[TD5_ROAM_AI_MAX], grid_pz[TD5_ROAM_AI_MAX], grid_lane[TD5_ROAM_AI_MAX];
     int     grid_yaw[TD5_ROAM_AI_MAX];
+    int     grid_force;                          /* self-test: the player's spot + 1, 0 = knob / random */
+    int     player_spot; double ppx, ppz; int pyaw;   /* the player's grid spot (0 = START) */
     int     nfin;
     /* standings */
     TD5_RoamStanding st[1 + TD5_ROAM_AI_MAX]; int nst; int player_rank;
@@ -561,6 +563,31 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
     placed = ra_build_grid(n_ai);
     if (placed <= 0) { TD5_LOG_W(LOG_TAG, "ROAM_AI: no grid spot behind START fits a car: no opponents"); ra_free_path(); return 0; }
     A.n = placed;
+    /* The player's spot: START plus the spots behind it form one grid of placed + 1, the player
+     * draws one (Mariano: random), the opponents fill the rest in order. Spot 0 = START. */
+    {
+        double sx[TD5_ROAM_AI_MAX + 1], sz[TD5_ROAM_AI_MAX + 1], sl[TD5_ROAM_AI_MAX + 1];
+        int sy[TD5_ROAM_AI_MAX + 1], j, m = 0, p = A.grid_force - 1;
+        sx[0] = start_px; sz[0] = start_pz; sl[0] = 0.0; sy[0] = start_yaw & 0xFFF;
+        for (k = 0; k < placed; k++) { sx[k + 1] = A.grid_px[k]; sz[k + 1] = A.grid_pz[k]; sl[k + 1] = A.grid_lane[k]; sy[k + 1] = A.grid_yaw[k]; }
+        if (p < 0) p = td5_env_int("TD5RE_ROAM_GRID_PLAYER", -1, -1, TD5_ROAM_AI_MAX);
+        if (p < 0) {
+            /* not the CRT rand(): the sim's random sequence stays untouched */
+            uint32_t h = td5_plat_time_ms() * 2654435761u;
+            h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 13;
+            p = (int)(h % (uint32_t)(placed + 1));
+        }
+        if (p > placed) p = placed;
+        A.player_spot = p;
+        A.ppx = sx[p]; A.ppz = sz[p]; A.pyaw = sy[p];
+        for (j = 0; j <= placed; j++) {
+            if (j == p) continue;
+            A.grid_px[m] = sx[j]; A.grid_pz[m] = sz[j]; A.grid_lane[m] = sl[j]; A.grid_yaw[m] = sy[j];
+            m++;
+        }
+        TD5_LOG_I(LOG_TAG, "ROAM_AI: player grid spot %d of %d (%s)", p + 1, placed + 1,
+                  A.grid_force > 0 ? "forced by the self-test" : "random, TD5RE_ROAM_GRID_PLAYER to fix it");
+    }
     td5_game_roam_set_racer_field(A.n);
     A.nfin = 0;
     for (k = 0; k < A.n; k++) {
@@ -950,6 +977,15 @@ int td5_roam_ai_car_info(int k, int *slot, long *finish_ticks, long *still_max, 
     if (finish_ticks) *finish_ticks = A.car[k].finished ? A.car[k].finish_ticks : 0;
     if (still_max) *still_max = A.car[k].still_max;
     if (recoveries) *recoveries = A.car[k].recoveries;
+    return 1;
+}
+
+void td5_roam_ai_force_player_spot(int spot) { A.grid_force = spot < 0 ? 0 : spot + 1; }
+
+int td5_roam_ai_player_grid(int32_t *px, int32_t *pz, int *yaw12)
+{
+    if (!A.on) return 0;
+    *px = (int32_t)floor(A.ppx + 0.5); *pz = (int32_t)floor(A.ppz + 0.5); *yaw12 = A.pyaw;
     return 1;
 }
 
