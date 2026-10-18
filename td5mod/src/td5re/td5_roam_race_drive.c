@@ -419,7 +419,12 @@ static void sd_build_path(void)
             const double bx = r->px[i + 1] - r->px[i], bz = r->pz[i + 1] - r->pz[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
             if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
-                (la < jog_m * SD_M || lb < jog_m * SD_M)) { dropped++; continue; }
+                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
+            /* [F9b] partido: an out-and-back spike to a junction node beside a via point (the points before and after
+             * coincide), up to jog_m long */
+            if (jog_m > 15.0 && la > 0.0 && lb > 0.0 && la < jog_m * SD_M && lb < jog_m * SD_M &&
+                (r->px[i + 1] - r->px[i - 1]) * (r->px[i + 1] - r->px[i - 1]) +
+                (r->pz[i + 1] - r->pz[i - 1]) * (r->pz[i + 1] - r->pz[i - 1]) < (3.0 * SD_M) * (3.0 * SD_M)) { dropped++; continue; }
         }
         if (c > 0 && i == 0) continue;                  /* the lap's first point is the previous lap's last */
         s_ppx[n] = r->px[i]; s_ppz[n] = r->pz[i];
