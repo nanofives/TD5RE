@@ -38,6 +38,11 @@
 #include "td5_roam_traffic.h"
 #include "../../../re/include/td5_actor_struct.h"
 
+#if defined(_WIN32) && !defined(TD5RE_RELEASE)
+#include <windows.h>
+#include <psapi.h>
+#endif
+
 #define LOG_TAG "roam"
 
 #define RT_M           430.0                     /* place units per metre               */
@@ -55,7 +60,7 @@
 
 enum { RT_PARKED = 0, RT_LIVE = 1 };
 enum { RT_SEG_EDGE = 0, RT_SEG_CONN = 1 };
-enum { RT_WHY_FAR = 1, RT_WHY_DEAD, RT_WHY_STUCK, RT_WHY_HOLD, RT_WHY_OFF, RT_WHY_UNRES, RT_WHY_LEVEL };
+enum { RT_WHY_FAR = 1, RT_WHY_DEAD, RT_WHY_STUCK, RT_WHY_HOLD, RT_WHY_OFF, RT_WHY_UNRES, RT_WHY_LEVEL, RT_WHY_LOST };
 
 typedef struct {
     int      slot, state;
@@ -79,11 +84,12 @@ typedef struct {
     int      committed;                          /* passed the decision point              */
     int      yield_node; long wait_since; int waiting;
     long     commit_tick; int commit_ph, commit_pa; double commit_tarr, commit_dstop, commit_v;   /* DEV log */
+    long     sr_tick; double sr_d, sr_v, sr_vt; int sr_ph;                                   /* DEV log: stop decided */
     /* control */
     double   v_class;                            /* cruise, m/s                            */
     int32_t  steer;
     int      holding;                            /* holding with a reason this tick        */
-    long     still_t, hold_t, off_t_ticks, born, last_contact;
+    long     still_t, hold_t, off_t_ticks, born, last_contact, lost_t;
     int      lane_chk;
     int      bar_k, bar_side;                    /* the barrier the car is beside, and its side */
 } RtCar;
@@ -107,6 +113,10 @@ static struct {
     long    st_t0;                               /* tick of the last stats reset      */
     int     bar_valid;
     int     shots, shot_done[3]; long shot_wait; char shot_name[24];   /* DEV shots */
+    int     trace_slot; FILE *trc;                                  /* DEV: TD5RE_ROAM_TRAFFIC_TRACE=<slot> */
+    /* DEV soak measures: private bytes after the warm-up / now / max, the tick's own cost */
+    double  priv0_mb, priv_mb, priv_max_mb; int priv_n;
+    double  tick_us_sum, tick_us_max; long tick_n;
 } T;
 
 /* ============================================================ helpers ============ */
@@ -140,6 +150,7 @@ static void rt_read_knobs(void)
     T.log_every   = td5_env_int("TD5RE_ROAM_TRAFFIC_LOG", 0, 0, 3600);
 #ifndef TD5RE_RELEASE
     T.shots       = td5_env_int("TD5RE_ROAM_TRAFFIC_SHOTS", 0, 0, 1);
+    T.trace_slot  = td5_env_int("TD5RE_ROAM_TRAFFIC_TRACE", -1, -1, 31);
     {   /* DEV: force the race level (the sprint test harness has no setup panel) */
         const int fl = td5_env_int("TD5RE_ROAM_TRAFFIC_RACE", -1, -1, 2);
         if (fl >= 0 && !T.force_level) T.force_level = fl + 1;
@@ -351,15 +362,21 @@ static int rt_build_conn(RtCar *c, const TD5_RouteGEdge *E, int d, double off0, 
         c->v_conn = rt_clamp(sqrt(T.a_lat * R), 3.5, v_class);
     } else c->v_conn = v_class;
     if (c->clen > 1.0 * RT_M)
-        for (j = 1; j <= 9; j++) {
+    {
+        /* one sample every ~2.5 m (at least 9) */
+        int ns = (int)(c->clen / (2.5 * RT_M));
+        if (ns < 9) ns = 9;
+        if (ns > 40) ns = 40;
+        for (j = 1; j <= ns; j++) {
             double x, z, tx, tz;
             int in0 = 0, in1 = 0, in2 = 0;
-            rt_bez((const double (*)[2])c->bz, (double)j / 10.0, &x, &z, &tx, &tz);
+            rt_bez((const double (*)[2])c->bz, (double)j / (double)(ns + 1), &x, &z, &tx, &tz);
             if (!rt_locate(x, z, 0, 0, &in0, NULL) || !in0) { off++; continue; }
             rt_locate(x + tz * 0.8 * RT_M, z - tx * 0.8 * RT_M, 0, 0, &in1, NULL);
             rt_locate(x - tz * 0.8 * RT_M, z + tx * 0.8 * RT_M, 0, 0, &in2, NULL);
             if (!in1 || !in2) off++;
         }
+    }
     return off;
 }
 
@@ -410,8 +427,12 @@ static void rt_plan_next(RtCar *c)
         nc++;
     }
     if (nc == 0) return;                         /* dead end */
+    if (min_off > 0) {
+        /* every way on leaves the paved patch: a dead end for traffic (the car is removed before it) */
+        T.st.conn_off_plans++;
+        return;
+    }
     for (i = 0; i < nc; i++) { if (cand_off[i] != min_off) w[i] = 0.0; wsum += w[i]; }
-    if (min_off > 0) T.st.conn_off_plans++;
     r = rt_unit(&c->rng) * wsum;
     for (i = 0; i < nc; i++) { if (w[i] <= 0.0) continue; r -= w[i]; if (r <= 0.0) { pick = i; break; } }
     if (pick < 0) for (i = nc - 1; i >= 0; i--) if (cand_off[i] == min_off) { pick = i; break; }
@@ -544,7 +565,11 @@ void td5_roam_traffic_session_init(void)
               T.dens_high, T.max_live, T.r_spawn_min, T.r_spawn_max, T.r_count, T.r_despawn);
 }
 
-void td5_roam_traffic_session_end(void) { T.on = 0; }
+void td5_roam_traffic_session_end(void)
+{
+    T.on = 0;
+    if (T.trc) { fclose(T.trc); T.trc = NULL; }
+}
 
 static RtCar *rt_car_of(int slot)
 {
@@ -677,14 +702,14 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     r = (T.r_spawn_min + rt_unit(&T.rng) * (T.r_spawn_max - T.r_spawn_min)) * RT_M;
     px = ax + cos(th) * r; pz = az + sin(th) * r;
     if (!td5_roam_route_graph_snap_edge(px, pz, 60.0, &e, &along, &dm)) return 0;
-    if (!rt_edge(e, &E) || E.plen < 14.0 * RT_M) return 0;
+    if (!rt_edge(e, &E) || E.plen < 42.0 * RT_M) return 0;
     if (E.klass <= 2 && rt_unit(&T.rng) < 0.8) return 0;      /* service / living: few cars */
     if (E.flags & 0x03) return 0;                              /* not on a deck or in a bore */
     if (E.oneway > 0) d = 0;
     else if (E.oneway < 0) d = 1;
     else d = (rt_lcg(&T.rng) & 1) ? 1 : 0;
     s = d == 0 ? along : E.plen - along;
-    if (s < 6.0 * RT_M || s > E.plen - 8.0 * RT_M) return 0;  /* clear of the junctions */
+    if (s < 6.0 * RT_M || s > E.plen - 35.0 * RT_M) return 0;  /* clear of the junctions (and of a stop line) */
     k = (int)(rt_lcg(&T.rng) % (uint32_t)rt_dir_lanes(&E));
     rt_edge_pt(&E, d, s, rt_lane_off(&E, k), &x, &z, &tx, &tz);
     /* far enough from EVERY anchor (no car pops up next to a racer) */
@@ -735,6 +760,7 @@ static void rt_despawn(RtCar *c, int why)
     case RT_WHY_HOLD: T.st.despawn_hold++; break;
     case RT_WHY_OFF: T.st.despawn_off++; break;
     case RT_WHY_UNRES: T.st.despawn_unres++; break;
+    case RT_WHY_LOST: T.st.despawn_lost++; break;
     default: break;
     }
 }
@@ -763,10 +789,12 @@ static void rt_track(RtCar *c, const TD5_Actor *a, double x, double z)
                     T.st.red_violations++;
                     if (T.st.red_violations <= 20)
                         TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_RED slot %d crossed the stop line on red at node %d (group %d, %.1f km/h) "
-                                  "committed=%d %ld ticks ago (phase %d, at arrival %d, t_arr %.2f s, d_stop %.2f m, %.1f km/h) stop_req=%d",
+                                  "committed=%d %ld ticks ago (phase %d, at arrival %d, t_arr %.2f s, d_stop %.2f m, %.1f km/h) stop_req=%d "
+                                  "decided %ld ticks ago at d_stop %.2f m %.1f km/h phase %d",
                                   c->slot, c->node, c->sig_g, rt_speed_ms(a) * 3.6, c->committed,
                                   (long)g_td5.simulation_tick_counter - c->commit_tick, c->commit_ph, c->commit_pa, c->commit_tarr,
-                                  c->commit_dstop, c->commit_v * 3.6, c->stop_req);
+                                  c->commit_dstop, c->commit_v * 3.6, c->stop_req, (long)g_td5.simulation_tick_counter - c->sr_tick,
+                                  c->sr_d, c->sr_v * 3.6, c->sr_ph);
                 }
             }
             T.st.turns[c->turn + 1]++;
@@ -930,15 +958,21 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
                      * (past 6 m/s2) is not tried: it goes on. */
                     const double ss = (double)tick / RT_HZ;
                     const double dl = d_stop + RT_STOP_BACK_M;
-                    const double t_arr = dl > 0.0 ? dl / (v > 1.0 ? v : 1.0) : 0.0;
+                    /* the speed it will cross at: it slows for the turn first */
+                    const double v_eff = c->v_conn < v ? 0.5 * (v + c->v_conn) : v;
+                    const double t_arr = dl > 0.0 ? dl / (v_eff > 1.0 ? v_eff : 1.0) : 0.0;
                     const int ph = td5_geo_signal_phase_at(ss, c->sig_g);
-                    const int pa = td5_geo_signal_phase_at(ss + t_arr + 0.5, c->sig_g);
                     /* amber after green (the head was green 1.6 s ago) vs amber after red */
                     const int amber_out = ph == 1 && td5_geo_signal_phase_at(ss - 1.6, c->sig_g) == 2;
-                    const int pa_out = pa == 1 && td5_geo_signal_phase_at(ss + t_arr + 0.5 - 1.6, c->sig_g) == 2;
-                    const int go = (ph == 2 || amber_out) && (pa == 2 || pa_out);
+                    int pa = 2, go;
+                    double tq;
+                    /* red anywhere between now and half a second after the car reaches the line: no go
+                     * (a far car's "arrival" can fall in the NEXT green, past a whole red) */
+                    for (tq = 0.0; tq <= t_arr + 0.5; tq += 0.25)
+                        if (td5_geo_signal_phase_at(ss + tq, c->sig_g) == 0) { pa = 0; break; }
+                    go = (ph == 2 || amber_out) && pa != 0;
                     if (!go && (c->stop_req || ph == 0 || d_stop > v * v / (2.0 * 6.5) - 0.3)) {
-                        if (!c->stop_req) T.st.sig_stops++;
+                        if (!c->stop_req) { T.st.sig_stops++; c->sr_tick = tick; c->sr_d = d_stop; c->sr_v = v; c->sr_ph = ph; }
                         c->stop_req = 1;
                     } else c->stop_req = 0;
                     must_stop = c->stop_req;
@@ -1009,12 +1043,13 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
     /* ---- throttle: the traffic integrator adds `throttle` (= cmd * 4) to the 24.8 speed per tick
      * and drags 1/256 of it, so cmd = (speed/256 + accel) / 4 holds a speed exactly ---- */
     {
-        const double v24 = (double)a->longitudinal_speed;                  /* 24.8 units / tick */
+        const double v24 = (double)a->longitudinal_speed;                  /* 24.8 units / tick, signed */
         const double k122 = RT_M * 256.0 / (RT_HZ * RT_HZ);               /* 24.8 per tick per (m/s^2) */
-        double acc = 0.9 * (vt - v);
-        if (a_req < acc) acc = a_req;
+        const double vs = v24 / 256.0 * RT_HZ / RT_M;                       /* signed forward speed, m/s */
+        double acc = 0.9 * (vt - vs);
+        if (a_req < acc && vs > 0.0) acc = a_req;
         acc = rt_clamp(acc, -6.5, 2.2);
-        if (vt < 0.3 && v < 0.8) {
+        if (vt < 0.3 && fabs(vs) < 0.8) {
             thr = -v24 * (255.0 / 256.0);                                   /* stand still */
             brake = 1;
         } else {
@@ -1025,9 +1060,33 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
         a->encounter_steering_cmd = (int16_t)floor(thr / 4.0 + 0.5);
     }
     a->steering_command = c->steer;
+#ifndef TD5RE_RELEASE
+    if (T.trace_slot == c->slot) {
+        if (!T.trc) {
+            char path[512];
+            const char *dir = td5_plat_log_dir();
+            snprintf(path, sizeof path, "%sroam_traffic_trace.csv", dir ? dir : "");
+            T.trc = fopen(path, "w");
+            if (T.trc) fprintf(T.trc, "tick,x,z,seg,e,d,k,s_m,lat_m,off_m,offt_m,v_kmh,vt_kmh,steer,herr,cmd,brake,hold,node,turn,clen_m\n");
+        }
+        if (T.trc)
+            fprintf(T.trc, "%ld,%.0f,%.0f,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%.1f\n", tick, x, z, c->seg, c->e,
+                    c->d, c->k, c->s / RT_M, c->lat_m, c->off / RT_M, c->off_t / RT_M, v * 3.6, vt * 3.6, (int)c->steer, herr,
+                    (int)a->encounter_steering_cmd, brake, c->holding, c->node, c->turn, c->clen / RT_M);
+    }
+#endif
     a->brake_flag = (uint8_t)brake;
     a->handbrake_flag = 0;
     a->throttle_state = (uint8_t)(brake ? 1 : 0);
+
+    /* ---- lost: far off the lane line it follows (a shove, a missed connector) ---- */
+    if (fabs(c->lat_m) > 3.5) {
+        if (++c->lost_t == 1 && T.st.despawn_lost < 20)
+            TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_LOST slot %d lat %.1f m seg=%s edge=%d d=%d s=%.1f m (conn %.1f m) turn=%d v=%.1f km/h contact %ld "
+                      "ticks ago", c->slot, c->lat_m, c->seg == RT_SEG_EDGE ? "edge" : "conn", c->e, c->d, c->s / RT_M, c->clen / RT_M,
+                      c->turn, v * 3.6, tick - c->last_contact);
+        if (c->lost_t > 20 && c->fade >= 0) rt_despawn(c, RT_WHY_LOST);
+    } else c->lost_t = 0;
 
     /* ---- stuck / holding / off the surface ---- */
     if (v < RT_STILL_MS) {
@@ -1181,7 +1240,39 @@ static void rt_shots(void)
 
 /* ============================================================ tick ================ */
 
+static void rt_tick_body(void);
+
 void td5_roam_traffic_tick(void)
+{
+#ifndef TD5RE_RELEASE
+    const uint64_t t0 = td5_plat_time_us();
+    if (!T.on || !td5_roam_active()) return;
+    rt_tick_body();
+    {
+        const double us = (double)(td5_plat_time_us() - t0);
+        const long tick = (long)g_td5.simulation_tick_counter;
+        T.tick_us_sum += us; T.tick_n++;
+        if (us > T.tick_us_max) T.tick_us_max = us;
+#ifdef _WIN32
+        if (tick - T.st_t0 > RT_WARMUP && tick % 30 == 0) {
+            PROCESS_MEMORY_COUNTERS_EX pmc;
+            memset(&pmc, 0, sizeof pmc);
+            if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pmc, sizeof pmc)) {
+                const double mb = (double)pmc.PrivateUsage / (1024.0 * 1024.0);
+                if (T.priv_n == 0) T.priv0_mb = mb;
+                T.priv_mb = mb;
+                if (mb > T.priv_max_mb) T.priv_max_mb = mb;
+                T.priv_n++;
+            }
+        }
+#endif
+    }
+#else
+    rt_tick_body();
+#endif
+}
+
+static void rt_tick_body(void)
 {
     double ax[8], az[8];
     int nanch, racing = 0, per, i, live = 0, target;
@@ -1261,9 +1352,9 @@ void td5_roam_traffic_tick(void)
     }
     if (T.log_every > 0 && tick % (T.log_every * 30L) == 0)
         TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC tick %ld: live %d target %d (per anchor %d x %d) spawns %ld despawns %ld (far %ld dead %ld "
-                  "stuck %ld hold %ld off %ld unres %ld) red %ld/%ld off_ticks %ld yield %ld turns L%ld S%ld R%ld vmax %.0f lat %.2f m",
+                  "stuck %ld hold %ld off %ld unres %ld lost %ld) red %ld/%ld off_ticks %ld yield %ld turns L%ld S%ld R%ld vmax %.0f lat %.2f m",
                   tick, live, target, per, nanch, T.st.spawns, T.st.despawns, T.st.despawn_far, T.st.despawn_dead_end,
-                  T.st.despawn_stuck, T.st.despawn_hold, T.st.despawn_off, T.st.despawn_unres, T.st.red_violations, T.st.sig_cross,
+                  T.st.despawn_stuck, T.st.despawn_hold, T.st.despawn_off, T.st.despawn_unres, T.st.despawn_lost, T.st.red_violations, T.st.sig_cross,
                   T.st.off_ticks, T.st.yield_waits, T.st.turns[0], T.st.turns[1], T.st.turns[2], T.st.max_kmh, T.st.max_lat_m);
 }
 
@@ -1275,6 +1366,49 @@ void td5_roam_traffic_stats(TD5_RoamTrafficStats *out)
     *out = T.st;
     if (out->samples == 0) out->live_min = 0;
 }
+
+#ifndef TD5RE_RELEASE
+int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
+{
+    const TD5_RoamTrafficStats *s = &T.st;
+    const long off_free = s->off_ticks - s->off_ticks_contact;
+    const double dpriv = T.priv_n ? T.priv_mb - T.priv0_mb : 0.0;
+    const double tick_ms = T.tick_n ? T.tick_us_sum / (double)T.tick_n / 1000.0 : 0.0;
+    char bad[96] = "";
+    size_t bl = 0;
+    int status = 0;
+#define RT_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
+    if (!T.on) RT_BAD("traffic off; ");
+    else if (s->samples == 0) RT_BAD("no samples; ");
+    else {
+        if (!race_row && (s->live_min == 0 || s->live_mean < 0.6 * (double)s->target))
+            RT_BAD("density min %d mean %.1f < 0.6 x %d; ", s->live_min, s->live_mean, s->target);
+        if (race_row && s->live_max == 0) RT_BAD("no traffic in the race; ");
+    }
+    if (off_free > 0) RT_BAD("off surface %ld ticks; ", off_free);
+    if (s->stuck_live > 0) RT_BAD("stuck>10s live %ld; ", s->stuck_live);
+    if (dpriv > 32.0) RT_BAD("private +%.0f MB; ", dpriv);
+#undef RT_BAD
+    if (bad[0]) status = 2;
+    else if (s->red_violations > 0) status = 1;
+    snprintf(note, n, "%straffic %d/%.1f/%d (target %d) red %ld/%ld off %ld(+%ld hit) stuck 0 priv %+.1f MB tick %.2f ms%s%.40s",
+             status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target, s->red_violations, s->sig_cross, off_free,
+             s->off_ticks_contact, dpriv, tick_ms, bad[0] ? ": " : "", bad);
+    TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s: live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "
+              "(far %ld dead-end %ld stuck %ld hold %ld off %ld unresident %ld lost %ld) | off-surface ticks %ld (%ld within 2 s of a racer "
+              "contact, events %ld) | red violations %ld of %ld stop-line crossings at signals, red stops %ld | stuck>10s live %ld | "
+              "yield waits %ld | turns L%ld S%ld R%ld | connector off-patch plans %ld | barrier passes %ld | racer-near ticks %ld | "
+              "max lane offset %.2f m, vmax %.0f km/h, pose-vs-ground %.2f m | private %.1f -> %.1f MB (max %.1f, %d samples) | "
+              "traffic tick mean %.3f ms max %.2f ms %s",
+              status == 2 ? "FAIL" : (status ? "WARN" : "PASS"), s->live_min, s->live_mean, s->live_max, s->target, s->samples,
+              s->spawns, s->despawns, s->despawn_far, s->despawn_dead_end, s->despawn_stuck, s->despawn_hold, s->despawn_off,
+              s->despawn_unres, s->despawn_lost, s->off_ticks, s->off_ticks_contact, s->off_events, s->red_violations, s->sig_cross, s->sig_stops,
+              s->stuck_live, s->yield_waits, s->turns[0], s->turns[1], s->turns[2], s->conn_off_plans, s->barrier_passes,
+              s->racer_near, s->max_lat_m, s->max_kmh, s->max_ground_dy_m, T.priv0_mb, T.priv_mb, T.priv_max_mb, T.priv_n,
+              tick_ms, T.tick_us_max / 1000.0, bad);
+    return status;
+}
+#endif
 
 void td5_roam_traffic_stats_reset(void)
 {

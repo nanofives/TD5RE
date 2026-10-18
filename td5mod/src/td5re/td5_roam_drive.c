@@ -996,6 +996,14 @@ void td5_roam_drive_arm(int mode)
     s_rv.ch_hint = ROAM_PRIM_NONE;
 }
 
+/* [F8] the TOUR mode without the env knobs (the roam-traffic soak rows) */
+void td5_roam_drive_set_tour(double side_m, int secs)
+{
+    s_rv.tour_m = side_m > 0.0 ? side_m : 0.0;
+    s_rv.tour_secs = secs > 30 ? secs : 30;
+    if (s_rv.tour_m > 0.0 && s_rv.max_secs < s_rv.tour_secs + 120) s_rv.max_secs = s_rv.tour_secs + 120;
+}
+
 void td5_roam_drive_disarm(void)
 {
     if (s_rv.rep) fclose(s_rv.rep);

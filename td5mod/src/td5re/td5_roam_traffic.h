@@ -73,7 +73,7 @@ typedef struct {
     int    live_min, live_max;          /* over the samples after the warm-up                       */
     double live_mean;
     long   spawns, despawns;
-    long   despawn_far, despawn_dead_end, despawn_stuck, despawn_hold, despawn_off, despawn_unres;
+    long   despawn_far, despawn_dead_end, despawn_stuck, despawn_hold, despawn_off, despawn_unres, despawn_lost;
     long   off_ticks;                   /* live-car ticks with the centre off the drivable surface */
     long   off_ticks_contact;           /* ...of those, within 2 s of a racer contact              */
     long   off_events;                  /* off for > 1 s (despawned)                               */
@@ -93,5 +93,11 @@ void td5_roam_traffic_stats(TD5_RoamTrafficStats *out);
 void td5_roam_traffic_stats_reset(void);
 /* DEV shots: a live car holding at a red stop line (slot, place xz of the cluster), 0 when none */
 int  td5_roam_traffic_find_red_stop(int *slot, double *cx, double *cz);
+#ifndef TD5RE_RELEASE
+/* The self-test verdict over the session so far: 0 PASS / 1 WARN (red-light violations) / 2 FAIL (density
+ * not held in free roam, a car off the surface without a racer contact, a car stuck > 10 s not removed,
+ * private bytes +32 MB after the warm-up). race_row: only "traffic was on the road" for density. */
+int  td5_roam_traffic_verdict(char *note, size_t n, int race_row);
+#endif
 
 #endif /* TD5_ROAM_TRAFFIC_H */
