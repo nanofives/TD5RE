@@ -34,6 +34,7 @@
 #include "td5_roam_route.h"
 #include "td5_roam_race.h"
 #include "td5_roam_ai.h"
+#include "td5_roam_barrier.h"
 #include "td5_roam_traffic.h"
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -84,6 +85,7 @@ typedef struct {
     int      holding;                            /* holding with a reason this tick        */
     long     still_t, hold_t, off_t_ticks, born, last_contact;
     int      lane_chk;
+    int      bar_k, bar_side;                    /* the barrier the car is beside, and its side */
 } RtCar;
 
 static struct {
@@ -103,6 +105,8 @@ static struct {
     TD5_RoamTrafficStats st;
     double  live_sum;
     long    st_t0;                               /* tick of the last stats reset      */
+    int     bar_valid;
+    int     shots, shot_done[3]; long shot_wait; char shot_name[24];   /* DEV shots */
 } T;
 
 /* ============================================================ helpers ============ */
@@ -134,6 +138,13 @@ static void rt_read_knobs(void)
     T.a_brake     = td5_env_int("TD5RE_ROAM_TRAFFIC_BRAKE", 30, 5, 100) / 10.0;       /* m/s2 x10 */
     T.speed_pct   = td5_env_int("TD5RE_ROAM_TRAFFIC_SPEED", 100, 20, 300) / 100.0;
     T.log_every   = td5_env_int("TD5RE_ROAM_TRAFFIC_LOG", 0, 0, 3600);
+#ifndef TD5RE_RELEASE
+    T.shots       = td5_env_int("TD5RE_ROAM_TRAFFIC_SHOTS", 0, 0, 1);
+    {   /* DEV: force the race level (the sprint test harness has no setup panel) */
+        const int fl = td5_env_int("TD5RE_ROAM_TRAFFIC_RACE", -1, -1, 2);
+        if (fl >= 0 && !T.force_level) T.force_level = fl + 1;
+    }
+#endif
     if (T.r_spawn_max < T.r_spawn_min + 20.0) T.r_spawn_max = T.r_spawn_min + 20.0;
     if (T.r_despawn < T.r_spawn_max + 30.0) T.r_despawn = T.r_spawn_max + 30.0;
 }
@@ -291,19 +302,76 @@ static void rt_bez(const double (*b)[2], double t, double *x, double *z, double 
     }
 }
 
+static double rt_class_speed(int klass);
+
 /* ============================================================ the next edge ======= */
 
 /* node at the travel end of (e, d) */
 static int rt_end_node(const TD5_RouteGEdge *E, int d) { return E->node[d == 0 ? 1 : 0]; }
 
+/* the lane a car takes on the next edge for a turn */
+static int rt_next_lane(const TD5_RouteGEdge *E, const TD5_RouteGEdge *F, int k, int turn)
+{
+    const int n2 = rt_dir_lanes(F), n1 = rt_dir_lanes(E);
+    int nk;
+    if (turn > 0) nk = n2 - 1;
+    else if (turn < 0) nk = 0;
+    else nk = (int)floor((double)k * (double)n2 / (double)(n1 > 0 ? n1 : 1) + 0.5);
+    if (nk >= n2) nk = n2 - 1;
+    if (nk < 0) nk = 0;
+    return nk;
+}
+
+/* The connector from the end of lane `off0` of (E, d) to lane `nk` of (F, nd): a cubic, its length and
+ * speed. Returns the samples (of 9, body edges +-0.8 m included) found off the drivable surface. */
+static int rt_build_conn(RtCar *c, const TD5_RouteGEdge *E, int d, double off0, const TD5_RouteGEdge *F, int nd, int nk,
+                         double v_class)
+{
+    double p0x, p0z, t0x, t0z, p3x, p3z, t3x, t3z, ch, h, th, lx, lz;
+    int j, off = 0;
+    rt_edge_pt(E, d, E->plen, off0, &p0x, &p0z, &t0x, &t0z);
+    rt_edge_pt(F, nd, 0.0, rt_lane_off(F, nk), &p3x, &p3z, &t3x, &t3z);
+    ch = hypot(p3x - p0x, p3z - p0z);
+    h = ch * 0.38;
+    c->bz[0][0] = p0x; c->bz[0][1] = p0z;
+    c->bz[1][0] = p0x + t0x * h; c->bz[1][1] = p0z + t0z * h;
+    c->bz[2][0] = p3x - t3x * h; c->bz[2][1] = p3z - t3z * h;
+    c->bz[3][0] = p3x; c->bz[3][1] = p3z;
+    c->clen = 0.0;
+    lx = p0x; lz = p0z;
+    for (j = 1; j <= 12; j++) {
+        double x, z;
+        rt_bez((const double (*)[2])c->bz, (double)j / 12.0, &x, &z, NULL, NULL);
+        c->clen += hypot(x - lx, z - lz);
+        lx = x; lz = z;
+    }
+    th = fabs(atan2(t0x * t3z - t0z * t3x, t0x * t3x + t0z * t3z));
+    if (th > 0.17 && ch > 1.0) {
+        const double R = (ch / RT_M) / (2.0 * sin(th * 0.5));
+        c->v_conn = rt_clamp(sqrt(T.a_lat * R), 3.5, v_class);
+    } else c->v_conn = v_class;
+    if (c->clen > 1.0 * RT_M)
+        for (j = 1; j <= 9; j++) {
+            double x, z, tx, tz;
+            int in0 = 0, in1 = 0, in2 = 0;
+            rt_bez((const double (*)[2])c->bz, (double)j / 10.0, &x, &z, &tx, &tz);
+            if (!rt_locate(x, z, 0, 0, &in0, NULL) || !in0) { off++; continue; }
+            rt_locate(x + tz * 0.8 * RT_M, z - tx * 0.8 * RT_M, 0, 0, &in1, NULL);
+            rt_locate(x - tz * 0.8 * RT_M, z + tx * 0.8 * RT_M, 0, 0, &in2, NULL);
+            if (!in1 || !in2) off++;
+        }
+    return off;
+}
+
 /* Pick the next edge at the travel end of the car's edge: straight preferred, one-way respected, no
- * U-turn (a dead end returns -1). Builds the connector and the junction-ahead state. */
+ * U-turn (a dead end returns -1), and only a turn whose connector stays on the paved patch (when none
+ * does, the one that leaves it least). Builds the connector and the junction-ahead state. */
 static void rt_plan_next(RtCar *c)
 {
     TD5_RouteGEdge E, F;
     TD5_RouteGNode N;
     double ex, ez, etx, etz, w[16], wsum = 0.0, r;
-    int cand_e[16], cand_d[16], cand_turn[16], nc = 0, i, pick = -1;
+    int cand_e[16], cand_d[16], cand_turn[16], cand_off[16], nc = 0, i, pick = -1, min_off = 1 << 30;
     c->ne = -1; c->nd = 0; c->nk = 0; c->turn = 0; c->clen = 0.0; c->v_conn = c->v_class;
     c->sig_n = -1; c->sig_g = -1; c->stop_req = 0; c->committed = 0; c->yield_node = -1; c->waiting = 0;
     if (!rt_edge(c->e, &E)) return;
@@ -336,51 +404,21 @@ static void rt_plan_next(RtCar *c)
         w[nc] = cand_turn[nc] == 0 ? 4.0 : (cand_turn[nc] > 0 ? 2.0 : 1.5);
         if (fabs(ang) > 2.4) w[nc] = 0.25;       /* a hairpin: rare */
         if (F.klass <= 2) w[nc] *= 0.35;         /* service / living streets: rarely */
-        wsum += w[nc];
+        cand_off[nc] = rt_build_conn(c, &E, c->d, c->off_t, &F, d2, rt_next_lane(&E, &F, c->k, cand_turn[nc]),
+                                     rt_class_speed(F.klass));
+        if (cand_off[nc] < min_off) min_off = cand_off[nc];
         nc++;
     }
     if (nc == 0) return;                         /* dead end */
+    for (i = 0; i < nc; i++) { if (cand_off[i] != min_off) w[i] = 0.0; wsum += w[i]; }
+    if (min_off > 0) T.st.conn_off_plans++;
     r = rt_unit(&c->rng) * wsum;
-    for (i = 0; i < nc; i++) { r -= w[i]; if (r <= 0.0) { pick = i; break; } }
-    if (pick < 0) pick = nc - 1;
+    for (i = 0; i < nc; i++) { if (w[i] <= 0.0) continue; r -= w[i]; if (r <= 0.0) { pick = i; break; } }
+    if (pick < 0) for (i = nc - 1; i >= 0; i--) if (cand_off[i] == min_off) { pick = i; break; }
     c->ne = cand_e[pick]; c->nd = cand_d[pick]; c->turn = cand_turn[pick];
     rt_edge(c->ne, &F);
-    {
-        const int n2 = rt_dir_lanes(&F), n1 = rt_dir_lanes(&E);
-        if (c->turn > 0) c->nk = n2 - 1;
-        else if (c->turn < 0) c->nk = 0;
-        else c->nk = (int)floor((double)c->k * (double)n2 / (double)(n1 > 0 ? n1 : 1) + 0.5);
-        if (c->nk >= n2) c->nk = n2 - 1;
-        if (c->nk < 0) c->nk = 0;
-    }
-    /* the connector: from the end of my lane to the start of the next lane */
-    {
-        double p0x, p0z, t0x, t0z, p3x, p3z, t3x, t3z, ch, h, th;
-        int j;
-        rt_edge_pt(&E, c->d, E.plen, c->off_t, &p0x, &p0z, &t0x, &t0z);
-        rt_edge_pt(&F, c->nd, 0.0, rt_lane_off(&F, c->nk), &p3x, &p3z, &t3x, &t3z);
-        ch = hypot(p3x - p0x, p3z - p0z);
-        h = ch * 0.38;
-        c->bz[0][0] = p0x; c->bz[0][1] = p0z;
-        c->bz[1][0] = p0x + t0x * h; c->bz[1][1] = p0z + t0z * h;
-        c->bz[2][0] = p3x - t3x * h; c->bz[2][1] = p3z - t3z * h;
-        c->bz[3][0] = p3x; c->bz[3][1] = p3z;
-        c->clen = 0.0;
-        {
-            double lx = p0x, lz = p0z;
-            for (j = 1; j <= 12; j++) {
-                double x, z;
-                rt_bez((const double (*)[2])c->bz, (double)j / 12.0, &x, &z, NULL, NULL);
-                c->clen += hypot(x - lx, z - lz);
-                lx = x; lz = z;
-            }
-        }
-        th = fabs(atan2(t0x * t3z - t0z * t3x, t0x * t3x + t0z * t3z));
-        if (th > 0.17 && ch > 1.0) {
-            const double R = (ch / RT_M) / (2.0 * sin(th * 0.5));
-            c->v_conn = rt_clamp(sqrt(T.a_lat * R), 3.5, c->v_class);
-        } else c->v_conn = c->v_class;
-    }
+    c->nk = rt_next_lane(&E, &F, c->k, c->turn);
+    rt_build_conn(c, &E, c->d, c->off_t, &F, c->nd, c->nk, c->v_class);
     /* the junction ahead: signal group of my arm */
     {
         int16_t bear[16];
@@ -479,7 +517,7 @@ void td5_roam_traffic_session_init(void)
 {
     int i;
     const int keep_force_l = T.force_level, keep_force_d = T.force_density, keep_loaded = T.loaded;
-    memset(&T, 0, sizeof T);
+    memset(&T, 0, sizeof T);   /* knobs are re-read below (T.knobs cleared) */
     T.force_level = keep_force_l; T.force_density = keep_force_d;
     T.loaded = td5_roam_active() ? keep_loaded : 0;   /* td5_roam_traffic_load_assets ran this race init */
     if (!td5_roam_active()) return;
@@ -894,9 +932,12 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
                     const double dl = d_stop + RT_STOP_BACK_M;
                     const double t_arr = dl > 0.0 ? dl / (v > 1.0 ? v : 1.0) : 0.0;
                     const int ph = td5_geo_signal_phase_at(ss, c->sig_g);
-                    const int pa = td5_geo_signal_phase_at(ss + t_arr, c->sig_g);
-                    const int go = pa == 2 || (pa == 1 && ph == 2);
-                    if (!go && (c->stop_req || d_stop > v * v / (2.0 * 6.0) - 0.5)) {
+                    const int pa = td5_geo_signal_phase_at(ss + t_arr + 0.5, c->sig_g);
+                    /* amber after green (the head was green 1.6 s ago) vs amber after red */
+                    const int amber_out = ph == 1 && td5_geo_signal_phase_at(ss - 1.6, c->sig_g) == 2;
+                    const int pa_out = pa == 1 && td5_geo_signal_phase_at(ss + t_arr + 0.5 - 1.6, c->sig_g) == 2;
+                    const int go = (ph == 2 || amber_out) && (pa == 2 || pa_out);
+                    if (!go && (c->stop_req || ph == 0 || d_stop > v * v / (2.0 * 6.5) - 0.3)) {
                         if (!c->stop_req) T.st.sig_stops++;
                         c->stop_req = 1;
                     } else c->stop_req = 0;
@@ -1018,6 +1059,126 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
     }
 }
 
+/* ============================================================ barriers + DEV shots */
+
+/* A traffic car crossing a race barrier segment (barriers are racer-only): counted for the proof. */
+static void rt_barrier_passes(void)
+{
+    int nb = 0, i, k;
+    const TD5_RoamBarrier *b;
+    if (!td5_roam_race_barriers_live()) { T.bar_valid = 0; return; }
+    b = td5_roam_barriers(&nb);
+    if (!b || nb <= 0) return;
+    for (i = 0; i < T.pool; i++) {
+        RtCar *c = &T.car[i];
+        const TD5_Actor *a;
+        double x, z;
+        if (c->state != RT_LIVE || c->alpha < 255) { c->bar_side = 0; continue; }
+        a = td5_game_get_actor(c->slot);
+        if (!a) continue;
+        x = (double)a->world_pos.x / 256.0; z = (double)a->world_pos.z / 256.0;     /* WORLD frame, units */
+        for (k = 0; k < nb; k++) {
+            const double x0 = b[k].x0 / 256.0, z0 = b[k].z0 / 256.0, x1 = b[k].x1 / 256.0, z1 = b[k].z1 / 256.0;
+            const double dx = x1 - x0, dz = z1 - z0, l2 = dx * dx + dz * dz;
+            double t, sd;
+            int side;
+            if (b[k].kind != TD5_ROAM_BARRIER_MOUTH || l2 <= 1.0) continue;
+            t = ((x - x0) * dx + (z - z0) * dz) / l2;
+            if (t < -0.05 || t > 1.05) continue;
+            sd = ((x - x0) * dz - (z - z0) * dx) / sqrt(l2);
+            if (fabs(sd) > 3.0 * RT_M) continue;
+            side = sd > 0.0 ? 1 : -1;
+            if (c->bar_k == k && c->bar_side != 0 && side != c->bar_side && T.bar_valid) {
+                T.st.barrier_passes++;
+#ifndef TD5RE_RELEASE
+                if (T.shots && !T.shot_done[2]) {
+                    const TD5_Actor *p = td5_game_get_actor(0);
+                    if (p) {
+                        const double px = p->world_pos.x / 256.0, pz = p->world_pos.z / 256.0;
+                        const double hy = (double)(((int)p->euler_accum.yaw >> 8) & 0xFFF) * (2.0 * RT_PI / 4096.0);
+                        const double rx = x - px, rz = z - pz, d = sqrt(rx * rx + rz * rz);
+                        if (d < 70.0 * RT_M && d > 6.0 * RT_M && (rx * sin(hy) + rz * cos(hy)) > 0.6 * d) {
+                            char path[512];
+                            const char *dir = td5_plat_log_dir();
+                            snprintf(path, sizeof path, "%sroam_traffic_barrier.png", dir ? dir : "");
+                            td5_plat_request_frame_dump(path);
+                            T.shot_done[2] = 1;
+                            TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] shot barrier: slot %d crossed barrier %d (cluster %llx) %.0f m ahead "
+                                      "of the player -> %s", c->slot, k, (unsigned long long)b[k].cluster_key, d / RT_M, path);
+                        }
+                    }
+                }
+#endif
+            }
+            c->bar_k = k; c->bar_side = side;
+            break;
+        }
+    }
+    T.bar_valid = 1;
+}
+
+#ifndef TD5RE_RELEASE
+/* DEV shots (TD5RE_ROAM_TRAFFIC_SHOTS=1, free roam only): put the player behind a car held at a red
+ * stop line, then behind a car on a busy avenue, and dump a frame each time. */
+static void rt_shots(void)
+{
+    const long tick = (long)g_td5.simulation_tick_counter;
+    TD5_Actor *p;
+    int i;
+    if (!T.shots || td5_roam_race_running()) return;
+    p = td5_game_get_actor(0);
+    if (!p) return;
+    if (T.shot_wait > 0) {
+        if (tick >= T.shot_wait) {
+            char path[512];
+            const char *dir = td5_plat_log_dir();
+            snprintf(path, sizeof path, "%sroam_traffic_%s.png", dir ? dir : "", T.shot_name);
+            td5_plat_request_frame_dump(path);
+            TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] shot %s -> %s (live %d)", T.shot_name, path, T.st.live);
+            T.shot_wait = 0;
+        }
+        return;
+    }
+    if (tick < 450) return;
+    for (i = 0; i < T.pool; i++) {
+        RtCar *c = &T.car[i];
+        TD5_RouteGEdge E;
+        double x, z, tx, tz, back;
+        int want = -1, j, nnear = 0;
+        const TD5_Actor *a;
+        if (c->state != RT_LIVE || c->seg != RT_SEG_EDGE || c->alpha < 255 || !rt_edge(c->e, &E)) continue;
+        a = td5_game_get_actor(c->slot);
+        if (!a) continue;
+        if (!T.shot_done[0] && c->sig_g >= 0 && c->stop_req && c->holding && rt_speed_ms(a) < 0.3 &&
+            td5_geo_signal_phase_at((double)tick / RT_HZ + 2.0, c->sig_g) == 0) want = 0;     /* red for 2 s more */
+        else if (T.shot_done[0] && !T.shot_done[1] && E.klass >= 6 && c->s > 40.0 * RT_M) {
+            double cx, cz;
+            rt_place_of(a, &cx, &cz);
+            for (j = 0; j < T.pool; j++) {
+                const TD5_Actor *b;
+                double bx, bz;
+                if (j == i || T.car[j].state != RT_LIVE) continue;
+                b = td5_game_get_actor(T.car[j].slot);
+                if (b && rt_place_of(b, &bx, &bz) && hypot(bx - cx, bz - cz) < 90.0 * RT_M) nnear++;
+            }
+            if (nnear >= 3) want = 1;
+        }
+        if (want < 0) continue;
+        back = want == 0 ? 16.0 : 22.0;
+        if (c->s < back * RT_M + 2.0 * RT_M) continue;
+        rt_edge_pt(&E, c->d, c->s - back * RT_M, c->off, &x, &z, &tx, &tz);
+        if (!rt_clear_of_actors(x, z, 5.0, 0)) continue;
+        td5_roam_place_actor(0, p, (int32_t)floor(x + 0.5), (int32_t)floor(z + 0.5), rt_angle_of(tx, tz));
+        T.shot_done[want] = 1;
+        T.shot_wait = tick + 20;
+        snprintf(T.shot_name, sizeof T.shot_name, "%s", want == 0 ? "red_stop" : "avenue");
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] shot %s: player put %.0f m behind slot %d (edge %d klass %d lanes %d, node %d group %d, "
+                  "%d cars within 90 m)", T.shot_name, back, c->slot, c->e, E.klass, E.lanes, c->node, c->sig_g, nnear);
+        return;
+    }
+}
+#endif
+
 /* ============================================================ tick ================ */
 
 void td5_roam_traffic_tick(void)
@@ -1086,6 +1247,10 @@ void td5_roam_traffic_tick(void)
         if (best >= 0 && rt_try_spawn(ax[best], az[best], ax, az, nanch)) live++;
     }
 
+    rt_barrier_passes();
+#ifndef TD5RE_RELEASE
+    rt_shots();
+#endif
     T.st.live = live;
     if (tick - T.st_t0 > RT_WARMUP) {
         T.st.samples++;

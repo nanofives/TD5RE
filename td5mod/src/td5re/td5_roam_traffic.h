@@ -82,6 +82,8 @@ typedef struct {
     long   stuck_live;                  /* car-ticks still stuck past 10 s and not despawned        */
     long   yield_waits;                 /* unsignalised junction waits started                     */
     long   turns[3];                    /* left / straight / right connectors                       */
+    long   conn_off_plans;              /* turns planned with no connector fully on the patch       */
+    long   barrier_passes;              /* traffic crossings of a race barrier (racer-only walls)   */
     long   racer_near;                  /* car-ticks with a racer within 4 m (contacts)             */
     double max_lat_m;                   /* largest |offset| from the lane's target                  */
     double max_kmh;
