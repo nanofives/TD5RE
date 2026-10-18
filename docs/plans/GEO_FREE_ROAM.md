@@ -156,8 +156,15 @@ positions on distance-along.
 
 Traffic cars spawn and despawn in a ring around the player on the street
 graph, follow lanes, turn at junctions, obey the lamp cycle of
-`td5_geo_signals.c`, ignore race barriers. Cops reuse cop-chase behaviour on
-the graph. Race setup gets traffic / cops toggles.
+`td5_geo_signals.c`, ignore race barriers. Race setup gets traffic / cops toggles.
+
+Cops (F10, `td5_roam_cops.h`) do NOT reuse the cop-chase or traffic-police
+drivers: both measure gaps and corners in strip spans, which roam does not
+have. They reuse the traffic police's cop identity (`g_cop_is_cop`: the police
+mesh, tough in a crash, no lift), its siren voice and its light bar, and drive
+their own A* legs with the Driver Model's path shape and the traffic throttle
+law. Decision: cops are racer-like, so the road edge and the race barriers are
+walls for them (traffic passes through barriers).
 
 ## Phases (one child round each)
 
@@ -173,7 +180,7 @@ the graph. Race setup gets traffic / cops toggles.
 | F7 | **AI racers** | Driver Model on the route polyline, positions, rubber-band | 5 AI finish a 3 km casco sprint with no stuck cars, invariant checker green |
 | F8 | **Traffic** | Ambient traffic on the graph, signals obeyed, passes through barriers, race toggle | Traffic density holds steady over 10 min roam, no traffic inside buildings |
 | F9 | **Circuits + whole partido** | Laps, origin rebasing, partido tile index. **F9a circuits DONE 2026-10-18** (roam-F9a): SPRINT / CIRCUIT + laps 1-10 in the map and the setup, closing leg, open start line, lap tracker on the total distance (`td5_roam_lap.c`), AI laps, lap HUD / results, selftest rows `roam-circuit` + `roam-circuit-smoke`. Origin rebasing + partido index still open | Drive from the casco to City Bell without a hitch |
-| F10 | **Cops** | Police on the graph in roam, per-race toggle | |
+| F10 | **Cops** **DONE 2026-10-18** (roam-F10) | Police on the graph in roam, per-race toggle. `td5_roam_cops.c`: cop slots after the traffic pool (30..35, the host level's police model, the traffic police's cop rules), patrol on A* legs (`td5_roam_route_plan_path`, red lamps obeyed), notice by line of sight (speeding, a red light run, a ram), pursuit with siren + light bar, heat 1..5 with reinforcements, escape by sight or distance, bust (stopped with a cop within 10 m for 2 s) with a fine and a respawn on the street in free roam, a 3 s hold in a race. Cops are racer-like: the road edge and race barriers are walls for them. Race: the COPS row (default OFF) puts them on the route corridor only. Selftest rows `roam-cops` + `roam-cops-smoke` | Speeding past a patrol starts a pursuit and the drive escapes; a second pursuit ends in a bust + respawn on the road; 0 cop off-surface ticks |
 | F11 | **Retire strip BUILD** | Parity checklist (forks, signals, AI quality, load time) then remove | Mariano signs off |
 
 ## Open questions (to settle in F0 or later)

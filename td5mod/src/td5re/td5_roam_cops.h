@@ -25,8 +25,9 @@
  * PURSUIT. Siren (the single tracked-vehicle voice, on the nearest pursuing cop) and the red / blue light bar
  * (render_tracked_actor_marker). Each pursuer re-plans an A* path to the player every 0.67 s and drives it with the
  * Driver Model's shape on a polyline (resampled path, corner speed sqrt(a_lat R), a backward braking pass, pure
- * pursuit steering, the traffic throttle law), up to TD5RE_ROAM_COPS_VMAX (125 km/h). Inside 30 m with line of sight
- * it drives at a box point beside the player instead. HEAT 1..5: 1 at the start, +1 per further offence and per 25 s
+ * pursuit steering, the traffic throttle law), up to TD5RE_ROAM_COPS_VMAX (125 km/h); within 150 m of the player a
+ * pursuer may take a one-way against the flow, and a player behind it is reached by turning round. Inside 30 m with
+ * line of sight it drives at a box point beside the player instead. HEAT 1..5: 1 at the start, +1 per further offence and per 25 s
  * of chase. Pursuers wanted = 1 + heat (pool permitting): reinforcements spawn 120..220 m out, behind or beside the
  * player (they join the chase, they do not meet the car head-on), and patrols within 200 m join from heat 2.
  *

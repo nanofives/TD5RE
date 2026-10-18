@@ -181,7 +181,7 @@ static int ct_plan(const TD5_Actor *a, double len_m, double min_m)
         const double dx = hx * c - hz * s, dz = hx * s + hz * c;
         double *qx = NULL, *qz = NULL, len = 0.0;
         int nq = 0;
-        if (td5_roam_route_plan_path(x, z, hx, hz, x + dx * len_m * CT_M, z + dz * len_m * CT_M, 200.0, NULL, &qx, &qz, &nq, &len) &&
+        if (td5_roam_route_plan_path(x, z, hx, hz, x + dx * len_m * CT_M, z + dz * len_m * CT_M, 200.0, NULL, 0, &qx, &qz, &nq, &len) &&
             len >= min_m && ct_set_path(qx, qz, nq)) {
             free(qx); free(qz);
             TD5_LOG_I(LOG_TAG, "[ROAMCOPS] player leg: %.0f m (%d points, try %d)", len, T.np, k);

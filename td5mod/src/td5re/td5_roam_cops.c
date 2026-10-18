@@ -78,11 +78,12 @@ typedef struct {
     int32_t  steer;
     double   v_t;
     int      rec, rec_t, rec_n; double rec_x, rec_z;
-    long     still_t, off_t, born, last_contact, wreck_t;
+    long     still_t, off_t, born, last_contact, wreck_t, wall_t;
     int      stuck_counted;
     int      sees; long los_t;                   /* line of sight to the player (cached)       */
     double   d_player;
     int      sig_hold;                           /* patrol: holding at a red stop line         */
+    int      turning;                            /* pursuit: the last leg leaves backwards (turn round) */
 } RcCop;
 
 static struct {
@@ -552,9 +553,30 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
         /* plan from a point AHEAD of the car on its heading (4..12 m, 0.6 s): at a junction the street under the car
          * can snap to the crossing street, and a leg starting there threw the wheel to lock (F10 smoke run 2) */
         const double la = rc_clamp(rc_speed_ms(a) * 0.6, 4.0, 12.0);
-        double sx = x + fx * la * RC_M, sz = z + fz * la * RC_M;
+        double sx = x + fx * la * RC_M, sz = z + fz * la * RC_M, hx = fx, hz = fz;
+        /* the player BEHIND the cop and close (it overshot a car that braked): leave either way from the cop itself
+         * (it turns round) instead of round the block (F10 smoke: a 691 m leg for a car 51 m behind on the same street) */
+        c->turning = c->state == RC_PURSUIT && (gx - x) * fx + (gz - z) * fz < 0.0 && hypot(gx - x, gz - z) < 150.0 * RC_M;
+        /* a pursuer within 150 m of the player may take a one-way against the flow (siren on): 30 m back down a one-way
+         * street, not a 700 m legal loop round the block */
+        const int close_ow = c->state == RC_PURSUIT && hypot(gx - x, gz - z) < 150.0 * RC_M;
+        if (c->turning) { sx = x; sz = z; hx = 0.0; hz = 0.0; }
         if (!rc_inside(sx, sz)) { sx = x; sz = z; }
-        ok = td5_roam_route_plan_path(sx, sz, fx, fz, gx, gz, 60.0, C.race_on ? C.mask : NULL, &qx, &qz, &nq, &len);
+        ok = td5_roam_route_plan_path(sx, sz, hx, hz, gx, gz, 60.0, C.race_on ? C.mask : NULL, close_ow, &qx, &qz, &nq, &len);
+#ifndef TD5RE_RELEASE
+        if (ok && C.log_every) {
+            const double straight = hypot(gx - sx, gz - sz) / RC_M;
+            if (len > 2.5 * straight + 60.0 && C.st.plans % 4 == 0) {
+                uint64_t ks = 0, kt = 0;
+                double d1, d2, a, b;
+                td5_roam_route_snap_xz(sx, sz, 60.0, &a, &b, &ks, &d1);
+                td5_roam_route_snap_xz(gx, gz, 60.0, &a, &b, &kt, &d2);
+                TD5_LOG_I(LOG_TAG, "ROAM_COPS_LONGPLAN slot %d %s: leg %.0f m for %.0f m straight, from (%.0f,%.0f) heading (%.2f,%.2f) edge %016llx "
+                          "(%.1f m off) to (%.0f,%.0f) edge %016llx (%.1f m off), %d points", c->slot, c->state == RC_PURSUIT ? "pursuit" : "patrol",
+                          len, straight, sx, sz, fx, fz, (unsigned long long)ks, d1, gx, gz, (unsigned long long)kt, d2, nq);
+            }
+        }
+#endif
         if (ok && nq >= 2) {
             /* the car, then the planned line */
             double *bx = (double *)malloc((size_t)(nq + 1) * sizeof(double)), *bz = (double *)malloc((size_t)(nq + 1) * sizeof(double));
@@ -1034,13 +1056,15 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
     }
     dx = ax - x; dz = az - z; dl = sqrt(dx * dx + dz * dz) / RC_M;
     herr = rc_ang12(rc_angle_of(dx, dz) - heading);
+    if (c->state == RC_PURSUIT && abs(herr) > 0x300 && vt > 4.0) vt = 4.0;   /* the aim is behind: turn round slowly */
     alpha = (double)herr * (2.0 * RC_PI / 4096.0);
     delta = atan2(2.0 * C.wb * sin(alpha), dl > 1.0 ? dl : 1.0);
     steer_t = (int32_t)(delta * (4096.0 / (2.0 * RC_PI)) * 256.0);
 
     /* ---- recovery: still while it wants to move (and not at the player): reverse, wheel away ---- */
-    if (c->rec == 0 && !c->hold && !c->sig_hold && vt > 1.5 && v < 0.3 && c->d_player > 9.0) {
-        if (++c->rec_t > 60) {
+    if (c->rec == 0 && !c->hold && !c->sig_hold && vt > 1.5 && v < (tick - c->wall_t < 4 ? 1.0 : 0.3) && c->d_player > 9.0) {
+        /* still while it wants to move: reverse out after 2 s, or after 0.5 s when the road edge holds it (nosed in) */
+        if (++c->rec_t > (tick - c->wall_t < 4 ? 15 : 60)) {
             c->rec = 1; c->rec_t = 0;
             C.st.recoveries++;
             c->rec_n = (hypot(x - c->rec_x, z - c->rec_z) < 6.0 * RC_M) ? c->rec_n + 1 : 1;
@@ -1183,29 +1207,35 @@ static void rc_road_walls(RcCop *c, TD5_Actor *a)
     const double tol = 0.35 * RC_M;
     double fx, fz, bpx = 0.0, bpz = 0.0, bpen = 0.0, ox0 = 0.0, oz0 = 0.0, sx = 0.0, sz = 0.0;
     int q, n = 0, pinch = 0;
+    /* probes: 4 body corners and the 2 side midpoints (kerb overhang allowed), the chassis centre (none: a car
+     * cutting a convex corner has every corner on the road and its centre over the kerb) */
+    static const double k_l[7] = { -2.2, 2.2, -2.2, 2.2, 0.0, 0.0, 0.0 };
+    static const double k_w[7] = { -0.95, -0.95, 0.95, 0.95, -0.95, 0.95, 0.0 };
     if (!rs) return;
     rc_heading(a, &fx, &fz);
-    for (q = 0; q < 4; q++) {
-        const double l = (q & 1) ? 2.2 : -2.2, w = (q & 2) ? 0.95 : -0.95;
+    for (q = 0; q < 7; q++) {
+        const double l = k_l[q], w = k_w[q];
         const int32_t qx = a->world_pos.x + (int32_t)((fx * l + fz * w) * RC_M * 256.0);
         const int32_t qz = a->world_pos.z + (int32_t)((fz * l - fx * w) * RC_M * 256.0);
         TD5_RoamHit h;
         double pd;
+        const double tq = q == 6 ? -0.2 * RC_M : tol;       /* the centre: pushed 0.2 m inside the edge */
         if (!td5_roam_locate(rs, qx, qz, a->world_pos.y, 1, ROAM_PRIM_NONE, &h) || h.prim == ROAM_PRIM_NONE || h.inside) continue;
         pd = (double)h.push_dist;
-        if (pd <= tol) continue;
+        if (pd <= tq) continue;
         if (n > 0 && (h.push_x * ox0 + h.push_z * oz0) < 0.0) pinch = 1;
         if (n == 0) { ox0 = h.push_x; oz0 = h.push_z; }
         n++;
         {
             const double l2 = sqrt((double)h.push_x * h.push_x + (double)h.push_z * h.push_z);
-            const double px = l2 > 0.0 ? h.push_x / l2 * (pd - tol) : 0.0, pz = l2 > 0.0 ? h.push_z / l2 * (pd - tol) : 0.0;
+            const double px = l2 > 0.0 ? h.push_x / l2 * (pd - tq) : 0.0, pz = l2 > 0.0 ? h.push_z / l2 * (pd - tq) : 0.0;
             sx += px; sz += pz;
-            if (pd - tol > bpen) { bpen = pd - tol; bpx = px; bpz = pz; }
+            if (pd - tq > bpen) { bpen = pd - tq; bpx = px; bpz = pz; }
         }
     }
     if (n == 0 || bpen <= 0.0) return;
     C.st.road_pushes++;
+    c->wall_t = rc_tick();
     if (pinch) { bpx = sx; bpz = sz; C.st.road_pinches++; }
     a->world_pos.x += (int32_t)floor(bpx * 256.0 + 0.5);
     a->world_pos.z += (int32_t)floor(bpz * 256.0 + 0.5);
@@ -1217,7 +1247,6 @@ static void rc_road_walls(RcCop *c, TD5_Actor *a)
             if (vn < 0.0) { a->linear_velocity_x -= (int32_t)(vn * nx); a->linear_velocity_z -= (int32_t)(vn * nz); }
         }
     }
-    (void)c;
 }
 
 /* ============================================================ the player's offences */

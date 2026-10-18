@@ -716,7 +716,8 @@ void td5_roam_sprint_test_frame(void)
             TD5_RoamRaceSetup s;
             TD5_RoamPhysStats st;
             memset(&s, 0, sizeof s);
-            s.laps = D.laps; s.traffic = 1; s.cops = 0;
+            s.laps = D.laps; s.traffic = 1;
+            s.cops = td5_env_int("TD5RE_ROAM_SPRINT_COPS", 0, 0, 1);   /* [F10] DEV: the sprint with COPS on */
             s.opponents = SD_IS_CIRC(D.mode) ? SD_CIRC_AI_N : (SD_IS_AI(D.mode) ? SD_AI_N : 0);   /* [F7] [F9a] */
             if (!td5_roam_race_start(&s)) { sd_finish("race start refused", 1); return; }
             td5_roam_barriers_stats(&D.bst);
