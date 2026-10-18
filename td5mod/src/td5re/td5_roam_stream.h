@@ -95,6 +95,11 @@ int  td5_roam_stream_guard(struct TD5_Actor *a);
  * (a probe there must not fall: the caller holds it). */
 int  td5_roam_stream_point_missing(int32_t x, int32_t z);
 
+/* [F9b] The route planner needs the ROAD file of (tx,tz): 1 = it exists, 0 = queued for the worker
+ * (built + written at a priority below every load), -1 = no session / beyond the place / given up. */
+int  td5_roam_stream_plan_tile(int tx, int tz);
+long td5_roam_stream_plan_built(void);
+
 typedef struct {
     int      road_tiles, scen_tiles, road_min, road_max, scen_min, scen_max;
     double   road_mb, scen_mb;

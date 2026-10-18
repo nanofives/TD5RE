@@ -54,9 +54,10 @@
 #define RS_PRIO_GATE     (-100)
 #define RS_PRIO_URGENT   (-1000)
 #define RS_PRIO_VERIFY   100000         /* below every load                          */
+#define RS_PRIO_PLAN     50000          /* [F9b] planner tiles: below every load, above verify */
 #define RS_MISS_LOG      20
 
-enum { RS_JOB_LOAD = 1, RS_JOB_VERIFY = 2 };
+enum { RS_JOB_LOAD = 1, RS_JOB_VERIFY = 2, RS_JOB_PLAN = 3 };   /* PLAN [F9b]: make sure the file exists (build + write), install nothing */
 
 typedef struct {
     int        tx, tz;
@@ -69,6 +70,7 @@ typedef struct {
     uint8_t    failed;            /* no file and no build: given up this session     */
     uint8_t    built;             /* the worker built it this session                */
     uint8_t    outside;           /* [F9b] not streamable (beyond the place boundary): never loaded */
+    uint8_t    plan;              /* [F9b] planner build: 0 none, 1 queued, 2 done (file there or failed) */
     uint32_t   out_ms[2];         /* when the layer left the keep ring (0 = inside)  */
     uint32_t   used_ms[2];        /* last time the layer was kept (LRU)              */
     int        prio;
@@ -96,6 +98,7 @@ typedef struct {
     int                ntile, captile;
     int32_t           *hash;  int nhash;   /* [F9b] open addressing, power of two        */
     int                partido;            /* [F9b] 1 = every tile of the place boundary, 0 = the casco list */
+    long               plan_built;         /* [F9b] tiles the planner asked for and the worker built */
     int                ncasco;
     /* knobs */
     int   road_r, view_r, lead_ms, linger_ms, lru, verify, build, worker_on;
@@ -321,6 +324,19 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
     memset(r, 0, sizeof *r);
     r->idx = j->idx; r->kind = j->kind; r->layers = j->layers; r->tx = tx; r->tz = tz;
     RS_DOING("read");
+    if (j->kind == RS_JOB_PLAN) {
+        /* [F9b] the planner only needs the FILE: an existing one is left alone (the stream verifies the
+         * tiles it loads), a missing one is built and written */
+        char path[512];
+        rs_tile_path(s, tx, tz, path, sizeof path);
+        if (td5_plat_file_exists(path)) return;
+        RS_DOING("plan_build");
+        if (!rs_build(s, tx, tz, &t, r->err, sizeof r->err)) { r->failed = 1; return; }
+        r->built = 1;
+        r->ms_build = td5_plat_time_ms() - t0;
+        rs_free_tile(t);
+        return;
+    }
     if (!rs_read(s, tx, tz, &t, r->err, sizeof r->err)) {
         r->ms_read = td5_plat_time_ms() - t0;
         t0 = td5_plat_time_ms();
@@ -456,7 +472,7 @@ static DWORD WINAPI rs_thread_proc(LPVOID param)
 static void rs_submit(RsSession *s, int idx, int kind, uint8_t layers, int prio)
 {
     RsTile *t = &s->tile[idx];
-    if (!layers) return;
+    if (!layers && kind != RS_JOB_PLAN) return;
     EnterCriticalSection(&s->cs);
     if (s->njob < RS_MAX_JOBS) {
         s->job[s->njob].idx = idx; s->job[s->njob].kind = kind;
@@ -464,6 +480,7 @@ static void rs_submit(RsSession *s, int idx, int kind, uint8_t layers, int prio)
         s->job[s->njob].layers = layers; s->job[s->njob].prio = prio;
         s->njob++;
         if (kind == RS_JOB_LOAD) t->pend |= layers;
+        else if (kind == RS_JOB_PLAN) t->plan = 1;
         else t->verify = 1;
     }
     LeaveCriticalSection(&s->cs);
@@ -497,6 +514,8 @@ static void rs_update_requests(RsSession *s)
             t->pend &= (uint8_t)~(j->layers & ~keep);
             j->layers = keep;
             j->prio = t->prio;
+        } else if (j->kind == RS_JOB_PLAN) {
+            /* [F9b] planner builds stay queued until done */
         } else if (!t->road) {                /* verify of a tile that left: re-queued if it comes back */
             t->verify = 0;
             s->job[i] = s->job[--s->njob];
@@ -562,6 +581,13 @@ static void rs_apply(RsSession *s, RsResult *r, int force, int *n_road, int *n_s
 {
     RsTile *tl = &s->tile[r->idx];
     const uint8_t keepm = (uint8_t)(tl->keep | tl->want | (tl->pinned || tl->gate ? RS_ROAD : 0u) | (tl->gate ? RS_SCEN : 0u));
+    if (r->kind == RS_JOB_PLAN) {           /* [F9b] nothing to install: the file is there (or never will be) */
+        tl->plan = 2;
+        if (r->built) { s->st.built++; s->plan_built++; tl->built = 1; }
+        if (r->failed) { s->st.failed++; TD5_LOG_W(LOG_TAG, "ROAM_STREAM: planner tile %d,%d not built (%s)", tl->tx, tl->tz, r->err); }
+        if (r->ms_build > s->build_ms_max) s->build_ms_max = r->ms_build;
+        return;
+    }
     if (r->kind == RS_JOB_LOAD) tl->pend &= (uint8_t)~r->layers;
     else if (tl->verify == 1) tl->verify = 2;
     if (r->failed) {
@@ -1187,6 +1213,30 @@ int td5_roam_stream_wait_area(int32_t px, int32_t pz, int ring)
               s->ncasco);
     return ready;
 }
+
+/* [F9b] The route planner needs the ROAD file of (tx,tz) (td5_roam_route.c, a region of the place). 1 = the
+ * file exists now; 0 = queued for the worker (PLAN job, below every load); -1 = no session / not streamable /
+ * given up. */
+int td5_roam_stream_plan_tile(int tx, int tz)
+{
+    RsSession *s = s_stream.s;
+    char path[512];
+    int i;
+    if (!s) return -1;
+    i = rs_get(s, tx, tz);
+    if (i < 0) return -1;
+    if (s->tile[i].plan == 2) {
+        rs_tile_path(s, tx, tz, path, sizeof path);
+        return td5_plat_file_exists(path) ? 1 : -1;
+    }
+    if (s->tile[i].plan == 1) return 0;
+    rs_tile_path(s, tx, tz, path, sizeof path);
+    if (td5_plat_file_exists(path)) { s->tile[i].plan = 2; return 1; }
+    rs_submit(s, i, RS_JOB_PLAN, 0, RS_PRIO_PLAN);
+    return 0;
+}
+
+long td5_roam_stream_plan_built(void) { return s_stream.s ? s_stream.s->plan_built : 0; }
 
 /* Read + install one ROAD tile on the main thread now. 1 when resident afterwards. */
 static int rs_sync_road(RsSession *s, int idx)

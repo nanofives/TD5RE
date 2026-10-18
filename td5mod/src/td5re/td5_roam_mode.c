@@ -42,10 +42,12 @@
 #include "td5_roam_ai.h"        /* [F7] the opponents' cars load with the session */
 #include "td5_asset.h"          /* [F7] td5_asset_get_car_zip_path: a known opponent car */
 #include "td5_roam_rebase.h"    /* [F9b] a new session starts the rebase counters */
+#include "td5_roam_partido.h"   /* [F9b] the place boundary + its streets (gate, spawn in a field) */
 
 #define LOG_TAG "roam"
 
 #define ROAM_MAX_SLOTS   32      /* == TD5_MAX_TOTAL_ACTORS */
+#define ROAM_GATE_STREET_M 300.0 /* [F9b] FREE ROAM accepts a point of the place with a street this close */
 #define ROAM_UPM         430.0   /* place units per metre */
 #define ROAM_RAD         0.017453292519943295
 #define ROAM_WGS_A       6378137.0
@@ -199,6 +201,11 @@ int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
         roam_grid_tile_of(&g, (double)x, (double)z, &tx, &tz);
         td5_roam_tile_path(path, sizeof path, NULL, cand, tx, tz);
         ok = td5_plat_file_exists(path);
+        /* [F9b] no tile built there yet: any point of the place with a street within ROAM_GATE_STREET_M
+         * (the light OSM layer; the stream builds the tiles on demand behind the start gate) */
+        if (!ok && td5_roam_partido_load(cand) && td5_roam_partido_contains((double)x, (double)z) &&
+            td5_roam_partido_streets_ensure(cand))
+            ok = td5_roam_partido_nearest_street((double)x, (double)z, ROAM_GATE_STREET_M, NULL, NULL, NULL);
         if (!ok) continue;
         snprintf(slug, cap, "%s", cand);
         *px = x; *pz = z;
@@ -536,6 +543,18 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
 
     /* the click point -> the nearest drivable spot (the car must not start off the road) */
     moved = roam_snap_to_road(&px, &pz, yaw);
+    if (moved < 0.0 && td5_roam_stream_active() && td5_roam_partido_streets_ensure(s_roam.spawn.place)) {
+        /* [F9b] a click in a field, beyond the spawn neighbourhood's streets: move it to the nearest OSM street
+         * of the place, bring that neighbourhood in and snap there */
+        double sx, sz, dm;
+        if (td5_roam_partido_nearest_street((double)px, (double)pz, 3000.0, &sx, &sz, &dm)) {
+            TD5_LOG_I(LOG_TAG, "roam: spawn click place=(%d,%d) has no road in its neighbourhood: nearest street %.0f m away",
+                      (int)px, (int)pz, dm);
+            px = (int32_t)floor(sx + 0.5); pz = (int32_t)floor(sz + 0.5);
+            td5_roam_stream_wait_area(px, pz, -1);
+            moved = roam_snap_to_road(&px, &pz, yaw);
+        }
+    }
     if (moved > 0.0)
         TD5_LOG_I(LOG_TAG, "roam: spawn snap to road: click place=(%d,%d) -> (%d,%d), moved %.1f m",
                   (int)s_roam.spawn.spawn_px, (int)s_roam.spawn.spawn_pz, (int)px, (int)pz, moved);

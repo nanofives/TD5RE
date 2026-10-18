@@ -34,6 +34,7 @@
 #include "td5_roam_physics.h"
 #include "td5_roam_stream.h"
 #include "td5_roam_route.h"
+#include "td5_roam_partido.h"   /* [F9b] the place outline + its streets on the map */
 #include "td5_roam_route_ui.h"
 #include "td5_roam_race.h"      /* [F6-B] RACE THIS ROUTE, the sprint locks route edits */
 #include "../../../re/include/td5_actor_struct.h"
@@ -139,6 +140,8 @@ static void route_summary(char *out, size_t cap)
         kind[0] = '\0';
     if (n == 0)       snprintf(out, cap, "%sNO ROUTE", kind);
     else if (n == 1)  snprintf(out, cap, "%s1 POINT   ADD A FINISH", kind);
+    else if (!r->ok && td5_roam_route_graph_pending() > 0)
+        snprintf(out, cap, "%s%d POINTS  MAPPING STREETS (%d TILES)", kind, n, td5_roam_route_graph_pending());
     else if (!r->ok)  snprintf(out, cap, "%s%d POINTS  NO ROUTE FOUND", kind, n);
     else if (r->length_m >= 1000.0)
         { char tail[24];
@@ -305,6 +308,43 @@ static void street_cb(void *user, int klass, int lanes, int oneway, const int32_
     }
 }
 
+/* [F9b] a street of the place-wide OSM layer (no lane width known beyond the class): thin lines */
+static void light_cb(void *user, int klass, int lanes, const int32_t *xz, int npt)
+{
+    StreetCtx *c = (StreetCtx *)user;
+    const int rank = klass >= TD5_GEO_RC_SECONDARY ? 2 : (klass >= TD5_GEO_RC_RESIDENTIAL ? 1 : 0);
+    float lx = 0, ly = 0, w;
+    int i, have = 0;
+    (void)lanes;
+    if (rank < c->min_rank) return;
+    w = c->w_rank[rank];
+    for (i = 0; i < npt; i++) {
+        float sx, sy;
+        proj_pt(c->p, (double)xz[2 * i], (double)xz[2 * i + 1], &sx, &sy);
+        if (!have) { lx = sx; ly = sy; have = 1; continue; }
+        if ((sx - lx) * (sx - lx) + (sy - ly) * (sy - ly) < 3.0f && i != npt - 1) continue;
+        if (seg_visible(c->p, lx, ly, sx, sy, w)) rb_line(lx, ly, sx, sy, w, c->col_rank[rank]);
+        lx = sx; ly = sy;
+    }
+}
+
+/* [F9b] the place's boundary ring */
+static void draw_boundary(const Proj *p, float w)
+{
+    int r;
+    for (r = 0; r < td5_roam_partido_ring_count(); r++) {
+        int n, i;
+        const double *xz = td5_roam_partido_ring(r, &n);
+        float lx = 0, ly = 0;
+        for (i = 0; i <= n && xz; i++) {
+            float sx, sy;
+            proj_pt(p, xz[2 * (i % n)], xz[2 * (i % n) + 1], &sx, &sy);
+            if (i > 0 && seg_visible(p, lx, ly, sx, sy, w)) rb_line(lx, ly, sx, sy, w, 0xFF6A5A2E);
+            lx = sx; ly = sy;
+        }
+    }
+}
+
 static void link_cb(void *user, int klass, double x0, double z0, double x1, double z1)
 {
     StreetCtx *c = (StreetCtx *)user;
@@ -326,6 +366,14 @@ static void draw_streets(const Proj *p, double half_w_units, double half_h_units
     c.p = p; c.min_rank = min_rank; c.ppm_px = ppm_px;
     c.w_rank[0] = 1.0f * scale; c.w_rank[1] = 1.6f * scale; c.w_rank[2] = 2.6f * scale;
     c.col_rank[0] = 0xFF3A424C; c.col_rank[1] = 0xFF59636F; c.col_rank[2] = 0xFF8C97A3;
+    /* [F9b] the whole place's streets first, dimmer (the OSM lines, also where no tile is built yet); the
+     * planner graph's streets are drawn over them */
+    {
+        StreetCtx lc = c;
+        lc.col_rank[0] = 0xFF262B31; lc.col_rank[1] = 0xFF333941; lc.col_rank[2] = 0xFF4A525C;
+        td5_roam_partido_streets_query(p->cx - half_w_units, p->cz - half_h_units, p->cx + half_w_units,
+                                       p->cz + half_h_units, light_cb, &lc);
+    }
     td5_roam_route_graph_query(p->cx - half_w_units, p->cz - half_h_units, p->cx + half_w_units, p->cz + half_h_units,
                                street_cb, &c);
     td5_roam_route_graph_links(p->cx - half_w_units, p->cz - half_h_units, p->cx + half_w_units, p->cz + half_h_units,
@@ -789,6 +837,7 @@ void td5_roam_route_ui_draw_overlay(void)
     /* streets: the smaller the zoom the fewer classes */
     min_rank = u.ppm < 0.075 ? 2 : (u.ppm < 0.19 ? 1 : 0);
     draw_streets(&p, (W * 0.5 + 40.0) / p.k, ((p.y1 - p.y0) * 0.5 + 40.0) / p.k, min_rank, (float)u.ppm, S);
+    draw_boundary(&p, 2.0f * S);
     draw_route(&p, 4.0f * S, 7.0f * S, 70.0f * S);
     if (have_car) draw_car(&p, px, pz, yaw, 9.0f * S);
     draw_pins(&p, 8.0f * S, 1);
@@ -1154,6 +1203,8 @@ static void ui_begin(void)
     u.active = 1; u.m_pin = -1; u.hint = -1;
     td5_roam_route_reset();
     td5_roam_route_graph_begin_async(place);
+    td5_roam_partido_load(place);                      /* [F9b] the place outline on the map */
+    td5_roam_partido_streets_begin_async(place);       /* [F9b] the whole place's streets on the map */
     TD5_LOG_I(LOG_TAG, "ROUTE_UI: session begin place=%s (planner graph building in the background)", place);
 }
 
@@ -1162,7 +1213,7 @@ static void ui_end(void)
     if (u.map_open) td5_plat_set_os_cursor_visible(0);
     TD5_LOG_I(LOG_TAG, "ROUTE_UI: session end");
     td5_roam_route_reset();
-    if (!td5_roam_route_graph_building()) td5_roam_route_graph_free();   /* the planner graph is per session */
+    td5_roam_route_graph_free();     /* the planner graph is per session ([F9b] waits for a running build) */
     memset(&u, 0, sizeof u);
 }
 
@@ -1185,6 +1236,7 @@ void td5_roam_route_ui_frame(void)
     int i;
     if (!td5_roam_active()) { if (u.active) ui_end(); return; }
     if (!u.active) ui_begin();
+    td5_roam_route_graph_poll();     /* [F9b] the planner region follows the car and the waypoints */
     memcpy(u.prev, u.cur, sizeof u.prev);
     for (i = 0; i < 256; i++) u.cur[i] = (uint8_t)(td5_plat_input_key_pressed(i) ? 1 : 0);
     now = td5_plat_time_ms();
