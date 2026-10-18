@@ -5134,21 +5134,39 @@ void td5_trackgen_roam_pages(int *road, int *ground, int *kerb)
     if (kerb)   *kerb   = TD5_TG_PAGE_SIDEWALK;
 }
 
+/* the seed a geo build of this place derives (td5_trackgen_regenerate) */
+static unsigned int tg_roam_seed(const char *slug)
+{
+    unsigned int seed = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
+    if (seed == 0) {
+        seed = tg_fnv1a(2166136261u, slug, strlen(slug));
+        if (seed == 0) seed = 1u;
+    }
+    return seed;
+}
+
+/* [F4f] the roam session's time of day: ONE verdict for the sky pool, the ambient dimming and the lamps
+ * (the geo options panel's TIME OF DAY: AUTO derives from the seed, DAY / NIGHT pin it) */
+int td5_trackgen_roam_is_night(int slot)
+{
+    const int gi = td5_trackgen_geo_index_for_slot(slot);
+    const char *slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
+    if (!slug) return 0;
+    return tg_night_for(tg_roam_seed(slug), td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2));
+}
+
 int td5_trackgen_roam_sky_path(int slot, char *out, size_t n)
 {
     const int gi = td5_trackgen_geo_index_for_slot(slot);
     const char *slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
-    unsigned int seed = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
+    unsigned int seed;
     int night, stamp_night = -1, variety, i, cnt, pass;
     const int *pool;
     char path[256], stamp[256], line[256];
     FILE *f;
     if (!slug || !out || n < 8) return 0;
-    if (seed == 0) {   /* the seed a geo build of this place derives (td5_trackgen_regenerate) */
-        seed = tg_fnv1a(2166136261u, slug, strlen(slug));
-        if (seed == 0) seed = 1u;
-    }
-    night = tg_night_for(seed, td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2));
+    seed = tg_roam_seed(slug);
+    night = td5_trackgen_roam_is_night(slot);
 
     snprintf(stamp, sizeof stamp, "re/assets/levels/level%03d/GENSTAMP.TXT", TD5_GEO_LEVEL_BASE + gi);
     f = fopen(stamp, "r");

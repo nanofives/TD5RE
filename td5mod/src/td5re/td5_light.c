@@ -18,6 +18,7 @@
 #include "td5_light.h"
 #include "td5_platform.h"
 #include "td5_track.h"       /* td5_track_probe_height — static per-lamp floor Y */
+#include "td5_roam_furniture.h" /* [F4f] td5_roam_night_active */
 #include "td5_rt.h"          /* [RT2 P7] td5_rt_active() — HIGH street-lamp default */
 #include "td5_render.h"      /* td5_render_actor_display_pose — beams ride the drawn body */
 
@@ -511,7 +512,7 @@ void td5_light_emit_street_lamps(void)
      * default ON in HIGH. LOW keeps s_street_lights (default OFF) untouched —
      * no lamps enter the registry in LOW, so the LOW light system is byte-
      * identical. (The dark-only + nearest-N budget gates below still apply.) */
-    int want_lamps = s_street_lights || td5_rt_active();
+    int want_lamps = s_street_lights || td5_rt_active() || td5_roam_night_active();   /* [F4f] roam night */
     if (!s_enabled || !want_lamps || s_lamp_count <= 0) return;
     /* Street lamps follow the auto-headlight verdict: on in rain/dusk/dark
      * zones, off in bright daylight. Tunnel lamps live INSIDE a tunnel, so they

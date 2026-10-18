@@ -205,6 +205,7 @@ void td5_trackgen_roam_pages(int *road, int *ground, int *kerb);
  * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): the level's own FORWSKY.png when its
  * GENSTAMP time of day matches, else a shipped panorama from the day / night pool. 1 on success. */
 int td5_trackgen_roam_sky_path(int slot, char *out, size_t n);
+int td5_trackgen_roam_is_night(int slot);   /* [F4f] the roam session's day/night verdict (sky, ambient, lamps) */
 
 /* Register every raceable place under re/assets/geo/ as a selectable track.
  * Rescans the places first. Safe to call again (rows update in place); returns

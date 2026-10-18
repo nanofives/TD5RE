@@ -8285,7 +8285,7 @@ static void frame_render(void)
      * td5_render_env_is_dark_for_slot(slot) (per-slot ambient/direct capture +
      * per-slot hysteresis latch in td5_render_mesh.c). */
     {
-        int manual_dark = g_td5.ini.light_dark_mode;
+        int manual_dark = g_td5.ini.light_dark_mode || td5_roam_night_active();   /* [F4f] roam night dims the scene */
         int auto_on = td5_light_auto();
         int total_actors = td5_game_get_total_actor_count();
         if (total_actors > TD5_ACTOR_MAX_TOTAL_SLOTS) total_actors = TD5_ACTOR_MAX_TOTAL_SLOTS;
@@ -8510,7 +8510,7 @@ static void frame_render(void)
          * verdict varies. */
         if (td5_light_auto()) {
             td5_render_set_dark_mode(
-                td5_render_env_is_dark_for_slot(g_actorSlotForView[vp]) || g_td5.ini.light_dark_mode);
+                td5_render_env_is_dark_for_slot(g_actorSlotForView[vp]) || g_td5.ini.light_dark_mode || td5_roam_night_active());
         }
 
         /* Configure projection for this viewport */
