@@ -26,6 +26,9 @@
 #include <stdint.h>
 
 void td5_roam_route_ui_frame(void);
+/* [F8b] end the planner session now (route, type + laps, planner graph): td5_roam_end calls it. The frame hook
+ * only runs inside a race, so without it the next roam session inherited the last one's route and type. */
+void td5_roam_route_ui_session_end(void);
 int  td5_roam_route_ui_want_pause(void);      /* 1 once per M press while driving */
 int  td5_roam_route_ui_map_open(void);
 /* [F6-B] open / close the route map from the sprint flow (open also asks for the pause menu) */

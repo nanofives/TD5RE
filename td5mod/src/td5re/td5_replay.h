@@ -37,6 +37,7 @@
 #ifndef TD5_REPLAY_H
 #define TD5_REPLAY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* 1 when the ghost recorder/pose path is enabled (TD5RE_GHOST_REPLAY != "0").
@@ -66,6 +67,11 @@ int  td5_replay_is_recording(void);
 
 /* Number of live sub-tick frames captured in the current buffer. */
 int  td5_replay_frame_count(void);
+
+/* [roam F8b] bytes the record buffer holds right now (capacity, not frames used). It grows by doubling
+ * (all actor slots every tick: ~4.4 KB a tick with roam's 30 slots), so a long session's private bytes
+ * step up with it; the roam traffic soak takes it out of its leak verdict. */
+size_t td5_replay_buffer_bytes(void);
 
 /* 1 once `sim_tick` has reached/passed the last recorded frame, i.e. the replay
  * has played back everything that was captured. pose_tick clamps (freezes) on

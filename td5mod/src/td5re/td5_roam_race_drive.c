@@ -299,7 +299,9 @@ static int sd_plan_save_load(void)
         else if (i == n - 1) ok = td5_roam_route_set_finish_at(px, pz);
         else ok = td5_roam_route_add_at(px, pz);
     }
-    if (ok && SD_IS_CIRC(D.mode)) td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, D.laps);     /* [F9a] closes FINISH -> START */
+    /* [F9a] a circuit closes FINISH -> START. [F8b] a sprint says SPRINT too: clear keeps the planner's type, and a
+     * circuit row run before this one left CIRCUIT x 3 (the smoke sprint was raced as 3 laps of a 1.2 km loop) */
+    if (ok) td5_roam_route_set_type(SD_IS_CIRC(D.mode) ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT, D.laps);
     if (!ok || !td5_roam_route_result()->ok) { sd_finish("could not plan the scripted route", 1); return 0; }
     if (SD_IS_CIRC(D.mode) && !td5_roam_route_result()->closed) { sd_finish("the circuit has no closing leg back to START", 1); return 0; }
     D.saved_hash = td5_roam_route_result()->hash;

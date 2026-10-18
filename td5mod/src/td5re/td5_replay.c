@@ -111,6 +111,10 @@ int td5_replay_ghost_enabled(void)
 
 int td5_replay_is_recording(void) { return s_recording; }
 int td5_replay_frame_count(void)  { return s_frame_count; }
+size_t td5_replay_buffer_bytes(void)
+{
+    return s_buf ? (size_t)s_frame_capacity * (size_t)s_actor_count * sizeof(TD5_ReplaySnap) : 0u;
+}
 
 int td5_replay_playback_at_end(uint32_t sim_tick)
 {
