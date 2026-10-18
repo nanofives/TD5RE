@@ -48,6 +48,7 @@ void     td5_roam_drive_disarm(void);
 void     td5_roam_drive_set_tour(double side_m, int secs);
 /* [F8] after arm: ambient traffic shares the road (rest / stuck / off-surface / rescues reported, not judged) */
 void     td5_roam_drive_set_traffic(int on);
+int      td5_roam_drive_soak_moves(void);   /* [F8] cars put 30 m on so far (the self-test treats each as a placement) */
 int      td5_roam_drive_mode(void);
 /* slot 0's control bits for this sim tick (0 when not armed / not in roam / done) */
 uint32_t td5_roam_drive_bits(struct TD5_Actor *a);

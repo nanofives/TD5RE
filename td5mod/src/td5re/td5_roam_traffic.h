@@ -73,7 +73,8 @@ typedef struct {
     int    live_min, live_max;          /* over the samples after the warm-up                       */
     double live_mean;
     long   spawns, despawns;
-    long   despawn_far, despawn_dead_end, despawn_stuck, despawn_hold, despawn_off, despawn_unres, despawn_lost;
+    long   despawn_far, despawn_dead_end, despawn_stuck, despawn_hold, despawn_off, despawn_unres, despawn_lost, despawn_wreck;
+    long   wrecks;                      /* cars wrecked by a hard hit (stand 8 s, then removed)      */
     long   off_ticks;                   /* live-car ticks with the centre off the drivable surface */
     long   off_ticks_contact;           /* ...of those, within 2 s of a racer contact              */
     long   off_events;                  /* off for > 1 s (despawned)                               */

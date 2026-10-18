@@ -1046,6 +1046,7 @@ void td5_roam_drive_arm(int mode)
 
 /* [F8] the TOUR mode without the env knobs (the roam-traffic soak rows) */
 void td5_roam_drive_set_traffic(int on) { s_rv.traffic = on ? 1 : 0; }
+int  td5_roam_drive_soak_moves(void) { return s_rv.soak_moves; }
 
 void td5_roam_drive_set_tour(double side_m, int secs)
 {

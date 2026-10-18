@@ -25,6 +25,7 @@
 #include "td5_types.h"
 #include "td5_race_state.h"
 #include "td5_asset.h"
+#include "td5_ai.h"             /* broken-down (wreck) flag of traffic slots */
 #include "td5_physics.h"
 #include "td5_render.h"
 #include "td5_geo_signals.h"
@@ -60,7 +61,7 @@
 
 enum { RT_PARKED = 0, RT_LIVE = 1 };
 enum { RT_SEG_EDGE = 0, RT_SEG_CONN = 1 };
-enum { RT_WHY_FAR = 1, RT_WHY_DEAD, RT_WHY_STUCK, RT_WHY_HOLD, RT_WHY_OFF, RT_WHY_UNRES, RT_WHY_LEVEL, RT_WHY_LOST };
+enum { RT_WHY_FAR = 1, RT_WHY_DEAD, RT_WHY_STUCK, RT_WHY_HOLD, RT_WHY_OFF, RT_WHY_UNRES, RT_WHY_LEVEL, RT_WHY_LOST, RT_WHY_WRECK };
 
 typedef struct {
     int      slot, state;
@@ -91,7 +92,7 @@ typedef struct {
     double   v_class;                            /* cruise, m/s                            */
     int32_t  steer;
     int      holding;                            /* holding with a reason this tick        */
-    long     still_t, hold_t, off_t_ticks, born, last_contact, lost_t;
+    long     still_t, hold_t, off_t_ticks, born, last_contact, lost_t, wreck_t;
     int      lane_chk;
     int      bar_k, bar_side;                    /* the barrier the car is beside, and its side */
 } RtCar;
@@ -716,6 +717,7 @@ static void rt_place_actor(RtCar *c, TD5_Actor *a, double px, double pz, int yaw
     memset(&a->tire_track_emitter_FL, 0xFF, 4);
     a->euler_accum.yaw = FP_SCALE(yaw12 & 0xFFF);
     td5_roam_physics_forget_slot(c->slot);
+    td5_ai_clear_actor_broken_down(c->slot);   /* a wreck flag left by the slot's last car (hard V2V) */
     a->airborne_frame_counter = 0;
     /* The racer reset (td5_physics_reset_actor_state) runs the RACER pose integrator, whose state leaked
      * into the next racer's tick: a one-tick 1.7 m drop of the player's wheels on the tick a traffic car
@@ -843,6 +845,7 @@ static void rt_despawn(RtCar *c, int why)
     case RT_WHY_OFF: T.st.despawn_off++; break;
     case RT_WHY_UNRES: T.st.despawn_unres++; break;
     case RT_WHY_LOST: T.st.despawn_lost++; break;
+    case RT_WHY_WRECK: T.st.despawn_wreck++; break;
     default: break;
     }
 }
@@ -1007,6 +1010,16 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
     rt_place_of(a, &x, &z);
     v = rt_speed_ms(a);
     if (v * 3.6 > T.st.max_kmh) T.st.max_kmh = v * 3.6;
+    if (td5_ai_actor_is_broken_down(c->slot)) {
+        /* a wreck (a hard hit, the normal TD5 traffic rule): it stands, smoking, and is taken away after 8 s */
+        a->steering_command = 0;
+        a->encounter_steering_cmd = 0;
+        a->brake_flag = 1;
+        if (++c->wreck_t == 1) T.st.wrecks++;
+        if (c->wreck_t > 240 && c->fade >= 0) rt_despawn(c, RT_WHY_WRECK);
+        c->still_t = 0; c->off_t_ticks = 0; c->lost_t = 0;
+        return;
+    }
     rt_track(c, a, x, z);
     if (!rt_edge(c->seg == RT_SEG_EDGE ? c->e : (c->ne >= 0 ? c->ne : c->e), &E)) { rt_despawn(c, RT_WHY_DEAD); return; }
     c->holding = 0;
@@ -1605,14 +1618,14 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
              status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target, s->red_violations, s->sig_cross, off_free,
              s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s: live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "
-              "(far %ld dead-end %ld stuck %ld hold %ld off %ld unresident %ld lost %ld) | off-surface ticks %ld (%ld within 2 s of a racer "
+              "(far %ld dead-end %ld stuck %ld hold %ld off %ld unresident %ld lost %ld wreck %ld) | wrecks %ld | off-surface ticks %ld (%ld within 2 s of a racer "
               "contact, events %ld) | red violations %ld of %ld stop-line crossings at signals, red stops %ld | stuck>10s live %ld | "
               "yield waits %ld | turns L%ld S%ld R%ld, lane changes %ld | connector off-patch plans %ld | barrier passes %ld | racer-near ticks %ld | "
               "max lane offset %.2f m, vmax %.0f km/h, pose-vs-ground %.2f m | private %.1f -> %.1f MB (max %.1f, %d samples, early-half avg %.1f late-half avg %.1f) | "
               "traffic tick mean %.3f ms max %.2f ms %s",
               status == 2 ? "FAIL" : (status ? "WARN" : "PASS"), s->live_min, s->live_mean, s->live_max, s->target, s->samples,
               s->spawns, s->despawns, s->despawn_far, s->despawn_dead_end, s->despawn_stuck, s->despawn_hold, s->despawn_off,
-              s->despawn_unres, s->despawn_lost, s->off_ticks, s->off_ticks_contact, s->off_events, s->red_violations, s->sig_cross, s->sig_stops,
+              s->despawn_unres, s->despawn_lost, s->despawn_wreck, s->wrecks, s->off_ticks, s->off_ticks_contact, s->off_events, s->red_violations, s->sig_cross, s->sig_stops,
               s->stuck_live, s->yield_waits, s->turns[0], s->turns[1], s->turns[2], s->lane_changes, s->conn_off_plans, s->barrier_passes,
               s->racer_near, s->max_lat_m, s->max_kmh, s->max_ground_dy_m, T.priv0_mb, T.priv_mb, T.priv_max_mb, T.priv_n, early, late,
               tick_ms, T.tick_us_max / 1000.0, bad);

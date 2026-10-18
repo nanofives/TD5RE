@@ -1119,6 +1119,17 @@ static void st_inv_sample(void)
     if (!s_inv.active) return;
     n = td5_game_get_total_actor_count();
     if (n > ST_INV_MAX_SLOTS) n = ST_INV_MAX_SLOTS;
+    {   /* [roam F8] a roam sprint start / end places the field (grid, run-out): a placement, not a jump */
+        static int s_last_rrs = -1, s_last_moves = -1;
+        const int rrs = s_roam_row ? td5_roam_race_state() : -1;
+        const int mv = s_roam_row ? td5_roam_drive_soak_moves() : -1;     /* and the soak's own moves */
+        if (rrs != s_last_rrs || mv != s_last_moves) {
+            int q;
+            for (q = 0; q < ST_INV_MAX_SLOTS; q++) { s_inv.haspos[q] = 0; s_inv.moving[q] = 0; }
+            s_last_rrs = rrs;
+            s_last_moves = mv;
+        }
+    }
     for (slot = 0; slot < n; slot++) {
         TD5_Actor *a;
         long long px, py, pz, vx, vy, vz;
