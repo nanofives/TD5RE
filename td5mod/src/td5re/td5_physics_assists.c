@@ -1957,7 +1957,7 @@ int32_t npc_fatal_mag(void) {
  * the heavy gate becomes TD5RE_ROAM_CRASH_HEAVY (0 = off: the faithful gates), and between it and
  * ROAM_CRASH_RAMP_X times it the racer's scatter + lift are damped from ROAM_CRASH_MIN_PCT up to 100 %, so a
  * real high-speed crash still scatters in full. Outside roam both accessors are no-ops (strip races unchanged). */
-#define ROAM_CRASH_HEAVY_DEFAULT  150000
+#define ROAM_CRASH_HEAVY_DEFAULT  70000
 #define ROAM_CRASH_RAMP_X         2
 #define ROAM_CRASH_MIN_PCT        30
 int32_t roam_crash_heavy(void) {

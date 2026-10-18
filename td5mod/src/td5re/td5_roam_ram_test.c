@@ -74,7 +74,7 @@ void td5_roam_ram_test_arm(void)
     memset(&T, 0, sizeof T);
     T.armed = 1;
     T.slot = -1;
-    TD5_LOG_I(LOG_TAG, "[ROAMRAM] armed (TD5RE_ROAM_CRASH_HEAVY=%d)", td5_env_int("TD5RE_ROAM_CRASH_HEAVY", 150000, 0, 2000000));
+    TD5_LOG_I(LOG_TAG, "[ROAMRAM] armed (TD5RE_ROAM_CRASH_HEAVY=%d)", td5_env_int("TD5RE_ROAM_CRASH_HEAVY", 70000, 0, 2000000));
 }
 
 void td5_roam_ram_test_disarm(void)
@@ -229,6 +229,12 @@ static uint32_t rr_drive(const TD5_Actor *a, double kmh_t)
     return bits;
 }
 
+/* brake while rolling, the handbrake once nearly still: a brake held at a standstill engages reverse */
+static uint32_t rr_stop_bits(const TD5_Actor *a)
+{
+    return (uint32_t)(rr_kmh(a) > 12.0 ? TD5_INPUT_BRAKE : TD5_INPUT_HANDBRAKE);
+}
+
 static void rr_row(void)
 {
     const char *kind = (T.n & 1) ? "side" : "rear";
@@ -342,7 +348,7 @@ static uint32_t rr_bits(TD5_Actor *a, long tick)
             T.phase = RR_SETTLE; T.phase_t0 = tick;
             td5_roam_traffic_dev_clear();
         }
-        return (uint32_t)TD5_INPUT_BRAKE;
+        return rr_stop_bits(a);
     }
     case RR_SETTLE:
         if (rr_kmh(a) < 3.0 && tick - T.phase_t0 > 45) {
@@ -351,7 +357,7 @@ static uint32_t rr_bits(TD5_Actor *a, long tick)
             return 0;
         }
         if (tick - T.phase_t0 > 600) { rr_finish("the car never settled", 1); return 0; }
-        return (uint32_t)(rr_kmh(a) > 4.0 ? TD5_INPUT_BRAKE : TD5_INPUT_HANDBRAKE);
+        return rr_stop_bits(a);
     case RR_END:
         if (tick - T.phase_t0 > 30) rr_finish("all rams done", 0);
         return (uint32_t)TD5_INPUT_HANDBRAKE;

@@ -872,8 +872,8 @@ static char s_roam_note[120];
 /* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
 static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15; }  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
-static int st_roam_is_cops(int row) { return row == 13 || row == 14; }
-static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */   /* [roam F10] 13 full (traffic on), 14 smoke */
+static int st_roam_is_cops(int row) { return row == 13 || row == 14; }   /* [roam F10] 13 full (traffic on), 14 smoke */
+static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
 
 static void st_roam_arm(const RaceScenario *sc)
 {
@@ -890,6 +890,17 @@ static void st_roam_arm(const RaceScenario *sc)
     td5_roam_cops_dev_force(st_roam_is_cops(sc->roam) ? -1 : 0, -1);
     /* [roam F9b] the cops rows rebase the world every tile: their pursuits run across world-origin rebases */
     td5_roam_rebase_force_tiles(st_roam_is_cops(sc->roam) ? 1 : -1);
+    if (st_roam_is_ram(sc->roam)) {
+        /* [roam F8e] the ram test: no ambient traffic, no patrols; the placed traffic car is the only other actor */
+        td5_roam_traffic_force_density(0);
+        td5_roam_ram_test_arm();
+        if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
+        return;
+    }
     if (st_roam_is_cops(sc->roam)) {
         /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
         if (sc->roam == 14) td5_roam_traffic_force_density(0);
