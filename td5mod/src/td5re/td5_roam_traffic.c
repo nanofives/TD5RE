@@ -1256,7 +1256,7 @@ static void rt_barrier_passes(void)
                         const double px = p->world_pos.x / 256.0, pz = p->world_pos.z / 256.0;
                         const double hy = (double)(((int)p->euler_accum.yaw >> 8) & 0xFFF) * (2.0 * RT_PI / 4096.0);
                         const double rx = x - px, rz = z - pz, d = sqrt(rx * rx + rz * rz);
-                        if (d < 70.0 * RT_M && d > 6.0 * RT_M && (rx * sin(hy) + rz * cos(hy)) > 0.6 * d) {
+                        if (d < 30.0 * RT_M && d > 8.0 * RT_M && (rx * sin(hy) + rz * cos(hy)) > 0.6 * d) {
                             char path[512];
                             const char *dir = td5_plat_log_dir();
                             snprintf(path, sizeof path, "%sroam_traffic_barrier.png", dir ? dir : "");
