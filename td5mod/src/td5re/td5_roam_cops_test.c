@@ -39,6 +39,7 @@
 #include "td5_roam_mode.h"
 #include "td5_roam_locate.h"
 #include "td5_roam_route.h"
+#include "td5_roam_physics.h"
 #include "td5_roam_cops.h"
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -77,6 +78,7 @@ static struct {
     double bcx, bcz, btx, btz, bgx, bgz, bgw, stop_x, stop_z;
     long   cross_t, stuck_t;
     TD5_RoamCopsStats rb_base;
+    long   pinch0;
 } T;
 
 void td5_roam_cops_test_arm(int mode)
@@ -480,7 +482,7 @@ static int rb_find_block(const TD5_Actor *a)
         int nc;
         if (!td5_roam_cops_dev_block(i, &cx, &cz, &tx, &tz, &gx, &gz, &gw, &nc)) continue;
         f = ((px - cx) * tx + (pz - cz) * tz) / CT_M;
-        if (f < -50.0 && f > -480.0) {
+        if (f < -50.0 && f > -480.0 && (T.sc != 4 || gw < 0.1)) {
             T.bcx = cx; T.bcz = cz; T.btx = tx; T.btz = tz; T.bgx = gx; T.bgz = gz; T.bgw = gw; T.bn = nc;
             return 1;
         }
@@ -518,7 +520,11 @@ static int rb_plan_block(const TD5_Actor *a, int mode)
     if (bx && bz) {
         memcpy(bx, qx, (size_t)nq * sizeof(double)); memcpy(bz, qz, (size_t)nq * sizeof(double));
         k = nq;
-        if (mode == 0) {
+        if (mode == 2) {
+            bx[k] = T.bcx - T.btx * 25.0 * CT_M; bz[k] = T.bcz - T.btz * 25.0 * CT_M; k++;
+            bx[k] = T.bcx; bz[k] = T.bcz; k++;
+            bx[k] = T.bcx + T.btx * 40.0 * CT_M; bz[k] = T.bcz + T.btz * 40.0 * CT_M; k++;
+        } else if (mode == 0) {
             bx[k] = T.bgx - T.btx * 25.0 * CT_M; bz[k] = T.bgz - T.btz * 25.0 * CT_M; k++;
             bx[k] = T.bgx; bz[k] = T.bgz; k++;
             bx[k] = T.bgx + T.btx * 40.0 * CT_M; bz[k] = T.bgz + T.btz * 40.0 * CT_M; k++;
@@ -529,7 +535,7 @@ static int rb_plan_block(const TD5_Actor *a, int mode)
         ok = ct_set_path(bx, bz, k);
     }
     free(bx); free(bz); free(qx); free(qz);
-    if (ok) TD5_LOG_I(LOG_TAG, "[ROAMCOPS] roadblock leg (%s): %.0f m to the street point 60 m short, %d points", mode ? "stop" : "gap", len, T.np);
+    if (ok) TD5_LOG_I(LOG_TAG, "[ROAMCOPS] roadblock leg (%s): %.0f m to the street point 60 m short, %d points", mode == 2 ? "ram" : mode ? "stop" : "gap", len, T.np);
     return ok;
 }
 
@@ -615,7 +621,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
         return ct_drive(a, T.kmh_cap);
     case RB_WAITBLK:
         if (rb_find_block(a)) {
-            const int ok = T.sc == 3 ? rb_plan_detour(a) : rb_plan_block(a, T.sc == 1 ? 0 : 1);
+            const int ok = T.sc == 3 ? rb_plan_detour(a) : rb_plan_block(a, T.sc == 1 ? 0 : (T.sc == 4 ? 2 : 1));
             if (!ok) { ct_finish(T.sc == 3 ? "roadblock: no detour leg" : "roadblock: no leg to the block", 1); return 0; }
             T.lane_off = 0.0;
             T.rb_base = st;
@@ -630,12 +636,20 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
         return ct_drive(a, T.kmh_cap);
     case RB_RUN: {
         const double d = rb_dist_to_block(a);
-        const double cap = T.sc == 3 ? 50.0 : 45.0;
+        const double cap = T.sc == 3 ? 50.0 : (T.sc == 4 ? 55.0 : 45.0);
         if (T.sc == 3) {
             if (st.blocks_detoured > T.rb_base.blocks_detoured) {
                 TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario 3: detour counted at %.0f m from the block", d);
-                T.phase = RB_END; T.phase_t0 = tick;
-                return ct_drive(a, cap);
+                {   /* scenario 4: heat 5 closes the next block: ram it */
+                    TD5_RoamPhysStats ps;
+                    td5_roam_physics_stats(&ps);
+                    T.pinch0 = ps.pinches;
+                }
+                T.sc = 4; T.st0 = st; T.kmh_cap = 50.0; T.lane_off = 1.6;
+                td5_roam_cops_dev_set_heat(5);
+                if (!ct_plan(a, 1200.0, 300.0)) { ct_finish("scenario 4: no leg after the detour", 1); return 0; }
+                T.phase = RB_WAITBLK; T.phase_t0 = tick;
+                return 0;
             }
             if (tick - T.phase_t0 > 45 * 30) { ct_finish("scenario 3: no detour counted within 45 s", 1); return 0; }
             if (T.s > (T.np - 1) * CT_DS - 30.0) { ct_finish("scenario 3: the detour leg ended before a detour was counted", 1); return 0; }
@@ -648,7 +662,11 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
         if (st.blocks_gap + st.blocks_rammed > T.rb_base.blocks_gap + T.rb_base.blocks_rammed) {
             if (!T.cross_t) {
                 T.cross_t = tick;
-                TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario 1: crossed the block (%s), %.0f km/h", st.blocks_rammed > T.rb_base.blocks_rammed ? "rammed" : "gap", ct_kmh(a));
+                TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario %d: crossed the block (%s), %.0f km/h", T.sc, st.blocks_rammed > T.rb_base.blocks_rammed ? "rammed" : "gap", ct_kmh(a));
+            }
+            if (tick - T.cross_t > 4 * 30 && T.sc == 4) {
+                T.phase = RB_END; T.phase_t0 = tick;
+                return ct_drive(a, 40.0);
             }
             if (tick - T.cross_t > 4 * 30) {
                 T.sc = 2; T.st0 = st; T.kmh_cap = 50.0; T.lane_off = 1.6; T.cross_t = 0;
@@ -657,10 +675,10 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
                 return 0;
             }
         } else {
-            if (ct_kmh(a) < 2.0 && d < 25.0) { if (++T.stuck_t > 4 * 30) { ct_finish("scenario 1: stopped at the block, not through", 1); return 0; } }
+            if (ct_kmh(a) < 2.0 && d < 25.0) { if (++T.stuck_t > 4 * 30) { ct_finish(T.sc == 4 ? "scenario 4: stopped at the closed block, not rammed through" : "scenario 1: stopped at the block, not through", 1); return 0; } }
             else T.stuck_t = 0;
-            if (!rb_block_alive()) { ct_finish("scenario 1: the block was removed before the player crossed it", 1); return 0; }
-            if (tick - T.phase_t0 > 60 * 30) { ct_finish("scenario 1: no crossing within 60 s", 1); return 0; }
+            if (!rb_block_alive()) { ct_finish(T.sc == 4 ? "scenario 4: the closed block was removed before the ram" : "scenario 1: the block was removed before the player crossed it", 1); return 0; }
+            if (tick - T.phase_t0 > 60 * 30) { ct_finish(T.sc == 4 ? "scenario 4: no ram crossing within 60 s" : "scenario 1: no crossing within 60 s", 1); return 0; }
         }
         return ct_drive(a, cap);
     }
@@ -721,10 +739,17 @@ static int rb_verdict(char *note, size_t n)
 #define RB_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
     if (!T.done) RB_BAD("not finished (%s); ", T.phase == RB_WAIT ? "never started" : "timeout");
     else if (T.failed) RB_BAD("%s; ", T.why);
-    if (s.blocks_placed < 3) RB_BAD("placed %ld < 3; ", s.blocks_placed);
+    if (s.blocks_placed < 4) RB_BAD("placed %ld < 4; ", s.blocks_placed);
     if (s.blocks_gap + s.blocks_rammed < 1) RB_BAD("no crossing; ");
     if (s.blocks_bust < 1) RB_BAD("no bust at a block; ");
     if (s.blocks_detoured < 1) RB_BAD("no detour; ");
+    if (s.blocks_rammed < 1) RB_BAD("no ram through a closed block; ");
+    if (s.block_hits < 1) RB_BAD("no block contact; ");
+    {
+        TD5_RoamPhysStats ps;
+        td5_roam_physics_stats(&ps);
+        if (T.pinch0 > 0 && ps.pinches > T.pinch0) RB_BAD("pinch %ld; ", ps.pinches - T.pinch0);
+    }
     if (s.blocks_despawned < s.blocks_placed - 1) RB_BAD("despawned %ld of %ld; ", s.blocks_despawned, s.blocks_placed);
     if (s.blocks_bust >= 1 && (!T.respawned || !T.respawn_on_road)) RB_BAD("respawn %s; ", T.respawned ? "off the road" : "missing");
 #undef RB_BAD

@@ -137,6 +137,7 @@ static struct {
     /* roadblocks [G1b] */
     RcBlock blk[RC_BLK_MAX];
     int     block_heat, block_max, block_fail_run;
+    int     dev_race_pursuit;                    /* DEV: a race with COPS on starts a heat 5 pursuit once (TD5RE_ROAM_COPS_DEV_RACE_PURSUIT) */
     double  block_min_m, block_max_m;
     long    block_cd;
     TD5_RoamCopsStats st;
@@ -178,6 +179,7 @@ static void rc_read_knobs(void)
     C.r_despawn   = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_M", 330, 80, 800);
     C.r_despawn_pursuit = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_PURSUIT_M", 450, 100, 2000);
     C.block_heat  = td5_env_int("TD5RE_ROAM_COPS_BLOCK_HEAT", 3, 0, 5);
+    C.dev_race_pursuit = td5_env_int("TD5RE_ROAM_COPS_DEV_RACE_PURSUIT", 0, 0, 1);
     C.block_max   = td5_env_int("TD5RE_ROAM_COPS_BLOCKS", 2, 1, RC_BLK_MAX);
     C.block_min_m = td5_env_int("TD5RE_ROAM_COPS_BLOCK_MIN_M", 200, 100, 500);
     C.block_max_m = td5_env_int("TD5RE_ROAM_COPS_BLOCK_MAX_M", 400, 150, 800);
@@ -272,7 +274,7 @@ int td5_roam_cops_pool(void)
 {
     int pool, base;
     if (!td5_roam_active()) return 0;
-    pool = td5_env_int("TD5RE_ROAM_COPS_POOL", 6, 0, TD5_ROAM_COPS_POOL_MAX);
+    pool = td5_env_int("TD5RE_ROAM_COPS_POOL", 8, 0, TD5_ROAM_COPS_POOL_MAX);   /* [G1b] 6 -> 8: slots 30..37 */
     base = g_traffic_slot_base + td5_roam_traffic_pool();
     if (base + pool > 40) pool = 40 - base;                 /* the roam per-slot tables hold 40 */
     return pool < 0 ? 0 : pool;
@@ -2085,6 +2087,21 @@ void td5_roam_cops_tick(void)
         rc_pursuit_tick(pl, plx, plz);
     }
 
+#ifndef TD5RE_RELEASE
+    if (C.dev_race_pursuit == 1 && C.race_on && !C.pursuit && td5_roam_race_state() == TD5_RRACE_RACING && tick >= C.grace_until) {
+        /* DEV (G1b): the race-with-COPS-on check of the roadblock's gap rule: a patrol cop 'notices' the player, heat 5 */
+        for (i = 0; i < C.pool; i++) {
+            RcCop *c = &C.cop[i];
+            if (c->state == RC_PATROL && c->fade >= 0 && c->alpha >= 255) {
+                C.dev_race_pursuit = 2;
+                rc_start_pursuit(c, 1, vpl * 3.6);
+                C.offences = 5; C.heat = 5; C.st.max_heat = 5;
+                TD5_LOG_I(LOG_TAG, "ROAM_COPS: DEV race pursuit at heat 5 started by slot %d", c->slot);
+                break;
+            }
+        }
+    }
+#endif
     rc_blocks_tick(pl, plx, plz, fx, fz, in_race);           /* [G1b] */
 
     /* spawn patrols round the player: one try per tick */

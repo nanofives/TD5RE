@@ -3,7 +3,7 @@
  * See docs/plans/GEO_FREE_ROAM.md (Decisions: street life = ambient traffic, then cops; traffic / cops toggle per
  * race, cops OFF unless the setup turns them on; F10 row: police on the graph in roam, per-race toggle).
  *
- * THE POOL. A roam session reserves TD5RE_ROAM_COPS_POOL cop slots (6, max 8) right after the ambient traffic pool
+ * THE POOL. A roam session reserves TD5RE_ROAM_COPS_POOL cop slots (8, max 8; 6 before G1b) right after the ambient traffic pool
  * (td5_roam_traffic.h: 6..29, so cops are 30..35) and loads the host level's police model into them. They are
  * traffic-type actors: the simplified traffic dynamics and traffic pose, the full V2V contact with racers, the cop
  * rules of the traffic police (g_cop_is_cop: the police mesh, tough in a crash, no lift). A slot is PARKED (no
