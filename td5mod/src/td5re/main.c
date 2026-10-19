@@ -1729,6 +1729,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* GEO FREE ROAM (F2-C) dev: TD5RE_ROAM_RENDER_POSES=<file> writes free-cam tour poses. */
     if (td5_roam_render_dev_poses())
         return 0;
+    /* GEO FREE ROAM (G4) dev: TD5RE_ROAM_GROUND_CENSUS=1 measures the ground grid against the road surface, exits. */
+    if (td5_roam_render_ground_census_dev_test())
+        return 0;
 #endif
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */

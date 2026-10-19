@@ -115,6 +115,10 @@ int  td5_roam_render_hides_strip(void);
 #ifndef TD5RE_RELEASE
 /* DEV: TD5RE_ROAM_RENDER_POSES=<file> -> <file>.tour.txt (free-cam tour poses from lat/lon). 1 = handled, exit. */
 int td5_roam_render_dev_poses(void);
+/* DEV (G4): TD5RE_ROAM_GROUND_CENSUS=1 -> the ground grid vs road surface census over every
+ * casco ROAMTILE (worst ground - road per ground cell under the road), writes
+ * <log>/roam_ground_census.txt + .csv, 1 = handled, exit. */
+int td5_roam_render_ground_census_dev_test(void);
 #endif
 
 /* [F9b] World-origin rebase: draw every tile shifted by a further (sx, sz) world units (td5_roam_rebase.c). */
