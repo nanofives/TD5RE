@@ -1686,7 +1686,7 @@ static void rc_blocks_tick(const TD5_Actor *pl, double plx, double plz, double f
         }
         b->prev_f = f; b->have_prev = 1;
         if (b->crossed && f > 35.0) { rc_block_end(b, "passed"); continue; }
-        if (!b->crossed && C.busted_t <= 0 && d > b->min_d + 80.0 && !b->was_near && f < 0.0) {
+        if (!b->crossed && C.busted_t <= 0 && d > b->min_d + 80.0 && !b->was_near) {
             C.st.blocks_detoured++; rc_block_end(b, "player turned away"); continue;
         }
         if (d > 560.0) { rc_block_end(b, "out of range"); continue; }
@@ -2090,9 +2090,10 @@ void td5_roam_cops_tick(void)
 #ifndef TD5RE_RELEASE
     if (C.dev_race_pursuit == 1 && C.race_on && !C.pursuit && td5_roam_race_state() == TD5_RRACE_RACING && tick >= C.grace_until) {
         /* DEV (G1b): the race-with-COPS-on check of the roadblock's gap rule: a patrol cop 'notices' the player, heat 5 */
+        if (rc_count(RC_PATROL) == 0 && rc_try_spawn(plx, plz, fx, fz, 0, RC_PATROL)) live++;   /* the selftest rows force 0 patrols */
         for (i = 0; i < C.pool; i++) {
             RcCop *c = &C.cop[i];
-            if (c->state == RC_PATROL && c->fade >= 0 && c->alpha >= 255) {
+            if (c->state == RC_PATROL && c->fade >= 0) {
                 C.dev_race_pursuit = 2;
                 rc_start_pursuit(c, 1, vpl * 3.6);
                 C.offences = 5; C.heat = 5; C.st.max_heat = 5;

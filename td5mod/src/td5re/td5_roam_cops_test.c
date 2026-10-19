@@ -599,8 +599,8 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
     case RB_WAIT:
         if (tick < 90 || !td5_roam_route_graph_ready() || st.pool <= 0) return 0;
         T.t_start = tick; T.sc = 1;
-        td5_roam_cops_dev_force(0, 60);
-        T.kmh_cap = 95.0; T.lane_off = 1.6;
+        td5_roam_cops_dev_force(0, 45);
+        T.kmh_cap = 95.0; T.lane_off = 0.0;
         if (!ct_plan(a, 1600.0, 900.0)) { ct_finish("no 900 m leg ahead of the spawn", 1); return 0; }
         T.phase = RB_COP;
         return (uint32_t)TD5_INPUT_BRAKE;
@@ -613,7 +613,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
     case RB_TRIG:
         if (st.pursuits > T.st0.pursuits) {
             td5_roam_cops_dev_set_heat(3);
-            T.kmh_cap = 60.0; T.lane_off = 1.6;
+            T.kmh_cap = 60.0; T.lane_off = 0.0;
             T.phase = RB_WAITBLK; T.phase_t0 = tick;
             TD5_LOG_I(LOG_TAG, "[ROAMCOPS] roadblock scenario %d: pursuit, heat raised to 3 (%.0f km/h)", T.sc, ct_kmh(a));
         } else if (T.s > T.cop_s + 80.0) { ct_finish("roadblock: passed the cop at speed, no pursuit", 1); return 0; }
@@ -645,7 +645,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
                     td5_roam_physics_stats(&ps);
                     T.pinch0 = ps.pinches;
                 }
-                T.sc = 4; T.st0 = st; T.kmh_cap = 50.0; T.lane_off = 1.6;
+                T.sc = 4; T.st0 = st; T.kmh_cap = 50.0; T.lane_off = 0.0;
                 td5_roam_cops_dev_set_heat(5);
                 if (!ct_plan(a, 1200.0, 300.0)) { ct_finish("scenario 4: no leg after the detour", 1); return 0; }
                 T.phase = RB_WAITBLK; T.phase_t0 = tick;
@@ -669,7 +669,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
                 return ct_drive(a, 40.0);
             }
             if (tick - T.cross_t > 4 * 30) {
-                T.sc = 2; T.st0 = st; T.kmh_cap = 50.0; T.lane_off = 1.6; T.cross_t = 0;
+                T.sc = 2; T.st0 = st; T.kmh_cap = 50.0; T.lane_off = 0.0; T.cross_t = 0;
                 if (!ct_plan(a, 1200.0, 300.0)) { ct_finish("scenario 2: no leg after the block", 1); return 0; }
                 T.phase = RB_WAITBLK; T.phase_t0 = tick;
                 return 0;
@@ -715,7 +715,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
         }
         if (tick - T.phase_t0 > 12 * 30) {
             if (!ct_plan(a, 1600.0, 900.0)) { ct_finish("scenario 3: no 900 m leg", 1); return 0; }
-            T.kmh_cap = 95.0; T.lane_off = 1.6;
+            T.kmh_cap = 95.0; T.lane_off = 0.0;
             T.phase = RB_COP;
             return 0;
         }
