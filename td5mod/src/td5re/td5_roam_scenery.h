@@ -56,7 +56,8 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  4u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road */
+#define TD5_ROAM_SCENERY_RULES  5u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+                                     * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -110,6 +111,7 @@ typedef struct {
     double bld_shift_max;           /* units */
     /* footpaths */
     int  fp_ways, fp_pieces, fp_cut_road, fp_merged, fp_struct;
+    int  fp_on_pv;          /* [G5] footpath vertices lifted onto a pavement slab / island they cross */
     /* plazas */
     int  areas, lawn_tris, lawn_cut, trees, trees_cut;
     /* [F4b] pavement: owned kerb pieces, those inside another drivable primitive, chains,

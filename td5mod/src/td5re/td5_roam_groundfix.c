@@ -321,7 +321,7 @@ void td5_roam_gfix_point(const RoamGrid *g, int tx, int tz, int i, int j, int G,
 
 int td5_roam_gfix_build(TD5_RoamGfix *f, const RoamGrid *g, const RoamTile *const nb[9], int tx, int tz, TD5_RoamHeight *hc)
 {
-    int G, N, W, i, j;
+    int G, N, W, M, i, j;
     double *cm;
     long W0;
     memset(f, 0, sizeof *f);
@@ -329,8 +329,11 @@ int td5_roam_gfix_build(TD5_RoamGfix *f, const RoamGrid *g, const RoamTile *cons
     G = 256 / td5_roam_gfix_cell_m();
     f->grid = *g; f->G = G; f->tx = tx; f->tz = tz;
     f->cs = (double)g->tile / (double)G;
-    f->lo = -GF_MARGIN + 1;                 /* lattice points lo .. G + GF_MARGIN - 1 */
-    f->np = G + 2 * GF_MARGIN - 1;
+    /* [G5] the whole reach of the tile's scenery (sc_in_reach: the 3x3), so a lawn, a tree or a path the tile lays
+     * in a neighbour stands on the ground the renderer draws there, not on the raster (G4b kept GF_MARGIN cells) */
+    M = td5_roam_gfix_g4() ? GF_MARGIN : G + 1;
+    f->lo = -M + 1;                         /* lattice points lo .. G + M - 1 */
+    f->np = G + 2 * M - 1;
     f->h = (double *)malloc((size_t)f->np * (size_t)f->np * sizeof(double));
     if (!f->h) { memset(f, 0, sizeof *f); return 0; }
     W0 = (long)f->np * (long)f->np;
@@ -346,10 +349,10 @@ int td5_roam_gfix_build(TD5_RoamGfix *f, const RoamGrid *g, const RoamTile *cons
         return 1;
     }
     /* cells tx*G - GF_MARGIN .. tx*G + G + GF_MARGIN - 1 */
-    N = G + 2 * GF_MARGIN;
+    N = G + 2 * M;
     cm = (double *)malloc((size_t)N * (size_t)N * sizeof(double));
     if (!cm) { for (i = 0; i < W0; i++) f->h[i] = 0.0; return 1; }
-    td5_roam_gfix_cells(g, nb, tx * G - GF_MARGIN, tz * G - GF_MARGIN, N, f->cs, cm);
+    td5_roam_gfix_cells(g, nb, tx * G - M, tz * G - M, N, f->cs, cm);
     for (j = 0; j < W; j++) for (i = 0; i < W; i++) {
         /* lattice point lo + i has the cells local i and i + 1 of the N window (cell -GF_MARGIN + k) */
         double cap = cm[j * N + i], *h = &f->h[j * W + i];

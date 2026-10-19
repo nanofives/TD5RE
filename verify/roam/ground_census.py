@@ -74,12 +74,15 @@ def main():
         src = os.path.join(ROOT, 'log', base + '.' + ext)
         if os.path.exists(src):
             shutil.copyfile(src, os.path.join(a.out, '%s_%s.%s' % ('pave' if a.pave else 'census', tag, ext)))
+    fpc = os.path.join(ROOT, 'log', 'roam_footpath_census.csv')
+    if a.pave and os.path.exists(fpc):
+        shutil.copyfile(fpc, os.path.join(a.out, 'footpath_%s.csv' % tag))
     ed = os.path.join(ROOT, 'log', 'roam_ground_edge.csv')
     if not a.pave and os.path.exists(ed):
         shutil.copyfile(ed, os.path.join(a.out, 'edge_%s.csv' % tag))
     lines = open(txt, encoding='utf-8', errors='replace').read().splitlines()
     if a.pave:
-        for ln in lines[:14]:
+        for ln in lines[:15]:
             print(ln)
         return 0
     for ln in lines[:20]:
