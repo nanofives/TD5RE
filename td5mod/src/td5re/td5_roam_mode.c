@@ -151,10 +151,8 @@ static int roam_grid_load(const char *slug, RoamGrid *g)
 
 int td5_roam_place_has_tiles(const char *slug)
 {
-    char path[512];
-    if (!slug || !slug[0]) return 0;
-    td5_geo_source_path(path, sizeof path, slug, "roam/ROAMGRID.JSON");
-    return td5_plat_file_exists(path);
+    /* [roam G6] the lattice is written on first use: the road tiles themselves stream in on demand */
+    return td5_roam_grid_ensure(slug);
 }
 
 int td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz)
@@ -184,8 +182,10 @@ int td5_roam_place_to_latlon(const char *slug, double px, double pz, double *lat
     return 1;
 }
 
-int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
-                             int32_t *px, int32_t *pz)
+/* nonblock: -1 instead of waiting when the answer needs the partido street layer and it is still
+ * loading (it is then loading in the background) */
+static int roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
+                                 int32_t *px, int32_t *pz, int nonblock)
 {
     char cand[64], path[512];
     int n, pass;
@@ -207,15 +207,39 @@ int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
         ok = td5_plat_file_exists(path);
         /* [F9b] no tile built there yet: any point of the place with a street within ROAM_GATE_STREET_M
          * (the light OSM layer; the stream builds the tiles on demand behind the start gate) */
-        if (!ok && td5_roam_partido_load(cand) && td5_roam_partido_contains((double)x, (double)z) &&
-            td5_roam_partido_streets_ensure(cand))
-            ok = td5_roam_partido_nearest_street((double)x, (double)z, ROAM_GATE_STREET_M, NULL, NULL, NULL);
+        if (!ok && td5_roam_partido_load(cand) && td5_roam_partido_contains((double)x, (double)z)) {
+            if (nonblock && !td5_roam_partido_streets_ready()) {
+                td5_roam_partido_streets_begin_async(cand);   /* [roam G6] ~5 s off the main thread */
+                return -1;
+            }
+            if (td5_roam_partido_streets_ensure(cand))
+                ok = td5_roam_partido_nearest_street((double)x, (double)z, ROAM_GATE_STREET_M, NULL, NULL, NULL);
+        }
         if (!ok) continue;
         snprintf(slug, cap, "%s", cand);
         *px = x; *pz = z;
         return 1;
     }
     return 0;
+}
+
+int td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
+                             int32_t *px, int32_t *pz)
+{
+    return roam_place_for_latlon(lat, lon, slug, cap, px, pz, 0);
+}
+
+void td5_roam_prefetch_streets(void)
+{
+    /* the shipped roam place, the one td5_roam_place_for_latlon tries first */
+    if (td5_roam_partido_load("la_plata_partido"))
+        td5_roam_partido_streets_begin_async("la_plata_partido");
+}
+
+int td5_roam_place_for_latlon_try(double lat, double lon, char *slug, size_t cap,
+                                 int32_t *px, int32_t *pz)
+{
+    return roam_place_for_latlon(lat, lon, slug, cap, px, pz, 1);
 }
 
 /* ----------------------------------------------------------- the contract ---- */

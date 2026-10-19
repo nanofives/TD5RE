@@ -186,6 +186,9 @@ int  roam_grid_parse(const char *json, RoamGrid *g);
 int  roam_grid_format(const RoamGrid *g, char *out, size_t cap);
 /* The casco default: S = 110080, angle -42.13 deg, origin (0, 0). */
 void roam_grid_default(const char *place, RoamGrid *g);
+/* [roam G6] roam/ROAMGRID.JSON of `place`, written with the default when missing (only for a place
+ * with tiles/INDEX.JSON). 1 when the file exists afterwards. */
+int  td5_roam_grid_ensure(const char *place);
 
 /* ------------------------------------------------------------ the tile ------- */
 

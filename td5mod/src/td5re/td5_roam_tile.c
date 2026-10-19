@@ -576,6 +576,38 @@ static int row_meets(const IdxRow *r, const double win[4], double halo)
              r->v[6] < win[1] - halo || r->v[4] > win[3] + halo);
 }
 
+/* [roam G6] The lattice file, written when missing. It is a constant (roam_grid_default), but until
+ * now only --RoamBuildTiles wrote it, and the FREE ROAM / RACE ROUTE gate (td5_roam_place_for_latlon)
+ * refuses every point of a place without it -- so a place whose roam/ folder was never built (or was
+ * cleared) read "START IS OUTSIDE THE CITY MAP" everywhere, although the stream builds the tiles on
+ * demand. Only for a place with the tiled OSM source (tiles/INDEX.JSON), the only kind roam can build. */
+int td5_roam_grid_ensure(const char *place)
+{
+    char path[400], dir[400], buf[2048];
+    RoamGrid g;
+    FILE *f;
+    int n;
+    if (!place || !place[0]) return 0;
+    td5_geo_source_path(path, sizeof path, place, "roam/ROAMGRID.JSON");
+    if ((f = fopen(path, "rb")) != NULL) { fclose(f); return 1; }
+    td5_geo_source_path(dir, sizeof dir, place, "tiles/INDEX.JSON");
+    if ((f = fopen(dir, "rb")) == NULL) return 0;
+    fclose(f);
+    roam_grid_default(place, &g);
+    n = roam_grid_format(&g, buf, sizeof buf);
+    if (n <= 0 || n >= (int)sizeof buf) return 0;
+    td5_geo_source_path(dir, sizeof dir, place, "roam");
+    td5_roam_mkdirs(dir);
+    if ((f = fopen(path, "wb")) == NULL) {
+        TD5_LOG_W(LOG_TAG, "roam tile: cannot write the default lattice %s", path);
+        return 0;
+    }
+    fwrite(buf, 1, (size_t)n, f);
+    fclose(f);
+    TD5_LOG_I(LOG_TAG, "roam tile: wrote default %s", path);
+    return 1;
+}
+
 TD5_RoamTileCtx *td5_roam_tile_ctx_open(const char *place, int create_grid,
                                         const double *global_win)
 {
@@ -591,25 +623,8 @@ TD5_RoamTileCtx *td5_roam_tile_ctx_open(const char *place, int create_grid,
     /* lattice */
     td5_geo_source_path(path, sizeof path, place, "roam/ROAMGRID.JSON");
     txt = slurp_len(path, &len);
-    if (!txt && create_grid) {
-        RoamGrid g;
-        char buf[2048];
-        int n;
-        roam_grid_default(place, &g);
-        n = roam_grid_format(&g, buf, sizeof buf);
-        td5_roam_mkdirs("re/assets/geo");
-        {
-            char d[400];
-            td5_geo_source_path(d, sizeof d, place, "roam");
-            td5_roam_mkdirs(d);
-        }
-        if (n > 0 && n < (int)sizeof buf) {
-            FILE *f = fopen(path, "wb");
-            if (f) { fwrite(buf, 1, (size_t)n, f); fclose(f); }
-            TD5_LOG_I(LOG_TAG, "roam tile: wrote default %s", path);
-        }
+    if (!txt && create_grid && td5_roam_grid_ensure(place))
         txt = slurp_len(path, &len);
-    }
     if (!txt || len >= sizeof c->grid_json || !roam_grid_parse(txt, &c->grid)) {
         TD5_LOG_E(LOG_TAG, "roam tile: no usable lattice file %s", path);
         free(txt);

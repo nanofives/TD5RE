@@ -77,13 +77,21 @@ long td5_roam_placements(void);    /* [F9a] how many actors td5_roam_place_actor
 int  td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *px, int32_t *pz);
 /* [F5-A] PLACE frame units -> lat/lon of `slug` (the inverse of the above). 1 on success. */
 int  td5_roam_place_to_latlon(const char *slug, double px, double pz, double *lat, double *lon);
-/* 1 when `slug` has road tiles to roam in (roam/ROAMGRID.JSON present). */
+/* 1 when `slug` can be roamed: roam/ROAMGRID.JSON present, or written now from the default lattice
+ * for a place with the tiled OSM source ([roam G6]; the road tiles stream in on demand). */
 int  td5_roam_place_has_tiles(const char *slug);
 /* The place a map point can be roamed in (F2 A, FREE ROAM button): the first known place whose
  * ROAMGRID covers lat/lon AND whose ROAMTILE file for that tile exists. Fills `slug` (cap bytes)
  * and the PLACE-frame point. 0 when the point is outside every built tile. */
 int  td5_roam_place_for_latlon(double lat, double lon, char *slug, size_t cap,
                                int32_t *px, int32_t *pz);
+/* [roam G6] The same, never waiting: -1 = cannot tell yet (the place's street layer is loading in
+ * the background, ask again next frame). For the geo map, which asks every frame. */
+int  td5_roam_place_for_latlon_try(double lat, double lon, char *slug, size_t cap,
+                                   int32_t *px, int32_t *pz);
+/* [roam G6] Start loading the shipped roam place's street layer in the background (idempotent), so
+ * the first _try above does not have to wait. The geo map calls it when it opens. */
+void td5_roam_prefetch_streets(void);
 
 #ifndef TD5RE_RELEASE
 /* Dev CLI: --Roam=1 --RoamSpawn=<lat>,<lon> [--RoamYaw=n] [--RoamPlace=slug]. Arms roam and
