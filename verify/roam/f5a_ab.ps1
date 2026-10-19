@@ -17,6 +17,8 @@ $env:TD5RE_RT = "0"; $env:TD5RE_WINDOW_TITLE = "TD5RE f5a ab $Tag"
 if ($Geo) {
     $env:TD5RE_AUTOTRACK_SEED = $Seed; $env:TD5RE_TG_DOUBLE_BUILD = "1"; $env:TD5RE_AUTOTRACK_REUSE = "0"
     $env:TD5RE_GEO_PLACE = "la_plata"
+    # [F11b] single player no longer builds the strip geo track: the dev door keeps the strip A/B arm working
+    $env:TD5RE_GEO_STRIP_BUILD = "1"
 }
 $gfx = @("--Windowed=1","--Lighting=0","--Quality=0","--SunShadows=0","--Reflections=0","--WetRoads=0","--StreetLights=0",
          "--CarLights=0","--LegacyShadows=0","--GIQuality=0","--ShadowRays=0","--ReflectionQuality=0","--CarShadows=0",
