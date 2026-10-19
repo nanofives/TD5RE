@@ -731,6 +731,13 @@ static void geo_handle_mouse(void)
         }
     }
 
+#ifndef TD5RE_RELEASE
+    if (l_edge || l_rel)   /* [roam G6] where each press / release landed, and on what */
+        TD5_LOG_I(LOG_TAG, "GEO MOUSE: %s at design %.0f,%.0f over_map=%d drag=%d pan=%d moved=%d sx=%.3f sy=%.3f",
+                  l_edge ? "press" : "release", dx, dy, over_map, s_drag_pt, s_panning,
+                  s_moved_while_down, sx, sy);
+#endif
+
     if (l_edge && over_map) {
         const int hit = geo_pick_point(dx, dy, sx, sy);
         s_moved_while_down = 0;
@@ -772,9 +779,15 @@ static void geo_handle_mouse(void)
          * drag is not: that was a pan, and ending it must not drop a pin. */
         if (was_pan && !s_moved_while_down && over_map) {
             double lat, lon;
+            int at;
             geo_design_to_latlon(dx, dy, sx, sy, &lat, &lon);
-            if (geo_place_click(lat, lon, geo_hit_route_leg(dx, dy, sx, sy)) >= 0)
+            at = geo_place_click(lat, lon, geo_hit_route_leg(dx, dy, sx, sy));
+            if (at >= 0)
                 frontend_play_sfx(3);
+#ifndef TD5RE_RELEASE
+            TD5_LOG_I(LOG_TAG, "GEO MOUSE: PLACE -> route index %d at %.5f,%.5f (%d point(s))",
+                      at, lat, lon, s_n_pts);
+#endif
         }
         (void)was_drag;
         s_moved_while_down = 0;
