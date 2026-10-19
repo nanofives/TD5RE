@@ -1949,7 +1949,7 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
         C.bust_meter = 1.0;
         C.busted_t = 90;
         C.st.busts++;
-        if (bdmin < 10.0 && bdmin <= dmin) C.st.blocks_bust++;      /* [G1b] busted at a roadblock */
+        if (bdmin < 12.0) C.st.blocks_bust++;      /* [G1b] busted with a roadblock car within 12 m (centre to centre) */
         C.fine = C.fine_base * C.heat + 50 * C.offences;
         if (!C.race_on) C.st.fines += C.fine;
         rc_toast("BUSTED", 0xFFFF3B3B, 3.0);

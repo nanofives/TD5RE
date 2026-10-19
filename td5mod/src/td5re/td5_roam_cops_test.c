@@ -536,7 +536,7 @@ static int rb_plan_block(const TD5_Actor *a, int mode)
 /* a leg that leaves the street the roadblock is on: first try whose whole path stays >= 120 m from the block */
 static int rb_plan_detour(const TD5_Actor *a)
 {
-    static const double k_rot[] = { 0.8, -0.8, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6 };
+    static const double k_rot[] = { 0.6, -0.6, 1.0, -1.0, 1.4, -1.4, 1.9, -1.9, 2.4, -2.4, 3.14159 };
     double x, z, hx, hz;
     int k;
     ct_place_of(a, &x, &z);
@@ -549,13 +549,18 @@ static int rb_plan_detour(const TD5_Actor *a)
         const double dx = hx * c - hz * s, dz = hx * s + hz * c;
         double *qx = NULL, *qz = NULL, len = 0.0, dmin = 1e300;
         int nq = 0, i;
-        if (td5_roam_route_plan_path(x, z, hx, hz, x + dx * 700.0 * CT_M, z + dz * 700.0 * CT_M, 200.0, NULL, 0, &qx, &qz, &nq, &len) &&
-            len >= 300.0) {
+        double gx = x + dx * 500.0 * CT_M, gz = z + dz * 500.0 * CT_M, sx, sz, dm;
+        uint64_t key;
+        int planned;
+        if (td5_roam_route_snap_xz(gx, gz, 150.0, &sx, &sz, &key, &dm)) { gx = sx; gz = sz; }
+        planned = td5_roam_route_plan_path(x, z, 0.0, 0.0, gx, gz, 200.0, NULL, 0, &qx, &qz, &nq, &len);
+        TD5_LOG_I(LOG_TAG, "[ROAMCOPS] detour try rot %.2f: planned %d len %.0f", k_rot[k], planned, planned ? len : 0.0);
+        if (planned && len >= 200.0) {
             for (i = 0; i < nq; i++) {
                 const double d = hypot(qx[i] - T.bcx, qz[i] - T.bcz) / CT_M;
                 if (d < dmin) dmin = d;
             }
-            if (dmin >= 120.0 && ct_set_path(qx, qz, nq)) {
+            if (dmin >= 100.0 && ct_set_path(qx, qz, nq)) {
                 TD5_LOG_I(LOG_TAG, "[ROAMCOPS] detour leg: %.0f m, closest to the block %.0f m (rot %.1f)", len, dmin, k_rot[k]);
                 free(qx); free(qz);
                 return 1;
@@ -637,8 +642,9 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
             return ct_drive(a, cap);
         }
         /* scenario 1: through the gap */
-        if (d < 62.0 && T.shots_n == 0) { ct_shot("roadblock_a"); T.shots_n = 1; }
+        if (d < 55.0 && T.shots_n == 0) { ct_shot("roadblock_a"); T.shots_n = 1; }
         if (d < 32.0 && T.shots_n == 1) { ct_shot("roadblock_b"); T.shots_n = 2; }
+        if (d < 16.0 && T.shots_n == 2) { ct_shot("roadblock_d"); T.shots_n = 3; }
         if (st.blocks_gap + st.blocks_rammed > T.rb_base.blocks_gap + T.rb_base.blocks_rammed) {
             if (!T.cross_t) {
                 T.cross_t = tick;
