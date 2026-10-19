@@ -591,6 +591,10 @@ struct TG_TileCtx {
      * neighbour's lawn reads the same plane the neighbour draws */
     double  *lx, *lz, *ly;
     int      nlt, cap_lt;
+    /* [G5] every pavement slab / island quad this tile emitted (x y z per corner, tile-local), so a footpath
+     * laid after the pavement stands on top of one it crosses */
+    double  *pvq;
+    int      npvq, cap_pvq;
     TD5_RoamScnStats st;
     TG_GeoBldStats   bst;
     /* [F4c] furniture: first mesh of each sub-block that is furniture (meshes from there on are
@@ -622,6 +626,7 @@ static void sc_ctx_reset(TG_TileCtx *c)
     c->nroad = 0;
     c->skip_lm = 0;
     c->nlt = 0;
+    c->npvq = 0;
     free(c->lamp); c->lamp = NULL; c->nlamp = 0;
     if (c->canopy.data) free(c->canopy.data);
     memset(&c->canopy, 0, sizeof c->canopy);
@@ -639,6 +644,7 @@ static void sc_ctx_free(TG_TileCtx *c)
     sc_ctx_reset(c);
     free(c->prim); free(c->seg); free(c->edge);
     free(c->lx); free(c->lz); free(c->ly);
+    free(c->pvq);
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { tg_buf_free(&c->sb[k].blk); free(c->sb[k].moff); }
     free(c);
 }
@@ -1726,8 +1732,18 @@ static int sc_lawn_level(const double *rx, const double *rz, const int *tri, int
     return lvl;
 }
 
-static int sc_plane_push(TG_TileCtx *c, const double *p, int lvl)
+static int sc_plane_push(TG_TileCtx *c, const double *p, int lvl, int extra)
 {
+    if (lvl <= 0) {
+        /* [G5] refined where sc_tri_split refines the drawn lawn (a piece on the road, `extra` more times), so the
+         * plane a path reads is the lawn surface as drawn: next to a road the ground is lowered and a coarser
+         * plane missed the drawn lawn by up to a metre (the road pieces are kept: a plane, never drawn) */
+        const double x[3] = { p[0], p[2], p[4] }, z[3] = { p[1], p[3], p[5] };
+        if (extra > 0 && sc_in_reach(c, x[0], z[0]) && sc_in_reach(c, x[1], z[1]) && sc_in_reach(c, x[2], z[2]) &&
+            sc_on_road(c, x, z, 3, NULL)) {
+            lvl = 1; extra--;
+        }
+    }
     if (lvl <= 0) {
         int k;
         if (c->nlt * 3 + 3 > c->cap_lt) {
@@ -1759,8 +1775,8 @@ static int sc_plane_push(TG_TileCtx *c, const double *p, int lvl)
         const double t1[6] = { ab[0], ab[1], p[2], p[3], bc[0], bc[1] };
         const double t2[6] = { ca[0], ca[1], bc[0], bc[1], p[4], p[5] };
         const double t3[6] = { ab[0], ab[1], bc[0], bc[1], ca[0], ca[1] };
-        return sc_plane_push(c, t0, lvl - 1) && sc_plane_push(c, t1, lvl - 1)
-            && sc_plane_push(c, t2, lvl - 1) && sc_plane_push(c, t3, lvl - 1);
+        return sc_plane_push(c, t0, lvl - 1, extra) && sc_plane_push(c, t1, lvl - 1, extra)
+            && sc_plane_push(c, t2, lvl - 1, extra) && sc_plane_push(c, t3, lvl - 1, extra);
     }
 }
 
@@ -1782,7 +1798,7 @@ static int sc_lawn_planes(TG_TileCtx *c, const ScArea *ar, int nar, double x0, d
         for (k = 0; k < ntri; k++) {
             const int i0 = tri[k * 3], i1 = tri[k * 3 + 1], i2 = tri[k * 3 + 2];
             const double pp[6] = { rx[i0], rz[i0], rx[i1], rz[i1], rx[i2], rz[i2] };
-            if (!sc_plane_push(c, pp, lvl)) return 0;
+            if (!sc_plane_push(c, pp, lvl, 2)) return 0;      /* 2 = sc_emit_lawn's sc_tri_split extra */
         }
     }
     return 1;
@@ -1808,6 +1824,33 @@ static int sc_lawn_y(const TG_TileCtx *c, double x, double z, double *y)
         h = w0 * Y[0] + w1 * Y[1] + w2 * Y[2];
         if (!hit || h > *y) *y = h;
         hit = 1;
+    }
+    return hit;
+}
+
+/* [G5] the highest pavement slab / island surface over (x, z) (the quad as drawn: 0 1 2, 0 2 3); 0 when none */
+static int sc_pv_y(const TG_TileCtx *c, double x, double z, double *y)
+{
+    int q, t, hit = 0;
+    for (q = 0; q < c->npvq; q++) {
+        const double *P = &c->pvq[q * 12];
+        if (x < P[0] && x < P[3] && x < P[6] && x < P[9]) continue;
+        if (x > P[0] && x > P[3] && x > P[6] && x > P[9]) continue;
+        if (z < P[2] && z < P[5] && z < P[8] && z < P[11]) continue;
+        if (z > P[2] && z > P[5] && z > P[8] && z > P[11]) continue;
+        for (t = 0; t < 2; t++) {
+            const double *A = P, *B = P + 3 * (1 + t), *C = P + 3 * (2 + t);
+            const double d = (B[2] - C[2]) * (A[0] - C[0]) + (C[0] - B[0]) * (A[2] - C[2]);
+            double w0, w1, w2, h;
+            if (fabs(d) < 1e-9) continue;
+            w0 = ((B[2] - C[2]) * (x - C[0]) + (C[0] - B[0]) * (z - C[2])) / d;
+            w1 = ((C[2] - A[2]) * (x - C[0]) + (A[0] - C[0]) * (z - C[2])) / d;
+            w2 = 1.0 - w0 - w1;
+            if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+            h = w0 * A[1] + w1 * B[1] + w2 * C[1];
+            if (!hit || h > *y) *y = h;
+            hit = 1;
+        }
     }
     return hit;
 }
@@ -2053,7 +2096,8 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
                     double y = sc_ground(c, qx[q], qz[q]) + SC_FP_LIFT, yl;
                     /* on a lawn: the lawn's own plane + the strip's tier (a path never sinks into the grass) */
                     if (sc_lawn_y(c, qx[q], qz[q], &yl) && yl + SC_GEOP_TIER > y) y = yl + SC_GEOP_TIER;
-                    bt->v[o + 0] = (float)qx[q];
+                    /* [G5] on a pavement slab or a median / traffic island: on top of it, the same tier */
+                    if (sc_pv_y(c, qx[q], qz[q], &yl) && yl + SC_GEOP_TIER > y) { y = yl + SC_GEOP_TIER; c->st.fp_on_pv++; }                    bt->v[o + 0] = (float)qx[q];
                     bt->v[o + 1] = (float)y;
                     bt->v[o + 2] = (float)qz[q];
                     bt->v[o + 3] = (float)((q == 1 || q == 2) ? 1.0 : 0.0);
@@ -2981,6 +3025,10 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
         v[k] = z[k] * (lawn ? PV_UV_LAWN : PV_UV);
     }
     if (!pv_quad(e, sb, lawn ? PV_B_LAWN : PV_B_PAVE, x, y, z, u, v, 0xFFFFFFFFu)) return 0;
+    if (sc_grow((void **)&c->pvq, &c->cap_pvq, (c->npvq + 1) * 12, sizeof(double))) {   /* [G5] for the footpaths */
+        double *P = &c->pvq[c->npvq++ * 12];
+        for (k = 0; k < 4; k++) { P[k * 3] = (double)(float)x[k]; P[k * 3 + 1] = (double)(float)y[k]; P[k * 3 + 2] = (double)(float)z[k]; }
+    }
     /* kerb face: the road up to the slab */
     {
         const double ka[2] = { kx[a], kz[a] }, kb[2] = { kx[b], kz[b] };
@@ -3567,10 +3615,11 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     c->st.ms_src = t1 - t0;
     if (td5_env_int("TD5RE_ROAM_SCN_PLAZAS", 1, 0, 1) && !sc_emit_plazas(c, ar, nar)) goto out;
     if (td5_env_int("TD5RE_ROAM_SCN_BUILDINGS", 1, 0, 1) && !sc_emit_buildings(s, c, bc, nbc, ar, nar)) goto out;
+    if (!sc_emit_pavement(s, c, bc, nbc, ar, nar)) goto out;            /* [F4b] */
+    /* [G5] after the pavement: a footpath crossing a slab or an island stands on it (sc_pv_y) */
     if (td5_env_int("TD5RE_ROAM_SCN_FOOTPATHS", 1, 0, 1) &&
         !sc_emit_footpaths(s, c, fc, nfc, x0 - (double)c->org_x, z0 - (double)c->org_z,
                            x1 - (double)c->org_x, z1 - (double)c->org_z)) goto out;
-    if (!sc_emit_pavement(s, c, bc, nbc, ar, nar)) goto out;            /* [F4b] */
     /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own) */
     if (s->furn) {
         int k;

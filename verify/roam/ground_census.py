@@ -12,8 +12,14 @@ the road the worst d is kept. Writes log/roam_ground_census.{txt,csv}; this scri
 PASS = 0 ground cells whose worst d is above -GAP cm (--gap, default 10).
 Needs the casco tiles: `td5re.exe --RoamBuildTiles=casco` first (or --tiles DIR for another tile directory).
 
-Usage:  python -I verify/roam/ground_census.py [--exe td5re.exe] [--nofix] [--out DIR] [--tag NAME] [--tiles DIR]
+[G5] The census also walks every kerb boundary edge (ROAD EDGE block): `over` = how far the clamp put the ground
+under min(unclamped ground, road edge - drop), i.e. the hang the clamp added beyond what it needs (steep roads).
+
+Usage:  python -I verify/roam/ground_census.py [--exe td5re.exe] [--nofix | --g4] [--pave] [--out DIR] [--tag NAME] [--tiles DIR]
         --nofix  the pre-G4 ground (TD5RE_ROAM_GROUND_NOFIX=1) for a before / after comparison
+        --g4     the G4 4-cell-minimum clamp (TD5RE_ROAM_GROUND_G4=1), the pre-G5 ground
+        --pave   the G4b pavement census instead (TD5RE_ROAM_PAVE_CENSUS=1, log/roam_pavement_census.*, ~30 s);
+                 exit 0 when it ran
 Exit 0 on PASS, 1 on FAIL, 2 when the census did not run.
 """
 import argparse
@@ -29,6 +35,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exe', default=os.path.join(ROOT, 'td5re.exe'))
     ap.add_argument('--nofix', action='store_true')
+    ap.add_argument('--g4', action='store_true')
+    ap.add_argument('--pave', action='store_true')
     ap.add_argument('--out', default=os.path.join(ROOT, '_archive', 'roam', 'G4'))
     ap.add_argument('--tag', default=None)
     ap.add_argument('--tiles', default=None)
@@ -41,9 +49,14 @@ def main():
     env['TD5RE_RT'] = '0'
     if a.nofix:
         env['TD5RE_ROAM_GROUND_NOFIX'] = '1'
+    if a.g4:
+        env['TD5RE_ROAM_GROUND_G4'] = '1'
+    if a.pave:
+        env['TD5RE_ROAM_PAVE_CENSUS'] = '1'
     if a.tiles:
         env['TD5RE_ROAM_GROUND_CENSUS_DIR'] = os.path.abspath(a.tiles)
-    txt = os.path.join(ROOT, 'log', 'roam_ground_census.txt')
+    base = 'roam_pavement_census' if a.pave else 'roam_ground_census'
+    txt = os.path.join(ROOT, 'log', base + '.txt')
     if os.path.exists(txt):
         os.remove(txt)
     try:
@@ -55,15 +68,32 @@ def main():
     if not os.path.exists(txt):
         print('no %s: the census did not run (casco tiles missing?)' % txt)
         return 2
-    tag = a.tag or ('before' if a.nofix else 'after')
+    tag = a.tag or ('before' if a.nofix else ('g4' if a.g4 else 'after'))
     os.makedirs(a.out, exist_ok=True)
     for ext in ('txt', 'csv'):
-        src = os.path.join(ROOT, 'log', 'roam_ground_census.' + ext)
+        src = os.path.join(ROOT, 'log', base + '.' + ext)
         if os.path.exists(src):
-            shutil.copyfile(src, os.path.join(a.out, 'census_%s.%s' % (tag, ext)))
+            shutil.copyfile(src, os.path.join(a.out, '%s_%s.%s' % ('pave' if a.pave else 'census', tag, ext)))
+    fpc = os.path.join(ROOT, 'log', 'roam_footpath_census.csv')
+    if a.pave and os.path.exists(fpc):
+        shutil.copyfile(fpc, os.path.join(a.out, 'footpath_%s.csv' % tag))
+    ed = os.path.join(ROOT, 'log', 'roam_ground_edge.csv')
+    if not a.pave and os.path.exists(ed):
+        shutil.copyfile(ed, os.path.join(a.out, 'edge_%s.csv' % tag))
     lines = open(txt, encoding='utf-8', errors='replace').read().splitlines()
+    if a.pave:
+        for ln in lines[:15]:
+            print(ln)
+        return 0
     for ln in lines[:20]:
+        if ln.startswith('ROAD EDGE'):
+            break
         print(ln)
+    for i, ln in enumerate(lines):
+        if ln.startswith('ROAD EDGE'):
+            for l2 in lines[i:i + 14]:
+                print(l2)
+            break
     bad = None
     for ln in lines:
         p = ln.split()

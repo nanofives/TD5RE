@@ -12,7 +12,11 @@
  *          above = outer edge height above the drawn ground, minus the nominal (kerb height + drop)
  *   flat   any face with its normal up on those pages (slabs, footpaths, lawns): the lowest vertex under
  *          the drawn ground (the ground covers it)
- * Output <log>/roam_pavement_census.{txt,csv}. Knob in td5_roam_render.c: TD5RE_ROAM_PAVE_CENSUS=1.
+ *   [G5] footpath  a footpath quad (uv u = 0 1 1 0 on any page) vertex against every pavement slab, island
+ *          and lawn surface of ALL tiles (up-facing SIDEWALK / lawn-page faces that are not footpaths): a vertex
+ *          inside one and under it (less than 1 cm over it) is a footpath hidden under the surface it crosses
+ * Output <log>/roam_pavement_census.{txt,csv} (+ roam_footpath_census.csv). Knob in td5_roam_render.c:
+ * TD5RE_ROAM_PAVE_CENSUS=1.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +73,35 @@ static int pc_cmp(const void *a, const void *b)
     return fabsf(x->val) > fabsf(y->val) ? -1 : (fabsf(x->val) < fabsf(y->val) ? 1 : 0);
 }
 
+/* [G5] surfaces (place-frame triangles) bucketed on an 8 m grid, footpath vertices */
+#define PC_FP_CELL (8.0 * PC_UPM)
+typedef struct { double x[3], y[3], z[3]; int lawn; } PcSurf;   /* lawn: 0 paving, 1 island / median lawn quad, 2 plaza lawn */
+typedef struct { int64_t key; int s; } PcSurfRef;
+typedef struct { double x, y, z; int tx, tz; } PcFpV;
+
+static int64_t pc_cell_key(int a, int b) { return ((int64_t)a << 32) ^ (int64_t)(uint32_t)b; }
+
+static int pc_ref_cmp(const void *a, const void *b)
+{
+    const PcSurfRef *x = (const PcSurfRef *)a, *y = (const PcSurfRef *)b;
+    if (x->key != y->key) return x->key < y->key ? -1 : 1;
+    return x->s < y->s ? -1 : (x->s > y->s ? 1 : 0);
+}
+
+/* the surface height at (x, z) when the triangle holds it */
+static int pc_surf_y(const PcSurf *t, double x, double z, double *y)
+{
+    const double d = (t->z[1] - t->z[2]) * (t->x[0] - t->x[2]) + (t->x[2] - t->x[1]) * (t->z[0] - t->z[2]);
+    double w0, w1, w2;
+    if (fabs(d) < 1e-9) return 0;
+    w0 = ((t->z[1] - t->z[2]) * (x - t->x[2]) + (t->x[2] - t->x[1]) * (z - t->z[2])) / d;
+    w1 = ((t->z[2] - t->z[0]) * (x - t->x[2]) + (t->x[0] - t->x[2]) * (z - t->z[2])) / d;
+    w2 = 1.0 - w0 - w1;
+    if (w0 < 1e-6 || w1 < 1e-6 || w2 < 1e-6) return 0;      /* strictly inside: a footpath meeting a slab edge is not under it */
+    *y = w0 * t->y[0] + w1 * t->y[1] + w2 * t->y[2];
+    return 1;
+}
+
 int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *scn, TD5_RoamHeight *hc,
                          TD5_RoamGroundFn ground, void *gu, double drop_units, const double proj[4], const char *outprefix)
 {
@@ -85,6 +118,11 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
     uint32_t t0 = td5_plat_time_ms();
     PcSet set;
     double dbg_x = 0.0, dbg_z = 0.0, dbg_r = 0.0;
+    PcSurf *surf = NULL; long nsurf = 0, capsurf = 0;
+    long fp_on = 0, fp_under = 0, fp_under_lawn = 0, nfprow = 0, fp_by[3][4] = { { 0 } };
+    double fp_lo = 1e30;
+    PcRow *fprow = (PcRow *)malloc(4096u * sizeof(PcRow));
+    PcFpV *fpv = NULL; long nfpv = 0, capfpv = 0;
     { const char *e = getenv("TD5RE_PAVE_DBG"); if (e) sscanf(e, "%lf,%lf,%lf", &dbg_x, &dbg_z, &dbg_r); }
 
     set.cap = 1u << 18;
@@ -135,6 +173,54 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                             if (q == 0) col = pc_rd32(v + 24);
                         }
                         cursor += (uint32_t)nvp;
+                        if (pass == 0) {   /* [G5] footpath quads (u = 0 1 1 0) and the surfaces they may cross */
+                            float u4[4], v4[4];
+                            int fp;
+                            for (q = 0; q < nvp; q++) {
+                                u4[q] = pc_rdf(rec + vtx_off + (cursor - (uint32_t)nvp + (uint32_t)q) * 44u + 28);
+                                v4[q] = pc_rdf(rec + vtx_off + (cursor - (uint32_t)nvp + (uint32_t)q) * 44u + 32);
+                            }
+                            /* sc_emit_footpaths: u 0 1 1 0, v the run along (same at both corners of an end), on the
+                             * paving or the loose-ground page, at least the narrowest footpath wide */
+                            fp = nvp == 4 && (page == TD5_TG_PAGE_SIDEWALK || page == k_biomes[0].ground_page) &&
+                                 col == 0xFFFFFFFFu && u4[0] == 0.0f && u4[1] == 1.0f && u4[2] == 1.0f && u4[3] == 0.0f &&
+                                 v4[0] == v4[1] && v4[2] == v4[3] && v4[2] > v4[0] &&
+                                 hypot(x[1] - x[0], z[1] - z[0]) > 0.7 * TD5_TG_INFRA_M;
+                            if (fp) {
+                                if (nfpv + 4 > capfpv) {
+                                    PcFpV *nf;
+                                    capfpv = capfpv ? capfpv * 2 : 65536;
+                                    if (!(nf = (PcFpV *)realloc(fpv, (size_t)capfpv * sizeof *fpv))) return 1;
+                                    fpv = nf;
+                                }
+                                for (q = 0; q < 4; q++) {
+                                    fpv[nfpv].x = x[q]; fpv[nfpv].y = y[q]; fpv[nfpv].z = z[q];
+                                    fpv[nfpv].tx = sc->tx; fpv[nfpv].tz = sc->tz; nfpv++;
+                                }
+                            } else if ((page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0) {
+                                const double ax = x[1] - x[0], ay = y[1] - y[0], az = z[1] - z[0];
+                                const double bx = x[2] - x[0], by = y[2] - y[0], bz = z[2] - z[0];
+                                const double ny = az * bx - ax * bz, nl = sqrt((ay * bz - az * by) * (ay * bz - az * by) + ny * ny +
+                                                                              (ax * by - ay * bx) * (ax * by - ay * bx));
+                                int tt;
+                                if (nl > 0.0 && fabs(ny) / nl > 0.7)
+                                    for (tt = 0; tt < nvp - 2; tt++) {
+                                        const int i1 = tt + 1, i2 = tt + 2;
+                                        PcSurf *f;
+                                        if (nsurf == capsurf) {
+                                            PcSurf *ns;
+                                            capsurf = capsurf ? capsurf * 2 : 65536;
+                                            if (!(ns = (PcSurf *)realloc(surf, (size_t)capsurf * sizeof *surf))) return 1;
+                                            surf = ns;
+                                        }
+                                        f = &surf[nsurf++];
+                                        f->x[0] = x[0]; f->y[0] = y[0]; f->z[0] = z[0];
+                                        f->x[1] = x[i1]; f->y[1] = y[i1]; f->z[1] = z[i1];
+                                        f->x[2] = x[i2]; f->y[2] = y[i2]; f->z[2] = z[i2];
+                                        f->lawn = page == TD5_TG_PAGE_R3_BLOCK + 0 ? (nvp == 4 ? 1 : 2) : 0;
+                                    }
+                            }
+                        }
                         if (!ours) continue;
                         if (pass == 0) {
                             if (page == TD5_TG_PAGE_SIDEWALK && col == 0xFFA8A8A8u && nvp == 4) {
@@ -202,6 +288,70 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
         }
         td5_roam_scn_free(sc);
     }
+    /* [G5] footpath vertices under a pavement / island / lawn surface */
+    {
+        PcSurfRef *ref = NULL;
+        long nref = 0, capref = 0, si, fi;
+        for (si = 0; si < nsurf; si++) {
+            const PcSurf *t = &surf[si];
+            double x0 = t->x[0], x1 = t->x[0], z0 = t->z[0], z1 = t->z[0];
+            int a, b, q;
+            for (q = 1; q < 3; q++) {
+                if (t->x[q] < x0) x0 = t->x[q];
+                if (t->x[q] > x1) x1 = t->x[q];
+                if (t->z[q] < z0) z0 = t->z[q];
+                if (t->z[q] > z1) z1 = t->z[q];
+            }
+            if (x1 - x0 > 64.0 * PC_FP_CELL || z1 - z0 > 64.0 * PC_FP_CELL) continue;
+            for (b = (int)floor(z0 / PC_FP_CELL); b <= (int)floor(z1 / PC_FP_CELL); b++)
+                for (a = (int)floor(x0 / PC_FP_CELL); a <= (int)floor(x1 / PC_FP_CELL); a++) {
+                    if (nref == capref) {
+                        PcSurfRef *nr;
+                        capref = capref ? capref * 2 : 262144;
+                        if (!(nr = (PcSurfRef *)realloc(ref, (size_t)capref * sizeof *ref))) return 1;
+                        ref = nr;
+                    }
+                    ref[nref].key = pc_cell_key(a, b); ref[nref].s = (int)si; nref++;
+                }
+        }
+        if (nref) qsort(ref, (size_t)nref, sizeof *ref, pc_ref_cmp);
+        for (fi = 0; fi < nfpv; fi++) {
+            const PcFpV *v = &fpv[fi];
+            const int64_t key = pc_cell_key((int)floor(v->x / PC_FP_CELL), (int)floor(v->z / PC_FP_CELL));
+            long lo = 0, hi = nref, k2;
+            double top = -1e300;
+            int on = 0, lawn = 0;
+            while (lo < hi) { const long mid = (lo + hi) / 2; if (ref[mid].key < key) lo = mid + 1; else hi = mid; }
+            for (k2 = lo; k2 < nref && ref[k2].key == key; k2++) {
+                double ys;
+                if (pc_surf_y(&surf[ref[k2].s], v->x, v->z, &ys) && ys > top) {
+                    const PcSurf *t = &surf[ref[k2].s];
+                    top = ys; on = 1; lawn = t->lawn;
+                    if (dbg_r > 0.0 && hypot(v->x - dbg_x, v->z - dbg_z) < dbg_r)
+                        fprintf(stderr, "FPDBG fp (%.0f %.0f y%.0f) surf %d y%.0f: (%.0f %.0f %.0f)(%.0f %.0f %.0f)(%.0f %.0f %.0f)\n",
+                                v->x, v->z, v->y, t->lawn, ys, t->x[0], t->y[0], t->z[0], t->x[1], t->y[1], t->z[1], t->x[2], t->y[2], t->z[2]);
+                }
+            }
+            if (!on) continue;
+            fp_on++;
+            if (v->y - top < fp_lo) fp_lo = v->y - top;
+            if (v->y < top + 1.0 * PC_CM) {
+                fp_under++;
+                if (lawn) fp_under_lawn++;
+                {
+                    static const double k_fp_cm[4] = { -1, 10, 50, 100 };
+                    int h2;
+                    for (h2 = 0; h2 < 4; h2++) if (top - v->y > k_fp_cm[h2] * PC_CM) fp_by[lawn][h2]++;
+                }
+                if (fprow && nfprow < 4096) {
+                    fprow[nfprow].val = (float)((v->y - top) / PC_CM); fprow[nfprow].aux = (float)lawn;
+                    fprow[nfprow].x = v->x; fprow[nfprow].y = v->y; fprow[nfprow].z = v->z;
+                    fprow[nfprow].tx = v->tx; fprow[nfprow].tz = v->tz; fprow[nfprow].cls = 5; nfprow++;
+                }
+            }
+        }
+        free(ref);
+    }
     qsort(keep, (size_t)nkeep, sizeof *keep, pc_cmp);
     snprintf(path, sizeof path, "%sroam_pavement_census.txt", ld ? ld : "");
     o = fopen(path, "w");
@@ -217,6 +367,12 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                    "worst up %.1f cm, worst down %.1f cm\n", nslab, worst_above / PC_CM, worst_rise / PC_CM, worst_fall / PC_CM);
         fprintf(o, "FLAT faces (slab / footpath / lawn, normal up): %ld; lowest vertex vs ground %.1f cm; faces with a vertex under the ground %ld, within 10 cm above it (z-fight) %ld\n",
                 nflat, lo_min / PC_CM, sink0, touch);
+        fprintf(o, "FOOTPATHS (G5): %ld footpath vertices, %ld of them over a pavement / island / lawn surface; under it "
+                   "(less than 1 cm over it): %ld (%ld on a lawn page), lowest %.1f cm\n",
+                nfpv, fp_on, fp_under, fp_under_lawn, fp_on ? fp_lo / PC_CM : 0.0);
+        fprintf(o, "footpath vertices under the surface by more than -1 / 10 / 50 / 100 cm: paving %ld %ld %ld %ld; island or median "
+                   "lawn %ld %ld %ld %ld; plaza lawn %ld %ld %ld %ld\n", fp_by[0][0], fp_by[0][1], fp_by[0][2], fp_by[0][3],
+                fp_by[1][0], fp_by[1][1], fp_by[1][2], fp_by[1][3], fp_by[2][0], fp_by[2][1], fp_by[2][2], fp_by[2][3]);
         fprintf(o, "threshold_cm  back_gap_above  slab_outer_above_nominal  slab_rise_up  slab_fall_down\n");
         for (h = 0; h < 6; h++) fprintf(o, "%5.0f  %10ld  %10ld  %10ld  %10ld\n", k_thr_cm[h], hgap[h], hab[h], hrise[h], hfall[h]);
         fprintf(o, "\nworst rows: cls(0 slab above nominal, 1 back gap, 2 cross-fall, 3 sunk, 4 within 10 cm of the ground) value_cm aux_cm tile place_x place_z y lat lon\n");
@@ -238,6 +394,23 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
         }
         fclose(csv);
     }
+    {   /* [G5] the hidden footpath vertices */
+        FILE *fc;
+        snprintf(path, sizeof path, "%sroam_footpath_census.csv", ld ? ld : "");
+        if ((fc = fopen(path, "w")) != NULL) {
+            fprintf(fc, "over_surface_cm,lawn,tx,tz,place_x,place_z,y,lat,lon\n");
+            for (k = 0; k < nfprow; k++) {
+                const PcRow *f = &fprow[k];
+                fprintf(fc, "%.1f,%d,%d,%d,%.0f,%.0f,%.0f,%.6f,%.6f\n", f->val, (int)f->aux, f->tx, f->tz, f->x, f->z, f->y,
+                        proj && proj[1] > 0 ? proj[0] + f->z / (proj[1] * PC_UPM) : 0.0,
+                        proj && proj[3] > 0 ? proj[2] + f->x / (proj[3] * PC_UPM) : 0.0);
+            }
+            fclose(fc);
+        }
+    }
+    fprintf(stderr, "PAVECENSUS FOOTPATHS: %ld vertices, %ld over a surface, %ld under it (%ld lawn), lowest %.1f cm\n",
+            nfpv, fp_on, fp_under, fp_under_lawn, fp_on ? fp_lo / PC_CM : 0.0);
+    free(surf); free(fpv); free(fprow);
     fprintf(stderr, "PAVECENSUS: %d tiles, back faces %ld (hole under %ld, >25cm %ld), slabs %ld (above nominal >50cm %ld, >100cm %ld; "
             "cross-fall up >50cm %ld, down >50cm %ld), flat %ld (a vertex under the ground %ld), %u ms\n", tn, nback, gap0, hgap[0], nslab,
             hab[1], hab[2], hrise[1], hfall[1], nflat, sink0, (unsigned)(td5_plat_time_ms() - t0));
