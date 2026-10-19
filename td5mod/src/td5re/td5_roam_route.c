@@ -60,6 +60,7 @@ typedef struct {
     double  x, z;
     int     first, ninc;         /* slice of g.inc[]: edge*2 + end */
     uint8_t cent;                /* x,z came from a NODE record (cluster centroid), not the key cell */
+    double  cx, cz;              /* [G2] where the A* connector goes through the node: x,z, or a point ON the patch (x,z stay the junction centre: the traffic's stop lines use it) */
     int     turn0;               /* [G2] 1 + offset of this node's ninc x ninc turn table in g.turn[], 0 = none */
 } RrNode;
 
@@ -316,20 +317,20 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
             const RrEdge *ed = &gp->edge[in >> 1];
             const int p = (in & 1) ? ed->pt0 + ed->npt - 1 : ed->pt0;
             const double ex = gp->pt[2 * p], ez = gp->pt[2 * p + 1];
-            const double d = hypot(ex - nd->x, ez - nd->z);
+            const double d = hypot(ex - nd->cx, ez - nd->cz);
             mx += ex; mz += ez;
             if (d < near_end) near_end = d;
         }
         mx /= nd->ninc; mz /= nd->ninc;
         if (!nd->cent) {
-            if (near_end > 25.0 * RR_UPM) { nd->x = mx; nd->z = mz; (*no_rec)++; }
+            if (near_end > 25.0 * RR_UPM) { nd->cx = mx; nd->cz = mz; (*no_rec)++; }
             continue;
         }
         {
             const RrPatch *hit = NULL;
             const RrPatchTri *T;
             int nt, lo = 0, hi = npa - 1;
-            double best, cur, bx = nd->x, bz = nd->z;
+            double best, cur, bx = nd->cx, bz = nd->cz;
             double cx[RR_FX_CAND + 3], cz[RR_FX_CAND + 3];
             char used[512];
             int nc = 0, i, ti, want, w;
@@ -340,7 +341,7 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
             }
             if (!hit || hit->n <= 0) continue;
             T = pt + hit->first; nt = hit->n;
-            cur = rr_fx_score(gp, T, nt, nd, nd->x, nd->z);
+            cur = rr_fx_score(gp, T, nt, nd, nd->cx, nd->cz);
             if (cur <= 0.0) continue;
             best = cur;
             /* candidates: the mean of the arm ends, the mean of the triangle barycentres, then the triangle barycentres
@@ -359,7 +360,7 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
                 int bi = -1;
                 for (ti = 0; ti < nt; ti++) {
                     const double tx = (T[ti].p[0] + T[ti].p[2] + T[ti].p[4]) / 3.0, tz = (T[ti].p[1] + T[ti].p[3] + T[ti].p[5]) / 3.0;
-                    const double d = (tx - nd->x) * (tx - nd->x) + (tz - nd->z) * (tz - nd->z);
+                    const double d = (tx - nd->cx) * (tx - nd->cx) + (tz - nd->cz) * (tz - nd->cz);
                     if (!used[ti] && d < bd) { bd = d; bi = ti; }
                 }
                 if (bi < 0) break;
@@ -370,7 +371,7 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
                 const double s = rr_fx_score(gp, T, nt, nd, cx[i], cz[i]);
                 if (s < best - 1e-9) { best = s; bx = cx[i]; bz = cz[i]; }
             }
-            if (best < cur) { nd->x = bx; nd->z = bz; (*moved)++; }
+            if (best < cur) { nd->cx = bx; nd->cz = bz; (*moved)++; }
             /* arms no single point serves (a concave patch, 5-8 arms): a connector of their own */
             {
                 int a, b;
@@ -384,9 +385,9 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
                         const RrEdge *eb = &gp->edge[ib >> 1];
                         const int pb_ = (ib & 1) ? eb->pt0 + eb->npt - 1 : eb->pt0;
                         const double bx2 = gp->pt[2 * pb_], bz2 = gp->pt[2 * pb_ + 1];
-                        const int far_c = (nd->x - ax) * (nd->x - ax) + (nd->z - az) * (nd->z - az) > (3.0 * RR_UPM) * (3.0 * RR_UPM) ||
-                                          (nd->x - bx2) * (nd->x - bx2) + (nd->z - bz2) * (nd->z - bz2) > (3.0 * RR_UPM) * (3.0 * RR_UPM);
-                        const double off0 = far_c ? rr_fx_off(T, nt, ax, az, nd->x, nd->z) + rr_fx_off(T, nt, nd->x, nd->z, bx2, bz2)
+                        const int far_c = (nd->cx - ax) * (nd->cx - ax) + (nd->cz - az) * (nd->cz - az) > (3.0 * RR_UPM) * (3.0 * RR_UPM) ||
+                                          (nd->cx - bx2) * (nd->cx - bx2) + (nd->cz - bz2) * (nd->cz - bz2) > (3.0 * RR_UPM) * (3.0 * RR_UPM);
+                        const double off0 = far_c ? rr_fx_off(T, nt, ax, az, nd->cx, nd->cz) + rr_fx_off(T, nt, nd->cx, nd->cz, bx2, bz2)
                                                   : rr_fx_off(T, nt, ax, az, bx2, bz2);
                         int8_t mode = 0;
                         double vx = 0.0, vz = 0.0, vx2 = 0.0, vz2 = 0.0, bo = off0;
@@ -683,6 +684,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
 
     {   /* [G2] connector points on the junction patches */
         int moved = 0, no_rec = 0, pair_fix = 0;
+        for (i = 0; i < gp->nnode; i++) { gp->node[i].cx = gp->node[i].x; gp->node[i].cz = gp->node[i].z; }
 #ifndef TD5RE_RELEASE
         if (!td5_env_flag_off("TD5RE_ROAM_GRAPH_NOFIX"))     /* DEV: the pre-G2 graph, for the census before / after */
 #endif
@@ -946,7 +948,7 @@ static int rr_turn_via(int node, int in_inc, int out_inc, double v[4])
 {
     const RrNode *nd = &g.node[node];
     int a = -1, b = -1, k;
-    v[0] = nd->x; v[1] = nd->z; v[2] = v[3] = 0.0;
+    v[0] = nd->cx; v[1] = nd->cz; v[2] = v[3] = 0.0;
     if (!nd->turn0) return 1;
     for (k = 0; k < nd->ninc; k++) {
         if (g.inc[nd->first + k] == in_inc) a = k;
