@@ -477,6 +477,12 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=13, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam G1b] police roadblocks (full suite only): heat 3 puts a block across the street ahead; through its gap,
+     * stop 7 m short of it -> bust at the block, turn away from one -> detour; each block is removed afterwards */
+    { .name="roam-cops-roadblock",   .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=17, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [roam F9b] out of the casco: Plaza Moreno -> Diagonal 74 -> Camino Parque Centenario at Gonnet (~8 km, solo, free
      * roam): the region planner maps the route (tiles built on the stream worker when missing), the drive crosses
      * world-origin rebases; 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units, 0 pinches / rescues /
@@ -872,7 +878,7 @@ static char s_roam_note[120];
 /* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
 static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15; }  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
-static int st_roam_is_cops(int row) { return row == 13 || row == 14; }   /* [roam F10] 13 full (traffic on), 14 smoke */
+static int st_roam_is_cops(int row) { return row == 13 || row == 14 || row == 17; }   /* [roam F10] 13 full (traffic on), 14 smoke; [G1b] 17 roadblocks */
 static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
 
 static void st_roam_arm(const RaceScenario *sc)
@@ -904,7 +910,7 @@ static void st_roam_arm(const RaceScenario *sc)
     if (st_roam_is_cops(sc->roam)) {
         /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
         if (sc->roam == 14) td5_roam_traffic_force_density(0);
-        td5_roam_cops_test_arm(sc->roam == 13 ? TD5_RCOPS_FULL : TD5_RCOPS_SMOKE);
+        td5_roam_cops_test_arm(sc->roam == 13 ? TD5_RCOPS_FULL : sc->roam == 17 ? TD5_RCOPS_ROADBLOCK : TD5_RCOPS_SMOKE);
         if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
             s_roam_captured = 1;
             s_roam_status = ST_FAIL;
@@ -978,7 +984,7 @@ static void st_roam_capture(void)
         td5_roam_rebase_stats(&rb);
         snprintf(base, sizeof base, "%s", s_roam_note);
         snprintf(s_roam_note, sizeof s_roam_note, "%.100s rb %ld", base, rb.count);
-        if (rb.count < 1 && s_roam_status < ST_FAIL) {
+        if (rb.count < 1 && s_roam_status < ST_FAIL && s_roam_row != 17) {
             s_roam_status = ST_FAIL;
             snprintf(s_roam_note, sizeof s_roam_note, "%.100s NO REBASE", base);
         }
