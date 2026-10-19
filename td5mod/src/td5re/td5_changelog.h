@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 19 (geo map: FREE ROAM and RACE ROUTE)" },
+    { CL_ITEM,    "Geo generator map: FREE ROAM and RACE ROUTE work on a" },
+    { CL_ITEM,    "  fresh install. The START pin no longer reads OUTSIDE" },
+    { CL_ITEM,    "  THE CITY MAP when no city tile was built yet, the map" },
+    { CL_ITEM,    "  no longer freezes for seconds after the first pin, and" },
+    { CL_ITEM,    "  a very quick click still places a pin." },
     { CL_DATE,    "October 19 (free roam: ground beside steep roads)" },
     { CL_ITEM,    "Free roam: beside a steep road the ground now meets" },
     { CL_ITEM,    "  the road edge instead of hanging metres below it," },
