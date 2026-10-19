@@ -31,6 +31,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 19 (free roam: no grass through the road)" },
+    { CL_ITEM,    "Free roam: grass no longer flickers through the road" },
+    { CL_ITEM,    "  in stripes or covers it in cuts and underpasses." },
+    { CL_ITEM,    "  The ground now always stays 40 cm under the road." },
     { CL_DATE,    "October 18 (free roam: several police sirens)" },
     { CL_ITEM,    "Each of the 3 nearest pursuing cops now has its own" },
     { CL_ITEM,    "  siren: own distance, Doppler, pitch and fade, so a" },

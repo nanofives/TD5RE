@@ -166,6 +166,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self,
                                     TD5_RoamHeight *hc);
 
 int  td5_roam_scn_enabled(void);                 /* TD5RE_ROAM_SCENERY (default 1) */
+/* [G4] neighbour ROAD tile (tx, tz) through the source (its LRU, the file, else its builder); NULL = absent.
+ * Owned by the source, valid until the next 24 asks. */
+const RoamTile *td5_roam_scn_road(TD5_RoamScnSource *s, int tx, int tz);
 
 #ifndef TD5RE_RELEASE
 /* DEV ONLY. --RoamBuildScenery=casco|x0,z0,x1,z1 [--RoamOut=<dir>] [--RoamOrder=rev]

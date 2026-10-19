@@ -3414,6 +3414,11 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
 
 int td5_roam_scn_enabled(void) { return td5_env_int("TD5RE_ROAM_SCENERY", 1, 0, 1); }
 
+/* [G4] a ROAD tile of the 3x3 for the render's ground clamp: the same LRU / file / builder as the
+ * tile ctx, so a seam is judged from the same tiles on both sides. Valid until SC_ROAD_LRU more asks. */
+const RoamTile *td5_roam_scn_road(TD5_RoamScnSource *s, int tx, int tz) { return s ? sc_road(s, tx, tz) : NULL; }
+
+
 TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_RoamScnBuildFn build, void *u)
 {
     TD5_RoamScnSource *s;
