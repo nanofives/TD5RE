@@ -634,6 +634,14 @@ int td5_plat_audio_load_wav(const void *data, size_t size);
 /** Free a loaded audio buffer. */
 void td5_plat_audio_free(int buffer_index);
 
+/** [roam G3] New buffer id that shares the data of `buffer_index` (DuplicateSoundBuffer).
+ *  Looping voices are deduped per source buffer, so each extra simultaneous loop of the
+ *  same sample needs its own id. Release with td5_plat_audio_free. -1 on failure. */
+int td5_plat_audio_clone_buffer(int buffer_index);
+
+/** [roam G3] Jump a live channel to `permille`/1000 of its sample (phase offset). */
+void td5_plat_audio_seek_permille(TD5_AudioChannel ch, int permille);
+
 /** Play a buffer. Returns channel, or -1 on failure. */
 TD5_AudioChannel td5_plat_audio_play(int buffer_index, int loop, int volume, int pan, int frequency);
 

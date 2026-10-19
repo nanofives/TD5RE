@@ -98,6 +98,7 @@ void td5_sound_stop_tracked_vehicle_audio(void);
 /* [POLICE rewrite] Per-frame: drive the distance-attenuated siren from the
  * nearest actively-chasing traffic cop (gated by the POLICE option). */
 void td5_sound_update_police_siren(void);
+int  td5_sound_siren_voice_count(void);   /* [roam G3] live multi-voice siren voices (0 = legacy/none) */
 int  td5_sound_toggle_siren(void);      /* cop-chase siren on/off toggle (port enh.) */
 int  td5_sound_siren_is_enabled(void);  /* query siren toggle state (any cop on) */
 int  td5_sound_toggle_cop_siren(int slot); /* per-cop siren toggle (local MP cop chase) */

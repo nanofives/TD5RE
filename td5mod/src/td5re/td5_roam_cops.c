@@ -1782,6 +1782,28 @@ int td5_roam_cops_siren_slot(int32_t wx, int32_t wz)
     return best;
 }
 
+/* [roam G3] the nearest `max` pursuers (lit, visible), nearest first; returns how many */
+int td5_roam_cops_siren_slots(int32_t wx, int32_t wz, int max, int *out)
+{
+    double bd[8];
+    int i, j, n = 0;
+    if (!C.on || !td5_roam_active() || max <= 0 || max > 8 || !out) return 0;
+    for (i = 0; i < C.pool; i++) {
+        const RcCop *c = &C.cop[i];
+        const TD5_Actor *a;
+        double d;
+        if (c->state != RC_PURSUIT || c->alpha <= 0) continue;
+        a = td5_game_get_actor(c->slot);
+        if (!a) continue;
+        d = hypot((double)(a->world_pos.x - wx), (double)(a->world_pos.z - wz));
+        if (n == max && d >= bd[n - 1]) continue;
+        j = (n < max) ? n++ : n - 1;
+        for (; j > 0 && bd[j - 1] > d; j--) { bd[j] = bd[j - 1]; out[j] = out[j - 1]; }
+        bd[j] = d; out[j] = c->slot;
+    }
+    return n;
+}
+
 uint32_t td5_roam_cops_filter_bits(int slot, uint32_t bits)
 {
     const TD5_Actor *a;

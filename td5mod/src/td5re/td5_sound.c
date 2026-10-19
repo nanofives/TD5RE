@@ -39,6 +39,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -495,6 +496,7 @@ static float sound_compute_doppler_ratio(const int32_t *listener_vel,
                                          float dx, float dz, float dist);
 
 static int sound_attenuate_volume(int raw_vol, float distance);
+static void siren_multi_release(void);   /* [roam G3] */
 
 static int sound_apply_doppler_pitch(int base_pitch, float doppler_ratio);
 
@@ -740,6 +742,7 @@ void td5_sound_release_race_channels(void)
      * is separate and stays running. */
     td5_plat_audio_stop_all();
     memset(s_slot_to_channel, 0xFF, sizeof(s_slot_to_channel));
+    siren_multi_release();   /* [roam G3] channels already gone; free the cloned siren buffers */
     td5_plat_audio_log_stats("race-end:after");
 }
 
@@ -1129,6 +1132,195 @@ void td5_sound_start_tracked_vehicle_audio(int actor_index)
     s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
 }
 
+/* ========================================================================
+ * [roam G3] Multi-voice police siren (PORT-ONLY, GEO FREE ROAM only)
+ *
+ * The engine has ONE siren voice (Siren3 + Siren5 loops, slots 0x14/0x15) that
+ * follows the nearest pursuer, so three cops on the player sound like one. In a
+ * roam session with N>1 (TD5RE_SIREN_VOICES, default 3, max 6) every one of the N
+ * nearest pursuing cops gets its OWN pair of loops. Looping voices are deduped per
+ * source buffer inside the platform layer, so each voice owns a CLONE of the two
+ * siren buffers (td5_plat_audio_clone_buffer). Per voice: distance attenuation and
+ * Doppler exactly like the legacy siren, a small fixed pitch offset and a start
+ * phase offset (so equal-speed cops do not phase into one), a sticky cop->voice
+ * assignment (a cop keeps its voice while it stays in the nearest N), a level ramp
+ * for hand-over, and a stop when the cop stops pursuing or despawns. The legacy
+ * single-voice path is left untouched whenever the knob is 1 or the mode is not roam.
+ * ======================================================================== */
+#define SIREN_VOICES_MAX 6
+typedef struct {
+    int buf[2];     /* cloned buffer ids (-1 = not created) */
+    int ch[2];      /* channel handles */
+    int actor;      /* cop actor slot, -1 = free */
+    int level;      /* 0..TD5_SOUND_SIREN_FADE_FULL ramp */
+    int target;     /* ramp target (FULL while assigned, 0 releasing) */
+    int vol;        /* last applied volume 0..127 (diagnostic) */
+    int pitch;      /* last applied pitch (diagnostic) */
+    float dist;     /* last distance (diagnostic) */
+} SirenVoice;
+static SirenVoice s_sv[SIREN_VOICES_MAX];
+static int s_sv_inited;
+static int s_sv_peak;
+static int s_sv_last_active = -1;
+static unsigned s_sv_frame;
+static const int s_sv_pitch_permille[SIREN_VOICES_MAX] = { 0, 25, -25, 45, -45, 12 };
+static const int s_sv_phase_permille[SIREN_VOICES_MAX] = { 0, 370, 740, 110, 480, 850 };
+
+static int siren_multi_voices(void)
+{
+    static int s_n = -1;
+    if (s_n < 0) {
+        unsigned n = td5_env_u32("TD5RE_SIREN_VOICES", 3);
+        s_n = (n < 1) ? 1 : (n > SIREN_VOICES_MAX ? SIREN_VOICES_MAX : (int)n);
+        TD5_LOG_I(LOG_TAG, "roam siren voices: %d (TD5RE_SIREN_VOICES)", s_n);
+    }
+    return s_n;
+}
+
+static void siren_multi_reset(int free_buffers)
+{
+    for (int v = 0; v < SIREN_VOICES_MAX; v++) {
+        for (int k = 0; k < 2; k++) {
+            if (s_sv[v].ch[k] >= 0) td5_plat_audio_stop(s_sv[v].ch[k]);
+            if (free_buffers && s_sv[v].buf[k] >= 0) td5_plat_audio_free(s_sv[v].buf[k]);
+        }
+    }
+    for (int v = 0; v < SIREN_VOICES_MAX; v++) {
+        s_sv[v].buf[0] = s_sv[v].buf[1] = -1;
+        s_sv[v].ch[0] = s_sv[v].ch[1] = -1;
+        s_sv[v].actor = -1;
+        s_sv[v].level = s_sv[v].target = s_sv[v].vol = s_sv[v].pitch = 0;
+        s_sv[v].dist = 0.0f;
+    }
+    s_sv_inited = 1;
+    s_sv_peak = 0;
+    s_sv_last_active = -1;
+}
+
+/* Ramp every voice, apply distance/Doppler/pitch/pan, start and stop its loops. */
+static void siren_multi_mix(void)
+{
+    int active = 0;
+    char dbg[200];
+    int dl = 0;
+    if (!s_sv_inited) return;
+    s_sv_frame++;
+    dbg[0] = 0;
+    for (int v = 0; v < SIREN_VOICES_MAX; v++) {
+        SirenVoice *sv = &s_sv[v];
+        if (sv->actor < 0) continue;
+        if (sv->level < sv->target) {
+            sv->level += TD5_SOUND_SIREN_FADE_RAMP_STEP;
+            if (sv->level > sv->target) sv->level = sv->target;
+        } else if (sv->target < sv->level) {
+            sv->level -= TD5_SOUND_SIREN_FADE_RAMP_STEP;
+            if (sv->level < sv->target) sv->level = sv->target;
+        }
+        TD5_Actor *cop = td5_game_get_actor(sv->actor);
+        if (!cop || (sv->level == 0 && sv->target == 0)) {
+            for (int k = 0; k < 2; k++)
+                if (sv->ch[k] >= 0) { td5_plat_audio_stop(sv->ch[k]); sv->ch[k] = -1; }
+            sv->actor = -1; sv->level = sv->target = 0; sv->vol = 0;
+            continue;
+        }
+        active++;
+        float dx = ((float)s_listener_pos[0][0] - (float)cop->world_pos.x)
+                   * TD5_SOUND_DISTANCE_SCALE * TD5_SOUND_REPLAY_DIST_SCALE;
+        float dz = ((float)s_listener_pos[0][2] - (float)cop->world_pos.z)
+                   * TD5_SOUND_DISTANCE_SCALE * TD5_SOUND_REPLAY_DIST_SCALE;
+        float dist = sqrtf(dx * dx + dz * dz);
+        int lvl = sv->level >> 5;
+        if (lvl > 0x7F) lvl = 0x7F;
+        int vol = sound_attenuate_volume(lvl, dist);
+        int pitch = TD5_SOUND_SIREN_FREQ;
+        if (vol > 0) {
+            float dop = sound_compute_doppler_ratio(s_listener_vel[0], &cop->linear_velocity_x,
+                                                    dx, dz, dist);
+            pitch = sound_apply_doppler_pitch(TD5_SOUND_SIREN_FREQ, dop);
+        }
+        pitch += pitch * s_sv_pitch_permille[v] / 1000;
+        /* pan: which side of the listener's heading (from its velocity) the cop is on */
+        int pan = 0;
+        {
+            float hx = (float)(s_listener_vel[0][0] >> 8), hz = (float)(s_listener_vel[0][2] >> 8);
+            float hl = sqrtf(hx * hx + hz * hz);
+            if (hl > 8.0f && dist > 1.0f) {
+                float side = (hx * (-dz) - hz * (-dx)) / (hl * dist);   /* cross(heading, to_cop) */
+                if (side > 1.0f) side = 1.0f;
+                if (side < -1.0f) side = -1.0f;
+                pan = (int)(side * 4000.0f);
+            }
+        }
+        sv->vol = vol; sv->pitch = pitch; sv->dist = dist;
+        for (int k = 0; k < 2; k++) {
+            if (sv->buf[k] < 0) continue;
+            if (sv->ch[k] < 0 || !td5_plat_audio_is_playing(sv->ch[k])) {
+                sv->ch[k] = td5_plat_audio_play(sv->buf[k], 1, vol, pan, pitch);
+                td5_plat_audio_seek_permille(sv->ch[k], (s_sv_phase_permille[v] + k * 130) % 1000);
+            } else {
+                td5_plat_audio_modify(sv->ch[k], vol, pan, pitch);
+            }
+        }
+        if (dl < (int)sizeof(dbg) - 48)
+            dl += snprintf(dbg + dl, sizeof(dbg) - (size_t)dl, " v%d[a%d d%.0f l%d vol%d p%d]",
+                           v, sv->actor, dist, sv->level >> 8, vol, pitch);
+    }
+    if (active > s_sv_peak) s_sv_peak = active;
+    if (active != s_sv_last_active || (active > 0 && (s_sv_frame % 120) == 0)) {
+        TD5_LOG_I(LOG_TAG, "siren voices: active=%d peak=%d%s", active, s_sv_peak, dbg);
+        s_sv_last_active = active;
+    }
+}
+
+/* Assign the nearest pursuers to voices (sticky), then run the mix. */
+static void siren_multi_update(int n_voices)
+{
+    int cand[SIREN_VOICES_MAX], used[SIREN_VOICES_MAX] = {0};
+    int n = td5_roam_cops_siren_slots(s_listener_pos[0][0], s_listener_pos[0][2], n_voices, cand);
+    if (!s_sv_inited) siren_multi_reset(0);
+    /* lazily clone the two siren buffers for every voice */
+    for (int v = 0; v < n_voices; v++)
+        for (int k = 0; k < 2; k++)
+            if (s_sv[v].buf[k] < 0 && s_slot_to_buffer[0x14 + k] >= 0)
+                s_sv[v].buf[k] = td5_plat_audio_clone_buffer(s_slot_to_buffer[0x14 + k]);
+    for (int v = 0; v < SIREN_VOICES_MAX; v++) {
+        if (s_sv[v].actor < 0) continue;
+        int keep = -1;
+        for (int i = 0; i < n; i++) if (cand[i] == s_sv[v].actor) keep = i;
+        if (keep >= 0 && v < n_voices) { used[keep] = 1; s_sv[v].target = TD5_SOUND_SIREN_FADE_FULL; }
+        else s_sv[v].target = 0;   /* no longer one of the nearest pursuers: fade out */
+    }
+    for (int i = 0; i < n; i++) {
+        if (used[i]) continue;
+        for (int v = 0; v < n_voices; v++) {
+            if (s_sv[v].actor >= 0 || s_sv[v].buf[0] < 0) continue;
+            s_sv[v].actor = cand[i]; s_sv[v].level = 0; s_sv[v].target = TD5_SOUND_SIREN_FADE_FULL;
+            break;
+        }
+    }
+    siren_multi_mix();
+}
+
+static void siren_multi_release(void)
+{
+    siren_multi_reset(1);
+    s_sv_inited = 0;
+}
+
+static void siren_multi_fade_all(void)
+{
+    if (!s_sv_inited) return;
+    for (int v = 0; v < SIREN_VOICES_MAX; v++) s_sv[v].target = 0;
+    siren_multi_mix();
+}
+
+int td5_sound_siren_voice_count(void)
+{
+    int n = 0;
+    for (int v = 0; v < SIREN_VOICES_MAX; v++) if (s_sv[v].actor >= 0) n++;
+    return n;
+}
+
 /**
  * StopTrackedVehicleAudio (0x440AE0).
  *
@@ -1137,6 +1329,7 @@ void td5_sound_start_tracked_vehicle_audio(int actor_index)
  */
 void td5_sound_stop_tracked_vehicle_audio(void)
 {
+    siren_multi_fade_all();   /* [roam G3] no-op unless the multi-voice siren has live voices */
     if (s_tracked_veh_active != 0) {
         s_tracked_veh_fade_target = 0;
     }
@@ -1162,6 +1355,11 @@ void td5_sound_update_police_siren(void)
     int nearest;
     if (td5_roam_active()) {
         /* [GEO FREE ROAM F10] the roam cops: the nearest pursuer carries the one siren voice */
+        int nv = siren_multi_voices();
+        if (nv > 1) {   /* [roam G3] one voice per nearest pursuer */
+            siren_multi_update(nv);
+            return;
+        }
         nearest = td5_roam_cops_siren_slot(s_listener_pos[0][0], s_listener_pos[0][2]);
     } else {
     /* POLICE option off -> cops are silent. */
