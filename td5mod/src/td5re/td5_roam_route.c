@@ -59,7 +59,19 @@ typedef struct {
     int64_t key;
     double  x, z;
     int     first, ninc;         /* slice of g.inc[]: edge*2 + end */
+    uint8_t cent;                /* x,z came from a NODE record (cluster centroid), not the key cell */
+    double  cx, cz;              /* [G2] where the A* connector goes through the node: x,z, or a point ON the patch (x,z stay the junction centre: the traffic's stop lines use it) */
+    int     turn0;               /* [G2] 1 + offset of this node's ninc x ninc turn table in g.turn[], 0 = none */
 } RrNode;
+
+/* [G2] how the A* joins two arms of a node whose centre is not enough: mode 0 = through the node position,
+ * 1 = straight from arm end to arm end, 2 = through (x, z) */
+typedef struct { int8_t mode; double x, z, x2, z2; } RrTurn;
+
+/* [G2] one cluster's patch triangles (place frame, 3 x,z pairs each), kept while the tiles are read so the
+ * connector point of a node can be put ON its patch (rr_fix_centres) */
+typedef struct { int64_t key; int first, n; } RrPatch;
+typedef struct { int32_t p[6]; } RrPatchTri;
 
 typedef struct { int64_t cell; int seg; } RrCellSeg;
 
@@ -79,6 +91,7 @@ typedef struct {
     int      ntiles;
     int    (*tiles)[2];          /* [F9b] the tiles read, sorted (tx, tz): the region this graph covers */
     struct RrSig *sig; int nsig; /* [F8] signalised clusters (SIGN records), sorted by key */
+    RrTurn  *turn;  int nturn;   /* [G2] per-pair connectors of the nodes that need one */
 } RrGraph;
 
 /* [F8] one signalised cluster: its arms in the tile's ARM order (the furniture's order) */
@@ -162,6 +175,7 @@ static void rr_graph_free(RrGraph *gp)
 {
     free(gp->edge); free(gp->node); free(gp->inc); free(gp->pt); free(gp->cum); free(gp->seg_edge); free(gp->cs);
     free(gp->tiles);
+    free(gp->turn);
     free(gp->sig);
     memset(gp, 0, sizeof *gp);
 }
@@ -186,17 +200,261 @@ void td5_roam_route_graph_stats(int *nedge, int *nnode, int *nseg, double *ms, d
     if (km)    *km    = g.km;
 }
 
+/* ---- [G2] node connector points ON the junction patch ------------------------------------------------------
+ * The A* joins two edges through the node position (rr_connector), and the traffic / AI / cops follow that
+ * polyline. The position was the cluster centroid, which on a divided avenue or a concave / holed patch sits in the
+ * median or on the island (170 of 2538 casco nodes off the surface, turns of up to 200 m with no road under them).
+ * Here each node with a patch gets the candidate point (its own position, the patch mean, a few triangle
+ * barycentres, the mean of the arm ends) whose turn paths (arm end -> point -> arm end, every pair) have the
+ * least length off the patch triangles of that node. A node that already scores 0 is not touched.
+ * A node with NO record (the cluster is owned by a tile outside the region) whose arm ends are all far from the
+ * key cell takes the mean of its arm ends instead of a point up to 100 m from the road. */
+#define RR_FX_TOL      215.0        /* 0.5 m: arm ends lie on the patch boundary */
+#define RR_FX_STEP     1290.0       /* 3 m samples */
+#define RR_FX_CAND     12
+
+static int rr_cmp_patch(const void *a, const void *b)
+{
+    const RrPatch *x = (const RrPatch *)a, *y = (const RrPatch *)b;
+    return x->key < y->key ? -1 : (x->key > y->key ? 1 : 0);
+}
+
+static int rr_fx_in(const RrPatchTri *T, int nt, double x, double z)
+{
+    int i;
+    for (i = 0; i < nt; i++) {
+        const int32_t *p = T[i].p;
+        if (x < (double)(p[0] < p[2] ? (p[0] < p[4] ? p[0] : p[4]) : (p[2] < p[4] ? p[2] : p[4])) - RR_FX_TOL ||
+            x > (double)(p[0] > p[2] ? (p[0] > p[4] ? p[0] : p[4]) : (p[2] > p[4] ? p[2] : p[4])) + RR_FX_TOL ||
+            z < (double)(p[1] < p[3] ? (p[1] < p[5] ? p[1] : p[5]) : (p[3] < p[5] ? p[3] : p[5])) - RR_FX_TOL ||
+            z > (double)(p[1] > p[3] ? (p[1] > p[5] ? p[1] : p[5]) : (p[3] > p[5] ? p[3] : p[5])) + RR_FX_TOL)
+            continue;
+        const double area2 = ((double)p[2] - p[0]) * ((double)p[5] - p[1]) - ((double)p[3] - p[1]) * ((double)p[4] - p[0]);
+        int j, in = 1;
+        if (area2 == 0.0) continue;
+        for (j = 0; j < 3; j++) {
+            const double ax = p[2 * j], az = p[2 * j + 1], bx = p[2 * ((j + 1) % 3)], bz = p[2 * ((j + 1) % 3) + 1];
+            const double l = hypot(bx - ax, bz - az);
+            const double e = (area2 > 0.0 ? 1.0 : -1.0) * ((bx - ax) * (z - az) - (bz - az) * (x - ax)) / (l > 0.0 ? l : 1.0);
+            if (e < -RR_FX_TOL) { in = 0; break; }
+        }
+        if (in) return 1;
+    }
+    return 0;
+}
+
+/* length (units) of the segment a -> b that lies outside the patch */
+static double rr_fx_off(const RrPatchTri *T, int nt, double ax, double az, double bx, double bz)
+{
+    const double len = hypot(bx - ax, bz - az);
+    const int n = (int)(len / RR_FX_STEP) + 1;
+    double off = 0.0;
+    int i;
+    for (i = 0; i <= n; i++) {
+        const double t = (double)i / n;
+        if (!rr_fx_in(T, nt, ax + t * (bx - ax), az + t * (bz - az))) off += len / n;
+    }
+    return off;
+}
+
+/* a car can arrive through arm `inc` (edge * 2 + end) / leave through it: one-way respected */
+static int rr_fx_in_ok(const RrGraph *gp, int inc)
+{
+    const int8_t ow = gp->edge[inc >> 1].oneway;
+    const int d = (inc & 1) ? 0 : 1;           /* arriving at end 1 = travelling node0 -> node1 */
+    return ow == 0 || (ow > 0 ? d == 0 : d == 1);
+}
+static int rr_fx_out_ok(const RrGraph *gp, int inc)
+{
+    const int8_t ow = gp->edge[inc >> 1].oneway;
+    const int d = (inc & 1) ? 1 : 0;
+    return ow == 0 || (ow > 0 ? d == 0 : d == 1);
+}
+/* a turn between the two arms exists in at least one direction (the A* never U-turns on one edge) */
+static int rr_fx_legal(const RrGraph *gp, int ia, int ib)
+{
+    if ((ia >> 1) == (ib >> 1)) return 0;
+    return (rr_fx_in_ok(gp, ia) && rr_fx_out_ok(gp, ib)) || (rr_fx_in_ok(gp, ib) && rr_fx_out_ok(gp, ia));
+}
+
+static double rr_fx_score(const RrGraph *gp, const RrPatchTri *T, int nt, const RrNode *nd, double cx, double cz)
+{
+    double score = 0.0;
+    int a, b;
+    for (a = 0; a < nd->ninc; a++) {
+        const int ia = gp->inc[nd->first + a];
+        const RrEdge *ea = &gp->edge[ia >> 1];
+        const int pa = (ia & 1) ? ea->pt0 + ea->npt - 1 : ea->pt0;
+        const double ax = gp->pt[2 * pa], az = gp->pt[2 * pa + 1];
+        for (b = a + 1; b < nd->ninc; b++) {
+            const int ib = gp->inc[nd->first + b];
+            const RrEdge *eb = &gp->edge[ib >> 1];
+            const int pb = (ib & 1) ? eb->pt0 + eb->npt - 1 : eb->pt0;
+            const double bx = gp->pt[2 * pb], bz = gp->pt[2 * pb + 1];
+            if (!rr_fx_legal(gp, ia, ib)) continue;
+            if ((cx - ax) * (cx - ax) + (cz - az) * (cz - az) > (3.0 * RR_UPM) * (3.0 * RR_UPM) ||
+                (cx - bx) * (cx - bx) + (cz - bz) * (cz - bz) > (3.0 * RR_UPM) * (3.0 * RR_UPM))
+                score += rr_fx_off(T, nt, ax, az, cx, cz) + rr_fx_off(T, nt, cx, cz, bx, bz);
+            else
+                score += rr_fx_off(T, nt, ax, az, bx, bz);
+        }
+    }
+    return score;
+}
+
+static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *pt, int *moved, int *no_rec, int *pair_fix)
+{
+    int n;
+    *moved = 0; *no_rec = 0; *pair_fix = 0;
+    if (npa > 1) qsort(pa, (size_t)npa, sizeof *pa, rr_cmp_patch);
+    for (n = 0; n < gp->nnode; n++) {
+        RrNode *nd = &gp->node[n];
+        double mx = 0.0, mz = 0.0, near_end = 1e300;
+        int k;
+        if (nd->ninc < 2) continue;
+        for (k = 0; k < nd->ninc; k++) {
+            const int in = gp->inc[nd->first + k];
+            const RrEdge *ed = &gp->edge[in >> 1];
+            const int p = (in & 1) ? ed->pt0 + ed->npt - 1 : ed->pt0;
+            const double ex = gp->pt[2 * p], ez = gp->pt[2 * p + 1];
+            const double d = hypot(ex - nd->cx, ez - nd->cz);
+            mx += ex; mz += ez;
+            if (d < near_end) near_end = d;
+        }
+        mx /= nd->ninc; mz /= nd->ninc;
+        if (!nd->cent) {
+            if (near_end > 25.0 * RR_UPM) { nd->cx = mx; nd->cz = mz; (*no_rec)++; }
+            continue;
+        }
+        {
+            const RrPatch *hit = NULL;
+            const RrPatchTri *T;
+            int nt, lo = 0, hi = npa - 1;
+            double best, cur, bx = nd->cx, bz = nd->cz;
+            double cx[RR_FX_CAND + 3], cz[RR_FX_CAND + 3];
+            char used[512];
+            int nc = 0, i, ti, want, w;
+            while (lo <= hi) {
+                const int mid = (lo + hi) / 2;
+                if (pa[mid].key == nd->key) { hit = &pa[mid]; break; }
+                if (pa[mid].key < nd->key) lo = mid + 1; else hi = mid - 1;
+            }
+            if (!hit || hit->n <= 0) continue;
+            T = pt + hit->first; nt = hit->n;
+            cur = rr_fx_score(gp, T, nt, nd, nd->cx, nd->cz);
+            if (cur <= 0.0) continue;
+            best = cur;
+            /* candidates: the mean of the arm ends, the mean of the triangle barycentres, then the triangle barycentres
+             * nearest the current point (selection by distance, ties by index) */
+            cx[nc] = mx; cz[nc] = mz; nc++;
+            {
+                double sx = 0.0, sz = 0.0;
+                for (ti = 0; ti < nt; ti++) { sx += (T[ti].p[0] + T[ti].p[2] + T[ti].p[4]) / 3.0; sz += (T[ti].p[1] + T[ti].p[3] + T[ti].p[5]) / 3.0; }
+                cx[nc] = sx / nt; cz[nc] = sz / nt; nc++;
+            }
+            want = nt < RR_FX_CAND ? nt : RR_FX_CAND;
+            if (nt > (int)sizeof used) want = 0;
+            memset(used, 0, sizeof used);
+            for (w = 0; w < want; w++) {
+                double bd = 1e300;
+                int bi = -1;
+                for (ti = 0; ti < nt; ti++) {
+                    const double tx = (T[ti].p[0] + T[ti].p[2] + T[ti].p[4]) / 3.0, tz = (T[ti].p[1] + T[ti].p[3] + T[ti].p[5]) / 3.0;
+                    const double d = (tx - nd->cx) * (tx - nd->cx) + (tz - nd->cz) * (tz - nd->cz);
+                    if (!used[ti] && d < bd) { bd = d; bi = ti; }
+                }
+                if (bi < 0) break;
+                used[bi] = 1;
+                cx[nc] = (T[bi].p[0] + T[bi].p[2] + T[bi].p[4]) / 3.0; cz[nc] = (T[bi].p[1] + T[bi].p[3] + T[bi].p[5]) / 3.0; nc++;
+            }
+            for (i = 0; i < nc; i++) {
+                const double s = rr_fx_score(gp, T, nt, nd, cx[i], cz[i]);
+                if (s < best - 1e-9) { best = s; bx = cx[i]; bz = cz[i]; }
+            }
+            if (best < cur) { nd->cx = bx; nd->cz = bz; (*moved)++; }
+            /* arms no single point serves (a concave patch, 5-8 arms): a connector of their own */
+            {
+                int a, b;
+                for (a = 0; a < nd->ninc; a++) {
+                    const int ia = gp->inc[nd->first + a];
+                    const RrEdge *ea = &gp->edge[ia >> 1];
+                    const int pa_ = (ia & 1) ? ea->pt0 + ea->npt - 1 : ea->pt0;
+                    const double ax = gp->pt[2 * pa_], az = gp->pt[2 * pa_ + 1];
+                    for (b = a + 1; b < nd->ninc; b++) {
+                        const int ib = gp->inc[nd->first + b];
+                        const RrEdge *eb = &gp->edge[ib >> 1];
+                        const int pb_ = (ib & 1) ? eb->pt0 + eb->npt - 1 : eb->pt0;
+                        const double bx2 = gp->pt[2 * pb_], bz2 = gp->pt[2 * pb_ + 1];
+                        const int far_c = (nd->cx - ax) * (nd->cx - ax) + (nd->cz - az) * (nd->cz - az) > (3.0 * RR_UPM) * (3.0 * RR_UPM) ||
+                                          (nd->cx - bx2) * (nd->cx - bx2) + (nd->cz - bz2) * (nd->cz - bz2) > (3.0 * RR_UPM) * (3.0 * RR_UPM);
+                        const double off0 = far_c ? rr_fx_off(T, nt, ax, az, nd->cx, nd->cz) + rr_fx_off(T, nt, nd->cx, nd->cz, bx2, bz2)
+                                                  : rr_fx_off(T, nt, ax, az, bx2, bz2);
+                        int8_t mode = 0;
+                        double vx = 0.0, vz = 0.0, vx2 = 0.0, vz2 = 0.0, bo = off0;
+                        if (off0 <= 0.0 || !rr_fx_legal(gp, ia, ib)) continue;
+                        {
+                            const double d = rr_fx_off(T, nt, ax, az, bx2, bz2);
+                            if (d < bo - 1e-9) { bo = d; mode = 1; }
+                        }
+                        for (i = 0; i < nc; i++) {
+                            const double o = rr_fx_off(T, nt, ax, az, cx[i], cz[i]) + rr_fx_off(T, nt, cx[i], cz[i], bx2, bz2);
+                            if (o < bo - 1e-9) { bo = o; mode = 2; vx = cx[i]; vz = cz[i]; }
+                        }
+                        if (bo > 0.0) {
+                            /* still off the patch: two via points (a concave patch, an island between the arms): the cheapest
+                             * a -> ci -> cj -> b over the candidates (segment costs once each) */
+                            double ca[RR_FX_CAND + 3], cb[RR_FX_CAND + 3];
+                            int j;
+                            for (i = 0; i < nc; i++) { ca[i] = rr_fx_off(T, nt, ax, az, cx[i], cz[i]); cb[i] = rr_fx_off(T, nt, cx[i], cz[i], bx2, bz2); }
+                            for (i = 0; i < nc; i++) {
+                                if (ca[i] >= bo) continue;
+                                for (j = 0; j < nc; j++) {
+                                    double o;
+                                    if (j == i || cb[j] + ca[i] >= bo) continue;
+                                    o = ca[i] + rr_fx_off(T, nt, cx[i], cz[i], cx[j], cz[j]) + cb[j];
+                                    if (o < bo - 1e-9) { bo = o; mode = 3; vx = cx[i]; vz = cz[i]; vx2 = cx[j]; vz2 = cz[j]; }
+                                }
+                            }
+                        }
+                        if (mode == 0) continue;
+                        if (!nd->turn0) {
+                            RrTurn *nt2 = (RrTurn *)realloc(gp->turn, (size_t)(gp->nturn + nd->ninc * nd->ninc) * sizeof *nt2);
+
+                            if (!nt2) break;
+                            gp->turn = nt2;
+                            nd->turn0 = gp->nturn + 1;
+                            memset(&gp->turn[gp->nturn], 0, (size_t)(nd->ninc * nd->ninc) * sizeof *gp->turn);
+                            gp->nturn += nd->ninc * nd->ninc;
+                        }
+                        {
+                            RrTurn *fw = &gp->turn[nd->turn0 - 1 + a * nd->ninc + b], *bw = &gp->turn[nd->turn0 - 1 + b * nd->ninc + a];
+                            fw->mode = bw->mode = mode;
+                            fw->x = vx; fw->z = vz; fw->x2 = vx2; fw->z2 = vz2;
+                            bw->x = mode == 3 ? vx2 : vx; bw->z = mode == 3 ? vz2 : vz;      /* the way back visits them in reverse */
+                            bw->x2 = vx; bw->z2 = vz;
+                        }
+                        (*pair_fix)++;
+                    }
+                }
+            }
+        }
+    }
+}
+
 static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int ntiles)
 {
     RrVec runs = { NULL, 0, 0, sizeof(RrRun) };
     RrVec pts  = { NULL, 0, 0, sizeof(int32_t) };
     RrVec cents = { NULL, 0, 0, sizeof(RrCent) };
     RrVec sigs  = { NULL, 0, 0, sizeof(RrSig) };    /* [F8] */
+    RrVec patches = { NULL, 0, 0, sizeof(RrPatch) };       /* [G2] */
+    RrVec ptris   = { NULL, 0, 0, sizeof(RrPatchTri) };    /* [G2] */
     int i, e;
     const uint32_t t0 = td5_plat_time_ms();
     int64_t *keys = NULL;
     int nkeys = 0;
     uint32_t t_read = 0, t_merge = 0, t_nodes = 0;
+    int gap_dropped = 0;
 
     if (!place || !place[0]) return 0;
     rr_graph_free(gp);
@@ -278,6 +536,27 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
             c->key = t.node[k].cluster_key;
             c->x = (double)t.org_x + t.node[k].x;
             c->z = (double)t.org_z + t.node[k].z;
+            {   /* [G2] the patch triangles of this owned cluster */
+                const RoamNodeRec *nr = &t.node[k];
+                RrPatch *pa = (RrPatch *)rr_vec_add(&patches);
+                uint32_t q;
+                if (!pa) goto oom;
+                pa->key = nr->cluster_key; pa->first = ptris.n; pa->n = 0;
+                for (q = 0; q < nr->tri_count && (uint32_t)nr->tri_first + q < t.ntri; q++) {
+                    const RoamTri *tr = &t.tri[nr->tri_first + q];
+                    RrPatchTri *pt;
+                    int j, okv = 1;
+                    for (j = 0; j < 3; j++) if (tr->v[j] >= t.nvert) okv = 0;
+                    if (!okv) continue;
+                    pt = (RrPatchTri *)rr_vec_add(&ptris);
+                    if (!pt) goto oom;
+                    for (j = 0; j < 3; j++) {
+                        pt->p[2 * j]     = t.org_x + tr->ox + t.vert[tr->v[j]].x;
+                        pt->p[2 * j + 1] = t.org_z + tr->oz + t.vert[tr->v[j]].z;
+                    }
+                    pa->n++;
+                }
+            }
         }
         td5_roam_tile_free(&t);
     }
@@ -308,12 +587,13 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
         for (i = 0; i < runs.n;) {
             int j = i;
             RrEdge *ed = &gp->edge[gp->nedge];
-            int prev_end_row = -1;
+            int prev_end_row = -1, gap = 0;
             ed->key = R[i].key; ed->end_key[0] = R[i].ek0; ed->end_key[1] = R[i].ek1;
             ed->oneway = R[i].oneway; ed->klass = R[i].klass; ed->lanes = R[i].lanes; ed->flags = R[i].flags;
             ed->pt0 = gp->npt;
             while (j < runs.n && R[j].key == R[i].key) {
                 int first = (prev_end_row == R[j].row0) ? 1 : 0;   /* shared row: drop the duplicate */
+                if (prev_end_row >= 0 && !first) gap = 1;          /* [G2] rows missing between two runs: their tile is not in the region */
                 int a;
                 for (a = first; a <= R[j].n; a++) {
                     gp->pt[2 * gp->npt]     = P[2 * (R[j].off + a)];
@@ -324,10 +604,14 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
                 j++;
             }
             ed->npt = gp->npt - ed->pt0;
-            if (ed->npt >= 2) gp->nedge++; else gp->npt = ed->pt0;   /* a one-point edge is no edge */
+            /* [G2] An edge with rows missing in the middle would be joined by a straight chord across the tile that has
+             * them (its ribbon is outside the region): no road under that line. It enters the graph once the tile does. */
+            if (gap) { gp->npt = ed->pt0; gap_dropped++; }
+            else if (ed->npt >= 2) gp->nedge++; else gp->npt = ed->pt0;   /* a one-point edge is no edge */
             i = j;
         }
     }
+    if (gap_dropped > 0) TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: %d edges left out, a run of their ribbon is in a tile outside the region", gap_dropped);
     /* cumulative distance + per-point edge index + length */
     gp->km = 0.0;
     for (e = 0; e < gp->nedge; e++) {
@@ -374,7 +658,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
         C = (const RrCent *)cents.p;
         for (i = 0; i < cents.n; i++) {
             const int ni = rr_find_node_in(gp, C[i].key);
-            if (ni >= 0) { gp->node[ni].x = C[i].x; gp->node[ni].z = C[i].z; }
+            if (ni >= 0) { gp->node[ni].x = C[i].x; gp->node[ni].z = C[i].z; gp->node[ni].cent = 1; }
         }
     }
     for (e = 0; e < gp->nedge; e++) {
@@ -398,6 +682,16 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
         }
     }
 
+    {   /* [G2] connector points on the junction patches */
+        int moved = 0, no_rec = 0, pair_fix = 0;
+        for (i = 0; i < gp->nnode; i++) { gp->node[i].cx = gp->node[i].x; gp->node[i].cz = gp->node[i].z; }
+#ifndef TD5RE_RELEASE
+        if (!td5_env_flag_off("TD5RE_ROAM_GRAPH_NOFIX"))     /* DEV: the pre-G2 graph, for the census before / after */
+#endif
+            rr_fix_centres(gp, (RrPatch *)patches.p, patches.n, (const RrPatchTri *)ptris.p, &moved, &no_rec, &pair_fix);
+        TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: node connector points moved onto the patch %d, turn pairs with their own connector %d, "
+                  "no cluster record %d", moved, pair_fix, no_rec);
+    }
     t_nodes = td5_plat_time_ms() - t0;
     /* ---- snap grid: every polyline segment into the cells its bbox touches ------- */
     {
@@ -432,7 +726,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
         gp->sig = S; gp->nsig = u;
         sigs.p = NULL;
     }
-    free(keys); free(runs.p); free(pts.p); free(cents.p);
+    free(keys); free(runs.p); free(pts.p); free(cents.p); free(patches.p); free(ptris.p);
     snprintf(gp->place, sizeof gp->place, "%s", place);
     gp->ms = (double)(td5_plat_time_ms() - t0);
     gp->ready = 1;
@@ -446,7 +740,7 @@ oom:
     TD5_LOG_E(LOG_TAG, "ROUTE_GRAPH: out of memory");
 fail:
     free(sigs.p);
-    free(keys); free(runs.p); free(pts.p); free(cents.p);
+    free(keys); free(runs.p); free(pts.p); free(cents.p); free(patches.p); free(ptris.p);
     rr_graph_free(gp);
     return 0;
 }
@@ -647,15 +941,50 @@ static void rr_slice(RrPoly *p, int e, double a0, double a1)
     rr_poly_add(p, x, z);
 }
 
-/* node centre between two edges: added when the edges' ends are not at the node (a patch) */
-static void rr_connector(RrPoly *p, int node)
+/* [G2] The via points a turn from arm `in_inc` to arm `out_inc` (g.inc values, edge * 2 + end) of node `node` goes
+ * through, v = x0, z0, x1, z1: 1 point (the node position) unless rr_fix_centres gave that pair a connector of its own,
+ * which is 0 points (arm end straight to arm end), 1 or 2 points. Returns the count. */
+static int rr_turn_via(int node, int in_inc, int out_inc, double v[4])
 {
     const RrNode *nd = &g.node[node];
-    double lx, lz;
+    int a = -1, b = -1, k;
+    v[0] = nd->cx; v[1] = nd->cz; v[2] = v[3] = 0.0;
+    if (!nd->turn0) return 1;
+    for (k = 0; k < nd->ninc; k++) {
+        if (g.inc[nd->first + k] == in_inc) a = k;
+        if (g.inc[nd->first + k] == out_inc) b = k;
+    }
+    if (a < 0 || b < 0 || a == b) return 1;
+    {
+        const RrTurn *t = &g.turn[nd->turn0 - 1 + a * nd->ninc + b];
+        if (t->mode == 1) return 0;
+        if (t->mode >= 2) { v[0] = t->x; v[1] = t->z; v[2] = t->x2; v[3] = t->z2; }
+        return t->mode == 3 ? 2 : 1;
+    }
+}
+
+/* the connector between two edges: the turn's via points, each added when it is not at the end of the edge before (a patch) */
+static void rr_connector(RrPoly *p, int node, int in_inc, int out_inc)
+{
+    double v[4];
+    int n, k;
     if (p->n < 1) return;
-    lx = p->x[p->n - 1]; lz = p->z[p->n - 1];
-    if ((nd->x - lx) * (nd->x - lx) + (nd->z - lz) * (nd->z - lz) > (3.0 * RR_UPM) * (3.0 * RR_UPM))
-        rr_poly_add(p, nd->x, nd->z);
+    n = rr_turn_via(node, in_inc, out_inc, v);
+    for (k = 0; k < n; k++) {
+        const double lx = p->x[p->n - 1], lz = p->z[p->n - 1];
+        if ((v[2 * k] - lx) * (v[2 * k] - lx) + (v[2 * k + 1] - lz) * (v[2 * k + 1] - lz) > (3.0 * RR_UPM) * (3.0 * RR_UPM))
+            rr_poly_add(p, v[2 * k], v[2 * k + 1]);
+    }
+}
+
+int td5_roam_route_graph_turn_via(int node, int in_inc, int out_inc, double v[4])
+{
+    double w[4];
+    int n, k;
+    if (!g.ready || node < 0 || node >= g.nnode) return 0;
+    n = rr_turn_via(node, in_inc, out_inc, w);
+    if (v) for (k = 0; k < 4; k++) v[k] = w[k];
+    return n;
 }
 
 static int rr_allowed(int e, int d)
@@ -787,12 +1116,13 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
             if (a == nc - 1) {
                 rr_slice(poly, e, S->along, d == 0 ? ed->plen : 0.0);
             } else {
-                rr_connector(poly, rr_start_node(e, d));
+                rr_connector(poly, rr_start_node(e, d), (chain[a + 1] >> 1) * 2 + ((chain[a + 1] & 1) == 0 ? 1 : 0), e * 2 + (d == 0 ? 0 : 1));
                 rr_slice(poly, e, d == 0 ? 0.0 : ed->plen, d == 0 ? ed->plen : 0.0);
             }
             rr_eref_add(refs, ed->key, d == 0 ? 1 : -1);
         }
-        rr_connector(poly, rr_start_node(T->edge, best_dw));
+        rr_connector(poly, rr_start_node(T->edge, best_dw), (best_state >> 1) * 2 + ((best_state & 1) == 0 ? 1 : 0),
+                     T->edge * 2 + (best_dw == 0 ? 0 : 1));
         rr_slice(poly, T->edge, best_dw == 0 ? 0.0 : te->plen, T->along);
         rr_eref_add(refs, te->key, best_dw == 0 ? 1 : -1);
     }

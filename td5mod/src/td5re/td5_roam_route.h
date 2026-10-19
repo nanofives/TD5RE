@@ -137,6 +137,10 @@ int  td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int
 int  td5_roam_route_graph_nsignal(void);
 /* [F10] edge index of an edge key, -1 when unknown */
 int  td5_roam_route_graph_edge_index(uint64_t key);
+/* [G2] the via points the A* puts between arm in_inc and arm out_inc (node_view inc[] values, edge * 2 + end) of node
+ * `node` (v = x0, z0, x1, z1, place frame): returns how many, 0..2 (0 = straight from arm end to arm end). The node position
+ * is the one point unless the pair has a connector of its own. They are kept ON the junction patch. */
+int  td5_roam_route_graph_turn_via(int node, int in_inc, int out_inc, double v[4]);
 /* [F10] ONE leg between two PLACE points over the planner graph (the cops' pursuit path): both ends snapped
  * within snap_m metres; (dir_x, dir_z) the start's heading (0, 0 = leave either way along the snapped street;
  * a one-way taken the wrong way leaves either way); ignore_ow 1 = one-way streets usable both ways (a pursuing cop

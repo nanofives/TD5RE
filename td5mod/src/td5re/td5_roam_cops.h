@@ -3,7 +3,7 @@
  * See docs/plans/GEO_FREE_ROAM.md (Decisions: street life = ambient traffic, then cops; traffic / cops toggle per
  * race, cops OFF unless the setup turns them on; F10 row: police on the graph in roam, per-race toggle).
  *
- * THE POOL. A roam session reserves TD5RE_ROAM_COPS_POOL cop slots (6, max 8) right after the ambient traffic pool
+ * THE POOL. A roam session reserves TD5RE_ROAM_COPS_POOL cop slots (8, max 8; 6 before G1b) right after the ambient traffic pool
  * (td5_roam_traffic.h: 6..29, so cops are 30..35) and loads the host level's police model into them. They are
  * traffic-type actors: the simplified traffic dynamics and traffic pose, the full V2V contact with racers, the cop
  * rules of the traffic police (g_cop_is_cop: the police mesh, tough in a crash, no lift). A slot is PARKED (no
@@ -48,6 +48,17 @@
  * physics. A cop whose centre is still off the surface for 1 s is put back on a street (pursuit) or removed
  * (patrol), counted either way.
  *
+ * ROADBLOCKS (G1b). From heat TD5RE_ROAM_COPS_BLOCK_HEAT (3, 0 = off) a roadblock is set up on the street AHEAD of the
+ * fleeing player: the street graph is planned from the player's heading to a point 450 m out (3 tries, +-26 deg), and
+ * a spot on that predicted path 200..400 m from the player (TD5RE_ROAM_COPS_BLOCK_MIN_M / _MAX_M), out of sight when
+ * one exists, away from junctions, decks and bores, is taken. 2 (heat 3) or 3 (heat 4, 5) pursuit-pool cars park ACROSS
+ * the carriageway (its width probed with the locator), lights on, siren off, solid for everyone (the normal V2V).
+ * Heat 3 leaves a 4.2 m gap, heat 4 a 3.2 m gap, heat 5 none (the player rams or detours); a race with COPS on always
+ * keeps a 3.6 m gap so the field can pass. At most TD5RE_ROAM_COPS_BLOCKS (2) are up at once, 20 s apart. A block is
+ * removed when the player has passed it, turned away from it, escaped, was busted, or is out of range; a stopped player
+ * within 10 m of a block car fills the bust meter like a pursuer's. It lives in the PLACE frame and keeps no graph
+ * index, so a world rebase and a planner graph swap need nothing. Never outside a pursuit: a race with COPS off has none.
+ *
  * STATE. One file-scope struct, main thread only, inert outside a roam session.
  */
 #ifndef TD5_ROAM_COPS_H
@@ -75,7 +86,12 @@ void td5_roam_cops_tick(void);
 int  td5_roam_cops_parked(int slot);         /* -1 not a cop slot, else 1 parked / 0 live */
 int  td5_roam_cops_alpha(int slot);          /* -1 not a cop slot, else 0..255 */
 int  td5_roam_cops_glow(int slot);           /* light-bar intensity for the slot, 0 = off */
+
+/* [G1a] minimap marks: every live (patrol or pursuit) cop, place-frame position. Returns the count written. */
+typedef struct { double px, pz; int pursuing; } TD5_RoamCopMark;
+int  td5_roam_cops_marks(TD5_RoamCopMark *out, int max);
 int  td5_roam_cops_siren_slot(int32_t wx, int32_t wz);   /* nearest cop with the siren on (WORLD 24.8), -1 */
+int  td5_roam_cops_siren_slots(int32_t wx, int32_t wz, int max, int *out);   /* nearest pursuers, nearest first (G3) */
 uint32_t td5_roam_cops_filter_bits(int slot, uint32_t bits);   /* BUSTED: the car is held braked */
 void td5_roam_cops_draw_hud(void);           /* HUD overlay pass: pursuit panel, bust meter, toasts */
 int  td5_roam_cops_heat(void);               /* 0 = no pursuit */
@@ -99,6 +115,12 @@ typedef struct {
     long   pursuit_ticks;
     int    max_heat, max_pursuers;
     double max_kmh;
+    long   blocks_placed, block_cars;         /* [G1b] roadblocks set up / cars in them                */
+    long   blocks_rammed, blocks_gap;         /* player crossed one: touching a car / through the gap  */
+    long   blocks_detoured, blocks_bust;      /* player turned away / busted with a block car < 10 m   */
+    long   blocks_despawned, block_hits;      /* removed (any reason) / ticks the player touched a car */
+    long   block_fails;                       /* placement tries that found no spot                    */
+    int    blocks_active;
     long   player_respawns;                   /* free roam busts: put back on a street                 */
     int    respawn_on_road;                   /* the last respawn landed on the drivable surface       */
 } TD5_RoamCopsStats;
@@ -113,9 +135,14 @@ int  td5_roam_cops_dev_place(double px, double pz, int yaw12, int hold);
 void td5_roam_cops_dev_force(int patrol_per_anchor, int vmax_kmh);
 int  td5_roam_cops_dev_busted(void);         /* 1 while the BUSTED hold runs */
 int  td5_roam_cops_dev_pursuer_behind(double min_m, double max_m);   /* a lit pursuer that far behind the player */
+/* [G1b] Make the heat at least h (offences raised, so it holds) in a running pursuit. */
+void td5_roam_cops_dev_set_heat(int h);
+/* [G1b] Active roadblock i (0..1): centre + travel tangent (PLACE frame), gap centre (gap_w 0 = none), cars, id; 0 when none. */
+int  td5_roam_cops_dev_block(int i, double *cx, double *cz, double *tx, double *tz, double *gx, double *gz, double *gap_w, int *ncar);
 
 #define TD5_RCOPS_FULL   1
 #define TD5_RCOPS_SMOKE  2
+#define TD5_RCOPS_ROADBLOCK 3   /* [G1b] gap crossing, bust at a block, detour */
 void     td5_roam_cops_test_arm(int mode);
 void     td5_roam_cops_test_disarm(void);
 int      td5_roam_cops_test_mode(void);

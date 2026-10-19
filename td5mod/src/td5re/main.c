@@ -57,6 +57,7 @@
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): dev CLI --Roam=1 */
 #include "td5_roam_route.h"  /* GEO FREE ROAM route planner (F5-A): dev test hook */
 #include "td5_roam_barrier.h" /* GEO FREE ROAM route barriers (F6-A): dev census hook */
+#include "td5_roam_gcensus.h" /* GEO FREE ROAM planner graph vs road surface census (G2): dev hook */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1721,6 +1722,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 0;
     /* GEO FREE ROAM (F6-A) dev: TD5RE_ROAM_BARRIER_TEST=1 plans the census routes, builds their barriers, writes the census, exits. */
     if (td5_roam_barriers_dev_test())
+        return 0;
+    /* GEO FREE ROAM (G2) dev: TD5RE_ROAM_GRAPH_CENSUS=1 samples every planner edge centre line against the road surface, exits. */
+    if (td5_roam_graph_census_dev_test())
         return 0;
     /* GEO FREE ROAM (F2-C) dev: TD5RE_ROAM_RENDER_POSES=<file> writes free-cam tour poses. */
     if (td5_roam_render_dev_poses())
