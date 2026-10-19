@@ -1256,6 +1256,19 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
                 if (c->still_t == RA_STUCK_LONG + 1) {
                     A.stats.stuck_long++;
                     TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d STUCK > 5 s at %.0f m along (lat %.1f m) place (%.0f,%.0f)", c->slot, c->along, lat_m, x, z);
+#ifndef TD5RE_RELEASE
+                    {   /* DEV: who is next to it */
+                        int s2;
+                        for (s2 = 0; s2 < 6; s2++) {
+                            double ox, oz;
+                            const TD5_Actor *oa = td5_game_get_actor(s2);
+                            if (s2 == c->slot || !oa || !ra_place_of(oa, &ox, &oz)) continue;
+                            if (hypot(ox - x, oz - z) / RA_M < 25.0)
+                                TD5_LOG_W(LOG_TAG, "ROAM_AI:   slot %d is %.1f m away at (%.0f,%.0f), speed %.1f m/s", s2, hypot(ox - x, oz - z) / RA_M, ox, oz,
+                                          sqrt((double)oa->linear_velocity_x * oa->linear_velocity_x + (double)oa->linear_velocity_z * oa->linear_velocity_z) / 256.0 * RA_HZ / RA_M);
+                        }
+                    }
+#endif
                 }
             } else {
                 c->still_t = 0;
