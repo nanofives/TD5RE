@@ -41,6 +41,9 @@
  * drop is a true minimum gap. The 3x3 ROAD tiles feed it and the clip runs in GLOBAL
  * lattice coordinates, so both tiles of a seam compute the same bits.
  * TD5RE_ROAM_GROUND_NOFIX=1 turns the clamp off (before / after checks).
+ * [G5] Beside a steep road the 4-cell minimum sat metres under the road edge, so each point now
+ * comes down only as far as the road triangles next to it need (td5_roam_gfix_lower: exact, and the
+ * same lowering on both sides of a seam); TD5RE_ROAM_GROUND_G4=1 = the G4 cell clamp.
  *
  * RESIDENCY. [F3] In a streamed session (td5_roam_stream.c) the stream worker bakes
  * each tile (td5_roam_render_bake, its own height source) and the main thread installs
@@ -147,6 +150,7 @@ typedef struct {
     double    lift;                          /* units, added to every y             */
     double    ground_drop;                   /* units                               */
     int       ground_clamp;                  /* [G4] hold the ground under the road */
+    int       keep_raw;                      /* [G5] census: keep the unclamped lattice (RRGround.h0) */
     int       cell_m;                        /* ground cell, metres (divides 64)    */
     double    radius;                        /* draw radius, units                  */
     /* DEV loader */
@@ -315,7 +319,7 @@ static uint32_t rr_skirt_col(int kind)
 }
 
 /* ground: heights on the tile's lattice, (G+1) x (G+1) points */
-typedef struct { int G; double *h; unsigned char *hole; int nclamp; double max_low; } RRGround;
+typedef struct { int G; double *h, *h0; unsigned char *hole; int nclamp; double max_low; } RRGround;   /* h0: [G5] census only */
 
 /* [G4] the 3x3 ROAD tiles round a bake, [4] = the tile itself; own[] = read here, freed by rr_nb_free */
 #define RR_NB 9
@@ -333,13 +337,24 @@ static void rr_ground_point(const RoamTile *t, int i, int j, int G, double *px, 
 /* [G4] hold every lattice point of g at or under the lowest road height of its four cells.
  * The cells reach one ring past the tile, fed by the 3x3 ROAD tiles: a border point sees the
  * same primitives and the same arithmetic from both tiles, so the seam stays exact. */
-static void rr_ground_clamp(const RoamTile *t, RRGround *g, const RRNb *nb)
+static void rr_ground_clamp(const RoamTile *t, RRGround *g, const RRNb *nb, TD5_RoamHeight *hc)
 {
     const int G = g->G, N = G + 2, W = G + 1, I0 = t->tx * G - 1, J0 = t->tz * G - 1;
     const double cs = (double)s_rr.grid.tile / (double)G;
     double *cm = (double *)malloc((size_t)N * (size_t)N * sizeof(double));
     int i, j;
     if (!cm) return;
+    if (!td5_roam_gfix_g4()) {                  /* [G5] each point down as far as the road next to it needs */
+        td5_roam_gfix_lower(&s_rr.grid, nb->t, hc, t->tx, t->tz, G, 0, W, cm);
+        for (i = 0; i < W * W; i++)
+            if (cm[i] > 0.0 && !isnan(g->h[i])) {
+                if (cm[i] > g->max_low) g->max_low = cm[i];
+                g->h[i] -= cm[i];
+                g->nclamp++;
+            }
+        free(cm);
+        return;
+    }
     td5_roam_gfix_cells(&s_rr.grid, nb->t, I0, J0, N, cs, cm);
     for (j = 0; j <= G; j++) for (i = 0; i <= G; i++) {
         /* point (i, j) = global (I0 + 1 + i, J0 + 1 + j); its cells are local (i..i+1, j..j+1) */
@@ -363,7 +378,6 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
     int i, j, c, ok = 0;
     uint32_t e, q;
     const double S = (double)s_rr.grid.tile;
-    (void)S;
     memset(g, 0, sizeof *g);
     g->G = G;
     if (!s_rr.use_ground || !hc) return 0;
@@ -377,7 +391,9 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
         if (z < minz) minz = z;
         if (z > maxz) maxz = z;
     }
-    if (!td5_roam_height_prefetch(hc, minx - 2000.0, minz - 2000.0, maxx + 2000.0, maxz + 2000.0)) {
+    /* [G5] the clamp reads the raster of the lattice ring one cell outside the tile (up to 1.41 cells out in x / z) */
+    if (!td5_roam_height_prefetch(hc, minx - 2000.0 - 2.0 * S / G, minz - 2000.0 - 2.0 * S / G,
+                                  maxx + 2000.0 + 2.0 * S / G, maxz + 2000.0 + 2.0 * S / G)) {
         free(g->h); free(g->hole); memset(g, 0, sizeof *g);
         return 0;
     }
@@ -389,7 +405,9 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
             else g->h[j * (G + 1) + i] = NAN;
         }
     }
-    if (s_rr.ground_clamp && nb) rr_ground_clamp(t, g, nb);
+    if (s_rr.keep_raw && (g->h0 = (double *)malloc((size_t)(G + 1) * (size_t)(G + 1) * sizeof(double))) != NULL)
+        memcpy(g->h0, g->h, (size_t)(G + 1) * (size_t)(G + 1) * sizeof(double));
+    if (s_rr.ground_clamp && nb) rr_ground_clamp(t, g, nb, hc);
     /* cells under a tunnel bore are left out: the road runs below the ground there */
     for (e = 0; e < t->nedge; e++) {
         const RoamEdgeRec *er = &t->edge[e];
@@ -412,7 +430,7 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
     return ok > 0;
 }
 
-static void rr_ground_free(RRGround *g) { free(g->h); free(g->hole); memset(g, 0, sizeof *g); }
+static void rr_ground_free(RRGround *g) { free(g->h); free(g->h0); free(g->hole); memset(g, 0, sizeof *g); }
 
 static int rr_ground_cell_ok(const RRGround *g, int i, int j)
 {
@@ -1532,6 +1550,7 @@ typedef struct {
     RoamTile *tile;
     RRGround *gr;
     RRGzCell **cell;                /* per tile G*G, d = -1e30 untouched */
+    double  **cmin;                 /* [G5] per tile G*G, the lowest road height in the cell (1e300 none) */
     TD5_RoamHeight *hc;
     long      ns, nnog, hist[10];
     double    worst;
@@ -1539,8 +1558,9 @@ typedef struct {
 
 static const double k_gz_thr_cm[10] = { -40, -30, -20, -10, -5, -2, 0, 10, 50, 100 };
 
-/* ground as drawn at a place point: the owning tile's cell, fan (0,1,2) / (0,2,3) */
-static int rr_gz_ground(const RRGz *z, double x, double zz, double *out, int *ti, int *ci)
+/* ground as drawn at a place point: the owning tile's cell, fan (0,1,2) / (0,2,3); raw = [G5] the
+ * unclamped lattice (RRGround.h0) */
+static int rr_gz_ground_h(const RRGz *z, double x, double zz, double *out, int *ti, int *ci, int raw)
 {
     double u, v, fu, fv, h00, h10, h11, h01;
     const double S = (double)s_rr.grid.tile;
@@ -1552,7 +1572,7 @@ static int rr_gz_ground(const RRGz *z, double x, double zz, double *out, int *ti
     k = z->slot[(tz - z->tz0) * z->tw + (tx - z->tx0)];
     if (k < 0) return 0;
     g = &z->gr[k];
-    if (!g->h) return 0;
+    if (!g->h || (raw && !g->h0)) return 0;
     G = g->G; W = G + 1;
     fu = (u / S - (double)tx) * (double)G; fv = (v / S - (double)tz) * (double)G;
     i = (int)floor(fu); j = (int)floor(fv);
@@ -1562,12 +1582,41 @@ static int rr_gz_ground(const RRGz *z, double x, double zz, double *out, int *ti
     if (j >= G) j = G - 1;
     if (!rr_ground_cell_ok(g, i, j)) return 0;
     fu -= (double)i; fv -= (double)j;
-    h00 = g->h[j * W + i]; h10 = g->h[j * W + i + 1]; h11 = g->h[(j + 1) * W + i + 1]; h01 = g->h[(j + 1) * W + i];
+    {
+        const double *hh = raw ? g->h0 : g->h;
+        h00 = hh[j * W + i]; h10 = hh[j * W + i + 1]; h11 = hh[(j + 1) * W + i + 1]; h01 = hh[(j + 1) * W + i];
+    }
     if (fu >= fv) *out = h00 + fu * (h10 - h00) + fv * (h11 - h10);
     else          *out = h00 + fv * (h01 - h00) + fu * (h11 - h01);
     *out -= s_rr.ground_drop;
     *ti = k; *ci = j * G + i;
     return 1;
+}
+
+static int rr_gz_ground(const RRGz *z, double x, double zz, double *out, int *ti, int *ci)
+{
+    return rr_gz_ground_h(z, x, zz, out, ti, ci, 0);
+}
+
+/* [G5] the ground beside the road: every KERB boundary edge (bedge; deck sides stand over the ground on
+ * purpose) sampled every `step`. At each sample, with y the road edge, g the drawn ground there, r the
+ * drawn ground WITHOUT the clamp:
+ *   hang = y - drop - g                  how far the ground hangs under its nominal place (y - drop)
+ *   over = min(r, y - drop) - g          the part of it the clamp added beyond what keeping the ground
+ *                                        under the road needs (0 = the clamp lowered just enough)
+ * A road on a fill hangs on its own (r < y - drop) and is not `over`. A sample whose 3x3 ground cells hold a
+ * road more than 2 m under it (an underpass, a ramp over a street) is booked apart: there the ground has to
+ * go under the lower road and a 16 m lattice cannot follow both. */
+typedef struct { float over, hang, lvl; double x, z, y; } RRGzEdge;   /* lvl: edge - lowest road of the 3x3 cells */
+
+static const double k_gz_edge_cm[8] = { 2, 5, 10, 25, 50, 100, 200, 400 };
+
+static int rr_gz_edge_cmp(const void *pa, const void *pb)
+{
+    const RRGzEdge *x = (const RRGzEdge *)pa, *y = (const RRGzEdge *)pb;
+    if (x->over != y->over) return x->over > y->over ? -1 : 1;
+    if (x->x != y->x) return x->x < y->x ? -1 : 1;
+    return x->z < y->z ? -1 : (x->z > y->z ? 1 : 0);
 }
 
 static void rr_gz_tri(RRGz *z, const double p[3][3], double step, uint8_t kind)
@@ -1629,6 +1678,12 @@ int td5_roam_render_ground_census_dev_test(void)
     double max_low = 0.0, seam_max = 0.0;
     RRGzCell **all = NULL;
     uint32_t t0;
+    /* [G5] the road-edge pass */
+    RRGzEdge *ed_keep = NULL;
+    long ed_n = 0, ed_nog = 0, ed_over[8] = { 0 }, ed_hang[8] = { 0 }, ed_nkeep = 0, ed_cap = 0;
+    double ed_worst_over = -1e30, ed_worst_hang = -1e30, ed_min_over = 1e30, ed_sum_over = 0.0;
+    long ed_nc[2] = { 0 }, ed_overc[2][8] = { { 0 } };
+    double ed_sumc[2] = { 0.0, 0.0 }, ed_worstc[2] = { -1e30, -1e30 };
 
     if (!td5_env_flag_off("TD5RE_ROAM_GROUND_CENSUS")) return 0;
     t0 = td5_plat_time_ms();
@@ -1655,6 +1710,7 @@ int td5_roam_render_ground_census_dev_test(void)
     if (64 % s_rr.cell_m != 0) s_rr.cell_m = 16;
     s_rr.ground_drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (RR_UPM / 100.0);
     s_rr.ground_clamp = !td5_env_flag_off("TD5RE_ROAM_GROUND_NOFIX");
+    s_rr.keep_raw = 1;
     step = td5_env_int("TD5RE_ROAM_GROUND_CENSUS_STEP_CM", 50, 5, 500) * (RR_UPM / 100.0);
     z.hc = (TD5_RoamHeight *)calloc(1, sizeof *z.hc);
     td5_geo_source_path(path, sizeof path, place, "HEIGHT.R16");
@@ -1700,7 +1756,8 @@ int td5_roam_render_ground_census_dev_test(void)
     z.tw = tx1 - z.tx0 + 1; z.th = tz1 - z.tz0 + 1;
     z.slot = (int *)malloc((size_t)z.tw * (size_t)z.th * sizeof(int));
     z.cell = (RRGzCell **)calloc((size_t)z.ntile, sizeof *z.cell);
-    if (!z.slot || !z.cell) return 1;
+    z.cmin = (double **)calloc((size_t)z.ntile, sizeof *z.cmin);
+    if (!z.slot || !z.cell || !z.cmin) return 1;
     for (i = 0; i < z.tw * z.th; i++) z.slot[i] = -1;
     G = 256 / s_rr.cell_m;
     for (k = 0; k < z.ntile; k++) {
@@ -1724,6 +1781,8 @@ int td5_roam_render_ground_census_dev_test(void)
         z.cell[k] = (RRGzCell *)malloc((size_t)G * (size_t)G * sizeof(RRGzCell));
         if (!z.cell[k]) return 1;
         for (i = 0; i < G * G; i++) { memset(&z.cell[k][i], 0, sizeof(RRGzCell)); z.cell[k][i].d = -1e30f; }
+        if ((z.cmin[k] = (double *)malloc((size_t)G * (size_t)G * sizeof(double))) != NULL)
+            td5_roam_gfix_cells(&s_rr.grid, nb.t, t->tx * G, t->tz * G, G, (double)s_rr.grid.tile / (double)G, z.cmin[k]);
     }
     /* [G4b] TD5RE_ROAM_PAVE_CENSUS=1: the pavement of every tile against this drawn ground, then done */
     if (td5_env_flag_off("TD5RE_ROAM_PAVE_CENSUS")) {
@@ -1732,7 +1791,8 @@ int td5_roam_render_ground_census_dev_test(void)
         td5_roam_pave_census(z.tile, z.ntile, scn, z.hc, rr_gz_ground_cb, &z, s_rr.ground_drop, proj, NULL);
         if (scn) td5_roam_scn_close(scn);
         for (k = 0; k < z.ntile; k++) { rr_ground_free(&z.gr[k]); free(z.cell[k]); td5_roam_tile_free(&z.tile[k]); }
-        free(z.cell); free(z.slot); free(z.gr); free(z.tile); free(list);
+        for (k = 0; k < z.ntile; k++) free(z.cmin[k]);
+        free(z.cmin); free(z.cell); free(z.slot); free(z.gr); free(z.tile); free(list);
         td5_roam_height_close(z.hc); free(z.hc);
         memset(&s_rr, 0, sizeof s_rr);
         return 1;
@@ -1788,6 +1848,70 @@ int td5_roam_render_ground_census_dev_test(void)
         }
         free(deck);
     }
+    /* [G5] the ground beside the road (see RRGzEdge) */
+    for (k = 0; k < z.ntile; k++) {
+        const RoamTile *t = &z.tile[k];
+        uint32_t s;
+        for (s = 0; s < t->nbedge; s++) {
+            const RoamBEdge *be = &t->bedge[s];
+            int32_t ox = 0, oy = 0, oz = 0;
+            double a[3], b[3], L;
+            int n, q;
+            if (be->kind != ROAM_BEDGE_KERB || !rr_bedge_prim(t, be, &ox, &oy, &oz)) continue;
+            a[0] = (double)t->org_x + ox + t->vert[be->v[0]].x; a[1] = (double)oy + t->vert[be->v[0]].y; a[2] = (double)t->org_z + oz + t->vert[be->v[0]].z;
+            b[0] = (double)t->org_x + ox + t->vert[be->v[1]].x; b[1] = (double)oy + t->vert[be->v[1]].y; b[2] = (double)t->org_z + oz + t->vert[be->v[1]].z;
+            L = hypot(b[0] - a[0], b[2] - a[2]);
+            n = (int)ceil(L / step);
+            if (n < 1) n = 1;
+            if (n > 4000) n = 4000;
+            for (q = 0; q <= n; q++) {
+                const double f = (double)q / n;
+                const double x = a[0] + f * (b[0] - a[0]), y = a[1] + f * (b[1] - a[1]), zz = a[2] + f * (b[2] - a[2]);
+                double g, r, bound, over, hang, lvlmin;
+                int ti, ci, h, cls;
+                if (!rr_gz_ground(&z, x, zz, &g, &ti, &ci) || !rr_gz_ground_h(&z, x, zz, &r, &ti, &ci, 1)) { ed_nog++; continue; }
+                bound = (r < y - s_rr.ground_drop) ? r : y - s_rr.ground_drop;
+                over = bound - g; hang = y - s_rr.ground_drop - g;
+                {   /* the lowest road of the 3x3 cells round the sample (this tile's cells) */
+                    const int ca = ci % G, cb = ci / G;
+                    int da, db;
+                    lvlmin = 1e300;
+                    for (db = -1; db <= 1; db++) for (da = -1; da <= 1; da++) {
+                        const int xa = ca + da, xb = cb + db;
+                        if (z.cmin[ti] && xa >= 0 && xb >= 0 && xa < G && xb < G && z.cmin[ti][xb * G + xa] < lvlmin) lvlmin = z.cmin[ti][xb * G + xa];
+                    }
+                    cls = (lvlmin < y - 200.0 * (RR_UPM / 100.0)) ? 1 : 0;
+                }
+                ed_nc[cls]++;
+                ed_sumc[cls] += over > 0.0 ? over : 0.0;
+                if (over > ed_worstc[cls]) ed_worstc[cls] = over;
+                for (h = 0; h < 8; h++) if (over > k_gz_edge_cm[h] * (RR_UPM / 100.0)) ed_overc[cls][h]++;
+                ed_n++;
+                ed_sum_over += over > 0.0 ? over : 0.0;
+                if (over > ed_worst_over) ed_worst_over = over;
+                if (hang > ed_worst_hang) ed_worst_hang = hang;
+                if (over < ed_min_over) ed_min_over = over;
+                for (h = 0; h < 8; h++) {
+                    if (over > k_gz_edge_cm[h] * (RR_UPM / 100.0)) ed_over[h]++;
+                    if (hang > k_gz_edge_cm[h] * (RR_UPM / 100.0)) ed_hang[h]++;
+                }
+                if (over > 25.0 * (RR_UPM / 100.0)) {
+                    if (ed_nkeep == ed_cap) {
+                        RRGzEdge *nk;
+                        ed_cap = ed_cap ? ed_cap * 2 : 4096;
+                        nk = (RRGzEdge *)realloc(ed_keep, (size_t)ed_cap * sizeof *ed_keep);
+                        if (!nk) return 1;
+                        ed_keep = nk;
+                    }
+                    ed_keep[ed_nkeep].over = (float)over; ed_keep[ed_nkeep].hang = (float)hang;
+                    ed_keep[ed_nkeep].lvl = (float)(lvlmin < 1e299 ? y - lvlmin : 0.0);
+                    ed_keep[ed_nkeep].x = x; ed_keep[ed_nkeep].z = zz; ed_keep[ed_nkeep].y = y;
+                    ed_nkeep++;
+                }
+            }
+        }
+    }
+    if (ed_nkeep > 1) qsort(ed_keep, (size_t)ed_nkeep, sizeof *ed_keep, rr_gz_edge_cmp);
     /* seams: every border lattice point must carry the same height in both tiles (bit for bit) */
     for (k = 0; k < z.ntile; k++) {
         const RoamTile *t = &z.tile[k];
@@ -1847,6 +1971,41 @@ int td5_roam_render_ground_census_dev_test(void)
         fprintf(o, "cells with worst d > -drop/2: %ld; cause at the worst sample: road below raster (A >= B) %ld, cell "
                    "interpolation (B > A) %ld; on ribbon %ld, patch %ld, deck ribbon %ld\n",
                 cause_a + cause_b, cause_a, cause_b, cause_kind[0], cause_kind[1], cause_kind[2]);
+        fprintf(o, "\nROAD EDGE (G5): clamp %s, %ld kerb-edge samples (%ld over no ground); hang = road edge - drop - ground, "
+                   "over = the part of the hang the clamp added beyond keeping the ground under the road\n",
+                s_rr.ground_clamp ? (!td5_roam_gfix_g4() ? "per-triangle lowering (G5)" : "4-cell minimum (G4, TD5RE_ROAM_GROUND_G4=1)") : "OFF",
+                ed_n, ed_nog);
+        fprintf(o, "edge over: worst %.1f cm, mean %.2f cm, lowest %.2f cm; edge hang: worst %.1f cm\n",
+                ed_worst_over / (RR_UPM / 100.0), ed_n ? ed_sum_over / ed_n / (RR_UPM / 100.0) : 0.0,
+                ed_min_over / (RR_UPM / 100.0), ed_worst_hang / (RR_UPM / 100.0));
+        fprintf(o, "edge over, ONE road level round the sample: %ld samples, worst %.1f cm, mean %.2f cm; another road > 2 m "
+                   "under it in the 3x3 cells (underpass / ramp): %ld samples, worst %.1f cm, mean %.2f cm\n",
+                ed_nc[0], ed_worstc[0] / (RR_UPM / 100.0), ed_nc[0] ? ed_sumc[0] / ed_nc[0] / (RR_UPM / 100.0) : 0.0,
+                ed_nc[1], ed_worstc[1] / (RR_UPM / 100.0), ed_nc[1] ? ed_sumc[1] / ed_nc[1] / (RR_UPM / 100.0) : 0.0);
+        fprintf(o, "edge_threshold_cm  samples_over_above  samples_hang_above  over_one_level  over_multi_level\n");
+        for (h = 0; h < 8; h++)
+            fprintf(o, "%5.0f  %10ld  %10ld  %10ld  %10ld\n", k_gz_edge_cm[h], ed_over[h], ed_hang[h], ed_overc[0][h], ed_overc[1][h]);
+        fprintf(o, "worst 40 edge samples: over_cm hang_cm level_gap_cm place_x place_z road_y lat lon\n");
+        for (i = 0; i < ed_nkeep && i < 40; i++) {
+            const RRGzEdge *c = &ed_keep[i];
+            fprintf(o, "%7.1f %7.1f %7.1f %.0f %.0f %.0f %.6f %.6f\n", c->over / (RR_UPM / 100.0), c->hang / (RR_UPM / 100.0),
+                    c->lvl / (RR_UPM / 100.0), c->x, c->z, c->y,
+                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + c->x / (mdlon * RR_UPM) : 0.0);
+        }
+        {   /* every kept edge sample (over > 25 cm) */
+            FILE *ec;
+            snprintf(wpath, sizeof wpath, "%sroam_ground_edge.csv", ld ? ld : "");
+            if ((ec = fopen(wpath, "w")) != NULL) {
+                fprintf(ec, "over_cm,hang_cm,level_gap_cm,place_x,place_z,road_y,lat,lon\n");
+                for (i = 0; i < ed_nkeep; i++) {
+                    const RRGzEdge *c = &ed_keep[i];
+                    fprintf(ec, "%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%.6f,%.6f\n", c->over / (RR_UPM / 100.0), c->hang / (RR_UPM / 100.0),
+                            c->lvl / (RR_UPM / 100.0), c->x, c->z, c->y,
+                            mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + c->x / (mdlon * RR_UPM) : 0.0);
+                }
+                fclose(ec);
+            }
+        }
         fprintf(o, "\nworst 60 cells: d_cm A_cm(raster-road) B_cm(cell-raster) kind place_x place_z road_y lat lon\n");
         for (i = 0; i < cells && i < 60; i++) {
             const RRGzCell *c = all[i];
@@ -1874,8 +2033,13 @@ int td5_roam_render_ground_census_dev_test(void)
               (unsigned)(td5_plat_time_ms() - t0), path);
     fprintf(stderr, "GZCENSUS: worst %.1f cm, cells d>-20cm %ld, d>-5cm %ld, d>0 %ld of %ld -> %s\n",
             z.worst / (RR_UPM / 100.0), cell_hist[2], cell_hist[4], cell_hist[6], cells, path);
+    fprintf(stderr, "GZCENSUS EDGE: %ld samples, over worst %.1f cm mean %.2f cm, >10cm %ld >50cm %ld >100cm %ld; hang worst %.1f cm\n",
+            ed_n, ed_worst_over / (RR_UPM / 100.0), ed_n ? ed_sum_over / ed_n / (RR_UPM / 100.0) : 0.0, ed_over[2], ed_over[4], ed_over[5],
+            ed_worst_hang / (RR_UPM / 100.0));
+    free(ed_keep);
     for (k = 0; k < z.ntile; k++) { rr_ground_free(&z.gr[k]); free(z.cell[k]); td5_roam_tile_free(&z.tile[k]); }
-    free(all); free(z.cell); free(z.slot); free(z.gr); free(z.tile); free(list);
+    for (k = 0; k < z.ntile; k++) free(z.cmin[k]);
+    free(all); free(z.cmin); free(z.cell); free(z.slot); free(z.gr); free(z.tile); free(list);
     td5_roam_height_close(z.hc); free(z.hc);
     memset(&s_rr, 0, sizeof s_rr);
     return 1;
