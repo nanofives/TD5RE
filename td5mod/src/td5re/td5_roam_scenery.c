@@ -37,6 +37,7 @@
 #include "deps/cjson/cJSON.h"
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
+#include "td5_roam_groundfix.h"   /* [G4b] the ground lowered under the road */
 #include "td5_roam_scenery.h"
 
 #ifdef LOG_TAG
@@ -583,6 +584,7 @@ struct TG_TileCtx {
     GrRaster canopy;
     int      canopy_ok;
     double   ground_last;
+    TD5_RoamGfix gf;            /* [G4b] how far the drawn ground is lowered under the road (render clamp) */
     ScSb     sb[TD5_ROAM_SCN_NSB];
     /* lawn planes of every plaza of the 3x3 that reaches this tile: x/z/y per
      * corner (3 per triangle), base refinement, no road cut -- a path laid on a
@@ -624,6 +626,7 @@ static void sc_ctx_reset(TG_TileCtx *c)
     if (c->canopy.data) free(c->canopy.data);
     memset(&c->canopy, 0, sizeof c->canopy);
     c->canopy_ok = 0;
+    td5_roam_gfix_free(&c->gf);
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { c->sb[k].blk.len = 0; c->sb[k].blk.oom = 0; c->sb[k].nmesh = 0; c->furn_first[k] = 0x7FFFFFFF; }
     memset(&c->st, 0, sizeof c->st);
     memset(&c->bst, 0, sizeof c->bst);
@@ -995,10 +998,22 @@ static double sc_ground(void *u, double x, double z)
     TG_TileCtx *c = (TG_TileCtx *)u;
     double h;
     if (c->hc && td5_roam_height_sample(c->hc, x + (double)c->org_x, z + (double)c->org_z, &h, NULL)) {
+        double low = 0.0;
+        /* [G4b] the render holds the drawn ground under the road (G4): follow it, so pavement beside a road in a cut
+         * stands at the road edge and not on the old raster height. 0 outside a clamped cell: bytes unchanged. */
+        if (c->gf.h && td5_roam_gfix_lowering(&c->gf, x + (double)c->org_x, z + (double)c->org_z, &low)) h -= low;
         c->ground_last = h;
         return h;
     }
     return c->ground_last;
+}
+
+/* [G4b] how far the drawn ground is lowered under the road at a tile-local point (0 where the clamp does not act) */
+static double sc_lowering(const TG_TileCtx *c, double x, double z)
+{
+    double low = 0.0;
+    if (c->gf.h && !td5_roam_gfix_lowering(&c->gf, x + (double)c->org_x, z + (double)c->org_z, &low)) low = 0.0;
+    return low;
 }
 
 /* canopy height in metres at a tile-local point, -1 = no measurement (td5_geo_canopy_m) */
@@ -2110,6 +2125,9 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_COLLAPSE_SEG 1.25         /* a piece longer than this many widths never folds */
 #define PV_COLLAPSE_RUN 3.5          /* a folded corner run is at most this many widths  */
 #define PV_FALL         0.25         /* TG_NET_FW_FALL: steepest cross-fall of a slab    */
+#define PV_FALL_LOW     0.06         /* [G4b] steepest fall away from the kerb where the drawn ground is
+                                      * lowered under the road (a cut): a street camber, the back face
+                                      * (down to the lowered ground) covers the rest                  */
 #define PV_BACK_SINK    344.0        /* back face reaches 0.8 m under the raster ground:
                                       * the drawn ground is dropped 0.4 m under it (roam
                                       * render GROUND_DROP) and interpolated per 16 m   */
@@ -2875,7 +2893,7 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
     if (v0 >= nv) v0 = 0;
     while (done < nv) {
         int n = 1, j;
-        double yk = 0.0, g, d = 0.0;
+        double yk = 0.0, g, d = 0.0, low;
         unsigned vf = 0;
         const int v = (v0 + done) % nv;
         while (done + n < nv) {
@@ -2892,6 +2910,7 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
         }
         yk /= (double)n;
         g = sc_ground(e->c, ch->ox[v], ch->oz[v]);
+        low = sc_lowering(e->c, ch->ox[v], ch->oz[v]);
         for (j = 0; j < n; j++) {
             const int k = (v + j) % nv;
             if (vf & (PV_VF_DECK | PV_VF_FLAT)) {
@@ -2900,6 +2919,7 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
                 double y = g + TD5_TG_KERB_H;
                 if (y < yk - d * PV_FALL) y = yk - d * PV_FALL;
                 if (y > yk + d * PV_FALL) y = yk + d * PV_FALL;
+                if (low > 0.0 && y < yk - d * PV_FALL_LOW) y = yk - d * PV_FALL_LOW;
                 yo[k] = y; gr[k] = g - PV_BACK_SINK;
             }
         }
@@ -3496,6 +3516,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         if (s->hc_open && td5_roam_height_prefetch(s->hc, x0 - halo, z0 - halo, x1 + halo, z1 + halo)) hc = s->hc;
     }
     c->hc = hc;
+    if (hc && td5_roam_gfix_enabled() && td5_env_flag_on("TD5RE_ROAM_SCN_LOWER")) td5_roam_gfix_build(&c->gf, &s->grid, (const RoamTile *const *)c->road, self->tx, self->tz, hc);
     c->ground_last = 0.0;
     if (hc) {
         double h;

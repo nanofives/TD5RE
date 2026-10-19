@@ -64,10 +64,14 @@
 #include "td5_page_map.h"
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
+#include "td5_roam_groundfix.h"   /* [G4b] the clamp, shared with the scenery */
 #include "td5_roam_ribbon.h"
 #include "td5_roam_view.h"
 #include "td5_roam_render.h"
 #include "td5_roam_scenery.h"   /* [F4a] the tile's SCENERY layer */
+#ifndef TD5RE_RELEASE
+#include "td5_roam_pavecensus.h"   /* [G4b] pavement census */
+#endif
 #include "td5_light2.h"         /* [F4a] td5_light2_active: derived normals */
 
 #if defined(__has_include)
@@ -326,53 +330,6 @@ static void rr_ground_point(const RoamTile *t, int i, int j, int G, double *px, 
     *pz = s_rr.grid.oz + s_rr.grid.s * u + s_rr.grid.c * v;
 }
 
-/* [G4] clip polygon p (n points of u, v, y) to coordinate `ax` >= c (ge) or <= c; returns the count */
-static int rr_clip_half(const double (*p)[3], int n, double (*o)[3], int ax, double c, int ge)
-{
-    int i, m = 0;
-    for (i = 0; i < n; i++) {
-        const double *a = p[i], *b = p[(i + 1) % n];
-        const double da = ge ? a[ax] - c : c - a[ax], db = ge ? b[ax] - c : c - b[ax];
-        if (da >= 0.0) { o[m][0] = a[0]; o[m][1] = a[1]; o[m][2] = a[2]; m++; }
-        if ((da >= 0.0) != (db >= 0.0)) {
-            const double f = da / (da - db);
-            o[m][0] = a[0] + f * (b[0] - a[0]); o[m][1] = a[1] + f * (b[1] - a[1]); o[m][2] = a[2] + f * (b[2] - a[2]);
-            m++;
-        }
-    }
-    return m;
-}
-
-/* [G4] lowest road height of triangle q (place x, y, z) inside each ground cell it meets.
- * Cells are GLOBAL lattice cells (I, J) = floor(u / cell); cm covers I0..I0+N-1, J0..J0+N-1. */
-static void rr_clamp_tri(const double q[3][3], double *cm, int I0, int J0, int N, double cs)
-{
-    double p[3][3], lo[2] = { 1e300, 1e300 }, hi[2] = { -1e300, -1e300 };
-    int k, I, J, i0, i1, j0, j1;
-    for (k = 0; k < 3; k++) {
-        roam_grid_uv(&s_rr.grid, q[k][0], q[k][2], &p[k][0], &p[k][1]);
-        p[k][0] /= cs; p[k][1] /= cs; p[k][2] = q[k][1];
-        if (p[k][0] < lo[0]) lo[0] = p[k][0];
-        if (p[k][0] > hi[0]) hi[0] = p[k][0];
-        if (p[k][1] < lo[1]) lo[1] = p[k][1];
-        if (p[k][1] > hi[1]) hi[1] = p[k][1];
-    }
-    i0 = (int)floor(lo[0]); i1 = (int)floor(hi[0]); j0 = (int)floor(lo[1]); j1 = (int)floor(hi[1]);
-    if (i0 < I0) i0 = I0;
-    if (j0 < J0) j0 = J0;
-    if (i1 > I0 + N - 1) i1 = I0 + N - 1;
-    if (j1 > J0 + N - 1) j1 = J0 + N - 1;
-    for (J = j0; J <= j1; J++) for (I = i0; I <= i1; I++) {
-        double a[12][3], b[12][3], y = 1e300;
-        int n = rr_clip_half((const double (*)[3])p, 3, a, 0, (double)I, 1);
-        n = rr_clip_half((const double (*)[3])a, n, b, 0, (double)(I + 1), 0);
-        n = rr_clip_half((const double (*)[3])b, n, a, 1, (double)J, 1);
-        n = rr_clip_half((const double (*)[3])a, n, b, 1, (double)(J + 1), 0);
-        for (k = 0; k < n; k++) if (b[k][2] < y) y = b[k][2];
-        if (n > 0 && y < cm[(J - J0) * N + (I - I0)]) cm[(J - J0) * N + (I - I0)] = y;
-    }
-}
-
 /* [G4] hold every lattice point of g at or under the lowest road height of its four cells.
  * The cells reach one ring past the tile, fed by the 3x3 ROAD tiles: a border point sees the
  * same primitives and the same arithmetic from both tiles, so the seam stays exact. */
@@ -381,53 +338,9 @@ static void rr_ground_clamp(const RoamTile *t, RRGround *g, const RRNb *nb)
     const int G = g->G, N = G + 2, W = G + 1, I0 = t->tx * G - 1, J0 = t->tz * G - 1;
     const double cs = (double)s_rr.grid.tile / (double)G;
     double *cm = (double *)malloc((size_t)N * (size_t)N * sizeof(double));
-    int k, i, j;
+    int i, j;
     if (!cm) return;
-    for (i = 0; i < N * N; i++) cm[i] = 1e300;
-    for (k = 0; k < RR_NB; k++) {
-        const RoamTile *n = nb->t[k];
-        uint8_t *bore;
-        uint32_t e, q, si;
-        if (!n) continue;
-        bore = (uint8_t *)calloc(n->nspan ? n->nspan : 1u, 1);
-        if (!bore) continue;
-        for (e = 0; e < n->nedge; e++)                 /* a tunnel road is under the ground on purpose */
-            if (n->edge[e].flags & ROAM_EF_BORE)
-                for (q = 0; q < n->edge[e].span_count; q++)
-                    if ((uint32_t)n->edge[e].span_first + q < n->nspan) bore[n->edge[e].span_first + q] = 1;
-        for (si = 0; si < n->nspan; si++) {
-            const TD5_StripSpan *sp = &n->span[si];
-            uint32_t L, R; int ln, kk;
-            if (bore[si] || !rr_span_ok(n, sp, &L, &R, &ln)) continue;
-            for (kk = 0; kk < ln; kk++) {          /* the lane quad as the renderer fans it: 0 1 2, 0 2 3 */
-                const TD5_StripVertex *v4[4] = { &n->vert[L + kk], &n->vert[L + kk + 1], &n->vert[R + kk + 1], &n->vert[R + kk] };
-                double pq[4][3], tri[3][3];
-                int c;
-                for (c = 0; c < 4; c++) {
-                    pq[c][0] = (double)n->org_x + (double)sp->origin_x + (double)v4[c]->x;
-                    pq[c][1] = (double)sp->origin_y + (double)v4[c]->y;
-                    pq[c][2] = (double)n->org_z + (double)sp->origin_z + (double)v4[c]->z;
-                }
-                memcpy(tri[0], pq[0], sizeof tri[0]); memcpy(tri[1], pq[1], sizeof tri[1]); memcpy(tri[2], pq[2], sizeof tri[2]);
-                rr_clamp_tri((const double (*)[3])tri, cm, I0, J0, N, cs);
-                memcpy(tri[1], pq[2], sizeof tri[1]); memcpy(tri[2], pq[3], sizeof tri[2]);
-                rr_clamp_tri((const double (*)[3])tri, cm, I0, J0, N, cs);
-            }
-        }
-        for (si = 0; si < n->ntri; si++) {
-            const RoamTri *tr = &n->tri[si];
-            double tri[3][3];
-            int c;
-            if (tr->v[0] >= n->nvert || tr->v[1] >= n->nvert || tr->v[2] >= n->nvert) continue;
-            for (c = 0; c < 3; c++) {
-                tri[c][0] = (double)n->org_x + (double)tr->ox + (double)n->vert[tr->v[c]].x;
-                tri[c][1] = (double)tr->oy + (double)n->vert[tr->v[c]].y;
-                tri[c][2] = (double)n->org_z + (double)tr->oz + (double)n->vert[tr->v[c]].z;
-            }
-            rr_clamp_tri((const double (*)[3])tri, cm, I0, J0, N, cs);
-        }
-        free(bore);
-    }
+    td5_roam_gfix_cells(&s_rr.grid, nb->t, I0, J0, N, cs, cm);
     for (j = 0; j <= G; j++) for (i = 0; i <= G; i++) {
         /* point (i, j) = global (I0 + 1 + i, J0 + 1 + j); its cells are local (i..i+1, j..j+1) */
         double cap = cm[j * N + i], *h = &g->h[j * W + i];
@@ -1693,6 +1606,12 @@ static void rr_gz_tri(RRGz *z, const double p[3][3], double step, uint8_t kind)
     }
 }
 
+static int rr_gz_ground_cb(void *u, double x, double zz, double *out)
+{
+    int ti, ci;
+    return rr_gz_ground((const RRGz *)u, x, zz, out, &ti, &ci);
+}
+
 int td5_roam_render_ground_census_dev_test(void)
 {
     static const char place[] = "la_plata_partido";
@@ -1805,6 +1724,18 @@ int td5_roam_render_ground_census_dev_test(void)
         z.cell[k] = (RRGzCell *)malloc((size_t)G * (size_t)G * sizeof(RRGzCell));
         if (!z.cell[k]) return 1;
         for (i = 0; i < G * G; i++) { memset(&z.cell[k][i], 0, sizeof(RRGzCell)); z.cell[k][i].d = -1e30f; }
+    }
+    /* [G4b] TD5RE_ROAM_PAVE_CENSUS=1: the pavement of every tile against this drawn ground, then done */
+    if (td5_env_flag_off("TD5RE_ROAM_PAVE_CENSUS")) {
+        TD5_RoamScnSource *scn = td5_roam_scn_open(place, &s_rr.grid, NULL, NULL);
+        const double proj[4] = { lat0, mdlat, lon0, mdlon };
+        td5_roam_pave_census(z.tile, z.ntile, scn, z.hc, rr_gz_ground_cb, &z, s_rr.ground_drop, proj, NULL);
+        if (scn) td5_roam_scn_close(scn);
+        for (k = 0; k < z.ntile; k++) { rr_ground_free(&z.gr[k]); free(z.cell[k]); td5_roam_tile_free(&z.tile[k]); }
+        free(z.cell); free(z.slot); free(z.gr); free(z.tile); free(list);
+        td5_roam_height_close(z.hc); free(z.hc);
+        memset(&s_rr, 0, sizeof s_rr);
+        return 1;
     }
     /* the road, tile by tile (raster window over the tile + halo for the attribution) */
     for (k = 0; k < z.ntile; k++) {
