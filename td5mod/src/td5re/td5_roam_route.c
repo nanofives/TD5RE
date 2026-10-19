@@ -683,7 +683,10 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
 
     {   /* [G2] connector points on the junction patches */
         int moved = 0, no_rec = 0, pair_fix = 0;
-        rr_fix_centres(gp, (RrPatch *)patches.p, patches.n, (const RrPatchTri *)ptris.p, &moved, &no_rec, &pair_fix);
+#ifndef TD5RE_RELEASE
+        if (!td5_env_flag_off("TD5RE_ROAM_GRAPH_NOFIX"))     /* DEV: the pre-G2 graph, for the census before / after */
+#endif
+            rr_fix_centres(gp, (RrPatch *)patches.p, patches.n, (const RrPatchTri *)ptris.p, &moved, &no_rec, &pair_fix);
         TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: node connector points moved onto the patch %d, turn pairs with their own connector %d, "
                   "no cluster record %d", moved, pair_fix, no_rec);
     }

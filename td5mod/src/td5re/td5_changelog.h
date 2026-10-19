@@ -31,6 +31,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 18 (free roam: routes stay on the road)" },
+    { CL_ITEM,    "Race routes, AI opponents and cop legs no longer cut" },
+    { CL_ITEM,    "  across a median or a junction island: the line through" },
+    { CL_ITEM,    "  a junction now follows the paved patch." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 18 (built geo track: multiplayer only)" },
     { CL_ITEM,    "Free roam and the city race no longer need a built" },
     { CL_ITEM,    "  geo track: a fresh install races the city from the" },
