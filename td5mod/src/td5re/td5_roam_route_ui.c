@@ -36,6 +36,7 @@
 #include "td5_roam_route.h"
 #include "td5_roam_partido.h"   /* [F9b] the place outline + its streets on the map */
 #include "td5_roam_route_ui.h"
+#include "td5_roam_cops.h"     /* [G1a] police marks on the minimap */
 #include "td5_roam_race.h"      /* [F6-B] RACE THIS ROUTE, the sprint locks route edits */
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -454,6 +455,39 @@ static void draw_car(const Proj *p, double X, double Z, int yaw12, float sz)
     rb_tri(sx + fx * sz, sy + fy * sz,
            sx - fx * sz * 0.6f - fy * sz * 0.6f, sy - fy * sz * 0.6f + fx * sz * 0.6f,
            sx - fx * sz * 0.6f + fy * sz * 0.6f, sy - fy * sz * 0.6f - fx * sz * 0.6f, 0xFF35E8FF);
+}
+
+/* [G1a] police on the minimap: a pursuing cop blinks red / blue, a patrol cop is a plain dark blue dot. A pursuer
+ * outside the pane gets a blinking arrow on the rim in its direction. */
+#define COP_MARKS_MAX 8
+static void draw_cops(const Proj *p, float w, float h, float S)
+{
+    TD5_RoamCopMark m[COP_MARKS_MAX];
+    const int n = td5_roam_cops_marks(m, COP_MARKS_MAX);
+    const float half = w * 0.5f - 6.0f * S, rim = (w < h ? w : h) * 0.5f - 8.0f * S;
+    const int blink = (g_td5.simulation_tick_counter / 8) & 1;
+    const uint32_t pursue_col = blink ? 0xFFE23B3B : 0xFF2F6BFF;
+    int i;
+    for (i = 0; i < n; i++) {
+        float sx, sy, dx, dy, d, ux, uy;
+        proj_pt(p, m[i].px, m[i].pz, &sx, &sy);
+        dx = sx - p->ox; dy = sy - p->oy;
+        d = sqrtf(dx * dx + dy * dy);
+        if (d <= half) {
+            rb_disc(sx, sy, 4.0f * S + 1.5f, 0xFF0A0A0A);
+            rb_disc(sx, sy, 4.0f * S, m[i].pursuing ? pursue_col : 0xFF1F3A7A);
+        } else if (m[i].pursuing) {
+            /* arrow on the rim, pointing at the cop */
+            ux = dx / d; uy = dy / d;
+            {
+                const float bx = p->ox + ux * rim, by = p->oy + uy * rim;
+                const float tx = bx + ux * 6.0f * S, ty = by + uy * 6.0f * S;
+                const float px_ = -uy * 4.5f * S, py_ = ux * 4.5f * S;
+                rb_tri(tx, ty, bx - ux * 3.0f * S + px_, by - uy * 3.0f * S + py_,
+                       bx - ux * 3.0f * S - px_, by - uy * 3.0f * S - py_, pursue_col);
+            }
+        }
+    }
 }
 
 /* ============================================================ the map overlay == */
@@ -1023,6 +1057,7 @@ void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
         draw_streets(&p, half_m * 430.0 * 1.5, half_m * 430.0 * 1.5, 0, (float)(p.k * 430.0), 1.0f * S < 1.0f ? 1.0f : S * 0.9f);
         draw_route(&p, 3.0f * S, 5.5f * S, 40.0f * S);
         draw_pins(&p, 5.0f * S, 0);
+        draw_cops(&p, w, h, S);
         /* the car, always pointing up */
         rb_tri(p.ox, p.oy - 9.0f * S, p.ox - 6.0f * S, p.oy + 7.0f * S, p.ox + 6.0f * S, p.oy + 7.0f * S, 0xFF101010);
         rb_tri(p.ox, p.oy - 7.0f * S, p.ox - 4.5f * S, p.oy + 5.0f * S, p.ox + 4.5f * S, p.oy + 5.0f * S, 0xFF35E8FF);

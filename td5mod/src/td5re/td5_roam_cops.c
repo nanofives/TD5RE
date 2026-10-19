@@ -1764,6 +1764,27 @@ int td5_roam_cops_glow(int slot)
     return RC_GLOW;
 }
 
+/* [G1a] live cops for the roam minimap: place-frame position, pursuing or patrolling. Read-only. */
+int td5_roam_cops_marks(TD5_RoamCopMark *out, int max)
+{
+    int i, n = 0;
+    int32_t ox, oz;
+    if (!out || max <= 0 || !C.on || !td5_roam_active()) return 0;
+    td5_roam_world_origin(&ox, &oz);
+    for (i = 0; i < C.pool && n < max; i++) {
+        const RcCop *c = &C.cop[i];
+        const TD5_Actor *a;
+        if (c->state == RC_PARKED || c->alpha <= 0) continue;
+        a = td5_game_get_actor(c->slot);
+        if (!a) continue;
+        out[n].px = (double)FP_TRUNC(a->world_pos.x) + (double)ox;
+        out[n].pz = (double)FP_TRUNC(a->world_pos.z) + (double)oz;
+        out[n].pursuing = c->state == RC_PURSUIT;
+        n++;
+    }
+    return n;
+}
+
 int td5_roam_cops_siren_slot(int32_t wx, int32_t wz)
 {
     int i, best = -1;

@@ -75,6 +75,10 @@ void td5_roam_cops_tick(void);
 int  td5_roam_cops_parked(int slot);         /* -1 not a cop slot, else 1 parked / 0 live */
 int  td5_roam_cops_alpha(int slot);          /* -1 not a cop slot, else 0..255 */
 int  td5_roam_cops_glow(int slot);           /* light-bar intensity for the slot, 0 = off */
+
+/* [G1a] minimap marks: every live (patrol or pursuit) cop, place-frame position. Returns the count written. */
+typedef struct { double px, pz; int pursuing; } TD5_RoamCopMark;
+int  td5_roam_cops_marks(TD5_RoamCopMark *out, int max);
 int  td5_roam_cops_siren_slot(int32_t wx, int32_t wz);   /* nearest cop with the siren on (WORLD 24.8), -1 */
 uint32_t td5_roam_cops_filter_bits(int slot, uint32_t bits);   /* BUSTED: the car is held braked */
 void td5_roam_cops_draw_hud(void);           /* HUD overlay pass: pursuit panel, bust meter, toasts */
