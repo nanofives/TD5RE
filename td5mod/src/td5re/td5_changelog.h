@@ -31,6 +31,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 18 (free roam: several police sirens)" },
+    { CL_ITEM,    "Each of the 3 nearest pursuing cops now has its own" },
+    { CL_ITEM,    "  siren: own distance, Doppler, pitch and fade, so a" },
+    { CL_ITEM,    "  heat 3 chase sounds like three cars, not one." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 18 (built geo track: multiplayer only)" },
     { CL_ITEM,    "Free roam and the city race no longer need a built" },
     { CL_ITEM,    "  geo track: a fresh install races the city from the" },

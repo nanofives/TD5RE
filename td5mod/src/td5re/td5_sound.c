@@ -1200,7 +1200,7 @@ static void siren_multi_reset(int free_buffers)
 /* Ramp every voice, apply distance/Doppler/pitch/pan, start and stop its loops. */
 static void siren_multi_mix(void)
 {
-    int active = 0;
+    int active = 0, audible = 0;
     char dbg[200];
     int dl = 0;
     if (!s_sv_inited) return;
@@ -1252,6 +1252,7 @@ static void siren_multi_mix(void)
             }
         }
         sv->vol = vol; sv->pitch = pitch; sv->dist = dist;
+        if (vol > 0) audible++;
         for (int k = 0; k < 2; k++) {
             if (sv->buf[k] < 0) continue;
             if (sv->ch[k] < 0 || !td5_plat_audio_is_playing(sv->ch[k])) {
@@ -1267,7 +1268,7 @@ static void siren_multi_mix(void)
     }
     if (active > s_sv_peak) s_sv_peak = active;
     if (active != s_sv_last_active || (active > 0 && (s_sv_frame % 120) == 0)) {
-        TD5_LOG_I(LOG_TAG, "siren voices: active=%d peak=%d%s", active, s_sv_peak, dbg);
+        TD5_LOG_I(LOG_TAG, "siren voices: active=%d audible=%d peak=%d%s", active, audible, s_sv_peak, dbg);
         s_sv_last_active = active;
     }
 }
