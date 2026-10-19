@@ -60,8 +60,11 @@
 #define RC_REPLAN      20                        /* pursuit re-plan every 0.67 s        */
 #define RC_LOS_EVERY   6
 
-enum { RC_PARKED = 0, RC_PATROL = 1, RC_PURSUIT = 2 };
-enum { RC_WHY_FAR = 1, RC_WHY_OFF, RC_WHY_STUCK, RC_WHY_UNRES, RC_WHY_LEVEL, RC_WHY_WRECK, RC_WHY_BUST, RC_WHY_NOPATH };
+enum { RC_PARKED = 0, RC_PATROL = 1, RC_PURSUIT = 2, RC_BLOCK = 3 };   /* RC_BLOCK: [G1b] a roadblock car, held */
+#define RC_BLK_MAX  2
+#define RC_BLK_CARS 3
+#define RC_BLK_CAR_W 4.4                         /* lateral cover of one car parked across the road, metres */
+enum { RC_WHY_FAR = 1, RC_WHY_OFF, RC_WHY_STUCK, RC_WHY_UNRES, RC_WHY_LEVEL, RC_WHY_WRECK, RC_WHY_BUST, RC_WHY_NOPATH, RC_WHY_BLOCK };
 
 typedef struct {
     int      slot, state;
@@ -86,7 +89,19 @@ typedef struct {
     double   d_player;
     int      sig_hold;                           /* patrol: holding at a red stop line         */
     int      turning;                            /* pursuit: the last leg leaves backwards (turn round) */
+    int      blk;                                /* [G1b] roadblock index + 1 (RC_BLOCK cars)            */
 } RcCop;
+
+/* [G1b] a roadblock: PLACE frame only (no graph index, so a rebase and a graph swap need nothing) */
+typedef struct {
+    int    on, ncar, heat;
+    int    slot[RC_BLK_CARS];
+    double cx, cz, tx, tz;                       /* centre, the player's travel tangent there            */
+    double gx, gz, gap_w;                        /* the gap's centre (gap_w 0 = closed)                  */
+    long   t0;
+    double min_d, prev_f;
+    int    have_prev, crossed, contact, was_near;
+} RcBlock;
 
 static struct {
     int     on, pool, base, loaded, model;
@@ -119,6 +134,11 @@ static struct {
     double  pl_vprev;
     /* toasts */
     char    toast[96]; uint32_t toast_col; long toast_until;
+    /* roadblocks [G1b] */
+    RcBlock blk[RC_BLK_MAX];
+    int     block_heat, block_max, block_fail_run;
+    double  block_min_m, block_max_m;
+    long    block_cd;
     TD5_RoamCopsStats st;
     long    st_regraphs;                         /* [F9b] planner graph swaps carried over */
 } C;
@@ -157,6 +177,11 @@ static void rc_read_knobs(void)
     C.r_spawn_max = td5_env_int("TD5RE_ROAM_COPS_SPAWN_MAX_M", 220, 60, 500);
     C.r_despawn   = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_M", 330, 80, 800);
     C.r_despawn_pursuit = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_PURSUIT_M", 450, 100, 2000);
+    C.block_heat  = td5_env_int("TD5RE_ROAM_COPS_BLOCK_HEAT", 3, 0, 5);
+    C.block_max   = td5_env_int("TD5RE_ROAM_COPS_BLOCKS", 2, 1, RC_BLK_MAX);
+    C.block_min_m = td5_env_int("TD5RE_ROAM_COPS_BLOCK_MIN_M", 200, 100, 500);
+    C.block_max_m = td5_env_int("TD5RE_ROAM_COPS_BLOCK_MAX_M", 400, 150, 800);
+    if (C.block_max_m < C.block_min_m + 50.0) C.block_max_m = C.block_min_m + 50.0;
     C.wb          = td5_env_int("TD5RE_ROAM_COPS_WB", 26, 10, 60) / 10.0;
     C.a_lat       = td5_env_int("TD5RE_ROAM_COPS_ALAT", 45, 10, 150) / 10.0;
     C.a_brake     = td5_env_int("TD5RE_ROAM_COPS_BRAKE", 55, 10, 150) / 10.0;
@@ -1388,6 +1413,319 @@ static void rc_road_walls(RcCop *c, TD5_Actor *a)
     }
 }
 
+/* ============================================================ roadblocks [G1b] ===== */
+
+/* a roadblock car holds its place: braked, wheels straight (a traffic-type actor, so the V2V contact is the normal one) */
+static void rc_block_drive(RcCop *c, TD5_Actor *a, double plx, double plz)
+{
+    const double v24 = (double)a->longitudinal_speed;
+    double x, z;
+    rc_place_of(a, &x, &z);
+    c->d_player = hypot(plx - x, plz - z) / RC_M;
+    if (td5_ai_actor_is_broken_down(c->slot)) {
+        if (++c->wreck_t == 1) C.st.wrecks++;
+        if (c->wreck_t > 240) rc_despawn(c, RC_WHY_WRECK);
+    }
+    a->steering_command = 0;
+    a->encounter_steering_cmd = (int16_t)floor(rc_clamp(-v24 * (255.0 / 256.0), -1024.0, 1024.0) / 4.0 + 0.5);
+    a->brake_flag = 1; a->handbrake_flag = 0;
+    a->throttle_state = 1;
+}
+
+static int rc_free_count(void)
+{
+    int i, n = 0;
+    for (i = 0; i < C.pool; i++) if (C.cop[i].state == RC_PARKED) n++;
+    return n;
+}
+
+static int rc_block_count(void)
+{
+    int i, n = 0;
+    for (i = 0; i < RC_BLK_MAX; i++) if (C.blk[i].on) n++;
+    return n;
+}
+
+/* the carriageway's lateral extent at (cx, cz) across the travel tangent (tx, tz): metres left (<0) / right (>0) of the
+ * centre while the locator stays on the drivable surface (a median ends it) */
+static int rc_road_extent(double cx, double cz, double tx, double tz, double *lmin, double *lmax)
+{
+    const double rx = tz, rz = -tx;
+    double l;
+    if (!rc_inside(cx, cz)) return 0;
+    for (l = 0.5; l <= 14.0; l += 0.5) if (!rc_inside(cx + rx * l * RC_M, cz + rz * l * RC_M)) break;
+    *lmax = l - 0.5;
+    for (l = 0.5; l <= 14.0; l += 0.5) if (!rc_inside(cx - rx * l * RC_M, cz - rz * l * RC_M)) break;
+    *lmin = -(l - 0.5);
+    return 1;
+}
+
+static int rc_side_cars(double len)
+{
+    return len >= 2.4 ? (int)ceil(len / RC_BLK_CAR_W - 0.15) : 0;
+}
+
+/* the cars of a block across [lmin, lmax]: lateral centres + a metre along the road; the gap by heat. Returns the car count */
+static int rc_block_layout(int heat, double lmin, double lmax, int ncap, double *lat, double *aoff, double *gap_l, double *gap_w)
+{
+    const double W = lmax - lmin;
+    double gw = heat >= 5 ? 0.0 : (heat >= 4 ? 3.2 : 4.2), gl;
+    double a0, a1, b0, b1;
+    int n = 0, ka, kb, j;
+    if (W < 5.5) return 0;
+    if (C.race_on && gw < 3.6) gw = 3.6;
+    if (gw > W - 2.4) gw = W - 2.4;
+    if (gw < 3.0) gw = 0.0;
+    if (gw > 0.0) gl = lmin + (0.15 + 0.7 * rc_unit(&C.rng)) * (W - gw);
+    else gl = lmax;
+    a0 = lmin; a1 = gl; b0 = gl + gw; b1 = lmax;
+    ka = rc_side_cars(a1 - a0);
+    kb = rc_side_cars(b1 - b0);
+    if (ka + kb > ncap) {            /* too few cars: the left side first, the rest is gap */
+        if (ka > ncap) ka = ncap;
+        if (kb > ncap - ka) kb = ncap - ka;
+    }
+    for (j = 0; j < ka && n < RC_BLK_CARS; j++) {
+        double c = a0 + (a1 - a0) * (j + 0.5) / ka;
+        if (a1 - a0 >= RC_BLK_CAR_W) { if (c < a0 + 2.2) c = a0 + 2.2; if (c > a1 - 2.2) c = a1 - 2.2; }
+        lat[n] = c; aoff[n] = 0.0; n++;
+    }
+    for (j = 0; j < kb && n < RC_BLK_CARS; j++) {
+        double c = b0 + (b1 - b0) * (j + 0.5) / kb;
+        if (b1 - b0 >= RC_BLK_CAR_W) { if (c < b0 + 2.2) c = b0 + 2.2; if (c > b1 - 2.2) c = b1 - 2.2; }
+        lat[n] = c; aoff[n] = 0.0; n++;
+    }
+    if (n == 1 && ncap >= 2) {       /* a narrow street: the second car parks behind the first, same side */
+        lat[1] = lat[0]; aoff[1] = -5.2; n = 2;
+    }
+    *gap_l = gl; *gap_w = gw;
+    return n;
+}
+
+/* a point `s` metres along a polyline (PLACE frame, cumulative metres in cum) and its tangent over +-4 m */
+static int rc_poly_at(const double *qx, const double *qz, const double *cum, int nq, double s, double *x, double *z, double *tx, double *tz)
+{
+    double dx, dz, l, p[2][2] = {{0.0, 0.0}, {0.0, 0.0}};
+    int q;
+    *x = *z = 0.0;
+    if (nq < 2 || s < 0.0 || s > cum[nq - 1]) return 0;
+    for (q = 0; q < 3; q++) {
+        const double ss = q == 0 ? s : (q == 1 ? (s - 4.0 < 0.0 ? 0.0 : s - 4.0) : (s + 4.0 > cum[nq - 1] ? cum[nq - 1] : s + 4.0));
+        int i = 0;
+        double t, px, pz;
+        while (i + 2 < nq && cum[i + 1] < ss) i++;
+        l = cum[i + 1] - cum[i];
+        t = l > 0.0 ? (ss - cum[i]) / l : 0.0;
+        px = qx[i] + (qx[i + 1] - qx[i]) * t; pz = qz[i] + (qz[i + 1] - qz[i]) * t;
+        if (q == 0) { *x = px; *z = pz; } else { p[q - 1][0] = px; p[q - 1][1] = pz; }
+    }
+    dx = p[1][0] - p[0][0]; dz = p[1][1] - p[0][1];
+    l = sqrt(dx * dx + dz * dz);
+    if (l <= 0.0) return 0;
+    *tx = dx / l; *tz = dz / l;
+    return 1;
+}
+
+/* try to set a roadblock up ahead of the player on the predicted street path; 1 = placed */
+static int rc_block_place(const TD5_Actor *pl, double plx, double plz, double fx, double fz)
+{
+    static const double k_rot[3] = { 0.0, 0.45, -0.45 };
+    double hx = fx, hz = fz;
+    const double vpl = rc_speed_ms(pl);
+    int k, pass, bi;
+    if (vpl > 2.0) {
+        const double vx = (double)pl->linear_velocity_x, vz = (double)pl->linear_velocity_z, l = sqrt(vx * vx + vz * vz);
+        if (l > 0.0) { hx = vx / l; hz = vz / l; }
+    }
+    for (bi = 0; bi < RC_BLK_MAX && C.blk[bi].on; bi++) {}
+    if (bi >= RC_BLK_MAX) return 0;
+    for (k = 0; k < 3; k++) {
+        const double cr = cos(k_rot[k]), sr = sin(k_rot[k]);
+        const double dx = hx * cr - hz * sr, dz = hx * sr + hz * cr;
+        double gx = plx + dx * 450.0 * RC_M, gz = plz + dz * 450.0 * RC_M, sx = plx + hx * 6.0 * RC_M, sz = plz + hz * 6.0 * RC_M;
+        double *qx = NULL, *qz = NULL, len = 0.0, *cum;
+        int nq = 0, i;
+        {   /* the goal on a street */
+            double ax, az, dm;
+            uint64_t key;
+            if (td5_roam_route_snap_xz(gx, gz, 150.0, &ax, &az, &key, &dm)) { gx = ax; gz = az; }
+        }
+        if (!rc_inside(sx, sz)) { sx = plx; sz = plz; }
+        if (!td5_roam_route_plan_path(sx, sz, hx, hz, gx, gz, 60.0, rc_use_mask(), 0, &qx, &qz, &nq, &len) || nq < 2) { free(qx); free(qz); continue; }
+        cum = (double *)malloc((size_t)nq * sizeof(double));
+        if (!cum) { free(qx); free(qz); return 0; }
+        cum[0] = 0.0;
+        for (i = 1; i < nq; i++) cum[i] = cum[i - 1] + hypot(qx[i] - qx[i - 1], qz[i] - qz[i - 1]) / RC_M;
+        if (cum[nq - 1] < C.block_min_m - 20.0) { free(cum); free(qx); free(qz); continue; }
+        for (pass = 0; pass < 2; pass++) {
+            const double s_lo = C.block_min_m, s_hi = C.block_max_m < cum[nq - 1] - 10.0 ? C.block_max_m : cum[nq - 1] - 10.0;
+            const int ncand = 14;
+            const double s_start = s_lo + rc_unit(&C.rng) * (s_hi > s_lo ? s_hi - s_lo : 0.0);
+            int ic;
+            for (ic = 0; ic < ncand && s_hi >= s_lo; ic++) {
+                double s = s_start + 20.0 * ic, x, z, tx, tz, lmin, lmax, lat[RC_BLK_CARS], aoff[RC_BLK_CARS], gl, gw, along, dm;
+                double px[RC_BLK_CARS], pz[RC_BLK_CARS], dxc[RC_BLK_CARS], dzc[RC_BLK_CARS];
+                int e, n, j, ok = 1, nfree;
+                TD5_RouteGEdge E;
+                if (s > s_hi) s = s_lo + (s - s_hi);
+                if (s > s_hi) continue;
+                if (!rc_poly_at(qx, qz, cum, nq, s, &x, &z, &tx, &tz)) continue;
+                {
+                    const double de = hypot(x - plx, z - plz) / RC_M;
+                    if (de < C.block_min_m * 0.7 || de > C.block_max_m + 20.0) continue;
+                }
+                if (pass == 0 && rc_los(plx, plz, x, z, 600.0)) continue;          /* out of sight first */
+                if (!td5_roam_route_graph_snap_edge(x, z, 12.0, &e, &along, &dm) || !td5_roam_route_graph_edge_view(e, &E)) continue;
+                if ((E.flags & 0x03) || E.klass <= 2 || along < 16.0 * RC_M || along > E.plen - 16.0 * RC_M) continue;
+                for (j = 0; j < RC_BLK_MAX; j++)
+                    if (C.blk[j].on && hypot(x - C.blk[j].cx, z - C.blk[j].cz) < 120.0 * RC_M) ok = 0;
+                if (!ok) continue;
+                if (!rc_road_extent(x, z, tx, tz, &lmin, &lmax)) continue;
+                nfree = rc_free_count();
+                n = rc_block_layout(C.heat, lmin, lmax, nfree < RC_BLK_CARS ? nfree : (C.heat >= 4 ? 3 : 2), lat, aoff, &gl, &gw);
+                if (n < 2 || n > nfree) continue;
+                {
+                    const double rx = tz, rz = -tx;
+                    for (j = 0; j < n && ok; j++) {
+                        /* the car's long axis across the road, a little off square, alternating */
+                        const double jit = (j & 1 ? 1.0 : -1.0) * (0.12 + 0.1 * rc_unit(&C.rng));
+                        const double sgn = (j & 1) ? 1.0 : -1.0;
+                        const double ux = rx * sgn * cos(jit) + tx * sin(jit), uz = rz * sgn * cos(jit) + tz * sin(jit);
+                        px[j] = x + rx * lat[j] * RC_M + tx * aoff[j] * RC_M;
+                        pz[j] = z + rz * lat[j] * RC_M + tz * aoff[j] * RC_M;
+                        dxc[j] = ux; dzc[j] = uz;
+                        if (!rc_footprint_ok(px[j], pz[j], ux, uz) || !rc_clear_of_actors(px[j], pz[j], 3.0, -1)) ok = 0;
+                    }
+                }
+                if (!ok) continue;
+                {   /* place it */
+                    RcBlock *b = &C.blk[bi];
+                    const double rx = tz, rz = -tx;
+                    int placed = 0;
+                    memset(b, 0, sizeof *b);
+                    for (j = 0; j < n; j++) {
+                        RcCop *c = rc_free_cop();
+                        if (!c || !rc_spawn_at(c, px[j], pz[j], dxc[j], dzc[j], RC_BLOCK, 1)) continue;
+                        c->blk = bi + 1;
+                        b->slot[placed++] = c->slot;
+                    }
+                    if (placed < 2) {     /* a slot vanished under us: take it back */
+                        for (j = 0; j < placed; j++) { RcCop *c = rc_cop_of(b->slot[j]); if (c) rc_despawn(c, RC_WHY_BLOCK); }
+                        memset(b, 0, sizeof *b);
+                        continue;
+                    }
+                    b->on = 1; b->ncar = placed; b->heat = C.heat;
+                    b->cx = x; b->cz = z; b->tx = tx; b->tz = tz;
+                    b->gap_w = gw;
+                    b->gx = x + rx * (gl + gw * 0.5) * RC_M; b->gz = z + rz * (gl + gw * 0.5) * RC_M;
+                    b->t0 = rc_tick();
+                    b->min_d = hypot(x - plx, z - plz) / RC_M;
+                    C.st.blocks_placed++; C.st.block_cars += placed;
+                    TD5_LOG_I(LOG_TAG, "ROAM_COPS: ROADBLOCK %ld placed (heat %d): %d cars across %.1f m of carriageway (%.1f..%.1f) at place "
+                              "(%.0f,%.0f), %.0f m from the player, %.0f m along the predicted path (try %d, %s), gap %.1f m",
+                              C.st.blocks_placed, C.heat, placed, lmax - lmin, lmin, lmax, x, z, b->min_d, s, k, pass ? "in sight" : "out of sight", gw);
+                    rc_toast("ROADBLOCK AHEAD", 0xFFFFA040, 2.5);
+                    free(cum); free(qx); free(qz);
+                    return 1;
+                }
+            }
+        }
+        free(cum); free(qx); free(qz);
+    }
+    return 0;
+}
+
+static void rc_block_end(RcBlock *b, const char *why)
+{
+    int i;
+    for (i = 0; i < b->ncar; i++) {
+        RcCop *c = rc_cop_of(b->slot[i]);
+        if (c && c->state == RC_BLOCK && c->blk) rc_despawn(c, RC_WHY_BLOCK);
+    }
+    TD5_LOG_I(LOG_TAG, "ROAM_COPS: roadblock at place (%.0f,%.0f) removed (%s) after %.1f s, closest %.0f m, %s", b->cx, b->cz, why,
+              (rc_tick() - b->t0) / RC_HZ, b->min_d, b->crossed ? (b->contact ? "crossed through the cars" : "crossed through the gap") : "not crossed");
+    b->on = 0;
+    C.st.blocks_despawned++;
+}
+
+/* per sim tick after the pursuit rules: place, track and remove the roadblocks */
+static void rc_blocks_tick(const TD5_Actor *pl, double plx, double plz, double fx, double fz, int in_race)
+{
+    const long tick = rc_tick();
+    int i, active = 0;
+    if (C.block_heat <= 0) return;
+    for (i = 0; i < RC_BLK_MAX; i++) {
+        RcBlock *b = &C.blk[i];
+        double d, f, l, rx, rz;
+        int alive = 0, j;
+        if (!b->on) continue;
+        for (j = 0; j < b->ncar; j++) { const RcCop *c = rc_cop_of(b->slot[j]); if (c && c->state == RC_BLOCK && c->fade >= 0) alive = 1; }
+        if (!alive) { b->on = 0; C.st.blocks_despawned++; continue; }
+        if (!C.pursuit) { rc_block_end(b, "pursuit over"); continue; }
+        d = hypot(plx - b->cx, plz - b->cz) / RC_M;
+        if (d < b->min_d) b->min_d = d;
+        f = ((plx - b->cx) * b->tx + (plz - b->cz) * b->tz) / RC_M;
+        rx = b->tz; rz = -b->tx;
+        l = ((plx - b->cx) * rx + (plz - b->cz) * rz) / RC_M;
+        if (d < 40.0) b->was_near = 1;
+        for (j = 0; j < b->ncar; j++) {       /* touched a car */
+            const RcCop *c = rc_cop_of(b->slot[j]);
+            if (c && c->state == RC_BLOCK && c->d_player < 3.4) {
+                if (!b->contact) TD5_LOG_I(LOG_TAG, "ROAM_COPS: player touches a roadblock car (slot %d) at %.0f km/h", c->slot, rc_speed_ms(pl) * 3.6);
+                b->contact = 1; C.st.block_hits++;
+                break;
+            }
+        }
+        if (b->have_prev && b->prev_f < 0.0 && f >= 0.0 && fabs(l) < 20.0 && !b->crossed) {
+            b->crossed = 1;
+            if (b->contact) C.st.blocks_rammed++; else C.st.blocks_gap++;
+            TD5_LOG_I(LOG_TAG, "ROAM_COPS: player crossed the roadblock line at lateral %.1f m, %.0f km/h: %s", l, rc_speed_ms(pl) * 3.6,
+                      b->contact ? "RAMMED THROUGH" : "through the gap");
+        }
+        b->prev_f = f; b->have_prev = 1;
+        if (b->crossed && f > 35.0) { rc_block_end(b, "passed"); continue; }
+        if (!b->crossed && C.busted_t <= 0 && d > b->min_d + 80.0 && !b->was_near && f < 0.0) {
+            C.st.blocks_detoured++; rc_block_end(b, "player turned away"); continue;
+        }
+        if (d > 560.0) { rc_block_end(b, "out of range"); continue; }
+        active++;
+    }
+    if (!C.pursuit || C.busted_t > 0 || C.heat < C.block_heat || (in_race && !C.race_on)) { C.st.blocks_active = active; return; }
+    if (active < C.block_max && tick >= C.block_cd) {
+        if (rc_free_count() < 2) {
+            /* the pool is out: the farthest patrols give up their cars (they fade out, the next ticks retry) */
+            int k, need = 2 - rc_free_count();
+            for (k = 0; k < need; k++) {
+                RcCop *farc = NULL;
+                int q;
+                for (q = 0; q < C.pool; q++) {
+                    RcCop *c = &C.cop[q];
+                    if (c->state != RC_PATROL || c->fade < 0 || c->d_player < 60.0) continue;
+                    if (!farc || c->d_player > farc->d_player) farc = c;
+                }
+                if (farc) rc_despawn(farc, RC_WHY_LEVEL);
+            }
+            C.block_cd = tick + 15;
+        } else if (rc_block_place(pl, plx, plz, fx, fz)) {
+            C.block_cd = tick + 20 * 30;
+            C.block_fail_run = 0;
+            active++;
+        } else {
+            C.st.block_fails++;
+            C.block_fail_run++;
+            C.block_cd = tick + 45;
+        }
+    }
+    C.st.blocks_active = active;
+}
+
+/* pool cars a pending roadblock holds back from the reinforcements (none once placing keeps failing) */
+static int rc_block_reserve(void)
+{
+    if (C.block_heat <= 0 || C.heat < C.block_heat || C.block_fail_run >= 4 || rc_block_count() >= C.block_max) return 0;
+    return 2;
+}
+
 /* ============================================================ the player's offences */
 
 /* 1 when the player crossed a stop line on red this tick (the lamp its arm obeys) */
@@ -1564,12 +1902,13 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
 {
     const long tick = rc_tick();
     const double vpl = rc_speed_ms(pl);
-    double dmin = 1e300, fx, fz;
+    double dmin = 1e300, bdmin = 1e300, fx, fz;
     int i, seen = 0, npur = 0, wanted;
     rc_heading(pl, &fx, &fz);
     C.st.pursuit_ticks++;
     for (i = 0; i < C.pool; i++) {
         const RcCop *c = &C.cop[i];
+        if (c->state == RC_BLOCK && c->fade >= 0 && c->alpha >= 255 && c->d_player < bdmin) bdmin = c->d_player;   /* [G1b] */
         if (c->state != RC_PURSUIT || c->fade < 0) continue;
         npur++;
         if (c->d_player < dmin) dmin = c->d_player;
@@ -1603,13 +1942,14 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
 #endif
     /* bust: the player (nearly) stopped with a pursuer within 10 m. A boxing cop nudges the car, so "stopped" is
      * under 10 km/h, and the meter drains at the rate it fills */
-    if (vpl < 10.0 / 3.6 && dmin < 10.0) C.bust_meter += 1.0 / (C.bust_s * RC_HZ);
+    if (vpl < 10.0 / 3.6 && (dmin < 10.0 || bdmin < 10.0)) C.bust_meter += 1.0 / (C.bust_s * RC_HZ);
     else C.bust_meter -= 1.0 / (C.bust_s * RC_HZ);
     if (C.bust_meter < 0.0) C.bust_meter = 0.0;
     if (C.bust_meter >= 1.0) {
         C.bust_meter = 1.0;
         C.busted_t = 90;
         C.st.busts++;
+        if (bdmin < 10.0 && bdmin <= dmin) C.st.blocks_bust++;      /* [G1b] busted at a roadblock */
         C.fine = C.fine_base * C.heat + 50 * C.offences;
         if (!C.race_on) C.st.fines += C.fine;
         rc_toast("BUSTED", 0xFFFF3B3B, 3.0);
@@ -1631,7 +1971,7 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
                 TD5_LOG_I(LOG_TAG, "ROAM_COPS: slot %d joins the pursuit (%.0f m away)", c->slot, c->d_player);
             }
         }
-    if (npur < wanted && tick >= C.spawn_cd && rc_free_cop()) {
+    if (npur < wanted && tick >= C.spawn_cd && rc_free_count() > rc_block_reserve()) {
         C.spawn_cd = tick + 90;
         if (rc_try_spawn(plx, plz, fx, fz, 1, RC_PURSUIT) || rc_try_spawn(plx, plz, fx, fz, 0, RC_PURSUIT)) {
             C.st.reinforcements++;
@@ -1693,9 +2033,10 @@ void td5_roam_cops_tick(void)
         if (c->state == RC_PARKED) continue;
         a = td5_game_get_actor(c->slot);
         if (!a) { rc_park(c); continue; }
-        rc_drive(c, a, pl, plx, plz);
+        if (c->state == RC_BLOCK) rc_block_drive(c, a, plx, plz);       /* [G1b] */
+        else rc_drive(c, a, pl, plx, plz);
         if (c->state != RC_PARKED) { rc_road_walls(c, a); rc_barriers(c, a); }
-        if (c->d_player > (c->state == RC_PURSUIT ? C.r_despawn_pursuit : C.r_despawn)) rc_despawn(c, RC_WHY_FAR);
+        if (c->state != RC_BLOCK && c->d_player > (c->state == RC_PURSUIT ? C.r_despawn_pursuit : C.r_despawn)) rc_despawn(c, RC_WHY_FAR);
         if (per == 0 && !C.pursuit && c->fade >= 0 && c->state == RC_PATROL && !c->hold) rc_despawn(c, RC_WHY_LEVEL);
         /* a ram: the player into a cop, closing faster than 2.5 m/s */
         if (c->d_player < 4.6 && c->alpha >= 255) {
@@ -1744,6 +2085,8 @@ void td5_roam_cops_tick(void)
         rc_pursuit_tick(pl, plx, plz);
     }
 
+    rc_blocks_tick(pl, plx, plz, fx, fz, in_race);           /* [G1b] */
+
     /* spawn patrols round the player: one try per tick */
     {
         const int npat = rc_count(RC_PATROL);
@@ -1760,7 +2103,7 @@ void td5_roam_cops_tick(void)
 int td5_roam_cops_glow(int slot)
 {
     const RcCop *c = rc_cop_of(slot);
-    if (!c || c->state != RC_PURSUIT || c->alpha <= 0) return 0;
+    if (!c || (c->state != RC_PURSUIT && c->state != RC_BLOCK) || c->alpha <= 0) return 0;   /* [G1b] block cars: lights on, no siren */
     return RC_GLOW;
 }
 
@@ -1920,6 +2263,24 @@ void td5_roam_cops_dev_force(int patrol_per_anchor, int vmax_kmh)
 }
 
 int td5_roam_cops_dev_busted(void) { return C.busted_t > 0; }
+
+/* [G1b] */
+void td5_roam_cops_dev_set_heat(int h)
+{
+    if (!C.pursuit || h < 1) return;
+    if (h > 5) h = 5;
+    if (C.offences < h) C.offences = h;
+    if (C.heat < h) { C.heat = h; if (C.heat > C.st.max_heat) C.st.max_heat = C.heat; }
+}
+
+int td5_roam_cops_dev_block(int i, double *cx, double *cz, double *tx, double *tz, double *gx, double *gz, double *gap_w, int *ncar)
+{
+    const RcBlock *b;
+    if (i < 0 || i >= RC_BLK_MAX || !C.blk[i].on) return 0;
+    b = &C.blk[i];
+    *cx = b->cx; *cz = b->cz; *tx = b->tx; *tz = b->tz; *gx = b->gx; *gz = b->gz; *gap_w = b->gap_w; *ncar = b->ncar;
+    return 1;
+}
 
 int td5_roam_cops_dev_pursuer_behind(double min_m, double max_m)
 {
