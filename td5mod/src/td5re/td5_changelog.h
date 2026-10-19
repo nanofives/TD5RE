@@ -31,6 +31,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 19 (free roam: pavement follows the road)" },
+    { CL_ITEM,    "Free roam: in a road cut the pavement beside the road" },
+    { CL_ITEM,    "  now stands at the kerb height above the road and no" },
+    { CL_ITEM,    "  longer rises over it. Footpaths, lawns, trees and" },
+    { CL_ITEM,    "  buildings sit on the lowered ground too." },
     { CL_DATE,    "October 19 (free roam: no grass through the road)" },
     { CL_ITEM,    "Free roam: grass no longer flickers through the road" },
     { CL_ITEM,    "  in stripes or covers it in cuts and underpasses." },

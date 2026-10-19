@@ -215,8 +215,8 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                 nback, gap0, worst_gap / PC_CM);
         fprintf(o, "SLABS (F4b pavement quads): %ld; outer edge above the drawn ground beyond nominal: worst %.1f cm; cross-fall outer - kerb: "
                    "worst up %.1f cm, worst down %.1f cm\n", nslab, worst_above / PC_CM, worst_rise / PC_CM, worst_fall / PC_CM);
-        fprintf(o, "FLAT faces (slab / footpath / lawn, normal up): %ld; lowest vertex vs ground %.1f cm; faces with a vertex under the ground %ld\n",
-                nflat, lo_min / PC_CM, sink0);
+        fprintf(o, "FLAT faces (slab / footpath / lawn, normal up): %ld; lowest vertex vs ground %.1f cm; faces with a vertex under the ground %ld, within 10 cm above it (z-fight) %ld\n",
+                nflat, lo_min / PC_CM, sink0, touch);
         fprintf(o, "threshold_cm  back_gap_above  slab_outer_above_nominal  slab_rise_up  slab_fall_down\n");
         for (h = 0; h < 6; h++) fprintf(o, "%5.0f  %10ld  %10ld  %10ld  %10ld\n", k_thr_cm[h], hgap[h], hab[h], hrise[h], hfall[h]);
         fprintf(o, "\nworst rows: cls(0 slab above nominal, 1 back gap, 2 cross-fall, 3 sunk, 4 within 10 cm of the ground) value_cm aux_cm tile place_x place_z y lat lon\n");
