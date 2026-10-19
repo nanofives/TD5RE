@@ -2023,7 +2023,7 @@ static int geo_commit_and_register(void)
 static int geo_roam_spawn(TD5_RoamSpawn *out)
 {
     /* the lookup parses PLACE.JSON + ROAMGRID.JSON, so it is memoised on the pin (asked every frame) */
-    static struct { int valid; double lat, lon; int ok; TD5_RoamSpawn sp; } memo;
+    static struct { int valid; double lat, lon; int ok; int waiting; TD5_RoamSpawn sp; } memo;
     s_roam_pending = 0;
     if (s_n_pts < 1) return 0;
     if (!memo.valid || memo.lat != s_pts[0].lat || memo.lon != s_pts[0].lon) {
@@ -2033,7 +2033,17 @@ static int geo_roam_spawn(TD5_RoamSpawn *out)
         memset(&memo.sp, 0, sizeof memo.sp);
         r = td5_roam_place_for_latlon_try(s_pts[0].lat, s_pts[0].lon, memo.sp.place,
                                           sizeof memo.sp.place, &memo.sp.spawn_px, &memo.sp.spawn_pz);
-        if (r < 0) { s_roam_pending = 1; memo.valid = 0; return 0; }
+        if (r < 0) {
+#ifndef TD5RE_RELEASE
+            if (!memo.waiting) TD5_LOG_I(LOG_TAG, "GEO GENERATOR: START check waits for the city street layer");
+#endif
+            memo.waiting = 1;
+            s_roam_pending = 1; memo.valid = 0; return 0;
+        }
+#ifndef TD5RE_RELEASE
+        if (memo.waiting) TD5_LOG_I(LOG_TAG, "GEO GENERATOR: START check answered after the wait: %s", r ? "in the city" : "outside");
+#endif
+        memo.waiting = 0;
         memo.ok = r;
         memo.sp.spawn_yaw = -1;           /* along the nearest street */
         memo.sp.car_index = 0;            /* the car-select screen fills it in */
