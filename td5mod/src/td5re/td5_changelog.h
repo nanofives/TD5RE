@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 18 (roam: police on the minimap)" },
+    { CL_ITEM,    "Free roam minimap: each police car shows as a dot." },
+    { CL_ITEM,    "  A pursuing car blinks red and blue; a patrol car is" },
+    { CL_ITEM,    "  dark blue. A pursuer off the map edge shows an arrow" },
+    { CL_ITEM,    "  on the rim, within 600 m of you." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 18 (built geo track: multiplayer only)" },
     { CL_ITEM,    "Free roam and the city race no longer need a built" },
     { CL_ITEM,    "  geo track: a fresh install races the city from the" },
