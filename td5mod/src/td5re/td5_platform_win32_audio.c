@@ -584,6 +584,46 @@ void td5_plat_audio_free(int buffer_index)
     }
 }
 
+static int audio_resolve_channel(TD5_AudioChannel h);
+
+int td5_plat_audio_clone_buffer(int buffer_index)
+{
+    LPDIRECTSOUNDBUFFER dup = NULL;
+    int idx = -1;
+    if (!s_dsound || buffer_index < 0 || buffer_index >= s_audio_buf_count) return -1;
+    if (!s_ds_buffers[buffer_index]) return -1;
+    for (int scan = 0; scan < s_audio_buf_count; scan++) {
+        if (!s_ds_buffers[scan]) { idx = scan; break; }
+    }
+    if (idx < 0 && s_audio_buf_count >= MAX_AUDIO_BUFFERS) return -1;
+    if (FAILED(IDirectSound8_DuplicateSoundBuffer(s_dsound, s_ds_buffers[buffer_index], &dup)) || !dup)
+        return -1;
+    if (idx < 0) idx = s_audio_buf_count++;
+    s_ds_buffers[idx] = dup;
+    s_ds_buffer_rates[idx] = s_ds_buffer_rates[buffer_index];
+    return idx;
+}
+
+void td5_plat_audio_seek_permille(TD5_AudioChannel ch, int permille)
+{
+    DSBCAPS caps;
+    WAVEFORMATEX wfx;
+    DWORD pos, align;
+    int idx = audio_resolve_channel(ch);
+    if (idx < 0) return;
+    ZeroMemory(&caps, sizeof(caps));
+    caps.dwSize = sizeof(caps);
+    ZeroMemory(&wfx, sizeof(wfx));
+    if (FAILED(IDirectSoundBuffer_GetCaps(s_ds_channels[idx], &caps)) || caps.dwBufferBytes == 0) return;
+    if (FAILED(IDirectSoundBuffer_GetFormat(s_ds_channels[idx], &wfx, sizeof(wfx), NULL))) return;
+    if (permille < 0) permille = 0;
+    if (permille > 999) permille = 999;
+    align = wfx.nBlockAlign ? wfx.nBlockAlign : 1;
+    pos = (DWORD)(((unsigned long long)caps.dwBufferBytes * (unsigned)permille) / 1000u);
+    pos -= pos % align;
+    IDirectSoundBuffer_SetCurrentPosition(s_ds_channels[idx], pos);
+}
+
 /* Stop + release the voice at channel index `i` and update the live count.
  * The generation is NOT bumped here — it is bumped on the next allocation of
  * this index, which is what invalidates any stale handle still pointing at it. */
