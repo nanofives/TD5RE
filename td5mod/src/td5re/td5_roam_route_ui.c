@@ -466,6 +466,7 @@ static void draw_cops(const Proj *p, float w, float h, float S)
     const int n = td5_roam_cops_marks(m, COP_MARKS_MAX);
     const float half = w * 0.5f - 6.0f * S, rim = (w < h ? w : h) * 0.5f - 8.0f * S;
     const int blink = (g_td5.simulation_tick_counter / 8) & 1;
+    const double arrow_units = (double)td5_env_int("TD5RE_ROAM_COPS_ARROW_M", 600, 50, 5000) * 430.0;   /* the map's place units per metre */
     const uint32_t pursue_col = blink ? 0xFFE23B3B : 0xFF2F6BFF;
     int i;
     for (i = 0; i < n; i++) {
@@ -476,8 +477,8 @@ static void draw_cops(const Proj *p, float w, float h, float S)
         if (d <= half) {
             rb_disc(sx, sy, 4.0f * S + 1.5f, 0xFF0A0A0A);
             rb_disc(sx, sy, 4.0f * S, m[i].pursuing ? pursue_col : 0xFF1F3A7A);
-        } else if (m[i].pursuing) {
-            /* arrow on the rim, pointing at the cop */
+        } else if (m[i].pursuing && hypot(m[i].px - p->cx, m[i].pz - p->cz) <= arrow_units) {
+            /* arrow on the rim, pointing at the cop (only within TD5RE_ROAM_COPS_ARROW_M of the car) */
             ux = dx / d; uy = dy / d;
             {
                 const float bx = p->ox + ux * rim, by = p->oy + uy * rim;
