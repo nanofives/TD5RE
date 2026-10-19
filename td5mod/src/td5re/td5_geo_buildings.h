@@ -380,4 +380,20 @@ double td5_geob_storey_units(void);
  * metre value without re-reading PLACE.JSON. 0 when no place is loaded. */
 double td5_geob_units_per_m(void);
 
+/* [roam F4a] RE-ENTRANT RECORD PARSERS, for free roam's per-tile reader
+ * (td5_roam_scenery.c). `rec` is one cJSON object of BUILDINGS.JSON
+ * `buildings[]` / AREAS.JSON `areas[]`; the ring goes to rx/rz (cap
+ * TD5_GEOB_RING_MAX, OPEN, CCW) and the record's `first` is 0. The SAME field
+ * rules as the strip loader (it calls the same code), no shared state touched.
+ * `tag_lm` = td5_env_flag_on("TD5RE_GEO_LM_TAGS"), `wide` = ("TD5RE_GEO_AREA_TAGS"),
+ * storey_m from the file (td5_geob_storey_m_of on the document root), upm the
+ * place's units per metre. *id_out = the OSM id (or idx). Returns the ring size,
+ * 0 when the record is rejected. */
+int    td5_geob_parse_building(const void *rec, int idx, int tag_lm, double storey_m,
+                               double upm, TD5_GeoBuilding *b, double *rx, double *rz,
+                               double *id_out);
+int    td5_geob_parse_area(const void *rec, int idx, int wide, TD5_GeoArea *a,
+                           double *rx, double *rz, double *id_out);
+double td5_geob_storey_m_of(const void *root);
+
 #endif /* TD5_GEO_BUILDINGS_H */

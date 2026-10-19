@@ -34,8 +34,6 @@
  * KNOBS (all default ON / sane, =0 restores master exactly):
  *   TD5RE_GEO_FORK_BLOCKLOOP        master switch for the generator
  *   TD5RE_GEO_BLOCKLOOP_MAX         most loops on a route (default 6)
- *   TD5RE_GEO_BLOCKLOOP_ONLY        "<span>[,<span>...]": only loops whose departure mouth is
- *                                    within 6 spans of one of these (harness / hand-picked)
  *   TD5RE_GEO_BLOCKLOOP_RMIN_M      corner radius wanted, metres (default 22: measured on the AI, 10 m and 18 m hit walls)
  *   TD5RE_GEO_BLOCKLOOP_RFLOOR_M    tightest corner a loop may keep, metres (default 7)
  *   TD5RE_GEO_BLOCKLOOP_FLARE       extra width per side at the corridor's two ends, world units (default 0)
@@ -51,9 +49,8 @@
  *   TD5RE_GEO_FORK_DIAG=1           why a candidate was refused
  *   [1019 V] LEFT-hand loops: TD5RE_GEO_BLOCKLOOP_LEFT (default 1; 0 = master exactly) lets the finder take the network's
  *   LEFT arms. A loop is built on ONE side (s_sd: -1 right, +1 left): the slip lane runs flush with that edge, the pavement
- *   on the inner edge is on the side facing the road, TG_Fork.side and the SLNK side word carry it. ONLY accepts "L620" / "R620"
- *   as well as "620". The one-way flow of the path is logged per candidate; TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a left
- *   loop that runs against a one-way street (default off: right loops ignore the flow too).
+ *   on the inner edge is on the side facing the road, TG_Fork.side and the SLNK side word carry it. The one-way flow of the path is logged per candidate (a left loop may
+ *   run against a one-way street, like the right ones).
  *
  *   [1029 X] TD5RE_GEO_LOOP_SHARED_MOUTH (default 1; 0 = round 1028): a left and a right loop may open on the SAME main
  *   spans (the two arms of one cross street); the engine keeps two side-link entries per span, the AI decides the
@@ -585,24 +582,6 @@ static int bl_plan_cmp(const void *pa, const void *pb)
     return a->F - b->F;
 }
 
-static int bl_only_ok(int si, int left)
-{
-    const char *e = getenv("TD5RE_GEO_BLOCKLOOP_ONLY");
-    int side = 0;                                   /* [1019 V] "L620" = a LEFT loop only, "R620" = a right one only, "620" = either */
-    if (!e || !e[0]) return 1;
-    while (*e) {
-        if (*e == 'L' || *e == 'l') { side = 1; e++; continue; }
-        if (*e == 'R' || *e == 'r') { side = -1; e++; continue; }
-        if (*e >= '0' && *e <= '9') {
-            const int v = atoi(e);
-            if (si >= v - 6 && si <= v + 6 && (side == 0 || (side > 0) == (left != 0))) return 1;
-            while (*e >= '0' && *e <= '9') e++;
-            side = 0;
-        } else e++;
-    }
-    return 0;
-}
-
 /* Douglas-Peucker: drop the vertices that lie within `tol` of the chord between the kept ones. The
  * real grid has dual carriageways and kerb nodes a few metres apart at every junction; their
  * hops are not corners a car drives. First and last points are kept. In place; returns the count. */
@@ -1028,7 +1007,6 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             if (B->si - A->si < 10 || B->si - A->si > 220) continue;
             if ((A->left != 0) != (B->left != 0)) continue;       /* [1019 V] both arms on the same side of the road */
             s_sd = A->left ? 1 : -1;
-            if (!bl_only_ok(A->si, A->left)) continue;
             snprintf(what, sizeof what, "arms %d/%d", A->edge, B->edge);
             ra = td5_geo_roads_get(A->road); rb = td5_geo_roads_get(B->road);
             if (!ra || !rb) continue;
@@ -1038,9 +1016,8 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
             if (np < 2) { bl_note(what, A->si, B->si, s_sd < 0 ? "no path over the real grid that stays right of the road" : "no path over the real grid that stays left of the road"); continue; }
             {
                 /* [1019 V] the one-way flow along the path (map data): edges WITH / AGAINST the direction of travel round the loop.
-                 * Logged on every candidate. TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY=1 refuses a LEFT loop that runs against a one-way
-                 * street (default 0: the round-1018 right loops ignore the flow too, and in La Plata's alternating one-way grid every
-                 * street on the left of this route runs the other way -- the check removes every left loop there). */
+                 * Logged on every candidate, never a refusal: in La Plata's alternating one-way grid every street on the left
+                 * of this route runs the other way. */
                 int q3, against = 0, with = 0;
                 for (q3 = 0; q3 + 1 < np; q3++) {
                     int k3;
@@ -1051,12 +1028,6 @@ int tg_bl_build(const TG_NodeList *nl, int ring)
                         }
                 }
                 s_ow_against = against; s_ow_with = with;
-                if (s_sd > 0 && against > 0 && td5_env_flag_off("TD5RE_GEO_BLOCKLOOP_LEFT_ONEWAY")) {
-                    char w[96];
-                    snprintf(w, sizeof w, "the path runs against a one-way street (%d edge(s) against, %d with)", against, with);
-                    bl_note(what, A->si, B->si, w);
-                    continue;
-                }
             }
             for (q = A->si; q < B->si && q + 1 < nl->count; q++) {
                 const double dx = nl->v[q + 1].x - nl->v[q].x, dz = nl->v[q + 1].z - nl->v[q].z;

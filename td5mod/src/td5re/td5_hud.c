@@ -53,6 +53,8 @@
 #include "td5_geo_attrs.h"  /* [1011 C3] route-first/spatial-fallback resolver */
 #include "td5_geo_roads.h"  /* [1018 L] the street under a car on a block-loop corridor */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM: speedo-only HUD, relabelled pause row */
+#include "td5_roam_route_ui.h" /* GEO FREE ROAM F5-A: roam minimap (street map + route) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -2393,7 +2395,7 @@ void td5_hud_draw_pause_action_confirm(void)
     const char *question = "";
     switch (action) {
         case 1: question = "RESTART RACE?";  break;
-        case 2: question = "QUIT TO MENU?";  break;
+        case 2: question = td5_roam_active() ? "LEAVE FREE ROAM?" : "QUIT TO MENU?";  break;   /* [GEO FREE ROAM F2-A] */
         case 3: question = "EXIT GAME?";     break;
         case 4: question = "BACK TO LOBBY?"; break;
         default: break;
@@ -3065,6 +3067,13 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
         if (g_track_is_circuit != 0 && g_game_type != 3) {
             flags |= TD5_HUD_CIRCUIT_LAPS;
         }
+
+        /* [GEO FREE ROAM F2-A] roam shows the speedometer only: no position, lap timers /
+         * counters, total timer, metric digits (odometer / checkpoint timer read the span)
+         * or U-turn warning (reads the span and the route table). The minimap is gated
+         * in td5_hud_render_minimap, the street label in td5_hud_draw_street_lines. */
+        if (td5_roam_active())
+            flags = TD5_HUD_SPEEDOMETER | TD5_HUD_RESERVED_5 | TD5_HUD_RESERVED_3;
 
         /* [PORT: N-way] every pane shows the same HUD element set. */
         for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
@@ -3816,6 +3825,7 @@ void td5_hud_draw_street_lines(void)
 {
     int views = s_view_count;
     if (g_replay_mode) return;
+    if (td5_roam_active()) return;   /* roam: the street is not a route span */
     if (td5_geo_route_count() < 2) return;
     if (views < 1) views = 1;
     if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
@@ -6582,7 +6592,8 @@ void td5_hud_render_overlays(float dt)
      * [REBASE MERGE: master's circuit-minimap knob + branch's per-view loop.] */
     if (g_track_type_mode == 0 || g_td5.ini.circuit_minimap) {
         for (int v = 0; v < s_view_count; v++) {
-            if (!(*s_hud_flags[v] & TD5_HUD_UTURN_WARNING)) continue;
+            /* [GEO FREE ROAM F5-A] roam keeps the span-reading U-turn flag off but still wants its minimap */
+            if (!(*s_hud_flags[v] & TD5_HUD_UTURN_WARNING) && !(td5_roam_active() && v == 0)) continue;
             hud_set_minimap_for_view(v);
             td5_hud_render_minimap(g_actor_slot_map[v]);
         }
@@ -7622,6 +7633,14 @@ static int hud_minimap_street_labels(int actor_slot, float offset_x, float offse
     return placed;
 }
 
+void td5_hud_prim_tris(const struct TD5_D3DVertex *v, int nv, const uint16_t *idx, int ni)
+{
+    if (!v || !idx || nv < 3 || ni < 3) return;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
+    td5_plat_render_draw_tris((const TD5_D3DVertex *)v, nv, idx, ni);
+}
+
 void td5_hud_render_minimap(int actor_slot)
 {
     /* Faithful: the original disabled the whole minimap on circuit tracks via an
@@ -7634,6 +7653,10 @@ void td5_hud_render_minimap(int actor_slot)
      * dot loops already handle the circuit modulo-wrap span window. */
     int circuit = (g_track_is_circuit != 0);
     if (circuit && !g_td5.ini.circuit_minimap) return;
+    if (td5_roam_active()) {   /* [GEO FREE ROAM F5-A] roam draws its own street map + the planned route */
+        td5_roam_route_ui_draw_minimap(s_minimap_x, s_minimap_y, s_minimap_width, s_minimap_height);
+        return;
+    }
 
     /* Guard against the span-wrap modulo dividing by zero before the track
      * strip is loaded (g_strip_span_count == 0) -- crashed on early race frames
@@ -8973,6 +8996,7 @@ void td5_hud_init_pause_menu(int page_index)
     int endrace_row = 1;
     int freecam_row = 1;   /* [FREE CAMERA] dev builds always expose the row */
 #endif
+    if (td5_roam_active()) endrace_row = 0;   /* [GEO FREE ROAM F2-A] matches td5_game.c */
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
@@ -9101,7 +9125,12 @@ void td5_hud_init_pause_menu(int page_index)
         /* [I18N] Translate AFTER the English-keyed gating strcmps above. The
          * PAUSETXT bitmap atlas + pause SDF font are ASCII-only, so pause-menu
          * catalog entries deliberately avoid accents ("SALIR AL MENU"). */
-        str = td5_tr(str);
+        {
+            /* [GEO FREE ROAM F2-A] the QUIT TO MENU row leaves free roam */
+            const int roam_quit = td5_roam_active() && strcmp(str, "QUIT TO MENU") == 0;
+            str = td5_tr(str);
+            if (roam_quit) str = "LEAVE FREE ROAM";
+        }
         int len = (int)strlen(str);
 
         if (pause_vec) {

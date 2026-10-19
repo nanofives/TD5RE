@@ -1,0 +1,4 @@
+# [F11b] free roam look A/B: stand still, quit (the frame is dumped at TD5RE_FRAMEDUMP_TICK)
+sync race
+420 log LOOK
++10 quit

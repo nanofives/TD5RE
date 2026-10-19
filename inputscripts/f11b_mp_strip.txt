@@ -1,0 +1,8 @@
+# [GEO FREE ROAM F11b] 2 local players on the GEOSPATIAL entry (--AutoRace=1 --DefaultPlayers=2
+# --DefaultTrack=61): the frontend builds the STRIP on demand from the planned pins (the geo map's,
+# else routes/geo_map.json), the split-screen strip race starts -> drive.
+sync race
+600 log RACE_EXPECTED
++10 throttle 1
++900 log DRIVEN
++10 quit

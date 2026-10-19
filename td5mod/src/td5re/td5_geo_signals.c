@@ -403,8 +403,19 @@ static float sig_scale(void)
     return s_k;
 }
 
+/* [ROAM F4c] SESSION CLOCK. >= 0 replaces the wall clock with the roam session's own
+ * time (td5_geo_signal_set_session_time, set once per frame from the sim tick), so the
+ * phase is a pure function of the session time: two launches show the same lamp at the
+ * same session time and every observer (renderer, F8 traffic) reads the same one. The
+ * strip never sets it (-1), so its cycle is untouched. */
+static volatile double s_sess_s = -1.0;
+
+void td5_geo_signal_set_session_time(double seconds) { s_sess_s = seconds; }
+
 static float sig_now_s(void)
 {
+    const double ss = s_sess_s;
+    if (ss >= 0.0) return (float)(fmod(ss, 3600.0) / (double)sig_scale());
     return (float)(td5_plat_time_us() % 3600000000ULL) * 1.0e-6f / sig_scale();
 }
 
@@ -432,6 +443,17 @@ int td5_geo_signal_lamp_phase_now(void)
 int td5_geo_signal_cross_phase_now(void)
 {
     return sig_phase_at(fmodf(sig_now_s() + 0.5f * SIG_T_PERIOD, SIG_T_PERIOD));
+}
+
+/* [ROAM F4c] The same cycle as a pure function of a session time (unscaled seconds,
+ * the knob TD5RE_GEO_SIGNAL_SCALE applied), for a consumer that is not the renderer
+ * (F8 traffic obeying the lamps). cross = 1: the cross street's head, half a period
+ * behind. */
+int td5_geo_signal_phase_at(double session_s, int cross)
+{
+    float t = (float)(fmod(session_s < 0.0 ? 0.0 : session_s, 3600.0) / (double)sig_scale());
+    if (cross) t += 0.5f * SIG_T_PERIOD;
+    return sig_phase_at(fmodf(t, SIG_T_PERIOD));
 }
 
 static unsigned int sig_colour(int phase, int lit_phase)

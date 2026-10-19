@@ -16,6 +16,8 @@
  */
 
 #include "td5_track.h"
+#include "td5_roam_mode.h"      /* GEO FREE ROAM: td5_roam_active (contact early-outs) */
+#include "td5_roam_physics.h"   /* GEO FREE ROAM: the roam contact provider (F2-B) */
 #include "td5_track_internal.h"
 #include "td5_trackgen.h"   /* [S2] streaming self-check: regenerate + compare */
 #include "td5_track_registry.h" /* [R3 item 19] custom-track end-wall sentinels */
@@ -1171,7 +1173,11 @@ static int build_placeholder_display_lists(void)
 /** Get a vertex from the vertex table by index. */
 static inline TD5_StripVertex *vertex_at(int index)
 {
-    return &s_vertex_table[index];
+    /* [GEO FREE ROAM F2-A / F0b crash risk 4] no vertex table (strip unloaded, e.g. roam)
+     * is NULL, so the many `if (!v)` guards on this helper are live instead of dead. There
+     * is still no upper bound (the table length is not stored): callers keep passing
+     * indices taken from a bounds-checked span. */
+    return s_vertex_table ? &s_vertex_table[index] : NULL;
 }
 
 /** Get a span record by index. */
@@ -1239,6 +1245,75 @@ static inline int span_lane_count(const TD5_StripSpan *sp)
 
 
 #ifndef TD5RE_RELEASE
+/* [roam F1-T6a] DEV: TD5RE_ROAM_MIRROR_TEST=1 -- "strip mirror" test of the table-parameterised height math.
+ * For every type-1 span of the loaded strip: copy its two vertex rows into a PRIVATE table (different
+ * indices, different array) with a re-based mirror span record, then at 9 in-quad points per lane (bilinear
+ * 3x3 over the lane quad) plus 8 extrapolated points (4 near, 4 far: exercises the upward cap) require
+ * td5_track_quad_height_v(private table) == td5_track_compute_contact_height_with_normal(real strip):
+ * same height, same int16 normal, same capped bit. Result line to race.log: "ROAM_MIRROR spans= lanes= points= mismatches=". */
+static void roam_mirror_test(void)
+{
+    static const float k_st[9][2] = {
+        {0.15f,0.15f},{0.50f,0.15f},{0.85f,0.15f},{0.15f,0.50f},{0.50f,0.50f},
+        {0.85f,0.50f},{0.15f,0.85f},{0.50f,0.85f},{0.85f,0.85f} };
+    /* extrapolated points: near (+-0.5 of the quad) and far (+-25 quads, reaches the upward cap on a slope) */
+    static const float k_out[8][2] = { {-0.5f,0.5f},{1.5f,0.5f},{0.5f,-0.5f},{0.5f,1.5f},
+                                       {-25.0f,0.5f},{26.0f,0.5f},{0.5f,-25.0f},{0.5f,26.0f} };
+    unsigned nspans = 0, nlanes = 0, npts = 0, bad = 0, skipped = 0, bad_logged = 0, capped_pts = 0;
+    int q;
+    if (!td5_env_flag_off("TD5RE_ROAM_MIRROR_TEST") || s_span_count <= 0 || !s_span_array || !s_vertex_table) return;
+    for (q = 0; q < s_span_count; q++) {
+        const TD5_StripSpan *sp = &s_span_array[q];
+        TD5_StripSpan ms;
+        TD5_StripVertex mv[64];
+        int lc, l, a0, a1, b0, b1, i, ok;
+        if (sp->span_type != 1) continue;
+        lc = span_lane_count(sp);
+        if (lc < 1 || lc > 31) { skipped++; continue; }
+        td5_track_quad_vertices(sp, 0, &a0, &a1, &b0, &b1);
+        for (i = 0; i <= lc; i++) { mv[i] = s_vertex_table[a0 + i]; mv[lc + 1 + i] = s_vertex_table[b0 + i]; }
+        ms = *sp;
+        ms.left_vertex_index = 0;
+        ms.right_vertex_index = (uint16_t)(lc + 1);
+        td5_track_quad_vertices(&ms, 0, &a0, &a1, &b0, &b1);
+        if (a0 != 0 || b0 != lc + 1) { skipped++; continue; }   /* type-1 offsets must be 0 for the re-base */
+        nspans++;
+        for (l = 0; l < lc; l++) {
+            int v0, v1, v2, v3, k;
+            const TD5_StripVertex *A, *B, *C, *D;
+            td5_track_quad_vertices(sp, l, &v0, &v1, &v2, &v3);
+            A = &s_vertex_table[v0]; B = &s_vertex_table[v1]; C = &s_vertex_table[v2]; D = &s_vertex_table[v3];
+            nlanes++;
+            for (k = 0; k < 17; k++) {
+                const float s = (k < 9) ? k_st[k][0] : k_out[k - 9][0];
+                const float t = (k < 9) ? k_st[k][1] : k_out[k - 9][1];
+                const float lx = (float)A->x + s * (float)(B->x - A->x), rx = (float)C->x + s * (float)(D->x - C->x);
+                const float lz = (float)A->z + s * (float)(B->z - A->z), rz = (float)C->z + s * (float)(D->z - C->z);
+                const int32_t wx = (int32_t)(((float)sp->origin_x + lx + t * (rx - lx)) * 256.0f);
+                const int32_t wz = (int32_t)(((float)sp->origin_z + lz + t * (rz - lz)) * 256.0f);
+                int16_t n_real[3] = {0,0,0}, n_mir[3] = {0,0,0};
+                int c_real, c_mir = 0;
+                int32_t h_real = td5_track_compute_contact_height_with_normal(q, l, wx, wz, n_real);
+                int32_t h_mir;
+                c_real = td5_track_last_contact_was_capped();
+                h_mir = td5_track_quad_height_v(mv, &ms, l, wx, wz, n_mir, &c_mir);
+                ok = (h_real == h_mir && c_real == c_mir && n_real[0] == n_mir[0] && n_real[1] == n_mir[1] && n_real[2] == n_mir[2]);
+                npts++;
+                if (c_real) capped_pts++;
+                if (!ok) {
+                    bad++;
+                    if (bad_logged++ < 8)
+                        TD5_LOG_W(LOG_TAG, "ROAM_MIRROR mismatch span=%d lane=%d k=%d h %d/%d cap %d/%d n (%d,%d,%d)/(%d,%d,%d)",
+                                  q, l, k, h_real, h_mir, c_real, c_mir,
+                                  n_real[0], n_real[1], n_real[2], n_mir[0], n_mir[1], n_mir[2]);
+                }
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "ROAM_MIRROR spans=%u lanes=%u points=%u capped_points=%u skipped=%u mismatches=%u",
+              nspans, nlanes, npts, capped_pts, skipped, bad);
+}
+
 /* [ROUND 1019 V] DEV: TD5RE_WALKER_AUDIT=1 -- static consistency audit of every corridor span, by class (0 right corridor,
  * 1 LEFT corridor, 2 block loop): (a) lane indexing: the world centre of lane l of the span (td5_track_get_span_lane_world,
  * what the AI aims at and the HUD reads) lies inside the quad of lane l (sl_lane_at) for every lane; (b) recovery:
@@ -2504,6 +2579,9 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     static uint32_t s_wall_tick = 0;
     int diag_slot0 = 0;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) { td5_roam_resolve_walls(actor); return; }
+
     if (!actor || !s_span_array || !s_vertex_table) return;
 
     /* Traffic actors (slots 6+) follow fixed AI paths; their probe positions
@@ -3214,6 +3292,7 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
 
 static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
 {
+    if (td5_roam_active()) return;   /* [GEO FREE ROAM F2-B] no boundary sentinels in roam */
     if (!actor || !s_span_array || !s_vertex_table || s_span_count < 3) return;
     if (actor->world_pos.x == 0 && actor->world_pos.z == 0) return;
 
@@ -4302,6 +4381,13 @@ static void get_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
     *vr1 = ri + 1;
 }
 
+/* [roam F1-T6a] public alias of get_quad_vertices (pure, reads no strip state). */
+void td5_track_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
+                             int *vl0, int *vl1, int *vr0, int *vr1)
+{
+    get_quad_vertices(sp, sub_lane, vl0, vl1, vr0, vr1);
+}
+
 /* [RT lighting] World-space corners of one lane quad, ring-ordered
  * {vl0, vl1, vr1, vr0} (near-left, far-left, far-right, near-right), in FLOAT
  * world units (origin + vertex). Uses the same span-type-aware vertex layout
@@ -4934,8 +5020,17 @@ int td5_track_load_strip(const void *data, size_t size)
         s_span_display_list_indices = NULL;
     }
 
-    if (!data || size < TD5_STRIP_HEADER_DWORDS * 4)
+    if (!data || size < TD5_STRIP_HEADER_DWORDS * 4) {
+        /* [roam F2-D 2026-10-16] No strip (free roam hosts on a level without one): the globals the
+         * HUD minimap init and the AI walk (g_strip_*) still pointed at the PREVIOUS race's freed
+         * span array and its span count, so the roam row after another race in one session crashed in
+         * td5_hud_init_minimap_layout. The bind further down only runs for a real strip. */
+        g_strip_span_count = 0;
+        g_strip_total_segments = 0;
+        g_strip_span_base = NULL;
+        g_strip_vertex_base = NULL;
         return build_placeholder_display_lists();
+    }
 
     /* Allocate and copy the raw blob */
     s_strip_blob = (uint8_t *)malloc(size);
@@ -5041,6 +5136,7 @@ int td5_track_load_strip(const void *data, size_t size)
     sl_pair_forks();                        /* [1029 X] a loop mouth in a real fork's decision zone */
 #ifndef TD5RE_RELEASE
     walker_audit_static();                  /* [1019 V] DEV: TD5RE_WALKER_AUDIT=1 */
+    roam_mirror_test();                     /* [roam F1-T6a] DEV: TD5RE_ROAM_MIRROR_TEST=1 */
 #endif
     if (g_td5.reverse_direction && g_active_td6_level == 0 && s_span_count > 0) {
         s_fork_divider = (int8_t *)calloc((size_t)s_span_count, 1);
@@ -5378,6 +5474,9 @@ int td5_track_get_surface_type(TD5_Actor *actor, int probe_index)
     TD5_TrackProbe *probe;
     TD5_StripSpan *sp;
     int lane;
+
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_surface_type(actor, probe_index);
 
     if (!actor || !s_span_array)
         return TD5_SURFACE_DRY_ASPHALT;
@@ -6747,6 +6846,9 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     int16_t *track_state;
     int32_t pos_x, pos_z;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) { td5_roam_actor_locate(actor); return; }
+
     if (!actor || !s_span_array || s_span_count == 0)
         return;
 
@@ -6910,6 +7012,7 @@ void td5_track_update_actor_position(TD5_Actor *actor)
 void td5_track_update_probe_position(TD5_TrackProbeState *probe,
                                      int32_t world_x, int32_t world_z)
 {
+    if (td5_roam_active()) return;   /* [GEO FREE ROAM F2-B] no walker in roam (span fields stay -1) */
     if (!probe || !s_span_array || s_span_count == 0)
         return;
 
@@ -7006,11 +7109,11 @@ void td5_track_compute_probe_contact_vertices(TD5_TrackProbeState *probe)
  * `cross <= 0` → triangle `(li, ri, ri+1)`.
  * [CONFIRMED @ 0x00445970..0x00445975, 0x004459d2..0x004459e6]
  */
-static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
-                              int32_t local_x, int32_t local_z)
+int64_t td5_track_diagonal_cross_v(const TD5_StripVertex *vt, int vl0_idx, int vr1_idx,
+                                   int32_t local_x, int32_t local_z)
 {
-    TD5_StripVertex *vli  = vertex_at(vl0_idx);
-    TD5_StripVertex *vri1 = vertex_at(vr1_idx);
+    const TD5_StripVertex *vli  = &vt[vl0_idx];
+    const TD5_StripVertex *vri1 = &vt[vr1_idx];
     int32_t dx = (int32_t)vri1->x - (int32_t)vli->x;
     int32_t dz = (int32_t)vri1->z - (int32_t)vli->z;
     return (int64_t)dx * (int64_t)(local_z - (int32_t)vli->z)
@@ -7056,13 +7159,22 @@ static int64_t diagonal_cross(int vl0_idx, int vr1_idx,
  * cannot be "grounded" on a fictional plane extrapolated above its span. */
 static int s_last_contact_capped = 0;
 
-int td5_track_last_contact_was_capped(void) { return s_last_contact_capped; }
-static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
-                                int32_t origin_x, int32_t origin_y, int32_t origin_z,
-                                int32_t pos_x, int32_t pos_z,
-                                int16_t *out_normal)
+int td5_track_last_contact_was_capped(void)
 {
-    TD5_StripVertex *va, *vb, *vc;
+    if (td5_roam_active()) return td5_roam_last_capped();   /* [GEO FREE ROAM F2-B] */
+    return s_last_contact_capped;
+}
+
+/* [roam F1-T6a] Pure core: vertex table is a parameter and the cap bit comes back
+ * through out_capped (the strip wrapper below folds it into s_last_contact_capped).
+ * Integer math + operation order unchanged from the pre-refactor triangle_height. */
+int32_t td5_track_tri_height_v(const TD5_StripVertex *vt,
+                               int va_idx, int vb_idx, int vc_idx,
+                               int32_t origin_x, int32_t origin_y, int32_t origin_z,
+                               int32_t pos_x, int32_t pos_z,
+                               int16_t *out_normal, int *out_capped)
+{
+    const TD5_StripVertex *va, *vb, *vc;
     int32_t e1x, e1y, e1z, e2x, e2y, e2z;
     int32_t nx, ny, nz;
     int16_t unx, uny, unz;
@@ -7070,9 +7182,9 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
     int32_t height;
     double len;
 
-    va = vertex_at(va_idx);
-    vb = vertex_at(vb_idx);
-    vc = vertex_at(vc_idx);
+    va = &vt[va_idx];
+    vb = &vt[vb_idx];
+    vc = &vt[vc_idx];
 
     e1x = (int32_t)vb->x - (int32_t)va->x;
     e1y = (int32_t)vb->y - (int32_t)va->y;
@@ -7147,7 +7259,7 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
         int32_t hi = vmax + (vmax - vmin) + 1024;
         if (height > hi) {
             height = hi;
-            s_last_contact_capped = 1;   /* signal consumer: force this wheel airborne */
+            if (out_capped) *out_capped = 1;   /* signal consumer: force this wheel airborne */
         }
     }
 
@@ -7256,25 +7368,36 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
  * calls this helper. Until that wires, the helper is unreferenced. We keep
  * the prototype in td5_track.h so the sibling worktree can pick it up
  * without a re-port. */
+/* [GEO FREE ROAM F2-B] Strip wrapper over the pure core below (vertex table as a
+ * parameter, like td5_track_tri_height_v): the roam contact provider evaluates the
+ * heading normal of a ROAMTILE triangle with the same integer + FPU sequence. */
 void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
                                            int16_t vc_idx, int16_t *out_normal)
 {
-    TD5_StripVertex *va, *vb, *vc;
+    if (!out_normal || !s_vertex_table)
+        return;
+    td5_track_segment_normal_v(s_vertex_table, va_idx, vb_idx, vc_idx, out_normal);
+}
+
+void td5_track_segment_normal_v(const TD5_StripVertex *vt, int va_idx, int vb_idx,
+                                int vc_idx, int16_t *out_normal)
+{
+    const TD5_StripVertex *va, *vb, *vc;
     int32_t e1_neg_x, e1_neg_y, e1_neg_z;   /* local_c/8/4 = va - vb  */
     int32_t e2_neg_x, e2_neg_y, e2_neg_z;   /* local_18/14/10 = va - vc */
     int32_t nx, ny, nz;                      /* local_24/1c/20 */
     double len_sq, inv_norm;
     int16_t unx, uny, unz;
 
-    if (!out_normal || !s_vertex_table)
+    if (!out_normal || !vt)
         return;
 
     /* g_trackVertexPool + idx*6 -- vertex_at clamps neither (orig doesn't
      * either; vertex indices come from the dispatcher's vertex-base + offset
      * arithmetic and are pre-validated upstream). */
-    va = vertex_at((int)va_idx);
-    vb = vertex_at((int)vb_idx);
-    vc = vertex_at((int)vc_idx);
+    va = &vt[va_idx];
+    vb = &vt[vb_idx];
+    vc = &vt[vc_idx];
 
     /* MOVSX-then-SUB sequences at 0x00445E51..0x00445EA8.
      * Orig computes negated edges; the cross-product of two negated vectors
@@ -7371,9 +7494,9 @@ void td5_track_interpolate_segment_normal(int16_t va_idx, int16_t vb_idx,
  * the "default flat normal" assumption callers rely on.
  * [CONFIRMED @ 0x004457E0]
  */
-static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
-                                       int32_t world_x, int32_t world_z,
-                                       int16_t *out_normal)
+int32_t td5_track_quad_height_v(const TD5_StripVertex *vt, const TD5_StripSpan *sp,
+                                int sub_lane, int32_t world_x, int32_t world_z,
+                                int16_t *out_normal, int *out_capped)
 {
     int32_t local_x, local_z;
     int vl0, vl1, vr0, vr1;
@@ -7382,7 +7505,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
     int type;
     int64_t cross;
 
-    s_last_contact_capped = 0;   /* reset per call; triangle_height sets it on upward OOB cap */
+    if (out_capped) *out_capped = 0;   /* reset per call; the triangle sets it on upward OOB cap */
 
     if (!sp)
         return 0;
@@ -7403,7 +7526,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         switch (type) {
         case 1: case 2: case 5:
         case 8: case 9: case 10: case 11:
-            cross = diagonal_cross(vl0, vr1, local_x, local_z);
+            cross = td5_track_diagonal_cross_v(vt, vl0, vr1, local_x, local_z);
             if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
             else           { va = vl0; vb = vr0; vc = vr1; }
             break;
@@ -7429,7 +7552,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         switch (type) {
         case 1: case 3: case 6:
         case 8: case 9: case 10: case 11:
-            cross = diagonal_cross(vl0, vr1, local_x, local_z);
+            cross = td5_track_diagonal_cross_v(vt, vl0, vr1, local_x, local_z);
             if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
             else           { va = vl0; vb = vr0; vc = vr1; }
             break;
@@ -7453,14 +7576,27 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         /* INTERIOR — single unconditional path, span_type NOT consulted.
          * Applies to ALL types including 0.
          * [CONFIRMED @ 0x0044599b..0x004459e6] */
-        cross = diagonal_cross(vl0, vr1, local_x, local_z);
+        cross = td5_track_diagonal_cross_v(vt, vl0, vr1, local_x, local_z);
         if (cross > 0) { va = vl0; vb = vr1; vc = vl1; }
         else           { va = vl0; vb = vr0; vc = vr1; }
     }
 
-    return triangle_height(va, vb, vc,
-                           sp->origin_x, sp->origin_y, sp->origin_z,
-                           world_x, world_z, out_normal);
+    return td5_track_tri_height_v(vt, va, vb, vc,
+                                  sp->origin_x, sp->origin_y, sp->origin_z,
+                                  world_x, world_z, out_normal, out_capped);
+}
+
+/* Strip wrapper: s_vertex_table + the s_last_contact_capped side channel
+ * (reset per call, set by an upward out-of-quad extrapolation cap). */
+static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
+                                       int32_t world_x, int32_t world_z,
+                                       int16_t *out_normal)
+{
+    int capped = 0;
+    int32_t h = td5_track_quad_height_v(s_vertex_table, sp, sub_lane,
+                                        world_x, world_z, out_normal, &capped);
+    s_last_contact_capped = capped;
+    return h;
 }
 
 /**
@@ -7485,6 +7621,8 @@ int32_t td5_track_compute_contact_height_with_normal(int span_index, int sub_lan
 {
     TD5_StripSpan *sp;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (span_index < 0 || span_index >= s_span_count)
         return 0;
 
@@ -7500,6 +7638,12 @@ int td5_track_probe_height(int world_x, int world_z, int current_span,
     int best_lane = 0;
     int best_score = 0x7FFFFFFF;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active() && out_y && out_surface_type) {
+        *out_y = td5_roam_ground_xz(world_x, world_z, NULL);
+        *out_surface_type = TD5_SURFACE_DRY_ASPHALT;
+        return 1;
+    }
     if (!out_y || !out_surface_type || !s_span_array || !s_vertex_table || s_span_count <= 0)
         return 0;
 
@@ -7561,6 +7705,8 @@ int32_t td5_track_compute_contact_height_bestlane(int span_index,
     TD5_StripSpan *sp;
     int lane_count, best_lane = 0, best_score = 0x7FFFFFFF;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (span_index < 0 || span_index >= s_span_count)
         return 0;
 
@@ -7611,6 +7757,8 @@ int32_t td5_track_compute_contact_height_bounded(int span_index, int carried_sub
     int lane_count, best_lane, best_score = 0x7FFFFFFF;
     int cand[3], nc = 0;
 
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (span_index < 0 || span_index >= s_span_count)
         return 0;
 
@@ -7729,6 +7877,8 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
                                       int16_t *out_normal)
 {
     int max_sp = s_span_count;
+    /* [GEO FREE ROAM F2-B] roam: no strip, the roam contact provider answers */
+    if (td5_roam_active()) return td5_roam_ground_xz(world_x, world_z, out_normal);
     if (max_sp <= 0 || !s_span_array || !s_vertex_table) {
         if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
         return 0;
@@ -8102,7 +8252,18 @@ static int64_t heading_diag_cross(int li_idx, int ri_plus1_idx,
  * 0x00434350 (spawn-only InitializeActorTrackPose) and hard-codes
  * heading_normal[1]=0 — that path is preserved for spawn-pose callers.
  */
+static void strip_runtime_heading_normal(TD5_Actor *actor);
+
+/* [GEO FREE ROAM F2-B] roam: the chassis primitive's normal (never y == 0); DEV
+ * mirror: the strip writes it, the provider compares and replaces it. */
 void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
+{
+    if (td5_roam_active()) { td5_roam_heading_normal(actor, 0); return; }
+    strip_runtime_heading_normal(actor);
+    if (td5_roam_physics_mirror()) td5_roam_heading_normal(actor, 1);
+}
+
+static void strip_runtime_heading_normal(TD5_Actor *actor)
 {
     int16_t *track_state;
     int16_t *out_normal;
@@ -11972,6 +12133,9 @@ void UpdateActorTrackPosition(short *probe, int *pos) {
 }
 
 void ComputeActorTrackContactNormal(short *probe, int *pos, int *out_y) {
+    /* [GEO FREE ROAM F2-B] roam (camera, scripted/recovery mode): the provider. pos = {x, z}, the
+     * same reading as the strip path below (td5_physics.c's scripted refresh passes {x, y, z}). */
+    if (td5_roam_active()) { if (out_y && pos) *out_y = td5_roam_ground_xz(pos[0], pos[1], NULL); return; }
     /*
      * Compute terrain contact height at the probe's span/sub-lane
      * for the world position pos = {x, z}.

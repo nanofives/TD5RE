@@ -42,6 +42,8 @@
 
 #include "td5_render_internal.h"  /* PRIVATE core<->effects seam */
 #include "td5_geo_signals.h"      /* [GEO SIGNALS] lamp tag + live lamp colour */
+#include "td5_roam_render.h"       /* [ROAM F2-C] plain road + ground tiles */
+#include "td5_roam_cops.h"         /* [ROAM F10] the roam cops' light bar */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2860,6 +2862,9 @@ void td5_render_actors_for_view(int view_index)
          * below (mesh == s_drag_gantry_mesh) has the pointer from the first frame. */
         if (g_td5.drag_race_enabled) td5_render_drag_gantry();
 
+        const int roam_on = td5_roam_render_wanted();
+        const int roam_hide_strip = roam_on && td5_roam_render_hides_strip();
+
         for (int i = 0; i < n_entries; i++) {
             int entry_idx = start_entry + i;
 
@@ -2898,9 +2903,15 @@ void td5_render_actors_for_view(int view_index)
             if (submitted_count < TD5_RENDER_SUBMITTED_CAP)
                 s_submitted[submitted_count++] = display_list;
 
-            if (!s_photobooth_active) td5_render_span_display_list(display_list);
+            if (!s_photobooth_active && !roam_hide_strip) td5_render_span_display_list(display_list);
             rendered_spans++;
         }
+
+        /* [ROAM F2-C] GEO FREE ROAM: the resident ROAMTILE road + ground, one pass
+         * after the strip's span walk (in roam the strip is unloaded, so the loop
+         * above drew nothing). One predictable branch when roam is off. */
+        if (roam_on && !s_photobooth_active)
+            td5_roam_render_tiles(view_index);
 
         /* Branch geometry fallback (port-only, no orig equivalent).
          * Only walks when the player is on a branch road. Uses the legacy
@@ -3632,6 +3643,12 @@ void td5_render_actors_for_view(int view_index)
                 td5_ai_cop_is_chasing(slot)) {
                 render_tracked_actor_marker(actor, &view_rot, &render_pos,
                                             td5_ai_cop_glow_intensity(slot));
+            }
+            /* [GEO FREE ROAM F10] a pursuing roam cop wears the same strobe (the POLICE option is off in roam;
+             * td5_roam_cops_glow is 0 outside a roam session) */
+            {
+                const int rg = td5_roam_cops_glow(slot);
+                if (rg > 0) render_tracked_actor_marker(actor, &view_rot, &render_pos, rg);
             }
 
             /* Wanted-mode damage indicator overlay — orig

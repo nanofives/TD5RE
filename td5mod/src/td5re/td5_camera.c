@@ -16,6 +16,8 @@
 #include "td5_hud.h"
 #include "td5_asset.h"  /* td5_asset_level_number — fly-in per-level blocklist */
 #include "td5_ai.h"     /* td5_compute_heading_delta */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM: replay trackside cameras are strip-only */
+#include "td5_roam_physics.h"   /* GEO FREE ROAM: roam ground under the chase camera (F2-B) */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5_fp.h"     /* FP_TRUNC/FP_SCALE — 24.8 fixed-point idiom macros */
 #include "td5re.h"
@@ -1202,13 +1204,17 @@ static void terrain_probe_trace_ensure_open(void)
     if (s_terrain_probe_trace_fp) return;
     s_terrain_probe_trace_fp = fopen("tools/frida_csv/terrain_probe_port.csv", "w");
     if (s_terrain_probe_trace_fp) {
+        /* [roam F3-B] fully buffered, no per-row fflush: the per-tick fflush was a synchronous
+         * WriteFile on the main thread every chase-camera tick, and under disk load NtWriteFile
+         * blocked it for up to ~1 s (the "camera solve" hitch; td5_hitchwatch stacks). The CRT
+         * flushes the buffer at exit, so a finished run's CSV is complete as before. */
+        setvbuf(s_terrain_probe_trace_fp, NULL, _IOFBF, 1u << 20);
         fprintf(s_terrain_probe_trace_fp,
             "sim_tick,view,actor_slot,actor_span,actor_sub_lane,"
             "pos_x,pos_y,pos_z,combined_angle,"
             "point_ax,point_az,point_bx,point_bz,point_cx,point_cz,"
             "norm_a_y,norm_b_y,norm_c_y,"
             "pitch_input,roll_input,orient1_y,stored_pitch,cam_y_offset\n");
-        fflush(s_terrain_probe_trace_fp);
     }
 }
 
@@ -1252,7 +1258,6 @@ static void terrain_probe_trace_emit(int view, const uint8_t *actor_addr,
         (int)g_camOrientShort[view][1],
         g_camStoredPitch[view],
         g_camOrbitOffset[view][1]);
-    fflush(s_terrain_probe_trace_fp);
 }
 
 /* Force the next snapshot to re-seed (prev := cur) for one view. */
@@ -1354,6 +1359,19 @@ static int td5_camera_probe_ground_y(uintptr_t actor, int cam_x, int cam_z,
     TD5_TrackProbeState probe;
     int car_span = (int)(*(short *)(actor + 0x80));
     int car_y    = TD5_ACTOR_AT(actor)->world_pos.y;
+
+    /* [GEO FREE ROAM F2-B] no strip, no span walk: the roam road layer under the camera,
+     * the deck chosen at the car's height (a camera beside a bridge must not read the deck
+     * above or the street below). Same plausibility check as the strip path. */
+    if (td5_roam_active()) {
+        int ground_y = (int)td5_roam_ground(cam_x, cam_z, car_y, 1, NULL);
+        int dy = ground_y - car_y;
+        if (dy < 0) dy = -dy;
+        if (dy > TD5_CAM_GROUND_SANE_DY)
+            return 0;
+        *out_ground_y = ground_y;
+        return 1;
+    }
 
     memset(&probe, 0, sizeof(probe));
     probe.span_index     = (int16_t)car_span;
@@ -4363,6 +4381,10 @@ void td5_camera_bind_trackside_profiles(int pool_index_1based)
  * the chase camera so the played-back car always stays on screen. */
 int td5_camera_replay_trackside_ready(void)
 {
+    /* [GEO FREE ROAM F2-A / F0b crash risk 3] the trackside profiles index the raw strip span /
+     * vertex tables (g_spanTable is NULL with no strip) and match on the actor's span (-1):
+     * never ready in roam, so a replay falls back to the chase camera */
+    if (td5_roam_active()) return 0;
     return (g_tracksideCameraProfiles != NULL) && (g_tracksideCameraProfileCount > 0);
 }
 
@@ -5724,6 +5746,10 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
     /* [x64 Stage 2] slot 0x00 holds a route-table HANDLE, not a pointer. */
     route_table = td5_ai_route_table(rs[0x00]); /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */
     if (!route_table) return 0;
+    /* [GEO FREE ROAM F2-A / F0b crash risk 1] the old lookup had no length check: a roam
+     * actor (span -1) indexed byte 196606 of the table, and a stale span from a longer
+     * previous track read past the end. Same guard td5_ai_route_speed_hint uses. */
+    if (!td5_ai_route_span_valid(rs[0x00], (int)span_norm)) return 0;
     rb   = route_table[(uint16_t)span_norm * 3u + 1u]; /* byte lookup [CONFIRMED @ 0x00434040] */
     diff = FP_TRUNC(actor_yaw) - (int)FP_TRUNC(rb * 0x102Cu);
     t    = ((uint32_t)diff - 0x800u) & 0xFFFu;
@@ -5778,3 +5804,33 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
  *     recovery — see td5_physics.c:996-1009). When port wires that branch,
  *     this function must come with it. Not currently observable.
  */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_camera_world_shift(int32_t sx, int32_t sz)
+{
+    const int fx = (int)FP_SCALE(sx), fz = (int)FP_SCALE(sz);
+    int v, k;
+    for (v = 0; v < TD5_MAX_VIEWPORTS; v++) {
+        TD5_CamPose *ps[2] = { &s_cam_pose_prev[v], &s_cam_pose_cur[v] };
+        for (k = 0; k < 2; k++) {
+            ps[k]->eye[0] += fx;    ps[k]->eye[2] += fz;
+            ps[k]->target[0] += fx; ps[k]->target[2] += fz;
+            ps[k]->anchor[0] += fx; ps[k]->anchor[2] += fz;
+        }
+        s_recov_last_eye[v][0] += fx; s_recov_last_eye[v][2] += fz;
+        s_recov_last_tgt[v][0] += fx; s_recov_last_tgt[v][2] += fz;
+        s_recov_from_eye[v][0] += fx; s_recov_from_eye[v][2] += fz;
+        s_recov_from_tgt[v][0] += fx; s_recov_from_tgt[v][2] += fz;
+        g_camWorldPos[v][0] += fx;    g_camWorldPos[v][2] += fz;
+        g_camAnchorX[v] += fx;        g_camAnchorZ[v] += fz;
+        g_camSplineState[v][0] += fx; g_camSplineState[v][2] += fz;
+    }
+    g_cameraPos[0] += (float)sx;
+    g_cameraPos[2] += (float)sz;
+#ifndef TD5RE_RELEASE
+    s_freecam_eye[0] += (double)fx;
+    s_freecam_eye[2] += (double)fz;
+#endif
+}

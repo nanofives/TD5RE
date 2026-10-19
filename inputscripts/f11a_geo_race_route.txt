@@ -1,0 +1,22 @@
+# [GEO FREE ROAM F11a] geo selector (pins seeded with TD5RE_GEO_SEED_LATLON, RACE ROUTE focused with
+# TD5RE_GEO_PANEL_FOCUS=1) -> RACE ROUTE -> normal car select -> OK -> roam session at START ->
+# the handoff plants the pins and opens the race setup panel over the route map -> ENTER on
+# START RACE -> 3-2-1 -> drive. Timeline is wall clock (60 ticks/s), generous for a cold planner graph.
+sync menu
+900 log GEO_SETTLED
++8 key enter press
++1500 log AT_CARSELECT
++30 key down press
++60 key down press
++60 key down press
++60 key down press
++60 key enter press
++2400 log AFTER_LAUNCH
+sync race
+1800 log SETUP_EXPECTED
++10 key enter 1
++25 key enter 0
++300 log RACE_STARTED
++10 throttle 1
++1800 log DRIVEN
++10 quit

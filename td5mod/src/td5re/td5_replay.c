@@ -111,6 +111,10 @@ int td5_replay_ghost_enabled(void)
 
 int td5_replay_is_recording(void) { return s_recording; }
 int td5_replay_frame_count(void)  { return s_frame_count; }
+size_t td5_replay_buffer_bytes(void)
+{
+    return s_buf ? (size_t)s_frame_capacity * (size_t)s_actor_count * sizeof(TD5_ReplaySnap) : 0u;
+}
 
 int td5_replay_playback_at_end(uint32_t sim_tick)
 {
@@ -155,6 +159,19 @@ void td5_replay_begin_record(void)
     s_pose_count = 0;
     s_recording = 1;
     TD5_LOG_I(LOG_TAG, "recording begin: actors/frame=%d", s_actor_count);
+}
+
+void td5_replay_discard(void)
+{
+    free(s_buf);
+    s_buf = NULL;
+    s_frame_capacity = 0;
+    s_frame_count = 0;
+    s_capped_logged = 0;
+    s_pose_frame = NULL;
+    s_pose_count = 0;
+    s_recording = 0;
+    TD5_LOG_I(LOG_TAG, "recording off for this race (no View Replay), buffer freed");
 }
 
 void td5_replay_begin_playback(void)
@@ -343,5 +360,21 @@ void td5_replay_pose_tick(uint32_t sim_tick)
         TD5_Actor *a = td5_game_get_actor(slot);
         if (!a) continue;
         replay_pose_actor(a, &frame[slot], next_frame ? &next_frame[slot] : NULL, slot);
+    }
+}
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_replay_world_shift(int32_t sx, int32_t sz)
+{
+    long i, n;
+    if (!s_buf || s_frame_count <= 0 || s_actor_count <= 0) return;
+    n = (long)s_frame_count * (long)s_actor_count;
+    for (i = 0; i < n; i++) {
+        s_buf[i].world_pos.x += (sx) * 256;
+        s_buf[i].world_pos.z += (sz) * 256;
+        s_buf[i].render_pos.x += (float)sx;
+        s_buf[i].render_pos.z += (float)sz;
     }
 }

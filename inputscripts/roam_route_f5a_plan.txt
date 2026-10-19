@@ -1,0 +1,39 @@
+# F5-A: drive-and-drop 3 points, open the map, add one, save as test1, leave.
+# Needs TD5RE_ROAM_DRIVE=street (autopilot) so the car actually moves between the key presses.
+sync race
++300 log f5a_drop_begin
++60 key 0x40 press
++420 key 0x41 press
++420 key 0x42 press
++60 log f5a_drop_done
++30 key 0x44 press
++150 key 0x44 press
++30 key 0x32 press
++90 log f5a_map_open
++20 key 0x44 press
++40 key right 1
++10 key right 0
++10 key 0x03 press
++40 key 0x44 press
++30 key 0x1F press
++20 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++12 key 0x0E press
++20 key 0x14 press
++12 key 0x12 press
++12 key 0x1F press
++12 key 0x14 press
++12 key 0x02 press
++30 key 0x44 press
++12 key enter press
++40 key 0x44 press
++30 log f5a_saved
++30 key esc press
++90 log f5a_plan_done
+quit

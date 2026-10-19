@@ -54,7 +54,7 @@
 #define GEO_ROADS_MAX_PTS  65536
 /* A way longer than this is split across records by Overpass anyway; the limit
  * only bounds one walk. */
-#define GEO_ROADS_MAX_WAY  512
+#define GEO_ROADS_MAX_WAY  TD5_GEO_ROADS_WAY_POINTS_MAX
 /* ROADS.JSON for a big city centre is larger than td5_geo.c's 8 MB route/place
  * budget, so this reader carries its own. */
 #define GEO_ROADS_MAX_FILE (64 * 1024 * 1024)
@@ -80,7 +80,7 @@ static struct {
 /* Read a whole file into a malloc'd NUL-terminated buffer, for cJSON. Same
  * shape as td5_geo.c's geo_slurp (which is static there, and carries a smaller
  * cap for the rasters' sidecars). */
-static char *geo_roads_slurp(const char *path)
+char *td5_geo_roads_slurp(const char *path)
 {
     TD5_File *f = td5_plat_file_open(path, "rb");
     int64_t n;
@@ -412,13 +412,13 @@ static void geo_roads_name_copy(char *dst, size_t cap, const char *s)
  * converts a tagged `width` correctly. 0 means "unknown": the caller then
  * ignores every width tag and uses the lane count, which is exactly the
  * behaviour before this module existed. */
-static double geo_roads_units_per_metre(const char *slug)
+double td5_geo_roads_units_per_metre(const char *slug)
 {
     char path[320];
     char *json;
     double upm = 0.0;
     td5_geo_place_path(path, sizeof path, slug, "PLACE.JSON");
-    json = geo_roads_slurp(path);
+    json = td5_geo_roads_slurp(path);
     if (!json) return 0.0;
     {
         cJSON *root = cJSON_Parse(json);
@@ -481,12 +481,115 @@ void td5_geo_roads_unload(void)
     memset(&s_roads, 0, sizeof(s_roads));
 }
 
+/* [F1 T1] The tag group of one record, reset to the pre-tag-round defaults. The
+ * strip reader calls this under TD5RE_GEO_ROAD_TAGS=0 so that the lifted parser
+ * above can always read the tags and the A/B still reproduces the old road. */
+static void geo_roads_clear_tags(TD5_GeoRoad *out)
+{
+    out->surface      = TD5_GEO_SURF_SMOOTH;
+    out->roundabout   = 0;
+    out->sidewalk     = TD5_GEO_SW_UNKNOWN;
+    out->tag_width_m  = 0.0;
+    out->sw_tag_l_m   = 0.0;
+    out->sw_tag_r_m   = 0.0;
+    out->namek        = TD5_GEO_NAMEK_UNKNOWN;
+    out->lit          = TD5_GEO_LIT_UNKNOWN;
+    out->maxspeed_kph = 0;
+    out->name_id      = -1;
+}
+
+int td5_geo_roads_parse_points(const cJSON *pts, int npt_max,
+                               double *px, double *pz, double bbox[4])
+{
+    const cJSON *p;
+    int k = 0, kept = 0;
+    if (!pts || !cJSON_IsArray(pts) || !px || !pz || !bbox) return 0;
+    for (p = pts->child; p && k < npt_max; p = p->next, k++) {
+        const cJSON *cx = cJSON_GetObjectItem(p, "x");
+        const cJSON *cz = cJSON_GetObjectItem(p, "z");
+        double x, z;
+        if (!cx || !cz || !cJSON_IsNumber(cx) || !cJSON_IsNumber(cz)) continue;
+        x = cx->valuedouble; z = cz->valuedouble;
+        /* Drop a repeated vertex: a zero-length segment has no bearing, and
+         * the network's junction walk would divide by its length. */
+        if (kept > 0) {
+            const double dx = x - px[kept - 1];
+            const double dz = z - pz[kept - 1];
+            if (dx * dx + dz * dz < 1.0) continue;
+        }
+        px[kept] = x;
+        pz[kept] = z;
+        if (kept == 0) {
+            bbox[0] = bbox[2] = x;
+            bbox[1] = bbox[3] = z;
+        } else {
+            if (x < bbox[0]) bbox[0] = x;
+            if (x > bbox[2]) bbox[2] = x;
+            if (z < bbox[1]) bbox[1] = z;
+            if (z > bbox[3]) bbox[3] = z;
+        }
+        kept++;
+    }
+    return kept;
+}
+
+int td5_geo_roads_parse_record(const cJSON *r, double upm, TD5_GeoRoad *out)
+{
+    const cJSON *ly, *od, *w, *tags;
+    if (!r || !out) return 0;
+    out->klass     = geo_roads_class(geo_roads_str(r, "class"));
+    out->lanes     = geo_roads_lanes(r, upm);
+    out->width     = (double)out->lanes * (double)TD5_TG_LANE_WIDTH;
+    out->oneway    = geo_roads_bool(r, "oneway");
+    out->bridge    = geo_roads_bool(r, "bridge");
+    out->tunnel    = geo_roads_bool(r, "tunnel");
+    ly = cJSON_GetObjectItem(r, "layer");
+    out->layer     = (ly && cJSON_IsNumber(ly)) ? ly->valueint : 0;
+    /* All three absent from a pre-2026-10-07 cache, and all three default to
+     * the old behaviour there: SMOOTH, two-way, not a roundabout. */
+    out->surface   = geo_roads_surface(geo_roads_str(r, "surface"));
+    od = cJSON_GetObjectItem(r, "oneway_dir");
+    out->oneway_dir = (od && cJSON_IsNumber(od)) ? od->valueint
+                    : (out->oneway ? 1 : 0);
+    out->roundabout = geo_roads_bool(r, "roundabout");
+    /* [ROUND 1009 item 7] SIDEWALK + the raw tagged width. */
+    out->sidewalk = geo_roads_sidewalk(geo_roads_str(r, "sidewalk"));
+    if (out->sidewalk == TD5_GEO_SW_UNKNOWN)
+        out->sidewalk = geo_roads_sidewalk_sides(r);
+    /* [ROUND 1011 C2] the measured per-side pavement width. */
+    geo_roads_sidewalk_widths(r, &out->sw_tag_l_m, &out->sw_tag_r_m);
+    { /* OSM width=* is free text; the same leading-number read the lane count
+       * uses. Kept RAW in metres -- what it means for the pavement is the
+       * consumer's decision, not this reader's. */
+        w = cJSON_GetObjectItem(r, "width");
+        out->tag_width_m = 0.0;
+        if (w && cJSON_IsString(w) && w->valuestring[0]) {
+            char *end = NULL;
+            const double m = strtod(w->valuestring, &end);
+            if (end != w->valuestring && m > 0.5 && m < 120.0)
+                out->tag_width_m = m;
+        } else if (w && cJSON_IsNumber(w)
+                   && w->valuedouble > 0.5 && w->valuedouble < 120.0) {
+            out->tag_width_m = w->valuedouble;
+        }
+    }
+    /* [ROUND 1011 C2] The street's kind from its name. */
+    out->namek = td5_geo_roads_namek_of(geo_roads_str(r, "name"));
+    /* [ROUND 1011 C3] lit / maxspeed. `lit` lives inside `tags`; `maxspeed` is
+     * a top-level field of the record (geo_fetch.py:1157). */
+    tags = cJSON_GetObjectItem(r, "tags");
+    out->lit          = geo_roads_lit(geo_roads_str(tags, "lit"));
+    out->maxspeed_kph = td5_geo_roads_maxspeed_parse(geo_roads_str(r, "maxspeed"));
+    out->name_id      = -1;   /* interned by the caller's own name pool */
+    return 1;
+}
+
 static int geo_roads_load(const char *slug)
 {
     char path[320];
     char *json;
     cJSON *root, *arr;
-    const double upm = geo_roads_units_per_metre(slug);
+    const double upm = td5_geo_roads_units_per_metre(slug);
     /* The A/B for the road half of the tag round, same shape as
      * TD5RE_GEO_LM_TAGS and TD5RE_GEO_AREA_TAGS: off, the reader ignores
      * `surface` and `roundabout` and every street takes its biome page, which
@@ -497,7 +600,7 @@ static int geo_roads_load(const char *slug)
     td5_geo_roads_unload();
     td5_geo_sw_place(slug);       /* [1014 B] the carriageway table below is the place's */
     td5_geo_place_path(path, sizeof path, slug, "ROADS.JSON");
-    json = geo_roads_slurp(path);
+    json = td5_geo_roads_slurp(path);
     if (!json) {
         TD5_LOG_W(LOG_TAG, "geo: no readable %s; the street network stays synthetic",
                   path);
@@ -533,10 +636,9 @@ static int geo_roads_load(const char *slug)
     for (i = 0; i < n; i++) {
         const cJSON *r   = cJSON_GetArrayItem(arr, i);
         const cJSON *pts = r ? cJSON_GetObjectItem(r, "points") : NULL;
-        const cJSON *cl  = r ? cJSON_GetObjectItem(r, "class") : NULL;
-        const cJSON *ly  = r ? cJSON_GetObjectItem(r, "layer") : NULL;
+        double bb[4];
         TD5_GeoRoad *out;
-        int k, npt, kept = 0;
+        int npt, kept;
 
         if (!pts || !cJSON_IsArray(pts)) continue;
         npt = cJSON_GetArraySize(pts);
@@ -547,38 +649,16 @@ static int geo_roads_load(const char *slug)
         out = &s_roads.road[s_roads.n];
         memset(out, 0, sizeof(*out));
         out->first = s_roads.np;
-        for (k = 0; k < npt; k++) {
-            const cJSON *p  = cJSON_GetArrayItem(pts, k);
-            const cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
-            const cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-            double x, z;
-            if (!px || !pz || !cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) continue;
-            x = px->valuedouble; z = pz->valuedouble;
-            /* Drop a repeated vertex: a zero-length segment has no bearing, and
-             * the network's junction walk would divide by its length. */
-            if (kept > 0) {
-                const double dx = x - s_roads.px[out->first + kept - 1];
-                const double dz = z - s_roads.pz[out->first + kept - 1];
-                if (dx * dx + dz * dz < 1.0) continue;
-            }
-            s_roads.px[out->first + kept] = x;
-            s_roads.pz[out->first + kept] = z;
-            if (kept == 0) {
-                out->minx = out->maxx = x;
-                out->minz = out->maxz = z;
-            } else {
-                if (x < out->minx) out->minx = x;
-                if (x > out->maxx) out->maxx = x;
-                if (z < out->minz) out->minz = z;
-                if (z > out->maxz) out->maxz = z;
-            }
-            kept++;
-        }
+        /* The point walk and the record parse are shared with the roam cache
+         * reader (td5_roam_cache.c). */
+        kept = td5_geo_roads_parse_points(pts, npt, &s_roads.px[out->first],
+                                          &s_roads.pz[out->first], bb);
         if (kept < 2) { dropped_short++; continue; }
-
+        out->minx = bb[0]; out->minz = bb[1];
+        out->maxx = bb[2]; out->maxz = bb[3];
         out->count  = kept;
-        out->klass  = geo_roads_class(cl && cJSON_IsString(cl) ? cl->valuestring : NULL);
-        out->lanes  = geo_roads_lanes(r, upm);
+        td5_geo_roads_parse_record(r, upm, out);
+        if (!read_tags) geo_roads_clear_tags(out);
         /* [1014 B items 6, 11] THE STREET IS AS WIDE AS THE PLACE'S CARRIAGEWAY.
          * The route reader has applied the place table to the road the car
          * drives since round 1011 (a calle is 10.47 m, 3 lanes) but this reader
@@ -594,9 +674,7 @@ static int geo_roads_load(const char *slug)
                                       || (cJSON_IsNumber(wd) && wd->valuedouble > 0.5));
             const int counted = ls && cJSON_IsString(ls) && ls->valuestring
                              && strcmp(ls->valuestring, "osm_lanes") == 0;
-            const int nk = read_tags
-                         ? td5_geo_roads_namek_of(geo_roads_str(r, "name"))
-                         : TD5_GEO_NAMEK_UNKNOWN;
+            const int nk = out->namek;   /* cleared to UNKNOWN when !read_tags */
             const double tm = tagged ? 0.0 : td5_geo_sw_carriageway_m(TD5_GEO_RC_UNKNOWN, nk);
             if (tm > 0.0) {
                 int want = (int)floor(tm * upm / (double)TD5_TG_LANE_WIDTH + 0.5);
@@ -605,74 +683,12 @@ static int geo_roads_load(const char *slug)
             }
         }
         out->width  = (double)out->lanes * (double)TD5_TG_LANE_WIDTH;
-        out->oneway = geo_roads_bool(r, "oneway");
-        out->bridge = geo_roads_bool(r, "bridge");
-        out->tunnel = geo_roads_bool(r, "tunnel");
-        out->layer  = (ly && cJSON_IsNumber(ly)) ? ly->valueint : 0;
-        /* All three absent from a pre-2026-10-07 cache, and all three default
-         * to the old behaviour there: SMOOTH, two-way, not a roundabout. */
-        out->surface = read_tags
-                     ? geo_roads_surface(geo_roads_str(r, "surface")) : 0;
-        {
-            const cJSON *od = cJSON_GetObjectItem(r, "oneway_dir");
-            out->oneway_dir = (od && cJSON_IsNumber(od)) ? od->valueint
-                            : (out->oneway ? 1 : 0);
-        }
-        out->roundabout = read_tags ? geo_roads_bool(r, "roundabout") : 0;
         if (out->roundabout) roundabouts++;
-        /* [ROUND 1009 item 7] SIDEWALK + the raw tagged width. Both under
-         * `read_tags` with the rest of the 2026-10-07 tag round, so
-         * TD5RE_GEO_ROAD_TAGS=0 reproduces the pre-1009 pavement exactly:
-         * UNKNOWN on every way, which the consumer reads as "keep the biome
-         * width". */
-        out->sidewalk = TD5_GEO_SW_UNKNOWN;
-        out->tag_width_m = 0.0;
-        out->sw_tag_l_m = out->sw_tag_r_m = 0.0;
-        /* [1011 C2] The name is read, CLASSIFIED and dropped -- the string
-         * never enters the pool. Outside `read_tags` with the rest of the tag
-         * round, so TD5RE_GEO_ROAD_TAGS=0 still reproduces the pre-1009 road. */
-        out->namek = read_tags
-                   ? td5_geo_roads_namek_of(geo_roads_str(r, "name"))
-                   : TD5_GEO_NAMEK_UNKNOWN;
-        /* [ROUND 1011 C3] lit / maxspeed / name. Under `read_tags` with the
-         * rest of the tag round, and all three default to the pre-1011
-         * behaviour when it is off: UNKNOWN lighting, no speed cap, no name.
-         *
-         * `name` and `maxspeed` are TOP-LEVEL fields of the record
-         * (geo_fetch.py:1124 and :1157); only `lit` lives inside `tags`
-         * (ROAD_TAG_KEYS). The name must be COPIED here: geo_roads_str hands
-         * back a pointer into the cJSON DOM and that DOM is deleted below. */
-        out->lit          = TD5_GEO_LIT_UNKNOWN;
-        out->maxspeed_kph = 0;
-        out->name_id      = -1;
-        if (read_tags) {
-            const cJSON *tags = cJSON_GetObjectItem(r, "tags");
-            out->lit = geo_roads_lit(geo_roads_str(tags, "lit"));
-            out->maxspeed_kph =
-                td5_geo_roads_maxspeed_parse(geo_roads_str(r, "maxspeed"));
-            out->name_id = geo_roads_intern(geo_roads_str(r, "name"));
-
-            out->sidewalk = geo_roads_sidewalk(geo_roads_str(r, "sidewalk"));
-            if (out->sidewalk == TD5_GEO_SW_UNKNOWN)
-                out->sidewalk = geo_roads_sidewalk_sides(r);
-            /* [ROUND 1011 C2] the measured per-side width, under the same
-             * read_tags gate as the rest of the tag round. */
-            geo_roads_sidewalk_widths(r, &out->sw_tag_l_m, &out->sw_tag_r_m);
-            {   /* OSM width=* is free text; the same leading-number read the
-                 * lane count uses. Kept RAW in metres -- what it means for the
-                 * pavement is the consumer's decision, not this reader's. */
-                const cJSON *w = cJSON_GetObjectItem(r, "width");
-                if (w && cJSON_IsString(w) && w->valuestring[0]) {
-                    char *end = NULL;
-                    const double m = strtod(w->valuestring, &end);
-                    if (end != w->valuestring && m > 0.5 && m < 120.0)
-                        out->tag_width_m = m;
-                } else if (w && cJSON_IsNumber(w)
-                           && w->valuedouble > 0.5 && w->valuedouble < 120.0) {
-                    out->tag_width_m = w->valuedouble;
-                }
-            }
-        }
+        /* [ROUND 1011 C3] The name is interned into this reader's pool, under the
+         * tag round's read_tags gate. The pool copies the string, so it outlives
+         * the cJSON DOM deleted below. Every other tag field was filled by
+         * td5_geo_roads_parse_record above (cleared when !read_tags). */
+        out->name_id = read_tags ? geo_roads_intern(geo_roads_str(r, "name")) : -1;
         s_roads.np += kept;
         s_roads.n++;
     }
@@ -887,22 +903,6 @@ int td5_geo_roads_pavement_at(double x, double z, double max_dist,
         case TD5_GEO_SW_RIGHT: l = kerb; r = def;  break;
         case TD5_GEO_SW_BOTH:  l = def;  r = def;  break;
         default:               break;              /* UNKNOWN: class default */
-        }
-        /* SPECULATIVE, DEFAULT OFF. OSM defines highway `width` as the
-         * CARRIAGEWAY's width, so treating a surplus over the lane count as
-         * pavement is an inference, not a measurement -- and on this cache it
-         * would fire on 50 of 2291 ways. Behind its own knob so the claim can
-         * be tested rather than assumed. */
-        if (best->tag_width_m > 0.0
-            && td5_env_flag_off("TD5RE_GEO_SW_FROM_WIDTH")) {
-            const double carriage = (double)best->lanes * 3.5;
-            const double surplus = best->tag_width_m - carriage;
-            if (surplus > 2.0) {
-                double half = surplus * 0.5;
-                if (half > def * 1.5) half = def * 1.5;
-                if (half > l) l = half;
-                if (half > r) r = half;
-            }
         }
         if (left_m)  *left_m  = l;
         if (right_m) *right_m = r;

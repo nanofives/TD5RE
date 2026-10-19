@@ -187,6 +187,9 @@ void td5_hud_render_overlays(float dt);
 int  td5_hud_build_metric_digits(void);
 void td5_hud_draw_status_text(int player_slot, int view_index);
 void td5_hud_render_minimap(int view_index);
+/* [roam F5-A] untextured pre-transformed screen triangles in ONE draw (the route map / minimap batcher) */
+struct TD5_D3DVertex;
+void td5_hud_prim_tris(const struct TD5_D3DVertex *v, int nv, const uint16_t *idx, int ni);
 void td5_hud_draw_pause_overlay(void);
 /* [S27] Per-viewport "controller disconnected — reconnect" modal. No-op unless a
  * required player's controller is currently missing. */

@@ -48,6 +48,9 @@
 #include "td5_i18n.h"
 #include "td5_config.h"        /* shared TD5RE_* env-knob accessors */
 #include "td5_frontend_internal.h"
+#include "td5_roam_mode.h"     /* [GEO FREE ROAM F2-A] the FREE ROAM button */
+#include "td5_roam_route.h"    /* [F11a] TD5_ROUTE_MAX_WP / TD5_ROUTE_SPRINT */
+#include "td5_roam_handoff.h"  /* [F11a] RACE ROUTE: the pins raced in the city (free roam) */
 
 #include <math.h>
 #include <stdio.h>
@@ -82,6 +85,9 @@
 #define GEO_BTN_BUILD_W  140
 #define GEO_BTN_BACK_X   360
 #define GEO_BTN_BACK_W    96
+/* [GEO FREE ROAM F2-A] FREE ROAM sits right of BACK, under the options panel's edge (628). */
+#define GEO_BTN_ROAM_X   462
+#define GEO_BTN_ROAM_W   166
 
 /* The OPTIONS panel: a section selector, up to GEO_OPT_VIS rows of the
  * current section, a help box for the focused row, and DEFAULTS. */
@@ -105,6 +111,7 @@ enum {
     GEO_BTN_SECT,
     GEO_BTN_ROW0,
     GEO_BTN_DEFAULTS = GEO_BTN_ROW0 + GEO_OPT_VIS,
+    GEO_BTN_ROAM,                  /* [GEO FREE ROAM F2-A] created last, after DEFAULTS */
     GEO_BTN_COUNT
 };
 
@@ -225,6 +232,15 @@ static int           s_bg_n_path_user;
  * kept as a variable so a future Quick Race entry point can set it like the
  * AUTO TRACK STUDIO chip does (frontend_autotrack_parent_screen). */
 static int    s_parent_screen = TD5_SCREEN_TRACK_SELECTION;
+
+/* [GEO FREE ROAM F11a, F11b] 1 = the STRIP geo BUILD is on, read at screen entry: local multiplayer
+ * (2+ humans, the only context the strip race is built in) or TD5RE_GEO_STRIP_BUILD=1 (dev). BUILD
+ * TRACK and the generation OPTIONS panel as before. 0 (single player) = the button is RACE ROUTE: the
+ * same pins raced inside the free-roam city, and the panel, whose rows only shape a strip build,
+ * gives way to a short note. docs/plans/geo_free_roam/F11_PARITY.md. */
+static int    s_strip;
+static int    geo_roam_spawn(TD5_RoamSpawn *out);
+static int    geo_race_city_ready(const char **why);
 
 /* ========================================================================
  * SECTION: Web Mercator (the slippy-map projection)
@@ -959,7 +975,9 @@ static void geo_opt_layout_rows(void)
     int k;
     for (k = 0; k < GEO_OPT_VIS; k++) {
         FE_Button *b = &s_buttons[GEO_BTN_ROW0 + k];
-        const int on = (geo_opt_row_at(k) >= 0);
+        /* [F11a] without the strip build only slot 0 of the ROUTE page (TIME OF DAY, which the roam
+         * session reads too: td5_trackgen_roam_is_night) stays; the other rows only shape a strip build */
+        const int on = (s_strip || k == 0) && (geo_opt_row_at(k) >= 0);
         b->hidden   = on ? 0 : 1;
         b->disabled = on ? 0 : 1;
     }
@@ -970,7 +988,7 @@ static void geo_opt_layout_rows(void)
 
 static void geo_opt_set_sect(int sect)
 {
-    s_opt_sect = ((sect % GEO_SECTS) + GEO_SECTS) % GEO_SECTS;
+    s_opt_sect = s_strip ? ((sect % GEO_SECTS) + GEO_SECTS) % GEO_SECTS : 0;   /* [F11a] city: ROUTE page only */
     geo_opt_layout_rows();
 }
 
@@ -1257,6 +1275,58 @@ static int geo_wrap_small(const char *s, float maxw, float sx, float sy,
  * from the shared button render (the section selector and the rows are
  * is_selector buttons, so they get the standard ◄► and LEFT/RIGHT cycling);
  * this draws what is written on them and the help box under them. */
+/* [GEO FREE ROAM F11a] Where the strip OPTIONS panel was: what RACE ROUTE and FREE ROAM do now. */
+static void geo_draw_city_note(float sx, float sy)
+{
+    static const char *k_note[] = {
+        "RACE ROUTE races these pins inside the free-roam city.",
+        "Next: pick a car, then opponents, traffic and cops on the route map.",
+        "Sprint or circuit and laps: on the same panel.",
+        "FREE ROAM drives from START with no race.",
+    };
+    const float px = (float)GEO_PANEL_X, pw = (float)GEO_PANEL_W;
+    const char *why = NULL;
+    const int ready = geo_race_city_ready(&why);
+    float y = (float)(GEO_ROW_Y0 + GEO_ROW_STEP) + 10.0f;
+    int i, j;
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    geo_fill(px, (float)GEO_SECT_Y, pw, 286.0f, 0xC0101018u, sx, sy);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    geo_frame_rect(px, (float)GEO_SECT_Y, pw, 286.0f, GEO_COL_FRAME, sx, sy);
+    fe_draw_text_centered((px + pw * 0.5f) * sx, ((float)GEO_SECT_Y + 6.0f) * sy,
+                          TR("RACE IN THE CITY"), 0xFFE3D708u, sx, sy);
+    {   /* TIME OF DAY (row 0, the one option the city race reads), drawn like a panel row */
+        const int row = geo_opt_row_at(0);
+        if (row >= 0) {
+            const GeoOpt *o = &k_geo_opts[row];
+            const int idx = geo_opt_index(row);
+            char line[32];
+            const float ry = (float)GEO_ROW_Y0;
+            fe_draw_option_arrows(GEO_BTN_ROW0, sx, sy);
+            fe_draw_small_text((px + 22.0f) * sx, (ry + 7.0f) * sy, TR(o->label), 0xFFE6ECF4u, sx, sy);
+            if (idx >= 0) snprintf(line, sizeof line, "%s", TR(o->names[idx]));
+            else          snprintf(line, sizeof line, "%d", geo_opt_value(row));
+            geo_small_centered(px + 176.0f, ry + 7.0f, line,
+                               geo_opt_value(row) != o->def ? 0xFF7CE07Cu : 0xFFFFFFFFu, sx, sy);
+        }
+    }
+    for (i = 0; i < (int)(sizeof k_note / sizeof k_note[0]); i++) {
+        char wl[3][GEO_WRAP_LEN];
+        const int n = geo_wrap_small(TR(k_note[i]), pw - 12.0f, sx, sy, wl, 3);
+        for (j = 0; j < n; j++, y += 13.0f)
+            fe_draw_small_text((px + 6.0f) * sx, y * sy, wl[j], 0xFFE6ECF4u, sx, sy);
+        y += 8.0f;
+    }
+    {
+        char wl[2][GEO_WRAP_LEN];
+        const int n = geo_wrap_small(ready ? TR("READY: PRESS RACE ROUTE") : TR(why ? why : ""),
+                                     pw - 12.0f, sx, sy, wl, 2);
+        y = (float)GEO_SECT_Y + 286.0f - 32.0f;
+        for (j = 0; j < n; j++, y += 13.0f)
+            fe_draw_small_text((px + 6.0f) * sx, y * sy, wl[j], ready ? GEO_COL_OK : GEO_COL_BAD, sx, sy);
+    }
+}
+
 static void geo_draw_panel(float sx, float sy)
 {
     const float px = (float)GEO_PANEL_X, pw = (float)GEO_PANEL_W;
@@ -1265,6 +1335,8 @@ static void geo_draw_panel(float sx, float sy)
     const int frow = (focus >= 0 && focus < GEO_OPT_VIS) ? geo_opt_row_at(focus) : -1;
     char line[64];
     int k;
+
+    if (!s_strip) { geo_draw_city_note(sx, sy); return; }   /* [F11a] */
 
     /* section selector: name centred, page count by the right arrow */
     fe_draw_option_arrows(GEO_BTN_SECT, sx, sy);
@@ -1456,6 +1528,25 @@ void frontend_geo_generator_render(float sx, float sy)
             fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
                                TR("WHEEL ZOOMS, DRAG PANS"),
                                GEO_COL_DIM, sx, sy);
+        } else if (!s_strip) {
+            /* [F11a] the race is planned again in the city: the strip router's verdict (spans, self
+             * crossings) does not apply, only whether the pins can be raced there */
+            const char *why = NULL;
+            const int ready = geo_race_city_ready(&why);
+            fe_draw_text(lx * sx, (GEO_STATUS_Y - 3.0f) * sy,
+                         ready ? TR("READY TO RACE") : TR("CANNOT RACE"),
+                         ready ? GEO_COL_OK : GEO_COL_BAD, sx, sy);
+            if (s_have_route && s_length_m > 0.0f)
+                snprintf(line, sizeof(line), "%s %.1f KM   %d %s", TR("ABOUT"),
+                         (double)s_length_m / 1000.0, s_n_pts, TR("POINTS"));
+            else
+                snprintf(line, sizeof(line), "%d %s", s_n_pts, TR("POINTS"));
+            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 21.0f) * sy, line, GEO_COL_DIM, sx, sy);
+            if (!ready && why)
+                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f) * sy, TR(why), GEO_COL_BAD, sx, sy);
+            if (order)
+                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
+                                   TR("RIGHT CLICK: UNDO"), GEO_COL_DIM, sx, sy);
         } else {
             const uint32_t vc = (s_verdict == TD5_GEO_ROUTE_OK) ? GEO_COL_OK : GEO_COL_BAD;
             fe_draw_text(lx * sx, (GEO_STATUS_Y - 3.0f) * sy, geo_verdict_text(), vc, sx, sy);
@@ -1594,11 +1685,16 @@ static void geo_screen_init(void)
      * Screen_AutoTrackOptions init); this screen reads the place from its own
      * map, so hand the decision back to the knob the way it was before. */
     td5_geo_force_place(NULL);
+    /* [GEO FREE ROAM F2-A] arriving on the map ends any pending roam: BACK / ESC out of the
+     * roam car select returns here without a dedicated hook, and a stale ARMED session would
+     * turn the next ordinary race into a roam race */
+    td5_roam_cancel();
+    s_strip = frontend_geo_strip_context();   /* [F11b] the strip BUILD: local multiplayer (or the dev knob) */
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,
                            GEO_BTN_CLEAR_W, GEO_BTN_H);
-    frontend_create_button(TR("BUILD TRACK"), GEO_BTN_BUILD_X, GEO_BTN_Y,
+    frontend_create_button(s_strip ? TR("BUILD TRACK") : TR("RACE ROUTE"), GEO_BTN_BUILD_X, GEO_BTN_Y,
                            GEO_BTN_BUILD_W, GEO_BTN_H);
     frontend_create_button(TR("BACK"), GEO_BTN_BACK_X, GEO_BTN_Y,
                            GEO_BTN_BACK_W, GEO_BTN_H);
@@ -1632,6 +1728,17 @@ static void geo_screen_init(void)
             TD5_LOG_E(LOG_TAG, "GEO GENERATOR: option sections cover %d of %d rows",
                       b, GEO_OPTS);
         geo_opt_set_sect(s_opt_sect);
+        if (!s_strip) {   /* [F11a] the panel's buttons stay (indices) but cannot be seen or focused */
+            s_buttons[GEO_BTN_SECT].hidden = s_buttons[GEO_BTN_SECT].disabled = 1;
+            s_buttons[GEO_BTN_DEFAULTS].hidden = s_buttons[GEO_BTN_DEFAULTS].disabled = 1;
+        }
+    }
+    {
+        /* [GEO FREE ROAM F2-A] FREE ROAM: drive the real city from the START pin (the first click) */
+        const int rb = frontend_create_button(TR("FREE ROAM"), GEO_BTN_ROAM_X, GEO_BTN_Y,
+                                              GEO_BTN_ROAM_W, GEO_BTN_H);
+        if (rb != GEO_BTN_ROAM)
+            TD5_LOG_E(LOG_TAG, "GEO GENERATOR: FREE ROAM button got index %d, expected %d", rb, GEO_BTN_ROAM);
     }
 
     /* Tiles are fetched only between open and close, so the screen is the
@@ -1879,6 +1986,102 @@ static int geo_commit_and_register(void)
     return slot;
 }
 
+/* [GEO FREE ROAM F2-A] The spawn for FREE ROAM: the START pin (the first click), as a point of a
+ * place that has built road tiles. 0 (button greyed) with no pin or outside the built tiles. */
+static int geo_roam_spawn(TD5_RoamSpawn *out)
+{
+    /* the lookup parses PLACE.JSON + ROAMGRID.JSON, so it is memoised on the pin (asked every frame) */
+    static struct { int valid; double lat, lon; int ok; TD5_RoamSpawn sp; } memo;
+    if (s_n_pts < 1) return 0;
+    if (!memo.valid || memo.lat != s_pts[0].lat || memo.lon != s_pts[0].lon) {
+        memset(&memo.sp, 0, sizeof memo.sp);
+        memo.ok = td5_roam_place_for_latlon(s_pts[0].lat, s_pts[0].lon, memo.sp.place,
+                                            sizeof memo.sp.place, &memo.sp.spawn_px, &memo.sp.spawn_pz);
+        memo.sp.spawn_yaw = -1;           /* along the nearest street */
+        memo.sp.car_index = 0;            /* the car-select screen fills it in */
+        memo.lat = s_pts[0].lat; memo.lon = s_pts[0].lon; memo.valid = 1;
+    }
+    if (memo.ok && out) *out = memo.sp;
+    return memo.ok;
+}
+
+/* FREE ROAM: arm the session, then the NORMAL car select (BACK there returns here, OK launches). */
+static void geo_do_roam(void)
+{
+    TD5_RoamSpawn sp;
+    if (!geo_roam_spawn(&sp)) { frontend_play_sfx(10); return; }
+    td5_roam_begin(&sp);
+    frontend_roam_prepare_car_select();
+    frontend_play_sfx(3);
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: FREE ROAM at %.5f,%.5f (%s) -> car select",
+              s_pts[0].lat, s_pts[0].lon, sp.place);
+    geo_leave(TD5_SCREEN_CAR_SELECTION);
+}
+
+/* [GEO FREE ROAM F11a] 1 when every pin can be raced in the city: 2..TD5_ROUTE_MAX_WP pins, all of
+ * them inside the built road tiles of ONE place (the START one). `why` = a short reason when not.
+ * Memoised on the pins (asked every frame; each lookup parses PLACE.JSON + ROAMGRID.JSON). */
+static int geo_race_city_ready(const char **why)
+{
+    static struct { int valid; uint32_t key; int ok; const char *why; } memo;
+    uint32_t key = 2166136261u;
+    int i;
+    const unsigned char *b = (const unsigned char *)s_pts;
+    for (i = 0; i < (int)(s_n_pts * (int)sizeof s_pts[0]); i++) key = (key ^ b[i]) * 16777619u;
+    key ^= (uint32_t)s_n_pts * 2654435761u;
+    if (!memo.valid || memo.key != key) {
+        TD5_RoamSpawn sp;
+        memo.valid = 1; memo.key = key; memo.ok = 0; memo.why = NULL;
+        if (s_n_pts < 2) memo.why = "PLACE A START AND A FINISH";
+        else if (s_n_pts > TD5_ROUTE_MAX_WP) memo.why = "AT MOST 24 POINTS IN THE CITY";
+        else if (!geo_roam_spawn(&sp)) memo.why = "START IS OUTSIDE THE CITY MAP";
+        else {
+            memo.ok = 1;
+            for (i = 1; i < s_n_pts && memo.ok; i++) {
+                char slug[64];
+                int32_t px, pz;
+                if (!td5_roam_place_for_latlon(s_pts[i].lat, s_pts[i].lon, slug, sizeof slug, &px, &pz) ||
+                    strcmp(slug, sp.place) != 0) {
+                    memo.ok = 0;
+                    memo.why = (i == s_n_pts - 1) ? "FINISH IS OUTSIDE THE CITY MAP" : "A POINT IS OUTSIDE THE CITY MAP";
+                }
+            }
+        }
+    }
+    if (why) *why = memo.why;
+    return memo.ok;
+}
+
+/* RACE ROUTE: free roam from START with the pins handed to the session; car select first, then the
+ * race setup panel opens over the route map once the city's planner has the route (td5_roam_handoff.h). */
+static void geo_do_race_city(void)
+{
+    TD5_RoamSpawn sp;
+    double ll[TD5_ROUTE_MAX_WP][2];
+    int i;
+    if (!geo_race_city_ready(NULL) || !geo_roam_spawn(&sp)) { frontend_play_sfx(10); return; }
+    for (i = 0; i < s_n_pts; i++) { ll[i][0] = s_pts[i].lat; ll[i][1] = s_pts[i].lon; }
+    td5_roam_begin(&sp);
+    if (!td5_roam_handoff_set((const double (*)[2])ll, s_n_pts, TD5_ROUTE_SPRINT, 1, TD5_HANDOFF_SETUP_PANEL, -1, 0, 0)) {
+        td5_roam_cancel();
+        frontend_play_sfx(10);
+        return;
+    }
+    frontend_roam_prepare_car_select();
+    frontend_play_sfx(3);
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: RACE ROUTE %d point(s) from %.5f,%.5f (%s) -> car select -> race in the city",
+              s_n_pts, s_pts[0].lat, s_pts[0].lon, sp.place);
+    geo_leave(TD5_SCREEN_CAR_SELECTION);
+}
+
+/* [F11a] The pins on the map (START first, FINISH last), for Quick Race's geospatial entry. */
+int frontend_geo_generator_points(double (*ll)[2], int max)
+{
+    int i, n = s_n_pts < max ? s_n_pts : max;
+    for (i = 0; i < n; i++) { ll[i][0] = s_pts[i].lat; ll[i][1] = s_pts[i].lon; }
+    return n;
+}
+
 static void geo_do_build(void)
 {
     if (geo_commit_and_register() >= 0) geo_leave(s_parent_screen);
@@ -1911,7 +2114,8 @@ void Screen_GeoGenerator(void)
     {
         static int s_autobuild_done;
         const int want = td5_env_int("TD5RE_GEO_AUTOBUILD_N", 1, 1, 4);
-        if (td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
+        /* [F11b] AUTOBUILD=1 is itself a dev strip request (td5_roam_strip_build_enabled), so s_strip is 1 */
+        if (s_strip && td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
             && s_autobuild_done < want && geo_route_is_buildable()) {
             int slot;
             TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - pressing "
@@ -1941,7 +2145,8 @@ void Screen_GeoGenerator(void)
 #endif
 
     s_buttons[GEO_BTN_CLEAR].disabled = (s_n_pts > 0) ? 0 : 1;
-    s_buttons[GEO_BTN_BUILD].disabled = geo_route_is_buildable() ? 0 : 1;
+    s_buttons[GEO_BTN_BUILD].disabled = (s_strip ? geo_route_is_buildable() : geo_race_city_ready(NULL)) ? 0 : 1;
+    s_buttons[GEO_BTN_ROAM].disabled = geo_roam_spawn(NULL) ? 0 : 1;
 
     if (frontend_check_escape()) {
         frontend_play_sfx(5);
@@ -1984,11 +2189,15 @@ void Screen_GeoGenerator(void)
             frontend_play_sfx(5);
             break;
         case GEO_BTN_BUILD:
-            geo_do_build();
+            if (s_strip) geo_do_build();
+            else geo_do_race_city();      /* [F11a] */
             return;
         case GEO_BTN_BACK:
             frontend_play_sfx(5);
             geo_leave(s_parent_screen);
+            return;
+        case GEO_BTN_ROAM:
+            geo_do_roam();
             return;
         default:
             /* confirm on a row (Enter, pad A, double click) = next value */

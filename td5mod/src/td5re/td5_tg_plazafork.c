@@ -53,7 +53,7 @@
  * report knob before). TD5RE_GEO_PLAZA_STRETCH_MAX (1.6) refuses a plaza whose far arc
  * would need spans longer than that many route spans (Plaza Dardo Rocha: 2.2x, measured: pile-ups).
  * TD5RE_GEO_PLAZA_SMOOTH (300) is the Laplacian pass count. TD5RE_GEO_FORK_DIAG=1 logs
- * every refusal, TD5RE_GEO_PLAZA_DUMP=1 writes log/pf_chain_<n>.csv.
+ * every refusal.
  *
  * BYTE-IDENTICAL SYNTHETIC BUILDS. Every entry point returns "nothing" with no geo
  * place loaded, and no tg_rand / tg_frand / tg_range is called here.
@@ -1068,20 +1068,6 @@ void tg_pf_finalize(const TG_NodeList *nl)
                       fi, P->name, P->F, P->len, P->R, P->k1, P->kx, P->la, P->lb,
                       P->ring_m, P->near_m, P->far_m, P->chain_m, P->nfree2, P->K2 - P->k1,
                       P->stretch, P->pitch, P->clen, P->min_r_m, P->max_dev_m);
-            if (td5_env_flag_off("TD5RE_GEO_PLAZA_DUMP")) {
-                char path[96]; FILE *fp;
-                snprintf(path, sizeof path, "log/pf_chain_%d.csv", fi);
-                fp = fopen(path, "w");
-                if (fp) {
-                    int k;
-                    fprintf(fp, "row,x,y,z,tx,tz\n");
-                    for (k = 0; k <= P->clen; k++) {
-                        const TG_Node *n = &P->rview.v[P->F + 1 + k];
-                        fprintf(fp, "%d,%.1f,%.1f,%.1f,%.4f,%.4f\n", k, n->x, n->y, n->z, n->tx, n->tz);
-                    }
-                    fclose(fp);
-                }
-            }
         }
     }
     if (s_runs > 0 || any) {

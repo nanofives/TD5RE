@@ -360,6 +360,8 @@ int  td5_game_battle_finish_secs_left(void);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);
+int  td5_game_resume_countdown_ticks(void);   /* [GEO FREE ROAM F6-B] resume / roam-sprint 3-2-1 ticks left */
+int  td5_game_roam_set_racer_field(int n_ai); /* [GEO FREE ROAM F7] player + n_ai live, rest parked (td5_race_state.h) */
 /* Pause-menu overlay queries consumed by the HUD renderer (td5_hud.c). */
 int  td5_game_pause_endrace_confirm_active(void);
 int  td5_game_pause_action_confirm(void);

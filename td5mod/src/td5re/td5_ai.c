@@ -46,6 +46,7 @@
 #define LOG_TAG "ai"
 
 #include "td5_ai_internal.h"
+#include "td5_roam_mode.h"   /* [GEO FREE ROAM F3-B] td5_roam_active: one-actor roam layout */
 
 int32_t *g_route_state_base;     /* 0x4AFB60 */
 char    *g_actor_base;           /* 0x4AB108 */
@@ -2497,6 +2498,11 @@ void td5_ai_init_race_actor_runtime(void) {
     /* --- Active actor count --- */
     if (is_time_trial) {
         g_active_actor_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
+    } else if (td5_roam_active()) {
+        /* [GEO FREE ROAM F3-B] roam spawns one actor (td5_game.c, set just before this
+         * call): keep its count, or the 6-slot default below brings back the five
+         * zeroed decoration slots with no car definition behind them */
+        g_active_actor_count = g_td5.total_actor_count > 0 ? g_td5.total_actor_count : 1;
     } else if (g_traffic_slot_base > TD5_LEGACY_RACE_SLOTS) {
         /* [PORT ENHANCEMENT] big split-screen field. Traffic (if enabled) spawns
          * at g_traffic_slot_base..+TD5_MAX_TRAFFIC_SLOTS, so the active-actor
@@ -9526,6 +9532,13 @@ void td5_ai_pre_tick(void) {
 /* [MP COP CHASE 2026-06-22] Arm a RACER slot as an AI-driven cop so the chase
  * driver (cop_drive) takes it over in td5_ai_update_actor and phys_top_speed
  * uncaps it (td5_ai_cop_is_chasing). is_ai==0 leaves the slot human-driven. */
+void td5_ai_roam_mark_cop(int slot, int is_cop) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    g_cop_is_cop[slot] = (uint8_t)(is_cop ? 1 : 0);
+    g_cop_phase[slot]  = COP_IDLE;
+    g_cop_target[slot] = -1;
+}
+
 void td5_ai_cop_chase_setup(int cop_slot, int is_ai) {
     if (cop_slot < 0 || cop_slot >= TD5_MAX_TOTAL_ACTORS) return;
     if (!is_ai) return;
@@ -9622,3 +9635,12 @@ void td5_ai_update_actor(int slot) {
  *     to g_zipDecompressOutputFile). Port uses td5_inflate_mem_to_mem in
  *     td5_inflate.c (no streaming callback needed). Not implemented anywhere.
  */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_ai_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    for (i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) { s_cop_ram_lastx[i] += (sx) * 256; s_cop_ram_lastz[i] += (sz) * 256; }
+}

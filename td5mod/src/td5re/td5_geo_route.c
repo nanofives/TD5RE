@@ -57,6 +57,7 @@
 #include "td5_geo_forks.h"
 #include "td5_geo_signals.h"
 #include "td5_geo_sidewalk.h"    /* [1011 C2] the per-place carriageway    */
+#include "td5_roam_height.h"     /* [ROAM F1-T2] dev-only height cross-check */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -480,8 +481,6 @@ static void gr_graph_free(void)
     free(s_g.heap);
     memset(&s_g, 0, sizeof s_g);
 }
-
-void td5_geo_route_drop_graph(void) { gr_graph_free(); }
 
 static int gr_hash_key(long long kx, long long kz, int mask)
 {
@@ -1331,7 +1330,7 @@ static void gr_components(int *out_comps, int *out_biggest)
  * SECTION: growable double-pair buffer
  * ======================================================================== */
 
-typedef struct { double *x, *z; int n, cap; } GrPts;
+/* GrPts is declared in td5_geo_route.h ([ROAM F1-T4] export of gr_resample). */
 
 static void gr_pts_free(GrPts *p) { free(p->x); free(p->z); p->x = p->z = NULL; p->n = p->cap = 0; }
 
@@ -1394,7 +1393,7 @@ static int gr_pts_push(GrPts *p, double x, double z)
  * nodes are exactly one span apart in EUCLIDEAN distance. Arc-length resampling
  * falls short at a corner -- measured 34.6 units at a 31.6 degree turn on the
  * La Plata route, which geo_audit R4 failed on. */
-static int gr_resample(const GrPts *in, double step, GrPts *out)
+int gr_resample(const GrPts *in, double step, GrPts *out)
 {
     int seg_i = 0;
     double t = 0.0;
@@ -3788,14 +3787,6 @@ int td5_geo_route_place_boundary(const char *slug, int ring, double *latlon, int
     return n;
 }
 
-int td5_geo_route_place_ring_count(const char *slug)
-{
-    cJSON *root = NULL, *rings = gr_place_boundary(slug, &root);
-    int n = rings ? cJSON_GetArraySize(rings) : 0;
-    if (root) cJSON_Delete(root);
-    return n;
-}
-
 const char *td5_geo_route_place_at(TD5_GeoLatLon p)
 {
     static char slug[64];
@@ -3839,26 +3830,6 @@ int td5_geo_route_places(char slugs[][64], double bbox[][4], int max)
         out++;
     }
     return out;
-}
-
-int td5_geo_route_snap(const char *slug, TD5_GeoLatLon p,
-                       TD5_GeoLatLon *out, double *dist_m)
-{
-    double x, z;
-    int n;
-    if (!slug || !slug[0]) slug = td5_geo_route_place_at(p);
-    if (!gr_graph_sync_pts(slug, &p, 1)) return 0;
-    gr_proj_to_world(&s_g.proj, p.lat, p.lon, &x, &z);
-    n = gr_nearest(x, z);
-    if (n < 0) return 0;
-    if (dist_m) *dist_m = gr_dist(s_g.nx[n], s_g.nz[n], x, z) / s_g.proj.upm;
-    if (out) gr_proj_to_latlon(&s_g.proj, s_g.nx[n], s_g.nz[n], &out->lat, &out->lon);
-    return 1;
-}
-
-const TD5_GeoRouteResult *td5_geo_route_last(void)
-{
-    return s_result.verdict == TD5_GEO_ROUTE_OK || s_result.n_path ? &s_result : NULL;
 }
 
 int td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult *out)
@@ -5069,14 +5040,7 @@ static int gr_write_route(const char *dir)
  * routed or built on, and is the shape "unable to read road graph" takes. */
 #define GR_GUARD_MIN_ROADS   GR_GRAPH_MIN_WAYS
 
-typedef struct {
-    int      kind;               /* 1 = int16, 2 = uint8 */
-    int      w, h;
-    double   origin_x, origin_z, cell, scale, bias, rotation;
-    int      nodata_raw;
-    void    *data;
-} GrRaster;
-
+/* GrRaster itself is declared in td5_geo_route.h (exported for td5_roam_height.c). */
 #define GR_RASTER_HEADER 72
 
 static double gr_rd_f64(const unsigned char *p)
@@ -5155,8 +5119,8 @@ static int gr_raster_peek(const char *path, GrRaster *out)
  * inside the rectangle (+pad) lands on the same cell and the same four
  * bilinear neighbours. A rectangle that misses the raster entirely gives a
  * 0x0 grid, which every sampler below reads as "outside = nodata". */
-static int gr_raster_read_window(const char *path, double wx0, double wz0,
-                                 double wx1, double wz1, int pad, GrRaster *out)
+int gr_raster_read_window(const char *path, double wx0, double wz0,
+                          double wx1, double wz1, int pad, GrRaster *out)
 {
     unsigned char h[GR_RASTER_HEADER];
     TD5_File *f = td5_plat_file_open(path, "rb");
@@ -6497,6 +6461,12 @@ int td5_geo_route_init(void)
     const int lvl = td5_env_int("TD5RE_GEO_ROUTE_TEST", 0, 0, 4);
     if (lvl > 0) {
         gr_self_test(lvl);
+        td5_geo_route_shutdown();
+        exit(0);
+    }
+    /* [ROAM F1-T2] TD5RE_ROAM_HEIGHT_TEST=1: source-window reader vs td5_geo_height. */
+    if (td5_env_int("TD5RE_ROAM_HEIGHT_TEST", 0, 0, 1) == 1) {
+        td5_roam_height_selftest();
         td5_geo_route_shutdown();
         exit(0);
     }

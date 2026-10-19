@@ -1777,6 +1777,15 @@ static inline int32_t v2v_scale_pct(int32_t x, int32_t pct)
     return (int32_t)(((int64_t)x * pct) / 100);
 }
 
+#ifndef TD5RE_RELEASE
+/* [roam F8e] DEV: the last V2V contact that reached the impulse (the ram test reads it) */
+static struct { long seq; int a, b, heavy, pct; int32_t mag; } s_v2v_dev;
+void td5_physics_dev_last_v2v(long *seq, int *a, int *b, int32_t *mag, int *heavy, int *pct)
+{
+    *seq = s_v2v_dev.seq; *a = s_v2v_dev.a; *b = s_v2v_dev.b; *mag = s_v2v_dev.mag; *heavy = s_v2v_dev.heavy; *pct = s_v2v_dev.pct;
+}
+#endif
+
 /* [TRAFFIC BATTLE 2026-06-28] In battle mode a WRECKED traffic car is intangible
  * — both the V2V impulse and the depenetration push skip any pair that includes
  * a broken-down traffic actor, so the player drives clean through wrecks (which
@@ -2256,6 +2265,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             g_wreck_push_ticks[B->slot_index] = WRECK_PUSH_TICKS;
     }
 
+#ifndef TD5RE_RELEASE
+    s_v2v_dev.seq++; s_v2v_dev.a = A->slot_index; s_v2v_dev.b = B->slot_index; s_v2v_dev.mag = impact_mag;
+    s_v2v_dev.heavy = 0; s_v2v_dev.pct = 100;
+#endif
     TD5_LOG_I(LOG_TAG, "v2v_impulse: side=%d slot_A=%d slot_B=%d mA=%d mB=%d "
               "cxA=%d czA=%d cxB=%d czB=%d imp=%d mag=%d toi=%d",
               is_side_branch, A->slot_index, B->slot_index, mass_A, mass_B,
@@ -2392,6 +2405,12 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int a_is_npc = (A->slot_index >= g_traffic_slot_base);
     int b_is_npc = (B->slot_index >= g_traffic_slot_base);
     int32_t heavy_gate = (a_is_npc || b_is_npc) ? npc_fatal_mag() : 90000;
+    /* [GEO FREE ROAM F8e] gentler gate in roam (0 outside roam: faithful) + damped racer response above it */
+    {
+        const int32_t rg = roam_crash_heavy();
+        if (rg > heavy_gate) heavy_gate = rg;
+    }
+    const int roam_pct = roam_crash_pct(impact_mag);
     /* [POLICE 2026-06-24] Cop durability: a cop only takes the dramatic crash
      * reaction (scatter + break-down) above 2.5x the traffic floor. A cop hit
      * between heavy_gate and cop_gate is "tough" — it shrugs the collision off
@@ -2413,6 +2432,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     const int     arc_launch_div   = 6;
     const int32_t arc_launch_clamp = 200000;
     if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
+#ifndef TD5RE_RELEASE
+        s_v2v_dev.heavy = 1; s_v2v_dev.pct = roam_pct;
+#endif
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
         int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
@@ -2434,6 +2456,11 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int32_t lift_a = impact_mag / arc_launch_div;
             if (lift_a > arc_launch_clamp) lift_a = arc_launch_clamp;
             lift_a = v2v_scale_pct(lift_a, rear_retain);
+            if (roam_pct < 100) {   /* [roam F8e] */
+                a_kick_ry = v2v_scale_pct(a_kick_ry, roam_pct);
+                a_kick_p  = v2v_scale_pct(a_kick_p,  roam_pct);
+                lift_a    = v2v_scale_pct(lift_a,    roam_pct);
+            }
             /* [WEIGHT fly-away 2026-06-25] Lighter cars get a bigger vertical pop,
              * heavier cars stay planted. Per-car Q8 from collision_mass; the
              * horizontal knockback is already mass-driven by the faithful impulse.
@@ -2462,9 +2489,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
              * arcade/sim launch scaling above. Knob TD5RE_WEIGHT_LIFT_PCT. */
             lift_b = td5_physics_scale_lift_q8(lift_b, td5_physics_weight_lift_q8(B));
             if (b_is_cop) lift_b = 0;             /* [POLICE] no airborne for a cop */
-            B->angular_velocity_roll  -= kick_ry;
-            B->angular_velocity_yaw   -= kick_ry;
-            B->angular_velocity_pitch -= kick_p;
+            lift_b = v2v_scale_pct(lift_b, roam_pct);                  /* [roam F8e] 100 outside roam */
+            B->angular_velocity_roll  -= v2v_scale_pct(kick_ry, roam_pct);
+            B->angular_velocity_yaw   -= v2v_scale_pct(kick_ry, roam_pct);
+            B->angular_velocity_pitch -= v2v_scale_pct(kick_p,  roam_pct);
             B->linear_velocity_y  = lift_b;
         } else {
             /* Traffic: scripted crash-spin recovery, orig 0x00408289+. */

@@ -1,0 +1,14 @@
+# [GEO FREE ROAM F11a] SELECT TRACK (--StartScreen=21 --StartScreenDirect=1 --DefaultTrack=61, the
+# GEOSPATIAL entry) -> UP wraps onto OK -> ENTER -> the single race launches IN THE CITY (roam
+# session at the route START, the handoff autostarts the race) -> drive.
+sync menu
+480 log TRKSEL_ON_GEO
++30 key up press
++60 log TRKSEL_ON_OK
++30 key enter press
++600 log AFTER_OK
+sync race
+600 log RACE_EXPECTED
++10 throttle 1
++900 log DRIVEN
++10 quit

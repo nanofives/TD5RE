@@ -1,0 +1,4 @@
+# F11a: look at the geo selector buttons
+sync menu
+900 log GEO_SETTLED
++300 quit

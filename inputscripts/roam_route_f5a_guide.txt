@@ -1,0 +1,21 @@
+# F5-A: pause menu hint, map from the pause menu (START at the car, FINISH ahead), back to the pause menu,
+# resume, then look at the on-road guidance. Needs TD5RE_ROAM_DRIVE=street (autopilot).
+sync race
++200 key esc press
++40 key 0x44 press
++10 key 0x32 press
++40 key 0x02 press
++10 key up 1
++30 key up 0
++10 key right 1
++30 key right 0
++10 key 0x04 press
++40 key 0x44 press
++10 key 0x32 press
++40 key 0x44 press
++10 key esc press
++240 key 0x44 press
++120 key 0x44 press
++120 key 0x44 press
++30 log f5a_guide_done
+quit

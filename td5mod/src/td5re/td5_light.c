@@ -18,6 +18,7 @@
 #include "td5_light.h"
 #include "td5_platform.h"
 #include "td5_track.h"       /* td5_track_probe_height — static per-lamp floor Y */
+#include "td5_roam_furniture.h" /* [F4f] td5_roam_night_active */
 #include "td5_rt.h"          /* [RT2 P7] td5_rt_active() — HIGH street-lamp default */
 #include "td5_render.h"      /* td5_render_actor_display_pose — beams ride the drawn body */
 
@@ -511,7 +512,7 @@ void td5_light_emit_street_lamps(void)
      * default ON in HIGH. LOW keeps s_street_lights (default OFF) untouched —
      * no lamps enter the registry in LOW, so the LOW light system is byte-
      * identical. (The dark-only + nearest-N budget gates below still apply.) */
-    int want_lamps = s_street_lights || td5_rt_active();
+    int want_lamps = s_street_lights || td5_rt_active() || td5_roam_night_active();   /* [F4f] roam night */
     if (!s_enabled || !want_lamps || s_lamp_count <= 0) return;
     /* Street lamps follow the auto-headlight verdict: on in rain/dusk/dark
      * zones, off in bright daylight. Tunnel lamps live INSIDE a tunnel, so they
@@ -751,4 +752,13 @@ void td5_light_emit_street_lamps(void)
                       gi >= 0 ? (double)sqrtf(gd2) : -1.0);
         }
     }
+}
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_light_world_shift(int32_t sx, int32_t sz)
+{
+    int i;
+    for (i = 0; i < s_lamp_count; i++) { s_lamp_pos[i][0] += (float)sx; s_lamp_pos[i][2] += (float)sz; }
 }

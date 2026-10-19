@@ -228,6 +228,10 @@ void td5_physics_rebuild_pose(TD5_Actor *actor);
  * traffic car is "fatal" (TD5RE_NPC_FATAL_MAG). Shared with the battle-mode
  * scoring hook td5_game_battle_note_ram so both use one threshold. */
 int32_t td5_physics_npc_fatal_mag(void);
+#ifndef TD5RE_RELEASE
+/* [roam F8e] DEV: the last V2V contact (seq counts impulses; heavy = scatter branch taken; pct = racer damping) */
+void td5_physics_dev_last_v2v(long *seq, int *a, int *b, int32_t *mag, int *heavy, int *pct);
+#endif
 void td5_physics_set_paused(int paused); /* 1=countdown (RPM only), 0=full sim */
 void td5_physics_set_xz_freeze(int freeze); /* 1=freeze XZ pos (countdown), 0=normal */
 void td5_physics_set_race_slot_state(int slot, int is_human); /* 1=player, 0=AI */
@@ -284,5 +288,10 @@ int  td5_physics_shift_quality_bonus_pct(int slot);
 /* Bonus percent to DISPLAY for `slot`, or -1 when there is nothing to show
  * (automatic gearbox / feature off / no such actor). HUD-facing. */
 int  td5_physics_shift_quality_hud_pct(int slot);
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_physics_world_shift(int32_t sx, int32_t sz);
 
 #endif /* TD5_PHYSICS_H */

@@ -71,6 +71,12 @@ int  td5_ai_driver_tick(int slot);
  * the `driver` trace module for target-vs-actual calibration in later phases. */
 int  td5_ai_driver_target_speed(int slot);
 
+/* [P4] A driver's personality, a pure function of (slot, difficulty tier): skill 0.12..0.99,
+ * aggression 0.25..0.95, consistency 0.40..0.97, line_bias -1..+1. The race init derives the
+ * DRIVER-mode table from it; the free-roam route driver (td5_roam_ai.c) reads the same values. */
+void td5_ai_driver_persona(int slot, int tier, float *skill, float *aggression,
+                           float *consistency, float *line_bias);
+
 /* Current recovery-FSM state for a slot (0=NORMAL,1=AIRBORNE,2=SPUN,3=STUCK),
  * for the `driver` trace / diagnostics. */
 int  td5_ai_driver_rec_state(int slot);

@@ -44,6 +44,90 @@ static TD5_LogFile s_log_files[TD5_LOG_CAT_COUNT];
 static char s_log_dir[512];
 static int  s_log_initialized = 0;
 
+/* [roam F3-B] ASYNC LOG WRITER. A log flush used to be a synchronous WriteFile on
+ * whatever thread logged the 256th line or filled a 4 KB buffer, usually the main
+ * thread; under disk load NtWriteFile blocked it for 100 ms .. 1 s (td5_hitchwatch
+ * stacks: td5_plat_log -> WriteFile from physics, render, input, camera). Now the
+ * buffers are handed to one writer thread as FIFO chunks (file order unchanged) and
+ * the logging thread never touches the disk, except: ERROR lines and explicit
+ * td5_plat_log_flush (shutdown, crash handler) drain synchronously, and past
+ * LW_BACKPRESSURE queued bytes the logger writes inline rather than grow without
+ * bound. The buffers are under `cs` now: the roam stream worker and the main thread
+ * both log, and the old code appended to the same buffer with no lock. */
+#define LW_BACKPRESSURE (32u << 20)
+/* h = an open log/console handle to append to; or path != NULL: a whole-file write
+ * (td5_plat_file_write_async: create/truncate, write, close) */
+typedef struct LogChunk { struct LogChunk *next; HANDLE h; char *path; DWORD n; char data[1]; } LogChunk;
+typedef struct {
+    CRITICAL_SECTION cs;        /* the category buffers + the queue          */
+    CRITICAL_SECTION io;        /* one drainer at a time: chunks in order    */
+    LogChunk        *head, *tail;
+    size_t           queued;
+    HANDLE           wake, thread;
+    volatile LONG    stop;
+    int              cs_live, live;
+} TD5_LogWriter;
+static TD5_LogWriter s_lw;
+
+/* append one chunk (caller holds cs when cs_live). 0 = no memory: caller writes inline */
+static int lw_enqueue(HANDLE h, const char *p, size_t n)
+{
+    LogChunk *c;
+    if (!n || h == INVALID_HANDLE_VALUE || !h) return 1;
+    c = (LogChunk *)malloc(sizeof(LogChunk) + n);
+    if (!c) return 0;
+    c->next = NULL; c->h = h; c->path = NULL; c->n = (DWORD)n;
+    memcpy(c->data, p, n);
+    if (s_lw.tail) s_lw.tail->next = c; else s_lw.head = c;
+    s_lw.tail = c;
+    s_lw.queued += n;
+    return 1;
+}
+
+/* write every queued chunk in order on the calling thread; wait_ms < 0 = block for io */
+static void lw_drain(int wait_ms)
+{
+    DWORD written;
+    if (!s_lw.cs_live) return;
+    if (wait_ms < 0) EnterCriticalSection(&s_lw.io);
+    else {
+        int t = 0;
+        while (!TryEnterCriticalSection(&s_lw.io)) { if (t >= wait_ms) return; Sleep(1); t++; }
+    }
+    for (;;) {
+        LogChunk *c;
+        EnterCriticalSection(&s_lw.cs);
+        c = s_lw.head;
+        if (c) { s_lw.head = c->next; if (!s_lw.head) s_lw.tail = NULL; s_lw.queued -= c->n; }
+        LeaveCriticalSection(&s_lw.cs);
+        if (!c) break;
+        if (c->path) {
+            HANDLE fh = CreateFileA(c->path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, NULL);
+            if (fh != INVALID_HANDLE_VALUE) {
+                WriteFile(fh, c->data, c->n, &written, NULL);
+                CloseHandle(fh);
+            }
+            free(c->path);
+        } else {
+            WriteFile(c->h, c->data, c->n, &written, NULL);
+        }
+        free(c);
+    }
+    LeaveCriticalSection(&s_lw.io);
+}
+
+static DWORD WINAPI lw_thread(LPVOID param)
+{
+    (void)param;
+    while (!InterlockedCompareExchange(&s_lw.stop, 0, 0)) {
+        WaitForSingleObject(s_lw.wake, 200);
+        lw_drain(-1);
+    }
+    lw_drain(-1);
+    return 0;
+}
+
 /* Runtime log filters (set via td5_plat_log_set_filters from main.c after INI
  * parse). Defaults match the historic behavior: master on, INFO and above,
  * all three categories enabled. */
@@ -190,17 +274,44 @@ static int td5_log_classify_module(const char *module)
     return TD5_LOG_CAT_ENGINE;
 }
 
+/* Hand the category buffer to the writer (caller holds s_lw.cs when it is live). Without
+ * the writer (not started, or out of memory) it is written here, as it always was. */
 static void td5_log_flush_file(TD5_LogFile *lf)
 {
     DWORD written;
     if (lf->handle == INVALID_HANDLE_VALUE || lf->buffer_used == 0) return;
-    WriteFile(lf->handle, lf->buffer, (DWORD)lf->buffer_used, &written, NULL);
+    if (!s_lw.live || !lw_enqueue(lf->handle, lf->buffer, lf->buffer_used))
+        WriteFile(lf->handle, lf->buffer, (DWORD)lf->buffer_used, &written, NULL);
     lf->buffer_used = 0;
+}
+
+/* Every category buffer into the queue, then the queue to disk on this thread. The
+ * crash handler calls this too: if the crashed thread holds cs, it waits at most
+ * ~100 ms and then writes the buffers unlocked (the old best-effort behaviour). */
+static void td5_log_drain_all(void)
+{
+    int i, t = 0, locked = 0;
+    if (s_lw.cs_live) {
+        while (!(locked = TryEnterCriticalSection(&s_lw.cs)) && t < 100) { Sleep(1); t++; }
+    }
+    for (i = 0; i < TD5_LOG_CAT_COUNT; i++) td5_log_flush_file(&s_log_files[i]);
+    if (locked) LeaveCriticalSection(&s_lw.cs);
+    lw_drain(500);
 }
 
 static void td5_plat_log_shutdown(void)
 {
     int i;
+    td5_log_drain_all();
+    if (s_lw.thread) {
+        InterlockedExchange(&s_lw.stop, 1);
+        SetEvent(s_lw.wake);
+        WaitForSingleObject(s_lw.thread, 2000);
+        CloseHandle(s_lw.thread);
+        s_lw.thread = NULL;
+    }
+    s_lw.live = 0;                 /* anything logged from here on is written inline */
+    lw_drain(500);
     for (i = 0; i < TD5_LOG_CAT_COUNT; i++) {
         if (s_log_files[i].handle != INVALID_HANDLE_VALUE) {
             td5_log_flush_file(&s_log_files[i]);
@@ -284,6 +395,17 @@ void td5_plat_log_init(void)
         td5_log_rotate_file(base);
     }
 
+    /* [roam F3-B] the async writer (see TD5_LogWriter). TD5RE_LOG_ASYNC=0 keeps every
+     * write on the logging thread, as before. */
+    InitializeCriticalSection(&s_lw.cs);
+    InitializeCriticalSection(&s_lw.io);
+    s_lw.cs_live = 1;
+    if (td5_env_int("TD5RE_LOG_ASYNC", 1, 0, 1)) {
+        s_lw.wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+        if (s_lw.wake) s_lw.thread = CreateThread(NULL, 64 * 1024, lw_thread, NULL, 0, NULL);
+        s_lw.live = s_lw.thread != NULL;
+    }
+
     atexit(td5_plat_log_shutdown);
     s_log_initialized = 1;
 }
@@ -360,46 +482,96 @@ void td5_plat_log(TD5_LogLevel level, const char *module, const char *fmt, ...)
     cat = td5_log_classify_module(module);
     lf = &s_log_files[cat];
 
-    if (lf->handle != INVALID_HANDLE_VALUE) {
-        size_t len = strlen(buf);
-        if (len > sizeof(lf->buffer)) {
-            td5_log_flush_file(lf);
-            WriteFile(lf->handle, buf, (DWORD)len, &written, NULL);
-        } else {
-            if (lf->buffer_used + len > sizeof(lf->buffer)) {
+    {
+        const size_t len = strlen(buf);
+        int sync = 0;
+        if (s_lw.cs_live) EnterCriticalSection(&s_lw.cs);
+        if (lf->handle != INVALID_HANDLE_VALUE) {
+            if (len > sizeof(lf->buffer)) {
                 td5_log_flush_file(lf);
+                if (!s_lw.live || !lw_enqueue(lf->handle, buf, len))
+                    WriteFile(lf->handle, buf, (DWORD)len, &written, NULL);
+            } else {
+                if (lf->buffer_used + len > sizeof(lf->buffer)) {
+                    td5_log_flush_file(lf);
+                }
+                memcpy(lf->buffer + lf->buffer_used, buf, len);
+                lf->buffer_used += len;
             }
-            memcpy(lf->buffer + lf->buffer_used, buf, len);
-            lf->buffer_used += len;
+            lf->line_count++;
+            /* Flush periodically — only on ERROR or every 256 messages.
+             * Flushing on WARN caused thousands of synchronous WriteFile calls per
+             * frame during rendering (invalid mesh opcodes, wall impulse logs),
+             * which was the root cause of the 5-10 second frame freeze in race mode.
+             * [roam F3-B] "flush" = hand to the writer thread; an ERROR is still
+             * written to disk before returning (it may precede a crash). */
+            if (level >= TD5_LOG_ERROR || (lf->line_count % 256) == 0) {
+                td5_log_flush_file(lf);
+                sync = level >= TD5_LOG_ERROR;
+            }
         }
-        lf->line_count++;
-        /* Flush to disk periodically — only on ERROR or every 256 messages.
-         * Flushing on WARN caused thousands of synchronous WriteFile calls per
-         * frame during rendering (invalid mesh opcodes, wall impulse logs),
-         * which was the root cause of the 5-10 second frame freeze in race mode. */
-        if (level >= TD5_LOG_ERROR || (lf->line_count % 256) == 0) {
-            td5_log_flush_file(lf);
-        }
-    }
 
-    /* Echo WARN and ERROR to the console (visible even when running from IDE) */
-    if (level >= TD5_LOG_WARN) {
-        HANDLE hcon = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (hcon && hcon != INVALID_HANDLE_VALUE) {
-            DWORD written2;
-            WriteFile(hcon, buf, (DWORD)strlen(buf), &written2, NULL);
+        /* Echo WARN and ERROR to the console (visible even when running from IDE).
+         * [roam F3-B] through the writer too: a console or pipe can block as well. */
+        if (level >= TD5_LOG_WARN) {
+            HANDLE hcon = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (hcon && hcon != INVALID_HANDLE_VALUE) {
+                if (!s_lw.live || !lw_enqueue(hcon, buf, len)) {
+                    DWORD written2;
+                    WriteFile(hcon, buf, (DWORD)len, &written2, NULL);
+                }
+            }
+        }
+        if (s_lw.queued > LW_BACKPRESSURE) sync = 1;   /* the disk cannot keep up: write inline */
+        if (s_lw.cs_live) LeaveCriticalSection(&s_lw.cs);
+        if (s_lw.live) {
+            if (sync) lw_drain(-1);
+            else if (s_lw.head) SetEvent(s_lw.wake);
         }
     }
+}
+
+/* [roam F3-B] Write a whole small file (create/truncate) on the log writer thread, in
+ * queue order with the logs; drained at shutdown and by td5_plat_log_flush. Without the
+ * writer (TD5RE_LOG_ASYNC=0, or no memory) it is written here. */
+void td5_plat_file_write_async(const char *path, const void *data, size_t n)
+{
+    LogChunk *c = NULL;
+    if (!path) return;
+    if (!s_log_initialized) td5_plat_log_init();
+    if (s_lw.live) {
+        c = (LogChunk *)malloc(sizeof(LogChunk) + n);
+        if (c) {
+            c->path = _strdup(path);
+            if (!c->path) { free(c); c = NULL; }
+        }
+    }
+    if (!c) {
+        HANDLE fh = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (fh != INVALID_HANDLE_VALUE) {
+            DWORD written;
+            WriteFile(fh, data, (DWORD)n, &written, NULL);
+            CloseHandle(fh);
+        }
+        return;
+    }
+    c->next = NULL; c->h = NULL; c->n = (DWORD)n;
+    if (n) memcpy(c->data, data, n);
+    EnterCriticalSection(&s_lw.cs);
+    if (s_lw.tail) s_lw.tail->next = c; else s_lw.head = c;
+    s_lw.tail = c;
+    s_lw.queued += n;
+    LeaveCriticalSection(&s_lw.cs);
+    SetEvent(s_lw.wake);
 }
 
 void td5_plat_log_flush(void)
 {
     int i;
+    td5_log_drain_all();
     for (i = 0; i < TD5_LOG_CAT_COUNT; i++) {
-        if (s_log_files[i].handle != INVALID_HANDLE_VALUE) {
-            td5_log_flush_file(&s_log_files[i]);
+        if (s_log_files[i].handle != INVALID_HANDLE_VALUE)
             FlushFileBuffers(s_log_files[i].handle);
-        }
     }
 }
 

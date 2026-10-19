@@ -752,8 +752,6 @@ int td5_geo_route_name_id(int i)
     return s_route.sn[i];
 }
 
-int td5_geo_route_name_count(void) { return s_route.n ? s_route.n_names : 0; }
-
 const char *td5_geo_route_name_by_id(int id)
 {
     if (!s_route.names || id < 0 || id >= s_route.n_names) return "";
@@ -975,6 +973,12 @@ int td5_geo_places_rescan(void)
         td5_plat_file_close(f);
         td5_geo_place_path(path, sizeof(path), e->d_name, "ROUTE.JSON");
         f = td5_plat_file_open(path, "rb");
+        /* [GEO FREE ROAM F11b] A place with built roam tiles is raceable in the city without any strip
+         * BUILD (the GEOSPATIAL entry, FREE ROAM, RACE ROUTE), so its roam grid registers it as well. */
+        if (!f) {
+            td5_geo_source_path(path, sizeof(path), e->d_name, "roam/ROAMGRID.JSON");
+            f = td5_plat_file_open(path, "rb");
+        }
         if (!f) {                            /* no route: not raceable yet */
             /* [ROUND 1015 F] A TILED place with no built track is buildable
              * from the map, so it is listed for routing (not for racing). */
@@ -1129,8 +1133,6 @@ int td5_geo_preview_route(const char *slug)
               slug, s_preview.n, total, stride);
     return s_preview.n;
 }
-
-int td5_geo_preview_count(void) { return s_preview.n; }
 
 int td5_geo_preview_node(int i, double *x, double *z)
 {

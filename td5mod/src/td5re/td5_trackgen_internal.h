@@ -2269,6 +2269,8 @@ int tg_finish_span(int ring);
  * stats so the track-select ticks land on the spans the level ships. */
 int tg_checkpoint_spans(int ring, int *cp_span);
 int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans, TG_Buf *out);
+/* [GEO FREE ROAM F11b] the roam host's TEXTURES.DAT (td5_tg_pages.c): the fixed page block only */
+int tg_emit_roam_host_textures(TG_Buf *out);
 /* ==========================================================================
  * MODELS.DAT -- road surface mesh
  *
@@ -6158,6 +6160,13 @@ int  tg_emit_mastarm(const TG_NodeList *nl, int si, double side, double gap, dou
 int  tg_mastarm_plate_pages(void);
 void tg_mastarm_emit_plate_page(TG_Buf *out, int p);
 void tg_mastarm_report(void);
+/* [ROAM F4c] The plate TEXT planner, pure (no state): upper-case a UTF-8 street name,
+ * and lay it out in a 64-texel cell (one row, or two split at the best space, abbreviating
+ * only as far as it needs). Roam builds its own plate atlas with the same rules. Returns
+ * the row count (1 or 2); *abbreviated says a word was shortened. */
+void tg_plate_upper(const char *in, char *out, size_t cap);
+int  tg_plate_plan(const char *upper_name, char *l1, char *l2, size_t cap, int *abbreviated);
+int  tg_plate_split2(const char *upper_one_line, char *l1, char *l2, size_t cap);
 
 /* ================== GEO STREET LEVEL (round 1011 C4) ====================
  * Zebras at real highway=crossing nodes, bus stops at real highway=bus_stop

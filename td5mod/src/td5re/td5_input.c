@@ -40,6 +40,11 @@
 #include "td5_control.h"     /* live-control per-slot action bits (dev-only) */
 #include "td5_net.h"     /* td5_net_is_active/td5_net_local_slot — FFB netplay-vs-local branch */
 #include "td5_chaos.h"   /* [CHAOS CO-OP 2026-09-29] seat roles + the N-seat -> 2-car input fold */
+#include "td5_roam_physics.h"   /* [roam F2-B] DEV roam drive harness bits */
+#include "td5_roam_drive.h"      /* [roam F2-D] DEV roam selftest scripted drive */
+#include "td5_roam_race.h"       /* [roam F6-B] sprint: brake at the finish; DEV sprint selftest drive */
+#include "td5_roam_ram_test.h"    /* [roam F8e] DEV ram selftest drive */
+#include "td5_roam_cops.h"       /* [roam F10] BUSTED hold; DEV cops selftest drive */
 
 /* Defined in td5_game.c */
 
@@ -981,7 +986,17 @@ void td5_input_poll_race_session(void)
 #ifndef TD5RE_RELEASE
             if (i == 0) s_control_bits[i] |= td5_track_dev_gap_drive_bits(td5_game_get_actor(0));   /* [R1023 D] DEV: TD5RE_GAP_DRIVE */
             if (i == 0) s_control_bits[i] |= td5_track_dev_median_drive_bits(td5_game_get_actor(0)); /* [R1030 E] DEV: TD5RE_MEDIAN_DRIVE */
+            if (i == 0) s_control_bits[i] |= td5_roam_dev_drive_bits(td5_game_get_actor(0));        /* [roam F2-B] DEV: TD5RE_ROAM_DRIVE */
+            if (i == 0) s_control_bits[i] |= td5_roam_drive_bits(td5_game_get_actor(0));            /* [roam F2-D] DEV: selftest `roam` rows */
+            if (i == 0) s_control_bits[i] |= td5_roam_sprint_test_bits(td5_game_get_actor(0));      /* [roam F6-B] DEV: selftest `roam-sprint` rows */
+            if (i == 0) s_control_bits[i] |= td5_roam_cops_test_bits(td5_game_get_actor(0));        /* [roam F10] DEV: selftest `roam-cops` rows */
+            if (i == 0) s_control_bits[i] |= td5_roam_ram_test_bits(td5_game_get_actor(0));         /* [roam F8e] DEV: selftest `roam-ram` row */
 #endif
+            /* [roam F6-B] a finished roam sprint brakes the car to a stop under the results panel
+             * (bits unchanged outside a roam sprint) */
+            if (i == 0) s_control_bits[i] = td5_roam_race_filter_bits(i, s_control_bits[i]);
+            /* [roam F10] BUSTED: the car is held braked under the banner (bits unchanged otherwise) */
+            if (i == 0) s_control_bits[i] = td5_roam_cops_filter_bits(i, s_control_bits[i]);
 
 #ifndef TD5RE_RELEASE
             /* [CHAOS CO-OP 2026-10-01] TD5RE_CHAOS_FAKE_PADS=1 — re-encode a

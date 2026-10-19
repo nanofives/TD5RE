@@ -37,6 +37,7 @@
 #ifndef TD5_REPLAY_H
 #define TD5_REPLAY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* 1 when the ghost recorder/pose path is enabled (TD5RE_GHOST_REPLAY != "0").
@@ -47,6 +48,9 @@ int  td5_replay_ghost_enabled(void);
 /* Start a fresh recording for the race about to run. Clears any previous
  * buffer and captures the actor count. No-op when ghost replay is disabled. */
 void td5_replay_begin_record(void);
+
+/* [roam F8b] stop recording and free the buffer (a race that offers no View Replay: free roam). */
+void td5_replay_discard(void);
 
 /* Switch to playback for a "View Replay" race. Keeps the buffer recorded by the
  * preceding race. No-op when ghost replay is disabled or nothing was recorded. */
@@ -67,6 +71,11 @@ int  td5_replay_is_recording(void);
 /* Number of live sub-tick frames captured in the current buffer. */
 int  td5_replay_frame_count(void);
 
+/* [roam F8b] bytes the record buffer holds right now (capacity, not frames used). It grows by doubling
+ * (all actor slots every tick: ~4.4 KB a tick with roam's 30 slots), so a long session's private bytes
+ * step up with it; the roam traffic soak takes it out of its leak verdict. */
+size_t td5_replay_buffer_bytes(void);
+
 /* 1 once `sim_tick` has reached/passed the last recorded frame, i.e. the replay
  * has played back everything that was captured. pose_tick clamps (freezes) on
  * the final pose past this point, so the caller uses this to END the replay
@@ -81,5 +90,10 @@ int  td5_replay_playback_at_end(uint32_t sim_tick);
  * Both return 0 outside a ghost replay / for an out-of-range slot. */
 int  td5_replay_actor_broken(int slot);       /* 1 = broken-down that frame */
 int  td5_replay_actor_smoke_tier(int slot);   /* 0..3 damage smoke tier      */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_replay_world_shift(int32_t sx, int32_t sz);
 
 #endif /* TD5_REPLAY_H */

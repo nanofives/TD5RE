@@ -236,6 +236,10 @@ int  td5_ai_cop_chase_throttle_boost_q8(int slot);
 /* [MP COP CHASE 2026-06-22] Arm a racer slot as an AI-driven cop (is_ai=0 =
  * human cop, no-op). The chase driver takes the slot over each tick. */
 void td5_ai_cop_chase_setup(int cop_slot, int is_ai);
+/* [GEO FREE ROAM F10] mark / unmark a roam cop slot (td5_roam_cops.c): the police mesh and the cop collision
+ * rules (tough, no lift) follow g_cop_is_cop. Phase stays IDLE: the roam cop driver owns the chase, so the
+ * span-based chase boost and corner test never run for it. */
+void td5_ai_roam_mark_cop(int slot, int is_cop);
 /* Steady strobe intensity (0..0x1000) for the cop-light glow; 0 if not chasing. */
 int  td5_ai_cop_glow_intensity(int slot);
 /* 1 when `slot` (racer or traffic/cop) is in the broken-down/parked state. */
@@ -320,5 +324,10 @@ void td5_ai_update_actor(int slot);
  *   0x379: vehicle_mode (byte)
  *   0x384: special_encounter_state (int)
  * ======================================================================== */
+
+/* [GEO FREE ROAM F9b] World-origin rebase: the roam world frame moved by (-sx, -sz) world units,
+ * so every stored WORLD position gets (sx, sz) added (24.8 values FP_SCALE(sx)). Called only by
+ * td5_roam_rebase.c at the top of a sim tick; never on a strip race. */
+void td5_ai_world_shift(int32_t sx, int32_t sz);
 
 #endif /* TD5_AI_H */

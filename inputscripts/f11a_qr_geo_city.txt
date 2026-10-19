@@ -1,0 +1,20 @@
+# [GEO FREE ROAM F11a] QUICK RACE -> GEOSPATIAL entry (LEFT from slot 0 wraps onto it) -> OK ->
+# (Quick Race opens on track 1: two LEFTs.) The city race (roam session at the route START, the handoff plants the route and AUTOSTARTS the
+# race with Quick Race's opponents / traffic / cops) -> drive.
+sync menu
+240 log QR_SLOT0
++30 key down press
++60 key left press
++60 key left press
++120 log QR_ON_GEO
++30 key down press
++30 key down press
++30 key down press
++60 log QR_ON_OK
++30 key enter press
++600 log AFTER_OK
+sync race
+900 log RACE_EXPECTED
++10 throttle 1
++1500 log DRIVEN
++10 quit

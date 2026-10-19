@@ -298,6 +298,20 @@ double tg_world_h(double x, double z)
 
 double tg_world_sea_y(void) { return s_w.built ? s_w.sea_abs - s_w.h0 : -1e9; }
 
+/* [F1-T10] The last GEO build's h0, kept past tg_world_free for the roam dev
+ * viewer: strip y = raw - h0, and h0 holds the synthetic detail octave at the
+ * origin, which the DEM height there does not (level091: 144 units). Written
+ * only by tg_world_build; read-only for everything else. */
+static double s_geo_h0;
+static int    s_geo_h0_ok;
+
+int tg_world_geo_h0(double *out)
+{
+    if (!s_geo_h0_ok) return 0;
+    if (out) *out = s_geo_h0;
+    return 1;
+}
+
 double tg_world_water_y(double x, double z)
 {
     const double sea = tg_world_sea_y();
@@ -612,6 +626,8 @@ int tg_world_build(unsigned int seed, int target_spans)
         s_w.ox = 0.0;
         s_w.oz = 0.0;
         s_w.h0 = tg_w_raw(0.0, 0.0);
+        s_geo_h0 = s_w.h0;
+        s_geo_h0_ok = 1;
         td5_geo_grid(&gw, &gh, NULL, NULL, NULL, &grid_rot);
         TD5_LOG_I(LOG_TAG, "trackgen: [WORLD] GEO \"%s\" seed=%u grid=%dx%d "
                   "rot=%.6frad h0=%.0f sea=%.0f relief-knob=%.0f (detail octave "
@@ -648,6 +664,7 @@ int tg_world_build(unsigned int seed, int target_spans)
         }
         s_w.ox = bx; s_w.oz = bz;
         s_w.h0 = tg_w_raw(bx, bz);
+        s_geo_h0_ok = 0;                 /* a synthetic world: no geo datum */
         TD5_LOG_I(LOG_TAG, "trackgen: [WORLD] seed=%u relief=%.0f sea=%.0f "
                   "(sea%+d%%) mountains=%d%% rivers=%d%% start-offset=(%.0f,%.0f) "
                   "badness=%.0f after %d candidate(s)",

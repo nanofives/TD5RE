@@ -47,6 +47,16 @@
 #include "td5_rt.h"       /* [RT2 P8] td5_rt_apply_lighting_options() */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode push */
 #include "td5_i18n.h"     /* [I18N] UI-language catalog load at boot */
+#include "td5_roam_cache.h" /* GEO FREE ROAM cache reader (dev census hook) */
+#include "td5_roam_ribbon.h" /* GEO FREE ROAM ribbons + heights (dev test hook) */
+#include "td5_roam_junction.h" /* GEO FREE ROAM junction census (dev hook) */
+#include "td5_roam_tile.h"   /* GEO FREE ROAM tile assembly + ROAMTILE (dev CLI) */
+#include "td5_roam_scenery.h" /* GEO FREE ROAM tile scenery (F4a dev CLI) */
+#include "td5_roam_locate.h" /* GEO FREE ROAM locator (dev self-test) */
+#include "td5_roam_render.h" /* GEO FREE ROAM plain render (dev pose generator) */
+#include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): dev CLI --Roam=1 */
+#include "td5_roam_route.h"  /* GEO FREE ROAM route planner (F5-A): dev test hook */
+#include "td5_roam_barrier.h" /* GEO FREE ROAM route barriers (F6-A): dev census hook */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -1682,6 +1692,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * + EnableUPnP. */
     if (td5_net_selftest())
         return 0;
+    /* GEO FREE ROAM (F1 T1) dev census: TD5RE_ROAM_CACHE_TEST=1 reads the casco
+     * window of the La Plata cache, writes the census and exits. */
+    if (td5_roam_cache_dev_census())
+        return 0;
+    /* GEO FREE ROAM (F1 T4) dev test: TD5RE_ROAM_RIBBON_TEST=1 builds every casco
+     * edge's ribbon, prints the census + determinism hashes and exits. */
+    if (td5_roam_ribbon_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F1 T3) dev census: TD5RE_ROAM_JUNC_TEST=1 builds the street
+     * graph + junction patches over the casco, writes the census + JSON, exits. */
+    if (td5_roam_junction_dev_census())
+        return 0;
+    /* GEO FREE ROAM (F1 T5) dev CLI: --RoamBuildTiles=x0,z0,x1,z1|casco builds the
+     * ROAMTILE files of those tiles, writes the census and exits. */
+    if (td5_roam_tile_dev_cli(lpCmdLine))
+        return 0;
+    /* GEO FREE ROAM (F4a) dev CLI: --RoamBuildScenery=x0,z0,x1,z1|casco builds the
+     * scenery layer of those tiles, writes SCENERY_*.BIN + the census and exits. */
+    if (td5_roam_scn_dev_cli(lpCmdLine))
+        return 0;
+    /* GEO FREE ROAM (F1 T6b) dev self-test: TD5RE_ROAM_LOCATE_TEST=1 loads every
+     * casco ROAMTILE and runs the locator checks + timing, writes the report, exits. */
+    if (td5_roam_locate_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F5-A) dev: TD5RE_ROAM_ROUTE_TEST=1 plans random routes + save/load round trip, exits. */
+    if (td5_roam_route_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F6-A) dev: TD5RE_ROAM_BARRIER_TEST=1 plans the census routes, builds their barriers, writes the census, exits. */
+    if (td5_roam_barriers_dev_test())
+        return 0;
+    /* GEO FREE ROAM (F2-C) dev: TD5RE_ROAM_RENDER_POSES=<file> writes free-cam tour poses. */
+    if (td5_roam_render_dev_poses())
+        return 0;
 #endif
 
     /* Auto-race: skip frontend entirely, launch race with INI settings */
@@ -1844,6 +1887,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
     }
+
+#ifndef TD5RE_RELEASE
+    /* GEO FREE ROAM (F2 A) dev CLI: --Roam=1 --RoamSpawn=<lat>,<lon> [--RoamYaw=n] arms free roam
+     * and the AutoRace path (after INI + CLI so it wins over both). Compiled out of RELEASE. */
+    td5_roam_dev_cli(lpCmdLine);
+#endif
 
     /* [I18N] Load the UI-language catalog once INI + CLI have settled. A
      * missing/bad catalog falls back to English (and resets the knob so the

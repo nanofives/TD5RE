@@ -171,14 +171,9 @@ int  td5_geo_route_is_stub(void);
 int  td5_geo_route_init(void);
 void td5_geo_route_shutdown(void);
 
-/* Snap a click to the nearest drivable road of `slug` (NULL = auto-pick the
- * place whose bbox holds it). Writes the snapped point and its distance in
- * metres. Returns 1 when a road was found. The screen uses this to show where
- * a click will actually start, and to refuse one that is in the middle of a
- * field -- the same CLICK_MAX_SNAP_M test the Python selector runs. */
+/* A pin snaps to the nearest drivable road within this many metres, else the
+ * route is refused -- the same CLICK_MAX_SNAP_M test the Python selector runs. */
 #define TD5_GEO_ROUTE_SNAP_MAX_M 250.0
-int  td5_geo_route_snap(const char *slug, TD5_GeoLatLon p,
-                        TD5_GeoLatLon *out, double *dist_m);
 
 /* The place a lat/lon falls in ("" when none), by PLACE.JSON bbox and, for a
  * place with a `boundary` (an administrative area), by its polygon. When two
@@ -189,15 +184,39 @@ const char *td5_geo_route_place_at(TD5_GeoLatLon p);
  * `ring` is written as lat,lon pairs into `latlon` (room for max_pts pairs);
  * the return is the point count of that ring (more than max_pts means it was
  * truncated), 0 when the place has no such ring. */
-int  td5_geo_route_place_ring_count(const char *slug);
 int  td5_geo_route_place_boundary(const char *slug, int ring,
                                   double *latlon, int max_pts);
 
-/* The last build's result, or NULL. Same lifetime as `path` above. */
-const TD5_GeoRouteResult *td5_geo_route_last(void);
+/* ------------------------------------------------------- raster window ----
+ * [ROAM F1-T2] One TD5GEOR1 raster, or a window of one read by seek. Exported
+ * for td5_roam_height.c, which samples the SOURCE HEIGHT.R16 / WATER.R8 of a
+ * place without ever slurping them (HEIGHT.R16 is ~346 MB). The struct and the
+ * reader are the ones the route frame is built with; their behaviour is not
+ * changed by the export. */
+typedef struct {
+    int      kind;               /* 1 = int16, 2 = uint8 */
+    int      w, h;
+    double   origin_x, origin_z, cell, scale, bias, rotation;
+    int      nodata_raw;
+    void    *data;               /* malloc'd; the caller free()s it */
+} GrRaster;
 
-/* Free the cached road graph (several MB). The screen may call this on exit so
- * a menu visit does not hold the memory for the rest of the session. */
-void td5_geo_route_drop_graph(void);
+/* The cells of a raster that cover the world rectangle [wx0,wx1] x [wz0,wz1]
+ * plus `pad` cells, read row by row with a seek. The result's origin is the
+ * origin of its first cell. A rectangle that misses the raster gives a 0x0
+ * grid. Returns 1 on success, 0 on failure (out is then zeroed). */
+int gr_raster_read_window(const char *path, double wx0, double wz0,
+                          double wx1, double wz1, int pad, GrRaster *out);
+
+/* ------------------------------------------------------ chord resampler ----
+ * [ROAM F1-T4] geo_condition._resample_uniform, exported for td5_roam_ribbon.c.
+ * Growable double-pair polyline (the route builder's own type) and the CHORD
+ * resampler: successive points are exactly `step` apart in Euclidean distance,
+ * the first point is in[0], and a leftover shorter than `step` at the far end is
+ * dropped. Pure; `out` is reset and grown with realloc (caller free()s out->x and
+ * out->z, and must zero-initialise `out` before the first call). Returns 1, or 0
+ * on out of memory. Exporting it changed no behaviour. */
+typedef struct { double *x, *z; int n, cap; } GrPts;
+int gr_resample(const GrPts *in, double step, GrPts *out);
 
 #endif /* TD5_GEO_ROUTE_H */
