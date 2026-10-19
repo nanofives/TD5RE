@@ -476,6 +476,12 @@ ctrl_done:
             if (A.pv[i] < 30.0 / 3.6 && A.pv[i - 1] >= 30.0 / 3.6) nb90++;
             if (A.ps[i] >= 0.0 && A.ps[i] <= A.length && A.pv[i] < vmin) vmin = A.pv[i];
         }
+#ifndef TD5RE_RELEASE
+        if (td5_env_flag_off("TD5RE_ROAM_AI_DUMP")) {       /* DEV: the path as x,z,s lines (log), for a stuck / jog investigation */
+            for (i = 0; i < A.np; i++)
+                TD5_LOG_I(LOG_TAG, "ROAM_AI_PATH %d %.1f %.1f %.1f", i, A.ps[i], A.px[i], A.pz[i]);
+        }
+#endif
         TD5_LOG_I(LOG_TAG, "ROAM_AI: path %d points (%.1f m, %d connector jogs dropped, %d m grid run-up, %d m run-out), "
                   "%d bends under 50 km/h, %d under 30 km/h, slowest %.0f km/h | a_lat %.1f a_brake %.1f top %.0f km/h",
                   A.np, total, dropped, nb * 3, nf * 3, nb50, nb90, vmin * 3.6, A.a_lat, A.a_brake, A.v_top * 3.6);
@@ -1249,7 +1255,7 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
                 c->still_t++;
                 if (c->still_t == RA_STUCK_LONG + 1) {
                     A.stats.stuck_long++;
-                    TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d STUCK > 5 s at %.0f m along (lat %.1f m)", c->slot, c->along, lat_m);
+                    TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d STUCK > 5 s at %.0f m along (lat %.1f m) place (%.0f,%.0f)", c->slot, c->along, lat_m, x, z);
                 }
             } else {
                 c->still_t = 0;
