@@ -18,6 +18,7 @@
 #endif
 
 #include "td5_platform.h"
+#include "td5_config.h"         /* [roam G6] td5_env_int */
 #include "td5_geo.h"
 #include "td5_geo_roads.h"
 #include "td5_roam_tile.h"
@@ -428,6 +429,11 @@ static char s_async_place[64];
 static void rp_thread(void *arg)
 {
     (void)arg;
+#ifndef TD5RE_RELEASE
+    /* [roam G6 DEV] TD5RE_ROAM_STREETS_DELAY_MS=n: the load takes n ms longer (a cold disk took 4.7 s),
+     * so the geo map's "waiting for the street layer" path can be driven on purpose */
+    Sleep((DWORD)td5_env_int("TD5RE_ROAM_STREETS_DELAY_MS", 0, 0, 60000));
+#endif
     rp_streets_load(s_async_place);
 #ifdef _WIN32
     MemoryBarrier();

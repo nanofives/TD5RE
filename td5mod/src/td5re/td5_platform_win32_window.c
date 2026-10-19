@@ -252,6 +252,16 @@ void td5_plat_set_os_cursor_visible(int visible) { s_os_cursor_show = visible ? 
 static int s_pick_click_latch = 0;
 int td5_plat_pick_take_click(void) { int c = s_pick_click_latch; s_pick_click_latch = 0; return c; }
 
+/* [roam G6] Every left press delivered to this window, and where (the geo map's click counter). */
+static unsigned s_lb_presses;
+static int      s_lb_press_x, s_lb_press_y;
+unsigned td5_plat_input_mouse_left_presses(int *client_x, int *client_y)
+{
+    if (client_x) *client_x = s_lb_press_x;
+    if (client_y) *client_y = s_lb_press_y;
+    return s_lb_presses;
+}
+
 LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -314,7 +324,12 @@ LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
     /* Latch mouse clicks so a quick click released within one 33ms frame is not missed */
-    case WM_LBUTTONDOWN: s_mouse_click_latch |= 1; s_pick_click_latch = 1; break;
+    case WM_LBUTTONDOWN:
+        s_mouse_click_latch |= 1; s_pick_click_latch = 1;
+        s_lb_presses++;
+        s_lb_press_x = (int)(short)LOWORD(lParam);
+        s_lb_press_y = (int)(short)HIWORD(lParam);
+        break;
     case WM_RBUTTONDOWN: s_mouse_click_latch |= 2; break;
     case WM_MBUTTONDOWN: s_mouse_click_latch |= 4; break;
     /* Queue genuine nav-key presses (auto-repeat filtered via lParam bit 30) so

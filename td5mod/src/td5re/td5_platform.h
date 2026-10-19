@@ -346,6 +346,10 @@ int td5_plat_input_get_mouse_pos(int *client_x, int *client_y,
                                  int *client_w, int *client_h);
 /** Physical left-mouse-button state (1 = down). Independent of the poll latch. */
 int td5_plat_input_mouse_left_down(void);
+/** [roam G6] How many WM_LBUTTONDOWN this window has received (a running count, never reset) and the
+ *  client position of the newest one. Unlike the physical state, a press AND release inside one long
+ *  frame still counts. Independent of the poll latch and the picker's click latch. */
+unsigned td5_plat_input_mouse_left_presses(int *client_x, int *client_y);
 /** Copy UTF-8 text to the Windows clipboard (CF_UNICODETEXT). 1 on success. */
 int td5_plat_clipboard_set_text(const char *utf8);
 /** Show (1) or hide (0) the OS cursor over the client area. Normally hidden

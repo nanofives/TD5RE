@@ -178,6 +178,7 @@ static int    s_panning;
 static int    s_pan_mx, s_pan_my;          /* design-space anchor of the pan  */
 static double s_pan_lat, s_pan_lon;
 static int    s_prev_lmb, s_prev_rmb;
+static unsigned s_prev_presses;            /* [roam G6] the window's left-press count */
 static int    s_moved_while_down;          /* a drag is not a click           */
 
 /* Last render's canvas scale, so the input pass (which runs without sx/sy)
@@ -240,6 +241,7 @@ static int    s_parent_screen = TD5_SCREEN_TRACK_SELECTION;
  * gives way to a short note. docs/plans/geo_free_roam/F11_PARITY.md. */
 static int    s_strip;
 static int    geo_roam_spawn(TD5_RoamSpawn *out);
+static int    s_roam_pending;              /* [roam G6] the START / pin check is waiting on the street layer */
 static int    geo_race_city_ready(const char **why);
 
 /* ========================================================================
@@ -677,17 +679,32 @@ static int geo_hit_route_leg(float dx, float dy, float sx, float sy)
 static void geo_handle_mouse(void)
 {
     const float sx = s_sx, sy = s_sy;
-    const float dx = (float)s_mouse_x, dy = (float)s_mouse_y;
-    const int   over_map = geo_in_map(dx, dy);
+    float dx = (float)s_mouse_x, dy = (float)s_mouse_y;
+    int   over_map;
     int lmb, rmb, l_edge, l_rel, r_edge, wheel;
+    int press_cx = 0, press_cy = 0;
+    const unsigned presses = td5_plat_input_mouse_left_presses(&press_cx, &press_cy);
 
     lmb = td5_plat_input_mouse_left_down();
     rmb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
     l_edge = (lmb && !s_prev_lmb);
     l_rel  = (!lmb && s_prev_lmb);
     r_edge = (rmb && !s_prev_rmb);
+    /* [roam G6] A press AND its release inside ONE frame never show in the physical state, and a
+     * frame can be long here (a route build, the first START check). The window still counted the
+     * press: replay it as a press + release this frame, at the point it was pressed. */
+    if (!lmb && !s_prev_lmb && presses != s_prev_presses) {
+        int cw = 0, ch = 0;
+        if (td5_plat_input_get_mouse_pos(NULL, NULL, &cw, &ch) && cw > 0 && ch > 0) {
+            dx = (float)(press_cx * 640 / cw);
+            dy = (float)(press_cy * 480 / ch);
+            l_edge = l_rel = 1;
+        }
+    }
+    s_prev_presses = presses;
     s_prev_lmb = lmb;
     s_prev_rmb = rmb;
+    over_map = geo_in_map(dx, dy);
 
     wheel = td5_plat_input_get_mouse_wheel();
     if (wheel != 0 && over_map) {
@@ -731,6 +748,13 @@ static void geo_handle_mouse(void)
         }
     }
 
+#ifndef TD5RE_RELEASE
+    if (l_edge || l_rel)   /* [roam G6] where each press / release landed, and on what */
+        TD5_LOG_I(LOG_TAG, "GEO MOUSE: %s at design %.0f,%.0f over_map=%d drag=%d pan=%d moved=%d sx=%.3f sy=%.3f",
+                  (l_edge && l_rel) ? "press+release in one frame" : l_edge ? "press" : "release", dx, dy, over_map, s_drag_pt, s_panning,
+                  s_moved_while_down, sx, sy);
+#endif
+
     if (l_edge && over_map) {
         const int hit = geo_pick_point(dx, dy, sx, sy);
         s_moved_while_down = 0;
@@ -772,9 +796,15 @@ static void geo_handle_mouse(void)
          * drag is not: that was a pan, and ending it must not drop a pin. */
         if (was_pan && !s_moved_while_down && over_map) {
             double lat, lon;
+            int at;
             geo_design_to_latlon(dx, dy, sx, sy, &lat, &lon);
-            if (geo_place_click(lat, lon, geo_hit_route_leg(dx, dy, sx, sy)) >= 0)
+            at = geo_place_click(lat, lon, geo_hit_route_leg(dx, dy, sx, sy));
+            if (at >= 0)
                 frontend_play_sfx(3);
+#ifndef TD5RE_RELEASE
+            TD5_LOG_I(LOG_TAG, "GEO MOUSE: PLACE -> route index %d at %.5f,%.5f (%d point(s))",
+                      at, lat, lon, s_n_pts);
+#endif
         }
         (void)was_drag;
         s_moved_while_down = 0;
@@ -1690,6 +1720,7 @@ static void geo_screen_init(void)
      * turn the next ordinary race into a roam race */
     td5_roam_cancel();
     s_strip = frontend_geo_strip_context();   /* [F11b] the strip BUILD: local multiplayer (or the dev knob) */
+    if (!s_strip) td5_roam_prefetch_streets();   /* [roam G6] the START check needs it; ~5 s, off-thread */
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,
@@ -1884,6 +1915,7 @@ static void geo_screen_init(void)
                                                         the previous screen must
                                                         not place a point */
     s_prev_rmb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
+    s_prev_presses = td5_plat_input_mouse_left_presses(NULL, NULL);
     s_moved_while_down = 0;
     (void)td5_plat_input_get_mouse_wheel();          /* drop queued wheel */
 
@@ -1991,12 +2023,28 @@ static int geo_commit_and_register(void)
 static int geo_roam_spawn(TD5_RoamSpawn *out)
 {
     /* the lookup parses PLACE.JSON + ROAMGRID.JSON, so it is memoised on the pin (asked every frame) */
-    static struct { int valid; double lat, lon; int ok; TD5_RoamSpawn sp; } memo;
+    static struct { int valid; double lat, lon; int ok; int waiting; TD5_RoamSpawn sp; } memo;
+    s_roam_pending = 0;
     if (s_n_pts < 1) return 0;
     if (!memo.valid || memo.lat != s_pts[0].lat || memo.lon != s_pts[0].lon) {
+        /* [roam G6] _try: the first answer can need the partido street layer (~5 s to load). Never
+         * wait for it on this screen; say so and ask again next frame. */
+        int r;
         memset(&memo.sp, 0, sizeof memo.sp);
-        memo.ok = td5_roam_place_for_latlon(s_pts[0].lat, s_pts[0].lon, memo.sp.place,
-                                            sizeof memo.sp.place, &memo.sp.spawn_px, &memo.sp.spawn_pz);
+        r = td5_roam_place_for_latlon_try(s_pts[0].lat, s_pts[0].lon, memo.sp.place,
+                                          sizeof memo.sp.place, &memo.sp.spawn_px, &memo.sp.spawn_pz);
+        if (r < 0) {
+#ifndef TD5RE_RELEASE
+            if (!memo.waiting) TD5_LOG_I(LOG_TAG, "GEO GENERATOR: START check waits for the city street layer");
+#endif
+            memo.waiting = 1;
+            s_roam_pending = 1; memo.valid = 0; return 0;
+        }
+#ifndef TD5RE_RELEASE
+        if (memo.waiting) TD5_LOG_I(LOG_TAG, "GEO GENERATOR: START check answered after the wait: %s", r ? "in the city" : "outside");
+#endif
+        memo.waiting = 0;
+        memo.ok = r;
         memo.sp.spawn_yaw = -1;           /* along the nearest street */
         memo.sp.car_index = 0;            /* the car-select screen fills it in */
         memo.lat = s_pts[0].lat; memo.lon = s_pts[0].lon; memo.valid = 1;
@@ -2034,19 +2082,25 @@ static int geo_race_city_ready(const char **why)
         memo.valid = 1; memo.key = key; memo.ok = 0; memo.why = NULL;
         if (s_n_pts < 2) memo.why = "PLACE A START AND A FINISH";
         else if (s_n_pts > TD5_ROUTE_MAX_WP) memo.why = "AT MOST 24 POINTS IN THE CITY";
-        else if (!geo_roam_spawn(&sp)) memo.why = "START IS OUTSIDE THE CITY MAP";
+        else if (!geo_roam_spawn(&sp))
+            memo.why = s_roam_pending ? "LOADING THE CITY STREETS" : "START IS OUTSIDE THE CITY MAP";
         else {
             memo.ok = 1;
             for (i = 1; i < s_n_pts && memo.ok; i++) {
                 char slug[64];
                 int32_t px, pz;
-                if (!td5_roam_place_for_latlon(s_pts[i].lat, s_pts[i].lon, slug, sizeof slug, &px, &pz) ||
-                    strcmp(slug, sp.place) != 0) {
+                const int r = td5_roam_place_for_latlon_try(s_pts[i].lat, s_pts[i].lon, slug, sizeof slug, &px, &pz);
+                if (r < 0) {
+                    s_roam_pending = 1;
+                    memo.ok = 0;
+                    memo.why = "LOADING THE CITY STREETS";
+                } else if (!r || strcmp(slug, sp.place) != 0) {
                     memo.ok = 0;
                     memo.why = (i == s_n_pts - 1) ? "FINISH IS OUTSIDE THE CITY MAP" : "A POINT IS OUTSIDE THE CITY MAP";
                 }
             }
         }
+        if (s_roam_pending) memo.valid = 0;   /* [roam G6] not an answer: ask again next frame */
     }
     if (why) *why = memo.why;
     return memo.ok;
