@@ -58,7 +58,7 @@
 #define RT_STEER_CLAMP 0x18000
 #define RT_FADE_TICKS  20
 #define RT_FADE_SLOW   45                        /* [HG] fade-out of a car that is in view: 1.5 s */
-#define RT_DEFER_TICKS 300                       /* [HG] a visible soft despawn waits this long for the car to leave the view */
+#define RT_DEFER_TICKS 120                       /* [HG] a visible soft despawn waits this long for the car to leave the view */
 #define RT_POP_M       300.0                     /* [HG] "in front of me": a pop this close inside the cone is counted */
 #define RT_VIEW_COS    0.34                      /* [HG] cos 70 deg: wider than the half horizontal FOV, so the edge is hidden too */
 #define RT_STOP_BACK_M 2.8                       /* car centre this far before the stop line */
@@ -206,20 +206,19 @@ static int rt_place_of(const TD5_Actor *a, double *px, double *pz)
  * (height ignored, the cone is wider than the real frustum), so a car behind the camera or off to the side is "unseen". */
 static int rt_in_view(double px, double pz, double range_m)
 {
-    int32_t ox, oz;
-    float r[3], u[3], f[3];
-    double cx, cz, dx, dz, d, fl;
-    td5_roam_world_origin(&ox, &oz);
-    td5_camera_get_basis(r, u, f);
-    cx = (double)g_camWorldPos[0][0] / 256.0 + (double)ox;
-    cz = (double)g_camWorldPos[0][2] / 256.0 + (double)oz;
+    /* The cone comes from the PLAYER'S SIM STATE (position + heading of actor 0), not from the render camera: the camera
+     * rides on wall-clock frame time, so a cone read from it made the whole traffic field (and every selftest layout built
+     * on it) differ from run to run. The chase camera follows the heading within a few degrees, well inside the cone. */
+    const TD5_Actor *p0 = td5_game_get_actor(0);
+    double cx, cz, dx, dz, d, fx, fz, yaw;
+    if (!p0 || !rt_place_of(p0, &cx, &cz)) return 0;
     dx = px - cx; dz = pz - cz;
     d = sqrt(dx * dx + dz * dz);
     if (d > range_m * RT_M) return 0;
-    if (d < 8.0 * RT_M) return 1;                        /* beside / under the camera: seen */
-    fl = sqrt((double)f[0] * f[0] + (double)f[2] * f[2]);
-    if (fl < 1e-4) return 1;                             /* looking straight up / down: treat everything as seen */
-    return (dx * f[0] + dz * f[2]) / (d * fl) > RT_VIEW_COS;
+    if (d < 20.0 * RT_M) return 1;                       /* beside / under / just behind the camera: seen */
+    yaw = (double)(p0->euler_accum.yaw >> 8 & 0xFFF) * (2.0 * RT_PI / 4096.0);
+    fx = sin(yaw); fz = cos(yaw);
+    return (dx * fx + dz * fz) / d > RT_VIEW_COS;
 }
 
 /* locator at a PLACE point: 1 when a resident tile covers it; *inside = on the drivable surface */
@@ -905,8 +904,9 @@ static void rt_despawn(RtCar *c, int why)
         const TD5_Actor *a = td5_game_get_actor(c->slot);
         double x, z;
         if (a && rt_place_of(a, &x, &z)) {
-            const int soft = why == RT_WHY_FAR || why == RT_WHY_DEAD || why == RT_WHY_STUCK || why == RT_WHY_HOLD ||
-                             why == RT_WHY_OFF || why == RT_WHY_WRECK;
+            /* only a car that is merely out of range is held: a stuck / dead-end / wreck / off-road car is the obstacle itself,
+             * keeping it blocks the lane (and the scripted drivers) for RT_DEFER_TICKS, so it leaves with the slow fade instead */
+            const int soft = why == RT_WHY_FAR;
             if (rt_in_view(x, z, T.vis_m)) {
                 if (T.visgate && soft && c->defer_t < RT_DEFER_TICKS) { c->defer_t++; T.pop_despawn_held++; return; }
                 seen = 1;
@@ -917,7 +917,7 @@ static void rt_despawn(RtCar *c, int why)
             }
         }
     }
-    c->fstep = (T.visgate && seen) ? 255 / RT_FADE_SLOW : 255 / RT_FADE_TICKS;
+    c->fstep = (T.visgate && seen && why == RT_WHY_FAR) ? 255 / RT_FADE_SLOW : 255 / RT_FADE_TICKS;
     if (c->fstep < 255 / RT_FADE_TICKS) T.pop_slow_fade++;
     c->fade = -1;
     c->why_out = why;

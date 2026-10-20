@@ -79,6 +79,7 @@ static struct {
     long   cross_t, stuck_t;
     TD5_RoamCopsStats rb_base;
     long   pinch0;
+    int    s2_tries;                    /* scenario 2 repeats when the bust landed far from the block */
 } T;
 
 void td5_roam_cops_test_arm(int mode)
@@ -651,7 +652,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
                 T.phase = RB_WAITBLK; T.phase_t0 = tick;
                 return 0;
             }
-            if (tick - T.phase_t0 > 45 * 30) { ct_finish("scenario 3: no detour counted within 45 s", 1); return 0; }
+            if (tick - T.phase_t0 > 90 * 30) { ct_finish("scenario 3: no detour counted within 90 s", 1); return 0; }   /* a 1000 m leg at 50 km/h is 75 s */
             if (T.s > (T.np - 1) * CT_DS - 30.0) { ct_finish("scenario 3: the detour leg ended before a detour was counted", 1); return 0; }
             return ct_drive(a, cap);
         }
@@ -692,7 +693,11 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
             T.respawned = st.player_respawns > T.st0.player_respawns;
             T.respawn_on_road = st.respawn_on_road;
             TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario 2: bust at the block (blocks_bust %ld), respawn %s", st.blocks_bust, T.respawned ? "yes" : "NO");
-            T.sc = 3; T.phase = RB_COOL; T.phase_t0 = tick; T.cool_planned = 0;
+            /* the cops can box the car in (a wall corner, a traffic car) well short of the block: that bust says nothing about
+             * the block, so run the scenario again (twice at most) instead of letting the field layout decide the verdict */
+            T.sc = (st.blocks_bust > T.rb_base.blocks_bust || ++T.s2_tries >= 3) ? 3 : 2;
+            if (T.sc == 2) TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario 2: busted away from the block, run %d of 3", T.s2_tries + 1);
+            T.phase = RB_COOL; T.phase_t0 = tick; T.cool_planned = 0; T.bust_was = 0;
             return (uint32_t)TD5_INPUT_BRAKE;
         }
         if (busted) return rb_hold(a);

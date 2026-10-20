@@ -98,6 +98,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Free roam: traffic cars no longer appear or vanish in" },
     { CL_ITEM,    "front of you. They spawn out of the camera view, and a" },
     { CL_ITEM,    "car in view is kept until it leaves it." },
+    { CL_ITEM,    "The view cone follows your car, and a stuck car in" },
+    { CL_ITEM,    "view is no longer held in your lane." },
     { CL_DATE,    "October 19 (free roam: ground beside steep roads)" },
     { CL_ITEM,    "Free roam: beside a steep road the ground now meets" },
     { CL_ITEM,    "  the road edge instead of hanging metres below it," },
