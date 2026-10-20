@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 20 (free roam: minimap + route planner)" },
+    { CL_ITEM,    "Free roam minimap turns the same way as the race" },
+    { CL_ITEM,    "  minimap (it was mirrored), shows an N marker on its" },
+    { CL_ITEM,    "  rim, street names on the map and the street you are" },
+    { CL_ITEM,    "  on under it. The route planner no longer shows a" },
+    { CL_ITEM,    "  flickering diagonal line on a dense map view." },
     { CL_DATE,    "October 19 (geo map: FREE ROAM and RACE ROUTE)" },
     { CL_ITEM,    "Geo generator map: FREE ROAM and RACE ROUTE work on a" },
     { CL_ITEM,    "  fresh install. The START pin no longer reads OUTSIDE" },
