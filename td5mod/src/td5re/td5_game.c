@@ -8595,6 +8595,7 @@ static void frame_render(void)
             td5_render_debug_lines_reset();
             td5_roam_route_ui_draw_world(vp);
             td5_render_debug_lines_flush();
+            td5_roam_race_draw_world(vp); /* [HF] START / FINISH gantries; self-gated */
             td5_roam_barriers_draw(vp);   /* [F6-A] route barriers: translucent panels + chevrons; self-gated */
         }
 
