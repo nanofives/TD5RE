@@ -151,8 +151,10 @@ typedef struct {
     int    on, target, span, ncar, heat;
     int    slot[POL_BLK_CARS];
     int32_t px[POL_BLK_CARS], pz[POL_BLK_CARS];   /* the cars, world (vertex) units                */
+    int     yaw[POL_BLK_CARS];                    /* the cars' yaw, 12-bit                          */
     double cx, cz, tx, tz;              /* centre + forward tangent, world units             */
     double gap_w;                       /* metres, 0 = closed                                */
+    double gx, gz;                      /* the gap's centre, world units                     */
     long   t0;
     double min_d, prev_f;
     int    have_prev, crossed, contact, releasing;
@@ -161,7 +163,7 @@ typedef struct {
 static struct {
     int      on;                        /* the layer runs this race                          */
     int      knobs;
-    int      knob_on, block_heat, block_max, upm;
+    int      knob_on, block_heat, block_max, upm, queue_spans;
     double   see_m, lose_s, escape_m, bust_s, join_m, block_min_m, block_max_m, ram_impact;
     uint32_t rng;
     PolTarget t[TD5_MAX_RACER_SLOTS];
@@ -189,6 +191,7 @@ static void pol_read_knobs(void)
     P.block_max_m = td5_env_int("TD5RE_POLICE_BLOCK_MAX_M", 400, 100, 900);
     if (P.block_max_m < P.block_min_m + 50.0) P.block_max_m = P.block_min_m + 50.0;
     P.ram_impact  = td5_env_int("TD5RE_POLICE_RAM_IMPACT", 12000, 1000, 400000);
+    P.queue_spans = td5_env_int("TD5RE_POLICE_QUEUE_SPANS", 18, 0, 200);
     TD5_LOG_I(LOG_TAG, "police pursuit: %s (TD5RE_POLICE_PURSUIT), %d units/m, sight %.0f m, lose %.0f+2xheat s, escape %.0f m, "
               "bust %.1f s, join %.0f m, roadblocks from heat %d (max %d, %.0f..%.0f m ahead), ram impact %.0f",
               P.knob_on ? "ON" : "off", P.upm, P.see_m, P.lose_s, P.escape_m, P.bust_s, P.join_m, P.block_heat, P.block_max,
@@ -256,12 +259,12 @@ void td5_police_race_init(void)
 {
     pol_read_knobs();
     {
-        const int knobs = P.knobs, knob_on = P.knob_on, bh = P.block_heat, bm = P.block_max, upm = P.upm;
+        const int knobs = P.knobs, knob_on = P.knob_on, bh = P.block_heat, bm = P.block_max, upm = P.upm, qs = P.queue_spans;
         const double see = P.see_m, lose = P.lose_s, esc = P.escape_m, bs = P.bust_s, jm = P.join_m, bmin = P.block_min_m,
                      bmax = P.block_max_m, ri = P.ram_impact;
         const int slow = P.dev_slow;
         memset(&P, 0, sizeof P);
-        P.knobs = knobs; P.knob_on = knob_on; P.block_heat = bh; P.block_max = bm; P.upm = upm;
+        P.knobs = knobs; P.knob_on = knob_on; P.block_heat = bh; P.block_max = bm; P.upm = upm; P.queue_spans = qs;
         P.see_m = see; P.lose_s = lose; P.escape_m = esc; P.bust_s = bs; P.join_m = jm; P.block_min_m = bmin;
         P.block_max_m = bmax; P.ram_impact = ri;
         P.dev_slow = slow;
@@ -277,9 +280,11 @@ void td5_police_race_init(void)
 
 /* ============================================================ span geometry ================= */
 
-/* The road band of `span`: centre of the span's near edge, the unit lateral vector (lane 0 -> last lane), the unit
- * forward vector (near -> far edge) and the band's lateral extent [lmin, lmax] in METRES from that centre (slow verge
- * lanes at both edges trimmed). World (vertex) units for the points. 0 when the span has no usable lanes. */
+/* The road band of `span`, from its lane quads (td5_track_get_lane_quad_world corners: [0] near-left, [1] near-right,
+ * [2] far-right, [3] far-left of the lane, the lanes ordered across the road): the centre of the span (midway between
+ * its near and far edges, across the full lane set), the unit lateral vector (lane 0 -> last lane), the unit forward
+ * vector (near edge -> far edge) and the band's lateral extent [lmin, lmax] in METRES from that centre, slow verge
+ * lanes at both edges trimmed. World (vertex) units for the points. 0 when the span has no usable lanes. */
 static int pol_span_band(int span, double *cx, double *cz, double *rx, double *rz, double *fx, double *fz,
                          double *lmin, double *lmax)
 {
@@ -288,14 +293,15 @@ static int pol_span_band(int span, double *cx, double *cz, double *rx, double *r
     double lx, lz, Rx, Rz, w, nx, nz, farx, farz, l;
     int lo = 0, hi;
     if (n <= 0 || !td5_track_get_lane_quad_world(span, 0, q0) || !td5_track_get_lane_quad_world(span, n - 1, q1)) return 0;
-    lx = q0[0][0]; lz = q0[0][2];                        /* near left of lane 0       */
-    Rx = q1[3][0]; Rz = q1[3][2];                        /* near right of the last lane */
+    /* the left and right road edges, each midway between the near and far edge of the span */
+    lx = (q0[0][0] + q0[3][0]) * 0.5; lz = (q0[0][2] + q0[3][2]) * 0.5;
+    Rx = (q1[1][0] + q1[2][0]) * 0.5; Rz = (q1[1][2] + q1[2][2]) * 0.5;
     w = hypot(Rx - lx, Rz - lz);
     if (w < 1.0) return 0;
     *rx = (Rx - lx) / w; *rz = (Rz - lz) / w;
     *cx = (lx + Rx) * 0.5; *cz = (lz + Rz) * 0.5;
-    nx = (q0[0][0] + q1[3][0]) * 0.5; nz = (q0[0][2] + q1[3][2]) * 0.5;
-    farx = (q0[1][0] + q1[2][0]) * 0.5; farz = (q0[1][2] + q1[2][2]) * 0.5;
+    nx = (q0[0][0] + q1[1][0]) * 0.5; nz = (q0[0][2] + q1[1][2]) * 0.5;          /* near edge centre */
+    farx = (q0[3][0] + q1[2][0]) * 0.5; farz = (q0[3][2] + q1[2][2]) * 0.5;      /* far edge centre  */
     l = hypot(farx - nx, farz - nz);
     if (l < 1.0) return 0;
     *fx = (farx - nx) / l; *fz = (farz - nz) / l;
@@ -303,15 +309,18 @@ static int pol_span_band(int span, double *cx, double *cz, double *rx, double *r
     while (lo < hi && td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, lo))) lo++;
     while (hi > lo && td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, hi))) hi--;
     {
-        float a[4][3], b[4][3];
-        if (!td5_track_get_lane_quad_world(span, lo, a) || !td5_track_get_lane_quad_world(span, hi, b)) return 0;
-        *lmin = pol_m((a[0][0] - *cx) * *rx + (a[0][2] - *cz) * *rz);
-        *lmax = pol_m((b[3][0] - *cx) * *rx + (b[3][2] - *cz) * *rz);
+        float a[4][3], c[4][3];
+        double ax, az, bx, bz;
+        if (!td5_track_get_lane_quad_world(span, lo, a) || !td5_track_get_lane_quad_world(span, hi, c)) return 0;
+        ax = (a[0][0] + a[3][0]) * 0.5; az = (a[0][2] + a[3][2]) * 0.5;
+        bx = (c[1][0] + c[2][0]) * 0.5; bz = (c[1][2] + c[2][2]) * 0.5;
+        *lmin = pol_m((ax - *cx) * *rx + (az - *cz) * *rz);
+        *lmax = pol_m((bx - *cx) * *rx + (bz - *cz) * *rz);
     }
     return *lmax > *lmin;
 }
 
-/* the sub-lane of `span` whose near edge holds lateral `lat_m` (metres from the band centre) */
+/* the sub-lane of `span` holding lateral `lat_m` (metres from the band centre), from each lane's mid-span edges */
 static int pol_lane_at(int span, double cx, double cz, double rx, double rz, double lat_m)
 {
     const int n = td5_track_get_span_lane_count(span);
@@ -320,8 +329,8 @@ static int pol_lane_at(int span, double cx, double cz, double rx, double rz, dou
         float q[4][3];
         double a, b;
         if (!td5_track_get_lane_quad_world(span, i, q)) continue;
-        a = pol_m((q[0][0] - cx) * rx + (q[0][2] - cz) * rz);
-        b = pol_m((q[3][0] - cx) * rx + (q[3][2] - cz) * rz);
+        a = pol_m(((q[0][0] + q[3][0]) * 0.5 - cx) * rx + ((q[0][2] + q[3][2]) * 0.5 - cz) * rz);
+        b = pol_m(((q[1][0] + q[2][0]) * 0.5 - cx) * rx + ((q[1][2] + q[2][2]) * 0.5 - cz) * rz);
         if ((lat_m >= a && lat_m <= b) || (lat_m >= b && lat_m <= a)) return i;
     }
     return n > 0 ? (lat_m < 0.0 ? 0 : n - 1) : 0;
@@ -476,19 +485,55 @@ int td5_police_block_lit(int slot) { return td5_police_block_slot(slot); }
 void td5_police_block_hold(int slot)
 {
     TD5_Actor *a = td5_game_get_actor(slot);
-    if (!a) return;
-    /* free roam's roadblock control: wheel centred, brake on, the drive command opposing the motion (a hard ram can
-     * still shove the car, it does not drive anywhere) */
+    const PolBlock *b;
+    int j;
+    long age;
+    if (!a || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || !P.blk_of[slot]) return;
+    b = &P.blk[P.blk_of[slot] - 1];
+    for (j = 0; j < b->ncar && b->slot[j] != slot; j++) {}
+    if (j >= b->ncar) return;
+    /* parked: back on its spot, square across the road, no motion at all (a ram moves the RACER, not the block). The
+     * height, roll and pitch come from the road each tick (integrate_traffic_pose). Hit hard it never scatters
+     * (td5_physics_collision.c: a block car is always a tough cop). */
+    a->world_pos.x = b->px[j] * 256;
+    a->world_pos.z = b->pz[j] * 256;
+    a->euler_accum.yaw = (b->yaw[j] & 0xFFF) << 8;
+    a->euler_accum.roll = 0;
+    a->euler_accum.pitch = 0;
+    a->linear_velocity_x = a->linear_velocity_y = a->linear_velocity_z = 0;
+    a->angular_velocity_roll = a->angular_velocity_yaw = a->angular_velocity_pitch = 0;
+    a->longitudinal_speed = 0;
+    a->vehicle_mode = 0;
     a->steering_command = 0;
-    {
-        double v = -(double)a->longitudinal_speed * (255.0 / 256.0);
-        if (v < -1024.0) v = -1024.0;
-        if (v > 1024.0) v = 1024.0;
-        a->encounter_steering_cmd = (int16_t)floor(v / 4.0 + 0.5);
-    }
+    a->encounter_steering_cmd = 0;
     a->brake_flag = 1;
     a->handbrake_flag = 0;
     a->throttle_state = 1;
+    /* pose log: the first 60 ticks after placement, then any tilt off the road (once a second) */
+    age = pol_tick() - b->t0;
+    if (age == 1 || age == 2 || age == 3 || age == 5 || age == 10 || age == 20 || age == 30 || age == 45 || age == 60 ||
+        ((((a->display_angles.roll & 0xFFF) > 0x100 && (a->display_angles.roll & 0xFFF) < 0xF00) ||
+          ((a->display_angles.pitch & 0xFFF) > 0x100 && (a->display_angles.pitch & 0xFFF) < 0xF00)) && (age % 30) == 0))
+        TD5_LOG_I(LOG_TAG, "POLICE: block car %d t+%ld: world (%d,%d,%d) display roll %d pitch %d yaw %d (placed yaw %d) mode %d span %d lane %d",
+                  slot, age, (int)(a->world_pos.x / 256), (int)(a->world_pos.y / 256), (int)(a->world_pos.z / 256),
+                  a->display_angles.roll & 0xFFF, a->display_angles.pitch & 0xFFF, a->display_angles.yaw & 0xFFF, b->yaw[j] & 0xFFF,
+                  a->vehicle_mode, (int)(int16_t)a->track_span_raw, (int)a->track_sub_lane_index);
+}
+
+int td5_police_traffic_blocked(int slot, int span, int oncoming)
+{
+    const int ring = td5_track_get_ring_length();
+    int i;
+    if (!P.on || P.queue_spans <= 0 || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS || P.blk_of[slot]) return 0;
+    for (i = 0; i < POL_BLK_MAX; i++) {
+        const PolBlock *b = &P.blk[i];
+        int d;
+        if (!b->on || b->releasing) continue;
+        d = oncoming ? span - b->span : b->span - span;
+        if (g_track_is_circuit && ring > 0) { while (d > ring / 2) d -= ring; while (d < -ring / 2) d += ring; }
+        if (d > 0 && d <= P.queue_spans) return 1;
+    }
+    return 0;
 }
 
 int td5_police_want_cop_spawn(void)
@@ -552,42 +597,27 @@ int td5_police_heat(int slot)
 
 /* ============================================================ roadblocks ==================== */
 
-static int pol_side_cars(double len)
-{
-    return len >= 2.4 ? (int)ceil(len / POL_BLK_CAR_W - 0.15) : 0;
-}
-
-/* free roam's layout (td5_roam_cops.c rc_block_layout) with its RACE rule: always a gap, 4.2 m at heat 3, 3.6 m
- * above (a strip race always has a field to let through). Returns the car count. */
+/* free roam's block (td5_roam_cops.c rc_block_layout) with its RACE rule (always a gap: 4.2 m at heat 3, 3.6 m above,
+ * a strip race always has a field to let through), but EVERY car lies wholly on the road band: a car's 4.4 m length
+ * across the road stays inside [lmin + 0.3, lmax - 0.3], packed to the edges. A side too short for a car gets none
+ * (the gap grows); with only one car abreast the second parks 5.2 m behind it. Returns the car count (0 = no block). */
 static int pol_block_layout(int heat, double lmin, double lmax, int ncap, double *lat, double *aoff, double *gap_l, double *gap_w)
 {
-    const double W = lmax - lmin;
-    double gw = heat >= 5 ? 0.0 : (heat >= 4 ? 3.2 : 4.2), gl;
-    double a0, a1, b0, b1;
+    const double lo = lmin + 0.3, hi = lmax - 0.3, W = hi - lo, half = POL_BLK_CAR_W * 0.5;
+    const double gw = heat >= 4 ? 3.6 : 4.2;
+    double gl;
     int n = 0, ka, kb, j;
-    if (W < 5.5) return 0;
-    if (gw < 3.6) gw = 3.6;
-    if (gw > W - 2.4) gw = W - 2.4;
-    if (gw < 3.0) gw = 0.0;
-    if (gw > 0.0) gl = lmin + (0.15 + 0.7 * pol_unit()) * (W - gw);
-    else gl = lmax;
-    a0 = lmin; a1 = gl; b0 = gl + gw; b1 = lmax;
-    ka = pol_side_cars(a1 - a0);
-    kb = pol_side_cars(b1 - b0);
+    if (W < POL_BLK_CAR_W + gw) return 0;                /* not even one car beside the gap */
+    if (W >= 2.0 * POL_BLK_CAR_W + gw) gl = lo + POL_BLK_CAR_W + pol_unit() * (W - 2.0 * POL_BLK_CAR_W - gw);   /* both sides */
+    else gl = (pol_lcg() & 1) ? lo + POL_BLK_CAR_W : hi - POL_BLK_CAR_W - gw;                                /* one side  */
+    ka = (int)floor((gl - lo) / POL_BLK_CAR_W + 1e-9);
+    kb = (int)floor((hi - gl - gw) / POL_BLK_CAR_W + 1e-9);
     if (ka + kb > ncap) {
         if (ka > ncap) ka = ncap;
         if (kb > ncap - ka) kb = ncap - ka;
     }
-    for (j = 0; j < ka && n < POL_BLK_CARS; j++) {
-        double c = a0 + (a1 - a0) * (j + 0.5) / ka;
-        if (a1 - a0 >= POL_BLK_CAR_W) { if (c < a0 + 2.2) c = a0 + 2.2; if (c > a1 - 2.2) c = a1 - 2.2; }
-        lat[n] = c; aoff[n] = 0.0; n++;
-    }
-    for (j = 0; j < kb && n < POL_BLK_CARS; j++) {
-        double c = b0 + (b1 - b0) * (j + 0.5) / kb;
-        if (b1 - b0 >= POL_BLK_CAR_W) { if (c < b0 + 2.2) c = b0 + 2.2; if (c > b1 - 2.2) c = b1 - 2.2; }
-        lat[n] = c; aoff[n] = 0.0; n++;
-    }
+    for (j = 0; j < ka && n < POL_BLK_CARS; j++) { lat[n] = lo + half + POL_BLK_CAR_W * j; aoff[n] = 0.0; n++; }
+    for (j = 0; j < kb && n < POL_BLK_CARS; j++) { lat[n] = hi - half - POL_BLK_CAR_W * j; aoff[n] = 0.0; n++; }
     if (n == 1 && ncap >= 2) { lat[1] = lat[0]; aoff[1] = -5.2; n = 2; }
     *gap_l = gl; *gap_w = gw;
     return n;
@@ -605,6 +635,25 @@ static int pol_clear_of_actors(double x, double z, double r_m)
         else if (td5_ai_traffic_dynamic_parked(k)) continue;
         pol_xz(a, &ax, &az);
         if (pol_m(hypot(ax - x, az - z)) < r_m) return 0;
+    }
+    return 1;
+}
+
+/* 1 when no live traffic car sits within +-pad spans of span s: a car that close at speed could not stop in the
+ * queue before the block (measured: 87 km/h, 5-11 spans short, drove into a block car and was launched) */
+static int pol_span_traffic_clear(int s, int pad)
+{
+    const int ring = td5_track_get_ring_length(), n = td5_game_get_total_actor_count();
+    int k;
+    for (k = g_traffic_slot_base; k < n && k < TD5_MAX_TOTAL_ACTORS; k++) {
+        const TD5_Actor *a;
+        int d;
+        if (td5_ai_traffic_dynamic_parked(k) || P.blk_of[k]) continue;
+        a = td5_game_get_actor(k);
+        if (!a) continue;
+        d = (int)(int16_t)a->track_span_normalized - s;
+        if (g_track_is_circuit && ring > 0) { while (d > ring / 2) d -= ring; while (d < -ring / 2) d += ring; }
+        if (d >= -pad && d <= pad) return 0;
     }
     return 1;
 }
@@ -688,6 +737,7 @@ static int pol_block_place(int target)
             int yaw[POL_BLK_CARS], lane[POL_BLK_CARS];
             int n, j, ok = 1, nfree;
             if (!pol_span_plain(s, ring, 6)) continue;
+            if (!pol_span_traffic_clear(s, 25)) continue;
             if (!pol_span_band(s, &cx, &cz, &rx, &rz, &fx, &fz, &lmin, &lmax)) continue;
             for (j = 0; j < POL_BLK_MAX; j++)
                 if (P.blk[j].on && pol_m(hypot(cx - P.blk[j].cx, cz - P.blk[j].cz)) < 120.0) ok = 0;
@@ -709,7 +759,7 @@ static int pol_block_place(int target)
                 wx[j] = (int32_t)floor(x + 0.5); wz[j] = (int32_t)floor(z + 0.5);
                 yaw[j] = pol_angle_of(ux, uz);
                 lane[j] = pol_lane_at(s, cx, cz, rx, rz, lat[j]);
-                if (!pol_clear_of_actors(x, z, 6.0)) ok = 0;
+                if (!pol_clear_of_actors(x, z, 12.0)) ok = 0;
             }
             if (!ok) continue;
             {
@@ -719,7 +769,7 @@ static int pol_block_place(int target)
                 for (j = 0; j < n; j++) {
                     const int slot = td5_ai_traffic_police_block_place(s, lane[j], wx[j], wz[j], yaw[j]);
                     if (slot < 0) continue;
-                    b->slot[placed] = slot; b->px[placed] = wx[j]; b->pz[placed] = wz[j];
+                    b->slot[placed] = slot; b->px[placed] = wx[j]; b->pz[placed] = wz[j]; b->yaw[placed] = yaw[j];
                     P.blk_of[slot] = (uint8_t)(bi + 1);
                     placed++;
                 }
@@ -731,6 +781,7 @@ static int pol_block_place(int target)
                 }
                 b->on = 1; b->target = target; b->span = s; b->ncar = placed; b->heat = T->heat;
                 b->cx = cx; b->cz = cz; b->tx = fx; b->tz = fz; b->gap_w = gw;
+                b->gx = cx + rx * (gl + gw * 0.5) * P.upm; b->gz = cz + rz * (gl + gw * 0.5) * P.upm;
                 b->t0 = pol_tick();
                 b->min_d = pol_m(hypot(cx - px, cz - pz));
                 P.st.blocks_placed++; P.st.block_cars += placed;
@@ -854,8 +905,14 @@ static void pol_target_tick(int t)
     if (T->bust >= 1.0) { pol_bust(t, T->bdmin < 10.0 && T->bdmin <= T->dmin ? "stopped at a roadblock" : "stopped beside a pursuer", 0); return; }
     /* escape */
     if (seen) T->lost = 0; else T->lost++;
-    if (npur == 0 || T->dmin > P.escape_m) { pol_end(t, 1, 1); return; }
-    if (T->lost > (long)((P.lose_s + 2.0 * T->heat) * POL_HZ)) { pol_end(t, 1, 0); return; }
+#ifndef TD5RE_RELEASE
+    if (P.dev_slow == 1 && npur > 0) T->lost = 0;   /* DEV (`police` test, roadblock phase): the pursuers held back, no escape yet */
+    else
+#endif
+    {
+        if (npur == 0 || T->dmin > P.escape_m) { pol_end(t, 1, 1); return; }
+        if (T->lost > (long)((P.lose_s + 2.0 * T->heat) * POL_HZ)) { pol_end(t, 1, 0); return; }
+    }
     /* roadblocks */
     if (P.block_heat > 0 && T->heat >= P.block_heat && tick >= T->block_cd) {
         int i, active = 0;
@@ -973,6 +1030,12 @@ int td5_police_dev_block(int i, int *span, int *ncar, double *gap_m)
 {
     if (i < 0 || i >= POL_BLK_MAX || !P.blk[i].on || P.blk[i].releasing) return 0;
     *span = P.blk[i].span; *ncar = P.blk[i].ncar; *gap_m = P.blk[i].gap_w;
+    return 1;
+}
+int td5_police_dev_block_gap(int i, double *gx, double *gz, double *fx, double *fz)
+{
+    if (i < 0 || i >= POL_BLK_MAX || !P.blk[i].on || P.blk[i].releasing) return 0;
+    *gx = P.blk[i].gx; *gz = P.blk[i].gz; *fx = P.blk[i].tx; *fz = P.blk[i].tz;
     return 1;
 }
 void td5_police_dev_slow_pursuers(int level) { P.dev_slow = level < 0 ? 0 : (level > 2 ? 2 : level); }

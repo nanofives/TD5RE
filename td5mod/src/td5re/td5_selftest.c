@@ -322,11 +322,13 @@ static const RaceScenario k_races[] = {
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=14, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [round H HH] smoke tier: free roam's police in a normal race (Moscow, POLICE on, low traffic, solo):
-     * pursuit, heat 3 + roadblock, escape, bust + release */
+     * pursuit, heat 3 + roadblock, escape, bust + release. FF 4: a human car at 265 km/h moves ~20 m per frame at
+     * the suite's 8x, so one 12-tick frame trips the invariant's 8000-unit jump WARN with no teleport at all
+     * (td5_police_test.c logs any single-tick move over 6 m: none) */
     { .name="police-smoke",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=1, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=1, .auto_gearbox=1,
-      .police=1, .depth=ST_DEPTH_ROAM_SPRINT },
+      .police=1, .ff=4, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -499,7 +501,7 @@ static const RaceScenario k_races[] = {
     { .name="police",                .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=3, .opponents=2, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=1, .auto_gearbox=1,
-      .police=2, .depth=ST_DEPTH_ROAM_SPRINT },
+      .police=2, .ff=4, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [roam F9b] out of the casco: Plaza Moreno -> Diagonal 74 -> Camino Parque Centenario at Gonnet (~8 km, solo, free
      * roam): the region planner maps the route (tiles built on the stream worker when missing), the drive crosses
      * world-origin rebases; 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units, 0 pinches / rescues /

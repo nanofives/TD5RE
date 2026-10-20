@@ -85,6 +85,9 @@ void td5_police_on_pullover_stopped(int cop, int target);          /* a stock pu
 int  td5_police_block_slot(int slot);     /* 1 = a roadblock car: the scheduler, the driver and the despawn skip it */
 int  td5_police_block_lit(int slot);      /* 1 = light bar on (a roadblock car)                     */
 void td5_police_block_hold(int slot);     /* the roadblock car's control for this tick (before physics) */
+/* 1 = ordinary traffic car `slot` (main-ring span `span`, oncoming or not) is within TD5RE_POLICE_QUEUE_SPANS (18)
+ * spans short of an active roadblock in its direction of travel: it brakes and waits (td5_ai.c). */
+int  td5_police_traffic_blocked(int slot, int span, int oncoming);
 
 /* ---- traffic spawner (td5_ai_traffic.c) ---------------------------------------------- */
 int  td5_police_want_cop_spawn(void);     /* 1 = make the next traffic spawn a cop (reinforcement)  */
@@ -115,7 +118,8 @@ int  td5_police_dev_pursuers(int slot);           /* cops chasing `slot` now    
 int  td5_police_dev_busted(int slot);             /* 1 while the BUSTED hold runs                            */
 int  td5_police_dev_pursuit(int slot);            /* 1 while a pursuit runs                                  */
 int  td5_police_dev_block(int i, int *span, int *ncar, double *gap_m);   /* active block i (0..1), 0 = none  */
-void td5_police_dev_slow_pursuers(int level);     /* 1 = the pursuers keep 40 m off, 2 = they brake (escape) */
+int  td5_police_dev_block_gap(int i, double *gx, double *gz, double *fx, double *fz);   /* gap centre + road forward, world units */
+void td5_police_dev_slow_pursuers(int level);     /* 1 = the pursuers keep 80 m off (no escape yet), 2 = they brake (escape) */
 int  td5_police_dev_slow(void);
 #define TD5_POLICE_TEST_SMOKE 1
 #define TD5_POLICE_TEST_FULL  2

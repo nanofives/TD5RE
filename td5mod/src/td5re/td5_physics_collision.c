@@ -2426,8 +2426,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int a_is_cop = (A->slot_index >= 0) && td5_ai_actor_is_cop((int)A->slot_index);
     int b_is_cop = (B->slot_index >= 0) && td5_ai_actor_is_cop((int)B->slot_index);
     int32_t cop_gate = cop_break_mag();
-    int a_tough_cop = a_is_cop && impact_mag <= cop_gate;
-    int b_tough_cop = b_is_cop && impact_mag <= cop_gate;
+    /* [round H HH] a police ROADBLOCK car is always tough: it never scatters, spins or lifts (td5_police.c) */
+    int a_tough_cop = a_is_cop && (impact_mag <= cop_gate || td5_police_block_slot((int)A->slot_index));
+    int b_tough_cop = b_is_cop && (impact_mag <= cop_gate || td5_police_block_slot((int)B->slot_index));
     /* [RACE OPTIONS 2026-09-29] Vertical launch is the FAITHFUL impact_mag/6
      * (200000-clamped) for everyone. The arcade levers that used to soften it
      * (lowered heavy gate, /16 divisor, 160000 clamp, 35% angular scatter) went

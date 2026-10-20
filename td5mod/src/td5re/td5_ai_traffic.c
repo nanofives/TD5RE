@@ -2360,6 +2360,11 @@ static int trf_test_span(void);
 int td5_ai_traffic_pair_blocked(int slot_a, int slot_b)
 {
     int base, a_traf, b_traf, owner_a, owner_b, vp;
+    /* [round H HH] a police car and a police ROADBLOCK car pass through each other: the pursuers would
+     * otherwise wreck themselves on their own block (measured: impact 231960 > the cop break gate) */
+    if (td5_police_block_slot(slot_a) ? (slot_b >= 0 && slot_b < TD5_MAX_TOTAL_ACTORS && g_cop_is_cop[slot_b])
+                                      : (td5_police_block_slot(slot_b) && slot_a >= 0 && slot_a < TD5_MAX_TOTAL_ACTORS && g_cop_is_cop[slot_a]))
+        return 1;
     /* [TRAFFIC TEST ZONE 2026-09-29] DEV harness: with TD5RE_TRAFFIC_TEST_SPAN set,
      * racers and traffic pass through each other, so a player parked at the end of
      * a fork to watch it never blocks (or gets rammed by) the traffic under test. */

@@ -8617,6 +8617,9 @@ void td5_ai_update_special_encounter(void) {
                  * pursuing through the hold rather than giving up the moment it noses
                  * ahead. The counter resets whenever the target is level/ahead again,
                  * so only a held lead counts. [#4 2026-06-20] */
+#ifndef TD5RE_RELEASE
+                if (td5_police_dev_slow()) s_cop_overtake_ticks[k] = 0;   /* [round H HH] DEV hold: no pull-over */
+#endif
                 if (gap <= -COP_OVERTAKE_MARGIN) {
                     if (++s_cop_overtake_ticks[k] >= cop_overtake_hold_ticks()) {
                         g_cop_phase[k]          = COP_PULLOVER;
@@ -9513,16 +9516,26 @@ static void cop_drive(int slot) {
 }
 
 static void ai_update_single_traffic(int slot) {
+    /* [round H HH] A police ROADBLOCK car (td5_police.c) is parked across the road:
+     * held at its spot, no route plan, no lane follow, never a wreck. */
+    if (td5_police_block_slot(slot)) {
+        g_actor_broken_down[slot]  = 0;
+        g_actor_broken_ticks[slot] = 0;
+        td5_police_block_hold(slot);
+        return;
+    }
     /* Broken-down traffic/cop: park it (brake, no throttle) so it sits and
      * smokes until the timer clears + it is recycled. Skip all driving. */
     if (g_actor_broken_down[slot]) {
         ai_apply_stop_command(actor_ptr(slot));
         return;
     }
-    /* [round H HH] A police ROADBLOCK car (td5_police.c) is parked across the road:
-     * held braked, no route plan, no lane follow. */
-    if (td5_police_block_slot(slot)) {
-        td5_police_block_hold(slot);
+    /* [round H HH] Ordinary traffic heading into a police roadblock brakes and
+     * waits behind it (it would otherwise drive into the parked cars). */
+    if (!g_cop_is_cop[slot] &&
+        td5_police_traffic_blocked(slot, (int)(int16_t)ACTOR_I16(actor_ptr(slot), ACTOR_SPAN_NORMALIZED),
+                                   route_state(slot)[RS_ROUTE_DIRECTION_POLARITY] != 0)) {
+        ai_apply_stop_command(actor_ptr(slot));
         return;
     }
 
@@ -9535,11 +9548,11 @@ static void ai_update_single_traffic(int slot) {
         cop_drive(slot);
 #ifndef TD5RE_RELEASE
         /* [round H HH] DEV: the `police` self-test holds the pursuers back: level 1 keeps
-         * them 40 m off the target (no overtake, no pull-over), level 2 brakes them */
+         * them 80 m off the target (and the scheduler grants no pull-over), level 2 brakes them */
         if (td5_police_dev_slow() == 2 ||
             (td5_police_dev_slow() == 1 && g_cop_target[slot] >= 0 &&
              smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_X) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_X)) / 256 +
-             smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_Z) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_Z)) / 256 < 40 * 330)) {
+             smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_Z) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_Z)) / 256 < 80 * 330)) {
             ACTOR_U8(actor_ptr(slot),  ACTOR_BRAKE_FLAG)      = 1;
             ACTOR_I16(actor_ptr(slot), ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
         }

@@ -6,10 +6,11 @@
  *
  *   A. PURSUIT. Full throttle; at 100 km/h an idle cop is planted 45 spans ahead in a down-track lane beside the car
  *      (td5_ai_traffic_police_dev_plant_cop). Passing it at speed is the stock trigger: the pursuit must start.
- *   B. HEAT + ROADBLOCK. The heat is raised to 3 (DEV), the pursuers are held 40 m back (DEV, or the first one
- *      overtakes and pulls the car over before the block) and the drive goes on at full throttle: a roadblock must be set
- *      up 200..400 m ahead; the car drives at it (lane assist keeps its lane, so it crosses through the gap or
- *      touching the cars), the block must be removed once passed.
+ *   B. HEAT + ROADBLOCK. The heat is raised to 3 (DEV), the pursuers are held 80 m back (DEV, or the first one
+ *      overtakes and pulls the car over before the block; the escape rule waits for C) and the drive goes on at full throttle: a roadblock must be set
+ *      up 200..400 m ahead; within 30 spans of it the driver slows to 100 km/h, and on the straight approach (gap
+ *      under 70 m ahead, heading within ~30 deg of the road) steers onto the gap's centre (a player aims for the
+ *      gap); lane assist drives before that. It crosses, and the block must be removed once passed.
  *   C. ESCAPE. The pursuers now brake (DEV), the car keeps going: the escape rule must fire (lost
  *      sight for 6 + 2 x heat s, or 320 m).
  *   D. BUST. After the grace a second cop is planted ahead and passed; once it chases, the car brakes to a stop and
@@ -56,6 +57,7 @@ static struct {
     int    rear, shot_p, shot_blk, shot_esc, shot_bust;
     uint32_t bits;
     TD5_PoliceStats st0;
+    int32_t px, py, pz; long ptick; double step_max;   /* the car's largest single-tick move (teleport watch) */
 } T;
 
 static long pt_tick(void) { return (long)g_td5.simulation_tick_counter; }
@@ -160,6 +162,20 @@ void td5_police_test_tick(void)
         pt_phase(PT_WARM);
     }
     if (kmh > T.kmh_max) T.kmh_max = kmh;
+    {   /* teleport watch: a move over 6 m in one sim tick is logged with the phase */
+        const TD5_Actor *pl = td5_game_get_actor(0);
+        if (pl) {
+            if (T.ptick && tick == T.ptick + 1) {
+                const double dx = (double)(pl->world_pos.x - T.px), dy = (double)(pl->world_pos.y - T.py), dz = (double)(pl->world_pos.z - T.pz);
+                const double m = sqrt(dx * dx + dy * dy + dz * dz) / 256.0 / 330.0;
+                if (m > T.step_max) T.step_max = m;
+                if (m > 6.0)
+                    TD5_LOG_W(LOG_TAG, "[POLICETEST] the car moved %.1f m in one tick (%s, %.0f km/h, dy %.1f m, span %d, mode %d)", m,
+                              k_phase[T.phase], kmh, dy / 256.0 / 330.0, (int)(int16_t)pl->track_span_raw, pl->vehicle_mode);
+            }
+            T.px = pl->world_pos.x; T.py = pl->world_pos.y; T.pz = pl->world_pos.z; T.ptick = tick;
+        }
+    }
     if (tick - T.t0 > cap) { pt_fail("timeout"); return; }
     switch (T.phase) {
     case PT_WARM:
@@ -214,6 +230,50 @@ void td5_police_test_tick(void)
             } else if (T.block_seen && !T.t_block_gone) {
                 T.t_block_gone = tick;
                 TD5_LOG_I(LOG_TAG, "[POLICETEST] roadblock gone after %.1f s", (tick - T.t_block) / PT_HZ);
+            }
+        }
+        /* a driver aims for the gap: within 30 spans of the block, 100 km/h at most and steer onto the gap centre
+         * (beyond 12 m short of it, onto a point 20 m past it, so the car crosses square) */
+        {
+            int span, ncar, i;
+            double gap, gx, gz, fx, fz;
+            const TD5_Actor *pl = td5_game_get_actor(0);
+            for (i = 0; i < 2 && pl; i++) {
+                if (!td5_police_dev_block(i, &span, &ncar, &gap) || !td5_police_dev_block_gap(i, &gx, &gz, &fx, &fz)) continue;
+                {
+                    const int d = span - (int)(int16_t)pl->track_span_normalized;
+                    const double x = (double)pl->world_pos.x / 256.0, z = (double)pl->world_pos.z / 256.0;
+                    double hx, hz, err, along;
+                    if (d < -3 || d > 30) continue;
+                    along = ((gx - x) * fx + (gz - z) * fz) / 330.0;
+                    if (along < 12.0) { gx += fx * 20.0 * 330.0; gz += fz * 20.0 * 330.0; }
+                    if (fabs((double)pl->linear_velocity_x) + fabs((double)pl->linear_velocity_z) > 1.0) {
+                        hx = (double)pl->linear_velocity_x; hz = (double)pl->linear_velocity_z;
+                    } else {
+                        const double y = (double)(pl->display_angles.yaw & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+                        hx = sin(y); hz = cos(y);
+                    }
+                    err = atan2(gx - x, gz - z) - atan2(hx, hz);
+                    while (err > 3.14159265358979323846) err -= 2.0 * 3.14159265358979323846;
+                    while (err < -3.14159265358979323846) err += 2.0 * 3.14159265358979323846;
+                    bits &= ~(uint32_t)(TD5_INPUT_THROTTLE | TD5_INPUT_BRAKE);
+                    {   /* the steering only on the straight approach: a block just past a bend is reached round it by lane assist */
+                        const double hl = sqrt(hx * hx + hz * hz);
+                        const double c = hl > 0.0 ? (hx * fx + hz * fz) / hl : 0.0;
+                        if (along > -2.0 && along < 70.0 && c > 0.85) {
+                            if (err > 0.02) bits |= (uint32_t)TD5_INPUT_STEER_LEFT;
+                            else if (err < -0.02) bits |= (uint32_t)TD5_INPUT_STEER_RIGHT;
+                        }
+                    }
+                    if (kmh < 95.0) bits |= (uint32_t)TD5_INPUT_THROTTLE;
+                    else if (kmh > 105.0) bits |= (uint32_t)TD5_INPUT_BRAKE;
+                    if ((tick % 5) == 0)
+                        TD5_LOG_I(LOG_TAG, "[POLICETEST] aim: %d spans to the block, %.1f m along, lateral to gap %.1f m, err %.3f rad, steer %s, yaw %d, %.0f km/h",
+                                  d, along, ((gx - x) * fz - (gz - z) * fx) / 330.0, err,
+                                  (bits & TD5_INPUT_STEER_LEFT) ? "LEFT" : (bits & TD5_INPUT_STEER_RIGHT) ? "RIGHT" : "-",
+                                  pl->display_angles.yaw & 0xFFF, kmh);
+                    break;
+                }
             }
         }
         if ((T.t_block_gone && tick - T.t_block_gone > 60) || tick - T.phase_t0 > 60 * 30) {
