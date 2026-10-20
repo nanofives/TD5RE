@@ -56,8 +56,9 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  5u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
-                                     * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns */
+#define TD5_ROAM_SCENERY_RULES  6u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+                                     * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
+                                     * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)

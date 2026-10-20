@@ -685,26 +685,31 @@ static RRPv rr_pv_lerp(const RRPv *p, const RRPv *q, double t)
     return r;
 }
 
-/* keep the part of polygon in[] with sgn * (a - k) >= 0 */
-static int rr_pv_clip(const RRPv *in, int n, double k, double sgn, RRPv *out)
+/* keep the part of polygon in[] with sgn * (a - k) >= 0 (axis 0) or sgn * (b - k) >= 0 (axis 1) */
+static int rr_pv_clip(const RRPv *in, int n, int axis, double k, double sgn, RRPv *out)
 {
     int i, m = 0;
     for (i = 0; i < n; i++) {
         const RRPv *p = &in[i], *q = &in[(i + 1) % n];
-        const double dp = sgn * (p->a - k), dq = sgn * (q->a - k);
+        const double dp = sgn * ((axis ? p->b : p->a) - k), dq = sgn * ((axis ? q->b : q->a) - k);
         if (dp >= 0.0) out[m++] = *p;
         if ((dp >= 0.0) != (dq >= 0.0)) out[m++] = rr_pv_lerp(p, q, dp / (dp - dq));
     }
     return m;
 }
 
-/* One junction patch triangle -> its slab pieces (TD5RE_ROAM_PATCH_UV=1) or itself with the old UVs. */
+/* One junction patch triangle -> its cell pieces (TD5RE_ROAM_PATCH_UV=1) or itself with the old UVs.
+ * Cells are RR_PATCH_TEX square on the lattice axes, the size of a ribbon lane quad: the texture needs
+ * the cut only in a (the slab), the cut in b is for the depth. A whole patch triangle (fans reach 30 m)
+ * lost to the ground 40 cm under it near a low camera, while the ribbon's lane quads beside it did not
+ * (roam HC: small0 at -34.905171,-57.944409, eye 1.7 m over the patch; old triangles + the same exe =
+ * grass, cells = road). */
 static void rr_patch_tri(const RoamTile *t, const RoamTri *tr, uint8_t sbi, RRXList *L, uint32_t *npiece)
 {
     RRPv v[3];
     float p[3][3];
     uint32_t col;
-    double amin, amax, bmin, k;
+    double amin, amax, bmin, bmax, k, kb;
     int i, j;
     for (i = 0; i < 3; i++) {
         const TD5_StripVertex *sv = &t->vert[tr->v[i]];
@@ -718,8 +723,9 @@ static void rr_patch_tri(const RoamTile *t, const RoamTri *tr, uint8_t sbi, RRXL
     }
     col = rr_shade(p[0], p[1], p[2]);
     amin = fmin(v[0].a, fmin(v[1].a, v[2].a)); amax = fmax(v[0].a, fmax(v[1].a, v[2].a));
+    bmax = fmax(v[0].b, fmax(v[1].b, v[2].b));
     bmin = floor(fmin(v[0].b, fmin(v[1].b, v[2].b)));
-    if (!s_rr.patch_uv || amax - amin > 64.0) {
+    if (!s_rr.patch_uv || amax - amin > 64.0 || bmax - bmin > 64.0) {
         /* the old mapping: a plain asphalt patch, UVs from the triangle's first vertex */
         RRXTri *x = rr_x_add(L);
         if (!x) return;
@@ -731,13 +737,17 @@ static void rr_patch_tri(const RoamTile *t, const RoamTri *tr, uint8_t sbi, RRXL
         x->col = col; x->sb = sbi;
         return;
     }
-    for (k = floor(amin); k < amax; k += 1.0) {
-        RRPv s1[5], s2[7];
-        int n1 = rr_pv_clip(v, 3, k, 1.0, s1), n2;
+    for (k = floor(amin); k < amax; k += 1.0) for (kb = bmin; kb < bmax; kb += 1.0) {
+        RRPv s1[5], s2[7], s3[9], s4[11];
+        int n1 = rr_pv_clip(v, 3, 0, k, 1.0, s1), n2;
         if (n1 < 3) continue;
-        n2 = rr_pv_clip(s1, n1, k + 1.0, -1.0, s2);
+        n2 = rr_pv_clip(s1, n1, 0, k + 1.0, -1.0, s2);
+        if (n2 < 3) continue;
+        n2 = rr_pv_clip(s2, n2, 1, kb, 1.0, s3);
+        if (n2 < 3) continue;
+        n2 = rr_pv_clip(s3, n2, 1, kb + 1.0, -1.0, s4);
         for (j = 1; j + 1 < n2; j++) {
-            const RRPv *q[3] = { &s2[0], &s2[j], &s2[j + 1] };
+            const RRPv *q[3] = { &s4[0], &s4[j], &s4[j + 1] };
             const double ar = (q[1]->x - q[0]->x) * (q[2]->z - q[0]->z) - (q[1]->z - q[0]->z) * (q[2]->x - q[0]->x);
             RRXTri *x;
             if (fabs(ar) < 1.0) continue;               /* a sliver of the cut: nothing to draw */
@@ -1190,6 +1200,8 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
     }
     rr_ground_free(&gr);
     free(spsb); free(trsb); free(besb); free(xl.t);
+    TD5_LOG_D(LOG_TAG, "ROAM_RENDER_HC tile %d,%d patch_tris=%u pieces=%u stop_lines=%u lane_quads=%u",
+              t->tx, t->tz, rt->ntri, rt->npiece, rt->nstop, rt->nroad);
     if (rt->nmesh == 0) { free(rt); return NULL; }
     return rt;
 
@@ -1883,6 +1895,9 @@ typedef struct {
     TD5_RoamHeight *hc;
     long      ns, nnog, hist[10];
     double    worst;
+    /* [roam HC] ground beside the road: [0 patch, 1 ribbon][offset 1/2/4/8 m] */
+    long      bs_n[2][4], bs_hist[2][4][5];
+    double    bs_worst[2][4], bs_wx[2][4], bs_wz[2][4];
 } RRGz;
 
 static const double k_gz_thr_cm[10] = { -40, -30, -20, -10, -5, -2, 0, 10, 50, 100 };
@@ -2018,6 +2033,7 @@ int td5_roam_render_ground_census_dev_test(void)
     t0 = td5_plat_time_ms();
     memset(&z, 0, sizeof z);
     z.worst = -1e30;
+    for (i = 0; i < 8; i++) z.bs_worst[i / 4][i % 4] = -1e30;
     memset(&s_rr, 0, sizeof s_rr);
     snprintf(s_rr.place, sizeof s_rr.place, "%s", place);
     /* the lattice: the tile dir's ROAMGRID.JSON, else the place's, else the default (as begin) */
@@ -2240,6 +2256,63 @@ int td5_roam_render_ground_census_dev_test(void)
             }
         }
     }
+    /* [roam HC] the ground BESIDE the road: drawn ground at 1 / 2 / 4 / 8 m outside every kerb edge minus the
+     * road edge's height (rise > 0 = the grass stands over the road next to it and hides it from a low eye),
+     * junction patch kerbs and ribbon kerbs apart. Outward = away from the edge's own primitive. */
+    {
+        static const double off_m[4] = { 1.0, 2.0, 4.0, 8.0 };
+        static const double thr_cm[5] = { 0.0, 25.0, 50.0, 100.0, 200.0 };
+        for (k = 0; k < z.ntile; k++) {
+            const RoamTile *t = &z.tile[k];
+            uint32_t s;
+            for (s = 0; s < t->nbedge; s++) {
+                const RoamBEdge *be = &t->bedge[s];
+                const int cls = (be->prim & ROAM_PRIM_TRI) ? 0 : 1;
+                int32_t ox = 0, oy = 0, oz = 0;
+                double a[3], b[3], in[2], nx, nz, l, L;
+                int n, q, o2, c;
+                if (be->kind != ROAM_BEDGE_KERB || !rr_bedge_prim(t, be, &ox, &oy, &oz)) continue;
+                if (cls == 0) {
+                    const RoamTri *tr = &t->tri[be->prim & ~ROAM_PRIM_TRI];
+                    in[0] = in[1] = 0.0;
+                    for (c = 0; c < 3; c++) { in[0] += t->vert[tr->v[c]].x; in[1] += t->vert[tr->v[c]].z; }
+                    in[0] = (double)t->org_x + ox + in[0] / 3.0; in[1] = (double)t->org_z + oz + in[1] / 3.0;
+                } else {
+                    uint32_t Lv, Rv; int ln;
+                    if (!rr_span_ok(t, &t->span[be->prim], &Lv, &Rv, &ln)) continue;
+                    in[0] = (double)t->org_x + ox + 0.25 * ((double)t->vert[Lv].x + t->vert[Lv + ln].x + t->vert[Rv].x + t->vert[Rv + ln].x);
+                    in[1] = (double)t->org_z + oz + 0.25 * ((double)t->vert[Lv].z + t->vert[Lv + ln].z + t->vert[Rv].z + t->vert[Rv + ln].z);
+                }
+                a[0] = (double)t->org_x + ox + t->vert[be->v[0]].x; a[1] = (double)oy + t->vert[be->v[0]].y; a[2] = (double)t->org_z + oz + t->vert[be->v[0]].z;
+                b[0] = (double)t->org_x + ox + t->vert[be->v[1]].x; b[1] = (double)oy + t->vert[be->v[1]].y; b[2] = (double)t->org_z + oz + t->vert[be->v[1]].z;
+                nx = b[2] - a[2]; nz = -(b[0] - a[0]); l = hypot(nx, nz);
+                if (l < 1.0) continue;
+                nx /= l; nz /= l;
+                if ((0.5 * (a[0] + b[0]) - in[0]) * nx + (0.5 * (a[2] + b[2]) - in[1]) * nz < 0.0) { nx = -nx; nz = -nz; }
+                L = l;
+                n = (int)ceil(L / step);
+                if (n < 1) n = 1;
+                if (n > 4000) n = 4000;
+                for (q = 0; q <= n; q++) {
+                    const double f = (double)q / n;
+                    const double x = a[0] + f * (b[0] - a[0]), y = a[1] + f * (b[1] - a[1]), zz = a[2] + f * (b[2] - a[2]);
+                    for (o2 = 0; o2 < 4; o2++) {
+                        const double sx = x + nx * off_m[o2] * RR_UPM, sz = zz + nz * off_m[o2] * RR_UPM;
+                        double g, rise;
+                        int ti, ci, h;
+                        if (!rr_gz_ground(&z, sx, sz, &g, &ti, &ci)) continue;
+                        rise = g - y;
+                        z.bs_n[cls][o2]++;
+                        if (rise > z.bs_worst[cls][o2]) {
+                            z.bs_worst[cls][o2] = rise;
+                            z.bs_wx[cls][o2] = sx; z.bs_wz[cls][o2] = sz;
+                        }
+                        for (h = 0; h < 5; h++) if (rise > thr_cm[h] * (RR_UPM / 100.0)) z.bs_hist[cls][o2][h]++;
+                    }
+                }
+            }
+        }
+    }
     if (ed_nkeep > 1) qsort(ed_keep, (size_t)ed_nkeep, sizeof *ed_keep, rr_gz_edge_cmp);
     /* seams: every border lattice point must carry the same height in both tiles (bit for bit) */
     for (k = 0; k < z.ntile; k++) {
@@ -2314,6 +2387,21 @@ int td5_roam_render_ground_census_dev_test(void)
         fprintf(o, "edge_threshold_cm  samples_over_above  samples_hang_above  over_one_level  over_multi_level\n");
         for (h = 0; h < 8; h++)
             fprintf(o, "%5.0f  %10ld  %10ld  %10ld  %10ld\n", k_gz_edge_cm[h], ed_over[h], ed_hang[h], ed_overc[0][h], ed_overc[1][h]);
+        {   /* [roam HC] */
+            static const char *const cn[2] = { "junction patch", "ribbon" };
+            static const double off_m[4] = { 1.0, 2.0, 4.0, 8.0 };
+            int c2, o2;
+            fprintf(o, "\nBESIDE THE ROAD (roam HC): verge %s; rise = ground as drawn at D m outside a kerb edge - the road "
+                       "edge height (> 0: the grass stands over the road beside it)\n", td5_roam_gfix_verge() ? "ON" : "OFF");
+            fprintf(o, "kerb_of          D_m   samples   rise>0   >25cm   >50cm  >100cm  >200cm  worst_cm  worst_lat worst_lon\n");
+            for (c2 = 0; c2 < 2; c2++) for (o2 = 0; o2 < 4; o2++)
+                fprintf(o, "%-15s %4.0f %9ld %8ld %7ld %7ld %7ld %7ld %9.1f  %.6f %.6f\n", cn[c2], off_m[o2], z.bs_n[c2][o2],
+                        z.bs_hist[c2][o2][0], z.bs_hist[c2][o2][1], z.bs_hist[c2][o2][2], z.bs_hist[c2][o2][3],
+                        z.bs_hist[c2][o2][4], z.bs_worst[c2][o2] / (RR_UPM / 100.0),
+                        mdlat > 0 ? lat0 + z.bs_wz[c2][o2] / (mdlat * RR_UPM) : 0.0,
+                        mdlon > 0 ? lon0 + z.bs_wx[c2][o2] / (mdlon * RR_UPM) : 0.0);
+            fprintf(o, "\n");
+        }
         fprintf(o, "worst 40 edge samples: over_cm hang_cm level_gap_cm place_x place_z road_y lat lon\n");
         for (i = 0; i < ed_nkeep && i < 40; i++) {
             const RRGzEdge *c = &ed_keep[i];
