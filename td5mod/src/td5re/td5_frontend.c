@@ -3907,8 +3907,10 @@ void td5_frontend_auto_race_setup(void) {
      * planned pins (frontend_geo_entry_on_ok); one player races in the city (its route: the geo map's
      * pins, else routes/geo_map.json), and with no route the city can race it is an error and track
      * 0, never a strip. TD5RE_GEO_STRIP_BUILD=1 (dev: the level091 identity gate) races the committed
-     * ROUTE.JSON exactly as before. */
-    if (td5_trackgen_is_geo_slot(s_selected_track) && !td5_roam_strip_build_enabled()) {
+     * ROUTE.JSON exactly as before. [roam HC] Not when a roam session is already armed (the dev
+     * --Roam=1 CLI points default_track at the roam host, a geo slot): re-arming here moved the CLI spawn
+     * to the geo map's saved route START and started a race. */
+    if (td5_trackgen_is_geo_slot(s_selected_track) && !td5_roam_strip_build_enabled() && !td5_roam_armed()) {
         const int humans_was = s_num_human_players;   /* only the context test reads it here */
         s_num_human_players = g_td5.ini.default_players >= 2 ? g_td5.ini.default_players : 1;
         if (frontend_geo_strip_context()) {

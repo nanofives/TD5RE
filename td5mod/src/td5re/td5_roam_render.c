@@ -69,6 +69,7 @@
 #include "td5_roam_height.h"
 #include "td5_roam_groundfix.h"   /* [G4b] the clamp, shared with the scenery */
 #include "td5_roam_ribbon.h"
+#include "td5_roam_junction.h"   /* [roam HC] TD5_ROAM_CL_TAPER / _BEND: which clusters get stop lines */
 #include "td5_roam_view.h"
 #include "td5_roam_render.h"
 #include "td5_roam_scenery.h"   /* [F4a] the tile's SCENERY layer */
@@ -104,8 +105,28 @@
 #define RR_PAGE_GROUND    9
 #define RR_PAGE_KERB      HUD_WHITE_TEX_PAGE
 /* Junction patch UVs: units of road per page. 80000 (186 m) magnified the geo asphalt's grain into
- * blotches; 24000 (56 m, +-22 m inside the stripe-free middle) keeps a patch uniform. */
+ * blotches; 24000 (56 m, +-22 m inside the stripe-free middle) keeps a patch uniform.
+ * [roam HC] That was 16x the ribbon's texel (87 cm against 5.5 cm: the blur at every junction), and a
+ * triangle wider than 12000 units still reached the lane-line column (x <= 1) of the page, which drew a
+ * 1.7 m blurred white bar across the box. RR_PATCH_UV_UNITS is now the OLD mapping (TD5RE_ROAM_PATCH_UV=0).
+ * The new one cuts every patch triangle into slabs of RR_PATCH_TEX units along the lattice u axis (world
+ * anchored, the same in every tile) and maps each slab to columns RR_PATCH_U0..U1 of the page, which hold
+ * no stripe even with bilinear filtering; v runs on along the lattice v axis and wraps (the stripe is a
+ * column, every row is clean). Texel: 1500 / 60 = 25 units (5.8 cm), the ribbon's 23.4. */
 #define RR_PATCH_UV_UNITS 24000.0f
+#define RR_PATCH_TEX      1500.0
+#define RR_PATCH_U0       (3.0 / 64.0)
+#define RR_PATCH_U1       (63.0 / 64.0)
+/* [roam HC] Stop lines: a white bar across the inbound lanes of every junction mouth that needs one, set
+ * back from the patch's cut row into the ribbon's last quad. Drawn on the road page's own lane-line column
+ * (texels x 0..1, rows 0..15 are one solid dash), so it is part of the road command: no new page. */
+#define RR_STOP_S0        (0.30 * RR_UPM)   /* bar starts this far back from the cut row */
+#define RR_STOP_S1        (0.80 * RR_UPM)   /* and ends here (a 50 cm bar)               */
+#define RR_STOP_LIFT      13.0              /* 3 cm over the ribbon: no z-fight          */
+#define RR_STOP_U0        (0.5 / 64.0)
+#define RR_STOP_U1        (1.5 / 64.0)
+#define RR_STOP_V0        (1.5 / 64.0)
+#define RR_STOP_V1        (14.5 / 64.0)
 
 typedef struct {
     int             tx, tz;
@@ -116,6 +137,7 @@ typedef struct {
     TD5_SpanDisplayList dl;
     float           cx, cy, cz, r;           /* whole-tile sphere                   */
     uint32_t        nroad, ntri, nground, nskirt;
+    uint32_t        npiece, nstop;           /* [roam HC] patch slab triangles, stop-line bars */
     size_t          bytes;
     /* [F4a] the SCENERY layer (td5_roam_scenery.c): runtime headers over the
      * layer's MODELS records, one display list per 64 m sub-block */
@@ -151,6 +173,9 @@ typedef struct {
     double    ground_drop;                   /* units                               */
     int       ground_clamp;                  /* [G4] hold the ground under the road */
     int       keep_raw;                      /* [G5] census: keep the unclamped lattice (RRGround.h0) */
+    int       patch_uv;                      /* [roam HC] 1 = slab mapping at the ribbon's texel, 0 = old */
+    int       stoplines;                     /* [roam HC] 1 = stop lines at junction mouths            */
+    int       kerb_line;                     /* [roam HC] 1 = the old dashed line down one kerb        */
     int       cell_m;                        /* ground cell, metres (divides 64)    */
     double    radius;                        /* draw radius, units                  */
     /* DEV loader */
@@ -599,7 +624,9 @@ static void rr_nb_get(RRNb *nb, const RoamTile *self, TD5_RoamScnSource *scn, in
 {
     int dx, dz;
     memset(nb, 0, sizeof *nb);
-    if (!s_rr.ground_clamp || !s_rr.use_ground) return;
+    nb->t[4] = self;
+    /* [roam HC] the stop lines read the 3x3 too (a mouth's cluster may live in a neighbour) */
+    if ((!s_rr.ground_clamp || !s_rr.use_ground) && !s_rr.stoplines) return;
     for (dz = -1; dz <= 1; dz++) for (dx = -1; dx <= 1; dx++) {
         const int k = (dz + 1) * 3 + (dx + 1), tx = self->tx + dx, tz = self->tz + dz;
         char path[512], err[160];
@@ -629,6 +656,306 @@ static void rr_nb_free(RRNb *nb)
     memset(nb, 0, sizeof *nb);
 }
 
+/* ------------------------------------------- [roam HC] junction road surface ---- */
+
+/* The extra triangles of the road command: junction patch slabs and stop-line bars, render frame,
+ * built before the count pass so both passes read one list. */
+typedef struct { float p[3][3]; float uv[3][2]; uint32_t col; uint8_t sb; } RRXTri;
+typedef struct { RRXTri *t; int n, cap, oom; } RRXList;
+
+static RRXTri *rr_x_add(RRXList *L)
+{
+    if (L->n == L->cap) {
+        const int nc = L->cap ? L->cap * 2 : 256;
+        RRXTri *nt = (RRXTri *)realloc(L->t, (size_t)nc * sizeof *nt);
+        if (!nt) { L->oom = 1; return NULL; }
+        L->t = nt; L->cap = nc;
+    }
+    return &L->t[L->n++];
+}
+
+/* a patch-slab vertex: place frame + the lattice texture coordinates (a, b) in RR_PATCH_TEX units */
+typedef struct { double x, y, z, a, b; } RRPv;
+
+static RRPv rr_pv_lerp(const RRPv *p, const RRPv *q, double t)
+{
+    RRPv r;
+    r.x = p->x + (q->x - p->x) * t; r.y = p->y + (q->y - p->y) * t; r.z = p->z + (q->z - p->z) * t;
+    r.a = p->a + (q->a - p->a) * t; r.b = p->b + (q->b - p->b) * t;
+    return r;
+}
+
+/* keep the part of polygon in[] with sgn * (a - k) >= 0 */
+static int rr_pv_clip(const RRPv *in, int n, double k, double sgn, RRPv *out)
+{
+    int i, m = 0;
+    for (i = 0; i < n; i++) {
+        const RRPv *p = &in[i], *q = &in[(i + 1) % n];
+        const double dp = sgn * (p->a - k), dq = sgn * (q->a - k);
+        if (dp >= 0.0) out[m++] = *p;
+        if ((dp >= 0.0) != (dq >= 0.0)) out[m++] = rr_pv_lerp(p, q, dp / (dp - dq));
+    }
+    return m;
+}
+
+/* One junction patch triangle -> its slab pieces (TD5RE_ROAM_PATCH_UV=1) or itself with the old UVs. */
+static void rr_patch_tri(const RoamTile *t, const RoamTri *tr, uint8_t sbi, RRXList *L, uint32_t *npiece)
+{
+    RRPv v[3];
+    float p[3][3];
+    uint32_t col;
+    double amin, amax, bmin, k;
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        const TD5_StripVertex *sv = &t->vert[tr->v[i]];
+        double u, w;
+        v[i].x = (double)t->org_x + (double)tr->ox + (double)sv->x;
+        v[i].y = (double)tr->oy + (double)sv->y;
+        v[i].z = (double)t->org_z + (double)tr->oz + (double)sv->z;
+        roam_grid_uv(&s_rr.grid, v[i].x, v[i].z, &u, &w);
+        v[i].a = u / RR_PATCH_TEX; v[i].b = w / RR_PATCH_TEX;
+        rr_pt(v[i].x, v[i].y, v[i].z, p[i]);
+    }
+    col = rr_shade(p[0], p[1], p[2]);
+    amin = fmin(v[0].a, fmin(v[1].a, v[2].a)); amax = fmax(v[0].a, fmax(v[1].a, v[2].a));
+    bmin = floor(fmin(v[0].b, fmin(v[1].b, v[2].b)));
+    if (!s_rr.patch_uv || amax - amin > 64.0) {
+        /* the old mapping: a plain asphalt patch, UVs from the triangle's first vertex */
+        RRXTri *x = rr_x_add(L);
+        if (!x) return;
+        memcpy(x->p, p, sizeof p);
+        for (i = 0; i < 3; i++) {
+            x->uv[i][0] = 0.5f + (p[i][0] - p[0][0]) / RR_PATCH_UV_UNITS;
+            x->uv[i][1] = 0.5f + (p[i][2] - p[0][2]) / RR_PATCH_UV_UNITS;
+        }
+        x->col = col; x->sb = sbi;
+        return;
+    }
+    for (k = floor(amin); k < amax; k += 1.0) {
+        RRPv s1[5], s2[7];
+        int n1 = rr_pv_clip(v, 3, k, 1.0, s1), n2;
+        if (n1 < 3) continue;
+        n2 = rr_pv_clip(s1, n1, k + 1.0, -1.0, s2);
+        for (j = 1; j + 1 < n2; j++) {
+            const RRPv *q[3] = { &s2[0], &s2[j], &s2[j + 1] };
+            const double ar = (q[1]->x - q[0]->x) * (q[2]->z - q[0]->z) - (q[1]->z - q[0]->z) * (q[2]->x - q[0]->x);
+            RRXTri *x;
+            if (fabs(ar) < 1.0) continue;               /* a sliver of the cut: nothing to draw */
+            x = rr_x_add(L);
+            if (!x) return;
+            for (i = 0; i < 3; i++) {
+                double fa = q[i]->a - k;
+                if (fa < 0.0) fa = 0.0;
+                if (fa > 1.0) fa = 1.0;
+                rr_pt(q[i]->x, q[i]->y, q[i]->z, x->p[i]);
+                x->uv[i][0] = (float)(RR_PATCH_U0 + fa * (RR_PATCH_U1 - RR_PATCH_U0));
+                x->uv[i][1] = (float)(q[i]->b - bmin);
+            }
+            x->col = col; x->sb = sbi;
+            (*npiece)++;
+        }
+    }
+}
+
+/* A cut vertex of a junction patch that can take a stop line: place-frame x/z + its cluster. */
+typedef struct { int64_t x, z; int cl; } RRCutV;
+typedef struct { int64_t key; int signal, minl, maxl; } RRClus;
+
+static int rr_cutv_cmp(const void *pa, const void *pb)
+{
+    const RRCutV *a = (const RRCutV *)pa, *b = (const RRCutV *)pb;
+    if (a->x != b->x) return a->x < b->x ? -1 : 1;
+    if (a->z != b->z) return a->z < b->z ? -1 : 1;
+    return a->cl - b->cl;
+}
+
+static int rr_cutv_find(const RRCutV *v, int n, int64_t x, int64_t z)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (v[mid].x < x || (v[mid].x == x && v[mid].z < z)) lo = mid + 1;
+        else if (v[mid].x == x && v[mid].z == z) return v[mid].cl;
+        else hi = mid - 1;
+    }
+    return -1;
+}
+
+/* point at fractional vertex index f along a row of n+1 vertices (place frame, doubles) */
+static void rr_row_at(const double (*r)[3], int n, double f, double o[3])
+{
+    int i = (int)floor(f);
+    double t;
+    if (i < 0) i = 0;
+    if (i > n - 1) i = n - 1;
+    t = f - (double)i;
+    o[0] = r[i][0] + (r[i + 1][0] - r[i][0]) * t;
+    o[1] = r[i][1] + (r[i + 1][1] - r[i][1]) * t;
+    o[2] = r[i][2] + (r[i + 1][2] - r[i][2]) * t;
+}
+
+/* Stop lines of tile t. A ribbon row whose every vertex is a vertex of ONE junction patch of the 3x3 is a
+ * mouth (the cut rows are shared bit for bit, T3/T5), so a mouth whose cluster another tile owns is found
+ * too. Taken: clusters of 3+ arms that are not a taper / bend; signalised clusters on every inbound arm,
+ * others on the minor arms (fewer lanes than the cluster's widest), or on every arm when all are equal.
+ * Not taken: roundabout rings, loops. Inbound: a one-way street flowing into the junction (the whole
+ * width), a two-way street's right half AS DRAWN (Argentina drives on the right). The roam world is drawn
+ * mirrored against the map (east is on screen-left facing north: plan from the ROAMTILEs vs top-down
+ * framedumps, roam HC), so the driver's right of a heading (hx, hz) is (-hz, hx), the convention
+ * td5_roam_furniture.c verified on screen (side -1 = right kerb). */
+static void rr_stop_lines(const RoamTile *t, const RRNb *nb, const uint8_t *spsb, RRXList *L, uint32_t *nstop)
+{
+    RRCutV *cv = NULL;
+    RRClus *cl = NULL;
+    int ncv = 0, ccv = 0, ncl = 0, ccl = 0, k;
+    int32_t *sedge = NULL;
+    uint32_t i, e;
+    if (!nb) return;
+    for (k = 0; k < RR_NB; k++) {
+        const RoamTile *nt = nb->t[k];
+        uint32_t ni;
+        if (!nt) continue;
+        for (ni = 0; ni < nt->nnode; ni++) {
+            const RoamNodeRec *nr = &nt->node[ni];
+            RRClus c;
+            uint32_t a, q, s;
+            if (nr->narm < 3 || (nr->flags & (TD5_ROAM_CL_TAPER | TD5_ROAM_CL_BEND))) continue;
+            if ((uint32_t)nr->arm_first + nr->narm > nt->narm || (uint32_t)nr->tri_first + nr->tri_count > nt->ntri) continue;
+            c.key = nr->cluster_key; c.signal = 0; c.minl = 99; c.maxl = 0;
+            for (a = 0; a < nr->narm; a++) {
+                const int ln = nt->arm[nr->arm_first + a].lanes;
+                if (ln < c.minl) c.minl = ln;
+                if (ln > c.maxl) c.maxl = ln;
+            }
+            for (s = 0; s < nt->nsign; s++) if (nt->sign[s].cluster_key == nr->cluster_key) { c.signal = 1; break; }
+            if (ncl == ccl) {
+                const int nc = ccl ? ccl * 2 : 64;
+                RRClus *n2 = (RRClus *)realloc(cl, (size_t)nc * sizeof *n2);
+                if (!n2) goto done;
+                cl = n2; ccl = nc;
+            }
+            cl[ncl] = c;
+            for (q = 0; q < nr->tri_count; q++) {
+                const RoamTri *tr = &nt->tri[nr->tri_first + q];
+                int j;
+                for (j = 0; j < 3; j++) {
+                    const TD5_StripVertex *sv;
+                    if (tr->v[j] >= nt->nvert) continue;
+                    sv = &nt->vert[tr->v[j]];
+                    if (ncv == ccv) {
+                        const int nc = ccv ? ccv * 2 : 1024;
+                        RRCutV *n2 = (RRCutV *)realloc(cv, (size_t)nc * sizeof *n2);
+                        if (!n2) goto done;
+                        cv = n2; ccv = nc;
+                    }
+                    cv[ncv].x = (int64_t)nt->org_x + tr->ox + sv->x;
+                    cv[ncv].z = (int64_t)nt->org_z + tr->oz + sv->z;
+                    cv[ncv].cl = ncl;
+                    ncv++;
+                }
+            }
+            ncl++;
+        }
+    }
+    if (!ncv) goto done;
+    qsort(cv, (size_t)ncv, sizeof *cv, rr_cutv_cmp);
+    sedge = (int32_t *)malloc((t->nspan ? t->nspan : 1u) * sizeof(int32_t));
+    if (!sedge) goto done;
+    for (i = 0; i < t->nspan; i++) sedge[i] = -1;
+    for (e = 0; e < t->nedge; e++)
+        for (i = t->edge[e].span_first; i < (uint32_t)t->edge[e].span_first + t->edge[e].span_count && i < t->nspan; i++)
+            sedge[i] = (int32_t)e;
+    for (i = 0; i < t->nspan; i++) {
+        const TD5_StripSpan *sp = &t->span[i];
+        uint32_t Lv, Rv;
+        int n, side, kk;
+        double row[2][RR_MAX_LANES + 1][3];
+        if (spsb[i] == 0xFF || sedge[i] < 0 || !rr_span_ok(t, sp, &Lv, &Rv, &n)) continue;
+        for (kk = 0; kk <= n; kk++) {
+            const TD5_StripVertex *a = &t->vert[Lv + (uint32_t)kk], *b = &t->vert[Rv + (uint32_t)kk];
+            row[0][kk][0] = (double)t->org_x + sp->origin_x + a->x; row[0][kk][1] = (double)sp->origin_y + a->y;
+            row[0][kk][2] = (double)t->org_z + sp->origin_z + a->z;
+            row[1][kk][0] = (double)t->org_x + sp->origin_x + b->x; row[1][kk][1] = (double)sp->origin_y + b->y;
+            row[1][kk][2] = (double)t->org_z + sp->origin_z + b->z;
+        }
+        for (side = 0; side < 2; side++) {
+            const RoamEdgeRec *er = &t->edge[sedge[i]];
+            const double (*m)[3] = (const double (*)[3])row[side], (*f)[3] = (const double (*)[3])row[side ^ 1];
+            int c = -1, inb, end;
+            double mc[3], fc[3], hx, hz, hl, f0, f1, fstep, ff;
+            for (kk = 0; kk <= n; kk++) {
+                const int ck = rr_cutv_find(cv, ncv, (int64_t)m[kk][0], (int64_t)m[kk][2]);
+                if (ck < 0 || (c >= 0 && ck != c)) { c = -2; break; }
+                c = ck;
+            }
+            if (c < 0) continue;
+            if (er->flags & ROAM_EF_ROUNDABOUT) continue;
+            if (er->end_key[0] == er->end_key[1]) continue;                   /* a loop: which end is this? */
+            if (er->end_key[0] == cl[c].key) end = 0;
+            else if (er->end_key[1] == cl[c].key) end = 1;
+            else continue;
+            if (!cl[c].signal && cl[c].minl != cl[c].maxl && er->lanes >= cl[c].maxl) continue;   /* the major road */
+            rr_row_at(m, n, 0.5 * n, mc);
+            rr_row_at(f, n, 0.5 * n, fc);
+            hx = mc[0] - fc[0]; hz = mc[2] - fc[2]; hl = hypot(hx, hz);          /* heading INTO the junction */
+            if (hl < RR_STOP_S1 * 1.25) continue;                                /* a stub quad: no room */
+            hx /= hl; hz /= hl;
+            if (er->oneway) {
+                inb = (er->oneway > 0) ? (end == 1) : (end == 0);
+                if (!inb) continue;
+                f0 = 0.0; f1 = (double)n;
+            } else {
+                /* the right of travel as drawn is (-hz, hx): which end of the row lies there */
+                const double lat0 = -(m[0][0] - mc[0]) * hz + (m[0][2] - mc[2]) * hx;
+                if (lat0 > 0.0) { f0 = 0.0; f1 = 0.5 * n; } else { f0 = 0.5 * n; f1 = (double)n; }
+            }
+            /* the bar, one quad per piece between row vertices */
+            for (ff = f0; ff < f1 - 1e-9; ff = fstep) {
+                double a0[3], a1[3], b0[3], b1[3], pa[3], pb[3];
+                double q[4][3];
+                int z;
+                fstep = floor(ff + 1e-9) + 1.0;
+                if (fstep > f1) fstep = f1;
+                rr_row_at(m, n, ff, a0); rr_row_at(f, n, ff, b0);
+                rr_row_at(m, n, fstep, a1); rr_row_at(f, n, fstep, b1);
+                for (z = 0; z < 2; z++) {
+                    const double *pm = z ? a1 : a0, *pf = z ? b1 : b0;
+                    const double dl = hypot(pf[0] - pm[0], pf[2] - pm[2]);
+                    const double t0 = dl > 1.0 ? RR_STOP_S0 / dl : 0.0, t1 = dl > 1.0 ? RR_STOP_S1 / dl : 0.0;
+                    for (kk = 0; kk < 3; kk++) {
+                        pa[kk] = pm[kk] + (pf[kk] - pm[kk]) * t0;
+                        pb[kk] = pm[kk] + (pf[kk] - pm[kk]) * t1;
+                    }
+                    memcpy(q[z ? 1 : 0], pa, sizeof pa);
+                    memcpy(q[z ? 2 : 3], pb, sizeof pb);
+                }
+                {
+                    float r[4][3];
+                    static const float uu[4] = { (float)RR_STOP_U0, (float)RR_STOP_U1, (float)RR_STOP_U1, (float)RR_STOP_U0 };
+                    static const float vv[4] = { (float)RR_STOP_V0, (float)RR_STOP_V0, (float)RR_STOP_V1, (float)RR_STOP_V1 };
+                    static const int tri[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+                    uint32_t col;
+                    int tt;
+                    for (z = 0; z < 4; z++) rr_pt(q[z][0], q[z][1] + RR_STOP_LIFT, q[z][2], r[z]);
+                    col = rr_shade(r[0], r[1], r[2]);
+                    for (tt = 0; tt < 2; tt++) {
+                        RRXTri *x = rr_x_add(L);
+                        if (!x) goto done;
+                        for (z = 0; z < 3; z++) {
+                            memcpy(x->p[z], r[tri[tt][z]], sizeof r[0]);
+                            x->uv[z][0] = uu[tri[tt][z]]; x->uv[z][1] = vv[tri[tt][z]];
+                        }
+                        x->col = col; x->sb = spsb[i];
+                    }
+                }
+            }
+            (*nstop)++;
+        }
+    }
+done:
+    free(cv); free(cl); free(sedge);
+}
+
 /* Bake `t` with the ground from `hc` (NULL = no ground). Returns the tile or NULL
  * (nothing to draw / out of memory). [F3] Thread-safe for a caller-owned `hc`: it
  * reads only the session's fixed configuration (frame, grid, pages, knobs), never
@@ -639,11 +966,13 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
     RRGround gr;
     RRTile *rt;
     uint8_t *spsb = NULL, *trsb = NULL, *besb = NULL;
+    RRXList xl;
     uint32_t i;
     int k, ok = 1;
     const float kerb_h = (float)(0.45 * RR_UPM), deck_h = (float)(1.2 * RR_UPM);
 
     memset(sb, 0, sizeof sb);
+    memset(&xl, 0, sizeof xl);
     for (k = 0; k < RR_MAXMESH; k++) {
         sb[k].lo[0] = sb[k].lo[1] = sb[k].lo[2] = 1e30f;
         sb[k].hi[0] = sb[k].hi[1] = sb[k].hi[2] = -1e30f;
@@ -671,8 +1000,13 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         if (tr->v[0] >= t->nvert || tr->v[1] >= t->nvert || tr->v[2] >= t->nvert) continue;
         rr_tri_centre(t, tr, &px, &pz);
         trsb[i] = (uint8_t)rr_sb_of(t, px, pz);
-        sb[trsb[i]].nrt++;
     }
+    /* [roam HC] the road command's triangles: patch slabs (or the old patch triangles) + stop lines */
+    for (i = 0; i < t->ntri; i++)
+        if (trsb[i] != 0xFF) { rr_patch_tri(t, &t->tri[i], trsb[i], &xl, &rt->npiece); rt->ntri++; }
+    if (s_rr.stoplines) rr_stop_lines(t, nb, spsb, &xl, &rt->nstop);
+    if (xl.oom) { ok = 0; goto done_counts; }
+    for (k = 0; k < xl.n; k++) sb[xl.t[k].sb].nrt++;
     for (i = 0; i < t->nbedge; i++) {
         const RoamBEdge *be = &t->bedge[i];
         int32_t ox, oy, oz;
@@ -729,34 +1063,26 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         for (kk = 0; kk < n; kk++) {
             TD5_MeshVertex *q = b->v + b->nrt * 3 + b->cq * 4;
             const uint32_t col = rr_shade(pl[kk], pl[kk + 1], pr[kk + 1]);
-            rr_put(b, q + 0, pl[kk],     col, (float)kk,       0.0f);
-            rr_put(b, q + 1, pl[kk + 1], col, (float)(kk + 1), 0.0f);
-            rr_put(b, q + 2, pr[kk + 1], col, (float)(kk + 1), 1.0f);
-            rr_put(b, q + 3, pr[kk],     col, (float)kk,       1.0f);
+            /* [roam HC] the page's lane line sits on u = 0 of every lane, so lane 0 drew a dashed line down
+             * ONE kerb (whichever the ribbon stores first) and the last lane's u = n edge half a line down
+             * the other; only the dividers between lanes keep it now (TD5RE_ROAM_KERB_LINE=1: the old look) */
+            const float u0 = (float)kk + ((kk == 0 && !s_rr.kerb_line) ? (float)RR_PATCH_U0 : 0.0f);
+            const float u1 = (float)(kk + 1) - ((kk == n - 1 && !s_rr.kerb_line) ? (float)(1.0 - RR_PATCH_U1) : 0.0f);
+            rr_put(b, q + 0, pl[kk],     col, u0, 0.0f);
+            rr_put(b, q + 1, pl[kk + 1], col, u1, 0.0f);
+            rr_put(b, q + 2, pr[kk + 1], col, u1, 1.0f);
+            rr_put(b, q + 3, pr[kk],     col, u0, 1.0f);
             b->cq++;
             rt->nroad++;
         }
     }
-    for (i = 0; i < t->ntri; i++) {
-        const RoamTri *tr = &t->tri[i];
-        float p[3][3];
-        uint32_t col;
-        TD5_MeshVertex *q;
-        RRSb *b;
+    for (k = 0; k < xl.n; k++) {
+        const RRXTri *x = &xl.t[k];
+        RRSb *b = &sb[x->sb];
+        TD5_MeshVertex *q = b->v + b->ct * 3;
         int kk;
-        if (trsb[i] == 0xFF) continue;
-        for (kk = 0; kk < 3; kk++) rr_vert(t, tr->ox, tr->oy, tr->oz, &t->vert[tr->v[kk]], p[kk]);
-        col = rr_shade(p[0], p[1], p[2]);
-        b = &sb[trsb[i]];
-        q = b->v + b->ct * 3;
-        /* a plain asphalt patch of the road page: UVs stay inside the stripe-free
-         * middle of the page (the lane line sits on the u = 0 edge) */
-        for (kk = 0; kk < 3; kk++)
-            rr_put(b, q + kk, p[kk], col,
-                   0.5f + (p[kk][0] - p[0][0]) / RR_PATCH_UV_UNITS,
-                   0.5f + (p[kk][2] - p[0][2]) / RR_PATCH_UV_UNITS);
+        for (kk = 0; kk < 3; kk++) rr_put(b, q + kk, x->p[kk], x->col, x->uv[kk][0], x->uv[kk][1]);
         b->ct++;
-        rt->ntri++;
     }
     if (gr.h) {
         int a, bq;
@@ -863,7 +1189,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         rt->dl.meshes = rt->vis;
     }
     rr_ground_free(&gr);
-    free(spsb); free(trsb); free(besb);
+    free(spsb); free(trsb); free(besb); free(xl.t);
     if (rt->nmesh == 0) { free(rt); return NULL; }
     return rt;
 
@@ -871,7 +1197,7 @@ done_free:
     rr_ground_free(&gr);
     for (k = 0; k < RR_MAXMESH; k++) free(sb[k].m);
 done_counts:
-    free(spsb); free(trsb); free(besb);
+    free(spsb); free(trsb); free(besb); free(xl.t);
     free(rt);
     return NULL;
 }
@@ -1175,6 +1501,9 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
     s_rr.lift        = td5_env_int("TD5RE_ROAM_RENDER_LIFT_CM", 0, -1000, 1000) * (RR_UPM / 100.0);
     s_rr.ground_drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (RR_UPM / 100.0);
     s_rr.ground_clamp = !td5_env_flag_off("TD5RE_ROAM_GROUND_NOFIX");
+    s_rr.patch_uv    = td5_env_int("TD5RE_ROAM_PATCH_UV", 1, 0, 1);      /* [roam HC] 0 = the old patch mapping */
+    s_rr.stoplines   = td5_env_int("TD5RE_ROAM_STOPLINES", 1, 0, 1);     /* [roam HC] 0 = no stop lines         */
+    s_rr.kerb_line   = td5_env_int("TD5RE_ROAM_KERB_LINE", 0, 0, 1);     /* [roam HC] 1 = lane 0's kerb stripe  */
     s_rr.radius      = td5_env_int("TD5RE_ROAM_RENDER_R", 500, 50, 5000) * RR_UPM;
 
     if (s_rr.use_ground) {
