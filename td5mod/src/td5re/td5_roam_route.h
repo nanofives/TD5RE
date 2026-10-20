@@ -157,6 +157,9 @@ void td5_roam_route_reset(void);                     /* clear waypoints, result,
 int  td5_roam_route_wp_count(void);
 const TD5_RouteWp *td5_roam_route_wp(int i);
 const TD5_RouteResult *td5_roam_route_result(void);
+/* [HE] the same route for DRAWING on the road: the junction-connector jogs dropped, corners rounded (px/pz/dist_m/npt
+ * differ from the result's; edge list, hash and flags are the result's). Valid until the result changes. */
+const TD5_RouteResult *td5_roam_route_display(void);
 int  td5_roam_route_type(void);
 int  td5_roam_route_laps(void);
 void td5_roam_route_set_type(int type, int laps);

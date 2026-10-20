@@ -1784,6 +1784,100 @@ void td5_roam_route_reset(void)
 int td5_roam_route_wp_count(void) { return rt.cur.nwp; }
 const TD5_RouteWp *td5_roam_route_wp(int i) { return (i >= 0 && i < rt.cur.nwp) ? &rt.cur.wp[i] : NULL; }
 const TD5_RouteResult *td5_roam_route_result(void) { return &rt.res; }
+
+/* [HE] The route as DRAWN on the road (td5_roam_route.h). Mariano: "the sprint arrows are doing weird twists on
+ * intersections". The planner polyline goes through each junction's connector point, which on a straight crossing is
+ * a short sideways jog (or a 7..14 m out-and-back spike, or a step into a divided avenue's median): fine for
+ * progress, but a band and chevrons drawn along it zig-zag across the junction. The drawn line is the driver line
+ * (rr_driver_line: those jogs dropped), its corners then rounded with a quadratic arc (up to 12 m of tangent, never
+ * more than 45% of either leg) sampled every 1.5 m. Rebuilt when the result changes. */
+static struct {
+    const double *src_x;
+    int      src_n;
+    uint32_t src_hash;
+    double   src_len;
+    double  *x, *z, *d;
+    int      cap;
+    TD5_RouteResult r;
+} s_disp;
+
+static int disp_push(int n, double x, double z)
+{
+    if (n >= s_disp.cap) {
+        const int nc = s_disp.cap ? s_disp.cap * 2 : 512;
+        double *a = (double *)realloc(s_disp.x, (size_t)nc * sizeof(double));
+        double *b, *c;
+        if (!a) return n;
+        s_disp.x = a;
+        b = (double *)realloc(s_disp.z, (size_t)nc * sizeof(double));
+        if (!b) return n;
+        s_disp.z = b;
+        c = (double *)realloc(s_disp.d, (size_t)nc * sizeof(double));
+        if (!c) return n;
+        s_disp.d = c;
+        s_disp.cap = nc;
+    }
+    if (n > 0 && fabs(s_disp.x[n - 1] - x) < 1.0 && fabs(s_disp.z[n - 1] - z) < 1.0) return n;
+    s_disp.x[n] = x; s_disp.z[n] = z;
+    return n + 1;
+}
+
+const TD5_RouteResult *td5_roam_route_display(void)
+{
+    const TD5_RouteResult *r = &rt.res;
+    double *lx, *lz;
+    int m, i, n = 0;
+    if (!r->ok || r->npt < 2) return r;
+#ifndef TD5RE_RELEASE
+    if (td5_env_int("TD5RE_ROAM_ROUTE_DISPLAY_RAW", 0, 0, 1)) return r;   /* DEV A/B: draw the planner polyline */
+#endif
+    if (s_disp.src_x == r->px && s_disp.src_n == r->npt && s_disp.src_hash == r->hash && s_disp.src_len == r->length_m)
+        return &s_disp.r;
+    lx = (double *)malloc((size_t)r->npt * sizeof(double));
+    lz = (double *)malloc((size_t)r->npt * sizeof(double));
+    if (!lx || !lz) { free(lx); free(lz); return r; }
+    memcpy(lx, r->px, (size_t)r->npt * sizeof(double));
+    memcpy(lz, r->pz, (size_t)r->npt * sizeof(double));
+    m = rr_driver_line(lx, lz, r->npt);
+    for (i = 0; i < m; i++) {
+        if (i == 0 || i == m - 1) { n = disp_push(n, lx[i], lz[i]); continue; }
+        {
+            const double ax = lx[i - 1] - lx[i], az = lz[i - 1] - lz[i], bx = lx[i + 1] - lx[i], bz = lz[i + 1] - lz[i];
+            const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
+            double c, th, f;
+            int k, ns;
+            if (la < 1.0 || lb < 1.0) { n = disp_push(n, lx[i], lz[i]); continue; }
+            c = -(ax * bx + az * bz) / (la * lb);              /* cos of the heading change */
+            if (c > 1.0) c = 1.0; else if (c < -1.0) c = -1.0;
+            th = acos(c);
+            if (th < 0.14) { n = disp_push(n, lx[i], lz[i]); continue; }     /* < 8 degrees: keep the vertex */
+            f = 12.0 * RR_UPM * tan(0.5 * th);
+            if (f > 12.0 * RR_UPM) f = 12.0 * RR_UPM;
+            if (f > 0.45 * la) f = 0.45 * la;
+            if (f > 0.45 * lb) f = 0.45 * lb;
+            {
+                const double p0x = lx[i] + ax / la * f, p0z = lz[i] + az / la * f;
+                const double p2x = lx[i] + bx / lb * f, p2z = lz[i] + bz / lb * f;
+                ns = 1 + (int)(2.0 * f / (1.5 * RR_UPM));
+                for (k = 0; k <= ns; k++) {
+                    const double t = (double)k / ns, u = 1.0 - t;
+                    n = disp_push(n, u * u * p0x + 2.0 * u * t * lx[i] + t * t * p2x, u * u * p0z + 2.0 * u * t * lz[i] + t * t * p2z);
+                }
+            }
+        }
+    }
+    free(lx); free(lz);
+    if (n < 2) return r;
+    s_disp.d[0] = 0.0;
+    for (i = 1; i < n; i++) s_disp.d[i] = s_disp.d[i - 1] + hypot(s_disp.x[i] - s_disp.x[i - 1], s_disp.z[i] - s_disp.z[i - 1]) / RR_UPM;
+    s_disp.r = *r;
+    s_disp.r.px = s_disp.x; s_disp.r.pz = s_disp.z; s_disp.r.dist_m = s_disp.d; s_disp.r.npt = n;
+    s_disp.r.length_m = s_disp.d[n - 1];
+    s_disp.src_x = r->px; s_disp.src_n = r->npt; s_disp.src_hash = r->hash; s_disp.src_len = r->length_m;
+    TD5_LOG_I(LOG_TAG, "ROUTE: display line %d points (planner %d, %d after the jog cleanup), %.1f m (planner %.1f m)",
+              n, r->npt, m, s_disp.r.length_m, r->length_m);
+    return &s_disp.r;
+}
 int td5_roam_route_type(void) { return rt.cur.type; }
 int td5_roam_route_laps(void) { return rt.cur.laps; }
 const char *td5_roam_route_current_name(void) { return rt.name; }

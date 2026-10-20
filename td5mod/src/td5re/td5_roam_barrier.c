@@ -40,6 +40,7 @@
 #include "td5_roam_physics.h"  /* td5_roam_ground */
 #include "td5_roam_stream.h"   /* td5_roam_stream_active / _point_missing */
 #include "td5_roam_barrier.h"
+#include "td5_roam_locate.h"   /* [HE] a locator over the tiles the build reads: do the panel ends meet a wall? */
 
 #define LOG_TAG "roam"
 
@@ -51,6 +52,7 @@
 #define BAR_BOARD_W_M      3.6
 #define BAR_ROW_FAR_M      90.0     /* an arm row further than this from its centroid is not that arm's */
 #define BAR_MAX_TAKEN      64
+#define BAR_PAIR_M         15.0     /* [HE] an edge this short (cut row to cut row) between two sealed junctions gets one panel */
 
 /* ============================================================ state ============ */
 
@@ -63,6 +65,7 @@ typedef struct {
     double   dirx, dirz;   /* mouth: the route exit direction the chevrons follow             */
     uint64_t arm_key;      /* mouth: the arm's edge key and end (debug / census)             */
     int      arm_end;
+    double   openx, openz; /* [HE] mouth: unit direction to the OPEN side (back into the junction), 0,0 = unknown */
 } BarAux;
 
 static struct {
@@ -80,6 +83,9 @@ static struct {
     int              knob_init, knob_on;
     char             knob_route[48];
     int              knob_loaded;
+    /* [HE] what the last build sealed, for the seal pass: route edges + sealed clusters, linked arms (sorted) */
+    uint64_t        *setk;  int nsetk, capsetk;
+    uint64_t        *linkk; int nlinkk, caplinkk;
 #ifndef TD5RE_RELEASE
     struct DbgArm { double x0, z0, x1, z1; int status; unsigned long long ck, ek; int end; } *dbg;   /* DEV: every arm of the clusters passed */
     int              ndbg, capdbg;
@@ -120,6 +126,7 @@ static int bar_add(const PlBar *p, int kind, uint64_t ck, int sign, uint64_t arm
         B.aux[B.n].sign = sign >= 0 ? 1 : -1;
         B.aux[B.n].refined = 0;
         B.aux[B.n].arm_key = arm_key; B.aux[B.n].arm_end = arm_end;
+        B.aux[B.n].openx = B.aux[B.n].openz = 0.0;
         B.n++;
     }
     return 1;
@@ -169,6 +176,8 @@ const TD5_RoamBarrier *td5_roam_barriers(int *count)
 void td5_roam_barriers_clear(void)
 {
     bar_free_set();
+    free(B.setk); B.setk = NULL; B.nsetk = B.capsetk = 0;
+    free(B.linkk); B.linkk = NULL; B.nlinkk = B.caplinkk = 0;
 #ifndef TD5RE_RELEASE
     free(B.dbg); B.dbg = NULL; B.ndbg = B.capdbg = 0;
 #endif
@@ -179,6 +188,35 @@ void td5_roam_barriers_clear(void)
 void td5_roam_barriers_set_visible(int on) { B.visible = on ? 1 : 0; }
 int  td5_roam_barriers_visible(void) { return B.visible; }
 void td5_roam_barriers_stats(TD5_RoamBarrierStats *out) { if (out) *out = B.st; }
+
+int td5_roam_barrier_arm(int i, uint64_t *edge_key, int *end)
+{
+    if (i < 0 || i >= B.n || B.pub[i].kind != TD5_ROAM_BARRIER_MOUTH) return 0;
+    if (edge_key) *edge_key = B.aux[i].arm_key;
+    if (end) *end = B.aux[i].arm_end;
+    return 1;
+}
+
+#ifndef TD5RE_RELEASE
+int td5_roam_barriers_dev_arm(int i, int *status, uint64_t *edge_key, uint64_t *cluster_key)
+{
+    if (i < 0) return B.ndbg;
+    if (i >= B.ndbg) return 0;
+    if (status) *status = B.dbg[i].status;
+    if (edge_key) *edge_key = B.dbg[i].ek;
+    if (cluster_key) *cluster_key = B.dbg[i].ck;
+    return 1;
+}
+#endif
+
+int td5_roam_barrier_open_dir(int i, double *nx, double *nz)
+{
+    if (i < 0 || i >= B.n || B.pub[i].kind != TD5_ROAM_BARRIER_MOUTH) return 0;
+    if (B.aux[i].openx == 0.0 && B.aux[i].openz == 0.0) return 0;
+    if (nx) *nx = B.aux[i].openx;
+    if (nz) *nz = B.aux[i].openz;
+    return 1;
+}
 
 /* ============================================================ tile pool ======== */
 
@@ -541,6 +579,49 @@ static int seg_clear_of_route(double ax, double az, double bx, double bz, const 
     return 1;
 }
 
+/* ============================================================ walls ============ */
+
+/* [HE] A locator over the pool's own tiles (the route is not bounded by the resident set), at a fixed origin taken
+ * from the route START so the answers, and so the barriers, are a pure function of (route, tiles). */
+typedef struct { TD5_RoamResident *rs; int32_t ox, oz; } BarLoc;
+
+static int bar_on_road(const BarLoc *L, double px, double pz)
+{
+    TD5_RoamHit h;
+    const double x = (px - (double)L->ox) * 256.0, z = (pz - (double)L->oz) * 256.0;
+    if (!L->rs || fabs(x) > 2.0e9 || fabs(z) > 2.0e9) return 0;
+    if (!td5_roam_locate(L->rs, (int32_t)floor(x + 0.5), (int32_t)floor(z + 0.5), 0, 0, ROAM_PRIM_NONE, &h)) return 0;
+    return h.prim != ROAM_PRIM_NONE && h.inside;
+}
+
+/* [HE] 1 when the drivable surface ends within BAR_GAP_M past the panel end (ax, az) going along (ux, uz): no car
+ * fits round it. Mariano's geo_map sprint (2026-10-19): barrier 5's end stood on the arm's kerb line, but that kerb is
+ * inside the union with the route junction's patch (an acute diagonal junction), the road went on, and the closed
+ * street was reached round the end. */
+#define BAR_GAP_M 1.4
+static int bar_end_walled(const BarLoc *L, double ax, double az, double ux, double uz)
+{
+    double s;
+    if (!L->rs) return 1;
+#ifndef TD5RE_RELEASE
+    if (!td5_env_int("TD5RE_ROAM_BARRIER_ENDWALL", 1, 0, 1)) return 1;   /* DEV A/B: 0 = the F6-A cut row, whatever its ends */
+#endif
+    for (s = 0.35; s <= BAR_GAP_M + 1e-9; s += 0.35)
+        if (!bar_on_road(L, ax + ux * s * BAR_UPM, az + uz * s * BAR_UPM)) return 1;
+    return 0;
+}
+
+/* how far (units) the drivable surface runs on past a panel end, up to max_m */
+static double bar_end_reach(const BarLoc *L, double ax, double az, double ux, double uz, double max_m)
+{
+    double s, last = 0.0;
+    for (s = 0.35; s <= max_m + 1e-9; s += 0.35) {
+        if (!bar_on_road(L, ax + ux * s * BAR_UPM, az + uz * s * BAR_UPM)) return last;
+        last = s * BAR_UPM;
+    }
+    return last;
+}
+
 /* ============================================================ placement ======== */
 
 typedef struct { uint64_t key; int end; } ArmId;
@@ -699,9 +780,43 @@ static int64_t pool_partner(const Pool *p, uint64_t edge_key, int64_t self_key)
 
 typedef struct { int boards_fallback; int boards_hit; int boards_alt; int boards_dropped; } PlaceStats;
 
-int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
+/* [HE] what the seal pass adds to the next build: touching clusters (sealed like glued neighbours) and panels across
+ * streets that overlap the sealed surface without being an arm of it */
+#define BAR_SEAL_MAX   64
+#define BAR_SEAL_ITERS 6
+typedef struct { PlBar pb; double openx, openz; uint64_t key; } BarSealPanel;
+typedef struct {
+    BarSealPanel panel[BAR_SEAL_MAX]; int npanel;
+    int64_t      cluster[BAR_SEAL_MAX]; int ncluster;
+    int          iters, entries, entries_left, panel_fail;
+    int          pockets, escapes;    /* unsealed entries of the last flood: enclosed pockets / ways out (must be 0) */
+} BarSeals;
+
+static int cmp_u64(const void *a, const void *b)
 {
-    Pool pool;
+    const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : (x > y);
+}
+static int has_u64(const uint64_t *k, int n, uint64_t v)
+{
+    int a = 0, b = n;
+    while (a < b) { const int m = (a + b) / 2; if (k[m] < v) a = m + 1; else b = m; }
+    return a < n && k[a] == v;
+}
+static void push_key(uint64_t **arr, int *n, int *cap, uint64_t v)
+{
+    if (*n >= *cap) {
+        const int nc = *cap ? *cap * 2 : 256;
+        uint64_t *q = (uint64_t *)realloc(*arr, (size_t)nc * sizeof(uint64_t));
+        if (!q) return;
+        *arr = q; *cap = nc;
+    }
+    (*arr)[(*n)++] = v;
+}
+
+static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in, const BarLoc *loc_in, const BarSeals *sx)
+{
+    Pool pool = *pool_in;
     REdge *re = NULL;
     Pass *ps = NULL;
     Cl *cl = NULL;
@@ -712,11 +827,16 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
     PlaceStats pst = { 0, 0, 0, 0 };
     int nboard_dup = 0, clcap = 0;
 
-    td5_roam_barriers_clear();
-    memset(&pool, 0, sizeof pool);
-    if (!route || !route->ok || route->nedge < 1 || route->npt < 2 || !place || !place[0]) return 0;
-    B.st.route_hash = route->hash;
-    if (!pool_load(&pool, place, route)) { pool_free(&pool); return 0; }
+    const BarLoc loc = *loc_in;
+    (void)place;
+    bar_free_set();
+    free(B.setk); B.setk = NULL; B.nsetk = B.capsetk = 0;
+    free(B.linkk); B.linkk = NULL; B.nlinkk = B.caplinkk = 0;
+    {
+        const uint32_t rh = route->hash;
+        memset(&B.st, 0, sizeof B.st);
+        B.st.route_hash = rh;
+    }
     B.st.tiles_read = pool.ntl;
 
     re = (REdge *)calloc((size_t)route->nedge, sizeof *re);
@@ -805,6 +925,19 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
     /* ---- rows of every arm, taken flags ---------------------------------------- */
     for (i = 0; i < ncl; i++) cl_compute(&pool, &cl[i]);
 
+    /* ---- [HE] touching clusters: a junction the seal pass found reachable from the sealed surface without an arm of
+     * it (its patch overlaps a sealed one) joins the set like a glued neighbour: every arm of it gets a barrier ---- */
+    for (a = 0; sx && a < sx->ncluster; a++) {
+        const int64_t key = sx->cluster[a];
+        if (cl_find(cl, ncl, key) >= 0 || ncl >= clcap) continue;
+        if (!cl_init(&cl[ncl], key, pool_node(&pool, key), &pool)) { ncl++; goto oom; }
+        if (!cl[ncl].node) { cl_free(&cl[ncl]); memset(&cl[ncl], 0, sizeof cl[ncl]); continue; }
+        cl_compute(&pool, &cl[ncl]);
+        cl[ncl].origin = 1;
+        ncl++;
+        B.st.clusters_touching++;
+    }
+
     /* ---- glued neighbours: an arm whose edge has no ribbon leads straight into the next junction patch, so
      * that neighbour joins the set (all its arms but the glued one get barriers) ---------------------- */
     {
@@ -868,9 +1001,26 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
             if (clear_u < 1.5 * BAR_UPM) clear_u = 1.5 * BAR_UPM;
             PlBar pb;
             double ax, az, dotv;
-            int sign = 1, r, placed = 0;
+            int sign = 1, r, placed = 0, first_clear = -1;
             B.st.arms_total++;
             if (c->taken[k]) { B.st.arms_route++; continue; }
+            {   /* [HE] a short edge between two sealed junctions (a route junction and its glued neighbour) needs ONE panel:
+                 * the junction past it is sealed anyway, and two panels a few metres apart face each other (each one's catch
+                 * window reaches past the other: barriers 4 / 84 of the geo_map sprint) */
+                int j, pair = 0;
+                for (j = 0; j < i && !pair; j++) {
+                    const RoamTile *t2;
+                    const RoamNodeRec *n2;
+                    int m;
+                    if (!cl[j].node || c->nrows[k] <= 0) continue;
+                    t2 = &pool.tl[cl[j].node->tile];
+                    n2 = &t2->node[cl[j].node->rec];
+                    for (m = 0; m < cl[j].narm; m++)
+                        if (cl[j].blocked[m] && cl[j].nrows[m] > 0 && t2->arm[n2->arm_first + m].edge_key == ar->edge_key &&
+                            hypot(cl[j].row[m].mx - c->row[k].mx, cl[j].row[m].mz - c->row[k].mz) <= BAR_PAIR_M * BAR_UPM) { pair = 1; break; }
+                }
+                if (pair) { B.st.pairs_single++; continue; }     /* the census below counts it linked */
+            }
             if (c->nrows[k] <= 0) {
                 B.st.arm_no_row++;
                 if (B.st.arm_no_row <= 8)
@@ -892,8 +1042,39 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
                 /* the ends are judged 0.8 m in: two carriageways side by side (a divided avenue) overlap at their kerbs */
                 if (!seg_clear_of_route(pb.x0 + ax * (BAR_KERB_M + 0.8) * BAR_UPM, pb.z0 + az * (BAR_KERB_M + 0.8) * BAR_UPM,
                                         pb.x1 - ax * (BAR_KERB_M + 0.8) * BAR_UPM, pb.z1 - az * (BAR_KERB_M + 0.8) * BAR_UPM, route, clear_u)) continue;
+                if (first_clear < 0) first_clear = r;
+                /* [HE] both ends must meet a real wall of the drivable surface, or a car drives round the panel */
+                if (!bar_end_walled(&loc, pb.x0, pb.z0, -ax, -az) || !bar_end_walled(&loc, pb.x1, pb.z1, ax, az)) continue;
                 placed = 1;
                 if (r > 0) B.st.slid++;
+                if (r > first_clear) B.st.slid_wall++;
+            }
+            if (!placed && first_clear >= 0) {
+                /* [HE] no row of the arm has walls at both ends (the arm overlaps another surface all along its first rows):
+                 * the first clear row, each open end lengthened along the panel to where the road ends, never into the
+                 * route's carriageway (the longest stretch that stays clear of the route polyline) */
+                const ArmRow *rw = &c->rows[(size_t)k * ARM_ROWS_MAX + (size_t)first_clear];
+                const double rl = sqrt((rw->x1 - rw->x0) * (rw->x1 - rw->x0) + (rw->z1 - rw->z0) * (rw->z1 - rw->z0));
+                int e;
+                ax = (rw->x1 - rw->x0) / rl; az = (rw->z1 - rw->z0) / rl;
+                pb.x0 = rw->x0 + rw->ox * BAR_OUT_M * BAR_UPM - ax * BAR_KERB_M * BAR_UPM;
+                pb.z0 = rw->z0 + rw->oz * BAR_OUT_M * BAR_UPM - az * BAR_KERB_M * BAR_UPM;
+                pb.x1 = rw->x1 + rw->ox * BAR_OUT_M * BAR_UPM + ax * BAR_KERB_M * BAR_UPM;
+                pb.z1 = rw->z1 + rw->oz * BAR_OUT_M * BAR_UPM + az * BAR_KERB_M * BAR_UPM;
+                pb.y0 = rw->y0; pb.y1 = rw->y1;
+                for (e = 0; e < 2; e++) {
+                    const double sg = e == 0 ? -1.0 : 1.0;
+                    double *ex = e == 0 ? &pb.x0 : &pb.x1, *ez = e == 0 ? &pb.z0 : &pb.z1;
+                    const double reach = bar_end_reach(&loc, *ex, *ez, ax * sg, az * sg, 12.0);
+                    double step;
+                    if (reach <= 0.0) continue;
+                    for (step = reach + 0.3 * BAR_UPM; step > 0.0; step -= 0.35 * BAR_UPM)
+                        if (seg_clear_of_route(*ex, *ez, *ex + ax * sg * step, *ez + az * sg * step, route, 1.0 * BAR_UPM)) break;
+                    if (step > 0.0) { *ex += ax * sg * step; *ez += az * sg * step; B.st.ends_lengthened++; }
+                    if (step < reach) B.st.ends_short++;
+                }
+                placed = 1;
+                if (first_clear > 0) B.st.slid++;
             }
             if (!placed) {
                 B.st.slide_fail++;
@@ -921,10 +1102,31 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
             sign = dotv >= 0.0 ? 1 : -1;
             if (!bar_add(&pb, TD5_ROAM_BARRIER_MOUTH, (uint64_t)c->key, sign, ar->edge_key, ar->end)) goto oom;
             B.aux[B.n - 1].dirx = c->dirx; B.aux[B.n - 1].dirz = c->dirz;
+            {   /* [HE] the open side is where the arm comes from: against its outward direction (row 0 -> row 1) */
+                const ArmRow *rw = &c->rows[(size_t)k * ARM_ROWS_MAX + (size_t)(r - 1)];
+                B.aux[B.n - 1].openx = -rw->ox; B.aux[B.n - 1].openz = -rw->oz;
+            }
             c->blocked[k] = 1;
             B.st.arms_blocked++;
             B.st.barriers_mouth++;
         }
+    }
+
+    /* ---- [HE] seal panels (the seal pass): across a street that overlaps the sealed surface ---------------------- */
+    for (a = 0; sx && a < sx->npanel; a++) {
+        const BarSealPanel *sp = &sx->panel[a];
+        const double dx = sp->pb.x1 - sp->pb.x0, dz = sp->pb.z1 - sp->pb.z0, l = sqrt(dx * dx + dz * dz);
+        double best = 1e300, rx = 0.0, rz = 0.0;
+        int j;
+        const double mx = 0.5 * (sp->pb.x0 + sp->pb.x1), mz = 0.5 * (sp->pb.z0 + sp->pb.z1);
+        for (j = 0; j + 1 < route->npt; j++) {   /* chevrons along the nearest route direction */
+            const double d2 = pt_seg_d2(mx, mz, route->px[j], route->pz[j], route->px[j + 1], route->pz[j + 1]);
+            if (d2 < best) { best = d2; rx = route->px[j + 1] - route->px[j]; rz = route->pz[j + 1] - route->pz[j]; }
+        }
+        if (!bar_add(&sp->pb, TD5_ROAM_BARRIER_MOUTH, sp->key, (l > 0.0 && dx * rx + dz * rz < 0.0) ? -1 : 1, sp->key, -1)) goto oom;
+        B.aux[B.n - 1].openx = sp->openx; B.aux[B.n - 1].openz = sp->openz;
+        B.st.barriers_mouth++;
+        B.st.seal_panels++;
     }
 
     /* ---- turn boards ----------------------------------------------------------- */
@@ -1047,6 +1249,22 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
         }
     }
 #endif
+    /* ---- [HE] what is sealed, for the seal pass ------------------------------------ */
+    for (i = 0; i < route->nedge; i++) push_key(&B.setk, &B.nsetk, &B.capsetk, route->edge[i].key);
+    for (i = 0; i < ncl; i++) {
+        const RoamTile *tt;
+        const RoamNodeRec *nr;
+        int k;
+        if (!cl[i].node) continue;
+        push_key(&B.setk, &B.nsetk, &B.capsetk, (uint64_t)cl[i].key);
+        tt = &pool.tl[cl[i].node->tile];
+        nr = &tt->node[cl[i].node->rec];
+        for (k = 0; k < cl[i].narm; k++)
+            if (cl[i].linked[k] || cl[i].taken[k]) push_key(&B.linkk, &B.nlinkk, &B.caplinkk, tt->arm[nr->arm_first + k].edge_key);
+    }
+    if (B.setk) qsort(B.setk, (size_t)B.nsetk, sizeof(uint64_t), cmp_u64);
+    if (B.linkk) qsort(B.linkk, (size_t)B.nlinkk, sizeof(uint64_t), cmp_u64);
+
     /* ---- census checks --------------------------------------------------------- */
     for (i = 0; i < ncl; i++) {
         int k, open_here = 0;
@@ -1105,23 +1323,415 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
     B.st.build_ms = (double)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "BARRIERS: built %d (mouth %d, turn %d) for %d clusters / %d passes, tiles read %d, arms total %d route %d blocked %d linked %d open %d "
               "(no row %d, planner-degree open %d), across route %d, missing cluster %d, board hit %d fallback %d outer-kerb %d dropped %d dup %d, "
-              "slid %d slide-fail %d, arrows with/side/against the route %d/%d/%d, %.0f ms",
+              "slid %d (to reach a wall %d) slide-fail %d, ends lengthened %d (short of a wall %d), arrows with/side/against the route %d/%d/%d, %.0f ms",
               B.n, B.st.barriers_mouth, B.st.barriers_turn, ncl, npass, pool.ntl, B.st.arms_total, B.st.arms_route, B.st.arms_blocked,
               B.st.arms_linked, B.st.arms_open, B.st.arm_no_row, B.st.degree_open, B.st.across_route, B.st.missing_cluster, pst.boards_hit,
-              pst.boards_fallback, pst.boards_alt, pst.boards_dropped, nboard_dup, B.st.slid, B.st.slide_fail,
+              pst.boards_fallback, pst.boards_alt, pst.boards_dropped, nboard_dup, B.st.slid, B.st.slid_wall, B.st.slide_fail,
+              B.st.ends_lengthened, B.st.ends_short,
               B.st.arrows_with, B.st.arrows_side, B.st.arrows_against, B.st.build_ms);
     B.st.boards_alt = pst.boards_alt; B.st.boards_dropped = pst.boards_dropped;
     for (i = 0; i < ncl; i++) { cl_free(&cl[i]); }
     free(cl); free(ps); free(re);
-    pool_free(&pool);
     return B.n;
 oom:
     TD5_LOG_E(LOG_TAG, "BARRIERS: out of memory");
     if (cl) for (i = 0; i < ncl; i++) { cl_free(&cl[i]); }
     free(cl); free(ps); free(re);
-    pool_free(&pool);
     td5_roam_barriers_clear();
+    return -1;
+}
+
+/* ============================================================ seal pass ======== */
+/* [HE] Mariano (2026-10-19): "walls for borders of the sprint are not fool-proof, they can be driven around". The
+ * placement above works on the street GRAPH; a car drives the SURFACE. In La Plata's acute diagonal junctions a street's
+ * ribbon overlaps a junction patch it is not an arm of (the diagonal past the start pocket of the geo_map sprint), so
+ * the graph shows no mouth there and the car turned off the route through it. The seal pass floods the car-passable
+ * surface (1 m cells: the cell centre and 4 points 0.8 m round it on the road) from the route polyline over the build's
+ * own tiles, every mouth panel a cut, and stops at the first step onto a surface that is not sealed (the route's edges,
+ * the sealed clusters' patches, their linked / taken arms, a closed arm in front of its own panel). Each such ENTRY is
+ * sealed for the next build: a junction patch joins the set; a street gets a panel across its ribbon at the entry, moved
+ * off the sealed surface, ends on a wall. Repeats until no entry is left (BAR_SEAL_ITERS). Pure function of
+ * (route, tiles): same origin, same order, no resident state. */
+
+#define SEAL_CELL   (1.0 * BAR_UPM)
+#define SEAL_ERODE  (0.8 * BAR_UPM)
+#define SEAL_EXT    (0.3 * BAR_UPM)
+
+typedef struct { int64_t key; uint8_t cls; } SealCell;     /* cls: 1 blocked, 2 sealed surface, 3 entry target */
+typedef struct { SealCell *c; int cap, n; } SealHash;
+
+static int64_t seal_ck(int cx, int cz) { return ((int64_t)cx << 32) ^ (int64_t)(uint32_t)cz; }
+static SealCell *seal_get(SealHash *h, int64_t key, int add)
+{
+    uint64_t i;
+    if (add && (h->n + 1) * 2 > h->cap) {
+        SealHash nh;
+        int j;
+        nh.cap = h->cap ? h->cap * 2 : 65536;
+        nh.n = 0;
+        nh.c = (SealCell *)calloc((size_t)nh.cap, sizeof(SealCell));
+        if (!nh.c) return NULL;
+        for (j = 0; j < h->cap; j++) {
+            if (!h->c[j].cls) continue;
+            i = ((uint64_t)h->c[j].key * 0x9E3779B97F4A7C15ull) & (uint64_t)(nh.cap - 1);
+            while (nh.c[i].cls) i = (i + 1) & (uint64_t)(nh.cap - 1);
+            nh.c[i] = h->c[j]; nh.n++;
+        }
+        free(h->c);
+        *h = nh;
+    }
+    if (!h->cap) return NULL;
+    i = ((uint64_t)key * 0x9E3779B97F4A7C15ull) & (uint64_t)(h->cap - 1);
+    while (h->c[i].cls) {
+        if (h->c[i].key == key) return &h->c[i];
+        i = (i + 1) & (uint64_t)(h->cap - 1);
+    }
+    if (!add) return NULL;
+    h->c[i].key = key;
+    h->n++;
+    return &h->c[i];
+}
+
+/* every drivable prim at a place point: key + patch flag; returns the count */
+static int seal_prims(const BarLoc *L, double px, double pz, uint64_t *key, uint8_t *patch, uint32_t *prim, int cap)
+{
+    TD5_RoamCand cd[16];
+    const double x = (px - (double)L->ox) * 256.0, z = (pz - (double)L->oz) * 256.0;
+    int n, i, m = 0;
+    if (!L->rs || fabs(x) > 2.0e9 || fabs(z) > 2.0e9) return 0;
+    n = td5_roam_collect(L->rs, (int32_t)floor(x + 0.5), (int32_t)floor(z + 0.5), cd, 16);
+    for (i = 0; i < n && m < cap; i++) {
+        TD5_RoamHit h;
+        if (!td5_roam_prim_eval(L->rs, cd[i].prim, (int32_t)floor(x + 0.5), (int32_t)floor(z + 0.5), &h)) continue;
+        key[m] = h.edge_key; patch[m] = h.is_patch; prim[m] = cd[i].prim; m++;
+    }
+    return m;
+}
+
+/* a closed arm (or a sealed street) seen from in front of its own panel, within 25 m: part of the junction */
+static int seal_stub(uint64_t key, double px, double pz)
+{
+    int j;
+    for (j = 0; j < B.n; j++) {
+        double ux, uz, l, t, d, ox, oz;
+        if (B.pub[j].kind != TD5_ROAM_BARRIER_MOUTH || B.aux[j].arm_key != key) continue;
+        if (B.aux[j].openx == 0.0 && B.aux[j].openz == 0.0) continue;
+        ux = B.pl[j].x1 - B.pl[j].x0; uz = B.pl[j].z1 - B.pl[j].z0; l = sqrt(ux * ux + uz * uz);
+        if (l < 1.0) continue;
+        ux /= l; uz /= l;
+        {   /* the open normal */
+            const double nx = -uz, nz = ux, sg = B.aux[j].openx * nx + B.aux[j].openz * nz;
+            ox = sg >= 0.0 ? nx : -nx; oz = sg >= 0.0 ? nz : -nz;
+        }
+        t = (px - B.pl[j].x0) * ux + (pz - B.pl[j].z0) * uz;
+        d = (px - B.pl[j].x0) * ox + (pz - B.pl[j].z0) * oz;
+        if (t >= -1.0 * BAR_UPM && t <= l + 1.0 * BAR_UPM && d >= -0.5 * BAR_UPM && d <= 25.0 * BAR_UPM) return 1;
+    }
     return 0;
+}
+
+/* 1 sealed surface, 0 not; *ek / *ep / *eprim = the first unsealed prim (the entry target) */
+static int seal_class(const BarLoc *L, double px, double pz, uint64_t *ek, uint8_t *ep, uint32_t *eprim)
+{
+    uint64_t k[16];
+    uint8_t pa[16];
+    uint32_t pr[16];
+    const int n = seal_prims(L, px, pz, k, pa, pr, 16);
+    int i;
+    for (i = 0; i < n; i++)
+        if (has_u64(B.setk, B.nsetk, k[i]) || has_u64(B.linkk, B.nlinkk, k[i]) || seal_stub(k[i], px, pz)) return 1;
+    if (n > 0) { *ek = k[0]; *ep = pa[0]; *eprim = pr[0]; }
+    return 0;
+}
+
+static int seal_passable(const BarLoc *L, double px, double pz)
+{
+    return bar_on_road(L, px, pz) && bar_on_road(L, px + SEAL_ERODE, pz) && bar_on_road(L, px - SEAL_ERODE, pz) &&
+           bar_on_road(L, px, pz + SEAL_ERODE) && bar_on_road(L, px, pz - SEAL_ERODE);
+}
+
+static int seal_cut(double ax, double az, double bx, double bz)
+{
+    int j;
+    for (j = 0; j < B.n; j++) {
+        const PlBar *q = &B.pl[j];
+        double ux, uz, l;
+        if (B.pub[j].kind != TD5_ROAM_BARRIER_MOUTH) continue;
+        if ((ax < q->x0 - 3000 && ax < q->x1 - 3000) || (ax > q->x0 + 3000 && ax > q->x1 + 3000) ||
+            (az < q->z0 - 3000 && az < q->z1 - 3000) || (az > q->z0 + 3000 && az > q->z1 + 3000)) continue;
+        ux = q->x1 - q->x0; uz = q->z1 - q->z0; l = sqrt(ux * ux + uz * uz);
+        if (l < 1.0) continue;
+        ux /= l; uz /= l;
+        if (seg_seg(ax, az, bx, bz, q->x0 - ux * SEAL_EXT, q->z0 - uz * SEAL_EXT, q->x1 + ux * SEAL_EXT, q->z1 + uz * SEAL_EXT)) return 1;
+    }
+    return 0;
+}
+
+/* a panel across street `key` at (qx, qz), the car having come from (fx, fz); 1 when one fits */
+static int seal_panel(const BarLoc *L, const TD5_RoamRouteResult *route, uint64_t key, uint32_t prim, double qx, double qz,
+                      double fx, double fz, BarSealPanel *out)
+{
+    const uint32_t slot = ROAM_PRIM_SLOT(prim), idx = ROAM_PRIM_INDEX(prim);
+    const RoamTile *t;
+    const TD5_StripSpan *sp;
+    double s0x, s0z, s0y, s1x, s1z, s1y, e0x, e0z, e0y, e1x, e1z, e1y, axx, axz, al2, f, fstep, sgn;
+    int Ln, vl0, vl1, vr0, vr1, tries;
+    if (ROAM_PRIM_IS_TRI(prim) || slot >= (uint32_t)L->rs->nslot || !(t = L->rs->tile[slot]) || idx >= t->nspan) return 0;
+    sp = &t->span[idx];
+    Ln = sp->pad_02[1] & 0x0F;
+    if (Ln < 1) Ln = 1;
+    td5_track_quad_vertices(sp, 0, &vl0, &vl1, &vr0, &vr1);
+    if (!vert_place(t, sp, vl0, &s0x, &s0y, &s0z) || !vert_place(t, sp, vl0 + Ln, &s1x, &s1y, &s1z) ||
+        !vert_place(t, sp, vr0, &e0x, &e0y, &e0z) || !vert_place(t, sp, vr0 + Ln, &e1x, &e1y, &e1z)) return 0;
+    axx = 0.5 * (e0x + e1x) - 0.5 * (s0x + s1x); axz = 0.5 * (e0z + e1z) - 0.5 * (s0z + s1z);
+    al2 = axx * axx + axz * axz;
+    if (al2 < 1.0) return 0;
+    f = ((qx - 0.5 * (s0x + s1x)) * axx + (qz - 0.5 * (s0z + s1z)) * axz) / al2;
+    sgn = ((qx - fx) * axx + (qz - fz) * axz) >= 0.0 ? 1.0 : -1.0;     /* away from the sealed side */
+    fstep = 0.5 * BAR_UPM / sqrt(al2);
+    if (f < 0.0) f = 0.0;
+    if (f > 1.0) f = 1.0;
+    for (tries = 0; tries < 80; tries++, f += sgn * fstep) {
+        PlBar pb;
+        double ux, uz, l;
+        int k, clean = 1;
+        if (f < 0.0 || f > 1.0) break;
+        pb.x0 = s0x + (e0x - s0x) * f; pb.z0 = s0z + (e0z - s0z) * f; pb.y0 = s0y + (e0y - s0y) * f;
+        pb.x1 = s1x + (e1x - s1x) * f; pb.z1 = s1z + (e1z - s1z) * f; pb.y1 = s1y + (e1y - s1y) * f;
+        ux = pb.x1 - pb.x0; uz = pb.z1 - pb.z0; l = sqrt(ux * ux + uz * uz);
+        if (l < 1.0) return 0;
+        ux /= l; uz /= l;
+        pb.x0 -= ux * BAR_KERB_M * BAR_UPM; pb.z0 -= uz * BAR_KERB_M * BAR_UPM;
+        pb.x1 += ux * BAR_KERB_M * BAR_UPM; pb.z1 += uz * BAR_KERB_M * BAR_UPM;
+        /* the panel must not stand on the sealed surface (the route's junction) nor cross the route */
+        for (k = 1; k < 8 && clean; k++) {
+            uint64_t ek; uint8_t ep; uint32_t epr;
+            const double g = 0.1 + 0.8 * (double)k / 8.0;
+            if (seal_class(L, pb.x0 + (pb.x1 - pb.x0) * g, pb.z0 + (pb.z1 - pb.z0) * g, &ek, &ep, &epr)) clean = 0;
+        }
+        if (!clean || !seg_clear_of_route(pb.x0, pb.z0, pb.x1, pb.z1, route, 1.0 * BAR_UPM)) continue;
+        {   /* ends on a wall: lengthen an open end, never toward the route */
+            int e;
+            for (e = 0; e < 2; e++) {
+                const double sg = e == 0 ? -1.0 : 1.0;
+                double *ex = e == 0 ? &pb.x0 : &pb.x1, *ez = e == 0 ? &pb.z0 : &pb.z1;
+                double reach, step;
+                if (bar_end_walled(L, *ex, *ez, ux * sg, uz * sg)) continue;
+                reach = bar_end_reach(L, *ex, *ez, ux * sg, uz * sg, 12.0);
+                for (step = reach + 0.3 * BAR_UPM; step > 0.0; step -= 0.35 * BAR_UPM)
+                    if (seg_clear_of_route(*ex, *ez, *ex + ux * sg * step, *ez + uz * sg * step, route, 1.0 * BAR_UPM)) break;
+                if (step > 0.0) { *ex += ux * sg * step; *ez += uz * sg * step; }
+            }
+        }
+        out->pb = pb;
+        out->key = key;
+        out->openx = -sgn * axx / sqrt(al2); out->openz = -sgn * axz / sqrt(al2);
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct { double fx, fz, qx, qz; uint64_t key; uint8_t patch; uint32_t prim; } SealEntry;
+
+/* least distance (units) from a place point to the route polyline */
+static double seal_route_dist(const TD5_RoamRouteResult *r, double px, double pz)
+{
+    double best = 1e300;
+    int j;
+    for (j = 0; j + 1 < r->npt; j++) {
+        const double d2 = pt_seg_d2(px, pz, r->px[j], r->pz[j], r->px[j + 1], r->pz[j + 1]);
+        if (d2 < best) best = d2;
+    }
+    return sqrt(best);
+}
+
+/* An unsealed entry: explore what lies behind it (car-passable cells, panels cut) for up to SEAL_POCKET_CELLS cells.
+ * 0 = an enclosed POCKET (a stub of a closed street round a panel end, a sliver between two carriageways): it leads
+ * nowhere; 1 = a WAY OUT (the cells run on past SEAL_POCKET_CELLS or farther than SEAL_ESCAPE_M from the route). */
+#define SEAL_POCKET_CELLS 1500
+#define SEAL_ESCAPE_M     40.0
+static int seal_explore(const TD5_RoamRouteResult *route, const BarLoc *L, SealHash *h, double qx, double qz)
+{
+    int64_t *q = NULL;
+    int qn = 0, qcap = 0, qh = 0, out = 0;
+    const int cx0 = (int)floor((qx - L->ox) / SEAL_CELL), cz0 = (int)floor((qz - L->oz) / SEAL_CELL);
+    SealCell *c = seal_get(h, seal_ck(cx0, cz0), 0);
+    if (c && c->cls == 4) return 0;                    /* explored already from another entry: counted once */
+    q = (int64_t *)malloc((size_t)(qcap = 2048) * sizeof *q);
+    if (!q) return 0;
+    q[qn++] = seal_ck(cx0, cz0);
+    if (c) c->cls = 4;
+    while (qh < qn && !out) {
+        static const int dx4[4] = { 1, -1, 0, 0 }, dz4[4] = { 0, 0, 1, -1 };
+        const int64_t ck = q[qh++];
+        const int cx = (int)(ck >> 32), cz = (int)(int32_t)(uint32_t)(ck & 0xFFFFFFFF);
+        const double ax = L->ox + (cx + 0.5) * SEAL_CELL, az = L->oz + (cz + 0.5) * SEAL_CELL;
+        int k;
+        if (qn > SEAL_POCKET_CELLS || seal_route_dist(route, ax, az) > SEAL_ESCAPE_M * BAR_UPM) { out = 1; break; }
+        for (k = 0; k < 4; k++) {
+            const int nx = cx + dx4[k], nz = cz + dz4[k];
+            const double bx = ax + dx4[k] * SEAL_CELL, bz = az + dz4[k] * SEAL_CELL;
+            SealCell *n = seal_get(h, seal_ck(nx, nz), 0);
+            if (n && n->cls != 3) continue;              /* blocked, sealed surface or explored */
+            if (seal_cut(ax, az, bx, bz)) continue;
+            if (!n) {
+                if (!seal_passable(L, bx, bz)) { n = seal_get(h, seal_ck(nx, nz), 1); if (n) n->cls = 1; continue; }
+                n = seal_get(h, seal_ck(nx, nz), 1);
+                if (!n) { out = 0; goto done; }
+            }
+            n->cls = 4;
+            if (qn >= qcap) { int64_t *nq = (int64_t *)realloc(q, (size_t)(qcap *= 2) * sizeof *q); if (!nq) goto done; q = nq; }
+            q[qn++] = seal_ck(nx, nz);
+        }
+    }
+done:
+    free(q);
+    return out;
+}
+
+/* one flood; adds seals to sx; returns how many were added */
+static int bar_seal_pass(const TD5_RoamRouteResult *route, const BarLoc *L, BarSeals *sx)
+{
+    SealHash h = { NULL, 0, 0 };
+    int64_t *q = NULL;
+    int qn = 0, qcap = 0, qh = 0, i, added = 0, nent = 0, cent = 0;
+    SealEntry *ent = NULL;
+    if (!L->rs || route->npt < 2) return 0;
+    /* seeds: the route polyline, every 0.5 m */
+    for (i = 0; i + 1 < route->npt; i++) {
+        const double ex = route->px[i + 1] - route->px[i], ez = route->pz[i + 1] - route->pz[i], l = sqrt(ex * ex + ez * ez);
+        const int ns = 1 + (int)(l / (0.5 * BAR_UPM));
+        int sI;
+        for (sI = 0; sI <= ns; sI++) {
+            const double px = route->px[i] + ex * (double)sI / ns, pz = route->pz[i] + ez * (double)sI / ns;
+            const int cx = (int)floor((px - L->ox) / SEAL_CELL), cz = (int)floor((pz - L->oz) / SEAL_CELL);
+            SealCell *c = seal_get(&h, seal_ck(cx, cz), 0);
+            const double ccx = L->ox + (cx + 0.5) * SEAL_CELL, ccz = L->oz + (cz + 0.5) * SEAL_CELL;
+            if (c) continue;
+            c = seal_get(&h, seal_ck(cx, cz), 1);
+            if (!c) goto done;
+            c->cls = seal_passable(L, ccx, ccz) ? 2 : 1;
+            if (c->cls != 2) continue;
+            if (qn >= qcap) { int64_t *nq = (int64_t *)realloc(q, (size_t)(qcap = qcap ? qcap * 2 : 8192) * sizeof *q); if (!nq) goto done; q = nq; }
+            q[qn++] = seal_ck(cx, cz);
+        }
+    }
+    while (qh < qn) {
+        static const int dx4[4] = { 1, -1, 0, 0 }, dz4[4] = { 0, 0, 1, -1 };
+        const int64_t ck = q[qh++];
+        const int cx = (int)(ck >> 32), cz = (int)(int32_t)(uint32_t)(ck & 0xFFFFFFFF);
+        const double ax = L->ox + (cx + 0.5) * SEAL_CELL, az = L->oz + (cz + 0.5) * SEAL_CELL;
+        int k;
+        if (qn > 4000000) break;                         /* a runaway fill: the route surface is never this big */
+        for (k = 0; k < 4; k++) {
+            const int nx = cx + dx4[k], nz = cz + dz4[k];
+            const double bx = ax + dx4[k] * SEAL_CELL, bz = az + dz4[k] * SEAL_CELL;
+            SealCell *c = seal_get(&h, seal_ck(nx, nz), 0);
+            uint64_t ek = 0; uint8_t ep = 0; uint32_t epr = ROAM_PRIM_NONE;
+            if (c) continue;
+            if (seal_cut(ax, az, bx, bz)) continue;      /* not marked: reachable from another side, maybe */
+            c = seal_get(&h, seal_ck(nx, nz), 1);
+            if (!c) goto done;
+            if (!seal_passable(L, bx, bz)) { c->cls = 1; continue; }
+            if (seal_class(L, bx, bz, &ek, &ep, &epr)) {
+                c->cls = 2;
+                if (qn >= qcap) { int64_t *nq = (int64_t *)realloc(q, (size_t)(qcap = qcap ? qcap * 2 : 8192) * sizeof *q); if (!nq) goto done; q = nq; }
+                q[qn++] = seal_ck(nx, nz);
+                continue;
+            }
+            c->cls = 3;
+            if (nent >= cent) { SealEntry *ne = (SealEntry *)realloc(ent, (size_t)(cent = cent ? cent * 2 : 64) * sizeof *ent); if (!ne) goto done; ent = ne; }
+            ent[nent].fx = ax; ent[nent].fz = az; ent[nent].qx = bx; ent[nent].qz = bz;
+            ent[nent].key = ek; ent[nent].patch = ep; ent[nent].prim = epr;
+            nent++;
+        }
+    }
+    sx->entries += nent;
+    sx->pockets = 0; sx->escapes = 0;
+    /* the entries -> seals (one per street piece within 15 m, one per junction) */
+    for (i = 0; i < nent; i++) {
+        const SealEntry *e = &ent[i];
+        int j, dup = 0;
+        if (e->patch) {
+            for (j = 0; j < sx->ncluster; j++) if ((uint64_t)sx->cluster[j] == e->key) dup = 1;
+            if (dup || sx->ncluster >= BAR_SEAL_MAX) continue;
+            sx->cluster[sx->ncluster++] = (int64_t)e->key;
+            added++;
+            TD5_LOG_I(LOG_TAG, "BARRIERS: seal pass: junction %016llx reached from the sealed surface at (%.0f,%.0f): sealed too",
+                      (unsigned long long)e->key, e->qx, e->qz);
+            continue;
+        }
+        for (j = 0; j < i && !dup; j++)
+            if (ent[j].key == e->key && !ent[j].patch && hypot(ent[j].qx - e->qx, ent[j].qz - e->qz) < 15.0 * BAR_UPM) dup = 1;
+        for (j = 0; j < sx->npanel && !dup; j++)
+            if (sx->panel[j].key == e->key && hypot(0.5 * (sx->panel[j].pb.x0 + sx->panel[j].pb.x1) - e->qx,
+                                                    0.5 * (sx->panel[j].pb.z0 + sx->panel[j].pb.z1) - e->qz) < 6.0 * BAR_UPM) dup = 2;
+        if (dup == 1) continue;
+        /* behind the entry: an enclosed pocket needs no panel */
+        if (!seal_explore(route, L, &h, e->qx, e->qz)) { sx->pockets++; continue; }
+        if (dup == 2 || sx->npanel >= BAR_SEAL_MAX) { sx->panel_fail++; sx->escapes++; continue; }
+        if (!seal_panel(L, route, e->key, e->prim, e->qx, e->qz, e->fx, e->fz, &sx->panel[sx->npanel])) {
+            sx->panel_fail++;
+            sx->escapes++;
+            TD5_LOG_W(LOG_TAG, "BARRIERS: seal pass: street %016llx entered at (%.0f,%.0f) leads away and no panel fits",
+                      (unsigned long long)e->key, e->qx, e->qz);
+            continue;
+        }
+        TD5_LOG_I(LOG_TAG, "BARRIERS: seal pass: street %016llx entered at (%.0f,%.0f) from (%.0f,%.0f): panel (%.0f,%.0f)-(%.0f,%.0f)",
+                  (unsigned long long)e->key, e->qx, e->qz, e->fx, e->fz, sx->panel[sx->npanel].pb.x0, sx->panel[sx->npanel].pb.z0,
+                  sx->panel[sx->npanel].pb.x1, sx->panel[sx->npanel].pb.z1);
+        sx->npanel++;
+        added++;
+    }
+    sx->entries_left = nent;
+done:
+    free(h.c); free(q); free(ent);
+    return added;
+}
+
+int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
+{
+    Pool pool;
+    BarLoc loc;
+    BarSeals *sx;
+    const char *place = td5_roam_route_place();
+    const uint32_t t0 = td5_plat_time_ms();
+    int i, n = 0, it, seal = 1;
+    td5_roam_barriers_clear();
+    memset(&pool, 0, sizeof pool);
+    memset(&loc, 0, sizeof loc);
+    if (!route || !route->ok || route->nedge < 1 || route->npt < 2 || !place || !place[0]) return 0;
+    B.st.route_hash = route->hash;
+    if (!pool_load(&pool, place, route)) { pool_free(&pool); return 0; }
+    loc.ox = (int32_t)floor(route->px[0]); loc.oz = (int32_t)floor(route->pz[0]);
+    loc.rs = (TD5_RoamResident *)calloc(1, sizeof(TD5_RoamResident));
+    if (loc.rs) {
+        td5_roam_resident_init(loc.rs, &pool.grid, loc.ox, loc.oz, 0);
+        for (i = 0; i < pool.ntl; i++) td5_roam_resident_add(loc.rs, &pool.tl[i]);
+    }
+    sx = (BarSeals *)calloc(1, sizeof *sx);
+#ifndef TD5RE_RELEASE
+    seal = td5_env_int("TD5RE_ROAM_BARRIER_SEAL", 1, 0, 1);    /* DEV A/B: 0 = the graph placement only */
+#endif
+    for (it = 0; it <= BAR_SEAL_ITERS; it++) {
+        n = bar_build_once(route, &pool, &loc, sx);
+        if (n < 0 || !sx || !seal || it == BAR_SEAL_ITERS) break;
+        sx->iters = it + 1;
+        if (!bar_seal_pass(route, &loc, sx)) break;
+    }
+    if (n > 0 && sx) {
+        B.st.seal_iters = sx->iters; B.st.seal_entries_left = sx->entries_left; B.st.seal_fail = sx->panel_fail;
+        B.st.seal_pockets = sx->pockets; B.st.seal_escapes = sx->escapes;
+        B.st.build_ms = (double)(td5_plat_time_ms() - t0);
+        TD5_LOG_I(LOG_TAG, "BARRIERS: seal pass: %d flood(s), %d seal panel(s), %d touching junction(s); last flood: %d unsealed "
+                  "entr(y/ies) = %d enclosed pocket(s) + %d WAY(S) OUT (must be 0); %d short edge(s) closed by one panel; %d barriers in all, %.0f ms with the floods",
+                  sx->iters, B.st.seal_panels, B.st.clusters_touching, sx->entries_left, sx->pockets, sx->escapes, B.st.pairs_single,
+                  B.n, B.st.build_ms);
+    }
+    free(sx);
+    free(loc.rs);
+    pool_free(&pool);
+    return n < 0 ? 0 : n;
 }
 
 /* ============================================================ drawing ========== */
