@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 20 (free roam: city blocks)" },
+    { CL_ITEM,    "Free roam: the open ground of the city is concrete now," },
+    { CL_ITEM,    "  not lawn. Backyards, gaps between buildings and empty" },
+    { CL_ITEM,    "  lots are paved, and empty street fronts get a row of" },
+    { CL_ITEM,    "  low buildings up to the pavement. Parks, plazas, pitches" },
+    { CL_ITEM,    "  and roundabout islands keep their grass." },
     { CL_DATE,    "October 19 (geo map: FREE ROAM and RACE ROUTE)" },
     { CL_ITEM,    "Geo generator map: FREE ROAM and RACE ROUTE work on a" },
     { CL_ITEM,    "  fresh install. The START pin no longer reads OUTSIDE" },
