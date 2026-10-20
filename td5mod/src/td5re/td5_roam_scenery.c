@@ -578,6 +578,7 @@ typedef struct {
 /* [HD] what a lot under an OSM polygon becomes (sc_lot_class), and a polygon the lots / infill ask about (place frame) */
 enum { SC_LC_BUILD = 0, SC_LC_GREEN = 1, SC_LC_OPEN = 2 };
 typedef struct ScLotPoly { const double *px, *pz; int n, cls; double x0, z0, x1, z1; } ScLotPoly;
+typedef struct InfRec { double x[TD5_GEOB_RING_MAX], z[TD5_GEOB_RING_MAX]; int n; double x0, z0, x1, z1; } InfRec;
 
 struct TG_TileCtx {
     const RoamGrid *grid;
@@ -604,6 +605,8 @@ struct TG_TileCtx {
     ScLotPoly *lotp;            /* [HD] the AREAS polygons that take no infill / keep their green (sc_lot_polys) */
     int      nlotp;             /*      + the ring plazas (pv_rings), whose points live in ringpool       */
     double  *ringpool;
+    InfRec  *infr;              /* [HD] the infill lots accepted so far (any owner): no pavement fence in front of them */
+    int      ninfr, cap_infr;
     double   ground_last;
     TD5_RoamGfix gf;            /* [G4b] how far the drawn ground is lowered under the road (render clamp) */
     ScSb     sb[TD5_ROAM_SCN_NSB];
@@ -649,6 +652,7 @@ static void sc_ctx_reset(TG_TileCtx *c)
     c->skip_lm = 0;
     c->nlt = 0;
     c->npvq = 0;
+    c->ninfr = 0;
     free(c->lamp); c->lamp = NULL; c->nlamp = 0;
     if (c->canopy.data) free(c->canopy.data);
     memset(&c->canopy, 0, sizeof c->canopy);
@@ -670,6 +674,7 @@ static void sc_ctx_free(TG_TileCtx *c)
     free(c->prim); free(c->seg); free(c->edge);
     free(c->lx); free(c->lz); free(c->ly);
     free(c->pvq);
+    free(c->infr);
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { tg_buf_free(&c->sb[k].blk); free(c->sb[k].moff); }
     free(c);
 }
@@ -2919,6 +2924,8 @@ static int pv_in_green(const TG_TileCtx *c, const ScArea *ar, int nar, double x,
 
 /* ---- emission ---- */
 
+static int inf_in_lot(const TG_TileCtx *c, double x, double z);   /* [HD] SECTION lots */
+
 typedef struct {
     TD5_RoamScnSource *s;
     TG_TileCtx  *c;
@@ -3098,7 +3105,7 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
             const double ex = oz[1] - oz[0], ez = -(ox[1] - ox[0]), el = hypot(ex, ez);
             const double px2 = mx + ex / el * PV_FENCE_PROBE, pz2 = mz + ez / el * PV_FENCE_PROBE;
             fence = !pv_in_building(c, e->bld, px2, pz2) && !pv_in_building(c, e->bld, mx, mz) &&
-                    !pv_in_green(c, e->ar, e->nar, px2, pz2);
+                    !pv_in_green(c, e->ar, e->nar, px2, pz2) && !inf_in_lot(c, px2, pz2);
         }
         if (fence) {
             x[0] = ox[0]; z[0] = oz[0]; y[0] = yo[a];
@@ -3296,6 +3303,8 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
         kz[v] = ch.pz[v] + ch.uz[v] * PV_KERB_IN * ch.mf[v];
     }
     pv_heights(e, &ch, yo, gr);
+    /* [HD] this block's frontage lots, before its pieces (a fence never stands in front of one) */
+    if (!pv_infill(e, &ch)) { ok = 0; goto done; }
     /* the owned pieces, straight runs merged */
     for (k = 0; k < m;) {
         const PvB *b = &B[seq[k]];
@@ -3314,7 +3323,6 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
                       b->kind == PV_K_PATCH)) { ok = 0; goto done; }
         k = k1;
     }
-    if (!pv_infill(e, &ch)) ok = 0;          /* [HD] frontage lots on this block's building line */
 done:
     free(blk);
     free(ch.vf);
@@ -3759,6 +3767,7 @@ out:
 #define INF_LM_CLEAR_M  15.0
 #define INF_PTS         24            /* front points per lot                            */
 #define INF_SPLIT_MIN_M 3.0           /* a taken lot splits into halves no narrower      */
+#define INF_FRONT_IN    65.0          /* units (15 cm): the front stands off the slab's back face */
 static const unsigned char k_inf_levels[16] = { 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 7 };
 
 static uint32_t inf_hash(double X, double Z)
@@ -3960,6 +3969,50 @@ static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const dou
 
 /* One lot [a0, a1] of the current run: accept it, else split it along its front (twice at most), else halve its
  * depth, else count why it was refused. Counted once, by the tile owning its front midpoint. */
+static int inf_record(TG_TileCtx *c, const double *rx, const double *rz, int n)
+{
+    InfRec *r;
+    int k;
+    if (!sc_grow((void **)&c->infr, &c->cap_infr, c->ninfr + 1, sizeof(InfRec))) return 0;
+    r = &c->infr[c->ninfr++];
+    r->n = n;
+    r->x0 = r->x1 = rx[0]; r->z0 = r->z1 = rz[0];
+    for (k = 0; k < n; k++) {
+        r->x[k] = rx[k]; r->z[k] = rz[k];
+        if (rx[k] < r->x0) r->x0 = rx[k];
+        if (rx[k] > r->x1) r->x1 = rx[k];
+        if (rz[k] < r->z0) r->z0 = rz[k];
+        if (rz[k] > r->z1) r->z1 = rz[k];
+    }
+    return 1;
+}
+
+/* an accepted infill lot (this tile's or a neighbour's) holds the tile-local point: the pavement puts no fence there */
+static int inf_in_lot(const TG_TileCtx *c, double x, double z)
+{
+    int i;
+    for (i = 0; i < c->ninfr; i++) {
+        const InfRec *r = &c->infr[i];
+        if (x < r->x0 || x > r->x1 || z < r->z0 || z > r->z1) continue;
+        if (td5_geob_point_in_ring(r->x, r->z, r->n, x, z)) return 1;
+    }
+    return 0;
+}
+
+/* the lot [a0, a1] with its front INF_FRONT_IN inside the building line and its back D behind that */
+static int inf_lot_ring(const InfLine *L, double a0, double a1, double D, double *fx, double *fz, double *gx,
+                        double *gz, int *nf, double *mx, double *mz, int *seg)
+{
+    double tx[INF_PTS + 2], tz[INF_PTS + 2];
+    int n2 = 0;
+    if (!inf_lot_geom(L, a0, a1, INF_FRONT_IN, tx, tz, fx, fz, nf, mx, mz, seg)) return 0;
+    if (!inf_lot_geom(L, a0, a1, INF_FRONT_IN + D, tx, tz, gx, gz, &n2, mx, mz, seg) || n2 != *nf) return 0;
+    return 1;
+}
+
+/* One lot [a0, a1] of the current run: accept it, else split it along its front (twice at most), else halve its
+ * depth, else refuse it. Every tile that sees the block decides every lot the same way and records the accepted
+ * ones (the fence test); only the tile owning the front midpoint counts and emits it. Returns 0 on out of memory. */
 static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split, int counted)
 {
     TG_TileCtx *c = e->c;
@@ -3967,17 +4020,17 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     const double U = s->upm;
     double fx[INF_PTS + 2], fz[INF_PTS + 2], gx[INF_PTS + 2], gz[INF_PTS + 2];
     double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], mx = 0.0, mz = 0.0, D, Dcap;
-    int nf = 0, seg = L->r0, q, res = 0;
+    int nf = 0, seg = L->r0, q, res = 0, own, why = 0;
     uint32_t h;
     if (!inf_lot_geom(L, a0, a1, 0.0, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) return 1;
-    if (!sc_owned_point(c, mx, mz)) return 1;
-    if (!counted) c->st.inf_lots++;
+    own = sc_owned_point(c, mx, mz) && !counted;
+    if (own) c->st.inf_lots++;
     h = inf_hash(mx + (double)c->org_x, mz + (double)c->org_z);
     D = (INF_DEPTH_MIN + (double)(h % (uint32_t)INF_DEPTH_SPAN)) * U;
-    Dcap = INF_HALF * inf_ray(L->ox, L->oz, L->n, seg, mx, mz, L->nx[seg], L->nz[seg]);
+    Dcap = INF_HALF * inf_ray(L->ox, L->oz, L->n, seg, mx, mz, L->nx[seg], L->nz[seg]) - INF_FRONT_IN;
     if (D > Dcap) D = Dcap;
-    if (D < INF_SHALLOW_M * U) { c->st.inf_drop_shape++; return 1; }
-    {   /* CITY ground; no green / open area, no landmark */
+    if (D < INF_SHALLOW_M * U) { why = 1; goto refused; }
+    {   /* CITY ground; no green / open area / ring plaza, no landmark */
         int city = sc_casco_has(s, c->tx, c->tz);
         const double X = mx + L->nx[seg] * 0.5 * D + (double)c->org_x, Z = mz + L->nz[seg] * 0.5 * D + (double)c->org_z;
         if (!city && s->lot_cover) {
@@ -3990,36 +4043,39 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
         }
         if (!city || sc_lot_class_at(c->lotp, c->nlotp, X, Z) != SC_LC_BUILD ||
             sc_lot_class_at(c->lotp, c->nlotp, mx + (double)c->org_x, mz + (double)c->org_z) != SC_LC_BUILD ||
-            inf_near_landmark(e->bld, X, Z, INF_LM_CLEAR_M * U)) { c->st.inf_drop_area++; return 1; }
+            inf_near_landmark(e->bld, X, Z, INF_LM_CLEAR_M * U)) { why = 4; goto refused; }
     }
-    inf_lot_geom(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg);
+    if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
     res = inf_lot_test(e, fx, fz, gx, gz, nf);
     if (res == 3 && split < 2 && a1 - a0 >= 2.0 * INF_SPLIT_MIN_M * U) {
-        /* a footprint on part of it: the two halves on their own (each counted as this lot's) */
-        const double am = 0.5 * (a0 + a1);
+        /* a footprint on part of it: the two halves on their own (booked as this lot) */
         const int b0 = c->st.inf_emitted;
+        const double am = 0.5 * (a0 + a1);
         if (!inf_lot(e, L, a0, am, split + 1, 1) || !inf_lot(e, L, am, a1, split + 1, 1)) return 0;
-        if (c->st.inf_emitted == b0 && !counted) c->st.inf_drop_real++;
+        if (own && c->st.inf_emitted == b0) c->st.inf_drop_real++;
         return 1;
     }
     if (res == 3 && 0.5 * D >= INF_SHALLOW_M * U) {      /* its back meets one: the front half */
         D *= 0.5;
-        inf_lot_geom(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg);
+        if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
         res = inf_lot_test(e, fx, fz, gx, gz, nf);
     }
-    if (res) {
-        if (!counted) {
-            if (res == 2) c->st.inf_drop_road++;
-            else if (res == 1) c->st.inf_drop_shape++;
-            else c->st.inf_drop_real++;
-        }
-        return 1;
-    }
-    if (nf * 2 > TD5_GEOB_RING_MAX) { if (!counted) c->st.inf_drop_shape++; return 1; }
+    if (res) { why = res; goto refused; }
+    if (nf * 2 > TD5_GEOB_RING_MAX) { why = 1; goto refused; }
     for (q = 0; q < nf; q++) { rx[q] = fx[q]; rz[q] = fz[q]; }
     for (q = 0; q < nf; q++) { rx[nf + q] = gx[nf - 1 - q]; rz[nf + q] = gz[nf - 1 - q]; }
-    if (!td5_geob_ring_simple(rx, rz, nf * 2)) { if (!counted) c->st.inf_drop_shape++; return 1; }
+    if (!td5_geob_ring_simple(rx, rz, nf * 2)) { why = 1; goto refused; }
+    if (!inf_record(c, rx, rz, nf * 2)) return 0;
+    if (!sc_owned_point(c, mx, mz)) return 1;          /* a split half: its own midpoint's tile emits it */
     return inf_emit(e, rx, rz, nf * 2, h, fabs(td5_geob_ring_area(rx, rz, nf * 2)));
+refused:
+    if (own) {
+        if (why == 2) c->st.inf_drop_road++;
+        else if (why == 3) c->st.inf_drop_real++;
+        else if (why == 4) c->st.inf_drop_area++;
+        else c->st.inf_drop_shape++;
+    }
+    return 1;
 }
 
 static int pv_infill(PvEmit *e, const PvChain *ch)
@@ -4291,7 +4347,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->lots_on   = td5_env_int("TD5RE_ROAM_LOTS", 1, 0, 1);
     s->lot_cover = td5_env_int("TD5RE_ROAM_LOT_COVER", 1, 0, 1);
     s->infill_on = td5_env_int("TD5RE_ROAM_INFILL", 1, 0, 1);
-    s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_BRIDGE_DECK, 0, 1023);   /* cast concrete, mid grey */
+    s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
         int (*cl)[2] = (int (*)[2])malloc(2048 * sizeof(int[2]));
         const int n = cl ? td5_roam_casco_tiles(g, cl, 2048) : 0;
@@ -4456,6 +4512,7 @@ out:
     c->cover_ok = 0;
     free(c->lotp); c->lotp = NULL; c->nlotp = 0;
     free(c->ringpool); c->ringpool = NULL;
+    c->ninfr = 0;                             /* infr itself is kept for the next tile (sc_ctx_free) */
     return sc;
 }
 
