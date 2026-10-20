@@ -3907,8 +3907,10 @@ void td5_frontend_auto_race_setup(void) {
      * planned pins (frontend_geo_entry_on_ok); one player races in the city (its route: the geo map's
      * pins, else routes/geo_map.json), and with no route the city can race it is an error and track
      * 0, never a strip. TD5RE_GEO_STRIP_BUILD=1 (dev: the level091 identity gate) races the committed
-     * ROUTE.JSON exactly as before. */
-    if (td5_trackgen_is_geo_slot(s_selected_track) && !td5_roam_strip_build_enabled()) {
+     * ROUTE.JSON exactly as before. [roam HC] Not when a roam session is already armed (the dev
+     * --Roam=1 CLI points default_track at the roam host, a geo slot): re-arming here moved the CLI spawn
+     * to the geo map's saved route START and started a race. */
+    if (td5_trackgen_is_geo_slot(s_selected_track) && !td5_roam_strip_build_enabled() && !td5_roam_armed()) {
         const int humans_was = s_num_human_players;   /* only the context test reads it here */
         s_num_human_players = g_td5.ini.default_players >= 2 ? g_td5.ini.default_players : 1;
         if (frontend_geo_strip_context()) {
@@ -8231,7 +8233,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
         /* 7 DRAG RACING */
         {"DRAG RACING"," ","CHOOSE YOUR CAR.....","THEN THROW DOWN THE HAMMER","AND WATCH THE SMOKE FLY!",0,0,0,0,0,0,0,0},
         /* 8 COP CHASE */
-        {"COP CHASE"," ","CHOOSE ONE OF THE COP CARS","AND PULL OVER THOSE LAWLESS","HOOLIGANS WHO ARE SPEEDING","THROUGH YOUR TOWN. HIT THE SIREN","AND SPIN THE CARS OUT TO GIVE OUT","THE TICKETS AND INSURANCE POINTS.",0,0,0,0,0},
+        {"COP CHASE"," ","CHOOSE ONE OF THE COP CARS","AND PULL OVER THOSE LAWLESS","HOOLIGANS WHO ARE SPEEDING","THROUGH YOUR TOWN. HIT THE SIREN","AND RAM THE CARS UNTIL THEY","ARE ARRESTED.",0,0,0,0,0},
         /* 9 TIME TRIALS */
         {"TIME TRIALS"," ","TAKE ON THE CLOCK WITH","TRAFFIC TO SEE HOW YOU FARE","IN A RACE AGAINST YOUR OWN","SKILL."," ","TIME IS KEPT FOR ALL","CHECKPOINTS AND TABULATED","AT THE END OF THE RACE.",0,0,0},
         /* 10 CUP RACE */

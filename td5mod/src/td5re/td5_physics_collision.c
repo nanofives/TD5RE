@@ -16,6 +16,7 @@
 #include "td5_physics.h"
 #include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_ai.h"
+#include "td5_police.h"   /* [round H HH] */
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
@@ -2353,6 +2354,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         }
     }
 
+    /* [round H HH] the pursuit layer of the normal races: a racer ramming a cop starts
+     * (or raises) a pursuit, a racer touching a roadblock car is counted. Records only. */
+    td5_police_on_contact((int)A->slot_index, (int)B->slot_index, impact_mag);
+
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]
      * traffic boundary g_traffic_slot_base, not hardcoded 6 — a human racer in
      * an expanded slot must not pick up the traffic-only lockout escalation. */
@@ -2421,8 +2426,9 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int a_is_cop = (A->slot_index >= 0) && td5_ai_actor_is_cop((int)A->slot_index);
     int b_is_cop = (B->slot_index >= 0) && td5_ai_actor_is_cop((int)B->slot_index);
     int32_t cop_gate = cop_break_mag();
-    int a_tough_cop = a_is_cop && impact_mag <= cop_gate;
-    int b_tough_cop = b_is_cop && impact_mag <= cop_gate;
+    /* [round H HH] a police ROADBLOCK car is always tough: it never scatters, spins or lifts (td5_police.c) */
+    int a_tough_cop = a_is_cop && (impact_mag <= cop_gate || td5_police_block_slot((int)A->slot_index));
+    int b_tough_cop = b_is_cop && (impact_mag <= cop_gate || td5_police_block_slot((int)B->slot_index));
     /* [RACE OPTIONS 2026-09-29] Vertical launch is the FAITHFUL impact_mag/6
      * (200000-clamped) for everyone. The arcade levers that used to soften it
      * (lowered heavy gate, /16 divisor, 160000 clamp, 35% angular scatter) went

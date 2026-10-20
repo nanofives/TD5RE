@@ -10,6 +10,12 @@
  *     facing the approaching car, pointing the way the route turns.
  * Nothing is ever placed across the route itself. The start and finish clusters are sealed too
  * (every arm but the route's own), so a car cannot leave the route backwards at the grid.
+ * [HE] The graph is not the surface. A mouth panel must END ON A WALL of the drivable surface (else it
+ * slides out along its arm, or its ends are lengthened), and the SEAL PASS floods the car-passable surface
+ * from the route over the build's own tiles, every panel a cut: a junction reached without an arm joins
+ * the set, a street reached without an arm (a diagonal's ribbon overlapping a junction patch) gets a
+ * SEAL PANEL across it (kind 0, cluster_key = that street's edge key). Repeats until no way out is left.
+ * A short edge between two sealed junctions gets one panel, not two facing ones.
  *
  * FRAME (the frozen contract with F6-B, the race flow + racer-only collision):
  *   x0,z0,x1,z1  the two ends of the segment in the WORLD frame, 24.8 fixed point:
@@ -68,6 +74,12 @@ void td5_roam_barriers_clear(void);
 void td5_roam_barriers_set_visible(int on);          /* F6-B: draw the set during a race */
 int  td5_roam_barriers_visible(void);
 void td5_roam_barriers_draw(int view);               /* per pane, in the world pass; self-gated */
+/* [HE] the OPEN side of mouth barrier i (index into td5_roam_barriers()): a unit xz direction from the panel
+ * back into the junction the route crosses, taken from the closed arm's own ribbon at build time (the frame is a
+ * pure translation, so it holds in PLACE and WORLD). 0 for a turn board or when unknown. */
+int  td5_roam_barrier_open_dir(int i, double *nx, double *nz);
+/* [HE] the closed arm of mouth barrier i: its edge key and end. 0 for a turn board. */
+int  td5_roam_barrier_arm(int i, uint64_t *edge_key, int *end);
 
 typedef struct {
     int clusters_passed;      /* clusters the route goes through (start/finish pockets included) */
@@ -83,6 +95,13 @@ typedef struct {
     int pass_gaps;            /* consecutive route edges that do not meet at one node key (must be 0)  */
     int ring_edges, oneway_edges;   /* route edges that are roundabout / one-way ribbons (plaza ring, divided avenue) */
     int slid, slide_fail;     /* mouth barriers moved outward along their arm (the cut row lay across the route) / none fit */
+    int slid_wall;            /* [HE] ... further out, to a row whose two ends meet a wall of the drivable surface   */
+    int ends_lengthened, ends_short;   /* [HE] no row had walls at both ends: panel ends lengthened to the wall / still short (the route is in the way) */
+    int seal_panels;          /* [HE] panels the seal pass put across a street that overlaps the sealed surface   */
+    int clusters_touching;    /* [HE] junctions the seal pass found reachable without an arm: sealed too          */
+    int seal_iters, seal_entries_left, seal_fail;
+    int pairs_single;         /* [HE] short edges between two sealed junctions closed by one panel instead of two facing ones */
+    int seal_pockets, seal_escapes;   /* [HE] the last flood's unsealed entries: enclosed pockets / ways out (must be 0) */   /* [HE] floods run / entries the last flood still found (must be 0) / panels that did not fit */
     int boards_alt, boards_dropped;   /* turn boards put on the outer kerb of the exit arm / left out (ahead and kerb both on the route) */
     int arrows_with, arrows_side, arrows_against;   /* mouth-barrier chevrons vs the nearest route direction (against must be 0) */
     int arm_no_row;           /* arms with no ribbon row (edge without quads): nothing to close  */
@@ -97,6 +116,9 @@ void td5_roam_barriers_stats(TD5_RoamBarrierStats *out);
  * builds the barriers for each, logs + writes <log dir>/roam_barrier_census.txt and
  * roam_barrier_<route>.json (barriers + route polyline, place frame) and returns 1 (exit). */
 int td5_roam_barriers_dev_test(void);
+/* [HE] DEV: arm i of every cluster the last build sealed: status 0 taken by the route, 1 barriered, 2 linked (left
+ * open on purpose: a twin carriageway / dead end), 3 OPEN; i < 0 returns the count. */
+int td5_roam_barriers_dev_arm(int i, int *status, uint64_t *edge_key, uint64_t *cluster_key);
 #endif
 
 #endif /* TD5_ROAM_BARRIER_H */

@@ -1,0 +1,9 @@
+# [roam HA] no car ever chosen: FREE ROAM / RACE ROUTE must still open the car select.
+sync menu
+480 log TRKSEL
++30 key up press
++60 key enter press
++900 log GEO_SETTLED
++8 key enter press
++900 log AFTER_ROAM
++60 quit

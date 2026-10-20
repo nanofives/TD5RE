@@ -6,16 +6,16 @@
  * WHAT IT IS. A race on the route planned in F5-A (td5_roam_route.h), run in the SAME roam session:
  * no level reload, no strip. The flow:
  *
- *   OFF --(R in the route map / pause, R on a saved route in the load list)--> SETUP
- *   SETUP: a panel over the route map (sprint, 1 lap, TRAFFIC / COPS toggles stored but inert until
- *          F8 / F10). START RACE --> the car is put on START facing the route, the barriers are built
+ *   OFF --(R in the route map / pause, R on a saved route in the load list, the geo generator's RACE
+ *        ROUTE)--> COUNTDOWN with the frontend's race settings (td5_roam_prefs_get; [roam HA] the in-race
+ *        setup panel is gone): the car is put on START facing the route, the barriers are built
  *          (td5_roam_barrier.h, F6-A), the pause menu closes and the game's 3-2-1 freezes the field.
  *   COUNTDOWN --(GO)--> RACING: progress is the DISTANCE ALONG the route polyline (no spans):
  *          checkpoints at the route's via points, wrong-way and off-route warnings, distance to the
  *          finish, checkpoint splits against the best run.
  *   RACING --(distance along reaches the FINISH)--> FINISHED: results panel (time, splits, best per
- *          route name in routes/<name>.best), the car brakes to a stop. ENTER keeps roaming from the
- *          finish point, M opens the route map, F5 races the route again.
+ *          route name in routes/<name>.best), the car brakes to a stop. [roam HA] ENTER leaves the session
+ *          back to the geo generator, M opens the route map, F5 races the route again.
  *   Any state --(A in the route map during a race, LEAVE FREE ROAM, restart, session end)--> OFF.
  *
  * BARRIERS ARE RACE-TIME ONLY. td5_roam_race_barriers_live() is 1 in COUNTDOWN and RACING; the roam wall
@@ -40,7 +40,6 @@
 struct TD5_Actor;
 
 #define TD5_RRACE_OFF        0
-#define TD5_RRACE_SETUP      1
 #define TD5_RRACE_COUNTDOWN  2
 #define TD5_RRACE_RACING     3
 #define TD5_RRACE_FINISHED   4
@@ -106,21 +105,24 @@ int  td5_roam_race_laps(void);
 int  td5_roam_race_lap_now(void);
 
 /* ---- entry points ------------------------------------------------------------ */
-/* Open the setup panel for the current route (opens the route map when it is not up). 1 when the
- * route is a planned sprint (START, FINISH, every leg planned). */
-int  td5_roam_race_open_setup(void);
-int  td5_roam_race_setup_open(void);         /* the panel is up: the route map gives it the keys */
+/* [roam HA] Race the planned route now with the frontend's race settings (td5_roam_prefs_get: opponents,
+ * traffic, cops; type and laps from the planner). 1 when started; 0 = not a planned route / a race is on. */
+int  td5_roam_race_start_prefs(void);
 /* Start now with `s` (NULL = defaults): grid, barriers, countdown. 1 on success. */
 int  td5_roam_race_start(const TD5_RoamRaceSetup *s);
 void td5_roam_race_abandon(void);            /* back to OFF, the car stays where it is */
+long td5_roam_race_fin_ticks(void);          /* [HF] dev: ticks since the player's finish, 0 when not finished */
+int  td5_roam_race_player_finished(void);    /* [HF] the player crossed the line (run-out / results) */
+void td5_roam_race_draw_world(int view);     /* [HF] START / FINISH gantries, world pass, pane 0, self-gated */
+int  td5_roam_race_wrong_way(void);          /* [HF] 1 while the route-direction check says WRONG WAY (stock HUD draws it) */
 
 /* ---- game hooks -------------------------------------------------------------- */
 void     td5_roam_race_frame(void);          /* once per rendered frame, after td5_roam_route_ui_frame */
 void     td5_roam_race_tick(void);           /* once per sim tick, after physics (normal tick path) */
 void     td5_roam_race_draw_hud(void);       /* HUD overlay pass */
-void     td5_roam_race_draw_setup(void);     /* inside the route map overlay (td5_roam_route_ui.c) */
 uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits);   /* FINISHED: brake to a stop */
 int      td5_roam_race_take_pause_close(void);   /* 1 once: the game closes its pause menu now */
+int      td5_roam_race_take_leave(void);         /* [roam HA] 1 once: the results were dismissed, the game leaves to the geo generator */
 int      td5_roam_race_take_countdown(void);     /* ticks per digit to arm the 3-2-1 with, once; 0 = none */
 int      td5_roam_race_hide_route_hint(void);    /* 1 = the route planner's HUD hint line stays off */
 
@@ -147,6 +149,7 @@ typedef struct {
     double max_pen_m;         /* deepest probe penetration past the panel face, metres         */
     double max_chassis_past_m;
     int  barriers, mouths;
+    long beyond_skips;        /* [HE] probe x panel tests skipped: the car's chassis is more than 3 m past that panel */
 } TD5_RoamRaceWallStats;
 void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 
@@ -172,6 +175,18 @@ int      td5_roam_sprint_test_done(void);
 int      td5_roam_sprint_test_verdict(char *note, size_t n);   /* 0 PASS / 1 WARN / 2 FAIL */
 /* Waypoints of the scripted routes (lat/lon, START first, FINISH last), for the census tools. */
 int      td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max);
+void     td5_roam_race_dev_hold_finish(int on);   /* [HE] no checkpoints / finish while on */
+
+/* ---- DEV: the `roam-walls` test (td5_roam_wall_test.c, [HE]) ------------------- */
+/* TD5RE_ROAM_WALL_TEST=1 with --Roam=1 --RoamSpawn=<START> (and TD5RE_ROAM_STREAM=0): plans the route
+ * (TD5RE_ROAM_WALL_WP="lat,lon;lat,lon;..." or Mariano's geo_map sprint), starts a solo race, then
+ *   1. FLOOD: fills the car-passable drivable surface from the route with every mouth barrier as a cut; any
+ *      reached road that is not the route's own surface nor a linked arm is a leak (exits listed);
+ *   2. ATTACK: puts the car in front of every closed mouth and drives it at the panel (middle at 90 km/h, both
+ *      kerb ends at 50 km/h, 30 degrees out): the chassis past the panel or on the closed arm is a leak.
+ * Writes <log dir>roam_wall_test.txt + roam_wall_flood.csv + roam_wall_attack.csv, logs a verdict, quits. */
+void     td5_roam_wall_test_frame(void);
+int      td5_roam_wall_test_bits(struct TD5_Actor *a, uint32_t *bits);   /* 1 = the test drives slot 0 now */
 #endif
 
 #endif /* TD5_ROAM_RACE_H */

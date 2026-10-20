@@ -36,8 +36,8 @@
  *
  * BUST. The player stopped (under 8 km/h) with a pursuer within 9 m fills a bust meter in 2 s (it drains at twice
  * that when the player gets going). Full = BUSTED: the car is held braked for 3 s under a BUSTED banner, then
- * - free roam: a fine (100 x heat + 50 per offence) is shown, the car is put back on the nearest street centre
- *   facing along it, the pursuers leave, 10 s of grace;
+ * - free roam: the car is put back on the nearest street centre facing along it, the pursuers leave, 10 s of grace
+ *   (no fines and no money anywhere, Mariano 2026-10-19, round H HH);
  * - a race: the car is released where it stands (the 3 s are the penalty), the pursuers drop back to patrol, 15 s
  *   of grace. No game over in either.
  *
@@ -103,7 +103,6 @@ typedef struct {
     long   pursuits, notice_speed, notice_red, notice_ram, joins;
     long   escapes, escapes_los, escapes_dist;
     long   busts;
-    long   fines;                             /* total fined, $                                       */
     long   red_runs;                          /* red lamps the player ran (seen or not)               */
     long   recoveries, stuck_episodes, stuck_removed;   /* stuck: under 1 km/h for > 5 s, not by the player */
     long   off_ticks, off_ticks_contact, off_events, off_rescues;

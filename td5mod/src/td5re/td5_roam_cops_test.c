@@ -12,7 +12,7 @@
  *      out-run them on city streets; the real default is TD5RE_ROAM_COPS_VMAX 125.
  *   B. STOP -> BUST. The cap goes, a second parked cop is put 90 m ahead on a new leg, the player passes it at
  *      80 km/h (speeding over 60), brakes to a stop 60 m past it and holds still. The pursuers box it in, the bust
- *      meter fills, BUSTED, the fine, and the car is put back on the street.
+ *      meter fills, BUSTED, and the car is put back on the street.
  *
  * Random patrols are off during the test (dev force: 0 per anchor) so the two placed cops are the only patrols;
  * reinforcements still come with the heat. The smoke row runs with no ambient traffic, the full row with the knob
@@ -79,6 +79,7 @@ static struct {
     long   cross_t, stuck_t;
     TD5_RoamCopsStats rb_base;
     long   pinch0;
+    int    s2_tries;                    /* scenario 2 repeats when the bust landed far from the block */
 } T;
 
 void td5_roam_cops_test_arm(int mode)
@@ -450,16 +451,16 @@ static int ct_verdict(char *note, size_t n)
 #undef CT_BAD
     if (bad[0]) status = 2;
     else if (s.stuck_episodes > 0 || s.off_events > 0) status = 1;
-    snprintf(note, n, "%spursuit %ld esc %ld (dist %ld) bust %ld fine $%ld heat %d cops %d stuck %ld off %ld+%ldhit %s%.48s",
-             status == 2 ? "FAIL " : "", s.pursuits, s.escapes, s.escapes_dist, s.busts, s.fines, s.max_heat, s.max_pursuers,
+    snprintf(note, n, "%spursuit %ld esc %ld (dist %ld) bust %ld heat %d cops %d stuck %ld off %ld+%ldhit %s%.48s",
+             status == 2 ? "FAIL " : "", s.pursuits, s.escapes, s.escapes_dist, s.busts, s.max_heat, s.max_pursuers,
              s.stuck_episodes, off_free, s.off_ticks_contact, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMCOPS] VERDICT %s: %s | spawns %ld despawns %ld reinforcements %ld joins %ld | notices speed %ld red %ld ram %ld "
-              "| escapes %ld (los %ld dist %ld) busts %ld fines $%ld respawns %ld (on road %d) | red runs %ld | recoveries %ld stuck %ld "
+              "| escapes %ld (los %ld dist %ld) busts %ld respawns %ld (on road %d) | red runs %ld | recoveries %ld stuck %ld "
               "removed %ld | off ticks %ld (%ld within 2 s of a contact) events %ld rescues %ld | road pushes %ld pinches %ld | barrier hits %ld | plans %ld fails %ld | "
               "wrecks %ld | pursuit %.1f s, max heat %d, max pursuers %d, cop vmax %.0f km/h | player vmax %.0f km/h | A: pursuit %.1f s "
               "escape %.1f s; B: pursuit %d bust %d",
               status == 2 ? "FAIL" : (status ? "WARN" : "PASS"), note, s.spawns, s.despawns, s.reinforcements, s.joins, s.notice_speed,
-              s.notice_red, s.notice_ram, s.escapes, s.escapes_los, s.escapes_dist, s.busts, s.fines, s.player_respawns,
+              s.notice_red, s.notice_ram, s.escapes, s.escapes_los, s.escapes_dist, s.busts, s.player_respawns,
               s.respawn_on_road, s.red_runs, s.recoveries, s.stuck_episodes, s.stuck_removed, s.off_ticks, s.off_ticks_contact,
               s.off_events, s.off_rescues, s.road_pushes, s.road_pinches, s.barrier_hits, s.plans, s.plan_fails, s.wrecks, s.pursuit_ticks / CT_HZ, s.max_heat,
               s.max_pursuers, s.max_kmh, T.kmh_max, T.t_pursuit_a ? (T.t_pursuit_a - T.t_start) / CT_HZ : -1.0,
@@ -651,7 +652,7 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
                 T.phase = RB_WAITBLK; T.phase_t0 = tick;
                 return 0;
             }
-            if (tick - T.phase_t0 > 45 * 30) { ct_finish("scenario 3: no detour counted within 45 s", 1); return 0; }
+            if (tick - T.phase_t0 > 90 * 30) { ct_finish("scenario 3: no detour counted within 90 s", 1); return 0; }   /* a 1000 m leg at 50 km/h is 75 s */
             if (T.s > (T.np - 1) * CT_DS - 30.0) { ct_finish("scenario 3: the detour leg ended before a detour was counted", 1); return 0; }
             return ct_drive(a, cap);
         }
@@ -692,7 +693,11 @@ static uint32_t rb_bits(TD5_Actor *a, long tick)
             T.respawned = st.player_respawns > T.st0.player_respawns;
             T.respawn_on_road = st.respawn_on_road;
             TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario 2: bust at the block (blocks_bust %ld), respawn %s", st.blocks_bust, T.respawned ? "yes" : "NO");
-            T.sc = 3; T.phase = RB_COOL; T.phase_t0 = tick; T.cool_planned = 0;
+            /* the cops can box the car in (a wall corner, a traffic car) well short of the block: that bust says nothing about
+             * the block, so run the scenario again (twice at most) instead of letting the field layout decide the verdict */
+            T.sc = (st.blocks_bust > T.rb_base.blocks_bust || ++T.s2_tries >= 3) ? 3 : 2;
+            if (T.sc == 2) TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario 2: busted away from the block, run %d of 3", T.s2_tries + 1);
+            T.phase = RB_COOL; T.phase_t0 = tick; T.cool_planned = 0; T.bust_was = 0;
             return (uint32_t)TD5_INPUT_BRAKE;
         }
         if (busted) return rb_hold(a);
@@ -757,9 +762,9 @@ static int rb_verdict(char *note, size_t n)
     snprintf(note, n, "%sblocks placed %ld cars %ld gap %ld rammed %ld detour %ld bust %ld despawned %ld hits %ld fails %ld%s%.40s",
              status == 2 ? "FAIL " : "", s.blocks_placed, s.block_cars, s.blocks_gap, s.blocks_rammed, s.blocks_detoured, s.blocks_bust,
              s.blocks_despawned, s.block_hits, s.block_fails, bad[0] ? ": " : "", bad);
-    TD5_LOG_I(LOG_TAG, "[ROAMCOPS] ROADBLOCK VERDICT %s: %s | pursuits %ld busts %ld fines $%ld max heat %d | spawns %ld despawns %ld | "
+    TD5_LOG_I(LOG_TAG, "[ROAMCOPS] ROADBLOCK VERDICT %s: %s | pursuits %ld busts %ld max heat %d | spawns %ld despawns %ld | "
               "stuck %ld off ticks %ld events %ld | player vmax %.0f km/h",
-              status == 2 ? "FAIL" : "PASS", note, s.pursuits, s.busts, s.fines, s.max_heat, s.spawns, s.despawns, s.stuck_episodes,
+              status == 2 ? "FAIL" : "PASS", note, s.pursuits, s.busts, s.max_heat, s.spawns, s.despawns, s.stuck_episodes,
               s.off_ticks, s.off_events, T.kmh_max);
     return status;
 }

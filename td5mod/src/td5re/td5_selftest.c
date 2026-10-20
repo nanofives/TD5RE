@@ -69,6 +69,7 @@
 #include "td5_roam_traffic.h" /* [roam F8] `roam-traffic` rows: ambient traffic verdict */
 #include "td5_roam_ram_test.h"  /* [roam F8e] `roam-ram` row: ram parked traffic at 20..90 km/h */
 #include "td5_roam_cops.h"    /* [roam F10] `roam-cops` rows: pursuit / escape / bust drive */
+#include "td5_police.h"       /* [round H HH] `police` rows: the pursuit layer on a stock track */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
@@ -228,6 +229,11 @@ typedef struct {
      *   8 = [F8] TRAFFIC SOAK, smoke: the same for 90 s
      *   9 = [F8] SPRINT + 5 AI + traffic HIGH, smoke route: the sprint still finishes, traffic on the road */
     int roam;
+    /* [round H HH] POLICE PURSUIT rows on a stock track (td5_police_test.c): 0 = not; slot 0 a HUMAN, lane assist
+     * steers, the test's THROTTLE / BRAKE bits drive. 1 = smoke (low traffic), 2 = full (more traffic, 2 AI):
+     * pursuit (pass a planted cop at speed), heat 3 -> roadblock ahead, escape (pursuers held back), a second
+     * pursuit -> stop -> BUSTED 3 s hold -> released, drives off. */
+    int police;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -315,6 +321,14 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=14, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [round H HH] smoke tier: free roam's police in a normal race (Moscow, POLICE on, low traffic, solo):
+     * pursuit, heat 3 + roadblock, escape, bust + release. FF 4: a human car at 265 km/h moves ~20 m per frame at
+     * the suite's 8x, so one 12-tick frame trips the invariant's 8000-unit jump WARN with no teleport at all
+     * (td5_police_test.c logs any single-tick move over 6 m: none) */
+    { .name="police-smoke",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=1, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .police=1, .ff=4, .depth=ST_DEPTH_ROAM_SPRINT },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
@@ -483,6 +497,11 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=17, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [round H HH] full suite: the police drive with more traffic and 2 AI racers on Moscow */
+    { .name="police",                .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=3, .opponents=2, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .police=2, .ff=4, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [roam F9b] out of the casco: Plaza Moreno -> Diagonal 74 -> Camino Parque Centenario at Gonnet (~8 km, solo, free
      * roam): the region planner maps the route (tiles built on the stream worker when missing), the drive crosses
      * world-origin rebases; 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units, 0 pinches / rescues /
@@ -516,7 +535,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 11  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-traffic-smoke + roam-cops-smoke */
+#define ST_SMOKE_RACES 12  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-traffic-smoke + roam-cops-smoke + police-smoke */
 
 typedef struct {
     const char *name;
@@ -794,6 +813,7 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.auto_throttle     = s_base.auto_throttle;
     st_drive_disarm();                                  /* [R1026 K] human-drive row knobs */
     st_roam_disarm();                                   /* [roam F2-D] drop an armed / running roam session */
+    td5_police_test_disarm();                           /* [round H HH] */
     g_td5.ini.trace_fast_forward = s_base.fast_forward;
     /* [NEW SUITE] Only-sometimes-set overrides must not leak into the next row. */
     g_td5.ini.start_span_offset  = 0;
@@ -2850,6 +2870,11 @@ static void st_tick_races(uint32_t now)
         st_apply_scenario(sc);
         if (sc->human_drive > 0) st_drive_arm(sc);   /* [R1026 K] after apply: it forces auto_throttle OFF */
         if (sc->roam > 0) st_roam_arm(sc);           /* [roam F2-D] after apply: auto_throttle OFF + roam session */
+        if (sc->police > 0) {                        /* [round H HH] slot 0 a human; the police test drives */
+            g_td5.ini.auto_throttle = 0;
+            g_td5.ini.player_is_ai  = 0;
+            td5_police_test_arm(sc->police == 2 ? TD5_POLICE_TEST_FULL : TD5_POLICE_TEST_SMOKE);
+        }
         g_td5.ini.auto_race = 1;      /* the MENU state consumes this next frame */
         s_race_launch_ms = now;
         s_sub = SS_RACE_WAIT_START;
@@ -2923,6 +2948,15 @@ static void st_tick_races(uint32_t now)
                         /* bounded append (snprintf here trips -Wformat-truncation) */
                         strncat(note, " ", sizeof(note) - strlen(note) - 1);
                         strncat(note, dn, sizeof(note) - strlen(note) - 1);
+                    }
+                }
+                /* [round H HH] the police drive's verdict (the counters live until the next race init) */
+                if (sc->police > 0) {
+                    char pn[120];
+                    const int ps = td5_police_test_verdict(pn, sizeof pn);
+                    if (ps > status || status == ST_PASS) {
+                        if (ps > status) status = ps;
+                        snprintf(note, sizeof(note), "%s", pn);
                     }
                 }
                 /* [roam F2-D] the roam drive's verdict (captured while the race was live) */
@@ -3053,7 +3087,8 @@ static void st_tick_races(uint32_t now)
             /* Natural finish (or knockout): the fade already returned us. */
             s_sub = SS_RACE_WAIT_MENU;
         } else if (!sc->natural_finish &&
-                   (tick - s_race_start_tick >= s_race_budget || (sc->roam > 0 && st_roam_done()))) {
+                   (tick - s_race_start_tick >= s_race_budget || (sc->roam > 0 && st_roam_done()) ||
+                    (sc->police > 0 && td5_police_test_done()))) {
             td5_game_selftest_end_race();
             s_step_deadline_ms = now + 30000u;
             s_sub = SS_RACE_WAIT_MENU;

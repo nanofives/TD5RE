@@ -13,6 +13,8 @@
  *   footpaths      mapped paths in pieces, cut off the road, merged into the street band
  *   pavement       [F4b] slab + kerb + back face + fence along every kerb of the drivable
  *                  surface, junction corners on the patch outline, medians and islands
+ *   lots          [HD] the city's open ground paved (render-lattice quads), ring plazas, the infill
+ *                  frontage lots on each block's building line
  *   assemble      the blob + record table + hash, the guard census over the bytes
  *   dev CLI        --RoamBuildScenery
  *
@@ -177,6 +179,7 @@ typedef struct {
     int       n;
     TD5_GeoBuilding *b;  TD5_GeoArea *a;  ScFoot *f;
     double   *id;
+    unsigned char *lot;     /* [HD] AREAS: SC_LC_* per record (the raw OSM kind) */
     int64_t  *own;          /* owner tile key per record (b, a)          */
     int      *order;        /* record indices sorted by (own, id, cx, cz) */
     double   *px, *pz;      /* ring / way points                          */
@@ -200,6 +203,12 @@ struct TD5_RoamScnSource {
     TD5_RoamScnBuildFn build;
     void     *build_u;
     char      canopy_path[512];
+    char      cover_path[512];    /* [HD] COVER.R8: the built-up test of the city lots */
+    int64_t  *casco;              /* [HD] the casco's tile keys, sorted (td5_roam_casco_tiles) */
+    int       ncasco;
+    int       lots_on, lot_cover, infill_on;   /* [HD] TD5RE_ROAM_LOTS / _LOT_COVER / TD5RE_ROAM_INFILL */
+    int       lot_page;                       /* [HD] TD5RE_ROAM_LOT_PAGE: the lots' host page */
+    int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
      * td5_roam_height_sample computes cell coordinates from the window origin, so a
      * shared LRU (whichever window happens to be resident) moves the low bits of a
@@ -238,7 +247,7 @@ static char *sc_slurp(const char *path, size_t *len)
 
 static void sc_cache_free(ScCache *c)
 {
-    free(c->b); free(c->a); free(c->f); free(c->id); free(c->own); free(c->order);
+    free(c->b); free(c->a); free(c->f); free(c->id); free(c->own); free(c->order); free(c->lot);
     free(c->px); free(c->pz);
     memset(c, 0, sizeof *c);
 }
@@ -298,6 +307,7 @@ static int sc_pool_push(ScCache *c, int *cap, const double *x, const double *z, 
 /* Parse one OSM cache tile of `layer` into slot c. 1 on success (an empty or
  * missing file is an empty slot, also 1: "nothing there" is a stable answer). */
 static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int ix, int iz);
+static int sc_lot_class(const char *kind);
 static int sc_cache_load(TD5_RoamScnSource *s, ScCache *c, int layer, int ix, int iz)
 {
     const uint32_t t0 = td5_plat_time_ms();
@@ -333,6 +343,7 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
     if (cap_rec > 0) {
         if (layer == SC_L_BLD) c->b = (TD5_GeoBuilding *)calloc((size_t)cap_rec, sizeof(TD5_GeoBuilding));
         if (layer == SC_L_AREA) c->a = (TD5_GeoArea *)calloc((size_t)cap_rec, sizeof(TD5_GeoArea));
+        if (layer == SC_L_AREA) c->lot = (unsigned char *)calloc((size_t)cap_rec, 1);
         if (layer == SC_L_FOOT) c->f = (ScFoot *)calloc((size_t)cap_rec, sizeof(ScFoot));
         c->id = (double *)calloc((size_t)cap_rec, sizeof(double));
         c->own = (int64_t *)calloc((size_t)cap_rec, sizeof(int64_t));
@@ -356,6 +367,10 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
             first = sc_pool_push(c, &cap_pt, rx, rz, n);
             if (first < 0) break;
             a->first = first;
+            if (c->lot) {
+                const cJSON *kv = cJSON_GetObjectItem(e, "kind");
+                c->lot[c->n] = (unsigned char)sc_lot_class((kv && cJSON_IsString(kv)) ? kv->valuestring : NULL);
+            }
             roam_grid_tile_of(&s->grid, a->cx, a->cz, &tx, &tz);
         } else {
             const cJSON *pts = cJSON_GetObjectItem(e, "points"), *p, *w, *v;
@@ -563,6 +578,11 @@ typedef struct {
     int     nmesh, cap;
 } ScSb;
 
+/* [HD] what a lot under an OSM polygon becomes (sc_lot_class), and a polygon the lots / infill ask about (place frame) */
+enum { SC_LC_BUILD = 0, SC_LC_GREEN = 1, SC_LC_OPEN = 2 };
+typedef struct ScLotPoly { const double *px, *pz; int n, cls; double x0, z0, x1, z1; } ScLotPoly;
+typedef struct InfRec { double x[TD5_GEOB_RING_MAX], z[TD5_GEOB_RING_MAX]; int n; double x0, z0, x1, z1; } InfRec;
+
 struct TG_TileCtx {
     const RoamGrid *grid;
     int      tx, tz;
@@ -583,6 +603,13 @@ struct TG_TileCtx {
     TD5_RoamHeight *hc;
     GrRaster canopy;
     int      canopy_ok;
+    GrRaster cover;             /* [HD] COVER.R8 window of the tile (lots) */
+    int      cover_ok;
+    ScLotPoly *lotp;            /* [HD] the AREAS polygons that take no infill / keep their green (sc_lot_polys) */
+    int      nlotp;             /*      + the ring plazas (pv_rings), whose points live in ringpool       */
+    double  *ringpool;
+    InfRec  *infr;              /* [HD] the infill lots accepted so far (any owner): no pavement fence in front of them */
+    int      ninfr, cap_infr;
     double   ground_last;
     TD5_RoamGfix gf;            /* [G4b] how far the drawn ground is lowered under the road (render clamp) */
     ScSb     sb[TD5_ROAM_SCN_NSB];
@@ -600,6 +627,7 @@ struct TG_TileCtx {
     /* [F4c] furniture: first mesh of each sub-block that is furniture (meshes from there on are
      * exempt from the F4a census, which judges them with its own overhead-aware one), and the lanterns */
     int      furn_first[TD5_ROAM_SCN_NSB];
+    int      lot_first[TD5_ROAM_SCN_NSB];   /* [HD] first mesh of each sub-block that is a city lot (ground: no footprint census) */
     float   *lamp;  uint32_t nlamp;
 };
 
@@ -627,12 +655,16 @@ static void sc_ctx_reset(TG_TileCtx *c)
     c->skip_lm = 0;
     c->nlt = 0;
     c->npvq = 0;
+    c->ninfr = 0;
     free(c->lamp); c->lamp = NULL; c->nlamp = 0;
     if (c->canopy.data) free(c->canopy.data);
     memset(&c->canopy, 0, sizeof c->canopy);
     c->canopy_ok = 0;
+    if (c->cover.data) free(c->cover.data);
+    memset(&c->cover, 0, sizeof c->cover);
+    c->cover_ok = 0;
     td5_roam_gfix_free(&c->gf);
-    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { c->sb[k].blk.len = 0; c->sb[k].blk.oom = 0; c->sb[k].nmesh = 0; c->furn_first[k] = 0x7FFFFFFF; }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { c->sb[k].blk.len = 0; c->sb[k].blk.oom = 0; c->sb[k].nmesh = 0; c->furn_first[k] = 0x7FFFFFFF; c->lot_first[k] = 0x7FFFFFFF; }
     memset(&c->st, 0, sizeof c->st);
     memset(&c->bst, 0, sizeof c->bst);
 }
@@ -645,6 +677,7 @@ static void sc_ctx_free(TG_TileCtx *c)
     free(c->prim); free(c->seg); free(c->edge);
     free(c->lx); free(c->lz); free(c->ly);
     free(c->pvq);
+    free(c->infr);
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { tg_buf_free(&c->sb[k].blk); free(c->sb[k].moff); }
     free(c);
 }
@@ -2194,6 +2227,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 
 #define PV_WF_PRIVATE   0x1u         /* access = private | no                            */
 #define PV_WF_NOWALK    0x2u         /* service = driveway | alley | parking_aisle | drive-through */
+#define PV_WF_RING      0x4u         /* [HD] junction = roundabout | circular: its inner kerb loop is a plaza */
 
 /* vertex flags */
 #define PV_VF_DECK      0x01u
@@ -2360,6 +2394,11 @@ static void pv_file_load(TD5_RoamScnSource *s, PvFile *f, int ix, int iz)
         if (svc && (!strcmp(svc, "driveway") || !strcmp(svc, "alley") || !strcmp(svc, "parking_aisle") ||
                     !strcmp(svc, "drive-through"))) w->flags |= PV_WF_NOWALK;
         w->name_h = pv_name_hash(pv_str(e, "name"));
+        {
+            const char *jn = pv_str(e, "junction");
+            if (cJSON_IsTrue(cJSON_GetObjectItem(e, "roundabout")) ||
+                (jn && (!strcmp(jn, "roundabout") || !strcmp(jn, "circular")))) w->flags |= PV_WF_RING;
+        }
         w->first = f->npt; w->count = np;
         f->npt += np;
         f->n++;
@@ -2781,7 +2820,7 @@ static int pv_offset_chain(PvChain *ch)
 
 /* ---- buildings for the facade clip and the fence ---- */
 
-typedef struct { const double *px, *pz; int n; double x0, z0, x1, z1; } PvRing;   /* place frame */
+typedef struct { const double *px, *pz; int n; double x0, z0, x1, z1; int lm; } PvRing;   /* place frame; lm: [HD] a landmark */
 typedef struct {
     PvRing *r; int nr;
     int    *start, *item;            /* CSR over a 64 m grid of the ctx box */
@@ -2810,6 +2849,7 @@ static int pv_bld_build(TG_TileCtx *c, ScCache **bc, int nbc, PvBld *pb)
                     if (!sc_grow((void **)&pb->r, &cap, pb->nr + 1, sizeof(PvRing))) return 0;
                     r = &pb->r[pb->nr++];
                     r->px = &bc[l]->px[gb->first]; r->pz = &bc[l]->pz[gb->first]; r->n = gb->n;
+                    r->lm = gb->landmark;
                     r->x0 = r->x1 = r->px[0]; r->z0 = r->z1 = r->pz[0];
                     for (k = 1; k < r->n; k++) {
                         if (r->px[k] < r->x0) r->x0 = r->px[k];
@@ -2886,6 +2926,8 @@ static int pv_in_green(const TG_TileCtx *c, const ScArea *ar, int nar, double x,
 }
 
 /* ---- emission ---- */
+
+static int inf_in_lot(const TG_TileCtx *c, double x, double z);   /* [HD] SECTION lots */
 
 typedef struct {
     TD5_RoamScnSource *s;
@@ -3066,7 +3108,7 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
             const double ex = oz[1] - oz[0], ez = -(ox[1] - ox[0]), el = hypot(ex, ez);
             const double px2 = mx + ex / el * PV_FENCE_PROBE, pz2 = mz + ez / el * PV_FENCE_PROBE;
             fence = !pv_in_building(c, e->bld, px2, pz2) && !pv_in_building(c, e->bld, mx, mz) &&
-                    !pv_in_green(c, e->ar, e->nar, px2, pz2);
+                    !pv_in_green(c, e->ar, e->nar, px2, pz2) && !inf_in_lot(c, px2, pz2);
         }
         if (fence) {
             x[0] = ox[0]; z[0] = oz[0]; y[0] = yo[a];
@@ -3099,6 +3141,8 @@ static int pv_mergeable(const PvChain *ch, const double *kx, const double *kz, c
     if (fabs(yo[M] - (yo[A] + (yo[Bv] - yo[A]) * t)) > 2.0 * PV_MERGE_TOL) return 0;
     return 1;
 }
+
+static int pv_infill(PvEmit *e, const PvChain *ch);   /* [HD] SECTION lots, after the city lots */
 
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 {
@@ -3262,6 +3306,8 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
         kz[v] = ch.pz[v] + ch.uz[v] * PV_KERB_IN * ch.mf[v];
     }
     pv_heights(e, &ch, yo, gr);
+    /* [HD] this block's frontage lots, before its pieces (a fence never stands in front of one) */
+    if (!pv_infill(e, &ch)) { ok = 0; goto done; }
     /* the owned pieces, straight runs merged */
     for (k = 0; k < m;) {
         const PvB *b = &B[seq[k]];
@@ -3287,6 +3333,75 @@ done:
     return ok;
 }
 
+/* [HD] Every closed kerb loop of the 3x3 that runs (by RIB length, PV_RING_SHARE) along roundabout / circular ways
+ * with the road outside it: the island of a ring, a plaza mapped only as its ring road (Plaza Italia). Its kerb
+ * polygon joins c->lotp as GREEN, so its ground keeps the lawn and no infill lot stands in it. */
+#define PV_RING_SHARE 0.6
+static int pv_rings(TG_TileCtx *c, PvB *B, int nb)
+{
+    unsigned char *seen = (unsigned char *)calloc((size_t)(nb > 0 ? nb : 1), 1);
+    int *seq = NULL, cap = 0, i, k, ok = 0, npts = 0, cap_pts = 0, nr = 0;
+    double *pts = NULL;
+    int *rf = NULL, *rn = NULL, cap_rf = 0, cap_rn = 0;
+    if (!seen) return 0;
+    for (i = 0; i < nb; i++) {
+        int m = 0, closed = 0;
+        double rib = 0.0, ring = 0.0;
+        if (seen[i]) continue;
+        for (k = i; k >= 0 && m < PV_CHAIN_MAX && !seen[k]; k = B[k].next) {
+            if (!sc_grow((void **)&seq, &cap, m + 1, sizeof(int))) goto out;
+            seq[m++] = k;
+            seen[k] = 1;
+            if (B[k].next == i) { closed = 1; break; }
+        }
+        if (!closed || m < 3) continue;
+        for (k = 0; k < m; k++) {
+            const PvB *b = &B[seq[k]];
+            if (b->kind != PV_K_RIB || !b->way) continue;
+            rib += b->len;
+            if (b->way->flags & PV_WF_RING) ring += b->len;
+        }
+        if (!(rib > 0.0) || ring < PV_RING_SHARE * rib) continue;
+        if (!sc_grow((void **)&pts, &cap_pts, (npts + m) * 2, sizeof(double)) ||
+            !sc_grow((void **)&rf, &cap_rf, nr + 1, sizeof(int)) || !sc_grow((void **)&rn, &cap_rn, nr + 1, sizeof(int))) goto out;
+        for (k = 0; k < m; k++) {
+            pts[(npts + k) * 2 + 0] = B[seq[k]].ax + (double)c->org_x;
+            pts[(npts + k) * 2 + 1] = B[seq[k]].az + (double)c->org_z;
+        }
+        rf[nr] = npts; rn[nr] = m; nr++;
+        npts += m;
+    }
+    /* de-interleave into the ctx's own pool, then the GREEN polygons (the road on the left: negative area) */
+    if (nr > 0) {
+        double *pool = (double *)malloc((size_t)npts * 2u * sizeof(double));
+        int cap_p = c->nlotp;
+        if (!pool) goto out;
+        for (k = 0; k < npts; k++) { pool[k] = pts[k * 2]; pool[npts + k] = pts[k * 2 + 1]; }
+        free(c->ringpool);
+        c->ringpool = pool;
+        for (i = 0; i < nr; i++) {
+            ScLotPoly q;
+            int j;
+            q.px = pool + rf[i]; q.pz = pool + npts + rf[i]; q.n = rn[i]; q.cls = SC_LC_GREEN;
+            if (!(td5_geob_ring_area(q.px, q.pz, q.n) < 0.0)) continue;
+            q.x0 = q.x1 = q.px[0]; q.z0 = q.z1 = q.pz[0];
+            for (j = 1; j < q.n; j++) {
+                if (q.px[j] < q.x0) q.x0 = q.px[j];
+                if (q.px[j] > q.x1) q.x1 = q.px[j];
+                if (q.pz[j] < q.z0) q.z0 = q.pz[j];
+                if (q.pz[j] > q.z1) q.z1 = q.pz[j];
+            }
+            if (!sc_grow((void **)&c->lotp, &cap_p, c->nlotp + 1, sizeof(ScLotPoly))) goto out;
+            c->lotp[c->nlotp++] = q;
+            c->st.lot_rings++;
+        }
+    }
+    ok = 1;
+out:
+    free(seen); free(seq); free(pts); free(rf); free(rn);
+    return ok;
+}
+
 static int sc_emit_pavement(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc, const ScArea *ar, int nar)
 {
     const uint32_t t0 = td5_plat_time_ms();
@@ -3309,6 +3424,7 @@ static int sc_emit_pavement(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, i
     ways = pv_window(s, x0 - S, z0 - S, x1 + S, z1 + S, &nways);
     if (!pv_bld_build(c, bc, nbc, &bld)) goto out;
     if (!pv_gather(s, c, ways, nways, &B, &nb)) goto out;
+    if (!pv_rings(c, B, nb)) goto out;       /* [HD] ring plazas: green, no infill (before any chain is emitted) */
     memset(&e, 0, sizeof e);
     e.s = s; e.c = c; e.ways = ways; e.nways = nways; e.bld = &bld; e.ar = ar; e.nar = nar;
     e.bat = (ScFpBatch *)calloc((size_t)TD5_ROAM_SCN_NSB * PV_NB, sizeof(ScFpBatch));
@@ -3332,6 +3448,739 @@ out:
     free(ways);
     pv_bld_free(&bld);
     c->st.ms_pv = td5_plat_time_ms() - t0;
+    return ok;
+}
+
+/* ============================================================================
+ * SECTION: lots [HD] (the city's open ground paved)
+ *
+ * WHY. Mariano, 2026-10-19: "you need to fill much more the green spaces that are not parks in the city, it's
+ * mostly concrete and buildings". The roam ground is one lawn page everywhere (td5_roam_render.c cmd 1), so every
+ * backyard, every gap between two footprints and every vacant lot of the casco read as a park.
+ *
+ * LOTS. Each ground cell of the tile, on the RENDER's own lattice (td5_roam_render.c rr_ground_point: same
+ * corners, TD5RE_ROAM_RENDER_CELL_M; same heights: the raster minus the G5 lowering, minus the ground drop), is
+ * laid again SC_LOT_LIFT over the drawn ground on a concrete page: ONE quad in the drawn ground's own vertex
+ * order (the pipeline splits every quad 0 1 2 / 0 2 3, so the two faces are parallel and never z-fight) or, where
+ * the cell meets the drivable surface, its two fan triangles refined SC_LOT_DEPTH times, the pieces on the road
+ * dropped, every new height interpolated in its parent's plane (still parallel). Under the road the drawn ground
+ * is held at least the drop down, so a lot never shows through the asphalt; the guard keeps it off anyway.
+ *
+ * WHICH CELLS. CITY = the tile is one of the casco's (td5_roam_casco_tiles), or (TD5RE_ROAM_LOT_COVER, outside
+ * it) at least SC_LOT_BUILT of the cell's 4 x 4 COVER samples are built-up. A city cell is paved unless most of
+ * its 5 samples (centre + 4 quarter points) lie in an OSM GREEN (sc_lot_class: park, grass, garden, pitch, forest,
+ * cemetery, ...) or its centre is water; the render's bore holes are left alone. A plaza lawn stands SC_GEOP_LIFT
+ * over the raster, far above a lot, so a park keeps its lawn over a paved border cell.
+ *
+ * CENSUS (st.lot_*). The tile's cells are classified with the same refinement whether or not they are paved, so
+ * lot_lawn_m2 (non-road ground, no OSM green, drawn as lawn) is comparable before / after (TD5RE_ROAM_LOTS=0).
+ * ========================================================================== */
+
+#define SC_LOT_LIFT    30.0          /* units over the DRAWN ground (7 cm)                       */
+#define SC_LOT_DEPTH   3             /* road-cut refinement: a 16 m cell's pieces down to 2 m      */
+#define SC_LOT_BUILT   10            /* of 16 COVER samples built-up: a city cell outside the casco */
+#define SC_LOT_UV      (1.0 / 3440.0)  /* one repeat per 8 m                                       */
+#define SC_LOT_CHUNK   64            /* primitives per mesh                                        */
+
+/* What a lot under an AREAS polygon becomes, by its raw OSM kind: GREEN keeps the lawn (and takes no infill),
+ * OPEN is paved but takes no infill (a car park, a school yard, a rail yard), BUILD is the city fabric. */
+static int sc_lot_class(const char *k)
+{
+    static const char *const green[] = {
+        "park", "grass", "grassland", "garden", "village_green", "common", "recreation_ground", "golf_course",
+        "meadow", "greenfield", "forest", "wood", "orchard", "farmland", "plant_nursery", "wetland", "pitch",
+        "playground", "cemetery", "grave_yard", "heath", "scrub", "allotments", "nature_reserve", "dog_park",
+        "vineyard", "flowerbed", "zoo", "camp_site", "picnic_site", NULL };
+    static const char *const open[] = {
+        "parking", "school", "university", "college", "kindergarten", "hospital", "sports_centre", "stadium",
+        "railway", "construction", "bleachers", "track", "prison", "religious", "education", "swimming_pool",
+        "marketplace", "quarry", "brownfield", "greenhouse_horticulture", "farmyard", "sand", "landfill",
+        "military", "depot", "garages", "fuel", "bus_station", NULL };
+    int i;
+    if (!k || !k[0]) return SC_LC_BUILD;
+    for (i = 0; green[i]; i++) if (!strcmp(k, green[i])) return SC_LC_GREEN;
+    for (i = 0; open[i]; i++) if (!strcmp(k, open[i])) return SC_LC_OPEN;
+    return SC_LC_BUILD;
+}
+
+
+/* every AREAS polygon of class != BUILD whose box meets [x0,x1]x[z0,z1] (place frame), from every pinned cache
+ * slot (a slot's extent covers its whole records, so this is every polygon that reaches the box) */
+static int sc_lot_polys(ScCache **ac, int nac, double x0, double z0, double x1, double z1, ScLotPoly **out, int *nout)
+{
+    ScLotPoly *P = NULL;
+    int n = 0, cap = 0, l, r, k;
+    *out = NULL; *nout = 0;
+    for (l = 0; l < nac; l++) {
+        const ScCache *c = ac[l];
+        if (!c->lot) continue;
+        for (r = 0; r < c->n; r++) {
+            const TD5_GeoArea *a = &c->a[r];
+            ScLotPoly q;
+            if (c->lot[r] == SC_LC_BUILD || a->n < 3) continue;
+            if (a->cx + a->radius < x0 || a->cx - a->radius > x1 || a->cz + a->radius < z0 || a->cz - a->radius > z1) continue;
+            q.px = &c->px[a->first]; q.pz = &c->pz[a->first]; q.n = a->n; q.cls = c->lot[r];
+            q.x0 = q.x1 = q.px[0]; q.z0 = q.z1 = q.pz[0];
+            for (k = 1; k < a->n; k++) {
+                if (q.px[k] < q.x0) q.x0 = q.px[k];
+                if (q.px[k] > q.x1) q.x1 = q.px[k];
+                if (q.pz[k] < q.z0) q.z0 = q.pz[k];
+                if (q.pz[k] > q.z1) q.z1 = q.pz[k];
+            }
+            if (!sc_grow((void **)&P, &cap, n + 1, sizeof *P)) { free(P); return 0; }
+            P[n++] = q;
+        }
+    }
+    *out = P; *nout = n;
+    return 1;
+}
+
+/* the strongest class of the polygons over a place-frame point: GREEN over OPEN over BUILD */
+static int sc_lot_class_at(const ScLotPoly *P, int n, double x, double z)
+{
+    int i, best = SC_LC_BUILD;
+    for (i = 0; i < n; i++) {
+        if (x < P[i].x0 || x > P[i].x1 || z < P[i].z0 || z > P[i].z1) continue;
+        if (best == SC_LC_GREEN || (best == SC_LC_OPEN && P[i].cls == SC_LC_OPEN)) continue;
+        if (td5_geob_point_in_ring(P[i].px, P[i].pz, P[i].n, x, z)) best = P[i].cls;
+    }
+    return best;
+}
+
+/* COVER class at a tile-local point (TD5_GEO_COVER_*), NONE without a window */
+static int sc_cover_at(const TG_TileCtx *c, double x, double z)
+{
+    const GrRaster *r = &c->cover;
+    double fx, fz;
+    int i, j;
+    if (!c->cover_ok || !r->data || r->w <= 0 || r->h <= 0) return TD5_GEO_COVER_NONE;
+    fx = (x + (double)c->org_x - r->origin_x) / r->cell;
+    fz = (z + (double)c->org_z - r->origin_z) / r->cell;
+    i = (int)floor(fx); j = (int)floor(fz);
+    if (i < 0 || j < 0 || i >= r->w || j >= r->h) return TD5_GEO_COVER_NONE;
+    return ((const unsigned char *)r->data)[(size_t)j * (size_t)r->w + (size_t)i];
+}
+
+static int sc_casco_has(const TD5_RoamScnSource *s, int tx, int tz)
+{
+    const int64_t k = sc_tkey(tx, tz);
+    int a = 0, b = s->ncasco;
+    while (a < b) { const int m = (a + b) / 2; if (s->casco[m] < k) a = m + 1; else b = m; }
+    return a < s->ncasco && s->casco[a] == k;
+}
+
+/* one sub-block's pending lot quads, x y z per corner */
+typedef struct { double *q; int nq, cq; } ScLotSb;
+
+static int sc_lot_put(double **a, int *n, int *cap, const double *p, int np)
+{
+    if (!sc_grow((void **)a, cap, (*n + 1) * np * 3, sizeof(double))) return 0;
+    memcpy(*a + (size_t)*n * (size_t)np * 3u, p, (size_t)np * 3u * sizeof(double));
+    (*n)++;
+    return 1;
+}
+
+/* The non-road area (m2, added to *area_ok) of triangle p (x y z x3): whole off the road, else split `lvl` more
+ * times and the pieces still on it left out (census only: a paved cell is laid whole, under the road too) */
+static int sc_lot_split(TG_TileCtx *c, const double *p, int lvl, double *area_ok)
+{
+    const double x[3] = { p[0], p[3], p[6] }, z[3] = { p[2], p[5], p[8] };
+    if (!sc_on_road(c, x, z, 3, NULL)) {
+        *area_ok += fabs(sc_cross(x[0], z[0], x[1], z[1], x[2], z[2])) * 0.5 / (SC_UPM * SC_UPM);
+        return 1;
+    }
+    if (lvl <= 0) return 1;
+    {
+        double m[3][3], q[4][9];
+        int k, e;
+        for (e = 0; e < 3; e++) for (k = 0; k < 3; k++) m[e][k] = 0.5 * (p[e * 3 + k] + p[((e + 1) % 3) * 3 + k]);
+        memcpy(q[0] + 0, p + 0, sizeof m[0]); memcpy(q[0] + 3, m[0], sizeof m[0]); memcpy(q[0] + 6, m[2], sizeof m[0]);
+        memcpy(q[1] + 0, m[0], sizeof m[0]); memcpy(q[1] + 3, p + 3, sizeof m[0]); memcpy(q[1] + 6, m[1], sizeof m[0]);
+        memcpy(q[2] + 0, m[2], sizeof m[0]); memcpy(q[2] + 3, m[1], sizeof m[0]); memcpy(q[2] + 6, p + 6, sizeof m[0]);
+        memcpy(q[3] + 0, m[0], sizeof m[0]); memcpy(q[3] + 3, m[1], sizeof m[0]); memcpy(q[3] + 6, m[2], sizeof m[0]);
+        for (k = 0; k < 4; k++) if (!sc_lot_split(c, q[k], lvl - 1, area_ok)) return 0;
+    }
+    return 1;
+}
+
+static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page)
+{
+    const double rep = 1.0 / SC_LOT_UV;
+    const double uox = fmod((double)c->org_x, rep), uoz = fmod((double)c->org_z, rep);
+    int qi = 0;
+    while (qi < L->nq) {
+        const int nq = (L->nq - qi < SC_LOT_CHUNK) ? L->nq - qi : SC_LOT_CHUNK;
+        float v[SC_LOT_CHUNK * 4 * 5];
+        unsigned int light[SC_LOT_CHUNK * 4];
+        unsigned short cmd[3];
+        ScSb *b = sc_sb(c, sbi, 1);
+        int i;
+        if (!b) return 0;
+        for (i = 0; i < nq * 4; i++) {
+            const double *P = &L->q[(size_t)(qi * 4 + i) * 3u];
+            v[i * 5 + 0] = (float)P[0]; v[i * 5 + 1] = (float)P[1]; v[i * 5 + 2] = (float)P[2];
+            v[i * 5 + 3] = (float)((P[0] + uox) * SC_LOT_UV); v[i * 5 + 4] = (float)((P[2] + uoz) * SC_LOT_UV);
+            light[i] = 0xFFFFFFFFu;
+        }
+        cmd[0] = (unsigned short)page; cmd[1] = 0; cmd[2] = (unsigned short)nq;
+        b->moff[b->nmesh++] = b->blk.len;
+        if (!tg_write_prefab_mesh(&b->blk, v, light, nq * 4, cmd, 1, 0, 0.0, 0.0, 0.0, 1.0, 0.0) || b->blk.oom) return 0;
+        qi += nq;
+    }
+    return 1;
+}
+
+static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
+{
+    const int cell_m = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
+    const int G = 256 / ((64 % cell_m) ? 16 : cell_m), per = G / TD5_ROAM_SCN_SUB, W = G + 1;
+    const double S = (double)c->grid->tile;
+    const double drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0);
+    const int casco = sc_casco_has(s, c->tx, c->tz);
+    ScLotSb L[TD5_ROAM_SCN_NSB];
+    const ScLotPoly *P = NULL;
+    double *px = NULL, *pz = NULL, *py = NULL, x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300;
+    unsigned char *hole = NULL;
+    int nP = 0, i, j, k, ok = 0;
+    uint32_t e, q;
+    if (!c->hc) return 1;
+    memset(L, 0, sizeof L);
+    px = (double *)malloc((size_t)W * W * sizeof(double));
+    pz = (double *)malloc((size_t)W * W * sizeof(double));
+    py = (double *)malloc((size_t)W * W * sizeof(double));
+    hole = (unsigned char *)calloc((size_t)G * G, 1);
+    if (!px || !pz || !py || !hole) goto out;
+    /* the render's lattice points (rr_ground_point), tile-local, and their drawn heights */
+    for (j = 0; j <= G; j++) for (i = 0; i <= G; i++) {
+        const double u = ((double)c->tx + (double)i / (double)G) * S, v = ((double)c->tz + (double)j / (double)G) * S;
+        const double X = c->grid->ox + c->grid->c * u - c->grid->s * v, Z = c->grid->oz + c->grid->s * u + c->grid->c * v;
+        px[j * W + i] = X - (double)c->org_x; pz[j * W + i] = Z - (double)c->org_z;
+        py[j * W + i] = sc_ground(c, px[j * W + i], pz[j * W + i]) - drop + SC_LOT_LIFT;
+        if (X < x0) x0 = X;
+        if (X > x1) x1 = X;
+        if (Z < z0) z0 = Z;
+        if (Z > z1) z1 = Z;
+    }
+    /* the render's bore holes (rr_ground_build): every cell round a tunnel span centre */
+    for (e = 0; e < self->nedge; e++) {
+        const RoamEdgeRec *er = &self->edge[e];
+        if (!(er->flags & ROAM_EF_BORE)) continue;
+        for (q = 0; q < er->span_count; q++) {
+            const uint32_t si = (uint32_t)er->span_first + q;
+            const TD5_StripSpan *sp;
+            uint32_t Lv, Rv;
+            int n, a, b, da, db;
+            double u, v, X, Z;
+            if (si >= self->nspan) continue;
+            sp = &self->span[si];
+            Lv = sp->left_vertex_index; Rv = sp->right_vertex_index; n = (int)(sp->pad_02[1] & 0x0Fu);
+            if (n < 1 || n >= 16 || Lv + (uint32_t)n >= self->nvert || Rv + (uint32_t)n >= self->nvert) continue;
+            X = (double)self->org_x + (double)sp->origin_x + 0.5 * ((double)self->vert[Lv].x + (double)self->vert[Rv + (uint32_t)n].x);
+            Z = (double)self->org_z + (double)sp->origin_z + 0.5 * ((double)self->vert[Lv].z + (double)self->vert[Rv + (uint32_t)n].z);
+            roam_grid_uv(c->grid, X, Z, &u, &v);
+            a = (int)floor((u / S - (double)c->tx) * (double)G);
+            b = (int)floor((v / S - (double)c->tz) * (double)G);
+            for (db = -1; db <= 1; db++) for (da = -1; da <= 1; da++)
+                if (a + da >= 0 && a + da < G && b + db >= 0 && b + db < G) hole[(b + db) * G + a + da] = 1;
+        }
+    }
+    (void)ac; (void)nac; (void)x0; (void)z0; (void)x1; (void)z1;
+    P = c->lotp; nP = c->nlotp;
+    for (j = 0; j < G; j++) for (i = 0; i < G; i++) {
+        static const int di[4] = { 0, 1, 1, 0 }, dj[4] = { 0, 0, 1, 1 };
+        static const double fq[5][2] = { { 0.5, 0.5 }, { 0.25, 0.25 }, { 0.75, 0.25 }, { 0.75, 0.75 }, { 0.25, 0.75 } };
+        double cx = 0.0, cz = 0.0, cell[12], area = 0.0;
+        int city = casco, green, pave, ng = 0;
+        const int sbi = (j / per) * TD5_ROAM_SCN_SUB + (i / per);
+        for (k = 0; k < 4; k++) {
+            const int pi = (j + dj[k]) * W + i + di[k];
+            cell[k * 3 + 0] = px[pi]; cell[k * 3 + 1] = py[pi]; cell[k * 3 + 2] = pz[pi];
+            cx += 0.25 * px[pi]; cz += 0.25 * pz[pi];
+        }
+        if (hole[j * G + i] || sc_cover_at(c, cx, cz) == TD5_GEO_COVER_WATER) { c->st.lot_skip++; continue; }
+        if (!city && s->lot_cover) {          /* built-up cover, 4 x 4 samples over the cell */
+            int a, b, built = 0;
+            for (b = 0; b < 4; b++) for (a = 0; a < 4; a++) {
+                const double fu = (a + 0.5) / 4.0, fv = (b + 0.5) / 4.0;
+                const double sx = cell[0] + (cell[3] - cell[0]) * fu + (cell[9] - cell[0]) * fv;
+                const double sz = cell[2] + (cell[5] - cell[2]) * fu + (cell[11] - cell[2]) * fv;
+                built += sc_cover_at(c, sx, sz) == TD5_GEO_COVER_BUILT;
+            }
+            city = built >= SC_LOT_BUILT;
+        }
+        for (k = 0; k < 5; k++) {             /* OSM green: most of centre + 4 quarter points */
+            const double sx = cell[0] + (cell[3] - cell[0]) * fq[k][0] + (cell[9] - cell[0]) * fq[k][1];
+            const double sz = cell[2] + (cell[5] - cell[2]) * fq[k][0] + (cell[11] - cell[2]) * fq[k][1];
+            ng += sc_lot_class_at(P, nP, sx + (double)c->org_x, sz + (double)c->org_z) == SC_LC_GREEN;
+        }
+        green = ng >= 3;
+        pave = s->lots_on && city && !green;
+        {
+            const double t0[9] = { cell[0], cell[1], cell[2], cell[3], cell[4], cell[5], cell[6], cell[7], cell[8] };
+            const double t1[9] = { cell[0], cell[1], cell[2], cell[6], cell[7], cell[8], cell[9], cell[10], cell[11] };
+            const double qx[4] = { cell[0], cell[3], cell[6], cell[9] }, qz[4] = { cell[2], cell[5], cell[8], cell[11] };
+            if (pave && !sc_lot_put(&L[sbi].q, &L[sbi].nq, &L[sbi].cq, cell, 4)) goto out;
+            if (!sc_on_road(c, qx, qz, 4, NULL)) area = fabs(td5_geob_ring_area(qx, qz, 4)) / (SC_UPM * SC_UPM);
+            else {
+                if (pave) c->st.lot_under_road++;
+                if (!sc_lot_split(c, t0, SC_LOT_DEPTH, &area) || !sc_lot_split(c, t1, SC_LOT_DEPTH, &area)) goto out;
+            }
+        }
+        if (green) { c->st.lot_green++; c->st.lot_green_m2 += area; }
+        else if (pave) { c->st.lot_cells++; c->st.lot_paved_m2 += area; }
+        else { if (!city) c->st.lot_rural++; c->st.lot_lawn_m2 += area; }
+    }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) if (!sc_lot_flush(c, k, &L[k], s->lot_page)) goto out;
+    ok = 1;
+out:
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) free(L[k].q);
+    free(px); free(pz); free(py); free(hole);
+    return ok;
+}
+
+/* ---- [HD] INFILL: frontage lots on the building line ----
+ *
+ * WHY. Mariano, 2026-10-19: the casco is "mostly concrete and buildings" (buildings to the block edge, the La Plata
+ * block fabric). The OSM / Overture footprints cover most of a block's frontage but leave gaps; the lots (SECTION
+ * lots) pave the gaps, this fills the frontage gaps with a built mass.
+ *
+ * WHERE. A CLOSED pavement chain with the road on its left is a block's kerb loop; its outer line (pv_offset_chain)
+ * is the block's building line. The line is cut into RUNS at its corners (a turn over INF_BREAK_DEG) and where it
+ * stops being a street front (an island, a deck, a bore, no pavement), and each run into LOTS at the world lattice
+ * lines (roam_grid_uv, INF_LOT_M apart along the run's dominant axis), so a lot is a pure function of the chain's
+ * geometry and comes out the same from every tile that sees the block. A lot reaches INF_DEPTH_MIN..MAX into the
+ * block (per-lot hash), never past INF_HALF of the block's own depth there; its back corners at a run end follow the
+ * corner's mitre, so the two lots of a block corner meet on the bisector instead of overlapping.
+ *
+ * REFUSED: a real footprint on its front (the frontage is taken; a lot whose back meets one is cut to the front
+ * half, else refused), the drivable surface, an OSM area that takes none (green or open, sc_lot_class), a landmark
+ * within INF_LM_CLEAR_M, ground that is not CITY (sc_emit_lots' rule), a lot too shallow, bent or self-crossing.
+ * OWNER: the tile holding the lot's front midpoint. The mass is the shared extrusion core with a synthetic flat-roof
+ * footprint: INF_LEVELS[hash] storeys of 3 m, a facade page by its hash.
+ */
+#define INF_LOT_M       10.0          /* lot frontage (lattice lines this far apart)    */
+#define INF_MIN_M       4.0           /* a piece shorter than this joins its neighbour  */
+#define INF_DEPTH_MIN   10.0
+#define INF_DEPTH_SPAN  9             /* depth = MIN + hash % SPAN metres               */
+#define INF_SHALLOW_M   5.0
+#define INF_HALF        0.48          /* of the block's depth in front of a lot          */
+#define INF_BREAK_DEG   25.0
+#define INF_MITRE_MAX   2.5
+#define INF_BLOCK_M2    400.0         /* a smaller loop is an island, not a block       */
+#define INF_LM_CLEAR_M  15.0
+#define INF_PTS         24            /* front points per lot                            */
+#define INF_SPLIT_MIN_M 3.0           /* a taken lot splits into halves no narrower      */
+#define INF_STOREY_W    2.5           /* metres of frontage per storey at most            */
+#define INF_FRONT_IN    65.0          /* units (15 cm): the front stands off the slab's back face */
+static const unsigned char k_inf_levels[16] = { 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 7 };
+
+static uint32_t inf_hash(double X, double Z)
+{
+    const int32_t q[2] = { (int32_t)floor(X / 43.0), (int32_t)floor(Z / 43.0) };   /* 10 cm, place frame */
+    uint32_t h = sc_fnv(2166136261u, q, sizeof q);
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return h;
+}
+
+/* nearest crossing of the ray (px,pz)+t(dx,dz), t > 0, with the ring O (n points), skipping segment `skip`; 1e300 = none */
+static double inf_ray(const double *ox, const double *oz, int n, int skip, double px, double pz, double dx, double dz)
+{
+    double best = 1e300;
+    int i;
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        const double ex = ox[j] - ox[i], ez = oz[j] - oz[i];
+        const double den = dx * ez - dz * ex;
+        double t, s;
+        if (i == skip || fabs(den) < 1e-9) continue;
+        t = ((ox[i] - px) * ez - (oz[i] - pz) * ex) / den;
+        s = ((ox[i] - px) * dz - (oz[i] - pz) * dx) / den;
+        if (t > 1.0 && s >= 0.0 && s <= 1.0 && t < best) best = t;
+    }
+    return best;
+}
+
+/* a real footprint overlaps the convex quad q (tile-local) */
+static int inf_quad_in_building(const TG_TileCtx *c, const PvBld *pb, const double *qx, const double *qz)
+{
+    double X[4], Z[4], x0, x1, z0, z1;
+    int k, a, b, a0, a1, b0, b1;
+    for (k = 0; k < 4; k++) { X[k] = qx[k] + (double)c->org_x; Z[k] = qz[k] + (double)c->org_z; }
+    x0 = x1 = X[0]; z0 = z1 = Z[0];
+    for (k = 1; k < 4; k++) { if (X[k] < x0) x0 = X[k]; if (X[k] > x1) x1 = X[k]; if (Z[k] < z0) z0 = Z[k]; if (Z[k] > z1) z1 = Z[k]; }
+    if (!pb->start) return 0;
+    a0 = (int)floor((x0 - pb->gx0) / pb->cell); a1 = (int)floor((x1 - pb->gx0) / pb->cell);
+    b0 = (int)floor((z0 - pb->gz0) / pb->cell); b1 = (int)floor((z1 - pb->gz0) / pb->cell);
+    if (a0 < 0) a0 = 0;
+    if (b0 < 0) b0 = 0;
+    if (a1 >= pb->gnx) a1 = pb->gnx - 1;
+    if (b1 >= pb->gnz) b1 = pb->gnz - 1;
+    for (b = b0; b <= b1; b++) for (a = a0; a <= a1; a++) {
+        const int cell = b * pb->gnx + a;
+        for (k = pb->start[cell]; k < pb->start[cell + 1]; k++) {
+            const PvRing *r = &pb->r[pb->item[k]];
+            if (r->x1 < x0 || r->x0 > x1 || r->z1 < z0 || r->z0 > z1) continue;
+            if (sc_poly_overlap(r->px, r->pz, r->n, X, Z, 4)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* a landmark footprint lies within d (units) of the place point */
+static int inf_near_landmark(const PvBld *pb, double X, double Z, double d)
+{
+    int i, k;
+    for (i = 0; i < pb->nr; i++) {
+        const PvRing *r = &pb->r[i];
+        if (!r->lm || r->x1 < X - d || r->x0 > X + d || r->z1 < Z - d || r->z0 > Z + d) continue;
+        for (k = 0; k < r->n; k++) if (hypot(r->px[k] - X, r->pz[k] - Z) <= d) return 1;
+        if (td5_geob_point_in_ring(r->px, r->pz, r->n, X, Z)) return 1;
+    }
+    return 0;
+}
+
+/* Extrude one accepted lot ring (tile-local, any winding, n points) as a flat-roof mass. */
+static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint32_t h, double area_units, double width)
+{
+    TG_TileCtx *c = e->c;
+    TD5_RoamScnSource *s = e->s;
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], cx = 0.0, cz = 0.0, r = 0.0, along = 0.0, lat = 0.0;
+    TD5_GeoBuilding gb;
+    ScBldU u;
+    TG_GeoBldEnv env;
+    ScSb *b;
+    int k, edge = -1, side = 1;
+    const int rev = td5_geob_ring_area(rx0, rz0, n) < 0.0;
+    for (k = 0; k < n; k++) { rx[k] = rev ? rx0[n - 1 - k] : rx0[k]; rz[k] = rev ? rz0[n - 1 - k] : rz0[k]; cx += rx[k]; cz += rz[k]; }
+    cx /= n; cz /= n;
+    for (k = 0; k < n; k++) { const double d = hypot(rx[k] - cx, rz[k] - cz); if (d > r) r = d; }
+    memset(&gb, 0, sizeof gb);
+    gb.n = n;
+    gb.cx = cx + (double)c->org_x; gb.cz = cz + (double)c->org_z;
+    gb.radius = r;
+    gb.levels = k_inf_levels[(h >> 8) & 15u];
+    {   /* a narrow front is a low house, not a pencil tower: at most one storey per INF_STOREY_W of frontage */
+        const int cap = (int)(width / (INF_STOREY_W * s->upm));
+        if (gb.levels > (cap > 1 ? cap : 1)) gb.levels = (unsigned short)(cap > 1 ? cap : 1);
+    }
+    gb.height = (double)gb.levels * 3.0 * s->upm;
+    gb.area_m2 = area_units / (s->upm * s->upm);
+    gb.id_hash = h;
+    gb.host_span = -1;
+    gb.hsrc = TD5_GEOB_HSRC_ESTIMATED;
+    gb.roof = TD5_GEOB_ROOF_NONE;
+    gb.fsrc = TD5_GEOB_FSRC_OVERTURE;
+    memset(&u, 0, sizeof u);
+    u.c = c;
+    u.host = roam_nearest_edge(c, cx, cz, SC_HOST_MAX_M * SC_UPM, &edge, &side, &along, &lat)
+          && roam_edge_frame(c, edge, side, along, &u.f);
+    u.side = side;
+    u.minout = u.host ? u.f.half_carriage + s->gap : 0.0;
+    u.gap = s->gap;
+    b = sc_sb(c, sc_sb_of(c, cx, cz), 4);
+    if (!b) return 0;
+    memset(&env, 0, sizeof env);
+    env.blk = &b->blk; env.moff = b->moff; env.nmesh = &b->nmesh; env.maxmesh = b->cap;
+    env.b = &k_biomes[0];
+    env.ground = sc_ground_u; env.u = &u;
+    env.have_ceiling = u.host;
+    env.ceiling_y = u.f.py + tg_city_kerb_h(env.b) + 400.0;
+    env.have_pf_ceiling = u.host;
+    env.pf_ceiling_y = env.ceiling_y;
+    env.upm = s->upm;
+    env.storey = 3.0 * s->upm;
+    env.corner_ok = sc_bld_corner_ok;
+    env.rect_on_road = sc_bld_rect_on_road;
+    env.apron_ok = sc_bld_apron_ok;
+    env.apron_quad_ok = sc_bld_apron_quad_ok;
+    env.si = -1;
+    env.st = &c->bst;
+    {
+        const long emitted0 = c->bst.emitted;
+        if (!tg_geo_emit_building_core(&env, &gb, rx, rz, n, cx, cz, 0.0) || b->blk.oom) return 0;
+        if (c->bst.emitted > emitted0) { c->st.inf_emitted++; c->st.inf_m2 += gb.area_m2; }
+    }
+    return 1;
+}
+
+/* one block's building line, as the infill reads it (tile-local) */
+typedef struct {
+    int     n;
+    double *ox, *oz;                 /* building-line vertices                          */
+    double *nx, *nz;                 /* per segment i -> i+1: unit normal into the block */
+    double *bx, *bz, *bm;            /* per vertex: unit bisector, mitre factor          */
+    double *arc;                     /* the current run: arc length at its k-th vertex   */
+    int     r0, cnt;                 /* the current run: first vertex, segment count     */
+} InfLine;
+
+/* the lot [a0, a1] (arc length along the current run) at depth D: front points, their back points, the front
+ * midpoint and the segment holding it; 0 when degenerate */
+static int inf_lot_geom(const InfLine *L, double a0, double a1, double D, double *fx, double *fz, double *gx,
+                        double *gz, int *nf_out, double *mx, double *mz, int *seg_mid)
+{
+    int k, nf = 0;
+    const double am = 0.5 * (a0 + a1);
+    for (k = 0; k < L->cnt && nf < INF_PTS; k++) {
+        const int a = (L->r0 + k) % L->n, b = (a + 1) % L->n;
+        const double s0 = L->arc[k], s1 = L->arc[k + 1], sl = (s1 - s0 > 1e-9) ? s1 - s0 : 1.0;
+        if (am >= s0 && am <= s1) {
+            const double t = (am - s0) / sl;
+            *mx = L->ox[a] + (L->ox[b] - L->ox[a]) * t; *mz = L->oz[a] + (L->oz[b] - L->oz[a]) * t; *seg_mid = a;
+        }
+        if (s1 <= a0 || s0 >= a1) continue;
+        if (nf == 0) {
+            const double t = (a0 - s0) / sl;
+            fx[nf] = L->ox[a] + (L->ox[b] - L->ox[a]) * t; fz[nf] = L->oz[a] + (L->oz[b] - L->oz[a]) * t;
+            if (t <= 1e-9) { gx[nf] = fx[nf] + L->bx[a] * D * L->bm[a]; gz[nf] = fz[nf] + L->bz[a] * D * L->bm[a]; }
+            else           { gx[nf] = fx[nf] + L->nx[a] * D;            gz[nf] = fz[nf] + L->nz[a] * D; }
+            nf++;
+        }
+        if (s1 < a1 - 1e-6) {          /* a vertex inside the lot: its mitre */
+            fx[nf] = L->ox[b]; fz[nf] = L->oz[b];
+            gx[nf] = fx[nf] + L->bx[b] * D * L->bm[b]; gz[nf] = fz[nf] + L->bz[b] * D * L->bm[b];
+            nf++;
+        } else {
+            const double t = (a1 - s0) / sl;
+            fx[nf] = L->ox[a] + (L->ox[b] - L->ox[a]) * t; fz[nf] = L->oz[a] + (L->oz[b] - L->oz[a]) * t;
+            if (t >= 1.0 - 1e-9) { gx[nf] = fx[nf] + L->bx[b] * D * L->bm[b]; gz[nf] = fz[nf] + L->bz[b] * D * L->bm[b]; }
+            else                 { gx[nf] = fx[nf] + L->nx[a] * D;            gz[nf] = fz[nf] + L->nz[a] * D; }
+            nf++;
+            break;
+        }
+    }
+    *nf_out = nf;
+    return nf >= 2;
+}
+
+/* 0 free, 1 bent, 2 on the road, 3 a real footprint (tested 0.5 m inside the lot, a facade on the line is not one) */
+static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const double *gx, const double *gz, int nf)
+{
+    TG_TileCtx *c = e->c;
+    const double in = 0.5 * e->s->upm;
+    int q, k;
+    for (q = 0; q + 1 < nf; q++) {
+        const double qx[4] = { fx[q], fx[q + 1], gx[q + 1], gx[q] }, qz[4] = { fz[q], fz[q + 1], gz[q + 1], gz[q] };
+        const double fdx = fx[q + 1] - fx[q], fdz = fz[q + 1] - fz[q], gdx = gx[q + 1] - gx[q], gdz = gz[q + 1] - gz[q];
+        double sx[4], sz[4], cx = 0.0, cz = 0.0;
+        if (fdx * gdx + fdz * gdz <= 0.0) return 1;
+        if (sc_on_road(c, qx, qz, 4, NULL)) return 2;
+        for (k = 0; k < 4; k++) { cx += 0.25 * qx[k]; cz += 0.25 * qz[k]; }
+        for (k = 0; k < 4; k++) {
+            const double dx = cx - qx[k], dz = cz - qz[k], l = hypot(dx, dz);
+            const double t = l > 2.0 * in ? in / l : 0.5;
+            sx[k] = qx[k] + dx * t; sz[k] = qz[k] + dz * t;
+        }
+        if (inf_quad_in_building(c, e->bld, sx, sz)) return 3;
+    }
+    return 0;
+}
+
+/* One lot [a0, a1] of the current run: accept it, else split it along its front (twice at most), else halve its
+ * depth, else count why it was refused. Counted once, by the tile owning its front midpoint. */
+static int inf_record(TG_TileCtx *c, const double *rx, const double *rz, int n)
+{
+    InfRec *r;
+    int k;
+    if (!sc_grow((void **)&c->infr, &c->cap_infr, c->ninfr + 1, sizeof(InfRec))) return 0;
+    r = &c->infr[c->ninfr++];
+    r->n = n;
+    r->x0 = r->x1 = rx[0]; r->z0 = r->z1 = rz[0];
+    for (k = 0; k < n; k++) {
+        r->x[k] = rx[k]; r->z[k] = rz[k];
+        if (rx[k] < r->x0) r->x0 = rx[k];
+        if (rx[k] > r->x1) r->x1 = rx[k];
+        if (rz[k] < r->z0) r->z0 = rz[k];
+        if (rz[k] > r->z1) r->z1 = rz[k];
+    }
+    return 1;
+}
+
+/* an accepted infill lot (this tile's or a neighbour's) holds the tile-local point: the pavement puts no fence there */
+static int inf_in_lot(const TG_TileCtx *c, double x, double z)
+{
+    int i;
+    for (i = 0; i < c->ninfr; i++) {
+        const InfRec *r = &c->infr[i];
+        if (x < r->x0 || x > r->x1 || z < r->z0 || z > r->z1) continue;
+        if (td5_geob_point_in_ring(r->x, r->z, r->n, x, z)) return 1;
+    }
+    return 0;
+}
+
+/* the lot [a0, a1] with its front INF_FRONT_IN inside the building line and its back D behind that */
+static int inf_lot_ring(const InfLine *L, double a0, double a1, double D, double *fx, double *fz, double *gx,
+                        double *gz, int *nf, double *mx, double *mz, int *seg)
+{
+    double tx[INF_PTS + 2], tz[INF_PTS + 2];
+    int n2 = 0;
+    if (!inf_lot_geom(L, a0, a1, INF_FRONT_IN, tx, tz, fx, fz, nf, mx, mz, seg)) return 0;
+    if (!inf_lot_geom(L, a0, a1, INF_FRONT_IN + D, tx, tz, gx, gz, &n2, mx, mz, seg) || n2 != *nf) return 0;
+    return 1;
+}
+
+/* One lot [a0, a1] of the current run: accept it, else split it along its front (twice at most), else halve its
+ * depth, else refuse it. Every tile that sees the block decides every lot the same way and records the accepted
+ * ones (the fence test); only the tile owning the front midpoint counts and emits it. Returns 0 on out of memory. */
+static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split, int counted)
+{
+    TG_TileCtx *c = e->c;
+    TD5_RoamScnSource *s = e->s;
+    const double U = s->upm;
+    double fx[INF_PTS + 2], fz[INF_PTS + 2], gx[INF_PTS + 2], gz[INF_PTS + 2];
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], mx = 0.0, mz = 0.0, D, Dcap;
+    int nf = 0, seg = L->r0, q, res = 0, own, why = 0;
+    uint32_t h;
+    if (!inf_lot_geom(L, a0, a1, 0.0, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) return 1;
+    own = sc_owned_point(c, mx, mz) && !counted;
+    if (own) c->st.inf_lots++;
+    h = inf_hash(mx + (double)c->org_x, mz + (double)c->org_z);
+    D = (INF_DEPTH_MIN + (double)(h % (uint32_t)INF_DEPTH_SPAN)) * U;
+    Dcap = INF_HALF * inf_ray(L->ox, L->oz, L->n, seg, mx, mz, L->nx[seg], L->nz[seg]) - INF_FRONT_IN;
+    if (D > Dcap) D = Dcap;
+    if (D < INF_SHALLOW_M * U) { why = 1; goto refused; }
+    {   /* CITY ground; no green / open area / ring plaza, no landmark */
+        int city = sc_casco_has(s, c->tx, c->tz);
+        const double X = mx + L->nx[seg] * 0.5 * D + (double)c->org_x, Z = mz + L->nz[seg] * 0.5 * D + (double)c->org_z;
+        if (!city && s->lot_cover) {
+            int k, bi = 0;
+            for (k = 0; k < 4; k++) {
+                const double t = (k + 0.5) / 4.0;
+                bi += sc_cover_at(c, mx + L->nx[seg] * D * t, mz + L->nz[seg] * D * t) == TD5_GEO_COVER_BUILT;
+            }
+            city = bi >= 3;
+        }
+        if (!city || sc_lot_class_at(c->lotp, c->nlotp, X, Z) != SC_LC_BUILD ||
+            sc_lot_class_at(c->lotp, c->nlotp, mx + (double)c->org_x, mz + (double)c->org_z) != SC_LC_BUILD ||
+            inf_near_landmark(e->bld, X, Z, INF_LM_CLEAR_M * U)) { why = 4; goto refused; }
+    }
+    if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
+    res = inf_lot_test(e, fx, fz, gx, gz, nf);
+    if (res == 3 && split < 2 && a1 - a0 >= 2.0 * INF_SPLIT_MIN_M * U) {
+        /* a footprint on part of it: the two halves on their own (booked as this lot) */
+        const int b0 = c->st.inf_emitted;
+        const double am = 0.5 * (a0 + a1);
+        if (!inf_lot(e, L, a0, am, split + 1, 1) || !inf_lot(e, L, am, a1, split + 1, 1)) return 0;
+        if (own && c->st.inf_emitted == b0) c->st.inf_drop_real++;
+        return 1;
+    }
+    if (res == 3 && 0.5 * D >= INF_SHALLOW_M * U) {      /* its back meets one: the front half */
+        D *= 0.5;
+        if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
+        res = inf_lot_test(e, fx, fz, gx, gz, nf);
+    }
+    if (res) { why = res; goto refused; }
+    if (nf * 2 > TD5_GEOB_RING_MAX) { why = 1; goto refused; }
+    for (q = 0; q < nf; q++) { rx[q] = fx[q]; rz[q] = fz[q]; }
+    for (q = 0; q < nf; q++) { rx[nf + q] = gx[nf - 1 - q]; rz[nf + q] = gz[nf - 1 - q]; }
+    if (!td5_geob_ring_simple(rx, rz, nf * 2)) { why = 1; goto refused; }
+    if (!inf_record(c, rx, rz, nf * 2)) return 0;
+    if (!sc_owned_point(c, mx, mz)) return 1;          /* a split half: its own midpoint's tile emits it */
+    if (s->infill_log)                                  /* TD5RE_ROAM_INFILL_LOG=1: where each lot stands (place frame) */
+        TD5_LOG_I(LOG_TAG, "ROAM_INFILL tile %d,%d front (%.0f,%.0f) normal (%.3f,%.3f) depth %.1f m width %.1f m",
+                  c->tx, c->tz, mx + (double)c->org_x, mz + (double)c->org_z, L->nx[seg], L->nz[seg], D / U, (a1 - a0) / U);
+    return inf_emit(e, rx, rz, nf * 2, h, fabs(td5_geob_ring_area(rx, rz, nf * 2)), a1 - a0);
+refused:
+    if (own) {
+        if (why == 2) c->st.inf_drop_road++;
+        else if (why == 3) c->st.inf_drop_real++;
+        else if (why == 4) c->st.inf_drop_area++;
+        else c->st.inf_drop_shape++;
+    }
+    return 1;
+}
+
+static int pv_infill(PvEmit *e, const PvChain *ch)
+{
+    TG_TileCtx *c = e->c;
+    TD5_RoamScnSource *s = e->s;
+    const double U = s->upm, LW = INF_LOT_M * U;
+    InfLine L;
+    double *blk = NULL, area;
+    unsigned char *fr = NULL, *brk = NULL;
+    int n = 0, v, i, ok = 0, first = -1;
+    if (!s->infill_on || !ch->closed || ch->nv < 3) return 1;
+    memset(&L, 0, sizeof L);
+    blk = (double *)malloc((size_t)(ch->nv + 1) * 8u * sizeof(double));
+    fr = (unsigned char *)calloc((size_t)ch->nv * 2u, 1);
+    if (!blk || !fr) goto out;
+    L.ox = blk; L.oz = L.ox + ch->nv; L.nx = L.oz + ch->nv; L.nz = L.nx + ch->nv;
+    L.bx = L.nz + ch->nv; L.bz = L.bx + ch->nv; L.bm = L.bz + ch->nv; L.arc = L.bm + ch->nv;
+    brk = fr + ch->nv;
+    /* the building line, collapsed corner runs as one point (brk: not a street front there, for now) */
+    for (v = 0; v < ch->nv; v++) {
+        const int bad = (ch->vf[v] & (PV_VF_ISLAND | PV_VF_DECK | PV_VF_FLAT | PV_VF_MEDIAN)) || !(ch->w[v] > 0.0);
+        if (n > 0 && hypot(ch->ox[v] - L.ox[n - 1], ch->oz[v] - L.oz[n - 1]) < 20.0) { if (bad) brk[n - 1] = 1; continue; }
+        L.ox[n] = ch->ox[v]; L.oz[n] = ch->oz[v]; brk[n] = (unsigned char)bad; n++;
+    }
+    if (n > 1 && hypot(L.ox[n - 1] - L.ox[0], L.oz[n - 1] - L.oz[0]) < 20.0) { brk[0] |= brk[n - 1]; n--; }
+    L.n = n;
+    if (n < 3) { ok = 1; goto out; }
+    area = td5_geob_ring_area(L.ox, L.oz, n);
+    /* a block lies on the RIGHT of the chain (the road on its left): negative area, and big enough */
+    if (!(area < -INF_BLOCK_M2 * U * U)) { ok = 1; goto out; }
+    for (i = 0; i < n; i++) {          /* fr[i]: segment i -> i+1 is a street front (both ends) */
+        const int j = (i + 1) % n;
+        const double dx = L.ox[j] - L.ox[i], dz = L.oz[j] - L.oz[i], l = hypot(dx, dz);
+        L.nx[i] = l > 1e-9 ? dz / l : 0.0; L.nz[i] = l > 1e-9 ? -dx / l : 0.0;      /* right of travel: into the block */
+        fr[i] = (unsigned char)!(brk[i] || brk[j]);
+    }
+    for (i = 0; i < n; i++) {
+        const int p = (i + n - 1) % n;
+        double ux = L.nx[p] + L.nx[i], uz = L.nz[p] + L.nz[i], l = hypot(ux, uz), cs, turn;
+        if (l > 1e-9) { ux /= l; uz /= l; } else { ux = L.nx[i]; uz = L.nz[i]; }
+        cs = ux * L.nx[i] + uz * L.nz[i];
+        L.bx[i] = ux; L.bz[i] = uz;
+        L.bm[i] = 1.0 / (cs > 1.0 / INF_MITRE_MAX ? cs : 1.0 / INF_MITRE_MAX);
+        turn = fabs(atan2(L.nx[p] * L.nz[i] - L.nz[p] * L.nx[i], L.nx[p] * L.nx[i] + L.nz[p] * L.nz[i])) * 57.29577951308232;
+        brk[i] = (unsigned char)(turn > INF_BREAK_DEG || fr[p] != fr[i]);
+        if (brk[i] && first < 0) first = i;
+    }
+    if (first < 0) {      /* a round loop: break at its least world point */
+        double bk = 1e300;
+        for (i = 0; i < n; i++) {
+            const double k = (L.ox[i] + (double)c->org_x) * 1e-3 + (L.oz[i] + (double)c->org_z);
+            if (k < bk) { bk = k; first = i; }
+        }
+        brk[first] = 1;
+    }
+    /* every run from a break to the next, cut at the world lattice lines */
+    for (v = 0; v < n; v++) {
+        const int r0 = (first + v) % n;
+        int r1, cnt, k, ncut = 0, axis, ci;
+        double Lr = 0.0, cut[256], u0, v0, u1, v1;
+        if (!brk[r0] || !fr[r0]) continue;
+        for (r1 = (r0 + 1) % n, cnt = 1; !brk[r1] && cnt < n; r1 = (r1 + 1) % n, cnt++) { }
+        L.r0 = r0; L.cnt = cnt;
+        L.arc[0] = 0.0;
+        for (k = 0; k < cnt; k++) {
+            const int a = (r0 + k) % n, b = (a + 1) % n;
+            Lr += hypot(L.ox[b] - L.ox[a], L.oz[b] - L.oz[a]);
+            L.arc[k + 1] = Lr;
+        }
+        if (Lr < INF_MIN_M * U) continue;
+        roam_grid_uv(c->grid, L.ox[r0] + (double)c->org_x, L.oz[r0] + (double)c->org_z, &u0, &v0);
+        roam_grid_uv(c->grid, L.ox[r1] + (double)c->org_x, L.oz[r1] + (double)c->org_z, &u1, &v1);
+        axis = fabs(u1 - u0) >= fabs(v1 - v0) ? 0 : 1;
+        cut[ncut++] = 0.0;
+        for (k = 0; k < cnt && ncut < 250; k++) {
+            const int a = (r0 + k) % n, b = (a + 1) % n;
+            double ua, va, ub, vb, ca, cb, lo, hi, g;
+            roam_grid_uv(c->grid, L.ox[a] + (double)c->org_x, L.oz[a] + (double)c->org_z, &ua, &va);
+            roam_grid_uv(c->grid, L.ox[b] + (double)c->org_x, L.oz[b] + (double)c->org_z, &ub, &vb);
+            ca = axis ? va : ua; cb = axis ? vb : ub;
+            lo = ca < cb ? ca : cb; hi = ca < cb ? cb : ca;
+            for (g = ceil(lo / LW) * LW; g < hi && ncut < 250; g += LW) {
+                const double at = L.arc[k] + (g - ca) / (cb - ca) * (L.arc[k + 1] - L.arc[k]);
+                if (at - cut[ncut - 1] >= INF_MIN_M * U && Lr - at >= INF_MIN_M * U) cut[ncut++] = at;
+            }
+        }
+        cut[ncut++] = Lr;
+        for (ci = 0; ci + 1 < ncut; ci++)
+            if (!inf_lot(e, &L, cut[ci], cut[ci + 1], 0, 0)) goto out;
+    }
+    ok = 1;
+out:
+    free(blk); free(fr);
     return ok;
 }
 
@@ -3438,6 +4287,7 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
         sc->sb_count[k] = (uint32_t)b->nmesh;
         for (m = 0; m < b->nmesh; m++) {
             rec_furn[r] = (m >= c->furn_first[k]);      /* [F4c] furniture: judged by its own census */
+            if (m >= c->lot_first[k]) rec_furn[r] = 1;  /* [HD] a city lot is the ground itself (SECTION lots) */
             sc->rec_off[r++] = (uint32_t)(off + b->moff[m]);
         }
         off += b->blk.len;
@@ -3503,6 +4353,26 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->gap = (double)td5_env_int("TD5RE_ROAM_SCN_GAP", (int)(tg_city_sidewalk_w(&k_biomes[0]) + TD5_TG_CARRIAGEWAY_MARGIN),
                                  0, 20000);
     td5_geo_source_path(s->canopy_path, sizeof s->canopy_path, place, "CANOPY.R8");
+    td5_geo_source_path(s->cover_path, sizeof s->cover_path, place, "COVER.R8");
+    /* [HD] city lots + infill: the casco's tiles, sorted for sc_casco_has */
+    s->lots_on   = td5_env_int("TD5RE_ROAM_LOTS", 1, 0, 1);
+    s->lot_cover = td5_env_int("TD5RE_ROAM_LOT_COVER", 1, 0, 1);
+    s->infill_on = td5_env_int("TD5RE_ROAM_INFILL", 1, 0, 1);
+    s->infill_log = td5_env_int("TD5RE_ROAM_INFILL_LOG", 0, 0, 1);
+    s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
+    {
+        int (*cl)[2] = (int (*)[2])malloc(2048 * sizeof(int[2]));
+        const int n = cl ? td5_roam_casco_tiles(g, cl, 2048) : 0;
+        int i, k;
+        s->casco = n > 0 ? (int64_t *)malloc((size_t)n * sizeof(int64_t)) : NULL;
+        for (i = 0; s->casco && i < n; i++) {
+            const int64_t key = sc_tkey(cl[i][0], cl[i][1]);
+            for (k = s->ncasco - 1; k >= 0 && s->casco[k] > key; k--) s->casco[k + 1] = s->casco[k];
+            s->casco[k + 1] = key;
+            s->ncasco++;
+        }
+        free(cl);
+    }
     td5_geo_source_path(s->height_path, sizeof s->height_path, place, "HEIGHT.R16");
     td5_geo_source_path(s->water_path, sizeof s->water_path, place, "WATER.R8");
     s->exag = (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0;
@@ -3529,6 +4399,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     for (k = 0; k < SC_ROAD_LRU; k++) if (s->road[k].t) { td5_roam_tile_free(s->road[k].t); free(s->road[k].t); }
     sc_ctx_free(s->ctx);
     sc_pv_close(s->pv);
+    free(s->casco);
     td5_roam_furn_close(s->furn);
     if (s->hc) { if (s->hc_open) td5_roam_height_close(s->hc); free(s->hc); }
     free(s);
@@ -3572,6 +4443,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     }
     if (gr_raster_read_window(s->canopy_path, x0 - halo, z0 - halo, x1 + halo, z1 + halo, 2, &c->canopy))
         c->canopy_ok = c->canopy.kind == 2 && c->canopy.data != NULL;
+    c->cover_ok = 0;                          /* [HD] the lots' built-up test: the tile box only */
+    if (gr_raster_read_window(s->cover_path, x0, z0, x1, z1, 2, &c->cover))
+        c->cover_ok = c->cover.kind == 2 && c->cover.data != NULL;
     /* OSM sources: the cache tiles that can hold a record owned by the 3x3 (extents
      * cover whole records, so the tile box + one tile each side is exact) */
     {
@@ -3611,6 +4485,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     }
     if (!sc_lawn_planes(c, ar, nar, x0 - (double)c->org_x, z0 - (double)c->org_z,
                         x1 - (double)c->org_x, z1 - (double)c->org_z)) goto out;
+    /* [HD] the AREAS polygons the lots and the infill ask (every one that reaches the 3x3, not only the owned) */
+    if (!sc_lot_polys(ac, nac, x0 - (double)s->grid.tile, z0 - (double)s->grid.tile, x1 + (double)s->grid.tile,
+                      z1 + (double)s->grid.tile, &c->lotp, &c->nlotp)) goto out;
     t1 = td5_plat_time_ms();
     c->st.ms_src = t1 - t0;
     if (td5_env_int("TD5RE_ROAM_SCN_PLAZAS", 1, 0, 1) && !sc_emit_plazas(c, ar, nar)) goto out;
@@ -3620,6 +4497,12 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     if (td5_env_int("TD5RE_ROAM_SCN_FOOTPATHS", 1, 0, 1) &&
         !sc_emit_footpaths(s, c, fc, nfc, x0 - (double)c->org_x, z0 - (double)c->org_z,
                            x1 - (double)c->org_x, z1 - (double)c->org_z)) goto out;
+    /* [HD] the city's open ground paved (census runs with the knob off too); meshes from lot_first on are lots */
+    {
+        int k;
+        for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->lot_first[k] = c->sb[k].nmesh;
+    }
+    if (!sc_emit_lots(s, c, self, ac, nac)) goto out;
     /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own) */
     if (s->furn) {
         int k;
@@ -3637,6 +4520,11 @@ out:
     sc_cache_unpin(s);
     free(ar);
     if (c->canopy.data) { free(c->canopy.data); c->canopy.data = NULL; }
+    if (c->cover.data) { free(c->cover.data); c->cover.data = NULL; }
+    c->cover_ok = 0;
+    free(c->lotp); c->lotp = NULL; c->nlotp = 0;
+    free(c->ringpool); c->ringpool = NULL;
+    c->ninfr = 0;                             /* infr itself is kept for the next tile (sc_ctx_free) */
     return sc;
 }
 
@@ -3734,8 +4622,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16];
-    double shift_max = 0.0;
+    long ft[16], lot_t[12] = { 0 };
+    double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 };
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
     memset(&j, 0, sizeof j);
@@ -3792,13 +4680,16 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                       "pv_fence pv_rail pv_kerb pv_cut pv_drop pv_kerb_cut pv_noway ms_pv furn_meshes sig_clusters sig_arms "
                       "sig_inbound mast_near post_left mast_far far_shared plates plate_one_face plate_none sig_drop_frame "
                       "sig_drop_road sig_drop_dup lamps lamp_glow lamp_drop_road lamp_skip_class stops shelters benches bins "
-                      "stop_drop_far stop_drop_road zebras limit_lines xing_unknown xing_drop_far furn_guard\n",
+                      "stop_drop_far stop_drop_road zebras limit_lines xing_unknown xing_drop_far furn_guard "
+                      "lot_cells lot_green lot_rural lot_skip lot_under_road lot_rings lot_paved_m2 lot_lawn_m2 lot_green_m2 "
+                      "inf_lots inf_emitted inf_drop_real inf_drop_road inf_drop_area inf_drop_shape inf_m2\n",
                    j.place, j.n, j.reverse ? "reverse" : "forward", threadmode, TD5_ROAM_SCENERY_RULES);
     for (i = 0; i < j.n; i++) {
         const TD5_RoamScnStats *r = &j.rows[i];
         if (f) fprintf(f, "%d %d %d %08x %d %u %u %u %u %d %d %d %d %d %d %d %d %d %d %d %.2f %d %d %d %d %d %d %d %d %d %d "
                           "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %u "
-                          "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+                          "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d "
+                          "%d %d %d %d %d %d %.0f %.0f %.0f %d %d %d %d %d %d %.0f\n",
                        j.list[i][0], j.list[i][1], j.ok[i], r->hash, r->meshes, r->bytes, r->ms, r->ms_src, r->ms_emit,
                        r->road_tiles, r->bld_seen, r->bld_emitted, r->bld_prefab, r->bld_apron, r->bld_drop_road,
                        r->bld_drop_shift, r->bld_drop_ring, r->bld_veto_plaza, r->bld_veto_lm, r->bld_nudged,
@@ -3812,7 +4703,15 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                        r->furn.plate_none, r->furn.sig_drop_frame, r->furn.sig_drop_road, r->furn.sig_drop_dup, r->furn.lamps,
                        r->furn.lamp_glow, r->furn.lamp_drop_road, r->furn.lamp_skip_class, r->furn.stops, r->furn.shelters,
                        r->furn.benches, r->furn.bins, r->furn.stop_drop_far, r->furn.stop_drop_road, r->furn.zebras,
-                       r->furn.limit_lines, r->furn.xing_unknown, r->furn.xing_drop_far, r->furn.guard_hits);
+                       r->furn.limit_lines, r->furn.xing_unknown, r->furn.xing_drop_far, r->furn.guard_hits,
+                       r->lot_cells, r->lot_green, r->lot_rural, r->lot_skip, r->lot_under_road, r->lot_rings,
+                       r->lot_paved_m2, r->lot_lawn_m2, r->lot_green_m2, r->inf_lots, r->inf_emitted, r->inf_drop_real,
+                       r->inf_drop_road, r->inf_drop_area, r->inf_drop_shape, r->inf_m2);
+        lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
+        lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
+        lot_t[8] += r->inf_drop_real; lot_t[9] += r->inf_drop_road; lot_t[10] += r->inf_drop_area;
+        lot_t[11] += r->inf_drop_shape;
+        lot_m2[0] += r->lot_paved_m2; lot_m2[1] += r->lot_lawn_m2; lot_m2[2] += r->lot_green_m2; lot_m2[3] += r->inf_m2;
         {
             int q;
             for (q = 0; q < 7; q++) pv_src[q] += r->pv_src[q];
@@ -3875,6 +4774,16 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "limit lines %ld | FURNITURE GUARD: %ld face(s) on the drivable surface",
                  ft[0], ft[1], ft[2], ft[3], ft[4], ft[5], ft[14], ft[6], ft[15], ft[12], ft[7], ft[13], ft[8], ft[9], ft[10],
                  ft[11]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam lots: %ld cell(s) paved (one quad each, %ld of them reach under the road), "
+                 "%ld kept green under an OSM green or a ring plaza (%ld rings), %ld left green outside the city | non-road ground: paved %.0f m2, "
+                 "LAWN WITHOUT AN OSM GREEN %.0f m2, OSM green %.0f m2 | infill: %ld frontage lot(s), %ld built (%.0f m2), "
+                 "refused: real building %ld, road / other lot %ld, area %ld, shape %ld",
+                 lot_t[0], lot_t[3], lot_t[1], lot_t[4], lot_t[2], lot_m2[0], lot_m2[1], lot_m2[2],
+                 lot_t[6], lot_t[7], lot_m2[3], lot_t[8], lot_t[9], lot_t[10], lot_t[11]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

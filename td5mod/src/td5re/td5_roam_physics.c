@@ -1107,6 +1107,7 @@ void td5_roam_resolve_walls(TD5_Actor *a)
     TD5_Vec3_Fixed corner[RP_WALL_PROBES];
     TD5_RoamHit hk[RP_WALL_PROBES];
     int out[RP_WALL_PROBES], k, np = 4, deep = -1, pinch = 0, pa = -1, pb = -1, pinch_out = 0, cen_in = 0, tip = 0;
+    uint8_t isbar[RP_WALL_PROBES];
     double nx[RP_WALL_PROBES], nz[RP_WALL_PROBES], tip_ux = 0.0, tip_uz = 0.0;
     int32_t tip_pen = 0;
     if (!a || !rs || !td5_roam_active()) return;
@@ -1243,6 +1244,7 @@ void td5_roam_resolve_walls(TD5_Actor *a)
      * barrier push wins, so the car still gets ONE combined push and the pinch / tip rules below see
      * barrier and kerb alike. The panel has no kerb overhang: the push distance is stored as
      * overhang + depth, so pen (= push_dist - overhang) is the barrier depth itself. */
+    memset(isbar, 0, sizeof isbar);
     if (td5_roam_race_barriers_live()) {
         int bar_any = 0;
         for (k = 0; k < np; k++) {
@@ -1259,6 +1261,7 @@ void td5_roam_resolve_walls(TD5_Actor *a)
             hk[k].push_x = bx; hk[k].push_z = bz; hk[k].push_dist = bd;
             hk[k].edge_key = 0;                                  /* 0 = a race barrier (logs) */
             out[k] = 1;
+            isbar[k] = 1;
             bar_any = 1;
         }
         if (bar_any) {
@@ -1273,6 +1276,22 @@ void td5_roam_resolve_walls(TD5_Actor *a)
         if (!out[k]) continue;
         for (j = k + 1; j < np; j++)
             if (out[j] && nx[k] * nx[j] + nz[k] * nz[j] < 0.0) { pinch = 1; pa = k; pb = j; break; }
+    }
+
+    /* [HE] A pinch between a RACE BARRIER and a kerb (a corner through the panel, another on the kerb beside it, normals
+     * opposed) is not a corridor too narrow for the car: the corridor rule (no translation) froze the car straddling the
+     * panel and full throttle crept it through (barrier 4 of the 2026-10-19 geo_map sprint: chassis 1.0 -> 1.4 m past
+     * in 30 ticks). The barrier wins: the deepest barrier probe's push, back toward the open side the car came from,
+     * as a normal wall hit; the kerb corner is resolved on the next tick. */
+    if (pinch && (isbar[pa] || isbar[pb])) {
+        int kb = -1;
+        for (k = 0; k < np; k++)
+            if (isbar[k] && (kb < 0 || hk[k].push_dist > hk[kb].push_dist)) kb = k;
+        if (kb >= 0) {
+            pinch = 0;
+            deep = kb;
+            s_rp.st.barrier_pinch_wins++;
+        }
     }
 
     /* [F2-E] A pinch on a wall TIP (a median nose between the front-left corner and the front

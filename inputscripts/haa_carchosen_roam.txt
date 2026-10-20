@@ -1,0 +1,18 @@
+# [roam HA] car select OK (a car is chosen) -> SELECT TRACK on the GEOSPATIAL entry -> OK opens the generator
+# -> FREE ROAM (focused by TD5RE_GEO_PANEL_FOCUS=11) must launch WITHOUT the car select.
+sync menu
+600 log AT_CARSELECT
++30 key down press
++60 key down press
++60 key down press
++60 key down press
++60 key enter press
++600 log AT_TRKSEL
++30 key up press
++60 key enter press
++900 log GEO_SETTLED
++8 key enter press
++1500 log AFTER_ROAM
+sync race
+900 log ROAM_EXPECTED
++60 quit

@@ -733,6 +733,7 @@ static struct { int checked, driven, reported; } E;
 
 void td5_roam_sprint_test_frame(void)
 {
+    td5_roam_wall_test_frame();   /* [HE] the roam-walls test (self-gated) */
     if (!E.checked && !D.mode && td5_roam_active()) {
         const char *m = getenv("TD5RE_ROAM_SPRINT_TEST");
         E.checked = 1;
@@ -747,12 +748,14 @@ void td5_roam_sprint_test_frame(void)
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
         }
     }
-    if (E.driven && D.done && !E.reported) {
+    if (E.driven && D.done && !E.reported && !(td5_env_int("TD5RE_ROAM_HF_FINLOG", 0, 0, 1) && td5_roam_race_fin_ticks() < 420)) {
         char note[128];
         E.reported = 1;
         td5_roam_sprint_test_verdict(note, sizeof note);
         TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] standalone verdict: %s", note);
-        g_td5.quit_requested = 1;
+        /* [roam HA] DEV: TD5RE_ROAM_SPRINT_LINGER=1 keeps the game up after the verdict, so the ENTER on the
+         * results can be followed into the frontend (the geo generator) */
+        if (!td5_env_int("TD5RE_ROAM_SPRINT_LINGER", 0, 0, 1)) g_td5.quit_requested = 1;
     }
     if (!D.mode || D.done || !td5_roam_active()) return;
     D.frames++;
@@ -813,17 +816,7 @@ void td5_roam_sprint_test_frame(void)
             if (D.phase_frames < 45) break;
         }
         if (D.phase_frames < 10) break;
-        if (!td5_roam_race_open_setup()) { sd_finish("setup refused the loaded route", 1); return; }
-        D.phase = 2; D.phase_frames = 0;
-        break;
-    case 2:   /* the panel is up over the map under the pause menu: TRAFFIC on (inert), START RACE */
-        if (td5_roam_race_state() != TD5_RRACE_SETUP) { sd_finish("setup panel closed by itself", 1); return; }
-        if (D.phase_frames == 25) sd_shot("1_setup");
-        if (D.phase_frames < (D.shots ? 45 : 30)) break;
-        if (!td5_game_is_pause_menu_active() || !td5_roam_route_ui_map_open()) {
-            if (D.phase_frames > 600) sd_finish("pause menu / route map never opened for the setup", 1);
-            break;
-        }
+        /* [roam HA] no setup panel any more: the race starts with the settings the test fills in */
         {
             TD5_RoamRaceSetup s;
             TD5_RoamPhysStats st;
@@ -884,7 +877,7 @@ void td5_roam_sprint_test_frame(void)
             sd_finish("race ended without a finish", 1);
         }
         break;
-    case 4:   /* results panel up: frame dump, then ENTER (keep roaming) must end the race at the finish */
+    case 4:   /* results panel up: frame dump, then ENTER ([roam HA] back to the geo generator: the game fades out and ends the session) */
         if (SD_IS_CIRC(D.mode)) sd_circ_monitor();
         if (SD_IS_AI(D.mode) && !D.ai_done) {
             /* [F7] every opponent through the line (or 6 minutes of frames) before the results are judged */
@@ -899,12 +892,14 @@ void td5_roam_sprint_test_frame(void)
         if (D.phase_frames == 60) sd_shot("6_results");
         if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
         if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
-        if (D.phase_frames >= 100) {
+        if (D.phase_frames >= 90) {
+            /* the leave is a fade-out (td5_game.c "Roam race results dismissed" log line) that ends the session
+             * after this verdict is read: judge it at the results, the session is still up here */
             int nb = 0;
             td5_roam_barriers(&nb);
-            D.exit_ok = td5_roam_race_state() == TD5_RRACE_OFF && nb == 0 && !td5_roam_barriers_visible();
-            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER: race state %d, barriers %d, visible %d -> %s",
-                      td5_roam_race_state(), nb, td5_roam_barriers_visible(), D.exit_ok ? "back to free roam" : "NOT EXITED");
+            D.exit_ok = td5_roam_active() && td5_roam_race_state() == TD5_RRACE_FINISHED;
+            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER pressed: race state %d, barriers %d -> %s",
+                      td5_roam_race_state(), nb, D.exit_ok ? "leaving to the geo generator (see the game log)" : "NOT ON THE RESULTS");
             sd_finish("finished", 0);
         }
         break;
@@ -1036,7 +1031,9 @@ static uint32_t sd_bits(TD5_Actor *a);
 uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
 {
     const long last = D.tick_last;
-    const uint32_t bits = sd_bits(a);
+    uint32_t bits;
+    if (td5_roam_wall_test_bits(a, &bits)) return bits;   /* [HE] the roam-walls test */
+    bits = sd_bits(a);
     if (D.rear_cd && td5_roam_race_state() == TD5_RRACE_COUNTDOWN) return (uint32_t)TD5_INPUT_REAR_VIEW;   /* [F7] */
     if (D.trc && a && D.tick_last != last) {
         double along, lat;

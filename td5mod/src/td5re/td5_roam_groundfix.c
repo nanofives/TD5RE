@@ -111,7 +111,8 @@ static int gf_clip_diag(const double (*p)[3], int n, double (*o)[3], double c, i
  * (G4), and in a cut the bank beside the road keeps its height. Every term is a function of the triangle,
  * the raster at the GLOBAL lattice points and those points, so both tiles of a seam compute the same
  * lowering (to the raster's own sampling, which the census shows is the same in the float vertex). */
-typedef struct { const RoamGrid *g; const double *r; double *low; int I0, J0, W; double cs; double dbg[3]; } GfLowU;
+typedef struct { const RoamGrid *g; const double *r; double *low; int I0, J0, W; double cs; double dbg[3];
+                 double vcap; } GfLowU;                 /* [roam HC] vcap: the most one constraint may ask */
 
 static void gf_low_tri(const GfLowU *cu, const double q[3][3])
 {
@@ -155,6 +156,7 @@ static void gf_low_tri(const GfLowU *cu, const double q[3][3])
                 v = w[0] * rc[0] + w[1] * rc[1] + w[2] * rc[2] - a[k][2];
                 ww = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
                 if (!(v > 0.0) || !(ww > 0.0)) continue;
+                if (v > cu->vcap) v = cu->vcap;
                 for (c = 0; c < 3; c++) {
                     const int PI = I + du[side][c], PJ = J + dv[side][c];
                     double d, *L;
@@ -234,6 +236,84 @@ static void gf_road_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
     }
 }
 
+/* [roam HC] THE VERGE. Holding the ground under the road is not enough: the road sits up to 4.7 m under the
+ * raster (grade smoothing, end blends, a junction patch's single cluster height), the lowering stops at the
+ * kerb, and the 16 m ground cell climbs straight back to the raster beside it, so at a junction the lawn and
+ * the ground next to a patch stood over the road and hid it from a driver's eye ("grass overlaps with the
+ * road"). A band GF_VERGE_W wide outside every kerb edge is now one more constraint of the same lowering:
+ * there the ground may rise at most GF_VERGE_GRADE above the road edge's height, measured from the kerb
+ * (two triangles per edge, y = edge y + grade x distance, the same linear-target rule as a road triangle).
+ * Bores (the road is under the ground on purpose) and bridge-deck sides (the deck is far over the ground)
+ * get no verge. TD5RE_ROAM_GROUND_VERGE=0 turns it off (before / after). */
+#define GF_VERGE_W      (8.0 * 430.0)
+#define GF_VERGE_GRADE  0.08
+/* The verge brings the ground down by at most this much: where two road levels meet (a road in a cut beside
+ * a higher one) an unbounded verge of the low road pulled the ground metres under the high road's kerb
+ * (census: kerb hang > 4 m went from 18 to 299 samples). The rise it exists to remove was <= 1.75 m. */
+#define GF_VERGE_VCAP   (2.0 * 430.0)
+
+int td5_roam_gfix_verge(void) { return td5_env_int("TD5RE_ROAM_GROUND_VERGE", 1, 0, 1); }
+
+static void gf_verge_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
+{
+    int k;
+    for (k = 0; k < 9; k++) {
+        const RoamTile *n = nb[k];
+        uint8_t *bore;
+        uint32_t e, q, bi;
+        if (!n) continue;
+        bore = (uint8_t *)calloc(n->nspan ? n->nspan : 1u, 1);
+        if (!bore) continue;
+        for (e = 0; e < n->nedge; e++)
+            if (n->edge[e].flags & ROAM_EF_BORE)
+                for (q = 0; q < n->edge[e].span_count; q++)
+                    if ((uint32_t)n->edge[e].span_first + q < n->nspan) bore[n->edge[e].span_first + q] = 1;
+        for (bi = 0; bi < n->nbedge; bi++) {
+            const RoamBEdge *be = &n->bedge[bi];
+            const uint32_t p = (uint32_t)(be->prim & ~ROAM_PRIM_TRI);
+            double a[3], b[3], in[2], ox, oy, oz, nx, nz, l, s, tri[3][3];
+            int c;
+            if (be->kind != ROAM_BEDGE_KERB || be->v[0] >= n->nvert || be->v[1] >= n->nvert) continue;
+            if (be->prim & ROAM_PRIM_TRI) {                    /* inside = the triangle's third vertex */
+                const RoamTri *tr;
+                if (p >= n->ntri) continue;
+                tr = &n->tri[p];
+                ox = (double)n->org_x + tr->ox; oy = (double)tr->oy; oz = (double)n->org_z + tr->oz;
+                in[0] = in[1] = 0.0;
+                for (c = 0; c < 3; c++) { in[0] += n->vert[tr->v[c]].x; in[1] += n->vert[tr->v[c]].z; }
+                in[0] = ox + in[0] / 3.0; in[1] = oz + in[1] / 3.0;
+            } else {                                           /* inside = the span quad's centre */
+                const TD5_StripSpan *sp;
+                uint32_t L, R; int ln;
+                if (p >= n->nspan || bore[p]) continue;
+                sp = &n->span[p];
+                if (!gf_span_ok(n, sp, &L, &R, &ln)) continue;
+                ox = (double)n->org_x + sp->origin_x; oy = (double)sp->origin_y; oz = (double)n->org_z + sp->origin_z;
+                in[0] = ox + 0.25 * ((double)n->vert[L].x + n->vert[L + ln].x + n->vert[R].x + n->vert[R + ln].x);
+                in[1] = oz + 0.25 * ((double)n->vert[L].z + n->vert[L + ln].z + n->vert[R].z + n->vert[R + ln].z);
+            }
+            a[0] = ox + n->vert[be->v[0]].x; a[1] = oy + n->vert[be->v[0]].y; a[2] = oz + n->vert[be->v[0]].z;
+            b[0] = ox + n->vert[be->v[1]].x; b[1] = oy + n->vert[be->v[1]].y; b[2] = oz + n->vert[be->v[1]].z;
+            nx = b[2] - a[2]; nz = -(b[0] - a[0]); l = hypot(nx, nz);
+            if (l < 1.0) continue;
+            nx /= l; nz /= l;
+            s = (0.5 * (a[0] + b[0]) - in[0]) * nx + (0.5 * (a[2] + b[2]) - in[1]) * nz;
+            if (s < 0.0) { nx = -nx; nz = -nz; }               /* point away from the road */
+            {
+                const double rise = GF_VERGE_W * GF_VERGE_GRADE;
+                const double A[3] = { a[0], a[1], a[2] }, B[3] = { b[0], b[1], b[2] };
+                const double Bo[3] = { b[0] + nx * GF_VERGE_W, b[1] + rise, b[2] + nz * GF_VERGE_W };
+                const double Ao[3] = { a[0] + nx * GF_VERGE_W, a[1] + rise, a[2] + nz * GF_VERGE_W };
+                memcpy(tri[0], A, sizeof A); memcpy(tri[1], B, sizeof B); memcpy(tri[2], Bo, sizeof Bo);
+                fn(u, (const double (*)[3])tri);
+                memcpy(tri[1], Bo, sizeof Bo); memcpy(tri[2], Ao, sizeof Ao);
+                fn(u, (const double (*)[3])tri);
+            }
+        }
+        free(bore);
+    }
+}
+
 static void gf_low_cb(void *u, const double tri[3][3]) { gf_low_tri((const GfLowU *)u, tri); }
 
 void td5_roam_gfix_lower(const RoamGrid *g, const RoamTile *const nb[9], TD5_RoamHeight *hc, int tx, int tz, int G,
@@ -253,10 +333,15 @@ void td5_roam_gfix_lower(const RoamGrid *g, const RoamTile *const nb[9], TD5_Roa
     u.g = g; u.r = r; u.low = low; u.I0 = tx * G + lo; u.J0 = tz * G + lo; u.W = W;
     u.cs = (double)g->tile / (double)G;
     u.dbg[0] = u.dbg[1] = u.dbg[2] = 0.0;
+    u.vcap = 1e300;
 #ifndef TD5RE_RELEASE
     { const char *e = getenv("TD5RE_GFIX_DBG"); if (e) sscanf(e, "%lf,%lf,%lf", &u.dbg[0], &u.dbg[1], &u.dbg[2]); }
 #endif
     gf_road_tris(nb, gf_low_cb, &u);
+    if (td5_roam_gfix_verge()) {                                     /* [roam HC] */
+        u.vcap = GF_VERGE_VCAP;
+        gf_verge_tris(nb, gf_low_cb, &u);
+    }
     free(r);
 }
 

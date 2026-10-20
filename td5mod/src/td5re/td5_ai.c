@@ -20,6 +20,7 @@
  */
 
 #include "td5_ai.h"
+#include "td5_police.h"   /* [round H HH] the pursuit layer of the normal races */
 #include "td5_ai_driver.h"  /* [AI DRIVER MODEL] mode gate + per-tick fork */
 #include "td5_bytes.h"
 #include "td5_math_util.h"
@@ -954,8 +955,15 @@ int td5_ai_cop_glow_intensity(int slot) {
         if (s_glow > 0x8000) s_glow = 0x8000;
         TD5_LOG_I(LOG_TAG, "cop_glow intensity = 0x%X (env TD5RE_COP_GLOW)", s_glow);
     }
-    if (!td5_ai_cop_is_chasing(slot)) return 0;
+    /* [round H HH] a roadblock car keeps its light bar on (siren off: it never chases) */
+    if (!td5_ai_cop_is_chasing(slot) && !td5_police_block_lit(slot)) return 0;
     return s_glow;
+}
+
+/* [round H HH] The racer `slot` is being chased (or pulled over) by cop `slot`'s chase: its target, else -1. */
+int td5_ai_cop_target(int slot) {
+    if (!td5_ai_cop_is_chasing(slot)) return -1;
+    return g_cop_target[slot];
 }
 
 /* 1 when `slot` (racer OR traffic/cop) is in the broken-down state set by a
@@ -8408,6 +8416,7 @@ void td5_ai_update_special_encounter(void) {
         /* [#3] Age the per-cop re-chase cooldown (deterministic; one tick/cop). */
         if (s_cop_rebust_ticks[k] > 0) s_cop_rebust_ticks[k]--;
         if (td5_ai_traffic_dynamic_parked(k)) continue;   /* not on the road */
+        if (td5_police_block_slot(k)) continue;           /* [round H HH] a roadblock car: held, never chases */
 
         /* A cop that itself broke down (crashed) abandons its chase + releases
          * any pull-over hold on its target. */
@@ -8434,7 +8443,7 @@ void td5_ai_update_special_encounter(void) {
             if (g_cop_cooldown[k] > 0) { g_cop_cooldown[k]--; continue; }
             /* Acquire the FIRST (lowest-slot = deterministic) racer that just
              * passed this cop and isn't already pursued by another cop. */
-            int chosen = -1;
+            int chosen = -1, joined = 0;
             for (int c = 0; c < racer_n; c++) {
                 char *cand;
                 int   st, cgap;
@@ -8467,6 +8476,15 @@ void td5_ai_update_special_encounter(void) {
                 cgap = smart_span_gap(cop_main,
                           td5_track_branch_to_main_span((int)ACTOR_I16(cand, ACTOR_SPAN_RAW)),
                           ring_len);
+                /* [round H HH] The pursuit layer (td5_police.c) first: a car in its
+                 * BUSTED hold / grace is left alone, a car already in a pursuit is
+                 * joined at any speed. STOCK (always, with the layer off) = the
+                 * stock trigger below, unchanged. */
+                {
+                    const int pg = td5_police_acquire_gate(k, c, cgap);
+                    if (pg == TD5_POLICE_GATE_SKIP) continue;
+                    if (pg == TD5_POLICE_GATE_JOIN) { chosen = c; joined = 1; break; }
+                }
                 /* "passed by" = now just ahead of the cop (1..COP_TRIGGER_HI
                  * spans), moving forward, above the speeding threshold. */
                 if (cgap < cop_trigger_lo() || cgap > cop_trigger_hi()) continue;
@@ -8505,7 +8523,8 @@ void td5_ai_update_special_encounter(void) {
                     ACTOR_I32(cop, ACTOR_LIN_VEL_X) = 0;
                     ACTOR_I32(cop, ACTOR_LIN_VEL_Z) = 0;
                 }
-                TD5_LOG_I(LOG_TAG, "cop_chase START: cop=%d target=%d", k, chosen);
+                TD5_LOG_I(LOG_TAG, "cop_chase START: cop=%d target=%d%s", k, chosen, joined ? " (joins the pursuit)" : "");
+                td5_police_on_acquire(k, chosen, joined);   /* [round H HH] */
             } else if (cop_diag_enabled() && (s_diag_tick % 30) == 0) {
                 /* [DIAG] No acquire this tick — dump the raw gate inputs for
                  * every candidate racer so the blocking gate is readable. Order
@@ -8542,8 +8561,10 @@ void td5_ai_update_special_encounter(void) {
         tgt = g_cop_target[k];
         if (tgt < 0 || tgt >= racer_n) { cop_end_chase(k); continue; }
 
-        /* End: the chased car broke down (crashed into traffic/car/wall). */
-        if (g_actor_broken_down[tgt]) {
+        /* End: the chased car broke down (crashed into traffic/car/wall).
+         * [round H HH] Not with the pursuit layer on: a crash in a pursuit is
+         * where the cops catch you (the bust rules decide), never an escape. */
+        if (g_actor_broken_down[tgt] && !td5_police_active()) {
             if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
             TD5_LOG_I(LOG_TAG, "cop_chase END (target broke down): cop=%d target=%d", k, tgt);
             cop_end_chase(k);
@@ -8596,6 +8617,9 @@ void td5_ai_update_special_encounter(void) {
                  * pursuing through the hold rather than giving up the moment it noses
                  * ahead. The counter resets whenever the target is level/ahead again,
                  * so only a held lead counts. [#4 2026-06-20] */
+#ifndef TD5RE_RELEASE
+                if (td5_police_dev_slow()) s_cop_overtake_ticks[k] = 0;   /* [round H HH] DEV hold: no pull-over */
+#endif
                 if (gap <= -COP_OVERTAKE_MARGIN) {
                     if (++s_cop_overtake_ticks[k] >= cop_overtake_hold_ticks()) {
                         g_cop_phase[k]          = COP_PULLOVER;
@@ -8626,6 +8650,8 @@ void td5_ai_update_special_encounter(void) {
                     }
                     TD5_LOG_I(LOG_TAG, "cop_chase COMPLETE (target stopped): cop=%d target=%d rebust_cd=%d", k, tgt, (int)s_cop_rebust_ticks[k]);
                     cop_end_chase(k);
+                    /* [round H HH] with the pursuit layer on, a completed pull-over is a BUST (3 s hold) */
+                    td5_police_on_pullover_stopped(k, tgt);
                 } else if (gap > COP_OVERTAKE_MARGIN) {
                     /* Target slipped back ahead of the cop -> resume the pursuit. */
                     g_encounter_active[tgt] = 0;
@@ -8789,6 +8815,9 @@ void td5_ai_update_race_actors(void) {
 
         /* --- Step 4: Special encounter check --- */
         td5_ai_update_special_encounter();
+        /* [round H HH] the pursuit layer of the normal races: heat, bust, escape,
+         * roadblocks (self-gated: a race with POLICE off never gets here with it on) */
+        td5_police_tick();
     }
 
     /* [R1026 K] Runs even when no traffic/cop scheduler is active (POLICE off, no
@@ -9487,9 +9516,25 @@ static void cop_drive(int slot) {
 }
 
 static void ai_update_single_traffic(int slot) {
+    /* [round H HH] A police ROADBLOCK car (td5_police.c) is parked across the road:
+     * held at its spot, no route plan, no lane follow, never a wreck. */
+    if (td5_police_block_slot(slot)) {
+        g_actor_broken_down[slot]  = 0;
+        g_actor_broken_ticks[slot] = 0;
+        td5_police_block_hold(slot);
+        return;
+    }
     /* Broken-down traffic/cop: park it (brake, no throttle) so it sits and
      * smokes until the timer clears + it is recycled. Skip all driving. */
     if (g_actor_broken_down[slot]) {
+        ai_apply_stop_command(actor_ptr(slot));
+        return;
+    }
+    /* [round H HH] Ordinary traffic heading into a police roadblock brakes and
+     * waits behind it (it would otherwise drive into the parked cars). */
+    if (!g_cop_is_cop[slot] &&
+        td5_police_traffic_blocked(slot, (int)(int16_t)ACTOR_I16(actor_ptr(slot), ACTOR_SPAN_NORMALIZED),
+                                   route_state(slot)[RS_ROUTE_DIRECTION_POLARITY] != 0)) {
         ai_apply_stop_command(actor_ptr(slot));
         return;
     }
@@ -9501,6 +9546,18 @@ static void ai_update_single_traffic(int slot) {
      * front of the target while pulling it over). */
     if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING) {
         cop_drive(slot);
+#ifndef TD5RE_RELEASE
+        /* [round H HH] DEV: the `police` self-test holds the pursuers back: level 1 keeps
+         * them 80 m off the target (and the scheduler grants no pull-over), level 2 brakes them */
+        if (td5_police_dev_slow() == 2 ||
+            (td5_police_dev_slow() == 1 && g_cop_target[slot] >= 0 &&
+             smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_X) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_X)) / 256 +
+             smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_Z) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_Z)) / 256 < 80 * 330)) {
+            ACTOR_U8(actor_ptr(slot),  ACTOR_BRAKE_FLAG)      = 1;
+            ACTOR_I16(actor_ptr(slot), ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
+        }
+        if (td5_police_dev_slow() == 1) s_cop_stall_ticks[slot] = 0;   /* a held cop is not a stalled one */
+#endif
         return;
     }
 
@@ -9537,6 +9594,48 @@ void td5_ai_roam_mark_cop(int slot, int is_cop) {
     g_cop_is_cop[slot] = (uint8_t)(is_cop ? 1 : 0);
     g_cop_phase[slot]  = COP_IDLE;
     g_cop_target[slot] = -1;
+}
+
+/* [round H HH] The pursuit layer (td5_police.c) ends EVERY chase on racer `target`
+ * (a bust or an escape): each cop chasing / pulling it over lets go (pull-over hold
+ * released, chase cooldown), and leaves that car alone for its re-chase cooldown.
+ * The cops stay cops and drive on as traffic. */
+void td5_ai_police_end_chases(int target) {
+    for (int k = g_traffic_slot_base; k < TD5_MAX_TOTAL_ACTORS; k++) {
+        if (!g_cop_is_cop[k] || g_cop_target[k] != target) continue;
+        if (g_cop_phase[k] != COP_CHASING && g_cop_phase[k] != COP_PULLOVER) continue;
+        if (g_cop_phase[k] == COP_PULLOVER && target >= 0 && target < TD5_MAX_TOTAL_ACTORS)
+            g_encounter_active[target] = 0;
+        cop_end_chase(k);
+        s_cop_rebust_target[k] = (int8_t)target;
+        s_cop_rebust_ticks[k]  = (int16_t)cop_rebust_cooldown();
+        TD5_LOG_I(LOG_TAG, "cop_chase END (pursuit layer): cop=%d target=%d", k, target);
+    }
+}
+
+/* [round H HH] Make idle cop `cop` chase racer `target` now (the racer rammed it).
+ * Same state the scheduler's acquire writes. Returns 1 when the chase started. */
+int td5_ai_police_force_chase(int cop, int target) {
+    char *a;
+    if (cop < g_traffic_slot_base || cop >= TD5_MAX_TOTAL_ACTORS) return 0;
+    if (target < 0 || target >= g_traffic_slot_base) return 0;
+    if (!g_cop_is_cop[cop] || g_actor_broken_down[cop] || td5_ai_traffic_dynamic_parked(cop)) return 0;
+    if (g_cop_phase[cop] != COP_IDLE) return g_cop_target[cop] == target;
+    g_cop_target[cop]          = (int8_t)target;
+    g_cop_phase[cop]           = COP_CHASING;
+    g_cop_cooldown[cop]        = 0;
+    s_cop_best_gap[cop]        = 0x7FFFFFFF;
+    s_cop_stall_ticks[cop]     = 0;
+    s_cop_chase_ticks[cop]     = 0;
+    a = actor_ptr(cop);
+    if (route_state(cop)[RS_ROUTE_DIRECTION_POLARITY] != 0) {
+        route_state(cop)[RS_ROUTE_DIRECTION_POLARITY] = 0;
+        td5_track_compute_heading((TD5_Actor *)a);
+        ACTOR_I32(a, ACTOR_LIN_VEL_X) = 0;
+        ACTOR_I32(a, ACTOR_LIN_VEL_Z) = 0;
+    }
+    TD5_LOG_I(LOG_TAG, "cop_chase START (rammed): cop=%d target=%d", cop, target);
+    return 1;
 }
 
 void td5_ai_cop_chase_setup(int cop_slot, int is_ai) {

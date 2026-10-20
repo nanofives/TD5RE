@@ -24,6 +24,9 @@ int td5_roam_gfix_enabled(void);
 /* [G5] 1 with TD5RE_ROAM_GROUND_G4=1: the G4 cell clamp (lowest road height of the 4 cells) instead of the
  * per-triangle lowering (before / after checks) */
 int td5_roam_gfix_g4(void);
+/* [roam HC] 0 with TD5RE_ROAM_GROUND_VERGE=0: no verge band (the ground may climb straight back to the raster
+ * beside a kerb, as before) */
+int td5_roam_gfix_verge(void);
 
 /* Lowest road height inside each global cell I0..I0+N-1, J0..J0+N-1 (cm[(J-J0)*N + (I-I0)], 1e300 = no road),
  * from the primitives of the 3x3 ROAD tiles nb[(dz+1)*3 + (dx+1)] (NULL entries skipped; tunnel bores left out). */

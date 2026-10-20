@@ -171,8 +171,13 @@ static void rb_quad(float x0, float y0, float x1, float y1, float x2, float y2, 
 {
     TD5_D3DVertex *v;
     uint16_t *ix;
-    const uint16_t b = (uint16_t)(rb_nq * 4);
+    uint16_t b;
+    /* [roam HB] flush BEFORE the base index is taken. It was taken first, so the first quad after every 6000-quad
+     * flush kept the old base (24000) while its vertices landed at slot 0: its indices read vertices that were
+     * never written, i.e. stale GPU upload memory. A dense planner view (> 6000 street quads) drew that quad as a
+     * thin diagonal sliver from the corner that changed from frame to frame: the "flickering diagonal line". */
     if (rb_nq >= RB_QUADS) rb_flush();
+    b = (uint16_t)(rb_nq * 4);
     v = &rb_v[rb_nq * 4];
     ix = &rb_i[rb_nq * 6];
     v[0].screen_x = x0; v[0].screen_y = y0;
@@ -277,6 +282,28 @@ static int seg_visible(const Proj *p, float ax, float ay, float bx, float by, fl
     return 1;
 }
 
+/* [roam HB] a line clipped to the pane (+ margin m) BEFORE it becomes a quad. A place-wide street or the boundary
+ * ring can run tens of thousands of pixels off screen; those quads were handed to the GPU whole, and their
+ * clipped edge crawled between frames (the flickering diagonal on the route planner). Liang-Barsky. */
+static void pline(const Proj *p, float ax, float ay, float bx, float by, float w, uint32_t col)
+{
+    const float xmin = p->x0 - w, xmax = p->x1 + w, ymin = p->y0 - w, ymax = p->y1 + w;
+    const float dx = bx - ax, dy = by - ay;
+    float t0 = 0.0f, t1 = 1.0f;
+    const float pp[4] = { -dx, dx, -dy, dy };
+    const float qq[4] = { ax - xmin, xmax - ax, ay - ymin, ymax - ay };
+    int i;
+    for (i = 0; i < 4; i++) {
+        if (pp[i] == 0.0f) { if (qq[i] < 0.0f) return; }
+        else {
+            const float t = qq[i] / pp[i];
+            if (pp[i] < 0.0f) { if (t > t1) return; if (t > t0) t0 = t; }
+            else              { if (t < t0) return; if (t < t1) t1 = t; }
+        }
+    }
+    rb_line(ax + dx * t0, ay + dy * t0, ax + dx * t1, ay + dy * t1, w, col);
+}
+
 typedef struct {
     const Proj *p;
     int   min_rank;
@@ -304,7 +331,7 @@ static void street_cb(void *user, int klass, int lanes, int oneway, const int32_
         proj_pt(c->p, (double)xz[2 * i], (double)xz[2 * i + 1], &sx, &sy);
         if (!have) { lx = sx; ly = sy; have = 1; continue; }
         if ((sx - lx) * (sx - lx) + (sy - ly) * (sy - ly) < 3.0f && i != npt - 1) continue;
-        if (seg_visible(c->p, lx, ly, sx, sy, w)) { rb_line(lx, ly, sx, sy, w, c->col_rank[rank]); c->segs++; }
+        if (seg_visible(c->p, lx, ly, sx, sy, w)) { pline(c->p, lx, ly, sx, sy, w, c->col_rank[rank]); c->segs++; }
         lx = sx; ly = sy;
     }
 }
@@ -324,7 +351,7 @@ static void light_cb(void *user, int klass, int lanes, const int32_t *xz, int np
         proj_pt(c->p, (double)xz[2 * i], (double)xz[2 * i + 1], &sx, &sy);
         if (!have) { lx = sx; ly = sy; have = 1; continue; }
         if ((sx - lx) * (sx - lx) + (sy - ly) * (sy - ly) < 3.0f && i != npt - 1) continue;
-        if (seg_visible(c->p, lx, ly, sx, sy, w)) rb_line(lx, ly, sx, sy, w, c->col_rank[rank]);
+        if (seg_visible(c->p, lx, ly, sx, sy, w)) pline(c->p, lx, ly, sx, sy, w, c->col_rank[rank]);
         lx = sx; ly = sy;
     }
 }
@@ -340,7 +367,7 @@ static void draw_boundary(const Proj *p, float w)
         for (i = 0; i <= n && xz; i++) {
             float sx, sy;
             proj_pt(p, xz[2 * (i % n)], xz[2 * (i % n) + 1], &sx, &sy);
-            if (i > 0 && seg_visible(p, lx, ly, sx, sy, w)) rb_line(lx, ly, sx, sy, w, 0xFF6A5A2E);
+            if (i > 0 && seg_visible(p, lx, ly, sx, sy, w)) pline(p, lx, ly, sx, sy, w, 0xFF6A5A2E);
             lx = sx; ly = sy;
         }
     }
@@ -356,7 +383,7 @@ static void link_cb(void *user, int klass, double x0, double z0, double x1, doub
     { const float real = 6.0f * c->ppm_px; if (real > w) w = real; }
     proj_pt(c->p, x0, z0, &ax, &ay);
     proj_pt(c->p, x1, z1, &bx, &by);
-    if (seg_visible(c->p, ax, ay, bx, by, w)) { rb_line(ax, ay, bx, by, w, c->col_rank[rank]); c->segs++; }
+    if (seg_visible(c->p, ax, ay, bx, by, w)) { pline(c->p, ax, ay, bx, by, w, c->col_rank[rank]); c->segs++; }
 }
 
 static void draw_streets(const Proj *p, double half_w_units, double half_h_units, int min_rank, float ppm_px,
@@ -398,7 +425,7 @@ static void draw_route(const Proj *p, float core, float casing, float chevron_ev
             if (!have) { lx = sx; ly = sy; have = 1; continue; }
             if ((sx - lx) * (sx - lx) + (sy - ly) * (sy - ly) < 2.25f && i != r->npt - 1) continue;
             if (seg_visible(p, lx, ly, sx, sy, w)) {
-                rb_line(lx, ly, sx, sy, w, col);
+                pline(p, lx, ly, sx, sy, w, col);
                 if (w >= 3.0f) rb_rect(sx - w * 0.5f, sy - w * 0.5f, w, w, col);
                 if (pass == 1 && chevron_every > 0.0f) {
                     const float dx = sx - lx, dy = sy - ly, len = sqrtf(dx * dx + dy * dy);
@@ -621,7 +648,7 @@ static void list_input(void)
         if (td5_roam_route_load(u.list[u.sel])) {
             u.mode = 0;
             fit_route();
-            if (!td5_roam_race_open_setup()) ui_toast("%s IS NOT A PLANNED SPRINT", u.list[u.sel]);
+            if (!td5_roam_race_start_prefs()) ui_toast("%s IS NOT A PLANNED SPRINT", u.list[u.sel]);
         } else {
             ui_toast("COULD NOT LOAD %s", u.list[u.sel]);
         }
@@ -700,7 +727,6 @@ static void map_input(double dt)
     int mx = 0, my = 0, cw = 0, ch = 0;
     const int shift = kd(K_LSHIFT) || kd(K_RSHIFT);
 
-    if (td5_roam_race_setup_open()) return;          /* [F6-B] the sprint setup panel owns the keys */
     if (u.mode == 1) { name_input(); return; }
     if (u.mode == 2) { list_input(); return; }
 
@@ -732,7 +758,7 @@ static void map_input(double dt)
         return;
     }
     if (ke(K_R)) {                                   /* [F6-B] RACE THIS ROUTE */
-        if (!td5_roam_race_open_setup()) ui_toast("NEED A START, A FINISH AND A ROUTE BETWEEN THEM");
+        if (!td5_roam_race_start_prefs()) ui_toast("NEED A START, A FINISH AND A ROUTE BETWEEN THEM");
         return;
     }
     if (ke(K_T)) {                                   /* [F9a] SPRINT <-> CIRCUIT */
@@ -993,7 +1019,6 @@ void td5_roam_route_ui_draw_overlay(void)
     }
     rb_flush();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    td5_roam_race_draw_setup();     /* [F6-B] the sprint setup panel over the map (self-gated) */
 }
 
 /* ============================================================ the HUD line ===== */
@@ -1035,6 +1060,144 @@ void td5_roam_route_ui_draw_hud(void)
 
 /* ============================================================ the minimap ====== */
 
+/* [roam HB] THE ONE PLACE the minimap's left/right handedness lives. Heading-up: the car's heading is screen-up.
+ * m00/m01 is the x row. It is the STRIP race minimap's convention (td5_hud.c: rot = 0x800 - heading), in which
+ * place/world +X lies to the LEFT of the heading. If the roam world transform gets mirrored to match the real
+ * map (suspected: the planner, which uses X-right, disagrees with the 3D view), negate the x row here
+ * (MM_MIRROR_X) and nothing else: the N marker, labels and cops all go through this matrix. */
+#define MM_MIRROR_X (-1.0)
+static void mm_heading_up_matrix(double ya, Proj *p)
+{
+    p->m00 = MM_MIRROR_X * cos(ya); p->m01 = -MM_MIRROR_X * sin(ya);
+    p->m10 = -sin(ya);              p->m11 = -cos(ya);
+}
+
+/* [roam HB] STREET NAMES on the roam minimap (the strip race had them since round 1022). The names come from
+ * the partido street layer (OSM "name" of the ROADS records). Same rule as the strip's labels: named streets
+ * of residential class and up, ONE label per name at the chord midpoint nearest the car, the street the car
+ * is on left out (the line under the map says it), nearest first, at most MM_LABELS, none overlapping each
+ * other or the car, horizontal text (the map turns, rotated text shimmers). */
+#define MM_LABELS 5
+#define MM_CAND   96
+typedef struct { int id; float d2, mx, my; } MmCand;
+typedef struct {
+    const Proj *p;
+    MmCand c[MM_CAND]; int n;
+    float keep2, mx0, my0, mx1, my1, ox, oy;
+} MmLabelCtx;
+
+static void mm_named_cb(void *user, int name_id, int klass, const int32_t *xz, int npt)
+{
+    MmLabelCtx *c = (MmLabelCtx *)user;
+    float lx = 0, ly = 0;
+    int i, have = 0;
+    if (klass < TD5_GEO_RC_RESIDENTIAL) return;
+    for (i = 0; i < npt; i++) {
+        float sx, sy;
+        proj_pt(c->p, (double)xz[2 * i], (double)xz[2 * i + 1], &sx, &sy);
+        if (have) {
+            const float mx = (lx + sx) * 0.5f, my = (ly + sy) * 0.5f;
+            if (mx >= c->mx0 && mx <= c->mx1 && my >= c->my0 && my <= c->my1) {
+                const float dx = mx - c->ox, dy = my - c->oy, d2 = dx * dx + dy * dy;
+                if (d2 >= c->keep2) {
+                    int j;
+                    MmCand *k = NULL;
+                    for (j = 0; j < c->n; j++) if (c->c[j].id == name_id) { k = &c->c[j]; break; }
+                    if (!k && c->n < MM_CAND) { k = &c->c[c->n++]; k->id = name_id; k->d2 = 1e30f; }
+                    if (k && d2 < k->d2) { k->d2 = d2; k->mx = mx; k->my = my; }
+                }
+            }
+        }
+        lx = sx; ly = sy; have = 1;
+    }
+}
+
+static void mm_street_labels(const Proj *p, double px, double pz, float x, float y, float w, float h, float S)
+{
+    MmLabelCtx lc;
+    float cap = 6.5f * S, rects[MM_LABELS][4];
+    int i, j, placed = 0, own;
+    double dist = 0.0;
+    struct { int id; float x0, base, w; } out[MM_LABELS];
+    if (!td5_roam_partido_streets_ready()) return;
+    if (td5_env_int("TD5RE_MINIMAP_LABELS", 1, 0, 1) == 0) return;
+    if (cap < 6.0f) cap = 6.0f;
+    memset(&lc, 0, sizeof lc);
+    lc.p = p; lc.ox = p->ox; lc.oy = p->oy;
+    lc.keep2 = (9.0f * S) * (9.0f * S);
+    lc.mx0 = x + 6.0f * S; lc.mx1 = x + w - 6.0f * S; lc.my0 = y + cap; lc.my1 = y + h - cap;
+    {
+        const double reach = (double)w * 0.75 / p->k;      /* the window's half diagonal, place units */
+        td5_roam_partido_named_query(px - reach, pz - reach, px + reach, pz + reach, mm_named_cb, &lc);
+    }
+    own = td5_roam_partido_name_at(px, pz, 25.0, &dist);
+    for (i = 1; i < lc.n; i++) {                           /* nearest first (insertion sort, n is tiny) */
+        MmCand t = lc.c[i];
+        for (j = i - 1; j >= 0 && lc.c[j].d2 > t.d2; j--) lc.c[j + 1] = lc.c[j];
+        lc.c[j + 1] = t;
+    }
+    for (i = 0; i < lc.n && placed < MM_LABELS; i++) {
+        const char *name;
+        float tw, x0, base, r[4];
+        int clash = 0;
+        if (lc.c[i].id == own) continue;
+        name = td5_roam_partido_name(lc.c[i].id);
+        if (!name[0]) continue;
+        tw = td5_hud_utf8_line(0.0f, 0.0f, cap, name, 0u, 0);
+        if (tw <= 0.0f || tw > w - 8.0f * S) continue;
+        x0 = lc.c[i].mx - tw * 0.5f;
+        if (x0 < x + 3.0f * S) x0 = x + 3.0f * S;
+        if (x0 + tw > x + w - 3.0f * S) x0 = x + w - 3.0f * S - tw;
+        if (fabsf((x0 + tw * 0.5f) - lc.c[i].mx) > tw * 0.35f) continue;
+        base = lc.c[i].my + cap * 0.5f;
+        r[0] = x0 - 2.0f * S; r[1] = base - cap - 1.5f * S; r[2] = x0 + tw + 2.0f * S; r[3] = base + 2.5f * S;
+        if (r[2] > p->ox - 9.0f * S && r[0] < p->ox + 9.0f * S && r[3] > p->oy - 9.0f * S && r[1] < p->oy + 9.0f * S) continue;
+        for (j = 0; j < placed; j++)
+            if (r[2] > rects[j][0] && r[0] < rects[j][2] && r[3] > rects[j][1] && r[1] < rects[j][3]) { clash = 1; break; }
+        if (clash) continue;
+        memcpy(rects[placed], r, sizeof r);
+        out[placed].id = lc.c[i].id; out[placed].x0 = x0; out[placed].base = base; out[placed].w = tw;
+        placed++;
+    }
+    for (i = 0; i < placed; i++) rb_rect(rects[i][0], rects[i][1], rects[i][2] - rects[i][0], rects[i][3] - rects[i][1], 0x8C0A140E);
+    rb_flush();
+    for (i = 0; i < placed; i++)
+        td5_hud_utf8_line(out[i].x0, out[i].base, cap, td5_roam_partido_name(out[i].id), 0xFFF2F6FF, 1);
+}
+
+/* [roam HB] "the current street below it": the name of the street the car is on, centred under the minimap
+ * (above it when the pane touches the screen bottom). Held until a new street has been nearest for a few
+ * frames, so a junction does not make it flicker. */
+static void mm_street_name(double px, double pz, float x, float y, float w, float h, float S)
+{
+    static int shown = -1, cand = -1, cand_n;
+    char buf[128];
+    float cap = 7.5f * S, tw, bx, by;
+    double dist;
+    int id;
+    if (!td5_roam_partido_streets_ready()) return;
+    if (td5_env_int("TD5RE_MINIMAP_LABELS", 1, 0, 1) == 0) return;
+    id = td5_roam_partido_name_at(px, pz, 25.0, &dist);
+    if (id != shown) {
+        if (id == cand) cand_n++; else { cand = id; cand_n = 1; }
+        if (cand_n >= 6 || shown < 0) { shown = id; cand_n = 0; }
+    } else cand_n = 0;
+    if (shown < 0) return;
+    if (cap < 7.0f) cap = 7.0f;
+    snprintf(buf, sizeof buf, "%s", td5_roam_partido_name(shown));
+    tw = td5_hud_utf8_line(0.0f, 0.0f, cap, buf, 0u, 0);
+    if (tw <= 0.0f) return;
+    bx = x + (w - tw) * 0.5f;
+    if (bx < 4.0f * S) bx = 4.0f * S;
+    by = y + h + cap * 1.25f;
+    if (by + cap * 0.6f > g_render_height_f) by = y - cap * 0.5f;    /* no room below: above the pane */
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
+    rb_rect(bx - 3.0f * S, by - cap - 1.5f * S, tw + 6.0f * S, cap + 4.5f * S, 0x990A140E);
+    rb_flush();
+    td5_hud_utf8_line(bx, by, cap, buf, 0xFFF2F6FF, 1);
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
 void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
 {
     Proj p;
@@ -1049,7 +1212,7 @@ void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
         memset(&p, 0, sizeof p);
         p.cx = px; p.cz = pz;
         p.k = (double)(w * 0.5f) / (half_m * 430.0);
-        p.m00 = cos(ya); p.m01 = -sin(ya); p.m10 = -sin(ya); p.m11 = -cos(ya);
+        mm_heading_up_matrix(ya, &p);
         p.ox = x + w * 0.5f; p.oy = y + h * 0.5f;
         p.x0 = x; p.y0 = y; p.x1 = x + w; p.y1 = y + h;
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
@@ -1059,6 +1222,7 @@ void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
         draw_route(&p, 3.0f * S, 5.5f * S, 40.0f * S);
         draw_pins(&p, 5.0f * S, 0);
         draw_cops(&p, w, h, S);
+        mm_street_labels(&p, px, pz, x, y, w, h, S);
         /* the car, always pointing up */
         rb_tri(p.ox, p.oy - 9.0f * S, p.ox - 6.0f * S, p.oy + 7.0f * S, p.ox + 6.0f * S, p.oy + 7.0f * S, 0xFF101010);
         rb_tri(p.ox, p.oy - 7.0f * S, p.ox - 4.5f * S, p.oy + 5.0f * S, p.ox + 4.5f * S, p.oy + 5.0f * S, 0xFF35E8FF);
@@ -1067,16 +1231,21 @@ void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
         rb_rect(x, y + h - 1.5f * S, w, 1.5f * S, 0xFFB0B8C2);
         rb_rect(x, y, 1.5f * S, h, 0xFFB0B8C2);
         rb_rect(x + w - 1.5f * S, y, 1.5f * S, h, 0xFFB0B8C2);
-        /* N marker on the rim */
+        /* N marker on the rim: the screen direction of place +Z (north), through the same matrix as the map.
+         * The rim is the pane's inscribed circle, so the marker sits ON the outline whatever the heading. */
         {
-            const double nf = cos((double)yaw * (2.0 * PI_D / 4096.0)), nr = -sin((double)yaw * (2.0 * PI_D / 4096.0));
-            const float nx = p.ox + (float)nr * (w * 0.5f - 10.0f * S), ny = p.oy - (float)nf * (h * 0.5f - 10.0f * S);
-            rb_disc(nx, ny, 7.0f * S, 0xFF1A1F27);
+            const float rim = (w < h ? w : h) * 0.5f - 1.5f * S;
+            const float nr = 7.5f * S;
+            const float dxn = (float)p.m01, dyn = (float)p.m11;     /* unit: m is a rotation (+ mirror) */
+            const float nx = p.ox + dxn * (rim - nr), ny = p.oy + dyn * (rim - nr);
+            rb_disc(nx, ny, nr + 1.2f * S, 0xFFE8E8E8);
+            rb_disc(nx, ny, nr, 0xFFB01E1E);
             rb_flush();
-            td5_vui_text_centered(nx, ny - 6.5f * S, "N", 0xFFFFFFFF, 11.0f * S / 26.0f, 11.0f * S / 26.0f);
+            td5_vui_text_centered(nx, ny - 6.0f * S, "N", 0xFFFFFFFF, 11.0f * S / 26.0f, 11.0f * S / 26.0f);
         }
         rb_flush();
         td5_render_set_clip_rect(0.0f, g_render_width_f, 0.0f, g_render_height_f);
+        mm_street_name(px, pz, x, y, w, h, S);
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     }
 }
@@ -1157,7 +1326,7 @@ static void wq_strip(double x0, double z0, float y0, double x1, double z1, float
 
 void td5_roam_route_ui_draw_world(int view)
 {
-    const TD5_RouteResult *r = td5_roam_route_result();
+    const TD5_RouteResult *r = td5_roam_route_display();   /* [HE] no connector jogs: the arrows do not twist at junctions */
     double px, pz;
     int32_t ox, oz;
     int i, i0, i1, nwp = td5_roam_route_wp_count();
