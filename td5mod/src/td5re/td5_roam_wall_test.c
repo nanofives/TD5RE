@@ -765,7 +765,21 @@ void td5_roam_wall_test_frame(void)
             const int st = td5_roam_race_state();
             const int cd = td5_game_resume_countdown_ticks();
             if (st == TD5_RRACE_OFF) T.rs_saw_off = 1;
-            if (T.rs_saw_off && st == TD5_RRACE_COUNTDOWN && cd > 0) { T.rs_saw_cd = 1; if (cd > T.rs_cd_max) T.rs_cd_max = cd; }
+            if (T.rs_saw_off && st == TD5_RRACE_COUNTDOWN && cd > 0) {
+                static int s_cd_shot[3];
+                const int digit = (cd + 29) / 30;          /* 3, 2, 1 */
+                T.rs_saw_cd = 1;
+                if (cd > T.rs_cd_max) T.rs_cd_max = cd;
+                if (digit >= 1 && digit <= 3 && !s_cd_shot[digit - 1] && (cd % 30) == 15) {
+                    /* the 3-2-1 after the restart, one frame dump per digit (TD5RE_D3D12_CAPTURE=1) */
+                    char path[512];
+                    const char *dir = td5_plat_log_dir();
+                    s_cd_shot[digit - 1] = 1;
+                    snprintf(path, sizeof path, "%sroam_wall_restart_cd%d.png", dir ? dir : "", digit);
+                    td5_plat_request_frame_dump(path);
+                    TD5_LOG_I(LOG_TAG, "[ROAMWALLS] restart countdown digit %d (%d ticks left) -> %s", digit, cd, path);
+                }
+            }
             if (T.rs_saw_off && st == TD5_RRACE_RACING) {
                 int n = 0, i, nm = 0;
                 const TD5_RoamBarrier *b = td5_roam_barriers(&n);
