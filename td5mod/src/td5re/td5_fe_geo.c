@@ -99,6 +99,7 @@
 #define GEO_ROW_STEP      28
 #define GEO_ROW_H         24
 #define GEO_OPT_VIS        6
+#define GEO_RR_ROWS        5   /* [roam HA] race settings rows (slots 1..5) of the city panel */
 #define GEO_HELP_Y       250.0f
 #define GEO_HELP_H        82.0f
 #define GEO_BTN_DEF_Y    338
@@ -1021,7 +1022,6 @@ static void geo_opt_layout_rows(void)
 /* [roam HA] RACE SETTINGS of the city race (RACE ROUTE): the options that were a panel inside the race
  * (R on the route map). They sit in slots 1..5 of the option rows, under TIME OF DAY, and live in
  * td5_roam_prefs (td5_roam_handoff.h). */
-#define GEO_RR_ROWS 5
 static const char *const k_rr_label[GEO_RR_ROWS] = { "RACE TYPE", "LAPS", "OPPONENTS", "TRAFFIC", "COPS" };
 
 static void geo_rr_value(int row, char *buf, size_t cap)
