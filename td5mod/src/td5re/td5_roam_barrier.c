@@ -63,6 +63,7 @@ typedef struct {
     double   dirx, dirz;   /* mouth: the route exit direction the chevrons follow             */
     uint64_t arm_key;      /* mouth: the arm's edge key and end (debug / census)             */
     int      arm_end;
+    double   openx, openz; /* [HE] mouth: unit direction to the OPEN side (back into the junction), 0,0 = unknown */
 } BarAux;
 
 static struct {
@@ -120,6 +121,7 @@ static int bar_add(const PlBar *p, int kind, uint64_t ck, int sign, uint64_t arm
         B.aux[B.n].sign = sign >= 0 ? 1 : -1;
         B.aux[B.n].refined = 0;
         B.aux[B.n].arm_key = arm_key; B.aux[B.n].arm_end = arm_end;
+        B.aux[B.n].openx = B.aux[B.n].openz = 0.0;
         B.n++;
     }
     return 1;
@@ -179,6 +181,15 @@ void td5_roam_barriers_clear(void)
 void td5_roam_barriers_set_visible(int on) { B.visible = on ? 1 : 0; }
 int  td5_roam_barriers_visible(void) { return B.visible; }
 void td5_roam_barriers_stats(TD5_RoamBarrierStats *out) { if (out) *out = B.st; }
+
+int td5_roam_barrier_open_dir(int i, double *nx, double *nz)
+{
+    if (i < 0 || i >= B.n || B.pub[i].kind != TD5_ROAM_BARRIER_MOUTH) return 0;
+    if (B.aux[i].openx == 0.0 && B.aux[i].openz == 0.0) return 0;
+    if (nx) *nx = B.aux[i].openx;
+    if (nz) *nz = B.aux[i].openz;
+    return 1;
+}
 
 /* ============================================================ tile pool ======== */
 
@@ -921,6 +932,10 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
             sign = dotv >= 0.0 ? 1 : -1;
             if (!bar_add(&pb, TD5_ROAM_BARRIER_MOUTH, (uint64_t)c->key, sign, ar->edge_key, ar->end)) goto oom;
             B.aux[B.n - 1].dirx = c->dirx; B.aux[B.n - 1].dirz = c->dirz;
+            {   /* [HE] the open side is where the arm comes from: against its outward direction (row 0 -> row 1) */
+                const ArmRow *rw = &c->rows[(size_t)k * ARM_ROWS_MAX + (size_t)(r - 1)];
+                B.aux[B.n - 1].openx = -rw->ox; B.aux[B.n - 1].openz = -rw->oz;
+            }
             c->blocked[k] = 1;
             B.st.arms_blocked++;
             B.st.barriers_mouth++;

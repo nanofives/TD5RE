@@ -111,6 +111,10 @@ static struct {
     uint32_t go_ms, split_ms;
     char     split_txt[96];
     uint32_t split_col;
+    /* [HE] a pause-menu RESTART re-inits the roam session: the race is run again from the grid */
+    int      restart;              /* 1 = start the race again once the new session is up */
+    long     restart_frames;
+    TD5_RoamRaceSetup restart_setup;
     /* keys (own edge detection, once per frame) */
     uint8_t  cur[256], prev[256];
 } R;
@@ -262,6 +266,19 @@ static void rr_to_off(const char *why)
 
 void td5_roam_race_reset(void)
 {
+    /* [HE] td5_roam_session_start runs this on a pause-menu RESTART too (the session stays active, the route
+     * survives): a race that was on is started again from the grid once the new session is up, so its barriers
+     * come back and the 3-2-1 runs. td5_roam_end clears active first, so leaving roam never restarts anything. */
+    const int was_live = R.state >= TD5_RRACE_COUNTDOWN;
+    if (was_live && td5_roam_active()) {
+        R.restart = 1;
+        R.restart_frames = 0;
+        R.restart_setup = R.setup;
+        TD5_LOG_I(LOG_TAG, "ROAM_RACE: restart: the race runs again once the session is up (opponents=%d traffic=%d cops=%d)",
+                  R.setup.opponents, R.setup.traffic, R.setup.cops);
+    } else if (!td5_roam_active()) {
+        R.restart = 0;
+    }
     rr_to_off("session");
     rr_free_route();
     memset(&R.res, 0, sizeof R.res);
@@ -701,6 +718,21 @@ void td5_roam_race_frame(void)
     td5_roam_sprint_test_frame();
 #endif
     td5_roam_handoff_frame();    /* [F11a] plant the handed-over route, then the setup panel / the race */
+
+    if (R.restart && R.state == TD5_RRACE_OFF && !paused) {
+        /* [HE] after a pause-menu RESTART: the same route, the same setup, from the grid (barriers + 3-2-1) */
+        R.restart_frames++;
+        if (rr_route_ready() && R.restart_frames >= 5) {
+            R.restart = 0;
+            if (td5_roam_race_start(&R.restart_setup))
+                TD5_LOG_I(LOG_TAG, "ROAM_RACE: restarted after the pause-menu RESTART (%ld frames)", R.restart_frames);
+            else
+                TD5_LOG_W(LOG_TAG, "ROAM_RACE: restart refused; free roam goes on");
+        } else if (R.restart_frames > 30 * 60) {
+            R.restart = 0;
+            TD5_LOG_W(LOG_TAG, "ROAM_RACE: restart dropped (the route never came back in 60 s)");
+        }
+    }
 
     switch (R.state) {
     case TD5_RRACE_OFF:

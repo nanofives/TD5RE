@@ -68,6 +68,10 @@ void td5_roam_barriers_clear(void);
 void td5_roam_barriers_set_visible(int on);          /* F6-B: draw the set during a race */
 int  td5_roam_barriers_visible(void);
 void td5_roam_barriers_draw(int view);               /* per pane, in the world pass; self-gated */
+/* [HE] the OPEN side of mouth barrier i (index into td5_roam_barriers()): a unit xz direction from the panel
+ * back into the junction the route crosses, taken from the closed arm's own ribbon at build time (the frame is a
+ * pure translation, so it holds in PLACE and WORLD). 0 for a turn board or when unknown. */
+int  td5_roam_barrier_open_dir(int i, double *nx, double *nz);
 
 typedef struct {
     int clusters_passed;      /* clusters the route goes through (start/finish pockets included) */

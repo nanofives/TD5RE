@@ -66,6 +66,7 @@ static struct {
     long     last_hit_tick[RW_RACERS];
     long     chassis_tick[RW_RACERS];
     long     dbg_tick[RW_RACERS];          /* [F8b] DEV: contact log rate limit */
+    int32_t  org_x, org_z;                 /* [HE] world origin the segments were derived for */
     TD5_RoamRaceWallStats st;
 } W;
 
@@ -79,7 +80,8 @@ static void rw_rebuild(const TD5_RoamBarrier *b, int n)
     }
     W.nseg = n;
     W.src = b; W.nsrc = n;
-    W.st.barriers = n; W.st.mouths = 0;
+    td5_roam_world_origin(&W.org_x, &W.org_z);
+    W.st.barriers = n; W.st.mouths = 0; W.st.side_route = 0;
     for (i = 0; i < n; i++) {
         RwSeg *s = &W.seg[i];
         const double ax = b[i].x0 / 256.0, az = b[i].z0 / 256.0, bx = b[i].x1 / 256.0, bz = b[i].z1 / 256.0;
@@ -92,6 +94,15 @@ static void rw_rebuild(const TD5_RoamBarrier *b, int n)
         s->y0 = (double)b[i].y0; s->y1 = (double)b[i].y1;
         s->mouth = b[i].kind == TD5_ROAM_BARRIER_MOUTH && l > 1.0;
         W.st.mouths += s->mouth;
+        {   /* [HE] the open side comes from the barrier build (the closed arm's own ribbon direction), never from where
+             * a car happens to be: the old chassis fallback could pick the ARM side, and then the panel pushed a car
+             * that came from the junction through into the closed street (one barrier got +1 and -1 in two runs) */
+            double ox, oz;
+            if (s->mouth && td5_roam_barrier_open_dir(i, &ox, &oz)) {
+                const double dot = ox * -s->uz + oz * s->ux;
+                if (fabs(dot) > 0.2) { s->side = (int8_t)(dot > 0.0 ? 1 : -1); W.st.side_route++; }
+            }
+        }
     }
     TD5_LOG_I(LOG_TAG, "ROAM_RACE_WALL: %d barriers (%d solid mouths) armed for racers", n, W.st.mouths);
 }
@@ -102,6 +113,25 @@ static int rw_sync(void)
     const TD5_RoamBarrier *b = td5_roam_barriers(&n);
     if (!b || n <= 0) { W.nseg = 0; W.src = NULL; W.nsrc = 0; return 0; }
     if (b != W.src || n != W.nsrc) rw_rebuild(b, n);
+    else {
+        /* [HE] a world-origin rebase (F9b) re-derives the barriers in place (same array, same count): move the
+         * segments with it, or every solid panel stays where the old frame put it (256 m+ off) while drawn right */
+        int32_t ox, oz;
+        td5_roam_world_origin(&ox, &oz);
+        if (ox != W.org_x || oz != W.org_z) {
+            int i;
+            for (i = 0; i < W.nseg; i++) {
+                RwSeg *g = &W.seg[i];
+                const double ax = b[i].x0 / 256.0, az = b[i].z0 / 256.0, bx = b[i].x1 / 256.0, bz = b[i].z1 / 256.0;
+                g->ax = ax; g->az = az;
+                g->minx = (ax < bx ? ax : bx) - RW_DEPTH; g->maxx = (ax > bx ? ax : bx) + RW_DEPTH;
+                g->minz = (az < bz ? az : bz) - RW_DEPTH; g->maxz = (az > bz ? az : bz) + RW_DEPTH;
+            }
+            TD5_LOG_I(LOG_TAG, "ROAM_RACE_WALL: %d barrier segments follow the origin rebase (%+d,%+d units)", W.nseg,
+                      (int)(W.org_x - ox), (int)(W.org_z - oz));
+            W.org_x = ox; W.org_z = oz;
+        }
+    }
     return W.nseg;
 }
 
