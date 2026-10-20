@@ -187,6 +187,8 @@ void td5_hud_render_overlays(float dt);
 int  td5_hud_build_metric_digits(void);
 void td5_hud_draw_status_text(int player_slot, int view_index);
 void td5_hud_render_minimap(int view_index);
+/* [roam HB] one UTF-8 line in the HUD face (baseline y, cap height px); draw=0 only measures. Returns the width. */
+float td5_hud_utf8_line(float x, float baseline, float cap, const char *s, uint32_t color, int draw);
 /* [roam F5-A] untextured pre-transformed screen triangles in ONE draw (the route map / minimap batcher) */
 struct TD5_D3DVertex;
 void td5_hud_prim_tris(const struct TD5_D3DVertex *v, int nv, const uint16_t *idx, int ni);

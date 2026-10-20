@@ -39,6 +39,7 @@ typedef struct { double lat0, lon0, upm, mdlat, mdlon, cs, sn, offx, offz; } RpP
 typedef struct {
     int32_t minx, minz, maxx, maxz;
     int     pt0, npt;
+    int     name_id;            /* [roam HB] interned street-name id, -1 unnamed */
     uint8_t klass, lanes;
 } RpWay;
 
@@ -55,6 +56,7 @@ typedef struct {
     volatile long ready, loading;
     RpWay   *way;   int nway;
     int32_t *pt;    int npt;
+    char    *npool;  int *noff;  int nname;      /* [roam HB] interned street names (UTF-8) */
     int      gnx, gnz;
     double   gx0, gz0;
     int     *gstart, *gitem;     /* CSR: way indices per cell */
@@ -300,17 +302,52 @@ static int rp_drivable(const cJSON *r, const char *cls)
     return 1;
 }
 
+/* [roam HB] street-name interning: name -> id; id indexes the offset table into the char pool.
+ * Loader thread only. */
+typedef struct { RpVec pool, off; int *tab; int tab_n; } RpNames;
+
+static int rp_name_intern(RpNames *nm, const char *s)
+{
+    uint32_t h = 2166136261u;
+    const char *c;
+    const int len = (int)strlen(s);
+    int slot, start;
+    char *d;
+    int *o;
+    for (c = s; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
+    slot = (int)(h & (uint32_t)(nm->tab_n - 1));
+    while (nm->tab[slot]) {
+        const int id = nm->tab[slot] - 1;
+        if (!strcmp((const char *)nm->pool.p + ((const int *)nm->off.p)[id], s)) return id;
+        slot = (slot + 1) & (nm->tab_n - 1);
+    }
+    if (nm->off.n + 1 >= nm->tab_n / 2) return -1;       /* table nearly full: leave the rest unnamed */
+    start = nm->pool.n;
+    d = (char *)rp_vec_add(&nm->pool, len + 1);
+    if (!d) return -1;
+    memcpy(d, s, (size_t)len + 1);
+    o = (int *)rp_vec_add(&nm->off, 1);
+    if (!o) { nm->pool.n = start; return -1; }
+    *o = start;
+    nm->tab[slot] = nm->off.n;
+    return nm->off.n - 1;
+}
+
 static void rp_streets_load(const char *place)
 {
     char path[512], idx[512];
     char *json;
     cJSON *root, *layers, *roads, *tiles, *t;
     RpVec ways = { NULL, 0, 0, sizeof(RpWay) }, pts = { NULL, 0, 0, sizeof(int32_t) };
+    RpNames nm;
     const uint32_t t0 = td5_plat_time_ms();
     int files = 0, i;
+    memset(&nm, 0, sizeof nm);
+    nm.pool.sz = 1; nm.off.sz = sizeof(int); nm.tab_n = 1 << 17;
+    nm.tab = (int *)calloc((size_t)nm.tab_n, sizeof(int));
     td5_geo_source_path(idx, sizeof idx, place, "tiles/INDEX.JSON");
-    json = rp_slurp(idx, (size_t)64 * 1024 * 1024);
-    if (!json) { TD5_LOG_W(LOG_TAG, "ROAM_PARTIDO: no %s, no street layer", idx); return; }
+    json = nm.tab ? rp_slurp(idx, (size_t)64 * 1024 * 1024) : NULL;
+    if (!json) { free(nm.tab); TD5_LOG_W(LOG_TAG, "ROAM_PARTIDO: no %s, no street layer", idx); return; }
     root = cJSON_Parse(json);
     free(json);
     if (!root) return;
@@ -345,6 +382,10 @@ static void rp_streets_load(const char *place)
             dst = (int32_t *)rp_vec_add(&pts, 2 * np);
             if (!w || !dst) goto oom;
             w->pt0 = (pts.n - 2 * np) / 2;
+            {
+                const cJSON *nmj = cJSON_GetObjectItem(r, "name");
+                w->name_id = (cJSON_IsString(nmj) && nmj->valuestring[0]) ? rp_name_intern(&nm, nmj->valuestring) : -1;
+            }
             w->klass = (uint8_t)rp_class(cls);
             w->lanes = (uint8_t)(cJSON_IsNumber(ln) && ln->valueint > 0 && ln->valueint < 16 ? ln->valueint : 2);
             w->minx = w->minz = INT32_MAX;
@@ -409,15 +450,18 @@ static void rp_streets_load(const char *place)
         free(cnt);
         s_pt.gnx = nx; s_pt.gnz = nz; s_pt.gx0 = x0; s_pt.gz0 = z0;
     }
+    s_pt.npool = (char *)nm.pool.p; s_pt.noff = (int *)nm.off.p; s_pt.nname = nm.off.n;
+    free(nm.tab); nm.tab = NULL;
     s_pt.way = (RpWay *)ways.p; s_pt.nway = ways.n;
     s_pt.pt = (int32_t *)pts.p; s_pt.npt = pts.n / 2;
     s_pt.ms = (double)(td5_plat_time_ms() - t0);
     snprintf(s_pt.s_place, sizeof s_pt.s_place, "%s", place);
-    TD5_LOG_I(LOG_TAG, "ROAM_PARTIDO: street layer %d ways, %d points from %d ROADS tiles in %.0f ms", s_pt.nway,
-              s_pt.npt, files, s_pt.ms);
+    TD5_LOG_I(LOG_TAG, "ROAM_PARTIDO: street layer %d ways, %d points, %d street names from %d ROADS tiles in %.0f ms",
+              s_pt.nway, s_pt.npt, s_pt.nname, files, s_pt.ms);
     return;
 oom:
     if (root) cJSON_Delete(root);
+    free(nm.tab); free(nm.pool.p); free(nm.off.p);
     free(ways.p); free(pts.p);
     free(s_pt.gstart); free(s_pt.gitem); free(s_pt.stamp);
     s_pt.gstart = s_pt.gitem = s_pt.stamp = NULL;
@@ -541,4 +585,69 @@ void td5_roam_partido_streets_stats(int *ways, int *points, double *ms)
     if (ways) *ways = s_pt.nway;
     if (points) *points = s_pt.npt;
     if (ms) *ms = s_pt.ms;
+}
+
+/* ---- [roam HB] street names -------------------------------------------------------------- */
+
+const char *td5_roam_partido_name(int id)
+{
+    return (s_pt.ready == 1 && id >= 0 && id < s_pt.nname) ? s_pt.npool + s_pt.noff[id] : "";
+}
+
+int td5_roam_partido_named_query(double minx, double minz, double maxx, double maxz,
+                                 TD5_PartidoNamedCb cb, void *user)
+{
+    int a0, a1, b0, b1, a, b, n = 0;
+    if (!td5_roam_partido_streets_ready() || !cb) return 0;
+    if (!rp_cells(minx, minz, maxx, maxz, &a0, &a1, &b0, &b1)) return 0;
+    if (++s_pt.stamp_gen == 0x7FFFFFFF) { memset(s_pt.stamp, 0, (size_t)s_pt.nway * sizeof(int)); s_pt.stamp_gen = 1; }
+    for (b = b0; b <= b1; b++)
+        for (a = a0; a <= a1; a++) {
+            const int c = b * s_pt.gnx + a;
+            int k;
+            for (k = s_pt.gstart[c]; k < s_pt.gstart[c + 1]; k++) {
+                const int i = s_pt.gitem[k];
+                const RpWay *w = &s_pt.way[i];
+                if (s_pt.stamp[i] == s_pt.stamp_gen) continue;
+                s_pt.stamp[i] = s_pt.stamp_gen;
+                if (w->name_id < 0) continue;
+                if (w->maxx < minx || w->minx > maxx || w->maxz < minz || w->minz > maxz) continue;
+                cb(user, w->name_id, w->klass, s_pt.pt + 2 * w->pt0, w->npt);
+                n++;
+            }
+        }
+    return n;
+}
+
+int td5_roam_partido_name_at(double px, double pz, double max_m, double *dist_m)
+{
+    const double R = max_m * RP_UPM;
+    int a0, a1, b0, b1, a, b, best_id = -1;
+    double best = R * R;
+    if (!td5_roam_partido_streets_ready()) return -1;
+    if (!rp_cells(px - R, pz - R, px + R, pz + R, &a0, &a1, &b0, &b1)) return -1;
+    for (b = b0; b <= b1; b++)
+        for (a = a0; a <= a1; a++) {
+            const int c = b * s_pt.gnx + a;
+            int k;
+            for (k = s_pt.gstart[c]; k < s_pt.gstart[c + 1]; k++) {
+                const RpWay *w = &s_pt.way[s_pt.gitem[k]];
+                int j;
+                if (w->name_id < 0) continue;
+                if (w->maxx < px - R || w->minx > px + R || w->maxz < pz - R || w->minz > pz + R) continue;
+                for (j = 0; j + 1 < w->npt; j++) {
+                    const double ax = s_pt.pt[2 * (w->pt0 + j)], az = s_pt.pt[2 * (w->pt0 + j) + 1];
+                    const double ex = s_pt.pt[2 * (w->pt0 + j + 1)] - ax, ez = s_pt.pt[2 * (w->pt0 + j + 1) + 1] - az;
+                    const double l2 = ex * ex + ez * ez;
+                    double t = l2 > 0.0 ? ((px - ax) * ex + (pz - az) * ez) / l2 : 0.0, qx, qz, d;
+                    if (t < 0.0) t = 0.0;
+                    if (t > 1.0) t = 1.0;
+                    qx = ax + ex * t; qz = az + ez * t;
+                    d = (qx - px) * (qx - px) + (qz - pz) * (qz - pz);
+                    if (d < best) { best = d; best_id = w->name_id; }
+                }
+            }
+        }
+    if (best_id >= 0 && dist_m) *dist_m = sqrt(best) / RP_UPM;
+    return best_id;
 }

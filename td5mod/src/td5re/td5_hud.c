@@ -3803,6 +3803,13 @@ static float hud_draw_utf8_line(float x, float baseline, float cap,
     return pen - x;
 }
 
+/* [roam HB] the UTF-8 HUD line for the roam minimap's street names (td5_roam_route_ui.c). 0 width = font not ready. */
+float td5_hud_utf8_line(float x, float baseline, float cap, const char *s, uint32_t color, int draw)
+{
+    if (!td5_hudfont_ready()) return 0.0f;
+    return hud_draw_utf8_line(x, baseline, cap, s, color, draw);
+}
+
 /* [ROUND 1011 C3] "ON <street>" -- the real street the player is driving on,
  * from the route's own per-node name table.
  *
