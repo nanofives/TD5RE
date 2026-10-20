@@ -94,6 +94,7 @@ typedef struct {
     int seal_panels;          /* [HE] panels the seal pass put across a street that overlaps the sealed surface   */
     int clusters_touching;    /* [HE] junctions the seal pass found reachable without an arm: sealed too          */
     int seal_iters, seal_entries_left, seal_fail;
+    int pairs_single;         /* [HE] short edges between two sealed junctions closed by one panel instead of two facing ones */
     int seal_pockets, seal_escapes;   /* [HE] the last flood's unsealed entries: enclosed pockets / ways out (must be 0) */   /* [HE] floods run / entries the last flood still found (must be 0) / panels that did not fit */
     int boards_alt, boards_dropped;   /* turn boards put on the outer kerb of the exit arm / left out (ahead and kerb both on the route) */
     int arrows_with, arrows_side, arrows_against;   /* mouth-barrier chevrons vs the nearest route direction (against must be 0) */

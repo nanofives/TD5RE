@@ -780,8 +780,8 @@ int td5_roam_wall_test_bits(TD5_Actor *a, uint32_t *bits)
     s_last = tick;
     if (T.nshot > 0) {
         /* pose the car (brakes on), let the scenery stream in, dump a frame, next pose */
-        *bits = (uint32_t)TD5_INPUT_BRAKE;
-        if (T.shot_t == 0) {
+        *bits = 0;                       /* no input: brake on a stopped car engages reverse */
+        if (T.shot_t == 0 || T.shot_t == 60) {
             const double *ps = T.shot[T.cur_shot];
             td5_roam_place_actor(0, a, (int32_t)floor(ps[0] + 0.5), (int32_t)floor(ps[1] + 0.5), (int)ps[2] & 0xFFF);
         }

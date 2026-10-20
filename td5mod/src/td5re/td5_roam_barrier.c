@@ -52,6 +52,7 @@
 #define BAR_BOARD_W_M      3.6
 #define BAR_ROW_FAR_M      90.0     /* an arm row further than this from its centroid is not that arm's */
 #define BAR_MAX_TAKEN      64
+#define BAR_PAIR_M         15.0     /* [HE] an edge this short (cut row to cut row) between two sealed junctions gets one panel */
 
 /* ============================================================ state ============ */
 
@@ -602,6 +603,9 @@ static int bar_end_walled(const BarLoc *L, double ax, double az, double ux, doub
 {
     double s;
     if (!L->rs) return 1;
+#ifndef TD5RE_RELEASE
+    if (!td5_env_int("TD5RE_ROAM_BARRIER_ENDWALL", 1, 0, 1)) return 1;   /* DEV A/B: 0 = the F6-A cut row, whatever its ends */
+#endif
     for (s = 0.35; s <= BAR_GAP_M + 1e-9; s += 0.35)
         if (!bar_on_road(L, ax + ux * s * BAR_UPM, az + uz * s * BAR_UPM)) return 1;
     return 0;
@@ -1000,6 +1004,23 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
             int sign = 1, r, placed = 0, first_clear = -1;
             B.st.arms_total++;
             if (c->taken[k]) { B.st.arms_route++; continue; }
+            {   /* [HE] a short edge between two sealed junctions (a route junction and its glued neighbour) needs ONE panel:
+                 * the junction past it is sealed anyway, and two panels a few metres apart face each other (each one's catch
+                 * window reaches past the other: barriers 4 / 84 of the geo_map sprint) */
+                int j, pair = 0;
+                for (j = 0; j < i && !pair; j++) {
+                    const RoamTile *t2;
+                    const RoamNodeRec *n2;
+                    int m;
+                    if (!cl[j].node || c->nrows[k] <= 0) continue;
+                    t2 = &pool.tl[cl[j].node->tile];
+                    n2 = &t2->node[cl[j].node->rec];
+                    for (m = 0; m < cl[j].narm; m++)
+                        if (cl[j].blocked[m] && cl[j].nrows[m] > 0 && t2->arm[n2->arm_first + m].edge_key == ar->edge_key &&
+                            hypot(cl[j].row[m].mx - c->row[k].mx, cl[j].row[m].mz - c->row[k].mz) <= BAR_PAIR_M * BAR_UPM) { pair = 1; break; }
+                }
+                if (pair) { B.st.pairs_single++; continue; }     /* the census below counts it linked */
+            }
             if (c->nrows[k] <= 0) {
                 B.st.arm_no_row++;
                 if (B.st.arm_no_row <= 8)
@@ -1703,8 +1724,9 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
         B.st.seal_pockets = sx->pockets; B.st.seal_escapes = sx->escapes;
         B.st.build_ms = (double)(td5_plat_time_ms() - t0);
         TD5_LOG_I(LOG_TAG, "BARRIERS: seal pass: %d flood(s), %d seal panel(s), %d touching junction(s); last flood: %d unsealed "
-                  "entr(y/ies) = %d enclosed pocket(s) + %d WAY(S) OUT (must be 0); %d barriers in all, %.0f ms with the floods",
-                  sx->iters, B.st.seal_panels, B.st.clusters_touching, sx->entries_left, sx->pockets, sx->escapes, B.n, B.st.build_ms);
+                  "entr(y/ies) = %d enclosed pocket(s) + %d WAY(S) OUT (must be 0); %d short edge(s) closed by one panel; %d barriers in all, %.0f ms with the floods",
+                  sx->iters, B.st.seal_panels, B.st.clusters_touching, sx->entries_left, sx->pockets, sx->escapes, B.st.pairs_single,
+                  B.n, B.st.build_ms);
     }
     free(sx);
     free(loc.rs);
