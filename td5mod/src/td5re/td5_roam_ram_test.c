@@ -173,8 +173,9 @@ static void rr_point(double s, double off, double *x, double *z, double *tx, dou
     l = sqrt(sx * sx + sz * sz);
     if (l <= 0.0) { sx = 0.0; sz = 1.0; l = 1.0; }
     sx /= l; sz /= l;
-    *x = T.px[i] + (T.px[i + 1] - T.px[i]) * t + sz * off * RR_M;
-    *z = T.pz[i] + (T.pz[i + 1] - T.pz[i]) * t - sx * off * RR_M;
+    /* [roam M] off > 0 is the driver's RIGHT, (-tz, tx) in the game frame (td5_geo_frame.h); it was (tz, -tx) with x = east */
+    *x = T.px[i] + (T.px[i + 1] - T.px[i]) * t - sz * off * RR_M;
+    *z = T.pz[i] + (T.pz[i + 1] - T.pz[i]) * t + sx * off * RR_M;
     if (tx) { *tx = sx; *tz = sz; }
 }
 
@@ -314,6 +315,12 @@ static uint32_t rr_bits(TD5_Actor *a, long tick)
             return (uint32_t)TD5_INPUT_BRAKE;
         }
         T.kmh_prev = rr_kmh(a);
+        if ((tick - T.phase_t0) % 60 == 0) {
+            double x, z;
+            rr_place_of(a, &x, &z);
+            TD5_LOG_I(LOG_TAG, "[ROAMRAM] run %d: t=%ld s=%.1f/%.1f m (car at %.0f) %.1f km/h place (%.0f,%.0f)", T.n + 1, tick - T.phase_t0,
+                      T.s, T.np * RR_DS, T.car_s, rr_kmh(a), x, z);
+        }
         return rr_drive(a, kmh_t);
     }
     case RR_HIT: {
