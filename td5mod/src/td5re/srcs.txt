@@ -51,6 +51,8 @@ td5_roam_ai.c
 td5_roam_traffic.c
 td5_roam_cops.c
 td5_roam_cops_test.c
+td5_police.c
+td5_police_test.c
 td5_roam_gcensus.c
 td5_roam_groundfix.c
 td5_roam_pavecensus.c

@@ -49,6 +49,7 @@
 #include "td5_roam_ai.h"       /* GEO FREE ROAM AI racers (F7): opponents on the route, parked while roaming */
 #include "td5_roam_traffic.h"  /* GEO FREE ROAM ambient traffic (F8): pool slots, lane follower, signals */
 #include "td5_roam_cops.h"     /* GEO FREE ROAM police (F10): cop slots after the traffic pool */
+#include "td5_police.h"        /* [round H HH] police pursuit in the normal races */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -5093,6 +5094,7 @@ static void init_race_race_systems(void)
      * seeding below. A latch left at 1 by a race that ended mid pull-over makes
      * the next race's human car steer normally and never accelerate. */
     td5_ai_race_reset_pullover_latches();
+    td5_police_race_init();          /* [round H HH] pursuit / heat / roadblock state, per race */
     td5_ai_init_traffic_actors();
 
     /* [MP COP CHASE AI COP 2026-06-23] Arm the AI cop HERE — AFTER
@@ -8771,6 +8773,7 @@ static void frame_render(void)
     td5_roam_route_ui_draw_hud();   /* [GEO FREE ROAM F5-A] route key hints + status; self-gated */
     td5_roam_race_draw_hud();       /* [GEO FREE ROAM F6-B] sprint timer / checkpoints / results; self-gated */
     td5_roam_cops_draw_hud();       /* [GEO FREE ROAM F10] pursuit panel, bust meter, toasts; self-gated */
+    td5_police_draw_hud();          /* [round H HH] the same panel in the normal races, per pane; self-gated */
 
     /* [S27] Controller-disconnect modal: a semi-transparent "reconnect" panel
      * over each disconnected player's split-screen viewport. Self-gated (no-op

@@ -30,6 +30,7 @@
 #include "td5_render.h"   /* AngleFromVector12 */
 #include "td5_frontend.h" /* td5_frontend_get_player_manual */
 #include "td5_ai.h"
+#include "td5_police.h"   /* [round H HH] */
 #include "td5_save.h"
 #include "td5_pending.h"  /* F11 toggles the pending-test overlay */
 #include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
@@ -977,6 +978,7 @@ void td5_input_poll_race_session(void)
 
 #ifndef TD5RE_RELEASE
             if (i == 0) s_control_bits[i] |= s_selftest_drive_bits;   /* [R1026 K] selftest throttle */
+            if (i == 0) s_control_bits[i] |= td5_police_test_bits();  /* [round H HH] the `police` self-test drive */
 #endif
             /* [CONTROL 2026-07-21] Live-control hold_action bits overlay the same
              * way (identical downstream paths). Returns 0 whenever the control
@@ -1994,6 +1996,25 @@ void td5_input_update_player_control(int slot)
         if (a_actor) a_actor->throttle_state = 1;  /* forward gear — never reverse */
         TD5_LOG_I(LOG_TAG, "police_pullover: slot=%d speed=%d stop_thresh=%d brake=%d",
                   slot, speed, (int)(COP_STOP_SPEED >> 8), (int)s_brake[slot]);
+    }
+
+    /* [round H HH] BUSTED (td5_police.c): the car is held for the 3 s under the
+     * banner whatever the player presses. Brake in forward gear down to rest
+     * (no coast band, unlike the pull-over above), then the handbrake: a brake
+     * held at a standstill would engage reverse. */
+    if (td5_police_held(slot)) {
+        TD5_Actor *a_actor = td5_game_get_actor(slot);
+        if (speed >= 3) {
+            s_throttle[slot]  = (int16_t)0xFF00;
+            s_brake[slot]     = 1;
+            s_handbrake[slot] = 0;
+        } else {
+            s_throttle[slot]  = 0;
+            s_brake[slot]     = 0;
+            s_handbrake[slot] = 1;
+        }
+        s_reverse_req[slot] = 0;
+        if (a_actor) a_actor->throttle_state = 1;
     }
 
     /* ---- NOS / Horn ---- */

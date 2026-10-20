@@ -9623,6 +9623,29 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
  * full-screen, so the screen-space bar quads map correctly into every pane
  * instead of being clipped to one offset viewport. A single full-screen race is
  * one iteration (v=0) -> byte-identical to the old single-player draw. */
+/* [round H HH] Pane geometry for the self-gated overlays of other modules (td5_police_draw_hud): the live pane
+ * count, and pane v's pixel rect. 0 when v is not a live pane. */
+int td5_hud_pane_count(void)
+{
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+    return views;
+}
+
+int td5_hud_pane_rect(int v, float *x0, float *y0, float *w, float *h)
+{
+    const TD5_HudViewLayout *vl;
+    if (v < 0 || v >= td5_hud_pane_count()) return 0;
+    vl = &s_view_layout[v];
+    *x0 = vl->vp_int_left;
+    *y0 = vl->vp_int_top;
+    *w  = vl->vp_int_right - vl->vp_int_left;
+    *h  = vl->vp_int_bottom - vl->vp_int_top;
+    if (*w < 2.0f || *h < 2.0f) { *x0 = 0.0f; *y0 = 0.0f; *w = g_render_width_f; *h = g_render_height_f; }
+    return 1;
+}
+
 void td5_hud_draw_damage_bars(void)
 {
     if (!td5_damage_bar_enabled()) return;

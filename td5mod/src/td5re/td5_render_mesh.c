@@ -32,6 +32,7 @@
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_replay.h"   /* [REPLAY SMOKE] recorded wreck/damage-smoke state */
 #include "td5_ai.h"
+#include "td5_police.h"   /* [round H HH] */
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
 #include "td5_material.h" /* [LIGHT2 P3] per-material reflectivity for SSR */
@@ -3640,7 +3641,7 @@ void td5_render_actors_for_view(int view_index)
              * tracker. Runs in this shared per-view actor loop, so it covers
              * both split-screen and single-view automatically. */
             if (g_td5.special_encounter_enabled &&
-                td5_ai_cop_is_chasing(slot)) {
+                (td5_ai_cop_is_chasing(slot) || td5_police_block_lit(slot))) {   /* [round H HH] + roadblock cars */
                 render_tracked_actor_marker(actor, &view_rot, &render_pos,
                                             td5_ai_cop_glow_intensity(slot));
             }

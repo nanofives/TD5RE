@@ -226,6 +226,23 @@ void td5_ai_dev_plant_encounter(int slot);
  * td5_ai.c. */
 /* 1 when `slot` is a cop currently chasing (or pulling over) a racer. */
 int  td5_ai_cop_is_chasing(int slot);
+/* [round H HH] the racer a chasing cop `slot` is after, else -1. */
+int  td5_ai_cop_target(int slot);
+/* [round H HH] the pursuit layer (td5_police.c): end every cop chase on racer `target` (bust / escape), and
+ * make idle cop `cop` chase `target` now (a ram). force returns 1 when the chase runs. */
+void td5_ai_police_end_chases(int target);
+int  td5_ai_police_force_chase(int cop, int target);
+/* [round H HH] police ROADBLOCK cars are dynamic traffic slots (td5_ai_traffic.c): free INACTIVE slots, put
+ * one on `span` / sub-lane `lane` at world (vertex) xz facing yaw12 as a cop (returns the slot, -1 = none free),
+ * fade one out again, and fade out the `n` farthest ordinary cars behind every human to make room. */
+int  td5_ai_traffic_police_free_slots(void);
+int  td5_ai_traffic_police_block_place(int span, int lane, int32_t wx, int32_t wz, int yaw12);
+void td5_ai_traffic_police_block_release(int slot);
+void td5_ai_traffic_police_make_room(int n);
+int  td5_ai_traffic_police_recruit(int target, int min_spans);   /* [round H HH] a far car ahead becomes a cop */
+#ifndef TD5RE_RELEASE
+int  td5_ai_traffic_police_dev_plant_cop(int spans_ahead);   /* [round H HH] DEV: the `police` self-test */
+#endif
 /* [COP OVERHAUL 2026-06-29] Q8 (0x100 = 1.0) propulsion multiplier for a chasing
  * traffic-slot cop, applied to the throttle force in td5_physics_update_traffic
  * so the cop out-accelerates a faster suspect on straights (acceleration

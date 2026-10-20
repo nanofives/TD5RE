@@ -186,6 +186,9 @@ void  td5_hud_reset_radial_pulse(void);
 void td5_hud_render_overlays(float dt);
 int  td5_hud_build_metric_digits(void);
 void td5_hud_draw_status_text(int player_slot, int view_index);
+/* [round H HH] pane geometry for other modules' per-pane overlays (td5_police_draw_hud) */
+int  td5_hud_pane_count(void);
+int  td5_hud_pane_rect(int v, float *x0, float *y0, float *w, float *h);
 void td5_hud_render_minimap(int view_index);
 /* [roam HB] one UTF-8 line in the HUD face (baseline y, cap height px); draw=0 only measures. Returns the width. */
 float td5_hud_utf8_line(float x, float baseline, float cap, const char *s, uint32_t color, int draw);
