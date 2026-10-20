@@ -13,6 +13,8 @@
  *   footpaths      mapped paths in pieces, cut off the road, merged into the street band
  *   pavement       [F4b] slab + kerb + back face + fence along every kerb of the drivable
  *                  surface, junction corners on the patch outline, medians and islands
+ *   lots          [HD] the city's open ground paved (render-lattice quads), ring plazas, the infill
+ *                  frontage lots on each block's building line
  *   assemble      the blob + record table + hash, the guard census over the bytes
  *   dev CLI        --RoamBuildScenery
  *

@@ -10,6 +10,9 @@
  * (slab at kerb height, kerb face, back face, fence or deck railing; junction corners
  * follow the patch outline and its fillets; medians and traffic islands are filled
  * and kerbed both sides; widths per (edge, side) from td5_geo_sw_resolve),
+ * and [HD] the CITY LOTS (every ground cell of the city that no OSM green or ring plaza holds, laid again in
+ * concrete just over the drawn ground) and the INFILL masses (frontage lots on a block's building line with no
+ * real footprint on them; td5_roam_scenery.c SECTION lots),
  * as MODELS.DAT mesh records (the generator's own writers), one record list per
  * 64 m sub-block (4 x 4 per tile). No texture page is created: every face names a
  * page of the geo host level's TEXTURES.DAT (TD5_TG_PAGE_*).
