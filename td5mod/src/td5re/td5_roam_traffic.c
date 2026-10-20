@@ -28,6 +28,7 @@
 #include "td5_ai.h"             /* broken-down (wreck) flag of traffic slots */
 #include "td5_physics.h"
 #include "td5_render.h"
+#include "td5_camera.h"        /* [roam HG] the view cone the spawner / despawner keep out of */
 #include "td5_geo_signals.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_locate.h"
@@ -56,6 +57,10 @@
 #define RT_LANE_W      1500.0                    /* one lane, units (TD5_ROAM_LANE_W)   */
 #define RT_STEER_CLAMP 0x18000
 #define RT_FADE_TICKS  20
+#define RT_FADE_SLOW   45                        /* [HG] fade-out of a car that is in view: 1.5 s */
+#define RT_DEFER_TICKS 300                       /* [HG] a visible soft despawn waits this long for the car to leave the view */
+#define RT_POP_M       300.0                     /* [HG] "in front of me": a pop this close inside the cone is counted */
+#define RT_VIEW_COS    0.34                      /* [HG] cos 70 deg: wider than the half horizontal FOV, so the edge is hidden too */
 #define RT_STOP_BACK_M 2.8                       /* car centre this far before the stop line */
 #define RT_STILL_MS    (1.0 / 3.6)               /* "still" under 1 km/h                */
 #define RT_STUCK_TICKS 300                       /* 10 s                                */
@@ -99,6 +104,7 @@ typedef struct {
     long     still_t, hold_t, off_t_ticks, born, last_contact, lost_t, wreck_t;
     int      lane_chk;
     int      bar_k, bar_side;                    /* the barrier the car is beside, and its side */
+    int      fstep, defer_t;                     /* [HG] alpha step of the fade-out, ticks a visible despawn was held */
 } RtCar;
 
 static struct {
@@ -120,6 +126,11 @@ static struct {
     double  wb, a_lat, a_brake, speed_pct;
     int     log_every;
     TD5_RoamTrafficStats st;
+    /* [HG] popping census: events inside the view cone within RT_POP_M, spawn candidates refused, despawns held */
+    int     visgate;
+    double  vis_m;
+    long    pop_spawn, pop_despawn, pop_spawn_rej, pop_despawn_held, pop_slow_fade;
+    long    pop_log_n;
     double  live_sum;
     long    st_t0;                               /* tick of the last stats reset      */
     int     bar_valid;
@@ -164,6 +175,8 @@ static void rt_read_knobs(void)
     T.a_brake     = td5_env_int("TD5RE_ROAM_TRAFFIC_BRAKE", 30, 5, 100) / 10.0;       /* m/s2 x10 */
     T.speed_pct   = td5_env_int("TD5RE_ROAM_TRAFFIC_SPEED", 100, 20, 300) / 100.0;
     T.log_every   = td5_env_int("TD5RE_ROAM_TRAFFIC_LOG", 0, 0, 3600);
+    T.visgate     = td5_env_int("TD5RE_ROAM_TRAFFIC_VISGATE", 1, 0, 1);      /* [HG] 0 = the old spawn / despawn rule (A/B) */
+    T.vis_m       = td5_env_int("TD5RE_ROAM_TRAFFIC_VIS_M", 470, 100, 900);   /* [HG] about the far cull (195000 / 430) + margin */
 #ifndef TD5RE_RELEASE
     T.shots       = td5_env_int("TD5RE_ROAM_TRAFFIC_SHOTS", 0, 0, 1);
     T.trace_slot  = td5_env_int("TD5RE_ROAM_TRAFFIC_TRACE", -1, -1, 31);
@@ -187,6 +200,26 @@ static int rt_place_of(const TD5_Actor *a, double *px, double *pz)
     *px = (double)a->world_pos.x / 256.0 + (double)ox;
     *pz = (double)a->world_pos.z / 256.0 + (double)oz;
     return 1;
+}
+
+/* [HG] is the PLACE point (px, pz) inside the player camera cone within range_m? Pure XZ cone about the camera forward
+ * (height ignored, the cone is wider than the real frustum), so a car behind the camera or off to the side is "unseen". */
+static int rt_in_view(double px, double pz, double range_m)
+{
+    int32_t ox, oz;
+    float r[3], u[3], f[3];
+    double cx, cz, dx, dz, d, fl;
+    td5_roam_world_origin(&ox, &oz);
+    td5_camera_get_basis(r, u, f);
+    cx = (double)g_camWorldPos[0][0] / 256.0 + (double)ox;
+    cz = (double)g_camWorldPos[0][2] / 256.0 + (double)oz;
+    dx = px - cx; dz = pz - cz;
+    d = sqrt(dx * dx + dz * dz);
+    if (d > range_m * RT_M) return 0;
+    if (d < 8.0 * RT_M) return 1;                        /* beside / under the camera: seen */
+    fl = sqrt((double)f[0] * f[0] + (double)f[2] * f[2]);
+    if (fl < 1e-4) return 1;                             /* looking straight up / down: treat everything as seen */
+    return (dx * f[0] + dz * f[2]) / (d * fl) > RT_VIEW_COS;
 }
 
 /* locator at a PLACE point: 1 when a resident tile covers it; *inside = on the drivable surface */
@@ -809,6 +842,7 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     /* far enough from EVERY anchor (no car pops up next to a racer) */
     for (i = 0; i < nanch; i++)
         if (hypot(x - anx[i], z - anz[i]) < T.r_spawn_min * 0.8 * RT_M) return 0;
+    if (T.visgate && rt_in_view(x, z, T.vis_m)) { T.pop_spawn_rej++; return 0; }   /* [HG] never appear in front of the camera */
     ok = rt_locate(x, z, 0, 0, &inside, NULL);
     if (!ok || !inside) return 0;
     {   /* not under (or on) a deck: one road surface at this point, so the spawn height is the right one */
@@ -853,6 +887,11 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     rt_place_actor(c, a, x, z, rt_angle_of(tx, tz), v);
     c->state = RT_LIVE;
     c->alpha = 0; c->fade = 1;
+    c->fstep = 255 / RT_FADE_TICKS;
+    if (rt_in_view(x, z, RT_POP_M)) {
+        T.pop_spawn++;
+        if (T.pop_log_n++ < 40) TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_POP spawn slot %d in view (gate %d)", c->slot, T.visgate);
+    }
     T.spawn_count++;
     T.st.spawns++;
     return 1;
@@ -860,7 +899,26 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
 
 static void rt_despawn(RtCar *c, int why)
 {
+    int seen = 0;
     if (c->state != RT_LIVE || c->fade < 0) return;
+    {   /* [HG] a car in view is not removed for a soft reason: hold it until it leaves the view cone (or RT_DEFER_TICKS) */
+        const TD5_Actor *a = td5_game_get_actor(c->slot);
+        double x, z;
+        if (a && rt_place_of(a, &x, &z)) {
+            const int soft = why == RT_WHY_FAR || why == RT_WHY_DEAD || why == RT_WHY_STUCK || why == RT_WHY_HOLD ||
+                             why == RT_WHY_OFF || why == RT_WHY_WRECK;
+            if (rt_in_view(x, z, T.vis_m)) {
+                if (T.visgate && soft && c->defer_t < RT_DEFER_TICKS) { c->defer_t++; T.pop_despawn_held++; return; }
+                seen = 1;
+            }
+            if (rt_in_view(x, z, RT_POP_M)) {
+                T.pop_despawn++;
+                if (T.pop_log_n++ < 40) TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_POP despawn slot %d why %d in view (gate %d)", c->slot, why, T.visgate);
+            }
+        }
+    }
+    c->fstep = (T.visgate && seen) ? 255 / RT_FADE_SLOW : 255 / RT_FADE_TICKS;
+    if (c->fstep < 255 / RT_FADE_TICKS) T.pop_slow_fade++;
     c->fade = -1;
     c->why_out = why;
     T.st.despawns++;
@@ -1526,6 +1584,18 @@ static void rt_tick_body(void)
     }
     per = rt_level_now(&racing);
     nanch = rt_anchors(racing, ax, az, 8);
+#ifndef TD5RE_RELEASE
+    if (T.visgate && tick % 900 == 0) {   /* [HG] DEV: the camera forward must agree with the player's heading (cone sign check) */
+        const TD5_Actor *p0 = td5_game_get_actor(0);
+        float r[3], u[3], f[3];
+        td5_camera_get_basis(r, u, f);
+        if (p0) {
+            const double y = (double)(p0->euler_accum.yaw >> 8 & 0xFFF) * (2.0 * RT_PI / 4096.0);
+            TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC_VIEW tick %ld cam fwd (%.2f,%.2f) player dir (%.2f,%.2f) dot %.2f", tick, f[0], f[2], sin(y), cos(y),
+                      f[0] * sin(y) + f[2] * cos(y));
+        }
+    }
+#endif
     target = per * nanch;
     if (target > T.max_live) target = T.max_live;
     if (target > T.pool) target = T.pool;
@@ -1561,7 +1631,7 @@ static void rt_tick_body(void)
         if (per == 0 && c->fade >= 0) rt_despawn(c, RT_WHY_LEVEL);
         rt_drive(c, a);
         if (c->fade > 0) { c->alpha += 255 / RT_FADE_TICKS; if (c->alpha >= 255) { c->alpha = 255; c->fade = 0; } }
-        else if (c->fade < 0) { c->alpha -= 255 / RT_FADE_TICKS; if (c->alpha <= 0) rt_park(c); }
+        else if (c->fade < 0) { c->alpha -= c->fstep > 0 ? c->fstep : 255 / RT_FADE_TICKS; if (c->alpha <= 0) rt_park(c); }
         if (c->state == RT_LIVE) live++;
     }
 
@@ -1736,6 +1806,8 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     snprintf(note, n, "%straffic %d/%.1f/%d t%d red %ld/%ld off %ld+%ldhit bar %ld priv-rep %+.0fMB %s%.40s",
              status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target, s->red_violations, s->sig_cross, off_free,
              s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
+    TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] POP gate %d: spawns in view (<%.0f m, cone) %ld of %ld, despawns in view %ld of %ld | refused spawn candidates %ld, held despawn ticks %ld, slow fade-outs %ld", T.visgate, RT_POP_M, T.pop_spawn, s->spawns, T.pop_despawn, s->despawns,
+              T.pop_spawn_rej, T.pop_despawn_held, T.pop_slow_fade);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s: live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "
               "(far %ld dead-end %ld stuck %ld hold %ld off %ld unresident %ld lost %ld wreck %ld) | wrecks %ld | off-surface ticks %ld (%ld within 2 s of a racer "
               "contact, events %ld) | red violations %ld of %ld stop-line crossings at signals, red stops %ld | stuck>10s live %ld | "
@@ -1777,6 +1849,7 @@ void td5_roam_traffic_stats_reset(void)
     T.st.pool = pool;
     T.st.live_min = 1 << 30;
     T.live_sum = 0.0;
+    T.pop_spawn = T.pop_despawn = T.pop_spawn_rej = T.pop_despawn_held = T.pop_slow_fade = 0;
     T.st_t0 = (long)g_td5.simulation_tick_counter;
 }
 
