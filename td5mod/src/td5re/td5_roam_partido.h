@@ -49,6 +49,14 @@ int    td5_roam_partido_streets_query(double minx, double minz, double maxx, dou
 /* Nearest street point within max_m metres of (px, pz). 1 on success. */
 int    td5_roam_partido_nearest_street(double px, double pz, double max_m, double *sx, double *sz,
                                        double *dist_m);
+/* [roam HB] street names (the OSM "name" of the ROADS records). id -1 = unnamed. Valid once the layer is ready. */
+const char *td5_roam_partido_name(int id);
+typedef void (*TD5_PartidoNamedCb)(void *user, int name_id, int klass, const int32_t *xz, int npt);
+/* Every NAMED street whose bbox meets the window. */
+int    td5_roam_partido_named_query(double minx, double minz, double maxx, double maxz,
+                                    TD5_PartidoNamedCb cb, void *user);
+/* Name id of the nearest named street within max_m metres of (px, pz), -1 when none. */
+int    td5_roam_partido_name_at(double px, double pz, double max_m, double *dist_m);
 void   td5_roam_partido_streets_stats(int *ways, int *points, double *ms);
 
 #endif /* TD5_ROAM_PARTIDO_H */
