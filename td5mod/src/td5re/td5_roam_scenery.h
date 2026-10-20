@@ -56,8 +56,9 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  5u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
-                                     * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns */
+#define TD5_ROAM_SCENERY_RULES  6u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+                                     * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns;
+                                     * 6 = HD city lots paved (concrete) off the OSM greens + infill buildings on the frontage */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -132,6 +133,17 @@ typedef struct {
     uint32_t ms, ms_src, ms_emit;   /* worker time: total, OSM source, emit           */
     int  road_tiles;                /* ROAD tiles of the 3x3 that were available       */
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
+    /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
+     * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
+     * the pieces emitted (whole-cell quads, road-cut triangles) and the ones dropped on the road. Areas (m2) of the
+     * non-road ground of the tile's cells: paved, left as LAWN although OSM maps no green there, under an OSM green. */
+    int  lot_cells, lot_green, lot_rural, lot_skip, lot_quads, lot_tris, lot_cut;
+    double lot_paved_m2, lot_lawn_m2, lot_green_m2;
+    /* [HD] INFILL: frontage lots along the pavement's building line with no real footprint on them -> a built mass
+     * (candidates owned here, emitted, refused: a real building stands on the front, a road / another lot, an area
+     * that takes none, a lot too shallow or bent) and the footprint area added (m2) */
+    int  inf_lots, inf_emitted, inf_drop_real, inf_drop_road, inf_drop_area, inf_drop_shape;
+    double inf_m2;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
