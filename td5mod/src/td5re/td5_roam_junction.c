@@ -1506,40 +1506,6 @@ static int u_notch_fill(ULV **pv, int *pn, int *pcap, double wmax)
     return fills;
 }
 
-/* [roam M] The wedge is often OUTSIDE the union: the two arms' cut rows end at its tip, so the gap runs between
- * the two ribbons and the loop has no notch to cut. Two consecutive cut rows (arm A's run of tagged vertices, then
- * arm B's, a few untagged kerb vertices between) whose facing ends lie under U_NOTCH_W apart and that run within
- * 30 deg of each other (an acute arm pair, or a divided carriageway's two halves either side of a narrow median)
- * push BOTH arms out by `step`, so the next round's union holds the wedge and u_notch_fill cuts it back. */
-static int u_notch_push(const ULV *v, int n, double wmax, double step, double *need, int na)
-{
-    int i, pushes = 0;
-    if (wmax <= 0.0 || n < 4) return 0;
-    for (i = 0; i < n; i++) {
-        const int ia = i, ta = v[ia].tag;
-        int ib, j, ia0, ib1, steps;
-        double rax, raz, rbx, rbz, la, lb;
-        if (!ta || v[(ia + 1) % n].tag == ta) continue;          /* the LAST vertex of a run of arm A's row */
-        for (ib = (ia + 1) % n, steps = 0; !v[ib].tag && steps < 8; ib = (ib + 1) % n) steps++;
-        if (!v[ib].tag || U_TAG_ARM(v[ib].tag) == U_TAG_ARM(ta)) continue;
-        if (hypot(v[ib].x - v[ia].x, v[ib].z - v[ia].z) >= wmax) continue;
-        for (ia0 = ia, j = 0; j < n && v[(ia0 - 1 + n) % n].tag && U_TAG_ARM(v[(ia0 - 1 + n) % n].tag) == U_TAG_ARM(ta); j++)
-            ia0 = (ia0 - 1 + n) % n;
-        for (ib1 = ib, j = 0; j < n && v[(ib1 + 1) % n].tag && U_TAG_ARM(v[(ib1 + 1) % n].tag) == U_TAG_ARM(v[ib].tag); j++)
-            ib1 = (ib1 + 1) % n;
-        rax = v[ia].x - v[ia0].x; raz = v[ia].z - v[ia0].z; rbx = v[ib1].x - v[ib].x; rbz = v[ib1].z - v[ib].z;
-        la = sqrt(rax * rax + raz * raz); lb = sqrt(rbx * rbx + rbz * rbz);
-        if (la < TD5_ROAM_UPM || lb < TD5_ROAM_UPM || (rax * rbx + raz * rbz) / (la * lb) < 0.86603) continue;   /* cos 30 */
-        {
-            const int ma = U_TAG_ARM(ta), mb = U_TAG_ARM(v[ib].tag);
-            if (ma >= 0 && ma < na && need[ma] < step) need[ma] = step;
-            if (mb >= 0 && mb < na && need[mb] < step) need[mb] = step;
-            pushes++;
-        }
-    }
-    return pushes;
-}
-
 /* [F2-E] A block corner that the union outline draws as a RUN of short reflex
  * segments (the node bevels of the pieces meeting there: 00064c21000864e3, a
  * 44 deg diagonal corner drawn as 7 vertices 0.1-0.3 m apart) got one fillet per
@@ -2034,7 +2000,7 @@ static int u_needs_push(const TD5_RoamGraph *g, const TD5_RoamCluster *cl, const
 static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmTmp *at, int na,
                        TD5_RoamGraphCensus *c, ULoops *U, UStat *st, int notch)
 {
-    /* [roam M] notch rules (u_notch_fill / u_notch_push): width, 0 = off for this solve */
+    /* [roam M] the union notch rule (u_notch_fill): width, 0 = off for this solve */
     const double notch_w = notch ? td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) * 0.1 * TD5_ROAM_UPM : 0.0;
     const TD5_RoamGraphParams *P = &g->prm;
     const double W = 2.0 * P->body_half_w, LF = P->body_lf;
@@ -2200,7 +2166,8 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
             for (k = 0; k < U->nloop; k++) ntips += u_simplify(U->v[k], &U->n[k]);
             {
                 /* [roam M] acute wedges cut back to U_NOTCH_W (u_notch_fill) */
-                for (k = 0; k < U->nloop; k++) nnotch += u_notch_fill(&U->v[k], &U->n[k], &U->cap[k], notch_w);
+                if (td5_env_int("TD5RE_ROAM_NOTCH_PARTS", 13, 0, 15) & 1)
+                    for (k = 0; k < U->nloop; k++) nnotch += u_notch_fill(&U->v[k], &U->n[k], &U->cap[k], notch_w);
             }
         }
         /* Fillets on the outer loop. */
@@ -2210,18 +2177,14 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         cl->flags &= ~TD5_ROAM_CL_SWEPT_FAIL;
         nf = u_fillet(U->v[0], U->n[0], &L, P, W, LF, fixed, pr, na, need, &sc, cl, &fl);
         if (nf < 0) goto out;
-        /* [roam M] arms either side of a narrow acute wedge reach out over it (u_notch_push) */
-        {
-            const int np_ = u_notch_push(U->v[0], U->n[0], notch_w, 3.0 * TD5_ROAM_UPM, need, na);
 #ifndef TD5RE_RELEASE
+        {
             const int nlog = td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2);
-            if ((np_ || nnotch || nlog == 2) && nlog)
-                TD5_LOG_I(LOG_TAG, "ROAM_NOTCH cluster %lld at (%.0f,%.0f) round %d: %d fill(s), %d arm pair push(es)",
-                          (long long)cl->key, cl->cx, cl->cz, round, nnotch, np_);
-#else
-            (void)np_;
-#endif
+            if ((nnotch || nlog == 2) && nlog)
+                TD5_LOG_I(LOG_TAG, "ROAM_NOTCH cluster %lld at (%.0f,%.0f) round %d: %d fill(s)",
+                          (long long)cl->key, cl->cx, cl->cz, round, nnotch);
         }
+#endif
 #ifndef TD5RE_RELEASE
         {
             const char *dk = getenv("TD5RE_ROAM_UNION_DEBUG");
@@ -3067,7 +3030,7 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 const double p = (right->tjx - a->kx) * a->a.dir_x + (right->tjz - a->kz) * a->a.dir_z;
                 if (p > t) t = p;
             }
-            if (!simple && !umode && na > 1) {
+            if (!simple && !umode && na > 1 && (td5_env_int("TD5RE_ROAM_NOTCH_PARTS", 13, 0, 15) & 4)) {
                 /* [roam M] the NORMAL-mode twin of u_notch_fill: an acute DIRECT gore (arms within 30 deg, the two
                  * kerbs converging, e.g. Diagonal 80 x Avenida 44) left its nose as a wedge between the ribbons. The
                  * cut moves out to where the kerbs are U_NOTCH_W apart (at most 50 m further, never past lim; a gore
@@ -3109,7 +3072,8 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
             a->a.kerb_r = left->type == CORNER_FILLET ? left->r : 0.0;
             a->a.corner = left->type;
         }
-        if (!simple && !umode && na > 1 && td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) > 0) {
+        if (!simple && !umode && na > 1 && td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) > 0 &&
+            (td5_env_int("TD5RE_ROAM_NOTCH_PARTS", 13, 0, 15) & 8)) {
             /* [roam M] LEVEL an acute DIRECT corner: its outline is the straight line from arm a's row end to arm b's.
              * With b's cut far out (Diagonal 80 x Avenida 44: 30 m) that line runs alongside a's ribbon, and the wedge
              * between them is an island spike into the junction. The shorter cut moves out to the longer one's level
@@ -3125,12 +3089,42 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 ebz = B->kz + B->a.dir_z * B->a.t - B->a.half_w * B->a.dir_x;
                 sb = (ebx - A->kx) * A->a.dir_x + (ebz - A->kz) * A->a.dir_z;    /* b's row end on a's axis */
                 sa = (eax - B->kx) * B->a.dir_x + (eaz - B->kz) * B->a.dir_z;    /* a's row end on b's axis */
+                {
+                    /* only a NARROW wedge: the far row end within 1.5 U_NOTCH_W of the near arm's kerb line and >= 2 m
+                     * beyond its cut (a wide gore is a real island and keeps its outline) */
+                    const double nw = td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) * 0.1 * TD5_ROAM_UPM;
+                    const double lat_b = fabs(cross2(A->a.dir_x, A->a.dir_z, ebx - eax, ebz - eaz));
+                    const double lat_a = fabs(cross2(B->a.dir_x, B->a.dir_z, eax - ebx, eaz - ebz));
+                    if (!(sb > A->a.t + 2.0 * TD5_ROAM_UPM && lat_b < 1.5 * nw)) sb = -1e30;
+                    if (!(sa > B->a.t + 2.0 * TD5_ROAM_UPM && lat_a < 1.5 * nw)) sa = -1e30;
+                }
                 if (sb > A->a.t + 0.5 * TD5_ROAM_UPM && sb <= A->a.t + 50.0 * TD5_ROAM_UPM) {
-                    A->a.t = sb < A->lim ? sb : A->lim;
-                    c->gore_trims++;
+                    /* the levelled row end must stay clear of b's (kerbs that meet there would leave a sub-cm kerb) */
+                    const double t2 = sb < A->lim ? sb : A->lim;
+                    const double nx = A->kx + A->a.dir_x * t2 + A->a.half_w * -A->a.dir_z;
+                    const double nz = A->kz + A->a.dir_z * t2 + A->a.half_w * A->a.dir_x;
+                    if (hypot(nx - ebx, nz - ebz) >= 0.1 * TD5_ROAM_UPM) {
+#ifndef TD5RE_RELEASE
+                        if (td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2))
+                            TD5_LOG_I(LOG_TAG, "ROAM_LEVEL cluster %lld at (%.0f,%.0f) arm %d: cut %.2f -> %.2f m (lim %.2f), row end (%.0f,%.0f), "
+                                      "other row end (%.0f,%.0f)", (long long)cl->key, cl->cx, cl->cz, m, A->a.t / TD5_ROAM_UPM,
+                                      t2 / TD5_ROAM_UPM, A->lim / TD5_ROAM_UPM, nx, nz, ebx, ebz);
+#endif
+                        A->a.t = t2; c->gore_trims++;
+                    }
                 } else if (sa > B->a.t + 0.5 * TD5_ROAM_UPM && sa <= B->a.t + 50.0 * TD5_ROAM_UPM) {
-                    B->a.t = sa < B->lim ? sa : B->lim;
-                    c->gore_trims++;
+                    const double t2 = sa < B->lim ? sa : B->lim;
+                    const double nx = B->kx + B->a.dir_x * t2 - B->a.half_w * -B->a.dir_z;
+                    const double nz = B->kz + B->a.dir_z * t2 - B->a.half_w * B->a.dir_x;
+                    if (hypot(nx - eax, nz - eaz) >= 0.1 * TD5_ROAM_UPM) {
+#ifndef TD5RE_RELEASE
+                        if (td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2))
+                            TD5_LOG_I(LOG_TAG, "ROAM_LEVEL cluster %lld at (%.0f,%.0f) arm %d: cut %.2f -> %.2f m (lim %.2f), row end (%.0f,%.0f), "
+                                      "other row end (%.0f,%.0f)", (long long)cl->key, cl->cx, cl->cz, (m + 1) % na, B->a.t / TD5_ROAM_UPM,
+                                      t2 / TD5_ROAM_UPM, B->lim / TD5_ROAM_UPM, nx, nz, eax, eaz);
+#endif
+                        B->a.t = t2; c->gore_trims++;
+                    }
                 }
             }
         }
