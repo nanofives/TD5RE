@@ -874,7 +874,7 @@ void td5_roam_sprint_test_frame(void)
             sd_finish("race ended without a finish", 1);
         }
         break;
-    case 4:   /* results panel up: frame dump, then ENTER (keep roaming) must end the race at the finish */
+    case 4:   /* results panel up: frame dump, then ENTER ([roam HA] back to the geo generator: the game fades out and ends the session) */
         if (SD_IS_CIRC(D.mode)) sd_circ_monitor();
         if (SD_IS_AI(D.mode) && !D.ai_done) {
             /* [F7] every opponent through the line (or 6 minutes of frames) before the results are judged */
@@ -889,12 +889,14 @@ void td5_roam_sprint_test_frame(void)
         if (D.phase_frames == 60) sd_shot("6_results");
         if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
         if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
-        if (D.phase_frames >= 100) {
+        if (D.phase_frames >= 90) {
+            /* the leave is a fade-out (td5_game.c "Roam race results dismissed" log line) that ends the session
+             * after this verdict is read: judge it at the results, the session is still up here */
             int nb = 0;
             td5_roam_barriers(&nb);
-            D.exit_ok = td5_roam_race_state() == TD5_RRACE_OFF && nb == 0 && !td5_roam_barriers_visible();
-            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER: race state %d, barriers %d, visible %d -> %s",
-                      td5_roam_race_state(), nb, td5_roam_barriers_visible(), D.exit_ok ? "back to free roam" : "NOT EXITED");
+            D.exit_ok = td5_roam_active() && td5_roam_race_state() == TD5_RRACE_FINISHED;
+            TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER pressed: race state %d, barriers %d -> %s",
+                      td5_roam_race_state(), nb, D.exit_ok ? "leaving to the geo generator (see the game log)" : "NOT ON THE RESULTS");
             sd_finish("finished", 0);
         }
         break;
