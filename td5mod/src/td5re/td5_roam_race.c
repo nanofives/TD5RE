@@ -54,6 +54,7 @@
 #define RR_OFF_ROUTE_M  18.0        /* OFF ROUTE warning past this lateral distance */
 #define RR_CP_RADIUS_M  25.0        /* a checkpoint counts only this close to the polyline */
 #define RR_FINISH_EPS_M 2.0
+#define RR_RUNOUT_TICKS 120         /* [HF] after the line the car rolls on this long before it brakes */
 
 /* DIK scan codes */
 #define K_ESC    0x01
@@ -98,6 +99,7 @@ static struct {
     TD5_RoamRaceResult res;
     /* requests the game takes */
     int      req_pause_close, req_countdown;
+    long     fin_t;                /* [HF] ticks since the player crossed the line */
     int      restart_pending;      /* [HF] session restart: start the race again on the first frame */
     int      cd_armed, rearm;
     /* [F7] the field's clock (runs on past the player's finish while opponents race) */
@@ -519,7 +521,12 @@ uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits)
         uint32_t out = bits & ~(uint32_t)(TD5_INPUT_THROTTLE | TD5_INPUT_RECOVER | TD5_INPUT_BRAKE);
         if (a) {
             const double vx = a->linear_velocity_x / 256.0, vz = a->linear_velocity_z / 256.0;
-            if (sqrt(vx * vx + vz * vz) > 1.5 * RR_M / TD5_RRACE_TICK_HZ) out |= (uint32_t)TD5_INPUT_BRAKE;
+            const double sp = sqrt(vx * vx + vz * vz);
+            if (R.fin_t < RR_RUNOUT_TICKS) {
+                /* roll on past the line at ~40 km/h first: a car stopped AT the line blocks the opponents still
+                 * racing (the roam-sprint-ai verdict caught it: an opponent stuck 13 s behind it) */
+                if (sp < 11.0 * RR_M / TD5_RRACE_TICK_HZ) out |= (uint32_t)TD5_INPUT_THROTTLE;
+            } else if (sp > 1.5 * RR_M / TD5_RRACE_TICK_HZ) out |= (uint32_t)TD5_INPUT_BRAKE;
         }
         return out;
     }
@@ -595,6 +602,7 @@ static void rr_finish(void)
 {
     char t[32], b[32];
     R.state = TD5_RRACE_FINISHED;
+    R.fin_t = 0;
     R.res.finished = 1;
     R.res.ticks = R.ticks;
     R.res.best_ticks = R.best_ticks;
@@ -621,6 +629,7 @@ void td5_roam_race_tick(void)
     TD5_Actor *a;
     if (!td5_roam_active()) return;
     if (R.state == TD5_RRACE_FINISHED) {
+        R.fin_t++;
         /* [F7] the player is through; the field's clock runs on until every opponent is */
         if (td5_roam_ai_racing()) {
             R.clock++;
