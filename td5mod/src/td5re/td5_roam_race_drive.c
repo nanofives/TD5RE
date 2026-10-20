@@ -752,7 +752,9 @@ void td5_roam_sprint_test_frame(void)
         E.reported = 1;
         td5_roam_sprint_test_verdict(note, sizeof note);
         TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] standalone verdict: %s", note);
-        g_td5.quit_requested = 1;
+        /* [roam HA] DEV: TD5RE_ROAM_SPRINT_LINGER=1 keeps the game up after the verdict, so the ENTER on the
+         * results can be followed into the frontend (the geo generator) */
+        if (!td5_env_int("TD5RE_ROAM_SPRINT_LINGER", 0, 0, 1)) g_td5.quit_requested = 1;
     }
     if (!D.mode || D.done || !td5_roam_active()) return;
     D.frames++;

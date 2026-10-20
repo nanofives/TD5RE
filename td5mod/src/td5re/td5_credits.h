@@ -38,8 +38,8 @@ static const char *const k_credits[] = {
     " ", "JIM BARNETT", "STAN ROACH", "NEIL JOHNSTON", "ERICA KRISHNAMURTHY",
     /* [roam HA] TD5RE source port: the data credits the geospatial tracks owe (ODbL and the building
      * sources). They used to be printed on the track select and the generator screens. */
-    " ", " ", " ", "TD5RE GEOSPATIAL TRACKS", " ", "MAP DATA (C)", "OPENSTREETMAP CONTRIBUTORS", "ODBL 1.0", " ",
-    "BUILDINGS (C)", "OVERTURE MAPS", " ", "(C) GOOGLE OPEN BUILDINGS", " ",
+    " ", " ", " ", "TD5RE GEOSPATIAL TRACKS", " ", "MAP DATA (C)", "OPENSTREETMAP", "CONTRIBUTORS", "ODBL 1.0", " ",
+    "BUILDINGS (C)", "OVERTURE MAPS", " ", "(C) GOOGLE OPEN", "BUILDINGS", " ",
 };
 #define K_CREDITS_COUNT ((int)(sizeof(k_credits)/sizeof(k_credits[0])))
 

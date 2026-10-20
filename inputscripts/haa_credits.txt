@@ -1,0 +1,4 @@
+sync menu
+300 log CREDITS_START
++14400 log CREDITS_END
++60 quit

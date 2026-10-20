@@ -1,0 +1,16 @@
+# [roam HA] SELECT TRACK on the GEOSPATIAL entry: OK opens the generator, BACK returns, OK races.
+sync menu
+480 log QR_ON_GEO
++30 key up press
++60 log OK_1
++30 key enter press
++400 log AT_SETTINGS
++30 key esc press
++400 log BACK_AT_TRKSEL
++30 key up press
++60 log OK_2
++30 key enter press
++600 log AFTER_OK_2
+sync race
+600 log RACE_EXPECTED
++60 quit
