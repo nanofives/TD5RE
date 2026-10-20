@@ -38,6 +38,20 @@ static struct {
     int      frames;
 } H;
 
+static TD5_RoamRacePrefs s_prefs = { 0, 3, 3, 0, 0 };
+
+void td5_roam_prefs_get(TD5_RoamRacePrefs *out) { if (out) *out = s_prefs; }
+
+void td5_roam_prefs_set(const TD5_RoamRacePrefs *in)
+{
+    if (!in) return;
+    s_prefs.circuit = in->circuit ? 1 : 0;
+    s_prefs.laps = in->laps < 1 ? 1 : (in->laps > TD5_ROUTE_MAX_LAPS ? TD5_ROUTE_MAX_LAPS : in->laps);
+    s_prefs.opponents = in->opponents < 0 ? 0 : (in->opponents > 5 ? 5 : in->opponents);
+    s_prefs.traffic = in->traffic < 0 ? 0 : (in->traffic > 2 ? 2 : in->traffic);
+    s_prefs.cops = in->cops ? 1 : 0;
+}
+
 int td5_roam_strip_build_enabled(void)
 {
 #ifndef TD5RE_RELEASE
@@ -129,7 +143,7 @@ void td5_roam_handoff_frame(void)
               r->length_m, r->nedge, (unsigned)r->hash, (unsigned)(td5_plat_time_ms() - H.t_plant));
     if (!td5_roam_route_save(TD5_HANDOFF_ROUTE_NAME))
         TD5_LOG_W(LOG_TAG, "HANDOFF: could not save the route as '%s' (racing it unsaved)", TD5_HANDOFF_ROUTE_NAME);
-    if (H.mode == TD5_HANDOFF_AUTOSTART) {
+    {
         TD5_RoamRaceSetup s;
         memset(&s, 0, sizeof s);
         s.laps = H.laps;
@@ -141,10 +155,6 @@ void td5_roam_handoff_frame(void)
             TD5_LOG_W(LOG_TAG, "HANDOFF: race start refused; free roam goes on");
         else
             TD5_LOG_I(LOG_TAG, "HANDOFF: race started %u ms after the session's first frame", (unsigned)(td5_plat_time_ms() - H.t_active));
-    } else if (!td5_roam_race_open_setup()) {
-        TD5_LOG_W(LOG_TAG, "HANDOFF: the setup panel refused the route; free roam goes on");
-    } else {
-        TD5_LOG_I(LOG_TAG, "HANDOFF: setup panel open %u ms after the session's first frame", (unsigned)(td5_plat_time_ms() - H.t_active));
     }
 }
 
