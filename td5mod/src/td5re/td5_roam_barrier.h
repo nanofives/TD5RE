@@ -89,6 +89,12 @@ typedef struct {
     int pass_gaps;            /* consecutive route edges that do not meet at one node key (must be 0)  */
     int ring_edges, oneway_edges;   /* route edges that are roundabout / one-way ribbons (plaza ring, divided avenue) */
     int slid, slide_fail;     /* mouth barriers moved outward along their arm (the cut row lay across the route) / none fit */
+    int slid_wall;            /* [HE] ... further out, to a row whose two ends meet a wall of the drivable surface   */
+    int ends_lengthened, ends_short;   /* [HE] no row had walls at both ends: panel ends lengthened to the wall / still short (the route is in the way) */
+    int seal_panels;          /* [HE] panels the seal pass put across a street that overlaps the sealed surface   */
+    int clusters_touching;    /* [HE] junctions the seal pass found reachable without an arm: sealed too          */
+    int seal_iters, seal_entries_left, seal_fail;
+    int seal_pockets, seal_escapes;   /* [HE] the last flood's unsealed entries: enclosed pockets / ways out (must be 0) */   /* [HE] floods run / entries the last flood still found (must be 0) / panels that did not fit */
     int boards_alt, boards_dropped;   /* turn boards put on the outer kerb of the exit arm / left out (ahead and kerb both on the route) */
     int arrows_with, arrows_side, arrows_against;   /* mouth-barrier chevrons vs the nearest route direction (against must be 0) */
     int arm_no_row;           /* arms with no ribbon row (edge without quads): nothing to close  */

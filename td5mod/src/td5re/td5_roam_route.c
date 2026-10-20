@@ -1828,6 +1828,9 @@ const TD5_RouteResult *td5_roam_route_display(void)
     double *lx, *lz;
     int m, i, n = 0;
     if (!r->ok || r->npt < 2) return r;
+#ifndef TD5RE_RELEASE
+    if (td5_env_int("TD5RE_ROAM_ROUTE_DISPLAY_RAW", 0, 0, 1)) return r;   /* DEV A/B: draw the planner polyline */
+#endif
     if (s_disp.src_x == r->px && s_disp.src_n == r->npt && s_disp.src_hash == r->hash && s_disp.src_len == r->length_m)
         return &s_disp.r;
     lx = (double *)malloc((size_t)r->npt * sizeof(double));

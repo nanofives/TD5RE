@@ -78,7 +78,14 @@ typedef struct {
     char   why[48];
 } TwAttack;
 
-typedef struct { int n; int keys; uint64_t key[TW_MAX_KEYS]; double ex, ez; int linked_only; } TwRegion;
+typedef struct {
+    int n; int keys; uint64_t key[TW_MAX_KEYS]; double ex, ez; int linked_only;
+    uint64_t via_key;           /* the route-side surface (edge / cluster) the way out touches */
+    double max_route_m;         /* farthest region cell from the route line */
+    double inx, inz, frx, frz;  /* the fill's entry step into the region: from (fr) -> into (in), place frame */
+    uint64_t from_key;          /* what the entry step came from */
+    int edge_out;               /* the region runs into the corridor's edge: it leaves the race area */
+} TwRegion;
 
 static struct {
     int      armed, phase, done;
@@ -95,6 +102,7 @@ static struct {
     double   gx0, gz0;
     uint8_t *cell;                      /* bit0 corridor, bit1 passable, bit2 route surface, bit3 linked, bit4 reached, bit5 leak, bit6 grouped */
     uint64_t *ckey;
+    int     *par;                       /* BFS parent cell, -1 = a seed */
     TwRegion reg[64];
     int      nreg, nreg_leak;
     long     n_corr, n_pass, n_reach, n_leak;
@@ -105,6 +113,10 @@ static struct {
     long     t_run;
     int      leaks;
     FILE    *acsv, *trc;
+    /* shots: TD5RE_ROAM_WALL_SHOTS="px,pz,yaw12;..." (place frame) -> <log dir>roam_wall_shot_NN.png */
+    double   shot[16][3];
+    int      nshot, cur_shot;
+    long     shot_t;
 } T;
 
 /* ------------------------------------------------------------ helpers ------------ */
@@ -170,7 +182,11 @@ static int tw_plan(void)
         else if (i == T.nwp - 1) ok = td5_roam_route_set_finish_at(px, pz);
         else ok = td5_roam_route_add_at(px, pz);
     }
-    if (ok) td5_roam_route_set_type(TD5_ROUTE_SPRINT, 1);
+    if (ok) {
+        const int laps = td5_env_int("TD5RE_ROAM_WALL_LAPS", 0, 0, 10);   /* > 0: plan a CIRCUIT of that many laps */
+        td5_roam_route_set_type(laps > 0 ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT, laps > 0 ? laps : 1);
+        if (laps > 0 && !td5_roam_route_result()->closed) return 0;
+    }
     return ok && td5_roam_route_result()->ok;
 }
 
@@ -233,6 +249,8 @@ static void tw_flood(FILE *rep)
     T.cell = (uint8_t *)calloc((size_t)T.gw * (size_t)T.gh, 1);
     T.ckey = (uint64_t *)calloc((size_t)T.gw * (size_t)T.gh, sizeof(uint64_t));
     queue = (int *)malloc((size_t)T.gw * (size_t)T.gh * sizeof(int));
+    T.par = (int *)malloc((size_t)T.gw * (size_t)T.gh * sizeof(int));
+    if (!T.par) { free(queue); return; }
     if (!T.cell || !T.ckey || !queue) { TD5_LOG_E(LOG_TAG, "[ROAMWALLS] flood: out of memory (%dx%d)", T.gw, T.gh); free(queue); return; }
     /* the corridor: discs round route samples every 5 m */
     for (i = 0; i + 1 < T.npt; i++) {
@@ -280,7 +298,7 @@ static void tw_flood(FILE *rep)
             const int cz = (int)((T.rz[i] + ez * (double)s / ns - T.gz0) / TW_CELL);
             const size_t ci = (size_t)cz * T.gw + cx;
             if (cx < 0 || cz < 0 || cx >= T.gw || cz >= T.gh) continue;
-            if ((T.cell[ci] & C_PASS) && !(T.cell[ci] & C_REACH)) { T.cell[ci] |= C_REACH; queue[qt++] = (int)ci; }
+            if ((T.cell[ci] & C_PASS) && !(T.cell[ci] & C_REACH)) { T.cell[ci] |= C_REACH; T.par[ci] = -1; queue[qt++] = (int)ci; }
         }
     }
     /* fill */
@@ -311,6 +329,7 @@ static void tw_flood(FILE *rep)
             }
             if (cut) continue;
             T.cell[ni] |= C_REACH;
+            T.par[ni] = ci;
             queue[qt++] = (int)ni;
         }
     }
@@ -348,6 +367,14 @@ static void tw_flood(FILE *rep)
         if ((size_t)qt * 2 > (size_t)T.gw * T.gh) break;
         memset(&rg, 0, sizeof rg);
         rg.linked_only = 1;
+        {   /* c0 is the region's first cell in fill order: its parent is where the fill came in */
+            const int pc = T.par[c0];
+            rg.inx = T.gx0 + (c0 % T.gw + 0.5) * TW_CELL; rg.inz = T.gz0 + (c0 / T.gw + 0.5) * TW_CELL;
+            if (pc >= 0) {
+                rg.frx = T.gx0 + (pc % T.gw + 0.5) * TW_CELL; rg.frz = T.gz0 + (pc / T.gw + 0.5) * TW_CELL;
+                rg.from_key = T.ckey[pc];
+            } else { rg.frx = rg.inx; rg.frz = rg.inz; }
+        }
         T.cell[c0] |= C_GRP;
         rq[rt++] = c0;
         while (rh < rt) {
@@ -355,19 +382,24 @@ static void tw_flood(FILE *rep)
             const int ci = rq[rh++], cx = ci % T.gw, cz = ci / T.gw;
             int k, have = 0;
             rg.n++;
+            if ((rg.n & 7) == 1) {
+                const double dd = tw_route_dist(T.gx0 + (cx + 0.5) * TW_CELL, T.gz0 + (cz + 0.5) * TW_CELL) / TW_M;
+                if (dd > rg.max_route_m) rg.max_route_m = dd;
+            }
             if (T.cell[ci] & C_LEAK) rg.linked_only = 0;
             for (k = 0; k < rg.keys; k++) if (rg.key[k] == T.ckey[ci]) have = 1;
             if (!have && rg.keys < TW_MAX_KEYS) rg.key[rg.keys++] = T.ckey[ci];
             for (k = 0; k < 4; k++) {
                 const int nx = cx + dx4[k], nz = cz + dz4[k];
                 size_t ni;
-                if (nx < 0 || nz < 0 || nx >= T.gw || nz >= T.gh) continue;
+                if (nx < 0 || nz < 0 || nx >= T.gw || nz >= T.gh) { rg.edge_out = 1; continue; }
                 ni = (size_t)nz * T.gw + nx;
+                if (!(T.cell[ni] & C_CORR)) rg.edge_out = 1;
                 if ((T.cell[ni] & C_REACH) && (T.cell[ni] & C_ROUTE)) {
                     /* the way out: the region cell next to the route surface farthest from the route line */
                     const double px = T.gx0 + (cx + 0.5) * TW_CELL, pz = T.gz0 + (cz + 0.5) * TW_CELL;
                     const double d = tw_route_dist(px, pz);
-                    if (bestd < 0.0 || d < bestd) { bestd = d; rg.ex = px; rg.ez = pz; }
+                    if (bestd < 0.0 || d < bestd) { bestd = d; rg.ex = px; rg.ez = pz; rg.via_key = T.ckey[ni]; }
                 }
                 if (!(T.cell[ni] & C_REACH) || !(T.cell[ni] & (C_LEAK | C_LINK)) || (T.cell[ni] & C_GRP)) continue;
                 T.cell[ni] |= C_GRP;
@@ -375,7 +407,7 @@ static void tw_flood(FILE *rep)
             }
         }
         if (bestd < 0.0) { rg.ex = T.gx0 + (c0 % T.gw + 0.5) * TW_CELL; rg.ez = T.gz0 + (c0 / T.gw + 0.5) * TW_CELL; }
-        if (!rg.linked_only && rg.n >= 4) T.nreg_leak++;
+        if (!rg.linked_only && (rg.edge_out || rg.max_route_m > 40.0)) T.nreg_leak++;
         if (T.nreg < 64) T.reg[T.nreg++] = rg;
     }
     T.flood_ms = (double)(td5_plat_time_us() - t0) / 1000.0;
@@ -385,16 +417,21 @@ static void tw_flood(FILE *rep)
         fprintf(rep, "FLOOD (1 m cells, car-passable = centre + 4 points 0.8 m away on the road, barriers cut 0.3 m past each end)\n");
         fprintf(rep, "  grid %dx%d, corridor %ld cells (%.0f m round the route), passable %ld, reached from the route %ld\n",
                 T.gw, T.gh, T.n_corr, TW_CORRIDOR_M, T.n_pass, T.n_reach);
-        fprintf(rep, "  leak cells (reached, not the route's own surface, not a linked arm) %ld, regions %d, leaking regions (>= 4 cells) %d\n",
+        fprintf(rep, "  leak cells (reached, not the route's own surface, not a linked arm) %ld, regions %d, ESCAPING regions (out of the corridor or > 40 m from the route) %d\n",
                 T.n_leak, T.nreg, T.nreg_leak);
         for (i = 0; i < T.nreg; i++) {
             const TwRegion *rg = &T.reg[i];
             double lat = 0, lon = 0;
             int k;
             td5_roam_route_place_to_latlon(rg->ex, rg->ez, &lat, &lon);
-            fprintf(rep, "  region %d: %s %d cells, way out place (%.0f,%.0f) = %.6f,%.6f, %.1f m from the route line, edges:",
-                    i, rg->linked_only ? "linked-only" : (rg->n >= 4 ? "LEAK" : "sliver"), rg->n, rg->ex, rg->ez, lat, lon,
-                    tw_route_dist(rg->ex, rg->ez) / TW_M);
+            fprintf(rep, "  region %d: %s %d cells (max %.0f m from the route%s), way out place (%.0f,%.0f) = %.6f,%.6f, %.1f m from the route line, "
+                         "via %016llx, edges:",
+                    i, rg->linked_only ? "linked-only" : ((rg->edge_out || rg->max_route_m > 40.0) ? "ESCAPE" : "pocket"), rg->n,
+                    rg->max_route_m, rg->edge_out ? ", runs out of the corridor" : "", rg->ex, rg->ez, lat, lon,
+                    tw_route_dist(rg->ex, rg->ez) / TW_M, (unsigned long long)rg->via_key);
+            td5_roam_route_place_to_latlon(rg->inx, rg->inz, &lat, &lon);
+            fprintf(rep, "\n      ENTRY step (%.0f,%.0f) -> (%.0f,%.0f) = %.6f,%.6f from %016llx, edges:", rg->frx, rg->frz, rg->inx,
+                    rg->inz, lat, lon, (unsigned long long)rg->from_key);
             for (k = 0; k < rg->keys; k++) fprintf(rep, " %016llx", (unsigned long long)rg->key[k]);
             fprintf(rep, "\n");
         }
@@ -420,6 +457,7 @@ static void tw_flood(FILE *rep)
         }
     }
     free(queue);
+    free(T.par); T.par = NULL;
 }
 
 /* ------------------------------------------------------------ attacks ------------ */
@@ -648,6 +686,18 @@ void td5_roam_wall_test_frame(void)
             T.nwp = 2;
             memcpy(T.ll, k_default_wp, sizeof k_default_wp);
         }
+        {
+            const char *w = getenv("TD5RE_ROAM_WALL_SHOTS");
+            T.nshot = 0;
+            while (w && *w && T.nshot < 16) {
+                double a, b, c;
+                int nread = 0;
+                if (sscanf(w, "%lf,%lf,%lf%n", &a, &b, &c, &nread) != 3) break;
+                T.shot[T.nshot][0] = a; T.shot[T.nshot][1] = b; T.shot[T.nshot][2] = c; T.nshot++;
+                w += nread;
+                if (*w == ';') w++;
+            }
+        }
         TD5_LOG_W(LOG_TAG, "[ROAMWALLS] armed: %d waypoints", T.nwp);
     }
     if (!T.armed || T.done || !td5_roam_active()) return;
@@ -697,6 +747,7 @@ void td5_roam_wall_test_frame(void)
             T.acsv = fopen(path, "w");
             if (T.acsv) fprintf(T.acsv, "run,barrier,cluster,aim,kmh,runup_m,start_px,start_pz,end_px,end_pz,max_past_m,max_arm_m,end_route_m,contacts,leak,why\n");
             tw_plan_attacks();
+            if (T.nshot > 0) T.nat = 0;      /* a shots run takes pictures only */
             snprintf(path, sizeof path, "%sroam_wall_trace.csv", dir ? dir : "");
             T.trc = fopen(path, "w");
             if (T.trc) fprintf(T.trc, "run,t,along_m,open_m,kmh,contacts,hits,yaw\n");
@@ -727,6 +778,28 @@ int td5_roam_wall_test_bits(TD5_Actor *a, uint32_t *bits)
     *bits = 0;
     if (tick == s_last) return 1;
     s_last = tick;
+    if (T.nshot > 0) {
+        /* pose the car (brakes on), let the scenery stream in, dump a frame, next pose */
+        *bits = (uint32_t)TD5_INPUT_BRAKE;
+        if (T.shot_t == 0) {
+            const double *ps = T.shot[T.cur_shot];
+            td5_roam_place_actor(0, a, (int32_t)floor(ps[0] + 0.5), (int32_t)floor(ps[1] + 0.5), (int)ps[2] & 0xFFF);
+        }
+        T.shot_t++;
+        if (T.shot_t == 75) {
+            char path[512];
+            const char *dir = td5_plat_log_dir();
+            snprintf(path, sizeof path, "%sroam_wall_shot_%02d.png", dir ? dir : "", T.cur_shot);
+            td5_plat_request_frame_dump(path);
+            TD5_LOG_I(LOG_TAG, "[ROAMWALLS] shot %d at place (%.0f,%.0f) yaw %d -> %s", T.cur_shot, T.shot[T.cur_shot][0],
+                      T.shot[T.cur_shot][1], (int)T.shot[T.cur_shot][2], path);
+        }
+        if (T.shot_t >= 90) {
+            T.shot_t = 0;
+            if (++T.cur_shot >= T.nshot) T.phase = 3;
+        }
+        return 1;
+    }
     if (T.cur >= 0 && T.cur < T.nat) {
         t = &T.at[T.cur];
         T.t_run++;
