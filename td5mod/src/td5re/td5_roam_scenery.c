@@ -206,6 +206,7 @@ struct TD5_RoamScnSource {
     int       ncasco;
     int       lots_on, lot_cover, infill_on;   /* [HD] TD5RE_ROAM_LOTS / _LOT_COVER / TD5RE_ROAM_INFILL */
     int       lot_page;                       /* [HD] TD5RE_ROAM_LOT_PAGE: the lots' host page */
+    int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
      * td5_roam_height_sample computes cell coordinates from the window origin, so a
      * shared LRU (whichever window happens to be resident) moves the low bits of a
@@ -3767,6 +3768,7 @@ out:
 #define INF_LM_CLEAR_M  15.0
 #define INF_PTS         24            /* front points per lot                            */
 #define INF_SPLIT_MIN_M 3.0           /* a taken lot splits into halves no narrower      */
+#define INF_STOREY_W    2.5           /* metres of frontage per storey at most            */
 #define INF_FRONT_IN    65.0          /* units (15 cm): the front stands off the slab's back face */
 static const unsigned char k_inf_levels[16] = { 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 7 };
 
@@ -3836,7 +3838,7 @@ static int inf_near_landmark(const PvBld *pb, double X, double Z, double d)
 }
 
 /* Extrude one accepted lot ring (tile-local, any winding, n points) as a flat-roof mass. */
-static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint32_t h, double area_units)
+static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint32_t h, double area_units, double width)
 {
     TG_TileCtx *c = e->c;
     TD5_RoamScnSource *s = e->s;
@@ -3855,6 +3857,10 @@ static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint
     gb.cx = cx + (double)c->org_x; gb.cz = cz + (double)c->org_z;
     gb.radius = r;
     gb.levels = k_inf_levels[(h >> 8) & 15u];
+    {   /* a narrow front is a low house, not a pencil tower: at most one storey per INF_STOREY_W of frontage */
+        const int cap = (int)(width / (INF_STOREY_W * s->upm));
+        if (gb.levels > (cap > 1 ? cap : 1)) gb.levels = (unsigned short)(cap > 1 ? cap : 1);
+    }
     gb.height = (double)gb.levels * 3.0 * s->upm;
     gb.area_m2 = area_units / (s->upm * s->upm);
     gb.id_hash = h;
@@ -4067,7 +4073,10 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     if (!td5_geob_ring_simple(rx, rz, nf * 2)) { why = 1; goto refused; }
     if (!inf_record(c, rx, rz, nf * 2)) return 0;
     if (!sc_owned_point(c, mx, mz)) return 1;          /* a split half: its own midpoint's tile emits it */
-    return inf_emit(e, rx, rz, nf * 2, h, fabs(td5_geob_ring_area(rx, rz, nf * 2)));
+    if (s->infill_log)                                  /* TD5RE_ROAM_INFILL_LOG=1: where each lot stands (place frame) */
+        TD5_LOG_I(LOG_TAG, "ROAM_INFILL tile %d,%d front (%.0f,%.0f) normal (%.3f,%.3f) depth %.1f m width %.1f m",
+                  c->tx, c->tz, mx + (double)c->org_x, mz + (double)c->org_z, L->nx[seg], L->nz[seg], D / U, (a1 - a0) / U);
+    return inf_emit(e, rx, rz, nf * 2, h, fabs(td5_geob_ring_area(rx, rz, nf * 2)), a1 - a0);
 refused:
     if (own) {
         if (why == 2) c->st.inf_drop_road++;
@@ -4347,6 +4356,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->lots_on   = td5_env_int("TD5RE_ROAM_LOTS", 1, 0, 1);
     s->lot_cover = td5_env_int("TD5RE_ROAM_LOT_COVER", 1, 0, 1);
     s->infill_on = td5_env_int("TD5RE_ROAM_INFILL", 1, 0, 1);
+    s->infill_log = td5_env_int("TD5RE_ROAM_INFILL_LOG", 0, 0, 1);
     s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
         int (*cl)[2] = (int (*)[2])malloc(2048 * sizeof(int[2]));
