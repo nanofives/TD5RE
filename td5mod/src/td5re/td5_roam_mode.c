@@ -548,7 +548,7 @@ void td5_roam_session_start(void)
 {
     if (!s_roam.armed) { s_roam.active = 0; return; }
     s_roam.active = 1;
-    td5_roam_race_session_restart();    /* [F6-B/HF] a pause-menu RESTART re-inits the session: a live race starts again with its countdown */
+    td5_roam_race_reset();              /* [F6-B] a pause-menu RESTART re-inits the session: no race carries over */
     td5_roam_physics_session_begin();   /* task B: registers the resident set before the spawn (street yaw) */
     td5_roam_apply_overrides();
     s_roam.spawn.car_index         = g_td5.car_index;

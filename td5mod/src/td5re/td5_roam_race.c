@@ -100,7 +100,6 @@ static struct {
     /* requests the game takes */
     int      req_pause_close, req_countdown;
     long     fin_t;                /* [HF] ticks since the player crossed the line */
-    int      restart_pending;      /* [HF] session restart: start the race again on the first frame */
     int      cd_armed, rearm;
     /* [F7] the field's clock (runs on past the player's finish while opponents race) */
     long     clock;
@@ -267,7 +266,6 @@ static void rr_to_off(const char *why)
 
 void td5_roam_race_reset(void)
 {
-    R.restart_pending = 0;
     rr_to_off("session");
     rr_free_route();
     memset(&R.res, 0, sizeof R.res);
@@ -300,20 +298,6 @@ void td5_roam_race_abandon(void)
         R.res.ticks = R.ticks;
     }
     rr_to_off("abandoned");
-}
-
-/* [HF] the pause-menu RESTART re-inits the session: a race that was on (grid, racing or results) is
- * started again from its grid with the normal 3-2-1, same setup, once the new session is up */
-void td5_roam_race_session_restart(void)
-{
-    const int was = R.state >= TD5_RRACE_COUNTDOWN;
-    const TD5_RoamRaceSetup keep = R.setup;
-    td5_roam_race_reset();
-    if (was) {
-        R.setup = keep;
-        R.restart_pending = 1;
-        TD5_LOG_I(LOG_TAG, "ROAM_RACE: restart requested, the race starts again with a countdown");
-    }
 }
 
 int td5_roam_race_player_finished(void) { return td5_roam_active() && R.state == TD5_RRACE_FINISHED; }
@@ -737,10 +721,6 @@ void td5_roam_race_frame(void)
     int i;
     const int paused = td5_game_is_pause_menu_active();
     if (!td5_roam_active()) { if (R.state != TD5_RRACE_OFF) td5_roam_race_reset(); return; }
-    if (R.restart_pending && R.state == TD5_RRACE_OFF) {
-        R.restart_pending = 0;
-        if (!td5_roam_race_start(&R.setup)) TD5_LOG_W(LOG_TAG, "ROAM_RACE: restart could not start the race again");
-    }
     memcpy(R.prev, R.cur, sizeof R.prev);
     for (i = 0; i < 256; i++) R.cur[i] = (uint8_t)(td5_plat_input_key_pressed(i) ? 1 : 0);
 
