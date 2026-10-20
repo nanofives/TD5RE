@@ -23,9 +23,12 @@ def projection():
     return pr['lat0'], pr['lon0'], pr['m_per_deg_lat'], pr['m_per_deg_lon']
 
 
+XS = -1.0   # roam M: east = XS * place x
+
+
 def to_latlon(x, z):
     lat0, lon0, mlat, mlon = projection()
-    return lat0 + z / UPM / mlat, lon0 + x / UPM / mlon
+    return lat0 + z / UPM / mlat, lon0 + XS * x / UPM / mlon   # roam M: place x = -east (td5_geo_frame.h)
 
 
 def clusters(d):
@@ -121,7 +124,7 @@ def cmd_poses(a):
     for k, (bi, ck, cx, cz, dx, dz, nb, nt) in enumerate(pick):
         # the route point nearest the cluster, then 22 m back along the route direction
         bx, bz = cx - dx * 22 * UPM, cz - dz * 22 * UPM
-        yaw = math.degrees(math.atan2(dx, dz))          # 0 = +Z (north), toward +X
+        yaw = math.degrees(math.atan2(XS * dx, dz))     # compass bearing: 0 = north, clockwise (the poses format)
         la, lo = to_latlon(bx, bz)
         out.append('%s_j%d_chase:%.7f,%.7f,3.2,%.2f,-7' % (name, k, la, lo, yaw))
         la, lo = to_latlon(cx, cz)
