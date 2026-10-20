@@ -300,6 +300,8 @@ void td5_roam_race_abandon(void)
     rr_to_off("abandoned");
 }
 
+long td5_roam_race_fin_ticks(void) { return R.state == TD5_RRACE_FINISHED ? R.fin_t : 0; }   /* [HF] dev */
+
 int td5_roam_race_player_finished(void) { return td5_roam_active() && R.state == TD5_RRACE_FINISHED; }
 
 int td5_roam_race_wrong_way(void) { return td5_roam_race_running() && R.state == TD5_RRACE_RACING && R.wrong_t > 15; }
@@ -497,6 +499,10 @@ int td5_roam_race_take_countdown(void)
 uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits)
 {
     if (slot != 0 || R.state == TD5_RRACE_OFF || R.state == TD5_RRACE_SETUP || !td5_roam_active()) return bits;
+#ifndef TD5RE_RELEASE
+    if (R.state == TD5_RRACE_RACING && R.ticks >= 150 && R.ticks < 330 && td5_env_int("TD5RE_ROAM_HF_WRONG", 0, 0, 1))
+        return (uint32_t)TD5_INPUT_THROTTLE;
+#endif
     if (R.state == TD5_RRACE_FINISHED) {
         /* [HF] the run-out after the line: throttle off, brake while the car still rolls, and let go of the
          * brake once it is (almost) stopped. A held brake at standstill is REVERSE: that was "the car goes
@@ -614,6 +620,17 @@ void td5_roam_race_tick(void)
     if (!td5_roam_active()) return;
     if (R.state == TD5_RRACE_FINISHED) {
         R.fin_t++;
+#ifndef TD5RE_RELEASE
+        /* [HF] dev: the player's speed every tick from the line until rest (TD5RE_ROAM_HF_FINLOG=1) */
+        if (td5_env_int("TD5RE_ROAM_HF_FINLOG", 0, 0, 1)) {
+            TD5_Actor *fa = td5_game_get_actor(0);
+            if (fa) {
+                const double vx = fa->linear_velocity_x / 256.0, vz = fa->linear_velocity_z / 256.0;
+                TD5_LOG_I(LOG_TAG, "ROAM_FIN: t=%ld fwd_raw=%d speed_kmh=%.2f", R.fin_t, (int)fa->longitudinal_speed,
+                          sqrt(vx * vx + vz * vz) * TD5_RRACE_TICK_HZ * 3.6 / RR_M);
+            }
+        }
+#endif
         /* [F7] the player is through; the field's clock runs on until every opponent is */
         if (td5_roam_ai_racing()) {
             R.clock++;
@@ -645,6 +662,14 @@ void td5_roam_race_tick(void)
     }
     R.ticks++;
     R.clock = R.ticks;
+#ifndef TD5RE_RELEASE
+    if (td5_env_int("TD5RE_ROAM_HF_WRONG", 0, 0, 1) && R.ticks == 150) {
+        /* [HF] dev: turn the car through 180 degrees on the spot, the filter then drives it straight ahead */
+        double cx, cz;
+        if (rr_car_place(&cx, &cz))
+            td5_roam_place_actor(0, a, (int32_t)cx, (int32_t)cz, (int)((a->euler_accum.yaw >> 8) + 2048) & 0xFFF);
+    }
+#endif
     rr_progress(a);
     if (R.wrong_t > 15) R.res.wrong_way_ticks++;
     if (R.off_t > 10) R.res.off_route_ticks++;
@@ -783,7 +808,7 @@ void td5_roam_race_frame(void)
     case TD5_RRACE_FINISHED:
         if (td5_roam_route_ui_map_open()) { rr_to_off("route map"); break; }
         if (paused) break;
-        if (ke(K_ENTER)) { rr_to_off("keep roaming"); break; }
+        if (ke(K_ENTER) && !td5_env_int("TD5RE_ROAM_HF_FINLOG", 0, 0, 1)) { rr_to_off("keep roaming"); break; }
         if (ke(K_F5)) { td5_roam_race_start(&R.setup); break; }
         break;
     default:
