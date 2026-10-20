@@ -10,6 +10,12 @@
  *     facing the approaching car, pointing the way the route turns.
  * Nothing is ever placed across the route itself. The start and finish clusters are sealed too
  * (every arm but the route's own), so a car cannot leave the route backwards at the grid.
+ * [HE] The graph is not the surface. A mouth panel must END ON A WALL of the drivable surface (else it
+ * slides out along its arm, or its ends are lengthened), and the SEAL PASS floods the car-passable surface
+ * from the route over the build's own tiles, every panel a cut: a junction reached without an arm joins
+ * the set, a street reached without an arm (a diagonal's ribbon overlapping a junction patch) gets a
+ * SEAL PANEL across it (kind 0, cluster_key = that street's edge key). Repeats until no way out is left.
+ * A short edge between two sealed junctions gets one panel, not two facing ones.
  *
  * FRAME (the frozen contract with F6-B, the race flow + racer-only collision):
  *   x0,z0,x1,z1  the two ends of the segment in the WORLD frame, 24.8 fixed point:

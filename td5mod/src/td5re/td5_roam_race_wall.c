@@ -8,7 +8,9 @@
  * car still gets ONE combined push per tick, and the pinch / wall-tip rules see barrier and kerb alike.
  *
  * ONE-SIDED PANELS. A barrier segment (kerb to kerb across a closed arm) has an OPEN side (the junction
- * the route crosses) and a CLOSED side (the arm). The open side is decided once per barrier, the first
+ * the route crosses) and a CLOSED side (the arm). [HE] The open side comes from the barrier build
+ * (td5_roam_barrier_open_dir: against the closed arm's own ribbon direction) when the segments are armed.
+ * Only when the build has none (TD5RE_ROAM_WALL_SIDE_FROM_BUILD=0) is it decided the F6-B way, the first
  * time a racer probe comes near it (its tiles are resident then):
  *   1. patch test: 2 m either side of the panel's midpoint, the side whose road hit is the junction
  *      patch of the barrier's own cluster (cluster_key) is open; else the side that is ANY patch while
@@ -18,7 +20,9 @@
  * A probe within the segment (ends included), less than RW_THICK in front of the panel or up to
  * RW_DEPTH behind it, is pushed back out to RW_THICK on the open side. The depth window keeps a car
  * on the far side of a long-past barrier (another street behind it) free, while a fast probe that went
- * through the panel in one tick (< RW_DEPTH, ~860 km/h) is still pushed back the way it came.
+ * through the panel in one tick (< RW_DEPTH, ~860 km/h) is still pushed back the way it came. [HE] A panel
+ * never catches a car whose chassis is more than RW_CHASSIS_BACK past it (that car is beyond this panel,
+ * e.g. pressing on another one that faces it), and the segments follow a world-origin rebase.
  *
  * ONE file-scope struct (W). Main thread only.
  */
