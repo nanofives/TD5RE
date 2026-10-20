@@ -441,7 +441,10 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
         s_rv.dir_x = hx; s_rv.dir_z = hz; s_rv.have_dir = 1;
         s_rv.sp_x = px; s_rv.sp_z = pz;
         if (s_rv.tour_m > 0.0) {
-            static const int sg[4][2] = { { 1, 1 }, { 1, -1 }, { -1, -1 }, { -1, 1 } };
+            /* [roam M] the first sign is negated: the game-frame lattice is the source one reflected
+             * (u' = -mirror(u), v' = mirror(v)), so this is the same square on the ground, corners in the
+             * same order, as before the reflection */
+            static const int sg[4][2] = { { -1, 1 }, { -1, -1 }, { 1, -1 }, { 1, 1 } };
             const double h = 0.5 * s_rv.tour_m * RV_M;
             const double ux = rs->grid.c, uz = rs->grid.s, vx = -rs->grid.s, vz = rs->grid.c;
             int k;
@@ -497,7 +500,9 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
                 } else if (turn == 0) {
                     wx = s_rv.dir_x; wz = s_rv.dir_z;
                 } else {
-                    wx = -s_rv.dir_z * turn; wz = s_rv.dir_x * turn;
+                    /* [roam M] turn +1 was the engine's right = the REAL left before the geographic -> game
+                     * reflection (td5_geo_frame.h); the sign keeps the tour on the same streets as before */
+                    wx = s_rv.dir_z * turn; wz = -s_rv.dir_x * turn;
                 }
                 s_rv.cl_key = (uint64_t)nd->cluster_key;
                 s_rv.cl_x = (double)t->org_x - rs->org_x + nd->x;
