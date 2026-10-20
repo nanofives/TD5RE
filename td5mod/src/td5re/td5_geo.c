@@ -25,9 +25,34 @@
 #include "td5_geo.h"
 #include "td5_geo_route.h"       /* td5_geo_derived_migrate */
 #include "td5_geo_roads.h"     /* [1011 C3] TD5_GEO_ROADS_NAME_MAX */
+#include "td5_geo_frame.h"     /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
+
+/* ------------------------------------------- [roam M] SOURCE -> GAME frame
+ * The reflection td5_geo_frame.h defines, for the readers that parse a SOURCE vector file
+ * themselves (free roam). Walks the whole tree: a coordinate is any object with a numeric
+ * "x" and a numeric "z", which in the geo files is exactly points[], signals[] and nodes[]. */
+void td5_geo_src_json_to_game(struct cJSON *root)
+{
+    cJSON *it;
+    if (!root) return;
+    if (cJSON_IsObject(root)) {
+        cJSON *x = cJSON_GetObjectItem(root, "x"), *z = cJSON_GetObjectItem(root, "z");
+        if (cJSON_IsNumber(x) && cJSON_IsNumber(z)) cJSON_SetNumberValue(x, td5_geo_game_x(x->valuedouble));
+    }
+    if (cJSON_IsObject(root) || cJSON_IsArray(root))
+        for (it = root->child; it; it = it->next)
+            if (cJSON_IsObject(it) || cJSON_IsArray(it)) td5_geo_src_json_to_game(it);
+}
+
+void td5_geo_src_bbox_to_game(double *minx, double *maxx)
+{
+    const double a = td5_geo_game_x(*maxx), b = td5_geo_game_x(*minx);
+    *minx = a < b ? a : b;
+    *maxx = a < b ? b : a;
+}
 
 /* ------------------------------------------- [ROUND 1008] SOURCE vs DERIVED
  * The three resolvers td5_geo.h documents. They are the ONLY place in the port
@@ -1117,12 +1142,18 @@ int td5_geo_preview_route(const char *slug)
             const cJSON *pj = cJSON_GetObjectItem(root, "projection");
             rr = pj ? cJSON_GetObjectItem(pj, "rotation_rad") : NULL;
         }
-        if (rr && cJSON_IsNumber(rr) && rr->valuedouble != 0.0) {
-            const double c = cos(rr->valuedouble), s = sin(rr->valuedouble);
+        /* [roam M] a GAME-frame route ("reflect_x", td5_geo_frame.h) un-rotates to (-east, north) */
+        const cJSON *pj = cJSON_GetObjectItem(root, "projection");
+        const cJSON *rf = pj ? cJSON_GetObjectItem(pj, TD5_GEO_PROJ_REFLECT_KEY) : NULL;
+        const int reflect = cJSON_IsNumber(rf) && rf->valueint != 0;
+        if ((rr && cJSON_IsNumber(rr) && rr->valuedouble != 0.0) || reflect) {
+            const double th = (rr && cJSON_IsNumber(rr)) ? rr->valuedouble : 0.0;
+            const double c = cos(th), s = sin(th);
             for (i = 0; i < s_preview.n; i++) {
                 const double x = s_preview.x[i], z = s_preview.z[i];
-                s_preview.x[i] =  x * c + z * s;   /* east  */
-                s_preview.z[i] = -x * s + z * c;   /* north */
+                const double e = x * c + z * s;
+                s_preview.x[i] = reflect ? td5_geo_game_x(e) : e;   /* east  */
+                s_preview.z[i] = -x * s + z * c;                    /* north */
             }
             TD5_LOG_I(LOG_TAG, "geo: preview route %s turned north up (rotation %.4f rad)",
                       slug, rr->valuedouble);

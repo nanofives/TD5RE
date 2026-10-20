@@ -26,6 +26,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_roam_pavecensus.h"
+#include "td5_geo_frame.h"      /* [roam M] game x back to east for the lat/lon columns */
 
 #ifndef TD5RE_RELEASE
 
@@ -380,7 +381,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
             const PcRow *f = &keep[k];
             fprintf(o, "%d %.1f %.1f %d,%d %.0f %.0f %.0f %.6f %.6f\n", f->cls, f->val, f->aux, f->tx, f->tz, f->x, f->z, f->y,
                     proj && proj[1] > 0 ? proj[0] + f->z / (proj[1] * PC_UPM) : 0.0,
-                    proj && proj[3] > 0 ? proj[2] + f->x / (proj[3] * PC_UPM) : 0.0);
+                    proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(f->x) / (proj[3] * PC_UPM) : 0.0);
         }
         fclose(o);
     }
@@ -390,7 +391,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
             const PcRow *f = &keep[k];
             fprintf(csv, "%d,%.1f,%.1f,%d,%d,%.0f,%.0f,%.0f,%.6f,%.6f\n", f->cls, f->val, f->aux, f->tx, f->tz, f->x, f->z, f->y,
                     proj && proj[1] > 0 ? proj[0] + f->z / (proj[1] * PC_UPM) : 0.0,
-                    proj && proj[3] > 0 ? proj[2] + f->x / (proj[3] * PC_UPM) : 0.0);
+                    proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(f->x) / (proj[3] * PC_UPM) : 0.0);
         }
         fclose(csv);
     }
@@ -403,7 +404,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                 const PcRow *f = &fprow[k];
                 fprintf(fc, "%.1f,%d,%d,%d,%.0f,%.0f,%.0f,%.6f,%.6f\n", f->val, (int)f->aux, f->tx, f->tz, f->x, f->z, f->y,
                         proj && proj[1] > 0 ? proj[0] + f->z / (proj[1] * PC_UPM) : 0.0,
-                        proj && proj[3] > 0 ? proj[2] + f->x / (proj[3] * PC_UPM) : 0.0);
+                        proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(f->x) / (proj[3] * PC_UPM) : 0.0);
             }
             fclose(fc);
         }

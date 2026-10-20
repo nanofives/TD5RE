@@ -844,7 +844,15 @@ int td5_roam_wheel_contact(TD5_Actor *a, int i, int32_t x, int32_t z, int32_t y,
         }
         s_rp.st.gap_n++;
         if (sp < 0.5 * 430.0 / 30.0 / 3.6) {      /* < 0.5 km/h: at rest */
-            if (s_rp.st.rest_n == 0 || gap > s_rp.st.rest_max) s_rp.st.rest_max = gap;
+            if (s_rp.st.rest_n == 0 || gap > s_rp.st.rest_max) {
+#ifndef TD5RE_RELEASE
+                if (gap > 10 * 256 * 43 / 10)    /* [roam M DEV] a new rest high over 10 cm: say where */
+                    TD5_LOG_W(LOG_TAG, "ROAM_REST_HIGH wheel %d %.1f cm above at world (%d,%d) tick %ld prim %08x patch %d inside %d",
+                              i, (double)gap / 256.0 / 4.30, (int)FP_TRUNC(x), (int)FP_TRUNC(z), (long)g_td5.simulation_tick_counter,
+                              (unsigned)h.prim, (int)h.is_patch, (int)h.inside);
+#endif
+                s_rp.st.rest_max = gap;
+            }
             if (s_rp.st.rest_n == 0 || gap < s_rp.st.rest_min) s_rp.st.rest_min = gap;
             s_rp.st.rest_sum += gap;
             s_rp.st.rest_n++;

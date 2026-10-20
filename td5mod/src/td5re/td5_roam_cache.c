@@ -19,6 +19,7 @@
 #include "td5_geo_roads.h"
 #include "td5_geo_sidewalk.h"    /* the place pavement table, for the lane floor */
 #include "td5_roam_cache.h"
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -271,6 +272,7 @@ static void roam_parse_tile(int ti, double upm, TD5_RoamCacheCensus *c)
         TD5_LOG_W(LOG_TAG, "roam cache: tile %s is not valid JSON", path);
         return;
     }
+    td5_geo_src_json_to_game(doc);       /* [roam M] source frame -> game frame */
     arr = cJSON_GetObjectItem(doc, "roads");
     if (arr && cJSON_IsArray(arr)) {
         /* Child walk, not cJSON_GetArrayItem: that is O(n) per call. */
@@ -336,6 +338,7 @@ int td5_roam_cache_session_begin(const char *slug)
         int k;
         for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
         if (k < 7) continue;
+        td5_geo_src_bbox_to_game(&v[3], &v[5]);   /* [roam M] the extent in the game frame */
         s_roam.tile[n].ix = (int)v[0];
         s_roam.tile[n].iz = (int)v[1];
         s_roam.tile[n].n  = (int)v[2];
@@ -420,10 +423,10 @@ int td5_roam_cache_point(const TD5_RoamWay *w, int k, double *x, double *z,
 /* The casco polygon, F0a's (_archive/roam/F0a/casco_poly.json, world frame): the
  * four avenue corners in ring order. Same quad measure_poly.py clips to. */
 static const double k_casco_poly[4][2] = {
-    { 1078705.99,        5374175.73 },
-    { 2582491.695195345, 7019045.535332896 },
-    { 4255470.01,        5615132.29 },
-    { 2731713.44,        3880755.48 },
+    { -1078705.99,        5374175.73 },     /* [roam M] game frame: x = -east */
+    { -2582491.695195345, 7019045.535332896 },
+    { -4255470.01,        5615132.29 },
+    { -2731713.44,        3880755.48 },
 };
 
 /* Ray-casting point in polygon, the same test as F0a (measure_poly.py pip). */

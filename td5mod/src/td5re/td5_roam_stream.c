@@ -242,6 +242,24 @@ static void rs_tile_path(const RsSession *s, int tx, int tz, char *out, size_t c
     td5_roam_tile_path(out, cap, NULL, s->place, tx, tz);
 }
 
+/* [roam M] a tile FILE the planner can read: present AND of this build's format + rules (the header's first 16 bytes).
+ * A rules bump left the partido's on-demand tiles on disk at the old rules: the route graph refused them
+ * ("unreadable, rules version 5, want 6") while the plan job, seeing the file, never rebuilt them, so the partido
+ * region never mapped. A stale file is now planned like a missing one (built and written over). */
+static int rs_file_current(const char *path)
+{
+    unsigned char h[16];
+    uint32_t ver, rules;
+    FILE *f = fopen(path, "rb");
+    size_t n;
+    if (!f) return 0;
+    n = fread(h, 1, sizeof h, f);
+    fclose(f);
+    if (n < sizeof h || memcmp(h, "TD5ROAM1", 8) != 0) return 0;
+    memcpy(&ver, h + 8, 4); memcpy(&rules, h + 12, 4);
+    return ver == ROAM_FORMAT_VERSION && rules == ROAM_RULES_VERSION;
+}
+
 void td5_roam_stream_set_loadscreen(TD5_RoamStreamLoadscreenFn fn) { s_stream.loadscreen = fn; }
 
 int td5_roam_stream_enabled(void) { return td5_env_int("TD5RE_ROAM_STREAM", 1, 0, 1); }
@@ -329,7 +347,7 @@ static void rs_process(RsSession *s, const RsJob *j, RsResult *r)
          * tiles it loads), a missing one is built and written */
         char path[512];
         rs_tile_path(s, tx, tz, path, sizeof path);
-        if (td5_plat_file_exists(path)) return;
+        if (rs_file_current(path)) return;
         RS_DOING("plan_build");
         if (!rs_build(s, tx, tz, &t, r->err, sizeof r->err)) { r->failed = 1; return; }
         r->built = 1;
@@ -1227,11 +1245,11 @@ int td5_roam_stream_plan_tile(int tx, int tz)
     if (i < 0) return -1;
     if (s->tile[i].plan == 2) {
         rs_tile_path(s, tx, tz, path, sizeof path);
-        return td5_plat_file_exists(path) ? 1 : -1;
+        return rs_file_current(path) ? 1 : -1;
     }
     if (s->tile[i].plan == 1) return 0;
     rs_tile_path(s, tx, tz, path, sizeof path);
-    if (td5_plat_file_exists(path)) { s->tile[i].plan = 2; return 1; }
+    if (rs_file_current(path)) { s->tile[i].plan = 2; return 1; }
     rs_submit(s, i, RS_JOB_PLAN, 0, RS_PRIO_PLAN);
     return 0;
 }

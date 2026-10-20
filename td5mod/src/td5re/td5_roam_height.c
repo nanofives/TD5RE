@@ -17,6 +17,7 @@
 #include "td5_config.h"
 #include "td5_geo.h"
 #include "td5_roam_height.h"
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -177,7 +178,7 @@ static int roam_load(TD5_RoamHeight *c, int layer,
     memset(s, 0, sizeof *s);
 
     t0 = td5_plat_time_us();
-    ok = gr_raster_read_window(path, x0, z0, x1, z1, TD5_ROAM_HEIGHT_PAD, &s->r);
+    ok = gr_raster_read_window_game(path, x0, z0, x1, z1, TD5_ROAM_HEIGHT_PAD, &s->r);   /* [roam M] game frame */
     c->read_us[layer] += td5_plat_time_us() - t0;
     c->reads++;
     if (!ok) {
@@ -260,6 +261,7 @@ int td5_roam_height_sample(TD5_RoamHeight *c, double x, double z,
  * own height differences are what checks the mapping. */
 typedef struct {
     double lat0, lon0, upm, mdlat, mdlon, cs, sn, offx, offz;
+    int    reflect;             /* [roam M] a route frame: east reflected before the rotation */
 } RoamTestProj;
 
 #define ROAM_TEST_WGS_A  6378137.0
@@ -304,6 +306,7 @@ static int roam_test_proj(const char *path, RoamTestProj *p)
         ox = cJSON_GetObjectItem(pr, "offset_x");
         oz = cJSON_GetObjectItem(pr, "offset_z");
         if (cJSON_IsNumber(a) && cJSON_IsNumber(o)) {
+            const cJSON *rf = cJSON_GetObjectItem(pr, TD5_GEO_PROJ_REFLECT_KEY);
             p->lat0 = a->valuedouble;
             p->lon0 = o->valuedouble;
             p->upm  = cJSON_IsNumber(u) ? u->valuedouble : 430.0;
@@ -312,6 +315,7 @@ static int roam_test_proj(const char *path, RoamTestProj *p)
             p->sn   = sin(rot);
             p->offx = cJSON_IsNumber(ox) ? ox->valuedouble : 0.0;
             p->offz = cJSON_IsNumber(oz) ? oz->valuedouble : 0.0;
+            p->reflect = cJSON_IsNumber(rf) && rf->valueint != 0;
             /* gr_proj_init, same constants and order. */
             e2  = ROAM_TEST_WGS_F * (2.0 - ROAM_TEST_WGS_F);
             phi = p->lat0 * ROAM_TEST_RAD;
@@ -327,19 +331,21 @@ static int roam_test_proj(const char *path, RoamTestProj *p)
 }
 
 /* The route-frame point (xr, zr) as the place frame sees it: the same chain as
- * gr_affine_old_from_new, route -> lat/lon -> place. */
+ * gr_affine_old_from_new, route -> lat/lon -> place. [roam M] The place frame is the GAME
+ * frame (td5_geo_frame.h): `op` is the SOURCE projection, so its east is reflected last. */
 static void roam_test_route_to_place(const RoamTestProj *np, const RoamTestProj *op,
                                      double xr, double zr, double *xs, double *zs)
 {
     const double xm = (xr - np->offx) / np->upm;
     const double zm = (zr - np->offz) / np->upm;
-    const double e  = xm * np->cs + zm * np->sn;
+    const double er = xm * np->cs + zm * np->sn;
+    const double e  = np->reflect ? td5_geo_game_x(er) : er;
     const double n  = -xm * np->sn + zm * np->cs;
     const double lat = np->lat0 + n / np->mdlat;
     const double lon = np->lon0 + e / np->mdlon;
     const double e2 = (lon - op->lon0) * op->mdlon;
     const double n2 = (lat - op->lat0) * op->mdlat;
-    *xs = (e2 * op->cs - n2 * op->sn) * op->upm + op->offx;
+    *xs = td5_geo_game_x((e2 * op->cs - n2 * op->sn) * op->upm + op->offx);
     *zs = (e2 * op->sn + n2 * op->cs) * op->upm + op->offz;
 }
 

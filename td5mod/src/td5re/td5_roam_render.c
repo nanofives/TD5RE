@@ -62,6 +62,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_geo.h"
+#include "td5_geo_frame.h"      /* [roam M] the geographic -> game reflection */
 #include "td5_render.h"
 #include "td5_camera.h"
 #include "td5_page_map.h"
@@ -809,10 +810,9 @@ static void rr_row_at(const double (*r)[3], int n, double f, double o[3])
  * too. Taken: clusters of 3+ arms that are not a taper / bend; signalised clusters on every inbound arm,
  * others on the minor arms (fewer lanes than the cluster's widest), or on every arm when all are equal.
  * Not taken: roundabout rings, loops. Inbound: a one-way street flowing into the junction (the whole
- * width), a two-way street's right half AS DRAWN (Argentina drives on the right). The roam world is drawn
- * mirrored against the map (east is on screen-left facing north: plan from the ROAMTILEs vs top-down
- * framedumps, roam HC), so the driver's right of a heading (hx, hz) is (-hz, hx), the convention
- * td5_roam_furniture.c verified on screen (side -1 = right kerb). */
+ * width), a two-way street's right half (Argentina drives on the right). The driver's right of a heading
+ * (hx, hz) is (-hz, hx), the engine's convention (td5_roam_furniture.c side -1 = right kerb); [roam M] the
+ * place frame is the GAME frame (td5_geo_frame.h: x = -east), so that is the real right as well. */
 static void rr_stop_lines(const RoamTile *t, const RRNb *nb, const uint8_t *spsb, RRXList *L, uint32_t *nstop)
 {
     RRCutV *cv = NULL;
@@ -915,7 +915,7 @@ static void rr_stop_lines(const RoamTile *t, const RRNb *nb, const uint8_t *spsb
                 if (!inb) continue;
                 f0 = 0.0; f1 = (double)n;
             } else {
-                /* the right of travel as drawn is (-hz, hx): which end of the row lies there */
+                /* the right of travel is (-hz, hx): which end of the row lies there */
                 const double lat0 = -(m[0][0] - mc[0]) * hz + (m[0][2] - mc[2]) * hx;
                 if (lat0 > 0.0) { f0 = 0.0; f1 = 0.5 * n; } else { f0 = 0.5 * n; f1 = (double)n; }
             }
@@ -1750,7 +1750,9 @@ int td5_roam_render_ensure_begun(void)
 
 #ifndef TD5RE_RELEASE
 /* DEV pose generator. TD5RE_ROAM_RENDER_POSES=<file> with lines
- *   name:lat,lon,h_above_ground_m,yaw_deg,pitch_deg      (yaw 0 = north, as seen on the map)
+ *   name:lat,lon,h_above_ground_m,yaw_deg,pitch_deg      (yaw 0 = north, as seen on the map;
+ *   [roam M] yaw is a compass bearing, clockwise: both game frames are reflected (td5_geo_frame.h),
+ *   so a clockwise bearing is a NEGATIVE engine yaw)
  * writes <file>.tour.txt in the free-cam tour format (STRIP units, the numbers the POS line prints;
  * the tour multiplies by 256 itself, y from the place height minus the strip datum) and returns 1 (the caller
  * exits). Only meaningful with a built geo level whose _route/ frame is the target of the
@@ -1812,7 +1814,7 @@ int td5_roam_render_dev_poses(void)
             TD5_File *gf;
             RoamGrid grd;
             int stx, stz, okg = 0;
-            double spx = (slon - lon0) * mdlon * 430.0, spz = (slat - lat0) * mdlat * 430.0;
+            double spx = td5_geo_game_x((slon - lon0) * mdlon * 430.0), spz = (slat - lat0) * mdlat * 430.0;
             td5_geo_source_path(gp, sizeof gp, slug, "roam/ROAMGRID.JSON");
             gf = td5_plat_file_open(gp, "rb");
             if (gf) {
@@ -1840,18 +1842,18 @@ int td5_roam_render_dev_poses(void)
         l = (size_t)(c - line); if (l >= sizeof nm) l = sizeof nm - 1;
         memcpy(nm, line, l); nm[l] = '\0';
         if (sscanf(c + 1, "%lf,%lf,%lf,%lf,%lf", &lat, &lon, &hm, &yaw, &pit) != 5) continue;
-        px = (lon - lon0) * mdlon * 430.0;
+        px = td5_geo_game_x((lon - lon0) * mdlon * 430.0);     /* [roam M] game frame */
         pz = (lat - lat0) * mdlat * 430.0;
         if (!td5_roam_height_prefetch(hc, px - 2000.0, pz - 2000.0, px + 2000.0, pz + 2000.0) ||
             !td5_roam_height_sample(hc, px, pz, &g, NULL)) { fprintf(stderr, "roam poses: no height at %s\n", nm); continue; }
         if (rf) {   /* roam frame: world = place - origin, y = place height, yaw 0 = +Z (north) */
             fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, (px - (double)rf_ox), (g + hm * 430.0),
-                    (pz - (double)rf_oz), yaw, pit);
+                    (pz - (double)rf_oz), -yaw, pit);
             cnt++;
             continue;
         }
         if (!td5_roam_view_frame(slug, px, pz, &xr, &zr) || !td5_roam_view_frame(slug, px, pz + 430.0, &xn, &zn)) continue;
-        yr = yaw * 3.14159265358979 / 180.0 + atan2(xn - xr, zn - zr);   /* map north -> route +Z-relative */
+        yr = -yaw * 3.14159265358979 / 180.0 + atan2(xn - xr, zn - zr);  /* map north -> route +Z-relative */
         fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, xr, (g + hm * 430.0 - datum), zr,
                 yr * 180.0 / 3.14159265358979, pit);
         cnt++;
@@ -2399,7 +2401,7 @@ int td5_roam_render_ground_census_dev_test(void)
                         z.bs_hist[c2][o2][0], z.bs_hist[c2][o2][1], z.bs_hist[c2][o2][2], z.bs_hist[c2][o2][3],
                         z.bs_hist[c2][o2][4], z.bs_worst[c2][o2] / (RR_UPM / 100.0),
                         mdlat > 0 ? lat0 + z.bs_wz[c2][o2] / (mdlat * RR_UPM) : 0.0,
-                        mdlon > 0 ? lon0 + z.bs_wx[c2][o2] / (mdlon * RR_UPM) : 0.0);
+                        mdlon > 0 ? lon0 + td5_geo_game_x(z.bs_wx[c2][o2]) / (mdlon * RR_UPM) : 0.0);
             fprintf(o, "\n");
         }
         fprintf(o, "worst 40 edge samples: over_cm hang_cm level_gap_cm place_x place_z road_y lat lon\n");
@@ -2407,7 +2409,7 @@ int td5_roam_render_ground_census_dev_test(void)
             const RRGzEdge *c = &ed_keep[i];
             fprintf(o, "%7.1f %7.1f %7.1f %.0f %.0f %.0f %.6f %.6f\n", c->over / (RR_UPM / 100.0), c->hang / (RR_UPM / 100.0),
                     c->lvl / (RR_UPM / 100.0), c->x, c->z, c->y,
-                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + c->x / (mdlon * RR_UPM) : 0.0);
+                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + td5_geo_game_x(c->x) / (mdlon * RR_UPM) : 0.0);
         }
         {   /* every kept edge sample (over > 25 cm) */
             FILE *ec;
@@ -2418,7 +2420,7 @@ int td5_roam_render_ground_census_dev_test(void)
                     const RRGzEdge *c = &ed_keep[i];
                     fprintf(ec, "%.1f,%.1f,%.1f,%.0f,%.0f,%.0f,%.6f,%.6f\n", c->over / (RR_UPM / 100.0), c->hang / (RR_UPM / 100.0),
                             c->lvl / (RR_UPM / 100.0), c->x, c->z, c->y,
-                            mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + c->x / (mdlon * RR_UPM) : 0.0);
+                            mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + td5_geo_game_x(c->x) / (mdlon * RR_UPM) : 0.0);
                 }
                 fclose(ec);
             }
@@ -2429,7 +2431,7 @@ int td5_roam_render_ground_census_dev_test(void)
             fprintf(o, "%7.1f %7.1f %7.1f %s %.0f %.0f %.0f %.6f %.6f\n", c->d / (RR_UPM / 100.0),
                     c->a / (RR_UPM / 100.0), c->b / (RR_UPM / 100.0),
                     c->kind == 1 ? "patch" : (c->kind & 2) ? "deck" : "ribbon", c->x, c->z, c->ry,
-                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + c->x / (mdlon * RR_UPM) : 0.0);
+                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + td5_geo_game_x(c->x) / (mdlon * RR_UPM) : 0.0);
         }
         fclose(o);
     }
@@ -2439,7 +2441,7 @@ int td5_roam_render_ground_census_dev_test(void)
             const RRGzCell *c = all[i];
             fprintf(csv, "%.1f,%.1f,%.1f,%d,%.0f,%.0f,%.0f,%.6f,%.6f\n", c->d / (RR_UPM / 100.0),
                     c->a / (RR_UPM / 100.0), c->b / (RR_UPM / 100.0), c->kind, c->x, c->z, c->ry,
-                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + c->x / (mdlon * RR_UPM) : 0.0);
+                    mdlat > 0 ? lat0 + c->z / (mdlat * RR_UPM) : 0.0, mdlon > 0 ? lon0 + td5_geo_game_x(c->x) / (mdlon * RR_UPM) : 0.0);
         }
         fclose(csv);
     }

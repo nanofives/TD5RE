@@ -131,10 +131,10 @@ const char *td5_geo_route_commit_reason(void);
  * nodes[] was never reprojected, and no FOOTWAYS.JSON at all, so its crossings
  * and bus stops would be drawn in the source frame on a route-frame track.
  *
- * This is NOT a re-commit: reprojecting a vector layer is a pure rigid
- * transform between two frames that are both written down, so it needs no
- * router, no waypoints and no guards. Only the layers that round changed are
- * rewritten.
+ * [roam M] Schema 3 (the geographic -> game reflection, td5_geo_frame.h) moves
+ * the whole frame, so an older derived frame is rebuilt by a RE-COMMIT of the
+ * route from its own committed waypoints (ROUTE_RAW.JSON), as BUILD TRACK
+ * would: no user input, no network.
  *
  * Returns 1 if it repaired something, 0 if there was nothing to do (no derived
  * frame, or already current), -1 if the repair failed -- in which case the
@@ -207,6 +207,12 @@ typedef struct {
  * grid. Returns 1 on success, 0 on failure (out is then zeroed). */
 int gr_raster_read_window(const char *path, double wx0, double wz0,
                           double wx1, double wz1, int pad, GrRaster *out);
+/* [roam M] The same window asked and answered in the GAME frame (td5_geo_frame.h: x = -east):
+ * the source window [-wx1,-wx0] is read and its columns are reversed, so cell (i, j) of the
+ * result covers game x = origin_x + i * cell exactly as any sampler expects. Free roam's
+ * rasters come in through this one; the strip's re-grid reads the source frame directly. */
+int gr_raster_read_window_game(const char *path, double wx0, double wz0,
+                               double wx1, double wz1, int pad, GrRaster *out);
 
 /* ------------------------------------------------------ chord resampler ----
  * [ROAM F1-T4] geo_condition._resample_uniform, exported for td5_roam_ribbon.c.

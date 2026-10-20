@@ -24,6 +24,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_geo.h"
+#include "td5_geo_frame.h"      /* [roam M] the geographic -> game reflection */
 #include "td5_fp.h"
 #include "td5re.h"
 #include "td5_types.h"
@@ -162,7 +163,8 @@ int td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *
     if (!slug || !px || !pz || !roam_proj_load(slug, &p)) return 0;
     e = (lon - p.lon0) * p.mdlon;
     n = (lat - p.lat0) * p.mdlat;
-    *px = (int32_t)floor((e * p.cs - n * p.sn) * p.upm + p.offx + 0.5);
+    /* [roam M] the SOURCE projection, then the reflection into the game frame (td5_geo_frame.h) */
+    *px = (int32_t)floor(td5_geo_game_x((e * p.cs - n * p.sn) * p.upm + p.offx) + 0.5);
     *pz = (int32_t)floor((e * p.sn + n * p.cs) * p.upm + p.offz + 0.5);
     return 1;
 }
@@ -173,7 +175,7 @@ int td5_roam_place_to_latlon(const char *slug, double px, double pz, double *lat
     RoamProj p;
     double x, z, e, n;
     if (!slug || !lat || !lon || !roam_proj_load(slug, &p)) return 0;
-    x = (px - p.offx) / p.upm;
+    x = (td5_geo_game_x(px) - p.offx) / p.upm;     /* [roam M] game frame -> source frame */
     z = (pz - p.offz) / p.upm;
     e = x * p.cs + z * p.sn;
     n = -x * p.sn + z * p.cs;
@@ -266,7 +268,10 @@ void td5_roam_begin(const TD5_RoamSpawn *s)
             if (e && sscanf(e, "%d,%d", &dtx, &dtz) == 2) { tx += dtx; tz += dtz; }
         }
 #endif
-        roam_grid_origin(&g, tx, tz, &s_roam.origin_x, &s_roam.origin_z);
+        /* [roam M] the corner that was the tile's (0,0) corner in the SOURCE frame: the reflected lattice
+         * (u' = -u) makes it the (0,0) corner of tile tx + 1, so the world origin stays on the same ground
+         * point as before the reflection (td5_geo_frame.h) */
+        roam_grid_origin(&g, tx + 1, tz, &s_roam.origin_x, &s_roam.origin_z);
     } else {
         TD5_LOG_W(LOG_TAG, "roam: no ROAMGRID.JSON for place '%s' (build tiles with "
                   "--RoamBuildTiles=casco); origin left at 0,0", s_roam.spawn.place);
@@ -411,7 +416,20 @@ static int roam_street_yaw(int32_t px, int32_t pz)
         if (idx < 0 || (uint32_t)idx >= t->ntri || t->tri[idx].patch >= t->nnode) return -1;
         nd = &t->node[t->tri[idx].patch];
         if (nd->narm < 1) return -1;
-        return (1024 - (int)t->arm[nd->arm_first].bearing12) & 0xFFF;
+        {   /* [roam M] the arm the SOURCE frame (x = east) listed first: arms are sorted by atan2 angle in
+             * (-pi, pi], and a game-frame angle a is the source angle pi - a (td5_geo_frame.h), so the arm
+             * with the least source angle is picked and the spawn faces the same street as before the
+             * reflection (the self-test scenarios start where they always did) */
+            int k, best = nd->arm_first, bkey = 0x7FFF;
+            for (k = 0; k < (int)nd->narm; k++) {
+                const int b12 = t->arm[nd->arm_first + k].bearing12;
+                const int a12 = b12 > 2048 ? b12 - 4096 : b12;          /* game angle, (-2048, 2048]   */
+                int s12 = 2048 - a12;                                    /* source angle, [0, 4096)     */
+                if (s12 > 2048) s12 -= 4096;                             /* into (-2048, 2048]          */
+                if (s12 < bkey) { bkey = s12; best = nd->arm_first + k; }
+            }
+            return (1024 - (int)t->arm[best].bearing12) & 0xFFF;
+        }
     }
     if (idx < 0 || (uint32_t)idx >= t->nspan) return -1;
     {
@@ -427,6 +445,11 @@ static int roam_street_yaw(int32_t px, int32_t pz)
         c1x = 0.5 * (t->vert[vr0].x + t->vert[vr0 + L].x);
         c1z = 0.5 * (t->vert[vr0].z + t->vert[vr0 + L].z);
         if (c0x == c1x && c0z == c1z) return -1;
+        /* [roam M] A ribbon is stored from its smaller node key to its larger (td5_roam_ribbon.c
+         * rib_is_reversed), and the key is x-major, so the stored order runs towards +x. Before the
+         * geographic -> game reflection +x was east; it is west now (td5_geo_frame.h). Facing towards
+         * -x keeps the spawn on the physical heading it always had (east-going, as stored then). */
+        if (c1x - c0x > 0.0) { c1x = 2.0 * c0x - c1x; c1z = 2.0 * c0z - c1z; }
         return (int)floor(atan2(c1x - c0x, c1z - c0z) * (4096.0 / (2.0 * 3.14159265358979323846)) + 0.5) & 0xFFF;
     }
 }

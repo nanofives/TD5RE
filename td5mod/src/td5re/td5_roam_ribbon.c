@@ -1143,10 +1143,10 @@ int roam_ribbon_row_world(const RoamRibbon *r, int row, int32_t (*out)[3])
 
 /* F0a's casco polygon (same four corners as td5_roam_cache.c k_casco_poly). */
 static const double k_tpoly[4][2] = {
-    { 1078705.99,        5374175.73 },
-    { 2582491.695195345, 7019045.535332896 },
-    { 4255470.01,        5615132.29 },
-    { 2731713.44,        3880755.48 },
+    { -1078705.99,        5374175.73 },     /* [roam M] game frame: x = -east */
+    { -2582491.695195345, 7019045.535332896 },
+    { -4255470.01,        5615132.29 },
+    { -2731713.44,        3880755.48 },
 };
 
 static int t_pip(double x, double z)

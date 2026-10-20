@@ -308,14 +308,16 @@ static void rt_poly_at(const TD5_RouteGEdge *E, double a, double *x, double *z, 
     if (seg) *seg = lo;
 }
 
-/* the point s units along TRAVEL on edge E, offset `off` units to the right of travel */
+/* the point s units along TRAVEL on edge E, offset `off` units to the right of travel. [roam M] The place
+ * frame is the GAME frame (td5_geo_frame.h: x = -east), where the driver's right of a heading (ux, uz) is
+ * (-uz, ux), on screen and on the real map alike, so traffic keeps to the real right (Argentina). */
 static void rt_edge_pt(const TD5_RouteGEdge *E, int d, double s, double off, double *x, double *z, double *tx, double *tz)
 {
     double px, pz, ux, uz;
     rt_poly_at(E, d == 0 ? s : E->plen - s, &px, &pz, &ux, &uz, NULL);
     if (d) { ux = -ux; uz = -uz; }
-    *x = px + uz * off;
-    *z = pz - ux * off;
+    *x = px - uz * off;
+    *z = pz + ux * off;
     if (tx) { *tx = ux; *tz = uz; }
 }
 
@@ -342,7 +344,7 @@ static double rt_edge_proj(const TD5_RouteGEdge *E, int d, double hint, double p
             best = dd;
             bs = d == 0 ? a : E->plen - a;
             if (d) { tx = -tx; tz = -tz; }
-            blat = (px - qx) * tz - (pz - qz) * tx;      /* right = (tz, -tx) */
+            blat = (pz - qz) * tx - (px - qx) * tz;      /* right = (-tz, tx), game frame */
         }
     }
     if (lat) *lat = blat;
@@ -504,9 +506,9 @@ static void rt_plan_next(RtCar *c)
         rt_edge_pt(&F, d2, 0.0, 0.0, &sx, &sz, &tx, &tz);
         cr = etx * tz - etz * tx;
         dt = etx * tx + etz * tz;
-        ang = atan2(cr, dt);                     /* < 0 = a right turn (x east, z north) */
+        ang = atan2(cr, dt);                     /* > 0 = a right turn (game frame, td5_geo_frame.h) */
         cand_e[nc] = e2; cand_d[nc] = d2;
-        cand_turn[nc] = fabs(ang) < 0.55 ? 0 : (ang < 0.0 ? 1 : -1);
+        cand_turn[nc] = fabs(ang) < 0.55 ? 0 : (ang > 0.0 ? 1 : -1);
         w[nc] = cand_turn[nc] == 0 ? 4.0 : (cand_turn[nc] > 0 ? 2.0 : 1.5);
         if (fabs(ang) > 2.4) w[nc] = 0.25;       /* a hairpin: rare */
         if (F.klass <= 2) w[nc] *= 0.35;         /* service / living streets: rarely */
@@ -544,6 +546,23 @@ static void rt_plan_next(RtCar *c)
     if (F.plen < 45.0 * RT_M) {
         c->sig2_g = rt_sig_group(&F, c->nd);
         c->sig2_extra = c->clen + F.plen;
+    }
+}
+
+/* the signal past a short next edge: slow early enough to stop at ITS line, d2 m away (the car reaches it after this
+ * junction; its own stop logic takes over on that edge) */
+static void rt_sig2_slow(const RtCar *c, double d2, double v, long tick, double *vt, double *a_req)
+{
+    const double ss = (double)tick / RT_HZ;
+    const double t2 = d2 > 0.0 ? (d2 + RT_STOP_BACK_M) / (v > 1.0 ? v : 1.0) : 0.0;
+    double tq;
+    int red = 0;
+    for (tq = 0.0; tq <= t2 + 0.5; tq += 0.25)
+        if (td5_geo_signal_phase_at(ss + tq, c->sig2_g) == 0) { red = 1; break; }
+    if (red && d2 > v * v / (2.0 * 6.5)) {
+        const double vs = sqrt(2.0 * T.a_brake * (d2 > 0.0 ? d2 : 0.0));
+        if (vs < *vt) *vt = vs;
+        if (v > 0.2 && d2 > 0.15) { const double ar = -v * v / (2.0 * d2); if (ar < *a_req) *a_req = ar; }
     }
 }
 
@@ -1180,21 +1199,16 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
         }
         /* the signal past a short next edge: slow early enough to stop at ITS line (the car reaches it after
          * this junction; its own stop logic takes over on that edge) */
-        if (c->ne >= 0 && c->sig2_g >= 0) {
-            const double d2 = d_end_now + c->sig2_extra / RT_M - RT_STOP_BACK_M;
-            const double ss = (double)tick / RT_HZ;
-            const double t2 = d2 > 0.0 ? (d2 + RT_STOP_BACK_M) / (v > 1.0 ? v : 1.0) : 0.0;
-            double tq;
-            int red = 0;
-            for (tq = 0.0; tq <= t2 + 0.5; tq += 0.25)
-                if (td5_geo_signal_phase_at(ss + tq, c->sig2_g) == 0) { red = 1; break; }
-            if (red && d2 > v * v / (2.0 * 6.5)) {
-                const double vs = sqrt(2.0 * T.a_brake * (d2 > 0.0 ? d2 : 0.0));
-                if (vs < vt) vt = vs;
-                if (v > 0.2 && d2 > 0.15) { const double ar = -v * v / (2.0 * d2); if (ar < a_req) a_req = ar; }
-            }
-        }
-    } else if (c->v_conn < vt) vt = c->v_conn;
+        if (c->ne >= 0 && c->sig2_g >= 0)
+            rt_sig2_slow(c, d_end_now + c->sig2_extra / RT_M - RT_STOP_BACK_M, v, tick, &vt, &a_req);
+    } else {
+        if (c->v_conn < vt) vt = c->v_conn;
+        /* [roam M] ON the connector too: a junction whose cut rows moved out (acute wedges paved, ROAM_RULES 6) has a
+         * longer connector and a shorter next edge, and a car that only looked again on that edge met its red 1.4 ..
+         * 7 m before the line at 35 .. 44 km/h (roam-traffic-smoke "red 1/23"). sig2_extra = connector + next edge. */
+        if (c->sig2_g >= 0)
+            rt_sig2_slow(c, (c->sig2_extra - c->s) / RT_M - RT_STOP_BACK_M, v, tick, &vt, &a_req);
+    }
     cap = rt_gap_cap(c, a, x, z, v, &obstacle);
     if (cap < vt) { vt = cap; if (vt < 0.5) c->holding = 1; }
     if (vt < 0.0) vt = 0.0;

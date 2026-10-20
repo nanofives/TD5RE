@@ -53,6 +53,7 @@
 #include "td5_roam_cache.h"
 #include "td5_roam_world.h"
 #include "td5_roam_junction.h"
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -1374,6 +1375,137 @@ static int u_simple(const ULV *pv, int n)
     return 1;
 }
 
+/* [roam M] NOTCHES. Where two arms meet at an acute angle (a diagonal crossing an avenue or a street, the two
+ * carriageways of a divided diagonal), the gap between their pieces runs into the patch as a long thin wedge, its
+ * tip at the cluster centre: 0.5 .. 2 m wide over 5 .. 20 m (Diagonal 74 x Calle 54, Diagonal 80 x Avenida 44).
+ * The pavement fills it as an island, a sidewalk spike in the middle of the junction, and the locator walls it: a
+ * nose every car, AI and cop hit. Such a tip is cut off where the wedge reaches U_NOTCH_W across, or at the cut
+ * rows (tagged vertices are never removed): the cut becomes paving, the island starts there.
+ * A TIP: 1..3 consecutive untagged vertices spanning under U_NOTCH_W that turn RIGHT (into the non-paved side; the
+ * paving is on the left of every loop) by more than 150 deg in all, i.e. a wedge under 30 deg. From the tip the
+ * two kerbs are walked back (0.25 m steps along one, nearest point on the other) while the gap stays under
+ * U_NOTCH_W, and the cut is kept only when the wedge it removes is deep (kerb run > 3 x the cut width) and the
+ * chord crosses no other edge. A block corner (90 deg) is never a tip. Knob TD5RE_ROAM_NOTCH_W (dm, 20; 0 = off). */
+#define U_NOTCH_STEP  (0.25 * TD5_ROAM_UPM)
+#define U_NOTCH_REACH (30.0 * TD5_ROAM_UPM)
+
+/* point at arc length s from vertex k walking dir (+1 forward, -1 backward); stops BEFORE a tagged vertex.
+ * Returns 0 past the reach / at a tag; *e = edge (a -> a+1, forward order) holding it, *t its fraction. */
+static int u_walk(const ULV *v, int n, int k, int dir, double s, double *px, double *pz, int *e, double *t)
+{
+    int i = k, steps = 0;
+    while (steps++ < n) {
+        const int j = (i + dir + n) % n;
+        const double L = hypot(v[j].x - v[i].x, v[j].z - v[i].z);
+        if (s <= L && L > 0.0) {
+            const double f = s / L;
+            *px = v[i].x + (v[j].x - v[i].x) * f; *pz = v[i].z + (v[j].z - v[i].z) * f;
+            if (dir > 0) { *e = i; *t = f; } else { *e = j; *t = 1.0 - f; }
+            return 1;
+        }
+        s -= L;
+        if (v[j].tag) return 0;
+        i = j;
+    }
+    return 0;
+}
+
+static int u_notch_fill(ULV **pv, int *pn, int *pcap, double wmax)
+{
+    int fills = 0, guard = 0;
+    if (wmax <= 0.0) return 0;
+    while (guard++ < 16) {
+        ULV *v = *pv;
+        const int n = *pn;
+        int k, w, best_a = -1, best_b = -1;
+        double best_area = 0.0, bpx = 0, bpz = 0, bqx = 0, bqz = 0, bta = 0, btb = 0;
+        if (n < 6) break;
+        for (k = 0; k < n; k++) {
+            for (w = 1; w <= 3; w++) {
+                const int kl = (k + w - 1) % n;
+                double turn = 0.0, span = 0.0, s, s_ok = -1.0, w_ok = 0.0, okx = 0, okz = 0, oqx = 0, oqz = 0, oarc = 0;
+                int j, ea_ok = -1, eb_ok = -1, bad = 0;
+                double ta_ok = 0, tb_ok = 0;
+                for (j = 0; j < w; j++) {
+                    const ULV *a = &v[(k + j - 1 + n) % n], *b = &v[(k + j) % n], *c = &v[(k + j + 1) % n];
+                    if (b->tag) { bad = 1; break; }
+                    turn += atan2(cross2(b->x - a->x, b->z - a->z, c->x - b->x, c->z - b->z),
+                                  (b->x - a->x) * (c->x - b->x) + (b->z - a->z) * (c->z - b->z));
+                    if (j + 1 < w) span += hypot(c->x - b->x, c->z - b->z);
+                }
+                if (bad || span >= wmax || turn > -150.0 * ROAM_PI / 180.0) continue;
+                /* walk the kerb behind the tip (backward from k), measure the gap to the kerb ahead (forward from kl) */
+                for (s = U_NOTCH_STEP; s <= U_NOTCH_REACH; s += U_NOTCH_STEP) {
+                    double px, pz, ta, bd = 1e30, bqxx = 0, bqzz = 0, barc = 0, btb2 = 0, arc = 0;
+                    int ea, i = kl, steps = 0, ebb = -1;
+                    if (!u_walk(v, n, k, -1, s, &px, &pz, &ea, &ta)) break;
+                    while (steps++ < n && arc < U_NOTCH_REACH + wmax) {      /* nearest point on the kerb ahead */
+                        const int jn = (i + 1) % n;
+                        const double ex = v[jn].x - v[i].x, ez = v[jn].z - v[i].z, l2 = ex * ex + ez * ez;
+                        double f = l2 > 0.0 ? ((px - v[i].x) * ex + (pz - v[i].z) * ez) / l2 : 0.0, qx, qz, d;
+                        if (f < 0.0) f = 0.0; else if (f > 1.0) f = 1.0;
+                        qx = v[i].x + ex * f; qz = v[i].z + ez * f;
+                        d = hypot(qx - px, qz - pz);
+                        if (d < bd) { bd = d; bqxx = qx; bqzz = qz; ebb = i; btb2 = f; barc = arc + f * sqrt(l2); }
+                        arc += sqrt(l2);
+                        if (v[jn].tag) break;
+                        i = jn;
+                    }
+                    if (ebb < 0 || bd >= wmax) break;
+                    if (ea == ebb || (ea - kl + n) % n <= (ebb - kl + n) % n) break;   /* the two walks met */
+                    s_ok = s; w_ok = bd; okx = px; okz = pz; oqx = bqxx; oqz = bqzz; oarc = barc;
+                    ea_ok = ea; ta_ok = ta; eb_ok = ebb; tb_ok = btb2;
+                }
+                if (s_ok < 0.5 * TD5_ROAM_UPM || s_ok + span + oarc <= 3.0 * w_ok) continue;
+                {
+                    /* the chord crosses no other edge of the loop */
+                    int q, cross = 0;
+                    for (q = 0; q < n && !cross; q++) {
+                        const ULV *c = &v[q], *d = &v[(q + 1) % n];
+                        double d1, d2, d3, d4;
+                        if (q == ea_ok || q == eb_ok) continue;
+                        d1 = cross2(oqx - okx, oqz - okz, c->x - okx, c->z - okz);
+                        d2 = cross2(oqx - okx, oqz - okz, d->x - okx, d->z - okz);
+                        d3 = cross2(d->x - c->x, d->z - c->z, okx - c->x, okz - c->z);
+                        d4 = cross2(d->x - c->x, d->z - c->z, oqx - c->x, oqz - c->z);
+                        if (((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) && d1 != 0.0 && d2 != 0.0 && d3 != 0.0 && d4 != 0.0)
+                            cross = 1;
+                    }
+                    if (cross) continue;
+                }
+                if (0.5 * (s_ok + oarc) * w_ok > best_area) {
+                    best_area = 0.5 * (s_ok + oarc) * w_ok;
+                    best_a = ea_ok; best_b = eb_ok; bta = ta_ok; btb = tb_ok;
+                    bpx = okx; bpz = okz; bqx = oqx; bqz = oqz;
+                }
+            }
+        }
+        if (best_a < 0) break;
+        {
+            /* new loop: v[best_b+1] .. (forward, wrapping) .. v[best_a], P, Q */
+            ULV *nv = (ULV *)malloc((size_t)(n + 2) * sizeof *nv);
+            int m = 0, i = (best_b + 1) % n, steps = 0;
+            if (!nv) break;
+            for (;;) {
+                nv[m++] = v[i];
+                if (i == best_a || steps++ > n) break;
+                i = (i + 1) % n;
+            }
+            if (bta * hypot(v[(best_a + 1) % n].x - v[best_a].x, v[(best_a + 1) % n].z - v[best_a].z) >= ROAM_OL_MIN_SEG) {
+                nv[m].x = bpx; nv[m].z = bpz; nv[m].tag = 0; nv[m].prim = v[best_a].prim; m++;
+            }
+            if ((1.0 - btb) * hypot(v[(best_b + 1) % n].x - v[best_b].x, v[(best_b + 1) % n].z - v[best_b].z) >= ROAM_OL_MIN_SEG) {
+                nv[m].x = bqx; nv[m].z = bqz; nv[m].tag = 0; nv[m].prim = v[best_b].prim; m++;
+            }
+            if (m < 4 || !u_simple(nv, m)) { free(nv); break; }
+            free(*pv);
+            *pv = nv; *pn = m; *pcap = n + 2;
+            fills++;
+        }
+    }
+    return fills;
+}
+
 /* [F2-E] A block corner that the union outline draws as a RUN of short reflex
  * segments (the node bevels of the pieces meeting there: 00064c21000864e3, a
  * 44 deg diagonal corner drawn as 7 vertices 0.1-0.3 m apart) got one fillet per
@@ -1866,8 +1998,10 @@ static int u_needs_push(const TD5_RoamGraph *g, const TD5_RoamCluster *cl, const
  * loops (U->v[0] = outer, CCW; the rest = holes, CW), local frame. Returns 1 on
  * success, 0 when no valid outline was found (U empty), -1 on out of memory. */
 static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmTmp *at, int na,
-                       TD5_RoamGraphCensus *c, ULoops *U, UStat *st)
+                       TD5_RoamGraphCensus *c, ULoops *U, UStat *st, int notch)
 {
+    /* [roam M] the union notch rule (u_notch_fill): width, 0 = off for this solve */
+    const double notch_w = notch ? td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) * 0.1 * TD5_ROAM_UPM : 0.0;
     const TD5_RoamGraphParams *P = &g->prm;
     const double W = 2.0 * P->body_half_w, LF = P->body_lf;
     UPrims L, A;
@@ -1909,7 +2043,7 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
     for (m = 0; m < na; m++) t[m] = tb[m] = at[m].a.t;
 
     for (round = 0;; round++) {
-        int any = 0, nf, outer = -1, ntips = 0;
+        int any = 0, nf, outer = -1, ntips = 0, nnotch = 0;
         ULV *fl = NULL;
         /* Push cuts out while a row is covered or a piece reaches into a ribbon.
          * An arm that reaches its limit still pushed makes PARTNERS of the arms
@@ -2030,6 +2164,11 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
             }
             U->nloop = w;
             for (k = 0; k < U->nloop; k++) ntips += u_simplify(U->v[k], &U->n[k]);
+            {
+                /* [roam M] acute wedges cut back to U_NOTCH_W (u_notch_fill) */
+                if (td5_env_int("TD5RE_ROAM_NOTCH_PARTS", 13, 0, 15) & 1)
+                    for (k = 0; k < U->nloop; k++) nnotch += u_notch_fill(&U->v[k], &U->n[k], &U->cap[k], notch_w);
+            }
         }
         /* Fillets on the outer loop. */
         memset(&sc, 0, sizeof sc);
@@ -2038,6 +2177,14 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         cl->flags &= ~TD5_ROAM_CL_SWEPT_FAIL;
         nf = u_fillet(U->v[0], U->n[0], &L, P, W, LF, fixed, pr, na, need, &sc, cl, &fl);
         if (nf < 0) goto out;
+#ifndef TD5RE_RELEASE
+        {
+            const int nlog = td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2);
+            if ((nnotch || nlog == 2) && nlog)
+                TD5_LOG_I(LOG_TAG, "ROAM_NOTCH cluster %lld at (%.0f,%.0f) round %d: %d fill(s)",
+                          (long long)cl->key, cl->cx, cl->cz, round, nnotch);
+        }
+#endif
 #ifndef TD5RE_RELEASE
         {
             const char *dk = getenv("TD5RE_ROAM_UNION_DEBUG");
@@ -2115,6 +2262,7 @@ static int union_solve(const TD5_RoamGraph *g, int ci, TD5_RoamCluster *cl, ArmT
         c->seam_corner_dropped += sc.seam_corner_dropped;
         c->fillet_tiny += sc.fillet_tiny;
         c->union_sliver_tips += ntips;
+        c->union_notch_fills += nnotch;
         break;
     }
     if (!u_simple(U->v[0], U->n[0])) {
@@ -2882,6 +3030,39 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
                 const double p = (right->tjx - a->kx) * a->a.dir_x + (right->tjz - a->kz) * a->a.dir_z;
                 if (p > t) t = p;
             }
+            if (!simple && !umode && na > 1 && (td5_env_int("TD5RE_ROAM_NOTCH_PARTS", 13, 0, 15) & 4)) {
+                /* [roam M] the NORMAL-mode twin of u_notch_fill: an acute DIRECT gore (arms within 30 deg, the two
+                 * kerbs converging, e.g. Diagonal 80 x Avenida 44) left its nose as a wedge between the ribbons. The
+                 * cut moves out to where the kerbs are U_NOTCH_W apart (at most 50 m further, never past lim; a gore
+                 * converging under ~1 deg is a parallel median and keeps its cut), so
+                 * the DIRECT corner spans that width and the fan paves the wedge tip. */
+                const double nw = td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) * 0.1 * TD5_ROAM_UPM;
+                int side;
+                for (side = 0; side < 2 && nw > 0.0; side++) {
+                    const ArmTmp *b = side == 0 ? &at[(m + 1) % na] : &at[(m + na - 1) % na];
+                    const Corner *co = side == 0 ? left : right;
+                    const double sg = side == 0 ? 1.0 : -1.0;      /* left kerb of a (with b's right), or right */
+                    const double ax0 = a->kx + sg * a->a.half_w * -a->a.dir_z, az0 = a->kz + sg * a->a.half_w * a->a.dir_x;
+                    const double bx0 = b->kx - sg * b->a.half_w * -b->a.dir_z, bz0 = b->kz - sg * b->a.half_w * b->a.dir_x;
+                    const double cosab = a->a.dir_x * b->a.dir_x + a->a.dir_z * b->a.dir_z;
+                    const double c0 = cross2(b->a.dir_x, b->a.dir_z, ax0 - bx0, az0 - bz0);
+                    const double c1 = cross2(b->a.dir_x, b->a.dir_z, a->a.dir_x, a->a.dir_z);
+                    double s_need;
+#ifndef TD5RE_RELEASE
+                    if (cosab >= 0.86603 && td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2) == 2)
+                        TD5_LOG_I(LOG_TAG, "ROAM_GORE cluster %lld at (%.0f,%.0f) arm %d side %d: corner type %d, cos %.3f, "
+                                  "gap at the cut %.2f m (t %.1f m, lim %.1f m), c1 %.3f", (long long)cl->key, cl->cx, cl->cz,
+                                  m, side, (int)co->type, cosab, fabs(c0 + c1 * t) / TD5_ROAM_UPM, t / TD5_ROAM_UPM,
+                                  a->lim / TD5_ROAM_UPM, c1);
+#endif
+                    if (co->type != CORNER_DIRECT || cosab < 0.86603 || fabs(c1) < 0.015) continue;  /* < 30 deg, > ~1 */
+                    if (fabs(c0 + c1 * t) >= nw) continue;                                         /* already wide */
+                    s_need = c1 > 0.0 ? (nw - c0) / c1 : (-nw - c0) / c1;
+                    if (s_need <= t || s_need > t + 50.0 * TD5_ROAM_UPM) continue;
+                    t = s_need;
+                    c->gore_trims++;
+                }
+            }
             if (t >= a->lim) {
                 t = a->lim;
                 cl->flags |= TD5_ROAM_CL_CLAMPED;
@@ -2891,10 +3072,66 @@ static int junction_pass(TD5_RoamGraph *g, const unsigned char *mode)
             a->a.kerb_r = left->type == CORNER_FILLET ? left->r : 0.0;
             a->a.corner = left->type;
         }
+        if (!simple && !umode && na > 1 && td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) > 0 &&
+            (td5_env_int("TD5RE_ROAM_NOTCH_PARTS", 13, 0, 15) & 8)) {
+            /* [roam M] LEVEL an acute DIRECT corner: its outline is the straight line from arm a's row end to arm b's.
+             * With b's cut far out (Diagonal 80 x Avenida 44: 30 m) that line runs alongside a's ribbon, and the wedge
+             * between them is an island spike into the junction. The shorter cut moves out to the longer one's level
+             * (projected on its own axis; at most 50 m further, never past lim), so the corner spans the real gap. */
+            for (m = 0; m < na; m++) {
+                ArmTmp *A = &at[m], *B = &at[(m + 1) % na];
+                const double cosab = A->a.dir_x * B->a.dir_x + A->a.dir_z * B->a.dir_z;
+                double eax, eaz, ebx, ebz, sb, sa;
+                if (cor[m].type != CORNER_DIRECT || cosab < 0.86603) continue;
+                eax = A->kx + A->a.dir_x * A->a.t + A->a.half_w * -A->a.dir_z;
+                eaz = A->kz + A->a.dir_z * A->a.t + A->a.half_w * A->a.dir_x;
+                ebx = B->kx + B->a.dir_x * B->a.t - B->a.half_w * -B->a.dir_z;
+                ebz = B->kz + B->a.dir_z * B->a.t - B->a.half_w * B->a.dir_x;
+                sb = (ebx - A->kx) * A->a.dir_x + (ebz - A->kz) * A->a.dir_z;    /* b's row end on a's axis */
+                sa = (eax - B->kx) * B->a.dir_x + (eaz - B->kz) * B->a.dir_z;    /* a's row end on b's axis */
+                {
+                    /* only a NARROW wedge: the far row end within 1.5 U_NOTCH_W of the near arm's kerb line and >= 2 m
+                     * beyond its cut (a wide gore is a real island and keeps its outline) */
+                    const double nw = td5_env_int("TD5RE_ROAM_NOTCH_W", 20, 0, 60) * 0.1 * TD5_ROAM_UPM;
+                    const double lat_b = fabs(cross2(A->a.dir_x, A->a.dir_z, ebx - eax, ebz - eaz));
+                    const double lat_a = fabs(cross2(B->a.dir_x, B->a.dir_z, eax - ebx, eaz - ebz));
+                    if (!(sb > A->a.t + 2.0 * TD5_ROAM_UPM && lat_b < 1.5 * nw)) sb = -1e30;
+                    if (!(sa > B->a.t + 2.0 * TD5_ROAM_UPM && lat_a < 1.5 * nw)) sa = -1e30;
+                }
+                if (sb > A->a.t + 0.5 * TD5_ROAM_UPM && sb <= A->a.t + 50.0 * TD5_ROAM_UPM) {
+                    /* the levelled row end must stay clear of b's (kerbs that meet there would leave a sub-cm kerb) */
+                    const double t2 = sb < A->lim ? sb : A->lim;
+                    const double nx = A->kx + A->a.dir_x * t2 + A->a.half_w * -A->a.dir_z;
+                    const double nz = A->kz + A->a.dir_z * t2 + A->a.half_w * A->a.dir_x;
+                    if (hypot(nx - ebx, nz - ebz) >= 0.1 * TD5_ROAM_UPM) {
+#ifndef TD5RE_RELEASE
+                        if (td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2))
+                            TD5_LOG_I(LOG_TAG, "ROAM_LEVEL cluster %lld at (%.0f,%.0f) arm %d: cut %.2f -> %.2f m (lim %.2f), row end (%.0f,%.0f), "
+                                      "other row end (%.0f,%.0f)", (long long)cl->key, cl->cx, cl->cz, m, A->a.t / TD5_ROAM_UPM,
+                                      t2 / TD5_ROAM_UPM, A->lim / TD5_ROAM_UPM, nx, nz, ebx, ebz);
+#endif
+                        A->a.t = t2; c->gore_trims++;
+                    }
+                } else if (sa > B->a.t + 0.5 * TD5_ROAM_UPM && sa <= B->a.t + 50.0 * TD5_ROAM_UPM) {
+                    const double t2 = sa < B->lim ? sa : B->lim;
+                    const double nx = B->kx + B->a.dir_x * t2 - B->a.half_w * -B->a.dir_z;
+                    const double nz = B->kz + B->a.dir_z * t2 - B->a.half_w * B->a.dir_x;
+                    if (hypot(nx - eax, nz - eaz) >= 0.1 * TD5_ROAM_UPM) {
+#ifndef TD5RE_RELEASE
+                        if (td5_env_int("TD5RE_ROAM_NOTCH_LOG", 0, 0, 2))
+                            TD5_LOG_I(LOG_TAG, "ROAM_LEVEL cluster %lld at (%.0f,%.0f) arm %d: cut %.2f -> %.2f m (lim %.2f), row end (%.0f,%.0f), "
+                                      "other row end (%.0f,%.0f)", (long long)cl->key, cl->cx, cl->cz, (m + 1) % na, B->a.t / TD5_ROAM_UPM,
+                                      t2 / TD5_ROAM_UPM, B->lim / TD5_ROAM_UPM, nx, nz, eax, eaz);
+#endif
+                        B->a.t = t2; c->gore_trims++;
+                    }
+                }
+            }
+        }
 
         /* UNION: the cuts are pushed out until the outline holds them. */
         if (umode) {
-            const int ur = union_solve(g, i, cl, at, na, c, &ul, &ust);
+            const int ur = union_solve(g, i, cl, at, na, c, &ul, &ust, 1);
             if (ur < 0) goto done;
             ugood = ur;
             cl->flags |= TD5_ROAM_CL_UNION;
@@ -3315,12 +3552,13 @@ patch_done:
     TD5_LOG_I(LOG_TAG, "roam junctions: %d cluster(s) (%d multi-node), %d internal edge(s), "
               "%d union(s) by edge + %d by disc, %d refused (cap), %d refused (layer), "
               "max diameter %.1f m, fan %d, ear-clip %d, fail %d, fillets %d, "
-              "swept fail %d (widened %d), %d split(s), slivers flipped %d left %d",
+              "swept fail %d (widened %d), %d split(s), slivers flipped %d left %d, "
+              "notch: %d union wedge(s) cut, %d gore cut(s) moved out",
               c->clusters, c->multi_node_clusters, c->internal_edges, c->unions_edge,
               c->unions_disc, c->rejected_unions, c->rejected_layer,
               c->max_diameter / TD5_ROAM_UPM, c->fan_ok, c->fan_fallback - c->earclip_fail,
               c->earclip_fail, c->fillets, c->swept_fail, c->swept_widened, c->tri_splits,
-              c->sliver_flips, c->sliver_kept);
+              c->sliver_flips, c->sliver_kept, c->union_notch_fills, c->gore_trims);
     ok = 1;
 
 done:
@@ -3440,10 +3678,10 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
 
 /* F0a's casco polygon (world frame), the same quad as td5_roam_cache.c. */
 static const double k_casco[4][2] = {
-    { 1078705.99,        5374175.73 },
-    { 2582491.695195345, 7019045.535332896 },
-    { 4255470.01,        5615132.29 },
-    { 2731713.44,        3880755.48 },
+    { -1078705.99,        5374175.73 },     /* [roam M] game frame: x = -east */
+    { -2582491.695195345, 7019045.535332896 },
+    { -4255470.01,        5615132.29 },
+    { -2731713.44,        3880755.48 },
 };
 
 static int casco_pip(double x, double z)
@@ -3487,6 +3725,7 @@ static double *load_signals(const char *slug, const double win[4], int *n_out)
         cJSON *doc, *arr, *s;
         for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
         if (k < 7) continue;
+        td5_geo_src_bbox_to_game(&v[3], &v[5]);   /* [roam M] the extent in the game frame */
         if (v[5] < win[0] || v[3] > win[2] || v[6] < win[1] || v[4] > win[3]) continue;
         snprintf(rel, sizeof rel, "tiles/SIGNALS_%d_%d.JSON", (int)v[0], (int)v[1]);
         td5_geo_source_path(p2, sizeof p2, slug, rel);
@@ -3495,6 +3734,7 @@ static double *load_signals(const char *slug, const double win[4], int *n_out)
         doc = cJSON_Parse(body);
         free(body);
         if (!doc) continue;
+        td5_geo_src_json_to_game(doc);            /* [roam M] source frame -> game frame */
         arr = cJSON_GetObjectItem(doc, "signals");
         for (s = arr ? arr->child : NULL; s; s = s->next) {
             const cJSON *x = cJSON_GetObjectItem(s, "x"), *z = cJSON_GetObjectItem(s, "z");
@@ -3710,6 +3950,7 @@ int td5_roam_junction_dev_census(void)
         fprintf(f, "fillet_runs_merged %d\n", c->fillet_runs_merged);
         fprintf(f, "hole_fillet_loops %d\n", c->hole_fillet_loops);
         fprintf(f, "union_sliver_tips %d\n", c->union_sliver_tips);
+        fprintf(f, "union_notch_fills %d\n", c->union_notch_fills);
         fprintf(f, "seam_corner_dropped %d\n", c->seam_corner_dropped);
         fprintf(f, "fillet_tiny %d\n", c->fillet_tiny);
         fprintf(f, "earclip_u_rescued %d\n", c->earclip_u_rescued);

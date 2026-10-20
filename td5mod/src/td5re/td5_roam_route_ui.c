@@ -29,6 +29,7 @@
 #include "td5_hud.h"
 #include "td5_race_state.h"
 #include "td5_geo_roads.h"
+#include "td5_geo_frame.h"      /* [roam M] the planner's east-right sign */
 #include "td5_page_map.h"      /* HUD_WHITE_TEX_PAGE */
 #include "td5_roam_mode.h"
 #include "td5_roam_physics.h"
@@ -269,7 +270,7 @@ static void proj_pt(const Proj *p, double X, double Z, float *sx, float *sy)
 
 static void proj_inv_northup(const Proj *p, float sx, float sy, double *X, double *Z)
 {
-    *X = p->cx + (double)(sx - p->ox) / p->k;
+    *X = p->cx + p->m00 * (double)(sx - p->ox) / p->k;     /* m00 = +-1: its own inverse */
     *Z = p->cz - (double)(sy - p->oy) / p->k;
 }
 
@@ -578,6 +579,10 @@ static void map_layout(float *top, float *bot)
     *bot = 74.0f * S;     /* [F9a] three hint lines */
 }
 
+/* [roam M] The planner is north up, EAST RIGHT. The place frame is the game frame (td5_geo_frame.h:
+ * x = -east), so east on screen is place -X. */
+#define MAP_EAST_X TD5_GEO_GAME_X_SIGN
+
 static void map_proj(Proj *p)
 {
     float top, bot;
@@ -585,7 +590,7 @@ static void map_proj(Proj *p)
     map_layout(&top, &bot);
     p->cx = u.cx; p->cz = u.cz;
     p->k = u.ppm / 430.0;
-    p->m00 = 1; p->m01 = 0; p->m10 = 0; p->m11 = -1;
+    p->m00 = MAP_EAST_X; p->m01 = 0; p->m10 = 0; p->m11 = -1;
     p->x0 = 0; p->x1 = g_render_width_f; p->y0 = top; p->y1 = g_render_height_f - bot;
     p->ox = g_render_width_f * 0.5f; p->oy = (p->y0 + p->y1) * 0.5f;
 }
@@ -735,8 +740,8 @@ static void map_input(double dt)
     /* ---- keyboard ---- */
     {
         const double pan = (shift ? 1500.0 : 520.0) * dt / u.ppm * 430.0;   /* place units */
-        if (kd(K_LEFT))  u.cx -= pan;
-        if (kd(K_RIGHT)) u.cx += pan;
+        if (kd(K_LEFT))  u.cx -= MAP_EAST_X * pan;
+        if (kd(K_RIGHT)) u.cx += MAP_EAST_X * pan;
         if (kd(K_UP))    u.cz += pan;
         if (kd(K_DOWN))  u.cz -= pan;
         if (kd(K_EQUALS) || kd(K_NPADD) || kd(K_PGUP)) u.ppm *= exp(1.6 * dt);
@@ -855,7 +860,7 @@ static void map_input(double dt)
             const int dx = u.m_x - u.m_x0, dy = u.m_y - u.m_y0;
             if (!u.m_drag && dx * dx + dy * dy > 25) u.m_drag = 1;
             if (u.m_drag && u.m_pin < 0) {
-                u.cx = u.m_cx0 - (double)dx / (u.ppm / 430.0);
+                u.cx = u.m_cx0 - MAP_EAST_X * (double)dx / (u.ppm / 430.0);
                 u.cz = u.m_cz0 + (double)dy / (u.ppm / 430.0);
             }
         } else if (!down && u.m_down) {
@@ -1061,14 +1066,15 @@ void td5_roam_route_ui_draw_hud(void)
 /* ============================================================ the minimap ====== */
 
 /* [roam HB] THE ONE PLACE the minimap's left/right handedness lives. Heading-up: the car's heading is screen-up.
- * m00/m01 is the x row. It is the STRIP race minimap's convention (td5_hud.c: rot = 0x800 - heading), in which
- * place/world +X lies to the LEFT of the heading. If the roam world transform gets mirrored to match the real
- * map (suspected: the planner, which uses X-right, disagrees with the 3D view), negate the x row here
- * (MM_MIRROR_X) and nothing else: the N marker, labels and cops all go through this matrix. */
-#define MM_MIRROR_X (-1.0)
+ * m00/m01 is the x row. It is the ENGINE's convention, the same as the 3D view and the strip race minimap
+ * (td5_hud.c: rot = 0x800 - heading): world +X lies to the LEFT of the heading (screen_x = -vx * focal / vz).
+ * [roam M] It was never a mirror compensation: the mirror was in the data, and the geographic -> game
+ * reflection (td5_geo_frame.h) removed it there, so this matrix now shows the real map as the 3D view does.
+ * The N marker, labels and cops all go through it. */
+#define MM_ENGINE_X (-1.0)
 static void mm_heading_up_matrix(double ya, Proj *p)
 {
-    p->m00 = MM_MIRROR_X * cos(ya); p->m01 = -MM_MIRROR_X * sin(ya);
+    p->m00 = MM_ENGINE_X * cos(ya); p->m01 = -MM_ENGINE_X * sin(ya);
     p->m10 = -sin(ya);              p->m11 = -cos(ya);
 }
 

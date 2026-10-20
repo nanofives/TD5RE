@@ -69,7 +69,7 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    4u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    6u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
                                      * ROW_COVERED pins at H_c
                                      * 3: F1-T10 height coupling of overlapping ribbons,
@@ -80,7 +80,13 @@
                                      * holes (islands) get kerb fillets, a NORMAL outline
                                      * the first-ear clipper strands is cut by ear_clip_u,
                                      * near-straight seam vertices beside a block corner
-                                     * and 2-3 vertex sliver tips are dropped */
+                                     * and 2-3 vertex sliver tips are dropped
+                                     * 5: roam M, the geographic -> game reflection: every
+                                     * source coordinate enters as x = -east (td5_geo_frame.h),
+                                     * lattice TD5ROAMGRID2 at +42.13 deg
+                                     * 6: roam M, acute union wedges (a diagonal meeting an
+                                     * avenue / a street) cut back to 2 m across: paving,
+                                     * not an island spike into the junction (u_notch_fill) */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */
@@ -170,7 +176,13 @@ typedef struct {
     double  c, s;                 /* cos / sin of the lattice angle, exact pair */
     double  angle_deg;            /* informational; c, s are the authority      */
     int32_t tile;                 /* tile side, units                           */
+    int     src_frame;            /* [roam M] parsed from a TD5ROAMGRID1 file (source frame), reflected */
 } RoamGrid;
+
+/* [roam M] The lattice file format. TD5ROAMGRID2 = the GAME frame (td5_geo_frame.h: x = -east);
+ * a TD5ROAMGRID1 file (source frame, x = east) is reflected on parse and rewritten by
+ * td5_roam_grid_ensure. */
+#define ROAM_GRID_FORMAT "TD5ROAMGRID2"
 
 /* Lattice coordinates (units, relative to the lattice origin). */
 void roam_grid_uv(const RoamGrid *g, double x, double z, double *u, double *v);
@@ -184,7 +196,8 @@ void roam_grid_origin(const RoamGrid *g, int tx, int tz, int32_t *ox, int32_t *o
 int  roam_grid_parse(const char *json, RoamGrid *g);
 /* Text of a ROAMGRID.JSON for these parameters (17 significant digits). */
 int  roam_grid_format(const RoamGrid *g, char *out, size_t cap);
-/* The casco default: S = 110080, angle -42.13 deg, origin (0, 0). */
+/* The casco default: S = 110080, angle +42.13 deg in the game frame (-42.13 in the source frame),
+ * origin (0, 0). */
 void roam_grid_default(const char *place, RoamGrid *g);
 /* [roam G6] roam/ROAMGRID.JSON of `place`, written with the default when missing (only for a place
  * with tiles/INDEX.JSON). 1 when the file exists afterwards. */

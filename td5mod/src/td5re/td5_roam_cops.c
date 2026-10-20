@@ -224,6 +224,23 @@ static int rc_inside(double px, double pz)
     return rc_locate(px, pz, 0, 0, &in, NULL) && in;
 }
 
+/* [roam M] the straight link a -> b runs off the road BETWEEN two stretches of road (a median, an island), 0.5 m
+ * samples; a car that is itself off the road (on a kerb) and drives back on does not count, nor tiles not resident */
+static int rc_link_crosses(double ax, double az, double bx, double bz)
+{
+    const double len = hypot(bx - ax, bz - az);
+    const int n = (int)(len / (0.5 * RC_M)) + 1;
+    int i, seen_in = 0, off_after_in = 0;
+    for (i = 0; i <= n; i++) {
+        const double t = (double)i / n;
+        int in = 0;
+        if (!rc_locate(ax + (bx - ax) * t, az + (bz - az) * t, 0, 0, &in, NULL)) continue;
+        if (in) { if (off_after_in) return 1; seen_in = 1; }
+        else if (seen_in) off_after_in = 1;
+    }
+    return 0;
+}
+
 static double rc_speed_ms(const TD5_Actor *a)
 {
     return sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) /
@@ -622,12 +639,13 @@ static double rc_path_proj(RcCop *c, double x, double z, double *lat)
     c->pi = best;
     {
         const double sx = c->px[best + 1] - c->px[best], sz = c->pz[best + 1] - c->pz[best], l = sqrt(sx * sx + sz * sz);
-        *lat = l > 0.0 ? ((x - c->px[best]) * (sz / l) - (z - c->pz[best]) * (sx / l)) / RC_M : 0.0;   /* + = right */
+        *lat = l > 0.0 ? ((z - c->pz[best]) * (sx / l) - (x - c->px[best]) * (sz / l)) / RC_M : 0.0;   /* + = right (-sz, sx) */
     }
     return (best + bt) * RC_DS;
 }
 
-/* path point at s metres, offset `off` metres to the right of travel */
+/* path point at s metres, offset `off` metres to the right of travel. [roam M] Every "right" in this file is
+ * the GAME frame's (td5_geo_frame.h: x = -east): (-tz, tx) for a heading (tx, tz), the real right. */
 static void rc_path_point(const RcCop *c, double s, double off, double *x, double *z, double *tx, double *tz)
 {
     int i = (int)floor(s / RC_DS);
@@ -639,8 +657,8 @@ static void rc_path_point(const RcCop *c, double s, double off, double *x, doubl
     l = sqrt(sx * sx + sz * sz);
     if (l <= 0.0) { sx = 0.0; sz = 1.0; l = 1.0; }
     sx /= l; sz /= l;
-    *x = c->px[i] + (c->px[i + 1] - c->px[i]) * t + sz * off * RC_M;
-    *z = c->pz[i] + (c->pz[i + 1] - c->pz[i]) * t - sx * off * RC_M;
+    *x = c->px[i] + (c->px[i + 1] - c->px[i]) * t - sz * off * RC_M;
+    *z = c->pz[i] + (c->pz[i + 1] - c->pz[i]) * t + sx * off * RC_M;
     if (tx) { *tx = sx; *tz = sz; }
 }
 
@@ -669,6 +687,18 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
         if (c->turning) { sx = x; sz = z; hx = 0.0; hz = 0.0; }
         if (!rc_inside(sx, sz)) { sx = x; sz = z; }
         ok = td5_roam_route_plan_path(sx, sz, hx, hz, gx, gz, 60.0, rc_use_mask(), close_ow, &qx, &qz, &nq, &len);
+        /* [roam M] the car is put in front of the leg (below): the link car -> the leg's first point must not cross a
+         * median or an island. From a point ahead inside a junction box the snap can land on the far side of a divided
+         * avenue's median (a pursuer northbound, the leg starting 13 m away on the southbound carriageway): the cop was
+         * sent over the median nose and stuck on it. Such a leg is planned again from the car itself; when that one
+         * crosses too, the plan fails and the cop keeps its current line until the next plan. */
+        if (ok && nq >= 1 && rc_link_crosses(x, z, qx[0], qz[0])) {
+            free(qx); free(qz); qx = qz = NULL; nq = 0;
+            C.st.plan_crossings++;
+            ok = (sx != x || sz != z) &&
+                 td5_roam_route_plan_path(x, z, hx, hz, gx, gz, 60.0, rc_use_mask(), close_ow, &qx, &qz, &nq, &len) &&
+                 nq >= 1 && !rc_link_crosses(x, z, qx[0], qz[0]);
+        }
 #ifndef TD5RE_RELEASE
         if (ok && C.log_every) {
             const double straight = hypot(gx - sx, gz - sz) / RC_M;
@@ -681,6 +711,17 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
                           "(%.1f m off) to (%.0f,%.0f) edge %016llx (%.1f m off), %d points", c->slot, c->state == RC_PURSUIT ? "pursuit" : "patrol",
                           len, straight, sx, sz, fx, fz, (unsigned long long)ks, d1, gx, gz, (unsigned long long)kt, d2, nq);
             }
+        }
+#endif
+#ifndef TD5RE_RELEASE
+        if (ok && td5_env_int("TD5RE_ROAM_COPS_PATHLOG_SLOT", -1, -1, 64) == c->slot) {
+            char buf[600];
+            size_t l = 0;
+            int i;
+            for (i = 0; i < nq && i < 12 && l < sizeof buf - 24; i++)
+                l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", qx[i], qz[i]);
+            TD5_LOG_I(LOG_TAG, "ROAM_COPS_RAW slot %d car (%.0f,%.0f) heading (%.2f,%.2f) from (%.0f,%.0f) dir (%.2f,%.2f) ow %d:%s",
+                      c->slot, x, z, fx, fz, sx, sz, hx, hz, close_ow, buf);
         }
 #endif
         if (ok && nq >= 2) {
@@ -728,6 +769,17 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
             break;
         }
     }
+#ifndef TD5RE_RELEASE
+    if (ok && td5_env_int("TD5RE_ROAM_COPS_PATHLOG_SLOT", -1, -1, 64) == c->slot) {
+        /* DEV: every leg of one cop, its first 40 m (a stuck / off-surface investigation) */
+        char buf[600];
+        size_t l = 0;
+        int i;
+        for (i = 0; i < c->np && i < 20 && l < sizeof buf - 24; i++)
+            l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", c->px[i], c->pz[i]);
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS_PLAN slot %d tick %ld turning %d:%s", c->slot, rc_tick(), c->turning, buf);
+    }
+#endif
     if (!ok) { C.st.plan_fails++; c->plan_fail++; return 0; }
     c->plan_fail = 0;
     c->s = 0.0; c->pi = 0;
@@ -830,7 +882,7 @@ static void rc_place_actor(RcCop *c, TD5_Actor *a, double px, double pz, int yaw
 /* centre + 4 body corners on the drivable surface, one road surface (not under or on a deck) */
 static int rc_footprint_ok(double x, double z, double tx, double tz)
 {
-    const double rx = tz, rz = -tx;
+    const double rx = -tz, rz = tx;
     int q;
     if (!rc_inside(x, z)) return 0;
     for (q = 0; q < 4; q++) {
@@ -898,7 +950,7 @@ static int rc_try_spawn(double ax, double az, double fx, double fz, int ahead, i
         if (s > len - 20.0) return 0;
         if (!rc_route_point(s, &x, &z, &tx, &tz)) return 0;
         {   /* right lane of the route direction when it fits */
-            const double ox = x + tz * 1.6 * RC_M, oz = z - tx * 1.6 * RC_M;
+            const double ox = x - tz * 1.6 * RC_M, oz = z + tx * 1.6 * RC_M;
             if (rc_footprint_ok(ox, oz, tx, tz)) { x = ox; z = oz; }
         }
     } else {
@@ -929,7 +981,7 @@ static int rc_try_spawn(double ax, double az, double fx, double fz, int ahead, i
             if (d) { ux = -ux; uz = -uz; }
             tx = ux; tz = uz;
             off = E.oneway ? 0.0 : (E.lanes >= 2 ? 1.6 : 0.5);   /* the right lane */
-            x += tz * off * RC_M; z -= tx * off * RC_M;
+            x -= tz * off * RC_M; z += tx * off * RC_M;
         }
     }
     if (hypot(x - ax, z - az) < C.r_spawn_min * 0.75 * RC_M) return 0;
@@ -955,7 +1007,7 @@ static double rc_gap_cap(RcCop *c, const TD5_Actor *a, double x, double z, doubl
     double fx, fz, rx, rz, cap = 1e9;
     int j, total = td5_game_get_total_actor_count();
     rc_heading(a, &fx, &fz);
-    rx = fz; rz = -fx;
+    rx = -fz; rz = fx;
     *pass_l = 0.0;
     for (j = 0; j < total; j++) {
         const TD5_Actor *b;
@@ -988,7 +1040,7 @@ static double rc_lane_fit(const RcCop *c, double s, double off)
         const double side = off > 0.0 ? 1.0 : -1.0;
         if (fabs(off) < 0.05) return 0.0;
         rc_path_point(c, s, off, &x, &z, &tx, &tz);
-        if (rc_inside(x, z) && rc_inside(x + tz * side * 1.1 * RC_M, z - tx * side * 1.1 * RC_M)) return off;
+        if (rc_inside(x, z) && rc_inside(x - tz * side * 1.1 * RC_M, z + tx * side * 1.1 * RC_M)) return off;
         off *= 0.5;
     }
     return 0.0;
@@ -1451,7 +1503,7 @@ static int rc_block_count(void)
  * centre while the locator stays on the drivable surface (a median ends it) */
 static int rc_road_extent(double cx, double cz, double tx, double tz, double *lmin, double *lmax)
 {
-    const double rx = tz, rz = -tx;
+    const double rx = -tz, rz = tx;
     double l;
     if (!rc_inside(cx, cz)) return 0;
     for (l = 0.5; l <= 14.0; l += 0.5) if (!rc_inside(cx + rx * l * RC_M, cz + rz * l * RC_M)) break;
@@ -1586,7 +1638,7 @@ static int rc_block_place(const TD5_Actor *pl, double plx, double plz, double fx
                 n = rc_block_layout(C.heat, lmin, lmax, nfree < RC_BLK_CARS ? nfree : (C.heat >= 4 ? 3 : 2), lat, aoff, &gl, &gw);
                 if (n < 2 || n > nfree) continue;
                 {
-                    const double rx = tz, rz = -tx;
+                    const double rx = -tz, rz = tx;
                     for (j = 0; j < n && ok; j++) {
                         /* the car's long axis across the road, a little off square, alternating */
                         const double jit = (j & 1 ? 1.0 : -1.0) * (0.12 + 0.1 * rc_unit(&C.rng));
@@ -1601,7 +1653,7 @@ static int rc_block_place(const TD5_Actor *pl, double plx, double plz, double fx
                 if (!ok) continue;
                 {   /* place it */
                     RcBlock *b = &C.blk[bi];
-                    const double rx = tz, rz = -tx;
+                    const double rx = -tz, rz = tx;
                     int placed = 0;
                     memset(b, 0, sizeof *b);
                     for (j = 0; j < n; j++) {
@@ -1666,7 +1718,7 @@ static void rc_blocks_tick(const TD5_Actor *pl, double plx, double plz, double f
         d = hypot(plx - b->cx, plz - b->cz) / RC_M;
         if (d < b->min_d) b->min_d = d;
         f = ((plx - b->cx) * b->tx + (plz - b->cz) * b->tz) / RC_M;
-        rx = b->tz; rz = -b->tx;
+        rx = -b->tz; rz = b->tx;
         l = ((plx - b->cx) * rx + (plz - b->cz) * rz) / RC_M;
         if (d < 40.0) b->was_near = 1;
         for (j = 0; j < b->ncar; j++) {       /* touched a car */

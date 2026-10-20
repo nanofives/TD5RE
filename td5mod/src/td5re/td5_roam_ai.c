@@ -76,6 +76,7 @@ typedef struct {
     double stop_s;                               /* where a finished car stops            */
     double v_prev;                               /* [F8b] DEV: last tick's speed (impact log) */
     int    yield_slot;                           /* [F8c] traffic slot a cross-traffic conflict capped last tick (0 = none) */
+    int    queued;                               /* [roam M] held behind a (nearly) stopped TRAFFIC car in my lane this tick */
     TD5_LapTrack lt;                             /* [F9a] circuit: total distance + laps  */
     int    laps_done;
     /* persona */
@@ -274,16 +275,24 @@ static int ra_extend(double x, double z, double ux, double uz, double len, doubl
     return n;
 }
 
+#define RA_UTURN_CAP 96                 /* points one U-turn arc may add */
 static int ra_build_path(void)
 {
     /* 1. the race polyline without the planner's junction-connector jogs (the sprint test's rule:
-     *    a point that turns back by more than 90 degrees with a leg under 15 m) */
-    double *jx = (double *)malloc((size_t)(A.rn + 1) * sizeof(double));
-    double *jz = (double *)malloc((size_t)(A.rn + 1) * sizeof(double));
+     *    a point that turns back by more than 90 degrees with a leg under 15 m). [roam M] Not a U-TURN
+     *    (td5_roam_route_is_uturn: the route runs the opposite way after it, on the other carriageway of a
+     *    divided avenue; the circuit smoke turns round at -34.9074,-57.9597): dropping it left a chord from
+     *    one carriageway to the other over the median nose, which every opponent hit. Its drivable arc
+     *    round the junction box goes in instead. */
     double bx[64], bz[64], fx[64], fz[64];
     double *cx = NULL, *cz = NULL, *cs = NULL;
     int nj = 0, nb = 0, nf = 0, nc, i, k, m, dropped = 0;
     double ux, uz, l, total;
+    int nu = 0;
+    double *jx, *jz;
+    for (i = 0; i < A.rn; i++) nu += td5_roam_route_is_uturn(A.rpx, A.rpz, A.rn, i);
+    jx = (double *)malloc((size_t)(A.rn + 1 + nu * RA_UTURN_CAP) * sizeof(double));
+    jz = (double *)malloc((size_t)(A.rn + 1 + nu * RA_UTURN_CAP) * sizeof(double));
     if (!jx || !jz) { free(jx); free(jz); return 0; }
     for (i = 0; i < A.rn; i++) {
         if (i >= 1 && i + 1 < A.rn) {
@@ -291,7 +300,15 @@ static int ra_build_path(void)
             const double qx = A.rpx[i + 1] - A.rpx[i], qz = A.rpz[i + 1] - A.rpz[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(qx * qx + qz * qz);
             if (la > 0.0 && lb > 0.0 && (ax * qx + az * qz) / (la * lb) < 0.0 && (la < 15.0 * RA_M || lb < 15.0 * RA_M)) {
-                dropped++;
+                /* [roam M] a U-turn: the drivable arc round the junction box (td5_roam_route_uturn_arc) */
+                const int na = td5_roam_route_uturn_arc(A.rpx, A.rpz, A.rn, i, jx + nj, jz + nj, RA_UTURN_CAP);
+#ifndef TD5RE_RELEASE
+                if (td5_env_flag_off("TD5RE_ROAM_AI_DUMP"))
+                    TD5_LOG_I(LOG_TAG, "ROAM_AI_JOG %d at (%.0f,%.0f) legs %.1f / %.1f m: %s", i, A.rpx[i], A.rpz[i],
+                              la / RA_M, lb / RA_M, na > 0 ? "U-turn, arc" : "jog, dropped");
+#endif
+                if (na > 0) nj += na;
+                else dropped++;
                 continue;
             }
         }
@@ -445,13 +462,15 @@ ctrl_done:
         free(rx); free(rz);
     }
     free(cx); free(cz); free(cs);
-    /* 7. tangents + right normals (yaw convention: forward (sin y, cos y), right (cos y, -sin y)) */
+    /* 7. tangents + right normals. [roam M] n is the driver's RIGHT, (-tz, tx) in the game frame (td5_geo_frame.h),
+     * the real right as it was before the reflection (it was (tz, -tx) with x = east): offsets, the grid order and
+     * the overtaking side keep their physical meaning. */
     for (i = 0; i < A.np; i++) {
         const int a0 = i > 0 ? i - 1 : 0, a1 = i + 1 < A.np ? i + 1 : A.np - 1;
         double dx = A.px[a1] - A.px[a0], dz = A.pz[a1] - A.pz[a0], dl = sqrt(dx * dx + dz * dz);
         if (dl <= 0.0) { dx = 0.0; dz = 1.0; dl = 1.0; }
         A.tx[i] = dx / dl; A.tz[i] = dz / dl;
-        A.nx[i] = A.tz[i]; A.nz[i] = -A.tx[i];
+        A.nx[i] = -A.tz[i]; A.nz[i] = A.tx[i];
     }
     /* 8. speed profile: corner cap from the heading change over +-6 samples (+-9 m), then braking */
     for (i = 0; i < A.np; i++) {
@@ -906,7 +925,7 @@ static void ra_ring_dump(const RaCar *c, const TD5_Actor *now, double v_prev, do
 static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
 {
     double cap = 1e9;
-    int j, total = td5_game_get_total_actor_count(), ys = 0;
+    int j, total = td5_game_get_total_actor_count(), ys = 0, queued = 0;
     const double tx = A.tx[idx], tz = A.tz[idx], nx = A.nx[idx], nz = A.nz[idx];
     for (j = 0; j < total; j++) {
         const TD5_Actor *b;
@@ -947,6 +966,13 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
                 }
             }
         }
+        if (j >= g_traffic_slot_base && f > 0.5 && f < 15.0 && fabs(l - c->lat) <= 2.1 &&
+            fabs(((double)b->linear_velocity_x * tx + (double)b->linear_velocity_z * tz) / 256.0 * RA_HZ / RA_M) < 1.5)
+            queued = 1;                      /* [roam M] a stopped traffic car in my lane up to 15 m ahead: a queue */
+        else if (j > 0 && j < g_traffic_slot_base && f > 0.5 && f < 15.0 && fabs(l - c->lat) <= 2.1) {
+            int k;                           /* ... or a racer ahead that is itself queued (the queue goes on) */
+            for (k = 0; k < A.n; k++) if (A.car[k].slot == j && A.car[k].queued) queued = 1;
+        }
         if (f <= 0.5 || f > 6.0 + v * 1.2) continue;
         if (fabs(l - c->lat) > 2.1) continue;
         vb = ((double)b->linear_velocity_x * tx + (double)b->linear_velocity_z * tz) / 256.0 * RA_HZ / RA_M;
@@ -969,6 +995,7 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
         }
     }
     c->yield_slot = ys;
+    c->queued = queued;
     if (cap < 1e8) A.stats.follow_ticks++;
     return cap;
 }
@@ -1251,15 +1278,21 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
         v = sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) /
             256.0 * RA_HZ / RA_M;
         if (racing && !c->finished) {
-            if (v < RA_STILL_MS) {
+            /* [roam M] waiting in the queue behind a traffic car at its red light (a narrow street: no room to pass) is
+             * not stuck: those ticks do not count (roam-sprint-ai: 15.3 s behind traffic 17 at a red, 75 m from the line).
+             * A racer held by another RACER still counts: the one in front is the stuck one. */
+            if (v < RA_STILL_MS && c->queued) {
+                c->still_t = 0;
+            } else if (v < RA_STILL_MS) {
                 c->still_t++;
                 if (c->still_t == RA_STUCK_LONG + 1) {
                     A.stats.stuck_long++;
                     TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d STUCK > 5 s at %.0f m along (lat %.1f m) place (%.0f,%.0f)", c->slot, c->along, lat_m, x, z);
 #ifndef TD5RE_RELEASE
-                    {   /* DEV: who is next to it */
+                    {   /* DEV: who is next to it (racers and traffic) */
                         int s2;
-                        for (s2 = 0; s2 < 6; s2++) {
+                        const int ntot = td5_game_get_total_actor_count();
+                        for (s2 = 0; s2 < ntot; s2++) {
                             double ox, oz;
                             const TD5_Actor *oa = td5_game_get_actor(s2);
                             if (s2 == c->slot || !oa || !ra_place_of(oa, &ox, &oz)) continue;

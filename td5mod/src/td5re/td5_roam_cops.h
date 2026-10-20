@@ -110,6 +110,7 @@ typedef struct {
     long   road_pushes, road_pinches;         /* cop ticks pushed back from the road edge (pinch: opposite pushes, summed) */
     long   path_fixes;                        /* path samples moved back onto the road (median / corner cuts) */
     long   plan_offroad, bad_edges;           /* legs refused (no road under the line) / edges barred for cop legs */
+    long   plan_crossings;                    /* [roam M] legs whose link from the car crossed a median / island, re-planned */
     long   plans, plan_fails, wrecks;
     long   pursuit_ticks;
     int    max_heat, max_pursuers;

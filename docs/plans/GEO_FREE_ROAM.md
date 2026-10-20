@@ -60,6 +60,14 @@ one strip" to "quads of every street in the loaded tiles".
 
 ### World frame and tiles
 
+- **Game frame (roam M, 2026-10-20):** the place frame is the GAME frame, `x = -east, z = north, y = up`
+  (`td5mod/src/td5re/td5_geo_frame.h`). The engine draws world +X to the screen-left of the heading, so
+  data laid in as `x = east` showed La Plata mirrored. The source files under `re/assets/geo/<place>/`
+  stay `x = east` and every reader reflects once on load (vectors, INDEX bboxes, rasters, lat/lon). The
+  strip route frame is reflected the same way before its rotation (`"reflect_x": 1` in `_route/PLACE.JSON`,
+  derived schema 3). The casco lattice is `TD5ROAMGRID2` at +42.13 deg (the same squares on the ground).
+  Side rules are the engine's: right of a heading `(tx, tz)` is `(-tz, tx)`, the real right.
+
 - **Tile** = a 256 m square on a lattice rotated to the casco axes (F0a: 462
   tiles, median 1.1 km of road and 205 buildings each). Lattice in `ROAMGRID.JSON`,
   addressed `(tx, tz)` in the place frame. **Tile content is a pure function of

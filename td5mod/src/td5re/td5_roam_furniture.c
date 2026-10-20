@@ -16,7 +16,10 @@
  * on the road centre, the HEADING of travel (tx, tz), side = +1 / -1 with the outward
  * lateral l = (tz * side, -tx * side). side = -1 is the driver's RIGHT kerb, side = +1 the
  * LEFT (verified on the strip: Argentina drives on the right, the near arm stands at
- * side = -1). All x / z here are TILE-LOCAL (place minus the tile origin), y is place y.
+ * side = -1). [roam M] Until the geographic -> game reflection (td5_geo_frame.h) that was
+ * the right AS DRAWN and the real left; the place frame is now the game frame (x = -east),
+ * so side = -1 is the real right kerb too. All x / z here are TILE-LOCAL (place minus the
+ * tile origin), y is place y.
  *
  * Every per-record decision keys off the record itself (edge key, quad row, node
  * position), never off the order tiles are built in; a cluster is evaluated by every tile
@@ -44,6 +47,7 @@
 #include "td5_types.h"
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos) */
 #include "deps/cjson/cJSON.h"
+#include "td5_geo_frame.h"      /* [roam M] the geographic -> game reflection */
 #include "td5_roam_tile.h"
 #include "td5_roam_scenery.h"
 #include "td5_roam_render.h"
@@ -593,6 +597,7 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
     if (!json) return t;                                    /* cached as empty */
     root = cJSON_Parse(json);
     free(json);
+    td5_geo_src_json_to_game(root);                         /* [roam M] source frame -> game frame */
     nd = root ? cJSON_GetObjectItem(root, "nodes") : NULL;
     if (nd && cJSON_IsArray(nd)) {
         const int n = cJSON_GetArraySize(nd);
@@ -648,6 +653,7 @@ static int fu_index_load(TD5_RoamFurnSource *f)
         int k;
         for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
         if (k < 7) continue;
+        td5_geo_src_bbox_to_game(&v[3], &v[5]);             /* [roam M] the extent in the game frame */
         f->rows[n].ix = (int)v[0]; f->rows[n].iz = (int)v[1];
         f->rows[n].x0 = v[3]; f->rows[n].z0 = v[4]; f->rows[n].x1 = v[5]; f->rows[n].z1 = v[6];
         n++;

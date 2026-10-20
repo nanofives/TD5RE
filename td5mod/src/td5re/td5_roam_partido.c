@@ -23,6 +23,7 @@
 #include "td5_geo_roads.h"
 #include "td5_roam_tile.h"
 #include "td5_roam_partido.h"
+#include "td5_geo_frame.h"      /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -114,10 +115,11 @@ static int rp_proj_of(const cJSON *root, RpProj *p)
     return 1;
 }
 
+/* lat/lon -> the GAME place frame: the SOURCE projection, then the reflection (td5_geo_frame.h) */
 static void rp_project(const RpProj *p, double lat, double lon, double *x, double *z)
 {
     const double e = (lon - p->lon0) * p->mdlon, n = (lat - p->lat0) * p->mdlat;
-    *x = (e * p->cs - n * p->sn) * p->upm + p->offx;
+    *x = td5_geo_game_x((e * p->cs - n * p->sn) * p->upm + p->offx);
     *z = (e * p->sn + n * p->cs) * p->upm + p->offz;
 }
 
@@ -367,6 +369,7 @@ static void rp_streets_load(const char *place)
         doc = cJSON_Parse(body);
         free(body);
         if (!doc) continue;
+        td5_geo_src_json_to_game(doc);       /* [roam M] source frame -> game frame */
         files++;
         arr = cJSON_GetObjectItem(doc, "roads");
         cJSON_ArrayForEach(r, arr) {

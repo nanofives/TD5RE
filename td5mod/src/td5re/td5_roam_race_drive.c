@@ -183,6 +183,7 @@ static struct {
     int      exit_ok;             /* ENTER on the results panel returned to free roam, barriers cleared */
     int      rear_cd;             /* [F7] rear view held on the grid (the field is behind START) */
     int      ai_done;             /* [F7] every opponent through the line before the results ENTER */
+    int      judged;              /* [roam M] the results were judged (frame 74), ENTER follows */
     /* [F9a] circuit rows */
     int      laps;                /* laps of the scripted circuit                                  */
     int      circ_closed;         /* the reloaded route is a closed circuit with the saved type + laps */
@@ -395,6 +396,8 @@ planned:
  * progress and drawing, but a pursuit driver at 10 m lookahead swerves into it. A point whose turn is
  * sharper than 90 degrees with a leg under 15 m is dropped. */
 static TD5_RouteResult s_path;
+static TD5_RoamRaceResult s_res_snap;   /* [roam M] the race result as judged at the results (the session may end first) */
+#define SD_UTURN_CAP 96                 /* points one U-turn arc may add */
 static double *s_ppx, *s_ppz, *s_pd;
 
 static void sd_build_path(void)
@@ -405,12 +408,15 @@ static void sd_build_path(void)
     /* [F9b] a via point snapped beside a junction leaves a ~16 m out-and-back spike to the node; the partido drive has
      * several of them, the casco rows keep the F6 15 m rule */
     const double jog_m = SD_IS_PARTIDO(D.mode) ? 30.0 : 15.0;
-    int c;
+    int c, nu = 0;
+    size_t cap;
     free(s_ppx); free(s_ppz); free(s_pd);
     memset(&s_path, 0, sizeof s_path);
-    s_ppx = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
-    s_ppz = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
-    s_pd  = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
+    for (i = 0; i < r->npt; i++) nu += td5_roam_route_is_uturn(r->px, r->pz, r->npt, i);
+    cap = (size_t)(r->npt + 1 + nu * SD_UTURN_CAP) * (size_t)copies;
+    s_ppx = (double *)malloc(cap * sizeof(double));
+    s_ppz = (double *)malloc(cap * sizeof(double));
+    s_pd  = (double *)malloc(cap * sizeof(double));
     if (!s_ppx || !s_ppz || !s_pd) return;
     for (c = 0; c < copies; c++)
     for (i = 0; i < r->npt; i++) {
@@ -421,7 +427,16 @@ static void sd_build_path(void)
             const double bx = r->px[i + 1] - r->px[i], bz = r->pz[i + 1] - r->pz[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
             if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
-                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
+                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) {
+                /* [roam M] a U-turn (the other carriageway, the opposite way): its drivable arc, not a chord over the nose */
+                const int na = td5_roam_route_uturn_arc(r->px, r->pz, r->npt, i, s_ppx + n, s_ppz + n, SD_UTURN_CAP);
+                int q;
+                if (na <= 0) { dropped++; continue; }
+                for (q = 0; q < na; q++, n++)
+                    s_pd[n] = n ? s_pd[n - 1] + sqrt((s_ppx[n] - s_ppx[n - 1]) * (s_ppx[n] - s_ppx[n - 1]) +
+                                                     (s_ppz[n] - s_ppz[n - 1]) * (s_ppz[n] - s_ppz[n - 1])) / SD_M : 0.0;
+                continue;
+            }
             /* [F9b] partido: an out-and-back spike to a junction node beside a via point (the points before and after
              * coincide), up to jog_m long */
             if (jog_m > 15.0 && la > 0.0 && lb > 0.0 && la < jog_m * SD_M && lb < jog_m * SD_M &&
@@ -890,18 +905,21 @@ void td5_roam_sprint_test_frame(void)
             break;
         }
         if (D.phase_frames == 60) sd_shot("6_results");
-        if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
-        if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
-        if (D.phase_frames >= 90) {
-            /* the leave is a fade-out (td5_game.c "Roam race results dismissed" log line) that ends the session
-             * after this verdict is read: judge it at the results, the session is still up here */
+        if (D.phase_frames == 74) {
+            /* the leave is a fade-out (td5_game.c "Roam race results dismissed" log line) that ends the session:
+             * judge it at the results, BEFORE the ENTER. [roam M] It was judged at frame 90, and a fade shorter
+             * than 15 frames (16-20 ms frames on the sprint-ai row) ended the session first: "never finished". */
             int nb = 0;
             td5_roam_barriers(&nb);
             D.exit_ok = td5_roam_active() && td5_roam_race_state() == TD5_RRACE_FINISHED;
+            s_res_snap = *td5_roam_race_result();
+            D.judged = 1;
             TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER pressed: race state %d, barriers %d -> %s",
                       td5_roam_race_state(), nb, D.exit_ok ? "leaving to the geo generator (see the game log)" : "NOT ON THE RESULTS");
-            sd_finish("finished", 0);
         }
+        if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
+        if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
+        if (D.phase_frames >= 90) sd_finish("finished", 0);
         break;
     default:
         break;
@@ -1071,17 +1089,26 @@ static uint32_t sd_bits(TD5_Actor *a)
         /* the driver's own distance along ITS path, in a window round the last answer */
         const TD5_RouteResult *r = sd_path();
         double best = 1e300, ba = D.along_s;
+        /* [roam M] a jump AHEAD costs: each metre of along past 6 m + 0.5 s of travel counts as a metre of distance.
+         * In a U-turn the return carriageway runs 8 m from the approach and ~20 m further along; the plain nearest
+         * point jumped across to it, the driver took the turn as done and left the road at 62 km/h. (A hard window
+         * instead lost the car on the sprint rows' wrong-turn and wedge runs.) */
+        const double ahead = 6.0 + sd_kmh(a) / 3.6 * 0.5;
+        double bestc = 1e300;
         int i;
         for (i = 0; i + 1 < r->npt; i++) {
             const double sx = r->px[i + 1] - r->px[i], sz = r->pz[i + 1] - r->pz[i];
             const double l2 = sx * sx + sz * sz;
-            double t, qx, qz, d;
+            double t, qx, qz, d, s_at, over, cost;
             if (r->dist_m[i + 1] < D.along_s - 40.0 || r->dist_m[i] > D.along_s + 150.0) continue;
             t = l2 > 0.0 ? ((px + ox - r->px[i]) * sx + (pz + oz - r->pz[i]) * sz) / l2 : 0.0;
             if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
             qx = r->px[i] + sx * t; qz = r->pz[i] + sz * t;
             d = (qx - px - ox) * (qx - px - ox) + (qz - pz - oz) * (qz - pz - oz);
-            if (d < best) { best = d; ba = r->dist_m[i] + t * (r->dist_m[i + 1] - r->dist_m[i]); }
+            s_at = r->dist_m[i] + t * (r->dist_m[i + 1] - r->dist_m[i]);
+            over = s_at - (D.along_s + ahead);
+            cost = d + (over > 0.0 ? (over * SD_M) * (over * SD_M) : 0.0);
+            if (cost < bestc) { bestc = cost; best = d; ba = s_at; }
         }
         D.along_s = ba;
         along = ba;
@@ -1284,7 +1311,8 @@ static int sd_circuit_verdict(char *note, size_t n, const char *bad, const TD5_R
 
 int td5_roam_sprint_test_verdict(char *note, size_t n)
 {
-    const TD5_RoamRaceResult *res = td5_roam_race_result();
+    /* [roam M] judged at the results: the snapshot (the session's end resets the live result) */
+    const TD5_RoamRaceResult *res = D.judged ? &s_res_snap : td5_roam_race_result();
     TD5_RoamRaceWallStats ws;
     TD5_RoamPhysStats st;
     char bad[240] = "", t[32];
@@ -1301,7 +1329,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     pinch = st.pinches - D.pinch0; resc = st.rescues + st.rescues_y - D.resc0; tele = st.teleports - D.tele0;
     for (i = 0; i < D.nwt; i++) blocked += D.wt[i].blocked;
 #define SD_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
-    if (!D.done || D.aborted || (!res->finished && !D.arrived)) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
+    if ((!D.done && !D.judged) || D.aborted || (!res->finished && !D.arrived)) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
     if (res->finished && !D.exit_ok) SD_BAD("results ENTER did not return to free roam; ");
     if (D.saved_hash != D.loaded_hash) SD_BAD("reload hash %08X != %08X; ", (unsigned)D.loaded_hash, (unsigned)D.saved_hash);
     if (D.nkeys < want_jn) SD_BAD("%d junctions < %d; ", D.nkeys, want_jn);

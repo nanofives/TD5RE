@@ -160,6 +160,16 @@ const TD5_RouteResult *td5_roam_route_result(void);
 /* [HE] the same route for DRAWING on the road: the junction-connector jogs dropped, corners rounded (px/pz/dist_m/npt
  * differ from the result's; edge list, hash and flags are the result's). Valid until the result changes. */
 const TD5_RouteResult *td5_roam_route_display(void);
+/* [roam M] A U-TURN on a planned polyline (place frame, 430 units/m): vertex i turns back (> 90 deg, a leg under
+ * 15 m, the connector-jog test) AND the route before it (i-2 -> i-1) and after it (i+1 -> i+2) runs the opposite way
+ * on carriageways at least 2 m apart (a divided avenue turned round in a junction). Every jog cleanup (drawn line,
+ * AI path, scripted driver, cops' legs) used to drop such a vertex like a jog, leaving a chord from one carriageway
+ * to the other over the median nose. td5_roam_route_uturn_arc writes the drivable turn that replaces the vertex
+ * (strictly between i-1 and i+1, ~1.5 m apart): straight on from i-1, out into the junction box, round a circle of
+ * radius >= 5 m (or the carriageway half-separation) as deep as the vertex, back into the other carriageway,
+ * tangent to both. Returns the points written (0 when i is not a U-turn or cap is too small). */
+int  td5_roam_route_is_uturn(const double *x, const double *z, int n, int i);
+int  td5_roam_route_uturn_arc(const double *x, const double *z, int n, int i, double *ox, double *oz, int cap);
 int  td5_roam_route_type(void);
 int  td5_roam_route_laps(void);
 void td5_roam_route_set_type(int type, int laps);

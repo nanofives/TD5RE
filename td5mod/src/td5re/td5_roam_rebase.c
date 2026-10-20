@@ -275,12 +275,15 @@ void td5_roam_rebase_tick(void)
         if (wm / RB_UPM > s_rb.st.max_world_m) s_rb.st.max_world_m = wm / RB_UPM;
     }
     roam_grid_tile_of(g, px, pz, &ptx, &ptz);
-    /* the origin is a lattice corner: its own tile is the one whose (0,0) corner it is */
+    /* the origin is a lattice corner: its own tile is the one whose (0,0) corner it is. [roam M] The world
+     * origin is the SOURCE-frame (0,0) corner, which the reflected lattice makes the (0,0) corner of tile
+     * tx + 1 (td5_roam_mode.c): its own tile is the one to the -u side */
     roam_grid_tile_of(g, (double)ox + 8.0 * (g->c - g->s), (double)oz + 8.0 * (g->s + g->c), &otx, &otz);
+    otx -= 1;
     d = abs(ptx - otx) > abs(ptz - otz) ? abs(ptx - otx) : abs(ptz - otz);
     if (!s_rb.force && d <= (s_rb.force_tiles ? s_rb.force_tiles - 1 : s_rb.tiles)) { RB_TRACE(0); return; }
     s_rb.force = 0;
-    roam_grid_origin(g, ptx, ptz, &nox, &noz);
+    roam_grid_origin(g, ptx + 1, ptz, &nox, &noz);
     rb_apply(nox, noz, ptx, ptz);
     RB_TRACE(1);
 }
