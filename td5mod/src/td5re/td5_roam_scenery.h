@@ -135,9 +135,11 @@ typedef struct {
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
-     * the pieces emitted (whole-cell quads, road-cut triangles) and the ones dropped on the road. Areas (m2) of the
-     * non-road ground of the tile's cells: paved, left as LAWN although OSM maps no green there, under an OSM green. */
-    int  lot_cells, lot_green, lot_rural, lot_skip, lot_quads, lot_tris, lot_cut;
+     * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).
+     * Areas (m2) of the NON-ROAD ground of the tile's cells (the cell refined against the road, 2 m pieces): paved,
+     * left as LAWN although OSM maps no green there, under an OSM green. */
+    int  lot_cells, lot_green, lot_rural, lot_skip, lot_under_road;
+    int  lot_rings;                 /* [HD] ring plazas (a roundabout's inner kerb loop) kept green */
     double lot_paved_m2, lot_lawn_m2, lot_green_m2;
     /* [HD] INFILL: frontage lots along the pavement's building line with no real footprint on them -> a built mass
      * (candidates owned here, emitted, refused: a real building stands on the front, a road / another lot, an area
