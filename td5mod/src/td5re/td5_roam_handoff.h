@@ -9,6 +9,8 @@
  * route planner (td5_roam_route.h), saves the route by name and then either opens the race setup
  * panel over the route map (the geo selector: the player picks opponents / traffic / cops) or starts
  * the race straight away with a setup the caller filled in (Quick Race: its own opponent count).
+ * [roam HA] The setup panel is gone: every handoff starts the race (the geo selector passes the
+ * frontend's race settings, TD5_RoamRacePrefs).
  *
  * LIFE CYCLE. td5_roam_handoff_set() after td5_roam_begin(); td5_roam_handoff_frame() runs once per
  * frame from td5_roam_race_frame() and consumes the handoff once (a pause-menu RESTART does not
@@ -21,8 +23,22 @@
 
 #define TD5_HANDOFF_ROUTE_NAME "geo_map"   /* the saved route the handoff writes (routes/geo_map.json) */
 
-#define TD5_HANDOFF_SETUP_PANEL 0          /* open the race setup panel over the route map */
 #define TD5_HANDOFF_AUTOSTART   1          /* start the race with the given opponents / traffic / cops */
+
+/* [roam HA] The race settings of the frontend (the geo generator's RACE IN THE CITY panel). They used
+ * to be a panel inside the race (R on the route map); the race now takes them from here: the geo
+ * screen's RACE ROUTE hands them over, and R in the route map / pause menu races the planned route
+ * with the opponents / traffic / cops set here (type and laps come from the planner's route). Lives
+ * for the process; the defaults are a sprint, 3 laps (circuits), 3 opponents, traffic and cops off. */
+typedef struct {
+    int circuit;     /* 0 sprint A to B / 1 circuit */
+    int laps;        /* 1..TD5_ROUTE_MAX_LAPS, used by a circuit */
+    int opponents;   /* 0..5 */
+    int traffic;     /* 0 off / 1 low / 2 high */
+    int cops;        /* 0 off / 1 on */
+} TD5_RoamRacePrefs;
+void td5_roam_prefs_get(TD5_RoamRacePrefs *out);
+void td5_roam_prefs_set(const TD5_RoamRacePrefs *in);   /* clamps every field */
 
 /* Waypoints lat/lon, START first and FINISH last (n >= 2, at most TD5_ROUTE_MAX_WP). type =
  * TD5_ROUTE_SPRINT / _CIRCUIT, laps 1..10. opponents / traffic / cops are used by AUTOSTART only

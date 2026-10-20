@@ -66,13 +66,9 @@
 #define K_LEFT   0xCB
 #define K_RIGHT  0xCD
 
-enum { ROW_TYPE, ROW_LAPS, ROW_OPP, ROW_TRAFFIC, ROW_COPS, ROW_START, ROW_CANCEL, ROW_N };
-
 static struct {
     int      state;
     TD5_RoamRaceSetup setup;
-    int      cursor;
-    long     setup_age;            /* frames since the setup panel opened (the pause menu opens a tick later) */
     /* the race's own copy of the route */
     double  *px, *pz, *dist;
     int      npt;
@@ -96,6 +92,7 @@ static struct {
     TD5_RoamRaceResult res;
     /* requests the game takes */
     int      req_pause_close, req_countdown;
+    int      req_leave;            /* [roam HA] the results were dismissed: leave to the geo generator */
     int      cd_armed, rearm;
     /* [F7] the field's clock (runs on past the player's finish while opponents race) */
     long     clock;
@@ -226,7 +223,6 @@ int td5_roam_race_barriers_live(void)
     return td5_roam_active() && (td5_roam_race_running() || (R.state == TD5_RRACE_FINISHED && R.bar_hold));
 }
 const TD5_RoamRaceResult *td5_roam_race_result(void) { return &R.res; }
-int td5_roam_race_setup_open(void) { return R.state == TD5_RRACE_SETUP; }
 
 void td5_roam_race_progress(double *along_m, double *length_m, double *lateral_m)
 {
@@ -252,7 +248,7 @@ static void rr_to_off(const char *why)
     if (R.state != TD5_RRACE_OFF)
         TD5_LOG_I(LOG_TAG, "ROAM_RACE: -> OFF (%s)", why);
     R.state = TD5_RRACE_OFF;
-    R.req_pause_close = 0; R.req_countdown = 0; R.cd_armed = 0; R.rearm = 0;
+    R.req_pause_close = 0; R.req_countdown = 0; R.cd_armed = 0; R.rearm = 0; R.req_leave = 0;
     R.bar_hold = 0;
     td5_roam_race_wall_end();
     td5_roam_barriers_set_visible(0);
@@ -310,25 +306,25 @@ static int rr_route_ready(void)
            (td5_roam_route_type() == TD5_ROUTE_SPRINT || r->closed);   /* [F9a] a circuit needs its closing leg */
 }
 
-int td5_roam_race_open_setup(void)
+/* [roam HA] R in the route map / pause menu: race the planned route NOW. There is no in-race setup
+ * panel any more: opponents / traffic / cops are the frontend's race settings (td5_roam_prefs_get, the
+ * geo generator's RACE IN THE CITY panel), type and laps are the planner's route (T on the map). */
+int td5_roam_race_start_prefs(void)
 {
+    TD5_RoamRacePrefs p;
+    TD5_RoamRaceSetup s;
     if (!rr_route_ready()) {
-        TD5_LOG_I(LOG_TAG, "ROAM_RACE: setup refused (need a planned sprint: START, FINISH, every leg planned)");
+        TD5_LOG_I(LOG_TAG, "ROAM_RACE: start refused (need a planned sprint: START, FINISH, every leg planned)");
         return 0;
     }
     if (R.state != TD5_RRACE_OFF) return 0;
-    if (!td5_roam_route_ui_map_open()) td5_roam_route_ui_open_map();
-    R.setup.laps = td5_roam_route_type() == TD5_ROUTE_CIRCUIT ? td5_roam_route_laps() : 1;
-    if (R.setup.opponents < 0) R.setup.opponents = td5_roam_ai_default_opponents();
-    if (R.setup.opponents > td5_roam_ai_available()) R.setup.opponents = td5_roam_ai_available();
-    R.cursor = ROW_START;
-    R.setup_age = 0;
-    R.state = TD5_RRACE_SETUP;
-    snprintf(R.name, sizeof R.name, "%s", td5_roam_route_current_name());
-    rr_best_load();
-    TD5_LOG_I(LOG_TAG, "ROAM_RACE: setup open (route '%s', %.0f m, best %ld ticks)", R.name[0] ? R.name : "UNSAVED",
-              td5_roam_route_result()->length_m, R.best_ticks);
-    return 1;
+    td5_roam_prefs_get(&p);
+    memset(&s, 0, sizeof s);
+    s.laps = td5_roam_route_type() == TD5_ROUTE_CIRCUIT ? td5_roam_route_laps() : 1;
+    s.opponents = p.opponents > td5_roam_ai_available() ? td5_roam_ai_available() : p.opponents;
+    s.traffic = p.traffic;
+    s.cops = p.cops;
+    return td5_roam_race_start(&s);
 }
 
 /* Copy the planned route, project the checkpoints. */
@@ -470,6 +466,13 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
     return 1;
 }
 
+int td5_roam_race_take_leave(void)
+{
+    const int r = R.req_leave;
+    R.req_leave = 0;
+    return r;
+}
+
 int td5_roam_race_take_pause_close(void)
 {
     const int r = R.req_pause_close;
@@ -488,7 +491,7 @@ int td5_roam_race_take_countdown(void)
 
 uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits)
 {
-    if (slot != 0 || R.state == TD5_RRACE_OFF || R.state == TD5_RRACE_SETUP || !td5_roam_active()) return bits;
+    if (slot != 0 || R.state == TD5_RRACE_OFF || !td5_roam_active()) return bits;
     if (R.state == TD5_RRACE_FINISHED || (R.state == TD5_RRACE_COUNTDOWN && !R.cd_armed) || R.rearm)
         return (bits & ~(uint32_t)(TD5_INPUT_THROTTLE | TD5_INPUT_RECOVER)) | (uint32_t)TD5_INPUT_BRAKE;
     return bits;
@@ -705,44 +708,7 @@ void td5_roam_race_frame(void)
     switch (R.state) {
     case TD5_RRACE_OFF:
         /* from the pause menu: R = race the planned route */
-        if (paused && !td5_roam_route_ui_map_open() && ke(K_R)) td5_roam_race_open_setup();
-        break;
-    case TD5_RRACE_SETUP:
-        R.setup_age++;
-        if ((!paused || !td5_roam_route_ui_map_open()) && R.setup_age > 15) {
-            R.state = TD5_RRACE_OFF;
-            TD5_LOG_I(LOG_TAG, "ROAM_RACE: setup closed");
-            break;
-        }
-        if (ke(K_UP))   { R.cursor = R.cursor <= ROW_TYPE ? ROW_CANCEL : R.cursor - 1; }
-        if (ke(K_DOWN)) { R.cursor = R.cursor >= ROW_CANCEL ? ROW_TYPE : R.cursor + 1; }
-        if (R.cursor == ROW_TYPE && (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER))) {
-            /* [F9a] SPRINT <-> CIRCUIT: the planner replans (a circuit adds the closing leg back to START) */
-            td5_roam_route_set_type(td5_roam_route_type() == TD5_ROUTE_CIRCUIT ? TD5_ROUTE_SPRINT : TD5_ROUTE_CIRCUIT,
-                                    td5_roam_route_laps());
-            R.setup.laps = td5_roam_route_type() == TD5_ROUTE_CIRCUIT ? td5_roam_route_laps() : 1;
-            rr_best_load();
-        } else if (R.cursor == ROW_LAPS && td5_roam_route_type() == TD5_ROUTE_CIRCUIT && (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER))) {
-            int l = td5_roam_route_laps();
-            if (ke(K_LEFT)) l = l <= 1 ? TD5_ROUTE_MAX_LAPS : l - 1;
-            else l = l >= TD5_ROUTE_MAX_LAPS ? 1 : l + 1;
-            td5_roam_route_set_type(TD5_ROUTE_CIRCUIT, l);
-            R.setup.laps = l;
-            rr_best_load();
-        } else if (R.cursor == ROW_OPP && (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER))) {
-            /* [F7] 0..the cars this session loaded, wrapping */
-            const int mx = td5_roam_ai_available();
-            if (R.setup.opponents < 0) R.setup.opponents = td5_roam_ai_default_opponents();
-            if (ke(K_LEFT)) R.setup.opponents = R.setup.opponents <= 0 ? mx : R.setup.opponents - 1;
-            else R.setup.opponents = R.setup.opponents >= mx ? 0 : R.setup.opponents + 1;
-        } else if (ke(K_LEFT) || ke(K_RIGHT) || ke(K_ENTER)) {
-            /* [F8] traffic OFF / LOW / HIGH */
-            if (R.cursor == ROW_TRAFFIC) R.setup.traffic = ke(K_LEFT) ? (R.setup.traffic + 2) % 3 : (R.setup.traffic + 1) % 3;
-            else if (R.cursor == ROW_COPS) R.setup.cops = !R.setup.cops;
-            else if (ke(K_ENTER) && R.cursor == ROW_START) { td5_roam_race_start(&R.setup); break; }
-            else if (ke(K_ENTER) && R.cursor == ROW_CANCEL) { R.state = TD5_RRACE_OFF; break; }
-        }
-        if (ke(K_BACK)) R.state = TD5_RRACE_OFF;     /* back to the map */
+        if (paused && !td5_roam_route_ui_map_open() && ke(K_R)) td5_roam_race_start_prefs();
         break;
     case TD5_RRACE_COUNTDOWN:
         /* the pause menu cancels the game's 3-2-1: run it again once the menu closes */
@@ -756,7 +722,10 @@ void td5_roam_race_frame(void)
     case TD5_RRACE_FINISHED:
         if (td5_roam_route_ui_map_open()) { rr_to_off("route map"); break; }
         if (paused) break;
-        if (ke(K_ENTER)) { rr_to_off("keep roaming"); break; }
+        /* [roam HA] "after a sprint is complete go back to the main menu of the geospatial generator"
+         * (sprint and circuit alike): ENTER on the results leaves the session, the game fades out
+         * and lands on the geo generator (td5_game.c, the same exit as LEAVE FREE ROAM) */
+        if (ke(K_ENTER)) { R.req_leave = 1; break; }
         if (ke(K_F5)) { td5_roam_race_start(&R.setup); break; }
         break;
     default:
@@ -815,65 +784,6 @@ static void tx_c(float cx, float y, const char *s, uint32_t col, float px)
     td5_vui_text_centered(cx, y, s, col, px / 26.0f, px / 26.0f);
 }
 static float tx_w(const char *s, float px) { return td5_vui_text_width(s, px / 26.0f); }
-
-void td5_roam_race_draw_setup(void)
-{
-    const float W = g_render_width_f, H = g_render_height_f, S = rr_scale();
-    const TD5_RouteResult *r = td5_roam_route_result();
-    const float bw = 520.0f * S, bh = 406.0f * S, bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
-    static const char *const k_rows[ROW_N] = { "TYPE", "LAPS", "OPPONENTS", "TRAFFIC", "COPS", "START RACE", "CANCEL" };
-    char line[160], best[32];
-    int i;
-    if (R.state != TD5_RRACE_SETUP || W < 2.0f) return;
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
-    qb_rect(0, 0, W, H, 0x90000000);
-    qb_rect(bx - 3.0f * S, by - 3.0f * S, bw + 6.0f * S, bh + 6.0f * S, 0xFFFFB400);
-    qb_rect(bx, by, bw, bh, 0xFF11161D);
-    qb_rect(bx + 14.0f * S, by + (118.0f + 34.0f * (float)R.cursor) * S, bw - 28.0f * S, 30.0f * S, 0xFF25507A);
-    const int circ = td5_roam_route_type() == TD5_ROUTE_CIRCUIT;
-    tx(bx + 18.0f * S, by + 14.0f * S, circ ? "CIRCUIT RACE" : "SPRINT RACE", 0xFFFFB400, 24.0f * S);
-    if (circ)
-        snprintf(line, sizeof line, "%s   LAP %.2f KM   %d LAPS = %.2f KM", R.name[0] ? R.name : "UNSAVED ROUTE", r->length_m / 1000.0,
-                 td5_roam_route_laps(), r->length_m * (double)td5_roam_route_laps() / 1000.0);
-    else
-        snprintf(line, sizeof line, "%s   %.2f KM   %d STREETS", R.name[0] ? R.name : "UNSAVED ROUTE", r->length_m / 1000.0, r->nedge);
-    tx(bx + 18.0f * S, by + 50.0f * S, line, 0xFFFFFFFF, 17.0f * S);
-    rr_fmt_time(best, sizeof best, R.best_ticks);
-    if (circ) {
-        char bl[32];
-        rr_fmt_time(bl, sizeof bl, R.best_lap);
-        snprintf(line, sizeof line, "BEST LAP %s   BEST TOTAL %s", R.best_lap > 0 ? bl : "NONE", R.best_ticks > 0 ? best : "NONE");
-        if (!r->closed) snprintf(line, sizeof line, "NO ROUTE BACK TO START   MOVE OR ADD A POINT");
-    } else {
-        snprintf(line, sizeof line, "%d CHECKPOINTS   BEST %s", td5_roam_route_wp_count() - 1,
-                 R.best_ticks > 0 ? best : (R.name[0] ? "NONE YET" : "SAVE THE ROUTE TO KEEP ONE"));
-    }
-    tx(bx + 18.0f * S, by + 76.0f * S, line, circ && !r->closed ? 0xFFFF6A50 : 0xFFB8C2CF, 15.0f * S);
-    for (i = 0; i < ROW_N; i++) {
-        const float y = by + (122.0f + 34.0f * (float)i) * S;
-        const int fixed = i == ROW_LAPS && !circ;
-        const uint32_t col = fixed ? 0xFF8A94A0 : 0xFFFFFFFF;
-        tx(bx + 30.0f * S, y, k_rows[i], col, 18.0f * S);
-        line[0] = '\0';
-        if (i == ROW_TYPE) snprintf(line, sizeof line, "%s", circ ? "CIRCUIT  LAPS ROUND A LOOP" : "SPRINT  A TO B");
-        else if (i == ROW_LAPS) {
-            if (circ) snprintf(line, sizeof line, "%d", td5_roam_route_laps());
-            else snprintf(line, sizeof line, "1   (CIRCUITS ONLY)");
-        }
-        else if (i == ROW_OPP) {
-            const int mx = td5_roam_ai_available();
-            const int n = R.setup.opponents < 0 ? td5_roam_ai_default_opponents() : R.setup.opponents;
-            if (mx > 0) snprintf(line, sizeof line, "%d   (UP TO %d)", n, mx);
-            else snprintf(line, sizeof line, "0   (NO CARS LOADED)");
-        }
-        else if (i == ROW_TRAFFIC) snprintf(line, sizeof line, "%s", R.setup.traffic >= 2 ? "HIGH" : (R.setup.traffic == 1 ? "LOW" : "OFF"));
-        else if (i == ROW_COPS) snprintf(line, sizeof line, "%s", R.setup.cops ? "ON" : "OFF");
-        if (line[0]) tx(bx + 200.0f * S, y, line, col, 18.0f * S);
-    }
-    tx(bx + 18.0f * S, by + bh - 26.0f * S, "UP / DOWN   LEFT / RIGHT CHANGE   ENTER SELECT   BKSP MAP   ESC DRIVE", 0xFFB8C2CF, 13.0f * S);
-    qb_flush();
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-}
 
 /* [F7] "YOU" / "CPU n" */
 static const char *rr_racer_name(int slot, char *buf, size_t cap)
@@ -1004,7 +914,7 @@ static void rr_draw_results(float W, float H, float S)
         }
     }
     if (nfld) rr_draw_field(W, by + ((circ ? 200.0f : 178.0f) + rstep * (float)(nrow > nmax ? nmax : nrow)) * S, S);
-    tx_c(W * 0.5f, by + bh - 28.0f * S, "ENTER KEEP ROAMING   M ROUTE MAP   F5 RACE AGAIN", 0xFFFFE070, 15.0f * S);
+    tx_c(W * 0.5f, by + bh - 28.0f * S, "ENTER BACK TO THE GENERATOR   M ROUTE MAP   F5 RACE AGAIN", 0xFFFFE070, 15.0f * S);
 }
 
 void td5_roam_race_draw_hud(void)

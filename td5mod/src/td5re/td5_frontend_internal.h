@@ -133,6 +133,11 @@ int  frontend_geo_pick_slot(void);
  * type, single local player, no net/MP flow. The car-select exit then launches the roam race
  * (OK) or returns to the geo selector (BACK) -- td5_fe_race.c, off td5_roam_armed(). */
 void frontend_roam_prepare_car_select(void);
+/* [roam HA] FREE ROAM / RACE ROUTE skip the car select once a car was chosen in the normal flow:
+ * frontend_roam_car_chosen() = 1, then frontend_roam_launch_chosen_car() launches the armed roam
+ * session with it (1 = launched). td5_fe_race.c. */
+int  frontend_roam_car_chosen(void);
+int  frontend_roam_launch_chosen_car(void);
 /* [GEO FREE ROAM F11a] The geo map's pins (START first, FINISH last) for the GEOSPATIAL entry, and
  * that entry's city-race launch (td5_fe_race.c): 1 = a roam race is armed, s_selected_track = host. */
 int  frontend_geo_generator_points(double (*ll)[2], int max);

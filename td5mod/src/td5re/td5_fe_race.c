@@ -744,6 +744,32 @@ void frontend_roam_prepare_car_select(void) {
     s_return_screen      = -1;
 }
 
+/* [roam HA] "selecting free roam should take directly to the race instead of selecting car because it
+ * has already been selected". 1 once the player has picked a car in the normal flow (the car select's
+ * OK, or Quick Race's OK / car cycling): FREE ROAM and RACE ROUTE then launch with that car and skip
+ * the car select, which stays the way in only when no car was ever chosen. */
+static int s_car_chosen;
+
+int frontend_roam_car_chosen(void) { return s_car_chosen; }
+
+/* Launch the armed roam session (td5_roam_begin already called) with the car and paint chosen earlier,
+ * exactly what the car select's OK does in the roam flow. Single race, one local player. */
+int frontend_roam_launch_chosen_car(void)
+{
+    const int actual_car = frontend_current_car_index();   /* before the game type is reset: masters roster */
+    if (!s_car_chosen || !td5_roam_armed()) return 0;
+    frontend_roam_prepare_car_select();
+    s_selected_car = actual_car;
+    s_p1_car   = actual_car;
+    s_p1_paint = s_selected_paint;
+    s_selected_track = td5_roam_host_track();
+    TD5_LOG_I(LOG_TAG, "FREE ROAM: car %d paint %d already chosen, launching without the car select (host track %d)",
+              actual_car, s_selected_paint, s_selected_track);
+    frontend_init_race_schedule();
+    frontend_init_display_mode_state();
+    return 1;
+}
+
 /* [GEO FREE ROAM F11b] The strip geo race is LOCAL MULTIPLAYER only (Mariano, 2026-10-18): 2+ humans
  * on this machine, no network (free roam is single player, blocker B1 in F11_PARITY.md). Everything
  * else on the GEOSPATIAL entry races in the city. TD5RE_GEO_STRIP_BUILD=1 (dev) opens the strip to
@@ -961,12 +987,40 @@ static int frontend_track_excluded_from_selector(int track_index) {
            frontend_track_is_cup_slot(track_index);
 }
 
+/* [roam HA] "both auto-generated track and geospatial generator in the track select the OK button
+ * should take to the settings of each mode". OK on a generated entry (AUTO-GENERATED, GEOSPATIAL TRACK
+ * GENERATOR) opens that mode's settings screen, the same one its SETTINGS button opens, instead of
+ * racing. Coming back (BUILD / OK / BACK there), the NEXT OK races: s_gen_settings_seen remembers the
+ * visit, and is cleared by racing, by cycling the track, and by BACK out of the selector. 1 = the
+ * screen was opened (the caller returns), 0 = race as before. */
+static int s_gen_settings_seen = -1;   /* the slot whose settings were visited, -1 = none */
+
+static int frontend_gen_ok_to_settings(int parent_screen)
+{
+    const int is_auto = td5_trackgen_is_auto_slot(s_selected_track);
+    const int is_geo  = td5_trackgen_is_geo_slot(s_selected_track);
+    if (!is_auto && !is_geo) return 0;
+    if (s_gen_settings_seen == s_selected_track) { s_gen_settings_seen = -1; return 0; }
+    s_gen_settings_seen = s_selected_track;
+    frontend_play_sfx(3);
+    if (is_auto) {
+        s_at_parent_screen = parent_screen;
+        td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+    } else {
+        frontend_geo_generator_set_parent(parent_screen);
+        td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+    }
+    TD5_LOG_I(LOG_TAG, "OK on the %s entry opens its settings", is_auto ? "AUTO-GENERATED" : "GEOSPATIAL");
+    return 1;
+}
+
 /* Advance track by delta (+1 or -1), skipping indices whose level zips are absent
  * and any slot excluded from the selector (drag strip + cups; see
  * frontend_track_excluded_from_selector).
  * Stops after one full revolution to avoid an infinite loop when no tracks exist. */
 static void frontend_cycle_track(int delta, int track_min, int track_max) {
     int start = s_selected_track;
+    s_gen_settings_seen = -1;   /* [roam HA] a new pick asks for its settings again */
     int attempts = track_max - track_min + 1;
     /* [GEO ROW REMOVAL 2026-10-08] Touching the TRACK arrows retires the armed
      * geo pick: the place leaves the list for good and cannot be cycled back
@@ -1854,6 +1908,7 @@ void Screen_QuickRaceMenu(void) {
                 s_selected_button == s_qr_auto_btn &&
                 !s_buttons[s_qr_auto_btn].disabled) {
                 frontend_play_sfx(3);
+                s_gen_settings_seen = s_selected_track;
                 s_at_parent_screen = TD5_SCREEN_QUICK_RACE;
                 td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
                 return;
@@ -1866,6 +1921,7 @@ void Screen_QuickRaceMenu(void) {
                 s_selected_button == s_qr_geo_btn &&
                 !s_buttons[s_qr_geo_btn].disabled) {
                 frontend_play_sfx(3);
+                s_gen_settings_seen = s_selected_track;
                 frontend_geo_generator_set_parent(TD5_SCREEN_QUICK_RACE);
                 td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
                 return;
@@ -1880,6 +1936,7 @@ void Screen_QuickRaceMenu(void) {
             }
 
             if (s_button_index == QR_BTN_OK) {
+                if (frontend_gen_ok_to_settings(TD5_SCREEN_QUICK_RACE)) return;   /* [roam HA] */
                 /* Block if car or track is locked */
                 int car_locked = (!s_cheat_unlock_all && !s_network_active &&
                                   s_selected_car >= 0 && s_selected_car < 37 &&
@@ -1899,6 +1956,7 @@ void Screen_QuickRaceMenu(void) {
                      * Game Options' OK, which no longer owns this setting). */
                     g_td5.ini.laps = s_game_option_laps;
                     td5_ini_persist_options();
+                    s_car_chosen = 1;   /* [roam HA] Quick Race picks its car on this screen */
                     /* [F11a] the GEOSPATIAL entry races in the city (no-op otherwise) */
                     if (frontend_geo_entry_launch_roam(s_num_ai_opponents))
                         g_td5.reverse_direction = 0;
@@ -1911,6 +1969,7 @@ void Screen_QuickRaceMenu(void) {
                 }
             }
             if (s_button_index == QR_BTN_BACK) {
+                s_gen_settings_seen = -1;
                 s_return_screen = TD5_SCREEN_MAIN_MENU;
                 s_inner_state = 5;
             }
@@ -7459,6 +7518,8 @@ void Screen_CarSelection(void) {
         int actual_car = (s_selected_game_type == 5) ?
                          s_masters_roster[s_selected_car] : s_selected_car;
 
+        if (s_return_screen == TD5_SCREEN_TRACK_SELECTION) s_car_chosen = 1;   /* [roam HA] OK, not BACK */
+
         /* [GEO FREE ROAM F2-A] BACK / ESC in the roam flow: abandon the session, return to the map */
         if (td5_roam_armed() && s_return_screen == TD5_SCREEN_GEO_GENERATOR) {
             td5_roam_cancel();
@@ -8884,41 +8945,9 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
  * instead of leaving an empty rectangle.
  *
  * Returns 1 if a route was plotted. */
-/* The map credits drawn with any preview of a real place (see the comments inside). */
-static void geo_draw_route_credit(const char *slug, float bx, float by, float sx, float sy)
-{
-    /* [GEO PHASE 4 / ODbL] The credit travels with the map, wherever it is shown.
-     * TWO LINES, ABOVE the panel. On one line under it (what the studio does in
-     * its wider rect) the full credit is ~228 canvas units from bx=412, so it ran
-     * off the 640-unit canvas and through the Pitbull logo -- measured on the
-     * first framedump of this screen. Above the panel there is clear space
-     * between the track name and the panel top, and splitting the string keeps
-     * the attribution complete rather than truncating it to fit. */
-    {
-        /* [ROUND 1030 A2] With the generator's own selector the panel title is
-         * GEOSPATIAL TRACK GENERATOR and the place name sits on the small line
-         * under it (y 108), where the first credit line used to be, so the
-         * credit drops one line. Its last line ends at ~by+7, still above the
-         * route, which the fit keeps AT_PV_MARGIN (8) inside the panel. */
-        const float cy0 = -14.0f;
-        fe_draw_small_text(bx * sx, (by + cy0) * sy, TR("MAP DATA (C)"), 0xFF8899AA, sx, sy);
-        fe_draw_small_text(bx * sx, (by + cy0 + 12.0f) * sy, TR("OPENSTREETMAP CONTRIBUTORS"),
-                           0xFF8899AA, sx, sy);
-    }
-    /* [ROUND 1012 D1] A place whose buildings were conflated with Overture +
-     * Google Open Buildings carries their credit too (both ODbL). NOT stacked
-     * straight above the OSM pair: the track name is drawn at y 81..106 and
-     * the first framedump showed both lines printed through "LA PLATA". They
-     * go ABOVE the name instead, in the gap right of the menu's decorative
-     * bars (which reach x 420 at that height). Small text is ~7.6 units a
-     * glyph, so each line stays under 28 characters to end before x 640. */
-    if (td5_geob_place_has_extra(slug)) {
-        fe_draw_small_text((bx + 13.0f) * sx, (by - 80.0f) * sy,
-                           TR(TD5_GEOB_CREDIT_BUILDINGS), 0xFF8899AA, sx, sy);
-        fe_draw_small_text((bx + 13.0f) * sx, (by - 68.0f) * sy,
-                           TR(TD5_GEOB_CREDIT_HEIGHTS), 0xFF8899AA, sx, sy);
-    }
-}
+/* [roam HA] The map credits (OSM / Overture / Google Open Buildings, ODbL) are no longer drawn on the
+ * track-select preview or the generator screens (Mariano, 2026-10-19). They live on the CREDITS reel
+ * (Extras, td5_credits.h) and in the changelog. */
 
 /* [GEO FREE ROAM F11b] Single player races the entry in the city, so the panel shows THAT route:
  * the pins (geo map, else routes/geo_map.json) as straight legs, north up, START and FINISH marked.
@@ -8938,12 +8967,7 @@ static int geo_draw_city_route(int place_index, float bx, float by, float bw, fl
         memo_place = place_index;
         memo_ms = td5_plat_time_ms();
     }
-    if (n < 2) {
-        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f) * sy, TR("NO ROUTE YET"), 0xFF8899AA, sx, sy);
-        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f + 12.0f) * sy, TR("SET THE PINS IN SETTINGS"),
-                           0xFF8899AA, sx, sy);
-        return 0;
-    }
+    if (n < 2) return 0;   /* [roam HA] no route yet: nothing is drawn (the old hint text is gone) */
     k = cos(ll[0][0] * 3.14159265358979323846 / 180.0);   /* metres east per degree, relative */
     min_x = max_x = ll[0][1] * k;
     min_z = max_z = ll[0][0];
@@ -8993,9 +9017,7 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
     const char *slug = td5_geo_places_slug(place_index);
 
     if (!frontend_geo_strip_context()) {
-        const int drawn = geo_draw_city_route(place_index, bx, by, bw, bh, sx, sy);
-        geo_draw_route_credit(slug, bx, by, sx, sy);
-        return drawn;
+        return geo_draw_city_route(place_index, bx, by, bw, bh, sx, sy);
     }
     n = td5_geo_preview_route(slug);
     if (n < 2) {
@@ -9059,7 +9081,6 @@ int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
                                  (cy - ((float)szp - oz) * scale) * sy, sx, sy, 0);
     }
 
-    geo_draw_route_credit(slug, bx, by, sx, sy);
     return 1;
 }
 
@@ -9090,19 +9111,7 @@ static void at_draw_preview(float sx, float sy)
         return;
     }
 
-    /* [GEO PHASE 4] ODbL: a real place must carry the OSM credit wherever its
-     * track is shown. Above the read-out so it never collides with it. */
-    if (td5_geo_wanted_slug()[0]) {
-        fe_draw_small_text(bx, by - 14 * sy, TD5_GEO_CREDIT, 0xFF8899AA, sx, sy);
-        /* [ROUND 1012 D1] + the building sources, when the place has them.
-         * Clear of the status line under the title (framedump-checked). */
-        if (td5_geob_place_has_extra(td5_geo_wanted_slug())) {
-            fe_draw_small_text(bx, by - 44 * sy, TR(TD5_GEOB_CREDIT_BUILDINGS),
-                               0xFF8899AA, sx, sy);
-            fe_draw_small_text(bx, by - 32 * sy, TR(TD5_GEOB_CREDIT_HEIGHTS),
-                               0xFF8899AA, sx, sy);
-        }
-    }
+    /* [roam HA] the map credits moved to the CREDITS reel (td5_credits.h) */
 
     /* Read-out under the panel. */
     if (s_at_status.done && s_at_status.ok) {
@@ -9950,6 +9959,7 @@ void Screen_TrackSelection(void) {
             }
 
             if (s_button_index == 4) { /* OK */
+                if (frontend_gen_ok_to_settings(TD5_SCREEN_TRACK_SELECTION)) break;   /* [roam HA] */
                 /* Lock enforcement */
                 int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
                              s_track_lock_table[s_selected_track] != 0 &&
@@ -9997,6 +10007,7 @@ void Screen_TrackSelection(void) {
              * DIRECTION 1 / LAPS 2 / RACE OPTIONS 3 / OK 4 / BACK 5). The old
              * "not the RANDOMIZE chip" guard went away with the chip (W3). */
             if (s_button_index == 5) { /* Back */
+                s_gen_settings_seen = -1;
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
             }
@@ -10009,6 +10020,7 @@ void Screen_TrackSelection(void) {
                 s_button_index == s_trksel_auto_btn &&
                 s_selected_button == s_trksel_auto_btn) {
                 frontend_play_sfx(3);
+                s_gen_settings_seen = s_selected_track;
                 s_at_parent_screen = TD5_SCREEN_TRACK_SELECTION;
                 td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
                 break;
@@ -10024,6 +10036,7 @@ void Screen_TrackSelection(void) {
                 s_selected_button == s_trksel_geo_btn &&
                 !s_buttons[s_trksel_geo_btn].disabled) {
                 frontend_play_sfx(3);
+                s_gen_settings_seen = s_selected_track;
                 frontend_geo_generator_set_parent(TD5_SCREEN_TRACK_SELECTION);
                 td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
                 break;

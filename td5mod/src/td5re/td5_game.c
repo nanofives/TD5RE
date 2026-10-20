@@ -6849,6 +6849,14 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             s_resume_countdown_roam = 1;
         }
     }
+    if (td5_roam_race_take_leave() && !s_pause_exit_pending) {
+        /* [roam HA] results dismissed: the LEAVE FREE ROAM exit (fade, release, back to the geo generator) */
+        s_pause_menu_active = 0;
+        s_pause_exit_pending = 1;
+        s_finish_position_display = 0;
+        td5_game_begin_fade_out(0);
+        TD5_LOG_I(LOG_TAG, "Roam race results dismissed -> leaving to the geo generator");
+    }
 
     /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
      * Detected here, OUTSIDE the fixed-step loop, so a brief ESC tap exits a

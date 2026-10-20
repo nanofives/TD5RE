@@ -813,17 +813,7 @@ void td5_roam_sprint_test_frame(void)
             if (D.phase_frames < 45) break;
         }
         if (D.phase_frames < 10) break;
-        if (!td5_roam_race_open_setup()) { sd_finish("setup refused the loaded route", 1); return; }
-        D.phase = 2; D.phase_frames = 0;
-        break;
-    case 2:   /* the panel is up over the map under the pause menu: TRAFFIC on (inert), START RACE */
-        if (td5_roam_race_state() != TD5_RRACE_SETUP) { sd_finish("setup panel closed by itself", 1); return; }
-        if (D.phase_frames == 25) sd_shot("1_setup");
-        if (D.phase_frames < (D.shots ? 45 : 30)) break;
-        if (!td5_game_is_pause_menu_active() || !td5_roam_route_ui_map_open()) {
-            if (D.phase_frames > 600) sd_finish("pause menu / route map never opened for the setup", 1);
-            break;
-        }
+        /* [roam HA] no setup panel any more: the race starts with the settings the test fills in */
         {
             TD5_RoamRaceSetup s;
             TD5_RoamPhysStats st;

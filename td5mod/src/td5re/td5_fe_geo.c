@@ -1007,13 +1007,68 @@ static void geo_opt_layout_rows(void)
         FE_Button *b = &s_buttons[GEO_BTN_ROW0 + k];
         /* [F11a] without the strip build only slot 0 of the ROUTE page (TIME OF DAY, which the roam
          * session reads too: td5_trackgen_roam_is_night) stays; the other rows only shape a strip build */
-        const int on = (s_strip || k == 0) && (geo_opt_row_at(k) >= 0);
+        /* [roam HA] ... and slots 1..5 are the race settings (RACE TYPE, LAPS, OPPONENTS, TRAFFIC, COPS) */
+        const int on = s_strip ? (geo_opt_row_at(k) >= 0)
+                               : (k == 0 ? geo_opt_row_at(0) >= 0 : k <= GEO_RR_ROWS);
         b->hidden   = on ? 0 : 1;
         b->disabled = on ? 0 : 1;
     }
     if (s_selected_button >= GEO_BTN_ROW0 && s_selected_button < GEO_BTN_ROW0 + GEO_OPT_VIS
         && s_buttons[s_selected_button].disabled)
         s_selected_button = GEO_BTN_SECT;
+}
+
+/* [roam HA] RACE SETTINGS of the city race (RACE ROUTE): the options that were a panel inside the race
+ * (R on the route map). They sit in slots 1..5 of the option rows, under TIME OF DAY, and live in
+ * td5_roam_prefs (td5_roam_handoff.h). */
+#define GEO_RR_ROWS 5
+static const char *const k_rr_label[GEO_RR_ROWS] = { "RACE TYPE", "LAPS", "OPPONENTS", "TRAFFIC", "COPS" };
+
+static void geo_rr_value(int row, char *buf, size_t cap)
+{
+    TD5_RoamRacePrefs p;
+    td5_roam_prefs_get(&p);
+    switch (row) {
+    case 0: snprintf(buf, cap, "%s", p.circuit ? TR("CIRCUIT") : TR("SPRINT")); break;
+    case 1: if (p.circuit) snprintf(buf, cap, "%d", p.laps); else snprintf(buf, cap, "%s", TR("1 (CIRCUIT ONLY)")); break;
+    case 2: snprintf(buf, cap, "%d", p.opponents); break;
+    case 3: snprintf(buf, cap, "%s", p.traffic >= 2 ? TR("HIGH") : (p.traffic == 1 ? TR("LOW") : TR("OFF"))); break;
+    default: snprintf(buf, cap, "%s", p.cops ? TR("ON") : TR("OFF")); break;
+    }
+}
+
+static int geo_rr_circuit(void)
+{
+    TD5_RoamRacePrefs p;
+    td5_roam_prefs_get(&p);
+    return p.circuit;
+}
+
+static void geo_rr_step(int row, int d)
+{
+    TD5_RoamRacePrefs p;
+    td5_roam_prefs_get(&p);
+    if (d == 0) d = 1;
+    switch (row) {
+    case 0: p.circuit = !p.circuit; break;
+    case 1:
+        if (!p.circuit) return;                       /* a sprint is one run A to B */
+        p.laps += d;
+        if (p.laps < 1) p.laps = TD5_ROUTE_MAX_LAPS;
+        if (p.laps > TD5_ROUTE_MAX_LAPS) p.laps = 1;
+        break;
+    case 2: p.opponents = (p.opponents + d + 6) % 6; break;   /* 0..5 */
+    case 3: p.traffic = (p.traffic + d + 3) % 3; break;       /* OFF / LOW / HIGH */
+    default: p.cops = !p.cops; break;
+    }
+    td5_roam_prefs_set(&p);
+#ifndef TD5RE_RELEASE
+    {
+        char v[40];
+        geo_rr_value(row, v, sizeof v);
+        TD5_LOG_I(LOG_TAG, "GEO GENERATOR: race setting %s -> %s", k_rr_label[row], v);
+    }
+#endif
 }
 
 static void geo_opt_set_sect(int sect)
@@ -1309,15 +1364,12 @@ static int geo_wrap_small(const char *s, float maxw, float sx, float sy,
 static void geo_draw_city_note(float sx, float sy)
 {
     static const char *k_note[] = {
-        "RACE ROUTE races these pins inside the free-roam city.",
-        "Next: pick a car, then opponents, traffic and cops on the route map.",
-        "Sprint or circuit and laps: on the same panel.",
-        "FREE ROAM drives from START with no race.",
+        "RACE ROUTE races the pins with these settings. FREE ROAM drives from START.",
     };
     const float px = (float)GEO_PANEL_X, pw = (float)GEO_PANEL_W;
     const char *why = NULL;
     const int ready = geo_race_city_ready(&why);
-    float y = (float)(GEO_ROW_Y0 + GEO_ROW_STEP) + 10.0f;
+    float y = (float)(GEO_ROW_Y0 + GEO_ROW_STEP * (GEO_RR_ROWS + 1)) + 4.0f;
     int i, j;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     geo_fill(px, (float)GEO_SECT_Y, pw, 286.0f, 0xC0101018u, sx, sy);
@@ -1339,6 +1391,16 @@ static void geo_draw_city_note(float sx, float sy)
             geo_small_centered(px + 176.0f, ry + 7.0f, line,
                                geo_opt_value(row) != o->def ? 0xFF7CE07Cu : 0xFFFFFFFFu, sx, sy);
         }
+    }
+    for (i = 0; i < GEO_RR_ROWS; i++) {   /* [roam HA] the race settings, slots 1..5 */
+        char v[40];
+        const float ry = (float)(GEO_ROW_Y0 + GEO_ROW_STEP * (i + 1));
+        const int dim = (i == 1) && !geo_rr_circuit();
+        fe_draw_option_arrows(GEO_BTN_ROW0 + i + 1, sx, sy);
+        fe_draw_small_text((px + 22.0f) * sx, (ry + 7.0f) * sy, TR(k_rr_label[i]),
+                           dim ? GEO_COL_DIM : 0xFFE6ECF4u, sx, sy);
+        geo_rr_value(i, v, sizeof v);
+        geo_small_centered(px + 176.0f, ry + 7.0f, v, dim ? GEO_COL_DIM : 0xFFFFFFFFu, sx, sy);
     }
     for (i = 0; i < (int)(sizeof k_note / sizeof k_note[0]); i++) {
         char wl[3][GEO_WRAP_LEN];
@@ -1488,21 +1550,8 @@ void frontend_geo_generator_render(float sx, float sy)
                                FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
 
-    /* [ODbL] The credit travels with the map and is never conditional.
-     * LEFT-aligned inside the pane's bottom edge: right-aligning it off
-     * fe_measure_small_text clipped the last characters on the first
-     * framedump, and a credit that can be truncated is not a credit. A dark
-     * plate under it keeps it readable over pale map imagery. */
-    {
-        const char *credit = TR("(C) OPENSTREETMAP CONTRIBUTORS");
-        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        geo_fill(GEO_MAP_X + 1.0f, GEO_MAP_Y + GEO_MAP_H - 15.0f,
-                 GEO_MAP_W - 2.0f, 14.0f, 0x99101018u, sx, sy);
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        fe_draw_small_text((GEO_MAP_X + 4.0f) * sx,
-                           (GEO_MAP_Y + GEO_MAP_H - 14.0f) * sy,
-                           credit, 0xFFE8ECF0u, sx, sy);
-    }
+    /* [roam HA] The (C) OPENSTREETMAP CONTRIBUTORS strip that sat on the map's bottom edge is gone
+     * (Mariano, 2026-10-19). The ODbL / Overture attribution is on the CREDITS reel (td5_credits.h). */
 
     /* [ROUND 1030 B item 6] "remove indicator on the top right for ZOOM
      * POINTS METERS". The ZOOM / POINTS / metres readout that sat right of
@@ -1927,7 +1976,7 @@ static void geo_screen_init(void)
     s_inner_state   = 1;
 }
 
-static void geo_leave(int screen)
+static void geo_close_screen(void)
 {
     td5_geo_tiles_close();
 
@@ -1946,6 +1995,11 @@ static void geo_leave(int screen)
     s_rebuild_wanted = 0;
 
     s_inner_state = 0;
+}
+
+static void geo_leave(int screen)
+{
+    geo_close_screen();
     td5_frontend_set_screen(screen);
 }
 
@@ -2059,9 +2113,18 @@ static void geo_do_roam(void)
     TD5_RoamSpawn sp;
     if (!geo_roam_spawn(&sp)) { frontend_play_sfx(10); return; }
     td5_roam_begin(&sp);
-    frontend_roam_prepare_car_select();
     frontend_play_sfx(3);
-    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: FREE ROAM at %.5f,%.5f (%s) -> car select",
+    if (frontend_roam_car_chosen()) {   /* [roam HA] the car was picked in the normal flow: straight to the race */
+        TD5_LOG_I(LOG_TAG, "GEO GENERATOR: FREE ROAM at %.5f,%.5f (%s) -> race (car already chosen)",
+                  s_pts[0].lat, s_pts[0].lon, sp.place);
+        geo_close_screen();
+        if (frontend_roam_launch_chosen_car()) return;
+        td5_roam_cancel();                 /* cannot happen (armed + chosen), but never strand the screen */
+        td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+        return;
+    }
+    frontend_roam_prepare_car_select();
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: FREE ROAM at %.5f,%.5f (%s) -> car select (no car chosen yet)",
               s_pts[0].lat, s_pts[0].lon, sp.place);
     geo_leave(TD5_SCREEN_CAR_SELECTION);
 }
@@ -2112,19 +2175,30 @@ static void geo_do_race_city(void)
 {
     TD5_RoamSpawn sp;
     double ll[TD5_ROUTE_MAX_WP][2];
+    TD5_RoamRacePrefs p;
     int i;
     if (!geo_race_city_ready(NULL) || !geo_roam_spawn(&sp)) { frontend_play_sfx(10); return; }
     for (i = 0; i < s_n_pts; i++) { ll[i][0] = s_pts[i].lat; ll[i][1] = s_pts[i].lon; }
+    td5_roam_prefs_get(&p);   /* [roam HA] the race settings of the RACE IN THE CITY panel */
     td5_roam_begin(&sp);
-    if (!td5_roam_handoff_set((const double (*)[2])ll, s_n_pts, TD5_ROUTE_SPRINT, 1, TD5_HANDOFF_SETUP_PANEL, -1, 0, 0)) {
+    if (!td5_roam_handoff_set((const double (*)[2])ll, s_n_pts, p.circuit ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT,
+                              p.laps, TD5_HANDOFF_AUTOSTART, p.opponents, p.traffic, p.cops)) {
         td5_roam_cancel();
         frontend_play_sfx(10);
         return;
     }
-    frontend_roam_prepare_car_select();
     frontend_play_sfx(3);
-    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: RACE ROUTE %d point(s) from %.5f,%.5f (%s) -> car select -> race in the city",
-              s_n_pts, s_pts[0].lat, s_pts[0].lon, sp.place);
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: RACE ROUTE %d point(s) from %.5f,%.5f (%s) %s laps=%d opponents=%d traffic=%d cops=%d",
+              s_n_pts, s_pts[0].lat, s_pts[0].lon, sp.place, p.circuit ? "circuit" : "sprint", p.laps,
+              p.opponents, p.traffic, p.cops);
+    if (frontend_roam_car_chosen()) {   /* [roam HA] the car was picked in the normal flow: straight to the race */
+        geo_close_screen();
+        if (frontend_roam_launch_chosen_car()) return;
+        td5_roam_cancel();
+        td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+        return;
+    }
+    frontend_roam_prepare_car_select();
     geo_leave(TD5_SCREEN_CAR_SELECTION);
 }
 
@@ -2217,6 +2291,9 @@ void Screen_GeoGenerator(void)
         if (d && s_selected_button == GEO_BTN_SECT) {
             geo_opt_set_sect(s_opt_sect + d);
             frontend_play_sfx(2);
+        } else if (d && !s_strip && slot >= 1 && slot <= GEO_RR_ROWS) {   /* [roam HA] race settings */
+            geo_rr_step(slot - 1, d);
+            frontend_play_sfx(2);
         } else if (d && slot >= 0 && slot < GEO_OPT_VIS && geo_opt_row_at(slot) >= 0) {
             geo_opt_step(geo_opt_row_at(slot), d);
             frontend_play_sfx(2);
@@ -2255,7 +2332,9 @@ void Screen_GeoGenerator(void)
             return;
         default:
             /* confirm on a row (Enter, pad A, double click) = next value */
-            if (s_button_index >= GEO_BTN_ROW0 && s_button_index < GEO_BTN_ROW0 + GEO_OPT_VIS
+            if (!s_strip && s_button_index > GEO_BTN_ROW0 && s_button_index <= GEO_BTN_ROW0 + GEO_RR_ROWS)
+                geo_rr_step(s_button_index - GEO_BTN_ROW0 - 1, 1);   /* [roam HA] race settings */
+            else if (s_button_index >= GEO_BTN_ROW0 && s_button_index < GEO_BTN_ROW0 + GEO_OPT_VIS
                 && geo_opt_row_at(s_button_index - GEO_BTN_ROW0) >= 0)
                 geo_opt_step(geo_opt_row_at(s_button_index - GEO_BTN_ROW0), 1);
             break;

@@ -621,7 +621,7 @@ static void list_input(void)
         if (td5_roam_route_load(u.list[u.sel])) {
             u.mode = 0;
             fit_route();
-            if (!td5_roam_race_open_setup()) ui_toast("%s IS NOT A PLANNED SPRINT", u.list[u.sel]);
+            if (!td5_roam_race_start_prefs()) ui_toast("%s IS NOT A PLANNED SPRINT", u.list[u.sel]);
         } else {
             ui_toast("COULD NOT LOAD %s", u.list[u.sel]);
         }
@@ -700,7 +700,6 @@ static void map_input(double dt)
     int mx = 0, my = 0, cw = 0, ch = 0;
     const int shift = kd(K_LSHIFT) || kd(K_RSHIFT);
 
-    if (td5_roam_race_setup_open()) return;          /* [F6-B] the sprint setup panel owns the keys */
     if (u.mode == 1) { name_input(); return; }
     if (u.mode == 2) { list_input(); return; }
 
@@ -732,7 +731,7 @@ static void map_input(double dt)
         return;
     }
     if (ke(K_R)) {                                   /* [F6-B] RACE THIS ROUTE */
-        if (!td5_roam_race_open_setup()) ui_toast("NEED A START, A FINISH AND A ROUTE BETWEEN THEM");
+        if (!td5_roam_race_start_prefs()) ui_toast("NEED A START, A FINISH AND A ROUTE BETWEEN THEM");
         return;
     }
     if (ke(K_T)) {                                   /* [F9a] SPRINT <-> CIRCUIT */
@@ -993,7 +992,6 @@ void td5_roam_route_ui_draw_overlay(void)
     }
     rb_flush();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    td5_roam_race_draw_setup();     /* [F6-B] the sprint setup panel over the map (self-gated) */
 }
 
 /* ============================================================ the HUD line ===== */
