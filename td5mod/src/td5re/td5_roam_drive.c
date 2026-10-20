@@ -391,7 +391,16 @@ static void rv_measure(TD5_Actor *a, const TD5_RoamResident *rs)
     s_rv.ch = h;
     s_rv.ch_ok = 1;
     s_rv.ch_hint = h.prim;
-    if (!h.inside) { s_rv.off_n++; return; }
+    if (!h.inside) {
+        /* [roam M] where: the first few off-surface ticks of a drive, with the push back to the road */
+        if (s_rv.off_n < 4 || (s_rv.off_n % 100) == 0)
+            TD5_LOG_W(LOG_TAG, "[ROAMSELFTEST] OFF surface #%ld at world (%d,%d) tick %ld prim %08x patch %d push (%d,%d) dist %d, "
+                      "%d junctions, on_path %d", s_rv.off_n + 1, (int)FP_TRUNC(a->world_pos.x), (int)FP_TRUNC(a->world_pos.z),
+                      (long)g_td5.simulation_tick_counter, (unsigned)h.prim, (int)h.is_patch, (int)h.push_x, (int)h.push_z,
+                      (int)h.push_dist, s_rv.crossings, s_rv.on_path);
+        s_rv.off_n++;
+        return;
+    }
     {
         const int32_t above = a->world_pos.y - h.ground_y;
         if (!s_rv.above_seen || above < s_rv.above_min) { s_rv.above_min = above; s_rv.above_seen = 1; }
@@ -462,7 +471,10 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
 
     if (s_rv.phase == 0) {
         double vt = s_rv.kmh;
-        if (on_patch && !s_rv.on_path) {
+        /* [roam M] also while following a path: the exit path of one junction can run straight onto the patch of
+         * the next one (two clusters 60 m apart, the second a 7-arm plaza), and the old path then carried the car
+         * into the new junction's island. A patch of a DIFFERENT cluster ends the old path and is planned here. */
+        if (on_patch) {
             const uint32_t slot = ROAM_PRIM_SLOT(s_rv.ch.prim), idx = ROAM_PRIM_INDEX(s_rv.ch.prim);
             const RoamTile *t = slot < (uint32_t)rs->nslot ? rs->tile[slot] : NULL;
             if (t && idx < t->ntri && t->tri[idx].patch < t->nnode &&
