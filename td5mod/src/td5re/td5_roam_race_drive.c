@@ -183,6 +183,7 @@ static struct {
     int      exit_ok;             /* ENTER on the results panel returned to free roam, barriers cleared */
     int      rear_cd;             /* [F7] rear view held on the grid (the field is behind START) */
     int      ai_done;             /* [F7] every opponent through the line before the results ENTER */
+    int      judged;              /* [roam M] the results were judged (frame 74), ENTER follows */
     /* [F9a] circuit rows */
     int      laps;                /* laps of the scripted circuit                                  */
     int      circ_closed;         /* the reloaded route is a closed circuit with the saved type + laps */
@@ -395,6 +396,7 @@ planned:
  * progress and drawing, but a pursuit driver at 10 m lookahead swerves into it. A point whose turn is
  * sharper than 90 degrees with a leg under 15 m is dropped. */
 static TD5_RouteResult s_path;
+static TD5_RoamRaceResult s_res_snap;   /* [roam M] the race result as judged at the results (the session may end first) */
 #define SD_UTURN_CAP 96                 /* points one U-turn arc may add */
 static double *s_ppx, *s_ppz, *s_pd;
 
@@ -903,18 +905,21 @@ void td5_roam_sprint_test_frame(void)
             break;
         }
         if (D.phase_frames == 60) sd_shot("6_results");
-        if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
-        if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
-        if (D.phase_frames >= 90) {
-            /* the leave is a fade-out (td5_game.c "Roam race results dismissed" log line) that ends the session
-             * after this verdict is read: judge it at the results, the session is still up here */
+        if (D.phase_frames == 74) {
+            /* the leave is a fade-out (td5_game.c "Roam race results dismissed" log line) that ends the session:
+             * judge it at the results, BEFORE the ENTER. [roam M] It was judged at frame 90, and a fade shorter
+             * than 15 frames (16-20 ms frames on the sprint-ai row) ended the session first: "never finished". */
             int nb = 0;
             td5_roam_barriers(&nb);
             D.exit_ok = td5_roam_active() && td5_roam_race_state() == TD5_RRACE_FINISHED;
+            s_res_snap = *td5_roam_race_result();
+            D.judged = 1;
             TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER pressed: race state %d, barriers %d -> %s",
                       td5_roam_race_state(), nb, D.exit_ok ? "leaving to the geo generator (see the game log)" : "NOT ON THE RESULTS");
-            sd_finish("finished", 0);
         }
+        if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
+        if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
+        if (D.phase_frames >= 90) sd_finish("finished", 0);
         break;
     default:
         break;
@@ -1306,7 +1311,8 @@ static int sd_circuit_verdict(char *note, size_t n, const char *bad, const TD5_R
 
 int td5_roam_sprint_test_verdict(char *note, size_t n)
 {
-    const TD5_RoamRaceResult *res = td5_roam_race_result();
+    /* [roam M] judged at the results: the snapshot (the session's end resets the live result) */
+    const TD5_RoamRaceResult *res = D.judged ? &s_res_snap : td5_roam_race_result();
     TD5_RoamRaceWallStats ws;
     TD5_RoamPhysStats st;
     char bad[240] = "", t[32];
@@ -1323,7 +1329,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     pinch = st.pinches - D.pinch0; resc = st.rescues + st.rescues_y - D.resc0; tele = st.teleports - D.tele0;
     for (i = 0; i < D.nwt; i++) blocked += D.wt[i].blocked;
 #define SD_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
-    if (!D.done || D.aborted || (!res->finished && !D.arrived)) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
+    if ((!D.done && !D.judged) || D.aborted || (!res->finished && !D.arrived)) SD_BAD("%s; ", D.why[0] ? D.why : "never finished");
     if (res->finished && !D.exit_ok) SD_BAD("results ENTER did not return to free roam; ");
     if (D.saved_hash != D.loaded_hash) SD_BAD("reload hash %08X != %08X; ", (unsigned)D.loaded_hash, (unsigned)D.saved_hash);
     if (D.nkeys < want_jn) SD_BAD("%d junctions < %d; ", D.nkeys, want_jn);

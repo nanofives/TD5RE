@@ -76,6 +76,7 @@ typedef struct {
     double stop_s;                               /* where a finished car stops            */
     double v_prev;                               /* [F8b] DEV: last tick's speed (impact log) */
     int    yield_slot;                           /* [F8c] traffic slot a cross-traffic conflict capped last tick (0 = none) */
+    int    queued;                               /* [roam M] held behind a (nearly) stopped TRAFFIC car in my lane this tick */
     TD5_LapTrack lt;                             /* [F9a] circuit: total distance + laps  */
     int    laps_done;
     /* persona */
@@ -924,7 +925,7 @@ static void ra_ring_dump(const RaCar *c, const TD5_Actor *now, double v_prev, do
 static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
 {
     double cap = 1e9;
-    int j, total = td5_game_get_total_actor_count(), ys = 0;
+    int j, total = td5_game_get_total_actor_count(), ys = 0, queued = 0;
     const double tx = A.tx[idx], tz = A.tz[idx], nx = A.nx[idx], nz = A.nz[idx];
     for (j = 0; j < total; j++) {
         const TD5_Actor *b;
@@ -965,6 +966,13 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
                 }
             }
         }
+        if (j >= g_traffic_slot_base && f > 0.5 && f < 15.0 && fabs(l - c->lat) <= 2.1 &&
+            fabs(((double)b->linear_velocity_x * tx + (double)b->linear_velocity_z * tz) / 256.0 * RA_HZ / RA_M) < 1.5)
+            queued = 1;                      /* [roam M] a stopped traffic car in my lane up to 15 m ahead: a queue */
+        else if (j > 0 && j < g_traffic_slot_base && f > 0.5 && f < 15.0 && fabs(l - c->lat) <= 2.1) {
+            int k;                           /* ... or a racer ahead that is itself queued (the queue goes on) */
+            for (k = 0; k < A.n; k++) if (A.car[k].slot == j && A.car[k].queued) queued = 1;
+        }
         if (f <= 0.5 || f > 6.0 + v * 1.2) continue;
         if (fabs(l - c->lat) > 2.1) continue;
         vb = ((double)b->linear_velocity_x * tx + (double)b->linear_velocity_z * tz) / 256.0 * RA_HZ / RA_M;
@@ -987,6 +995,7 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
         }
     }
     c->yield_slot = ys;
+    c->queued = queued;
     if (cap < 1e8) A.stats.follow_ticks++;
     return cap;
 }
@@ -1269,15 +1278,21 @@ void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int 
         v = sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) /
             256.0 * RA_HZ / RA_M;
         if (racing && !c->finished) {
-            if (v < RA_STILL_MS) {
+            /* [roam M] waiting in the queue behind a traffic car at its red light (a narrow street: no room to pass) is
+             * not stuck: those ticks do not count (roam-sprint-ai: 15.3 s behind traffic 17 at a red, 75 m from the line).
+             * A racer held by another RACER still counts: the one in front is the stuck one. */
+            if (v < RA_STILL_MS && c->queued) {
+                c->still_t = 0;
+            } else if (v < RA_STILL_MS) {
                 c->still_t++;
                 if (c->still_t == RA_STUCK_LONG + 1) {
                     A.stats.stuck_long++;
                     TD5_LOG_W(LOG_TAG, "ROAM_AI: slot %d STUCK > 5 s at %.0f m along (lat %.1f m) place (%.0f,%.0f)", c->slot, c->along, lat_m, x, z);
 #ifndef TD5RE_RELEASE
-                    {   /* DEV: who is next to it */
+                    {   /* DEV: who is next to it (racers and traffic) */
                         int s2;
-                        for (s2 = 0; s2 < 6; s2++) {
+                        const int ntot = td5_game_get_total_actor_count();
+                        for (s2 = 0; s2 < ntot; s2++) {
                             double ox, oz;
                             const TD5_Actor *oa = td5_game_get_actor(s2);
                             if (s2 == c->slot || !oa || !ra_place_of(oa, &ox, &oz)) continue;
