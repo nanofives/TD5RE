@@ -69,7 +69,7 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    5u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    6u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
                                      * ROW_COVERED pins at H_c
                                      * 3: F1-T10 height coupling of overlapping ribbons,
@@ -83,7 +83,10 @@
                                      * and 2-3 vertex sliver tips are dropped
                                      * 5: roam M, the geographic -> game reflection: every
                                      * source coordinate enters as x = -east (td5_geo_frame.h),
-                                     * lattice TD5ROAMGRID2 at +42.13 deg */
+                                     * lattice TD5ROAMGRID2 at +42.13 deg
+                                     * 6: roam M, acute union wedges (a diagonal meeting an
+                                     * avenue / a street) cut back to 2 m across: paving,
+                                     * not an island spike into the junction (u_notch_fill) */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */

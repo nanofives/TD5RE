@@ -234,6 +234,8 @@ typedef struct {
     int    hole_fillet_loops;    /* [F2-E] union hole loops (islands) whose corners got fillets */
     int    earclip_u_rescued;    /* [F2-E] NORMAL outlines the first-ear clipper left, cut by ear_clip_u */
     int    union_sliver_tips;    /* [F2-E] union sliver tips drawn as 2-3 vertices, dropped */
+    int    union_notch_fills;    /* [roam M] acute wedge tips cut back to the notch width (u_notch_fill) */
+    int    gore_trims;           /* [roam M] NORMAL-mode cuts moved out to an acute gore's 2 m width */
     int    seam_corner_dropped;  /* [F2-E] near-straight seam vertices dropped beside a block corner */
     int    fillet_tiny;          /* [F2-E] union block corners (>= 30 deg) left with a fillet under 1 m */
     int    tri_splits, patch_tris, patch_verts, recipe_overflow;
