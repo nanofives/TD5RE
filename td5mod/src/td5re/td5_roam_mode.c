@@ -24,6 +24,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_geo.h"
+#include "td5_geo_frame.h"      /* [roam M] the geographic -> game reflection */
 #include "td5_fp.h"
 #include "td5re.h"
 #include "td5_types.h"
@@ -162,7 +163,8 @@ int td5_roam_latlon_to_place(const char *slug, double lat, double lon, int32_t *
     if (!slug || !px || !pz || !roam_proj_load(slug, &p)) return 0;
     e = (lon - p.lon0) * p.mdlon;
     n = (lat - p.lat0) * p.mdlat;
-    *px = (int32_t)floor((e * p.cs - n * p.sn) * p.upm + p.offx + 0.5);
+    /* [roam M] the SOURCE projection, then the reflection into the game frame (td5_geo_frame.h) */
+    *px = (int32_t)floor(td5_geo_game_x((e * p.cs - n * p.sn) * p.upm + p.offx) + 0.5);
     *pz = (int32_t)floor((e * p.sn + n * p.cs) * p.upm + p.offz + 0.5);
     return 1;
 }
@@ -173,7 +175,7 @@ int td5_roam_place_to_latlon(const char *slug, double px, double pz, double *lat
     RoamProj p;
     double x, z, e, n;
     if (!slug || !lat || !lon || !roam_proj_load(slug, &p)) return 0;
-    x = (px - p.offx) / p.upm;
+    x = (td5_geo_game_x(px) - p.offx) / p.upm;     /* [roam M] game frame -> source frame */
     z = (pz - p.offz) / p.upm;
     e = x * p.cs + z * p.sn;
     n = -x * p.sn + z * p.cs;

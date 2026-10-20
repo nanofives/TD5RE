@@ -58,6 +58,7 @@
 #include "td5_geo_signals.h"
 #include "td5_geo_sidewalk.h"    /* [1011 C2] the per-place carriageway    */
 #include "td5_roam_height.h"     /* [ROAM F1-T2] dev-only height cross-check */
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "geo"
@@ -277,6 +278,7 @@ typedef struct {
     double m_per_deg_lat, m_per_deg_lon;
     double cos_t, sin_t;
     double off_x, off_z;
+    int    reflect;     /* [roam M] 1 = a GAME frame: east reflected before the rotation (td5_geo_frame.h) */
 } GeoProj;
 
 static void gr_proj_init(GeoProj *p, double lat0, double lon0, double upm)
@@ -294,10 +296,25 @@ static void gr_proj_init(GeoProj *p, double lat0, double lon0, double upm)
     p->sin_t = 0.0;
 }
 
+/* [roam M] Mark a projection as a GAME frame (td5_geo_frame.h: x = -east before rotation / offset).
+ * Every ROUTE frame the conditioner makes is one; a fetched place's own projection (the SOURCE frame
+ * the router walks) is not. Serialised as "reflect_x" in the projection block. */
+static void gr_proj_reflect(GeoProj *p, int on)
+{
+    p->reflect = on ? 1 : 0;
+}
+
 static void gr_proj_rot(GeoProj *p, double theta)
 {
     p->cos_t = cos(theta);
     p->sin_t = sin(theta);
+}
+
+/* the "reflect_x" flag of a projection block */
+static int gr_json_reflect(const cJSON *pr)
+{
+    const cJSON *rf = pr ? cJSON_GetObjectItem(pr, TD5_GEO_PROJ_REFLECT_KEY) : NULL;
+    return cJSON_IsNumber(rf) && rf->valueint != 0;
 }
 
 static double gr_proj_theta(const GeoProj *p)
@@ -314,7 +331,8 @@ static void gr_proj_off(GeoProj *p, double dx, double dz)
 static void gr_proj_to_world(const GeoProj *p, double lat, double lon,
                              double *x, double *z)
 {
-    const double e = (lon - p->lon0) * p->m_per_deg_lon;
+    const double e0 = (lon - p->lon0) * p->m_per_deg_lon;
+    const double e = p->reflect ? td5_geo_game_x(e0) : e0;
     const double n = (lat - p->lat0) * p->m_per_deg_lat;
     *x = (e * p->cos_t - n * p->sin_t) * p->upm + p->off_x;
     *z = (e * p->sin_t + n * p->cos_t) * p->upm + p->off_z;
@@ -325,7 +343,8 @@ static void gr_proj_to_latlon(const GeoProj *p, double x, double z,
 {
     const double xm = (x - p->off_x) / p->upm;
     const double zm = (z - p->off_z) / p->upm;
-    const double e  =  xm * p->cos_t + zm * p->sin_t;
+    const double er =  xm * p->cos_t + zm * p->sin_t;
+    const double e  = p->reflect ? td5_geo_game_x(er) : er;
     const double n  = -xm * p->sin_t + zm * p->cos_t;
     *lat = p->lat0 + n / p->m_per_deg_lat;
     *lon = p->lon0 + e / p->m_per_deg_lon;
@@ -580,6 +599,7 @@ static int gr_place_read(const char *slug)
             gr_proj_rot(&s_g.proj, cJSON_IsNumber(r) ? r->valuedouble : 0.0);
             gr_proj_off(&s_g.proj, cJSON_IsNumber(ox) ? ox->valuedouble : 0.0,
                                    cJSON_IsNumber(oz) ? oz->valuedouble : 0.0);
+            gr_proj_reflect(&s_g.proj, gr_json_reflect(pr));
             ok = 1;
         }
     }
@@ -1931,6 +1951,7 @@ static int gr_condition(const TD5_GeoLatLon *ll, const int *lanes_in,
     for (i = 0; i < n_in; i++) { lat0 += ll[i].lat; lon0 += ll[i].lon; }
     lat0 /= (double)n_in; lon0 /= (double)n_in;
     gr_proj_init(&proj, lat0, lon0, upm);
+    gr_proj_reflect(&proj, 1);   /* [roam M] the route frame is a GAME frame (td5_geo_frame.h) */
     for (i = 0; i < n_in; i++) {
         double x, z;
         gr_proj_to_world(&proj, ll[i].lat, ll[i].lon, &x, &z);   /* rotation identity */
@@ -4600,6 +4621,7 @@ static cJSON *gr_json_proj(const GeoProj *p)
     cJSON_AddNumberToObject(o, "rotation_rad", gr_proj_theta(p));
     cJSON_AddNumberToObject(o, "offset_x", p->off_x);
     cJSON_AddNumberToObject(o, "offset_z", p->off_z);
+    if (p->reflect) cJSON_AddNumberToObject(o, TD5_GEO_PROJ_REFLECT_KEY, 1);
     return o;
 }
 
@@ -4762,7 +4784,10 @@ static int gr_write_avenues(const char *dir)
         cJSON_AddStringToObject(e, "name", m->name);
         cJSON_AddNumberToObject(e, "s0", s_last.av_s0[i]);
         cJSON_AddNumberToObject(e, "s1", s_last.av_s1[i]);
-        cJSON_AddNumberToObject(e, "side", m->side);
+        /* [roam M] side and off were MEASURED in the SOURCE frame (the router's, x = east), "+ = left
+         * of travel" by (tz, -tx). The route frame is a GAME frame (td5_geo_frame.h): a reflection
+         * swaps left and right, so both signs cross over with TD5_GEO_GAME_X_SIGN. */
+        cJSON_AddNumberToObject(e, "side", (int)TD5_GEO_GAME_X_SIGN * m->side);
         cJSON_AddNumberToObject(e, "gap_m", m->gap_m);
         cJSON_AddNumberToObject(e, "gap_min_m", m->gap_min_m);
         cJSON_AddNumberToObject(e, "gap_max_m", m->gap_max_m);
@@ -4776,7 +4801,7 @@ static int gr_write_avenues(const char *dir)
             if (g->av != i) continue;
             r = cJSON_CreateObject();
             cJSON_AddNumberToObject(r, "s", g->span);
-            cJSON_AddNumberToObject(r, "off", g->off);
+            cJSON_AddNumberToObject(r, "off", TD5_GEO_GAME_X_SIGN * g->off);
             cJSON_AddNumberToObject(r, "lanes", g->lanes);
             cJSON_AddNumberToObject(r, "open", g->open);
             cJSON_AddItemToArray(sp, r);
@@ -5185,6 +5210,29 @@ int gr_raster_read_window(const char *path, double wx0, double wz0,
         }
     }
     td5_plat_file_close(f);
+    return 1;
+}
+
+int gr_raster_read_window_game(const char *path, double wx0, double wz0,
+                               double wx1, double wz1, int pad, GrRaster *out)
+{
+    int i, j;
+    if (!gr_raster_read_window(path, td5_geo_game_x(wx1), wz0, td5_geo_game_x(wx0), wz1, pad, out))
+        return 0;
+    if (out->w > 0 && out->h > 0) {
+        const size_t esz = out->kind == 1 ? 2u : 1u;
+        unsigned char *d = (unsigned char *)out->data, t[2];
+        for (j = 0; j < out->h; j++) {
+            unsigned char *row = d + (size_t)j * (size_t)out->w * esz;
+            for (i = 0; i < out->w / 2; i++) {
+                unsigned char *a = row + (size_t)i * esz, *b = row + (size_t)(out->w - 1 - i) * esz;
+                memcpy(t, a, esz); memcpy(a, b, esz); memcpy(b, t, esz);
+            }
+        }
+    }
+    /* source cell i sits at x = o + i*cell, game x = -(o + i*cell); reversed, cell i' = w-1-i
+     * sits at game x = -(o + (w-1)*cell) + i'*cell */
+    out->origin_x = td5_geo_game_x(out->origin_x + (double)(out->w > 0 ? out->w - 1 : 0) * out->cell);
     return 1;
 }
 
@@ -5622,11 +5670,12 @@ static int gr_commit_refuse(const char *fmt, ...)
  * than like stale data.
  *
  * So the stamp carries a VERSION, and a place whose derived frame is older is
- * repaired on load. The repair is NOT a re-commit: it needs no router, no
- * waypoints and no guards, because reprojecting a vector layer is a pure rigid
- * transform between two frames that are both written down -- the SOURCE
- * PLACE.JSON's and the derived PLACE.JSON's. It reads the pristine source and
- * rewrites only the layers this round changed.
+ * repaired on load. Schema 2 repaired two layers by a rigid reprojection.
+ * [roam M] Schema 3 changes the frame ITSELF (the geographic -> game
+ * reflection, td5_geo_frame.h), which moves every layer, the route nodes and
+ * the avenue sides, so the repair is now a RE-COMMIT of the route from its own
+ * committed waypoints (ROUTE_RAW.JSON): what BUILD TRACK does, with no user
+ * input and no network (the router reads the pristine source).
  *
  * IF THE REPAIR FAILS, THE STAMP IS DELETED. That makes the resolver fall back
  * to the SOURCE frame for the WHOLE place, which is self-consistent and
@@ -5634,41 +5683,7 @@ static int gr_commit_refuse(const char *fmt, ...)
  * frame in place would be the mixing bug again, which is the one outcome worth
  * losing a BUILD to avoid.
  */
-#define GR_DERIVED_SCHEMA 2
-
-/* The `projection` block of any PLACE.JSON, by path. gr_place_read does this
- * for the SOURCE copy into s_g; this one answers about an arbitrary file and
- * touches no global, because the migration needs BOTH frames at once. */
-static int gr_proj_from_place_file(const char *path, GeoProj *out)
-{
-    char *json = gr_slurp(path, NULL);
-    cJSON *root, *pr;
-    int ok = 0;
-
-    if (!json) return 0;
-    root = cJSON_Parse(json);
-    free(json);
-    if (!root) return 0;
-    pr = cJSON_GetObjectItem(root, "projection");
-    if (pr && cJSON_IsObject(pr)) {
-        const cJSON *a  = cJSON_GetObjectItem(pr, "lat0");
-        const cJSON *o  = cJSON_GetObjectItem(pr, "lon0");
-        const cJSON *u  = cJSON_GetObjectItem(pr, "units_per_metre");
-        const cJSON *r  = cJSON_GetObjectItem(pr, "rotation_rad");
-        const cJSON *ox = cJSON_GetObjectItem(pr, "offset_x");
-        const cJSON *oz = cJSON_GetObjectItem(pr, "offset_z");
-        if (cJSON_IsNumber(a) && cJSON_IsNumber(o)) {
-            gr_proj_init(out, a->valuedouble, o->valuedouble,
-                         cJSON_IsNumber(u) ? u->valuedouble : GR_UNITS_PER_METRE);
-            gr_proj_rot(out, cJSON_IsNumber(r) ? r->valuedouble : 0.0);
-            gr_proj_off(out, cJSON_IsNumber(ox) ? ox->valuedouble : 0.0,
-                             cJSON_IsNumber(oz) ? oz->valuedouble : 0.0);
-            ok = 1;
-        }
-    }
-    cJSON_Delete(root);
-    return ok;
-}
+#define GR_DERIVED_SCHEMA 3   /* [roam M] 3 = the route frame is a GAME frame (reflect_x) */
 
 /* The schema a derived frame was written at. 0 = there is no derived frame;
  * 1 = one written before the stamp carried a version. */
@@ -5691,19 +5706,56 @@ static int gr_derived_schema_of(const char *dst_dir)
     return v;
 }
 
+/* [roam M] Schema 3 = the route frame is a GAME frame (td5_geo_frame.h, "reflect_x" in the
+ * projection). A frame written before (schema 1 or 2) is UNREFLECTED: La Plata drawn mirrored. That
+ * is not a layer-by-layer repair (every layer, the route nodes and the avenue sides all move), so the
+ * route is BUILT AGAIN from its own committed waypoints (ROUTE_RAW.JSON), exactly as BUILD TRACK
+ * would, and committed. The router walks the pristine SOURCE, so no network and no user input. */
+static int gr_derived_recommit(const char *slug, const char *dst_dir)
+{
+    char path[512];
+    char *json;
+    cJSON *root, *wp, *it;
+    TD5_GeoLatLon pts[GR_MAX_WAYPOINTS];
+    TD5_GeoRouteResult res;
+    int n = 0;
+
+    snprintf(path, sizeof path, "%s/ROUTE_RAW.JSON", dst_dir);
+    json = gr_slurp(path, NULL);
+    root = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    wp = root ? cJSON_GetObjectItem(root, "waypoints") : NULL;
+    cJSON_ArrayForEach(it, wp) {
+        const cJSON *a = cJSON_GetArrayItem(it, 0), *o = cJSON_GetArrayItem(it, 1);
+        if (n >= GR_MAX_WAYPOINTS || !cJSON_IsNumber(a) || !cJSON_IsNumber(o)) continue;
+        pts[n].lat = a->valuedouble;
+        pts[n].lon = o->valuedouble;
+        n++;
+    }
+    cJSON_Delete(root);
+    if (n < 2) {
+        TD5_LOG_E(LOG_TAG, "geo route: %s: no committed waypoints in %s to rebuild from", slug, path);
+        return 0;
+    }
+    memset(&res, 0, sizeof res);
+    if (td5_geo_route_build(pts, n, &res) != 0 || res.verdict != TD5_GEO_ROUTE_OK) {
+        TD5_LOG_E(LOG_TAG, "geo route: %s: the %d committed waypoint(s) no longer route (verdict %d)",
+                  slug, n, (int)res.verdict);
+        return 0;
+    }
+    if (td5_geo_route_commit() != 0) {
+        TD5_LOG_E(LOG_TAG, "geo route: %s: rebuild commit refused: %s", slug, s_commit_reason);
+        return 0;
+    }
+    TD5_LOG_I(LOG_TAG, "geo route: %s rebuilt in the game frame from %d committed waypoint(s), %d span(s)",
+              slug, n, res.spans);
+    return 1;
+}
+
 int td5_geo_derived_migrate(const char *slug)
 {
-    static const struct { const char *file; const char *key; const char *key2; }
-    k_fix[] = {
-        /* Exactly the layers round 1011 C4 changed. ROADS/BUILDINGS/AREAS
-         * were always reprojected correctly and are left alone, so a repair
-         * cannot disturb geometry that was already right. */
-        { "SIGNALS.JSON",  "signals",  "nodes" },
-        { "FOOTWAYS.JSON", "footways", NULL    },
-    };
     char src_dir[256], dst_dir[300], path[512];
-    GeoProj oldp, newp;
-    int have_schema, i, wrote = 0, failed = 0;
+    int have_schema;
 
     if (!slug || !slug[0]) return 0;
 
@@ -5718,73 +5770,18 @@ int td5_geo_derived_migrate(const char *slug)
     if (have_schema == 0)                   return 0;  /* races off SOURCE */
     if (have_schema >= GR_DERIVED_SCHEMA)   return 0;  /* already current  */
 
-    TD5_LOG_W(LOG_TAG, "geo route: %s has a derived frame at schema %d "
-              "(current %d) -- it was BUILT before the SIGNALS.JSON nodes[] "
-              "reprojection fix, so its crossings and bus stops are in the "
-              "SOURCE frame and it has no mapped pavements. Repairing it in "
-              "place from the pristine source; no re-route is needed because "
-              "the two frames are both recorded.",
-              slug, have_schema, GR_DERIVED_SCHEMA);
+    TD5_LOG_W(LOG_TAG, "geo route: %s has a derived frame at schema %d (current %d) -- it was BUILT "
+              "before the geographic -> game reflection (roam M), so the place is drawn MIRRORED. "
+              "Rebuilding the committed route in the game frame.", slug, have_schema, GR_DERIVED_SCHEMA);
+    if (gr_derived_recommit(slug, dst_dir)) return 1;
 
-    snprintf(path, sizeof path, "%s/PLACE.JSON", src_dir);
-    if (!gr_proj_from_place_file(path, &oldp)) failed = 1;
-    snprintf(path, sizeof path, "%s/PLACE.JSON", dst_dir);
-    if (!failed && !gr_proj_from_place_file(path, &newp)) failed = 1;
-
-    for (i = 0; !failed && i < (int)(sizeof k_fix / sizeof k_fix[0]); i++) {
-        int n = -1;
-        cJSON *tree = gr_reproject_mem(src_dir, k_fix[i].file, k_fix[i].key,
-                                       k_fix[i].key2, &newp, &oldp, &n, NULL, 0);
-        if (!tree) {
-            /* Absent in the SOURCE too is fine and expected: a cache fetched
-             * before tag_schema 3 has no FOOTWAYS.JSON to carry over, and the
-             * readers treat that as "this place has none". */
-            if (n < 0) continue;
-            failed = 1;
-            break;
-        }
-        snprintf(path, sizeof path, "%s/%s", dst_dir, k_fix[i].file);
-        /* COMPACT: a reprojected vector layer is a machine-only derived copy.
-         * See gr_write_json_ex. */
-        if (!gr_write_json_ex(path, tree, 0)) { failed = 1; break; }  /* consumes */
-        wrote++;
-        TD5_LOG_I(LOG_TAG, "geo route:   repaired %s (%d entries) into the "
-                  "route frame", k_fix[i].file, n);
-    }
-
+    /* NEVER leave an unreflected frame behind a current stamp: dropping the stamp sends the
+     * resolver back to the SOURCE for the whole place, which is self-consistent. */
     snprintf(path, sizeof path, "%s/%s", dst_dir, TD5_GEO_DERIVED_STAMP);
-    if (failed) {
-        /* NEVER leave a half-repaired derived frame: dropping the stamp sends
-         * the resolver back to the SOURCE frame for the whole place, which is
-         * self-consistent. The user loses the built route frame and is told
-         * to press BUILD, which is a far better outcome than a race whose
-         * street furniture is in a different coordinate system from its
-         * roads. */
-        td5_plat_file_delete(path);
-        TD5_LOG_E(LOG_TAG, "geo route: could not repair %s's derived frame. "
-                  "Dropped %s so the place races off its PRISTINE SOURCE "
-                  "rather than a half-converted frame -- press BUILD TRACK in "
-                  "the GEOSPATIAL TRACK GENERATOR to rebuild it.",
-                  slug, TD5_GEO_DERIVED_STAMP);
-        return -1;
-    }
-    {
-        char stamp[64];
-        const int len = snprintf(stamp, sizeof stamp,
-                                 "td5_geo_route.c\nschema=%d\n",
-                                 GR_DERIVED_SCHEMA);
-        if (!gr_write_atomic(path, stamp, (size_t)len)) {
-            TD5_LOG_W(LOG_TAG, "geo route: repaired %s but could not update "
-                      "the stamp; it will be repaired again next load "
-                      "(the repair is idempotent)", slug);
-            return 1;
-        }
-    }
-    TD5_LOG_I(LOG_TAG, "geo route: %s derived frame repaired to schema %d "
-              "(%d layer(s) rewritten). Crossings, bus stops and mapped "
-              "pavements are now in the same frame as the roads.",
-              slug, GR_DERIVED_SCHEMA, wrote);
-    return 1;
+    td5_plat_file_delete(path);
+    TD5_LOG_E(LOG_TAG, "geo route: could not rebuild %s's derived frame. Dropped %s -- press BUILD "
+              "TRACK in the GEOSPATIAL TRACK GENERATOR to rebuild it.", slug, TD5_GEO_DERIVED_STAMP);
+    return -1;
 }
 
 /* [ROUND 1013 F1] THE VECTOR LAYERS BELONG TO THE FRAME THE COMMIT JUST

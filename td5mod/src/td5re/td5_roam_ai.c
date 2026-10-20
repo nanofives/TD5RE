@@ -445,7 +445,9 @@ ctrl_done:
         free(rx); free(rz);
     }
     free(cx); free(cz); free(cs);
-    /* 7. tangents + right normals (yaw convention: forward (sin y, cos y), right (cos y, -sin y)) */
+    /* 7. tangents + side normals (yaw convention: forward (sin y, cos y), n = (cos y, -sin y)). [roam M] n is
+     * the math right (x right, z up), which the engine draws as the driver's LEFT (td5_geo_frame.h); only the
+     * signs inside this file use it (path offset, overtaking side), so it is left as it was. */
     for (i = 0; i < A.np; i++) {
         const int a0 = i > 0 ? i - 1 : 0, a1 = i + 1 < A.np ? i + 1 : A.np - 1;
         double dx = A.px[a1] - A.px[a0], dz = A.pz[a1] - A.pz[a0], dl = sqrt(dx * dx + dz * dz);

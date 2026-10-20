@@ -32,7 +32,8 @@
 #include "td5_geo_landmarks.h"   /* td5_geolm_apron (pure hull)                */
 #include "td5_geo_footways.h"
 #include "td5_geo_roads.h"       /* TD5_GEO_RC_*                                */
-#include "td5_geo_route.h"       /* GrRaster, gr_raster_read_window              */
+#include "td5_geo_route.h"       /* GrRaster, gr_raster_read_window_game         */
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection    */
 #include "td5_geo_sidewalk.h"    /* [F4b] td5_geo_sw_resolve                     */
 #include "td5_config.h"
 #include "td5_platform.h"
@@ -336,6 +337,7 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
     root = cJSON_Parse(json);
     free(json);
     if (!root) return 1;
+    td5_geo_src_json_to_game(root);          /* [roam M] source frame -> game frame */
     if (layer == SC_L_BLD) storey_m = td5_geob_storey_m_of(root);
     c->storey_m = storey_m;
     arr = cJSON_GetObjectItem(root, k_sc_key[layer]);
@@ -503,6 +505,7 @@ static int sc_index_load(TD5_RoamScnSource *s)
             int k;
             for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
             if (k < 7) continue;
+            td5_geo_src_bbox_to_game(&v[3], &v[5]);   /* [roam M] the extent in the game frame */
             s->rows[l][n].ix = (int)v[0]; s->rows[l][n].iz = (int)v[1];
             s->rows[l][n].x0 = v[3]; s->rows[l][n].z0 = v[4];
             s->rows[l][n].x1 = v[5]; s->rows[l][n].z1 = v[6];
@@ -2299,6 +2302,7 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
             int k;
             for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
             if (k < 7) continue;
+            td5_geo_src_bbox_to_game(&v[3], &v[5]);   /* [roam M] the extent in the game frame */
             p->rows[p->nrows].ix = (int)v[0]; p->rows[p->nrows].iz = (int)v[1];
             p->rows[p->nrows].x0 = v[3]; p->rows[p->nrows].z0 = v[4];
             p->rows[p->nrows].x1 = v[5]; p->rows[p->nrows].z1 = v[6];
@@ -2353,6 +2357,7 @@ static void pv_file_load(TD5_RoamScnSource *s, PvFile *f, int ix, int iz)
     root = cJSON_Parse(json);
     free(json);
     if (!root) return;
+    td5_geo_src_json_to_game(root);          /* [roam M] source frame -> game frame */
     arr = cJSON_GetObjectItem(root, "roads");
     cap = arr ? cJSON_GetArraySize(arr) : 0;
     px = (double *)malloc(TD5_GEO_ROADS_WAY_POINTS_MAX * 2 * sizeof(double));
@@ -4441,10 +4446,10 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         double h;
         if (td5_roam_height_sample(hc, 0.5 * (x0 + x1), 0.5 * (z0 + z1), &h, NULL)) c->ground_last = h;
     }
-    if (gr_raster_read_window(s->canopy_path, x0 - halo, z0 - halo, x1 + halo, z1 + halo, 2, &c->canopy))
+    if (gr_raster_read_window_game(s->canopy_path, x0 - halo, z0 - halo, x1 + halo, z1 + halo, 2, &c->canopy))
         c->canopy_ok = c->canopy.kind == 2 && c->canopy.data != NULL;
     c->cover_ok = 0;                          /* [HD] the lots' built-up test: the tile box only */
-    if (gr_raster_read_window(s->cover_path, x0, z0, x1, z1, 2, &c->cover))
+    if (gr_raster_read_window_game(s->cover_path, x0, z0, x1, z1, 2, &c->cover))
         c->cover_ok = c->cover.kind == 2 && c->cover.data != NULL;
     /* OSM sources: the cache tiles that can hold a record owned by the 3x3 (extents
      * cover whole records, so the tile box + one tile each side is exact) */

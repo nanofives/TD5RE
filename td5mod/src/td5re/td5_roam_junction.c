@@ -53,6 +53,7 @@
 #include "td5_roam_cache.h"
 #include "td5_roam_world.h"
 #include "td5_roam_junction.h"
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -3440,10 +3441,10 @@ int td5_roam_junction_build(TD5_RoamGraph *g)
 
 /* F0a's casco polygon (world frame), the same quad as td5_roam_cache.c. */
 static const double k_casco[4][2] = {
-    { 1078705.99,        5374175.73 },
-    { 2582491.695195345, 7019045.535332896 },
-    { 4255470.01,        5615132.29 },
-    { 2731713.44,        3880755.48 },
+    { -1078705.99,        5374175.73 },     /* [roam M] game frame: x = -east */
+    { -2582491.695195345, 7019045.535332896 },
+    { -4255470.01,        5615132.29 },
+    { -2731713.44,        3880755.48 },
 };
 
 static int casco_pip(double x, double z)
@@ -3487,6 +3488,7 @@ static double *load_signals(const char *slug, const double win[4], int *n_out)
         cJSON *doc, *arr, *s;
         for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
         if (k < 7) continue;
+        td5_geo_src_bbox_to_game(&v[3], &v[5]);   /* [roam M] the extent in the game frame */
         if (v[5] < win[0] || v[3] > win[2] || v[6] < win[1] || v[4] > win[3]) continue;
         snprintf(rel, sizeof rel, "tiles/SIGNALS_%d_%d.JSON", (int)v[0], (int)v[1]);
         td5_geo_source_path(p2, sizeof p2, slug, rel);
@@ -3495,6 +3497,7 @@ static double *load_signals(const char *slug, const double win[4], int *n_out)
         doc = cJSON_Parse(body);
         free(body);
         if (!doc) continue;
+        td5_geo_src_json_to_game(doc);            /* [roam M] source frame -> game frame */
         arr = cJSON_GetObjectItem(doc, "signals");
         for (s = arr ? arr->child : NULL; s; s = s->next) {
             const cJSON *x = cJSON_GetObjectItem(s, "x"), *z = cJSON_GetObjectItem(s, "z");

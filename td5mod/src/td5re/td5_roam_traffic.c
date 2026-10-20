@@ -308,14 +308,16 @@ static void rt_poly_at(const TD5_RouteGEdge *E, double a, double *x, double *z, 
     if (seg) *seg = lo;
 }
 
-/* the point s units along TRAVEL on edge E, offset `off` units to the right of travel */
+/* the point s units along TRAVEL on edge E, offset `off` units to the right of travel. [roam M] The place
+ * frame is the GAME frame (td5_geo_frame.h: x = -east), where the driver's right of a heading (ux, uz) is
+ * (-uz, ux), on screen and on the real map alike, so traffic keeps to the real right (Argentina). */
 static void rt_edge_pt(const TD5_RouteGEdge *E, int d, double s, double off, double *x, double *z, double *tx, double *tz)
 {
     double px, pz, ux, uz;
     rt_poly_at(E, d == 0 ? s : E->plen - s, &px, &pz, &ux, &uz, NULL);
     if (d) { ux = -ux; uz = -uz; }
-    *x = px + uz * off;
-    *z = pz - ux * off;
+    *x = px - uz * off;
+    *z = pz + ux * off;
     if (tx) { *tx = ux; *tz = uz; }
 }
 
@@ -342,7 +344,7 @@ static double rt_edge_proj(const TD5_RouteGEdge *E, int d, double hint, double p
             best = dd;
             bs = d == 0 ? a : E->plen - a;
             if (d) { tx = -tx; tz = -tz; }
-            blat = (px - qx) * tz - (pz - qz) * tx;      /* right = (tz, -tx) */
+            blat = (pz - qz) * tx - (px - qx) * tz;      /* right = (-tz, tx), game frame */
         }
     }
     if (lat) *lat = blat;
@@ -504,9 +506,9 @@ static void rt_plan_next(RtCar *c)
         rt_edge_pt(&F, d2, 0.0, 0.0, &sx, &sz, &tx, &tz);
         cr = etx * tz - etz * tx;
         dt = etx * tx + etz * tz;
-        ang = atan2(cr, dt);                     /* < 0 = a right turn (x east, z north) */
+        ang = atan2(cr, dt);                     /* > 0 = a right turn (game frame, td5_geo_frame.h) */
         cand_e[nc] = e2; cand_d[nc] = d2;
-        cand_turn[nc] = fabs(ang) < 0.55 ? 0 : (ang < 0.0 ? 1 : -1);
+        cand_turn[nc] = fabs(ang) < 0.55 ? 0 : (ang > 0.0 ? 1 : -1);
         w[nc] = cand_turn[nc] == 0 ? 4.0 : (cand_turn[nc] > 0 ? 2.0 : 1.5);
         if (fabs(ang) > 2.4) w[nc] = 0.25;       /* a hairpin: rare */
         if (F.klass <= 2) w[nc] *= 0.35;         /* service / living streets: rarely */

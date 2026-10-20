@@ -46,6 +46,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_geo.h"
+#include "td5_geo_frame.h"    /* [roam M] the geographic -> game reflection */
 #include "td5_render.h"
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
@@ -67,7 +68,10 @@
 #define RV_WGS_F        (1.0 / 298.257223563)
 #define RV_RAD          0.017453292519943295
 
-typedef struct { double lat0, lon0, upm, mdlat, mdlon, cs, sn, offx, offz; } RvProj;
+/* [roam M] reflect: a route frame whose projection carries "reflect_x" (east reflected before the
+ * rotation). The ROAM place frame is the SOURCE projection followed by the reflection
+ * (td5_geo_frame.h), which rv_place_to_route / rv_route_to_place apply on the place side. */
+typedef struct { double lat0, lon0, upm, mdlat, mdlon, cs, sn, offx, offz; int reflect; } RvProj;
 
 typedef struct {
     int       used, ok;
@@ -137,6 +141,10 @@ static int rv_proj_load(const char *path, RvProj *p)
             p->sn   = sin(rot);
             p->offx = cJSON_IsNumber(ox) ? ox->valuedouble : 0.0;
             p->offz = cJSON_IsNumber(oz) ? oz->valuedouble : 0.0;
+            {
+                const cJSON *rf = cJSON_GetObjectItem(pr, TD5_GEO_PROJ_REFLECT_KEY);
+                p->reflect = cJSON_IsNumber(rf) && rf->valueint != 0;
+            }
             e2  = RV_WGS_F * (2.0 - RV_WGS_F);
             phi = p->lat0 * RV_RAD;
             s   = sin(phi);
@@ -156,12 +164,13 @@ static int rv_proj_load(const char *path, RvProj *p)
 static void rv_place_to_route(const RvProj *np, const RvProj *op,
                               double xs, double zs, double *xr, double *zr)
 {
-    const double dx = xs - op->offx, dz = zs - op->offz;
+    const double dx = td5_geo_game_x(xs) - op->offx, dz = zs - op->offz;
     const double e2 = (dx * op->cs + dz * op->sn) / op->upm;
     const double n2 = (-dx * op->sn + dz * op->cs) / op->upm;
     const double lon = op->lon0 + e2 / op->mdlon;
     const double lat = op->lat0 + n2 / op->mdlat;
-    const double e = (lon - np->lon0) * np->mdlon;
+    const double e0 = (lon - np->lon0) * np->mdlon;
+    const double e = np->reflect ? td5_geo_game_x(e0) : e0;
     const double n = (lat - np->lat0) * np->mdlat;
     const double xm = e * np->cs - n * np->sn;
     const double zm = e * np->sn + n * np->cs;
@@ -175,13 +184,14 @@ static void rv_route_to_place(const RvProj *np, const RvProj *op,
 {
     const double xm = (xr - np->offx) / np->upm;
     const double zm = (zr - np->offz) / np->upm;
-    const double e  = xm * np->cs + zm * np->sn;
+    const double er = xm * np->cs + zm * np->sn;
+    const double e  = np->reflect ? td5_geo_game_x(er) : er;
     const double n  = -xm * np->sn + zm * np->cs;
     const double lat = np->lat0 + n / np->mdlat;
     const double lon = np->lon0 + e / np->mdlon;
     const double e2 = (lon - op->lon0) * op->mdlon;
     const double n2 = (lat - op->lat0) * op->mdlat;
-    *xs = (e2 * op->cs - n2 * op->sn) * op->upm + op->offx;
+    *xs = td5_geo_game_x((e2 * op->cs - n2 * op->sn) * op->upm + op->offx);
     *zs = (e2 * op->sn + n2 * op->cs) * op->upm + op->offz;
 }
 

@@ -32,6 +32,7 @@
 #include "td5_roam_junction.h"
 #include "td5_roam_ribbon.h"
 #include "td5_roam_tile.h"
+#include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -114,15 +115,20 @@ void roam_grid_origin(const RoamGrid *g, int tx, int tz, int32_t *ox, int32_t *o
     *oz = td5_roam_quant(c[0][1]);
 }
 
+/* [roam M] The casco axes run at -42.13 deg in the SOURCE frame (x = east); the game frame reflects
+ * x (td5_geo_frame.h), which turns them to +42.13 deg. The reflected lattice covers exactly the same
+ * squares on the ground: u' = -u, v' = v, so tile (tx, tz) is now (-tx - 1, tz). */
+#define ROAM_GRID_ANGLE_DEG 42.13
+
 void roam_grid_default(const char *place, RoamGrid *g)
 {
     const double pi = 3.14159265358979323846;
-    const double rad = -42.13 * pi / 180.0;
+    const double rad = ROAM_GRID_ANGLE_DEG * pi / 180.0;
     memset(g, 0, sizeof *g);
     snprintf(g->place, sizeof g->place, "%s", place ? place : "");
     g->ox = 0.0;
     g->oz = 0.0;
-    g->angle_deg = -42.13;
+    g->angle_deg = ROAM_GRID_ANGLE_DEG;
     g->c = cos(rad);
     g->s = sin(rad);
     g->tile = ROAM_TILE_UNITS;
@@ -132,7 +138,7 @@ int roam_grid_format(const RoamGrid *g, char *out, size_t cap)
 {
     return snprintf(out, cap,
         "{\n"
-        " \"format\": \"TD5ROAMGRID1\",\n"
+        " \"format\": \"" ROAM_GRID_FORMAT "\",\n"
         " \"place\": \"%s\",\n"
         " \"tile_units\": %d,\n"
         " \"origin\": [%.17g, %.17g],\n"
@@ -140,7 +146,7 @@ int roam_grid_format(const RoamGrid *g, char *out, size_t cap)
         " \"c\": %.17g,\n"
         " \"s\": %.17g,\n"
         " \"note\": \"u = c*(x-ox) + s*(z-oz), v = c*(z-oz) - s*(x-ox); tx = floor(u/tile_units), "
-        "tz = floor(v/tile_units); casco axes -42.13 deg, design 1.8\"\n"
+        "tz = floor(v/tile_units); game frame x = -east (td5_geo_frame.h), casco axes +42.13 deg, design 1.8\"\n"
         "}\n",
         g->place, (int)g->tile, g->ox, g->oz, g->angle_deg, g->c, g->s);
 }
@@ -167,6 +173,17 @@ int roam_grid_parse(const char *json, RoamGrid *g)
         g->tile = (int32_t)t->valuedouble;
         g->angle_deg = cJSON_IsNumber(a) ? a->valuedouble : 0.0;
         if (cJSON_IsString(p) && p->valuestring) snprintf(g->place, sizeof g->place, "%s", p->valuestring);
+        {   /* [roam M] a TD5ROAMGRID1 lattice was written in the SOURCE frame (x = east): reflected
+             * into the game frame it covers the same squares on the ground (td5_roam_grid_ensure
+             * rewrites the file once) */
+            const cJSON *fm = cJSON_GetObjectItem(root, "format");
+            if (!(cJSON_IsString(fm) && fm->valuestring && strcmp(fm->valuestring, ROAM_GRID_FORMAT) == 0)) {
+                g->ox = td5_geo_game_x(g->ox);
+                g->s = -g->s;
+                g->angle_deg = -g->angle_deg;
+                g->src_frame = 1;
+            }
+        }
         ok = 1;
     }
     cJSON_Delete(root);
@@ -180,10 +197,10 @@ int roam_grid_parse(const char *json, RoamGrid *g)
 /* F0a's casco polygon (_archive/roam/F0a/casco_poly.json, place frame): the four
  * ring-avenue corners, the same quad td5_roam_junction.c and td5_roam_cache.c use. */
 static const double k_casco[4][2] = {
-    { 1078705.99,        5374175.73 },
-    { 2582491.695195345, 7019045.535332896 },
-    { 4255470.01,        5615132.29 },
-    { 2731713.44,        3880755.48 },
+    { -1078705.99,        5374175.73 },     /* [roam M] game frame: x = -east */
+    { -2582491.695195345, 7019045.535332896 },
+    { -4255470.01,        5615132.29 },
+    { -2731713.44,        3880755.48 },
 };
 
 int td5_roam_casco_tiles(const RoamGrid *g, int (*out)[2], int cap)
@@ -503,6 +520,7 @@ static int idx_load(TD5_RoamTileCtx *c)
             IdxRow *r;
             for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
             if (k < 7) continue;
+            td5_geo_src_bbox_to_game(&v[3], &v[5]);   /* [roam M] the extent in the game frame */
             if (c->nidx >= cap) {
                 IdxRow *nr;
                 cap = cap ? cap * 2 : 256;
@@ -552,6 +570,7 @@ static void idx_load_signals(TD5_RoamTileCtx *c, IdxRow *r)
     doc = cJSON_Parse(b);
     free(b);
     if (!doc) return;
+    td5_geo_src_json_to_game(doc);       /* [roam M] source frame -> game frame */
     arr = cJSON_GetObjectItem(doc, "signals");
     for (s = arr ? arr->child : NULL; s; s = s->next) {
         const cJSON *x = cJSON_GetObjectItem(s, "x"), *z = cJSON_GetObjectItem(s, "z");
@@ -589,7 +608,20 @@ int td5_roam_grid_ensure(const char *place)
     int n;
     if (!place || !place[0]) return 0;
     td5_geo_source_path(path, sizeof path, place, "roam/ROAMGRID.JSON");
-    if ((f = fopen(path, "rb")) != NULL) { fclose(f); return 1; }
+    if ((f = fopen(path, "rb")) != NULL) {
+        /* [roam M] a source-frame (TD5ROAMGRID1) lattice is rewritten once, reflected */
+        n = (int)fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[n > 0 ? n : 0] = '\0';
+        if (!roam_grid_parse(buf, &g) || !g.src_frame) return 1;
+        g.src_frame = 0;
+        n = roam_grid_format(&g, buf, sizeof buf);
+        if (n <= 0 || n >= (int)sizeof buf || (f = fopen(path, "wb")) == NULL) return 1;
+        fwrite(buf, 1, (size_t)n, f);
+        fclose(f);
+        TD5_LOG_I(LOG_TAG, "roam tile: %s was a source-frame lattice, rewritten in the game frame", path);
+        return 1;
+    }
     td5_geo_source_path(dir, sizeof dir, place, "tiles/INDEX.JSON");
     if ((f = fopen(dir, "rb")) == NULL) return 0;
     fclose(f);
