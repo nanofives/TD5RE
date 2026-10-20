@@ -16,6 +16,7 @@
 #include "td5_physics.h"
 #include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_ai.h"
+#include "td5_police.h"   /* [round H HH] */
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
@@ -2352,6 +2353,10 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             td5_input_ff_jolt(susp_s, TD5_FF_ARREST_JOLT_MAG);
         }
     }
+
+    /* [round H HH] the pursuit layer of the normal races: a racer ramming a cop starts
+     * (or raises) a pursuit, a racer touching a roadblock car is counted. Records only. */
+    td5_police_on_contact((int)A->slot_index, (int)B->slot_index, impact_mag);
 
     /* Traffic recovery escalation (> 50000 and traffic slot). [N-way 2026-06-04]
      * traffic boundary g_traffic_slot_base, not hardcoded 6 — a human racer in

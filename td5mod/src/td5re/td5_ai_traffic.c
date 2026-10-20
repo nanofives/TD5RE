@@ -22,6 +22,7 @@
 #include "td5re.h"
 #include "td5_config.h"
 #include "td5_roam_traffic.h"   /* [GEO FREE ROAM F8] roam traffic answers parked / alpha for its pool */
+#include "td5_police.h"         /* [round H HH] roadblock cars + reinforcement spawns */
 #include <string.h>
 #include <math.h>
 #include <limits.h>
@@ -4858,6 +4859,8 @@ void td5_ai_traffic_dynamic_tick(void)
             /* Never retire the live cop (mirrors recycle's slot-9 guard
              * @ 0x0043545B). */
             if (slot == 9 && g_encounter_tracked_handle != -1) { on_road++; break; }
+            /* [round H HH] a police ROADBLOCK car: td5_police.c owns its life (it fades it out) */
+            if (td5_police_block_slot(slot)) { on_road++; break; }
             /* Live corridor = [trailing HUMAN - despawn .. race LEADER +
              * despawn]. A car only retires once the LAST human has passed it
              * by DespawnDistance (signed — cars still AHEAD of a last-place
@@ -5215,7 +5218,9 @@ void td5_ai_traffic_dynamic_tick(void)
             g_cop_phase[pick]  = COP_IDLE;
             g_cop_target[pick] = -1;
             if (g_encounter_enabled) {
-                if (s_cop_spawn_counter >= g_td5.ini.cop_ratio) {
+                /* [round H HH] a running pursuit wants 1 + heat cops on the road: the
+                 * next spawn is a cop (reinforcement, td5_police.c, 1 per 3 s) */
+                if (s_cop_spawn_counter >= g_td5.ini.cop_ratio || td5_police_want_cop_spawn()) {
                     g_cop_is_cop[pick]  = 1;
                     s_cop_spawn_counter = 0;
                     TD5_LOG_I(LOG_TAG, "cop_spawn: slot=%d flagged COP (1 per %d cars)",
@@ -6524,3 +6529,132 @@ ttc_done:;
                    ACTOR_U8(actor, ACTOR_BRAKE_FLAG) ? brake_why : TRF_BRK_NONE, "");
 }
 
+/* ========================================================================
+ * [round H HH] Police ROADBLOCK cars (td5_police.c). A roadblock car is an
+ * ordinary dynamic traffic slot: placed on the span like a spawn (trf_dyn_place:
+ * route state, span walker, heading, physics reset), then moved to its spot across
+ * the road and turned. It fades in like any spawn and wears the police mesh
+ * (g_cop_is_cop). While td5_police_block_slot() says so, the despawn rules skip it
+ * and ai_update_single_traffic holds it braked; release fades it out the normal
+ * way, and FADE_OUT -> INACTIVE strips the cop identity (cop_release).
+ * ======================================================================== */
+static void trf_police_range(int *lo, int *hi)
+{
+    *lo = g_traffic_slot_base;
+    *hi = g_active_actor_count;
+    if (*hi > *lo + TD5_MAX_TRAFFIC_SLOTS) *hi = *lo + TD5_MAX_TRAFFIC_SLOTS;
+    if (*hi > TD5_MAX_TOTAL_ACTORS) *hi = TD5_MAX_TOTAL_ACTORS;
+}
+
+int td5_ai_traffic_police_free_slots(void)
+{
+    int lo, hi, n = 0;
+    if (!td5_ai_traffic_dynamic_active()) return 0;
+    trf_police_range(&lo, &hi);
+    for (int s = lo; s < hi; s++) if (s_trf_dyn_state[s] == TRF_DYN_INACTIVE) n++;
+    return n;
+}
+
+int td5_ai_traffic_police_block_place(int span, int lane, int32_t wx, int32_t wz, int yaw12)
+{
+    int lo, hi, pick = -1;
+    char *a;
+    if (!td5_ai_traffic_dynamic_active()) return -1;
+    if (span < 0 || span >= td5_track_get_span_count()) return -1;
+    trf_police_range(&lo, &hi);
+    for (int s = hi - 1; s >= lo; s--)    /* from the top: slot 9 stays the stock spawner's preferred slot */
+        if (s_trf_dyn_state[s] == TRF_DYN_INACTIVE && s != 9) { pick = s; break; }
+    if (pick < 0) return -1;
+    if (lane < 0) lane = 0;
+    trf_dyn_place(pick, span, lane, 0);
+    a = actor_ptr(pick);
+    ACTOR_I32(a, ACTOR_WORLD_POS_X) = (int32_t)(wx * 256);
+    ACTOR_I32(a, ACTOR_WORLD_POS_Z) = (int32_t)(wz * 256);
+    ACTOR_I32(a, ACTOR_YAW_ACCUM)   = (int32_t)((yaw12 & 0xFFF) << 8);
+    ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) = 0;
+    ACTOR_I32(a, ACTOR_LIN_VEL_X) = 0;
+    ACTOR_I32(a, ACTOR_LIN_VEL_Y) = 0;
+    ACTOR_I32(a, ACTOR_LIN_VEL_Z) = 0;
+    ACTOR_I32(a, ACTOR_ANG_VEL_YAW) = 0;
+    ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 1;
+    td5_track_update_actor_position((TD5_Actor *)a);   /* span + sub-lane from the moved xz */
+    s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
+    s_trf_dyn_alpha[pick] = 0;
+    g_cop_is_cop[pick] = 1;
+    g_cop_phase[pick]  = COP_IDLE;
+    g_cop_target[pick] = -1;
+    g_actor_broken_down[pick]  = 0;
+    g_actor_broken_ticks[pick] = 0;
+    TD5_LOG_I(LOG_TAG, "police_block: slot=%d on span %d lane %d at (%d,%d) yaw %d", pick, span, lane, (int)wx, (int)wz, yaw12 & 0xFFF);
+    return pick;
+}
+
+void td5_ai_traffic_police_block_release(int slot)
+{
+    int lo, hi;
+    trf_police_range(&lo, &hi);
+    if (slot < lo || slot >= hi) return;
+    if (s_trf_dyn_state[slot] == TRF_DYN_FADE_IN || s_trf_dyn_state[slot] == TRF_DYN_ACTIVE)
+        s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
+}
+
+void td5_ai_traffic_police_make_room(int n)
+{
+    int lo, hi;
+    trf_police_range(&lo, &hi);
+    while (n-- > 0) {
+        int best = -1, best_d = 40;      /* never closer than 40 spans to a human */
+        for (int s = lo; s < hi; s++) {
+            int d;
+            if (s_trf_dyn_state[s] != TRF_DYN_ACTIVE || g_cop_is_cop[s] || td5_police_block_slot(s)) continue;
+            d = trf_dyn_min_player_dist((int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED));
+            if (d > best_d) { best_d = d; best = s; }
+        }
+        if (best < 0) return;
+        s_trf_dyn_state[best] = TRF_DYN_FADE_OUT;
+        TD5_LOG_I(LOG_TAG, "police_block: traffic slot=%d (%d spans from the nearest human) fades out to make room", best, best_d);
+    }
+}
+
+#ifndef TD5RE_RELEASE
+/* [round H HH] DEV, the `police` self-test: put an IDLE cop on the main ring `spans_ahead` spans ahead of slot 0,
+ * in a down-track lane beside the car's own (fades in like a spawn). Returns the slot, -1 when none is free. */
+int td5_ai_traffic_police_dev_plant_cop(int spans_ahead)
+{
+    const int ring = td5_track_get_ring_length(), nspan = td5_track_get_span_count();
+    int lo, hi, pick = -1, sp, span, lanes, lane = -1, my_lane;
+    char *pl = actor_ptr(0);
+    if (!td5_ai_traffic_dynamic_active() || !pl || nspan <= 0) return -1;
+    trf_police_range(&lo, &hi);
+    for (int s = lo; s < hi; s++) if (s_trf_dyn_state[s] == TRF_DYN_INACTIVE && s != 9) { pick = s; break; }
+    if (pick < 0) return -1;
+    sp = (int)(int16_t)ACTOR_I16(pl, ACTOR_SPAN_NORMALIZED);
+    span = sp + spans_ahead;
+    if (g_track_is_circuit && ring > 0) span %= ring;
+    else if (span >= (ring > 0 ? ring : nspan) - 2) span = (ring > 0 ? ring : nspan) - 3;
+    if (span < 0) return -1;
+    lanes = td5_track_get_span_lane_count(span);
+    if (lanes <= 0) return -1;
+    my_lane = (int)ACTOR_U8(pl, ACTOR_SUB_LANE_INDEX);
+    for (int pass = 0; pass < 2 && lane < 0; pass++)
+        for (int l = 0; l < lanes; l++) {
+            if (trf_dyn_lane_direction(lanes, l) != 0) continue;
+            if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, l))) continue;
+            if (pass == 0 && l == my_lane) continue;
+            lane = l;
+            break;
+        }
+    if (lane < 0) lane = 0;
+    trf_dyn_place(pick, span, lane, 0);
+    s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
+    s_trf_dyn_alpha[pick] = 0;
+    g_cop_is_cop[pick] = 1;
+    g_cop_phase[pick]  = COP_IDLE;
+    g_cop_target[pick] = -1;
+    g_actor_broken_down[pick]  = 0;
+    g_actor_broken_ticks[pick] = 0;
+    TD5_LOG_I(LOG_TAG, "police DEV: cop planted in slot %d on span %d lane %d (%d spans ahead of the player, lane %d)", pick, span, lane,
+              spans_ahead, my_lane);
+    return pick;
+}
+#endif

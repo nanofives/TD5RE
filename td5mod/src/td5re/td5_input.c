@@ -30,6 +30,7 @@
 #include "td5_render.h"   /* AngleFromVector12 */
 #include "td5_frontend.h" /* td5_frontend_get_player_manual */
 #include "td5_ai.h"
+#include "td5_police.h"   /* [round H HH] */
 #include "td5_save.h"
 #include "td5_pending.h"  /* F11 toggles the pending-test overlay */
 #include "td5_sound.h"   /* td5_sound_toggle_siren — cop-chase siren toggle */
@@ -977,6 +978,7 @@ void td5_input_poll_race_session(void)
 
 #ifndef TD5RE_RELEASE
             if (i == 0) s_control_bits[i] |= s_selftest_drive_bits;   /* [R1026 K] selftest throttle */
+            if (i == 0) s_control_bits[i] |= td5_police_test_bits();  /* [round H HH] the `police` self-test drive */
 #endif
             /* [CONTROL 2026-07-21] Live-control hold_action bits overlay the same
              * way (identical downstream paths). Returns 0 whenever the control
@@ -1527,6 +1529,8 @@ void td5_input_update_player_control(int slot)
          * frame into the encounter-control branch below and prevented the
          * normal throttle write — Cop Chase player car never accelerated. */
         encounter_active = td5_ai_is_encounter_active(slot);
+        /* [round H HH] BUSTED (td5_police.c): the same stop + hold as a pull-over */
+        if (!encounter_active && td5_police_held(slot)) encounter_active = 1;
     }
 
     int steer_rate_denom;

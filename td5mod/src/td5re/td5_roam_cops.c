@@ -42,6 +42,7 @@
 #include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
 #include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
+#include "td5_police.h"         /* [round H HH] the shared pursuit HUD drawing */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -115,7 +116,7 @@ static struct {
     double  vmax, v_patrol, limit_kmh, notice_m, notice_red_m, see_m, lose_s, escape_m, bust_s;
     double  r_spawn_min, r_spawn_max, r_despawn, r_despawn_pursuit;
     double  wb, a_lat, a_brake;
-    int     fine_base, log_every, offpath_dumped;
+    int     log_every, offpath_dumped;
     int     force_dens, force_vmax;              /* DEV overrides (+1 encoded, 0 = knob) */
     /* the race corridor */
     int     race_on;                             /* a race with COPS on runs (the corridor applies) */
@@ -128,7 +129,6 @@ static struct {
     long    p_t0, lost_t, spawn_cd, grace_until, last_offence;
     double  bust_meter;
     long    busted_t;                            /* > 0: the BUSTED hold runs                  */
-    int     fine;                                /* the last fine                              */
     /* the player's red-lamp watch */
     int     pl_e, pl_d, pl_node, pl_red_node; double pl_rem;
     double  pl_vprev;
@@ -172,7 +172,6 @@ static void rc_read_knobs(void)
     C.lose_s      = td5_env_int("TD5RE_ROAM_COPS_LOSE_S", 6, 1, 120);
     C.escape_m    = td5_env_int("TD5RE_ROAM_COPS_ESCAPE_M", 320, 80, 2000);
     C.bust_s      = td5_env_int("TD5RE_ROAM_COPS_BUST_DS", 20, 3, 200) / 10.0;
-    C.fine_base   = td5_env_int("TD5RE_ROAM_COPS_FINE", 100, 0, 100000);
     C.log_every   = td5_env_int("TD5RE_ROAM_COPS_LOG", 0, 0, 60);     /* DEV: a pursuit line every N s */
     C.r_spawn_min = td5_env_int("TD5RE_ROAM_COPS_SPAWN_MIN_M", 120, 30, 400);
     C.r_spawn_max = td5_env_int("TD5RE_ROAM_COPS_SPAWN_MAX_M", 220, 60, 500);
@@ -1867,7 +1866,7 @@ static void rc_bust_release(TD5_Actor *pl, double plx, double plz)
         return;
     }
     C.grace_until = rc_tick() + 10 * 30;
-    snprintf(msg, sizeof msg, "FINED $%d   %ld BUSTS", C.fine, C.st.busts);
+    snprintf(msg, sizeof msg, "BACK ON THE STREET   %ld BUST%s", C.st.busts, C.st.busts == 1 ? "" : "S");
     rc_toast(msg, 0xFFFFE070, 3.5);
     {   /* back on the nearest street centre, facing along it the way the car pointed */
         double sx, sz, dm, fx, fz;
@@ -1952,11 +1951,9 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
         C.busted_t = 90;
         C.st.busts++;
         if (bdmin < 12.0) C.st.blocks_bust++;      /* [G1b] busted with a roadblock car within 12 m (centre to centre) */
-        C.fine = C.fine_base * C.heat + 50 * C.offences;
-        if (!C.race_on) C.st.fines += C.fine;
         rc_toast("BUSTED", 0xFFFF3B3B, 3.0);
-        TD5_LOG_I(LOG_TAG, "ROAM_COPS: BUST %ld after %.1f s of pursuit, heat %d, %d pursuer(s), nearest %.1f m, fine $%d%s", C.st.busts,
-                  (tick - C.p_t0) / RC_HZ, C.heat, npur, dmin, C.fine, C.race_on ? " (race: held, no fine)" : "");
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS: BUST %ld after %.1f s of pursuit, heat %d, %d pursuer(s), nearest %.1f m%s", C.st.busts,
+                  (tick - C.p_t0) / RC_HZ, C.heat, npur, dmin, C.race_on ? " (race: held 3 s)" : " (free roam: back on the street)");
         return;
     }
     /* escape */
@@ -2205,101 +2202,32 @@ void td5_roam_cops_stats(TD5_RoamCopsStats *out)
 
 /* ============================================================ HUD ================= */
 
-#define QB_QUADS 32
-static TD5_D3DVertex qb_v[QB_QUADS * 4];
-static uint16_t      qb_i[QB_QUADS * 6];
-static int           qb_n;
-
-static void qb_flush(void)
-{
-    if (qb_n > 0) { td5_hud_prim_tris(qb_v, qb_n * 4, qb_i, qb_n * 6); qb_n = 0; }
-}
-
-static void qb_rect(float x, float y, float w, float h, uint32_t col)
-{
-    TD5_D3DVertex *v;
-    uint16_t *ix;
-    const uint16_t b = (uint16_t)(qb_n * 4);
-    int k;
-    if (qb_n >= QB_QUADS) qb_flush();
-    v = &qb_v[qb_n * 4];
-    ix = &qb_i[qb_n * 6];
-    v[0].screen_x = x;     v[0].screen_y = y;
-    v[1].screen_x = x + w; v[1].screen_y = y;
-    v[2].screen_x = x + w; v[2].screen_y = y + h;
-    v[3].screen_x = x;     v[3].screen_y = y + h;
-    for (k = 0; k < 4; k++) {
-        v[k].depth_z = 0.0f; v[k].rhw = 1.0f; v[k].diffuse = col; v[k].specular = 0;
-        v[k].tex_u = 0.5f; v[k].tex_v = 0.5f;
-    }
-    ix[0] = b; ix[1] = (uint16_t)(b + 1); ix[2] = (uint16_t)(b + 2);
-    ix[3] = b; ix[4] = (uint16_t)(b + 2); ix[5] = (uint16_t)(b + 3);
-    qb_n++;
-}
-
-static void tx(float x, float y, const char *s, uint32_t col, float px)
-{
-    qb_flush();
-    td5_vui_text(x, y, s, col, px / 26.0f, px / 26.0f);
-}
-static void tx_c(float cx, float y, const char *s, uint32_t col, float px)
-{
-    qb_flush();
-    td5_vui_text_centered(cx, y, s, col, px / 26.0f, px / 26.0f);
-}
-static float tx_w(const char *s, float px) { return td5_vui_text_width(s, px / 26.0f); }
-
+/* [round H HH] The drawing itself is td5_police_hud_draw (td5_police.c), shared with the normal races' pursuit panel. */
 void td5_roam_cops_draw_hud(void)
 {
     const float W = g_render_width_f, H = g_render_height_f;
-    const float S = g_render_height_f / 720.0f < 0.6f ? 0.6f : g_render_height_f / 720.0f;
     const long tick = rc_tick();
     char line[96];
-    int i;
+    TD5_PoliceHud h;
     if (!C.on || !td5_roam_active() || W < 2.0f) return;
     if (td5_roam_route_ui_map_open() || td5_game_is_pause_menu_active()) return;
     if (!C.pursuit && C.busted_t <= 0 && tick >= C.toast_until) return;
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
-    if (C.pursuit && C.busted_t <= 0) {
-        /* top right: PURSUIT, heat boxes, the cops on it, the evade bar */
-        const float bw = 250.0f * S, bx = W - bw - 12.0f * S, by = 80.0f * S;
-        const int flash = ((tick / 8) & 1) != 0;
-        const double lose = (C.lose_s + 2.0 * C.heat) * RC_HZ;
-        qb_rect(bx, by, bw, 92.0f * S, 0xA0000000);
-        tx(bx + 12.0f * S, by + 6.0f * S, "PURSUIT", flash ? 0xFFFF3B3B : 0xFF3B7BFF, 24.0f * S);
-        for (i = 0; i < 5; i++)
-            qb_rect(bx + 140.0f * S + (float)i * 20.0f * S, by + 12.0f * S, 15.0f * S, 15.0f * S, i < C.heat ? 0xFFFF3B3B : 0xFF3A3F48);
-        snprintf(line, sizeof line, "HEAT %d   COPS %d", C.heat, rc_count(RC_PURSUIT));
-        tx(bx + 12.0f * S, by + 38.0f * S, line, 0xFFFFFFFF, 15.0f * S);
-        {
-            const float f = (float)rc_clamp((double)C.lost_t / lose, 0.0, 1.0);
-            tx(bx + 12.0f * S, by + 62.0f * S, "EVADE", 0xFFC8D0DA, 13.0f * S);
-            qb_rect(bx + 70.0f * S, by + 66.0f * S, bw - 84.0f * S, 9.0f * S, 0xFF2A323D);
-            qb_rect(bx + 70.0f * S, by + 66.0f * S, (bw - 84.0f * S) * f, 9.0f * S, 0xFF50E070);
-        }
-        if (C.bust_meter > 0.0) {
-            const float mw = 360.0f * S, mx = (W - mw) * 0.5f, my = H * 0.72f;
-            qb_rect(mx - 6.0f * S, my - 30.0f * S, mw + 12.0f * S, 52.0f * S, 0xA0000000);
-            tx_c(W * 0.5f, my - 26.0f * S, "PULL OVER", 0xFFFF3B3B, 18.0f * S);
-            qb_rect(mx, my, mw, 12.0f * S, 0xFF2A323D);
-            qb_rect(mx, my, mw * (float)rc_clamp(C.bust_meter, 0.0, 1.0), 12.0f * S, 0xFFFF3B3B);
-        }
-    }
-    if (C.busted_t > 0) {
-        const float bw = 520.0f * S, bx = (W - bw) * 0.5f, by = H * 0.30f;
-        qb_rect(bx, by, bw, 110.0f * S, 0xC0000000);
-        qb_rect(bx, by, bw, 4.0f * S, ((tick / 6) & 1) ? 0xFFFF3B3B : 0xFF3B7BFF);
-        tx_c(W * 0.5f, by + 12.0f * S, "BUSTED", 0xFFFF3B3B, 52.0f * S);
+    memset(&h, 0, sizeof h);
+    h.tick = tick;
+    h.pursuit = C.pursuit;
+    h.heat = C.heat;
+    h.cops = rc_count(RC_PURSUIT);
+    h.evade = (float)rc_clamp((double)C.lost_t / ((C.lose_s + 2.0 * C.heat) * RC_HZ), 0.0, 1.0);
+    h.bust = (float)C.bust_meter;
+    h.busted = C.busted_t > 0;
+    if (h.busted) {
+        /* no fines and no money anywhere (Mariano, 2026-10-19) */
         if (C.race_on) snprintf(line, sizeof line, "HELD BY THE POLICE   %d", (int)(C.busted_t / 30) + 1);
-        else snprintf(line, sizeof line, "FINE $%d   HEAT %d   %d OFFENCE%s", C.fine, C.heat, C.offences, C.offences == 1 ? "" : "S");
-        tx_c(W * 0.5f, by + 74.0f * S, line, 0xFFFFFFFF, 18.0f * S);
-    } else if (tick < C.toast_until && C.toast[0]) {
-        const float w = tx_w(C.toast, 20.0f * S);
-        qb_rect((W - w) * 0.5f - 14.0f * S, H * 0.22f, w + 28.0f * S, 34.0f * S, 0xB0000000);
-        tx((W - w) * 0.5f, H * 0.22f + 6.0f * S, C.toast, C.toast_col, 20.0f * S);
+        else snprintf(line, sizeof line, "HEAT %d   %d OFFENCE%s", C.heat, C.offences, C.offences == 1 ? "" : "S");
+        h.busted_line = line;
     }
-    qb_flush();
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    if (tick < C.toast_until && C.toast[0]) { h.toast = C.toast; h.toast_col = C.toast_col; }
+    td5_police_hud_draw(&h, 0.0f, 0.0f, W, H);
 }
 
 /* ============================================================ DEV ================= */
