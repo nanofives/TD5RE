@@ -122,7 +122,10 @@ typedef struct {
     double   kmh_max;
     int      on_path;               /* following the planned path through a junction */
     long     path_t0;
-    double   pth_x[RV_NP], pth_z[RV_NP], pth_ox, pth_oz, pth_defl;
+    double   pth_x[RV_PMAX], pth_z[RV_PMAX], pth_ox, pth_oz, pth_defl;
+    int      pth_np;                  /* path points: RV_NP for the Bezier, more once routed on the paved mask */
+    uint64_t way;                     /* way id (edge key >> 16) of the street being followed, 0 = none yet */
+    int      way_alt_t;               /* ticks in a row another way's ribbon has been under the chassis */
 
     /* corners */
     RvCorner c[RV_MAXC];
@@ -298,15 +301,15 @@ static uint64_t rv_way_at(const TD5_RoamResident *rs, double x, double z)
     return h.edge_key >> 16;
 }
 
-/* Pure pursuit on a RV_NP-point polyline whose last point is followed by a straight run along
+/* Pure pursuit on an np-point polyline whose last point is followed by a straight run along
  * (outx, outz): the arc length of the car's nearest point, aim `look` further. along_out > 0 once the
  * nearest point is past (total - 40 m), i.e. on the exit ribbon; lat_out = distance to the polyline. */
-static void rv_pursue(const double *pxs, const double *pzs, double outx, double outz, double px, double pz,
+static void rv_pursue(const double *pxs, const double *pzs, int np, double outx, double outz, double px, double pz,
                       double look, double *tx, double *tz, double *along_out, double *lat_out)
 {
     double best = 1e30, cum = 0.0, total = 0.0, s_car = 0.0, want;
     int k;
-    for (k = 0; k < RV_NP - 1; k++) {
+    for (k = 0; k < np - 1; k++) {
         const double sx = pxs[k + 1] - pxs[k], sz = pzs[k + 1] - pzs[k];
         const double len = sqrt(sx * sx + sz * sz);
         double tt = len > 0.0 ? ((px - pxs[k]) * sx + (pz - pzs[k]) * sz) / (len * len) : 0.0, qx, qz, dd;
@@ -321,9 +324,9 @@ static void rv_pursue(const double *pxs, const double *pzs, double outx, double 
     want = s_car + look;
     if (want > total) want = total + look;           /* past the end: keep going straight out */
     cum = 0.0;
-    *tx = pxs[RV_NP - 1] + outx * (want - total);
-    *tz = pzs[RV_NP - 1] + outz * (want - total);
-    for (k = 0; k < RV_NP - 1; k++) {
+    *tx = pxs[np - 1] + outx * (want - total);
+    *tz = pzs[np - 1] + outz * (want - total);
+    for (k = 0; k < np - 1; k++) {
         const double sx = pxs[k + 1] - pxs[k], sz = pzs[k + 1] - pzs[k];
         const double len = sqrt(sx * sx + sz * sz);
         if (want <= cum + len && len > 0.0) {
@@ -543,8 +546,22 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
                     double eix = 0, eiz = 0, eox = 0, eoz = 0;
                     const int have_in = rv_edge_end_near(rs, ai->edge_key, s_rv.cl_x, s_rv.cl_z, &eix, &eiz, &inx, &inz);
                     const int have_out = rv_edge_end_near(rs, ao->edge_key, s_rv.cl_x, s_rv.cl_z, &eox, &eoz, &outx, &outz);
+                    s_rv.pth_np = RV_NP;
                     if (have_in && have_out) {
                         rv_plan_path(s_rv.pth_x, s_rv.pth_z, eix, eiz, inx, inz, eox, eoz, outx, outz);
+                        /* [roam M] the corner matrix's F2-E rule on the tour too: a Bezier that cuts an island nose
+                         * (fffc4db4000845ba, 6 arms: 9 cm into the wedge between two exit arms, so a car 20 cm
+                         * off the line on that side wedged there) is replaced by a route on the paved mask
+                         * with 1.5 m kerb clearance, whichever side of the line the car errs to */
+                        if (td5_env_int("TD5RE_ROAM_SELFTEST_CORNER_ROUTE", 1, 0, 1)) {
+                            int routed = 0;
+                            const double off_m = td5_roam_dev_route_path(s_rv.pth_x, s_rv.pth_z, &s_rv.pth_np, RV_PMAX,
+                                                                         s_rv.cl_x, s_rv.cl_z, outx, outz, 40.0 * RV_M, &routed);
+                            if (off_m > 0.0)
+                                TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] junction #%d: Bezier %.1f m off the road -> %s (%d points)",
+                                          s_rv.crossings, off_m, routed == 1 ? "ROUTED on the paved mask" : "NO ROUTE, kept",
+                                          s_rv.pth_np);
+                        }
                     } else {
                         /* no ribbon end rows: straight from the car to 25 m past the node along the exit arm */
                         int q;
@@ -555,6 +572,8 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
                         }
                     }
                     s_rv.pth_ox = outx; s_rv.pth_oz = outz;
+                    s_rv.way = (uint64_t)ao->edge_key >> 16;
+                    s_rv.way_alt_t = 0;
                     s_rv.pth_defl = acos(fmax(-1.0, fmin(1.0, -(inx * outx + inz * outz)))) * 180.0 / RV_PI;
                     s_rv.on_path = 1;
                     s_rv.path_t0 = tick;
@@ -562,22 +581,43 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
                               "deflection %.0f deg, heading (%.2f,%.2f), %.0f m driven",
                               s_rv.crossings, s_rv.distinct, (unsigned long long)nd->cluster_key, (int)nd->narm, s_rv.cl_x, s_rv.cl_z,
                               turn, ik, bk, s_rv.pth_defl, s_rv.dir_x, s_rv.dir_z, s_rv.dist_m);
+                    if (td5_env_int("TD5RE_ROAM_SELFTEST_PATHLOG", 0, 0, 1)) {
+                        /* dev: the planned path, so a junction can be plotted over the tiles */
+                        char buf[400];
+                        size_t l = 0;
+                        int q;
+                        for (q = 0; q < s_rv.pth_np && l < sizeof buf - 24; q++)
+                            l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", s_rv.pth_x[q], s_rv.pth_z[q]);
+                        TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] path #%d%s", s_rv.crossings, buf);
+                    }
                 }
             }
         }
         if (s_rv.on_path) {
             double along, lat;
-            rv_pursue(s_rv.pth_x, s_rv.pth_z, s_rv.pth_ox, s_rv.pth_oz, px, pz,
+            rv_pursue(s_rv.pth_x, s_rv.pth_z, s_rv.pth_np, s_rv.pth_ox, s_rv.pth_oz, px, pz,
                       (s_rv.pth_defl > 30.0 ? 10.0 : 14.0) * RV_M, &tx, &tz, &along, &lat);
             if (s_rv.pth_defl > 30.0) vt = s_rv.kmh * 0.6 > 15.0 ? s_rv.kmh * 0.6 : 15.0;
+            if ((tick & 3) == 0 && td5_env_int("TD5RE_ROAM_SELFTEST_PATHLOG", 0, 0, 1))
+                TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] onpath #%d t=%ld car %.0f,%.0f aim %.0f,%.0f kmh %.1f lat %.0f", s_rv.crossings,
+                          tick, px, pz, tx, tz, kmh, lat);
             if ((along > 12.0 * RV_M && !on_patch) || tick - s_rv.path_t0 > 20 * 30) {
                 s_rv.on_path = 0;
                 s_rv.dir_x = s_rv.pth_ox; s_rv.dir_z = s_rv.pth_oz;
                 s_rv.have_off = 0;
             }
         } else if (s_rv.ch_ok && !on_patch && rv_street_axis(rs, &s_rv.ch, px, pz, &cx, &cz, &ax, &az)) {
+            /* [roam M] stay on our own street where two ribbons overlap (a split: 000011200bda vs 000001652667,
+             * 22 deg apart, the locator returning either one): another way's axis is taken only once its ribbon
+             * has been under the chassis for 3 s in a row (a way that changes at a plain node, no junction) */
+            const uint64_t hw = (uint64_t)s_rv.ch.edge_key >> 16;
+            int other_way = 0;
+            if (s_rv.way == 0 || hw == s_rv.way) s_rv.way_alt_t = 0;
+            else if (++s_rv.way_alt_t >= 90) { s_rv.way = hw; s_rv.way_alt_t = 0; }
+            else other_way = 1;
+            if (s_rv.way == 0) s_rv.way = hw;
             if (ax * s_rv.dir_x + az * s_rv.dir_z < 0.0) { ax = -ax; az = -az; }
-            if (ax * s_rv.dir_x + az * s_rv.dir_z < 0.82) {     /* > 35 deg off: a crossing street, keep going straight */
+            if (other_way || ax * s_rv.dir_x + az * s_rv.dir_z < 0.82) {     /* > 35 deg off: a crossing street, keep going straight */
                 ax = s_rv.dir_x; az = s_rv.dir_z;
                 cx = px; cz = pz;
             }
@@ -589,6 +629,10 @@ static uint32_t rv_route(TD5_Actor *a, const TD5_RoamResident *rs, long tick)
             tz = pz + s_rv.dir_z * look;
         }
         bits = rv_steer_to(a, tx, tz, vt);
+        if (!s_rv.on_path && (tick & 3) == 0 && td5_env_int("TD5RE_ROAM_SELFTEST_PATHLOG", 0, 0, 1))
+            TD5_LOG_I(LOG_TAG, "[ROAMSELFTEST] street #%d t=%ld car %.0f,%.0f aim %.0f,%.0f dir %.3f,%.3f kmh %.1f edge %016llx patch %d",
+                      s_rv.crossings, tick, px, pz, tx, tz, s_rv.dir_x, s_rv.dir_z, kmh,
+                      (unsigned long long)(s_rv.ch_ok ? s_rv.ch.edge_key : 0), on_patch);
         if ((s_rv.tour_m > 0.0 ? tick - s_rv.t0 >= (long)s_rv.tour_secs * 30L : s_rv.distinct >= s_rv.want_junctions) &&
             !on_patch && !s_rv.on_path) {
             s_rv.phase = 1;
@@ -1054,7 +1098,7 @@ static void rv_world_shift(int32_t sx, int32_t sz)
     for (k = 0; k < 4; k++) { s_rv.wp_x[k] += sx; s_rv.wp_z[k] += sz; }
     s_rv.cl_x += sx; s_rv.cl_z += sz;
     if (s_rv.tgt_x != 0.0 || s_rv.tgt_z != 0.0) { s_rv.tgt_x += sx; s_rv.tgt_z += sz; }
-    for (k = 0; k < RV_NP; k++) { s_rv.pth_x[k] += sx; s_rv.pth_z[k] += sz; }
+    for (k = 0; k < s_rv.pth_np; k++) { s_rv.pth_x[k] += sx; s_rv.pth_z[k] += sz; }
 }
 
 void td5_roam_drive_arm(int mode)
