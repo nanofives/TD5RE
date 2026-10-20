@@ -6598,6 +6598,33 @@ void td5_ai_traffic_police_block_release(int slot)
         s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
 }
 
+/* [round H HH] a reinforcement when no spawn can happen (the pool at its cap): the nearest ordinary down-track car
+ * at least `min_spans` ahead of racer `target` becomes an IDLE cop (out of sight: it waits to be passed, then joins
+ * through the pursuit rule). Returns the slot, -1 when none qualifies. */
+int td5_ai_traffic_police_recruit(int target, int min_spans)
+{
+    const int ring = td5_track_get_ring_length();
+    int lo, hi, best = -1, best_d = 0x7FFFFFFF, ts;
+    if (!td5_ai_traffic_dynamic_active() || target < 0 || target >= g_traffic_slot_base) return -1;
+    trf_police_range(&lo, &hi);
+    ts = (int)(int16_t)ACTOR_I16(actor_ptr(target), ACTOR_SPAN_NORMALIZED);
+    for (int s = lo; s < hi; s++) {
+        int d;
+        if (s_trf_dyn_state[s] != TRF_DYN_ACTIVE || g_cop_is_cop[s] || td5_police_block_slot(s) || g_actor_broken_down[s]) continue;
+        if (route_state(s)[RS_ROUTE_DIRECTION_POLARITY] != 0) continue;   /* down-track cars only */
+        d = (int)(int16_t)ACTOR_I16(actor_ptr(s), ACTOR_SPAN_NORMALIZED) - ts;
+        if (g_track_is_circuit && ring > 0) { while (d < 0) d += ring; while (d >= ring) d -= ring; }
+        if (d < min_spans || d >= best_d) continue;
+        best_d = d; best = s;
+    }
+    if (best < 0) return -1;
+    g_cop_is_cop[best] = 1;
+    g_cop_phase[best]  = COP_IDLE;
+    g_cop_target[best] = -1;
+    TD5_LOG_I(LOG_TAG, "police: traffic slot=%d (%d spans ahead of racer %d) becomes a cop (reinforcement)", best, best_d, target);
+    return best;
+}
+
 void td5_ai_traffic_police_make_room(int n)
 {
     int lo, hi;

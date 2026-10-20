@@ -239,6 +239,7 @@ int  td5_ai_traffic_police_free_slots(void);
 int  td5_ai_traffic_police_block_place(int span, int lane, int32_t wx, int32_t wz, int yaw12);
 void td5_ai_traffic_police_block_release(int slot);
 void td5_ai_traffic_police_make_room(int n);
+int  td5_ai_traffic_police_recruit(int target, int min_spans);   /* [round H HH] a far car ahead becomes a cop */
 #ifndef TD5RE_RELEASE
 int  td5_ai_traffic_police_dev_plant_cop(int spans_ahead);   /* [round H HH] DEV: the `police` self-test */
 #endif

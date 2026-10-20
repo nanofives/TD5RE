@@ -1529,8 +1529,6 @@ void td5_input_update_player_control(int slot)
          * frame into the encounter-control branch below and prevented the
          * normal throttle write — Cop Chase player car never accelerated. */
         encounter_active = td5_ai_is_encounter_active(slot);
-        /* [round H HH] BUSTED (td5_police.c): the same stop + hold as a pull-over */
-        if (!encounter_active && td5_police_held(slot)) encounter_active = 1;
     }
 
     int steer_rate_denom;
@@ -1998,6 +1996,25 @@ void td5_input_update_player_control(int slot)
         if (a_actor) a_actor->throttle_state = 1;  /* forward gear — never reverse */
         TD5_LOG_I(LOG_TAG, "police_pullover: slot=%d speed=%d stop_thresh=%d brake=%d",
                   slot, speed, (int)(COP_STOP_SPEED >> 8), (int)s_brake[slot]);
+    }
+
+    /* [round H HH] BUSTED (td5_police.c): the car is held for the 3 s under the
+     * banner whatever the player presses. Brake in forward gear down to rest
+     * (no coast band, unlike the pull-over above), then the handbrake: a brake
+     * held at a standstill would engage reverse. */
+    if (td5_police_held(slot)) {
+        TD5_Actor *a_actor = td5_game_get_actor(slot);
+        if (speed >= 3) {
+            s_throttle[slot]  = (int16_t)0xFF00;
+            s_brake[slot]     = 1;
+            s_handbrake[slot] = 0;
+        } else {
+            s_throttle[slot]  = 0;
+            s_brake[slot]     = 0;
+            s_handbrake[slot] = 1;
+        }
+        s_reverse_req[slot] = 0;
+        if (a_actor) a_actor->throttle_state = 1;
     }
 
     /* ---- NOS / Horn ---- */

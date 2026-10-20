@@ -8561,8 +8561,10 @@ void td5_ai_update_special_encounter(void) {
         tgt = g_cop_target[k];
         if (tgt < 0 || tgt >= racer_n) { cop_end_chase(k); continue; }
 
-        /* End: the chased car broke down (crashed into traffic/car/wall). */
-        if (g_actor_broken_down[tgt]) {
+        /* End: the chased car broke down (crashed into traffic/car/wall).
+         * [round H HH] Not with the pursuit layer on: a crash in a pursuit is
+         * where the cops catch you (the bust rules decide), never an escape. */
+        if (g_actor_broken_down[tgt] && !td5_police_active()) {
             if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
             TD5_LOG_I(LOG_TAG, "cop_chase END (target broke down): cop=%d target=%d", k, tgt);
             cop_end_chase(k);
@@ -9532,11 +9534,16 @@ static void ai_update_single_traffic(int slot) {
     if (g_cop_is_cop[slot] && g_cop_phase[slot] == COP_CHASING) {
         cop_drive(slot);
 #ifndef TD5RE_RELEASE
-        /* [round H HH] DEV: the `police` self-test's escape scenario holds the pursuers back */
-        if (td5_police_dev_slow()) {
+        /* [round H HH] DEV: the `police` self-test holds the pursuers back: level 1 keeps
+         * them 40 m off the target (no overtake, no pull-over), level 2 brakes them */
+        if (td5_police_dev_slow() == 2 ||
+            (td5_police_dev_slow() == 1 && g_cop_target[slot] >= 0 &&
+             smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_X) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_X)) / 256 +
+             smart_iabs(ACTOR_I32(actor_ptr(slot), ACTOR_WORLD_POS_Z) - ACTOR_I32(actor_ptr(g_cop_target[slot]), ACTOR_WORLD_POS_Z)) / 256 < 40 * 330)) {
             ACTOR_U8(actor_ptr(slot),  ACTOR_BRAKE_FLAG)      = 1;
             ACTOR_I16(actor_ptr(slot), ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF00;
         }
+        if (td5_police_dev_slow() == 1) s_cop_stall_ticks[slot] = 0;   /* a held cop is not a stalled one */
 #endif
         return;
     }

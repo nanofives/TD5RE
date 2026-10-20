@@ -831,6 +831,22 @@ static void pol_target_tick(int t)
         }
         if (T->heat > P.st.max_heat) P.st.max_heat = T->heat;
     }
+    /* reinforcements: a spawn carries one when the pool has room (td5_police_want_cop_spawn); otherwise, or first,
+     * a far car ahead becomes a cop. One per 3 s either way (shared cooldown). */
+    if (tick >= T->reinf_cd) {
+        int live = 0;
+        for (k = g_traffic_slot_base; k < nact && k < TD5_MAX_TOTAL_ACTORS; k++)
+            if (td5_ai_actor_is_cop(k) && !td5_ai_traffic_dynamic_parked(k) && !P.blk_of[k]) live++;
+        if (live < 1 + T->heat) {
+            const int r = td5_ai_traffic_police_recruit(t, 90);
+            T->reinf_cd = tick + 90;
+            if (r >= 0) {
+                P.st.reinforcements++;
+                TD5_LOG_I(LOG_TAG, "POLICE: reinforcement %ld for slot %d (heat %d, %d cop(s) on the road): traffic slot %d recruited",
+                          P.st.reinforcements, t, T->heat, live, r);
+            }
+        }
+    }
     /* bust: (nearly) stopped with a pursuer or a block car within 10 m; the meter drains at the rate it fills */
     if (vpl < 10.0 / 3.6 && (T->dmin < 10.0 || T->bdmin < 10.0)) T->bust += 1.0 / (P.bust_s * POL_HZ);
     else T->bust -= 1.0 / (P.bust_s * POL_HZ);
@@ -959,6 +975,6 @@ int td5_police_dev_block(int i, int *span, int *ncar, double *gap_m)
     *span = P.blk[i].span; *ncar = P.blk[i].ncar; *gap_m = P.blk[i].gap_w;
     return 1;
 }
-void td5_police_dev_slow_pursuers(int on) { P.dev_slow = on ? 1 : 0; }
-int  td5_police_dev_slow(void) { return P.on && P.dev_slow; }
+void td5_police_dev_slow_pursuers(int level) { P.dev_slow = level < 0 ? 0 : (level > 2 ? 2 : level); }
+int  td5_police_dev_slow(void) { return P.on ? P.dev_slow : 0; }
 #endif

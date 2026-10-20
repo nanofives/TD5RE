@@ -115,7 +115,7 @@ int  td5_police_dev_pursuers(int slot);           /* cops chasing `slot` now    
 int  td5_police_dev_busted(int slot);             /* 1 while the BUSTED hold runs                            */
 int  td5_police_dev_pursuit(int slot);            /* 1 while a pursuit runs                                  */
 int  td5_police_dev_block(int i, int *span, int *ncar, double *gap_m);   /* active block i (0..1), 0 = none  */
-void td5_police_dev_slow_pursuers(int on);        /* the pursuers brake (the escape scenario)                */
+void td5_police_dev_slow_pursuers(int level);     /* 1 = the pursuers keep 40 m off, 2 = they brake (escape) */
 int  td5_police_dev_slow(void);
 #define TD5_POLICE_TEST_SMOKE 1
 #define TD5_POLICE_TEST_FULL  2

@@ -6,17 +6,18 @@
  *
  *   A. PURSUIT. Full throttle; at 100 km/h an idle cop is planted 45 spans ahead in a down-track lane beside the car
  *      (td5_ai_traffic_police_dev_plant_cop). Passing it at speed is the stock trigger: the pursuit must start.
- *   B. HEAT + ROADBLOCK. The heat is raised to 3 (DEV) and the drive goes on at full throttle: a roadblock must be set
+ *   B. HEAT + ROADBLOCK. The heat is raised to 3 (DEV), the pursuers are held 40 m back (DEV, or the first one
+ *      overtakes and pulls the car over before the block) and the drive goes on at full throttle: a roadblock must be set
  *      up 200..400 m ahead; the car drives at it (lane assist keeps its lane, so it crosses through the gap or
  *      touching the cars), the block must be removed once passed.
- *   C. ESCAPE. The pursuers are held back (DEV: they brake), the car keeps going: the escape rule must fire (lost
+ *   C. ESCAPE. The pursuers now brake (DEV), the car keeps going: the escape rule must fire (lost
  *      sight for 6 + 2 x heat s, or 320 m).
  *   D. BUST. After the grace a second cop is planted ahead and passed; once it chases, the car brakes to a stop and
  *      waits. The cop comes up (overtake -> pull-over, or the PULL OVER meter): BUSTED. During the 3 s hold the car
  *      presses THROTTLE and must not move; after the release it must drive off again.
  *
- * Shots (log dir; TD5RE_D3D12_CAPTURE=1 arms the capture): police_pursuit_{a,b}.png (rear view, a pursuer 8..60 m
- * behind), police_roadblock.png (the block 50..110 m ahead), police_escape.png (the ESCAPED toast),
+ * Shots (log dir; TD5RE_D3D12_CAPTURE=1 arms the capture): police_pursuit_{a,b}.png (chase view, a pursuer 8..45 m
+ * ahead, 4 ticks apart: the strobe flashes), police_roadblock.png / _near.png (7..13 / 2..4 spans short of the block), police_escape.png (the ESCAPED toast),
  * police_busted.png (the BUSTED banner).
  *
  * ONE file-scope struct. Compiled out of RELEASE.
@@ -111,16 +112,16 @@ int td5_police_test_mode(void) { return T.mode; }
 int td5_police_test_done(void) { return T.mode && T.done; }
 uint32_t td5_police_test_bits(void) { return T.mode ? T.bits : 0; }
 
-/* rear view while a pursuer sits 8..60 m behind: 2 frames 4 ticks apart (the strobe flashes) */
+/* a pursuer 8..45 m in front of the car (overtaking it): 2 frames 4 ticks apart (the strobe flashes) */
 static uint32_t pt_rear_shots(void)
 {
     if (T.shot_p) return 0;
     if (T.rear > 0) {
         ++T.rear;
-        if (T.rear == 25) pt_shot("pursuit_a");
-        if (T.rear == 29) pt_shot("pursuit_b");
-        if (T.rear >= 30) { T.rear = 0; T.shot_p = 1; }
-        return (uint32_t)TD5_INPUT_REAR_VIEW;
+        if (T.rear == 2) pt_shot("pursuit_a");
+        if (T.rear == 6) pt_shot("pursuit_b");
+        if (T.rear >= 7) { T.rear = 0; T.shot_p = 1; }
+        return 0;
     }
     {
         const TD5_Actor *pl = td5_game_get_actor(0);
@@ -137,7 +138,7 @@ static uint32_t pt_rear_shots(void)
                 const double hy = (double)((((int)pl->euler_accum.yaw) >> 8) & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
                 f = (dx * sin(hy) + dz * cos(hy)) / 330.0;
             }
-            if (d > 8.0 && d < 60.0 && f < -4.0) { T.rear = 1; break; }
+            if (d > 8.0 && d < 45.0 && f > 4.0) { T.rear = 1; break; }   /* a pursuer in front, in the chase view */
         }
     }
     return 0;
@@ -176,6 +177,9 @@ void td5_police_test_tick(void)
         if (td5_police_dev_pursuit(0)) {
             T.t_pursuit = tick;
             td5_police_dev_set_heat(0, 3);
+            /* the pursuers are held back from here: a cop that overtakes pulls the car over (the stock rule, kept),
+             * and this scenario has to reach the roadblock and then escape */
+            td5_police_dev_slow_pursuers(1);
             pt_phase(PT_BLOCK);
         } else if (tick - T.phase_t0 > 25 * 30) {
             /* the planted cop may have been passed too slowly or out of sight: plant another, at most 3 */
@@ -188,6 +192,7 @@ void td5_police_test_tick(void)
         if (!td5_police_dev_pursuit(0)) {
             /* the pursuit ended on its own before the block was seen through (an escape at full speed): fine, go on */
             if (!T.block_seen) TD5_LOG_W(LOG_TAG, "[POLICETEST] the pursuit ended before a roadblock was placed");
+            td5_police_dev_slow_pursuers(0);
             T.t_escape = tick;
             pt_phase(PT_GRACE);
             break;
@@ -200,10 +205,11 @@ void td5_police_test_tick(void)
                     T.block_seen = 1; T.block_span = span; T.block_ncar = ncar; T.block_gap = gap; T.t_block = tick;
                     TD5_LOG_I(LOG_TAG, "[POLICETEST] roadblock on span %d, %d cars, gap %.1f m", span, ncar, gap);
                 }
-                if (!T.shot_blk) {
+                if (T.shot_blk < 2) {
                     const TD5_Actor *pl = td5_game_get_actor(0);
                     const int d = pl ? span - (int)(int16_t)pl->track_span_normalized : 0;
-                    if (d > 12 && d < 30) { pt_shot("roadblock"); T.shot_blk = 1; }
+                    if (T.shot_blk == 0 && d > 7 && d < 13) { pt_shot("roadblock"); T.shot_blk = 1; }
+                    if (T.shot_blk == 1 && d > 1 && d <= 4) { pt_shot("roadblock_near"); T.shot_blk = 2; }
                 }
             } else if (T.block_seen && !T.t_block_gone) {
                 T.t_block_gone = tick;
@@ -212,7 +218,7 @@ void td5_police_test_tick(void)
         }
         if ((T.t_block_gone && tick - T.t_block_gone > 60) || tick - T.phase_t0 > 60 * 30) {
             if (!T.block_seen) TD5_LOG_W(LOG_TAG, "[POLICETEST] no roadblock in 60 s of heat 3");
-            td5_police_dev_slow_pursuers(1);
+            td5_police_dev_slow_pursuers(2);
             pt_phase(PT_ESCAPE);
         }
         break;
@@ -239,6 +245,7 @@ void td5_police_test_tick(void)
     case PT_STOP:
         /* brake to rest, then wait for the cop */
         bits = kmh > 3.0 ? (uint32_t)TD5_INPUT_BRAKE : 0u;
+        pt_rear_shots();
         if (td5_police_dev_busted(0)) {
             T.t_bust = tick;
             pt_phase(PT_HELD);
