@@ -111,6 +111,10 @@ int  td5_roam_race_start_prefs(void);
 /* Start now with `s` (NULL = defaults): grid, barriers, countdown. 1 on success. */
 int  td5_roam_race_start(const TD5_RoamRaceSetup *s);
 void td5_roam_race_abandon(void);            /* back to OFF, the car stays where it is */
+long td5_roam_race_fin_ticks(void);          /* [HF] dev: ticks since the player's finish, 0 when not finished */
+int  td5_roam_race_player_finished(void);    /* [HF] the player crossed the line (run-out / results) */
+void td5_roam_race_draw_world(int view);     /* [HF] START / FINISH gantries, world pass, pane 0, self-gated */
+int  td5_roam_race_wrong_way(void);          /* [HF] 1 while the route-direction check says WRONG WAY (stock HUD draws it) */
 
 /* ---- game hooks -------------------------------------------------------------- */
 void     td5_roam_race_frame(void);          /* once per rendered frame, after td5_roam_route_ui_frame */

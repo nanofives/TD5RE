@@ -11,6 +11,7 @@
 #include "td5_track.h"
 #include "td5_trackgen_stream.h"   /* [ROUND 1019 T] free-cam tour waits for the scenery stream */
 #include "td5_game.h"
+#include "td5_roam_race.h"   /* [HF] finish orbit */
 #include "td5_damage.h"   /* [CAR DAMAGE] end-of-race orbit around a finished/wrecked car */
 #include "td5_platform.h"
 #include "td5_hud.h"
@@ -2339,8 +2340,13 @@ void td5_camera_snap_poses(void)
  * the finish-orbit knob are on. */
 static void cam_finish_orbit_step(int v, TD5_Actor *actor)
 {
-    if (!td5_damage_finish_orbit_enabled() || !actor) return;
+    if (!actor) return;
     if (v < 0 || v >= TD5_MAX_VIEWPORTS) return;
+    if (td5_roam_race_player_finished() && v == 0) {   /* [GEO FREE ROAM HF] the finish orbit, damage knob or not */
+        g_camYawOffset[v] = (g_camYawOffset[v] + (td5_damage_finish_orbit_enabled() ? td5_damage_finish_orbit_speed() : 10)) & 0xFFF;
+        return;
+    }
+    if (!td5_damage_finish_orbit_enabled()) return;
     int slot = (int)actor->slot_index;
     if (slot < 0) return;
     if (!td5_game_slot_is_finished(slot) && !td5_damage_slot_knocked_out(slot)) return;

@@ -747,7 +747,7 @@ void td5_roam_sprint_test_frame(void)
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
         }
     }
-    if (E.driven && D.done && !E.reported) {
+    if (E.driven && D.done && !E.reported && !(td5_env_int("TD5RE_ROAM_HF_FINLOG", 0, 0, 1) && td5_roam_race_fin_ticks() < 420)) {
         char note[128];
         E.reported = 1;
         td5_roam_sprint_test_verdict(note, sizeof note);

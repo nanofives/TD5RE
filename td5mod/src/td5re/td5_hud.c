@@ -54,6 +54,7 @@
 #include "td5_geo_roads.h"  /* [1018 L] the street under a car on a block-loop corridor */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM: speedo-only HUD, relabelled pause row */
+#include "td5_roam_race.h"     /* [HF] route-driven WRONG WAY */
 #include "td5_roam_route_ui.h" /* GEO FREE ROAM F5-A: roam minimap (street map + route) */
 
 #include <stdlib.h>
@@ -3072,8 +3073,8 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
          * counters, total timer, metric digits (odometer / checkpoint timer read the span)
          * or U-turn warning (reads the span and the route table). The minimap is gated
          * in td5_hud_render_minimap, the street label in td5_hud_draw_street_lines. */
-        if (td5_roam_active())
-            flags = TD5_HUD_SPEEDOMETER | TD5_HUD_RESERVED_5 | TD5_HUD_RESERVED_3;
+        if (td5_roam_active())    /* [HF] + the U-turn flag: in roam it only draws the route-driven WRONG WAY */
+            flags = TD5_HUD_SPEEDOMETER | TD5_HUD_UTURN_WARNING | TD5_HUD_RESERVED_5 | TD5_HUD_RESERVED_3;
 
         /* [PORT: N-way] every pane shows the same HUD element set. */
         for (int hv = 0; hv < MAX_HUD_VIEWS; hv++)
@@ -6386,7 +6387,23 @@ void td5_hud_render_overlays(float dt)
         }
 
         /* --- Bit 4: U-turn warning --- */
-        if (flags & TD5_HUD_UTURN_WARNING) {
+        if ((flags & TD5_HUD_UTURN_WARNING) && td5_roam_active()) {
+            /* [GEO FREE ROAM HF] the stock U-turn icon + WRONG WAY caption, driven from the route
+             * direction (td5_roam_race_wrong_way) instead of the span counters (roam has no spans) */
+            if (v == 0 && td5_roam_race_player_finished() && (g_tick_counter & 0x3Fu) < 0x30u) {
+                s_hud_next_text_scale = 1.6f;   /* the stock FINISH caption */
+                td5_hud_queue_text(0, (int)vl->center_x,
+                                   (int)(vl->vp_int_top + (vl->vp_int_bottom - vl->vp_int_top) * 0.14f),
+                                   1, "%s", s_hud_string_table[8]);
+            }
+            if (v == 0 && td5_roam_race_wrong_way() && (g_tick_counter & 0x7Fu) < 0x60u) {
+                hud_submit_quad(view_base + 0x67C);
+                s_hud_next_text_scale = 1.6f;
+                td5_hud_queue_text(0, (int)vl->center_x,
+                                   (int)(vl->vp_int_top + (vl->vp_int_bottom - vl->vp_int_top) * 0.14f),
+                                   1, "%s", s_hud_string_table[6]);
+            }
+        } else if (flags & TD5_HUD_UTURN_WARNING) {
             int16_t cur_span = actor_span_index(actor_slot);
             int prev_span = s_prev_span_pos[v];
 
