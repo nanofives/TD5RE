@@ -733,6 +733,7 @@ static struct { int checked, driven, reported; } E;
 
 void td5_roam_sprint_test_frame(void)
 {
+    td5_roam_wall_test_frame();   /* [HE] the roam-walls test (self-gated) */
     if (!E.checked && !D.mode && td5_roam_active()) {
         const char *m = getenv("TD5RE_ROAM_SPRINT_TEST");
         E.checked = 1;
@@ -1036,7 +1037,9 @@ static uint32_t sd_bits(TD5_Actor *a);
 uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
 {
     const long last = D.tick_last;
-    const uint32_t bits = sd_bits(a);
+    uint32_t bits;
+    if (td5_roam_wall_test_bits(a, &bits)) return bits;   /* [HE] the roam-walls test */
+    bits = sd_bits(a);
     if (D.rear_cd && td5_roam_race_state() == TD5_RRACE_COUNTDOWN) return (uint32_t)TD5_INPUT_REAR_VIEW;   /* [F7] */
     if (D.trc && a && D.tick_last != last) {
         double along, lat;

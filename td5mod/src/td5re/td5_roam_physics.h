@@ -109,6 +109,7 @@ typedef struct {
     long ticks, wall_hits, pinches, rescues, rescues_y, teleports, nohit_wheels, outside_wheels;
     long wall_side_flips, pinch_rescues;   /* [F2-E] thin-wall pushes flipped back, pinch rescues */
     long pinch_tips;                       /* [F2-E] wall-tip pinches resolved by one translation */
+    long barrier_pinch_wins;               /* [HE] pinches with a race-barrier probe: the barrier push applied */
     long wall_corner_pen_max;
     long mirror_cmp, mirror_diff_h, mirror_diff_n, mirror_diff_cap, mirror_diff_surf, mirror_scmp;
     long mirror_fallback, mirror_corner_cmp, mirror_corner_diff, mirror_corner_fallback;

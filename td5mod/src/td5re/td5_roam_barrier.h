@@ -72,6 +72,8 @@ void td5_roam_barriers_draw(int view);               /* per pane, in the world p
  * back into the junction the route crosses, taken from the closed arm's own ribbon at build time (the frame is a
  * pure translation, so it holds in PLACE and WORLD). 0 for a turn board or when unknown. */
 int  td5_roam_barrier_open_dir(int i, double *nx, double *nz);
+/* [HE] the closed arm of mouth barrier i: its edge key and end. 0 for a turn board. */
+int  td5_roam_barrier_arm(int i, uint64_t *edge_key, int *end);
 
 typedef struct {
     int clusters_passed;      /* clusters the route goes through (start/finish pockets included) */
@@ -101,6 +103,9 @@ void td5_roam_barriers_stats(TD5_RoamBarrierStats *out);
  * builds the barriers for each, logs + writes <log dir>/roam_barrier_census.txt and
  * roam_barrier_<route>.json (barriers + route polyline, place frame) and returns 1 (exit). */
 int td5_roam_barriers_dev_test(void);
+/* [HE] DEV: arm i of every cluster the last build sealed: status 0 taken by the route, 1 barriered, 2 linked (left
+ * open on purpose: a twin carriageway / dead end), 3 OPEN; i < 0 returns the count. */
+int td5_roam_barriers_dev_arm(int i, int *status, uint64_t *edge_key, uint64_t *cluster_key);
 #endif
 
 #endif /* TD5_ROAM_BARRIER_H */

@@ -121,6 +121,11 @@ static struct {
 
 static int ke(int sc) { return R.cur[sc] && !R.prev[sc]; }
 
+#ifndef TD5RE_RELEASE
+static int s_dev_hold_finish;    /* [HE] DEV: no checkpoints / finish (the roam-walls test puts the car anywhere on the route) */
+void td5_roam_race_dev_hold_finish(int on) { s_dev_hold_finish = on ? 1 : 0; }
+#endif
+
 /* ============================================================ small helpers === */
 
 static void rr_free_route(void)
@@ -676,6 +681,9 @@ void td5_roam_race_tick(void)
             if (R.laps_done >= R.laps) rr_finish();
         }
     }
+#ifndef TD5RE_RELEASE
+    if (s_dev_hold_finish) { td5_roam_ai_progress(R.clock, 1, R.along, 0, R.ticks); return; }   /* [HE] DEV: the wall test teleports */
+#endif
     while (R.cp_next < R.ncp && R.along >= R.cp_along[R.cp_next] - (R.cp_next == R.ncp - 1 ? RR_FINISH_EPS_M : 3.0) &&
            R.lateral_m < RR_CP_RADIUS_M) {
         const int k = R.cp_next++;

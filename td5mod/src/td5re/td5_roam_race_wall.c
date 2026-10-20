@@ -28,6 +28,7 @@
 #include <math.h>
 
 #include "td5_platform.h"
+#include "td5_config.h"
 #include "td5_fp.h"
 #include "td5re.h"
 #include "td5_types.h"
@@ -47,6 +48,7 @@
 #define RW_DEPTH      (8.0 * RW_M)      /* a probe this far behind the panel is no longer caught */
 #define RW_NEAR       (6.0 * RW_M)      /* decide a barrier's open side when a probe is this close */
 #define RW_SIDE_PROBE (2.0 * RW_M)      /* patch test offset either side of the midpoint */
+#define RW_CHASSIS_BACK (3.0 * RW_M)    /* [HE] a panel only catches a car whose chassis is at most this far past it */
 #define RW_Y_BELOW    (2.0 * RW_M * 256.0)                       /* 24.8: probe this far under the base = other level */
 #define RW_Y_ABOVE    ((TD5_ROAM_BARRIER_H_M + 1.0) * RW_M * 256.0)
 
@@ -98,7 +100,11 @@ static void rw_rebuild(const TD5_RoamBarrier *b, int n)
              * a car happens to be: the old chassis fallback could pick the ARM side, and then the panel pushed a car
              * that came from the junction through into the closed street (one barrier got +1 and -1 in two runs) */
             double ox, oz;
-            if (s->mouth && td5_roam_barrier_open_dir(i, &ox, &oz)) {
+            int from_build = 1;
+#ifndef TD5RE_RELEASE
+            from_build = td5_env_int("TD5RE_ROAM_WALL_SIDE_FROM_BUILD", 1, 0, 1);   /* DEV A/B: 0 = the F6-B patch / chassis rule */
+#endif
+            if (from_build && s->mouth && td5_roam_barrier_open_dir(i, &ox, &oz)) {
                 const double dot = ox * -s->uz + oz * s->ux;
                 if (fabs(dot) > 0.2) { s->side = (int8_t)(dot > 0.0 ? 1 : -1); W.st.side_route++; }
             }
@@ -253,12 +259,16 @@ int td5_roam_race_wall_probe(int slot, int probe, int32_t x, int32_t z, int32_t 
                              int32_t *push_x, int32_t *push_z, int32_t *push_dist)
 {
     const double px = x / 256.0, pz = z / 256.0;
-    double best_pen = 0.0, bnx = 0.0, bnz = 0.0;
-    int i, hit = 0;
+    double best_pen = 0.0, bnx = 0.0, bnz = 0.0, chx = 0.0, chz = 0.0;
+    int i, hit = 0, have_ch = 0;
     if (slot < 0 || slot >= RW_RACERS || !td5_roam_race_barriers_live()) return 0;
     if (slot > 0 && td5_roam_ai_slot_finished(slot)) return 0;   /* [F7] a finished opponent is not racing */
     if (!rw_sync()) return 0;
     if (probe == 0) rw_chassis_check(slot);
+    {
+        const TD5_Actor *a = td5_game_get_actor(slot);
+        if (a) { chx = a->world_pos.x / 256.0; chz = a->world_pos.z / 256.0; have_ch = 1; }
+    }
     for (i = 0; i < W.nseg; i++) {
         RwSeg *s = &W.seg[i];
         double t, d, gy;
@@ -275,6 +285,15 @@ int td5_roam_race_wall_probe(int slot, int probe, int32_t x, int32_t z, int32_t 
         if ((double)y < gy - RW_Y_BELOW || (double)y > gy + RW_Y_ABOVE) continue;
         d *= s->side;                          /* + = open side */
         if (d >= RW_THICK || d < -RW_DEPTH) continue;
+        if (have_ch) {
+            /* [HE] The depth window catches a probe that went through the panel in one tick. It must not catch a car
+             * that is BEYOND this panel: two panels closing one short edge from both ends (a route junction and a
+             * glued neighbour, 2 m apart: barriers 4 / 84 of the 2026-10-19 geo_map sprint) face each other, and a car
+             * pressing on one sat 7 m inside the other's window, which threw it the other way, through the first. */
+            double ct, cd;
+            rw_rel(s, chx, chz, &ct, &cd);
+            if (cd * s->side < -RW_CHASSIS_BACK) { W.st.beyond_skips++; continue; }
+        }
         if (RW_THICK - d > best_pen) {
             best_pen = RW_THICK - d;
             bnx = -s->uz * s->side; bnz = s->ux * s->side;

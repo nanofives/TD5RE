@@ -1157,7 +1157,7 @@ static void wq_strip(double x0, double z0, float y0, double x1, double z1, float
 
 void td5_roam_route_ui_draw_world(int view)
 {
-    const TD5_RouteResult *r = td5_roam_route_result();
+    const TD5_RouteResult *r = td5_roam_route_display();   /* [HE] no connector jogs: the arrows do not twist at junctions */
     double px, pz;
     int32_t ox, oz;
     int i, i0, i1, nwp = td5_roam_route_wp_count();

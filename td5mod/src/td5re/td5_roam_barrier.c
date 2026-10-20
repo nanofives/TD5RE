@@ -182,6 +182,26 @@ void td5_roam_barriers_set_visible(int on) { B.visible = on ? 1 : 0; }
 int  td5_roam_barriers_visible(void) { return B.visible; }
 void td5_roam_barriers_stats(TD5_RoamBarrierStats *out) { if (out) *out = B.st; }
 
+int td5_roam_barrier_arm(int i, uint64_t *edge_key, int *end)
+{
+    if (i < 0 || i >= B.n || B.pub[i].kind != TD5_ROAM_BARRIER_MOUTH) return 0;
+    if (edge_key) *edge_key = B.aux[i].arm_key;
+    if (end) *end = B.aux[i].arm_end;
+    return 1;
+}
+
+#ifndef TD5RE_RELEASE
+int td5_roam_barriers_dev_arm(int i, int *status, uint64_t *edge_key, uint64_t *cluster_key)
+{
+    if (i < 0) return B.ndbg;
+    if (i >= B.ndbg) return 0;
+    if (status) *status = B.dbg[i].status;
+    if (edge_key) *edge_key = B.dbg[i].ek;
+    if (cluster_key) *cluster_key = B.dbg[i].ck;
+    return 1;
+}
+#endif
+
 int td5_roam_barrier_open_dir(int i, double *nx, double *nz)
 {
     if (i < 0 || i >= B.n || B.pub[i].kind != TD5_ROAM_BARRIER_MOUTH) return 0;

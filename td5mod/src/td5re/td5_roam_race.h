@@ -147,6 +147,7 @@ typedef struct {
     double max_pen_m;         /* deepest probe penetration past the panel face, metres         */
     double max_chassis_past_m;
     int  barriers, mouths;
+    long beyond_skips;        /* [HE] probe x panel tests skipped: the car's chassis is more than 3 m past that panel */
 } TD5_RoamRaceWallStats;
 void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 
@@ -172,6 +173,18 @@ int      td5_roam_sprint_test_done(void);
 int      td5_roam_sprint_test_verdict(char *note, size_t n);   /* 0 PASS / 1 WARN / 2 FAIL */
 /* Waypoints of the scripted routes (lat/lon, START first, FINISH last), for the census tools. */
 int      td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max);
+void     td5_roam_race_dev_hold_finish(int on);   /* [HE] no checkpoints / finish while on */
+
+/* ---- DEV: the `roam-walls` test (td5_roam_wall_test.c, [HE]) ------------------- */
+/* TD5RE_ROAM_WALL_TEST=1 with --Roam=1 --RoamSpawn=<START> (and TD5RE_ROAM_STREAM=0): plans the route
+ * (TD5RE_ROAM_WALL_WP="lat,lon;lat,lon;..." or Mariano's geo_map sprint), starts a solo race, then
+ *   1. FLOOD: fills the car-passable drivable surface from the route with every mouth barrier as a cut; any
+ *      reached road that is not the route's own surface nor a linked arm is a leak (exits listed);
+ *   2. ATTACK: puts the car in front of every closed mouth and drives it at the panel (middle at 90 km/h, both
+ *      kerb ends at 50 km/h, 30 degrees out): the chassis past the panel or on the closed arm is a leak.
+ * Writes <log dir>roam_wall_test.txt + roam_wall_flood.csv + roam_wall_attack.csv, logs a verdict, quits. */
+void     td5_roam_wall_test_frame(void);
+int      td5_roam_wall_test_bits(struct TD5_Actor *a, uint32_t *bits);   /* 1 = the test drives slot 0 now */
 #endif
 
 #endif /* TD5_ROAM_RACE_H */
