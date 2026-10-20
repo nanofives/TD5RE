@@ -1134,34 +1134,138 @@ done:
 
 #undef RR_OK
 
+/* [roam M] U-turns (td5_roam_route.h). Geometry in the frame of the approach: d = the heading before the turn, sv the
+ * unit sideways from the approach carriageway A (point i-1) to the return one B (point i+1), M their midpoint, w half
+ * their separation, h the depth of the junction vertex ahead of M. */
+#define RR_UTURN_MIN_W_M  1.0       /* half separation: carriageways >= 2 m apart (not an out-and-back spike) */
+#define RR_UTURN_R_M      5.0       /* the circle's radius at least this (a car's turning circle), or w        */
+#define RR_UTURN_STEP_M   1.5
+#define RR_PI_            3.14159265358979323846
+
+static int rr_uturn_frame(const double *x, const double *z, int n, int i, double *d, double *sv, double *w, double *h)
+{
+    double ax, az, bx, bz, qx, qz, la, lb, l, ex, ez, along, lx, lz, ll;
+    if (i < 2 || i + 2 >= n) return 0;
+    ax = x[i] - x[i - 1]; az = z[i] - z[i - 1]; qx = x[i + 1] - x[i]; qz = z[i + 1] - z[i];
+    la = sqrt(ax * ax + az * az); lb = sqrt(qx * qx + qz * qz);
+    if (la <= 0.0 || lb <= 0.0 || (ax * qx + az * qz) / (la * lb) >= 0.0 || (la >= 15.0 * RR_UPM && lb >= 15.0 * RR_UPM)) return 0;
+    ax = x[i - 1] - x[i - 2]; az = z[i - 1] - z[i - 2]; bx = x[i + 2] - x[i + 1]; bz = z[i + 2] - z[i + 1];
+    la = sqrt(ax * ax + az * az); lb = sqrt(bx * bx + bz * bz);
+    if (la <= 0.0 || lb <= 0.0 || (ax * bx + az * bz) / (la * lb) >= -0.5) return 0;     /* not reversed: a jog */
+    /* the approach heading, averaged with the reversed return heading */
+    d[0] = ax / la - bx / lb; d[1] = az / la - bz / lb;
+    l = sqrt(d[0] * d[0] + d[1] * d[1]);
+    if (l <= 0.0) return 0;
+    d[0] /= l; d[1] /= l;
+    ex = x[i + 1] - x[i - 1]; ez = z[i + 1] - z[i - 1];
+    along = ex * d[0] + ez * d[1];
+    lx = ex - d[0] * along; lz = ez - d[1] * along;
+    ll = sqrt(lx * lx + lz * lz);
+    *w = 0.5 * ll;
+    if (*w < RR_UTURN_MIN_W_M * RR_UPM) return 0;
+    sv[0] = lx / ll; sv[1] = lz / ll;
+    *h = (x[i] - 0.5 * (x[i - 1] + x[i + 1])) * d[0] + (z[i] - 0.5 * (z[i - 1] + z[i + 1])) * d[1];
+    return 1;
+}
+
+int td5_roam_route_is_uturn(const double *x, const double *z, int n, int i)
+{
+    double d[2], sv[2], w, h;
+    return rr_uturn_frame(x, z, n, i, d, sv, &w, &h);
+}
+
+/* a cubic from p0 (tangent t0) to p3 (tangent t3), both tangents unit, handles q long; samples t in (0, 1] */
+static int rr_uturn_cubic(double p0x, double p0z, double t0x, double t0z, double p3x, double p3z, double t3x, double t3z,
+                          double q, double *ox, double *oz, int k, int cap)
+{
+    const double p1x = p0x + t0x * q, p1z = p0z + t0z * q, p2x = p3x - t3x * q, p2z = p3z - t3z * q;
+    const double len = hypot(p3x - p0x, p3z - p0z) + q;
+    const int ns = 1 + (int)(len / (RR_UTURN_STEP_M * RR_UPM));
+    int s;
+    for (s = 1; s <= ns && k < cap; s++) {
+        const double t = (double)s / ns, u = 1.0 - t;
+        ox[k] = u * u * u * p0x + 3.0 * u * u * t * p1x + 3.0 * u * t * t * p2x + t * t * t * p3x;
+        oz[k] = u * u * u * p0z + 3.0 * u * u * t * p1z + 3.0 * u * t * t * p2z + t * t * t * p3z;
+        k++;
+    }
+    return k;
+}
+
+int td5_roam_route_uturn_arc(const double *x, const double *z, int n, int i, double *ox, double *oz, int cap)
+{
+    double d[2], sv[2], w, h, R, depth, mx, mz, cx, cz, lx, lz, rx, rz, qa, qb;
+    int k = 0, s, ns;
+    if (!rr_uturn_frame(x, z, n, i, d, sv, &w, &h)) return 0;
+    R = RR_UTURN_R_M * RR_UPM;
+    if (R < w) R = w;
+    if (h < R) h = R;                                   /* the circle never ends short of its own radius */
+    depth = h - R;                                      /* circle centre ahead of M */
+    if (depth < 2.0 * (R - w)) depth = 2.0 * (R - w);   /* room for the swing out from w to R */
+    mx = 0.5 * (x[i - 1] + x[i + 1]); mz = 0.5 * (z[i - 1] + z[i + 1]);
+    cx = mx + d[0] * depth; cz = mz + d[1] * depth;
+    lx = cx - sv[0] * R; lz = cz - sv[1] * R;           /* the circle's point on the A side, heading d   */
+    rx = cx + sv[0] * R; rz = cz + sv[1] * R;           /* ... on the B side, heading -d                  */
+    /* A (i-1) -> L: straight on, swinging out to the circle */
+    qa = 0.5 * ((lx - x[i - 1]) * d[0] + (lz - z[i - 1]) * d[1]);
+    if (qa > 0.5 * RR_UPM) k = rr_uturn_cubic(x[i - 1], z[i - 1], d[0], d[1], lx, lz, d[0], d[1], qa, ox, oz, k, cap);
+    else if (k < cap) { ox[k] = lx; oz[k] = lz; k++; }
+    /* round the far half of the circle, L -> R */
+    ns = 1 + (int)(RR_PI_ * R / (RR_UTURN_STEP_M * RR_UPM));
+    for (s = 1; s <= ns && k < cap; s++) {
+        const double th = RR_PI_ * s / ns;
+        ox[k] = cx - sv[0] * R * cos(th) + d[0] * R * sin(th);
+        oz[k] = cz - sv[1] * R * cos(th) + d[1] * R * sin(th);
+        k++;
+    }
+    /* R -> B (i+1): back down into the return carriageway (its last sample is i+1 itself: left to the caller) */
+    qb = 0.5 * ((rx - x[i + 1]) * d[0] + (rz - z[i + 1]) * d[1]);
+    if (qb > 0.5 * RR_UPM) {
+        k = rr_uturn_cubic(rx, rz, -d[0], -d[1], x[i + 1], z[i + 1], -d[0], -d[1], qb, ox, oz, k, cap);
+        if (k > 0) k--;                                 /* drop the end point: it is i+1 */
+    }
+    return k >= cap ? 0 : k;
+}
+
 /* [F10] A driver's line from a planned polyline, td5_roam_ai.c's two cleanups (F7): (1) the junction-connector
  * jogs, a point that turns back more than 90 degrees with a leg under 15 m; (2) the LATERAL jogs through a cluster
  * centre that sits in a divided avenue's median 7..14 m off the carriageway: a vertex whose heading before and after
  * agree within 20 degrees, more than 1.5 m off the chord of its neighbours, that chord under 150 m. Returns the count. */
-static int rr_driver_line(double *x, double *z, int n)
+#define RR_UTURN_CAP 96                 /* points one U-turn arc may add */
+static int rr_driver_line(double **px, double **pz, int n)
 {
-    int i, m = 0, changed = 1, guard = 0;
+    const double *x = *px, *z = *pz;
+    int i, m = 0, changed = 1, guard = 0, nu = 0;
+    double *ox, *oz;
+    for (i = 0; i < n; i++) nu += td5_roam_route_is_uturn(x, z, n, i);
+    ox = (double *)malloc((size_t)(n + nu * RR_UTURN_CAP + 1) * sizeof(double));
+    oz = (double *)malloc((size_t)(n + nu * RR_UTURN_CAP + 1) * sizeof(double));
+    if (!ox || !oz) { free(ox); free(oz); ox = *px; oz = *pz; nu = -1; }
     for (i = 0; i < n; i++) {
         if (i >= 1 && i + 1 < n) {
             const double ax = x[i] - x[i - 1], az = z[i] - z[i - 1], qx = x[i + 1] - x[i], qz = z[i + 1] - z[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(qx * qx + qz * qz);
-            if (la > 0.0 && lb > 0.0 && (ax * qx + az * qz) / (la * lb) < 0.0 && (la < 15.0 * RR_UPM || lb < 15.0 * RR_UPM)) continue;
+            if (la > 0.0 && lb > 0.0 && (ax * qx + az * qz) / (la * lb) < 0.0 && (la < 15.0 * RR_UPM || lb < 15.0 * RR_UPM)) {
+                /* [roam M] a U-turn: its drivable arc instead of the vertex (a jog is just dropped) */
+                if (nu > 0) m += td5_roam_route_uturn_arc(x, z, n, i, ox + m, oz + m, RR_UTURN_CAP);
+                continue;
+            }
         }
-        if (m > 0 && fabs(x[i] - x[m - 1]) < 1.0 && fabs(z[i] - z[m - 1]) < 1.0) continue;
-        x[m] = x[i]; z[m] = z[i]; m++;
+        if (m > 0 && fabs(x[i] - ox[m - 1]) < 1.0 && fabs(z[i] - oz[m - 1]) < 1.0) continue;
+        ox[m] = x[i]; oz[m] = z[i]; m++;
     }
+    if (nu >= 0) { free(*px); free(*pz); *px = ox; *pz = oz; }
     while (changed && guard++ < 16) {
         changed = 0;
         for (i = 2; i + 2 < m; i++) {
-            const double ax = x[i - 1] - x[i - 2], az = z[i - 1] - z[i - 2];
-            const double bx = x[i + 2] - x[i + 1], bz = z[i + 2] - z[i + 1];
-            const double cx = x[i + 1] - x[i - 1], cz = z[i + 1] - z[i - 1];
+            const double ax = ox[i - 1] - ox[i - 2], az = oz[i - 1] - oz[i - 2];
+            const double bx = ox[i + 2] - ox[i + 1], bz = oz[i + 2] - oz[i + 1];
+            const double cx = ox[i + 1] - ox[i - 1], cz = oz[i + 1] - oz[i - 1];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz), lc = sqrt(cx * cx + cz * cz);
             if (la <= 0.0 || lb <= 0.0 || lc <= 0.0 || lc > 150.0 * RR_UPM) continue;
             if ((ax * bx + az * bz) / (la * lb) < cos(20.0 * 3.14159265358979323846 / 180.0)) continue;
-            if (fabs((x[i] - x[i - 1]) * cz - (z[i] - z[i - 1]) * cx) / lc <= 1.5 * RR_UPM) continue;
-            memmove(&x[i], &x[i + 1], (size_t)(m - i - 1) * sizeof(double));
-            memmove(&z[i], &z[i + 1], (size_t)(m - i - 1) * sizeof(double));
+            if (fabs((ox[i] - ox[i - 1]) * cz - (oz[i] - oz[i - 1]) * cx) / lc <= 1.5 * RR_UPM) continue;
+            memmove(&ox[i], &ox[i + 1], (size_t)(m - i - 1) * sizeof(double));
+            memmove(&oz[i], &oz[i + 1], (size_t)(m - i - 1) * sizeof(double));
             m--;
             changed = 1;
         }
@@ -1196,7 +1300,7 @@ int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, d
         return 0;
     }
     free(refs.r);
-    poly.n = rr_driver_line(poly.x, poly.z, poly.n);
+    poly.n = rr_driver_line(&poly.x, &poly.z, poly.n);
     for (i = 1; i < poly.n; i++) L += hypot(poly.x[i] - poly.x[i - 1], poly.z[i] - poly.z[i - 1]);
     if (px) *px = poly.x; else free(poly.x);
     if (pz) *pz = poly.z; else free(poly.z);
@@ -1838,7 +1942,7 @@ const TD5_RouteResult *td5_roam_route_display(void)
     if (!lx || !lz) { free(lx); free(lz); return r; }
     memcpy(lx, r->px, (size_t)r->npt * sizeof(double));
     memcpy(lz, r->pz, (size_t)r->npt * sizeof(double));
-    m = rr_driver_line(lx, lz, r->npt);
+    m = rr_driver_line(&lx, &lz, r->npt);
     for (i = 0; i < m; i++) {
         if (i == 0 || i == m - 1) { n = disp_push(n, lx[i], lz[i]); continue; }
         {

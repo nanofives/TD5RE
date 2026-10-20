@@ -274,16 +274,24 @@ static int ra_extend(double x, double z, double ux, double uz, double len, doubl
     return n;
 }
 
+#define RA_UTURN_CAP 96                 /* points one U-turn arc may add */
 static int ra_build_path(void)
 {
     /* 1. the race polyline without the planner's junction-connector jogs (the sprint test's rule:
-     *    a point that turns back by more than 90 degrees with a leg under 15 m) */
-    double *jx = (double *)malloc((size_t)(A.rn + 1) * sizeof(double));
-    double *jz = (double *)malloc((size_t)(A.rn + 1) * sizeof(double));
+     *    a point that turns back by more than 90 degrees with a leg under 15 m). [roam M] Not a U-TURN
+     *    (td5_roam_route_is_uturn: the route runs the opposite way after it, on the other carriageway of a
+     *    divided avenue; the circuit smoke turns round at -34.9074,-57.9597): dropping it left a chord from
+     *    one carriageway to the other over the median nose, which every opponent hit. Its drivable arc
+     *    round the junction box goes in instead. */
     double bx[64], bz[64], fx[64], fz[64];
     double *cx = NULL, *cz = NULL, *cs = NULL;
     int nj = 0, nb = 0, nf = 0, nc, i, k, m, dropped = 0;
     double ux, uz, l, total;
+    int nu = 0;
+    double *jx, *jz;
+    for (i = 0; i < A.rn; i++) nu += td5_roam_route_is_uturn(A.rpx, A.rpz, A.rn, i);
+    jx = (double *)malloc((size_t)(A.rn + 1 + nu * RA_UTURN_CAP) * sizeof(double));
+    jz = (double *)malloc((size_t)(A.rn + 1 + nu * RA_UTURN_CAP) * sizeof(double));
     if (!jx || !jz) { free(jx); free(jz); return 0; }
     for (i = 0; i < A.rn; i++) {
         if (i >= 1 && i + 1 < A.rn) {
@@ -291,7 +299,15 @@ static int ra_build_path(void)
             const double qx = A.rpx[i + 1] - A.rpx[i], qz = A.rpz[i + 1] - A.rpz[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(qx * qx + qz * qz);
             if (la > 0.0 && lb > 0.0 && (ax * qx + az * qz) / (la * lb) < 0.0 && (la < 15.0 * RA_M || lb < 15.0 * RA_M)) {
-                dropped++;
+                /* [roam M] a U-turn: the drivable arc round the junction box (td5_roam_route_uturn_arc) */
+                const int na = td5_roam_route_uturn_arc(A.rpx, A.rpz, A.rn, i, jx + nj, jz + nj, RA_UTURN_CAP);
+#ifndef TD5RE_RELEASE
+                if (td5_env_flag_off("TD5RE_ROAM_AI_DUMP"))
+                    TD5_LOG_I(LOG_TAG, "ROAM_AI_JOG %d at (%.0f,%.0f) legs %.1f / %.1f m: %s", i, A.rpx[i], A.rpz[i],
+                              la / RA_M, lb / RA_M, na > 0 ? "U-turn, arc" : "jog, dropped");
+#endif
+                if (na > 0) nj += na;
+                else dropped++;
                 continue;
             }
         }

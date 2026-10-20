@@ -395,6 +395,7 @@ planned:
  * progress and drawing, but a pursuit driver at 10 m lookahead swerves into it. A point whose turn is
  * sharper than 90 degrees with a leg under 15 m is dropped. */
 static TD5_RouteResult s_path;
+#define SD_UTURN_CAP 96                 /* points one U-turn arc may add */
 static double *s_ppx, *s_ppz, *s_pd;
 
 static void sd_build_path(void)
@@ -405,12 +406,15 @@ static void sd_build_path(void)
     /* [F9b] a via point snapped beside a junction leaves a ~16 m out-and-back spike to the node; the partido drive has
      * several of them, the casco rows keep the F6 15 m rule */
     const double jog_m = SD_IS_PARTIDO(D.mode) ? 30.0 : 15.0;
-    int c;
+    int c, nu = 0;
+    size_t cap;
     free(s_ppx); free(s_ppz); free(s_pd);
     memset(&s_path, 0, sizeof s_path);
-    s_ppx = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
-    s_ppz = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
-    s_pd  = (double *)malloc((size_t)(r->npt + 1) * (size_t)copies * sizeof(double));
+    for (i = 0; i < r->npt; i++) nu += td5_roam_route_is_uturn(r->px, r->pz, r->npt, i);
+    cap = (size_t)(r->npt + 1 + nu * SD_UTURN_CAP) * (size_t)copies;
+    s_ppx = (double *)malloc(cap * sizeof(double));
+    s_ppz = (double *)malloc(cap * sizeof(double));
+    s_pd  = (double *)malloc(cap * sizeof(double));
     if (!s_ppx || !s_ppz || !s_pd) return;
     for (c = 0; c < copies; c++)
     for (i = 0; i < r->npt; i++) {
@@ -421,7 +425,16 @@ static void sd_build_path(void)
             const double bx = r->px[i + 1] - r->px[i], bz = r->pz[i + 1] - r->pz[i];
             const double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
             if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) / (la * lb) < 0.0 &&
-                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) { dropped++; continue; }
+                (la < 15.0 * SD_M || lb < 15.0 * SD_M)) {
+                /* [roam M] a U-turn (the other carriageway, the opposite way): its drivable arc, not a chord over the nose */
+                const int na = td5_roam_route_uturn_arc(r->px, r->pz, r->npt, i, s_ppx + n, s_ppz + n, SD_UTURN_CAP);
+                int q;
+                if (na <= 0) { dropped++; continue; }
+                for (q = 0; q < na; q++, n++)
+                    s_pd[n] = n ? s_pd[n - 1] + sqrt((s_ppx[n] - s_ppx[n - 1]) * (s_ppx[n] - s_ppx[n - 1]) +
+                                                     (s_ppz[n] - s_ppz[n - 1]) * (s_ppz[n] - s_ppz[n - 1])) / SD_M : 0.0;
+                continue;
+            }
             /* [F9b] partido: an out-and-back spike to a junction node beside a via point (the points before and after
              * coincide), up to jog_m long */
             if (jog_m > 15.0 && la > 0.0 && lb > 0.0 && la < jog_m * SD_M && lb < jog_m * SD_M &&
