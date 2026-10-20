@@ -50,6 +50,7 @@ Usage:  python -I verify/roam/audit_coverage.py [--tiles DIR] [--roads DIR] [--g
                                               [--inner x0,z0,x1,z1]
 Exit 0 when every check is 0 and the structure gate is clean, else 1.
 """
+XS = 1.0  # roam M: source x -> tile x sign, set by Lattice
 import glob
 import json
 import math
@@ -211,6 +212,10 @@ class Lattice:
         self.ox, self.oz = float(g["origin"][0]), float(g["origin"][1])
         self.c, self.s = float(g["c"]), float(g["s"])
         self.S = float(g["tile_units"])
+        # roam M: a TD5ROAMGRID2 lattice is in the GAME frame (x = -east, td5_geo_frame.h); the source
+        # files (ROADS tiles, casco_poly.json) are in the SOURCE frame (x = east) and are reflected to match
+        global XS
+        XS = -1.0 if g.get("format") == "TD5ROAMGRID2" else 1.0
 
     def uv(self, x, z):
         dx, dz = x - self.ox, z - self.oz
@@ -238,7 +243,7 @@ class Lattice:
 def load_poly(path):
     with open(path, encoding="utf-8") as f:
         doc = json.load(f)
-    return [(float(c["x"]), float(c["z"])) for c in doc["corners"]]
+    return [(XS * float(c["x"]), float(c["z"])) for c in doc["corners"]]
 
 
 def pt_in_poly(x, z, poly):
@@ -431,7 +436,7 @@ def main(argv):
             kept = []
             last = None
             for p in rec.get("points", []):
-                x, z = float(p["x"]), float(p["z"])
+                x, z = XS * float(p["x"]), float(p["z"])
                 key = (round(x / 10.0), round(z / 10.0))
                 if key == last:
                     continue

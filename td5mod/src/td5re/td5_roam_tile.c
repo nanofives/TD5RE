@@ -148,7 +148,7 @@ int roam_grid_format(const RoamGrid *g, char *out, size_t cap)
         " \"note\": \"u = c*(x-ox) + s*(z-oz), v = c*(z-oz) - s*(x-ox); tx = floor(u/tile_units), "
         "tz = floor(v/tile_units); game frame x = -east (td5_geo_frame.h), casco axes +42.13 deg, design 1.8\"\n"
         "}\n",
-        g->place, (int)g->tile, g->ox, g->oz, g->angle_deg, g->c, g->s);
+        g->place, (int)g->tile, g->ox == 0.0 ? 0.0 : g->ox, g->oz == 0.0 ? 0.0 : g->oz, g->angle_deg, g->c, g->s);
 }
 
 int roam_grid_parse(const char *json, RoamGrid *g)
@@ -655,6 +655,13 @@ TD5_RoamTileCtx *td5_roam_tile_ctx_open(const char *place, int create_grid,
     /* lattice */
     td5_geo_source_path(path, sizeof path, place, "roam/ROAMGRID.JSON");
     txt = slurp_len(path, &len);
+    if (txt && !strstr(txt, ROAM_GRID_FORMAT)) {
+        /* [roam M] a source-frame lattice: rewritten in the game frame first, so the bytes that go into
+         * every tile's input hash are the ones the geometry is built on */
+        free(txt);
+        td5_roam_grid_ensure(place);
+        txt = slurp_len(path, &len);
+    }
     if (!txt && create_grid && td5_roam_grid_ensure(place))
         txt = slurp_len(path, &len);
     if (!txt || len >= sizeof c->grid_json || !roam_grid_parse(txt, &c->grid)) {
