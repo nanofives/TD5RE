@@ -1084,17 +1084,25 @@ static uint32_t sd_bits(TD5_Actor *a)
         /* the driver's own distance along ITS path, in a window round the last answer */
         const TD5_RouteResult *r = sd_path();
         double best = 1e300, ba = D.along_s;
-        int i;
+        /* [roam M] the window ahead follows the car's speed (6 m + 0.5 s): in a U-turn the return carriageway runs
+         * 8 m from the approach and ~20 m further along, and a 150 m window let the answer jump across to it, the
+         * driver took the turn as done and left the road at 62 km/h. Lost (> 12 m off it): the old wide window. */
+        const double ahead = 6.0 + sd_kmh(a) / 3.6 * 0.5;
+        int i, pass;
+        for (pass = 0; pass < 2; pass++) {
+        const double lo = pass ? D.along_s - 40.0 : D.along_s - 10.0, hi = pass ? D.along_s + 150.0 : D.along_s + ahead;
+        if (pass && best <= (12.0 * SD_M) * (12.0 * SD_M)) break;
         for (i = 0; i + 1 < r->npt; i++) {
             const double sx = r->px[i + 1] - r->px[i], sz = r->pz[i + 1] - r->pz[i];
             const double l2 = sx * sx + sz * sz;
             double t, qx, qz, d;
-            if (r->dist_m[i + 1] < D.along_s - 40.0 || r->dist_m[i] > D.along_s + 150.0) continue;
+            if (r->dist_m[i + 1] < lo || r->dist_m[i] > hi) continue;
             t = l2 > 0.0 ? ((px + ox - r->px[i]) * sx + (pz + oz - r->pz[i]) * sz) / l2 : 0.0;
             if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
             qx = r->px[i] + sx * t; qz = r->pz[i] + sz * t;
             d = (qx - px - ox) * (qx - px - ox) + (qz - pz - oz) * (qz - pz - oz);
             if (d < best) { best = d; ba = r->dist_m[i] + t * (r->dist_m[i + 1] - r->dist_m[i]); }
+        }
         }
         D.along_s = ba;
         along = ba;

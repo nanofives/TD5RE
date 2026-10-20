@@ -267,6 +267,9 @@ int td5_roam_race_wall_probe(int slot, int probe, int32_t x, int32_t z, int32_t 
     int i, hit = 0, have_ch = 0;
     if (slot < 0 || slot >= RW_RACERS || !td5_roam_race_barriers_live()) return 0;
     if (slot > 0 && td5_roam_ai_slot_finished(slot)) return 0;   /* [F7] a finished opponent is not racing */
+    /* [roam M] nor is a preloaded opponent the race does not use (slots past the opponent count stay parked: the
+     * circuit smoke loads 5 and races 3, and a barrier built over the parked pair counted them "past a barrier") */
+    if (slot > td5_roam_ai_count()) return 0;
     if (!rw_sync()) return 0;
     if (probe == 0) rw_chassis_check(slot);
     {
