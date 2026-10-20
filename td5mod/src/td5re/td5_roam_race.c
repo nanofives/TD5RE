@@ -274,7 +274,10 @@ void td5_roam_race_reset(void)
     /* [HE] td5_roam_session_start runs this on a pause-menu RESTART too (the session stays active, the route
      * survives): a race that was on is started again from the grid once the new session is up, so its barriers
      * come back and the 3-2-1 runs. td5_roam_end clears active first, so leaving roam never restarts anything. */
-    const int was_live = R.state >= TD5_RRACE_COUNTDOWN;
+    int was_live = R.state >= TD5_RRACE_COUNTDOWN;
+#ifndef TD5RE_RELEASE
+    if (!td5_env_int("TD5RE_ROAM_RACE_RESTART", 1, 0, 1)) was_live = 0;   /* DEV A/B: 0 = a restart drops the race (F6-B) */
+#endif
     if (was_live && td5_roam_active()) {
         R.restart = 1;
         R.restart_frames = 0;

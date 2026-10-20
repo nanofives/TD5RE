@@ -39,6 +39,7 @@
 #include "td5_roam_locate.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_route.h"
+#include "td5_roam_route_ui.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_race.h"
 #include "../../../re/include/td5_actor_struct.h"
@@ -117,6 +118,10 @@ static struct {
     double   shot[16][3];
     int      nshot, cur_shot;
     long     shot_t;
+    /* restart: TD5RE_ROAM_WALL_RESTART=1 -> pause menu RESTART mid-race, then the barriers must be back */
+    int      restart, rs_phase;
+    long     rs_f;
+    int      rs_saw_off, rs_saw_cd, rs_cd_max, rs_bar_n, rs_bar_vis, rs_bar_live, rs_ok;
 } T;
 
 /* ------------------------------------------------------------ helpers ------------ */
@@ -652,8 +657,12 @@ static void tw_report(void)
             fprintf(f, "  LEAK attack %d: barrier %d aim %d %.0f km/h run-up %.0f m: %s, end %.1f m from the route\n", i, t->bar,
                     t->aim, t->kmh, t->run_m, t->why, t->end_route_m);
         }
-        fprintf(f, "VERDICT: %s (flood leaking regions %d, attack leaks %d)\n", (T.nreg_leak || T.leaks) ? "FAIL" : "PASS",
-                T.nreg_leak, T.leaks);
+        if (T.restart)
+            fprintf(f, "RESTART: %s (race went OFF %d, 3-2-1 seen %d, max %d ticks left; back with %d mouth barriers, visible %d, solid %d)\n",
+                    T.rs_ok ? "PASS" : "FAIL", T.rs_saw_off, T.rs_saw_cd, T.rs_cd_max, T.rs_bar_n, T.rs_bar_vis, T.rs_bar_live);
+        fprintf(f, "VERDICT: %s (flood leaking regions %d, attack leaks %d%s)\n",
+                (T.nreg_leak || T.leaks || (T.restart && !T.rs_ok)) ? "FAIL" : "PASS", T.nreg_leak, T.leaks,
+                T.restart ? (T.rs_ok ? ", restart ok" : ", RESTART FAILED") : "");
         fclose(f);
     }
     TD5_LOG_I(LOG_TAG, "[ROAMWALLS] VERDICT %s: flood leaking regions %d (leak cells %ld), attack runs %d held %d leaked %d, "
@@ -698,7 +707,8 @@ void td5_roam_wall_test_frame(void)
                 if (*w == ';') w++;
             }
         }
-        TD5_LOG_W(LOG_TAG, "[ROAMWALLS] armed: %d waypoints", T.nwp);
+        T.restart = td5_env_int("TD5RE_ROAM_WALL_RESTART", 0, 0, 1);
+        TD5_LOG_W(LOG_TAG, "[ROAMWALLS] armed: %d waypoints%s", T.nwp, T.restart ? ", pause-menu RESTART check" : "");
     }
     if (!T.armed || T.done || !td5_roam_active()) return;
     T.frames++; T.pf++;
@@ -717,7 +727,57 @@ void td5_roam_wall_test_frame(void)
         }
         td5_roam_race_dev_hold_finish(1);
         tw_copy_route();
-        T.phase = 1; T.pf = 0;
+        T.phase = T.restart ? 10 : 1; T.pf = 0;
+        break;
+    case 10:   /* [restart] racing: 2 s, then ESC until the pause menu is up, DOWN DOWN (a DEV build has FREE CAMERA between
+                * CONTINUE and RESTART RACE), ENTER. Keys held 8 frames each, the next one 8 frames after the release. */
+        if (td5_roam_race_state() != TD5_RRACE_RACING && T.rs_phase == 0) { if (T.pf > 1800) { T.done = 1; g_td5.quit_requested = 1; } break; }
+        T.rs_f++;
+        switch (T.rs_phase) {
+        case 0: if (T.rs_f >= 60) { T.rs_phase = 1; T.rs_f = 0; } break;
+        case 1: /* ESC */
+            if (T.rs_f == 1) td5_plat_input_inject_key(0x01, 1);
+            if (T.rs_f == 9) td5_plat_input_inject_key(0x01, 0);
+            if (T.rs_f >= 25) {
+                TD5_LOG_I(LOG_TAG, "[ROAMWALLS] restart: after ESC the pause menu is %s", td5_game_is_pause_menu_active() ? "up" : "NOT up, again");
+                T.rs_phase = td5_game_is_pause_menu_active() ? 2 : 1; T.rs_f = 0;
+                if (T.pf > 900) { TD5_LOG_E(LOG_TAG, "[ROAMWALLS] restart: the pause menu never opened"); T.done = 1; g_td5.quit_requested = 1; }
+            }
+            break;
+        case 2: case 3: /* DOWN, DOWN */
+            if (T.rs_f == 1) td5_plat_input_inject_key(0xD0, 1);
+            if (T.rs_f == 9) td5_plat_input_inject_key(0xD0, 0);
+            if (T.rs_f >= 17) { T.rs_phase++; T.rs_f = 0; }
+            break;
+        case 4: /* ENTER */
+            if (T.rs_f == 1) td5_plat_input_inject_key(0x1C, 1);
+            if (T.rs_f == 9) { td5_plat_input_inject_key(0x1C, 0); T.phase = 11; T.pf = 0; }
+            break;
+        default: break;
+        }
+        break;
+    case 11:   /* [restart] the race goes OFF (session re-init), then COUNTDOWN with a running 3-2-1, then RACING */
+        {
+            const int st = td5_roam_race_state();
+            const int cd = td5_game_resume_countdown_ticks();
+            if (st == TD5_RRACE_OFF) T.rs_saw_off = 1;
+            if (T.rs_saw_off && st == TD5_RRACE_COUNTDOWN && cd > 0) { T.rs_saw_cd = 1; if (cd > T.rs_cd_max) T.rs_cd_max = cd; }
+            if (T.rs_saw_off && st == TD5_RRACE_RACING) {
+                int n = 0, i, nm = 0;
+                const TD5_RoamBarrier *b = td5_roam_barriers(&n);
+                for (i = 0; b && i < n; i++) nm += b[i].kind == TD5_ROAM_BARRIER_MOUTH;
+                T.rs_bar_n = nm; T.rs_bar_vis = td5_roam_barriers_visible(); T.rs_bar_live = td5_roam_race_barriers_live();
+                T.rs_ok = T.rs_saw_cd && nm > 0 && T.rs_bar_vis && T.rs_bar_live;
+                TD5_LOG_I(LOG_TAG, "[ROAMWALLS] RESTART %s: race went OFF %d, 3-2-1 seen %d (max %d ticks left), back to RACING with %d mouth "
+                          "barriers, visible %d, solid %d", T.rs_ok ? "PASS" : "FAIL", T.rs_saw_off, T.rs_saw_cd, T.rs_cd_max, nm,
+                          T.rs_bar_vis, T.rs_bar_live);
+                T.phase = 1; T.pf = 0;
+            } else if (T.pf > 3600) {
+                TD5_LOG_E(LOG_TAG, "[ROAMWALLS] RESTART FAIL: the race did not come back (state %d, went OFF %d, 3-2-1 %d)", st,
+                          T.rs_saw_off, T.rs_saw_cd);
+                T.done = 1; g_td5.quit_requested = 1;
+            }
+        }
         break;
     case 1:
         if (td5_roam_race_state() != TD5_RRACE_RACING) {
@@ -748,6 +808,7 @@ void td5_roam_wall_test_frame(void)
             if (T.acsv) fprintf(T.acsv, "run,barrier,cluster,aim,kmh,runup_m,start_px,start_pz,end_px,end_pz,max_past_m,max_arm_m,end_route_m,contacts,leak,why\n");
             tw_plan_attacks();
             if (T.nshot > 0) T.nat = 0;      /* a shots run takes pictures only */
+            if (T.restart && T.nat > 18) T.nat = 18;   /* after a restart: 6 barriers prove the walls are solid again */
             snprintf(path, sizeof path, "%sroam_wall_trace.csv", dir ? dir : "");
             T.trc = fopen(path, "w");
             if (T.trc) fprintf(T.trc, "run,t,along_m,open_m,kmh,contacts,hits,yaw\n");
