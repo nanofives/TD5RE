@@ -6383,6 +6383,12 @@ void td5_hud_render_overlays(float dt)
         if ((flags & TD5_HUD_UTURN_WARNING) && td5_roam_active()) {
             /* [GEO FREE ROAM HF] the stock U-turn icon + WRONG WAY caption, driven from the route
              * direction (td5_roam_race_wrong_way) instead of the span counters (roam has no spans) */
+            if (v == 0 && td5_roam_race_player_finished() && (g_tick_counter & 0x3Fu) < 0x30u) {
+                s_hud_next_text_scale = 1.6f;   /* the stock FINISH caption */
+                td5_hud_queue_text(0, (int)vl->center_x,
+                                   (int)(vl->vp_int_top + (vl->vp_int_bottom - vl->vp_int_top) * 0.14f),
+                                   1, "%s", s_hud_string_table[8]);
+            }
             if (v == 0 && td5_roam_race_wrong_way() && (g_tick_counter & 0x7Fu) < 0x60u) {
                 hud_submit_quad(view_base + 0x67C);
                 s_hud_next_text_scale = 1.6f;
