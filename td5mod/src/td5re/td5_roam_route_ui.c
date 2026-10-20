@@ -1062,6 +1062,18 @@ void td5_roam_route_ui_draw_hud(void)
 
 /* ============================================================ the minimap ====== */
 
+/* [roam HB] THE ONE PLACE the minimap's left/right handedness lives. Heading-up: the car's heading is screen-up.
+ * m00/m01 is the x row. It is the STRIP race minimap's convention (td5_hud.c: rot = 0x800 - heading), in which
+ * place/world +X lies to the LEFT of the heading. If the roam world transform gets mirrored to match the real
+ * map (suspected: the planner, which uses X-right, disagrees with the 3D view), negate the x row here
+ * (MM_MIRROR_X) and nothing else: the N marker, labels and cops all go through this matrix. */
+#define MM_MIRROR_X (-1.0)
+static void mm_heading_up_matrix(double ya, Proj *p)
+{
+    p->m00 = MM_MIRROR_X * cos(ya); p->m01 = -MM_MIRROR_X * sin(ya);
+    p->m10 = -sin(ya);              p->m11 = -cos(ya);
+}
+
 /* [roam HB] STREET NAMES on the roam minimap (the strip race had them since round 1022). The names come from
  * the partido street layer (OSM "name" of the ROADS records). Same rule as the strip's labels: named streets
  * of residential class and up, ONE label per name at the chord midpoint nearest the car, the street the car
@@ -1202,10 +1214,7 @@ void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
         memset(&p, 0, sizeof p);
         p.cx = px; p.cz = pz;
         p.k = (double)(w * 0.5f) / (half_m * 430.0);
-        /* [roam HB] the STRIP minimap's convention (td5_hud.c: rot = 0x800 - heading): the car's heading is
-         * up and the world's +X lies to the LEFT of it. The first roam matrix had the x row negated, so a
-         * right turn swung the map the wrong way ("minimap is inverted"). Only the x row differs. */
-        p.m00 = -cos(ya); p.m01 = sin(ya); p.m10 = -sin(ya); p.m11 = -cos(ya);
+        mm_heading_up_matrix(ya, &p);
         p.ox = x + w * 0.5f; p.oy = y + h * 0.5f;
         p.x0 = x; p.y0 = y; p.x1 = x + w; p.y1 = y + h;
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
