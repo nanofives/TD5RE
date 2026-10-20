@@ -458,6 +458,10 @@ static void tw_flood(FILE *rep)
                 fprintf(f, "#bar,%d,%.0f,%.0f,%.0f,%.0f\n", b[i].kind, b[i].x0 / 256.0 + ox, b[i].z0 / 256.0 + oz,
                         b[i].x1 / 256.0 + ox, b[i].z1 / 256.0 + oz);
             for (i = 0; i < T.npt; i++) fprintf(f, "#pt,%.0f,%.0f\n", T.rx[i], T.rz[i]);
+            {   /* the line drawn on the road (td5_roam_route_display) */
+                const TD5_RouteResult *dr = td5_roam_route_display();
+                for (i = 0; dr && i < dr->npt; i++) fprintf(f, "#dp,%.0f,%.0f\n", dr->px[i], dr->pz[i]);
+            }
             fclose(f);
         }
     }
