@@ -1145,11 +1145,14 @@ done:
 static int rr_uturn_frame(const double *x, const double *z, int n, int i, double *d, double *sv, double *w, double *h)
 {
     double ax, az, bx, bz, qx, qz, la, lb, l, ex, ez, along, lx, lz, ll;
-    if (i < 2 || i + 2 >= n) return 0;
+    if (i < 1 || i + 1 >= n) return 0;
     ax = x[i] - x[i - 1]; az = z[i] - z[i - 1]; qx = x[i + 1] - x[i]; qz = z[i + 1] - z[i];
     la = sqrt(ax * ax + az * az); lb = sqrt(qx * qx + qz * qz);
     if (la <= 0.0 || lb <= 0.0 || (ax * qx + az * qz) / (la * lb) >= 0.0 || (la >= 15.0 * RR_UPM && lb >= 15.0 * RR_UPM)) return 0;
-    ax = x[i - 1] - x[i - 2]; az = z[i - 1] - z[i - 2]; bx = x[i + 2] - x[i + 1]; bz = z[i + 2] - z[i + 1];
+    /* the headings before and after the turn; at an end of the polyline (a cop's leg planned from just short of
+     * the junction it turns round in) the leg into / out of the vertex stands in */
+    if (i >= 2) { ax = x[i - 1] - x[i - 2]; az = z[i - 1] - z[i - 2]; }
+    if (i + 2 < n) { bx = x[i + 2] - x[i + 1]; bz = z[i + 2] - z[i + 1]; } else { bx = qx; bz = qz; }
     la = sqrt(ax * ax + az * az); lb = sqrt(bx * bx + bz * bz);
     if (la <= 0.0 || lb <= 0.0 || (ax * bx + az * bz) / (la * lb) >= -0.5) return 0;     /* not reversed: a jog */
     /* the approach heading, averaged with the reversed return heading */

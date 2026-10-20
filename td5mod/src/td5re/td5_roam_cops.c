@@ -224,6 +224,23 @@ static int rc_inside(double px, double pz)
     return rc_locate(px, pz, 0, 0, &in, NULL) && in;
 }
 
+/* [roam M] the straight link a -> b runs off the road BETWEEN two stretches of road (a median, an island), 0.5 m
+ * samples; a car that is itself off the road (on a kerb) and drives back on does not count, nor tiles not resident */
+static int rc_link_crosses(double ax, double az, double bx, double bz)
+{
+    const double len = hypot(bx - ax, bz - az);
+    const int n = (int)(len / (0.5 * RC_M)) + 1;
+    int i, seen_in = 0, off_after_in = 0;
+    for (i = 0; i <= n; i++) {
+        const double t = (double)i / n;
+        int in = 0;
+        if (!rc_locate(ax + (bx - ax) * t, az + (bz - az) * t, 0, 0, &in, NULL)) continue;
+        if (in) { if (off_after_in) return 1; seen_in = 1; }
+        else if (seen_in) off_after_in = 1;
+    }
+    return 0;
+}
+
 static double rc_speed_ms(const TD5_Actor *a)
 {
     return sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) /
@@ -670,6 +687,18 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
         if (c->turning) { sx = x; sz = z; hx = 0.0; hz = 0.0; }
         if (!rc_inside(sx, sz)) { sx = x; sz = z; }
         ok = td5_roam_route_plan_path(sx, sz, hx, hz, gx, gz, 60.0, rc_use_mask(), close_ow, &qx, &qz, &nq, &len);
+        /* [roam M] the car is put in front of the leg (below): the link car -> the leg's first point must not cross a
+         * median or an island. From a point ahead inside a junction box the snap can land on the far side of a divided
+         * avenue's median (a pursuer northbound, the leg starting 13 m away on the southbound carriageway): the cop was
+         * sent over the median nose and stuck on it. Such a leg is planned again from the car itself; when that one
+         * crosses too, the plan fails and the cop keeps its current line until the next plan. */
+        if (ok && nq >= 1 && rc_link_crosses(x, z, qx[0], qz[0])) {
+            free(qx); free(qz); qx = qz = NULL; nq = 0;
+            C.st.plan_crossings++;
+            ok = (sx != x || sz != z) &&
+                 td5_roam_route_plan_path(x, z, hx, hz, gx, gz, 60.0, rc_use_mask(), close_ow, &qx, &qz, &nq, &len) &&
+                 nq >= 1 && !rc_link_crosses(x, z, qx[0], qz[0]);
+        }
 #ifndef TD5RE_RELEASE
         if (ok && C.log_every) {
             const double straight = hypot(gx - sx, gz - sz) / RC_M;
@@ -682,6 +711,17 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
                           "(%.1f m off) to (%.0f,%.0f) edge %016llx (%.1f m off), %d points", c->slot, c->state == RC_PURSUIT ? "pursuit" : "patrol",
                           len, straight, sx, sz, fx, fz, (unsigned long long)ks, d1, gx, gz, (unsigned long long)kt, d2, nq);
             }
+        }
+#endif
+#ifndef TD5RE_RELEASE
+        if (ok && td5_env_int("TD5RE_ROAM_COPS_PATHLOG_SLOT", -1, -1, 64) == c->slot) {
+            char buf[600];
+            size_t l = 0;
+            int i;
+            for (i = 0; i < nq && i < 12 && l < sizeof buf - 24; i++)
+                l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", qx[i], qz[i]);
+            TD5_LOG_I(LOG_TAG, "ROAM_COPS_RAW slot %d car (%.0f,%.0f) heading (%.2f,%.2f) from (%.0f,%.0f) dir (%.2f,%.2f) ow %d:%s",
+                      c->slot, x, z, fx, fz, sx, sz, hx, hz, close_ow, buf);
         }
 #endif
         if (ok && nq >= 2) {
@@ -729,6 +769,17 @@ static int rc_plan(RcCop *c, const TD5_Actor *a, double gx, double gz, double v_
             break;
         }
     }
+#ifndef TD5RE_RELEASE
+    if (ok && td5_env_int("TD5RE_ROAM_COPS_PATHLOG_SLOT", -1, -1, 64) == c->slot) {
+        /* DEV: every leg of one cop, its first 40 m (a stuck / off-surface investigation) */
+        char buf[600];
+        size_t l = 0;
+        int i;
+        for (i = 0; i < c->np && i < 20 && l < sizeof buf - 24; i++)
+            l += (size_t)snprintf(buf + l, sizeof buf - l, " %.0f,%.0f", c->px[i], c->pz[i]);
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS_PLAN slot %d tick %ld turning %d:%s", c->slot, rc_tick(), c->turning, buf);
+    }
+#endif
     if (!ok) { C.st.plan_fails++; c->plan_fail++; return 0; }
     c->plan_fail = 0;
     c->s = 0.0; c->pi = 0;
