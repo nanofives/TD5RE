@@ -258,6 +258,102 @@ def convert(osm: dict, proj) -> dict:
     return {"rails": rails, "nodes": nodes}
 
 
+XING_CELL = 50.0 * 430.0       # road-segment grid cell for the crossing search
+
+
+def _seg_hit(ax, az, bx, bz, cx, cz, dx, dz):
+    """(t, u) where segment ab meets segment cd, or None."""
+    rx, rz, sx, sz = bx - ax, bz - az, dx - cx, dz - cz
+    den = rx * sz - rz * sx
+    if abs(den) < 1e-9:
+        return None
+    t = ((cx - ax) * sz - (cz - az) * sx) / den
+    u = ((cx - ax) * rz - (cz - az) * rx) / den
+    if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+        return t, u
+    return None
+
+
+def road_crossings(place: str, doc: dict) -> dict:
+    """Every rail way gets "road_x": where a ROADS way crosses it, in the place frame.
+
+    kind: "grade"     both at layer 0, neither a bridge / tunnel: a LEVEL CROSSING
+          "rail_over" the rail is the bridge: the road passes under the deck
+          "road_over" the road is the bridge: the rail passes under it
+          "tunnel"    either one is in a tunnel
+    Each row: {"x","z","seg","t","road","class","kind"} (seg = the rail's segment index, t in [0,1]
+    along it), sorted by (seg, t). Computed here, offline and once, so the game reads a fact
+    of the data instead of finding crossings tile by tile (a crossing outside a tile's 3x3
+    would otherwise be invisible to it, and a bridge ramp would step at the seam)."""
+    tiles_dir = os.path.join(place, "tiles")
+    grid: dict = {}
+    roads = []
+    for fn in sorted(os.listdir(tiles_dir)):
+        if not (fn.startswith("ROADS_") and fn.endswith(".JSON")):
+            continue
+        with open(os.path.join(tiles_dir, fn), encoding="utf-8") as f:
+            for r in json.load(f).get("roads", []):
+                p = r.get("points") or []
+                if len(p) < 2:
+                    continue
+                ri = len(roads)
+                roads.append(r)
+                for k in range(len(p) - 1):
+                    a, b = p[k], p[k + 1]
+                    for gx in range(int(math.floor(min(a["x"], b["x"]) / XING_CELL)),
+                                    int(math.floor(max(a["x"], b["x"]) / XING_CELL)) + 1):
+                        for gz in range(int(math.floor(min(a["z"], b["z"]) / XING_CELL)),
+                                        int(math.floor(max(a["z"], b["z"]) / XING_CELL)) + 1):
+                            grid.setdefault((gx, gz), []).append((ri, k))
+    counts: dict = {}
+    for e in doc["rails"]:
+        rows = []
+        seen = set()
+        p = e["points"]
+        if e["area"]:
+            e["road_x"] = rows
+            continue
+        for k in range(len(p) - 1):
+            a, b = p[k], p[k + 1]
+            cand = set()
+            for gx in range(int(math.floor(min(a["x"], b["x"]) / XING_CELL)),
+                            int(math.floor(max(a["x"], b["x"]) / XING_CELL)) + 1):
+                for gz in range(int(math.floor(min(a["z"], b["z"]) / XING_CELL)),
+                                int(math.floor(max(a["z"], b["z"]) / XING_CELL)) + 1):
+                    cand.update(grid.get((gx, gz), ()))
+            for ri, j in sorted(cand):
+                r = roads[ri]
+                q0, q1 = r["points"][j], r["points"][j + 1]
+                h = _seg_hit(a["x"], a["z"], b["x"], b["z"], q0["x"], q0["z"], q1["x"], q1["z"])
+                if h is None:
+                    continue
+                t = h[0]
+                x = a["x"] + (b["x"] - a["x"]) * t
+                z = a["z"] + (b["z"] - a["z"]) * t
+                key = (r["id"], round(x), round(z))
+                if key in seen:                    # a road vertex on the rail: one hit, not two
+                    continue
+                seen.add(key)
+                rl, ql = e["layer"], _int_tag(r.get("layer"), 0)
+                rb, qb = e["bridge"], bool(r.get("bridge"))
+                if e["tunnel"] or r.get("tunnel"):
+                    kind = "tunnel"
+                elif rb and (not qb or rl > ql):
+                    kind = "rail_over"
+                elif qb and (not rb or ql > rl):
+                    kind = "road_over"
+                elif rl != ql:
+                    kind = "rail_over" if rl > ql else "road_over"
+                else:
+                    kind = "grade"
+                rows.append({"x": round(x, 2), "z": round(z, 2), "seg": k, "t": round(t, 6),
+                             "road": r["id"], "class": r.get("class"), "kind": kind})
+                counts[kind] = counts.get(kind, 0) + 1
+        rows.sort(key=lambda w: (w["seg"], w["t"], w["road"]))
+        e["road_x"] = rows
+    return counts
+
+
 def _anchor_bbox(e: dict):
     pts = e.get("points")
     if pts:
@@ -381,12 +477,14 @@ def main(argv=None) -> int:
         if "runtime error" in osm["remark"]:
             return 3
     doc = convert(osm, proj)
+    xings = road_crossings(a.place, doc)
     rows = write_tiles(a.place, idx, doc)
     idx["layers"]["RAILS"] = {"file": "RAILS.JSON", "key": "rails",
                               "key2": "nodes", "tiles": rows}
     write_json(os.path.join(a.place, "tiles", "INDEX.JSON"), idx)
     rep = census(doc)
     rep["tiles"] = len(rows)
+    rep["road_crossings_by_kind"] = xings
     rep["elements_in_answer"] = len(osm.get("elements", []))
     print(json.dumps(rep, indent=1, sort_keys=True))
     return 0
