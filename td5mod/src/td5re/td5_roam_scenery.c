@@ -2189,6 +2189,11 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
  * length). Then per vertex: never past HALF the free distance to another drivable
  * surface, so the two sides of a median, a traffic island or a sliver between two
  * roads meet in the middle (the island is filled and kerbed on both sides), and
+ * [roam IA] a gap of at most PV_MEDIAN_M with no mapped building in this side's half is
+ * an island too whichever streets bound it (it used to keep two sidewalks and a bare
+ * strip of ground 40-70 cm below them between: Mariano's "holes in the medians"); an
+ * island slab keeps its back face, so where the two halves do not meet (a wedge, two
+ * kerb heights) the step between them is closed (TD5RE_ROAM_PV_ISLAND_FILL / _BACK), and
  * never under a mapped building front (clipped there, not closer to the kerb than
  * the buildings' own clearance gap). A median between the two one-way carriageways
  * of ONE named street is a lawn island; any other island is paved.
@@ -2235,7 +2240,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 /* vertex flags */
 #define PV_VF_DECK      0x01u
 #define PV_VF_FLAT      0x02u        /* bore / building passage: no ground follow        */
-#define PV_VF_ISLAND    0x04u        /* filled to the middle of a gap: no back, no fence  */
+#define PV_VF_ISLAND    0x04u        /* filled to the middle of a gap: no fence (no back face before roam IA) */
 #define PV_VF_MEDIAN    0x08u        /* ... and it is a named avenue's median: lawn       */
 #define PV_VF_FACADE    0x10u        /* clipped at a building front: no fence             */
 #define PV_VF_COLLAPSE  0x20u        /* merged into a corner point                        */
@@ -2265,6 +2270,7 @@ struct ScPvSrc {
     PvFile    f[PV_LRU];
     uint32_t  clock;
     int       on, fence, facade, merge, median;
+    int       island_fill, island_back;   /* [roam IA] */
 };
 
 static void pv_file_free(PvFile *f)
@@ -2286,6 +2292,8 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->facade = td5_env_int("TD5RE_ROAM_PV_FACADE", 1, 0, 1);
     p->merge  = td5_env_int("TD5RE_ROAM_PV_MERGE", 1, 0, 1);
     p->median = td5_env_int("TD5RE_ROAM_PV_MEDIAN", 1, 0, 1);
+    p->island_fill = td5_env_int("TD5RE_ROAM_PV_ISLAND_FILL", 1, 0, 1);   /* [roam IA] */
+    p->island_back = td5_env_int("TD5RE_ROAM_PV_ISLAND_BACK", 1, 0, 1);   /* [roam IA] */
     /* the place's building-line table (td5_geo_sidewalk.c), selected on THIS thread
      * before the first resolve, so its lazy generic default is never taken */
     if (strcmp(td5_geo_sw_place_name(), s->place) != 0) td5_geo_sw_place(s->place);
@@ -3093,7 +3101,7 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
             c->st.pv_kerb_cut++;
         }
     }
-    if (island || cut || flat) return 1;
+    if (cut || flat || (island && !e->s->pv->island_back)) return 1;   /* [roam IA] islands keep the back face */
     /* back face: the slab's outer edge down under the drawn ground (a fascia on a deck) */
     x[0] = ox[1]; z[0] = oz[1]; y[0] = yo[b];
     x[1] = ox[0]; z[1] = oz[0]; y[1] = yo[a];
@@ -3104,10 +3112,10 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     if (!pv_quad(e, sb, PV_B_PAVE, x, y, z, u, v, 0xFFA8A8A8u)) return 0;
     /* fence: a railing on a deck; elsewhere where nothing stands behind the slab */
     {
-        int fence = deck;
+        int fence = deck && !island;
         /* not on a junction outline: a block corner holds a building or a plaza, and the
          * outline has no street class of its own */
-        if (!fence && e->s->pv->fence && !corner && !((fa | fb) & PV_VF_FACADE) && klass >= TD5_GEO_RC_LIVING &&
+        if (!fence && !island && e->s->pv->fence && !corner && !((fa | fb) & PV_VF_FACADE) && klass >= TD5_GEO_RC_LIVING &&
             klass <= TD5_GEO_RC_SECONDARY && hypot(ox[1] - ox[0], oz[1] - oz[0]) > 200.0) {
             const double mx = 0.5 * (ox[0] + ox[1]), mz = 0.5 * (oz[0] + oz[1]);
             const double ex = oz[1] - oz[0], ez = -(ox[1] - ox[0]), el = hypot(ex, ez);
@@ -3282,10 +3290,21 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
                 const PvWay *ot = pv_find(e->ways, e->nways, (int64_t)(c->edge[c->seg[hp->seg].edge].key >> 16));
                 median = me && ot && me != ot && me->name_h && me->name_h == ot->name_h && me->oneway && ot->oneway;
             }
-            if (median || ch.w[v] > 0.5 * freed) {
+            /* [roam IA] a gap no building stands in (this side's half, probed every 0.5 m) is an island
+             * whichever streets bound it; a lawn when the middle of the gap is an OSM green */
+            int fill = 0, green = 0;
+            if (!median && e->s->pv->island_fill && ch.w[v] <= 0.5 * freed && freed <= PV_MEDIAN_M * SC_UPM) {
+                fill = 1;
+                for (d = ch.w[v]; d <= 0.5 * freed && fill; d += PV_FACE_STEP)
+                    if (pv_in_building(c, e->bld, ch.px[v] + ch.ux[v] * d, ch.pz[v] + ch.uz[v] * d)) fill = 0;
+                if (fill)
+                    green = pv_in_green(c, e->ar, e->nar, ch.px[v] + ch.ux[v] * 0.5 * freed, ch.pz[v] + ch.uz[v] * 0.5 * freed);
+                if (fill && B[seq[v < m ? v : m - 1]].owned) c->st.pv_island_fill++;
+            }
+            if (median || fill || ch.w[v] > 0.5 * freed) {
                 ch.w[v] = 0.5 * freed;
                 ch.vf[v] |= PV_VF_ISLAND;
-                if (median && freed > PV_LAWN_MIN_M * SC_UPM) ch.vf[v] |= PV_VF_MEDIAN;
+                if ((median || green) && freed > PV_LAWN_MIN_M * SC_UPM) ch.vf[v] |= PV_VF_MEDIAN;
                 if (B[seq[v < m ? v : m - 1]].owned) c->st.pv_free_clamp++;
             }
         }
@@ -4625,7 +4644,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     int i, threadmode = 0, cap = 2048;
     FILE *f;
     uint32_t t0;
-    long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0;
+    long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0;
     uint32_t pv_ms_max = 0;
     long ft[16], lot_t[12] = { 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 };
@@ -4721,6 +4740,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             int q;
             for (q = 0; q < 7; q++) pv_src[q] += r->pv_src[q];
             pv[0] += r->pv_bedges; pv[1] += r->pv_interior; pv[2] += r->pv_pieces; pv[3] += r->pv_corner;
+            pv_fill += r->pv_island_fill;                 /* [roam IA] */
             pv[4] += r->pv_collapsed; pv[5] += r->pv_island; pv[6] += r->pv_median; pv[7] += r->pv_free_clamp;
             pv[8] += r->pv_fence; pv[9] += r->pv_rail; pv[10] += r->pv_kerb; pv[11] += r->pv_cut;
             pv[12] += r->pv_drop; pv[13] += r->pv_kerb_cut; pv[14] += r->pv_noway; pv[15] += (long)r->ms_pv;
@@ -4769,6 +4789,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  pv[14], pv_src[TD5_GEO_SWSRC_TAG], pv_src[TD5_GEO_SWSRC_FOOTWAY], pv_src[TD5_GEO_SWSRC_FACADE],
                  pv_src[TD5_GEO_SWSRC_FRONTAGE], pv_src[TD5_GEO_SWSRC_CLASS], pv_src[TD5_GEO_SWSRC_KERB],
                  pv_src[TD5_GEO_SWSRC_NONE], j.n ? (double)pv[15] / j.n : 0.0, (unsigned)pv_ms_max, lm_stub, guard_lm);
+        TD5_LOG_I(LOG_TAG, "roam pavement [IA]: %ld kerb vertices made an island by the no-building gap rule "
+                  "(TD5RE_ROAM_PV_ISLAND_FILL)", pv_fill);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
