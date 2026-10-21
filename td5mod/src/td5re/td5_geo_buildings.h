@@ -192,6 +192,11 @@ typedef struct {
     unsigned char roof_across;  /* roof:orientation=across: ridge across the long axis */
     unsigned int  roof_rgb;     /* roof:colour, else roof:material; 0x01RRGGBB, 0 = none */
     unsigned int  wall_rgb;     /* building:colour, else building:material; same encoding */
+    /* [roam JC2] a civic building (government / church / public / museum / university / theatre
+     * classes or tags, or a part roofed in slate / copper / lead / zinc): free roam dresses it in a
+     * stone / plaster facade page instead of the city's window pages */
+    unsigned char civic;
+    unsigned char rel;          /* [roam JC2] an outline from S3D_RELATIONS.JSON (an OSM multipolygon) */
 } TD5_GeoBuilding;
 
 /* An area's own BARRIER, straight off AREAS.JSON's `barrier` field.

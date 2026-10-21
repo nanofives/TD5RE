@@ -41,6 +41,13 @@
  * COLOUR. roof:colour, else roof:material, tints the roof's baked vertex colour; building:colour,
  * else building:material, the walls. Only on this path, so an untagged city is untouched.
  *
+ * COURTYARDS (roam JC2). An OSM multipolygon outline (S3D_RELATIONS.JSON) arrives with its inner rings
+ * (e->s3d_hx/hz/hn): they get walls facing into the courtyard, the flat cap is the outline minus the
+ * holes (each hole bridged to the outline, then ear-clipped), and a sloped roof insets every ring at the
+ * pitch to one holed deck. The BASE (e->s3d_base) is the flat block an outline still draws under its
+ * building:parts, inset 0.25 m so no wall is coplanar with a part's. A CIVIC building takes a stone /
+ * plaster facade page (k_s3d_civic below).
+ *
  * SCOPE. Called only when the caller's environment sets e->s3d (free roam). The strip geo BUILD
  * never sets it, so level091 and the synthetic gate are byte-identical. No file-scope state:
  * the stream worker builds tiles with it.
@@ -391,20 +398,307 @@ static int s3d_rows(const TD5_GeoBuilding *gb, const double *x, const double *z,
     }
 }
 
+/* ------------------------------------------------------------ courtyards --- */
+
+/* [roam JC2] Mitred offset of a CW HOLE ring by d into the solid (the left of a CW edge is the
+ * outside of the hole). 1 = usable: simple, every edge keeps its direction, still CW, no vertex
+ * inside the original hole. */
+static int s3d_offset_hole(const double *x, const double *z, int n, double d, double *ox, double *oz)
+{
+    double nx[S3D_RN], nz[S3D_RN];
+    int i;
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        const double ex = x[j] - x[i], ez = z[j] - z[i], l = hypot(ex, ez);
+        if (!(l > 1e-6)) return 0;
+        nx[i] = -ez / l; nz[i] = ex / l;
+    }
+    for (i = 0; i < n; i++) {
+        const int p = (i + n - 1) % n;
+        const double dot = nx[p] * nx[i] + nz[p] * nz[i];
+        if (dot < -0.9) return 0;
+        ox[i] = x[i] + d * (nx[p] + nx[i]) / (1.0 + dot);
+        oz[i] = z[i] + d * (nz[p] + nz[i]) / (1.0 + dot);
+    }
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        if ((ox[j] - ox[i]) * (x[j] - x[i]) + (oz[j] - oz[i]) * (z[j] - z[i]) <= 0.0) return 0;
+        if (td5_geob_point_in_ring(x, z, n, ox[i], oz[i])) return 0;
+    }
+    return td5_geob_ring_simple(ox, oz, n) && td5_geob_ring_area(ox, oz, n) < 0.0;
+}
+
+/* proper crossing of segments ab and cd (touching at an endpoint does not count) */
+static int s3d_seg_cross(double ax, double az, double bx, double bz, double cx, double cz, double dx, double dz)
+{
+    const double d1 = s3d_cross(bx - ax, bz - az, cx - ax, cz - az), d2 = s3d_cross(bx - ax, bz - az, dx - ax, dz - az);
+    const double d3 = s3d_cross(dx - cx, dz - cz, ax - cx, az - cz), d4 = s3d_cross(dx - cx, dz - cz, bx - cx, bz - cz);
+    return ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0));
+}
+
+static int s3d_rings_cross(const double *ax, const double *az, int an, const double *bx, const double *bz, int bn)
+{
+    int i, j;
+    for (i = 0; i < an; i++)
+        for (j = 0; j < bn; j++)
+            if (s3d_seg_cross(ax[i], az[i], ax[(i + 1) % an], az[(i + 1) % an],
+                              bx[j], bz[j], bx[(j + 1) % bn], bz[(j + 1) % bn])) return 1;
+    return 0;
+}
+
+typedef struct {
+    int    nh, hn[TG_S3D_HOLES_MAX];
+    double hx[TG_S3D_HOLES_MAX][S3D_RN], hz[TG_S3D_HOLES_MAX][S3D_RN];
+} S3dHoles;
+
+/* outer + holes offset into the solid by d, and the rings still clear of each other */
+static int s3d_offset_all(const double *x, const double *z, int n, const S3dHoles *h, double d,
+                          double *ox, double *oz, S3dHoles *oh)
+{
+    int i, j, k;
+    if (!s3d_offset(x, z, n, d, ox, oz)) return 0;
+    oh->nh = h->nh;
+    for (i = 0; i < h->nh; i++) {
+        oh->hn[i] = h->hn[i];
+        if (!s3d_offset_hole(h->hx[i], h->hz[i], h->hn[i], d, oh->hx[i], oh->hz[i])) return 0;
+        for (k = 0; k < oh->hn[i]; k++)
+            if (!td5_geob_point_in_ring(ox, oz, n, oh->hx[i][k], oh->hz[i][k])) return 0;
+        if (s3d_rings_cross(ox, oz, n, oh->hx[i], oh->hz[i], oh->hn[i])) return 0;
+        for (j = 0; j < i; j++)
+            if (s3d_rings_cross(oh->hx[j], oh->hz[j], oh->hn[j], oh->hx[i], oh->hz[i], oh->hn[i])) return 0;
+    }
+    return 1;
+}
+
+#define S3D_CAPN (S3D_RN * (1 + TG_S3D_HOLES_MAX) + 2 * TG_S3D_HOLES_MAX + 4)
+
+/* Splice hole (CW) into the CCW polygon p through a bridge from the hole's rightmost vertex to the
+ * nearest polygon vertex the bridge reaches without crossing any edge (of p, of this hole, of the holes
+ * still to come). 1 = merged. */
+static int s3d_bridge(double *px, double *pz, int *pn, const double *hx, const double *hz, int hn,
+                      const S3dHoles *rest, const int *done)
+{
+    int mi = 0, k, best = -1, i, j, n = *pn;
+    double bd = 1e300;
+    for (k = 1; k < hn; k++) if (hx[k] > hx[mi]) mi = k;
+    for (k = 0; k < n; k++) {
+        const double d = hypot(px[k] - hx[mi], pz[k] - hz[mi]);
+        int ok = 1;
+        if (!(d < bd)) continue;
+        for (i = 0; i < n && ok; i++) {
+            const int i2 = (i + 1) % n;
+            if (s3d_seg_cross(hx[mi], hz[mi], px[k], pz[k], px[i], pz[i], px[i2], pz[i2])) ok = 0;
+        }
+        for (i = 0; i < hn && ok; i++)
+            if (s3d_seg_cross(hx[mi], hz[mi], px[k], pz[k], hx[i], hz[i], hx[(i + 1) % hn], hz[(i + 1) % hn])) ok = 0;
+        for (j = 0; j < rest->nh && ok; j++) {
+            if (done[j]) continue;
+            for (i = 0; i < rest->hn[j] && ok; i++)
+                if (s3d_seg_cross(hx[mi], hz[mi], px[k], pz[k], rest->hx[j][i], rest->hz[j][i],
+                                  rest->hx[j][(i + 1) % rest->hn[j]], rest->hz[j][(i + 1) % rest->hn[j]])) ok = 0;
+        }
+        if (ok && !td5_geob_point_in_ring(px, pz, n, 0.5 * (hx[mi] + px[k]), 0.5 * (hz[mi] + pz[k]))) ok = 0;
+        if (ok) { bd = d; best = k; }
+    }
+    if (best < 0 || n + hn + 2 > S3D_CAPN) return 0;
+    /* p[0..best], h[mi], h[mi+1] .. h[mi-1], h[mi], p[best], p[best+1 ..] */
+    for (k = n - 1; k > best; k--) { px[k + hn + 2] = px[k]; pz[k + hn + 2] = pz[k]; }
+    for (k = 0; k <= hn; k++) { px[best + 1 + k] = hx[(mi + k) % hn]; pz[best + 1 + k] = hz[(mi + k) % hn]; }
+    px[best + hn + 2] = px[best]; pz[best + hn + 2] = pz[best];
+    *pn = n + hn + 2;
+    return 1;
+}
+
+static int s3d_same(double ax, double az, double bx, double bz) { return fabs(ax - bx) < 1e-6 && fabs(az - bz) < 1e-6; }
+
+/* Ear clipping of a CCW, weakly simple polygon (bridged holes: repeated vertices). Triangles as index
+ * triples into (x, z). Returns the count, or -1 when no ear is left (the caller lids the courtyard). */
+static int s3d_earcut(const double *x, const double *z, int n, int *tri)
+{
+    int idx[S3D_CAPN], cnt = n, nt = 0, i = 0, miss = 0, k;
+    if (n < 3 || n > S3D_CAPN) return -1;
+    for (k = 0; k < n; k++) idx[k] = k;
+    while (cnt > 3) {
+        const int a = idx[(i + cnt - 1) % cnt], b = idx[i % cnt], c = idx[(i + 1) % cnt];
+        const double cr = s3d_cross(x[b] - x[a], z[b] - z[a], x[c] - x[b], z[c] - z[b]);
+        int ear = cr > 1e-9;
+        if (ear) {
+            for (k = 0; k < cnt && ear; k++) {
+                const int v = idx[k];
+                double d1, d2, d3;
+                if (v == a || v == b || v == c) continue;
+                if (s3d_same(x[v], z[v], x[a], z[a]) || s3d_same(x[v], z[v], x[b], z[b]) || s3d_same(x[v], z[v], x[c], z[c]))
+                    continue;
+                d1 = s3d_cross(x[b] - x[a], z[b] - z[a], x[v] - x[a], z[v] - z[a]);
+                d2 = s3d_cross(x[c] - x[b], z[c] - z[b], x[v] - x[b], z[v] - z[b]);
+                d3 = s3d_cross(x[a] - x[c], z[a] - z[c], x[v] - x[c], z[v] - z[c]);
+                if (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) ear = 0;
+            }
+        }
+        if (!ear && fabs(cr) <= 1e-9 && miss >= cnt) ear = -1;        /* a straight-through or doubled vertex: drop it */
+        if (ear) {
+            if (ear > 0) { tri[nt * 3 + 0] = a; tri[nt * 3 + 1] = b; tri[nt * 3 + 2] = c; nt++; }
+            for (k = i % cnt; k + 1 < cnt; k++) idx[k] = idx[k + 1];
+            cnt--;
+            if (i >= cnt) i = 0;
+            miss = 0;
+            continue;
+        }
+        i = (i + 1) % cnt;
+        if (++miss > 2 * cnt) return -1;
+    }
+    tri[nt * 3 + 0] = idx[0]; tri[nt * 3 + 1] = idx[1]; tri[nt * 3 + 2] = idx[2];
+    return nt + 1;
+}
+
+/* flat cap of the outer ring minus its holes at y. 1 holed, 2 lidded (the clipper gave up: outer only), -1 OOM */
+static int s3d_cap_holes(TG_S3dMesh *m, const double *x, const double *z, int n, const S3dHoles *h, double y,
+                         int flip, unsigned int col, int *ntri)
+{
+    double px[S3D_CAPN], pz[S3D_CAPN], t[9];
+    int tri[S3D_CAPN * 3], done[TG_S3D_HOLES_MAX], pn = n, nt, k, i, r, ok = 1;
+    if (h->nh <= 0) return s3d_cap(m, x, z, n, y, flip, col, ntri) < 0 ? -1 : 1;
+    for (k = 0; k < n; k++) { px[k] = x[k]; pz[k] = z[k]; }
+    memset(done, 0, sizeof done);
+    for (i = 0; i < h->nh && ok; i++) {           /* rightmost hole first (earcut's order) */
+        int pick = -1, j;
+        double bx = -1e300;
+        for (j = 0; j < h->nh; j++) {
+            int q;
+            if (done[j]) continue;
+            for (q = 0; q < h->hn[j]; q++) if (h->hx[j][q] > bx) { bx = h->hx[j][q]; pick = j; }
+        }
+        done[pick] = 1;
+        ok = s3d_bridge(px, pz, &pn, h->hx[pick], h->hz[pick], h->hn[pick], h, done);
+    }
+    nt = ok ? s3d_earcut(px, pz, pn, tri) : -1;
+    if (nt < 0) return s3d_cap(m, x, z, n, y, flip, col, ntri) < 0 ? -1 : 2;
+    for (k = 0; k < nt; k++) {
+        const int a = tri[k * 3 + 0], b = tri[k * 3 + (flip ? 2 : 1)], c = tri[k * 3 + (flip ? 1 : 2)];
+        t[0] = px[a]; t[1] = y; t[2] = pz[a];
+        t[3] = px[b]; t[4] = y; t[5] = pz[b];
+        t[6] = px[c]; t[7] = y; t[8] = pz[c];
+        if ((r = s3d_tri(m, t, col)) < 0) return -1;
+        *ntri += r;
+    }
+    return 1;
+}
+
+/* one band of roof between ring a (at ya) and ring b (at yb), edge by edge */
+static int s3d_band(TG_S3dMesh *m, const double *ax, const double *az, double ya, const double *bx, const double *bz,
+                    double yb, int n, unsigned int col, int *ntri)
+{
+    double t[9];
+    int k, r;
+    for (k = 0; k < n; k++) {
+        const int j = (k + 1) % n;
+        t[0] = ax[k]; t[1] = ya; t[2] = az[k];
+        t[3] = ax[j]; t[4] = ya; t[5] = az[j];
+        t[6] = bx[j]; t[7] = yb; t[8] = bz[j];
+        if ((r = s3d_tri(m, t, col)) < 0) return -1;
+        *ntri += r;
+        t[0] = ax[k]; t[1] = ya; t[2] = az[k];
+        t[3] = bx[j]; t[4] = yb; t[5] = bz[j];
+        t[6] = bx[k]; t[7] = yb; t[8] = bz[k];
+        if ((r = s3d_tri(m, t, col)) < 0) return -1;
+        *ntri += r;
+    }
+    return 1;
+}
+
+/* walls of one ring (outer CCW faces out, a CW courtyard ring faces into the courtyard) */
+static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double *x, const double *z,
+                     int n, double by, double base_y, double wall_top, double vrows, double cell_w, unsigned int col,
+                     int *nquad)
+{
+    double bot[S3D_RN], q[12];
+    int k;
+    for (k = 0; k < n; k++) {
+        bot[k] = base_y;
+        if (!gb->roof_only && td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") && !(gb->min_height > 0.0)) {
+            const double g = e->ground(e->u, x[k], z[k]) + tg_city_kerb_h(e->b) - 300.0;   /* TD5_TG_GEO_BASE_SINK */
+            if (g < bot[k]) bot[k] = (g < by - 4300.0) ? by - 4300.0 : g;                   /* TD5_TG_GEO_MAX_FOUND */
+        }
+    }
+    for (k = 0; k < n; k++) {
+        const int j = (k + 1) % n;
+        const double elen = hypot(x[j] - x[k], z[j] - z[k]);
+        double vq = vrows;
+        if (!(elen > 1.0)) continue;
+        q[0] = x[k]; q[1]  = bot[k];   q[2]  = z[k];
+        q[3] = x[j]; q[4]  = bot[j];   q[5]  = z[j];
+        q[6] = x[j]; q[7]  = wall_top; q[8]  = z[j];
+        q[9] = x[k]; q[10] = wall_top; q[11] = z[k];
+        if (wall_top - base_y > 1.0) vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - base_y);
+        if (s3d_quad(m, q, elen / ((cell_w > 1.0) ? cell_w : 1500.0), vq, col) < 0) return -1;
+        (*nquad)++;
+    }
+    return 1;
+}
+
+/* [roam JC2] THE CIVIC FACADE. Mariano's pick at the Legislatura read as "dense vertical stripes": a palace
+ * drew the city's residential window grid. A civic building (TD5_GeoBuilding.civic) takes one of four
+ * classical stone / plaster pages with large, spaced windows from the shipped landmark page block (local
+ * index into td5_tg_real_tex_landmarks.h, looked at on a contact sheet, _archive/roam/JC/pages):
+ *    94  cream plaster, pilasters, two storeys, three bays     95  white palace front, two storeys, seven bays
+ *   153  rusticated cream stone, two storeys, three bays      154  rusticated grey stone, two storeys, three bays
+ * One page cell is the two storeys it shows (civic storeys are tall, 4.5 m) and its bays at ~4 m. */
+static const struct { int page; double cell_w_m, row_h_m; } k_s3d_civic[4] = {
+    { 94, 12.0, 9.0 }, { 95, 24.0, 9.0 }, { 153, 12.0, 9.0 }, { 154, 12.0, 9.0 },
+};
+typedef char s3d_civic_pages_fit[(TD5_TG_LM_PAGES >= 155) ? 1 : -1];
+
 int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double *rx_in, const double *rz_in,
                  int n_in, double by, double H, double floor_h, double cell_w, double lm_row_h, int storeys,
                  int wall_page, int roof_page, TG_S3dMesh *m)
 {
     double x[S3D_RN], z[S3D_RN], cx = 0.0, cz = 0.0, rise, wall_top, vrows, base_y, minw = 1e300;
     double (*rw)[2][S3D_RN] = NULL;
-    double rh[S3D_ROWS_MAX], bot[S3D_RN], t[9], q[12];
+    double rh[S3D_ROWS_MAX];
+    S3dHoles *hl = NULL, *ho = NULL;
     unsigned int roof_col = 0xFFC8C8C8u, wall_col = 0xFFFFFFFFu;
-    int n, k, r, nrow, cap, how, ntri = 0, nquad = 0, res;
+    int n, k, i, nrow, cap, how, ntri = 0, nquad = 0, ret = -1;
     const double upm = e->upm > 1.0 ? e->upm : 430.0;
 
     memset(m, 0, sizeof *m);
     if (n_in < 3 || n_in > S3D_RN) return 0;
+    rw = (double (*)[2][S3D_RN])malloc(sizeof(double[2][S3D_RN]) * S3D_ROWS_MAX);
+    hl = (S3dHoles *)calloc(2, sizeof(S3dHoles));
+    if (!rw || !hl) { free(rw); free(hl); return -1; }
+    ho = hl + 1;
     n = s3d_clean(rx_in, rz_in, n_in, upm, x, z);
+
+    /* courtyards: cleaned, CW, inside the outline (a ring that is not is dropped) */
+    if (e->s3d_nh > 0 && e->s3d_hn) {
+        int off = 0;
+        for (i = 0; i < e->s3d_nh; i++) {
+            const int hn = e->s3d_hn[i];
+            double tx[S3D_RN], tz[S3D_RN];
+            if (hn >= 3 && hn <= S3D_RN && hl->nh < TG_S3D_HOLES_MAX) {
+                const int c = s3d_clean(e->s3d_hx + off, e->s3d_hz + off, hn, upm, tx, tz);
+                int inside = td5_geob_ring_simple(tx, tz, c);
+                for (k = 0; k < c && inside; k++) inside = td5_geob_point_in_ring(x, z, n, tx[k], tz[k]);
+                if (inside && !s3d_rings_cross(x, z, n, tx, tz, c)) {
+                    const int cw = td5_geob_ring_area(tx, tz, c) < 0.0;
+                    for (k = 0; k < c; k++) {
+                        hl->hx[hl->nh][k] = cw ? tx[k] : tx[c - 1 - k];
+                        hl->hz[hl->nh][k] = cw ? tz[k] : tz[c - 1 - k];
+                    }
+                    hl->hn[hl->nh++] = c;
+                }
+            }
+            off += hn;
+        }
+        m->holes = hl->nh;
+    }
+    /* the base under building:parts: inset 0.25 m off every ring so no wall is coplanar with a part's */
+    if (e->s3d_base) {
+        double ox[S3D_RN], oz[S3D_RN];
+        if (s3d_offset_all(x, z, n, hl, 0.25 * upm, ox, oz, ho)) {
+            memcpy(x, ox, sizeof(double) * (size_t)n); memcpy(z, oz, sizeof(double) * (size_t)n);
+            *hl = *ho;
+        }
+    }
     for (k = 0; k < n; k++) { cx += x[k]; cz += z[k]; }
     cx /= n; cz /= n;
     {   /* the narrowest extent across the principal axis, for the default dome rise */
@@ -417,11 +711,19 @@ int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double 
         }
         minw = vmax - vmin;
     }
+    /* civic: the stone / plaster page (a worship landmark keeps its own dressing) */
+    if (gb->civic && !(lm_row_h > 1.0)) {
+        const int c = (int)((gb->id_hash >> 9) % 4u);
+        wall_page = TD5_TG_PAGE_LM_BASE + k_s3d_civic[c].page;
+        cell_w    = k_s3d_civic[c].cell_w_m * upm;
+        lm_row_h  = k_s3d_civic[c].row_h_m * upm;
+        m->civic  = 1;
+    }
 
     /* ROOF HEIGHT. Simple 3D Buildings: `height` includes the roof and roof:height is its share,
      * so the eaves sit at height - roof:height. Untagged: roof:levels storeys, else 3.5 m (a dome:
      * half its width, a barrel: decided by the recipe), never more than 60 % of the mass. */
-    if (gb->roof3d == TD5_GEOB_R3_NONE || gb->roof3d == TD5_GEOB_R3_FLAT) rise = 0.0;
+    if (gb->roof3d == TD5_GEOB_R3_NONE || gb->roof3d == TD5_GEOB_R3_FLAT || e->s3d_base) rise = 0.0;
     else if (gb->roof_height > 0.0)  rise = gb->roof_height;
     else if (gb->roof_levels > 0)    rise = gb->roof_levels * (e->storey > 1.0 ? e->storey : 3.0 * upm);
     else if (gb->roof3d == TD5_GEOB_R3_DOME || gb->roof3d == TD5_GEOB_R3_ONION) rise = minw * 0.5;
@@ -429,49 +731,59 @@ int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double 
     if (rise > H * 0.6 && !(gb->roof_height > 0.0 && gb->roof_height < H * 0.95)) rise = H * 0.6;
     if (gb->roof_only && rise > H * 0.9) rise = H * 0.9;
 
-    rw = (double (*)[2][S3D_RN])malloc(sizeof(double[2][S3D_RN]) * S3D_ROWS_MAX);
-    if (!rw) return -1;
-    nrow = s3d_rows(gb, x, z, n, cx, cz, rise, H * 0.6, upm, rw, rh, &cap, &how, &rise);
+    if (e->s3d_base || gb->roof3d == TD5_GEOB_R3_NONE || gb->roof3d == TD5_GEOB_R3_FLAT) {
+        for (k = 0; k < n; k++) { rw[0][0][k] = x[k]; rw[0][1][k] = z[k]; }
+        rh[0] = 0.0; nrow = 1; cap = 1; how = TG_S3D_HOW_FLAT;
+    } else if (hl->nh > 0) {
+        /* a sloped roof round courtyards: every ring inset at the pitch, one deck with the holes */
+        const double slope = (gb->roof3d == TD5_GEOB_R3_MANSARD) ? 0.35 : 1.43;
+        double d = rise * slope;
+        int tries, ok = 0;
+        for (tries = 0; tries < 12 && d >= S3D_MIN_OFF_M * upm; tries++, d *= 0.75)
+            if (s3d_offset_all(x, z, n, hl, d, rw[1][0], rw[1][1], ho)) { ok = 1; break; }
+        for (k = 0; k < n; k++) { rw[0][0][k] = x[k]; rw[0][1][k] = z[k]; }
+        rh[0] = 0.0; cap = 1;
+        if (ok) {
+            rh[1] = (gb->roof3d == TD5_GEOB_R3_MANSARD) ? rise : (d / slope < rise ? d / slope : rise);
+            nrow = 2; how = TG_S3D_HOW_OFFSET;
+        } else {
+            nrow = 1; how = TG_S3D_HOW_FLAT_FALLBACK;
+        }
+    } else {
+        nrow = s3d_rows(gb, x, z, n, cx, cz, rise, H * 0.6, upm, rw, rh, &cap, &how, &rise);
+    }
     if (how == TG_S3D_HOW_FLAT_FALLBACK || how == TG_S3D_HOW_FLAT) rise = 0.0;
     wall_top = by + H - rise;
-    if (wall_top < by + 0.5 * upm) {                         /* the roof ate the walls: keep half a metre */
-        const double over = by + 0.5 * upm - wall_top;
-        wall_top += over;
-    }
+    if (wall_top < by + 0.5 * upm) wall_top = by + 0.5 * upm;   /* the roof ate the walls: keep half a metre */
     m->how = how;
 
     if (gb->roof_rgb)  { roof_col = s3d_tint(roof_col, gb->roof_rgb, 0.75); m->tint_roof = 1; }
     if (gb->wall_rgb)  { wall_col = s3d_tint(wall_col, gb->wall_rgb, 0.55); m->tint_wall = 1; }
 
-    /* --- roof triangles: rows joined edge by edge, then the cap --- */
-    for (r = 0; r + 1 < nrow; r++) {
-        for (k = 0; k < n; k++) {
-            const int j = (k + 1) % n;
-            t[0] = rw[r][0][k];     t[1] = wall_top + rh[r];     t[2] = rw[r][1][k];
-            t[3] = rw[r][0][j];     t[4] = wall_top + rh[r];     t[5] = rw[r][1][j];
-            t[6] = rw[r + 1][0][j]; t[7] = wall_top + rh[r + 1]; t[8] = rw[r + 1][1][j];
-            if ((res = s3d_tri(m, t, roof_col)) < 0) { free(rw); return -1; }
-            ntri += res;
-            t[0] = rw[r][0][k];     t[1] = wall_top + rh[r];     t[2] = rw[r][1][k];
-            t[3] = rw[r + 1][0][j]; t[4] = wall_top + rh[r + 1]; t[5] = rw[r + 1][1][j];
-            t[6] = rw[r + 1][0][k]; t[7] = wall_top + rh[r + 1]; t[8] = rw[r + 1][1][k];
-            if ((res = s3d_tri(m, t, roof_col)) < 0) { free(rw); return -1; }
-            ntri += res;
-        }
-    }
+    /* --- roof triangles: rows joined edge by edge (courtyard rings too), then the cap --- */
+    for (i = 0; i + 1 < nrow; i++)
+        if (s3d_band(m, rw[i][0], rw[i][1], wall_top + rh[i], rw[i + 1][0], rw[i + 1][1], wall_top + rh[i + 1], n,
+                     roof_col, &ntri) < 0) goto out;
+    if (nrow == 2 && how == TG_S3D_HOW_OFFSET && hl->nh > 0)
+        for (i = 0; i < hl->nh; i++)
+            if (s3d_band(m, hl->hx[i], hl->hz[i], wall_top, ho->hx[i], ho->hz[i], wall_top + rh[1], hl->hn[i],
+                         roof_col, &ntri) < 0) goto out;
     if (cap) {
         double tx[S3D_RN], tz[S3D_RN];
+        int r;
         for (k = 0; k < n; k++) { tx[k] = rw[nrow - 1][0][k]; tz[k] = rw[nrow - 1][1][k]; }
-        if (s3d_cap(m, tx, tz, n, wall_top + rh[nrow - 1], 0, roof_col, &ntri) < 0) { free(rw); return -1; }
+        r = s3d_cap_holes(m, tx, tz, n, (nrow == 2 && how == TG_S3D_HOW_OFFSET && hl->nh > 0) ? ho : hl,
+                          wall_top + rh[nrow - 1], 0, roof_col, &ntri);
+        if (r < 0) goto out;
+        if (hl->nh > 0) { if (r == 1) m->cap_holed++; else m->cap_lidded++; }
     }
-    free(rw);
 
-    /* --- walls --- */
+    /* --- walls: the outline, then every courtyard --- */
     base_y = by;
     if (gb->roof_only) {
         const double fascia = (S3D_FASCIA_M * upm < (wall_top - by) * 0.5) ? S3D_FASCIA_M * upm : (wall_top - by) * 0.5;
         base_y = wall_top - fascia;
-        if (s3d_cap(m, x, z, n, base_y, 1, roof_col, &ntri) < 0) return -1;   /* the underside, seen from the street */
+        if (s3d_cap_holes(m, x, z, n, hl, base_y, 1, roof_col, &ntri) < 0) goto out;   /* the underside */
     }
     if (ntri > 0) {
         m->cmd[m->ncmd * 3 + 0] = (unsigned short)roof_page;
@@ -479,36 +791,24 @@ int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double 
         m->cmd[m->ncmd * 3 + 2] = 0;
         m->ncmd++;
     }
-    for (k = 0; k < n; k++) {
-        bot[k] = base_y;
-        if (!gb->roof_only && td5_env_flag_on("TD5RE_GEO_BLD_FOUNDATION") && !(gb->min_height > 0.0)) {
-            const double g = e->ground(e->u, x[k], z[k]) + tg_city_kerb_h(e->b) - 300.0;   /* TD5_TG_GEO_BASE_SINK */
-            if (g < bot[k]) bot[k] = (g < by - 4300.0) ? by - 4300.0 : g;                   /* TD5_TG_GEO_MAX_FOUND */
-        }
-    }
     if (lm_row_h > 1.0)             vrows = (wall_top - base_y) / lm_row_h;
     else if (storeys > 0 && H > 1.0) vrows = (double)storeys * (wall_top - base_y) / H;
     else                            vrows = (wall_top - base_y) / ((floor_h > 1.0) ? floor_h : 1.0);
     if (!(vrows > 0.25)) vrows = gb->roof_only ? 0.25 : 1.0;
-    for (k = 0; k < n; k++) {
-        const int j = (k + 1) % n;
-        const double elen = hypot(x[j] - x[k], z[j] - z[k]);
-        double vq = vrows;
-        if (!(elen > 1.0)) continue;
-        q[0] = x[k]; q[1]  = bot[k];   q[2]  = z[k];
-        q[3] = x[j]; q[4]  = bot[j];   q[5]  = z[j];
-        q[6] = x[j]; q[7]  = wall_top; q[8]  = z[j];
-        q[9] = x[k]; q[10] = wall_top; q[11] = z[k];
-        if (wall_top - base_y > 1.0) vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - base_y);
-        if (s3d_quad(m, q, elen / ((cell_w > 1.0) ? cell_w : 1500.0), vq, wall_col) < 0) return -1;
-        nquad++;
-    }
-    if (nquad < 3) return 0;
+    if (s3d_walls(m, e, gb, x, z, n, by, base_y, wall_top, vrows, cell_w, wall_col, &nquad) < 0) goto out;
+    if (nquad < 3) { ret = 0; goto out; }
+    for (i = 0; i < hl->nh; i++)
+        if (s3d_walls(m, e, gb, hl->hx[i], hl->hz[i], hl->hn[i], by, base_y, wall_top, vrows, cell_w, wall_col, &nquad) < 0)
+            goto out;
     m->cmd[m->ncmd * 3 + 0] = (unsigned short)wall_page;
     m->cmd[m->ncmd * 3 + 1] = 0;
     m->cmd[m->ncmd * 3 + 2] = (unsigned short)nquad;
     m->ncmd++;
     m->rows = nrow;
     m->rise = rise;
-    return 1;
+    ret = 1;
+out:
+    free(rw);
+    free(hl);
+    return ret;
 }

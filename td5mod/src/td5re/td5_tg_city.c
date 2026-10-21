@@ -3272,7 +3272,7 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
 
     /* [roam JC] OSM Simple 3D Buildings (td5_tg_s3d.c): a building:part or a roof:shape-tagged
      * footprint gets its real roof on any ring, in free roam only (the strip never sets e->s3d). */
-    if (e->s3d && tg_s3d_eligible(gb)) {
+    if (e->s3d && (tg_s3d_eligible(gb) || e->s3d_nh > 0 || e->s3d_base)) {
         TG_S3dMesh m;
         int ok;
         const int r = tg_s3d_build(e, gb, rx, rz, n_ring, by, H, floor_h, cell_w, lm_row_h, storeys,
@@ -3288,6 +3288,12 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
         if (gb->roof_across) e->st->s3d_across++;
         e->st->s3d_tint_roof += m.tint_roof;
         e->st->s3d_tint_wall += m.tint_wall;
+        e->st->s3d_rel += gb->rel;
+        e->st->s3d_holes += m.holes;
+        e->st->s3d_cap_holed += m.cap_holed;
+        e->st->s3d_cap_lidded += m.cap_lidded;
+        e->st->s3d_civic += m.civic;
+        e->st->s3d_base += (e->s3d_base != 0);
         if (m.how != TG_S3D_HOW_FLAT && m.how != TG_S3D_HOW_FLAT_FALLBACK) e->st->roof_shaped++;
         tg_s3d_free(&m);
         if (!ok) return 0;

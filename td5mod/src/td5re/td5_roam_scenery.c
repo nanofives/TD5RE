@@ -189,6 +189,14 @@ typedef struct {
     size_t    bytes;
 } ScCache;
 
+/* [roam JC2] the courtyards of one S3D_RELATIONS.JSON outline: inner rings in the cache's point pool
+ * (place frame, CW), and whether its height is an estimate the emitter may replace */
+typedef struct ScRelX {
+    int nh, hfirst[TG_S3D_HOLES_MAX], hn[TG_S3D_HOLES_MAX];
+    int h_est;
+    double hole_m2;
+} ScRelX;
+
 typedef struct { int tx, tz; RoamTile *t; int absent; uint32_t clock; } ScRoad;
 
 struct TD5_RoamScnSource {
@@ -227,6 +235,8 @@ struct TD5_RoamScnSource {
     int       fp_on, plaza_on, bld_on, lm_prefab;
     int       lm_wins;        /* [F4b] TD5RE_ROAM_LM_WINS, see sc_bld_clear       */
     int       s3d;            /* [JC] TD5RE_ROAM_S3D: Simple 3D Buildings (parts, roofs, outlines hidden) */
+    ScCache   rel;            /* [JC2] S3D_RELATIONS.JSON outlines (a pinned extra BUILDINGS cache)   */
+    ScRelX   *relx;           /*   ... their courtyards, per record                                   */
     struct ScPvSrc *pv;       /* [F4b] the pavement's ROADS facts (SECTION pavement) */
     /* reused per build */
     TG_TileCtx *ctx;
@@ -528,6 +538,158 @@ static void sc_owned_range(const ScCache *c, int64_t own, int *lo, int *hi)
     b = c->n;
     while (a < b) { const int m = (a + b) / 2; if (c->own[c->order[m]] <= own) a = m + 1; else b = m; }
     *hi = a;
+}
+
+/* [roam JC2] RELATION OUTLINES. geo_fetch never asked Overpass for relations, so a building mapped as a
+ * multipolygon (an outline with courtyards) was not in the tiles: the Legislatura (relation 1646678, the
+ * pick), the Casa de Gobierno (19835072), the Teatro Argentino, the Municipalidad and 46 more, 41 of them
+ * with inner rings. re/tools/geo_s3d_relations.py writes them to S3D_RELATIONS.JSON (source frame,
+ * BUILDINGS-style fields). Each outer ring becomes one TD5_GeoBuilding record (rel = 1) of a pinned extra
+ * cache that every consumer of the BUILDINGS caches sees (emitter, pavement frontage, infill), its inner
+ * rings kept beside it. id = 8e15 + relation id * 8 + outer index: clear of the OSM way and Overture ids.
+ * Without a height or a levels tag the height is an estimate (one storey here) the emitter replaces. */
+#define SC_REL_ID_BASE 8.0e15
+static int sc_rel_ring(const cJSON *pts, double *x, double *z, int cap)
+{
+    const cJSON *q;
+    int raw = 0, n = 0, i = 0, stride;
+    for (q = pts ? pts->child : NULL; q; q = q->next) raw++;
+    if (raw >= 2) {   /* the ring is closed in the file: the last point repeats the first */
+        const cJSON *a = pts->child, *b = cJSON_GetArrayItem(pts, raw - 1);
+        if (cJSON_GetNumberValue(cJSON_GetObjectItem(a, "x")) == cJSON_GetNumberValue(cJSON_GetObjectItem(b, "x"))
+            && cJSON_GetNumberValue(cJSON_GetObjectItem(a, "z")) == cJSON_GetNumberValue(cJSON_GetObjectItem(b, "z")))
+            raw--;
+    }
+    if (raw < 3) return 0;
+    stride = (raw + cap - 1) / cap;
+    for (q = pts->child; q && i < raw && n < cap; q = q->next, i++) {
+        if (i % stride) continue;
+        x[n] = cJSON_GetNumberValue(cJSON_GetObjectItem(q, "x"));
+        z[n] = cJSON_GetNumberValue(cJSON_GetObjectItem(q, "z"));
+        n++;
+    }
+    return n >= 3 ? n : 0;
+}
+
+static void sc_rel_copy(cJSON *dst, const cJSON *src, const char *key)
+{
+    const cJSON *v = src ? cJSON_GetObjectItem(src, key) : NULL;
+    if (v && !cJSON_IsNull(v) && !cJSON_GetObjectItem(dst, key)) cJSON_AddItemToObject(dst, key, cJSON_Duplicate(v, 1));
+}
+
+static void sc_rel_load(TD5_RoamScnSource *s)
+{
+    static const char *const k_fields[] = { "class", "name", "roof_shape", "colour", "roof_colour", "material",
+                                            "roof_material", "levels", "height_m", "min_height_m", "roof_height_m", NULL };
+    static const char *const k_tags[] = { "government", "amenity", "tourism", "historic", "heritage", "denomination",
+                                          "religion", "office", NULL };
+    char path[512];
+    char *json;
+    cJSON *root, *arr, *r;
+    ScCache *c = &s->rel;
+    int cap = 0, cap_pt = 0, nrec = 0, k;
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    memset(c, 0, sizeof *c);
+    c->used = 1; c->layer = SC_L_BLD; c->pin = 1; c->storey_m = 3.0;
+    td5_geo_source_path(path, sizeof path, s->place, "S3D_RELATIONS.JSON");
+    json = sc_slurp(path, NULL);
+    if (!json) return;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return;
+    td5_geo_src_json_to_game(root);          /* [roam M] source frame -> game frame */
+    arr = cJSON_GetObjectItem(root, "relations");
+    for (r = arr ? arr->child : NULL; r; r = r->next) cap += cJSON_GetArraySize(cJSON_GetObjectItem(r, "outer"));
+    if (cap > 0) {
+        c->b = (TD5_GeoBuilding *)calloc((size_t)cap, sizeof(TD5_GeoBuilding));
+        c->id = (double *)calloc((size_t)cap, sizeof(double));
+        c->own = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+        s->relx = (ScRelX *)calloc((size_t)cap, sizeof(ScRelX));
+    }
+    for (r = arr ? arr->child : NULL; r && c->b && c->id && c->own && s->relx; r = r->next) {
+        const cJSON *outer = cJSON_GetObjectItem(r, "outer"), *inner = cJSON_GetObjectItem(r, "inner");
+        const cJSON *tags = cJSON_GetObjectItem(r, "tags"), *o;
+        const double rid = cJSON_GetNumberValue(cJSON_GetObjectItem(r, "id"));
+        int oi = 0;
+        const char *cls = cJSON_GetStringValue(cJSON_GetObjectItem(r, "class"));
+        if (!cls || cJSON_IsTrue(cJSON_GetObjectItem(r, "part"))) continue;        /* parts: none in La Plata */
+        for (o = outer ? outer->child : NULL; o; o = o->next, oi++) {
+            cJSON *rec = cJSON_CreateObject();
+            const cJSON *h;
+            TD5_GeoBuilding *b = &c->b[c->n];
+            ScRelX *x = &s->relx[c->n];
+            double id = SC_REL_ID_BASE + rid * 8.0 + oi, hm, lv;
+            int n, first, tx, tz, f;
+            if (!rec) break;
+            cJSON_AddItemToObject(rec, "points", cJSON_Duplicate(o, 1));
+            cJSON_AddNumberToObject(rec, "id", id);
+            for (f = 0; k_fields[f]; f++) sc_rel_copy(rec, r, k_fields[f]);
+            for (f = 0; k_tags[f]; f++) sc_rel_copy(rec, tags, k_tags[f]);
+            hm = cJSON_GetNumberValue(cJSON_GetObjectItem(rec, "height_m"));
+            lv = atof(cJSON_GetStringValue(cJSON_GetObjectItem(rec, "levels")) ? cJSON_GetStringValue(cJSON_GetObjectItem(rec, "levels")) : "0");
+            x->h_est = 0;
+            if (!(hm > 0.0) && lv > 0.0) {
+                cJSON_DeleteItemFromObject(rec, "height_m");
+                cJSON_AddNumberToObject(rec, "height_m", lv * 3.0);
+                cJSON_AddStringToObject(rec, "height_src", "osm_levels");
+            } else if (hm > 0.0) {
+                cJSON_AddStringToObject(rec, "height_src", "osm_height");
+            } else {
+                cJSON_AddStringToObject(rec, "height_src", "estimated");
+                x->h_est = 1;
+            }
+            cJSON_AddStringToObject(rec, "footprint_src", "osm");
+            n = td5_geob_parse_building(rec, nrec, s->tag_lm, 3.0, s->upm, b, rx, rz, NULL);
+            cJSON_Delete(rec);
+            if (n <= 0) continue;
+            first = sc_pool_push(c, &cap_pt, rx, rz, n);
+            if (first < 0) break;
+            b->first = first;
+            b->rel = 1;
+            b->area_m2 = fabs(td5_geob_ring_area(rx, rz, n)) / (s->upm * s->upm);
+            c->id[c->n] = id;
+            roam_grid_tile_of(&s->grid, b->cx, b->cz, &tx, &tz);
+            c->own[c->n] = sc_tkey(tx, tz);
+            /* the inner rings this outer holds (first point inside), CW */
+            for (h = inner ? inner->child : NULL; h && x->nh < TG_S3D_HOLES_MAX; h = h->next) {
+                double hx[TD5_GEOB_RING_MAX], hz[TD5_GEOB_RING_MAX];
+                const int hn = sc_rel_ring(h, hx, hz, TD5_GEOB_RING_MAX);
+                int hf;
+                if (hn < 3 || !td5_geob_point_in_ring(rx, rz, n, hx[0], hz[0])) continue;
+                if (td5_geob_ring_area(hx, hz, hn) > 0.0)
+                    for (k = 0; k < hn / 2; k++) {
+                        double t = hx[k]; hx[k] = hx[hn - 1 - k]; hx[hn - 1 - k] = t;
+                        t = hz[k]; hz[k] = hz[hn - 1 - k]; hz[hn - 1 - k] = t;
+                    }
+                hf = sc_pool_push(c, &cap_pt, hx, hz, hn);
+                if (hf < 0) break;
+                x->hfirst[x->nh] = hf; x->hn[x->nh] = hn; x->nh++;
+                x->hole_m2 += fabs(td5_geob_ring_area(hx, hz, hn)) / (s->upm * s->upm);
+            }
+            c->n++;
+            nrec++;
+        }
+    }
+    cJSON_Delete(root);
+    sc_cache_sort(c);
+    {
+        int nh = 0, ne = 0;
+        for (k = 0; k < c->n; k++) { nh += s->relx[k].nh; ne += s->relx[k].h_est; }
+        TD5_LOG_I(LOG_TAG, "roam scenery: %d relation outline(s) from S3D_RELATIONS.JSON, %d courtyard ring(s), "
+                  "%d with an estimated height", c->n, nh, ne);
+    }
+}
+
+/* [roam JC2] the place point stands inside a relation outline (outer ring; courtyards included) */
+static int sc_rel_covers(const TD5_RoamScnSource *s, double x, double z)
+{
+    int k;
+    for (k = 0; k < s->rel.n; k++) {
+        const TD5_GeoBuilding *b = &s->rel.b[k];
+        if (hypot(x - b->cx, z - b->cz) > b->radius) continue;
+        if (td5_geob_point_in_ring(&s->rel.px[b->first], &s->rel.pz[b->first], b->n, x, z)) return 1;
+    }
+    return 0;
 }
 
 static int sc_index_load(TD5_RoamScnSource *s)
@@ -1297,6 +1459,8 @@ typedef struct {
     const double *px, *pz;     /* place-frame ring (cache pool) */
     double id;
     double storey_m;           /* its file's storey height      */
+    const ScRelX *rx;          /* [JC2] courtyards (a relation outline), else NULL */
+    const ScCache *rc;         /*   ... and the pool they live in */
 } ScBld;
 
 typedef struct {
@@ -1758,7 +1922,8 @@ static int sc_bld_drops(TD5_RoamScnSource *s, TG_TileCtx *c, const TD5_GeoBuildi
     ScBldU u;
     int k;
     const int n = gb->n;
-    if (gb->landmark || gb->part) return 0;
+    if (gb->landmark || gb->part || gb->rel) return 0;
+    if (s->s3d && gb->fsrc == TD5_GEOB_FSRC_OVERTURE && sc_rel_covers(s, gb->cx, gb->cz)) return 1;   /* [JC2] */
     if (n < 3 || n > TD5_GEOB_RING_MAX) return 1;
     if (sc_bld_plaza_veto(ar, nar, gb, px, pz) || sc_bld_green_veto(c, gb, px, pz)) return 1;
     for (k = 0; k < n; k++) { rx[k] = px[k] - (double)c->org_x; rz[k] = pz[k] - (double)c->org_z; }
@@ -1784,13 +1949,22 @@ static void sc_bld_note(const TD5_RoamScnSource *s, const TG_TileCtx *c, const S
  * covering SC_S3D_COVER of its area is hidden; a partial set of parts (an outline with one tower mapped) keeps the
  * outline. Census over the partido (verify/roam/s3d_census.py): 9 outlines hold parts. */
 #define SC_S3D_COVER 0.5
-static int sc_s3d_hidden(const ScBld *set, int nset, int self)
+/* [JC2] parts covering this much of the outline need no BASE under them (the gaps they leave are slivers) */
+#define SC_S3D_BASE_COVER 0.95
+static int sc_s3d_hidden(const ScBld *set, int nset, int self, double *cover_out, double *low_top)
 {
     const TD5_GeoBuilding *o = set[self].b;
     double cover = 0.0, area;
     int k;
+    *cover_out = 0.0; *low_top = 1e300;
     if (o->part || o->n < 3) return 0;
     area = fabs(td5_geob_ring_area(set[self].px, set[self].pz, o->n));
+    if (set[self].rx) {                                /* [JC2] the solid area: courtyards out */
+        int h;
+        for (h = 0; h < set[self].rx->nh; h++)
+            area -= fabs(td5_geob_ring_area(&set[self].rc->px[set[self].rx->hfirst[h]],
+                                            &set[self].rc->pz[set[self].rx->hfirst[h]], set[self].rx->hn[h]));
+    }
     if (!(area > 0.0)) return 0;
     for (k = 0; k < nset; k++) {
         const TD5_GeoBuilding *p = set[k].b;
@@ -1798,8 +1972,27 @@ static int sc_s3d_hidden(const ScBld *set, int nset, int self)
         if (hypot(p->cx - o->cx, p->cz - o->cz) > o->radius) continue;
         if (!td5_geob_point_in_ring(set[self].px, set[self].pz, o->n, p->cx, p->cz)) continue;
         cover += fabs(td5_geob_ring_area(set[k].px, set[k].pz, p->n));
+        if (p->height < *low_top) *low_top = p->height;
     }
+    *cover_out = cover / area;
     return cover >= SC_S3D_COVER * area;
+}
+
+/* [JC2] the smallest non-part outline in the set whose ring holds this footprint's centroid: what a
+ * building:part belongs to (its civic dressing is inherited) */
+static int sc_s3d_host(const ScBld *set, int nset, int self)
+{
+    const TD5_GeoBuilding *c = set[self].b;
+    double best = 1e300;
+    int k, host = -1;
+    for (k = 0; k < nset; k++) {
+        const TD5_GeoBuilding *o = set[k].b;
+        if (k == self || o->part || o->n < 3 || o->fsrc != TD5_GEOB_FSRC_OSM) continue;
+        if (hypot(c->cx - o->cx, c->cz - o->cz) > o->radius) continue;
+        if (!td5_geob_point_in_ring(set[k].px, set[k].pz, o->n, c->cx, c->cz)) continue;
+        if (o->area_m2 < best) { best = o->area_m2; host = k; }
+    }
+    return host;
 }
 
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
@@ -1824,6 +2017,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                     set[nset].pz = &bc[l]->pz[bc[l]->b[ri].first];
                     set[nset].id = bc[l]->id[ri];
                     set[nset].storey_m = bc[l]->storey_m;
+                    set[nset].rx = (bc[l] == &s->rel && s->relx) ? &s->relx[ri] : NULL;
+                    set[nset].rc = bc[l];
                     nset++;
                 }
             }
@@ -1850,27 +2045,69 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         ScBldU u;
         TG_GeoBldEnv e;
         ScSb *b;
-        int s3d_hide;
+        int s3d_hide, s3d_base = 0, nh = 0, hn[TG_S3D_HOLES_MAX];
+        double s3d_cover = 0.0, s3d_low = 1e300, hx[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX], hz[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX];
+        TD5_GeoBuilding gloc;
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
         if (sc_tkey(tx, tz) != self) continue;
         c->st.bld_seen++;
         if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "bad ring"); continue; }
+        /* [JC2] an Overture / Open Buildings blob under an OSM relation outline: the outline is the building */
+        if (s->s3d && gb->fsrc == TD5_GEOB_FSRC_OVERTURE && sc_rel_covers(s, gb->cx, gb->cz)) {
+            c->st.bld_rel_ovt_drop++;
+            sc_bld_note(s, c, &set[i], "under a relation outline");
+            continue;
+        }
+        gloc = *gb;
+        if (s->s3d && gb->rel) {
+            /* [JC2] a relation with no height: the tallest blob under it (Open Buildings measured it), else two storeys */
+            if (set[i].rx && set[i].rx->h_est) {
+                double hmax = 0.0;
+                for (k = 0; k < nset; k++) {
+                    const TD5_GeoBuilding *q = set[k].b;
+                    if (q->fsrc != TD5_GEOB_FSRC_OVERTURE || hypot(q->cx - gb->cx, q->cz - gb->cz) > gb->radius) continue;
+                    if (!td5_geob_point_in_ring(set[i].px, set[i].pz, n, q->cx, q->cz)) continue;
+                    if (q->height > hmax) hmax = q->height;
+                }
+                gloc.height = hmax > 0.0 ? hmax : 2.0 * set[i].storey_m * s->upm;
+                if (!gloc.levels) gloc.levels = (unsigned short)(gloc.height / (3.0 * s->upm) + 0.5);
+            }
+            c->st.bld_rel++;
+        }
+        if (s->s3d && gb->part && !gb->civic) {                       /* [JC2] a part of a civic building is civic */
+            const int h = sc_s3d_host(set, nset, i);
+            if (h >= 0 && set[h].b->civic) gloc.civic = 1;
+        }
+        gb = &gloc;
         /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building. [JC] Nor a
          * building:part: a mapper modelled it in 3D, it stands. MEASURED: 6 of the 7 parts of the civic palace at Avenida 7 / 51 / 53 (Plaza San Martin) stand
          * on a mapped grass polygon (AREAS 176337780) and were vetoed, leaving its roof-only canopy alone as a box. */
-        if (!(s->s3d && gb->part) && sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
+        if (!(s->s3d && (gb->part || gb->rel)) && sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
             c->st.bld_veto_plaza++;
             sc_bld_note(s, c, &set[i], "plaza veto");
             continue;
         }
-        if (sc_bld_green_veto(c, gb, set[i].px, set[i].pz)) {          /* [IC] park / ring plaza / avenue median */
+        if (!gb->rel && sc_bld_green_veto(c, gb, set[i].px, set[i].pz)) {   /* [IC] park / ring plaza / avenue median */
             c->st.bld_veto_green++;
             sc_bld_note(s, c, &set[i], "green veto");
             continue;
         }
         sc_lm_info(set, nset, i, &kind, &anchor, &veto);
-        s3d_hide = s->s3d && sc_s3d_hidden(set, nset, i);
-        if (s3d_hide && !(anchor && kind == TD5_GEOB_LMK_WORSHIP)) {   /* a worship anchor still lays its apron */
+        s3d_hide = s->s3d && sc_s3d_hidden(set, nset, i, &s3d_cover, &s3d_low);
+        /* [JC2] parts that leave gaps: the outline stays as a flat BASE lower than every part (Mariano, 2026-10-21:
+         * the Legislatura "stands on bare lawn" between its parts) */
+        if (s3d_hide && s3d_cover < SC_S3D_BASE_COVER && s3d_low < 1e300) {
+            const double top = (gloc.height < s3d_low ? gloc.height : s3d_low) - 0.3 * s->upm;
+            if (top > 2.0 * s->upm) {
+                s3d_base = 1;
+                gloc.height = top;
+                gloc.min_height = 0.0;
+                gloc.roof3d = TD5_GEOB_R3_FLAT;
+                gloc.roof_height = 0.0;
+                gloc.roof_only = 0;
+            }
+        }
+        if (s3d_hide && !s3d_base && !(anchor && kind == TD5_GEOB_LMK_WORSHIP)) {   /* a worship anchor still lays its apron */
             c->st.bld_s3d_hidden++;
             sc_bld_note(s, c, &set[i], "outline replaced by its building:parts");
             continue;
@@ -1898,7 +2135,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         u.minout = u.host ? u.f.half_carriage + s->gap : 0.0;
         u.gap = s->gap;
         r = sc_bld_clear(c, &u, s->gap, rx, rz, n, &shift,
-                         s->lm_wins && (gb->landmark || kind != TD5_GEOB_LMK_NONE || (s->s3d && gb->part)));
+                         s->lm_wins && (gb->landmark || kind != TD5_GEOB_LMK_NONE || (s->s3d && (gb->part || gb->rel))));
         if (gb->landmark && !gb->part)       /* one line per landmark outline: what became of it */
             TD5_LOG_I(LOG_TAG, "[ROAM LM] tile %d,%d way_hash=%08x kind=%d anchor=%d host=%d half=%.0f minout=%.0f "
                       "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
@@ -1934,8 +2171,25 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         e.acct = 0;
         e.st = &c->bst;
         e.s3d = s->s3d;
-        e.s3d_skip_mass = s3d_hide;
+        e.s3d_skip_mass = s3d_hide && !s3d_base;
+        e.s3d_base = s3d_base;
         if (s3d_hide) c->st.bld_s3d_hidden++;
+        if (set[i].rx && set[i].rx->nh > 0) {
+            /* [JC2] the courtyards, in the tile frame, moved by the same clearance shift as the outline */
+            const double sx = rx[0] - (set[i].px[0] - (double)c->org_x), sz = rz[0] - (set[i].pz[0] - (double)c->org_z);
+            int h, off = 0;
+            for (h = 0; h < set[i].rx->nh; h++) {
+                const int hf = set[i].rx->hfirst[h];
+                hn[nh] = set[i].rx->hn[h];
+                for (k = 0; k < hn[nh]; k++) {
+                    hx[off + k] = set[i].rc->px[hf + k] - (double)c->org_x + sx;
+                    hz[off + k] = set[i].rc->pz[hf + k] - (double)c->org_z + sz;
+                }
+                off += hn[nh];
+                nh++;
+            }
+        }
+        e.s3d_nh = nh; e.s3d_hn = hn; e.s3d_hx = hx; e.s3d_hz = hz;
         {
             const long emitted0 = c->bst.emitted, prefab0 = c->bst.lm_prefab, apron0 = c->bst.lm_apron;
             long how0[6];
@@ -1971,6 +2225,12 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         for (q = 0; q < 6; q++) c->st.s3d_how[q] = (int)c->bst.s3d_how[q];
         c->st.s3d_roof_only = (int)c->bst.s3d_roof_only;
         c->st.s3d_tint = (int)(c->bst.s3d_tint_roof + c->bst.s3d_tint_wall);
+        c->st.s3d_holes = (int)c->bst.s3d_holes;
+        c->st.s3d_cap_holed = (int)c->bst.s3d_cap_holed;
+        c->st.s3d_cap_lidded = (int)c->bst.s3d_cap_lidded;
+        c->st.s3d_civic = (int)c->bst.s3d_civic;
+        c->st.s3d_base = (int)c->bst.s3d_base;
+        c->st.s3d_rel_built = (int)c->bst.s3d_rel;
     }
     return 1;
 }
@@ -5263,6 +5523,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->pv = sc_pv_open(s);
     s->hc = (TD5_RoamHeight *)calloc(1, sizeof(TD5_RoamHeight));
     if (!sc_index_load(s)) TD5_LOG_W(LOG_TAG, "roam scenery: %s has no tiles/INDEX.JSON: no buildings", place);
+    if (s->s3d) sc_rel_load(s);               /* [JC2] relation outlines + courtyards */
     s->ctx = (TG_TileCtx *)calloc(1, sizeof(TG_TileCtx));
     if (!s->ctx) { td5_roam_scn_close(s); return NULL; }
     s->furn = td5_roam_furn_open(place);      /* [F4c] NULL = no furniture (knob off / no data) */
@@ -5288,6 +5549,8 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     for (k = 0; k < SC_ROAD_LRU; k++) if (s->road[k].t) { td5_roam_tile_free(s->road[k].t); free(s->road[k].t); }
     sc_ctx_free(s->ctx);
     sc_pv_close(s->pv);
+    sc_cache_free(&s->rel);                   /* [JC2] */
+    free(s->relx);
     free(s->casco);
     td5_roam_furn_close(s->furn);
     td5_roam_rails_close(s->rails);
@@ -5298,7 +5561,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
 TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, TD5_RoamHeight *hc)
 {
     TG_TileCtx *c;
-    ScCache *bc[SC_CACHE_LRU], *ac[SC_CACHE_LRU], *fc[SC_CACHE_LRU];
+    ScCache *bc[SC_CACHE_LRU + 1], *ac[SC_CACHE_LRU], *fc[SC_CACHE_LRU];
     ScArea *ar = NULL;
     int nbc, nac, nfc, nar = 0, cap = 0, l, i, dx, dz;
     double corner[4][2], x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300;
@@ -5351,6 +5614,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     {
         const double S = (double)s->grid.tile * 1.5;
         nbc = sc_cache_window(s, SC_L_BLD, x0 - S, z0 - S, x1 + S, z1 + S, bc, k_sc_lru[SC_L_BLD]);
+        if (s->s3d && s->rel.n > 0) bc[nbc++] = &s->rel;   /* [JC2] the relation outlines, after the tiles */
         nac = sc_cache_window(s, SC_L_AREA, x0 - S, z0 - S, x1 + S, z1 + S, ac, k_sc_lru[SC_L_AREA]);
         nfc = sc_cache_window(s, SC_L_FOOT, x0, z0, x1, z1, fc, k_sc_lru[SC_L_FOOT]);
     }
@@ -5543,6 +5807,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
+    long s3d_r[8] = { 0 };                                 /* [roam JC2] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -5642,6 +5907,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             int q;
             s3d_t[0] += r->bld_s3d; s3d_t[1] += r->bld_s3d_hidden; s3d_t[2] += r->s3d_roof_only; s3d_t[3] += r->s3d_tint;
             s3d_tag += r->s3d_tagged; s3d_slope += r->s3d_sloped;
+            s3d_r[0] += r->bld_rel; s3d_r[1] += r->s3d_rel_built; s3d_r[2] += r->s3d_holes; s3d_r[3] += r->s3d_cap_holed;
+            s3d_r[4] += r->s3d_cap_lidded; s3d_r[5] += r->s3d_civic; s3d_r[6] += r->s3d_base; s3d_r[7] += r->bld_rel_ovt_drop;
             for (q = 0; q < 6; q++) s3d_t[4 + q] += r->s3d_how[q];
         }
         inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
@@ -5778,6 +6045,13 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "their parts | 3D-tagged footprints drawn %ld, with a sloped roof %ld (TD5RE_ROAM_S3D=%d)",
                  s3d_t[0], s3d_t[4], s3d_t[5], s3d_t[6], s3d_t[7], s3d_t[8], s3d_t[9], s3d_t[2], s3d_t[3], s3d_t[1],
                  s3d_tag, s3d_slope, td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1));
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam JC2: relation outlines owned %ld, built %ld | courtyard rings walled %ld, holed caps %ld, lidded "
+                 "(clipper gave up) %ld | civic facades %ld | bases under parts %ld | Overture blobs under a relation "
+                 "not built %ld", s3d_r[0], s3d_r[1], s3d_r[2], s3d_r[3], s3d_r[4], s3d_r[5], s3d_r[6], s3d_r[7]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

@@ -60,7 +60,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  12u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  13u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -79,7 +79,9 @@
                                      *      11 so no tile cached by a single branch is reused)
                                      * 12 = roam JC: OSM Simple 3D Buildings (td5_tg_s3d.c): every building:part and
                                      *      roof:shape footprint gets its real roof on any ring, roof-only parts,
-                                     *      roof / wall colours, outlines replaced by their parts not drawn */
+                                     *      roof / wall colours, outlines replaced by their parts not drawn
+                                     * 13 = roam JC2: S3D_RELATIONS.JSON outlines with courtyards, Overture blobs
+                                     *      under them dropped, civic stone / plaster facades, bases under parts */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -199,6 +201,9 @@ typedef struct {
      * outlines not drawn because their building:parts replace them */
     int  bld_s3d, s3d_how[6], s3d_roof_only, s3d_tint, bld_s3d_hidden;
     int  s3d_tagged, s3d_sloped;   /* footprints with part / roof:shape / roof-only drawn (either builder), with a sloped roof */
+    /* [JC2] relation outlines owned / built, courtyard rings walled, holed caps / lidded, civic facades, bases under
+     * parts, Overture blobs not built because a relation outline covers them */
+    int  bld_rel, s3d_rel_built, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base, bld_rel_ovt_drop;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

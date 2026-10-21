@@ -38,6 +38,9 @@ typedef struct {
     /* [roam JC] the Simple 3D Buildings path (td5_tg_s3d.c); only free roam fills these */
     long   s3d_n, s3d_kind[TD5_GEOB_R3__N], s3d_how[6], s3d_roof_only, s3d_tint_roof, s3d_tint_wall;
     long   s3d_hidden, s3d_across;
+    /* [roam JC2] relation outlines built, courtyard rings walled, holed caps (and the ones that fell back to a
+     * lidded outer cap), civic facades, base masses under parts */
+    long   s3d_rel, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base;
 } TG_GeoBldStats;
 
 typedef struct {
@@ -80,6 +83,14 @@ typedef struct {
     /* [roam JC] 1: lay the landmark apron only, not the mass (an outline its building:parts
      * replace, Simple 3D Buildings: the outline is not rendered when parts exist) */
     int      s3d_skip_mass;
+    /* [roam JC2] COURTYARDS: the inner rings of an OSM multipolygon outline, in the caller's frame, any winding,
+     * concatenated (s3d_hn[i] points each). 0 = none. Built by tg_s3d_build only. */
+    int            s3d_nh;
+    const int     *s3d_hn;
+    const double  *s3d_hx, *s3d_hz;
+    /* [roam JC2] 1: the mass is the BASE under an outline's building:parts (a flat block inset 0.25 m, filling the
+     * gaps the parts leave, lower than every part) */
+    int      s3d_base;
 } TG_GeoBldEnv;
 
 /* Extrude ONE cleared footprint (ring rx/rz[n_ring], CCW, centroid cx/cz, already moved
@@ -96,10 +107,12 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
 #define TG_S3D_HOW_CENTROID      3   /* pyramidal, cone, dome, onion on a star-shaped ring */
 #define TG_S3D_HOW_OFFSET        4   /* mansard, or a sloped shape on a concave ring: mitred inset + deck */
 #define TG_S3D_HOW_FLAT_FALLBACK 5   /* sloped shape, no offset fitted: flat */
+#define TG_S3D_HOLES_MAX 8
 typedef struct {
     float *v; unsigned int *light; int nv, cap;
     unsigned short cmd[6]; int ncmd;
     int how, rows, tint_roof, tint_wall;
+    int holes, cap_holed, cap_lidded, civic;
     double rise;
 } TG_S3dMesh;
 int  tg_s3d_eligible(const TD5_GeoBuilding *gb);

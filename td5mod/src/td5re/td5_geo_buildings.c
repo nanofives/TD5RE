@@ -818,6 +818,31 @@ unsigned int td5_geob_colour_of(const char *s, int kind)
 }
 
 
+/* [roam JC2] CIVIC: what free roam dresses in a stone / plaster facade (td5_tg_s3d.c). The palace
+ * classes and tags OSM uses for government, worship, culture and learning, plus a building:part
+ * roofed in slate / copper / lead / zinc (La Plata's 1880s palaces: the Legislatura parts carry
+ * roof:material=slate and nothing else). School and hospital stay ordinary fabric. */
+static int geob_civic_of(const cJSON *e, int part)
+{
+    static const char *const k_cls[] = { "government", "public", "civic", "palace", "townhall", "courthouse",
+        "museum", "university", "college", "theatre", "cathedral", "church", "chapel", "basilica", "monastery",
+        "train_station", "castle", "library", "synagogue", "mosque", "temple", NULL };
+    static const char *const k_amen[] = { "townhall", "courthouse", "theatre", "library", "university", "college",
+        "arts_centre", "place_of_worship", "police", "embassy", "planetarium", NULL };
+    static const char *const k_tour[] = { "museum", "gallery", NULL };
+    static const char *const k_roof[] = { "slate", "copper", "lead", "zinc", NULL };
+    const char *v;
+    if (geob_in_set(geob_str(e, "class"), k_cls)) return 1;
+    v = geob_str(e, "government");
+    if (v && v[0]) return 1;
+    if (geob_in_set(geob_str(e, "amenity"), k_amen)) return 1;
+    if (geob_in_set(geob_str(e, "tourism"), k_tour)) return 1;
+    v = geob_str(e, "historic");
+    if (v && v[0] && strcmp(v, "no")) return 1;
+    if (part && geob_in_set(geob_str(e, "roof_material"), k_roof)) return 1;
+    return 0;
+}
+
 /* [roam F4a] Every field of one BUILDINGS.JSON record except the ring (which the
  * caller has already parsed into b->cx/cz/radius), lifted out of
  * geob_load_buildings unchanged so free roam reads its tiles with the same rules.
@@ -934,6 +959,7 @@ static void geob_fill_building(const cJSON *e, int i, int tag_lm, double storey_
         rgb = td5_geob_colour_of(geob_str(e, "colour"), 0);
         if (!rgb) rgb = td5_geob_colour_of(geob_str(e, "material"), 2);
         b->wall_rgb = rgb;
+        b->civic = (unsigned char)geob_civic_of(e, b->part);
     }
 }
 
