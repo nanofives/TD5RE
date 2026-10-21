@@ -210,6 +210,7 @@ struct TD5_RoamScnSource {
     int       lots_on, lot_cover, infill_on;   /* [HD] TD5RE_ROAM_LOTS / _LOT_COVER / TD5RE_ROAM_INFILL */
     int       lot_page;                       /* [HD] TD5RE_ROAM_LOT_PAGE: the lots' host page */
     int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
+    int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
      * td5_roam_height_sample computes cell coordinates from the window origin, so a
      * shared LRU (whichever window happens to be resident) moves the low bits of a
@@ -1558,6 +1559,14 @@ static int sc_bld_clear(TG_TileCtx *c, ScBldU *u, double gap, double *rx, double
     return 0;
 }
 
+/* [IC] TD5RE_ROAM_BLD_LOG=1: what became of one footprint (place frame centroid), for the offline census */
+static void sc_bld_note(const TD5_RoamScnSource *s, const TG_TileCtx *c, const ScBld *b, const char *fate)
+{
+    if (!s->bld_log) return;
+    TD5_LOG_I(LOG_TAG, "ROAM_BLD tile %d,%d id %.0f src %d c (%.0f,%.0f) area %.0f h %.1f: %s", c->tx, c->tz, b->id,
+              (int)b->b->fsrc, b->b->cx, b->b->cz, b->b->area_m2, b->b->height / SC_UPM, fate);
+}
+
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
                              const ScArea *ar, int nar)
 {
@@ -1609,7 +1618,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
         if (sc_tkey(tx, tz) != self) continue;
         c->st.bld_seen++;
-        if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; continue; }
+        if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "bad ring"); continue; }
         /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building */
         if (td5_env_flag_on("TD5RE_GEO_PLAZA_BLD") && nar > 0) {
             int in = 0, np = 0;
@@ -1620,6 +1629,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             if (in * 2 > np && !gb->landmark
                 && !(gb->fsrc == TD5_GEOB_FSRC_OSM && sc_ring_area_m2(set[i].px, set[i].pz, n) < SC_PLAZA_KEEP_M2)) {
                 c->st.bld_veto_plaza++;
+                sc_bld_note(s, c, &set[i], "plaza veto");
                 continue;
             }
         }
@@ -1632,11 +1642,11 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                 for (f = 0; f < nfc && !veto; f++)
                     if (sc_hull_dist(&fc[f], set[i].px[k], set[i].pz[k]) <= clear) veto = 1;
         }
-        if (veto) { c->st.bld_veto_lm++; continue; }
+        if (veto) { c->st.bld_veto_lm++; sc_bld_note(s, c, &set[i], "landmark veto"); continue; }
         for (k = 0; k < n; k++) { rx[k] = set[i].px[k] - (double)c->org_x; rz[k] = set[i].pz[k] - (double)c->org_z; }
-        if (!td5_geob_ring_simple(rx, rz, n)) { c->st.bld_drop_ring++; continue; }
+        if (!td5_geob_ring_simple(rx, rz, n)) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "ring not simple"); continue; }
         for (k = 0; k < n && sc_in_reach(c, rx[k], rz[k]); k++) { }
-        if (k < n) { c->st.bld_drop_ring++; continue; }
+        if (k < n) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "out of reach"); continue; }
         for (k = 0; k < n; k++) { cx += rx[k]; cz += rz[k]; }
         cx /= n; cz /= n;
         memset(&u, 0, sizeof u);
@@ -1653,8 +1663,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                       "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
                       u.f.half_carriage, u.minout, gb->area_m2, gb->height,
                       r == 2 ? "DROPPED past the shift cap" : r == 1 ? "DROPPED on a road" : "kept", shift);
-        if (r == 2) { c->st.bld_drop_shift++; continue; }
-        if (r == 1) { c->st.bld_drop_road++; continue; }
+        if (r == 2) { c->st.bld_drop_shift++; sc_bld_note(s, c, &set[i], "past the shift cap"); continue; }
+        if (r == 1) { c->st.bld_drop_road++; sc_bld_note(s, c, &set[i], "on a road"); continue; }
         if (shift > 0.0) { c->st.bld_nudged++; if (shift > c->st.bld_shift_max) c->st.bld_shift_max = shift; }
         cx = 0.0; cz = 0.0;
         for (k = 0; k < n; k++) { cx += rx[k]; cz += rz[k]; }
@@ -1687,6 +1697,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                 free(set); free(fc); return 0;
             }
             if (c->bst.emitted > emitted0) c->st.bld_emitted++;
+            sc_bld_note(s, c, &set[i], c->bst.emitted > emitted0 ? "emitted" : "core refused");
             if (c->bst.lm_prefab > prefab0) c->st.bld_prefab++;
             if (c->bst.lm_apron > apron0) c->st.bld_apron++;
             if (kind != TD5_GEOB_LMK_NONE || gb->landmark) c->st.bld_lm++;
@@ -3904,6 +3915,9 @@ static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint
         const long emitted0 = c->bst.emitted;
         if (!tg_geo_emit_building_core(&env, &gb, rx, rz, n, cx, cz, 0.0) || b->blk.oom) return 0;
         if (c->bst.emitted > emitted0) { c->st.inf_emitted++; c->st.inf_m2 += gb.area_m2; }
+        if (s->bld_log && c->bst.emitted > emitted0)
+            TD5_LOG_I(LOG_TAG, "ROAM_BLD tile %d,%d id %u src infill c (%.0f,%.0f) area %.0f h %.1f: emitted", c->tx, c->tz,
+                      h, gb.cx, gb.cz, gb.area_m2, gb.height / s->upm);
     }
     return 1;
 }
@@ -4364,6 +4378,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->lot_cover = td5_env_int("TD5RE_ROAM_LOT_COVER", 1, 0, 1);
     s->infill_on = td5_env_int("TD5RE_ROAM_INFILL", 1, 0, 1);
     s->infill_log = td5_env_int("TD5RE_ROAM_INFILL_LOG", 0, 0, 1);
+    s->bld_log = td5_env_int("TD5RE_ROAM_BLD_LOG", 0, 0, 1);
     s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
         int (*cl)[2] = (int (*)[2])malloc(2048 * sizeof(int[2]));
