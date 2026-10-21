@@ -70,6 +70,9 @@
                                      * 10 = roam IA: a gap of <= 25 m to another carriageway with no building in it is an
                                      *      island filled to the middle (any streets), island slabs keep their back face
                                      * 10 = roam IB: no kerb fences, no stamped TD5 landmark prefabs
+                                     * 10 = roam IC: avenue medians + named-ring plazas green, Overture footprints
+                                     *     not built on them / on parks, dropped footprints free the frontage,
+                                     *     infill 1-3 floors (taller on avenues) 12-24 m deep, AREAS spikes
                                      * 11 = round I integration: every round I branch combined (each bumped 9 -> 10 on its own,
                                      *      11 so no tile cached by a single branch is reused) */
 
@@ -161,6 +164,12 @@ typedef struct {
      * that takes none, a lot too shallow or bent) and the footprint area added (m2) */
     int  inf_lots, inf_emitted, inf_drop_real, inf_drop_road, inf_drop_area, inf_drop_shape;
     double inf_m2;
+    /* [IC] avenue medians (a rambla's kerb loop) kept green + taking no building; Overture footprints not built on a
+     * park / ring plaza / median polygon (the green veto); footprints the pavement + infill stopped treating as
+     * standing because the emitter drops them (sc_bld_drops). Frontage METRES of the owned infill candidates by
+     * outcome: built, taken by a real footprint, refused by an area (green / open / not city), other (road, shape) */
+    int  lot_medians, bld_veto_green, pv_bld_gone, lot_cover_green;
+    double inf_m_built, inf_m_real, inf_m_area, inf_m_other;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
