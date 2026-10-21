@@ -686,7 +686,8 @@ static int sc_rel_covers(const TD5_RoamScnSource *s, double x, double z)
     int k;
     for (k = 0; k < s->rel.n; k++) {
         const TD5_GeoBuilding *b = &s->rel.b[k];
-        if (hypot(x - b->cx, z - b->cz) > b->radius) continue;
+        const double dx = x - b->cx, dz = z - b->cz;
+        if (dx * dx + dz * dz > b->radius * b->radius) continue;
         if (td5_geob_point_in_ring(&s->rel.px[b->first], &s->rel.pz[b->first], b->n, x, z)) return 1;
     }
     return 0;
@@ -1995,7 +1996,7 @@ static int sc_s3d_host(const ScBld *set, int nset, int self)
     for (k = 0; k < nset; k++) {
         const TD5_GeoBuilding *o = set[k].b;
         if (k == self || o->part || o->n < 3 || o->fsrc != TD5_GEOB_FSRC_OSM) continue;
-        if (hypot(c->cx - o->cx, c->cz - o->cz) > o->radius) continue;
+        if ((c->cx - o->cx) * (c->cx - o->cx) + (c->cz - o->cz) * (c->cz - o->cz) > o->radius * o->radius) continue;
         if (!td5_geob_point_in_ring(set[k].px, set[k].pz, o->n, c->cx, c->cz)) continue;
         if (o->area_m2 < best) { best = o->area_m2; host = k; }
     }
@@ -2074,7 +2075,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                 double hmax = 0.0;
                 for (k = 0; k < nset; k++) {
                     const TD5_GeoBuilding *q = set[k].b;
-                    if (q->fsrc != TD5_GEOB_FSRC_OVERTURE || hypot(q->cx - gb->cx, q->cz - gb->cz) > gb->radius) continue;
+                    if (q->fsrc != TD5_GEOB_FSRC_OVERTURE
+                        || (q->cx - gb->cx) * (q->cx - gb->cx) + (q->cz - gb->cz) * (q->cz - gb->cz) > gb->radius * gb->radius) continue;
                     if (!td5_geob_point_in_ring(set[i].px, set[i].pz, n, q->cx, q->cz)) continue;
                     if (q->height > hmax) hmax = q->height;
                 }

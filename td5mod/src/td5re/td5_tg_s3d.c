@@ -72,6 +72,10 @@
 /* --------------------------------------------------------------- ring tools --- */
 
 static double s3d_cross(double ax, double az, double bx, double bz) { return ax * bz - az * bx; }
+/* [roam JC2] length of (a, b) as sqrt(a*a + b*b), never libm hypot: MEASURED on the scenery determinism harness,
+ * hypot here rounds differently on the stream worker than on the main thread (tile 20,57, one wall U 3.0 vs
+ * 2.9999998), while SSE sqrt is exact IEEE on every thread */
+static double s3d_len(double a, double b) { return sqrt(a * a + b * b); }
 
 /* Drop the straight-through vertices (an OSM node on a straight wall: within S3D_COL_DEG or S3D_COL_DEV_M of the
  * chord of its neighbours) and the near-duplicates (S3D_DUP_M). MEASURED: the Catedral's two octagonal pinnacles
@@ -94,9 +98,9 @@ static int s3d_clean(const double *rx, const double *rz, int n, double upm, doub
             while (!keep[q]) q = (q + 1) % n;
             ax = rx[k] - rx[p]; az = rz[k] - rz[p];
             bx = rx[q] - rx[k]; bz = rz[q] - rz[k];
-            la = hypot(ax, az); lb = hypot(bx, bz);
+            la = s3d_len(ax, az); lb = s3d_len(bx, bz);
             {
-                const double cx = rx[q] - rx[p], cz = rz[q] - rz[p], lc = hypot(cx, cz);
+                const double cx = rx[q] - rx[p], cz = rz[q] - rz[p], lc = s3d_len(cx, cz);
                 const double dev = lc > 1e-6 ? fabs(s3d_cross(cx, cz, rx[k] - rx[p], rz[k] - rz[p])) / lc : 0.0;
                 if (la < S3D_DUP_M * upm || lb < S3D_DUP_M * upm
                     || (ax * bx + az * bz > 0.0
@@ -142,7 +146,7 @@ static int s3d_offset(const double *x, const double *z, int n, double d, double 
     int i;
     for (i = 0; i < n; i++) {
         const int j = (i + 1) % n;
-        const double ex = x[j] - x[i], ez = z[j] - z[i], l = hypot(ex, ez);
+        const double ex = x[j] - x[i], ez = z[j] - z[i], l = s3d_len(ex, ez);
         if (!(l > 1e-6)) return 0;
         nx[i] = -ez / l; nz[i] = ex / l;           /* left of a CCW edge = inside */
     }
@@ -409,7 +413,7 @@ static int s3d_offset_hole(const double *x, const double *z, int n, double d, do
     int i;
     for (i = 0; i < n; i++) {
         const int j = (i + 1) % n;
-        const double ex = x[j] - x[i], ez = z[j] - z[i], l = hypot(ex, ez);
+        const double ex = x[j] - x[i], ez = z[j] - z[i], l = s3d_len(ex, ez);
         if (!(l > 1e-6)) return 0;
         nx[i] = -ez / l; nz[i] = ex / l;
     }
@@ -482,7 +486,7 @@ static int s3d_bridge(double *px, double *pz, int *pn, const double *hx, const d
     double bd = 1e300;
     for (k = 1; k < hn; k++) if (hx[k] > hx[mi]) mi = k;
     for (k = 0; k < n; k++) {
-        const double d = hypot(px[k] - hx[mi], pz[k] - hz[mi]);
+        const double d = s3d_len(px[k] - hx[mi], pz[k] - hz[mi]);
         int ok = 1;
         if (!(d < bd)) continue;
         for (i = 0; i < n && ok; i++) {
@@ -630,7 +634,7 @@ static int s3d_quad_uv(TG_S3dMesh *m, const double *q, double u0, double u1, dou
 static int s3d_edge_portals(const TG_GeoBldEnv *e, double ax, double az, double bx, double bz, double upm,
                             double *t0, double *t1)
 {
-    const double ex = bx - ax, ez = bz - az, el = hypot(ex, ez);
+    const double ex = bx - ax, ez = bz - az, el = s3d_len(ex, ez);
     int p, np = 0, i, j;
     if (!(el > 1.0) || e->s3d_np <= 0 || !e->s3d_pseg) return 0;
     for (p = 0; p < e->s3d_np && np < S3D_PORTALS_MAX; p++) {
@@ -641,7 +645,7 @@ static int s3d_edge_portals(const TG_GeoBldEnv *e, double ax, double az, double 
         t = s3d_cross(g[0] - ax, g[1] - az, rx, rz) / den;
         u = s3d_cross(g[0] - ax, g[1] - az, ex, ez) / den;
         if (t < 0.0 || t > 1.0 || u < 0.0 || u > 1.0) continue;
-        sn = fabs(den) / (el * hypot(rx, rz));                  /* sin of the crossing angle */
+        sn = fabs(den) / (el * s3d_len(rx, rz));                  /* sin of the crossing angle */
         if (sn < 0.25) sn = 0.25;
         half = (g[4] + S3D_PORTAL_PAD_M * upm) / sn / el;
         t0[np] = t - half < 0.0 ? 0.0 : t - half;
@@ -663,12 +667,12 @@ static int s3d_edge_portals(const TG_GeoBldEnv *e, double ax, double az, double 
 /* walls of one ring (outer CCW faces out, a CW courtyard ring faces into the courtyard); an edge a service way
  * crosses opens into a carriage arch there */
 static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double *x, const double *z,
-                     int n, double by, double base_y, double wall_top, double vrows, double cell_w, unsigned int col,
-                     int *nquad)
+                     int n, double by, double base_y, double wall_top, double span_h, double vrows, double cell_w,
+                     unsigned int col, int *nquad)
 {
     double bot[S3D_RN], q[12];
     const double upm = e->upm > 1.0 ? e->upm : 430.0;
-    const double span = (wall_top - base_y) > 1.0 ? (wall_top - base_y) : 1.0;
+    const double span = span_h > 1.0 ? span_h : 1.0;
     const double ph = (S3D_PORTAL_H_M * upm < (wall_top - base_y) - 1.0 * upm) ? S3D_PORTAL_H_M * upm : 0.0;
     int k;
     for (k = 0; k < n; k++) {
@@ -680,7 +684,7 @@ static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding
     }
     for (k = 0; k < n; k++) {
         const int j = (k + 1) % n;
-        const double elen = hypot(x[j] - x[k], z[j] - z[k]);
+        const double elen = s3d_len(x[j] - x[k], z[j] - z[k]);
         const double ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
         double t0[S3D_PORTALS_MAX], t1[S3D_PORTALS_MAX], vq = vrows;
         int np, p;
@@ -691,7 +695,7 @@ static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding
             q[3] = x[j]; q[4]  = bot[j];   q[5]  = z[j];
             q[6] = x[j]; q[7]  = wall_top; q[8]  = z[j];
             q[9] = x[k]; q[10] = wall_top; q[11] = z[k];
-            if (wall_top - base_y > 1.0) vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - base_y);
+            vq = vrows * (span + (base_y - 0.5 * (bot[k] + bot[j]))) / span;
             if (s3d_quad(m, q, ua, vq, col) < 0) return -1;
             (*nquad)++;
             continue;
@@ -713,8 +717,8 @@ static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding
                     q[3] = x[k] + (x[j] - x[k]) * sb; q[4]  = yb;       q[5]  = z[k] + (z[j] - z[k]) * sb;
                     q[6] = q[3];                      q[7]  = wall_top; q[8]  = q[5];
                     q[9] = q[0];                      q[10] = wall_top; q[11] = q[2];
-                    if (s3d_quad_uv(m, q, ua * sa, ua * sb, vrows * (wall_top - ya) / span, vrows * (wall_top - yb) / span,
-                                    0.0, col) < 0) return -1;
+                    if (s3d_quad_uv(m, q, ua * sa, ua * sb, vrows * (span + (base_y - ya)) / span,
+                                    vrows * (span + (base_y - yb)) / span, 0.0, col) < 0) return -1;
                     (*nquad)++;
                 }
                 if (p < np) { ta = t1[p]; m->portals++; }
@@ -740,7 +744,7 @@ int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double 
                  int n_in, double by, double H, double floor_h, double cell_w, double lm_row_h, int storeys,
                  int wall_page, int roof_page, TG_S3dMesh *m)
 {
-    double x[S3D_RN], z[S3D_RN], cx = 0.0, cz = 0.0, rise, wall_top, vrows, base_y, minw = 1e300;
+    double x[S3D_RN], z[S3D_RN], cx = 0.0, cz = 0.0, rise, wall_top, vrows, base_y, minw = 1e300, span_h = 1.0;
     double (*rw)[2][S3D_RN] = NULL;
     double rh[S3D_ROWS_MAX];
     S3dHoles *hl = NULL, *ho = NULL;
@@ -879,14 +883,23 @@ int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double 
         m->cmd[m->ncmd * 3 + 2] = 0;
         m->ncmd++;
     }
-    if (lm_row_h > 1.0)             vrows = (wall_top - base_y) / lm_row_h;
-    else if (storeys > 0 && H > 1.0) vrows = (double)storeys * (wall_top - base_y) / H;
-    else                            vrows = (wall_top - base_y) / ((floor_h > 1.0) ? floor_h : 1.0);
+    /* The wall's height from the INPUTS (H, rise, fascia), never wall_top - base_y: that difference cancels and
+     * carries the last bit of the ground sample under the building, which MEASURED differs between the stream worker
+     * and the main thread (tile 20,57: a 3-storey wall's V 3.0 vs 2.9999998, determinism arm T). */
+    {
+        double wh = gb->roof_only ? (wall_top - base_y) : (H - rise);
+        if (!gb->roof_only && H - rise < 0.5 * upm) wh = 0.5 * upm;             /* the half-metre floor above */
+        if (lm_row_h > 1.0)             vrows = wh / lm_row_h;
+        else if (storeys > 0 && H > 1.0) vrows = (double)storeys * wh / H;
+        else                            vrows = wh / ((floor_h > 1.0) ? floor_h : 1.0);
+        span_h = wh;
+    }
     if (!(vrows > 0.25)) vrows = gb->roof_only ? 0.25 : 1.0;
-    if (s3d_walls(m, e, gb, x, z, n, by, base_y, wall_top, vrows, cell_w, wall_col, &nquad) < 0) goto out;
+    if (s3d_walls(m, e, gb, x, z, n, by, base_y, wall_top, span_h, vrows, cell_w, wall_col, &nquad) < 0) goto out;
     if (nquad < 3) { ret = 0; goto out; }
     for (i = 0; i < hl->nh; i++)
-        if (s3d_walls(m, e, gb, hl->hx[i], hl->hz[i], hl->hn[i], by, base_y, wall_top, vrows, cell_w, wall_col, &nquad) < 0)
+        if (s3d_walls(m, e, gb, hl->hx[i], hl->hz[i], hl->hn[i], by, base_y, wall_top, span_h, vrows, cell_w, wall_col,
+                      &nquad) < 0)
             goto out;
     m->cmd[m->ncmd * 3 + 0] = (unsigned short)wall_page;
     m->cmd[m->ncmd * 3 + 1] = 0;
