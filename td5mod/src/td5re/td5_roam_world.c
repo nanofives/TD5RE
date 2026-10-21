@@ -17,6 +17,7 @@
 
 #include "td5re.h"
 #include "td5_platform.h"
+#include "td5_config.h"
 #include "td5_geo_sidewalk.h"    /* building line + carriageway (divided rule) */
 #include "td5_roam_cache.h"
 #include "td5_roam_world.h"
@@ -50,6 +51,8 @@ void td5_roam_graph_params_default(TD5_RoamGraphParams *p)
      * same units as the 1500-unit lane. Script: _archive/roam/F1/T3/car_dims.py. */
     p->body_half_w   = 340.0;
     p->body_lf       = 1280.0;
+    /* [roam JA] 2 m: a kerbed island a pavement slab fits on (td5_roam_scenery.c PV_W_SKIP); 50 = the T10 0.5 m */
+    p->median_min    = (double)td5_env_int("TD5RE_ROAM_MEDIAN_MIN_CM", 200, 50, 1000) * TD5_ROAM_UPM / 100.0;
 }
 
 /* ------------------------------------------------------------ filter -------- */
@@ -869,8 +872,21 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
                             e->lane_w = avail / (double)e->lanes;
                             if (e->lane_w > TD5_ROAM_LANE_W) e->lane_w = TD5_ROAM_LANE_W;
                             if (e->lane_w < lmin) e->lane_w = lmin;
-                            if (e->lane_w < TD5_ROAM_LANE_W) c->median_narrow_edges++;
                         }
+                        /* [roam JA] THE MEDIAN ITSELF. The 0.5 m kerb above only keeps two carriageways from
+                         * overlapping: a pair whose lanes fit the centre gap kept them at full width and left
+                         * a median of 0.5-1 m (Avenida 7 at Calle 49: 11.2 m centre to centre, 3 x 3.49 m lanes
+                         * a side, 0.79 m between), too narrow for any pavement slab, so the lot showed in the
+                         * slot (Mariano: "there's no median in between these roads"). The lanes now narrow (never
+                         * under lmin, the lane count is never lowered for it) until the median is median_min. */
+                        if (g->prm.median_min > ROAM_MED_KERB_M * TD5_ROAM_UPM) {
+                            const double want = (gap - g->prm.median_min) / (double)e->lanes;
+                            if (e->lane_w > want) {
+                                const double nw = want > lmin ? want : lmin;
+                                if (nw < e->lane_w) { e->lane_w = nw; c->median_widened_edges++; }
+                            }
+                        }
+                        if (e->lane_w < TD5_ROAM_LANE_W) c->median_narrow_edges++;
                     }
                     if (g->prm.log_median) {
                         double mx, mz;
@@ -1001,11 +1017,12 @@ int td5_roam_graph_build(TD5_RoamGraph *g, const double win[4], double halo,
               "(%d junction, %d join, %d taper, %d bend, %d dead end), %d edge(s), "
               "%d cluster(s), %d divided carriageway(s) at their own lanes (%d would be narrowed "
               "whole by the T9 rule; per edge: %d of %d edges lose lanes, %.0f m, %d keep them on "
-              "narrower lanes), %d wide avenue(s), %u ms",
+              "narrower lanes, %d of them narrowed for a %.1f m median), %d wide avenue(s), %u ms",
               c->ways_in, c->ways_kept, c->nodes, c->junction_nodes, c->joins,
               c->tapers, c->bends, c->dead_ends, c->edges, c->clusters, c->divided_ways,
               c->median_capped, c->median_capped_edges, c->divided_edges,
-              c->median_capped_len / TD5_ROAM_UPM, c->median_narrow_edges, c->wide_ways, (unsigned)c->ms);
+              c->median_capped_len / TD5_ROAM_UPM, c->median_narrow_edges, c->median_widened_edges,
+              g->prm.median_min / TD5_ROAM_UPM, c->wide_ways, (unsigned)c->ms);
     return 1;
 
 oom:

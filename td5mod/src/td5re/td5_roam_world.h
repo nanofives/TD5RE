@@ -190,6 +190,9 @@ typedef struct {
     /* Reference body for the swept-width check (2.5 rule 4), world units. */
     double body_half_w;         /* widest half width in the car table            */
     double body_lf;             /* rear axle to front corner, longest in table   */
+    double median_min;          /* [roam JA] median a divided carriageway pair is narrowed
+                                 * to leave (lanes down to TD5_ROAM_LANE_MIN_M, the lane
+                                 * count kept), units; TD5RE_ROAM_MEDIAN_MIN_CM        */
     int    log_median;          /* [T10] dev census only: log every divided way the
                                  * T9 whole-way rule narrowed (ROAM_MEDIAN_T9) and
                                  * every divided edge's verdict (ROAM_MEDIAN_EDGE).
@@ -209,6 +212,7 @@ typedef struct {
     int    median_capped_edges;/* [T10] of those, narrowed to keep the median */
     double median_capped_len;  /* [T10] their length, units                  */
     int    median_narrow_edges;/* [T10] edges on lanes narrower than 1500    */
+    int    median_widened_edges;/* [roam JA] edges whose lanes narrowed to widen the median to median_min */
     int    nodes, edges, joins, tapers, bends, junction_nodes, dead_ends;
     int    layer_cross_nodes;
     int    clusters, cluster_by_arms[TD5_ROAM_ARM_HIST];
