@@ -42,6 +42,31 @@ int32_t roam_round(double v)
     return (int32_t)floor(v + 0.5);
 }
 
+/* ------------------------------------------------------- [roam IE] deck floor */
+
+int roam_deck_env_at(const RoamDeckEnv *e, double s, double *out)
+{
+    double u;
+    int i;
+    if (!e || !e->y || e->n < 2 || !(e->step > 0.0)) return 0;
+    u = (s - e->s0) / e->step;
+    if (u < 0.0 || u > (double)(e->n - 1)) return 0;
+    i = (int)floor(u);
+    if (i >= e->n - 1) i = e->n - 2;
+    u -= (double)i;
+    *out = e->y[i] + (e->y[i + 1] - e->y[i]) * u;
+    return 1;
+}
+
+double roam_deck_smax(double a, double b, double k)
+{
+    const double d = b - a;
+    if (!(k > 0.0)) return a > b ? a : b;
+    if (d <= -k) return a;
+    if (d >= k) return b;
+    return a + (d + k) * (d + k) / (4.0 * k);
+}
+
 /* ------------------------------------------------------- grade solver ------- */
 
 /* The three-pass rule of tg_road_solve (td5_tg_road.c:374), copied statement for
@@ -844,6 +869,23 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
         }
     }
 
+    /* [roam IE] the deck floor of a bridge chain: every interior row at least the
+     * floor (smooth max, so the toe of a ramp is a sag curve, not a kink). The end
+     * rows are the pins; a JOIN pin on the chain already took the same floor. */
+    if (in->deck && in->deck->n >= 2) {
+        int lifted = 0;
+        for (i = 1; i < n - 1; i++) {
+            const double d = ca + arc[i];
+            double e;
+            if (!roam_deck_env_at(in->deck, rev ? ltot - d : d, &e)) continue;
+            {
+                const double t2 = roam_deck_smax(T[i], e, in->deck->soft);
+                if (t2 > T[i]) { T[i] = t2; lifted = 1; }
+            }
+        }
+        if (lifted) fl |= ROAM_RIBF_DECKENV;
+    }
+
     /* crossings under a bridge deck: where they sit on the ribbon, and the base
      * target there */
     if ((in->bridge || in->tunnel == 1) && in->ncross > 0 && in->cross) {
@@ -969,7 +1011,7 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
     HW = (double *)malloc((size_t)n * sizeof(double));
     if (!HW) goto done;
     for (i = 0; i < n; i++) HW[i] = (double)lanes * lane_w * 0.5;
-    if (((in->nlead > 0 && in->lead) || (in->nltri > 0 && in->ltri)) && !in->bridge && in->tunnel != 1) {
+    if (((in->nlead > 0 && in->lead) || (in->nltri > 0 && in->ltri)) && !in->bridge && in->tunnel != 1 && !in->deck) {
         TILT = (double *)calloc((size_t)n, sizeof(double));
         if (!TILT) goto done;
         if (!rib_couple(in, rx, rz, arc, seg, HW, n, has_pa, has_pb, Y, TILT, out)) goto done;

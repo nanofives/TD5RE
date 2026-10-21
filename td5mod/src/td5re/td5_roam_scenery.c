@@ -4648,6 +4648,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     if (!j.list) return 1;
     if (_strnicmp(val, "casco", 5) == 0) {
         j.n = td5_roam_casco_tiles(&j.grid, j.list, cap);
+    } else if (_strnicmp(val, "list:", 5) == 0) {       /* [roam IE] */
+        int (*l)[2] = NULL, k;
+        const int nl = td5_roam_read_tile_list(val + 5, &l);
+        for (k = 0; k < nl && j.n < cap; k++) { j.list[j.n][0] = l[k][0]; j.list[j.n][1] = l[k][1]; j.n++; }
+        free(l);
     } else {
         int x0, z0, x1, z1, tx, tz;
         if (sscanf(val, "%d,%d,%d,%d", &x0, &z0, &x1, &z1) != 4) { free(j.list); return 1; }
