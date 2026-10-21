@@ -60,7 +60,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  11u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  12u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -76,7 +76,10 @@
                                      *     infill 1-3 floors (taller on avenues) 12-24 m deep, AREAS spikes
                                      * 10 = roam ID: railways (td5_roam_rails.c, the RAILS tile layer)
                                      * 11 = round I integration: every round I branch combined (each bumped 9 -> 10 on its own,
-                                     *      11 so no tile cached by a single branch is reused) */
+                                     *      11 so no tile cached by a single branch is reused)
+                                     * 12 = roam JC: OSM Simple 3D Buildings (td5_tg_s3d.c): every building:part and
+                                     *      roof:shape footprint gets its real roof on any ring, roof-only parts,
+                                     *      roof / wall colours, outlines replaced by their parts not drawn */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -191,6 +194,10 @@ typedef struct {
     int  inf_drop_rail;
     double inf_m_rail;
     int  inf_rail_moved, inf_rail_shallow;   /* ... built anyway: front moved back behind the bed / shallower */
+    /* [JC] Simple 3D Buildings: footprints built by tg_s3d_build (building:part or roof:shape), by how the roof was
+     * made (TG_S3D_HOW_*: flat, ridge, barrel, centroid, offset, flat fallback), roof-only parts, tinted surfaces,
+     * outlines not drawn because their building:parts replace them */
+    int  bld_s3d, s3d_how[6], s3d_roof_only, s3d_tint, bld_s3d_hidden;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

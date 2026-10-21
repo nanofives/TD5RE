@@ -322,6 +322,28 @@ static int geob_roof_of(const char *s)
     return TD5_GEOB_ROOF_APEX;
 }
 
+/* [roam JC] roof:shape -> TD5_GEOB_R3_*, the finer reading free roam builds
+ * (td5_tg_s3d.c). Unrecognised values are PYRAMIDAL, the same choice geob_roof_of makes. */
+static int geob_roof3d_of(const char *s)
+{
+    if (!s || !s[0]) return TD5_GEOB_R3_NONE;
+    if (!strcmp(s, "flat"))                                          return TD5_GEOB_R3_FLAT;
+    if (!strcmp(s, "gabled") || !strcmp(s, "saltbox") || !strncmp(s, "gabled_with", 11))
+        return TD5_GEOB_R3_GABLED;
+    if (!strcmp(s, "hipped") || !strcmp(s, "side_hipped") || !strcmp(s, "hipped_and_gabled"))
+        return TD5_GEOB_R3_HIPPED;
+    if (!strcmp(s, "half-hipped") || !strcmp(s, "half_hipped"))     return TD5_GEOB_R3_HALF_HIPPED;
+    if (!strcmp(s, "skillion") || !strcmp(s, "lean_to") || !strcmp(s, "shed") || !strcmp(s, "monopitch"))
+        return TD5_GEOB_R3_SKILLION;
+    if (!strcmp(s, "mansard"))                                       return TD5_GEOB_R3_MANSARD;
+    if (!strcmp(s, "gambrel"))                                       return TD5_GEOB_R3_GAMBREL;
+    if (!strcmp(s, "dome") || !strcmp(s, "sphere"))                  return TD5_GEOB_R3_DOME;
+    if (!strcmp(s, "onion"))                                         return TD5_GEOB_R3_ONION;
+    if (!strcmp(s, "round") || !strcmp(s, "arched") || !strcmp(s, "barrel")) return TD5_GEOB_R3_ROUND;
+    if (!strcmp(s, "cone"))                                          return TD5_GEOB_R3_CONE;
+    return TD5_GEOB_R3_PYRAMIDAL;
+}
+
 /* A number that may have arrived as a JSON STRING.
  *
  * Overpass hands every tag back as a string and geo_fetch stores height,
@@ -722,6 +744,80 @@ static int geob_load_place_scale(const char *slug)
     return 1;
 }
 
+/* [roam JC] Simple 3D Buildings colours: roof:colour / building:colour values (OSM takes
+ * "#rrggbb" or a CSS colour name) and the roof / wall materials, as the tint the free-roam
+ * builder bakes into a vertex colour (td5_tg_s3d.c). Read for every record, used by roam only. */
+
+typedef struct { const char *name; unsigned int rgb; } GeobCol;
+
+static const GeobCol k_geob_names[] = {
+    { "black", 0x2E2E30 }, { "white", 0xF2F2EE }, { "grey", 0x8C8C8C }, { "gray", 0x8C8C8C },
+    { "darkgrey", 0x5A5A5A }, { "darkgray", 0x5A5A5A }, { "dimgray", 0x696969 }, { "dimgrey", 0x696969 },
+    { "lightgrey", 0xC4C4C4 }, { "lightgray", 0xC4C4C4 }, { "silver", 0xB8B8B8 }, { "red", 0xA83A2E },
+    { "darkred", 0x7A2A22 }, { "maroon", 0x6E2A22 }, { "brown", 0x7A5038 }, { "sienna", 0x8E5236 },
+    { "beige", 0xD9CCAA }, { "tan", 0xC8AE84 }, { "wheat", 0xE0CFA6 }, { "ivory", 0xF0EBD8 },
+    { "cream", 0xEDE3C4 }, { "yellow", 0xD8C25A }, { "orange", 0xC8783A }, { "salmon", 0xD8907A },
+    { "pink", 0xD9A6A6 }, { "green", 0x5E8A58 }, { "darkgreen", 0x3E5E3A }, { "olive", 0x7A7A44 },
+    { "teal", 0x3E7E7E }, { "blue", 0x4A6A9A }, { "navy", 0x2E3E66 }, { "lightblue", 0x9AB8D0 },
+    { "terracotta", 0xB0603E }, { "khaki", 0xC8BC8A }, { "gold", 0xC8A848 }, { "copper", 0x5E9C86 },
+};
+
+static const GeobCol k_geob_roof_mat[] = {
+    { "slate", 0x4A4F57 }, { "roof_tiles", 0xA4513A }, { "tile", 0xA4513A }, { "tiles", 0xA4513A },
+    { "metal", 0x9BA1A6 }, { "metal_sheet", 0x9BA1A6 }, { "tin", 0x9BA1A6 }, { "zinc", 0x8E979C },
+    { "copper", 0x5E9C86 }, { "lead", 0x6E747A }, { "concrete", 0xA9A9A4 }, { "glass", 0x8DB2C6 },
+    { "tar_paper", 0x45454A }, { "asphalt", 0x45454A }, { "eternit", 0x9A9A96 }, { "thatch", 0x9C8452 },
+    { "stone", 0x8E8A80 }, { "wood", 0x7A5A3C }, { "gravel", 0x9A968C },
+};
+
+static const GeobCol k_geob_wall_mat[] = {
+    { "brick", 0x9C5A40 }, { "stone", 0xC9BC9C }, { "sandstone", 0xD2BE96 }, { "limestone", 0xD8D0BC },
+    { "marble", 0xE0DDD5 }, { "concrete", 0xB8B6AE }, { "glass", 0x86A3B5 }, { "mirror", 0x86A3B5 },
+    { "metal", 0xA0A6AA }, { "steel", 0xA0A6AA }, { "wood", 0x8A6440 }, { "timber_framing", 0xC8B898 },
+};
+
+static int geob_col_ieq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (ca == ' ' || ca == '-') ca = '_';
+        if (ca != cb) return 0;
+    }
+    return *a == 0 && *b == 0;
+}
+
+static int geob_col_hex(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* "#rrggbb", "#rgb" or a CSS-style name -> 0x00RRGGBB | 0x01000000 (the "set" bit), 0 = unknown. */
+unsigned int td5_geob_colour_of(const char *s, int kind)
+{
+    const GeobCol *t;
+    int nt, i;
+    if (!s || !s[0]) return 0;
+    if (s[0] == '#') {
+        int h[6], k, len = (int)strlen(s + 1);
+        if (len == 6 || len == 3) {
+            for (k = 0; k < len; k++) if ((h[k] = geob_col_hex(s[1 + k])) < 0) return 0;
+            if (len == 3) return 0x01000000u | (unsigned)((h[0] * 17) << 16 | (h[1] * 17) << 8 | (h[2] * 17));
+            return 0x01000000u | (unsigned)((h[0] << 20) | (h[1] << 16) | (h[2] << 12) | (h[3] << 8) | (h[4] << 4) | h[5]);
+        }
+        return 0;
+    }
+    if (kind == 0)      { t = k_geob_names;    nt = (int)(sizeof k_geob_names / sizeof k_geob_names[0]); }
+    else if (kind == 1) { t = k_geob_roof_mat; nt = (int)(sizeof k_geob_roof_mat / sizeof k_geob_roof_mat[0]); }
+    else                { t = k_geob_wall_mat; nt = (int)(sizeof k_geob_wall_mat / sizeof k_geob_wall_mat[0]); }
+    for (i = 0; i < nt; i++) if (geob_col_ieq(s, t[i].name)) return 0x01000000u | t[i].rgb;
+    return 0;
+}
+
+
 /* [roam F4a] Every field of one BUILDINGS.JSON record except the ring (which the
  * caller has already parsed into b->cx/cz/radius), lifted out of
  * geob_load_buildings unchanged so free roam reads its tiles with the same rules.
@@ -820,6 +916,24 @@ static void geob_fill_building(const cJSON *e, int i, int tag_lm, double storey_
         b->levels      = (unsigned short)((lv > 0.0) ? (int)(lv + 0.5) : 0);
         b->roof_levels = (unsigned short)((rl > 0.0) ? (int)(rl + 0.5) : 0);
         b->min_level   = (unsigned short)((ml > 0.0) ? (int)(ml + 0.5) : 0);
+    }
+    /* [roam JC] Simple 3D Buildings: the full roof:shape, roof-only parts, ridge orientation and
+     * colours. Nothing in the strip geo BUILD reads these fields. */
+    {
+        const char *rs = geob_str(e, "roof_shape"), *cl = geob_str(e, "class"), *ro = NULL;
+        const cJSON *tg = cJSON_GetObjectItem(e, "tags");
+        unsigned int rgb;
+        b->roof3d = (unsigned char)geob_roof3d_of(rs);
+        b->roof_only = (unsigned char)(cl && !strcmp(cl, "roof"));
+        if (tg) ro = geob_str(tg, "roof:orientation");
+        /* "across"; the La Plata cache also spells it "acroos" (the three Casa de Gobierno parts) */
+        b->roof_across = (unsigned char)(ro && !strncmp(ro, "acr", 3));
+        rgb = td5_geob_colour_of(geob_str(e, "roof_colour"), 0);
+        if (!rgb) rgb = td5_geob_colour_of(geob_str(e, "roof_material"), 1);
+        b->roof_rgb = rgb;
+        rgb = td5_geob_colour_of(geob_str(e, "colour"), 0);
+        if (!rgb) rgb = td5_geob_colour_of(geob_str(e, "material"), 2);
+        b->wall_rgb = rgb;
     }
 }
 

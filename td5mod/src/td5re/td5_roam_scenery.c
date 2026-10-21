@@ -226,6 +226,7 @@ struct TD5_RoamScnSource {
     double    gap;            /* carriageway clearance of a footprint (units)    */
     int       fp_on, plaza_on, bld_on, lm_prefab;
     int       lm_wins;        /* [F4b] TD5RE_ROAM_LM_WINS, see sc_bld_clear       */
+    int       s3d;            /* [JC] TD5RE_ROAM_S3D: Simple 3D Buildings (parts, roofs, outlines hidden) */
     struct ScPvSrc *pv;       /* [F4b] the pavement's ROADS facts (SECTION pavement) */
     /* reused per build */
     TG_TileCtx *ctx;
@@ -1776,6 +1777,31 @@ static void sc_bld_note(const TD5_RoamScnSource *s, const TG_TileCtx *c, const S
               (int)b->b->fsrc, b->b->cx, b->b->cz, b->b->area_m2, b->b->height / SC_UPM, fate);
 }
 
+/* [JC] SIMPLE 3D BUILDINGS: an outline its building:parts replace. Mariano, 2026-10-21, at the Casa de Gobierno:
+ * "isn't there the geometry available?". OSM's rule (wiki Simple_3D_Buildings) is that a building outline holding
+ * building:part ways is NOT rendered: the parts are the building. Roam drew both, so the Catedral's 20 m outline box
+ * swallowed its 25 parts below the spires. An outline (not itself a part) whose ring holds the centroids of parts
+ * covering SC_S3D_COVER of its area is hidden; a partial set of parts (an outline with one tower mapped) keeps the
+ * outline. Census over the partido (verify/roam/s3d_census.py): 9 outlines hold parts. */
+#define SC_S3D_COVER 0.5
+static int sc_s3d_hidden(const ScBld *set, int nset, int self)
+{
+    const TD5_GeoBuilding *o = set[self].b;
+    double cover = 0.0, area;
+    int k;
+    if (o->part || o->n < 3) return 0;
+    area = fabs(td5_geob_ring_area(set[self].px, set[self].pz, o->n));
+    if (!(area > 0.0)) return 0;
+    for (k = 0; k < nset; k++) {
+        const TD5_GeoBuilding *p = set[k].b;
+        if (k == self || !p->part || p->n < 3) continue;
+        if (hypot(p->cx - o->cx, p->cz - o->cz) > o->radius) continue;
+        if (!td5_geob_point_in_ring(set[self].px, set[self].pz, o->n, p->cx, p->cz)) continue;
+        cover += fabs(td5_geob_ring_area(set[k].px, set[k].pz, p->n));
+    }
+    return cover >= SC_S3D_COVER * area;
+}
+
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
                              const ScArea *ar, int nar)
 {
@@ -1824,6 +1850,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         ScBldU u;
         TG_GeoBldEnv e;
         ScSb *b;
+        int s3d_hide;
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
         if (sc_tkey(tx, tz) != self) continue;
         c->st.bld_seen++;
@@ -1840,6 +1867,12 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             continue;
         }
         sc_lm_info(set, nset, i, &kind, &anchor, &veto);
+        s3d_hide = s->s3d && sc_s3d_hidden(set, nset, i);
+        if (s3d_hide && !(anchor && kind == TD5_GEOB_LMK_WORSHIP)) {   /* a worship anchor still lays its apron */
+            c->st.bld_s3d_hidden++;
+            sc_bld_note(s, c, &set[i], "outline replaced by its building:parts");
+            continue;
+        }
         if (!veto && nfc > 0 && !gb->landmark && !gb->part && kind == TD5_GEOB_LMK_NONE) {
             /* a foreign footprint on a major landmark's forecourt (geolm_build_forecourts) */
             const double clear = (double)td5_env_float("TD5RE_GEO_LM_BUILDING_CLEAR_M", 12.0f, 0.0f, 100.0f) * SC_UPM;
@@ -1898,6 +1931,9 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         e.si = -1;
         e.acct = 0;
         e.st = &c->bst;
+        e.s3d = s->s3d;
+        e.s3d_skip_mass = s3d_hide;
+        if (s3d_hide) c->st.bld_s3d_hidden++;
         {
             const long emitted0 = c->bst.emitted, prefab0 = c->bst.lm_prefab, apron0 = c->bst.lm_apron;
             if (!tg_geo_emit_building_core(&e, gb, rx, rz, n, cx, cz, shift) || b->blk.oom) {
@@ -1912,6 +1948,13 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
     }
     free(set);
     free(fc);
+    {   /* [JC] what the Simple 3D Buildings builder did on this tile (c->bst counts the whole tile) */
+        int q;
+        c->st.bld_s3d = (int)c->bst.s3d_n;
+        for (q = 0; q < 6; q++) c->st.s3d_how[q] = (int)c->bst.s3d_how[q];
+        c->st.s3d_roof_only = (int)c->bst.s3d_roof_only;
+        c->st.s3d_tint = (int)(c->bst.s3d_tint_roof + c->bst.s3d_tint_wall);
+    }
     return 1;
 }
 
@@ -5199,6 +5242,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     td5_geo_source_path(s->water_path, sizeof s->water_path, place, "WATER.R8");
     s->exag = (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0;
     s->lm_wins = td5_env_int("TD5RE_ROAM_LM_WINS", 1, 0, 1);
+    s->s3d = td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1);
     s->pv = sc_pv_open(s);
     s->hc = (TD5_RoamHeight *)calloc(1, sizeof(TD5_RoamHeight));
     if (!sc_index_load(s)) TD5_LOG_W(LOG_TAG, "roam scenery: %s has no tiles/INDEX.JSON: no buildings", place);
@@ -5481,6 +5525,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t pv_ms_max = 0;
     long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
+    long s3d_t[10] = { 0 };                      /* [roam JC] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -5576,6 +5621,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ic_t[0] += r->lot_medians; ic_t[1] += r->bld_veto_green; ic_t[2] += r->pv_bld_gone; ic_t[3] += r->lot_cover_green;
         ic_m[0] += r->inf_m_built; ic_m[1] += r->inf_m_real; ic_m[2] += r->inf_m_area; ic_m[3] += r->inf_m_other;
         inf_rail_n += r->inf_drop_rail; inf_rail_m += r->inf_m_rail;   /* [integ-roamI] */
+        {   /* [roam JC] */
+            int q;
+            s3d_t[0] += r->bld_s3d; s3d_t[1] += r->bld_s3d_hidden; s3d_t[2] += r->s3d_roof_only; s3d_t[3] += r->s3d_tint;
+            for (q = 0; q < 6; q++) s3d_t[4 + q] += r->s3d_how[q];
+        }
         inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
         lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
         lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
@@ -5700,6 +5750,16 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "%ld shallower, %ld refused (%.0f m)",
                  ic_t[0], ic_t[3], ic_t[1], ic_t[2], ic_m[0], ic_m[1], ic_m[2], ic_m[3], inf_rail_mv, inf_rail_sh,
                  inf_rail_n, inf_rail_m);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam JC: %ld footprint(s) built as Simple 3D Buildings (building:part / roof:shape), roofs: flat %ld, "
+                 "ridge %ld, barrel %ld, centroid (pyramid / cone / dome / onion) %ld, inset deck (mansard / concave) %ld, "
+                 "sloped tag built flat %ld | %ld roof-only part(s), %ld tinted surface(s), %ld outline(s) replaced by "
+                 "their parts (TD5RE_ROAM_S3D=%d)",
+                 s3d_t[0], s3d_t[4], s3d_t[5], s3d_t[6], s3d_t[7], s3d_t[8], s3d_t[9], s3d_t[2], s3d_t[3], s3d_t[1],
+                 td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

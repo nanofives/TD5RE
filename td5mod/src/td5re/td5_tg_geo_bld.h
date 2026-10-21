@@ -35,6 +35,9 @@ typedef struct {
     long   found, fp_overture, h_overture, h_raster;
     long   h_n, h_levels, h_off;
     double h_err_sum, h_err_max, found_max, lm_apron_dev;
+    /* [roam JC] the Simple 3D Buildings path (td5_tg_s3d.c); only free roam fills these */
+    long   s3d_n, s3d_kind[TD5_GEOB_R3__N], s3d_how[6], s3d_roof_only, s3d_tint_roof, s3d_tint_wall;
+    long   s3d_hidden, s3d_across;
 } TG_GeoBldStats;
 
 typedef struct {
@@ -71,6 +74,12 @@ typedef struct {
      * pieces of at most one span length along the hull and a refused piece is left out,
      * so a long hull edge never lays its band across a road between two vertices. */
     int    (*apron_quad_ok)(void *u, const double *qx, const double *qz);
+    /* [roam JC] 1: a building:part or a roof:shape-tagged footprint is built by the Simple 3D
+     * Buildings builder (tg_s3d_build). The strip leaves it 0: its bytes cannot move. */
+    int      s3d;
+    /* [roam JC] 1: lay the landmark apron only, not the mass (an outline its building:parts
+     * replace, Simple 3D Buildings: the outline is not rendered when parts exist) */
+    int      s3d_skip_mass;
 } TG_GeoBldEnv;
 
 /* Extrude ONE cleared footprint (ring rx/rz[n_ring], CCW, centroid cx/cz, already moved
@@ -79,6 +88,27 @@ typedef struct {
 int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
                               const double *rx, const double *rz, int n_ring,
                               double cx, double cz, double shift);
+
+/* [roam JC] OSM Simple 3D Buildings mesh (td5_tg_s3d.c). */
+#define TG_S3D_HOW_FLAT          0   /* flat / untagged: the eaves capped */
+#define TG_S3D_HOW_RIDGE         1   /* gabled, hipped, half-hipped, skillion, gambrel on a convex ring */
+#define TG_S3D_HOW_BARREL        2   /* round: a vault */
+#define TG_S3D_HOW_CENTROID      3   /* pyramidal, cone, dome, onion on a star-shaped ring */
+#define TG_S3D_HOW_OFFSET        4   /* mansard, or a sloped shape on a concave ring: mitred inset + deck */
+#define TG_S3D_HOW_FLAT_FALLBACK 5   /* sloped shape, no offset fitted: flat */
+typedef struct {
+    float *v; unsigned int *light; int nv, cap;
+    unsigned short cmd[6]; int ncmd;
+    int how, rows, tint_roof, tint_wall;
+    double rise;
+} TG_S3dMesh;
+int  tg_s3d_eligible(const TD5_GeoBuilding *gb);
+/* by = the mass's base y (base sink applied), H = its height (sink added). 1 built, 0 degenerate,
+ * -1 out of memory. m is owned by the caller afterwards: tg_s3d_free. */
+int  tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double *rx, const double *rz,
+                  int n, double by, double H, double floor_h, double cell_w, double lm_row_h, int storeys,
+                  int wall_page, int roof_page, TG_S3dMesh *m);
+void tg_s3d_free(TG_S3dMesh *m);
 
 /* One shipped set piece written into blk, no census counter (td5_tg_prefab.c). */
 int tg_prefab_write_piece(TG_Buf *blk, int pf, double ox, double oy, double oz,

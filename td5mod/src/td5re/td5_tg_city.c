@@ -3118,6 +3118,7 @@ static int tg_geo_emit_apron(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
 /* Emit ONE real footprint as one mesh. Returns 0 only on a buffer write
  * failure; a refusal (on the road, degenerate ring, mesh table full) is a
  * counted no-op success, matching the back-row contract. */
+static void tg_geo_core_tail(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, int si, double shift);
 int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
                               const double *rx, const double *rz, int n_ring,
                               double cx, double cz, double shift)
@@ -3149,6 +3150,8 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
     if (e->lm_anchor && e->lm_kind == TD5_GEOB_LMK_WORSHIP) {
         if (!tg_geo_emit_apron(e, gb, rx, rz, n_ring)) return 0;
     }
+    /* [roam JC] an outline its building:parts replace: the apron stays, the mass does not */
+    if (e->s3d_skip_mass) { e->st->s3d_hidden++; return 1; }
 
     /* --- a landmark OSM does not describe in 3D: the prefab table ---------
      * Tried BEFORE the extrusion, because a stamped set piece REPLACES the
@@ -3266,6 +3269,31 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
      * height back and closes the stack. */
     H += TD5_TG_GEO_BASE_SINK;
     by -= TD5_TG_GEO_BASE_SINK;
+
+    /* [roam JC] OSM Simple 3D Buildings (td5_tg_s3d.c): a building:part or a roof:shape-tagged
+     * footprint gets its real roof on any ring, in free roam only (the strip never sets e->s3d). */
+    if (e->s3d && tg_s3d_eligible(gb)) {
+        TG_S3dMesh m;
+        int ok;
+        const int r = tg_s3d_build(e, gb, rx, rz, n_ring, by, H, floor_h, cell_w, lm_row_h, storeys,
+                                   wall_page, roof_page, &m);
+        if (r < 0) { tg_s3d_free(&m); return 0; }
+        if (r == 0) { tg_s3d_free(&m); e->st->dropped_deg++; return 1; }
+        e->moff[(*e->nmesh)++] = e->blk->len;
+        ok = tg_write_prefab_mesh(e->blk, m.v, m.light, m.nv, m.cmd, m.ncmd, 0, 0.0, 0.0, 0.0, 1.0, 0.0);
+        e->st->s3d_n++;
+        if (gb->roof3d < TD5_GEOB_R3__N) e->st->s3d_kind[gb->roof3d]++;
+        if (m.how >= 0 && m.how < 6) e->st->s3d_how[m.how]++;
+        if (gb->roof_only) e->st->s3d_roof_only++;
+        if (gb->roof_across) e->st->s3d_across++;
+        e->st->s3d_tint_roof += m.tint_roof;
+        e->st->s3d_tint_wall += m.tint_wall;
+        if (m.how != TG_S3D_HOW_FLAT && m.how != TG_S3D_HOW_FLAT_FALLBACK) e->st->roof_shaped++;
+        tg_s3d_free(&m);
+        if (!ok) return 0;
+        tg_geo_core_tail(e, gb, si, shift);
+        return 1;
+    }
 
     /* --- ROOF first: the writer consumes tris before quads per command ----
      *
@@ -3441,6 +3469,13 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
     if (!tg_write_prefab_mesh(e->blk, v, light, nv, cmd, ncmd, 0,
                               0.0, 0.0, 0.0, 1.0, 0.0))
         return 0;
+    tg_geo_core_tail(e, gb, si, shift);
+    return 1;
+}
+
+/* What every extruded footprint counts once its mesh is written (both builders). */
+static void tg_geo_core_tail(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, int si, double shift)
+{
     if (e->acct) tg_acct(TG_ACCT_BUILDING, si);
     tg_geo_lm_note_k(gb, e->lm_kind, si, "emitted extruded", shift);
     e->st->emitted++;
@@ -3454,7 +3489,6 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
         if (tg_geo_landmark_real(gb)) e->st->lm_real++;
         else                          e->st->lm_fallback++;
     }
-    return 1;
 }
 
 /* [roam F4a] The strip's environment for the shared extrusion core: every callback
