@@ -1167,6 +1167,22 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
 
     float near_z = s_near_clip;
 
+    /* [roam IA 2026-10-20] NEAR DEPTH CLIP. td5_depth_persp maps vz = NEAR_DEPTH_OFFSET (64) to depth 0,
+     * but polygons were clipped at s_near_clip (32): a vertex in (32, 64), and every vertex the clip
+     * below creates, encoded a NEGATIVE depth (vz = 32 -> -A, the whole depth range) that
+     * vs_pretransformed.hlsl saturates PER VERTEX. Perspective depth is affine in screen space, so
+     * clamping one corner tilts the polygon's whole depth plane: most of a big polygon that reaches
+     * behind the camera was written far too deep and lost the z-test to whatever lies under it (roam
+     * sidewalk slabs, merged into pieces up to 30 m, and big junction patch triangles vanished into the
+     * ground 40-70 cm below near a low camera). Clipping at the depth-0 plane keeps every vertex depth
+     * >= 0, so the plane is exact; only geometry within 15 cm of the eye plane is lost.
+     * TD5RE_NEAR_DEPTH_CLIP=0 = the old clip. */
+    {
+        static int s_near_depth_clip = -1;
+        if (s_near_depth_clip < 0) s_near_depth_clip = td5_env_flag_on("TD5RE_NEAR_DEPTH_CLIP");
+        if (s_near_depth_clip && near_z < NEAR_DEPTH_OFFSET) near_z = NEAR_DEPTH_OFFSET;
+    }
+
     /* --- Near-plane clip (Sutherland-Hodgman) --- */
     /* Input polygon from view-space vertices */
     float in_vx[8], in_vy[8], in_vz[8], in_u[8], in_v[8];
@@ -1263,6 +1279,28 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         s_debug_clip_near_rejects++;
         return;
     }
+#ifndef TD5RE_RELEASE
+    /* [roam IA] TD5RE_NEAR_DEPTH_DIAG=1: how many submitted polygons carry a vertex with a negative
+     * perspective depth (vz < NEAR_DEPTH_OFFSET, saturated per vertex by the shader). race.log. */
+    {
+        static int s_nd_diag = -1;
+        static long long s_nd_tot, s_nd_neg, s_nd_clip;
+        if (s_nd_diag < 0) { const char *e = getenv("TD5RE_NEAR_DEPTH_DIAG"); s_nd_diag = (e && e[0] && e[0] != '0') ? 1 : 0; }
+        if (s_nd_diag) {
+            int k, neg = 0, cl = 0;
+            for (k = 0; k < out_count; k++) {
+                if (out_vz[k] < NEAR_DEPTH_OFFSET) neg = 1;
+                if (out_vz[k] == near_z) cl = 1;
+            }
+            s_nd_tot++; s_nd_neg += neg; s_nd_clip += cl;
+            if (s_nd_tot >= 500000) {
+                TD5_LOG_I(LOG_TAG, "near depth diag: polys=%lld with a negative-depth vertex=%lld near-clipped=%lld (near_z %.0f)",
+                          s_nd_tot, s_nd_neg, s_nd_clip, near_z);
+                s_nd_tot = s_nd_neg = s_nd_clip = 0;
+            }
+        }
+    }
+#endif
 
     /* --- Perspective projection --- */
     /* [task#21] TD6 car body z-fix: snap depth to a fine grid + a toward-camera
