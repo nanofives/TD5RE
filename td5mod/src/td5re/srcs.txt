@@ -70,6 +70,7 @@ td5_tg_plazafork.c
 td5_tg_blockloop.c
 td5_tg_guard.c
 td5_tg_city.c
+td5_tg_s3d.c
 td5_tg_streets.c
 td5_tg_terrain.c
 td5_tg_bridge.c

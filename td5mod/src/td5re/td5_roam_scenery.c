@@ -189,6 +189,14 @@ typedef struct {
     size_t    bytes;
 } ScCache;
 
+/* [roam JC2] the courtyards of one S3D_RELATIONS.JSON outline: inner rings in the cache's point pool
+ * (place frame, CW), and whether its height is an estimate the emitter may replace */
+typedef struct ScRelX {
+    int nh, hfirst[TG_S3D_HOLES_MAX], hn[TG_S3D_HOLES_MAX];
+    int h_est;
+    double hole_m2;
+} ScRelX;
+
 typedef struct { int tx, tz; RoamTile *t; int absent; uint32_t clock; } ScRoad;
 
 struct TD5_RoamScnSource {
@@ -226,6 +234,9 @@ struct TD5_RoamScnSource {
     double    gap;            /* carriageway clearance of a footprint (units)    */
     int       fp_on, plaza_on, bld_on, lm_prefab;
     int       lm_wins;        /* [F4b] TD5RE_ROAM_LM_WINS, see sc_bld_clear       */
+    int       s3d;            /* [JC] TD5RE_ROAM_S3D: Simple 3D Buildings (parts, roofs, outlines hidden) */
+    ScCache   rel;            /* [JC2] S3D_RELATIONS.JSON outlines (a pinned extra BUILDINGS cache)   */
+    ScRelX   *relx;           /*   ... their courtyards, per record                                   */
     struct ScPvSrc *pv;       /* [F4b] the pavement's ROADS facts (SECTION pavement) */
     /* reused per build */
     TG_TileCtx *ctx;
@@ -527,6 +538,159 @@ static void sc_owned_range(const ScCache *c, int64_t own, int *lo, int *hi)
     b = c->n;
     while (a < b) { const int m = (a + b) / 2; if (c->own[c->order[m]] <= own) a = m + 1; else b = m; }
     *hi = a;
+}
+
+/* [roam JC2] RELATION OUTLINES. geo_fetch never asked Overpass for relations, so a building mapped as a
+ * multipolygon (an outline with courtyards) was not in the tiles: the Legislatura (relation 1646678, the
+ * pick), the Casa de Gobierno (19835072), the Teatro Argentino, the Municipalidad and 46 more, 41 of them
+ * with inner rings. re/tools/geo_s3d_relations.py writes them to S3D_RELATIONS.JSON (source frame,
+ * BUILDINGS-style fields). Each outer ring becomes one TD5_GeoBuilding record (rel = 1) of a pinned extra
+ * cache that every consumer of the BUILDINGS caches sees (emitter, pavement frontage, infill), its inner
+ * rings kept beside it. id = 8e15 + relation id * 8 + outer index: clear of the OSM way and Overture ids.
+ * Without a height or a levels tag the height is an estimate (one storey here) the emitter replaces. */
+#define SC_REL_ID_BASE 8.0e15
+static int sc_rel_ring(const cJSON *pts, double *x, double *z, int cap)
+{
+    const cJSON *q;
+    int raw = 0, n = 0, i = 0, stride;
+    for (q = pts ? pts->child : NULL; q; q = q->next) raw++;
+    if (raw >= 2) {   /* the ring is closed in the file: the last point repeats the first */
+        const cJSON *a = pts->child, *b = cJSON_GetArrayItem(pts, raw - 1);
+        if (cJSON_GetNumberValue(cJSON_GetObjectItem(a, "x")) == cJSON_GetNumberValue(cJSON_GetObjectItem(b, "x"))
+            && cJSON_GetNumberValue(cJSON_GetObjectItem(a, "z")) == cJSON_GetNumberValue(cJSON_GetObjectItem(b, "z")))
+            raw--;
+    }
+    if (raw < 3) return 0;
+    stride = (raw + cap - 1) / cap;
+    for (q = pts->child; q && i < raw && n < cap; q = q->next, i++) {
+        if (i % stride) continue;
+        x[n] = cJSON_GetNumberValue(cJSON_GetObjectItem(q, "x"));
+        z[n] = cJSON_GetNumberValue(cJSON_GetObjectItem(q, "z"));
+        n++;
+    }
+    return n >= 3 ? n : 0;
+}
+
+static void sc_rel_copy(cJSON *dst, const cJSON *src, const char *key)
+{
+    const cJSON *v = src ? cJSON_GetObjectItem(src, key) : NULL;
+    if (v && !cJSON_IsNull(v) && !cJSON_GetObjectItem(dst, key)) cJSON_AddItemToObject(dst, key, cJSON_Duplicate(v, 1));
+}
+
+static void sc_rel_load(TD5_RoamScnSource *s)
+{
+    static const char *const k_fields[] = { "class", "name", "roof_shape", "colour", "roof_colour", "material",
+                                            "roof_material", "levels", "height_m", "min_height_m", "roof_height_m", NULL };
+    static const char *const k_tags[] = { "government", "amenity", "tourism", "historic", "heritage", "denomination",
+                                          "religion", "office", NULL };
+    char path[512];
+    char *json;
+    cJSON *root, *arr, *r;
+    ScCache *c = &s->rel;
+    int cap = 0, cap_pt = 0, nrec = 0, k;
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    memset(c, 0, sizeof *c);
+    c->used = 1; c->layer = SC_L_BLD; c->pin = 1; c->storey_m = 3.0;
+    td5_geo_source_path(path, sizeof path, s->place, "S3D_RELATIONS.JSON");
+    json = sc_slurp(path, NULL);
+    if (!json) return;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) return;
+    td5_geo_src_json_to_game(root);          /* [roam M] source frame -> game frame */
+    arr = cJSON_GetObjectItem(root, "relations");
+    for (r = arr ? arr->child : NULL; r; r = r->next) cap += cJSON_GetArraySize(cJSON_GetObjectItem(r, "outer"));
+    if (cap > 0) {
+        c->b = (TD5_GeoBuilding *)calloc((size_t)cap, sizeof(TD5_GeoBuilding));
+        c->id = (double *)calloc((size_t)cap, sizeof(double));
+        c->own = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
+        s->relx = (ScRelX *)calloc((size_t)cap, sizeof(ScRelX));
+    }
+    for (r = arr ? arr->child : NULL; r && c->b && c->id && c->own && s->relx; r = r->next) {
+        const cJSON *outer = cJSON_GetObjectItem(r, "outer"), *inner = cJSON_GetObjectItem(r, "inner");
+        const cJSON *tags = cJSON_GetObjectItem(r, "tags"), *o;
+        const double rid = cJSON_GetNumberValue(cJSON_GetObjectItem(r, "id"));
+        int oi = 0;
+        const char *cls = cJSON_GetStringValue(cJSON_GetObjectItem(r, "class"));
+        if (!cls || cJSON_IsTrue(cJSON_GetObjectItem(r, "part"))) continue;        /* parts: none in La Plata */
+        for (o = outer ? outer->child : NULL; o; o = o->next, oi++) {
+            cJSON *rec = cJSON_CreateObject();
+            const cJSON *h;
+            TD5_GeoBuilding *b = &c->b[c->n];
+            ScRelX *x = &s->relx[c->n];
+            double id = SC_REL_ID_BASE + rid * 8.0 + oi, hm, lv;
+            int n, first, tx, tz, f;
+            if (!rec) break;
+            cJSON_AddItemToObject(rec, "points", cJSON_Duplicate(o, 1));
+            cJSON_AddNumberToObject(rec, "id", id);
+            for (f = 0; k_fields[f]; f++) sc_rel_copy(rec, r, k_fields[f]);
+            for (f = 0; k_tags[f]; f++) sc_rel_copy(rec, tags, k_tags[f]);
+            hm = cJSON_GetNumberValue(cJSON_GetObjectItem(rec, "height_m"));
+            lv = atof(cJSON_GetStringValue(cJSON_GetObjectItem(rec, "levels")) ? cJSON_GetStringValue(cJSON_GetObjectItem(rec, "levels")) : "0");
+            x->h_est = 0;
+            if (!(hm > 0.0) && lv > 0.0) {
+                cJSON_DeleteItemFromObject(rec, "height_m");
+                cJSON_AddNumberToObject(rec, "height_m", lv * 3.0);
+                cJSON_AddStringToObject(rec, "height_src", "osm_levels");
+            } else if (hm > 0.0) {
+                cJSON_AddStringToObject(rec, "height_src", "osm_height");
+            } else {
+                cJSON_AddStringToObject(rec, "height_src", "estimated");
+                x->h_est = 1;
+            }
+            cJSON_AddStringToObject(rec, "footprint_src", "osm");
+            n = td5_geob_parse_building(rec, nrec, s->tag_lm, 3.0, s->upm, b, rx, rz, NULL);
+            cJSON_Delete(rec);
+            if (n <= 0) continue;
+            first = sc_pool_push(c, &cap_pt, rx, rz, n);
+            if (first < 0) break;
+            b->first = first;
+            b->rel = 1;
+            b->area_m2 = fabs(td5_geob_ring_area(rx, rz, n)) / (s->upm * s->upm);
+            c->id[c->n] = id;
+            roam_grid_tile_of(&s->grid, b->cx, b->cz, &tx, &tz);
+            c->own[c->n] = sc_tkey(tx, tz);
+            /* the inner rings this outer holds (first point inside), CW */
+            for (h = inner ? inner->child : NULL; h && x->nh < TG_S3D_HOLES_MAX; h = h->next) {
+                double hx[TD5_GEOB_RING_MAX], hz[TD5_GEOB_RING_MAX];
+                const int hn = sc_rel_ring(h, hx, hz, TD5_GEOB_RING_MAX);
+                int hf;
+                if (hn < 3 || !td5_geob_point_in_ring(rx, rz, n, hx[0], hz[0])) continue;
+                if (td5_geob_ring_area(hx, hz, hn) > 0.0)
+                    for (k = 0; k < hn / 2; k++) {
+                        double t = hx[k]; hx[k] = hx[hn - 1 - k]; hx[hn - 1 - k] = t;
+                        t = hz[k]; hz[k] = hz[hn - 1 - k]; hz[hn - 1 - k] = t;
+                    }
+                hf = sc_pool_push(c, &cap_pt, hx, hz, hn);
+                if (hf < 0) break;
+                x->hfirst[x->nh] = hf; x->hn[x->nh] = hn; x->nh++;
+                x->hole_m2 += fabs(td5_geob_ring_area(hx, hz, hn)) / (s->upm * s->upm);
+            }
+            c->n++;
+            nrec++;
+        }
+    }
+    cJSON_Delete(root);
+    sc_cache_sort(c);
+    {
+        int nh = 0, ne = 0;
+        for (k = 0; k < c->n; k++) { nh += s->relx[k].nh; ne += s->relx[k].h_est; }
+        TD5_LOG_I(LOG_TAG, "roam scenery: %d relation outline(s) from S3D_RELATIONS.JSON, %d courtyard ring(s), "
+                  "%d with an estimated height", c->n, nh, ne);
+    }
+}
+
+/* [roam JC2] the place point stands inside a relation outline (outer ring; courtyards included) */
+static int sc_rel_covers(const TD5_RoamScnSource *s, double x, double z)
+{
+    int k;
+    for (k = 0; k < s->rel.n; k++) {
+        const TD5_GeoBuilding *b = &s->rel.b[k];
+        const double dx = x - b->cx, dz = z - b->cz;
+        if (dx * dx + dz * dz > b->radius * b->radius) continue;
+        if (td5_geob_point_in_ring(&s->rel.px[b->first], &s->rel.pz[b->first], b->n, x, z)) return 1;
+    }
+    return 0;
 }
 
 static int sc_index_load(TD5_RoamScnSource *s)
@@ -1296,6 +1460,8 @@ typedef struct {
     const double *px, *pz;     /* place-frame ring (cache pool) */
     double id;
     double storey_m;           /* its file's storey height      */
+    const ScRelX *rx;          /* [JC2] courtyards (a relation outline), else NULL */
+    const ScCache *rc;         /*   ... and the pool they live in */
 } ScBld;
 
 typedef struct {
@@ -1639,12 +1805,16 @@ static int sc_bld_clear(TG_TileCtx *c, ScBldU *u, double gap, double *rx, double
     if (lm_wins) {
         /* a landmark stands where OSM puts it unless it truly covers a street: the
          * dead-end stubs drawn to its wall are let through (sc_lm_stub_ok) */
-        ScPrim *marked[8];
+        /* [JC2] lm_wins 2 (a building:part or an OSM relation outline): it also stands over SERVICE ways, the
+         * courtyard driveways the Casa de Gobierno, the Municipalidad and the ministries are mapped with (the
+         * walls open into a carriage arch there, td5_tg_s3d.c s3d_edge_portals) */
+        ScPrim *marked[64];
         int nm = 0, g, clear;
         c->skip_lm = 1;
-        for (g = 0; g < 8; g++) {
+        for (g = 0; g < 64; g++) {
             if (!sc_on_road(c, rx, rz, n, &hit)) break;
-            if (!sc_lm_stub_ok(c, hit, rx, rz, n)) break;
+            if (!sc_lm_stub_ok(c, hit, rx, rz, n)
+                && !(lm_wins == 2 && hit->seg >= 0 && c->edge[c->seg[hit->seg].edge].klass == TD5_GEO_RC_SERVICE)) break;
             marked[nm] = (ScPrim *)hit;
             marked[nm++]->lm_ok = 1;
         }
@@ -1757,7 +1927,8 @@ static int sc_bld_drops(TD5_RoamScnSource *s, TG_TileCtx *c, const TD5_GeoBuildi
     ScBldU u;
     int k;
     const int n = gb->n;
-    if (gb->landmark || gb->part) return 0;
+    if (gb->landmark || gb->part || gb->rel) return 0;
+    if (s->s3d && gb->fsrc == TD5_GEOB_FSRC_OVERTURE && sc_rel_covers(s, gb->cx, gb->cz)) return 1;   /* [JC2] */
     if (n < 3 || n > TD5_GEOB_RING_MAX) return 1;
     if (sc_bld_plaza_veto(ar, nar, gb, px, pz) || sc_bld_green_veto(c, gb, px, pz)) return 1;
     for (k = 0; k < n; k++) { rx[k] = px[k] - (double)c->org_x; rz[k] = pz[k] - (double)c->org_z; }
@@ -1774,6 +1945,62 @@ static void sc_bld_note(const TD5_RoamScnSource *s, const TG_TileCtx *c, const S
     if (!s->bld_log) return;
     TD5_LOG_I(LOG_TAG, "ROAM_BLD tile %d,%d id %.0f src %d c (%.0f,%.0f) area %.0f h %.1f: %s", c->tx, c->tz, b->id,
               (int)b->b->fsrc, b->b->cx, b->b->cz, b->b->area_m2, b->b->height / SC_UPM, fate);
+}
+
+/* [JC] SIMPLE 3D BUILDINGS: an outline its building:parts replace. Mariano, 2026-10-21, on Plaza San Martin:
+ * "isn't there the geometry available?". OSM's rule (wiki Simple_3D_Buildings) is that a building outline holding
+ * building:part ways is NOT rendered: the parts are the building. Roam drew both, so the Catedral's 20 m outline box
+ * swallowed its 25 parts below the spires. An outline (not itself a part) whose ring holds the centroids of parts
+ * covering SC_S3D_COVER of its area is hidden; a partial set of parts (an outline with one tower mapped) keeps the
+ * outline. Census over the partido (verify/roam/s3d_census.py): 9 outlines hold parts. */
+#define SC_S3D_COVER 0.5
+/* [JC2] parts covering this much of the outline need no BASE under them (the gaps they leave are slivers) */
+#define SC_S3D_BASE_COVER 0.95
+static int sc_s3d_hidden(const ScBld *set, int nset, int self, double *cover_out, double *low_top, int *civic,
+                         unsigned int *roof_rgb)
+{
+    const TD5_GeoBuilding *o = set[self].b;
+    double cover = 0.0, area;
+    int k;
+    *cover_out = 0.0; *low_top = 1e300; *civic = 0; *roof_rgb = 0;
+    if (o->part || o->n < 3) return 0;
+    area = fabs(td5_geob_ring_area(set[self].px, set[self].pz, o->n));
+    if (set[self].rx) {                                /* [JC2] the solid area: courtyards out */
+        int h;
+        for (h = 0; h < set[self].rx->nh; h++)
+            area -= fabs(td5_geob_ring_area(&set[self].rc->px[set[self].rx->hfirst[h]],
+                                            &set[self].rc->pz[set[self].rx->hfirst[h]], set[self].rx->hn[h]));
+    }
+    if (!(area > 0.0)) return 0;
+    for (k = 0; k < nset; k++) {
+        const TD5_GeoBuilding *p = set[k].b;
+        if (k == self || !p->part || p->n < 3) continue;
+        if (hypot(p->cx - o->cx, p->cz - o->cz) > o->radius) continue;
+        if (!td5_geob_point_in_ring(set[self].px, set[self].pz, o->n, p->cx, p->cz)) continue;
+        cover += fabs(td5_geob_ring_area(set[k].px, set[k].pz, p->n));
+        if (p->height < *low_top) *low_top = p->height;
+        if (p->civic) *civic = 1;                      /* [JC2] what a BASE under them inherits */
+        if (p->roof_rgb && !*roof_rgb) *roof_rgb = p->roof_rgb;
+    }
+    *cover_out = cover / area;
+    return cover >= SC_S3D_COVER * area;
+}
+
+/* [JC2] the smallest non-part outline in the set whose ring holds this footprint's centroid: what a
+ * building:part belongs to (its civic dressing is inherited) */
+static int sc_s3d_host(const ScBld *set, int nset, int self)
+{
+    const TD5_GeoBuilding *c = set[self].b;
+    double best = 1e300;
+    int k, host = -1;
+    for (k = 0; k < nset; k++) {
+        const TD5_GeoBuilding *o = set[k].b;
+        if (k == self || o->part || o->n < 3 || o->fsrc != TD5_GEOB_FSRC_OSM) continue;
+        if ((c->cx - o->cx) * (c->cx - o->cx) + (c->cz - o->cz) * (c->cz - o->cz) > o->radius * o->radius) continue;
+        if (!td5_geob_point_in_ring(set[k].px, set[k].pz, o->n, c->cx, c->cz)) continue;
+        if (o->area_m2 < best) { best = o->area_m2; host = k; }
+    }
+    return host;
 }
 
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
@@ -1798,6 +2025,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                     set[nset].pz = &bc[l]->pz[bc[l]->b[ri].first];
                     set[nset].id = bc[l]->id[ri];
                     set[nset].storey_m = bc[l]->storey_m;
+                    set[nset].rx = (bc[l] == &s->rel && s->relx) ? &s->relx[ri] : NULL;
+                    set[nset].rc = bc[l];
                     nset++;
                 }
             }
@@ -1824,22 +2053,78 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         ScBldU u;
         TG_GeoBldEnv e;
         ScSb *b;
+        int s3d_hide, s3d_base = 0, nh = 0, hn[TG_S3D_HOLES_MAX], np = 0, s3d_pciv = 0;
+        unsigned int s3d_prgb = 0;
+        double pseg[128 * 5];                          /* [integ J] 128 (was 16): a palace has dozens of drive segments */
+        double s3d_cover = 0.0, s3d_low = 1e300, hx[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX], hz[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX];
+        TD5_GeoBuilding gloc;
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
         if (sc_tkey(tx, tz) != self) continue;
         c->st.bld_seen++;
         if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "bad ring"); continue; }
-        /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building */
-        if (sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
+        /* [JC2] an Overture / Open Buildings blob under an OSM relation outline: the outline is the building */
+        if (s->s3d && gb->fsrc == TD5_GEOB_FSRC_OVERTURE && sc_rel_covers(s, gb->cx, gb->cz)) {
+            c->st.bld_rel_ovt_drop++;
+            sc_bld_note(s, c, &set[i], "under a relation outline");
+            continue;
+        }
+        gloc = *gb;
+        if (s->s3d && gb->rel) {
+            /* [JC2] a relation with no height: the tallest blob under it (Open Buildings measured it), else two storeys */
+            if (set[i].rx && set[i].rx->h_est) {
+                double hmax = 0.0;
+                for (k = 0; k < nset; k++) {
+                    const TD5_GeoBuilding *q = set[k].b;
+                    if (q->fsrc != TD5_GEOB_FSRC_OVERTURE
+                        || (q->cx - gb->cx) * (q->cx - gb->cx) + (q->cz - gb->cz) * (q->cz - gb->cz) > gb->radius * gb->radius) continue;
+                    if (!td5_geob_point_in_ring(set[i].px, set[i].pz, n, q->cx, q->cz)) continue;
+                    if (q->height > hmax) hmax = q->height;
+                }
+                gloc.height = hmax > 0.0 ? hmax : 2.0 * set[i].storey_m * s->upm;
+                if (!gloc.levels) gloc.levels = (unsigned short)(gloc.height / (3.0 * s->upm) + 0.5);
+            }
+            c->st.bld_rel++;
+        }
+        if (s->s3d && gb->part && !gb->civic) {                       /* [JC2] a part of a civic building is civic */
+            const int h = sc_s3d_host(set, nset, i);
+            if (h >= 0 && set[h].b->civic) gloc.civic = 1;
+        }
+        gb = &gloc;
+        /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building. [JC] Nor a
+         * building:part: a mapper modelled it in 3D, it stands. MEASURED: 6 of the 7 parts of the civic palace at Avenida 7 / 51 / 53 (Plaza San Martin) stand
+         * on a mapped grass polygon (AREAS 176337780) and were vetoed, leaving its roof-only canopy alone as a box. */
+        if (!(s->s3d && (gb->part || gb->rel)) && sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
             c->st.bld_veto_plaza++;
             sc_bld_note(s, c, &set[i], "plaza veto");
             continue;
         }
-        if (sc_bld_green_veto(c, gb, set[i].px, set[i].pz)) {          /* [IC] park / ring plaza / avenue median */
+        if (!gb->rel && sc_bld_green_veto(c, gb, set[i].px, set[i].pz)) {   /* [IC] park / ring plaza / avenue median */
             c->st.bld_veto_green++;
             sc_bld_note(s, c, &set[i], "green veto");
             continue;
         }
         sc_lm_info(set, nset, i, &kind, &anchor, &veto);
+        s3d_hide = s->s3d && sc_s3d_hidden(set, nset, i, &s3d_cover, &s3d_low, &s3d_pciv, &s3d_prgb);
+        /* [JC2] parts that leave gaps: the outline stays as a flat BASE lower than every part (Mariano, 2026-10-21:
+         * the Legislatura "stands on bare lawn" between its parts) */
+        if (s3d_hide && s3d_cover < SC_S3D_BASE_COVER && s3d_low < 1e300) {
+            const double top = (gloc.height < s3d_low ? gloc.height : s3d_low) - 0.3 * s->upm;
+            if (top > 2.0 * s->upm) {
+                s3d_base = 1;
+                gloc.height = top;
+                gloc.min_height = 0.0;
+                gloc.roof3d = TD5_GEOB_R3_FLAT;
+                gloc.roof_height = 0.0;
+                gloc.roof_only = 0;
+                if (s3d_pciv) gloc.civic = 1;              /* the base wears its parts' facade and roof */
+                if (!gloc.roof_rgb) gloc.roof_rgb = s3d_prgb;
+            }
+        }
+        if (s3d_hide && !s3d_base && !(anchor && kind == TD5_GEOB_LMK_WORSHIP)) {   /* a worship anchor still lays its apron */
+            c->st.bld_s3d_hidden++;
+            sc_bld_note(s, c, &set[i], "outline replaced by its building:parts");
+            continue;
+        }
         if (!veto && nfc > 0 && !gb->landmark && !gb->part && kind == TD5_GEOB_LMK_NONE) {
             /* a foreign footprint on a major landmark's forecourt (geolm_build_forecourts) */
             const double clear = (double)td5_env_float("TD5RE_GEO_LM_BUILDING_CLEAR_M", 12.0f, 0.0f, 100.0f) * SC_UPM;
@@ -1863,7 +2148,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         u.minout = u.host ? u.f.half_carriage + s->gap : 0.0;
         u.gap = s->gap;
         r = sc_bld_clear(c, &u, s->gap, rx, rz, n, &shift,
-                         s->lm_wins && (gb->landmark || kind != TD5_GEOB_LMK_NONE));
+                         !s->lm_wins ? 0 : (s->s3d && (gb->part || gb->rel)) ? 2
+                                         : (gb->landmark || kind != TD5_GEOB_LMK_NONE) ? 1 : 0);
         if (gb->landmark && !gb->part)       /* one line per landmark outline: what became of it */
             TD5_LOG_I(LOG_TAG, "[ROAM LM] tile %d,%d way_hash=%08x kind=%d anchor=%d host=%d half=%.0f minout=%.0f "
                       "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
@@ -1898,10 +2184,61 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         e.si = -1;
         e.acct = 0;
         e.st = &c->bst;
+        e.s3d = s->s3d;
+        e.s3d_skip_mass = s3d_hide && !s3d_base;
+        e.s3d_base = s3d_base;
+        if (s3d_hide) c->st.bld_s3d_hidden++;
+        if (set[i].rx && set[i].rx->nh > 0) {
+            /* [JC2] the courtyards, in the tile frame, moved by the same clearance shift as the outline */
+            const double sx = rx[0] - (set[i].px[0] - (double)c->org_x), sz = rz[0] - (set[i].pz[0] - (double)c->org_z);
+            int h, off = 0;
+            for (h = 0; h < set[i].rx->nh; h++) {
+                const int hf = set[i].rx->hfirst[h];
+                hn[nh] = set[i].rx->hn[h];
+                for (k = 0; k < hn[nh]; k++) {
+                    hx[off + k] = set[i].rc->px[hf + k] - (double)c->org_x + sx;
+                    hz[off + k] = set[i].rc->pz[hf + k] - (double)c->org_z + sz;
+                }
+                off += hn[nh];
+                nh++;
+            }
+        }
+        e.s3d_nh = nh; e.s3d_hn = hn; e.s3d_hx = hx; e.s3d_hz = hz;
+        np = 0;
+        if (s->s3d && (gb->part || gb->rel)) {
+            /* [JC2] the service ways near the outline, for the carriage arches */
+            int q;
+            for (q = 0; q < c->nseg && np < 128; q++) {
+                const ScSeg *g = &c->seg[q];
+                double d;
+                if (c->edge[g->edge].klass != TD5_GEO_RC_SERVICE) continue;
+                d = sc_seg_dist(cx, cz, g->ax, g->az, g->bx, g->bz, NULL);
+                if (d > gb->radius + g->hw) continue;
+                pseg[np * 5 + 0] = g->ax; pseg[np * 5 + 1] = g->az; pseg[np * 5 + 2] = g->bx; pseg[np * 5 + 3] = g->bz;
+                pseg[np * 5 + 4] = g->hw;
+                np++;
+            }
+        }
+        e.s3d_np = np; e.s3d_pseg = pseg;
         {
             const long emitted0 = c->bst.emitted, prefab0 = c->bst.lm_prefab, apron0 = c->bst.lm_apron;
+            long how0[6];
+            const long s3d0 = c->bst.s3d_n, shaped0 = c->bst.roof_shaped;
+            memcpy(how0, c->bst.s3d_how, sizeof how0);
             if (!tg_geo_emit_building_core(&e, gb, rx, rz, n, cx, cz, shift) || b->blk.oom) {
                 free(set); free(fc); return 0;
+            }
+            if (gb->part || gb->roof3d != TD5_GEOB_R3_NONE || gb->roof_only) {
+                /* [JC] every footprint OSM models in 3D, by either builder: what its roof became */
+                int q, how = -1;
+                for (q = 0; q < 6; q++) if (c->bst.s3d_how[q] > how0[q]) how = q;
+                if (c->bst.emitted > emitted0) c->st.s3d_tagged++;
+                if (c->bst.roof_shaped > shaped0) c->st.s3d_sloped++;
+                if (s->bld_log)
+                    TD5_LOG_I(LOG_TAG, "ROAM_S3D tile %d,%d id %.0f part %d roof3d %d roof_only %d n %d h %.1f rh %.1f: %s how %d",
+                              c->tx, c->tz, set[i].id, (int)gb->part, (int)gb->roof3d, (int)gb->roof_only, n,
+                              gb->height / SC_UPM, gb->roof_height / SC_UPM,
+                              c->bst.s3d_n > s3d0 ? "s3d" : c->bst.emitted > emitted0 ? "core" : "not built", how);
             }
             if (c->bst.emitted > emitted0) c->st.bld_emitted++;
             sc_bld_note(s, c, &set[i], c->bst.emitted > emitted0 ? "emitted" : "core refused");
@@ -1912,6 +2249,20 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
     }
     free(set);
     free(fc);
+    {   /* [JC] what the Simple 3D Buildings builder did on this tile (c->bst counts the whole tile) */
+        int q;
+        c->st.bld_s3d = (int)c->bst.s3d_n;
+        for (q = 0; q < 6; q++) c->st.s3d_how[q] = (int)c->bst.s3d_how[q];
+        c->st.s3d_roof_only = (int)c->bst.s3d_roof_only;
+        c->st.s3d_tint = (int)(c->bst.s3d_tint_roof + c->bst.s3d_tint_wall);
+        c->st.s3d_holes = (int)c->bst.s3d_holes;
+        c->st.s3d_cap_holed = (int)c->bst.s3d_cap_holed;
+        c->st.s3d_cap_lidded = (int)c->bst.s3d_cap_lidded;
+        c->st.s3d_civic = (int)c->bst.s3d_civic;
+        c->st.s3d_base = (int)c->bst.s3d_base;
+        c->st.s3d_rel_built = (int)c->bst.s3d_rel;
+        c->st.s3d_portals = (int)c->bst.s3d_portals;
+    }
     return 1;
 }
 
@@ -2570,6 +2921,8 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_COLLAPSE_SEG 1.25         /* a piece longer than this many widths never folds */
 #define PV_COLLAPSE_RUN 3.5          /* a folded corner run is at most this many widths  */
 #define PV_FALL         0.25         /* TG_NET_FW_FALL: steepest cross-fall of a slab    */
+#define PV_LEVEL_TOL    43.0         /* [roam JA] ground this far (10 cm) over an island's level: ground follow */
+#define PV_MED_SEAM     8.0          /* [roam JA] island halves overlap 2 cm (same plane, world-space uv): no hairline (pv_piece) */
 #define PV_FALL_LOW     0.06         /* [G4b] steepest fall away from the kerb where the drawn ground is
                                       * lowered under the road (a cut): a street camber, the back face
                                       * (down to the lowered ground) covers the rest                  */
@@ -2580,6 +2933,8 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_W_MAX        2600.0       /* TD5_TG_GEO_SW_MAX (6 m)                          */
 #define PV_W_DEFAULT    860.0        /* 2 m: an outline no ribbon width reaches          */
 #define PV_W_SKIP       200.0        /* narrower than this (0.47 m, a sliver between two roads): none */
+#define PV_W_SKIP_PAIR  60.0         /* [roam JA] the same between the two one-way halves of ONE named street (14 cm):
+                                      * a tight divided avenue keeps a narrow kerbed median, not a slot of lot */
 #define PV_MEDIAN_M     25.0         /* an opposite carriageway this near: a median      */
 #define PV_LAWN_MIN_M   2.5          /* a median narrower than this is paved             */
 #define PV_RAY_STEP     200.0
@@ -2604,6 +2959,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_VF_MEDIAN    0x08u        /* ... and it is a named avenue's median: lawn       */
 #define PV_VF_FACADE    0x10u        /* clipped at a building front: no fence             */
 #define PV_VF_COLLAPSE  0x20u        /* merged into a corner point                        */
+#define PV_VF_PAIR      0x40u        /* [roam JA] its gap is a same-name one-way pair's median (PV_W_SKIP_PAIR) */
 
 typedef struct {
     int64_t   id;
@@ -2631,6 +2987,10 @@ struct ScPvSrc {
     uint32_t  clock;
     int       on, fence, facade, merge, median;
     int       island_fill, island_back;   /* [roam IA] */
+    int       join_guard;                 /* [roam JA] pv_join: no join on the road side of a kerb line */
+    int       medial;                     /* [roam JA] pv_medial: fill to the medial line, not the half ray */
+    int       level;                      /* [roam JA] pv_heights: an island's outer edge between the two kerb tops */
+    int       pair_skip;                  /* [roam JA] PV_W_SKIP_PAIR in a same-name pair's median */
     double    dbg_x, dbg_z, dbg_r;        /* [roam IA] DEV TD5RE_ROAM_PV_DBG=x,z,r (place frame): width-rule trace */
 };
 
@@ -2655,6 +3015,10 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->median = td5_env_int("TD5RE_ROAM_PV_MEDIAN", 1, 0, 1);
     p->island_fill = td5_env_int("TD5RE_ROAM_PV_ISLAND_FILL", 1, 0, 1);   /* [roam IA] */
     p->island_back = td5_env_int("TD5RE_ROAM_PV_ISLAND_BACK", 1, 0, 1);   /* [roam IA] */
+    p->join_guard  = td5_env_int("TD5RE_ROAM_PV_JOIN_GUARD", 1, 0, 1);    /* [roam JA] */
+    p->medial      = td5_env_int("TD5RE_ROAM_PV_MEDIAL", 1, 0, 1);        /* [roam JA] */
+    p->level       = td5_env_int("TD5RE_ROAM_PV_ISLAND_LEVEL", 1, 0, 1);  /* [roam JA] */
+    p->pair_skip   = td5_env_int("TD5RE_ROAM_PV_PAIR_SKIP", 1, 0, 1);     /* [roam JA] */
 #ifndef TD5RE_RELEASE
     {
         const char *q = getenv("TD5RE_ROAM_PV_DBG");
@@ -3059,11 +3423,20 @@ typedef struct {
     double  *nx, *nz;                    /* per segment, outward                         */
     double  *ox, *oz;                    /* per vertex: outer point                      */
     double  *ux, *uz, *mf;               /* per vertex: unit bisector, mitre factor      */
+    double  *fy;                         /* [roam JA] per island vertex: the far kerb's road y (or -1e30) */
     unsigned char *vf;                   /* per vertex: PV_VF_*                          */
+    int      join_guard;                 /* [roam JA] TD5RE_ROAM_PV_JOIN_GUARD (pv_join)  */
+    int      level;                      /* [roam JA] TD5RE_ROAM_PV_ISLAND_LEVEL (pv_heights) */
 } PvChain;
 
 /* The junction of the outer lines of alive segments a and b (a before b), the
- * vertex between them being v. Clamped to PV_MITRE_MAX widths from it. */
+ * vertex between them being v. Clamped to PV_MITRE_MAX widths from it.
+ * [roam JA] A segment whose two ends have different widths has a TILTED outer line, and two tilted lines
+ * over short pieces (an acute block tip whose kerb vertices were filled to the middle of the gap, PV_VF_ISLAND,
+ * beside a fillet that was not) can meet past the tip, on the ROAD side of a kerb line: the guard then halved
+ * the piece six times and dropped it, and the block tip stayed a hole the city lot showed through (Parque
+ * Vucetich, Diagonal 101 x Calle 27). A join on the road side of either kerb line is the vertex's own mitre
+ * instead (TD5RE_ROAM_PV_JOIN_GUARD=0: the old join). */
 static void pv_join(const PvChain *ch, const double *Ax, const double *Az, const double *Bx, const double *Bz,
                     int a, int b, int v, double *x, double *z)
 {
@@ -3077,6 +3450,14 @@ static void pv_join(const PvChain *ch, const double *Ax, const double *Az, const
     if (d > lim) {
         *x = ch->px[v] + (*x - ch->px[v]) * lim / d;
         *z = ch->pz[v] + (*z - ch->pz[v]) * lim / d;
+    }
+    /* judged after the clamp: on a collapsed run v lies off segment b's line, so pulling a far join back toward
+     * it can land on the road side of that line */
+    if (ch->join_guard &&
+        ((*x - ch->px[a]) * ch->nx[a] + (*z - ch->pz[a]) * ch->nz[a] < 0.0 ||
+         (*x - ch->px[b]) * ch->nx[b] + (*z - ch->pz[b]) * ch->nz[b] < 0.0)) {
+        *x = ch->px[v] + ch->ux[v] * ch->w[v] * ch->mf[v];   /* mf <= 2.5 = PV_MITRE_MAX: within lim */
+        *z = ch->pz[v] + ch->uz[v] * ch->w[v] * ch->mf[v];
     }
 }
 
@@ -3391,6 +3772,24 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
         yk /= (double)n;
         g = sc_ground(e->c, ch->ox[v], ch->oz[v]);
         low = sc_lowering(e->c, ch->ox[v], ch->oz[v]);
+        /* [roam JA] ISLAND LEVEL. An island vertex meets the far side's slab on the medial line (pv_medial), where
+         * both kerbs are equally far: its outer edge stands at the mean of the two kerb tops, so the two halves meet
+         * at one height (each used to follow the ground within its own kerb's cross-fall, and the higher half's back
+         * face showed as a crease across the island). Not where the ground stands over that level (a mound, a
+         * steep cross slope): the old rule there. */
+        if (ch->level && (vf & PV_VF_ISLAND) && !(vf & (PV_VF_DECK | PV_VF_FLAT))) {
+            double fs = 0.0;
+            int fn = 0;
+            for (j = 0; j < n; j++) { const int k = (v + j) % nv; if (ch->fy[k] > -1e29) { fs += ch->fy[k]; fn++; } }
+            if (fn == n) {
+                const double lvl = 0.5 * (yk + fs / (double)n + TD5_TG_KERB_H);
+                if (g + TD5_TG_KERB_H <= lvl + PV_LEVEL_TOL) {
+                    for (j = 0; j < n; j++) { const int k = (v + j) % nv; yo[k] = lvl; gr[k] = g - PV_BACK_SINK; }
+                    done += n;
+                    continue;
+                }
+            }
+        }
         for (j = 0; j < n; j++) {
             const int k = (v + j) % nv;
             if (vf & (PV_VF_DECK | PV_VF_FLAT)) {
@@ -3407,6 +3806,9 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
     }
 }
 
+/* [roam JA] the narrowest slab vertex v keeps (PV_W_SKIP; PV_W_SKIP_PAIR in a same-name pair's median) */
+static double pv_skip(const PvChain *ch, int v) { return (ch->vf[v] & PV_VF_PAIR) ? PV_W_SKIP_PAIR : PV_W_SKIP; }
+
 /* one piece (vertices i0 .. i1 of the chain, i1 > i0 in chain order, wrapped) */
 static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, const double *kz,
                     const double *yo, const double *gr, int klass, int corner)
@@ -3420,7 +3822,7 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     double fx[4], fz[4], x[4], y[4], z[4], u[4], v[4];
     const double ddx = kx[b] - kx[a], ddz = kz[b] - kz[a];
     int sb, k, cut = 0;
-    if (ch->w[a] < PV_W_SKIP && ch->w[b] < PV_W_SKIP) return 1;
+    if (ch->w[a] < pv_skip(ch, a) && ch->w[b] < pv_skip(ch, b)) return 1;
     if ((ox[1] - ox[0]) * ddx + (oz[1] - oz[0]) * ddz < 0.0) {
         /* an outer piece still running backwards (a reversal no corner rule may fold):
          * a triangle to its midpoint, never a bow-tie */
@@ -3458,6 +3860,26 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
         }
     }
     if (cut) c->st.pv_cut++;
+    /* [roam JA] SEAM. Two island halves meet on the medial line from two independent chains: their outer edges
+     * coincide only to the millimetre and the hairline between them showed dark down the middle of a median. Each
+     * island end of an uncut piece reaches PV_MED_SEAM past it (same plane, world-space uv: the overlap does not
+     * show), here and not in the chain's widths so the chain's collapse and mitre decisions stay as they are; kept
+     * only while the footprint stays off the road. */
+    if (!cut && island && e->s->pv->medial && !e->kerb_only) {
+        double sx[2], sz[2], qx[4], qz[4];
+        int q, moved = 0;
+        for (q = 0; q < 2; q++) {
+            const int vi = q ? b : a;
+            const double kx0 = q ? kx[b] : kx[a], kz0 = q ? kz[b] : kz[a];
+            const double dx = ox[q] - kx0, dz = oz[q] - kz0, l = hypot(dx, dz);
+            sx[q] = ox[q]; sz[q] = oz[q];
+            if ((ch->vf[vi] & PV_VF_ISLAND) && l > 4.0 * PV_MED_SEAM) { sx[q] += dx / l * PV_MED_SEAM; sz[q] += dz / l * PV_MED_SEAM; moved = 1; }
+        }
+        qx[0] = kx[a]; qx[1] = kx[b]; qx[2] = sx[1]; qx[3] = sx[0];
+        qz[0] = kz[a]; qz[1] = kz[b]; qz[2] = sz[1]; qz[3] = sz[0];
+        for (q = 0; q < 4; q++) { qx[q] = (double)(float)qx[q]; qz[q] = (double)(float)qz[q]; }
+        if (moved && !sc_on_road(c, qx, qz, 4, NULL)) { ox[0] = sx[0]; oz[0] = sz[0]; ox[1] = sx[1]; oz[1] = sz[1]; }
+    }
     c->st.pv_pieces++;
     if (corner) c->st.pv_corner++;
     if (island) c->st.pv_island++;
@@ -3615,7 +4037,7 @@ static int pv_piece_dropped(TG_TileCtx *c, const PvChain *ch, int a, int b, cons
     double ox[2] = { ch->ox[a], ch->ox[b] }, oz[2] = { ch->oz[a], ch->oz[b] };
     const double ddx = kx[b] - kx[a], ddz = kz[b] - kz[a];
     int cut = 0, k;
-    if (ch->w[a] < PV_W_SKIP && ch->w[b] < PV_W_SKIP) return 0;
+    if (ch->w[a] < pv_skip(ch, a) && ch->w[b] < pv_skip(ch, b)) return 0;
     if ((ox[1] - ox[0]) * ddx + (oz[1] - oz[0]) * ddz < 0.0) {
         ox[0] = ox[1] = 0.5 * (ox[0] + ox[1]);
         oz[0] = oz[1] = 0.5 * (oz[0] + oz[1]);
@@ -3721,6 +4143,67 @@ static int pv_island_top(PvEmit *e, const PvChain *ch, const double *kx, const d
     return ok;
 }
 
+/* [roam JA] the free distance from kerb point (x, z) along unit (ux, uz) to the next drivable surface (the ray
+ * of pv_chain_emit: PV_RAY_STEP march then 5 halvings), -1 when none within lim */
+static double pv_ray_free(TG_TileCtx *c, double x, double z, double ux, double uz, double lim)
+{
+    double d;
+    for (d = PV_RAY_STEP; d <= lim; d += PV_RAY_STEP) {
+        const double qx = x + ux * (PV_KERB_IN + d), qz = z + uz * (PV_KERB_IN + d);
+        if (sc_on_road(c, &qx, &qz, 1, NULL)) {
+            double lo = d - PV_RAY_STEP, hi = d;
+            int it;
+            for (it = 0; it < 5; it++) {
+                const double mid = 0.5 * (lo + hi);
+                const double rx = x + ux * (PV_KERB_IN + mid), rz = z + uz * (PV_KERB_IN + mid);
+                if (sc_on_road(c, &rx, &rz, 1, NULL)) hi = mid; else lo = mid;
+            }
+            return PV_KERB_IN + lo;
+        }
+    }
+    return -1.0;
+}
+
+/* [roam JA] MEDIAL FILL. A vertex filled to the middle of a gap (an island, a median, a vertex clamped to half
+ * the free distance) used to stop at HALF the ray, freed / 2. That is the medial line only when the far kerb is
+ * square to the ray. Where two kerbs meet at an angle (a block tip between a diagonal and a calle: Parque Vucetich,
+ * Diagonal 101 x Calle 27) each side's half-ray point lies past the true middle, so the two sides' slabs crossed
+ * over each other a few cm apart (a stacked, ragged seam). The far kerb's direction comes from two more rays
+ * PV_MED_PROBE_DEG either side; the slab stops at t = f cos(phi) / (1 + cos(phi)) along the ray (phi: the ray
+ * against the far kerb's normal), the point as far from this kerb as from that one. Back to f / 2 when a side ray
+ * misses or the two far points disagree (another road), and phi is capped at PV_MED_PHI_MAX.
+ * TD5RE_ROAM_PV_MEDIAL=0: the old half ray. */
+#define PV_MED_PROBE_DEG  12.0
+#define PV_MED_PHI_MAX    70.0
+#define PV_MED_STRAIGHT_COS 0.9659   /* cos 15 deg: a vertex turning more is a corner (half ray) */
+static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
+{
+    TG_TileCtx *c = e->c;
+    const double ux = ch->ux[v], uz = ch->uz[v], a = PV_MED_PROBE_DEG * 3.14159265358979323846 / 180.0;
+    const double ca = cos(a), sa = sin(a);
+    double fp, fm, bx[2], bz[2], dx, dz, dl, cphi;
+    if (!e->s->pv->medial || !(freed > 0.0)) return 0.5 * freed;
+    if (freed <= 2.0 * PV_MED_SEAM) return 0.5 * freed;
+    {   /* a corner vertex (a fillet arc): its side rays fan round the bend and the far kerb read jumps from one
+         * vertex to the next, so the old half ray (the arc's pieces must keep a smooth outer line) */
+        const int kin = (v > 0) ? v - 1 : (ch->closed ? ch->ns - 1 : -1), kout = (v < ch->ns) ? v : -1;
+        if (kin >= 0 && kout >= 0 && ch->nx[kin] * ch->nx[kout] + ch->nz[kin] * ch->nz[kout] < PV_MED_STRAIGHT_COS)
+            return 0.5 * freed;
+    }
+    fp = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca - uz * sa, ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
+    fm = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca + uz * sa, -ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
+    if (fp < 0.0 || fm < 0.0) return 0.5 * freed;
+    bx[0] = ch->px[v] + (ux * ca - uz * sa) * fp;  bz[0] = ch->pz[v] + (ux * sa + uz * ca) * fp;
+    bx[1] = ch->px[v] + (ux * ca + uz * sa) * fm;  bz[1] = ch->pz[v] + (-ux * sa + uz * ca) * fm;
+    dx = bx[0] - bx[1]; dz = bz[0] - bz[1]; dl = hypot(dx, dz);
+    /* the two far points span about 2 f tan(a) on one straight kerb; much more or less is a corner or another road */
+    if (!(dl > 0.5 * freed * tan(a)) || dl > 4.0 * freed * tan(a)) return 0.5 * freed;
+    cphi = fabs(ux * dz - uz * dx) / dl;            /* |u x far kerb direction| = cos(ray, far normal) */
+    if (cphi < cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0)) cphi = cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0);
+    if (cphi > 1.0) cphi = 1.0;
+    return freed * cphi / (1.0 + cphi);
+}
+
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 {
     TG_TileCtx *c = e->c;
@@ -3744,13 +4227,17 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
     ch.ns = m;
     ch.nv = closed ? m : m + 1;
     ch.closed = closed;
-    blk = (double *)calloc((size_t)ch.nv * 14u + (size_t)m * 2u, sizeof(double));
+    ch.join_guard = e->s->pv->join_guard;
+    ch.level = e->s->pv->level;
+    blk = (double *)calloc((size_t)ch.nv * 15u + (size_t)m * 2u, sizeof(double));
     ch.vf = (unsigned char *)calloc((size_t)ch.nv, 1);
     if (!blk || !ch.vf) { free(blk); free(ch.vf); free(seq); return 0; }
     ch.px = blk; ch.pz = ch.px + ch.nv; ch.py = ch.pz + ch.nv; ch.w = ch.py + ch.nv;
     ch.ox = ch.w + ch.nv; ch.oz = ch.ox + ch.nv; ch.ux = ch.oz + ch.nv; ch.uz = ch.ux + ch.nv; ch.mf = ch.uz + ch.nv;
     kx = ch.mf + ch.nv; kz = kx + ch.nv; yo = kz + ch.nv; gr = yo + ch.nv;
     ch.nx = gr + ch.nv; ch.nz = ch.nx + m;
+    ch.fy = ch.nz + m;
+    for (v = 0; v < ch.nv; v++) ch.fy[v] = -1e30;
     c->st.pv_chains++;
     /* vertices, segment normals, vertex flags and the ribbon widths */
     for (k = 0; k < m; k++) {
@@ -3852,6 +4339,8 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 #endif
         if (freed >= 0.0) {
             int median = 0;
+            /* [roam JA] where the slab stops: the MEDIAL line between this kerb and the surface the ray hit */
+            const double half = pv_medial(e, &ch, v, freed);
             if (hp && hp->seg >= 0 && freed <= PV_MEDIAN_M * SC_UPM && e->s->pv->median) {
                 const int kin = (v > 0) ? v - 1 : (closed ? m - 1 : -1), kout = (v < m) ? v : -1;
                 const PvWay *me = (kout >= 0 && B[seq[kout]].way) ? B[seq[kout]].way
@@ -3862,26 +4351,32 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
             /* [roam IA] a gap no building stands in (this side's half, probed every 0.5 m) is an island
              * whichever streets bound it; a lawn when the middle of the gap is an OSM green */
             int fill = 0, green = 0;
-            if (!median && e->s->pv->island_fill && ch.w[v] <= 0.5 * freed && freed <= PV_MEDIAN_M * SC_UPM) {
+            if (!median && e->s->pv->island_fill && ch.w[v] <= half && freed <= PV_MEDIAN_M * SC_UPM) {
                 fill = 1;
-                for (d = ch.w[v]; d <= 0.5 * freed && fill; d += PV_FACE_STEP)
+                for (d = ch.w[v]; d <= half && fill; d += PV_FACE_STEP)
                     if (pv_in_building(c, e->bld, ch.px[v] + ch.ux[v] * d, ch.pz[v] + ch.uz[v] * d)) fill = 0;
 #ifndef TD5RE_RELEASE
                 if (e->s->pv->dbg_r > 0.0 && hypot(ch.px[v] + c->org_x - e->s->pv->dbg_x, ch.pz[v] + c->org_z - e->s->pv->dbg_z) < e->s->pv->dbg_r)
                     TD5_LOG_I(LOG_TAG, "PVDBG   v %d fill %d (a building %.0f along the ray)", v, fill, fill ? -1.0 : d);
 #endif
                 if (fill)
-                    green = pv_in_green(c, e->ar, e->nar, ch.px[v] + ch.ux[v] * 0.5 * freed, ch.pz[v] + ch.uz[v] * 0.5 * freed);
+                    green = pv_in_green(c, e->ar, e->nar, ch.px[v] + ch.ux[v] * half, ch.pz[v] + ch.uz[v] * half);
                 if (fill && B[seq[v < m ? v : m - 1]].owned) c->st.pv_island_fill++;
             }
-            if (median || fill || ch.w[v] > 0.5 * freed) {
-                ch.w[v] = 0.5 * freed;
+            if (median || fill || ch.w[v] > half) {
+                ch.w[v] = half;
                 ch.vf[v] |= PV_VF_ISLAND;
+                if (median && e->s->pv->pair_skip) ch.vf[v] |= PV_VF_PAIR;
+                if (ch.level) {   /* [roam JA] the far kerb's road height, just past the ray's hit */
+                    const double qx = ch.px[v] + ch.ux[v] * (freed + 2.0 * PV_KERB_IN), qz = ch.pz[v] + ch.uz[v] * (freed + 2.0 * PV_KERB_IN);
+                    double fyv;
+                    if (roam_ctx_road_y(c, qx, qz, ch.py[v], &fyv)) ch.fy[v] = fyv;
+                }
                 if ((median || green) && freed > PV_LAWN_MIN_M * SC_UPM) ch.vf[v] |= PV_VF_MEDIAN;
                 if (B[seq[v < m ? v : m - 1]].owned) c->st.pv_free_clamp++;
             }
         }
-        if (ch.w[v] < PV_KERB_IN + PV_W_SKIP) { ch.w[v] = 0.0; continue; }
+        if (ch.w[v] < PV_KERB_IN + pv_skip(&ch, v)) { ch.w[v] = 0.0; continue; }
         /* a mapped building front behind the kerb: the slab stops there (not inside the clearance gap) */
         if (e->s->pv->facade && !(ch.vf[v] & (PV_VF_ISLAND | PV_VF_DECK | PV_VF_FLAT)) && ch.w[v] > e->s->gap) {
             for (d = e->s->gap; d < ch.w[v]; d += PV_FACE_STEP) {
@@ -5199,9 +5694,11 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     td5_geo_source_path(s->water_path, sizeof s->water_path, place, "WATER.R8");
     s->exag = (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0;
     s->lm_wins = td5_env_int("TD5RE_ROAM_LM_WINS", 1, 0, 1);
+    s->s3d = td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1);
     s->pv = sc_pv_open(s);
     s->hc = (TD5_RoamHeight *)calloc(1, sizeof(TD5_RoamHeight));
     if (!sc_index_load(s)) TD5_LOG_W(LOG_TAG, "roam scenery: %s has no tiles/INDEX.JSON: no buildings", place);
+    if (s->s3d) sc_rel_load(s);               /* [JC2] relation outlines + courtyards */
     s->ctx = (TG_TileCtx *)calloc(1, sizeof(TG_TileCtx));
     if (!s->ctx) { td5_roam_scn_close(s); return NULL; }
     s->furn = td5_roam_furn_open(place);      /* [F4c] NULL = no furniture (knob off / no data) */
@@ -5227,6 +5724,8 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     for (k = 0; k < SC_ROAD_LRU; k++) if (s->road[k].t) { td5_roam_tile_free(s->road[k].t); free(s->road[k].t); }
     sc_ctx_free(s->ctx);
     sc_pv_close(s->pv);
+    sc_cache_free(&s->rel);                   /* [JC2] */
+    free(s->relx);
     free(s->casco);
     td5_roam_furn_close(s->furn);
     td5_roam_rails_close(s->rails);
@@ -5237,7 +5736,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
 TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, TD5_RoamHeight *hc)
 {
     TG_TileCtx *c;
-    ScCache *bc[SC_CACHE_LRU], *ac[SC_CACHE_LRU], *fc[SC_CACHE_LRU];
+    ScCache *bc[SC_CACHE_LRU + 1], *ac[SC_CACHE_LRU], *fc[SC_CACHE_LRU];
     ScArea *ar = NULL;
     int nbc, nac, nfc, nar = 0, cap = 0, l, i, dx, dz;
     double corner[4][2], x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300;
@@ -5290,6 +5789,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     {
         const double S = (double)s->grid.tile * 1.5;
         nbc = sc_cache_window(s, SC_L_BLD, x0 - S, z0 - S, x1 + S, z1 + S, bc, k_sc_lru[SC_L_BLD]);
+        if (s->s3d && s->rel.n > 0) bc[nbc++] = &s->rel;   /* [JC2] the relation outlines, after the tiles */
         nac = sc_cache_window(s, SC_L_AREA, x0 - S, z0 - S, x1 + S, z1 + S, ac, k_sc_lru[SC_L_AREA]);
         nfc = sc_cache_window(s, SC_L_FOOT, x0, z0, x1, z1, fc, k_sc_lru[SC_L_FOOT]);
     }
@@ -5481,6 +5981,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t pv_ms_max = 0;
     long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
+    long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
+    long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -5576,6 +6078,15 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ic_t[0] += r->lot_medians; ic_t[1] += r->bld_veto_green; ic_t[2] += r->pv_bld_gone; ic_t[3] += r->lot_cover_green;
         ic_m[0] += r->inf_m_built; ic_m[1] += r->inf_m_real; ic_m[2] += r->inf_m_area; ic_m[3] += r->inf_m_other;
         inf_rail_n += r->inf_drop_rail; inf_rail_m += r->inf_m_rail;   /* [integ-roamI] */
+        {   /* [roam JC] */
+            int q;
+            s3d_t[0] += r->bld_s3d; s3d_t[1] += r->bld_s3d_hidden; s3d_t[2] += r->s3d_roof_only; s3d_t[3] += r->s3d_tint;
+            s3d_tag += r->s3d_tagged; s3d_slope += r->s3d_sloped;
+            s3d_r[0] += r->bld_rel; s3d_r[1] += r->s3d_rel_built; s3d_r[2] += r->s3d_holes; s3d_r[3] += r->s3d_cap_holed;
+            s3d_r[4] += r->s3d_cap_lidded; s3d_r[5] += r->s3d_civic; s3d_r[6] += r->s3d_base; s3d_r[7] += r->bld_rel_ovt_drop;
+            s3d_r[8] += r->s3d_portals;
+            for (q = 0; q < 6; q++) s3d_t[4 + q] += r->s3d_how[q];
+        }
         inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
         lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
         lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
@@ -5700,6 +6211,24 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "%ld shallower, %ld refused (%.0f m)",
                  ic_t[0], ic_t[3], ic_t[1], ic_t[2], ic_m[0], ic_m[1], ic_m[2], ic_m[3], inf_rail_mv, inf_rail_sh,
                  inf_rail_n, inf_rail_m);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam JC: %ld footprint(s) built as Simple 3D Buildings (building:part / roof:shape), roofs: flat %ld, "
+                 "ridge %ld, barrel %ld, centroid (pyramid / cone / dome / onion) %ld, inset deck (mansard / concave) %ld, "
+                 "sloped tag built flat %ld | %ld roof-only part(s), %ld tinted surface(s), %ld outline(s) replaced by "
+                 "their parts | 3D-tagged footprints drawn %ld, with a sloped roof %ld (TD5RE_ROAM_S3D=%d)",
+                 s3d_t[0], s3d_t[4], s3d_t[5], s3d_t[6], s3d_t[7], s3d_t[8], s3d_t[9], s3d_t[2], s3d_t[3], s3d_t[1],
+                 s3d_tag, s3d_slope, td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1));
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam JC2: relation outlines owned %ld, built %ld | courtyard rings walled %ld, holed caps %ld, lidded "
+                 "(clipper gave up) %ld | civic facades %ld | bases under parts %ld | Overture blobs under a relation "
+                 "not built %ld | carriage arches %ld", s3d_r[0], s3d_r[1], s3d_r[2], s3d_r[3], s3d_r[4], s3d_r[5], s3d_r[6],
+                 s3d_r[7], s3d_r[8]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

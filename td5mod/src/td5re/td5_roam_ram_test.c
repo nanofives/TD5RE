@@ -135,6 +135,36 @@ static int rr_set_path(const double *qx, const double *qz, int nq, double cap)
     return 1;
 }
 
+static int rr_inside(double px, double pz)
+{
+    const TD5_RoamResident *rs = td5_roam_resident();
+    int32_t ox, oz;
+    TD5_RoamHit h;
+    if (!rs) return 0;
+    td5_roam_world_origin(&ox, &oz);
+    return td5_roam_locate(rs, (int32_t)floor((px - ox) * 256.0 + 0.5), (int32_t)floor((pz - oz) * 256.0 + 0.5), 0, 0,
+                           ROAM_PRIM_NONE, &h) && h.prim != ROAM_PRIM_NONE && h.inside;
+}
+
+static void rr_point(double s, double off, double *x, double *z, double *tx, double *tz);
+
+/* [integ J] the line rr_drive steers (1.6 m right of the planned path) must keep BOTH sides of the car on the
+ * road over the whole run-up: the planner's chord through a skewed junction can pass a kerb corner close enough
+ * that the right-lane line runs over it (Calle 14 / 55 by Plaza Moreno: ram 5 stopped dead on the block tip, a
+ * line no driver takes). Returns the first s (m) where it does not, -1 when the leg is clear. */
+static double rr_lane_blocked(double upto_m)
+{
+    double sm;
+    for (sm = 0.0; sm <= upto_m; sm += 1.0) {
+        double x, z;
+        rr_point(sm, 1.6 + 1.1, &x, &z, NULL, NULL);
+        if (!rr_inside(x, z)) return sm;
+        rr_point(sm, 1.6 - 1.1, &x, &z, NULL, NULL);
+        if (!rr_inside(x, z)) return sm;
+    }
+    return -1.0;
+}
+
 /* plan a leg of len_m ahead (rotated tries when the street runs out); the leg must be a clear straight for car_at_m */
 static int rr_plan(const TD5_Actor *a, double len_m, double min_m, double cap)
 {
@@ -153,8 +183,11 @@ static int rr_plan(const TD5_Actor *a, double len_m, double min_m, double cap)
         int nq = 0;
         if (td5_roam_route_plan_path(x, z, hx, hz, x + dx * len_m * RR_M, z + dz * len_m * RR_M, 200.0, NULL, 0, &qx, &qz, &nq, &len) &&
             len >= min_m && rr_set_path(qx, qz, nq, cap)) {
+            const double blk = rr_lane_blocked(min_m);
             free(qx); free(qz);
-            return 1;
+            if (blk < 0.0) return 1;
+            TD5_LOG_I(LOG_TAG, "[ROAMRAM] leg %d refused: the lane line leaves the road %.0f m along", k, blk);
+            continue;
         }
         free(qx); free(qz);
     }
@@ -292,6 +325,11 @@ static uint32_t rr_bits(TD5_Actor *a, long tick)
         if (T.slot < 0) { rr_finish("no free traffic-pool car", 1); return 0; }
         td5_physics_dev_last_v2v(&T.seq0, &ia, &ib, &mag, &heavy, &pct);
         T.phase = RR_RUN; T.phase_t0 = tick; T.kmh_prev = rr_kmh(a);
+        if (td5_env_int("TD5RE_ROAM_RAM_TRACE", 0, 0, 1)) {   /* dev: the planned leg, one point every 4 m */
+            int q;
+            for (q = 0; q < T.np; q += 2)
+                TD5_LOG_I(LOG_TAG, "[ROAMRAM] PATH %d %d %.0f %.0f", T.n + 1, q, T.px[q], T.pz[q]);
+        }
         TD5_LOG_I(LOG_TAG, "[ROAMRAM] ram %d/%d: %s at %d km/h, traffic slot %d parked %.0f m along (run-up %.0f m)", T.n + 1, RR_N,
                   side ? "SIDE" : "REAR", kmh_t, T.slot, T.car_s, runup);
         return 0;
@@ -315,6 +353,12 @@ static uint32_t rr_bits(TD5_Actor *a, long tick)
             return (uint32_t)TD5_INPUT_BRAKE;
         }
         T.kmh_prev = rr_kmh(a);
+        if (td5_env_int("TD5RE_ROAM_RAM_TRACE", 0, 0, 1) && (tick - T.phase_t0) % 3 == 0 && tick - T.phase_t0 < 300) {
+            double x, z;
+            rr_place_of(a, &x, &z);
+            TD5_LOG_I(LOG_TAG, "[ROAMRAM] TRK %d t=%ld s=%.2f %.1f km/h place %.0f %.0f yaw %d", T.n + 1, tick - T.phase_t0, T.s,
+                      rr_kmh(a), x, z, (int)(a->display_angles.yaw & 0xFFF));
+        }
         if ((tick - T.phase_t0) % 60 == 0) {
             double x, z;
             rr_place_of(a, &x, &z);

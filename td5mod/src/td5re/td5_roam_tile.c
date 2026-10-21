@@ -750,6 +750,8 @@ static uint32_t ctx_input_hash(TD5_RoamTileCtx *c, const double win[4], int *nti
     h = fnv_dbl(h, p->kerb_r_major);      h = fnv_u32(h, (uint32_t)p->fillet_segs);
     h = fnv_dbl(h, p->tri_edge_max);      h = fnv_dbl(h, p->signal_r);
     h = fnv_dbl(h, p->body_half_w);       h = fnv_dbl(h, p->body_lf);
+    h = fnv_dbl(h, p->median_min);        /* [roam JA] */
+    h = fnv_u32(h, (uint32_t)p->median_keep_outer);   /* [integ J] */
     h = fnv_dbl(h, ROAM_RIB_STEP);   h = fnv_dbl(h, ROAM_RIB_LANE_W);
     h = fnv_u32(h, ROAM_RIB_BLOCK);  h = fnv_u32(h, ROAM_RIB_CHUNK_ROWS);
     h = fnv_u32(h, ROAM_RIB_CHUNK_TAIL); h = fnv_u32(h, ROAM_RIB_SMOOTH);

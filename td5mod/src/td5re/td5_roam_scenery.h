@@ -60,7 +60,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  11u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  15u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -76,7 +76,18 @@
                                      *     infill 1-3 floors (taller on avenues) 12-24 m deep, AREAS spikes
                                      * 10 = roam ID: railways (td5_roam_rails.c, the RAILS tile layer)
                                      * 11 = round I integration: every round I branch combined (each bumped 9 -> 10 on its own,
-                                     *      11 so no tile cached by a single branch is reused) */
+                                     *      11 so no tile cached by a single branch is reused)
+                                     * 12 = roam JA: pavement joins never on the road side of a kerb, islands filled to the
+                                     *      medial line at one level, a narrow kerbed median between a same-name pair
+                                     * 12 = roam JC: OSM Simple 3D Buildings (td5_tg_s3d.c): every building:part and
+                                     *      roof:shape footprint gets its real roof on any ring, roof-only parts,
+                                     *      roof / wall colours, outlines replaced by their parts not drawn
+                                     * 13 = roam JC2: S3D_RELATIONS.JSON outlines with courtyards, Overture blobs
+                                     *      under them dropped, civic stone / plaster facades, bases under parts
+                                     * 14 = round J integration: roam JA (12) + roam JC (12, 13) combined,
+                                     *      14 so no tile cached by a single branch is reused
+                                     * 15 = integ J: a carriage arch opens every stretch of a part / relation wall that stands on
+                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -191,6 +202,15 @@ typedef struct {
     int  inf_drop_rail;
     double inf_m_rail;
     int  inf_rail_moved, inf_rail_shallow;   /* ... built anyway: front moved back behind the bed / shallower */
+    /* [JC] Simple 3D Buildings: footprints built by tg_s3d_build (building:part or roof:shape), by how the roof was
+     * made (TG_S3D_HOW_*: flat, ridge, barrel, centroid, offset, flat fallback), roof-only parts, tinted surfaces,
+     * outlines not drawn because their building:parts replace them */
+    int  bld_s3d, s3d_how[6], s3d_roof_only, s3d_tint, bld_s3d_hidden;
+    int  s3d_tagged, s3d_sloped;   /* footprints with part / roof:shape / roof-only drawn (either builder), with a sloped roof */
+    /* [JC2] relation outlines owned / built, courtyard rings walled, holed caps / lidded, civic facades, bases under
+     * parts, Overture blobs not built because a relation outline covers them */
+    int  bld_rel, s3d_rel_built, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base, bld_rel_ovt_drop;
+    int  s3d_portals;              /* [JC2] wall openings where a service way passes under an outline */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
