@@ -5422,6 +5422,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
     long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 };
+    double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
+    long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
@@ -5442,6 +5444,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     if (!j.list) return 1;
     if (_strnicmp(val, "casco", 5) == 0) {
         j.n = td5_roam_casco_tiles(&j.grid, j.list, cap);
+    } else if (_strnicmp(val, "list:", 5) == 0) {       /* [roam IE] */
+        int (*l)[2] = NULL, k;
+        const int nl = td5_roam_read_tile_list(val + 5, &l);
+        for (k = 0; k < nl && j.n < cap; k++) { j.list[j.n][0] = l[k][0]; j.list[j.n][1] = l[k][1]; j.n++; }
+        free(l);
     } else {
         int x0, z0, x1, z1, tx, tz;
         if (sscanf(val, "%d,%d,%d,%d", &x0, &z0, &x1, &z1) != 4) { free(j.list); return 1; }
@@ -5546,10 +5553,23 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         tot[13] += r->areas; tot[14] += r->lawn_tris; tot[15] += r->trees; tot[16] += r->guard_overlaps;
         tot[17] += r->bld_nudged; tot[18] += r->bld_apron; tot[19] += r->lawn_cut; tot[20] += r->trees_cut;
         tot[21] += r->bld_drop_ring;
+        ie_m[0] += r->furn.bar_guard_m; ie_m[1] += r->furn.bar_nj_m; ie_m[2] += r->furn.bar_parapet_m; ie_m[3] += r->furn.emb_m;
+        ie_n[0] += r->furn.bar_drop_road; ie_n[1] += r->furn.bar_patch_edges; ie_n[2] += r->furn.piers;
+        ie_n[3] += r->furn.pier_cols; ie_n[4] += r->furn.pier_drop_road; ie_n[5] += r->furn.abutments;
         if (r->bld_shift_max > shift_max) shift_max = r->bld_shift_max;
         if (r->ms > ms_max) ms_max = r->ms;
         if (r->bytes > bytes_max) bytes_max = r->bytes;
         ms_sum += r->ms;
+    }
+    {
+        /* [roam IE] */
+        char ln[400];
+        snprintf(ln, sizeof ln, "roam structures [roam IE]: guardrail %.0f m, New Jersey %.0f m, deck parapet %.0f m, embankment %.0f m, "
+                 "barrier segments dropped on a carriageway %ld, junction kerb edges railed %ld | piers %ld (%ld columns, %ld moved off "
+                 "a road below failed), abutments %ld", ie_m[0], ie_m[1], ie_m[2], ie_m[3], ie_n[0], ie_n[1], ie_n[2], ie_n[3], ie_n[4], ie_n[5]);
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
     }
     {
         char line[1400];

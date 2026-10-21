@@ -48,7 +48,9 @@
 #include "td5_roam_tile.h"
 
 /* Bumped BY HAND when a furniture rule changes (mixed into the scenery hash). */
-#define TD5_ROAM_FURN_RULES  2u   /* 2: [F8] each approach's facing heads show its signal group */
+#define TD5_ROAM_FURN_RULES  3u   /* 2: [F8] each approach's facing heads show its signal group
+                                   * 3: [roam IE] motorway / expressway barriers (W-beam outside, New Jersey
+                                   *    on the median, parapets on decks), embankments, bridge piers + abutments */
 
 typedef struct TG_TileCtx TG_TileCtx;
 typedef struct TD5_RoamFurnSource TD5_RoamFurnSource;
@@ -67,6 +69,11 @@ typedef struct {
     int  stops, shelters, benches, bins, stop_drop_far, stop_drop_road;
     /* crossings */
     int  zebras, limit_lines, xing_unknown, xing_drop_far;
+    /* [roam IE] barriers (metres of kerb), segments dropped because a carriageway lies under them, patch
+     * kerb edges railed; embankment metres; piers (and their columns), columns dropped on a road below, abutments */
+    double bar_guard_m, bar_nj_m, bar_parapet_m, emb_m;
+    int  bar_drop_road, bar_patch_edges, emb_drop_road;
+    int  piers, pier_cols, pier_drop_road, abutments;
     /* output */
     int  meshes;                                      /* furniture meshes appended */
     int  guard_hits;                                  /* furniture faces on the drivable surface, not overhead, not a decal: must be 0 */

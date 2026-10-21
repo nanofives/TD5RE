@@ -69,7 +69,7 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    6u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    7u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
                                      * ROW_COVERED pins at H_c
                                      * 3: F1-T10 height coupling of overlapping ribbons,
@@ -86,12 +86,17 @@
                                      * lattice TD5ROAMGRID2 at +42.13 deg
                                      * 6: roam M, acute union wedges (a diagonal meeting an
                                      * avenue / a street) cut back to 2 m across: paving,
-                                     * not an island spike into the junction (u_notch_fill) */
+                                     * not an island spike into the junction (u_notch_fill)
+                                     * 7: roam IE, bridge chains: a deck floor (clearance over
+                                     * the roads under it and the water, no sag between the
+                                     * abutments) ramps down over the approach ways at 5 %
+                                     * with 800 m crests; at-grade junctions anchor it */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */
 #define ROAM_HALO_M           300.0           /* build halo (T3 locality is exact there) */
 #define ROAM_SPREAD_CLAMP_M   0.5             /* design risk 3 arm-blend clamp  */
+#define ROAM_DECK_SOFT_U      (0.75 * 430.0)  /* [roam IE] deck floor smooth max, units */
 #define ROAM_NSECT            11
 
 #define ROAM_SECT_SPAN  0x4E415053u   /* 'SPAN' little endian */
@@ -126,6 +131,7 @@
 #define ROAM_EF_ROUNDABOUT  0x08u
 #define ROAM_EF_RAMP_SHORT  0x10u   /* T4 flags of the ribbon                   */
 #define ROAM_EF_PIN_MISS    0x20u
+#define ROAM_EF_APPROACH    0x40u   /* [roam IE] the deck floor of a bridge chain lifted it */
 /* EDGE.end_kind[] values: TD5_ROAM_END_* of td5_roam_world.h */
 
 /* SIGN.kind */
@@ -284,6 +290,10 @@ typedef struct {
     double   max_grade;           /* steepest owned quad (dy / run)              */
     int      grade_over_cap;      /* owned quads steeper than ROAM_GRADE_CAP     */
     int      dep_cycles;          /* build-order cycles broken (should be 0)     */
+    /* [roam IE] bridge chains, over the OWNED quads' ribbons */
+    int      deck_ribbons;        /* owned ribbon pieces a deck floor lifted     */
+    int      deck_decks;          /* of them: decks themselves                   */
+    double   deck_max_lift_m;     /* largest (road - ground) on them             */
     uint32_t ms;                  /* wall time of the build (not in the file)    */
     uint32_t ms_graph, ms_ribbon, ms_assemble;
 } TD5_RoamTileStats;
@@ -324,6 +334,9 @@ int  td5_roam_casco_tiles(const RoamGrid *g, int (*out)[2], int cap);
  * WITHOUT it, the negative control), --RoamGlobal=1, --RoamPlace=<slug>,
  * --RoamCensus=<path>. 0 when --RoamBuildTiles is absent. */
 int  td5_roam_tile_dev_cli(const char *cmdline);
+/* [roam IE] DEV: a tile list file, one "tx tz" per line (--RoamBuildTiles=list:<path>, --RoamBuildScenery=list:<path>).
+ * *out is malloc'd (caller frees); returns the count. */
+int  td5_roam_read_tile_list(const char *path, int (**out)[2]);
 #endif
 
 #endif /* TD5_ROAM_TILE_H */
