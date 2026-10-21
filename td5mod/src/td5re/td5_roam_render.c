@@ -1836,7 +1836,10 @@ int td5_roam_render_dev_poses(void)
             }
             if (!okg) { fprintf(stderr, "roam poses: no ROAMGRID\n"); td5_roam_height_close(hc); free(hc); free(buf); return 1; }
             roam_grid_tile_of(&grd, spx, spz, &stx, &stz);
-            roam_grid_origin(&grd, stx, stz, &rf_ox, &rf_oz);
+            /* [integ-roamI] the session's corner (td5_roam_mode.c, roam M): the reflected lattice makes the
+             * world origin the (0,0) corner of tile tx + 1. Corner (stx, stz) put every pose one tile
+             * diagonal (~256 m) off and its height on the wrong ground. */
+            roam_grid_origin(&grd, stx + 1, stz, &rf_ox, &rf_oz);
             rf = 1;
             fprintf(stderr, "roam poses: roam frame, spawn tile %d,%d origin %d,%d\n", stx, stz, (int)rf_ox, (int)rf_oz);
         }
