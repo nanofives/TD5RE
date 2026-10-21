@@ -93,7 +93,8 @@
                                      * with 800 m crests; at-grade junctions anchor it
                                      * 8: roam JA, a divided carriageway pair narrows its
                                      * lanes (to 2.75 m, lane count kept) for a 2 m median
-                                     * 9: integ J: a narrowed divided carriageway keeps its outer kerb (shifted
+                                     * 9: integ J: TD5RE_ROAM_MEDIAN_KEEP_OUTER (opt-in, default off = the rule-8
+                                     *    geometry): a narrowed divided carriageway keeps its outer kerb (shifted
                                      *    outward, the median widens on its own side), its nodes follow */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */

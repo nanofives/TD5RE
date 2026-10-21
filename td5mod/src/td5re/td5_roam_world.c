@@ -53,8 +53,10 @@ void td5_roam_graph_params_default(TD5_RoamGraphParams *p)
     p->body_lf       = 1280.0;
     /* [roam JA] 2 m: a kerbed island a pavement slab fits on (td5_roam_scenery.c PV_W_SKIP); 50 = the T10 0.5 m */
     p->median_min    = (double)td5_env_int("TD5RE_ROAM_MEDIAN_MIN_CM", 200, 50, 1000) * TD5_ROAM_UPM / 100.0;
-    /* [integ J] the median widens on its own side: the outer kerb (and the junction corners on it) stay */
-    p->median_keep_outer = td5_env_int("TD5RE_ROAM_MEDIAN_KEEP_OUTER", 1, 0, 1);
+    /* [integ J] OPT-IN (default 0 = roam JA): the median widens on its own side, the outer kerb (and the junction
+     * corners on it) stay. Off by default: with it on, roam-cops-roadblock scenario 2 fails 3/3 (the run diverges from
+     * scenario 1 and the player pins on a kerb of way 336716283), not understood yet (_archive/roam/J/INTEG_REPORT.md) */
+    p->median_keep_outer = td5_env_int("TD5RE_ROAM_MEDIAN_KEEP_OUTER", 0, 0, 1);
 }
 
 /* ------------------------------------------------------------ filter -------- */

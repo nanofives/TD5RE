@@ -195,7 +195,7 @@ typedef struct {
     double median_min;          /* [roam JA] median a divided carriageway pair is narrowed
                                  * to leave (lanes down to TD5_ROAM_LANE_MIN_M, the lane
                                  * count kept), units; TD5RE_ROAM_MEDIAN_MIN_CM        */
-    int    median_keep_outer;   /* [integ J] 1: the median widens on its own side only, the
+    int    median_keep_outer;   /* [integ J] OPT-IN, default 0. 1: the median widens on its own side only, the
                                  * outer kerb stays where full lanes put it (the carriageway
                                  * shifts outward); 0 = roam JA (narrowed about the way).
                                  * TD5RE_ROAM_MEDIAN_KEEP_OUTER                        */
