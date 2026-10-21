@@ -69,7 +69,7 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    8u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    9u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
                                      * ROW_COVERED pins at H_c
                                      * 3: F1-T10 height coupling of overlapping ribbons,
@@ -92,7 +92,9 @@
                                      * abutments) ramps down over the approach ways at 5 %
                                      * with 800 m crests; at-grade junctions anchor it
                                      * 8: roam JA, a divided carriageway pair narrows its
-                                     * lanes (to 2.75 m, lane count kept) for a 2 m median */
+                                     * lanes (to 2.75 m, lane count kept) for a 2 m median
+                                     * 9: integ J: a narrowed divided carriageway keeps its outer kerb (shifted
+                                     *    outward, the median widens on its own side), its nodes follow */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */

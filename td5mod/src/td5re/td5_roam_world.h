@@ -161,6 +161,8 @@ typedef struct {
     int      tunnel;        /* 0 none, 1 tunnel=yes (bore), 2 building_passage   */
     int      roundabout;
     int      namek, name_id, maxspeed_kph;
+    double   med_shift;     /* [integ J] outward shift of a narrowed divided carriageway
+                             * (its outer kerb kept where full lanes put it), units */
     TD5_RoamEdgeEnd end[2]; /* [0] at node_a, [1] at node_b                      */
 } TD5_RoamEdge;
 
@@ -193,6 +195,10 @@ typedef struct {
     double median_min;          /* [roam JA] median a divided carriageway pair is narrowed
                                  * to leave (lanes down to TD5_ROAM_LANE_MIN_M, the lane
                                  * count kept), units; TD5RE_ROAM_MEDIAN_MIN_CM        */
+    int    median_keep_outer;   /* [integ J] 1: the median widens on its own side only, the
+                                 * outer kerb stays where full lanes put it (the carriageway
+                                 * shifts outward); 0 = roam JA (narrowed about the way).
+                                 * TD5RE_ROAM_MEDIAN_KEEP_OUTER                        */
     int    log_median;          /* [T10] dev census only: log every divided way the
                                  * T9 whole-way rule narrowed (ROAM_MEDIAN_T9) and
                                  * every divided edge's verdict (ROAM_MEDIAN_EDGE).
@@ -213,6 +219,9 @@ typedef struct {
     double median_capped_len;  /* [T10] their length, units                  */
     int    median_narrow_edges;/* [T10] edges on lanes narrower than 1500    */
     int    median_widened_edges;/* [roam JA] edges whose lanes narrowed to widen the median to median_min */
+    int    median_shifted_edges;/* [integ J] of those, shifted outward to keep the outer kerb */
+    int    median_moved_nodes;  /* [integ J] nodes moved with the shifted edges ending there  */
+    double median_shift_max;    /* [integ J] largest outward shift, units                     */
     int    nodes, edges, joins, tapers, bends, junction_nodes, dead_ends;
     int    layer_cross_nodes;
     int    clusters, cluster_by_arms[TD5_ROAM_ARM_HIST];
