@@ -65,12 +65,13 @@ typedef struct {
 
 int  td5_roam_rails_enabled(void);   /* TD5RE_ROAM_RAILS (default 1) */
 
-/* Read every RAILS tile of the place (the whole layer, ~0.9 MB for La Plata) and solve the lift
- * field. NULL when the place has no RAILS layer or the knob is off. */
+/* Read the RAILS rows of tiles/INDEX.JSON. NULL when the place has no RAILS layer or the knob is off.
+ * The layer itself (every RAILS tile, ~0.9 MB for La Plata) is parsed and the lift field solved LAZILY,
+ * on the first td5_roam_rails_emit, i.e. on the building thread once it carries the main FP env. */
 TD5_RoamRailSource *td5_roam_rails_open(const char *place);
 void td5_roam_rails_close(TD5_RoamRailSource *r);
-/* source-wide facts for the log: ways kept, vertices, rail_over lift sources, crossings */
-void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ways, int *verts, int *lifts, int *xings);
+/* source-wide facts for the log: RAILS tiles listed; once loaded, ways kept, vertices, rail_over lift sources, crossings */
+void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ntiles, int *ways, int *verts, int *lifts, int *xings);
 
 /* Append the railways of the ctx's tile to its sub-block buffers. 1 on success, 0 on out of memory. */
 int  td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats *st);

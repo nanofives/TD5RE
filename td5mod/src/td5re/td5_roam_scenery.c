@@ -4475,10 +4475,9 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->furn = td5_roam_furn_open(place);      /* [F4c] NULL = no furniture (knob off / no data) */
     s->rails = td5_roam_rails_open(place);    /* [roam ID] NULL = no railways (knob off / no RAILS layer) */
     if (s->rails) {
-        int nw, nv, nl, nx;
-        td5_roam_rails_summary(s->rails, &nw, &nv, &nl, &nx);
-        TD5_LOG_I(LOG_TAG, "roam rails: source open, %d way(s) kept, %d vertices, %d road crossing(s), %d rail-over-road "
-                  "clearance source(s)", nw, nv, nx, nl);
+        int nt;
+        td5_roam_rails_summary(s->rails, &nt, NULL, NULL, NULL, NULL);
+        TD5_LOG_I(LOG_TAG, "roam rails: source open, %d RAILS tile(s) listed (parsed on the first tile build)", nt);
     }
     TD5_LOG_I(LOG_TAG, "roam scenery: source open place=%s upm=%.1f gap=%.0f units index rows B=%d A=%d F=%d",
               place, s->upm, s->gap, s->nrows[0], s->nrows[1], s->nrows[2]);

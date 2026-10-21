@@ -120,6 +120,12 @@ struct TD5_RoamRailSource {
     double  *L;  int nnode;        /* lift head per network node (-1e30 = none)          */
     int      nlift;
     double   exag;
+    /* LAZY: open() only reads INDEX.JSON; the RAILS tiles are parsed and the lift solved on the first
+     * emit, i.e. on the building thread AFTER it took the main thread's FP environment (strtod and the
+     * height sampling are FP-env sensitive: parsed at open() on a fresh worker, a coordinate's last bits
+     * moved and the determinism T arm differed on the light-rail tiles 5,49 / 5,51) */
+    int      loaded, load_ok;
+    int    (*tile)[2];  int ntile;
 };
 
 int td5_roam_rails_enabled(void) { return td5_env_int("TD5RE_ROAM_RAILS", 1, 0, 1); }
@@ -448,10 +454,27 @@ out:
     return ok;
 }
 
+static int rl_load_all(TD5_RoamRailSource *r)
+{
+    char hp[512], wp[512];
+    int i;
+    r->loaded = 1;
+    for (i = 0; i < r->ntile; i++)
+        if (!rl_load_tile(r, r->tile[i][0], r->tile[i][1])) return 0;
+    qsort(r->w, (size_t)r->nw, sizeof(RlWay), rl_way_cmp);   /* id order: the emit order */
+    td5_geo_source_path(hp, sizeof hp, r->place, "HEIGHT.R16");
+    td5_geo_source_path(wp, sizeof wp, r->place, "WATER.R8");
+    if (!rl_solve_lift(r, hp, wp)) return 0;
+    r->load_ok = 1;
+    TD5_LOG_I(LOG_TAG, "roam rails: layer loaded, %d way(s) kept, %d vertices, %d road crossing(s), %d rail-over-road "
+              "clearance source(s)", r->nw, r->np, r->nx, r->nlift);
+    return 1;
+}
+
 TD5_RoamRailSource *td5_roam_rails_open(const char *place)
 {
     TD5_RoamRailSource *r;
-    char path[512], hp[512], wp[512];
+    char path[512];
     char *json;
     cJSON *root;
     const cJSON *tl, *t;
@@ -471,28 +494,28 @@ TD5_RoamRailSource *td5_roam_rails_open(const char *place)
     if (!r) { cJSON_Delete(root); return NULL; }
     snprintf(r->place, sizeof r->place, "%s", place);
     r->exag = (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0;
+    r->tile = (int (*)[2])malloc((size_t)(cJSON_GetArraySize(tl) + 1) * sizeof(int[2]));
+    if (!r->tile) { cJSON_Delete(root); td5_roam_rails_close(r); return NULL; }
     for (t = tl->child; t; t = t->next) {
         const cJSON *a = t->child, *b = a ? a->next : NULL;
         if (!a || !b || !cJSON_IsNumber(a) || !cJSON_IsNumber(b)) continue;
-        if (!rl_load_tile(r, (int)a->valuedouble, (int)b->valuedouble)) { cJSON_Delete(root); td5_roam_rails_close(r); return NULL; }
+        r->tile[r->ntile][0] = (int)a->valuedouble; r->tile[r->ntile][1] = (int)b->valuedouble;
+        r->ntile++;
     }
     cJSON_Delete(root);
-    qsort(r->w, (size_t)r->nw, sizeof(RlWay), rl_way_cmp);   /* id order: the emit order */
-    td5_geo_source_path(hp, sizeof hp, place, "HEIGHT.R16");
-    td5_geo_source_path(wp, sizeof wp, place, "WATER.R8");
-    if (!rl_solve_lift(r, hp, wp)) { td5_roam_rails_close(r); return NULL; }
     return r;
 }
 
 void td5_roam_rails_close(TD5_RoamRailSource *r)
 {
     if (!r) return;
-    free(r->w); free(r->px); free(r->pz); free(r->ps); free(r->node); free(r->x); free(r->L);
+    free(r->w); free(r->px); free(r->pz); free(r->ps); free(r->node); free(r->x); free(r->L); free(r->tile);
     free(r);
 }
 
-void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ways, int *verts, int *lifts, int *xings)
+void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ntiles, int *ways, int *verts, int *lifts, int *xings)
 {
+    if (ntiles) *ntiles = r ? r->ntile : 0;
     if (ways) *ways = r ? r->nw : 0;
     if (verts) *verts = r ? r->np : 0;
     if (lifts) *lifts = r ? r->nlift : 0;
@@ -1200,6 +1223,8 @@ int td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats 
     int tx, tz, i, k, sb, pg;
     const double margin = RL_M(30.0);
     if (!r || !c || !st) return 1;
+    if (!r->loaded && !rl_load_all(r)) TD5_LOG_W(LOG_TAG, "roam rails: the RAILS layer of %s did not load: no railways", r->place);
+    if (!r->load_ok) return 1;
     memset(&e, 0, sizeof e);
     e.c = c; e.st = st; e.r = r;
     e.log = td5_env_int("TD5RE_ROAM_RAILS_LOG", 0, 0, 1);
