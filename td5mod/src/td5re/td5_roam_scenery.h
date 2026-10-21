@@ -60,7 +60,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  11u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  12u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -76,7 +76,9 @@
                                      *     infill 1-3 floors (taller on avenues) 12-24 m deep, AREAS spikes
                                      * 10 = roam ID: railways (td5_roam_rails.c, the RAILS tile layer)
                                      * 11 = round I integration: every round I branch combined (each bumped 9 -> 10 on its own,
-                                     *      11 so no tile cached by a single branch is reused) */
+                                     *      11 so no tile cached by a single branch is reused)
+                                     * 12 = roam JA: pavement joins never on the road side of a kerb, islands filled to the
+                                     *      medial line at one level, a narrow kerbed median between a same-name pair */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
