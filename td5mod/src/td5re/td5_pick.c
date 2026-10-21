@@ -28,6 +28,9 @@
 #include "td5_camera.h"
 #include "td5_render.h"
 #include "td5_track.h"
+#include "td5_roam_mode.h"
+#include "td5_roam_tile.h"
+#include "td5_roam_render.h"
 #include "td5_trackgen.h"   /* auto-track page-name lookup */
 #include "td5_asset.h"      /* shipped-level number for the import handle */
 #include "td5_hud.h"
@@ -564,9 +567,26 @@ void td5_pick_finish_frame(void)
             for (i = 1; i < npages && off > 0 && off < (int)sizeof s_json; i++)
                 off += snprintf(s_json + off, sizeof s_json - off, "+%d", pages[i]);
             if (off > 0 && off < (int)sizeof s_json)
-                snprintf(s_json + off, sizeof s_json - off,
-                         " pos %.0f,%.0f,%.0f r%.0f v%d c%d",
-                         s_best_cx, s_best_cy, s_best_cz, r, verts, cmds);
+                off += snprintf(s_json + off, sizeof s_json - off,
+                                " pos %.0f,%.0f,%.0f r%.0f v%d c%d",
+                                s_best_cx, s_best_cy, s_best_cz, r, verts, cmds);
+            /* [roam IB] a roam pick is in WORLD units (place - origin) and the origin rebases as the
+             * car drives, so the pos alone cannot be located later. Append the PLACE frame position
+             * (world + origin) and the lattice tile that holds it, which do not move. */
+            if (td5_roam_active() && off > 0 && off < (int)sizeof s_json) {
+                int32_t ox = 0, oz = 0;
+                const RoamGrid *g = td5_roam_render_grid();
+                const double px = (double)s_best_cx + 0.0, pz = (double)s_best_cz + 0.0;
+                td5_roam_world_origin(&ox, &oz);
+                if (g) {
+                    int tx = 0, tz = 0;
+                    roam_grid_tile_of(g, px + ox, pz + oz, &tx, &tz);
+                    snprintf(s_json + off, sizeof s_json - off, " place %.0f,%.0f tile %d,%d",
+                             px + ox, pz + oz, tx, tz);
+                } else {
+                    snprintf(s_json + off, sizeof s_json - off, " place %.0f,%.0f", px + ox, pz + oz);
+                }
+            }
         }
         s_hud_valid = 1;
 
