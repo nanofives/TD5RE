@@ -204,6 +204,7 @@ typedef struct {
     /* [JC2] relation outlines owned / built, courtyard rings walled, holed caps / lidded, civic facades, bases under
      * parts, Overture blobs not built because a relation outline covers them */
     int  bld_rel, s3d_rel_built, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base, bld_rel_ovt_drop;
+    int  s3d_portals;              /* [JC2] wall openings where a service way passes under an outline */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

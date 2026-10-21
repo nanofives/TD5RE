@@ -40,7 +40,7 @@ typedef struct {
     long   s3d_hidden, s3d_across;
     /* [roam JC2] relation outlines built, courtyard rings walled, holed caps (and the ones that fell back to a
      * lidded outer cap), civic facades, base masses under parts */
-    long   s3d_rel, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base;
+    long   s3d_rel, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base, s3d_portals;
 } TG_GeoBldStats;
 
 typedef struct {
@@ -91,6 +91,10 @@ typedef struct {
     /* [roam JC2] 1: the mass is the BASE under an outline's building:parts (a flat block inset 0.25 m, filling the
      * gaps the parts leave, lower than every part) */
     int      s3d_base;
+    /* [roam JC2] CARRIAGE ARCHES: service-way centrelines (ax, az, bx, bz, half width; 5 doubles each, caller's frame)
+     * the outline is let stand over. Where one crosses a wall the wall opens from the ground to an arch height. */
+    int            s3d_np;
+    const double  *s3d_pseg;
 } TG_GeoBldEnv;
 
 /* Extrude ONE cleared footprint (ring rx/rz[n_ring], CCW, centroid cx/cz, already moved
@@ -112,7 +116,7 @@ typedef struct {
     float *v; unsigned int *light; int nv, cap;
     unsigned short cmd[6]; int ncmd;
     int how, rows, tint_roof, tint_wall;
-    int holes, cap_holed, cap_lidded, civic;
+    int holes, cap_holed, cap_lidded, civic, portals;
     double rise;
 } TG_S3dMesh;
 int  tg_s3d_eligible(const TD5_GeoBuilding *gb);

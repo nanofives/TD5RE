@@ -1804,12 +1804,16 @@ static int sc_bld_clear(TG_TileCtx *c, ScBldU *u, double gap, double *rx, double
     if (lm_wins) {
         /* a landmark stands where OSM puts it unless it truly covers a street: the
          * dead-end stubs drawn to its wall are let through (sc_lm_stub_ok) */
-        ScPrim *marked[8];
+        /* [JC2] lm_wins 2 (a building:part or an OSM relation outline): it also stands over SERVICE ways, the
+         * courtyard driveways the Casa de Gobierno, the Municipalidad and the ministries are mapped with (the
+         * walls open into a carriage arch there, td5_tg_s3d.c s3d_edge_portals) */
+        ScPrim *marked[64];
         int nm = 0, g, clear;
         c->skip_lm = 1;
-        for (g = 0; g < 8; g++) {
+        for (g = 0; g < 64; g++) {
             if (!sc_on_road(c, rx, rz, n, &hit)) break;
-            if (!sc_lm_stub_ok(c, hit, rx, rz, n)) break;
+            if (!sc_lm_stub_ok(c, hit, rx, rz, n)
+                && !(lm_wins == 2 && hit->seg >= 0 && c->edge[c->seg[hit->seg].edge].klass == TD5_GEO_RC_SERVICE)) break;
             marked[nm] = (ScPrim *)hit;
             marked[nm++]->lm_ok = 1;
         }
@@ -1951,12 +1955,13 @@ static void sc_bld_note(const TD5_RoamScnSource *s, const TG_TileCtx *c, const S
 #define SC_S3D_COVER 0.5
 /* [JC2] parts covering this much of the outline need no BASE under them (the gaps they leave are slivers) */
 #define SC_S3D_BASE_COVER 0.95
-static int sc_s3d_hidden(const ScBld *set, int nset, int self, double *cover_out, double *low_top)
+static int sc_s3d_hidden(const ScBld *set, int nset, int self, double *cover_out, double *low_top, int *civic,
+                         unsigned int *roof_rgb)
 {
     const TD5_GeoBuilding *o = set[self].b;
     double cover = 0.0, area;
     int k;
-    *cover_out = 0.0; *low_top = 1e300;
+    *cover_out = 0.0; *low_top = 1e300; *civic = 0; *roof_rgb = 0;
     if (o->part || o->n < 3) return 0;
     area = fabs(td5_geob_ring_area(set[self].px, set[self].pz, o->n));
     if (set[self].rx) {                                /* [JC2] the solid area: courtyards out */
@@ -1973,6 +1978,8 @@ static int sc_s3d_hidden(const ScBld *set, int nset, int self, double *cover_out
         if (!td5_geob_point_in_ring(set[self].px, set[self].pz, o->n, p->cx, p->cz)) continue;
         cover += fabs(td5_geob_ring_area(set[k].px, set[k].pz, p->n));
         if (p->height < *low_top) *low_top = p->height;
+        if (p->civic) *civic = 1;                      /* [JC2] what a BASE under them inherits */
+        if (p->roof_rgb && !*roof_rgb) *roof_rgb = p->roof_rgb;
     }
     *cover_out = cover / area;
     return cover >= SC_S3D_COVER * area;
@@ -2045,7 +2052,9 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         ScBldU u;
         TG_GeoBldEnv e;
         ScSb *b;
-        int s3d_hide, s3d_base = 0, nh = 0, hn[TG_S3D_HOLES_MAX];
+        int s3d_hide, s3d_base = 0, nh = 0, hn[TG_S3D_HOLES_MAX], np = 0, s3d_pciv = 0;
+        unsigned int s3d_prgb = 0;
+        double pseg[16 * 5];
         double s3d_cover = 0.0, s3d_low = 1e300, hx[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX], hz[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX];
         TD5_GeoBuilding gloc;
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
@@ -2093,7 +2102,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             continue;
         }
         sc_lm_info(set, nset, i, &kind, &anchor, &veto);
-        s3d_hide = s->s3d && sc_s3d_hidden(set, nset, i, &s3d_cover, &s3d_low);
+        s3d_hide = s->s3d && sc_s3d_hidden(set, nset, i, &s3d_cover, &s3d_low, &s3d_pciv, &s3d_prgb);
         /* [JC2] parts that leave gaps: the outline stays as a flat BASE lower than every part (Mariano, 2026-10-21:
          * the Legislatura "stands on bare lawn" between its parts) */
         if (s3d_hide && s3d_cover < SC_S3D_BASE_COVER && s3d_low < 1e300) {
@@ -2105,6 +2114,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                 gloc.roof3d = TD5_GEOB_R3_FLAT;
                 gloc.roof_height = 0.0;
                 gloc.roof_only = 0;
+                if (s3d_pciv) gloc.civic = 1;              /* the base wears its parts' facade and roof */
+                if (!gloc.roof_rgb) gloc.roof_rgb = s3d_prgb;
             }
         }
         if (s3d_hide && !s3d_base && !(anchor && kind == TD5_GEOB_LMK_WORSHIP)) {   /* a worship anchor still lays its apron */
@@ -2135,7 +2146,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         u.minout = u.host ? u.f.half_carriage + s->gap : 0.0;
         u.gap = s->gap;
         r = sc_bld_clear(c, &u, s->gap, rx, rz, n, &shift,
-                         s->lm_wins && (gb->landmark || kind != TD5_GEOB_LMK_NONE || (s->s3d && (gb->part || gb->rel))));
+                         !s->lm_wins ? 0 : (s->s3d && (gb->part || gb->rel)) ? 2
+                                         : (gb->landmark || kind != TD5_GEOB_LMK_NONE) ? 1 : 0);
         if (gb->landmark && !gb->part)       /* one line per landmark outline: what became of it */
             TD5_LOG_I(LOG_TAG, "[ROAM LM] tile %d,%d way_hash=%08x kind=%d anchor=%d host=%d half=%.0f minout=%.0f "
                       "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
@@ -2190,6 +2202,22 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             }
         }
         e.s3d_nh = nh; e.s3d_hn = hn; e.s3d_hx = hx; e.s3d_hz = hz;
+        np = 0;
+        if (s->s3d && (gb->part || gb->rel)) {
+            /* [JC2] the service ways near the outline, for the carriage arches */
+            int q;
+            for (q = 0; q < c->nseg && np < 16; q++) {
+                const ScSeg *g = &c->seg[q];
+                double d;
+                if (c->edge[g->edge].klass != TD5_GEO_RC_SERVICE) continue;
+                d = sc_seg_dist(cx, cz, g->ax, g->az, g->bx, g->bz, NULL);
+                if (d > gb->radius + g->hw) continue;
+                pseg[np * 5 + 0] = g->ax; pseg[np * 5 + 1] = g->az; pseg[np * 5 + 2] = g->bx; pseg[np * 5 + 3] = g->bz;
+                pseg[np * 5 + 4] = g->hw;
+                np++;
+            }
+        }
+        e.s3d_np = np; e.s3d_pseg = pseg;
         {
             const long emitted0 = c->bst.emitted, prefab0 = c->bst.lm_prefab, apron0 = c->bst.lm_apron;
             long how0[6];
@@ -2231,6 +2259,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         c->st.s3d_civic = (int)c->bst.s3d_civic;
         c->st.s3d_base = (int)c->bst.s3d_base;
         c->st.s3d_rel_built = (int)c->bst.s3d_rel;
+        c->st.s3d_portals = (int)c->bst.s3d_portals;
     }
     return 1;
 }
@@ -5807,7 +5836,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
-    long s3d_r[8] = { 0 };                                 /* [roam JC2] */
+    long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -5909,6 +5938,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             s3d_tag += r->s3d_tagged; s3d_slope += r->s3d_sloped;
             s3d_r[0] += r->bld_rel; s3d_r[1] += r->s3d_rel_built; s3d_r[2] += r->s3d_holes; s3d_r[3] += r->s3d_cap_holed;
             s3d_r[4] += r->s3d_cap_lidded; s3d_r[5] += r->s3d_civic; s3d_r[6] += r->s3d_base; s3d_r[7] += r->bld_rel_ovt_drop;
+            s3d_r[8] += r->s3d_portals;
             for (q = 0; q < 6; q++) s3d_t[4 + q] += r->s3d_how[q];
         }
         inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
@@ -6051,7 +6081,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         snprintf(line, sizeof line,
                  "roam JC2: relation outlines owned %ld, built %ld | courtyard rings walled %ld, holed caps %ld, lidded "
                  "(clipper gave up) %ld | civic facades %ld | bases under parts %ld | Overture blobs under a relation "
-                 "not built %ld", s3d_r[0], s3d_r[1], s3d_r[2], s3d_r[3], s3d_r[4], s3d_r[5], s3d_r[6], s3d_r[7]);
+                 "not built %ld | carriage arches %ld", s3d_r[0], s3d_r[1], s3d_r[2], s3d_r[3], s3d_r[4], s3d_r[5], s3d_r[6],
+                 s3d_r[7], s3d_r[8]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

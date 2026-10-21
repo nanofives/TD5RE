@@ -3294,6 +3294,7 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
         e->st->s3d_cap_lidded += m.cap_lidded;
         e->st->s3d_civic += m.civic;
         e->st->s3d_base += (e->s3d_base != 0);
+        e->st->s3d_portals += m.portals;
         if (m.how != TG_S3D_HOW_FLAT && m.how != TG_S3D_HOW_FLAT_FALLBACK) e->st->roof_shaped++;
         tg_s3d_free(&m);
         if (!ok) return 0;

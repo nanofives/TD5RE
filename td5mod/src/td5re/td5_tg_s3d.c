@@ -606,12 +606,70 @@ static int s3d_band(TG_S3dMesh *m, const double *ax, const double *az, double ya
     return 1;
 }
 
-/* walls of one ring (outer CCW faces out, a CW courtyard ring faces into the courtyard) */
+/* one wall quad with explicit u / v: near-bottom (u0, vb0), far-bottom (u1, vb1), far-top (u1, vt), near-top (u0, vt) */
+static int s3d_quad_uv(TG_S3dMesh *m, const double *q, double u0, double u1, double vb0, double vb1, double vt,
+                       unsigned int col)
+{
+    const double u[4] = { u0, u1, u1, u0 }, v[4] = { vb0, vb1, vt, vt };
+    int i;
+    if (!s3d_reserve(m, 4)) return -1;
+    for (i = 0; i < 4; i++) {
+        float *o = &m->v[(size_t)m->nv * 5];
+        o[0] = (float)q[i * 3 + 0]; o[1] = (float)q[i * 3 + 1]; o[2] = (float)q[i * 3 + 2];
+        o[3] = (float)u[i]; o[4] = (float)v[i];
+        m->light[m->nv++] = col;
+    }
+    return 1;
+}
+
+#define S3D_PORTAL_H_M   4.5     /* a carriage arch */
+#define S3D_PORTAL_PAD_M 0.6     /* clear of the driveway's edge each side */
+#define S3D_PORTALS_MAX  8
+
+/* The openings of edge (a, b): [t0, t1] along it where a service way the outline stands over crosses it. */
+static int s3d_edge_portals(const TG_GeoBldEnv *e, double ax, double az, double bx, double bz, double upm,
+                            double *t0, double *t1)
+{
+    const double ex = bx - ax, ez = bz - az, el = hypot(ex, ez);
+    int p, np = 0, i, j;
+    if (!(el > 1.0) || e->s3d_np <= 0 || !e->s3d_pseg) return 0;
+    for (p = 0; p < e->s3d_np && np < S3D_PORTALS_MAX; p++) {
+        const double *g = &e->s3d_pseg[p * 5];
+        const double rx = g[2] - g[0], rz = g[3] - g[1], den = s3d_cross(ex, ez, rx, rz);
+        double t, u, sn, half;
+        if (fabs(den) < 1e-9) continue;
+        t = s3d_cross(g[0] - ax, g[1] - az, rx, rz) / den;
+        u = s3d_cross(g[0] - ax, g[1] - az, ex, ez) / den;
+        if (t < 0.0 || t > 1.0 || u < 0.0 || u > 1.0) continue;
+        sn = fabs(den) / (el * hypot(rx, rz));                  /* sin of the crossing angle */
+        if (sn < 0.25) sn = 0.25;
+        half = (g[4] + S3D_PORTAL_PAD_M * upm) / sn / el;
+        t0[np] = t - half < 0.0 ? 0.0 : t - half;
+        t1[np] = t + half > 1.0 ? 1.0 : t + half;
+        np++;
+    }
+    for (i = 1; i < np; i++)                                      /* sort, then merge overlaps */
+        for (j = i; j > 0 && t0[j] < t0[j - 1]; j--) {
+            double a = t0[j]; t0[j] = t0[j - 1]; t0[j - 1] = a;
+            a = t1[j]; t1[j] = t1[j - 1]; t1[j - 1] = a;
+        }
+    for (i = 0, j = 0; i < np; i++) {
+        if (j > 0 && t0[i] <= t1[j - 1]) { if (t1[i] > t1[j - 1]) t1[j - 1] = t1[i]; continue; }
+        t0[j] = t0[i]; t1[j] = t1[i]; j++;
+    }
+    return j;
+}
+
+/* walls of one ring (outer CCW faces out, a CW courtyard ring faces into the courtyard); an edge a service way
+ * crosses opens into a carriage arch there */
 static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double *x, const double *z,
                      int n, double by, double base_y, double wall_top, double vrows, double cell_w, unsigned int col,
                      int *nquad)
 {
     double bot[S3D_RN], q[12];
+    const double upm = e->upm > 1.0 ? e->upm : 430.0;
+    const double span = (wall_top - base_y) > 1.0 ? (wall_top - base_y) : 1.0;
+    const double ph = (S3D_PORTAL_H_M * upm < (wall_top - base_y) - 1.0 * upm) ? S3D_PORTAL_H_M * upm : 0.0;
     int k;
     for (k = 0; k < n; k++) {
         bot[k] = base_y;
@@ -623,15 +681,45 @@ static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding
     for (k = 0; k < n; k++) {
         const int j = (k + 1) % n;
         const double elen = hypot(x[j] - x[k], z[j] - z[k]);
-        double vq = vrows;
+        const double ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
+        double t0[S3D_PORTALS_MAX], t1[S3D_PORTALS_MAX], vq = vrows;
+        int np, p;
         if (!(elen > 1.0)) continue;
-        q[0] = x[k]; q[1]  = bot[k];   q[2]  = z[k];
-        q[3] = x[j]; q[4]  = bot[j];   q[5]  = z[j];
-        q[6] = x[j]; q[7]  = wall_top; q[8]  = z[j];
-        q[9] = x[k]; q[10] = wall_top; q[11] = z[k];
-        if (wall_top - base_y > 1.0) vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - base_y);
-        if (s3d_quad(m, q, elen / ((cell_w > 1.0) ? cell_w : 1500.0), vq, col) < 0) return -1;
-        (*nquad)++;
+        np = (ph > 0.0 && !gb->roof_only) ? s3d_edge_portals(e, x[k], z[k], x[j], z[j], upm, t0, t1) : 0;
+        if (np == 0) {
+            q[0] = x[k]; q[1]  = bot[k];   q[2]  = z[k];
+            q[3] = x[j]; q[4]  = bot[j];   q[5]  = z[j];
+            q[6] = x[j]; q[7]  = wall_top; q[8]  = z[j];
+            q[9] = x[k]; q[10] = wall_top; q[11] = z[k];
+            if (wall_top - base_y > 1.0) vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - base_y);
+            if (s3d_quad(m, q, ua, vq, col) < 0) return -1;
+            (*nquad)++;
+            continue;
+        }
+        /* solid runs from the ground, openings from the arch up; u runs on along the edge */
+        {
+            double ta = 0.0;
+            for (p = 0; p <= np; p++) {
+                const double tb = (p < np) ? t0[p] : 1.0;
+                int pass;
+                for (pass = 0; pass < 2; pass++) {
+                    const double sa = pass ? t0[p < np ? p : 0] : ta, sb = pass ? t1[p < np ? p : 0] : tb;
+                    double ya, yb;
+                    if (pass && p == np) break;
+                    if (!(sb - sa > 1e-4)) continue;
+                    ya = pass ? base_y + ph : bot[k] + (bot[j] - bot[k]) * sa;
+                    yb = pass ? base_y + ph : bot[k] + (bot[j] - bot[k]) * sb;
+                    q[0] = x[k] + (x[j] - x[k]) * sa; q[1]  = ya;       q[2]  = z[k] + (z[j] - z[k]) * sa;
+                    q[3] = x[k] + (x[j] - x[k]) * sb; q[4]  = yb;       q[5]  = z[k] + (z[j] - z[k]) * sb;
+                    q[6] = q[3];                      q[7]  = wall_top; q[8]  = q[5];
+                    q[9] = q[0];                      q[10] = wall_top; q[11] = q[2];
+                    if (s3d_quad_uv(m, q, ua * sa, ua * sb, vrows * (wall_top - ya) / span, vrows * (wall_top - yb) / span,
+                                    0.0, col) < 0) return -1;
+                    (*nquad)++;
+                }
+                if (p < np) { ta = t1[p]; m->portals++; }
+            }
+        }
     }
     return 1;
 }
