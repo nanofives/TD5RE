@@ -73,6 +73,11 @@ void td5_roam_rails_close(TD5_RoamRailSource *r);
 /* source-wide facts for the log: RAILS tiles listed; once loaded, ways kept, vertices, rail_over lift sources, crossings */
 void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ntiles, int *ways, int *verts, int *lifts, int *xings);
 
+/* [integ-roamI] 1 when the drawn track bed (crest + the shortest shoulder toe) or a platform of any way comes
+ * within `clear` units of the polygon X/Z (n points, place frame = game frame). The infill asks it so no
+ * fallback building stands on a railway. Loads the layer lazily, like emit (call it on the building thread). */
+int  td5_roam_rails_bed_near(TD5_RoamRailSource *r, const double *X, const double *Z, int n, double clear);
+
 /* Append the railways of the ctx's tile to its sub-block buffers. 1 on success, 0 on out of memory. */
 int  td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats *st);
 

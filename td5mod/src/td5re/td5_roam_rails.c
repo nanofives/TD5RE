@@ -522,6 +522,69 @@ void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ntiles, int *ways,
     if (xings) *xings = r ? r->nx : 0;
 }
 
+/* [integ-roamI] the distance from segment p0-p1 to segment q0-q1 (0 when they cross) */
+static double rl_seg_seg(double p0x, double p0z, double p1x, double p1z, double q0x, double q0z, double q1x, double q1z)
+{
+    const double rx = p1x - p0x, rz = p1z - p0z, sx = q1x - q0x, sz = q1z - q0z;
+    const double den = rx * sz - rz * sx;
+    double best = 1e300;
+    int k;
+    if (fabs(den) > 1e-9) {
+        const double t = ((q0x - p0x) * sz - (q0z - p0z) * sx) / den, u = ((q0x - p0x) * rz - (q0z - p0z) * rx) / den;
+        if (t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0) return 0.0;
+    }
+    for (k = 0; k < 4; k++) {   /* each end against the other segment */
+        const double ax = k < 2 ? p0x : q0x, az = k < 2 ? p0z : q0z, dx = k < 2 ? rx : sx, dz = k < 2 ? rz : sz;
+        const double px = k == 0 ? q0x : k == 1 ? q1x : k == 2 ? p0x : p1x, pz = k == 0 ? q0z : k == 1 ? q1z : k == 2 ? p0z : p1z;
+        const double l2 = dx * dx + dz * dz;
+        double t = l2 > 0.0 ? ((px - ax) * dx + (pz - az) * dz) / l2 : 0.0, d;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+        d = hypot(px - (ax + t * dx), pz - (az + t * dz));
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+int td5_roam_rails_bed_near(TD5_RoamRailSource *r, const double *X, const double *Z, int n, double clear)
+{
+    double x0, x1, z0, z1;
+    int i, k, seg;
+    if (!r || !X || !Z || n < 3) return 0;
+    if (!r->loaded && !rl_load_all(r)) TD5_LOG_W(LOG_TAG, "roam rails: the RAILS layer of %s did not load: no railways", r->place);
+    if (!r->load_ok) return 0;
+    x0 = x1 = X[0]; z0 = z1 = Z[0];
+    for (k = 1; k < n; k++) {
+        if (X[k] < x0) x0 = X[k];
+        if (X[k] > x1) x1 = X[k];
+        if (Z[k] < z0) z0 = Z[k];
+        if (Z[k] > z1) z1 = Z[k];
+    }
+    for (i = 0; i < r->nw; i++) {
+        const RlWay *w = &r->w[i];
+        /* what rl_emit draws: track (not a tunnel) and platforms; the bed reaches its crest + the shortest toe */
+        const double rad = clear + (w->kind == RK_PLATFORM ? RL_PLAT_HW
+                                    : 0.5 * w->gauge + RL_SLEEPER_OUT + RL_CREST_OUT + RL_TOE_MIN);
+        if (w->tunnel) continue;
+        if (w->bx1 < x0 - rad || w->bx0 > x1 + rad || w->bz1 < z0 - rad || w->bz0 > z1 + rad) continue;
+        for (seg = 0; seg + 1 < w->n; seg++) {
+            const int a = w->p0 + seg, b = a + 1;
+            const double ax = r->px[a], az = r->pz[a], bx = r->px[b], bz = r->pz[b];
+            if ((ax < x0 - rad && bx < x0 - rad) || (ax > x1 + rad && bx > x1 + rad) ||
+                (az < z0 - rad && bz < z0 - rad) || (az > z1 + rad && bz > z1 + rad)) continue;
+            {   /* a track vertex inside the polygon (crossing parity), else the nearest polygon edge */
+                int in = 0, j;
+                for (k = 0, j = n - 1; k < n; j = k++)
+                    if (((Z[k] > az) != (Z[j] > az)) && ax < (X[j] - X[k]) * (az - Z[k]) / (Z[j] - Z[k]) + X[k]) in = !in;
+                if (in) return 1;
+                for (k = 0, j = n - 1; k < n; j = k++)
+                    if (rl_seg_seg(ax, az, bx, bz, X[j], Z[j], X[k], Z[k]) <= rad) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* ============================================================================
  * SECTION: heights
  * ========================================================================== */

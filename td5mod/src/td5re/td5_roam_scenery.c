@@ -212,6 +212,7 @@ struct TD5_RoamScnSource {
     int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
     int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     int       cover_green;                    /* [IC] TD5RE_ROAM_COVER_GREEN: unmapped vegetated casco loops are green */
+    int       inf_rail;                       /* [integ-roamI] TD5RE_ROAM_INF_RAIL_VETO: no infill on a railway */
     int       ic_despike, ic_drops, ic_infill;  /* [IC] TD5RE_ROAM_AREA_DESPIKE / _BLD_DROPS / _IC_INFILL (A/B: all IC
                                                  * knobs 0 = the round M scenery, byte for byte) */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
@@ -4688,7 +4689,8 @@ static int inf_lot_geom(const InfLine *L, double a0, double a1, double D, double
 }
 
 /* 0 free, 1 bent, 2 on the road, 3 a real footprint (tested 0.5 m inside the lot, a facade on the line is not one),
- * 4 [IC] a green / open polygon under any inset corner or centre of the lot */
+ * 4 [IC] a green / open polygon under any inset corner or centre of the lot, 5 [integ-roamI] a drawn railway bed or
+ * platform reaches the lot (open land like a rail yard: IC's veto, refused as an area) */
 static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const double *gx, const double *gz, int nf)
 {
     TG_TileCtx *c = e->c;
@@ -4710,6 +4712,11 @@ static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const dou
         for (k = 0; k < 5 && e->s->ic_infill; k++) {
             const double X = (k < 4 ? sx[k] : cx) + (double)c->org_x, Z = (k < 4 ? sz[k] : cz) + (double)c->org_z;
             if (sc_lot_class_at(c->lotp, c->nlotp, X, Z) != SC_LC_BUILD) return 4;
+        }
+        if (e->s->inf_rail && e->s->rails) {   /* [integ-roamI] round I combined: ID's track vs IC's infill */
+            double X[4], Z[4];
+            for (k = 0; k < 4; k++) { X[k] = qx[k] + (double)c->org_x; Z[k] = qz[k] + (double)c->org_z; }
+            if (td5_roam_rails_bed_near(e->s->rails, X, Z, 4, 0.5 * e->s->upm)) return 5;
         }
     }
     return 0;
@@ -4818,7 +4825,7 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
         static const double k_back[3] = { 0.7, 0.5, 0.35 };
         const double D0 = D;
         int q2;
-        for (q2 = 0; q2 < 3 && (res == 3 || res == 4) && k_back[q2] * D0 >= INF_SHALLOW_M * U; q2++) {
+        for (q2 = 0; q2 < 3 && (res == 3 || res == 4 || res == 5) && k_back[q2] * D0 >= INF_SHALLOW_M * U; q2++) {
             D = k_back[q2] * D0;
             if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
             res = inf_lot_test(e, fx, fz, gx, gz, nf);
@@ -4839,10 +4846,11 @@ refused:
     if (own) {
         if (why == 2) c->st.inf_drop_road++;
         else if (why == 3) c->st.inf_drop_real++;
-        else if (why == 4) c->st.inf_drop_area++;
+        else if (why == 4 || why == 5) c->st.inf_drop_area++;
         else c->st.inf_drop_shape++;
+        if (why == 5) { c->st.inf_drop_rail++; c->st.inf_m_rail += (a1 - a0) / U; }
         if (why == 3) c->st.inf_m_real += (a1 - a0) / U;
-        else if (why == 4) c->st.inf_m_area += (a1 - a0) / U;
+        else if (why == 4 || why == 5) c->st.inf_m_area += (a1 - a0) / U;
         else c->st.inf_m_other += (a1 - a0) / U;
     }
     return 1;
@@ -5123,6 +5131,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->ic_despike = td5_env_int("TD5RE_ROAM_AREA_DESPIKE", 1, 0, 1);
     s->ic_drops = td5_env_int("TD5RE_ROAM_BLD_DROPS", 1, 0, 1);
     s->ic_infill = td5_env_int("TD5RE_ROAM_IC_INFILL", 1, 0, 1);
+    s->inf_rail = td5_env_int("TD5RE_ROAM_INF_RAIL_VETO", 1, 0, 1);
     s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
         int (*cl)[2] = (int (*)[2])malloc(2048 * sizeof(int[2]));
@@ -5421,10 +5430,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 };
+    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
-    double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0;
+    double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
     memset(&j, 0, sizeof j);
@@ -5517,6 +5526,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                        r->pv_bld_gone, r->inf_m_built, r->inf_m_real, r->inf_m_area, r->inf_m_other);
         ic_t[0] += r->lot_medians; ic_t[1] += r->bld_veto_green; ic_t[2] += r->pv_bld_gone; ic_t[3] += r->lot_cover_green;
         ic_m[0] += r->inf_m_built; ic_m[1] += r->inf_m_real; ic_m[2] += r->inf_m_area; ic_m[3] += r->inf_m_other;
+        inf_rail_n += r->inf_drop_rail; inf_rail_m += r->inf_m_rail;   /* [integ-roamI] */
         lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
         lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
         lot_t[8] += r->inf_drop_real; lot_t[9] += r->inf_drop_road; lot_t[10] += r->inf_drop_area;
@@ -5636,8 +5646,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         snprintf(line, sizeof line,
                  "roam IC: %ld avenue median(s) + %ld unmapped vegetated casco loop(s) kept green, %ld footprint(s) not built on a park / ring plaza / median "
                  "(green veto), %ld dropped footprint(s) no longer taking the frontage | infill frontage: built %.0f m, "
-                 "taken by a real footprint %.0f m, refused by an area %.0f m, other (road / shape) %.0f m",
-                 ic_t[0], ic_t[3], ic_t[1], ic_t[2], ic_m[0], ic_m[1], ic_m[2], ic_m[3]);
+                 "taken by a real footprint %.0f m, refused by an area %.0f m (of it a railway bed: %ld lot(s), %.0f m), other (road / shape) %.0f m",
+                 ic_t[0], ic_t[3], ic_t[1], ic_t[2], ic_m[0], ic_m[1], ic_m[2], inf_rail_n, inf_rail_m, ic_m[3]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

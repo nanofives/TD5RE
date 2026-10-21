@@ -186,6 +186,10 @@ typedef struct {
      * outcome: built, taken by a real footprint, refused by an area (green / open / not city), other (road, shape) */
     int  lot_medians, bld_veto_green, pv_bld_gone, lot_cover_green;
     double inf_m_built, inf_m_real, inf_m_area, inf_m_other;
+    /* [integ-roamI] infill candidates refused because a drawn railway bed / platform reaches them (counted in
+     * inf_drop_area too) and their frontage metres */
+    int  inf_drop_rail;
+    double inf_m_rail;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
