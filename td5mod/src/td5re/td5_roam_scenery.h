@@ -132,6 +132,7 @@ typedef struct {
      * ribbon kerbs whose way the cache lacks, (edge, side) widths per TD5_GEO_SWSRC_* */
     int  pv_bedges, pv_interior, pv_chains, pv_pieces, pv_corner, pv_collapsed, pv_island, pv_median;
     int  pv_island_fill;          /* [roam IA] kerb vertices made an island by the no-building gap rule */
+    int  pv_island_tops, pv_island_top_refused;   /* [roam IA] island loop top triangles emitted, loops left to the pieces */
     int  pv_free_clamp, pv_fence, pv_rail, pv_kerb, pv_cut, pv_drop, pv_kerb_cut, pv_noway;
     int  pv_src[7];
     uint32_t ms_pv;

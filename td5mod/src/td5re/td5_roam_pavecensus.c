@@ -76,7 +76,9 @@ static int pc_cmp(const void *a, const void *b)
 
 /* [G5] surfaces (place-frame triangles) bucketed on an 8 m grid, footpath vertices */
 #define PC_FP_CELL (8.0 * PC_UPM)
-typedef struct { double x[3], y[3], z[3]; int lawn; } PcSurf;   /* lawn: 0 paving, 1 island / median lawn quad, 2 plaza lawn */
+typedef struct { double x[3], y[3], z[3]; int lawn; } PcSurf;   /* lawn: 0 paving, 1 island / median lawn quad, 2 plaza lawn,
+                                                                 * 3 [roam IA] any other up-facing face > 25 cm over the drawn
+                                                                 * ground (a roof): median census cover only */
 typedef struct { int64_t key; int s; } PcSurfRef;
 typedef struct { double x, y, z; int tx, tz; } PcFpV;
 
@@ -279,6 +281,34 @@ static void pc_median_census(const RoamTile *tiles, int ntile, const PcSurf *sur
                     }
             }
         }
+        {   /* [roam IA] DEV TD5RE_ROAM_MEDIAN_DUMP=x,z: the raster round a place point as a PPM in the log dir
+             * (black road, green cover, white other ground) */
+            const char *q = getenv("TD5RE_ROAM_MEDIAN_DUMP");
+            double qx, qz;
+            if (q && sscanf(q, "%lf,%lf", &qx, &qz) == 2 && qx >= x0 && qx < x1 && qz >= z0 && qz < z1) {
+                const int ci = (int)((qx - x0) / PC_MC), cj = (int)((qz - z0) / PC_MC), R = 120;
+                char dp[600];
+                FILE *pf;
+                snprintf(dp, sizeof dp, "%sroam_median_dump_%d_%d.ppm", ld ? ld : "", t->tx, t->tz);
+                if ((pf = fopen(dp, "wb")) != NULL) {
+                    int ii, jj;
+                    fprintf(pf, "P6 %d %d 255\n", 2 * R, 2 * R);
+                    for (jj = cj + R - 1; jj >= cj - R; jj--)
+                        for (ii = ci - R; ii < ci + R; ii++) {
+                            unsigned char rgb[3] = { 128, 128, 255 };
+                            if (ii >= 0 && jj >= 0 && ii < nx && jj < nz) {
+                                const uint8_t fl = f[(size_t)jj * nx + ii];
+                                rgb[0] = rgb[1] = rgb[2] = 255;
+                                if (fl & 2) { rgb[0] = 60; rgb[1] = 200; rgb[2] = 60; }
+                                if (fl & 1) { rgb[0] = rgb[1] = rgb[2] = 0; }
+                                if (ii == ci && jj == cj) { rgb[0] = 255; rgb[1] = 0; rgb[2] = 0; }
+                            }
+                            fwrite(rgb, 1, 3, pf);
+                        }
+                    fclose(pf);
+                }
+            }
+        }
         for (j = 0; j < nz; j++)
             for (i = 0; i < nx; i++) {
                 const int c = j * nx + i;
@@ -461,13 +491,22 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                                     fpv[nfpv].x = x[q]; fpv[nfpv].y = y[q]; fpv[nfpv].z = z[q];
                                     fpv[nfpv].tx = sc->tx; fpv[nfpv].tz = sc->tz; nfpv++;
                                 }
-                            } else if ((page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0) {
+                            } else if ((page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0 ||
+                                       s_pc_grid) {   /* [roam IA] + raised faces (roofs) for the median census */
                                 const double ax = x[1] - x[0], ay = y[1] - y[0], az = z[1] - z[0];
                                 const double bx = x[2] - x[0], by = y[2] - y[0], bz = z[2] - z[0];
                                 const double ny = az * bx - ax * bz, nl = sqrt((ay * bz - az * by) * (ay * bz - az * by) + ny * ny +
                                                                               (ax * by - ay * bx) * (ax * by - ay * bx));
                                 int tt;
-                                if (nl > 0.0 && fabs(ny) / nl > 0.7)
+                                const int pave = (page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0;
+                                int raised = 0;
+                                if (!pave && nl > 0.0 && fabs(ny) / nl > 0.7) {      /* [roam IA] a roof, not a city lot */
+                                    double gg;
+                                    raised = 1;
+                                    for (q = 0; q < nvp && raised; q++)
+                                        if (!ground(gu, x[q], z[q], &gg) || y[q] - gg < 25.0 * PC_CM) raised = 0;
+                                }
+                                if (nl > 0.0 && fabs(ny) / nl > 0.7 && (pave || raised))
                                     for (tt = 0; tt < nvp - 2; tt++) {
                                         const int i1 = tt + 1, i2 = tt + 2;
                                         PcSurf *f;
@@ -481,7 +520,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                                         f->x[0] = x[0]; f->y[0] = y[0]; f->z[0] = z[0];
                                         f->x[1] = x[i1]; f->y[1] = y[i1]; f->z[1] = z[i1];
                                         f->x[2] = x[i2]; f->y[2] = y[i2]; f->z[2] = z[i2];
-                                        f->lawn = page == TD5_TG_PAGE_R3_BLOCK + 0 ? (nvp == 4 ? 1 : 2) : 0;
+                                        f->lawn = !pave ? 3 : page == TD5_TG_PAGE_R3_BLOCK + 0 ? (nvp == 4 ? 1 : 2) : 0;
                                     }
                             }
                         }
@@ -588,6 +627,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
             while (lo < hi) { const long mid = (lo + hi) / 2; if (ref[mid].key < key) lo = mid + 1; else hi = mid; }
             for (k2 = lo; k2 < nref && ref[k2].key == key; k2++) {
                 double ys;
+                if (surf[ref[k2].s].lawn == 3) continue;              /* [roam IA] roofs: median census only */
                 if (pc_surf_y(&surf[ref[k2].s], v->x, v->z, &ys) && ys > top) {
                     const PcSurf *t = &surf[ref[k2].s];
                     top = ys; on = 1; lawn = t->lawn;
