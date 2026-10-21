@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 20 (roam IB: no fences, no TD5 landmarks)" },
+    { CL_ITEM,    "Free roam: the low fences along the kerbs are gone in the" },
+    { CL_ITEM,    "whole city. Bridge deck railings stay." },
+    { CL_ITEM,    "The shipped Test Drive 5 landmarks are no longer stamped in" },
+    { CL_ITEM,    "the real city: the real OSM building outline stands instead." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 20 (roam M: La Plata no longer mirrored)" },
     { CL_ITEM,    "Free roam and the geo strip race show La Plata the right" },
     { CL_ITEM,    "  way round: a real right turn is a right turn on screen." },
