@@ -35,6 +35,7 @@ td5_roam_drive.c
 td5_roam_render.c
 td5_roam_scenery.c
 td5_roam_furniture.c
+td5_roam_rails.c
 td5_roam_partido.c
 td5_roam_rebase.c
 td5_roam_stream.c

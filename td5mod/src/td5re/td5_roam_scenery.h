@@ -55,18 +55,20 @@
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
 #include "td5_roam_furniture.h"
+#include "td5_roam_rails.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  9u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES 10u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
                                      * 7 = round H merge: HC verge + HD lots together
                                      * 8 = roam M: the place frame is the GAME frame (x = -east,
                                      *     td5_geo_frame.h), La Plata no longer mirrored
-                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes */
+                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes
+                                     * 10 = roam ID: railways (td5_roam_rails.c, the RAILS tile layer) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -108,6 +110,15 @@ int    roam_ctx_owned(const TG_TileCtx *c, double x, double z);
 int    roam_ctx_sb_of(const TG_TileCtx *c, double x, double z);
 /* ground height at a tile-local point (the scenery's own height source) */
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z);
+/* [roam ID] the RAW height raster at a tile-local point (no G4b lowering under the road): 1 + *h (and
+ * *wet when non-NULL) when the tile's window covers it */
+int    roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet);
+/* [roam ID] the drivable surface height at a tile-local point: of the primitives under (x, z), the one
+ * whose height there is nearest ref_y (a deck over a street answers by its height). 1 on a hit. */
+int    roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, double *y);
+/* [roam ID] roam_ctx_on_road counting only the primitives whose height range meets [y_lo, y_hi]: a road
+ * deck high over the polygon or a street far under it is not "on" it */
+int    roam_ctx_on_road_band(const TG_TileCtx *c, const double *x, const double *z, int n, double y_lo, double y_hi);
 /* Reserve one mesh record in sub-block `sb`: returns the TG_Buf* to write it into (its offset is
  * recorded; void* because TG_Buf lives in td5_trackgen_internal.h), NULL on out of memory. The
  * caller appends exactly one MODELS.DAT mesh record. */
@@ -141,6 +152,7 @@ typedef struct {
     uint32_t ms, ms_src, ms_emit;   /* worker time: total, OSM source, emit           */
     int  road_tiles;                /* ROAD tiles of the 3x3 that were available       */
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
+    TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
      * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).

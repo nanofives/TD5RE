@@ -225,6 +225,7 @@ struct TD5_RoamScnSource {
     /* reused per build */
     TG_TileCtx *ctx;
     TD5_RoamFurnSource *furn;   /* [F4c] street furniture (td5_roam_furniture.c), this thread's */
+    TD5_RoamRailSource *rails;  /* [roam ID] railways (td5_roam_rails.c), this thread's; NULL = none */
 };
 
 static int64_t sc_tkey(int tx, int tz) { return ((int64_t)tx << 32) | (uint32_t)tz; }
@@ -571,7 +572,8 @@ static const RoamTile *sc_road(TD5_RoamScnSource *s, int tx, int tz)
 /* [F4b] cap_row: the quad closes a dead end on its row 0 (x/z[0..1]) or row 1
  * (x/z[2..3]), else -1; lm_ok: a landmark was let stand on this dead-end quad
  * (sc_lm_stub_ok), so the census books its overlap apart (st.guard_lm) */
-typedef struct { double x[4], z[4]; int n; double x0, z0, x1, z1; int seg; int cap_row, lm_ok; } ScPrim;
+typedef struct { double x[4], z[4]; int n; double x0, z0, x1, z1; int seg; int cap_row, lm_ok;
+                 double y[4], y0, y1; } ScPrim;   /* [roam ID] the surface height per corner + its range */
 typedef struct { double ax, az, bx, bz, ay, by, hw, s0; int edge; } ScSeg;
 typedef struct { uint64_t key; int klass, seg_first, seg_count; } ScEdge;
 
@@ -697,7 +699,10 @@ static void sc_prim_bbox(ScPrim *p)
 {
     int k;
     p->x0 = p->x1 = p->x[0]; p->z0 = p->z1 = p->z[0];
+    p->y0 = p->y1 = p->y[0];
     for (k = 1; k < p->n; k++) {
+        if (p->y[k] < p->y0) p->y0 = p->y[k];
+        if (p->y[k] > p->y1) p->y1 = p->y[k];
         if (p->x[k] < p->x0) p->x0 = p->x[k];
         if (p->x[k] > p->x1) p->x1 = p->x[k];
         if (p->z[k] < p->z0) p->z0 = p->z[k];
@@ -760,6 +765,7 @@ static int sc_ctx_add_tile(TG_TileCtx *c, const RoamTile *t)
             pr->n = 4;
             pr->x[0] = lx0; pr->z[0] = lz0; pr->x[1] = lxn; pr->z[1] = lzn;
             pr->x[2] = rxn; pr->z[2] = rzn; pr->x[3] = rx0; pr->z[3] = rz0;
+            pr->y[0] = ly0; pr->y[1] = lyn; pr->y[2] = ryn; pr->y[3] = ry0;
             pr->seg = c->nseg;
             sc_prim_bbox(pr);
             c->nprim++;
@@ -779,7 +785,8 @@ static int sc_ctx_add_tile(TG_TileCtx *c, const RoamTile *t)
         pr = &c->prim[c->nprim];
         pr->cap_row = -1; pr->lm_ok = 0;
         pr->n = 3;
-        for (k = 0; k < 3; k++) sc_tvert(c, t, tr->ox, tr->oy, tr->oz, &t->vert[tr->v[k]], &pr->x[k], &y, &pr->z[k]);
+        for (k = 0; k < 3; k++) { sc_tvert(c, t, tr->ox, tr->oy, tr->oz, &t->vert[tr->v[k]], &pr->x[k], &y, &pr->z[k]); pr->y[k] = y; }
+        pr->y[3] = pr->y[2];
         pr->seg = -1;
         sc_prim_bbox(pr);
         c->nprim++;
@@ -1129,6 +1136,77 @@ int roam_ctx_on_road(const TG_TileCtx *c, const double *x, const double *z, int 
 int roam_ctx_owned(const TG_TileCtx *c, double x, double z) { return sc_owned_point(c, x, z); }
 int roam_ctx_sb_of(const TG_TileCtx *c, double x, double z) { return sc_sb_of(c, x, z); }
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z) { return sc_ground((void *)c, x, z); }
+
+/* [roam ID] the RAW raster at a tile-local point (no G4b road lowering): a pure function of the place
+ * position, so two tiles meeting at a seam read the same value. 0 when no window covers it. */
+int roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet)
+{
+    if (!c->hc) return 0;
+    return td5_roam_height_sample(c->hc, x + (double)c->org_x, z + (double)c->org_z, h, wet);
+}
+
+/* [roam ID] the height of primitive p at (x, z) when the point lies on it (barycentric on its triangle;
+ * a quad is the two triangles 0-1-2, 0-2-3) */
+static int sc_prim_y_at(const ScPrim *p, double x, double z, double *y)
+{
+    int t;
+    for (t = 0; t < (p->n == 4 ? 2 : 1); t++) {
+        const int a = 0, b = t + 1, cc = t + 2;
+        const double d = (p->z[b] - p->z[cc]) * (p->x[a] - p->x[cc]) + (p->x[cc] - p->x[b]) * (p->z[a] - p->z[cc]);
+        double l0, l1, l2;
+        if (fabs(d) < 1e-9) continue;
+        l0 = ((p->z[b] - p->z[cc]) * (x - p->x[cc]) + (p->x[cc] - p->x[b]) * (z - p->z[cc])) / d;
+        l1 = ((p->z[cc] - p->z[a]) * (x - p->x[cc]) + (p->x[a] - p->x[cc]) * (z - p->z[cc])) / d;
+        l2 = 1.0 - l0 - l1;
+        if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
+        *y = l0 * p->y[a] + l1 * p->y[b] + l2 * p->y[cc];
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct { double x, z, ref, best, y; int hit; } ScRoadYQ;
+static int sc_road_y_q(void *u, const ScPrim *p)
+{
+    ScRoadYQ *q = (ScRoadYQ *)u;
+    double y;
+    if (q->x < p->x0 || q->x > p->x1 || q->z < p->z0 || q->z > p->z1) return 0;
+    if (!sc_prim_y_at(p, q->x, q->z, &y)) return 0;
+    if (!q->hit || fabs(y - q->ref) < q->best) { q->best = fabs(y - q->ref); q->y = y; q->hit = 1; }
+    return 0;                                     /* every prim: a bridge deck over a street is two answers */
+}
+
+int roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, double *y)
+{
+    ScRoadYQ q;
+    q.x = x; q.z = z; q.ref = ref_y; q.best = 0.0; q.y = 0.0; q.hit = 0;
+    sc_prims_in((TG_TileCtx *)c, x - 1.0, z - 1.0, x + 1.0, z + 1.0, sc_road_y_q, &q);
+    if (q.hit) *y = q.y;
+    return q.hit;
+}
+
+typedef struct { const double *x, *z; int n; double lo, hi; } ScBandQ;
+static int sc_band_q(void *u, const ScPrim *p)
+{
+    ScBandQ *q = (ScBandQ *)u;
+    if (p->y1 < q->lo || p->y0 > q->hi) return 0;
+    return sc_poly_overlap(q->x, q->z, q->n, p->x, p->z, p->n) ? 1 : 0;
+}
+
+int roam_ctx_on_road_band(const TG_TileCtx *c, const double *x, const double *z, int n, double y_lo, double y_hi)
+{
+    ScBandQ q;
+    double x0 = x[0], x1 = x[0], z0 = z[0], z1 = z[0];
+    int k;
+    for (k = 1; k < n; k++) {
+        if (x[k] < x0) x0 = x[k];
+        if (x[k] > x1) x1 = x[k];
+        if (z[k] < z0) z0 = z[k];
+        if (z[k] > z1) z1 = z[k];
+    }
+    q.x = x; q.z = z; q.n = n; q.lo = y_lo; q.hi = y_hi;
+    return sc_prims_in((TG_TileCtx *)c, x0, z0, x1, z1, sc_band_q, &q);
+}
 void *roam_ctx_mesh_begin(TG_TileCtx *c, int sb)
 {
     ScSb *b = sc_sb(c, sb, 1);
@@ -4388,6 +4466,13 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->ctx = (TG_TileCtx *)calloc(1, sizeof(TG_TileCtx));
     if (!s->ctx) { td5_roam_scn_close(s); return NULL; }
     s->furn = td5_roam_furn_open(place);      /* [F4c] NULL = no furniture (knob off / no data) */
+    s->rails = td5_roam_rails_open(place);    /* [roam ID] NULL = no railways (knob off / no RAILS layer) */
+    if (s->rails) {
+        int nw, nv, nl, nx;
+        td5_roam_rails_summary(s->rails, &nw, &nv, &nl, &nx);
+        TD5_LOG_I(LOG_TAG, "roam rails: source open, %d way(s) kept, %d vertices, %d road crossing(s), %d rail-over-road "
+                  "clearance source(s)", nw, nv, nx, nl);
+    }
     TD5_LOG_I(LOG_TAG, "roam scenery: source open place=%s upm=%.1f gap=%.0f units index rows B=%d A=%d F=%d",
               place, s->upm, s->gap, s->nrows[0], s->nrows[1], s->nrows[2]);
     return s;
@@ -4406,6 +4491,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     sc_pv_close(s->pv);
     free(s->casco);
     td5_roam_furn_close(s->furn);
+    td5_roam_rails_close(s->rails);
     if (s->hc) { if (s->hc_open) td5_roam_height_close(s->hc); free(s->hc); }
     free(s);
 }
@@ -4508,10 +4594,16 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->lot_first[k] = c->sb[k].nmesh;
     }
     if (!sc_emit_lots(s, c, self, ac, nac)) goto out;
-    /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own) */
-    if (s->furn) {
+    /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own).
+     * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
+     * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
+     * height-aware one (st.rail.guard_hits). */
+    if (s->furn || s->rails) {
         int k;
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->furn_first[k] = c->sb[k].nmesh;
+    }
+    if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
+    if (s->furn) {
         if (!td5_roam_furn_emit(s->furn, c, &c->st.furn, &c->lamp, &c->nlamp)) goto out;
     }
     c->st.ms_emit = td5_plat_time_ms() - t1;
@@ -4627,8 +4719,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 };
-    double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 };
+    long ft[16], lot_t[12] = { 0 }, rl_t[19] = { 0 };
+    double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
     memset(&j, 0, sizeof j);
@@ -4732,6 +4824,13 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ft[8] += r->furn.stops; ft[9] += r->furn.zebras; ft[10] += r->furn.limit_lines; ft[11] += r->furn.guard_hits;
         ft[12] += r->furn.sig_drop_road + r->furn.sig_drop_frame + r->furn.sig_drop_dup;
         ft[13] += r->furn.lamp_drop_road; ft[14] += r->furn.far_shared; ft[15] += r->furn.plate_none;
+        rl_t[0] += r->rail.ways; rl_t[1] += r->rail.pieces; rl_t[2] += r->rail.full; rl_t[3] += r->rail.narrow;
+        rl_t[4] += r->rail.flush; rl_t[5] += r->rail.flush_nodata; rl_t[6] += r->rail.blend; rl_t[7] += r->rail.bridge;
+        rl_t[8] += r->rail.piers; rl_t[9] += r->rail.lifted; rl_t[10] += r->rail.under_deck; rl_t[11] += r->rail.tunnel_skip;
+        rl_t[12] += r->rail.sleepers; rl_t[13] += r->rail.platforms; rl_t[14] += r->rail.plat_pieces;
+        rl_t[15] += r->rail.plat_drop; rl_t[16] += r->rail.meshes; rl_t[17] += r->rail.guard_hits;
+        if (r->rail.pieces) rl_t[18]++;
+        if (r->rail.lift_max_m > rl_lift_max) rl_lift_max = r->rail.lift_max_m;
         tot[0] += j.ok[i]; tot[1] += r->meshes; tot[2] += r->bytes; tot[3] += r->bld_seen; tot[4] += r->bld_emitted;
         tot[5] += r->bld_prefab; tot[6] += r->bld_drop_road; tot[7] += r->bld_drop_shift; tot[8] += r->bld_veto_plaza;
         tot[9] += r->bld_veto_lm; tot[10] += r->fp_pieces; tot[11] += r->fp_cut_road; tot[12] += r->fp_merged;
@@ -4779,6 +4878,17 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "limit lines %ld | FURNITURE GUARD: %ld face(s) on the drivable surface",
                  ft[0], ft[1], ft[2], ft[3], ft[4], ft[5], ft[14], ft[6], ft[15], ft[12], ft[7], ft[13], ft[8], ft[9], ft[10],
                  ft[11]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam rails: %ld tile(s) with track, %ld way piece(s) in %ld meshes (%.1f km): full bed %ld, narrow (road beside) "
+                 "%ld, flush on a road %ld (no data crossing near %ld), blended to a level crossing %ld | bridges %ld piece(s), "
+                 "%ld piers, lifted over a road under %ld (max %.1f m), under a road deck %ld, tunnel pieces skipped %ld | "
+                 "%ld sleepers | platforms %ld + %ld line piece(s), %ld face(s) kept off the road | RAIL GUARD: %ld face(s) on "
+                 "the drivable surface",
+                 rl_t[18], rl_t[1], rl_t[16], (double)rl_t[1] * 4.0 / 1000.0, rl_t[2], rl_t[3], rl_t[4], rl_t[5], rl_t[6],
+                 rl_t[7], rl_t[8], rl_t[9], rl_lift_max, rl_t[10], rl_t[11], rl_t[12], rl_t[13], rl_t[14], rl_t[15], rl_t[17]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
