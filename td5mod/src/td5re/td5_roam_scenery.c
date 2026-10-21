@@ -1855,8 +1855,10 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         if (sc_tkey(tx, tz) != self) continue;
         c->st.bld_seen++;
         if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "bad ring"); continue; }
-        /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building */
-        if (sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
+        /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building. [JC] Nor a
+         * building:part: a mapper modelled it in 3D, it stands. MEASURED: 6 of the Casa de Gobierno's 7 parts stand
+         * on a mapped grass polygon (AREAS 176337780) and were vetoed, leaving its roof-only canopy alone as a box. */
+        if (!(s->s3d && gb->part) && sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
             c->st.bld_veto_plaza++;
             sc_bld_note(s, c, &set[i], "plaza veto");
             continue;
@@ -1896,7 +1898,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         u.minout = u.host ? u.f.half_carriage + s->gap : 0.0;
         u.gap = s->gap;
         r = sc_bld_clear(c, &u, s->gap, rx, rz, n, &shift,
-                         s->lm_wins && (gb->landmark || kind != TD5_GEOB_LMK_NONE));
+                         s->lm_wins && (gb->landmark || kind != TD5_GEOB_LMK_NONE || (s->s3d && gb->part)));
         if (gb->landmark && !gb->part)       /* one line per landmark outline: what became of it */
             TD5_LOG_I(LOG_TAG, "[ROAM LM] tile %d,%d way_hash=%08x kind=%d anchor=%d host=%d half=%.0f minout=%.0f "
                       "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
@@ -1936,8 +1938,23 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         if (s3d_hide) c->st.bld_s3d_hidden++;
         {
             const long emitted0 = c->bst.emitted, prefab0 = c->bst.lm_prefab, apron0 = c->bst.lm_apron;
+            long how0[6];
+            const long s3d0 = c->bst.s3d_n, shaped0 = c->bst.roof_shaped;
+            memcpy(how0, c->bst.s3d_how, sizeof how0);
             if (!tg_geo_emit_building_core(&e, gb, rx, rz, n, cx, cz, shift) || b->blk.oom) {
                 free(set); free(fc); return 0;
+            }
+            if (gb->part || gb->roof3d != TD5_GEOB_R3_NONE || gb->roof_only) {
+                /* [JC] every footprint OSM models in 3D, by either builder: what its roof became */
+                int q, how = -1;
+                for (q = 0; q < 6; q++) if (c->bst.s3d_how[q] > how0[q]) how = q;
+                if (c->bst.emitted > emitted0) c->st.s3d_tagged++;
+                if (c->bst.roof_shaped > shaped0) c->st.s3d_sloped++;
+                if (s->bld_log)
+                    TD5_LOG_I(LOG_TAG, "ROAM_S3D tile %d,%d id %.0f part %d roof3d %d roof_only %d n %d h %.1f rh %.1f: %s how %d",
+                              c->tx, c->tz, set[i].id, (int)gb->part, (int)gb->roof3d, (int)gb->roof_only, n,
+                              gb->height / SC_UPM, gb->roof_height / SC_UPM,
+                              c->bst.s3d_n > s3d0 ? "s3d" : c->bst.emitted > emitted0 ? "core" : "not built", how);
             }
             if (c->bst.emitted > emitted0) c->st.bld_emitted++;
             sc_bld_note(s, c, &set[i], c->bst.emitted > emitted0 ? "emitted" : "core refused");
@@ -5525,7 +5542,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t pv_ms_max = 0;
     long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
-    long s3d_t[10] = { 0 };                      /* [roam JC] */
+    long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -5624,6 +5641,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         {   /* [roam JC] */
             int q;
             s3d_t[0] += r->bld_s3d; s3d_t[1] += r->bld_s3d_hidden; s3d_t[2] += r->s3d_roof_only; s3d_t[3] += r->s3d_tint;
+            s3d_tag += r->s3d_tagged; s3d_slope += r->s3d_sloped;
             for (q = 0; q < 6; q++) s3d_t[4 + q] += r->s3d_how[q];
         }
         inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
@@ -5757,9 +5775,9 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "roam JC: %ld footprint(s) built as Simple 3D Buildings (building:part / roof:shape), roofs: flat %ld, "
                  "ridge %ld, barrel %ld, centroid (pyramid / cone / dome / onion) %ld, inset deck (mansard / concave) %ld, "
                  "sloped tag built flat %ld | %ld roof-only part(s), %ld tinted surface(s), %ld outline(s) replaced by "
-                 "their parts (TD5RE_ROAM_S3D=%d)",
+                 "their parts | 3D-tagged footprints drawn %ld, with a sloped roof %ld (TD5RE_ROAM_S3D=%d)",
                  s3d_t[0], s3d_t[4], s3d_t[5], s3d_t[6], s3d_t[7], s3d_t[8], s3d_t[9], s3d_t[2], s3d_t[3], s3d_t[1],
-                 td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1));
+                 s3d_tag, s3d_slope, td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

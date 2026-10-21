@@ -198,6 +198,7 @@ typedef struct {
      * made (TG_S3D_HOW_*: flat, ridge, barrel, centroid, offset, flat fallback), roof-only parts, tinted surfaces,
      * outlines not drawn because their building:parts replace them */
     int  bld_s3d, s3d_how[6], s3d_roof_only, s3d_tint, bld_s3d_hidden;
+    int  s3d_tagged, s3d_sloped;   /* footprints with part / roof:shape / roof-only drawn (either builder), with a sloped roof */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

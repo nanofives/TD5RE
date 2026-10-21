@@ -53,7 +53,9 @@
 
 #define S3D_ROWS_MAX   9                       /* eaves + up to 8 rows (onion: 7) */
 #define S3D_RN         TD5_GEOB_RING_MAX
-#define S3D_COL_DEG    1.0                     /* a corner straighter than this is a node on a wall */
+#define S3D_COL_DEG    3.0                     /* a corner straighter than this is a node on a wall */
+#define S3D_COL_DEV_M  0.10                    /* ... or one this close to the chord of its neighbours */
+#define S3D_DUP_M      0.25                    /* points closer than this are one corner */
 #define S3D_TRI_MIN    4.0                     /* twice the area, world units^2: a sliver */
 #define S3D_DEF_RISE_M 3.5                     /* untagged sloped roof */
 #define S3D_FASCIA_M   0.6                     /* building:part=roof edge */
@@ -63,9 +65,11 @@
 
 static double s3d_cross(double ax, double az, double bx, double bz) { return ax * bz - az * bx; }
 
-/* Drop the straight-through vertices (an OSM node on a straight wall) and the near-duplicates.
- * The ring stays CCW. Returns the new count (>= 3), or n unchanged when cleaning would leave < 3. */
-static int s3d_clean(const double *rx, const double *rz, int n, double *ox, double *oz)
+/* Drop the straight-through vertices (an OSM node on a straight wall: within S3D_COL_DEG or S3D_COL_DEV_M of the
+ * chord of its neighbours) and the near-duplicates (S3D_DUP_M). MEASURED: the Catedral's two octagonal pinnacles
+ * (parts 1450098105 / 1450098112) carry a 1.2 deg kink and a 0.13 m edge, enough to fail the convex test and every
+ * inset. The ring stays CCW. Returns the new count (>= 3), or n unchanged when cleaning would leave < 3. */
+static int s3d_clean(const double *rx, const double *rz, int n, double upm, double *ox, double *oz)
 {
     const double s_tol = sin(S3D_COL_DEG * 3.14159265358979 / 180.0);
     int keep[S3D_RN], k, m = 0, pass;
@@ -83,15 +87,20 @@ static int s3d_clean(const double *rx, const double *rz, int n, double *ox, doub
             ax = rx[k] - rx[p]; az = rz[k] - rz[p];
             bx = rx[q] - rx[k]; bz = rz[q] - rz[k];
             la = hypot(ax, az); lb = hypot(bx, bz);
-            if (la < 20.0 || lb < 20.0                                   /* < 5 cm */
-                || (fabs(s3d_cross(ax, az, bx, bz)) < s_tol * la * lb && ax * bx + az * bz > 0.0)) {
-                keep[k] = 0; changed = 1;
+            {
+                const double cx = rx[q] - rx[p], cz = rz[q] - rz[p], lc = hypot(cx, cz);
+                const double dev = lc > 1e-6 ? fabs(s3d_cross(cx, cz, rx[k] - rx[p], rz[k] - rz[p])) / lc : 0.0;
+                if (la < S3D_DUP_M * upm || lb < S3D_DUP_M * upm
+                    || (ax * bx + az * bz > 0.0
+                        && (fabs(s3d_cross(ax, az, bx, bz)) < s_tol * la * lb || dev < S3D_COL_DEV_M * upm))) {
+                    keep[k] = 0; changed = 1;
+                }
             }
         }
         if (!changed) break;
     }
     for (k = 0; k < n; k++) if (keep[k]) { ox[m] = rx[k]; oz[m] = rz[k]; m++; }
-    if (m < 3) { for (k = 0; k < n; k++) { ox[k] = rx[k]; oz[k] = rz[k]; } return n; }
+    if (m < 3 || !td5_geob_ring_simple(ox, oz, m)) { for (k = 0; k < n; k++) { ox[k] = rx[k]; oz[k] = rz[k]; } return n; }
     return m;
 }
 
@@ -394,7 +403,7 @@ int tg_s3d_build(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb, const double 
 
     memset(m, 0, sizeof *m);
     if (n_in < 3 || n_in > S3D_RN) return 0;
-    n = s3d_clean(rx_in, rz_in, n_in, x, z);
+    n = s3d_clean(rx_in, rz_in, n_in, upm, x, z);
     for (k = 0; k < n; k++) { cx += x[k]; cz += z[k]; }
     cx /= n; cz /= n;
     {   /* the narrowest extent across the principal axis, for the default dome rise */
