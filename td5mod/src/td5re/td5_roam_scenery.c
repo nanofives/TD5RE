@@ -212,6 +212,8 @@ struct TD5_RoamScnSource {
     int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
     int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     int       cover_green;                    /* [IC] TD5RE_ROAM_COVER_GREEN: unmapped vegetated casco loops are green */
+    int       ic_despike, ic_drops, ic_infill;  /* [IC] TD5RE_ROAM_AREA_DESPIKE / _BLD_DROPS / _IC_INFILL (A/B: all IC
+                                                 * knobs 0 = the round M scenery, byte for byte) */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
      * td5_roam_height_sample computes cell coordinates from the window origin, so a
      * shared LRU (whichever window happens to be resident) moves the low bits of a
@@ -409,10 +411,9 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
             TD5_GeoArea *a = &c->a[c->n];
             n = td5_geob_parse_area(e, idx, s->area_wide, a, rx, rz, &id);
             if (n <= 0) continue;
-            if (sc_area_despike(rx, rz, &n, a) && s->bld_log)
+            if (s->ic_despike && sc_area_despike(rx, rz, &n, a) && s->bld_log)
                 TD5_LOG_I(LOG_TAG, "ROAM_AREA_SPIKE %s_%d_%d id %.0f: spike vertex dropped, %d point(s) left",
                           k_sc_layer[layer], ix, iz, id, n);
-            if (n < 3) continue;
             first = sc_pool_push(c, &cap_pt, rx, rz, n);
             if (first < 0) break;
             a->first = first;
@@ -2984,7 +2985,7 @@ static int pv_bld_build(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int n
                     double u, v;
                     if (gb->n < 3 || gb->part) continue;
                     roam_grid_uv(c->grid, gb->cx, gb->cz, &u, &v);
-                    if (judge && u > (double)c->tx * T - J - gb->radius && u < (double)(c->tx + 1) * T + J + gb->radius &&
+                    if (judge && s->ic_drops && u > (double)c->tx * T - J - gb->radius && u < (double)(c->tx + 1) * T + J + gb->radius &&
                         v > (double)c->tz * T - J - gb->radius && v < (double)(c->tz + 1) * T + J + gb->radius &&
                         sc_bld_drops(s, c, gb, &bc[l]->px[gb->first], &bc[l]->pz[gb->first], ar, nar)) {
                         c->st.pv_bld_gone++;
@@ -4135,9 +4136,10 @@ static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint
           && roam_edge_frame(c, edge, side, along, &u.f);
     {   /* [IC] storeys by the host street's class; a narrow front is a low house, not a pencil tower: at most one
          * storey per INF_STOREY_W (an avenue INF_STOREY_W_AV) of frontage */
-        const int avenue = u.host && edge >= 0 && edge < c->nedge && c->edge[edge].klass >= TD5_GEO_RC_TERTIARY;
+        static const unsigned char k_inf_levels_m[16] = { 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 7 };   /* round M */
+        const int avenue = s->ic_infill && u.host && edge >= 0 && edge < c->nedge && c->edge[edge].klass >= TD5_GEO_RC_TERTIARY;
         const int cap = (int)(width / ((avenue ? INF_STOREY_W_AV : INF_STOREY_W) * s->upm));
-        gb.levels = (avenue ? k_inf_levels_avenue : k_inf_levels_street)[(h >> 8) & 15u];
+        gb.levels = (!s->ic_infill ? k_inf_levels_m : avenue ? k_inf_levels_avenue : k_inf_levels_street)[(h >> 8) & 15u];
         if (gb.levels > (cap > 1 ? cap : 1)) gb.levels = (unsigned short)(cap > 1 ? cap : 1);
     }
     gb.height = (double)gb.levels * 3.0 * s->upm;
@@ -4248,7 +4250,7 @@ static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const dou
             sx[k] = qx[k] + dx * t; sz[k] = qz[k] + dz * t;
         }
         if (inf_quad_in_building(c, e->bld, sx, sz)) return 3;
-        for (k = 0; k < 5; k++) {
+        for (k = 0; k < 5 && e->s->ic_infill; k++) {
             const double X = (k < 4 ? sx[k] : cx) + (double)c->org_x, Z = (k < 4 ? sz[k] : cz) + (double)c->org_z;
             if (sc_lot_class_at(c->lotp, c->nlotp, X, Z) != SC_LC_BUILD) return 4;
         }
@@ -4315,7 +4317,8 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     own = sc_owned_point(c, mx, mz) && !counted;
     if (own) c->st.inf_lots++;
     h = inf_hash(mx + (double)c->org_x, mz + (double)c->org_z);
-    D = (INF_DEPTH_MIN + (double)(h % (uint32_t)INF_DEPTH_SPAN)) * U;
+    D = s->ic_infill ? (INF_DEPTH_MIN + (double)(h % (uint32_t)INF_DEPTH_SPAN)) * U
+                     : (10.0 + (double)(h % 9u)) * U;                 /* round M: 10-18 m */
     Dcap = INF_HALF * inf_ray(L->ox, L->oz, L->n, seg, mx, mz, L->nx[seg], L->nz[seg]) - INF_FRONT_IN;
     if (D > Dcap) D = Dcap;
     if (D < INF_SHALLOW_M * U) { why = 1; goto refused; }
@@ -4647,6 +4650,9 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->infill_log = td5_env_int("TD5RE_ROAM_INFILL_LOG", 0, 0, 1);
     s->bld_log = td5_env_int("TD5RE_ROAM_BLD_LOG", 0, 0, 1);
     s->cover_green = td5_env_int("TD5RE_ROAM_COVER_GREEN", 1, 0, 1);
+    s->ic_despike = td5_env_int("TD5RE_ROAM_AREA_DESPIKE", 1, 0, 1);
+    s->ic_drops = td5_env_int("TD5RE_ROAM_BLD_DROPS", 1, 0, 1);
+    s->ic_infill = td5_env_int("TD5RE_ROAM_IC_INFILL", 1, 0, 1);
     s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
         int (*cl)[2] = (int (*)[2])malloc(2048 * sizeof(int[2]));
