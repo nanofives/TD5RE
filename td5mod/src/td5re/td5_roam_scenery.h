@@ -59,14 +59,17 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  9u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES 10u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
                                      * 7 = round H merge: HC verge + HD lots together
                                      * 8 = roam M: the place frame is the GAME frame (x = -east,
                                      *     td5_geo_frame.h), La Plata no longer mirrored
-                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes */
+                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes
+                                     * 10 = roam IC: avenue medians + named-ring plazas green, Overture footprints
+                                     *     not built on them / on parks, dropped footprints free the frontage,
+                                     *     infill 1-3 floors (taller on avenues) 12-24 m deep, AREAS spikes */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -154,6 +157,12 @@ typedef struct {
      * that takes none, a lot too shallow or bent) and the footprint area added (m2) */
     int  inf_lots, inf_emitted, inf_drop_real, inf_drop_road, inf_drop_area, inf_drop_shape;
     double inf_m2;
+    /* [IC] avenue medians (a rambla's kerb loop) kept green + taking no building; Overture footprints not built on a
+     * park / ring plaza / median polygon (the green veto); footprints the pavement + infill stopped treating as
+     * standing because the emitter drops them (sc_bld_drops). Frontage METRES of the owned infill candidates by
+     * outcome: built, taken by a real footprint, refused by an area (green / open / not city), other (road, shape) */
+    int  lot_medians, bld_veto_green, pv_bld_gone, lot_cover_green;
+    double inf_m_built, inf_m_real, inf_m_area, inf_m_other;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
