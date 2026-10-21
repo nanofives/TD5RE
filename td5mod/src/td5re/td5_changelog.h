@@ -31,6 +31,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 21 (roam round I combined)" },
+    { CL_ITEM,    "Free roam: the fallback row houses no longer stand on" },
+    { CL_ITEM,    "  a railway. Where a block edge runs along the track" },
+    { CL_ITEM,    "  the lot is built shallower or left open." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 20 (roam IA: sidewalks, medians, park lawns)" },
     { CL_ITEM,    "Sidewalks no longer vanish beside and behind the car." },
     { CL_ITEM,    "  A long slab that reached behind the camera was drawn" },
