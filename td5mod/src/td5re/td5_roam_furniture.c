@@ -541,6 +541,7 @@ struct TD5_RoamFurnSource {
     int        night;
     double     lamp_sw;                  /* pavement width, the lamp / pole stand-off (units) */
     int        on_signals, on_lamps, on_stops, on_xings, on_unknown_xings;
+    int        on_barriers, on_piers;      /* [roam IE] TD5RE_ROAM_FURN_BARRIERS / _PIERS (default 1) */
 };
 
 static int fu_json_true(const cJSON *e, const char *key)
@@ -675,6 +676,8 @@ TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
     f->lamp_sw = tg_city_sidewalk_w(&k_biomes[0]);
     f->on_signals = td5_env_int("TD5RE_ROAM_FURN_SIGNALS", 1, 0, 1);
     f->on_lamps   = td5_env_int("TD5RE_ROAM_FURN_LAMPS", 1, 0, 1);
+    f->on_barriers = td5_env_int("TD5RE_ROAM_FURN_BARRIERS", 1, 0, 1);
+    f->on_piers    = td5_env_int("TD5RE_ROAM_FURN_PIERS", 1, 0, 1);
     f->on_stops   = td5_env_int("TD5RE_ROAM_FURN_STOPS", 1, 0, 1);
     f->on_xings   = td5_env_int("TD5RE_ROAM_FURN_XINGS", 1, 0, 1);
     f->on_unknown_xings = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1);
@@ -1554,6 +1557,575 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
  * SECTION: the tile
  * ========================================================================== */
 
+/* ============================================================================
+ * SECTION: [roam IE] motorway barriers, bridge parapets, piers, embankments
+ *
+ * "if it is a motorway the road should have barriers on the sides and in the middle" and
+ * "bridges are a raised segment and nothing else" (Mariano, 2026-10-20).
+ *
+ * BARRIER ROADS: highway=motorway / motorway_link (TD5_GEO_RC_MOTORWAY) and the rural
+ * dual-carriageway trunks (one-way trunk with maxspeed >= 80: Autovia 2, Ruta 6, Av. 44
+ * past the city). The urban 60 km/h trunks (Circunvalacion 31/32/72/122, the boulevards,
+ * Av. 44 in town) are city avenues with sidewalks and junctions every block: none.
+ * Along every KERB / DECK boundary edge of such a ribbon, and of a junction patch whose
+ * arms are all barrier roads (merges, diverges, ramps):
+ *   outer edge   steel W-beam guardrail on posts (TD5_TG_PAGE_R4_GUARDRAIL)
+ *   median edge  New Jersey concrete (the LEFT kerb of a one-way carriageway; La Plata
+ *                drives on the right)
+ *   deck edge    a concrete parapet on a cantilevered ledge, with a fascia below
+ * The road face stands FU_BAR_OFF outside the kerb line, past the wall code's kerb
+ * overhang (ROAM_KERB_OVERHANG, 0.35 m): the invisible wall at the kerb (roam's roads-only
+ * collision, racers and cops) stops a car before its body reaches the barrier, so nothing
+ * clips. Traffic is held on its lane by the lane follower. A gap opens only where the
+ * kerb itself opens: a junction mouth (a real link).
+ * EMBANKMENTS: where a deck floor lifted a barrier road (ROAM_EF_APPROACH) more than
+ * FU_EMB_MIN over the ground, a grass slope (1 : FU_EMB_SLOPE) from the barrier down to it.
+ * PIERS: under every deck ribbon (ROAM_EF_DECK) more than FU_PIER_MIN over the ground, a
+ * pier every FU_PIER_ROWS rows (one or two columns and a headstock), never on a road below
+ * (moved half a row, else dropped); an ABUTMENT wall at each end of a deck run whose
+ * neighbour row is not a deck.
+ * Geometry is double-sided (both windings): the renderer's cull state is not ours to guess.
+ * ========================================================================== */
+
+#define FU_BAR_OFF      (0.40 * FU_UPM)
+#define FU_WB_Y0        (0.45 * FU_UPM)
+#define FU_WB_Y1        (0.78 * FU_UPM)
+#define FU_WB_T         (0.10 * FU_UPM)
+#define FU_WB_POST_W    (0.15 * FU_UPM)
+#define FU_WB_REPEAT    (4.0 * FU_UPM)
+#define FU_NJ_W         (0.66 * FU_UPM)
+#define FU_PAR_H        (1.00 * FU_UPM)
+#define FU_PAR_T        (0.30 * FU_UPM)
+#define FU_DECK_T       (1.20 * FU_UPM)
+#define FU_EMB_MIN      (0.50 * FU_UPM)
+#define FU_EMB_SLOPE    1.5
+#define FU_PIER_MIN     (1.00 * FU_UPM)
+#define FU_PIER_ROWS    7
+#define FU_PIER_HW      (0.55 * FU_UPM)
+#define FU_PIER_SINK    (0.40 * FU_UPM)
+#define FU_RUN_SPANS    12                 /* boundary edges per barrier mesh (~42 m) */
+#define FU_QB_MAX       512
+#define FU_END_JOIN     2                  /* TD5_ROAM_END_JOIN (td5_roam_world.h) */
+
+/* quads of one mesh, by page (each page one command) */
+typedef struct {
+    double x[FU_QB_MAX * 4], y[FU_QB_MAX * 4], z[FU_QB_MAX * 4], u[FU_QB_MAX * 4], v[FU_QB_MAX * 4];
+    int    page[FU_QB_MAX];
+    int    nq;
+} FuQB;
+
+static void fu_qb_quad(FuQB *q, int page, const double p[4][3], const double uv[4][2])
+{
+    int w, k;
+    for (w = 0; w < 2; w++) {                  /* both windings */
+        if (q->nq >= FU_QB_MAX) return;
+        for (k = 0; k < 4; k++) {
+            const int s = w ? 3 - k : k, o = q->nq * 4 + k;
+            q->x[o] = p[s][0]; q->y[o] = p[s][1]; q->z[o] = p[s][2];
+            q->u[o] = uv[s][0]; q->v[o] = uv[s][1];
+        }
+        q->page[q->nq++] = page;
+    }
+}
+
+/* write the quads as ONE mesh (sorted into page commands) in sub-block sb; census skipped
+ * for `nocensus` (piers stand under their own deck, the census reads that as "on the road") */
+static int fu_qb_flush(FuEm *em, FuQB *q, int sb, int nocensus)
+{
+    double *px, *py, *pz, *pu, *pv;
+    int seg_page[16], seg_nq[16], nseg = 0, n = 0, i, k, pg, ok;
+    int pages[16], np = 0;
+    if (q->nq <= 0) return 1;
+    px = (double *)malloc((size_t)q->nq * 4u * 5u * sizeof(double));
+    if (!px) { em->oom = 1; return 0; }
+    py = px + q->nq * 4; pz = py + q->nq * 4; pu = pz + q->nq * 4; pv = pu + q->nq * 4;
+    for (i = 0; i < q->nq; i++) {
+        for (k = 0; k < np; k++) if (pages[k] == q->page[i]) break;
+        if (k == np && np < 16) pages[np++] = q->page[i];
+    }
+    for (pg = 0; pg < np; pg++) {
+        int c = 0;
+        for (i = 0; i < q->nq; i++) {
+            if (q->page[i] != pages[pg]) continue;
+            for (k = 0; k < 4; k++) {
+                px[n] = q->x[i * 4 + k]; py[n] = q->y[i * 4 + k]; pz[n] = q->z[i * 4 + k];
+                pu[n] = q->u[i * 4 + k]; pv[n] = q->v[i * 4 + k]; n++;
+            }
+            c++;
+        }
+        seg_page[nseg] = pages[pg]; seg_nq[nseg] = c; nseg++;
+    }
+    em->sb = sb;
+    q->nq = 0;
+    ok = fu_quad(em, px, py, pz, pu, pv, n, seg_page, seg_nq, nseg, nocensus);
+    free(px);
+    return ok;
+}
+
+/* barrier class of an edge record: 0 none, 1 barrier road */
+static int fu_bar_road(const RoamEdgeRec *er)
+{
+    if (!er) return 0;
+    if (er->klass == TD5_GEO_RC_MOTORWAY) return 1;
+    if (er->klass == TD5_GEO_RC_TRUNK && (int8_t)er->oneway != 0 && er->maxspeed_kph >= 80) return 1;
+    return 0;
+}
+
+/* a cluster (NODE record of tile t) whose arms are all barrier roads */
+static int fu_bar_cluster(const TG_TileCtx *c, const RoamTile *t, uint32_t ni)
+{
+    const RoamNodeRec *nr;
+    uint32_t k;
+    if (ni >= t->nnode) return 0;
+    nr = &t->node[ni];
+    if (nr->narm == 0) return 0;
+    for (k = 0; k < nr->narm; k++) {
+        const RoamTile *et = NULL;
+        const uint32_t ai = (uint32_t)nr->arm_first + k;
+        const RoamEdgeRec *er;
+        if (ai >= t->narm) return 0;
+        er = fu_find_edge(c, t->arm[ai].edge_key, &et);
+        if (!fu_bar_road(er)) return 0;
+    }
+    return 1;
+}
+
+/* one profile face swept along a->b: lateral offsets o0 -> o1, heights h0 -> h1 over the
+ * kerb line (a, b: tile-local kerb points with their road y; n: outward unit normal) */
+static void fu_sweep(FuQB *q, int page, const double a[3], const double b[3], const double n[2],
+                     double o0, double h0, double o1, double h1, double u0, double u1, double v0, double v1)
+{
+    double p[4][3], uv[4][2];
+    p[0][0] = a[0] + n[0] * o0; p[0][1] = a[1] + h0; p[0][2] = a[2] + n[1] * o0;
+    p[1][0] = b[0] + n[0] * o0; p[1][1] = b[1] + h0; p[1][2] = b[2] + n[1] * o0;
+    p[2][0] = b[0] + n[0] * o1; p[2][1] = b[1] + h1; p[2][2] = b[2] + n[1] * o1;
+    p[3][0] = a[0] + n[0] * o1; p[3][1] = a[1] + h1; p[3][2] = a[2] + n[1] * o1;
+    uv[0][0] = u0; uv[0][1] = v0; uv[1][0] = u0; uv[1][1] = v1;
+    uv[2][0] = u1; uv[2][1] = v1; uv[3][0] = u1; uv[3][1] = v0;
+    fu_qb_quad(q, page, (const double (*)[3])p, (const double (*)[2])uv);
+}
+
+/* a drivable primitive of the 3x3 BELOW y_top (a road under a deck) under the footprint */
+static int fu_lower_road(const TG_TileCtx *c, const double *qx, const double *qz, int n, double y_top)
+{
+    int dx, dz, k;
+    for (dz = -1; dz <= 1; dz++) for (dx = -1; dx <= 1; dx++) {
+        const RoamTile *t = roam_ctx_tile(c, dx, dz);
+        int32_t ctx, ctz, cox, coz;
+        double sx, sz;
+        uint32_t i;
+        if (!t) continue;
+        roam_ctx_origin(c, &ctx, &ctz, &cox, &coz);
+        sx = (double)t->org_x - cox; sz = (double)t->org_z - coz;
+        for (i = 0; i < t->nspan; i++) {
+            const TD5_StripSpan *sp = &t->span[i];
+            const uint32_t L = sp->left_vertex_index, R = sp->right_vertex_index, m = (uint32_t)(sp->pad_02[1] & 0x0Fu);
+            double px[4], pz[4], ymax = -1e30, mnx = 1e30, mxx = -1e30, mnz = 1e30, mxz = -1e30;
+            uint32_t vi[4];
+            int j;
+            if (m < 1 || L + m >= t->nvert || R + m >= t->nvert) continue;
+            vi[0] = L; vi[1] = L + m; vi[2] = R + m; vi[3] = R;
+            for (j = 0; j < 4; j++) {
+                const TD5_StripVertex *v = &t->vert[vi[j]];
+                px[j] = sx + sp->origin_x + v->x; pz[j] = sz + sp->origin_z + v->z;
+                if ((double)sp->origin_y + v->y > ymax) ymax = (double)sp->origin_y + v->y;
+                mnx = fmin(mnx, px[j]); mxx = fmax(mxx, px[j]);
+                mnz = fmin(mnz, pz[j]); mxz = fmax(mxz, pz[j]);
+            }
+            if (ymax > y_top - 2.5 * FU_UPM) continue;          /* not below: the deck itself */
+            for (k = 0; k < n; k++) {
+                int a2, inside = 1;
+                if (qx[k] < mnx || qx[k] > mxx || qz[k] < mnz || qz[k] > mxz) continue;
+                for (a2 = 0; a2 < 4 && inside; a2++) {
+                    const int b2 = (a2 + 1) & 3;
+                    const double cr = (px[b2] - px[a2]) * (qz[k] - pz[a2]) - (pz[b2] - pz[a2]) * (qx[k] - px[a2]);
+                    if (a2 == 0 && cr < 0.0) inside = -1;            /* winding of this quad */
+                    if ((inside == -1 && cr > 0.0) || (inside == 1 && cr < 0.0)) inside = 0;
+                }
+                if (inside) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    double a[3], b[3], n[2], len;      /* kerb segment (tile-local, road y), outward normal */
+    int    kind;                       /* 1 guardrail, 2 New Jersey, 3 deck parapet */
+    int    emb;                        /* an approach: embankment allowed */
+} FuBarSeg;
+
+static int fu_bar_seg_emit(FuEm *em, FuQB *q, const FuBarSeg *s, double v0)
+{
+    TG_TileCtx *c = em->c;
+    const double v1 = v0 + s->len / FU_WB_REPEAT;
+    double fx[4], fz[4];
+    const double o = FU_BAR_OFF, w = s->kind == 2 ? FU_NJ_W : (s->kind == 3 ? FU_PAR_T : FU_WB_T + FU_WB_POST_W);
+    /* the barrier's own footprint must not touch a drivable primitive (a carriageway beside) */
+    fx[0] = s->a[0] + s->n[0] * (o + 2.0); fz[0] = s->a[2] + s->n[1] * (o + 2.0);
+    fx[1] = s->b[0] + s->n[0] * (o + 2.0); fz[1] = s->b[2] + s->n[1] * (o + 2.0);
+    fx[2] = s->b[0] + s->n[0] * (o + w);   fz[2] = s->b[2] + s->n[1] * (o + w);
+    fx[3] = s->a[0] + s->n[0] * (o + w);   fz[3] = s->a[2] + s->n[1] * (o + w);
+    if (s->kind != 3 && roam_ctx_on_road(c, fx, fz, 4)) { em->st->bar_drop_road++; return 1; }
+    switch (s->kind) {
+    case 1: {   /* W-beam on posts */
+        const int pg = TD5_TG_PAGE_R4_GUARDRAIL, pp = TD5_TG_PAGE_R11_SIGN_POST;
+        fu_sweep(q, pg, s->a, s->b, s->n, o, FU_WB_Y0, o, FU_WB_Y1, 0.0, 1.0, v0, v1);
+        fu_sweep(q, pg, s->a, s->b, s->n, o, FU_WB_Y1, o + FU_WB_T, FU_WB_Y1, 0.9, 1.0, v0, v1);
+        fu_sweep(q, pg, s->a, s->b, s->n, o + FU_WB_T, FU_WB_Y1, o + FU_WB_T, FU_WB_Y0, 1.0, 0.0, v0, v1);
+        {
+            /* the post at the segment start: two crossed faces, from under the ground to the rail top */
+            double t[2], pa[3], pb[3];
+            const double l = s->len > 1e-6 ? s->len : 1.0;
+            t[0] = (s->b[0] - s->a[0]) / l; t[1] = (s->b[2] - s->a[2]) / l;
+            pa[0] = s->a[0] - t[0] * 0.5 * FU_WB_POST_W; pa[1] = s->a[1]; pa[2] = s->a[2] - t[1] * 0.5 * FU_WB_POST_W;
+            pb[0] = s->a[0] + t[0] * 0.5 * FU_WB_POST_W; pb[1] = s->a[1]; pb[2] = s->a[2] + t[1] * 0.5 * FU_WB_POST_W;
+            fu_sweep(q, pp, pa, pb, s->n, o + FU_WB_T + 0.5 * FU_WB_POST_W, -FU_PIER_SINK,
+                     o + FU_WB_T + 0.5 * FU_WB_POST_W, FU_WB_Y1, 0.0, 1.0, 0.0, 1.0);
+            fu_sweep(q, pp, pa, pb, s->n, o + FU_WB_T, FU_WB_Y0, o + FU_WB_T + FU_WB_POST_W, FU_WB_Y0, 0.0, 1.0, 0.0, 1.0);
+        }
+        em->st->bar_guard_m += s->len / FU_UPM;
+        break;
+    }
+    case 2: {   /* New Jersey profile */
+        static const double k_nj[8][2] = { { 0.00, 0.00 }, { 0.05, 0.08 }, { 0.20, 0.33 }, { 0.25, 0.81 },
+                                           { 0.41, 0.81 }, { 0.46, 0.33 }, { 0.61, 0.08 }, { 0.66, 0.00 } };
+        int k;
+        for (k = 0; k < 7; k++)
+            fu_sweep(q, TD5_TG_PAGE_R4_PIER, s->a, s->b, s->n, o + k_nj[k][0] * FU_UPM, k_nj[k][1] * FU_UPM,
+                     o + k_nj[k + 1][0] * FU_UPM, k_nj[k + 1][1] * FU_UPM, (double)k / 7.0, (double)(k + 1) / 7.0, v0, v1);
+        em->st->bar_nj_m += s->len / FU_UPM;
+        break;
+    }
+    default: {  /* deck: ledge, parapet, fascia, soffit */
+        const int pg = TD5_TG_PAGE_R4_PIER;
+        const double e0 = 0.02 * FU_UPM;
+        fu_sweep(q, pg, s->a, s->b, s->n, e0, 0.0, o, 0.0, 0.0, 0.3, v0, v1);
+        fu_sweep(q, pg, s->a, s->b, s->n, o, 0.0, o, FU_PAR_H, 0.3, 0.6, v0, v1);
+        fu_sweep(q, pg, s->a, s->b, s->n, o, FU_PAR_H, o + FU_PAR_T, FU_PAR_H, 0.6, 0.7, v0, v1);
+        fu_sweep(q, pg, s->a, s->b, s->n, o + FU_PAR_T, FU_PAR_H, o + FU_PAR_T, -FU_DECK_T, 0.7, 1.0, v0, v1);
+        fu_sweep(q, pg, s->a, s->b, s->n, o + FU_PAR_T, -FU_DECK_T, e0, -FU_DECK_T, 0.0, 0.3, v0, v1);
+        em->st->bar_parapet_m += s->len / FU_UPM;
+        break;
+    }
+    }
+    /* embankment: a grass slope from behind the barrier down to the ground */
+    if (s->emb && s->kind != 3) {
+        const double ob = o + w;
+        double ga, gb, ha, hb, fa, fb;
+        ga = roam_ctx_ground(c, s->a[0] + s->n[0] * ob, s->a[2] + s->n[1] * ob);
+        gb = roam_ctx_ground(c, s->b[0] + s->n[0] * ob, s->b[2] + s->n[1] * ob);
+        ha = s->a[1] - ga; hb = s->b[1] - gb;
+        if (ha > FU_EMB_MIN || hb > FU_EMB_MIN) {
+            double p[4][3], uv[4][2];
+            const double sink = 0.3 * FU_UPM;
+            if (ha < 0.0) ha = 0.0;
+            if (hb < 0.0) hb = 0.0;
+            fa = ob + FU_EMB_SLOPE * (ha + sink); fb = ob + FU_EMB_SLOPE * (hb + sink);
+            p[0][0] = s->a[0] + s->n[0] * ob; p[0][1] = s->a[1] - 0.05 * FU_UPM; p[0][2] = s->a[2] + s->n[1] * ob;
+            p[1][0] = s->b[0] + s->n[0] * ob; p[1][1] = s->b[1] - 0.05 * FU_UPM; p[1][2] = s->b[2] + s->n[1] * ob;
+            p[2][0] = s->b[0] + s->n[0] * fb; p[2][2] = s->b[2] + s->n[1] * fb;
+            p[2][1] = roam_ctx_ground(c, p[2][0], p[2][2]) - sink;
+            p[3][0] = s->a[0] + s->n[0] * fa; p[3][2] = s->a[2] + s->n[1] * fa;
+            p[3][1] = roam_ctx_ground(c, p[3][0], p[3][2]) - sink;
+            uv[0][0] = 0.0; uv[0][1] = v0; uv[1][0] = 0.0; uv[1][1] = v1;
+            uv[2][0] = 1.0; uv[2][1] = v1; uv[3][0] = 1.0; uv[3][1] = v0;
+            fu_qb_quad(q, TD5_TG_PAGE_R3_BLOCK + 0, (const double (*)[3])p, (const double (*)[2])uv);
+            /* the shoulder between the kerb and the barrier foot, at road level */
+            fu_sweep(q, TD5_TG_PAGE_R4_PIER, s->a, s->b, s->n, 0.02 * FU_UPM, -0.03 * FU_UPM, o, -0.03 * FU_UPM,
+                     0.0, 0.3, v0, v1);
+            em->st->emb_m += s->len / FU_UPM;
+        }
+    }
+    return 1;
+}
+
+/* kerb segment of boundary edge be: tile-local ends with road y, outward normal (away from
+ * the primitive's own inside point `ix, iz`) */
+static int fu_bedge_seg(const RoamTile *t, const RoamBEdge *be, int32_t ox, int32_t oy, int32_t oz,
+                        double ix, double iz, FuBarSeg *s)
+{
+    const TD5_StripVertex *va = &t->vert[be->v[0]], *vb = &t->vert[be->v[1]];
+    double dx, dz, l, nx, nz;
+    s->a[0] = (double)ox + va->x; s->a[1] = (double)oy + va->y; s->a[2] = (double)oz + va->z;
+    s->b[0] = (double)ox + vb->x; s->b[1] = (double)oy + vb->y; s->b[2] = (double)oz + vb->z;
+    dx = s->b[0] - s->a[0]; dz = s->b[2] - s->a[2];
+    l = hypot(dx, dz);
+    if (!(l > 1.0)) return 0;
+    nx = dz / l; nz = -dx / l;
+    if (nx * (ix - s->a[0]) + nz * (iz - s->a[2]) > 0.0) { nx = -nx; nz = -nz; }
+    s->n[0] = nx; s->n[1] = nz; s->len = l;
+    return 1;
+}
+
+static int fu_emit_barriers(FuEm *em)
+{
+    TG_TileCtx *c = em->c;
+    const RoamTile *t = roam_ctx_tile(c, 0, 0);
+    int32_t *sedge = NULL;
+    int32_t *sbe[2] = { NULL, NULL };   /* per span: its boundary edge on side 0 (j = 0) / 1 (j = lanes) */
+    uint32_t e, i, k;
+    FuQB *q = NULL;
+    int ok = 0;
+    if (!t || t->nspan == 0) return 1;
+    sedge = (int32_t *)malloc((size_t)t->nspan * sizeof(int32_t));
+    sbe[0] = (int32_t *)malloc((size_t)t->nspan * sizeof(int32_t));
+    sbe[1] = (int32_t *)malloc((size_t)t->nspan * sizeof(int32_t));
+    q = (FuQB *)malloc(sizeof *q);
+    if (!sedge || !sbe[0] || !sbe[1] || !q) goto done;
+    q->nq = 0;
+    for (i = 0; i < t->nspan; i++) { sedge[i] = -1; sbe[0][i] = sbe[1][i] = -1; }
+    for (e = 0; e < t->nedge; e++)
+        for (i = 0; i < t->edge[e].span_count; i++)
+            if ((uint32_t)t->edge[e].span_first + i < t->nspan) sedge[t->edge[e].span_first + i] = (int32_t)e;
+    for (k = 0; k < t->nbedge; k++) {
+        const RoamBEdge *be = &t->bedge[k];
+        const TD5_StripSpan *sp;
+        uint32_t L, R, n;
+        if (be->prim & ROAM_PRIM_TRI || be->prim >= t->nspan) continue;
+        if (be->kind != ROAM_BEDGE_KERB && be->kind != ROAM_BEDGE_DECK) continue;
+        sp = &t->span[be->prim];
+        n = (uint32_t)(sp->pad_02[1] & 0x0Fu);
+        L = sp->left_vertex_index; R = sp->right_vertex_index;
+        if ((be->v[0] == L && be->v[1] == R) || (be->v[0] == R && be->v[1] == L)) sbe[0][be->prim] = (int32_t)k;
+        else if ((be->v[0] == L + n && be->v[1] == R + n) || (be->v[0] == R + n && be->v[1] == L + n)) sbe[1][be->prim] = (int32_t)k;
+    }
+    /* ribbons: per edge record, per side, runs of FU_RUN_SPANS */
+    for (e = 0; e < t->nedge; e++) {
+        const RoamEdgeRec *er = &t->edge[e];
+        const int bar = fu_bar_road(er);
+        int side;
+        if (!bar) continue;
+        for (side = 0; side < 2; side++) {
+            /* the median side of a one-way carriageway: the LEFT kerb of the travel direction.
+             * j = 0 lies at +lateral (tz, -tx) of the row direction = its LEFT */
+            const int ow = (int8_t)er->oneway;
+            const int median = (ow > 0 && side == 0) || (ow < 0 && side == 1);
+            double v0 = 0.0;
+            int inrun = 0;
+            uint32_t mid_sb_i = (uint32_t)er->span_first;
+            for (i = 0; i < er->span_count; i++) {
+                const uint32_t si = (uint32_t)er->span_first + i;
+                const TD5_StripSpan *sp;
+                FuBarSeg s;
+                uint32_t n, L;
+                double ix, iz;
+                if (si >= t->nspan || sbe[side][si] < 0) {
+                    if (inrun && !fu_qb_flush(em, q, roam_ctx_sb_of(c, (double)t->span[mid_sb_i].origin_x, (double)t->span[mid_sb_i].origin_z), 0)) goto done;
+                    inrun = 0;
+                    continue;
+                }
+                sp = &t->span[si];
+                n = (uint32_t)(sp->pad_02[1] & 0x0Fu);
+                L = sp->left_vertex_index;
+                {
+                    const TD5_StripVertex *vo = &t->vert[side ? L : L + n];
+                    ix = (double)sp->origin_x + vo->x; iz = (double)sp->origin_z + vo->z;
+                }
+                if (!fu_bedge_seg(t, &t->bedge[sbe[side][si]], sp->origin_x, sp->origin_y, sp->origin_z, ix, iz, &s)) continue;
+                s.kind = (t->bedge[sbe[side][si]].kind == ROAM_BEDGE_DECK || (er->flags & ROAM_EF_DECK)) ? 3 : (median ? 2 : 1);
+                s.emb = (er->flags & ROAM_EF_APPROACH) != 0;
+                if (!inrun) { inrun = 1; mid_sb_i = si; }
+                if (!fu_bar_seg_emit(em, q, &s, v0)) goto done;
+                v0 += s.len / FU_WB_REPEAT;
+                if (q->nq + 40 > FU_QB_MAX || (i + 1) % FU_RUN_SPANS == 0) {
+                    if (!fu_qb_flush(em, q, roam_ctx_sb_of(c, (double)t->span[mid_sb_i].origin_x, (double)t->span[mid_sb_i].origin_z), 0)) goto done;
+                    inrun = 0;
+                }
+            }
+            if (inrun && !fu_qb_flush(em, q, roam_ctx_sb_of(c, (double)t->span[mid_sb_i].origin_x, (double)t->span[mid_sb_i].origin_z), 0)) goto done;
+        }
+    }
+    /* junction patches of barrier roads: a guardrail round the kerb outline */
+    for (k = 0; k < t->nbedge; k++) {
+        const RoamBEdge *be = &t->bedge[k];
+        const uint32_t ix = (uint32_t)(be->prim & 0x7FFFu);
+        const RoamTri *tr;
+        FuBarSeg s;
+        double cx = 0.0, cz = 0.0;
+        int j;
+        if (!(be->prim & ROAM_PRIM_TRI) || ix >= t->ntri || be->kind != ROAM_BEDGE_KERB) continue;
+        tr = &t->tri[ix];
+        if (!fu_bar_cluster(c, t, tr->patch)) continue;
+        for (j = 0; j < 3; j++) { cx += (double)tr->ox + t->vert[tr->v[j]].x; cz += (double)tr->oz + t->vert[tr->v[j]].z; }
+        cx /= 3.0; cz /= 3.0;
+        if (!fu_bedge_seg(t, be, tr->ox, tr->oy, tr->oz, cx, cz, &s)) continue;
+        s.kind = 1; s.emb = 0;
+        if (!fu_bar_seg_emit(em, q, &s, 0.0)) goto done;
+        if (q->nq + 40 > FU_QB_MAX && !fu_qb_flush(em, q, roam_ctx_sb_of(c, s.a[0], s.a[2]), 0)) goto done;
+        em->st->bar_patch_edges++;
+        if (k + 1 == t->nbedge || q->nq > FU_QB_MAX / 2) {
+            if (!fu_qb_flush(em, q, roam_ctx_sb_of(c, s.a[0], s.a[2]), 0)) goto done;
+        }
+    }
+    if (q->nq > 0 && !fu_qb_flush(em, q, roam_ctx_sb_of(c, 0.0, 0.0), 0)) goto done;
+    ok = 1;
+done:
+    free(sedge); free(sbe[0]); free(sbe[1]); free(q);
+    return ok;
+}
+
+/* one pier column (a box from under the ground to the soffit), unless it stands on a road below */
+static int fu_pier_box(FuEm *em, FuQB *q, double x, double z, double tx, double tz, double soffit, double deck_y)
+{
+    TG_TileCtx *c = em->c;
+    const double h = FU_PIER_HW;
+    double fx[4], fz[4], g, p[4][3], uv[4][2];
+    int k;
+    fx[0] = x - tx * h - tz * h; fz[0] = z - tz * h + tx * h;
+    fx[1] = x + tx * h - tz * h; fz[1] = z + tz * h + tx * h;
+    fx[2] = x + tx * h + tz * h; fz[2] = z + tz * h - tx * h;
+    fx[3] = x - tx * h + tz * h; fz[3] = z - tz * h - tx * h;
+    if (fu_lower_road(c, fx, fz, 4, deck_y)) return 0;
+    g = roam_ctx_ground(c, x, z) - FU_PIER_SINK;
+    if (soffit - g < FU_PIER_MIN) return 0;
+    for (k = 0; k < 4; k++) {
+        const int k2 = (k + 1) & 3;
+        p[0][0] = fx[k];  p[0][1] = g;      p[0][2] = fz[k];
+        p[1][0] = fx[k2]; p[1][1] = g;      p[1][2] = fz[k2];
+        p[2][0] = fx[k2]; p[2][1] = soffit; p[2][2] = fz[k2];
+        p[3][0] = fx[k];  p[3][1] = soffit; p[3][2] = fz[k];
+        uv[0][0] = 0.0; uv[0][1] = (soffit - g) / (2.0 * FU_UPM); uv[1][0] = 1.0; uv[1][1] = uv[0][1];
+        uv[2][0] = 1.0; uv[2][1] = 0.0; uv[3][0] = 0.0; uv[3][1] = 0.0;
+        fu_qb_quad(q, TD5_TG_PAGE_R4_PIER, (const double (*)[3])p, (const double (*)[2])uv);
+    }
+    return 1;
+}
+
+/* The deck's end row in span sp: 0 = its left (first) row, 1 = its right row, -1 none. An end
+ * is a JOIN node (decoded from its 10-unit key) where the other way is not a deck. */
+static int fu_deck_end_row(const TG_TileCtx *c, const RoamTile *t, const RoamEdgeRec *er, const TD5_StripSpan *sp)
+{
+    int32_t ctx, ctz, cox, coz;
+    int k, r;
+    const uint32_t n = (uint32_t)(sp->pad_02[1] & 0x0Fu);
+    roam_ctx_origin(c, &ctx, &ctz, &cox, &coz);
+    for (k = 0; k < 2; k++) {
+        const int64_t key = er->end_key[k];
+        const double nx = (double)(int32_t)(key >> 32) * 10.0 - (double)cox, nz = (double)(int32_t)(uint32_t)key * 10.0 - (double)coz;
+        int dx, dz, other_deck = 0;
+        if (er->end_kind[k] != FU_END_JOIN) continue;
+        for (r = 0; r < 2; r++) {
+            const uint32_t base = r ? sp->right_vertex_index : sp->left_vertex_index;
+            const TD5_StripVertex *a = &t->vert[base], *b = &t->vert[base + n];
+            const double mx = sp->origin_x + 0.5 * (a->x + b->x), mz = sp->origin_z + 0.5 * (a->z + b->z);
+            if (base + n >= t->nvert || hypot(mx - nx, mz - nz) > 1.0 * FU_UPM) continue;
+            for (dz = -1; dz <= 1 && !other_deck; dz++) for (dx = -1; dx <= 1 && !other_deck; dx++) {
+                const RoamTile *o = roam_ctx_tile(c, dx, dz);
+                uint32_t e;
+                if (!o) continue;
+                for (e = 0; e < o->nedge; e++) {
+                    const RoamEdgeRec *q = &o->edge[e];
+                    if (q->key == er->key || !(q->flags & ROAM_EF_DECK)) continue;
+                    if ((q->end_kind[0] == FU_END_JOIN && q->end_key[0] == key) ||
+                        (q->end_kind[1] == FU_END_JOIN && q->end_key[1] == key)) { other_deck = 1; break; }
+                }
+            }
+            if (!other_deck) return r;
+        }
+    }
+    return -1;
+}
+
+static int fu_emit_piers(FuEm *em)
+{
+    TG_TileCtx *c = em->c;
+    const RoamTile *t = roam_ctx_tile(c, 0, 0);
+    FuQB *q;
+    uint32_t e, i;
+    if (!t) return 1;
+    q = (FuQB *)malloc(sizeof *q);
+    if (!q) return 0;
+    q->nq = 0;
+    for (e = 0; e < t->nedge; e++) {
+        const RoamEdgeRec *er = &t->edge[e];
+        if (!(er->flags & ROAM_EF_DECK)) continue;
+        for (i = 0; i < er->span_count; i++) {
+            const uint32_t si = (uint32_t)er->span_first + i, row = (uint32_t)er->row0 + i;
+            const TD5_StripSpan *sp;
+            const TD5_StripVertex *l0, *ln, *r0, *rn;
+            uint32_t L, R, n;
+            double ax, az, bx, bz, y, hw, tx, tz, len, cx, cz, soffit, g;
+            int abut = -1, cols, kk, placed = 0;
+            if (si >= t->nspan) break;
+            sp = &t->span[si];
+            abut = fu_deck_end_row(c, t, er, sp);
+            if (abut < 0 && (row % FU_PIER_ROWS) != 3) continue;
+            n = (uint32_t)(sp->pad_02[1] & 0x0Fu);
+            L = sp->left_vertex_index; R = sp->right_vertex_index;
+            if (n < 1 || L + n >= t->nvert || R + n >= t->nvert) continue;
+            l0 = &t->vert[L]; ln = &t->vert[L + n]; r0 = &t->vert[R]; rn = &t->vert[R + n];
+            ax = sp->origin_x + 0.5 * (l0->x + ln->x); az = sp->origin_z + 0.5 * (l0->z + ln->z);
+            bx = sp->origin_x + 0.5 * (r0->x + rn->x); bz = sp->origin_z + 0.5 * (r0->z + rn->z);
+            y = sp->origin_y + 0.25 * (l0->y + ln->y + r0->y + rn->y);
+            hw = 0.25 * (hypot(ln->x - l0->x, ln->z - l0->z) + hypot(rn->x - r0->x, rn->z - r0->z));
+            len = hypot(bx - ax, bz - az);
+            if (!(len > 1e-6)) continue;
+            tx = (bx - ax) / len; tz = (bz - az) / len;
+            cx = 0.5 * (ax + bx); cz = 0.5 * (az + bz);
+            soffit = y - FU_DECK_T;
+            g = roam_ctx_ground(c, cx, cz);
+            if (soffit - g < FU_PIER_MIN) continue;
+            em->road_y = y;
+            if (abut >= 0) {
+                /* an abutment wall across the deck at its end row (from under the ground to the soffit) */
+                const double ex = abut == 0 ? ax : bx, ez = abut == 0 ? az : bz;
+                double fx[2], fz[2], p[4][3], uv[4][2];
+                const double lx = tz, lz = -tx, hh = hw + FU_PAR_T + FU_BAR_OFF;
+                fx[0] = ex + lx * hh; fz[0] = ez + lz * hh;
+                fx[1] = ex - lx * hh; fz[1] = ez - lz * hh;
+                p[0][0] = fx[0]; p[0][1] = roam_ctx_ground(c, fx[0], fz[0]) - FU_PIER_SINK; p[0][2] = fz[0];
+                p[1][0] = fx[1]; p[1][1] = roam_ctx_ground(c, fx[1], fz[1]) - FU_PIER_SINK; p[1][2] = fz[1];
+                p[2][0] = fx[1]; p[2][1] = soffit; p[2][2] = fz[1];
+                p[3][0] = fx[0]; p[3][1] = soffit; p[3][2] = fz[0];
+                uv[0][0] = 0.0; uv[0][1] = 1.0; uv[1][0] = 2.0; uv[1][1] = 1.0; uv[2][0] = 2.0; uv[2][1] = 0.0; uv[3][0] = 0.0; uv[3][1] = 0.0;
+                fu_qb_quad(q, TD5_TG_PAGE_R4_PIER, (const double (*)[3])p, (const double (*)[2])uv);
+                em->st->abutments++;
+                if (!fu_qb_flush(em, q, roam_ctx_sb_of(c, cx, cz), 1)) { free(q); return 0; }
+                if ((row % FU_PIER_ROWS) != 3) continue;
+            }
+            /* columns: two under a wide deck, one under a narrow one; a column that would stand on a
+             * road below moves half a row along, else it is dropped */
+            cols = (2.0 * hw > 9.0 * FU_UPM) ? 2 : 1;
+            for (kk = 0; kk < cols; kk++) {
+                const double off = cols == 2 ? (kk ? 1.0 : -1.0) * (hw - 1.6 * FU_UPM) : 0.0;
+                const double px = cx + tz * off, pz = cz - tx * off;
+                int tries;
+                for (tries = 0; tries < 3; tries++) {
+                    const double sh = tries == 0 ? 0.0 : (tries == 1 ? 0.5 : -0.5) * ROAM_TILE_UNITS / 64.0;
+                    if (fu_pier_box(em, q, px + tx * sh, pz + tz * sh, tx, tz, soffit, y)) { placed++; break; }
+                }
+                if (tries == 3) em->st->pier_drop_road++;
+            }
+            if (placed) {
+                /* the headstock under the soffit, across the deck */
+                double p[4][3], uv[4][2];
+                const double lx = tz, lz = -tx, hh = hw, hd = 0.6 * FU_UPM, y1 = soffit, y0 = soffit - 0.9 * FU_UPM;
+                int f;
+                for (f = 0; f < 2; f++) {
+                    const double sx2 = f ? hd : -hd;
+                    p[0][0] = cx + lx * hh + tx * sx2; p[0][1] = y0; p[0][2] = cz + lz * hh + tz * sx2;
+                    p[1][0] = cx - lx * hh + tx * sx2; p[1][1] = y0; p[1][2] = cz - lz * hh + tz * sx2;
+                    p[2][0] = cx - lx * hh + tx * sx2; p[2][1] = y1; p[2][2] = cz - lz * hh + tz * sx2;
+                    p[3][0] = cx + lx * hh + tx * sx2; p[3][1] = y1; p[3][2] = cz + lz * hh + tz * sx2;
+                    uv[0][0] = 0.0; uv[0][1] = 0.5; uv[1][0] = 2.0; uv[1][1] = 0.5; uv[2][0] = 2.0; uv[2][1] = 0.0; uv[3][0] = 0.0; uv[3][1] = 0.0;
+                    fu_qb_quad(q, TD5_TG_PAGE_R4_PIER, (const double (*)[3])p, (const double (*)[2])uv);
+                }
+                p[0][0] = cx + lx * hh - tx * hd; p[0][1] = y0; p[0][2] = cz + lz * hh - tz * hd;
+                p[1][0] = cx - lx * hh - tx * hd; p[1][1] = y0; p[1][2] = cz - lz * hh - tz * hd;
+                p[2][0] = cx - lx * hh + tx * hd; p[2][1] = y0; p[2][2] = cz - lz * hh + tz * hd;
+                p[3][0] = cx + lx * hh + tx * hd; p[3][1] = y0; p[3][2] = cz + lz * hh + tz * hd;
+                fu_qb_quad(q, TD5_TG_PAGE_R4_PIER, (const double (*)[3])p, (const double (*)[2])uv);
+                em->st->piers++;
+                em->st->pier_cols += placed;
+            }
+            if (q->nq > 0 && !fu_qb_flush(em, q, roam_ctx_sb_of(c, cx, cz), 1)) { free(q); return 0; }
+        }
+    }
+    free(q);
+    return 1;
+}
+
 int td5_roam_furn_emit(TD5_RoamFurnSource *f, TG_TileCtx *c, TD5_RoamFurnStats *st, float **lamps, uint32_t *nlamps)
 {
     FuEm em;
@@ -1567,6 +2139,8 @@ int td5_roam_furn_emit(TD5_RoamFurnSource *f, TG_TileCtx *c, TD5_RoamFurnStats *
     if (!f || !c || !st) return 1;
     if (f->on_signals && !fu_emit_signals(&em)) ok = 0;
     if (ok && f->on_lamps && !fu_emit_lamps(&em, f, &lp)) ok = 0;
+    if (ok && f->on_barriers && !fu_emit_barriers(&em)) ok = 0;     /* [roam IE] */
+    if (ok && f->on_piers && !fu_emit_piers(&em)) ok = 0;           /* [roam IE] */
     if (ok && (f->on_stops || f->on_xings)) {
         if (!fu_collect_nodes(&em, f, &xs, &nx, &bs, &nb)) ok = 0;
         if (ok && f->on_stops && !fu_emit_stops(&em, bs, nb)) ok = 0;
