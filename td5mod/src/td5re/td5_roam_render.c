@@ -152,6 +152,7 @@ typedef struct {
     float           *lamp;                   /* [F4c] lantern positions, RENDER frame (x, y, z), nlamp of them */
     uint32_t        nlamp;
     int32_t          sdx, sdz;               /* [F9b] world shift already applied (bake frame -> world) */
+    uint8_t         *aud;                    /* [roam IA] DEV cull audit: last frame's verdict per mesh  */
 } RRTile;
 
 typedef struct { RRTile *t; uint32_t tick; } RRRetired;
@@ -205,6 +206,12 @@ typedef struct {
     double    st_sum_ms, st_max_ms, st_last_ms;
     int       st_drawn_tiles, st_drawn_meshes;
     uint32_t  st_drawn_quads;
+    /* [roam IA] DEV cull audit (TD5RE_ROAM_CULL_AUDIT=1): a mesh the draw loop rejected while one
+     * of its vertices is in view within the draw radius is a FALSE cull; one that was drawn last
+     * frame is a POP. Counted per stage x class (0 road, 1 pavement page, 2 other scenery). */
+    int       audit;
+    uint64_t  au_frames, au_tested[3], au_drawn[3], au_false[8][3], au_pop[8][3], au_far[3], au_proj;
+    int       au_logged;
 } RRSession;
 
 static RRSession s_rr;
@@ -482,6 +489,7 @@ static void rr_free_tile(RRTile *rt)
     free(rt->snorm);
     free(rt->sptr);
     free(rt->lamp);
+    free(rt->aud);
     td5_roam_scn_free(rt->scn);
     free(rt);
 }
@@ -1517,6 +1525,9 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
     s_rr.stoplines   = td5_env_int("TD5RE_ROAM_STOPLINES", 1, 0, 1);     /* [roam HC] 0 = no stop lines         */
     s_rr.kerb_line   = td5_env_int("TD5RE_ROAM_KERB_LINE", 0, 0, 1);     /* [roam HC] 1 = lane 0's kerb stripe  */
     s_rr.radius      = td5_env_int("TD5RE_ROAM_RENDER_R", 500, 50, 5000) * RR_UPM;
+#ifndef TD5RE_RELEASE
+    s_rr.audit       = td5_env_int("TD5RE_ROAM_CULL_AUDIT", 0, 0, 1);   /* [roam IA] */
+#endif
 
     if (s_rr.use_ground) {
         s_rr.hc = (TD5_RoamHeight *)calloc(1, sizeof *s_rr.hc);
@@ -2135,6 +2146,7 @@ int td5_roam_render_ground_census_dev_test(void)
     if (td5_env_flag_off("TD5RE_ROAM_PAVE_CENSUS")) {
         TD5_RoamScnSource *scn = td5_roam_scn_open(place, &s_rr.grid, NULL, NULL);
         const double proj[4] = { lat0, mdlat, lon0, mdlon };
+        td5_roam_pave_census_set_grid(&s_rr.grid);            /* [roam IA] + the median census */
         td5_roam_pave_census(z.tile, z.ntile, scn, z.hc, rr_gz_ground_cb, &z, s_rr.ground_drop, proj, NULL);
         if (scn) td5_roam_scn_close(scn);
         for (k = 0; k < z.ntile; k++) { rr_ground_free(&z.gr[k]); free(z.cell[k]); td5_roam_tile_free(&z.tile[k]); }
@@ -2476,6 +2488,140 @@ static void rr_note_slow(const RRTile *t, int sb, int n, uint64_t us)
     (void)sb;
 }
 
+#ifndef TD5RE_RELEASE
+/* [roam IA] DEV cull audit, run after the frame's draw loop with the same camera. It re-takes the
+ * loop's decisions stage by stage (1 tile radius, 2 tile frustum, 3 mesh / sub-block radius,
+ * 4 sub-block frustum, 5 the renderer's 256-mesh list cap, 6 the renderer's per-mesh frustum) and
+ * holds each REJECTED mesh against the truth: a vertex in view within the draw radius. In view =
+ * the cull planes' own point test OR the projection (td5_render_project_world inside the pane
+ * rectangle centre +- centre), so cull planes narrower than the drawn picture show up too.
+ * Class: 0 road layer, 1 a mesh with a pavement-page command, 2 other scenery. */
+static int rr_au_class(const TD5_MeshHeader *m, int scen)
+{
+    int c;
+    if (!scen) return 0;
+    for (c = 0; c < m->command_count; c++)
+        if (m->commands[c].texture_page_id == s_rr.page_kerb) return 1;
+    return 2;
+}
+
+static int rr_au_on_screen(float x, float y, float z)
+{
+    const float cx = td5_render_get_center_x(), cy = td5_render_get_center_y();
+    float sx, sy, rhw;
+    /* view z past 195000 (DEFAULT_FAR_CULL = DEFAULT_FAR_CLIP, td5_render_internal.h) is never drawn */
+    if (!td5_render_project_world(x, y, z, &sx, &sy, &rhw) || !(rhw >= 1.0f / 195000.0f)) return 0;
+    return sx >= 0.0f && sx <= 2.0f * cx && sy >= 0.0f && sy <= 2.0f * cy;
+}
+
+/* 1 = a vertex is in view inside R, 2 = in view but only beyond R, 0 = not in view */
+static int rr_au_truth(const TD5_MeshHeader *m, float ex, float ey, float ez, float R)
+{
+    const float ox = m->origin_x / 256.0f, oy = m->origin_y / 256.0f, oz = m->origin_z / 256.0f;
+    int i, far_hit = 0;
+    for (i = 0; i < m->total_vertex_count; i++) {
+        const TD5_MeshVertex *v = &m->vertices[i];
+        const float x = ox + v->pos_x, y = oy + v->pos_y, z = oz + v->pos_z;
+        const float dx = x - ex, dy = y - ey, dz = z - ez;
+        const int planes = td5_render_is_sphere_visible(x, y, z, 0.0f), proj = rr_au_on_screen(x, y, z);
+        if (proj && !planes) s_rr.au_proj++;
+        if (!planes && !proj) continue;
+        if (dx * dx + dy * dy + dz * dz <= R * R) return 1;
+        far_hit = 1;
+    }
+    return far_hit ? 2 : 0;
+}
+
+static void rr_au_one(RRTile *t, int slot, const TD5_MeshHeader *m, int scen, int stage,
+                      float ex, float ey, float ez, float R)
+{
+    const int cl = rr_au_class(m, scen);
+    const uint8_t prev = t->aud[slot];
+    s_rr.au_tested[cl]++;
+    if (!stage) { s_rr.au_drawn[cl]++; t->aud[slot] = 1; return; }
+    t->aud[slot] = 0;
+    {
+        const int tr = rr_au_truth(m, ex, ey, ez, R);
+        if (tr == 2) s_rr.au_far[cl]++;
+        if (tr != 1) return;
+    }
+    s_rr.au_false[stage][cl]++;
+    if (prev) s_rr.au_pop[stage][cl]++;
+    if (s_rr.au_logged < 40) {
+        s_rr.au_logged++;
+        TD5_LOG_I(LOG_TAG, "ROAM_CULL_FALSE frame %llu tile %d,%d stage %d class %d mesh c(%.0f,%.0f,%.0f) r %.0f "
+                  "verts %d eye (%.0f,%.0f,%.0f)%s", (unsigned long long)s_rr.au_frames, t->tx, t->tz, stage, cl,
+                  m->bounding_center_x, m->bounding_center_y, m->bounding_center_z, m->bounding_radius,
+                  m->total_vertex_count, ex, ey, ez, prev ? " POP" : "");
+    }
+}
+
+static void rr_audit_frame(float ex, float ey, float ez, float R)
+{
+    int i, k;
+    uint32_t j;
+    s_rr.au_frames++;
+    for (i = 0; i < s_rr.ntile; i++) {
+        RRTile *t = s_rr.tile[i];
+        float dx = t->cx - ex, dy = t->cy - ey, dz = t->cz - ez;
+        int tstage = 0;
+        if (!t->aud) {
+            t->aud = (uint8_t *)calloc((size_t)t->nmesh + t->nscn + 1u, 1);
+            if (!t->aud) continue;
+        }
+        if (sqrtf(dx * dx + dy * dy + dz * dz) - t->r > R) tstage = 1;
+        else if (!td5_render_is_sphere_visible(t->cx, t->cy, t->cz, t->r)) tstage = 2;
+        for (k = 0; k < t->nmesh; k++) {
+            const TD5_MeshHeader *m = t->mesh[k];
+            const float *s = t->sph[k];
+            int st = tstage;
+            if (!st) {
+                dx = s[0] - ex; dy = s[1] - ey; dz = s[2] - ez;
+                if (sqrtf(dx * dx + dy * dy + dz * dz) - s[3] > R) st = 3;
+                else if (!td5_render_is_sphere_visible(m->bounding_center_x, m->bounding_center_y,
+                                                       m->bounding_center_z, m->bounding_radius)) st = 6;
+            }
+            rr_au_one(t, k, m, 0, st, ex, ey, ez, R);
+        }
+        for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+            const float *s = t->ssph[k];
+            int sst = tstage;
+            if (!t->sdl[k].count) continue;
+            if (!sst) {
+                dx = s[0] - ex; dy = s[1] - ey; dz = s[2] - ez;
+                if (sqrtf(dx * dx + dy * dy + dz * dz) - s[3] > R) sst = 3;
+                else if (!td5_render_is_sphere_visible(s[0], s[1], s[2], s[3])) sst = 4;
+                else if (t->sdl[k].count > 256) sst = 5;
+            }
+            for (j = 0; j < t->sdl[k].count; j++) {
+                const TD5_MeshHeader *m = t->sdl[k].meshes[j];
+                const int slot = t->nmesh + (int)(t->sdl[k].meshes + j - t->sptr);
+                int st = sst;
+                if (!st && !td5_render_is_sphere_visible(m->bounding_center_x, m->bounding_center_y,
+                                                         m->bounding_center_z, m->bounding_radius)) st = 6;
+                rr_au_one(t, slot, m, 1, st, ex, ey, ez, R);
+            }
+        }
+    }
+    if ((s_rr.au_frames % 240u) == 1u) {
+        int c;
+        TD5_LOG_I(LOG_TAG, "ROAM_CULL_AUDIT frames %llu centre %.1f,%.1f projection-only vertices %llu",
+                  (unsigned long long)s_rr.au_frames, td5_render_get_center_x(), td5_render_get_center_y(),
+                  (unsigned long long)s_rr.au_proj);
+        for (c = 0; c < 3; c++)
+            TD5_LOG_I(LOG_TAG, "ROAM_CULL_AUDIT frames %llu class %d tested %llu drawn %llu false t-r %llu t-fr %llu "
+                      "m-r %llu sb-fr %llu cap %llu m-fr %llu pops %llu far %llu", (unsigned long long)s_rr.au_frames, c,
+                      (unsigned long long)s_rr.au_tested[c], (unsigned long long)s_rr.au_drawn[c],
+                      (unsigned long long)s_rr.au_false[1][c], (unsigned long long)s_rr.au_false[2][c],
+                      (unsigned long long)s_rr.au_false[3][c], (unsigned long long)s_rr.au_false[4][c],
+                      (unsigned long long)s_rr.au_false[5][c], (unsigned long long)s_rr.au_false[6][c],
+                      (unsigned long long)(s_rr.au_pop[1][c] + s_rr.au_pop[2][c] + s_rr.au_pop[3][c] +
+                                           s_rr.au_pop[4][c] + s_rr.au_pop[5][c] + s_rr.au_pop[6][c]),
+                      (unsigned long long)s_rr.au_far[c]);
+    }
+}
+#endif
+
 void td5_roam_render_tiles(int view)
 {
     uint32_t t0;
@@ -2533,6 +2679,9 @@ void td5_roam_render_tiles(int view)
         }
         if (n > 0) tiles++;
     }
+#ifndef TD5RE_RELEASE
+    if (s_rr.audit) rr_audit_frame(ex, ey, ez, R);
+#endif
 
     {
         const uint32_t t1 = (uint32_t)(td5_plat_time_us() & 0xFFFFFFFFu);

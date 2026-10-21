@@ -59,14 +59,16 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  9u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  10u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
                                      * 7 = round H merge: HC verge + HD lots together
                                      * 8 = roam M: the place frame is the GAME frame (x = -east,
                                      *     td5_geo_frame.h), La Plata no longer mirrored
-                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes */
+                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes
+                                     * 10 = roam IA: a gap of <= 25 m to another carriageway with no building in it is an
+                                     *      island filled to the middle (any streets), island slabs keep their back face */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -129,6 +131,8 @@ typedef struct {
      * kerb faces, pieces cut back / dropped by the guard, kerb faces dropped, facade clips,
      * ribbon kerbs whose way the cache lacks, (edge, side) widths per TD5_GEO_SWSRC_* */
     int  pv_bedges, pv_interior, pv_chains, pv_pieces, pv_corner, pv_collapsed, pv_island, pv_median;
+    int  pv_island_fill;          /* [roam IA] kerb vertices made an island by the no-building gap rule */
+    int  pv_island_tops, pv_island_top_refused;   /* [roam IA] island loop top triangles emitted, loops left to the pieces */
     int  pv_free_clamp, pv_fence, pv_rail, pv_kerb, pv_cut, pv_drop, pv_kerb_cut, pv_noway;
     int  pv_src[7];
     uint32_t ms_pv;

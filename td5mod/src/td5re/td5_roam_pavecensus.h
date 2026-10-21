@@ -17,6 +17,9 @@ typedef int (*TD5_RoamGroundFn)(void *u, double x, double z, double *y);
  * m_per_deg_lat, lon0, m_per_deg_lon (or NULL). Writes <log>/roam_pavement_census.{txt,csv}. Returns 1. */
 int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *scn, TD5_RoamHeight *hc,
                          TD5_RoamGroundFn ground, void *gu, double drop_units, const double proj[4], const char *outprefix);
+/* [roam IA] the MEDIAN census runs inside td5_roam_pave_census (it needs every tile's pavement surfaces) once
+ * the lattice is set here: <log>/roam_median_census.{txt,csv}. NULL = off. */
+void td5_roam_pave_census_set_grid(const RoamGrid *grid);
 #endif
 
 #endif
