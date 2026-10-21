@@ -2582,6 +2582,8 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_W_MAX        2600.0       /* TD5_TG_GEO_SW_MAX (6 m)                          */
 #define PV_W_DEFAULT    860.0        /* 2 m: an outline no ribbon width reaches          */
 #define PV_W_SKIP       200.0        /* narrower than this (0.47 m, a sliver between two roads): none */
+#define PV_W_SKIP_PAIR  60.0         /* [roam JA] the same between the two one-way halves of ONE named street (14 cm):
+                                      * a tight divided avenue keeps a narrow kerbed median, not a slot of lot */
 #define PV_MEDIAN_M     25.0         /* an opposite carriageway this near: a median      */
 #define PV_LAWN_MIN_M   2.5          /* a median narrower than this is paved             */
 #define PV_RAY_STEP     200.0
@@ -2606,6 +2608,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_VF_MEDIAN    0x08u        /* ... and it is a named avenue's median: lawn       */
 #define PV_VF_FACADE    0x10u        /* clipped at a building front: no fence             */
 #define PV_VF_COLLAPSE  0x20u        /* merged into a corner point                        */
+#define PV_VF_PAIR      0x40u        /* [roam JA] its gap is a same-name one-way pair's median (PV_W_SKIP_PAIR) */
 
 typedef struct {
     int64_t   id;
@@ -2636,6 +2639,7 @@ struct ScPvSrc {
     int       join_guard;                 /* [roam JA] pv_join: no join on the road side of a kerb line */
     int       medial;                     /* [roam JA] pv_medial: fill to the medial line, not the half ray */
     int       level;                      /* [roam JA] pv_heights: an island's outer edge between the two kerb tops */
+    int       pair_skip;                  /* [roam JA] PV_W_SKIP_PAIR in a same-name pair's median */
     double    dbg_x, dbg_z, dbg_r;        /* [roam IA] DEV TD5RE_ROAM_PV_DBG=x,z,r (place frame): width-rule trace */
 };
 
@@ -2663,6 +2667,7 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->join_guard  = td5_env_int("TD5RE_ROAM_PV_JOIN_GUARD", 1, 0, 1);    /* [roam JA] */
     p->medial      = td5_env_int("TD5RE_ROAM_PV_MEDIAL", 1, 0, 1);        /* [roam JA] */
     p->level       = td5_env_int("TD5RE_ROAM_PV_ISLAND_LEVEL", 1, 0, 1);  /* [roam JA] */
+    p->pair_skip   = td5_env_int("TD5RE_ROAM_PV_PAIR_SKIP", 1, 0, 1);     /* [roam JA] */
 #ifndef TD5RE_RELEASE
     {
         const char *q = getenv("TD5RE_ROAM_PV_DBG");
@@ -3450,6 +3455,9 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
     }
 }
 
+/* [roam JA] the narrowest slab vertex v keeps (PV_W_SKIP; PV_W_SKIP_PAIR in a same-name pair's median) */
+static double pv_skip(const PvChain *ch, int v) { return (ch->vf[v] & PV_VF_PAIR) ? PV_W_SKIP_PAIR : PV_W_SKIP; }
+
 /* one piece (vertices i0 .. i1 of the chain, i1 > i0 in chain order, wrapped) */
 static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, const double *kz,
                     const double *yo, const double *gr, int klass, int corner)
@@ -3463,7 +3471,7 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     double fx[4], fz[4], x[4], y[4], z[4], u[4], v[4];
     const double ddx = kx[b] - kx[a], ddz = kz[b] - kz[a];
     int sb, k, cut = 0;
-    if (ch->w[a] < PV_W_SKIP && ch->w[b] < PV_W_SKIP) return 1;
+    if (ch->w[a] < pv_skip(ch, a) && ch->w[b] < pv_skip(ch, b)) return 1;
     if ((ox[1] - ox[0]) * ddx + (oz[1] - oz[0]) * ddz < 0.0) {
         /* an outer piece still running backwards (a reversal no corner rule may fold):
          * a triangle to its midpoint, never a bow-tie */
@@ -3678,7 +3686,7 @@ static int pv_piece_dropped(TG_TileCtx *c, const PvChain *ch, int a, int b, cons
     double ox[2] = { ch->ox[a], ch->ox[b] }, oz[2] = { ch->oz[a], ch->oz[b] };
     const double ddx = kx[b] - kx[a], ddz = kz[b] - kz[a];
     int cut = 0, k;
-    if (ch->w[a] < PV_W_SKIP && ch->w[b] < PV_W_SKIP) return 0;
+    if (ch->w[a] < pv_skip(ch, a) && ch->w[b] < pv_skip(ch, b)) return 0;
     if ((ox[1] - ox[0]) * ddx + (oz[1] - oz[0]) * ddz < 0.0) {
         ox[0] = ox[1] = 0.5 * (ox[0] + ox[1]);
         oz[0] = oz[1] = 0.5 * (oz[0] + oz[1]);
@@ -4007,6 +4015,7 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
             if (median || fill || ch.w[v] > half) {
                 ch.w[v] = half;
                 ch.vf[v] |= PV_VF_ISLAND;
+                if (median && e->s->pv->pair_skip) ch.vf[v] |= PV_VF_PAIR;
                 if (ch.level) {   /* [roam JA] the far kerb's road height, just past the ray's hit */
                     const double qx = ch.px[v] + ch.ux[v] * (freed + 2.0 * PV_KERB_IN), qz = ch.pz[v] + ch.uz[v] * (freed + 2.0 * PV_KERB_IN);
                     double fyv;
@@ -4016,7 +4025,7 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
                 if (B[seq[v < m ? v : m - 1]].owned) c->st.pv_free_clamp++;
             }
         }
-        if (ch.w[v] < PV_KERB_IN + PV_W_SKIP) { ch.w[v] = 0.0; continue; }
+        if (ch.w[v] < PV_KERB_IN + pv_skip(&ch, v)) { ch.w[v] = 0.0; continue; }
         /* a mapped building front behind the kerb: the slab stops there (not inside the clearance gap) */
         if (e->s->pv->facade && !(ch.vf[v] & (PV_VF_ISLAND | PV_VF_DECK | PV_VF_FLAT)) && ch.w[v] > e->s->gap) {
             for (d = e->s->gap; d < ch.w[v]; d += PV_FACE_STEP) {
