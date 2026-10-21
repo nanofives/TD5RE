@@ -655,6 +655,54 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
             }
         }
         pc_median_census(tiles, ntile, surf, ref, nref, proj, ld);   /* [roam IA] */
+        {   /* [roam IA] LAWN poke census: the drawn ground over a lawn's INTERIOR (the vertex check above only sees
+             * corners). 21 barycentric samples per lawn triangle (plaza lawn 2, island / median lawn 1): a sample
+             * where the ground is less than 1 cm under the lawn shows grass through grass ("hay pasto debajo del
+             * pasto?"). Area-weighted. */
+            double area_s[3] = { 0, 0, 0 }, poke_s[3] = { 0, 0, 0 }, worst[3] = { -1e30, -1e30, -1e30 };
+            double wx[3] = { 0, 0, 0 }, wz[3] = { 0, 0, 0 };
+            long si2;
+            for (si2 = 0; si2 < nsurf; si2++) {
+                const PcSurf *t2 = &surf[si2];
+                const int L2 = t2->lawn;
+                double ar, nsamp = 0, npoke = 0;
+                int a2, b2;
+                if (L2 != 1 && L2 != 2 && L2 != 0) continue;
+                ar = 0.5 * fabs((t2->x[1] - t2->x[0]) * (t2->z[2] - t2->z[0]) - (t2->z[1] - t2->z[0]) * (t2->x[2] - t2->x[0])) / (PC_UPM * PC_UPM);
+                for (a2 = 0; a2 <= 5; a2++) for (b2 = 0; a2 + b2 <= 5; b2++) {
+                    const double w0 = (a2 + 0.25) / 6.25, w1 = (b2 + 0.25) / 6.25, w2 = 1.0 - w0 - w1;
+                    double g, x2, z2, y2;
+                    if (w2 < 0.0) continue;
+                    x2 = w0 * t2->x[0] + w1 * t2->x[1] + w2 * t2->x[2];
+                    z2 = w0 * t2->z[0] + w1 * t2->z[1] + w2 * t2->z[2];
+                    y2 = w0 * t2->y[0] + w1 * t2->y[1] + w2 * t2->y[2];
+                    if (!ground(gu, x2, z2, &g)) continue;
+                    nsamp++;
+                    if (g > y2 - 1.0 * PC_CM) npoke++;
+                    if (g - y2 > worst[L2]) { worst[L2] = g - y2; wx[L2] = x2; wz[L2] = z2; }
+                }
+                if (nsamp > 0) { area_s[L2] += ar; poke_s[L2] += ar * npoke / nsamp; }
+            }
+            {
+                char lp[600];
+                FILE *lf;
+                snprintf(lp, sizeof lp, "%sroam_lawn_census.txt", ld ? ld : "");
+                if ((lf = fopen(lp, "w")) != NULL) {
+                    int q3;
+                    static const char *const nm[3] = { "paving slab", "island / median lawn", "plaza lawn" };
+                    fprintf(lf, "roam LAWN poke census (IA): drawn ground less than 1 cm under the surface, 21 samples per triangle\n");
+                    for (q3 = 2; q3 >= 0; q3--)
+                        fprintf(lf, "%-22s %10.0f m2, ground through it on %8.1f m2 (%.3f %%), worst ground over it %.1f cm at %.0f %.0f "
+                                    "(%.6f %.6f)\n", nm[q3], area_s[q3], poke_s[q3], area_s[q3] > 0 ? 100.0 * poke_s[q3] / area_s[q3] : 0.0,
+                                worst[q3] / PC_CM, wx[q3], wz[q3],
+                                proj && proj[1] > 0 ? proj[0] + wz[q3] / (proj[1] * PC_UPM) : 0.0,
+                                proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(wx[q3]) / (proj[3] * PC_UPM) : 0.0);
+                    fclose(lf);
+                }
+                fprintf(stderr, "LAWNCENSUS: plaza lawn %.0f m2 poked %.1f m2, island lawn %.0f m2 poked %.1f m2, paving %.0f m2 poked %.1f m2\n",
+                        area_s[2], poke_s[2], area_s[1], poke_s[1], area_s[0], poke_s[0]);
+            }
+        }
         free(ref);
     }
     qsort(keep, (size_t)nkeep, sizeof *keep, pc_cmp);

@@ -621,6 +621,10 @@ struct TG_TileCtx {
      * neighbour's lawn reads the same plane the neighbour draws */
     double  *lx, *lz, *ly;
     int      nlt, cap_lt;
+    /* [roam IA] the drawn ground's lattice for the lawns (sc_dg): cells per tile side, the render's ground drop,
+     * and the knob (TD5RE_ROAM_LAWN_ON_GROUND) */
+    int      dg_G, lawn_dg;
+    double   dg_drop;
     /* [G5] every pavement slab / island quad this tile emitted (x y z per corner, tile-local), so a footpath
      * laid after the pavement stands on top of one it crosses */
     double  *pvq;
@@ -1732,6 +1736,16 @@ static int sc_tri_split(TG_TileCtx *c, ScTris *out, const double *p, int lvl, in
             c->st.lawn_cut++;
             return 1;
         }
+        if (c->lawn_dg) {
+            /* [roam IA] a cell piece is judged as the guard census reads the bytes: float corners, a corner within
+             * 1 unit of another merged, under 4 units2 a segment (sc_assemble) */
+            const double xf[3] = { (double)(float)x[0], (double)(float)x[1], (double)(float)x[2] };
+            const double zf[3] = { (double)(float)z[0], (double)(float)z[1], (double)(float)z[2] };
+            const int dup = (fabs(xf[0] - xf[1]) < 1.0 && fabs(zf[0] - zf[1]) < 1.0) || (fabs(xf[1] - xf[2]) < 1.0 && fabs(zf[1] - zf[2]) < 1.0) ||
+                            (fabs(xf[0] - xf[2]) < 1.0 && fabs(zf[0] - zf[2]) < 1.0);
+            if (dup || fabs(td5_geob_ring_area(xf, zf, 3)) < 4.0) { c->st.lawn_cut++; return 1; }
+            if (!sc_on_road(c, xf, zf, 3, NULL)) return sc_tri_push(out, p);
+        } else
         if (!sc_on_road(c, x, z, 3, NULL)) return sc_tri_push(out, p);
         if (extra <= 0) { c->st.lawn_cut++; return 1; }
         lvl = 1; extra--;
@@ -1816,6 +1830,136 @@ static int sc_plane_push(TG_TileCtx *c, const double *p, int lvl, int extra)
     }
 }
 
+/* [roam IA] LAWNS ON THE DRAWN GROUND. Mariano, 2026-10-20: "hay pasto debajo del pasto?" (is there grass under the
+ * grass?). A plaza lawn stood SC_GEOP_LIFT over the RASTER at its own vertices (18 m triangles) while the drawn ground
+ * under it is a 16 m lattice of planar cells: inside a lawn triangle the ground's kinks rose through it and the
+ * ground's lighter grass showed in slivers (lawn census: 1.7 % of the casco's 2.7 km2 of plaza lawn, up to 2.6 m). Now
+ * every lawn triangle is cut along the render's ground cells and their diagonal (rr_bake splits each cell 0 1 2 /
+ * 0 2 3) and each piece takes the drawn ground's own plane + the ground drop + SC_GEOP_LIFT: parallel to the ground
+ * everywhere, so the ground never shows through, and the same height as before at every lattice point. The lawn
+ * planes the footpaths read are the same pieces. TD5RE_ROAM_LAWN_ON_GROUND=0 = the old lawn. */
+
+/* the drawn ground at a tile-local point (render frame height, before the ground drop is subtracted: + c->dg_drop
+ * gives the raster - lowering at the lattice points) */
+static double sc_dg(TG_TileCtx *c, double x, double z)
+{
+    const double S = (double)c->grid->tile, G = (double)c->dg_G;
+    static const int di[4] = { 0, 1, 1, 0 }, dj[4] = { 0, 0, 1, 1 };
+    double u, v, fu, fv, a, b, h[4];
+    int i, j, k;
+    roam_grid_uv(c->grid, x + (double)c->org_x, z + (double)c->org_z, &u, &v);
+    fu = u / S * G; fv = v / S * G;
+    i = (int)floor(fu); j = (int)floor(fv);
+    a = fu - i; b = fv - j;
+    for (k = 0; k < 4; k++) {
+        const double uu = (double)(i + di[k]) * S / G, vv = (double)(j + dj[k]) * S / G;
+        const double X = c->grid->ox + c->grid->c * uu - c->grid->s * vv, Z = c->grid->oz + c->grid->s * uu + c->grid->c * vv;
+        h[k] = sc_ground(c, X - (double)c->org_x, Z - (double)c->org_z) - c->dg_drop;
+    }
+    if (b <= a) return h[0] + a * (h[1] - h[0]) + b * (h[2] - h[1]);
+    return h[0] + b * (h[3] - h[0]) + a * (h[2] - h[3]);
+}
+
+/* the lawn surface over the drawn ground at a tile-local point */
+static double sc_lawn_h(TG_TileCtx *c, double x, double z)
+{
+    return c->lawn_dg ? sc_dg(c, x, z) + c->dg_drop + SC_GEOP_LIFT : sc_ground(c, x, z) + SC_GEOP_LIFT;
+}
+
+/* polygon (fu, fv) clipped to the half-plane sgn * (k - (fu, fv) . (ca, cb)) >= 0 */
+static int sc_clip_hp(const double *iu, const double *iv, int n, double ca, double cb, double k, double sgn, double *ou, double *ov)
+{
+    int i, m = 0;
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        const double di = sgn * (k - (iu[i] * ca + iv[i] * cb)), dj = sgn * (k - (iu[j] * ca + iv[j] * cb));
+        if (di >= 0.0) { ou[m] = iu[i]; ov[m] = iv[i]; m++; }
+        if ((di >= 0.0) != (dj >= 0.0)) {
+            const double t = di / (di - dj);
+            ou[m] = iu[i] + t * (iu[j] - iu[i]); ov[m] = iv[i] + t * (iv[j] - iv[i]); m++;
+        }
+    }
+    return m;
+}
+
+/* triangle p (x z x z x z, tile-local) cut along the ground cells and their diagonal; emit() gets every piece */
+static int sc_lawn_cells(TG_TileCtx *c, const double *p, int (*emit)(TG_TileCtx *, const double *, void *), void *ud)
+{
+    const double S = (double)c->grid->tile, G = (double)c->dg_G;
+    double fu[3], fv[3], u0 = 1e300, u1 = -1e300, v0 = 1e300, v1 = -1e300;
+    int k, i, j;
+    for (k = 0; k < 3; k++) {
+        double u, v;
+        roam_grid_uv(c->grid, p[k * 2] + (double)c->org_x, p[k * 2 + 1] + (double)c->org_z, &u, &v);
+        fu[k] = u / S * G; fv[k] = v / S * G;
+        if (fu[k] < u0) u0 = fu[k];
+        if (fu[k] > u1) u1 = fu[k];
+        if (fv[k] < v0) v0 = fv[k];
+        if (fv[k] > v1) v1 = fv[k];
+    }
+    for (j = (int)floor(v0); j <= (int)floor(v1); j++)
+        for (i = (int)floor(u0); i <= (int)floor(u1); i++) {
+            double au[16], av[16], bu[16], bv[16];
+            int n = 3, half;
+            memcpy(au, fu, sizeof fu); memcpy(av, fv, sizeof fv);
+            n = sc_clip_hp(au, av, n, 1.0, 0.0, (double)i, -1.0, bu, bv);         /* fu >= i     */
+            n = sc_clip_hp(bu, bv, n, 1.0, 0.0, (double)(i + 1), 1.0, au, av);    /* fu <= i + 1 */
+            n = sc_clip_hp(au, av, n, 0.0, 1.0, (double)j, -1.0, bu, bv);         /* fv >= j     */
+            n = sc_clip_hp(bu, bv, n, 0.0, 1.0, (double)(j + 1), 1.0, au, av);    /* fv <= j + 1 */
+            if (n < 3) continue;
+            for (half = 0; half < 2; half++) {
+                /* (fv - j) - (fu - i) <= 0: the cell's (0 1 2) triangle, >= 0: its (0 2 3) */
+                double cu[16], cv[16];
+                const int m = sc_clip_hp(au, av, n, -1.0, 1.0, (double)(j - i), half ? -1.0 : 1.0, cu, cv);
+                int q;
+                for (q = 1; q + 1 < m; q++) {
+                    double t6[6];
+                    const int id[3] = { 0, q, q + 1 };
+                    int r;
+                    for (r = 0; r < 3; r++) {
+                        const double uu = cu[id[r]] * S / G, vv = cv[id[r]] * S / G;
+                        t6[r * 2] = c->grid->ox + c->grid->c * uu - c->grid->s * vv - (double)c->org_x;
+                        t6[r * 2 + 1] = c->grid->oz + c->grid->s * uu + c->grid->c * vv - (double)c->org_z;
+                    }
+                    if (fabs(sc_cross(t6[0], t6[1], t6[2], t6[3], t6[4], t6[5])) < 1.0) continue;   /* a sliver */
+                    if (!emit(c, t6, ud)) return 0;
+                }
+            }
+        }
+    return 1;
+}
+
+static int sc_lawn_emit_drawn(TG_TileCtx *c, const double *t6, void *ud)
+{
+    return sc_tri_split(c, (ScTris *)ud, t6, 0, 2);
+}
+
+static int sc_lawn_emit_plane(TG_TileCtx *c, const double *t6, void *ud)
+{
+    int k;
+    (void)ud;
+    if (c->nlt * 3 + 3 > c->cap_lt) {
+        const int nc = c->cap_lt ? c->cap_lt * 2 : 3072;
+        double *a = (double *)realloc(c->lx, (size_t)nc * sizeof(double));
+        if (!a) return 0;
+        c->lx = a;
+        a = (double *)realloc(c->lz, (size_t)nc * sizeof(double));
+        if (!a) return 0;
+        c->lz = a;
+        a = (double *)realloc(c->ly, (size_t)nc * sizeof(double));
+        if (!a) return 0;
+        c->ly = a;
+        c->cap_lt = nc;
+    }
+    for (k = 0; k < 3; k++) {
+        c->lx[c->nlt * 3 + k] = t6[k * 2];
+        c->lz[c->nlt * 3 + k] = t6[k * 2 + 1];
+        c->ly[c->nlt * 3 + k] = sc_lawn_h(c, t6[k * 2], t6[k * 2 + 1]);
+    }
+    c->nlt++;
+    return 1;
+}
+
 /* lawn planes of the plazas of the 3x3 whose box meets the tile box (tile-local) */
 static int sc_lawn_planes(TG_TileCtx *c, const ScArea *ar, int nar, double x0, double z0, double x1, double z1)
 {
@@ -1834,6 +1978,7 @@ static int sc_lawn_planes(TG_TileCtx *c, const ScArea *ar, int nar, double x0, d
         for (k = 0; k < ntri; k++) {
             const int i0 = tri[k * 3], i1 = tri[k * 3 + 1], i2 = tri[k * 3 + 2];
             const double pp[6] = { rx[i0], rz[i0], rx[i1], rz[i1], rx[i2], rz[i2] };
+            if (c->lawn_dg) { if (!sc_lawn_cells(c, pp, sc_lawn_emit_plane, NULL)) return 0; continue; }   /* [roam IA] */
             if (!sc_plane_push(c, pp, lvl, 2)) return 0;      /* 2 = sc_emit_lawn's sc_tri_split extra */
         }
     }
@@ -1918,7 +2063,8 @@ static int sc_emit_lawn(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, c
     for (k = 0; k < ntri; k++) {
         const int i0 = tri[k * 3], i1 = tri[k * 3 + 1], i2 = tri[k * 3 + 2];
         const double p[6] = { rx[i0], rz[i0], rx[i1], rz[i1], rx[i2], rz[i2] };
-        if (!sc_tri_split(c, &tr, p, lvl, 2)) { free(tr.x); free(tr.z); return 0; }
+        if (c->lawn_dg ? !sc_lawn_cells(c, p, sc_lawn_emit_drawn, &tr)      /* [roam IA] on the drawn ground */
+                       : !sc_tri_split(c, &tr, p, lvl, 2)) { free(tr.x); free(tr.z); return 0; }
     }
     while (t0 < tr.n) {
         const int nt = (tr.n - t0 < SC_LAWN_CHUNK) ? tr.n - t0 : SC_LAWN_CHUNK;
@@ -1929,7 +2075,7 @@ static int sc_emit_lawn(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, c
         for (i = 0; i < nt * 3; i++) {
             const int q = t0 * 3 + i;
             v[i * 5 + 0] = (float)tr.x[q];
-            v[i * 5 + 1] = (float)(sc_ground(c, tr.x[q], tr.z[q]) + SC_GEOP_LIFT);
+            v[i * 5 + 1] = (float)sc_lawn_h(c, tr.x[q], tr.z[q]);
             v[i * 5 + 2] = (float)tr.z[q];
             v[i * 5 + 3] = (float)(tr.x[q] * inv_tile);
             v[i * 5 + 4] = (float)(tr.z[q] * inv_tile);
@@ -4665,6 +4811,12 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         if (s->hc_open && td5_roam_height_prefetch(s->hc, x0 - halo, z0 - halo, x1 + halo, z1 + halo)) hc = s->hc;
     }
     c->hc = hc;
+    {   /* [roam IA] the render's ground lattice, for the lawns laid on it (sc_dg) */
+        const int cm = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
+        c->dg_G = 256 / ((64 % cm) ? 16 : cm);
+        c->dg_drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0);
+        c->lawn_dg = td5_env_int("TD5RE_ROAM_LAWN_ON_GROUND", 1, 0, 1);
+    }
     if (hc && td5_roam_gfix_enabled() && td5_env_flag_on("TD5RE_ROAM_SCN_LOWER")) td5_roam_gfix_build(&c->gf, &s->grid, (const RoamTile *const *)c->road, self->tx, self->tz, hc);
     c->ground_last = 0.0;
     if (hc) {
