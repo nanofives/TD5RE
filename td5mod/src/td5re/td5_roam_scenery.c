@@ -2571,6 +2571,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_COLLAPSE_RUN 3.5          /* a folded corner run is at most this many widths  */
 #define PV_FALL         0.25         /* TG_NET_FW_FALL: steepest cross-fall of a slab    */
 #define PV_LEVEL_TOL    43.0         /* [roam JA] ground this far (10 cm) over an island's level: ground follow */
+#define PV_MED_SEAM     8.0          /* [roam JA] island halves overlap 2 cm (same plane, world-space uv): no hairline (pv_piece) */
 #define PV_FALL_LOW     0.06         /* [G4b] steepest fall away from the kerb where the drawn ground is
                                       * lowered under the road (a cut): a street camber, the back face
                                       * (down to the lowered ground) covers the rest                  */
@@ -3088,17 +3089,19 @@ static void pv_join(const PvChain *ch, const double *Ax, const double *Az, const
         *x = 0.5 * (Bx[a] + Ax[b]);
         *z = 0.5 * (Bz[a] + Az[b]);
     }
-    if (ch->join_guard &&
-        ((*x - ch->px[a]) * ch->nx[a] + (*z - ch->pz[a]) * ch->nz[a] < 0.0 ||
-         (*x - ch->px[b]) * ch->nx[b] + (*z - ch->pz[b]) * ch->nz[b] < 0.0)) {
-        *x = ch->px[v] + ch->ux[v] * ch->w[v] * ch->mf[v];
-        *z = ch->pz[v] + ch->uz[v] * ch->w[v] * ch->mf[v];
-    }
     lim = PV_MITRE_MAX * (ch->w[v] > 1.0 ? ch->w[v] : 1.0);
     d = hypot(*x - ch->px[v], *z - ch->pz[v]);
     if (d > lim) {
         *x = ch->px[v] + (*x - ch->px[v]) * lim / d;
         *z = ch->pz[v] + (*z - ch->pz[v]) * lim / d;
+    }
+    /* judged after the clamp: on a collapsed run v lies off segment b's line, so pulling a far join back toward
+     * it can land on the road side of that line */
+    if (ch->join_guard &&
+        ((*x - ch->px[a]) * ch->nx[a] + (*z - ch->pz[a]) * ch->nz[a] < 0.0 ||
+         (*x - ch->px[b]) * ch->nx[b] + (*z - ch->pz[b]) * ch->nz[b] < 0.0)) {
+        *x = ch->px[v] + ch->ux[v] * ch->w[v] * ch->mf[v];   /* mf <= 2.5 = PV_MITRE_MAX: within lim */
+        *z = ch->pz[v] + ch->uz[v] * ch->w[v] * ch->mf[v];
     }
 }
 
@@ -3498,6 +3501,26 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
         }
     }
     if (cut) c->st.pv_cut++;
+    /* [roam JA] SEAM. Two island halves meet on the medial line from two independent chains: their outer edges
+     * coincide only to the millimetre and the hairline between them showed dark down the middle of a median. Each
+     * island end of an uncut piece reaches PV_MED_SEAM past it (same plane, world-space uv: the overlap does not
+     * show), here and not in the chain's widths so the chain's collapse and mitre decisions stay as they are; kept
+     * only while the footprint stays off the road. */
+    if (!cut && island && e->s->pv->medial && !e->kerb_only) {
+        double sx[2], sz[2], qx[4], qz[4];
+        int q, moved = 0;
+        for (q = 0; q < 2; q++) {
+            const int vi = q ? b : a;
+            const double kx0 = q ? kx[b] : kx[a], kz0 = q ? kz[b] : kz[a];
+            const double dx = ox[q] - kx0, dz = oz[q] - kz0, l = hypot(dx, dz);
+            sx[q] = ox[q]; sz[q] = oz[q];
+            if ((ch->vf[vi] & PV_VF_ISLAND) && l > 4.0 * PV_MED_SEAM) { sx[q] += dx / l * PV_MED_SEAM; sz[q] += dz / l * PV_MED_SEAM; moved = 1; }
+        }
+        qx[0] = kx[a]; qx[1] = kx[b]; qx[2] = sx[1]; qx[3] = sx[0];
+        qz[0] = kz[a]; qz[1] = kz[b]; qz[2] = sz[1]; qz[3] = sz[0];
+        for (q = 0; q < 4; q++) { qx[q] = (double)(float)qx[q]; qz[q] = (double)(float)qz[q]; }
+        if (moved && !sc_on_road(c, qx, qz, 4, NULL)) { ox[0] = sx[0]; oz[0] = sz[0]; ox[1] = sx[1]; oz[1] = sz[1]; }
+    }
     c->st.pv_pieces++;
     if (corner) c->st.pv_corner++;
     if (island) c->st.pv_island++;
@@ -3793,7 +3816,7 @@ static double pv_ray_free(TG_TileCtx *c, double x, double z, double ux, double u
  * TD5RE_ROAM_PV_MEDIAL=0: the old half ray. */
 #define PV_MED_PROBE_DEG  12.0
 #define PV_MED_PHI_MAX    70.0
-#define PV_MED_SEAM       8.0     /* the two halves overlap 2 cm (same plane, world-space uv): no hairline of lot between */
+#define PV_MED_STRAIGHT_COS 0.9659   /* cos 15 deg: a vertex turning more is a corner (half ray) */
 static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
 {
     TG_TileCtx *c = e->c;
@@ -3802,18 +3825,24 @@ static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
     double fp, fm, bx[2], bz[2], dx, dz, dl, cphi;
     if (!e->s->pv->medial || !(freed > 0.0)) return 0.5 * freed;
     if (freed <= 2.0 * PV_MED_SEAM) return 0.5 * freed;
+    {   /* a corner vertex (a fillet arc): its side rays fan round the bend and the far kerb read jumps from one
+         * vertex to the next, so the old half ray (the arc's pieces must keep a smooth outer line) */
+        const int kin = (v > 0) ? v - 1 : (ch->closed ? ch->ns - 1 : -1), kout = (v < ch->ns) ? v : -1;
+        if (kin >= 0 && kout >= 0 && ch->nx[kin] * ch->nx[kout] + ch->nz[kin] * ch->nz[kout] < PV_MED_STRAIGHT_COS)
+            return 0.5 * freed;
+    }
     fp = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca - uz * sa, ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
     fm = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca + uz * sa, -ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
-    if (fp < 0.0 || fm < 0.0) return 0.5 * freed + PV_MED_SEAM;
+    if (fp < 0.0 || fm < 0.0) return 0.5 * freed;
     bx[0] = ch->px[v] + (ux * ca - uz * sa) * fp;  bz[0] = ch->pz[v] + (ux * sa + uz * ca) * fp;
     bx[1] = ch->px[v] + (ux * ca + uz * sa) * fm;  bz[1] = ch->pz[v] + (-ux * sa + uz * ca) * fm;
     dx = bx[0] - bx[1]; dz = bz[0] - bz[1]; dl = hypot(dx, dz);
     /* the two far points span about 2 f tan(a) on one straight kerb; much more or less is a corner or another road */
-    if (!(dl > 0.5 * freed * tan(a)) || dl > 4.0 * freed * tan(a)) return 0.5 * freed + PV_MED_SEAM;
+    if (!(dl > 0.5 * freed * tan(a)) || dl > 4.0 * freed * tan(a)) return 0.5 * freed;
     cphi = fabs(ux * dz - uz * dx) / dl;            /* |u x far kerb direction| = cos(ray, far normal) */
     if (cphi < cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0)) cphi = cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0);
     if (cphi > 1.0) cphi = 1.0;
-    return freed * cphi / (1.0 + cphi) + PV_MED_SEAM;
+    return freed * cphi / (1.0 + cphi);
 }
 
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
