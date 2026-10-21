@@ -833,8 +833,42 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
         S[i] = sg / sw;
         T[i] = S[i];
     }
+    /* [roam IE] the deck floor of a bridge chain, on the smoothed ground BEFORE the end blends (smooth max, so
+     * the toe of a ramp is a sag curve, not a kink). Blending afterwards runs from a raised profile to a pin that
+     * took the same floor (a JOIN on the chain), so the blend stays flat instead of dropping from the pin to the
+     * bare ground and back up to the floor (the curvature clamp turned that into a -9.5 % kink on the Av. 7 deck). */
+    if (in->deck && in->deck->n >= 2) {
+        int lifted = 0;
+        for (i = 0; i < n; i++) {
+            const double d = ca + arc[i];
+            double e;
+            if (!roam_deck_env_at(in->deck, rev ? ltot - d : d, &e)) continue;
+            {
+                const double t2 = roam_deck_smax(T[i], e, in->deck->soft);
+                if (t2 > T[i]) { T[i] = t2; lifted = 1; }
+            }
+        }
+        if (lifted) fl |= ROAM_RIBF_DECKENV;
+    }
     const int blend_both = has_pa && has_pb && n - 1 < 2 * ROAM_RIB_BLEND_ROWS - 1;
-    if (blend_both) {
+    if (fl & ROAM_RIBF_DECKENV) {
+        /* [roam IE] a floored ribbon blends the OFFSET to each pin (T + w * (pin - T_end)) instead of blending
+         * toward the pin itself: the profile keeps the floor's shape (a 5 % ramp stays 5 %) while the end rows
+         * meet their pins exactly. A convex blend toward a constant pin held the top flat and then caught up with
+         * the falling floor at 8 %. */
+        const double ta = T[0], tb = T[n - 1];
+        for (i = 0; i < n; i++) {
+            const int ia = i, ib = n - 1 - i;
+            const double wa = (has_pa && ia < ROAM_RIB_BLEND_ROWS)
+                ? 0.5 * (1.0 + cos(M_PI * (double)ia / (double)ROAM_RIB_BLEND_ROWS)) : 0.0;
+            const double wb = (has_pb && ib < ROAM_RIB_BLEND_ROWS)
+                ? 0.5 * (1.0 + cos(M_PI * (double)ib / (double)ROAM_RIB_BLEND_ROWS)) : 0.0;
+            T[i] += wa * (pa - ta) * (1.0 - wb) + wb * (pb - tb) * (1.0 - wa)
+                  + wa * wb * 0.5 * ((pa - ta) + (pb - tb));
+        }
+        if (has_pa) T[0] = pa;
+        if (has_pb) T[n - 1] = pb;
+    } else if (blend_both) {
         /* [F1 T9] The two end blends overlap (a short piece, e.g. a 10 m stub
          * from a JOIN to a junction). Applied one after the other, the far end's
          * blend reached row 0 and moved it off its pin, so the JOIN row stood up
@@ -861,29 +895,12 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
             T[i] = T[i] * (1.0 - w) + pa * w;
         }
     }
-    if (has_pb && !blend_both) {
+    if (has_pb && !blend_both && !(fl & ROAM_RIBF_DECKENV)) {
         for (i = 0; i < ROAM_RIB_BLEND_ROWS && i < n; i++) {
             const int k = n - 1 - i;
             const double w = 0.5 * (1.0 + cos(M_PI * (double)i / (double)ROAM_RIB_BLEND_ROWS));
             T[k] = T[k] * (1.0 - w) + pb * w;
         }
-    }
-
-    /* [roam IE] the deck floor of a bridge chain: every interior row at least the
-     * floor (smooth max, so the toe of a ramp is a sag curve, not a kink). The end
-     * rows are the pins; a JOIN pin on the chain already took the same floor. */
-    if (in->deck && in->deck->n >= 2) {
-        int lifted = 0;
-        for (i = 1; i < n - 1; i++) {
-            const double d = ca + arc[i];
-            double e;
-            if (!roam_deck_env_at(in->deck, rev ? ltot - d : d, &e)) continue;
-            {
-                const double t2 = roam_deck_smax(T[i], e, in->deck->soft);
-                if (t2 > T[i]) { T[i] = t2; lifted = 1; }
-            }
-        }
-        if (lifted) fl |= ROAM_RIBF_DECKENV;
     }
 
     /* crossings under a bridge deck: where they sit on the ribbon, and the base

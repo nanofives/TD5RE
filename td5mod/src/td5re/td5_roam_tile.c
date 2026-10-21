@@ -1321,6 +1321,19 @@ typedef struct { double s, y, f; int hard; } DkPt;              /* a constraint:
 /* An edge whose profile is a deck. */
 static int dk_struct(const TD5_RoamEdge *e) { return e->bridge && e->layer >= 1 && e->tunnel != 1; }
 
+/* DEV A/B: TD5RE_ROAM_DECK_FLOOR=0 builds the tiles as before roam IE (no floor, no pass-through lift, approaches may
+ * lead). Not hashed: clear the ROAMTILE files when switching it. RELEASE: always on. */
+static int dk_on(void)
+{
+#ifndef TD5RE_RELEASE
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_int("TD5RE_ROAM_DECK_FLOOR", 1, 0, 1);
+    return s_on;
+#else
+    return 1;
+#endif
+}
+
 static int dk_has_ribbon(const TD5_RoamEdge *e)
 {
     return e->end[0].kind != TD5_ROAM_END_INTERNAL && e->end[1].kind != TD5_ROAM_END_INTERNAL;
@@ -1795,7 +1808,11 @@ static double dk_floor_at(const DkSet *s, const DkPt *own, int nown, double t, d
         if (vh < ah) ah = vh;
         if (vs < as) as = vs;
     }
-    return fmax(fmin(hard, ah), fmin(soft, as));
+    /* a smooth min against the anchors: a plain min leaves an unrounded crest where the floor meets the
+     * anchor cone (a 2-tick hop at 62 km/h on the Av. 7 deck); the smooth one rounds it like the toe */
+    if (ah < ROAM_DECK_INF * 0.5) hard = -roam_deck_smax(-hard, -ah, ROAM_DECK_SOFT);
+    if (as < ROAM_DECK_INF * 0.5) soft = -roam_deck_smax(-soft, -as, ROAM_DECK_SOFT);
+    return fmax(hard, soft);
 }
 
 /* edge ei's floor: samples over its own length, ei's frame. 0 = no deck within reach. */
@@ -1810,7 +1827,7 @@ static int dk_build_env(Work *w, int ei, RoamDeckEnv *out)
     const int va = dk_vend(g, x, 0), vb = dk_vend(g, x, 1);
     memset(out, 0, sizeof *out);
     memset(&s, 0, sizeof s);
-    if (x->tunnel == 1 || bore_of_chain(g, ei) >= 0 || !dk_has_ribbon(x) || x->node_a == x->node_b) return 0;
+    if (!dk_on() || x->tunnel == 1 || bore_of_chain(g, ei) >= 0 || !dk_has_ribbon(x) || x->node_a == x->node_b) return 0;
     if (!dk_gather(w, ei, &s, va, vb, x->klass)) goto done;
     if (dk_struct(x)) {
         if (!dk_constraints(w, ei, &own, &nown, &cown)) goto done;
@@ -1879,7 +1896,7 @@ static void dk_cluster_lift(Work *w, int ci)
     double px[TD5_ROAM_ARM_MAX_LOCAL], pz[TD5_ROAM_ARM_MAX_LOCAL], need[TD5_ROAM_ARM_MAX_LOCAL], raw[TD5_ROAM_ARM_MAX_LOCAL];
     double over = 0.0;
     int i, n = 0, lifted = 0;
-    if (!dk_pass(g, ci) || cl->narm > TD5_ROAM_ARM_MAX_LOCAL) return;
+    if (!dk_on() || !dk_pass(g, ci) || cl->narm > TD5_ROAM_ARM_MAX_LOCAL) return;
     for (i = 0; i < cl->narm; i++) {
         const TD5_RoamArm *a = &g->arm[cl->arm_first + i];
         const TD5_RoamEdge *e = &g->edge[a->edge];
@@ -1986,6 +2003,7 @@ static int dk_near_deck(Work *w, int ei)
     const TD5_RoamGraph *g = &w->g;
     const TD5_RoamEdge *x = &g->edge[ei];
     int side, k, m, n, found;
+    if (!dk_on()) return 0;
     if (w->dknear && ei < w->dknear_n && w->dknear[ei]) return w->dknear[ei] == 1;
     found = dk_struct(x);
     if (!found && x->tunnel != 1 && bore_of_chain(g, ei) < 0 && dk_has_ribbon(x)) {

@@ -1966,6 +1966,8 @@ static int fu_emit_barriers(FuEm *em)
             const int ow = (int8_t)er->oneway;
             const int median = (ow > 0 && side == 0) || (ow < 0 && side == 1);
             const int deck = (er->flags & ROAM_EF_DECK) != 0;   /* parapets: checked by fu_par_on_road instead */
+            /* an expressway trunk keeps its pavement outside: New Jersey on the median kerb (and parapets on a deck) only */
+            if (er->klass != TD5_GEO_RC_MOTORWAY && !median && !deck) continue;
             double v0 = 0.0;
             FuBarSeg cur;
             int open = 0;
