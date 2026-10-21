@@ -53,6 +53,7 @@ typedef struct {
     double   storey;          /* td5_geob_storey_units(): world units per OSM storey    */
     int      lm_kind;         /* TD5_GEOB_LMK_* of this footprint (td5_geolm_kind)      */
     int      lm_anchor;       /* the footprint is a landmark cluster anchor              */
+    int      no_prefab;       /* 1: never stamp a shipped TD5 set piece (roam IB): the extruded ring stands */
     /* set-piece fallback: called once before the fit (may be NULL); a fitted corner
      * must pass corner_ok (NULL = any); the fitted rectangle must not stand on a road
      * (rect_on_road returns 1 = refuse; NULL = never) */

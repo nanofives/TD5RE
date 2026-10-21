@@ -3154,7 +3154,7 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
      * Tried BEFORE the extrusion, because a stamped set piece REPLACES the
      * box rather than standing beside it. A refusal falls through and the
      * footprint is extruded exactly as before. */
-    if (gb->landmark && !tg_geo_landmark_real(gb)) {
+    if (gb->landmark && !e->no_prefab && !tg_geo_landmark_real(gb)) {
         const int r = tg_geo_emit_landmark_prefab(e, gb, rx, rz, n_ring,
                                                   cx, cz);
         if (r < 0) return 0;
