@@ -867,7 +867,7 @@ static int work_ground(Work *w, double x, double z, double *out)
  * at its cut row (work_arm_pin). Not for a ROW_COVERED union: its covered cut row
  * lies flat under the patch, so that patch stays flat at H_c as before. A cluster
  * within the spread keeps its mean exactly. */
-static int dk_cluster_floor(Work *w, int ci, double *out);   /* [roam IE] below */
+static void dk_cluster_lift(Work *w, int ci);   /* [roam IE] below */
 
 static int work_hc_raw(Work *w, int ci, double *out)
 {
@@ -941,12 +941,8 @@ static int work_hc(Work *w, int ci, double *out)
     if (!work_hc_raw(w, ci, &h0)) return 0;
     if (w->cdeck && !(w->cdeck[ci] & 2)) {
         /* [roam IE] a pass-through junction near a deck rides on the deck floor */
-        double fy;
         w->cdeck[ci] |= 2;
-        if (dk_cluster_floor(w, ci, &fy)) {
-            const double h2 = roam_deck_smax(w->hc[ci], fy, ROAM_DECK_SOFT_U);
-            if (h2 > w->hc[ci]) { w->hc[ci] = h2; w->cdeck[ci] |= 1; }
-        }
+        dk_cluster_lift(w, ci);
     }
     *out = w->hc[ci];
     return 1;
@@ -1340,9 +1336,9 @@ static int dk_pass(const TD5_RoamGraph *g, int ci)
     for (i = 0; i < cl->narm; i++) {
         const TD5_RoamEdge *e = &g->edge[g->arm[cl->arm_first + i].edge];
         if (e->layer < 1) all_up = 0;
-        if (!e->oneway || e->klass < TD5_GEO_RC_TRUNK) all_major = 0;
+        if (!e->oneway || e->klass < TD5_GEO_RC_PRIMARY) all_major = 0;
     }
-    return all_up || all_major;
+    return all_up || (all_major && cl->narm <= 4);
 }
 
 /* graph vertex of a node: its cluster (nnode + ci) or the node itself */
@@ -1350,6 +1346,14 @@ static int dk_vert(const TD5_RoamGraph *g, int node)
 {
     const int c = g->node[node].cluster;
     return c >= 0 ? g->nnode + c : node;
+}
+
+/* graph vertex of an edge END: the cluster it is cut into (its node need not be a member), else its node */
+static int dk_vend(const TD5_RoamGraph *g, const TD5_RoamEdge *e, int end)
+{
+    const TD5_RoamEdgeEnd *en = &e->end[end];
+    if ((en->kind == TD5_ROAM_END_CLUSTER || en->kind == TD5_ROAM_END_INTERNAL) && en->cluster >= 0) return g->nnode + en->cluster;
+    return dk_vert(g, end ? e->node_b : e->node_a);
 }
 
 /* Bounded Dijkstra from vertex `src` over the street graph (edge `skip` excluded). The
@@ -1425,8 +1429,8 @@ static int dk_search(Work *w, int src, int skip, int klass, int *nout)
             if (ei == skip) continue;
             e = &g->edge[ei];
             if (!dk_has_ribbon(e) || e->tunnel == 1) continue;
-            if (klass >= 0 && e->klass != klass) continue;   /* a floor follows its own road (class + links) */
-            wv = dk_vert(g, end == 0 ? e->node_b : e->node_a);
+            if (klass >= 0 && v >= g->nnode && e->klass != klass) continue;   /* out of a junction: only its own road (class + links); a JOIN is one road */
+            wv = dk_vend(g, e, 1 - end);
             nd2 = w->dk_dist[v] + fmax(0.0, e->end[1].s - e->end[0].s);   /* cut row to cut row */
             if (w->dk_seen[wv] != w->dk_gen) {
                 w->dk_seen[wv] = w->dk_gen; w->dk_dist[wv] = nd2; w->dk_done[wv] = 0;
@@ -1653,14 +1657,13 @@ static int dk_gather(Work *w, int self, DkSet *s, int srcA, int srcB, int klass)
                 if (v >= g->nnode) ei = g->arm[g->cluster[v - g->nnode].arm_first + m].edge;
                 else ei = g->node_end[g->node[v].end_first + m].edge;
                 if (ei == self || !dk_struct(&g->edge[ei]) || !dk_has_ribbon(&g->edge[ei])) continue;
-                if (klass >= 0 && g->edge[ei].klass != klass) continue;
                 for (j = 0; j < nqs; j++) if (qs[j] == ei) dup = 1;
                 if (!dup) qs[nqs++] = ei;
             }
         }
         for (k = 0; k < nqs; k++) {
             const TD5_RoamEdge *q = &g->edge[qs[k]];
-            const int va = dk_vert(g, q->node_a), vb = dk_vert(g, q->node_b);
+            const int va = dk_vend(g, q, 0), vb = dk_vend(g, q, 1);
             DkPt *lp = NULL;
             int ln = 0, lc = 0;
             if (!dk_constraints(w, qs[k], &lp, &ln, &lc)) { free(lp); goto done; }
@@ -1772,7 +1775,8 @@ static double dk_floor_at(const DkSet *s, const DkPt *own, int nown, double t, d
     for (k = 0; k + 1 < s->nh; k++) {
         const DkPt *a = &s->hull[k], *b = &s->hull[k + 1];
         if (t >= a->s && t <= b->s) {
-            const double v = b->s > a->s ? a->y + (b->y - a->y) * (t - a->s) / (b->s - a->s) : fmax(a->y, b->y);
+            /* one soft width down: the hull lifts only where the ground sags under the abutment line */
+            const double v = (b->s > a->s ? a->y + (b->y - a->y) * (t - a->s) / (b->s - a->s) : fmax(a->y, b->y)) - ROAM_DECK_SOFT;
             if (v > hard) hard = v;
             break;
         }
@@ -1803,7 +1807,7 @@ static int dk_build_env(Work *w, int ei, RoamDeckEnv *out)
     DkPt *own = NULL;
     int nown = 0, cown = 0, i, ok = 0, k, nao = 0;
     double anc_t[2], anc_y[2];
-    const int va = dk_vert(g, x->node_a), vb = dk_vert(g, x->node_b);
+    const int va = dk_vend(g, x, 0), vb = dk_vend(g, x, 1);
     memset(out, 0, sizeof *out);
     memset(&s, 0, sizeof s);
     if (x->tunnel == 1 || bore_of_chain(g, ei) >= 0 || !dk_has_ribbon(x) || x->node_a == x->node_b) return 0;
@@ -1862,33 +1866,76 @@ done:
     return ok;
 }
 
-/* a pass-through cluster's floor at its centroid. 0 = none. */
-static int dk_cluster_floor(Work *w, int ci, double *out)
+/* A pass-through junction on a bridge chain: each arm needs its cut row at least at that arm's own
+ * floor there (the arm edge's env at its cut, so distances are right however long the patch is). When
+ * any arm needs more than the ground plane gives, the cluster takes the least-squares PLANE through the
+ * arms' needs (gradient capped like the ground plane's; a ROW_COVERED / HULL patch stays flat and moves
+ * up by the largest need instead). A too-high pin is harmless (the arm ribbon blends from it over
+ * ROAM_RIB_BLEND_ROWS); a too-low one would be a step, so the fit is then raised to cover every need. */
+static void dk_cluster_lift(Work *w, int ci)
 {
     const TD5_RoamGraph *g = &w->g;
-    const int v = g->nnode + ci;
-    DkSet s;
-    int ok = 0, klass = -1;
-    memset(&s, 0, sizeof s);
-    if (!dk_pass(g, ci)) return 0;
-    {
-        int a;
-        for (a = 0; a < g->cluster[ci].narm; a++) {
-            const int kl = g->edge[g->arm[g->cluster[ci].arm_first + a].edge].klass;
-            if (kl > klass) klass = kl;
+    const TD5_RoamCluster *cl = &g->cluster[ci];
+    double px[TD5_ROAM_ARM_MAX_LOCAL], pz[TD5_ROAM_ARM_MAX_LOCAL], need[TD5_ROAM_ARM_MAX_LOCAL], raw[TD5_ROAM_ARM_MAX_LOCAL];
+    double over = 0.0;
+    int i, n = 0, lifted = 0;
+    if (!dk_pass(g, ci) || cl->narm > TD5_ROAM_ARM_MAX_LOCAL) return;
+    for (i = 0; i < cl->narm; i++) {
+        const TD5_RoamArm *a = &g->arm[cl->arm_first + i];
+        const TD5_RoamEdge *e = &g->edge[a->edge];
+        const TD5_RoamEdgeEnd *en = &e->end[a->end];
+        const RoamDeckEnv *env;
+        double f;
+        if (en->nrow < 1) continue;
+        px[n] = 0.5 * (en->row[0].x + en->row[en->nrow - 1].x);
+        pz[n] = 0.5 * (en->row[0].z + en->row[en->nrow - 1].z);
+        raw[n] = work_plane_y(w, ci, px[n], pz[n]);
+        need[n] = raw[n];
+        env = dk_has_ribbon(e) ? work_edge_env(w, a->edge) : NULL;
+        if (env && roam_deck_env_at(env, en->s, &f)) {
+            need[n] = roam_deck_smax(raw[n], f, ROAM_DECK_SOFT);
+            if (need[n] > raw[n] + 1.0) lifted = 1;
         }
+        n++;
     }
-    if (dk_gather(w, -1, &s, v, v, klass) && s.any) {
-        *out = dk_floor_at(&s, NULL, 0, 0.0, 0.0, 0.0, NULL, 0, NULL);
-        ok = *out > -ROAM_DECK_INF * 0.5;
-#ifndef TD5RE_RELEASE
-        if (getenv("TD5RE_ROAM_DECK_LOG"))
-            TD5_LOG_I(LOG_TAG, "ROAM_DECK_CLUSTER %lld: %d pts %d anchors floor %.2f m", (long long)g->cluster[ci].key, s.npt, s.nanc,
-                      *out / TD5_ROAM_UPM);
-#endif
+    if (!lifted || n < 1) return;
+    if ((cl->flags & (TD5_ROAM_CL_ROW_COVERED | TD5_ROAM_CL_HULL)) || n < 2) {
+        for (i = 0; i < n; i++) if (need[i] - raw[i] > over) over = need[i] - raw[i];
+        w->hc[ci] += over;
+    } else {
+        double mx = 0.0, mz = 0.0, my = 0.0, sxx = 0.0, szz = 0.0, sxz = 0.0, sxy = 0.0, szy = 0.0, det, gx = 0.0, gz = 0.0;
+        const double capg = ROAM_GRADE_CAP * 0.97;
+        for (i = 0; i < n; i++) { mx += px[i]; mz += pz[i]; my += need[i]; }
+        mx /= n; mz /= n; my /= n;
+        for (i = 0; i < n; i++) {
+            const double x = px[i] - mx, z = pz[i] - mz, y = need[i] - my;
+            sxx += x * x; szz += z * z; sxz += x * z; sxy += x * y; szy += z * y;
+        }
+        det = sxx * szz - sxz * sxz;
+        if (n >= 3 && det > 1e-6 * (sxx + szz) * (sxx + szz)) {
+            gx = (sxy * szz - szy * sxz) / det;
+            gz = (szy * sxx - sxy * sxz) / det;
+        } else if (sxx + szz > 1e-9) {
+            /* two arms (or collinear cut rows): the line through them */
+            const double l2 = sxx + szz, k = (sxy + szy) / l2;
+            (void)k;
+            gx = sxy / l2; gz = szy / l2;
+        }
+        {
+            const double gm = hypot(gx, gz);
+            if (gm > capg) { gx *= capg / gm; gz *= capg / gm; }
+        }
+        /* lift the fit until it covers every need */
+        for (i = 0; i < n; i++) {
+            const double fit = my + gx * (px[i] - mx) + gz * (pz[i] - mz);
+            if (need[i] - fit > over) over = need[i] - fit;
+        }
+        w->cgr[2 * ci] = gx;
+        w->cgr[2 * ci + 1] = gz;
+        w->cpl[ci] = 1;
+        w->hc[ci] = my + over + gx * (cl->cx - mx) + gz * (cl->cz - mz);
     }
-    dk_set_free(&s);
-    return ok;
+    w->cdeck[ci] |= 1;
 }
 
 /* [roam IE] graph only (the window passes): every edge within reach of a deck round edge
@@ -1901,7 +1948,7 @@ static int dk_deps(Work *w, int ei)
     int *el = NULL, ne = 0, ce = 0, ok = 0;
     if (x->tunnel == 1 || bore_of_chain(g, ei) >= 0 || !dk_has_ribbon(x)) return 1;
     for (side = 0; side < 2; side++) {
-        if (!dk_search(w, dk_vert(g, side ? x->node_b : x->node_a), ei, x->klass, &n)) goto done;
+        if (!dk_search(w, dk_vend(g, x, side), ei, x->klass, &n)) goto done;
         for (k = 0; k < n; k++) {
             const int v = w->dk_list[k];
             const int cnt = v >= g->nnode ? g->cluster[v - g->nnode].narm : g->node[v].nend;
@@ -1910,7 +1957,7 @@ static int dk_deps(Work *w, int ei)
                                              : g->node_end[g->node[v].end_first + m].edge;
                 int j, dup = 0;
                 if (e2 == ei) continue;
-                if (dk_struct(&g->edge[e2]) && g->edge[e2].klass == x->klass) found = 1;
+                if (dk_struct(&g->edge[e2])) found = 1;
                 for (j = 0; j < ne; j++) if (el[j] == e2) { dup = 1; break; }
                 if (dup) continue;
                 if (ne >= ce) {
@@ -1943,14 +1990,14 @@ static int dk_near_deck(Work *w, int ei)
     found = dk_struct(x);
     if (!found && x->tunnel != 1 && bore_of_chain(g, ei) < 0 && dk_has_ribbon(x)) {
         for (side = 0; side < 2 && !found; side++) {
-            if (!dk_search(w, dk_vert(g, side ? x->node_b : x->node_a), ei, x->klass, &n)) break;
+            if (!dk_search(w, dk_vend(g, x, side), ei, x->klass, &n)) break;
             for (k = 0; k < n && !found; k++) {
                 const int v = w->dk_list[k];
                 const int cnt = v >= g->nnode ? g->cluster[v - g->nnode].narm : g->node[v].nend;
                 for (m = 0; m < cnt && !found; m++) {
                     const int e2 = v >= g->nnode ? g->arm[g->cluster[v - g->nnode].arm_first + m].edge
                                                  : g->node_end[g->node[v].end_first + m].edge;
-                    if (e2 != ei && dk_struct(&g->edge[e2]) && g->edge[e2].klass == x->klass) found = 1;
+                    if (e2 != ei && dk_struct(&g->edge[e2])) found = 1;
                 }
             }
         }
@@ -1967,7 +2014,7 @@ static const RoamDeckEnv *work_edge_env(Work *w, int ei)
     return w->denvs[ei] == 1 ? &w->denv[ei] : NULL;
 }
 
-/* [roam IE] the floor at a JOIN node, read once from the node's edge with the smaller key
+/* [roam IE] the floor at a JOIN node: the higher of its two edges' floors there, read once per node
  * (so both edges that share the row get the same pin, bit for bit). 0 = none. */
 static int work_node_deck(Work *w, int node, double *out)
 {
@@ -1978,11 +2025,16 @@ static int work_node_deck(Work *w, int node, double *out)
         const RoamDeckEnv *env = NULL;
         w->nhighs[node] = 2;
         if (nd->kind == TD5_ROAM_NODE_JOIN && nd->nend == 2) {
+            /* both edges' floors at the node (a deck's own run hull is in its env only), the higher one */
             const TD5_RoamEndRef *r = &g->node_end[nd->end_first];
-            const int k = g->edge[r[0].edge].key <= g->edge[r[1].edge].key ? 0 : 1;
-            const TD5_RoamEdge *e = &g->edge[r[k].edge];
-            env = work_edge_env(w, r[k].edge);
-            if (env && roam_deck_env_at(env, r[k].end ? e->length : 0.0, &w->nhigh[node])) w->nhighs[node] = 1;
+            int k;
+            for (k = 0; k < 2; k++) {
+                const TD5_RoamEdge *e = &g->edge[r[k].edge];
+                double fy;
+                env = work_edge_env(w, r[k].edge);
+                if (env && roam_deck_env_at(env, r[k].end ? e->length : 0.0, &fy) &&
+                    (w->nhighs[node] != 1 || fy > w->nhigh[node])) { w->nhigh[node] = fy; w->nhighs[node] = 1; }
+            }
         }
     }
     if (w->nhighs[node] != 1) return 0;
