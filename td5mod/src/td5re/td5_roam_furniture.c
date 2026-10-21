@@ -1566,7 +1566,9 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
  * BARRIER ROADS: highway=motorway / motorway_link (TD5_GEO_RC_MOTORWAY) and the rural
  * dual-carriageway trunks (one-way trunk with maxspeed >= 80: Autovia 2, Ruta 6, Av. 44
  * past the city). The urban 60 km/h trunks (Circunvalacion 31/32/72/122, the boulevards,
- * Av. 44 in town) are city avenues with sidewalks and junctions every block: none.
+ * Av. 44 in town) are city avenues with sidewalks and junctions every block: none. The rural
+ * trunks keep their pavement on the outer kerb too (td5_roam_scenery.c pv_width gives every
+ * non-motorway class one), so they take the median barrier (and deck parapets) only.
  * Along every KERB / DECK boundary edge of such a ribbon, and of a junction patch whose
  * arms are all barrier roads (merges, diverges, ramps):
  *   outer edge   steel W-beam guardrail on posts (TD5_TG_PAGE_R4_GUARDRAIL)
