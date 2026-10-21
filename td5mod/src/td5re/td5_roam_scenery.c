@@ -4349,10 +4349,23 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
         if (own) c->st.inf_m_real += (a1 - a0) / U - (c->st.inf_m_built - m0);
         return 1;
     }
-    if ((res == 3 || res == 4) && 0.5 * D >= INF_SHALLOW_M * U) {   /* its back meets one (or an area): the front half */
-        D *= 0.5;
-        if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
-        res = inf_lot_test(e, fx, fz, gx, gz, nf);
+    if (!s->ic_infill) {
+        if (res == 3 && 0.5 * D >= INF_SHALLOW_M * U) {          /* round M: its back meets one: the front half */
+            D *= 0.5;
+            if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
+            res = inf_lot_test(e, fx, fz, gx, gz, nf);
+        }
+    } else {
+        /* [IC] its back meets a footprint or an area: shallower, step by step (the deeper 12-24 m lots must not
+         * cost frontage the 10-18 m ones built) */
+        static const double k_back[3] = { 0.7, 0.5, 0.35 };
+        const double D0 = D;
+        int q2;
+        for (q2 = 0; q2 < 3 && (res == 3 || res == 4) && k_back[q2] * D0 >= INF_SHALLOW_M * U; q2++) {
+            D = k_back[q2] * D0;
+            if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
+            res = inf_lot_test(e, fx, fz, gx, gz, nf);
+        }
     }
     if (res) { why = res; goto refused; }
     if (nf * 2 > TD5_GEOB_RING_MAX) { why = 1; goto refused; }
