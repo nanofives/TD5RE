@@ -6,8 +6,9 @@ MULTIPOLYGON (an outline with courtyards = inner rings) or grouped by a
 type=building relation (outline + its parts) is therefore not on disk at all.
 MEASURED on the La Plata partido cache (verify/roam/s3d_census.py): 36 of the 78
 building:part ways have no outline under them, among them the seven parts of the
-Casa de Gobierno at place (2859879, 5683905): its outline and its NAME are not in
-the tiles, so the building can only be identified from its surroundings. The
+civic palace at place (2859879, 5683905), on the Avenida 7 side of Plaza San Martin
+(by its block most likely the Palacio de la Legislatura): its outline and its NAME
+are not in the tiles, so it can only be identified from its surroundings. The
 Palacio Municipal and the Teatro Argentino have no named footprint either.
 
 WHAT. ONE Overpass request for the place bbox:

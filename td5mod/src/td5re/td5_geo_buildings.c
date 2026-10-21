@@ -926,7 +926,7 @@ static void geob_fill_building(const cJSON *e, int i, int tag_lm, double storey_
         b->roof3d = (unsigned char)geob_roof3d_of(rs);
         b->roof_only = (unsigned char)(cl && !strcmp(cl, "roof"));
         if (tg) ro = geob_str(tg, "roof:orientation");
-        /* "across"; the La Plata cache also spells it "acroos" (the three Casa de Gobierno parts) */
+        /* "across"; the La Plata cache also spells it "acroos" (three parts on Plaza San Martin, Avenida 7 / 51 / 53) */
         b->roof_across = (unsigned char)(ro && !strncmp(ro, "acr", 3));
         rgb = td5_geob_colour_of(geob_str(e, "roof_colour"), 0);
         if (!rgb) rgb = td5_geob_colour_of(geob_str(e, "roof_material"), 1);

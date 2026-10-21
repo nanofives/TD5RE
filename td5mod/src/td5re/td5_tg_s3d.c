@@ -1,7 +1,8 @@
 /**
  * td5_tg_s3d.c -- GEO: OSM Simple 3D Buildings mass + roof for FREE ROAM (PORT-ONLY, roam JC).
  *
- * WHY. Mariano, 2026-10-21, at the Casa de Gobierno: "this building represents a government
+ * WHY. Mariano, 2026-10-21, at a civic palace on Plaza San Martin (most likely the Legislatura: the block of
+ * Avenida 7 / calle 8 / 51 / 53, see roam JC REPORT): "this building represents a government
  * building, isn't there the geometry available to copy on the game?". It is: OSM models the
  * civic landmarks of La Plata as building:part ways, each with its own height, roof:shape,
  * roof:height and roof:colour (Simple 3D Buildings, wiki.openstreetmap.org/wiki/Simple_3D_Buildings).

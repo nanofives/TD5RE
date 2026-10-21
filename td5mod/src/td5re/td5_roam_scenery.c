@@ -1777,7 +1777,7 @@ static void sc_bld_note(const TD5_RoamScnSource *s, const TG_TileCtx *c, const S
               (int)b->b->fsrc, b->b->cx, b->b->cz, b->b->area_m2, b->b->height / SC_UPM, fate);
 }
 
-/* [JC] SIMPLE 3D BUILDINGS: an outline its building:parts replace. Mariano, 2026-10-21, at the Casa de Gobierno:
+/* [JC] SIMPLE 3D BUILDINGS: an outline its building:parts replace. Mariano, 2026-10-21, on Plaza San Martin:
  * "isn't there the geometry available?". OSM's rule (wiki Simple_3D_Buildings) is that a building outline holding
  * building:part ways is NOT rendered: the parts are the building. Roam drew both, so the Catedral's 20 m outline box
  * swallowed its 25 parts below the spires. An outline (not itself a part) whose ring holds the centroids of parts
@@ -1856,7 +1856,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         c->st.bld_seen++;
         if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "bad ring"); continue; }
         /* the plaza veto: most of the outline in a plaza, not a landmark, not a small OSM building. [JC] Nor a
-         * building:part: a mapper modelled it in 3D, it stands. MEASURED: 6 of the Casa de Gobierno's 7 parts stand
+         * building:part: a mapper modelled it in 3D, it stands. MEASURED: 6 of the 7 parts of the civic palace at Avenida 7 / 51 / 53 (Plaza San Martin) stand
          * on a mapped grass polygon (AREAS 176337780) and were vetoed, leaving its roof-only canopy alone as a box. */
         if (!(s->s3d && gb->part) && sc_bld_plaza_veto(ar, nar, gb, set[i].px, set[i].pz)) {
             c->st.bld_veto_plaza++;
