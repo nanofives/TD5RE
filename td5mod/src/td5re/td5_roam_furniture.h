@@ -72,7 +72,7 @@ typedef struct {
     /* [roam IE] barriers (metres of kerb), segments dropped because a carriageway lies under them, patch
      * kerb edges railed; embankment metres; piers (and their columns), columns dropped on a road below, abutments */
     double bar_guard_m, bar_nj_m, bar_parapet_m, emb_m;
-    int  bar_drop_road, bar_patch_edges;
+    int  bar_drop_road, bar_patch_edges, emb_drop_road;
     int  piers, pier_cols, pier_drop_road, abutments;
     /* output */
     int  meshes;                                      /* furniture meshes appended */
