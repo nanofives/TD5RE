@@ -4719,7 +4719,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 }, rl_t[19] = { 0 };
+    long ft[16], lot_t[12] = { 0 }, rl_t[23] = { 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
@@ -4829,6 +4829,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         rl_t[8] += r->rail.piers; rl_t[9] += r->rail.lifted; rl_t[10] += r->rail.under_deck; rl_t[11] += r->rail.tunnel_skip;
         rl_t[12] += r->rail.sleepers; rl_t[13] += r->rail.platforms; rl_t[14] += r->rail.plat_pieces;
         rl_t[15] += r->rail.plat_drop; rl_t[16] += r->rail.meshes; rl_t[17] += r->rail.guard_hits;
+        rl_t[19] += r->rail.sleeper_cut; rl_t[20] += r->rail.wall_cut; rl_t[21] += r->rail.squeezed; rl_t[22] += r->rail.nudged;
         if (r->rail.pieces) rl_t[18]++;
         if (r->rail.lift_max_m > rl_lift_max) rl_lift_max = r->rail.lift_max_m;
         tot[0] += j.ok[i]; tot[1] += r->meshes; tot[2] += r->bytes; tot[3] += r->bld_seen; tot[4] += r->bld_emitted;
@@ -4883,12 +4884,12 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
                  "roam rails: %ld tile(s) with track, %ld way piece(s) in %ld meshes (%.1f km): full bed %ld, narrow (road beside) "
-                 "%ld, flush on a road %ld (no data crossing near %ld), blended to a level crossing %ld | bridges %ld piece(s), "
+                 "%ld, squeezed (tight median) %ld, nudged off a parallel street %ld, flush on a road %ld (no data crossing near %ld), blended to a level crossing %ld | bridges %ld piece(s), "
                  "%ld piers, lifted over a road under %ld (max %.1f m), under a road deck %ld, tunnel pieces skipped %ld | "
-                 "%ld sleepers | platforms %ld + %ld line piece(s), %ld face(s) kept off the road | RAIL GUARD: %ld face(s) on "
+                 "%ld sleepers (%ld sleeper ends + %ld walls left off a road) | platforms %ld + %ld line piece(s), %ld face(s) kept off the road | RAIL GUARD: %ld face(s) on "
                  "the drivable surface",
-                 rl_t[18], rl_t[1], rl_t[16], (double)rl_t[1] * 4.0 / 1000.0, rl_t[2], rl_t[3], rl_t[4], rl_t[5], rl_t[6],
-                 rl_t[7], rl_t[8], rl_t[9], rl_lift_max, rl_t[10], rl_t[11], rl_t[12], rl_t[13], rl_t[14], rl_t[15], rl_t[17]);
+                 rl_t[18], rl_t[1], rl_t[16], (double)rl_t[1] * 4.0 / 1000.0, rl_t[2], rl_t[3], rl_t[21], rl_t[22], rl_t[4], rl_t[5], rl_t[6],
+                 rl_t[7], rl_t[8], rl_t[9], rl_lift_max, rl_t[10], rl_t[11], rl_t[12], rl_t[19], rl_t[20], rl_t[13], rl_t[14], rl_t[15], rl_t[17]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

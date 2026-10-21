@@ -65,6 +65,7 @@
 #define RL_GRADE        0.03
 /* crossings */
 #define RL_BLEND        RL_M(12.0)     /* the bed blends to a level crossing's road over this */
+#define RL_NUDGE        RL_M(1.5)      /* the most a section is moved off a parallel street   */
 /* platforms */
 #define RL_PLAT_TOP     RL_M(0.95)     /* platform top over the rail head (base)             */
 #define RL_PLAT_HW      RL_M(2.00)     /* half width of a platform mapped as a line          */
@@ -504,6 +505,7 @@ typedef struct {
     int32_t ox, oz;                /* the tile origin: tile-local = place - origin       */
     struct RlBatch *bat;
     int oom;
+    int log;                       /* TD5RE_ROAM_RAILS_LOG: one line per flush piece with no data crossing */
     double gx_end[2];              /* the current way's end heads (a bridge's line)      */
 } RlEm;
 
@@ -662,9 +664,18 @@ static int rl_quad(RlEm *e, int sb, int pg, const double *x, const double *y, co
     return 1;
 }
 
+/* a face that may be left out: a sleeper end or a retaining wall that would touch the road is dropped
+ * (counted in *cut), the piece around it stays */
+static int rl_quad_cut(RlEm *e, int sb, int pg, const double *x, const double *y, const double *z,
+                       const double *u, const double *v, unsigned int col, int *cut)
+{
+    if (rl_face_on_road(e, x, y, z)) { (*cut)++; return 1; }
+    return rl_quad(e, sb, pg, x, y, z, u, v, col, 0);
+}
+
 /* a ribbon quad between two cross sections A, B: lateral offsets oa0..oa1 at A, ob0..ob1 at B (along the
  * section normals na / nb), heights ya0 ya1 yb0 yb1 */
-typedef struct { double x, z, nx, nz, s, head, ground; } RlSec;
+typedef struct { double x, z, nx, nz, tx, tz, s, head, ground; } RlSec;
 
 static int rl_band(RlEm *e, int sb, int pg, const RlSec *A, const RlSec *B, double o0, double o1,
                    double ya0, double ya1, double yb0, double yb1, double ustep, unsigned int col, int flush)
@@ -712,6 +723,7 @@ static void rl_section(RlEm *e, const RlWay *w, int seg, double t, RlSec *o)
     o->x = ax + dx * t - (double)e->ox;
     o->z = az + dz * t - (double)e->oz;
     o->nx = nx; o->nz = nz;
+    o->tx = tx; o->tz = tz;
     o->s = r->ps[i] + t * l;
 }
 
@@ -759,9 +771,9 @@ static int rl_rails(RlEm *e, int sb, const RlWay *w, const RlSec *A, const RlSec
     return 1;
 }
 
-static int rl_sleepers(RlEm *e, int sb, const RlWay *w, const RlSec *A, const RlSec *B)
+static int rl_sleepers(RlEm *e, int sb, const RlSec *A, const RlSec *B, double hl)
 {
-    const double hl = 0.5 * w->gauge + RL_SLEEPER_OUT, ds = B->s - A->s;
+    const double ds = B->s - A->s;
     double s = ceil(A->s / RL_SLEEPER_STEP) * RL_SLEEPER_STEP;
     double tx = B->x - A->x, tz = B->z - A->z;
     const double tl = hypot(tx, tz);
@@ -780,8 +792,11 @@ static int rl_sleepers(RlEm *e, int sb, const RlWay *w, const RlSec *A, const Rl
         yy[0] = yy[1] = yy[2] = yy[3] = y;
         u[0] = u[3] = 0.0; u[1] = u[2] = 1.0;
         v[0] = v[1] = 0.0; v[2] = v[3] = 0.25;
-        if (!rl_quad(e, sb, RP_SLEEPER, x, yy, z, u, v, RC_SLEEPER, 0)) return 0;
-        e->st->sleepers++;
+        {
+            const int before = e->st->sleeper_cut;
+            if (!rl_quad_cut(e, sb, RP_SLEEPER, x, yy, z, u, v, RC_SLEEPER, &e->st->sleeper_cut)) return 0;
+            if (e->st->sleeper_cut == before) e->st->sleepers++;
+        }
     }
     return 1;
 }
@@ -830,13 +845,40 @@ static int rl_deck(RlEm *e, int sb, const RlWay *w, const RlSec *A, const RlSec 
     return 1;
 }
 
+/* [Avenida 1] a section a little inside a PARALLEL street (roam draws carriageways wider than the
+ * real ones) is moved off it, at most RL_NUDGE (1.5 m: a 4 m track pair keeps 2.5 m between centres,
+ * room for two squeezed beds): the street's own outward normal, so both ends of a
+ * piece and both tiles at a seam move the same way. Never near a level crossing (a crossing street's
+ * "lateral" runs along the rail). 1 when moved. */
+static int rl_nudge(RlEm *e, RlSec *S, double strip_hw)
+{
+    int ed = -1, sd = 0;
+    double al = 0.0, lat = 0.0, need;
+    RoamFrame fr;
+    if (!roam_nearest_edge(e->c, S->x, S->z, RL_M(20.0), &ed, &sd, &al, &lat)) return 0;
+    if (!roam_edge_frame(e->c, ed, sd, al, &fr)) return 0;
+    if (fabs(fr.tx * S->tx + fr.tz * S->tz) < 0.9) return 0;         /* not parallel (> ~25 deg) */
+    need = fr.half_carriage + strip_hw + RL_M(0.05) - fabs(lat);
+    if (!(need > 0.0) || need > RL_NUDGE) return 0;
+    S->x += fr.nx * need; S->z += fr.nz * need;
+    return 1;
+}
+
+/* a level crossing of the data within d of along-distance s */
+static int rl_near_grade(const TD5_RoamRailSource *r, const RlWay *w, double s, double d)
+{
+    int k;
+    for (k = 0; k < w->nx; k++) if (r->x[w->x0 + k].kind == RX_GRADE && fabs(r->x[w->x0 + k].s - s) < d) return 1;
+    return 0;
+}
+
 /* one owned piece [A, B] of way w */
 static int rl_piece(RlEm *e, const RlWay *w, RlSec *A, RlSec *B, double lift_over, int blended)
 {
     TG_TileCtx *c = e->c;
     const double sleeper_hw = 0.5 * w->gauge + RL_SLEEPER_OUT;
     const double crest_hw = sleeper_hw + RL_CREST_OUT;
-    const double strip_hw = 0.5 * w->gauge + RL_M(0.20);
+    const double strip_hw = 0.5 * w->gauge + 2.0 * RL_RAIL_HW + RL_M(0.03);   /* the rails' outer faces */
     const double ylo = (A->head < B->head ? A->head : B->head) - RL_HEAD - RL_M(0.5);
     const double yhi = (A->head > B->head ? A->head : B->head) + RL_GUARD_HI;
     const double mx = 0.5 * (A->x + B->x), mz = 0.5 * (A->z + B->z);
@@ -845,7 +887,7 @@ static int rl_piece(RlEm *e, const RlWay *w, RlSec *A, RlSec *B, double lift_ove
     double fx[4], fz[4];
     double acr = A->head - RL_CREST_DY, bcr = B->head - RL_CREST_DY;
     double ag, bg, adrop, bdrop, atoe, btoe;
-    int mode, is_deck = 0;          /* mode 0 full, 1 narrow, 2 flush */
+    int mode, is_deck = 0;          /* mode 0 full, 1 narrow, 2 flush, 3 squeezed (rails + short sleepers) */
     A->ground = ag = roam_ctx_ground(c, A->x, A->z);
     B->ground = bg = roam_ctx_ground(c, B->x, B->z);
     adrop = acr - ag; bdrop = bcr - bg;
@@ -864,7 +906,7 @@ static int rl_piece(RlEm *e, const RlWay *w, RlSec *A, RlSec *B, double lift_ove
     if (!is_deck && roam_ctx_on_road_band(c, fx, fz, 4, ylo, yhi)) mode = 2;
     else {
         rl_foot(A, B, crest_hw, fx, fz);
-        if (!is_deck && roam_ctx_on_road_band(c, fx, fz, 4, ylo, yhi)) mode = 2;
+        if (!is_deck && roam_ctx_on_road_band(c, fx, fz, 4, ylo, yhi)) mode = 3;   /* a tight median: squeezed */
         else {
             double tx[4], tz[4];
             tx[0] = A->x - A->nx * atoe; tz[0] = A->z - A->nz * atoe;
@@ -886,8 +928,34 @@ static int rl_piece(RlEm *e, const RlWay *w, RlSec *A, RlSec *B, double lift_ove
     }
     if (mode == 2) {
         e->st->flush++;
-        if (!blended) e->st->flush_nodata++;
+        if (!blended) {
+            e->st->flush_nodata++;
+            if (e->log) {
+                int ed = -1, sd = 0;
+                double al = 0.0, lat = 0.0;
+                const int ne = roam_nearest_edge(c, mx, mz, RL_M(30.0), &ed, &sd, &al, &lat);
+                RoamFrame fr;
+                const int okf = ne && roam_edge_frame(c, ed, sd, al, &fr);
+                TD5_LOG_I(LOG_TAG, "ROAM_RAIL_FLUSH_NODATA way %lld kind %d at place (%.0f,%.0f) east %.0f: nearest street lateral %.1f m "
+                          "half carriage %.1f m class %d", (long long)w->id, w->kind, mx + (double)e->ox, mz + (double)e->oz,
+                          -(mx + (double)e->ox), ne ? lat / RL_UPM : -1.0, okf ? fr.half_carriage / RL_UPM : -1.0, okf ? fr.klass : -1);
+            }
+        }
         return rl_rails(e, sb, w, A, B, 1);
+    }
+    if (mode == 3) {
+        /* the rails clear the road but the bed does not (Avenida 1: the Roca in a median that roam's
+         * carriageways leave ~6 m of): ballast and sleepers cut back to just past the rails */
+        const double hw = strip_hw - RL_M(0.01);
+        double x[4], y[4], z[4], u[4], v[4];
+        e->st->squeezed++;
+        rl_foot(A, B, hw, x, z);
+        y[0] = y[1] = acr; y[2] = y[3] = bcr;
+        u[0] = u[3] = 0.0; u[1] = u[2] = 2.0 * hw / RL_M(2.0);
+        v[0] = v[1] = A->s / RL_M(2.0); v[2] = v[3] = B->s / RL_M(2.0);
+        if (!rl_quad_cut(e, sb, RP_BALLAST, x, y, z, u, v, cb, &e->st->sleeper_cut)) return 0;
+        if (!rl_sleepers(e, sb, A, B, hw)) return 0;
+        return rl_rails(e, sb, w, A, B, 0);
     }
     if (is_deck) {
         e->st->bridge++;
@@ -921,12 +989,23 @@ static int rl_piece(RlEm *e, const RlWay *w, RlSec *A, RlSec *B, double lift_ove
                 if (!rl_quad(e, sb, pg, x, y, z, u, v, col, 0)) return 0;
             }
         } else if (adrop > RL_M(0.30) || bdrop > RL_M(0.30)) {
-            /* narrow and raised (a road beside the ramp): retaining walls down to the ground */
-            if (!rl_band(e, sb, RP_CONC, A, B, -crest_hw, -crest_hw, ag - RL_M(0.1), acr, bg - RL_M(0.1), bcr, RL_M(2.0), RC_WHITE, 0)) return 0;
-            if (!rl_band(e, sb, RP_CONC, A, B, crest_hw, crest_hw, ag - RL_M(0.1), acr, bg - RL_M(0.1), bcr, RL_M(2.0), RC_WHITE, 0)) return 0;
+            /* narrow and raised (a road beside the ramp): retaining walls down to the ground, each one
+             * left out where it would stand on the road */
+            int sd;
+            for (sd = -1; sd <= 1; sd += 2) {
+                double x[4], y[4], z[4], u[4], v[4];
+                const double o = sd * crest_hw;
+                x[0] = A->x + A->nx * o; z[0] = A->z + A->nz * o; y[0] = ag - RL_M(0.1);
+                x[1] = A->x + A->nx * o; z[1] = A->z + A->nz * o; y[1] = acr;
+                x[2] = B->x + B->nx * o; z[2] = B->z + B->nz * o; y[2] = bcr;
+                x[3] = B->x + B->nx * o; z[3] = B->z + B->nz * o; y[3] = bg - RL_M(0.1);
+                u[0] = u[3] = A->s / RL_M(2.0); u[1] = u[2] = B->s / RL_M(2.0);
+                v[0] = v[3] = 0.0; v[1] = v[2] = 0.5;
+                if (!rl_quad_cut(e, sb, RP_CONC, x, y, z, u, v, RC_WHITE, &e->st->wall_cut)) return 0;
+            }
         }
     }
-    if (!rl_sleepers(e, sb, w, A, B)) return 0;
+    if (!rl_sleepers(e, sb, A, B, sleeper_hw)) return 0;
     return rl_rails(e, sb, w, A, B, 0);
 }
 
@@ -1080,6 +1159,7 @@ int td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats 
     if (!r || !c || !st) return 1;
     memset(&e, 0, sizeof e);
     e.c = c; e.st = st; e.r = r;
+    e.log = td5_env_int("TD5RE_ROAM_RAILS_LOG", 0, 0, 1);
     roam_ctx_origin(c, &tx, &tz, &e.ox, &e.oz);
     roam_grid_corners(g, tx, tz, corner);
     for (k = 0; k < 4; k++) {
@@ -1117,6 +1197,12 @@ int td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats 
                 rl_section(&e, w, seg, (double)(j + 1) / np, &B);
                 if (!roam_ctx_owned(c, 0.5 * (A.x + B.x), 0.5 * (A.z + B.z))) continue;
                 if (w->tunnel) { st->tunnel_skip++; continue; }
+                {   /* each section by its own along-distance: a shared end moves the same in both pieces */
+                    const double shw = 0.5 * w->gauge + 2.0 * RL_RAIL_HW + RL_M(0.03);
+                    const int na = !rl_near_grade(r, w, A.s, RL_BLEND) && rl_nudge(&e, &A, shw);
+                    const int nb = !rl_near_grade(r, w, B.s, RL_BLEND) && rl_nudge(&e, &B, shw);
+                    if (na || nb) st->nudged++;
+                }
                 A.head = rl_head(&e, w, seg, A.s, A.x, A.z, &la, &ba);
                 B.head = rl_head(&e, w, seg, B.s, B.x, B.z, &lb, &bb);
                 if (!rl_piece(&e, w, &A, &B, la > lb ? la : lb, ba || bb)) e.oom = 1;

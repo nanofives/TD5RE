@@ -48,12 +48,14 @@ typedef struct {
     int  ways;               /* ways with at least one owned piece                          */
     int  pieces;             /* owned track pieces drawn                                    */
     int  full, narrow, flush;/* full bed / no shoulders (a road beside it) / flush on a road */
+    int  squeezed, nudged;   /* bed cut back to the rails (tight median) / moved <= 1 m off a parallel street */
     int  flush_nodata;       /* flush pieces with no data crossing within 12 m (OSM offset) */
     int  blend;              /* pieces whose head blends to a level crossing's road         */
     int  bridge, piers, lifted;  /* bridge pieces, piers, pieces raised over base by lift    */
     int  under_deck;         /* pieces under a road deck (road_over: not a conflict)       */
     int  tunnel_skip;        /* pieces of a tunnel way, not drawn                           */
     int  sleepers;
+    int  sleeper_cut, wall_cut;  /* sleeper ends / retaining walls left out where they would touch a road */
     int  platforms, plat_pieces, plat_drop;   /* polygons + line pieces drawn, faces off the road */
     int  meshes;
     int  guard_hits;         /* emitted faces on the drivable surface that are not flush rails: 0 */
