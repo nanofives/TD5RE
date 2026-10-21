@@ -856,15 +856,14 @@ int roam_ribbon_build(const RoamEdgeIn *in, TD5_RoamHeight *h, RoamRibbon *out)
          * toward the pin itself: the profile keeps the floor's shape (a 5 % ramp stays 5 %) while the end rows
          * meet their pins exactly. A convex blend toward a constant pin held the top flat and then caught up with
          * the falling floor at 8 %. */
-        const double ta = T[0], tb = T[n - 1];
+        const double da = has_pa ? pa - T[0] : 0.0, db = has_pb ? pb - T[n - 1] : 0.0;   /* NAN pin = free end: no offset */
         for (i = 0; i < n; i++) {
             const int ia = i, ib = n - 1 - i;
             const double wa = (has_pa && ia < ROAM_RIB_BLEND_ROWS)
                 ? 0.5 * (1.0 + cos(M_PI * (double)ia / (double)ROAM_RIB_BLEND_ROWS)) : 0.0;
             const double wb = (has_pb && ib < ROAM_RIB_BLEND_ROWS)
                 ? 0.5 * (1.0 + cos(M_PI * (double)ib / (double)ROAM_RIB_BLEND_ROWS)) : 0.0;
-            T[i] += wa * (pa - ta) * (1.0 - wb) + wb * (pb - tb) * (1.0 - wa)
-                  + wa * wb * 0.5 * ((pa - ta) + (pb - tb));
+            T[i] += wa * da * (1.0 - wb) + wb * db * (1.0 - wa) + wa * wb * 0.5 * (da + db);
         }
         if (has_pa) T[0] = pa;
         if (has_pb) T[n - 1] = pb;
