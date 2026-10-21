@@ -48,7 +48,8 @@ typedef struct {
     int  ways;               /* ways with at least one owned piece                          */
     int  pieces;             /* owned track pieces drawn                                    */
     int  full, narrow, flush;/* full bed / no shoulders (a road beside it) / flush on a road */
-    int  squeezed, nudged;   /* bed cut back to the rails (tight median) / moved <= 1 m off a parallel street */
+    int  squeezed, nudged;   /* bed cut back to the rails (tight median) / moved <= 1.5 m off a parallel street */
+    int  floored;            /* head raised to a street's kerb + 0.57 m (over its median / sidewalk slab) */
     int  flush_nodata;       /* flush pieces with no data crossing within 12 m (OSM offset) */
     int  blend;              /* pieces whose head blends to a level crossing's road         */
     int  bridge, piers, lifted;  /* bridge pieces, piers, pieces raised over base by lift    */

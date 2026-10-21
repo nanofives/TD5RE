@@ -119,6 +119,10 @@ int    roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, do
 /* [roam ID] roam_ctx_on_road counting only the primitives whose height range meets [y_lo, y_hi]: a road
  * deck high over the polygon or a street far under it is not "on" it */
 int    roam_ctx_on_road_band(const TG_TileCtx *c, const double *x, const double *z, int n, double y_lo, double y_hi);
+/* [roam ID] the pavement slab (this tile's, emitted before) / plaza lawn plane (the 3x3's) height at a
+ * tile-local point; 1 on a hit */
+int    roam_ctx_slab_y(const TG_TileCtx *c, double x, double z, double *y);
+int    roam_ctx_lawn_y(const TG_TileCtx *c, double x, double z, double *y);
 /* Reserve one mesh record in sub-block `sb`: returns the TG_Buf* to write it into (its offset is
  * recorded; void* because TG_Buf lives in td5_trackgen_internal.h), NULL on out of memory. The
  * caller appends exactly one MODELS.DAT mesh record. */

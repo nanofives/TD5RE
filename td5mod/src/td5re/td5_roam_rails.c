@@ -65,6 +65,11 @@
 #define RL_GRADE        0.03
 /* crossings */
 #define RL_BLEND        RL_M(12.0)     /* the bed blends to a level crossing's road over this */
+#define RL_FLOOR        245.0          /* [Avenida 1] head over a street's kerb: the F4b median / sidewalk slab
+                                        * rises up to ~126 units over the kerb line (measured at the pick), the
+                                        * crest sits RL_CREST_DY under the head, + 1 cm                      */
+#define RL_FLOOR_REACH  RL_M(12.0)     /* full floor this far past the carriageway edge                      */
+#define RL_FLOOR_FALL   0.15           /* then it falls off at this lateral grade                            */
 #define RL_NUDGE        RL_M(1.5)      /* the most a section is moved off a parallel street   */
 /* platforms */
 #define RL_PLAT_TOP     RL_M(0.95)     /* platform top over the rail head (base)             */
@@ -547,7 +552,8 @@ static double rl_smooth(double u) { if (u <= 0.0) return 0.0; if (u >= 1.0) retu
 
 /* the rail head at along-distance s (tile-local point lx, lz) of way w; *lifted = head over base by lift;
  * *blend = 1 when a level crossing pulled it toward a road */
-static double rl_head(RlEm *e, const RlWay *w, int seg, double s, double lx, double lz, double *lift_over, int *blend)
+static double rl_head(RlEm *e, const RlWay *w, int seg, double s, double lx, double lz, double *lift_over, int *blend,
+                      int *floored)
 {
     const TD5_RoamRailSource *r = e->r;
     double base, head, lf;
@@ -559,6 +565,20 @@ static double rl_head(RlEm *e, const RlWay *w, int seg, double s, double lx, dou
     head = lf > base ? lf : base;
     if (lift_over) *lift_over = head - base;
     if (blend) *blend = 0;
+    if (floored) *floored = 0;
+    {   /* [Avenida 1] beside a street at track level: over its median / sidewalk slab, never under it (the
+         * nearest street only, from the 3x3's ribbons: both tiles at a seam read the same one) */
+        int ed = -1, sd = 0;
+        double al = 0.0, lat = 0.0;
+        RoamFrame fr;
+        if (roam_nearest_edge(e->c, lx, lz, RL_M(30.0), &ed, &sd, &al, &lat) && roam_edge_frame(e->c, ed, sd, al, &fr) &&
+            fr.kerb_y < head + RL_M(2.0)) {
+            const double over = fabs(lat) - fr.half_carriage - RL_FLOOR_REACH;
+            double fl = fr.kerb_y + RL_FLOOR;
+            if (over > 0.0) fl -= over * RL_FLOOR_FALL;
+            if (fl > head) { head = fl; if (floored) *floored = 1; }
+        }
+    }
     for (k = 0; k < w->nx; k++) {
         const RlX *x = &r->x[w->x0 + k];
         const double d = fabs(s - x->s);
@@ -572,6 +592,8 @@ static double rl_head(RlEm *e, const RlWay *w, int seg, double s, double lx, dou
             const double hx = ry + RL_FLUSH;
             head = hx + (head - hx) * rl_smooth(bd / RL_BLEND);
             if (blend) *blend = 1;
+            if (e->log && bd < RL_M(1.0))
+                TD5_LOG_I(LOG_TAG, "ROAM_RAIL_XING way %lld at place (%.0f,%.0f) road_y %.0f", (long long)w->id, x->x, x->z, ry);
         }
     }
     return head;
@@ -920,6 +942,27 @@ static int rl_piece(RlEm *e, const RlWay *w, RlSec *A, RlSec *B, double lift_ove
         rl_foot(A, B, crest_hw, fx, fz);
         if (mode != 2 && roam_ctx_on_road_band(c, fx, fz, 4, yhi, 1e12)) e->st->under_deck++;
     }
+    if (e->log && mode != 2) {   /* any drivable primitive under the crest at ANY height: band or a hole? */
+        double ry = 0.0;
+        rl_foot(A, B, crest_hw, fx, fz);
+        if (roam_ctx_on_road_band(c, fx, fz, 4, -1e12, 1e12))
+            TD5_LOG_I(LOG_TAG, "ROAM_RAIL_ANYY way %lld mode %d deck %d at place (%.0f,%.0f): head %.0f band %.0f..%.0f road_y %s%.0f",
+                      (long long)w->id, mode, is_deck, mx + (double)e->ox, mz + (double)e->oz, 0.5 * (A->head + B->head), ylo, yhi,
+                      roam_ctx_road_y(c, mx, mz, A->head, &ry) ? "" : "(none at the centre) ", ry);
+    }
+    if (e->log && mode != 2) {
+        double sy = 0.0, ly = 0.0, kerb = -1e30;
+        int ed = -1, sd = 0;
+        double al = 0.0, lat = 0.0;
+        RoamFrame fr;
+        const int hs = roam_ctx_slab_y(c, mx, mz, &sy), hl = roam_ctx_lawn_y(c, mx, mz, &ly);
+        if (roam_nearest_edge(c, mx, mz, RL_M(20.0), &ed, &sd, &al, &lat) && roam_edge_frame(c, ed, sd, al, &fr)) kerb = fr.kerb_y;
+        if (hs || hl)
+            TD5_LOG_I(LOG_TAG, "ROAM_RAIL_FLOOR way %lld mode %d at place (%.0f,%.0f): head %.0f crest %.0f ground %.0f | slab %s%.0f "
+                      "lawn %s%.0f | street lat %.1f m kerb_y %.0f", (long long)w->id, mode, mx + (double)e->ox, mz + (double)e->oz,
+                      0.5 * (A->head + B->head), 0.5 * (acr + bcr), 0.5 * (ag + bg), hs ? "" : "-", hs ? sy : 0.0, hl ? "" : "-",
+                      hl ? ly : 0.0, lat / RL_UPM, kerb);
+    }
     e->st->pieces++;
     if (blended) e->st->blend++;
     if (lift_over > RL_M(0.05)) {
@@ -1192,7 +1235,7 @@ int td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats 
             for (j = 0; j < np && !e.oom; j++) {
                 RlSec A, B;
                 double la, lb;
-                int ba, bb;
+                int ba, bb, fa, fb;
                 rl_section(&e, w, seg, (double)j / np, &A);
                 rl_section(&e, w, seg, (double)(j + 1) / np, &B);
                 if (!roam_ctx_owned(c, 0.5 * (A.x + B.x), 0.5 * (A.z + B.z))) continue;
@@ -1203,8 +1246,9 @@ int td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats 
                     const int nb = !rl_near_grade(r, w, B.s, RL_BLEND) && rl_nudge(&e, &B, shw);
                     if (na || nb) st->nudged++;
                 }
-                A.head = rl_head(&e, w, seg, A.s, A.x, A.z, &la, &ba);
-                B.head = rl_head(&e, w, seg, B.s, B.x, B.z, &lb, &bb);
+                A.head = rl_head(&e, w, seg, A.s, A.x, A.z, &la, &ba, &fa);
+                B.head = rl_head(&e, w, seg, B.s, B.x, B.z, &lb, &bb, &fb);
+                if (fa || fb) st->floored++;
                 if (!rl_piece(&e, w, &A, &B, la > lb ? la : lb, ba || bb)) e.oom = 1;
                 used = 1;
             }
