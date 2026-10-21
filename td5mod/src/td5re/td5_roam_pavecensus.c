@@ -76,7 +76,9 @@ static int pc_cmp(const void *a, const void *b)
 
 /* [G5] surfaces (place-frame triangles) bucketed on an 8 m grid, footpath vertices */
 #define PC_FP_CELL (8.0 * PC_UPM)
-typedef struct { double x[3], y[3], z[3]; int lawn; } PcSurf;   /* lawn: 0 paving, 1 island / median lawn quad, 2 plaza lawn */
+typedef struct { double x[3], y[3], z[3]; int lawn; } PcSurf;   /* lawn: 0 paving, 1 island / median lawn quad, 2 plaza lawn,
+                                                                 * 3 [roam IA] any other up-facing face > 25 cm over the drawn
+                                                                 * ground (a roof): median census cover only */
 typedef struct { int64_t key; int s; } PcSurfRef;
 typedef struct { double x, y, z; int tx, tz; } PcFpV;
 
@@ -101,6 +103,297 @@ static int pc_surf_y(const PcSurf *t, double x, double z, double *y)
     if (w0 < 1e-6 || w1 < 1e-6 || w2 < 1e-6) return 0;      /* strictly inside: a footpath meeting a slab edge is not under it */
     *y = w0 * t->y[0] + w1 * t->y[1] + w2 * t->y[2];
     return 1;
+}
+
+/* ============================================================================
+ * [roam IA] MEDIAN census: the ground between two carriageways that nothing covers.
+ *
+ * Per tile, a 0.5 m cell raster over the tile box + PC_MED_WIDE: the drivable triangles of the 3x3 (ribbon
+ * quads as the renderer's two triangles, junction patch triangles) and every up-facing pavement / island /
+ * median lawn / plaza lawn triangle of ALL tiles (the footpath block's buckets, so a slab the neighbour owns
+ * counts). A nearest-road transform gives each cell its distance d to the closest road cell and the way back
+ * to it; one ray from the cell straight AWAY from that road finds the opposite carriageway at d2. A cell of
+ * this tile with d + d2 <= PC_MED_NARROW is in a MEDIAN / traffic island (a band no wider than two maximum
+ * sidewalks), <= PC_MED_WIDE a wide island or a narrow wedge (it may hold buildings). Uncovered = no
+ * pavement or lawn triangle over the cell centre: the drawn ground (a paved lot, grass) shows there, 40+ cm
+ * under the slabs round it. Hot spots = 8 m buckets of uncovered narrow cells.
+ * ========================================================================== */
+#define PC_MC          (0.5 * PC_UPM)
+#define PC_MED_NARROW  (12.0 * PC_UPM)
+#define PC_MED_WIDE    (25.0 * PC_UPM)
+#define PC_MED_BUCKET  (8.0 * PC_UPM)
+
+static const RoamGrid *s_pc_grid;      /* set by the caller for one census run, NULL = no median census */
+void td5_roam_pave_census_set_grid(const RoamGrid *grid) { s_pc_grid = grid; }
+
+typedef struct { int64_t key; long n; double sx, sz, sgap; } PcMedHot;
+
+static int pc_hot_cmp(const void *a, const void *b)
+{
+    const PcMedHot *x = (const PcMedHot *)a, *y = (const PcMedHot *)b;
+    return x->n > y->n ? -1 : (x->n < y->n ? 1 : (x->key < y->key ? -1 : (x->key > y->key)));
+}
+
+static void pc_ras_tri(uint8_t *f, int nx, int nz, double x0, double z0, const double *X, const double *Z, uint8_t bit)
+{
+    double ax = X[0], bx = X[0], az = Z[0], bz = Z[0], d;
+    int i0, i1, j0, j1, i, j, q;
+    for (q = 1; q < 3; q++) {
+        if (X[q] < ax) ax = X[q];
+        if (X[q] > bx) bx = X[q];
+        if (Z[q] < az) az = Z[q];
+        if (Z[q] > bz) bz = Z[q];
+    }
+    d = (Z[1] - Z[2]) * (X[0] - X[2]) + (X[2] - X[1]) * (Z[0] - Z[2]);
+    if (fabs(d) < 1e-9) return;
+    i0 = (int)floor((ax - x0) / PC_MC - 0.5); i1 = (int)ceil((bx - x0) / PC_MC - 0.5);
+    j0 = (int)floor((az - z0) / PC_MC - 0.5); j1 = (int)ceil((bz - z0) / PC_MC - 0.5);
+    if (i0 < 0) i0 = 0;
+    if (j0 < 0) j0 = 0;
+    if (i1 > nx - 1) i1 = nx - 1;
+    if (j1 > nz - 1) j1 = nz - 1;
+    for (j = j0; j <= j1; j++)
+        for (i = i0; i <= i1; i++) {
+            const double x = x0 + (i + 0.5) * PC_MC, z = z0 + (j + 0.5) * PC_MC;
+            const double w0 = ((Z[1] - Z[2]) * (x - X[2]) + (X[2] - X[1]) * (z - Z[2])) / d;
+            const double w1 = ((Z[2] - Z[0]) * (x - X[2]) + (X[0] - X[2]) * (z - Z[2])) / d;
+            if (w0 >= 0.0 && w1 >= 0.0 && w0 + w1 <= 1.0) f[(size_t)j * nx + i] |= bit;
+        }
+}
+
+static void pc_ras_road(const RoamTile *t, uint8_t *f, int nx, int nz, double x0, double z0)
+{
+    uint32_t s;
+    for (s = 0; s < t->nspan; s++) {
+        const TD5_StripSpan *sp = &t->span[s];
+        const uint32_t L = sp->left_vertex_index, R = sp->right_vertex_index;
+        const int n = (int)(sp->pad_02[1] & 0x0Fu);
+        int kk;
+        if (n < 1 || n >= 16 || L + (uint32_t)n >= t->nvert || R + (uint32_t)n >= t->nvert) continue;
+        for (kk = 0; kk < n; kk++) {
+            const TD5_StripVertex *v4[4] = { &t->vert[L + kk], &t->vert[L + kk + 1], &t->vert[R + kk + 1], &t->vert[R + kk] };
+            double X[4], Z[4];
+            int c;
+            for (c = 0; c < 4; c++) {
+                X[c] = (double)t->org_x + sp->origin_x + v4[c]->x;
+                Z[c] = (double)t->org_z + sp->origin_z + v4[c]->z;
+            }
+            pc_ras_tri(f, nx, nz, x0, z0, X, Z, 1);
+            { const double X2[3] = { X[0], X[2], X[3] }, Z2[3] = { Z[0], Z[2], Z[3] }; pc_ras_tri(f, nx, nz, x0, z0, X2, Z2, 1); }
+        }
+    }
+    for (s = 0; s < t->ntri; s++) {
+        const RoamTri *tr = &t->tri[s];
+        double X[3], Z[3];
+        int c;
+        if (tr->v[0] >= t->nvert || tr->v[1] >= t->nvert || tr->v[2] >= t->nvert) continue;
+        for (c = 0; c < 3; c++) {
+            X[c] = (double)t->org_x + tr->ox + t->vert[tr->v[c]].x;
+            Z[c] = (double)t->org_z + tr->oz + t->vert[tr->v[c]].z;
+        }
+        pc_ras_tri(f, nx, nz, x0, z0, X, Z, 1);
+    }
+}
+
+static void pc_median_census(const RoamTile *tiles, int ntile, const PcSurf *surf, const PcSurfRef *ref, long nref,
+                             const double proj[4], const char *ld)
+{
+    const RoamGrid *g = s_pc_grid;
+    static const double k_bin_m[7] = { 3, 6, 9, 12, 18, 25, 1e9 };
+    int k, tx0 = 1 << 30, tz0 = 1 << 30, tx1 = -(1 << 30), tz1 = -(1 << 30), tw, th;
+    int *slot;
+    double area[2] = { 0, 0 }, unc[2] = { 0, 0 }, bin_a[7] = { 0 }, bin_u[7] = { 0 };
+    PcMedHot *hot = NULL;
+    long nhot = 0, caphot = 0;
+    char path[600];
+    FILE *o, *csv;
+    uint32_t t0 = td5_plat_time_ms();
+    if (!g) return;
+    for (k = 0; k < ntile; k++) {
+        if (tiles[k].tx < tx0) tx0 = tiles[k].tx;
+        if (tiles[k].tz < tz0) tz0 = tiles[k].tz;
+        if (tiles[k].tx > tx1) tx1 = tiles[k].tx;
+        if (tiles[k].tz > tz1) tz1 = tiles[k].tz;
+    }
+    if (ntile <= 0) return;
+    tw = tx1 - tx0 + 1; th = tz1 - tz0 + 1;
+    slot = (int *)malloc((size_t)tw * th * sizeof(int));
+    if (!slot) return;
+    for (k = 0; k < tw * th; k++) slot[k] = -1;
+    for (k = 0; k < ntile; k++) slot[(tiles[k].tz - tz0) * tw + (tiles[k].tx - tx0)] = k;
+    for (k = 0; k < ntile; k++) {
+        const RoamTile *t = &tiles[k];
+        double cor[4][2], x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300;
+        int nx, nz, i, j, dx, dz, a, b, nb;
+        uint8_t *f;
+        int32_t *nr;
+        long *bk;
+        roam_grid_corners(g, t->tx, t->tz, cor);
+        for (i = 0; i < 4; i++) {
+            if (cor[i][0] < x0) x0 = cor[i][0];
+            if (cor[i][0] > x1) x1 = cor[i][0];
+            if (cor[i][1] < z0) z0 = cor[i][1];
+            if (cor[i][1] > z1) z1 = cor[i][1];
+        }
+        x0 -= PC_MED_WIDE + PC_UPM; z0 -= PC_MED_WIDE + PC_UPM; x1 += PC_MED_WIDE + PC_UPM; z1 += PC_MED_WIDE + PC_UPM;
+        nx = (int)ceil((x1 - x0) / PC_MC); nz = (int)ceil((z1 - z0) / PC_MC);
+        nb = (int)ceil((x1 - x0) / PC_MED_BUCKET) * (int)ceil((z1 - z0) / PC_MED_BUCKET);
+        f = (uint8_t *)calloc((size_t)nx * nz, 1);
+        nr = (int32_t *)malloc((size_t)nx * nz * sizeof(int32_t));
+        bk = (long *)calloc((size_t)nb * 4u, sizeof(long));   /* n, sum x, sum z, sum gap (x, z, gap as longs of units) */
+        if (!f || !nr || !bk) { free(f); free(nr); free(bk); break; }
+        for (dz = -1; dz <= 1; dz++) for (dx = -1; dx <= 1; dx++) {
+            const int ax = t->tx + dx, az = t->tz + dz;
+            if (ax < tx0 || az < tz0 || ax > tx1 || az > tz1 || slot[(az - tz0) * tw + (ax - tx0)] < 0) continue;
+            pc_ras_road(&tiles[slot[(az - tz0) * tw + (ax - tx0)]], f, nx, nz, x0, z0);
+        }
+        for (b = (int)floor(z0 / PC_FP_CELL); b <= (int)floor(z1 / PC_FP_CELL); b++)
+            for (a = (int)floor(x0 / PC_FP_CELL); a <= (int)floor(x1 / PC_FP_CELL); a++) {
+                const int64_t key = pc_cell_key(a, b);
+                long lo = 0, hi = nref, r;
+                while (lo < hi) { const long mid = (lo + hi) / 2; if (ref[mid].key < key) lo = mid + 1; else hi = mid; }
+                for (r = lo; r < nref && ref[r].key == key; r++) pc_ras_tri(f, nx, nz, x0, z0, surf[ref[r].s].x, surf[ref[r].s].z, 2);
+            }
+        /* nearest road cell: two raster passes (dead reckoning), exact distance to the carried cell */
+        for (i = 0; i < nx * nz; i++) nr[i] = (f[i] & 1) ? i : -1;
+        {
+            static const int fw[4][2] = { { -1, -1 }, { 0, -1 }, { 1, -1 }, { -1, 0 } };
+            int pass;
+            for (pass = 0; pass < 2; pass++) {
+                const int js = pass ? nz - 1 : 0, je = pass ? -1 : nz, st = pass ? -1 : 1;
+                for (j = js; j != je; j += st)
+                    for (i = pass ? nx - 1 : 0; pass ? i >= 0 : i < nx; i += st) {
+                        const int c = j * nx + i;
+                        int q;
+                        double best = 1e300;
+                        if (nr[c] >= 0) { const int ri = nr[c] % nx, rj = nr[c] / nx; best = (double)(ri - i) * (ri - i) + (double)(rj - j) * (rj - j); }
+                        for (q = 0; q < 4; q++) {
+                            const int ni = i + (pass ? -fw[q][0] : fw[q][0]), nj = j + (pass ? -fw[q][1] : fw[q][1]);
+                            int cand, ri, rj;
+                            double dd;
+                            if (ni < 0 || nj < 0 || ni >= nx || nj >= nz) continue;
+                            cand = nr[nj * nx + ni];
+                            if (cand < 0) continue;
+                            ri = cand % nx; rj = cand / nx;
+                            dd = (double)(ri - i) * (ri - i) + (double)(rj - j) * (rj - j);
+                            if (dd < best) { best = dd; nr[c] = cand; }
+                        }
+                    }
+            }
+        }
+        {   /* [roam IA] DEV TD5RE_ROAM_MEDIAN_DUMP=x,z: the raster round a place point as a PPM in the log dir
+             * (black road, green cover, white other ground) */
+            const char *q = getenv("TD5RE_ROAM_MEDIAN_DUMP");
+            double qx, qz;
+            if (q && sscanf(q, "%lf,%lf", &qx, &qz) == 2 && qx >= x0 && qx < x1 && qz >= z0 && qz < z1) {
+                const int ci = (int)((qx - x0) / PC_MC), cj = (int)((qz - z0) / PC_MC), R = 120;
+                char dp[600];
+                FILE *pf;
+                snprintf(dp, sizeof dp, "%sroam_median_dump_%d_%d.ppm", ld ? ld : "", t->tx, t->tz);
+                if ((pf = fopen(dp, "wb")) != NULL) {
+                    int ii, jj;
+                    fprintf(pf, "P6 %d %d 255\n", 2 * R, 2 * R);
+                    for (jj = cj + R - 1; jj >= cj - R; jj--)
+                        for (ii = ci - R; ii < ci + R; ii++) {
+                            unsigned char rgb[3] = { 128, 128, 255 };
+                            if (ii >= 0 && jj >= 0 && ii < nx && jj < nz) {
+                                const uint8_t fl = f[(size_t)jj * nx + ii];
+                                rgb[0] = rgb[1] = rgb[2] = 255;
+                                if (fl & 2) { rgb[0] = 60; rgb[1] = 200; rgb[2] = 60; }
+                                if (fl & 1) { rgb[0] = rgb[1] = rgb[2] = 0; }
+                                if (ii == ci && jj == cj) { rgb[0] = 255; rgb[1] = 0; rgb[2] = 0; }
+                            }
+                            fwrite(rgb, 1, 3, pf);
+                        }
+                    fclose(pf);
+                }
+            }
+        }
+        for (j = 0; j < nz; j++)
+            for (i = 0; i < nx; i++) {
+                const int c = j * nx + i;
+                const double x = x0 + (i + 0.5) * PC_MC, z = z0 + (j + 0.5) * PC_MC;
+                double d, ux, uz, gap = -1.0, s;
+                int otx, otz, cls, bin;
+                if ((f[c] & 1) || nr[c] < 0) continue;
+                d = PC_MC * hypot((double)(nr[c] % nx - i), (double)(nr[c] / nx - j));
+                if (d > PC_MED_WIDE) continue;
+                roam_grid_tile_of(g, x, z, &otx, &otz);
+                if (otx != t->tx || otz != t->tz) continue;
+                ux = (double)(i - nr[c] % nx) * PC_MC / d; uz = (double)(j - nr[c] / nx) * PC_MC / d;
+                for (s = 0.5 * PC_MC; d + s <= PC_MED_WIDE; s += 0.5 * PC_MC) {
+                    const int ii = (int)floor((x + ux * s - x0) / PC_MC), jj = (int)floor((z + uz * s - z0) / PC_MC);
+                    if (ii < 0 || jj < 0 || ii >= nx || jj >= nz) break;
+                    if (f[(size_t)jj * nx + ii] & 1) { gap = d + s; break; }
+                }
+                if (gap < 0.0) continue;
+                cls = gap <= PC_MED_NARROW ? 0 : 1;
+                for (bin = 0; gap > k_bin_m[bin] * PC_UPM; bin++) { }
+                area[cls] += 0.25; bin_a[bin] += 0.25;
+                if (f[c] & 2) continue;
+                unc[cls] += 0.25; bin_u[bin] += 0.25;
+                if (cls == 0) {
+                    const int bi = (int)floor((x - x0) / PC_MED_BUCKET), bj = (int)floor((z - z0) / PC_MED_BUCKET);
+                    const int bw = (int)ceil((x1 - x0) / PC_MED_BUCKET), q = bj * bw + bi;
+                    bk[q * 4 + 0]++; bk[q * 4 + 1] += (long)(x - x0); bk[q * 4 + 2] += (long)(z - z0); bk[q * 4 + 3] += (long)gap;
+                }
+            }
+        {
+            const int bw = (int)ceil((x1 - x0) / PC_MED_BUCKET);
+            int q;
+            for (q = 0; q < nb; q++) {
+                if (!bk[q * 4]) continue;
+                if (nhot == caphot) {
+                    PcMedHot *nh;
+                    caphot = caphot ? caphot * 2 : 4096;
+                    if (!(nh = (PcMedHot *)realloc(hot, (size_t)caphot * sizeof *hot))) { nhot = 0; break; }
+                    hot = nh;
+                }
+                hot[nhot].key = ((int64_t)t->tx << 40) ^ ((int64_t)(t->tz & 0xFFFFF) << 20) ^ q;
+                hot[nhot].n = bk[q * 4];
+                hot[nhot].sx = x0 + (double)bk[q * 4 + 1] / bk[q * 4];
+                hot[nhot].sz = z0 + (double)bk[q * 4 + 2] / bk[q * 4];
+                hot[nhot].sgap = (double)bk[q * 4 + 3] / bk[q * 4];
+                nhot++;
+                (void)bw;
+            }
+        }
+        free(f); free(nr); free(bk);
+    }
+    free(slot);
+    if (nhot) qsort(hot, (size_t)nhot, sizeof *hot, pc_hot_cmp);
+    snprintf(path, sizeof path, "%sroam_median_census.txt", ld ? ld : "");
+    o = fopen(path, "w");
+    snprintf(path, sizeof path, "%sroam_median_census.csv", ld ? ld : "");
+    csv = fopen(path, "w");
+    if (o) {
+        int q;
+        fprintf(o, "roam MEDIAN census (IA): %d tiles, 0.5 m cells between two carriageways (one ray away from the nearest road)\n", ntile);
+        fprintf(o, "NARROW (gap <= %.0f m, medians + islands): %.0f m2, UNCOVERED %.0f m2 (%.2f %%)\n", PC_MED_NARROW / PC_UPM,
+                area[0], unc[0], area[0] > 0 ? 100.0 * unc[0] / area[0] : 0.0);
+        fprintf(o, "WIDE (%.0f < gap <= %.0f m, wide islands + narrow wedges, may hold buildings): %.0f m2, uncovered %.0f m2 (%.2f %%)\n",
+                PC_MED_NARROW / PC_UPM, PC_MED_WIDE / PC_UPM, area[1], unc[1], area[1] > 0 ? 100.0 * unc[1] / area[1] : 0.0);
+        fprintf(o, "by gap width (m): bin_upper area_m2 uncovered_m2\n");
+        for (q = 0; q < 6; q++) fprintf(o, "  %4.0f %10.0f %10.0f\n", k_bin_m[q], bin_a[q], bin_u[q]);
+        fprintf(o, "hot spots (8 m buckets of uncovered NARROW cells, most first): uncovered_m2 mean_gap_m tile place_x place_z lat lon\n");
+        for (q = 0; q < nhot && q < 60; q++)
+            fprintf(o, "%.1f %.1f %lld %.0f %.0f %.6f %.6f\n", hot[q].n * 0.25, hot[q].sgap / PC_UPM, (long long)(hot[q].key >> 40),
+                    hot[q].sx, hot[q].sz, proj && proj[1] > 0 ? proj[0] + hot[q].sz / (proj[1] * PC_UPM) : 0.0,
+                    proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(hot[q].sx) / (proj[3] * PC_UPM) : 0.0);
+        fclose(o);
+    }
+    if (csv) {
+        long q;
+        fprintf(csv, "uncovered_m2,mean_gap_m,place_x,place_z,lat,lon\n");
+        for (q = 0; q < nhot; q++)
+            fprintf(csv, "%.2f,%.2f,%.0f,%.0f,%.6f,%.6f\n", hot[q].n * 0.25, hot[q].sgap / PC_UPM, hot[q].sx, hot[q].sz,
+                    proj && proj[1] > 0 ? proj[0] + hot[q].sz / (proj[1] * PC_UPM) : 0.0,
+                    proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(hot[q].sx) / (proj[3] * PC_UPM) : 0.0);
+        fclose(csv);
+    }
+    fprintf(stderr, "MEDIANCENSUS: narrow %.0f m2 uncovered %.0f m2 (%.2f %%), wide %.0f m2 uncovered %.0f m2, %ld hot buckets, %u ms\n",
+            area[0], unc[0], area[0] > 0 ? 100.0 * unc[0] / area[0] : 0.0, area[1], unc[1], nhot, (unsigned)(td5_plat_time_ms() - t0));
+    free(hot);
 }
 
 int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *scn, TD5_RoamHeight *hc,
@@ -198,13 +491,22 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                                     fpv[nfpv].x = x[q]; fpv[nfpv].y = y[q]; fpv[nfpv].z = z[q];
                                     fpv[nfpv].tx = sc->tx; fpv[nfpv].tz = sc->tz; nfpv++;
                                 }
-                            } else if ((page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0) {
+                            } else if ((page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0 ||
+                                       s_pc_grid) {   /* [roam IA] + raised faces (roofs) for the median census */
                                 const double ax = x[1] - x[0], ay = y[1] - y[0], az = z[1] - z[0];
                                 const double bx = x[2] - x[0], by = y[2] - y[0], bz = z[2] - z[0];
                                 const double ny = az * bx - ax * bz, nl = sqrt((ay * bz - az * by) * (ay * bz - az * by) + ny * ny +
                                                                               (ax * by - ay * bx) * (ax * by - ay * bx));
                                 int tt;
-                                if (nl > 0.0 && fabs(ny) / nl > 0.7)
+                                const int pave = (page == TD5_TG_PAGE_SIDEWALK && col == 0xFFFFFFFFu) || page == TD5_TG_PAGE_R3_BLOCK + 0;
+                                int raised = 0;
+                                if (!pave && nl > 0.0 && fabs(ny) / nl > 0.7) {      /* [roam IA] a roof, not a city lot */
+                                    double gg;
+                                    raised = 1;
+                                    for (q = 0; q < nvp && raised; q++)
+                                        if (!ground(gu, x[q], z[q], &gg) || y[q] - gg < 25.0 * PC_CM) raised = 0;
+                                }
+                                if (nl > 0.0 && fabs(ny) / nl > 0.7 && (pave || raised))
                                     for (tt = 0; tt < nvp - 2; tt++) {
                                         const int i1 = tt + 1, i2 = tt + 2;
                                         PcSurf *f;
@@ -218,7 +520,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                                         f->x[0] = x[0]; f->y[0] = y[0]; f->z[0] = z[0];
                                         f->x[1] = x[i1]; f->y[1] = y[i1]; f->z[1] = z[i1];
                                         f->x[2] = x[i2]; f->y[2] = y[i2]; f->z[2] = z[i2];
-                                        f->lawn = page == TD5_TG_PAGE_R3_BLOCK + 0 ? (nvp == 4 ? 1 : 2) : 0;
+                                        f->lawn = !pave ? 3 : page == TD5_TG_PAGE_R3_BLOCK + 0 ? (nvp == 4 ? 1 : 2) : 0;
                                     }
                             }
                         }
@@ -325,6 +627,7 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
             while (lo < hi) { const long mid = (lo + hi) / 2; if (ref[mid].key < key) lo = mid + 1; else hi = mid; }
             for (k2 = lo; k2 < nref && ref[k2].key == key; k2++) {
                 double ys;
+                if (surf[ref[k2].s].lawn == 3) continue;              /* [roam IA] roofs: median census only */
                 if (pc_surf_y(&surf[ref[k2].s], v->x, v->z, &ys) && ys > top) {
                     const PcSurf *t = &surf[ref[k2].s];
                     top = ys; on = 1; lawn = t->lawn;
@@ -349,6 +652,55 @@ int td5_roam_pave_census(const RoamTile *tiles, int ntile, TD5_RoamScnSource *sc
                     fprow[nfprow].x = v->x; fprow[nfprow].y = v->y; fprow[nfprow].z = v->z;
                     fprow[nfprow].tx = v->tx; fprow[nfprow].tz = v->tz; fprow[nfprow].cls = 5; nfprow++;
                 }
+            }
+        }
+        pc_median_census(tiles, ntile, surf, ref, nref, proj, ld);   /* [roam IA] */
+        {   /* [roam IA] LAWN poke census: the drawn ground over a lawn's INTERIOR (the vertex check above only sees
+             * corners). 21 barycentric samples per lawn triangle (plaza lawn 2, island / median lawn 1): a sample
+             * where the ground is less than 1 cm under the lawn shows grass through grass ("hay pasto debajo del
+             * pasto?"). Area-weighted. */
+            double area_s[3] = { 0, 0, 0 }, poke_s[3] = { 0, 0, 0 }, worst[3] = { -1e30, -1e30, -1e30 };
+            double wx[3] = { 0, 0, 0 }, wz[3] = { 0, 0, 0 };
+            long si2;
+            for (si2 = 0; si2 < nsurf; si2++) {
+                const PcSurf *t2 = &surf[si2];
+                const int L2 = t2->lawn;
+                double ar, nsamp = 0, npoke = 0;
+                int a2, b2;
+                if (L2 != 1 && L2 != 2 && L2 != 0) continue;
+                ar = 0.5 * fabs((t2->x[1] - t2->x[0]) * (t2->z[2] - t2->z[0]) - (t2->z[1] - t2->z[0]) * (t2->x[2] - t2->x[0])) / (PC_UPM * PC_UPM);
+                for (a2 = 0; a2 <= 5; a2++) for (b2 = 0; a2 + b2 <= 5; b2++) {
+                    const double w0 = (a2 + 0.25) / 6.25, w1 = (b2 + 0.25) / 6.25, w2 = 1.0 - w0 - w1;
+                    double g, x2, z2, y2;
+                    if (w2 < 0.0) continue;
+                    x2 = w0 * t2->x[0] + w1 * t2->x[1] + w2 * t2->x[2];
+                    z2 = w0 * t2->z[0] + w1 * t2->z[1] + w2 * t2->z[2];
+                    y2 = w0 * t2->y[0] + w1 * t2->y[1] + w2 * t2->y[2];
+                    if (!ground(gu, x2, z2, &g)) continue;
+                    nsamp++;
+                    if (g > y2 - 1.0 * PC_CM) npoke++;
+                    if (g - y2 > worst[L2]) { worst[L2] = g - y2; wx[L2] = x2; wz[L2] = z2; }
+                }
+                if (nsamp > 0) { area_s[L2] += ar; poke_s[L2] += ar * npoke / nsamp; }
+            }
+            {
+                char lp[600];
+                FILE *lf;
+                snprintf(lp, sizeof lp, "%sroam_lawn_census.txt", ld ? ld : "");
+                if ((lf = fopen(lp, "w")) != NULL) {
+                    int q3;
+                    static const char *const nm[3] = { "paving slab", "island / median lawn", "plaza lawn" };
+                    fprintf(lf, "roam LAWN poke census (IA): drawn ground less than 1 cm under the surface, 21 samples per triangle\n");
+                    for (q3 = 2; q3 >= 0; q3--)
+                        fprintf(lf, "%-22s %10.0f m2, ground through it on %8.1f m2 (%.3f %%), worst ground over it %.1f cm at %.0f %.0f "
+                                    "(%.6f %.6f)\n", nm[q3], area_s[q3], poke_s[q3], area_s[q3] > 0 ? 100.0 * poke_s[q3] / area_s[q3] : 0.0,
+                                worst[q3] / PC_CM, wx[q3], wz[q3],
+                                proj && proj[1] > 0 ? proj[0] + wz[q3] / (proj[1] * PC_UPM) : 0.0,
+                                proj && proj[3] > 0 ? proj[2] + td5_geo_game_x(wx[q3]) / (proj[3] * PC_UPM) : 0.0);
+                    fclose(lf);
+                }
+                fprintf(stderr, "LAWNCENSUS: plaza lawn %.0f m2 poked %.1f m2, island lawn %.0f m2 poked %.1f m2, paving %.0f m2 poked %.1f m2\n",
+                        area_s[2], poke_s[2], area_s[1], poke_s[1], area_s[0], poke_s[0]);
             }
         }
         free(ref);

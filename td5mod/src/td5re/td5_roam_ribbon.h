@@ -69,6 +69,7 @@
 #define ROAM_RIBF_BORE        0x40u
 #define ROAM_RIBF_CHUNKED     0x80u   /* split at synthetic joins (edge > 1 km)      */
 #define ROAM_RIBF_UNTWIST     0x400u  /* [T10] rows dropped: a lane quad folded over   */
+#define ROAM_RIBF_DECKENV     0x800u  /* [roam IE] a deck floor lifted rows (bridge chain) */
 
 /* A grade-separated crossing under this edge (design 1.5): the deck must clear
  * y_under by ROAM_XSEP_LIFT at the PLACE-frame point (x, z). y_under is the
@@ -76,6 +77,24 @@
 typedef struct { double x, z, y_under; } RoamCross;
 
 struct RoamRibbon;
+
+/* [roam IE] The DECK FLOOR of an edge on a bridge chain (td5_roam_tile.c "BRIDGE DECKS AND
+ * THEIR APPROACHES"): the least height the road may take, sampled every `step` units of
+ * distance from the edge's first INPUT point (node_a), sample 0 at s0 (negative: behind
+ * node_a). Past either end of the samples there is no floor. The ribbon takes
+ * roam_deck_smax(ground target, floor) on every interior row. */
+typedef struct {
+    double *y;                    /* n samples, place units                               */
+    int     n;
+    double  s0, step;
+    double  soft;                 /* roam_deck_smax half width, units                      */
+    int     on_struct;            /* the edge is a deck itself                             */
+} RoamDeckEnv;
+
+/* The floor at distance s (linear between samples). 0 when s is outside the samples. */
+int    roam_deck_env_at(const RoamDeckEnv *e, double s, double *out);
+/* Quadratic smooth max: a when b <= a - k, b when b >= a + k, a C1 blend between. */
+double roam_deck_smax(double a, double b, double k);
 
 typedef struct {
     uint64_t       key;           /* (way_id << 16) | piece ordinal                    */
@@ -121,6 +140,9 @@ typedef struct {
      * lowered by the caller; cross[] of a tunnel=1 edge holds the roads ABOVE it
      * (y_under = their solved height), and the bore must clear them by
      * ROAM_XSEP_LIFT. */
+    /* [roam IE] the deck floor (NULL = none). An edge with a floor takes no leader
+     * (its profile is the bridge's, as a deck's is). */
+    const RoamDeckEnv *deck;
 } RoamEdgeIn;
 
 /* Per quad, for ownership. Midpoint of the quad's centre segment, PLACE frame. */

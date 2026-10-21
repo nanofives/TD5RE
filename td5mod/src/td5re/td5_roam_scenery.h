@@ -55,18 +55,28 @@
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
 #include "td5_roam_furniture.h"
+#include "td5_roam_rails.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  9u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  11u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
                                      * 7 = round H merge: HC verge + HD lots together
                                      * 8 = roam M: the place frame is the GAME frame (x = -east,
                                      *     td5_geo_frame.h), La Plata no longer mirrored
-                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes */
+                                     * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes
+                                     * 10 = roam IA: a gap of <= 25 m to another carriageway with no building in it is an
+                                     *      island filled to the middle (any streets), island slabs keep their back face
+                                     * 10 = roam IB: no kerb fences, no stamped TD5 landmark prefabs
+                                     * 10 = roam IC: avenue medians + named-ring plazas green, Overture footprints
+                                     *     not built on them / on parks, dropped footprints free the frontage,
+                                     *     infill 1-3 floors (taller on avenues) 12-24 m deep, AREAS spikes
+                                     * 10 = roam ID: railways (td5_roam_rails.c, the RAILS tile layer)
+                                     * 11 = round I integration: every round I branch combined (each bumped 9 -> 10 on its own,
+                                     *      11 so no tile cached by a single branch is reused) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -108,6 +118,19 @@ int    roam_ctx_owned(const TG_TileCtx *c, double x, double z);
 int    roam_ctx_sb_of(const TG_TileCtx *c, double x, double z);
 /* ground height at a tile-local point (the scenery's own height source) */
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z);
+/* [roam ID] the RAW height raster at a tile-local point (no G4b lowering under the road): 1 + *h (and
+ * *wet when non-NULL) when the tile's window covers it */
+int    roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet);
+/* [roam ID] the drivable surface height at a tile-local point: of the primitives under (x, z), the one
+ * whose height there is nearest ref_y (a deck over a street answers by its height). 1 on a hit. */
+int    roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, double *y);
+/* [roam ID] roam_ctx_on_road counting only the primitives whose height range meets [y_lo, y_hi]: a road
+ * deck high over the polygon or a street far under it is not "on" it */
+int    roam_ctx_on_road_band(const TG_TileCtx *c, const double *x, const double *z, int n, double y_lo, double y_hi);
+/* [roam ID] the pavement slab (this tile's, emitted before) / plaza lawn plane (the 3x3's) height at a
+ * tile-local point; 1 on a hit */
+int    roam_ctx_slab_y(const TG_TileCtx *c, double x, double z, double *y);
+int    roam_ctx_lawn_y(const TG_TileCtx *c, double x, double z, double *y);
 /* Reserve one mesh record in sub-block `sb`: returns the TG_Buf* to write it into (its offset is
  * recorded; void* because TG_Buf lives in td5_trackgen_internal.h), NULL on out of memory. The
  * caller appends exactly one MODELS.DAT mesh record. */
@@ -129,6 +152,8 @@ typedef struct {
      * kerb faces, pieces cut back / dropped by the guard, kerb faces dropped, facade clips,
      * ribbon kerbs whose way the cache lacks, (edge, side) widths per TD5_GEO_SWSRC_* */
     int  pv_bedges, pv_interior, pv_chains, pv_pieces, pv_corner, pv_collapsed, pv_island, pv_median;
+    int  pv_island_fill;          /* [roam IA] kerb vertices made an island by the no-building gap rule */
+    int  pv_island_tops, pv_island_top_refused;   /* [roam IA] island loop top triangles emitted, loops left to the pieces */
     int  pv_free_clamp, pv_fence, pv_rail, pv_kerb, pv_cut, pv_drop, pv_kerb_cut, pv_noway;
     int  pv_src[7];
     uint32_t ms_pv;
@@ -141,6 +166,7 @@ typedef struct {
     uint32_t ms, ms_src, ms_emit;   /* worker time: total, OSM source, emit           */
     int  road_tiles;                /* ROAD tiles of the 3x3 that were available       */
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
+    TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
      * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).
@@ -154,6 +180,17 @@ typedef struct {
      * that takes none, a lot too shallow or bent) and the footprint area added (m2) */
     int  inf_lots, inf_emitted, inf_drop_real, inf_drop_road, inf_drop_area, inf_drop_shape;
     double inf_m2;
+    /* [IC] avenue medians (a rambla's kerb loop) kept green + taking no building; Overture footprints not built on a
+     * park / ring plaza / median polygon (the green veto); footprints the pavement + infill stopped treating as
+     * standing because the emitter drops them (sc_bld_drops). Frontage METRES of the owned infill candidates by
+     * outcome: built, taken by a real footprint, refused by an area (green / open / not city), other (road, shape) */
+    int  lot_medians, bld_veto_green, pv_bld_gone, lot_cover_green;
+    double inf_m_built, inf_m_real, inf_m_area, inf_m_other;
+    /* [integ-roamI] infill candidates refused because a drawn railway bed / platform reaches them (counted in
+     * inf_drop_area too) and their frontage metres */
+    int  inf_drop_rail;
+    double inf_m_rail;
+    int  inf_rail_moved, inf_rail_shallow;   /* ... built anyway: front moved back behind the bed / shallower */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

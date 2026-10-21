@@ -35,6 +35,10 @@
 #include "td5_geo_frame.h"       /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
 
+/* [roam IE] deck floor numbers, also hashed into the tile input (ctx_input_hash) */
+#define ROAM_DECK_REACH_U  (250.0 * TD5_ROAM_UPM)
+#define ROAM_DECK_G_U      0.05
+#define ROAM_DECK_R_U      (800.0 * TD5_ROAM_UPM)
 #define LOG_TAG "roam"
 
 #define FNV_INIT 2166136261u
@@ -753,6 +757,7 @@ static uint32_t ctx_input_hash(TD5_RoamTileCtx *c, const double win[4], int *nti
     h = fnv_dbl(h, ROAM_GRADE_CAP);  h = fnv_dbl(h, ROAM_GRADE_ABSMAX);
     h = fnv_dbl(h, ROAM_CURV_CAP);   h = fnv_dbl(h, ROAM_XSEP_LIFT);
     h = fnv_dbl(h, ROAM_XSEP_RAMP_FRAC); h = fnv_dbl(h, ROAM_RIB_DECK_FLAT);
+    h = fnv_dbl(h, ROAM_DECK_REACH_U); h = fnv_dbl(h, ROAM_DECK_G_U); h = fnv_dbl(h, ROAM_DECK_R_U);   /* [roam IE] */
     h = fnv_dbl(h, ROAM_PAD_TOUCH_M);    h = fnv_dbl(h, ROAM_SPREAD_CLAMP_M);
     h = fnv_u32(h, ROAM_HC_PLANE);
     h = fnv_u32(h, c->hdr_fnv);
@@ -806,6 +811,14 @@ struct Work {
     uint8_t   *bstate;             /* per edge: 0 todo, 1 building, 2 done            */
     double    *nlow;               /* per node: lowered JOIN pin (bore chain), NAN none */
     double    *cbox;               /* per cluster: patch vertex bbox minx,minz,maxx,maxz */
+    /* [roam IE] deck floors: per edge (0 unknown, 1 built, 2 none) and per JOIN node */
+    RoamDeckEnv *denv;  uint8_t *denvs;
+    double    *nhigh;  uint8_t *nhighs;
+    uint8_t   *cdeck;              /* [roam IE] per cluster: H_c took a deck floor      */
+    double    *hcraw;              /* [roam IE] per cluster: H_c before the floor       */
+    double    *dk_dist; uint32_t *dk_seen; int *dk_list; uint8_t *dk_done;   /* dk_search scratch */
+    int        dk_cap;  uint32_t dk_gen;
+    uint8_t   *dknear;  int dknear_n;  /* [roam IE] per edge of the current graph: 0 ?, 1 near a deck, 2 not */
     double     win[4];             /* the final graph window                           */
     uint32_t   hash;               /* input hash for the final window                  */
     int        cache_tiles;
@@ -822,6 +835,9 @@ static void work_free(Work *w)
     free(w->hc); free(w->cspread); free(w->cgr); free(w->cpl); free(w->hcs); free(w->apin); free(w->apins);
     free(w->px); free(w->pz);
     free(w->dep_first); free(w->dep_n); free(w->dep); free(w->depk); free(w->bstate); free(w->nlow); free(w->cbox);
+    if (w->denv) for (i = 0; i < w->g.nedge; i++) free(w->denv[i].y);
+    free(w->denv); free(w->denvs); free(w->nhigh); free(w->nhighs); free(w->cdeck); free(w->hcraw);
+    free(w->dk_dist); free(w->dk_seen); free(w->dk_list); free(w->dk_done); free(w->dknear);
     if (w->h_live) td5_roam_height_close(&w->h);
     if (w->g_live) td5_roam_graph_free(&w->g);
     free(w);
@@ -851,7 +867,9 @@ static int work_ground(Work *w, double x, double z, double *out)
  * at its cut row (work_arm_pin). Not for a ROW_COVERED union: its covered cut row
  * lies flat under the patch, so that patch stays flat at H_c as before. A cluster
  * within the spread keeps its mean exactly. */
-static int work_hc(Work *w, int ci, double *out)
+static void dk_cluster_lift(Work *w, int ci);   /* [roam IE] below */
+
+static int work_hc_raw(Work *w, int ci, double *out)
 {
     if (w->hcs[ci] == 0) {
         const TD5_RoamGraph *g = &w->g;
@@ -908,9 +926,24 @@ static int work_hc(Work *w, int ci, double *out)
                     w->cpl[ci] = 1;
                 }
             }
+            if (w->hcraw) w->hcraw[ci] = w->hc[ci];   /* [roam IE] before any deck floor */
         }
     }
     if (w->hcs[ci] != 1) return 0;
+    *out = w->hcraw ? w->hcraw[ci] : w->hc[ci];
+    return 1;
+}
+
+/* The cluster height: work_hc_raw, then [roam IE] the deck floor on a pass-through junction. */
+static int work_hc(Work *w, int ci, double *out)
+{
+    double h0;
+    if (!work_hc_raw(w, ci, &h0)) return 0;
+    if (w->cdeck && !(w->cdeck[ci] & 2)) {
+        /* [roam IE] a pass-through junction near a deck rides on the deck floor */
+        w->cdeck[ci] |= 2;
+        dk_cluster_lift(w, ci);
+    }
     *out = w->hc[ci];
     return 1;
 }
@@ -967,7 +1000,7 @@ static int work_arm_pin(Work *w, int gi, double *out)
          * made from the other arms' pins, so a per-arm pin left the covered row
          * standing off the patch (casco: up to 6 units; 0 with every arm at H_c). */
         if (w->cspread[ci] > clamp_u && dev > clamp_u &&
-            !(g->cluster[ci].flags & TD5_ROAM_CL_ROW_COVERED)) {
+            !(g->cluster[ci].flags & TD5_ROAM_CL_ROW_COVERED) && !(w->cdeck && (w->cdeck[ci] & 1))) {
             w->apin[gi] = gr + (hc > gr ? clamp_u : -clamp_u);
             w->st.arm_clamped++;
         } else {
@@ -979,6 +1012,8 @@ static int work_arm_pin(Work *w, int gi, double *out)
     *out = w->apin[gi];
     return 1;
 }
+
+static int work_node_deck(Work *w, int node, double *out);   /* [roam IE] below */
 
 /* The pin of one end of an edge: cluster arm pin, ground at a JOIN node, NaN at a
  * dead end. Returns 0 when the end needs a ribbon-less treatment (INTERNAL). */
@@ -998,6 +1033,11 @@ static int work_end_pin(Work *w, int ei, int end, double *pin)
         if (!work_ground(w, nd->x, nd->z, &gr)) return -1;
         /* [F1-T10] a JOIN on a bore chain sits lower (td5_roam_tile.c work_bore) */
         if (w->nlow && !isnan(w->nlow[en->node]) && w->nlow[en->node] < gr) gr = w->nlow[en->node];
+        else {
+            /* [roam IE] a JOIN on a bridge chain takes the deck floor */
+            double fy;
+            if (work_node_deck(w, en->node, &fy)) gr = roam_deck_smax(gr, fy, ROAM_DECK_SOFT_U);
+        }
         *pin = gr;
         return 1;
     }
@@ -1008,6 +1048,8 @@ static int work_end_pin(Work *w, int ei, int end, double *pin)
 /* One graph edge -> one RoamEdgeIn (the T3 -> T4 adapter of _archive/roam/F1/T4).
  * Returns 1 when a ribbon is to be built, 0 for an INTERNAL / unset end, -1 when a
  * pin could not be sampled. */
+static const RoamDeckEnv *work_edge_env(Work *w, int ei);   /* [roam IE] below */
+
 static int work_edge_in(Work *w, int ei, const RoamCross *cross, int ncross, RoamEdgeIn *in)
 {
     const TD5_RoamGraph *g = &w->g;
@@ -1054,6 +1096,7 @@ static int work_edge_in(Work *w, int ei, const RoamCross *cross, int ncross, Roa
     in->ncross  = ncross;
     in->rowq_a  = e->end[0].rowq;
     in->rowq_b  = e->end[1].rowq;
+    in->deck    = work_edge_env(w, ei);     /* [roam IE] */
     return 1;
 }
 
@@ -1231,6 +1274,792 @@ static int dep_push(Work *w, int d, int kind)
     return 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * [roam IE] BRIDGE DECKS AND THEIR APPROACHES (Mariano 2026-10-20: "bridges are a raised
+ * segment and nothing else, the transition should be more realistic").
+ *
+ * Before: a bridge=yes edge was lifted only inside its own OSM way, from end rows at the
+ * ground, at 6.9 % and then 20 % when that did not reach the clearance, and only when a
+ * road ran under it (30 of the 339 partido bridges). The rest (streams, drains, the
+ * Autopista viaducts over the wetland) followed the smoothed ground.
+ *
+ * Now every edge and junction within ROAM_DECK_REACH (graph distance) of a deck gets a
+ * FLOOR, built from the graph and the height raster only (no ribbon is read, so there is
+ * no build order, and every tile that holds the neighbourhood computes the same floor):
+ *   HARD  a CROSSING of the deck with a lower-layer road: ground there + ROAM_XSEP_LIFT +
+ *         ROAM_DECK_MARGIN, flat for ROAM_RIB_DECK_FLAT rows each side; on a deck RUN
+ *         (deck edges through JOIN nodes) the upper hull of those flats and the run's two
+ *         abutments (the deck never sags between them);
+ *   SOFT  a WET row of a deck: the water surface + ROAM_DECK_WATER.
+ *   Every point drops away at ROAM_DECK_G (5 %) after a parabolic crest of radius
+ *   ROAM_DECK_R, by graph distance.
+ *   ANCHORS: an at-grade junction (a cluster that is not pass-through, dk_pass) is never
+ *   moved; the floor climbs off it at ROAM_DECK_ANCHOR_G for the hard part, ROAM_DECK_G
+ *   for the soft part (a drain between two city corners stays nearly flat).
+ *   PASS-THROUGH junctions (a 2-arm taper / bend, a junction whose arms are all on the
+ *   structure, or one of one-way major roads only: merges, diverges, interchange ramps)
+ *   are carried with the deck: their H_c takes the floor at the centroid.
+ * The ribbon takes roam_deck_smax(ground target, floor) (a quadratic smooth max: the toe
+ * of a ramp is a sag of radius 2 * soft / g^2, not a kink); a JOIN pin takes the same,
+ * read once per node from one canonical edge. Bores keep their own chain (work_bore).
+ * ------------------------------------------------------------------------- */
+
+#define ROAM_DEP_DECK        4
+#define ROAM_DECK_REACH      ROAM_DECK_REACH_U        /* graph distance a floor reaches past a deck  */
+#define ROAM_DECK_G          ROAM_DECK_G_U            /* ramp grade                                  */
+#define ROAM_DECK_R          ROAM_DECK_R_U            /* crest radius                                */
+#define ROAM_DECK_ANCHOR_G   0.10                     /* hard floor off an at-grade junction         */
+#define ROAM_DECK_SOFT       ROAM_DECK_SOFT_U         /* smooth-max half width (td5_roam_tile.h)    */
+#define ROAM_DECK_MARGIN     (0.5 * TD5_ROAM_UPM)     /* over the clearance at a crossing            */
+#define ROAM_DECK_WATER      (2.5 * TD5_ROAM_UPM)     /* deck over the water surface                 */
+#define ROAM_DECK_STEP       (2.0 * TD5_ROAM_UPM)     /* floor sample spacing                        */
+#define ROAM_DECK_HOPS       64
+#define ROAM_DECK_INF        1e300
+
+typedef struct { double s, y, f; int hard; } DkPt;              /* a constraint: flat half f */
+
+/* An edge whose profile is a deck. */
+static int dk_struct(const TD5_RoamEdge *e) { return e->bridge && e->layer >= 1 && e->tunnel != 1; }
+
+/* DEV A/B: TD5RE_ROAM_DECK_FLOOR=0 builds the tiles as before roam IE (no floor, no pass-through lift, approaches may
+ * lead). Not hashed: clear the ROAMTILE files when switching it. RELEASE: always on. */
+static int dk_on(void)
+{
+#ifndef TD5RE_RELEASE
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_int("TD5RE_ROAM_DECK_FLOOR", 1, 0, 1);
+    return s_on;
+#else
+    return 1;
+#endif
+}
+
+static int dk_has_ribbon(const TD5_RoamEdge *e)
+{
+    return e->end[0].kind != TD5_ROAM_END_INTERNAL && e->end[1].kind != TD5_ROAM_END_INTERNAL;
+}
+
+/* A junction the deck floor passes through (see the section comment). Graph only. */
+static int dk_pass(const TD5_RoamGraph *g, int ci)
+{
+    const TD5_RoamCluster *cl = &g->cluster[ci];
+    int i, all_up = 1, all_major = 1;
+    if (cl->narm <= 0) return 0;
+    if (cl->narm == 2) return 1;
+    for (i = 0; i < cl->narm; i++) {
+        const TD5_RoamEdge *e = &g->edge[g->arm[cl->arm_first + i].edge];
+        if (e->layer < 1) all_up = 0;
+        if (!e->oneway || e->klass < TD5_GEO_RC_PRIMARY) all_major = 0;
+    }
+    return all_up || (all_major && cl->narm <= 4);
+}
+
+/* graph vertex of a node: its cluster (nnode + ci) or the node itself */
+static int dk_vert(const TD5_RoamGraph *g, int node)
+{
+    const int c = g->node[node].cluster;
+    return c >= 0 ? g->nnode + c : node;
+}
+
+/* graph vertex of an edge END: the cluster it is cut into (its node need not be a member), else its node */
+static int dk_vend(const TD5_RoamGraph *g, const TD5_RoamEdge *e, int end)
+{
+    const TD5_RoamEdgeEnd *en = &e->end[end];
+    if ((en->kind == TD5_ROAM_END_CLUSTER || en->kind == TD5_ROAM_END_INTERNAL) && en->cluster >= 0) return g->nnode + en->cluster;
+    return dk_vert(g, end ? e->node_b : e->node_a);
+}
+
+/* Bounded Dijkstra from vertex `src` over the street graph (edge `skip` excluded). The
+ * search runs THROUGH JOIN nodes and pass-through clusters within ROAM_DECK_REACH; a
+ * cluster that is not pass-through is reached (an anchor) but not expanded, nor is a dead
+ * end. Distances in w->dk_dist (valid where w->dk_seen == w->dk_gen); the reached vertices
+ * in w->dk_list[0..*nout). Returns 0 on out of memory. */
+static int dk_reserve(Work *w)
+{
+    const int nv = w->g.nnode + w->g.ncluster + 1;
+    if (nv > w->dk_cap) {
+        double *d = (double *)realloc(w->dk_dist, (size_t)nv * sizeof(double));
+        uint32_t *s;
+        int *l;
+        uint8_t *o;
+        if (!d) return 0;
+        w->dk_dist = d;
+        s = (uint32_t *)realloc(w->dk_seen, (size_t)nv * sizeof(uint32_t));
+        if (!s) return 0;
+        w->dk_seen = s;
+        l = (int *)realloc(w->dk_list, (size_t)nv * sizeof(int));
+        if (!l) return 0;
+        w->dk_list = l;
+        o = (uint8_t *)realloc(w->dk_done, (size_t)nv);
+        if (!o) return 0;
+        w->dk_done = o;
+        memset(w->dk_seen + w->dk_cap, 0, (size_t)(nv - w->dk_cap) * sizeof(uint32_t));
+        w->dk_cap = nv;
+    }
+    return 1;
+}
+
+static int dk_search(Work *w, int src, int skip, int klass, int *nout)
+{
+    const TD5_RoamGraph *g = &w->g;
+    int n = 0;
+    if (!dk_reserve(w)) return 0;
+    if (++w->dk_gen == 0) { memset(w->dk_seen, 0, (size_t)w->dk_cap * sizeof(uint32_t)); w->dk_gen = 1; }
+    w->dk_seen[src] = w->dk_gen; w->dk_dist[src] = 0.0; w->dk_done[src] = 0;
+    w->dk_list[n++] = src;
+    for (;;) {
+        int k, best = -1, v, m, cnt;
+        double bd = ROAM_DECK_INF;
+        for (k = 0; k < n; k++) {
+            const int u = w->dk_list[k];
+            if (!w->dk_done[u] && w->dk_dist[u] < bd) { bd = w->dk_dist[u]; best = u; }
+        }
+        if (best < 0) break;
+        v = best;
+        w->dk_done[v] = 1;
+        if (w->dk_dist[v] > ROAM_DECK_REACH) continue;
+        if (v >= g->nnode) {
+            const int ci = v - g->nnode;
+            if (v != src && !dk_pass(g, ci)) continue;               /* an anchor */
+            if (v == src && !dk_pass(g, ci)) continue;
+            cnt = g->cluster[ci].narm;
+        } else {
+            const TD5_RoamNode *nd = &g->node[v];
+            if (nd->kind != TD5_ROAM_NODE_JOIN && v != src) continue;
+            cnt = nd->nend;
+        }
+        for (m = 0; m < cnt; m++) {
+            int ei, end, wv;
+            const TD5_RoamEdge *e;
+            double nd2;
+            if (v >= g->nnode) {
+                const TD5_RoamArm *a = &g->arm[g->cluster[v - g->nnode].arm_first + m];
+                ei = a->edge; end = a->end;
+            } else {
+                const TD5_RoamEndRef *r = &g->node_end[g->node[v].end_first + m];
+                ei = r->edge; end = r->end;
+            }
+            if (ei == skip) continue;
+            e = &g->edge[ei];
+            if (!dk_has_ribbon(e) || e->tunnel == 1) continue;
+            if (klass >= 0 && v >= g->nnode && e->klass != klass) continue;   /* out of a junction: only its own road (class + links); a JOIN is one road */
+            wv = dk_vend(g, e, 1 - end);
+            nd2 = w->dk_dist[v] + fmax(0.0, e->end[1].s - e->end[0].s);   /* cut row to cut row */
+            if (w->dk_seen[wv] != w->dk_gen) {
+                w->dk_seen[wv] = w->dk_gen; w->dk_dist[wv] = nd2; w->dk_done[wv] = 0;
+                w->dk_list[n++] = wv;
+            } else if (nd2 < w->dk_dist[wv] && !w->dk_done[wv]) {
+                w->dk_dist[wv] = nd2;
+            }
+        }
+    }
+    *nout = n;
+    return 1;
+}
+
+/* ground (and wet flag) at a place point: the ribbon's rule (a wet cell reads as the surface) */
+static int dk_ground(Work *w, double x, double z, double *g, int *wet)
+{
+    double hg;
+    int wt = 0, ok = td5_roam_height_sample(&w->h, x, z, &hg, &wt);
+    if (!ok && td5_roam_height_prefetch(&w->h, x - 3000.0, z - 3000.0, x + 3000.0, z + 3000.0))
+        ok = td5_roam_height_sample(&w->h, x, z, &hg, &wt);
+    if (!ok) return 0;
+    *g = wt ? hg + TD5_ROAM_WATER_DEPTH : hg;
+    *wet = wt ? 1 : 0;
+    return 1;
+}
+
+static int dk_push(DkPt **p, int *n, int *cap, double s, double y, double f, int hard)
+{
+    if (*n >= *cap) {
+        const int nc = *cap ? *cap * 2 : 64;
+        DkPt *np = (DkPt *)realloc(*p, (size_t)nc * sizeof(DkPt));
+        if (!np) return 0;
+        *p = np; *cap = nc;
+    }
+    (*p)[*n].s = s; (*p)[*n].y = y; (*p)[*n].f = f; (*p)[*n].hard = hard;
+    (*n)++;
+    return 1;
+}
+
+/* [roam IE] The height of lower road o at the place point (x, z), predicted the way its ribbon makes
+ * its target (roam_ribbon_build steps 4): the ground every ROAM_RIB_STEP, a +-ROAM_RIB_SMOOTH row
+ * triangular smoothing, a cosine blend over ROAM_RIB_BLEND_ROWS toward each end's pin (a junction's
+ * raw H_c, a JOIN's ground). Graph + raster only, so a deck floor needs no build order. */
+static int dk_lower_y(Work *w, int oi, double x, double z, double *out)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *o = &g->edge[oi];
+    const double s0 = o->end[0].s, s1 = o->end[1].s, L = s1 - s0;
+    double so, dd, sw = 0.0, sg = 0.0, pin[2], t;
+    int k, n, i0, wet, has[2] = { 0, 0 };
+    if (!(L > 1.0)) return 0;
+    poly_nearest(g, o, x, z, &so, &dd);
+    n = (int)floor(L / ROAM_RIB_STEP + 0.5);
+    if (n < 1) n = 1;
+    i0 = (int)floor((so - s0) / (L / n) + 0.5);
+    if (i0 < 0) i0 = 0;
+    if (i0 > n) i0 = n;
+    for (k = -ROAM_RIB_SMOOTH; k <= ROAM_RIB_SMOOTH; k++) {
+        const int r = i0 + k;
+        double px, pz, gv;
+        if (r < 0 || r > n) continue;
+        td5_roam_edge_point(g, o, s0 + (double)r * (L / n), &px, &pz, NULL, NULL);
+        if (!dk_ground(w, px, pz, &gv, &wet)) continue;
+        t = (double)(ROAM_RIB_SMOOTH + 1 - (k < 0 ? -k : k));
+        sw += t; sg += t * gv;
+    }
+    if (!(sw > 0.0)) return 0;
+    t = sg / sw;
+    for (k = 0; k < 2; k++) {
+        const TD5_RoamEdgeEnd *en = &o->end[k];
+        if (en->kind == TD5_ROAM_END_CLUSTER && en->cluster >= 0) has[k] = work_hc_raw(w, en->cluster, &pin[k]);
+        else if (en->kind == TD5_ROAM_END_JOIN) has[k] = dk_ground(w, g->node[en->node].x, g->node[en->node].z, &pin[k], &wet);
+    }
+    for (k = 0; k < 2; k++) {
+        const int ir = k ? n - i0 : i0;
+        if (has[k] && ir < ROAM_RIB_BLEND_ROWS) {
+            const double wb = 0.5 * (1.0 + cos(M_PI * (double)ir / (double)ROAM_RIB_BLEND_ROWS));
+            t = t * (1.0 - wb) + pin[k] * wb;
+        }
+    }
+    *out = t;
+    return 1;
+}
+
+/* constraints of deck edge q in its LOCAL frame (s = t from its node_a) */
+static int dk_constraints(Work *w, int qi, DkPt **p, int *n, int *cap)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *q = &g->edge[qi];
+    const double *bq = &w->ebox[4 * qi];
+    const double flat = ROAM_RIB_DECK_FLAT * ROAM_RIB_STEP;
+    double t;
+    int j, a, b;
+    for (j = 0; j < g->nedge; j++) {
+        const TD5_RoamEdge *o = &g->edge[j];
+        if (j == qi || o->layer >= q->layer || o->way == q->way) continue;
+        if (!box_meets(bq, &w->ebox[4 * j])) continue;
+        for (a = 0; a + 1 < q->npt; a++) {
+            for (b = 0; b + 1 < o->npt; b++) {
+                const TD5_RoamPt *pa0 = &g->pt[q->pt_first + a], *pa1 = &g->pt[q->pt_first + a + 1];
+                const TD5_RoamPt *qb0 = &g->pt[o->pt_first + b], *qb1 = &g->pt[o->pt_first + b + 1];
+                const TD5_RoamPt *pe0 = &g->pt[q->pt_first], *pe1 = &g->pt[q->pt_first + q->npt - 1];
+                const TD5_RoamPt *qe0 = &g->pt[o->pt_first], *qe1 = &g->pt[o->pt_first + o->npt - 1];
+                double xx, zz, gr, sp, dp;
+                int wet;
+                if (!seg_cross(pa0->x, pa0->z, pa1->x, pa1->z, qb0->x, qb0->z, qb1->x, qb1->z, &xx, &zz)) continue;
+                if (hypot(xx - pe0->x, zz - pe0->z) < 60.0 || hypot(xx - pe1->x, zz - pe1->z) < 60.0 ||
+                    hypot(xx - qe0->x, zz - qe0->z) < 60.0 || hypot(xx - qe1->x, zz - qe1->z) < 60.0) continue;
+                if (!dk_ground(w, xx, zz, &gr, &wet)) continue;
+                {
+                    double yl;
+                    if (dk_lower_y(w, j, xx, zz, &yl) && yl > gr) gr = yl;
+                }
+                poly_nearest(g, q, xx, zz, &sp, &dp);
+                if (!dk_push(p, n, cap, sp, gr + ROAM_XSEP_LIFT + ROAM_DECK_MARGIN, flat, 1)) return 0;
+            }
+        }
+    }
+    for (t = 0.5 * ROAM_RIB_STEP; t < q->length; t += ROAM_RIB_STEP) {
+        double x, z, gr;
+        int wet = 0;
+        td5_roam_edge_point(g, q, t, &x, &z, NULL, NULL);
+        if (!dk_ground(w, x, z, &gr, &wet)) continue;
+        if (wet && !dk_push(p, n, cap, t, gr + ROAM_DECK_WATER, 0.0, 0)) return 0;
+    }
+    return 1;
+}
+
+static int dk_cmp_s(const void *pa, const void *pb)
+{
+    const DkPt *a = (const DkPt *)pa, *b = (const DkPt *)pb;
+    if (a->s != b->s) return a->s < b->s ? -1 : 1;
+    return a->y < b->y ? -1 : (a->y > b->y ? 1 : 0);
+}
+
+/* the floor of a cone (flat top, parabolic crest, then the ramp grade) at distance d past its flat */
+static double dk_cone(double y, double d)
+{
+    const double tr = ROAM_DECK_G * ROAM_DECK_R;
+    if (d <= 0.0) return y;
+    if (d <= tr) return y - d * d / (2.0 * ROAM_DECK_R);
+    return y - 0.5 * tr * ROAM_DECK_G - ROAM_DECK_G * (d - tr);
+}
+
+/* One floor query set: constraints with their distances from the two ends of the frame
+ * edge (dA = from its node_a end, dB = from its node_b end), anchors likewise. For a
+ * cluster frame both ends are the centroid (len 0). */
+typedef struct {
+    DkPt  *pt;  int npt, cpt;       /* s unused: da / db below */
+    double *da, *db;  int cdist;
+    double anc_y[64], anc_da[64], anc_db[64];
+    int    nanc;
+    DkPt  *hull; int nh, ch;        /* the frame deck's run hull, frame s */
+    int    any;
+} DkSet;
+
+static void dk_set_free(DkSet *s) { free(s->pt); free(s->da); free(s->db); free(s->hull); }
+
+static int dk_set_add(DkSet *s, double y, double f, int hard, double da, double db)
+{
+    if (!dk_push(&s->pt, &s->npt, &s->cpt, 0.0, y, f, hard)) return 0;
+    if (s->npt > s->cdist) {
+        const int c = s->cpt;
+        double *a = (double *)realloc(s->da, (size_t)c * sizeof(double)), *b;
+        if (!a) return 0;
+        s->da = a;
+        b = (double *)realloc(s->db, (size_t)c * sizeof(double));
+        if (!b) return 0;
+        s->db = b;
+        s->cdist = c;
+    }
+    s->da[s->npt - 1] = da; s->db[s->npt - 1] = db;
+    return 1;
+}
+
+/* Collect from the searches of the frame's two ends: every deck edge reached (not the frame
+ * edge `self`) contributes its constraints, every reached anchor its H_c. dA / dB are kept
+ * in two passes: pass 0 = search from end A just ran (store dA), pass 1 = from end B. */
+typedef struct { int e; double t; double y, f; int hard; double da, db; } DkTmp;
+
+static int dk_gather(Work *w, int self, DkSet *s, int srcA, int srcB, int klass)
+{
+    const TD5_RoamGraph *g = &w->g;
+    double *dA = NULL, *dB = NULL;
+    int *vl = NULL, nA = 0, nB = 0, i, k, ok = 0, nv = g->nnode + g->ncluster;
+    uint8_t *mark = NULL;
+    int *qs = NULL, nq = 0;
+    /* end A */
+    if (!dk_search(w, srcA, self, klass, &nA)) return 0;
+    dA = (double *)malloc((size_t)(nv + 1) * sizeof(double));
+    dB = (double *)malloc((size_t)(nv + 1) * sizeof(double));
+    mark = (uint8_t *)calloc((size_t)(nv + 1), 1);
+    vl = (int *)malloc((size_t)(nv + 1) * 2 * sizeof(int));
+    qs = (int *)malloc(((size_t)g->nedge + 1) * sizeof(int));
+    if (!dA || !dB || !mark || !vl || !qs) goto done;
+    for (i = 0; i < nv; i++) dA[i] = dB[i] = ROAM_DECK_INF;
+    for (i = 0; i < nA; i++) { const int v = w->dk_list[i]; dA[v] = w->dk_dist[v]; if (!mark[v]) { mark[v] = 1; vl[nq++] = v; } }
+    if (srcB != srcA) {
+        if (!dk_search(w, srcB, self, klass, &nB)) goto done;
+        for (i = 0; i < nB; i++) { const int v = w->dk_list[i]; dB[v] = w->dk_dist[v]; if (!mark[v]) { mark[v] = 1; vl[nq++] = v; } }
+    } else {
+        for (i = 0; i < nv; i++) dB[i] = dA[i];
+    }
+    /* deck edges incident to the reached vertices (once each), anchors */
+    {
+        int nqs = 0, m;
+        for (k = 0; k < nq; k++) {
+            const int v = vl[k];
+            int cnt;
+            if (v >= g->nnode) {
+                const int ci = v - g->nnode;
+                if (!dk_pass(g, ci) && v != srcA && v != srcB && s->nanc < 64) {
+                    double hc;
+                    if (work_hc_raw(w, ci, &hc)) {
+                        s->anc_y[s->nanc] = hc; s->anc_da[s->nanc] = dA[v]; s->anc_db[s->nanc] = dB[v];
+                        s->nanc++;
+                    }
+                    continue;
+                }
+                cnt = g->cluster[ci].narm;
+            } else cnt = g->node[v].nend;
+            for (m = 0; m < cnt; m++) {
+                int ei, j, dup = 0;
+                if (v >= g->nnode) ei = g->arm[g->cluster[v - g->nnode].arm_first + m].edge;
+                else ei = g->node_end[g->node[v].end_first + m].edge;
+                if (ei == self || !dk_struct(&g->edge[ei]) || !dk_has_ribbon(&g->edge[ei])) continue;
+                for (j = 0; j < nqs; j++) if (qs[j] == ei) dup = 1;
+                if (!dup) qs[nqs++] = ei;
+            }
+        }
+        for (k = 0; k < nqs; k++) {
+            const TD5_RoamEdge *q = &g->edge[qs[k]];
+            const int va = dk_vend(g, q, 0), vb = dk_vend(g, q, 1);
+            DkPt *lp = NULL;
+            int ln = 0, lc = 0;
+            if (!dk_constraints(w, qs[k], &lp, &ln, &lc)) { free(lp); goto done; }
+            for (m = 0; m < ln; m++) {
+                const double t0 = lp[m].s;
+                const double ua = fmax(0.0, t0 - q->end[0].s), ub = fmax(0.0, q->end[1].s - t0);
+                const double da = fmin(dA[va] + ua, dA[vb] + ub);
+                const double db = fmin(dB[va] + ua, dB[vb] + ub);
+                if (da >= ROAM_DECK_INF * 0.5 && db >= ROAM_DECK_INF * 0.5) continue;
+                if (!dk_set_add(s, lp[m].y, lp[m].f, lp[m].hard, da, db)) { free(lp); goto done; }
+                s->any = 1;
+            }
+            free(lp);
+            s->any = 1;
+        }
+    }
+    ok = 1;
+done:
+    free(dA); free(dB); free(mark); free(vl); free(qs);
+    return ok;
+}
+
+/* The deck RUN of a deck edge ei (deck edges through JOIN nodes) in ei's frame, its hull
+ * of hard flats + abutments into s->hull. */
+static int dk_run_hull(Work *w, int ei, DkSet *s)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *x = &g->edge[ei];
+    struct { int e; double s0; int dir; } it[2 * ROAM_DECK_HOPS + 1];
+    int n = 1, side, k, m, ok = 0;
+    double lo = 0.0, hi = x->length, ga, gb, ax, az, bx, bz;
+    DkPt *hp = NULL;
+    int hn = 0, hc = 0, wet;
+    it[0].e = ei; it[0].s0 = 0.0; it[0].dir = 1;
+    ax = g->node[x->node_a].x; az = g->node[x->node_a].z;
+    bx = g->node[x->node_b].x; bz = g->node[x->node_b].z;
+    for (side = 0; side < 2 && x->node_a != x->node_b; side++) {
+        int cur = ei, cur_end = side, node = side ? x->node_b : x->node_a, hop;
+        double sc = side ? x->length : 0.0;
+        for (hop = 0; hop < ROAM_DECK_HOPS && n < 2 * ROAM_DECK_HOPS + 1; hop++) {
+            const TD5_RoamNode *nd = &g->node[node];
+            const TD5_RoamEndRef *r;
+            const TD5_RoamEdge *q;
+            int nxt, nend, dup = 0;
+            if (g->edge[cur].end[cur_end].kind != TD5_ROAM_END_JOIN || nd->kind != TD5_ROAM_NODE_JOIN || nd->nend != 2) break;
+            r = &g->node_end[nd->end_first];
+            nxt = (r[0].edge == cur && r[0].end == cur_end) ? r[1].edge : r[0].edge;
+            nend = (r[0].edge == cur && r[0].end == cur_end) ? r[1].end : r[0].end;
+            q = &g->edge[nxt];
+            if (!dk_struct(q) || q->node_a == q->node_b) break;
+            for (k = 0; k < n; k++) if (it[k].e == nxt) dup = 1;
+            if (dup) break;
+            if (side) { it[n].dir = nend == 0 ? 1 : -1; it[n].s0 = nend == 0 ? sc : sc + q->length; sc += q->length; hi = sc; }
+            else      { it[n].dir = nend == 1 ? 1 : -1; it[n].s0 = nend == 1 ? sc - q->length : sc; sc -= q->length; lo = sc; }
+            it[n].e = nxt; n++;
+            cur = nxt; cur_end = 1 - nend;
+            node = nend == 0 ? q->node_b : q->node_a;
+        }
+        if (side) { bx = g->node[node].x; bz = g->node[node].z; }
+        else      { ax = g->node[node].x; az = g->node[node].z; }
+    }
+    if (!dk_ground(w, ax, az, &ga, &wet) || !dk_ground(w, bx, bz, &gb, &wet)) return 1;   /* no hull */
+    if (!dk_push(&hp, &hn, &hc, lo, ga, 0.0, 1) || !dk_push(&hp, &hn, &hc, hi, gb, 0.0, 1)) goto done;
+    for (k = 0; k < n; k++) {
+        DkPt *lp = NULL;
+        int ln = 0, lc = 0;
+        if (!dk_constraints(w, it[k].e, &lp, &ln, &lc)) { free(lp); goto done; }
+        for (m = 0; m < ln; m++) {
+            double s0, s1, sm;
+            if (!lp[m].hard) continue;
+            sm = it[k].s0 + it[k].dir * lp[m].s;
+            s0 = sm - lp[m].f; s1 = sm + lp[m].f;
+            if (s0 < lo) s0 = lo;
+            if (s1 > hi) s1 = hi;
+            if (!dk_push(&hp, &hn, &hc, s0, lp[m].y, 0.0, 1) || !dk_push(&hp, &hn, &hc, s1, lp[m].y, 0.0, 1)) { free(lp); goto done; }
+        }
+        free(lp);
+    }
+    qsort(hp, (size_t)hn, sizeof(DkPt), dk_cmp_s);
+    for (m = 0; m < hn; m++) {
+        while (s->nh >= 2) {
+            const DkPt *o = &s->hull[s->nh - 2], *a = &s->hull[s->nh - 1];
+            const double cr = (a->s - o->s) * (hp[m].y - o->y) - (a->y - o->y) * (hp[m].s - o->s);
+            if (cr >= 0.0) s->nh--; else break;
+        }
+        if (!dk_push(&s->hull, &s->nh, &s->ch, hp[m].s, hp[m].y, 0.0, 1)) goto done;
+    }
+    ok = 1;
+done:
+    free(hp);
+    return ok;
+}
+
+/* the floor at frame position t (distance da from end A, db from end B of the frame) */
+static double dk_floor_at(const DkSet *s, const DkPt *own, int nown, double t, double da, double db,
+                          const double *anc_t, int nanc_own, const double *anc_y_own)
+{
+    double hard = -ROAM_DECK_INF, soft = -ROAM_DECK_INF, ah = ROAM_DECK_INF, as = ROAM_DECK_INF;
+    int k;
+    for (k = 0; k < s->npt; k++) {
+        const double d = fmin(da + s->da[k], db + s->db[k]);
+        const double v = dk_cone(s->pt[k].y, d - s->pt[k].f);
+        if (s->pt[k].hard) { if (v > hard) hard = v; } else if (v > soft) soft = v;
+    }
+    for (k = 0; k < nown; k++) {
+        const double v = dk_cone(own[k].y, fabs(t - own[k].s) - own[k].f);
+        if (own[k].hard) { if (v > hard) hard = v; } else if (v > soft) soft = v;
+    }
+    for (k = 0; k + 1 < s->nh; k++) {
+        const DkPt *a = &s->hull[k], *b = &s->hull[k + 1];
+        if (t >= a->s && t <= b->s) {
+            /* one soft width down: the hull lifts only where the ground sags under the abutment line */
+            const double v = (b->s > a->s ? a->y + (b->y - a->y) * (t - a->s) / (b->s - a->s) : fmax(a->y, b->y)) - ROAM_DECK_SOFT;
+            if (v > hard) hard = v;
+            break;
+        }
+    }
+    for (k = 0; k < s->nanc; k++) {
+        const double d = fmin(da + s->anc_da[k], db + s->anc_db[k]);
+        const double vh = s->anc_y[k] - ROAM_DECK_SOFT + ROAM_DECK_ANCHOR_G * d;
+        const double vs = s->anc_y[k] - ROAM_DECK_SOFT + ROAM_DECK_G * d;
+        if (vh < ah) ah = vh;
+        if (vs < as) as = vs;
+    }
+    for (k = 0; k < nanc_own; k++) {
+        const double d = fabs(t - anc_t[k]);
+        const double vh = anc_y_own[k] - ROAM_DECK_SOFT + ROAM_DECK_ANCHOR_G * d;
+        const double vs = anc_y_own[k] - ROAM_DECK_SOFT + ROAM_DECK_G * d;
+        if (vh < ah) ah = vh;
+        if (vs < as) as = vs;
+    }
+    /* a smooth min against the anchors: a plain min leaves an unrounded crest where the floor meets the
+     * anchor cone (a 2-tick hop at 62 km/h on the Av. 7 deck); the smooth one rounds it like the toe */
+    if (ah < ROAM_DECK_INF * 0.5) hard = -roam_deck_smax(-hard, -ah, ROAM_DECK_SOFT);
+    if (as < ROAM_DECK_INF * 0.5) soft = -roam_deck_smax(-soft, -as, ROAM_DECK_SOFT);
+    return fmax(hard, soft);
+}
+
+/* edge ei's floor: samples over its own length, ei's frame. 0 = no deck within reach. */
+static int dk_build_env(Work *w, int ei, RoamDeckEnv *out)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *x = &g->edge[ei];
+    DkSet s;
+    DkPt *own = NULL;
+    int nown = 0, cown = 0, i, ok = 0, k, nao = 0;
+    double anc_t[2], anc_y[2];
+    const int va = dk_vend(g, x, 0), vb = dk_vend(g, x, 1);
+    memset(out, 0, sizeof *out);
+    memset(&s, 0, sizeof s);
+    if (!dk_on() || x->tunnel == 1 || bore_of_chain(g, ei) >= 0 || !dk_has_ribbon(x) || x->node_a == x->node_b) return 0;
+    if (!dk_gather(w, ei, &s, va, vb, x->klass)) goto done;
+    if (dk_struct(x)) {
+        if (!dk_constraints(w, ei, &own, &nown, &cown)) goto done;
+        if (!dk_run_hull(w, ei, &s)) goto done;
+        s.any = 1;
+    }
+    if (!s.any) goto done;
+    /* this edge's own at-grade ends are anchors at their distance along it */
+    for (k = 0; k < 2; k++) {
+        const int v = k ? vb : va;
+        double hc;
+        if (v < g->nnode || dk_pass(g, v - g->nnode)) continue;
+        if (!work_hc_raw(w, v - g->nnode, &hc)) continue;
+        anc_t[nao] = x->end[k].s; anc_y[nao] = hc; nao++;
+    }
+    out->n = (int)floor(x->length / ROAM_DECK_STEP) + 2;
+    out->s0 = 0.0;
+    out->step = ROAM_DECK_STEP;
+    out->y = (double *)malloc((size_t)out->n * sizeof(double));
+    if (!out->y) goto done;
+    for (i = 0; i < out->n; i++) {
+        double t = (double)i * ROAM_DECK_STEP;
+        if (t > x->length) t = x->length;
+        out->y[i] = dk_floor_at(&s, own, nown, t, fmax(0.0, t - x->end[0].s), fmax(0.0, x->end[1].s - t), anc_t, nao, anc_y);
+    }
+#ifndef TD5RE_RELEASE
+    {
+        static long s_way = -2;
+        if (s_way == -2) { const char *e = getenv("TD5RE_ROAM_DECK_LOG"); s_way = e ? atol(e) : -1; }
+        if (s_way >= 0 && (long)(x->key >> 16) == s_way) {
+            TD5_LOG_I(LOG_TAG, "ROAM_DECK_ENV edge %llu len %.1f m: %d pts, %d anchors, hull %d, own %d own anchors %d; floor first %.2f mid %.2f last %.2f m",
+                      (unsigned long long)x->key, x->length / TD5_ROAM_UPM, s.npt, s.nanc, s.nh, nown, nao,
+                      out->y[0] / TD5_ROAM_UPM, out->y[out->n / 2] / TD5_ROAM_UPM, out->y[out->n - 1] / TD5_ROAM_UPM);
+            for (k = 0; k < s.npt; k++)
+                TD5_LOG_I(LOG_TAG, "  pt y %.2f f %.1f hard %d dA %.1f dB %.1f", s.pt[k].y / TD5_ROAM_UPM, s.pt[k].f / TD5_ROAM_UPM, s.pt[k].hard,
+                          s.da[k] / TD5_ROAM_UPM, s.db[k] / TD5_ROAM_UPM);
+            for (k = 0; k < nown; k++)
+                TD5_LOG_I(LOG_TAG, "  own y %.2f f %.1f hard %d at %.1f m", own[k].y / TD5_ROAM_UPM, own[k].f / TD5_ROAM_UPM, own[k].hard, own[k].s / TD5_ROAM_UPM);
+            for (k = 0; k + 1 < s.nh + 1 && k < s.nh; k++)
+                TD5_LOG_I(LOG_TAG, "  hull s %.1f y %.2f", s.hull[k].s / TD5_ROAM_UPM, s.hull[k].y / TD5_ROAM_UPM);
+            for (k = 0; k < s.nanc; k++)
+                TD5_LOG_I(LOG_TAG, "  anchor y %.2f dA %.1f dB %.1f", s.anc_y[k] / TD5_ROAM_UPM, s.anc_da[k] / TD5_ROAM_UPM, s.anc_db[k] / TD5_ROAM_UPM);
+        }
+    }
+#endif
+    out->soft = ROAM_DECK_SOFT;
+    out->on_struct = dk_struct(x);
+    ok = 1;
+done:
+    if (!ok) { free(out->y); memset(out, 0, sizeof *out); }
+    free(own);
+    dk_set_free(&s);
+    return ok;
+}
+
+/* A pass-through junction on a bridge chain: each arm needs its cut row at least at that arm's own
+ * floor there (the arm edge's env at its cut, so distances are right however long the patch is). When
+ * any arm needs more than the ground plane gives, the cluster takes the least-squares PLANE through the
+ * arms' needs (gradient capped like the ground plane's; a ROW_COVERED / HULL patch stays flat and moves
+ * up by the largest need instead). A too-high pin is harmless (the arm ribbon blends from it over
+ * ROAM_RIB_BLEND_ROWS); a too-low one would be a step, so the fit is then raised to cover every need. */
+static void dk_cluster_lift(Work *w, int ci)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamCluster *cl = &g->cluster[ci];
+    double px[TD5_ROAM_ARM_MAX_LOCAL], pz[TD5_ROAM_ARM_MAX_LOCAL], need[TD5_ROAM_ARM_MAX_LOCAL], raw[TD5_ROAM_ARM_MAX_LOCAL];
+    double over = 0.0;
+    int i, n = 0, lifted = 0;
+    if (!dk_on() || !dk_pass(g, ci) || cl->narm > TD5_ROAM_ARM_MAX_LOCAL) return;
+    for (i = 0; i < cl->narm; i++) {
+        const TD5_RoamArm *a = &g->arm[cl->arm_first + i];
+        const TD5_RoamEdge *e = &g->edge[a->edge];
+        const TD5_RoamEdgeEnd *en = &e->end[a->end];
+        const RoamDeckEnv *env;
+        double f;
+        if (en->nrow < 1) continue;
+        px[n] = 0.5 * (en->row[0].x + en->row[en->nrow - 1].x);
+        pz[n] = 0.5 * (en->row[0].z + en->row[en->nrow - 1].z);
+        raw[n] = work_plane_y(w, ci, px[n], pz[n]);
+        need[n] = raw[n];
+        env = dk_has_ribbon(e) ? work_edge_env(w, a->edge) : NULL;
+        if (env && roam_deck_env_at(env, en->s, &f)) {
+            need[n] = roam_deck_smax(raw[n], f, ROAM_DECK_SOFT);
+            if (need[n] > raw[n] + 1.0) lifted = 1;
+        }
+        n++;
+    }
+    if (!lifted || n < 1) return;
+    if ((cl->flags & (TD5_ROAM_CL_ROW_COVERED | TD5_ROAM_CL_HULL)) || n < 2) {
+        for (i = 0; i < n; i++) if (need[i] - raw[i] > over) over = need[i] - raw[i];
+        w->hc[ci] += over;
+    } else {
+        double mx = 0.0, mz = 0.0, my = 0.0, sxx = 0.0, szz = 0.0, sxz = 0.0, sxy = 0.0, szy = 0.0, det, gx = 0.0, gz = 0.0;
+        const double capg = ROAM_GRADE_CAP * 0.97;
+        for (i = 0; i < n; i++) { mx += px[i]; mz += pz[i]; my += need[i]; }
+        mx /= n; mz /= n; my /= n;
+        for (i = 0; i < n; i++) {
+            const double x = px[i] - mx, z = pz[i] - mz, y = need[i] - my;
+            sxx += x * x; szz += z * z; sxz += x * z; sxy += x * y; szy += z * y;
+        }
+        det = sxx * szz - sxz * sxz;
+        if (n >= 3 && det > 1e-6 * (sxx + szz) * (sxx + szz)) {
+            gx = (sxy * szz - szy * sxz) / det;
+            gz = (szy * sxx - sxy * sxz) / det;
+        } else if (sxx + szz > 1e-9) {
+            /* two arms (or collinear cut rows): the line through them */
+            const double l2 = sxx + szz, k = (sxy + szy) / l2;
+            (void)k;
+            gx = sxy / l2; gz = szy / l2;
+        }
+        {
+            const double gm = hypot(gx, gz);
+            if (gm > capg) { gx *= capg / gm; gz *= capg / gm; }
+        }
+        /* lift the fit until it covers every need */
+        for (i = 0; i < n; i++) {
+            const double fit = my + gx * (px[i] - mx) + gz * (pz[i] - mz);
+            if (need[i] - fit > over) over = need[i] - fit;
+        }
+        w->cgr[2 * ci] = gx;
+        w->cgr[2 * ci + 1] = gz;
+        w->cpl[ci] = 1;
+        w->hc[ci] = my + over + gx * (cl->cx - mx) + gz * (cl->cz - mz);
+    }
+    w->cdeck[ci] |= 1;
+}
+
+/* [roam IE] graph only (the window passes): every edge within reach of a deck round edge
+ * ei becomes its dependency (geometry only: its floor reads them). */
+static int dk_deps(Work *w, int ei)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *x = &g->edge[ei];
+    int side, k, m, n, found = dk_struct(x);
+    int *el = NULL, ne = 0, ce = 0, ok = 0;
+    if (x->tunnel == 1 || bore_of_chain(g, ei) >= 0 || !dk_has_ribbon(x)) return 1;
+    for (side = 0; side < 2; side++) {
+        if (!dk_search(w, dk_vend(g, x, side), ei, x->klass, &n)) goto done;
+        for (k = 0; k < n; k++) {
+            const int v = w->dk_list[k];
+            const int cnt = v >= g->nnode ? g->cluster[v - g->nnode].narm : g->node[v].nend;
+            for (m = 0; m < cnt; m++) {
+                const int e2 = v >= g->nnode ? g->arm[g->cluster[v - g->nnode].arm_first + m].edge
+                                             : g->node_end[g->node[v].end_first + m].edge;
+                int j, dup = 0;
+                if (e2 == ei) continue;
+                if (dk_struct(&g->edge[e2])) found = 1;
+                for (j = 0; j < ne; j++) if (el[j] == e2) { dup = 1; break; }
+                if (dup) continue;
+                if (ne >= ce) {
+                    int *nl;
+                    ce = ce ? ce * 2 : 64;
+                    nl = (int *)realloc(el, (size_t)ce * sizeof(int));
+                    if (!nl) goto done;
+                    el = nl;
+                }
+                el[ne++] = e2;
+            }
+        }
+    }
+    if (found)
+        for (k = 0; k < ne; k++) if (!dep_push(w, el[k], ROAM_DEP_DECK)) goto done;
+    ok = 1;
+done:
+    free(el);
+    return ok;
+}
+
+/* [roam IE] graph only: a deck of ei's class within reach (ei will carry a floor). Memoised per
+ * graph (work_close_deps resets it). */
+static int dk_near_deck(Work *w, int ei)
+{
+    const TD5_RoamGraph *g = &w->g;
+    const TD5_RoamEdge *x = &g->edge[ei];
+    int side, k, m, n, found;
+    if (!dk_on()) return 0;
+    if (w->dknear && ei < w->dknear_n && w->dknear[ei]) return w->dknear[ei] == 1;
+    found = dk_struct(x);
+    if (!found && x->tunnel != 1 && bore_of_chain(g, ei) < 0 && dk_has_ribbon(x)) {
+        for (side = 0; side < 2 && !found; side++) {
+            if (!dk_search(w, dk_vend(g, x, side), ei, x->klass, &n)) break;
+            for (k = 0; k < n && !found; k++) {
+                const int v = w->dk_list[k];
+                const int cnt = v >= g->nnode ? g->cluster[v - g->nnode].narm : g->node[v].nend;
+                for (m = 0; m < cnt && !found; m++) {
+                    const int e2 = v >= g->nnode ? g->arm[g->cluster[v - g->nnode].arm_first + m].edge
+                                                 : g->node_end[g->node[v].end_first + m].edge;
+                    if (e2 != ei && dk_struct(&g->edge[e2])) found = 1;
+                }
+            }
+        }
+    }
+    if (w->dknear && ei < w->dknear_n) w->dknear[ei] = (uint8_t)(found ? 1 : 2);
+    return found;
+}
+
+/* [roam IE] edge ei's floor (memoised), NULL = none / not in the build phase */
+static const RoamDeckEnv *work_edge_env(Work *w, int ei)
+{
+    if (!w->denv || !w->denvs) return NULL;
+    if (w->denvs[ei] == 0) w->denvs[ei] = (uint8_t)(dk_build_env(w, ei, &w->denv[ei]) ? 1 : 2);
+    return w->denvs[ei] == 1 ? &w->denv[ei] : NULL;
+}
+
+/* [roam IE] the floor at a JOIN node: the higher of its two edges' floors there, read once per node
+ * (so both edges that share the row get the same pin, bit for bit). 0 = none. */
+static int work_node_deck(Work *w, int node, double *out)
+{
+    const TD5_RoamGraph *g = &w->g;
+    if (!w->nhighs) return 0;
+    if (w->nhighs[node] == 0) {
+        const TD5_RoamNode *nd = &g->node[node];
+        const RoamDeckEnv *env = NULL;
+        w->nhighs[node] = 2;
+        if (nd->kind == TD5_ROAM_NODE_JOIN && nd->nend == 2) {
+            /* both edges' floors at the node (a deck's own run hull is in its env only), the higher one */
+            const TD5_RoamEndRef *r = &g->node_end[nd->end_first];
+            int k;
+            for (k = 0; k < 2; k++) {
+                const TD5_RoamEdge *e = &g->edge[r[k].edge];
+                double fy;
+                env = work_edge_env(w, r[k].edge);
+                if (env && roam_deck_env_at(env, r[k].end ? e->length : 0.0, &fy) &&
+                    (w->nhighs[node] != 1 || fy > w->nhigh[node])) { w->nhigh[node] = fy; w->nhighs[node] = 1; }
+            }
+        }
+    }
+    if (w->nhighs[node] != 1) return 0;
+    *out = w->nhigh[node];
+    return 1;
+}
+
 /* Fill edge ei's dependency slice (sorted by edge index: leaders in priority
  * order are re-sorted by the caller of the coupling). Returns 0 on OOM. */
 static int work_deps(Work *w, int ei)
@@ -1240,6 +2069,8 @@ static int work_deps(Work *w, int ei)
     const double *be = &w->ebox[4 * ei];
     int j, t;
     w->dep_first[ei] = w->ndep;
+    /* [roam IE] every edge within reach of a deck round it (its floor reads their geometry) */
+    if (!dk_deps(w, ei)) return 0;
     if (e->tunnel == 1) {
         for (j = 0; j < g->nedge; j++) {
             const TD5_RoamEdge *q = &g->edge[j];
@@ -1261,6 +2092,7 @@ static int work_deps(Work *w, int ei)
                 const TD5_RoamEdge *q = &g->edge[j];
                 if (j == ei || q->layer != e->layer || edge_is_structure(q) || !edge_has_ribbon(q)) continue;
                 if (edge_prio_cmp(q, e) <= 0) continue;
+                if (dk_near_deck(w, j)) continue;     /* [roam IE] a bridge approach leads no one */
                 {
                     /* a bore approach may lead, but never a road above its own bore
                      * (that road is one of the bore's dependencies: a cycle) */
@@ -1323,6 +2155,9 @@ static int work_close_deps(Work *w)
     w->dep_n = (int *)calloc((size_t)g->nedge + 1u, sizeof(int));
     queue = (int *)malloc(((size_t)g->nedge + 1u) * sizeof(int));
     if (!w->dep_first || !w->dep_n || !queue) { free(queue); return 0; }
+    free(w->dknear);
+    w->dknear = (uint8_t *)calloc((size_t)g->nedge + 1u, 1);     /* [roam IE] */
+    w->dknear_n = w->dknear ? g->nedge : 0;
     for (i = 0; i < g->nedge; i++) if (w->sel[i]) queue[nq++] = i;
     while (qh < nq) {
         const int ei = queue[qh++];
@@ -1529,6 +2364,7 @@ static int work_build_rec(Work *w, int ei, int depth)
     w->bstate[ei] = 1;
     for (k = 0; k < w->dep_n[ei]; k++) {
         const int d = w->dep[w->dep_first[ei] + k];
+        if (w->depk[w->dep_first[ei] + k] == ROAM_DEP_DECK) continue;   /* geometry only, no build order */
         if (w->sel[d] && !work_build_rec(w, d, depth + 1)) return 0;
     }
     w->bstate[ei] = 2;
@@ -1547,7 +2383,7 @@ static int work_build_rec(Work *w, int ei, int depth)
         lead[m] = &w->rib[d];
         nlead++;
     }
-    if (bore_of_chain(g, ei) < 0 && !work_patch_leads(w, ei, &ltri, &nltri)) { free(cross); return 0; }
+    if (bore_of_chain(g, ei) < 0 && !work_edge_env(w, ei) && !work_patch_leads(w, ei, &ltri, &nltri)) { free(cross); return 0; }
     r = work_edge_in(w, ei, cross, ncross, &in);
     if (r <= 0) { if (r < 0) w->st.ribbon_height_fail++; free(cross); free(ltri); return 1; }
     in.lead = lead;
@@ -1679,6 +2515,13 @@ static int work_build(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int
         for (i = 0; i <= g->nnode; i++) w->nlow[i] = NAN;
         w->cbox = (double *)malloc(((size_t)g->ncluster + 1u) * 4u * sizeof(double));
         if (!w->cbox) return 0;
+        w->denv   = (RoamDeckEnv *)calloc((size_t)g->nedge + 1u, sizeof(RoamDeckEnv));
+        w->denvs  = (uint8_t *)calloc((size_t)g->nedge + 1u, 1);
+        w->nhigh  = (double *)calloc((size_t)g->nnode + 1u, sizeof(double));
+        w->nhighs = (uint8_t *)calloc((size_t)g->nnode + 1u, 1);
+        w->cdeck  = (uint8_t *)calloc((size_t)g->ncluster + 1u, 1);
+        w->hcraw  = (double *)calloc((size_t)g->ncluster + 1u, sizeof(double));
+        if (!w->denv || !w->denvs || !w->nhigh || !w->nhighs || !w->cdeck || !w->hcraw) return 0;
         for (i = 0; i < g->ncluster; i++) {
             const TD5_RoamCluster *cl = &g->cluster[i];
             double *cb = &w->cbox[4 * i];
@@ -1730,6 +2573,16 @@ static int work_build(TD5_RoamTileCtx *c, Work *w, const double tile_box[4], int
                         }
                         list[nl].x = xx; list[nl].z = zz; list[nl].y_under = yu;
                         nl++;
+#ifndef TD5RE_RELEASE
+                        if (getenv("TD5RE_ROAM_DECK_LOG") && atol(getenv("TD5RE_ROAM_DECK_LOG")) == (long)(p->key >> 16)) {
+                            double gq;
+                            int wq;
+                            dk_ground(w, xx, zz, &gq, &wq);
+                            TD5_LOG_I(LOG_TAG, "ROAM_DECK_XING deck %llu over edge %llu (klass %d layer %d flags rib 0x%x): y_under %.2f m, ground %.2f m",
+                                      (unsigned long long)p->key, (unsigned long long)q->key, q->klass, q->layer, w->rib[j].flags,
+                                      yu / TD5_ROAM_UPM, gq / TD5_ROAM_UPM);
+                        }
+#endif
                     }
                 }
             }
@@ -2117,7 +2970,8 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
                                   (e->tunnel == 1 ? ROAM_EF_BORE : 0) | (e->tunnel == 2 ? ROAM_EF_PASSAGE : 0) |
                                   (e->roundabout ? ROAM_EF_ROUNDABOUT : 0) |
                                   ((r->flags & ROAM_RIBF_RAMP_SHORT) ? ROAM_EF_RAMP_SHORT : 0) |
-                                  ((r->flags & ROAM_RIBF_PIN_MISS) ? ROAM_EF_PIN_MISS : 0));
+                                  ((r->flags & ROAM_RIBF_PIN_MISS) ? ROAM_EF_PIN_MISS : 0) |
+                                  ((r->flags & ROAM_RIBF_DECKENV) ? ROAM_EF_APPROACH : 0));
             nm = e->name_id >= 0 ? td5_roam_cache_name(e->name_id) : NULL;
             er->name_id = 0xFFFFu;              /* remapped to the sorted index below */
             {
@@ -2169,6 +3023,14 @@ static int slice_tile(TD5_RoamTileCtx *c, Work *w, int tx, int tz, RoamTile *out
             gq = fabs(r->y[q + 1] - r->y[q]) / run;
             if (gq > st->max_grade) st->max_grade = gq;
             if (gq > ROAM_GRADE_CAP * 1.0005 + 1e-6) st->grade_over_cap++;
+        }
+        if (r->flags & ROAM_RIBF_DECKENV) {           /* [roam IE] */
+            st->deck_ribbons++;
+            if (e->bridge && e->layer >= 1) st->deck_decks++;
+            for (q = 0; q < nq; q++) {
+                const double lift = (r->y[q] - r->ground[q]) / TD5_ROAM_UPM;
+                if (owned[q] && lift > st->deck_max_lift_m) st->deck_max_lift_m = lift;
+            }
         }
         if (e->tunnel == 1 && r->clear_n > 0) {
             st->bore_cross += r->clear_n;
@@ -2617,6 +3479,27 @@ done:
 
 #ifndef TD5RE_RELEASE
 
+int td5_roam_read_tile_list(const char *path, int (**out)[2])
+{
+    FILE *f = fopen(path, "r");
+    int (*list)[2] = NULL, n = 0, cap = 0, tx, tz;
+    *out = NULL;
+    if (!f) { TD5_LOG_E(LOG_TAG, "roam tiles: no tile list %s", path); return 0; }
+    while (fscanf(f, "%d %d", &tx, &tz) == 2) {
+        if (n == cap) {
+            int (*nl)[2];
+            cap = cap ? cap * 2 : 256;
+            nl = (int (*)[2])realloc(list, (size_t)cap * sizeof(int[2]));
+            if (!nl) break;
+            list = nl;
+        }
+        list[n][0] = tx; list[n][1] = tz; n++;
+    }
+    fclose(f);
+    *out = list;
+    return n;
+}
+
 static int cli_get(const char *cmd, const char *key, char *out, size_t cap)
 {
     char pat[64];
@@ -2716,6 +3599,8 @@ int td5_roam_tile_dev_cli(const char *cmdline)
     double max_spread = 0.0, max_blend = 0.0, max_pdy = 0.0, max_over = 0.0;
     long tot_crib = 0, tot_crow = 0, tot_bore = 0, tot_gover = 0, tot_cyc = 0;
     double max_cdy = 0.0, max_grade = 0.0, min_clear = 0.0;
+    long tot_deckrib = 0, tot_deckdeck = 0;          /* [roam IE] */
+    double max_decklift = 0.0;
     uint32_t max_ms = 0, sum_ms = 0;
     long hug[16], hist_spread[5] = { 0, 0, 0, 0, 0 }, hist_pdy[5] = { 0, 0, 0, 0, 0 };
 
@@ -2748,6 +3633,8 @@ int td5_roam_tile_dev_cli(const char *cmdline)
         int cap = 2048;
         list = (int (*)[2])malloc((size_t)cap * sizeof(int[2]));
         n = list ? td5_roam_casco_tiles(td5_roam_tile_ctx_grid(ctx), list, cap) : 0;
+    } else if (_strnicmp(val, "list:", 5) == 0) {
+        n = td5_roam_read_tile_list(val + 5, &list);     /* [roam IE] any set of tiles, one "tx tz" per line */
     } else {
         int x0, z0, x1, z1, tx, tz;
         if (sscanf(val, "%d,%d,%d,%d", &x0, &z0, &x1, &z1) != 4) {
@@ -2808,6 +3695,8 @@ int td5_roam_tile_dev_cli(const char *cmdline)
         tot_sig += s->signals;
         tot_crib += s->couple_ribbons; tot_crow += s->couple_rows; tot_bore += s->bore_cross;
         tot_gover += s->grade_over_cap; tot_cyc += s->dep_cycles;
+        tot_deckrib += s->deck_ribbons; tot_deckdeck += s->deck_decks;
+        if (s->deck_max_lift_m > max_decklift) max_decklift = s->deck_max_lift_m;
         if (s->couple_max_dy_m > max_cdy) max_cdy = s->couple_max_dy_m;
         if (s->max_grade > max_grade) max_grade = s->max_grade;
         if (s->bore_cross > 0 && (min_clear == 0.0 || s->bore_min_clear_m < min_clear)) min_clear = s->bore_min_clear_m;
@@ -2853,6 +3742,8 @@ int td5_roam_tile_dev_cli(const char *cmdline)
                    "(want %.2f); build-order cycles broken %ld\n",
                 tot_crib, tot_crow, max_cdy, max_grade, ROAM_GRADE_CAP, tot_gover, tot_bore, min_clear,
                 ROAM_XSEP_LIFT / TD5_ROAM_UPM, tot_cyc);
+        fprintf(f, "[roam IE] bridge chains: %ld owned ribbon piece(s) lifted by a deck floor (%ld of them decks), "
+                   "largest road-over-ground %.2f m\n", tot_deckrib, tot_deckdeck, max_decklift);
         fprintf(f, "patch vertex origin moved off the centroid to the bbox centre (int16 reach, F1-T5b): %ld cluster(s)\n", tot_reorg);
         fprintf(f, "owned quads with a vertex outside their tile: %ld; max overhang %.2f m (GRID margin is sized from it)\n",
                 tot_border, max_over);

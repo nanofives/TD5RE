@@ -199,6 +199,9 @@ static struct {
     int      free_drive;          /* [F9b] partido rows: the route driven in free roam (no race, no barriers) */
     int      arrived;             /* [F9b] reached the end of the route */
     long     t_arrive;
+    /* [roam IE] airborne watch on every driven tick: all four wheels off the road */
+    long     air4_ticks, air4_run, air4_run_max, air_any_ticks;
+    double   air4_x, air4_z, air4_kmh;
 } D;
 
 /* one frame dump per name: <log dir>roam_sprint_<name>.png */
@@ -817,7 +820,7 @@ void td5_roam_sprint_test_frame(void)
             sd_dump_route();
             snprintf(path, sizeof path, "%sroam_sprint_trace.csv", dir ? dir : "");
             D.trc = fopen(path, "w");
-            if (D.trc) fprintf(D.trc, "tick,along_m,lat_m,px,pz,kmh,bits,wt,wt_state,drv_along,tx,tz,yaw\n");
+            if (D.trc) fprintf(D.trc, "tick,along_m,lat_m,px,pz,kmh,bits,wt,wt_state,drv_along,tx,tz,yaw,y_m,wheels_air,air_frames\n");
             D.free_drive = 1;
             D.phase = 3; D.phase_frames = 0;
             TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] free-roam drive of the %.1f m route begins", s_path.length_m);
@@ -851,7 +854,7 @@ void td5_roam_sprint_test_frame(void)
                 const char *dir = td5_plat_log_dir();
                 snprintf(path, sizeof path, "%sroam_sprint_trace.csv", dir ? dir : "");
                 D.trc = fopen(path, "w");
-                if (D.trc) fprintf(D.trc, "tick,along_m,lat_m,px,pz,kmh,bits,wt,wt_state,drv_along,tx,tz,yaw\n");
+                if (D.trc) fprintf(D.trc, "tick,along_m,lat_m,px,pz,kmh,bits,wt,wt_state,drv_along,tx,tz,yaw,y_m,wheels_air,air_frames\n");
             }
             D.phase = 3; D.phase_frames = 0;
         }
@@ -1053,15 +1056,29 @@ uint32_t td5_roam_sprint_test_bits(TD5_Actor *a)
     if (td5_roam_wall_test_bits(a, &bits)) return bits;   /* [HE] the roam-walls test */
     bits = sd_bits(a);
     if (D.rear_cd && td5_roam_race_state() == TD5_RRACE_COUNTDOWN) return (uint32_t)TD5_INPUT_REAR_VIEW;   /* [F7] */
+    if (a && D.tick_last != last && D.phase == 3) {
+        /* [roam IE] a launch: all four wheels airborne (wheel_contact_bitmask bit set = that wheel off) */
+        if ((a->wheel_contact_bitmask & 0x0F) == 0x0F) {
+            D.air4_ticks++;
+            if (++D.air4_run > D.air4_run_max) {
+                int32_t ox, oz;
+                td5_roam_world_origin(&ox, &oz);
+                D.air4_run_max = D.air4_run;
+                D.air4_x = a->world_pos.x / 256.0 + ox; D.air4_z = a->world_pos.z / 256.0 + oz; D.air4_kmh = sd_kmh(a);
+            }
+        } else D.air4_run = 0;
+        if (a->wheel_contact_bitmask & 0x0F) D.air_any_ticks++;
+    }
     if (D.trc && a && D.tick_last != last) {
         double along, lat;
         int32_t ox, oz;
         td5_roam_world_origin(&ox, &oz);
         td5_roam_race_progress(&along, NULL, &lat);
-        fprintf(D.trc, "%ld,%.1f,%.1f,%.0f,%.0f,%.1f,%u,%d,%d,%.1f,%.0f,%.0f,%d\n", D.tick_last, along, lat,
+        fprintf(D.trc, "%ld,%.1f,%.1f,%.0f,%.0f,%.1f,%u,%d,%d,%.1f,%.0f,%.0f,%d,%.2f,%u,%d\n", D.tick_last, along, lat,
                 a->world_pos.x / 256.0 + ox, a->world_pos.z / 256.0 + oz, sd_kmh(a), (unsigned)bits, D.active_wt,
                 D.active_wt >= 0 ? D.wt[D.active_wt].state : -1, D.along_s, D.ltx + ox, D.ltz + oz,
-                (int)(a->display_angles.yaw & 0xFFF));
+                (int)(a->display_angles.yaw & 0xFFF), a->world_pos.y / 256.0 / 430.0, (unsigned)(a->wheel_contact_bitmask & 0x0F),
+                (int)a->airborne_frame_counter);
     }
     return bits;
 }
@@ -1398,6 +1415,8 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
                   rb.frame_worst_ms, rb.max_world_m, rb.far_actors, ss.loaded, ss.built, ss.misses, ss.holds, ss.sync_loads,
                   ss.frame_median_ms, ss.frame_worst_ms, pinch, resc, tele, D.stuck_events, D.kmh_max, res->max_lateral_m,
                   res->off_route_ticks, D.bst.barriers_mouth, (unsigned)D.saved_hash, (unsigned)D.loaded_hash, bad);
+        TD5_LOG_I(LOG_TAG, "[ROAMPARTIDO] AIR all-four-wheels-off ticks=%ld longest=%ld ticks at place (%.0f,%.0f) %.0f km/h; "
+                  "ticks with any wheel off=%ld", D.air4_ticks, D.air4_run_max, D.air4_x, D.air4_z, D.air4_kmh, D.air_any_ticks);
         return bad[0] ? 2 : 0;
     }
     if (SD_IS_CIRC(D.mode)) return sd_circuit_verdict(note, n, bad, res, &ws, pinch, resc, tele);
