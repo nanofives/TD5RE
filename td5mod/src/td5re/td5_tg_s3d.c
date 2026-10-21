@@ -628,9 +628,24 @@ static int s3d_quad_uv(TG_S3dMesh *m, const double *q, double u0, double u1, dou
 
 #define S3D_PORTAL_H_M   4.5     /* a carriage arch */
 #define S3D_PORTAL_PAD_M 0.6     /* clear of the driveway's edge each side */
-#define S3D_PORTALS_MAX  8
+#define S3D_PORTALS_MAX  64
+#define S3D_PORTAL_STEP_M 0.25   /* [integ J] the wall is tested against the drive every 25 cm */
 
-/* The openings of edge (a, b): [t0, t1] along it where a service way the outline stands over crosses it. */
+/* distance from (px, pz) to the segment (ax, az) - (bx, bz) */
+static double s3d_seg_dist(double px, double pz, double ax, double az, double bx, double bz)
+{
+    const double dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+    double t = l2 > 0.0 ? ((px - ax) * dx + (pz - az) * dz) / l2 : 0.0;
+    if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+    return s3d_len(ax + dx * t - px, az + dz * t - pz);
+}
+
+/* The openings of edge (a, b): [t0, t1] along it where a service way the outline stands over runs under it.
+ * [integ J] Every stretch of the wall that stands ON the drive (within its half width + the pad) opens, not only
+ * where the centreline crosses the edge: the Casa de Gobierno's porch drive (way 1450354264, tunnel=building_passage)
+ * runs along the porch walls for 15 m and a pavilion (part 1450354283) overlaps the edge of the north-east drive, and
+ * their walls stood on the drive (27 wall faces on a carriageway in the casco, bld_road_census.py). A crossing gives
+ * the interval the crossing rule gave (half / sin either side). */
 static int s3d_edge_portals(const TG_GeoBldEnv *e, double ax, double az, double bx, double bz, double upm,
                             double *t0, double *t1)
 {
@@ -639,18 +654,27 @@ static int s3d_edge_portals(const TG_GeoBldEnv *e, double ax, double az, double 
     if (!(el > 1.0) || e->s3d_np <= 0 || !e->s3d_pseg) return 0;
     for (p = 0; p < e->s3d_np && np < S3D_PORTALS_MAX; p++) {
         const double *g = &e->s3d_pseg[p * 5];
-        const double rx = g[2] - g[0], rz = g[3] - g[1], den = s3d_cross(ex, ez, rx, rz);
-        double t, u, sn, half;
-        if (fabs(den) < 1e-9) continue;
-        t = s3d_cross(g[0] - ax, g[1] - az, rx, rz) / den;
-        u = s3d_cross(g[0] - ax, g[1] - az, ex, ez) / den;
-        if (t < 0.0 || t > 1.0 || u < 0.0 || u > 1.0) continue;
-        sn = fabs(den) / (el * s3d_len(rx, rz));                  /* sin of the crossing angle */
-        if (sn < 0.25) sn = 0.25;
-        half = (g[4] + S3D_PORTAL_PAD_M * upm) / sn / el;
-        t0[np] = t - half < 0.0 ? 0.0 : t - half;
-        t1[np] = t + half > 1.0 ? 1.0 : t + half;
-        np++;
+        const double band = g[4] + S3D_PORTAL_PAD_M * upm;
+        const int ns = (int)ceil(el / (S3D_PORTAL_STEP_M * upm));
+        const double dt = 1.0 / (double)ns;
+        double ta = -1.0;
+        int k;
+        /* a drive whose box is not within the band of the edge's box cannot touch it */
+        if ((g[0] < g[2] ? g[0] : g[2]) - band > (ax > bx ? ax : bx) || (g[0] > g[2] ? g[0] : g[2]) + band < (ax < bx ? ax : bx) ||
+            (g[1] < g[3] ? g[1] : g[3]) - band > (az > bz ? az : bz) || (g[1] > g[3] ? g[1] : g[3]) + band < (az < bz ? az : bz))
+            continue;
+        for (k = 0; k <= ns && np < S3D_PORTALS_MAX; k++) {
+            const double t = k * dt;
+            const int on = s3d_seg_dist(ax + ex * t, az + ez * t, g[0], g[1], g[2], g[3]) <= band;
+            if (on && ta < 0.0) ta = t;
+            if ((!on || k == ns) && ta >= 0.0) {
+                const double tb = on ? t : t - dt;
+                t0[np] = ta - 0.5 * dt < 0.0 ? 0.0 : ta - 0.5 * dt;
+                t1[np] = tb + 0.5 * dt > 1.0 ? 1.0 : tb + 0.5 * dt;
+                np++;
+                ta = -1.0;
+            }
+        }
     }
     for (i = 1; i < np; i++)                                      /* sort, then merge overlaps */
         for (j = i; j > 0 && t0[j] < t0[j - 1]; j--) {
@@ -673,7 +697,8 @@ static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding
     double bot[S3D_RN], q[12];
     const double upm = e->upm > 1.0 ? e->upm : 430.0;
     const double span = span_h > 1.0 ? span_h : 1.0;
-    const double ph = (S3D_PORTAL_H_M * upm < (wall_top - base_y) - 1.0 * upm) ? S3D_PORTAL_H_M * upm : 0.0;
+    /* [integ J] a wall too low for the 4.5 m arch (a base under parts, a low wing) is not built over the drive at all */
+    const double ph = (S3D_PORTAL_H_M * upm < (wall_top - base_y) - 1.0 * upm) ? S3D_PORTAL_H_M * upm : wall_top - base_y;
     int k;
     for (k = 0; k < n; k++) {
         bot[k] = base_y;
@@ -711,6 +736,7 @@ static int s3d_walls(TG_S3dMesh *m, const TG_GeoBldEnv *e, const TD5_GeoBuilding
                     double ya, yb;
                     if (pass && p == np) break;
                     if (!(sb - sa > 1e-4)) continue;
+                    if (pass && base_y + ph >= wall_top - 1e-6) continue;   /* [integ J] no lintel: the opening is the whole wall */
                     ya = pass ? base_y + ph : bot[k] + (bot[j] - bot[k]) * sa;
                     yb = pass ? base_y + ph : bot[k] + (bot[j] - bot[k]) * sb;
                     q[0] = x[k] + (x[j] - x[k]) * sa; q[1]  = ya;       q[2]  = z[k] + (z[j] - z[k]) * sa;

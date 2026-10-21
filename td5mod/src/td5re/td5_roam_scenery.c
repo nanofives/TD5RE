@@ -2055,7 +2055,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         ScSb *b;
         int s3d_hide, s3d_base = 0, nh = 0, hn[TG_S3D_HOLES_MAX], np = 0, s3d_pciv = 0;
         unsigned int s3d_prgb = 0;
-        double pseg[16 * 5];
+        double pseg[128 * 5];                          /* [integ J] 128 (was 16): a palace has dozens of drive segments */
         double s3d_cover = 0.0, s3d_low = 1e300, hx[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX], hz[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX];
         TD5_GeoBuilding gloc;
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
@@ -2208,7 +2208,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         if (s->s3d && (gb->part || gb->rel)) {
             /* [JC2] the service ways near the outline, for the carriage arches */
             int q;
-            for (q = 0; q < c->nseg && np < 16; q++) {
+            for (q = 0; q < c->nseg && np < 128; q++) {
                 const ScSeg *g = &c->seg[q];
                 double d;
                 if (c->edge[g->edge].klass != TD5_GEO_RC_SERVICE) continue;
