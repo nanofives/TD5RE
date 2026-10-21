@@ -2146,6 +2146,7 @@ int td5_roam_render_ground_census_dev_test(void)
     if (td5_env_flag_off("TD5RE_ROAM_PAVE_CENSUS")) {
         TD5_RoamScnSource *scn = td5_roam_scn_open(place, &s_rr.grid, NULL, NULL);
         const double proj[4] = { lat0, mdlat, lon0, mdlon };
+        td5_roam_pave_census_set_grid(&s_rr.grid);            /* [roam IA] + the median census */
         td5_roam_pave_census(z.tile, z.ntile, scn, z.hc, rr_gz_ground_cb, &z, s_rr.ground_drop, proj, NULL);
         if (scn) td5_roam_scn_close(scn);
         for (k = 0; k < z.ntile; k++) { rr_ground_free(&z.gr[k]); free(z.cell[k]); td5_roam_tile_free(&z.tile[k]); }
@@ -2508,7 +2509,8 @@ static int rr_au_on_screen(float x, float y, float z)
 {
     const float cx = td5_render_get_center_x(), cy = td5_render_get_center_y();
     float sx, sy, rhw;
-    if (!td5_render_project_world(x, y, z, &sx, &sy, &rhw) || !(rhw > 0.0f)) return 0;
+    /* view z past 195000 (DEFAULT_FAR_CULL = DEFAULT_FAR_CLIP, td5_render_internal.h) is never drawn */
+    if (!td5_render_project_world(x, y, z, &sx, &sy, &rhw) || !(rhw >= 1.0f / 195000.0f)) return 0;
     return sx >= 0.0f && sx <= 2.0f * cx && sy >= 0.0f && sy <= 2.0f * cy;
 }
 
