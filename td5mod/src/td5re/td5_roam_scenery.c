@@ -1668,6 +1668,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         if (!b) { free(set); free(fc); return 0; }
         memset(&e, 0, sizeof e);
         e.blk = &b->blk; e.moff = b->moff; e.nmesh = &b->nmesh; e.maxmesh = b->cap;
+        e.no_prefab = !td5_env_int("TD5RE_ROAM_LM_PREFAB", 0, 0, 1);   /* [IB] no shipped TD5 landmark in the real city: the OSM ring is extruded (=1 restores) */
         e.b = &k_biomes[0];                         /* CITY: the geo city biome */
         e.ground = sc_ground_u; e.u = &u;
         e.have_ceiling = u.host;
@@ -2435,7 +2436,7 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     const cJSON *tl, *t;
     if (!p) return NULL;
     p->on     = td5_env_int("TD5RE_ROAM_SCN_PAVEMENT", 1, 0, 1);
-    p->fence  = td5_env_int("TD5RE_ROAM_PV_FENCE", 1, 0, 1);
+    p->fence  = td5_env_int("TD5RE_ROAM_PV_FENCE", 0, 0, 1);   /* [IB] off: no fence along any kerb (deck railings stay) */
     p->facade = td5_env_int("TD5RE_ROAM_PV_FACADE", 1, 0, 1);
     p->merge  = td5_env_int("TD5RE_ROAM_PV_MERGE", 1, 0, 1);
     p->median = td5_env_int("TD5RE_ROAM_PV_MEDIAN", 1, 0, 1);

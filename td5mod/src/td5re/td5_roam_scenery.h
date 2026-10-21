@@ -59,7 +59,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  10u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  11u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -68,7 +68,10 @@
                                      *     td5_geo_frame.h), La Plata no longer mirrored
                                      * 9 = roam M: patches without acute wedge tips (ROAM_RULES 6), no island spikes
                                      * 10 = roam IA: a gap of <= 25 m to another carriageway with no building in it is an
-                                     *      island filled to the middle (any streets), island slabs keep their back face */
+                                     *      island filled to the middle (any streets), island slabs keep their back face
+                                     * 10 = roam IB: no kerb fences, no stamped TD5 landmark prefabs
+                                     * 11 = round I integration: every round I branch combined (each bumped 9 -> 10 on its own,
+                                     *      11 so no tile cached by a single branch is reused) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
