@@ -84,6 +84,24 @@
 #define TD5_GEOB_ROOF_HIPPED   5     /* hipped -- ridge inset at both ends  */
 #define TD5_GEOB_ROOF_SKILLION 6     /* one slope, high edge at the far end */
 
+/* [roam JC] THE FULL roof:shape, for the Simple 3D Buildings builder free roam runs
+ * (td5_tg_s3d.c). TD5_GEOB_ROOF_* above stays what the strip geo BUILD reads, unchanged:
+ * this is a second, finer reading of the same tag, so level091 cannot move. */
+#define TD5_GEOB_R3_NONE        0     /* untagged */
+#define TD5_GEOB_R3_FLAT        1
+#define TD5_GEOB_R3_GABLED      2     /* gabled, saltbox, gabled_with_* */
+#define TD5_GEOB_R3_HIPPED      3     /* hipped, side_hipped, hipped_and_gabled */
+#define TD5_GEOB_R3_HALF_HIPPED 4
+#define TD5_GEOB_R3_SKILLION    5     /* skillion, lean_to, shed, monopitch */
+#define TD5_GEOB_R3_PYRAMIDAL   6     /* pyramidal, and anything unrecognised */
+#define TD5_GEOB_R3_MANSARD     7
+#define TD5_GEOB_R3_GAMBREL     8
+#define TD5_GEOB_R3_DOME        9     /* dome, sphere */
+#define TD5_GEOB_R3_ONION      10
+#define TD5_GEOB_R3_ROUND      11     /* a barrel vault along the ridge axis */
+#define TD5_GEOB_R3_CONE       12
+#define TD5_GEOB_R3__N         13
+
 /* AREAS.JSON `kind`, collapsed to what the plaza emitter distinguishes. */
 #define TD5_GEOA_KIND_OTHER   0
 #define TD5_GEOA_KIND_PARK    1      /* leisure=park, village_green, common */
@@ -168,6 +186,17 @@ typedef struct {
     unsigned short levels;      /* building:levels, or the estimator's guess */
     unsigned short roof_levels; /* roof:levels                               */
     unsigned short min_level;   /* building:min_level                        */
+    /* [roam JC] Simple 3D Buildings, read for free roam only (td5_tg_s3d.c). */
+    unsigned char roof3d;       /* TD5_GEOB_R3_* -- the full roof:shape       */
+    unsigned char roof_only;    /* building(:part)=roof: a roof with no walls */
+    unsigned char roof_across;  /* roof:orientation=across: ridge across the long axis */
+    unsigned int  roof_rgb;     /* roof:colour, else roof:material; 0x01RRGGBB, 0 = none */
+    unsigned int  wall_rgb;     /* building:colour, else building:material; same encoding */
+    /* [roam JC2] a civic building (government / church / public / museum / university / theatre
+     * classes or tags, or a part roofed in slate / copper / lead / zinc): free roam dresses it in a
+     * stone / plaster facade page instead of the city's window pages */
+    unsigned char civic;
+    unsigned char rel;          /* [roam JC2] an outline from S3D_RELATIONS.JSON (an OSM multipolygon) */
 } TD5_GeoBuilding;
 
 /* An area's own BARRIER, straight off AREAS.JSON's `barrier` field.
@@ -312,6 +341,10 @@ void td5_geob_bind_stats(int *buildings_bound, int *buildings_far,
  * gets a roof that stays inside its own walls -- a centroid fan does not.
  * Writes `ntri` index triples into tri[] and returns ntri, or 0 when the ring
  * is degenerate. Indices are 0..n-1 into the ring. */
+/* [roam JC] "#rrggbb" / "#rgb" / a colour name (kind 0), a roof:material (1) or a
+ * building:material (2) -> 0x01RRGGBB, 0 = unknown. */
+unsigned int td5_geob_colour_of(const char *s, int kind);
+
 int  td5_geob_triangulate(const double *x, const double *z, int n,
                           int *tri, int maxtri);
 
