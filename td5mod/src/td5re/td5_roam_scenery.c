@@ -2570,6 +2570,7 @@ static int sc_emit_footpaths(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **fc, 
 #define PV_COLLAPSE_SEG 1.25         /* a piece longer than this many widths never folds */
 #define PV_COLLAPSE_RUN 3.5          /* a folded corner run is at most this many widths  */
 #define PV_FALL         0.25         /* TG_NET_FW_FALL: steepest cross-fall of a slab    */
+#define PV_LEVEL_TOL    43.0         /* [roam JA] ground this far (10 cm) over an island's level: ground follow */
 #define PV_FALL_LOW     0.06         /* [G4b] steepest fall away from the kerb where the drawn ground is
                                       * lowered under the road (a cut): a street camber, the back face
                                       * (down to the lowered ground) covers the rest                  */
@@ -2633,6 +2634,7 @@ struct ScPvSrc {
     int       island_fill, island_back;   /* [roam IA] */
     int       join_guard;                 /* [roam JA] pv_join: no join on the road side of a kerb line */
     int       medial;                     /* [roam JA] pv_medial: fill to the medial line, not the half ray */
+    int       level;                      /* [roam JA] pv_heights: an island's outer edge between the two kerb tops */
     double    dbg_x, dbg_z, dbg_r;        /* [roam IA] DEV TD5RE_ROAM_PV_DBG=x,z,r (place frame): width-rule trace */
 };
 
@@ -2659,6 +2661,7 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->island_back = td5_env_int("TD5RE_ROAM_PV_ISLAND_BACK", 1, 0, 1);   /* [roam IA] */
     p->join_guard  = td5_env_int("TD5RE_ROAM_PV_JOIN_GUARD", 1, 0, 1);    /* [roam JA] */
     p->medial      = td5_env_int("TD5RE_ROAM_PV_MEDIAL", 1, 0, 1);        /* [roam JA] */
+    p->level       = td5_env_int("TD5RE_ROAM_PV_ISLAND_LEVEL", 1, 0, 1);  /* [roam JA] */
 #ifndef TD5RE_RELEASE
     {
         const char *q = getenv("TD5RE_ROAM_PV_DBG");
@@ -3063,8 +3066,10 @@ typedef struct {
     double  *nx, *nz;                    /* per segment, outward                         */
     double  *ox, *oz;                    /* per vertex: outer point                      */
     double  *ux, *uz, *mf;               /* per vertex: unit bisector, mitre factor      */
+    double  *fy;                         /* [roam JA] per island vertex: the far kerb's road y (or -1e30) */
     unsigned char *vf;                   /* per vertex: PV_VF_*                          */
     int      join_guard;                 /* [roam JA] TD5RE_ROAM_PV_JOIN_GUARD (pv_join)  */
+    int      level;                      /* [roam JA] TD5RE_ROAM_PV_ISLAND_LEVEL (pv_heights) */
 } PvChain;
 
 /* The junction of the outer lines of alive segments a and b (a before b), the
@@ -3408,6 +3413,24 @@ static void pv_heights(PvEmit *e, PvChain *ch, double *yo, double *gr)
         yk /= (double)n;
         g = sc_ground(e->c, ch->ox[v], ch->oz[v]);
         low = sc_lowering(e->c, ch->ox[v], ch->oz[v]);
+        /* [roam JA] ISLAND LEVEL. An island vertex meets the far side's slab on the medial line (pv_medial), where
+         * both kerbs are equally far: its outer edge stands at the mean of the two kerb tops, so the two halves meet
+         * at one height (each used to follow the ground within its own kerb's cross-fall, and the higher half's back
+         * face showed as a crease across the island). Not where the ground stands over that level (a mound, a
+         * steep cross slope): the old rule there. */
+        if (ch->level && (vf & PV_VF_ISLAND) && !(vf & (PV_VF_DECK | PV_VF_FLAT))) {
+            double fs = 0.0;
+            int fn = 0;
+            for (j = 0; j < n; j++) { const int k = (v + j) % nv; if (ch->fy[k] > -1e29) { fs += ch->fy[k]; fn++; } }
+            if (fn == n) {
+                const double lvl = 0.5 * (yk + fs / (double)n + TD5_TG_KERB_H);
+                if (g + TD5_TG_KERB_H <= lvl + PV_LEVEL_TOL) {
+                    for (j = 0; j < n; j++) { const int k = (v + j) % nv; yo[k] = lvl; gr[k] = g - PV_BACK_SINK; }
+                    done += n;
+                    continue;
+                }
+            }
+        }
         for (j = 0; j < n; j++) {
             const int k = (v + j) % nv;
             if (vf & (PV_VF_DECK | PV_VF_FLAT)) {
@@ -3770,6 +3793,7 @@ static double pv_ray_free(TG_TileCtx *c, double x, double z, double ux, double u
  * TD5RE_ROAM_PV_MEDIAL=0: the old half ray. */
 #define PV_MED_PROBE_DEG  12.0
 #define PV_MED_PHI_MAX    70.0
+#define PV_MED_SEAM       8.0     /* the two halves overlap 2 cm (same plane, world-space uv): no hairline of lot between */
 static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
 {
     TG_TileCtx *c = e->c;
@@ -3777,18 +3801,19 @@ static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
     const double ca = cos(a), sa = sin(a);
     double fp, fm, bx[2], bz[2], dx, dz, dl, cphi;
     if (!e->s->pv->medial || !(freed > 0.0)) return 0.5 * freed;
+    if (freed <= 2.0 * PV_MED_SEAM) return 0.5 * freed;
     fp = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca - uz * sa, ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
     fm = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca + uz * sa, -ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
-    if (fp < 0.0 || fm < 0.0) return 0.5 * freed;
+    if (fp < 0.0 || fm < 0.0) return 0.5 * freed + PV_MED_SEAM;
     bx[0] = ch->px[v] + (ux * ca - uz * sa) * fp;  bz[0] = ch->pz[v] + (ux * sa + uz * ca) * fp;
     bx[1] = ch->px[v] + (ux * ca + uz * sa) * fm;  bz[1] = ch->pz[v] + (-ux * sa + uz * ca) * fm;
     dx = bx[0] - bx[1]; dz = bz[0] - bz[1]; dl = hypot(dx, dz);
     /* the two far points span about 2 f tan(a) on one straight kerb; much more or less is a corner or another road */
-    if (!(dl > 0.5 * freed * tan(a)) || dl > 4.0 * freed * tan(a)) return 0.5 * freed;
+    if (!(dl > 0.5 * freed * tan(a)) || dl > 4.0 * freed * tan(a)) return 0.5 * freed + PV_MED_SEAM;
     cphi = fabs(ux * dz - uz * dx) / dl;            /* |u x far kerb direction| = cos(ray, far normal) */
     if (cphi < cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0)) cphi = cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0);
     if (cphi > 1.0) cphi = 1.0;
-    return freed * cphi / (1.0 + cphi);
+    return freed * cphi / (1.0 + cphi) + PV_MED_SEAM;
 }
 
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
@@ -3815,13 +3840,16 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
     ch.nv = closed ? m : m + 1;
     ch.closed = closed;
     ch.join_guard = e->s->pv->join_guard;
-    blk = (double *)calloc((size_t)ch.nv * 14u + (size_t)m * 2u, sizeof(double));
+    ch.level = e->s->pv->level;
+    blk = (double *)calloc((size_t)ch.nv * 15u + (size_t)m * 2u, sizeof(double));
     ch.vf = (unsigned char *)calloc((size_t)ch.nv, 1);
     if (!blk || !ch.vf) { free(blk); free(ch.vf); free(seq); return 0; }
     ch.px = blk; ch.pz = ch.px + ch.nv; ch.py = ch.pz + ch.nv; ch.w = ch.py + ch.nv;
     ch.ox = ch.w + ch.nv; ch.oz = ch.ox + ch.nv; ch.ux = ch.oz + ch.nv; ch.uz = ch.ux + ch.nv; ch.mf = ch.uz + ch.nv;
     kx = ch.mf + ch.nv; kz = kx + ch.nv; yo = kz + ch.nv; gr = yo + ch.nv;
     ch.nx = gr + ch.nv; ch.nz = ch.nx + m;
+    ch.fy = ch.nz + m;
+    for (v = 0; v < ch.nv; v++) ch.fy[v] = -1e30;
     c->st.pv_chains++;
     /* vertices, segment normals, vertex flags and the ribbon widths */
     for (k = 0; k < m; k++) {
@@ -3950,6 +3978,11 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
             if (median || fill || ch.w[v] > half) {
                 ch.w[v] = half;
                 ch.vf[v] |= PV_VF_ISLAND;
+                if (ch.level) {   /* [roam JA] the far kerb's road height, just past the ray's hit */
+                    const double qx = ch.px[v] + ch.ux[v] * (freed + 2.0 * PV_KERB_IN), qz = ch.pz[v] + ch.uz[v] * (freed + 2.0 * PV_KERB_IN);
+                    double fyv;
+                    if (roam_ctx_road_y(c, qx, qz, ch.py[v], &fyv)) ch.fy[v] = fyv;
+                }
                 if ((median || green) && freed > PV_LAWN_MIN_M * SC_UPM) ch.vf[v] |= PV_VF_MEDIAN;
                 if (B[seq[v < m ? v : m - 1]].owned) c->st.pv_free_clamp++;
             }
