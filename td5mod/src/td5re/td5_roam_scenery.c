@@ -2631,6 +2631,8 @@ struct ScPvSrc {
     uint32_t  clock;
     int       on, fence, facade, merge, median;
     int       island_fill, island_back;   /* [roam IA] */
+    int       join_guard;                 /* [roam JA] pv_join: no join on the road side of a kerb line */
+    int       medial;                     /* [roam JA] pv_medial: fill to the medial line, not the half ray */
     double    dbg_x, dbg_z, dbg_r;        /* [roam IA] DEV TD5RE_ROAM_PV_DBG=x,z,r (place frame): width-rule trace */
 };
 
@@ -2655,6 +2657,8 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->median = td5_env_int("TD5RE_ROAM_PV_MEDIAN", 1, 0, 1);
     p->island_fill = td5_env_int("TD5RE_ROAM_PV_ISLAND_FILL", 1, 0, 1);   /* [roam IA] */
     p->island_back = td5_env_int("TD5RE_ROAM_PV_ISLAND_BACK", 1, 0, 1);   /* [roam IA] */
+    p->join_guard  = td5_env_int("TD5RE_ROAM_PV_JOIN_GUARD", 1, 0, 1);    /* [roam JA] */
+    p->medial      = td5_env_int("TD5RE_ROAM_PV_MEDIAL", 1, 0, 1);        /* [roam JA] */
 #ifndef TD5RE_RELEASE
     {
         const char *q = getenv("TD5RE_ROAM_PV_DBG");
@@ -3060,10 +3064,17 @@ typedef struct {
     double  *ox, *oz;                    /* per vertex: outer point                      */
     double  *ux, *uz, *mf;               /* per vertex: unit bisector, mitre factor      */
     unsigned char *vf;                   /* per vertex: PV_VF_*                          */
+    int      join_guard;                 /* [roam JA] TD5RE_ROAM_PV_JOIN_GUARD (pv_join)  */
 } PvChain;
 
 /* The junction of the outer lines of alive segments a and b (a before b), the
- * vertex between them being v. Clamped to PV_MITRE_MAX widths from it. */
+ * vertex between them being v. Clamped to PV_MITRE_MAX widths from it.
+ * [roam JA] A segment whose two ends have different widths has a TILTED outer line, and two tilted lines
+ * over short pieces (an acute block tip whose kerb vertices were filled to the middle of the gap, PV_VF_ISLAND,
+ * beside a fillet that was not) can meet past the tip, on the ROAD side of a kerb line: the guard then halved
+ * the piece six times and dropped it, and the block tip stayed a hole the city lot showed through (Parque
+ * Vucetich, Diagonal 101 x Calle 27). A join on the road side of either kerb line is the vertex's own mitre
+ * instead (TD5RE_ROAM_PV_JOIN_GUARD=0: the old join). */
 static void pv_join(const PvChain *ch, const double *Ax, const double *Az, const double *Bx, const double *Bz,
                     int a, int b, int v, double *x, double *z)
 {
@@ -3071,6 +3082,12 @@ static void pv_join(const PvChain *ch, const double *Ax, const double *Az, const
     if (!pv_isect(Ax[a], Az[a], Bx[a], Bz[a], Ax[b], Az[b], Bx[b], Bz[b], x, z)) {
         *x = 0.5 * (Bx[a] + Ax[b]);
         *z = 0.5 * (Bz[a] + Az[b]);
+    }
+    if (ch->join_guard &&
+        ((*x - ch->px[a]) * ch->nx[a] + (*z - ch->pz[a]) * ch->nz[a] < 0.0 ||
+         (*x - ch->px[b]) * ch->nx[b] + (*z - ch->pz[b]) * ch->nz[b] < 0.0)) {
+        *x = ch->px[v] + ch->ux[v] * ch->w[v] * ch->mf[v];
+        *z = ch->pz[v] + ch->uz[v] * ch->w[v] * ch->mf[v];
     }
     lim = PV_MITRE_MAX * (ch->w[v] > 1.0 ? ch->w[v] : 1.0);
     d = hypot(*x - ch->px[v], *z - ch->pz[v]);
@@ -3721,6 +3738,59 @@ static int pv_island_top(PvEmit *e, const PvChain *ch, const double *kx, const d
     return ok;
 }
 
+/* [roam JA] the free distance from kerb point (x, z) along unit (ux, uz) to the next drivable surface (the ray
+ * of pv_chain_emit: PV_RAY_STEP march then 5 halvings), -1 when none within lim */
+static double pv_ray_free(TG_TileCtx *c, double x, double z, double ux, double uz, double lim)
+{
+    double d;
+    for (d = PV_RAY_STEP; d <= lim; d += PV_RAY_STEP) {
+        const double qx = x + ux * (PV_KERB_IN + d), qz = z + uz * (PV_KERB_IN + d);
+        if (sc_on_road(c, &qx, &qz, 1, NULL)) {
+            double lo = d - PV_RAY_STEP, hi = d;
+            int it;
+            for (it = 0; it < 5; it++) {
+                const double mid = 0.5 * (lo + hi);
+                const double rx = x + ux * (PV_KERB_IN + mid), rz = z + uz * (PV_KERB_IN + mid);
+                if (sc_on_road(c, &rx, &rz, 1, NULL)) hi = mid; else lo = mid;
+            }
+            return PV_KERB_IN + lo;
+        }
+    }
+    return -1.0;
+}
+
+/* [roam JA] MEDIAL FILL. A vertex filled to the middle of a gap (an island, a median, a vertex clamped to half
+ * the free distance) used to stop at HALF the ray, freed / 2. That is the medial line only when the far kerb is
+ * square to the ray. Where two kerbs meet at an angle (a block tip between a diagonal and a calle: Parque Vucetich,
+ * Diagonal 101 x Calle 27) each side's half-ray point lies past the true middle, so the two sides' slabs crossed
+ * over each other a few cm apart (a stacked, ragged seam). The far kerb's direction comes from two more rays
+ * PV_MED_PROBE_DEG either side; the slab stops at t = f cos(phi) / (1 + cos(phi)) along the ray (phi: the ray
+ * against the far kerb's normal), the point as far from this kerb as from that one. Back to f / 2 when a side ray
+ * misses or the two far points disagree (another road), and phi is capped at PV_MED_PHI_MAX.
+ * TD5RE_ROAM_PV_MEDIAL=0: the old half ray. */
+#define PV_MED_PROBE_DEG  12.0
+#define PV_MED_PHI_MAX    70.0
+static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
+{
+    TG_TileCtx *c = e->c;
+    const double ux = ch->ux[v], uz = ch->uz[v], a = PV_MED_PROBE_DEG * 3.14159265358979323846 / 180.0;
+    const double ca = cos(a), sa = sin(a);
+    double fp, fm, bx[2], bz[2], dx, dz, dl, cphi;
+    if (!e->s->pv->medial || !(freed > 0.0)) return 0.5 * freed;
+    fp = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca - uz * sa, ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
+    fm = pv_ray_free(c, ch->px[v], ch->pz[v], ux * ca + uz * sa, -ux * sa + uz * ca, 2.0 * freed + PV_RAY_STEP);
+    if (fp < 0.0 || fm < 0.0) return 0.5 * freed;
+    bx[0] = ch->px[v] + (ux * ca - uz * sa) * fp;  bz[0] = ch->pz[v] + (ux * sa + uz * ca) * fp;
+    bx[1] = ch->px[v] + (ux * ca + uz * sa) * fm;  bz[1] = ch->pz[v] + (-ux * sa + uz * ca) * fm;
+    dx = bx[0] - bx[1]; dz = bz[0] - bz[1]; dl = hypot(dx, dz);
+    /* the two far points span about 2 f tan(a) on one straight kerb; much more or less is a corner or another road */
+    if (!(dl > 0.5 * freed * tan(a)) || dl > 4.0 * freed * tan(a)) return 0.5 * freed;
+    cphi = fabs(ux * dz - uz * dx) / dl;            /* |u x far kerb direction| = cos(ray, far normal) */
+    if (cphi < cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0)) cphi = cos(PV_MED_PHI_MAX * 3.14159265358979323846 / 180.0);
+    if (cphi > 1.0) cphi = 1.0;
+    return freed * cphi / (1.0 + cphi);
+}
+
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 {
     TG_TileCtx *c = e->c;
@@ -3744,6 +3814,7 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
     ch.ns = m;
     ch.nv = closed ? m : m + 1;
     ch.closed = closed;
+    ch.join_guard = e->s->pv->join_guard;
     blk = (double *)calloc((size_t)ch.nv * 14u + (size_t)m * 2u, sizeof(double));
     ch.vf = (unsigned char *)calloc((size_t)ch.nv, 1);
     if (!blk || !ch.vf) { free(blk); free(ch.vf); free(seq); return 0; }
@@ -3852,6 +3923,8 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 #endif
         if (freed >= 0.0) {
             int median = 0;
+            /* [roam JA] where the slab stops: the MEDIAL line between this kerb and the surface the ray hit */
+            const double half = pv_medial(e, &ch, v, freed);
             if (hp && hp->seg >= 0 && freed <= PV_MEDIAN_M * SC_UPM && e->s->pv->median) {
                 const int kin = (v > 0) ? v - 1 : (closed ? m - 1 : -1), kout = (v < m) ? v : -1;
                 const PvWay *me = (kout >= 0 && B[seq[kout]].way) ? B[seq[kout]].way
@@ -3862,20 +3935,20 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
             /* [roam IA] a gap no building stands in (this side's half, probed every 0.5 m) is an island
              * whichever streets bound it; a lawn when the middle of the gap is an OSM green */
             int fill = 0, green = 0;
-            if (!median && e->s->pv->island_fill && ch.w[v] <= 0.5 * freed && freed <= PV_MEDIAN_M * SC_UPM) {
+            if (!median && e->s->pv->island_fill && ch.w[v] <= half && freed <= PV_MEDIAN_M * SC_UPM) {
                 fill = 1;
-                for (d = ch.w[v]; d <= 0.5 * freed && fill; d += PV_FACE_STEP)
+                for (d = ch.w[v]; d <= half && fill; d += PV_FACE_STEP)
                     if (pv_in_building(c, e->bld, ch.px[v] + ch.ux[v] * d, ch.pz[v] + ch.uz[v] * d)) fill = 0;
 #ifndef TD5RE_RELEASE
                 if (e->s->pv->dbg_r > 0.0 && hypot(ch.px[v] + c->org_x - e->s->pv->dbg_x, ch.pz[v] + c->org_z - e->s->pv->dbg_z) < e->s->pv->dbg_r)
                     TD5_LOG_I(LOG_TAG, "PVDBG   v %d fill %d (a building %.0f along the ray)", v, fill, fill ? -1.0 : d);
 #endif
                 if (fill)
-                    green = pv_in_green(c, e->ar, e->nar, ch.px[v] + ch.ux[v] * 0.5 * freed, ch.pz[v] + ch.uz[v] * 0.5 * freed);
+                    green = pv_in_green(c, e->ar, e->nar, ch.px[v] + ch.ux[v] * half, ch.pz[v] + ch.uz[v] * half);
                 if (fill && B[seq[v < m ? v : m - 1]].owned) c->st.pv_island_fill++;
             }
-            if (median || fill || ch.w[v] > 0.5 * freed) {
-                ch.w[v] = 0.5 * freed;
+            if (median || fill || ch.w[v] > half) {
+                ch.w[v] = half;
                 ch.vf[v] |= PV_VF_ISLAND;
                 if ((median || green) && freed > PV_LAWN_MIN_M * SC_UPM) ch.vf[v] |= PV_VF_MEDIAN;
                 if (B[seq[v < m ? v : m - 1]].owned) c->st.pv_free_clamp++;
