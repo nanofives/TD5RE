@@ -4501,6 +4501,9 @@ out:
 #define INF_STOREY_W    2.5           /* metres of frontage per storey at most (a street)   */
 #define INF_STOREY_W_AV 1.25          /* ... on an avenue (a 10 m front takes 8 storeys)     */
 #define INF_FRONT_IN    65.0          /* units (15 cm): the front stands off the slab's back face */
+#define INF_RAIL_STEP_M 1.0           /* [integ-roamI] a lot a rail bed reaches: its front is searched back in these steps */
+#define INF_RAIL_GAP_M  3.0           /* ... and stands this far behind the first offset clear of the bed            */
+#define INF_RAIL_MIN_M  8.0           /* ... refused when less than this depth is left                               */
 static const unsigned char k_inf_levels_street[16] = { 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3 };
 static const unsigned char k_inf_levels_avenue[16] = { 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6, 6, 8, 10 };
 
@@ -4754,15 +4757,22 @@ static int inf_in_lot(const TG_TileCtx *c, double x, double z)
     return 0;
 }
 
+/* the lot [a0, a1] with its front o0 and its back o1 behind the building line */
+static int inf_lot_ring_at(const InfLine *L, double a0, double a1, double o0, double o1, double *fx, double *fz,
+                           double *gx, double *gz, int *nf, double *mx, double *mz, int *seg)
+{
+    double tx[INF_PTS + 2], tz[INF_PTS + 2];
+    int n2 = 0;
+    if (!inf_lot_geom(L, a0, a1, o0, tx, tz, fx, fz, nf, mx, mz, seg)) return 0;
+    if (!inf_lot_geom(L, a0, a1, o1, tx, tz, gx, gz, &n2, mx, mz, seg) || n2 != *nf) return 0;
+    return 1;
+}
+
 /* the lot [a0, a1] with its front INF_FRONT_IN inside the building line and its back D behind that */
 static int inf_lot_ring(const InfLine *L, double a0, double a1, double D, double *fx, double *fz, double *gx,
                         double *gz, int *nf, double *mx, double *mz, int *seg)
 {
-    double tx[INF_PTS + 2], tz[INF_PTS + 2];
-    int n2 = 0;
-    if (!inf_lot_geom(L, a0, a1, INF_FRONT_IN, tx, tz, fx, fz, nf, mx, mz, seg)) return 0;
-    if (!inf_lot_geom(L, a0, a1, INF_FRONT_IN + D, tx, tz, gx, gz, &n2, mx, mz, seg) || n2 != *nf) return 0;
-    return 1;
+    return inf_lot_ring_at(L, a0, a1, INF_FRONT_IN, INF_FRONT_IN + D, fx, fz, gx, gz, nf, mx, mz, seg);
 }
 
 /* One lot [a0, a1] of the current run: accept it, else split it along its front (twice at most), else halve its
@@ -4775,7 +4785,8 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     const double U = s->upm;
     double fx[INF_PTS + 2], fz[INF_PTS + 2], gx[INF_PTS + 2], gz[INF_PTS + 2];
     double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], mx = 0.0, mz = 0.0, D, Dcap;
-    int nf = 0, seg = L->r0, q, res = 0, own, why = 0;
+    int nf = 0, seg = L->r0, q, res = 0, own, why = 0, rail_hit = 0, rail_moved = 0;
+    double front = 0.0;                  /* [integ-roamI] the lot's front behind the building line when moved back */
     uint32_t h;
     if (!inf_lot_geom(L, a0, a1, 0.0, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) return 1;
     own = sc_owned_point(c, mx, mz) && !counted;
@@ -4803,6 +4814,37 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     }
     if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
     res = inf_lot_test(e, fx, fz, gx, gz, nf);
+    if (res == 5 && s->ic_infill) {
+        /* [integ-roamI] a railway runs along the block edge (FC Roca beside Avenida 72): the lot keeps its frontage
+         * and steps back behind the bed + INF_RAIL_GAP_M, as deep as before but never past the half-block cap
+         * (Dcap); refused only when less than INF_RAIL_MIN_M is left. No offset clear of the bed (the track runs
+         * behind the lot): the shallowing below keeps the front instead. */
+        double sb;
+        rail_hit = 1;
+        for (sb = INF_RAIL_STEP_M * U; sb + INF_RAIL_MIN_M * U <= Dcap + 1e-6; sb += INF_RAIL_STEP_M * U) {
+            const double back = (sb + D < Dcap ? sb + D : Dcap);
+            int r2;
+            if (!inf_lot_ring_at(L, a0, a1, INF_FRONT_IN + sb, INF_FRONT_IN + back, fx, fz, gx, gz, &nf, &mx, &mz, &seg))
+                break;
+            r2 = inf_lot_test(e, fx, fz, gx, gz, nf);
+            if (r2 == 5) continue;
+            sb += INF_RAIL_GAP_M * U;
+            {
+                const double b2 = (sb + D < Dcap ? sb + D : Dcap);
+                if (b2 - sb < INF_RAIL_MIN_M * U) { why = 5; goto refused; }
+                if (!inf_lot_ring_at(L, a0, a1, INF_FRONT_IN + sb, INF_FRONT_IN + b2, fx, fz, gx, gz, &nf, &mx, &mz, &seg))
+                    { why = 1; goto refused; }
+                res = inf_lot_test(e, fx, fz, gx, gz, nf);
+                if (res) { why = res; goto refused; }
+                front = sb; D = b2 - sb; rail_moved = 1;
+            }
+            break;
+        }
+        if (!rail_moved) {   /* back to the lot at the building line for the shallowing */
+            if (!inf_lot_ring(L, a0, a1, D, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) { why = 1; goto refused; }
+            res = 5;
+        }
+    }
     if (res == 3 && split < 2 && a1 - a0 >= 2.0 * INF_SPLIT_MIN_M * U) {
         /* a footprint on part of it: the two halves on their own (booked as this lot) */
         const int b0 = c->st.inf_emitted;
@@ -4838,9 +4880,12 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     if (!td5_geob_ring_simple(rx, rz, nf * 2)) { why = 1; goto refused; }
     if (!inf_record(c, rx, rz, nf * 2)) return 0;
     if (!sc_owned_point(c, mx, mz)) return 1;          /* a split half: its own midpoint's tile emits it */
+    if (rail_moved) c->st.inf_rail_moved++;
+    else if (rail_hit) c->st.inf_rail_shallow++;
     if (s->infill_log)                                  /* TD5RE_ROAM_INFILL_LOG=1: where each lot stands (place frame) */
         TD5_LOG_I(LOG_TAG, "ROAM_INFILL tile %d,%d front (%.0f,%.0f) normal (%.3f,%.3f) depth %.1f m width %.1f m",
-                  c->tx, c->tz, mx + (double)c->org_x, mz + (double)c->org_z, L->nx[seg], L->nz[seg], D / U, (a1 - a0) / U);
+                  c->tx, c->tz, mx + L->nx[seg] * front + (double)c->org_x, mz + L->nz[seg] * front + (double)c->org_z,
+                  L->nx[seg], L->nz[seg], D / U, (a1 - a0) / U);
     return inf_emit(e, rx, rz, nf * 2, h, fabs(td5_geob_ring_area(rx, rz, nf * 2)), a1 - a0);
 refused:
     if (own) {
@@ -4848,7 +4893,11 @@ refused:
         else if (why == 3) c->st.inf_drop_real++;
         else if (why == 4 || why == 5) c->st.inf_drop_area++;
         else c->st.inf_drop_shape++;
-        if (why == 5) { c->st.inf_drop_rail++; c->st.inf_m_rail += (a1 - a0) / U; }
+        if (why == 5 || rail_hit) { c->st.inf_drop_rail++; c->st.inf_m_rail += (a1 - a0) / U; }
+        if ((why == 5 || rail_hit) && s->infill_log)
+            TD5_LOG_I(LOG_TAG, "ROAM_INFILL_RAIL tile %d,%d front (%.0f,%.0f) refused why %d (5 bed / too shallow, 4 area, 3 real, "
+                      "2 road, 1 shape) block half %.1f m width %.1f m", c->tx, c->tz, mx + (double)c->org_x, mz + (double)c->org_z,
+                      why, Dcap / U, (a1 - a0) / U);
         if (why == 3) c->st.inf_m_real += (a1 - a0) / U;
         else if (why == 4 || why == 5) c->st.inf_m_area += (a1 - a0) / U;
         else c->st.inf_m_other += (a1 - a0) / U;
@@ -5430,7 +5479,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0;
+    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
@@ -5527,6 +5576,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ic_t[0] += r->lot_medians; ic_t[1] += r->bld_veto_green; ic_t[2] += r->pv_bld_gone; ic_t[3] += r->lot_cover_green;
         ic_m[0] += r->inf_m_built; ic_m[1] += r->inf_m_real; ic_m[2] += r->inf_m_area; ic_m[3] += r->inf_m_other;
         inf_rail_n += r->inf_drop_rail; inf_rail_m += r->inf_m_rail;   /* [integ-roamI] */
+        inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
         lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
         lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
         lot_t[8] += r->inf_drop_real; lot_t[9] += r->inf_drop_road; lot_t[10] += r->inf_drop_area;
@@ -5646,8 +5696,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         snprintf(line, sizeof line,
                  "roam IC: %ld avenue median(s) + %ld unmapped vegetated casco loop(s) kept green, %ld footprint(s) not built on a park / ring plaza / median "
                  "(green veto), %ld dropped footprint(s) no longer taking the frontage | infill frontage: built %.0f m, "
-                 "taken by a real footprint %.0f m, refused by an area %.0f m (of it a railway bed: %ld lot(s), %.0f m), other (road / shape) %.0f m",
-                 ic_t[0], ic_t[3], ic_t[1], ic_t[2], ic_m[0], ic_m[1], ic_m[2], inf_rail_n, inf_rail_m, ic_m[3]);
+                 "taken by a real footprint %.0f m, refused by an area %.0f m, other (road / shape) %.0f m | lots a railway bed reached: %ld moved back behind it, "
+                 "%ld shallower, %ld refused (%.0f m)",
+                 ic_t[0], ic_t[3], ic_t[1], ic_t[2], ic_m[0], ic_m[1], ic_m[2], ic_m[3], inf_rail_mv, inf_rail_sh,
+                 inf_rail_n, inf_rail_m);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

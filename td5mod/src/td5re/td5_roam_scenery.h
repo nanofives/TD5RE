@@ -190,6 +190,7 @@ typedef struct {
      * inf_drop_area too) and their frontage metres */
     int  inf_drop_rail;
     double inf_m_rail;
+    int  inf_rail_moved, inf_rail_shallow;   /* ... built anyway: front moved back behind the bed / shallower */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
