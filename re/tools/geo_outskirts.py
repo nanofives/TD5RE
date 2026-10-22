@@ -202,9 +202,9 @@ def load_roads(place: str):
 
 
 def nearest_road(grid, cell, upm, x, z):
-    """(distance in metres, road) of the nearest ROADS segment, or (None, None)."""
+    """(distance in metres, road, unit direction) of the nearest ROADS segment, or (None, None)."""
     gx, gz = int(math.floor(x / cell)), int(math.floor(z / cell))
-    best, br = 1e300, None
+    best, br, bd = 1e300, None, (1.0, 0.0)
     for dx in (-1, 0, 1):
         for dz in (-1, 0, 1):
             for a, b, r in grid.get((gx + dx, gz + dz), ()):
@@ -214,7 +214,9 @@ def nearest_road(grid, cell, upm, x, z):
                 d = math.hypot(x - (a["x"] + vx * t), z - (a["z"] + vz * t))
                 if d < best:
                     best, br = d, r
-    return (best / upm, br) if br is not None else (None, None)
+                    l = math.sqrt(L2) or 1.0
+                    bd = (vx / l, vz / l)
+    return (best / upm, br, bd) if br is not None else (None, None, bd)
 
 
 def convert(osms: list, proj, roads) -> dict:
@@ -235,7 +237,7 @@ def convert(osms: list, proj, roads) -> dict:
                                        "tags": _keep(t, KEEP_POLE)}
                 elif t.get("barrier") in GATE_KINDS:
                     p = _pt(proj, el["lat"], el["lon"])
-                    d, r = nearest_road(grid, cell, upm, p["x"], p["z"])
+                    d, r, dr = nearest_road(grid, cell, upm, p["x"], p["z"])
                     if d is None or d > GATE_ROAD_M:
                         dropped["gates_off_road"] += 1
                         continue
@@ -248,6 +250,7 @@ def convert(osms: list, proj, roads) -> dict:
                     gates[el["id"]] = {"id": el["id"], "kind": t["barrier"], "x": p["x"], "z": p["z"],
                                        "latlon": [el["lat"], el["lon"]], "access": t.get("access"),
                                        "road": r.get("id"), "class": cls, "d": round(d, 2),
+                                       "dx": round(dr[0], 4), "dz": round(dr[1], 4),
                                        "tags": _keep(t, KEEP_GATE)}
             elif el.get("type") == "way":
                 geom = el.get("geometry") or []
@@ -266,7 +269,7 @@ def convert(osms: list, proj, roads) -> dict:
                                        "node_ids": el.get("nodes") or []}
                 elif t.get("barrier") == "guard_rail":
                     m = pts[len(pts) // 2]
-                    d, r = nearest_road(grid, cell, upm, m["x"], m["z"])
+                    d, r, _ = nearest_road(grid, cell, upm, m["x"], m["z"])
                     guards[el["id"]] = {"id": el["id"], "points": pts, "latlon": ll,
                                         "highway_near": r.get("class") if r is not None and d is not None and d < 25 else None,
                                         "tags": _keep(t, KEEP_GUARD)}
