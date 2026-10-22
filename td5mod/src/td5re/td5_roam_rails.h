@@ -67,7 +67,8 @@ typedef struct {
      * board on each platform; electrified=contact_line -> masts, cantilevers, messenger + contact wire. */
     int  lx_nodes;           /* level_crossing nodes owned (every tag state)                                 */
     int  lx_equipped;        /* ... of them with a barrier / light / saltire tag: drawn                      */
-    int  lx_untagged;        /* ... with none of those tags: left bare (not drawn)                           */
+    int  lx_untagged;        /* ... with none of those tags (roam PA: a plain saltire on each approach, lx_untagged_x)  */
+    int  lx_untagged_x;      /* roam PA: saltire approaches drawn for untagged crossings (TD5RE_ROAM_RAILS_UNTAGGED_X) */
     int  lx_barrier_half, lx_barrier_full, lx_lights, lx_saltires;  /* elements drawn (per approach)       */
     int  lx_no_road, lx_no_rail, lx_post_drop;   /* no street within 12 m / no track within 12 m / post on a road */
     int  stn_boards, stn_named, stn_plain;       /* boards drawn / with the station's name / blank (no cell)  */

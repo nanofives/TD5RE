@@ -8138,7 +8138,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             sh_m += r->shop.front_m;
         }
         lf_t[0] += r->rail.lx_nodes; lf_t[1] += r->rail.lx_equipped; lf_t[2] += r->rail.lx_untagged;
-        lf_t[3] += r->rail.lx_barrier_half; lf_t[4] += r->rail.lx_barrier_full; lf_t[5] += r->rail.lx_lights; lf_t[6] += r->rail.lx_saltires;
+        lf_t[3] += r->rail.lx_barrier_half; lf_t[4] += r->rail.lx_barrier_full; lf_t[5] += r->rail.lx_lights; lf_t[6] += r->rail.lx_saltires; lf_t[21] += r->rail.lx_untagged_x;
         lf_t[7] += r->rail.lx_no_road; lf_t[8] += r->rail.lx_no_rail; lf_t[9] += r->rail.lx_post_drop;
         lf_t[10] += r->rail.stn_boards; lf_t[11] += r->rail.stn_named; lf_t[12] += r->rail.stn_plain; lf_t[13] += r->rail.stn_on_platform;
         lf_t[14] += r->rail.stn_by_track; lf_t[15] += r->rail.stn_drop;
@@ -8302,11 +8302,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
-                 "roam rail furniture [roam LF]: level-crossing nodes owned %ld (%ld equipped, %ld untagged left bare; no street within 12 m %ld, "
+                 "roam rail furniture [roam LF]: level-crossing nodes owned %ld (%ld equipped, %ld untagged [roam PA: %ld plain saltire approaches drawn]; no street within 12 m %ld, "
                  "no track %ld, post on a road %ld) | drawn per approach: half barriers %ld, full barriers %ld, light heads %ld, saltires %ld | "
                  "station boards %ld (%ld with the name, %ld blank; %ld on a platform, %ld beside the track, %ld refused) | catenary: %ld way(s), %ld mast(s) "
                  "(%ld dropped on a road), %ld wire piece(s) = %.2f km of contact wire (%ld left off under a road deck)",
-                 lf_t[0], lf_t[1], lf_t[2], lf_t[7], lf_t[8], lf_t[9], lf_t[3], lf_t[4], lf_t[5], lf_t[6], lf_t[10], lf_t[11], lf_t[12],
+                 lf_t[0], lf_t[1], lf_t[2], lf_t[21], lf_t[7], lf_t[8], lf_t[9], lf_t[3], lf_t[4], lf_t[5], lf_t[6], lf_t[10], lf_t[11], lf_t[12],
                  lf_t[13], lf_t[14], lf_t[15], lf_t[16], lf_t[17], lf_t[18], lf_t[19], lf_wire_m / 1000.0, lf_t[20]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
