@@ -514,7 +514,9 @@ static void sh_dress_front(TD5_RoamShopSource *s, TG_TileCtx *c, const TD5_RoamS
             ox[1] = b0x + fr->nx * SH_OFF_FASCIA; oz[1] = b0z + fr->nz * SH_OFF_FASCIA;
             ox[2] = b0x + fr->nx * d; oz[2] = b0z + fr->nz * d;
             ox[3] = a0x + fr->nx * d; oz[3] = a0z + fr->nz * d;
-            if (roam_ctx_on_road(c, ox, oz, 4)) {
+            /* [roam NA] the valance alone too: its face projects onto the awning's outer edge, and an edge touching a
+             * road prim can pass the quad test (a facade moved onto the municipal line, tile 14,53) */
+            if (roam_ctx_on_road(c, ox, oz, 4) || roam_ctx_on_road(c, &ox[2], &oz[2], 2)) {
                 st->awning_tight++;
             } else {
                 p[0][0] = ox[0]; p[0][1] = y_in;  p[0][2] = oz[0];

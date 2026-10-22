@@ -63,7 +63,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  17u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  18u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -106,7 +106,12 @@
                                      * 16 = roam LH: poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c),
                                      *      cropland paint on the ground cover
                                      * 17 = round L integration: roam LA LB LC LD LE LF LH combined (each bumped 15 -> 16 on
-                                     *      its own, 17 so no tile cached by a single branch is reused) */
+                                     *      its own, 17 so no tile cached by a single branch is reused)
+                                     * 18 = roam NA: the MUNICIPAL LINE (td5_roam_muni.c): street walls of casco footprints
+                                     *      moved onto the pavement's back edge (side walls stretched, ochavas at block
+                                     *      corners, infill corner lots chamfered), footprints on the line kept 0.5 m off the
+                                     *      kerb instead of 2.8 m; LANDMARK GROUNDS: no Overture blob / infill lot in the
+                                     *      block of a major landmark (the Catedral) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -259,6 +264,15 @@ typedef struct {
      * because the outline touches the drivable surface, bad ring (under 3 points / no triangulation); water m2 */
     int  pools, pool_drop_road, pool_bad;
     double pool_m2;
+    /* [roam NA] the municipal line (td5_roam_muni.h), footprints this tile emits: their fate (TD5_MUNI_*), the ones left
+     * by rule (landmark / civic / part / relation, fuel site, on a park / plaza / open area or landmark grounds, outside
+     * the casco), walls brought forward / cut back, block corners filled + new ochavas; every emitted street wall by its
+     * gap to the line (on the pavement > 5 cm, 0 (5 cm), < 1 m, 1-3, 3-6, 6-12, 12-20 m) and the pre-pass line pieces */
+    int  muni_fate[10], muni_skip[4], muni_fwd, muni_back, muni_corner, muni_ochava, muni_gap[7], muni_segs;
+    /* [roam NA] landmark grounds: blocks marked, Overture blobs not built in them, infill lots refused, OSM footprints
+     * kept in them */
+    int  grounds, grounds_ovt, grounds_inf, grounds_osm;
+    int  inf_ochava;               /* [roam NA] infill corner lots cut by an ochava */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

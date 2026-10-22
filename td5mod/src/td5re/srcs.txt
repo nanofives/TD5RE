@@ -38,6 +38,7 @@ td5_roam_furniture.c
 td5_roam_rails.c
 td5_roam_plaza.c
 td5_roam_shops.c
+td5_roam_muni.c
 td5_roam_outskirts.c
 td5_roam_partido.c
 td5_roam_rebase.c
