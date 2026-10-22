@@ -840,6 +840,13 @@ static void sc_prel_load(TD5_RoamScnSource *s)
             /* a PRECINCT keeps its lot class (no infill) but is no plaza: no lawn, no plaza veto, no plaza trees
              * (the census: the Cementerio de La Plata's 110 mausoleums and galleries, Gimnasia's club buildings) */
             if (!(cls && !strcmp(cls, "green")) || sc_prel_precinct(kind)) { a->kind = TD5_GEOA_KIND_OTHER; nprec++; }
+            {   /* the plaza trees' species (sc_emit_trees: id_hash % TD5_TG_TREE_VARIANTS): from the RELATION id, past
+                 * the two conifers (3, and 4 the snow conifer: pale spikes in a La Plata plaza) */
+                unsigned int hh = (unsigned int)fmod(rid, 4294967296.0) * 2654435761u ^ 0x9E3779B9u;
+                while ((hh % (unsigned)TD5_TG_TREE_VARIANTS) == 3u || (hh % (unsigned)TD5_TG_TREE_VARIANTS) == 4u)
+                    hh = hh * 2654435761u + 0x7F4A7C15u;
+                a->id_hash = hh;
+            }
             first = sc_pool_push(c, &cap_pt, rx, rz, n);
             if (first < 0) break;
             a->first = first;
