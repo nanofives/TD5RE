@@ -151,6 +151,7 @@ double roam_ctx_ground(const TG_TileCtx *c, double x, double z);
 /* [roam ID] the RAW height raster at a tile-local point (no G4b lowering under the road): 1 + *h (and
  * *wet when non-NULL) when the tile's window covers it */
 int    roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet);
+int    roam_ctx_rails_bed_near(const TG_TileCtx *c, const double *x, const double *z, int n, double clear);   /* [integ L] */
 /* [roam ID] the drivable surface height at a tile-local point: of the primitives under (x, z), the one
  * whose height there is nearest ref_y (a deck over a street answers by its height). 1 on a hit. */
 int    roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, double *y);
@@ -181,6 +182,7 @@ typedef struct {
      * per category (shopfront, fuel canopy, plaza furniture, rails, outskirts, pool), trunks on a wet raster sample */
     int  xc_trees[2], xc_trunk[2][6], xc_crown[2][6], xc_wet[2];
     int  pt_furn_drop, pt_wet_drop; /* [integ L] plaza trees the round L veto dropped (a face in the tail, water) */
+    int  xc_xing_rail, xc_furn_rail;   /* [integ L] cross-check: street furniture faces (flat paint / standing) over a rail face */
     /* [roam LA] STREET + LOT TREES from CANOPY.R8 (SECTION trees): planted on the pavement band, planted on the lot
      * lattice; band stations walked, refused: no canopy >= 3 m there, band too narrow, facade too close, slab not
      * found / on a road / a driveway mouth; refused by street furniture or a rail bed after every along-kerb dodge,

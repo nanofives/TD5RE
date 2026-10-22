@@ -1047,6 +1047,7 @@ struct TG_TileCtx {
     int      pt_lot_set;            /* [integ L] plaza trees from LA's lot species set (TD5RE_ROAM_PLAZA_TREE_PAGES) */
     int      xc_on;                 /* [integ L] tree cross-check census (TD5RE_ROAM_TREE_XCHECK, dev) */
     int      tv_on;                 /* [integ L] round L tree veto (TD5RE_ROAM_TREE_VETO_L): see sc_emit_street_trees */
+    TD5_RoamRailSource *rails;      /* [integ L] this build's railways (roam_ctx_rails_bed_near), NULL = none */
     struct ScXcRange *xc_r;         /* [integ L] mesh ranges per emitter, (sub-block, first, end, category) */
     int      xc_n, xc_cap;
     int     *late_pz, nlate_pz, cap_late_pz;   /* [integ L] (sub-block, mesh) of each late plaza tree (cross-check) */
@@ -1568,6 +1569,16 @@ int roam_ctx_on_road(const TG_TileCtx *c, const double *x, const double *z, int 
     return sc_on_road((TG_TileCtx *)c, x, z, n, NULL);
 }
 int roam_ctx_owned(const TG_TileCtx *c, double x, double z) { return sc_owned_point(c, x, z); }
+
+/* [integ L] 1 when the drawn track bed / a platform comes within `clear` units of the tile-local polygon x/z */
+int roam_ctx_rails_bed_near(const TG_TileCtx *c, const double *x, const double *z, int n, double clear)
+{
+    double X[8], Z[8];
+    int k;
+    if (!c->rails || n < 1 || n > 8) return 0;
+    for (k = 0; k < n; k++) { X[k] = x[k] + (double)c->org_x; Z[k] = z[k] + (double)c->org_z; }
+    return td5_roam_rails_bed_near(c->rails, X, Z, n, clear);
+}
 int roam_ctx_sb_of(const TG_TileCtx *c, double x, double z) { return sc_sb_of(c, x, z); }
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z) { return sc_ground((void *)c, x, z); }
 
@@ -1658,7 +1669,7 @@ void *roam_ctx_mesh_begin(TG_TileCtx *c, int sb)
 
 /* [integ L] TREE CROSS-CHECK ranges: which meshes each round L emitter wrote (a snapshot of every sub-block's mesh
  * count before the call, the new meshes noted after it). Read only by sc_tree_xcheck; writes no byte. */
-enum { SC_XC_SHOP, SC_XC_FUEL, SC_XC_PLAZA, SC_XC_RAIL, SC_XC_OUT, SC_XC_POOL, SC_XC_NCAT, SC_XC_TREE_PLAZA = 8 };
+enum { SC_XC_SHOP, SC_XC_FUEL, SC_XC_PLAZA, SC_XC_RAIL, SC_XC_OUT, SC_XC_POOL, SC_XC_NCAT, SC_XC_FURN = 7, SC_XC_TREE_PLAZA = 8 };
 struct ScXcRange { int sb, cat, m0, m1; };
 
 static void sc_xc_snap(const TG_TileCtx *c, int *snap)
@@ -5149,6 +5160,28 @@ static double sc_xc_dist(const ScXcFace *q, double x, double z)
     return d;
 }
 
+/* [integ L] XZ overlap of two faces (1-4 points; a 2-point face is a wall segment, 1 point a billboard foot) */
+static int sc_xc_seg_x(double ax, double az, double bx, double bz, double cx, double cz, double dx, double dz)
+{
+    const double d1 = (bx - ax) * (cz - az) - (bz - az) * (cx - ax), d2 = (bx - ax) * (dz - az) - (bz - az) * (dx - ax);
+    const double d3 = (dx - cx) * (az - cz) - (dz - cz) * (ax - cx), d4 = (dx - cx) * (bz - cz) - (dz - cz) * (bx - cx);
+    return ((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0));
+}
+
+static int sc_xc_overlap(const ScXcFace *a, const ScXcFace *b)
+{
+    int i, j;
+    if (a->x1 < b->x0 || b->x1 < a->x0 || a->z1 < b->z0 || b->z1 < a->z0) return 0;
+    if (a->n >= 3) for (i = 0; i < b->n; i++) if (td5_geob_point_in_ring(a->x, a->z, a->n, b->x[i], b->z[i])) return 1;
+    if (b->n >= 3) for (i = 0; i < a->n; i++) if (td5_geob_point_in_ring(b->x, b->z, b->n, a->x[i], a->z[i])) return 1;
+    if (a->n < 2 || b->n < 2) return 0;
+    for (i = 0; i < (a->n == 2 ? 1 : a->n); i++)
+        for (j = 0; j < (b->n == 2 ? 1 : b->n); j++)
+            if (sc_xc_seg_x(a->x[i], a->z[i], a->x[(i + 1) % a->n], a->z[(i + 1) % a->n],
+                            b->x[j], b->z[j], b->x[(j + 1) % b->n], b->z[(j + 1) % b->n])) return 1;
+    return 0;
+}
+
 static void sc_tree_xcheck(TG_TileCtx *c)
 {
     ScXcFace *F = NULL;
@@ -5185,6 +5218,24 @@ static void sc_tree_xcheck(TG_TileCtx *c)
         }
         for (k = 0; k < SC_XC_NCAT; k++) { c->st.xc_trunk[t->kind][k] += hit_t[k]; c->st.xc_crown[t->kind][k] += hit_c[k]; }
         if (roam_ctx_ground_raw(c, t->x, t->z, &h, &wet) && wet) c->st.xc_wet[t->kind]++;
+    }
+    /* [integ L] street furniture (LC crossing paint, limit lines, posts) against the rails layer (LF level-crossing posts,
+     * arms, boards, masts, the track itself): faces of one overlapping faces of the other in XZ, split by the furniture
+     * face being flat paint (zebra / line, under 0.3 m tall) or standing */
+    {
+        int g;
+        for (f = 0; f < nf; f++) {
+            const ScXcFace *q = &F[f];
+            int flat, any = 0;
+            if (q->cat != SC_XC_FURN) continue;
+            flat = (q->yhi - q->ylo) < 0.3 * SC_UPM;
+            for (g = 0; g < nf && !any; g++)
+                if (F[g].cat == SC_XC_RAIL && sc_xc_overlap(q, &F[g])) any = 1 + (F[g].yhi - F[g].ylo >= 0.3 * SC_UPM);
+            if (any) { if (flat) c->st.xc_xing_rail++; else c->st.xc_furn_rail++; }
+            if (any && flat)
+                fprintf(stderr, "ROAM_XC_XING tile %d,%d paint face at place (%.0f,%.0f) over a %s rail face\n", c->tx, c->tz,
+                          q->x[0] + (double)c->org_x, q->z[0] + (double)c->org_z, any == 2 ? "standing" : "flat");
+        }
     }
 done:
     free(F); free(T);
@@ -6977,6 +7028,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     c->xc_on = td5_env_int("TD5RE_ROAM_TREE_XCHECK", 0, 0, 1);              /* [integ L] dev census */
 #endif
     c->tv_on = td5_env_int("TD5RE_ROAM_TREE_VETO_L", 1, 0, 1);              /* [integ L] */
+    c->rails = s->rails;                                                     /* [integ L] */
     roam_grid_corners(&s->grid, self->tx, self->tz, corner);
     for (i = 0; i < 4; i++) {
         if (corner[i][0] < x0) x0 = corner[i][0];
@@ -7115,7 +7167,10 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         sc_xc_note(c, xs, SC_XC_FUEL);
     }
     if (s->furn) {
+        int xs[TD5_ROAM_SCN_NSB];
+        sc_xc_snap(c, xs);
         if (!td5_roam_furn_emit(s->furn, c, &c->st.furn, &c->lamp, &c->nlamp)) goto out;
+        if (c->xc_on) sc_xc_note(c, xs, SC_XC_FURN);                     /* [integ L] cross-check only */
     }
     /* [roam LA] street + lot trees last: they keep off the furniture and rail faces just written */
     if (!sc_emit_street_trees(c)) goto out;
@@ -7249,6 +7304,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long ptv[TD5_TG_TREE_VARIANTS] = { 0 };                /* [integ L] plaza trees per tree page variant */
     long pt_drop[2] = { 0, 0 };                            /* [integ L] plaza trees vetoed: faces, water */
     long xct[2] = { 0, 0 }, xtr[2][6] = { { 0 } }, xcr[2][6] = { { 0 } }, xwt[2] = { 0, 0 };   /* [integ L] cross-check */
+    long xfr[2] = { 0, 0 }, xr_drop = 0;
     long cg_n[2] = { 0, 0 };
     double cg_m = 0.0;
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
@@ -7371,6 +7427,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             int q, w;
             for (w = 0; w < 2; w++) {
                 xct[w] += r->xc_trees[w]; xwt[w] += r->xc_wet[w];
+                if (!w) { xfr[0] += r->xc_xing_rail; xfr[1] += r->xc_furn_rail; }
                 for (q = 0; q < 6; q++) { xtr[w][q] += r->xc_trunk[w][q]; xcr[w][q] += r->xc_crown[w][q]; }
             }
         }
@@ -7397,6 +7454,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ft[8] += r->furn.stops; ft[9] += r->furn.zebras; ft[10] += r->furn.limit_lines; ft[11] += r->furn.guard_hits;
         ft_unknown_skipped += r->furn.xing_unknown; lc_t[0] += r->furn.xing_unmarked; lc_t[1] += r->furn.xing_unk_zebra;
         lc_t[2] += r->furn.xing_unk_lines; lc_t[3] += r->furn.xing_ways; lc_t[4] += r->furn.xing_way_dup; lc_t[5] += r->furn.xing_way_drawn;
+        xr_drop += r->furn.xing_rail_drop;                                  /* [integ L] */
         ft[12] += r->furn.sig_drop_road + r->furn.sig_drop_frame + r->furn.sig_drop_dup;
         ft[13] += r->furn.lamp_drop_road; ft[14] += r->furn.far_shared; ft[15] += r->furn.plate_none;
         rl_t[0] += r->rail.ways; rl_t[1] += r->rail.pieces; rl_t[2] += r->rail.full; rl_t[3] += r->rail.narrow;
@@ -7533,8 +7591,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
                  "roam crossings [LC]: unmarked skipped %ld | unknown painted by the rule: zebra %ld, lines %ld, skipped %ld | "
-                 "footway=crossing ways %ld: already a node %ld, drawn %ld | zebras %ld, limit lines %ld in all",
-                 lc_t[0], lc_t[1], lc_t[2], ft_unknown_skipped, lc_t[3], lc_t[4], lc_t[5], ft[9], ft[10]);
+                 "footway=crossing ways %ld: already a node %ld, drawn %ld | zebras %ld, limit lines %ld in all | "
+                 "rule / way paint left off a rail bed %ld (TD5RE_ROAM_XING_RAIL_VETO=%d)",
+                 lc_t[0], lc_t[1], lc_t[2], ft_unknown_skipped, lc_t[3], lc_t[4], lc_t[5], ft[9], ft[10], xr_drop,
+                 td5_env_int("TD5RE_ROAM_XING_RAIL_VETO", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
@@ -7632,6 +7692,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                 if (f) fprintf(f, "# %s\n", line);
                 fprintf(stderr, "%s\n", line);
             }
+            snprintf(line, sizeof line, "roam xcheck [integ L] street furniture over the rails layer (track, level-crossing "
+                     "furniture, boards, masts): flat paint faces (zebras / limit lines) %ld, standing faces %ld", xfr[0], xfr[1]);
+            TD5_LOG_I(LOG_TAG, "%s", line);
+            if (f) fprintf(f, "# %s\n", line);
+            fprintf(stderr, "%s\n", line);
         }
         snprintf(line, sizeof line,
                  "roam plaza tree pages [integ L]: v0 %ld, v1 %ld, v2 %ld, v3 %ld, v4 (snow conifer) %ld, v5 %ld, v6 %ld, v7 %ld, "

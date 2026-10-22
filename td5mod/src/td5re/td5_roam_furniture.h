@@ -71,6 +71,7 @@ typedef struct {
     int  zebras, limit_lines, xing_unknown, xing_drop_far;
     /* [roam LC] unmarked skipped, unknown painted by the rule (zebra / lines), footway=crossing ways seen / already a node / drawn */
     int  xing_unmarked, xing_unk_zebra, xing_unk_lines, xing_ways, xing_way_dup, xing_way_drawn;
+    int  xing_rail_drop;            /* [integ L] rule-painted / way crossings left off a rail bed (TD5RE_ROAM_XING_RAIL_VETO) */
     /* [roam IE] barriers (metres of kerb), segments dropped because a carriageway lies under them, patch
      * kerb edges railed; embankment metres; piers (and their columns), columns dropped on a road below, abutments */
     double bar_guard_m, bar_nj_m, bar_parapet_m, emb_m;

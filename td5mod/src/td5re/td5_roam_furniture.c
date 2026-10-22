@@ -1772,6 +1772,7 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1;
         RoamFrame fr, f0, f1;
         int paint = x->paint;
+        const int lc_new = (paint == 3 || x->way);          /* [integ L] painted by LC's rule, or an LC crossing way */
         if (paint == 0) { st->xing_unmarked++; continue; }                   /* [roam LC] explicitly unmarked: never painted */
         if (paint == 3 && f->xing_mode == 0) { st->xing_unknown++; continue; }
         if (!roam_nearest_edge(c, x->x, x->z, 12.0 * FU_UPM, &seg, &side, &along, &lat) ||
@@ -1796,6 +1797,13 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         px[1] = f0.px + f0.nx * fr.half_carriage; pz[1] = f0.pz + f0.nz * fr.half_carriage; py[1] = f0.py + FU_X_LIFT;
         px[2] = f1.px + f1.nx * fr.half_carriage; pz[2] = f1.pz + f1.nz * fr.half_carriage; py[2] = f1.py + FU_X_LIFT;
         px[3] = f1.px - f1.nx * fr.half_carriage; pz[3] = f1.pz - f1.nz * fr.half_carriage; py[3] = f1.py + FU_X_LIFT;
+        /* [integ L] LC's own paint never lands on the track of a level crossing (roam LF's furniture stands there):
+         * a band within 0.5 m of a drawn rail bed is left off. TD5RE_ROAM_XING_RAIL_VETO=0 = paint it anyway. */
+        if (lc_new && td5_env_int("TD5RE_ROAM_XING_RAIL_VETO", 1, 0, 1) && roam_ctx_rails_bed_near(c, px, pz, 4, 0.5 * FU_UPM)) {
+            if (x->paint == 3) { if (paint == 1) st->xing_unk_zebra--; else st->xing_unk_lines--; }
+            st->xing_rail_drop++;
+            continue;
+        }
         if (paint != 2) {                     /* a ZEBRA: u across the lanes, so the bars run along travel */
             uu[0] = 0.0; vv[0] = 0.0; uu[1] = L; vv[1] = 0.0; uu[2] = L; vv[2] = 1.0; uu[3] = 0.0; vv[3] = 1.0;
         } else {                              /* LIMIT LINES: the same page transposed, two transverse bars */
