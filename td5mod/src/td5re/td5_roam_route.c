@@ -661,10 +661,17 @@ static void rr_restrict_build(RrGraph *gp, const char *place)
                           td5_roam_rules_kind_name(rr_turn_class(gp, pin[0], pout[0])), best_m == 2 ? "id" : "direction",
                           gp->node[best].x, gp->node[best].z, best_d / RR_UPM);
 #endif
+            /* [roam LG] a pair that turns differently from the kind is enforced only when both ways matched by
+             * edge key: a direction match there may be the wrong arm (a no_left that computes as straight on
+             * would ban legal straight-on driving) */
+            if (want && !ok[0] && best_m != 2) { gp->rc.geom_skipped++; continue; }
             ok[0] = 1;
         }
         else if (nok > 0 && nok < np) gp->rc.filtered++;
-        else if (nok == 0) for (j = 0; j < np; j++) ok[j] = 1;
+        else if (nok == 0) {
+            if (best_m != 2) { gp->rc.geom_skipped++; continue; }
+            for (j = 0; j < np; j++) ok[j] = 1;
+        }
         for (j = 0; j < np; j++) {
             const RrNode *nd = &gp->node[best];
             int b;
@@ -702,10 +709,11 @@ static void rr_restrict_build(RrGraph *gp, const char *place)
     gp->rc.ms = (double)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT: %d restrictions for cars, matched %d (%d with both ways by id, %d via a way inside one "
               "junction), no graph node within %.0f m %d, no node with both arms %d, via-way chain not enforced %d, no drivable "
-              "pair %d | banned turns %d | one-pair geometry agrees %d differs %d, several pairs filtered by the turn %d | %.0f ms",
+              "pair %d | banned turns %d | one-pair geometry agrees %d differs %d (skipped: geometry disagrees, not matched by id %d), "
+              "several pairs filtered by the turn %d | %.0f ms",
               gp->rc.loaded, gp->rc.matched, gp->rc.matched_by_id, gp->rc.matched_via_way, RR_RESTR_R_M, gp->rc.outside,
               gp->rc.no_node, gp->rc.via_way_chain, gp->rc.no_pair, gp->rc.bans, gp->rc.geom_agree, gp->rc.geom_differ,
-              gp->rc.filtered, gp->rc.ms);
+              gp->rc.geom_skipped, gp->rc.filtered, gp->rc.ms);
 }
 
 static int rr_banned_in(const RrGraph *gp, int node, int in, int out)
@@ -2805,10 +2813,11 @@ int td5_roam_route_dev_test(void)
               planned ? ratio_sum / planned : 0.0, ratio_max, planned ? ms_sum / planned : 0.0, ms_max);
     TD5_LOG_I(LOG_TAG, "ROUTE_TEST: rules: costs %s | mean time at the limits %.1f s | turns %d, through a banned turn %d, "
               "legs planned without the bans %ld | restrictions %d matched %d (via way %d) outside %d no-node %d via-way-chain %d "
-              "no-pair %d, banned turns %d, one-pair geometry agrees %d differs %d, filtered %d",
+              "no-pair %d, banned turns %d, one-pair geometry agrees %d differs %d, skipped (geometry disagrees) %d, filtered %d",
               g.time_cost ? "TIME" : "DISTANCE", planned ? time_sum / planned : 0.0,
               turns, bad_turn, rr_ban_fallbacks - fb0, g.rc.loaded, g.rc.matched, g.rc.matched_via_way, g.rc.outside,
-              g.rc.no_node, g.rc.via_way_chain, g.rc.no_pair, g.rc.bans, g.rc.geom_agree, g.rc.geom_differ, g.rc.filtered);
+              g.rc.no_node, g.rc.via_way_chain, g.rc.no_pair, g.rc.bans, g.rc.geom_agree, g.rc.geom_differ, g.rc.geom_skipped,
+              g.rc.filtered);
     /* connected components of the undirected edge graph */
     {
         int *comp = (int *)calloc((size_t)g.nnode, sizeof(int)), *stack = (int *)malloc((size_t)g.nnode * sizeof(int));

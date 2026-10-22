@@ -153,6 +153,8 @@ typedef struct {
     int    bans;              /* banned (node, in, out) triples                                          */
     int    geom_agree, geom_differ;   /* no_* with one candidate pair: the pair's turn agrees with the kind */
     int    filtered;          /* several candidate pairs, kept the ones whose turn agrees                */
+    int    geom_skipped;      /* NOT enforced: no pair turns as the kind says and the ways matched by
+                               * direction only (likely the wrong arm)                                  */
     double ms;
 } TD5_RouteRestrCensus;
 void td5_roam_route_graph_restr_census(TD5_RouteRestrCensus *out);
