@@ -88,6 +88,9 @@ int  td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g);
 int  td5_roam_furn_session_begin(const char *place, const RoamGrid *g);   /* prepare + upload */
 void td5_roam_furn_session_end(void);
 int  td5_roam_furn_plates_ready(void);
+/* [roam LF] the atlas cell of a name (a station board): TEXTURES.DAT page id, the cell's top / bottom v (0..1, a
+ * ready-to-use inset of 1.5 texels) and its row count (1 = 64x16, 2 = 64x32). 0 when the name has no cell. */
+int  td5_roam_furn_plate_cell(const char *name, int *page_id, double *v_top, double *v_bot, int *rows);
 
 int  td5_roam_furn_enabled(void);     /* TD5RE_ROAM_FURNITURE (default 1) */
 int  td5_roam_night_active(void);    /* [F4f] a roam session at night: ambient dimming + street lamps on, no DarkMode / StreetLights needed */

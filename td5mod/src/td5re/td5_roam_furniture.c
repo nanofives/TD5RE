@@ -53,6 +53,7 @@
 #include "td5_roam_render.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_furniture.h"
+#include "td5_roam_rails.h"
 #include "td5_roam_traffic.h"   /* [F8] td5_roam_signal_group: the head an approach obeys */
 
 #ifdef LOG_TAG
@@ -221,11 +222,16 @@ static struct {
     char          place[64];
     FuCell        cell[FU_CELLS_MAX];
     int           ncell;
+    /* [roam LF] the station-board bank: its own pages (ROAM_STATION_PAGE_BASE..), never a street plate's cell */
+    FuCell        scell[64];
+    int           nscell, snpg, sdropped;
+    unsigned char spg[ROAM_STATION_PAGE_COUNT][TD5_TG_TEX_TEXELS];
+    int           spg_rows[ROAM_STATION_PAGE_COUNT];
     unsigned char pg[FU_PAGES_MAX][TD5_TG_TEX_TEXELS];
     int           pg_rows[FU_PAGES_MAX];
     int           npg;
     unsigned char dsp[TD5_TG_TEX_TEXELS];
-    int           names, cells_wanted, cells_dropped, uses_dropped, clusters, arms, ms;
+    int           names, cells_wanted, cells_dropped, uses_dropped, clusters, arms, ms, stations;
 } s_at;
 
 int td5_roam_furn_plates_ready(void) { return s_at.ready && s_at.ncell > 0; }
@@ -270,6 +276,19 @@ static int fu_alloc_rows(int rows, int *row0)
     return p;
 }
 
+static int fu_alloc_rows_stn(int rows, int *row0)
+{
+    int p;
+    for (p = 0; p < s_at.snpg; p++)
+        if (s_at.spg_rows[p] + rows <= FU_PL_ROWS) { *row0 = s_at.spg_rows[p]; s_at.spg_rows[p] += rows; return p; }
+    if (s_at.snpg >= ROAM_STATION_PAGE_COUNT) return -1;
+    p = s_at.snpg++;
+    memset(s_at.spg[p], 0, sizeof s_at.spg[p]);
+    s_at.spg_rows[p] = rows;
+    *row0 = 0;
+    return p;
+}
+
 /* a wanted cell: (name, forced) with its use count */
 static int fu_want(FuCell *w, int *nw, const char *name, int forced)
 {
@@ -293,8 +312,58 @@ static int fu_cell_cmp(const void *pa, const void *pb)
     return strcmp(a->name, b->name);
 }
 
+/* [roam LF] station boards: a long name is abbreviated until its smallest line can be read (cap >= 5.5 px): the leftmost
+ * word that is not the last becomes its initial ("MANUEL BERNARDO GONNET" -> "MANUEL B. GONNET"); a single long word is
+ * cut to 8 letters + a stop. 1 when it changed the text. */
+static int fu_utf8_n(unsigned char ch) { return ch < 0x80 ? 1 : ch < 0xE0 ? 2 : ch < 0xF0 ? 3 : 4; }
+
+static int fu_stn_abbrev(char *s)
+{
+    char out[FU_NAME_MAX];
+    char *w[12];
+    int nw = 0, i;
+    char *p = s;
+    while (*p && nw < 12) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        w[nw++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) { *p = 0; p++; }
+    }
+    out[0] = 0;
+    if (nw >= 2) {
+        int done = 0;
+        for (i = 0; i < nw; i++) {
+            int chars = 0;
+            const char *q;
+            for (q = w[i]; *q; q += fu_utf8_n((unsigned char)*q)) chars++;
+            if (!done && i < nw - 1 && chars > 2 && w[i][strlen(w[i]) - 1] != '.') {
+                const int n1 = fu_utf8_n((unsigned char)w[i][0]);
+                char ini[8];
+                memcpy(ini, w[i], (size_t)n1); ini[n1] = '.'; ini[n1 + 1] = 0;
+                if (out[0]) strncat(out, " ", sizeof out - strlen(out) - 1);
+                strncat(out, ini, sizeof out - strlen(out) - 1);
+                done = 1;
+            } else {
+                if (out[0]) strncat(out, " ", sizeof out - strlen(out) - 1);
+                strncat(out, w[i], sizeof out - strlen(out) - 1);
+            }
+        }
+        if (!done) { snprintf(s, FU_NAME_MAX, "%s", out); return 0; }
+    } else if (nw == 1) {
+        int chars = 0;
+        const char *q;
+        for (q = w[0]; *q; q += fu_utf8_n((unsigned char)*q)) chars++;
+        if (chars <= 9 || w[0][strlen(w[0]) - 1] == '.') { snprintf(s, FU_NAME_MAX, "%s", w[0]); return 0; }
+        { int k = 0, bytes = 0; for (q = w[0]; *q && k < 8; q += fu_utf8_n((unsigned char)*q)) { bytes += fu_utf8_n((unsigned char)*q); k++; }
+          memcpy(out, w[0], (size_t)bytes); out[bytes] = '.'; out[bytes + 1] = 0; }
+    } else return 0;
+    snprintf(s, FU_NAME_MAX, "%s", out);
+    return 1;
+}
+
 /* one cell, rasterised exactly like td5_tg_mastarm.c pl_cell_for */
-static int fu_raster_cell(FuCell *c)
+static int fu_raster_cell(FuCell *c, int station)
 {
     char up[FU_NAME_MAX], l1[FU_NAME_MAX], l2[FU_NAME_MAX];
     unsigned char cov[FU_PL_W * FU_PL_ROW_H * 2];
@@ -308,19 +377,34 @@ static int fu_raster_cell(FuCell *c)
         snprintf(one, sizeof one, "%s", l1);
         if (tg_plate_split2(one, l1, l2, sizeof l1)) lines = 2;
     }
+    if (station) {   /* the text keeps 4 texels from every edge, no ring (the board is the plate); abbreviate until it can be read */
+        int tries;
+        for (tries = 0; tries < 6; tries++) {
+            float f1 = td5_font_plate_fit_cap(l1, FU_PL_W, 4), f2 = (lines == 2) ? td5_font_plate_fit_cap(l2, FU_PL_W, 4) : f1;
+            if ((f1 < f2 ? f1 : f2) >= 5.5f) break;
+            if (!fu_stn_abbrev(up)) break;
+            l2[0] = 0;
+            lines = tg_plate_plan(up, l1, l2, sizeof l1, &abbr);
+        }
+    }
     rows = c->forced ? 2 : lines;
     h = rows * FU_PL_ROW_H;
-    if (!td5_font_plate_raster(l1, lines == 2 ? l2 : NULL, FU_PL_W, h, FU_PL_PAD, cov, &cap)) return 0;
-    pg = fu_alloc_rows(rows, &row0);
+    if (!td5_font_plate_raster(l1, lines == 2 ? l2 : NULL, FU_PL_W, h, station ? 4 : FU_PL_PAD, cov, &cap)) return 0;
+    pg = station ? fu_alloc_rows_stn(rows, &row0) : fu_alloc_rows(rows, &row0);
     if (pg < 0) return -1;
     for (y = 0; y < h; y++)
         for (x = 0; x < FU_PL_W; x++) {
             int v = (cov[y * FU_PL_W + x] * 15 + 127) / 255;
             const int ring = (x == 1 || x == FU_PL_W - 2 || y == 1 || y == h - 2) &&
                              x >= 1 && x <= FU_PL_W - 2 && y >= 1 && y <= h - 2;
-            if (ring) v = 15;
-            s_at.pg[pg][(row0 * FU_PL_ROW_H + y) * TD5_TG_TEX_DIM + x] = (unsigned char)v;
+            if (ring && !station) v = 15;
+            (station ? s_at.spg[pg] : s_at.pg[pg])[(row0 * FU_PL_ROW_H + y) * TD5_TG_TEX_DIM + x] = (unsigned char)v;
         }
+    if (station && td5_env_int("TD5RE_ROAM_RAILS_LOG", 0, 0, 1)) {
+        int xmin = 99, xmax = -1;
+        for (y = 0; y < h; y++) for (x = 0; x < FU_PL_W; x++) if (cov[y * FU_PL_W + x] > 24) { if (x < xmin) xmin = x; if (x > xmax) xmax = x; }
+        TD5_LOG_I(LOG_TAG, "STATION_INK '%s' '%s'/'%s' x %d..%d of %d", c->name, l1, lines == 2 ? l2 : "", xmin, xmax, FU_PL_W);
+    }
     c->page = pg; c->y = row0 * FU_PL_ROW_H; c->h = h; c->lines = lines; c->cap = cap;
     return 1;
 }
@@ -445,6 +529,27 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
         }
         s_at.arms += n;
     }
+    {   /* [roam LF] every station / halt / stop name of the RAILS layer (the whole partido streams, Tolosa and Gonnet are
+         * outside the casco) gets a cell in the STATION bank: pages ROAM_STATION_PAGE_BASE.., apart from the street plates */
+        char (*sn)[96] = td5_roam_rails_furn_enabled() ? (char (*)[96])malloc(256u * 96u) : NULL;
+        double (*sxz)[2] = sn ? (double (*)[2])malloc(256u * sizeof(double[2])) : NULL;
+        const int nsn = (sn && sxz) ? td5_roam_rails_station_names(place, sn, sxz, 256) : 0;
+        for (i = 0; i < nsn; i++) {
+            FuCell sc;
+            int r;
+            if (s_at.nscell >= 64) { s_at.sdropped++; continue; }
+            memset(&sc, 0, sizeof sc);
+            snprintf(sc.name, sizeof sc.name, "%s", sn[i]);
+            sc.uses = 1; sc.page = -1;
+            r = fu_raster_cell(&sc, 1);
+            if (r <= 0) { s_at.sdropped++; continue; }
+            if (td5_env_int("TD5RE_ROAM_RAILS_LOG", 0, 0, 1))
+                TD5_LOG_I(LOG_TAG, "STATION_CELL '%s' lines %d cap %.1f px", sc.name, sc.lines, (double)sc.cap);
+            s_at.scell[s_at.nscell++] = sc;
+            s_at.stations++;
+        }
+        free(sn); free(sxz);
+    }
     s_at.clusters = ncl;
     s_at.names = nnames;
     s_at.cells_wanted = nw;
@@ -452,7 +557,7 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
     for (i = 0; i < nw; i++) {
         int r;
         if (s_at.ncell >= FU_CELLS_MAX) { s_at.cells_dropped++; s_at.uses_dropped += want[i].uses; continue; }
-        r = fu_raster_cell(&want[i]);
+        r = fu_raster_cell(&want[i], 0);
         if (r <= 0) { s_at.cells_dropped++; s_at.uses_dropped += want[i].uses; continue; }
         s_at.cell[s_at.ncell++] = want[i];
     }
@@ -462,9 +567,9 @@ done:
     s_at.ms = (int)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "roam furniture: plate atlas %s | %d signalised cluster(s), %d arm(s), %d distinct street name(s) | "
               "%d cell(s) wanted, %d placed on %d page(s) (page ids %d..%d, display %d), %d dropped (%d use(s) fall back to the "
-              "other face) | %d ms", ok ? "built" : "EMPTY", s_at.clusters, s_at.arms, s_at.names, s_at.cells_wanted,
+              "other face) | %d station name(s) in %d own page(s) (%d dropped) | %d ms", ok ? "built" : "EMPTY", s_at.clusters, s_at.arms, s_at.names, s_at.cells_wanted,
               s_at.ncell, s_at.npg, FU_PAGE_BASE, FU_PAGE_BASE + (s_at.npg ? s_at.npg - 1 : 0), FU_PAGE_BASE + s_at.npg,
-              s_at.cells_dropped, s_at.uses_dropped, s_at.ms);
+              s_at.cells_dropped, s_at.uses_dropped, s_at.stations, s_at.snpg, s_at.sdropped, s_at.ms);
     free(list); free(names); free(en); free(cl); free(arms); free(want);
     return ok;
 }
@@ -486,6 +591,19 @@ static void fu_plate_bgra(int page, uint8_t *out)
     }
 }
 
+static void fu_station_bgra(int page, uint8_t *out)
+{
+    static const int k_bg[3] = { 150, 56, 22 };
+    int i;
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int idx = s_at.spg[page][i];
+        out[i * 4 + 0] = (uint8_t)(k_bg[0] + (255 - k_bg[0]) * idx / 15);
+        out[i * 4 + 1] = (uint8_t)(k_bg[1] + (255 - k_bg[1]) * idx / 15);
+        out[i * 4 + 2] = (uint8_t)(k_bg[2] + (255 - k_bg[2]) * idx / 15);
+        out[i * 4 + 3] = 0xFF;
+    }
+}
+
 int td5_roam_furn_session_begin(const char *place, const RoamGrid *g)
 {
     int p, np;
@@ -498,6 +616,11 @@ int td5_roam_furn_session_begin(const char *place, const RoamGrid *g)
         fu_plate_bgra(p, px);
         td5_asset_set_page_transparency(FU_PAGE_BASE + p, 0);
         td5_plat_render_upload_texture(FU_PAGE_BASE + p, px, TD5_TG_TEX_DIM, TD5_TG_TEX_DIM, 2);
+    }
+    for (p = 0; p < s_at.snpg; p++) {   /* [roam LF] the station bank */
+        fu_station_bgra(p, px);
+        td5_asset_set_page_transparency(ROAM_STATION_PAGE_BASE + p, 0);
+        td5_plat_render_upload_texture(ROAM_STATION_PAGE_BASE + p, px, TD5_TG_TEX_DIM, TD5_TG_TEX_DIM, 2);
     }
     free(px);
     s_at.uploaded = 1;
@@ -515,6 +638,21 @@ static const FuCell *fu_cell_find(const char *name, int forced)
     for (i = 0; i < s_at.ncell; i++)
         if (s_at.cell[i].forced == forced && strcmp(s_at.cell[i].name, name) == 0) return &s_at.cell[i];
     return NULL;
+}
+
+/* [roam LF] a station board's cell: the same inset the street plates use (1.5 texels all round) */
+int td5_roam_furn_plate_cell(const char *name, int *page_id, double *v_top, double *v_bot, int *rows)
+{
+    const FuCell *c = NULL;
+    int i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < s_at.nscell; i++) if (!strcmp(s_at.scell[i].name, name)) { c = &s_at.scell[i]; break; }
+    if (!c) return 0;
+    if (page_id) *page_id = ROAM_STATION_PAGE_BASE + c->page;
+    if (v_top) *v_top = ((double)c->y + 1.5) / 64.0;
+    if (v_bot) *v_bot = ((double)(c->y + c->h) - 1.5) / 64.0;
+    if (rows) *rows = c->h / FU_PL_ROW_H;
+    return 1;
 }
 
 /* ============================================================================
@@ -865,8 +1003,8 @@ static int fu_quad(FuEm *em, const double *px, const double *py, const double *p
 static int fu_emit_plate(FuEm *em, const double pole[2], const double l[2], const double t[2], double side, double u0,
                          double y_top, const FuCell *cf, const FuCell *cb)
 {
-    double px[8], py[8], pz[8], uu[8], vv[8];
-    int seg_page[2], seg_nq[2];
+    double px[12], py[12], pz[12], uu[12], vv[12];
+    int seg_page[3], seg_nq[3], nseg = 2;
     const FuCell *c[2];
     int face, k;
     c[0] = cf; c[1] = cb;
@@ -897,7 +1035,30 @@ static int fu_emit_plate(FuEm *em, const double pole[2], const double l[2], cons
         seg_page[face] = FU_PAGE_BASE + c[face]->page;
         seg_nq[face] = 1;
     }
-    return fu_quad(em, px, py, pz, uu, vv, 8, seg_page, seg_nq, 2, 0);
+    if (c[0]->h != c[1]->h) {
+        /* [roam LF] faces of different row counts: the taller one's lower part showed through the shorter, mirrored (both
+         * faces are drawn double-sided). A blank-blue filler under the shorter face, in ITS cell's own page (texel (2, y + 2)
+         * is plate background), makes the plate one height from both sides. */
+        const int sf = c[0]->h < c[1]->h ? 0 : 1;
+        const double hs = (double)c[sf]->h / (double)FU_PL_ROW_H * FU_MA_PLATE_ROW;
+        const double hl = (double)c[1 - sf]->h / (double)FU_PL_ROW_H * FU_MA_PLATE_ROW;
+        const double off = (sf == 0) ? -FU_MA_PLATE_OFF : FU_MA_PLATE_OFF;
+        const int far_left = (sf == 0) ? (side < 0.0) : (side > 0.0);
+        const double ul = far_left ? u0 + FU_MA_PLATE_W : u0, ur = far_left ? u0 : u0 + FU_MA_PLATE_W;
+        const double us[4] = { ul, ur, ur, ul };
+        const double bu = 2.5 / 64.0, bv = ((double)c[sf]->y + 2.5) / 64.0;
+        for (k = 0; k < 4; k++) {
+            const int o = 8 + k;
+            px[o] = pole[0] - l[0] * us[k] + t[0] * off;
+            pz[o] = pole[1] - l[1] * us[k] + t[1] * off;
+            py[o] = (k < 2) ? y_top - hl : y_top - hs;
+            uu[o] = bu; vv[o] = bv;
+        }
+        seg_page[2] = FU_PAGE_BASE + c[sf]->page;
+        seg_nq[2] = 1;
+        nseg = 3;
+    }
+    return fu_quad(em, px, py, pz, uu, vv, nseg == 3 ? 12 : 8, seg_page, seg_nq, nseg, 0);
 }
 
 static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double base_y, const FuCell *cf, const FuCell *cb,

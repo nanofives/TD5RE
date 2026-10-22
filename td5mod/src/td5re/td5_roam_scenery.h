@@ -99,7 +99,9 @@
                                      *      world lattice where the canopy says so (td5_roam_scenery.c SECTION trees);
                                      *      canopy green: wooded unmapped ground stays lawn, takes no infill
                                      * 16 = roam LB: shopfronts (glass, fascia, awning, pharmacy cross) on the street walls of
-                                     *      footprints with a business (tags + POIS.JSON), fuel forecourt canopies */
+                                     *      footprints with a business (tags + POIS.JSON), fuel forecourt canopies
+                                     * 16 = roam LF: railway furniture (level-crossing posts / arms / lights / saltires, station name
+                                     *      boards, catenary), RAILS_RULES 2 */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
