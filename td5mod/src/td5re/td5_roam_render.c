@@ -83,6 +83,7 @@
 #include "td5_roam_tile.h"
 #include "td5_roam_height.h"
 #include "td5_roam_groundfix.h"   /* [G4b] the clamp, shared with the scenery */
+#include "td5_roam_cut.h"         /* [roam NC] cuttings: hole cells, the refill */
 #include "td5_roam_ribbon.h"
 #include "td5_roam_junction.h"   /* [roam HC] TD5_ROAM_CL_TAPER / _BEND: which clusters get stop lines */
 #include "td5_roam_view.h"
@@ -153,7 +154,7 @@ typedef struct {
     TD5_MeshHeader *vis[RR_MAXMESH];         /* this frame's list (stable storage)  */
     TD5_SpanDisplayList dl;
     float           cx, cy, cz, r;           /* whole-tile sphere                   */
-    uint32_t        nroad, ntri, nground, nskirt;
+    uint32_t        nroad, ntri, nground, nskirt, nfill;   /* nfill: [roam NC] refill sub-cells */
     uint32_t        ncls[RR_NCLS];           /* [roam LC] road quads + patch tris by surface class (smooth, cobble, loose) */
     uint32_t        npiece, nstop;           /* [roam HC] patch slab triangles, stop-line bars */
     uint32_t        nwater, nwet, nwater_road, nwater_deck;   /* [roam LE] water quads, wet lattice points, cells
@@ -379,7 +380,8 @@ static uint32_t rr_skirt_col(int kind)
 }
 
 /* ground: heights on the tile's lattice, (G+1) x (G+1) points */
-typedef struct { int G; double *h, *h0; unsigned char *hole; int nclamp; double max_low; } RRGround;   /* h0: [G5] census only */
+typedef struct { int G; double *h, *h0; unsigned char *hole; int nclamp; double max_low;
+                 uint64_t *fill; int nfill; } RRGround;   /* h0: [G5] census only; fill: [roam NC] sub-cell masks */
 
 /* [G4] the 3x3 ROAD tiles round a bake, [4] = the tile itself; own[] = read here, freed by rr_nb_free */
 #define RR_NB 9
@@ -431,6 +433,56 @@ static void rr_ground_clamp(const RoamTile *t, RRGround *g, const RRNb *nb, TD5_
     free(cm);
 }
 
+/* [roam NC] the place-frame position of lattice point (i + fi, j + fj) of tile t (fractional, G cells per side) */
+static void rr_ground_point_f(const RoamTile *t, double fi, double fj, int G, double *px, double *pz)
+{
+    const double S = (double)s_rr.grid.tile;
+    const double u = ((double)t->tx + fi / (double)G) * S;
+    const double v = ((double)t->tz + fj / (double)G) * S;
+    *px = s_rr.grid.ox + s_rr.grid.c * u - s_rr.grid.s * v;
+    *pz = s_rr.grid.oz + s_rr.grid.s * u + s_rr.grid.c * v;
+}
+
+/* [roam NC] THE REFILL of the hole cells (td5_roam_cut.h): each hole cell keeps the TD5_ROAM_CUT_SUB^2 sub-cells
+ * with no corner inside a cutting band, on the cell's own surface (rr_bake_fill). Bit (sj * SUB + si) of fill[cell]. */
+static void rr_ground_fill(const RoamTile *t, RRGround *g, const RoamTile *const n9[9], TD5_RoamHeight *hc)
+{
+    const int G = g->G, N = TD5_ROAM_CUT_SUB, W = G + 1;
+    TD5_RoamCutBands bands;
+    double x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300, x, z;
+    int c, i, j, a, b, any = 0;
+    for (i = 0; i < G * G; i++) any |= g->hole[i];
+    if (!any) return;
+    g->fill = (uint64_t *)calloc((size_t)G * (size_t)G, sizeof(uint64_t));
+    if (!g->fill) return;
+    for (c = 0; c < 4; c++) {
+        rr_ground_point(t, (c & 1) ? G : 0, (c & 2) ? G : 0, G, &x, &z);
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (z < z0) z0 = z;
+        if (z > z1) z1 = z;
+    }
+    if (!td5_roam_cut_bands(&bands, n9, hc, x0, z0, x1, z1)) { free(g->fill); g->fill = NULL; return; }
+    for (b = 0; b < G; b++) for (a = 0; a < G; a++) {
+        unsigned char in[(TD5_ROAM_CUT_SUB + 1) * (TD5_ROAM_CUT_SUB + 1)];
+        uint64_t m = 0;
+        if (!g->hole[b * G + a]) continue;
+        if (isnan(g->h[b * W + a]) || isnan(g->h[b * W + a + 1]) || isnan(g->h[(b + 1) * W + a]) ||
+            isnan(g->h[(b + 1) * W + a + 1])) continue;
+        for (j = 0; j <= N; j++) for (i = 0; i <= N; i++) {
+            rr_ground_point_f(t, (double)a + (double)i / N, (double)b + (double)j / N, G, &x, &z);
+            in[j * (N + 1) + i] = (unsigned char)td5_roam_cut_inside(&bands, x, z);
+        }
+        for (j = 0; j < N; j++) for (i = 0; i < N; i++)
+            if (!in[j * (N + 1) + i] && !in[j * (N + 1) + i + 1] && !in[(j + 1) * (N + 1) + i] && !in[(j + 1) * (N + 1) + i + 1]) {
+                m |= (uint64_t)1 << (j * N + i);
+                g->nfill++;
+            }
+        g->fill[b * G + a] = m;
+    }
+    td5_roam_cut_bands_free(&bands);
+}
+
 static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, const RRNb *nb)
 {
     const int G = (int)(256 / s_rr.cell_m);
@@ -455,7 +507,8 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
      * [roam LE] the water level reads one more ring (lattice -2..G+2: up to 2.83 cells out), so the window grows
      * when the water is on; a sample's value does not depend on the window (bilinear inside the rect + PAD). */
     {
-        const double m = 2000.0 + (s_rr.water ? 4.0 : 2.0) * S / G;
+        double m = 2000.0 + (s_rr.water ? 4.0 : 2.0) * S / G;
+        if (td5_roam_cut_on() && m < 0.5 * S) m = 0.5 * S;    /* [roam NC] the 3x3's cutting spans read the raster */
         if (!td5_roam_height_prefetch(hc, minx - m, minz - m, maxx + m, maxz + m)) {
             free(g->h); free(g->hole); memset(g, 0, sizeof *g);
             return 0;
@@ -472,29 +525,21 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
     if (s_rr.keep_raw && (g->h0 = (double *)malloc((size_t)(G + 1) * (size_t)(G + 1) * sizeof(double))) != NULL)
         memcpy(g->h0, g->h, (size_t)(G + 1) * (size_t)(G + 1) * sizeof(double));
     if (s_rr.ground_clamp && nb) rr_ground_clamp(t, g, nb, hc);
-    /* cells under a tunnel bore are left out: the road runs below the ground there */
-    for (e = 0; e < t->nedge; e++) {
-        const RoamEdgeRec *er = &t->edge[e];
-        if (!(er->flags & ROAM_EF_BORE)) continue;
-        for (q = 0; q < er->span_count; q++) {
-            const uint32_t si = (uint32_t)er->span_first + q;
-            uint32_t L, R; int n; double px, pz, u, v;
-            int a, b, da, db;
-            if (si >= t->nspan || !rr_span_ok(t, &t->span[si], &L, &R, &n)) continue;
-            rr_span_centre(t, &t->span[si], L, R, n, &px, &pz);
-            roam_grid_uv(&s_rr.grid, px, pz, &u, &v);
-            a = (int)floor((u / (double)s_rr.grid.tile - (double)t->tx) * (double)G);
-            b = (int)floor((v / (double)s_rr.grid.tile - (double)t->tz) * (double)G);
-            for (db = -1; db <= 1; db++) for (da = -1; da <= 1; da++) {
-                const int ca = a + da, cb = b + db;
-                if (ca >= 0 && ca < G && cb >= 0 && cb < G) g->hole[cb * G + ca] = 1;
-            }
-        }
+    /* cells under a tunnel bore ([roam NC] and round a cutting span of the 3x3) are left out: the road runs below
+     * the ground there */
+    {
+        const RoamTile *n9[9];
+        int k;
+        for (k = 0; k < 9; k++) n9[k] = nb ? nb->t[k] : NULL;
+        n9[4] = t;
+        td5_roam_cut_holes(&s_rr.grid, n9, hc, t->tx, t->tz, G, g->hole);
+        if (td5_roam_cut_on()) rr_ground_fill(t, g, n9, hc);
     }
+    (void)e; (void)q;
     return ok > 0;
 }
 
-static void rr_ground_free(RRGround *g) { free(g->h); free(g->h0); free(g->hole); memset(g, 0, sizeof *g); }
+static void rr_ground_free(RRGround *g) { free(g->h); free(g->h0); free(g->hole); free(g->fill); memset(g, 0, sizeof *g); }
 
 static int rr_ground_cell_ok(const RRGround *g, int i, int j)
 {
@@ -1128,6 +1173,50 @@ static int rr_cls_base(const RRSb *b, int cls)
  * (nothing to draw / out of memory). [F3] Thread-safe for a caller-owned `hc`: it
  * reads only the session's fixed configuration (frame, grid, pages, knobs), never
  * the tile table, so the stream worker bakes while the main thread draws. */
+static int rr_popcount64(uint64_t m) { int n = 0; while (m) { m &= m - 1; n++; } return n; }
+
+/* [roam NC] the refill's sub-cells: the cell's own two fan triangles (0 1 2, 0 2 3), cut into
+ * TD5_ROAM_CUT_SUB^2 squares (a square on the diagonal splits along it, so every piece lies in one triangle) */
+static void rr_bake_fill(const RoamTile *t, const RRGround *gr, RRSb *sb, RRTile *rt)
+{
+    const int G = gr->G, W = G + 1, N = TD5_ROAM_CUT_SUB;
+    int a, bq;
+    for (bq = 0; bq < G; bq++) for (a = 0; a < G; a++) {
+        static const int di[4] = { 0, 1, 1, 0 }, dj[4] = { 0, 0, 1, 1 };
+        const uint64_t m = gr->fill[bq * G + a];
+        double h[4], x, z;
+        float c3[3][3];
+        uint32_t col;
+        RRSb *b;
+        int kk, i, j;
+        if (!m || rr_ground_cell_ok(gr, a, bq)) continue;
+        for (kk = 0; kk < 4; kk++) h[kk] = gr->h[(bq + dj[kk]) * W + a + di[kk]] - s_rr.ground_drop;
+        for (kk = 0; kk < 3; kk++) {                   /* the whole cell's shade (rr_bake: its first triangle) */
+            rr_ground_point(t, a + di[kk], bq + dj[kk], G, &x, &z);
+            rr_pt(x, h[kk], z, c3[kk]);
+        }
+        col = rr_shade(c3[0], c3[1], c3[2]);
+        b = &sb[rr_cell_sb(gr, a, bq)];
+        for (j = 0; j < N; j++) for (i = 0; i < N; i++) {
+            TD5_MeshVertex *q;
+            if (!(m & ((uint64_t)1 << (j * N + i)))) continue;
+            q = b->v + b->nrt * 3 + b->nrq * 4 + b->cg * 4;
+            for (kk = 0; kk < 4; kk++) {
+                const double fu = (double)(i + di[kk]) / N, fv = (double)(j + dj[kk]) / N;
+                const double y = (fu >= fv) ? h[0] + fu * (h[1] - h[0]) + fv * (h[2] - h[1])
+                                            : h[0] + fv * (h[3] - h[0]) + fu * (h[2] - h[3]);
+                float p[3];
+                rr_ground_point_f(t, (double)a + fu, (double)bq + fv, G, &x, &z);
+                rr_pt(x, y, z, p);
+                rr_put(b, q + kk, p, col, (float)fu, (float)fv);
+            }
+            b->cg++;
+            rt->nground++;
+            rt->nfill++;
+        }
+    }
+}
+
 static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
 {
     RRSb sb[RR_MAXMESH];
@@ -1202,8 +1291,11 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
     rr_ground_build(t, &gr, hc, nb);
     if (gr.h) {
         int a, b;
-        for (b = 0; b < gr.G; b++) for (a = 0; a < gr.G; a++)
+        for (b = 0; b < gr.G; b++) for (a = 0; a < gr.G; a++) {
             if (rr_ground_cell_ok(&gr, a, b)) sb[rr_cell_sb(&gr, a, b)].ngq++;
+            else if (gr.fill && gr.fill[b * gr.G + a])                  /* [roam NC] the refill */
+                sb[rr_cell_sb(&gr, a, b)].ngq += rr_popcount64(gr.fill[b * gr.G + a]);
+        }
         if (rr_water_build(t, &gr, hc, nb, &wa))                       /* [roam LE] */
             for (b = 0; b < gr.G; b++) for (a = 0; a < gr.G; a++)
                 if (wa.cell[b * gr.G + a]) sb[rr_cell_sb(&gr, a, b)].nwq++;
@@ -1294,6 +1386,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
             b->cg++;
             rt->nground++;
         }
+        if (gr.fill) rr_bake_fill(t, &gr, sb, rt);                       /* [roam NC] after the whole cells */
     }
     for (i = 0; i < t->nbedge; i++) {
         const RoamBEdge *be = &t->bedge[i];

@@ -10,6 +10,7 @@
 
 #include "td5_config.h"
 #include "td5_roam_groundfix.h"
+#include "td5_roam_cut.h"
 
 #define GF_MAX_LANES 16     /* = RR_MAX_LANES of td5_roam_render.c */
 #define GF_MARGIN    3      /* cells of lattice kept round the tile */
@@ -187,7 +188,7 @@ static void gf_low_tri(const GfLowU *cu, const double q[3][3])
  * tunnel bores left out), each handed to fn */
 typedef void (*GfTriFn)(void *u, const double tri[3][3]);
 
-static void gf_road_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
+static void gf_road_tris(const RoamTile *const nb[9], TD5_RoamHeight *hc, GfTriFn fn, void *u)
 {
     int k;
     for (k = 0; k < 9; k++) {
@@ -197,10 +198,9 @@ static void gf_road_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
         if (!n) continue;
         bore = (uint8_t *)calloc(n->nspan ? n->nspan : 1u, 1);
         if (!bore) continue;
-        for (e = 0; e < n->nedge; e++)                 /* a tunnel road is under the ground on purpose */
-            if (n->edge[e].flags & ROAM_EF_BORE)
-                for (q = 0; q < n->edge[e].span_count; q++)
-                    if ((uint32_t)n->edge[e].span_first + q < n->nspan) bore[n->edge[e].span_first + q] = 1;
+        /* a tunnel road (and [roam NC] a road in a cutting: its walls hold the ground) is under the ground on purpose */
+        td5_roam_cut_spans(n, hc, bore);
+        (void)e; (void)q;
         for (si = 0; si < n->nspan; si++) {
             const TD5_StripSpan *sp = &n->span[si];
             uint32_t L, R; int ln, kk;
@@ -254,7 +254,7 @@ static void gf_road_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
 
 int td5_roam_gfix_verge(void) { return td5_env_int("TD5RE_ROAM_GROUND_VERGE", 1, 0, 1); }
 
-static void gf_verge_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
+static void gf_verge_tris(const RoamTile *const nb[9], TD5_RoamHeight *hc, GfTriFn fn, void *u)
 {
     int k;
     for (k = 0; k < 9; k++) {
@@ -264,10 +264,8 @@ static void gf_verge_tris(const RoamTile *const nb[9], GfTriFn fn, void *u)
         if (!n) continue;
         bore = (uint8_t *)calloc(n->nspan ? n->nspan : 1u, 1);
         if (!bore) continue;
-        for (e = 0; e < n->nedge; e++)
-            if (n->edge[e].flags & ROAM_EF_BORE)
-                for (q = 0; q < n->edge[e].span_count; q++)
-                    if ((uint32_t)n->edge[e].span_first + q < n->nspan) bore[n->edge[e].span_first + q] = 1;
+        td5_roam_cut_spans(n, hc, bore);        /* [roam NC] bores + cuttings: no verge */
+        (void)e; (void)q;
         for (bi = 0; bi < n->nbedge; bi++) {
             const RoamBEdge *be = &n->bedge[bi];
             const uint32_t p = (uint32_t)(be->prim & ~ROAM_PRIM_TRI);
@@ -337,10 +335,10 @@ void td5_roam_gfix_lower(const RoamGrid *g, const RoamTile *const nb[9], TD5_Roa
 #ifndef TD5RE_RELEASE
     { const char *e = getenv("TD5RE_GFIX_DBG"); if (e) sscanf(e, "%lf,%lf,%lf", &u.dbg[0], &u.dbg[1], &u.dbg[2]); }
 #endif
-    gf_road_tris(nb, gf_low_cb, &u);
+    gf_road_tris(nb, hc, gf_low_cb, &u);
     if (td5_roam_gfix_verge()) {                                     /* [roam HC] */
         u.vcap = GF_VERGE_VCAP;
-        gf_verge_tris(nb, gf_low_cb, &u);
+        gf_verge_tris(nb, hc, gf_low_cb, &u);
     }
     free(r);
 }
