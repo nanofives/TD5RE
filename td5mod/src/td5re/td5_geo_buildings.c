@@ -843,6 +843,52 @@ static int geob_civic_of(const cJSON *e, int part)
     return 0;
 }
 
+/* [roam LB] The shopfront category of a tag set. The SAME rule as re/tools/geo_pois.py category(), so a
+ * footprint tagged shop=bakery and a bakery node joined to an untagged footprint get the same front. */
+int td5_geob_poi_cat(const char *shop, const char *amenity, const char *office, const char *healthcare)
+{
+    static const char *const k_food_am[] = { "restaurant", "fast_food", "cafe", "bar", "pub", "ice_cream",
+        "biergarten", "food_court", NULL };
+    static const char *const k_food_sh[] = { "bakery", "pastry", "confectionery", "coffee", "deli", "butcher",
+        "greengrocer", "cheese", "chocolate", "beverages", "alcohol", "wine", "seafood", "frozen_food", "dairy",
+        "spices", "tea", "pasta", NULL };
+    static const char *const k_kiosk[] = { "kiosk", "newsagent", "convenience", "tobacco", "lottery", NULL };
+    static const char *const k_health[] = { "clinic", "doctors", "dentist", "veterinary", NULL };
+    static const char *const k_skip[] = { "vacant", "no", "none", "disused", NULL };
+    const int sh = shop && shop[0] && !geob_in_set(shop, k_skip);
+    if (amenity && !strcmp(amenity, "fuel")) return TD5_GEOB_POI_FUEL;
+    if ((amenity && !strcmp(amenity, "pharmacy")) || (healthcare && !strcmp(healthcare, "pharmacy")))
+        return TD5_GEOB_POI_PHARMACY;
+    if (amenity && (!strcmp(amenity, "bank") || !strcmp(amenity, "bureau_de_change"))) return TD5_GEOB_POI_BANK;
+    if (geob_in_set(amenity, k_food_am)) return TD5_GEOB_POI_FOOD;
+    if (sh) {
+        if (geob_in_set(shop, k_food_sh)) return TD5_GEOB_POI_FOOD;
+        if (geob_in_set(shop, k_kiosk)) return TD5_GEOB_POI_KIOSK;
+        if (!strcmp(shop, "chemist")) return TD5_GEOB_POI_PHARMACY;
+        return TD5_GEOB_POI_SHOP;
+    }
+    if (geob_in_set(amenity, k_health) || (healthcare && healthcare[0] && !(amenity && amenity[0])))
+        return TD5_GEOB_POI_HEALTH;
+    if (office && office[0] && strcmp(office, "no") && strcmp(office, "vacant")) return TD5_GEOB_POI_OFFICE;
+    return TD5_GEOB_POI_NONE;
+}
+
+static const char *const k_geob_poi_names[TD5_GEOB_POI__N] = {
+    "none", "fuel", "pharmacy", "bank", "food", "kiosk", "health", "shop", "office" };
+
+int td5_geob_poi_cat_of_name(const char *name)
+{
+    int k;
+    if (!name) return TD5_GEOB_POI_NONE;
+    for (k = 1; k < TD5_GEOB_POI__N; k++) if (!strcmp(name, k_geob_poi_names[k])) return k;
+    return TD5_GEOB_POI_NONE;
+}
+
+const char *td5_geob_poi_name(int cat)
+{
+    return (cat >= 0 && cat < TD5_GEOB_POI__N) ? k_geob_poi_names[cat] : "?";
+}
+
 /* [roam F4a] Every field of one BUILDINGS.JSON record except the ring (which the
  * caller has already parsed into b->cx/cz/radius), lifted out of
  * geob_load_buildings unchanged so free roam reads its tiles with the same rules.
@@ -960,6 +1006,9 @@ static void geob_fill_building(const cJSON *e, int i, int tag_lm, double storey_
         if (!rgb) rgb = td5_geob_colour_of(geob_str(e, "material"), 2);
         b->wall_rgb = rgb;
         b->civic = (unsigned char)geob_civic_of(e, b->part);
+        /* [roam LB] the business on the footprint's own tags (free-roam shopfronts) */
+        b->poi_cat = (unsigned char)td5_geob_poi_cat(geob_str(e, "shop"), geob_str(e, "amenity"),
+                                                     geob_str(e, "office"), geob_str(e, "healthcare"));
     }
 }
 

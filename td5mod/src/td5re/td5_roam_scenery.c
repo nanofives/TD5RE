@@ -242,6 +242,7 @@ struct TD5_RoamScnSource {
     TG_TileCtx *ctx;
     TD5_RoamFurnSource *furn;   /* [F4c] street furniture (td5_roam_furniture.c), this thread's */
     TD5_RoamRailSource *rails;  /* [roam ID] railways (td5_roam_rails.c), this thread's; NULL = none */
+    TD5_RoamShopSource *shops;  /* [roam LB] shopfronts (td5_roam_shops.c); NULL = knob off */
 };
 
 static int64_t sc_tkey(int tx, int tz) { return ((int64_t)tx << 32) | (uint32_t)tz; }
@@ -2003,11 +2004,28 @@ static int sc_s3d_host(const ScBld *set, int nset, int self)
     return host;
 }
 
+/* [roam LB] the shopfront's "is this tile-local point inside a footprint of the halo set" */
+typedef struct { const ScBld *set; int nset; double ox, oz; } ScShopU;
+static int sc_shop_in_bld(void *uv, double x, double z)
+{
+    const ScShopU *u = (const ScShopU *)uv;
+    const double X = x + u->ox, Z = z + u->oz;
+    int k;
+    for (k = 0; k < u->nset; k++) {
+        const TD5_GeoBuilding *b = u->set[k].b;
+        const double dx = X - b->cx, dz = Z - b->cz;
+        if (b->n < 3 || b->part || dx * dx + dz * dz > b->radius * b->radius) continue;
+        if (td5_geob_point_in_ring(u->set[k].px, u->set[k].pz, b->n, X, Z)) return 1;
+    }
+    return 0;
+}
+
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
                              const ScArea *ar, int nar)
 {
     ScBld *set = NULL;
     ScHull *fc = NULL;
+    ScShopU su;
     int nset = 0, cap = 0, i, k, l, dx, dz, nfc = 0;
     const int64_t self = sc_tkey(c->tx, c->tz);
     /* the halo set: every building owned by the 3x3 (landmark anchors may sit next door) */
@@ -2045,6 +2063,9 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
     }
     fc = (ScHull *)malloc(SC_FC_MAX * sizeof(ScHull));
     nfc = fc ? sc_forecourts(set, nset, fc) : 0;
+    {
+        su.set = set; su.nset = nset; su.ox = (double)c->org_x; su.oz = (double)c->org_z;
+    }
     for (i = 0; i < nset; i++) {
         const TD5_GeoBuilding *gb = set[i].b;
         double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], cx = 0.0, cz = 0.0, shift = 0.0;
@@ -2241,12 +2262,25 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                               c->bst.s3d_n > s3d0 ? "s3d" : c->bst.emitted > emitted0 ? "core" : "not built", how);
             }
             if (c->bst.emitted > emitted0) c->st.bld_emitted++;
+            if (s->shops && c->bst.emitted > emitted0 && !e.s3d_skip_mass && !s3d_base) {
+                /* [roam LB] the ground floor of a footprint with a business: the core's own base y */
+                TD5_RoamShopBld sb_;
+                double by = sc_ground_u(&u, cx, cz) + tg_city_kerb_h(e.b);
+                if (e.have_ceiling && by > e.ceiling_y) by = e.ceiling_y;
+                memset(&sb_, 0, sizeof sb_);
+                sb_.id = set[i].id; sb_.gb = gb; sb_.rx = rx; sb_.rz = rz; sb_.n = n;
+                sb_.by = by; sb_.kerb_h = tg_city_kerb_h(e.b); sb_.sb = sb;
+                sb_.in_bld = sc_shop_in_bld; sb_.u = &su;
+                if (!td5_roam_shops_building(s->shops, c, &sb_, &c->st.shop)) { free(set); free(fc); return 0; }
+            }
             sc_bld_note(s, c, &set[i], c->bst.emitted > emitted0 ? "emitted" : "core refused");
             if (c->bst.lm_prefab > prefab0) c->st.bld_prefab++;
             if (c->bst.lm_apron > apron0) c->st.bld_apron++;
             if (kind != TD5_GEOB_LMK_NONE || gb->landmark) c->st.bld_lm++;
         }
     }
+    /* [roam LB] fuel forecourt canopies, kept off every footprint of the halo set */
+    if (s->shops && !td5_roam_shops_fuel(s->shops, c, sc_shop_in_bld, &su, &c->st.shop)) { free(set); free(fc); return 0; }
     free(set);
     free(fc);
     {   /* [JC] what the Simple 3D Buildings builder did on this tile (c->bst counts the whole tile) */
@@ -5703,6 +5737,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     if (!s->ctx) { td5_roam_scn_close(s); return NULL; }
     s->furn = td5_roam_furn_open(place);      /* [F4c] NULL = no furniture (knob off / no data) */
     s->rails = td5_roam_rails_open(place);    /* [roam ID] NULL = no railways (knob off / no RAILS layer) */
+    s->shops = td5_roam_shops_open(place);    /* [roam LB] NULL = TD5RE_ROAM_SHOPS=0 (POIS.JSON read on the first build) */
     if (s->rails) {
         int nt;
         td5_roam_rails_summary(s->rails, &nt, NULL, NULL, NULL, NULL);
@@ -5729,6 +5764,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     free(s->casco);
     td5_roam_furn_close(s->furn);
     td5_roam_rails_close(s->rails);
+    td5_roam_shops_close(s->shops);
     if (s->hc) { if (s->hc_open) td5_roam_height_close(s->hc); free(s->hc); }
     free(s);
 }
@@ -5984,6 +6020,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
+    long sh_t[14] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
+    double sh_m = 0.0;
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
@@ -6117,6 +6155,16 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         rl_t[15] += r->rail.plat_drop; rl_t[16] += r->rail.meshes; rl_t[17] += r->rail.guard_hits;
         rl_t[19] += r->rail.sleeper_cut; rl_t[20] += r->rail.wall_cut; rl_t[21] += r->rail.squeezed; rl_t[22] += r->rail.nudged; rl_t[23] += r->rail.floored;
         if (r->rail.pieces) rl_t[18]++;
+        {   /* [roam LB] */
+            int q;
+            sh_t[0] += r->shop.cand; sh_t[1] += r->shop.from_tag; sh_t[2] += r->shop.from_poi;
+            sh_t[3] += r->shop.dressed; sh_t[4] += r->shop.fronts; sh_t[5] += r->shop.no_front;
+            sh_t[6] += r->shop.skip_kind; sh_t[7] += r->shop.skip_low; sh_t[8] += r->shop.awnings;
+            sh_t[9] += r->shop.awning_tight; sh_t[10] += r->shop.crosses; sh_t[11] += r->shop.canopies;
+            sh_t[12] += r->shop.canopy_refused; sh_t[13] += r->shop.meshes;
+            for (q = 0; q < TD5_GEOB_POI__N; q++) sh_cat[q] += r->shop.by_cat[q];
+            sh_m += r->shop.front_m;
+        }
         if (r->rail.lift_max_m > rl_lift_max) rl_lift_max = r->rail.lift_max_m;
         tot[0] += j.ok[i]; tot[1] += r->meshes; tot[2] += r->bytes; tot[3] += r->bld_seen; tot[4] += r->bld_emitted;
         tot[5] += r->bld_prefab; tot[6] += r->bld_drop_road; tot[7] += r->bld_drop_shift; tot[8] += r->bld_veto_plaza;
@@ -6131,6 +6179,21 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         if (r->ms > ms_max) ms_max = r->ms;
         if (r->bytes > bytes_max) bytes_max = r->bytes;
         ms_sum += r->ms;
+    }
+    {
+        /* [roam LB] */
+        char ln[700];
+        snprintf(ln, sizeof ln, "roam shops [roam LB]: %ld footprint(s) with a business (tags %ld, POIS.JSON %ld), %ld dressed "
+                 "(fuel %ld pharmacy %ld bank %ld food %ld kiosk %ld health %ld shop %ld office %ld), %ld street wall(s), %.0f m of "
+                 "shopfront | no street wall %ld, skipped landmark/civic/part %ld, too low %ld | awnings %ld (%ld refused: pavement "
+                 "narrow / low / road), pharmacy crosses %ld | fuel canopies %ld (%ld site(s) with no clear spot) | %ld meshes "
+                 "(TD5RE_ROAM_SHOPS=%d)", sh_t[0], sh_t[1], sh_t[2], sh_t[3], sh_cat[TD5_GEOB_POI_FUEL],
+                 sh_cat[TD5_GEOB_POI_PHARMACY], sh_cat[TD5_GEOB_POI_BANK], sh_cat[TD5_GEOB_POI_FOOD], sh_cat[TD5_GEOB_POI_KIOSK],
+                 sh_cat[TD5_GEOB_POI_HEALTH], sh_cat[TD5_GEOB_POI_SHOP], sh_cat[TD5_GEOB_POI_OFFICE], sh_t[4], sh_m, sh_t[5],
+                 sh_t[6], sh_t[7], sh_t[8], sh_t[9], sh_t[10], sh_t[11], sh_t[12], sh_t[13], td5_roam_shops_enabled());
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
     }
     {
         /* [roam IE] */
