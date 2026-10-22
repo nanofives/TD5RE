@@ -809,12 +809,15 @@ static void sh_dress_front(TD5_RoamShopSource *s, TG_TileCtx *c, const TD5_RoamS
             if (w > fr->len - SH_M(0.4)) w = fr->len - SH_M(0.4);
             if (sh >= SH_M(0.2) && w >= SH_M(1.0)) {
                 const double mx = 0.5 * (ax + bx), mz = 0.5 * (az + bz), o2 = SH_OFF_FASCIA + SH_M(0.02);
+                /* the reader's right, facing the wall (forward = -n; game x = -east): the ring's winding flips the edge
+                 * tangent, so the text runs along (nz, -nx), never along the edge (MEASURED: mirrored on Avenida 7) */
+                const double rx_ = fr->nz, rz_ = -fr->nx;
                 /* the board keeps the cell's 4:1 shape: a short front shows the middle of the cell, never squeezed */
                 const double uw = 0.5 * (w / (4.0 * sh)) * (62.5 - 1.5) / 64.0, um = 0.5;
                 unsigned int r = (fcol >> 16) & 255u, g = (fcol >> 8) & 255u, bl = fcol & 255u;
                 r += (255u - r) * 3u / 5u; g += (255u - g) * 3u / 5u; bl += (255u - bl) * 3u / 5u;
-                p[0][0] = mx - tx * 0.5 * w + fr->nx * o2; p[0][1] = y0;      p[0][2] = mz - tz * 0.5 * w + fr->nz * o2;
-                p[1][0] = mx + tx * 0.5 * w + fr->nx * o2; p[1][1] = y0;      p[1][2] = mz + tz * 0.5 * w + fr->nz * o2;
+                p[0][0] = mx - rx_ * 0.5 * w + fr->nx * o2; p[0][1] = y0;      p[0][2] = mz - rz_ * 0.5 * w + fr->nz * o2;
+                p[1][0] = mx + rx_ * 0.5 * w + fr->nx * o2; p[1][1] = y0;      p[1][2] = mz + rz_ * 0.5 * w + fr->nz * o2;
                 p[2][0] = p[1][0];                         p[2][1] = y0 + sh; p[2][2] = p[1][2];
                 p[3][0] = p[0][0];                         p[3][1] = y0 + sh; p[3][2] = p[0][2];
                 uv[0][0] = um - uw; uv[0][1] = vb; uv[1][0] = um + uw; uv[1][1] = vb;
