@@ -704,6 +704,10 @@ static int sc_rel_covers(const TD5_RoamScnSource *s, double x, double z)
  * consumer of the AREAS caches sees (lawns, trees, plaza veto, green veto, lots, infill). Skipped: water (round L
  * LE draws water), a kind geo_fetch's whitelist would refuse (keep = false: the civic palaces, which
  * S3D_RELATIONS.JSON builds), a relation an AREAS way already maps (dup_of: a second lawn would z-fight).
+ * PRECINCTS (sc_prel_precinct, and every class but green: a school, a hospital, the Hipodromo, a club ground, a
+ * cemetery) keep their lot class only (no infill) and become TD5_GEOA_KIND_OTHER: no lawn, no plaza veto, no plaza
+ * trees, because buildings stand in them (the Cementerio de La Plata alone would have lost 110). A real green keeps
+ * its plaza kind, but never vetoes an OSM footprint (sc_in_plaza skip_rel): only Overture's ML blobs.
  * HOLES. The inner rings an outer holds (its first point inside) follow the outer's points, each joined to point
  * 0 by a bridge walked out and back (O0 H0 .. Hk-1 H0, then O0 again for the next): the bridge is crossed twice,
  * so point-in-ring parity is exact, and n_outer tells the lawn triangulation where the plain outline ends (a lawn
@@ -714,6 +718,15 @@ static int sc_rel_covers(const TD5_RoamScnSource *s, double x, double z)
 #define SC_PREL_HOLE_PTS   8
 #define SC_PREL_OUTER_MIN  24
 #define SC_PREL_HOLES_MAX  16
+
+static int sc_prel_precinct(const char *kind)
+{
+    static const char *const k[] = { "cemetery", "grave_yard", "sports_centre", "stadium", "track", "golf_course",
+                                     "pitch", NULL };
+    int i;
+    for (i = 0; kind && k[i]; i++) if (!strcmp(kind, k[i])) return 1;
+    return 0;
+}
 
 static int sc_prel_orient(double *x, double *z, int n, int ccw)
 {
@@ -734,7 +747,7 @@ static void sc_prel_load(TD5_RoamScnSource *s)
     char *json;
     cJSON *root, *arr, *r;
     ScCache *c = &s->prel;
-    int cap = 0, cap_pt = 0, nrel = 0, nwater = 0, ndup = 0, nskip = 0, nh = 0, nh_drop = 0, nwith = 0, k;
+    int cap = 0, cap_pt = 0, nrel = 0, nwater = 0, ndup = 0, nskip = 0, nh = 0, nh_drop = 0, nwith = 0, nprec = 0, k;
     memset(c, 0, sizeof *c);
     c->used = 1; c->layer = SC_L_AREA; c->pin = 1;
     td5_geo_source_path(path, sizeof path, s->place, "PARK_RELATIONS.JSON");
@@ -759,8 +772,8 @@ static void sc_prel_load(TD5_RoamScnSource *s)
         const double rid = cJSON_GetNumberValue(cJSON_GetObjectItem(r, "id"));
         int oi = 0;
         nrel++;
-        if (!cJSON_IsTrue(cJSON_GetObjectItem(r, "keep"))) { nskip++; continue; }
         if (cls && !strcmp(cls, "water")) { nwater++; continue; }
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(r, "keep"))) { nskip++; continue; }
         if (cJSON_IsNumber(cJSON_GetObjectItem(r, "dup_of"))) { ndup++; continue; }
         for (o = outer ? outer->child : NULL; o; o = o->next, oi++) {
             double ox[TD5_GEOB_RING_MAX], oz[TD5_GEOB_RING_MAX], X[TD5_GEOB_RING_MAX], Z[TD5_GEOB_RING_MAX];
@@ -824,6 +837,9 @@ static void sc_prel_load(TD5_RoamScnSource *s)
             n = td5_geob_parse_area(rec, c->n, s->area_wide, a, rx, rz, NULL);
             cJSON_Delete(rec);
             if (n != m || rx[0] != X[0] || rz[0] != Z[0]) { memset(a, 0, sizeof *a); continue; }   /* reversed / decimated: no bridges */
+            /* a PRECINCT keeps its lot class (no infill) but is no plaza: no lawn, no plaza veto, no plaza trees
+             * (the census: the Cementerio de La Plata's 110 mausoleums and galleries, Gimnasia's club buildings) */
+            if (!(cls && !strcmp(cls, "green")) || sc_prel_precinct(kind)) { a->kind = TD5_GEOA_KIND_OTHER; nprec++; }
             first = sc_pool_push(c, &cap_pt, rx, rz, n);
             if (first < 0) break;
             a->first = first;
@@ -840,9 +856,9 @@ static void sc_prel_load(TD5_RoamScnSource *s)
     cJSON_Delete(root);
     sc_cache_sort(c);
     c->bytes = (size_t)c->npt * 16u + (size_t)c->n * (sizeof(double) + sizeof(int64_t) + sizeof(int) + sizeof(TD5_GeoArea));
-    TD5_LOG_I(LOG_TAG, "ROAM_PARK_REL %d relation(s) read: %d outline(s) loaded (%d with holes, %d hole ring(s) kept, "
-              "%d dropped by the point budget), skipped: %d water, %d not an area kind, %d already an AREAS way",
-              nrel, c->n, nwith, nh - nh_drop, nh_drop, nwater, nskip, ndup);
+    TD5_LOG_I(LOG_TAG, "ROAM_PARK_REL %d relation(s) read: %d outline(s) loaded (%d precinct(s): lot class only, %d with "
+              "holes, %d hole ring(s) kept, %d dropped by the point budget), skipped: %d water, %d not an area kind, %d already "
+              "an AREAS way", nrel, c->n, nprec, nwith, nh - nh_drop, nh_drop, nwater, nskip, ndup);
 }
 
 static int sc_index_load(TD5_RoamScnSource *s)
@@ -1819,12 +1835,13 @@ static int sc_forecourts(const ScBld *set, int nset, ScHull *fc)
     return nfc;
 }
 
-static int sc_in_plaza(const ScArea *ar, int na, double x, double z)
+static int sc_in_plaza(const ScArea *ar, int na, double x, double z, int skip_rel)
 {
     int k;
     for (k = 0; k < na; k++) {
         const TD5_GeoArea *a = ar[k].a;
         if (!td5_geob_area_is_plaza(a)) continue;
+        if (skip_rel && ar[k].id >= SC_PREL_ID_BASE && ar[k].id < SC_PREL_ID_BASE + 1.0e15) continue;   /* [LD] */
         if (hypot(x - a->cx, z - a->cz) > a->radius) continue;
         if (td5_geob_point_in_ring(ar[k].px, ar[k].pz, a->n, x, z)) return 1;
     }
@@ -2038,7 +2055,8 @@ static int sc_bld_plaza_veto(const ScArea *ar, int nar, const TD5_GeoBuilding *g
     if (!td5_env_flag_on("TD5RE_GEO_PLAZA_BLD") || nar <= 0 || gb->landmark) return 0;
     for (k = -1; k < gb->n; k++) {
         np++;
-        in += sc_in_plaza(ar, nar, k < 0 ? gb->cx : px[k], k < 0 ? gb->cz : pz[k]);
+        /* [LD] a park relation never takes an OSM footprint: the mapper drew that building in the park */
+        in += sc_in_plaza(ar, nar, k < 0 ? gb->cx : px[k], k < 0 ? gb->cz : pz[k], gb->fsrc == TD5_GEOB_FSRC_OSM);
     }
     return in * 2 > np && !(gb->fsrc == TD5_GEOB_FSRC_OSM && sc_ring_area_m2(px, pz, gb->n) < SC_PLAZA_KEEP_M2);
 }

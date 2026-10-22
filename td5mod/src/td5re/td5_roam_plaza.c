@@ -53,7 +53,7 @@ enum { PP_STONE = 0, PP_METAL, PP_WATER, PP_WOOD, PP_N };
 #define PC_RED      0xFFC8382Cu
 #define PC_YELLOW   0xFFE8C030u
 #define PC_BLUE     0xFF3C70C0u
-#define PC_CELESTE  0xFF78B0E0u      /* the Argentine flag's light blue    */
+#define PC_CELESTE  0xFFA8D8FFu      /* the Argentine flag's light blue (over the darker metal page) */
 
 /* ============================================================================
  * SECTION: source
@@ -65,6 +65,8 @@ typedef struct {
     double r_m;         /* fountain basin radius from the mapped polygon, else 0 */
     double id;
     int    kind, small, tall, named;
+    int    in_fnt;      /* statue: stands inside a fountain's basin (on a pedestal out of the water) */
+    int    has_fig;     /* fountain: a statue stands in it (no centre column / bowl of its own)      */
     unsigned int flag;  /* flagpole: the flag colour                            */
 } PzItem;
 
@@ -164,6 +166,19 @@ static int pz_load(TD5_RoamPlazaSource *p)
         p->n++;
     }
     cJSON_Delete(root);
+    {   /* a statue mapped at a fountain's centre (Plaza Moreno's four seasons: 0.2 - 0.6 m) stands IN it */
+        int a, b;
+        for (a = 0; a < p->n; a++) {
+            PzItem *q = &p->it[a];
+            if (q->kind != PK_STATUE && q->kind != PK_MONUMENT) continue;
+            for (b = 0; b < p->n; b++) {
+                PzItem *f = &p->it[b];
+                const double r = PZ_M((f->r_m > 0.0 ? f->r_m : 2.5) - 0.6);
+                if (f->kind != PK_FOUNTAIN || f->has_fig) continue;
+                if (hypot(f->x - q->x, f->z - q->z) < r) { q->in_fnt = 1; f->has_fig = 1; break; }
+            }
+        }
+    }
     p->load_ok = 1;
     TD5_LOG_I(LOG_TAG, "ROAM_PLAZA layer loaded: %d item(s) of a drawn kind, %d of a kind left out", p->n - p->nskip_file,
               p->nskip_file);
@@ -404,6 +419,11 @@ static int pz_statue(PzEm *e, const PzItem *q, double x, double z, double by, do
     double side = q->small ? 0.8 : (q->tall ? 3.0 : 2.0), ph = q->small ? 1.3 : (q->tall ? 4.2 : 2.2);
     double fh = q->small ? 1.1 : (q->tall ? 4.0 : 2.8);
     if (q->h_m > 0.0) { const double s = q->h_m / (ph + fh); ph *= s; fh *= s; }
+    if (q->in_fnt) {   /* a pedestal rising out of the basin's water (pz_fountain: water at +0.40 m) */
+        if (!pz_box(e, PP_STONE, x, z, by + PZ_M(0.30), by + PZ_M(1.7), PZ_M(0.55), PZ_M(0.55), ux, uz, PC_STONE, 1.0)) return 0;
+        if (!pz_box(e, PP_STONE, x, z, by + PZ_M(1.7), by + PZ_M(1.85), PZ_M(0.68), PZ_M(0.68), ux, uz, PC_STONE_D, 1.0)) return 0;
+        return pz_figure(e, x, by + PZ_M(1.85), z, PZ_M(fh * 0.85));
+    }
     if (!pz_box(e, PP_STONE, x, z, by - PZ_SINK, by + PZ_M(0.35), PZ_M(side * 0.5 + 0.25), PZ_M(side * 0.5 + 0.25), ux, uz,
                 PC_STONE_D, 1.0)) return 0;
     if (!pz_box(e, PP_STONE, x, z, by + PZ_M(0.35), by + PZ_M(ph - 0.25), PZ_M(side * 0.5), PZ_M(side * 0.5), ux, uz,
@@ -433,6 +453,7 @@ static int pz_fountain(PzEm *e, const PzItem *q, double x, double z, double by)
     if (!pz_prism(e, PP_STONE, x, z, wall, wall, R, R - T, 8, rot, PC_STONE_D, 0, 1.0)) return 0;        /* the rim */
     if (!pz_prism(e, PP_STONE, x, z, by + PZ_M(0.40), wall, R - T, R - T, 8, rot, PC_STONE, 0, 1.0)) return 0;
     if (!pz_disc(e, PP_WATER, x, z, by + PZ_M(0.40), R - T, 8, rot, PC_WATER, 2.0)) return 0;
+    if (q->has_fig) return 1;                    /* the statue in it is its centrepiece (pz_statue in_fnt) */
     if (!pz_prism(e, PP_STONE, x, z, by + PZ_M(0.40), by + PZ_M(1.6), cr, cr * 0.8, 8, rot, PC_STONE, 0, 1.0)) return 0;
     if (!pz_prism(e, PP_STONE, x, z, by + PZ_M(1.6), by + PZ_M(1.9), cr * 0.8, cr * 2.6, 8, rot, PC_STONE_D, 0, 1.0)) return 0;
     return pz_disc(e, PP_WATER, x, z, by + PZ_M(1.88), cr * 2.4, 8, rot, PC_WATER, 2.0);
