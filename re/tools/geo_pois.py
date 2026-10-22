@@ -430,8 +430,9 @@ def main(argv=None) -> int:
                     help="allow the one Overpass request when it is not cached")
     ap.add_argument("--dry-run", action="store_true",
                     help="prove the fetch budget offline (urlopen patched)")
-    ap.add_argument("--casco", default=os.path.join(REPO, "_archive", "roam", "F0a", "casco_poly.json"),
-                    help="casco corner polygon for the casco census columns (optional)")
+    ap.add_argument("--casco", default=None,
+                    help="casco corner polygon for the casco census columns (default: _archive/roam/F0a/"
+                         "casco_poly.json in this tree, else in the main tree when run from .claude/worktrees/<x>)")
     a = ap.parse_args(argv)
     if a.dry_run:
         print(json.dumps(dry_run(a.place), indent=1))
@@ -447,14 +448,26 @@ def main(argv=None) -> int:
         if "runtime error" in osm["remark"]:
             return 3
     casco = None
-    if os.path.exists(a.casco):
+    if a.casco is None:
+        # _archive is gitignored, so a worktree has none: fall back to the main tree's copy
+        rel = os.path.join("_archive", "roam", "F0a", "casco_poly.json")
+        for root in (REPO, os.path.dirname(os.path.dirname(os.path.dirname(REPO)))):
+            if os.path.exists(os.path.join(root, rel)):
+                a.casco = os.path.join(root, rel)
+                break
+    if a.casco and os.path.exists(a.casco):
         with open(a.casco, encoding="utf-8") as f:
             casco = json.load(f)["corners"]
+    else:
+        print("WARNING: no casco polygon (%s): the casco census columns are null, not zero" % a.casco, file=sys.stderr)
     fp = Footprints(a.place, idx, pj["projection"]["units_per_metre"])
     pois, blds, fuel, dropped = convert(osm, proj, fp, casco)
     rep = census(pois, blds, fuel, dropped, fp)
     rep["elements_in_answer"] = len(osm.get("elements", []))
     rep["casco_polygon"] = a.casco if casco else None
+    if not casco:                              # unknown, not zero
+        for k in ("pois_casco", "by_cat_casco", "joined_casco", "unjoined_casco"):
+            rep[k] = None
     write_json(os.path.join(a.place, "POIS.JSON"),
                {"pois": pois, "buildings": blds, "fuel": fuel, "census": rep})
     print(json.dumps(rep, indent=1, sort_keys=True, ensure_ascii=False))
