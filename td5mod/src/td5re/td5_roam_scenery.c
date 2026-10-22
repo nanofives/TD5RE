@@ -4819,7 +4819,7 @@ static int sc_lot_split(TG_TileCtx *c, const double *p, int lvl, double *area_ok
     return 1;
 }
 
-static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page)
+static int sc_lot_flush_col(TG_TileCtx *c, int sbi, ScLotSb *L, int page, unsigned int col)
 {
     const double rep = 1.0 / SC_LOT_UV;
     const double uox = fmod((double)c->org_x, rep), uoz = fmod((double)c->org_z, rep);
@@ -4836,7 +4836,7 @@ static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page)
             const double *P = &L->q[(size_t)(qi * 4 + i) * 3u];
             v[i * 5 + 0] = (float)P[0]; v[i * 5 + 1] = (float)P[1]; v[i * 5 + 2] = (float)P[2];
             v[i * 5 + 3] = (float)((P[0] + uox) * SC_LOT_UV); v[i * 5 + 4] = (float)((P[2] + uoz) * SC_LOT_UV);
-            light[i] = 0xFFFFFFFFu;
+            light[i] = col;
         }
         cmd[0] = (unsigned short)page; cmd[1] = 0; cmd[2] = (unsigned short)nq;
         b->moff[b->nmesh++] = b->blk.len;
@@ -4845,6 +4845,8 @@ static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page)
     }
     return 1;
 }
+
+static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page) { return sc_lot_flush_col(c, sbi, L, page, 0xFFFFFFFFu); }
 
 static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
 {
@@ -4951,6 +4953,75 @@ static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *sel
 out:
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) free(L[k].q);
     free(px); free(pz); free(py); free(hole);
+    return ok;
+}
+
+/* ---- [roam LH] GROUND COVER outside the casco ----
+ *
+ * The roam ground is one lawn page everywhere, so a horticulture belt or a marsh reads as the same meadow as a park.
+ * Outside the casco every drawn-ground cell whose COVER samples are mostly CROP (4 x 4, >= 12 of 16) is laid again
+ * SC_LOT_LIFT over the drawn ground on the plank-wood page (brown, furrowed: tilled soil), mostly WETLAND on the grass page (TD5RE_ROAM_OUT_COVER_WET=1, default off:
+ * never looked at), the lots' own way (one quad in the drawn ground's own vertex heights, the
+ * lots' UV). A cell with a road on it, a bore hole under it or water is left to the lawn. Greenhouse buildings are not
+ * drawn (no data: Overture / OSM carry none for the partido, see _archive/roam/LH/REPORT.md). TD5RE_ROAM_OUT_COVER=0 = off. */
+static int sc_emit_cover(TD5_RoamScnSource *s, TG_TileCtx *c)
+{
+    const int cell_m = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
+    const int G = 256 / ((64 % cell_m) ? 16 : cell_m), per = G / TD5_ROAM_SCN_SUB, W = G + 1;
+    const double S = (double)c->grid->tile;
+    const double drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0);
+    const int wet_on = td5_env_int("TD5RE_ROAM_OUT_COVER_WET", 0, 0, 1);   /* wetland paint: written, never looked at, off */
+    ScLotSb L[2][TD5_ROAM_SCN_NSB];
+    double *px = NULL, *pz = NULL, *py = NULL;
+    int i, j, k, cl, ok = 0;
+    (void)s;
+    if (!c->hc) return 1;
+    memset(L, 0, sizeof L);
+    px = (double *)malloc((size_t)W * W * sizeof(double));
+    pz = (double *)malloc((size_t)W * W * sizeof(double));
+    py = (double *)malloc((size_t)W * W * sizeof(double));
+    if (!px || !pz || !py) goto out;
+    for (j = 0; j <= G; j++) for (i = 0; i <= G; i++) {
+        const double u = ((double)c->tx + (double)i / (double)G) * S, v = ((double)c->tz + (double)j / (double)G) * S;
+        const double X = c->grid->ox + c->grid->c * u - c->grid->s * v, Z = c->grid->oz + c->grid->s * u + c->grid->c * v;
+        px[j * W + i] = X - (double)c->org_x; pz[j * W + i] = Z - (double)c->org_z;
+        py[j * W + i] = sc_ground(c, px[j * W + i], pz[j * W + i]) - drop + 3.0 * SC_LOT_LIFT;   /* a 21 cm lift: coplanar quads z-fight with the ground at distance */
+    }
+    for (j = 0; j < G; j++) for (i = 0; i < G; i++) {
+        static const int di[4] = { 0, 1, 1, 0 }, dj[4] = { 0, 0, 1, 1 };
+        double cell[12];
+        int crop = 0, wet = 0, water = 0, a, b;
+        const int sbi = (j / per) * TD5_ROAM_SCN_SUB + (i / per);
+        for (k = 0; k < 4; k++) {
+            const int pi = (j + dj[k]) * W + i + di[k];
+            cell[k * 3 + 0] = px[pi]; cell[k * 3 + 1] = py[pi]; cell[k * 3 + 2] = pz[pi];
+        }
+        for (b = 0; b < 4; b++) for (a = 0; a < 4; a++) {
+            const double fu = (a + 0.5) / 4.0, fv = (b + 0.5) / 4.0;
+            const double sx = cell[0] + (cell[3] - cell[0]) * fu + (cell[9] - cell[0]) * fv;
+            const double sz = cell[2] + (cell[5] - cell[2]) * fu + (cell[11] - cell[2]) * fv;
+            const int cv = sc_cover_at(c, sx, sz);
+            crop += cv == TD5_GEO_COVER_CROP;
+            wet += cv == TD5_GEO_COVER_WETLAND;
+            water += cv == TD5_GEO_COVER_WATER;
+        }
+        cl = crop >= 12 ? 0 : (wet >= 12 && wet_on ? 1 : -1);
+        if (cl < 0 || water) continue;
+        {
+            const double qx[4] = { cell[0], cell[3], cell[6], cell[9] }, qz[4] = { cell[2], cell[5], cell[8], cell[11] };
+            if (sc_on_road(c, qx, qz, 4, NULL)) { c->st.out.cover_road_skip++; continue; }
+        }
+        if (!sc_lot_put(&L[cl][sbi].q, &L[cl][sbi].nq, &L[cl][sbi].cq, cell, 4)) goto out;
+        if (cl == 0) c->st.out.cover_crop++; else c->st.out.cover_wet++;
+    }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+        if (!sc_lot_flush_col(c, k, &L[0][k], TD5_TG_PAGE_ROAD_EXTRA + 1, 0xFFFFFFFFu)) goto out;
+        if (!sc_lot_flush_col(c, k, &L[1][k], TD5_TG_PAGE_GREEN, 0xFFFFFFFFu)) goto out;
+    }
+    ok = 1;
+out:
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { free(L[0][k].q); free(L[1][k].q); }
+    free(px); free(pz); free(py);
     return ok;
 }
 
@@ -5857,6 +5928,12 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->lot_first[k] = c->sb[k].nmesh;
     }
     if (!sc_emit_lots(s, c, self, ac, nac)) goto out;
+    if (s->outsk && !sc_casco_has(s, c->tx, c->tz) && td5_env_int("TD5RE_ROAM_OUT_COVER", 1, 0, 1)) {   /* [roam LH] */
+        if (!sc_emit_cover(s, c)) goto out;
+        if (td5_env_int("TD5RE_ROAM_OUT_LOG", 0, 0, 1))
+            TD5_LOG_I(LOG_TAG, "roam cover tile %d,%d: cover_ok %d, cropland cells %d, wetland cells %d, left to the lawn (road) %d",
+                      c->tx, c->tz, c->cover_ok, c->st.out.cover_crop, c->st.out.cover_wet, c->st.out.cover_road_skip);
+    }
     /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own).
      * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
      * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
@@ -5988,7 +6065,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, ou_t[16] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
+    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, ou_t[16] = { 0 }, cov_t[3] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
@@ -6129,7 +6206,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ou_t[0] += r->out.poles; ou_t[1] += r->out.wood; ou_t[2] += r->out.concrete; ou_t[3] += r->out.towers;
         ou_t[4] += r->out.wires; ou_t[5] += r->out.wire_quads; ou_t[6] += (long)(r->out.wire_m + 0.5);
         ou_t[7] += r->out.guards; ou_t[8] += r->out.guard_posts; ou_t[9] += (long)(r->out.guard_m + 0.5);
-        ou_t[10] += r->out.gates; ou_t[11] += r->out.gates_lift; ou_t[12] += r->out.on_road_skipped;
+        ou_t[10] += r->out.gates; cov_t[0] += r->out.cover_crop; cov_t[1] += r->out.cover_wet; cov_t[2] += r->out.cover_road_skip; ou_t[11] += r->out.gates_lift; ou_t[12] += r->out.on_road_skipped;
         ou_t[13] += r->out.portal_skipped; ou_t[14] += r->out.guard_hits; ou_t[15] += r->out.meshes;
         if (r->rail.lift_max_m > rl_lift_max) rl_lift_max = r->rail.lift_max_m;
         tot[0] += j.ok[i]; tot[1] += r->meshes; tot[2] += r->bytes; tot[3] += r->bld_seen; tot[4] += r->bld_emitted;
@@ -6211,9 +6288,9 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         snprintf(line, sizeof line,
                  "roam outskirts [roam LH]: %ld pole(s) (%ld wood, %ld concrete, %ld tower), %ld wire span(s) = %ld m in %ld quads, "
                  "%ld guard-rail segment(s) = %ld m on %ld posts, %ld open gate(s) (%ld lift), %ld footprint(s) skipped on the road, "
-                 "%ld portal(s) not drawn, %ld meshes | OUTSKIRTS GUARD: %ld face(s) on the drivable surface",
+                 "%ld portal(s) not drawn, %ld meshes | ground cover: %ld cropland cell(s), %ld wetland cell(s), %ld left to the lawn (road on them) | OUTSKIRTS GUARD: %ld face(s) on the drivable surface",
                  ou_t[0], ou_t[1], ou_t[2], ou_t[3], ou_t[4], ou_t[6], ou_t[5], ou_t[7], ou_t[9], ou_t[8], ou_t[10], ou_t[11],
-                 ou_t[12], ou_t[13], ou_t[15], ou_t[14]);
+                 ou_t[12], ou_t[13], ou_t[15], cov_t[0], cov_t[1], cov_t[2], ou_t[14]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

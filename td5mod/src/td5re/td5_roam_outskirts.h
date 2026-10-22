@@ -40,6 +40,7 @@ typedef struct {
     int  on_road_skipped;                 /* footprints left out: on the drivable surface */
     int  portal_skipped;                  /* substation portals (not drawn) */
     int  guard_hits;                      /* emitted faces on the drivable surface: 0 */
+    int  cover_crop, cover_wet, cover_road_skip;   /* ground-cover cells painted (cropland / wetland), cells left to the lawn because a road is on them */
     int  quads, meshes;
 } TD5_RoamOutStats;
 
