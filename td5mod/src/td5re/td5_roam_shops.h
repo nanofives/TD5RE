@@ -46,6 +46,8 @@ typedef struct {
     int  awnings, awning_tight;     /* awnings drawn / refused (pavement too narrow or too low)  */
     int  crosses;                   /* pharmacy green crosses                                    */
     int  canopies, canopy_refused;  /* fuel forecourt canopies drawn / sites with no clear spot  */
+    int  canopy_islands;            /* ... with their pump islands (clear of every road)         */
+    int  canopy_service;            /* ... whose deck spans a forecourt SERVICE drive            */
     int  meshes;
     double front_m;                 /* metres of shopfront                                       */
 } TD5_RoamShopStats;
@@ -79,9 +81,13 @@ int  td5_roam_shops_category(TD5_RoamShopSource *s, double id, const TD5_GeoBuil
 /* Dress one emitted footprint. 1 on success (including "nothing to dress"), 0 on out of memory. */
 int  td5_roam_shops_building(TD5_RoamShopSource *s, TG_TileCtx *c, const TD5_RoamShopBld *b, TD5_RoamShopStats *st);
 
-/* Fuel forecourt canopies of the tile. in_bld(u, x, z) = 1 when the tile-local point is inside a
- * footprint (the canopy keeps off buildings). 1 on success, 0 on out of memory. */
+/* Fuel forecourt canopies of the tile, PLANNED (in the building pass: in_bld(u, x, z) = 1 when the
+ * tile-local point is inside a footprint, the canopy keeps off buildings) then WRITTEN by _fuel_flush
+ * in the furniture tail: the deck may span a forecourt's service drive, which the 2D F4a census would
+ * read as "on the road"; the posts and pump islands stand on no drivable surface and the deck covers no
+ * real street (this module's own test). 1 on success, 0 on out of memory. */
 int  td5_roam_shops_fuel(TD5_RoamShopSource *s, TG_TileCtx *c, int (*in_bld)(void *u, double x, double z), void *u,
                          TD5_RoamShopStats *st);
+int  td5_roam_shops_fuel_flush(TD5_RoamShopSource *s, TG_TileCtx *c, TD5_RoamShopStats *st);
 
 #endif /* TD5_ROAM_SHOPS_H */

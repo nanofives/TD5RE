@@ -32,7 +32,7 @@
 #define SH_SINK         300.0              /* TD5_TG_GEO_BASE_SINK (td5_tg_city.c)    */
 #define SH_MAX_FOUND    4300.0             /* TD5_TG_GEO_MAX_FOUND                    */
 #define SH_MIN_H        SH_M(2.6)          /* lower than this is a shed, not a shop   */
-#define SH_GLASS_H      SH_M(2.75)         /* shop head height over the base          */
+#define SH_GLASS_H      SH_M(3.0)          /* shop head height over the base          */
 #define SH_FASCIA_H     SH_M(0.55)
 #define SH_OFF_GLASS    SH_M(0.06)         /* proud of the facade                     */
 #define SH_OFF_FASCIA   SH_M(0.12)
@@ -44,15 +44,29 @@
 #define SH_BAY          SH_M(4.5)          /* one store page cell                     */
 #define SH_AWN_D        SH_M(1.3)
 #define SH_AWN_MIN      SH_M(0.7)
-#define SH_AWN_DROP     SH_M(0.40)
+#define SH_AWN_DROP     SH_M(0.35)
 #define SH_AWN_CLEAR    SH_M(2.2)          /* lowest awning edge over the pavement    */
-#define SH_AWN_VAL      SH_M(0.22)         /* valance                                 */
+#define SH_AWN_VAL      SH_M(0.20)         /* valance                                 */
 #define SH_PAGE_WHITE   TD5_TG_PAGE_SNOW   /* near-white page every colour tints      */
 #define SH_QMAX         64
 
+#define SH_CAN_L     SH_M(16.0)
+#define SH_CAN_W     SH_M(9.0)
+#define SH_CAN_CLEAR SH_M(4.8)
+#define SH_CAN_T     SH_M(0.8)
+#define SH_CAN_MAX   32                    /* planned canopies per tile */
+
+typedef struct {
+    double cx, cz, tx, tz, hl, hw, gy;
+    unsigned int col;
+    int islands;                           /* the pump islands are clear too */
+    int posts;                             /* bit k: post k stands on clear ground (drawn) */
+    int sb;
+} ShCanopy;
+
 struct TD5_RoamShopSource {
     char   place[64];
-    int    loaded, use_pois, awnings, canopy;
+    int    loaded, use_pois, awnings, canopy, log;
     /* POIS.JSON buildings[], sorted by id */
     int    nb;
     double *bid;
@@ -65,6 +79,9 @@ struct TD5_RoamShopSource {
     int    *fring0, *fringn;               /* into rx / rz */
     double *rx, *rz;
     int    nr;
+    /* the tile being built: canopies planned in the building pass, written in the furniture tail */
+    ShCanopy pend[SH_CAN_MAX];
+    int    npend;
 };
 
 int td5_roam_shops_enabled(void) { return td5_env_int("TD5RE_ROAM_SHOPS", 1, 0, 1); }
@@ -79,6 +96,7 @@ TD5_RoamShopSource *td5_roam_shops_open(const char *place)
     s->use_pois = td5_env_int("TD5RE_ROAM_SHOP_POIS", 1, 0, 1);
     s->awnings  = td5_env_int("TD5RE_ROAM_SHOP_AWNINGS", 1, 0, 1);
     s->canopy   = td5_env_int("TD5RE_ROAM_SHOP_CANOPY", 1, 0, 1);
+    s->log      = td5_env_int("TD5RE_ROAM_SHOP_LOG", 0, 0, 1);
     return s;
 }
 
@@ -626,12 +644,14 @@ int td5_roam_shops_building(TD5_RoamShopSource *s, TG_TileCtx *c, const TD5_Roam
     return k;
 }
 
-/* ---------------------------------------------------------------- fuel canopies */
-
-#define SH_CAN_L     SH_M(16.0)
-#define SH_CAN_W     SH_M(9.0)
-#define SH_CAN_CLEAR SH_M(4.8)
-#define SH_CAN_T     SH_M(0.8)
+/* ---------------------------------------------------------------- fuel canopies
+ *
+ * La Plata's stations are corner lots whose forecourt OSM maps with a SERVICE drive through it (MEASURED on the casco
+ * census, TD5RE_ROAM_SHOP_LOG=1: the nearest street of 30 of the 41 owned sites is class SERVICE, the site 0-9 m off its
+ * kerb). So the deck may span a service drive (it stands 4.8 m over it), while the posts and the pump islands stand on
+ * no drivable surface at all and the deck covers no real street. The placement is planned in the building pass (it
+ * needs the halo footprints) and written in the furniture tail (td5_roam_shops_fuel_flush): the F4a census is 2D and
+ * would read a deck over a forecourt drive as "on the road"; this module's own test above is the canopy's guard. */
 
 static int sh_pip(const double *x, const double *z, int n, double px, double pz)
 {
@@ -641,25 +661,69 @@ static int sh_pip(const double *x, const double *z, int n, double px, double pz)
     return in;
 }
 
-/* the canopy rectangle (centre, tangent, half extents) is clear: off every road (with a 1 m margin),
- * off every footprint, inside the forecourt ring when there is one */
-static int sh_can_ok(TG_TileCtx *c, double cx, double cz, double tx, double tz, double hl, double hw,
-                     int (*in_bld)(void *u, double x, double z), void *u, const double *rx, const double *rz, int rn)
+/* a deck point is acceptable: off the drivable surface, or on it only inside a SERVICE drive's carriageway */
+static int sh_deck_pt_ok(TG_TileCtx *c, double x, double z)
 {
-    const double nx = -tz, nz = tx, m = SH_M(1.0);
+    int edge, side;
+    double along, lat;
+    RoamFrame f;
+    if (!roam_ctx_on_road(c, &x, &z, 1)) return 1;
+    if (!roam_nearest_edge(c, x, z, SH_M(30.0), &edge, &side, &along, &lat) || !roam_edge_frame(c, edge, side, along, &f))
+        return 0;                          /* on a junction patch: a street */
+    return f.klass == TD5_GEO_RC_SERVICE && fabs(lat) <= f.half_carriage + SH_M(0.5);
+}
+
+/* a small rectangle (posts, islands) on no drivable surface */
+static int sh_rect_clear(TG_TileCtx *c, double cx, double cz, double tx, double tz, double hl, double hw)
+{
+    const double nx = -tz, nz = tx;
     double qx[4], qz[4];
-    int a, bb;
-    qx[0] = cx - tx * (hl + m) - nx * (hw + m); qz[0] = cz - tz * (hl + m) - nz * (hw + m);
-    qx[1] = cx + tx * (hl + m) - nx * (hw + m); qz[1] = cz + tz * (hl + m) - nz * (hw + m);
-    qx[2] = cx + tx * (hl + m) + nx * (hw + m); qz[2] = cz + tz * (hl + m) + nz * (hw + m);
-    qx[3] = cx - tx * (hl + m) + nx * (hw + m); qz[3] = cz - tz * (hl + m) + nz * (hw + m);
-    if (roam_ctx_on_road(c, qx, qz, 4)) return 0;
-    if (rn >= 3 && !sh_pip(rx, rz, rn, cx, cz)) return 0;
+    qx[0] = cx - tx * hl - nx * hw; qz[0] = cz - tz * hl - nz * hw;
+    qx[1] = cx + tx * hl - nx * hw; qz[1] = cz + tz * hl - nz * hw;
+    qx[2] = cx + tx * hl + nx * hw; qz[2] = cz + tz * hl + nz * hw;
+    qx[3] = cx - tx * hl + nx * hw; qz[3] = cz - tz * hl + nz * hw;
+    return !roam_ctx_on_road(c, qx, qz, 4);
+}
+
+#define SH_POST_L(hl) ((hl) - SH_M(1.5))
+#define SH_POST_W(hw) ((hw) * 0.85)
+#define SH_ISL_W(hw)  ((hw) * 0.45)
+
+/* why[]: 0 deck over a street, 1 a post on a road, 2 outside the forecourt, 3 on a footprint */
+static int sh_can_ok(TG_TileCtx *c, double cx, double cz, double tx, double tz, double hl, double hw,
+                     int (*in_bld)(void *u, double x, double z), void *u, const double *rx, const double *rz, int rn,
+                     int *why, int *islands, int *posts)
+{
+    const double nx = -tz, nz = tx;
+    int a, bb, k;
+    if (rn >= 3 && !sh_pip(rx, rz, rn, cx, cz)) { why[2]++; return 0; }
+    for (a = -2; a <= 2; a++)
+        for (bb = -2; bb <= 2; bb++) {
+            const double x = cx + tx * hl * a * 0.5 + nx * hw * bb * 0.5, z = cz + tz * hl * a * 0.5 + nz * hw * bb * 0.5;
+            if (!sh_deck_pt_ok(c, x, z)) { why[0]++; return 0; }
+        }
+    {   /* at least two posts on clear ground (a cantilevered deck); only the clear ones are drawn */
+        int nposts = 0;
+        *posts = 0;
+        for (k = 0; k < 4; k++) {
+            const double sl = (k & 1) ? 1.0 : -1.0, sw = (k & 2) ? 1.0 : -1.0;
+            if (sh_rect_clear(c, cx + tx * sl * SH_POST_L(hl) + nx * sw * SH_POST_W(hw),
+                              cz + tz * sl * SH_POST_L(hl) + nz * sw * SH_POST_W(hw), tx, tz, SH_M(0.4), SH_M(0.4)))
+                { *posts |= 1 << k; nposts++; }
+        }
+        if (nposts < 2) { why[1]++; return 0; }
+    }
     if (in_bld)
         for (a = -2; a <= 2; a++)
             for (bb = -2; bb <= 2; bb++)
                 if (in_bld(u, cx + tx * hl * a * 0.5 + nx * hw * bb * 0.5, cz + tz * hl * a * 0.5 + nz * hw * bb * 0.5))
-                    return 0;
+                    { why[3]++; return 0; }
+    *islands = 1;
+    for (k = 0; k < 2; k++) {
+        const double sw = k ? 1.0 : -1.0;
+        if (!sh_rect_clear(c, cx + nx * sw * SH_ISL_W(hw), cz + nz * sw * SH_ISL_W(hw), tx, tz, hl - SH_M(3.0), SH_M(0.8)))
+            *islands = 0;
+    }
     return 1;
 }
 
@@ -668,68 +732,109 @@ int td5_roam_shops_fuel(TD5_RoamShopSource *s, TG_TileCtx *c, int (*in_bld)(void
 {
     int i, tx, tz;
     int32_t ox, oz;
-    if (!s || !s->canopy) return 1;
+    if (!s) return 1;
+    s->npend = 0;
+    if (!s->canopy) return 1;
     sh_load(s);
     if (s->nf <= 0) return 1;
     roam_ctx_origin(c, &tx, &tz, &ox, &oz);
     for (i = 0; i < s->nf; i++) {
         const double px = s->fx[i] - (double)ox, pz = s->fz[i] - (double)oz;
-        double rx[64], rz[64], along, lat, ttx, ttz, rdx, rdz, rd;
-        int rn = s->fringn[i] > 64 ? 0 : s->fringn[i], k, edge, side, placed = 0;
+        double rx[64], rz[64], along, lat, rdx, rdz, rd;
+        int rn = s->fringn[i] > 64 ? 0 : s->fringn[i], k, edge, side, placed = 0, why[4] = { 0, 0, 0, 0 };
         RoamFrame f;
         if (!roam_ctx_owned(c, px, pz)) continue;
         for (k = 0; k < rn; k++) { rx[k] = s->rx[s->fring0[i] + k] - (double)ox; rz[k] = s->rz[s->fring0[i] + k] - (double)oz; }
         if (!roam_nearest_edge(c, px, pz, SH_M(45.0), &edge, &side, &along, &lat) ||
-            !roam_edge_frame(c, edge, side, along, &f)) { st->canopy_refused++; continue; }
-        ttx = f.tx; ttz = f.tz;
+            !roam_edge_frame(c, edge, side, along, &f)) {
+            st->canopy_refused++;
+            if (s->log) TD5_LOG_I(LOG_TAG, "ROAM_SHOP_FUEL tile %d,%d site %d: no street within 45 m", tx, tz, i);
+            continue;
+        }
         rdx = f.px - px; rdz = f.pz - pz; rd = hypot(rdx, rdz);
         if (rd > 1.0) { rdx /= rd; rdz /= rd; } else { rdx = 0.0; rdz = 0.0; }
         {
-            static const double shift_m[6] = { 0.0, 3.0, 6.0, 9.0, -3.0, 12.0 };
+            /* the site point is often on the pavement or on the forecourt's own SERVICE drive (the nearest edge,
+             * so its direction says nothing about where the street is): rings of candidate centres round the
+             * point, 2.5 m apart out to 12.5 m in eight directions, the deck along the nearest edge or across it,
+             * full size first */
+            static const double ring_m[6] = { 0.0, 2.5, 5.0, 7.5, 10.0, 12.5 };
             static const double scale[3] = { 1.0, 0.8, 0.6 };
-            int a, sc;
+            int a, sc, sd, ori, isl = 0, posts = 0;
+            (void)rdx; (void)rdz;
             for (sc = 0; sc < 3 && !placed; sc++)
-                for (a = 0; a < 6 && !placed; a++) {
-                    const double cx = px + rdx * SH_M(shift_m[a]), cz = pz + rdz * SH_M(shift_m[a]);
-                    const double hl = 0.5 * SH_CAN_L * scale[sc], hw = 0.5 * SH_CAN_W * scale[sc];
-                    if (!sh_can_ok(c, cx, cz, ttx, ttz, hl, hw, in_bld, u, rx, rz, rn)) continue;
-                    {
-                        ShQB *q = (ShQB *)malloc(sizeof *q);
-                        const double gy = roam_ctx_ground(c, cx, cz) + SH_M(0.15);
-                        const double nnx = -ttz, nnz = ttx;
-                        int pk, ok;
-                        if (!q) return 0;
-                        q->nq = 0;
-                        /* deck: light grey soffit and top, the brand fascia round it */
-                        sh_box(q, cx, cz, gy + SH_CAN_CLEAR, gy + SH_CAN_CLEAR + SH_CAN_T, ttx, ttz, hl, hw,
-                               s->fcol[i], 0xFFD8D8D8u, 1);
-                        /* four posts, two pump islands between them */
-                        for (pk = 0; pk < 4; pk++) {
-                            const double sl = (pk & 1) ? 1.0 : -1.0, sw = (pk & 2) ? 1.0 : -1.0;
-                            const double qx = cx + ttx * sl * (hl - SH_M(2.0)) + nnx * sw * (hw * 0.45);
-                            const double qz = cz + ttz * sl * (hl - SH_M(2.0)) + nnz * sw * (hw * 0.45);
-                            sh_box(q, qx, qz, gy - SH_M(0.3), gy + SH_CAN_CLEAR, ttx, ttz, SH_M(0.2), SH_M(0.2),
-                                   0xFFB8B8B8u, 0xFFB8B8B8u, 0);
+                for (a = 0; a < 6 && !placed; a++)
+                    for (sd = 0; sd < (a ? 8 : 1) && !placed; sd++)
+                        for (ori = 0; ori < 2 && !placed; ori++) {
+                            const double ang = (double)sd * 0.78539816339744831;
+                            const double dx = f.tx * cos(ang) - f.tz * sin(ang), dz = f.tz * cos(ang) + f.tx * sin(ang);
+                            const double ttx = ori ? -f.tz : f.tx, ttz = ori ? f.tx : f.tz;
+                            const double cx = px + dx * SH_M(ring_m[a]);
+                            const double cz = pz + dz * SH_M(ring_m[a]);
+                            const double hl = 0.5 * SH_CAN_L * scale[sc], hw = 0.5 * SH_CAN_W * scale[sc];
+                            ShCanopy *cp;
+                            if (!sh_can_ok(c, cx, cz, ttx, ttz, hl, hw, in_bld, u, rx, rz, rn, why, &isl, &posts)) continue;
+                            if (s->npend >= SH_CAN_MAX) break;
+                            cp = &s->pend[s->npend++];
+                            cp->cx = cx; cp->cz = cz; cp->tx = ttx; cp->tz = ttz; cp->hl = hl; cp->hw = hw;
+                            cp->gy = roam_ctx_ground(c, cx, cz) + SH_M(0.15);
+                            cp->col = s->fcol[i];
+                            cp->islands = isl;
+                            cp->posts = posts;
+                            cp->sb = roam_ctx_sb_of(c, cx, cz);
+                            placed = 1;
                         }
-                        for (pk = 0; pk < 2; pk++) {
-                            const double sw = pk ? 1.0 : -1.0;
-                            const double qx = cx + nnx * sw * (hw * 0.45), qz = cz + nnz * sw * (hw * 0.45);
-                            sh_box(q, qx, qz, gy - SH_M(0.1), gy + SH_M(0.25), ttx, ttz, hl - SH_M(3.0), SH_M(0.6),
-                                   0xFFA0A0A0u, 0xFFA0A0A0u, 0);
-                            sh_box(q, qx + ttx * SH_M(1.6), qz + ttz * SH_M(1.6), gy + SH_M(0.25), gy + SH_M(1.9), ttx, ttz,
-                                   SH_M(0.45), SH_M(0.3), s->fcol[i], 0xFFE0E0E0u, 0);
-                            sh_box(q, qx - ttx * SH_M(1.6), qz - ttz * SH_M(1.6), gy + SH_M(0.25), gy + SH_M(1.9), ttx, ttz,
-                                   SH_M(0.45), SH_M(0.3), s->fcol[i], 0xFFE0E0E0u, 0);
-                        }
-                        ok = sh_flush(c, roam_ctx_sb_of(c, cx, cz), q, st);
-                        free(q);
-                        if (!ok) return 0;
-                        placed = 1;
-                        st->canopies++;
-                    }
-                }
         }
         if (!placed) st->canopy_refused++;
+        if (s->log)
+            TD5_LOG_I(LOG_TAG, "ROAM_SHOP_FUEL tile %d,%d site %d (%.0f,%.0f) ring %d: %s (tries refused: deck over a "
+                      "street %d, post on a road %d, outside the forecourt %d, on a footprint %d) nearest street class %d, "
+                      "site %.1f m off its kerb", tx, tz, i, s->fx[i], s->fz[i], rn, placed ? "canopy" : "no clear spot",
+                      why[0], why[1], why[2], why[3], f.klass, (fabs(lat) - f.half_carriage) / SH_UPM);
     }
+    return 1;
+}
+
+int td5_roam_shops_fuel_flush(TD5_RoamShopSource *s, TG_TileCtx *c, TD5_RoamShopStats *st)
+{
+    int i, pk;
+    if (!s) return 1;
+    for (i = 0; i < s->npend; i++) {
+        const ShCanopy *cp = &s->pend[i];
+        const double nnx = -cp->tz, nnz = cp->tx, gy = cp->gy;
+        ShQB *q = (ShQB *)malloc(sizeof *q);
+        int ok;
+        if (!q) return 0;
+        q->nq = 0;
+        /* deck: light grey soffit and top, the brand fascia round it */
+        sh_box(q, cp->cx, cp->cz, gy + SH_CAN_CLEAR, gy + SH_CAN_CLEAR + SH_CAN_T, cp->tx, cp->tz, cp->hl, cp->hw,
+               cp->col, 0xFFD8D8D8u, 1);
+        for (pk = 0; pk < 4; pk++) {
+            const double sl = (pk & 1) ? 1.0 : -1.0, sw = (pk & 2) ? 1.0 : -1.0;
+            if (!(cp->posts & (1 << pk))) continue;
+            const double qx = cp->cx + cp->tx * sl * SH_POST_L(cp->hl) + nnx * sw * SH_POST_W(cp->hw);
+            const double qz = cp->cz + cp->tz * sl * SH_POST_L(cp->hl) + nnz * sw * SH_POST_W(cp->hw);
+            sh_box(q, qx, qz, gy - SH_M(0.3), gy + SH_CAN_CLEAR, cp->tx, cp->tz, SH_M(0.2), SH_M(0.2),
+                   0xFFB8B8B8u, 0xFFB8B8B8u, 0);
+        }
+        if (cp->islands)
+            for (pk = 0; pk < 2; pk++) {
+                const double sw = pk ? 1.0 : -1.0;
+                const double qx = cp->cx + nnx * sw * SH_ISL_W(cp->hw), qz = cp->cz + nnz * sw * SH_ISL_W(cp->hw);
+                sh_box(q, qx, qz, gy - SH_M(0.1), gy + SH_M(0.25), cp->tx, cp->tz, cp->hl - SH_M(3.0), SH_M(0.6),
+                       0xFFA0A0A0u, 0xFFA0A0A0u, 0);
+                sh_box(q, qx + cp->tx * SH_M(1.6), qz + cp->tz * SH_M(1.6), gy + SH_M(0.25), gy + SH_M(1.9), cp->tx, cp->tz,
+                       SH_M(0.45), SH_M(0.3), cp->col, 0xFFE0E0E0u, 0);
+                sh_box(q, qx - cp->tx * SH_M(1.6), qz - cp->tz * SH_M(1.6), gy + SH_M(0.25), gy + SH_M(1.9), cp->tx, cp->tz,
+                       SH_M(0.45), SH_M(0.3), cp->col, 0xFFE0E0E0u, 0);
+            }
+        ok = sh_flush(c, cp->sb, q, st);
+        free(q);
+        if (!ok) return 0;
+        st->canopies++;
+        if (cp->islands) st->canopy_islands++;
+        if (roam_ctx_on_road(c, &cp->cx, &cp->cz, 1)) st->canopy_service++;   /* the deck centre over a service drive */
+    }
+    s->npend = 0;
     return 1;
 }

@@ -5889,11 +5889,13 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
      * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
      * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
      * height-aware one (st.rail.guard_hits). */
-    if (s->furn || s->rails) {
+    if (s->furn || s->rails || s->shops) {
         int k;
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->furn_first[k] = c->sb[k].nmesh;
     }
     if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
+    /* [roam LB] the fuel canopies planned in the building pass (a deck may span a forecourt drive) */
+    if (s->shops && !td5_roam_shops_fuel_flush(s->shops, c, &c->st.shop)) goto out;
     if (s->furn) {
         if (!td5_roam_furn_emit(s->furn, c, &c->st.furn, &c->lamp, &c->nlamp)) goto out;
     }
@@ -6020,7 +6022,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
-    long sh_t[14] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
+    long sh_t[16] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
     double sh_m = 0.0;
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -6162,6 +6164,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             sh_t[6] += r->shop.skip_kind; sh_t[7] += r->shop.skip_low; sh_t[8] += r->shop.awnings;
             sh_t[9] += r->shop.awning_tight; sh_t[10] += r->shop.crosses; sh_t[11] += r->shop.canopies;
             sh_t[12] += r->shop.canopy_refused; sh_t[13] += r->shop.meshes;
+            sh_t[14] += r->shop.canopy_islands; sh_t[15] += r->shop.canopy_service;
             for (q = 0; q < TD5_GEOB_POI__N; q++) sh_cat[q] += r->shop.by_cat[q];
             sh_m += r->shop.front_m;
         }
@@ -6186,11 +6189,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         snprintf(ln, sizeof ln, "roam shops [roam LB]: %ld footprint(s) with a business (tags %ld, POIS.JSON %ld), %ld dressed "
                  "(fuel %ld pharmacy %ld bank %ld food %ld kiosk %ld health %ld shop %ld office %ld), %ld street wall(s), %.0f m of "
                  "shopfront | no street wall %ld, skipped landmark/civic/part %ld, too low %ld | awnings %ld (%ld refused: pavement "
-                 "narrow / low / road), pharmacy crosses %ld | fuel canopies %ld (%ld site(s) with no clear spot) | %ld meshes "
+                 "narrow / low / road), pharmacy crosses %ld | fuel canopies %ld (%ld with pump islands, %ld over a forecourt service drive; %ld site(s) with no clear spot) | %ld meshes "
                  "(TD5RE_ROAM_SHOPS=%d)", sh_t[0], sh_t[1], sh_t[2], sh_t[3], sh_cat[TD5_GEOB_POI_FUEL],
                  sh_cat[TD5_GEOB_POI_PHARMACY], sh_cat[TD5_GEOB_POI_BANK], sh_cat[TD5_GEOB_POI_FOOD], sh_cat[TD5_GEOB_POI_KIOSK],
                  sh_cat[TD5_GEOB_POI_HEALTH], sh_cat[TD5_GEOB_POI_SHOP], sh_cat[TD5_GEOB_POI_OFFICE], sh_t[4], sh_m, sh_t[5],
-                 sh_t[6], sh_t[7], sh_t[8], sh_t[9], sh_t[10], sh_t[11], sh_t[12], sh_t[13], td5_roam_shops_enabled());
+                 sh_t[6], sh_t[7], sh_t[8], sh_t[9], sh_t[10], sh_t[11], sh_t[14], sh_t[15], sh_t[12], sh_t[13], td5_roam_shops_enabled());
         TD5_LOG_I(LOG_TAG, "%s", ln);
         if (f) fprintf(f, "# %s\n", ln);
         fprintf(stderr, "%s\n", ln);
