@@ -4234,7 +4234,8 @@ static float    sc_rdf(const uint8_t *p);
  *   reads >= 3 m; where it does not, the walk searches on in 2 m steps. No station within 5 m of a junction outline
  *   or a dead-end cap (corner sight lines, the crossings at the mouth), nor within 2 m of a deck, a bore or an
  *   island stretch. The trunk stands 40 % of the band width out from the kerb (0.55 .. 0.9 m), on a band at least
- *   1.4 m wide, at least 0.6 m short of a building front (mapped or infill; the crown is narrowed to the front),
+ *   1.4 m wide, at least 0.6 m short of a building front (mapped or infill; the crown is narrowed to the front and
+ *   reaches at most 2.5 m over the carriageway, shorter when narrowed past 85 %),
  *   on the slab (its height), its 0.35 m trunk square off the road and 2 m each way along the kerb off the road too
  *   (a driveway or a side street mouth). Species: one round-crown page per named street (FNV of the name), one tree
  *   in five another; height from the canopy (5 .. 15 m, +-10 % jitter).
@@ -4243,7 +4244,9 @@ static float    sc_rdf(const uint8_t *p);
  *   a point whose 3x3 canopy probe reads >= 3 m gets a tree (5 .. 18 m, deciduous / conifer / willow / palm pages) unless
  *   it stands on a road, a slab, a building (mapped or infill), a plaza / park / pitch / grass area (the plazas plant
  *   their own) or water, or is HIDDEN: a building stands between it and the nearest street centreline and the
- *   canopy is under 10 m (a tree that tall shows over two-three storey roofs). At most 400 a tile.
+ *   canopy is under 10 m (a tree that tall shows over two-three storey roofs). Its crown reaches at most 1.5 m over a
+ *   road (narrowed, and shorter when narrowed past 85 %: a big camera-facing billboard beside a street reads as a
+ *   green wall across it). At most 400 a tile.
  *
  * FURNITURE. Both emit AFTER the furniture and the railways, so they read the faces those wrote (this tile's tail of
  * every sub-block): a trunk keeps 1.5 m off any furniture face (2 m off a flat one: zebras, limit lines, rail beds),
@@ -4272,6 +4275,7 @@ static float    sc_rdf(const uint8_t *p);
 #define ST_PROBE_M          1.75
 #define ST_FACADE_MIN_M     0.6
 #define ST_FACADE_OVER_M    0.4
+#define ST_ROAD_OVER_M      2.5
 #define ST_FACADE_PROBE_M   8.0
 #define ST_MOUTH_M          2.0
 #define ST_TRUNK_M          0.35
@@ -4284,8 +4288,10 @@ static float    sc_rdf(const uint8_t *p);
 #define ST_LOT_SHOW_M       10
 #define ST_LOT_JIT_M        2.0
 #define ST_LOT_CLEAR_M      1.0
+#define ST_LOT_OVER_M       1.5
 #define ST_LOT_REACH_M      80.0
 #define ST_LOT_CAP          400
+#define ST_SQUEEZE          0.85     /* a crown narrowed past this share of its width gets shorter too (keeps the page's shape) */
 #define ST_CROWN_COVER      0.8      /* the share of the billboard half width a crown covers on the canopy raster */
 
 /* round crowns on the street (La Plata's tilos, platanos, fresnos): deciduous 0, big deciduous 1, round topiary 7.
@@ -4436,7 +4442,8 @@ static int pv_trees_chain(PvEmit *e, const PvChain *ch, const PvB *B, const int 
         if (dfac < ST_M(ST_FACADE_MIN_M)) { c->st.st_facade++; s += sp; continue; }
         hw0 = hw;
         if (hw > dfac + ST_M(ST_FACADE_OVER_M)) hw = dfac + ST_M(ST_FACADE_OVER_M);
-        if (hw < 0.6 * hw0) th *= hw / (0.6 * hw0);
+        if (hw > lat + ST_M(ST_ROAD_OVER_M)) hw = lat + ST_M(ST_ROAD_OVER_M);   /* no green wall across a narrow street */
+        if (hw < ST_SQUEEZE * hw0) th *= hw / (ST_SQUEEZE * hw0);
         if (th < ST_M(ST_H_MIN_M) * 0.8) { c->st.st_facade++; s += sp; continue; }
         {
             struct ScTreeCand *tc = NULL;
@@ -4520,10 +4527,19 @@ static int sc_lot_trees(TD5_RoamScnSource *s, TG_TileCtx *c, const PvBld *bld, c
                     }
                     if (hid) { c->st.st_lot_hidden++; continue; }
                 }
-                tc = st_cand_new(c);
+                tc = st_cand_new(c);            /* not counted until c->ntcand++ below: a refusal leaves it unused */
                 if (!tc) return 0;
                 var = k_st_lot_var[(h >> 17) % 8u];
                 st_size(var, (double)best, ST_LOT_H_MAX_M, h, &tc->hw, &tc->th);
+                {   /* a lot crown reaches at most ST_LOT_OVER_M over the road: a camera-facing billboard bigger than
+                     * that stands across the street as a green wall */
+                    const double hw0 = tc->hw;
+                    double r = tc->hw - ST_M(ST_LOT_OVER_M);
+                    while (r > ST_M(ST_LOT_CLEAR_M) && sc_square_on_road(c, x, z, r)) r -= ST_M(0.75);
+                    if (r + ST_M(ST_LOT_OVER_M) < tc->hw) tc->hw = r + ST_M(ST_LOT_OVER_M);
+                    if (tc->hw < ST_SQUEEZE * hw0) tc->th *= tc->hw / (ST_SQUEEZE * hw0);
+                    if (tc->th < ST_M(ST_H_MIN_M) * 0.8) { c->st.st_lot_refused++; continue; }
+                }
                 tc->var = var; tc->kind = 1;
                 tc->x[0] = x; tc->z[0] = z; tc->y[0] = sc_ground(c, x, z) + SC_GEOP_LIFT; tc->nalt = 1;
                 c->ntcand++;
