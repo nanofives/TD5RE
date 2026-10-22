@@ -53,6 +53,7 @@
 #include "td5_roam_render.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_furniture.h"
+#include "td5_roam_rails.h"
 #include "td5_roam_traffic.h"   /* [F8] td5_roam_signal_group: the head an approach obeys */
 
 #ifdef LOG_TAG
@@ -445,6 +446,13 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
         }
         s_at.arms += n;
     }
+    {   /* [roam LF] the station / halt / stop name boards of the RAILS layer share the atlas (one natural-height cell each) */
+        char (*sn)[96] = td5_roam_rails_furn_enabled() ? (char (*)[96])malloc(256u * 96u) : NULL;
+        const int nsn = sn ? td5_roam_rails_station_names(place, sn, 256) : 0;
+        for (i = 0; i < nsn; i++)
+            if (!fu_want(want, &nw, sn[i], 0)) s_at.cells_dropped++;
+        free(sn);
+    }
     s_at.clusters = ncl;
     s_at.names = nnames;
     s_at.cells_wanted = nw;
@@ -515,6 +523,18 @@ static const FuCell *fu_cell_find(const char *name, int forced)
     for (i = 0; i < s_at.ncell; i++)
         if (s_at.cell[i].forced == forced && strcmp(s_at.cell[i].name, name) == 0) return &s_at.cell[i];
     return NULL;
+}
+
+/* [roam LF] a station board's cell: the same inset the street plates use (1.5 texels all round) */
+int td5_roam_furn_plate_cell(const char *name, int *page_id, double *v_top, double *v_bot, int *rows)
+{
+    const FuCell *c = fu_cell_find(name, 0);
+    if (!c || !s_at.ncell) return 0;
+    if (page_id) *page_id = FU_PAGE_BASE + c->page;
+    if (v_top) *v_top = ((double)c->y + 1.5) / 64.0;
+    if (v_bot) *v_bot = ((double)(c->y + c->h) - 1.5) / 64.0;
+    if (rows) *rows = c->h / FU_PL_ROW_H;
+    return 1;
 }
 
 /* ============================================================================

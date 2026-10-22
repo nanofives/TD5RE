@@ -60,7 +60,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  15u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  16u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -87,7 +87,9 @@
                                      * 14 = round J integration: roam JA (12) + roam JC (12, 13) combined,
                                      *      14 so no tile cached by a single branch is reused
                                      * 15 = integ J: a carriage arch opens every stretch of a part / relation wall that stands on
-                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments */
+                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments
+                                     * 16 = roam LF: railway furniture (level-crossing posts / arms / lights / saltires, station name
+                                     *      boards, catenary), RAILS_RULES 2 */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
