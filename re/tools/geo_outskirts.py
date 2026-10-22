@@ -280,6 +280,33 @@ def convert(osms: list, proj, roads) -> dict:
 KEYS = ("lines", "poles", "guards", "gates")
 
 
+def split_by_tile(entries: list, idx: dict, bbox: dict) -> list:
+    """Overpass returns WHOLE ways (some run 300 km), the tile layer owns an entry by its first
+    vertex: cut every way into per-tile runs (each run keeps the next vertex, so the pieces join),
+    and drop runs that start outside the place bbox. A piece keeps the way id and gains "part"."""
+    size, x0, z0 = float(idx["size"]), float(idx["x0"]), float(idx["z0"])
+    tile = lambda p: (int(math.floor((p["x"] - x0) / size)), int(math.floor((p["z"] - z0) / size)))  # noqa: E731
+    out = []
+    for e in entries:
+        pts, n = e["points"], len(e["points"])
+        i, part = 0, 0
+        while i < n - 1:
+            t = tile(pts[i])
+            j = i + 1
+            while j < n - 1 and tile(pts[j]) == t:
+                j += 1
+            ll = e["latlon"][i]
+            if bbox["south"] <= ll[0] <= bbox["north"] and bbox["west"] <= ll[1] <= bbox["east"]:
+                q = dict(e)
+                q["points"], q["latlon"], q["part"] = pts[i:j + 1], e["latlon"][i:j + 1], part
+                if "pole_ids" in e:
+                    q["pole_ids"] = e["pole_ids"][i:j + 1]
+                out.append(q)
+            part += 1
+            i = j
+    return out
+
+
 def _anchor(e):
     pts = e.get("points")
     if pts:
@@ -335,7 +362,8 @@ def census(doc: dict, upm: float) -> dict:
     for e in doc["gates"]:
         gk["%s/%s" % (e["kind"], e["class"])] = gk.get("%s/%s" % (e["kind"], e["class"]), 0) + 1
     return {"poles_by_kind_material": pk, "lines_by_kind": lk, "line_km": km(doc["lines"]),
-            "lines_with_all_poles": sum(1 for e in doc["lines"] if all(e["pole_ids"])),
+            "line_pieces": len(doc["lines"]),
+            "pieces_with_all_poles": sum(1 for e in doc["lines"] if all(e["pole_ids"])),
             "guard_rails": len(doc["guards"]), "guard_km": km(doc["guards"]),
             "guards_near_a_road": sum(1 for e in doc["guards"] if e["highway_near"]),
             "gates_kept_by_kind_class": gk, "dropped": doc["_dropped"]}
@@ -393,6 +421,8 @@ def main(argv=None) -> int:
                 return 3
         osms.append(o)
     doc = convert(osms, proj, load_roads(a.place))
+    for k in ("lines", "guards"):
+        doc[k] = split_by_tile(doc[k], idx, pj["bbox"])
     rows = write_tiles(a.place, idx, doc)
     idx["layers"]["OUTSKIRTS"] = {"file": "OUTSKIRTS.JSON", "key": "lines", "key2": "poles",
                                   "keys": list(KEYS), "tiles": rows}
