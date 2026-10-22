@@ -82,6 +82,7 @@
 #if defined(__has_include)
 #  if __has_include("td5_roam_mode.h")
 #    include "td5_roam_mode.h"
+#    include "td5_trackgen.h"      /* [roam LC] td5_trackgen_roam_surface_pages */
 #    include "td5_roam_locate.h"   /* [F2-B] TD5_RoamResident: tiles come from the physics resident set */
 #    define RR_HAVE_MODE 1
 #  endif
@@ -93,6 +94,7 @@
 #define RR_MAXMESH        (RR_SUB * RR_SUB)
 #define RR_UPM            430.0              /* units per metre                     */
 #define RR_MAX_LANES      16
+#define RR_NCLS           3                  /* [roam LC] road surface classes: smooth, cobble, loose */
 /* Pages of the HOST level (td5_roam_mode.h). F2-F: a roam session asks the mode for them
  * (td5_roam_host_pages: the place's own geo level, TD5_TG_PAGE_ROAD / _GREEN / _SIDEWALK); the
  * numbers below are the SHIPPED-LEVEL FALLBACK (level023 "Moscow", 475 pages) and the dev overlay
@@ -138,6 +140,7 @@ typedef struct {
     TD5_SpanDisplayList dl;
     float           cx, cy, cz, r;           /* whole-tile sphere                   */
     uint32_t        nroad, ntri, nground, nskirt;
+    uint32_t        ncls[RR_NCLS];           /* [roam LC] road quads + patch tris by surface class (smooth, cobble, loose) */
     uint32_t        npiece, nstop;           /* [roam HC] patch slab triangles, stop-line bars */
     size_t          bytes;
     /* [F4a] the SCENERY layer (td5_roam_scenery.c): runtime headers over the
@@ -170,6 +173,7 @@ typedef struct {
     int       ntile, captile;
     /* knobs, read once at begin */
     int       page_road, page_ground, page_kerb;
+    int       surf_pages, page_cls[3];    /* [roam LC] per-surface road pages (0 = the old single page) */
     int       use_ground;
     double    lift;                          /* units, added to every y             */
     double    ground_drop;                   /* units                               */
@@ -268,8 +272,11 @@ static uint32_t rr_shade(const float a[3], const float b[3], const float c[3])
 
 /* ------------------------------------------------------------- mesh baker ---- */
 
+/* [roam LC] road surface classes: one road command each (smooth = the host's road page, cobble, loose) */
 typedef struct {
-    int      nrt, nrq, ngq, nsq;             /* counts: road tris/quads, ground, skirt */
+    int      nrt, nrq, ngq, nsq;             /* counts: road tris/quads (all classes), ground, skirt */
+    int      cnt_t[RR_NCLS], cnt_q[RR_NCLS]; /* [roam LC] road tris / quads per class                */
+    int      cur_t[RR_NCLS], cur_q[RR_NCLS]; /* [roam LC] their write cursors                        */
     TD5_MeshHeader *m;
     TD5_MeshVertex *v;
     int      ct, cq, cg, cs;                 /* write cursors (in primitives)         */
@@ -669,8 +676,20 @@ static void rr_nb_free(RRNb *nb)
 
 /* The extra triangles of the road command: junction patch slabs and stop-line bars, render frame,
  * built before the count pass so both passes read one list. */
-typedef struct { float p[3][3]; float uv[3][2]; uint32_t col; uint8_t sb; } RRXTri;
+typedef struct { float p[3][3]; float uv[3][2]; uint32_t col; uint8_t sb, cls; } RRXTri;
 typedef struct { RRXTri *t; int n, cap, oom; } RRXList;
+
+/* [roam LC] TD5_GEO_SURF_* (edge) or a patch's 0x10|grip byte -> road page class (0 smooth, 1 cobble, 2 loose) */
+static int rr_cls_of_geo(int geo)
+{
+    if (!s_rr.surf_pages) return 0;
+    return geo == TD5_GEO_SURF_COBBLE ? 1 : (geo == TD5_GEO_SURF_LOOSE ? 2 : 0);
+}
+static int rr_cls_of_grip(int surf)
+{
+    if (!s_rr.surf_pages) return 0;
+    switch (surf & 0x0F) { case 4: return 1; case 2: return 2; default: return 0; }
+}
 
 static RRXTri *rr_x_add(RRXList *L)
 {
@@ -743,7 +762,7 @@ static void rr_patch_tri(const RoamTile *t, const RoamTri *tr, uint8_t sbi, RRXL
             x->uv[i][0] = 0.5f + (p[i][0] - p[0][0]) / RR_PATCH_UV_UNITS;
             x->uv[i][1] = 0.5f + (p[i][2] - p[0][2]) / RR_PATCH_UV_UNITS;
         }
-        x->col = col; x->sb = sbi;
+        x->col = col; x->sb = sbi; x->cls = (uint8_t)rr_cls_of_grip(tr->surface);
         return;
     }
     for (k = floor(amin); k < amax; k += 1.0) for (kb = bmin; kb < bmax; kb += 1.0) {
@@ -770,7 +789,7 @@ static void rr_patch_tri(const RoamTile *t, const RoamTri *tr, uint8_t sbi, RRXL
                 x->uv[i][0] = (float)(RR_PATCH_U0 + fa * (RR_PATCH_U1 - RR_PATCH_U0));
                 x->uv[i][1] = (float)(q[i]->b - bmin);
             }
-            x->col = col; x->sb = sbi;
+            x->col = col; x->sb = sbi; x->cls = (uint8_t)rr_cls_of_grip(tr->surface);
             (*npiece)++;
         }
     }
@@ -908,6 +927,7 @@ static void rr_stop_lines(const RoamTile *t, const RRNb *nb, const uint8_t *spsb
             }
             if (c < 0) continue;
             if (er->flags & ROAM_EF_ROUNDABOUT) continue;
+            if (rr_cls_of_geo(er->surface)) continue;                          /* [roam LC] no paint on cobble / dirt */
             if (er->end_key[0] == er->end_key[1]) continue;                   /* a loop: which end is this? */
             if (er->end_key[0] == cl[c].key) end = 0;
             else if (er->end_key[1] == cl[c].key) end = 1;
@@ -963,7 +983,7 @@ static void rr_stop_lines(const RoamTile *t, const RRNb *nb, const uint8_t *spsb
                             memcpy(x->p[z], r[tri[tt][z]], sizeof r[0]);
                             x->uv[z][0] = uu[tri[tt][z]]; x->uv[z][1] = vv[tri[tt][z]];
                         }
-                        x->col = col; x->sb = spsb[i];
+                        x->col = col; x->sb = spsb[i]; x->cls = 0;
                     }
                 }
             }
@@ -972,6 +992,14 @@ static void rr_stop_lines(const RoamTile *t, const RRNb *nb, const uint8_t *spsb
     }
 done:
     free(cv); free(cl); free(sedge);
+}
+
+/* [roam LC] first vertex of road class `cls` in a sub-block mesh: classes lay out one after another (tris, then quads) */
+static int rr_cls_base(const RRSb *b, int cls)
+{
+    int c, o = 0;
+    for (c = 0; c < cls; c++) o += b->cnt_t[c] * 3 + b->cnt_q[c] * 4;
+    return o;
 }
 
 /* Bake `t` with the ground from `hc` (NULL = no ground). Returns the tile or NULL
@@ -983,7 +1011,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
     RRSb sb[RR_MAXMESH];
     RRGround gr;
     RRTile *rt;
-    uint8_t *spsb = NULL, *trsb = NULL, *besb = NULL;
+    uint8_t *spsb = NULL, *trsb = NULL, *besb = NULL, *spcls = NULL;
     RRXList xl;
     uint32_t i;
     int k, ok = 1;
@@ -999,7 +1027,16 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
     spsb = (uint8_t *)calloc(t->nspan ? t->nspan : 1u, 1);
     trsb = (uint8_t *)calloc(t->ntri ? t->ntri : 1u, 1);
     besb = (uint8_t *)calloc(t->nbedge ? t->nbedge : 1u, 1);
-    if (!rt || !spsb || !trsb || !besb) { ok = 0; goto done_counts; }
+    spcls = (uint8_t *)calloc(t->nspan ? t->nspan : 1u, 1);
+    if (!rt || !spsb || !trsb || !besb || !spcls) { ok = 0; goto done_counts; }
+    if (s_rr.surf_pages) {                           /* [roam LC] a span takes its edge's surface class */
+        uint32_t e, si;
+        for (e = 0; e < t->nedge; e++) {
+            const int cl = rr_cls_of_geo(t->edge[e].surface);
+            for (si = t->edge[e].span_first; cl && si < (uint32_t)t->edge[e].span_first + t->edge[e].span_count && si < t->nspan; si++)
+                spcls[si] = (uint8_t)cl;
+        }
+    }
     rt->tx = t->tx; rt->tz = t->tz;
 
     /* ---- pass 1: count per sub-block ---- */
@@ -1010,6 +1047,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         rr_span_centre(t, &t->span[i], L, R, n, &px, &pz);
         spsb[i] = (uint8_t)rr_sb_of(t, px, pz);
         sb[spsb[i]].nrq += n;
+        sb[spsb[i]].cnt_q[spcls[i]] += n;
     }
     for (i = 0; i < t->ntri; i++) {
         const RoamTri *tr = &t->tri[i];
@@ -1024,7 +1062,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         if (trsb[i] != 0xFF) { rr_patch_tri(t, &t->tri[i], trsb[i], &xl, &rt->npiece); rt->ntri++; }
     if (s_rr.stoplines) rr_stop_lines(t, nb, spsb, &xl, &rt->nstop);
     if (xl.oom) { ok = 0; goto done_counts; }
-    for (k = 0; k < xl.n; k++) sb[xl.t[k].sb].nrt++;
+    for (k = 0; k < xl.n; k++) { sb[xl.t[k].sb].nrt++; sb[xl.t[k].sb].cnt_t[xl.t[k].cls]++; }
     for (i = 0; i < t->nbedge; i++) {
         const RoamBEdge *be = &t->bedge[i];
         int32_t ox, oy, oz;
@@ -1050,12 +1088,12 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         size_t bytes;
         uint8_t *blk;
         if (nv <= 0) continue;
-        bytes = hdr + 3u * sizeof(TD5_PrimitiveCmd) + (size_t)nv * sizeof(TD5_MeshVertex);
+        bytes = hdr + (2u + RR_NCLS) * sizeof(TD5_PrimitiveCmd) + (size_t)nv * sizeof(TD5_MeshVertex);
         blk = (uint8_t *)calloc(1, bytes);
         if (!blk) { ok = 0; break; }
         sb[k].m = (TD5_MeshHeader *)blk;
         sb[k].m->commands = (TD5_PrimitiveCmd *)(blk + hdr);
-        sb[k].v = (TD5_MeshVertex *)(blk + hdr + 3u * sizeof(TD5_PrimitiveCmd));
+        sb[k].v = (TD5_MeshVertex *)(blk + hdr + (2u + RR_NCLS) * sizeof(TD5_PrimitiveCmd));
         sb[k].m->vertices = sb[k].v;
         sb[k].m->normals = NULL;
         sb[k].m->render_type = 259;
@@ -1079,7 +1117,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         }
         b = &sb[spsb[i]];
         for (kk = 0; kk < n; kk++) {
-            TD5_MeshVertex *q = b->v + b->nrt * 3 + b->cq * 4;
+            TD5_MeshVertex *q = b->v + rr_cls_base(b, spcls[i]) + b->cnt_t[spcls[i]] * 3 + b->cur_q[spcls[i]] * 4;
             const uint32_t col = rr_shade(pl[kk], pl[kk + 1], pr[kk + 1]);
             /* [roam HC] the page's lane line sits on u = 0 of every lane, so lane 0 drew a dashed line down
              * ONE kerb (whichever the ribbon stores first) and the last lane's u = n edge half a line down
@@ -1090,17 +1128,17 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
             rr_put(b, q + 1, pl[kk + 1], col, u1, 0.0f);
             rr_put(b, q + 2, pr[kk + 1], col, u1, 1.0f);
             rr_put(b, q + 3, pr[kk],     col, u0, 1.0f);
-            b->cq++;
+            b->cur_q[spcls[i]]++; b->cq++; rt->ncls[spcls[i]]++;
             rt->nroad++;
         }
     }
     for (k = 0; k < xl.n; k++) {
         const RRXTri *x = &xl.t[k];
         RRSb *b = &sb[x->sb];
-        TD5_MeshVertex *q = b->v + b->ct * 3;
+        TD5_MeshVertex *q = b->v + rr_cls_base(b, x->cls) + b->cur_t[x->cls] * 3;
         int kk;
         for (kk = 0; kk < 3; kk++) rr_put(b, q + kk, x->p[kk], x->col, x->uv[kk][0], x->uv[kk][1]);
-        b->ct++;
+        b->cur_t[x->cls]++; b->ct++; rt->ncls[x->cls]++;
     }
     if (gr.h) {
         int a, bq;
@@ -1156,13 +1194,14 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
     for (k = 0; k < RR_MAXMESH; k++) {
         TD5_MeshHeader *m = sb[k].m;
         TD5_PrimitiveCmd *c;
-        int nc = 0;
+        int nc = 0, cls;
         float cx, cy, cz, r, dx, dy, dz;
         if (!m) continue;
         c = m->commands;
-        if (sb[k].nrt || sb[k].nrq) {
-            c[nc].dispatch_type = 0; c[nc].texture_page_id = (int16_t)s_rr.page_road;
-            c[nc].triangle_count = (uint16_t)sb[k].nrt; c[nc].quad_count = (uint16_t)sb[k].nrq;
+        for (cls = 0; cls < RR_NCLS; cls++) {
+            if (!sb[k].cnt_t[cls] && !sb[k].cnt_q[cls]) continue;
+            c[nc].dispatch_type = 0; c[nc].texture_page_id = (int16_t)s_rr.page_cls[cls];
+            c[nc].triangle_count = (uint16_t)sb[k].cnt_t[cls]; c[nc].quad_count = (uint16_t)sb[k].cnt_q[cls];
             nc++;
         }
         if (sb[k].ngq) {
@@ -1207,7 +1246,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         rt->dl.meshes = rt->vis;
     }
     rr_ground_free(&gr);
-    free(spsb); free(trsb); free(besb); free(xl.t);
+    free(spsb); free(trsb); free(besb); free(spcls); free(xl.t);
     TD5_LOG_D(LOG_TAG, "ROAM_RENDER_HC tile %d,%d patch_tris=%u pieces=%u stop_lines=%u lane_quads=%u",
               t->tx, t->tz, rt->ntri, rt->npiece, rt->nstop, rt->nroad);
     if (rt->nmesh == 0) { free(rt); return NULL; }
@@ -1217,7 +1256,7 @@ done_free:
     rr_ground_free(&gr);
     for (k = 0; k < RR_MAXMESH; k++) free(sb[k].m);
 done_counts:
-    free(spsb); free(trsb); free(besb); free(xl.t);
+    free(spsb); free(trsb); free(besb); free(spcls); free(xl.t);
     free(rt);
     return NULL;
 }
@@ -1395,8 +1434,8 @@ int td5_roam_render_add_tile(const RoamTile *t)
     if (!rt) { td5_roam_render_remove_tile(t->tx, t->tz); return 0; }
     if (!rr_insert(rt)) { rr_free_tile(rt); return 0; }
     TD5_LOG_D(LOG_TAG, "ROAM_RENDER_TILE %d,%d meshes=%d road_quads=%u patch_tris=%u ground_quads=%u skirts=%u "
-              "bytes=%.2f MB bake_ms=%u", rt->tx, rt->tz, rt->nmesh, rt->nroad, rt->ntri, rt->nground,
-              rt->nskirt, (double)rt->bytes / 1048576.0, (unsigned)(td5_plat_time_ms() - t0));
+              "bytes=%.2f MB bake_ms=%u cls(smooth/cobble/loose)=%u/%u/%u", rt->tx, rt->tz, rt->nmesh, rt->nroad, rt->ntri, rt->nground,
+              rt->nskirt, (double)rt->bytes / 1048576.0, (unsigned)(td5_plat_time_ms() - t0), rt->ncls[0], rt->ncls[1], rt->ncls[2]);
     return 1;
 }
 
@@ -1514,6 +1553,15 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
         s_rr.page_road   = td5_env_int("TD5RE_ROAM_RENDER_PAGE_ROAD",   hr, 0, 1023);
         s_rr.page_ground = td5_env_int("TD5RE_ROAM_RENDER_PAGE_GROUND", hg, 0, 1023);
         s_rr.page_kerb   = td5_env_int("TD5RE_ROAM_RENDER_PAGE_KERB",   hk, 0, 1023);
+        /* [roam LC] cobble / loose road pages of a geo host (TD5RE_ROAM_SURF_PAGES=0: one page for every road) */
+        s_rr.page_cls[0] = s_rr.page_road; s_rr.page_cls[1] = s_rr.page_road; s_rr.page_cls[2] = s_rr.page_road;
+        s_rr.surf_pages = 0;
+#ifdef RR_HAVE_MODE
+        if (td5_roam_active() && td5_roam_host_is_geo() && td5_env_int("TD5RE_ROAM_SURF_PAGES", 1, 0, 1)) {
+            td5_trackgen_roam_surface_pages(&s_rr.page_cls[1], &s_rr.page_cls[2]);
+            s_rr.surf_pages = 1;
+        }
+#endif
     }
     s_rr.use_ground  = td5_env_int("TD5RE_ROAM_RENDER_GROUND", 1, 0, 1);
     s_rr.cell_m      = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);

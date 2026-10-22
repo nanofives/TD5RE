@@ -521,12 +521,14 @@ static const FuCell *fu_cell_find(const char *name, int forced)
  * SECTION: source (SIGNALS tiles: crossings and bus stops)
  * ========================================================================== */
 
-typedef struct { double x, z; int paint; } FuXing;          /* paint: 1 marked, 2 signals, 0 unknown */
+/* paint: 1 marked, 2 signals, 0 unmarked (never painted), 3 unknown (the [roam LC] rule decides at emit time).
+ * way: 1 = from a footway=crossing way (its midpoint), 0 = a highway=crossing node. */
+typedef struct { double x, z; int paint, way; } FuXing;
 typedef struct { double x, z; int shelter, bench, bin; } FuStop;
 typedef struct { int ix, iz; double x0, z0, x1, z1; } FuRow;
 
 typedef struct {
-    int used, ix, iz;
+    int used, ix, iz, layer;                 /* [roam LC] layer 0 = SIGNALS, 1 = FOOTWAYS */
     uint32_t clock;
     FuXing *xs; int nx;
     FuStop *bs; int nb;
@@ -534,8 +536,10 @@ typedef struct {
 
 struct TD5_RoamFurnSource {
     char       place[64];
-    FuRow     *rows;
-    int        nrows;
+    FuRow     *rows, *frows;                /* [roam LC] frows: the FOOTWAYS layer's tile rows */
+    int        nrows, nfrows;
+    int        xing_mode;                   /* [roam LC] TD5RE_ROAM_XING_UNKNOWN: 0 skip, 1 rule, 2 all zebra */
+    int        xing_ways;                   /* [roam LC] TD5RE_ROAM_XING_WAYS */
     FuSigTile  tile[FU_SIGN_CACHE];
     uint32_t   clock;
     int        night;
@@ -574,7 +578,7 @@ static int fu_stop_cmp(const void *pa, const void *pb)
     return a->z < b->z ? -1 : (a->z > b->z ? 1 : 0);
 }
 
-static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
+static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int layer, int ix, int iz)
 {
     int i, victim = 0;
     char rel[96], path[512];
@@ -584,21 +588,54 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
     FuSigTile *t;
     int ncx = 0, ncb = 0;
     for (i = 0; i < FU_SIGN_CACHE; i++)
-        if (f->tile[i].used && f->tile[i].ix == ix && f->tile[i].iz == iz) { f->tile[i].clock = ++f->clock; return &f->tile[i]; }
+        if (f->tile[i].used && f->tile[i].layer == layer && f->tile[i].ix == ix && f->tile[i].iz == iz) { f->tile[i].clock = ++f->clock; return &f->tile[i]; }
     for (i = 0; i < FU_SIGN_CACHE; i++) {
         if (!f->tile[i].used) { victim = i; break; }
         if (f->tile[i].clock < f->tile[victim].clock) victim = i;
     }
     t = &f->tile[victim];
     fu_sigtile_free(t);
-    t->used = 1; t->ix = ix; t->iz = iz; t->clock = ++f->clock;
-    snprintf(rel, sizeof rel, "tiles/SIGNALS_%d_%d.JSON", ix, iz);
+    t->used = 1; t->ix = ix; t->iz = iz; t->layer = layer; t->clock = ++f->clock;
+    snprintf(rel, sizeof rel, "tiles/%s_%d_%d.JSON", layer ? "FOOTWAYS" : "SIGNALS", ix, iz);
     td5_geo_source_path(path, sizeof path, f->place, rel);
     json = fu_slurp(path);
     if (!json) return t;                                    /* cached as empty */
     root = cJSON_Parse(json);
     free(json);
     td5_geo_src_json_to_game(root);                         /* [roam M] source frame -> game frame */
+    if (layer) {                            /* [roam LC] footway=crossing ways: one crossing at the midpoint */
+        const cJSON *fw = root ? cJSON_GetObjectItem(root, "footways") : NULL;
+        if (fw && cJSON_IsArray(fw)) {
+            const int n = cJSON_GetArraySize(fw);
+            t->xs = (FuXing *)calloc((size_t)(n > 0 ? n : 1), sizeof(FuXing));
+            if (t->xs) {
+                for (e = fw->child; e; e = e->next) {
+                    const cJSON *pk = cJSON_GetObjectItem(e, "kind"), *pts = cJSON_GetObjectItem(e, "points"), *pp = cJSON_GetObjectItem(e, "paint");
+                    const cJSON *a, *b;
+                    const char *s;
+                    if (!pk || !cJSON_IsString(pk) || strcmp(pk->valuestring, "crossing") || !pts || !cJSON_IsArray(pts)) continue;
+                    a = pts->child;
+                    if (!a) continue;
+                    for (b = a; b->next; b = b->next) {}
+                    if (b == a) continue;
+                    {
+                        const cJSON *ax = cJSON_GetObjectItem(a, "x"), *az = cJSON_GetObjectItem(a, "z");
+                        const cJSON *bx = cJSON_GetObjectItem(b, "x"), *bz = cJSON_GetObjectItem(b, "z");
+                        if (!ax || !az || !bx || !bz) continue;
+                        s = (pp && cJSON_IsString(pp)) ? pp->valuestring : "";
+                        t->xs[ncx].x = 0.5 * (ax->valuedouble + bx->valuedouble);
+                        t->xs[ncx].z = 0.5 * (az->valuedouble + bz->valuedouble);
+                        t->xs[ncx].paint = !strcmp(s, "marked") ? 1 : (!strcmp(s, "signals") ? 2 : (!strcmp(s, "unmarked") ? 0 : 3));
+                        t->xs[ncx].way = 1;
+                        ncx++;
+                    }
+                }
+            }
+            t->nx = ncx;
+        }
+        cJSON_Delete(root);
+        return t;
+    }
     nd = root ? cJSON_GetObjectItem(root, "nodes") : NULL;
     if (nd && cJSON_IsArray(nd)) {
         const int n = cJSON_GetArraySize(nd);
@@ -614,7 +651,8 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
                     const cJSON *pp = cJSON_GetObjectItem(e, "paint");
                     const char *s = (pp && cJSON_IsString(pp)) ? pp->valuestring : "";
                     t->xs[ncx].x = px->valuedouble; t->xs[ncx].z = pz->valuedouble;
-                    t->xs[ncx].paint = !strcmp(s, "marked") ? 1 : (!strcmp(s, "signals") ? 2 : 0);
+                    t->xs[ncx].paint = !strcmp(s, "marked") ? 1 : (!strcmp(s, "signals") ? 2 : (!strcmp(s, "unmarked") ? 0 : 3));   /* [roam LC] unmarked != unknown */
+                    t->xs[ncx].way = 0;
                     ncx++;
                 } else if (!strcmp(kind, "bus_stop")) {
                     t->bs[ncb].x = px->valuedouble; t->bs[ncb].z = pz->valuedouble;
@@ -631,7 +669,7 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
     return t;
 }
 
-static int fu_index_load(TD5_RoamFurnSource *f)
+static int fu_index_layer(TD5_RoamFurnSource *f, const char *layer, FuRow **rowsp, int *nrowsp)
 {
     char path[512];
     char *json;
@@ -643,11 +681,11 @@ static int fu_index_load(TD5_RoamFurnSource *f)
     if (!json) return 0;
     root = cJSON_Parse(json);
     free(json);
-    ly = root ? cJSON_GetObjectItem(cJSON_GetObjectItem(root, "layers"), "SIGNALS") : NULL;
+    ly = root ? cJSON_GetObjectItem(cJSON_GetObjectItem(root, "layers"), layer) : NULL;
     tl = ly ? cJSON_GetObjectItem(ly, "tiles") : NULL;
     if (!tl || !cJSON_IsArray(tl)) { cJSON_Delete(root); return 0; }
-    f->rows = (FuRow *)calloc((size_t)cJSON_GetArraySize(tl) + 1u, sizeof(FuRow));
-    if (!f->rows) { cJSON_Delete(root); return 0; }
+    *rowsp = (FuRow *)calloc((size_t)cJSON_GetArraySize(tl) + 1u, sizeof(FuRow));
+    if (!*rowsp) { cJSON_Delete(root); return 0; }
     for (t = tl->child; t; t = t->next) {
         const cJSON *a = t->child;
         double v[7];
@@ -655,13 +693,20 @@ static int fu_index_load(TD5_RoamFurnSource *f)
         for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
         if (k < 7) continue;
         td5_geo_src_bbox_to_game(&v[3], &v[5]);             /* [roam M] the extent in the game frame */
-        f->rows[n].ix = (int)v[0]; f->rows[n].iz = (int)v[1];
-        f->rows[n].x0 = v[3]; f->rows[n].z0 = v[4]; f->rows[n].x1 = v[5]; f->rows[n].z1 = v[6];
+        (*rowsp)[n].ix = (int)v[0]; (*rowsp)[n].iz = (int)v[1];
+        (*rowsp)[n].x0 = v[3]; (*rowsp)[n].z0 = v[4]; (*rowsp)[n].x1 = v[5]; (*rowsp)[n].z1 = v[6];
         n++;
     }
-    f->nrows = n;
+    *nrowsp = n;
     cJSON_Delete(root);
     return 1;
+}
+
+static int fu_index_load(TD5_RoamFurnSource *f)
+{
+    const int ok = fu_index_layer(f, "SIGNALS", &f->rows, &f->nrows);
+    fu_index_layer(f, "FOOTWAYS", &f->frows, &f->nfrows);      /* [roam LC] the crossing ways */
+    return ok;
 }
 
 TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
@@ -680,7 +725,10 @@ TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
     f->on_piers    = td5_env_int("TD5RE_ROAM_FURN_PIERS", 1, 0, 1);
     f->on_stops   = td5_env_int("TD5RE_ROAM_FURN_STOPS", 1, 0, 1);
     f->on_xings   = td5_env_int("TD5RE_ROAM_FURN_XINGS", 1, 0, 1);
-    f->on_unknown_xings = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1);
+    /* [roam LC] unknown paint: 0 skipped (old), 1 the rule (zebra on a main / wide road, plain lines elsewhere), 2 every
+     * unknown a zebra (what TD5RE_GEO_XING_UNKNOWN=1 always meant). Unmarked is never painted in any mode. */
+    f->xing_mode = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1) ? 2 : td5_env_int("TD5RE_ROAM_XING_UNKNOWN", 1, 0, 2);
+    f->xing_ways = td5_env_int("TD5RE_ROAM_XING_WAYS", 1, 0, 1);
     return f;
 }
 
@@ -689,7 +737,7 @@ void td5_roam_furn_close(TD5_RoamFurnSource *f)
     int i;
     if (!f) return;
     for (i = 0; i < FU_SIGN_CACHE; i++) fu_sigtile_free(&f->tile[i]);
-    free(f->rows);
+    free(f->rows); free(f->frows);
     free(f);
 }
 
@@ -1392,6 +1440,24 @@ static int fu_emit_lamps(FuEm *em, TD5_RoamFurnSource *f, FuLamps *out)
  * SECTION: bus stops and crossings (OSM nodes of the SIGNALS tiles)
  * ========================================================================== */
 
+#define FU_XWAY_DUP_M   9.0      /* [roam LC] a way's midpoint this near a crossing node is the same crossing */
+
+/* 1 when a crossing NODE (any resident SIGNALS tile, place frame) lies within `r` units of the place point */
+static int fu_node_near(TD5_RoamFurnSource *f, double x, double z, double r)
+{
+    int k;
+    for (k = 0; k < f->nrows; k++) {
+        const FuRow *row = &f->rows[k];
+        FuSigTile *st;
+        int i;
+        if (x < row->x0 - r || x > row->x1 + r || z < row->z0 - r || z > row->z1 + r) continue;
+        st = fu_sigtile(f, 0, row->ix, row->iz);
+        for (i = 0; i < st->nx; i++)
+            if (hypot(st->xs[i].x - x, st->xs[i].z - z) < r) return 1;
+    }
+    return 0;
+}
+
 /* the SIGNALS tiles that meet the tile's box (+ margin), their nodes owned by the tile, in (x, z) order */
 static int fu_collect_nodes(FuEm *em, TD5_RoamFurnSource *f, FuXing **xs, int *nx, FuStop **bs, int *nb)
 {
@@ -1413,7 +1479,7 @@ static int fu_collect_nodes(FuEm *em, TD5_RoamFurnSource *f, FuXing **xs, int *n
         FuSigTile *st;
         int i;
         if (row->x1 < x0 || row->x0 > x1 || row->z1 < z0 || row->z0 > z1) continue;
-        st = fu_sigtile(f, row->ix, row->iz);
+        st = fu_sigtile(f, 0, row->ix, row->iz);
         for (i = 0; i < st->nx; i++) {
             const double lx = st->xs[i].x - (double)ox, lz = st->xs[i].z - (double)oz;
             if (!roam_ctx_owned(c, lx, lz)) continue;
@@ -1426,6 +1492,31 @@ static int fu_collect_nodes(FuEm *em, TD5_RoamFurnSource *f, FuXing **xs, int *n
             if (!fu_grow((void **)bs, &capb, *nb + 1, sizeof **bs)) return 0;
             (*bs)[*nb] = st->bs[i]; (*bs)[*nb].x = lx; (*bs)[*nb].z = lz; (*nb)++;
         }
+    }
+    if (f->xing_ways) {                                  /* [roam LC] footway=crossing ways, minus those a node already covers */
+        const double dup = FU_XWAY_DUP_M * FU_UPM;
+        FuXing *wy = NULL;
+        int nwy = 0, capw = 0, j;
+        for (r = 0; r < f->nfrows; r++) {                /* copy first: fu_node_near below may evict the FOOTWAYS tile */
+            const FuRow *row = &f->frows[r];
+            FuSigTile *st;
+            int i;
+            if (row->x1 < x0 || row->x0 > x1 || row->z1 < z0 || row->z0 > z1) continue;
+            st = fu_sigtile(f, 1, row->ix, row->iz);
+            for (i = 0; i < st->nx; i++) {
+                const double lx = st->xs[i].x - (double)ox, lz = st->xs[i].z - (double)oz;
+                if (!roam_ctx_owned(c, lx, lz)) continue;
+                if (!fu_grow((void **)&wy, &capw, nwy + 1, sizeof *wy)) { free(wy); return 0; }
+                wy[nwy] = st->xs[i]; wy[nwy].x = lx; wy[nwy].z = lz; nwy++;
+            }
+        }
+        for (j = 0; j < nwy; j++) {
+            em->st->xing_ways++;
+            if (fu_node_near(f, wy[j].x + (double)ox, wy[j].z + (double)oz, dup)) { em->st->xing_way_dup++; continue; }
+            if (!fu_grow((void **)xs, &capx, *nx + 1, sizeof **xs)) { free(wy); return 0; }
+            (*xs)[(*nx)++] = wy[j];
+        }
+        free(wy);
     }
     if (*nx > 1) qsort(*xs, (size_t)*nx, sizeof **xs, fu_xing_cmp);
     if (*nb > 1) qsort(*bs, (size_t)*nb, sizeof **bs, fu_stop_cmp);
@@ -1519,7 +1610,9 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         double along, lat, L, px[4], py[4], pz[4], uu[4], vv[4];
         int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1;
         RoamFrame fr, f0, f1;
-        if (x->paint == 0 && !f->on_unknown_xings) { st->xing_unknown++; continue; }
+        int paint = x->paint;
+        if (paint == 0) { st->xing_unmarked++; continue; }                   /* [roam LC] explicitly unmarked: never painted */
+        if (paint == 3 && f->xing_mode == 0) { st->xing_unknown++; continue; }
         if (!roam_nearest_edge(c, x->x, x->z, 12.0 * FU_UPM, &seg, &side, &along, &lat) ||
             !roam_edge_frame(c, seg, 1, along, &fr) ||
             hypot(x->x - fr.px, x->z - fr.pz) > fr.half_carriage + FU_X_NEAR_M * FU_UPM) { st->xing_drop_far++; continue; }
@@ -1529,13 +1622,20 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         (void)side;
         lanes = (int)(2.0 * fr.half_carriage / 1500.0 + 0.5);
         if (lanes < 1) lanes = 1;
+        if (paint == 3) {
+            /* [roam LC] the rule for a crossing OSM never said how to paint: a zebra on a main road (tertiary and up)
+             * or a wide carriageway (4+ lanes), plain limit lines on a residential street. Mode 2: always a zebra. */
+            const int main_road = fr.klass >= TD5_GEO_RC_TERTIARY || lanes >= 4;
+            paint = (f->xing_mode == 2 || main_road) ? 1 : 2;
+            if (paint == 1) st->xing_unk_zebra++; else st->xing_unk_lines++;
+        }
         L = (double)lanes;
         /* the band across the whole carriageway: right edge, left edge, left edge ahead, right edge ahead */
         px[0] = f0.px - f0.nx * fr.half_carriage; pz[0] = f0.pz - f0.nz * fr.half_carriage; py[0] = f0.py + FU_X_LIFT;
         px[1] = f0.px + f0.nx * fr.half_carriage; pz[1] = f0.pz + f0.nz * fr.half_carriage; py[1] = f0.py + FU_X_LIFT;
         px[2] = f1.px + f1.nx * fr.half_carriage; pz[2] = f1.pz + f1.nz * fr.half_carriage; py[2] = f1.py + FU_X_LIFT;
         px[3] = f1.px - f1.nx * fr.half_carriage; pz[3] = f1.pz - f1.nz * fr.half_carriage; py[3] = f1.py + FU_X_LIFT;
-        if (x->paint != 2) {                  /* a ZEBRA: u across the lanes, so the bars run along travel */
+        if (paint != 2) {                     /* a ZEBRA: u across the lanes, so the bars run along travel */
             uu[0] = 0.0; vv[0] = 0.0; uu[1] = L; vv[1] = 0.0; uu[2] = L; vv[2] = 1.0; uu[3] = 0.0; vv[3] = 1.0;
         } else {                              /* LIMIT LINES: the same page transposed, two transverse bars */
             uu[0] = 0.0; vv[0] = 0.0; uu[1] = 0.0; vv[1] = L; uu[2] = 1.0; vv[2] = L; uu[3] = 1.0; vv[3] = 0.0;
@@ -1543,11 +1643,12 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         em->sb = roam_ctx_sb_of(c, fr.px, fr.pz);
         em->road_y = fr.py;
         if (!fu_quad(em, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1, 1)) return 0;
-        if (x->paint != 2) st->zebras++; else st->limit_lines++;
+        if (paint != 2) st->zebras++; else st->limit_lines++;
+        if (x->way) st->xing_way_drawn++;
         if (td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 2) {
             int32_t ox, oz;
             roam_ctx_origin(c, NULL, NULL, &ox, &oz);
-            TD5_LOG_I(LOG_TAG, "FURN_XING place %.0f %.0f paint %d lanes %d", fr.px + (double)ox, fr.pz + (double)oz, x->paint, lanes);
+            TD5_LOG_I(LOG_TAG, "FURN_XING place %.0f %.0f paint %d lanes %d", fr.px + (double)ox, fr.pz + (double)oz, paint, lanes);
         }
     }
     return 1;

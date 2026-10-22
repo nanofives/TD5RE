@@ -206,6 +206,7 @@ int td5_trackgen_roam_host_slot(const char *slug);
 int td5_trackgen_roam_host_dir(int slot, char *out, size_t n);
 /* The page ids a plain road / lawn / kerb surface uses in that level's TEXTURES.DAT. */
 void td5_trackgen_roam_pages(int *road, int *ground, int *kerb);
+void td5_trackgen_roam_surface_pages(int *cobble, int *loose);   /* [roam LC] */
 /* The FORWSKY a roam session on `slot` draws for the TIME OF DAY options in force
  * (TD5RE_AUTOTRACK_NIGHT, same seed rule as a build): a shipped panorama from the day / night pool,
  * city horizons first. 1 on success. */
