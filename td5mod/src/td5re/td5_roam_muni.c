@@ -447,6 +447,19 @@ int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, con
             rx[nr] = tx[k]; rz[nr] = tz[k]; nr++;
         }
         while (nr > 1 && hypot(rx[nr - 1] - rx[0], rz[nr - 1] - rz[0]) < MU_DUP) nr--;
+        /* a vertex the move folded back on its own edge (a spike: in, then straight back out) goes, until none is left */
+        for (;;) {
+            int hit = -1;
+            for (k = 0; k < nr && nr > 3 && hit < 0; k++) {
+                const int p0 = (k + nr - 1) % nr, p1 = (k + 1) % nr;
+                const double ax = rx[k] - rx[p0], az = rz[k] - rz[p0], bx = rx[p1] - rx[k], bz = rz[p1] - rz[k];
+                const double la = hypot(ax, az), lb = hypot(bx, bz);
+                if (la > 0.0 && lb > 0.0 && (ax * bx + az * bz) < -0.999 * la * lb) hit = k;
+            }
+            if (hit < 0) break;
+            for (k = hit; k + 1 < nr; k++) { rx[k] = rx[k + 1]; rz[k] = rz[k + 1]; }
+            nr--;
+        }
         a1 = mu_area(rx, rz, nr);
         if (nr < 3 || nr > cap || !(a1 >= 0.5 * a0) || !mu_simple(rx, rz, nr)) { res->fate = TD5_MUNI_RING; return res->fate; }
         /* the whole result behind the line, every edge and every metre of it: the line bends between its pieces,

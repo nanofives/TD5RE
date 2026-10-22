@@ -6081,6 +6081,14 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
                             for (k = 0; k < gb->n; k++) { rx[k] = gx[k] - (double)c->org_x; rz[k] = gz[k] - (double)c->org_z; }
                             u.self = gx;
                             fate = td5_muni_snap(c->muni, &o, rx, rz, gb->n, ox, oz, &on, TD5_GEOB_RING_MAX, &res);
+                            if (fate == TD5_MUNI_SNAPPED) {       /* the emitter's test, on the values it will read */
+                                double ex[TD5_GEOB_RING_MAX], ez[TD5_GEOB_RING_MAX];
+                                for (k = 0; k < on; k++) {
+                                    ex[k] = (ox[k] + (double)c->org_x) - (double)c->org_x;
+                                    ez[k] = (oz[k] + (double)c->org_z) - (double)c->org_z;
+                                }
+                                if (!td5_geob_ring_simple(ex, ez, on)) fate = TD5_MUNI_RING;
+                            }
                             if (fate == TD5_MUNI_SNAPPED || fate == TD5_MUNI_ON) {
                                 /* on the line it is kept only MU_SNAP_GAP off the kerbs: a ring that needs any shift off
                                  * the drivable surface there (a junction patch, a drive the line does not front) keeps its
@@ -6142,6 +6150,7 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
          * the island fill), and every answer on the line not wholly behind that DRAWN line keeps its OSM position and
          * the old clearance (TD5_MUNI_FRONT). Reverting one can move the drawn line again near it: not iterated. */
         c->muni_ready = 1;
+        if (td5_env_int("TD5RE_ROAM_MUNI_PASS2", 0, 0, 1)) {   /* default off: +30 ms a tile for 8 casco footprints */
         if (!pv_bld_build(s, c, bc, nbc, ar, nar, &pb, 1)) goto out;
         if (!c->muni2 && !(c->muni2 = td5_muni_new())) { pv_bld_free(&pb); goto out; }
         td5_muni_reset(c->muni2);
@@ -6206,6 +6215,7 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
                 if (!td5_muni_ring_behind(c->muni2, &o, rx, rz, n)) { mr->fate = TD5_MUNI_FRONT; mr->n = 0; }
             }
         }
+        }   /* TD5RE_ROAM_MUNI_PASS2 */
     }
     c->muni_ready = 1;
     ok = 1;
@@ -6980,6 +6990,7 @@ typedef struct {
     double *nx, *nz;                 /* per segment i -> i+1: unit normal into the block */
     double *bx, *bz, *bm;            /* per vertex: unit bisector, mitre factor          */
     double *arc;                     /* the current run: arc length at its k-th vertex   */
+    unsigned char *och;              /* [roam NA] per vertex: a block corner of two fronts the ochava cuts */
     int     r0, cnt;                 /* the current run: first vertex, segment count     */
 } InfLine;
 
@@ -7117,7 +7128,7 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
     const double U = s->upm;
     double fx[INF_PTS + 2], fz[INF_PTS + 2], gx[INF_PTS + 2], gz[INF_PTS + 2];
     double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], mx = 0.0, mz = 0.0, D, Dcap;
-    int nf = 0, seg = L->r0, q, res = 0, own, why = 0, rail_hit = 0, rail_moved = 0;
+    int nf = 0, seg = L->r0, q, res = 0, own, why = 0, rail_hit = 0, rail_moved = 0, nr_lot = 0;
     double front = 0.0;                  /* [integ-roamI] the lot's front behind the building line when moved back */
     uint32_t h;
     if (!inf_lot_geom(L, a0, a1, 0.0, fx, fz, gx, gz, &nf, &mx, &mz, &seg)) return 1;
@@ -7207,11 +7218,43 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
         }
     }
     if (res) { why = res; goto refused; }
-    if (nf * 2 > TD5_GEOB_RING_MAX) { why = 1; goto refused; }
-    for (q = 0; q < nf; q++) { rx[q] = fx[q]; rz[q] = fz[q]; }
-    for (q = 0; q < nf; q++) { rx[nf + q] = gx[nf - 1 - q]; rz[nf + q] = gz[nf - 1 - q]; }
-    if (!td5_geob_ring_simple(rx, rz, nf * 2)) { why = 1; goto refused; }
-    if (!inf_record(c, rx, rz, nf * 2)) return 0;
+    if (nf * 2 + (s->muni_on && s->ochava > 0.0 ? 2 : 0) > TD5_GEOB_RING_MAX) { why = 1; goto refused; }
+    {   /* [roam NA] THE OCHAVA (La Plata's chamfered block corner): a lot at a corner of two fronts stops LG short of
+         * the corner on its street and closes along the chamfer to the corner's bisector, where the other street's
+         * lot takes the other half (both from this InfLine, so the two halves meet on one point M) */
+        const double LG = s->muni_on ? s->ochava : 0.0;
+        const int v0 = L->r0, v1 = (L->r0 + L->cnt) % L->n;
+        int nfr = 0, cut0 = 0, cut1 = 0;
+        double frx[INF_PTS + 4], frz[INF_PTS + 4];
+        if (LG > 0.0 && L->och && !rail_moved && nf >= 2 && a0 <= 1e-6 && L->och[v0]) {
+            const double ex = fx[1] - fx[0], ez = fz[1] - fz[0], el = hypot(ex, ez);
+            const double c2 = el > 1e-6 ? (L->bx[v0] * ex + L->bz[v0] * ez) / el : 0.0;
+            if (el > LG + 0.5 * U && c2 > 0.2) {
+                frx[nfr] = fx[0] + L->bx[v0] * LG * c2; frz[nfr] = fz[0] + L->bz[v0] * LG * c2; nfr++;
+                frx[nfr] = fx[0] + ex / el * LG; frz[nfr] = fz[0] + ez / el * LG; nfr++;
+                cut0 = 1;
+            }
+        }
+        for (q = cut0; q < nf; q++) { frx[nfr] = fx[q]; frz[nfr] = fz[q]; nfr++; }
+        if (LG > 0.0 && L->och && !rail_moved && nf >= 2 && a1 >= L->arc[L->cnt] - 1e-6 && L->och[v1] &&
+            !(nf == 2 && cut0)) {
+            const double ex = fx[nf - 1] - fx[nf - 2], ez = fz[nf - 1] - fz[nf - 2], el = hypot(ex, ez);
+            const double c2 = el > 1e-6 ? -(L->bx[v1] * ex + L->bz[v1] * ez) / el : 0.0;
+            if (el > LG + 0.5 * U && c2 > 0.2) {
+                const double X = fx[nf - 1], Z = fz[nf - 1];
+                nfr--;                                       /* the corner point itself */
+                frx[nfr] = X - ex / el * LG; frz[nfr] = Z - ez / el * LG; nfr++;
+                frx[nfr] = X + L->bx[v1] * LG * c2; frz[nfr] = Z + L->bz[v1] * LG * c2; nfr++;
+                cut1 = 1;
+            }
+        }
+        for (q = 0; q < nfr; q++) { rx[q] = frx[q]; rz[q] = frz[q]; }
+        for (q = 0; q < nf; q++) { rx[nfr + q] = gx[nf - 1 - q]; rz[nfr + q] = gz[nf - 1 - q]; }
+        nr_lot = nfr + nf;
+        if (!td5_geob_ring_simple(rx, rz, nr_lot)) { why = 1; goto refused; }
+        if ((cut0 || cut1) && sc_owned_point(c, mx, mz)) c->st.inf_ochava++;
+    }
+    if (!inf_record(c, rx, rz, nr_lot)) return 0;
     if (!sc_owned_point(c, mx, mz)) return 1;          /* a split half: its own midpoint's tile emits it */
     if (rail_moved) c->st.inf_rail_moved++;
     else if (rail_hit) c->st.inf_rail_shallow++;
@@ -7219,7 +7262,7 @@ static int inf_lot(PvEmit *e, const InfLine *L, double a0, double a1, int split,
         TD5_LOG_I(LOG_TAG, "ROAM_INFILL tile %d,%d front (%.0f,%.0f) normal (%.3f,%.3f) depth %.1f m width %.1f m",
                   c->tx, c->tz, mx + L->nx[seg] * front + (double)c->org_x, mz + L->nz[seg] * front + (double)c->org_z,
                   L->nx[seg], L->nz[seg], D / U, (a1 - a0) / U);
-    return inf_emit(e, rx, rz, nf * 2, h, fabs(td5_geob_ring_area(rx, rz, nf * 2)), a1 - a0);
+    return inf_emit(e, rx, rz, nr_lot, h, fabs(td5_geob_ring_area(rx, rz, nr_lot)), a1 - a0);
 refused:
     if (own) {
         if (why == 2) c->st.inf_drop_road++;
@@ -7253,11 +7296,12 @@ static int pv_infill(PvEmit *e, const PvChain *ch)
     if (!s->infill_on || !ch->closed || ch->nv < 3) return 1;
     memset(&L, 0, sizeof L);
     blk = (double *)malloc((size_t)(ch->nv + 1) * 8u * sizeof(double));
-    fr = (unsigned char *)calloc((size_t)ch->nv * 2u, 1);
+    fr = (unsigned char *)calloc((size_t)ch->nv * 3u, 1);
     if (!blk || !fr) goto out;
     L.ox = blk; L.oz = L.ox + ch->nv; L.nx = L.oz + ch->nv; L.nz = L.nx + ch->nv;
     L.bx = L.nz + ch->nv; L.bz = L.bx + ch->nv; L.bm = L.bz + ch->nv; L.arc = L.bm + ch->nv;
     brk = fr + ch->nv;
+    L.och = fr + 2 * ch->nv;                 /* [roam NA] */
     /* the building line, collapsed corner runs as one point (brk: not a street front there, for now) */
     for (v = 0; v < ch->nv; v++) {
         const int bad = (ch->vf[v] & (PV_VF_ISLAND | PV_VF_DECK | PV_VF_FLAT | PV_VF_MEDIAN)) || !(ch->w[v] > 0.0);
@@ -7285,6 +7329,7 @@ static int pv_infill(PvEmit *e, const PvChain *ch)
         L.bm[i] = 1.0 / (cs > 1.0 / INF_MITRE_MAX ? cs : 1.0 / INF_MITRE_MAX);
         turn = fabs(atan2(L.nx[p] * L.nz[i] - L.nz[p] * L.nx[i], L.nx[p] * L.nx[i] + L.nz[p] * L.nz[i])) * 57.29577951308232;
         brk[i] = (unsigned char)(turn > INF_BREAK_DEG || fr[p] != fr[i]);
+        L.och[i] = (unsigned char)(fr[p] && fr[i] && turn >= 30.0 && turn <= 150.0);   /* [roam NA] an ochava corner */
         if (brk[i] && first < 0) first = i;
     }
     if (first < 0) {      /* a round loop: break at its least world point */
@@ -8115,6 +8160,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             mu_t[21] += r->muni_segs; mu_t[22] += r->grounds; mu_t[23] += r->grounds_ovt; mu_t[24] += r->grounds_inf;
             mu_t[25] += r->grounds_osm;
             mu_t[26] += r->muni_fwd; mu_t[27] += r->muni_back; mu_t[28] += r->muni_corner; mu_t[29] += r->muni_ochava;
+            mu_t[30] += r->inf_ochava;
         }
         if (r->bld_shift_max > shift_max) shift_max = r->bld_shift_max;
         if (r->ms > ms_max) ms_max = r->ms;
@@ -8129,12 +8175,12 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "rule: landmark / civic / part / relation %ld, fuel %ld, park / plaza / open area / grounds %ld, outside the "
                  "casco %ld | street walls by gap to the line: ON THE PAVEMENT %ld, 0 %ld, < 1 m %ld, 1-3 m %ld, 3-6 m %ld, "
                  "6-12 m %ld, 12-20 m %ld | landmark grounds: %ld block(s), Overture blobs not built %ld, infill lots refused "
-                 "%ld, OSM footprints kept %ld (TD5RE_ROAM_MUNI_LINE=%d TD5RE_ROAM_LM_GROUNDS=%d TD5RE_ROAM_OCHAVA_CM=%d)",
+                 "%ld, OSM footprints kept %ld | infill corner lots cut by an ochava %ld (TD5RE_ROAM_MUNI_LINE=%d TD5RE_ROAM_LM_GROUNDS=%d TD5RE_ROAM_OCHAVA_CM=%d)",
                  mu_t[21], mu_t[TD5_MUNI_NONE], mu_t[TD5_MUNI_ON], mu_t[TD5_MUNI_SNAPPED], mu_t[26], mu_t[27], mu_t[28], mu_t[29],
                  mu_t[TD5_MUNI_FAR],
                  mu_t[TD5_MUNI_BLOCKED], mu_t[TD5_MUNI_CORNER], mu_t[TD5_MUNI_RING], mu_t[TD5_MUNI_ROAD], mu_t[TD5_MUNI_FRONT],
                  mu_t[10], mu_t[11], mu_t[12], mu_t[13],
-                 mu_t[14], mu_t[15], mu_t[16], mu_t[17], mu_t[18], mu_t[19], mu_t[20], mu_t[22], mu_t[23], mu_t[24], mu_t[25],
+                 mu_t[14], mu_t[15], mu_t[16], mu_t[17], mu_t[18], mu_t[19], mu_t[20], mu_t[22], mu_t[23], mu_t[24], mu_t[25], mu_t[30],
                  td5_env_int("TD5RE_ROAM_MUNI_LINE", 1, 0, 1), td5_env_int("TD5RE_ROAM_LM_GROUNDS", 1, 0, 1),
                  td5_env_int("TD5RE_ROAM_OCHAVA_CM", 300, 0, 1000));
         TD5_LOG_I(LOG_TAG, "%s", ln);
