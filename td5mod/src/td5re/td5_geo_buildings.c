@@ -1009,6 +1009,8 @@ static void geob_fill_building(const cJSON *e, int i, int tag_lm, double storey_
         /* [roam LB] the business on the footprint's own tags (free-roam shopfronts) */
         b->poi_cat = (unsigned char)td5_geob_poi_cat(geob_str(e, "shop"), geob_str(e, "amenity"),
                                                      geob_str(e, "office"), geob_str(e, "healthcare"));
+        /* [roam PB] a stadium's stand: free roam draws it as tiers (td5_roam_stadium.c), never as a block */
+        b->stand = (unsigned char)(cl && (!strcmp(cl, "stadium") || !strcmp(cl, "grandstand") || !strcmp(cl, "bleachers")));
     }
 }
 

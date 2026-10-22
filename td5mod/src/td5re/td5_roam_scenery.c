@@ -184,6 +184,7 @@ typedef struct {
     double   *id;
     unsigned char *lot;     /* [HD] AREAS: SC_LC_* per record (the raw OSM kind) */
     unsigned char *pool;    /* [roam LE] AREAS: 1 = kind swimming_pool                      */
+    unsigned char *spt, *srf;   /* [roam PB] AREAS: TD5_RPS_* sport (TD5_RPS_STADIUM = leisure=stadium) + TD5_RPF_* surface */
     int64_t  *own;          /* owner tile key per record (b, a)          */
     int      *order;        /* record indices sorted by (own, id, cx, cz) */
     double   *px, *pz;      /* ring / way points                          */
@@ -221,6 +222,7 @@ struct TD5_RoamScnSource {
     int       lots_on, lot_cover, infill_on;   /* [HD] TD5RE_ROAM_LOTS / _LOT_COVER / TD5RE_ROAM_INFILL */
     int       lot_page;                       /* [HD] TD5RE_ROAM_LOT_PAGE: the lots' host page */
     int       pools_on;                       /* [roam LE] TD5RE_ROAM_POOLS: swimming pools (coping + water) */
+    int       stadium_on, pitch_on;           /* [roam PB] TD5RE_ROAM_STADIUM / TD5RE_ROAM_PITCH_LINES (td5_roam_stadium.c) */
     int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
     int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     int       cover_green;                    /* [IC] TD5RE_ROAM_COVER_GREEN: unmapped vegetated casco loops are green */
@@ -280,6 +282,7 @@ static char *sc_slurp(const char *path, size_t *len)
 static void sc_cache_free(ScCache *c)
 {
     free(c->b); free(c->a); free(c->f); free(c->id); free(c->own); free(c->order); free(c->lot); free(c->pool);
+    free(c->spt); free(c->srf);
     free(c->px); free(c->pz);
     memset(c, 0, sizeof *c);
 }
@@ -391,6 +394,20 @@ static int sc_area_despike(double *rx, double *rz, int *np, TD5_GeoArea *a)
     return 1;
 }
 
+/* [roam PB] the sport / surface codes of one AREAS (or PARK_RELATIONS) record: leisure=stadium -> TD5_RPS_STADIUM,
+ * a leisure=pitch -> its sport= (TD5_RPS_NONE when untagged) and SC_SRF_PITCH | its surface= */
+#define SC_SRF_PITCH 0x80u
+static void sc_sport_codes(const cJSON *e, unsigned char *spt, unsigned char *srf)
+{
+    const char *le = cJSON_GetStringValue(cJSON_GetObjectItem(e, "leisure"));
+    *spt = 0; *srf = 0;
+    if (!le) return;
+    if (!strcmp(le, "stadium")) { *spt = (unsigned char)TD5_RPS_STADIUM; return; }
+    if (strcmp(le, "pitch")) return;
+    *spt = (unsigned char)td5_roam_sport_of(cJSON_GetStringValue(cJSON_GetObjectItem(e, "sport")));
+    *srf = (unsigned char)(SC_SRF_PITCH | td5_roam_surface_of(cJSON_GetStringValue(cJSON_GetObjectItem(e, "surface"))));
+}
+
 static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int ix, int iz)
 {
     char rel[96], path[512];
@@ -419,6 +436,8 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
         if (layer == SC_L_AREA) c->a = (TD5_GeoArea *)calloc((size_t)cap_rec, sizeof(TD5_GeoArea));
         if (layer == SC_L_AREA) c->lot = (unsigned char *)calloc((size_t)cap_rec, 1);
         if (layer == SC_L_AREA) c->pool = (unsigned char *)calloc((size_t)cap_rec, 1);   /* [roam LE] */
+        if (layer == SC_L_AREA) c->spt = (unsigned char *)calloc((size_t)cap_rec, 1);    /* [roam PB] */
+        if (layer == SC_L_AREA) c->srf = (unsigned char *)calloc((size_t)cap_rec, 1);
         if (layer == SC_L_FOOT) c->f = (ScFoot *)calloc((size_t)cap_rec, sizeof(ScFoot));
         c->id = (double *)calloc((size_t)cap_rec, sizeof(double));
         c->own = (int64_t *)calloc((size_t)cap_rec, sizeof(int64_t));
@@ -450,6 +469,7 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
                 c->lot[c->n] = (unsigned char)sc_lot_class((kv && cJSON_IsString(kv)) ? kv->valuestring : NULL);
                 if (c->pool) c->pool[c->n] = (unsigned char)(kv && cJSON_IsString(kv) && !strcmp(kv->valuestring, "swimming_pool"));
             }
+            if (c->spt && c->srf) sc_sport_codes(e, &c->spt[c->n], &c->srf[c->n]);   /* [roam PB] */
             roam_grid_tile_of(&s->grid, a->cx, a->cz, &tx, &tz);
         } else {
             const cJSON *pts = cJSON_GetObjectItem(e, "points"), *p, *w, *v;
@@ -775,6 +795,8 @@ static void sc_prel_load(TD5_RoamScnSource *s)
     if (cap > 0) {
         c->a = (TD5_GeoArea *)calloc((size_t)cap, sizeof(TD5_GeoArea));
         c->lot = (unsigned char *)calloc((size_t)cap, 1);
+        c->spt = (unsigned char *)calloc((size_t)cap, 1);   /* [roam PB] */
+        c->srf = (unsigned char *)calloc((size_t)cap, 1);
         c->id = (double *)calloc((size_t)cap, sizeof(double));
         c->own = (int64_t *)calloc((size_t)cap, sizeof(int64_t));
     }
@@ -866,6 +888,7 @@ static void sc_prel_load(TD5_RoamScnSource *s)
             a->n_outer = (unsigned short)(take > 0 ? on : 0);
             a->cx = cx; a->cz = cz; a->radius = rad;          /* the outline's, not the holes' */
             c->lot[c->n] = (unsigned char)sc_lot_class(kind);
+            if (c->spt && c->srf) sc_sport_codes(r, &c->spt[c->n], &c->srf[c->n]);   /* [roam PB] */
             c->id[c->n] = id;
             roam_grid_tile_of(&s->grid, cx, cz, &tx, &tz);
             c->own[c->n] = sc_tkey(tx, tz);
@@ -997,6 +1020,7 @@ typedef struct ScGround { int first, n; double x0, z0, x1, z1; double lm_id; } S
 
 struct TG_TileCtx {
     const RoamGrid *grid;
+    int      sport_on;        /* [roam PB] 1 = stadiums (TD5RE_ROAM_STADIUM), 2 = pitch paint (TD5RE_ROAM_PITCH_LINES) */
     int      tx, tz;
     int32_t  org_x, org_z;
     const RoamTile *road[9];
@@ -1752,6 +1776,7 @@ typedef struct {
     const TD5_GeoArea *a;
     const double *px, *pz;
     double id;
+    unsigned char spt, srf;    /* [roam PB] the cache's sport / surface codes (sc_sport_codes) */
 } ScArea;
 
 typedef struct {
@@ -2316,6 +2341,44 @@ static int sc_shop_in_bld(void *uv, double x, double z)
     return 0;
 }
 
+/* [roam PB] the leisure=stadium outline of the 3x3 holding a point (its ar index), -1 = none */
+static int sc_stadium_at(const ScArea *ar, int nar, double x, double z)
+{
+    int k;
+    for (k = 0; k < nar; k++) {
+        const TD5_GeoArea *a = ar[k].a;
+        const int no = a->n_outer ? a->n_outer : a->n;
+        if (ar[k].spt != TD5_RPS_STADIUM || no < 3) continue;
+        if ((x - a->cx) * (x - a->cx) + (z - a->cz) * (z - a->cz) > a->radius * a->radius) continue;
+        if (td5_geob_point_in_ring(ar[k].px, ar[k].pz, no, x, z)) return k;
+    }
+    return -1;
+}
+
+/* [roam PB] WHAT td5_roam_stadium.c TAKES of the halo set: 1 = a stand (class stadium / grandstand / bleachers, its
+ * centroid inside a leisure=stadium outline), 2 = an Overture / Open Buildings blob whose centroid falls inside such a
+ * stand (the same structure traced twice: not drawn), 0 = neither. *stadium = the outline's ar index. A pure function
+ * of the record and the 3x3, so the tile drawing the stadium and the tile owning a footprint agree. */
+static int sc_sport_claim(const ScBld *set, int nset, int i, const ScArea *ar, int nar, int *stadium)
+{
+    const TD5_GeoBuilding *gb = set[i].b;
+    const int st = sc_stadium_at(ar, nar, gb->cx, gb->cz);
+    int k;
+    if (stadium) *stadium = st;
+    if (st < 0) return 0;
+    if (gb->fsrc != TD5_GEOB_FSRC_OSM && !gb->rel) {
+        for (k = 0; k < nset; k++) {
+            const TD5_GeoBuilding *q = set[k].b;
+            if (k == i || !q->stand || (q->fsrc != TD5_GEOB_FSRC_OSM && !q->rel)) continue;
+            if ((gb->cx - q->cx) * (gb->cx - q->cx) + (gb->cz - q->cz) * (gb->cz - q->cz) > q->radius * q->radius) continue;
+            if (sc_stadium_at(ar, nar, q->cx, q->cz) != st) continue;
+            if (td5_geob_point_in_ring(set[k].px, set[k].pz, q->n, gb->cx, gb->cz)) return 2;
+        }
+        return 0;
+    }
+    return gb->stand ? 1 : 0;
+}
+
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
                              const ScArea *ar, int nar)
 {
@@ -2385,6 +2448,14 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             c->st.bld_rel_ovt_drop++;
             sc_bld_note(s, c, &set[i], "under a relation outline");
             continue;
+        }
+        if (s->stadium_on) {   /* [roam PB] a stadium's stand is drawn by td5_roam_stadium.c, a blob traced over one not at all */
+            const int cl = sc_sport_claim(set, nset, i, ar, nar, NULL);
+            if (cl) {
+                if (cl == 1) c->st.bld_stand++; else c->st.bld_stand_dup++;
+                sc_bld_note(s, c, &set[i], cl == 1 ? "stadium stand (td5_roam_stadium.c)" : "traced over a stadium stand");
+                continue;
+            }
         }
         gloc = *gb;
         if (s->s3d && gb->rel) {
@@ -3134,6 +3205,8 @@ static int sc_emit_plazas(TG_TileCtx *c, const ScArea *ar, int nar)
         c->st.areas++;
         if (ar[i].id >= SC_PREL_ID_BASE && ar[i].id < SC_PREL_ID_BASE + 1.0e15) c->st.park_rel++;   /* [LD] */
         if (!sc_emit_lawn(c, a, rx, rz, a->n_outer ? a->n_outer : n, sc_sb_of(c, cx, cz))) return 0;
+        if ((c->sport_on & 1) && ar[i].spt == TD5_RPS_STADIUM) { c->st.sp_tree_skip++; continue; }   /* [roam PB] */
+        if ((c->sport_on & 2) && (ar[i].srf & SC_SRF_PITCH)) { c->st.sp_tree_skip++; continue; }
         {
             int xs[TD5_ROAM_SCN_NSB];
             sc_xc_snap(c, xs);
@@ -6728,6 +6801,141 @@ static int sc_emit_pools(TG_TileCtx *c, const RoamTile *self, ScCache **ac, int 
     return 1;
 }
 
+/* ---- [roam PB] STADIUMS + SPORTS PITCHES (td5_roam_stadium.c) ----
+ *
+ * The leisure=stadium outlines this tile owns, each with its main pitch (the largest leisure=pitch inside it) and its
+ * stands (sc_sport_claim == 1 over the 3x3's footprints, a relation outline's courtyards included), and the
+ * leisure=pitch areas it owns, handed to td5_roam_sport_emit in (id, cx, cz) order. Coordinates tile-local. */
+#define SC_SP_STAND_MAX 32
+#define SC_SP_PITCH_MAX 256
+#define SC_SP_STADIA    8
+
+typedef struct {
+    double px[TD5_GEOB_RING_MAX], pz[TD5_GEOB_RING_MAX];
+    double hx[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX], hz[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX];
+    int hn[TG_S3D_HOLES_MAX];
+} ScSpRing;
+
+typedef struct { double x[TD5_GEOB_RING_MAX], z[TD5_GEOB_RING_MAX]; } ScSpPoly;
+
+static int sc_emit_sport(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc, const ScArea *ar, int nar)
+{
+    const int64_t self = sc_tkey(c->tx, c->tz);
+    ScBld *set = NULL;
+    ScSpRing *rings = NULL;
+    TD5_RoamStand *st = NULL;
+    TD5_RoamStadium sd[SC_SP_STADIA];
+    TD5_RoamPitch *pt = NULL;
+    ScSpPoly *sdr = NULL, *sdq = NULL, *ptr = NULL;
+    int nset = 0, cap = 0, nsd = 0, nst = 0, npt = 0, i, k, l, dx, dz, ok = 0;
+    if (!c->sport_on) return 1;
+    rings = (ScSpRing *)calloc(SC_SP_STAND_MAX, sizeof(ScSpRing));
+    st = (TD5_RoamStand *)calloc(SC_SP_STAND_MAX, sizeof(TD5_RoamStand));
+    pt = (TD5_RoamPitch *)calloc(SC_SP_PITCH_MAX, sizeof(TD5_RoamPitch));
+    sdr = (ScSpPoly *)calloc(SC_SP_STADIA, sizeof(ScSpPoly));
+    sdq = (ScSpPoly *)calloc(SC_SP_STADIA, sizeof(ScSpPoly));
+    ptr = (ScSpPoly *)calloc(SC_SP_PITCH_MAX, sizeof(ScSpPoly));
+    if (!rings || !st || !pt || !sdr || !sdq || !ptr) goto out;
+    if (c->sport_on & 1) {   /* the halo set, as sc_emit_buildings gathers and sorts it */
+        for (dz = -1; dz <= 1; dz++)
+            for (dx = -1; dx <= 1; dx++) {
+                const int64_t key = sc_tkey(c->tx + dx, c->tz + dz);
+                for (l = 0; l < nbc; l++) {
+                    int lo, hi, j;
+                    sc_owned_range(bc[l], key, &lo, &hi);
+                    for (j = lo; j < hi; j++) {
+                        const int ri = bc[l]->order[j];
+                        if (!sc_grow((void **)&set, &cap, nset + 1, sizeof(ScBld))) goto out;
+                        memset(&set[nset], 0, sizeof set[nset]);
+                        set[nset].b = &bc[l]->b[ri];
+                        set[nset].px = &bc[l]->px[bc[l]->b[ri].first];
+                        set[nset].pz = &bc[l]->pz[bc[l]->b[ri].first];
+                        set[nset].id = bc[l]->id[ri];
+                        set[nset].storey_m = bc[l]->storey_m;
+                        set[nset].rx = (bc[l] == &s->rel && s->relx) ? &s->relx[ri] : NULL;
+                        set[nset].rc = bc[l];
+                        nset++;
+                    }
+                }
+            }
+        for (i = 1; i < nset; i++) {
+            ScBld t = set[i];
+            for (k = i - 1; k >= 0; k--) {
+                const ScBld *q = &set[k];
+                if (!(q->id > t.id || (q->id == t.id && (q->b->cx > t.b->cx || (q->b->cx == t.b->cx && q->b->cz > t.b->cz))))) break;
+                set[k + 1] = set[k];
+            }
+            set[k + 1] = t;
+        }
+    }
+    for (i = 0; i < nar; i++) {
+        const TD5_GeoArea *a = ar[i].a;
+        const int no = a->n_outer ? a->n_outer : a->n;
+        int tx, tz;
+        roam_grid_tile_of(c->grid, a->cx, a->cz, &tx, &tz);
+        if (sc_tkey(tx, tz) != self || no < 3 || no > TD5_GEOB_RING_MAX) continue;
+        if (ar[i].spt == TD5_RPS_STADIUM && (c->sport_on & 1) && nsd < SC_SP_STADIA) {
+            TD5_RoamStadium *d = &sd[nsd];
+            double best = 0.0;
+            int q, j;
+            memset(d, 0, sizeof *d);
+            d->osm_id = ar[i].id >= SC_PREL_ID_BASE ? floor((ar[i].id - SC_PREL_ID_BASE) / 8.0) : ar[i].id;
+            for (k = 0; k < no; k++) { sdr[nsd].x[k] = ar[i].px[k] - (double)c->org_x; sdr[nsd].z[k] = ar[i].pz[k] - (double)c->org_z; }
+            d->rx = sdr[nsd].x; d->rz = sdr[nsd].z; d->n = no;
+            for (q = 0; q < nar; q++) {   /* the main pitch: the largest leisure=pitch inside */
+                const TD5_GeoArea *b = ar[q].a;
+                const int bn = b->n_outer ? b->n_outer : b->n;
+                double m2;
+                if (!(ar[q].srf & SC_SRF_PITCH) || bn < 3 || bn > TD5_GEOB_RING_MAX) continue;
+                if (sc_stadium_at(ar, nar, b->cx, b->cz) != i) continue;
+                m2 = fabs(td5_geob_ring_area(ar[q].px, ar[q].pz, bn));
+                if (m2 <= best) continue;
+                best = m2;
+                for (k = 0; k < bn; k++) { sdq[nsd].x[k] = ar[q].px[k] - (double)c->org_x; sdq[nsd].z[k] = ar[q].pz[k] - (double)c->org_z; }
+                d->qx = sdq[nsd].x; d->qz = sdq[nsd].z; d->qn = bn;
+            }
+            d->st = &st[nst];
+            for (j = 0; j < nset && nst < SC_SP_STAND_MAX; j++) {
+                int which = -1, h = 0, off = 0;
+                const TD5_GeoBuilding *gb = set[j].b;
+                ScSpRing *r = &rings[nst];
+                TD5_RoamStand *u = &st[nst];
+                if (sc_sport_claim(set, nset, j, ar, nar, &which) != 1 || which != i) continue;
+                if (gb->n < 3 || gb->n > TD5_GEOB_RING_MAX) continue;
+                for (k = 0; k < gb->n; k++) { r->px[k] = set[j].px[k] - (double)c->org_x; r->pz[k] = set[j].pz[k] - (double)c->org_z; }
+                u->px = r->px; u->pz = r->pz; u->n = gb->n;
+                u->height = gb->height > 0.0 ? gb->height : 9.0 * s->upm;
+                u->id = set[j].id;
+                if (set[j].rx) {
+                    for (h = 0; h < set[j].rx->nh && h < TG_S3D_HOLES_MAX; h++) {
+                        const int hf = set[j].rx->hfirst[h];
+                        r->hn[h] = set[j].rx->hn[h];
+                        for (k = 0; k < r->hn[h]; k++) {
+                            r->hx[off + k] = set[j].rc->px[hf + k] - (double)c->org_x;
+                            r->hz[off + k] = set[j].rc->pz[hf + k] - (double)c->org_z;
+                        }
+                        off += r->hn[h];
+                    }
+                    u->nh = h; u->hn = r->hn; u->hx = r->hx; u->hz = r->hz;
+                }
+                nst++;
+                d->nst++;
+            }
+            nsd++;
+        } else if ((ar[i].srf & SC_SRF_PITCH) && (c->sport_on & 2) && npt < SC_SP_PITCH_MAX) {
+            TD5_RoamPitch *p = &pt[npt];
+            for (k = 0; k < no; k++) { ptr[npt].x[k] = ar[i].px[k] - (double)c->org_x; ptr[npt].z[k] = ar[i].pz[k] - (double)c->org_z; }
+            p->id = ar[i].id; p->sport = ar[i].spt; p->surface = ar[i].srf & 0x7F;
+            p->rx = ptr[npt].x; p->rz = ptr[npt].z; p->n = no;
+            npt++;
+        }
+    }
+    ok = td5_roam_sport_emit(c, sd, nsd, pt, npt, &c->st.sport);
+out:
+    free(set); free(rings); free(st); free(pt); free(sdr); free(sdq); free(ptr);
+    return ok;
+}
+
 /* ---- [roam LH] GROUND COVER outside the casco ----
  *
  * The roam ground is one lawn page everywhere, so a horticulture belt or a marsh reads as the same meadow as a park.
@@ -7560,6 +7768,8 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     /* [HD] city lots + infill: the casco's tiles, sorted for sc_casco_has */
     s->lots_on   = td5_env_int("TD5RE_ROAM_LOTS", 1, 0, 1);
     s->pools_on  = td5_env_int("TD5RE_ROAM_POOLS", 1, 0, 1);
+    s->stadium_on = td5_roam_stadium_enabled();   /* [roam PB] */
+    s->pitch_on   = td5_roam_pitch_enabled();
     s->lot_cover = td5_env_int("TD5RE_ROAM_LOT_COVER", 1, 0, 1);
     s->infill_on = td5_env_int("TD5RE_ROAM_INFILL", 1, 0, 1);
     s->infill_log = td5_env_int("TD5RE_ROAM_INFILL_LOG", 0, 0, 1);
@@ -7692,6 +7902,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         c->dg_G = 256 / ((64 % cm) ? 16 : cm);
         c->dg_drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0);
         c->lawn_dg = td5_env_int("TD5RE_ROAM_LAWN_ON_GROUND", 1, 0, 1);
+        c->sport_on = (s->stadium_on ? 1 : 0) | (s->pitch_on ? 2 : 0);   /* [roam PB] */
     }
     if (hc && td5_roam_gfix_enabled() && td5_env_flag_on("TD5RE_ROAM_SCN_LOWER")) td5_roam_gfix_build(&c->gf, &s->grid, (const RoamTile *const *)c->road, self->tx, self->tz, hc);
     c->ground_last = 0.0;
@@ -7732,6 +7943,8 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
                     ar[nar].px = &ac[l]->px[ac[l]->a[ri].first];
                     ar[nar].pz = &ac[l]->pz[ac[l]->a[ri].first];
                     ar[nar].id = ac[l]->id[ri];
+                    ar[nar].spt = ac[l]->spt ? ac[l]->spt[ri] : 0;   /* [roam PB] */
+                    ar[nar].srf = ac[l]->srf ? ac[l]->srf[ri] : 0;
                     nar++;
                 }
             }
@@ -7796,7 +8009,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
      * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
      * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
      * height-aware one (st.rail.guard_hits). */
-    if (s->furn || s->rails || s->plaza || s->shops || s->outsk || td5_roam_cut_on()) {
+    if (s->furn || s->rails || s->plaza || s->shops || s->outsk || td5_roam_cut_on() || s->stadium_on || s->pitch_on) {
         int k;
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->furn_first[k] = c->sb[k].nmesh;
     }
@@ -7804,6 +8017,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         int xs[TD5_ROAM_SCN_NSB];                                                /* [integ L] cross-check ranges */
         sc_xc_snap(c, xs);
         if (!td5_roam_cut_emit(c, &c->st.cut, sc_casco_has(s, c->tx, c->tz))) goto out;   /* [roam NC] cutting walls */
+        if (!sc_emit_sport(s, c, bc, nbc, ar, nar)) goto out;                              /* [roam PB] stadiums + pitches */
         sc_xc_snap(c, xs);
         if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
         sc_xc_note(c, xs, SC_XC_RAIL); sc_xc_snap(c, xs);
@@ -7963,6 +8177,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long pool_n[3] = { 0, 0, 0 };              /* [roam LE] drawn, on a road, bad ring */
     double pool_m2 = 0.0;
     long pz_t[13] = { 0 };                     /* [roam LD] plaza furniture + park relations */
+    TD5_RoamSportStats sp_t = { 0 };           /* [roam PB] stadiums + pitches */
+    long sp_b[3] = { 0 };                      /* [roam PB] stands left to the module, blobs traced over one, plaza trees skipped */
     long sh_t[16] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
     long mu_t[32] = { 0 };                                     /* [roam NA] */
     double sh_m = 0.0;
@@ -8164,6 +8380,19 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         pz_t[4] += r->plaza.fountains; pz_t[5] += r->plaza.benches; pz_t[6] += r->plaza.playgrounds; pz_t[7] += r->plaza.flagpoles;
         pz_t[8] += r->plaza.named; pz_t[9] += r->plaza.skip_kind; pz_t[10] += r->plaza.drop_road; pz_t[11] += r->plaza.guard_hits;
         pz_t[12] += r->park_rel;
+        {   /* [roam PB] */
+            int q;
+            sp_t.stadiums += r->sport.stadiums; sp_t.bowls += r->sport.bowls; sp_t.stands += r->sport.stands;
+            sp_t.stand_roofs += r->sport.stand_roofs; sp_t.roofs += r->sport.roofs; sp_t.portals += r->sport.portals;
+            sp_t.tier_quads += r->sport.tier_quads; sp_t.openings += r->sport.openings; sp_t.pitches += r->sport.pitches;
+            for (q = 0; q < TD5_RPS__N; q++) sp_t.by_sport[q] += r->sport.by_sport[q];
+            for (q = 0; q < TD5_RPF__N; q++) sp_t.by_surface[q] += r->sport.by_surface[q];
+            sp_t.surface_only += r->sport.surface_only; sp_t.skip_small += r->sport.skip_small; sp_t.skip_sport += r->sport.skip_sport;
+            sp_t.skip_none += r->sport.skip_none; sp_t.drop_road += r->sport.drop_road; sp_t.courts += r->sport.courts;
+            sp_t.goals += r->sport.goals; sp_t.nets += r->sport.nets; sp_t.hoops += r->sport.hoops;
+            sp_t.line_quads += r->sport.line_quads; sp_t.meshes += r->sport.meshes; sp_t.guard_hits += r->sport.guard_hits;
+            sp_b[0] += r->bld_stand; sp_b[1] += r->bld_stand_dup; sp_b[2] += r->sp_tree_skip;
+        }
         {   /* [roam NA] */
             int q;
             for (q = 0; q < 10; q++) mu_t[q] += r->muni_fate[q];
@@ -8236,6 +8465,26 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "benches %ld, playgrounds %ld, flagpoles %ld (%ld named) | left out by kind %ld, dropped on a road %ld | "
                  "GUARD %ld face(s) on the drivable surface | park-relation plazas drawn %ld",
                  pz_t[0], pz_t[1], pz_t[2], pz_t[3], pz_t[4], pz_t[5], pz_t[6], pz_t[7], pz_t[8], pz_t[9], pz_t[10], pz_t[11], pz_t[12]);
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
+    }
+    {   /* [roam PB] */
+        char ln[1600];
+        snprintf(ln, sizeof ln, "roam sport [roam PB]: stadiums %d, stands %d (bowls %d, open-stand roofs %d), membrane roofs %d, "
+                 "portals %d, wall openings over a drive %d, tier quads %d | footprints left to the module %ld, blobs traced over a "
+                 "stand %ld, plaza trees not planted on a stadium / pitch %ld | pitches %d: soccer %d tennis %d padel %d basketball %d "
+                 "volleyball %d hockey %d rugby %d beach %d surface-only %d | surfaces grass %d clay %d hard %d acrylic %d turf %d "
+                 "sand %d | courts %d goals %d nets %d hoops %d line quads %d | left out: small %d, sport %d, untagged %d, on a road "
+                 "%d | meshes %d | GUARD %d face(s) on the drivable surface (TD5RE_ROAM_STADIUM=%d TD5RE_ROAM_PITCH_LINES=%d)",
+                 sp_t.stadiums, sp_t.stands, sp_t.bowls, sp_t.stand_roofs, sp_t.roofs, sp_t.portals, sp_t.openings, sp_t.tier_quads,
+                 sp_b[0], sp_b[1], sp_b[2], sp_t.pitches, sp_t.by_sport[TD5_RPS_SOCCER], sp_t.by_sport[TD5_RPS_TENNIS],
+                 sp_t.by_sport[TD5_RPS_PADEL], sp_t.by_sport[TD5_RPS_BASKET], sp_t.by_sport[TD5_RPS_VOLLEY],
+                 sp_t.by_sport[TD5_RPS_HOCKEY], sp_t.by_sport[TD5_RPS_RUGBY], sp_t.by_sport[TD5_RPS_BEACH], sp_t.surface_only,
+                 sp_t.by_surface[TD5_RPF_GRASS], sp_t.by_surface[TD5_RPF_CLAY], sp_t.by_surface[TD5_RPF_HARD],
+                 sp_t.by_surface[TD5_RPF_ACRYLIC], sp_t.by_surface[TD5_RPF_TURF], sp_t.by_surface[TD5_RPF_SAND], sp_t.courts,
+                 sp_t.goals, sp_t.nets, sp_t.hoops, sp_t.line_quads, sp_t.skip_small, sp_t.skip_sport, sp_t.skip_none,
+                 sp_t.drop_road, sp_t.meshes, sp_t.guard_hits, td5_roam_stadium_enabled(), td5_roam_pitch_enabled());
         TD5_LOG_I(LOG_TAG, "%s", ln);
         if (f) fprintf(f, "# %s\n", ln);
         fprintf(stderr, "%s\n", ln);
