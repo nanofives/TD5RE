@@ -224,6 +224,10 @@ typedef struct {
      * plaza emitter lays it like any other plaza and takes its paths from the
      * real FOOTWAYS.JSON ways inside it. See geob_add_ring_areas. */
     unsigned char ring;
+    /* [roam LD] 0 = the ring is the whole outline. > 0: a PARK_RELATIONS.JSON multipolygon whose
+     * inner rings follow the first n_outer points, each joined to point 0 by a zero-width bridge
+     * walked out and back: point-in-ring parity skips the holes, a triangulation takes n_outer. */
+    unsigned short n_outer;
 } TD5_GeoArea;
 
 /* ------------------------------------------------------------- lifecycle --- */
