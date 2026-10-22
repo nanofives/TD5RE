@@ -5218,6 +5218,13 @@ void td5_trackgen_roam_pages(int *road, int *ground, int *kerb)
     if (kerb)   *kerb   = TD5_TG_PAGE_SIDEWALK;
 }
 
+/* [roam LC] the host level's cobble and loose road pages (the RS blocks every geo build emits) */
+void td5_trackgen_roam_surface_pages(int *cobble, int *loose)
+{
+    if (cobble) *cobble = TD5_TG_PAGE_RS_COBBLE;
+    if (loose)  *loose  = TD5_TG_PAGE_RS_DIRT;
+}
+
 /* the seed a geo build of this place derives (td5_trackgen_regenerate) */
 static unsigned int tg_roam_seed(const char *slug)
 {

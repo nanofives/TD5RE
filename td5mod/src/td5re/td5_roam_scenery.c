@@ -5979,7 +5979,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
+    long ft[16], lc_t[6] = { 0 }, ft_unknown_skipped = 0, lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
@@ -6108,6 +6108,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ft[0] += r->furn.meshes; ft[1] += r->furn.sig_clusters; ft[2] += r->furn.sig_inbound; ft[3] += r->furn.mast_near;
         ft[4] += r->furn.post_left; ft[5] += r->furn.mast_far; ft[6] += r->furn.plates; ft[7] += r->furn.lamps;
         ft[8] += r->furn.stops; ft[9] += r->furn.zebras; ft[10] += r->furn.limit_lines; ft[11] += r->furn.guard_hits;
+        ft_unknown_skipped += r->furn.xing_unknown; lc_t[0] += r->furn.xing_unmarked; lc_t[1] += r->furn.xing_unk_zebra;
+        lc_t[2] += r->furn.xing_unk_lines; lc_t[3] += r->furn.xing_ways; lc_t[4] += r->furn.xing_way_dup; lc_t[5] += r->furn.xing_way_drawn;
         ft[12] += r->furn.sig_drop_road + r->furn.sig_drop_frame + r->furn.sig_drop_dup;
         ft[13] += r->furn.lamp_drop_road; ft[14] += r->furn.far_shared; ft[15] += r->furn.plate_none;
         rl_t[0] += r->rail.ways; rl_t[1] += r->rail.pieces; rl_t[2] += r->rail.full; rl_t[3] += r->rail.narrow;
@@ -6183,6 +6185,15 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam crossings [LC]: unmarked skipped %ld | unknown painted by the rule: zebra %ld, lines %ld, skipped %ld | "
+                 "footway=crossing ways %ld: already a node %ld, drawn %ld | zebras %ld, limit lines %ld in all",
+                 lc_t[0], lc_t[1], lc_t[2], ft_unknown_skipped, lc_t[3], lc_t[4], lc_t[5], ft[9], ft[10]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s
+", line);
+        fprintf(stderr, "%s
+", line);
         snprintf(line, sizeof line,
                  "roam rails: %ld tile(s) with track, %ld way piece(s) in %ld meshes (%.1f km): full bed %ld, narrow (road beside) "
                  "%ld, squeezed (tight median) %ld, nudged off a parallel street %ld, raised over a street slab %ld, flush on a road %ld (no data crossing near %ld), blended to a level crossing %ld | bridges %ld piece(s), "
