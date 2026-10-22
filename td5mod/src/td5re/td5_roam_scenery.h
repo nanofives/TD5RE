@@ -93,7 +93,10 @@
                                      *      elsewhere), unmarked never, footway=crossing ways drawn
                                      * 16 = roam LE: swimming pools (coping ring + inset water) over the lots
                                      * 16 = roam LD: PARK_RELATIONS.JSON multipolygon greens / precincts in the AREAS logic
-                                     *      (holes by bridge), plaza furniture + monuments (td5_roam_plaza.c) */
+                                     *      (holes by bridge), plaza furniture + monuments (td5_roam_plaza.c)
+                                     * 16 = roam LA: street trees from CANOPY.R8 along the pavement band + lot trees on the
+                                     *      world lattice where the canopy says so (td5_roam_scenery.c SECTION trees);
+                                     *      canopy green: wooded unmapped ground stays lawn, takes no infill */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -163,6 +166,20 @@ typedef struct {
     int  fp_on_pv;          /* [G5] footpath vertices lifted onto a pavement slab / island they cross */
     /* plazas */
     int  areas, lawn_tris, lawn_cut, trees, trees_cut;
+    /* [roam LA] STREET + LOT TREES from CANOPY.R8 (SECTION trees): planted on the pavement band, planted on the lot
+     * lattice; band stations walked, refused: no canopy >= 3 m there, band too narrow, facade too close, slab not
+     * found / on a road / a driveway mouth; refused by street furniture or a rail bed after every along-kerb dodge,
+     * moved along the kerb to dodge one, too near the tile edge (a neighbour's furniture could stand there); lot points
+     * hidden behind a facade, lot points refused (road, slab, building, plaza / green, water); planted tree origins on
+     * the drivable surface (the bytes census: 0); canopy >= 3 m cells of the owned tile, and those under a crown of
+     * any tree (street, lot or plaza) */
+    int  st_band, st_lot, st_stations, st_nocanopy, st_narrow, st_facade, st_noslab;
+    int  st_furn_drop, st_furn_moved, st_border, st_lot_hidden, st_lot_refused, st_on_road;
+    int  canopy_cells, canopy_cov;
+    /* [roam LA] CANOPY GREEN (sc_canopy_green): city lot cells left lawn instead of paved, infill lots refused, their
+     * frontage (m) */
+    int  lot_canopy_green, inf_drop_canopy;
+    double inf_m_canopy;
     /* [F4b] pavement: owned kerb pieces, those inside another drivable primitive, chains,
      * emitted pieces (corner = on a junction patch outline), vertices merged into a corner
      * point, island / median pieces, vertices clamped to half a gap, fences, deck railings,

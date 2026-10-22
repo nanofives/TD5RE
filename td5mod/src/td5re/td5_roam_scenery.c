@@ -223,6 +223,7 @@ struct TD5_RoamScnSource {
     int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     int       cover_green;                    /* [IC] TD5RE_ROAM_COVER_GREEN: unmapped vegetated casco loops are green */
     int       inf_rail;                       /* [integ-roamI] TD5RE_ROAM_INF_RAIL_VETO: no infill on a railway */
+    int       canopy_green;                      /* [roam LA] TD5RE_ROAM_CANOPY_GREEN (sc_canopy_green) */
     int       ic_despike, ic_drops, ic_infill;  /* [IC] TD5RE_ROAM_AREA_DESPIKE / _BLD_DROPS / _IC_INFILL (A/B: all IC
                                                  * knobs 0 = the round M scenery, byte for byte) */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
@@ -1038,7 +1039,18 @@ struct TG_TileCtx {
     int      furn_first[TD5_ROAM_SCN_NSB];
     int      lot_first[TD5_ROAM_SCN_NSB];   /* [HD] first mesh of each sub-block that is a city lot (ground: no footprint census) */
     float   *lamp;  uint32_t nlamp;
+    /* [roam LA] SECTION trees: the knobs, the street / lot tree candidates (emitted after the furniture), every
+     * planted crown (x, z, radius; plazas too) for the canopy census, and each sub-block's tree records */
+    int      st_on, lt_on;
+    void    *pv_bld;                /* [roam LA] the pavement's footprint set (PvBld), kept for the lots (sc_canopy_green) */
+    struct ScTreeCand *tcand;
+    int      ntcand, cap_tcand;
+    double  *tpos;
+    int      ntpos, cap_tpos;
+    int      tree_first[TD5_ROAM_SCN_NSB], tree_end[TD5_ROAM_SCN_NSB];
 };
+
+static int st_push_pos(TG_TileCtx *c, double x, double z, double r);   /* [roam LA] SECTION trees */
 
 static int sc_grow(void **p, int *cap, int need, size_t elem)
 {
@@ -1078,6 +1090,8 @@ static void sc_ctx_reset(TG_TileCtx *c)
     free(c->anyp); c->anyp = NULL; c->nanyp = 0;
     td5_roam_gfix_free(&c->gf);
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { c->sb[k].blk.len = 0; c->sb[k].blk.oom = 0; c->sb[k].nmesh = 0; c->furn_first[k] = 0x7FFFFFFF; c->lot_first[k] = 0x7FFFFFFF; }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->tree_first[k] = c->tree_end[k] = 0x7FFFFFFF;   /* [roam LA] */
+    c->ntcand = 0; c->ntpos = 0;
     memset(&c->st, 0, sizeof c->st);
     memset(&c->bst, 0, sizeof c->bst);
 }
@@ -1091,6 +1105,7 @@ static void sc_ctx_free(TG_TileCtx *c)
     free(c->lx); free(c->lz); free(c->ly);
     free(c->pvq);
     free(c->infr);
+    free(c->tcand); free(c->tpos);   /* [roam LA] */
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { tg_buf_free(&c->sb[k].blk); free(c->sb[k].moff); }
     free(c);
 }
@@ -2895,6 +2910,7 @@ static int sc_emit_trees(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, 
                     }
                     planted++;
                     c->st.trees++;
+                    if (!st_push_pos(c, gx, gz, tw * 0.5 * 0.8)) return 0;   /* [roam LA] the canopy census (ST_CROWN_COVER) */
                 }
             }
         }
@@ -3894,6 +3910,7 @@ typedef struct {
     const ScArea *ar; int nar;
     ScFpBatch   *bat;                 /* 3 per sub-block: paving, lawn, fence */
     int          kerb_only;           /* [roam IA] the chain's top is its triangulated loop: pieces emit kerb faces only */
+    int          trees;               /* [roam LA] street tree candidates along the chain (SECTION trees) */
 } PvEmit;
 
 enum { PV_B_PAVE = 0, PV_B_LAWN = 1, PV_B_FENCE = 2, PV_NB = 3 };
@@ -4387,6 +4404,496 @@ static double pv_medial(PvEmit *e, const PvChain *ch, int v, double freed)
     return freed * cphi / (1.0 + cphi);
 }
 
+static uint32_t sc_rd32(const uint8_t *p);   /* SECTION assemble */
+static float    sc_rdf(const uint8_t *p);
+
+/* ============================================================================
+ * SECTION: trees [roam LA] (street trees + lot trees from CANOPY.R8)
+ *
+ * WHAT. CANOPY.R8 (Meta-WRI canopy height, ~3.5 m cells) reads >= 3 m over 12 % of the casco, and OSM maps 43 tree
+ * nodes there: the raster is the only real source. Two emitters read it:
+ *
+ *   STREET BAND. Every kerb chain the pavement walks (pv_chain_emit) is walked again by arc length along its kerb
+ *   line. A STATION every `spacing` (6.5 .. 12 m, 0.85 of the crown width the canopy height gives) on a ribbon kerb
+ *   whose canopy (the trunk, 1.75 m each way along the kerb, 1.75 m out over the road: crowns overhang the road)
+ *   reads >= 3 m; where it does not, the walk searches on in 2 m steps. No station within 5 m of a junction outline
+ *   or a dead-end cap (corner sight lines, the crossings at the mouth), nor within 2 m of a deck, a bore or an
+ *   island stretch. The trunk stands 40 % of the band width out from the kerb (0.55 .. 0.9 m), on a band at least
+ *   1.4 m wide, at least 0.6 m short of a building front (mapped or infill; the crown is narrowed to the front and
+ *   reaches at most 2.5 m over the carriageway, shorter when narrowed past 85 %),
+ *   on the slab (its height), its 0.35 m trunk square off the road and 2 m each way along the kerb off the road too
+ *   (a driveway or a side street mouth). Species: one round-crown page per named street (FNV of the name), one tree
+ *   in five another; height from the canopy (5 .. 15 m, +-10 % jitter).
+ *
+ *   LOT. The plaza emitter's WORLD lattice (12 m) over the owned tile, jittered up to 2 m per point by its own hash:
+ *   a point whose 3x3 canopy probe reads >= 3 m gets a tree (5 .. 18 m, deciduous / conifer / willow / palm pages) unless
+ *   it stands on a road, a slab, a building (mapped or infill), a plaza / park / pitch / grass area (the plazas plant
+ *   their own) or water, or is HIDDEN: a building stands between it and the nearest street centreline and the
+ *   canopy is under 10 m (a tree that tall shows over two-three storey roofs). Its crown reaches at most 1.5 m over a
+ *   road (narrowed, and shorter when narrowed past 85 %: a big camera-facing billboard beside a street reads as a
+ *   green wall across it). At most 400 a tile.
+ *
+ * FURNITURE. Both emit AFTER the furniture and the railways, so they read the faces those wrote (this tile's tail of
+ * every sub-block): a trunk keeps 1.5 m off any furniture face (2 m off a flat one: zebras, limit lines, rail beds),
+ * else the station tries 1.5 m and 3 m each way along the kerb before it is dropped. A neighbour tile's furniture
+ * is not in the tail: no tree stands within 2.5 m of the tile edge (each owner emits only what stands in it, so a
+ * neighbour's pole is at least that far). The bytes census judges every tree record (sc_assemble): trees on the
+ * drivable surface stay 0.
+ *
+ * Knobs: TD5RE_ROAM_STREET_TREES=0 / TD5RE_ROAM_LOT_TREES=0 (the old bytes, bar the rules number).
+ * ========================================================================== */
+
+#define ST_M(m)             ((m) * SC_UPM)
+#define ST_ALTS             5
+#define ST_W_MIN_M          1.4
+#define ST_LAT_FRAC         0.40
+#define ST_LAT_MIN_M        0.55
+#define ST_LAT_MAX_M        0.9
+#define ST_CORNER_CLEAR_M   5.0
+#define ST_BLOCK_CLEAR_M    2.0
+#define ST_SEARCH_M         2.0
+#define ST_SPACE_K          0.85
+#define ST_SPACE_MIN_M      6.5
+#define ST_SPACE_MAX_M      12.0
+#define ST_H_MIN_M          5.0
+#define ST_H_MAX_M          15.0
+#define ST_PROBE_M          1.75
+#define ST_FACADE_MIN_M     0.6
+#define ST_FACADE_OVER_M    0.4
+#define ST_ROAD_OVER_M      2.5
+#define ST_FACADE_PROBE_M   8.0
+#define ST_MOUTH_M          2.0
+#define ST_TRUNK_M          0.35
+#define ST_DODGE_M          1.5
+#define ST_KEEP_M           1.5
+#define ST_KEEP_FLAT_M      2.0
+#define ST_FLAT_M           0.3
+#define ST_BORDER_M         2.5
+#define ST_LOT_H_MAX_M      18.0
+#define ST_LOT_SHOW_M       10
+#define ST_LOT_JIT_M        2.0
+#define ST_LOT_CLEAR_M      1.0
+#define ST_LOT_OVER_M       1.5
+#define ST_LOT_REACH_M      80.0
+#define ST_LOT_CAP          400
+#define ST_SQUEEZE          0.85     /* a crown narrowed past this share of its width gets shorter too (keeps the page's shape) */
+#define ST_CROWN_COVER      0.8      /* the share of the billboard half width a crown covers on the canopy raster */
+
+/* round crowns on the street (La Plata's tilos, platanos, fresnos): deciduous 0, big deciduous 1, round topiary 7.
+ * Not 2: a HALF page drawn mirrored (tg_emit_billboard_mesh) comes out as a pointed, cypress-like crown. Lots add a
+ * conifer, a willow and a palm (one in eight each). */
+static const int k_st_street_var[3] = { 0, 1, 7 };
+static const int k_st_lot_var[8]    = { 0, 1, 7, 0, 1, 3, 9, 5 };
+
+struct ScTreeCand {
+    double x[ST_ALTS], z[ST_ALTS], y[ST_ALTS];
+    int    nalt;
+    double hw, th;                  /* billboard half width, height (units) */
+    int    var, kind;               /* k_tree_pages variant; 0 = street band, 1 = lot */
+};
+
+static uint32_t st_hash_xz(double x, double z, uint32_t salt)
+{
+    const int32_t q[3] = { (int32_t)floor(x + 0.5), (int32_t)floor(z + 0.5), (int32_t)salt };
+    return sc_fnv(2166136261u, q, sizeof q);
+}
+
+static int st_push_pos(TG_TileCtx *c, double x, double z, double r)
+{
+    if (!sc_grow((void **)&c->tpos, &c->cap_tpos, (c->ntpos + 1) * 3, sizeof(double))) return 0;
+    c->tpos[c->ntpos * 3 + 0] = x; c->tpos[c->ntpos * 3 + 1] = z; c->tpos[c->ntpos * 3 + 2] = r;
+    c->ntpos++;
+    return 1;
+}
+
+static struct ScTreeCand *st_cand_new(TG_TileCtx *c)
+{
+    struct ScTreeCand *t;
+    if (!sc_grow((void **)&c->tcand, &c->cap_tcand, c->ntcand + 1, sizeof(struct ScTreeCand))) return NULL;
+    t = &c->tcand[c->ntcand];
+    memset(t, 0, sizeof *t);
+    return t;
+}
+
+/* the highest canopy reading of a few points (-1 = none measured) */
+static int st_canopy_max(const TG_TileCtx *c, const double *x, const double *z, int n)
+{
+    int k, best = -1;
+    for (k = 0; k < n; k++) { const int v = sc_canopy_m(c, x[k], z[k]); if (v > best) best = v; }
+    return best;
+}
+
+/* the billboard of variant v for a canopy height h_m (metres) and its jitter hash */
+static void st_size(int v, double h_m, double h_max_m, uint32_t h, double *hw, double *th)
+{
+    const TG_TreePage *tp = &k_tree_pages[v];
+    double t = h_m < ST_H_MIN_M ? ST_H_MIN_M : (h_m > h_max_m ? h_max_m : h_m);
+    t *= 0.9 + (double)((h >> 11) % 21) * 0.01;                         /* 0.90 .. 1.10 */
+    *th = ST_M(t);
+    *hw = 0.5 * (double)tp->w * (*th / (double)tp->h);
+}
+
+/* the first blocked stretch whose clearance holds arc position s: the position just past it (s itself when free) */
+static double st_blocked(const double *S, const double *clr, int m, double s)
+{
+    int k;
+    for (k = 0; k < m; k++)
+        if (clr[k] >= 0.0 && s >= S[k] - clr[k] && s <= S[k + 1] + clr[k]) return S[k + 1] + clr[k] + 1.0;
+    return s;
+}
+
+/* Street trees along one kerb chain (SECTION trees). Candidates only: emitted after the furniture. */
+static int pv_trees_chain(PvEmit *e, const PvChain *ch, const PvB *B, const int *seq, int m, const double *kx,
+                          const double *kz)
+{
+    TG_TileCtx *c = e->c;
+    double *S, *clr, total, s;
+    int k, seg = 0, ok = 1;
+    if (m <= 0) return 1;
+    S = (double *)malloc((size_t)(m + 1) * 2u * sizeof(double));
+    if (!S) return 0;
+    clr = S + m + 1;
+    S[0] = 0.0;
+    for (k = 0; k < m; k++) {
+        const int a = k, b = (k + 1) % ch->nv;
+        const PvB *p = &B[seq[k]];
+        const unsigned f = ch->vf[a] | ch->vf[b];
+        S[k + 1] = S[k] + hypot(kx[b] - kx[a], kz[b] - kz[a]);
+        clr[k] = -1.0;
+        if (p->kind != PV_K_RIB) clr[k] = ST_M(ST_CORNER_CLEAR_M);
+        else if ((f & (PV_VF_DECK | PV_VF_FLAT | PV_VF_ISLAND)) || p->deck || p->flat || ch->w[a] <= 0.0 || ch->w[b] <= 0.0)
+            clr[k] = ST_M(ST_BLOCK_CLEAR_M);
+    }
+    total = S[m];
+    /* the walk's phase: the chain's first kerb vertex in the WORLD frame */
+    s = (double)(st_hash_xz(kx[0] + (double)c->org_x, kz[0] + (double)c->org_z, 0x5EEDu) % 400u) * (SC_UPM / 100.0);
+    while (s < total && ok) {
+        const double past = st_blocked(S, clr, m, s);
+        int a, b, var, alt;
+        double t, len, dx, dz, nx, nz, px, pz, w, lat, hw, th, sp, dfac = ST_M(ST_FACADE_PROBE_M), hw0;
+        double qx[4], qz[4];
+        uint32_t h;
+        const PvB *p;
+        if (past > s) { s = past; continue; }
+        while (seg < m - 1 && S[seg + 1] <= s) seg++;
+        a = seg; b = (seg + 1) % ch->nv;
+        p = &B[seq[seg]];
+        len = S[seg + 1] - S[seg];
+        if (!(len > 1.0)) { s = S[seg + 1] + 1.0; continue; }
+        t = (s - S[seg]) / len;
+        dx = (kx[b] - kx[a]) / len; dz = (kz[b] - kz[a]) / len;
+        nx = ch->nx[seg]; nz = ch->nz[seg];
+        px = kx[a] + (kx[b] - kx[a]) * t; pz = kz[a] + (kz[b] - kz[a]) * t;
+        w = hypot(ch->ox[a] - kx[a], ch->oz[a] - kz[a]) * (1.0 - t) + hypot(ch->ox[b] - kx[b], ch->oz[b] - kz[b]) * t;
+        lat = ST_LAT_FRAC * w;
+        if (lat < ST_M(ST_LAT_MIN_M)) lat = ST_M(ST_LAT_MIN_M);
+        if (lat > ST_M(ST_LAT_MAX_M)) lat = ST_M(ST_LAT_MAX_M);
+        {   /* the canopy over the trunk and the crown's reach */
+            const double tx0 = px + nx * lat, tz0 = pz + nz * lat;
+            qx[0] = tx0; qz[0] = tz0;
+            qx[1] = tx0 + dx * ST_M(ST_PROBE_M); qz[1] = tz0 + dz * ST_M(ST_PROBE_M);
+            qx[2] = tx0 - dx * ST_M(ST_PROBE_M); qz[2] = tz0 - dz * ST_M(ST_PROBE_M);
+            qx[3] = tx0 - nx * ST_M(ST_PROBE_M); qz[3] = tz0 - nz * ST_M(ST_PROBE_M);
+        }
+        {
+            const int hm = st_canopy_max(c, qx, qz, 4);
+            h = st_hash_xz(qx[0] + (double)c->org_x, qz[0] + (double)c->org_z, 0x7EE5u);
+            {
+                const uint32_t name = (p->way && p->way->name_h) ? p->way->name_h : (uint32_t)(p->ekey ^ (p->ekey >> 32));
+                int vi = (int)(name % 3u);
+                if (h % 5u == 0u) vi = (vi + 1 + (int)((h >> 8) & 1u)) % 3;
+                var = k_st_street_var[vi];
+            }
+            if (hm < SC_CANOPY_M) {
+                if (p->owned) c->st.st_nocanopy++;
+                s += ST_M(ST_SEARCH_M);
+                continue;
+            }
+            st_size(var, (double)hm, ST_H_MAX_M, h, &hw, &th);
+        }
+        sp = ST_SPACE_K * 2.0 * hw;
+        if (sp < ST_M(ST_SPACE_MIN_M)) sp = ST_M(ST_SPACE_MIN_M);
+        if (sp > ST_M(ST_SPACE_MAX_M)) sp = ST_M(ST_SPACE_MAX_M);
+        if (!p->owned) { s += sp; continue; }
+        c->st.st_stations++;
+        if (w < ST_M(ST_W_MIN_M)) { c->st.st_narrow++; s += sp; continue; }
+        {   /* the building front behind the trunk: the crown is narrowed to it */
+            double d;
+            for (d = 0.0; d < ST_M(ST_FACADE_PROBE_M); d += ST_M(0.25)) {
+                const double fx = qx[0] + nx * d, fz = qz[0] + nz * d;
+                if (pv_in_building(c, e->bld, fx, fz) || inf_in_lot(c, fx, fz)) { dfac = d; break; }
+            }
+        }
+        if (dfac < ST_M(ST_FACADE_MIN_M)) { c->st.st_facade++; s += sp; continue; }
+        hw0 = hw;
+        if (hw > dfac + ST_M(ST_FACADE_OVER_M)) hw = dfac + ST_M(ST_FACADE_OVER_M);
+        if (hw > lat + ST_M(ST_ROAD_OVER_M)) hw = lat + ST_M(ST_ROAD_OVER_M);   /* no green wall across a narrow street */
+        if (hw < ST_SQUEEZE * hw0) th *= hw / (ST_SQUEEZE * hw0);
+        if (th < ST_M(ST_H_MIN_M) * 0.8) { c->st.st_facade++; s += sp; continue; }
+        {
+            struct ScTreeCand *tc = NULL;
+            static const double k_off[ST_ALTS] = { 0.0, ST_DODGE_M, -ST_DODGE_M, 2.0 * ST_DODGE_M, -2.0 * ST_DODGE_M };
+            for (alt = 0; alt < ST_ALTS; alt++) {
+                const double so = s + ST_M(k_off[alt]);
+                const double ax = qx[0] + dx * ST_M(k_off[alt]), az = qz[0] + dz * ST_M(k_off[alt]);
+                double y, mx[2], mz[2];
+                if (so < 0.0 || so > total || st_blocked(S, clr, m, so) != so) continue;
+                if (!sc_pv_y(c, ax, az, &y)) continue;
+                if (sc_square_on_road(c, ax, az, ST_M(ST_TRUNK_M))) continue;
+                mx[0] = ax + dx * ST_M(ST_MOUTH_M); mz[0] = az + dz * ST_M(ST_MOUTH_M);
+                mx[1] = ax - dx * ST_M(ST_MOUTH_M); mz[1] = az - dz * ST_M(ST_MOUTH_M);
+                if (sc_on_road(c, &mx[0], &mz[0], 1, NULL) || sc_on_road(c, &mx[1], &mz[1], 1, NULL)) continue;
+                if (pv_in_building(c, e->bld, ax, az) || inf_in_lot(c, ax, az)) continue;
+                if (!tc) {
+                    tc = st_cand_new(c);
+                    if (!tc) { ok = 0; break; }
+                    tc->hw = hw; tc->th = th; tc->var = var; tc->kind = 0;
+                }
+                tc->x[tc->nalt] = ax; tc->z[tc->nalt] = az; tc->y[tc->nalt] = y; tc->nalt++;
+            }
+            if (tc) c->ntcand++;
+            else if (ok) c->st.st_noslab++;
+        }
+        s += sp;
+    }
+    free(S);
+    return ok;
+}
+
+/* Lot trees of the owned tile (SECTION trees). Candidates only: emitted after the furniture. */
+static int sc_lot_trees(TD5_RoamScnSource *s, TG_TileCtx *c, const PvBld *bld, const ScArea *ar, int nar)
+{
+    double corner[4][2], x0 = 1e300, z0 = 1e300, x1 = -1e300, z1 = -1e300, gx, gz;
+    const double ox = (double)c->org_x, oz = (double)c->org_z;
+    int i, n = 0;
+    roam_grid_corners(&s->grid, c->tx, c->tz, corner);
+    for (i = 0; i < 4; i++) {
+        if (corner[i][0] < x0) x0 = corner[i][0];
+        if (corner[i][0] > x1) x1 = corner[i][0];
+        if (corner[i][1] < z0) z0 = corner[i][1];
+        if (corner[i][1] > z1) z1 = corner[i][1];
+    }
+    x0 -= ox; x1 -= ox; z0 -= oz; z1 -= oz;
+    {
+        const double lx0 = floor((x0 - ST_M(ST_LOT_JIT_M) + ox) / SC_TREE_STEP) * SC_TREE_STEP - ox;
+        const double lz0 = floor((z0 - ST_M(ST_LOT_JIT_M) + oz) / SC_TREE_STEP) * SC_TREE_STEP - oz;
+        for (gz = lz0; gz <= z1 + ST_M(ST_LOT_JIT_M) && n < ST_LOT_CAP; gz += SC_TREE_STEP)
+            for (gx = lx0; gx <= x1 + ST_M(ST_LOT_JIT_M) && n < ST_LOT_CAP; gx += SC_TREE_STEP) {
+                const uint32_t h = st_hash_xz(gx + ox, gz + oz, 0x10Fu);
+                const double x = gx + ((double)(h % 401u) / 200.0 - 1.0) * ST_M(ST_LOT_JIT_M);
+                const double z = gz + ((double)((h >> 9) % 401u) / 200.0 - 1.0) * ST_M(ST_LOT_JIT_M);
+                double qx[9], qz[9], y, gh;
+                int ddx, ddz, best, wet = 0, var;
+                struct ScTreeCand *tc;
+                if (!sc_owned_point(c, x, z)) continue;
+                for (ddz = -1; ddz <= 1; ddz++)
+                    for (ddx = -1; ddx <= 1; ddx++) {
+                        qx[(ddz + 1) * 3 + ddx + 1] = x + ddx * SC_TREE_STEP * 0.33;
+                        qz[(ddz + 1) * 3 + ddx + 1] = z + ddz * SC_TREE_STEP * 0.33;
+                    }
+                best = st_canopy_max(c, qx, qz, 9);
+                if (best < SC_CANOPY_M) continue;
+                if (sc_square_on_road(c, x, z, ST_M(ST_LOT_CLEAR_M)) || sc_pv_y(c, x, z, &y) ||
+                    pv_in_building(c, bld, x, z) || inf_in_lot(c, x, z) || pv_in_green(c, ar, nar, x, z) ||
+                    (roam_ctx_ground_raw(c, x, z, &gh, &wet) && wet)) { c->st.st_lot_refused++; continue; }
+                if (best < ST_LOT_SHOW_M) {
+                    /* hidden behind a facade from the nearest street? */
+                    int edge, side, hid = 0;
+                    double along, latv;
+                    RoamFrame fr;
+                    if (roam_nearest_edge(c, x, z, ST_M(ST_LOT_REACH_M), &edge, &side, &along, &latv) &&
+                        roam_edge_frame(c, edge, side, along, &fr)) {
+                        const double L = hypot(fr.px - x, fr.pz - z);
+                        double d;
+                        for (d = ST_M(1.5); d < L && !hid; d += ST_M(1.5)) {
+                            const double fx = x + (fr.px - x) * d / L, fz = z + (fr.pz - z) * d / L;
+                            if (pv_in_building(c, bld, fx, fz) || inf_in_lot(c, fx, fz)) hid = 1;
+                        }
+                    }
+                    if (hid) { c->st.st_lot_hidden++; continue; }
+                }
+                tc = st_cand_new(c);            /* not counted until c->ntcand++ below: a refusal leaves it unused */
+                if (!tc) return 0;
+                var = k_st_lot_var[(h >> 17) % 8u];
+                st_size(var, (double)best, ST_LOT_H_MAX_M, h, &tc->hw, &tc->th);
+                {   /* a lot crown reaches at most ST_LOT_OVER_M over the road: a camera-facing billboard bigger than
+                     * that stands across the street as a green wall */
+                    const double hw0 = tc->hw;
+                    double r = tc->hw - ST_M(ST_LOT_OVER_M);
+                    while (r > ST_M(ST_LOT_CLEAR_M) && sc_square_on_road(c, x, z, r)) r -= ST_M(0.75);
+                    if (r + ST_M(ST_LOT_OVER_M) < tc->hw) tc->hw = r + ST_M(ST_LOT_OVER_M);
+                    if (tc->hw < ST_SQUEEZE * hw0) tc->th *= tc->hw / (ST_SQUEEZE * hw0);
+                    if (tc->th < ST_M(ST_H_MIN_M) * 0.8) { c->st.st_lot_refused++; continue; }
+                }
+                tc->var = var; tc->kind = 1;
+                tc->x[0] = x; tc->z[0] = z; tc->y[0] = sc_ground(c, x, z) + SC_GEOP_LIFT; tc->nalt = 1;
+                c->ntcand++;
+                n++;
+            }
+    }
+    return 1;
+}
+
+/* one furniture / rail face as a keep-out: its XZ footprint (1-4 points) and the margin a trunk keeps off it */
+typedef struct { double x[4], z[4], x0, z0, x1, z1, keep; int n; } StKeep;
+
+static int st_keep_collect(TG_TileCtx *c, StKeep **out, int *nout)
+{
+    StKeep *kp = NULL;
+    int n = 0, cap = 0, k, m;
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
+        const ScSb *b = &c->sb[k];
+        if (c->furn_first[k] >= b->nmesh) continue;
+        for (m = c->furn_first[k]; m < b->nmesh; m++) {
+            const uint8_t *rec = b->blk.b + b->moff[m];
+            const size_t avail = ((m + 1 < b->nmesh) ? b->moff[m + 1] : b->blk.len) - b->moff[m];
+            const int tag = (int)(int16_t)(sc_rd32(rec) >> 16);
+            const uint32_t ncmd = sc_rd32(rec + 4), nv = sc_rd32(rec + 8);
+            const uint32_t cmd_off = sc_rd32(rec + TD5_MESH_DISK_OFF_COMMANDS), vtx_off = sc_rd32(rec + TD5_MESH_DISK_OFF_VERTICES);
+            const float ox = sc_rdf(rec + 28) / 256.0f, oz = sc_rdf(rec + 36) / 256.0f;
+            uint32_t ci, cursor = 0;
+            if (cmd_off + ncmd * 16u > avail || vtx_off + nv * 44u > avail) continue;
+            for (ci = 0; ci < ncmd; ci++) {
+                const uint8_t *cm = rec + cmd_off + ci * 16u;
+                const uint32_t tc = (uint32_t)(sc_rd32(cm + 8) & 0xFFFFu), qc = sc_rd32(cm + 8) >> 16;
+                uint32_t p;
+                for (p = 0; p < tc + qc; p++) {
+                    const int nvp = p < tc ? 3 : 4;
+                    StKeep q;
+                    double ylo = 1e30, yhi = -1e30;
+                    int j;
+                    if (cursor + (uint32_t)nvp > nv) break;
+                    memset(&q, 0, sizeof q);
+                    for (j = 0; j < nvp; j++) {
+                        const uint8_t *v = rec + vtx_off + (cursor + (uint32_t)j) * 44u;
+                        const double vy = (double)sc_rdf(v + 4);
+                        q.x[j] = (double)sc_rdf(v) + (tag ? ox : 0.0f);
+                        q.z[j] = (double)sc_rdf(v + 8) + (tag ? oz : 0.0f);
+                        if (vy < ylo) ylo = vy;
+                        if (vy > yhi) yhi = vy;
+                    }
+                    cursor += (uint32_t)nvp;
+                    q.n = nvp;
+                    if (tag) { q.x[0] = (double)ox; q.z[0] = (double)oz; q.n = 1; }
+                    q.keep = (yhi - ylo < ST_M(ST_FLAT_M)) ? ST_M(ST_KEEP_FLAT_M) : ST_M(ST_KEEP_M);
+                    q.x0 = q.x1 = q.x[0]; q.z0 = q.z1 = q.z[0];
+                    for (j = 1; j < q.n; j++) {
+                        if (q.x[j] < q.x0) q.x0 = q.x[j];
+                        if (q.x[j] > q.x1) q.x1 = q.x[j];
+                        if (q.z[j] < q.z0) q.z0 = q.z[j];
+                        if (q.z[j] > q.z1) q.z1 = q.z[j];
+                    }
+                    q.x0 -= q.keep; q.z0 -= q.keep; q.x1 += q.keep; q.z1 += q.keep;
+                    if (!sc_grow((void **)&kp, &cap, n + 1, sizeof(StKeep))) { free(kp); return 0; }
+                    kp[n++] = q;
+                }
+            }
+        }
+    }
+    *out = kp; *nout = n;
+    return 1;
+}
+
+static int st_keep_hit(const StKeep *kp, int n, double x, double z)
+{
+    int i, j;
+    for (i = 0; i < n; i++) {
+        const StKeep *q = &kp[i];
+        double d = 1e30, t;
+        if (x < q->x0 || x > q->x1 || z < q->z0 || z > q->z1) continue;
+        if (q->n == 1) d = hypot(x - q->x[0], z - q->z[0]);
+        else {
+            if (q->n >= 3 && td5_geob_point_in_ring(q->x, q->z, q->n, x, z)) return 1;
+            for (j = 0; j < q->n; j++) {
+                const int j2 = (j + 1) % q->n;
+                const double dd = sc_seg_dist(x, z, q->x[j], q->z[j], q->x[j2], q->z[j2], &t);
+                if (dd < d) d = dd;
+                if (q->n == 2) break;
+            }
+        }
+        if (d < q->keep) return 1;
+    }
+    return 0;
+}
+
+/* the trunk is far enough inside the owned tile that no neighbour's furniture can stand within its keep-out */
+static int st_inside(const TG_TileCtx *c, double x, double z)
+{
+    static const double k_d[8][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                                      { 0.7071, 0.7071 }, { -0.7071, 0.7071 }, { 0.7071, -0.7071 }, { -0.7071, -0.7071 } };
+    int k;
+    for (k = 0; k < 8; k++)
+        if (!sc_owned_point(c, x + k_d[k][0] * ST_M(ST_BORDER_M), z + k_d[k][1] * ST_M(ST_BORDER_M))) return 0;
+    return 1;
+}
+
+/* the canopy coverage census: canopy >= 3 m cells of the owned tile, those under a crown of any tree */
+static void st_canopy_census(TG_TileCtx *c)
+{
+    const GrRaster *r = &c->canopy;
+    unsigned char *mask;
+    int i, a, b;
+    if (!c->canopy_ok || !r->data || r->w <= 0 || r->h <= 0 || !(r->cell > 0.0)) return;
+    mask = (unsigned char *)calloc((size_t)r->w * (size_t)r->h, 1);
+    if (!mask) return;
+    for (i = 0; i < c->ntpos; i++) {
+        const double X = c->tpos[i * 3] + (double)c->org_x, Z = c->tpos[i * 3 + 1] + (double)c->org_z, R = c->tpos[i * 3 + 2];
+        const int a0 = (int)floor((X - R - r->origin_x) / r->cell + 0.5), a1 = (int)floor((X + R - r->origin_x) / r->cell + 0.5);
+        const int b0 = (int)floor((Z - R - r->origin_z) / r->cell + 0.5), b1 = (int)floor((Z + R - r->origin_z) / r->cell + 0.5);
+        for (b = b0 < 0 ? 0 : b0; b <= b1 && b < r->h; b++)
+            for (a = a0 < 0 ? 0 : a0; a <= a1 && a < r->w; a++) {
+                const double cx = r->origin_x + (double)a * r->cell, cz = r->origin_z + (double)b * r->cell;
+                if (hypot(cx - X, cz - Z) <= R) mask[(size_t)b * (size_t)r->w + (size_t)a] = 1;
+            }
+    }
+    for (b = 0; b < r->h; b++)
+        for (a = 0; a < r->w; a++) {
+            const unsigned v = ((const unsigned char *)r->data)[(size_t)b * (size_t)r->w + (size_t)a];
+            const double x = r->origin_x + (double)a * r->cell - (double)c->org_x, z = r->origin_z + (double)b * r->cell - (double)c->org_z;
+            if (r->nodata_raw >= 0 && r->nodata_raw <= 255 && (int)v == r->nodata_raw) continue;
+            if ((int)v < SC_CANOPY_M) continue;
+            if (!sc_owned_point(c, x, z)) continue;
+            c->st.canopy_cells++;
+            if (mask[(size_t)b * (size_t)r->w + (size_t)a]) c->st.canopy_cov++;
+        }
+    free(mask);
+}
+
+/* the candidates, after the furniture: the first along-kerb position clear of every furniture face wins */
+static int sc_emit_street_trees(TG_TileCtx *c)
+{
+    StKeep *kp = NULL;
+    int nk = 0, i, k, ok = 1;
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->tree_first[k] = c->sb[k].nmesh;
+    if (c->ntcand > 0 && !st_keep_collect(c, &kp, &nk)) return 0;
+    for (i = 0; i < c->ntcand && ok; i++) {
+        const struct ScTreeCand *t = &c->tcand[i];
+        int a, hit = 0;
+        for (a = 0; a < t->nalt; a++) {
+            if (!st_inside(c, t->x[a], t->z[a])) continue;
+            if (st_keep_hit(kp, nk, t->x[a], t->z[a])) { hit++; continue; }
+            break;
+        }
+        if (a >= t->nalt) {
+            if (hit) c->st.st_furn_drop++; else c->st.st_border++;
+            continue;
+        }
+        if (a > 0) c->st.st_furn_moved++;
+        {
+            ScSb *b = sc_sb(c, sc_sb_of(c, t->x[a], t->z[a]), 1);
+            if (!b) { ok = 0; break; }
+            b->moff[b->nmesh++] = b->blk.len;
+            if (!tg_emit_billboard_mesh(&b->blk, t->x[a], t->y[a], t->z[a], t->hw, t->th, tg_tree_slot(t->var), 1)) { ok = 0; break; }
+        }
+        if (t->kind == 0) c->st.st_band++; else c->st.st_lot++;
+        if (!st_push_pos(c, t->x[a], t->z[a], t->hw * ST_CROWN_COVER)) { ok = 0; break; }
+    }
+    free(kp);
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->tree_end[k] = c->sb[k].nmesh;
+    st_canopy_census(c);
+    return ok;
+}
+
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 {
     TG_TileCtx *c = e->c;
@@ -4606,6 +5113,8 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
                       b->kind == PV_K_PATCH)) { ok = 0; goto done; }
         k = k1;
     }
+    /* [roam LA] the street trees of this chain (an island loop's top takes none) */
+    if (e->trees && !e->kerb_only && !pv_trees_chain(e, &ch, B, seq, m, kx, kz)) { ok = 0; goto done; }
 done:
     e->kerb_only = 0;
     free(blk);
@@ -4825,6 +5334,7 @@ static int sc_emit_pavement(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, i
     if (!pv_bld_build(s, c, bc, nbc, ar, nar, &bld, 1)) goto out;
     memset(&e, 0, sizeof e);
     e.s = s; e.c = c; e.ways = ways; e.nways = nways; e.bld = &bld; e.ar = ar; e.nar = nar;
+    e.trees = c->st_on;
     e.bat = (ScFpBatch *)calloc((size_t)TD5_ROAM_SCN_NSB * PV_NB, sizeof(ScFpBatch));
     if (!e.bat) goto out;
     for (sb = 0; sb < TD5_ROAM_SCN_NSB; sb++) {
@@ -4841,7 +5351,12 @@ static int sc_emit_pavement(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, i
             if (!sc_fp_flush(c, sb, &e.bat[sb * PV_NB + q])) ok = 0;
     }
     free(e.bat);
+    if (ok && c->lt_on && !sc_lot_trees(s, c, &bld, ar, nar)) ok = 0;   /* [roam LA] while the footprints are at hand */
 out:
+    if (ok && s->canopy_green && !c->pv_bld) {   /* [roam LA] the lots ask it (sc_canopy_green); freed by the build */
+        PvBld *keep = (PvBld *)malloc(sizeof *keep);
+        if (keep) { *keep = bld; c->pv_bld = keep; memset(&bld, 0, sizeof bld); }
+    }
     pv_bld_free(&bld);
     c->st.ms_pv += td5_plat_time_ms() - t0;
     return ok;
@@ -5028,6 +5543,28 @@ static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page)
     return 1;
 }
 
+/* [roam LA] CANOPY GREEN. Paseo del Bosque by the lake (-34.9090, -57.9386): a real wooded park no OSM area covers, so its
+ * ground was a paved city lot and its frontage could take infill. A quad (tile-local, 4 corners) is canopy green when
+ * CANOPY.R8 reads >= 3 m on at least SC_CG_CANOPY of its 4 x 4 sample points and no AREAS polygon of any kind (anyp, else
+ * the lots' own set) holds more than SC_CG_MAPPED of them. TD5RE_ROAM_CANOPY_GREEN=0 turns it off. */
+#define SC_CG_CANOPY    12
+#define SC_CG_MAPPED    2
+static int sc_canopy_green(const TD5_RoamScnSource *s, const TG_TileCtx *c, const double *qx, const double *qz)
+{
+    int a, b, can = 0, mapped = 0;
+    if (!s->canopy_green || !c->canopy_ok) return 0;
+    for (b = 0; b < 4; b++)
+        for (a = 0; a < 4; a++) {
+            const double fu = (a + 0.5) / 4.0, fv = (b + 0.5) / 4.0;
+            const double x = qx[0] + (qx[1] - qx[0]) * fu + (qx[3] - qx[0]) * fv;
+            const double z = qz[0] + (qz[1] - qz[0]) * fu + (qz[3] - qz[0]) * fv;
+            const double X = x + (double)c->org_x, Z = z + (double)c->org_z;
+            can += sc_canopy_m(c, x, z) >= SC_CANOPY_M;
+            mapped += c->anyp ? pv_poly_has(c->anyp, c->nanyp, X, Z) : (sc_lot_class_at(c->lotp, c->nlotp, X, Z) != SC_LC_BUILD);
+        }
+    return can >= SC_CG_CANOPY && mapped <= SC_CG_MAPPED;
+}
+
 static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
 {
     const int cell_m = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
@@ -5113,6 +5650,18 @@ static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *sel
         }
         green = ng >= 3;
         pave = s->lots_on && city && !green;
+        if (pave && c->pv_bld) {              /* [roam LA] canopy green: wooded ground no OSM area maps, no footprint on it */
+            const double gqx[4] = { cell[0], cell[3], cell[6], cell[9] }, gqz[4] = { cell[2], cell[5], cell[8], cell[11] };
+            if (sc_canopy_green(s, c, gqx, gqz)) {
+                int bl = 0;
+                for (k = 0; k < 5 && !bl; k++) {
+                    const double sx = cell[0] + (cell[3] - cell[0]) * fq[k][0] + (cell[9] - cell[0]) * fq[k][1];
+                    const double sz = cell[2] + (cell[5] - cell[2]) * fq[k][0] + (cell[11] - cell[2]) * fq[k][1];
+                    bl = pv_in_building(c, (const PvBld *)c->pv_bld, sx, sz) || inf_in_lot(c, sx, sz);
+                }
+                if (!bl) { pave = 0; c->st.lot_canopy_green++; }
+            }
+        }
         {
             const double t0[9] = { cell[0], cell[1], cell[2], cell[3], cell[4], cell[5], cell[6], cell[7], cell[8] };
             const double t1[9] = { cell[0], cell[1], cell[2], cell[6], cell[7], cell[8], cell[9], cell[10], cell[11] };
@@ -5497,6 +6046,7 @@ static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const dou
             for (k = 0; k < 4; k++) { X[k] = qx[k] + (double)c->org_x; Z[k] = qz[k] + (double)c->org_z; }
             if (td5_roam_rails_bed_near(e->s->rails, X, Z, 4, 0.5 * e->s->upm)) return 5;
         }
+        if (sc_canopy_green(e->s, c, qx, qz)) return 6;   /* [roam LA] wooded ground no OSM area maps: no row house */
     }
     return 0;
 }
@@ -5668,6 +6218,7 @@ refused:
         if (why == 2) c->st.inf_drop_road++;
         else if (why == 3) c->st.inf_drop_real++;
         else if (why == 4 || why == 5) c->st.inf_drop_area++;
+        else if (why == 6) c->st.inf_drop_canopy++;   /* [roam LA] */
         else c->st.inf_drop_shape++;
         if (why == 5 || rail_hit) { c->st.inf_drop_rail++; c->st.inf_m_rail += (a1 - a0) / U; }
         if ((why == 5 || rail_hit) && s->infill_log)
@@ -5676,6 +6227,7 @@ refused:
                       why, Dcap / U, (a1 - a0) / U);
         if (why == 3) c->st.inf_m_real += (a1 - a0) / U;
         else if (why == 4 || why == 5) c->st.inf_m_area += (a1 - a0) / U;
+        else if (why == 6) c->st.inf_m_canopy += (a1 - a0) / U;   /* [roam LA] */
         else c->st.inf_m_other += (a1 - a0) / U;
     }
     return 1;
@@ -5866,12 +6418,14 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
     int k, m;
     uint32_t nrec = 0, r = 0, h = 2166136261u;
     int *rec_furn = NULL;
+    unsigned char *rec_tree = NULL;
     if (!sc) return NULL;
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { total += c->sb[k].blk.len; nrec += (uint32_t)c->sb[k].nmesh; }
     sc->blob = (uint8_t *)malloc(total ? total : 1u);
     sc->rec_off = (uint32_t *)malloc((nrec ? nrec : 1u) * sizeof(uint32_t));
     rec_furn = (int *)calloc(nrec ? nrec : 1u, sizeof(int));
-    if (!sc->blob || !sc->rec_off || !rec_furn) { free(rec_furn); td5_roam_scn_free(sc); return NULL; }
+    rec_tree = (unsigned char *)calloc(nrec ? nrec : 1u, 1);
+    if (!sc->blob || !sc->rec_off || !rec_furn || !rec_tree) { free(rec_furn); free(rec_tree); td5_roam_scn_free(sc); return NULL; }
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
         const ScSb *b = &c->sb[k];
         if (b->blk.len) memcpy(sc->blob + off, b->blk.b, b->blk.len);
@@ -5880,6 +6434,7 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
         for (m = 0; m < b->nmesh; m++) {
             rec_furn[r] = (m >= c->furn_first[k]);      /* [F4c] furniture: judged by its own census */
             if (m >= c->lot_first[k]) rec_furn[r] = 1;  /* [HD] a city lot is the ground itself (SECTION lots) */
+            if (m >= c->tree_first[k] && m < c->tree_end[k]) { rec_furn[r] = 0; rec_tree[r] = 1; }   /* [roam LA] judged */
             sc->rec_off[r++] = (uint32_t)(off + b->moff[m]);
         }
         off += b->blk.len;
@@ -5907,10 +6462,14 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
     for (r = 0; r < nrec; r++) {
         const size_t ro = sc->rec_off[r];
         const size_t end = (r + 1 < nrec) ? sc->rec_off[r + 1] : total;
+        int bad;
         if (rec_furn[r]) continue;
-        c->st.guard_overlaps += sc_census_record(c, sc->blob + ro, (end > ro && end <= total) ? end - ro : total - ro);
+        bad = sc_census_record(c, sc->blob + ro, (end > ro && end <= total) ? end - ro : total - ro);
+        c->st.guard_overlaps += bad;
+        if (rec_tree[r]) c->st.st_on_road += bad;   /* [roam LA] */
     }
     free(rec_furn);
+    free(rec_tree);
     c->st.meshes = (int)nrec;
     c->st.bytes = (uint32_t)(total + (size_t)nrec * 4u);
     c->st.hash = h;
@@ -5957,6 +6516,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->ic_despike = td5_env_int("TD5RE_ROAM_AREA_DESPIKE", 1, 0, 1);
     s->ic_drops = td5_env_int("TD5RE_ROAM_BLD_DROPS", 1, 0, 1);
     s->ic_infill = td5_env_int("TD5RE_ROAM_IC_INFILL", 1, 0, 1);
+    s->canopy_green = td5_env_int("TD5RE_ROAM_CANOPY_GREEN", 1, 0, 1);   /* [roam LA] */
     s->inf_rail = td5_env_int("TD5RE_ROAM_INF_RAIL_VETO", 1, 0, 1);
     s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
@@ -6034,6 +6594,8 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     c = s->ctx;
     if (!sc_ctx_build(s, c, self)) return NULL;
     c->hc = hc;
+    c->st_on = td5_env_int("TD5RE_ROAM_STREET_TREES", 1, 0, 1);   /* [roam LA] */
+    c->lt_on = td5_env_int("TD5RE_ROAM_LOT_TREES", 1, 0, 1);
     roam_grid_corners(&s->grid, self->tx, self->tz, corner);
     for (i = 0; i < 4; i++) {
         if (corner[i][0] < x0) x0 = corner[i][0];
@@ -6152,6 +6714,8 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     if (s->furn) {
         if (!td5_roam_furn_emit(s->furn, c, &c->st.furn, &c->lamp, &c->nlamp)) goto out;
     }
+    /* [roam LA] street + lot trees last: they keep off the furniture and rail faces just written */
+    if (!sc_emit_street_trees(c)) goto out;
     c->st.ms_emit = td5_plat_time_ms() - t1;
     sc = sc_assemble(c);
     if (sc) {
@@ -6172,6 +6736,7 @@ out:
     free(c->ringpool); c->ringpool = NULL;
     free(c->pv_B); c->pv_B = NULL; c->pv_nb = 0;
     free(c->pv_ways); c->pv_ways = NULL; c->pv_nways = 0; c->pv_ready = 0;
+    if (c->pv_bld) { pv_bld_free((PvBld *)c->pv_bld); free(c->pv_bld); c->pv_bld = NULL; }   /* [roam LA] */
     c->ninfr = 0;                             /* infr itself is kept for the next tile (sc_ctx_free) */
     return sc;
 }
@@ -6274,6 +6839,9 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
+    long lt[16] = { 0 };                                   /* [roam LA] */
+    long cg_n[2] = { 0, 0 };
+    double cg_m = 0.0;
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     long pool_n[3] = { 0, 0, 0 };              /* [roam LE] drawn, on a road, bad ring */
     double pool_m2 = 0.0;
@@ -6382,6 +6950,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             for (q = 0; q < 6; q++) s3d_t[4 + q] += r->s3d_how[q];
         }
         inf_rail_mv += r->inf_rail_moved; inf_rail_sh += r->inf_rail_shallow;
+        lt[0] += r->st_band; lt[1] += r->st_lot; lt[2] += r->trees; lt[3] += r->st_stations; lt[4] += r->st_nocanopy;
+        lt[5] += r->st_narrow; lt[6] += r->st_facade; lt[7] += r->st_noslab; lt[8] += r->st_furn_drop;
+        lt[9] += r->st_furn_moved; lt[10] += r->st_border; lt[11] += r->st_lot_hidden; lt[12] += r->st_lot_refused;
+        lt[13] += r->st_on_road; lt[14] += r->canopy_cells; lt[15] += r->canopy_cov;
+        cg_n[0] += r->lot_canopy_green; cg_n[1] += r->inf_drop_canopy; cg_m += r->inf_m_canopy;
         lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
         lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
         lot_t[8] += r->inf_drop_real; lot_t[9] += r->inf_drop_road; lot_t[10] += r->inf_drop_area;
@@ -6553,6 +7126,25 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "(clipper gave up) %ld | civic facades %ld | bases under parts %ld | Overture blobs under a relation "
                  "not built %ld | carriage arches %ld", s3d_r[0], s3d_r[1], s3d_r[2], s3d_r[3], s3d_r[4], s3d_r[5], s3d_r[6],
                  s3d_r[7], s3d_r[8]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam trees [LA]: street band %ld, lot %ld, plaza %ld (total %ld) | band stations %ld: no canopy >= 3 m "
+                 "(2 m search steps) %ld, band too narrow %ld, facade too close %ld, no slab / road / mouth %ld, refused by "
+                 "furniture or a rail bed %ld, moved along the kerb %ld, near the tile edge %ld | lot points hidden behind a "
+                 "facade %ld, refused (road / slab / building / green / water) %ld | canopy >= 3 m cells %ld, under a crown "
+                 "%ld (%.1f %%) | TREES ON ROAD: %ld (TD5RE_ROAM_STREET_TREES=%d TD5RE_ROAM_LOT_TREES=%d)",
+                 lt[0], lt[1], lt[2], lt[0] + lt[1] + lt[2], lt[3], lt[4], lt[5], lt[6], lt[7], lt[8], lt[9], lt[10],
+                 lt[11], lt[12], lt[14], lt[15], lt[14] ? 100.0 * (double)lt[15] / (double)lt[14] : 0.0, lt[13],
+                 td5_env_int("TD5RE_ROAM_STREET_TREES", 1, 0, 1), td5_env_int("TD5RE_ROAM_LOT_TREES", 1, 0, 1));
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam canopy green [LA]: %ld city lot cell(s) left lawn (CANOPY >= 3 m on 12 of 16 points, no OSM area, no "
+                 "footprint), %ld infill lot(s) refused on such ground (%.0f m of frontage) (TD5RE_ROAM_CANOPY_GREEN=%d)",
+                 cg_n[0], cg_n[1], cg_m, td5_env_int("TD5RE_ROAM_CANOPY_GREEN", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
