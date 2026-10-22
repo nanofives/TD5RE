@@ -1715,7 +1715,7 @@ static void sc_xc_note(TG_TileCtx *c, const int *snap, int cat)
 
 /* [roam NA] SECTION municipal line */
 #define MU_SNAP_GAP 215.0      /* 0.5 m: a footprint on the line is still kept this far off a centreline's kerb */
-static const ScMuniRing *sc_muni_find(const TG_TileCtx *c, double cx, double cz);
+static const ScMuniRing *sc_muni_find(const TG_TileCtx *c, double id, double cx, double cz);
 static int sc_in_grounds(const TG_TileCtx *c, double x, double z);
 static void sc_muni_census(TD5_RoamScnSource *s, TG_TileCtx *c, const double *rx, const double *rz, int n);
 /* [roam NA] TD5RE_ROAM_RING_LOG=1 (dev): one line per emitted footprint / infill lot, its ring (place frame) */
@@ -2202,7 +2202,7 @@ static int sc_bld_green_veto(const TG_TileCtx *c, const TD5_GeoBuilding *gb, con
  * Overture blob covering the block was dropped past the shift cap, yet the infill refused every lot on it ("real
  * building") and the pavement stopped at its facade: neither stood. Same tests in the same order as the emitter
  * (landmarks and parts kept: their own clearance runs elsewhere). 1 = it does not stand. */
-static int sc_bld_drops(TD5_RoamScnSource *s, TG_TileCtx *c, const TD5_GeoBuilding *gb, const double *px,
+static int sc_bld_drops(TD5_RoamScnSource *s, TG_TileCtx *c, const TD5_GeoBuilding *gb, double id, const double *px,
                         const double *pz, const ScArea *ar, int nar)
 {
     double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], shift = 0.0, gap = s->gap;
@@ -2216,7 +2216,7 @@ static int sc_bld_drops(TD5_RoamScnSource *s, TG_TileCtx *c, const TD5_GeoBuildi
     if (gb->fsrc != TD5_GEOB_FSRC_OSM && sc_in_grounds(c, gb->cx - (double)c->org_x, gb->cz - (double)c->org_z))
         return 1;                                                                  /* [roam NA] landmark grounds */
     for (k = 0; k < n; k++) { rx[k] = px[k] - (double)c->org_x; rz[k] = pz[k] - (double)c->org_z; }
-    mu = sc_muni_find(c, gb->cx, gb->cz);                                         /* [roam NA] by centroid */
+    mu = sc_muni_find(c, id, gb->cx, gb->cz);                                     /* [roam NA] */
     if (mu && (mu->fate == TD5_MUNI_SNAPPED || mu->fate == TD5_MUNI_ON)) {
         if (mu->fate == TD5_MUNI_SNAPPED) {
             n = mu->n;
@@ -2459,7 +2459,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         }
         if (veto) { c->st.bld_veto_lm++; sc_bld_note(s, c, &set[i], "landmark veto"); continue; }
         for (k = 0; k < n; k++) { rx[k] = set[i].px[k] - (double)c->org_x; rz[k] = set[i].pz[k] - (double)c->org_z; }
-        mu = sc_muni_find(c, set[i].b->cx, set[i].b->cz);                  /* [roam NA] the municipal line */
+        mu = sc_muni_find(c, set[i].id, set[i].b->cx, set[i].b->cz);       /* [roam NA] the municipal line */
         mu_on_line = mu && (mu->fate == TD5_MUNI_SNAPPED || mu->fate == TD5_MUNI_ON);
         if (mu && mu->fate == TD5_MUNI_SNAPPED && !(s3d_hide && !s3d_base)) {
             double r2 = 0.0, mx = 0.0, mz = 0.0;
@@ -4019,7 +4019,7 @@ static int pv_bld_build(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int n
                     roam_grid_uv(c->grid, gb->cx, gb->cz, &u, &v);
                     if (judge && s->ic_drops && u > (double)c->tx * T - J - gb->radius && u < (double)(c->tx + 1) * T + J + gb->radius &&
                         v > (double)c->tz * T - J - gb->radius && v < (double)(c->tz + 1) * T + J + gb->radius &&
-                        sc_bld_drops(s, c, gb, &bc[l]->px[gb->first], &bc[l]->pz[gb->first], ar, nar)) {
+                        sc_bld_drops(s, c, gb, bc[l]->id[bc[l]->order[j]], &bc[l]->px[gb->first], &bc[l]->pz[gb->first], ar, nar)) {
                         c->st.pv_bld_gone++;
                         continue;
                     }
@@ -4027,7 +4027,7 @@ static int pv_bld_build(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int n
                     r = &pb->r[pb->nr++];
                     r->px = &bc[l]->px[gb->first]; r->pz = &bc[l]->pz[gb->first]; r->n = gb->n;
                     {   /* [roam NA] a footprint moved onto the municipal line stands there for the pavement too */
-                        const ScMuniRing *mu = sc_muni_find(c, gb->cx, gb->cz);
+                        const ScMuniRing *mu = sc_muni_find(c, bc[l]->id[bc[l]->order[j]], gb->cx, gb->cz);
                         if (mu && mu->fate == TD5_MUNI_SNAPPED) {
                             r->px = &c->mpool[mu->first]; r->pz = &c->mpool[mu->first + mu->n]; r->n = mu->n;
                         }
@@ -5798,14 +5798,16 @@ static int sc_mr_cmp(const void *pa, const void *pb)
 {
     const ScMuniRing *a = (const ScMuniRing *)pa, *b = (const ScMuniRing *)pb;
     if (a->cx != b->cx) return a->cx < b->cx ? -1 : 1;
-    return a->cz < b->cz ? -1 : (a->cz > b->cz);
+    if (a->cz != b->cz) return a->cz < b->cz ? -1 : 1;
+    /* MEASURED (tile 6,44): a relation outline and the OSM way drawn on the same ring share the centroid exactly */
+    return a->id < b->id ? -1 : (a->id > b->id);
 }
 
-static const ScMuniRing *sc_muni_find(const TG_TileCtx *c, double cx, double cz)
+static const ScMuniRing *sc_muni_find(const TG_TileCtx *c, double id, double cx, double cz)
 {
     ScMuniRing key;
     if (!c->muni_ready || c->nmr <= 0) return NULL;
-    key.cx = cx; key.cz = cz;
+    key.cx = cx; key.cz = cz; key.id = id;
     return (const ScMuniRing *)bsearch(&key, c->mr, (size_t)c->nmr, sizeof(ScMuniRing), sc_mr_cmp);
 }
 
@@ -6200,7 +6202,7 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
                 for (l = 0; l < nbc && !gb; l++) {     /* the record (ON keeps its own ring): by centroid */
                     int j;
                     for (j = 0; j < bc[l]->n; j++)
-                        if (bc[l]->b[j].cx == mr->cx && bc[l]->b[j].cz == mr->cz) {
+                        if (bc[l]->b[j].cx == mr->cx && bc[l]->b[j].cz == mr->cz && bc[l]->id[j] == mr->id) {
                             gb = &bc[l]->b[j];
                             n = gb->n;
                             for (k = 0; k < n; k++) { rx[k] = bc[l]->px[gb->first + k] - (double)c->org_x; rz[k] = bc[l]->pz[gb->first + k] - (double)c->org_z; }
