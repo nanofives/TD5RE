@@ -61,6 +61,7 @@ void td5_roam_cancel(void);                  /* = td5_roam_end(), for "back out 
 int  td5_roam_host_track(void);              /* track index of the level whose textures/sky host the roam world */
 int  td5_roam_host_is_geo(void);             /* 1 when the host is the place's own geo level (F2-F) */
 void td5_roam_host_pages(int *road, int *ground, int *kerb);   /* page ids in the host's TEXTURES.DAT; kerb -1 = HUD white */
+int  td5_roam_host_water_page(void);                            /* [roam LE] the host's water page, -1 = none (shipped host) */
 int  td5_roam_host_sky_path(char *out, size_t n);              /* sky file override for the host, 0 = level's own */
 void td5_roam_session_start(void);           /* race init: armed -> active, force the single-player overrides */
 void td5_roam_apply_overrides(void);         /* the overrides alone (idempotent; re-asserted after the mode setup) */

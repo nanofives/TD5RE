@@ -181,6 +181,7 @@ typedef struct {
     TD5_GeoBuilding *b;  TD5_GeoArea *a;  ScFoot *f;
     double   *id;
     unsigned char *lot;     /* [HD] AREAS: SC_LC_* per record (the raw OSM kind) */
+    unsigned char *pool;    /* [roam LE] AREAS: 1 = kind swimming_pool                      */
     int64_t  *own;          /* owner tile key per record (b, a)          */
     int      *order;        /* record indices sorted by (own, id, cx, cz) */
     double   *px, *pz;      /* ring / way points                          */
@@ -217,6 +218,7 @@ struct TD5_RoamScnSource {
     int       ncasco;
     int       lots_on, lot_cover, infill_on;   /* [HD] TD5RE_ROAM_LOTS / _LOT_COVER / TD5RE_ROAM_INFILL */
     int       lot_page;                       /* [HD] TD5RE_ROAM_LOT_PAGE: the lots' host page */
+    int       pools_on;                       /* [roam LE] TD5RE_ROAM_POOLS: swimming pools (coping + water) */
     int       infill_log;                     /* [HD] TD5RE_ROAM_INFILL_LOG: one log line per built lot */
     int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     int       cover_green;                    /* [IC] TD5RE_ROAM_COVER_GREEN: unmapped vegetated casco loops are green */
@@ -265,7 +267,7 @@ static char *sc_slurp(const char *path, size_t *len)
 
 static void sc_cache_free(ScCache *c)
 {
-    free(c->b); free(c->a); free(c->f); free(c->id); free(c->own); free(c->order); free(c->lot);
+    free(c->b); free(c->a); free(c->f); free(c->id); free(c->own); free(c->order); free(c->lot); free(c->pool);
     free(c->px); free(c->pz);
     memset(c, 0, sizeof *c);
 }
@@ -404,6 +406,7 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
         if (layer == SC_L_BLD) c->b = (TD5_GeoBuilding *)calloc((size_t)cap_rec, sizeof(TD5_GeoBuilding));
         if (layer == SC_L_AREA) c->a = (TD5_GeoArea *)calloc((size_t)cap_rec, sizeof(TD5_GeoArea));
         if (layer == SC_L_AREA) c->lot = (unsigned char *)calloc((size_t)cap_rec, 1);
+        if (layer == SC_L_AREA) c->pool = (unsigned char *)calloc((size_t)cap_rec, 1);   /* [roam LE] */
         if (layer == SC_L_FOOT) c->f = (ScFoot *)calloc((size_t)cap_rec, sizeof(ScFoot));
         c->id = (double *)calloc((size_t)cap_rec, sizeof(double));
         c->own = (int64_t *)calloc((size_t)cap_rec, sizeof(int64_t));
@@ -433,6 +436,7 @@ static int sc_cache_load_body(TD5_RoamScnSource *s, ScCache *c, int layer, int i
             if (c->lot) {
                 const cJSON *kv = cJSON_GetObjectItem(e, "kind");
                 c->lot[c->n] = (unsigned char)sc_lot_class((kv && cJSON_IsString(kv)) ? kv->valuestring : NULL);
+                if (c->pool) c->pool[c->n] = (unsigned char)(kv && cJSON_IsString(kv) && !strcmp(kv->valuestring, "swimming_pool"));
             }
             roam_grid_tile_of(&s->grid, a->cx, a->cz, &tx, &tz);
         } else {
@@ -4953,6 +4957,104 @@ out:
     return ok;
 }
 
+/* ---- [roam LE] SWIMMING POOLS ----
+ *
+ * AREAS kind swimming_pool (82 in the partido, 2 in the casco: club and backyard pools in City Bell / Gonnet) were
+ * paved over as OPEN lots. Each one OWNED by the tile (sc_owned_range) is now a flat box top at its highest base
+ * point (the drawn ground + SC_LOT_LIFT, or a lawn standing over it): a concrete coping ring on the sidewalk page
+ * (the outline to the outline pulled SC_POOL_INSET towards its centroid) and the inset polygon on the water page
+ * SC_POOL_WATER_Y over the base, a little under the coping (SC_POOL_COPING_Y). An outline touching the drivable
+ * surface is left out (st.pool_drop_road). TD5RE_ROAM_POOLS=0 = the old paved lot. */
+#define SC_POOL_INSET     (0.50 * SC_UPM)   /* coping width (at most 30 % of the mean radius)   */
+#define SC_POOL_COPING_Y  40.0              /* units over the base (9 cm)                       */
+#define SC_POOL_WATER_Y   30.0              /* units over the base (7 cm)                       */
+#define SC_POOL_WATER_UV  (1.0 / 6000.0)    /* TD5_TG_WATER_TILE                                */
+
+static int sc_emit_pools(TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
+{
+    const int64_t key = sc_tkey(self->tx, self->tz);
+    const double wrep = 1.0 / SC_POOL_WATER_UV, crep = 1.0 / SC_LOT_UV;
+    const double wox = fmod((double)c->org_x, wrep), woz = fmod((double)c->org_z, wrep);
+    const double cox = fmod((double)c->org_x, crep), coz = fmod((double)c->org_z, crep);
+    int l;
+    for (l = 0; l < nac; l++) {
+        const ScCache *ca = ac[l];
+        int lo, hi, j;
+        if (!ca->pool) continue;
+        sc_owned_range(ca, key, &lo, &hi);
+        for (j = lo; j < hi; j++) {
+            const int ri = ca->order[j];
+            const TD5_GeoArea *a = &ca->a[ri];
+            double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], ix[TD5_GEOB_RING_MAX], iz[TD5_GEOB_RING_MAX];
+            int tri[(TD5_GEOB_RING_MAX - 2) * 3];
+            double cx = 0.0, cz = 0.0, rm = 0.0, f, base = -1e300, y;
+            float *v;
+            unsigned int *light;
+            unsigned short cmd[6];
+            int n = a->n, k, ntri, nv;
+            ScSb *b;
+            if (!ca->pool[ri]) continue;
+            if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.pool_bad++; continue; }
+            for (k = 0; k < n; k++) {
+                rx[k] = ca->px[a->first + k] - (double)c->org_x;
+                rz[k] = ca->pz[a->first + k] - (double)c->org_z;
+            }
+            if (n > 3 && fabs(rx[0] - rx[n - 1]) < 1.0 && fabs(rz[0] - rz[n - 1]) < 1.0) n--;   /* closed ring */
+            for (k = 0; k < n; k++) { cx += rx[k]; cz += rz[k]; }
+            cx /= n; cz /= n;
+            if (sc_on_road(c, rx, rz, n, NULL)) { c->st.pool_drop_road++; continue; }
+            for (k = 0; k < n; k++) rm += hypot(rx[k] - cx, rz[k] - cz);
+            rm /= n;
+            if (rm < 1.0) { c->st.pool_bad++; continue; }
+            f = 1.0 - ((SC_POOL_INSET < 0.3 * rm) ? SC_POOL_INSET : 0.3 * rm) / rm;
+            for (k = 0; k <= n; k++) {                       /* the base: the highest surface under the outline */
+                const double px = (k < n) ? rx[k] : cx, pz = (k < n) ? rz[k] : cz;
+                double h = sc_dg(c, px, pz) + SC_LOT_LIFT, lw;
+                if (sc_lawn_y(c, px, pz, &lw) && lw > h) h = lw;
+                if (h > base) base = h;
+            }
+            for (k = 0; k < n; k++) { ix[k] = cx + f * (rx[k] - cx); iz[k] = cz + f * (rz[k] - cz); }
+            ntri = td5_geob_triangulate(ix, iz, n, tri, TD5_GEOB_RING_MAX - 2);
+            if (ntri <= 0) { c->st.pool_bad++; continue; }
+            nv = n * 4 + ntri * 3;
+            v = (float *)malloc((size_t)nv * 5u * sizeof(float));
+            light = (unsigned int *)malloc((size_t)nv * sizeof(unsigned int));
+            if (!v || !light) { free(v); free(light); return 0; }
+            y = base + SC_POOL_COPING_Y;
+            for (k = 0; k < n; k++) {                        /* coping: outer k, outer k+1, inner k+1, inner k */
+                const int k1 = (k + 1) % n;
+                const double qx[4] = { rx[k], rx[k1], ix[k1], ix[k] }, qz[4] = { rz[k], rz[k1], iz[k1], iz[k] };
+                int e;
+                for (e = 0; e < 4; e++) {
+                    float *o = &v[(k * 4 + e) * 5];
+                    o[0] = (float)qx[e]; o[1] = (float)y; o[2] = (float)qz[e];
+                    o[3] = (float)((qx[e] + cox) * SC_LOT_UV); o[4] = (float)((qz[e] + coz) * SC_LOT_UV);
+                }
+            }
+            y = base + SC_POOL_WATER_Y;
+            for (k = 0; k < ntri * 3; k++) {
+                float *o = &v[(n * 4 + k) * 5];
+                const int p = tri[k];
+                o[0] = (float)ix[p]; o[1] = (float)y; o[2] = (float)iz[p];
+                o[3] = (float)((ix[p] + wox) * SC_POOL_WATER_UV); o[4] = (float)((iz[p] + woz) * SC_POOL_WATER_UV);
+            }
+            for (k = 0; k < nv; k++) light[k] = 0xFFFFFFFFu;
+            cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK; cmd[1] = 0; cmd[2] = (unsigned short)n;
+            cmd[3] = (unsigned short)TD5_TG_PAGE_WATER;    cmd[4] = (unsigned short)ntri; cmd[5] = 0;
+            b = sc_sb(c, sc_sb_of(c, cx, cz), 1);
+            if (!b) { free(v); free(light); return 0; }
+            b->moff[b->nmesh++] = b->blk.len;
+            if (!tg_write_prefab_mesh(&b->blk, v, light, nv, cmd, 2, 0, 0.0, 0.0, 0.0, 1.0, 0.0) || b->blk.oom) {
+                free(v); free(light); return 0;
+            }
+            free(v); free(light);
+            c->st.pools++;
+            c->st.pool_m2 += sc_ring_area_m2(ix, iz, n);
+        }
+    }
+    return 1;
+}
+
 /* ---- [HD] INFILL: frontage lots on the building line ----
  *
  * WHY. Mariano, 2026-10-19: the casco is "mostly concrete and buildings" (buildings to the block edge, the La Plata
@@ -5667,6 +5769,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     td5_geo_source_path(s->cover_path, sizeof s->cover_path, place, "COVER.R8");
     /* [HD] city lots + infill: the casco's tiles, sorted for sc_casco_has */
     s->lots_on   = td5_env_int("TD5RE_ROAM_LOTS", 1, 0, 1);
+    s->pools_on  = td5_env_int("TD5RE_ROAM_POOLS", 1, 0, 1);
     s->lot_cover = td5_env_int("TD5RE_ROAM_LOT_COVER", 1, 0, 1);
     s->infill_on = td5_env_int("TD5RE_ROAM_INFILL", 1, 0, 1);
     s->infill_log = td5_env_int("TD5RE_ROAM_INFILL_LOG", 0, 0, 1);
@@ -5849,6 +5952,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->lot_first[k] = c->sb[k].nmesh;
     }
     if (!sc_emit_lots(s, c, self, ac, nac)) goto out;
+    if (s->pools_on && !sc_emit_pools(c, self, ac, nac)) goto out;       /* [roam LE] over the lots */
     /* [F4c] street furniture: appended LAST in every sub-block (meshes from furn_first on are its own).
      * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
      * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
@@ -5984,6 +6088,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
+    long pool_n[3] = { 0, 0, 0 };              /* [roam LE] drawn, on a road, bad ring */
+    double pool_m2 = 0.0;
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
     if (!sc_cli_get(cmdline, "RoamBuildScenery", val, sizeof val)) return 0;
@@ -6129,10 +6235,19 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         ie_m[0] += r->furn.bar_guard_m; ie_m[1] += r->furn.bar_nj_m; ie_m[2] += r->furn.bar_parapet_m; ie_m[3] += r->furn.emb_m;
         ie_n[0] += r->furn.bar_drop_road; ie_n[1] += r->furn.bar_patch_edges; ie_n[2] += r->furn.piers;
         ie_n[3] += r->furn.pier_cols; ie_n[4] += r->furn.pier_drop_road; ie_n[5] += r->furn.abutments;
+        pool_n[0] += r->pools; pool_n[1] += r->pool_drop_road; pool_n[2] += r->pool_bad; pool_m2 += r->pool_m2;
         if (r->bld_shift_max > shift_max) shift_max = r->bld_shift_max;
         if (r->ms > ms_max) ms_max = r->ms;
         if (r->bytes > bytes_max) bytes_max = r->bytes;
         ms_sum += r->ms;
+    }
+    {   /* [roam LE] */
+        char ln[200];
+        snprintf(ln, sizeof ln, "roam pools [roam LE]: %ld drawn (%.0f m2 of water), %ld left out on the drivable surface, "
+                 "%ld bad ring(s)", pool_n[0], pool_m2, pool_n[1], pool_n[2]);
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
     }
     {
         /* [roam IE] */
