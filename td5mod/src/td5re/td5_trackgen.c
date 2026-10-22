@@ -5218,6 +5218,8 @@ void td5_trackgen_roam_pages(int *road, int *ground, int *kerb)
     if (kerb)   *kerb   = TD5_TG_PAGE_SIDEWALK;
 }
 
+int td5_trackgen_roam_water_page(void) { return TD5_TG_PAGE_WATER; }
+
 /* the seed a geo build of this place derives (td5_trackgen_regenerate) */
 static unsigned int tg_roam_seed(const char *slug)
 {

@@ -119,6 +119,9 @@ int td5_roam_render_dev_poses(void);
  * casco ROAMTILE (worst ground - road per ground cell under the road), writes
  * <log>/roam_ground_census.txt + .csv, 1 = handled, exit. */
 int td5_roam_render_ground_census_dev_test(void);
+/* DEV (roam LE): TD5RE_ROAM_WATER_CENSUS=<tile list> -> water plane census of those tiles
+ * (<log>/roam_water_census.txt + .csv), 1 = handled, exit. */
+int td5_roam_render_water_census_dev_test(void);
 #endif
 
 /* [F9b] World-origin rebase: draw every tile shifted by a further (sx, sz) world units (td5_roam_rebase.c). */

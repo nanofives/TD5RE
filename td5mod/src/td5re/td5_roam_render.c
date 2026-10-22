@@ -12,6 +12,7 @@
  *   cmd 0  road     ribbon lane quads + junction patch triangles, the asphalt page
  *   cmd 1  ground   a heightfield cell per ROAM_RENDER_CELL_M, the ground page
  *   cmd 2  skirts   a grey vertical face down every BEDG (kerb, deck side)
+ *   cmd 3  water    [roam LE] a flat-ish water quad per ground cell that touches a wet lattice point
  *
  * FRAME. place -> render is `place - (ox, oz)` in x/z and `y - dy` in height (the
  * contract of td5_roam_mode.h). DEV route mode swaps x/z for the place -> route
@@ -44,6 +45,18 @@
  * [G5] Beside a steep road the 4-cell minimum sat metres under the road edge, so each point now
  * comes down only as far as the road triangles next to it need (td5_roam_gfix_lower: exact, and the
  * same lowering on both sides of a seam); TD5RE_ROAM_GROUND_G4=1 = the G4 cell clamp.
+ *
+ * WATER. [roam LE] The ground at a wet lattice point sits TD5_ROAM_WATER_DEPTH (3.3 m) under the raster: until LE
+ * that was a dry hole (the Bosque lake, the quarry lakes, the arroyos). Each ground cell with a wet corner now gets
+ * a quad on the host's water page at the SURFACE LEVEL of its corners: the lowest of the 3 x 3 lattice points round
+ * each corner (the raster's surface where wet, the DRAWN ground where dry: raster - G5 lowering - the drop) minus
+ * RR_WATER_BELOW. So a shore corner is always under its own bank and the next dry points (the ground occludes the
+ * plane there, a clean waterline), the surface follows a river's fall, and it is a function of global lattice
+ * points only (both tiles of a seam compute the same level). A cell the road crosses keeps its water only when the
+ * lowest road height in the cell (td5_roam_gfix_cells, the 3x3 ROAD tiles) stands RR_WATER_ROAD_GAP over the
+ * plane: a deck over a stream keeps its clearance (round I IE lifts it 2.5 m over the surface), a road at the
+ * water's level drops the cell. Cells under a bore are left out with the ground. TD5RE_ROAM_WATER=0 = the old dry
+ * holes; TD5RE_ROAM_WATER_BELOW_CM moves the level; census: TD5RE_ROAM_WATER_CENSUS=<tile list>.
  *
  * RESIDENCY. [F3] In a streamed session (td5_roam_stream.c) the stream worker bakes
  * each tile (td5_roam_render_bake, its own height source) and the main thread installs
@@ -139,6 +152,9 @@ typedef struct {
     float           cx, cy, cz, r;           /* whole-tile sphere                   */
     uint32_t        nroad, ntri, nground, nskirt;
     uint32_t        npiece, nstop;           /* [roam HC] patch slab triangles, stop-line bars */
+    uint32_t        nwater, nwet, nwater_road, nwater_deck;   /* [roam LE] water quads, wet lattice points, cells
+                                                               * dropped for a road at the water, cells under a deck */
+    double          water_clear;             /* [roam LE] lowest road - water over a kept cell, units (1e300 none) */
     size_t          bytes;
     /* [F4a] the SCENERY layer (td5_roam_scenery.c): runtime headers over the
      * layer's MODELS records, one display list per 64 m sub-block */
@@ -178,6 +194,9 @@ typedef struct {
     int       patch_uv;                      /* [roam HC] 1 = slab mapping at the ribbon's texel, 0 = old */
     int       stoplines;                     /* [roam HC] 1 = stop lines at junction mouths            */
     int       kerb_line;                     /* [roam HC] 1 = the old dashed line down one kerb        */
+    int       water;                         /* [roam LE] 1 = water quads over wet cells (needs page_water) */
+    int       page_water;
+    double    water_below;                   /* [roam LE] units under the lowest bank / surface point  */
     int       cell_m;                        /* ground cell, metres (divides 64)    */
     double    radius;                        /* draw radius, units                  */
     /* DEV loader */
@@ -269,10 +288,10 @@ static uint32_t rr_shade(const float a[3], const float b[3], const float c[3])
 /* ------------------------------------------------------------- mesh baker ---- */
 
 typedef struct {
-    int      nrt, nrq, ngq, nsq;             /* counts: road tris/quads, ground, skirt */
+    int      nrt, nrq, ngq, nsq, nwq;        /* counts: road tris/quads, ground, skirt, [roam LE] water */
     TD5_MeshHeader *m;
     TD5_MeshVertex *v;
-    int      ct, cq, cg, cs;                 /* write cursors (in primitives)         */
+    int      ct, cq, cg, cs, cw;             /* write cursors (in primitives)         */
     float    lo[3], hi[3];
 } RRSb;
 
@@ -424,11 +443,15 @@ static int rr_ground_build(const RoamTile *t, RRGround *g, TD5_RoamHeight *hc, c
         if (z < minz) minz = z;
         if (z > maxz) maxz = z;
     }
-    /* [G5] the clamp reads the raster of the lattice ring one cell outside the tile (up to 1.41 cells out in x / z) */
-    if (!td5_roam_height_prefetch(hc, minx - 2000.0 - 2.0 * S / G, minz - 2000.0 - 2.0 * S / G,
-                                  maxx + 2000.0 + 2.0 * S / G, maxz + 2000.0 + 2.0 * S / G)) {
-        free(g->h); free(g->hole); memset(g, 0, sizeof *g);
-        return 0;
+    /* [G5] the clamp reads the raster of the lattice ring one cell outside the tile (up to 1.41 cells out in x / z).
+     * [roam LE] the water level reads one more ring (lattice -2..G+2: up to 2.83 cells out), so the window grows
+     * when the water is on; a sample's value does not depend on the window (bilinear inside the rect + PAD). */
+    {
+        const double m = 2000.0 + (s_rr.water ? 4.0 : 2.0) * S / G;
+        if (!td5_roam_height_prefetch(hc, minx - m, minz - m, maxx + m, maxz + m)) {
+            free(g->h); free(g->hole); memset(g, 0, sizeof *g);
+            return 0;
+        }
     }
     for (j = 0; j <= G; j++) {
         for (i = 0; i <= G; i++) {
@@ -471,6 +494,104 @@ static int rr_ground_cell_ok(const RRGround *g, int i, int j)
     if (!g->h || g->hole[j * g->G + i]) return 0;
     return !isnan(g->h[j * W + i]) && !isnan(g->h[j * W + i + 1]) &&
            !isnan(g->h[(j + 1) * W + i]) && !isnan(g->h[(j + 1) * W + i + 1]);
+}
+
+/* ------------------------------------------------------------ [roam LE] water ---- */
+
+#define RR_WATER_BELOW_CM   25               /* default: the plane this far under the lowest bank point    */
+#define RR_WATER_ROAD_GAP   (0.10 * RR_UPM)  /* a road over a water cell must stand this far over the plane */
+#define RR_WATER_TILE       6000.0           /* world units per water page repeat (TD5_TG_WATER_TILE)      */
+
+typedef struct {
+    int            G;
+    double        *L;              /* (G+1)^2 surface level per lattice point (NAN = none) */
+    unsigned char *cell;           /* G*G: 1 = a water quad                               */
+    int            ncell, nwet, nroad, ndeck;
+    double         min_clear;      /* lowest road - plane over a kept cell, units           */
+} RRWater;
+
+static void rr_water_free(RRWater *w) { free(w->L); free(w->cell); memset(w, 0, sizeof *w); }
+
+/* The water lattice of one tile (see the WATER paragraph of the header). Reads the lattice ring -1..G+1 of the
+ * raster (prefetched by rr_ground_build) and the 3x3 ROAD tiles. 0 = no water quad in the tile. */
+static int rr_water_build(const RoamTile *t, const RRGround *gr, TD5_RoamHeight *hc, const RRNb *nb, RRWater *w)
+{
+    const int G = gr->G, W = G + 1, R = G + 3;
+    const double cs = (double)s_rr.grid.tile / (double)G;
+    double *S = NULL, *low = NULL, *cm = NULL;
+    unsigned char *wet = NULL;
+    int i, j, k, any = 0;
+    memset(w, 0, sizeof *w);
+    w->G = G;
+    w->min_clear = 1e300;
+    if (!s_rr.water || !gr->h || !hc) return 0;
+    S = (double *)malloc((size_t)R * (size_t)R * sizeof(double));
+    wet = (unsigned char *)calloc((size_t)R * (size_t)R, 1);
+    if (!S || !wet) goto fail;
+    for (j = 0; j < R; j++) for (i = 0; i < R; i++) {
+        double x, z, h;
+        int wt = 0;
+        td5_roam_gfix_point(&s_rr.grid, t->tx, t->tz, i - 1, j - 1, G, &x, &z);
+        if (td5_roam_height_sample(hc, x, z, &h, &wt)) {
+            S[j * R + i] = wt ? h + TD5_ROAM_WATER_DEPTH : h;      /* the raster's own surface where wet */
+            wet[j * R + i] = (unsigned char)wt;
+            any |= wt;
+        } else S[j * R + i] = NAN;
+    }
+    if (!any) goto fail;
+    /* dry points: the DRAWN ground (the G5 lowering of rr_ground_clamp, then the drop) */
+    if (s_rr.ground_clamp && nb && !td5_roam_gfix_g4()) {
+        low = (double *)malloc((size_t)R * (size_t)R * sizeof(double));
+        if (!low) goto fail;
+        td5_roam_gfix_lower(&s_rr.grid, nb->t, hc, t->tx, t->tz, G, -1, R, low);
+    }
+    for (k = 0; k < R * R; k++)
+        if (!wet[k] && !isnan(S[k])) S[k] -= (low ? low[k] : 0.0) + s_rr.ground_drop;
+    w->L = (double *)malloc((size_t)W * (size_t)W * sizeof(double));
+    w->cell = (unsigned char *)calloc((size_t)G * (size_t)G, 1);
+    if (!w->L || !w->cell) goto fail;
+    for (j = 0; j <= G; j++) for (i = 0; i <= G; i++) {
+        double m = 1e300;
+        int ok = 1, di, dj;
+        for (dj = 0; dj < 3; dj++) for (di = 0; di < 3; di++) {
+            const double v = S[(j + dj) * R + i + di];
+            if (isnan(v)) ok = 0;
+            else if (v < m) m = v;
+        }
+        w->L[j * W + i] = ok ? m - s_rr.water_below : NAN;
+        if (i < G && j < G && wet[(j + 1) * R + i + 1]) w->nwet++;        /* a seam point is its lower tile's */
+    }
+    if (nb) {
+        cm = (double *)malloc((size_t)G * (size_t)G * sizeof(double));
+        if (!cm) goto fail;
+        td5_roam_gfix_cells(&s_rr.grid, nb->t, t->tx * G, t->tz * G, G, cs, cm);
+    }
+    for (j = 0; j < G; j++) for (i = 0; i < G; i++) {
+        static const int di[4] = { 0, 1, 1, 0 }, dj[4] = { 0, 0, 1, 1 };
+        double mx = -1e300;
+        int kk, wc = 0, ok = 1;
+        if (gr->hole[j * G + i]) continue;
+        for (kk = 0; kk < 4; kk++) {
+            const double l = w->L[(j + dj[kk]) * W + i + di[kk]];
+            wc |= wet[(j + dj[kk] + 1) * R + i + di[kk] + 1];
+            if (isnan(l)) ok = 0;
+            else if (l > mx) mx = l;
+        }
+        if (!wc || !ok) continue;
+        if (cm && cm[j * G + i] < 1e299) {
+            if (mx > cm[j * G + i] - RR_WATER_ROAD_GAP) { w->nroad++; continue; }
+            w->ndeck++;
+            if (cm[j * G + i] - mx < w->min_clear) w->min_clear = cm[j * G + i] - mx;
+        }
+        w->cell[j * G + i] = 1;
+        w->ncell++;
+    }
+    free(S); free(wet); free(low); free(cm);
+    return w->ncell > 0;
+fail:
+    free(S); free(wet); free(low); free(cm);
+    { const int nwet = w->nwet; rr_water_free(w); w->G = G; w->nwet = nwet; w->min_clear = 1e300; }
+    return 0;
 }
 
 /* ground cell (i, j) -> sub-block index */
@@ -982,6 +1103,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
 {
     RRSb sb[RR_MAXMESH];
     RRGround gr;
+    RRWater wa;
     RRTile *rt;
     uint8_t *spsb = NULL, *trsb = NULL, *besb = NULL;
     RRXList xl;
@@ -991,6 +1113,8 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
 
     memset(sb, 0, sizeof sb);
     memset(&xl, 0, sizeof xl);
+    memset(&gr, 0, sizeof gr);
+    memset(&wa, 0, sizeof wa);
     for (k = 0; k < RR_MAXMESH; k++) {
         sb[k].lo[0] = sb[k].lo[1] = sb[k].lo[2] = 1e30f;
         sb[k].hi[0] = sb[k].hi[1] = sb[k].hi[2] = -1e30f;
@@ -1041,21 +1165,26 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         int a, b;
         for (b = 0; b < gr.G; b++) for (a = 0; a < gr.G; a++)
             if (rr_ground_cell_ok(&gr, a, b)) sb[rr_cell_sb(&gr, a, b)].ngq++;
+        if (rr_water_build(t, &gr, hc, nb, &wa))                       /* [roam LE] */
+            for (b = 0; b < gr.G; b++) for (a = 0; a < gr.G; a++)
+                if (wa.cell[b * gr.G + a]) sb[rr_cell_sb(&gr, a, b)].nwq++;
     }
+    rt->nwet = (uint32_t)wa.nwet; rt->nwater_road = (uint32_t)wa.nroad; rt->nwater_deck = (uint32_t)wa.ndeck;
+    rt->water_clear = wa.min_clear;
 
     /* ---- allocate one block per non-empty sub-block ---- */
     for (k = 0; k < RR_MAXMESH; k++) {
-        const int nv = sb[k].nrt * 3 + (sb[k].nrq + sb[k].ngq + sb[k].nsq) * 4;
+        const int nv = sb[k].nrt * 3 + (sb[k].nrq + sb[k].ngq + sb[k].nsq + sb[k].nwq) * 4;
         size_t hdr = (sizeof(TD5_MeshHeader) + 15u) & ~(size_t)15u;
         size_t bytes;
         uint8_t *blk;
         if (nv <= 0) continue;
-        bytes = hdr + 3u * sizeof(TD5_PrimitiveCmd) + (size_t)nv * sizeof(TD5_MeshVertex);
+        bytes = hdr + 4u * sizeof(TD5_PrimitiveCmd) + (size_t)nv * sizeof(TD5_MeshVertex);
         blk = (uint8_t *)calloc(1, bytes);
         if (!blk) { ok = 0; break; }
         sb[k].m = (TD5_MeshHeader *)blk;
         sb[k].m->commands = (TD5_PrimitiveCmd *)(blk + hdr);
-        sb[k].v = (TD5_MeshVertex *)(blk + hdr + 3u * sizeof(TD5_PrimitiveCmd));
+        sb[k].v = (TD5_MeshVertex *)(blk + hdr + 4u * sizeof(TD5_PrimitiveCmd));
         sb[k].m->vertices = sb[k].v;
         sb[k].m->normals = NULL;
         sb[k].m->render_type = 259;
@@ -1151,6 +1280,32 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         b->cs++;
         rt->nskirt++;
     }
+    if (wa.cell) {                                                      /* [roam LE] water quads, after the skirts */
+        int a, bq;
+        const int W = gr.G + 1;
+        for (bq = 0; bq < gr.G; bq++) for (a = 0; a < gr.G; a++) {
+            static const int di[4] = { 0, 1, 1, 0 }, dj[4] = { 0, 0, 1, 1 };
+            float p[4][3], uv[4][2];
+            RRSb *b;
+            TD5_MeshVertex *q;
+            uint32_t col;
+            int kk;
+            if (!wa.cell[bq * gr.G + a]) continue;
+            for (kk = 0; kk < 4; kk++) {
+                double x, z;
+                rr_ground_point(t, a + di[kk], bq + dj[kk], gr.G, &x, &z);
+                rr_pt(x, wa.L[(bq + dj[kk]) * W + a + di[kk]], z, p[kk]);
+                uv[kk][0] = (float)(x / RR_WATER_TILE);                 /* place frame: rebase-proof, seam-free */
+                uv[kk][1] = (float)(z / RR_WATER_TILE);
+            }
+            col = rr_shade(p[0], p[1], p[2]);
+            b = &sb[rr_cell_sb(&gr, a, bq)];
+            q = b->v + b->nrt * 3 + (b->nrq + b->ngq + b->nsq) * 4 + b->cw * 4;
+            for (kk = 0; kk < 4; kk++) rr_put(b, q + kk, p[kk], col, uv[kk][0], uv[kk][1]);
+            b->cw++;
+            rt->nwater++;
+        }
+    }
 
     /* ---- headers, commands, bounding spheres ---- */
     for (k = 0; k < RR_MAXMESH; k++) {
@@ -1173,6 +1328,11 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         if (sb[k].nsq) {
             c[nc].dispatch_type = 0; c[nc].texture_page_id = (int16_t)s_rr.page_kerb;
             c[nc].triangle_count = 0; c[nc].quad_count = (uint16_t)sb[k].nsq;
+            nc++;
+        }
+        if (sb[k].nwq) {                                                /* [roam LE] */
+            c[nc].dispatch_type = 0; c[nc].texture_page_id = (int16_t)s_rr.page_water;
+            c[nc].triangle_count = 0; c[nc].quad_count = (uint16_t)sb[k].nwq;
             nc++;
         }
         m->command_count = nc;
@@ -1207,7 +1367,12 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
         rt->dl.meshes = rt->vis;
     }
     rr_ground_free(&gr);
+    rr_water_free(&wa);
     free(spsb); free(trsb); free(besb); free(xl.t);
+    if (rt->nwater || rt->nwater_road)
+        TD5_LOG_D(LOG_TAG, "ROAM_WATER tile %d,%d quads=%u wet_points=%u road_cells_dropped=%u deck_cells=%u "
+                  "min_clear=%.2f m", t->tx, t->tz, rt->nwater, rt->nwet, rt->nwater_road, rt->nwater_deck,
+                  rt->water_clear < 1e299 ? rt->water_clear / RR_UPM : -1.0);
     TD5_LOG_D(LOG_TAG, "ROAM_RENDER_HC tile %d,%d patch_tris=%u pieces=%u stop_lines=%u lane_quads=%u",
               t->tx, t->tz, rt->ntri, rt->npiece, rt->nstop, rt->nroad);
     if (rt->nmesh == 0) { free(rt); return NULL; }
@@ -1215,6 +1380,7 @@ static RRTile *rr_bake(const RoamTile *t, TD5_RoamHeight *hc, const RRNb *nb)
 
 done_free:
     rr_ground_free(&gr);
+    rr_water_free(&wa);
     for (k = 0; k < RR_MAXMESH; k++) free(sb[k].m);
 done_counts:
     free(spsb); free(trsb); free(besb); free(xl.t);
@@ -1525,6 +1691,15 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
     s_rr.stoplines   = td5_env_int("TD5RE_ROAM_STOPLINES", 1, 0, 1);     /* [roam HC] 0 = no stop lines         */
     s_rr.kerb_line   = td5_env_int("TD5RE_ROAM_KERB_LINE", 0, 0, 1);     /* [roam HC] 1 = lane 0's kerb stripe  */
     s_rr.radius      = td5_env_int("TD5RE_ROAM_RENDER_R", 500, 50, 5000) * RR_UPM;
+    {   /* [roam LE] the water plane: on when the host has a water page (or the knob names one) */
+        int hw = -1;
+#ifdef RR_HAVE_MODE
+        if (td5_roam_active()) hw = td5_roam_host_water_page();
+#endif
+        s_rr.page_water  = td5_env_int("TD5RE_ROAM_RENDER_PAGE_WATER", hw, -1, 1023);
+        s_rr.water       = td5_env_int("TD5RE_ROAM_WATER", 1, 0, 1) && s_rr.page_water >= 0;
+        s_rr.water_below = td5_env_int("TD5RE_ROAM_WATER_BELOW_CM", RR_WATER_BELOW_CM, 0, 300) * (RR_UPM / 100.0);
+    }
 #ifndef TD5RE_RELEASE
     s_rr.audit       = td5_env_int("TD5RE_ROAM_CULL_AUDIT", 0, 0, 1);   /* [roam IA] */
 #endif
@@ -1543,10 +1718,11 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
     if (!s_rr.f.route && td5_roam_scn_enabled()) td5_roam_furn_session_begin(place, &s_rr.grid);
     s_rr.began = 1;
     TD5_LOG_I(LOG_TAG, "roam render: begin place=%s frame origin=(%d,%d) dy=%.0f route=%d pages road=%d ground=%d "
-              "kerb=%d ground=%s cell=%d m drop=%.0f units clamp=%d lift=%.0f R=%.0f m",
+              "kerb=%d ground=%s cell=%d m drop=%.0f units clamp=%d lift=%.0f R=%.0f m water=%d page=%d below=%.0f units",
               place, (int)s_rr.f.ox, (int)s_rr.f.oz, s_rr.f.dy, s_rr.f.route, s_rr.page_road, s_rr.page_ground,
               s_rr.page_kerb, (s_rr.use_ground && s_rr.hc_ok) ? "on" : "off", s_rr.cell_m,
-              s_rr.ground_drop, s_rr.ground_clamp, s_rr.lift, s_rr.radius / RR_UPM);
+              s_rr.ground_drop, s_rr.ground_clamp, s_rr.lift, s_rr.radius / RR_UPM, s_rr.water, s_rr.page_water,
+              s_rr.water_below);
     return 1;
 }
 
@@ -2475,6 +2651,138 @@ int td5_roam_render_ground_census_dev_test(void)
     for (k = 0; k < z.ntile; k++) free(z.cmin[k]);
     free(all); free(z.cmin); free(z.cell); free(z.slot); free(z.gr); free(z.tile); free(list);
     td5_roam_height_close(z.hc); free(z.hc);
+    memset(&s_rr, 0, sizeof s_rr);
+    return 1;
+}
+
+/* [roam LE] DEV: TD5RE_ROAM_WATER_CENSUS=<tile list> ("tx tz" per line; _archive/roam/LE/wet_tiles.py writes the
+ * wet ones) bakes every listed tile through rr_bake with the session knobs (TD5RE_ROAM_WATER=0 for the before
+ * column) and writes <log>/roam_water_census.txt + .csv: water quads and m2, wet lattice points, cells dropped for
+ * a road at the water's level, cells under a deck and their lowest clearance, water vertex MB, and an FNV hash of
+ * every GROUND quad (equal with the water on and off = the water changed nothing else). Tiles come from the place's
+ * roam/ dir (build them with --RoamBuildTiles=list:<file> first). 1 = handled, exit. */
+static uint32_t rr_fnv(uint32_t h, const void *p, size_t n)
+{
+    const unsigned char *b = (const unsigned char *)p;
+    while (n--) { h ^= *b++; h *= 16777619u; }
+    return h;
+}
+
+int td5_roam_render_water_census_dev_test(void)
+{
+    static const char place[] = "la_plata_partido";
+    const char *lp = getenv("TD5RE_ROAM_WATER_CENSUS");
+    char path[600], wpath[512], err[160], gtxt[4096];
+    int (*list)[2] = NULL;
+    int nlist, i, nread = 0, nmiss = 0, nwt = 0;
+    long q_tot = 0, wet_tot = 0, road_tot = 0, deck_tot = 0, cells_ground = 0;
+    double clear_min = 1e300, cell_m2;
+    uint32_t ghash = 2166136261u, whash = 2166136261u, t0;
+    TD5_RoamHeight *hc;
+    TD5_File *f;
+    FILE *o, *csv;
+    const char *ld;
+    if (!lp || !lp[0] || !strcmp(lp, "0")) return 0;
+    t0 = td5_plat_time_ms();
+    memset(&s_rr, 0, sizeof s_rr);
+    snprintf(s_rr.place, sizeof s_rr.place, "%s", place);
+    td5_geo_source_path(path, sizeof path, place, "roam/ROAMGRID.JSON");
+    if ((f = td5_plat_file_open(path, "rb")) != NULL) {
+        const int64_t n = td5_plat_file_size(f);
+        if (n > 0 && n < (int64_t)sizeof gtxt && td5_plat_file_read(f, gtxt, (size_t)n) == (size_t)n) {
+            gtxt[n] = 0; s_rr.grid_ok = roam_grid_parse(gtxt, &s_rr.grid);
+        }
+        td5_plat_file_close(f);
+    }
+    if (!s_rr.grid_ok) roam_grid_default(place, &s_rr.grid);
+    /* the knobs as td5_roam_render_begin reads them; pages are census tags (ground = 2, water = 4) */
+    s_rr.page_road = 1; s_rr.page_ground = 2; s_rr.page_kerb = 3; s_rr.page_water = 4;
+    s_rr.use_ground   = 1;
+    s_rr.cell_m       = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
+    if (64 % s_rr.cell_m != 0) s_rr.cell_m = 16;
+    s_rr.ground_drop  = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (RR_UPM / 100.0);
+    s_rr.ground_clamp = !td5_env_flag_off("TD5RE_ROAM_GROUND_NOFIX");
+    s_rr.patch_uv     = td5_env_int("TD5RE_ROAM_PATCH_UV", 1, 0, 1);
+    s_rr.stoplines    = td5_env_int("TD5RE_ROAM_STOPLINES", 1, 0, 1);
+    s_rr.kerb_line    = td5_env_int("TD5RE_ROAM_KERB_LINE", 0, 0, 1);
+    s_rr.water        = td5_env_int("TD5RE_ROAM_WATER", 1, 0, 1);
+    s_rr.water_below  = td5_env_int("TD5RE_ROAM_WATER_BELOW_CM", RR_WATER_BELOW_CM, 0, 300) * (RR_UPM / 100.0);
+    cell_m2 = (double)s_rr.cell_m * (double)s_rr.cell_m;
+    hc = (TD5_RoamHeight *)calloc(1, sizeof *hc);
+    td5_geo_source_path(path, sizeof path, place, "HEIGHT.R16");
+    td5_geo_source_path(wpath, sizeof wpath, place, "WATER.R8");
+    if (!hc || !td5_roam_height_open(hc, path, wpath,
+            (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0)) {
+        TD5_LOG_E(LOG_TAG, "WATERCENSUS: no height source at %s", path); free(hc); return 1;
+    }
+    nlist = td5_roam_read_tile_list(lp, &list);
+    if (nlist <= 0) { TD5_LOG_E(LOG_TAG, "WATERCENSUS: no tiles in %s", lp); td5_roam_height_close(hc); free(hc); return 1; }
+    ld = td5_plat_log_dir();
+    snprintf(path, sizeof path, "%sroam_water_census.csv", ld ? ld : "");
+    csv = fopen(path, "w");
+    if (csv) fprintf(csv, "tx,tz,water_quads,wet_points,road_cells_dropped,deck_cells,min_clear_m,ground_quads\n");
+    for (i = 0; i < nlist; i++) {
+        RoamTile t;
+        RRNb nb;
+        RRTile *rt;
+        memset(&t, 0, sizeof t);
+        td5_roam_tile_path(path, sizeof path, NULL, place, list[i][0], list[i][1]);
+        if (!td5_roam_tile_read(path, &t, 0, err, sizeof err)) { nmiss++; continue; }
+        nread++;
+        rr_nb_get(&nb, &t, NULL, 0);
+        rt = rr_bake(&t, hc, &nb);
+        rr_nb_free(&nb);
+        if (rt) {
+            int k, ci;
+            for (k = 0; k < rt->nmesh; k++) {           /* hash the ground quads + the water quads, by command */
+                const TD5_MeshHeader *m = rt->mesh[k];
+                const TD5_MeshVertex *v = m->vertices;
+                for (ci = 0; ci < m->command_count; ci++) {
+                    const TD5_PrimitiveCmd *c = &m->commands[ci];
+                    const int nv = c->triangle_count * 3 + c->quad_count * 4;
+                    int e;
+                    for (e = 0; e < nv; e++) {
+                        const float pp[3] = { v[e].pos_x, v[e].pos_y, v[e].pos_z };
+                        if (c->texture_page_id == s_rr.page_ground) ghash = rr_fnv(ghash, pp, sizeof pp);
+                        if (c->texture_page_id == s_rr.page_water)  whash = rr_fnv(whash, pp, sizeof pp);
+                    }
+                    v += nv;
+                }
+            }
+            q_tot += rt->nwater; wet_tot += rt->nwet; road_tot += rt->nwater_road; deck_tot += rt->nwater_deck;
+            cells_ground += rt->nground;
+            if (rt->water_clear < clear_min) clear_min = rt->water_clear;
+            if (rt->nwater) nwt++;
+            if (csv) fprintf(csv, "%d,%d,%u,%u,%u,%u,%.2f,%u\n", t.tx, t.tz, rt->nwater, rt->nwet, rt->nwater_road,
+                             rt->nwater_deck, rt->water_clear < 1e299 ? rt->water_clear / RR_UPM : -1.0, rt->nground);
+            rr_free_tile(rt);
+        }
+        td5_roam_tile_free(&t);
+    }
+    if (csv) fclose(csv);
+    snprintf(path, sizeof path, "%sroam_water_census.txt", ld ? ld : "");
+    if ((o = fopen(path, "w")) != NULL) {
+        fprintf(o, "roam water census (roam LE), place %s, list %s\n", place, lp);
+        fprintf(o, "knobs: TD5RE_ROAM_WATER=%d below=%.0f cm cell=%d m drop=%.0f cm clamp=%d\n", s_rr.water,
+                s_rr.water_below / (RR_UPM / 100.0), s_rr.cell_m, s_rr.ground_drop / (RR_UPM / 100.0), s_rr.ground_clamp);
+        fprintf(o, "tiles listed %d, read %d, missing ROAMTILE %d, with water %d\n", nlist, nread, nmiss, nwt);
+        fprintf(o, "water quads %ld (%.3f km2), wet lattice points %ld (%.3f km2)\n", q_tot, q_tot * cell_m2 / 1e6,
+                wet_tot, wet_tot * cell_m2 / 1e6);
+        fprintf(o, "water on road: cells dropped (road under the plane + %.0f cm) %ld; kept cells under a road (deck) %ld, "
+                "lowest clearance %.2f m\n", RR_WATER_ROAD_GAP / (RR_UPM / 100.0), road_tot, deck_tot,
+                clear_min < 1e299 ? clear_min / RR_UPM : -1.0);
+        fprintf(o, "water vertex data %.2f MB\n", (double)q_tot * 4.0 * sizeof(TD5_MeshVertex) / 1048576.0);
+        fprintf(o, "ground quads %ld hash %08x ; water hash %08x\n", cells_ground, ghash, whash);
+        fprintf(o, "ms %u\n", (unsigned)(td5_plat_time_ms() - t0));
+        fclose(o);
+    }
+    fprintf(stderr, "WATERCENSUS: %d tiles read (%d missing), water quads %ld (%.3f km2), road-dropped %ld, deck %ld "
+            "min_clear %.2f m, ground hash %08x water hash %08x -> %s\n", nread, nmiss, q_tot, q_tot * cell_m2 / 1e6,
+            road_tot, deck_tot, clear_min < 1e299 ? clear_min / RR_UPM : -1.0, ghash, whash, path);
+    TD5_LOG_I(LOG_TAG, "WATERCENSUS: %d tiles read (%d missing), water quads %ld, road-dropped %ld, deck %ld, ground hash "
+              "%08x water hash %08x", nread, nmiss, q_tot, road_tot, deck_tot, ghash, whash);
+    free(list);
+    td5_roam_height_close(hc); free(hc);
     memset(&s_rr, 0, sizeof s_rr);
     return 1;
 }
