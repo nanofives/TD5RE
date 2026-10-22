@@ -535,8 +535,9 @@ static void sh_dress_front(TD5_RoamShopSource *s, TG_TileCtx *c, const TD5_RoamS
     if (cross) {
         const double at = fr->len * 0.2 < SH_M(1.0) ? fr->len * 0.2 : SH_M(1.0);
         const double cx = ax + tx * at, cz = az + tz * at;
-        const double yc = 0.5 * (glass_top + fascia_top) + SH_M(0.15);
-        const double o0 = SH_M(0.25), o1 = SH_M(0.95), om = 0.5 * (o0 + o1), arm = 0.5 * (o1 - o0), bar = SH_M(0.12);
+        /* 1.0 m across, its centre at the fascia's top (a 0.25 m bracket out of the wall) */
+        const double yc = fascia_top;
+        const double o0 = SH_M(0.25), o1 = SH_M(1.25), om = 0.5 * (o0 + o1), arm = 0.5 * (o1 - o0), bar = SH_M(0.17);
         double ox[2], oz[2];
         ox[0] = cx + fr->nx * o0; oz[0] = cz + fr->nz * o0;
         ox[1] = cx + fr->nx * o1; oz[1] = cz + fr->nz * o1;
