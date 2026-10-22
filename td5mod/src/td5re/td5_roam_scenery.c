@@ -221,6 +221,7 @@ struct TD5_RoamScnSource {
     int       bld_log;                        /* [IC] TD5RE_ROAM_BLD_LOG: one log line per footprint (its fate) */
     int       cover_green;                    /* [IC] TD5RE_ROAM_COVER_GREEN: unmapped vegetated casco loops are green */
     int       inf_rail;                       /* [integ-roamI] TD5RE_ROAM_INF_RAIL_VETO: no infill on a railway */
+    int       canopy_green;                      /* [roam LA] TD5RE_ROAM_CANOPY_GREEN (sc_canopy_green) */
     int       ic_despike, ic_drops, ic_infill;  /* [IC] TD5RE_ROAM_AREA_DESPIKE / _BLD_DROPS / _IC_INFILL (A/B: all IC
                                                  * knobs 0 = the round M scenery, byte for byte) */
     /* the scenery's OWN height source, re-windowed per tile with ONE fixed rectangle:
@@ -862,6 +863,7 @@ struct TG_TileCtx {
     /* [roam LA] SECTION trees: the knobs, the street / lot tree candidates (emitted after the furniture), every
      * planted crown (x, z, radius; plazas too) for the canopy census, and each sub-block's tree records */
     int      st_on, lt_on;
+    void    *pv_bld;                /* [roam LA] the pavement's footprint set (PvBld), kept for the lots (sc_canopy_green) */
     struct ScTreeCand *tcand;
     int      ntcand, cap_tcand;
     double  *tpos;
@@ -5168,6 +5170,10 @@ static int sc_emit_pavement(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, i
     free(e.bat);
     if (ok && c->lt_on && !sc_lot_trees(s, c, &bld, ar, nar)) ok = 0;   /* [roam LA] while the footprints are at hand */
 out:
+    if (ok && s->canopy_green && !c->pv_bld) {   /* [roam LA] the lots ask it (sc_canopy_green); freed by the build */
+        PvBld *keep = (PvBld *)malloc(sizeof *keep);
+        if (keep) { *keep = bld; c->pv_bld = keep; memset(&bld, 0, sizeof bld); }
+    }
     pv_bld_free(&bld);
     c->st.ms_pv += td5_plat_time_ms() - t0;
     return ok;
@@ -5354,6 +5360,28 @@ static int sc_lot_flush(TG_TileCtx *c, int sbi, ScLotSb *L, int page)
     return 1;
 }
 
+/* [roam LA] CANOPY GREEN. Paseo del Bosque by the lake (-34.9090, -57.9386): a real wooded park no OSM area covers, so its
+ * ground was a paved city lot and its frontage could take infill. A quad (tile-local, 4 corners) is canopy green when
+ * CANOPY.R8 reads >= 3 m on at least SC_CG_CANOPY of its 4 x 4 sample points and no AREAS polygon of any kind (anyp, else
+ * the lots' own set) holds more than SC_CG_MAPPED of them. TD5RE_ROAM_CANOPY_GREEN=0 turns it off. */
+#define SC_CG_CANOPY    12
+#define SC_CG_MAPPED    2
+static int sc_canopy_green(const TD5_RoamScnSource *s, const TG_TileCtx *c, const double *qx, const double *qz)
+{
+    int a, b, can = 0, mapped = 0;
+    if (!s->canopy_green || !c->canopy_ok) return 0;
+    for (b = 0; b < 4; b++)
+        for (a = 0; a < 4; a++) {
+            const double fu = (a + 0.5) / 4.0, fv = (b + 0.5) / 4.0;
+            const double x = qx[0] + (qx[1] - qx[0]) * fu + (qx[3] - qx[0]) * fv;
+            const double z = qz[0] + (qz[1] - qz[0]) * fu + (qz[3] - qz[0]) * fv;
+            const double X = x + (double)c->org_x, Z = z + (double)c->org_z;
+            can += sc_canopy_m(c, x, z) >= SC_CANOPY_M;
+            mapped += c->anyp ? pv_poly_has(c->anyp, c->nanyp, X, Z) : (sc_lot_class_at(c->lotp, c->nlotp, X, Z) != SC_LC_BUILD);
+        }
+    return can >= SC_CG_CANOPY && mapped <= SC_CG_MAPPED;
+}
+
 static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
 {
     const int cell_m = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
@@ -5439,6 +5467,18 @@ static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *sel
         }
         green = ng >= 3;
         pave = s->lots_on && city && !green;
+        if (pave && c->pv_bld) {              /* [roam LA] canopy green: wooded ground no OSM area maps, no footprint on it */
+            const double gqx[4] = { cell[0], cell[3], cell[6], cell[9] }, gqz[4] = { cell[2], cell[5], cell[8], cell[11] };
+            if (sc_canopy_green(s, c, gqx, gqz)) {
+                int bl = 0;
+                for (k = 0; k < 5 && !bl; k++) {
+                    const double sx = cell[0] + (cell[3] - cell[0]) * fq[k][0] + (cell[9] - cell[0]) * fq[k][1];
+                    const double sz = cell[2] + (cell[5] - cell[2]) * fq[k][0] + (cell[11] - cell[2]) * fq[k][1];
+                    bl = pv_in_building(c, (const PvBld *)c->pv_bld, sx, sz) || inf_in_lot(c, sx, sz);
+                }
+                if (!bl) { pave = 0; c->st.lot_canopy_green++; }
+            }
+        }
         {
             const double t0[9] = { cell[0], cell[1], cell[2], cell[3], cell[4], cell[5], cell[6], cell[7], cell[8] };
             const double t1[9] = { cell[0], cell[1], cell[2], cell[6], cell[7], cell[8], cell[9], cell[10], cell[11] };
@@ -5725,6 +5765,7 @@ static int inf_lot_test(PvEmit *e, const double *fx, const double *fz, const dou
             for (k = 0; k < 4; k++) { X[k] = qx[k] + (double)c->org_x; Z[k] = qz[k] + (double)c->org_z; }
             if (td5_roam_rails_bed_near(e->s->rails, X, Z, 4, 0.5 * e->s->upm)) return 5;
         }
+        if (sc_canopy_green(e->s, c, qx, qz)) return 6;   /* [roam LA] wooded ground no OSM area maps: no row house */
     }
     return 0;
 }
@@ -5896,6 +5937,7 @@ refused:
         if (why == 2) c->st.inf_drop_road++;
         else if (why == 3) c->st.inf_drop_real++;
         else if (why == 4 || why == 5) c->st.inf_drop_area++;
+        else if (why == 6) c->st.inf_drop_canopy++;   /* [roam LA] */
         else c->st.inf_drop_shape++;
         if (why == 5 || rail_hit) { c->st.inf_drop_rail++; c->st.inf_m_rail += (a1 - a0) / U; }
         if ((why == 5 || rail_hit) && s->infill_log)
@@ -5904,6 +5946,7 @@ refused:
                       why, Dcap / U, (a1 - a0) / U);
         if (why == 3) c->st.inf_m_real += (a1 - a0) / U;
         else if (why == 4 || why == 5) c->st.inf_m_area += (a1 - a0) / U;
+        else if (why == 6) c->st.inf_m_canopy += (a1 - a0) / U;   /* [roam LA] */
         else c->st.inf_m_other += (a1 - a0) / U;
     }
     return 1;
@@ -6191,6 +6234,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->ic_despike = td5_env_int("TD5RE_ROAM_AREA_DESPIKE", 1, 0, 1);
     s->ic_drops = td5_env_int("TD5RE_ROAM_BLD_DROPS", 1, 0, 1);
     s->ic_infill = td5_env_int("TD5RE_ROAM_IC_INFILL", 1, 0, 1);
+    s->canopy_green = td5_env_int("TD5RE_ROAM_CANOPY_GREEN", 1, 0, 1);   /* [roam LA] */
     s->inf_rail = td5_env_int("TD5RE_ROAM_INF_RAIL_VETO", 1, 0, 1);
     s->lot_page  = td5_env_int("TD5RE_ROAM_LOT_PAGE", TD5_TG_PAGE_R4_PIER, 0, 1023);   /* light cast concrete */
     {
@@ -6401,6 +6445,7 @@ out:
     free(c->ringpool); c->ringpool = NULL;
     free(c->pv_B); c->pv_B = NULL; c->pv_nb = 0;
     free(c->pv_ways); c->pv_ways = NULL; c->pv_nways = 0; c->pv_ready = 0;
+    if (c->pv_bld) { pv_bld_free((PvBld *)c->pv_bld); free(c->pv_bld); c->pv_bld = NULL; }   /* [roam LA] */
     c->ninfr = 0;                             /* infr itself is kept for the next tile (sc_ctx_free) */
     return sc;
 }
@@ -6504,6 +6549,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long lt[16] = { 0 };                                   /* [roam LA] */
+    long cg_n[2] = { 0, 0 };
+    double cg_m = 0.0;
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     double shift_max = 0.0, lot_m2[4] = { 0.0, 0.0, 0.0, 0.0 }, ic_m[4] = { 0.0, 0.0, 0.0, 0.0 }, rl_lift_max = 0.0, inf_rail_m = 0.0;
     uint32_t ms_max = 0, ms_sum = 0, bytes_max = 0;
@@ -6613,6 +6660,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         lt[5] += r->st_narrow; lt[6] += r->st_facade; lt[7] += r->st_noslab; lt[8] += r->st_furn_drop;
         lt[9] += r->st_furn_moved; lt[10] += r->st_border; lt[11] += r->st_lot_hidden; lt[12] += r->st_lot_refused;
         lt[13] += r->st_on_road; lt[14] += r->canopy_cells; lt[15] += r->canopy_cov;
+        cg_n[0] += r->lot_canopy_green; cg_n[1] += r->inf_drop_canopy; cg_m += r->inf_m_canopy;
         lot_t[0] += r->lot_cells; lot_t[1] += r->lot_green; lot_t[2] += r->lot_rural; lot_t[3] += r->lot_under_road; lot_t[4] += r->lot_rings;
         lot_t[6] += r->inf_lots; lot_t[7] += r->inf_emitted;
         lot_t[8] += r->inf_drop_real; lot_t[9] += r->inf_drop_road; lot_t[10] += r->inf_drop_area;
@@ -6766,6 +6814,13 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  lt[0], lt[1], lt[2], lt[0] + lt[1] + lt[2], lt[3], lt[4], lt[5], lt[6], lt[7], lt[8], lt[9], lt[10],
                  lt[11], lt[12], lt[14], lt[15], lt[14] ? 100.0 * (double)lt[15] / (double)lt[14] : 0.0, lt[13],
                  td5_env_int("TD5RE_ROAM_STREET_TREES", 1, 0, 1), td5_env_int("TD5RE_ROAM_LOT_TREES", 1, 0, 1));
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam canopy green [LA]: %ld city lot cell(s) left lawn (CANOPY >= 3 m on 12 of 16 points, no OSM area, no "
+                 "footprint), %ld infill lot(s) refused on such ground (%.0f m of frontage) (TD5RE_ROAM_CANOPY_GREEN=%d)",
+                 cg_n[0], cg_n[1], cg_m, td5_env_int("TD5RE_ROAM_CANOPY_GREEN", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

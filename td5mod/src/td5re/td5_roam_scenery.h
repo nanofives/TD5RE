@@ -89,7 +89,8 @@
                                      * 15 = integ J: a carriage arch opens every stretch of a part / relation wall that stands on
                                      *      a service drive (not only where its centreline crosses), up to 128 drive segments
                                      * 16 = roam LA: street trees from CANOPY.R8 along the pavement band + lot trees on the
-                                     *      world lattice where the canopy says so (td5_roam_scenery.c SECTION trees) */
+                                     *      world lattice where the canopy says so (td5_roam_scenery.c SECTION trees);
+                                     *      canopy green: wooded unmapped ground stays lawn, takes no infill */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -169,6 +170,10 @@ typedef struct {
     int  st_band, st_lot, st_stations, st_nocanopy, st_narrow, st_facade, st_noslab;
     int  st_furn_drop, st_furn_moved, st_border, st_lot_hidden, st_lot_refused, st_on_road;
     int  canopy_cells, canopy_cov;
+    /* [roam LA] CANOPY GREEN (sc_canopy_green): city lot cells left lawn instead of paved, infill lots refused, their
+     * frontage (m) */
+    int  lot_canopy_green, inf_drop_canopy;
+    double inf_m_canopy;
     /* [F4b] pavement: owned kerb pieces, those inside another drivable primitive, chains,
      * emitted pieces (corner = on a junction patch outline), vertices merged into a corner
      * point, island / median pieces, vertices clamped to half a gap, fences, deck railings,
