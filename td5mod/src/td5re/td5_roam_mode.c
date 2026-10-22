@@ -381,6 +381,13 @@ void td5_roam_host_pages(int *road, int *ground, int *kerb)
     }
 }
 
+/* [roam LE] The water page: a geo host carries the generator's TD5_TG_PAGE_WATER. A shipped host has no known water
+ * page, so the water plane stays off there unless TD5RE_ROAM_RENDER_PAGE_WATER picks one. */
+int td5_roam_host_water_page(void)
+{
+    return td5_roam_host_is_geo() ? td5_trackgen_roam_water_page() : -1;
+}
+
 /* The sky file for a geo host (a shipped panorama), or 0 to keep a shipped host's own FORWSKY. */
 int td5_roam_host_sky_path(char *out, size_t n)
 {

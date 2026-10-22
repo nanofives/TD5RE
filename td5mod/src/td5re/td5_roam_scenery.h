@@ -56,11 +56,15 @@
 #include "td5_roam_height.h"
 #include "td5_roam_furniture.h"
 #include "td5_roam_rails.h"
+#include "td5_roam_plaza.h"
+#include "td5_roam_shops.h"
+#include "td5_roam_outskirts.h"
+#include "td5_roam_cut.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  15u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  19u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -87,7 +91,32 @@
                                      * 14 = round J integration: roam JA (12) + roam JC (12, 13) combined,
                                      *      14 so no tile cached by a single branch is reused
                                      * 15 = integ J: a carriage arch opens every stretch of a part / relation wall that stands on
-                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments */
+                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments
+                                     * 16 = roam LC: unknown crossings painted by the rule (zebra on a main / wide road, lines
+                                     *      elsewhere), unmarked never, footway=crossing ways drawn
+                                     * 16 = roam LE: swimming pools (coping ring + inset water) over the lots
+                                     * 16 = roam LD: PARK_RELATIONS.JSON multipolygon greens / precincts in the AREAS logic
+                                     *      (holes by bridge), plaza furniture + monuments (td5_roam_plaza.c)
+                                     * 16 = roam LA: street trees from CANOPY.R8 along the pavement band + lot trees on the
+                                     *      world lattice where the canopy says so (td5_roam_scenery.c SECTION trees);
+                                     *      canopy green: wooded unmapped ground stays lawn, takes no infill
+                                     * 16 = roam LB: shopfronts (glass, fascia, awning, pharmacy cross) on the street walls of
+                                     *      footprints with a business (tags + POIS.JSON), fuel forecourt canopies
+                                     * 16 = roam LF: railway furniture (level-crossing posts / arms / lights / saltires, station name
+                                     *      boards, catenary), RAILS_RULES 2
+                                     * 16 = roam LH: poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c),
+                                     *      cropland paint on the ground cover
+                                     * 17 = round L integration: roam LA LB LC LD LE LF LH combined (each bumped 15 -> 16 on
+                                     *      its own, 17 so no tile cached by a single branch is reused)
+                                     * 18 = roam NA: the MUNICIPAL LINE (td5_roam_muni.c): street walls of casco footprints
+                                     *      moved onto the pavement's back edge (side walls stretched, ochavas at block
+                                     *      corners, infill corner lots chamfered), footprints on the line kept 0.5 m off the
+                                     *      kerb instead of 2.8 m; LANDMARK GROUNDS: no Overture blob / infill lot in the
+                                     *      block of a major landmark (the Catedral)
+                                     * 18 = roam NC: cutting walls (td5_roam_cut.c), no sidewalk on a cutting span, lot holes
+                                     *      round every cutting span of the 3x3
+                                     * 19 = round N integration: roam NA NC combined (each bumped 17 -> 18 on its
+                                     *      own, 19 so no tile cached by a single branch is reused) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -129,9 +158,14 @@ int    roam_ctx_owned(const TG_TileCtx *c, double x, double z);
 int    roam_ctx_sb_of(const TG_TileCtx *c, double x, double z);
 /* ground height at a tile-local point (the scenery's own height source) */
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z);
+/* [roam NC] the ground the renderer DRAWS at a tile-local point (its lattice, the G5 lowering, the ground drop) */
+double roam_ctx_drawn_ground(const TG_TileCtx *c, double x, double z);
+/* [roam NC] the tile's raster window (NULL when none) */
+TD5_RoamHeight *roam_ctx_hc(const TG_TileCtx *c);
 /* [roam ID] the RAW height raster at a tile-local point (no G4b lowering under the road): 1 + *h (and
  * *wet when non-NULL) when the tile's window covers it */
 int    roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet);
+int    roam_ctx_rails_bed_near(const TG_TileCtx *c, const double *x, const double *z, int n, double clear);   /* [integ L] */
 /* [roam ID] the drivable surface height at a tile-local point: of the primitives under (x, z), the one
  * whose height there is nearest ref_y (a deck over a street answers by its height). 1 on a hit. */
 int    roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, double *y);
@@ -157,6 +191,26 @@ typedef struct {
     int  fp_on_pv;          /* [G5] footpath vertices lifted onto a pavement slab / island they cross */
     /* plazas */
     int  areas, lawn_tris, lawn_cut, trees, trees_cut;
+    int  plaza_tree_var[10];        /* [integ L] plaza trees per tree page variant (TD5_TG_TREE_VARIANTS) */
+    /* [integ L] TREE CROSS-CHECK (TD5RE_ROAM_TREE_XCHECK=1): trees judged [0 plaza, 1 street + lot], trunk / crown hits
+     * per category (shopfront, fuel canopy, plaza furniture, rails, outskirts, pool), trunks on a wet raster sample */
+    int  xc_trees[2], xc_trunk[2][6], xc_crown[2][6], xc_wet[2];
+    int  pt_furn_drop, pt_wet_drop; /* [integ L] plaza trees the round L veto dropped (a face in the tail, water) */
+    int  xc_xing_rail, xc_furn_rail;   /* [integ L] cross-check: street furniture faces (flat paint / standing) over a rail face */
+    /* [roam LA] STREET + LOT TREES from CANOPY.R8 (SECTION trees): planted on the pavement band, planted on the lot
+     * lattice; band stations walked, refused: no canopy >= 3 m there, band too narrow, facade too close, slab not
+     * found / on a road / a driveway mouth; refused by street furniture or a rail bed after every along-kerb dodge,
+     * moved along the kerb to dodge one, too near the tile edge (a neighbour's furniture could stand there); lot points
+     * hidden behind a facade, lot points refused (road, slab, building, plaza / green, water); planted tree origins on
+     * the drivable surface (the bytes census: 0); canopy >= 3 m cells of the owned tile, and those under a crown of
+     * any tree (street, lot or plaza) */
+    int  st_band, st_lot, st_stations, st_nocanopy, st_narrow, st_facade, st_noslab;
+    int  st_furn_drop, st_furn_moved, st_border, st_lot_hidden, st_lot_refused, st_on_road;
+    int  canopy_cells, canopy_cov;
+    /* [roam LA] CANOPY GREEN (sc_canopy_green): city lot cells left lawn instead of paved, infill lots refused, their
+     * frontage (m) */
+    int  lot_canopy_green, inf_drop_canopy;
+    double inf_m_canopy;
     /* [F4b] pavement: owned kerb pieces, those inside another drivable primitive, chains,
      * emitted pieces (corner = on a junction patch outline), vertices merged into a corner
      * point, island / median pieces, vertices clamped to half a gap, fences, deck railings,
@@ -178,6 +232,11 @@ typedef struct {
     int  road_tiles;                /* ROAD tiles of the 3x3 that were available       */
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
     TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
+    TD5_RoamPlazaStats plaza;       /* [roam LD] plaza furniture + monuments census (td5_roam_plaza.c) */
+    TD5_RoamCutStats   cut;         /* [roam NC] cutting walls census (td5_roam_cut.c) */
+    int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
+    TD5_RoamShopStats shop;         /* [roam LB] shopfronts + fuel canopies (td5_roam_shops.c) */
+    TD5_RoamOutStats  out;          /* [roam LH] poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c) */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
      * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).
@@ -211,6 +270,19 @@ typedef struct {
      * parts, Overture blobs not built because a relation outline covers them */
     int  bld_rel, s3d_rel_built, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base, bld_rel_ovt_drop;
     int  s3d_portals;              /* [JC2] wall openings where a service way passes under an outline */
+    /* [roam LE] swimming pools (AREAS leisure=swimming_pool owned here): drawn (coping ring + inset water), left out
+     * because the outline touches the drivable surface, bad ring (under 3 points / no triangulation); water m2 */
+    int  pools, pool_drop_road, pool_bad;
+    double pool_m2;
+    /* [roam NA] the municipal line (td5_roam_muni.h), footprints this tile emits: their fate (TD5_MUNI_*), the ones left
+     * by rule (landmark / civic / part / relation, fuel site, on a park / plaza / open area or landmark grounds, outside
+     * the casco), walls brought forward / cut back, block corners filled + new ochavas; every emitted street wall by its
+     * gap to the line (on the pavement > 5 cm, 0 (5 cm), < 1 m, 1-3, 3-6, 6-12, 12-20 m) and the pre-pass line pieces */
+    int  muni_fate[10], muni_skip[4], muni_fwd, muni_back, muni_corner, muni_ochava, muni_gap[7], muni_segs;
+    /* [roam NA] landmark grounds: blocks marked, Overture blobs not built in them, infill lots refused, OSM footprints
+     * kept in them */
+    int  grounds, grounds_ovt, grounds_inf, grounds_osm;
+    int  inf_ochava;               /* [roam NA] infill corner lots cut by an ochava */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

@@ -123,6 +123,7 @@ typedef struct {
     const int32_t *pt; const double *cum; int npt;
     double   plen;
     int      oneway, klass, lanes, flags;
+    int      maxspeed;       /* [roam LG] posted limit km/h, 0 = untagged (td5_roam_limit_kmh resolves it) */
 } TD5_RouteGEdge;
 typedef struct { int64_t key; double x, z; const int *inc; int ninc; } TD5_RouteGNode;
 int  td5_roam_route_graph_nedge(void);
@@ -135,6 +136,31 @@ int  td5_roam_route_graph_snap_edge(double px, double pz, double max_m, int *edg
  * ARM order, up to cap. Returns the arm count (>= 1), 0 when the cluster has no signal. */
 int  td5_roam_route_graph_signal(int64_t key, int16_t *bear, uint64_t *ekey, int cap);
 int  td5_roam_route_graph_nsignal(void);
+/* [roam LG] TURN RESTRICTIONS (td5_roam_rules.h) matched onto the planner graph at every build: 1 when the turn
+ * at node `node` arriving through inc `in_inc` and leaving through inc `out_inc` (node_view inc[] values: edge * 2 +
+ * the edge's end at the node) is forbidden. 0 with TD5RE_ROAM_TURN_RESTRICT=0. */
+int  td5_roam_route_graph_turn_banned(int node, int in_inc, int out_inc);
+typedef struct {
+    int    loaded;            /* restrictions kept for cars in RESTRICTIONS.JSON                         */
+    int    matched;           /* matched to a graph node (via node, or a via way inside one cluster): an
+                               * arm per way by edge key, or by its direction within 35 deg             */
+    int    matched_via_way;   /*   of those, via a way                                                   */
+    int    matched_by_id;     /*   of those, both ways found by edge key (else by direction)             */
+    int    outside;           /* no graph node within 60 m of the via (outside the region)              */
+    int    no_node;           /* nodes near, none with a from arm arriving and a to arm leaving          */
+    int    via_way_chain;     /* the via way is a street of its own between two nodes: not enforced      */
+    int    no_pair;           /* matched, but no drivable (arm in, arm out) pair (one-way against)       */
+    int    bans;              /* banned (node, in, out) triples                                          */
+    int    geom_agree, geom_differ;   /* no_* with one candidate pair: the pair's turn agrees with the kind */
+    int    filtered;          /* several candidate pairs, kept the ones whose turn agrees                */
+    int    geom_skipped;      /* NOT enforced: no pair turns as the kind says and the ways matched by
+                               * direction only (likely the wrong arm)                                  */
+    double ms;
+} TD5_RouteRestrCensus;
+void td5_roam_route_graph_restr_census(TD5_RouteRestrCensus *out);
+/* [roam LG] legs the route planner had to plan WITHOUT the turn bans (no legal path), since the session start */
+long td5_roam_route_restr_fallbacks(void);
+
 /* [F10] edge index of an edge key, -1 when unknown */
 int  td5_roam_route_graph_edge_index(uint64_t key);
 /* [G2] the via points the A* puts between arm in_inc and arm out_inc (node_view inc[] values, edge * 2 + end) of node

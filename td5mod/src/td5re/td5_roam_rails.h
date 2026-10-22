@@ -38,7 +38,7 @@
 #include <stdint.h>
 
 /* Bumped BY HAND when a rail rule changes (the scenery rules version moves with it). */
-#define TD5_ROAM_RAILS_RULES  1u
+#define TD5_ROAM_RAILS_RULES  2u   /* 2: [roam LF] level-crossing furniture, station name boards, catenary */
 
 typedef struct TG_TileCtx TG_TileCtx;
 typedef struct TD5_RoamRailSource TD5_RoamRailSource;
@@ -61,6 +61,19 @@ typedef struct {
     int  meshes;
     int  guard_hits;         /* emitted faces on the drivable surface that are not flush rails: 0 */
     double lift_max_m;       /* highest head over base of an owned piece                    */
+    /* [roam LF] railway FURNITURE (TD5RE_ROAM_RAILS_FURN, default 1; 0 = round I output). Level crossings of the
+     * RAILS nodes[]: crossing:barrier half/full -> a post with a raised red/white arm per approach, crossing:light
+     * -> two red heads, crossing:saltire -> St Andrew's cross; stations / halts / stops -> a double-faced name
+     * board on each platform; electrified=contact_line -> masts, cantilevers, messenger + contact wire. */
+    int  lx_nodes;           /* level_crossing nodes owned (every tag state)                                 */
+    int  lx_equipped;        /* ... of them with a barrier / light / saltire tag: drawn                      */
+    int  lx_untagged;        /* ... with none of those tags: left bare (not drawn)                           */
+    int  lx_barrier_half, lx_barrier_full, lx_lights, lx_saltires;  /* elements drawn (per approach)       */
+    int  lx_no_road, lx_no_rail, lx_post_drop;   /* no street within 12 m / no track within 12 m / post on a road */
+    int  stn_boards, stn_named, stn_plain;       /* boards drawn / with the station's name / blank (no cell)  */
+    int  stn_on_platform, stn_by_track, stn_drop;/* on a platform / beside the track (no platform) / refused   */
+    int  cat_ways, cat_masts, cat_mast_drop, cat_wire_pieces, cat_skip_deck;
+    double cat_wire_m;       /* contact wire drawn, metres                                                   */
 } TD5_RoamRailStats;
 
 int  td5_roam_rails_enabled(void);   /* TD5RE_ROAM_RAILS (default 1) */
@@ -77,6 +90,11 @@ void td5_roam_rails_summary(const TD5_RoamRailSource *r, int *ntiles, int *ways,
  * within `clear` units of the polygon X/Z (n points, place frame = game frame). The infill asks it so no
  * fallback building stands on a railway. Loads the layer lazily, like emit (call it on the building thread). */
 int  td5_roam_rails_bed_near(TD5_RoamRailSource *r, const double *X, const double *Z, int n, double clear);
+
+/* [roam LF] the distinct station / halt / stop names of the RAILS layer (UTF-8), for the furniture's plate atlas.
+ * Reads the nodes[] of every RAILS tile itself (cheap, main thread, before any tile builds). Returns the count. */
+int  td5_roam_rails_station_names(const char *place, char (*out)[96], double (*xz)[2], int max);   /* xz: the first node's place-frame position */
+int  td5_roam_rails_furn_enabled(void);   /* TD5RE_ROAM_RAILS_FURN (default 1) */
 
 /* Append the railways of the ctx's tile to its sub-block buffers. 1 on success, 0 on out of memory. */
 int  td5_roam_rails_emit(TD5_RoamRailSource *r, TG_TileCtx *c, TD5_RoamRailStats *st);

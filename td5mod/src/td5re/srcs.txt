@@ -36,10 +36,16 @@ td5_roam_render.c
 td5_roam_scenery.c
 td5_roam_furniture.c
 td5_roam_rails.c
+td5_roam_plaza.c
+td5_roam_cut.c
+td5_roam_shops.c
+td5_roam_muni.c
+td5_roam_outskirts.c
 td5_roam_partido.c
 td5_roam_rebase.c
 td5_roam_stream.c
 td5_roam_route.c
+td5_roam_rules.c
 td5_roam_route_ui.c
 td5_roam_barrier.c
 td5_roam_race.c

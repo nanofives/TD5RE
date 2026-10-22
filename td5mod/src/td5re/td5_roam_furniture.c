@@ -53,6 +53,7 @@
 #include "td5_roam_render.h"
 #include "td5_roam_mode.h"
 #include "td5_roam_furniture.h"
+#include "td5_roam_rails.h"
 #include "td5_roam_traffic.h"   /* [F8] td5_roam_signal_group: the head an approach obeys */
 
 #ifdef LOG_TAG
@@ -221,11 +222,16 @@ static struct {
     char          place[64];
     FuCell        cell[FU_CELLS_MAX];
     int           ncell;
+    /* [roam LF] the station-board bank: its own pages (ROAM_STATION_PAGE_BASE..), never a street plate's cell */
+    FuCell        scell[64];
+    int           nscell, snpg, sdropped;
+    unsigned char spg[ROAM_STATION_PAGE_COUNT][TD5_TG_TEX_TEXELS];
+    int           spg_rows[ROAM_STATION_PAGE_COUNT];
     unsigned char pg[FU_PAGES_MAX][TD5_TG_TEX_TEXELS];
     int           pg_rows[FU_PAGES_MAX];
     int           npg;
     unsigned char dsp[TD5_TG_TEX_TEXELS];
-    int           names, cells_wanted, cells_dropped, uses_dropped, clusters, arms, ms;
+    int           names, cells_wanted, cells_dropped, uses_dropped, clusters, arms, ms, stations;
 } s_at;
 
 int td5_roam_furn_plates_ready(void) { return s_at.ready && s_at.ncell > 0; }
@@ -270,6 +276,19 @@ static int fu_alloc_rows(int rows, int *row0)
     return p;
 }
 
+static int fu_alloc_rows_stn(int rows, int *row0)
+{
+    int p;
+    for (p = 0; p < s_at.snpg; p++)
+        if (s_at.spg_rows[p] + rows <= FU_PL_ROWS) { *row0 = s_at.spg_rows[p]; s_at.spg_rows[p] += rows; return p; }
+    if (s_at.snpg >= ROAM_STATION_PAGE_COUNT) return -1;
+    p = s_at.snpg++;
+    memset(s_at.spg[p], 0, sizeof s_at.spg[p]);
+    s_at.spg_rows[p] = rows;
+    *row0 = 0;
+    return p;
+}
+
 /* a wanted cell: (name, forced) with its use count */
 static int fu_want(FuCell *w, int *nw, const char *name, int forced)
 {
@@ -293,8 +312,58 @@ static int fu_cell_cmp(const void *pa, const void *pb)
     return strcmp(a->name, b->name);
 }
 
+/* [roam LF] station boards: a long name is abbreviated until its smallest line can be read (cap >= 5.5 px): the leftmost
+ * word that is not the last becomes its initial ("MANUEL BERNARDO GONNET" -> "MANUEL B. GONNET"); a single long word is
+ * cut to 8 letters + a stop. 1 when it changed the text. */
+static int fu_utf8_n(unsigned char ch) { return ch < 0x80 ? 1 : ch < 0xE0 ? 2 : ch < 0xF0 ? 3 : 4; }
+
+static int fu_stn_abbrev(char *s)
+{
+    char out[FU_NAME_MAX];
+    char *w[12];
+    int nw = 0, i;
+    char *p = s;
+    while (*p && nw < 12) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        w[nw++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) { *p = 0; p++; }
+    }
+    out[0] = 0;
+    if (nw >= 2) {
+        int done = 0;
+        for (i = 0; i < nw; i++) {
+            int chars = 0;
+            const char *q;
+            for (q = w[i]; *q; q += fu_utf8_n((unsigned char)*q)) chars++;
+            if (!done && i < nw - 1 && chars > 2 && w[i][strlen(w[i]) - 1] != '.') {
+                const int n1 = fu_utf8_n((unsigned char)w[i][0]);
+                char ini[8];
+                memcpy(ini, w[i], (size_t)n1); ini[n1] = '.'; ini[n1 + 1] = 0;
+                if (out[0]) strncat(out, " ", sizeof out - strlen(out) - 1);
+                strncat(out, ini, sizeof out - strlen(out) - 1);
+                done = 1;
+            } else {
+                if (out[0]) strncat(out, " ", sizeof out - strlen(out) - 1);
+                strncat(out, w[i], sizeof out - strlen(out) - 1);
+            }
+        }
+        if (!done) { snprintf(s, FU_NAME_MAX, "%s", out); return 0; }
+    } else if (nw == 1) {
+        int chars = 0;
+        const char *q;
+        for (q = w[0]; *q; q += fu_utf8_n((unsigned char)*q)) chars++;
+        if (chars <= 9 || w[0][strlen(w[0]) - 1] == '.') { snprintf(s, FU_NAME_MAX, "%s", w[0]); return 0; }
+        { int k = 0, bytes = 0; for (q = w[0]; *q && k < 8; q += fu_utf8_n((unsigned char)*q)) { bytes += fu_utf8_n((unsigned char)*q); k++; }
+          memcpy(out, w[0], (size_t)bytes); out[bytes] = '.'; out[bytes + 1] = 0; }
+    } else return 0;
+    snprintf(s, FU_NAME_MAX, "%s", out);
+    return 1;
+}
+
 /* one cell, rasterised exactly like td5_tg_mastarm.c pl_cell_for */
-static int fu_raster_cell(FuCell *c)
+static int fu_raster_cell(FuCell *c, int station)
 {
     char up[FU_NAME_MAX], l1[FU_NAME_MAX], l2[FU_NAME_MAX];
     unsigned char cov[FU_PL_W * FU_PL_ROW_H * 2];
@@ -308,19 +377,34 @@ static int fu_raster_cell(FuCell *c)
         snprintf(one, sizeof one, "%s", l1);
         if (tg_plate_split2(one, l1, l2, sizeof l1)) lines = 2;
     }
+    if (station) {   /* the text keeps 4 texels from every edge, no ring (the board is the plate); abbreviate until it can be read */
+        int tries;
+        for (tries = 0; tries < 6; tries++) {
+            float f1 = td5_font_plate_fit_cap(l1, FU_PL_W, 4), f2 = (lines == 2) ? td5_font_plate_fit_cap(l2, FU_PL_W, 4) : f1;
+            if ((f1 < f2 ? f1 : f2) >= 5.5f) break;
+            if (!fu_stn_abbrev(up)) break;
+            l2[0] = 0;
+            lines = tg_plate_plan(up, l1, l2, sizeof l1, &abbr);
+        }
+    }
     rows = c->forced ? 2 : lines;
     h = rows * FU_PL_ROW_H;
-    if (!td5_font_plate_raster(l1, lines == 2 ? l2 : NULL, FU_PL_W, h, FU_PL_PAD, cov, &cap)) return 0;
-    pg = fu_alloc_rows(rows, &row0);
+    if (!td5_font_plate_raster(l1, lines == 2 ? l2 : NULL, FU_PL_W, h, station ? 4 : FU_PL_PAD, cov, &cap)) return 0;
+    pg = station ? fu_alloc_rows_stn(rows, &row0) : fu_alloc_rows(rows, &row0);
     if (pg < 0) return -1;
     for (y = 0; y < h; y++)
         for (x = 0; x < FU_PL_W; x++) {
             int v = (cov[y * FU_PL_W + x] * 15 + 127) / 255;
             const int ring = (x == 1 || x == FU_PL_W - 2 || y == 1 || y == h - 2) &&
                              x >= 1 && x <= FU_PL_W - 2 && y >= 1 && y <= h - 2;
-            if (ring) v = 15;
-            s_at.pg[pg][(row0 * FU_PL_ROW_H + y) * TD5_TG_TEX_DIM + x] = (unsigned char)v;
+            if (ring && !station) v = 15;
+            (station ? s_at.spg[pg] : s_at.pg[pg])[(row0 * FU_PL_ROW_H + y) * TD5_TG_TEX_DIM + x] = (unsigned char)v;
         }
+    if (station && td5_env_int("TD5RE_ROAM_RAILS_LOG", 0, 0, 1)) {
+        int xmin = 99, xmax = -1;
+        for (y = 0; y < h; y++) for (x = 0; x < FU_PL_W; x++) if (cov[y * FU_PL_W + x] > 24) { if (x < xmin) xmin = x; if (x > xmax) xmax = x; }
+        TD5_LOG_I(LOG_TAG, "STATION_INK '%s' '%s'/'%s' x %d..%d of %d", c->name, l1, lines == 2 ? l2 : "", xmin, xmax, FU_PL_W);
+    }
     c->page = pg; c->y = row0 * FU_PL_ROW_H; c->h = h; c->lines = lines; c->cap = cap;
     return 1;
 }
@@ -445,6 +529,27 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
         }
         s_at.arms += n;
     }
+    {   /* [roam LF] every station / halt / stop name of the RAILS layer (the whole partido streams, Tolosa and Gonnet are
+         * outside the casco) gets a cell in the STATION bank: pages ROAM_STATION_PAGE_BASE.., apart from the street plates */
+        char (*sn)[96] = td5_roam_rails_furn_enabled() ? (char (*)[96])malloc(256u * 96u) : NULL;
+        double (*sxz)[2] = sn ? (double (*)[2])malloc(256u * sizeof(double[2])) : NULL;
+        const int nsn = (sn && sxz) ? td5_roam_rails_station_names(place, sn, sxz, 256) : 0;
+        for (i = 0; i < nsn; i++) {
+            FuCell sc;
+            int r;
+            if (s_at.nscell >= 64) { s_at.sdropped++; continue; }
+            memset(&sc, 0, sizeof sc);
+            snprintf(sc.name, sizeof sc.name, "%s", sn[i]);
+            sc.uses = 1; sc.page = -1;
+            r = fu_raster_cell(&sc, 1);
+            if (r <= 0) { s_at.sdropped++; continue; }
+            if (td5_env_int("TD5RE_ROAM_RAILS_LOG", 0, 0, 1))
+                TD5_LOG_I(LOG_TAG, "STATION_CELL '%s' lines %d cap %.1f px", sc.name, sc.lines, (double)sc.cap);
+            s_at.scell[s_at.nscell++] = sc;
+            s_at.stations++;
+        }
+        free(sn); free(sxz);
+    }
     s_at.clusters = ncl;
     s_at.names = nnames;
     s_at.cells_wanted = nw;
@@ -452,7 +557,7 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
     for (i = 0; i < nw; i++) {
         int r;
         if (s_at.ncell >= FU_CELLS_MAX) { s_at.cells_dropped++; s_at.uses_dropped += want[i].uses; continue; }
-        r = fu_raster_cell(&want[i]);
+        r = fu_raster_cell(&want[i], 0);
         if (r <= 0) { s_at.cells_dropped++; s_at.uses_dropped += want[i].uses; continue; }
         s_at.cell[s_at.ncell++] = want[i];
     }
@@ -462,9 +567,9 @@ done:
     s_at.ms = (int)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "roam furniture: plate atlas %s | %d signalised cluster(s), %d arm(s), %d distinct street name(s) | "
               "%d cell(s) wanted, %d placed on %d page(s) (page ids %d..%d, display %d), %d dropped (%d use(s) fall back to the "
-              "other face) | %d ms", ok ? "built" : "EMPTY", s_at.clusters, s_at.arms, s_at.names, s_at.cells_wanted,
+              "other face) | %d station name(s) in %d own page(s) (%d dropped) | %d ms", ok ? "built" : "EMPTY", s_at.clusters, s_at.arms, s_at.names, s_at.cells_wanted,
               s_at.ncell, s_at.npg, FU_PAGE_BASE, FU_PAGE_BASE + (s_at.npg ? s_at.npg - 1 : 0), FU_PAGE_BASE + s_at.npg,
-              s_at.cells_dropped, s_at.uses_dropped, s_at.ms);
+              s_at.cells_dropped, s_at.uses_dropped, s_at.stations, s_at.snpg, s_at.sdropped, s_at.ms);
     free(list); free(names); free(en); free(cl); free(arms); free(want);
     return ok;
 }
@@ -486,6 +591,19 @@ static void fu_plate_bgra(int page, uint8_t *out)
     }
 }
 
+static void fu_station_bgra(int page, uint8_t *out)
+{
+    static const int k_bg[3] = { 150, 56, 22 };
+    int i;
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int idx = s_at.spg[page][i];
+        out[i * 4 + 0] = (uint8_t)(k_bg[0] + (255 - k_bg[0]) * idx / 15);
+        out[i * 4 + 1] = (uint8_t)(k_bg[1] + (255 - k_bg[1]) * idx / 15);
+        out[i * 4 + 2] = (uint8_t)(k_bg[2] + (255 - k_bg[2]) * idx / 15);
+        out[i * 4 + 3] = 0xFF;
+    }
+}
+
 int td5_roam_furn_session_begin(const char *place, const RoamGrid *g)
 {
     int p, np;
@@ -498,6 +616,11 @@ int td5_roam_furn_session_begin(const char *place, const RoamGrid *g)
         fu_plate_bgra(p, px);
         td5_asset_set_page_transparency(FU_PAGE_BASE + p, 0);
         td5_plat_render_upload_texture(FU_PAGE_BASE + p, px, TD5_TG_TEX_DIM, TD5_TG_TEX_DIM, 2);
+    }
+    for (p = 0; p < s_at.snpg; p++) {   /* [roam LF] the station bank */
+        fu_station_bgra(p, px);
+        td5_asset_set_page_transparency(ROAM_STATION_PAGE_BASE + p, 0);
+        td5_plat_render_upload_texture(ROAM_STATION_PAGE_BASE + p, px, TD5_TG_TEX_DIM, TD5_TG_TEX_DIM, 2);
     }
     free(px);
     s_at.uploaded = 1;
@@ -517,16 +640,33 @@ static const FuCell *fu_cell_find(const char *name, int forced)
     return NULL;
 }
 
+/* [roam LF] a station board's cell: the same inset the street plates use (1.5 texels all round) */
+int td5_roam_furn_plate_cell(const char *name, int *page_id, double *v_top, double *v_bot, int *rows)
+{
+    const FuCell *c = NULL;
+    int i;
+    if (!name || !name[0]) return 0;
+    for (i = 0; i < s_at.nscell; i++) if (!strcmp(s_at.scell[i].name, name)) { c = &s_at.scell[i]; break; }
+    if (!c) return 0;
+    if (page_id) *page_id = ROAM_STATION_PAGE_BASE + c->page;
+    if (v_top) *v_top = ((double)c->y + 1.5) / 64.0;
+    if (v_bot) *v_bot = ((double)(c->y + c->h) - 1.5) / 64.0;
+    if (rows) *rows = c->h / FU_PL_ROW_H;
+    return 1;
+}
+
 /* ============================================================================
  * SECTION: source (SIGNALS tiles: crossings and bus stops)
  * ========================================================================== */
 
-typedef struct { double x, z; int paint; } FuXing;          /* paint: 1 marked, 2 signals, 0 unknown */
+/* paint: 1 marked, 2 signals, 0 unmarked (never painted), 3 unknown (the [roam LC] rule decides at emit time).
+ * way: 1 = from a footway=crossing way (its midpoint), 0 = a highway=crossing node. */
+typedef struct { double x, z; int paint, way; } FuXing;
 typedef struct { double x, z; int shelter, bench, bin; } FuStop;
 typedef struct { int ix, iz; double x0, z0, x1, z1; } FuRow;
 
 typedef struct {
-    int used, ix, iz;
+    int used, ix, iz, layer;                 /* [roam LC] layer 0 = SIGNALS, 1 = FOOTWAYS */
     uint32_t clock;
     FuXing *xs; int nx;
     FuStop *bs; int nb;
@@ -534,8 +674,10 @@ typedef struct {
 
 struct TD5_RoamFurnSource {
     char       place[64];
-    FuRow     *rows;
-    int        nrows;
+    FuRow     *rows, *frows;                /* [roam LC] frows: the FOOTWAYS layer's tile rows */
+    int        nrows, nfrows;
+    int        xing_mode;                   /* [roam LC] TD5RE_ROAM_XING_UNKNOWN: 0 skip, 1 rule, 2 all zebra */
+    int        xing_ways;                   /* [roam LC] TD5RE_ROAM_XING_WAYS */
     FuSigTile  tile[FU_SIGN_CACHE];
     uint32_t   clock;
     int        night;
@@ -574,7 +716,7 @@ static int fu_stop_cmp(const void *pa, const void *pb)
     return a->z < b->z ? -1 : (a->z > b->z ? 1 : 0);
 }
 
-static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
+static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int layer, int ix, int iz)
 {
     int i, victim = 0;
     char rel[96], path[512];
@@ -584,21 +726,54 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
     FuSigTile *t;
     int ncx = 0, ncb = 0;
     for (i = 0; i < FU_SIGN_CACHE; i++)
-        if (f->tile[i].used && f->tile[i].ix == ix && f->tile[i].iz == iz) { f->tile[i].clock = ++f->clock; return &f->tile[i]; }
+        if (f->tile[i].used && f->tile[i].layer == layer && f->tile[i].ix == ix && f->tile[i].iz == iz) { f->tile[i].clock = ++f->clock; return &f->tile[i]; }
     for (i = 0; i < FU_SIGN_CACHE; i++) {
         if (!f->tile[i].used) { victim = i; break; }
         if (f->tile[i].clock < f->tile[victim].clock) victim = i;
     }
     t = &f->tile[victim];
     fu_sigtile_free(t);
-    t->used = 1; t->ix = ix; t->iz = iz; t->clock = ++f->clock;
-    snprintf(rel, sizeof rel, "tiles/SIGNALS_%d_%d.JSON", ix, iz);
+    t->used = 1; t->ix = ix; t->iz = iz; t->layer = layer; t->clock = ++f->clock;
+    snprintf(rel, sizeof rel, "tiles/%s_%d_%d.JSON", layer ? "FOOTWAYS" : "SIGNALS", ix, iz);
     td5_geo_source_path(path, sizeof path, f->place, rel);
     json = fu_slurp(path);
     if (!json) return t;                                    /* cached as empty */
     root = cJSON_Parse(json);
     free(json);
     td5_geo_src_json_to_game(root);                         /* [roam M] source frame -> game frame */
+    if (layer) {                            /* [roam LC] footway=crossing ways: one crossing at the midpoint */
+        const cJSON *fw = root ? cJSON_GetObjectItem(root, "footways") : NULL;
+        if (fw && cJSON_IsArray(fw)) {
+            const int n = cJSON_GetArraySize(fw);
+            t->xs = (FuXing *)calloc((size_t)(n > 0 ? n : 1), sizeof(FuXing));
+            if (t->xs) {
+                for (e = fw->child; e; e = e->next) {
+                    const cJSON *pk = cJSON_GetObjectItem(e, "kind"), *pts = cJSON_GetObjectItem(e, "points"), *pp = cJSON_GetObjectItem(e, "paint");
+                    const cJSON *a, *b;
+                    const char *s;
+                    if (!pk || !cJSON_IsString(pk) || strcmp(pk->valuestring, "crossing") || !pts || !cJSON_IsArray(pts)) continue;
+                    a = pts->child;
+                    if (!a) continue;
+                    for (b = a; b->next; b = b->next) {}
+                    if (b == a) continue;
+                    {
+                        const cJSON *ax = cJSON_GetObjectItem(a, "x"), *az = cJSON_GetObjectItem(a, "z");
+                        const cJSON *bx = cJSON_GetObjectItem(b, "x"), *bz = cJSON_GetObjectItem(b, "z");
+                        if (!ax || !az || !bx || !bz) continue;
+                        s = (pp && cJSON_IsString(pp)) ? pp->valuestring : "";
+                        t->xs[ncx].x = 0.5 * (ax->valuedouble + bx->valuedouble);
+                        t->xs[ncx].z = 0.5 * (az->valuedouble + bz->valuedouble);
+                        t->xs[ncx].paint = !strcmp(s, "marked") ? 1 : (!strcmp(s, "signals") ? 2 : (!strcmp(s, "unmarked") ? 0 : 3));
+                        t->xs[ncx].way = 1;
+                        ncx++;
+                    }
+                }
+            }
+            t->nx = ncx;
+        }
+        cJSON_Delete(root);
+        return t;
+    }
     nd = root ? cJSON_GetObjectItem(root, "nodes") : NULL;
     if (nd && cJSON_IsArray(nd)) {
         const int n = cJSON_GetArraySize(nd);
@@ -614,7 +789,8 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
                     const cJSON *pp = cJSON_GetObjectItem(e, "paint");
                     const char *s = (pp && cJSON_IsString(pp)) ? pp->valuestring : "";
                     t->xs[ncx].x = px->valuedouble; t->xs[ncx].z = pz->valuedouble;
-                    t->xs[ncx].paint = !strcmp(s, "marked") ? 1 : (!strcmp(s, "signals") ? 2 : 0);
+                    t->xs[ncx].paint = !strcmp(s, "marked") ? 1 : (!strcmp(s, "signals") ? 2 : (!strcmp(s, "unmarked") ? 0 : 3));   /* [roam LC] unmarked != unknown */
+                    t->xs[ncx].way = 0;
                     ncx++;
                 } else if (!strcmp(kind, "bus_stop")) {
                     t->bs[ncb].x = px->valuedouble; t->bs[ncb].z = pz->valuedouble;
@@ -631,7 +807,7 @@ static FuSigTile *fu_sigtile(TD5_RoamFurnSource *f, int ix, int iz)
     return t;
 }
 
-static int fu_index_load(TD5_RoamFurnSource *f)
+static int fu_index_layer(TD5_RoamFurnSource *f, const char *layer, FuRow **rowsp, int *nrowsp)
 {
     char path[512];
     char *json;
@@ -643,11 +819,11 @@ static int fu_index_load(TD5_RoamFurnSource *f)
     if (!json) return 0;
     root = cJSON_Parse(json);
     free(json);
-    ly = root ? cJSON_GetObjectItem(cJSON_GetObjectItem(root, "layers"), "SIGNALS") : NULL;
+    ly = root ? cJSON_GetObjectItem(cJSON_GetObjectItem(root, "layers"), layer) : NULL;
     tl = ly ? cJSON_GetObjectItem(ly, "tiles") : NULL;
     if (!tl || !cJSON_IsArray(tl)) { cJSON_Delete(root); return 0; }
-    f->rows = (FuRow *)calloc((size_t)cJSON_GetArraySize(tl) + 1u, sizeof(FuRow));
-    if (!f->rows) { cJSON_Delete(root); return 0; }
+    *rowsp = (FuRow *)calloc((size_t)cJSON_GetArraySize(tl) + 1u, sizeof(FuRow));
+    if (!*rowsp) { cJSON_Delete(root); return 0; }
     for (t = tl->child; t; t = t->next) {
         const cJSON *a = t->child;
         double v[7];
@@ -655,13 +831,20 @@ static int fu_index_load(TD5_RoamFurnSource *f)
         for (k = 0; k < 7 && a; k++, a = a->next) v[k] = a->valuedouble;
         if (k < 7) continue;
         td5_geo_src_bbox_to_game(&v[3], &v[5]);             /* [roam M] the extent in the game frame */
-        f->rows[n].ix = (int)v[0]; f->rows[n].iz = (int)v[1];
-        f->rows[n].x0 = v[3]; f->rows[n].z0 = v[4]; f->rows[n].x1 = v[5]; f->rows[n].z1 = v[6];
+        (*rowsp)[n].ix = (int)v[0]; (*rowsp)[n].iz = (int)v[1];
+        (*rowsp)[n].x0 = v[3]; (*rowsp)[n].z0 = v[4]; (*rowsp)[n].x1 = v[5]; (*rowsp)[n].z1 = v[6];
         n++;
     }
-    f->nrows = n;
+    *nrowsp = n;
     cJSON_Delete(root);
     return 1;
+}
+
+static int fu_index_load(TD5_RoamFurnSource *f)
+{
+    const int ok = fu_index_layer(f, "SIGNALS", &f->rows, &f->nrows);
+    fu_index_layer(f, "FOOTWAYS", &f->frows, &f->nfrows);      /* [roam LC] the crossing ways */
+    return ok;
 }
 
 TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
@@ -680,7 +863,10 @@ TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
     f->on_piers    = td5_env_int("TD5RE_ROAM_FURN_PIERS", 1, 0, 1);
     f->on_stops   = td5_env_int("TD5RE_ROAM_FURN_STOPS", 1, 0, 1);
     f->on_xings   = td5_env_int("TD5RE_ROAM_FURN_XINGS", 1, 0, 1);
-    f->on_unknown_xings = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1);
+    /* [roam LC] unknown paint: 0 skipped (old), 1 the rule (zebra on a main / wide road, plain lines elsewhere), 2 every
+     * unknown a zebra (what TD5RE_GEO_XING_UNKNOWN=1 always meant). Unmarked is never painted in any mode. */
+    f->xing_mode = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1) ? 2 : td5_env_int("TD5RE_ROAM_XING_UNKNOWN", 1, 0, 2);
+    f->xing_ways = td5_env_int("TD5RE_ROAM_XING_WAYS", 1, 0, 1);
     return f;
 }
 
@@ -689,7 +875,7 @@ void td5_roam_furn_close(TD5_RoamFurnSource *f)
     int i;
     if (!f) return;
     for (i = 0; i < FU_SIGN_CACHE; i++) fu_sigtile_free(&f->tile[i]);
-    free(f->rows);
+    free(f->rows); free(f->frows);
     free(f);
 }
 
@@ -817,8 +1003,8 @@ static int fu_quad(FuEm *em, const double *px, const double *py, const double *p
 static int fu_emit_plate(FuEm *em, const double pole[2], const double l[2], const double t[2], double side, double u0,
                          double y_top, const FuCell *cf, const FuCell *cb)
 {
-    double px[8], py[8], pz[8], uu[8], vv[8];
-    int seg_page[2], seg_nq[2];
+    double px[12], py[12], pz[12], uu[12], vv[12];
+    int seg_page[3], seg_nq[3], nseg = 2;
     const FuCell *c[2];
     int face, k;
     c[0] = cf; c[1] = cb;
@@ -849,7 +1035,30 @@ static int fu_emit_plate(FuEm *em, const double pole[2], const double l[2], cons
         seg_page[face] = FU_PAGE_BASE + c[face]->page;
         seg_nq[face] = 1;
     }
-    return fu_quad(em, px, py, pz, uu, vv, 8, seg_page, seg_nq, 2, 0);
+    if (c[0]->h != c[1]->h && td5_env_int("TD5RE_ROAM_PLATE_FILLER", 1, 0, 1)) {   /* [integ L] A/B knob, 0 = no filler */
+        /* [roam LF] faces of different row counts: the taller one's lower part showed through the shorter, mirrored (both
+         * faces are drawn double-sided). A blank-blue filler under the shorter face, in ITS cell's own page (texel (2, y + 2)
+         * is plate background), makes the plate one height from both sides. */
+        const int sf = c[0]->h < c[1]->h ? 0 : 1;
+        const double hs = (double)c[sf]->h / (double)FU_PL_ROW_H * FU_MA_PLATE_ROW;
+        const double hl = (double)c[1 - sf]->h / (double)FU_PL_ROW_H * FU_MA_PLATE_ROW;
+        const double off = (sf == 0) ? -FU_MA_PLATE_OFF : FU_MA_PLATE_OFF;
+        const int far_left = (sf == 0) ? (side < 0.0) : (side > 0.0);
+        const double ul = far_left ? u0 + FU_MA_PLATE_W : u0, ur = far_left ? u0 : u0 + FU_MA_PLATE_W;
+        const double us[4] = { ul, ur, ur, ul };
+        const double bu = 2.5 / 64.0, bv = ((double)c[sf]->y + 2.5) / 64.0;
+        for (k = 0; k < 4; k++) {
+            const int o = 8 + k;
+            px[o] = pole[0] - l[0] * us[k] + t[0] * off;
+            pz[o] = pole[1] - l[1] * us[k] + t[1] * off;
+            py[o] = (k < 2) ? y_top - hl : y_top - hs;
+            uu[o] = bu; vv[o] = bv;
+        }
+        seg_page[2] = FU_PAGE_BASE + c[sf]->page;
+        seg_nq[2] = 1;
+        nseg = 3;
+    }
+    return fu_quad(em, px, py, pz, uu, vv, nseg == 3 ? 12 : 8, seg_page, seg_nq, nseg, 0);
 }
 
 static int fu_mastarm(FuEm *em, const FuPt *n, double side, double gap, double base_y, const FuCell *cf, const FuCell *cb,
@@ -1392,6 +1601,24 @@ static int fu_emit_lamps(FuEm *em, TD5_RoamFurnSource *f, FuLamps *out)
  * SECTION: bus stops and crossings (OSM nodes of the SIGNALS tiles)
  * ========================================================================== */
 
+#define FU_XWAY_DUP_M   9.0      /* [roam LC] a way's midpoint this near a crossing node is the same crossing */
+
+/* 1 when a crossing NODE (any resident SIGNALS tile, place frame) lies within `r` units of the place point */
+static int fu_node_near(TD5_RoamFurnSource *f, double x, double z, double r)
+{
+    int k;
+    for (k = 0; k < f->nrows; k++) {
+        const FuRow *row = &f->rows[k];
+        FuSigTile *st;
+        int i;
+        if (x < row->x0 - r || x > row->x1 + r || z < row->z0 - r || z > row->z1 + r) continue;
+        st = fu_sigtile(f, 0, row->ix, row->iz);
+        for (i = 0; i < st->nx; i++)
+            if (hypot(st->xs[i].x - x, st->xs[i].z - z) < r) return 1;
+    }
+    return 0;
+}
+
 /* the SIGNALS tiles that meet the tile's box (+ margin), their nodes owned by the tile, in (x, z) order */
 static int fu_collect_nodes(FuEm *em, TD5_RoamFurnSource *f, FuXing **xs, int *nx, FuStop **bs, int *nb)
 {
@@ -1413,7 +1640,7 @@ static int fu_collect_nodes(FuEm *em, TD5_RoamFurnSource *f, FuXing **xs, int *n
         FuSigTile *st;
         int i;
         if (row->x1 < x0 || row->x0 > x1 || row->z1 < z0 || row->z0 > z1) continue;
-        st = fu_sigtile(f, row->ix, row->iz);
+        st = fu_sigtile(f, 0, row->ix, row->iz);
         for (i = 0; i < st->nx; i++) {
             const double lx = st->xs[i].x - (double)ox, lz = st->xs[i].z - (double)oz;
             if (!roam_ctx_owned(c, lx, lz)) continue;
@@ -1426,6 +1653,31 @@ static int fu_collect_nodes(FuEm *em, TD5_RoamFurnSource *f, FuXing **xs, int *n
             if (!fu_grow((void **)bs, &capb, *nb + 1, sizeof **bs)) return 0;
             (*bs)[*nb] = st->bs[i]; (*bs)[*nb].x = lx; (*bs)[*nb].z = lz; (*nb)++;
         }
+    }
+    if (f->xing_ways) {                                  /* [roam LC] footway=crossing ways, minus those a node already covers */
+        const double dup = FU_XWAY_DUP_M * FU_UPM;
+        FuXing *wy = NULL;
+        int nwy = 0, capw = 0, j;
+        for (r = 0; r < f->nfrows; r++) {                /* copy first: fu_node_near below may evict the FOOTWAYS tile */
+            const FuRow *row = &f->frows[r];
+            FuSigTile *st;
+            int i;
+            if (row->x1 < x0 || row->x0 > x1 || row->z1 < z0 || row->z0 > z1) continue;
+            st = fu_sigtile(f, 1, row->ix, row->iz);
+            for (i = 0; i < st->nx; i++) {
+                const double lx = st->xs[i].x - (double)ox, lz = st->xs[i].z - (double)oz;
+                if (!roam_ctx_owned(c, lx, lz)) continue;
+                if (!fu_grow((void **)&wy, &capw, nwy + 1, sizeof *wy)) { free(wy); return 0; }
+                wy[nwy] = st->xs[i]; wy[nwy].x = lx; wy[nwy].z = lz; nwy++;
+            }
+        }
+        for (j = 0; j < nwy; j++) {
+            em->st->xing_ways++;
+            if (fu_node_near(f, wy[j].x + (double)ox, wy[j].z + (double)oz, dup)) { em->st->xing_way_dup++; continue; }
+            if (!fu_grow((void **)xs, &capx, *nx + 1, sizeof **xs)) { free(wy); return 0; }
+            (*xs)[(*nx)++] = wy[j];
+        }
+        free(wy);
     }
     if (*nx > 1) qsort(*xs, (size_t)*nx, sizeof **xs, fu_xing_cmp);
     if (*nb > 1) qsort(*bs, (size_t)*nb, sizeof **bs, fu_stop_cmp);
@@ -1519,7 +1771,10 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         double along, lat, L, px[4], py[4], pz[4], uu[4], vv[4];
         int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1;
         RoamFrame fr, f0, f1;
-        if (x->paint == 0 && !f->on_unknown_xings) { st->xing_unknown++; continue; }
+        int paint = x->paint;
+        const int lc_new = (paint == 3 || x->way);          /* [integ L] painted by LC's rule, or an LC crossing way */
+        if (paint == 0) { st->xing_unmarked++; continue; }                   /* [roam LC] explicitly unmarked: never painted */
+        if (paint == 3 && f->xing_mode == 0) { st->xing_unknown++; continue; }
         if (!roam_nearest_edge(c, x->x, x->z, 12.0 * FU_UPM, &seg, &side, &along, &lat) ||
             !roam_edge_frame(c, seg, 1, along, &fr) ||
             hypot(x->x - fr.px, x->z - fr.pz) > fr.half_carriage + FU_X_NEAR_M * FU_UPM) { st->xing_drop_far++; continue; }
@@ -1529,13 +1784,27 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         (void)side;
         lanes = (int)(2.0 * fr.half_carriage / 1500.0 + 0.5);
         if (lanes < 1) lanes = 1;
+        if (paint == 3) {
+            /* [roam LC] the rule for a crossing OSM never said how to paint: a zebra on a main road (tertiary and up)
+             * or a wide carriageway (4+ lanes), plain limit lines on a residential street. Mode 2: always a zebra. */
+            const int main_road = fr.klass >= TD5_GEO_RC_TERTIARY || lanes >= 4;
+            paint = (f->xing_mode == 2 || main_road) ? 1 : 2;
+            if (paint == 1) st->xing_unk_zebra++; else st->xing_unk_lines++;
+        }
         L = (double)lanes;
         /* the band across the whole carriageway: right edge, left edge, left edge ahead, right edge ahead */
         px[0] = f0.px - f0.nx * fr.half_carriage; pz[0] = f0.pz - f0.nz * fr.half_carriage; py[0] = f0.py + FU_X_LIFT;
         px[1] = f0.px + f0.nx * fr.half_carriage; pz[1] = f0.pz + f0.nz * fr.half_carriage; py[1] = f0.py + FU_X_LIFT;
         px[2] = f1.px + f1.nx * fr.half_carriage; pz[2] = f1.pz + f1.nz * fr.half_carriage; py[2] = f1.py + FU_X_LIFT;
         px[3] = f1.px - f1.nx * fr.half_carriage; pz[3] = f1.pz - f1.nz * fr.half_carriage; py[3] = f1.py + FU_X_LIFT;
-        if (x->paint != 2) {                  /* a ZEBRA: u across the lanes, so the bars run along travel */
+        /* [integ L] LC's own paint never lands on the track of a level crossing (roam LF's furniture stands there):
+         * a band within 0.5 m of a drawn rail bed is left off. TD5RE_ROAM_XING_RAIL_VETO=0 = paint it anyway. */
+        if (lc_new && td5_env_int("TD5RE_ROAM_XING_RAIL_VETO", 1, 0, 1) && roam_ctx_rails_bed_near(c, px, pz, 4, 0.5 * FU_UPM)) {
+            if (x->paint == 3) { if (paint == 1) st->xing_unk_zebra--; else st->xing_unk_lines--; }
+            st->xing_rail_drop++;
+            continue;
+        }
+        if (paint != 2) {                     /* a ZEBRA: u across the lanes, so the bars run along travel */
             uu[0] = 0.0; vv[0] = 0.0; uu[1] = L; vv[1] = 0.0; uu[2] = L; vv[2] = 1.0; uu[3] = 0.0; vv[3] = 1.0;
         } else {                              /* LIMIT LINES: the same page transposed, two transverse bars */
             uu[0] = 0.0; vv[0] = 0.0; uu[1] = 0.0; vv[1] = L; uu[2] = 1.0; vv[2] = L; uu[3] = 1.0; vv[3] = 0.0;
@@ -1543,11 +1812,12 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         em->sb = roam_ctx_sb_of(c, fr.px, fr.pz);
         em->road_y = fr.py;
         if (!fu_quad(em, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1, 1)) return 0;
-        if (x->paint != 2) st->zebras++; else st->limit_lines++;
+        if (paint != 2) st->zebras++; else st->limit_lines++;
+        if (x->way) st->xing_way_drawn++;
         if (td5_env_int("TD5RE_ROAM_FURN_DBG", 0, 0, 2) == 2) {
             int32_t ox, oz;
             roam_ctx_origin(c, NULL, NULL, &ox, &oz);
-            TD5_LOG_I(LOG_TAG, "FURN_XING place %.0f %.0f paint %d lanes %d", fr.px + (double)ox, fr.pz + (double)oz, x->paint, lanes);
+            TD5_LOG_I(LOG_TAG, "FURN_XING place %.0f %.0f paint %d lanes %d", fr.px + (double)ox, fr.pz + (double)oz, paint, lanes);
         }
     }
     return 1;

@@ -32,6 +32,7 @@
 #include "td5_roam_partido.h"   /* [F9b] which tiles are in the place */
 #include "td5_roam_stream.h"    /* [F9b] missing region tiles are built by the stream worker */
 #include "td5_roam_race.h"      /* [F9b] no replan under a running race */
+#include "td5_roam_rules.h"     /* [roam LG] speed limits + turn restrictions */
 #include "deps/cjson/cJSON.h"
 #include "../../../re/include/td5_actor_struct.h"
 
@@ -53,6 +54,8 @@ typedef struct {
     double   plen;               /* polyline length, units */
     int8_t   oneway;             /* 0 two-way, +1 a->b, -1 b->a */
     uint8_t  klass, lanes, flags;
+    uint8_t  maxspeed;           /* [roam LG] posted limit km/h, 0 = untagged (the EDGE record's maxspeed_kph) */
+    double   w;                  /* [roam LG] A* cost per unit: 40 / limit km/h (time), 1 with TD5RE_ROAM_ROUTE_TIME=0 */
 } RrEdge;
 
 typedef struct {
@@ -62,6 +65,7 @@ typedef struct {
     uint8_t cent;                /* x,z came from a NODE record (cluster centroid), not the key cell */
     double  cx, cz;              /* [G2] where the A* connector goes through the node: x,z, or a point ON the patch (x,z stay the junction centre: the traffic's stop lines use it) */
     int     turn0;               /* [G2] 1 + offset of this node's ninc x ninc turn table in g.turn[], 0 = none */
+    uint8_t ban;                 /* [roam LG] 1 = some (arm in, arm out) pair here is banned (g.ban[]) */
 } RrNode;
 
 /* [G2] how the A* joins two arms of a node whose centre is not enough: mode 0 = through the node position,
@@ -92,7 +96,14 @@ typedef struct {
     int    (*tiles)[2];          /* [F9b] the tiles read, sorted (tx, tz): the region this graph covers */
     struct RrSig *sig; int nsig; /* [F8] signalised clusters (SIGN records), sorted by key */
     RrTurn  *turn;  int nturn;   /* [G2] per-pair connectors of the nodes that need one */
+    struct RrBan *ban; int nban; /* [roam LG] banned turns, sorted (node, in, out) */
+    TD5_RouteRestrCensus rc;     /* [roam LG] how the restrictions matched this graph */
+    int      time_cost;          /* [roam LG] 1 = edge costs are times (TD5RE_ROAM_ROUTE_TIME) */
 } RrGraph;
+
+/* [roam LG] one banned turn at node `node`: arriving through inc `in` (edge*2 + the end at the node), leaving
+ * through inc `out` (node_view inc[] values, both) */
+typedef struct RrBan { int node, in, out; } RrBan;
 
 /* [F8] one signalised cluster: its arms in the tile's ARM order (the furniture's order) */
 #define RR_SIG_ARMS 16
@@ -100,7 +111,7 @@ typedef struct RrSig { int64_t key; int narm; int16_t bear[RR_SIG_ARMS]; uint64_
 
 static RrGraph g;
 
-typedef struct { uint64_t key; int row0, n, off; int64_t ek0, ek1; int8_t oneway; uint8_t klass, lanes, flags; } RrRun;
+typedef struct { uint64_t key; int row0, n, off; int64_t ek0, ek1; int8_t oneway; uint8_t klass, lanes, flags, maxspeed; } RrRun;
 typedef struct { int64_t key; double x, z; } RrCent;
 
 typedef struct { void *p; int n, cap; size_t sz; } RrVec;
@@ -177,6 +188,7 @@ static void rr_graph_free(RrGraph *gp)
     free(gp->tiles);
     free(gp->turn);
     free(gp->sig);
+    free(gp->ban);
     memset(gp, 0, sizeof *gp);
 }
 
@@ -441,6 +453,302 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
     }
 }
 
+/* ============================================================ [roam LG] road rules == */
+
+#define RR_RESTR_R_M     60.0         /* a via node this close to a graph node (a cluster centre can sit off it) */
+#define RR_RESTR_TAN_M   10.0         /* an arm's direction: from its end point to the point this far along */
+
+static int rr_in_set(int64_t id, const int64_t *set, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) if (set[i] == id) return 1;
+    return 0;
+}
+static int64_t rr_inc_way(const RrGraph *gp, int inc) { return (int64_t)(gp->edge[inc >> 1].key >> 16); }
+
+/* unit direction AWAY from the node along edge e from its end k (0 = node[0] side) */
+static void rr_end_dir(const RrGraph *gp, int e, int k, double *dx, double *dz)
+{
+    const RrEdge *ed = &gp->edge[e];
+    const int32_t *P = gp->pt + 2 * ed->pt0;
+    const double *C = gp->cum + ed->pt0;
+    const double want = RR_RESTR_TAN_M * RR_UPM;
+    int a = k == 0 ? 0 : ed->npt - 1, b = a;
+    double L;
+    if (k == 0) { while (b + 1 < ed->npt && C[b] - C[a] < want) b++; }
+    else        { while (b > 0 && C[a] - C[b] < want) b--; }
+    *dx = (double)P[2 * b] - P[2 * a];
+    *dz = (double)P[2 * b + 1] - P[2 * a + 1];
+    L = sqrt(*dx * *dx + *dz * *dz);
+    if (L > 0.0) { *dx /= L; *dz /= L; } else { *dx = 1.0; *dz = 0.0; }
+}
+
+/* the turn from arm `in` into arm `out` at a node (inc values) as TD5_RESTR_NO_LEFT / _RIGHT / _STRAIGHT / _U, in the
+ * sign convention of td5_roam_traffic.c rt_plan_next (cross > 0 = a right turn, game frame, td5_geo_frame.h) */
+static int rr_turn_class(const RrGraph *gp, int in, int out)
+{
+    double ix, iz, ox, oz, cr, dt, ang;
+    rr_end_dir(gp, in >> 1, in & 1, &ix, &iz);
+    ix = -ix; iz = -iz;                                  /* travelling INTO the node */
+    rr_end_dir(gp, out >> 1, out & 1, &ox, &oz);
+    cr = ix * oz - iz * ox;
+    dt = ix * ox + iz * oz;
+    ang = atan2(cr, dt);
+    if (fabs(ang) <= 0.785) return TD5_RESTR_NO_STRAIGHT;
+    if (fabs(ang) >= 2.62) return TD5_RESTR_NO_U;
+    return ang > 0.0 ? TD5_RESTR_NO_RIGHT : TD5_RESTR_NO_LEFT;
+}
+static int rr_kind_turn(int kind)       /* the turn class a kind names, 0 = any (no_entry / no_exit) */
+{
+    switch (kind) {
+    case TD5_RESTR_NO_LEFT:     case TD5_RESTR_ONLY_LEFT:     return TD5_RESTR_NO_LEFT;
+    case TD5_RESTR_NO_RIGHT:    case TD5_RESTR_ONLY_RIGHT:    return TD5_RESTR_NO_RIGHT;
+    case TD5_RESTR_NO_STRAIGHT: case TD5_RESTR_ONLY_STRAIGHT: return TD5_RESTR_NO_STRAIGHT;
+    case TD5_RESTR_NO_U:        case TD5_RESTR_ONLY_U:        return TD5_RESTR_NO_U;
+    default: return 0;
+    }
+}
+/* inc arriving at its node legally / leaving it legally (one-way) */
+static int rr_inc_arrive_ok(const RrGraph *gp, int inc)
+{
+    const int8_t ow = gp->edge[inc >> 1].oneway;
+    return ow == 0 || (ow > 0 ? (inc & 1) == 1 : (inc & 1) == 0);
+}
+static int rr_inc_leave_ok(const RrGraph *gp, int inc)
+{
+    const int8_t ow = gp->edge[inc >> 1].oneway;
+    return ow == 0 || (ow > 0 ? (inc & 1) == 0 : (inc & 1) == 1);
+}
+
+static int rr_cmp_ban(const void *a, const void *b)
+{
+    const RrBan *x = (const RrBan *)a, *y = (const RrBan *)b;
+    if (x->node != y->node) return x->node < y->node ? -1 : 1;
+    if (x->in != y->in) return x->in < y->in ? -1 : 1;
+    return x->out < y->out ? -1 : (x->out > y->out ? 1 : 0);
+}
+
+#define RR_PAIRS_MAX 64
+#define RR_ARM_COS   0.819          /* an arm matches a way's direction within 35 deg */
+
+/* arm `inc` of a node against a restriction's way set: 2 = the arm's edge key IS one of the ways (exact), 1 = its
+ * direction away from the node is within 35 deg of one of the ways' directions away from the via, 0 = no */
+static int rr_arm_match(const RrGraph *gp, int inc, const int64_t *ids, const TD5_RoamRestrDir *dirs, int n)
+{
+    double ax, az;
+    int i, j;
+    if (rr_in_set(rr_inc_way(gp, inc), ids, n)) return 2;
+    rr_end_dir(gp, inc >> 1, inc & 1, &ax, &az);
+    for (i = 0; i < n; i++)
+        for (j = 0; j < dirs[i].n; j++)
+            if (ax * dirs[i].dx[j] + az * dirs[i].dz[j] >= RR_ARM_COS) return 1;
+    return 0;
+}
+
+/* the from arms (arriving legally) and to arms (leaving legally) of node n; returns the weaker of the two best match
+ * strengths (0 = one side has none). in[] / out[] keep only the arms of the best strength on each side. */
+static int rr_node_arms(const RrGraph *gp, int n, const TD5_RoamRestr *q, int *in, int *nin, int *out, int *nout)
+{
+    const RrNode *nd = &gp->node[n];
+    int a, bf = 0, bt = 0;
+    *nin = *nout = 0;
+    for (a = 0; a < nd->ninc; a++) {
+        const int inc = gp->inc[nd->first + a];
+        const int mf = rr_inc_arrive_ok(gp, inc) ? rr_arm_match(gp, inc, q->from, q->from_dir, q->nfrom) : 0;
+        const int mt = rr_inc_leave_ok(gp, inc) ? rr_arm_match(gp, inc, q->to, q->to_dir, q->nto) : 0;
+        if (mf > bf) { bf = mf; *nin = 0; }
+        if (mf && mf == bf && *nin < 16) in[(*nin)++] = inc;
+        if (mt > bt) { bt = mt; *nout = 0; }
+        if (mt && mt == bt && *nout < 16) out[(*nout)++] = inc;
+    }
+    return bf < bt ? bf : bt;
+}
+
+typedef struct { double x; int n; } RrNodeX;
+static int rr_cmp_nodex(const void *a, const void *b)
+{
+    const RrNodeX *p = (const RrNodeX *)a, *q = (const RrNodeX *)b;
+    if (p->x != q->x) return p->x < q->x ? -1 : 1;
+    return p->n - q->n;
+}
+
+/* Match every restriction to the graph and fill gp->ban (sorted, unique) + gp->rc. A restriction is matched at the
+ * graph node nearest its via (node, or the via way end points), within RR_RESTR_R_M, that has an arm of a FROM way
+ * arriving and an arm of a TO way leaving. An arm is a way's when its edge key is that way's id, or (the graph's edges
+ * are ribbon chains keyed by their first way: one OSM way per block joins through) when its direction away from the
+ * node is within 35 deg of the way's own direction away from the via. A junction cluster is one node, so a via way
+ * inside one junction (a divided avenue's median link) collapses onto it. A via way that is a street between two
+ * nodes is counted and NOT enforced (the A* turn state is one node deep). Several pairs keep the ones whose turn
+ * matches the kind (a from way that runs THROUGH the via: left from one side is right from the other). */
+static void rr_restrict_build(RrGraph *gp, const char *place)
+{
+    const uint32_t t0 = td5_plat_time_ms();
+    const TD5_RoamRestr *R;
+    TD5_RoamRestrLoad ld;
+    RrVec bans = { NULL, 0, 0, sizeof(RrBan) };
+    int nr = 0, i, dbg = 0;
+    RrNodeX *byx = NULL;
+    const double r_units = RR_RESTR_R_M * RR_UPM;
+    memset(&gp->rc, 0, sizeof gp->rc);
+    if (td5_env_int("TD5RE_ROAM_TURN_RESTRICT", 1, 0, 1) == 0) return;
+#ifndef TD5RE_RELEASE
+    dbg = td5_env_int("TD5RE_ROAM_RULES_LOG", 0, 0, 1);    /* DEV: why restrictions did not match */
+#endif
+    R = td5_roam_rules_restrictions(place, &nr, &ld);
+    gp->rc.loaded = nr;
+    if (nr == 0 || gp->nnode == 0) return;
+    byx = (RrNodeX *)malloc((size_t)gp->nnode * sizeof(RrNodeX));
+    if (!byx) return;
+    for (i = 0; i < gp->nnode; i++) { byx[i].x = gp->node[i].x; byx[i].n = i; }
+    qsort(byx, (size_t)gp->nnode, sizeof(RrNodeX), rr_cmp_nodex);
+    for (i = 0; i < nr; i++) {
+        const TD5_RoamRestr *q = &R[i];
+        double qx[TD5_RESTR_VIAPTS], qz[TD5_RESTR_VIAPTS], minx = 1e300, maxx = -1e300, best_d = 1e300;
+        int nq = 0, lo, hi, k, best = -1, best_m = 0, n_near = 0;
+        int pin[RR_PAIRS_MAX], pout[RR_PAIRS_MAX], ok[RR_PAIRS_MAX], np = 0, nok = 0, want, j;
+        int in[16], nin = 0, out[16], nout = 0;
+        if (q->via_node) { qx[0] = q->vx; qz[0] = q->vz; nq = 1; }
+        else for (k = 0; k < q->nvpt; k++) { qx[nq] = q->vpx[k]; qz[nq] = q->vpz[k]; nq++; }
+        for (k = 0; k < nq; k++) { if (qx[k] < minx) minx = qx[k]; if (qx[k] > maxx) maxx = qx[k]; }
+        lo = 0; hi = gp->nnode;
+        while (lo < hi) { const int mid = (lo + hi) / 2; if (byx[mid].x < minx - r_units) lo = mid + 1; else hi = mid; }
+        for (; lo < gp->nnode && byx[lo].x <= maxx + r_units; lo++) {
+            const int n = byx[lo].n;
+            double d = 1e300;
+            int m, ti[16], tn, to2[16], tn2;
+            for (k = 0; k < nq; k++) { const double dd = hypot(gp->node[n].x - qx[k], gp->node[n].z - qz[k]); if (dd < d) d = dd; }
+            if (d > r_units) continue;
+            n_near++;
+            m = rr_node_arms(gp, n, q, ti, &tn, to2, &tn2);
+            if (m == 0) continue;
+            /* the strongest match first (both sides by id), then the nearest */
+            if (m > best_m || (m == best_m && (d < best_d || (d == best_d && n < best)))) {
+                best_m = m; best_d = d; best = n;
+                nin = tn; nout = tn2;
+                memcpy(in, ti, sizeof(int) * (size_t)tn); memcpy(out, to2, sizeof(int) * (size_t)tn2);
+            }
+        }
+        if (best < 0) {
+            if (!n_near) gp->rc.outside++;
+            else if (q->nvia_way > 0) gp->rc.via_way_chain++;
+            else gp->rc.no_node++;
+#ifndef TD5RE_RELEASE
+            if (dbg && gp->rc.outside + gp->rc.no_node + gp->rc.via_way_chain <= 24)
+                TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT dbg: %lld %s unmatched (%s): from %lld to %lld, %d nodes within %.0f m",
+                          (long long)q->id, td5_roam_rules_kind_name(q->kind), !n_near ? "no node near" :
+                          (q->nvia_way > 0 ? "via-way chain" : "no node with both arms"), (long long)q->from[0],
+                          (long long)q->to[0], n_near, RR_RESTR_R_M);
+#endif
+            continue;
+        }
+        gp->rc.matched++;
+        if (best_m == 2) gp->rc.matched_by_id++;
+        if (!q->via_node) gp->rc.matched_via_way++;
+        for (k = 0; k < nin; k++)
+            for (j = 0; j < nout && np < RR_PAIRS_MAX; j++) {
+                if ((out[j] >> 1) == (in[k] >> 1) && !(q->kind == TD5_RESTR_NO_U || q->kind == TD5_RESTR_ONLY_U)) continue;
+                pin[np] = in[k]; pout[np] = out[j]; np++;
+            }
+        if (np == 0) { gp->rc.no_pair++; continue; }
+        want = rr_kind_turn(q->kind);
+        for (j = 0; j < np; j++) { ok[j] = !want || rr_turn_class(gp, pin[j], pout[j]) == want; nok += ok[j]; }
+        if (np == 1) {
+            if (want) { if (ok[0]) gp->rc.geom_agree++; else gp->rc.geom_differ++; }
+#ifndef TD5RE_RELEASE
+            if (dbg && want && !ok[0])
+                TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT dbg: %lld %s differs: the one pair turns %s (match %s) at node (%.0f,%.0f), "
+                          "%.0f m from the via", (long long)q->id, td5_roam_rules_kind_name(q->kind),
+                          td5_roam_rules_kind_name(rr_turn_class(gp, pin[0], pout[0])), best_m == 2 ? "id" : "direction",
+                          gp->node[best].x, gp->node[best].z, best_d / RR_UPM);
+#endif
+            /* [roam LG] a pair that turns differently from the kind is enforced only when both ways matched by
+             * edge key: a direction match there may be the wrong arm (a no_left that computes as straight on
+             * would ban legal straight-on driving) */
+            if (want && !ok[0] && best_m != 2) { gp->rc.geom_skipped++; continue; }
+            ok[0] = 1;
+        }
+        else if (nok > 0 && nok < np) gp->rc.filtered++;
+        else if (nok == 0) {
+            if (best_m != 2) { gp->rc.geom_skipped++; continue; }
+            for (j = 0; j < np; j++) ok[j] = 1;
+        }
+        for (j = 0; j < np; j++) {
+            const RrNode *nd = &gp->node[best];
+            int b;
+            if (!ok[j]) continue;
+            if (!q->only) {
+                RrBan *bn = (RrBan *)rr_vec_add(&bans);
+                if (!bn) break;
+                bn->node = best; bn->in = pin[j]; bn->out = pout[j];
+                continue;
+            }
+            /* only_*: from this arm every OTHER way out is banned */
+            for (b = 0; b < nd->ninc; b++) {
+                const int o = gp->inc[nd->first + b];
+                RrBan *bn;
+                int t, is_to = 0;
+                for (t = 0; t < nout; t++) if (out[t] == o) is_to = 1;
+                if (is_to || !rr_inc_leave_ok(gp, o) || (o >> 1) == (pin[j] >> 1)) continue;
+                bn = (RrBan *)rr_vec_add(&bans);
+                if (!bn) break;
+                bn->node = best; bn->in = pin[j]; bn->out = o;
+            }
+        }
+    }
+    free(byx);
+    if (bans.n > 0) {
+        RrBan *B = (RrBan *)bans.p;
+        int u = 0;
+        qsort(B, (size_t)bans.n, sizeof(RrBan), rr_cmp_ban);
+        for (i = 0; i < bans.n; i++)
+            if (u == 0 || rr_cmp_ban(&B[i], &B[u - 1]) != 0) B[u++] = B[i];
+        gp->ban = B; gp->nban = u;
+        for (i = 0; i < u; i++) gp->node[B[i].node].ban = 1;
+    }
+    gp->rc.bans = gp->nban;
+    gp->rc.ms = (double)(td5_plat_time_ms() - t0);
+    TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT: %d restrictions for cars, matched %d (%d with both ways by id, %d via a way inside one "
+              "junction), no graph node within %.0f m %d, no node with both arms %d, via-way chain not enforced %d, no drivable "
+              "pair %d | banned turns %d | one-pair geometry agrees %d differs %d (skipped: geometry disagrees, not matched by id %d), "
+              "several pairs filtered by the turn %d | %.0f ms",
+              gp->rc.loaded, gp->rc.matched, gp->rc.matched_by_id, gp->rc.matched_via_way, RR_RESTR_R_M, gp->rc.outside,
+              gp->rc.no_node, gp->rc.via_way_chain, gp->rc.no_pair, gp->rc.bans, gp->rc.geom_agree, gp->rc.geom_differ,
+              gp->rc.geom_skipped, gp->rc.filtered, gp->rc.ms);
+}
+
+static int rr_banned_in(const RrGraph *gp, int node, int in, int out)
+{
+    int lo = 0, hi = gp->nban - 1;
+    RrBan key;
+    if (node < 0 || node >= gp->nnode || !gp->node[node].ban) return 0;
+    key.node = node; key.in = in; key.out = out;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        const int c = rr_cmp_ban(&gp->ban[mid], &key);
+        if (c == 0) return 1;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
+/* per-edge A* weight: time at the street's limit (40 km/h = 1.0 per unit) */
+static void rr_edge_weights(RrGraph *gp)
+{
+    const int time_cost = td5_env_int("TD5RE_ROAM_ROUTE_TIME", 1, 0, 1);
+    const int use_tag = td5_env_int("TD5RE_ROAM_MAXSPEED", 1, 0, 1);
+    int e, tagged = 0;
+    for (e = 0; e < gp->nedge; e++) {
+        RrEdge *ed = &gp->edge[e];
+        const int lim = td5_roam_limit_kmh(ed->klass, use_tag ? ed->maxspeed : 0);
+        if (ed->maxspeed) tagged++;
+        ed->w = time_cost ? 40.0 / (double)(lim > 5 ? lim : 5) : 1.0;
+    }
+    gp->time_cost = time_cost;
+    TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: edge costs %s, %d of %d edges carry a posted limit%s",
+              time_cost ? "TIME (length / limit)" : "DISTANCE", tagged, gp->nedge,
+              use_tag ? "" : " (ignored: TD5RE_ROAM_MAXSPEED=0)");
+}
+
 static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int ntiles)
 {
     RrVec runs = { NULL, 0, 0, sizeof(RrRun) };
@@ -482,6 +790,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
             r->key = er->key; r->row0 = er->row0; r->n = er->span_count; r->off = pts.n / 2;
             r->ek0 = er->end_key[0]; r->ek1 = er->end_key[1];
             r->oneway = (int8_t)er->oneway; r->klass = er->klass; r->lanes = er->lanes; r->flags = er->flags;
+            r->maxspeed = er->maxspeed_kph;
             for (q = 0; q <= er->span_count; q++) {
                 int32_t *pp;
                 int vl0, vl1, vr0, vr1, L;
@@ -590,6 +899,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
             int prev_end_row = -1, gap = 0;
             ed->key = R[i].key; ed->end_key[0] = R[i].ek0; ed->end_key[1] = R[i].ek1;
             ed->oneway = R[i].oneway; ed->klass = R[i].klass; ed->lanes = R[i].lanes; ed->flags = R[i].flags;
+            ed->maxspeed = R[i].maxspeed;
             ed->pt0 = gp->npt;
             while (j < runs.n && R[j].key == R[i].key) {
                 int first = (prev_end_row == R[j].row0) ? 1 : 0;   /* shared row: drop the duplicate */
@@ -726,6 +1036,8 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
         gp->sig = S; gp->nsig = u;
         sigs.p = NULL;
     }
+    rr_edge_weights(gp);              /* [roam LG] */
+    rr_restrict_build(gp, place);     /* [roam LG] */
     free(keys); free(runs.p); free(pts.p); free(cents.p); free(patches.p); free(ptris.p);
     snprintf(gp->place, sizeof gp->place, "%s", place);
     gp->ms = (double)(td5_plat_time_ms() - t0);
@@ -1052,6 +1364,15 @@ static int rr_mask_ok(const uint8_t *edge_ok, int e, const RrSnap *S, const RrSn
  * the edge (a car keeps its heading); ignore_ow: one-way streets usable both ways (a pursuing cop close to
  * its target). The route planner passes NULL, -1, 0: unchanged. */
 #define RR_OK(e, d) (ignore_ow || rr_allowed((e), (d)))
+/* [roam LG] the turn bans apply to a leg unless it ignores one-ways (a cop close to its target) or the planner
+ * is retrying a leg that has no legal path (rr_no_bans) */
+static int  rr_no_bans;
+static long rr_ban_fallbacks;
+/* [roam LG] 1 while td5_roam_route_plan_path runs: a cop's leg (and the test drives on the same call) costs DISTANCE,
+ * a pursuer takes the shortest way to a car a few hundred metres off; the route (a race) costs time */
+static int  rr_cost_dist;
+#define RR_W(e) (rr_cost_dist ? 1.0 : g.edge[(e)].w)
+#define RR_BANNED(n, in, out) (bans_on && rr_banned_in(&g, (n), (in), (out)))
 static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs, const uint8_t *edge_ok, int start_dir,
                        int ignore_ow)
 {
@@ -1063,32 +1384,36 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
     double best = 1e300;
     int best_state = -2, best_dw = 0, k;
     const RrEdge *te = &g.edge[T->edge];
-    const double extra[2] = { T->along, te->plen - T->along };
+    const double ws = RR_W(S->edge), wt = RR_W(T->edge);       /* [roam LG] time per unit (1 = distance) */
+    const double extra[2] = { T->along * wt, (te->plen - T->along) * wt };
+    const int bans_on = g.nban > 0 && !ignore_ow && !rr_no_bans;
     int ok = 0;
 
     if (!cost || !parent) { free(cost); free(parent); return 0; }
     for (k = 0; k < ns; k++) { cost[k] = 1e300; parent[k] = -1; }
 
     if (S->edge == T->edge) {
-        if (RR_OK(S->edge, 0) && start_dir != 1 && T->along >= S->along) { best = T->along - S->along; best_state = -1; best_dw = 0; }
-        if (RR_OK(S->edge, 1) && start_dir != 0 && T->along <= S->along && S->along - T->along < best) {
-            best = S->along - T->along; best_state = -1; best_dw = 1;
+        if (RR_OK(S->edge, 0) && start_dir != 1 && T->along >= S->along) { best = (T->along - S->along) * ws; best_state = -1; best_dw = 0; }
+        if (RR_OK(S->edge, 1) && start_dir != 0 && T->along <= S->along && (S->along - T->along) * ws < best) {
+            best = (S->along - T->along) * ws; best_state = -1; best_dw = 1;
         }
     }
     {
         const RrEdge *se = &g.edge[S->edge];
-        if (RR_OK(S->edge, 0) && start_dir != 1) { cost[S->edge * 2] = se->plen - S->along; rr_heap_push(&hp, cost[S->edge * 2], S->edge * 2); }
-        if (RR_OK(S->edge, 1) && start_dir != 0) { cost[S->edge * 2 + 1] = S->along; rr_heap_push(&hp, cost[S->edge * 2 + 1], S->edge * 2 + 1); }
+        if (RR_OK(S->edge, 0) && start_dir != 1) { cost[S->edge * 2] = (se->plen - S->along) * ws; rr_heap_push(&hp, cost[S->edge * 2], S->edge * 2); }
+        if (RR_OK(S->edge, 1) && start_dir != 0) { cost[S->edge * 2 + 1] = S->along * ws; rr_heap_push(&hp, cost[S->edge * 2 + 1], S->edge * 2 + 1); }
     }
     while (rr_heap_pop(&hp, &it)) {
         const int s = it.s, e = s >> 1, d = s & 1;
-        int n, dw, q;
+        int n, dw, q, in_inc;
         if (it.c >= best) break;
         if (it.c > cost[s]) continue;
         n = rr_end_node(e, d);
+        in_inc = e * 2 + (d == 0 ? 1 : 0);              /* [roam LG] the arm (edge, end at n) the car arrives by */
         for (dw = 0; dw < 2; dw++) {
             if (!RR_OK(T->edge, dw) || rr_start_node(T->edge, dw) != n) continue;
             if (rr_uturn(e, d, T->edge, dw, n)) continue;
+            if (RR_BANNED(n, in_inc, T->edge * 2 + dw)) continue;
             if (it.c + extra[dw] < best) { best = it.c + extra[dw]; best_state = s; best_dw = dw; }
         }
         for (q = 0; q < g.node[n].ninc; q++) {
@@ -1097,7 +1422,8 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
             const int s2 = e2 * 2 + d2;
             double c2;
             if (!RR_OK(e2, d2) || rr_uturn(e, d, e2, d2, n) || !rr_mask_ok(edge_ok, e2, S, T)) continue;
-            c2 = it.c + g.edge[e2].plen;
+            if (RR_BANNED(n, in_inc, inc)) continue;
+            c2 = it.c + g.edge[e2].plen * RR_W(e2);
             if (c2 < cost[s2]) { cost[s2] = c2; parent[s2] = s; rr_heap_push(&hp, c2, s2); }
         }
     }
@@ -1133,6 +1459,39 @@ done:
 }
 
 #undef RR_OK
+#undef RR_BANNED
+#undef RR_W
+
+/* [roam LG] a leg under the turn bans, else (no legal path: a restriction mapped wrongly, a region edge) the same
+ * leg without them, counted */
+static int rr_plan_leg_rules(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs, const uint8_t *edge_ok,
+                             int start_dir, int ignore_ow)
+{
+    const int n0 = poly->n, r0 = refs->n;
+    int ok;
+    if (rr_plan_leg(S, T, poly, refs, edge_ok, start_dir, ignore_ow)) return 1;
+    if (g.nban == 0 || ignore_ow) return 0;
+    poly->n = n0; refs->n = r0;
+    rr_no_bans = 1;
+    ok = rr_plan_leg(S, T, poly, refs, edge_ok, start_dir, ignore_ow);
+    rr_no_bans = 0;
+    if (ok) {
+        rr_ban_fallbacks++;
+        TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT: a leg has no path under the turn bans, planned without them (%ld so far)",
+                  rr_ban_fallbacks);
+    }
+    return ok;
+}
+
+int td5_roam_route_graph_turn_banned(int node, int in_inc, int out_inc)
+{
+    return g.ready && rr_banned_in(&g, node, in_inc, out_inc);
+}
+void td5_roam_route_graph_restr_census(TD5_RouteRestrCensus *out)
+{
+    if (out) *out = g.rc;
+}
+long td5_roam_route_restr_fallbacks(void) { return rr_ban_fallbacks; }
 
 /* [roam M] U-turns (td5_roam_route.h). Geometry in the frame of the approach: d = the heading before the turn, sv the
  * unit sideways from the approach carriageway A (point i-1) to the return one B (point i+1), M their midpoint, w half
@@ -1297,11 +1656,14 @@ int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, d
         start_dir = (ex * dir_x + ez * dir_z) >= 0.0 ? 0 : 1;
         if (!ignore_ow && !rr_allowed(S.edge, start_dir)) start_dir = -1;      /* a one-way the wrong way: either way out */
     }
-    if (!rr_plan_leg(&S, &T, &poly, &refs, edge_ok, start_dir, ignore_ow) &&
-        (start_dir < 0 || !rr_plan_leg(&S, &T, &poly, &refs, edge_ok, -1, ignore_ow))) {
+    rr_cost_dist = 1;
+    if (!rr_plan_leg_rules(&S, &T, &poly, &refs, edge_ok, start_dir, ignore_ow) &&
+        (start_dir < 0 || !rr_plan_leg_rules(&S, &T, &poly, &refs, edge_ok, -1, ignore_ow))) {
+        rr_cost_dist = 0;
         free(poly.x); free(poly.z); free(refs.r);
         return 0;
     }
+    rr_cost_dist = 0;
     free(refs.r);
     poly.n = rr_driver_line(&poly.x, &poly.z, poly.n);
     for (i = 1; i < poly.n; i++) L += hypot(poly.x[i] - poly.x[i - 1], poly.z[i] - poly.z[i - 1]);
@@ -1846,7 +2208,7 @@ void td5_roam_route_replan(void)
         if (!rr_covers((double)a->px, (double)a->pz) || !rr_covers((double)b->px, (double)b->pz)) break;
         if (!rr_snap((double)a->px, (double)a->pz, RR_SNAP_MAX_M, &sa) ||
             !rr_snap((double)b->px, (double)b->pz, RR_SNAP_MAX_M, &sb)) break;
-        if (!rr_plan_leg(&sa, &sb, &poly, &refs, NULL, -1, 0)) break;
+        if (!rr_plan_leg_rules(&sa, &sb, &poly, &refs, NULL, -1, 0)) break;
         ok_legs++;
     }
     rt.res.legs = nlegs; rt.res.legs_ok = ok_legs; rt.res.ok = (ok_legs == nlegs);
@@ -2393,6 +2755,9 @@ int td5_roam_route_dev_test(void)
     const int N = td5_env_int("TD5RE_ROAM_ROUTE_TEST_N", 40, 2, 2000);
     uint32_t rng = 12345u;
     int i, pairs = 0, planned = 0, bad_oneway = 0, nondet = 0, snapfail = 0, unknown_key = 0;
+    int bad_turn = 0, turns = 0;                    /* [roam LG] consecutive edge pairs through a banned turn */
+    double time_sum = 0.0;                          /* [roam LG] the routes' time at the limits, seconds   */
+    const long fb0 = rr_ban_fallbacks;
     double ratio_sum = 0.0, ratio_max = 0.0, ms_sum = 0.0, ms_max = 0.0, len_sum = 0.0;
     int edges_sum = 0;
     if (td5_env_int("TD5RE_ROAM_ROUTE_TEST", 0, 0, 1) != 1) return 0;
@@ -2427,6 +2792,15 @@ int td5_roam_route_dev_test(void)
                 const int ei = rr_find_edge_key(rt.res.edge[k].key);
                 if (ei < 0) { unknown_key++; continue; }
                 if (!rr_allowed(ei, rt.res.edge[k].dir > 0 ? 0 : 1)) bad_oneway++;
+                time_sum += g.edge[ei].plen / RR_UPM / (td5_roam_limit_kmh(g.edge[ei].klass, g.edge[ei].maxspeed) / 3.6);
+                if (k + 1 < rt.res.nedge) {      /* [roam LG] the turn into the next edge */
+                    const int ej = rr_find_edge_key(rt.res.edge[k + 1].key);
+                    const int d = rt.res.edge[k].dir > 0 ? 0 : 1, d2 = rt.res.edge[k + 1].dir > 0 ? 0 : 1;
+                    if (ej >= 0 && ej != ei && rr_end_node(ei, d) == rr_start_node(ej, d2)) {
+                        turns++;
+                        if (rr_banned_in(&g, rr_end_node(ei, d), ei * 2 + (d == 0 ? 1 : 0), ej * 2 + d2)) bad_turn++;
+                    }
+                }
             }
             td5_roam_route_replan();
             if (rt.res.hash != h1) nondet++;
@@ -2437,6 +2811,13 @@ int td5_roam_route_dev_test(void)
               pairs, planned, snapfail, bad_oneway, unknown_key, nondet,
               planned ? len_sum / planned : 0.0, planned ? (double)edges_sum / planned : 0.0,
               planned ? ratio_sum / planned : 0.0, ratio_max, planned ? ms_sum / planned : 0.0, ms_max);
+    TD5_LOG_I(LOG_TAG, "ROUTE_TEST: rules: costs %s | mean time at the limits %.1f s | turns %d, through a banned turn %d, "
+              "legs planned without the bans %ld | restrictions %d matched %d (via way %d) outside %d no-node %d via-way-chain %d "
+              "no-pair %d, banned turns %d, one-pair geometry agrees %d differs %d, skipped (geometry disagrees) %d, filtered %d",
+              g.time_cost ? "TIME" : "DISTANCE", planned ? time_sum / planned : 0.0,
+              turns, bad_turn, rr_ban_fallbacks - fb0, g.rc.loaded, g.rc.matched, g.rc.matched_via_way, g.rc.outside,
+              g.rc.no_node, g.rc.via_way_chain, g.rc.no_pair, g.rc.bans, g.rc.geom_agree, g.rc.geom_differ, g.rc.geom_skipped,
+              g.rc.filtered);
     /* connected components of the undirected edge graph */
     {
         int *comp = (int *)calloc((size_t)g.nnode, sizeof(int)), *stack = (int *)malloc((size_t)g.nnode * sizeof(int));
@@ -2507,6 +2888,7 @@ int td5_roam_route_graph_edge_view(int e, TD5_RouteGEdge *out)
     out->plen = ed->plen;
     out->oneway = ed->oneway;
     out->klass = ed->klass; out->lanes = ed->lanes; out->flags = ed->flags;
+    out->maxspeed = ed->maxspeed;
     return 1;
 }
 

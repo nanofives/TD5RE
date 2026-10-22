@@ -89,6 +89,12 @@
 #define TD6_PROP_TEX_BASE              1002
 #define TD6_PROP_TEX_COUNT             6
 
+/* [roam LF] station name boards of free roam (td5_roam_furniture.c): 13 pages of 64x16 / 64x32 cells, 1008..1020
+ * (1021 is TD5_FALLBACK_TEXTURE_PAGE). Kept apart from the street-plate atlas (which fills its 47 pages in the level
+ * zone) so a station name never takes a street plate's cell. */
+#define ROAM_STATION_PAGE_BASE         1008
+#define ROAM_STATION_PAGE_COUNT        13
+
 /* --- Compile-time invariants (the non-regressable guard) ------------------
  * (1) Every reserved base sits at or above the level ceiling.
  * (2) Ranges do not overlap (checked pairwise in sorted-by-base order).
@@ -121,6 +127,11 @@ _Static_assert(ENVMAP_TEXTURE_PAGE_BASE + ENVMAP_TEXTURE_PAGE_COUNT
 _Static_assert(WHEEL_RIM_TEX_BASE + WHEEL_RIM_TEX_COUNT
                <= TD6_PROP_TEX_BASE,
                "WHEEL RIM pages overlap TD6 PROP pages");
+
+_Static_assert(TD6_PROP_TEX_BASE + TD6_PROP_TEX_COUNT <= ROAM_STATION_PAGE_BASE,
+               "TD6 PROP pages overlap the ROAM STATION pages");
+_Static_assert(ROAM_STATION_PAGE_BASE + ROAM_STATION_PAGE_COUNT <= 1021,
+               "ROAM STATION pages run into TD5_FALLBACK_TEXTURE_PAGE");
 
 /* (3) fits in the table */
 _Static_assert(TD6_PROP_TEX_BASE + TD6_PROP_TEX_COUNT <= TD5_PAGE_TABLE_SIZE,

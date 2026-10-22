@@ -102,6 +102,26 @@
 #define TD5_GEOB_R3_CONE       12
 #define TD5_GEOB_R3__N         13
 
+/* [roam LB] WHAT BUSINESS a footprint holds, for the free-roam shopfront (td5_roam_shops.c): from the
+ * footprint's own shop= / amenity= / office= / healthcare= tags (td5_geob_poi_cat), or a POIS.JSON point
+ * joined to it (re/tools/geo_pois.py, same rule). First match wins, in this order. Nothing in the strip
+ * geo BUILD reads it. */
+#define TD5_GEOB_POI_NONE      0
+#define TD5_GEOB_POI_FUEL      1   /* amenity=fuel                                         */
+#define TD5_GEOB_POI_PHARMACY  2   /* amenity=pharmacy, healthcare=pharmacy, shop=chemist  */
+#define TD5_GEOB_POI_BANK      3   /* amenity=bank / bureau_de_change                     */
+#define TD5_GEOB_POI_FOOD      4   /* restaurant, cafe, bar, fast food, ice cream, bakery, butcher... */
+#define TD5_GEOB_POI_KIOSK     5   /* shop=kiosk / newsagent / convenience / tobacco / lottery */
+#define TD5_GEOB_POI_HEALTH    6   /* amenity=clinic / doctors / dentist / veterinary, healthcare=* */
+#define TD5_GEOB_POI_SHOP      7   /* any other shop=                                      */
+#define TD5_GEOB_POI_OFFICE    8   /* office=*                                             */
+#define TD5_GEOB_POI__N        9
+/* The rule above (tag values as OSM writes them, NULL = absent). */
+int td5_geob_poi_cat(const char *shop, const char *amenity, const char *office, const char *healthcare);
+/* "fuel", "pharmacy", ... (geo_pois.py's category names) -> TD5_GEOB_POI_*, NONE when unknown. */
+int td5_geob_poi_cat_of_name(const char *name);
+const char *td5_geob_poi_name(int cat);
+
 /* AREAS.JSON `kind`, collapsed to what the plaza emitter distinguishes. */
 #define TD5_GEOA_KIND_OTHER   0
 #define TD5_GEOA_KIND_PARK    1      /* leisure=park, village_green, common */
@@ -197,6 +217,7 @@ typedef struct {
      * stone / plaster facade page instead of the city's window pages */
     unsigned char civic;
     unsigned char rel;          /* [roam JC2] an outline from S3D_RELATIONS.JSON (an OSM multipolygon) */
+    unsigned char poi_cat;      /* [roam LB] TD5_GEOB_POI_* of the footprint's own shop= / amenity= / office= tags */
 } TD5_GeoBuilding;
 
 /* An area's own BARRIER, straight off AREAS.JSON's `barrier` field.
@@ -224,6 +245,10 @@ typedef struct {
      * plaza emitter lays it like any other plaza and takes its paths from the
      * real FOOTWAYS.JSON ways inside it. See geob_add_ring_areas. */
     unsigned char ring;
+    /* [roam LD] 0 = the ring is the whole outline. > 0: a PARK_RELATIONS.JSON multipolygon whose
+     * inner rings follow the first n_outer points, each joined to point 0 by a zero-width bridge
+     * walked out and back: point-in-ring parity skips the holes, a triangulation takes n_outer. */
+    unsigned short n_outer;
 } TD5_GeoArea;
 
 /* ------------------------------------------------------------- lifecycle --- */

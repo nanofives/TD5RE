@@ -69,7 +69,7 @@
 #define ROAM_FORMAT_VERSION   1u
 /* Bumped BY HAND when a build rule changes (design 5.1 item 4). The determinism
  * harness (verify/roam/determinism.py) is the guard that it was bumped. */
-#define ROAM_RULES_VERSION    9u    /* 2: F1-T9 divided-carriageway lanes, short-ribbon
+#define ROAM_RULES_VERSION    10u   /* 2: F1-T9 divided-carriageway lanes, short-ribbon
                                      * pins, absorbed edges on the patch, SPLIT fallbacks,
                                      * ROW_COVERED pins at H_c
                                      * 3: F1-T10 height coupling of overlapping ribbons,
@@ -95,7 +95,9 @@
                                      * lanes (to 2.75 m, lane count kept) for a 2 m median
                                      * 9: integ J: TD5RE_ROAM_MEDIAN_KEEP_OUTER (opt-in, default off = the rule-8
                                      *    geometry): a narrowed divided carriageway keeps its outer kerb (shifted
-                                     *    outward, the median widens on its own side), its nodes follow */
+                                     *    outward, the median widens on its own side), its nodes follow
+                                     * 10: roam NC, EDGE flag ROAM_EF_UNDER (an edge that may lie in a cutting:
+                                     *    a bore approach, layer < 0, or crossed under by a deck) */
 #define ROAM_TILE_UNITS       110080          /* 256 m x 430                    */
 #define ROAM_GRID_CELL        3440            /* 8 m locator cell               */
 #define ROAM_GRID_CELLS       32              /* cells per tile side, no margin */
@@ -137,6 +139,8 @@
 #define ROAM_EF_RAMP_SHORT  0x10u   /* T4 flags of the ribbon                   */
 #define ROAM_EF_PIN_MISS    0x20u
 #define ROAM_EF_APPROACH    0x40u   /* [roam IE] the deck floor of a bridge chain lifted it */
+#define ROAM_EF_UNDER       0x80u   /* [roam NC] may lie in a cutting: a bore approach (two JOIN hops),
+                                     * layer < 0, or crossed UNDER by a deck of another way (td5_roam_cut.h) */
 /* EDGE.end_kind[] values: TD5_ROAM_END_* of td5_roam_world.h */
 
 /* SIGN.kind */
