@@ -64,7 +64,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  19u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  20u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -116,7 +116,9 @@
                                      * 18 = roam NC: cutting walls (td5_roam_cut.c), no sidewalk on a cutting span, lot holes
                                      *      round every cutting span of the 3x3
                                      * 19 = round N integration: roam NA NC combined (each bumped 17 -> 18 on its
-                                     *      own, 19 so no tile cached by a single branch is reused) */
+                                     *      own, 19 so no tile cached by a single branch is reused)
+                                     * 20 = roam PA: bus / bike lane paint (td5_roam_furniture.c fu_emit_lanes, LANES.JSON), a plain saltire on
+                                     *      every untagged level crossing approach (td5_roam_rails.c) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -143,6 +145,11 @@ int roam_nearest_edge(const TG_TileCtx *c, double x, double z, double max_d,
                       int *edge, int *side, double *along, double *lateral);
 /* The frame of edge `edge` at `along` on `side`. 1 on success. */
 int roam_edge_frame(const TG_TileCtx *c, int edge, int side, double along, RoamFrame *out);
+/* [roam PA] the street segments of the 3x3 (one per ribbon span: the row centre a -> the next row centre b, the
+ * half carriageway there, the surface height at both ends, the owning edge's key). 1 on success. */
+typedef struct { double ax, az, ay, bx, bz, by, hw; uint64_t key; int klass; } RoamSegInfo;
+int roam_ctx_nseg(const TG_TileCtx *c);
+int roam_ctx_seg(const TG_TileCtx *c, int i, RoamSegInfo *out);
 
 /* ---- [F4c] the ctx as the furniture emitters see it (td5_roam_furniture.c) ---- */
 /* The ROAD tile of the 3x3 at (dx, dz) in -1..1 (0,0 = the tile being built), NULL if absent. */

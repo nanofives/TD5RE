@@ -1601,6 +1601,7 @@ static int rl_lx_node(RlEm *e, const RlNode *n0)
         sb = roam_ctx_sb_of(c, px, pz);
         if (!rl_lx_post(e, sb, px, pz, ky, T, R, n, arm)) return 0;
         if (untagged) e->st->lx_untagged_x++;
+        if (untagged && e->log) TD5_LOG_I(LOG_TAG, "ROAM_RAIL_UNTAGGED_X at place (%.0f,%.0f)", px + (double)e->ox, pz + (double)e->oz);
     }
     return 1;
 }

@@ -13,8 +13,9 @@ which every ROADS way carries as "id"):
 
 OUTPUT (inside <place>/, nothing else is touched)
 
-    LANES.JSON   {"ways": {"<osm way id>": {"bus": {...}, "cycle": {...}, "tags": {...}}}, "census": {...}}
-        bus:   {"left": kind|null, "right": kind|null, "contraflow": bool}
+    LANES.JSON   {"ways": {"<osm way id>": {"bus": {...}, "cycle": {...}, "tags": {...},
+                  "pts": [{"x","z"}, ...] (the ROADS tile polyline, source frame)}}, "census": {...}}
+        bus:   {"left": kind|null, "right": kind|null, "left_n", "right_n": reserved lanes from that kerb, "contraflow": bool}
         cycle: {"left": kind|null, "right": kind|null}
         kind (bus):   "lane"   a lane of the carriageway kept for buses (busway=lane, a `designated`
                                slot of bus:lanes / psv:lanes, lanes:bus=1 read on the kerb side)
@@ -62,7 +63,7 @@ LANE_QL = ("[out:json][timeout:180];\n(\n"
 KEEP_PREFIX = ("cycleway", "busway", "bus:lanes", "psv:lanes", "lanes:bus", "lanes:psv", "oneway:bus",
                "bicycle:lanes", "lanes", "oneway", "highway", "name", "surface:cycleway")
 
-BUS_SLOTS = ("designated", "yes", "lane")      # a bus:lanes slot value that reserves that lane
+BUS_SLOTS = ("designated", "yes", "lane")      # a bus:lanes slot value: lane allowed for buses (yes) / reserved (designated)
 
 
 def query_for(pj: dict) -> str:
@@ -116,22 +117,55 @@ def _bus(t: dict) -> dict:
             out["right"] = None
             out["left"] = "track" if v == "opposite_track" else "lane"
             out["contraflow"] = True
-    for key in ("bus:lanes", "psv:lanes", "lanes:bus", "lanes:psv"):
+    out["left_n"] = 1 if out["left"] else 0
+    out["right_n"] = 1 if out["right"] else 0
+    slots_seen = False
+    for key in ("bus:lanes", "psv:lanes"):
         raw = t.get(key)
-        if not raw:
+        if not raw or "|" not in raw and raw.strip() not in BUS_SLOTS:
             continue
-        if "|" in raw:                                  # one slot per lane, left to right
-            slots = [s.strip() for s in raw.split("|")]
-            if slots and slots[-1] in BUS_SLOTS and out["right"] is None:
-                out["right"] = "lane"
-            if slots and slots[0] in BUS_SLOTS and len(slots) > 1 and out["left"] is None:
-                out["left"] = "lane"
-        elif raw.strip() in BUS_SLOTS + ("1", "2") and out["right"] is None and key.startswith("lanes:"):
-            out["right"] = "lane"                       # lanes:bus=1 -> the kerb lane
+        slots = [x.strip() for x in raw.split("|")]       # one slot per lane, left to right
+        # `designated` reserves the lane for buses; `yes` only lets them use a general lane
+        nr = 0
+        for x in reversed(slots):
+            if x != "designated":
+                break
+            nr += 1
+        nl = 0
+        for x in slots:
+            if x != "designated":
+                break
+            nl += 1
+        if nr == len(slots):          # every lane reserved: not a bus LANE any more, leave it
+            nr = nl = 0
+        if nr and out["right"] is None:
+            out["right"], out["right_n"] = "lane", nr
+        if nl and out["left"] is None:
+            out["left"], out["left_n"] = "lane", nl
+        slots_seen = True
+    if not slots_seen and not out["right"] and not out["left"]:
+        n = (t.get("lanes:bus") or t.get("lanes:psv") or "").strip()
+        if n.isdigit() and int(n) > 0:   # a count with no slot list: the kerb lanes, right side
+            out["right"], out["right_n"] = "lane", min(int(n), 2)
     return out
 
 
-def convert(osm: dict) -> dict:
+def road_points(place: str, ids: set) -> dict:
+    """way id -> [{"x","z"}, ...] (source frame, as in the ROADS tiles). The C painter needs the way's own
+    direction: OSM left/right are relative to it and a ribbon row may run either way."""
+    import glob
+    out: dict = {}
+    for f in sorted(glob.glob(os.path.join(place, "tiles", "ROADS_*.JSON"))):
+        with open(f, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        for r in doc.get("roads", []):
+            k = str(r.get("id"))
+            if k in ids and k not in out and r.get("points"):
+                out[k] = [{"x": p["x"], "z": p["z"]} for p in r["points"]]
+    return out
+
+
+def convert(osm: dict, pts: dict | None = None) -> dict:
     ways: dict = {}
     for el in osm.get("elements", []):
         if el.get("type") != "way":
@@ -143,6 +177,9 @@ def convert(osm: dict) -> dict:
         ways[str(el["id"])] = {
             "bus": b, "cycle": c,
             "tags": {k: v for k, v in t.items() if k.startswith(KEEP_PREFIX)}}
+    if pts is not None:
+        for k, w in ways.items():
+            w["pts"] = pts.get(k, [])
     return ways
 
 
@@ -217,7 +254,11 @@ def main(argv=None) -> int:
         if "runtime error" in osm["remark"]:
             return 3
     ways = convert(osm)
+    pts = road_points(a.place, set(ways))
+    for k, w in ways.items():
+        w["pts"] = pts.get(k, [])
     rep = census(ways, osm)
+    rep["ways_with_geometry"] = sum(1 for w in ways.values() if w["pts"])
     write_json(os.path.join(a.place, "LANES.JSON"), {"ways": ways, "census": rep})
     print(json.dumps(rep, indent=1, sort_keys=True, ensure_ascii=False))
     return 0
