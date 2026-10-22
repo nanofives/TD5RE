@@ -64,6 +64,7 @@ typedef struct {
     double clear;                          /* [roam PE] deck underside over gy (SH_CAN_CLEAR for a forecourt-point site) */
     unsigned int col;
     int islands;                           /* the pump islands are clear too */
+    int site;                              /* [roam PE] the fuel site of a canopy drawn on its footprint, -1 = LB's */
     int posts;                             /* bit k: post k stands on clear ground (drawn) */
     int sb;
 } ShCanopy;
@@ -284,8 +285,9 @@ static int sh_find(const TD5_RoamShopSource *s, double id);
  *
  * One 64 x 16 cell per distinct NAME of POIS.JSON's footprints (buildings[].name), on pages of their own
  * (ROAM_SHOP_PAGE_BASE, ROAM_SHOP_PAGE_COUNT): a street plate or a station board never loses its cell to a shop. The bank
- * holds ROAM_SHOP_PAGE_COUNT * 4 cells; the names used by the most footprints go first (the chains: Loteria de la
- * Provincia, Banco Provincia, Subway), then the shorter, then by name. Upper case like the plates (tg_plate_upper), ONE
+ * holds ROAM_SHOP_PAGE_COUNT * 4 cells; the names of casco footprints go first (a POI of POIS.JSON's pois[] with
+ * casco = true joined to it), then the names used by the most footprints (the chains: Loteria de la Provincia, Banco
+ * Provincia, Subway), then the shorter, then by name. Upper case like the plates (tg_plate_upper), ONE
  * line (a 0.45 m fascia sign is too low for two), the cap at least SN_MIN_CAP px: a longer name loses its leading words
  * to initials ("FARMACIA DEL PUEBLO" -> "F. DEL PUEBLO") until it fits, else it is skipped. Dark letters on a white
  * cell: the sign quad's vertex colour (the fascia tint, lightened) is the board colour. Built on the MAIN thread before
@@ -298,7 +300,7 @@ static int sh_find(const TD5_RoamShopSource *s, double id);
 #define SN_NAME_MAX  96
 #define SN_CELLS     (ROAM_SHOP_PAGE_COUNT * SN_ROWS)
 
-typedef struct { char name[SN_NAME_MAX]; int uses, page, y; } SnCell;
+typedef struct { char name[SN_NAME_MAX]; int uses, casco, page, y; } SnCell;
 
 static struct {
     int     ready, uploaded;
@@ -347,6 +349,7 @@ static int sn_cell_cmp(const void *pa, const void *pb)
 {
     const SnCell *a = (const SnCell *)pa, *b = (const SnCell *)pb;
     const size_t la = strlen(a->name), lb = strlen(b->name);
+    if (a->casco != b->casco) return b->casco - a->casco;      /* the casco's shops first: where the city is driven */
     if (a->uses != b->uses) return b->uses - a->uses;
     if (la != lb) return la < lb ? -1 : 1;
     return strcmp(a->name, b->name);
@@ -357,6 +360,12 @@ static int sn_name_cmp(const void *pa, const void *pb)
     return strcmp(((const SnCell *)pa)->name, ((const SnCell *)pb)->name);
 }
 
+static int sn_dbl_cmp(const void *pa, const void *pb)
+{
+    const double a = *(const double *)pa, b = *(const double *)pb;
+    return a < b ? -1 : (a > b);
+}
+
 int td5_roam_shops_atlas_prepare(const char *place)
 {
     char path[512];
@@ -364,7 +373,8 @@ int td5_roam_shops_atlas_prepare(const char *place)
     cJSON *root;
     const cJSON *arr, *e;
     SnCell *want = NULL;
-    int nw = 0, capw = 0, i;
+    double *cid = NULL;
+    int nw = 0, capw = 0, i, ncid = 0;
     if (!place) return 0;
     if (s_sn.ready && strcmp(s_sn.place, place) == 0) return s_sn.ncell > 0;
     memset(&s_sn, 0, sizeof s_sn);
@@ -377,6 +387,13 @@ int td5_roam_shops_atlas_prepare(const char *place)
     root = cJSON_Parse(json);
     free(json);
     if (!root) return 0;
+    arr = cJSON_GetObjectItem(root, "pois");                    /* the footprints a casco POI joins */
+    if (cJSON_IsArray(arr) && (cid = (double *)malloc((size_t)cJSON_GetArraySize(arr) * sizeof(double) + 8)) != NULL) {
+        for (e = arr->child; e; e = e->next)
+            if (cJSON_IsTrue(cJSON_GetObjectItem(e, "casco")) && cJSON_IsNumber(cJSON_GetObjectItem(e, "bld")))
+                cid[ncid++] = sh_num(e, "bld", 0.0);
+        qsort(cid, (size_t)ncid, sizeof(double), sn_dbl_cmp);
+    }
     arr = cJSON_GetObjectItem(root, "buildings");
     for (e = cJSON_IsArray(arr) ? arr->child : NULL; e; e = e->next) {
         const char *nm = sh_str(e, "name");
@@ -391,15 +408,24 @@ int td5_roam_shops_atlas_prepare(const char *place)
         memset(&want[nw], 0, sizeof want[nw]);
         snprintf(want[nw].name, sizeof want[nw].name, "%s", nm);
         want[nw].uses = 1;
+        {
+            const double id = sh_num(e, "id", 0.0);
+            want[nw].casco = cid && ncid > 0 && bsearch(&id, cid, (size_t)ncid, sizeof(double), sn_dbl_cmp) != NULL;
+        }
         nw++;
     }
+    free(cid);
     cJSON_Delete(root);
     /* one entry per distinct name, with its use count */
     qsort(want, (size_t)nw, sizeof *want, sn_name_cmp);
     {
         int o = 0;
         for (i = 0; i < nw; i++) {
-            if (o > 0 && strcmp(want[o - 1].name, want[i].name) == 0) { want[o - 1].uses++; continue; }
+            if (o > 0 && strcmp(want[o - 1].name, want[i].name) == 0) {
+                want[o - 1].uses++;
+                want[o - 1].casco |= want[i].casco;
+                continue;
+            }
             want[o++] = want[i];
         }
         nw = o;
@@ -1067,7 +1093,8 @@ int td5_roam_shops_canopy_fp(TD5_RoamShopSource *s, double id, const TD5_GeoBuil
 int td5_roam_shops_canopy_from_fp(TD5_RoamShopSource *s, TG_TileCtx *c, int site, const TD5_GeoBuilding *gb,
                                   const double *rx, const double *rz, int n, TD5_RoamShopStats *st)
 {
-    static const double scale[3] = { 1.0, 0.9, 0.8 };
+    static const double scale[5] = { 1.0, 0.9, 0.8, 0.7, 0.6 };
+    int why_deck = 0, why_post = 0;
     double best = 1e300, bcx = 0.0, bcz = 0.0, btx = 1.0, btz = 0.0, bhl = 0.0, bhw = 0.0, clear;
     int k, j, sc;
     if (!s || s->npend >= SH_CAN_MAX || site < 0 || site >= s->nf || n < 3) { if (st) st->canopy_fp_kept++; return 0; }
@@ -1097,45 +1124,55 @@ int td5_roam_shops_canopy_from_fp(TD5_RoamShopSource *s, TG_TileCtx *c, int site
     clear = gb->height - SH_CAN_T;                     /* the mapped (or measured) top is the deck's top */
     if (clear < SH_M(4.2)) clear = SH_M(4.2);
     if (clear > SH_M(6.0)) clear = SH_M(6.0);
-    for (sc = 0; sc < 3; sc++) {
-        const double hl = bhl * scale[sc], hw = bhw * scale[sc], nx = -btz, nz = btx;
+    /* each scale at the rectangle's centre, then moved up to 3 m along and across it (a forecourt roof mapped over the
+     * pavement edge: the deck slides back off the street) */
+    for (sc = 0; sc < 5 * 9; sc++) {
+        static const double k_off[9][2] = { { 0, 0 }, { 0, 1.5 }, { 0, -1.5 }, { 1.5, 0 }, { -1.5, 0 },
+                                             { 0, 3.0 }, { 0, -3.0 }, { 3.0, 0 }, { -3.0, 0 } };
+        const double hl = bhl * scale[sc / 9], hw = bhw * scale[sc / 9], nx = -btz, nz = btx;
+        const double cx = bcx + btx * SH_M(k_off[sc % 9][0]) + nx * SH_M(k_off[sc % 9][1]);
+        const double cz = bcz + btz * SH_M(k_off[sc % 9][0]) + nz * SH_M(k_off[sc % 9][1]);
         int a, bb, ok = 1, posts = 0, nposts = 0, isl = 1;
         for (a = -2; a <= 2 && ok; a++)
             for (bb = -2; bb <= 2 && ok; bb++)
-                if (!sh_deck_pt_ok(c, bcx + btx * hl * a * 0.5 + nx * hw * bb * 0.5, bcz + btz * hl * a * 0.5 + nz * hw * bb * 0.5))
+                if (!sh_deck_pt_ok(c, cx + btx * hl * a * 0.5 + nx * hw * bb * 0.5, cz + btz * hl * a * 0.5 + nz * hw * bb * 0.5))
                     ok = 0;
-        if (!ok) continue;
+        if (!ok) { why_deck++; continue; }
         for (k = 0; k < 4; k++) {
             const double sl = (k & 1) ? 1.0 : -1.0, sw = (k & 2) ? 1.0 : -1.0;
-            if (sh_rect_clear(c, bcx + btx * sl * SH_POST_L(hl) + nx * sw * SH_POST_W(hw),
-                              bcz + btz * sl * SH_POST_L(hl) + nz * sw * SH_POST_W(hw), btx, btz, SH_M(0.4), SH_M(0.4)))
+            if (sh_rect_clear(c, cx + btx * sl * SH_POST_L(hl) + nx * sw * SH_POST_W(hw),
+                              cz + btz * sl * SH_POST_L(hl) + nz * sw * SH_POST_W(hw), btx, btz, SH_M(0.4), SH_M(0.4)))
                 { posts |= 1 << k; nposts++; }
         }
-        if (nposts < 2) continue;
+        if (nposts < 2) { why_post++; continue; }
         if (hl - SH_M(3.0) < SH_M(1.0)) isl = 0;
         for (k = 0; k < 2 && isl; k++) {
             const double sw = k ? 1.0 : -1.0;
-            if (!sh_rect_clear(c, bcx + nx * sw * SH_ISL_W(hw), bcz + nz * sw * SH_ISL_W(hw), btx, btz, hl - SH_M(3.0), SH_M(0.8)))
+            if (!sh_rect_clear(c, cx + nx * sw * SH_ISL_W(hw), cz + nz * sw * SH_ISL_W(hw), btx, btz, hl - SH_M(3.0), SH_M(0.8)))
                 isl = 0;
         }
         {
             ShCanopy *cp = &s->pend[s->npend++];
-            cp->cx = bcx; cp->cz = bcz; cp->tx = btx; cp->tz = btz; cp->hl = hl; cp->hw = hw;
-            cp->gy = roam_ctx_ground(c, bcx, bcz) + SH_M(0.15);
+            cp->cx = cx; cp->cz = cz; cp->tx = btx; cp->tz = btz; cp->hl = hl; cp->hw = hw;
+            cp->gy = roam_ctx_ground(c, cx, cz) + SH_M(0.15);
             cp->clear = clear;
+            cp->site = site;
             cp->col = s->fcol[site];
             cp->islands = isl;
             cp->posts = posts;
-            cp->sb = roam_ctx_sb_of(c, bcx, bcz);
+            cp->sb = roam_ctx_sb_of(c, cx, cz);
         }
         st->canopy_fp++;
         if (s->log) TD5_LOG_I(LOG_TAG, "ROAM_SHOP_FUEL_FP site %d (%.0f,%.0f) footprint %s %.0f m2 h %.1f m: canopy %.1f x %.1f m "
                               "clear %.1f m (scale %.1f, posts %d, islands %d)", site, s->fx[site], s->fz[site],
                               gb->roof_only ? "roof" : "box", gb->area_m2, gb->height / SH_UPM, 2.0 * hl / SH_UPM,
-                              2.0 * hw / SH_UPM, clear / SH_UPM, scale[sc], nposts, isl);
+                              2.0 * hw / SH_UPM, clear / SH_UPM, scale[sc / 9], nposts, isl);
         return 1;
     }
     st->canopy_fp_kept++;
+    if (s->log) TD5_LOG_I(LOG_TAG, "ROAM_SHOP_FUEL_FP site %d (%.0f,%.0f) footprint %s %.0f m2: KEPT as a building (rect %.1f x %.1f m, "
+                          "scales refused: deck over a street %d, posts on a road %d)", site, s->fx[site], s->fz[site],
+                          gb->roof_only ? "roof" : "box", gb->area_m2, 2.0 * bhl / SH_UPM, 2.0 * bhw / SH_UPM, why_deck, why_post);
     return 0;
 }
 
@@ -1155,7 +1192,11 @@ int td5_roam_shops_fuel(TD5_RoamShopSource *s, TG_TileCtx *c, int (*in_bld)(void
         int rn = s->fringn[i] > 64 ? 0 : s->fringn[i], k, edge, side, placed = 0, why[4] = { 0, 0, 0, 0 };
         RoamFrame f;
         if (!roam_ctx_owned(c, px, pz)) continue;
-        if (site_fp && site_fp(u, i)) { st->canopy_fp_site++; continue; }   /* [roam PE] its footprint is the canopy */
+        if (site_fp && site_fp(u, i)) {    /* [roam PE] its footprint is the canopy, drawn by this tile */
+            int q, drawn = 0;
+            for (q = 0; q < s->npend; q++) if (s->pend[q].site == i) drawn = 1;
+            if (drawn) { st->canopy_fp_site++; continue; }
+        }
         for (k = 0; k < rn; k++) { rx[k] = s->rx[s->fring0[i] + k] - (double)ox; rz[k] = s->rz[s->fring0[i] + k] - (double)oz; }
         if (!roam_nearest_edge(c, px, pz, SH_M(45.0), &edge, &side, &along, &lat) ||
             !roam_edge_frame(c, edge, side, along, &f)) {
@@ -1191,6 +1232,7 @@ int td5_roam_shops_fuel(TD5_RoamShopSource *s, TG_TileCtx *c, int (*in_bld)(void
                             cp->cx = cx; cp->cz = cz; cp->tx = ttx; cp->tz = ttz; cp->hl = hl; cp->hw = hw;
                             cp->gy = roam_ctx_ground(c, cx, cz) + SH_M(0.15);
                             cp->clear = SH_CAN_CLEAR;
+                            cp->site = -1;
                             cp->col = s->fcol[i];
                             cp->islands = isl;
                             cp->posts = posts;

@@ -1080,6 +1080,7 @@ struct TG_TileCtx {
      * apron). The line keeps off the zone (TD5RE_ROAM_MUNI_CUT); the census reads both whatever the knob. */
     TD5_RoamCutBands mcut_band, mcut_zone;
     int      mcut_skip;
+    void    *shd;                    /* [roam PE] ScShopDefer: shopfronts waiting for the pavement + infill */
 };
 
 static int st_push_pos(TG_TileCtx *c, double x, double z, double r);   /* [roam LA] SECTION trees */
@@ -1130,6 +1131,9 @@ static void sc_ctx_reset(TG_TileCtx *c)
     memset(&c->bst, 0, sizeof c->bst);
 }
 
+static void sc_shd_free(TG_TileCtx *c);                              /* [roam PE] */
+static int inf_in_lot(const TG_TileCtx *c, double x, double z);   /* [HD] SECTION lots */
+
 static void sc_ctx_free(TG_TileCtx *c)
 {
     int k;
@@ -1143,6 +1147,7 @@ static void sc_ctx_free(TG_TileCtx *c)
     free(c->xc_r); free(c->late_pz); /* [integ L] */
     td5_muni_free(c->muni); td5_muni_free(c->muni2); free(c->mr); free(c->mpool); free(c->grd); free(c->gpool);   /* [roam NA] */
     td5_roam_cut_bands_free(&c->mcut_band); td5_roam_cut_bands_free(&c->mcut_zone);   /* [roam PE] */
+    sc_shd_free(c);
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { tg_buf_free(&c->sb[k].blk); free(c->sb[k].moff); }
     free(c);
 }
@@ -2319,6 +2324,13 @@ typedef struct {
     const double **epx, **epz; int *en;       /* the standing ring of each set entry */
     double *er;                               /* ... its radius round the record's centroid */
     unsigned char *skip;                      /* a fuel canopy footprint: no mass */
+    /* [roam PE] the DEFERRED dressing (TD5RE_ROAM_SHOP_ABUT): the shopfronts are laid after every footprint of the tile
+     * stands (its clearance nudge, up to 4 m, moved neighbours onto 10 of the casco's buried shop walls) and after the
+     * infill lots (sc_emit_pavement): gone[k] = an owned footprint the tile did not build, fin = the built rings */
+    TG_TileCtx *c;
+    unsigned char *gone;
+    double *fin; int nfin, capfin; int *finoff;
+    int infill;                               /* the infill lots are known (c->infr): a lot is a mass too */
 } ScShopU;
 static int sc_shop_in_bld(void *uv, double x, double z)
 {
@@ -2329,10 +2341,11 @@ static int sc_shop_in_bld(void *uv, double x, double z)
         for (k = 0; k < u->nset; k++) {
             const TD5_GeoBuilding *b = u->set[k].b;
             const double dx = X - b->cx, dz = Z - b->cz;
-            if (b->n < 3 || b->part || u->skip[k] || u->set[k].px == u->self || dx * dx + dz * dz > u->er[k] * u->er[k]) continue;
+            if (b->n < 3 || b->part || u->skip[k] || u->gone[k] || u->set[k].px == u->self || dx * dx + dz * dz > u->er[k] * u->er[k])
+                continue;
             if (td5_geob_point_in_ring(u->epx[k], u->epz[k], u->en[k], X, Z)) return 1;
         }
-        return 0;
+        return u->infill && u->c && inf_in_lot(u->c, x, z);
     }
     for (k = 0; k < u->nset; k++) {
         const TD5_GeoBuilding *b = u->set[k].b;
@@ -2343,6 +2356,34 @@ static int sc_shop_in_bld(void *uv, double x, double z)
     return 0;
 }
 
+/* [roam PE] one footprint waiting for its shopfront (deferred dressing) */
+typedef struct {
+    int    i, n, sb;
+    double by, kerb_h;
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    TD5_GeoBuilding g;
+} ScShopItem;
+typedef struct ScShopDefer {
+    ScBld     *set;
+    ScShopU    su;
+    ScShopItem *it; int nit, cap;
+} ScShopDefer;
+
+static void sc_shopu_free(ScShopU *u)
+{
+    free((void *)u->epx); free(u->en); free(u->er); free(u->skip); free(u->gone); free(u->fin); free(u->finoff);
+    u->epx = NULL; u->en = NULL; u->er = NULL; u->skip = NULL; u->gone = NULL; u->fin = NULL; u->finoff = NULL;
+}
+
+static void sc_shd_free(TG_TileCtx *c)
+{
+    ScShopDefer *d = (ScShopDefer *)c->shd;
+    if (!d) return;
+    sc_shopu_free(&d->su);
+    free(d->set); free(d->it); free(d);
+    c->shd = NULL;
+}
+
 /* [roam PE] the owned fuel site `site` has a footprint of the halo set that is drawn as its canopy */
 static int sc_fuel_site_fp(void *uv, int site)
 {
@@ -2351,6 +2392,33 @@ static int sc_fuel_site_fp(void *uv, int site)
     if (!u->skip) return 0;
     for (k = 0; k < u->nset; k++) if (u->skip[k] == (unsigned char)(1 + (site & 0x7F)) && site < 127) return 1;
     return 0;
+}
+
+static void sc_xc_snap(const TG_TileCtx *c, int *xs);
+static void sc_xc_note(TG_TileCtx *c, const int *xs, int cat);
+
+/* [roam PE] the shopfronts of the tile, after every footprint and infill lot stands (TD5RE_ROAM_SHOP_ABUT) */
+static int sc_shops_deferred(TD5_RoamScnSource *s, TG_TileCtx *c)
+{
+    ScShopDefer *d = (ScShopDefer *)c->shd;
+    int k, ok = 1;
+    if (!d) return 1;
+    d->su.infill = 1;
+    for (k = 0; k < d->nit && ok; k++) {
+        const ScShopItem *it = &d->it[k];
+        TD5_RoamShopBld sb_;
+        int xs[TD5_ROAM_SCN_NSB];
+        memset(&sb_, 0, sizeof sb_);
+        sb_.id = d->set[it->i].id; sb_.gb = &it->g; sb_.rx = it->rx; sb_.rz = it->rz; sb_.n = it->n;
+        sb_.by = it->by; sb_.kerb_h = it->kerb_h; sb_.sb = it->sb;
+        sb_.in_bld = sc_shop_in_bld; sb_.u = &d->su;
+        d->su.self = d->set[it->i].px;
+        sc_xc_snap(c, xs);
+        if (!td5_roam_shops_building(s->shops, c, &sb_, &c->st.shop)) ok = 0;
+        sc_xc_note(c, xs, SC_XC_SHOP);
+    }
+    sc_shd_free(c);
+    return ok;
 }
 
 static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int nbc,
@@ -2397,6 +2465,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
     fc = (ScHull *)malloc(SC_FC_MAX * sizeof(ScHull));
     nfc = fc ? sc_forecourts(set, nset, fc) : 0;
     memset(&su, 0, sizeof su);
+    sc_shd_free(c);                              /* [roam PE] nothing left from another tile */
     {
         su.set = set; su.nset = nset; su.ox = (double)c->org_x; su.oz = (double)c->org_z;
     }
@@ -2409,10 +2478,14 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         su.en = (int *)malloc((size_t)nset * sizeof(int));
         su.er = (double *)malloc((size_t)nset * sizeof(double));
         su.skip = (unsigned char *)calloc((size_t)nset, 1);
-        if (!su.epx || !su.en || !su.er || !su.skip) {
-            free((void *)su.epx); free(su.en); free(su.er); free(su.skip); free(set); free(fc); return 0;
-        }
+        if (!su.epx || !su.en || !su.er || !su.skip) { sc_shopu_free(&su); free(set); free(fc); return 0; }
         su.epz = su.epx + nset;
+        su.c = c;
+        if (su.pe) {
+            su.gone = (unsigned char *)calloc((size_t)nset, 1);
+            su.finoff = (int *)malloc((size_t)nset * sizeof(int));
+            if (!su.gone || !su.finoff) { sc_shopu_free(&su); free(set); free(fc); return 0; }
+        }
         for (i = 0; i < nset; i++) {
             const TD5_GeoBuilding *gb = set[i].b;
             const ScMuniRing *mu = sc_muni_find(c, set[i].id, gb->cx, gb->cz);
@@ -2427,6 +2500,12 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             }
             if (td5_roam_shops_canopy_fp(s->shops, set[i].id, gb, &site) && site >= 0 && site < 127)
                 su.skip[i] = (unsigned char)(1 + site);
+            if (su.pe) {                        /* an owned footprint stands only once the pass builds it */
+                int tx2, tz2;
+                roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx2, &tz2);
+                su.gone[i] = sc_tkey(tx2, tz2) == self;
+                su.finoff[i] = -1;
+            }
         }
     }
     for (i = 0; i < nset; i++) {
@@ -2530,6 +2609,17 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         }
         if (veto) { c->st.bld_veto_lm++; sc_bld_note(s, c, &set[i], "landmark veto"); continue; }
         for (k = 0; k < n; k++) { rx[k] = set[i].px[k] - (double)c->org_x; rz[k] = set[i].pz[k] - (double)c->org_z; }
+        if (su.skip && su.skip[i]) {
+            /* [roam PE] a fuel site's canopy traced as a building: LB's canopy on its rectangle, no mass. Before the
+             * clearance: a forecourt reaches the kerb and its service drive, so 11 of the casco's 17 canopy footprints
+             * were dropped as "on a road" / "past the shift cap" (nothing drawn); the canopy has its own road test (the
+             * deck may span a service drive, the posts and islands stand clear of every drivable surface) */
+            if (td5_roam_shops_canopy_from_fp(s->shops, c, (int)su.skip[i] - 1, gb, rx, rz, n, &c->st.shop)) {
+                sc_bld_note(s, c, &set[i], "fuel canopy");
+                continue;
+            }
+            su.skip[i] = 0;               /* no rectangle fits: it stays a footprint (a mass for the tests after it) */
+        }
         mu = sc_muni_find(c, set[i].id, set[i].b->cx, set[i].b->cz);       /* [roam NA] the municipal line */
         mu_on_line = mu && (mu->fate == TD5_MUNI_SNAPPED || mu->fate == TD5_MUNI_ON);
         if (mu && mu->fate == TD5_MUNI_SNAPPED && !(s3d_hide && !s3d_base)) {
@@ -2571,13 +2661,6 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         for (k = 0; k < n; k++) { cx += rx[k]; cz += rz[k]; }
         cx /= n; cz /= n;
         sb = sc_sb_of(c, cx, cz);
-        if (su.skip && su.skip[i]) {
-            /* [roam PE] a fuel site's canopy traced as a building: LB's canopy on its rectangle, no mass */
-            if (td5_roam_shops_canopy_from_fp(s->shops, c, (int)su.skip[i] - 1, gb, rx, rz, n, &c->st.shop)) {
-                sc_bld_note(s, c, &set[i], "fuel canopy");
-                continue;
-            }
-        }
         b = sc_sb(c, sb, 4);
         if (!b) { free(set); free(fc); return 0; }
         memset(&e, 0, sizeof e);
@@ -2672,7 +2755,32 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
                     if (sc_ring_over_cut(&c->mcut_zone, c, rx, rz, n)) { c->st.muni_cut_over[1]++; c->st.muni_cut_over[3] += snapped; }
                 }
             }
-            if (s->shops && c->bst.emitted > emitted0 && !e.s3d_skip_mass && !s3d_base) {
+            if (su.pe && c->bst.emitted > emitted0) {   /* [roam PE] the ring as built */
+                if (!sc_grow((void **)&su.fin, &su.capfin, su.nfin + 2 * n, sizeof(double))) { sc_shopu_free(&su); free(set); free(fc); return 0; }
+                su.finoff[i] = su.nfin;
+                for (k = 0; k < n; k++) {
+                    su.fin[su.nfin + k] = rx[k] + (double)c->org_x;
+                    su.fin[su.nfin + n + k] = rz[k] + (double)c->org_z;
+                }
+                su.nfin += 2 * n;
+                su.en[i] = n;
+                su.gone[i] = 0;
+            }
+            if (s->shops && su.pe && c->bst.emitted > emitted0 && !e.s3d_skip_mass && !s3d_base) {
+                /* [roam PE] deferred: dressed after the pavement + infill (sc_shops_deferred) */
+                ScShopDefer *d = (ScShopDefer *)c->shd;
+                ScShopItem *it;
+                if (!d && !(d = (ScShopDefer *)calloc(1, sizeof *d))) { sc_shopu_free(&su); free(set); free(fc); return 0; }
+                c->shd = d;
+                if (!sc_grow((void **)&d->it, &d->cap, d->nit + 1, sizeof(ScShopItem))) { sc_shopu_free(&su); free(set); free(fc); return 0; }
+                it = &d->it[d->nit++];
+                it->i = i; it->n = n; it->sb = sb; it->g = *gb;
+                it->by = sc_ground_u(&u, cx, cz) + tg_city_kerb_h(e.b);
+                if (e.have_ceiling && it->by > e.ceiling_y) it->by = e.ceiling_y;
+                it->kerb_h = tg_city_kerb_h(e.b);
+                memcpy(it->rx, rx, (size_t)n * sizeof(double));
+                memcpy(it->rz, rz, (size_t)n * sizeof(double));
+            } else if (s->shops && c->bst.emitted > emitted0 && !e.s3d_skip_mass && !s3d_base) {
                 /* [roam LB] the ground floor of a footprint with a business: the core's own base y */
                 TD5_RoamShopBld sb_;
                 double by = sc_ground_u(&u, cx, cz) + tg_city_kerb_h(e.b);
@@ -2694,11 +2802,26 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
             if (kind != TD5_GEOB_LMK_NONE || gb->landmark) c->st.bld_lm++;
         }
     }
+    if (su.pe)                                   /* [roam PE] the built rings (the pool no longer moves) */
+        for (i = 0; i < nset; i++)
+            if (su.finoff[i] >= 0) {
+                const TD5_GeoBuilding *gb = set[i].b;
+                su.epx[i] = &su.fin[su.finoff[i]]; su.epz[i] = &su.fin[su.finoff[i] + su.en[i]];
+                for (k = 0; k < su.en[i]; k++) {
+                    const double d = hypot(su.epx[i][k] - gb->cx, su.epz[i][k] - gb->cz);
+                    if (d > su.er[i]) su.er[i] = d;
+                }
+            }
     /* [roam LB] fuel forecourt canopies, kept off every footprint of the halo set */
     if (s->shops && !td5_roam_shops_fuel(s->shops, c, sc_shop_in_bld, &su, sc_fuel_site_fp, &c->st.shop)) {
-        free((void *)su.epx); free(su.en); free(su.er); free(su.skip); free(set); free(fc); return 0;
+        sc_shopu_free(&su); free(set); free(fc); return 0;
     }
-    free((void *)su.epx); free(su.en); free(su.er); free(su.skip);   /* [roam PE] */
+    if (su.pe && c->shd) {                       /* [roam PE] kept for sc_shops_deferred */
+        ScShopDefer *d = (ScShopDefer *)c->shd;
+        d->set = set; d->su = su;
+        d->su.set = set;
+        set = NULL;
+    } else sc_shopu_free(&su);
     free(set);
     free(fc);
     {   /* [JC] what the Simple 3D Buildings builder did on this tile (c->bst counts the whole tile) */
@@ -6182,7 +6305,14 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
             g.ax = ch.ox[a]; g.az = ch.oz[a]; g.bx = ch.ox[b]; g.bz = ch.oz[b];
             if (c->mcut_skip) {                      /* [roam PE] no line over a cutting (its kerb or its line point there) */
                 const double lx[4] = { ch.px[a], ch.px[b], ch.ox[b], ch.ox[a] }, lz[4] = { ch.pz[a], ch.pz[b], ch.oz[b], ch.oz[a] };
-                if (sc_muni_in_cut(c, lx, lz, 4)) { c->st.muni_cut_skip++; continue; }
+                if (sc_muni_in_cut(c, lx, lz, 4)) {
+                    c->st.muni_cut_skip++;
+                    if (s->bld_log)                  /* TD5RE_ROAM_BLD_LOG=1: which pieces the cutting took */
+                        TD5_LOG_I(LOG_TAG, "ROAM_MUNI_CUT tile %d,%d piece (%.0f,%.0f)-(%.0f,%.0f) w %.0f %.0f vf %02x %02x", c->tx,
+                                  c->tz, g.ax + c->org_x, g.az + c->org_z, g.bx + c->org_x, g.bz + c->org_z, ch.w[a], ch.w[b],
+                                  ch.vf[a], ch.vf[b]);
+                    continue;
+                }
             }
             {   /* the OUTER line's own normal: a piece whose two ends have different widths is tilted against its kerb */
                 const double dx = g.bx - g.ax, dz = g.bz - g.az, l = hypot(dx, dz);
@@ -7932,6 +8062,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     if (td5_env_int("TD5RE_ROAM_SCN_PLAZAS", 1, 0, 1) && !sc_emit_plazas(c, ar, nar)) goto out;
     if (td5_env_int("TD5RE_ROAM_SCN_BUILDINGS", 1, 0, 1) && !sc_emit_buildings(s, c, bc, nbc, ar, nar)) goto out;
     if (!sc_emit_pavement(s, c, bc, nbc, ar, nar)) goto out;            /* [F4b] */
+    if (!sc_shops_deferred(s, c)) goto out;                             /* [roam PE] after the infill */
     /* [G5] after the pavement: a footpath crossing a slab or an island stands on it (sc_pv_y) */
     if (td5_env_int("TD5RE_ROAM_SCN_FOOTPATHS", 1, 0, 1) &&
         !sc_emit_footpaths(s, c, fc, nfc, x0 - (double)c->org_x, z0 - (double)c->org_z,
