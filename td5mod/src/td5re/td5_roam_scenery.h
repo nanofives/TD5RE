@@ -259,6 +259,14 @@ typedef struct {
      * because the outline touches the drivable surface, bad ring (under 3 points / no triangulation); water m2 */
     int  pools, pool_drop_road, pool_bad;
     double pool_m2;
+    /* [roam NA] the municipal line (td5_roam_muni.h), footprints this tile emits: their fate (TD5_MUNI_*), the ones left
+     * by rule (landmark / civic / part / relation, fuel site, on a park / plaza / open area or landmark grounds, outside
+     * the casco), walls brought forward / cut back, block corners filled + new ochavas; every emitted street wall by its
+     * gap to the line (on the pavement > 5 cm, 0 (5 cm), < 1 m, 1-3, 3-6, 6-12, 12-20 m) and the pre-pass line pieces */
+    int  muni_fate[8], muni_skip[4], muni_fwd, muni_back, muni_corner, muni_ochava, muni_gap[7], muni_segs;
+    /* [roam NA] landmark grounds: blocks marked, Overture blobs not built in them, infill lots refused, OSM footprints
+     * kept in them */
+    int  grounds, grounds_ovt, grounds_inf, grounds_osm;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
