@@ -6190,10 +6190,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "footway=crossing ways %ld: already a node %ld, drawn %ld | zebras %ld, limit lines %ld in all",
                  lc_t[0], lc_t[1], lc_t[2], ft_unknown_skipped, lc_t[3], lc_t[4], lc_t[5], ft[9], ft[10]);
         TD5_LOG_I(LOG_TAG, "%s", line);
-        if (f) fprintf(f, "# %s
-", line);
-        fprintf(stderr, "%s
-", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
                  "roam rails: %ld tile(s) with track, %ld way piece(s) in %ld meshes (%.1f km): full bed %ld, narrow (road beside) "
                  "%ld, squeezed (tight median) %ld, nudged off a parallel street %ld, raised over a street slab %ld, flush on a road %ld (no data crossing near %ld), blended to a level crossing %ld | bridges %ld piece(s), "
