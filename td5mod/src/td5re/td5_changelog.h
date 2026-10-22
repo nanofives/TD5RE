@@ -31,6 +31,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 22 (free roam round L together)" },
+    { CL_ITEM,    "Free roam: park trees use the same kinds as the" },
+    { CL_ITEM,    "  street trees, no more white snow pines in La Plata." },
+    { CL_ITEM,    "Free roam: no tree stands in an awning, a pool, a rail" },
+    { CL_ITEM,    "  bed, a monument or under a power line any more." },
+    { CL_ITEM,    "Free roam: no zebra is painted across the rails of a" },
+    { CL_ITEM,    "  level crossing." },
     { CL_DATE,    "October 21 (roam LC: road surfaces, crossings)" },
     { CL_ITEM,    "Free roam: sett / cobble streets use the cobble road" },
     { CL_ITEM,    "  page, dirt and gravel streets the dirt page, no lane" },
