@@ -57,6 +57,7 @@
 #include "td5_roam_furniture.h"
 #include "td5_roam_rails.h"
 #include "td5_roam_plaza.h"
+#include "td5_roam_shops.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
@@ -96,7 +97,9 @@
                                      *      (holes by bridge), plaza furniture + monuments (td5_roam_plaza.c)
                                      * 16 = roam LA: street trees from CANOPY.R8 along the pavement band + lot trees on the
                                      *      world lattice where the canopy says so (td5_roam_scenery.c SECTION trees);
-                                     *      canopy green: wooded unmapped ground stays lawn, takes no infill */
+                                     *      canopy green: wooded unmapped ground stays lawn, takes no infill
+                                     * 16 = roam LB: shopfronts (glass, fascia, awning, pharmacy cross) on the street walls of
+                                     *      footprints with a business (tags + POIS.JSON), fuel forecourt canopies */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -202,7 +205,8 @@ typedef struct {
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
     TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
     TD5_RoamPlazaStats plaza;       /* [roam LD] plaza furniture + monuments census (td5_roam_plaza.c) */
-    int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
+    int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON
+    TD5_RoamShopStats shop;         /* [roam LB] shopfronts + fuel canopies (td5_roam_shops.c) */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
      * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).
