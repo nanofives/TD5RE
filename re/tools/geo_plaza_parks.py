@@ -227,6 +227,39 @@ def convert_relation(el: dict, proj, upm: float) -> dict:
     }
 
 
+def mark_dups(place: str, rels: list) -> int:
+    """`dup_of` = the AREAS tile record a relation repeats (the same area mapped twice: a way AND a
+    multipolygon), else None. A record repeats the relation when its centroid lies in an outer ring
+    and it carries the same non-empty name, or it is unnamed, of the same kind and covers >= 80 % of
+    the relation's area (both of the same area_class). A repeated relation would lay a second lawn over the first (z-fight)."""
+    import glob
+    areas = []
+    for f in sorted(glob.glob(os.path.join(place, "tiles", "AREAS_*.JSON"))):
+        with open(f, encoding="utf-8") as fh:
+            for a in json.load(fh).get("areas", []):
+                if a.get("closed") and len(a.get("points") or []) >= 4:
+                    areas.append(a)
+    n = 0
+    for r in rels:
+        r["dup_of"] = None
+        if not r["outer"]:
+            continue
+        ra = sum(_ring_area(o) for o in r["outer"])
+        for a in sorted(areas, key=lambda a: a["id"]):
+            cx, cz = _centroid(a["points"])
+            if not any(_pip([(p["x"], p["z"]) for p in o], cx, cz) for o in r["outer"]):
+                continue
+            same_name = (bool(r["name"]) and a.get("name") == r["name"]
+                         and _area_class(a.get("kind")) == r["area_class"])
+            same_area = (not a.get("name") and a.get("kind") == r["kind"]
+                         and _ring_area(a["points"]) >= 0.8 * ra)
+            if same_name or same_area:
+                r["dup_of"] = a["id"]
+                n += 1
+                break
+    return n
+
+
 def _furn_kind(t: dict):
     """(kind, sub) of a furniture element, or (None, None)."""
     h = t.get("historic")
@@ -331,7 +364,8 @@ def census(rels: list, items: list) -> tuple[dict, dict]:
         rc["list"].append({"id": r["id"], "name": r["name"], "kind": r["kind"],
                            "class": r["area_class"], "keep": r["keep"], "casco": ic,
                            "outer": len(r["outer"]), "inner": len(r["inner"]),
-                           "open_chains": r["open_chains"], "area_m2": r["area_m2"]})
+                           "open_chains": r["open_chains"], "area_m2": r["area_m2"],
+                           "dup_of": r.get("dup_of")})
     ic_: dict = {"items": len(items), "casco_poly": casco is not None, "by_kind": {},
                  "casco_by_kind": {}, "by_osm": {}, "with_height": 0, "landmarks": 0,
                  "watch": []}
@@ -425,7 +459,9 @@ def main(argv=None) -> int:
             items.append(it)
     rels.sort(key=lambda e: e["id"])
     items.sort(key=lambda e: (e["osm"], e["id"]))
+    ndup = mark_dups(a.place, rels)
     rc, ic = census(rels, items)
+    rc["dup_of_areas_record"] = ndup
     rc["elements_in_answer"] = len(osm.get("elements", []))
     write_json(os.path.join(a.place, "PARK_RELATIONS.JSON"), {"relations": rels, "census": rc})
     write_json(os.path.join(a.place, "PLAZA_FURNITURE.JSON"), {"items": items, "census": ic})
