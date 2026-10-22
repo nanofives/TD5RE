@@ -694,10 +694,10 @@ typedef struct {
 
 /* [roam PE] Round N integ census: 45 casco shopfronts stood more than 5 cm inside another footprint's mass (a neighbour
  * whose ring overlaps the shop's wall, Overture blobs over OSM ways mostly, or an infill lot, td5_roam_scenery.c). The
- * glass keeps to the stretch of the wall whose outside no other footprint covers (probed 0.15 m out every 0.25 m): the
- * longest free run, if it is still SH_EDGE_MIN long, else the wall is no shopfront. */
+ * glass keeps to the stretch of the wall whose outside no other footprint covers (probed every 0.25 m): the
+ * longest free run, if it is still SH_EDGE_MIN long, else the wall is no shopfront. Probed 0.08 m out (SH_FREE_OUT). */
 #define SH_FREE_STEP  SH_M(0.25)
-#define SH_FREE_OUT   SH_M(0.15)
+#define SH_FREE_OUT   SH_M(0.08)          /* the glass stands 0.06 m out: a mass reaching 0.08 m covers it */
 static int sh_free_run(const TD5_RoamShopBld *b, double ax, double az, double bx, double bz, double nx, double nz,
                        double len, double *t0, double *t1)
 {
