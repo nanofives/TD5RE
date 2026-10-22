@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 21 (roam LA: street trees)" },
+    { CL_ITEM,    "Free roam: street trees where the satellite canopy" },
+    { CL_ITEM,    "  map sees them, on the sidewalk off the road, clear" },
+    { CL_ITEM,    "  of corners, lamps, signals, stops and crossings." },
+    { CL_ITEM,    "  Tall yard trees show where no facade hides them." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 21 (round J combined)" },
     { CL_ITEM,    "Free roam: palace drives pass under the building." },
     { CL_ITEM,    "  No wall stands on a drive a palace covers (Casa de" },
