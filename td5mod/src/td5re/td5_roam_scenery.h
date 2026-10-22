@@ -58,11 +58,12 @@
 #include "td5_roam_rails.h"
 #include "td5_roam_plaza.h"
 #include "td5_roam_shops.h"
+#include "td5_roam_outskirts.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  16u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  17u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -101,7 +102,11 @@
                                      * 16 = roam LB: shopfronts (glass, fascia, awning, pharmacy cross) on the street walls of
                                      *      footprints with a business (tags + POIS.JSON), fuel forecourt canopies
                                      * 16 = roam LF: railway furniture (level-crossing posts / arms / lights / saltires, station name
-                                     *      boards, catenary), RAILS_RULES 2 */
+                                     *      boards, catenary), RAILS_RULES 2
+                                     * 16 = roam LH: poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c),
+                                     *      cropland paint on the ground cover
+                                     * 17 = round L integration: roam LA LB LC LD LE LF LH combined (each bumped 15 -> 16 on
+                                     *      its own, 17 so no tile cached by a single branch is reused) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -207,8 +212,9 @@ typedef struct {
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
     TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
     TD5_RoamPlazaStats plaza;       /* [roam LD] plaza furniture + monuments census (td5_roam_plaza.c) */
-    int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON
+    int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
     TD5_RoamShopStats shop;         /* [roam LB] shopfronts + fuel canopies (td5_roam_shops.c) */
+    TD5_RoamOutStats  out;          /* [roam LH] poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c) */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
      * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).
