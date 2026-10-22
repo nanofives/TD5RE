@@ -577,8 +577,11 @@ static int sp_bowl(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand *s, c
     if (lk.capacity > 0 && row_m > 1.0) K = (int)((double)lk.capacity * SP_SEAT_M / row_m + 0.5);   /* rows for the capacity */
     if (K < 6) K = 6;
     if (K > SP_TIER_MAX) K = SP_TIER_MAX;
-    kb = K / 2;
     e->st->seats += (int)((double)K * row_m / SP_SEAT_M);
+    /* drawn: one step per two seat rows past 24 (the tiers were 9,216 of the bowl's ~10k quads, CPU-transformed every
+     * frame: +1.8 ms from the street; a 1.6 m step is not seen from there) */
+    if (K > 24) K = (K + 1) / 2;
+    kb = K / 2;
     rise = (top - y0 - box_h) / (double)K;
     for (k = 0; k < K; k++) T[k] = y0 + (double)(k + 1) * rise + (k >= kb ? box_h : 0.0);
     /* the wall round the pitch (front of row 0), then the tiers */
@@ -679,15 +682,15 @@ static int sp_open_stand(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand
     Ht = s->height > SP_M(4.0) ? s->height : SP_M(4.0);
     top = B + (0.85 * Ht > SP_M(3.0) ? 0.85 * Ht : SP_M(3.0));
     y0 = B + SP_M(0.8);
-    K = (int)(depth / SP_M(1.4) + 0.5);
+    K = (int)(depth / SP_M(2.0) + 0.5);   /* drawn steps of ~2 m (2.5 seat rows): CPU-transformed, see sp_bowl */
     if (K < 2) K = 2;
     if (K > SP_TIER_MAX) K = SP_TIER_MAX;
     rise = (top - y0) / (double)K;
     for (k = 0; k < K; k++) T[k] = y0 + (double)(k + 1) * rise;
-    {   /* the seat census: K rows of the mean of the front and back chain lengths */
+    {   /* the seat census: a seat row every 0.8 m of depth, the mean of the front and back chain lengths */
         double lf = 0.0, lb = 0.0;
         for (j = 0; j < m; j++) { lf += hypot(fx[j + 1] - fx[j], fz[j + 1] - fz[j]); lb += hypot(bx[j + 1] - bx[j], bz[j + 1] - bz[j]); }
-        e->st->seats += (int)((double)K * 0.5 * (lf + lb) / SP_UPM / SP_SEAT_M);
+        e->st->seats += (int)(floor(depth / SP_M(0.8)) * 0.5 * (lf + lb) / SP_UPM / SP_SEAT_M);
     }
     for (j = 0; j < m; j++)
         if (!sp_wall(e, SP_PAINT, fx[j], fz[j], fx[j + 1], fz[j + 1], B - SP_SINK, B - SP_SINK, y0, y0, SC_CONC_D)) return 0;
