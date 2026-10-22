@@ -1070,7 +1070,7 @@ struct TG_TileCtx {
     /* [roam PD] SECTION trees: rule street trees (TD5RE_ROAM_RULE_TREES, casco tiles only), the trunk-in-a-footprint
      * test at emission (TD5RE_ROAM_TREE_BLD) over every footprint ring this tile emitted (after its clearance shift),
      * the avenue / diagonal kerb samples of the coverage census (x, z, class), the dev tree log */
-    int      rt_on, rt_casco, tb_on, tree_log;
+    int      rt_on, rt_casco, tb_on, tree_log, rt_face;
     struct StRing *ebr;
     int      nebr, cap_ebr;
     double  *ebp;
@@ -3433,6 +3433,7 @@ struct ScPvSrc {
     int       medial;                     /* [roam JA] pv_medial: fill to the medial line, not the half ray */
     int       level;                      /* [roam JA] pv_heights: an island's outer edge between the two kerb tops */
     int       pair_skip;                  /* [roam JA] PV_W_SKIP_PAIR in a same-name pair's median */
+    int       side_fix;                   /* [roam PD] TD5RE_ROAM_PV_SIDE_FIX: sidewalk=left / right on the right kerb */
     double    dbg_x, dbg_z, dbg_r;        /* [roam IA] DEV TD5RE_ROAM_PV_DBG=x,z,r (place frame): width-rule trace */
 };
 
@@ -3461,6 +3462,7 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->medial      = td5_env_int("TD5RE_ROAM_PV_MEDIAL", 1, 0, 1);        /* [roam JA] */
     p->level       = td5_env_int("TD5RE_ROAM_PV_ISLAND_LEVEL", 1, 0, 1);  /* [roam JA] */
     p->pair_skip   = td5_env_int("TD5RE_ROAM_PV_PAIR_SKIP", 1, 0, 1);     /* [roam JA] */
+    p->side_fix    = td5_env_int("TD5RE_ROAM_PV_SIDE_FIX", 1, 0, 1);      /* [roam PD] */
 #ifndef TD5RE_RELEASE
     {
         const char *q = getenv("TD5RE_ROAM_PV_DBG");
@@ -3816,6 +3818,10 @@ static int pv_gather(TD5_RoamScnSource *s, TG_TileCtx *c, PvWay *const *ways, in
                 int src = TD5_GEO_SWSRC_NONE, left;
                 if (w) pv_way_dir(w, rx + (double)c->org_x, rz + (double)c->org_z, &dx, &dz);
                 left = ((0.5 * (b->ax + b->bx) - rx) * (-dz) + (0.5 * (b->az + b->bz) - rz) * dx) > 0.0;
+                /* [roam PD] (-dz, dx) is the LEFT of travel in a right-handed frame; the place frame is mirrored since
+                 * roam M (x = -east, td5_geo_frame.h), so there it is the RIGHT: sidewalk=right / left landed on the
+                 * other kerb (casco: every one of 789 bare one-sided kerbs stood on the tagged side). */
+                if (s->pv->side_fix) left = !left;
                 b->w = pv_width(s, w, er, left, &src);
                 if (cutsp && be->prim < t->nspan && cutsp[be->prim]) { b->w = 0.0; if (ti == 4) c->st.cut.pv_skip++; }
                 b->way = w;
@@ -4866,7 +4872,9 @@ static double st_blocked(const double *S, const double *clr, int m, double s)
  * lines, rail beds; a standing face RT_FURN_M off), the shopfront / awning crown rule. Emitted after every other tree
  * and refused within RT_DOUBLE_M of one (no doubles over LA's canopy trees, one row on a median both kerbs walk).
  * Species: LA's round-crown street pages (k_st_street_var: broadleaf only, no conifer), height RT_H_MIN_M .. MAX. */
-#define RT_W_MIN_M      3.0
+#define RT_W_MIN_M      2.5          /* Mariano 2026-10-22: 2.5 (was 3), La Plata plants its 2.5 m veredas */
+#define RT_FACE_LAT_M   1.5          /* a no-sidewalk kerb facing a median: the trunk this far onto the lawn */
+#define RT_FACE_MAX_M   60.0         /* ... the partner carriageway searched this far out */
 #define RT_MED_MIN_M    4.0
 #define RT_SPACE_MIN_M  8.0
 #define RT_LAT_M        0.9
@@ -4885,6 +4893,30 @@ static int rt_av_class(const PvB *p)
     if (p->way->namek == TD5_GEO_NAMEK_AVENIDA) return 0;
     if (p->way->namek == TD5_GEO_NAMEK_DIAGONAL) return 1;
     return -1;
+}
+
+/* [roam PD] Mariano 2026-10-22: the NO-SIDEWALK kerb of a one-way carriageway (sidewalk=left / right, the other side)
+ * that faces its same-name partner across a median of RT_MED_MIN_M or more gets a row too, on the lawn. March out
+ * from the kerb point (tile-local, outward normal nx nz): a footprint or an infill lot first = a block, not a
+ * median; the first road hit must be a one-way way of the same name, at least RT_MED_MIN_M out. */
+static int rt_faces_median(PvEmit *e, const PvB *p, double px, double pz, double nx, double nz)
+{
+    TG_TileCtx *c = e->c;
+    const PvWay *me = p->way;
+    double d;
+    if (!me || !me->oneway || !me->name_h || (me->sidewalk != TD5_GEO_SW_LEFT && me->sidewalk != TD5_GEO_SW_RIGHT)) return 0;
+    for (d = ST_M(0.5); d <= ST_M(RT_FACE_MAX_M); d += ST_M(0.5)) {
+        const double qx = px + nx * d, qz = pz + nz * d;
+        const ScPrim *hp = NULL;
+        if (pv_in_building(c, e->bld, qx, qz) || inf_in_lot(c, qx, qz)) return 0;
+        if (sc_on_road(c, &qx, &qz, 1, &hp)) {
+            const PvWay *ot;
+            if (d < ST_M(RT_MED_MIN_M) || !hp || hp->seg < 0) return 0;
+            ot = pv_find(e->ways, e->nways, (int64_t)(c->edge[c->seg[hp->seg].edge].key >> 16));
+            return ot && ot != me && ot->oneway && ot->name_h == me->name_h;
+        }
+    }
+    return 0;
 }
 
 static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *seq, int m, const double *kx,
@@ -4935,6 +4967,7 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
         double qx[4], qz[4];
         uint32_t h, name;
         const PvB *p;
+        int m3 = 0;
         if (past > s) { s = past; continue; }
         while (seg < m - 1 && S[seg + 1] <= s) seg++;
         a = seg; b = (seg + 1) % ch->nv;
@@ -4952,7 +4985,10 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
         w = ch->w[a] * (1.0 - t) + ch->w[b] * t;
         if (mode[seg] == 2) lat = w - PV_KERB_IN;                   /* the median's medial line */
         else {
-            if (w < ST_M(RT_W_MIN_M - 0.05)) {      /* 5 cm: a 3 m vereda interpolates to 2.9999 */
+            if (w < ST_M(RT_W_MIN_M - 0.05) && c->rt_face && rt_faces_median(e, p, px, pz, nx, nz)) {
+                m3 = 1;                              /* the no-sidewalk kerb of a one-way pair, a median >= 4 m beyond */
+                lat = ST_M(RT_FACE_LAT_M);
+            } else if (w < ST_M(RT_W_MIN_M - 0.05)) {      /* 5 cm: a 3 m vereda interpolates to 2.9999 */
                 c->st.rt_narrow++;
 #ifndef TD5RE_RELEASE
                 if (c->tree_log)
@@ -4962,8 +4998,7 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
                               p->way->name_h, p->way->klass, p->way->sidewalk, p->way->tag_l, p->way->tag_r);
 #endif
                 s += sp; continue;
-            }
-            lat = ST_M(RT_LAT_M);
+            } else lat = ST_M(RT_LAT_M);
         }
         qx[0] = px + nx * lat; qz[0] = pz + nz * lat;
         qx[1] = qx[0] + dx * ST_M(ST_PROBE_M); qz[1] = qz[0] + dz * ST_M(ST_PROBE_M);
@@ -4980,7 +5015,7 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
         if (e->s->shops && td5_roam_shops_fuel_at(e->s->shops, qx[0] + (double)c->org_x, qz[0] + (double)c->org_z)) {
             c->st.rt_fuel++; s += sp; continue;
         }
-        if (mode[seg] == 1) {   /* the building front behind the trunk: the crown is narrowed to it */
+        if (mode[seg] == 1 && !m3) {   /* the building front behind the trunk: the crown is narrowed to it */
             double d;
             for (d = 0.0; d < ST_M(ST_FACADE_PROBE_M); d += ST_M(0.25)) {
                 const double fx = qx[0] + nx * d, fz = qz[0] + nz * d;
@@ -5001,7 +5036,8 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
                 const double ax = qx[0] + dx * ST_M(k_off[alt]), az = qz[0] + dz * ST_M(k_off[alt]);
                 double y, mx[2], mz[2];
                 if (so < 0.0 || so > total || st_blocked(S, clr, m, so) != so) continue;
-                if (!sc_pv_y(c, ax, az, &y)) continue;
+                if (m3) y = sc_ground(c, ax, az) + SC_GEOP_LIFT;   /* [roam PD] on the median lawn, no slab */
+                else if (!sc_pv_y(c, ax, az, &y)) continue;
                 if (sc_square_on_road(c, ax, az, ST_M(ST_TRUNK_M))) continue;
                 mx[0] = ax + dx * ST_M(RT_MOUTH_M); mz[0] = az + dz * ST_M(RT_MOUTH_M);
                 mx[1] = ax - dx * ST_M(RT_MOUTH_M); mz[1] = az - dz * ST_M(RT_MOUTH_M);
@@ -5010,7 +5046,7 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
                 if (!tc) {
                     tc = st_cand_new(c);
                     if (!tc) { ok = 0; break; }
-                    tc->hw = hw; tc->th = th; tc->var = var; tc->kind = mode[seg] == 2 ? 4 : 3;
+                    tc->hw = hw; tc->th = th; tc->var = var; tc->kind = m3 ? 5 : mode[seg] == 2 ? 4 : 3;
                     tc->cls = rt_av_class(p);
                 }
                 tc->x[tc->nalt] = ax; tc->z[tc->nalt] = az; tc->y[tc->nalt] = y; tc->nalt++;
@@ -5458,6 +5494,7 @@ static int sc_emit_street_trees(TG_TileCtx *c)
             else if (t->kind == 1) c->st.st_lot++;
             else if (t->kind == 2) { c->st.trees++; c->st.plaza_tree_var[t->var]++; }    /* [integ L] a plaza tree planted late */
             else if (t->kind == 4) c->st.rt_med++;
+            else if (t->kind == 5) c->st.rt_face++;
             else if (t->cls == 1) c->st.rt_diag++;
             else c->st.rt_av++;
 #ifndef TD5RE_RELEASE
@@ -8005,6 +8042,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     c->rt_casco = sc_casco_has(s, self->tx, self->tz);                       /* [roam PD] */
     c->rt_on = c->rt_casco && td5_env_int("TD5RE_ROAM_RULE_TREES", 1, 0, 1);
     c->tb_on = td5_env_int("TD5RE_ROAM_TREE_BLD", 1, 0, 1);
+    c->rt_face = td5_env_int("TD5RE_ROAM_RULE_TREE_FACE", 1, 0, 1);
 #ifndef TD5RE_RELEASE
     c->tree_log = td5_env_int("TD5RE_ROAM_TREE_LOG", 0, 0, 1);
 #endif
@@ -8291,7 +8329,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
     long lt[16] = { 0 };                                   /* [roam LA] */
-    long rt_t[12] = { 0 }, tb_t[12] = { 0 };               /* [roam PD] */
+    long rt_t[12] = { 0 }, tb_t[12] = { 0 }, rt_face_n = 0;   /* [roam PD] */
     double rt_m[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     long ptv[TD5_TG_TREE_VARIANTS] = { 0 };                /* [integ L] plaza trees per tree page variant */
     long pt_drop[2] = { 0, 0 };                            /* [integ L] plaza trees vetoed: faces, water */
@@ -8416,6 +8454,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         lt[13] += r->st_on_road; lt[14] += r->canopy_cells; lt[15] += r->canopy_cov;
         {   /* [roam PD] */
             int q;
+            rt_face_n += r->rt_face;
             rt_t[0] += r->rt_av; rt_t[1] += r->rt_diag; rt_t[2] += r->rt_med; rt_t[3] += r->rt_stations;
             rt_t[4] += r->rt_canopy; rt_t[5] += r->rt_narrow; rt_t[6] += r->rt_facade; rt_t[7] += r->rt_noslab;
             rt_t[8] += r->rt_fuel; rt_t[9] += r->rt_furn; rt_t[10] += r->rt_border; rt_t[11] += r->rt_double;
@@ -8731,13 +8770,13 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
-                 "roam rule trees [PD]: avenue %ld, diagonal %ld, median %ld (total %ld) | rule stations %ld: canopy "
+                 "roam rule trees [PD]: avenue %ld, diagonal %ld, median %ld, no-sidewalk kerb facing a median %ld (total %ld) | rule stations %ld: canopy "
                  ">= 3 m (LA's) %ld, sidewalk < 3 m %ld, facade %ld, no slab / road / mouth %ld, fuel forecourt %ld, "
                  "furniture / shop face %ld, tile edge %ld, a tree within %.0f m %ld | kerb km with a trunk within %.0f m: "
                  "avenue %.2f -> %.2f of %.2f, diagonal %.2f -> %.2f of %.2f (LA -> with rule) | TRUNK IN A FOOTPRINT "
                  "planted: street %ld, lot %ld, plaza %ld, rule %ld; moved off one %ld/%ld/%ld/%ld; dropped %ld/%ld/%ld/%ld "
                  "(TD5RE_ROAM_RULE_TREES=%d TD5RE_ROAM_TREE_BLD=%d)",
-                 rt_t[0], rt_t[1], rt_t[2], rt_t[0] + rt_t[1] + rt_t[2], rt_t[3], rt_t[4], rt_t[5], rt_t[6], rt_t[7],
+                 rt_t[0], rt_t[1], rt_t[2], rt_face_n, rt_t[0] + rt_t[1] + rt_t[2] + rt_face_n, rt_t[3], rt_t[4], rt_t[5], rt_t[6], rt_t[7],
                  rt_t[8], rt_t[9], rt_t[10], RT_DOUBLE_M, rt_t[11], RT_COVER_M, rt_m[2] / 1000.0, rt_m[4] / 1000.0,
                  rt_m[0] / 1000.0, rt_m[3] / 1000.0, rt_m[5] / 1000.0, rt_m[1] / 1000.0, tb_t[0], tb_t[1], tb_t[2],
                  tb_t[3], tb_t[4], tb_t[5], tb_t[6], tb_t[7], tb_t[8], tb_t[9], tb_t[10], tb_t[11],

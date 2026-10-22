@@ -215,7 +215,7 @@ typedef struct {
      * already within reach (no doubles); the owned avenue / diagonal kerb length (m) and the part of it with a trunk
      * within PD_COVER_M: LA's trees only (cov0) and with the rule trees (cov1). [0] avenue, [1] diagonal */
     int  rt_av, rt_diag, rt_med, rt_stations, rt_canopy, rt_narrow, rt_facade, rt_noslab, rt_fuel, rt_furn, rt_border;
-    int  rt_double;
+    int  rt_double, rt_face;   /* rt_face: [roam PD] trees on the no-sidewalk kerb of a one-way pair facing a median */
     double rt_kerb_m[2], rt_cov0_m[2], rt_cov1_m[2];
     /* [roam PD] trunks in a footprint at emission, by kind (street band, lot, plaza, rule): planted inside one (0 with
      * TD5RE_ROAM_TREE_BLD=1), moved along the kerb off one, dropped (every position inside one) */
