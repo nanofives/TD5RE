@@ -41,6 +41,7 @@
 #include "td5_roam_ai.h"        /* td5_roam_ai_count: the racer field when the session re-sets it */
 #include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
+#include "td5_roam_rules.h"     /* [roam LG] td5_roam_limit_kmh */
 #include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
 #include "td5_police.h"         /* [round H HH] the shared pursuit HUD drawing */
 #include "../../../re/include/td5_actor_struct.h"
@@ -2301,8 +2302,22 @@ void td5_roam_cops_draw_hud(void)
     const long tick = rc_tick();
     char line[96];
     TD5_PoliceHud h;
-    if (!C.on || !td5_roam_active() || W < 2.0f) return;
+    if (!td5_roam_active() || W < 2.0f) return;
     if (td5_roam_route_ui_map_open() || td5_game_is_pause_menu_active()) return;
+    {   /* [roam LG] DEV readout of the street's limit under the player (TD5RE_ROAM_LIMIT_HUD=1, default off):
+         * "LIMIT 40" where OSM posts it, "LIMIT (40)" for the class default */
+        static int knob = -1;
+        double x, z;
+        if (knob < 0) knob = td5_env_int("TD5RE_ROAM_LIMIT_HUD", 0, 0, 1);
+        if (knob && rc_place_of(td5_game_get_actor(0), &x, &z)) {
+            int klass = -1;
+            const int posted = rc_posted_at(x, z, &klass);
+            if (klass >= 0)
+                td5_hud_queue_text(0, (int)(W * 0.5f), (int)(H * 0.12f), 1, posted > 0 ? "LIMIT %d" : "LIMIT (%d)",
+                                   td5_roam_limit_kmh(klass, posted));
+        }
+    }
+    if (!C.on) return;
     if (!C.pursuit && C.busted_t <= 0 && tick >= C.toast_until) return;
     memset(&h, 0, sizeof h);
     h.tick = tick;

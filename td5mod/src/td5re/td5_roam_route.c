@@ -98,6 +98,7 @@ typedef struct {
     RrTurn  *turn;  int nturn;   /* [G2] per-pair connectors of the nodes that need one */
     struct RrBan *ban; int nban; /* [roam LG] banned turns, sorted (node, in, out) */
     TD5_RouteRestrCensus rc;     /* [roam LG] how the restrictions matched this graph */
+    int      time_cost;          /* [roam LG] 1 = edge costs are times (TD5RE_ROAM_ROUTE_TIME) */
 } RrGraph;
 
 /* [roam LG] one banned turn at node `node`: arriving through inc `in` (edge*2 + the end at the node), leaving
@@ -685,6 +686,7 @@ static void rr_edge_weights(RrGraph *gp)
         if (ed->maxspeed) tagged++;
         ed->w = time_cost ? 40.0 / (double)(lim > 5 ? lim : 5) : 1.0;
     }
+    gp->time_cost = time_cost;
     TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: edge costs %s, %d of %d edges carry a posted limit%s",
               time_cost ? "TIME (length / limit)" : "DISTANCE", tagged, gp->nedge,
               use_tag ? "" : " (ignored: TD5RE_ROAM_MAXSPEED=0)");
@@ -2688,6 +2690,9 @@ int td5_roam_route_dev_test(void)
     const int N = td5_env_int("TD5RE_ROAM_ROUTE_TEST_N", 40, 2, 2000);
     uint32_t rng = 12345u;
     int i, pairs = 0, planned = 0, bad_oneway = 0, nondet = 0, snapfail = 0, unknown_key = 0;
+    int bad_turn = 0, turns = 0;                    /* [roam LG] consecutive edge pairs through a banned turn */
+    double time_sum = 0.0;                          /* [roam LG] the routes' time at the limits, seconds   */
+    const long fb0 = rr_ban_fallbacks;
     double ratio_sum = 0.0, ratio_max = 0.0, ms_sum = 0.0, ms_max = 0.0, len_sum = 0.0;
     int edges_sum = 0;
     if (td5_env_int("TD5RE_ROAM_ROUTE_TEST", 0, 0, 1) != 1) return 0;
@@ -2722,6 +2727,15 @@ int td5_roam_route_dev_test(void)
                 const int ei = rr_find_edge_key(rt.res.edge[k].key);
                 if (ei < 0) { unknown_key++; continue; }
                 if (!rr_allowed(ei, rt.res.edge[k].dir > 0 ? 0 : 1)) bad_oneway++;
+                time_sum += g.edge[ei].plen / RR_UPM / (td5_roam_limit_kmh(g.edge[ei].klass, g.edge[ei].maxspeed) / 3.6);
+                if (k + 1 < rt.res.nedge) {      /* [roam LG] the turn into the next edge */
+                    const int ej = rr_find_edge_key(rt.res.edge[k + 1].key);
+                    const int d = rt.res.edge[k].dir > 0 ? 0 : 1, d2 = rt.res.edge[k + 1].dir > 0 ? 0 : 1;
+                    if (ej >= 0 && ej != ei && rr_end_node(ei, d) == rr_start_node(ej, d2)) {
+                        turns++;
+                        if (rr_banned_in(&g, rr_end_node(ei, d), ei * 2 + (d == 0 ? 1 : 0), ej * 2 + d2)) bad_turn++;
+                    }
+                }
             }
             td5_roam_route_replan();
             if (rt.res.hash != h1) nondet++;
@@ -2732,6 +2746,12 @@ int td5_roam_route_dev_test(void)
               pairs, planned, snapfail, bad_oneway, unknown_key, nondet,
               planned ? len_sum / planned : 0.0, planned ? (double)edges_sum / planned : 0.0,
               planned ? ratio_sum / planned : 0.0, ratio_max, planned ? ms_sum / planned : 0.0, ms_max);
+    TD5_LOG_I(LOG_TAG, "ROUTE_TEST: rules: costs %s | mean time at the limits %.1f s | turns %d, through a banned turn %d, "
+              "legs planned without the bans %ld | restrictions %d matched %d (via way %d) outside %d no-node %d via-way-chain %d "
+              "no-pair %d, banned turns %d, one-pair geometry agrees %d differs %d, filtered %d",
+              g.time_cost ? "TIME" : "DISTANCE", planned ? time_sum / planned : 0.0,
+              turns, bad_turn, rr_ban_fallbacks - fb0, g.rc.loaded, g.rc.matched, g.rc.matched_via_way, g.rc.outside,
+              g.rc.no_node, g.rc.via_way_chain, g.rc.no_pair, g.rc.bans, g.rc.geom_agree, g.rc.geom_differ, g.rc.filtered);
     /* connected components of the undirected edge graph */
     {
         int *comp = (int *)calloc((size_t)g.nnode, sizeof(int)), *stack = (int *)malloc((size_t)g.nnode * sizeof(int));
