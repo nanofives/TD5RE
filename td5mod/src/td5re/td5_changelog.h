@@ -39,7 +39,7 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Stations have blue name boards on the platforms" },
     { CL_ITEM,    "  (Tolosa, La Plata, Gonnet, Ringuelet and the rest)." },
     { CL_ITEM,    "Electrified lines carry masts, cantilevers and wire." },
-    { CL_ITEM,    "  Street plates that lose a cell show the other face." },
+    { CL_ITEM,    "  Station names have their own texture pages." },
     { CL_BLANK,   "" },
     { CL_DATE,    "October 21 (round J combined)" },
     { CL_ITEM,    "Free roam: palace drives pass under the building." },

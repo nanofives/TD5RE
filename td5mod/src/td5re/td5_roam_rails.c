@@ -351,6 +351,12 @@ static void rl_build_stations(TD5_RoamRailSource *r)
     for (i = 0; i < r->nnd; i++) {
         const RlNode *n = &r->nd[i];
         if (n->kind == RN_LX) continue;
+        if (n->kind == RN_STOP) {   /* a stop within 150 m of a station / halt is that station's platform stop, whatever its spelling */
+            int k, shadow = 0;
+            for (k = 0; k < r->nnd && !shadow; k++)
+                if ((r->nd[k].kind == RN_STATION || r->nd[k].kind == RN_HALT) && hypot(r->nd[k].x - n->x, r->nd[k].z - n->z) < RL_M(150.0)) shadow = 1;
+            if (shadow) continue;
+        }
         for (j = 0; j < r->nstn; j++)
             if (!strcmp(r->stn[j].name, n->name) && hypot(r->stn[j].x - n->x, r->stn[j].z - n->z) < RL_M(400.0)) break;
         if (j == r->nstn) {
@@ -1595,20 +1601,12 @@ static int rl_lx_node(RlEm *e, const RlNode *n)
 static int rl_board_mesh(RlEm *e, int sb, int page, const double *x, const double *y, const double *z,
                          const double *u, const double *v)
 {
-    float vv[8 * 5];
-    unsigned int light[8];
-    unsigned short cmd[3];
-    TG_Buf *b;
-    int k;
-    for (k = 0; k < 8; k++) {
-        vv[k * 5 + 0] = (float)x[k]; vv[k * 5 + 1] = (float)y[k]; vv[k * 5 + 2] = (float)z[k];
-        vv[k * 5 + 3] = (float)u[k]; vv[k * 5 + 4] = (float)v[k];
-        light[k] = RC_WHITE;
-    }
-    b = (TG_Buf *)roam_ctx_mesh_begin(e->c, sb);
+    /* the same writer the street plates use (tg_write_quad_mesh): its UV encoding, not the prefab writer's */
+    int seg_page[1], seg_nq[1];
+    TG_Buf *b = (TG_Buf *)roam_ctx_mesh_begin(e->c, sb);
     if (!b) { e->oom = 1; return 0; }
-    cmd[0] = (unsigned short)page; cmd[1] = 0; cmd[2] = 2;
-    if (!tg_write_prefab_mesh(b, vv, light, 8, cmd, 1, 0, 0.0, 0.0, 0.0, 1.0, 0.0) || b->oom) { e->oom = 1; return 0; }
+    seg_page[0] = page; seg_nq[0] = 2;
+    if (!tg_write_quad_mesh(b, x, y, z, u, v, 8, seg_page, seg_nq, 1) || b->oom) { e->oom = 1; return 0; }
     e->st->meshes++;
     return 1;
 }
@@ -1654,7 +1652,7 @@ static int rl_board(RlEm *e, const char *name, double cx, double cz, const doubl
         const double A[3] = { T[0], 0.0, T[1] }, B[3] = { N[0], 0.0, N[1] };
         for (side = -1; side <= 1; side += 2) {
             double p0[3], p1[3];
-            p0[0] = p1[0] = cx + T[0] * hw * 0.8 * side; p0[2] = p1[2] = cz + T[1] * hw * 0.8 * side;
+            p0[0] = p1[0] = cx + T[0] * (hw + RL_M(0.07)) * side; p0[2] = p1[2] = cz + T[1] * (hw + RL_M(0.07)) * side;   /* beyond the board's ends: a post in front of the text hid the first and last letters */
             p0[1] = top - RL_M(0.1); p1[1] = bot + h;
             if (!rl_obox(e, sb, p0, p1, A, B, RL_M(0.06), RL_M(0.06), RC_STEEL)) return 0;
         }
@@ -1870,7 +1868,9 @@ int td5_roam_rails_station_names(const char *place, char (*out)[96], double (*xz
     char *json;
     cJSON *root;
     const cJSON *tl, *t;
-    int n = 0;
+    int n = 0, nhs = 0;
+    int kind_of[256];
+    static double hs[1024][2];
     if (!place || !out || !xz || max <= 0 || !td5_roam_rails_enabled()) return 0;
     td5_geo_source_path(path, sizeof path, place, "tiles/INDEX.JSON");
     json = td5_geo_roads_slurp(path);
@@ -1893,11 +1893,22 @@ int td5_roam_rails_station_names(const char *place, char (*out)[96], double (*xz
         for (nn = nodes ? nodes->child : NULL; nn; nn = nn->next) {
             const cJSON *pk = cJSON_GetObjectItem(nn, "kind"), *nm = cJSON_GetObjectItem(nn, "name");
             int i;
-            if (!pk || !cJSON_IsString(pk) || !pk->valuestring) continue;
-            if (strcmp(pk->valuestring, "station") && strcmp(pk->valuestring, "halt") && strcmp(pk->valuestring, "stop")) continue;
+            const int nk = (pk && cJSON_IsString(pk) && pk->valuestring) ? (!strcmp(pk->valuestring, "station") ? 1 : !strcmp(pk->valuestring, "halt") ? 2 : !strcmp(pk->valuestring, "stop") ? 3 : 0) : 0;
+            if (!nk) continue;
             if (!nm || !cJSON_IsString(nm) || !nm->valuestring || !nm->valuestring[0]) continue;
+            if (nk != 3 && nhs < 1024) {
+                const cJSON *hx = cJSON_GetObjectItem(nn, "x"), *hz = cJSON_GetObjectItem(nn, "z");
+                if (hx && hz && cJSON_IsNumber(hx) && cJSON_IsNumber(hz)) { hs[nhs][0] = td5_geo_game_x(hx->valuedouble); hs[nhs][1] = hz->valuedouble; nhs++; }
+            }
             for (i = 0; i < n; i++) if (!strncmp(out[i], nm->valuestring, 95)) break;
-            if (i < n || n >= max) continue;
+            if (i < n && nk < kind_of[i]) {   /* a better kind of the same name: its position */
+                const cJSON *qx = cJSON_GetObjectItem(nn, "x"), *qz = cJSON_GetObjectItem(nn, "z");
+                kind_of[i] = nk;
+                xz[i][0] = qx && cJSON_IsNumber(qx) ? td5_geo_game_x(qx->valuedouble) : xz[i][0];
+                xz[i][1] = qz && cJSON_IsNumber(qz) ? qz->valuedouble : xz[i][1];
+            }
+            if (i < n || n >= max || n >= 256) continue;
+            kind_of[n] = nk;
             snprintf(out[n], 96, "%s", nm->valuestring);
             {   const cJSON *qx = cJSON_GetObjectItem(nn, "x"), *qz = cJSON_GetObjectItem(nn, "z");
                 xz[n][0] = qx && cJSON_IsNumber(qx) ? td5_geo_game_x(qx->valuedouble) : 0.0;
@@ -1908,6 +1919,18 @@ int td5_roam_rails_station_names(const char *place, char (*out)[96], double (*xz
         if (tile) cJSON_Delete(tile);
     }
     if (root) cJSON_Delete(root);
+    {   /* a stop-only name within 150 m of a station / halt is that station's platform stop: no board of its own */
+        int i, w = 0;
+        for (i = 0; i < n; i++) {
+            int k, shadow = 0;
+            if (kind_of[i] == 3)
+                for (k = 0; k < nhs && !shadow; k++) if (hypot(hs[k][0] - xz[i][0], hs[k][1] - xz[i][1]) < RL_M(150.0)) shadow = 1;
+            if (shadow) continue;
+            if (w != i) { memcpy(out[w], out[i], 96); xz[w][0] = xz[i][0]; xz[w][1] = xz[i][1]; }
+            w++;
+        }
+        n = w;
+    }
     {   /* by name, the position travelling with it (insertion sort: n is tiny) */
         int i, j;
         for (i = 1; i < n; i++) {
