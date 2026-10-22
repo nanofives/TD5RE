@@ -226,7 +226,7 @@ static struct {
     int           pg_rows[FU_PAGES_MAX];
     int           npg;
     unsigned char dsp[TD5_TG_TEX_TEXELS];
-    int           names, cells_wanted, cells_dropped, uses_dropped, clusters, arms, ms;
+    int           names, cells_wanted, cells_dropped, uses_dropped, clusters, arms, ms, stations;
 } s_at;
 
 int td5_roam_furn_plates_ready(void) { return s_at.ready && s_at.ncell > 0; }
@@ -446,12 +446,19 @@ int td5_roam_furn_atlas_prepare(const char *place, const RoamGrid *g)
         }
         s_at.arms += n;
     }
-    {   /* [roam LF] the station / halt / stop name boards of the RAILS layer share the atlas (one natural-height cell each) */
+    {   /* [roam LF] every station / halt / stop name of the RAILS layer (the whole partido streams, Tolosa and Gonnet are
+         * outside the casco) shares the atlas: one natural-height cell each, ranked ABOVE every street name (a station is
+         * a landmark; the atlas is full at 47 pages, the street cells that lose a place fall back to their other face) */
         char (*sn)[96] = td5_roam_rails_furn_enabled() ? (char (*)[96])malloc(256u * 96u) : NULL;
-        const int nsn = sn ? td5_roam_rails_station_names(place, sn, 256) : 0;
-        for (i = 0; i < nsn; i++)
-            if (!fu_want(want, &nw, sn[i], 0)) s_at.cells_dropped++;
-        free(sn);
+        double (*sxz)[2] = sn ? (double (*)[2])malloc(256u * sizeof(double[2])) : NULL;
+        const int nsn = (sn && sxz) ? td5_roam_rails_station_names(place, sn, sxz, 256) : 0;
+        for (i = 0; i < nsn; i++) {
+            int w;
+            if (!fu_want(want, &nw, sn[i], 0)) { s_at.cells_dropped++; continue; }
+            for (w = 0; w < nw; w++) if (!want[w].forced && !strcmp(want[w].name, sn[i])) { want[w].uses += 1000; break; }
+            s_at.stations++;
+        }
+        free(sn); free(sxz);
     }
     s_at.clusters = ncl;
     s_at.names = nnames;
@@ -470,9 +477,9 @@ done:
     s_at.ms = (int)(td5_plat_time_ms() - t0);
     TD5_LOG_I(LOG_TAG, "roam furniture: plate atlas %s | %d signalised cluster(s), %d arm(s), %d distinct street name(s) | "
               "%d cell(s) wanted, %d placed on %d page(s) (page ids %d..%d, display %d), %d dropped (%d use(s) fall back to the "
-              "other face) | %d ms", ok ? "built" : "EMPTY", s_at.clusters, s_at.arms, s_at.names, s_at.cells_wanted,
+              "other face) | %d station name(s) | %d ms", ok ? "built" : "EMPTY", s_at.clusters, s_at.arms, s_at.names, s_at.cells_wanted,
               s_at.ncell, s_at.npg, FU_PAGE_BASE, FU_PAGE_BASE + (s_at.npg ? s_at.npg - 1 : 0), FU_PAGE_BASE + s_at.npg,
-              s_at.cells_dropped, s_at.uses_dropped, s_at.ms);
+              s_at.cells_dropped, s_at.uses_dropped, s_at.stations, s_at.ms);
     free(list); free(names); free(en); free(cl); free(arms); free(want);
     return ok;
 }

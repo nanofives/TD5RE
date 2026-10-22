@@ -1659,6 +1659,8 @@ static int rl_board(RlEm *e, const char *name, double cx, double cz, const doubl
             if (!rl_obox(e, sb, p0, p1, A, B, RL_M(0.06), RL_M(0.06), RC_STEEL)) return 0;
         }
     }
+    if (e->log)
+        TD5_LOG_I(LOG_TAG, "ROAM_RAIL_BOARD '%s' at place (%.0f,%.0f) %s", name, cx + (double)e->ox, cz + (double)e->oz, named ? "named" : "blank");
     e->st->stn_boards++;
     return 1;
 }
@@ -1862,14 +1864,14 @@ static int rl_catenary(RlEm *e, const RlWay *w, double x0, double z0, double x1,
 
 static int rl_name_cmp(const void *pa, const void *pb) { return strcmp((const char *)pa, (const char *)pb); }
 
-int td5_roam_rails_station_names(const char *place, char (*out)[96], int max)
+int td5_roam_rails_station_names(const char *place, char (*out)[96], double (*xz)[2], int max)
 {
     char path[512];
     char *json;
     cJSON *root;
     const cJSON *tl, *t;
     int n = 0;
-    if (!place || !out || max <= 0 || !td5_roam_rails_enabled()) return 0;
+    if (!place || !out || !xz || max <= 0 || !td5_roam_rails_enabled()) return 0;
     td5_geo_source_path(path, sizeof path, place, "tiles/INDEX.JSON");
     json = td5_geo_roads_slurp(path);
     if (!json) return 0;
@@ -1897,12 +1899,25 @@ int td5_roam_rails_station_names(const char *place, char (*out)[96], int max)
             for (i = 0; i < n; i++) if (!strncmp(out[i], nm->valuestring, 95)) break;
             if (i < n || n >= max) continue;
             snprintf(out[n], 96, "%s", nm->valuestring);
+            {   const cJSON *qx = cJSON_GetObjectItem(nn, "x"), *qz = cJSON_GetObjectItem(nn, "z");
+                xz[n][0] = qx && cJSON_IsNumber(qx) ? td5_geo_game_x(qx->valuedouble) : 0.0;
+                xz[n][1] = qz && cJSON_IsNumber(qz) ? qz->valuedouble : 0.0;
+            }
             n++;
         }
         if (tile) cJSON_Delete(tile);
     }
     if (root) cJSON_Delete(root);
-    qsort(out, (size_t)n, 96, rl_name_cmp);
+    {   /* by name, the position travelling with it (insertion sort: n is tiny) */
+        int i, j;
+        for (i = 1; i < n; i++) {
+            char nm[96];
+            double q[2];
+            memcpy(nm, out[i], 96); q[0] = xz[i][0]; q[1] = xz[i][1];
+            for (j = i; j > 0 && rl_name_cmp(out[j - 1], nm) > 0; j--) { memcpy(out[j], out[j - 1], 96); xz[j][0] = xz[j - 1][0]; xz[j][1] = xz[j - 1][1]; }
+            memcpy(out[j], nm, 96); xz[j][0] = q[0]; xz[j][1] = q[1];
+        }
+    }
     return n;
 }
 

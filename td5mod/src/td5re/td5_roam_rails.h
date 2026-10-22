@@ -93,7 +93,7 @@ int  td5_roam_rails_bed_near(TD5_RoamRailSource *r, const double *X, const doubl
 
 /* [roam LF] the distinct station / halt / stop names of the RAILS layer (UTF-8), for the furniture's plate atlas.
  * Reads the nodes[] of every RAILS tile itself (cheap, main thread, before any tile builds). Returns the count. */
-int  td5_roam_rails_station_names(const char *place, char (*out)[96], int max);
+int  td5_roam_rails_station_names(const char *place, char (*out)[96], double (*xz)[2], int max);   /* xz: the first node's place-frame position */
 int  td5_roam_rails_furn_enabled(void);   /* TD5RE_ROAM_RAILS_FURN (default 1) */
 
 /* Append the railways of the ctx's tile to its sub-block buffers. 1 on success, 0 on out of memory. */
