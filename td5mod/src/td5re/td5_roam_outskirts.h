@@ -45,6 +45,7 @@ typedef struct {
     int  cover_crop, cover_wet, cover_road_skip;   /* ground-cover cells painted (cropland / wetland), cells left to the lawn because a road is on them */
     int  lattice_towers, lattice_members;   /* [roam PC] towers drawn as an open lattice, their members */
     int  cover_reeds, cover_marsh_area;     /* [roam PC] reed clumps on marsh cells; marsh cells from an OSM wetland area */
+    int  cover_shore_skip;                  /* [roam PC] cover cells left to the render's shore */
     int  quads, meshes;
 } TD5_RoamOutStats;
 

@@ -25,7 +25,7 @@
 #define GH_EAVE_MIN   1.8
 #define GH_SINK       0.25            /* the base this far under the lowest ground sample             */
 #define GH_UV_M       4.0             /* one page repeat per 4 m                                      */
-#define GH_PAGE       TD5_TG_PAGE_R4_PIER
+#define GH_PAGE       TD5_TG_PAGE_RS_ICE      /* pale blue-white, a light grain (the snow road page) */
 #define GH_R          232.0           /* plastic, pale blue-white (before the sun shade)              */
 #define GH_G          240.0
 #define GH_B          240.0

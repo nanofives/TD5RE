@@ -1073,6 +1073,7 @@ struct TG_TileCtx {
     /* [roam LA] SECTION trees: the knobs, the street / lot tree candidates (emitted after the furniture), every
      * planted crown (x, z, radius; plazas too) for the canopy census, and each sub-block's tree records */
     int      st_on, lt_on;
+    int      shore_on;              /* [roam PC] TD5RE_ROAM_SHORE: lots / lawns / cover paint keep off shore cells */
     int      pt_lot_set;            /* [integ L] plaza trees from LA's lot species set (TD5RE_ROAM_PLAZA_TREE_PAGES) */
     int      xc_on;                 /* [integ L] tree cross-check census (TD5RE_ROAM_TREE_XCHECK, dev) */
     int      tv_on;                 /* [integ L] round L tree veto (TD5RE_ROAM_TREE_VETO_L): see sc_emit_street_trees */
@@ -2904,8 +2905,23 @@ static int sc_lawn_cells(TG_TileCtx *c, const double *p, int (*emit)(TG_TileCtx 
     return 1;
 }
 
+static int sc_lot_shore(TG_TileCtx *c, const double *cell);   /* [roam PC] SECTION lots */
 static int sc_lawn_emit_drawn(TG_TileCtx *c, const double *t6, void *ud)
 {
+    if (c->shore_on) {   /* [roam PC] a piece in a shore cell is left to the render's bank (its ground is the lawn page) */
+        const double S = (double)c->grid->tile, G = (double)c->dg_G;
+        double u, v, cell[12];
+        int i, j, k;
+        roam_grid_uv(c->grid, (t6[0] + t6[2] + t6[4]) / 3.0 + (double)c->org_x, (t6[1] + t6[3] + t6[5]) / 3.0 + (double)c->org_z, &u, &v);
+        i = (int)floor(u / S * G); j = (int)floor(v / S * G);
+        for (k = 0; k < 4; k++) {
+            const double uu = (i + ((k == 1 || k == 2) ? 1 : 0)) * S / G, vv = (j + (k >= 2 ? 1 : 0)) * S / G;
+            cell[k * 3 + 0] = c->grid->ox + c->grid->c * uu - c->grid->s * vv - (double)c->org_x;
+            cell[k * 3 + 1] = 0.0;
+            cell[k * 3 + 2] = c->grid->oz + c->grid->s * uu + c->grid->c * vv - (double)c->org_z;
+        }
+        if (sc_lot_shore(c, cell)) { c->st.lawn_shore++; return 1; }
+    }
     return sc_tri_split(c, (ScTris *)ud, t6, 0, 2);
 }
 
@@ -6856,8 +6872,8 @@ static int sc_emit_pools(TG_TileCtx *c, const RoamTile *self, ScCache **ac, int 
 #define SC_MARSH_MIN    8
 #define SC_MARSH_NB     3
 #define SC_MARSH_COL    0xFF8E9A68u
-#define SC_REED_PER     3
-#define SC_REED_BLADES  6
+#define SC_REED_PER     2
+#define SC_REED_BLADES  5
 #define SC_REED_COL0    0xFFB8B070u     /* straw */
 #define SC_REED_COL1    0xFF8FA458u     /* green */
 #define SC_PUDDLE_ONE   5
@@ -6966,6 +6982,7 @@ static int sc_emit_cover(TD5_RoamScnSource *s, TG_TileCtx *c)
             const double qx[4] = { cell[0], cell[3], cell[6], cell[9] }, qz[4] = { cell[2], cell[5], cell[8], cell[11] };
             if (sc_on_road(c, qx, qz, 4, NULL)) { c->st.out.cover_road_skip++; continue; }
         }
+        if (c->shore_on && sc_lot_shore(c, cell)) { c->st.out.cover_shore_skip++; continue; }   /* [roam PC] the render's bank */
         if (!sc_lot_put(&L[cl][sbi].q, &L[cl][sbi].nq, &L[cl][sbi].cq, cell, 4)) goto out;
         if (cl == 0) { c->st.out.cover_crop++; continue; }
         c->st.out.cover_wet++;
@@ -7902,6 +7919,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     if (!sc_ctx_build(s, c, self)) return NULL;
     c->hc = hc;
     c->st_on = td5_env_int("TD5RE_ROAM_STREET_TREES", 1, 0, 1);   /* [roam LA] */
+    c->shore_on = s->shore_on;                                     /* [roam PC] */
     c->lt_on = td5_env_int("TD5RE_ROAM_LOT_TREES", 1, 0, 1);
     c->pt_lot_set = td5_env_int("TD5RE_ROAM_PLAZA_TREE_PAGES", 1, 0, 1);   /* [integ L] */
 #ifndef TD5RE_RELEASE
@@ -8202,7 +8220,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     double cg_m = 0.0;
     long ie_n[6] = { 0, 0, 0, 0, 0, 0 };
     long pool_n[3] = { 0, 0, 0 };              /* [roam LE] drawn, on a road, bad ring */
-    long pc_t[16] = { 0 };                     /* [roam PC] greenhouses, marsh, lattice towers, shore lots */
+    long pc_t[18] = { 0 };                     /* [roam PC] greenhouses, marsh, lattice towers, shore lots */
     double pc_m2 = 0.0;
     double pool_m2 = 0.0;
     long pz_t[13] = { 0 };                     /* [roam LD] plaza furniture + park relations */
@@ -8408,6 +8426,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         pc_m2 += r->gh.m2;
         pc_t[9] += r->out.cover_wet; pc_t[10] += r->out.cover_marsh_area; pc_t[11] += r->out.cover_reeds;
         pc_t[12] += r->out.lattice_towers; pc_t[13] += r->out.lattice_members; pc_t[14] += r->lot_shore; pc_t[15] += r->out.towers;
+        pc_t[16] += r->lawn_shore; pc_t[17] += r->out.cover_shore_skip;
         pz_t[0] += r->plaza.items; pz_t[1] += r->plaza.statues; pz_t[2] += r->plaza.monuments; pz_t[3] += r->plaza.memorials;
         pz_t[4] += r->plaza.fountains; pz_t[5] += r->plaza.benches; pz_t[6] += r->plaza.playgrounds; pz_t[7] += r->plaza.flagpoles;
         pz_t[8] += r->plaza.named; pz_t[9] += r->plaza.skip_kind; pz_t[10] += r->plaza.drop_road; pz_t[11] += r->plaza.guard_hits;
@@ -8460,10 +8479,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         snprintf(ln, sizeof ln, "roam PC: greenhouses %ld drawn (%ld spans, %.0f m2, %ld quads) of %ld OSM building=greenhouse + %ld "
                  "footprints in a horticulture area | left to the building core: small %ld, tall %ld, not a rectangle %ld, on a road %ld | "
                  "marsh cells %ld (%ld from an OSM wetland area), reed clumps %ld | towers %ld, lattice %ld (%ld members) | city lot "
-                 "cells left to the shore %ld (TD5RE_ROAM_GREENHOUSE=%d TD5RE_ROAM_OUT_COVER_WET=%d TD5RE_ROAM_MARSH=%d "
+                 "cells left to the shore %ld, lawn pieces %ld, cover cells %ld (TD5RE_ROAM_GREENHOUSE=%d TD5RE_ROAM_OUT_COVER_WET=%d TD5RE_ROAM_MARSH=%d "
                  "TD5RE_ROAM_OUT_LATTICE=%d TD5RE_ROAM_SHORE=%d)",
                  pc_t[2], pc_t[3], pc_m2, pc_t[8], pc_t[0], pc_t[1], pc_t[4], pc_t[5], pc_t[6], pc_t[7], pc_t[9], pc_t[10], pc_t[11],
-                 pc_t[15], pc_t[12], pc_t[13], pc_t[14], td5_roam_gh_enabled(), td5_env_int("TD5RE_ROAM_OUT_COVER_WET", 1, 0, 1),
+                 pc_t[15], pc_t[12], pc_t[13], pc_t[14], pc_t[16], pc_t[17], td5_roam_gh_enabled(), td5_env_int("TD5RE_ROAM_OUT_COVER_WET", 1, 0, 1),
                  td5_env_int("TD5RE_ROAM_MARSH", 1, 0, 1), td5_env_int("TD5RE_ROAM_OUT_LATTICE", 1, 0, 1),
                  td5_env_int("TD5RE_ROAM_SHORE", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", ln);

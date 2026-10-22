@@ -248,6 +248,7 @@ typedef struct {
      * left as LAWN although OSM maps no green there, under an OSM green. */
     int  lot_cells, lot_green, lot_rural, lot_skip, lot_under_road;
     int  lot_shore;                 /* [roam PC] cells left to the render's shore (a wet 2 m sub-sample or lattice corner) */
+    int  lawn_shore;                /* [roam PC] plaza lawn pieces left to the render's shore */
     int  lot_rings;                 /* [HD] ring plazas (a roundabout's inner kerb loop) kept green */
     double lot_paved_m2, lot_lawn_m2, lot_green_m2;
     /* [HD] INFILL: frontage lots along the pavement's building line with no real footprint on them -> a built mass
