@@ -2335,8 +2335,9 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
     ScBld *set = NULL;
     ScHull *fc = NULL;
     ScShopU su;
-    int nset = 0, cap = 0, i, k, l, dx, dz, nfc = 0;
+    int nset = 0, cap = 0, i, k, l, dx, dz, nfc = 0, ghost_prev = 0;
     const int64_t self = sc_tkey(c->tx, c->tz);
+    TD5_RoamScnStats *st_save = NULL;              /* [roam PD] the census, restored after a ghost footprint */
     /* the halo set: every building owned by the 3x3 (landmark anchors may sit next door) */
     for (dz = -1; dz <= 1; dz++)
         for (dx = -1; dx <= 1; dx++) {
@@ -2389,8 +2390,23 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         double pseg[128 * 5];                          /* [integ J] 128 (was 16): a palace has dozens of drive segments */
         double s3d_cover = 0.0, s3d_low = 1e300, hx[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX], hz[TG_S3D_HOLES_MAX * TD5_GEOB_RING_MAX];
         TD5_GeoBuilding gloc;
+        int ghost = 0;
+        if (ghost_prev) { c->st = *st_save; ghost_prev = 0; }
         roam_grid_tile_of(c->grid, gb->cx, gb->cz, &tx, &tz);
-        if (sc_tkey(tx, tz) != self) continue;
+        if (sc_tkey(tx, tz) != self) {
+            /* [roam PD] a GHOST: a neighbour's footprint that may stand over this tile. It runs the same vetoes and the
+             * same clearance shift (this 3x3 holds every road that near the seam) but emits nothing: its shifted ring
+             * joins the trunk test (st_in_bld), the neighbour builds it. The census is restored after it. */
+            const double T = (double)c->grid->tile, R = gb->radius + SC_MAX_SHIFT;
+            double uu, vv;
+            if (!c->tb_on) continue;
+            roam_grid_uv(c->grid, gb->cx, gb->cz, &uu, &vv);
+            if (uu < (double)c->tx * T - R || uu > (double)(c->tx + 1) * T + R ||
+                vv < (double)c->tz * T - R || vv > (double)(c->tz + 1) * T + R) continue;
+            if (!st_save && !(st_save = (TD5_RoamScnStats *)malloc(sizeof *st_save))) { free(set); free(fc); return 0; }
+            *st_save = c->st;
+            ghost = ghost_prev = 1;
+        }
         c->st.bld_seen++;
         if (n < 3 || n > TD5_GEOB_RING_MAX) { c->st.bld_drop_ring++; sc_bld_note(s, c, &set[i], "bad ring"); continue; }
         /* [JC2] an Overture / Open Buildings blob under an OSM relation outline: the outline is the building */
@@ -2505,7 +2521,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         r = sc_bld_clear(c, &u, mu_on_line ? MU_SNAP_GAP : s->gap, rx, rz, n, &shift,
                          !s->lm_wins ? 0 : (s->s3d && (gb->part || gb->rel)) ? 2
                                          : (gb->landmark || kind != TD5_GEOB_LMK_NONE) ? 1 : 0);
-        if (gb->landmark && !gb->part)       /* one line per landmark outline: what became of it */
+        if (gb->landmark && !gb->part && !ghost)   /* one line per landmark outline: what became of it */
             TD5_LOG_I(LOG_TAG, "[ROAM LM] tile %d,%d way_hash=%08x kind=%d anchor=%d host=%d half=%.0f minout=%.0f "
                       "area=%.0fm2 h=%.0f: %s (shift %.0f)", c->tx, c->tz, gb->id_hash, kind, anchor, u.host,
                       u.f.half_carriage, u.minout, gb->area_m2, gb->height,
@@ -2513,6 +2529,10 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         if (r == 2) { c->st.bld_drop_shift++; sc_bld_note(s, c, &set[i], "past the shift cap"); continue; }
         if (r == 1) { c->st.bld_drop_road++; sc_bld_note(s, c, &set[i], "on a road"); continue; }
         if (shift > 0.0) { c->st.bld_nudged++; if (shift > c->st.bld_shift_max) c->st.bld_shift_max = shift; }
+        if (ghost) {                                                          /* [roam PD] */
+            if (!st_push_ring(c, rx, rz, n)) { free(set); free(fc); free(st_save); return 0; }
+            continue;
+        }
         cx = 0.0; cz = 0.0;
         for (k = 0; k < n; k++) { cx += rx[k]; cz += rz[k]; }
         cx /= n; cz /= n;
@@ -2628,6 +2648,8 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         }
     }
     /* [roam LB] fuel forecourt canopies, kept off every footprint of the halo set */
+    if (ghost_prev) c->st = *st_save;                                         /* [roam PD] */
+    free(st_save);
     if (s->shops && !td5_roam_shops_fuel(s->shops, c, sc_shop_in_bld, &su, &c->st.shop)) { free(set); free(fc); return 0; }
     free(set);
     free(fc);
@@ -4930,7 +4952,17 @@ static int pv_rule_trees(PvEmit *e, const PvChain *ch, const PvB *B, const int *
         w = ch->w[a] * (1.0 - t) + ch->w[b] * t;
         if (mode[seg] == 2) lat = w - PV_KERB_IN;                   /* the median's medial line */
         else {
-            if (w < ST_M(RT_W_MIN_M)) { c->st.rt_narrow++; s += sp; continue; }
+            if (w < ST_M(RT_W_MIN_M - 0.05)) {      /* 5 cm: a 3 m vereda interpolates to 2.9999 */
+                c->st.rt_narrow++;
+#ifndef TD5RE_RELEASE
+                if (c->tree_log)
+                    TD5_LOG_I(LOG_TAG, "ROAM_RTN tile %d,%d at %.0f,%.0f w %.2f m (%.2f / %.2f) vf %02x %02x way %lld name %08x "
+                              "klass %d sw %d tag %.1f/%.1f", c->tx, c->tz, px + (double)c->org_x, pz + (double)c->org_z,
+                              w / SC_UPM, ch->w[a] / SC_UPM, ch->w[b] / SC_UPM, ch->vf[a], ch->vf[b], (long long)p->way->id,
+                              p->way->name_h, p->way->klass, p->way->sidewalk, p->way->tag_l, p->way->tag_r);
+#endif
+                s += sp; continue;
+            }
             lat = ST_M(RT_LAT_M);
         }
         qx[0] = px + nx * lat; qz[0] = pz + nz * lat;
@@ -5369,7 +5401,7 @@ static void st_kerb_cover(TG_TileCtx *c, int n, double *cov, int which)
         for (i = 0; i < n; i++)
             if (fabs(c->tpos[i * 3] - x) < R && fabs(c->tpos[i * 3 + 1] - z) < R &&
                 hypot(c->tpos[i * 3] - x, c->tpos[i * 3 + 1] - z) < R) break;
-        if (i < n) { cov[cls] += RT_SAMPLE_M; c->rks[k * 4 + 2] = (double)(cls | (4 << which)); }
+        if (i < n) { cov[cls] += RT_SAMPLE_M; c->rks[k * 4 + 2] = (double)((int)c->rks[k * 4 + 2] | (4 << which)); }
     }
 }
 
