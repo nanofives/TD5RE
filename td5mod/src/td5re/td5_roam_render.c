@@ -741,15 +741,15 @@ static int rr_water_build(const RoamTile *t, const RRGround *gr, TD5_RoamHeight 
                 const int pinned = corner || (b == 0 && pin[0]) || (a == N && pin[1]) || (b == N && pin[2]) || (a == 0 && pin[3]);
                 const double f = rr_wetfrac(t, hc, (double)i + fu, (double)j + fv, G);
                 double y;
-                fm[b * FW + a] = (unsigned char)((f > 0.0 && f < 1.0) ? 255 : 0);   /* the bank strip: mud, graded by vertex */
-                mud += f > 0.0 && f < 1.0;
+                fm[b * FW + a] = (unsigned char)((f > 1e-9 && f < 1.0 - 1e-9) ? 255 : 0);   /* the bank strip: mud, graded by vertex */
+                mud += f > 1e-9 && f < 1.0 - 1e-9;
                 if (pinned) y = rr_tri(C, fu, fv);
                 else {
                     const double Dp = rr_tri(D, fu, fv), Lp = rr_tri(Lc, fu, fv);
-                    if (f >= 1.0) {                                /* open water: the pit, under the plane */
+                    if (f >= 1.0 - 1e-9) {                         /* open water: the pit, under the plane */
                         y = Dp - TD5_ROAM_WATER_DEPTH;
                         if (y > Lp - RR_SHORE_BED) y = Lp - RR_SHORE_BED;
-                    } else if (f <= 0.0) {                         /* dry land, over the plane */
+                    } else if (f <= 1e-9) {                        /* dry land, over the plane */
                         y = Dp;
                         if (y < Lp + RR_SHORE_BANK) y = Lp + RR_SHORE_BANK;
                     } else {
