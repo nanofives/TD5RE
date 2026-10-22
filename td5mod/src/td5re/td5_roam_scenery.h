@@ -176,6 +176,10 @@ typedef struct {
     int  fp_on_pv;          /* [G5] footpath vertices lifted onto a pavement slab / island they cross */
     /* plazas */
     int  areas, lawn_tris, lawn_cut, trees, trees_cut;
+    int  plaza_tree_var[10];        /* [integ L] plaza trees per tree page variant (TD5_TG_TREE_VARIANTS) */
+    /* [integ L] TREE CROSS-CHECK (TD5RE_ROAM_TREE_XCHECK=1): trees judged [0 plaza, 1 street + lot], trunk / crown hits
+     * per category (shopfront, fuel canopy, plaza furniture, rails, outskirts, pool), trunks on a wet raster sample */
+    int  xc_trees[2], xc_trunk[2][6], xc_crown[2][6], xc_wet[2];
     /* [roam LA] STREET + LOT TREES from CANOPY.R8 (SECTION trees): planted on the pavement band, planted on the lot
      * lattice; band stations walked, refused: no canopy >= 3 m there, band too narrow, facade too close, slab not
      * found / on a road / a driveway mouth; refused by street furniture or a rail bed after every along-kerb dodge,
