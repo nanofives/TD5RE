@@ -2842,8 +2842,14 @@ static int edge_under(const Work *w, int ei)
             for (b = 0; b + 1 < q->npt; b++) {
                 const TD5_RoamPt *p0 = &g->pt[e->pt_first + a], *p1 = &g->pt[e->pt_first + a + 1];
                 const TD5_RoamPt *q0 = &g->pt[q->pt_first + b], *q1 = &g->pt[q->pt_first + b + 1];
+                const TD5_RoamPt *ea = &g->pt[e->pt_first], *eb = &g->pt[e->pt_first + e->npt - 1];
+                const TD5_RoamPt *qa = &g->pt[q->pt_first], *qb = &g->pt[q->pt_first + q->npt - 1];
+                const double tip = 2.0 * TD5_ROAM_UPM;   /* a way that only TOUCHES the deck at a shared end node is no crossing */
                 double xx, zz;
-                if (seg_cross(p0->x, p0->z, p1->x, p1->z, q0->x, q0->z, q1->x, q1->z, &xx, &zz)) return 1;
+                if (!seg_cross(p0->x, p0->z, p1->x, p1->z, q0->x, q0->z, q1->x, q1->z, &xx, &zz)) continue;
+                if (hypot(xx - ea->x, zz - ea->z) < tip || hypot(xx - eb->x, zz - eb->z) < tip ||
+                    hypot(xx - qa->x, zz - qa->z) < tip || hypot(xx - qb->x, zz - qb->z) < tip) continue;
+                return 1;
             }
     }
     return 0;
