@@ -263,7 +263,7 @@ typedef struct {
      * by rule (landmark / civic / part / relation, fuel site, on a park / plaza / open area or landmark grounds, outside
      * the casco), walls brought forward / cut back, block corners filled + new ochavas; every emitted street wall by its
      * gap to the line (on the pavement > 5 cm, 0 (5 cm), < 1 m, 1-3, 3-6, 6-12, 12-20 m) and the pre-pass line pieces */
-    int  muni_fate[8], muni_skip[4], muni_fwd, muni_back, muni_corner, muni_ochava, muni_gap[7], muni_segs;
+    int  muni_fate[10], muni_skip[4], muni_fwd, muni_back, muni_corner, muni_ochava, muni_gap[7], muni_segs;
     /* [roam NA] landmark grounds: blocks marked, Overture blobs not built in them, infill lots refused, OSM footprints
      * kept in them */
     int  grounds, grounds_ovt, grounds_inf, grounds_osm;

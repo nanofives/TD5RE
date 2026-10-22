@@ -14,9 +14,10 @@
  *     OCHAVA (a chamfer square to the corner's bisector, legs of ochava_leg along each street) when the corner turns
  *     between 30 and 150 degrees. An ochava the footprint already has (a short diagonal edge) is kept: its two
  *     vertices each move onto their own street's line;
- *   - every new vertex stands behind the line (td5_muni_behind >= 0), the swept area of a wall brought forward meets
- *     no other footprint (opt->blocked), and the ring stays simple with at least half its area, else the footprint is
- *     left as it was.
+ *   - every new vertex stands behind the line (td5_muni_behind >= 0), every point of a wall on the line lies on a line
+ *     piece (not on its extension), the swept area of a wall brought forward meets no other footprint (opt->blocked),
+ *     the ring stays simple with at least half its area, and NO point of the result (every edge, every metre) is in
+ *     front of the line, else the footprint is left as it was (an angled corner wing on the pavement, TD5_MUNI_FRONT).
  *
  * Coordinates are the caller's (tile-local units). Pure geometry: no ctx, no I/O. */
 #ifndef TD5_ROAM_MUNI_H
@@ -62,6 +63,8 @@ enum {
     TD5_MUNI_BLOCKED,           /* a wall's swept area meets another footprint                   */
     TD5_MUNI_CORNER,            /* a corner (or its ochava) could not stand behind both lines    */
     TD5_MUNI_RING,              /* the moved ring is not simple / lost half its area / too long  */
+    TD5_MUNI_ROAD,              /* (the caller's verdict) the moved ring needs a shift off the drivable surface */
+    TD5_MUNI_FRONT,             /* some edge no wall rule moves (angled, short) would still stand in front of the line */
     TD5_MUNI__N
 };
 
@@ -76,6 +79,9 @@ typedef struct {
  * (res->fate too); the output is a copy of the input unless the fate is TD5_MUNI_SNAPPED. */
 int  td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *x, const double *z, int n,
                    double *ox, double *oz, int *on, int cap, TD5_MuniRes *res);
+
+/* No point of ring (x, z)[n] (each vertex, every metre of each edge) stands more than o->tol in front of the line. */
+int  td5_muni_ring_behind(const TD5_Muni *m, const TD5_MuniOpt *o, const double *x, const double *z, int n);
 
 /* CENSUS: the walls of ring (x, z)[n] (as td5_muni_snap finds them, within o->reach either side) and each wall's
  * gap to the line (mean of its two ends, > 0 behind). Returns the wall count, gaps in gap[] (up to cap). */

@@ -288,12 +288,36 @@ static int mu_behind_ok(const TD5_Muni *m, const TD5_MuniOpt *o, double x, doubl
     return g >= 0.5 * o->inset;
 }
 
+/* no point of ring (x, z)[n] (each vertex, every metre of each edge) stands more than tol in front of the line */
+static int mu_all_behind(const TD5_Muni *m, const TD5_MuniOpt *o, const double *x, const double *z, int n)
+{
+    int k, q;
+    for (k = 0; k < n; k++) {
+        const int j = (k + 1) % n;
+        const double L = hypot(x[j] - x[k], z[j] - z[k]);
+        const int nq = (int)(L / (o->min_wall > 1.0 ? o->min_wall : 1.0)) + 1;
+        for (q = 0; q < nq; q++) {
+            const double t = (double)q / (double)nq;
+            double g;
+            if (td5_muni_behind(m, x[k] + (x[j] - x[k]) * t, z[k] + (z[j] - z[k]) * t, o->reach, &g, NULL) && g < -o->tol)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+int td5_muni_ring_behind(const TD5_Muni *m, const TD5_MuniOpt *o, const double *x, const double *z, int n)
+{
+    return !m || !m->n || mu_all_behind(m, o, x, z, n);
+}
+
 int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, const double *iz, int n,
                   double *ox, double *oz, int *on, int cap, TD5_MuniRes *res)
 {
     double x[MU_RING_MAX], z[MU_RING_MAX], tx[MU_RING_MAX * 2], tz[MU_RING_MAX * 2], a0;
     MuWall w[MU_RING_MAX];
     int act[MU_RING_MAX];
+    double inx[MU_RING_MAX], inz[MU_RING_MAX], outx[MU_RING_MAX], outz[MU_RING_MAX];   /* where walls k-1 end / k start */
     int flip, i, k, nt = 0, nw, nact = 0, nfar = 0, nmove = 0, moved = 0;
     memset(res, 0, sizeof *res);
     *on = 0;
@@ -318,14 +342,14 @@ int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, con
         }
     }
     if (!nact) { res->fate = TD5_MUNI_FAR; return res->fate; }
-    if (!nmove) { res->fate = TD5_MUNI_ON; return res->fate; }
+    if (!nmove) { res->fate = mu_all_behind(m, o, x, z, n) ? TD5_MUNI_ON : TD5_MUNI_FRONT; return res->fate; }
     (void)nfar;
     /* every vertex: kept, moved onto one line, or the corner of two (with its ochava) */
     for (k = 0; k < n; k++) {
         const int ein = (k + n - 1) % n, eout = k;
         const int si = act[ein] ? w[ein].seg : -1, so = act[eout] ? w[eout].seg : -1;
         if (nt + 2 > MU_RING_MAX * 2) { res->fate = TD5_MUNI_RING; return res->fate; }
-        if (si < 0 && so < 0) { tx[nt] = x[k]; tz[nt] = z[k]; nt++; continue; }
+        if (si < 0 && so < 0) { inx[k] = outx[k] = tx[nt] = x[k]; inz[k] = outz[k] = tz[nt] = z[k]; nt++; continue; }
         if (si >= 0 && so >= 0 && si != so &&
             m->s[si].nx * m->s[so].nx + m->s[si].nz * m->s[so].nz < MU_PAR_COS) {
             /* a block corner: the crossing of the two lines, chamfered */
@@ -345,10 +369,13 @@ int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, con
             res->corners++;
             if (turn < MU_TURN_MIN || turn > MU_TURN_MAX) {
                 if (!mu_behind_ok(m, o, X, Z)) { res->fate = TD5_MUNI_CORNER; return res->fate; }
-                tx[nt] = X; tz[nt] = Z; nt++;
+                inx[k] = outx[k] = tx[nt] = X; inz[k] = outz[k] = tz[nt] = Z; nt++;
                 continue;
             }
-            if (o->ochava_leg <= 0.0 && mu_behind_ok(m, o, X, Z)) { tx[nt] = X; tz[nt] = Z; nt++; continue; }
+            if (o->ochava_leg <= 0.0 && mu_behind_ok(m, o, X, Z)) {
+                inx[k] = outx[k] = tx[nt] = X; inz[k] = outz[k] = tz[nt] = Z; nt++;
+                continue;
+            }
             leg = o->ochava_leg > 0.0 ? o->ochava_leg : o->min_wall;
             for (step = 0; step < MU_LEG_STEPS && !done; step++) {
                 const double L = leg + (double)step * (o->ochava_leg > 0.0 ? o->ochava_leg : o->min_wall) * 0.5;
@@ -358,8 +385,8 @@ int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, con
                 if ((x[(k + 1) % n] - p2x) * t2x + (z[(k + 1) % n] - p2z) * t2z < o->min_wall) break;
                 if (!mu_behind_ok(m, o, p1x, p1z) || !mu_behind_ok(m, o, p2x, p2z) ||
                     !mu_behind_ok(m, o, 0.5 * (p1x + p2x), 0.5 * (p1z + p2z))) continue;
-                tx[nt] = p1x; tz[nt] = p1z; nt++;
-                tx[nt] = p2x; tz[nt] = p2z; nt++;
+                inx[k] = tx[nt] = p1x; inz[k] = tz[nt] = p1z; nt++;
+                outx[k] = tx[nt] = p2x; outz[k] = tz[nt] = p2z; nt++;
                 done = 1;
             }
             if (!done) { res->fate = TD5_MUNI_CORNER; return res->fate; }
@@ -378,7 +405,23 @@ int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, con
             tz[nt] = z[k] + m->s[s].nz * (o->inset - g);
             if (fabs(o->inset - g) > 1.0) moved = 1;
             if (!mu_behind_ok(m, o, tx[nt], tz[nt])) { res->fate = TD5_MUNI_CORNER; return res->fate; }
+            inx[k] = outx[k] = tx[nt]; inz[k] = outz[k] = tz[nt];
             nt++;
+        }
+    }
+    /* every point of a wall now on the line lies ON a line piece (not on its extension past the piece's end, where the
+     * line stops: an island-filled gap, a deck, a mouth), within 0.3 m (6 tol) of it */
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n;
+        const double L = hypot(inx[j] - outx[i], inz[j] - outz[i]);
+        int q, nq;
+        if (!act[i]) continue;
+        nq = (int)(L / (o->min_wall > 1.0 ? o->min_wall : 1.0)) + 1;
+        for (q = 0; q <= nq; q++) {
+            const double t = (double)q / (double)nq;
+            double g;
+            if (!td5_muni_behind(m, outx[i] + (inx[j] - outx[i]) * t, outz[i] + (inz[j] - outz[i]) * t, o->reach, &g, NULL) ||
+                fabs(g) > o->inset + 6.0 * o->tol) { res->fate = TD5_MUNI_CORNER; return res->fate; }
         }
     }
     /* the area a wall sweeps forward meets no other footprint */
@@ -406,6 +449,9 @@ int td5_muni_snap(const TD5_Muni *m, const TD5_MuniOpt *o, const double *ix, con
         while (nr > 1 && hypot(rx[nr - 1] - rx[0], rz[nr - 1] - rz[0]) < MU_DUP) nr--;
         a1 = mu_area(rx, rz, nr);
         if (nr < 3 || nr > cap || !(a1 >= 0.5 * a0) || !mu_simple(rx, rz, nr)) { res->fate = TD5_MUNI_RING; return res->fate; }
+        /* the whole result behind the line, every edge and every metre of it: the line bends between its pieces,
+         * and an edge no wall rule moved (an angled wing, a short jog) must not be left on the pavement */
+        if (!mu_all_behind(m, o, rx, rz, nr)) { res->fate = TD5_MUNI_FRONT; return res->fate; }
         for (k = 0; k < nr; k++) {
             ox[k] = flip ? rx[nr - 1 - k] : rx[k];
             oz[k] = flip ? rz[nr - 1 - k] : rz[k];
