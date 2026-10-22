@@ -1624,8 +1624,8 @@ static int fu_emit_xings(FuEm *em, TD5_RoamFurnSource *f, const FuXing *xs, int 
         if (lanes < 1) lanes = 1;
         if (paint == 3) {
             /* [roam LC] the rule for a crossing OSM never said how to paint: a zebra on a main road (tertiary and up)
-             * or a wide carriageway (3+ lanes), plain limit lines on a residential street. Mode 2: always a zebra. */
-            const int main_road = fr.klass >= TD5_GEO_RC_TERTIARY || lanes >= 3;
+             * or a wide carriageway (4+ lanes), plain limit lines on a residential street. Mode 2: always a zebra. */
+            const int main_road = fr.klass >= TD5_GEO_RC_TERTIARY || lanes >= 4;
             paint = (f->xing_mode == 2 || main_road) ? 1 : 2;
             if (paint == 1) st->xing_unk_zebra++; else st->xing_unk_lines++;
         }
