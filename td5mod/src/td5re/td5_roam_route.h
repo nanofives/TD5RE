@@ -142,10 +142,12 @@ int  td5_roam_route_graph_nsignal(void);
 int  td5_roam_route_graph_turn_banned(int node, int in_inc, int out_inc);
 typedef struct {
     int    loaded;            /* restrictions kept for cars in RESTRICTIONS.JSON                         */
-    int    matched;           /* matched to a graph node (via node, or a via way inside one cluster)     */
+    int    matched;           /* matched to a graph node (via node, or a via way inside one cluster): an
+                               * arm per way by edge key, or by its direction within 35 deg             */
     int    matched_via_way;   /*   of those, via a way                                                   */
-    int    outside;           /* a from / to way not in this graph (outside the region)                 */
-    int    no_node;           /* from and to are in the graph, no node within 60 m of the via joins them */
+    int    matched_by_id;     /*   of those, both ways found by edge key (else by direction)             */
+    int    outside;           /* no graph node within 60 m of the via (outside the region)              */
+    int    no_node;           /* nodes near, none with a from arm arriving and a to arm leaving          */
     int    via_way_chain;     /* the via way is a street of its own between two nodes: not enforced      */
     int    no_pair;           /* matched, but no drivable (arm in, arm out) pair (one-way against)       */
     int    bans;              /* banned (node, in, out) triples                                          */

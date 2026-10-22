@@ -458,19 +458,6 @@ static void rr_fix_centres(RrGraph *gp, RrPatch *pa, int npa, const RrPatchTri *
 #define RR_RESTR_R_M     60.0         /* a via node this close to a graph node (a cluster centre can sit off it) */
 #define RR_RESTR_TAN_M   10.0         /* an arm's direction: from its end point to the point this far along */
 
-/* first edge index of OSM way `way` (edges sorted by key = way_id << 16 | vertex), nedge when none */
-static int rr_way_first(const RrGraph *gp, int64_t way)
-{
-    const uint64_t k = (uint64_t)way << 16;
-    int lo = 0, hi = gp->nedge;
-    while (lo < hi) { const int mid = (lo + hi) / 2; if (gp->edge[mid].key < k) lo = mid + 1; else hi = mid; }
-    return lo;
-}
-static int rr_way_has(const RrGraph *gp, int64_t way)
-{
-    const int e = rr_way_first(gp, way);
-    return e < gp->nedge && (int64_t)(gp->edge[e].key >> 16) == way;
-}
 static int rr_in_set(int64_t id, const int64_t *set, int n)
 {
     int i;
@@ -542,78 +529,126 @@ static int rr_cmp_ban(const void *a, const void *b)
 }
 
 #define RR_PAIRS_MAX 64
+#define RR_ARM_COS   0.819          /* an arm matches a way's direction within 35 deg */
+
+/* arm `inc` of a node against a restriction's way set: 2 = the arm's edge key IS one of the ways (exact), 1 = its
+ * direction away from the node is within 35 deg of one of the ways' directions away from the via, 0 = no */
+static int rr_arm_match(const RrGraph *gp, int inc, const int64_t *ids, const TD5_RoamRestrDir *dirs, int n)
+{
+    double ax, az;
+    int i, j;
+    if (rr_in_set(rr_inc_way(gp, inc), ids, n)) return 2;
+    rr_end_dir(gp, inc >> 1, inc & 1, &ax, &az);
+    for (i = 0; i < n; i++)
+        for (j = 0; j < dirs[i].n; j++)
+            if (ax * dirs[i].dx[j] + az * dirs[i].dz[j] >= RR_ARM_COS) return 1;
+    return 0;
+}
+
+/* the from arms (arriving legally) and to arms (leaving legally) of node n; returns the weaker of the two best match
+ * strengths (0 = one side has none). in[] / out[] keep only the arms of the best strength on each side. */
+static int rr_node_arms(const RrGraph *gp, int n, const TD5_RoamRestr *q, int *in, int *nin, int *out, int *nout)
+{
+    const RrNode *nd = &gp->node[n];
+    int a, bf = 0, bt = 0;
+    *nin = *nout = 0;
+    for (a = 0; a < nd->ninc; a++) {
+        const int inc = gp->inc[nd->first + a];
+        const int mf = rr_inc_arrive_ok(gp, inc) ? rr_arm_match(gp, inc, q->from, q->from_dir, q->nfrom) : 0;
+        const int mt = rr_inc_leave_ok(gp, inc) ? rr_arm_match(gp, inc, q->to, q->to_dir, q->nto) : 0;
+        if (mf > bf) { bf = mf; *nin = 0; }
+        if (mf && mf == bf && *nin < 16) in[(*nin)++] = inc;
+        if (mt > bt) { bt = mt; *nout = 0; }
+        if (mt && mt == bt && *nout < 16) out[(*nout)++] = inc;
+    }
+    return bf < bt ? bf : bt;
+}
+
+typedef struct { double x; int n; } RrNodeX;
+static int rr_cmp_nodex(const void *a, const void *b)
+{
+    const RrNodeX *p = (const RrNodeX *)a, *q = (const RrNodeX *)b;
+    if (p->x != q->x) return p->x < q->x ? -1 : 1;
+    return p->n - q->n;
+}
+
 /* Match every restriction to the graph and fill gp->ban (sorted, unique) + gp->rc. A restriction is matched at the
- * graph node nearest its via (node, or via way end points), within RR_RESTR_R_M, that holds an arm of a FROM way and
- * an arm of a TO way: a junction cluster is one node, so a via way inside one junction (a divided avenue's median
- * link) collapses onto it. A via way that is a street between two nodes is counted and NOT enforced (the A* turn
- * state is one node deep). Pairs: (a from arm arriving, a to arm leaving), one-way respected; several pairs keep the
- * ones whose turn matches the kind (a from way that runs THROUGH the via: left from one side is right from the other). */
+ * graph node nearest its via (node, or the via way end points), within RR_RESTR_R_M, that has an arm of a FROM way
+ * arriving and an arm of a TO way leaving. An arm is a way's when its edge key is that way's id, or (the graph's edges
+ * are ribbon chains keyed by their first way: one OSM way per block joins through) when its direction away from the
+ * node is within 35 deg of the way's own direction away from the via. A junction cluster is one node, so a via way
+ * inside one junction (a divided avenue's median link) collapses onto it. A via way that is a street between two
+ * nodes is counted and NOT enforced (the A* turn state is one node deep). Several pairs keep the ones whose turn
+ * matches the kind (a from way that runs THROUGH the via: left from one side is right from the other). */
 static void rr_restrict_build(RrGraph *gp, const char *place)
 {
     const uint32_t t0 = td5_plat_time_ms();
     const TD5_RoamRestr *R;
     TD5_RoamRestrLoad ld;
     RrVec bans = { NULL, 0, 0, sizeof(RrBan) };
-    int nr = 0, i;
+    int nr = 0, i, dbg = 0;
+    RrNodeX *byx = NULL;
+    const double r_units = RR_RESTR_R_M * RR_UPM;
     memset(&gp->rc, 0, sizeof gp->rc);
     if (td5_env_int("TD5RE_ROAM_TURN_RESTRICT", 1, 0, 1) == 0) return;
+#ifndef TD5RE_RELEASE
+    dbg = td5_env_int("TD5RE_ROAM_RULES_LOG", 0, 0, 1);    /* DEV: why restrictions did not match */
+#endif
     R = td5_roam_rules_restrictions(place, &nr, &ld);
     gp->rc.loaded = nr;
+    if (nr == 0 || gp->nnode == 0) return;
+    byx = (RrNodeX *)malloc((size_t)gp->nnode * sizeof(RrNodeX));
+    if (!byx) return;
+    for (i = 0; i < gp->nnode; i++) { byx[i].x = gp->node[i].x; byx[i].n = i; }
+    qsort(byx, (size_t)gp->nnode, sizeof(RrNodeX), rr_cmp_nodex);
     for (i = 0; i < nr; i++) {
         const TD5_RoamRestr *q = &R[i];
-        int f, best = -1, all_in = 1, via_way_hit = 0;
-        double best_d = RR_RESTR_R_M * RR_UPM;
+        double qx[TD5_RESTR_VIAPTS], qz[TD5_RESTR_VIAPTS], minx = 1e300, maxx = -1e300, best_d = 1e300;
+        int nq = 0, lo, hi, k, best = -1, best_m = 0, n_near = 0;
         int pin[RR_PAIRS_MAX], pout[RR_PAIRS_MAX], ok[RR_PAIRS_MAX], np = 0, nok = 0, want, j;
-        for (f = 0; f < q->nfrom; f++) if (!rr_way_has(gp, q->from[f])) all_in = 0;
-        for (f = 0; f < q->nto; f++) if (!rr_way_has(gp, q->to[f])) all_in = 0;
-        if (!all_in) { gp->rc.outside++; continue; }
-        /* candidate nodes: the end nodes of the from ways' edges that also hold an arm of a to way */
-        for (f = 0; f < q->nfrom; f++) {
-            int e;
-            for (e = rr_way_first(gp, q->from[f]); e < gp->nedge && (int64_t)(gp->edge[e].key >> 16) == q->from[f]; e++) {
-                int k;
-                for (k = 0; k < 2; k++) {
-                    const int n = gp->edge[e].node[k];
-                    const RrNode *nd = &gp->node[n];
-                    int a, has_to = 0;
-                    double d;
-                    for (a = 0; a < nd->ninc && !has_to; a++)
-                        if (rr_in_set(rr_inc_way(gp, gp->inc[nd->first + a]), q->to, q->nto)) has_to = 1;
-                    if (!has_to) continue;
-                    if (q->via_node) d = hypot(nd->x - q->vx, nd->z - q->vz);
-                    else {
-                        int v;
-                        d = 1e300;
-                        for (v = 0; v < q->nvpt; v++) { const double dv = hypot(nd->x - q->vpx[v], nd->z - q->vpz[v]); if (dv < d) d = dv; }
-                    }
-                    if (d < best_d || (d == best_d && best >= 0 && n < best)) { best_d = d; best = n; }
-                }
+        int in[16], nin = 0, out[16], nout = 0;
+        if (q->via_node) { qx[0] = q->vx; qz[0] = q->vz; nq = 1; }
+        else for (k = 0; k < q->nvpt; k++) { qx[nq] = q->vpx[k]; qz[nq] = q->vpz[k]; nq++; }
+        for (k = 0; k < nq; k++) { if (qx[k] < minx) minx = qx[k]; if (qx[k] > maxx) maxx = qx[k]; }
+        lo = 0; hi = gp->nnode;
+        while (lo < hi) { const int mid = (lo + hi) / 2; if (byx[mid].x < minx - r_units) lo = mid + 1; else hi = mid; }
+        for (; lo < gp->nnode && byx[lo].x <= maxx + r_units; lo++) {
+            const int n = byx[lo].n;
+            double d = 1e300;
+            int m, ti[16], tn, to2[16], tn2;
+            for (k = 0; k < nq; k++) { const double dd = hypot(gp->node[n].x - qx[k], gp->node[n].z - qz[k]); if (dd < d) d = dd; }
+            if (d > r_units) continue;
+            n_near++;
+            m = rr_node_arms(gp, n, q, ti, &tn, to2, &tn2);
+            if (m == 0) continue;
+            /* the strongest match first (both sides by id), then the nearest */
+            if (m > best_m || (m == best_m && (d < best_d || (d == best_d && n < best)))) {
+                best_m = m; best_d = d; best = n;
+                nin = tn; nout = tn2;
+                memcpy(in, ti, sizeof(int) * (size_t)tn); memcpy(out, to2, sizeof(int) * (size_t)tn2);
             }
         }
         if (best < 0) {
-            if (!q->via_node) {
-                int v;
-                for (v = 0; v < q->nvia_way; v++) if (rr_way_has(gp, q->via_way[v])) via_way_hit = 1;
-            }
-            if (via_way_hit) gp->rc.via_way_chain++; else gp->rc.no_node++;
+            if (!n_near) gp->rc.outside++;
+            else if (q->nvia_way > 0) gp->rc.via_way_chain++;
+            else gp->rc.no_node++;
+#ifndef TD5RE_RELEASE
+            if (dbg && gp->rc.outside + gp->rc.no_node + gp->rc.via_way_chain <= 24)
+                TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT dbg: %lld %s unmatched (%s): from %lld to %lld, %d nodes within %.0f m",
+                          (long long)q->id, td5_roam_rules_kind_name(q->kind), !n_near ? "no node near" :
+                          (q->nvia_way > 0 ? "via-way chain" : "no node with both arms"), (long long)q->from[0],
+                          (long long)q->to[0], n_near, RR_RESTR_R_M);
+#endif
             continue;
         }
         gp->rc.matched++;
+        if (best_m == 2) gp->rc.matched_by_id++;
         if (!q->via_node) gp->rc.matched_via_way++;
-        {
-            const RrNode *nd = &gp->node[best];
-            int a, b;
-            for (a = 0; a < nd->ninc; a++) {
-                const int in = gp->inc[nd->first + a];
-                if (!rr_in_set(rr_inc_way(gp, in), q->from, q->nfrom) || !rr_inc_arrive_ok(gp, in)) continue;
-                for (b = 0; b < nd->ninc && np < RR_PAIRS_MAX; b++) {
-                    const int out = gp->inc[nd->first + b];
-                    if (!rr_in_set(rr_inc_way(gp, out), q->to, q->nto) || !rr_inc_leave_ok(gp, out)) continue;
-                    if ((out >> 1) == (in >> 1) && !(q->kind == TD5_RESTR_NO_U || q->kind == TD5_RESTR_ONLY_U)) continue;
-                    pin[np] = in; pout[np] = out; np++;
-                }
+        for (k = 0; k < nin; k++)
+            for (j = 0; j < nout && np < RR_PAIRS_MAX; j++) {
+                if ((out[j] >> 1) == (in[k] >> 1) && !(q->kind == TD5_RESTR_NO_U || q->kind == TD5_RESTR_ONLY_U)) continue;
+                pin[np] = in[k]; pout[np] = out[j]; np++;
             }
-        }
         if (np == 0) { gp->rc.no_pair++; continue; }
         want = rr_kind_turn(q->kind);
         for (j = 0; j < np; j++) { ok[j] = !want || rr_turn_class(gp, pin[j], pout[j]) == want; nok += ok[j]; }
@@ -632,15 +667,18 @@ static void rr_restrict_build(RrGraph *gp, const char *place)
             }
             /* only_*: from this arm every OTHER way out is banned */
             for (b = 0; b < nd->ninc; b++) {
-                const int out = gp->inc[nd->first + b];
+                const int o = gp->inc[nd->first + b];
                 RrBan *bn;
-                if (rr_in_set(rr_inc_way(gp, out), q->to, q->nto) || !rr_inc_leave_ok(gp, out)) continue;
+                int t, is_to = 0;
+                for (t = 0; t < nout; t++) if (out[t] == o) is_to = 1;
+                if (is_to || !rr_inc_leave_ok(gp, o) || (o >> 1) == (pin[j] >> 1)) continue;
                 bn = (RrBan *)rr_vec_add(&bans);
                 if (!bn) break;
-                bn->node = best; bn->in = pin[j]; bn->out = out;
+                bn->node = best; bn->in = pin[j]; bn->out = o;
             }
         }
     }
+    free(byx);
     if (bans.n > 0) {
         RrBan *B = (RrBan *)bans.p;
         int u = 0;
@@ -652,11 +690,12 @@ static void rr_restrict_build(RrGraph *gp, const char *place)
     }
     gp->rc.bans = gp->nban;
     gp->rc.ms = (double)(td5_plat_time_ms() - t0);
-    TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT: %d restrictions for cars, matched %d (%d via a way inside one junction), "
-              "outside the region %d, no joining node %d, via-way chain not enforced %d, no drivable pair %d | "
-              "banned turns %d | one-pair geometry agrees %d differs %d, several pairs filtered by the turn %d | %.0f ms",
-              gp->rc.loaded, gp->rc.matched, gp->rc.matched_via_way, gp->rc.outside, gp->rc.no_node, gp->rc.via_way_chain,
-              gp->rc.no_pair, gp->rc.bans, gp->rc.geom_agree, gp->rc.geom_differ, gp->rc.filtered, gp->rc.ms);
+    TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT: %d restrictions for cars, matched %d (%d with both ways by id, %d via a way inside one "
+              "junction), no graph node within %.0f m %d, no node with both arms %d, via-way chain not enforced %d, no drivable "
+              "pair %d | banned turns %d | one-pair geometry agrees %d differs %d, several pairs filtered by the turn %d | %.0f ms",
+              gp->rc.loaded, gp->rc.matched, gp->rc.matched_by_id, gp->rc.matched_via_way, RR_RESTR_R_M, gp->rc.outside,
+              gp->rc.no_node, gp->rc.via_way_chain, gp->rc.no_pair, gp->rc.bans, gp->rc.geom_agree, gp->rc.geom_differ,
+              gp->rc.filtered, gp->rc.ms);
 }
 
 static int rr_banned_in(const RrGraph *gp, int node, int in, int out)

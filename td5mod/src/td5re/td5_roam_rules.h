@@ -60,12 +60,18 @@ enum {
 #define TD5_RESTR_WAYS   6
 #define TD5_RESTR_VIAPTS 8
 
+/* A from / to way's direction AWAY from the via (unit, game frame), from its own points: the planner graph cannot
+ * match by way id alone (an edge there is a ribbon chain keyed by its FIRST way: La Plata maps one way per block). A
+ * way the via sits inside of (it passes through) has both directions. */
+typedef struct { int n; double dx[2], dz[2]; } TD5_RoamRestrDir;
+
 typedef struct {
     int64_t id;
     int     kind;                         /* TD5_RESTR_*                                             */
     int     only;                         /* an only_* rule                                          */
     int     nfrom, nto;
     int64_t from[TD5_RESTR_WAYS], to[TD5_RESTR_WAYS];
+    TD5_RoamRestrDir from_dir[TD5_RESTR_WAYS], to_dir[TD5_RESTR_WAYS];
     int     via_node;                     /* 1 = via is a node at (vx, vz)                           */
     double  vx, vz;                       /* via node, game frame                                    */
     int     nvia_way;                     /* via ways (0 for a via node)                             */
@@ -78,6 +84,7 @@ typedef struct {
     int file;                             /* 1 = RESTRICTIONS.JSON was read                          */
     int relations;                        /* records in the file                                     */
     int kept;                             /* bind a car, known kind, from + to + via present         */
+    int no_dir;                           /* of those, a from / to way without points (ids only)     */
     int not_car, unknown_kind, incomplete;/* left out, by reason                                     */
     int by_kind[TD5_RESTR_KIND_COUNT];
 } TD5_RoamRestrLoad;

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -75,6 +76,43 @@ static int rl_ids(const cJSON *arr, int64_t *out, int cap)
     return n;
 }
 
+/* the directions of one from / to way object away from the point (rx, rz): its vertex nearest that point, then the
+ * first vertex >= 10 m along either way (only the ways that exist) */
+#define RL_DIR_UNITS (10.0 * 430.0)
+static int rl_dirs(const cJSON *w, double rx, double rz, TD5_RoamRestrDir *d)
+{
+    const cJSON *pts = cJSON_GetObjectItem(w, "pts");
+    const int np = cJSON_GetArraySize(pts);
+    double *x, *z, best = 1e300;
+    int i, bi = 0, s;
+    d->n = 0;
+    if (np < 2) return 0;
+    x = (double *)malloc((size_t)np * sizeof(double));
+    z = (double *)malloc((size_t)np * sizeof(double));
+    if (!x || !z) { free(x); free(z); return 0; }
+    i = 0;
+    for (const cJSON *p = pts->child; p && i < np; p = p->next, i++) {
+        x[i] = cJSON_GetNumberValue(cJSON_GetObjectItem(p, "x"));
+        z[i] = cJSON_GetNumberValue(cJSON_GetObjectItem(p, "z"));
+        {
+            const double dd = (x[i] - rx) * (x[i] - rx) + (z[i] - rz) * (z[i] - rz);
+            if (dd < best) { best = dd; bi = i; }
+        }
+    }
+    for (s = -1; s <= 1; s += 2) {
+        int j = bi + s;
+        double L;
+        if (j < 0 || j >= np) continue;
+        while (j + s >= 0 && j + s < np && hypot(x[j] - x[bi], z[j] - z[bi]) < RL_DIR_UNITS) j += s;
+        L = hypot(x[j] - x[bi], z[j] - z[bi]);
+        if (L <= 0.0 || d->n >= 2) continue;
+        d->dx[d->n] = (x[j] - x[bi]) / L; d->dz[d->n] = (z[j] - z[bi]) / L;
+        d->n++;
+    }
+    free(x); free(z);
+    return d->n;
+}
+
 static void rl_parse(const char *place)
 {
     char path[512];
@@ -129,6 +167,34 @@ static void rl_parse(const char *place)
             }
         }
         if (q->nfrom == 0 || q->nto == 0 || (!q->via_node && q->nvpt == 0)) { L.load.incomplete++; continue; }
+        {   /* the ways' directions away from the via (a via way: from its end point nearest the way) */
+            const char *const role[2] = { "from", "to" };
+            int r2, ok_dir = 1;
+            for (r2 = 0; r2 < 2; r2++) {
+                const cJSON *m;
+                int k = 0;
+                for (m = cJSON_GetObjectItem(it, role[r2]) ? cJSON_GetObjectItem(it, role[r2])->child : NULL;
+                     m && k < TD5_RESTR_WAYS; m = m->next) {
+                    double rx = q->vx, rz = q->vz;
+                    TD5_RoamRestrDir *d = r2 == 0 ? &q->from_dir[k] : &q->to_dir[k];
+                    if (!cJSON_IsNumber(cJSON_GetObjectItem(m, "id"))) continue;
+                    if (!q->via_node) {   /* the via-way end point nearest this way's first point */
+                        const cJSON *p0 = cJSON_GetArrayItem(cJSON_GetObjectItem(m, "pts"), 0);
+                        const double x0 = cJSON_GetNumberValue(cJSON_GetObjectItem(p0, "x"));
+                        const double z0 = cJSON_GetNumberValue(cJSON_GetObjectItem(p0, "z"));
+                        double bd = 1e300;
+                        int v;
+                        for (v = 0; v < q->nvpt; v++) {
+                            const double dd = hypot(q->vpx[v] - x0, q->vpz[v] - z0);
+                            if (dd < bd) { bd = dd; rx = q->vpx[v]; rz = q->vpz[v]; }
+                        }
+                    }
+                    if (!rl_dirs(m, rx, rz, d)) ok_dir = 0;
+                    k++;
+                }
+            }
+            if (!ok_dir) L.load.no_dir++;
+        }
         L.load.by_kind[q->kind]++;
         n++;
     }
