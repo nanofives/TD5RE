@@ -123,6 +123,7 @@ typedef struct {
     int    blocks_active;
     long   player_respawns;                   /* free roam busts: put back on a street                 */
     int    respawn_on_road;                   /* the last respawn landed on the drivable surface       */
+    long   limit_ticks;                       /* [roam LG] cop ticks whose speed cap came from a posted limit */
 } TD5_RoamCopsStats;
 void td5_roam_cops_stats(TD5_RoamCopsStats *out);
 

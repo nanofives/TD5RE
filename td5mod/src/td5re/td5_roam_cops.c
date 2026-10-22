@@ -91,6 +91,8 @@ typedef struct {
     int      sig_hold;                           /* patrol: holding at a red stop line         */
     int      turning;                            /* pursuit: the last leg leaves backwards (turn round) */
     int      blk;                                /* [G1b] roadblock index + 1 (RC_BLOCK cars)            */
+    int      lim_kmh;                            /* [roam LG] posted limit of the street under the car, 0 = none */
+    long     lim_t;                              /* [roam LG] tick it was looked up                      */
 } RcCop;
 
 /* [G1b] a roadblock: PLACE frame only (no graph index, so a rebase and a graph swap need nothing) */
@@ -114,6 +116,8 @@ static struct {
     int     knobs;
     int     dens_free, dens_race;
     double  vmax, v_patrol, limit_kmh, notice_m, notice_red_m, see_m, lose_s, escape_m, bust_s;
+    double  patrol_pct, pursuit_pct, speed_margin;   /* [roam LG] posted-limit rules (0 = the class rules) */
+    int     pl_posted;                           /* [roam LG] posted limit under the player at the last check, 0 = none */
     double  r_spawn_min, r_spawn_max, r_despawn, r_despawn_pursuit;
     double  wb, a_lat, a_brake;
     int     log_every, offpath_dumped;
@@ -166,6 +170,13 @@ static void rc_read_knobs(void)
     C.vmax        = td5_env_int("TD5RE_ROAM_COPS_VMAX", 125, 30, 250) / 3.6;
     C.v_patrol    = td5_env_int("TD5RE_ROAM_COPS_PATROL_KMH", 36, 10, 80) / 3.6;
     C.limit_kmh   = td5_env_int("TD5RE_ROAM_COPS_LIMIT_KMH", 60, 20, 200);
+    /* [roam LG] on a street with a posted limit: patrol at PATROL_PCT of it (90: a 40 street gives the old 36 km/h),
+     * pursue at no more than PURSUIT_PCT of it (250, floor 60 km/h, ceiling VMAX), and a player is SPEEDING past the
+     * limit + SPEEDING_MARGIN_KMH (20), never under LIMIT_KMH. Untagged streets keep the class rules. 0 = off (A/B). */
+    C.patrol_pct  = td5_env_int("TD5RE_ROAM_COPS_PATROL_PCT", 90, 0, 150) / 100.0;
+    C.pursuit_pct = td5_env_int("TD5RE_ROAM_COPS_PURSUIT_PCT", 250, 0, 500) / 100.0;
+    C.speed_margin = td5_env_int("TD5RE_ROAM_COPS_SPEEDING_MARGIN_KMH", 20, -1, 100);
+    if (td5_env_int("TD5RE_ROAM_MAXSPEED", 1, 0, 1) == 0) { C.patrol_pct = 0.0; C.pursuit_pct = 0.0; C.speed_margin = -1.0; }
     C.notice_m    = td5_env_int("TD5RE_ROAM_COPS_NOTICE_M", 60, 10, 300);
     C.notice_red_m = td5_env_int("TD5RE_ROAM_COPS_NOTICE_RED_M", 80, 10, 300);
     C.see_m       = td5_env_int("TD5RE_ROAM_COPS_SEE_M", 150, 30, 600);
@@ -191,6 +202,18 @@ static void rc_read_knobs(void)
 }
 
 static double rc_vmax(void) { return C.force_vmax ? (C.force_vmax - 1) / 3.6 : C.vmax; }
+
+/* [roam LG] the posted limit (km/h) of the street nearest a PLACE point within 15 m, 0 = untagged / none */
+static int rc_posted_at(double x, double z, int *klass)
+{
+    int e;
+    double along, dm;
+    TD5_RouteGEdge E;
+    if (klass) *klass = -1;
+    if (!td5_roam_route_graph_snap_edge(x, z, 15.0, &e, &along, &dm) || !td5_roam_route_graph_edge_view(e, &E)) return 0;
+    if (klass) *klass = E.klass;
+    return E.maxspeed;
+}
 
 static int rc_place_of(const TD5_Actor *a, double *px, double *pz)
 {
@@ -1153,13 +1176,17 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
     } else if (c->state == RC_PATROL && !c->hold) {
         if ((c->np < 2 || c->s > rc_path_len(c) - 25.0) && tick - c->plan_t >= (c->plan_fail ? 30 : 1)) {
             double gx, gz;
-            if (!rc_patrol_goal(c, a, &gx, &gz) || !rc_plan(c, a, gx, gz, C.v_patrol, C.v_patrol)) {
+            /* [roam LG] the profile is capped at the fastest patrol speed; the street's own cap is applied per tick
+             * (min(profile, cap) is the profile planned at that cap: an untagged street drives exactly as before) */
+            const double v_pcap = C.patrol_pct > 0.0 ? rc_clamp(130.0 * C.patrol_pct / 3.6, C.v_patrol, rc_vmax()) : C.v_patrol;
+            if (!rc_patrol_goal(c, a, &gx, &gz) || !rc_plan(c, a, gx, gz, v_pcap, C.v_patrol)) {
                 c->plan_t = tick;
                 if (c->plan_fail > 6) rc_despawn(c, RC_WHY_NOPATH);
             }
         }
     }
     if (c->np >= 2) c->s = rc_path_proj(c, x, z, &c->lat);
+    if (tick - c->lim_t >= 8 || tick < c->lim_t) { c->lim_kmh = rc_posted_at(x, z, NULL); c->lim_t = tick; }   /* [roam LG] */
 
     /* ---- target speed ---- */
     if (c->hold) vt = 0.0;
@@ -1171,7 +1198,10 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
     } else vt = 0.0;
     if (c->state == RC_PATROL) {
         double pl_l, cap;
-        if (vt > C.v_patrol) vt = C.v_patrol;
+        const double v_p = (C.patrol_pct > 0.0 && c->lim_kmh > 0)
+                         ? rc_clamp(c->lim_kmh * C.patrol_pct, 10.0, 130.0) / 3.6 : C.v_patrol;   /* [roam LG] */
+        if (c->lim_kmh > 0 && C.patrol_pct > 0.0) C.st.limit_ticks++;
+        if (vt > v_p) vt = v_p;
         cap = rc_signal_cap(c, a, x, z, v, &a_req);
         if (cap < vt) vt = cap;
         cap = rc_gap_cap(c, a, x, z, v, 0, &pl_l);
@@ -1179,6 +1209,10 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
     } else if (c->state == RC_PURSUIT && pl) {
         double pl_l, cap;
         const double vpl = rc_speed_ms(pl);
+        if (C.pursuit_pct > 0.0 && c->lim_kmh > 0) {   /* [roam LG] a pursuit cap from the posted limit */
+            const double vp = rc_clamp(c->lim_kmh * C.pursuit_pct, 60.0, rc_vmax() * 3.6) / 3.6;
+            if (vt > vp) { vt = vp; C.st.limit_ticks++; }
+        }
         cap = rc_gap_cap(c, a, x, z, v, 1, &pl_l);
         if (cap < vt - 1.0 && c->pass_dwell <= 0) {
             /* a slower car ahead: pass on the free side (kept on the road by the lane fit) */
@@ -1812,8 +1846,12 @@ static double rc_limit_here(double x, double z)
     double along, dm;
     TD5_RouteGEdge E;
     double lim = C.limit_kmh;
+    C.pl_posted = 0;
     if (td5_roam_route_graph_snap_edge(x, z, 15.0, &e, &along, &dm) && td5_roam_route_graph_edge_view(e, &E)) {
-        const double k = rc_class_kmh(E.klass) * 1.5;
+        /* [roam LG] a posted limit: speeding is past it + the margin; else 1.5 x the class speed */
+        const double k = (C.speed_margin >= 0.0 && E.maxspeed > 0) ? (double)E.maxspeed + C.speed_margin
+                                                                   : rc_class_kmh(E.klass) * 1.5;
+        C.pl_posted = C.speed_margin >= 0.0 ? E.maxspeed : 0;
         if (k > lim) lim = k;
     }
     return lim;
@@ -1862,7 +1900,9 @@ static void rc_start_pursuit(RcCop *by, int cause, double kmh)
     else if (cause == 2) C.st.notice_red++;
     else C.st.notice_ram++;
     rc_join(by);
-    if (cause == 1) snprintf(msg, sizeof msg, "POLICE PURSUIT: SPEEDING %.0f KM/H", kmh);
+    if (cause == 1 && C.pl_posted > 0)   /* [roam LG] the street's posted limit */
+        snprintf(msg, sizeof msg, "POLICE PURSUIT: SPEEDING %.0f KM/H IN A %d ZONE", kmh, C.pl_posted);
+    else if (cause == 1) snprintf(msg, sizeof msg, "POLICE PURSUIT: SPEEDING %.0f KM/H", kmh);
     else snprintf(msg, sizeof msg, "POLICE PURSUIT: %s", k_cause[cause]);
     rc_toast(msg, 0xFFFF4040, 3.0);
     TD5_LOG_I(LOG_TAG, "ROAM_COPS: PURSUIT %ld starts: slot %d, %s (%.0f km/h), %.0f m from the player", C.st.pursuits, by->slot,

@@ -91,6 +91,9 @@ typedef struct {
     double max_lat_m;                   /* largest |offset| from the lane's target                  */
     double max_kmh;
     double max_ground_dy_m;             /* |actor y - y-aware ground| (bridge decks), max           */
+    long   limit_edges;          /* [roam LG] edges entered whose cruise came from a posted limit      */
+    long   ban_skips;            /* [roam LG] ways on skipped at a junction: a forbidden turn          */
+    long   ban_overrides;        /* [roam LG] junctions where every way on was forbidden (taken anyway) */
 } TD5_RoamTrafficStats;
 void td5_roam_traffic_stats(TD5_RoamTrafficStats *out);
 void td5_roam_traffic_stats_reset(void);

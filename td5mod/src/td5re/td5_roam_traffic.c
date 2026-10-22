@@ -124,6 +124,7 @@ static struct {
     int     dens_free, dens_low, dens_high, max_live;
     double  r_spawn_min, r_spawn_max, r_count, r_despawn;
     double  wb, a_lat, a_brake, speed_pct;
+    double  limit_pct, vmax_kmh;                 /* [roam LG] cruise = posted limit x limit_pct (0 = class table), capped */
     int     log_every;
     TD5_RoamTrafficStats st;
     /* [HG] popping census: events inside the view cone within RT_POP_M, spawn candidates refused, despawns held */
@@ -175,6 +176,11 @@ static void rt_read_knobs(void)
     T.a_brake     = td5_env_int("TD5RE_ROAM_TRAFFIC_BRAKE", 30, 5, 100) / 10.0;       /* m/s2 x10 */
     T.speed_pct   = td5_env_int("TD5RE_ROAM_TRAFFIC_SPEED", 100, 20, 300) / 100.0;
     T.log_every   = td5_env_int("TD5RE_ROAM_TRAFFIC_LOG", 0, 0, 3600);
+    /* [roam LG] a street with a posted limit: cruise at TD5RE_ROAM_TRAFFIC_LIMIT_PCT of it (80: a tagged 40 street gives
+     * the residential class speed, 32), capped at TD5RE_ROAM_TRAFFIC_VMAX_KMH; 0 = the class table everywhere (A/B) */
+    T.limit_pct   = td5_env_int("TD5RE_ROAM_TRAFFIC_LIMIT_PCT", 80, 0, 150) / 100.0;
+    T.vmax_kmh    = td5_env_int("TD5RE_ROAM_TRAFFIC_VMAX_KMH", 90, 20, 160);
+    if (td5_env_int("TD5RE_ROAM_MAXSPEED", 1, 0, 1) == 0) T.limit_pct = 0.0;
     T.visgate     = td5_env_int("TD5RE_ROAM_TRAFFIC_VISGATE", 1, 0, 1);      /* [HG] 0 = the old spawn / despawn rule (A/B) */
     T.vis_m       = td5_env_int("TD5RE_ROAM_TRAFFIC_VIS_M", 470, 100, 900);   /* [HG] about the far cull (195000 / 430) + margin */
 #ifndef TD5RE_RELEASE
@@ -367,6 +373,7 @@ static void rt_bez(const double (*b)[2], double t, double *x, double *z, double 
 }
 
 static double rt_class_speed(int klass);
+static double rt_edge_speed(const TD5_RouteGEdge *E);
 
 /* ============================================================ the next edge ======= */
 
@@ -496,6 +503,12 @@ static void rt_plan_next(RtCar *c)
         }
         c->priority = E.klass >= 6 && E.klass > mx;
     }
+    {
+    /* [roam LG] a turn the real signs forbid (td5_roam_route_graph_turn_banned) is not taken; when every way on is
+     * forbidden (a restriction mapped onto the wrong arm) the second pass takes them anyway */
+    const int in_inc = c->e * 2 + (c->d == 0 ? 1 : 0);
+    int pass, nbanned = 0;
+    for (pass = 0; pass < 2 && nc == 0 && (pass == 0 || nbanned > 0); pass++)
     for (i = 0; i < N.ninc && nc < 16; i++) {
         const int inc = N.inc[i];
         const int e2 = inc >> 1, end = inc & 1;
@@ -503,6 +516,7 @@ static void rt_plan_next(RtCar *c)
         double sx, sz, tx, tz, cr, dt, ang;
         if (e2 == c->e) continue;                /* no U-turn on the same street piece */
         if (!rt_edge(e2, &F) || !rt_allowed(&F, d2)) continue;
+        if (pass == 0 && td5_roam_route_graph_turn_banned(c->node, in_inc, inc)) { nbanned++; T.st.ban_skips++; continue; }
         rt_edge_pt(&F, d2, 0.0, 0.0, &sx, &sz, &tx, &tz);
         cr = etx * tz - etz * tx;
         dt = etx * tx + etz * tz;
@@ -516,10 +530,12 @@ static void rt_plan_next(RtCar *c)
             const int lc = E.plen - c->s > 30.0 * RT_M;     /* room to change lanes first */
             const int kt = lc ? rt_turn_lane(&E, c->k, cand_turn[nc]) : c->k;
             cand_off[nc] = rt_build_conn(c, &E, c->d, lc ? rt_lane_off(&E, kt) : c->off_t, &F, d2,
-                                         rt_next_lane(&E, &F, kt, cand_turn[nc]), rt_class_speed(F.klass));
+                                         rt_next_lane(&E, &F, kt, cand_turn[nc]), rt_edge_speed(&F));
         }
         if (cand_off[nc] < min_off) min_off = cand_off[nc];
         nc++;
+    }
+    if (pass == 2 && nc > 0) T.st.ban_overrides++;
     }
     if (nc == 0) return;                         /* dead end */
     if (min_off > 0) {
@@ -782,6 +798,15 @@ static double rt_class_speed(int klass)
     return kmh / 3.6 * T.speed_pct;
 }
 
+/* [roam LG] the cruise speed of a street: from its posted limit where OSM tags one, else the class table */
+static double rt_edge_speed(const TD5_RouteGEdge *E)
+{
+    if (T.limit_pct > 0.0 && E->maxspeed > 0) {
+        return rt_clamp((double)E->maxspeed * T.limit_pct, 12.0, T.vmax_kmh) / 3.6 * T.speed_pct;
+    }
+    return rt_class_speed(E->klass);
+}
+
 static void rt_place_actor(RtCar *c, TD5_Actor *a, double px, double pz, int yaw12, double v)
 {
     int32_t ox, oz;
@@ -891,7 +916,8 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     c->seg = RT_SEG_EDGE;
     c->e = e; c->d = d; c->k = k; c->s = s;
     c->off = c->off_t = rt_lane_off(&E, k);
-    c->v_class = rt_class_speed(E.klass) * (0.9 + 0.2 * rt_unit(&c->rng));
+    c->v_class = rt_edge_speed(&E) * (0.9 + 0.2 * rt_unit(&c->rng));
+    if (T.limit_pct > 0.0 && E.maxspeed > 0) T.st.limit_edges++;
     c->born = (long)g_td5.simulation_tick_counter;
     c->last_contact = -100000;
     {
@@ -1007,7 +1033,8 @@ static void rt_track(RtCar *c, const TD5_Actor *a, double x, double z)
             c->off_t = rt_lane_off(&E, c->k);
             c->off = c->off_t;
             c->s = 0.0;
-            c->v_class = rt_class_speed(E.klass) * (0.9 + 0.2 * rt_unit(&c->rng));
+            c->v_class = rt_edge_speed(&E) * (0.9 + 0.2 * rt_unit(&c->rng));
+            if (T.limit_pct > 0.0 && E.maxspeed > 0) T.st.limit_edges++;
             c->probe_y = a->world_pos.y;
             rt_plan_next(c);
             c->s = rt_edge_proj(&E, c->d, 0.0, x, z, NULL);
@@ -1822,7 +1849,15 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
              s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] POP gate %d: spawns in view (<%.0f m, cone) %ld of %ld, despawns in view %ld of %ld | refused spawn candidates %ld, held despawn ticks %ld, slow fade-outs %ld", T.visgate, RT_POP_M, T.pop_spawn, s->spawns, T.pop_despawn, s->despawns,
               T.pop_spawn_rej, T.pop_despawn_held, T.pop_slow_fade);
-    TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s: live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "
+    {   /* [roam LG] road rules seen by the traffic */
+        TD5_RouteRestrCensus rc;
+        td5_roam_route_graph_restr_census(&rc);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] RULES: edges entered at a posted limit %ld (cruise %.0f%% of it, cap %.0f km/h%s) | "
+                  "forbidden turns skipped %ld, junctions where every way on was forbidden %ld | graph: restrictions %d matched %d, "
+                  "banned turns %d", s->limit_edges, T.limit_pct * 100.0, T.vmax_kmh, T.limit_pct > 0.0 ? "" : ": OFF, class table",
+                  s->ban_skips, s->ban_overrides, rc.loaded, rc.matched, rc.bans);
+    }
+    TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] VERDICT %s:live min %d mean %.2f max %d target %d samples %ld | spawns %ld despawns %ld "
               "(far %ld dead-end %ld stuck %ld hold %ld off %ld unresident %ld lost %ld wreck %ld) | wrecks %ld | off-surface ticks %ld (%ld within 2 s of a racer "
               "contact, events %ld) | red violations %ld of %ld stop-line crossings at signals, red stops %ld | stuck>10s live %ld | "
               "yield waits %ld | turns L%ld S%ld R%ld, lane changes %ld | connector off-patch plans %ld | barrier passes %ld | racer-near ticks %ld | "
