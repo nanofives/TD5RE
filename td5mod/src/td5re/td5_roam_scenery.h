@@ -60,7 +60,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  15u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  16u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -87,7 +87,8 @@
                                      * 14 = round J integration: roam JA (12) + roam JC (12, 13) combined,
                                      *      14 so no tile cached by a single branch is reused
                                      * 15 = integ J: a carriage arch opens every stretch of a part / relation wall that stands on
-                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments */
+                                     *      a service drive (not only where its centreline crosses), up to 128 drive segments
+                                     * 16 = roam LE: swimming pools (coping ring + inset water) over the lots */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -211,6 +212,10 @@ typedef struct {
      * parts, Overture blobs not built because a relation outline covers them */
     int  bld_rel, s3d_rel_built, s3d_holes, s3d_cap_holed, s3d_cap_lidded, s3d_civic, s3d_base, bld_rel_ovt_drop;
     int  s3d_portals;              /* [JC2] wall openings where a service way passes under an outline */
+    /* [roam LE] swimming pools (AREAS leisure=swimming_pool owned here): drawn (coping ring + inset water), left out
+     * because the outline touches the drivable surface, bad ring (under 3 points / no triangulation); water m2 */
+    int  pools, pool_drop_road, pool_bad;
+    double pool_m2;
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */
