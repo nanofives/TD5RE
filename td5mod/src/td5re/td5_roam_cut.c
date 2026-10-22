@@ -203,6 +203,30 @@ int td5_roam_cut_inside(const TD5_RoamCutBands *b, double x, double z)
 
 void td5_roam_cut_bands_free(TD5_RoamCutBands *b) { free(b->q); memset(b, 0, sizeof *b); }
 
+void td5_roam_cut_bands_widen(TD5_RoamCutBands *b, double extra)
+{
+    int i, r;
+    for (i = 0; i < b->n; i++) {
+        double *q = &b->q[i * 12];
+        for (r = 0; r < 2; r++) {                 /* rows (0, 1) and (3, 2), as td5_roam_cut_bands widened them */
+            const int i0 = r ? 3 : 0, i1 = r ? 2 : 1;
+            double dx = q[i1 * 2] - q[i0 * 2], dz = q[i1 * 2 + 1] - q[i0 * 2 + 1];
+            const double l = hypot(dx, dz);
+            if (l < 1.0) continue;
+            dx /= l; dz /= l;
+            q[i0 * 2] -= dx * extra; q[i0 * 2 + 1] -= dz * extra;
+            q[i1 * 2] += dx * extra; q[i1 * 2 + 1] += dz * extra;
+        }
+        q[8] = q[10] = q[0]; q[9] = q[11] = q[1];
+        for (r = 1; r < 4; r++) {
+            if (q[r * 2] < q[8]) q[8] = q[r * 2];
+            if (q[r * 2] > q[10]) q[10] = q[r * 2];
+            if (q[r * 2 + 1] < q[9]) q[9] = q[r * 2 + 1];
+            if (q[r * 2 + 1] > q[11]) q[11] = q[r * 2 + 1];
+        }
+    }
+}
+
 /* ------------------------------------------------------------ walls ---- */
 
 typedef struct {

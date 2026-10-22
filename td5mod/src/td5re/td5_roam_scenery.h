@@ -64,7 +64,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  19u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  20u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -116,7 +116,10 @@
                                      * 18 = roam NC: cutting walls (td5_roam_cut.c), no sidewalk on a cutting span, lot holes
                                      *      round every cutting span of the 3x3
                                      * 19 = round N integration: roam NA NC combined (each bumped 17 -> 18 on its
-                                     *      own, 19 so no tile cached by a single branch is reused) */
+                                     *      own, 19 so no tile cached by a single branch is reused)
+                                     * 20 = roam PE: fuel footprints drawn as canopies, shop names on the fascia, the
+                                     *      municipal line off NC's cutting zones, shopfronts clear of other masses
+                                     *      (trimmed glass, infill lots off a shop's footprint) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -283,6 +286,10 @@ typedef struct {
      * kept in them */
     int  grounds, grounds_ovt, grounds_inf, grounds_osm;
     int  inf_ochava;               /* [roam NA] infill corner lots cut by an ochava */
+    /* [roam PE] emitted footprints over an NC cutting: [0] the band (kerb -> wall back), [1] the zone (+ coping apron),
+     * [2] / [3] of them moved by the municipal line; line pieces left off a cutting zone */
+    int  muni_cut_over[4], muni_cut_skip;
+    int  shop_inf_guard;           /* [roam PE] infill lot tests refused by a shop's footprint (full quad, no 0.5 m lap) */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

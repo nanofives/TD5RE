@@ -77,6 +77,12 @@
 #define FE_SURFACE_PAGE_BASE           900
 #define FE_SURFACE_PAGE_COUNT          32
 
+/* [roam PE] shop names on free roam's fascias (td5_roam_shops.c): 32 pages of 64x16 cells, 932..963. The retired
+ * per-screen title strips' window (td5_frontend.c: 931-980 FREE since 2026-06-16), below the frontend's MSDF / SDF font
+ * pages (970..983, td5_frontend_internal.h asserts the gap). */
+#define ROAM_SHOP_PAGE_BASE            932
+#define ROAM_SHOP_PAGE_COUNT           32
+
 /* Per-track environment/reflection pages: 990..993. */
 #define ENVMAP_TEXTURE_PAGE_BASE       990
 #define ENVMAP_TEXTURE_PAGE_COUNT      4
@@ -119,8 +125,11 @@ _Static_assert(STATIC_ATLAS_BASE + STATIC_ATLAS_PAGE_COUNT
 _Static_assert(HUD_WHITE_TEX_PAGE + 1 <= FE_SURFACE_PAGE_BASE,
                "HUD white page overlaps FRONTEND surfaces");
 _Static_assert(FE_SURFACE_PAGE_BASE + FE_SURFACE_PAGE_COUNT
+               <= ROAM_SHOP_PAGE_BASE,
+               "FRONTEND surfaces overlap the ROAM SHOP pages");
+_Static_assert(ROAM_SHOP_PAGE_BASE + ROAM_SHOP_PAGE_COUNT
                <= ENVMAP_TEXTURE_PAGE_BASE,
-               "FRONTEND surfaces overlap ENVMAP pages");
+               "ROAM SHOP pages overlap ENVMAP pages");
 _Static_assert(ENVMAP_TEXTURE_PAGE_BASE + ENVMAP_TEXTURE_PAGE_COUNT
                <= WHEEL_RIM_TEX_BASE,
                "ENVMAP pages overlap WHEEL RIM pages");
