@@ -59,11 +59,12 @@
 #include "td5_roam_plaza.h"
 #include "td5_roam_shops.h"
 #include "td5_roam_outskirts.h"
+#include "td5_roam_cut.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  17u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  18u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -106,7 +107,9 @@
                                      * 16 = roam LH: poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c),
                                      *      cropland paint on the ground cover
                                      * 17 = round L integration: roam LA LB LC LD LE LF LH combined (each bumped 15 -> 16 on
-                                     *      its own, 17 so no tile cached by a single branch is reused) */
+                                     *      its own, 17 so no tile cached by a single branch is reused)
+                                     * 18 = roam NC: cutting walls (td5_roam_cut.c), no sidewalk on a cutting span, lot holes
+                                     *      round every cutting span of the 3x3 */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -148,6 +151,10 @@ int    roam_ctx_owned(const TG_TileCtx *c, double x, double z);
 int    roam_ctx_sb_of(const TG_TileCtx *c, double x, double z);
 /* ground height at a tile-local point (the scenery's own height source) */
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z);
+/* [roam NC] the ground the renderer DRAWS at a tile-local point (its lattice, the G5 lowering, the ground drop) */
+double roam_ctx_drawn_ground(const TG_TileCtx *c, double x, double z);
+/* [roam NC] the tile's raster window (NULL when none) */
+TD5_RoamHeight *roam_ctx_hc(const TG_TileCtx *c);
 /* [roam ID] the RAW height raster at a tile-local point (no G4b lowering under the road): 1 + *h (and
  * *wet when non-NULL) when the tile's window covers it */
 int    roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet);
@@ -219,6 +226,7 @@ typedef struct {
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
     TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
     TD5_RoamPlazaStats plaza;       /* [roam LD] plaza furniture + monuments census (td5_roam_plaza.c) */
+    TD5_RoamCutStats   cut;         /* [roam NC] cutting walls census (td5_roam_cut.c) */
     int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
     TD5_RoamShopStats shop;         /* [roam LB] shopfronts + fuel canopies (td5_roam_shops.c) */
     TD5_RoamOutStats  out;          /* [roam LH] poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c) */

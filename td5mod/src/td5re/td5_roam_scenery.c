@@ -42,6 +42,7 @@
 #include "td5_roam_height.h"
 #include "td5_roam_groundfix.h"   /* [G4b] the ground lowered under the road */
 #include "td5_roam_scenery.h"
+#include "td5_roam_cut.h"
 
 #ifdef LOG_TAG
 #undef LOG_TAG
@@ -1581,6 +1582,9 @@ int roam_ctx_rails_bed_near(const TG_TileCtx *c, const double *x, const double *
 }
 int roam_ctx_sb_of(const TG_TileCtx *c, double x, double z) { return sc_sb_of(c, x, z); }
 double roam_ctx_ground(const TG_TileCtx *c, double x, double z) { return sc_ground((void *)c, x, z); }
+static double sc_dg(TG_TileCtx *c, double x, double z);   /* [roam NC] SECTION plazas */
+double roam_ctx_drawn_ground(const TG_TileCtx *c, double x, double z) { return sc_dg((TG_TileCtx *)c, x, z); }
+TD5_RoamHeight *roam_ctx_hc(const TG_TileCtx *c) { return c->hc; }
 
 /* [roam ID] the RAW raster at a tile-local point (no G4b road lowering): a pure function of the place
  * position, so two tiles meeting at a seam read the same value. 0 when no window covers it. */
@@ -3595,6 +3599,7 @@ static int pv_gather(TD5_RoamScnSource *s, TG_TileCtx *c, PvWay *const *ways, in
 {
     PvB *B = NULL;
     PvKI *ki = NULL;
+    uint8_t *cutsp = NULL;                       /* [roam NC] */
     int nb = 0, cap = 0, ti, i;
     *out = NULL; *nout = 0;
     for (ti = 0; ti < 9; ti++) {
@@ -3608,6 +3613,11 @@ static int pv_gather(TD5_RoamScnSource *s, TG_TileCtx *c, PvWay *const *ways, in
         for (e = 0; e < t->nedge; e++)
             for (bi = 0; bi < t->edge[e].span_count; bi++)
                 if ((uint32_t)t->edge[e].span_first + bi < t->nspan) ser[t->edge[e].span_first + bi] = (int)e;
+        if (td5_roam_cut_on()) {                  /* [roam NC] the cutting spans: no sidewalk, the wall stands there */
+            cutsp = (uint8_t *)realloc(cutsp, t->nspan ? t->nspan : 1u);
+            if (!cutsp) { free(ser); free(B); return 0; }
+            td5_roam_cut_spans(t, c->hc, cutsp);
+        }
         for (bi = 0; bi < t->nbedge; bi++) {
             const RoamBEdge *be = &t->bedge[bi];
             const RoamEdgeRec *er = NULL;
@@ -3683,6 +3693,7 @@ static int pv_gather(TD5_RoamScnSource *s, TG_TileCtx *c, PvWay *const *ways, in
                 if (w) pv_way_dir(w, rx + (double)c->org_x, rz + (double)c->org_z, &dx, &dz);
                 left = ((0.5 * (b->ax + b->bx) - rx) * (-dz) + (0.5 * (b->az + b->bz) - rz) * dx) > 0.0;
                 b->w = pv_width(s, w, er, left, &src);
+                if (cutsp && be->prim < t->nspan && cutsp[be->prim]) { b->w = 0.0; if (ti == 4) c->st.cut.pv_skip++; }
                 b->way = w;
                 b->ekey = er->key;
                 if (b->owned) {
@@ -3695,6 +3706,7 @@ static int pv_gather(TD5_RoamScnSource *s, TG_TileCtx *c, PvWay *const *ways, in
         }
         free(ser);
     }
+    free(cutsp);
     /* link: the unique piece that starts where this one ends (same level) */
     ki = (PvKI *)malloc((size_t)(nb > 0 ? nb : 1) * sizeof(PvKI));
     if (!ki) { free(B); return 0; }
@@ -5945,28 +5957,13 @@ static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *sel
         if (Z < z0) z0 = Z;
         if (Z > z1) z1 = Z;
     }
-    /* the render's bore holes (rr_ground_build): every cell round a tunnel span centre */
-    for (e = 0; e < self->nedge; e++) {
-        const RoamEdgeRec *er = &self->edge[e];
-        if (!(er->flags & ROAM_EF_BORE)) continue;
-        for (q = 0; q < er->span_count; q++) {
-            const uint32_t si = (uint32_t)er->span_first + q;
-            const TD5_StripSpan *sp;
-            uint32_t Lv, Rv;
-            int n, a, b, da, db;
-            double u, v, X, Z;
-            if (si >= self->nspan) continue;
-            sp = &self->span[si];
-            Lv = sp->left_vertex_index; Rv = sp->right_vertex_index; n = (int)(sp->pad_02[1] & 0x0Fu);
-            if (n < 1 || n >= 16 || Lv + (uint32_t)n >= self->nvert || Rv + (uint32_t)n >= self->nvert) continue;
-            X = (double)self->org_x + (double)sp->origin_x + 0.5 * ((double)self->vert[Lv].x + (double)self->vert[Rv + (uint32_t)n].x);
-            Z = (double)self->org_z + (double)sp->origin_z + 0.5 * ((double)self->vert[Lv].z + (double)self->vert[Rv + (uint32_t)n].z);
-            roam_grid_uv(c->grid, X, Z, &u, &v);
-            a = (int)floor((u / S - (double)c->tx) * (double)G);
-            b = (int)floor((v / S - (double)c->tz) * (double)G);
-            for (db = -1; db <= 1; db++) for (da = -1; da <= 1; da++)
-                if (a + da >= 0 && a + da < G && b + db >= 0 && b + db < G) hole[(b + db) * G + a + da] = 1;
-        }
+    /* the render's ground holes (rr_ground_build): round a bore / [roam NC] cutting span centre */
+    {
+        const RoamTile *nb9[9];
+        for (k = 0; k < 9; k++) nb9[k] = c->road[k];
+        if (!nb9[4]) nb9[4] = self;
+        td5_roam_cut_holes(c->grid, nb9, c->hc, c->tx, c->tz, G, hole);
+        (void)e; (void)q;
     }
     (void)ac; (void)nac; (void)x0; (void)z0; (void)x1; (void)z1;
     P = c->lotp; nP = c->nlotp;
@@ -7148,12 +7145,14 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
      * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
      * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
      * height-aware one (st.rail.guard_hits). */
-    if (s->furn || s->rails || s->plaza || s->shops || s->outsk) {
+    if (s->furn || s->rails || s->plaza || s->shops || s->outsk || td5_roam_cut_on()) {
         int k;
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->furn_first[k] = c->sb[k].nmesh;
     }
     {
         int xs[TD5_ROAM_SCN_NSB];                                                /* [integ L] cross-check ranges */
+        sc_xc_snap(c, xs);
+        if (!td5_roam_cut_emit(c, &c->st.cut)) goto out;                         /* [roam NC] cutting walls */
         sc_xc_snap(c, xs);
         if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
         sc_xc_note(c, xs, SC_XC_RAIL); sc_xc_snap(c, xs);
