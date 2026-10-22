@@ -1852,7 +1852,7 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     {   /* [roam LG] road rules seen by the traffic */
         TD5_RouteRestrCensus rc;
         td5_roam_route_graph_restr_census(&rc);
-        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] RULES: edges entered at a posted limit %ld (cruise %.0f%% of it, cap %.0f km/h%s) | "
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] RULES: edges entered at a posted limit %ld (cruise %.0f pct of it, cap %.0f km/h%s) | "
                   "forbidden turns skipped %ld, junctions where every way on was forbidden %ld | graph: restrictions %d matched %d, "
                   "banned turns %d", s->limit_edges, T.limit_pct * 100.0, T.vmax_kmh, T.limit_pct > 0.0 ? "" : ": OFF, class table",
                   s->ban_skips, s->ban_overrides, rc.loaded, rc.matched, rc.bans);

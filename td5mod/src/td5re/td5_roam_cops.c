@@ -173,7 +173,8 @@ static void rc_read_knobs(void)
     C.limit_kmh   = td5_env_int("TD5RE_ROAM_COPS_LIMIT_KMH", 60, 20, 200);
     /* [roam LG] on a street with a posted limit: patrol at PATROL_PCT of it (90: a 40 street gives the old 36 km/h),
      * pursue at no more than PURSUIT_PCT of it (250, floor 60 km/h, ceiling VMAX), and a player is SPEEDING past the
-     * limit + SPEEDING_MARGIN_KMH (20), never under LIMIT_KMH. Untagged streets keep the class rules. 0 = off (A/B). */
+     * limit + SPEEDING_MARGIN_KMH (20; the class default limit where untagged), never under LIMIT_KMH. Untagged streets keep the class
+     * patrol speed and no pursuit cap. 0 (margin -1) = off (A/B). */
     C.patrol_pct  = td5_env_int("TD5RE_ROAM_COPS_PATROL_PCT", 90, 0, 150) / 100.0;
     C.pursuit_pct = td5_env_int("TD5RE_ROAM_COPS_PURSUIT_PCT", 250, 0, 500) / 100.0;
     C.speed_margin = td5_env_int("TD5RE_ROAM_COPS_SPEEDING_MARGIN_KMH", 20, -1, 100);
@@ -1849,10 +1850,11 @@ static double rc_limit_here(double x, double z)
     double lim = C.limit_kmh;
     C.pl_posted = 0;
     if (td5_roam_route_graph_snap_edge(x, z, 15.0, &e, &along, &dm) && td5_roam_route_graph_edge_view(e, &E)) {
-        /* [roam LG] a posted limit: speeding is past it + the margin; else 1.5 x the class speed */
-        const double k = (C.speed_margin >= 0.0 && E.maxspeed > 0) ? (double)E.maxspeed + C.speed_margin
-                                                                   : rc_class_kmh(E.klass) * 1.5;
-        C.pl_posted = C.speed_margin >= 0.0 ? E.maxspeed : 0;
+        /* [roam LG] speeding is past the street's limit (posted, else the class default: td5_roam_limit_kmh) + the
+         * margin; TD5RE_ROAM_COPS_SPEEDING_MARGIN_KMH=-1 = the old 1.5 x the class speed */
+        const double k = C.speed_margin >= 0.0 ? (double)td5_roam_limit_kmh(E.klass, E.maxspeed) + C.speed_margin
+                                               : rc_class_kmh(E.klass) * 1.5;
+        C.pl_posted = C.speed_margin >= 0.0 ? td5_roam_limit_kmh(E.klass, E.maxspeed) : 0;
         if (k > lim) lim = k;
     }
     return lim;
