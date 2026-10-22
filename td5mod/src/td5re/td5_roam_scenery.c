@@ -8396,7 +8396,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             int q;
             sp_t.stadiums += r->sport.stadiums; sp_t.bowls += r->sport.bowls; sp_t.stands += r->sport.stands;
             sp_t.stand_roofs += r->sport.stand_roofs; sp_t.roofs += r->sport.roofs; sp_t.portals += r->sport.portals;
-            sp_t.tier_quads += r->sport.tier_quads; sp_t.openings += r->sport.openings; sp_t.pitches += r->sport.pitches;
+            sp_t.tier_quads += r->sport.tier_quads; sp_t.openings += r->sport.openings; sp_t.seats += r->sport.seats; sp_t.pitches += r->sport.pitches;
             for (q = 0; q < TD5_RPS__N; q++) sp_t.by_sport[q] += r->sport.by_sport[q];
             for (q = 0; q < TD5_RPF__N; q++) sp_t.by_surface[q] += r->sport.by_surface[q];
             sp_t.surface_only += r->sport.surface_only; sp_t.skip_small += r->sport.skip_small; sp_t.skip_sport += r->sport.skip_sport;
@@ -8484,12 +8484,12 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     {   /* [roam PB] */
         char ln[1600];
         snprintf(ln, sizeof ln, "roam sport [roam PB]: stadiums %d, stands %d (bowls %d, open-stand roofs %d), membrane roofs %d, "
-                 "portals %d, wall openings over a drive %d, tier quads %d | footprints left to the module %ld, blobs traced over a "
+                 "portals %d, wall openings over a drive %d, tier quads %d, seats %d | footprints left to the module %ld, blobs traced over a "
                  "stand %ld, plaza trees not planted on a stadium / pitch %ld, lawns left to a painted pitch %ld | pitches %d: soccer %d tennis %d padel %d basketball %d "
                  "volleyball %d hockey %d rugby %d beach %d surface-only %d | surfaces grass %d clay %d hard %d acrylic %d turf %d "
                  "sand %d | courts %d goals %d nets %d hoops %d line quads %d | left out: small %d, sport %d, untagged %d, on a road "
                  "%d | meshes %d | GUARD %d face(s) on the drivable surface (TD5RE_ROAM_STADIUM=%d TD5RE_ROAM_PITCH_LINES=%d)",
-                 sp_t.stadiums, sp_t.stands, sp_t.bowls, sp_t.stand_roofs, sp_t.roofs, sp_t.portals, sp_t.openings, sp_t.tier_quads,
+                 sp_t.stadiums, sp_t.stands, sp_t.bowls, sp_t.stand_roofs, sp_t.roofs, sp_t.portals, sp_t.openings, sp_t.tier_quads, sp_t.seats,
                  sp_b[0], sp_b[1], sp_b[2], sp_b[3], sp_t.pitches, sp_t.by_sport[TD5_RPS_SOCCER], sp_t.by_sport[TD5_RPS_TENNIS],
                  sp_t.by_sport[TD5_RPS_PADEL], sp_t.by_sport[TD5_RPS_BASKET], sp_t.by_sport[TD5_RPS_VOLLEY],
                  sp_t.by_sport[TD5_RPS_HOCKEY], sp_t.by_sport[TD5_RPS_RUGBY], sp_t.by_sport[TD5_RPS_BEACH], sp_t.surface_only,

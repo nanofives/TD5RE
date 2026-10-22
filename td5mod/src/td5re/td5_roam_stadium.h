@@ -81,6 +81,7 @@ typedef struct {
 /* One tile's census (what the tile OWNS) */
 typedef struct {
     int stadiums, bowls, stands, stand_roofs, roofs, portals, tier_quads;
+    int seats;              /* seat census: rows x mean row length / 0.5 m                           */
     int openings;           /* walls standing on a drivable way, opened SP_CLEAR over it (or left out) */
     int pitches, by_sport[TD5_RPS__N], by_surface[TD5_RPF__N], surface_only;
     int skip_small, skip_sport, skip_none, drop_road;

@@ -430,15 +430,18 @@ static void sp_chain(const double *x, const double *z, int n, int i0, int cnt, i
 
 #define SP_BOWL_M      96         /* sectors round a bowl                 */
 #define SP_STAND_MAXM  48
-#define SP_TIER_MAX    40
+#define SP_TIER_MAX    64
+#define SP_SEAT_M      0.5        /* seat width along a row (m): the seat census and the capacity rule */
 
-typedef struct { unsigned int seat, seat2; int every; } SpLook;
+typedef struct { unsigned int seat, seat2; int every; int capacity; } SpLook;
 
 /* the seat colours: by stadium (the club colours of the two La Plata clubs), else a neutral grey-blue */
 static SpLook sp_look(double osm_id)
 {
     SpLook l;
-    l.seat = 0xFF8C9AACu; l.seat2 = 0xFF8C9AACu; l.every = 0;
+    l.seat = 0xFF8C9AACu; l.seat2 = 0xFF8C9AACu; l.every = 0; l.capacity = 0;
+    /* the Estadio Unico seats about 53,000 (a known fact, not OSM): the bowl gets as many rows as that takes */
+    if (osm_id == 119937010.0) l.capacity = 53000;
     if (osm_id == 1392060296.0) { l.seat = 0xFF2A4C9Au; l.seat2 = 0xFFE8E8E8u; l.every = 4; }   /* Zerillo: Gimnasia   */
     if (osm_id == 3882033.0)    { l.seat = 0xFFB8282Cu; l.seat2 = 0xFFE8E8E8u; l.every = 4; }   /* Hirschi: Estudiantes */
     return l;
@@ -524,7 +527,7 @@ static int sp_bowl(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand *s, c
 {
     double fx[SP_BOWL_M + 1], fz[SP_BOWL_M + 1], bx[SP_BOWL_M + 1], bz[SP_BOWL_M + 1], ix[SP_BOWL_M + 1], iz[SP_BOWL_M + 1];
     double nx[SP_BOWL_M + 1], nz[SP_BOWL_M + 1], gy[SP_BOWL_M + 1], T[SP_TIER_MAX];
-    double rx[40], rz[40], depth = 0.0, B, Ht, top, y0, rise, box_h = SP_M(2.4), yr_o, yr_i;
+    double rx[40], rz[40], depth = 0.0, B, Ht, top, y0, rise, box_h = SP_M(2.4), yr_o, yr_i, row_m = 0.0;
     const double a0 = atan2(pb->uz, pb->ux);
     const SpLook lk = sp_look(sd->osm_id);
     int j, k, K, kb, nr = 0;
@@ -557,15 +560,25 @@ static int sp_bowl(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand *s, c
         depth += ro - rf;
     }
     depth /= (double)(SP_BOWL_M + 1);
+    {   /* the mean row length: half way between the front line and the outline */
+        double pf = 0.0, pbk = 0.0;
+        for (j = 0; j < SP_BOWL_M; j++) {
+            pf += hypot(fx[j + 1] - fx[j], fz[j + 1] - fz[j]);
+            pbk += hypot(bx[j + 1] - bx[j], bz[j + 1] - bz[j]);
+        }
+        row_m = 0.5 * (pf + pbk) / SP_UPM;
+    }
     B = sp_base(e->c, pb->cx, pb->cz);
     for (j = 0; j <= SP_BOWL_M; j++) gy[j] = sp_base(e->c, bx[j], bz[j]);
     Ht = s->height > SP_M(12.0) ? s->height : SP_M(12.0);
     top = B + 0.78 * Ht;
     y0 = B + SP_M(1.2);
     K = (int)(depth / SP_M(1.6) + 0.5);
+    if (lk.capacity > 0 && row_m > 1.0) K = (int)((double)lk.capacity * SP_SEAT_M / row_m + 0.5);   /* rows for the capacity */
     if (K < 6) K = 6;
     if (K > SP_TIER_MAX) K = SP_TIER_MAX;
     kb = K / 2;
+    e->st->seats += (int)((double)K * row_m / SP_SEAT_M);
     rise = (top - y0 - box_h) / (double)K;
     for (k = 0; k < K; k++) T[k] = y0 + (double)(k + 1) * rise + (k >= kb ? box_h : 0.0);
     /* the wall round the pitch (front of row 0), then the tiers */
@@ -671,6 +684,11 @@ static int sp_open_stand(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand
     if (K > SP_TIER_MAX) K = SP_TIER_MAX;
     rise = (top - y0) / (double)K;
     for (k = 0; k < K; k++) T[k] = y0 + (double)(k + 1) * rise;
+    {   /* the seat census: K rows of the mean of the front and back chain lengths */
+        double lf = 0.0, lb = 0.0;
+        for (j = 0; j < m; j++) { lf += hypot(fx[j + 1] - fx[j], fz[j + 1] - fz[j]); lb += hypot(bx[j + 1] - bx[j], bz[j + 1] - bz[j]); }
+        e->st->seats += (int)((double)K * 0.5 * (lf + lb) / SP_UPM / SP_SEAT_M);
+    }
     for (j = 0; j < m; j++)
         if (!sp_wall(e, SP_PAINT, fx[j], fz[j], fx[j + 1], fz[j + 1], B - SP_SINK, B - SP_SINK, y0, y0, SC_CONC_D)) return 0;
     if (!sp_tiers(e, fx, fz, bx, bz, m, 0, K, T, y0, -1, 0.0, &lk)) return 0;
