@@ -56,6 +56,7 @@
 #include "td5_roam_height.h"
 #include "td5_roam_furniture.h"
 #include "td5_roam_rails.h"
+#include "td5_roam_plaza.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
@@ -90,7 +91,9 @@
                                      *      a service drive (not only where its centreline crosses), up to 128 drive segments
                                      * 16 = roam LC: unknown crossings painted by the rule (zebra on a main / wide road, lines
                                      *      elsewhere), unmarked never, footway=crossing ways drawn
-                                     * 16 = roam LE: swimming pools (coping ring + inset water) over the lots */
+                                     * 16 = roam LE: swimming pools (coping ring + inset water) over the lots
+                                     * 16 = roam LD: PARK_RELATIONS.JSON multipolygon greens / precincts in the AREAS logic
+                                     *      (holes by bridge), plaza furniture + monuments (td5_roam_plaza.c) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -181,6 +184,8 @@ typedef struct {
     int  road_tiles;                /* ROAD tiles of the 3x3 that were available       */
     TD5_RoamFurnStats furn;         /* [F4c] street furniture census (td5_roam_furniture.c) */
     TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
+    TD5_RoamPlazaStats plaza;       /* [roam LD] plaza furniture + monuments census (td5_roam_plaza.c) */
+    int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
     /* [HD] CITY LOTS: the tile's ground cells (the render's own 16 m lattice) paved with concrete, kept green under an
      * OSM green, left green outside the city (not casco, not built-up cover), skipped (water, bore hole, no height);
      * paved cells that reach under the drivable surface (the lot lies under the road there, as the ground does).
