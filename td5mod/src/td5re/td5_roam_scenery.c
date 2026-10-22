@@ -4848,7 +4848,8 @@ static int sc_lot_trees(TD5_RoamScnSource *s, TG_TileCtx *c, const PvBld *bld, c
 
 /* one furniture / rail face as a keep-out: its XZ footprint (1-4 points) and the margin a trunk keeps off it.
  * [integ L] lit = 1: a shopfront / awning / pool face (the round L veto), judged by height: a face over the crown
- * floor (ylo) keeps the CROWN off it, a lower one keeps the trunk ST_LIT_TRUNK_M off it. */
+ * floor (ylo) keeps the CROWN off it, a lower one keeps the trunk ST_LIT_TRUNK_M off it. lit = 2: an outskirts face
+ * (pole, wire), its high faces only (the wires): the low ones are already in the furniture tail. */
 typedef struct { double x[4], z[4], x0, z0, x1, z1, keep, ylo; int n, lit; } StKeep;
 
 #define ST_LIT_TRUNK_M   0.5          /* [integ L] trunk off a shopfront / pool face            */
@@ -4870,9 +4871,9 @@ static int st_keep_collect(TG_TileCtx *c, StKeep **out, int *nout)
     if (c->tv_on)                                                   /* [integ L] shopfronts, awnings, pools */
         for (i = 0; i < c->xc_n; i++) {
             const struct ScXcRange *r = &c->xc_r[i];
-            if (r->cat != SC_XC_SHOP && r->cat != SC_XC_POOL) continue;
-            for (m = r->m0; m < r->m1; m++)
-                if (!st_keep_mesh(c, r->sb, m, 1, &kp, &n, &cap)) { free(kp); return 0; }
+            if (r->cat != SC_XC_SHOP && r->cat != SC_XC_POOL && r->cat != SC_XC_OUT) continue;
+            for (m = r->m0; m < r->m1; m++)   /* outskirts (lit 2): only its wires, the crown rule; the rest is tail */
+                if (!st_keep_mesh(c, r->sb, m, r->cat == SC_XC_OUT ? 2 : 1, &kp, &n, &cap)) { free(kp); return 0; }
         }
     *out = kp; *nout = n;
     return 1;
@@ -4944,7 +4945,7 @@ static int st_keep_hit(const StKeep *kp, int n, double x, double z, double y, do
         const StKeep *q = &kp[i];
         double d = 1e30, t, keep = q->keep;
         if (x < q->x0 || x > q->x1 || z < q->z0 || z > q->z1) continue;
-        if (q->lit) keep = (q->ylo >= y + ST_M(ST_LIT_HIGH_M)) ? crown : ST_M(ST_LIT_TRUNK_M);
+        if (q->lit) keep = (q->ylo >= y + ST_M(ST_LIT_HIGH_M)) ? crown : (q->lit == 2 ? 0.0 : ST_M(ST_LIT_TRUNK_M));
         if (q->n == 1) d = hypot(x - q->x[0], z - q->z[0]);
         else {
             if (q->n >= 3 && td5_geob_point_in_ring(q->x, q->z, q->n, x, z)) return 1;
