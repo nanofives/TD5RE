@@ -4020,7 +4020,7 @@ static int pv_bld_build(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, int n
                     if (judge && s->ic_drops && u > (double)c->tx * T - J - gb->radius && u < (double)(c->tx + 1) * T + J + gb->radius &&
                         v > (double)c->tz * T - J - gb->radius && v < (double)(c->tz + 1) * T + J + gb->radius &&
                         sc_bld_drops(s, c, gb, bc[l]->id[bc[l]->order[j]], &bc[l]->px[gb->first], &bc[l]->pz[gb->first], ar, nar)) {
-                        c->st.pv_bld_gone++;
+                        if (judge == 1) c->st.pv_bld_gone++;   /* [roam NA] 2: the municipal line's own walk, not counted */
                         continue;
                     }
                     if (!sc_grow((void **)&pb->r, &cap, pb->nr + 1, sizeof(PvRing))) return 0;
@@ -6055,7 +6055,7 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
         TD5_MuniOpt o;
         const double T = (double)c->grid->tile, J = MU_JUDGE_M * SC_UPM;
         int dx, dz, l, j;
-        if (!pv_bld_build(s, c, bc, nbc, ar, nar, &pb, 1)) goto out;
+        if (!pv_bld_build(s, c, bc, nbc, ar, nar, &pb, 2)) goto out;
         sc_muni_opt(s, &o);
         u.c = c; u.pb = &pb; u.self = NULL; u.fc = fc; u.nfc = nfc;
         o.blocked = sc_muni_blocked; o.u = &u;
@@ -6153,7 +6153,7 @@ static int sc_muni_prepare(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, in
          * the old clearance (TD5_MUNI_FRONT). Reverting one can move the drawn line again near it: not iterated. */
         c->muni_ready = 1;
         if (td5_env_int("TD5RE_ROAM_MUNI_PASS2", 0, 0, 1)) {   /* default off: +30 ms a tile for 8 casco footprints */
-        if (!pv_bld_build(s, c, bc, nbc, ar, nar, &pb, 1)) goto out;
+        if (!pv_bld_build(s, c, bc, nbc, ar, nar, &pb, 2)) goto out;
         if (!c->muni2 && !(c->muni2 = td5_muni_new())) { pv_bld_free(&pb); goto out; }
         td5_muni_reset(c->muni2);
         {
