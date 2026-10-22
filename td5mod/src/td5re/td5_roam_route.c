@@ -652,7 +652,17 @@ static void rr_restrict_build(RrGraph *gp, const char *place)
         if (np == 0) { gp->rc.no_pair++; continue; }
         want = rr_kind_turn(q->kind);
         for (j = 0; j < np; j++) { ok[j] = !want || rr_turn_class(gp, pin[j], pout[j]) == want; nok += ok[j]; }
-        if (np == 1) { if (want) { if (ok[0]) gp->rc.geom_agree++; else gp->rc.geom_differ++; } ok[0] = 1; }
+        if (np == 1) {
+            if (want) { if (ok[0]) gp->rc.geom_agree++; else gp->rc.geom_differ++; }
+#ifndef TD5RE_RELEASE
+            if (dbg && want && !ok[0])
+                TD5_LOG_I(LOG_TAG, "ROUTE_RESTRICT dbg: %lld %s differs: the one pair turns %s (match %s) at node (%.0f,%.0f), "
+                          "%.0f m from the via", (long long)q->id, td5_roam_rules_kind_name(q->kind),
+                          td5_roam_rules_kind_name(rr_turn_class(gp, pin[0], pout[0])), best_m == 2 ? "id" : "direction",
+                          gp->node[best].x, gp->node[best].z, best_d / RR_UPM);
+#endif
+            ok[0] = 1;
+        }
         else if (nok > 0 && nok < np) gp->rc.filtered++;
         else if (nok == 0) for (j = 0; j < np; j++) ok[j] = 1;
         for (j = 0; j < np; j++) {
