@@ -7152,7 +7152,7 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
     {
         int xs[TD5_ROAM_SCN_NSB];                                                /* [integ L] cross-check ranges */
         sc_xc_snap(c, xs);
-        if (!td5_roam_cut_emit(c, &c->st.cut)) goto out;                         /* [roam NC] cutting walls */
+        if (!td5_roam_cut_emit(c, &c->st.cut, sc_casco_has(s, c->tx, c->tz))) goto out;   /* [roam NC] cutting walls */
         sc_xc_snap(c, xs);
         if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
         sc_xc_note(c, xs, SC_XC_RAIL); sc_xc_snap(c, xs);
@@ -7295,6 +7295,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
+    long ct_i[8] = { 0 };                       /* [roam NC] */
+    double ct_d[5] = { 0 }, ct_cen[2][6] = { { 0 } };
     long ft[16], lc_t[6] = { 0 }, ft_unknown_skipped = 0, lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, lf_t[24] = { 0 }, lf_wire_m = 0.0, ou_t[16] = { 0 }, cov_t[3] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
@@ -7462,6 +7464,15 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         rl_t[12] += r->rail.sleepers; rl_t[13] += r->rail.platforms; rl_t[14] += r->rail.plat_pieces;
         rl_t[15] += r->rail.plat_drop; rl_t[16] += r->rail.meshes; rl_t[17] += r->rail.guard_hits;
         rl_t[19] += r->rail.sleeper_cut; rl_t[20] += r->rail.wall_cut; rl_t[21] += r->rail.squeezed; rl_t[22] += r->rail.nudged; rl_t[23] += r->rail.floored;
+        {   /* [roam NC] cuttings */
+            int q, w;
+            ct_i[0] += r->cut.spans; ct_i[1] += r->cut.pieces; ct_i[2] += r->cut.deck_pieces; ct_i[3] += r->cut.apron_cut;
+            ct_i[4] += r->cut.on_road; ct_i[5] += r->cut.low_skip; ct_i[6] += r->cut.pv_skip; if (r->cut.spans) ct_i[7]++;
+            ct_d[0] += r->cut.walls_m; ct_d[1] += r->cut.parapet_m; ct_d[2] += r->cut.apron_m;
+            if (r->cut.max_h_m > ct_d[3]) ct_d[3] = r->cut.max_h_m;
+            for (w = 0; w < 2; w++) for (q = 0; q < 6; q++) ct_cen[w][q] += r->cut.cen_m[w][q];
+            ct_d[4] += r->cut.verge_m;
+        }
         if (r->rail.pieces) rl_t[18]++;
         {   /* [roam LB] */
             int q;
@@ -7615,6 +7626,18 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "(%ld dropped on a road), %ld wire piece(s) = %.2f km of contact wire (%ld left off under a road deck)",
                  lf_t[0], lf_t[1], lf_t[2], lf_t[7], lf_t[8], lf_t[9], lf_t[3], lf_t[4], lf_t[5], lf_t[6], lf_t[10], lf_t[11], lf_t[12],
                  lf_t[13], lf_t[14], lf_t[15], lf_t[16], lf_t[17], lf_t[18], lf_t[19], lf_wire_m / 1000.0, lf_t[20]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam cuttings [roam NC] (TD5RE_ROAM_CUT=%d): %ld cutting span(s) in %ld tile(s), %ld wall piece(s) = %.0f m "
+                 "(parapet %.0f m, coping apron %.0f m, %ld under a deck, %ld apron(s) cut short by another cut), tallest face %.1f m | "
+                 "no wall: %ld piece(s) the ground meets the road (verge strip %.0f m), %ld on a road | %ld kerb piece(s) without a sidewalk | "
+                 "CENSUS kerb m casco WALL %.0f VERGE %.0f WALL_VOID %.0f VOID %.0f BANK %.0f SHALLOW %.0f | partido WALL %.0f VERGE %.0f "
+                 "WALL_VOID %.0f VOID %.0f BANK %.0f SHALLOW %.0f",
+                 td5_roam_cut_on(), ct_i[0], ct_i[7], ct_i[1], ct_d[0], ct_d[1], ct_d[2], ct_i[2], ct_i[3], ct_d[3], ct_i[5], ct_d[4], ct_i[4], ct_i[6],
+                 ct_cen[1][0], ct_cen[1][5], ct_cen[1][1], ct_cen[1][2], ct_cen[1][3], ct_cen[1][4],
+                 ct_cen[0][0], ct_cen[0][5], ct_cen[0][1], ct_cen[0][2], ct_cen[0][3], ct_cen[0][4]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

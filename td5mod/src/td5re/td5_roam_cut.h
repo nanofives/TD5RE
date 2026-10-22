@@ -25,7 +25,8 @@
  *            stands 0.6 m past the kerb, past the 0.35 m body overhang), as for round IE's barriers.
  *   PAVEMENT no sidewalk on a cutting span (the wall stands where it would).
  * TD5RE_ROAM_CUT=0 = the old behaviour (bore holes from the tile's own spans, no fill, no walls, sidewalks).
- * Census: TD5RE_ROAM_CUT_CENSUS=<tile list | all> (td5_roam_cut_census_dev_test).
+ * Census: TD5RE_ROAM_CUT_CENSUS=1 with --RoamBuildScenery (td5_roam_cut_emit: kerb metres per class + one
+ * ROAM_CUT_CEN log line per open piece; the knob off measures the old look on the same spans).
  */
 #ifndef TD5_ROAM_CUT_H
 #define TD5_ROAM_CUT_H
@@ -43,6 +44,9 @@
 typedef struct {
     int    spans, pieces, deck_pieces, apron_cut, on_road, low_skip, pv_skip;
     double walls_m, parapet_m, apron_m, max_h_m;      /* wall length, of it with a parapet / an apron; tallest face */
+    double verge_m;                                   /* no wall needed: the band paved by a verge strip      */
+    double cen_m[2][6];                               /* census (TD5RE_ROAM_CUT_CENSUS=1): [casco][WALL, WALL_VOID,
+                                                       * VOID, BANK, SHALLOW, VERGE] kerb metres (td5_roam_cut.c) */
 } TD5_RoamCutStats;
 
 /* TD5RE_ROAM_CUT (default 1) */
@@ -66,12 +70,8 @@ int  td5_roam_cut_inside(const TD5_RoamCutBands *b, double x, double z);
 void td5_roam_cut_bands_free(TD5_RoamCutBands *b);
 
 struct TG_TileCtx;
-/* the walls of the tile being built (scenery tail). 0 on out of memory. */
-int  td5_roam_cut_emit(struct TG_TileCtx *c, TD5_RoamCutStats *st);
+/* the walls of the tile being built (scenery tail; casco = the tile is in the casco, census split). 0 on out of memory. */
+int  td5_roam_cut_emit(struct TG_TileCtx *c, TD5_RoamCutStats *st, int casco);
 
-#ifndef TD5RE_RELEASE
-/* TD5RE_ROAM_CUT_CENSUS=<file of "tx,tz" lines | all>: 1 = ran (the caller exits) */
-int  td5_roam_cut_census_dev_test(void);
-#endif
 
 #endif
