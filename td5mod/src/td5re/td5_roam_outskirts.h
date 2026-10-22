@@ -4,7 +4,9 @@
  * From the OUTSKIRTS tile layer (re/tools/geo_outskirts.py: OSM power poles / towers / lines,
  * barrier=guard_rail ways, road gates), for one ROAMTILE that is NOT one of the casco's:
  *   - POWER POLES (wood / concrete by tag, a hash of the OSM id where untagged) and TOWERS (a
- *     tapered mast with two cross arms), a cross arm per pole, and the WIRES between two
+ *     tapered mast with two cross arms; [roam PC] a steel tower is an OPEN LATTICE: four legs
+ *     battered to a waist, crossed bracing per panel, latticed arms and an earth-wire peak,
+ *     TD5RE_ROAM_OUT_LATTICE=0 = the solid mast), a cross arm per pole, and the WIRES between two
  *     consecutive poles of one line (three conductors, a parabolic sag of 1.2 % of the span);
  *   - GUARD RAILS: a W-beam band on posts every 4 m along each barrier=guard_rail way;
  *   - ROAD GATES: an OPEN gate (two posts a lane-and-a-half either side of the road axis, a
@@ -25,7 +27,7 @@
 #include <stdint.h>
 
 /* Bumped BY HAND when an outskirts rule changes (TD5_ROAM_SCENERY_RULES moves with it). */
-#define TD5_ROAM_OUTSKIRTS_RULES  1u
+#define TD5_ROAM_OUTSKIRTS_RULES  2u   /* 2 = [roam PC] lattice towers */
 
 typedef struct TG_TileCtx TG_TileCtx;
 typedef struct TD5_RoamOutSource TD5_RoamOutSource;
@@ -41,6 +43,8 @@ typedef struct {
     int  portal_skipped;                  /* substation portals (not drawn) */
     int  guard_hits;                      /* emitted faces on the drivable surface: 0 */
     int  cover_crop, cover_wet, cover_road_skip;   /* ground-cover cells painted (cropland / wetland), cells left to the lawn because a road is on them */
+    int  lattice_towers, lattice_members;   /* [roam PC] towers drawn as an open lattice, their members */
+    int  cover_reeds, cover_marsh_area;     /* [roam PC] reed clumps on marsh cells; marsh cells from an OSM wetland area */
     int  quads, meshes;
 } TD5_RoamOutStats;
 

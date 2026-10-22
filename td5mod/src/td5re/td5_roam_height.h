@@ -87,6 +87,10 @@ int  td5_roam_height_prefetch(TD5_RoamHeight *c, double x0, double z0,
 int  td5_roam_height_sample(TD5_RoamHeight *c, double x, double z,
                             double *out_h, int *out_water);
 
+/* [roam PC] Wetness of the WATER raster at a place-frame point, bilinear over the 4 cells round it (0..1; the 0.5
+ * contour is the real shoreline at the raster's resolution). 1 when a resident window covers it. */
+int  td5_roam_height_wetfrac(TD5_RoamHeight *c, double x, double z, double *out_frac);
+
 #ifndef TD5RE_RELEASE
 /* Dev test, run by td5_geo_route_init when TD5RE_ROAM_HEIGHT_TEST=1. Samples
  * 1000 points of the derived route window through td5_geo_height and through
