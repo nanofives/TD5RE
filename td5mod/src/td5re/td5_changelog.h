@@ -31,6 +31,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 21 (roam LH: outside the casco)" },
+    { CL_ITEM,    "Free roam outside the city: power poles, towers and" },
+    { CL_ITEM,    "  the wires between them (real OSM lines), guard rails" },
+    { CL_ITEM,    "  on the real barrier ways, open road gates, and" },
+    { CL_ITEM,    "  ploughed fields where the land cover says cropland." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 21 (round J combined)" },
     { CL_ITEM,    "Free roam: palace drives pass under the building." },
     { CL_ITEM,    "  No wall stands on a drive a palace covers (Casa de" },
