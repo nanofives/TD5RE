@@ -41,9 +41,11 @@
 #define SP_PI         3.14159265358979323846
 
 /* lifts over the lawn / ground under a pitch: the surface, an inner court patch, the paint */
-#define SP_LIFT_SURF  SP_M(0.03)     /* the lawn is not drawn under a painted pitch (td5_roam_pitch_paints)   */
-#define SP_LIFT_COURT SP_M(0.08)
-#define SP_LIFT_LINE  SP_M(0.16)     /* 13 cm over the surface: closer, the paint z-fights it beyond ~50 m    */
+/* the pitch's own lawn is not drawn (td5_roam_pitch_paints), but a park lawn round it can lie under it: 10 cm
+ * clears it (3 cm let the park's grass through at 25 m); the paint 12 cm over the surface */
+#define SP_LIFT_SURF  SP_M(0.10)
+#define SP_LIFT_COURT SP_M(0.14)
+#define SP_LIFT_LINE  SP_M(0.22)
 
 enum { SP_PAINT = 0, SP_GRASS, SP_STONE, SP_METAL, SP_N };
 
@@ -51,12 +53,14 @@ enum { SP_PAINT = 0, SP_GRASS, SP_STONE, SP_METAL, SP_N };
 #define SC_LINE      0xFFF2F2EEu
 #define SC_CONCRETE  0xFFB4B0A8u
 #define SC_CONC_D    0xFF8C8882u
+#define SC_CONC_M    0xFFA6A29Au
 #define SC_GLASS     0xFF2E3A46u
 #define SC_PORTAL    0xFF20242Au
 #define SC_MEMBRANE  0xFFF4F4F0u
 #define SC_STEEL     0xFFC8CCD0u
 #define SC_STEEL_D   0xFF50565Cu
 #define SC_FACADE    0xFFE2E0DAu
+#define SC_FACADE_D  0xFFCCCAC4u
 #define SC_NET       0xFF2A2C2Eu
 #define SC_GRASS_L   0xFFE8F4DCu
 #define SC_GRASS_D   0xFFB4CAA4u
@@ -572,7 +576,9 @@ static int sp_bowl(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand *s, c
     yr_o = B + Ht + SP_M(0.6);
     yr_i = B + Ht - SP_M(1.0);
     for (j = 0; j < SP_BOWL_M; j++) {
-        if (!sp_wall(e, SP_STONE, bx[j], bz[j], bx[j + 1], bz[j + 1], gy[j] - SP_SINK, gy[j + 1] - SP_SINK, yr_o, yr_o, SC_FACADE))
+        /* plain panels in two tones per sector (a textured page made moire arcs across 100 m of wall) */
+        if (!sp_wall(e, SP_PAINT, bx[j], bz[j], bx[j + 1], bz[j + 1], gy[j] - SP_SINK, gy[j + 1] - SP_SINK, yr_o, yr_o,
+                     (j & 1) ? SC_FACADE : SC_FACADE_D))
             return 0;
         {
             const double px0 = bx[j] + nx[j] * SP_M(0.12), pz0 = bz[j] + nz[j] * SP_M(0.12);
@@ -671,11 +677,12 @@ static int sp_open_stand(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand
     /* the back wall (a parapet over the top row; up to the roof when there is one), the stepped end walls */
     ytop = Ht >= SP_M(15.0) ? top + SP_M(3.5) : top + SP_M(1.1);
     for (j = 0; j < m; j++)
-        if (!sp_wall(e, SP_STONE, bx[j], bz[j], bx[j + 1], bz[j + 1], B - SP_SINK, B - SP_SINK, ytop, ytop, SC_CONCRETE)) return 0;
+        if (!sp_wall(e, SP_PAINT, bx[j], bz[j], bx[j + 1], bz[j + 1], B - SP_SINK, B - SP_SINK, ytop, ytop,
+                     (j & 1) ? SC_CONCRETE : SC_CONC_M)) return 0;
     for (j = 0; j <= m; j += m)
         for (k = 0; k < K; k++) {
             const double f0 = (double)k / K, f1 = (double)(k + 1) / K;
-            if (!sp_wall(e, SP_STONE, fx[j] + (bx[j] - fx[j]) * f0, fz[j] + (bz[j] - fz[j]) * f0,
+            if (!sp_wall(e, SP_PAINT, fx[j] + (bx[j] - fx[j]) * f0, fz[j] + (bz[j] - fz[j]) * f0,
                          fx[j] + (bx[j] - fx[j]) * f1, fz[j] + (bz[j] - fz[j]) * f1, B - SP_SINK, B - SP_SINK, T[k], T[k], SC_CONCRETE))
                 return 0;
         }
@@ -1062,7 +1069,8 @@ static int sp_pitch(SpEm *e, const TD5_RoamPitch *pt)
     if (v == 4) { e->st->drop_road++; return 1; }
     p.e = e;
     p.lift = SP_LIFT_LINE;
-    p.w = SP_M(sport == TD5_RPS_SOCCER || sport == TD5_RPS_RUGBY || sport == TD5_RPS_HOCKEY ? 0.14 : 0.08);
+    /* wider than regulation (0.12 / 0.05 m): thinner, a line falls under a pixel from 40 m and breaks into dashes */
+    p.w = SP_M(sport == TD5_RPS_SOCCER || sport == TD5_RPS_RUGBY || sport == TD5_RPS_HOCKEY ? 0.24 : 0.12);
     switch (surf) {
     case TD5_RPF_GRASS: c1 = SC_GRASS_L; c2 = SC_GRASS_D; break;
     case TD5_RPF_CLAY:  c1 = c2 = SC_CLAY; break;

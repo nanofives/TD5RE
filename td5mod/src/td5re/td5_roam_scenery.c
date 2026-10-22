@@ -3206,7 +3206,9 @@ static int sc_emit_plazas(TG_TileCtx *c, const ScArea *ar, int nar)
         if (ar[i].id >= SC_PREL_ID_BASE && ar[i].id < SC_PREL_ID_BASE + 1.0e15) c->st.park_rel++;   /* [LD] */
         {   /* [roam PB] a painted pitch lays its own surface: no lawn under it (coplanar, it z-fought the paint) */
             int paint = 0;
-            if ((c->sport_on & 2) && (ar[i].srf & SC_SRF_PITCH)) {
+            if ((c->sport_on & 1) && ar[i].spt == TD5_RPS_STADIUM) paint = 1;   /* the stadium grounds: the drawn ground (a lawn
+                                                                                 * page) shows, the pitch paint has no lawn under it */
+            else if ((c->sport_on & 2) && (ar[i].srf & SC_SRF_PITCH)) {
                 TD5_RoamPitch pq;
                 pq.id = ar[i].id; pq.sport = ar[i].spt; pq.surface = ar[i].srf & 0x7F;
                 pq.rx = rx; pq.rz = rz; pq.n = a->n_outer ? a->n_outer : n;
