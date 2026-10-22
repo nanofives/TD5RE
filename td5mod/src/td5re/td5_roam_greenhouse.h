@@ -14,7 +14,7 @@
  * SHAPE. In that rectangle: n = round(short side / 8 m) arched spans side by side (a multi-tunnel block), each a
  * half-ellipse of TD5_ROAM_GH_SEG strips from the eave to the ridge and down, gable ends filled to the ground, the
  * two long side walls to the eave. The ridge is the footprint's measured height (3..8 m, else 4.2 m), the rise is at
- * most 0.4 of a span. White plastic: the pale blue-white snow road page (TD5_TG_PAGE_RS_ICE), each roof strip shaded by
+ * most 0.4 of a span. White plastic: the pale blue-white road page TD5_TG_PAGE_ROAD_EXTRA + 2, each roof strip shaded by
  * its slope against a fixed sun so the arches read.
  *
  * GUARD. The rectangle is tested against the drivable surface (roam_ctx_on_road); one that touches it is left to the

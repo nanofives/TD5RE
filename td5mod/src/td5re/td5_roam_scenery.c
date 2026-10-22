@@ -6864,19 +6864,65 @@ static int sc_emit_pools(TG_TileCtx *c, const RoamTile *self, ScCache **ac, int 
  *     wetland AND >= SC_MARSH_NB of its 8 neighbour cells pass the same count (a lone speckle is dropped, a ragged
  *     edge is filled), or when its centre lies in an OSM natural=wetland area (c->wetp, 29 in the partido, 24 km2).
  *     The counts read the 3x3 COVER window, so a cell on a tile seam is judged the same from both tiles.
- *   - LOOK. The grass page in a dark olive (SC_MARSH_COL), SC_REED_PER reed clumps per cell (SC_REED_BLADES thin
- *     tapered blades each, 1.1-2.0 m, leaning, straw or green) and a shallow open-water patch in one cell of
- *     SC_PUDDLE_ONE (the host's water page, 3 cm over the paint). Positions and sizes hash the GLOBAL lattice cell, so
- *     a tile's bytes do not depend on its neighbours or the build order. A clump or patch touching a road is left out.
+ *   - LOOK. The grass page shifted to straw (SC_MARSH_COL: the light array multiplies the page, so a dark tint went
+ *     black) and SC_REED_PER reed clumps per cell: two crossed upright quads, 1.2-1.9 m tall, on
+ *     the willow tree page (SC_REED_PAGE, alpha cut, a half page: a ragged drooping tuft), straw or green. Open-water patches were tried and
+ *     dropped (square blue diamonds read as noise). Positions and sizes hash the GLOBAL lattice cell, so a tile's bytes
+ *     do not depend on its neighbours or the build order. A clump touching a road is left out.
  * Greenhouses: td5_roam_greenhouse.c (the building pass). */
 #define SC_MARSH_MIN    8
 #define SC_MARSH_NB     3
-#define SC_MARSH_COL    0xFF8E9A68u
+#define SC_MARSH_COL    0xFFF0E6B4u     /* straw over the grass page                         */
 #define SC_REED_PER     2
-#define SC_REED_BLADES  5
-#define SC_REED_COL0    0xFFB8B070u     /* straw */
-#define SC_REED_COL1    0xFF8FA458u     /* green */
-#define SC_PUDDLE_ONE   5
+#define SC_REED_PAGE    (TD5_TG_PAGE_TREE_EXTRA + 8)   /* tree variant 9, the willow (td5_tg_terrain.c) */
+#define SC_REED_U0      0.0             /* the whole half page: its alpha cut gives the clump a ragged outline */
+#define SC_REED_V0      0.0
+#define SC_REED_COL0    0xFFFFF2C0u     /* straw */
+#define SC_REED_COL1    0xFFE0FFC8u     /* green */
+
+/* [roam PC] upright quads with their own UVs (the reeds), one sub-block's pending batch */
+typedef struct { float *v; unsigned int *l; int nq, cq; } ScUvSb;
+
+static int sc_uv_put(ScUvSb *b, const double *q, const double *uv, unsigned int col)
+{
+    int k;
+    if (b->nq + 1 > b->cq) {
+        const int nc = b->cq ? b->cq * 2 : 64;
+        float *nv = (float *)realloc(b->v, (size_t)nc * 4 * 5 * sizeof(float));
+        unsigned int *nl;
+        if (!nv) return 0;
+        b->v = nv;
+        nl = (unsigned int *)realloc(b->l, (size_t)nc * 4 * sizeof(unsigned int));
+        if (!nl) return 0;
+        b->l = nl;
+        b->cq = nc;
+    }
+    for (k = 0; k < 4; k++) {
+        float *o = &b->v[(size_t)(b->nq * 4 + k) * 5];
+        o[0] = (float)q[k * 3]; o[1] = (float)q[k * 3 + 1]; o[2] = (float)q[k * 3 + 2];
+        o[3] = (float)uv[k * 2]; o[4] = (float)uv[k * 2 + 1];
+        b->l[b->nq * 4 + k] = col;
+    }
+    b->nq++;
+    return 1;
+}
+
+static int sc_uv_flush(TG_TileCtx *c, int sbi, ScUvSb *L, int page)
+{
+    int qi = 0;
+    while (qi < L->nq) {
+        const int nq = (L->nq - qi < SC_LOT_CHUNK) ? L->nq - qi : SC_LOT_CHUNK;
+        unsigned short cmd[3];
+        ScSb *b = sc_sb(c, sbi, 1);
+        if (!b) return 0;
+        cmd[0] = (unsigned short)page; cmd[1] = 0; cmd[2] = (unsigned short)nq;
+        b->moff[b->nmesh++] = b->blk.len;
+        if (!tg_write_prefab_mesh(&b->blk, &L->v[(size_t)qi * 4 * 5], &L->l[(size_t)qi * 4], nq * 4, cmd, 1, 0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            || b->blk.oom) return 0;
+        qi += nq;
+    }
+    return 1;
+}
 
 /* COVER class at a tile-local point from the 3x3 window (falls back to the tile window) */
 static int sc_cover3_at(const TG_TileCtx *c, double x, double z)
@@ -6914,14 +6960,14 @@ static int sc_emit_cover(TD5_RoamScnSource *s, TG_TileCtx *c)
     const int wet_on = s->wet_on;                                    /* [roam PC] on by default */
     const int marsh = wet_on && td5_env_int("TD5RE_ROAM_MARSH", 1, 0, 1);
     const int R = G + 2;                                             /* cells -1..G, for the neighbour count */
-    ScLotSb L[2][TD5_ROAM_SCN_NSB], RD[2][TD5_ROAM_SCN_NSB], PD[TD5_ROAM_SCN_NSB];
+    ScLotSb L[2][TD5_ROAM_SCN_NSB];
+    ScUvSb RD[TD5_ROAM_SCN_NSB];
     double *px = NULL, *pz = NULL, *py = NULL;
     unsigned char *wc = NULL;
     int i, j, k, cl, ok = 0;
     if (!c->hc) return 1;
     memset(L, 0, sizeof L);
     memset(RD, 0, sizeof RD);
-    memset(PD, 0, sizeof PD);
     px = (double *)malloc((size_t)W * W * sizeof(double));
     pz = (double *)malloc((size_t)W * W * sizeof(double));
     py = (double *)malloc((size_t)W * W * sizeof(double));
@@ -6987,64 +7033,39 @@ static int sc_emit_cover(TD5_RoamScnSource *s, TG_TileCtx *c)
         if (cl == 0) { c->st.out.cover_crop++; continue; }
         c->st.out.cover_wet++;
         if (!marsh) continue;
-        {   /* [roam PC] reeds + a puddle, by the global cell's hash */
+        {   /* [roam PC] reed clumps, by the global cell's hash */
             const int gi = c->tx * G + i, gj = c->tz * G + j;
             uint32_t h = sc_cell_hash(gi, gj, 0x5EEDu);
-            int r, bl;
+            int r, f;
             for (r = 0; r < SC_REED_PER; r++) {
                 const double fu = 0.15 + 0.7 * sc_h01(&h), fv = 0.15 + 0.7 * sc_h01(&h);
                 const double rx0 = cell[0] + (cell[3] - cell[0]) * fu + (cell[9] - cell[0]) * fv;
                 const double rz0 = cell[2] + (cell[5] - cell[2]) * fu + (cell[11] - cell[2]) * fv;
                 const double ry0 = cell[1] + (cell[4] - cell[1]) * fu + (cell[10] - cell[1]) * fv - 0.5 * SC_LOT_LIFT;
-                const double sq = 0.9 * SC_UPM;
-                const double bx[4] = { rx0 - sq, rx0 + sq, rx0 + sq, rx0 - sq }, bz[4] = { rz0 - sq, rz0 - sq, rz0 + sq, rz0 + sq };
-                const int tone = (int)(sc_h01(&h) * 2.0);
+                const double hw = (0.7 + 0.3 * sc_h01(&h)) * SC_UPM, ht = (1.2 + 0.7 * sc_h01(&h)) * SC_UPM;
+                const double ang = 3.14159265 * sc_h01(&h);
+                const unsigned int col = sc_h01(&h) < 0.5 ? SC_REED_COL0 : SC_REED_COL1;
+                const double bx[4] = { rx0 - hw, rx0 + hw, rx0 + hw, rx0 - hw }, bz[4] = { rz0 - hw, rz0 - hw, rz0 + hw, rz0 + hw };
                 if (sc_on_road(c, bx, bz, 4, NULL)) continue;
-                for (bl = 0; bl < SC_REED_BLADES; bl++) {
-                    const double ang = 6.2831853 * sc_h01(&h), off = 0.55 * SC_UPM * sc_h01(&h);
-                    const double hgt = (1.1 + 0.9 * sc_h01(&h)) * SC_UPM, lean = 0.25 * hgt * sc_h01(&h);
-                    const double ca = cos(ang), sa = sin(ang), w = 0.05 * SC_UPM;
-                    const double ox = rx0 + ca * off, oz = rz0 + sa * off;
-                    /* a tapered blade: two base corners across (-sa, ca), the tip leaning outward along (ca, sa) */
-                    const double q[12] = { ox - sa * w, ry0, oz + ca * w,
-                                           ox + sa * w, ry0, oz - ca * w,
-                                           ox + ca * lean + sa * 0.2 * w, ry0 + hgt, oz + sa * lean - ca * 0.2 * w,
-                                           ox + ca * lean - sa * 0.2 * w, ry0 + hgt, oz + sa * lean + ca * 0.2 * w };
-                    if (!sc_lot_put(&RD[tone][sbi].q, &RD[tone][sbi].nq, &RD[tone][sbi].cq, q, 4)) goto out;
+                for (f = 0; f < 2; f++) {     /* two crossed uprights */
+                    const double ca = cos(ang + f * 1.5707963), sa = sin(ang + f * 1.5707963);
+                    const double q[12] = { rx0 - ca * hw, ry0, rz0 - sa * hw,   rx0 + ca * hw, ry0, rz0 + sa * hw,
+                                           rx0 + ca * hw, ry0 + ht, rz0 + sa * hw,   rx0 - ca * hw, ry0 + ht, rz0 - sa * hw };
+                    const double uv[8] = { SC_REED_U0, 1.0, 1.0, 1.0, 1.0, SC_REED_V0, SC_REED_U0, SC_REED_V0 };
+                    if (!sc_uv_put(&RD[sbi], q, uv, col)) goto out;
                 }
                 c->st.out.cover_reeds++;
-            }
-            if ((sc_cell_hash(gi, gj, 0xB0Bu) % SC_PUDDLE_ONE) == 0) {   /* a shallow patch of open water */
-                const double fu = 0.3 + 0.4 * sc_h01(&h), fv = 0.3 + 0.4 * sc_h01(&h), rr = (2.0 + 2.5 * sc_h01(&h)) / (double)cell_m;
-                double q[12];
-                int ok4 = 1;
-                for (k = 0; k < 4; k++) {
-                    const double ku = fu + ((k == 1 || k == 2) ? rr : -rr) * (0.8 + 0.4 * sc_h01(&h));
-                    const double kv = fv + ((k >= 2) ? rr : -rr) * (0.8 + 0.4 * sc_h01(&h));
-                    if (ku < 0.02 || ku > 0.98 || kv < 0.02 || kv > 0.98) ok4 = 0;
-                    q[k * 3 + 0] = cell[0] + (cell[3] - cell[0]) * ku + (cell[9] - cell[0]) * kv;
-                    q[k * 3 + 1] = cell[1] + (cell[4] - cell[1]) * ku + (cell[10] - cell[1]) * kv + 0.4 * SC_LOT_LIFT;
-                    q[k * 3 + 2] = cell[2] + (cell[5] - cell[2]) * ku + (cell[11] - cell[2]) * kv;
-                }
-                if (ok4) {
-                    const double qx[4] = { q[0], q[3], q[6], q[9] }, qz[4] = { q[2], q[5], q[8], q[11] };
-                    if (!sc_on_road(c, qx, qz, 4, NULL) && !sc_lot_put(&PD[sbi].q, &PD[sbi].nq, &PD[sbi].cq, q, 4)) goto out;
-                }
             }
         }
     }
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
         if (!sc_lot_flush_col(c, k, &L[0][k], TD5_TG_PAGE_ROAD_EXTRA + 1, 0xFFFFFFFFu)) goto out;
         if (!sc_lot_flush_col(c, k, &L[1][k], TD5_TG_PAGE_GREEN, marsh ? SC_MARSH_COL : 0xFFFFFFFFu)) goto out;
-        if (marsh) {
-            if (!sc_lot_flush_col(c, k, &PD[k], TD5_TG_PAGE_WATER, 0xFFFFFFFFu)) goto out;
-            if (!sc_lot_flush_col(c, k, &RD[0][k], TD5_TG_PAGE_GREEN, SC_REED_COL0)) goto out;
-            if (!sc_lot_flush_col(c, k, &RD[1][k], TD5_TG_PAGE_GREEN, SC_REED_COL1)) goto out;
-        }
+        if (marsh && !sc_uv_flush(c, k, &RD[k], SC_REED_PAGE)) goto out;
     }
     ok = 1;
 out:
-    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { free(L[0][k].q); free(L[1][k].q); free(RD[0][k].q); free(RD[1][k].q); free(PD[k].q); }
+    for (k = 0; k < TD5_ROAM_SCN_NSB; k++) { free(L[0][k].q); free(L[1][k].q); free(RD[k].v); free(RD[k].l); }
     free(px); free(pz); free(py); free(wc);
     return ok;
 }

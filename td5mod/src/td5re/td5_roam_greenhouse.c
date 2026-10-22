@@ -25,10 +25,10 @@
 #define GH_EAVE_MIN   1.8
 #define GH_SINK       0.25            /* the base this far under the lowest ground sample             */
 #define GH_UV_M       4.0             /* one page repeat per 4 m                                      */
-#define GH_PAGE       TD5_TG_PAGE_RS_ICE      /* pale blue-white, a light grain (the snow road page) */
-#define GH_R          232.0           /* plastic, pale blue-white (before the sun shade)              */
-#define GH_G          240.0
-#define GH_B          240.0
+#define GH_PAGE       (TD5_TG_PAGE_ROAD_EXTRA + 2)   /* pale blue-white, a light grain (dump mean 240, rgb 232 242 247) */
+#define GH_R          246.0           /* plastic, white (before the sun shade)                         */
+#define GH_G          250.0
+#define GH_B          252.0
 
 typedef struct { int nq; float v[GH_CHUNK * 4 * 5]; unsigned int light[GH_CHUNK * 4]; } GhBatch;
 
@@ -110,7 +110,7 @@ static unsigned int gh_col(double nx, double ny, double nz)
     static const double L[3] = { 0.33, 0.86, 0.39 };
     double d = nx * L[0] + ny * L[1] + nz * L[2], s;
     if (d < 0.0) d = 0.0;
-    s = 0.62 + 0.38 * d;
+    s = 0.86 + 0.14 * d;                    /* translucent plastic: even its shaded side stays light */
     return 0xFF000000u | ((unsigned)(GH_R * s) << 16) | ((unsigned)(GH_G * s) << 8) | (unsigned)(GH_B * s);
 }
 
