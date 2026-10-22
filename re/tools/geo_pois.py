@@ -28,7 +28,8 @@ OUTPUT (inside <place>/, nothing else is touched)
                       footprint edge nearest to the point, the storefront side,
                       or -1), "dist_m" (0 inside), "tags": {...}}
         buildings[]: {"id" (BUILDINGS record id), "cat" (dominant category),
-                      "n" (POIs joined), "edge", "name", "cats": {cat: n}}
+                      "n" (POIs joined), "edge", "name", "cats": {cat: n},
+                      "x", "z" (the dominant POI's point; absent for an area POI)}
                       sorted by id, so C can bsearch it.
         fuel[]:      {"id", "osm", "x", "z" (centroid), "name", "brand",
                       "ring": [{"x","z"}] or null (node = no forecourt outline),
@@ -344,9 +345,15 @@ def convert(osm: dict, proj, fp: Footprints, casco):
     for bid in sorted(per):
         e = per[bid]
         p = e["best"][1]
-        blds.append({"id": bid, "cat": p["cat"], "n": e["n"],
-                     "edge": p["edge"] if p.get("bld") == bid else -1,
-                     "name": p["name"], "cats": e["cats"]})
+        # x / z: the dominant POI's point (place frame), so the reader picks the
+        # storefront wall nearest to it after its own ring decimation / winding.
+        # An AREA POI (shop site) has no door point: x / z omitted.
+        rec = {"id": bid, "cat": p["cat"], "n": e["n"],
+               "edge": p["edge"] if p.get("bld") == bid else -1,
+               "name": p["name"], "cats": e["cats"]}
+        if p.get("bld") == bid and not p.get("blds"):
+            rec["x"], rec["z"] = p["x"], p["z"]
+        blds.append(rec)
     return pois, blds, fuel, dropped
 
 
