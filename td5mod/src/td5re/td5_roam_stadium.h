@@ -92,6 +92,9 @@ typedef struct {
 int td5_roam_stadium_enabled(void);   /* TD5RE_ROAM_STADIUM (default 1; 0 = stand footprints built as buildings) */
 int td5_roam_pitch_enabled(void);     /* TD5RE_ROAM_PITCH_LINES (default 1; 0 = pitches stay plain lawn) */
 
+/* 1 when td5_roam_sport_emit will paint this pitch (surface + markings): the scenery then lays no lawn under it */
+int td5_roam_pitch_paints(TG_TileCtx *c, const TD5_RoamPitch *pt);
+
 /* Append the stadiums and pitches the ctx's tile owns to its sub-block buffers. 1 on success, 0 on OOM. */
 int td5_roam_sport_emit(TG_TileCtx *c, const TD5_RoamStadium *sd, int nsd, const TD5_RoamPitch *pt, int npt,
                         TD5_RoamSportStats *st);

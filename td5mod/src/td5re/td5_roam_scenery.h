@@ -242,6 +242,7 @@ typedef struct {
     TD5_RoamSportStats sport;       /* [roam PB] stadiums + sports pitches census (td5_roam_stadium.c) */
     int  bld_stand, bld_stand_dup;  /* [roam PB] footprints left to td5_roam_stadium.c (stands), blobs traced over a stand */
     int  sp_tree_skip;              /* [roam PB] stadium / pitch areas whose plaza trees were not planted */
+    int  sp_lawn_skip;              /* [roam PB] pitch areas whose lawn the painted surface replaces */
     int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
     TD5_RoamShopStats shop;         /* [roam LB] shopfronts + fuel canopies (td5_roam_shops.c) */
     TD5_RoamOutStats  out;          /* [roam LH] poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c) */

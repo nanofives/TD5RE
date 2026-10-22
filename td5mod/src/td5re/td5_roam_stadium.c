@@ -41,9 +41,9 @@
 #define SP_PI         3.14159265358979323846
 
 /* lifts over the lawn / ground under a pitch: the surface, an inner court patch, the paint */
-#define SP_LIFT_SURF  SP_M(0.08)
-#define SP_LIFT_COURT SP_M(0.11)
-#define SP_LIFT_LINE  SP_M(0.14)
+#define SP_LIFT_SURF  SP_M(0.03)     /* the lawn is not drawn under a painted pitch (td5_roam_pitch_paints)   */
+#define SP_LIFT_COURT SP_M(0.08)
+#define SP_LIFT_LINE  SP_M(0.16)     /* 13 cm over the surface: closer, the paint z-fights it beyond ~50 m    */
 
 enum { SP_PAINT = 0, SP_GRASS, SP_STONE, SP_METAL, SP_N };
 
@@ -742,11 +742,11 @@ static int sp_patch(SpPf *p, int pg, double s0, double t0, double s1, double t1,
     return 1;
 }
 
-/* a painted line from (s0, t0) to (s1, t1) in the pitch frame, cut every 6 m to follow the ground */
+/* a painted line from (s0, t0) to (s1, t1) in the pitch frame, cut every 4 m to follow the ground */
 static int sp_line(SpPf *p, double s0, double t0, double s1, double t1)
 {
     const double L = hypot(s1 - s0, t1 - t0);
-    int n = (int)ceil(L / SP_M(6.0)), i, q;
+    int n = (int)ceil(L / SP_M(4.0)), i, q;
     double ds, dt;
     if (L < 1.0) return 1;
     if (n < 1) n = 1;
@@ -1022,23 +1022,45 @@ static int sp_volley(SpPf *p)
     return sp_net(p, 0.0, W + SP_M(1.0), SP_M(1.43), SP_M(2.43));
 }
 
+/* whether a pitch gets painted, and why not: 0 = painted, else the census slot it is left out under (1 small,
+ * 2 sport, 3 untagged / bad ring, 4 on a road). Shared by the emit and td5_roam_pitch_paints. */
+static int sp_pitch_verdict(TG_TileCtx *c, const TD5_RoamPitch *pt, double *x, double *z, int *n, int *surf, SpBox *b)
+{
+    double m2;
+    *n = sp_ring(pt->rx, pt->rz, pt->n, x, z);
+    *surf = pt->surface;
+    if (!*n) return 3;
+    m2 = fabs(td5_geob_ring_area(x, z, *n)) / (SP_UPM * SP_UPM);
+    if (m2 < SP_SMALL_M2) return 1;
+    if (pt->sport == TD5_RPS_OTHER && *surf == TD5_RPF_NONE) return 2;
+    if (pt->sport == TD5_RPS_NONE && (*surf == TD5_RPF_NONE || *surf == TD5_RPF_OTHER)) return 3;
+    if (*surf == TD5_RPF_NONE || *surf == TD5_RPF_OTHER) *surf = sp_default_surface(pt->sport);
+    if (roam_ctx_on_road(c, x, z, *n)) return 4;
+    if (!sp_obb(x, z, *n, b)) return 3;
+    return 0;
+}
+
+int td5_roam_pitch_paints(TG_TileCtx *c, const TD5_RoamPitch *pt)
+{
+    double x[SP_RING_MAX], z[SP_RING_MAX];
+    int n, surf;
+    SpBox b;
+    return td5_roam_pitch_enabled() && sp_pitch_verdict(c, pt, x, z, &n, &surf, &b) == 0;
+}
+
 static int sp_pitch(SpEm *e, const TD5_RoamPitch *pt)
 {
-    double x[SP_RING_MAX], z[SP_RING_MAX], m2;
-    const int n = sp_ring(pt->rx, pt->rz, pt->n, x, z);
-    int surf = pt->surface, sport = pt->sport, ok = 1, stripes = 0;
+    double x[SP_RING_MAX], z[SP_RING_MAX];
+    int n, surf, sport = pt->sport, ok = 1, stripes = 0, v;
     unsigned int c1 = 0, c2 = 0;
     SpPf p;
-    if (!n) { e->st->skip_none++; return 1; }
-    m2 = fabs(td5_geob_ring_area(x, z, n)) / (SP_UPM * SP_UPM);
-    if (m2 < SP_SMALL_M2) { e->st->skip_small++; return 1; }
-    if (sport == TD5_RPS_OTHER && surf == TD5_RPF_NONE) { e->st->skip_sport++; return 1; }
-    if (sport == TD5_RPS_NONE && (surf == TD5_RPF_NONE || surf == TD5_RPF_OTHER)) { e->st->skip_none++; return 1; }
-    if (surf == TD5_RPF_NONE || surf == TD5_RPF_OTHER) surf = sp_default_surface(sport);
-    if (roam_ctx_on_road(e->c, x, z, n)) { e->st->drop_road++; return 1; }
     memset(&p, 0, sizeof p);
+    v = sp_pitch_verdict(e->c, pt, x, z, &n, &surf, &p.b);
+    if (v == 1) { e->st->skip_small++; return 1; }
+    if (v == 2) { e->st->skip_sport++; return 1; }
+    if (v == 3) { e->st->skip_none++; return 1; }
+    if (v == 4) { e->st->drop_road++; return 1; }
     p.e = e;
-    if (!sp_obb(x, z, n, &p.b)) { e->st->skip_none++; return 1; }
     p.lift = SP_LIFT_LINE;
     p.w = SP_M(sport == TD5_RPS_SOCCER || sport == TD5_RPS_RUGBY || sport == TD5_RPS_HOCKEY ? 0.14 : 0.08);
     switch (surf) {

@@ -3204,7 +3204,17 @@ static int sc_emit_plazas(TG_TileCtx *c, const ScArea *ar, int nar)
         cx /= n; cz /= n;
         c->st.areas++;
         if (ar[i].id >= SC_PREL_ID_BASE && ar[i].id < SC_PREL_ID_BASE + 1.0e15) c->st.park_rel++;   /* [LD] */
-        if (!sc_emit_lawn(c, a, rx, rz, a->n_outer ? a->n_outer : n, sc_sb_of(c, cx, cz))) return 0;
+        {   /* [roam PB] a painted pitch lays its own surface: no lawn under it (coplanar, it z-fought the paint) */
+            int paint = 0;
+            if ((c->sport_on & 2) && (ar[i].srf & SC_SRF_PITCH)) {
+                TD5_RoamPitch pq;
+                pq.id = ar[i].id; pq.sport = ar[i].spt; pq.surface = ar[i].srf & 0x7F;
+                pq.rx = rx; pq.rz = rz; pq.n = a->n_outer ? a->n_outer : n;
+                paint = td5_roam_pitch_paints(c, &pq);
+            }
+            if (paint) c->st.sp_lawn_skip++;
+            else if (!sc_emit_lawn(c, a, rx, rz, a->n_outer ? a->n_outer : n, sc_sb_of(c, cx, cz))) return 0;
+        }
         if ((c->sport_on & 1) && ar[i].spt == TD5_RPS_STADIUM) { c->st.sp_tree_skip++; continue; }   /* [roam PB] */
         if ((c->sport_on & 2) && (ar[i].srf & SC_SRF_PITCH)) { c->st.sp_tree_skip++; continue; }
         {
@@ -8178,7 +8188,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     double pool_m2 = 0.0;
     long pz_t[13] = { 0 };                     /* [roam LD] plaza furniture + park relations */
     TD5_RoamSportStats sp_t = { 0 };           /* [roam PB] stadiums + pitches */
-    long sp_b[3] = { 0 };                      /* [roam PB] stands left to the module, blobs traced over one, plaza trees skipped */
+    long sp_b[4] = { 0 };                      /* [roam PB] stands left to the module, blobs traced over one, plaza trees skipped */
     long sh_t[16] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
     long mu_t[32] = { 0 };                                     /* [roam NA] */
     double sh_m = 0.0;
@@ -8391,7 +8401,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             sp_t.skip_none += r->sport.skip_none; sp_t.drop_road += r->sport.drop_road; sp_t.courts += r->sport.courts;
             sp_t.goals += r->sport.goals; sp_t.nets += r->sport.nets; sp_t.hoops += r->sport.hoops;
             sp_t.line_quads += r->sport.line_quads; sp_t.meshes += r->sport.meshes; sp_t.guard_hits += r->sport.guard_hits;
-            sp_b[0] += r->bld_stand; sp_b[1] += r->bld_stand_dup; sp_b[2] += r->sp_tree_skip;
+            sp_b[0] += r->bld_stand; sp_b[1] += r->bld_stand_dup; sp_b[2] += r->sp_tree_skip; sp_b[3] += r->sp_lawn_skip;
         }
         {   /* [roam NA] */
             int q;
@@ -8473,12 +8483,12 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         char ln[1600];
         snprintf(ln, sizeof ln, "roam sport [roam PB]: stadiums %d, stands %d (bowls %d, open-stand roofs %d), membrane roofs %d, "
                  "portals %d, wall openings over a drive %d, tier quads %d | footprints left to the module %ld, blobs traced over a "
-                 "stand %ld, plaza trees not planted on a stadium / pitch %ld | pitches %d: soccer %d tennis %d padel %d basketball %d "
+                 "stand %ld, plaza trees not planted on a stadium / pitch %ld, lawns left to a painted pitch %ld | pitches %d: soccer %d tennis %d padel %d basketball %d "
                  "volleyball %d hockey %d rugby %d beach %d surface-only %d | surfaces grass %d clay %d hard %d acrylic %d turf %d "
                  "sand %d | courts %d goals %d nets %d hoops %d line quads %d | left out: small %d, sport %d, untagged %d, on a road "
                  "%d | meshes %d | GUARD %d face(s) on the drivable surface (TD5RE_ROAM_STADIUM=%d TD5RE_ROAM_PITCH_LINES=%d)",
                  sp_t.stadiums, sp_t.stands, sp_t.bowls, sp_t.stand_roofs, sp_t.roofs, sp_t.portals, sp_t.openings, sp_t.tier_quads,
-                 sp_b[0], sp_b[1], sp_b[2], sp_t.pitches, sp_t.by_sport[TD5_RPS_SOCCER], sp_t.by_sport[TD5_RPS_TENNIS],
+                 sp_b[0], sp_b[1], sp_b[2], sp_b[3], sp_t.pitches, sp_t.by_sport[TD5_RPS_SOCCER], sp_t.by_sport[TD5_RPS_TENNIS],
                  sp_t.by_sport[TD5_RPS_PADEL], sp_t.by_sport[TD5_RPS_BASKET], sp_t.by_sport[TD5_RPS_VOLLEY],
                  sp_t.by_sport[TD5_RPS_HOCKEY], sp_t.by_sport[TD5_RPS_RUGBY], sp_t.by_sport[TD5_RPS_BEACH], sp_t.surface_only,
                  sp_t.by_surface[TD5_RPF_GRASS], sp_t.by_surface[TD5_RPF_CLAY], sp_t.by_surface[TD5_RPF_HARD],
