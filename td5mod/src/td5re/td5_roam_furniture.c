@@ -1035,7 +1035,7 @@ static int fu_emit_plate(FuEm *em, const double pole[2], const double l[2], cons
         seg_page[face] = FU_PAGE_BASE + c[face]->page;
         seg_nq[face] = 1;
     }
-    if (c[0]->h != c[1]->h) {
+    if (c[0]->h != c[1]->h && td5_env_int("TD5RE_ROAM_PLATE_FILLER", 1, 0, 1)) {   /* [integ L] A/B knob, 0 = no filler */
         /* [roam LF] faces of different row counts: the taller one's lower part showed through the shorter, mirrored (both
          * faces are drawn double-sided). A blank-blue filler under the shorter face, in ITS cell's own page (texel (2, y + 2)
          * is plate background), makes the plate one height from both sides. */
