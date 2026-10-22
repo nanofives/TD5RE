@@ -16,7 +16,8 @@
  * (td5_roam_route.c, it owns the graph); the traffic asks td5_roam_route_graph_turn_banned.
  *
  * KNOBS (read by the consumers): TD5RE_ROAM_MAXSPEED (1; 0 = every consumer back to its class table),
- * TD5RE_ROAM_TURN_RESTRICT (1; 0 = no turn banned), TD5RE_ROAM_ROUTE_TIME (1; 0 = the planner costs distance).
+ * TD5RE_ROAM_TURN_RESTRICT (1; 0 = no turn banned), TD5RE_ROAM_ROUTE_TIME (1; 0 = the route planner costs distance; the cops' legs, td5_roam_route_plan_path, always cost
+ * distance).
  *
  * STATE. One parsed list per place, kept for the process (a few KB). Inert outside a roam session.
  */

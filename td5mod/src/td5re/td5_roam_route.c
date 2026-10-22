@@ -1311,6 +1311,10 @@ static int rr_mask_ok(const uint8_t *edge_ok, int e, const RrSnap *S, const RrSn
  * is retrying a leg that has no legal path (rr_no_bans) */
 static int  rr_no_bans;
 static long rr_ban_fallbacks;
+/* [roam LG] 1 while td5_roam_route_plan_path runs: a cop's leg (and the test drives on the same call) costs DISTANCE,
+ * a pursuer takes the shortest way to a car a few hundred metres off; the route (a race) costs time */
+static int  rr_cost_dist;
+#define RR_W(e) (rr_cost_dist ? 1.0 : g.edge[(e)].w)
 #define RR_BANNED(n, in, out) (bans_on && rr_banned_in(&g, (n), (in), (out)))
 static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *refs, const uint8_t *edge_ok, int start_dir,
                        int ignore_ow)
@@ -1323,7 +1327,7 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
     double best = 1e300;
     int best_state = -2, best_dw = 0, k;
     const RrEdge *te = &g.edge[T->edge];
-    const double ws = g.edge[S->edge].w, wt = te->w;           /* [roam LG] time per unit (1 = distance) */
+    const double ws = RR_W(S->edge), wt = RR_W(T->edge);       /* [roam LG] time per unit (1 = distance) */
     const double extra[2] = { T->along * wt, (te->plen - T->along) * wt };
     const int bans_on = g.nban > 0 && !ignore_ow && !rr_no_bans;
     int ok = 0;
@@ -1362,7 +1366,7 @@ static int rr_plan_leg(const RrSnap *S, const RrSnap *T, RrPoly *poly, RrERefs *
             double c2;
             if (!RR_OK(e2, d2) || rr_uturn(e, d, e2, d2, n) || !rr_mask_ok(edge_ok, e2, S, T)) continue;
             if (RR_BANNED(n, in_inc, inc)) continue;
-            c2 = it.c + g.edge[e2].plen * g.edge[e2].w;
+            c2 = it.c + g.edge[e2].plen * RR_W(e2);
             if (c2 < cost[s2]) { cost[s2] = c2; parent[s2] = s; rr_heap_push(&hp, c2, s2); }
         }
     }
@@ -1399,6 +1403,7 @@ done:
 
 #undef RR_OK
 #undef RR_BANNED
+#undef RR_W
 
 /* [roam LG] a leg under the turn bans, else (no legal path: a restriction mapped wrongly, a region edge) the same
  * leg without them, counted */
@@ -1594,11 +1599,14 @@ int td5_roam_route_plan_path(double sx, double sz, double dir_x, double dir_z, d
         start_dir = (ex * dir_x + ez * dir_z) >= 0.0 ? 0 : 1;
         if (!ignore_ow && !rr_allowed(S.edge, start_dir)) start_dir = -1;      /* a one-way the wrong way: either way out */
     }
+    rr_cost_dist = 1;
     if (!rr_plan_leg_rules(&S, &T, &poly, &refs, edge_ok, start_dir, ignore_ow) &&
         (start_dir < 0 || !rr_plan_leg_rules(&S, &T, &poly, &refs, edge_ok, -1, ignore_ow))) {
+        rr_cost_dist = 0;
         free(poly.x); free(poly.z); free(refs.r);
         return 0;
     }
+    rr_cost_dist = 0;
     free(refs.r);
     poly.n = rr_driver_line(&poly.x, &poly.z, poly.n);
     for (i = 1; i < poly.n; i++) L += hypot(poly.x[i] - poly.x[i - 1], poly.z[i] - poly.z[i - 1]);

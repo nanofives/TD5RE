@@ -382,7 +382,11 @@ static uint32_t ct_bits(TD5_Actor *a, long tick, int full)
         return ct_drive(a, 40.0);
     case CT_B_PLAN:
         T.st0 = st;
-        if (!ct_place_cop(90.0)) { ct_finish("scenario B: no spot for the patrol cop", 1); return 0; }
+        /* [roam LG] the leg is planned on time costs now and can run through a junction or a narrow street at 90 m:
+         * a few spots along it, the first whose footprint fits */
+        if (!ct_place_cop(90.0) && !ct_place_cop(105.0) && !ct_place_cop(75.0) && !ct_place_cop(120.0) && !ct_place_cop(135.0)) {
+            ct_finish("scenario B: no spot for the patrol cop", 1); return 0;
+        }
         TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario B: patrol cop slot %d parked 90 m ahead; pass at 80 km/h, stop 60 m past it", T.cop_slot);
         T.phase = CT_B_DRIVE; T.phase_t0 = tick;
         return 0;
