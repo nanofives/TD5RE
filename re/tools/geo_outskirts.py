@@ -201,10 +201,20 @@ def load_roads(place: str):
     return grid, cell, upm
 
 
+NEAREST_POINT = [(0.0, 0.0)]      # side channel: the nearest point of the last nearest_road() call
+
+# Metres from a road AXIS to the CENTRE of a pole: carriageway + pavement + a margin (the roam road
+# prims include the pavement slab). A tower's footprint half width is added on top.
+POLE_CLEAR_M = {"motorway": 12.0, "motorway_link": 9.0, "trunk": 11.0, "trunk_link": 9.0, "primary": 11.0,
+                "secondary": 10.0, "tertiary": 9.0, "residential": 8.0, "unclassified": 8.0,
+                "living_street": 7.0, "service": 6.0, "track": 4.0, "path": 3.0}
+POLE_R_M = {"pole": 0.3, "tower": 2.6, "portal": 2.6}
+
+
 def nearest_road(grid, cell, upm, x, z):
     """(distance in metres, road, unit direction) of the nearest ROADS segment, or (None, None)."""
     gx, gz = int(math.floor(x / cell)), int(math.floor(z / cell))
-    best, br, bd = 1e300, None, (1.0, 0.0)
+    best, br, bd, bp = 1e300, None, (1.0, 0.0), (x, z)
     for dx in (-1, 0, 1):
         for dz in (-1, 0, 1):
             for a, b, r in grid.get((gx + dx, gz + dz), ()):
@@ -216,6 +226,8 @@ def nearest_road(grid, cell, upm, x, z):
                     best, br = d, r
                     l = math.sqrt(L2) or 1.0
                     bd = (vx / l, vz / l)
+                    bp = (a["x"] + vx * t, a["z"] + vz * t)
+    NEAREST_POINT[0] = bp
     return (best / upm, br, bd) if br is not None else (None, None, bd)
 
 
@@ -229,8 +241,20 @@ def convert(osms: list, proj, roads) -> dict:
             if el.get("type") == "node":
                 if t.get("power") in POLE_KINDS:
                     p = _pt(proj, el["lat"], el["lon"])
+                    shift = 0.0
+                    d, r, _dr = nearest_road(grid, cell, upm, p["x"], p["z"])
+                    if d is not None:
+                        req = POLE_CLEAR_M.get(r.get("class"), 8.0) + POLE_R_M[t["power"]]
+                        if d < req:                    # stand it beside the road, not in it
+                            nx, nz = NEAREST_POINT[0]
+                            vx, vz = p["x"] - nx, p["z"] - nz
+                            l = math.hypot(vx, vz)
+                            if l < 1e-6:
+                                vx, vz, l = -_dr[1], _dr[0], 1.0
+                            p = {"x": round(nx + vx / l * req * upm, 2), "z": round(nz + vz / l * req * upm, 2)}
+                            shift = round(req - d, 2)
                     poles[el["id"]] = {"id": el["id"], "kind": t["power"], "x": p["x"], "z": p["z"],
-                                       "latlon": [el["lat"], el["lon"]],
+                                       "latlon": [el["lat"], el["lon"]], "shift_m": shift,
                                        "material": t.get("material"), "structure": t.get("structure"),
                                        "design": t.get("design"), "height": t.get("height"),
                                        "voltage": t.get("voltage"), "ref": t.get("ref"),
