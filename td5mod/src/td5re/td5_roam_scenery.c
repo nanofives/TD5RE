@@ -241,6 +241,7 @@ struct TD5_RoamScnSource {
     /* reused per build */
     TG_TileCtx *ctx;
     TD5_RoamFurnSource *furn;   /* [F4c] street furniture (td5_roam_furniture.c), this thread's */
+    TD5_RoamOutSource *outsk;   /* [roam LH] outskirts (td5_roam_outskirts.c), this thread's; NULL = none */
     TD5_RoamRailSource *rails;  /* [roam ID] railways (td5_roam_rails.c), this thread's; NULL = none */
 };
 
@@ -5708,6 +5709,12 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
         td5_roam_rails_summary(s->rails, &nt, NULL, NULL, NULL, NULL);
         TD5_LOG_I(LOG_TAG, "roam rails: source open, %d RAILS tile(s) listed (parsed on the first tile build)", nt);
     }
+    s->outsk = td5_roam_out_open(place);      /* [roam LH] NULL = no outskirts (knob off / no OUTSKIRTS layer) */
+    if (s->outsk) {
+        int nt;
+        td5_roam_out_summary(s->outsk, &nt, NULL, NULL, NULL, NULL);
+        TD5_LOG_I(LOG_TAG, "roam outskirts: source open, %d OUTSKIRTS tile(s) listed (parsed on the first tile build)", nt);
+    }
     TD5_LOG_I(LOG_TAG, "roam scenery: source open place=%s upm=%.1f gap=%.0f units index rows B=%d A=%d F=%d",
               place, s->upm, s->gap, s->nrows[0], s->nrows[1], s->nrows[2]);
     return s;
@@ -5729,6 +5736,7 @@ void td5_roam_scn_close(TD5_RoamScnSource *s)
     free(s->casco);
     td5_roam_furn_close(s->furn);
     td5_roam_rails_close(s->rails);
+    td5_roam_out_close(s->outsk);
     if (s->hc) { if (s->hc_open) td5_roam_height_close(s->hc); free(s->hc); }
     free(s);
 }
@@ -5853,11 +5861,12 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
      * [roam ID] the railways go first in that tail: a rail laid flush on a level crossing is ON the road by
      * design, so the F4a footprint census does not judge them either; td5_roam_rails.c runs its own,
      * height-aware one (st.rail.guard_hits). */
-    if (s->furn || s->rails) {
+    if (s->furn || s->rails || s->outsk) {
         int k;
         for (k = 0; k < TD5_ROAM_SCN_NSB; k++) c->furn_first[k] = c->sb[k].nmesh;
     }
     if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
+    if (s->outsk && !td5_roam_out_emit(s->outsk, c, &c->st.out, sc_casco_has(s, c->tx, c->tz))) goto out;   /* [roam LH] */
     if (s->furn) {
         if (!td5_roam_furn_emit(s->furn, c, &c->st.furn, &c->lamp, &c->nlamp)) goto out;
     }
@@ -5979,7 +5988,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t t0;
     long tot[24], pv[16], pv_src[7], lm_stub = 0, guard_lm = 0, pv_fill = 0, pv_tops = 0, pv_topref = 0;
     uint32_t pv_ms_max = 0;
-    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
+    long ft[16], lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, ou_t[16] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
     long s3d_r[9] = { 0 };                                 /* [roam JC2] */
@@ -6117,6 +6126,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         rl_t[15] += r->rail.plat_drop; rl_t[16] += r->rail.meshes; rl_t[17] += r->rail.guard_hits;
         rl_t[19] += r->rail.sleeper_cut; rl_t[20] += r->rail.wall_cut; rl_t[21] += r->rail.squeezed; rl_t[22] += r->rail.nudged; rl_t[23] += r->rail.floored;
         if (r->rail.pieces) rl_t[18]++;
+        ou_t[0] += r->out.poles; ou_t[1] += r->out.wood; ou_t[2] += r->out.concrete; ou_t[3] += r->out.towers;
+        ou_t[4] += r->out.wires; ou_t[5] += r->out.wire_quads; ou_t[6] += (long)(r->out.wire_m + 0.5);
+        ou_t[7] += r->out.guards; ou_t[8] += r->out.guard_posts; ou_t[9] += (long)(r->out.guard_m + 0.5);
+        ou_t[10] += r->out.gates; ou_t[11] += r->out.gates_lift; ou_t[12] += r->out.on_road_skipped;
+        ou_t[13] += r->out.portal_skipped; ou_t[14] += r->out.guard_hits; ou_t[15] += r->out.meshes;
         if (r->rail.lift_max_m > rl_lift_max) rl_lift_max = r->rail.lift_max_m;
         tot[0] += j.ok[i]; tot[1] += r->meshes; tot[2] += r->bytes; tot[3] += r->bld_seen; tot[4] += r->bld_emitted;
         tot[5] += r->bld_prefab; tot[6] += r->bld_drop_road; tot[7] += r->bld_drop_shift; tot[8] += r->bld_veto_plaza;
@@ -6191,6 +6205,15 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  "the drivable surface",
                  rl_t[18], rl_t[1], rl_t[16], (double)rl_t[1] * 4.0 / 1000.0, rl_t[2], rl_t[3], rl_t[21], rl_t[22], rl_t[23], rl_t[4], rl_t[5], rl_t[6],
                  rl_t[7], rl_t[8], rl_t[9], rl_lift_max, rl_t[10], rl_t[11], rl_t[12], rl_t[19], rl_t[20], rl_t[13], rl_t[14], rl_t[15], rl_t[17]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam outskirts [roam LH]: %ld pole(s) (%ld wood, %ld concrete, %ld tower), %ld wire span(s) = %ld m in %ld quads, "
+                 "%ld guard-rail segment(s) = %ld m on %ld posts, %ld open gate(s) (%ld lift), %ld footprint(s) skipped on the road, "
+                 "%ld portal(s) not drawn, %ld meshes | OUTSKIRTS GUARD: %ld face(s) on the drivable surface",
+                 ou_t[0], ou_t[1], ou_t[2], ou_t[3], ou_t[4], ou_t[6], ou_t[5], ou_t[7], ou_t[9], ou_t[8], ou_t[10], ou_t[11],
+                 ou_t[12], ou_t[13], ou_t[15], ou_t[14]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
