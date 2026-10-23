@@ -41,6 +41,7 @@
 #include "td5_roam_ai.h"        /* td5_roam_ai_count: the racer field when the session re-sets it */
 #include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
+#include "td5_roam_handoff.h"     /* [roam QA] TD5_RoamFreePrefs: the FREE ROAM setup's COPS row */
 #include "td5_roam_rules.h"     /* [roam LG] td5_roam_limit_kmh */
 #include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
 #include "td5_police.h"         /* [round H HH] the shared pursuit HUD drawing */
@@ -511,7 +512,11 @@ static int rc_race_level(int *in_race)
     const int rs = td5_roam_race_state();
     const int racing = rs == TD5_RRACE_COUNTDOWN || rs == TD5_RRACE_RACING || rs == TD5_RRACE_FINISHED;
     if (in_race) *in_race = racing;
-    if (!racing) return C.force_dens ? C.force_dens - 1 : C.dens_free;
+    if (!racing) {   /* [roam QA] the FREE ROAM setup's COPS row */
+        TD5_RoamFreePrefs f;
+        td5_roam_free_prefs_get(&f);
+        return C.force_dens ? C.force_dens - 1 : (f.cops ? C.dens_free : 0);
+    }
     if (!td5_roam_race_cops()) return 0;
     return C.force_dens ? C.force_dens - 1 : C.dens_race;
 }

@@ -252,7 +252,8 @@ int  td5_roam_tile_from_image(RoamTile *t, uint8_t *image, size_t bytes,
 int  td5_roam_tile_read(const char *path, RoamTile *t, uint32_t expect_hash,
                         char *err, size_t errn);
 int  td5_roam_tile_write(const char *path, const RoamTile *t);
-/* "re/assets/geo/<place>/roam/ROAMTILE_<tx>_<tz>.BIN" under `dir` (NULL = default) */
+/* "re/assets/geo/<place>/roam/ROAMTILE_<tx>_<tz>.BIN" under `dir` (NULL = default). [roam QA] The
+ * default directory follows the terrain height: roam/ at 150, roam/x<N>/ at any other N (x100). */
 void td5_roam_tile_path(char *out, size_t cap, const char *dir, const char *place,
                         int tx, int tz);
 /* Create the directory (and parents), 1 when it exists afterwards. */

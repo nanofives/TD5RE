@@ -380,8 +380,16 @@ void td5_roam_tile_path(char *out, size_t cap, const char *dir, const char *plac
         const int has_sep = (dir[n - 1] == '/' || dir[n - 1] == '\\');
         snprintf(out, cap, "%s%sROAMTILE_%d_%d.BIN", dir, has_sep ? "" : "/", tx, tz);
     } else {
+        /* [roam QA] the terrain height (TD5RE_GEO_EXAGGERATION) is in every tile's heights, so each
+         * value has its own cache directory and a change never installs a tile of the other one:
+         * 150, what roam/ was always built at, keeps roam/; any other value is roam/x<N>/ (the 1x
+         * default: roam/x100/). The input hash carries the value too (ctx_input_hash). */
+        const int ex100 = td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400);
         char rel[64];
-        snprintf(rel, sizeof rel, "roam/ROAMTILE_%d_%d.BIN", tx, tz);
+        if (ex100 == TD5_GEO_EXAGGERATION_X100_LEGACY)
+            snprintf(rel, sizeof rel, "roam/ROAMTILE_%d_%d.BIN", tx, tz);
+        else
+            snprintf(rel, sizeof rel, "roam/x%d/ROAMTILE_%d_%d.BIN", ex100, tx, tz);
         td5_geo_source_path(out, cap, place, rel);
     }
 }

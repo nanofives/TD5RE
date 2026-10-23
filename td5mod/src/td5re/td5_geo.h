@@ -331,7 +331,13 @@ int td5_geo_preview_node(int i, double *x, double *z);
 /* Vertical exaggeration applied to real relief, per the plan's section 3:
  * scale the real gradient, THEN let the road profile's own grade cap clip it.
  * At the default TD5RE_AUTOTRACK_GRADE (0.12) a real 8% slope becomes 12% and
- * lands exactly on the cap. Overridable with TD5RE_GEO_EXAGGERATION (x100). */
-#define TD5_GEO_EXAGGERATION_X100_DEFAULT 150
+ * lands exactly on the cap. Overridable with TD5RE_GEO_EXAGGERATION (x100).
+ * [roam QA 2026-10-23] Mariano: "make the exaggerated terrain height configurable, make it 1x
+ * default". 150 -> 100 (the real heights); the TERRAIN HEIGHT row of the FREE ROAM setup and the
+ * SPRINT / CIRCUIT screen (td5_fe_geo.c) writes the knob. 150 rebuilds the old bytes. */
+#define TD5_GEO_EXAGGERATION_X100_DEFAULT 100
+/* The terrain height the roam tile cache of roam/ was built at before round QA: tiles of that
+ * value keep the old directory, every other value has its own (td5_roam_tile_path). */
+#define TD5_GEO_EXAGGERATION_X100_LEGACY  150
 
 #endif /* TD5_GEO_H */

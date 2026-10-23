@@ -916,6 +916,7 @@ int frontend_geo_entry_launch_roam(int opponents)
     traffic = g_td5.traffic_volume >= 2 ? 2 : (g_td5.traffic_volume == 1 || g_td5.traffic_enabled) ? 1 : 0;
     if (!g_td5.traffic_enabled) traffic = 0;
     td5_roam_begin(&sp);
+    frontend_roam_set_origin(TD5_SCREEN_GEO_GENERATOR);   /* [roam QA] leaving returns to the map, as before */
     if (!td5_roam_handoff_set((const double (*)[2])ll, n, TD5_ROUTE_SPRINT, 1, TD5_HANDOFF_AUTOSTART,
                               opponents < 0 ? -1 : (opponents > 5 ? 5 : opponents), traffic,
                               g_td5.special_encounter_enabled ? 1 : 0)) {
@@ -957,6 +958,53 @@ int frontend_geo_entry_slot(void) {
         if (want && want[0] && !strcmp(want, td5_geo_places_slug(i))) return slot;
     }
     return first;
+}
+
+/* [roam QA] Mariano: "i want free roam to be a separate option here [the track selector], when
+ * selected it should just prompt for the initial point, time of day, traffic, cops and confirm".
+ * The FREE ROAM entry is the list position right after the GEOSPATIAL one. It has no track slot of
+ * its own: s_selected_track stays on the geo entry slot (a real, registered slot, so every reader of
+ * the pick keeps working) and s_roam_entry says which of the two positions it is. Listed where free
+ * roam can run: a single local player in a single race, no network, no strip context (the same
+ * contexts the GEOSPATIAL entry races in the city). OK on it opens the FREE ROAM setup
+ * (TD5_SCREEN_ROAM_SETUP), never a race. */
+static int s_roam_entry;
+
+static int frontend_roam_entry_available(void) {
+    if (s_network_active || frontend_geo_strip_context() || s_selected_game_type != 0) return 0;
+    return frontend_geo_entry_slot() >= 0;
+}
+
+int frontend_roam_entry_selected(void) {
+    return s_roam_entry && frontend_roam_entry_available() && s_selected_track == frontend_geo_entry_slot();
+}
+
+/* Before a cycler's walk: 1 = the step stayed on the geo slot (GEOSPATIAL -> FREE ROAM going right,
+ * FREE ROAM -> GEOSPATIAL going left), 0 = walk on (leaving FREE ROAM to the right walks from the geo
+ * slot to the next track, exactly as leaving GEOSPATIAL did). */
+static int frontend_roam_entry_step_pre(int delta) {
+    if (!frontend_roam_entry_available() || s_selected_track != frontend_geo_entry_slot()) {
+        s_roam_entry = 0;
+        return 0;
+    }
+    if (s_roam_entry) { s_roam_entry = 0; return delta < 0; }
+    if (delta > 0) { s_roam_entry = 1; return 1; }
+    return 0;
+}
+
+/* After the walk: arriving on the geo slot going LEFT lands on FREE ROAM, the later of the two. */
+static void frontend_roam_entry_step_post(int delta) {
+    s_roam_entry = (delta < 0 && frontend_roam_entry_available() &&
+                    s_selected_track == frontend_geo_entry_slot()) ? 1 : 0;
+}
+
+/* OK on the FREE ROAM entry: the setup screen, BACK there returns to `parent`. */
+static void frontend_roam_entry_open(int parent) {
+    frontend_play_sfx(3);
+    frontend_roam_setup_set_parent(parent);
+    TD5_LOG_I(LOG_TAG, "FREE ROAM entry: OK opens the FREE ROAM setup (back to screen %d, car chosen %d)",
+              parent, s_car_chosen);
+    td5_frontend_set_screen(TD5_SCREEN_ROAM_SETUP);
 }
 
 static int frontend_track_excluded_from_selector(int track_index) {
@@ -1022,6 +1070,7 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
     int start = s_selected_track;
     s_gen_settings_seen = -1;   /* [roam HA] a new pick asks for its settings again */
     int attempts = track_max - track_min + 1;
+    if (frontend_roam_entry_step_pre(delta)) return;   /* [roam QA] GEOSPATIAL <-> FREE ROAM */
     /* [GEO ROW REMOVAL 2026-10-08] Touching the TRACK arrows retires the armed
      * geo pick: the place leaves the list for good and cannot be cycled back
      * onto. Dropped BEFORE the walk so the armed slot is not a landing spot
@@ -1032,7 +1081,7 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
         if (s_selected_track < track_min) s_selected_track = track_max - 1;
         if (s_selected_track >= track_max) s_selected_track = track_min;
         if (frontend_track_excluded_from_selector(s_selected_track)) continue;
-        if (frontend_track_level_exists(s_selected_track)) return;
+        if (frontend_track_level_exists(s_selected_track)) { frontend_roam_entry_step_post(delta); return; }
     }
     /* No available track found -- restore original selection */
     s_selected_track = start;
@@ -1343,6 +1392,10 @@ static void frontend_load_selected_track_preview(void) {
         s_track_preview_surface = 0;
     }
     if (s_selected_track < 0) return;
+    /* [roam QA] "geospatial generator menu on the track selector should not display a preview of a
+     * track": the GEOSPATIAL / FREE ROAM entries load no picture (a geo slot has no trak*.tga, and
+     * the panel draws no route for them either, frontend_render_track_selection_preview) */
+    if (td5_trackgen_is_geo_slot(s_selected_track)) return;
     /* Use the original binary's gScheduleToPoolIndex table (DAT_00466894):
      * pool_index == trak TGA file number, NOT the schedule slot. */
     tga_idx = (s_selected_track < (int)(sizeof(s_track_schedule_to_tga_index)))
@@ -1449,13 +1502,15 @@ static void frontend_quickrace_cycle_track(int delta) {
     if (track_max <= 0) return;
     int start = s_selected_track;
     int attempts = track_max + 1;
+    s_gen_settings_seen = -1;   /* [roam QA] as frontend_cycle_track: a new pick asks for its settings again */
+    if (frontend_roam_entry_step_pre(delta)) return;   /* [roam QA] GEOSPATIAL <-> FREE ROAM */
     frontend_geo_pick_arm(-1);   /* [GEO ROW REMOVAL] see frontend_cycle_track */
     while (attempts-- > 0) {
         s_selected_track += delta;
         if (s_selected_track < 0) s_selected_track = track_max - 1;
         if (s_selected_track >= track_max) s_selected_track = 0;
         if (frontend_track_excluded_from_selector(s_selected_track)) continue; /* skip drag strip + cups */
-        if (frontend_track_level_exists(s_selected_track)) return;
+        if (frontend_track_level_exists(s_selected_track)) { frontend_roam_entry_step_post(delta); return; }
     }
     s_selected_track = start; /* nothing else available — restore (never lands on drag strip / cup) */
 }
@@ -1504,12 +1559,17 @@ static void frontend_btn_set_label(int idx, const char *label) {
 static void frontend_refresh_geo_btn(int idx) {
     int show;
     if (idx < 0) return;
-    show = frontend_geo_btn_wanted();
+    /* [roam QA] the FREE ROAM entry has no options button: its OK opens its setup */
+    show = frontend_geo_btn_wanted() && !frontend_roam_entry_selected();
     s_buttons[idx].hidden   = show ? 0 : 1;
     s_buttons[idx].disabled = show ? 0 : 1;
+    /* [roam QA] "in the settings menu rename it to sprint/circuit": in the city flow the geo entry's
+     * button opens the SPRINT / CIRCUIT screen and says so; the strip build (local multiplayer) keeps
+     * SETTINGS */
     frontend_btn_set_label(idx,
         td5_trackgen_is_geo_slot(s_selected_track)
-            ? TR("SETTINGS") : TR("GEOSPATIAL TRACK GENERATOR"));
+            ? (frontend_geo_strip_context() ? TR("SETTINGS") : TR("SPRINT / CIRCUIT"))
+            : TR("GEOSPATIAL TRACK GENERATOR"));
 }
 
 static void frontend_qr_refresh_geo_btn(void) {
@@ -1936,6 +1996,11 @@ void Screen_QuickRaceMenu(void) {
             }
 
             if (s_button_index == QR_BTN_OK) {
+                if (frontend_roam_entry_selected()) {   /* [roam QA] FREE ROAM: its setup, the car is this screen's */
+                    s_car_chosen = 1;
+                    frontend_roam_entry_open(TD5_SCREEN_QUICK_RACE);
+                    return;
+                }
                 if (frontend_gen_ok_to_settings(TD5_SCREEN_QUICK_RACE)) return;   /* [roam HA] */
                 /* Block if car or track is locked */
                 int car_locked = (!s_cheat_unlock_all && !s_network_active &&
@@ -7310,8 +7375,8 @@ void Screen_CarSelection(void) {
                 /* [GEO FREE ROAM F2-A] entered from the geo selector's FREE ROAM button: BACK
                  * abandons the session and returns there */
                 if (td5_roam_armed()) {
+                    s_return_screen = (int)td5_frontend_roam_origin_screen();   /* [roam QA] map or FREE ROAM setup */
                     td5_roam_cancel();
-                    s_return_screen = TD5_SCREEN_GEO_GENERATOR;
                 }
                 s_inner_state = 0x14;
                 break;
@@ -7521,9 +7586,9 @@ void Screen_CarSelection(void) {
         if (s_return_screen == TD5_SCREEN_TRACK_SELECTION) s_car_chosen = 1;   /* [roam HA] OK, not BACK */
 
         /* [GEO FREE ROAM F2-A] BACK / ESC in the roam flow: abandon the session, return to the map */
-        if (td5_roam_armed() && s_return_screen == TD5_SCREEN_GEO_GENERATOR) {
+        if (td5_roam_armed() && s_return_screen == (int)td5_frontend_roam_origin_screen()) {
             td5_roam_cancel();
-            td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+            td5_frontend_set_screen(td5_frontend_roam_origin_screen());   /* [roam QA] */
             return;
         }
 
@@ -9959,6 +10024,10 @@ void Screen_TrackSelection(void) {
             }
 
             if (s_button_index == 4) { /* OK */
+                if (frontend_roam_entry_selected()) {   /* [roam QA] FREE ROAM: its setup */
+                    frontend_roam_entry_open(TD5_SCREEN_TRACK_SELECTION);
+                    break;
+                }
                 if (frontend_gen_ok_to_settings(TD5_SCREEN_TRACK_SELECTION)) break;   /* [roam HA] */
                 /* Lock enforcement */
                 int locked = (s_selected_track >= 0 && s_selected_track < 37 &&
