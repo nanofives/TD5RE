@@ -61,6 +61,7 @@
 #include "td5_roam_outskirts.h"
 #include "td5_roam_cut.h"
 #include "td5_roam_greenhouse.h"
+#include "td5_roam_stadium.h"
 
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
@@ -119,7 +120,11 @@
                                      * 19 = round N integration: roam NA NC combined (each bumped 17 -> 18 on its
                                      *      own, 19 so no tile cached by a single branch is reused)
                                      * 20 = roam PC: horticulture greenhouses (td5_roam_greenhouse.c), wetland drawn as a
-                                     *      marsh (reeds, puddles), lattice power towers, no city lot on a shore cell */
+                                     *      marsh (reeds, puddles), lattice power towers, no city lot on a shore cell
+                                     * 20 = roam PB: stadiums (td5_roam_stadium.c): stand footprints drawn as stepped tiers
+                                     *      (the Estadio Unico as a bowl with its membrane roof), blobs traced over a stand
+                                     *      dropped; sports pitches painted (surface + markings per sport); no plaza trees
+                                     *      on a stadium or a pitch */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -237,6 +242,10 @@ typedef struct {
     TD5_RoamRailStats rail;         /* [roam ID] railways census (td5_roam_rails.c) */
     TD5_RoamPlazaStats plaza;       /* [roam LD] plaza furniture + monuments census (td5_roam_plaza.c) */
     TD5_RoamCutStats   cut;         /* [roam NC] cutting walls census (td5_roam_cut.c) */
+    TD5_RoamSportStats sport;       /* [roam PB] stadiums + sports pitches census (td5_roam_stadium.c) */
+    int  bld_stand, bld_stand_dup;  /* [roam PB] footprints left to td5_roam_stadium.c (stands), blobs traced over a stand */
+    int  sp_tree_skip;              /* [roam PB] stadium / pitch areas whose plaza trees were not planted */
+    int  sp_lawn_skip;              /* [roam PB] pitch areas whose lawn the painted surface replaces */
     int  park_rel;                  /* [roam LD] plaza-kind areas drawn that come from PARK_RELATIONS.JSON */
     TD5_RoamShopStats shop;         /* [roam LB] shopfronts + fuel canopies (td5_roam_shops.c) */
     TD5_RoamOutStats  out;          /* [roam LH] poles / wires / guard rails / gates outside the casco (td5_roam_outskirts.c) */

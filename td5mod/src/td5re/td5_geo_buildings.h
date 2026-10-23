@@ -218,6 +218,7 @@ typedef struct {
     unsigned char civic;
     unsigned char rel;          /* [roam JC2] an outline from S3D_RELATIONS.JSON (an OSM multipolygon) */
     unsigned char poi_cat;      /* [roam LB] TD5_GEOB_POI_* of the footprint's own shop= / amenity= / office= tags */
+    unsigned char stand;        /* [roam PB] class stadium / grandstand / bleachers: a stadium's stand (td5_roam_stadium.c) */
 } TD5_GeoBuilding;
 
 /* An area's own BARRIER, straight off AREAS.JSON's `barrier` field.
