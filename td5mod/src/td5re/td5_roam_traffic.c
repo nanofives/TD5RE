@@ -104,6 +104,7 @@ typedef struct {
     double   v_class;                            /* cruise, m/s                            */
     int32_t  steer;
     int      holding;                            /* holding with a reason this tick        */
+    int      hold_why;                           /* [roam QD] 1 a red signal, 2 a give-way, 3 a queue behind a car */
     long     still_t, hold_t, off_t_ticks, born, last_contact, lost_t, wreck_t;
     int      lane_chk;
     int      bar_k, bar_side;                    /* the barrier the car is beside, and its side */
@@ -131,6 +132,8 @@ static struct {
     int     hide_on; double hide_m, hide_min_m, eye_back_m;   /* [roam QD] a spawn in view hidden by a built-up block */
     int     rb_oneway;                           /* [roam QD] an untagged roundabout is one-way (counter-clockwise) */
     int     lane_fit;                            /* [roam QD] fit the lane offset to the real carriageway on entry */
+    long    hold_q_ticks, yield_relax_ticks;     /* [roam QD] hold limit at a red / in a queue; give-way relax after */
+    long    hold_by[4];                          /* [roam QD] hold despawns by hold_why */
     double  lead_pct, lead_deg;                  /* [roam QD] share of spawn tries aimed ahead of the player, half angle */
     int     log_every;
     TD5_RoamTrafficStats st;
@@ -213,6 +216,12 @@ static void rt_read_knobs(void)
     T.eye_back_m  = 6.0;
     T.rb_oneway   = td5_env_int("TD5RE_ROAM_TRAFFIC_RB_ONEWAY", 1, 0, 1);
     T.lane_fit    = td5_env_int("TD5RE_ROAM_TRAFFIC_LANE_FIT", 1, 0, 1);
+    /* [roam QD] A car still for 40 s with a reason was taken away (RT_HOLD_TICKS), and 7 of 8 cars that vanished in
+     * view in a 10-min casco soak were cars queued at a red light that did not clear in one green. At a red or in a
+     * queue the limit is now TD5RE_ROAM_TRAFFIC_HOLD_Q_S (0 = the old 40 s); a give-way keeps 40 s, and after
+     * TD5RE_ROAM_TRAFFIC_YIELD_RELAX_S (0 = never) it yields only to cars inside the junction itself. */
+    T.hold_q_ticks      = (long)td5_env_int("TD5RE_ROAM_TRAFFIC_HOLD_Q_S", 120, 0, 600) * 30L;
+    T.yield_relax_ticks = (long)td5_env_int("TD5RE_ROAM_TRAFFIC_YIELD_RELAX_S", 20, 0, 600) * 30L;
     /* [roam QD] share (pct) of the spawn tries aimed within +-lead_deg of the player's heading: cars spawned behind a
      * moving player leave the despawn ring within seconds. 0 = the old uniform ring (and the old RNG draws). */
     T.lead_pct    = td5_env_int("TD5RE_ROAM_TRAFFIC_LEAD", 60, 0, 100) / 100.0;
@@ -1313,6 +1322,8 @@ static int rt_may_enter(RtCar *c, double x, double z, double d_stop_m)
         b = td5_game_get_actor(j);
         if (!b || !rt_place_of(b, &bx, &bz)) continue;
         if (hypot(bx - N.x, bz - N.z) / RT_M > rj + 1.0) continue;
+        /* [roam QD] waited long: only a car inside the junction itself holds me */
+        if (T.yield_relax_ticks > 0 && tick - c->wait_since > T.yield_relax_ticks && hypot(bx - N.x, bz - N.z) / RT_M > 9.0) continue;
         o = rt_car_of(j);
         vb = rt_speed_ms(b);
         if (o && o->seg == RT_SEG_EDGE && o->node == c->node && o->waiting) {
@@ -1361,6 +1372,7 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
     rt_track(c, a, x, z);
     if (!rt_edge(c->seg == RT_SEG_EDGE ? c->e : (c->ne >= 0 ? c->ne : c->e), &E)) { rt_despawn(c, RT_WHY_DEAD); return; }
     c->holding = 0;
+    c->hold_why = 0;
 
     /* ---- target speed ---- */
     vt = c->v_class;
@@ -1425,6 +1437,7 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
                     if (vs < vt) vt = vs;
                     if (v > 0.2) { const double ar = d_stop > 0.15 ? -v * v / (2.0 * d_stop) : -6.5; if (ar < a_req) a_req = ar; }
                     c->holding = 1;
+                    c->hold_why = c->sig_g >= 0 ? 1 : 2;
                 } else if (d_stop < 1.5 && (c->sig_g >= 0 || c->waiting)) {
                     c->committed = 1;
                     c->commit_tick = tick;
@@ -1444,7 +1457,7 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
             rt_sig2_slow(c, (c->sig2_extra - c->s) / RT_M - RT_STOP_BACK_M, v, tick, &vt, &a_req);
     }
     cap = rt_gap_cap(c, a, x, z, v, &obstacle);
-    if (cap < vt) { vt = cap; if (vt < 0.5) c->holding = 1; }
+    if (cap < vt) { vt = cap; if (vt < 0.5) { c->holding = 1; if (!c->hold_why) c->hold_why = 3; } }
     if (vt < 0.0) vt = 0.0;
 
     /* ---- lane: keep the target lane on the road (the carriageway may be narrower than the nominal lanes) ---- */
@@ -1540,7 +1553,10 @@ static void rt_drive(RtCar *c, TD5_Actor *a)
         if (c->holding) c->hold_t++;
     } else { c->still_t = 0; c->hold_t = 0; }
     if (c->still_t > RT_STUCK_TICKS && !c->holding && c->fade >= 0) rt_despawn(c, RT_WHY_STUCK);
-    if (c->hold_t > RT_HOLD_TICKS && c->fade >= 0) rt_despawn(c, RT_WHY_HOLD);
+    {
+        const long lim = (c->hold_why == 2 || T.hold_q_ticks <= 0) ? RT_HOLD_TICKS : T.hold_q_ticks;
+        if (c->hold_t > lim && c->fade >= 0) { T.hold_by[c->hold_why & 3]++; rt_despawn(c, RT_WHY_HOLD); }
+    }
     if (c->still_t > RT_STUCK_TICKS + 30 && c->fade >= 0 && c->state == RT_LIVE && !c->holding) T.st.stuck_live++;
     {
         int inside = 0;
@@ -2123,11 +2139,14 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     }
     if (off_free > 0) RT_BAD("off surface %ld ticks; ", off_free);
     if (s->stuck_live > 0) RT_BAD("stuck>10s live %ld; ", s->stuck_live);
+    /* [roam QD] a car against a one-way street (tagged, or a roundabout's implied one) */
+    if (T.dir_against + T.dir_rb_against > 0) RT_BAD("against one-way %.1f car-s; ", (T.dir_against + T.dir_rb_against) / RT_HZ);
 #undef RT_BAD
     if (bad[0]) status = 2;
     /* WARN: red-light violations; private bytes less the replay buffer up > 32 MB early-half vs late-half (the
-     * traffic pool allocates nothing after race init) */
-    else if (s->red_violations > 0 || dpriv > 32.0) status = 1;
+     * traffic pool allocates nothing after race init); [roam QD] the left half of a two-way street for more than 1 pct of
+     * the judged car-seconds */
+    else if (s->red_violations > 0 || dpriv > 32.0 || (T.dir_n > 0 && T.dir_wrong * 100 > T.dir_n)) status = 1;
     {   /* the private-bytes series, one value every 30 s: private / replay buffer / stream resident */
         char ser[700];
         size_t sl = 0;
@@ -2140,9 +2159,11 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
         TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] memory early-half -> late-half: private less replay %+.1f MB (judged), replay buffer %+.1f MB, "
                   "stream resident %+.1f MB", dpriv, drep, dstrm);
     }
-    snprintf(note, n, "%straffic %d/%.1f/%d t%d red %ld/%ld off %ld+%ldhit bar %ld priv-rep %+.0fMB %s%.40s",
-             status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target, s->red_violations, s->sig_cross, off_free,
-             s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
+    /* [roam QD] vis = mean cars in the view cone within 150 m; dir = car-s against a one-way / on the wrong side */
+    snprintf(note, n, "%straffic %d/%.1f/%d t%d vis %.1f dir %.0f/%.0f red %ld/%ld off %ld+%ld bar %ld priv %+.0fMB %s%.40s",
+             status == 2 ? "FAIL " : "", s->live_min, s->live_mean, s->live_max, s->target,
+             T.vis_n > 0 ? T.vis_sum / (double)T.vis_n : 0.0, (T.dir_against + T.dir_rb_against) / RT_HZ, T.dir_wrong / RT_HZ,
+             s->red_violations, s->sig_cross, off_free, s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] POP gate %d: spawns in view (<%.0f m, cone) %ld of %ld, despawns in view %ld of %ld | refused spawn candidates %ld, held despawn ticks %ld, slow fade-outs %ld", T.visgate, RT_POP_M, T.pop_spawn, s->spawns, T.pop_despawn, s->despawns,
               T.pop_spawn_rej, T.pop_despawn_held, T.pop_slow_fade);
     {   /* [roam QD] census: spawn tries by outcome, what the player sees, direction against the road */
@@ -2162,9 +2183,11 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
                   100.0 * T.vis_hist[4] / ns, T.ahead_sum / ns, T.near_sum / ns, T.vis_n);
         TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD DIRECTION judged %.1f car-s: against a one-way %.1f car-s, wrong side of a two-way %.1f car-s, "
                   "untagged roundabout pieces %.1f car-s of which against %.1f car-s | not judged: turning %.1f car-s, within 12 m of a node "
-                  "%.1f car-s, nearest street not the car's own (parallel carriageways, connectors) %.1f car-s | lane offsets fitted to a narrower carriageway %ld (nothing fit %ld) | roundabout one-way %d",
+                  "%.1f car-s, nearest street not the car's own (parallel carriageways, connectors) %.1f car-s | hold despawns: red %ld "
+                  "give-way %ld queue %ld | lane offsets fitted to a narrower carriageway %ld (nothing fit %ld) | roundabout one-way %d",
                   T.dir_n / RT_HZ, T.dir_against / RT_HZ, T.dir_wrong / RT_HZ, T.dir_rb_n / RT_HZ, T.dir_rb_against / RT_HZ,
-                  T.dir_skip_turn / RT_HZ, T.dir_skip_end / RT_HZ, T.dir_skip_par / RT_HZ, T.lane_fits, T.lane_fit_none, T.rb_oneway);
+                  T.dir_skip_turn / RT_HZ, T.dir_skip_end / RT_HZ, T.dir_skip_par / RT_HZ, T.hold_by[1], T.hold_by[2], T.hold_by[3],
+                  T.lane_fits, T.lane_fit_none, T.rb_oneway);
     }
     {   /* [roam LG] road rules seen by the traffic */
         TD5_RouteRestrCensus rc;
@@ -2221,6 +2244,7 @@ void td5_roam_traffic_stats_reset(void)
     memset(T.vis_hist, 0, sizeof T.vis_hist);
     T.vis_sum = T.near_sum = T.ahead_sum = 0.0;
     T.dir_n = T.dir_against = T.dir_wrong = T.dir_rb_n = T.dir_rb_against = T.dir_skip_turn = T.dir_skip_end = T.dir_skip_par = 0;
+    memset(T.hold_by, 0, sizeof T.hold_by);
     T.st_t0 = (long)g_td5.simulation_tick_counter;
 }
 

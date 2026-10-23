@@ -999,7 +999,7 @@ static void st_roam_capture(void)
         size_t q;
         snprintf(dn, sizeof dn, "%s", s_roam_note);
         for (q = 0; dn[q]; q++) if (dn[q] == '|') dn[q] = '/';   /* the report is a markdown table */
-        snprintf(s_roam_note, sizeof s_roam_note, "%.70s; %.47s", tn, dn);
+        snprintf(s_roam_note, sizeof s_roam_note, "%.80s; %.37s", tn, dn);   /* [roam QD] the traffic note grew: vis + dir */
         if (ts > s_roam_status) s_roam_status = ts;
     }
     if (st_roam_is_cops(s_roam_row)) {
