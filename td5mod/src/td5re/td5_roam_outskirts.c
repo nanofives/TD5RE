@@ -6,7 +6,7 @@
  *   source    INDEX.JSON layers.OUTSKIRTS, every tile parsed once (game frame): poles sorted by id,
  *             wire spans (pole index pairs), guard-rail segments, gates
  *   writers   per (sub-block, page) quad batches -> one MODELS.DAT prefab record each
- *   shapes    prism / frustum, wire ribbon
+ *   shapes    prism / frustum, [roam PC] flat member strip, wire ribbon
  *   emit      the tile: owned features only, each footprint tested against the drivable surface
  *
  * Every decision keys off the OSM id and the place-frame position, never off the order tiles are
@@ -290,6 +290,7 @@ typedef struct {
     int32_t ox, oz;                /* tile origin: tile-local = place - origin */
     OuBatch *bat;
     int oom;
+    int lattice;                   /* [roam PC] TD5RE_ROAM_OUT_LATTICE: steel towers as an open lattice */
 } OuEm;
 
 static int ou_page(int p)
@@ -375,6 +376,34 @@ static int ou_prism(OuEm *e, int pg, double cx, double cz, double ux, double uz,
     return 1;
 }
 
+/* [roam PC] one straight member P -> Q (tile-local, absolute y) as a flat strip of half width t whose width runs along
+ * `a` (made perpendicular to the member): ONE quad, the renderer culls no winding, so it reads from both sides */
+static int ou_strip(OuEm *e, int pg, const double *P, const double *Q, double t, double ax, double ay, double az,
+                    unsigned int col)
+{
+    static const int fwd[4] = { 0, 1, 2, 3 };
+    double d[3] = { Q[0] - P[0], Q[1] - P[1], Q[2] - P[2] }, l, k;
+    int sb;
+    l = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (l < 1.0) return 1;
+    d[0] /= l; d[1] /= l; d[2] /= l;
+    k = ax * d[0] + ay * d[1] + az * d[2];
+    ax -= k * d[0]; ay -= k * d[1]; az -= k * d[2];
+    l = sqrt(ax * ax + ay * ay + az * az);
+    if (l < 1e-6) return 1;
+    ax *= t / l; ay *= t / l; az *= t / l;
+    sb = roam_ctx_sb_of(e->c, 0.5 * (P[0] + Q[0]), 0.5 * (P[2] + Q[2]));
+    {
+        const double x[4] = { P[0] - ax, P[0] + ax, Q[0] + ax, Q[0] - ax };
+        const double y[4] = { P[1] - ay, P[1] + ay, Q[1] + ay, Q[1] - ay };
+        const double z[4] = { P[2] - az, P[2] + az, Q[2] + az, Q[2] - az };
+        const double u[4] = { 0.0, 1.0, 1.0, 0.0 }, v[4] = { 0.0, 0.0, 4.0, 4.0 };
+        if (!ou_put(e, sb, pg, x, y, z, u, v, col, fwd)) { e->oom = 1; return 0; }
+    }
+    e->st->lattice_members++;
+    return 1;
+}
+
 /* a wire ribbon A -> B (tile-local, absolute y), sagging by OU_SAG * span at the middle */
 static int ou_wire(OuEm *e, const double *A, const double *B, int *quads)
 {
@@ -438,6 +467,87 @@ static int ou_footprint_on_road(OuEm *e, double cx, double cz, double hw, double
     return roam_ctx_on_road_band(e->c, x, z, 4, y0, y1);
 }
 
+/* [roam PC] LATTICE TOWER. A steel transmission tower in the tower's own frame (u along the line, w across it):
+ * four corner legs battered from OU_LT_BASE at the ground to OU_LT_WAIST at OU_LT_WAIST_F of the height, then
+ * straight up the head to the top; crossed diagonals on every face of each panel (OU_LT_BODY panels below the waist,
+ * OU_LT_HEAD above) and a horizontal strut on top of each; two latticed cross arms (the conductors hang under the
+ * upper one, ou_attach) and an earth-wire peak. Members are flat strips (ou_strip): a leg is an angle iron of two,
+ * a brace or strut one strip in its face, an arm chord one strip plus a flange. */
+#define OU_LT_BASE     2.4            /* leg half spread at the ground, m (the solid mast's base) */
+#define OU_LT_WAIST    0.85           /* half spread at the waist and up the head, m              */
+#define OU_LT_WAIST_F  0.62
+#define OU_LT_BODY     4
+#define OU_LT_HEAD     3
+#define OU_LT_LEG_T    0.11           /* half section, m */
+#define OU_LT_BR_T     0.05
+#define OU_LT_ARM_T    0.06
+
+/* the corner k (0..3) of the tower's square at height y (m over g), tile-local */
+static void ou_lt_corner(double lx, double lz, double ux, double uz, double g, double h, double y, int k, double out[3])
+{
+    static const int sa[4] = { -1, 1, 1, -1 }, sw[4] = { -1, -1, 1, 1 };
+    const double yw = OU_LT_WAIST_F * h;
+    const double r = y >= yw ? OU_LT_WAIST : OU_LT_BASE + (OU_LT_WAIST - OU_LT_BASE) * (y / yw);
+    const double wx = -uz, wz = ux;
+    out[0] = lx + (ux * sa[k] + wx * sw[k]) * OU_M(r);
+    out[1] = g + OU_M(y);
+    out[2] = lz + (uz * sa[k] + wz * sw[k]) * OU_M(r);
+}
+
+static int ou_lattice_tower(OuEm *e, double lx, double lz, double ux, double uz, double g, double h)
+{
+    const double yw = OU_LT_WAIST_F * h, wx = -uz, wz = ux;
+    double lev[OU_LT_BODY + OU_LT_HEAD + 1];
+    int nl = 0, i, k, arm;
+    for (i = 0; i <= OU_LT_BODY; i++) lev[nl++] = yw * i / OU_LT_BODY;
+    for (i = 1; i <= OU_LT_HEAD; i++) lev[nl++] = yw + (h - yw) * i / OU_LT_HEAD;
+    for (i = 0; i + 1 < nl; i++) {
+        double A[4][3], B[4][3];
+        for (k = 0; k < 4; k++) {
+            ou_lt_corner(lx, lz, ux, uz, g, h, lev[i], k, A[k]);
+            ou_lt_corner(lx, lz, ux, uz, g, h, lev[i + 1], k, B[k]);
+        }
+        for (k = 0; k < 4; k++) {
+            const int j = (k + 1) & 3;
+            const double ex = B[j][0] - B[k][0], ez = B[j][2] - B[k][2];          /* the face's horizontal edge */
+            /* leg: an angle iron, two strips across the tower's own axes */
+            if (!ou_strip(e, OP_METAL, A[k], B[k], OU_M(OU_LT_LEG_T), ux, 0.0, uz, OC_METAL)) return 0;
+            if (!ou_strip(e, OP_METAL, A[k], B[k], OU_M(OU_LT_LEG_T), wx, 0.0, wz, OC_METAL)) return 0;
+            /* X brace + top strut, flat in the face */
+            if (!ou_strip(e, OP_METAL, A[k], B[j], OU_M(OU_LT_BR_T), ex, 0.0, ez, OC_METAL)) return 0;
+            if (!ou_strip(e, OP_METAL, A[j], B[k], OU_M(OU_LT_BR_T), ex, 0.0, ez, OC_METAL)) return 0;
+            if (!ou_strip(e, OP_METAL, B[k], B[j], OU_M(OU_LT_BR_T), 0.0, 1.0, 0.0, OC_METAL)) return 0;
+        }
+    }
+    for (arm = 0; arm < 2; arm++) {                   /* the cross arms: upper (h - 3) 4.6 m, lower (h - 9) 3.4 m */
+        const double y = arm ? h - 9.0 : h - 3.0, L = arm ? 3.4 : 4.6;
+        int side, f;
+        if (y <= yw) continue;
+        for (side = -1; side <= 1; side += 2)
+            for (f = -1; f <= 1; f += 2) {           /* both faces of the arm (u = -r / +r), tapering to one tip */
+                const double r = OU_LT_WAIST;
+                const double R[3] = { lx + ux * f * OU_M(r) + wx * side * OU_M(r), g + OU_M(y), lz + uz * f * OU_M(r) + wz * side * OU_M(r) };
+                const double U[3] = { R[0], g + OU_M(y + 1.4), R[2] };
+                const double T[3] = { lx + wx * side * OU_M(L), g + OU_M(y), lz + wz * side * OU_M(L) };
+                const double M[3] = { lx + ux * f * OU_M(0.5 * r) + wx * side * OU_M(0.5 * (L + r)), g + OU_M(y), lz + uz * f * OU_M(0.5 * r) + wz * side * OU_M(0.5 * (L + r)) };
+                if (!ou_strip(e, OP_METAL, R, T, OU_M(OU_LT_ARM_T), 0.0, 1.0, 0.0, OC_METAL)) return 0;   /* lower chord */
+                if (!ou_strip(e, OP_METAL, R, T, OU_M(OU_LT_ARM_T), ux, 0.0, uz, OC_METAL)) return 0;     /*   (its flange) */
+                if (!ou_strip(e, OP_METAL, U, T, OU_M(OU_LT_ARM_T), 0.0, 1.0, 0.0, OC_METAL)) return 0;   /* upper chord */
+                if (!ou_strip(e, OP_METAL, U, M, OU_M(OU_LT_BR_T), 0.0, 1.0, 0.0, OC_METAL)) return 0;    /* web         */
+            }
+    }
+    {   /* the earth-wire peak */
+        const double P[3] = { lx, g + OU_M(h + 2.5), lz };
+        for (k = 0; k < 4; k++) {
+            double A[3];
+            ou_lt_corner(lx, lz, ux, uz, g, h, h, k, A);
+            if (!ou_strip(e, OP_METAL, A, P, OU_M(OU_LT_BR_T), k & 1 ? wx : ux, 0.0, k & 1 ? wz : uz, OC_METAL)) return 0;
+        }
+    }
+    e->st->lattice_towers++;
+    return 1;
+}
+
 static int ou_emit_pole(OuEm *e, const OuPole *p, double lx, double lz)
 {
     TD5_RoamOutStats *st = e->st;
@@ -449,6 +559,12 @@ static int ou_emit_pole(OuEm *e, const OuPole *p, double lx, double lz)
     const int pg = tower || p->mat == OM_METAL ? OP_METAL : (p->mat == OM_CONC ? OP_CONC : OP_WOOD);
     const unsigned int col = pg == OP_METAL ? OC_METAL : (pg == OP_CONC ? OC_CONC : OC_WOOD);
     if (ou_footprint_on_road(e, lx, lz, hw0, g - OU_M(0.5), g + OU_M(2.0))) { st->on_road_skipped++; return 1; }
+    if (tower && e->lattice && p->mat == OM_METAL) {  /* [roam PC] an open steel lattice (a concrete tower stays a mast) */
+        if (!ou_lattice_tower(e, lx, lz, ux, uz, g, h)) return 0;
+        st->poles++;
+        st->towers++;
+        return 1;
+    }
     if (!ou_prism(e, pg, lx, lz, ux, uz, g, g + OU_M(h), hw0, hw0, hw1, hw1, h / 2.0, col)) return 0;
     /* cross arm(s): a thin bar across the line */
     if (tower) {
@@ -532,6 +648,7 @@ int td5_roam_out_emit(TD5_RoamOutSource *o, TG_TileCtx *c, TD5_RoamOutStats *st,
     if (!o->load_ok) return 1;
     memset(&e, 0, sizeof e);
     e.c = c; e.st = st;
+    e.lattice = td5_env_int("TD5RE_ROAM_OUT_LATTICE", 1, 0, 1);
     roam_ctx_origin(c, &tx, &tz, &e.ox, &e.oz);
     roam_grid_corners(g, tx, tz, corner);
     for (k = 0; k < 4; k++) {
