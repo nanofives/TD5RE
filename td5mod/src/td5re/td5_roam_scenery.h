@@ -126,7 +126,10 @@
                                      *      dropped; sports pitches painted (surface + markings per sport); no plaza trees
                                      *      on a stadium or a pitch
                                      * 20 = roam PA: bus / bike lane paint (td5_roam_furniture.c fu_emit_lanes, LANES.JSON), a plain saltire on
-                                     *      every untagged level crossing approach (td5_roam_rails.c) */
+                                     *      every untagged level crossing approach (td5_roam_rails.c)
+                                     * 20 = roam PE: fuel footprints drawn as canopies, shop names on the fascia, the
+                                     *      municipal line off NC's cutting zones, shopfronts clear of other masses
+                                     *      (trimmed glass, infill lots off a shop's footprint) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -305,6 +308,10 @@ typedef struct {
      * kept in them */
     int  grounds, grounds_ovt, grounds_inf, grounds_osm;
     int  inf_ochava;               /* [roam NA] infill corner lots cut by an ochava */
+    /* [roam PE] emitted footprints over an NC cutting: [0] the band (kerb -> wall back), [1] the zone (+ coping apron),
+     * [2] / [3] of them moved by the municipal line; line pieces left off a cutting zone */
+    int  muni_cut_over[4], muni_cut_skip;
+    int  shop_inf_guard;           /* [roam PE] infill lot tests refused by a shop's footprint (full quad, no 0.5 m lap) */
 } TD5_RoamScnStats;
 
 /* The scenery layer of one tile. Owned by the caller; free with td5_roam_scn_free. */

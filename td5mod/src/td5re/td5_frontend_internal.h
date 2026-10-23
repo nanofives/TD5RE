@@ -295,6 +295,8 @@ _Static_assert(FE_SURFACE_PAGE_BASE + FE_SURFACE_PAGE_COUNT
                "FE surface block collides with the MSDF/title shared pages");
 _Static_assert(SHARED_PAGE_PAUSEFONT_SDF < ENVMAP_TEXTURE_PAGE_BASE,
                "frontend shared-page block runs into the envmap pages");
+_Static_assert(ROAM_SHOP_PAGE_BASE + ROAM_SHOP_PAGE_COUNT <= SHARED_PAGE_FONT_MSDF,
+               "roam shop-name pages (td5_page_map.h) run into the frontend MSDF font pages");
 
 typedef struct {
     int in_use;

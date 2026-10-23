@@ -102,6 +102,7 @@
 #include "td5_roam_view.h"
 #include "td5_roam_render.h"
 #include "td5_roam_scenery.h"   /* [F4a] the tile's SCENERY layer */
+#include "td5_roam_shops.h"     /* [roam PE] td5_roam_shops_session_begin */
 #ifndef TD5RE_RELEASE
 #include "td5_roam_pavecensus.h"   /* [G4b] pavement census */
 #endif
@@ -2104,6 +2105,7 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
     }
     /* [F4c] the street-name plate atlas + its GPU pages, BEFORE any worker bakes a tile (main thread) */
     if (!s_rr.f.route && td5_roam_scn_enabled()) td5_roam_furn_session_begin(place, &s_rr.grid);
+    if (!s_rr.f.route && td5_roam_scn_enabled()) td5_roam_shops_session_begin(place);   /* [roam PE] shop-name bank */
     s_rr.began = 1;
     TD5_LOG_I(LOG_TAG, "roam render: begin place=%s frame origin=(%d,%d) dy=%.0f route=%d pages road=%d ground=%d "
               "kerb=%d ground=%s cell=%d m drop=%.0f units clamp=%d lift=%.0f R=%.0f m water=%d page=%d below=%.0f units",

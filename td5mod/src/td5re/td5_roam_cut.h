@@ -68,6 +68,9 @@ int  td5_roam_cut_bands(TD5_RoamCutBands *b, const RoamTile *const nb[9], TD5_Ro
                         double x0, double z0, double x1, double z1);
 int  td5_roam_cut_inside(const TD5_RoamCutBands *b, double x, double z);
 void td5_roam_cut_bands_free(TD5_RoamCutBands *b);
+/* [roam PE] every band widened across its rows by `extra` units each side (the coping apron past the wall's back) */
+void td5_roam_cut_bands_widen(TD5_RoamCutBands *b, double extra);
+#define TD5_ROAM_CUT_APRON (3.0 * 430.0)  /* the coping apron reaches this far past the band (td5_roam_cut_emit) */
 
 struct TG_TileCtx;
 /* the walls of the tile being built (scenery tail; casco = the tile is in the casco, census split). 0 on out of memory. */
