@@ -403,6 +403,9 @@ void td5_roam_cops_session_init(void)
 void td5_roam_cops_session_end(void)
 {
     int i;
+    if (C.on)   /* [roam QA] one line per session: the FREE ROAM setup's COPS row is checked against it */
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS summary: spawns %ld despawns %ld pursuits %ld escapes %ld busts %ld",
+                  C.st.spawns, C.st.despawns, C.st.pursuits, C.st.escapes, C.st.busts);
     for (i = 0; i < C.pool; i++) td5_ai_roam_mark_cop(C.cop[i].slot, 0);
     C.on = 0;
     free(C.mask); C.mask = NULL; C.mask_n = 0;
