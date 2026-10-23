@@ -3137,7 +3137,7 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
     unsigned short cmd[6];
     double q[12], t3[9];
     double H, by, rise, inv_tile;
-    double wall_top, vrows;
+    double wall_top, vrows, wall_h;
     double bot[TD5_GEOB_RING_MAX], found_max = 0.0;
     int k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
     int rows, storeys = 0, wall_page, roof_page, shape, convex;
@@ -3319,11 +3319,14 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
     }
     rise = (double)TD5_TG_GEO_ROOF_RISE;
     wall_top = by + H;
+    wall_h = H;                            /* [integ Q] wall_top - by, without the cancellation */
     if (shape != TD5_GEOB_ROOF_FLAT && shape != TD5_GEOB_ROOF_NONE
         && gb->roof_height > 0.0 && gb->roof_height < H * 0.8) {
         rise = gb->roof_height;
         wall_top = by + H - rise;          /* the roof is INSIDE the height */
+        wall_h = H - rise;
     }
+    if (!e->exact_wall_h) wall_h = wall_top - by;   /* the strip: its bytes as they always were */
     /* Roof tile: one page every ~8 m of footprint, so a 30 m block reads as a
      * tiled roof instead of one stretched image. */
     inv_tile = 1.0 / 3400.0;
@@ -3406,11 +3409,11 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
      * the windows -- the reason this was ever derived from a height). Falls back
      * to the page-floor ratio when the cache has no storey count. */
     if (lm_row_h > 1.0) {
-        vrows = (wall_top - by) / lm_row_h;       /* [1014 D20] worship cell */
+        vrows = wall_h / lm_row_h;                /* [1014 D20] worship cell */
     } else if (storeys > 0 && H > 1.0) {
-        vrows = (double)storeys * (wall_top - by) / H;
+        vrows = (double)storeys * wall_h / H;
     } else {
-        vrows = (wall_top - by) / ((floor_h > 1.0) ? floor_h : 1.0);
+        vrows = wall_h / ((floor_h > 1.0) ? floor_h : 1.0);
     }
     if (!(vrows > 0.25)) vrows = 1.0;
     if (ntri > 0) {
@@ -3455,8 +3458,9 @@ int tg_geo_emit_building_core(const TG_GeoBldEnv *e, const TD5_GeoBuilding *gb,
         /* The page rows stretch with the extra wall, so a foundation under a
          * 12-storey block does not squash its windows. */
         vq = vrows;
-        if (wall_top - by > 1.0)
-            vq = vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - by);
+        if (wall_h > 1.0)
+            vq = e->exact_wall_h ? vrows * (wall_h + (by - 0.5 * (bot[k] + bot[j]))) / wall_h
+                                 : vrows * (wall_top - 0.5 * (bot[k] + bot[j])) / (wall_top - by);
         /* Storeys over the WALL, not over the building: with roof:height
          * tagged the eaves are below the top and repeating the full storey
          * count over the shorter wall would squash the windows. */

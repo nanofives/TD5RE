@@ -244,6 +244,7 @@ struct TD5_RoamScnSource {
     int       fp_on, plaza_on, bld_on, lm_prefab;
     int       lm_wins;        /* [F4b] TD5RE_ROAM_LM_WINS, see sc_bld_clear       */
     int       s3d;            /* [JC] TD5RE_ROAM_S3D: Simple 3D Buildings (parts, roofs, outlines hidden) */
+    int       bld_vexact;     /* [integ Q] TD5RE_ROAM_BLD_VEXACT: wall V from the wall height (TG_GeoBldEnv.exact_wall_h) */
     ScCache   rel;            /* [JC2] S3D_RELATIONS.JSON outlines (a pinned extra BUILDINGS cache)   */
     ScRelX   *relx;           /*   ... their courtyards, per record                                   */
     ScCache   prel;           /* [LD] PARK_RELATIONS.JSON greens / precincts (a pinned extra AREAS cache) */
@@ -2856,6 +2857,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
         e.acct = 0;
         e.st = &c->bst;
         e.s3d = s->s3d;
+        e.exact_wall_h = s->bld_vexact;
         e.s3d_skip_mass = s3d_hide && !s3d_base;
         e.s3d_base = s3d_base;
         if (s3d_hide) c->st.bld_s3d_hidden++;
@@ -9003,6 +9005,7 @@ static int inf_emit(PvEmit *e, const double *rx0, const double *rz0, int n, uint
     env.rect_on_road = sc_bld_rect_on_road;
     env.apron_ok = sc_bld_apron_ok;
     env.apron_quad_ok = sc_bld_apron_quad_ok;
+    env.exact_wall_h = s->bld_vexact;
     env.si = -1;
     env.st = &c->bst;
     {
@@ -9806,6 +9809,7 @@ TD5_RoamScnSource *td5_roam_scn_open(const char *place, const RoamGrid *g, TD5_R
     s->exag = (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0;
     s->lm_wins = td5_env_int("TD5RE_ROAM_LM_WINS", 1, 0, 1);
     s->s3d = td5_env_int("TD5RE_ROAM_S3D", 1, 0, 1);
+    s->bld_vexact = td5_env_int("TD5RE_ROAM_BLD_VEXACT", 1, 0, 1);
     s->pv = sc_pv_open(s);
     s->hc = (TD5_RoamHeight *)calloc(1, sizeof(TD5_RoamHeight));
     if (!sc_index_load(s)) TD5_LOG_W(LOG_TAG, "roam scenery: %s has no tiles/INDEX.JSON: no buildings", place);
