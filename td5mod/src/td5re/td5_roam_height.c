@@ -252,6 +252,34 @@ int td5_roam_height_sample(TD5_RoamHeight *c, double x, double z,
     return 1;
 }
 
+/* [roam PC] the WATER raster's wetness at a place-frame point, bilinear over the 4 cells round it (0 dry .. 1 wet):
+ * its 0.5 contour is the shoreline roam_is_wet's nearest-cell rule draws at the raster's own resolution. */
+int td5_roam_height_wetfrac(TD5_RoamHeight *c, double x, double z, double *out_frac)
+{
+    TD5_RoamHeightWin *ww;
+    const GrRaster *r;
+    const unsigned char *d;
+    double fx, fz, tx, tz, w[4];
+    int ix, iz, jx, jz, k;
+    if (!c->has_water) { *out_frac = 0.0; return 1; }
+    ww = roam_find(c, TD5_ROAM_HEIGHT_LAYER_WATER, x, z);
+    if (!ww) return 0;
+    r = &ww->r;
+    d = (const unsigned char *)r->data;
+    roam_cell(r, x, z, &fx, &fz);
+    ix = (int)fx; iz = (int)fz;
+    jx = (ix + 1 < r->w) ? ix + 1 : ix;
+    jz = (iz + 1 < r->h) ? iz + 1 : iz;
+    tx = fx - (double)ix; tz = fz - (double)iz;
+    for (k = 0; k < 4; k++) {
+        const unsigned v = d[(size_t)(k < 2 ? iz : jz) * (size_t)r->w + (size_t)((k & 1) ? jx : ix)];
+        const int nodata = r->nodata_raw >= 0 && r->nodata_raw <= 255 && (int)v == r->nodata_raw;
+        w[k] = (v != 0u && !nodata) ? 1.0 : 0.0;
+    }
+    *out_frac = (w[0] * (1.0 - tx) + w[1] * tx) * (1.0 - tz) + (w[2] * (1.0 - tx) + w[3] * tx) * tz;
+    return 1;
+}
+
 /* ---------------------------------------------------------------- dev test -- */
 
 #ifndef TD5RE_RELEASE

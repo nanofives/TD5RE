@@ -54,6 +54,7 @@
 #include "td5_roam_mode.h"
 #include "td5_roam_furniture.h"
 #include "td5_roam_rails.h"
+#include "td5_roam_lanes.h"      /* [roam PA] bus / bike lane paint data */
 #include "td5_roam_traffic.h"   /* [F8] td5_roam_signal_group: the head an approach obeys */
 
 #ifdef LOG_TAG
@@ -684,6 +685,8 @@ struct TD5_RoamFurnSource {
     double     lamp_sw;                  /* pavement width, the lamp / pole stand-off (units) */
     int        on_signals, on_lamps, on_stops, on_xings, on_unknown_xings;
     int        on_barriers, on_piers;      /* [roam IE] TD5RE_ROAM_FURN_BARRIERS / _PIERS (default 1) */
+    int        on_lanes;                   /* [roam PA] TD5RE_ROAM_LANES (default 1) */
+    int        lane_rail_veto;             /* [integ P] TD5RE_ROAM_LANE_RAIL_VETO (default 1) */
 };
 
 static int fu_json_true(const cJSON *e, const char *key)
@@ -863,6 +866,8 @@ TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
     f->on_piers    = td5_env_int("TD5RE_ROAM_FURN_PIERS", 1, 0, 1);
     f->on_stops   = td5_env_int("TD5RE_ROAM_FURN_STOPS", 1, 0, 1);
     f->on_xings   = td5_env_int("TD5RE_ROAM_FURN_XINGS", 1, 0, 1);
+    f->on_lanes   = td5_env_int("TD5RE_ROAM_LANES", 1, 0, 1);      /* [roam PA] */
+    f->lane_rail_veto = td5_env_int("TD5RE_ROAM_LANE_RAIL_VETO", 1, 0, 1);   /* [integ P] */
     /* [roam LC] unknown paint: 0 skipped (old), 1 the rule (zebra on a main / wide road, plain lines elsewhere), 2 every
      * unknown a zebra (what TD5RE_GEO_XING_UNKNOWN=1 always meant). Unmarked is never painted in any mode. */
     f->xing_mode = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1) ? 2 : td5_env_int("TD5RE_ROAM_XING_UNKNOWN", 1, 0, 2);
@@ -2460,6 +2465,141 @@ static int fu_emit_piers(FuEm *em)
     return 1;
 }
 
+/* ============================================================================
+ * SECTION: lane paint  [roam PA]
+ * Bus lanes (red, a solid white line on the traffic side) and bike lanes (green; a separated "ciclovia"
+ * gets a low kerb) along the kerb of every street the OSM tags name (LANES.JSON). One tinted flat quad per
+ * ribbon span, written as a decal under the zebras. The way's own direction decides left / right.
+ * ========================================================================== */
+
+#define FU_LN_LIFT       14.0                         /* under the zebra / stop line (FU_X_LIFT 20), over the ribbon */
+#define FU_LN_BUS_W      (3.0 * FU_UPM)
+#define FU_LN_BIKE_W     (1.5 * FU_UPM)
+#define FU_LN_TRACK_W    (2.0 * FU_UPM)
+#define FU_LN_LINE_W     (0.12 * FU_UPM)
+#define FU_LN_KERB_W     (0.10 * FU_UPM)              /* kerb half width */
+#define FU_LN_KERB_H     (0.14 * FU_UPM)
+#define FU_LN_EDGE       (0.10 * FU_UPM)              /* paint stops this far from the kerb face */
+#define FU_LN_RED        0xFFC04040u
+#define FU_LN_GREEN      0xFF3E9A50u
+#define FU_LN_WHITE      0xFFF0F0F0u
+
+static int fu_quad_col(FuEm *em, const double *px, const double *py, const double *pz, unsigned int col, int page)
+{
+    static const double uu[4] = { 0.0, 1.0, 1.0, 0.0 }, vv[4] = { 0.0, 0.0, 1.0, 1.0 };
+    const unsigned int cc[4] = { col, col, col, col };
+    int seg_page = page, seg_nq = 1;
+    size_t off;
+    TG_Buf *b = fu_begin(em, &off);
+    if (!b) return 0;
+    return fu_end(em, b, off, tg_write_quad_mesh_col(b, px, py, pz, uu, vv, cc, 4, &seg_page, &seg_nq, 1), 1);
+}
+
+/* the direction of way `w` nearest the place-frame point (x, z): *dx, *dz unit; returns the distance, -1 none */
+static double fu_lane_way_dir(const TD5_RoamLaneWay *w, double x, double z, double *dx, double *dz)
+{
+    double best = 1e300;
+    int k;
+    for (k = 0; k + 1 < w->np; k++) {
+        const double ax = w->px[k], az = w->pz[k], ex = w->px[k + 1] - ax, ez = w->pz[k + 1] - az, l2 = ex * ex + ez * ez;
+        double t = l2 > 1e-9 ? ((x - ax) * ex + (z - az) * ez) / l2 : 0.0, d, l;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+        d = hypot(x - (ax + ex * t), z - (az + ez * t));
+        l = sqrt(l2);
+        if (d < best && l > 1e-6) { best = d; *dx = ex / l; *dz = ez / l; }
+    }
+    return best < 1e299 ? best : -1.0;
+}
+
+/* a strip between lateral offsets o0 < o1 (along n = (tz, -tx)) of the span a -> b */
+static int fu_lane_strip(FuEm *em, const RoamSegInfo *s, const double n[2], double o0, double o1, double lift, unsigned int col)
+{
+    double px[4], py[4], pz[4];
+    px[0] = s->ax + n[0] * o0; pz[0] = s->az + n[1] * o0; py[0] = s->ay + lift;
+    px[1] = s->ax + n[0] * o1; pz[1] = s->az + n[1] * o1; py[1] = s->ay + lift;
+    px[2] = s->bx + n[0] * o1; pz[2] = s->bz + n[1] * o1; py[2] = s->by + lift;
+    px[3] = s->bx + n[0] * o0; pz[3] = s->bz + n[1] * o0; py[3] = s->by + lift;
+    return fu_quad_col(em, px, py, pz, col, TD5_TG_PAGE_R4_PIER);
+}
+
+/* one painted lane of width w ending `edge` from the centre, the strip + its inner white line; returns the new inner offset */
+static int fu_lane_one(FuEm *em, const RoamSegInfo *s, const double n[2], double sg, double edge, double w, unsigned int col)
+{
+    const double inner = edge - w, l0 = inner - FU_LN_LINE_W;
+    if (!fu_lane_strip(em, s, n, sg > 0 ? inner : -edge, sg > 0 ? edge : -inner, FU_LN_LIFT, col)) return 0;
+    return fu_lane_strip(em, s, n, sg > 0 ? l0 : -inner, sg > 0 ? inner : -l0, FU_LN_LIFT + 1.0, FU_LN_WHITE);
+}
+
+static int fu_emit_lanes(FuEm *em, TD5_RoamFurnSource *f)
+{
+    TG_TileCtx *c = em->c;
+    TD5_RoamFurnStats *st = em->st;
+    int32_t ox, oz;
+    int i, ns = roam_ctx_nseg(c);
+    long long last_way = -1;
+    roam_ctx_origin(c, NULL, NULL, &ox, &oz);
+    for (i = 0; i < ns; i++) {
+        RoamSegInfo s;
+        const TD5_RoamLaneWay *lw;
+        double mx, mz, len, tx, tz, wx = 0.0, wz = 0.0, n[2], dist, hw;
+        int side, same;
+        if (!roam_ctx_seg(c, i, &s)) continue;
+        mx = 0.5 * (s.ax + s.bx); mz = 0.5 * (s.az + s.bz);
+        if (!roam_ctx_owned(c, mx, mz)) continue;
+        lw = td5_roam_lanes_way(f->place, (long long)(s.key >> 16), NULL);
+        if (!lw) continue;
+        len = hypot(s.bx - s.ax, s.bz - s.az);
+        if (!(len > 1e-6)) continue;
+        tx = (s.bx - s.ax) / len; tz = (s.bz - s.az) / len;
+        dist = fu_lane_way_dir(lw, mx + (double)ox, mz + (double)oz, &wx, &wz);
+        if (dist < 0.0 || dist > 40.0 * FU_UPM) { st->lane_no_dir++; continue; }
+        if (last_way != lw->id) { last_way = lw->id; st->lane_ways++; }
+        same = (tx * wx + tz * wz) >= 0.0;
+        n[0] = tz; n[1] = -tx;                              /* the span's LEFT (game frame) */
+        hw = s.hw;
+        if (f->lane_rail_veto) {   /* [integ P] no lane paint across a level crossing: the span's carriageway off the rail bed */
+            const double px[4] = { s.ax + n[0] * hw, s.bx + n[0] * hw, s.bx - n[0] * hw, s.ax - n[0] * hw };
+            const double pz[4] = { s.az + n[1] * hw, s.bz + n[1] * hw, s.bz - n[1] * hw, s.az - n[1] * hw };
+            if (roam_ctx_rails_bed_near(c, px, pz, 4, 0.5 * FU_UPM)) { st->lane_rail++; continue; }
+        }
+        em->sb = roam_ctx_sb_of(c, mx, mz);
+        em->road_y = 0.5 * (s.ay + s.by);
+        for (side = 0; side < 2; side++) {                  /* 0 = the way's left, 1 = its right */
+            const double sg = ((side == 0) == (same != 0)) ? 1.0 : -1.0;   /* along n: + = the span's left */
+            double edge = hw - FU_LN_EDGE;
+            const int bus = lw->bus[side], cyc = lw->cyc[side];
+            if (bus) {
+                const int nb = lw->bus_n[side] > 0 ? lw->bus_n[side] : 1;
+                double w = FU_LN_BUS_W;
+                if (w * nb > 0.62 * 2.0 * hw) w = 0.62 * 2.0 * hw / nb;     /* never more than ~60 % of the carriageway */
+                if (w < 1.8 * FU_UPM) { st->lane_narrow++; continue; }
+                if (!fu_lane_one(em, &s, n, sg, edge, w * nb, FU_LN_RED)) return 0;
+                st->lane_bus_segs++; st->lane_bus_m += len / FU_UPM;
+                edge -= w * nb + FU_LN_LINE_W;              /* a bike lane on the same side goes inside */
+            }
+            if (cyc == TD5_LANE_LANE || cyc == TD5_LANE_TRACK) {
+                const double w = cyc == TD5_LANE_TRACK ? FU_LN_TRACK_W : FU_LN_BIKE_W;
+                if (edge - w < 0.35 * hw) { st->lane_narrow++; continue; }
+                if (!fu_lane_one(em, &s, n, sg, edge, w, FU_LN_GREEN)) return 0;
+                if (cyc == TD5_LANE_TRACK) {      /* the separated ciclovia: a low kerb on the traffic side */
+                    const double ko = sg * (edge - w - FU_LN_LINE_W - FU_LN_KERB_W);
+                    const double kx = mx + n[0] * ko, kz = mz + n[1] * ko, ky = 0.5 * (s.ay + s.by) + 0.5 * FU_LN_KERB_H;
+                    size_t off;
+                    TG_Buf *b = fu_begin(em, &off);
+                    if (!b) return 0;
+                    if (!fu_end(em, b, off, tg_emit_box_mesh(b, kx, ky, kz, FU_LN_KERB_W, 0.5 * FU_LN_KERB_H, 0.5 * len, tx, tz,
+                                                           TD5_TG_PAGE_R4_PIER, FU_LN_KERB_W * 2.0, 0xFFC8C8C8u), 1)) return 0;
+                    st->lane_kerbs++; st->lane_track_segs++; st->lane_track_m += len / FU_UPM;
+                } else {
+                    st->lane_bike_segs++; st->lane_bike_m += len / FU_UPM;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
 int td5_roam_furn_emit(TD5_RoamFurnSource *f, TG_TileCtx *c, TD5_RoamFurnStats *st, float **lamps, uint32_t *nlamps)
 {
     FuEm em;
@@ -2475,6 +2615,12 @@ int td5_roam_furn_emit(TD5_RoamFurnSource *f, TG_TileCtx *c, TD5_RoamFurnStats *
     if (ok && f->on_lamps && !fu_emit_lamps(&em, f, &lp)) ok = 0;
     if (ok && f->on_barriers && !fu_emit_barriers(&em)) ok = 0;     /* [roam IE] */
     if (ok && f->on_piers && !fu_emit_piers(&em)) ok = 0;           /* [roam IE] */
+    if (ok && f->on_lanes) {                                         /* [roam PA] */
+        int xs_ln[TD5_ROAM_SCN_NSB];
+        roam_ctx_xc_snap(c, xs_ln);
+        if (!fu_emit_lanes(&em, f)) ok = 0;
+        roam_ctx_xc_note(c, xs_ln, ROAM_XC_LANE);                   /* [integ P] tree cross-check range */
+    }
     if (ok && (f->on_stops || f->on_xings)) {
         if (!fu_collect_nodes(&em, f, &xs, &nx, &bs, &nb)) ok = 0;
         if (ok && f->on_stops && !fu_emit_stops(&em, bs, nb)) ok = 0;

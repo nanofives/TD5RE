@@ -1549,9 +1549,17 @@ static int rl_lx_post(RlEm *e, int sb, double px, double pz, double ky, const do
     return 1;
 }
 
-static int rl_lx_node(RlEm *e, const RlNode *n)
+int td5_roam_rails_untagged_x_enabled(void) { return td5_env_int("TD5RE_ROAM_RAILS_UNTAGGED_X", 1, 0, 1); }
+
+static int rl_lx_node(RlEm *e, const RlNode *n0)
 {
     TG_TileCtx *c = e->c;
+    RlNode nx;
+    const RlNode *n = n0;
+    const int untagged = !n0->barrier && !n0->light && !n0->saltire;
+    if (untagged && td5_roam_rails_untagged_x_enabled()) {   /* [roam PA] untagged: a plain St Andrew's cross, no arms, no lamps */
+        nx = *n0; nx.saltire = 1; n = &nx;
+    }
     const double lx = n->x - (double)e->ox, lz = n->z - (double)e->oz;
     const int own = roam_ctx_owned(c, lx, lz);
     int ed = -1, sd = 0, ap;
@@ -1560,8 +1568,9 @@ static int rl_lx_node(RlEm *e, const RlNode *n)
     RlNear tr;
     if (own) {
         e->st->lx_nodes++;
-        if (!n->barrier && !n->light && !n->saltire) { e->st->lx_untagged++; return 1; }
-        e->st->lx_equipped++;
+        if (untagged) e->st->lx_untagged++;
+        if (!n->barrier && !n->light && !n->saltire) return 1;
+        if (!untagged) e->st->lx_equipped++;
     } else if (!n->barrier && !n->light && !n->saltire) return 1;
     if (!rl_nearest_track(e->r, n->x, n->z, RL_M(12.0), &tr)) { if (own) e->st->lx_no_rail++; return 1; }
     if (!roam_nearest_edge(c, lx, lz, RL_M(12.0), &ed, &sd, &al, &lat) || !roam_edge_frame(c, ed, sd, al, &fr)) {
@@ -1591,6 +1600,8 @@ static int rl_lx_node(RlEm *e, const RlNode *n)
         if (arm > cap) arm = cap;
         sb = roam_ctx_sb_of(c, px, pz);
         if (!rl_lx_post(e, sb, px, pz, ky, T, R, n, arm)) return 0;
+        if (untagged) e->st->lx_untagged_x++;
+        if (untagged && e->log) TD5_LOG_I(LOG_TAG, "ROAM_RAIL_UNTAGGED_X at place (%.0f,%.0f)", px + (double)e->ox, pz + (double)e->oz);
     }
     return 1;
 }
