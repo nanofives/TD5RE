@@ -289,6 +289,10 @@ typedef struct {
     int  lot_cells, lot_green, lot_rural, lot_skip, lot_under_road;
     int  lot_shore;                 /* [roam PC] cells left to the render's shore (a wet 2 m sub-sample or lattice corner) */
     int  lawn_shore;                /* [roam PC] plaza lawn pieces left to the render's shore */
+    /* [roam QB] lawn against the road: pieces clipped exactly (TD5RE_ROAM_LAWN_CLIP), the census of the gap
+     * between the drawn lawn and the road edge (the drawn ground shows there, drop + lift under the lawn) */
+    int  lawn_clip, lawn_clip_drop, lawn_clip_fallback;
+    double lawn_border_m, lawn_gap_m2;
     int  lot_rings;                 /* [HD] ring plazas (a roundabout's inner kerb loop) kept green */
     double lot_paved_m2, lot_lawn_m2, lot_green_m2;
     /* [HD] INFILL: frontage lots along the pavement's building line with no real footprint on them -> a built mass

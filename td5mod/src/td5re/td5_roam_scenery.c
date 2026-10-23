@@ -1083,6 +1083,7 @@ struct TG_TileCtx {
     /* [roam IA] the drawn ground's lattice for the lawns (sc_dg): cells per tile side, the render's ground drop,
      * and the knob (TD5RE_ROAM_LAWN_ON_GROUND) */
     int      dg_G, lawn_dg;
+    int      lawn_clip, lawn_gap_cen;   /* [roam QB] the exact lawn cut, its census */
     double   dg_drop;
     /* [G5] every pavement slab / island quad this tile emitted (x y z per corner, tile-local), so a footpath
      * laid after the pavement stands on top of one it crosses */
@@ -3045,6 +3046,181 @@ static int sc_tri_push(ScTris *t, const double *p)
     return 1;
 }
 
+
+/* [roam QB] LAWN CLIP. Mariano, 2026-10-23: "grass texture leaves a dent around the road". A lawn piece touching the road
+ * was refined twice and every sub-triangle still on the road dropped (sc_tri_split): the drawn ground showed in a saw-tooth
+ * strip up to ~2 m wide between the lawn's edge and the kerb, drop + lift (54 cm) under the lawn, a trench along every
+ * park road. Now the piece loses only what lies on the road: each drivable primitive over it is cut away along its own
+ * edges (convex difference, SC_LCLIP_MARGIN outside them so the guard census still reads 0), the rest fanned into
+ * triangles in the piece's own plane (one drawn-ground cell triangle: still parallel to the ground). A piece the cut
+ * cannot hold (too many pieces) keeps the old refinement. TD5RE_ROAM_LAWN_CLIP=0 = the old lawn. */
+#define SC_LCLIP_PTS     24
+#define SC_LCLIP_PIECES  48
+#define SC_LCLIP_PRIMS   64
+#define SC_LCLIP_MARGIN  (0.03 * SC_UPM)
+
+typedef struct { double x[SC_LCLIP_PTS], z[SC_LCLIP_PTS]; int n; } ScLcPoly;
+typedef struct { const ScPrim *p[SC_LCLIP_PRIMS]; int n, skip_lm, over; } ScLcPrims;
+
+static int sc_lc_collect(void *u, const ScPrim *p)
+{
+    ScLcPrims *q = (ScLcPrims *)u;
+    if (q->skip_lm && p->lm_ok) return 0;
+    if (q->n < SC_LCLIP_PRIMS) q->p[q->n++] = p; else q->over = 1;
+    return 0;
+}
+
+/* the part of `in` where sgn * (signed distance to the line a->b, + = left) >= k */
+static int sc_lc_half(const ScLcPoly *in, double ax, double az, double bx, double bz, double sgn, double k, ScLcPoly *out)
+{
+    const double l = hypot(bx - ax, bz - az);
+    int i, m = 0;
+    if (l < 1e-9) { *out = *in; return out->n; }
+    for (i = 0; i < in->n; i++) {
+        const int j = (i + 1) % in->n;
+        const double di = sgn * sc_cross(ax, az, bx, bz, in->x[i], in->z[i]) / l - k;
+        const double dj = sgn * sc_cross(ax, az, bx, bz, in->x[j], in->z[j]) / l - k;
+        if (di >= 0.0 && m < SC_LCLIP_PTS) { out->x[m] = in->x[i]; out->z[m] = in->z[i]; m++; }
+        if ((di >= 0.0) != (dj >= 0.0) && m < SC_LCLIP_PTS) {
+            const double t = di / (di - dj);
+            out->x[m] = in->x[i] + t * (in->x[j] - in->x[i]); out->z[m] = in->z[i] + t * (in->z[j] - in->z[i]); m++;
+        }
+    }
+    out->n = m;
+    return m;
+}
+
+static double sc_lc_area(const ScLcPoly *q)
+{
+    double a = 0.0;
+    int i;
+    for (i = 0; i < q->n; i++) { const int j = (i + 1) % q->n; a += q->x[i] * q->z[j] - q->x[j] * q->z[i]; }
+    return 0.5 * fabs(a);
+}
+
+/* triangle p minus every drivable primitive over it, `margin` outside their edges, into piece list A (its count).
+ * *border = the length of the cut edges (the lawn's edge along the road). -1 = too many pieces / primitives */
+static int sc_lc_cut(TG_TileCtx *c, const double *p, double margin, ScLcPoly *A, double *border)
+{
+    static const int cap = SC_LCLIP_PIECES;
+    ScLcPrims q;
+    ScLcPoly B[SC_LCLIP_PIECES];
+    double x0 = p[0], x1 = p[0], z0 = p[1], z1 = p[1];
+    int na = 1, k, i, e;
+    for (k = 1; k < 3; k++) {
+        if (p[k * 2] < x0) x0 = p[k * 2];
+        if (p[k * 2] > x1) x1 = p[k * 2];
+        if (p[k * 2 + 1] < z0) z0 = p[k * 2 + 1];
+        if (p[k * 2 + 1] > z1) z1 = p[k * 2 + 1];
+    }
+    memset(&q, 0, sizeof q);
+    q.skip_lm = c->skip_lm;
+    sc_prims_in(c, x0 - margin, z0 - margin, x1 + margin, z1 + margin, sc_lc_collect, &q);
+    if (q.over) return -1;
+    for (k = 0; k < 3; k++) { A[0].x[k] = p[k * 2]; A[0].z[k] = p[k * 2 + 1]; }
+    A[0].n = 3;
+    if (border) *border = 0.0;
+    for (i = 0; i < q.n; i++) {
+        const ScPrim *pr = q.p[i];
+        double ar = 0.0, sgn;
+        int nb = 0, a;
+        if (pr->n < 3) continue;
+        for (e = 0; e < pr->n; e++) { const int f = (e + 1) % pr->n; ar += pr->x[e] * pr->z[f] - pr->x[f] * pr->z[e]; }
+        if (fabs(ar) < 1e-6) continue;
+        sgn = ar > 0.0 ? 1.0 : -1.0;          /* inside = sgn * cross > 0 for every edge */
+        for (a = 0; a < na; a++) {
+            ScLcPoly rem = A[a], t;
+            double bx0 = 1e300, bx1 = -1e300, bz0 = 1e300, bz1 = -1e300;
+            for (k = 0; k < rem.n; k++) {
+                if (rem.x[k] < bx0) bx0 = rem.x[k];
+                if (rem.x[k] > bx1) bx1 = rem.x[k];
+                if (rem.z[k] < bz0) bz0 = rem.z[k];
+                if (rem.z[k] > bz1) bz1 = rem.z[k];
+            }
+            if (bx1 < pr->x0 - margin || bx0 > pr->x1 + margin || bz1 < pr->z0 - margin || bz0 > pr->z1 + margin) {
+                if (nb >= cap) return -1;
+                B[nb++] = rem;
+                continue;
+            }
+            for (e = 0; e < pr->n && rem.n >= 3; e++) {
+                const int f = (e + 1) % pr->n;
+                /* outside this edge (beyond the margin): kept; the rest goes on to the next edge */
+                if (sc_lc_half(&rem, pr->x[e], pr->z[e], pr->x[f], pr->z[f], -sgn, margin, &t) >= 3 && sc_lc_area(&t) > 1.0) {
+                    if (nb >= cap) return -1;
+                    B[nb++] = t;
+                }
+                sc_lc_half(&rem, pr->x[e], pr->z[e], pr->x[f], pr->z[f], sgn, -margin, &t);
+                rem = t;
+            }
+            if (border && rem.n >= 3) {   /* what fell inside the primitive: its edges on the primitive's outline */
+                for (k = 0; k < rem.n; k++) {
+                    const int j = (k + 1) % rem.n;
+                    const double mx = 0.5 * (rem.x[k] + rem.x[j]), mz = 0.5 * (rem.z[k] + rem.z[j]);
+                    int on = -1;
+                    for (e = 0; e < pr->n && on < 0; e++) {
+                        const int f = (e + 1) % pr->n;
+                        const double l = hypot(pr->x[f] - pr->x[e], pr->z[f] - pr->z[e]);
+                        if (l > 1e-9 && fabs(sc_cross(pr->x[e], pr->z[e], pr->x[f], pr->z[f], mx, mz)) / l < margin + 1.0) on = e;
+                    }
+                    if (on >= 0) {   /* a road EDGE only when the ground beyond it is not road too (lane quads share edges) */
+                        const int f = (on + 1) % pr->n;
+                        const double l = hypot(pr->x[f] - pr->x[on], pr->z[f] - pr->z[on]);
+                        const double ox = -sgn * -(pr->z[f] - pr->z[on]) / l, oz = -sgn * (pr->x[f] - pr->x[on]) / l;
+                        const double tx = mx + ox * 0.2 * SC_UPM, tz = mz + oz * 0.2 * SC_UPM;
+                        if (!sc_on_road(c, &tx, &tz, 1, NULL)) *border += hypot(rem.x[j] - rem.x[k], rem.z[j] - rem.z[k]);
+                    }
+                }
+            }
+        }
+        memcpy(A, B, (size_t)nb * sizeof B[0]);
+        na = nb;
+        if (na == 0) break;
+    }
+    return na;
+}
+
+static int sc_tri_push(ScTris *t, const double *p);
+/* 1 = done (pieces pushed), 0 = out of memory, -1 = not handled (the old refinement) */
+static int sc_lawn_clip(TG_TileCtx *c, ScTris *out, const double *p)
+{
+    ScLcPoly A[SC_LCLIP_PIECES], F[SC_LCLIP_PIECES];
+    double border = 0.0, free_m2 = 0.0, drawn_m2 = 0.0;
+    const int na = sc_lc_cut(c, p, SC_LCLIP_MARGIN, A, NULL);
+    const int nf = sc_lc_cut(c, p, 0.0, F, &border);         /* the census: the exact free part, the road edge in it */
+    int a, k;
+    if (nf > 0) for (a = 0; a < nf; a++) free_m2 += sc_lc_area(&F[a]);
+    if (na < 0 || nf < 0) { c->st.lawn_clip_fallback++; return -1; }
+    for (a = 0; a < na; a++)
+        for (k = 1; k + 1 < A[a].n; k++) {
+            const double t6[6] = { A[a].x[0], A[a].z[0], A[a].x[k], A[a].z[k], A[a].x[k + 1], A[a].z[k + 1] };
+            const double xf[3] = { (double)(float)t6[0], (double)(float)t6[2], (double)(float)t6[4] };
+            const double zf[3] = { (double)(float)t6[1], (double)(float)t6[3], (double)(float)t6[5] };
+            const int dup = (fabs(xf[0] - xf[1]) < 1.0 && fabs(zf[0] - zf[1]) < 1.0) || (fabs(xf[1] - xf[2]) < 1.0 && fabs(zf[1] - zf[2]) < 1.0) ||
+                            (fabs(xf[0] - xf[2]) < 1.0 && fabs(zf[0] - zf[2]) < 1.0);
+            if (dup || fabs(td5_geob_ring_area(xf, zf, 3)) < 4.0) continue;
+            if (sc_on_road(c, xf, zf, 3, NULL)) { c->st.lawn_clip_drop++; continue; }
+            if (!sc_tri_push(out, t6)) return 0;
+            drawn_m2 += fabs(td5_geob_ring_area(xf, zf, 3));
+            c->st.lawn_clip++;
+        }
+    c->st.lawn_border_m += border / SC_UPM;
+    if (free_m2 > drawn_m2) c->st.lawn_gap_m2 += (free_m2 - drawn_m2) / (SC_UPM * SC_UPM);
+    return 1;
+}
+
+/* the old path's census twin: what the refinement keeps of a piece on the road, against its exact free part */
+static void sc_lawn_gap_old(TG_TileCtx *c, const double *p, double kept_m2)
+{
+    ScLcPoly F[SC_LCLIP_PIECES];
+    double border = 0.0, free_m2 = 0.0;
+    const int nf = sc_lc_cut(c, p, 0.0, F, &border);
+    int a;
+    if (nf < 0) return;
+    for (a = 0; a < nf; a++) free_m2 += sc_lc_area(&F[a]);
+    c->st.lawn_border_m += border / SC_UPM;
+    if (free_m2 > kept_m2) c->st.lawn_gap_m2 += (free_m2 - kept_m2) / (SC_UPM * SC_UPM);
+}
+
 /* red refinement to `lvl`, then: a sub-triangle on the road is refined `extra`
  * more times and only its road-free pieces kept */
 static int sc_tri_split(TG_TileCtx *c, ScTris *out, const double *p, int lvl, int extra)
@@ -3064,6 +3240,25 @@ static int sc_tri_split(TG_TileCtx *c, ScTris *out, const double *p, int lvl, in
                             (fabs(xf[0] - xf[2]) < 1.0 && fabs(zf[0] - zf[2]) < 1.0);
             if (dup || fabs(td5_geob_ring_area(xf, zf, 3)) < 4.0) { c->st.lawn_cut++; return 1; }
             if (!sc_on_road(c, xf, zf, 3, NULL)) return sc_tri_push(out, p);
+            if (c->lawn_clip && extra == 2) {                          /* [roam QB] the cell piece, cut exactly */
+                const int r = sc_lawn_clip(c, out, p);
+                if (r >= 0) return r;
+            }
+            if (c->lawn_gap_cen && extra == 2) {                       /* [roam QB] the old path, measured */
+                const int n0 = out->n;
+                int r, t;
+                double kept = 0.0;
+                c->lawn_gap_cen = 0;
+                r = sc_tri_split(c, out, p, 1, 1);
+                c->lawn_gap_cen = 1;
+                for (t = n0; t < out->n; t++) {
+                    const double qx[3] = { out->x[t * 3], out->x[t * 3 + 1], out->x[t * 3 + 2] };
+                    const double qz[3] = { out->z[t * 3], out->z[t * 3 + 1], out->z[t * 3 + 2] };
+                    kept += fabs(td5_geob_ring_area(qx, qz, 3));
+                }
+                sc_lawn_gap_old(c, p, kept);
+                return r;
+            }
         } else
         if (!sc_on_road(c, x, z, 3, NULL)) return sc_tri_push(out, p);
         if (extra <= 0) { c->st.lawn_cut++; return 1; }
@@ -7435,6 +7630,43 @@ static int sc_lot_shore(TG_TileCtx *c, const double *cell)
     return 0;
 }
 
+
+#ifndef TD5RE_RELEASE
+/* [roam QB] DEV probe: TD5RE_QB_PROBE=x,z (place frame) prints a cross-section of the surfaces outward from the nearest
+ * street centreline through that point, on the tile that owns it: road, lawn plane, slab, drawn ground, raster */
+static void sc_qb_probe(TG_TileCtx *c)
+{
+    const char *e = getenv("TD5RE_QB_PROBE");
+    double px, pz, along, lat, x, z;
+    int edge, side, k;
+    if (!e || sscanf(e, "%lf,%lf", &px, &pz) != 2) return;
+    x = px - (double)c->org_x; z = pz - (double)c->org_z;
+    if (!sc_owned_point(c, x, z)) return;
+    if (!roam_nearest_edge(c, x, z, 60.0 * SC_UPM, &edge, &side, &along, &lat)) { fprintf(stderr, "QBPROBE no street\n"); return; }
+    {
+        const ScSeg *sg = &c->seg[edge];
+        const double dx = sg->bx - sg->ax, dz = sg->bz - sg->az, l = hypot(dx, dz);
+        const double tx = dx / l, tz = dz / l, nx = tz * (lat >= 0 ? 1.0 : -1.0), nz = -tx * (lat >= 0 ? 1.0 : -1.0);
+        const double t = ((x - sg->ax) * tx + (z - sg->az) * tz);
+        const double cx = sg->ax + tx * t, cz = sg->az + tz * t;
+        fprintf(stderr, "QBPROBE tile %d,%d seg %d hw %.2f m lat %.2f m (point) centre y %.3f m\n", c->tx, c->tz, edge, sg->hw / SC_UPM,
+                fabs(lat) / SC_UPM, (sg->ay + (sg->by - sg->ay) * (t / l)) / SC_UPM);
+        for (k = 0; k <= 60; k++) {
+            const double d = (double)k * 0.5 * SC_UPM;
+            const double qx = cx + nx * d, qz = cz + nz * d;
+            double ry = 0.0, ly = 0.0, sy = 0.0, raw = 0.0;
+            const int hr = roam_ctx_road_y(c, qx, qz, sg->ay, &ry), hl = sc_lawn_y(c, qx, qz, &ly), hs = sc_pv_y(c, qx, qz, &sy);
+            roam_ctx_ground_raw(c, qx, qz, &raw, NULL);
+            fprintf(stderr, "QBPROBE d %5.1f road %s lawn %s slab %s dg %8.3f ground %8.3f raw %8.3f low %6.3f\n", d / SC_UPM,
+                    hr ? "   y    " : "    -   ", hl ? "y" : "-", hs ? "y" : "-", sc_dg(c, qx, qz) / SC_UPM,
+                    sc_ground(c, qx, qz) / SC_UPM, raw / SC_UPM, sc_lowering(c, qx, qz) / SC_UPM);
+            if (hr || hl || hs) fprintf(stderr, "QBPROBE   d %5.1f road_y %8.3f lawn_y %8.3f slab_y %8.3f\n", d / SC_UPM,
+                                        hr ? ry / SC_UPM : -1.0, hl ? ly / SC_UPM : -1.0, hs ? sy / SC_UPM : -1.0);
+        }
+    }
+}
+#endif
+
 static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
 {
     const int cell_m = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
@@ -8918,6 +9150,8 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         c->dg_G = 256 / ((64 % cm) ? 16 : cm);
         c->dg_drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0);
         c->lawn_dg = td5_env_int("TD5RE_ROAM_LAWN_ON_GROUND", 1, 0, 1);
+        c->lawn_clip = c->lawn_dg && td5_env_int("TD5RE_ROAM_LAWN_CLIP", 1, 0, 1);   /* [roam QB] */
+        c->lawn_gap_cen = 1;
         c->sport_on = (s->stadium_on ? 1 : 0) | (s->pitch_on ? 2 : 0);   /* [roam PB] */
     }
     if (hc && td5_roam_gfix_enabled() && td5_env_flag_on("TD5RE_ROAM_SCN_LOWER")) td5_roam_gfix_build(&c->gf, &s->grid, (const RoamTile *const *)c->road, self->tx, self->tz, hc);
@@ -9062,6 +9296,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
 #ifndef TD5RE_RELEASE
     if (c->xc_on) sc_tree_xcheck(c);                                             /* [integ L] dev census */
 #endif
+#ifndef TD5RE_RELEASE
+    sc_qb_probe(c);                                                               /* [roam QB] dev */
+#endif
     c->st.ms_emit = td5_plat_time_ms() - t1;
     sc = sc_assemble(c);
     if (sc) {
@@ -9204,6 +9441,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     double pool_m2 = 0.0;
     long pz_t[13] = { 0 };                     /* [roam LD] plaza furniture + park relations */
     TD5_RoamSportStats sp_t = { 0 };           /* [roam PB] stadiums + pitches */
+    long qb_lc[4] = { 0 };                     /* [roam QB] lawn clip: pieces, dropped, fallback, lawn tris */
+    double qb_lm[2] = { 0.0, 0.0 };            /* [roam QB] lawn border along the road (m), gap (m2) */
     long sp_b[4] = { 0 };                      /* [roam PB] stands left to the module, blobs traced over one, plaza trees skipped */
     long sh_t[16] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
     long mu_t[32] = { 0 };                                     /* [roam NA] */
@@ -9422,6 +9661,8 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         pc_t[9] += r->out.cover_wet; pc_t[10] += r->out.cover_marsh_area; pc_t[11] += r->out.cover_reeds;
         pc_t[12] += r->out.lattice_towers; pc_t[13] += r->out.lattice_members; pc_t[14] += r->lot_shore; pc_t[15] += r->out.towers;
         pc_t[16] += r->lawn_shore; pc_t[17] += r->out.cover_shore_skip;
+        qb_lc[0] += r->lawn_clip; qb_lc[1] += r->lawn_clip_drop; qb_lc[2] += r->lawn_clip_fallback; qb_lc[3] += r->lawn_tris;
+        qb_lm[0] += r->lawn_border_m; qb_lm[1] += r->lawn_gap_m2;
         pz_t[0] += r->plaza.items; pz_t[1] += r->plaza.statues; pz_t[2] += r->plaza.monuments; pz_t[3] += r->plaza.memorials;
         pz_t[4] += r->plaza.fountains; pz_t[5] += r->plaza.benches; pz_t[6] += r->plaza.playgrounds; pz_t[7] += r->plaza.flagpoles;
         pz_t[8] += r->plaza.named; pz_t[9] += r->plaza.skip_kind; pz_t[10] += r->plaza.drop_road; pz_t[11] += r->plaza.guard_hits;
@@ -9438,6 +9679,12 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             sp_t.goals += r->sport.goals; sp_t.nets += r->sport.nets; sp_t.hoops += r->sport.hoops;
             sp_t.line_quads += r->sport.line_quads; sp_t.meshes += r->sport.meshes; sp_t.guard_hits += r->sport.guard_hits;
             sp_b[0] += r->bld_stand; sp_b[1] += r->bld_stand_dup; sp_b[2] += r->sp_tree_skip; sp_b[3] += r->sp_lawn_skip;
+            for (q = 0; q < TD5_RSB__N; q++) {   /* [roam QB] */
+                sp_t.foot_n[q] += r->sport.foot_n[q]; sp_t.foot_over[q] += r->sport.foot_over[q];
+                sp_t.foot_sum[q] += r->sport.foot_sum[q];
+                if (r->sport.foot_max[q] > sp_t.foot_max[q]) sp_t.foot_max[q] = r->sport.foot_max[q];
+            }
+            sp_t.open_n += r->sport.open_n; sp_t.open_m += r->sport.open_m;
         }
         {   /* [roam NA] */
             int q;
@@ -9574,6 +9821,35 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  sp_t.by_surface[TD5_RPF_ACRYLIC], sp_t.by_surface[TD5_RPF_TURF], sp_t.by_surface[TD5_RPF_SAND], sp_t.courts,
                  sp_t.goals, sp_t.nets, sp_t.hoops, sp_t.line_quads, sp_t.skip_small, sp_t.skip_sport, sp_t.skip_none,
                  sp_t.drop_road, sp_t.meshes, sp_t.guard_hits, td5_roam_stadium_enabled(), td5_roam_pitch_enabled());
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
+    }
+    {   /* [roam QB] the lawn's edge along the road */
+        char ln[600];
+        snprintf(ln, sizeof ln, "roam lawn edge [roam QB]: lawn along the road %.0f m, gap between the drawn lawn and the road %.1f m2 "
+                 "(mean width %.3f m, the drawn ground %.0f cm under the lawn there) | lawn tris %ld, clipped pieces %ld, dropped on the road "
+                 "%ld, fallback %ld (TD5RE_ROAM_LAWN_CLIP=%d)", qb_lm[0], qb_lm[1], qb_lm[0] > 0.0 ? qb_lm[1] / qb_lm[0] : 0.0,
+                 (td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0) + SC_GEOP_LIFT) / SC_UPM * 100.0,
+                 qb_lc[3], qb_lc[0], qb_lc[1], qb_lc[2], td5_env_int("TD5RE_ROAM_LAWN_CLIP", 1, 0, 1));
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
+    }
+    {   /* [roam QB] stadium base census: wall bottoms against the drawn ground */
+        static const char *const nm[TD5_RSB__N] = { "bowl front", "bowl outer", "stand front", "stand back", "stand ends", "portals" };
+        char ln[1600];
+        int q, o = 0, tn = 0, tov = 0;
+        double ts = 0.0, tm = 0.0;
+        o += snprintf(ln + o, sizeof ln - (size_t)o, "roam sport base [roam QB]:");
+        for (q = 0; q < TD5_RSB__N; q++) {
+            o += snprintf(ln + o, sizeof ln - (size_t)o, " %s n %d mean %.2f max %.2f over25 %d |", nm[q], sp_t.foot_n[q],
+                          sp_t.foot_n[q] ? sp_t.foot_sum[q] / sp_t.foot_n[q] : 0.0, sp_t.foot_max[q], sp_t.foot_over[q]);
+            tn += sp_t.foot_n[q]; tov += sp_t.foot_over[q]; ts += sp_t.foot_sum[q];
+            if (sp_t.foot_max[q] > tm) tm = sp_t.foot_max[q];
+        }
+        snprintf(ln + o, sizeof ln - (size_t)o, " ALL n %d mean %.3f max %.2f over25 %d (m over the drawn ground) | openings %d, %.0f m",
+                 tn, tn ? ts / tn : 0.0, tm, tov, sp_t.open_n, sp_t.open_m);
         TD5_LOG_I(LOG_TAG, "%s", ln);
         if (f) fprintf(f, "# %s\n", ln);
         fprintf(stderr, "%s\n", ln);

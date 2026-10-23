@@ -143,6 +143,7 @@ typedef struct {
     int oom;
     int nofix_sb;          /* sub-block forced for the current piece (-1 = by each quad's centre) */
     int line_quads;        /* counting the paint                                                 */
+    int foot;              /* [roam QB] TD5_RSB_* of the wall being laid on the ground (-1 = not a footing) */
 } SpEm;
 
 static int sp_page(int pg)
@@ -252,20 +253,47 @@ static int sp_quad(SpEm *e, int pg, const double *x, const double *y, const doub
 }
 
 /* a vertical wall quad from (ax, az) to (bx, bz), bottoms ya0 / yb0, tops ya1 / yb1 */
+/* [roam QB] the base census of one footing: its bottom edge against the drawn ground at both ends and the middle */
+static void sp_foot_census(SpEm *e, double ax, double az, double bx, double bz, double ya0, double yb0)
+{
+    int k;
+    const int f = e->foot;
+    if (f < 0 || f >= TD5_RSB__N) return;
+    for (k = 0; k < 3; k++) {
+        const double t = 0.5 * (double)k;
+        const double x = ax + (bx - ax) * t, z = az + (bz - az) * t, y = ya0 + (yb0 - ya0) * t;
+        double g = (y - roam_ctx_drawn_ground(e->c, x, z)) / SP_UPM;
+        if (g < 0.0) g = 0.0;
+        e->st->foot_n[f]++;
+        e->st->foot_sum[f] += g;
+        if (g > e->st->foot_max[f]) e->st->foot_max[f] = g;
+        if (g > 0.25) e->st->foot_over[f]++;
+    }
+}
+
 static int sp_wall(SpEm *e, int pg, double ax, double az, double bx, double bz, double ya0, double yb0, double ya1, double yb1,
                    unsigned int col)
 {
     const double fx[2] = { ax, bx }, fz[2] = { az, bz };
     const double lo = ya0 < yb0 ? ya0 : yb0, hi = ya1 < yb1 ? ya1 : yb1;
+    if (e->foot == TD5_RSB_OUTER && getenv("TD5RE_QB_DBG")) {
+        double ry = 0.0;
+        const int anyr = roam_ctx_on_road_band(e->c, fx, fz, 2, -1e30, 1e30);
+        const int hr = roam_ctx_road_y(e->c, 0.5 * (ax + bx), 0.5 * (az + bz), lo, &ry);
+        fprintf(stderr, "QBDBG outer (%.0f,%.0f) on_road_any %d road_y_hit %d road-lo %.2f m dg-lo %.2f m\n", 0.5 * (ax + bx), 0.5 * (az + bz),
+                anyr, hr, hr ? (ry - lo) / SP_UPM : 0.0, (roam_ctx_drawn_ground(e->c, 0.5 * (ax + bx), 0.5 * (az + bz)) - lo) / SP_UPM);
+    }
     if (roam_ctx_on_road_band(e->c, fx, fz, 2, lo - SP_GUARD_LO, lo + SP_GUARD_HI)) {
         /* a wall standing on a drivable way (the Unico's service drives run under its end stands): an opening, the
          * wall's bottom SP_CLEAR over the road */
         double ry;
         if (!roam_ctx_road_y(e->c, 0.5 * (ax + bx), 0.5 * (az + bz), lo, &ry)) ry = lo;
         e->st->openings++;
+        if (e->foot >= 0) { e->st->open_n++; e->st->open_m += hypot(bx - ax, bz - az) / SP_UPM; }
         if (ry + SP_CLEAR >= hi) return 1;
         ya0 = yb0 = ry + SP_CLEAR;
     }
+    sp_foot_census(e, ax, az, bx, bz, ya0, yb0);
     {
         const double x[4] = { ax, bx, bx, ax }, y[4] = { ya0, yb0, yb1, ya1 }, z[4] = { az, bz, bz, az };
         return sp_quad(e, pg, x, y, z, col, 2.0, 1);
@@ -511,9 +539,11 @@ static int sp_portals(SpEm *e, const double *wx, const double *wz, const double 
         if (L < 1e-6) continue;
         ox = ox / L * SP_M(0.15); oz = oz / L * SP_M(0.15);
         gy = sp_base(e->c, px, pz);
+        e->foot = TD5_RSB_PORTAL;
         if (!sp_wall(e, SP_PAINT, px + ox - tx * SP_M(w * 0.5), pz + oz - tz * SP_M(w * 0.5),
                      px + ox + tx * SP_M(w * 0.5), pz + oz + tz * SP_M(w * 0.5), gy, gy, gy + SP_M(h), gy + SP_M(h), SC_PORTAL))
             return 0;
+        e->foot = -1;
         e->st->portals++;
     }
     return 1;
@@ -585,17 +615,21 @@ static int sp_bowl(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand *s, c
     rise = (top - y0 - box_h) / (double)K;
     for (k = 0; k < K; k++) T[k] = y0 + (double)(k + 1) * rise + (k >= kb ? box_h : 0.0);
     /* the wall round the pitch (front of row 0), then the tiers */
+    e->foot = TD5_RSB_FRONT;
     for (j = 0; j < SP_BOWL_M; j++)
         if (!sp_wall(e, SP_PAINT, fx[j], fz[j], fx[j + 1], fz[j + 1], B - SP_SINK, B - SP_SINK, y0, y0, SC_CONC_D)) return 0;
+    e->foot = -1;
     if (!sp_tiers(e, fx, fz, bx, bz, SP_BOWL_M, 1, K, T, y0, kb, box_h, &lk)) return 0;
     /* the outer wall to the mapped height: facade + a dark ribbon half way up */
     yr_o = B + Ht + SP_M(0.6);
     yr_i = B + Ht - SP_M(1.0);
     for (j = 0; j < SP_BOWL_M; j++) {
         /* plain panels in two tones per sector (a textured page made moire arcs across 100 m of wall) */
+        e->foot = TD5_RSB_OUTER;
         if (!sp_wall(e, SP_PAINT, bx[j], bz[j], bx[j + 1], bz[j + 1], gy[j] - SP_SINK, gy[j + 1] - SP_SINK, yr_o, yr_o,
                      (j & 1) ? SC_FACADE : SC_FACADE_D))
             return 0;
+        e->foot = -1;
         {
             const double px0 = bx[j] + nx[j] * SP_M(0.12), pz0 = bz[j] + nz[j] * SP_M(0.12);
             const double px1 = bx[j + 1] + nx[j + 1] * SP_M(0.12), pz1 = bz[j + 1] + nz[j + 1] * SP_M(0.12);
@@ -692,14 +726,18 @@ static int sp_open_stand(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand
         for (j = 0; j < m; j++) { lf += hypot(fx[j + 1] - fx[j], fz[j + 1] - fz[j]); lb += hypot(bx[j + 1] - bx[j], bz[j + 1] - bz[j]); }
         e->st->seats += (int)(floor(depth / SP_M(0.8)) * 0.5 * (lf + lb) / SP_UPM / SP_SEAT_M);
     }
+    e->foot = TD5_RSB_SFRONT;
     for (j = 0; j < m; j++)
         if (!sp_wall(e, SP_PAINT, fx[j], fz[j], fx[j + 1], fz[j + 1], B - SP_SINK, B - SP_SINK, y0, y0, SC_CONC_D)) return 0;
+    e->foot = -1;
     if (!sp_tiers(e, fx, fz, bx, bz, m, 0, K, T, y0, -1, 0.0, &lk)) return 0;
     /* the back wall (a parapet over the top row; up to the roof when there is one), the stepped end walls */
     ytop = Ht >= SP_M(15.0) ? top + SP_M(3.5) : top + SP_M(1.1);
+    e->foot = TD5_RSB_SBACK;
     for (j = 0; j < m; j++)
         if (!sp_wall(e, SP_PAINT, bx[j], bz[j], bx[j + 1], bz[j + 1], B - SP_SINK, B - SP_SINK, ytop, ytop,
                      (j & 1) ? SC_CONCRETE : SC_CONC_M)) return 0;
+    e->foot = TD5_RSB_SEND;
     for (j = 0; j <= m; j += m)
         for (k = 0; k < K; k++) {
             const double f0 = (double)k / K, f1 = (double)(k + 1) / K;
@@ -707,6 +745,7 @@ static int sp_open_stand(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand
                          fx[j] + (bx[j] - fx[j]) * f1, fz[j] + (bz[j] - fz[j]) * f1, B - SP_SINK, B - SP_SINK, T[k], T[k], SC_CONCRETE))
                 return 0;
         }
+    e->foot = -1;
     {
         double back = 0.0;
         for (j = 0; j < m; j++) back += hypot(bx[j + 1] - bx[j], bz[j + 1] - bz[j]);
@@ -1163,7 +1202,7 @@ int td5_roam_sport_emit(TG_TileCtx *c, const TD5_RoamStadium *sd, int nsd, const
     int i, sb, pg;
     if (!c || !st || (nsd <= 0 && npt <= 0)) return 1;
     memset(&e, 0, sizeof e);
-    e.c = c; e.st = st; e.nofix_sb = -1;
+    e.c = c; e.st = st; e.nofix_sb = -1; e.foot = -1;
     e.bat = (SpBatch *)calloc((size_t)TD5_ROAM_SCN_NSB * SP_N, sizeof(SpBatch));
     if (!e.bat) return 0;
     for (i = 0; i < nsd && !e.oom; i++) sp_stadium(&e, &sd[i]);
