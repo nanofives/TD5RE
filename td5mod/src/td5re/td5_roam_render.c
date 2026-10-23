@@ -3337,6 +3337,22 @@ static void rr_audit_frame(float ex, float ey, float ez, float R)
 }
 #endif
 
+/* [roam QB] td5_render_span_display_list draws NOTHING for a list of more than 256 meshes (its "sanity" return, from
+ * the original's 0x431270): a scenery sub-block past 256 meshes vanished whole, lawn, pavement, trees and all (the
+ * exact lawn cut took the Bosque-side park sub-block of tile 26,47 to 330 lawn meshes). Long lists go in slices. */
+#define RR_DL_SLICE 256
+static void rr_draw_dl(const TD5_SpanDisplayList *dl)
+{
+    uint32_t off;
+    if (dl->count <= RR_DL_SLICE) { td5_render_span_display_list(dl); return; }
+    for (off = 0; off < dl->count; off += RR_DL_SLICE) {
+        TD5_SpanDisplayList s;
+        s.count = dl->count - off < RR_DL_SLICE ? dl->count - off : RR_DL_SLICE;
+        s.meshes = dl->meshes + off;
+        td5_render_span_display_list(&s);
+    }
+}
+
 void td5_roam_render_tiles(int view)
 {
     uint32_t t0;
@@ -3371,7 +3387,7 @@ void td5_roam_render_tiles(int view)
             const uint64_t q0 = td5_plat_time_us();
             t->dl.count = (uint32_t)n;
             t->dl.meshes = t->vis;
-            td5_render_span_display_list(&t->dl);
+            rr_draw_dl(&t->dl);
             meshes += n;
             rr_note_slow(t, -1, n, td5_plat_time_us() - q0);
         }
@@ -3385,7 +3401,7 @@ void td5_roam_render_tiles(int view)
                 if (!td5_render_is_sphere_visible(s[0], s[1], s[2], s[3])) continue;
                 {
                     const uint64_t q0 = td5_plat_time_us();
-                    td5_render_span_display_list(&t->sdl[k]);
+                    rr_draw_dl(&t->sdl[k]);
                     rr_note_slow(t, k, (int)t->sdl[k].count, td5_plat_time_us() - q0);
                 }
                 meshes += (int)t->sdl[k].count;

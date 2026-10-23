@@ -3611,6 +3611,19 @@ static int sc_emit_lawn(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, c
             v[i * 5 + 4] = (float)(tr.z[q] * inv_tile);
             light[i] = 0xFFFFFFFFu;
         }
+        if (getenv("TD5RE_QB_DBG")) {
+            double lx0 = 1e30, lx1 = -1e30, ly0 = 1e30, ly1 = -1e30, lz0 = 1e30, lz1 = -1e30;
+            for (i = 0; i < nt * 3; i++) {
+                if (v[i * 5] < lx0) lx0 = v[i * 5];
+                if (v[i * 5] > lx1) lx1 = v[i * 5];
+                if (v[i * 5 + 1] < ly0) ly0 = v[i * 5 + 1];
+                if (v[i * 5 + 1] > ly1) ly1 = v[i * 5 + 1];
+                if (v[i * 5 + 2] < lz0) lz0 = v[i * 5 + 2];
+                if (v[i * 5 + 2] > lz1) lz1 = v[i * 5 + 2];
+            }
+            TD5_LOG_I(LOG_TAG, "QBLAWN tile %d,%d sb %d chunk %d nt %d x %.0f..%.0f y %.0f..%.0f z %.0f..%.0f", c->tx, c->tz, sb, t0, nt,
+                    lx0, lx1, ly0, ly1, lz0, lz1);
+        }
         cmd[0] = (unsigned short)(TD5_TG_PAGE_R3_BLOCK + 0);
         cmd[1] = (unsigned short)nt;
         cmd[2] = 0;
@@ -8927,6 +8940,8 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
         if (b->blk.len) memcpy(sc->blob + off, b->blk.b, b->blk.len);
         sc->sb_first[k] = r;
         sc->sb_count[k] = (uint32_t)b->nmesh;
+        if (b->nmesh > 256) c->st.sb_over256++;                                      /* [roam QB] */
+        if (b->nmesh > c->st.sb_max_meshes) c->st.sb_max_meshes = b->nmesh;
         for (m = 0; m < b->nmesh; m++) {
             rec_furn[r] = (m >= c->furn_first[k]);      /* [F4c] furniture: judged by its own census */
             if (m >= c->lot_first[k]) rec_furn[r] = 1;  /* [HD] a city lot is the ground itself (SECTION lots) */
@@ -9443,6 +9458,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     TD5_RoamSportStats sp_t = { 0 };           /* [roam PB] stadiums + pitches */
     long qb_lc[4] = { 0 };                     /* [roam QB] lawn clip: pieces, dropped, fallback, lawn tris */
     double qb_lm[2] = { 0.0, 0.0 };            /* [roam QB] lawn border along the road (m), gap (m2) */
+    long qb_sb[2] = { 0, 0 };                  /* [roam QB] sub-blocks over 256 meshes, the most meshes in one */
     long sp_b[4] = { 0 };                      /* [roam PB] stands left to the module, blobs traced over one, plaza trees skipped */
     long sh_t[16] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
     long mu_t[32] = { 0 };                                     /* [roam NA] */
@@ -9663,6 +9679,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         pc_t[16] += r->lawn_shore; pc_t[17] += r->out.cover_shore_skip;
         qb_lc[0] += r->lawn_clip; qb_lc[1] += r->lawn_clip_drop; qb_lc[2] += r->lawn_clip_fallback; qb_lc[3] += r->lawn_tris;
         qb_lm[0] += r->lawn_border_m; qb_lm[1] += r->lawn_gap_m2;
+        qb_sb[0] += r->sb_over256; if (r->sb_max_meshes > qb_sb[1]) qb_sb[1] = r->sb_max_meshes;
         pz_t[0] += r->plaza.items; pz_t[1] += r->plaza.statues; pz_t[2] += r->plaza.monuments; pz_t[3] += r->plaza.memorials;
         pz_t[4] += r->plaza.fountains; pz_t[5] += r->plaza.benches; pz_t[6] += r->plaza.playgrounds; pz_t[7] += r->plaza.flagpoles;
         pz_t[8] += r->plaza.named; pz_t[9] += r->plaza.skip_kind; pz_t[10] += r->plaza.drop_road; pz_t[11] += r->plaza.guard_hits;
@@ -9829,9 +9846,9 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         char ln[600];
         snprintf(ln, sizeof ln, "roam lawn edge [roam QB]: lawn along the road %.0f m, gap between the drawn lawn and the road %.1f m2 "
                  "(mean width %.3f m, the drawn ground %.0f cm under the lawn there) | lawn tris %ld, clipped pieces %ld, dropped on the road "
-                 "%ld, fallback %ld (TD5RE_ROAM_LAWN_CLIP=%d)", qb_lm[0], qb_lm[1], qb_lm[0] > 0.0 ? qb_lm[1] / qb_lm[0] : 0.0,
+                 "%ld, fallback %ld (TD5RE_ROAM_LAWN_CLIP=%d) | sub-blocks over 256 meshes %ld (most %ld)", qb_lm[0], qb_lm[1], qb_lm[0] > 0.0 ? qb_lm[1] / qb_lm[0] : 0.0,
                  (td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0) + SC_GEOP_LIFT) / SC_UPM * 100.0,
-                 qb_lc[3], qb_lc[0], qb_lc[1], qb_lc[2], td5_env_int("TD5RE_ROAM_LAWN_CLIP", 1, 0, 1));
+                 qb_lc[3], qb_lc[0], qb_lc[1], qb_lc[2], td5_env_int("TD5RE_ROAM_LAWN_CLIP", 1, 0, 1), qb_sb[0], qb_sb[1]);
         TD5_LOG_I(LOG_TAG, "%s", ln);
         if (f) fprintf(f, "# %s\n", ln);
         fprintf(stderr, "%s\n", ln);

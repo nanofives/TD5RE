@@ -293,6 +293,7 @@ typedef struct {
      * between the drawn lawn and the road edge (the drawn ground shows there, drop + lift under the lawn) */
     int  lawn_clip, lawn_clip_drop, lawn_clip_fallback;
     double lawn_border_m, lawn_gap_m2;
+    int  sb_over256, sb_max_meshes;  /* [roam QB] sub-blocks past td5_render_span_display_list's 256 meshes, the most */
     int  lot_rings;                 /* [HD] ring plazas (a roundabout's inner kerb loop) kept green */
     double lot_paved_m2, lot_lawn_m2, lot_green_m2;
     /* [HD] INFILL: frontage lots along the pavement's building line with no real footprint on them -> a built mass
