@@ -5687,13 +5687,15 @@ static int st_keep_collect(TG_TileCtx *c, StKeep **out, int *nout)
             for (m = r->m0; m < r->m1; m++)
                 if (!st_keep_mesh(c, r->sb, m, 4, &kp, &n, &cap)) { free(kp); return 0; }
         }
-    if (c->tv_on)                                                   /* [integ L] shopfronts, awnings, pools */
+    if (c->tv_on) {                                                 /* [integ L] shopfronts, awnings, pools */
+        const int gh_veto = td5_env_int("TD5RE_ROAM_TREE_VETO_GH", 1, 0, 1);   /* [integ P] + greenhouse tunnels (lit 1) */
         for (i = 0; i < c->xc_n; i++) {
             const struct ScXcRange *r = &c->xc_r[i];
-            if (r->cat != SC_XC_SHOP && r->cat != SC_XC_POOL && r->cat != SC_XC_OUT) continue;
+            if (r->cat != SC_XC_SHOP && r->cat != SC_XC_POOL && r->cat != SC_XC_OUT && !(gh_veto && r->cat == SC_XC_GH)) continue;
             for (m = r->m0; m < r->m1; m++)   /* outskirts (lit 2): only its wires, the crown rule; the rest is tail */
                 if (!st_keep_mesh(c, r->sb, m, r->cat == SC_XC_OUT ? 2 : 1, &kp, &n, &cap)) { free(kp); return 0; }
         }
+    }
     *out = kp; *nout = n;
     return 1;
 }
