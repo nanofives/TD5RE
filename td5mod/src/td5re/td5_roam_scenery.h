@@ -66,7 +66,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  21u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  22u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -133,7 +133,10 @@
                                      * 20 = roam PD: rule street trees on casco avenues / diagonals / medians, no
                                      *      trunk inside an emitted footprint
                                      * 21 = round P integration: roam PC PB PA PE PD combined (each bumped 19 -> 20 on
-                                     *      its own, 21 so no tile cached by a single branch is reused) */
+                                     *      its own, 21 so no tile cached by a single branch is reused)
+                                     * 22 = roam QB: stadium footings on the drawn ground + facade / stand backs off a
+                                     *      drive along the outline, plaza lawns cut exactly at the road, a lawn
+                                     *      leaves out what a larger plaza lawn draws, place-frame lawn UVs */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -293,6 +296,8 @@ typedef struct {
      * between the drawn lawn and the road edge (the drawn ground shows there, drop + lift under the lawn) */
     int  lawn_clip, lawn_clip_drop, lawn_clip_fallback;
     double lawn_border_m, lawn_gap_m2;
+    int  lawn_dedup_fallback;       /* [roam QB] lawn pieces the plaza-lawn dedupe could not cut (kept whole) */
+    double lawn_dedup_m2;           /* [roam QB] lawn left to another plaza lawn over it (m2)              */
     int  sb_over256, sb_max_meshes;  /* [roam QB] sub-blocks past td5_render_span_display_list's 256 meshes, the most */
     int  lot_rings;                 /* [HD] ring plazas (a roundabout's inner kerb loop) kept green */
     double lot_paved_m2, lot_lawn_m2, lot_green_m2;

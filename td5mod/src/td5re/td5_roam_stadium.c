@@ -276,13 +276,6 @@ static int sp_wall(SpEm *e, int pg, double ax, double az, double bx, double bz, 
 {
     const double fx[2] = { ax, bx }, fz[2] = { az, bz };
     const double lo = ya0 < yb0 ? ya0 : yb0, hi = ya1 < yb1 ? ya1 : yb1;
-    if (e->foot == TD5_RSB_OUTER && getenv("TD5RE_QB_DBG")) {
-        double ry = 0.0;
-        const int anyr = roam_ctx_on_road_band(e->c, fx, fz, 2, -1e30, 1e30);
-        const int hr = roam_ctx_road_y(e->c, 0.5 * (ax + bx), 0.5 * (az + bz), lo, &ry);
-        fprintf(stderr, "QBDBG outer (%.0f,%.0f) on_road_any %d road_y_hit %d road-lo %.2f m dg-lo %.2f m\n", 0.5 * (ax + bx), 0.5 * (az + bz),
-                anyr, hr, hr ? (ry - lo) / SP_UPM : 0.0, (roam_ctx_drawn_ground(e->c, 0.5 * (ax + bx), 0.5 * (az + bz)) - lo) / SP_UPM);
-    }
     if (roam_ctx_on_road_band(e->c, fx, fz, 2, lo - SP_GUARD_LO, lo + SP_GUARD_HI)) {
         /* a wall standing on a drivable way (the Unico's service drives run under its end stands): an opening, the
          * wall's bottom SP_CLEAR over the road */
@@ -633,23 +626,6 @@ static int sp_bowl(SpEm *e, const TD5_RoamStadium *sd, const TD5_RoamStand *s, c
         ix[j] = pb->cx + dx * ri; iz[j] = pb->cz + dz * ri;
         nx[j] = dx; nz[j] = dz;
         depth += rw - rf;
-    }
-    if (getenv("TD5RE_QB_DBG")) {
-        for (j = 0; j < SP_BOWL_M; j++) {
-            const double a = a0 + 2.0 * SP_PI * (double)j / (double)SP_BOWL_M, dx = cos(a), dz = sin(a);
-            const double ro = hypot(bx[j] - pb->cx, bz[j] - pb->cz), rf = hypot(fx[j] - pb->cx, fz[j] - pb->cz);
-            char buf[512];
-            int o = 0, prev = 0;
-            double r;
-            for (r = rf; r <= ro + SP_M(25.0); r += SP_M(0.5)) {
-                const double px = pb->cx + dx * r, pz = pb->cz + dz * r;
-                const int on = roam_ctx_on_road(e->c, &px, &pz, 1);
-                if (on != prev && o < 480) o += snprintf(buf + o, sizeof buf - (size_t)o, " %s%.1f", on ? "[" : "]", (r - ro) / SP_UPM);
-                prev = on;
-            }
-            buf[o] = 0;
-            fprintf(stderr, "QBRAY j %d ro %.1f m rf %.1f m road (rel. ro):%s\n", j, ro / SP_UPM, rf / SP_UPM, buf);
-        }
     }
     depth /= (double)(SP_BOWL_M + 1);
     {   /* the mean row length: half way between the front line and the outline */
