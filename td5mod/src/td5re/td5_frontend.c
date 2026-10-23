@@ -2307,8 +2307,10 @@ static void frontend_get_entry_title(int slot, char *title, size_t tcap,
     if (td5_trackgen_is_geo_slot(slot)) {
         snprintf(place, pcap, "%s", title);
         /* [roam QA] the FREE ROAM entry shares the geo slot (frontend_roam_entry_selected) */
+        /* [integ Q] Mariano: the entry itself reads SPRINT / CIRCUIT too (was GEOSPATIAL TRACK
+         * GENERATOR), the place stays on the subline */
         snprintf(title, tcap, "%s", (slot == s_selected_track && frontend_roam_entry_selected())
-                                        ? TR("FREE ROAM") : TR("GEOSPATIAL TRACK GENERATOR"));
+                                        ? TR("FREE ROAM") : TR("SPRINT / CIRCUIT"));
     }
 }
 

@@ -1569,7 +1569,7 @@ static void frontend_refresh_geo_btn(int idx) {
     frontend_btn_set_label(idx,
         td5_trackgen_is_geo_slot(s_selected_track)
             ? (frontend_geo_strip_context() ? TR("SETTINGS") : TR("SPRINT / CIRCUIT"))
-            : TR("GEOSPATIAL TRACK GENERATOR"));
+            : TR("SPRINT / CIRCUIT"));   /* [integ Q] the no-place fallback names the screen it opens */
 }
 
 static void frontend_qr_refresh_geo_btn(void) {
@@ -1783,7 +1783,7 @@ void Screen_QuickRaceMenu(void) {
          * shared button loop condenses it (fe_fit_text_scale).
          * [ROUND 1030 A2] frontend_qr_refresh_geo_btn relabels it SETTINGS while
          * the geo entry is the pick (same rule as SELECT TRACK). */
-        s_qr_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
+        s_qr_geo_btn = frontend_create_button(TR("SPRINT / CIRCUIT"),
                                               QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32);
         frontend_qr_refresh_geo_btn();
 
@@ -7972,7 +7972,7 @@ static void trksel_build_main_buttons(void) {
      * title. The label is long for a 224-wide frame; the shared button loop
      * condenses it (fe_fit_text_scale, floor 0.55) rather than clipping, so
      * Mariano's wording survives intact instead of being abbreviated. */
-    s_trksel_geo_btn = frontend_create_button(TR("GEOSPATIAL TRACK GENERATOR"),
+    s_trksel_geo_btn = frontend_create_button(TR("SPRINT / CIRCUIT"),
                                               120, 306, 224, 32);
     /* [ROUND 1026 L] Hidden unless the GEOSPATIAL entry is the pick (see
      * frontend_geo_entry_slot). It takes the STUDIO chip's row (306) so the two
