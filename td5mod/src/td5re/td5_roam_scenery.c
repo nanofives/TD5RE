@@ -1084,6 +1084,9 @@ struct TG_TileCtx {
     /* [roam IA] the drawn ground's lattice for the lawns (sc_dg): cells per tile side, the render's ground drop,
      * and the knob (TD5RE_ROAM_LAWN_ON_GROUND) */
     int      dg_G, lawn_dg;
+    int      lawn_clip, lawn_gap_cen;   /* [roam QB] the exact lawn cut, its census */
+    struct ScLawnCover *lcov;            /* [roam QB] the plaza lawns of the 3x3 that draw (SECTION plazas)  */
+    int      nlcov, lcov_self, lawn_dedup;
     double   dg_drop;
     /* [G5] every pavement slab / island quad this tile emitted (x y z per corner, tile-local), so a footpath
      * laid after the pavement stands on top of one it crosses */
@@ -3029,6 +3032,7 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
 
 typedef struct { double *x, *z; int n, cap; } ScTris;   /* 3 points per triangle */
 
+
 static int sc_tri_push(ScTris *t, const double *p)
 {
     int k;
@@ -3045,6 +3049,273 @@ static int sc_tri_push(ScTris *t, const double *p)
     for (k = 0; k < 3; k++) { t->x[t->n * 3 + k] = p[k * 2]; t->z[t->n * 3 + k] = p[k * 2 + 1]; }
     t->n++;
     return 1;
+}
+
+
+/* [roam QB] LAWN CLIP. Mariano, 2026-10-23: "grass texture leaves a dent around the road". A lawn piece touching the road
+ * was refined twice and every sub-triangle still on the road dropped (sc_tri_split): the drawn ground showed in a saw-tooth
+ * strip up to ~2 m wide between the lawn's edge and the kerb, drop + lift (54 cm) under the lawn, a trench along every
+ * park road. Now the piece loses only what lies on the road: each drivable primitive over it is cut away along its own
+ * edges (convex difference, SC_LCLIP_MARGIN outside them so the guard census still reads 0), the rest fanned into
+ * triangles in the piece's own plane (one drawn-ground cell triangle: still parallel to the ground). A piece the cut
+ * cannot hold (too many pieces) keeps the old refinement. TD5RE_ROAM_LAWN_CLIP=0 = the old lawn. */
+#define SC_LCLIP_PTS     24
+#define SC_LCLIP_PIECES  48
+#define SC_LCLIP_PRIMS   64
+#define SC_LCLIP_MARGIN  (0.03 * SC_UPM)
+
+typedef struct { double x[SC_LCLIP_PTS], z[SC_LCLIP_PTS]; int n; } ScLcPoly;
+typedef struct { const ScPrim *p[SC_LCLIP_PRIMS]; int n, skip_lm, over; } ScLcPrims;
+
+static int sc_lc_collect(void *u, const ScPrim *p)
+{
+    ScLcPrims *q = (ScLcPrims *)u;
+    if (q->skip_lm && p->lm_ok) return 0;
+    if (q->n < SC_LCLIP_PRIMS) q->p[q->n++] = p; else q->over = 1;
+    return 0;
+}
+
+/* a point this close to a cut line is ON it: the side test of a near-collinear vertex is the last bits of the
+ * arithmetic, and those moved between the main thread and a worker (determinism arm T: an extra vertex) */
+#define SC_LC_SNAP 1e-3
+
+static double sc_lc_dist(double ax, double az, double bx, double bz, double l, double sgn, double k, double px, double pz)
+{
+    const double d = sgn * sc_cross(ax, az, bx, bz, px, pz) / l - k;
+    return fabs(d) < SC_LC_SNAP ? 0.0 : d;
+}
+
+/* the part of `in` where sgn * (signed distance to the line a->b, + = left) >= k */
+static int sc_lc_half(const ScLcPoly *in, double ax, double az, double bx, double bz, double sgn, double k, ScLcPoly *out)
+{
+    const double l = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));   /* not hypot: a CRT call, its rounding is the thread's */
+    int i, m = 0;
+    if (l < 1e-9) { *out = *in; return out->n; }
+    for (i = 0; i < in->n; i++) {
+        const int j = (i + 1) % in->n;
+        const double di = sc_lc_dist(ax, az, bx, bz, l, sgn, k, in->x[i], in->z[i]);
+        const double dj = sc_lc_dist(ax, az, bx, bz, l, sgn, k, in->x[j], in->z[j]);
+        if (di >= 0.0 && m < SC_LCLIP_PTS) { out->x[m] = in->x[i]; out->z[m] = in->z[i]; m++; }
+        if (((di > 0.0 && dj < 0.0) || (di < 0.0 && dj > 0.0)) && m < SC_LCLIP_PTS) {   /* a point ON the line is no crossing */
+            const double t = di / (di - dj);
+            out->x[m] = in->x[i] + t * (in->x[j] - in->x[i]); out->z[m] = in->z[i] + t * (in->z[j] - in->z[i]); m++;
+        }
+    }
+    out->n = m;
+    return m;
+}
+
+static double sc_lc_area(const ScLcPoly *q)
+{
+    double a = 0.0;
+    int i;
+    for (i = 0; i < q->n; i++) { const int j = (i + 1) % q->n; a += q->x[i] * q->z[j] - q->x[j] * q->z[i]; }
+    return 0.5 * fabs(a);
+}
+
+/* triangle p minus every drivable primitive over it, `margin` outside their edges, into piece list A (its count).
+ * *border = the length of the cut edges (the lawn's edge along the road). -1 = too many pieces / primitives */
+static int sc_lc_cut(TG_TileCtx *c, const double *p, double margin, ScLcPoly *A, double *border)
+{
+    static const int cap = SC_LCLIP_PIECES;
+    ScLcPrims q;
+    ScLcPoly B[SC_LCLIP_PIECES];
+    double x0 = p[0], x1 = p[0], z0 = p[1], z1 = p[1];
+    int na = 1, k, i, e;
+    for (k = 1; k < 3; k++) {
+        if (p[k * 2] < x0) x0 = p[k * 2];
+        if (p[k * 2] > x1) x1 = p[k * 2];
+        if (p[k * 2 + 1] < z0) z0 = p[k * 2 + 1];
+        if (p[k * 2 + 1] > z1) z1 = p[k * 2 + 1];
+    }
+    memset(&q, 0, sizeof q);
+    q.skip_lm = c->skip_lm;
+    sc_prims_in(c, x0 - margin, z0 - margin, x1 + margin, z1 + margin, sc_lc_collect, &q);
+    if (q.over) return -1;
+    for (k = 0; k < 3; k++) { A[0].x[k] = p[k * 2]; A[0].z[k] = p[k * 2 + 1]; }
+    A[0].n = 3;
+    if (border) *border = 0.0;
+    for (i = 0; i < q.n; i++) {
+        const ScPrim *pr = q.p[i];
+        double ar = 0.0, sgn;
+        int nb = 0, a;
+        if (pr->n < 3) continue;
+        for (e = 0; e < pr->n; e++) { const int f = (e + 1) % pr->n; ar += pr->x[e] * pr->z[f] - pr->x[f] * pr->z[e]; }
+        if (fabs(ar) < 1e-6) continue;
+        sgn = ar > 0.0 ? 1.0 : -1.0;          /* inside = sgn * cross > 0 for every edge */
+        for (a = 0; a < na; a++) {
+            ScLcPoly rem = A[a], t;
+            double bx0 = 1e300, bx1 = -1e300, bz0 = 1e300, bz1 = -1e300;
+            for (k = 0; k < rem.n; k++) {
+                if (rem.x[k] < bx0) bx0 = rem.x[k];
+                if (rem.x[k] > bx1) bx1 = rem.x[k];
+                if (rem.z[k] < bz0) bz0 = rem.z[k];
+                if (rem.z[k] > bz1) bz1 = rem.z[k];
+            }
+            if (bx1 < pr->x0 - margin || bx0 > pr->x1 + margin || bz1 < pr->z0 - margin || bz0 > pr->z1 + margin) {
+                if (nb >= cap) return -1;
+                B[nb++] = rem;
+                continue;
+            }
+            for (e = 0; e < pr->n && rem.n >= 3; e++) {
+                const int f = (e + 1) % pr->n;
+                /* outside this edge (beyond the margin): kept; the rest goes on to the next edge */
+                if (sc_lc_half(&rem, pr->x[e], pr->z[e], pr->x[f], pr->z[f], -sgn, margin, &t) >= 3 && sc_lc_area(&t) > 1.0) {
+                    if (nb >= cap) return -1;
+                    B[nb++] = t;
+                }
+                sc_lc_half(&rem, pr->x[e], pr->z[e], pr->x[f], pr->z[f], sgn, -margin, &t);
+                rem = t;
+            }
+            if (border && rem.n >= 3) {   /* what fell inside the primitive: its edges on the primitive's outline */
+                for (k = 0; k < rem.n; k++) {
+                    const int j = (k + 1) % rem.n;
+                    const double mx = 0.5 * (rem.x[k] + rem.x[j]), mz = 0.5 * (rem.z[k] + rem.z[j]);
+                    int on = -1;
+                    for (e = 0; e < pr->n && on < 0; e++) {
+                        const int f = (e + 1) % pr->n;
+                        const double l = hypot(pr->x[f] - pr->x[e], pr->z[f] - pr->z[e]);
+                        if (l > 1e-9 && fabs(sc_cross(pr->x[e], pr->z[e], pr->x[f], pr->z[f], mx, mz)) / l < margin + 1.0) on = e;
+                    }
+                    if (on >= 0) {   /* a road EDGE only when the ground beyond it is not road too (lane quads share edges) */
+                        const int f = (on + 1) % pr->n;
+                        const double l = hypot(pr->x[f] - pr->x[on], pr->z[f] - pr->z[on]);
+                        const double ox = -sgn * -(pr->z[f] - pr->z[on]) / l, oz = -sgn * (pr->x[f] - pr->x[on]) / l;
+                        const double tx = mx + ox * 0.2 * SC_UPM, tz = mz + oz * 0.2 * SC_UPM;
+                        if (!sc_on_road(c, &tx, &tz, 1, NULL)) *border += hypot(rem.x[j] - rem.x[k], rem.z[j] - rem.z[k]);
+                    }
+                }
+            }
+        }
+        memcpy(A, B, (size_t)nb * sizeof B[0]);
+        na = nb;
+        if (na == 0) break;
+    }
+    return na;
+}
+
+static int sc_tri_push(ScTris *t, const double *p);
+/* 1 = done (pieces pushed), 0 = out of memory, -1 = not handled (the old refinement) */
+static int sc_lawn_clip(TG_TileCtx *c, ScTris *out, const double *p)
+{
+    ScLcPoly A[SC_LCLIP_PIECES], F[SC_LCLIP_PIECES];
+    double border = 0.0, free_m2 = 0.0, drawn_m2 = 0.0;
+    const int na = sc_lc_cut(c, p, SC_LCLIP_MARGIN, A, NULL);
+    const int nf = sc_lc_cut(c, p, 0.0, F, &border);         /* the census: the exact free part, the road edge in it */
+    int a, k;
+    if (nf > 0) for (a = 0; a < nf; a++) free_m2 += sc_lc_area(&F[a]);
+    if (na < 0 || nf < 0) { c->st.lawn_clip_fallback++; return -1; }
+    for (a = 0; a < na; a++)
+        for (k = 1; k + 1 < A[a].n; k++) {
+            const double t6[6] = { A[a].x[0], A[a].z[0], A[a].x[k], A[a].z[k], A[a].x[k + 1], A[a].z[k + 1] };
+            const double xf[3] = { (double)(float)t6[0], (double)(float)t6[2], (double)(float)t6[4] };
+            const double zf[3] = { (double)(float)t6[1], (double)(float)t6[3], (double)(float)t6[5] };
+            const int dup = (fabs(xf[0] - xf[1]) < 1.0 && fabs(zf[0] - zf[1]) < 1.0) || (fabs(xf[1] - xf[2]) < 1.0 && fabs(zf[1] - zf[2]) < 1.0) ||
+                            (fabs(xf[0] - xf[2]) < 1.0 && fabs(zf[0] - zf[2]) < 1.0);
+            if (dup || fabs(td5_geob_ring_area(xf, zf, 3)) < 4.0) continue;
+            if (sc_on_road(c, xf, zf, 3, NULL)) { c->st.lawn_clip_drop++; continue; }
+            if (!sc_tri_push(out, t6)) return 0;
+            drawn_m2 += fabs(td5_geob_ring_area(xf, zf, 3));
+            c->st.lawn_clip++;
+        }
+    c->st.lawn_border_m += border / SC_UPM;
+    if (free_m2 > drawn_m2) c->st.lawn_gap_m2 += (free_m2 - drawn_m2) / (SC_UPM * SC_UPM);
+    return 1;
+}
+
+/* the old path's census twin: what the refinement keeps of a piece on the road, against its exact free part */
+static void sc_lawn_gap_old(TG_TileCtx *c, const double *p, double kept_m2)
+{
+    ScLcPoly F[SC_LCLIP_PIECES];
+    double border = 0.0, free_m2 = 0.0;
+    const int nf = sc_lc_cut(c, p, 0.0, F, &border);
+    int a;
+    if (nf < 0) return;
+    for (a = 0; a < nf; a++) free_m2 += sc_lc_area(&F[a]);
+    c->st.lawn_border_m += border / SC_UPM;
+    if (free_m2 > kept_m2) c->st.lawn_gap_m2 += (free_m2 - kept_m2) / (SC_UPM * SC_UPM);
+}
+
+/* [roam QB] DOUBLE GRASS. Mariano, 2026-10-23: "there's still double grass". Census (roam grass overlap, the Estadio
+ * Unico block): 44,555 m2 of the 328,500 m2 of grass lay under two grass faces, 16,281 m2 of them two PLAZA LAWNS at the
+ * same height (a grass or pitch area inside a park, two parks over each other: OSM maps them overlapping and each owner
+ * laid its whole outline). The two lawns are coplanar but their UVs were tile-local (x * 1/3400 from each OWNER's
+ * origin), so their textures were offset and z-fought, a second grass showing through the first in patches. Now:
+ *   - a lawn leaves out the part of its outline another plaza lawn covers there (the larger one keeps it, by area, then
+ *     id), cut exactly along that lawn's triangles: only where that lawn really draws (it is not a painted pitch or a
+ *     stadium ground, and the spot is in its owner's 3x3, its reach);
+ *   - lawn UVs are in the place frame, so whatever still overlaps, and two lawns meeting, show the same texels.
+ * TD5RE_ROAM_LAWN_DEDUP=0 = the old lawns. */
+#define SC_LCOV_TRI ((TD5_GEOB_RING_MAX - 2) * 3)
+typedef struct ScLawnCover {
+    double x[TD5_GEOB_RING_MAX], z[TD5_GEOB_RING_MAX];   /* tile-local outline */
+    int    n, ntri, tri[SC_LCOV_TRI];
+    double x0, z0, x1, z1, m2, id;
+    int    otx, otz;                                     /* owner tile: the lawn draws in its 3x3 */
+} ScLawnCover;
+
+/* 1 when cover b keeps the ground over cover a (larger first, then the smaller id) */
+static int sc_lcov_wins(const ScLawnCover *b, const ScLawnCover *a)
+{
+    if (b->m2 != a->m2) return b->m2 > a->m2;
+    return b->id < a->id;
+}
+
+/* triangle p (x z x z x z) minus every winning cover over it, into A (count), -1 = too many pieces */
+static int sc_lcov_cut(TG_TileCtx *c, const double *p, ScLcPoly *A)
+{
+    ScLcPoly B[SC_LCLIP_PIECES];
+    const ScLawnCover *self = &c->lcov[c->lcov_self];
+    double x0 = p[0], x1 = p[0], z0 = p[1], z1 = p[1], mx, mz;
+    int na = 1, k, i, t, tx, tz;
+    for (k = 1; k < 3; k++) {
+        if (p[k * 2] < x0) x0 = p[k * 2];
+        if (p[k * 2] > x1) x1 = p[k * 2];
+        if (p[k * 2 + 1] < z0) z0 = p[k * 2 + 1];
+        if (p[k * 2 + 1] > z1) z1 = p[k * 2 + 1];
+    }
+    for (k = 0; k < 3; k++) { A[0].x[k] = p[k * 2]; A[0].z[k] = p[k * 2 + 1]; }
+    A[0].n = 3;
+    mx = (p[0] + p[2] + p[4]) / 3.0; mz = (p[1] + p[3] + p[5]) / 3.0;
+    roam_grid_tile_of(c->grid, mx + (double)c->org_x, mz + (double)c->org_z, &tx, &tz);   /* a cell piece: one tile */
+    for (i = 0; i < c->nlcov && na > 0; i++) {
+        const ScLawnCover *cv = &c->lcov[i];
+        if (i == c->lcov_self || !sc_lcov_wins(cv, self)) continue;
+        if (cv->x1 < x0 || cv->x0 > x1 || cv->z1 < z0 || cv->z0 > z1) continue;
+        if (tx < cv->otx - 1 || tx > cv->otx + 1 || tz < cv->otz - 1 || tz > cv->otz + 1) continue;   /* it does not draw here */
+        for (t = 0; t < cv->ntri && na > 0; t++) {
+            const double tx3[3] = { cv->x[cv->tri[t * 3]], cv->x[cv->tri[t * 3 + 1]], cv->x[cv->tri[t * 3 + 2]] };
+            const double tz3[3] = { cv->z[cv->tri[t * 3]], cv->z[cv->tri[t * 3 + 1]], cv->z[cv->tri[t * 3 + 2]] };
+            double ar, sgn, bx0 = tx3[0], bx1 = tx3[0], bz0 = tz3[0], bz1 = tz3[0];
+            int nb = 0, a, e;
+            for (k = 1; k < 3; k++) {
+                if (tx3[k] < bx0) bx0 = tx3[k];
+                if (tx3[k] > bx1) bx1 = tx3[k];
+                if (tz3[k] < bz0) bz0 = tz3[k];
+                if (tz3[k] > bz1) bz1 = tz3[k];
+            }
+            if (bx1 < x0 || bx0 > x1 || bz1 < z0 || bz0 > z1) continue;
+            ar = sc_cross(tx3[0], tz3[0], tx3[1], tz3[1], tx3[2], tz3[2]);
+            if (fabs(ar) < 1e-6) continue;
+            sgn = ar > 0.0 ? 1.0 : -1.0;
+            for (a = 0; a < na; a++) {
+                ScLcPoly rem = A[a], q;
+                for (e = 0; e < 3 && rem.n >= 3; e++) {
+                    const int f = (e + 1) % 3;
+                    /* outside this edge: kept, overlapping the cover by (0.02 * SC_UPM) so no hairline opens between them */
+                    if (sc_lc_half(&rem, tx3[e], tz3[e], tx3[f], tz3[f], -sgn, -(0.02 * SC_UPM), &q) >= 3 && sc_lc_area(&q) > 1.0) {
+                        if (nb >= SC_LCLIP_PIECES) return -1;
+                        B[nb++] = q;
+                    }
+                    sc_lc_half(&rem, tx3[e], tz3[e], tx3[f], tz3[f], sgn, (0.02 * SC_UPM), &q);
+                    rem = q;
+                }
+            }
+            memcpy(A, B, (size_t)nb * sizeof B[0]);
+            na = nb;
+        }
+    }
+    return na;
 }
 
 /* red refinement to `lvl`, then: a sub-triangle on the road is refined `extra`
@@ -3066,6 +3337,25 @@ static int sc_tri_split(TG_TileCtx *c, ScTris *out, const double *p, int lvl, in
                             (fabs(xf[0] - xf[2]) < 1.0 && fabs(zf[0] - zf[2]) < 1.0);
             if (dup || fabs(td5_geob_ring_area(xf, zf, 3)) < 4.0) { c->st.lawn_cut++; return 1; }
             if (!sc_on_road(c, xf, zf, 3, NULL)) return sc_tri_push(out, p);
+            if (c->lawn_clip && extra == 2) {                          /* [roam QB] the cell piece, cut exactly */
+                const int r = sc_lawn_clip(c, out, p);
+                if (r >= 0) return r;
+            }
+            if (c->lawn_gap_cen && extra == 2) {                       /* [roam QB] the old path, measured */
+                const int n0 = out->n;
+                int r, t;
+                double kept = 0.0;
+                c->lawn_gap_cen = 0;
+                r = sc_tri_split(c, out, p, 1, 1);
+                c->lawn_gap_cen = 1;
+                for (t = n0; t < out->n; t++) {
+                    const double qx[3] = { out->x[t * 3], out->x[t * 3 + 1], out->x[t * 3 + 2] };
+                    const double qz[3] = { out->z[t * 3], out->z[t * 3 + 1], out->z[t * 3 + 2] };
+                    kept += fabs(td5_geob_ring_area(qx, qz, 3));
+                }
+                sc_lawn_gap_old(c, p, kept);
+                return r;
+            }
         } else
         if (!sc_on_road(c, x, z, 3, NULL)) return sc_tri_push(out, p);
         if (extra <= 0) { c->st.lawn_cut++; return 1; }
@@ -3267,6 +3557,24 @@ static int sc_lawn_emit_drawn(TG_TileCtx *c, const double *t6, void *ud)
         }
         if (sc_lot_shore(c, cell)) { c->st.lawn_shore++; return 1; }
     }
+    if (c->lawn_dedup && c->lcov && c->lcov_self >= 0) {   /* [roam QB] the part another plaza lawn draws is left to it */
+        ScLcPoly A[SC_LCLIP_PIECES];
+        const int na = sc_lcov_cut(c, t6, A);
+        double in_m2 = fabs(sc_cross(t6[0], t6[1], t6[2], t6[3], t6[4], t6[5])) * 0.5, out_m2 = 0.0;
+        int a, k;
+        if (na < 0) { c->st.lawn_dedup_fallback++; return sc_tri_split(c, (ScTris *)ud, t6, 0, 2); }
+        if (na == 1 && A[0].n == 3 && fabs(sc_lc_area(&A[0]) - in_m2) < 1.0) return sc_tri_split(c, (ScTris *)ud, t6, 0, 2);
+        for (a = 0; a < na; a++) {
+            out_m2 += sc_lc_area(&A[a]);
+            for (k = 1; k + 1 < A[a].n; k++) {
+                const double q6[6] = { A[a].x[0], A[a].z[0], A[a].x[k], A[a].z[k], A[a].x[k + 1], A[a].z[k + 1] };
+                if (fabs(sc_cross(q6[0], q6[1], q6[2], q6[3], q6[4], q6[5])) < 1.0) continue;
+                if (!sc_tri_split(c, (ScTris *)ud, q6, 0, 2)) return 0;
+            }
+        }
+        if (in_m2 > out_m2) c->st.lawn_dedup_m2 += (in_m2 - out_m2) / (SC_UPM * SC_UPM);
+        return 1;
+    }
     return sc_tri_split(c, (ScTris *)ud, t6, 0, 2);
 }
 
@@ -3373,15 +3681,14 @@ static int sc_pv_y(const TG_TileCtx *c, double x, double z, double *y)
     return hit;
 }
 
+static int sc_lawn_write(TG_TileCtx *c, ScTris *trp, int sb);
+
 static int sc_emit_lawn(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, const double *rz, int n, int sb)
 {
     int tri[(TD5_GEOB_RING_MAX - 2) * 3];
-    int ntri, k, lvl = 0, t0 = 0;
+    int ntri, k, lvl = 0;
     double maxe = 0.0;
-    const double inv_tile = td5_env_flag_on("TD5RE_GEO_PLAZA_TILE") ? (1.0 / (double)TD5_TG_SPAN_LENGTH) : (1.0 / 3400.0);
     ScTris tr;
-    float v[SC_LAWN_CHUNK * 3 * 5];
-    unsigned int light[SC_LAWN_CHUNK * 3];
     (void)a;
     memset(&tr, 0, sizeof tr);
     ntri = td5_geob_triangulate(rx, rz, n, tri, TD5_GEOB_RING_MAX - 2);
@@ -3403,6 +3710,17 @@ static int sc_emit_lawn(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, c
         if (c->lawn_dg ? !sc_lawn_cells(c, p, sc_lawn_emit_drawn, &tr)      /* [roam IA] on the drawn ground */
                        : !sc_tri_split(c, &tr, p, lvl, 2)) { free(tr.x); free(tr.z); return 0; }
     }
+    return sc_lawn_write(c, &tr, sb);
+}
+
+/* the lawn triangles tr (consumed) as meshes of sub-block sb */
+static int sc_lawn_write(TG_TileCtx *c, ScTris *trp, int sb)
+{
+    const double inv_tile = td5_env_flag_on("TD5RE_GEO_PLAZA_TILE") ? (1.0 / (double)TD5_TG_SPAN_LENGTH) : (1.0 / 3400.0);
+    ScTris tr = *trp;
+    float v[SC_LAWN_CHUNK * 3 * 5];
+    unsigned int light[SC_LAWN_CHUNK * 3];
+    int t0 = 0;
     while (t0 < tr.n) {
         const int nt = (tr.n - t0 < SC_LAWN_CHUNK) ? tr.n - t0 : SC_LAWN_CHUNK;
         unsigned short cmd[3];
@@ -3414,8 +3732,9 @@ static int sc_emit_lawn(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, c
             v[i * 5 + 0] = (float)tr.x[q];
             v[i * 5 + 1] = (float)sc_lawn_h(c, tr.x[q], tr.z[q]);
             v[i * 5 + 2] = (float)tr.z[q];
-            v[i * 5 + 3] = (float)(tr.x[q] * inv_tile);
-            v[i * 5 + 4] = (float)(tr.z[q] * inv_tile);
+            /* [roam QB] place-frame UVs: two lawns of two owners show the same texels where they meet or overlap */
+            v[i * 5 + 3] = (float)((tr.x[q] + (c->lawn_dedup ? (double)c->org_x : 0.0)) * inv_tile);
+            v[i * 5 + 4] = (float)((tr.z[q] + (c->lawn_dedup ? (double)c->org_z : 0.0)) * inv_tile);
             light[i] = 0xFFFFFFFFu;
         }
         cmd[0] = (unsigned short)(TD5_TG_PAGE_R3_BLOCK + 0);
@@ -3521,11 +3840,65 @@ static int sc_emit_trees(TG_TileCtx *c, const TD5_GeoArea *a, const double *rx, 
     return 1;
 }
 
-static int sc_emit_plazas(TG_TileCtx *c, const ScArea *ar, int nar)
+static int sc_plaza_paints(TG_TileCtx *c, const ScArea *e, const double *rx, const double *rz)
+{
+    if ((c->sport_on & 1) && e->spt == TD5_RPS_STADIUM) return 1;
+    if ((c->sport_on & 2) && (e->srf & SC_SRF_PITCH)) {
+        TD5_RoamPitch pq;
+        pq.id = e->id; pq.sport = e->spt; pq.surface = e->srf & 0x7F;
+        pq.rx = rx; pq.rz = rz; pq.n = e->a->n_outer ? e->a->n_outer : e->a->n;
+        return td5_roam_pitch_paints(c, &pq);
+    }
+    return 0;
+}
+
+/* [roam QB] the plaza lawns of the 3x3 that draw (the ones sc_emit_plazas lays, each by its owner): what a lawn leaves to
+ * another. map[i] = the cover of ar[i], -1 = none */
+static int sc_lcov_build(TG_TileCtx *c, const ScArea *ar, int nar, int *map)
 {
     int i, k;
-    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 1;
+    c->nlcov = 0;
+    c->lcov = (ScLawnCover *)calloc((size_t)(nar > 0 ? nar : 1), sizeof(ScLawnCover));
+    if (!c->lcov) return 0;
     for (i = 0; i < nar; i++) {
+        const TD5_GeoArea *a = ar[i].a;
+        ScLawnCover *cv = &c->lcov[c->nlcov];
+        const int no = a->n_outer ? a->n_outer : a->n;
+        double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+        map[i] = -1;
+        if (!td5_geob_area_is_plaza(a) || a->n < 3 || a->n > TD5_GEOB_RING_MAX || a->radius < SC_GEOP_MIN_R) continue;
+        for (k = 0; k < a->n; k++) { rx[k] = ar[i].px[k] - (double)c->org_x; rz[k] = ar[i].pz[k] - (double)c->org_z; }
+        if (sc_plaza_paints(c, &ar[i], rx, rz)) continue;
+        cv->n = no;
+        cv->x0 = cv->z0 = 1e300; cv->x1 = cv->z1 = -1e300;
+        for (k = 0; k < no; k++) {
+            cv->x[k] = rx[k]; cv->z[k] = rz[k];
+            if (rx[k] < cv->x0) cv->x0 = rx[k];
+            if (rx[k] > cv->x1) cv->x1 = rx[k];
+            if (rz[k] < cv->z0) cv->z0 = rz[k];
+            if (rz[k] > cv->z1) cv->z1 = rz[k];
+        }
+        cv->ntri = td5_geob_triangulate(cv->x, cv->z, no, cv->tri, TD5_GEOB_RING_MAX - 2);
+        if (cv->ntri <= 0) continue;
+        cv->m2 = fabs(td5_geob_ring_area(cv->x, cv->z, no));
+        cv->id = ar[i].id;
+        roam_grid_tile_of(c->grid, a->cx, a->cz, &cv->otx, &cv->otz);
+        map[i] = c->nlcov++;
+    }
+    return 1;
+}
+
+static int sc_emit_plazas(TG_TileCtx *c, const ScArea *ar, int nar)
+{
+    int i, k, *lmap = NULL;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 1;
+    c->lcov_self = -1;
+    if (c->lawn_dedup && c->lawn_dg) {   /* [roam QB] */
+        lmap = (int *)malloc((size_t)(nar > 0 ? nar : 1) * sizeof(int));
+        if (!lmap || !sc_lcov_build(c, ar, nar, lmap)) { free(lmap); return 0; }
+    }
+    for (i = 0; i < nar; i++) {
+        c->lcov_self = lmap ? lmap[i] : -1;
         const TD5_GeoArea *a = ar[i].a;
         double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX], cx = 0.0, cz = 0.0;
         const int n = a->n;
@@ -3554,10 +3927,13 @@ static int sc_emit_plazas(TG_TileCtx *c, const ScArea *ar, int nar)
         {
             int xs[TD5_ROAM_SCN_NSB];
             sc_xc_snap(c, xs);
-            if (!sc_emit_trees(c, a, rx, rz, n)) return 0;
+            if (!sc_emit_trees(c, a, rx, rz, n)) { free(lmap); free(c->lcov); c->lcov = NULL; return 0; }
             sc_xc_note(c, xs, SC_XC_TREE_PLAZA);                                 /* [integ L] */
         }
     }
+    c->lcov_self = -1;
+    free(lmap);
+    free(c->lcov); c->lcov = NULL; c->nlcov = 0;
     return 1;
 }
 
@@ -7853,6 +8229,43 @@ static int sc_lot_shore(TG_TileCtx *c, const double *cell)
     return 0;
 }
 
+
+#ifndef TD5RE_RELEASE
+/* [roam QB] DEV probe: TD5RE_QB_PROBE=x,z (place frame) prints a cross-section of the surfaces outward from the nearest
+ * street centreline through that point, on the tile that owns it: road, lawn plane, slab, drawn ground, raster */
+static void sc_qb_probe(TG_TileCtx *c)
+{
+    const char *e = getenv("TD5RE_QB_PROBE");
+    double px, pz, along, lat, x, z;
+    int edge, side, k;
+    if (!e || sscanf(e, "%lf,%lf", &px, &pz) != 2) return;
+    x = px - (double)c->org_x; z = pz - (double)c->org_z;
+    if (!sc_owned_point(c, x, z)) return;
+    if (!roam_nearest_edge(c, x, z, 60.0 * SC_UPM, &edge, &side, &along, &lat)) { fprintf(stderr, "QBPROBE no street\n"); return; }
+    {
+        const ScSeg *sg = &c->seg[edge];
+        const double dx = sg->bx - sg->ax, dz = sg->bz - sg->az, l = hypot(dx, dz);
+        const double tx = dx / l, tz = dz / l, nx = tz * (lat >= 0 ? 1.0 : -1.0), nz = -tx * (lat >= 0 ? 1.0 : -1.0);
+        const double t = ((x - sg->ax) * tx + (z - sg->az) * tz);
+        const double cx = sg->ax + tx * t, cz = sg->az + tz * t;
+        fprintf(stderr, "QBPROBE tile %d,%d seg %d hw %.2f m lat %.2f m (point) centre y %.3f m\n", c->tx, c->tz, edge, sg->hw / SC_UPM,
+                fabs(lat) / SC_UPM, (sg->ay + (sg->by - sg->ay) * (t / l)) / SC_UPM);
+        for (k = 0; k <= 60; k++) {
+            const double d = (double)k * 0.5 * SC_UPM;
+            const double qx = cx + nx * d, qz = cz + nz * d;
+            double ry = 0.0, ly = 0.0, sy = 0.0, raw = 0.0;
+            const int hr = roam_ctx_road_y(c, qx, qz, sg->ay, &ry), hl = sc_lawn_y(c, qx, qz, &ly), hs = sc_pv_y(c, qx, qz, &sy);
+            roam_ctx_ground_raw(c, qx, qz, &raw, NULL);
+            fprintf(stderr, "QBPROBE d %5.1f road %s lawn %s slab %s dg %8.3f ground %8.3f raw %8.3f low %6.3f\n", d / SC_UPM,
+                    hr ? "   y    " : "    -   ", hl ? "y" : "-", hs ? "y" : "-", sc_dg(c, qx, qz) / SC_UPM,
+                    sc_ground(c, qx, qz) / SC_UPM, raw / SC_UPM, sc_lowering(c, qx, qz) / SC_UPM);
+            if (hr || hl || hs) fprintf(stderr, "QBPROBE   d %5.1f road_y %8.3f lawn_y %8.3f slab_y %8.3f\n", d / SC_UPM,
+                                        hr ? ry / SC_UPM : -1.0, hl ? ly / SC_UPM : -1.0, hs ? sy / SC_UPM : -1.0);
+        }
+    }
+}
+#endif
+
 static int sc_emit_lots(TD5_RoamScnSource *s, TG_TileCtx *c, const RoamTile *self, ScCache **ac, int nac)
 {
     const int cell_m = td5_env_int("TD5RE_ROAM_RENDER_CELL_M", 16, 8, 64);
@@ -9093,6 +9506,160 @@ void td5_roam_scn_free(TD5_RoamScenery *sc)
     free(sc);
 }
 
+#ifndef TD5RE_RELEASE
+/* [roam QB] GRASS OVERLAP census (DEV, --RoamBuildScenery with TD5RE_ROAM_GRASS_CENSUS=1, single thread only): every
+ * up-facing face on a grass page (the lawn page R3_BLOCK, the GREEN page) of every tile built, rasterised on 1 m cells
+ * of the place frame with the drawn ground under it; after the run, cells holding two or more grass faces are the
+ * double grass (classed by the height gap between the top two and by where they come from). */
+typedef struct { int32_t ix, iz; float y, g; int32_t tile, mesh; int16_t page; int16_t pad; } ScGrassCell;
+static ScGrassCell *s_gc;
+static size_t s_gc_n, s_gc_cap;
+static int s_gc_on = -1;
+
+static int sc_gc_page(int pg) { return pg == TD5_TG_PAGE_R3_BLOCK + 0 || pg == TD5_TG_PAGE_GREEN; }
+
+static void sc_gc_tri(TG_TileCtx *c, const double *x, const double *y, const double *z, int mesh, int page)
+{
+    const double ux = x[1] - x[0], uy = y[1] - y[0], uz = z[1] - z[0], vx = x[2] - x[0], vy = y[2] - y[0], vz = z[2] - z[0];
+    const double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, L = sqrt(nx * nx + ny * ny + nz * nz);
+    const double C = SC_UPM;
+    double x0 = x[0], x1 = x[0], z0 = z[0], z1 = z[0], d;
+    int k, i, j;
+    if (L < 1e-9 || fabs(ny) / L < 0.7) return;                 /* up-facing (either winding) */
+    for (k = 1; k < 3; k++) {
+        if (x[k] < x0) x0 = x[k];
+        if (x[k] > x1) x1 = x[k];
+        if (z[k] < z0) z0 = z[k];
+        if (z[k] > z1) z1 = z[k];
+    }
+    d = (z[1] - z[2]) * (x[0] - x[2]) + (x[2] - x[1]) * (z[0] - z[2]);
+    if (fabs(d) < 1e-9) return;
+    for (j = (int)floor((z0 + c->org_z) / C); j <= (int)floor((z1 + c->org_z) / C); j++)
+        for (i = (int)floor((x0 + c->org_x) / C); i <= (int)floor((x1 + c->org_x) / C); i++) {
+            const double px = (i + 0.5) * C - c->org_x, pz = (j + 0.5) * C - c->org_z;
+            const double w0 = ((z[1] - z[2]) * (px - x[2]) + (x[2] - x[1]) * (pz - z[2])) / d;
+            const double w1 = ((z[2] - z[0]) * (px - x[2]) + (x[0] - x[2]) * (pz - z[2])) / d;
+            const double w2 = 1.0 - w0 - w1;
+            ScGrassCell *g;
+            if (w0 < 0.0 || w1 < 0.0 || w2 < 0.0) continue;
+            if (s_gc_n >= s_gc_cap) {
+                const size_t nc = s_gc_cap ? s_gc_cap * 2 : (size_t)1 << 20;
+                ScGrassCell *a = (ScGrassCell *)realloc(s_gc, nc * sizeof *a);
+                if (!a) return;
+                s_gc = a; s_gc_cap = nc;
+            }
+            g = &s_gc[s_gc_n++];
+            g->ix = i; g->iz = j;
+            g->y = (float)((w0 * y[0] + w1 * y[1] + w2 * y[2]) / C);
+            g->g = (float)(sc_dg(c, px, pz) / C);
+            g->tile = c->tx * 1000 + c->tz; g->mesh = mesh; g->page = (int16_t)page; g->pad = 0;
+        }
+}
+
+static void sc_gc_record(TG_TileCtx *c, const uint8_t *rec, size_t avail, int mesh)
+{
+    const int tag = (int)(int16_t)(sc_rd32(rec) >> 16);
+    const uint32_t ncmd = sc_rd32(rec + 4), nv = sc_rd32(rec + 8);
+    const uint32_t cmd_off = sc_rd32(rec + TD5_MESH_DISK_OFF_COMMANDS), vtx_off = sc_rd32(rec + TD5_MESH_DISK_OFF_VERTICES);
+    uint32_t ci, cursor = 0;
+    if (tag || cmd_off + ncmd * 16u > avail || vtx_off + nv * 44u > avail) return;
+    for (ci = 0; ci < ncmd; ci++) {
+        const uint8_t *cm = rec + cmd_off + ci * 16u;
+        const uint32_t tc = (uint32_t)(sc_rd32(cm + 8) & 0xFFFFu), qc = sc_rd32(cm + 8) >> 16;
+        const int page = (int)(int16_t)(sc_rd32(cm) >> 16);
+        uint32_t p;
+        for (p = 0; p < tc + qc; p++) {
+            const int nvp = p < tc ? 3 : 4;
+            double x[4], y[4], z[4];
+            int k;
+            if (cursor + (uint32_t)nvp > nv) return;
+            for (k = 0; k < nvp; k++) {
+                const uint8_t *v = rec + vtx_off + (cursor + (uint32_t)k) * 44u;
+                x[k] = (double)sc_rdf(v); y[k] = (double)sc_rdf(v + 4); z[k] = (double)sc_rdf(v + 8);
+            }
+            cursor += (uint32_t)nvp;
+            if (!sc_gc_page(page)) continue;
+            sc_gc_tri(c, x, y, z, mesh, page);
+            if (nvp == 4) {
+                const double x2[3] = { x[0], x[2], x[3] }, y2[3] = { y[0], y[2], y[3] }, z2[3] = { z[0], z[2], z[3] };
+                sc_gc_tri(c, x2, y2, z2, mesh, page);
+            }
+        }
+    }
+}
+
+static int sc_gc_cmp(const void *a, const void *b)
+{
+    const ScGrassCell *p = (const ScGrassCell *)a, *q = (const ScGrassCell *)b;
+    if (p->iz != q->iz) return p->iz < q->iz ? -1 : 1;
+    if (p->ix != q->ix) return p->ix < q->ix ? -1 : 1;
+    return p->y > q->y ? -1 : (p->y < q->y ? 1 : 0);   /* top first */
+}
+
+/* the report: m2 of cells with >= 2 grass faces, by the gap between the top two (coplanar < 5 cm, 5-50 cm, > 50 cm),
+ * by origin (same mesh, same tile other mesh, another tile), and the top grass face's height over the drawn ground */
+static void sc_gc_report(FILE *f)
+{
+    size_t i = 0;
+    long cells = 0, over = 0, gap[3] = { 0 }, org[3] = { 0 }, low[3] = { 0 }, lpage[2][2] = { { 0 } };
+    long gdis = 0, gl_dis = 0;
+    struct { int la, lb; long n; } pr[64];
+    int npr = 0;
+    char ln[900];
+    if (!s_gc_n) return;
+    qsort(s_gc, s_gc_n, sizeof *s_gc, sc_gc_cmp);
+    while (i < s_gc_n) {
+        size_t j = i + 1;
+        while (j < s_gc_n && s_gc[j].ix == s_gc[i].ix && s_gc[j].iz == s_gc[i].iz) j++;
+        cells++;
+        {   /* the top face over the drawn ground: < 5 cm z-fights with the ground's own grass */
+            const double h = s_gc[i].y - s_gc[i].g;
+            low[h < 0.05 ? 0 : (h < 0.25 ? 1 : 2)]++;
+        }
+        if (j - i >= 2) {
+            const ScGrassCell *a = &s_gc[i], *b = &s_gc[i + 1];
+            const double dy = a->y - b->y;
+            over++;
+            gap[dy < 0.05 ? 0 : (dy < 0.5 ? 1 : 2)]++;
+            if (fabs(a->g - b->g) >= 0.02) gdis++;                     /* the two tiles see different ground there */
+            {   /* the (top, second) lift over the drawn ground, in cm, 2 cm bins */
+                const int la = (int)floor((a->y - a->g) * 50.0 + 0.5) * 2, lb = (int)floor((b->y - b->g) * 50.0 + 0.5) * 2;
+                int q;
+                for (q = 0; q < npr; q++) if (pr[q].la == la && pr[q].lb == lb) break;
+                if (q == npr && npr < 64) { pr[npr].la = la; pr[npr].lb = lb; pr[npr].n = 0; npr++; }
+                if (q < npr) pr[q].n++;
+            }
+            if (dy >= 0.05 && fabs((a->y - a->g) - (b->y - b->g)) >= 0.02) gl_dis++;   /* different lift over their ground */
+            org[a->tile != b->tile ? 2 : (a->mesh == b->mesh ? 0 : 1)]++;
+            lpage[a->page == TD5_TG_PAGE_GREEN][b->page == TD5_TG_PAGE_GREEN]++;
+
+        }
+        i = j;
+    }
+    snprintf(ln, sizeof ln, "roam grass overlap [roam QB]: grass-covered %ld m2, under 2+ grass faces %ld m2 (top two coplanar < 5 cm %ld, "
+             "5-50 cm %ld, > 50 cm %ld; same mesh %ld, same tile %ld, two tiles %ld; lawn/lawn %ld lawn/green %ld green/lawn %ld "
+             "green/green %ld; ground differs between the two >= 2 cm %ld, lift over own ground differs %ld) | top grass face over the drawn ground < 5 cm %ld m2, 5-25 cm %ld, > 25 cm %ld",
+             cells, over, gap[0], gap[1], gap[2], org[0], org[1], org[2], lpage[0][0], lpage[0][1], lpage[1][0], lpage[1][1],
+             gdis, gl_dis, low[0], low[1], low[2]);
+    fprintf(stderr, "%s\n", ln);
+    TD5_LOG_I(LOG_TAG, "%s", ln);
+    if (f) fprintf(f, "# %s\n", ln);
+    {
+        int q, w;
+        for (w = 0; w < 10 && w < npr; w++) {       /* the 10 most common lift pairs */
+            int b2 = w;
+            for (q = w + 1; q < npr; q++) if (pr[q].n > pr[b2].n) b2 = q;
+            if (b2 != w) { const int ta = pr[w].la, tb = pr[w].lb; const long tn = pr[w].n;
+                           pr[w] = pr[b2]; pr[b2].la = ta; pr[b2].lb = tb; pr[b2].n = tn; }
+            snprintf(ln, sizeof ln, "roam grass overlap pair: top %d cm / second %d cm over the drawn ground: %ld m2", pr[w].la, pr[w].lb, pr[w].n);
+            fprintf(stderr, "%s\n", ln);
+            if (f) fprintf(f, "# %s\n", ln);
+        }
+    }
+    free(s_gc); s_gc = NULL; s_gc_n = s_gc_cap = 0;
+}
+#endif
+
 static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
 {
     TD5_RoamScenery *sc = (TD5_RoamScenery *)calloc(1, sizeof *sc);
@@ -9113,6 +9680,8 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
         if (b->blk.len) memcpy(sc->blob + off, b->blk.b, b->blk.len);
         sc->sb_first[k] = r;
         sc->sb_count[k] = (uint32_t)b->nmesh;
+        if (b->nmesh > 256) c->st.sb_over256++;                                      /* [roam QB] */
+        if (b->nmesh > c->st.sb_max_meshes) c->st.sb_max_meshes = b->nmesh;
         for (m = 0; m < b->nmesh; m++) {
             rec_furn[r] = (m >= c->furn_first[k]);      /* [F4c] furniture: judged by its own census */
             if (m >= c->lot_first[k]) rec_furn[r] = 1;  /* [HD] a city lot is the ground itself (SECTION lots) */
@@ -9145,6 +9714,10 @@ static TD5_RoamScenery *sc_assemble(TG_TileCtx *c)
         const size_t ro = sc->rec_off[r];
         const size_t end = (r + 1 < nrec) ? sc->rec_off[r + 1] : total;
         int bad;
+#ifndef TD5RE_RELEASE
+        if (s_gc_on < 0) s_gc_on = td5_env_int("TD5RE_ROAM_GRASS_CENSUS", 0, 0, 1);
+        if (s_gc_on) sc_gc_record(c, sc->blob + ro, (end > ro && end <= total) ? end - ro : total - ro, (int)r);
+#endif
         if (rec_furn[r]) continue;
         bad = sc_census_record(c, sc->blob + ro, (end > ro && end <= total) ? end - ro : total - ro);
         c->st.guard_overlaps += bad;
@@ -9336,6 +9909,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         c->dg_G = 256 / ((64 % cm) ? 16 : cm);
         c->dg_drop = td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0);
         c->lawn_dg = td5_env_int("TD5RE_ROAM_LAWN_ON_GROUND", 1, 0, 1);
+        c->lawn_clip = c->lawn_dg && td5_env_int("TD5RE_ROAM_LAWN_CLIP", 1, 0, 1);   /* [roam QB] */
+        c->lawn_gap_cen = 1;
+        c->lawn_dedup = c->lawn_dg && td5_env_int("TD5RE_ROAM_LAWN_DEDUP", 1, 0, 1);   /* [roam QB] */
         c->sport_on = (s->stadium_on ? 1 : 0) | (s->pitch_on ? 2 : 0);   /* [roam PB] */
     }
     if (hc && td5_roam_gfix_enabled() && td5_env_flag_on("TD5RE_ROAM_SCN_LOWER")) td5_roam_gfix_build(&c->gf, &s->grid, (const RoamTile *const *)c->road, self->tx, self->tz, hc);
@@ -9480,6 +10056,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
 #ifndef TD5RE_RELEASE
     if (c->xc_on) sc_tree_xcheck(c);                                             /* [integ L] dev census */
 #endif
+#ifndef TD5RE_RELEASE
+    sc_qb_probe(c);                                                               /* [roam QB] dev */
+#endif
     c->st.ms_emit = td5_plat_time_ms() - t1;
     sc = sc_assemble(c);
     if (sc) {
@@ -9623,6 +10202,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     double pool_m2 = 0.0;
     long pz_t[13] = { 0 };                     /* [roam LD] plaza furniture + park relations */
     TD5_RoamSportStats sp_t = { 0 };           /* [roam PB] stadiums + pitches */
+    long qb_lc[4] = { 0 };                     /* [roam QB] lawn clip: pieces, dropped, fallback, lawn tris */
+    double qb_lm[2] = { 0.0, 0.0 };            /* [roam QB] lawn border along the road (m), gap (m2) */
+    double qb_dd[2] = { 0.0, 0.0 };            /* [roam QB] lawn left to another plaza lawn (m2), dedupe fallbacks */
+    long qb_sb[2] = { 0, 0 };                  /* [roam QB] sub-blocks over 256 meshes, the most meshes in one */
     long sp_b[4] = { 0 };                      /* [roam PB] stands left to the module, blobs traced over one, plaza trees skipped */
     long sh_t[16] = { 0 }, sh_cat[TD5_GEOB_POI__N] = { 0 };   /* [roam LB] */
     long mu_t[32] = { 0 };                                     /* [roam NA] */
@@ -9841,6 +10424,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         pc_t[9] += r->out.cover_wet; pc_t[10] += r->out.cover_marsh_area; pc_t[11] += r->out.cover_reeds;
         pc_t[12] += r->out.lattice_towers; pc_t[13] += r->out.lattice_members; pc_t[14] += r->lot_shore; pc_t[15] += r->out.towers;
         pc_t[16] += r->lawn_shore; pc_t[17] += r->out.cover_shore_skip;
+        qb_lc[0] += r->lawn_clip; qb_lc[1] += r->lawn_clip_drop; qb_lc[2] += r->lawn_clip_fallback; qb_lc[3] += r->lawn_tris;
+        qb_lm[0] += r->lawn_border_m; qb_lm[1] += r->lawn_gap_m2;
+        qb_dd[0] += r->lawn_dedup_m2; qb_dd[1] += r->lawn_dedup_fallback;
+        qb_sb[0] += r->sb_over256; if (r->sb_max_meshes > qb_sb[1]) qb_sb[1] = r->sb_max_meshes;
         pz_t[0] += r->plaza.items; pz_t[1] += r->plaza.statues; pz_t[2] += r->plaza.monuments; pz_t[3] += r->plaza.memorials;
         pz_t[4] += r->plaza.fountains; pz_t[5] += r->plaza.benches; pz_t[6] += r->plaza.playgrounds; pz_t[7] += r->plaza.flagpoles;
         pz_t[8] += r->plaza.named; pz_t[9] += r->plaza.skip_kind; pz_t[10] += r->plaza.drop_road; pz_t[11] += r->plaza.guard_hits;
@@ -9857,6 +10444,12 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             sp_t.goals += r->sport.goals; sp_t.nets += r->sport.nets; sp_t.hoops += r->sport.hoops;
             sp_t.line_quads += r->sport.line_quads; sp_t.meshes += r->sport.meshes; sp_t.guard_hits += r->sport.guard_hits;
             sp_b[0] += r->bld_stand; sp_b[1] += r->bld_stand_dup; sp_b[2] += r->sp_tree_skip; sp_b[3] += r->sp_lawn_skip;
+            for (q = 0; q < TD5_RSB__N; q++) {   /* [roam QB] */
+                sp_t.foot_n[q] += r->sport.foot_n[q]; sp_t.foot_over[q] += r->sport.foot_over[q];
+                sp_t.foot_sum[q] += r->sport.foot_sum[q];
+                if (r->sport.foot_max[q] > sp_t.foot_max[q]) sp_t.foot_max[q] = r->sport.foot_max[q];
+            }
+            sp_t.open_n += r->sport.open_n; sp_t.open_m += r->sport.open_m; sp_t.pulls += r->sport.pulls; sp_t.pull_m += r->sport.pull_m;
         }
         {   /* [roam NA] */
             int q;
@@ -9993,6 +10586,40 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                  sp_t.by_surface[TD5_RPF_ACRYLIC], sp_t.by_surface[TD5_RPF_TURF], sp_t.by_surface[TD5_RPF_SAND], sp_t.courts,
                  sp_t.goals, sp_t.nets, sp_t.hoops, sp_t.line_quads, sp_t.skip_small, sp_t.skip_sport, sp_t.skip_none,
                  sp_t.drop_road, sp_t.meshes, sp_t.guard_hits, td5_roam_stadium_enabled(), td5_roam_pitch_enabled());
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
+    }
+#ifndef TD5RE_RELEASE
+    if (s_gc_on > 0 && threadmode == 0) sc_gc_report(f);       /* [roam QB] */
+#endif
+    {   /* [roam QB] the lawn's edge along the road */
+        char ln[600];
+        snprintf(ln, sizeof ln, "roam lawn edge [roam QB]: lawn along the road %.0f m, gap between the drawn lawn and the road %.1f m2 "
+                 "(mean width %.3f m, the drawn ground %.0f cm under the lawn there) | lawn tris %ld, clipped pieces %ld, dropped on the road "
+                 "%ld, fallback %ld (TD5RE_ROAM_LAWN_CLIP=%d) | sub-blocks over 256 meshes %ld (most %ld) | lawn left to another plaza lawn %.0f m2, %.0f fallback(s) (TD5RE_ROAM_LAWN_DEDUP=%d)", qb_lm[0], qb_lm[1], qb_lm[0] > 0.0 ? qb_lm[1] / qb_lm[0] : 0.0,
+                 (td5_env_int("TD5RE_ROAM_RENDER_GROUND_DROP_CM", 40, 0, 500) * (SC_UPM / 100.0) + SC_GEOP_LIFT) / SC_UPM * 100.0,
+                 qb_lc[3], qb_lc[0], qb_lc[1], qb_lc[2], td5_env_int("TD5RE_ROAM_LAWN_CLIP", 1, 0, 1), qb_sb[0], qb_sb[1], qb_dd[0], qb_dd[1],
+                 td5_env_int("TD5RE_ROAM_LAWN_DEDUP", 1, 0, 1));
+        TD5_LOG_I(LOG_TAG, "%s", ln);
+        if (f) fprintf(f, "# %s\n", ln);
+        fprintf(stderr, "%s\n", ln);
+    }
+    {   /* [roam QB] stadium base census: wall bottoms against the drawn ground */
+        static const char *const nm[TD5_RSB__N] = { "bowl front", "bowl outer", "stand front", "stand back", "stand ends", "portals" };
+        char ln[1600];
+        int q, o = 0, tn = 0, tov = 0;
+        double ts = 0.0, tm = 0.0;
+        o += snprintf(ln + o, sizeof ln - (size_t)o, "roam sport base [roam QB]:");
+        for (q = 0; q < TD5_RSB__N; q++) {
+            o += snprintf(ln + o, sizeof ln - (size_t)o, " %s n %d mean %.2f max %.2f over25 %d |", nm[q], sp_t.foot_n[q],
+                          sp_t.foot_n[q] ? sp_t.foot_sum[q] / sp_t.foot_n[q] : 0.0, sp_t.foot_max[q], sp_t.foot_over[q]);
+            tn += sp_t.foot_n[q]; tov += sp_t.foot_over[q]; ts += sp_t.foot_sum[q];
+            if (sp_t.foot_max[q] > tm) tm = sp_t.foot_max[q];
+        }
+        snprintf(ln + o, sizeof ln - (size_t)o, " ALL n %d mean %.3f max %.2f over25 %d (m over the drawn ground) | openings %d, %.0f m | facade sectors pulled off a drive %d (mean %.1f m) (TD5RE_ROAM_STADIUM_BASE=%d)",
+                 tn, tn ? ts / tn : 0.0, tm, tov, sp_t.open_n, sp_t.open_m, sp_t.pulls, sp_t.pulls ? sp_t.pull_m / sp_t.pulls : 0.0,
+                 td5_env_int("TD5RE_ROAM_STADIUM_BASE", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", ln);
         if (f) fprintf(f, "# %s\n", ln);
         fprintf(stderr, "%s\n", ln);

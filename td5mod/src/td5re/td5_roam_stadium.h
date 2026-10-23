@@ -88,7 +88,17 @@ typedef struct {
     int courts, goals, nets, hoops, line_quads;
     int meshes;
     int guard_hits;         /* emitted faces on the drivable surface: must be 0 */
+    /* [roam QB] base census: every wall meant to stand on the ground, its bottom against the DRAWN ground at 3 points
+     * per piece (gap > 0 = the wall floats), by piece (TD5_RSB_*); openings over a drive counted apart (metres) */
+    int foot_n[6], foot_over[6];   /* samples, samples floating > 0.25 m                                     */
+    double foot_sum[6], foot_max[6];   /* floating metres (gap clamped at 0) summed / max                       */
+    int open_n;                    /* opened wall pieces                                                     */
+    double open_m;                 /* their length (m)                                                       */
+    int pulls;                     /* bowl facade sectors pulled in off a drive along the outline            */
+    double pull_m;                 /* metres pulled, summed                                                  */
 } TD5_RoamSportStats;
+
+enum { TD5_RSB_FRONT = 0, TD5_RSB_OUTER, TD5_RSB_SFRONT, TD5_RSB_SBACK, TD5_RSB_SEND, TD5_RSB_PORTAL, TD5_RSB__N };
 
 int td5_roam_stadium_enabled(void);   /* TD5RE_ROAM_STADIUM (default 1; 0 = stand footprints built as buildings) */
 int td5_roam_pitch_enabled(void);     /* TD5RE_ROAM_PITCH_LINES (default 1; 0 = pitches stay plain lawn) */
