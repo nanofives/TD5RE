@@ -3073,18 +3073,28 @@ static int sc_lc_collect(void *u, const ScPrim *p)
     return 0;
 }
 
+/* a point this close to a cut line is ON it: the side test of a near-collinear vertex is the last bits of the
+ * arithmetic, and those moved between the main thread and a worker (determinism arm T: an extra vertex) */
+#define SC_LC_SNAP 1e-3
+
+static double sc_lc_dist(double ax, double az, double bx, double bz, double l, double sgn, double k, double px, double pz)
+{
+    const double d = sgn * sc_cross(ax, az, bx, bz, px, pz) / l - k;
+    return fabs(d) < SC_LC_SNAP ? 0.0 : d;
+}
+
 /* the part of `in` where sgn * (signed distance to the line a->b, + = left) >= k */
 static int sc_lc_half(const ScLcPoly *in, double ax, double az, double bx, double bz, double sgn, double k, ScLcPoly *out)
 {
-    const double l = hypot(bx - ax, bz - az);
+    const double l = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));   /* not hypot: a CRT call, its rounding is the thread's */
     int i, m = 0;
     if (l < 1e-9) { *out = *in; return out->n; }
     for (i = 0; i < in->n; i++) {
         const int j = (i + 1) % in->n;
-        const double di = sgn * sc_cross(ax, az, bx, bz, in->x[i], in->z[i]) / l - k;
-        const double dj = sgn * sc_cross(ax, az, bx, bz, in->x[j], in->z[j]) / l - k;
+        const double di = sc_lc_dist(ax, az, bx, bz, l, sgn, k, in->x[i], in->z[i]);
+        const double dj = sc_lc_dist(ax, az, bx, bz, l, sgn, k, in->x[j], in->z[j]);
         if (di >= 0.0 && m < SC_LCLIP_PTS) { out->x[m] = in->x[i]; out->z[m] = in->z[i]; m++; }
-        if ((di >= 0.0) != (dj >= 0.0) && m < SC_LCLIP_PTS) {
+        if (((di > 0.0 && dj < 0.0) || (di < 0.0 && dj > 0.0)) && m < SC_LCLIP_PTS) {   /* a point ON the line is no crossing */
             const double t = di / (di - dj);
             out->x[m] = in->x[i] + t * (in->x[j] - in->x[i]); out->z[m] = in->z[i] + t * (in->z[j] - in->z[i]); m++;
         }
