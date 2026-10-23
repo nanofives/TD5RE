@@ -145,7 +145,18 @@ static struct {
     float   priv_s[1024];                       /* one sample a second */
     float   rep_s[1024], strm_s[1024];          /* [F8b] the same seconds: replay record buffer, stream resident MB */
     double  tick_us_sum, tick_us_max; long tick_n;
+    /* [roam QD] census: spawn tries refused by reason, cars the player can see, direction vs the road */
+    long    rej[16], tries, budget_ticks, short_ticks;
+    long    vis_n, vis_hist[5]; double vis_sum, near_sum, ahead_sum;
+    long    dir_n, dir_against, dir_wrong, dir_rb_n, dir_rb_against, dir_skip_turn, dir_skip_end;
+    FILE   *dcsv;
 } T;
+
+/* [roam QD] why a spawn try was refused (census; the order of the tests in rt_try_spawn) */
+enum { RJ_NOCAR = 0, RJ_SNAP, RJ_SHORT, RJ_SERVICE, RJ_DECK, RJ_ENDS, RJ_ANCHOR, RJ_VIEW, RJ_OFFROAD, RJ_STACK, RJ_CORNERS,
+       RJ_ACTOR, RJ_OK, RJ_N };
+static const char *const k_rej_name[RJ_N] = { "no-parked-car", "no-street-60m", "edge<42m", "service-skip", "deck/bore",
+    "junction-clearance", "near-anchor", "in-view", "off-surface", "stacked-decks", "body-corners-off", "actor-14m", "OK" };
 
 /* ============================================================ helpers ============ */
 
@@ -709,6 +720,7 @@ void td5_roam_traffic_session_end(void)
 {
     T.on = 0;
     if (T.trc) { fclose(T.trc); T.trc = NULL; }
+    if (T.dcsv) { fclose(T.dcsv); T.dcsv = NULL; }
 }
 
 static RtCar *rt_car_of(int slot)
@@ -867,27 +879,28 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     double th, r, px, pz, along, dm, s, x, z, tx, tz, v;
     int i, e, d, k, inside = 0, ok;
     for (i = 0; i < T.pool; i++) if (T.car[i].state == RT_PARKED) { c = &T.car[i]; break; }
-    if (!c) return 0;
+    T.tries++;
+    if (!c) { T.rej[RJ_NOCAR]++; return 0; }
     th = rt_unit(&T.rng) * 2.0 * RT_PI;
     r = (T.r_spawn_min + rt_unit(&T.rng) * (T.r_spawn_max - T.r_spawn_min)) * RT_M;
     px = ax + cos(th) * r; pz = az + sin(th) * r;
-    if (!td5_roam_route_graph_snap_edge(px, pz, 60.0, &e, &along, &dm)) return 0;
-    if (!rt_edge(e, &E) || E.plen < 42.0 * RT_M) return 0;
-    if (E.klass <= 2 && rt_unit(&T.rng) < 0.8) return 0;      /* service / living: few cars */
-    if (E.flags & 0x03) return 0;                              /* not on a deck or in a bore */
+    if (!td5_roam_route_graph_snap_edge(px, pz, 60.0, &e, &along, &dm)) { T.rej[RJ_SNAP]++; return 0; }
+    if (!rt_edge(e, &E) || E.plen < 42.0 * RT_M) { T.rej[RJ_SHORT]++; return 0; }
+    if (E.klass <= 2 && rt_unit(&T.rng) < 0.8) { T.rej[RJ_SERVICE]++; return 0; }      /* service / living: few cars */
+    if (E.flags & 0x03) { T.rej[RJ_DECK]++; return 0; }                             /* not on a deck or in a bore */
     if (E.oneway > 0) d = 0;
     else if (E.oneway < 0) d = 1;
     else d = (rt_lcg(&T.rng) & 1) ? 1 : 0;
     s = d == 0 ? along : E.plen - along;
-    if (s < 6.0 * RT_M || s > E.plen - 35.0 * RT_M) return 0;  /* clear of the junctions (and of a stop line) */
+    if (s < 6.0 * RT_M || s > E.plen - 35.0 * RT_M) { T.rej[RJ_ENDS]++; return 0; }  /* clear of the junctions (and of a stop line) */
     k = (int)(rt_lcg(&T.rng) % (uint32_t)rt_dir_lanes(&E));
     rt_edge_pt(&E, d, s, rt_lane_off(&E, k), &x, &z, &tx, &tz);
     /* far enough from EVERY anchor (no car pops up next to a racer) */
     for (i = 0; i < nanch; i++)
-        if (hypot(x - anx[i], z - anz[i]) < T.r_spawn_min * 0.8 * RT_M) return 0;
-    if (T.visgate && rt_in_view(x, z, T.vis_m)) { T.pop_spawn_rej++; return 0; }   /* [HG] never appear in front of the camera */
+        if (hypot(x - anx[i], z - anz[i]) < T.r_spawn_min * 0.8 * RT_M) { T.rej[RJ_ANCHOR]++; return 0; }
+    if (T.visgate && rt_in_view(x, z, T.vis_m)) { T.pop_spawn_rej++; T.rej[RJ_VIEW]++; return 0; }   /* [HG] never appear in front of the camera */
     ok = rt_locate(x, z, 0, 0, &inside, NULL);
-    if (!ok || !inside) return 0;
+    if (!ok || !inside) { T.rej[RJ_OFFROAD]++; return 0; }
     {   /* not under (or on) a deck: one road surface at this point, so the spawn height is the right one */
         TD5_RoamCand cand[4];
         int32_t ox, oz;
@@ -897,17 +910,17 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
         if (!rs) return 0;
         nc = td5_roam_collect(rs, (int32_t)floor((x - ox) * 256.0 + 0.5), (int32_t)floor((z - oz) * 256.0 + 0.5), cand, 4);
         for (q = 1; q < nc; q++)
-            if (abs(cand[q].h - cand[0].h) > 2 * 430 * 256) return 0;
+            if (abs(cand[q].h - cand[0].h) > 2 * 430 * 256) { T.rej[RJ_STACK]++; return 0; }
     }
     {   /* the body corners on the road too */
         const double rx = tz, rz = -tx;
         int q;
         for (q = 0; q < 4; q++) {
             const double l = (q & 1) ? 2.2 : -2.2, w = (q & 2) ? 0.95 : -0.95;
-            if (!rt_locate(x + (tx * l + rx * w) * RT_M, z + (tz * l + rz * w) * RT_M, 0, 0, &inside, NULL) || !inside) return 0;
+            if (!rt_locate(x + (tx * l + rx * w) * RT_M, z + (tz * l + rz * w) * RT_M, 0, 0, &inside, NULL) || !inside) { T.rej[RJ_CORNERS]++; return 0; }
         }
     }
-    if (!rt_clear_of_actors(x, z, 14.0, c->slot)) return 0;
+    if (!rt_clear_of_actors(x, z, 14.0, c->slot)) { T.rej[RJ_ACTOR]++; return 0; }
     a = td5_game_get_actor(c->slot);
     if (!a) return 0;
     memset(&c->e, 0, sizeof *c - offsetof(RtCar, e));
@@ -938,6 +951,7 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     }
     T.spawn_count++;
     T.st.spawns++;
+    T.rej[RJ_OK]++;
     return 1;
 }
 
@@ -1477,6 +1491,81 @@ static void rt_shots(void)
 }
 #endif
 
+/* ============================================================ [roam QD] census ==== */
+
+/* Every sampled tick: how many cars the PLAYER can see (alive, faded in, inside the view cone within 150 m), how many
+ * are within 250 m in any direction, and, for every moving car on the middle of a street, its direction against the
+ * street's own polyline found by an independent snap (not the follower's state): a one-way driven backwards, or a
+ * two-way street driven on its left half. Car-ticks / 30 = car-seconds. DEV: TD5RE_ROAM_TRAFFIC_DIRCSV=1 writes
+ * one sample per car per second to log/roam_traffic_dir.csv for the offline OSM check (verify/roam/traffic_dir.py). */
+static void rt_census(void)
+{
+    const TD5_Actor *p0 = td5_game_get_actor(0);
+    double cx = 0.0, cz = 0.0;
+    int i, nvis = 0;
+    const long tick = (long)g_td5.simulation_tick_counter;
+    if (!p0 || !rt_place_of(p0, &cx, &cz)) return;
+#ifndef TD5RE_RELEASE
+    if (!T.dcsv && td5_env_int("TD5RE_ROAM_TRAFFIC_DIRCSV", 0, 0, 1)) {
+        char path[512];
+        const char *dir = td5_plat_log_dir();
+        snprintf(path, sizeof path, "%sroam_traffic_dir.csv", dir ? dir : "");
+        T.dcsv = fopen(path, "w");
+        if (T.dcsv) fprintf(T.dcsv, "tick,slot,x,z,vx,vz,v_kmh,seg,e,d,k,edge_key,oneway,flags,lat_m,verdict,px,pz\n");
+    }
+#endif
+    T.vis_n++;
+    for (i = 0; i < T.pool; i++) {
+        const RtCar *c = &T.car[i];
+        const TD5_Actor *a;
+        TD5_RouteGEdge E;
+        double x, z, d, v, vx, vz, along = 0.0, dm = 0.0, qx, qz, tx, tz, dot, lat = 0.0;
+        int e = -1, dir, verdict = 0;
+        if (c->state != RT_LIVE || c->alpha <= 0) continue;
+        a = td5_game_get_actor(c->slot);
+        if (!a || !rt_place_of(a, &x, &z)) continue;
+        d = hypot(x - cx, z - cz) / RT_M;
+        if (d < 250.0) T.near_sum += 1.0;
+        if (d < 150.0 && rt_in_view(x, z, 150.0)) { nvis++; }
+        if (d < 150.0 && rt_in_view(x, z, 150.0) && d > 20.0) T.ahead_sum += 1.0;
+        /* direction */
+        if (c->alpha < 255 || td5_ai_actor_is_broken_down(c->slot)) continue;
+        v = rt_speed_ms(a);
+        if (v < 1.5) continue;
+        vx = (double)a->linear_velocity_x / (v * 256.0 / RT_HZ * RT_M);
+        vz = (double)a->linear_velocity_z / (v * 256.0 / RT_HZ * RT_M);
+        if (!td5_roam_route_graph_snap_edge(x, z, 6.0, &e, &along, &dm) || !rt_edge(e, &E)) continue;
+        if (along < 12.0 * RT_M || along > E.plen - 12.0 * RT_M) { T.dir_skip_end++; verdict = -2; goto row; }
+        rt_poly_at(&E, along, &qx, &qz, &tx, &tz, NULL);
+        dot = vx * tx + vz * tz;
+        if (fabs(dot) < 0.8) { T.dir_skip_turn++; verdict = -1; goto row; }
+        dir = dot > 0.0 ? 0 : 1;
+        {   /* signed lateral, + = right of the car's travel ((-uz, ux), game frame) */
+            const double ux = dir ? -tx : tx, uz = dir ? -tz : tz;
+            lat = ((x - qx) * -uz + (z - qz) * ux) / RT_M;
+        }
+        T.dir_n++;
+        if (E.oneway) {
+            if (!rt_allowed(&E, dir)) { T.dir_against++; verdict = 1; }
+        } else if (E.oneway_rb) {
+            /* an untagged roundabout piece: its implied (counter-clockwise) one-way */
+            T.dir_rb_n++;
+            if (dir != (E.oneway_rb > 0 ? 0 : 1)) { T.dir_rb_against++; verdict = 3; }
+        } else if (!(E.flags & ROAM_EF_ROUNDABOUT) && lat < -0.3) { T.dir_wrong++; verdict = 2; }
+row:
+#ifndef TD5RE_RELEASE
+        if (T.dcsv && (tick + c->slot) % 30 == 0 && e >= 0 && rt_edge(e, &E))
+            fprintf(T.dcsv, "%ld,%d,%.0f,%.0f,%.3f,%.3f,%.1f,%d,%d,%d,%d,%llu,%d,%d,%.2f,%d,%.0f,%.0f\n", tick, c->slot, x, z, vx, vz,
+                    v * 3.6, c->seg, c->e, c->d, c->k, (unsigned long long)E.key, E.oneway, E.flags, lat, verdict, cx, cz);
+#else
+        (void)tick;
+#endif
+        continue;
+    }
+    T.vis_sum += nvis;
+    T.vis_hist[nvis < 4 ? nvis : 4]++;
+}
+
 /* ============================================================ tick ================ */
 
 static void rt_tick_body(void);
@@ -1766,6 +1855,8 @@ static void rt_tick_body(void)
 #endif
     T.live_prev = live;
     if (tick - T.st_t0 > RT_WARMUP) {
+        rt_census();
+        if (live < target) T.budget_ticks++;
         T.st.samples++;
         T.live_sum += live;
         if (live < T.st.live_min) T.st.live_min = live;
@@ -1849,6 +1940,24 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
              s->off_ticks_contact, s->barrier_passes, dpriv, bad[0] ? ": " : "", bad);
     TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] POP gate %d: spawns in view (<%.0f m, cone) %ld of %ld, despawns in view %ld of %ld | refused spawn candidates %ld, held despawn ticks %ld, slow fade-outs %ld", T.visgate, RT_POP_M, T.pop_spawn, s->spawns, T.pop_despawn, s->despawns,
               T.pop_spawn_rej, T.pop_despawn_held, T.pop_slow_fade);
+    {   /* [roam QD] census: spawn tries by outcome, what the player sees, direction against the road */
+        char rj[600];
+        size_t rl = 0;
+        int q;
+        const double ns = T.vis_n > 0 ? (double)T.vis_n : 1.0;
+        rj[0] = 0;
+        for (q = 0; q < RJ_N && rl < sizeof rj - 40; q++)
+            if (T.rej[q]) rl += (size_t)snprintf(rj + rl, sizeof rj - rl, " %s %ld", k_rej_name[q], T.rej[q]);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD SPAWN tries %ld:%s | ticks below target %ld of %ld", T.tries, rj, T.budget_ticks, s->samples);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD VISIBLE in the view cone within 150 m: mean %.2f cars (0: %.0f, 1: %.0f, 2: %.0f, 3: %.0f, "
+                  "4+: %.0f pct of the time), beyond 20 m %.2f | within 250 m any side: mean %.2f | samples %ld", T.vis_sum / ns,
+                  100.0 * T.vis_hist[0] / ns, 100.0 * T.vis_hist[1] / ns, 100.0 * T.vis_hist[2] / ns, 100.0 * T.vis_hist[3] / ns,
+                  100.0 * T.vis_hist[4] / ns, T.ahead_sum / ns, T.near_sum / ns, T.vis_n);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD DIRECTION judged %.1f car-s: against a one-way %.1f car-s, wrong side of a two-way %.1f car-s, "
+                  "untagged roundabout pieces %.1f car-s of which against %.1f car-s | not judged: turning %.1f car-s, within 12 m of a node "
+                  "%.1f car-s", T.dir_n / RT_HZ, T.dir_against / RT_HZ, T.dir_wrong / RT_HZ, T.dir_rb_n / RT_HZ, T.dir_rb_against / RT_HZ,
+                  T.dir_skip_turn / RT_HZ, T.dir_skip_end / RT_HZ);
+    }
     {   /* [roam LG] road rules seen by the traffic */
         TD5_RouteRestrCensus rc;
         td5_roam_route_graph_restr_census(&rc);
@@ -1899,6 +2008,11 @@ void td5_roam_traffic_stats_reset(void)
     T.st.live_min = 1 << 30;
     T.live_sum = 0.0;
     T.pop_spawn = T.pop_despawn = T.pop_spawn_rej = T.pop_despawn_held = T.pop_slow_fade = 0;
+    memset(T.rej, 0, sizeof T.rej);       /* [roam QD] census */
+    T.tries = T.budget_ticks = T.short_ticks = T.vis_n = 0;
+    memset(T.vis_hist, 0, sizeof T.vis_hist);
+    T.vis_sum = T.near_sum = T.ahead_sum = 0.0;
+    T.dir_n = T.dir_against = T.dir_wrong = T.dir_rb_n = T.dir_rb_against = T.dir_skip_turn = T.dir_skip_end = 0;
     T.st_t0 = (long)g_td5.simulation_tick_counter;
 }
 
