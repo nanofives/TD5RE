@@ -686,6 +686,7 @@ struct TD5_RoamFurnSource {
     int        on_signals, on_lamps, on_stops, on_xings, on_unknown_xings;
     int        on_barriers, on_piers;      /* [roam IE] TD5RE_ROAM_FURN_BARRIERS / _PIERS (default 1) */
     int        on_lanes;                   /* [roam PA] TD5RE_ROAM_LANES (default 1) */
+    int        lane_rail_veto;             /* [integ P] TD5RE_ROAM_LANE_RAIL_VETO (default 1) */
 };
 
 static int fu_json_true(const cJSON *e, const char *key)
@@ -866,6 +867,7 @@ TD5_RoamFurnSource *td5_roam_furn_open(const char *place)
     f->on_stops   = td5_env_int("TD5RE_ROAM_FURN_STOPS", 1, 0, 1);
     f->on_xings   = td5_env_int("TD5RE_ROAM_FURN_XINGS", 1, 0, 1);
     f->on_lanes   = td5_env_int("TD5RE_ROAM_LANES", 1, 0, 1);      /* [roam PA] */
+    f->lane_rail_veto = td5_env_int("TD5RE_ROAM_LANE_RAIL_VETO", 1, 0, 1);   /* [integ P] */
     /* [roam LC] unknown paint: 0 skipped (old), 1 the rule (zebra on a main / wide road, plain lines elsewhere), 2 every
      * unknown a zebra (what TD5RE_GEO_XING_UNKNOWN=1 always meant). Unmarked is never painted in any mode. */
     f->xing_mode = td5_env_int("TD5RE_GEO_XING_UNKNOWN", 0, 0, 1) ? 2 : td5_env_int("TD5RE_ROAM_XING_UNKNOWN", 1, 0, 2);
@@ -2556,6 +2558,11 @@ static int fu_emit_lanes(FuEm *em, TD5_RoamFurnSource *f)
         same = (tx * wx + tz * wz) >= 0.0;
         n[0] = tz; n[1] = -tx;                              /* the span's LEFT (game frame) */
         hw = s.hw;
+        if (f->lane_rail_veto) {   /* [integ P] no lane paint across a level crossing: the span's carriageway off the rail bed */
+            const double px[4] = { s.ax + n[0] * hw, s.bx + n[0] * hw, s.bx - n[0] * hw, s.ax - n[0] * hw };
+            const double pz[4] = { s.az + n[1] * hw, s.bz + n[1] * hw, s.bz - n[1] * hw, s.az - n[1] * hw };
+            if (roam_ctx_rails_bed_near(c, px, pz, 4, 0.5 * FU_UPM)) { st->lane_rail++; continue; }
+        }
         em->sb = roam_ctx_sb_of(c, mx, mz);
         em->road_y = 0.5 * (s.ay + s.by);
         for (side = 0; side < 2; side++) {                  /* 0 = the way's left, 1 = its right */

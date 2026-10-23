@@ -5642,7 +5642,11 @@ static int sc_lot_trees(TD5_RoamScnSource *s, TG_TileCtx *c, const PvBld *bld, c
  * [integ L] lit = 1: a shopfront / awning / pool face (the round L veto), judged by height: a face over the crown
  * floor (ylo) keeps the CROWN off it, a lower one keeps the trunk ST_LIT_TRUNK_M off it. lit = 2: an outskirts face
  * (pole, wire), its high faces only (the wires): the low ones are already in the furniture tail. */
-typedef struct { double x[4], z[4], x0, z0, x1, z1, keep, ylo; int n, lit; } StKeep;
+/* [integ P] lit = 4: a rails face (catenary, boards, masts) judged like lit 2 (high faces keep the crown off) for RULE
+ * trees only (TD5RE_ROAM_RULE_TREE_WIRE); lane = 1: roam PA lane paint / track kerb, a trunk keeps ST_LIT_TRUNK_M off it
+ * instead of the flat-face ST_KEEP_FLAT_M (TD5RE_ROAM_TREE_LANE_KEEP): the lane is on the carriageway, the tree behind
+ * the kerb */
+typedef struct { double x[4], z[4], x0, z0, x1, z1, keep, ylo; int n, lit, lane; } StKeep;
 
 #define ST_LIT_TRUNK_M   0.5          /* [integ L] trunk off a shopfront / pool face            */
 #define ST_LIT_HIGH_M    2.0          /* [integ L] a face this far over the foot meets the crown */
@@ -5654,12 +5658,35 @@ static int st_keep_collect(TG_TileCtx *c, StKeep **out, int *nout)
 {
     StKeep *kp = NULL;
     int n = 0, cap = 0, k, m, i;
+    const int lane_keep = c->tv_on && td5_env_int("TD5RE_ROAM_TREE_LANE_KEEP", 1, 0, 1);      /* [integ P] */
     for (k = 0; k < TD5_ROAM_SCN_NSB; k++) {
         const ScSb *b = &c->sb[k];
         if (c->furn_first[k] >= b->nmesh) continue;
-        for (m = c->furn_first[k]; m < b->nmesh; m++)
+        for (m = c->furn_first[k]; m < b->nmesh; m++) {
+            const int n0 = n;
             if (!st_keep_mesh(c, k, m, 0, &kp, &n, &cap)) { free(kp); return 0; }
+            if (lane_keep && n > n0)
+                for (i = 0; i < c->xc_n; i++) {
+                    const struct ScXcRange *r = &c->xc_r[i];
+                    if (r->cat == SC_XC_LANE && r->sb == k && m >= r->m0 && m < r->m1) {
+                        int q;
+                        for (q = n0; q < n; q++) {
+                            const double d = kp[q].keep - ST_M(ST_LIT_TRUNK_M);
+                            kp[q].lane = 1; kp[q].keep = ST_M(ST_LIT_TRUNK_M);
+                            kp[q].x0 += d; kp[q].z0 += d; kp[q].x1 -= d; kp[q].z1 -= d;
+                        }
+                        break;
+                    }
+                }
+        }
     }
+    if (c->tv_on && td5_env_int("TD5RE_ROAM_RULE_TREE_WIRE", 1, 0, 1))           /* [integ P] rule crowns off catenary */
+        for (i = 0; i < c->xc_n; i++) {
+            const struct ScXcRange *r = &c->xc_r[i];
+            if (r->cat != SC_XC_RAIL) continue;
+            for (m = r->m0; m < r->m1; m++)
+                if (!st_keep_mesh(c, r->sb, m, 4, &kp, &n, &cap)) { free(kp); return 0; }
+        }
     if (c->tv_on)                                                   /* [integ L] shopfronts, awnings, pools */
         for (i = 0; i < c->xc_n; i++) {
             const struct ScXcRange *r = &c->xc_r[i];
@@ -5737,10 +5764,11 @@ static int st_keep_hit(const StKeep *kp, int n, double x, double z, double y, do
     for (i = 0; i < n; i++) {
         const StKeep *q = &kp[i];
         double d = 1e30, t, keep = q->keep;
-        const double more = (!q->lit && stand > keep && keep < ST_M(ST_KEEP_FLAT_M)) ? stand - keep : 0.0;
+        const double more = (!q->lit && !q->lane && stand > keep && keep < ST_M(ST_KEEP_FLAT_M)) ? stand - keep : 0.0;
+        if (q->lit == 4 && stand <= 0.0) continue;                 /* [integ P] rails crown rule: rule trees only */
         if (x < q->x0 - more || x > q->x1 + more || z < q->z0 - more || z > q->z1 + more) continue;
         keep += more;
-        if (q->lit) keep = (q->ylo >= y + ST_M(ST_LIT_HIGH_M)) ? crown : (q->lit == 2 ? 0.0 : ST_M(ST_LIT_TRUNK_M));
+        if (q->lit) keep = (q->ylo >= y + ST_M(ST_LIT_HIGH_M)) ? crown : (q->lit >= 2 ? 0.0 : ST_M(ST_LIT_TRUNK_M));
         if (q->n == 1) d = hypot(x - q->x[0], z - q->z[0]);
         else {
             if (q->n >= 3 && td5_geob_point_in_ring(q->x, q->z, q->n, x, z)) return 1;
@@ -9153,7 +9181,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t pv_ms_max = 0;
     long ct_i[8] = { 0 };                       /* [roam NC] */
     double ct_d[5] = { 0 }, ct_cen[2][6] = { { 0 } };
-    long pa_t[8] = { 0 }; double pa_m[3] = { 0.0, 0.0, 0.0 };   /* [roam PA] lane paint census */
+    long pa_t[8] = { 0 }; double pa_m[3] = { 0.0, 0.0, 0.0 };   /* [roam PA] lane paint census ([integ P] pa_t[7] off a rail bed) */
     long ft[16], lc_t[6] = { 0 }, ft_unknown_skipped = 0, lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, lf_t[24] = { 0 }, lf_wire_m = 0.0, ou_t[16] = { 0 }, cov_t[3] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
@@ -9361,7 +9389,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             sh_m += r->shop.front_m;
         }
         pa_t[0] += r->furn.lane_bus_segs; pa_t[1] += r->furn.lane_bike_segs; pa_t[2] += r->furn.lane_track_segs; pa_t[3] += r->furn.lane_kerbs;
-        pa_t[4] += r->furn.lane_ways; pa_t[5] += r->furn.lane_no_dir; pa_t[6] += r->furn.lane_narrow;
+        pa_t[4] += r->furn.lane_ways; pa_t[5] += r->furn.lane_no_dir; pa_t[6] += r->furn.lane_narrow; pa_t[7] += r->furn.lane_rail;
         pa_m[0] += r->furn.lane_bus_m; pa_m[1] += r->furn.lane_bike_m; pa_m[2] += r->furn.lane_track_m;
         lf_t[0] += r->rail.lx_nodes; lf_t[1] += r->rail.lx_equipped; lf_t[2] += r->rail.lx_untagged;
         lf_t[3] += r->rail.lx_barrier_half; lf_t[4] += r->rail.lx_barrier_full; lf_t[5] += r->rail.lx_lights; lf_t[6] += r->rail.lx_saltires; lf_t[21] += r->rail.lx_untagged_x;
@@ -9611,8 +9639,10 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
                  "roam lane paint [roam PA]: bus lane %.2f km (%ld spans), bike lane %.2f km (%ld spans), separated track %.2f km (%ld spans, %ld kerb boxes) | "
-                 "ways painted %ld (ribbon pieces counted per tile) | spans with no way direction %ld, too narrow %ld",
-                 pa_m[0] / 1000.0, pa_t[0], pa_m[1] / 1000.0, pa_t[1], pa_m[2] / 1000.0, pa_t[2], pa_t[3], pa_t[4], pa_t[5], pa_t[6]);
+                 "ways painted %ld (ribbon pieces counted per tile) | spans with no way direction %ld, too narrow %ld, "
+                 "at a rail bed %ld [integ P, TD5RE_ROAM_LANE_RAIL_VETO=%d]",
+                 pa_m[0] / 1000.0, pa_t[0], pa_m[1] / 1000.0, pa_t[1], pa_m[2] / 1000.0, pa_t[2], pa_t[3], pa_t[4], pa_t[5], pa_t[6],
+                 pa_t[7], td5_env_int("TD5RE_ROAM_LANE_RAIL_VETO", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);

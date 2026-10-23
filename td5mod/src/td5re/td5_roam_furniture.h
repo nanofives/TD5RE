@@ -79,6 +79,7 @@ typedef struct {
     int  piers, pier_cols, pier_drop_road, abutments;
     /* [roam PA] bus / bike lane paint: spans + metres by kind, kerb boxes, ways met, spans with no way direction / too narrow */
     int  lane_bus_segs, lane_bike_segs, lane_track_segs, lane_kerbs, lane_ways, lane_no_dir, lane_narrow;
+    int  lane_rail;                 /* [integ P] lane spans left bare: the carriageway meets a drawn rail bed */
     double lane_bus_m, lane_bike_m, lane_track_m;
     /* output */
     int  meshes;                                      /* furniture meshes appended */
