@@ -6562,6 +6562,10 @@ static int pv_end_face(PvEmit *e, const PvEnd *q, int at_b)
     double x[4], y[4], z[4], u[4], v[4];
     const double dx = q->ox - q->kx, dz = q->oz - q->kz;
     if (!(hypot(dx, dz) > 4.0)) return 1;
+    {   /* off the drivable surface as the census reads it (a wall: its footprint segment), like the kerb face */
+        const double fx[2] = { (double)(float)q->kx, (double)(float)q->ox }, fz[2] = { (double)(float)q->kz, (double)(float)q->oz };
+        if (sc_on_road(e->c, fx, fz, 2, NULL)) return 1;
+    }
     if (at_b) {
         x[0] = q->kx; z[0] = q->kz; y[0] = q->ykb;
         x[1] = q->ox; z[1] = q->oz; y[1] = q->yob;
@@ -6610,7 +6614,12 @@ static int pv_trim(PvEmit *e, PvChain *ch, int a, int b, const double *kx, const
             ox[0] = ch->ox[a] + (ch->ox[b] - ch->ox[a]) * t0; oz[0] = ch->oz[a] + (ch->oz[b] - ch->oz[a]) * t0;
             ox[1] = ch->ox[a] + (ch->ox[b] - ch->ox[a]) * t1; oz[1] = ch->oz[a] + (ch->oz[b] - ch->oz[a]) * t1;
             if ((ox[1] - ox[0]) * (qx[1] - qx[0]) + (oz[1] - oz[0]) * (qz[1] - qz[0]) < 0.0) { hi = t; continue; }
-            if (pv_guard_fit(e->c, qx, qz, 0, 1, ox, oz, ((ch->vf[a] | ch->vf[b]) & PV_VF_ISLAND) != 0, &cut)) lo = t; else hi = t;
+            if (pv_guard_fit(e->c, qx, qz, 0, 1, ox, oz, ((ch->vf[a] | ch->vf[b]) & PV_VF_ISLAND) != 0, &cut)) {
+                /* and its back face off the road as the census reads a wall (a corner whose outer point sits on the
+                 * kerb passes as a triangle while its outer edge touches the road) */
+                const double fx[2] = { (double)(float)ox[0], (double)(float)ox[1] }, fz[2] = { (double)(float)oz[0], (double)(float)oz[1] };
+                if (sc_on_road(e->c, fx, fz, 2, NULL)) hi = t; else lo = t;
+            } else hi = t;
         }
         if (side) ts = lo; else tp = lo;
     }
