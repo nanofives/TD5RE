@@ -30,6 +30,8 @@
 #include "td5_render.h"
 #include "td5_camera.h"        /* [roam HG] the view cone the spawner / despawner keep out of */
 #include "td5_geo_signals.h"
+#include "td5_geo.h"              /* [roam QD] COVER classes, the place raster path */
+#include "td5_geo_route.h"        /* [roam QD] GrRaster, gr_raster_read_window_game */
 #include "td5_roam_mode.h"
 #include "td5_roam_locate.h"
 #include "td5_roam_physics.h"
@@ -125,6 +127,8 @@ static struct {
     double  r_spawn_min, r_spawn_max, r_count, r_despawn;
     double  wb, a_lat, a_brake, speed_pct;
     double  limit_pct, vmax_kmh;                 /* [roam LG] cruise = posted limit x limit_pct (0 = class table), capped */
+    int     hide_on; double hide_m, hide_min_m, eye_back_m;   /* [roam QD] a spawn in view hidden by a built-up block */
+    double  lead_pct, lead_deg;                  /* [roam QD] share of spawn tries aimed ahead of the player, half angle */
     int     log_every;
     TD5_RoamTrafficStats st;
     /* [HG] popping census: events inside the view cone within RT_POP_M, spawn candidates refused, despawns held */
@@ -146,7 +150,7 @@ static struct {
     float   rep_s[1024], strm_s[1024];          /* [F8b] the same seconds: replay record buffer, stream resident MB */
     double  tick_us_sum, tick_us_max; long tick_n;
     /* [roam QD] census: spawn tries refused by reason, cars the player can see, direction vs the road */
-    long    rej[16], tries, budget_ticks, short_ticks;
+    long    rej[16], tries, budget_ticks, short_ticks, hid_spawns, hid_despawns;
     long    vis_n, vis_hist[5]; double vis_sum, near_sum, ahead_sum;
     long    dir_n, dir_against, dir_wrong, dir_rb_n, dir_rb_against, dir_skip_turn, dir_skip_end;
     FILE   *dcsv;
@@ -194,6 +198,18 @@ static void rt_read_knobs(void)
     if (td5_env_int("TD5RE_ROAM_MAXSPEED", 1, 0, 1) == 0) T.limit_pct = 0.0;
     T.visgate     = td5_env_int("TD5RE_ROAM_TRAFFIC_VISGATE", 1, 0, 1);      /* [HG] 0 = the old spawn / despawn rule (A/B) */
     T.vis_m       = td5_env_int("TD5RE_ROAM_TRAFFIC_VIS_M", 470, 100, 900);   /* [HG] about the far cull (195000 / 430) + margin */
+    /* [roam QD] A candidate inside the view cone may still spawn when a built-up block hides it: the sight line from the
+     * chase camera (eye_back_m behind the car) to it crosses an unbroken hide_m of ground that is off the drivable surface
+     * AND built-up on COVER.R8 (a city block), and it is at least hide_min_m away. 0 = the old rule (every candidate in the
+     * cone refused). */
+    T.hide_on     = td5_env_int("TD5RE_ROAM_TRAFFIC_HIDE", 1, 0, 1);
+    T.hide_m      = td5_env_int("TD5RE_ROAM_TRAFFIC_HIDE_M", 20, 4, 200);
+    T.hide_min_m  = td5_env_int("TD5RE_ROAM_TRAFFIC_HIDE_MIN_M", 60, 20, 400);
+    T.eye_back_m  = 6.0;
+    /* [roam QD] share (pct) of the spawn tries aimed within +-lead_deg of the player's heading: cars spawned behind a
+     * moving player leave the despawn ring within seconds. 0 = the old uniform ring (and the old RNG draws). */
+    T.lead_pct    = td5_env_int("TD5RE_ROAM_TRAFFIC_LEAD", 60, 0, 100) / 100.0;
+    T.lead_deg    = td5_env_int("TD5RE_ROAM_TRAFFIC_LEAD_DEG", 80, 10, 180);
 #ifndef TD5RE_RELEASE
     T.shots       = td5_env_int("TD5RE_ROAM_TRAFFIC_SHOTS", 0, 0, 1);
     T.trace_slot  = td5_env_int("TD5RE_ROAM_TRAFFIC_TRACE", -1, -1, 31);
@@ -385,6 +401,7 @@ static void rt_bez(const double (*b)[2], double t, double *x, double *z, double 
 
 static double rt_class_speed(int klass);
 static double rt_edge_speed(const TD5_RouteGEdge *E);
+static void rt_cover_free(void);
 
 /* ============================================================ the next edge ======= */
 
@@ -689,6 +706,7 @@ void td5_roam_traffic_session_init(void)
     int i;
     const int keep_force_l = T.force_level, keep_force_d = T.force_density, keep_loaded = T.loaded;
     memset(&T, 0, sizeof T);   /* knobs are re-read below (T.knobs cleared) */
+    rt_cover_free();           /* [roam QD] */
     T.force_level = keep_force_l; T.force_density = keep_force_d;
     T.loaded = td5_roam_active() ? keep_loaded : 0;   /* td5_roam_traffic_load_assets ran this race init */
     if (!td5_roam_active()) return;
@@ -721,6 +739,7 @@ void td5_roam_traffic_session_end(void)
     T.on = 0;
     if (T.trc) { fclose(T.trc); T.trc = NULL; }
     if (T.dcsv) { fclose(T.dcsv); T.dcsv = NULL; }
+    rt_cover_free();           /* [roam QD] */
 }
 
 static RtCar *rt_car_of(int slot)
@@ -775,6 +794,124 @@ static int rt_anchors(int racing, double *ax, double *az, int cap)
         n++;
     }
     return n;
+}
+
+/* ============================================================ [roam QD] hidden === */
+
+/* The COVER.R8 window round the player (place / game frame, 1.8 km square). The first one is read on the spot (the
+ * spawn); after that, when the player is 400 m from its centre, a worker thread reads the next one while the old window
+ * (still covering 500 m round the player, more than the spawn ring and the view range of a hidden test) stays in use,
+ * and it is swapped in on a later tick. A refresh read on the sim thread cost a 118 ms tick (cold file). */
+static struct {
+    GrRaster r; int ok, failed; double cx, cz;              /* the window in use */
+    GrRaster nx; int nx_ok; double nx_cx, nx_cz;            /* the worker's result */
+    char path[512];
+    TD5_FpEnv fp;
+    void *th; int busy;                                       /* busy: 1 while the worker runs, 2 when it is done */
+} s_cov;
+
+static void rt_cover_read(GrRaster *out, int *ok, double cx, double cz)
+{
+    const double half = 900.0 * RT_M;
+    memset(out, 0, sizeof *out);
+    *ok = gr_raster_read_window_game(s_cov.path, cx - half, cz - half, cx + half, cz + half, 2, out) && out->kind == 2 &&
+          out->data && out->w > 0 && out->h > 0;
+    if (!*ok) { if (out->data) free(out->data); memset(out, 0, sizeof *out); }
+}
+
+static void rt_cover_thread(void *arg)
+{
+    (void)arg;
+    td5_plat_fpenv_apply(&s_cov.fp);
+    rt_cover_read(&s_cov.nx, &s_cov.nx_ok, s_cov.nx_cx, s_cov.nx_cz);
+    __atomic_store_n(&s_cov.busy, 2, __ATOMIC_RELEASE);
+}
+
+static void rt_cover_free(void)
+{
+    if (s_cov.th) { td5_plat_thread_join(s_cov.th); s_cov.th = NULL; }
+    if (s_cov.r.data) free(s_cov.r.data);
+    if (s_cov.nx.data) free(s_cov.nx.data);
+    memset(&s_cov, 0, sizeof s_cov);
+}
+
+static int rt_cover_at(double px, double pz)
+{
+    const GrRaster *r = &s_cov.r;
+    int i, j;
+    if (!s_cov.ok) return TD5_GEO_COVER_NONE;
+    i = (int)floor((px - r->origin_x) / r->cell);
+    j = (int)floor((pz - r->origin_z) / r->cell);
+    if (i < 0 || j < 0 || i >= r->w || j >= r->h) return TD5_GEO_COVER_NONE;
+    return ((const unsigned char *)r->data)[(size_t)j * (size_t)r->w + (size_t)i];
+}
+
+static void rt_cover_follow(double cx, double cz)
+{
+    const char *place = td5_roam_route_place();
+    if (!T.hide_on || s_cov.failed || !place || !place[0]) return;
+    if (s_cov.th && __atomic_load_n(&s_cov.busy, __ATOMIC_ACQUIRE) == 2) {
+        td5_plat_thread_join(s_cov.th);
+        s_cov.th = NULL; s_cov.busy = 0;
+        if (s_cov.nx_ok) {
+            if (s_cov.r.data) free(s_cov.r.data);
+            s_cov.r = s_cov.nx; s_cov.cx = s_cov.nx_cx; s_cov.cz = s_cov.nx_cz;
+            memset(&s_cov.nx, 0, sizeof s_cov.nx);
+        }
+    }
+    if (!s_cov.ok) {
+        int ok = 0;
+        td5_geo_source_path(s_cov.path, sizeof s_cov.path, place, "COVER.R8");
+        rt_cover_read(&s_cov.r, &ok, cx, cz);
+        if (!ok) {
+            s_cov.failed = 1;
+            TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC: no COVER.R8 window for '%s': spawns in view stay refused", place);
+            return;
+        }
+        s_cov.ok = 1; s_cov.cx = cx; s_cov.cz = cz;
+        return;
+    }
+    if (s_cov.th || hypot(cx - s_cov.cx, cz - s_cov.cz) < 400.0 * RT_M) return;
+    s_cov.nx_cx = cx; s_cov.nx_cz = cz; s_cov.nx_ok = 0;
+    td5_plat_fpenv_capture(&s_cov.fp);
+    s_cov.busy = 1;
+    s_cov.th = td5_plat_thread_create(rt_cover_thread, NULL);
+    if (!s_cov.th) {
+        /* no thread: read here (the old cost, rare) */
+        s_cov.busy = 0;
+        rt_cover_read(&s_cov.nx, &s_cov.nx_ok, cx, cz);
+        if (s_cov.nx_ok) {
+            free(s_cov.r.data);
+            s_cov.r = s_cov.nx; s_cov.cx = cx; s_cov.cz = cz;
+            memset(&s_cov.nx, 0, sizeof s_cov.nx);
+        }
+    }
+}
+
+/* 1 when a built-up block hides the PLACE point (x, z) from the player's chase camera: the straight sight line crosses an
+ * unbroken T.hide_m of ground that is off the drivable surface and built-up on COVER.R8. Height is ignored (the eye is
+ * a few metres up, the buildings of a block are taller). Not resident or no cover: not hidden. */
+static int rt_hidden(double x, double z)
+{
+    const TD5_Actor *p0 = td5_game_get_actor(0);
+    double ex, ez, d, yaw, run = 0.0;
+    int n, i;
+    if (!T.hide_on || !s_cov.ok || !p0 || !rt_place_of(p0, &ex, &ez)) return 0;
+    yaw = (double)(p0->euler_accum.yaw >> 8 & 0xFFF) * (2.0 * RT_PI / 4096.0);
+    ex -= sin(yaw) * T.eye_back_m * RT_M; ez -= cos(yaw) * T.eye_back_m * RT_M;
+    d = hypot(x - ex, z - ez) / RT_M;
+    if (d < T.hide_min_m) return 0;
+    n = (int)(d / 2.0);
+    for (i = 1; i < n; i++) {
+        const double t = (double)i / (double)n;
+        const double px = ex + (x - ex) * t, pz = ez + (z - ez) * t;
+        int in = 0;
+        if (rt_cover_at(px, pz) == TD5_GEO_COVER_BUILT && rt_locate(px, pz, 0, 0, &in, NULL) && !in) {
+            run += d / (double)n;
+            if (run >= T.hide_m) return 1;
+        } else run = 0.0;
+    }
+    return 0;
 }
 
 /* ============================================================ spawn =============== */
@@ -877,12 +1014,20 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     TD5_Actor *a;
     TD5_RouteGEdge E;
     double th, r, px, pz, along, dm, s, x, z, tx, tz, v;
-    int i, e, d, k, inside = 0, ok;
+    int i, e, d, k, inside = 0, ok, hid;
     for (i = 0; i < T.pool; i++) if (T.car[i].state == RT_PARKED) { c = &T.car[i]; break; }
     T.tries++;
     if (!c) { T.rej[RJ_NOCAR]++; return 0; }
     th = rt_unit(&T.rng) * 2.0 * RT_PI;
     r = (T.r_spawn_min + rt_unit(&T.rng) * (T.r_spawn_max - T.r_spawn_min)) * RT_M;
+    if (T.lead_pct > 0.0 && rt_unit(&T.rng) < T.lead_pct) {
+        /* [roam QD] aimed ahead of the player (slot 0's heading): th is the angle of (cos, sin) = (x, z) */
+        const TD5_Actor *p0 = td5_game_get_actor(0);
+        if (p0) {
+            const double yaw = (double)(p0->euler_accum.yaw >> 8 & 0xFFF) * (2.0 * RT_PI / 4096.0);
+            th = atan2(cos(yaw), sin(yaw)) + (th / RT_PI - 1.0) * T.lead_deg * (RT_PI / 180.0);
+        }
+    }
     px = ax + cos(th) * r; pz = az + sin(th) * r;
     if (!td5_roam_route_graph_snap_edge(px, pz, 60.0, &e, &along, &dm)) { T.rej[RJ_SNAP]++; return 0; }
     if (!rt_edge(e, &E) || E.plen < 42.0 * RT_M) { T.rej[RJ_SHORT]++; return 0; }
@@ -898,7 +1043,12 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     /* far enough from EVERY anchor (no car pops up next to a racer) */
     for (i = 0; i < nanch; i++)
         if (hypot(x - anx[i], z - anz[i]) < T.r_spawn_min * 0.8 * RT_M) { T.rej[RJ_ANCHOR]++; return 0; }
-    if (T.visgate && rt_in_view(x, z, T.vis_m)) { T.pop_spawn_rej++; T.rej[RJ_VIEW]++; return 0; }   /* [HG] never appear in front of the camera */
+    hid = 0;
+    if (T.visgate && rt_in_view(x, z, T.vis_m)) {
+        /* [HG] never appear in front of the camera, [roam QD] unless a built-up block hides the spot */
+        if (!rt_hidden(x, z)) { T.pop_spawn_rej++; T.rej[RJ_VIEW]++; return 0; }
+        hid = 1;
+    }
     ok = rt_locate(x, z, 0, 0, &inside, NULL);
     if (!ok || !inside) { T.rej[RJ_OFFROAD]++; return 0; }
     {   /* not under (or on) a deck: one road surface at this point, so the spawn height is the right one */
@@ -945,7 +1095,8 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     c->state = RT_LIVE;
     c->alpha = 0; c->fade = 1;
     c->fstep = 255 / RT_FADE_TICKS;
-    if (rt_in_view(x, z, RT_POP_M)) {
+    if (hid) T.hid_spawns++;
+    else if (rt_in_view(x, z, RT_POP_M)) {
         T.pop_spawn++;
         if (T.pop_log_n++ < 40) TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_POP spawn slot %d in view (gate %d)", c->slot, T.visgate);
     }
@@ -966,11 +1117,13 @@ static void rt_despawn(RtCar *c, int why)
             /* only a car that is merely out of range is held: a stuck / dead-end / wreck / off-road car is the obstacle itself,
              * keeping it blocks the lane (and the scripted drivers) for RT_DEFER_TICKS, so it leaves with the slow fade instead */
             const int soft = why == RT_WHY_FAR;
-            if (rt_in_view(x, z, T.vis_m)) {
+            const int hidden = rt_in_view(x, z, T.vis_m) && rt_hidden(x, z);   /* [roam QD] behind a block: not seen */
+            if (hidden) T.hid_despawns++;
+            if (!hidden && rt_in_view(x, z, T.vis_m)) {
                 if (T.visgate && soft && c->defer_t < RT_DEFER_TICKS) { c->defer_t++; T.pop_despawn_held++; return; }
                 seen = 1;
             }
-            if (rt_in_view(x, z, RT_POP_M)) {
+            if (!hidden && rt_in_view(x, z, RT_POP_M)) {
                 T.pop_despawn++;
                 if (T.pop_log_n++ < 40) TD5_LOG_W(LOG_TAG, "ROAM_TRAFFIC_POP despawn slot %d why %d in view (gate %d)", c->slot, why, T.visgate);
             }
@@ -1681,14 +1834,16 @@ static void rt_tick_body(void)
         if (T.dbg_edge >= 0) { TD5_RouteGEdge DE; if (rt_edge(T.dbg_edge, &DE)) T.dbg_key = (long long)DE.key; }
         {   /* DEV: TD5RE_ROAM_TRAFFIC_DBG_PT=x,z (place) -> a 3 x 3 m grid at 10 cm through the locator */
             const char *e = getenv("TD5RE_ROAM_TRAFFIC_DBG_PT");
+            const double dstep = td5_env_int("TD5RE_ROAM_TRAFFIC_DBG_STEP_CM", 10, 1, 500) / 100.0;   /* [roam QD] grid step */
             double qx, qz;
-            if (e && sscanf(e, "%lf,%lf", &qx, &qz) == 2) {
+            /* [roam QD] several points: "x,z;x,z;..." */
+            for (; e && *e && sscanf(e, "%lf,%lf", &qx, &qz) == 2; e = strchr(e, ';') ? strchr(e, ';') + 1 : NULL) {
                 int ix, iz, nout = 0, nres = 0;
                 for (iz = 15; iz >= -15; iz--) {
                     char row[40];
                     for (ix = -15; ix <= 15; ix++) {
                         int in = 0;
-                        row[ix + 15] = rt_locate(qx + ix * 0.1 * RT_M, qz + iz * 0.1 * RT_M, 0, 0, &in, NULL) ? (in ? '#' : '.') : ' ';
+                        row[ix + 15] = rt_locate(qx + ix * dstep * RT_M, qz + iz * dstep * RT_M, 0, 0, &in, NULL) ? (in ? '#' : '.') : ' ';
                     }
                     row[31] = 0;
                     TD5_LOG_I(LOG_TAG, "ROAM_TRAFFIC_DBG_MAP %+3d %s", iz, row);
@@ -1697,7 +1852,7 @@ static void rt_tick_body(void)
                     for (ix = -15; ix <= 15; ix++) {
                         int in = 0;
                         int32_t gy = 0;
-                        const double px = qx + ix * 0.1 * RT_M, pz = qz + iz * 0.1 * RT_M;
+                        const double px = qx + ix * dstep * RT_M, pz = qz + iz * dstep * RT_M;
                         if (!rt_locate(px, pz, 0, 0, &in, &gy)) continue;
                         nres++;
                         if (!in) {
@@ -1714,6 +1869,7 @@ static void rt_tick_body(void)
     }
     per = rt_level_now(&racing);
     nanch = rt_anchors(racing, ax, az, 8);
+    if (nanch > 0) rt_cover_follow(ax[0], az[0]);      /* [roam QD] the built-up window round the player */
 #ifndef TD5RE_RELEASE
     if (T.visgate && tick % 900 == 0) {   /* [HG] DEV: the camera forward must agree with the player's heading (cone sign check) */
         const TD5_Actor *p0 = td5_game_get_actor(0);
@@ -1948,7 +2104,9 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
         rj[0] = 0;
         for (q = 0; q < RJ_N && rl < sizeof rj - 40; q++)
             if (T.rej[q]) rl += (size_t)snprintf(rj + rl, sizeof rj - rl, " %s %ld", k_rej_name[q], T.rej[q]);
-        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD SPAWN tries %ld:%s | ticks below target %ld of %ld", T.tries, rj, T.budget_ticks, s->samples);
+        TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD SPAWN tries %ld:%s | ticks below target %ld of %ld | in the view cone but hidden by a block: "
+                  "spawns %ld, despawns %ld (hide %d, %.0f m run, lead %.0f pct +-%.0f deg)", T.tries, rj, T.budget_ticks, s->samples,
+                  T.hid_spawns, T.hid_despawns, T.hide_on, T.hide_m, T.lead_pct * 100.0, T.lead_deg);
         TD5_LOG_I(LOG_TAG, "[ROAMTRAFFIC] QD VISIBLE in the view cone within 150 m: mean %.2f cars (0: %.0f, 1: %.0f, 2: %.0f, 3: %.0f, "
                   "4+: %.0f pct of the time), beyond 20 m %.2f | within 250 m any side: mean %.2f | samples %ld", T.vis_sum / ns,
                   100.0 * T.vis_hist[0] / ns, 100.0 * T.vis_hist[1] / ns, 100.0 * T.vis_hist[2] / ns, 100.0 * T.vis_hist[3] / ns,
@@ -2009,7 +2167,7 @@ void td5_roam_traffic_stats_reset(void)
     T.live_sum = 0.0;
     T.pop_spawn = T.pop_despawn = T.pop_spawn_rej = T.pop_despawn_held = T.pop_slow_fade = 0;
     memset(T.rej, 0, sizeof T.rej);       /* [roam QD] census */
-    T.tries = T.budget_ticks = T.short_ticks = T.vis_n = 0;
+    T.tries = T.budget_ticks = T.short_ticks = T.vis_n = T.hid_spawns = T.hid_despawns = 0;
     memset(T.vis_hist, 0, sizeof T.vis_hist);
     T.vis_sum = T.near_sum = T.ahead_sum = 0.0;
     T.dir_n = T.dir_against = T.dir_wrong = T.dir_rb_n = T.dir_rb_against = T.dir_skip_turn = T.dir_skip_end = 0;
