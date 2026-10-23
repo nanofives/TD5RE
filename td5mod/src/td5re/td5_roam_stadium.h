@@ -94,6 +94,8 @@ typedef struct {
     double foot_sum[6], foot_max[6];   /* floating metres (gap clamped at 0) summed / max                       */
     int open_n;                    /* opened wall pieces                                                     */
     double open_m;                 /* their length (m)                                                       */
+    int pulls;                     /* bowl facade sectors pulled in off a drive along the outline            */
+    double pull_m;                 /* metres pulled, summed                                                  */
 } TD5_RoamSportStats;
 
 enum { TD5_RSB_FRONT = 0, TD5_RSB_OUTER, TD5_RSB_SFRONT, TD5_RSB_SBACK, TD5_RSB_SEND, TD5_RSB_PORTAL, TD5_RSB__N };

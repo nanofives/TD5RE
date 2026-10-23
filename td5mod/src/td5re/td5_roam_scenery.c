@@ -9684,7 +9684,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                 sp_t.foot_sum[q] += r->sport.foot_sum[q];
                 if (r->sport.foot_max[q] > sp_t.foot_max[q]) sp_t.foot_max[q] = r->sport.foot_max[q];
             }
-            sp_t.open_n += r->sport.open_n; sp_t.open_m += r->sport.open_m;
+            sp_t.open_n += r->sport.open_n; sp_t.open_m += r->sport.open_m; sp_t.pulls += r->sport.pulls; sp_t.pull_m += r->sport.pull_m;
         }
         {   /* [roam NA] */
             int q;
@@ -9848,8 +9848,9 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             tn += sp_t.foot_n[q]; tov += sp_t.foot_over[q]; ts += sp_t.foot_sum[q];
             if (sp_t.foot_max[q] > tm) tm = sp_t.foot_max[q];
         }
-        snprintf(ln + o, sizeof ln - (size_t)o, " ALL n %d mean %.3f max %.2f over25 %d (m over the drawn ground) | openings %d, %.0f m",
-                 tn, tn ? ts / tn : 0.0, tm, tov, sp_t.open_n, sp_t.open_m);
+        snprintf(ln + o, sizeof ln - (size_t)o, " ALL n %d mean %.3f max %.2f over25 %d (m over the drawn ground) | openings %d, %.0f m | facade sectors pulled off a drive %d (mean %.1f m) (TD5RE_ROAM_STADIUM_BASE=%d)",
+                 tn, tn ? ts / tn : 0.0, tm, tov, sp_t.open_n, sp_t.open_m, sp_t.pulls, sp_t.pulls ? sp_t.pull_m / sp_t.pulls : 0.0,
+                 td5_env_int("TD5RE_ROAM_STADIUM_BASE", 1, 0, 1));
         TD5_LOG_I(LOG_TAG, "%s", ln);
         if (f) fprintf(f, "# %s\n", ln);
         fprintf(stderr, "%s\n", ln);
