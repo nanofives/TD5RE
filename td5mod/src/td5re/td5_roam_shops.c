@@ -999,6 +999,20 @@ static int sh_pip(const double *x, const double *z, int n, double px, double pz)
     return in;
 }
 
+/* [roam PD] see td5_roam_shops.h */
+int td5_roam_shops_fuel_at(const TD5_RoamShopSource *s, double x, double z)
+{
+    int i;
+    if (!s) return 0;
+    for (i = 0; i < s->nf; i++) {
+        const double d = hypot(x - s->fx[i], z - s->fz[i]);
+        if (s->fringn[i] >= 3) {
+            if (d < SH_M(120.0) && sh_pip(&s->rx[s->fring0[i]], &s->rz[s->fring0[i]], s->fringn[i], x, z)) return 1;
+        } else if (d < SH_M(15.0)) return 1;
+    }
+    return 0;
+}
+
 /* a deck point is acceptable: off the drivable surface, or on it only inside a SERVICE drive's carriageway */
 static int sh_deck_pt_ok(TG_TileCtx *c, double x, double z)
 {

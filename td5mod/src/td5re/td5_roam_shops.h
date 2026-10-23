@@ -121,4 +121,8 @@ int  td5_roam_shops_infill_guard(const TD5_RoamShopSource *s);
 int  td5_roam_shops_canopy_fp_on(const TD5_RoamShopSource *s);
 int  td5_roam_shops_fuel_flush(TD5_RoamShopSource *s, TG_TileCtx *c, TD5_RoamShopStats *st);
 
+/* [roam PD] 1 when the place-frame point stands on a fuel site: inside its forecourt ring, or within 15 m of a site
+ * POIS.JSON maps as a point only. The rule street trees keep off forecourts. */
+int  td5_roam_shops_fuel_at(const TD5_RoamShopSource *s, double x, double z);
+
 #endif /* TD5_ROAM_SHOPS_H */

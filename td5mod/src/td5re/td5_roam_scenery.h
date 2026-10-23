@@ -66,7 +66,7 @@
 /* Bumped BY HAND when a scenery rule changes (the determinism hash includes it).
  * 2: F4b pavement (slab, kerb, back face, fence, junction corners, medians) and the
  *    landmark set that is cleared off the drivable surface only (no pavement gap). */
-#define TD5_ROAM_SCENERY_RULES  20u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
+#define TD5_ROAM_SCENERY_RULES  21u  /* F4b pavement + F4c furniture combined; 4 = G4b ground lowered under the road;
                                      * 5 = G5 ground lowered per road triangle, footpaths on top of slabs / islands / lawns
                                      * 6 = roam HC verge: the ground beside every kerb rises at most 8 % from the road edge
                                      *     (HD: city lots paved (concrete) off the OSM greens + infill buildings on the frontage)
@@ -129,7 +129,11 @@
                                      *      every untagged level crossing approach (td5_roam_rails.c)
                                      * 20 = roam PE: fuel footprints drawn as canopies, shop names on the fascia, the
                                      *      municipal line off NC's cutting zones, shopfronts clear of other masses
-                                     *      (trimmed glass, infill lots off a shop's footprint) */
+                                     *      (trimmed glass, infill lots off a shop's footprint)
+                                     * 20 = roam PD: rule street trees on casco avenues / diagonals / medians, no
+                                     *      trunk inside an emitted footprint
+                                     * 21 = round P integration: roam PC PB PA PE PD combined (each bumped 19 -> 20 on
+                                     *      its own, 21 so no tile cached by a single branch is reused) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -225,6 +229,17 @@ typedef struct {
     int  st_band, st_lot, st_stations, st_nocanopy, st_narrow, st_facade, st_noslab;
     int  st_furn_drop, st_furn_moved, st_border, st_lot_hidden, st_lot_refused, st_on_road;
     int  canopy_cells, canopy_cov;
+    /* [roam PD] RULE STREET TREES (casco avenues + diagonals, SECTION trees): planted on an avenue / a diagonal sidewalk,
+     * on a median; rule stations walked, refused: the canopy reads >= 3 m there (LA's walk owns it), sidewalk under
+     * 3 m, facade too close, slab / road / mouth, a fuel forecourt, furniture or a shop face, the tile edge, a tree
+     * already within reach (no doubles); the owned avenue / diagonal kerb length (m) and the part of it with a trunk
+     * within PD_COVER_M: LA's trees only (cov0) and with the rule trees (cov1). [0] avenue, [1] diagonal */
+    int  rt_av, rt_diag, rt_med, rt_stations, rt_canopy, rt_narrow, rt_facade, rt_noslab, rt_fuel, rt_furn, rt_border;
+    int  rt_double, rt_face;   /* rt_face: [roam PD] trees on the no-sidewalk kerb of a one-way pair facing a median */
+    double rt_kerb_m[2], rt_cov0_m[2], rt_cov1_m[2];
+    /* [roam PD] trunks in a footprint at emission, by kind (street band, lot, plaza, rule): planted inside one (0 with
+     * TD5RE_ROAM_TREE_BLD=1), moved along the kerb off one, dropped (every position inside one) */
+    int  tb_left[4], tb_moved[4], tb_drop[4];
     /* [roam LA] CANOPY GREEN (sc_canopy_green): city lot cells left lawn instead of paved, infill lots refused, their
      * frontage (m) */
     int  lot_canopy_green, inf_drop_canopy;
