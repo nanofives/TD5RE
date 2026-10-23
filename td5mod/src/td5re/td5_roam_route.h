@@ -124,6 +124,8 @@ typedef struct {
     double   plen;
     int      oneway, klass, lanes, flags;
     int      maxspeed;       /* [roam LG] posted limit km/h, 0 = untagged (td5_roam_limit_kmh resolves it) */
+    int      oneway_rb;      /* [roam QD] an untagged roundabout piece's implied one-way (counter-clockwise), same sign
+                              * rule as oneway; 0 = none. oneway stays the tagged value (the planner and the cops use it) */
 } TD5_RouteGEdge;
 typedef struct { int64_t key; double x, z; const int *inc; int ninc; } TD5_RouteGNode;
 int  td5_roam_route_graph_nedge(void);

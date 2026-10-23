@@ -959,10 +959,15 @@ static void st_roam_arm(const RaceScenario *sc)
         td5_roam_drive_set_tour(2400.0, td5_env_int("TD5RE_SELFTEST_ROAM_TRAFFIC_SECS", sc->roam == 10 ? 600 : 90, 30, 7200));
         td5_roam_drive_set_traffic(1);
     }
-    if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
-        s_roam_captured = 1;
-        s_roam_status = ST_FAIL;
-        snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+    {   /* [roam QD] DEV: TD5RE_SELFTEST_ROAM_LATLON="lat,lon" moves the drive rows' spawn (a two-way outskirts soak) */
+        double lat = ST_ROAM_LAT, lon = ST_ROAM_LON;
+        const char *ll = getenv("TD5RE_SELFTEST_ROAM_LATLON");
+        if (ll && sscanf(ll, "%lf,%lf", &lat, &lon) != 2) { lat = ST_ROAM_LAT; lon = ST_ROAM_LON; }
+        if (!td5_roam_selftest_arm(lat, lon)) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
     }
 }
 
@@ -994,7 +999,7 @@ static void st_roam_capture(void)
         size_t q;
         snprintf(dn, sizeof dn, "%s", s_roam_note);
         for (q = 0; dn[q]; q++) if (dn[q] == '|') dn[q] = '/';   /* the report is a markdown table */
-        snprintf(s_roam_note, sizeof s_roam_note, "%.70s; %.47s", tn, dn);
+        snprintf(s_roam_note, sizeof s_roam_note, "%.80s; %.37s", tn, dn);   /* [roam QD] the traffic note grew: vis + dir */
         if (ts > s_roam_status) s_roam_status = ts;
     }
     if (st_roam_is_cops(s_roam_row)) {

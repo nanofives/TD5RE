@@ -56,6 +56,7 @@ typedef struct {
     uint8_t  klass, lanes, flags;
     uint8_t  maxspeed;           /* [roam LG] posted limit km/h, 0 = untagged (the EDGE record's maxspeed_kph) */
     double   w;                  /* [roam LG] A* cost per unit: 40 / limit km/h (time), 1 with TD5RE_ROAM_ROUTE_TIME=0 */
+    int8_t   rb_dir;             /* [roam QD] a roundabout piece OSM leaves untagged: its implied one-way (+1 a->b, -1 b->a), 0 none */
 } RrEdge;
 
 typedef struct {
@@ -732,6 +733,66 @@ static int rr_banned_in(const RrGraph *gp, int node, int in, int out)
 }
 
 /* per-edge A* weight: time at the street's limit (40 km/h = 1.0 per unit) */
+/* [roam QD] OSM's junction=roundabout implies oneway=yes, and 219 of La Plata's 288 roundabout ways carry no oneway tag,
+ * so their graph edges read two-way. Every roundabout way of the place runs counter-clockwise about its ring
+ * (_archive/roam/QD/rb_ccw_check.py: 288 of 288, the right-hand-traffic rule), so the implied direction of a piece is the
+ * one that sweeps counter-clockwise (real map) about the centroid of its ring: the roundabout edges joined through their
+ * nodes. In the game frame (x = -east) counter-clockwise is a NEGATIVE sweep. Only the traffic's edge view reads it
+ * (oneway_rb); the route planner and the cops keep the tagged one-way. A piece whose sweep is ~0 keeps 0. */
+static void rr_roundabout_dirs(RrGraph *gp)
+{
+    int *par, e, n = gp->nnode, set = 0, flat = 0, comps = 0;
+    double *sx, *sz, *sl;
+    if (n <= 0) return;
+    par = (int *)malloc((size_t)n * sizeof(int));
+    sx = (double *)calloc((size_t)n * 3, sizeof(double));
+    if (!par || !sx) { free(par); free(sx); return; }
+    sz = sx + n; sl = sz + n;
+    for (e = 0; e < n; e++) par[e] = e;
+#define RR_FIND(v) do { while (par[v] != v) { par[v] = par[par[v]]; v = par[v]; } } while (0)
+    for (e = 0; e < gp->nedge; e++) {
+        const RrEdge *ed = &gp->edge[e];
+        int a = ed->node[0], b = ed->node[1];
+        if (!(ed->flags & ROAM_EF_ROUNDABOUT) || a < 0 || b < 0) continue;
+        RR_FIND(a); RR_FIND(b);
+        if (a != b) par[a] = b;
+    }
+    for (e = 0; e < gp->nedge; e++) {
+        const RrEdge *ed = &gp->edge[e];
+        int r = ed->node[0], q;
+        if (!(ed->flags & ROAM_EF_ROUNDABOUT) || r < 0) continue;
+        RR_FIND(r);
+        if (sl[r] == 0.0) comps++;
+        for (q = 0; q + 1 < ed->npt; q++) {
+            const int32_t *P = gp->pt + 2 * (ed->pt0 + q);
+            const double l = hypot((double)P[2] - P[0], (double)P[3] - P[1]);
+            sx[r] += 0.5 * ((double)P[0] + P[2]) * l; sz[r] += 0.5 * ((double)P[1] + P[3]) * l; sl[r] += l;
+        }
+    }
+    for (e = 0; e < gp->nedge; e++) {
+        RrEdge *ed = &gp->edge[e];
+        int r = ed->node[0], q;
+        double cx, cz, sw = 0.0;
+        ed->rb_dir = 0;
+        if (!(ed->flags & ROAM_EF_ROUNDABOUT) || ed->oneway || r < 0) continue;
+        RR_FIND(r);
+        if (sl[r] <= 0.0) continue;
+        cx = sx[r] / sl[r]; cz = sz[r] / sl[r];
+        for (q = 0; q + 1 < ed->npt; q++) {
+            const int32_t *P = gp->pt + 2 * (ed->pt0 + q);
+            const double mx = 0.5 * ((double)P[0] + P[2]) - cx, mz = 0.5 * ((double)P[1] + P[3]) - cz;
+            sw += mx * ((double)P[3] - P[1]) - mz * ((double)P[2] - P[0]);
+        }
+        if (fabs(sw) < 1.0 * RR_UPM * RR_UPM) { flat++; continue; }
+        ed->rb_dir = sw < 0.0 ? 1 : -1;
+        set++;
+    }
+#undef RR_FIND
+    free(par); free(sx);
+    TD5_LOG_I(LOG_TAG, "ROUTE_GRAPH: [roam QD] roundabout rings %d, untagged pieces given the counter-clockwise one-way %d, "
+              "no sweep (kept two-way) %d", comps, set, flat);
+}
+
 static void rr_edge_weights(RrGraph *gp)
 {
     const int time_cost = td5_env_int("TD5RE_ROAM_ROUTE_TIME", 1, 0, 1);
@@ -1038,6 +1099,7 @@ static int rr_build_into(RrGraph *gp, const char *place, int (*tiles)[2], int nt
     }
     rr_edge_weights(gp);              /* [roam LG] */
     rr_restrict_build(gp, place);     /* [roam LG] */
+    rr_roundabout_dirs(gp);           /* [roam QD] */
     free(keys); free(runs.p); free(pts.p); free(cents.p); free(patches.p); free(ptris.p);
     snprintf(gp->place, sizeof gp->place, "%s", place);
     gp->ms = (double)(td5_plat_time_ms() - t0);
@@ -2887,6 +2949,7 @@ int td5_roam_route_graph_edge_view(int e, TD5_RouteGEdge *out)
     out->npt = ed->npt;
     out->plen = ed->plen;
     out->oneway = ed->oneway;
+    out->oneway_rb = ed->rb_dir;
     out->klass = ed->klass; out->lanes = ed->lanes; out->flags = ed->flags;
     out->maxspeed = ed->maxspeed;
     return 1;
