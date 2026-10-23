@@ -1523,6 +1523,20 @@ int roam_edge_frame(const TG_TileCtx *c, int edge, int side, double along, RoamF
     return 1;
 }
 
+/* [roam PA] */
+int roam_ctx_nseg(const TG_TileCtx *c) { return c ? c->nseg : 0; }
+int roam_ctx_seg(const TG_TileCtx *c, int i, RoamSegInfo *out)
+{
+    const ScSeg *s;
+    const ScEdge *ed;
+    if (!c || !out || i < 0 || i >= c->nseg) return 0;
+    s = &c->seg[i];
+    ed = &c->edge[s->edge];
+    out->ax = s->ax; out->az = s->az; out->ay = s->ay; out->bx = s->bx; out->bz = s->bz; out->by = s->by;
+    out->hw = s->hw; out->key = ed->key; out->klass = ed->klass;
+    return 1;
+}
+
 /* ---- [F4c] the ctx as the furniture emitters see it (declared in td5_roam_scenery.h) ---- */
 const RoamTile *roam_ctx_tile(const TG_TileCtx *c, int dx, int dz)
 {
@@ -8454,6 +8468,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     uint32_t pv_ms_max = 0;
     long ct_i[8] = { 0 };                       /* [roam NC] */
     double ct_d[5] = { 0 }, ct_cen[2][6] = { { 0 } };
+    long pa_t[8] = { 0 }; double pa_m[3] = { 0.0, 0.0, 0.0 };   /* [roam PA] lane paint census */
     long ft[16], lc_t[6] = { 0 }, ft_unknown_skipped = 0, lot_t[12] = { 0 }, ic_t[4] = { 0, 0, 0, 0 }, rl_t[24] = { 0 }, lf_t[24] = { 0 }, lf_wire_m = 0.0, ou_t[16] = { 0 }, cov_t[3] = { 0 }, inf_rail_n = 0, inf_rail_mv = 0, inf_rail_sh = 0;
     double ie_m[4] = { 0.0, 0.0, 0.0, 0.0 };   /* [roam IE] */
     long s3d_t[10] = { 0 }, s3d_tag = 0, s3d_slope = 0;   /* [roam JC] */
@@ -8647,8 +8662,11 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             for (q = 0; q < TD5_GEOB_POI__N; q++) sh_cat[q] += r->shop.by_cat[q];
             sh_m += r->shop.front_m;
         }
+        pa_t[0] += r->furn.lane_bus_segs; pa_t[1] += r->furn.lane_bike_segs; pa_t[2] += r->furn.lane_track_segs; pa_t[3] += r->furn.lane_kerbs;
+        pa_t[4] += r->furn.lane_ways; pa_t[5] += r->furn.lane_no_dir; pa_t[6] += r->furn.lane_narrow;
+        pa_m[0] += r->furn.lane_bus_m; pa_m[1] += r->furn.lane_bike_m; pa_m[2] += r->furn.lane_track_m;
         lf_t[0] += r->rail.lx_nodes; lf_t[1] += r->rail.lx_equipped; lf_t[2] += r->rail.lx_untagged;
-        lf_t[3] += r->rail.lx_barrier_half; lf_t[4] += r->rail.lx_barrier_full; lf_t[5] += r->rail.lx_lights; lf_t[6] += r->rail.lx_saltires;
+        lf_t[3] += r->rail.lx_barrier_half; lf_t[4] += r->rail.lx_barrier_full; lf_t[5] += r->rail.lx_lights; lf_t[6] += r->rail.lx_saltires; lf_t[21] += r->rail.lx_untagged_x;
         lf_t[7] += r->rail.lx_no_road; lf_t[8] += r->rail.lx_no_rail; lf_t[9] += r->rail.lx_post_drop;
         lf_t[10] += r->rail.stn_boards; lf_t[11] += r->rail.stn_named; lf_t[12] += r->rail.stn_plain; lf_t[13] += r->rail.stn_on_platform;
         lf_t[14] += r->rail.stn_by_track; lf_t[15] += r->rail.stn_drop;
@@ -8866,11 +8884,18 @@ int td5_roam_scn_dev_cli(const char *cmdline)
         if (f) fprintf(f, "# %s\n", line);
         fprintf(stderr, "%s\n", line);
         snprintf(line, sizeof line,
-                 "roam rail furniture [roam LF]: level-crossing nodes owned %ld (%ld equipped, %ld untagged left bare; no street within 12 m %ld, "
+                 "roam lane paint [roam PA]: bus lane %.2f km (%ld spans), bike lane %.2f km (%ld spans), separated track %.2f km (%ld spans, %ld kerb boxes) | "
+                 "ways painted %ld (ribbon pieces counted per tile) | spans with no way direction %ld, too narrow %ld",
+                 pa_m[0] / 1000.0, pa_t[0], pa_m[1] / 1000.0, pa_t[1], pa_m[2] / 1000.0, pa_t[2], pa_t[3], pa_t[4], pa_t[5], pa_t[6]);
+        TD5_LOG_I(LOG_TAG, "%s", line);
+        if (f) fprintf(f, "# %s\n", line);
+        fprintf(stderr, "%s\n", line);
+        snprintf(line, sizeof line,
+                 "roam rail furniture [roam LF]: level-crossing nodes owned %ld (%ld equipped, %ld untagged [roam PA: %ld plain saltire approaches drawn]; no street within 12 m %ld, "
                  "no track %ld, post on a road %ld) | drawn per approach: half barriers %ld, full barriers %ld, light heads %ld, saltires %ld | "
                  "station boards %ld (%ld with the name, %ld blank; %ld on a platform, %ld beside the track, %ld refused) | catenary: %ld way(s), %ld mast(s) "
                  "(%ld dropped on a road), %ld wire piece(s) = %.2f km of contact wire (%ld left off under a road deck)",
-                 lf_t[0], lf_t[1], lf_t[2], lf_t[7], lf_t[8], lf_t[9], lf_t[3], lf_t[4], lf_t[5], lf_t[6], lf_t[10], lf_t[11], lf_t[12],
+                 lf_t[0], lf_t[1], lf_t[2], lf_t[21], lf_t[7], lf_t[8], lf_t[9], lf_t[3], lf_t[4], lf_t[5], lf_t[6], lf_t[10], lf_t[11], lf_t[12],
                  lf_t[13], lf_t[14], lf_t[15], lf_t[16], lf_t[17], lf_t[18], lf_t[19], lf_wire_m / 1000.0, lf_t[20]);
         TD5_LOG_I(LOG_TAG, "%s", line);
         if (f) fprintf(f, "# %s\n", line);

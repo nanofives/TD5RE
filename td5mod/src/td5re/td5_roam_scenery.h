@@ -124,7 +124,9 @@
                                      * 20 = roam PB: stadiums (td5_roam_stadium.c): stand footprints drawn as stepped tiers
                                      *      (the Estadio Unico as a bowl with its membrane roof), blobs traced over a stand
                                      *      dropped; sports pitches painted (surface + markings per sport); no plaza trees
-                                     *      on a stadium or a pitch */
+                                     *      on a stadium or a pitch
+                                     * 20 = roam PA: bus / bike lane paint (td5_roam_furniture.c fu_emit_lanes, LANES.JSON), a plain saltire on
+                                     *      every untagged level crossing approach (td5_roam_rails.c) */
 
 #define TD5_ROAM_SCN_SUB   4                    /* sub-blocks per tile side (64 m) */
 #define TD5_ROAM_SCN_NSB   (TD5_ROAM_SCN_SUB * TD5_ROAM_SCN_SUB)
@@ -151,6 +153,11 @@ int roam_nearest_edge(const TG_TileCtx *c, double x, double z, double max_d,
                       int *edge, int *side, double *along, double *lateral);
 /* The frame of edge `edge` at `along` on `side`. 1 on success. */
 int roam_edge_frame(const TG_TileCtx *c, int edge, int side, double along, RoamFrame *out);
+/* [roam PA] the street segments of the 3x3 (one per ribbon span: the row centre a -> the next row centre b, the
+ * half carriageway there, the surface height at both ends, the owning edge's key). 1 on success. */
+typedef struct { double ax, az, ay, bx, bz, by, hw; uint64_t key; int klass; } RoamSegInfo;
+int roam_ctx_nseg(const TG_TileCtx *c);
+int roam_ctx_seg(const TG_TileCtx *c, int i, RoamSegInfo *out);
 
 /* ---- [F4c] the ctx as the furniture emitters see it (td5_roam_furniture.c) ---- */
 /* The ROAD tile of the 3x3 at (dx, dz) in -1..1 (0,0 = the tile being built), NULL if absent. */

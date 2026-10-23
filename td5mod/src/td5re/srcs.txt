@@ -48,6 +48,7 @@ td5_roam_rebase.c
 td5_roam_stream.c
 td5_roam_route.c
 td5_roam_rules.c
+td5_roam_lanes.c
 td5_roam_route_ui.c
 td5_roam_barrier.c
 td5_roam_race.c

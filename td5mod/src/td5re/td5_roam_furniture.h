@@ -77,6 +77,9 @@ typedef struct {
     double bar_guard_m, bar_nj_m, bar_parapet_m, emb_m;
     int  bar_drop_road, bar_patch_edges, emb_drop_road;
     int  piers, pier_cols, pier_drop_road, abutments;
+    /* [roam PA] bus / bike lane paint: spans + metres by kind, kerb boxes, ways met, spans with no way direction / too narrow */
+    int  lane_bus_segs, lane_bike_segs, lane_track_segs, lane_kerbs, lane_ways, lane_no_dir, lane_narrow;
+    double lane_bus_m, lane_bike_m, lane_track_m;
     /* output */
     int  meshes;                                      /* furniture meshes appended */
     int  guard_hits;                                  /* furniture faces on the drivable surface, not overhead, not a decal: must be 0 */
