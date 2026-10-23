@@ -1484,8 +1484,11 @@ static void geo_draw_city_note(float sx, float sy)
     geo_fill(px, (float)GEO_SECT_Y, pw, 286.0f, 0xC0101018u, sx, sy);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     geo_frame_rect(px, (float)GEO_SECT_Y, pw, 286.0f, GEO_COL_FRAME, sx, sy);
-    fe_draw_text_centered((px + pw * 0.5f) * sx, ((float)GEO_SECT_Y + 6.0f) * sy,
-                          s_roam_mode ? TR("FREE ROAM") : TR("RACE IN THE CITY"), 0xFFE3D708u, sx, sy);
+    {   /* condensed to the panel: es-AR at 4:3 ran past its right edge */
+        const char *hdr = s_roam_mode ? TR("DRIVE THE CITY") : TR("RACE IN THE CITY");
+        const float fit = fe_fit_text_scale(hdr, (pw - 12.0f) * sx, sx, sy);
+        fe_draw_text_centered((px + pw * 0.5f) * sx, ((float)GEO_SECT_Y + 6.0f) * sy, hdr, 0xFFE3D708u, sx * fit, sy);
+    }
     for (k = 0; k < GEO_OPT_VIS; k++) {
         const float ry = (float)(GEO_ROW_Y0 + GEO_ROW_STEP * k);
         const char *label = NULL;
@@ -1525,8 +1528,10 @@ static void geo_draw_city_note(float sx, float sy)
                                                  : TR("RACE ROUTE RACES THE PINS."),
                                      pw - 12.0f, sx, sy, wl, 3);
         y = (float)(GEO_ROW_Y0 + GEO_ROW_STEP * nrows) + 4.0f;
-        for (j = 0; j < n; j++, y += 13.0f)
-            fe_draw_small_text((px + 6.0f) * sx, y * sy, wl[j], 0xFFE6ECF4u, sx, sy);
+        /* only when it fits above the READY line (13 px a line): never drawn over it */
+        if (y + 13.0f * (float)n <= (float)GEO_SECT_Y + 286.0f - 32.0f)
+            for (j = 0; j < n; j++, y += 13.0f)
+                fe_draw_small_text((px + 6.0f) * sx, y * sy, wl[j], 0xFFE6ECF4u, sx, sy);
     }
     {
         char wl[2][GEO_WRAP_LEN];
