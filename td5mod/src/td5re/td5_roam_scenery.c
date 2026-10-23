@@ -1775,7 +1775,10 @@ void *roam_ctx_mesh_begin(TG_TileCtx *c, int sb)
 
 /* [integ L] TREE CROSS-CHECK ranges: which meshes each round L emitter wrote (a snapshot of every sub-block's mesh
  * count before the call, the new meshes noted after it). Read only by sc_tree_xcheck; writes no byte. */
-enum { SC_XC_SHOP, SC_XC_FUEL, SC_XC_PLAZA, SC_XC_RAIL, SC_XC_OUT, SC_XC_POOL, SC_XC_NCAT, SC_XC_FURN = 7, SC_XC_TREE_PLAZA = 8 };
+/* [integ P] + SPORT (td5_roam_stadium.c stands, bowls, pitches), LANE (roam PA lane paint + track kerbs, ROAM_XC_LANE),
+ * GH (roam PC greenhouse tunnels) */
+enum { SC_XC_SHOP, SC_XC_FUEL, SC_XC_PLAZA, SC_XC_RAIL, SC_XC_OUT, SC_XC_POOL, SC_XC_SPORT, SC_XC_LANE, SC_XC_GH, SC_XC_NCAT,
+       SC_XC_FURN = 10, SC_XC_TREE_PLAZA = 11 };
 struct ScXcRange { int sb, cat, m0, m1; };
 
 static void sc_xc_snap(const TG_TileCtx *c, int *snap)
@@ -1796,6 +1799,9 @@ static void sc_xc_note(TG_TileCtx *c, const int *snap, int cat)
         c->xc_n++;
     }
 }
+
+void roam_ctx_xc_snap(const TG_TileCtx *c, int *snap) { sc_xc_snap(c, snap); }                 /* [integ P] */
+void roam_ctx_xc_note(TG_TileCtx *c, const int *snap, int cat) { sc_xc_note(c, snap, cat); }
 
 /* ============================================================================
  * SECTION: buildings
@@ -2757,7 +2763,11 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
              * clearance: a forecourt reaches the kerb and its service drive, so 11 of the casco's 17 canopy footprints
              * were dropped as "on a road" / "past the shift cap" (nothing drawn); the canopy has its own road test (the
              * deck may span a service drive, the posts and islands stand clear of every drivable surface) */
-            if (td5_roam_shops_canopy_from_fp(s->shops, c, (int)su.skip[i] - 1, gb, rx, rz, n, &c->st.shop)) {
+            int xs_fp[TD5_ROAM_SCN_NSB], fp_ok;
+            sc_xc_snap(c, xs_fp);
+            fp_ok = td5_roam_shops_canopy_from_fp(s->shops, c, (int)su.skip[i] - 1, gb, rx, rz, n, &c->st.shop);
+            sc_xc_note(c, xs_fp, SC_XC_FUEL);       /* [integ P] cross-check range */
+            if (fp_ok) {
                 sc_bld_note(s, c, &set[i], "fuel canopy");
                 continue;
             }
@@ -2963,7 +2973,11 @@ static int sc_emit_buildings(TD5_RoamScnSource *s, TG_TileCtx *c, ScCache **bc, 
     if (ghost_prev) c->st = *st_save;          /* [roam PD] restored before the passes after the loop count (integ P) */
     free(st_save);
     if (gh) {                                         /* [roam PC] */
-        const int ok = td5_roam_gh_flush(gh, c, &c->st.gh);
+        int xs[TD5_ROAM_SCN_NSB];
+        int ok;
+        sc_xc_snap(c, xs);
+        ok = td5_roam_gh_flush(gh, c, &c->st.gh);
+        sc_xc_note(c, xs, SC_XC_GH);                  /* [integ P] cross-check range */
         td5_roam_gh_end(gh);
         if (!ok) { free(set); free(fc); return 0; }
     }
@@ -8993,8 +9007,9 @@ TD5_RoamScenery *td5_roam_scn_build(TD5_RoamScnSource *s, const RoamTile *self, 
         int xs[TD5_ROAM_SCN_NSB];                                                /* [integ L] cross-check ranges */
         sc_xc_snap(c, xs);
         if (!td5_roam_cut_emit(c, &c->st.cut, sc_casco_has(s, c->tx, c->tz))) goto out;   /* [roam NC] cutting walls */
-        if (!sc_emit_sport(s, c, bc, nbc, ar, nar)) goto out;                              /* [roam PB] stadiums + pitches */
         sc_xc_snap(c, xs);
+        if (!sc_emit_sport(s, c, bc, nbc, ar, nar)) goto out;                              /* [roam PB] stadiums + pitches */
+        sc_xc_note(c, xs, SC_XC_SPORT); sc_xc_snap(c, xs);                               /* [integ P] */
         if (s->rails && !td5_roam_rails_emit(s->rails, c, &c->st.rail)) goto out;
         sc_xc_note(c, xs, SC_XC_RAIL); sc_xc_snap(c, xs);
         if (s->outsk && !td5_roam_out_emit(s->outsk, c, &c->st.out, sc_casco_has(s, c->tx, c->tz))) goto out;   /* [roam LH] */
@@ -9148,7 +9163,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
     double rt_m[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     long ptv[TD5_TG_TREE_VARIANTS] = { 0 };                /* [integ L] plaza trees per tree page variant */
     long pt_drop[2] = { 0, 0 };                            /* [integ L] plaza trees vetoed: faces, water */
-    long xct[2] = { 0, 0 }, xtr[2][6] = { { 0 } }, xcr[2][6] = { { 0 } }, xwt[2] = { 0, 0 };   /* [integ L] cross-check */
+    long xct[2] = { 0, 0 }, xtr[2][9] = { { 0 } }, xcr[2][9] = { { 0 } }, xwt[2] = { 0, 0 };   /* [integ L] cross-check */
     long xfr[2] = { 0, 0 }, xr_drop = 0;
     long cg_n[2] = { 0, 0 };
     double cg_m = 0.0;
@@ -9289,7 +9304,7 @@ int td5_roam_scn_dev_cli(const char *cmdline)
             for (w = 0; w < 2; w++) {
                 xct[w] += r->xc_trees[w]; xwt[w] += r->xc_wet[w];
                 if (!w) { xfr[0] += r->xc_xing_rail; xfr[1] += r->xc_furn_rail; }
-                for (q = 0; q < 6; q++) { xtr[w][q] += r->xc_trunk[w][q]; xcr[w][q] += r->xc_crown[w][q]; }
+                for (q = 0; q < 9; q++) { xtr[w][q] += r->xc_trunk[w][q]; xcr[w][q] += r->xc_crown[w][q]; }
             }
         }
         cg_n[0] += r->lot_canopy_green; cg_n[1] += r->inf_drop_canopy; cg_m += r->inf_m_canopy;
@@ -9707,6 +9722,14 @@ int td5_roam_scn_dev_cli(const char *cmdline)
                          "trunk on water %ld", w ? "street+lot" : "plaza", xct[w], xtr[w][0], xtr[w][1], xtr[w][2],
                          xtr[w][3], xtr[w][4], xtr[w][5], xcr[w][0], xcr[w][1], xcr[w][2], xcr[w][3], xcr[w][4], xcr[w][5],
                          xwt[w]);
+                TD5_LOG_I(LOG_TAG, "%s", line);
+                if (f) fprintf(f, "# %s\n", line);
+                fprintf(stderr, "%s\n", line);
+                snprintf(line, sizeof line,
+                         "roam tree xcheck [integ P] %s trees %ld | TRUNK within 0.5 m of: stadium / pitch %ld, lane paint / "
+                         "track kerb %ld, greenhouse %ld | CROWN through: stadium / pitch %ld, lane %ld, greenhouse %ld",
+                         w ? "street+lot+rule" : "plaza", xct[w], xtr[w][6], xtr[w][7], xtr[w][8], xcr[w][6], xcr[w][7],
+                         xcr[w][8]);
                 TD5_LOG_I(LOG_TAG, "%s", line);
                 if (f) fprintf(f, "# %s\n", line);
                 fprintf(stderr, "%s\n", line);

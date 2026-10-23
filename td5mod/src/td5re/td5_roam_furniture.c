@@ -2608,7 +2608,12 @@ int td5_roam_furn_emit(TD5_RoamFurnSource *f, TG_TileCtx *c, TD5_RoamFurnStats *
     if (ok && f->on_lamps && !fu_emit_lamps(&em, f, &lp)) ok = 0;
     if (ok && f->on_barriers && !fu_emit_barriers(&em)) ok = 0;     /* [roam IE] */
     if (ok && f->on_piers && !fu_emit_piers(&em)) ok = 0;           /* [roam IE] */
-    if (ok && f->on_lanes && !fu_emit_lanes(&em, f)) ok = 0;        /* [roam PA] */
+    if (ok && f->on_lanes) {                                         /* [roam PA] */
+        int xs_ln[TD5_ROAM_SCN_NSB];
+        roam_ctx_xc_snap(c, xs_ln);
+        if (!fu_emit_lanes(&em, f)) ok = 0;
+        roam_ctx_xc_note(c, xs_ln, ROAM_XC_LANE);                   /* [integ P] tree cross-check range */
+    }
     if (ok && (f->on_stops || f->on_xings)) {
         if (!fu_collect_nodes(&em, f, &xs, &nx, &bs, &nb)) ok = 0;
         if (ok && f->on_stops && !fu_emit_stops(&em, bs, nb)) ok = 0;

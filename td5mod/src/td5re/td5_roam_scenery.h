@@ -188,6 +188,11 @@ TD5_RoamHeight *roam_ctx_hc(const TG_TileCtx *c);
  * *wet when non-NULL) when the tile's window covers it */
 int    roam_ctx_ground_raw(const TG_TileCtx *c, double x, double z, double *h, int *wet);
 int    roam_ctx_rails_bed_near(const TG_TileCtx *c, const double *x, const double *z, int n, double clear);   /* [integ L] */
+/* [integ P] tree cross-check ranges for an emitter outside td5_roam_scenery.c (dev census, writes no byte): snap the
+ * sub-block mesh counts (snap[TD5_ROAM_SCN_NSB]) before it, note the new meshes as category cat after it */
+#define ROAM_XC_LANE 7
+void   roam_ctx_xc_snap(const TG_TileCtx *c, int *snap);
+void   roam_ctx_xc_note(TG_TileCtx *c, const int *snap, int cat);
 /* [roam ID] the drivable surface height at a tile-local point: of the primitives under (x, z), the one
  * whose height there is nearest ref_y (a deck over a street answers by its height). 1 on a hit. */
 int    roam_ctx_road_y(const TG_TileCtx *c, double x, double z, double ref_y, double *y);
@@ -215,8 +220,9 @@ typedef struct {
     int  areas, lawn_tris, lawn_cut, trees, trees_cut;
     int  plaza_tree_var[10];        /* [integ L] plaza trees per tree page variant (TD5_TG_TREE_VARIANTS) */
     /* [integ L] TREE CROSS-CHECK (TD5RE_ROAM_TREE_XCHECK=1): trees judged [0 plaza, 1 street + lot], trunk / crown hits
-     * per category (shopfront, fuel canopy, plaza furniture, rails, outskirts, pool), trunks on a wet raster sample */
-    int  xc_trees[2], xc_trunk[2][6], xc_crown[2][6], xc_wet[2];
+     * per category (shopfront, fuel canopy, plaza furniture, rails, outskirts, pool; [integ P] + stadium / pitch, lane
+     * paint / track kerb, greenhouse), trunks on a wet raster sample */
+    int  xc_trees[2], xc_trunk[2][9], xc_crown[2][9], xc_wet[2];
     int  pt_furn_drop, pt_wet_drop; /* [integ L] plaza trees the round L veto dropped (a face in the tail, water) */
     int  xc_xing_rail, xc_furn_rail;   /* [integ L] cross-check: street furniture faces (flat paint / standing) over a rail face */
     /* [roam LA] STREET + LOT TREES from CANOPY.R8 (SECTION trees): planted on the pavement band, planted on the lot
