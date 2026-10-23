@@ -1687,6 +1687,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_ini_str("Network", "Nickname", "", g_td5.ini.net_nickname,
                 sizeof(g_td5.ini.net_nickname));
 
+    /* [Geo] TerrainHeight (x100): the TERRAIN HEIGHT row of FREE ROAM / SPRINT / CIRCUIT
+     * (td5_fe_geo.c geo_opt_write) saves it here. Seed TD5RE_GEO_EXAGGERATION from it
+     * when the environment does not already set the knob (env keeps priority, so
+     * harness -Extra runs are unaffected); 0 / missing = the built-in default. */
+    {
+        const int th = td5_ini_int("Geo", "TerrainHeight", 0);
+        const char *ev = getenv("TD5RE_GEO_EXAGGERATION");
+        if (th >= 100 && th <= 400 && (!ev || !ev[0])) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", th);
+            _putenv_s("TD5RE_GEO_EXAGGERATION", buf);
+        }
+    }
+
 #ifndef TD5RE_RELEASE
     /* S10 dev hook: run the loopback net self-test (env TD5RE_NET_SELFTEST) and
      * exit if requested. Placed AFTER the [Network] reads so it honors GamePort

@@ -31,6 +31,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
 
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
+    { CL_DATE,    "October 23 (terrain height is remembered)" },
+    { CL_ITEM,    "TERRAIN HEIGHT (FREE ROAM setup, SPRINT / CIRCUIT)" },
+    { CL_ITEM,    "  is saved and comes back after a restart." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "October 23 (free roam round Q together)" },
     { CL_ITEM,    "Free roam: the FREE ROAM entry and setup, traffic you" },
     { CL_ITEM,    "  can see, sidewalks without sudden ends, the stadium" },

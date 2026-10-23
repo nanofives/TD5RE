@@ -1003,6 +1003,11 @@ static void geo_opt_write(int row, int value)
         snprintf(buf, sizeof buf, "%d", value);
         _putenv_s(o->knob, buf);
     }
+    if (row == GO_ROW_TERRAIN) {
+        /* TERRAIN HEIGHT survives a restart: main.c seeds the knob from [Geo] TerrainHeight. */
+        snprintf(buf, sizeof buf, "%d", value);
+        td5_ini_write_str("Geo", "TerrainHeight", buf);
+    }
     TD5_LOG_I(LOG_TAG, "GEO GENERATOR: option %s -> %d (%s=%s)", o->label, value,
               o->knob, getenv(o->knob) ? getenv(o->knob) : "<unset>");
     if (o->route && s_n_pts >= 2) geo_mark_dirty();
