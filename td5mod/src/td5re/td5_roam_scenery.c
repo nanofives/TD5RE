@@ -3815,6 +3815,11 @@ struct ScPvSrc {
     int       level;                      /* [roam JA] pv_heights: an island's outer edge between the two kerb tops */
     int       pair_skip;                  /* [roam JA] PV_W_SKIP_PAIR in a same-name pair's median */
     int       side_fix;                   /* [roam PD] TD5RE_ROAM_PV_SIDE_FIX: sidewalk=left / right on the right kerb */
+    int       merge_split;                /* [roam QC] TD5RE_ROAM_PV_MERGE_SPLIT: a merged run the guard drops is laid piece by piece */
+    double    fill_run;                   /* [roam QC] TD5RE_ROAM_PV_FILL_RUN (cm): shortest island-fill run kept, units (0 = off) */
+    int       trim;                       /* [roam QC] TD5RE_ROAM_PV_TRIM: a piece the guard drops keeps the part off the road */
+    int       end_face;                   /* [roam QC] TD5RE_ROAM_PV_END_FACE: every slab end gets a kerb return (end face) */
+    int       fill_cap;                   /* [roam QC] TD5RE_ROAM_PV_FILL_CAP: no island fill at a dead end's cap */
     FILE     *end_log;                    /* [roam QC] DEV TD5RE_ROAM_PV_END_CENSUS=1: log/roam_pv_ends.csv (CLI, one thread) */
     double    dbg_x, dbg_z, dbg_r;        /* [roam IA] DEV TD5RE_ROAM_PV_DBG=x,z,r (place frame): width-rule trace */
 };
@@ -3845,6 +3850,11 @@ static struct ScPvSrc *sc_pv_open(TD5_RoamScnSource *s)
     p->level       = td5_env_int("TD5RE_ROAM_PV_ISLAND_LEVEL", 1, 0, 1);  /* [roam JA] */
     p->pair_skip   = td5_env_int("TD5RE_ROAM_PV_PAIR_SKIP", 1, 0, 1);     /* [roam JA] */
     p->side_fix    = td5_env_int("TD5RE_ROAM_PV_SIDE_FIX", 1, 0, 1);      /* [roam PD] */
+    p->merge_split = td5_env_int("TD5RE_ROAM_PV_MERGE_SPLIT", 1, 0, 1);   /* [roam QC] */
+    p->fill_run    = td5_env_int("TD5RE_ROAM_PV_FILL_RUN", 600, 0, 5000) * SC_UPM / 100.0;   /* [roam QC] */
+    p->fill_cap    = td5_env_int("TD5RE_ROAM_PV_FILL_CAP", 1, 0, 1);      /* [roam QC] */
+    p->trim        = td5_env_int("TD5RE_ROAM_PV_TRIM", 1, 0, 1);          /* [roam QC] */
+    p->end_face    = td5_env_int("TD5RE_ROAM_PV_END_FACE", 1, 0, 1);      /* [roam QC] */
 #ifndef TD5RE_RELEASE
     {
         const char *q = getenv("TD5RE_ROAM_PV_DBG");
@@ -4569,6 +4579,9 @@ static int pv_in_green(const TG_TileCtx *c, const ScArea *ar, int nar, double x,
 
 static int inf_in_lot(const TG_TileCtx *c, double x, double z);   /* [HD] SECTION lots */
 
+/* [roam QC] one end edge of a laid slab (kerb point -> outer point, tile-local): tops, bottoms (road / under ground), sub-block */
+typedef struct { double kx, kz, ox, oz, ykt, yot, ykb, yob; int sb, ok; } PvEnd;
+
 typedef struct {
     TD5_RoamScnSource *s;
     TG_TileCtx  *c;
@@ -4579,6 +4592,8 @@ typedef struct {
     int          kerb_only;           /* [roam IA] the chain's top is its triangulated loop: pieces emit kerb faces only */
     int          trees;               /* [roam LA] street tree candidates along the chain (SECTION trees) */
     int          dry;                 /* [roam NA] a geometry-only walk (sc_muni_prepare): no stats */
+    int          last_fate;           /* [roam QC] what the last pv_piece laid: 0 a slab, 1 none (too narrow), 2 dropped by the guard */
+    PvEnd        last_end[2];         /* [roam QC] ... and, a slab, its two end edges (at i0, at i1) */
 } PvEmit;
 
 enum { PV_B_PAVE = 0, PV_B_LAWN = 1, PV_B_FENCE = 2, PV_NB = 3 };
@@ -4719,7 +4734,9 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
     double x[4], y[4], z[4], u[4], v[4];
     const double ddx = kx[b] - kx[a], ddz = kz[b] - kz[a];
     int sb, k, cut = 0;
+    e->last_fate = 1;
     if (ch->w[a] < pv_skip(ch, a) && ch->w[b] < pv_skip(ch, b)) return 1;
+    e->last_fate = 2;
     if ((ox[1] - ox[0]) * ddx + (oz[1] - oz[0]) * ddz < 0.0) {
         /* an outer piece still running backwards (a reversal no corner rule may fold):
          * a triangle to its midpoint, never a bow-tie */
@@ -4737,6 +4754,7 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
 #endif
         c->st.pv_drop++; return 1;
     }
+    e->last_fate = 0;
     if (cut) c->st.pv_cut++;
     /* [roam JA] SEAM. Two island halves meet on the medial line from two independent chains: their outer edges
      * coincide only to the millimetre and the hairline between them showed dark down the middle of a median. Each
@@ -4772,6 +4790,14 @@ static int pv_piece(PvEmit *e, PvChain *ch, int i0, int i1, const double *kx, co
         v[k] = z[k] * (lawn ? PV_UV_LAWN : PV_UV);
     }
     if (!e->kerb_only && !pv_quad(e, sb, lawn ? PV_B_LAWN : PV_B_PAVE, x, y, z, u, v, 0xFFFFFFFFu)) return 0;
+    if (!e->kerb_only) {   /* [roam QC] the end edges, for the kerb returns (pv_end_faces) */
+        PvEnd *q = e->last_end;
+        q[0].kx = x[0]; q[0].kz = z[0]; q[0].ox = x[3]; q[0].oz = z[3]; q[0].ykt = y[0]; q[0].yot = y[3];
+        q[0].ykb = ch->py[a]; q[0].yob = deck ? y[3] - PV_DECK_FASCIA : gr[a];
+        q[1].kx = x[1]; q[1].kz = z[1]; q[1].ox = x[2]; q[1].oz = z[2]; q[1].ykt = y[1]; q[1].yot = y[2];
+        q[1].ykb = ch->py[b]; q[1].yob = deck ? y[2] - PV_DECK_FASCIA : gr[b];
+        q[0].sb = q[1].sb = sb; q[0].ok = q[1].ok = 1;
+    }
     if (!e->kerb_only && sc_grow((void **)&c->pvq, &c->cap_pvq, (c->npvq + 1) * 12, sizeof(double))) {   /* [G5] for the footpaths */
         double *P = &c->pvq[c->npvq++ * 12];
         for (k = 0; k < 4; k++) { P[k * 3] = (double)(float)x[k]; P[k * 3 + 1] = (double)(float)y[k]; P[k * 3 + 2] = (double)(float)z[k]; }
@@ -6166,12 +6192,80 @@ done:
  * (*blk_out, kx kz yo gr after ch->mf: ch->nv each). 0 = out of memory (nothing allocated), -1 = the offset failed
  * (caller frees). [roam NA] e->bld NULL is the FRONTAGE view (td5_roam_muni.h): no island by the no-building rule
  * and no clip at a mapped facade, so the outer line is the municipal line itself, kerb + the street's pavement. */
+/* the end of the per-vertex width rules (pv_chain_geom): too narrow is none, a mapped building front clips it */
+static void pv_vertex_tail(PvEmit *e, PvChain *ch, int v)
+{
+    double d;
+    if (ch->w[v] < PV_KERB_IN + pv_skip(ch, v)) { ch->w[v] = 0.0; return; }
+    /* a mapped building front behind the kerb: the slab stops there (not inside the clearance gap) */
+    if (e->bld && e->s->pv->facade && !(ch->vf[v] & (PV_VF_ISLAND | PV_VF_DECK | PV_VF_FLAT)) && ch->w[v] > e->s->gap) {
+        for (d = e->s->gap; d < ch->w[v]; d += PV_FACE_STEP) {
+            const double qx = ch->px[v] + ch->ux[v] * d, qz = ch->pz[v] + ch->uz[v] * d;
+            if (pv_in_building(e->c, e->bld, qx, qz)) {
+                ch->w[v] = d;
+                ch->vf[v] |= PV_VF_FACADE;
+                break;
+            }
+        }
+    }
+}
+
+/* [roam QC] SHORT ISLAND FILLS. The [roam IA] fill (a gap with no building, the slab to the middle) is judged per vertex:
+ * where only one or two kerb vertices see another road across a gap (a dead-end stub's cap 13 m off an avenue, the
+ * corner of a block whose far side is a road), those vertices alone jump to half the gap and their mitres drew long
+ * sidewalk SPIKES into the grass, the kerb beside them a plain 1.2 m strip (Mariano's pick at the Estadio Uno ring,
+ * place -1268136,5731953). A fill run (consecutive filled vertices) along less than TD5RE_ROAM_PV_FILL_RUN of kerb is
+ * put back to its own width; a closed loop filled all round (a small island) is a run of its own and stays. */
+static void pv_fill_runs(PvEmit *e, PvChain *ch, const unsigned char *fillv, const double *w0s, const unsigned char *vf0)
+{
+    const int nv = ch->nv;
+    int v, s0 = -1, all = 1;
+    for (v = 0; v < nv; v++) if (!fillv[v]) { all = 0; s0 = v; break; }
+    if (all) return;                               /* a loop filled all round (or nothing to judge) */
+    for (v = 0; v < nv; v++) {
+        int a, n = 0, j;
+        double len = 0.0;
+        a = (s0 + 1 + v) % nv;
+        if (!ch->closed) a = v;
+        if (!fillv[a]) continue;
+        {   /* the start of a run only */
+            const int p = ch->closed ? (a + nv - 1) % nv : a - 1;
+            if (p >= 0 && fillv[p]) continue;
+        }
+        while (n < nv) {
+            const int q = ch->closed ? (a + n) % nv : a + n;
+            if (q >= nv || !fillv[q]) break;
+            if (n > 0) {
+                const int pq = ch->closed ? (q + nv - 1) % nv : q - 1;
+                len += hypot(ch->px[q] - ch->px[pq], ch->pz[q] - ch->pz[pq]);
+            }
+            n++;
+        }
+        if (len >= e->s->pv->fill_run) continue;
+#ifndef TD5RE_RELEASE
+        if (e->s->pv->end_log && !e->dry)
+            fprintf(e->s->pv->end_log, "%d,%d,spike_fix,0,%.0f,%.0f,%.0f,%.0f,%.2f,0,0,0,0,%.2f,%d,-1,-1\n", e->c->tx, e->c->tz,
+                    ch->px[a] + e->c->org_x, ch->pz[a] + e->c->org_z, ch->px[a] + e->c->org_x, ch->pz[a] + e->c->org_z,
+                    len / SC_UPM, ch->w[a] / SC_UPM, n);
+#endif
+        for (j = 0; j < n; j++) {
+            const int q = ch->closed ? (a + j) % nv : a + j;
+            ch->w[q] = w0s[q];
+            ch->vf[q] = vf0[q];
+            ch->fy[q] = -1e30;
+            pv_vertex_tail(e, ch, q);
+        }
+    }
+}
+
 static int pv_chain_geom(PvEmit *e, PvB *B, int start, PvChain *out, int **seq_out, int *m_out, double **blk_out)
 {
     TG_TileCtx *c = e->c;
     int *seq = NULL, m = 0, cap = 0, s, closed = 0, k, v;
     PvChain ch;
     double *gr, *blk;
+    unsigned char *fillv = NULL;   /* [roam QC] per vertex: island-filled (nv), then its flags before the fill (nv) */
+    double *w0s = NULL;            /* [roam QC] its width before the fill */
     /* back to the chain's first piece (or round a closed one), then forward */
     s = start;
     for (k = 0; k < PV_CHAIN_MAX && B[s].prev >= 0 && B[s].prev != start; k++) s = B[s].prev;
@@ -6271,6 +6365,11 @@ static int pv_chain_geom(PvEmit *e, PvB *B, int start, PvChain *out, int **seq_o
         free(wk);
     }
     /* per vertex: half the free distance to another drivable surface, the building front */
+    if (e->bld && e->s->pv->island_fill && (e->s->pv->fill_run > 0.0 || e->s->pv->fill_cap)) {   /* [roam QC] */
+        fillv = (unsigned char *)calloc((size_t)ch.nv * 2u, 1);
+        w0s = (double *)malloc((size_t)ch.nv * sizeof(double));
+        if (!fillv || !w0s) { free(fillv); free(w0s); fillv = NULL; w0s = NULL; }
+    }
     for (v = 0; v < ch.nv; v++) {
         const double w0 = ch.w[v];
         const double dmax = 2.0 * w0 + 2.0 * PV_KERB_IN + 400.0;
@@ -6321,10 +6420,26 @@ static int pv_chain_geom(PvEmit *e, PvB *B, int start, PvChain *out, int **seq_o
                 if (e->s->pv->dbg_r > 0.0 && hypot(ch.px[v] + c->org_x - e->s->pv->dbg_x, ch.pz[v] + c->org_z - e->s->pv->dbg_z) < e->s->pv->dbg_r)
                     TD5_LOG_I(LOG_TAG, "PVDBG   v %d fill %d (a building %.0f along the ray)", v, fill, fill ? -1.0 : d);
 #endif
+                /* [roam QC] a dead end's cap and the kerb across from one keep their sidewalk: the stub's kerb
+                 * returns round its cap (TD5RE_ROAM_PV_FILL_CAP=0: the old fill) */
+                if (fill && e->s->pv->fill_cap) {
+                    const int kin = (v > 0) ? v - 1 : (closed ? m - 1 : -1), kout = (v < m) ? v : -1;
+                    if ((hp && hp->cap_row >= 0) || (kin >= 0 && B[seq[kin]].kind == PV_K_CAP) ||
+                        (kout >= 0 && B[seq[kout]].kind == PV_K_CAP)) {
+                        fill = 0;
+#ifndef TD5RE_RELEASE
+                        if (e->s->pv->end_log && !e->dry && B[seq[v < m ? v : m - 1]].owned)
+                            fprintf(e->s->pv->end_log, "%d,%d,cap_fix,0,%.0f,%.0f,%.0f,%.0f,%.2f,0,0,0,0,%.2f,-1,-1,-1\n", c->tx, c->tz,
+                                    ch.px[v] + c->org_x, ch.pz[v] + c->org_z, ch.px[v] + c->org_x, ch.pz[v] + c->org_z,
+                                    freed / SC_UPM, half / SC_UPM);
+#endif
+                    }
+                }
                 if (fill)
                     green = pv_in_green(c, e->ar, e->nar, ch.px[v] + ch.ux[v] * half, ch.pz[v] + ch.uz[v] * half);
                 if (fill && !e->dry && B[seq[v < m ? v : m - 1]].owned) c->st.pv_island_fill++;
             }
+            if (fill && fillv) { fillv[v] = 1; w0s[v] = ch.w[v]; fillv[ch.nv + v] = ch.vf[v]; }   /* [roam QC] */
             if (median || fill || ch.w[v] > half) {
                 ch.w[v] = half;
                 ch.vf[v] |= PV_VF_ISLAND;
@@ -6338,32 +6453,21 @@ static int pv_chain_geom(PvEmit *e, PvB *B, int start, PvChain *out, int **seq_o
                 if (e->bld && !e->dry && B[seq[v < m ? v : m - 1]].owned) c->st.pv_free_clamp++;
             }
         }
-        if (ch.w[v] < PV_KERB_IN + pv_skip(&ch, v)) { ch.w[v] = 0.0; continue; }
-        /* a mapped building front behind the kerb: the slab stops there (not inside the clearance gap) */
-        if (e->bld && e->s->pv->facade && !(ch.vf[v] & (PV_VF_ISLAND | PV_VF_DECK | PV_VF_FLAT)) && ch.w[v] > e->s->gap) {
-            for (d = e->s->gap; d < ch.w[v]; d += PV_FACE_STEP) {
-                const double qx = ch.px[v] + ch.ux[v] * d, qz = ch.pz[v] + ch.uz[v] * d;
-                if (pv_in_building(c, e->bld, qx, qz)) {
-                    ch.w[v] = d;
-                    ch.vf[v] |= PV_VF_FACADE;
-                    break;
-                }
-            }
-        }
+        pv_vertex_tail(e, &ch, v);
     }
+    if (fillv) { pv_fill_runs(e, &ch, fillv, w0s, fillv + ch.nv); free(fillv); free(w0s); }   /* [roam QC] */
     if (pv_offset_chain(&ch) < 0) { free(blk); free(ch.vf); free(seq); return 0; }
     *out = ch; *seq_out = seq; *m_out = m; *blk_out = blk;
     return 1;
 }
 
-#ifndef TD5RE_RELEASE
 /* [roam QC] DEV END CENSUS (TD5RE_ROAM_PV_END_CENSUS=1, --RoamBuildScenery only: log/roam_pv_ends.csv). Every place
  * where an owned slab piece of a chain has no slab after it (or before it): the fate of the piece that follows (no
  * sidewalk by width, dropped by the guard) or, at the open end of a chain, why the kerb did not link on. The judge of
  * "sudden ends" is _archive/roam/QC/ends.py over these rows + the SCENERY bytes. */
-enum { PVF_SLAB = 0, PVF_TOP, PVF_MOTORWAY, PVF_CUT, PVF_GAP, PVF_NARROW, PVF_DROP,
+enum { PVF_SLAB = 0, PVF_TOP, PVF_MOTORWAY, PVF_CUT, PVF_GAP, PVF_NARROW, PVF_DROP, PVF_MDROP,
        PVF_O_NOLINK, PVF_O_INTERIOR, PVF_O_LEVEL, PVF_O_MULTI, PVF_O_TAKEN, PVF_O_MAX, PVF__N };
-static const char *const k_pvf_name[PVF__N] = { "slab", "top", "motorway", "cut", "gap", "narrow", "drop",
+static const char *const k_pvf_name[PVF__N] = { "slab", "top", "motorway", "cut", "gap", "narrow", "drop", "drop_merged",
                                                 "open_nolink", "open_interior", "open_level", "open_multi", "open_taken",
                                                 "open_max" };
 
@@ -6409,16 +6513,13 @@ static int pv_open_cause(const TG_TileCtx *c, const PvB *B, int nb, const PvB *e
 }
 
 static void pv_end_census(PvEmit *e, const PvChain *ch, const PvB *B, int nb, const int *seq, int m,
-                          const double *kx, const double *kz)
+                          const double *kx, const double *kz, unsigned char *fate)
 {
     TG_TileCtx *c = e->c;
     FILE *f = e->s->pv->end_log;
-    unsigned char *fate;
     int k, dir;
-    if (!f || e->dry || !e->bld || m < 1) return;
-    fate = (unsigned char *)malloc((size_t)m);
-    if (!fate) return;
-    for (k = 0; k < m; k++) fate[k] = (unsigned char)pv_fate(e, ch, B, seq, k, kx, kz);
+    /* the owned pieces carry what they laid; a neighbour's pieces are judged dry (as one piece each) */
+    for (k = 0; k < m; k++) if (fate[k] == 0xFF) fate[k] = (unsigned char)pv_fate(e, ch, B, seq, k, kx, kz);
     for (k = 0; k < m; k++) {
         const PvB *b = &B[seq[k]];
         if (!b->owned || fate[k] > PVF_TOP) continue;
@@ -6445,9 +6546,141 @@ static void pv_end_census(PvEmit *e, const PvChain *ch, const PvB *B, int nb, co
             }
         }
     }
-    free(fate);
 }
+
+/* [roam QC] KERB RETURN. A slab end that no slab continues (the next piece is too narrow, dropped by the guard, or the
+ * kerb chain stops) showed the slab's open cut: the top, the kerb face and the back face, and nothing across the end,
+ * so a driver saw under the pavement. The end edge (kerb point -> outer point) gets a face from the slab top down to
+ * the road on the kerb side and under the drawn ground on the outer side, facing out of the slab (at_b: the slab's
+ * i1 end, along the kerb). Its colour PV_END_FACE_ARGB tells the censuses it apart from a back face. */
+#define PV_END_FACE_ARGB 0xFFA9A9A9u
+#define PV_TRIM_MIN      (0.5 * SC_UPM)     /* a trimmed part shorter than this is not laid */
+#define PV_END_MATCH     2.0                /* units: two end edges this close are one joint */
+
+static int pv_end_face(PvEmit *e, const PvEnd *q, int at_b)
+{
+    double x[4], y[4], z[4], u[4], v[4];
+    const double dx = q->ox - q->kx, dz = q->oz - q->kz;
+    if (!(hypot(dx, dz) > 4.0)) return 1;
+    if (at_b) {
+        x[0] = q->kx; z[0] = q->kz; y[0] = q->ykb;
+        x[1] = q->ox; z[1] = q->oz; y[1] = q->yob;
+        x[2] = q->ox; z[2] = q->oz; y[2] = q->yot;
+        x[3] = q->kx; z[3] = q->kz; y[3] = q->ykt;
+    } else {
+        x[0] = q->ox; z[0] = q->oz; y[0] = q->yob;
+        x[1] = q->kx; z[1] = q->kz; y[1] = q->ykb;
+        x[2] = q->kx; z[2] = q->kz; y[2] = q->ykt;
+        x[3] = q->ox; z[3] = q->oz; y[3] = q->yot;
+    }
+    u[0] = u[3] = pv_along(x[0], z[0], dx, dz); u[1] = u[2] = pv_along(x[1], z[1], dx, dz);
+    v[0] = (y[3] - y[0]) * PV_UV; v[1] = (y[2] - y[1]) * PV_UV; v[2] = v[3] = 0.0;
+    return pv_quad(e, q->sb, PV_B_PAVE, x, y, z, u, v, PV_END_FACE_ARGB);
+}
+
+static int pv_end_same(const PvEnd *a, const PvEnd *b)
+{
+    return fabs(a->kx - b->kx) < PV_END_MATCH && fabs(a->kz - b->kz) < PV_END_MATCH &&
+           fabs(a->ox - b->ox) < PV_END_MATCH && fabs(a->oz - b->oz) < PV_END_MATCH;
+}
+
+/* [roam QC] TRIM. The guard drops a whole piece whose footprint meets another drivable surface (an acute block tip, two
+ * ribbons that overlap at a junction with no patch, the corner of a ribbon running into a cross street): the kerb before
+ * the other road then stood bare up to 3.5 m. The part of the piece that stays off the road is laid instead: the
+ * longest prefix (from i0) and the longest suffix (to i1) of the piece whose footprint passes the guard, found by
+ * bisection along the kerb, each with a kerb return at its cut. q_a / q_b: the real ends laid (ok = 0 if none). */
+static int pv_trim(PvEmit *e, PvChain *ch, int a, int b, const double *kx, const double *kz, const double *yo,
+                   const double *gr, int klass, PvEnd *q_a, PvEnd *q_b, int *laid)
+{
+    const double L = hypot(kx[b] - kx[a], kz[b] - kz[a]);
+    double tp = 0.0, ts = 1.0;
+    int side, it;
+    *laid = 0;
+    q_a->ok = q_b->ok = 0;
+    if (!(L > 2.0 * PV_TRIM_MIN)) return 1;
+    for (side = 0; side < 2; side++) {        /* 0: prefix [0, t], 1: suffix [t, 1] */
+        double lo = side ? 1.0 : 0.0, hi = side ? 0.0 : 1.0;   /* lo fits (empty), hi does not */
+        for (it = 0; it < 8; it++) {
+            const double t = 0.5 * (lo + hi);
+            const double t0 = side ? t : 0.0, t1 = side ? 1.0 : t;
+            double qx[2], qz[2], ox[2], oz[2];
+            int cut = 0;
+            qx[0] = kx[a] + (kx[b] - kx[a]) * t0; qz[0] = kz[a] + (kz[b] - kz[a]) * t0;
+            qx[1] = kx[a] + (kx[b] - kx[a]) * t1; qz[1] = kz[a] + (kz[b] - kz[a]) * t1;
+            ox[0] = ch->ox[a] + (ch->ox[b] - ch->ox[a]) * t0; oz[0] = ch->oz[a] + (ch->oz[b] - ch->oz[a]) * t0;
+            ox[1] = ch->ox[a] + (ch->ox[b] - ch->ox[a]) * t1; oz[1] = ch->oz[a] + (ch->oz[b] - ch->oz[a]) * t1;
+            if ((ox[1] - ox[0]) * (qx[1] - qx[0]) + (oz[1] - oz[0]) * (qz[1] - qz[0]) < 0.0) { hi = t; continue; }
+            if (pv_guard_fit(e->c, qx, qz, 0, 1, ox, oz, ((ch->vf[a] | ch->vf[b]) & PV_VF_ISLAND) != 0, &cut)) lo = t; else hi = t;
+        }
+        if (side) ts = lo; else tp = lo;
+    }
+    if (ts <= tp) { ts = 1.0; }                /* the parts would overlap: the prefix is the longer one, or the suffix */
+    for (side = 0; side < 2; side++) {
+        const double t0 = side ? ts : 0.0, t1 = side ? 1.0 : tp;
+        double px[2], pz[2], py[2], w[2], ox[2], oz[2], fy[2] = { -1e30, -1e30 }, tkx[2], tkz[2], tyo[2], tgr[2];
+        unsigned char vf[2];
+        PvChain t;
+        int j;
+        if ((t1 - t0) * L < PV_TRIM_MIN) continue;
+        if (side && ts <= tp) continue;
+        for (j = 0; j < 2; j++) {
+            const double f = j ? t1 : t0;
+            px[j] = ch->px[a] + (ch->px[b] - ch->px[a]) * f; pz[j] = ch->pz[a] + (ch->pz[b] - ch->pz[a]) * f;
+            py[j] = ch->py[a] + (ch->py[b] - ch->py[a]) * f; w[j] = ch->w[a] + (ch->w[b] - ch->w[a]) * f;
+            ox[j] = ch->ox[a] + (ch->ox[b] - ch->ox[a]) * f; oz[j] = ch->oz[a] + (ch->oz[b] - ch->oz[a]) * f;
+            tkx[j] = kx[a] + (kx[b] - kx[a]) * f; tkz[j] = kz[a] + (kz[b] - kz[a]) * f;
+            tyo[j] = yo[a] + (yo[b] - yo[a]) * f; tgr[j] = gr[a] + (gr[b] - gr[a]) * f;
+            vf[j] = (unsigned char)((f < 0.5 ? ch->vf[a] : ch->vf[b]) | ((ch->vf[a] | ch->vf[b]) & PV_VF_ISLAND));
+        }
+        memset(&t, 0, sizeof t);
+        t.nv = 2; t.ns = 1; t.closed = 0;
+        t.px = px; t.pz = pz; t.py = py; t.w = w; t.ox = ox; t.oz = oz; t.vf = vf; t.fy = fy;
+        t.join_guard = ch->join_guard; t.level = ch->level;
+        if (!pv_piece(e, &t, 0, 1, tkx, tkz, tyo, tgr, klass, 0)) return 0;
+        if (e->last_fate != 0) continue;
+        *laid = 1;
+        if (side == 0) { *q_a = e->last_end[0]; if (e->s->pv->end_face && !pv_end_face(e, &e->last_end[1], 1)) return 0; }
+        else           { *q_b = e->last_end[1]; if (e->s->pv->end_face && !pv_end_face(e, &e->last_end[0], 0)) return 0; }
+#ifndef TD5RE_RELEASE
+        if (e->s->pv->end_log)
+            fprintf(e->s->pv->end_log, "%d,%d,trim,%d,%.0f,%.0f,%.0f,%.0f,%.2f,0,0,0,0,%.2f,-1,-1,-1\n", e->c->tx, e->c->tz,
+                    side ? -1 : 1, (side ? tkx[0] : tkx[1]) + e->c->org_x, (side ? tkz[0] : tkz[1]) + e->c->org_z,
+                    (side ? ox[0] : ox[1]) + e->c->org_x, (side ? oz[0] : oz[1]) + e->c->org_z, (1.0 - (t1 - t0)) * L / SC_UPM,
+                    (side ? w[0] : w[1]) / SC_UPM);
 #endif
+    }
+    return 1;
+}
+
+/* [roam QC] the kerb returns of one chain: every laid end edge whose neighbour piece lays no slab meeting it */
+static int pv_end_pass(PvEmit *e, const PvChain *ch, const PvB *B, const int *seq, int m, const double *kx, const double *kz,
+                       const PvEnd *ea, const PvEnd *eb)
+{
+    unsigned char *dry = (unsigned char *)malloc((size_t)m);
+    int j, side;
+    if (!dry) return 0;
+    memset(dry, 0xFF, (size_t)m);
+    for (j = 0; j < m; j++) {
+        if (!B[seq[j]].owned) continue;
+        for (side = 0; side < 2; side++) {
+            const PvEnd *q = side ? &eb[j] : &ea[j];
+            int n = side ? j + 1 : j - 1, need;
+            if (!q->ok) continue;
+            if (n < 0 || n >= m) { if (ch->closed) n = (n + m) % m; else n = -1; }
+            if (n < 0) need = 1;
+            else if (B[seq[n]].owned) {
+                const PvEnd *o = side ? &ea[n] : &eb[n];
+                need = !(o->ok && pv_end_same(o, q));
+            } else {
+                if (dry[n] == 0xFF) dry[n] = (unsigned char)pv_fate(e, ch, B, seq, n, kx, kz);
+                need = dry[n] > PVF_TOP;
+            }
+            if (need && !pv_end_face(e, q, side)) { free(dry); return 0; }
+        }
+    }
+    free(dry);
+    return 1;
+}
 
 static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
 {
@@ -6455,9 +6688,15 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
     int *seq = NULL, m = 0, ok = 1, k, v;
     PvChain ch;
     double *kx, *kz, *yo, *gr, *blk = NULL;
+    unsigned char *fate = NULL;   /* [roam QC] DEV end census: what each piece laid (PVF_*), 0xFF = not owned */
+    PvEnd *ea = NULL, *eb = NULL; /* [roam QC] per piece: its laid end edge at its first / its last vertex (pv_end_pass) */
     (void)nb;
     if (!pv_chain_geom(e, B, start, &ch, &seq, &m, &blk)) return 0;
     kx = ch.mf + ch.nv; kz = kx + ch.nv; yo = kz + ch.nv; gr = yo + ch.nv;
+#ifndef TD5RE_RELEASE
+    if (e->s->pv->end_log && !e->dry && e->bld && m > 0 && (fate = (unsigned char *)malloc((size_t)m)) != NULL)
+        memset(fate, 0xFF, (size_t)m);
+#endif
 #ifndef TD5RE_RELEASE
     if (e->s->pv->dbg_r > 0.0)
         for (v = 0; v < ch.nv; v++)
@@ -6477,6 +6716,11 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
     }
     /* [HD] this block's frontage lots, before its pieces (a fence never stands in front of one) */
     if (!pv_infill(e, &ch)) { ok = 0; goto done; }
+    if (e->s->pv->end_face && !e->kerb_only) {   /* [roam QC] each piece's laid end edges, for the kerb returns */
+        ea = (PvEnd *)calloc((size_t)m * 2u, sizeof(PvEnd));
+        if (!ea) { ok = 0; goto done; }
+        eb = ea + m;
+    }
     /* the owned pieces, straight runs merged */
     for (k = 0; k < m;) {
         const PvB *b = &B[seq[k]];
@@ -6493,14 +6737,54 @@ static int pv_chain_emit(PvEmit *e, PvB *B, int nb, int start)
             }
         if (!pv_piece(e, &ch, k, k1, kx, kz, yo, gr, b->klass >= 0 ? b->klass : TD5_GEO_RC_RESIDENTIAL,
                       b->kind == PV_K_PATCH)) { ok = 0; goto done; }
+        if (ea && e->last_fate == 0) { ea[k] = e->last_end[0]; eb[k1 - 1] = e->last_end[1]; }
+        if (fate) {
+            int j;
+            for (j = k; j < k1; j++)
+                fate[j] = (unsigned char)(e->last_fate == 0 ? (e->kerb_only ? PVF_TOP : PVF_SLAB)
+                                        : e->last_fate == 2 ? (k1 > k + 1 ? PVF_MDROP : PVF_DROP)
+                                        : pv_fate(e, &ch, B, seq, j, kx, kz));
+        }
+        /* [roam QC] MERGE SPLIT. A merged straight run (up to PV_MERGE_M, 30 m) is one quad, so the guard judged its
+         * whole footprint: one driveway mouth or a service road behind the kerb dropped all of it, and a long stretch of
+         * kerb stood bare between two slabs (casco census: the largest unexplained class). Dropped, the run is laid again
+         * piece by piece, each judged on its own (TD5RE_ROAM_PV_MERGE_SPLIT=0: the old drop). */
+        if (e->last_fate == 2 && k1 > k + 1 && e->s->pv->merge_split) {
+            int j;
+            c->st.pv_drop--;
+            for (j = k; j < k1; j++) {
+                if (!pv_piece(e, &ch, j, j + 1, kx, kz, yo, gr, B[seq[j]].klass >= 0 ? B[seq[j]].klass : TD5_GEO_RC_RESIDENTIAL,
+                              0)) { ok = 0; goto done; }
+                if (ea && e->last_fate == 0) { ea[j] = e->last_end[0]; eb[j] = e->last_end[1]; }
+                if (e->last_fate == 2 && e->s->pv->trim) {
+                    PvEnd qa, qb;
+                    int laid;
+                    if (!pv_trim(e, &ch, j, j + 1, kx, kz, yo, gr, B[seq[j]].klass >= 0 ? B[seq[j]].klass : TD5_GEO_RC_RESIDENTIAL,
+                                 &qa, &qb, &laid)) { ok = 0; goto done; }
+                    if (ea) { ea[j] = qa; eb[j] = qb; }
+                    if (laid && fate) { fate[j] = PVF_SLAB; continue; }
+                }
+                if (fate) fate[j] = (unsigned char)(e->last_fate == 0 ? PVF_SLAB : e->last_fate == 2 ? PVF_DROP
+                                                    : pv_fate(e, &ch, B, seq, j, kx, kz));
+            }
+        } else if (e->last_fate == 2 && k1 == k + 1 && e->s->pv->trim) {
+            PvEnd qa, qb;
+            int laid;
+            if (!pv_trim(e, &ch, k, k1, kx, kz, yo, gr, b->klass >= 0 ? b->klass : TD5_GEO_RC_RESIDENTIAL, &qa, &qb, &laid)) {
+                ok = 0; goto done;
+            }
+            if (ea) { ea[k] = qa; eb[k] = qb; }
+            if (laid && fate) fate[k] = PVF_SLAB;
+        }
         k = k1;
     }
+    if (ea && !pv_end_pass(e, &ch, B, seq, m, kx, kz, ea, eb)) { ok = 0; goto done; }   /* [roam QC] kerb returns */
     /* [roam LA] the street trees of this chain (an island loop's top takes none) */
     if ((e->trees || c->rt_casco) && !e->kerb_only && !pv_trees_chain(e, &ch, B, seq, m, kx, kz)) { ok = 0; goto done; }
-#ifndef TD5RE_RELEASE
-    pv_end_census(e, &ch, B, nb, seq, m, kx, kz);   /* [roam QC] DEV, writes no byte */
-#endif
+    if (fate) pv_end_census(e, &ch, B, nb, seq, m, kx, kz, fate);   /* [roam QC] DEV, writes no byte */
 done:
+    free(fate);
+    free(ea);
     e->kerb_only = 0;
     free(blk);
     free(ch.vf);
