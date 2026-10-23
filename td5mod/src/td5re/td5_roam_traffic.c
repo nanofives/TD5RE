@@ -40,6 +40,7 @@
 #include "td5_roam_ai.h"
 #include "td5_roam_barrier.h"
 #include "td5_roam_traffic.h"
+#include "td5_roam_handoff.h"     /* [roam QA] TD5_RoamFreePrefs: the FREE ROAM setup's TRAFFIC row */
 #include "td5_roam_rebase.h"     /* [F9b] parked cars are held where they were parked */
 #include "td5_roam_cops.h"       /* [F10] the cop slots answer td5_roam_traffic_parked / _alpha */
 #include "td5_roam_stream.h"     /* [F8b] the soak logs the stream residency beside private bytes */
@@ -836,7 +837,10 @@ static int rt_level_now(int *racing)
         int lvl = T.force_level ? T.force_level - 1 : td5_roam_race_traffic_level();
         per = lvl <= 0 ? 0 : (lvl == 1 ? T.dens_low : T.dens_high);
     } else {
-        per = T.force_density ? T.force_density - 1 : T.dens_free;
+        TD5_RoamFreePrefs f;   /* [roam QA] the FREE ROAM setup's TRAFFIC: HIGH = the knob, LOW = half, OFF */
+        td5_roam_free_prefs_get(&f);
+        per = T.force_density ? T.force_density - 1
+            : (f.traffic >= 2 ? T.dens_free : (f.traffic == 1 ? (T.dens_free + 1) / 2 : 0));
     }
     return per;
 }

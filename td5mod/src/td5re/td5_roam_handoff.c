@@ -52,6 +52,18 @@ void td5_roam_prefs_set(const TD5_RoamRacePrefs *in)
     s_prefs.cops = in->cops ? 1 : 0;
 }
 
+/* [roam QA] free roam's TRAFFIC / COPS (the FREE ROAM setup). Defaults = what free roam always did. */
+static TD5_RoamFreePrefs s_free = { 2, 1 };
+
+void td5_roam_free_prefs_get(TD5_RoamFreePrefs *out) { if (out) *out = s_free; }
+
+void td5_roam_free_prefs_set(const TD5_RoamFreePrefs *in)
+{
+    if (!in) return;
+    s_free.traffic = in->traffic < 0 ? 0 : (in->traffic > 2 ? 2 : in->traffic);
+    s_free.cops = in->cops ? 1 : 0;
+}
+
 int td5_roam_strip_build_enabled(void)
 {
 #ifndef TD5RE_RELEASE

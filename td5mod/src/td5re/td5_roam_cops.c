@@ -41,6 +41,7 @@
 #include "td5_roam_ai.h"        /* td5_roam_ai_count: the racer field when the session re-sets it */
 #include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
+#include "td5_roam_handoff.h"     /* [roam QA] TD5_RoamFreePrefs: the FREE ROAM setup's COPS row */
 #include "td5_roam_rules.h"     /* [roam LG] td5_roam_limit_kmh */
 #include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
 #include "td5_police.h"         /* [round H HH] the shared pursuit HUD drawing */
@@ -411,6 +412,9 @@ void td5_roam_cops_session_init(void)
 void td5_roam_cops_session_end(void)
 {
     int i;
+    if (C.on)   /* [roam QA] one line per session: the FREE ROAM setup's COPS row is checked against it */
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS summary: spawns %ld despawns %ld pursuits %ld escapes %ld busts %ld",
+                  C.st.spawns, C.st.despawns, C.st.pursuits, C.st.escapes, C.st.busts);
     for (i = 0; i < C.pool; i++) td5_ai_roam_mark_cop(C.cop[i].slot, 0);
     if (C.on) TD5_LOG_I(LOG_TAG, "ROAM_COPS: [roam QD] three-point turns %ld (%ld ticks reversing), off-surface ticks %ld (kturn %d)",
                         C.kturns, C.kturn_ticks, C.st.off_ticks, C.kturn);
@@ -522,7 +526,11 @@ static int rc_race_level(int *in_race)
     const int rs = td5_roam_race_state();
     const int racing = rs == TD5_RRACE_COUNTDOWN || rs == TD5_RRACE_RACING || rs == TD5_RRACE_FINISHED;
     if (in_race) *in_race = racing;
-    if (!racing) return C.force_dens ? C.force_dens - 1 : C.dens_free;
+    if (!racing) {   /* [roam QA] the FREE ROAM setup's COPS row */
+        TD5_RoamFreePrefs f;
+        td5_roam_free_prefs_get(&f);
+        return C.force_dens ? C.force_dens - 1 : (f.cops ? C.dens_free : 0);
+    }
     if (!td5_roam_race_cops()) return 0;
     return C.force_dens ? C.force_dens - 1 : C.dens_race;
 }

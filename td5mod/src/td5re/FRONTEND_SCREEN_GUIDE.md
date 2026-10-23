@@ -347,6 +347,22 @@ button that exists only while that entry is the pick:
   track select / race options and launches (`s_selected_track = td5_roam_host_track()`,
   `frontend_init_race_schedule`); BACK cancels the session and returns to the geo screen. Leaving
   the race (pause row LEAVE FREE ROAM) comes back to the geo screen (`td5_game.c`, no results screen).
+* **[roam QA 2026-10-23] FREE ROAM entry + FREE ROAM SETUP (screen 57).** The cyclers carry a third
+  generated position, FREE ROAM, right after the GEOSPATIAL one. It has no slot: `s_selected_track`
+  stays on the geo entry slot and `s_roam_entry` (td5_fe_race.c, `frontend_roam_entry_selected()`)
+  says which of the two it is; `frontend_roam_entry_step_pre/post` wrap the walk of both cyclers
+  (RIGHT from GEOSPATIAL and LEFT arriving on the geo slot land on FREE ROAM). Listed only where the
+  GEOSPATIAL entry races in the city (single race, one local player, no network). OK opens
+  `TD5_SCREEN_ROAM_SETUP` = `Screen_RoamSetup`, which is the geo map screen in ROAM mode
+  (`frontend_effective_screen` maps 57 -> 56, so every behaviour switch, the post-button render and
+  the parent lookup are shared; `geo_screen_init` reads `s_current_screen`). ROAM mode: one pin (a
+  click puts the START, `geo_place_click`), panel rows by `geo_slot_kind` (TIME OF DAY, TRAFFIC, COPS,
+  TERRAIN HEIGHT), CONFIRM in the BUILD slot (`geo_do_roam`), its own pin bank and parent
+  (`frontend_roam_setup_set_parent`). Leaving free roam / BACK out of its car select return to the map
+  screen that armed the session (`td5_frontend_roam_origin_screen`). The GEOSPATIAL entry draws no
+  route preview and its options button reads SPRINT / CIRCUIT (strip context: SETTINGS); screen 56
+  is titled SPRINT / CIRCUIT in the city flow, has a 7th row (TERRAIN HEIGHT, `GEO_OPT_VIS` 7) and its
+  FREE ROAM button is kept for index stability but always hidden + disabled.
 * **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
   STUDIO chip was created as button 17 and silently refused (`-1`) until round
   1026. If you add a button past the last index of a screen, check the return value.

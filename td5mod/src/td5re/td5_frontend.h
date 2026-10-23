@@ -56,6 +56,9 @@ void td5_frontend_leave_net_session(void);
  * mid-race lockstep loss. Pass a short human-readable reason (or NULL). */
 void td5_frontend_show_net_disconnect(const char *reason);
 TD5_ScreenIndex td5_frontend_get_screen(void);
+/* [roam QA] The map screen the armed / running free-roam session came from (the FREE ROAM setup or
+ * the SPRINT / CIRCUIT screen): where leaving free roam, or BACK out of its car select, returns. */
+TD5_ScreenIndex td5_frontend_roam_origin_screen(void);
 
 /* --- Test-harness hooks (StartScreen nav walker / scripted-input engine) ---
  * force_input: acquire(1)/release(0) — treat the window as focused so injected

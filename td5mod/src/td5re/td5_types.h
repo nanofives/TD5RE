@@ -498,7 +498,11 @@ typedef enum TD5_ScreenIndex {
      * are referenced by --StartScreen, the logs, the inputscripts and the
      * docs, so a renumber silently redirects all of them. */
     TD5_SCREEN_GEO_GENERATOR       = 56,
-    TD5_SCREEN_COUNT               = 57
+    /* [roam QA 2026-10-23] Screen_RoamSetup (td5_fe_geo.c) — the FREE ROAM setup: the geo map in
+     * ROAM mode (START pin, TIME OF DAY, TRAFFIC, COPS, TERRAIN HEIGHT, CONFIRM), opened by the
+     * track selectors' FREE ROAM entry. Behaves as GEO_GENERATOR (frontend_effective_screen). */
+    TD5_SCREEN_ROAM_SETUP          = 57,
+    TD5_SCREEN_COUNT               = 58
 } TD5_ScreenIndex;
 
 /* ========================================================================

@@ -1702,7 +1702,7 @@ int td5_game_tick(void) {
                 td5_roam_end();
                 g_td5.game_state = TD5_GAMESTATE_MENU;
                 TD5_LOG_I(LOG_TAG, "Race exited (result=%d) -> leave free roam -> geo selector", result);
-                td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+                td5_frontend_set_screen(td5_frontend_roam_origin_screen());   /* [roam QA] map or FREE ROAM setup */
                 return 0;
             }
 

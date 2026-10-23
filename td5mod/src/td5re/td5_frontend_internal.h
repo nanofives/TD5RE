@@ -121,6 +121,16 @@ void frontend_geo_generator_render(float sx, float sy);
  * chip's frontend_autotrack_parent_screen. */
 void frontend_geo_generator_set_parent(int screen);
 int  frontend_geo_generator_parent_screen(void);
+/* [roam QA] The FREE ROAM setup (TD5_SCREEN_ROAM_SETUP): the same map screen in ROAM mode, opened by
+ * the track selectors' FREE ROAM entry (td5_fe_race.c), which sets its parent. frontend_roam_set_origin
+ * names the screen leaving free roam returns to (td5_frontend_roam_origin_screen, td5_frontend.h)
+ * for an armed session that did not come from the map screen. */
+void Screen_RoamSetup(void);
+void frontend_roam_setup_set_parent(int screen);
+void frontend_roam_set_origin(int screen);
+/* [roam QA] 1 while a track selector's pick is the FREE ROAM entry (the position right after the
+ * GEOSPATIAL one; s_selected_track still holds the geo slot). td5_fe_race.c. */
+int  frontend_roam_entry_selected(void);
 /* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] The per-place track slots are no
  * longer browsable in SELECT TRACK -- this generator is the only way to a real
  * place. BUILD therefore ARMS the slot it just registered (td5_fe_race.c keeps
