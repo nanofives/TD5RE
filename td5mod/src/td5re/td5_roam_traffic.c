@@ -2130,7 +2130,9 @@ int td5_roam_traffic_verdict(char *note, size_t n, int race_row)
     size_t bl = 0;
     int status = 0;
 #define RT_BAD(...) do { if (bl < sizeof bad - 1) bl += (size_t)snprintf(bad + bl, sizeof bad - bl, __VA_ARGS__); } while (0)
-    if (!T.on) RT_BAD("traffic off; ");
+    /* [roam QD] T.on is cleared by td5_roam_traffic_session_end, which a race row (roam-sprint-traffic) reaches before its
+     * verdict is captured: "traffic off" FAILed that row although its traffic ran. The session pool says whether it had any. */
+    if (!T.on && T.st.pool <= 0) RT_BAD("traffic off; ");
     else if (s->samples == 0) RT_BAD("no samples; ");
     else {
         if (!race_row && (s->live_min == 0 || s->live_mean < 0.6 * (double)s->target))
