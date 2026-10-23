@@ -40,6 +40,18 @@ typedef struct {
 void td5_roam_prefs_get(TD5_RoamRacePrefs *out);
 void td5_roam_prefs_set(const TD5_RoamRacePrefs *in);   /* clamps every field */
 
+/* [roam QA] TRAFFIC / COPS of FREE ROAM itself (no race running), set by the FREE ROAM setup screen
+ * (td5_fe_geo.c). Read live by td5_roam_traffic.c / td5_roam_cops.c outside a race; a race keeps
+ * its own TD5_RoamRacePrefs. traffic HIGH = the TD5RE_ROAM_TRAFFIC density per anchor (what free
+ * roam always ran), LOW = half of it, OFF = none; cops ON = TD5RE_ROAM_COPS patrols. Defaults
+ * HIGH + ON, so free roam is unchanged until the player changes them. Lives for the process. */
+typedef struct {
+    int traffic;     /* 0 off / 1 low / 2 high */
+    int cops;        /* 0 off / 1 on */
+} TD5_RoamFreePrefs;
+void td5_roam_free_prefs_get(TD5_RoamFreePrefs *out);
+void td5_roam_free_prefs_set(const TD5_RoamFreePrefs *in);   /* clamps every field */
+
 /* Waypoints lat/lon, START first and FINISH last (n >= 2, at most TD5_ROUTE_MAX_WP). type =
  * TD5_ROUTE_SPRINT / _CIRCUIT, laps 1..10. opponents / traffic / cops are used by AUTOSTART only
  * (opponents -1 = the session default). Returns 1 when stored. */

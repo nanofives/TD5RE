@@ -83,6 +83,10 @@ typedef struct {
     /* [roam JC] 1: lay the landmark apron only, not the mass (an outline its building:parts
      * replace, Simple 3D Buildings: the outline is not rendered when parts exist) */
     int      s3d_skip_mass;
+    /* [integ Q] 1: the wall V comes from the wall height itself (H, or H - the roof rise), not from
+     * (by + H) - by: a ground sample one ULP apart on a worker thread made a 2-storey V 1.9999998
+     * (determinism arm T, tile 25,42, at the 1x terrain height). Free roam only: the strip leaves it 0. */
+    int      exact_wall_h;
     /* [roam JC2] COURTYARDS: the inner rings of an OSM multipolygon outline, in the caller's frame, any winding,
      * concatenated (s3d_hn[i] points each). 0 = none. Built by tg_s3d_build only. */
     int            s3d_nh;

@@ -69,6 +69,7 @@
 #include "td5_roam_traffic.h" /* [roam F8] `roam-traffic` rows: ambient traffic verdict */
 #include "td5_roam_ram_test.h"  /* [roam F8e] `roam-ram` row: ram parked traffic at 20..90 km/h */
 #include "td5_roam_cops.h"    /* [roam F10] `roam-cops` rows: pursuit / escape / bust drive */
+#include "td5_roam_handoff.h" /* [integ Q] the FREE ROAM setup's TRAFFIC / COPS prefs */
 #include "td5_police.h"       /* [round H HH] `police` rows: the pursuit layer on a stock track */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
@@ -916,6 +917,13 @@ static void st_roam_arm(const RaceScenario *sc)
     td5_roam_cops_dev_force(st_roam_is_cops(sc->roam) ? -1 : 0, -1);
     /* [roam F9b] the cops rows rebase the world every tile: their pursuits run across world-origin rebases */
     td5_roam_rebase_force_tiles(st_roam_is_cops(sc->roam) ? 1 : -1);
+    {   /* [integ Q] DEV: the FREE ROAM setup's TRAFFIC (0 OFF / 1 LOW / 2 HIGH) and COPS rows for a roam row,
+         * the prefs td5_fe_geo.c writes; unset = HIGH + ON, the setup's defaults. The forces above still win. */
+        TD5_RoamFreePrefs fp;
+        fp.traffic = td5_env_int("TD5RE_SELFTEST_ROAM_FREE_TRAFFIC", 2, 0, 2);
+        fp.cops    = td5_env_int("TD5RE_SELFTEST_ROAM_FREE_COPS", 1, 0, 1);
+        td5_roam_free_prefs_set(&fp);
+    }
     if (st_roam_is_ram(sc->roam)) {
         /* [roam F8e] the ram test: no ambient traffic, no patrols; the placed traffic car is the only other actor */
         td5_roam_traffic_force_density(0);
@@ -959,10 +967,15 @@ static void st_roam_arm(const RaceScenario *sc)
         td5_roam_drive_set_tour(2400.0, td5_env_int("TD5RE_SELFTEST_ROAM_TRAFFIC_SECS", sc->roam == 10 ? 600 : 90, 30, 7200));
         td5_roam_drive_set_traffic(1);
     }
-    if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
-        s_roam_captured = 1;
-        s_roam_status = ST_FAIL;
-        snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+    {   /* [roam QD] DEV: TD5RE_SELFTEST_ROAM_LATLON="lat,lon" moves the drive rows' spawn (a two-way outskirts soak) */
+        double lat = ST_ROAM_LAT, lon = ST_ROAM_LON;
+        const char *ll = getenv("TD5RE_SELFTEST_ROAM_LATLON");
+        if (ll && sscanf(ll, "%lf,%lf", &lat, &lon) != 2) { lat = ST_ROAM_LAT; lon = ST_ROAM_LON; }
+        if (!td5_roam_selftest_arm(lat, lon)) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
     }
 }
 
@@ -994,7 +1007,7 @@ static void st_roam_capture(void)
         size_t q;
         snprintf(dn, sizeof dn, "%s", s_roam_note);
         for (q = 0; dn[q]; q++) if (dn[q] == '|') dn[q] = '/';   /* the report is a markdown table */
-        snprintf(s_roam_note, sizeof s_roam_note, "%.70s; %.47s", tn, dn);
+        snprintf(s_roam_note, sizeof s_roam_note, "%.80s; %.37s", tn, dn);   /* [roam QD] the traffic note grew: vis + dir */
         if (ts > s_roam_status) s_roam_status = ts;
     }
     if (st_roam_is_cops(s_roam_row)) {

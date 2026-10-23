@@ -925,6 +925,19 @@ void td5_geo_sync(void)
                       "falling back to the synthetic world", slug);
         }
     }
+    /* [integ Q] The TERRAIN HEIGHT row (SPRINT / CIRCUIT, FREE ROAM setup) writes TD5RE_GEO_EXAGGERATION
+     * in session, and the reload above keys on the slug only: a build after the row changed would sample
+     * the heights at the value of the first load while GENSTAMP (env hash) names the new one. The value
+     * is applied at sample time (td5_geo_height), so refreshing it is enough. */
+    if (s_geo.loaded) {
+        const double ex = (double)td5_env_int("TD5RE_GEO_EXAGGERATION",
+                                              TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0;
+        if (ex != s_geo.exaggeration) {
+            TD5_LOG_I(LOG_TAG, "geo: terrain height %.2fx -> %.2fx (TD5RE_GEO_EXAGGERATION changed in session)",
+                      s_geo.exaggeration, ex);
+            s_geo.exaggeration = ex;
+        }
+    }
     geo_route_sync();
 }
 

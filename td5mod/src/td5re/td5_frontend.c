@@ -174,6 +174,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [54] */ { "PERFORMANCE CUSTOM",   Screen_PerformanceCustom },/* [PERF PRESETS 2026-09-29] the per-knob list (was screen 53) */
     /* [55] */ { "CHAOS TEAMS",           Screen_ChaosTeams },      /* [CHAOS CO-OP 2026-09-29] seat/role board */
     /* [56] */ { "GEO GENERATOR",        Screen_GeoGenerator },    /* [GEO GENERATOR 2026-10-07] OSM map + route builder */
+    /* [57] */ { "FREE ROAM SETUP",      Screen_RoamSetup },       /* [roam QA] the geo map in ROAM mode */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -190,6 +191,7 @@ TD5_ScreenIndex frontend_effective_screen(TD5_ScreenIndex s) {
     case TD5_SCREEN_MP_PROFILE_SELECT:
     case TD5_SCREEN_MP_CAR_GRID:         return TD5_SCREEN_CAR_SELECTION;
     case TD5_SCREEN_MP_CUP_INTERMISSION: return TD5_SCREEN_MP_POST_RACE;
+    case TD5_SCREEN_ROAM_SETUP:          return TD5_SCREEN_GEO_GENERATOR;   /* [roam QA] same map screen */
     default:                             return s;
     }
 }
@@ -2304,7 +2306,11 @@ static void frontend_get_entry_title(int slot, char *title, size_t tcap,
     place[0] = '\0';
     if (td5_trackgen_is_geo_slot(slot)) {
         snprintf(place, pcap, "%s", title);
-        snprintf(title, tcap, "%s", TR("GEOSPATIAL TRACK GENERATOR"));
+        /* [roam QA] the FREE ROAM entry shares the geo slot (frontend_roam_entry_selected) */
+        /* [integ Q] Mariano: the entry itself reads SPRINT / CIRCUIT too (was GEOSPATIAL TRACK
+         * GENERATOR), the place stays on the subline */
+        snprintf(title, tcap, "%s", (slot == s_selected_track && frontend_roam_entry_selected())
+                                        ? TR("FREE ROAM") : TR("SPRINT / CIRCUIT"));
     }
 }
 
@@ -4112,7 +4118,7 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
 
     case TD5_SCREEN_CAR_SELECTION:
         /* [GEO FREE ROAM F2-A] entered from the geo map's FREE ROAM button: BACK / ESC return there */
-        if (td5_roam_armed()) return TD5_SCREEN_GEO_GENERATOR;
+        if (td5_roam_armed()) return td5_frontend_roam_origin_screen();   /* [roam QA] map or FREE ROAM setup */
         if (s_network_active || s_previous_screen == TD5_SCREEN_NETWORK_LOBBY) {
             return TD5_SCREEN_NETWORK_LOBBY;
         }
@@ -9047,10 +9053,15 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         /* [J8 GEO-PICK 2026-10-03] A real place has no trak*.tga either, but
          * unlike the auto slot its route is already on disk -- so this panel is
          * populated immediately, shows the REAL road, and carries the OSM credit
-         * the ODbL requires wherever that geometry is displayed. */
+         * the ODbL requires wherever that geometry is displayed.
+         * [roam QA] Mariano: "geospatial generator menu on the track selector should not display a
+         * preview of a track". The plot showed the LAST committed strip route, which is not what OK
+         * races any more (the geo map's pins in the city, or the FREE ROAM setup), so the panel stays
+         * empty for both entries. TD5RE_GEO_SELECTOR_PREVIEW=1 (dev) draws the old plot again. */
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-        td5_geo_draw_route(td5_trackgen_geo_index_for_slot(s_selected_track),
-                           412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f, sx, sy);
+        if (td5_env_int("TD5RE_GEO_SELECTOR_PREVIEW", 0, 0, 1))
+            td5_geo_draw_route(td5_trackgen_geo_index_for_slot(s_selected_track),
+                               412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f, sx, sy);
         {
             /* Name the places that could NOT be listed, so an incomplete fetch
              * is a diagnosable state instead of a silently missing entry. */

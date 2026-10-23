@@ -41,6 +41,7 @@
 #include "td5_roam_ai.h"        /* td5_roam_ai_count: the racer field when the session re-sets it */
 #include "td5_roam_stream.h"    /* td5_roam_stream_point_missing: a leg into a tile not streamed in yet */
 #include "td5_roam_cops.h"
+#include "td5_roam_handoff.h"     /* [roam QA] TD5_RoamFreePrefs: the FREE ROAM setup's COPS row */
 #include "td5_roam_rules.h"     /* [roam LG] td5_roam_limit_kmh */
 #include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
 #include "td5_police.h"         /* [round H HH] the shared pursuit HUD drawing */
@@ -91,6 +92,7 @@ typedef struct {
     double   d_player;
     int      sig_hold;                           /* patrol: holding at a red stop line         */
     int      turning;                            /* pursuit: the last leg leaves backwards (turn round) */
+    int      kt, kt_t;                           /* [roam QD] three-point turn: 1 = reversing on opposite lock, ticks */
     int      blk;                                /* [G1b] roadblock index + 1 (RC_BLOCK cars)            */
     int      lim_kmh;                            /* [roam LG] posted limit of the street under the car, 0 = none */
     long     lim_t;                              /* [roam LG] tick it was looked up                      */
@@ -123,6 +125,8 @@ static struct {
     double  wb, a_lat, a_brake;
     int     log_every, offpath_dumped;
     int     force_dens, force_vmax;              /* DEV overrides (+1 encoded, 0 = knob) */
+    int     kturn;                               /* [roam QD] TD5RE_ROAM_COPS_KTURN: turn round in narrow streets by reversing */
+    long    kturns, kturn_ticks;                 /* [roam QD] reverse phases started, ticks spent reversing */
     /* the race corridor */
     int     race_on;                             /* a race with COPS on runs (the corridor applies) */
     uint8_t *mask; int mask_n; uint32_t mask_hash;
@@ -197,6 +201,12 @@ static void rc_read_knobs(void)
     C.block_max_m = td5_env_int("TD5RE_ROAM_COPS_BLOCK_MAX_M", 400, 150, 800);
     if (C.block_max_m < C.block_min_m + 50.0) C.block_max_m = C.block_min_m + 50.0;
     C.wb          = td5_env_int("TD5RE_ROAM_COPS_WB", 26, 10, 60) / 10.0;
+    /* [roam QD] A cop whose new leg leaves backwards (the aim more than 67 deg behind) turned round FORWARD on full lock
+     * at 4 km/h; in a street narrower than its turning circle the nose ground along the kerb, the centre crossed the
+     * edge every tick before rc_road_walls pushed it back (roam-cops "cop off surface 1..13 ticks"), and since it kept
+     * moving the still-car recovery never fired. With KTURN=1 a cop with the aim behind and its nose at the edge
+     * reverses on opposite lock first (a three-point turn). 0 = the old forward turn. */
+    C.kturn       = td5_env_int("TD5RE_ROAM_COPS_KTURN", 1, 0, 1);
     C.a_lat       = td5_env_int("TD5RE_ROAM_COPS_ALAT", 45, 10, 150) / 10.0;
     C.a_brake     = td5_env_int("TD5RE_ROAM_COPS_BRAKE", 55, 10, 150) / 10.0;
     if (C.r_spawn_max < C.r_spawn_min + 20.0) C.r_spawn_max = C.r_spawn_min + 20.0;
@@ -402,7 +412,12 @@ void td5_roam_cops_session_init(void)
 void td5_roam_cops_session_end(void)
 {
     int i;
+    if (C.on)   /* [roam QA] one line per session: the FREE ROAM setup's COPS row is checked against it */
+        TD5_LOG_I(LOG_TAG, "ROAM_COPS summary: spawns %ld despawns %ld pursuits %ld escapes %ld busts %ld",
+                  C.st.spawns, C.st.despawns, C.st.pursuits, C.st.escapes, C.st.busts);
     for (i = 0; i < C.pool; i++) td5_ai_roam_mark_cop(C.cop[i].slot, 0);
+    if (C.on) TD5_LOG_I(LOG_TAG, "ROAM_COPS: [roam QD] three-point turns %ld (%ld ticks reversing), off-surface ticks %ld (kturn %d)",
+                        C.kturns, C.kturn_ticks, C.st.off_ticks, C.kturn);
     C.on = 0;
     free(C.mask); C.mask = NULL; C.mask_n = 0;
     free(C.bad); C.bad = NULL; C.bad_n = 0; free(C.use); C.use = NULL; C.use_n = 0;
@@ -511,7 +526,11 @@ static int rc_race_level(int *in_race)
     const int rs = td5_roam_race_state();
     const int racing = rs == TD5_RRACE_COUNTDOWN || rs == TD5_RRACE_RACING || rs == TD5_RRACE_FINISHED;
     if (in_race) *in_race = racing;
-    if (!racing) return C.force_dens ? C.force_dens - 1 : C.dens_free;
+    if (!racing) {   /* [roam QA] the FREE ROAM setup's COPS row */
+        TD5_RoamFreePrefs f;
+        td5_roam_free_prefs_get(&f);
+        return C.force_dens ? C.force_dens - 1 : (f.cops ? C.dens_free : 0);
+    }
     if (!td5_roam_race_cops()) return 0;
     return C.force_dens ? C.force_dens - 1 : C.dens_race;
 }
@@ -1287,6 +1306,40 @@ static void rc_drive(RcCop *c, TD5_Actor *a, const TD5_Actor *pl, double plx, do
     delta = atan2(2.0 * C.wb * sin(alpha), dl > 1.0 ? dl : 1.0);
     steer_t = (int32_t)(delta * (4096.0 / (2.0 * RC_PI)) * 256.0);
 
+    /* ---- [roam QD] three-point turn: the aim behind and the nose at the road edge: reverse on opposite lock until the
+     * aim is within 45 deg, the tail reaches the edge, or 2 s; then forward on full lock again (repeated as needed) ---- */
+    if (C.kturn && c->rec == 0 && !c->hold && !direct) {
+        if (c->kt == 0 && abs(herr) > 0x300 && vt > 1.0) {
+            const int front_in = rc_inside(x + fx * 3.0 * RC_M, z + fz * 3.0 * RC_M);
+            if (tick - c->wall_t < 4 || !front_in) {
+                c->kt = 1; c->kt_t = 0;
+                C.kturns++;
+                if (C.kturns <= 40)
+                    TD5_LOG_I(LOG_TAG, "ROAM_COPS_KTURN slot %d tick %ld at place (%.0f,%.0f) %s: aim %d deg off the heading, %.1f km/h, "
+                              "%s, leg s %.1f/%.1f m turning %d -> reversing on opposite lock", c->slot, tick, x, z,
+                              c->state == RC_PURSUIT ? "pursuit" : "patrol", herr * 360 / 4096, v * 3.6,
+                              front_in ? "the road edge pushed it" : "the nose is off the road", c->s, rc_path_len(c), c->turning);
+            }
+        }
+        if (c->kt) {
+            const int tail_in = rc_inside(x - fx * 3.0 * RC_M, z - fz * 3.0 * RC_M);
+            if (abs(herr) < 0x200 || ++c->kt_t > 60 || (!tail_in && c->kt_t > 6)) {
+                c->kt = 0;
+                c->steer = steer_t;     /* forward again: the lock toward the aim at once, not ramped from the reverse lock */
+            } else {
+                const double v24 = (double)a->longitudinal_speed, vs = v24 / 256.0 * RC_HZ / RC_M;
+                const double k122 = RC_M * 256.0 / (RC_HZ * RC_HZ);
+                const double accr = rc_clamp(0.9 * (-2.5 - vs), -3.0, 3.0);
+                C.kturn_ticks++;
+                a->steering_command = herr > 0 ? -RC_STEER_CLAMP : RC_STEER_CLAMP;
+                c->steer = a->steering_command;
+                a->encounter_steering_cmd = (int16_t)floor(rc_clamp(v24 / 256.0 + accr * k122, -1024.0, 1024.0) / 4.0 + 0.5);
+                a->brake_flag = 0; a->handbrake_flag = 0; a->throttle_state = 0;
+                goto status;
+            }
+        }
+    }
+
     /* ---- recovery: still while it wants to move (and not at the player): reverse, wheel away ---- */
     if (c->rec == 0 && !c->hold && !c->sig_hold && vt > 1.5 && v < (tick - c->wall_t < 4 ? 1.0 : 0.3) && c->d_player > 9.0) {
         /* still while it wants to move: reverse out after 2 s, or after 0.5 s when the road edge holds it (nosed in) */
@@ -1386,11 +1439,14 @@ status:
                     }
                 }
 #endif
-                TD5_LOG_W(LOG_TAG, "ROAM_COPS_OFF slot %d at place (%.0f,%.0f) %s v=%.1f km/h vt=%.1f lat=%.2f m s=%.1f/%.1f path point "
-                          "(%.0f,%.0f) %s, steer %d, contact %ld ticks ago | top surface here %s, car y %d ground %d", c->slot, x, z,
+                TD5_LOG_W(LOG_TAG, "ROAM_COPS_OFF slot %d tick %ld at place (%.0f,%.0f) %s v=%.1f km/h vt=%.1f lat=%.2f m s=%.1f/%.1f path point "
+                          "(%.0f,%.0f) %s, steer %d, contact %ld ticks ago | top surface here %s, car y %d ground %d | [roam QD] aim %d deg "
+                          "off the heading, turning %d, kturn %d, road edge pushed %ld ticks ago, nose %s", c->slot, tick, x, z,
                           c->state == RC_PURSUIT ? "pursuit" : "patrol", v * 3.6, c->v_t * 3.6, c->lat, c->s, rc_path_len(c), qx, qz,
                           rc_inside(qx, qz) ? "on the road" : "OFF the road", (int)c->steer, tick - c->last_contact,
-                          rc_inside(x, z) ? "ON the road" : "off the road", (int)(a->world_pos.y >> 8), (int)(gy >> 8));
+                          rc_inside(x, z) ? "ON the road" : "off the road", (int)(a->world_pos.y >> 8), (int)(gy >> 8),
+                          herr * 360 / 4096, c->turning, c->kt, tick - c->wall_t,
+                          rc_inside(x + fx * 3.0 * RC_M, z + fz * 3.0 * RC_M) ? "on the road" : "OFF the road");
             }
             C.st.off_ticks++;
             if (tick - c->last_contact < 60) C.st.off_ticks_contact++;
@@ -1408,7 +1464,7 @@ status:
                     }
                     if (ok) {
                         rc_place_actor(c, a, rx, rz, rc_angle_of(rtx, rtz), v * 0.5);
-                        c->np = 0; c->plan_t = -100000;
+                        c->np = 0; c->plan_t = -100000; c->kt = 0;
                         C.st.off_rescues++;
                         TD5_LOG_I(LOG_TAG, "ROAM_COPS: slot %d put back on the street %.1f m away", c->slot, dm);
                     } else rc_despawn(c, RC_WHY_OFF);

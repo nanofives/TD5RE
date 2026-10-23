@@ -86,6 +86,7 @@ static RvProj   s_np, s_op;            /* route frame (np), place frame (op)    
 static RoamGrid s_grid;
 static char     s_slug[64];
 static int      s_ready;               /* 1 when the projections and grid loaded */
+static int      s_ex100;               /* [integ Q] terrain height the cached tiles were read at */
 static double   s_datum;               /* place height at the strip's y = 0      */
 static double   s_lift;                /* display lift, units                    */
 static RvSlot   s_slot[RV_SLOTS];
@@ -241,7 +242,10 @@ static int rv_setup(const char *slug)
 {
     char path[512], err[64];
     char *json;
-    if (strcmp(s_slug, slug) == 0 && s_ready != -1) return s_ready;
+    /* [integ Q] the terrain height picks the tile folder (td5_roam_tile_path): a change drops the cache too */
+    const int ex100 = td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400);
+    if (strcmp(s_slug, slug) == 0 && s_ex100 == ex100 && s_ready != -1) return s_ready;
+    s_ex100 = ex100;
     /* a new place: drop the tile cache, then load the frames and the grid */
     {
         int i;
