@@ -1122,6 +1122,9 @@ static void rr_draw_positions(int me, float X0, float Y0, float W, float S)
     for (i = 0; i < n; i++) if (st[i].slot == me) rank = i + 1;
     x = X0 + W - 230.0f * S;
     y = Y0 + 6.0f * S;
+    /* [roam RA] a pane too narrow for the timer box (360) and this panel (230) side by side: the panel goes
+     * under the timer box (never in single player, whose pane is the whole screen) */
+    if (x - 8.0f * S < X0 + (W + 360.0f * S) * 0.5f) y = Y0 + 74.0f * S;
     qb_rect(x - 8.0f * S, y - 2.0f * S, 222.0f * S, (52.0f + 20.0f * (float)n) * S, 0x90000000);
     snprintf(line, sizeof line, "POS %d/%d", rank, n);
     tx(x, y, line, 0xFFFFFFFF, 26.0f * S);

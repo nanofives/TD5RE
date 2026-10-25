@@ -3369,6 +3369,17 @@ static void rr_draw_dl(const TD5_SpanDisplayList *dl)
     }
 }
 
+/* [roam RA] SPLIT-SCREEN DRAW DISTANCE. The tile + scenery submission is the bulk of a roam frame (~1.4 us per mesh,
+ * ~3,300 meshes a pane at 500 m): 4 panes measured 26 ms median per frame at min graphics. With 3+ local humans each
+ * pane draws to TD5RE_ROAM_SPLIT_DRAW_PCT % of the radius (default 70); 1 or 2 humans keep the full radius. */
+static float rr_split_scale(void)
+{
+    static int pct = -1;
+    if (td5_roam_humans() < 3) return 1.0f;
+    if (pct < 0) pct = td5_env_int("TD5RE_ROAM_SPLIT_DRAW_PCT", 70, 30, 100);
+    return (float)pct / 100.0f;
+}
+
 void td5_roam_render_tiles(int view)
 {
     uint32_t t0;
@@ -3377,7 +3388,7 @@ void td5_roam_render_tiles(int view)
     uint32_t quads = 0;
     double ms;
     const float ex = g_cameraPos[0], ey = g_cameraPos[1], ez = g_cameraPos[2];
-    const float R = (float)s_rr.radius;
+    const float R = (float)s_rr.radius * rr_split_scale();
 
     if (!s_rr.began) rr_autobegin();
     if (!s_rr.began) return;

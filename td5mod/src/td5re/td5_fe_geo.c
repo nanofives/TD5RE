@@ -1944,7 +1944,7 @@ static void geo_screen_init(void)
      * roam car select returns here without a dedicated hook, and a stale ARMED session would
      * turn the next ordinary race into a roam race */
     td5_roam_cancel();
-    s_strip = s_roam_mode ? 0 : frontend_geo_strip_context();   /* [F11b] the strip BUILD: local multiplayer (or the dev knob) */
+    s_strip = s_roam_mode ? 0 : frontend_geo_strip_context();   /* [F11b] the strip BUILD; [roam RA] only with TD5RE_GEO_STRIP_BUILD=1 */
     if (!s_strip) td5_roam_prefetch_streets();   /* [roam G6] the START check needs it; ~5 s, off-thread */
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
