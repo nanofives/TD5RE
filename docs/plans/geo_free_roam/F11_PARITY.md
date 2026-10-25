@@ -1,5 +1,11 @@
 # F11 parity checklist: strip geo race vs free-roam race (F11a, 2026-10-18)
 
+> **Round R (roam-RA, 2026-10-25): B1 closed.** Local split screen (2..6 humans) races the free-roam city on the
+> SPRINT / CIRCUIT entry, the geo map's RACE ROUTE and AutoRace `--DefaultPlayers>=2`; humans drive racer slots
+> 0..N-1, the AI the rest of the 6-slot grid; per-human progress / laps / finish / results, per-pane HUD and world
+> draws, streaming round every human. The strip BUILD is reached only with `TD5RE_GEO_STRIP_BUILD=1`. FREE ROAM
+> (wander) stays one player. What becomes deletable: `R_SPLIT_DELETABLE.md`.
+
 Base integ-roam @ f5940f1c (F0-F10 + F8e), branch roam-F11a. Decision under test
 (GEO_FREE_ROAM.md): "Old strip geo BUILD: kept until the live-wall race reaches
 parity, then retired". Mariano signs off.

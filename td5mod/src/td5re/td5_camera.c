@@ -2342,7 +2342,9 @@ static void cam_finish_orbit_step(int v, TD5_Actor *actor)
 {
     if (!actor) return;
     if (v < 0 || v >= TD5_MAX_VIEWPORTS) return;
-    if (td5_roam_race_player_finished() && v == 0) {   /* [GEO FREE ROAM HF] the finish orbit, damage knob or not */
+    /* [GEO FREE ROAM HF] the finish orbit, damage knob or not; [roam RA] split screen: each pane whose human is through */
+    if (td5_roam_humans() > 1 ? td5_roam_race_human_finished((int)actor->slot_index)
+                              : (td5_roam_race_player_finished() && v == 0)) {
         g_camYawOffset[v] = (g_camYawOffset[v] + (td5_damage_finish_orbit_enabled() ? td5_damage_finish_orbit_speed() : 10)) & 0xFFF;
         return;
     }

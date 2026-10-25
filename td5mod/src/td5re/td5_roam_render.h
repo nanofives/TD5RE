@@ -56,6 +56,16 @@ typedef struct {
     uint32_t frames;
 } TD5_RoamRenderStats;
 
+/* [roam RA] per pane of a split-screen race (td5_roam_render_tiles(view) culls from that pane's camera):
+ * the last frame's drawn tiles / meshes, the mean meshes and CPU ms per drawn frame. 0 = pane never drawn. */
+#define TD5_ROAM_RENDER_VIEWS 9
+typedef struct {
+    int      tiles, meshes;
+    uint32_t frames;
+    double   avg_meshes, avg_ms;
+} TD5_RoamRenderViewStats;
+int td5_roam_render_view_stats(int view, TD5_RoamRenderViewStats *o);
+
 /* Session. begin opens the place's grid and the height source; returns 1.
  * Idempotent for the same place. end frees every baked mesh. */
 int  td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame);

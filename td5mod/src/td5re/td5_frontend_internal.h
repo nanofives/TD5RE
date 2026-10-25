@@ -155,6 +155,8 @@ int  frontend_geo_entry_launch_roam(int opponents);
 /* [GEO FREE ROAM F11b] 1 in the only context the strip geo race is built in: local multiplayer
  * (2+ humans, no network), or TD5RE_GEO_STRIP_BUILD=1 (dev). */
 int  frontend_geo_strip_context(void);
+int  frontend_local_mp(void);           /* [roam RA] 2+ local humans (MP lobby flow), no network */
+int  frontend_roam_launch_mp(void);     /* [roam RA] launch the armed city race with the lobby's humans; 1 = launched */
 /* [F11b] OK on a track selector with the GEOSPATIAL entry picked: single player = a route the city
  * can race; local multiplayer = the strip, built on demand from the planned pins. 0 = refuse.
  * 1 for any other track. */

@@ -111,4 +111,13 @@ typedef struct {
 } TD5_RoamStreamStats;
 void td5_roam_stream_stats(TD5_RoamStreamStats *out);
 
+/* [roam RA] per racer (split screen: every local human): the tile it stands on, its ROAD ring (road_r) and
+ * SCENERY ring (view_r) tiles inside the place and how many are resident, the guard's misses / holds for it. */
+typedef struct {
+    int  tx, tz;
+    int  road_near, road_res, scen_near, scen_res;
+    long misses, holds;
+} TD5_RoamStreamSlotCensus;
+int  td5_roam_stream_slot_census(int slot, TD5_RoamStreamSlotCensus *out);
+
 #endif /* TD5_ROAM_STREAM_H */

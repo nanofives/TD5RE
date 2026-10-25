@@ -770,14 +770,36 @@ int frontend_roam_launch_chosen_car(void)
     return 1;
 }
 
-/* [GEO FREE ROAM F11b] The strip geo race is LOCAL MULTIPLAYER only (Mariano, 2026-10-18): 2+ humans
- * on this machine, no network (free roam is single player, blocker B1 in F11_PARITY.md). Everything
- * else on the GEOSPATIAL entry races in the city. TD5RE_GEO_STRIP_BUILD=1 (dev) opens the strip to
- * every context, the way F11a left it. */
+/* [GEO FREE ROAM F11b] The strip geo race was LOCAL MULTIPLAYER only (2026-10-18). [roam RA] Not any more
+ * (Mariano, 2026-10-25: "i want the circuit/sprint build come from the free roam style"): local split screen
+ * races the city too (td5_roam_mode.h, TD5_ROAM_MAX_HUMANS), so the strip BUILD is reached ONLY through
+ * TD5RE_GEO_STRIP_BUILD=1 (dev / the level091 identity gate, read in release too), in every context, the way
+ * F11a left it. A network lobby never lists a geo slot (frontend_track_excluded_from_selector). */
 int frontend_geo_strip_context(void)
 {
-    if (td5_roam_strip_build_enabled()) return 1;
+    return td5_roam_strip_build_enabled();
+}
+
+/* [roam RA] 2+ humans on this machine (the multiplayer lobby flow), no network: the city race runs split
+ * screen, FREE ROAM (single player) is refused */
+int frontend_local_mp(void)
+{
     return !s_network_active && (s_num_human_players > 1 || s_two_player_mode || s_mp_flow);
+}
+
+/* [roam RA] Local multiplayer: launch the armed roam session with the lobby's humans, cars and split layout
+ * as they stand (the MP car select already ran: there is no roam car select for N players). 1 = launched. */
+int frontend_roam_launch_mp(void)
+{
+    if (!frontend_local_mp() || !td5_roam_armed()) return 0;
+    s_selected_game_type = 0;
+    s_network_active     = 0;
+    s_selected_track     = td5_roam_host_track();
+    TD5_LOG_I(LOG_TAG, "CITY RACE: local multiplayer, %d human(s) (2p=%d mp_flow=%d), launching on host track %d",
+              s_num_human_players, s_two_player_mode, s_mp_flow, s_selected_track);
+    frontend_init_race_schedule();
+    frontend_init_display_mode_state();
+    return 1;
 }
 
 /* The route the GEOSPATIAL entry races: the geo map's pins when it holds 2..max of them, else the
@@ -925,8 +947,9 @@ int frontend_geo_entry_launch_roam(int opponents)
     }
     s_selected_track = td5_roam_host_track();
     TD5_LOG_I(LOG_TAG, "geo entry: RACE IN THE CITY %d point(s) from %s at %.5f,%.5f (%s), car=%d opponents=%d "
-              "traffic=%d cops=%d -> host track %d", n, src, ll[0][0], ll[0][1], sp.place, sp.car_index,
-              opponents, traffic, g_td5.special_encounter_enabled ? 1 : 0, s_selected_track);
+              "traffic=%d cops=%d humans=%d -> host track %d", n, src, ll[0][0], ll[0][1], sp.place, sp.car_index,
+              opponents, traffic, g_td5.special_encounter_enabled ? 1 : 0,
+              frontend_local_mp() ? s_num_human_players : 1, s_selected_track);
     return 1;
 }
 
@@ -1023,6 +1046,10 @@ static int frontend_track_excluded_from_selector(int track_index) {
         /* [F11b] single player races the entry in the city, which has a single race only:
          * a cup / time trial / cop chase never lists it (it would need the strip) */
         if (!frontend_geo_strip_context() && s_selected_game_type != 0) return 1;
+        /* [roam RA] local multiplayer races it in the city too: a race (not the lobby's cop chase / cup / drag /
+         * battle modes), and at most TD5_ROAM_MAX_HUMANS humans (the roam racer field is the 6-slot grid) */
+        if (!frontend_geo_strip_context() && frontend_local_mp() &&
+            (g_td5.mp_mode_config.mode != TD5_MP_MODE_RACE || s_num_human_players > TD5_ROAM_MAX_HUMANS)) return 1;
         return track_index != frontend_geo_entry_slot();
     }
     /* Custom slots (>=37) are selectable ONLY when the registry actually has a
@@ -1997,6 +2024,11 @@ void Screen_QuickRaceMenu(void) {
 
             if (s_button_index == QR_BTN_OK) {
                 if (frontend_roam_entry_selected()) {   /* [roam QA] FREE ROAM: its setup, the car is this screen's */
+                    if (frontend_local_mp()) {          /* [roam RA] FREE ROAM is single player (the subline says so) */
+                        frontend_play_sfx(10);
+                        TD5_LOG_I(LOG_TAG, "FREE ROAM entry: refused, %d humans (free roam is single player)", s_num_human_players);
+                        return;
+                    }
                     s_car_chosen = 1;
                     frontend_roam_entry_open(TD5_SCREEN_QUICK_RACE);
                     return;
@@ -10025,6 +10057,11 @@ void Screen_TrackSelection(void) {
 
             if (s_button_index == 4) { /* OK */
                 if (frontend_roam_entry_selected()) {   /* [roam QA] FREE ROAM: its setup */
+                    if (frontend_local_mp()) {          /* [roam RA] FREE ROAM is single player (the subline says so) */
+                        frontend_play_sfx(10);
+                        TD5_LOG_I(LOG_TAG, "FREE ROAM entry: refused, %d humans (free roam is single player)", s_num_human_players);
+                        break;
+                    }
                     frontend_roam_entry_open(TD5_SCREEN_TRACK_SELECTION);
                     break;
                 }

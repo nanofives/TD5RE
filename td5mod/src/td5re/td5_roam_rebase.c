@@ -274,6 +274,28 @@ void td5_roam_rebase_tick(void)
                               ? fabs((double)FP_TRUNC(a->world_pos.x)) : fabs((double)FP_TRUNC(a->world_pos.z));
         if (wm / RB_UPM > s_rb.st.max_world_m) s_rb.st.max_world_m = wm / RB_UPM;
     }
+    if (td5_roam_humans() > 1) {
+        /* [roam RA] split screen: the origin follows the middle of the humans' box, so every human stays inside the
+         * 24.8 range (+-19.5 km from the origin) as long as no two of them are more than ~39 km apart */
+        double x0 = px, x1 = px, z0 = pz, z1 = pz;
+        int h;
+        for (h = 1; h < td5_roam_humans(); h++) {
+            const TD5_Actor *b = td5_game_get_actor(h);
+            double bx, bz, wm;
+            if (!b) continue;
+            bx = (double)FP_TRUNC(b->world_pos.x) + (double)ox;
+            bz = (double)FP_TRUNC(b->world_pos.z) + (double)oz;
+            if (bx < x0) x0 = bx;
+            if (bx > x1) x1 = bx;
+            if (bz < z0) z0 = bz;
+            if (bz > z1) z1 = bz;
+            wm = fabs((double)FP_TRUNC(b->world_pos.x)) > fabs((double)FP_TRUNC(b->world_pos.z))
+                     ? fabs((double)FP_TRUNC(b->world_pos.x)) : fabs((double)FP_TRUNC(b->world_pos.z));
+            if (wm / RB_UPM > s_rb.st.max_world_m) s_rb.st.max_world_m = wm / RB_UPM;
+        }
+        px = 0.5 * (x0 + x1);
+        pz = 0.5 * (z0 + z1);
+    }
     roam_grid_tile_of(g, px, pz, &ptx, &ptz);
     /* the origin is a lattice corner: its own tile is the one whose (0,0) corner it is. [roam M] The world
      * origin is the SOURCE-frame (0,0) corner, which the reflected lattice makes the (0,0) corner of tile

@@ -311,6 +311,17 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=8, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam RA] smoke tier: the short sprint in SPLIT SCREEN, 2 humans + 4 AI: slot 0 driven by the sprint test, P2 a
+     * simulated test player (mp_ai_player_mask) driven by the roam route driver; every human finishes, a pane each */
+    { .name="roam-sprint-mp2",       .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .mp_mode=0, .mp_ai_players=1, .roam=18, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam RA] smoke tier: the 2-lap block loop in split screen, 2 humans + 3 AI: every human runs both laps */
+    { .name="roam-circuit-mp2",      .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .mp_mode=0, .mp_ai_players=1, .roam=19, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [roam F8] smoke tier: 90 s of free roam with ambient traffic (the tour as a square round the spawn) */
     { .name="roam-traffic-smoke",    .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
@@ -477,6 +488,17 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=7, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam RA] full suite: the short sprint in a 4-pane split screen, 4 humans + 2 AI (P2..P4 simulated test players):
+     * every human finishes, a pane each, the 4-pane frame time in the report */
+    { .name="roam-sprint-mp4",       .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .mp_mode=0, .mp_ai_players=3, .roam=20, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [roam RA] full suite: the 2-lap block loop in a 4-pane split screen, 4 humans + 2 AI: every human runs both laps */
+    { .name="roam-circuit-mp4",      .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .mp_mode=0, .mp_ai_players=3, .roam=21, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [roam F8] the 10-minute free-roam traffic soak (full suite only) */
     { .name="roam-traffic",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
@@ -536,7 +558,7 @@ static const RaceScenario k_races[] = {
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-#define ST_SMOKE_RACES 12  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-traffic-smoke + roam-cops-smoke + police-smoke */
+#define ST_SMOKE_RACES 14  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-sprint-mp2 + roam-circuit-mp2 + roam-traffic-smoke + roam-cops-smoke + police-smoke */
 
 typedef struct {
     const char *name;
@@ -897,7 +919,7 @@ static int  s_roam_status;
 static char s_roam_note[120];
 
 /* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
-static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15; }  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
+static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15 || (row >= 18 && row <= 21); }   /* [roam RA] 18..21 split screen */  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
 static int st_roam_is_cops(int row) { return row == 13 || row == 14 || row == 17; }   /* [roam F10] 13 full (traffic on), 14 smoke; [G1b] 17 roadblocks */
 static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
@@ -950,10 +972,11 @@ static void st_roam_arm(const RaceScenario *sc)
         /* [roam F6-B] sprint rows: spawn at the scripted route's START, the sprint test drives */
         double ll[8][2];
         const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : sc->roam == 5 ? TD5_RSPRINT_FULL_AI
-                       : (sc->roam == 6 || sc->roam == 12) ? TD5_RSPRINT_SMOKE_AI : sc->roam == 7 ? TD5_RCIRCUIT_FULL
-                       : sc->roam == 8 ? TD5_RCIRCUIT_SMOKE : sc->roam == 15 ? TD5_RSPRINT_PARTIDO_SHORT : TD5_RSPRINT_FULL;
+                       : (sc->roam == 6 || sc->roam == 12 || sc->roam == 18 || sc->roam == 20) ? TD5_RSPRINT_SMOKE_AI : sc->roam == 7 ? TD5_RCIRCUIT_FULL
+                       : (sc->roam == 8 || sc->roam == 19 || sc->roam == 21) ? TD5_RCIRCUIT_SMOKE : sc->roam == 15 ? TD5_RSPRINT_PARTIDO_SHORT : TD5_RSPRINT_FULL;
         td5_roam_sprint_route_waypoints(mode, ll, 8);
         td5_roam_sprint_test_arm(mode);
+        if (sc->roam >= 18 && sc->roam <= 21) td5_roam_sprint_test_set_humans(1 + sc->mp_ai_players);   /* [roam RA] */
         if (!td5_roam_selftest_arm(ll[0][0], ll[0][1])) {
             s_roam_captured = 1;
             s_roam_status = ST_FAIL;

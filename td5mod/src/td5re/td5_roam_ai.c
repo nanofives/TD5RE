@@ -102,10 +102,16 @@ static struct {
     int     grid_yaw[TD5_ROAM_AI_MAX];
     int     grid_force;                          /* self-test: the player's spot + 1, 0 = knob / random */
     int     player_spot; double ppx, ppz; int pyaw;   /* the player's grid spot (0 = START) */
+    /* [roam RA] every local human's grid spot (human 0 = the player's above), and the PILOTS: simulated test
+     * players (g_td5.mp_ai_player_mask) driven by this driver from A.car[A.n .. A.n + A.npilot - 1] */
+    int     nh; double hpx[TD5_ROAM_MAX_HUMANS], hpz[TD5_ROAM_MAX_HUMANS]; int hyaw[TD5_ROAM_MAX_HUMANS], hspot[TD5_ROAM_MAX_HUMANS];
+    int     npilot;
     int     nfin;
     /* standings */
-    TD5_RoamStanding st[1 + TD5_ROAM_AI_MAX]; int nst; int player_rank;
-    double  player_along; int player_finished; long player_fin_ticks; long race_ticks; int racing;
+    TD5_RoamStanding st[TD5_LEGACY_RACE_SLOTS]; int nst; int player_rank;
+    int     hrank[TD5_ROAM_MAX_HUMANS];                 /* [roam RA] each human's rank, 1-based */
+    double  h_along[TD5_ROAM_MAX_HUMANS]; int h_fin[TD5_ROAM_MAX_HUMANS]; long h_fin_ticks[TD5_ROAM_MAX_HUMANS];
+    long race_ticks; int racing;
     TD5_RoamAiStats stats;
     /* knobs */
     int    knobs;
@@ -577,15 +583,18 @@ void td5_roam_ai_session_init(void)
     if (A.trc) { fclose(A.trc); A.trc = NULL; }
     ra_free_path();
     for (k = 0; k < TD5_ROAM_AI_MAX; k++) memset(&A.car[k], 0, sizeof A.car[k]);
-    A.on = 0; A.n = 0; A.nst = 0; A.player_rank = 0;
+    A.on = 0; A.n = 0; A.nst = 0; A.player_rank = 0; A.npilot = 0; A.nh = 1;
     A.circ = 0; A.circ_req = 0; A.laps = 0;
     A.loaded = 0;
     if (!td5_roam_active()) return;
     {
         /* the cars the race init loaded = the racer slots it spawned past the player */
         const int total = td5_game_get_total_actor_count();
-        A.loaded = total - 1;
+        A.loaded = total - td5_roam_humans();      /* [roam RA] the racer slots past the humans */
         if (A.loaded > TD5_ROAM_AI_MAX) A.loaded = TD5_ROAM_AI_MAX;
+        /* [roam RA] the field is the legacy 6-slot grid: humans + opponents <= 6 (total also counts the traffic and
+         * cop slots, so it alone never capped this) */
+        if (A.loaded > TD5_LEGACY_RACE_SLOTS - td5_roam_humans()) A.loaded = TD5_LEGACY_RACE_SLOTS - td5_roam_humans();
         if (A.loaded < 0) A.loaded = 0;
     }
     td5_game_roam_set_racer_field(0);
@@ -661,10 +670,15 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
 {
     int k, placed;
     uint32_t t0 = td5_plat_time_ms();
+    const int nh = td5_roam_humans();
     ra_read_knobs();
     td5_roam_ai_race_end();
-    if (!td5_roam_active() || A.loaded <= 0 || n_ai <= 0 || npt < 2) return 0;
+    /* [roam RA] split screen: the path + grid are built for the other humans' spots even with no opponents */
+    if (!td5_roam_active() || npt < 2) return 0;
     if (n_ai > A.loaded) n_ai = A.loaded;
+    if (n_ai > TD5_LEGACY_RACE_SLOTS - nh) n_ai = TD5_LEGACY_RACE_SLOTS - nh;   /* the grid arrays hold 6 spots */
+    if (n_ai < 0) n_ai = 0;
+    if (n_ai <= 0 && nh <= 1) return 0;
     ra_free_path();
     A.rpx = (double *)malloc((size_t)npt * sizeof(double));
     A.rpz = (double *)malloc((size_t)npt * sizeof(double));
@@ -692,14 +706,20 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
     if (!ra_build_path()) { TD5_LOG_W(LOG_TAG, "ROAM_AI: no driver path (route too short?)"); ra_free_path(); return 0; }
     memset(&A.stats, 0, sizeof A.stats);
     A.stats.circuit_laps = A.circ ? A.laps : 0;
-    placed = ra_build_grid(n_ai);
+    placed = ra_build_grid(n_ai + nh - 1);       /* [roam RA] START + these = one spot per racer */
     if (placed <= 0) { TD5_LOG_W(LOG_TAG, "ROAM_AI: no grid spot behind START fits a car: no opponents"); ra_free_path(); return 0; }
-    A.n = placed;
+    A.nh = nh;
+    if (placed < nh - 1)
+        TD5_LOG_W(LOG_TAG, "ROAM_AI: only %d grid spot(s) behind START for %d other human(s): no opponents, the rest queue on START",
+                  placed, nh - 1);
+    A.n = placed - (nh - 1);
+    if (A.n < 0) A.n = 0;
     /* The player's spot: START plus the spots behind it form one grid of placed + 1, the player
      * draws one (Mariano: random), the opponents fill the rest in order. Spot 0 = START. */
     {
         double sx[TD5_ROAM_AI_MAX + 1], sz[TD5_ROAM_AI_MAX + 1], sl[TD5_ROAM_AI_MAX + 1];
-        int sy[TD5_ROAM_AI_MAX + 1], j, m = 0, p = A.grid_force - 1;
+        int sy[TD5_ROAM_AI_MAX + 1], j, m = 0, p = A.grid_force - 1, h;
+        int taken[TD5_ROAM_AI_MAX + 1];
         sx[0] = start_px; sz[0] = start_pz; sl[0] = 0.0; sy[0] = start_yaw & 0xFFF;
         for (k = 0; k < placed; k++) { sx[k + 1] = A.grid_px[k]; sz[k + 1] = A.grid_pz[k]; sl[k + 1] = A.grid_lane[k]; sy[k + 1] = A.grid_yaw[k]; }
         if (p < 0) p = td5_env_int("TD5RE_ROAM_GRID_PLAYER", -1, -1, TD5_ROAM_AI_MAX);
@@ -712,23 +732,48 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
         if (p > placed) p = placed;
         A.player_spot = p;
         A.ppx = sx[p]; A.ppz = sz[p]; A.pyaw = sy[p];
+        /* [roam RA] the humans take consecutive spots from the drawn one on (wrapping round the grid), so the
+         * players start side by side; the opponents fill the rest in order */
+        memset(taken, 0, sizeof taken);
+        for (h = 0; h < nh && h <= placed; h++) {
+            const int q = (p + h) % (placed + 1);
+            taken[q] = 1;
+            A.hspot[h] = q; A.hpx[h] = sx[q]; A.hpz[h] = sz[q]; A.hyaw[h] = sy[q];
+        }
+        for (; h < nh; h++) { A.hspot[h] = 0; A.hpx[h] = sx[0]; A.hpz[h] = sz[0]; A.hyaw[h] = sy[0]; }
         for (j = 0; j <= placed; j++) {
-            if (j == p) continue;
+            if (taken[j]) continue;
             A.grid_px[m] = sx[j]; A.grid_pz[m] = sz[j]; A.grid_lane[m] = sl[j]; A.grid_yaw[m] = sy[j];
             m++;
         }
+        /* [roam RA] a pilot's grid = its human's spot (index A.n + i of the grid arrays) */
+        A.npilot = 0;
+        for (h = 1; h < nh; h++) {
+            if (!td5_roam_human_ai_driven(h)) continue;
+            A.grid_px[A.n + A.npilot] = A.hpx[h]; A.grid_pz[A.n + A.npilot] = A.hpz[h]; A.grid_yaw[A.n + A.npilot] = A.hyaw[h];
+            A.grid_lane[A.n + A.npilot] = sl[A.hspot[h]];
+            A.npilot++;
+        }
         TD5_LOG_I(LOG_TAG, "ROAM_AI: player grid spot %d of %d (%s)", p + 1, placed + 1,
                   A.grid_force > 0 ? "forced by the self-test" : "random, TD5RE_ROAM_GRID_PLAYER to fix it");
+        for (h = 1; h < nh; h++)
+            TD5_LOG_I(LOG_TAG, "ROAM_AI: human %d grid spot %d of %d%s", h + 1, A.hspot[h] + 1, placed + 1,
+                      td5_roam_human_ai_driven(h) ? " (a simulated test player: this driver steers it)" : "");
     }
     td5_game_roam_set_racer_field(A.n);
     A.nfin = 0;
 #ifndef TD5RE_RELEASE
     ra_ring_reset();
 #endif
-    for (k = 0; k < A.n; k++) {
+    for (k = 0; k < A.n + A.npilot; k++) {
         RaCar *c = &A.car[k];
         memset(c, 0, sizeof *c);
-        c->slot = k + 1;
+        if (k < A.n) c->slot = nh + k;          /* [roam RA] the opponents follow the humans' slots */
+        else {
+            int h, i = k - A.n;                 /* the i-th simulated human */
+            for (h = 1; h < nh; h++) if (td5_roam_human_ai_driven(h) && i-- == 0) break;
+            c->slot = h;
+        }
         c->live = 1;
         c->car_index = td5_game_get_slot_car_index(c->slot);
         td5_ai_driver_persona(c->slot, g_td5.difficulty_tier, &c->skill, &c->aggr, &c->cons, &c->line_bias);
@@ -737,7 +782,9 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
     }
     A.on = 1;
     A.stats.n = A.n;
-    A.player_along = 0.0; A.player_finished = 0; A.player_fin_ticks = 0; A.race_ticks = 0; A.racing = 0;
+    memset(A.h_along, 0, sizeof A.h_along); memset(A.h_fin, 0, sizeof A.h_fin); memset(A.h_fin_ticks, 0, sizeof A.h_fin_ticks);
+    memset(A.hrank, 0, sizeof A.hrank);
+    A.race_ticks = 0; A.racing = 0;
 #ifndef TD5RE_RELEASE
     if (td5_env_int("TD5RE_ROAM_AI_TRACE", 0, 0, 1)) {
         char path[512];
@@ -747,7 +794,7 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
         if (A.trc) fprintf(A.trc, "tick,slot,s,along,lat,kmh,vt_kmh,off,steer,thr,brake,rec,rank\n");
     }
 #endif
-    for (k = 0; k < A.n; k++)
+    for (k = 0; k < A.n + A.npilot; k++)
         TD5_LOG_I(LOG_TAG, "ROAM_AI: slot %d car %d on the grid at place (%.0f,%.0f) yaw %d lane %+.1f m (skill %.2f aggr %.2f)",
                   A.car[k].slot, A.car[k].car_index, A.grid_px[k], A.grid_pz[k], A.grid_yaw[k], A.car[k].lane,
                   (double)A.car[k].skill, (double)A.car[k].aggr);
@@ -760,7 +807,7 @@ void td5_roam_ai_regrid(void)
 {
     int k;
     if (!A.on) return;
-    for (k = 0; k < A.n; k++) ra_place(k);
+    for (k = 0; k < A.n + A.npilot; k++) ra_place(k);
 }
 
 void td5_roam_ai_race_end(void)
@@ -774,6 +821,7 @@ void td5_roam_ai_race_end(void)
     A.on = 0;                 /* A.n, the cars and the counters stay readable for the verdict */
     A.nst = 0;
     A.player_rank = 0;
+    A.npilot = 0;
 }
 
 /* ============================================================ driving ========== */
@@ -1000,6 +1048,18 @@ static double ra_racecraft(RaCar *c, double x, double z, double v, int idx)
     return cap;
 }
 
+/* [roam RA] the human the rubber band measures against: the one furthest along of those still racing (the only
+ * human in single player), -1 once every human is through */
+static int ra_lead_human(void)
+{
+    int h, best = -1;
+    for (h = 0; h < A.nh; h++) {
+        if (A.h_fin[h]) continue;
+        if (best < 0 || A.h_along[h] > A.h_along[best]) best = h;
+    }
+    return best;
+}
+
 static void ra_drive(RaCar *c, int hold)
 {
     TD5_Actor *a = td5_game_get_actor(c->slot);
@@ -1056,9 +1116,9 @@ static void ra_drive(RaCar *c, int hold)
     /* ---- target speed: the profile a little ahead of the car, persona, band, racecraft ---- */
     vt = A.pv[ra_path_index(c->s + (v * 0.25 > 2.0 ? v * 0.25 : 2.0))];
     vt *= 0.94 + 0.06 * (double)c->skill;
-    if (A.rb_on && !A.player_finished && !c->finished) {
+    if (A.rb_on && !c->finished && (int)(c - A.car) < A.n && ra_lead_human() >= 0) {
         const int level = td5_ai_get_catchup_level();
-        const double gap = A.player_along - c->along;     /* + = I am behind the player */
+        const double gap = A.h_along[ra_lead_human()] - c->along;     /* + = I am behind the (leading) player */
         if (level > 0) {
             const double pct = level == 1 ? 0.25 : (level == 2 ? 0.50 : 1.0);
             if (gap > 0.0) rb = 1.0 + A.rb_boost * pct * ra_clamp(gap / A.rb_behind_m, 0.0, 1.0);
@@ -1188,7 +1248,7 @@ void td5_roam_ai_tick(void)
     int k, rs;
     if (!A.on || !td5_roam_active()) return;
     rs = td5_roam_race_state();
-    for (k = 0; k < A.n; k++) {
+    for (k = 0; k < A.n + A.npilot; k++) {
         RaCar *c = &A.car[k];
         if (!c->live) continue;
         ra_drive(c, !(rs == TD5_RRACE_RACING || rs == TD5_RRACE_FINISHED));
@@ -1201,10 +1261,12 @@ static void ra_rank(void)
 {
     int i, j, n = 0;
     TD5_RoamStanding t;
-    A.st[n].slot = 0; A.st[n].finished = A.player_finished; A.st[n].finish_ticks = A.player_finished ? A.player_fin_ticks : 0;
-    A.st[n].along_m = A.player_along; A.st[n].car_index = td5_game_get_slot_car_index(0);
-    n++;
-    for (i = 0; i < A.n; i++) {
+    for (i = 0; i < A.nh; i++) {          /* [roam RA] every human (slot i), then the opponents */
+        A.st[n].slot = i; A.st[n].finished = A.h_fin[i]; A.st[n].finish_ticks = A.h_fin[i] ? A.h_fin_ticks[i] : 0;
+        A.st[n].along_m = A.h_along[i]; A.st[n].car_index = td5_game_get_slot_car_index(i);
+        n++;
+    }
+    for (i = 0; i < A.n && n < TD5_LEGACY_RACE_SLOTS; i++) {
         const RaCar *c = &A.car[i];
         if (!c->live) continue;
         A.st[n].slot = c->slot; A.st[n].finished = c->finished; A.st[n].finish_ticks = c->finish_ticks;
@@ -1237,20 +1299,34 @@ static void ra_rank(void)
     for (i = 0; i < n; i++) {
         TD5_Actor *a = td5_game_get_actor(A.st[i].slot);
         if (A.st[i].slot == 0) A.player_rank = i + 1;
+        if (A.st[i].slot < A.nh) A.hrank[A.st[i].slot] = i + 1;
         if (a) { a->prev_race_position = a->race_position; a->race_position = (uint8_t)i; }
     }
 }
 
-void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int player_finished, long player_finish_ticks)
+void td5_roam_ai_progress(long race_ticks, int racing, int nh, const double *h_along, const int *h_finished,
+                          const long *h_finish_ticks)
 {
     int k;
     if (!A.on || !td5_roam_active()) return;
     A.race_ticks = race_ticks;
     A.racing = racing;
-    A.player_along = player_along;
-    if (player_finished && !A.player_finished) {
-        A.player_finished = 1;
-        A.player_fin_ticks = player_finish_ticks;
+    for (k = 0; k < A.nh && k < nh; k++) {
+        A.h_along[k] = h_along[k];
+        if (h_finished[k] && !A.h_fin[k]) {
+            A.h_fin[k] = 1;
+            A.h_fin_ticks[k] = h_finish_ticks[k];
+        }
+    }
+    /* [roam RA] a pilot (a simulated human) follows its human's finish: the run-out to a stop past the line */
+    for (k = A.n; k < A.n + A.npilot; k++) {
+        RaCar *c = &A.car[k];
+        if (c->live && !c->finished && c->slot < A.nh && A.h_fin[c->slot]) {
+            c->finished = 1;
+            c->finish_ticks = A.h_fin_ticks[c->slot];
+            c->stop_s = (A.circ ? A.path_lap_len * (double)A.laps : A.length) + 40.0;
+        }
+        c->along = c->s;    /* its path distance: the recovery's same-spot test reads it */
     }
     for (k = 0; k < A.n; k++) {
         RaCar *c = &A.car[k];
@@ -1353,6 +1429,7 @@ int td5_roam_ai_standings(TD5_RoamStanding *out, int max)
 }
 
 int td5_roam_ai_player_rank(void) { return A.on ? A.player_rank : 0; }
+int td5_roam_ai_human_rank(int h) { return (A.on && h >= 0 && h < A.nh) ? A.hrank[h] : 0; }
 
 void td5_roam_ai_stats(TD5_RoamAiStats *out)
 {
@@ -1386,6 +1463,14 @@ int td5_roam_ai_player_grid(int32_t *px, int32_t *pz, int *yaw12)
     return 1;
 }
 
+int td5_roam_ai_human_grid(int h, int32_t *px, int32_t *pz, int *yaw12)
+{
+    if (h == 0) return td5_roam_ai_player_grid(px, pz, yaw12);
+    if (!A.on || h < 0 || h >= A.nh) return 0;
+    *px = (int32_t)floor(A.hpx[h] + 0.5); *pz = (int32_t)floor(A.hpz[h] + 0.5); *yaw12 = A.hyaw[h];
+    return 1;
+}
+
 int td5_roam_ai_slot_finished(int slot)
 {
     int k;
@@ -1399,7 +1484,7 @@ int td5_roam_ai_braking_for_bend(int slot, double m)
 {
     int k;
     if (!A.on) return 0;
-    for (k = 0; k < A.n; k++)
+    for (k = 0; k < A.n + A.npilot; k++)
         if (A.car[k].slot == slot) return A.car[k].braking_bend && A.car[k].bend_d <= m;
     return 0;
 }

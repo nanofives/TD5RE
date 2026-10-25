@@ -1944,7 +1944,7 @@ static void geo_screen_init(void)
      * roam car select returns here without a dedicated hook, and a stale ARMED session would
      * turn the next ordinary race into a roam race */
     td5_roam_cancel();
-    s_strip = s_roam_mode ? 0 : frontend_geo_strip_context();   /* [F11b] the strip BUILD: local multiplayer (or the dev knob) */
+    s_strip = s_roam_mode ? 0 : frontend_geo_strip_context();   /* [F11b] the strip BUILD; [roam RA] only with TD5RE_GEO_STRIP_BUILD=1 */
     if (!s_strip) td5_roam_prefetch_streets();   /* [roam G6] the START check needs it; ~5 s, off-thread */
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
@@ -2375,6 +2375,13 @@ static void geo_do_race_city(void)
     TD5_LOG_I(LOG_TAG, "GEO GENERATOR: RACE ROUTE %d point(s) from %.5f,%.5f (%s) %s laps=%d opponents=%d traffic=%d cops=%d",
               s_n_pts, s_pts[0].lat, s_pts[0].lon, sp.place, p.circuit ? "circuit" : "sprint", p.laps,
               p.opponents, p.traffic, p.cops);
+    if (frontend_local_mp()) {   /* [roam RA] local multiplayer: the lobby's cars, split screen in the city */
+        geo_close_screen();
+        if (frontend_roam_launch_mp()) return;
+        td5_roam_cancel();
+        td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+        return;
+    }
     if (frontend_roam_car_chosen()) {   /* [roam HA] the car was picked in the normal flow: straight to the race */
         geo_close_screen();
         if (frontend_roam_launch_chosen_car()) return;

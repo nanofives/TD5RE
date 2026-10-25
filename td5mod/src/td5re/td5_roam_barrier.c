@@ -1984,8 +1984,8 @@ void td5_roam_barriers_draw(int view)
     uint32_t now;
     uint64_t t_us0 = 0;
     float pulse;
-    if (view != 0 || !td5_roam_active()) return;
-    dev_frame();
+    if ((view != 0 && td5_roam_humans() <= 1) || !td5_roam_active()) return;   /* [roam RA] every pane of a split race */
+    if (view == 0) dev_frame();
     if (!(B.visible || DEV_KNOB_ON()) || B.n <= 0) return;
     bar_rebase_if_needed();
     /* refine turn-board heights from the live ground, once, when the tile is resident */

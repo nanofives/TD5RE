@@ -119,6 +119,22 @@ static int kd(int sc) { return u.cur[sc]; }
 
 /* ============================================================ car ============ */
 
+/* [roam RA] any racer slot's PLACE position (a split-screen pane draws its own human's map / guidance) */
+static int car_place_slot(int slot, double *px, double *pz, int *yaw12)
+{
+    TD5_Actor *a = td5_game_get_actor(slot);
+    int32_t ox, oz;
+    if (!a) return 0;
+    td5_roam_world_origin(&ox, &oz);
+    *px = (double)FP_TRUNC(a->world_pos.x) + (double)ox;
+    *pz = (double)FP_TRUNC(a->world_pos.z) + (double)oz;
+    if (yaw12) *yaw12 = (int)((a->euler_accum.yaw >> 8) & 0xFFF);
+    return 1;
+}
+
+/* [roam RA] the guidance ribbon's search hint per pane > 0 (pane 0 keeps u.hint) */
+static int s_view_hint[TD5_MAX_VIEWPORTS];
+
 static int car_place(double *px, double *pz, int *yaw12)
 {
     TD5_Actor *a = td5_game_get_actor(0);
@@ -1206,12 +1222,17 @@ static void mm_street_name(double px, double pz, float x, float y, float w, floa
 
 void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h)
 {
+    td5_roam_route_ui_draw_minimap_slot(0, x, y, w, h);
+}
+
+void td5_roam_route_ui_draw_minimap_slot(int slot, float x, float y, float w, float h)
+{
     Proj p;
     double px, pz;
     int yaw;
     const float S = w / 160.0f;
     if (!td5_roam_active() || !td5_roam_route_graph_ready()) return;
-    if (!car_place(&px, &pz, &yaw)) return;
+    if (!car_place_slot(slot, &px, &pz, &yaw)) return;
     {
         const double ya = (double)yaw * (2.0 * PI_D / 4096.0);
         const double half_m = 220.0;             /* the pane shows 440 m across */
@@ -1338,8 +1359,11 @@ void td5_roam_route_ui_draw_world(int view)
     int i, i0, i1, nwp = td5_roam_route_wp_count();
     const float lift = 70.0f;               /* 0.16 m above the road */
     const double M = 430.0;
-    if (view != 0 || !td5_roam_active() || nwp < 1) return;
-    if (!car_place(&px, &pz, NULL)) return;
+    int *hint;
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS || (view != 0 && td5_roam_humans() <= 1) || !td5_roam_active() || nwp < 1) return;
+    /* [roam RA] each pane guides its own human (pane 0: slot 0 and u.hint, as before) */
+    hint = view == 0 ? &u.hint : &s_view_hint[view];
+    if (!car_place_slot(view == 0 ? 0 : td5_game_get_player_slot(view), &px, &pz, NULL)) return;
     td5_roam_world_origin(&ox, &oz);
 
     /* beacons over the pins */
@@ -1367,12 +1391,12 @@ void td5_roam_route_ui_draw_world(int view)
     }
     if (!r->ok || r->npt < 2) return;
 
-    u.hint = route_nearest(r, px, pz, u.hint);
-    if (u.hint < 0) return;
-    i0 = u.hint;
-    while (i0 > 0 && r->dist_m[u.hint] - r->dist_m[i0] < 10.0) i0--;
-    i1 = u.hint;
-    while (i1 + 1 < r->npt && r->dist_m[i1 + 1] - r->dist_m[u.hint] < 320.0) i1++;
+    *hint = route_nearest(r, px, pz, *hint);
+    if (*hint < 0) return;
+    i0 = *hint;
+    while (i0 > 0 && r->dist_m[*hint] - r->dist_m[i0] < 10.0) i0--;
+    i1 = *hint;
+    while (i1 + 1 < r->npt && r->dist_m[i1 + 1] - r->dist_m[*hint] < 320.0) i1++;
     {
         double next_chev = r->dist_m[i0] + 4.0;
         for (i = i0; i < i1; i++) {
@@ -1412,6 +1436,10 @@ static void ui_begin(void)
     const char *place = td5_roam_route_place();
     memset(&u, 0, sizeof u);
     u.active = 1; u.m_pin = -1; u.hint = -1;
+    {
+        int v;
+        for (v = 0; v < TD5_MAX_VIEWPORTS; v++) s_view_hint[v] = -1;
+    }
     td5_roam_route_reset();
     td5_roam_route_graph_begin_async(place);
     td5_roam_partido_load(place);                      /* [F9b] the place outline on the map */

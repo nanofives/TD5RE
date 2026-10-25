@@ -113,14 +113,23 @@ int  td5_roam_race_start(const TD5_RoamRaceSetup *s);
 void td5_roam_race_abandon(void);            /* back to OFF, the car stays where it is */
 long td5_roam_race_fin_ticks(void);          /* [HF] dev: ticks since the player's finish, 0 when not finished */
 int  td5_roam_race_player_finished(void);    /* [HF] the player crossed the line (run-out / results) */
-void td5_roam_race_draw_world(int view);     /* [HF] START / FINISH gantries, world pass, pane 0, self-gated */
+void td5_roam_race_draw_world(int view);     /* [HF] START / FINISH gantries, world pass, pane 0 ([roam RA] every pane in split screen) */
 int  td5_roam_race_wrong_way(void);          /* [HF] 1 while the route-direction check says WRONG WAY (stock HUD draws it) */
+
+/* ---- [roam RA] split screen: one progress / finish / result per local human (racer slot h = human h) ---- */
+int  td5_roam_race_humans(void);                         /* humans in the race (0 when no race) */
+int  td5_roam_race_human_finished(int slot);             /* that human crossed the line (its pane: FINISH, run-out) */
+int  td5_roam_race_human_wrong_way(int slot);            /* that human's WRONG WAY */
+void td5_roam_race_progress_slot(int slot, double *along_m, double *length_m, double *lateral_m);
+const TD5_RoamRaceResult *td5_roam_race_result_slot(int slot);   /* NULL past the human slots */
 
 /* ---- game hooks -------------------------------------------------------------- */
 void     td5_roam_race_frame(void);          /* once per rendered frame, after td5_roam_route_ui_frame */
 void     td5_roam_race_tick(void);           /* once per sim tick, after physics (normal tick path) */
 void     td5_roam_race_draw_hud(void);       /* HUD overlay pass */
-uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits);   /* FINISHED: brake to a stop */
+uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits);   /* a human through the line: run-out then a stop
+                                                                * ([roam RA] every human slot; a pad's packed pedal axis
+                                                                * is rewritten, never its alias bits) */
 int      td5_roam_race_take_pause_close(void);   /* 1 once: the game closes its pause menu now */
 int      td5_roam_race_take_leave(void);         /* [roam HA] 1 once: the results were dismissed, the game leaves to the geo generator */
 int      td5_roam_race_take_countdown(void);     /* ticks per digit to arm the 3-2-1 with, once; 0 = none */
@@ -169,6 +178,8 @@ void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 void     td5_roam_sprint_test_arm(int mode);
 void     td5_roam_sprint_test_frame(void);   /* once per frame from td5_roam_race_frame: plan, setup, start */
 void     td5_roam_sprint_test_disarm(void);
+/* [roam RA] the split-screen rows: n humans (slot 0 this test, the others simulated test players); per-human checks */
+void     td5_roam_sprint_test_set_humans(int n);
 int      td5_roam_sprint_test_mode(void);
 uint32_t td5_roam_sprint_test_bits(struct TD5_Actor *a);   /* slot 0 control bits, 0 when idle */
 int      td5_roam_sprint_test_done(void);
