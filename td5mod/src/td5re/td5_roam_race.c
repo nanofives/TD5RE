@@ -42,6 +42,8 @@
 #include "td5_roam_lap.h"          /* [F9a] circuits: total distance + lap count */
 #include "td5_roam_handoff.h"      /* [F11a] the geo selector / Quick Race route, planted once the graph is up */
 #include "td5_input.h"              /* [roam RA] TD5_INPUT_JS_AXIS_CENTER: a pad word's packed pedal axis */
+#include "td5_roam_stream.h"        /* [roam RA] the split-screen census: tiles round each human */
+#include "td5_roam_render.h"        /* [roam RA] ... and each pane's draws */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -768,6 +770,33 @@ static void rr_ai_progress(long clock, int racing)
     td5_roam_ai_progress(clock, racing, R.nh, along, fin, fint);
 }
 
+/* [roam RA] SPLIT-SCREEN CENSUS, every 10 s of race and at the end of it: per human its distance / lap / finish and
+ * the stream round it (resident road + scenery tiles of its rings, the guard's misses / holds), per pane its draws */
+static void rr_mp_census(const char *when)
+{
+    int h, v;
+    char line[512];
+    size_t l = 0;
+    if (R.nh <= 1) return;
+    for (h = 0; h < R.nh; h++) {
+        const RrHuman *hm = &R.hm[h];
+        TD5_RoamStreamSlotCensus sc;
+        const int have = td5_roam_stream_slot_census(h, &sc);
+        if (l < sizeof line)
+            l += (size_t)snprintf(line + l, sizeof line - l, " | P%d along %.0f m lap %d%s tile (%d,%d) road %d/%d scen %d/%d miss %ld hold %ld",
+                                  h + 1, hm->along, hm->laps_done, hm->finished ? " FIN" : "", have ? sc.tx : 0, have ? sc.tz : 0,
+                                  sc.road_res, sc.road_near, sc.scen_res, sc.scen_near, sc.misses, sc.holds);
+    }
+    for (v = 0; v < TD5_ROAM_RENDER_VIEWS; v++) {
+        TD5_RoamRenderViewStats vs;
+        if (!td5_roam_render_view_stats(v, &vs)) continue;
+        if (l < sizeof line)
+            l += (size_t)snprintf(line + l, sizeof line - l, " | pane %d %d tiles %d meshes (mean %.0f, %.2f ms)", v, vs.tiles,
+                                  vs.meshes, vs.avg_meshes, vs.avg_ms);
+    }
+    TD5_LOG_I(LOG_TAG, "ROAM_MP_CENSUS %s t=%ld%s", when, R.ticks, line);
+}
+
 /* one human's tick in RACING: progress, laps, checkpoints, finish */
 static void rr_tick_human(int h, TD5_Actor *a)
 {
@@ -915,6 +944,8 @@ void td5_roam_race_tick(void)
     /* [F7] opponents' progress + positions, the humans' finishes (this tick) included */
     rr_ai_progress(R.clock, 1);
     rr_field_snapshot();
+    if (R.nh > 1 && (R.ticks % 300 == 0 || R.state == TD5_RRACE_FINISHED))
+        rr_mp_census(R.state == TD5_RRACE_FINISHED ? "every human through" : "racing");
 }
 
 /* ============================================================ frame =========== */

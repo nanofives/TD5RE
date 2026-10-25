@@ -2375,6 +2375,13 @@ static void geo_do_race_city(void)
     TD5_LOG_I(LOG_TAG, "GEO GENERATOR: RACE ROUTE %d point(s) from %.5f,%.5f (%s) %s laps=%d opponents=%d traffic=%d cops=%d",
               s_n_pts, s_pts[0].lat, s_pts[0].lon, sp.place, p.circuit ? "circuit" : "sprint", p.laps,
               p.opponents, p.traffic, p.cops);
+    if (frontend_local_mp()) {   /* [roam RA] local multiplayer: the lobby's cars, split screen in the city */
+        geo_close_screen();
+        if (frontend_roam_launch_mp()) return;
+        td5_roam_cancel();
+        td5_frontend_set_screen(TD5_SCREEN_GEO_GENERATOR);
+        return;
+    }
     if (frontend_roam_car_chosen()) {   /* [roam HA] the car was picked in the normal flow: straight to the race */
         geo_close_screen();
         if (frontend_roam_launch_chosen_car()) return;

@@ -48,6 +48,7 @@
 #include "td5_roam_lap.h"         /* [F9a] the circuit rows: the lap tracker simulation */
 #include "td5_roam_rebase.h"      /* [F9b] world-frame memories follow a rebase; the partido rows judge them */
 #include "td5_roam_stream.h"      /* [F9b] the partido rows judge stream misses / holds */
+#include "td5_roam_render.h"      /* [roam RA] the MP rows' per-pane draws */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -202,6 +203,7 @@ static struct {
     /* [roam IE] airborne watch on every driven tick: all four wheels off the road */
     long     air4_ticks, air4_run, air4_run_max, air_any_ticks;
     double   air4_x, air4_z, air4_kmh;
+    int    nh;                 /* [roam RA] local humans of the MP rows (1 = the single-player rows) */
 } D;
 
 /* one frame dump per name: <log dir>roam_sprint_<name>.png */
@@ -315,6 +317,17 @@ void td5_roam_sprint_test_arm(int mode)
              : mode == TD5_RSPRINT_PARTIDO_SHORT ? "selftest_partido_short" : "selftest_sprint");
 }
 
+/* [roam RA] the MP rows: `n` humans race (slot 0 driven by this test, the others simulated test players driven by
+ * the roam route driver). The route is saved under its own name (_mp<n>) so the single-player bests stay apart. */
+void td5_roam_sprint_test_set_humans(int n)
+{
+    size_t l;
+    D.nh = n < 1 ? 1 : n;
+    if (D.nh <= 1) return;
+    l = strlen(D.route_name);
+    if (l + 5 < sizeof D.route_name) snprintf(D.route_name + l, sizeof D.route_name - l, "_mp%d", D.nh);
+}
+
 void td5_roam_sprint_test_disarm(void)
 {
     if (D.trc) fclose(D.trc);
@@ -400,6 +413,9 @@ planned:
  * sharper than 90 degrees with a leg under 15 m is dropped. */
 static TD5_RouteResult s_path;
 static TD5_RoamRaceResult s_res_snap;   /* [roam M] the race result as judged at the results (the session may end first) */
+static TD5_RoamRaceResult s_res_snap_h[TD5_ROAM_MAX_HUMANS];   /* [roam RA] every human's, the same moment */
+static int s_snap_nh;
+static void sd_mp_census(void);
 #define SD_UTURN_CAP 96                 /* points one U-turn arc may add */
 static double *s_ppx, *s_ppz, *s_pd;
 
@@ -842,6 +858,8 @@ void td5_roam_sprint_test_frame(void)
             s.laps = D.laps; s.traffic = 1;
             s.cops = td5_env_int("TD5RE_ROAM_SPRINT_COPS", 0, 0, 1);   /* [F10] DEV: the sprint with COPS on */
             s.opponents = SD_IS_CIRC(D.mode) ? SD_CIRC_AI_N : (SD_IS_AI(D.mode) ? SD_AI_N : 0);   /* [F7] [F9a] */
+            if (s.opponents > TD5_LEGACY_RACE_SLOTS - td5_roam_humans())       /* [roam RA] the humans take grid slots */
+                s.opponents = TD5_LEGACY_RACE_SLOTS - td5_roam_humans();
             if (!td5_roam_race_start(&s)) { sd_finish("race start refused", 1); return; }
             td5_roam_barriers_stats(&D.bst);
             td5_roam_physics_stats(&st);
@@ -916,6 +934,12 @@ void td5_roam_sprint_test_frame(void)
             td5_roam_barriers(&nb);
             D.exit_ok = td5_roam_active() && td5_roam_race_state() == TD5_RRACE_FINISHED;
             s_res_snap = *td5_roam_race_result();
+            {   /* [roam RA] every human */
+                int h;
+                s_snap_nh = td5_roam_race_humans();
+                for (h = 0; h < s_snap_nh && h < TD5_ROAM_MAX_HUMANS; h++) s_res_snap_h[h] = *td5_roam_race_result_slot(h);
+                if (D.nh > 1) sd_mp_census();   /* while the session (its stream + panes) is still up */
+            }
             D.judged = 1;
             TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER pressed: race state %d, barriers %d -> %s",
                       td5_roam_race_state(), nb, D.exit_ok ? "leaving to the geo generator (see the game log)" : "NOT ON THE RESULTS");
@@ -1252,8 +1276,9 @@ static int sd_ai_verdict(char *note, size_t n, const char *bad, const TD5_RoamRa
     for (i = 0; i < res->nfield && i < 6; i++) {
         const int slot = res->field_slot[i];
         const long ft = res->field_ticks[i];
-        char who[8];
+        char who[16];
         if (slot == 0) snprintf(who, sizeof who, "YOU");
+        else if (slot < D.nh) snprintf(who, sizeof who, "P%d", slot + 1);   /* [roam RA] another human */
         else snprintf(who, sizeof who, "C%d", slot);
         if (ft <= 0) {
             if (ol < sizeof ord) ol += (size_t)snprintf(ord + ol, sizeof ord - ol, "%s%d.%s DNF", i ? " " : "", i + 1, who);
@@ -1309,7 +1334,7 @@ static int sd_circuit_verdict(char *note, size_t n, const char *bad, const TD5_R
     for (i = 0; i < res->nfield && i < 6; i++) {
         if (ol < sizeof ord)
             ol += (size_t)snprintf(ord + ol, sizeof ord - ol, "%s%d.%s L%d %.1fs", i ? " " : "", i + 1,
-                                   res->field_slot[i] == 0 ? "YOU" : "CPU", res->field_laps[i],
+                                   res->field_slot[i] == 0 ? "YOU" : (res->field_slot[i] < D.nh ? "P2+" : "CPU"), res->field_laps[i],
                                    res->field_ticks[i] > 0 ? (double)res->field_ticks[i] / 30.0 : 0.0);
     }
     if (bad[0]) snprintf(note, n, "circuit FAIL: %.100s", bad);
@@ -1324,6 +1349,36 @@ static int sd_circuit_verdict(char *note, size_t n, const char *bad, const TD5_R
               as.max_lateral_m, ord, ws->hits, ws->chassis_past, pinch, resc, tele, D.stuck_events, D.nkeys, D.saw_plaza,
               D.f8_note[0] ? D.f8_note : "(no figure-8 census in this row)", bad);
     return bad[0] ? 2 : 0;
+}
+
+/* [roam RA] opponents the row can have: the humans take grid slots of the 6 */
+static int sd_want_ai(int n)
+{
+    const int cap = TD5_LEGACY_RACE_SLOTS - (D.nh > 1 ? D.nh : 1);
+    return n < cap ? n : cap;
+}
+
+/* [roam RA] the MP rows' census: each human's result, its stream ring, each pane's draws */
+static void sd_mp_census(void)
+{
+    int h, v;
+    for (h = 0; h < s_snap_nh && h < TD5_ROAM_MAX_HUMANS; h++) {
+        const TD5_RoamRaceResult *hr = &s_res_snap_h[h];
+        TD5_RoamStreamSlotCensus sc;
+        const int have = td5_roam_stream_slot_census(h, &sc);
+        TD5_LOG_I(LOG_TAG, "[ROAMMP] human %d (slot %d%s): finished=%d ticks=%ld (%.2f s) rank=%d/%d laps=%d/%d lap_jumps=%ld "
+                  "wrong_way_ticks=%ld off_route_ticks=%ld max_lateral=%.1f m | stream%s: road %d/%d scen %d/%d resident, misses %ld holds %ld",
+                  h + 1, h, td5_roam_human_ai_driven(h) ? ", simulated" : (h == 0 ? ", test driver" : ""), hr->finished, hr->ticks,
+                  hr->ticks / 30.0, hr->player_rank, hr->nfield, hr->laps_done, hr->laps, hr->lap_jumps, hr->wrong_way_ticks,
+                  hr->off_route_ticks, hr->max_lateral_m, have ? "" : " (no census)", sc.road_res, sc.road_near, sc.scen_res,
+                  sc.scen_near, sc.misses, sc.holds);
+    }
+    for (v = 0; v < TD5_ROAM_RENDER_VIEWS; v++) {
+        TD5_RoamRenderViewStats vs;
+        if (!td5_roam_render_view_stats(v, &vs)) continue;
+        TD5_LOG_I(LOG_TAG, "[ROAMMP] pane %d: last frame %d tiles %d meshes, mean %.0f meshes %.2f ms over %u frames", v, vs.tiles,
+                  vs.meshes, vs.avg_meshes, vs.avg_ms, vs.frames);
+    }
 }
 
 int td5_roam_sprint_test_verdict(char *note, size_t n)
@@ -1369,7 +1424,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
         if (res->laps_done != D.laps) SD_BAD("player laps %d/%d; ", res->laps_done, D.laps);
         if (res->lap_jumps || D.mon_jumps) SD_BAD("player lap jumps %ld/%ld; ", res->lap_jumps, D.mon_jumps);
         if (res->finished && res->laps_done == D.laps && res->lap_ticks[D.laps - 1] != res->ticks) SD_BAD("last lap tick != total; ");
-        if (as.n < SD_CIRC_AI_N) SD_BAD("grid %d/%d opponents; ", as.n, SD_CIRC_AI_N);
+        if (as.n < sd_want_ai(SD_CIRC_AI_N)) SD_BAD("grid %d/%d opponents; ", as.n, sd_want_ai(SD_CIRC_AI_N));
         if (as.finished < as.n) SD_BAD("opponents finished %d/%d; ", as.finished, as.n);
         if (as.stuck_long) SD_BAD("opponents stuck>5s %ld; ", as.stuck_long);
         if (as.lap_jumps || D.mon_ai_jumps) SD_BAD("opponent lap jumps %ld/%ld; ", as.lap_jumps, D.mon_ai_jumps);
@@ -1379,9 +1434,21 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
         /* [F7] every opponent placed and through the line, none stuck > 5 s */
         TD5_RoamAiStats as;
         td5_roam_ai_stats(&as);
-        if (as.n < SD_AI_N) SD_BAD("grid %d/%d opponents; ", as.n, SD_AI_N);
+        if (as.n < sd_want_ai(SD_AI_N)) SD_BAD("grid %d/%d opponents; ", as.n, sd_want_ai(SD_AI_N));
         if (as.finished < as.n) SD_BAD("opponents finished %d/%d; ", as.finished, as.n);
         if (as.stuck_long) SD_BAD("opponents stuck>5s %ld; ", as.stuck_long);
+    }
+    if (D.nh > 1) {
+        /* [roam RA] every human of the split-screen race: through the line (a circuit: every lap, no jump), a pane each */
+        int h;
+        if (s_snap_nh != D.nh) SD_BAD("race had %d humans, row wants %d; ", s_snap_nh, D.nh);
+        for (h = 1; h < s_snap_nh && h < TD5_ROAM_MAX_HUMANS; h++) {
+            const TD5_RoamRaceResult *hr = &s_res_snap_h[h];
+            if (!hr->finished) SD_BAD("P%d never finished; ", h + 1);
+            if (SD_IS_CIRC(D.mode) && hr->laps_done != D.laps) SD_BAD("P%d laps %d/%d; ", h + 1, hr->laps_done, D.laps);
+            if (hr->lap_jumps) SD_BAD("P%d lap jumps %ld; ", h + 1, hr->lap_jumps);
+        }
+        if (g_td5.split_screen_mode == 0) SD_BAD("split screen off; ");
     }
     if (SD_IS_PARTIDO(D.mode)) {
         /* [F9b] off the casco on tiles built on demand, across rebases, without a stall */

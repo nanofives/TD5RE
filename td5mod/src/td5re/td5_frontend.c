@@ -2311,6 +2311,9 @@ static void frontend_get_entry_title(int slot, char *title, size_t tcap,
          * GENERATOR), the place stays on the subline */
         snprintf(title, tcap, "%s", (slot == s_selected_track && frontend_roam_entry_selected())
                                         ? TR("FREE ROAM") : TR("SPRINT / CIRCUIT"));
+        /* [roam RA] local multiplayer: SPRINT / CIRCUIT races split screen in the city, FREE ROAM is one player */
+        if (slot == s_selected_track && frontend_roam_entry_selected() && frontend_local_mp())
+            snprintf(place, pcap, "%s", TR("SINGLE PLAYER ONLY"));
     }
 }
 
@@ -3908,12 +3911,11 @@ void td5_frontend_auto_race_setup(void) {
     frontend_chaos_dev_commit_from_env();
 #endif
 
-    /* [GEO FREE ROAM F11b] The strip geo race is local multiplayer only. AutoRace on the GEOSPATIAL
-     * entry does what the menus' OK does: DefaultPlayers>=2 builds the strip on demand from the
-     * planned pins (frontend_geo_entry_on_ok); one player races in the city (its route: the geo map's
-     * pins, else routes/geo_map.json), and with no route the city can race it is an error and track
-     * 0, never a strip. TD5RE_GEO_STRIP_BUILD=1 (dev: the level091 identity gate) races the committed
-     * ROUTE.JSON exactly as before. [roam HC] Not when a roam session is already armed (the dev
+    /* [GEO FREE ROAM F11b] AutoRace on the GEOSPATIAL entry does what the menus' OK does: the race runs
+     * in the city (its route: the geo map's pins, else routes/geo_map.json), and with no route the city
+     * can race it is an error and track 0, never a strip. [roam RA] DefaultPlayers>=2 races the city in
+     * split screen too (it built the strip on demand until 2026-10-25). TD5RE_GEO_STRIP_BUILD=1 (dev:
+     * the level091 identity gate) races the committed ROUTE.JSON exactly as before. [roam HC] Not when a roam session is already armed (the dev
      * --Roam=1 CLI points default_track at the roam host, a geo slot): re-arming here moved the CLI spawn
      * to the geo map's saved route START and started a race. */
     if (td5_trackgen_is_geo_slot(s_selected_track) && !td5_roam_strip_build_enabled() && !td5_roam_armed()) {
@@ -3925,9 +3927,9 @@ void td5_frontend_auto_race_setup(void) {
                           s_selected_track, s_num_human_players);
         } else if (!frontend_geo_entry_on_ok() ||
                    !frontend_geo_entry_launch_roam(g_td5.ini.default_opponents)) {
-            TD5_LOG_E(LOG_TAG, "AutoRace: geo slot %d in single player has no city race; racing track 0 "
-                      "(the strip geo race is local multiplayer only, TD5RE_GEO_STRIP_BUILD=1 for dev)",
-                      s_selected_track);
+            TD5_LOG_E(LOG_TAG, "AutoRace: geo slot %d, %d human(s), has no city race; racing track 0 "
+                      "(the strip geo race needs TD5RE_GEO_STRIP_BUILD=1)",
+                      s_selected_track, s_num_human_players);
             s_selected_track = 0;
         }
         s_num_human_players = humans_was;

@@ -178,6 +178,8 @@ void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 void     td5_roam_sprint_test_arm(int mode);
 void     td5_roam_sprint_test_frame(void);   /* once per frame from td5_roam_race_frame: plan, setup, start */
 void     td5_roam_sprint_test_disarm(void);
+/* [roam RA] the split-screen rows: n humans (slot 0 this test, the others simulated test players); per-human checks */
+void     td5_roam_sprint_test_set_humans(int n);
 int      td5_roam_sprint_test_mode(void);
 uint32_t td5_roam_sprint_test_bits(struct TD5_Actor *a);   /* slot 0 control bits, 0 when idle */
 int      td5_roam_sprint_test_done(void);

@@ -247,6 +247,10 @@ typedef struct {
     uint32_t  st_frames;
     double    st_sum_ms, st_max_ms, st_last_ms;
     int       st_drawn_tiles, st_drawn_meshes;
+    /* [roam RA] per pane (split screen): draws of the last frame, running sums for the averages */
+    int       v_tiles[TD5_ROAM_RENDER_VIEWS], v_meshes[TD5_ROAM_RENDER_VIEWS];
+    uint32_t  v_frames[TD5_ROAM_RENDER_VIEWS];
+    double    v_sum_meshes[TD5_ROAM_RENDER_VIEWS], v_sum_ms[TD5_ROAM_RENDER_VIEWS];
     uint32_t  st_drawn_quads;
     /* [roam IA] DEV cull audit (TD5RE_ROAM_CULL_AUDIT=1): a mesh the draw loop rejected while one
      * of its vertices is in view within the draw radius is a FALSE cull; one that was drawn last
@@ -2130,6 +2134,18 @@ void td5_roam_render_end(void)
     memset(&s_rr, 0, sizeof s_rr);
 }
 
+int td5_roam_render_view_stats(int view, TD5_RoamRenderViewStats *o)
+{
+    if (!o) return 0;
+    memset(o, 0, sizeof *o);
+    if (view < 0 || view >= TD5_ROAM_RENDER_VIEWS || !s_rr.v_frames[view]) return 0;
+    o->tiles = s_rr.v_tiles[view]; o->meshes = s_rr.v_meshes[view];
+    o->frames = s_rr.v_frames[view];
+    o->avg_meshes = s_rr.v_sum_meshes[view] / (double)s_rr.v_frames[view];
+    o->avg_ms = s_rr.v_sum_ms[view] / (double)s_rr.v_frames[view];
+    return 1;
+}
+
 void td5_roam_render_stats(TD5_RoamRenderStats *o)
 {
     int i;
@@ -3362,7 +3378,6 @@ void td5_roam_render_tiles(int view)
     double ms;
     const float ex = g_cameraPos[0], ey = g_cameraPos[1], ez = g_cameraPos[2];
     const float R = (float)s_rr.radius;
-    (void)view;
 
     if (!s_rr.began) rr_autobegin();
     if (!s_rr.began) return;
@@ -3417,6 +3432,11 @@ void td5_roam_render_tiles(int view)
     {
         const uint32_t t1 = (uint32_t)(td5_plat_time_us() & 0xFFFFFFFFu);
         ms = (double)(uint32_t)(t1 - t0) / 1000.0;
+    }
+    if (view >= 0 && view < TD5_ROAM_RENDER_VIEWS) {
+        s_rr.v_tiles[view] = tiles; s_rr.v_meshes[view] = meshes;
+        s_rr.v_frames[view]++;
+        s_rr.v_sum_meshes[view] += (double)meshes; s_rr.v_sum_ms[view] += ms;
     }
     s_rr.st_frames++;
     s_rr.st_sum_ms += ms; s_rr.st_last_ms = ms;

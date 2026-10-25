@@ -592,6 +592,9 @@ void td5_roam_ai_session_init(void)
         const int total = td5_game_get_total_actor_count();
         A.loaded = total - td5_roam_humans();      /* [roam RA] the racer slots past the humans */
         if (A.loaded > TD5_ROAM_AI_MAX) A.loaded = TD5_ROAM_AI_MAX;
+        /* [roam RA] the field is the legacy 6-slot grid: humans + opponents <= 6 (total also counts the traffic and
+         * cop slots, so it alone never capped this) */
+        if (A.loaded > TD5_LEGACY_RACE_SLOTS - td5_roam_humans()) A.loaded = TD5_LEGACY_RACE_SLOTS - td5_roam_humans();
         if (A.loaded < 0) A.loaded = 0;
     }
     td5_game_roam_set_racer_field(0);
@@ -673,6 +676,7 @@ int td5_roam_ai_race_start(const double *px, const double *pz, const double *dis
     /* [roam RA] split screen: the path + grid are built for the other humans' spots even with no opponents */
     if (!td5_roam_active() || npt < 2) return 0;
     if (n_ai > A.loaded) n_ai = A.loaded;
+    if (n_ai > TD5_LEGACY_RACE_SLOTS - nh) n_ai = TD5_LEGACY_RACE_SLOTS - nh;   /* the grid arrays hold 6 spots */
     if (n_ai < 0) n_ai = 0;
     if (n_ai <= 0 && nh <= 1) return 0;
     ra_free_path();
@@ -1262,7 +1266,7 @@ static void ra_rank(void)
         A.st[n].along_m = A.h_along[i]; A.st[n].car_index = td5_game_get_slot_car_index(i);
         n++;
     }
-    for (i = 0; i < A.n; i++) {
+    for (i = 0; i < A.n && n < TD5_LEGACY_RACE_SLOTS; i++) {
         const RaCar *c = &A.car[i];
         if (!c->live) continue;
         A.st[n].slot = c->slot; A.st[n].finished = c->finished; A.st[n].finish_ticks = c->finish_ticks;
