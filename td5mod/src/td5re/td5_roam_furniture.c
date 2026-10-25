@@ -2667,7 +2667,16 @@ void td5_roam_furn_frame(void)
     p = td5_game_get_actor(0);
     if (!p) return;
     td5_light_lamps_reset();
-    n = td5_roam_render_lamps((float)p->world_pos.x * (1.0f / 256.0f), (float)p->world_pos.z * (1.0f / 256.0f), FU_FRAME_LAMP_R,
-                              lamp, FU_FRAME_LAMP_CAP);
-    for (i = 0; i < n; i++) td5_light_lamps_add(lamp[i][0], lamp[i][1], lamp[i][2]);
+    {
+        /* [roam RA] split screen: the lanterns round every local human (an equal share of the registry each) */
+        const int nh = td5_roam_humans();
+        int h;
+        for (h = 0; h < nh; h++) {
+            const TD5_Actor *q = h == 0 ? p : td5_game_get_actor(h);
+            if (!q) continue;
+            n = td5_roam_render_lamps((float)q->world_pos.x * (1.0f / 256.0f), (float)q->world_pos.z * (1.0f / 256.0f), FU_FRAME_LAMP_R,
+                                      lamp, FU_FRAME_LAMP_CAP / nh);
+            for (i = 0; i < n; i++) td5_light_lamps_add(lamp[i][0], lamp[i][1], lamp[i][2]);
+        }
+    }
 }

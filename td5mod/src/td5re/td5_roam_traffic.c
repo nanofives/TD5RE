@@ -254,12 +254,16 @@ static int rt_place_of(const TD5_Actor *a, double *px, double *pz)
 
 /* [HG] is the PLACE point (px, pz) inside the player camera cone within range_m? Pure XZ cone about the camera forward
  * (height ignored, the cone is wider than the real frustum), so a car behind the camera or off to the side is "unseen". */
-static int rt_in_view(double px, double pz, double range_m)
+static int s_rt_anchor_slot[8];     /* [roam RA] the racer slot of each anchor (rt_anchors) */
+static int s_rt_spawn_anchor;       /* the anchor rt_try_spawn spawns round */
+
+static int rt_in_view_s(int slot, double px, double pz, double range_m)
 {
     /* The cone comes from the PLAYER'S SIM STATE (position + heading of actor 0), not from the render camera: the camera
      * rides on wall-clock frame time, so a cone read from it made the whole traffic field (and every selftest layout built
-     * on it) differ from run to run. The chase camera follows the heading within a few degrees, well inside the cone. */
-    const TD5_Actor *p0 = td5_game_get_actor(0);
+     * on it) differ from run to run. The chase camera follows the heading within a few degrees, well inside the cone.
+     * [roam RA] per human: `slot` is the human whose pane is asked */
+    const TD5_Actor *p0 = td5_game_get_actor(slot);
     double cx, cz, dx, dz, d, fx, fz, yaw;
     if (!p0 || !rt_place_of(p0, &cx, &cz)) return 0;
     dx = px - cx; dz = pz - cz;
@@ -848,12 +852,14 @@ static int rt_level_now(int *racing)
 /* the anchors: slot 0, and every racer slot of the field in a race */
 static int rt_anchors(int racing, double *ax, double *az, int cap)
 {
+    const int nh = td5_roam_humans();      /* [roam RA] every local human is an anchor, race or not */
     int n = 0, s;
     for (s = 0; s < 6 && n < cap; s++) {
         const TD5_Actor *a;
-        if (s > 0 && (!racing || td5_game_get_slot_state(s) == 3)) continue;
+        if (s >= nh && (!racing || td5_game_get_slot_state(s) == 3)) continue;
         a = td5_game_get_actor(s);
         if (!a || !rt_place_of(a, &ax[n], &az[n])) continue;
+        if (n < 8) s_rt_anchor_slot[n] = s;
         n++;
     }
     return n;
@@ -944,9 +950,9 @@ static void rt_cover_follow(double cx, double cz)
 /* 1 when a built-up block hides the PLACE point (x, z) from the player's chase camera: the straight sight line crosses an
  * unbroken T.hide_m of ground that is off the drivable surface and built-up on COVER.R8. Height is ignored (the eye is
  * a few metres up, the buildings of a block are taller). Not resident or no cover: not hidden. */
-static int rt_hidden(double x, double z)
+static int rt_hidden_s(int slot, double x, double z)
 {
-    const TD5_Actor *p0 = td5_game_get_actor(0);
+    const TD5_Actor *p0 = td5_game_get_actor(slot);
     double ex, ez, d, yaw, run = 0.0;
     int n, i;
     if (!T.hide_on || !s_cov.ok || !p0 || !rt_place_of(p0, &ex, &ez)) return 0;
@@ -966,6 +972,27 @@ static int rt_hidden(double x, double z)
     }
     return 0;
 }
+
+/* [roam RA] every local human's pane: in view of ANY human; hidden = hidden from every human that has the point
+ * in view (T.vis_m). The callers ask rt_hidden only for a point already in view. One human = slot 0, as before. */
+static int rt_in_view(double px, double pz, double range_m)
+{
+    const int nh = td5_roam_humans();
+    int h;
+    for (h = 0; h < nh; h++) if (rt_in_view_s(h, px, pz, range_m)) return 1;
+    return 0;
+}
+
+static int rt_hidden(double x, double z)
+{
+    const int nh = td5_roam_humans();
+    int h;
+    if (nh <= 1) return rt_hidden_s(0, x, z);
+    for (h = 0; h < nh; h++)
+        if (rt_in_view_s(h, x, z, T.vis_m) && !rt_hidden_s(h, x, z)) return 0;
+    return 1;
+}
+
 
 /* ============================================================ spawn =============== */
 
@@ -1074,8 +1101,9 @@ static int rt_try_spawn(double ax, double az, const double *anx, const double *a
     th = rt_unit(&T.rng) * 2.0 * RT_PI;
     r = (T.r_spawn_min + rt_unit(&T.rng) * (T.r_spawn_max - T.r_spawn_min)) * RT_M;
     if (T.lead_pct > 0.0 && rt_unit(&T.rng) < T.lead_pct) {
-        /* [roam QD] aimed ahead of the player (slot 0's heading): th is the angle of (cos, sin) = (x, z) */
-        const TD5_Actor *p0 = td5_game_get_actor(0);
+        /* [roam QD] aimed ahead of the player (slot 0's heading): th is the angle of (cos, sin) = (x, z).
+         * [roam RA] a human anchor's own heading (slot 0 for the others, as before) */
+        const TD5_Actor *p0 = td5_game_get_actor(s_rt_spawn_anchor < td5_roam_humans() ? s_rt_spawn_anchor : 0);
         if (p0) {
             const double yaw = (double)(p0->euler_accum.yaw >> 8 & 0xFFF) * (2.0 * RT_PI / 4096.0);
             th = atan2(cos(yaw), sin(yaw)) + (th / RT_PI - 1.0) * T.lead_deg * (RT_PI / 180.0);
@@ -2006,6 +2034,7 @@ static void rt_tick_body(void)
             }
             if (n < per && n < bn) { bn = n; best = k; }
         }
+        if (best >= 0) s_rt_spawn_anchor = best < 8 ? s_rt_anchor_slot[best] : 0;
         if (best >= 0 && rt_try_spawn(ax[best], az[best], ax, az, nanch)) live++;
     }
 

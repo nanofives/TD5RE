@@ -70,9 +70,12 @@ typedef struct {
     uint64_t                        slot_edge[ROAM_MAX_SLOTS];
     int                             host_track;           /* -1 = not resolved */
     double                          spawn_snap_m;         /* metres the spawn point moved onto the road, -1 = none found */
+    int                             humans;               /* [roam RA] local humans (slots 0..humans-1), 1 = single player */
+    int32_t                         sp0_px, sp0_pz;       /* [roam RA] slot 0's snapped spawn (PLACE): the others queue behind it */
+    int                             sp0_yaw;
 } RoamSession;
 
-static RoamSession s_roam = { 0, 0, { {0}, 0, 0, 0, 0 }, 0, 0, NULL, { 0 }, -1, 0.0 };
+static RoamSession s_roam = { 0, 0, { {0}, 0, 0, 0, 0 }, 0, 0, NULL, { 0 }, -1, 0.0, 1, 0, 0, 0 };
 
 /* ------------------------------------------------------------ small helpers -- */
 
@@ -549,15 +552,18 @@ void td5_roam_apply_overrides(void)
     if (!s_roam.active) return;
     g_td5.track_index              = td5_roam_host_track();
     g_td5.reverse_direction        = 0;     /* the host level's reverse texture swap never applies */
-    g_td5.num_human_players        = 1;
+    g_td5.num_human_players        = s_roam.humans;   /* [roam RA] 1, or the local split-screen humans */
     /* [F7] the opponents' cars load with the session (parked until a sprint asks for them:
-     * td5_roam_ai_session_init); a car index the loader does not know falls back to a fixed set */
+     * td5_roam_ai_session_init); a car index the loader does not know falls back to a fixed set.
+     * [roam RA] they fill the legacy 6-slot grid after the humans */
     g_td5.num_ai_opponents         = td5_roam_ai_preload();
+    if (g_td5.num_ai_opponents > TD5_LEGACY_RACE_SLOTS - s_roam.humans)
+        g_td5.num_ai_opponents = TD5_LEGACY_RACE_SLOTS - s_roam.humans;
     {
         static const int k_fallback[TD5_ROAM_AI_MAX] = { 11, 22, 7, 14, 3 };
         int i;
-        for (i = 1; i <= TD5_ROAM_AI_MAX; i++) {
-            if (!td5_asset_get_car_zip_path(g_td5.ai_car_indices[i])) g_td5.ai_car_indices[i] = k_fallback[i - 1];
+        for (i = s_roam.humans; i < TD5_LEGACY_RACE_SLOTS; i++) {
+            if (!td5_asset_get_car_zip_path(g_td5.ai_car_indices[i])) g_td5.ai_car_indices[i] = k_fallback[(i - 1) % TD5_ROAM_AI_MAX];
             if (g_td5.ai_car_variants[i] < 0 || g_td5.ai_car_variants[i] > 3) g_td5.ai_car_variants[i] = 0;
         }
     }
@@ -569,8 +575,18 @@ void td5_roam_apply_overrides(void)
     g_td5.drag_race_enabled        = 0;
     g_td5.network_active           = 0;
     g_td5.track_span_ring_length   = 0;     /* stays 0: not reset when a strip unloads (F0b finding 2) */
-    g_td5.split_screen_mode        = 0;
+    if (s_roam.humans <= 1) {
+        g_td5.split_screen_mode    = 0;
+        g_td5.mp_ai_player_mask    = 0;
+    }                                       /* [roam RA] 2+ humans keep the frontend's split layout + test players */
     g_td5.mp_mode_config.mode      = TD5_MP_MODE_RACE;
+}
+
+int td5_roam_humans(void) { return (s_roam.active || s_roam.armed) ? s_roam.humans : 1; }
+
+int td5_roam_human_ai_driven(int slot)
+{
+    return slot > 0 && slot < td5_roam_humans() && ((g_td5.mp_ai_player_mask >> slot) & 1u);
 }
 
 /* Race init, before anything reads the race modes: armed -> active + the overrides. */
@@ -578,14 +594,23 @@ void td5_roam_session_start(void)
 {
     if (!s_roam.armed) { s_roam.active = 0; return; }
     s_roam.active = 1;
+    /* [roam RA] the local humans of this session (the frontend's MP flow / AutoRace DefaultPlayers),
+     * fixed now: the overrides below re-assert it after the mode setup */
+    s_roam.humans = g_td5.network_active ? 1 : g_td5.num_human_players;
+    if (s_roam.humans < 1) s_roam.humans = 1;
+    if (s_roam.humans > TD5_ROAM_MAX_HUMANS) {
+        TD5_LOG_W(LOG_TAG, "roam: %d local humans, the city race takes at most %d: the rest do not race",
+                  s_roam.humans, TD5_ROAM_MAX_HUMANS);
+        s_roam.humans = TD5_ROAM_MAX_HUMANS;
+    }
     td5_roam_race_reset();              /* [F6-B] a pause-menu RESTART re-inits the session: no race carries over */
     td5_roam_physics_session_begin();   /* task B: registers the resident set before the spawn (street yaw) */
     td5_roam_apply_overrides();
     s_roam.spawn.car_index         = g_td5.car_index;
     TD5_LOG_I(LOG_TAG, "roam: session start place=%s car=%d host_track=%d origin=(%d,%d) "
-              "(no strip, ring 0, 1 racer + parked opponents, no traffic/cops/checkpoints)",
+              "(no strip, ring 0, %d human(s) + parked opponents, no traffic/cops/checkpoints)",
               s_roam.spawn.place, s_roam.spawn.car_index, g_td5.track_index,
-              (int)s_roam.origin_x, (int)s_roam.origin_z);
+              (int)s_roam.origin_x, (int)s_roam.origin_z, s_roam.humans);
 }
 
 /* Place the player actor (td5_game.c spawn loop, after the AI runtime init). */
@@ -600,6 +625,21 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
     int auto_yaw = 0;
     double moved;
     if (!a) return;
+    if (slot > 0) {
+        /* [roam RA] another local human: queued behind slot 0's spot on the same street, 8 m per place
+         * (snapped onto the road like the click; a race start puts every human on its grid spot anyway) */
+        const double yr = (double)(s_roam.sp0_yaw & 0xFFF) * (2.0 * 3.14159265358979323846 / 4096.0);
+        const double back = 8.0 * ROAM_UPM * (double)slot;
+        px = (int32_t)floor((double)s_roam.sp0_px - sin(yr) * back + 0.5);
+        pz = (int32_t)floor((double)s_roam.sp0_pz - cos(yr) * back + 0.5);
+        if (td5_roam_stream_active()) td5_roam_stream_wait_area(px, pz, -1);
+        moved = roam_snap_to_road(&px, &pz, s_roam.sp0_yaw);
+        if (moved < 0.0) { px = s_roam.sp0_px; pz = s_roam.sp0_pz; }
+        roam_place_actor(slot, a, px - s_roam.origin_x, pz - s_roam.origin_z, s_roam.sp0_yaw & 0xFFF);
+        TD5_LOG_I(LOG_TAG, "roam: spawn human slot=%d place=(%d,%d) yaw=%d (%.0f m behind slot 0%s)", slot, (int)px, (int)pz,
+                  s_roam.sp0_yaw & 0xFFF, back / ROAM_UPM, moved < 0.0 ? ", no road there: on slot 0's spot" : "");
+        return;
+    }
 
     /* [F3] START GATE: the spawn tile and its ROAD neighbourhood must be resident before the
      * snap and the street yaw read them (no-op when the session is not streamed) */
@@ -638,6 +678,7 @@ void td5_roam_session_spawn(int slot, void *actor_mem)
         if (yaw < 0) yaw = 0;
     }
     yaw &= 0xFFF;
+    s_roam.sp0_px = px; s_roam.sp0_pz = pz; s_roam.sp0_yaw = yaw;   /* [roam RA] the other humans queue behind */
 
     roam_place_actor(slot, a, wx, wz, yaw);
 

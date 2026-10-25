@@ -4540,7 +4540,7 @@ static void init_race_spawn_actors(void)
              * (span fields -1 are written AFTER td5_ai_init_race_actor_runtime above,
              * and AFTER td5_ai_invalidate_actor_track_state which writes 0). */
             if (td5_roam_active()) {
-                if (slot == 0) td5_roam_session_spawn(slot, actor);
+                if (slot < td5_roam_humans()) td5_roam_session_spawn(slot, actor);   /* [roam RA] every local human */
                 continue;
             }
             int span_index;
@@ -8601,7 +8601,7 @@ static void frame_render(void)
 
         /* [GEO FREE ROAM F5-A] on-road route guidance (ribbon + chevrons + pin beacons) through the
          * same debug-line batch; pane 0 only, self-gated (no-op outside roam / without a route). */
-        if (vp == 0 && td5_roam_active()) {
+        if ((vp == 0 || td5_roam_humans() > 1) && td5_roam_active()) {   /* [roam RA] every pane of a split-screen race */
             td5_render_debug_lines_reset();
             td5_roam_route_ui_draw_world(vp);
             td5_render_debug_lines_flush();
@@ -12806,28 +12806,31 @@ int td5_game_resume_countdown_ticks(void) { return s_resume_countdown_ticks; }
  * size actually set (capped by the slots the session loaded). */
 int td5_game_roam_set_racer_field(int n_ai)
 {
+    /* [roam RA] the local humans keep slots 0..humans-1 (state 1, or 0 for a simulated test player:
+     * InitRace step for mp_ai_player_mask); the opponents follow them */
+    const int humans = td5_roam_humans();
     int i, loaded = g_racer_count;
     if (!td5_roam_active() || !g_actor_table_base) return 0;
     if (loaded > TD5_LEGACY_RACE_SLOTS) loaded = TD5_LEGACY_RACE_SLOTS;
     if (n_ai < 0) n_ai = 0;
-    if (n_ai > loaded - 1) n_ai = loaded - 1;
+    if (n_ai > loaded - humans) n_ai = loaded - humans;
     if (n_ai < 0) n_ai = 0;
-    for (i = 1; i < TD5_MAX_RACER_SLOTS; i++) {
-        s_slot_state[i].state = (uint8_t)(i <= n_ai ? 0 : 3);
+    for (i = humans; i < TD5_MAX_RACER_SLOTS; i++) {
+        s_slot_state[i].state = (uint8_t)(i < humans + n_ai ? 0 : 3);
         s_slot_state[i].companion_1 = 0;
         s_slot_state[i].companion_2 = 0;
         if (i < TD5_LEGACY_RACE_SLOTS) td5_physics_set_race_slot_state(i, 0);
     }
-    g_td5.total_actor_count = 1 + n_ai;
+    g_td5.total_actor_count = humans + n_ai;
     /* [GEO FREE ROAM F8] the ambient traffic pool sits past the racer slots: keep it in the field */
     if (td5_roam_traffic_field_total() > g_td5.total_actor_count)
         g_td5.total_actor_count = td5_roam_traffic_field_total();
     /* [GEO FREE ROAM F10] ...and the cop slots after it */
     if (td5_roam_cops_field_total() > g_td5.total_actor_count)
         g_td5.total_actor_count = td5_roam_cops_field_total();
-    TD5_LOG_I(LOG_TAG, "roam: racer field = player + %d AI (actors %d, cars loaded for %d)", n_ai,
+    TD5_LOG_I(LOG_TAG, "roam: racer field = %d human(s) + %d AI (actors %d, cars loaded for %d)", humans, n_ai,
               g_td5.total_actor_count, loaded);
-    return 1 + n_ai;
+    return humans + n_ai;
 }
 /* [COP-CHASE 2026-06-21] 1 during the pre-race countdown (camera-transition timer
  * still running, cars held); 0 once the race is running. Lets the wanted-objective

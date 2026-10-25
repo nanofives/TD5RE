@@ -135,6 +135,7 @@ typedef struct {
     int                last_installed, last_evicted;
     long               guard_tick[RS_SLOTS];
     uint8_t            guard_valid[RS_SLOTS], guard_hold[RS_SLOTS];
+    long               slot_miss[RS_RACERS], slot_hold[RS_RACERS];   /* [roam RA] the guard's misses / holds per racer slot */
 } RsSession;
 
 typedef struct {
@@ -778,6 +779,17 @@ static void rs_compute_wanted(RsSession *s)
         rs_mark(s, cx, cz, s->view_r, RS_SCEN, 5);
         if (have0 && sp0 > 5.0) rs_mark(s, cx + (l0x - p0x), cz + (l0z - p0z), 1, RS_SCEN, 7);
     }
+    {
+        /* [roam RA] SPLIT SCREEN: g_cameraPos is the LAST pane's camera, so scenery is also kept round every
+         * local human's car (each pane's chase camera rides within metres of it), with its own lead */
+        const int nh = td5_roam_humans();
+        for (i = 0; nh > 1 && i < nh && i < RS_RACERS; i++) {
+            double px, pz, lx, lz, sp;
+            if (!rs_racer(s, i, &px, &pz, &lx, &lz, &sp)) continue;
+            rs_mark(s, px, pz, s->view_r, RS_SCEN, 5);
+            if (sp > 5.0) rs_mark(s, lx, lz, 1, RS_SCEN, 7);
+        }
+    }
     for (i = 0; i < s->ntile; i++) {
         RsTile *t = &s->tile[i];
         if (t->pinned && t->prio > 50) t->prio = 50;
@@ -1044,6 +1056,32 @@ void td5_roam_stream_end(void)
     free(s);
     s_stream.s = NULL;
     TD5_LOG_I(LOG_TAG, "ROAM_STREAM end: worker joined, every streamed tile and mesh freed");
+}
+
+/* [roam RA] the census round one racer: the tiles its ROAD ring (road_r) and its SCENERY ring (view_r) cover, how
+ * many of them are resident, and the guard's misses / holds for that slot so far. 0 = no stream / no such car. */
+int td5_roam_stream_slot_census(int slot, TD5_RoamStreamSlotCensus *out)
+{
+    RsSession *s = s_stream.s;
+    double px, pz, lx, lz, sp;
+    int ctx, ctz, dx, dz;
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if (!s || slot < 0 || slot >= RS_RACERS || !rs_racer(s, slot, &px, &pz, &lx, &lz, &sp)) return 0;
+    roam_grid_tile_of(&s->grid, px, pz, &ctx, &ctz);
+    out->tx = ctx; out->tz = ctz;
+    for (dz = -s->view_r; dz <= s->view_r; dz++)
+        for (dx = -s->view_r; dx <= s->view_r; dx++) {
+            const int i = rs_find(s, ctx + dx, ctz + dz);
+            const int d = abs(dx) > abs(dz) ? abs(dx) : abs(dz);
+            if (i >= 0 && s->tile[i].outside) continue;    /* beyond the place: nothing to load */
+            if (d <= s->road_r) { out->road_near++; if (i >= 0 && s->tile[i].road) out->road_res++; }
+            out->scen_near++;
+            if (i >= 0 && s->tile[i].scen) out->scen_res++;
+        }
+    out->misses = s->slot_miss[slot];
+    out->holds = s->slot_hold[slot];
+    return 1;
 }
 
 void td5_roam_stream_stats(TD5_RoamStreamStats *out)
@@ -1337,6 +1375,7 @@ int td5_roam_stream_guard(TD5_Actor *a)
     }
     if (nm > 0) {
         s->st.misses++;
+        if (slot < RS_RACERS) s->slot_miss[slot]++;
         if (s->st.misses <= RS_MISS_LOG || s->st.misses % 100 == 0)
             TD5_LOG_W(LOG_TAG, "ROAM_STREAM_MISS #%ld slot=%d tick=%ld pos place (%.0f,%.0f): %d tile(s) under the car "
                       "not resident (first %d,%d pend=%d failed=%d)", s->st.misses, slot, tick, px, pz, nm,
@@ -1349,6 +1388,7 @@ int td5_roam_stream_guard(TD5_Actor *a)
         }
         if (hold) {
             s->st.holds++;
+            if (slot < RS_RACERS) s->slot_hold[slot]++;
             if (s->st.holds <= RS_MISS_LOG || s->st.holds % 100 == 0)
                 TD5_LOG_W(LOG_TAG, "ROAM_STREAM_HOLD #%ld slot=%d tick=%ld: the car is held until its tile is built",
                           s->st.holds, slot, tick);

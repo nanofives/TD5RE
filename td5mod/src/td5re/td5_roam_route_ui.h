@@ -40,6 +40,8 @@ void td5_roam_route_ui_draw_hud(void);
 void td5_roam_route_ui_draw_world(int view);
 /* x,y,w,h: the minimap pane, screen pixels. Draws a heading-up street map + the route. */
 void td5_roam_route_ui_draw_minimap(float x, float y, float w, float h);
+/* [roam RA] the same map centred on racer slot `slot` (a split-screen pane's own human) */
+void td5_roam_route_ui_draw_minimap_slot(int slot, float x, float y, float w, float h);
 
 #ifndef TD5RE_RELEASE
 /* DEV: log the route state ("ROUTE_STATE ...") so a script can compare it across runs. */

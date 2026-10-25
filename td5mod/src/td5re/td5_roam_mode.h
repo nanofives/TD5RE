@@ -65,7 +65,18 @@ int  td5_roam_host_water_page(void);                            /* [roam LE] the
 int  td5_roam_host_sky_path(char *out, size_t n);              /* sky file override for the host, 0 = level's own */
 void td5_roam_session_start(void);           /* race init: armed -> active, force the single-player overrides */
 void td5_roam_apply_overrides(void);         /* the overrides alone (idempotent; re-asserted after the mode setup) */
-void td5_roam_session_spawn(int slot, void *actor);    /* places the player actor (td5_game.c spawn loop) */
+void td5_roam_session_spawn(int slot, void *actor);    /* places a human's actor (td5_game.c spawn loop, slots 0..humans-1) */
+
+/* [roam RA] LOCAL SPLIT-SCREEN in a roam race. The humans drive racer slots 0..humans-1 (one pane each, the
+ * same slot model the strip's local multiplayer uses); the AI opponents take the slots after them. The roam
+ * racer field lives on the legacy 6-slot grid (the traffic pool starts at slot 6, the cops after it), so
+ * humans + opponents <= 6: TD5_ROAM_MAX_HUMANS humans, 0 opponents at the cap. Fixed at session start from
+ * g_td5.num_human_players (the frontend's local MP flow, or AutoRace DefaultPlayers); 1 outside a session. */
+#define TD5_ROAM_MAX_HUMANS 6
+int  td5_roam_humans(void);
+/* 1 when human slot `slot` is a simulated test player (g_td5.mp_ai_player_mask): the roam route driver
+ * steers it (td5_roam_ai.c "pilots"), it still races as a human (pane, HUD, progress, results). */
+int  td5_roam_human_ai_driven(int slot);
 /* Metres the session's spawn point was moved onto the drivable surface (0 = the click was already
  * on the road, -1 = no road found near it). The click is snapped by td5_roam_session_spawn (F2-D). */
 double td5_roam_spawn_snap_m(void);

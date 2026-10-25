@@ -46,7 +46,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define TD5_ROAM_AI_MAX   5      /* opponents (racer slots 1..5) */
+#define TD5_ROAM_AI_MAX   5      /* opponents (racer slots 1..5; [roam RA] humans..5 in split screen) */
 
 /* ---- session ------------------------------------------------------------------ */
 int  td5_roam_ai_preload(void);              /* opponents a roam session loads (TD5RE_ROAM_AI_PRELOAD, 0..5, 5) */
@@ -75,13 +75,14 @@ int  td5_roam_ai_racing(void);               /* opponents still running (not fin
 /* Once per sim tick BEFORE physics (td5_game.c, the roam branch of the AI tick): commands. */
 void td5_roam_ai_tick(void);
 /* Once per sim tick AFTER physics (td5_roam_race_tick): progress, finishes, positions. `racing` = the
- * race clock runs (RACING, or FINISHED for the player while opponents still run). */
-void td5_roam_ai_progress(long race_ticks, int racing, double player_along, int player_finished,
-                          long player_finish_ticks);
+ * race clock runs (RACING, or FINISHED for the humans while opponents still run). [roam RA] One entry per
+ * local human (slot h): distance along, crossed the line, race ticks at the line (1 entry in single player). */
+void td5_roam_ai_progress(long race_ticks, int racing, int nh, const double *h_along, const int *h_finished,
+                          const long *h_finish_ticks);
 
 /* ---- standings (player + opponents, rank order) -------------------------------- */
 typedef struct {
-    int    slot;             /* 0 = the player */
+    int    slot;             /* 0 = the player ([roam RA] 0..humans-1 = the local humans) */
     int    finished;
     long   finish_ticks;     /* race ticks at the line */
     double along_m;          /* distance along the route (a circuit: TOTAL distance, laps included) */
@@ -90,6 +91,7 @@ typedef struct {
 } TD5_RoamStanding;
 int  td5_roam_ai_standings(TD5_RoamStanding *out, int max);   /* count written (0 outside a race) */
 int  td5_roam_ai_player_rank(void);                           /* 1-based, 0 = no field */
+int  td5_roam_ai_human_rank(int h);                            /* [roam RA] human h's rank, 1-based, 0 = no field */
 
 /* ---- counters (self-test, logs) --------------------------------------------------- */
 typedef struct {
@@ -114,6 +116,11 @@ int  td5_roam_ai_car_info(int k, int *slot, long *finish_ticks, long *still_max,
 /* The player's grid spot this race (PLACE frame, yaw). START plus the spots behind it are one grid; the
  * player draws a spot at random (TD5RE_ROAM_GRID_PLAYER=0..5 fixes it, 0 = pole). 0 without opponents. */
 int  td5_roam_ai_player_grid(int32_t *px, int32_t *pz, int *yaw12);
+/* [roam RA] Human h's grid spot (h = 0: the player's above). The humans of a split-screen race take consecutive
+ * spots of the same grid from the drawn one on; built even with no opponents when there are 2+ humans. A human
+ * that is a simulated test player (td5_roam_human_ai_driven) is then driven by this module's driver (a PILOT: it
+ * races as a human, the rubber band and the opponents' counters leave it out). 0 = no spot this race. */
+int  td5_roam_ai_human_grid(int h, int32_t *px, int32_t *pz, int *yaw12);
 /* DEV self-test: pin the player's spot (-1 = back to knob / random). */
 void td5_roam_ai_force_player_spot(int spot);
 /* 1 when opponent slot `slot` has crossed the finish: no longer a racer, the barriers let it through */

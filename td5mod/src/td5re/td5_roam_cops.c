@@ -45,6 +45,7 @@
 #include "td5_roam_rules.h"     /* [roam LG] td5_roam_limit_kmh */
 #include "td5_roam_rebase.h"    /* [F9b] parked cops are held where they were parked */
 #include "td5_police.h"         /* [round H HH] the shared pursuit HUD drawing */
+#include "td5_input.h"          /* [roam RA] TD5_INPUT_JS_AXIS_CENTER: a pad's packed pedal axis */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "roam"
@@ -151,7 +152,39 @@ static struct {
     long    block_cd;
     TD5_RoamCopsStats st;
     long    st_regraphs;                         /* [F9b] planner graph swaps carried over */
+    /* [roam RA] split screen: the cops watch ONE human at a time ("the player" everywhere in this file). With
+     * no pursuit on they move on to the next human still racing every RC_TARGET_TICKS (patrols spawn round that
+     * one); a pursuit and its BUSTED hold stay on the human they started on. Always slot 0 in single player. */
+    int     target;
+    long    target_t;
 } C;
+
+#define RC_TARGET_TICKS (10 * 30)
+
+static long rc_tick(void);
+
+/* [roam RA] the human the cops watch now */
+static int rc_target(void) { return C.target; }
+
+static void rc_pick_target(void)
+{
+    const int nh = td5_roam_humans();
+    int k, next;
+    if (nh <= 1) { C.target = 0; return; }
+    if (C.target >= nh) C.target = 0;
+    if (C.pursuit || C.busted_t > 0) return;
+    if (rc_tick() - C.target_t < RC_TARGET_TICKS && !td5_roam_race_human_finished(C.target)) return;
+    next = C.target;
+    for (k = 1; k <= nh; k++) {
+        const int h = (C.target + k) % nh;
+        if (!td5_roam_race_human_finished(h)) { next = h; break; }
+    }
+    C.target_t = rc_tick();
+    if (next == C.target) return;
+    C.target = next;
+    C.pl_e = -1; C.pl_node = -1; C.pl_red_node = -1;   /* the red-lamp watch follows the new human */
+    TD5_LOG_I(LOG_TAG, "ROAM_COPS: watching human %d now (slot %d)", next + 1, next);
+}
 
 /* ============================================================ helpers ============ */
 
@@ -989,7 +1022,7 @@ static int rc_try_spawn(double ax, double az, double fx, double fz, int ahead, i
     if (C.race_on) {
         /* the route corridor ahead of the player */
         double pa = 0.0, len = 0.0, lat = 0.0, s;
-        td5_roam_race_progress(&pa, &len, &lat);
+        td5_roam_race_progress_slot(rc_target(), &pa, &len, &lat);
         s = pa + C.r_spawn_min + rc_unit(&C.rng) * (C.r_spawn_max - C.r_spawn_min);
         if (s > len - 20.0) return 0;
         if (!rc_route_point(s, &x, &z, &tx, &tz)) return 0;
@@ -1056,7 +1089,7 @@ static double rc_gap_cap(RcCop *c, const TD5_Actor *a, double x, double z, doubl
     for (j = 0; j < total; j++) {
         const TD5_Actor *b;
         double bx, bz, f, l, vb;
-        if (j == c->slot || (ignore_player && j == 0)) continue;
+        if (j == c->slot || (ignore_player && j == rc_target())) continue;
         if (j < g_traffic_slot_base && td5_game_get_slot_state(j) == 3) continue;
         if (j >= g_traffic_slot_base && td5_roam_traffic_parked(j) == 1) continue;
         b = td5_game_get_actor(j);
@@ -2036,7 +2069,7 @@ static void rc_bust_release(TD5_Actor *pl, double plx, double plz)
             l = sqrt(ux * ux + uz * uz);
             if (l > 0.0) { ux /= l; uz /= l; }
             if (d) { ux = -ux; uz = -uz; }
-            td5_roam_place_actor(0, pl, (int32_t)floor(sx + 0.5), (int32_t)floor(sz + 0.5), rc_angle_of(ux, uz));
+            td5_roam_place_actor(rc_target(), pl, (int32_t)floor(sx + 0.5), (int32_t)floor(sz + 0.5), rc_angle_of(ux, uz));
             C.st.player_respawns++;
             on = rc_inside(sx, sz);
             C.st.respawn_on_road = on;
@@ -2149,7 +2182,8 @@ void td5_roam_cops_tick(void)
         TD5_LOG_I(LOG_TAG, "ROAM_COPS: planner graph ready: %d edges", td5_roam_route_graph_nedge());
     }
     rc_regraph();              /* [F9b] a planner graph swap renumbered the edges */
-    pl = td5_game_get_actor(0);
+    rc_pick_target();          /* [roam RA] */
+    pl = td5_game_get_actor(rc_target());
     if (!pl) return;
     rc_place_of(pl, &plx, &plz);
     rc_heading(pl, &fx, &fz);
@@ -2337,9 +2371,16 @@ int td5_roam_cops_siren_slots(int32_t wx, int32_t wz, int max, int *out)
 uint32_t td5_roam_cops_filter_bits(int slot, uint32_t bits)
 {
     const TD5_Actor *a;
-    if (slot != 0 || !C.on || C.busted_t <= 0 || !td5_roam_active()) return bits;
+    if (slot != rc_target() || !C.on || C.busted_t <= 0 || !td5_roam_active()) return bits;
     /* brake to a stop, then the handbrake (a brake held at a standstill engages reverse) */
-    a = td5_game_get_actor(0);
+    a = td5_game_get_actor(slot);
+    if (bits & (uint32_t)TD5_INPUT_ANALOG_Y_FLAG) {
+        /* [roam RA] a pad: bits 9..17 are its packed pedal axis (throttle / brake / recover alias that payload);
+         * full brake on the axis while it rolls, the axis centred and the handbrake once stopped */
+        const int ay = (a && rc_speed_ms(a) > 1.0) ? 2 * TD5_INPUT_JS_AXIS_CENTER : TD5_INPUT_JS_AXIS_CENTER;
+        bits = (bits & ~(0x1FFu << 9)) | ((uint32_t)ay << 9);
+        return (a && rc_speed_ms(a) > 1.0) ? bits : (bits | (uint32_t)TD5_INPUT_HANDBRAKE);
+    }
     bits &= ~(uint32_t)(TD5_INPUT_THROTTLE | TD5_INPUT_RECOVER | TD5_INPUT_BRAKE);
     return bits | (uint32_t)((a && rc_speed_ms(a) > 1.0) ? TD5_INPUT_BRAKE : TD5_INPUT_HANDBRAKE);
 }
@@ -2392,6 +2433,17 @@ void td5_roam_cops_draw_hud(void)
         h.busted_line = line;
     }
     if (tick < C.toast_until && C.toast[0]) { h.toast = C.toast; h.toast_col = C.toast_col; }
+    if (td5_roam_humans() > 1) {
+        /* [roam RA] split screen: the panel goes in the pane of the human the cops watch */
+        const int panes = td5_hud_pane_count();
+        int v;
+        for (v = 0; v < panes; v++) {
+            float x0, y0, pw, ph;
+            if (td5_game_get_player_slot(v) != rc_target() || !td5_hud_pane_rect(v, &x0, &y0, &pw, &ph)) continue;
+            td5_police_hud_draw(&h, x0, y0, pw, ph);
+        }
+        return;
+    }
     td5_police_hud_draw(&h, 0.0f, 0.0f, W, H);
 }
 

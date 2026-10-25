@@ -995,10 +995,11 @@ void td5_input_poll_race_session(void)
             if (i == 0) s_control_bits[i] |= td5_roam_ram_test_bits(td5_game_get_actor(0));         /* [roam F8e] DEV: selftest `roam-ram` row */
 #endif
             /* [roam F6-B] a finished roam sprint brakes the car to a stop under the results panel
-             * (bits unchanged outside a roam sprint) */
-            if (i == 0) s_control_bits[i] = td5_roam_race_filter_bits(i, s_control_bits[i]);
+             * (bits unchanged outside a roam sprint). [roam RA] every local human of a split-screen roam race
+             * (player i drives slot i; both filters answer only for their own slots) */
+            s_control_bits[i] = td5_roam_race_filter_bits(i, s_control_bits[i]);
             /* [roam F10] BUSTED: the car is held braked under the banner (bits unchanged otherwise) */
-            if (i == 0) s_control_bits[i] = td5_roam_cops_filter_bits(i, s_control_bits[i]);
+            s_control_bits[i] = td5_roam_cops_filter_bits(i, s_control_bits[i]);
 
 #ifndef TD5RE_RELEASE
             /* [CHAOS CO-OP 2026-10-01] TD5RE_CHAOS_FAKE_PADS=1 — re-encode a
