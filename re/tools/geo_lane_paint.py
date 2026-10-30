@@ -67,9 +67,17 @@ BUS_SLOTS = ("designated", "yes", "lane")      # a bus:lanes slot value: lane al
 
 
 def query_for(pj: dict) -> str:
-    b = pj["bbox"]
+    return query_for_box(pj["bbox"])
+
+
+def query_for_box(b: dict, added: bool = False) -> str:
+    """The query for one box. The base box of an extended place (and a plain
+    place's bbox) must give the exact old string, so its cached answer is used."""
     bbox = "%.6f,%.6f,%.6f,%.6f" % (b["south"], b["west"], b["north"], b["east"])
-    return LANE_QL % {"bbox": bbox}
+    q = LANE_QL % {"bbox": bbox}
+    if added:   # tags only has no location: an added box needs one to
+        q = q.replace("out tags;", "out tags center;")  # filter by anchor
+    return q
 
 
 def _cyc_kind(v: str | None, seg: str | None = None) -> str | None:
@@ -196,6 +204,15 @@ def census(ways: dict, osm: dict) -> dict:
 
 
 def dry_run(place: str) -> dict:
+    pj0, _, _ = geo_rails.load_place(place)
+    boxes = geo_rails.place_boxes(pj0)
+    if len(boxes) > 1:          # an extended place: one query per box
+        return geo_rails.dry_run_boxes(
+            place, [query_for_box(b, k > 0) for k, b in enumerate(boxes)])
+    return _dry_run_one(place)
+
+
+def _dry_run_one(place: str) -> dict:
     """Prove the budget offline: every urlopen is recorded and refused."""
     import urllib.request
     would: list = []
@@ -244,11 +261,13 @@ def main(argv=None) -> int:
         print(json.dumps(dry_run(a.place), indent=1))
         return 0
     pj, _, _ = geo_rails.load_place(a.place)
-    ql = query_for(pj)
-    osm = geo_rails.fetch(a.place, ql, a.online)
+    osm, missing, mst = geo_rails.fetch_place(a.place, pj, query_for_box, a.online)
     if osm is None:
-        print("NOT CACHED: %s\nrerun with --online (1 Overpass request)" % geo_rails.cache_path(a.place, ql))
+        print("NOT CACHED: %s\nrerun with --online (%d Overpass request(s))"
+              % (", ".join(missing), len(missing)))
         return 2
+    if mst.get("parts", 1) > 1:
+        print("boxes: %s" % json.dumps(mst), file=sys.stderr)
     if osm.get("remark"):
         print("OVERPASS REMARK: %s" % osm["remark"])
         if "runtime error" in osm["remark"]:

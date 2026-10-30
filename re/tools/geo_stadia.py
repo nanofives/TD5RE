@@ -131,6 +131,20 @@ def query_for(pj: dict, rings: list) -> str:
     return "[out:json][timeout:120];\n(\n%s\n);\nout body geom;\n" % "\n".join(boxes)
 
 
+def split_rings(place: str, pj: dict, rings: list):
+    """(base, added) for an EXTENDED place (geo_rails.place_boxes): the base
+    rings are the stadia the existing STADIA.JSON already holds, so their query
+    is the old one byte for byte and comes from the cache; the rest (stadia in
+    the added area) get their own query. A plain place: (rings, [])."""
+    path = os.path.join(place, "STADIA.JSON")
+    if len(geo_rails.place_boxes(pj)) < 2 or not os.path.exists(path):
+        return rings, []
+    with open(path, encoding="utf-8") as fh:
+        old = {(s["osm"], s["id"]) for s in json.load(fh).get("stadia", [])}
+    return ([s for s in rings if (s["osm"], s["id"]) in old],
+            [s for s in rings if (s["osm"], s["id"]) not in old])
+
+
 def convert(osm: dict, proj, rings: list, upm: float):
     tol = MARGIN_M * upm
     for s in rings:
@@ -195,6 +209,14 @@ def dry_run(place: str) -> dict:
     try:
         pj, _, _ = geo_rails.load_place(place)
         rings = stadium_rings(place, pj["projection"]["units_per_metre"])
+        base, added = split_rings(place, pj, rings)
+        if added:
+            urllib.request.urlopen = real
+            geo_rails._sleep = real_sleep
+            rep = geo_rails.dry_run_boxes(place, [query_for(pj, base), query_for(pj, added)])
+            rep["stadia_base"] = [(s["osm"], s["id"], s["name"], s["area_m2"]) for s in base]
+            rep["stadia_added"] = [(s["osm"], s["id"], s["name"], s["area_m2"]) for s in added]
+            return rep
         ql = query_for(pj, rings)
         cp = geo_rails.cache_path(place, ql)
         cached = os.path.exists(cp) and os.path.getsize(cp) > 0
@@ -227,19 +249,23 @@ def main(argv=None) -> int:
     pj, _, proj = geo_rails.load_place(a.place)
     upm = pj["projection"]["units_per_metre"]
     rings = stadium_rings(a.place, upm)
-    ql = query_for(pj, rings)
-    osm = geo_rails.fetch(a.place, ql, a.online)
-    if osm is None:
-        print("NOT CACHED: %s\nrerun with --online (1 Overpass request)" % geo_rails.cache_path(a.place, ql))
+    base, added = split_rings(a.place, pj, rings)
+    parts = [base] + ([added] if added else [])
+    docs, missing = geo_rails.fetch_boxes(a.place, [query_for(pj, r) for r in parts], a.online)
+    if docs is None:
+        print("NOT CACHED: %s\nrerun with --online (%d Overpass request(s))"
+              % (", ".join(missing), len(missing)))
         return 2
-    if osm.get("remark"):
-        print("OVERPASS REMARK: %s" % osm["remark"])
-        if "runtime error" in osm["remark"]:
-            return 3
-    convert(osm, proj, rings, upm)
+    for osm, part in zip(docs, parts):
+        if osm.get("remark"):
+            print("OVERPASS REMARK: %s" % osm["remark"])
+            if "runtime error" in osm["remark"]:
+                return 3
+        convert(osm, proj, part, upm)      # each answer serves only its own rings
+    rings = sorted(base + added, key=lambda s: (s["osm"], s["id"]))
     rep = census(rings)
     write_json(os.path.join(a.place, "STADIA.JSON"), {"stadia": rings, "census": rep,
-                                                       "elements_in_answer": len(osm.get("elements", []))})
+                                                       "elements_in_answer": sum(len(d.get("elements", [])) for d in docs)})
     print(json.dumps(rep, indent=1, sort_keys=True, ensure_ascii=False))
     return 0
 

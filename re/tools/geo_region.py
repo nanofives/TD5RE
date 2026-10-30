@@ -145,7 +145,10 @@ out geom;
 
 
 def boundary_query(spec: dict) -> str:
-    rel = spec["relation"]
+    return boundary_query_rel(spec["relation"])
+
+
+def boundary_query_rel(rel: dict) -> str:
     if rel.get("id"):
         return BOUNDARY_ID_QL % {"id": int(rel["id"])}
     around = ""
@@ -302,8 +305,13 @@ def world_box_to_ll(frame: Frame, x0, z0, x1, z1):
 # --------------------------------------------------------------------- spec ---
 
 def load_spec(path: str) -> dict:
+    """A spec names ONE relation (`relation`) or several (`relations`, the place
+    is their union). `frame_from` (a place dir) makes it an EXTENSION of that
+    place: see prepare_extend."""
     with open(path, encoding="utf-8") as f:
         spec = json.load(f)
+    if "relations" in spec and "relation" in spec:
+        raise SystemExit("spec: give `relation` or `relations`, not both")
     spec.setdefault("slug", slugify(spec["name"]))
     spec.setdefault("block_m", BLOCK_M)
     spec.setdefault("halo_m", HALO_M)
@@ -558,8 +566,9 @@ def split_home_orphans(owned: dict, lay: Layout, me):
     return home, away
 
 
-def merge_orphans(tiles_dir: str) -> int:
-    """Fold every tiles/_orph/<name>.<tag> file into tiles/<name>."""
+def merge_orphans(tiles_dir: str, dedupe: bool = False) -> int:
+    """Fold every tiles/_orph/<name>.<tag> file into tiles/<name>. `dedupe`
+    (an extension run) skips an entry whose `id` the tile already holds."""
     od = os.path.join(tiles_dir, "_orph")
     if not os.path.isdir(od):
         return 0
@@ -583,7 +592,12 @@ def merge_orphans(tiles_dir: str) -> int:
                 continue
             for k, v in d.items():
                 if isinstance(v, list):
-                    doc.setdefault(k, []).extend(v)
+                    have = doc.setdefault(k, [])
+                    if dedupe:
+                        ids = {e.get("id") for e in have if isinstance(e, dict)}
+                        v = [e for e in v if not (isinstance(e, dict) and e.get("id")
+                                                  is not None and e.get("id") in ids)]
+                    have.extend(v)
                 else:
                     doc.setdefault(k, v)
         with open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
@@ -596,11 +610,18 @@ def merge_orphans(tiles_dir: str) -> int:
     return len(groups)
 
 
-def build_index(tiles_dir: str, lay: Layout) -> dict:
+def build_index(tiles_dir: str, lay: Layout, keep_other: bool = False) -> dict:
     """INDEX.JSON: per layer, per tile: [ix, iz, n, minx, minz, maxx, maxz]
     where the box is the extent of EVERYTHING the tile holds (a long road
-    anchored in one tile still reaches the next), so a window query is exact."""
+    anchored in one tile still reaches the next), so a window query is exact.
+    `keep_other` (an extension run) carries the layers other tools added
+    (RAILS, OUTSKIRTS) through from the existing index; rerun those tools."""
     layers = {}
+    if keep_other and os.path.exists(os.path.join(tiles_dir, "INDEX.JSON")):
+        with open(os.path.join(tiles_dir, "INDEX.JSON"), encoding="utf-8") as f:
+            old = json.load(f).get("layers", {})
+        core = {layer_name(f) for f in TILED_LAYERS}
+        layers.update({k: v for k, v in old.items() if k not in core})
     for fname, (k1, k2) in TILED_LAYERS.items():
         ln = layer_name(fname)
         rows = []
@@ -650,6 +671,8 @@ class Ctx:
         self.opt = spec.get("layers", {})
         self.smooth_m = float(spec.get("dem_smooth_m", gf.DEM_SMOOTH_M_DEFAULT))
         self.levels_estimator = int(spec.get("levels_estimator", 2))
+        self.ext = None            # extension state (prepare_extend), else None
+        self.height = None
 
 
 def overpass_for_box(ctx: Ctx, bbox_ll):
@@ -716,8 +739,19 @@ def process_block(ctx: Ctx, blk: dict, plan_only: bool = False) -> dict | None:
         return {"planned": True}
 
     vec = gf.convert_osm(osm, fr.proj, ctx.levels_estimator)
+    completing = blk.get("mode") == "complete"
+    if completing:
+        # An old block cut by the old lattice edge: its vectors are on disk
+        # already (a block always kept its whole box), only raster cells past
+        # the old edge are missing. Paint them from the vectors ON DISK, so the
+        # raster agrees with what the game draws; only `water` (rivers, the
+        # coastline, which no tile layer stores) comes from the fresh answer.
+        hb = (blk["x0"] - halo, blk["z0"] - halo, blk["x1"] + halo, blk["z1"] + halo)
+        for key, layer in (("roads", "ROADS"), ("areas", "AREAS"),
+                           ("buildings", "BUILDINGS")):
+            vec[key] = tile_entries(ctx, layer, key, hb)
     stats_x = None
-    if ctx.opt.get("extra_buildings", True):
+    if ctx.opt.get("extra_buildings", True) and not completing:
         import geo_buildings_extra as xb
         xb.fetch_extra(ctx.work, bbox_ll, ctx.online,
                        ctx.spec.get("overture_release"),
@@ -751,7 +785,8 @@ def process_block(ctx: Ctx, blk: dict, plan_only: bool = False) -> dict | None:
     del lat, lon
     cover_r, water_r, painted = gf.rasterize_layers(vec, fr.proj, tmpl, bbox_ll,
                                                     base_cover)
-    bh = gf.estimate_building_heights(vec, cover_r, ctx.levels_estimator)
+    bh = (gf.estimate_building_heights(vec, cover_r, ctx.levels_estimator)
+          if not completing else None)
 
     # A coastline sinks the sea floor inside rasterize_layers; carry that back
     # into the metres so the global HEIGHT sees it.
@@ -765,17 +800,24 @@ def process_block(ctx: Ctx, blk: dict, plan_only: bool = False) -> dict | None:
     ii0, ii1, jj0, jj1 = interior
     sl = (slice(jj0 - gj0, jj1 - gj0), slice(ii0 - gi0, ii1 - gi0))
     gs = (slice(jj0, jj1), slice(ii0, ii1))
-    ctx.dem[gs] = dem_g[sl]
-    ctx.cover.mm[gs] = cover_r.data[sl]
-    ctx.water.mm[gs] = water_r.data[sl]
-    if ctx.canopy is not None and canopy_arr is not None:
-        ctx.canopy.mm[gs] = canopy_arr[sl]
+    ext_stats = None
+    if ctx.ext is not None:
+        ext_stats = write_ext_rasters(ctx, blk, interior, dem_g[sl], cover_r.data[sl],
+                                      water_r.data[sl],
+                                      canopy_arr[sl] if canopy_arr is not None else None)
+    else:
+        ctx.dem[gs] = dem_g[sl]
+        ctx.cover.mm[gs] = cover_r.data[sl]
+        ctx.water.mm[gs] = water_r.data[sl]
+        if ctx.canopy is not None and canopy_arr is not None:
+            ctx.canopy.mm[gs] = canopy_arr[sl]
 
     # ---- vectors: keep only what this block owns -------------------------
-    owned, n_orph = split_owned(vec, lay, blk)
+    owned, n_orph = split_owned(vec, lay, blk) if not completing else ({}, 0)
     me = (blk["bx"], blk["bz"])
     home, away = split_home_orphans(owned, lay, me)
     storey = gf.STOREY_HEIGHT_M
+    replaced = blank_stale_home_tiles(ctx, blk, home) if ctx.ext is not None and not completing else None
     nt = write_tile_docs(ctx.tiles_dir, home, None, storey)
     nt += write_tile_docs(ctx.tiles_dir, away, tag, storey)
     counts = {}
@@ -802,6 +844,10 @@ def process_block(ctx: Ctx, blk: dict, plan_only: bool = False) -> dict | None:
         "osm_counts": {k: v for k, v in vec["counts"].items()
                        if isinstance(v, int)},
     }
+    if ctx.ext is not None:
+        summary["mode"] = blk.get("mode", "new")
+        summary["ext_rasters"] = ext_stats
+        summary["replaced_tile_entries"] = replaced
     os.makedirs(os.path.dirname(done), exist_ok=True)
     with open(done, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=1, default=str)
@@ -809,10 +855,647 @@ def process_block(ctx: Ctx, blk: dict, plan_only: bool = False) -> dict | None:
     return summary
 
 
+# ============================================== EXTENSION (round S, roam SB) ===
+#
+# "Add the partidos of Berisso and Ensenada" to La Plata, as ONE place with the
+# same slug and frame. A plain re-run cannot do it: the frame is centred on the
+# bbox, so a bigger bbox moves the origin and every coordinate of the place
+# (ROAMTILE names, saved routes, selftest and tour poses) with it; and the 43
+# La Plata block answers of 10 Oct are no longer on disk, so a re-run would
+# re-fetch them with every OSM edit made since.
+#
+# An EXTENSION (`frame_from: <place dir>`) therefore does not rebuild the old
+# place at all. It keeps the old projection, cell, lattice origin and tile and
+# block grid, so every old block keeps its world box and every old tile its
+# ix_iz name, and:
+#   * old FETCHED blocks (read off the old HEIGHT.R16: a block is fetched iff
+#     its interior holds a value) keep every tile file and every raster cell
+#     byte for byte. Zero requests.
+#   * NEW blocks (touched by the union boundary, not fetched before) are
+#     fetched and converted exactly as a plain run does. Ownership puts the old
+#     blocks first, so an entry anchored in an old block is never written again.
+#     A tile homed in a new block is written whole (old orphans there were the
+#     old blocks' halo copies of entries this block now owns).
+#   * old blocks CUT by the old lattice edge (a block always fetched its whole
+#     box, but its raster stopped at the old grid) get the missing raster cells
+#     past the old edge, no vectors.
+#   * HEIGHT keeps the old scale and bias. int16 raw spans -32000..32000 about
+#     the old minimum, i.e. [min - relief, max] = [-50.2, 47.3] m for La Plata,
+#     so the -4 m sea-floor clamp of a river cell fits as is. A new cell above
+#     the old maximum would be clipped: the run counts it and stops.
+# Producers of the other gitignored files (geo_pois, geo_rails, ...) read
+# `extension.base_bbox` / `added_bboxes` from PLACE.JSON: see geo_rails.fetch_place.
+
+DISSOLVE_M = 20.0          # closing radius that dissolves shared partido borders
+EXT_PAD_DEG = 0.002        # the bbox pad prepare() uses
+
+
+def relation_specs(spec: dict) -> list:
+    return list(spec.get("relations") or [spec["relation"]])
+
+
+def _rel_matches_place(rel: dict, bnd: dict) -> bool:
+    if rel.get("id"):
+        return int(rel["id"]) == int(bnd.get("relation_id") or 0)
+    return (rel.get("name") == bnd.get("name")
+            and str(rel.get("admin_level")) == str(bnd.get("admin_level")))
+
+
+def load_relation(rel: dict, spec: dict, work: str, budget: Budget, base_pj):
+    """{id, tags, rings (kept), dropped, area_m2, source} or None (not cached).
+
+    Cached boundary answer first; else, when the relation IS the base place's,
+    its PLACE.JSON rings (simplified 15 m), so the old boundary costs nothing."""
+    q = boundary_query_rel(rel)
+    key = "overpass-boundary\x00" + q
+    cp = gf._cache_path(work, key, ".json")
+    cached = os.path.exists(cp) and os.path.getsize(cp) > 0
+    bnd = (base_pj or {}).get("boundary") or {}
+    use_base = (not cached) and base_pj is not None and _rel_matches_place(rel, bnd)
+    raw = None if use_base else cached_or_would(budget, gf.OVERPASS_ENDPOINTS[0], work,
+                                                ".json", q.encode("utf-8"), key)
+    frac = float(rel.get("min_ring_frac", spec.get("min_ring_frac", 0.02)))
+    if raw is not None:
+        bd = parse_boundary(raw)
+        big = max(_ring_area_m2(r) for r in bd["rings"])
+        keep = [r for r in bd["rings"] if _ring_area_m2(r) >= frac * big]
+        dropped = [{"points": len(r), "km2": round(_ring_area_m2(r) / 1e6, 2),
+                    "at": [round(r[0][0], 4), round(r[0][1], 4)]}
+                   for r in bd["rings"] if r not in keep]
+        return {"id": bd["id"], "tags": bd["tags"], "rings": keep, "dropped": dropped,
+                "area_m2": bd["area_m2"], "source": "overpass (cached)"}
+    if use_base:
+        rings = [[(float(a), float(b)) for a, b in r] for r in bnd["rings"]]
+        return {"id": bnd.get("relation_id"),
+                "tags": {"name": bnd.get("name"), "admin_level": bnd.get("admin_level")},
+                "rings": rings, "dropped": bnd.get("dropped_exclave_rings", []),
+                "area_m2": float(bnd.get("area_km2", 0.0)) * 1e6,
+                "source": "frame_from PLACE.JSON (simplified %s m)" % bnd.get("simplify_m")}
+    return None
+
+
+class PinnedFrame(Frame):
+    """The base place's frame (projection, cell, lattice origin) grown to cover
+    `bbox_ll`. Growing past the origin (west or south) is refused: it would
+    renumber every raster cell."""
+
+    def __init__(self, base_pj: dict, bbox_ll):
+        pr = base_pj["projection"]
+        self.proj = LocalProjection(pr["lat0"], pr["lon0"], pr["units_per_metre"])
+        if (abs(self.proj._m_per_deg_lat - pr["m_per_deg_lat"]) > 1e-6
+                or abs(self.proj._m_per_deg_lon - pr["m_per_deg_lon"]) > 1e-6):
+            raise SystemExit("frame_from: projection mismatch")
+        if abs(pr.get("rotation_rad", 0.0)) > 1e-12 or pr.get("offset_x") or pr.get("offset_z"):
+            raise SystemExit("frame_from: not an unrotated offset-0 frame")
+        self.cell = float(base_pj["cell_units"])
+        self.upm = float(pr["units_per_metre"])
+        self.x0, self.z0 = (float(v) for v in base_pj["tiled"]["origin"])
+        bw, bh = (int(v) for v in base_pj["tiled"]["grid"])
+        s, w, n, e = bbox_ll
+        xs, zs = [], []
+        for la in (s, n):
+            for lo in (w, e):
+                x, z = self.proj.to_world(la, lo)
+                xs.append(x)
+                zs.append(z)
+        if min(xs) < self.x0 - 1e-6 or min(zs) < self.z0 - 1e-6:
+            raise SystemExit("frame_from: the new area reaches west/south of the old "
+                             "lattice origin; not supported (would renumber cells)")
+        self.w = max(bw, int(math.ceil((max(xs) - self.x0) / self.cell)) + 1)
+        self.h = max(bh, int(math.ceil((max(zs) - self.z0) / self.cell)) + 1)
+        self.base_w, self.base_h = bw, bh
+
+
+def _repo_path(p: str) -> str:
+    if os.path.isabs(p):
+        return p
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo, p)
+
+
+def base_fetched_blocks(base_dir: str, bw: int, bh: int, bcells: int) -> set:
+    """(bx, bz) of every block the base place fetched, read off its HEIGHT.R16:
+    a fetched block wrote every interior cell, an unfetched one none."""
+    from geo_raster import HEADER_SIZE
+    mm = np.memmap(os.path.join(base_dir, "HEIGHT.R16"), dtype=np.int16, mode="r",
+                   offset=HEADER_SIZE, shape=(bh, bw))
+    out = set()
+    for bz in range(int(math.ceil(bh / bcells))):
+        rows = np.asarray(mm[bz * bcells:min(bh, (bz + 1) * bcells)])
+        for bx in range(int(math.ceil(bw / bcells))):
+            if (rows[:, bx * bcells:min(bw, (bx + 1) * bcells)] != -32768).any():
+                out.add((bx, bz))
+    del mm
+    return out
+
+
+def _box_minus(nb: dict, bb: dict) -> list:
+    """nb minus bb as up to four boxes (north, south, then east and west strips
+    between them)."""
+    out = []
+    if nb["north"] > bb["north"]:
+        out.append({"south": bb["north"], "west": nb["west"], "north": nb["north"], "east": nb["east"]})
+    if nb["south"] < bb["south"]:
+        out.append({"south": nb["south"], "west": nb["west"], "north": bb["south"], "east": nb["east"]})
+    s, n = max(nb["south"], bb["south"]), min(nb["north"], bb["north"])
+    if n > s:
+        if nb["east"] > bb["east"]:
+            out.append({"south": s, "west": bb["east"], "north": n, "east": nb["east"]})
+        if nb["west"] < bb["west"]:
+            out.append({"south": s, "west": nb["west"], "north": n, "east": bb["west"]})
+    return [{k: round(v, 7) for k, v in b.items()} for b in out]
+
+
+def prepare_extend(spec: dict, work: str, budget: Budget) -> dict:
+    """prepare() for a spec with `frame_from` (or several relations)."""
+    from shapely.geometry import Polygon, MultiPolygon, box
+    from shapely.ops import unary_union
+    base_dir = _repo_path(spec["frame_from"]) if spec.get("frame_from") else None
+    base_pj = None
+    if base_dir:
+        with open(os.path.join(base_dir, "PLACE.JSON"), encoding="utf-8") as f:
+            base_pj = json.load(f)
+        if not base_pj.get("tiled"):
+            raise SystemExit("frame_from: %s is not a tiled place" % base_dir)
+    rels, missing = [], []
+    for rel in relation_specs(spec):
+        r = load_relation(rel, spec, work, budget, base_pj)
+        (rels.append(r) if r else missing.append(rel.get("name") or rel.get("id")))
+    if missing:
+        raise RuntimeError("boundary not cached for %s; run once with --online "
+                           "(one small request each)" % missing)
+    # bbox of every kept ring, padded like prepare(), and never smaller than the base
+    lats = [p[0] for r in rels for rg in r["rings"] for p in rg]
+    lons = [p[1] for r in rels for rg in r["rings"] for p in rg]
+    s, w = min(lats) - EXT_PAD_DEG, min(lons) - EXT_PAD_DEG
+    n, e = max(lats) + EXT_PAD_DEG, max(lons) + EXT_PAD_DEG
+    if base_pj:
+        bb = base_pj["bbox"]
+        s, w = min(s, bb["south"]), min(w, bb["west"])
+        n, e = max(n, bb["north"]), max(e, bb["east"])
+        frame = PinnedFrame(base_pj, (s, w, n, e))
+        tile_side = float(base_pj["tiled"]["tile_size_units"])
+        tile_cells = int(round(tile_side / frame.cell))
+        block_tiles = int(base_pj["tiled"]["block_tiles"])
+    else:
+        frame = Frame((s, w, n, e), float(spec.get("cell", TG_WORLD_CELL)),
+                      float(spec.get("units_per_metre", UNITS_PER_METRE_DERIVED)))
+        tile_cells = int(round(spec["tile_m"] * frame.upm / frame.cell))
+        block_tiles = max(1, int(round(spec["block_m"] / spec["tile_m"])))
+    # union of the partidos in world units; a closing of DISSOLVE_M welds the
+    # shared borders (the base ring is simplified 15 m, the new ones are not)
+    d = DISSOLVE_M * frame.upm
+    polys = []
+    for r in rels:
+        for rg in r["rings"]:
+            polys.append(Polygon([frame.proj.to_world(la, lo) for la, lo in rg]).buffer(0))
+    union = unary_union(polys).buffer(d, join_style=2).buffer(-d, join_style=2)
+    parts = list(union.geoms) if isinstance(union, MultiPolygon) else [union]
+    holes = [(len(p.interiors), sum(Polygon(h).area for h in p.interiors)) for p in parts]
+    union_rings = []
+    for p in sorted(parts, key=lambda q: -q.area):
+        union_rings.append([frame.proj.world_to_latlon(x, z) for x, z in p.exterior.coords])
+    blocks_all, poly, side = plan_blocks(frame, union_rings, tile_cells, block_tiles)
+    bcells = tile_cells * block_tiles
+    ext = None
+    if base_pj:
+        old = base_fetched_blocks(base_dir, frame.base_w, frame.base_h, bcells)
+        if len(old) != int(base_pj["tiled"]["blocks"]):
+            raise SystemExit("frame_from: %d fetched blocks on the base HEIGHT.R16, "
+                             "PLACE.JSON says %s" % (len(old), base_pj["tiled"]["blocks"]))
+        new, comp = [], []
+        for b in blocks_all:
+            k = (b["bx"], b["bz"])
+            if k not in old:
+                b["mode"] = "new"
+                new.append(b)
+        for (bx, bz) in sorted(old, key=lambda t: (t[1], t[0])):
+            x0b, z0b = frame.x0 + bx * side, frame.z0 + bz * side
+            past = []
+            if (bx + 1) * bcells > frame.base_w and frame.w > frame.base_w:
+                past.append(box(frame.x0 + frame.base_w * frame.cell, z0b,
+                                x0b + side, z0b + side))
+            if (bz + 1) * bcells > frame.base_h and frame.h > frame.base_h:
+                past.append(box(x0b, frame.z0 + frame.base_h * frame.cell,
+                                x0b + side, z0b + side))
+            if any(poly.intersects(pb) for pb in past):
+                comp.append({"bx": bx, "bz": bz, "x0": x0b, "z0": z0b,
+                             "x1": x0b + side, "z1": z0b + side,
+                             "i0": bx * bcells, "j0": bz * bcells, "cells": bcells,
+                             "mode": "complete"})
+        old_blocks = [{"bx": bx, "bz": bz, "x0": frame.x0 + bx * side,
+                       "z0": frame.z0 + bz * side, "x1": frame.x0 + (bx + 1) * side,
+                       "z1": frame.z0 + (bz + 1) * side, "i0": bx * bcells,
+                       "j0": bz * bcells, "cells": bcells}
+                      for (bx, bz) in sorted(old, key=lambda t: (t[1], t[0]))]
+        # ownership: old blocks first, so an entry they hold is never re-owned
+        lay = Layout(frame, tile_cells, block_tiles, old_blocks + new,
+                     spec["halo_m"] * frame.upm)
+        # producers' boxes: the base bbox as fetched, plus the bbox of the NEW
+        # relations minus it
+        bb = {k: base_pj["bbox"][k] for k in ("south", "west", "north", "east")}
+        nl = [p[0] for r in rels if not _rel_matches_place_any(r, base_pj) for rg in r["rings"] for p in rg]
+        no = [p[1] for r in rels if not _rel_matches_place_any(r, base_pj) for rg in r["rings"] for p in rg]
+        nb = {"south": min(nl) - EXT_PAD_DEG, "west": min(no) - EXT_PAD_DEG,
+              "north": max(nl) + EXT_PAD_DEG, "east": max(no) + EXT_PAD_DEG}
+        ext = {"base_dir": base_dir, "base_pj": base_pj, "old": old,
+               "old_w": frame.base_w, "old_h": frame.base_h,
+               "new": new, "complete": comp, "base_bbox": bb,
+               "added_bboxes": _box_minus(nb, bb)}
+        blocks = new + comp
+    else:
+        lay = Layout(frame, tile_cells, block_tiles, blocks_all, spec["halo_m"] * frame.upm)
+        blocks = blocks_all
+    area = sum(r["area_m2"] for r in rels)
+    bd = {"id": rels[0]["id"], "tags": dict(rels[0]["tags"]), "area_m2": area,
+          "rings": union_rings}
+    bd["tags"]["name"] = spec["name"]
+    return {"bd": bd, "rels": rels, "rings": union_rings,
+            "dropped_rings": [x for r in rels for x in r["dropped"]],
+            "bbox_ll": (s, w, n, e), "frame": frame, "blocks": blocks, "poly": poly,
+            "lay": lay, "ext": ext, "holes": holes, "union_parts": len(parts)}
+
+
+def _rel_matches_place_any(r: dict, base_pj) -> bool:
+    bnd = (base_pj or {}).get("boundary") or {}
+    return r["id"] is not None and int(r["id"]) == int(bnd.get("relation_id") or -1)
+
+
+def tile_entries(ctx: Ctx, layer: str, key: str, hb) -> list:
+    """Every entry of a tile layer whose tile extent meets world box hb."""
+    with open(os.path.join(ctx.tiles_dir, "INDEX.JSON"), encoding="utf-8") as f:
+        idx = json.load(f)
+    out = []
+    for row in idx["layers"].get(layer, {}).get("tiles", []):
+        ix, iz, _, mnx, mnz, mxx, mxz = row
+        if mxx < hb[0] or mnx > hb[2] or mxz < hb[1] or mnz > hb[3]:
+            continue
+        with open(os.path.join(ctx.tiles_dir, "%s_%d_%d.JSON" % (layer, ix, iz)),
+                  encoding="utf-8") as f:
+            out.extend(json.load(f).get(key, []))
+    return out
+
+
+def write_ext_rasters(ctx: Ctx, blk: dict, interior, dem_i, cover_i, water_i,
+                      canopy_i) -> dict:
+    """Write one block's interior into the extended rasters. A NEW block writes
+    every interior cell (none was written before: its old block was unfetched
+    or past the old edge); a COMPLETE block only the cells past the old edge.
+    HEIGHT is quantised with the base scale/bias."""
+    ex = ctx.ext
+    ii0, ii1, jj0, jj1 = interior
+    jj = np.arange(jj0, jj1)[:, None]
+    ii = np.arange(ii0, ii1)[None, :]
+    if blk.get("mode") == "complete":
+        mask = (ii >= ex["old_w"]) | (jj >= ex["old_h"])
+    else:
+        mask = np.ones((jj1 - jj0, ii1 - ii0), dtype=bool)
+    upm = ctx.frame.upm
+    sc, bi = ctx.height.scale, ctx.height.bias
+    m = dem_i.astype(np.float64)
+    q = np.rint((m * upm - bi) / sc)
+    over = int(((q > 32000) & mask).sum())
+    under = int(((q < -32000) & mask).sum())
+    raw = np.clip(q, -32000, 32000).astype(np.int16)
+    gs = (slice(jj0, jj1), slice(ii0, ii1))
+    for mm, src in ((ctx.height.mm, raw), (ctx.cover.mm, cover_i),
+                    (ctx.water.mm, water_i),
+                    (ctx.canopy.mm if ctx.canopy is not None else None, canopy_i)):
+        if mm is None or src is None:
+            continue
+        cur = np.asarray(mm[gs])
+        mm[gs] = np.where(mask, src, cur)
+    mv = m[mask] if mask.any() else np.zeros(1)
+    return {"cells": int(mask.sum()), "min_m": float(mv.min()), "max_m": float(mv.max()),
+            "below_old_min_cells": int(((m < ex["h_min_m"]) & mask).sum()),
+            "height_clipped_over": over, "height_clipped_under": under}
+
+
+def blank_stale_home_tiles(ctx: Ctx, blk: dict, home: dict) -> dict:
+    """A tile homed in a NEW block is rewritten whole. Any core-layer file there
+    that this block does not write (the old blocks' halo orphans of an entry
+    that is gone) gets an empty document instead of being deleted: the main
+    tree's re/assets cannot delete, and INDEX drops empty tiles anyway.
+    Returns how many old entries were replaced, per layer."""
+    lay = ctx.lay
+    me = (blk["bx"], blk["bz"])
+    rep = {}
+    for fn in os.listdir(ctx.tiles_dir):
+        if not fn.endswith(".JSON") or fn == "INDEX.JSON":
+            continue
+        ln, _, rest = fn[:-5].partition("_")
+        fname = ln + ".JSON"
+        if fname not in TILED_LAYERS:
+            continue
+        try:
+            ix, iz = (int(v) for v in rest.split("_"))
+        except ValueError:
+            continue
+        if lay.block_of_tile(ix, iz) != me:
+            continue
+        with open(os.path.join(ctx.tiles_dir, fn), encoding="utf-8") as f:
+            d = json.load(f)
+        k1, k2 = TILED_LAYERS[fname]
+        rep[ln] = rep.get(ln, 0) + sum(len(d.get(k, [])) for k in (k1, k2) if k)
+        if fname in home.get((ix, iz), {}):
+            continue
+        doc = {k1: []}
+        if k2:
+            doc[k2] = []
+        if fname == "BUILDINGS.JSON":
+            doc["storey_height_m"] = gf.STOREY_HEIGHT_M
+        with open(os.path.join(ctx.tiles_dir, fn), "w", encoding="utf-8", newline="\n") as f:
+            json.dump(doc, f, sort_keys=True, separators=(",", ":"))
+            f.write("\n")
+    return rep
+
+
+EXT_SEED_FILES = ("POIS.JSON", "S3D_RELATIONS.JSON", "PARK_RELATIONS.JSON",
+                  "PLAZA_FURNITURE.JSON", "RESTRICTIONS.JSON", "LANES.JSON",
+                  "STADIA.JSON")
+
+
+def seed_staging(ext: dict, work: str) -> dict:
+    """Copy what an extension starts from into the staging place: every tile
+    file, the base _cache (the producers' answers), the producers' outputs.
+    Never overwrites (resumable). Rasters are built by open_outputs_ext."""
+    import shutil
+    base = ext["base_dir"]
+    n = {"tiles": 0, "cache": 0, "files": 0}
+    for sub, key in (("tiles", "tiles"), ("_cache", "cache")):
+        src = os.path.join(base, sub)
+        dst = os.path.join(work, sub)
+        os.makedirs(dst, exist_ok=True)
+        for fn in sorted(os.listdir(src)):
+            sp = os.path.join(src, fn)
+            if os.path.isfile(sp) and not os.path.exists(os.path.join(dst, fn)):
+                shutil.copy2(sp, os.path.join(dst, fn))
+                n[key] += 1
+    for fn in EXT_SEED_FILES:
+        sp = os.path.join(base, fn)
+        if os.path.exists(sp) and not os.path.exists(os.path.join(work, fn)):
+            shutil.copy2(sp, os.path.join(work, fn))
+            n["files"] += 1
+    return n
+
+
+def open_outputs_ext(ctx: Ctx) -> None:
+    """The four rasters at the grown size, the base cells copied in once."""
+    from geo_raster import HEADER_SIZE, _HEADER
+    import struct
+    fr, ex = ctx.frame, ctx.ext
+    os.makedirs(ctx.region_dir, exist_ok=True)
+    with open(os.path.join(ex["base_dir"], "HEIGHT.R16"), "rb") as f:
+        hdr = struct.unpack(_HEADER, f.read(HEADER_SIZE))
+    h_scale, h_bias = hdr[7], hdr[8]
+    rot = fr.proj.describe()["rotation_rad"]
+    mk = lambda name, kind, nd, sc=1.0, bi=0.0: RasterFile(   # noqa: E731
+        os.path.join(ctx.work, name), kind, fr.w, fr.h, fr, nd, scale=sc, bias=bi,
+        rotation=rot)
+    ctx.cover = mk("COVER.R8", 2, 255)
+    ctx.water = mk("WATER.R8", 2, 255)
+    ctx.canopy = mk("CANOPY.R8", 2, 255) if ctx.opt.get("canopy", True) else None
+    ctx.height = mk("HEIGHT.R16", 1, -32768, h_scale, h_bias)
+    ex["h_min_m"] = h_bias / fr.upm
+    marker = os.path.join(ctx.region_dir, "seeded.json")
+    if os.path.exists(marker):
+        return
+    ow, oh = ex["old_w"], ex["old_h"]
+    for name, rf in (("HEIGHT.R16", ctx.height), ("COVER.R8", ctx.cover),
+                     ("WATER.R8", ctx.water), ("CANOPY.R8", ctx.canopy)):
+        if rf is None:
+            continue
+        src = np.memmap(os.path.join(ex["base_dir"], name), dtype=rf.dtype, mode="r",
+                        offset=HEADER_SIZE, shape=(oh, ow))
+        for j in range(0, oh, 1024):
+            rf.mm[j:j + 1024, :ow] = src[j:j + 1024]
+        rf.mm.flush()
+        del src
+    with open(marker, "w", encoding="utf-8") as f:
+        json.dump({"old_grid": [ow, oh], "new_grid": [fr.w, fr.h],
+                   "height_scale": h_scale, "height_bias": h_bias}, f)
+
+
+def ext_identity(ctx: Ctx) -> dict:
+    """The proof that the base place is untouched: every raster cell of an old
+    FETCHED block equal to the base file, and every base tile file homed in an
+    old fetched block byte-identical. Tiles that did change are listed by why."""
+    from geo_raster import HEADER_SIZE
+    import hashlib as _h
+    fr, ex, lay = ctx.frame, ctx.ext, ctx.lay
+    bc = lay.tile_cells * lay.block_tiles
+    ow, oh = ex["old_w"], ex["old_h"]
+    rast = {}
+    for name, rf in (("HEIGHT.R16", ctx.height), ("COVER.R8", ctx.cover),
+                     ("WATER.R8", ctx.water), ("CANOPY.R8", ctx.canopy)):
+        if rf is None:
+            continue
+        a = np.memmap(os.path.join(ex["base_dir"], name), dtype=rf.dtype, mode="r",
+                      offset=HEADER_SIZE, shape=(oh, ow))
+        b = np.memmap(os.path.join(ctx.work, name), dtype=rf.dtype, mode="r",
+                      offset=HEADER_SIZE, shape=(fr.h, fr.w))
+        diff = cells = 0
+        for (bx, bz) in ex["old"]:
+            j0, j1 = bz * bc, min(oh, (bz + 1) * bc)
+            i0, i1 = bx * bc, min(ow, (bx + 1) * bc)
+            diff += int((np.asarray(a[j0:j1, i0:i1]) != np.asarray(b[j0:j1, i0:i1])).sum())
+            cells += (j1 - j0) * (i1 - i0)
+        rast[name] = {"old_fetched_cells": cells, "differ": diff}
+        del a, b
+    tiles = {"same": 0, "changed_homed_old_fetched": [], "changed_homed_new": 0,
+             "changed_unfetched": 0, "new_files": 0}
+    bdir = os.path.join(ex["base_dir"], "tiles")
+    sdir = ctx.tiles_dir
+    base_set = set(os.listdir(bdir))
+    for fn in sorted(os.listdir(sdir)):
+        sp = os.path.join(sdir, fn)
+        if not os.path.isfile(sp) or fn == "INDEX.JSON":
+            continue
+        if fn not in base_set:
+            tiles["new_files"] += 1
+            continue
+        with open(sp, "rb") as f:
+            hs = _h.sha256(f.read()).digest()
+        with open(os.path.join(bdir, fn), "rb") as f:
+            hb = _h.sha256(f.read()).digest()
+        if hs == hb:
+            tiles["same"] += 1
+            continue
+        try:
+            ix, iz = (int(v) for v in fn[:-5].rsplit("_", 2)[1:])
+        except ValueError:
+            continue
+        bk = lay.block_of_tile(ix, iz)
+        if bk in ex["old"]:
+            tiles["changed_homed_old_fetched"].append(fn)
+        elif any((b["bx"], b["bz"]) == bk for b in ex["new"]):
+            tiles["changed_homed_new"] += 1
+        else:
+            tiles["changed_unfetched"] += 1
+    tiles["base_files_missing"] = sorted(f for f in base_set
+                                         if not os.path.exists(os.path.join(sdir, f)))
+    return {"rasters": rast, "tiles": tiles}
+
+
+def write_place_ext(ctx: Ctx, prep: dict, sums: list) -> dict:
+    """The base PLACE.JSON, grown: name, bbox, grid, blocks, union boundary (and
+    each partido as a part), counts and provenance added, `extension` block for
+    the producers. Projection, centre, cell and origin are the base's."""
+    import copy
+    fr, ex, spec = ctx.frame, ctx.ext, ctx.spec
+    pj = copy.deepcopy(ex["base_pj"])
+
+    def add(key):
+        t = {}
+        for s in sums:
+            for k, v in (s.get(key) or {}).items():
+                if isinstance(v, (int, float)):
+                    t[k] = t.get(k, 0) + v
+        return t
+    s, w, n, e = prep["bbox_ll"]
+    pj["name"] = spec["name"]
+    pj["bbox"] = {"south": s, "west": w, "north": n, "east": e}
+    pj["radius_m"] = 0.5 * max(fr.w, fr.h) * fr.cell / fr.upm
+    pj["tiled"]["grid"] = [fr.w, fr.h]
+    pj["tiled"]["blocks"] = len(ex["old"]) + len(ex["new"])
+    rings = [simplify_ring(r, BOUNDARY_SIMPLIFY_M) for r in prep["rings"]]
+    parts = []
+    for r in prep["rels"]:
+        rr = r["rings"] if r["source"].startswith("frame_from") else \
+            [simplify_ring(x, BOUNDARY_SIMPLIFY_M) for x in r["rings"]]
+        parts.append({"relation_id": r["id"], "name": r["tags"].get("name"),
+                      "admin_level": r["tags"].get("admin_level"),
+                      "area_km2": round(r["area_m2"] / 1e6, 1), "source": r["source"],
+                      "rings": [[[round(a, 6), round(b, 6)] for a, b in x] for x in rr]})
+    old_b = pj.get("boundary") or {}
+    pj["boundary"] = {
+        "relation_id": old_b.get("relation_id"),
+        "relation_ids": [p["relation_id"] for p in parts],
+        "name": spec["name"], "admin_level": old_b.get("admin_level"),
+        "area_km2": round(sum(r["area_m2"] for r in prep["rels"]) / 1e6, 1),
+        "simplify_m": BOUNDARY_SIMPLIFY_M, "dissolve_m": DISSOLVE_M,
+        "rings": [[[round(a, 6), round(b, 6)] for a, b in r] for r in rings],
+        "holes_dropped": prep["holes"],
+        "dropped_exclave_rings": prep["dropped_rings"],
+        "parts": parts}
+    L = pj["layers"]
+    osm_add = add("counts")
+    L["osm"]["counts_base"] = dict(L["osm"].get("counts", {}))
+    L["osm"]["counts_added"] = osm_add
+    L["osm"]["counts"] = {k: L["osm"]["counts_base"].get(k, 0) + osm_add.get(k, 0)
+                          for k in set(L["osm"]["counts_base"]) | set(osm_add)}
+    L["osm"]["vintage"] = "base blocks %s, added blocks %s" % (
+        ex["base_pj"].get("fetched_utc"), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    hs = [x["ext_rasters"] for x in sums if x.get("ext_rasters")]
+    L["height"]["extension"] = {
+        "pinned_scale_bias": True,
+        "representable_m": [L["height"]["min_m"] - L["height"]["relief_m"], L["height"]["max_m"]],
+        "added_cells": sum(x["cells"] for x in hs),
+        "added_min_m": min((x["min_m"] for x in hs), default=None),
+        "added_max_m": max((x["max_m"] for x in hs), default=None),
+        "added_below_base_min_cells": sum(x["below_old_min_cells"] for x in hs),
+        "clipped": sum(x["height_clipped_over"] + x["height_clipped_under"] for x in hs)}
+    painted = add("painted")
+    L["cover"]["painted_added"] = painted
+    wc = set((L["cover"].get("worldcover") or {}).get("tiles") or [])
+    wc |= {t for x in sums for t in ((x.get("wc") or {}).get("tiles") or [])}
+    L["cover"].setdefault("worldcover", {})["tiles"] = sorted(wc)
+    if "detail" in L.get("canopy", {}):
+        qk = set(L["canopy"]["detail"].get("quadkeys") or [])
+        qk |= {t for x in sums for t in ((x.get("canopy") or {}).get("quadkeys") or [])}
+        L["canopy"]["detail"]["quadkeys"] = sorted(qk)
+    if L.get("buildings_extra", {}).get("height_src") is not None:
+        L["buildings_extra"]["height_src_added"] = add("height_src")
+    pj["fetched_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    pj["extension"] = {
+        "version": 1, "frame_from": spec["frame_from"],
+        "base_name": ex["base_pj"].get("name"),
+        "base_fetched_utc": ex["base_pj"].get("fetched_utc"),
+        "base_bbox": ex["base_bbox"], "added_bboxes": ex["added_bboxes"],
+        "base_grid": [ex["old_w"], ex["old_h"]],
+        "base_blocks": len(ex["old"]),
+        "new_blocks": [[b["bx"], b["bz"]] for b in ex["new"]],
+        "completed_blocks": [[b["bx"], b["bz"]] for b in ex["complete"]]}
+    write_json(os.path.join(ctx.work, "PLACE.JSON"), pj)
+    return pj
+
+
+def run_extend(spec: dict, out_root: str, online: bool, only, limit) -> int:
+    work = os.path.join(out_root, spec["slug"])
+    os.makedirs(work, exist_ok=True)
+    budget = Budget(online)
+    prep = prepare_extend(spec, work, budget)
+    print(json.dumps(estimate_ext(prep), indent=1))
+    ctx = Ctx(spec, prep["frame"], prep["lay"], budget, work, online)
+    ctx.ext = prep["ext"]
+    print("seeded staging from base: %s" % seed_staging(ctx.ext, work))
+    blocks = prep["blocks"]
+    if only:
+        want = {tuple(int(v) for v in o.split(":")) for o in only}
+        blocks = [b for b in blocks if (b["bx"], b["bz"]) in want]
+    if limit:
+        blocks = blocks[:limit]
+    open_outputs_ext(ctx)
+    sums = []
+    for b in blocks:
+        s = process_block(ctx, b)
+        if s is None:
+            print("  block b%d_%d (%s): NOT AVAILABLE OFFLINE" % (b["bx"], b["bz"], b["mode"]))
+            return 2
+        sums.append(s)
+    if len(blocks) != len(prep["blocks"]):
+        print("partial run (%d of %d blocks): no finalize" % (len(blocks), len(prep["blocks"])))
+        return 0
+    for rf in (ctx.height, ctx.cover, ctx.water, ctx.canopy):
+        if rf is not None:
+            rf.finish()
+    clipped = sum((s.get("ext_rasters") or {}).get("height_clipped_over", 0)
+                  + (s.get("ext_rasters") or {}).get("height_clipped_under", 0) for s in sums)
+    n_merged = merge_orphans(ctx.tiles_dir, dedupe=True)
+    idx = build_index(ctx.tiles_dir, ctx.lay, keep_other=True)
+    place = write_place_ext(ctx, prep, sums)
+    ident = ext_identity(ctx)
+    write_json(os.path.join(ctx.region_dir, "extend_report.json"),
+               {"identity": ident, "blocks": sums})
+    print("orphan tiles merged: %d; tile index layers: %s" % (
+        n_merged, {k: len(v["tiles"]) for k, v in idx["layers"].items()}))
+    print("identity: %s" % json.dumps(ident))
+    print("wrote %s -- now rerun geo_rails / geo_outskirts / the other producers "
+          "on it (see docs/plans/geo_free_roam/S_GRAN_LA_PLATA.md)" % work)
+    bad = ident["tiles"]["changed_homed_old_fetched"] or any(
+        v["differ"] for v in ident["rasters"].values())
+    if clipped or bad:
+        print("EXTENSION CHECK FAILED: clipped height cells %d, base changes %s"
+              % (clipped, bool(bad)))
+        return 4
+    return 0
+
+
+def estimate_ext(prep: dict) -> dict:
+    fr, ex = prep["frame"], prep["ext"]
+    e = estimate(prep)
+    e["relations"] = [{"id": r["id"], "name": r["tags"].get("name"),
+                       "km2": round(r["area_m2"] / 1e6, 1), "rings": len(r["rings"]),
+                       "source": r["source"]} for r in prep["rels"]]
+    e["union_parts"] = prep["union_parts"]
+    e["union_holes"] = prep["holes"]
+    if ex:
+        e["base_grid"] = [ex["old_w"], ex["old_h"]]
+        e["grid_growth_cells"] = [fr.w - ex["old_w"], fr.h - ex["old_h"]]
+        e["blocks_base_fetched"] = len(ex["old"])
+        e["blocks_new"] = [[b["bx"], b["bz"]] for b in ex["new"]]
+        e["blocks_complete"] = [[b["bx"], b["bz"]] for b in ex["complete"]]
+        e["base_bbox"] = ex["base_bbox"]
+        e["added_bboxes"] = ex["added_bboxes"]
+    return e
+
+
 # ================================================================= driver ===
 
 def prepare(spec: dict, work: str, budget: Budget):
     """Boundary -> frame -> blocks -> layout. Returns (ctx_parts dict)."""
+    if spec.get("frame_from") or "relations" in spec:
+        return prepare_extend(spec, work, budget)
     q = boundary_query(spec)
     raw = cached_or_would(budget, gf.OVERPASS_ENDPOINTS[0], work, ".json",
                           q.encode("utf-8"), "overpass-boundary\x00" + q)
@@ -1008,6 +1691,8 @@ def write_place(ctx: Ctx, prep: dict, sums: list, hprov: dict) -> dict:
 
 def run(spec: dict, out_root: str, online: bool, only: list | None,
         limit: int | None, finalize: bool = True) -> int:
+    if spec.get("frame_from"):
+        return run_extend(spec, out_root, online, only, limit)
     work = os.path.join(out_root, spec["slug"])
     os.makedirs(work, exist_ok=True)
     budget = Budget(online)
@@ -1056,18 +1741,23 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int)
     ap.add_argument("--dry-run", action="store_true",
                     help="prove the fetch budget offline (urlopen patched)")
+    ap.add_argument("--plan-metadata", action="store_true",
+                    help="the dry run, but FETCH the metadata it needs to be exact: "
+                         "COG headers, the Overture STAC + parquet footers, the Open "
+                         "Buildings manifests/headers (small range reads, cached). "
+                         "Overpass and Terrarium stay offline.")
     ap.add_argument("--plan", action="store_true",
                     help="print the region/blocks/estimates and exit")
     a = ap.parse_args(argv)
     spec = load_spec(a.spec)
-    if a.dry_run:
-        rep = dry_run(spec, a.root)
+    if a.dry_run or a.plan_metadata:
+        rep = dry_run(spec, a.root, plan_metadata_online=a.plan_metadata)
         print(json.dumps(rep, indent=1, default=str))
         return 0
     if a.plan:
         work = os.path.join(a.root, spec["slug"])
         prep = prepare(spec, work, Budget(a.online))
-        print(json.dumps(estimate(prep), indent=1))
+        print(json.dumps(estimate_ext(prep) if "rels" in prep else estimate(prep), indent=1))
         return 0
     return run(spec, a.root, a.online, a.only, a.limit)
 
@@ -1105,13 +1795,15 @@ def dry_run(spec: dict, out_root: str, plan_metadata_online: bool = False) -> di
         raise NetBlocked("dry run: WOULD FETCH " + str(url))
 
     real = urllib.request.urlopen
-    urllib.request.urlopen = blocked
+    if not plan_metadata_online:
+        urllib.request.urlopen = blocked
     try:
         budget = Budget(False)
         prep = prepare(spec, work, budget)
         ctx = Ctx(spec, prep["frame"], prep["lay"], budget, work, False)
+        ctx.meta_online = plan_metadata_online
         fr = ctx.frame
-        report = {"estimate": estimate(prep)}
+        report = {"estimate": estimate_ext(prep) if "rels" in prep else estimate(prep)}
         ov_miss = tile_miss = 0
         tiles_all: set = set()
         for blk in prep["blocks"]:
@@ -1232,11 +1924,14 @@ def plan_cogs_and_extra(ctx: Ctx, prep: dict) -> dict:
     nplan = nblocked = 0
     first_block = None
     for blk in prep["blocks"]:
+        if blk.get("mode") == "complete":
+            continue            # a completion block takes its buildings from the tiles
         halo = ctx.lay.halo
         bb = world_box_to_ll(fr, blk["x0"] - halo, blk["z0"] - halo,
                              blk["x1"] + halo, blk["z1"] + halo)
         try:
-            xb.fetch_extra(ctx.work, bb, False, ctx.spec.get("overture_release"),
+            xb.fetch_extra(ctx.work, bb, getattr(ctx, "meta_online", False),
+                           ctx.spec.get("overture_release"),
                            int(ctx.spec.get("extra_max_mb", 900) * 1024 * 1024), True)
         except Exception as exc:                          # noqa: BLE001
             nblocked += 1

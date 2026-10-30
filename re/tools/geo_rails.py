@@ -173,7 +173,10 @@ def load_place(place: str):
 
 
 def query_for(pj: dict) -> str:
-    b = pj["bbox"]
+    return query_for_box(pj["bbox"])
+
+
+def query_for_box(b: dict, added: bool = False) -> str:
     bbox = "%.6f,%.6f,%.6f,%.6f" % (b["south"] - BBOX_MARGIN_DEG,
                                     b["west"] - BBOX_MARGIN_DEG,
                                     b["north"] + BBOX_MARGIN_DEG,
@@ -198,6 +201,178 @@ def fetch(place: str, ql: str, online: bool) -> dict | None:
         except Exception as exc:               # noqa: BLE001 - try the mirror
             last = exc
     raise RuntimeError("every Overpass endpoint failed: %s" % last)
+
+
+# ------------------------------------------------- an EXTENDED place (round S) ---
+# geo_region --frame-from grows a place without re-fetching it (La Plata + Berisso
+# + Ensenada). PLACE.JSON then keeps the bbox the place was FIRST fetched with as
+# `extension.base_bbox` and lists the new area as `extension.added_bboxes`. Every
+# one-bbox producer asks Overpass once per box: the base query string is the old
+# one byte for byte, so its answer comes from the old cache, and the added boxes
+# are the only new requests. An element of an added box is kept only when it is
+# not in the base answer AND its anchor lies outside the base query box, so OSM
+# edits made inside the old area since it was fetched never leak in.
+
+def place_boxes(pj: dict) -> list:
+    """[base bbox, added bboxes...] as {"south","west","north","east"} dicts."""
+    ext = pj.get("extension") or {}
+    if ext.get("base_bbox"):
+        return [ext["base_bbox"]] + list(ext.get("added_bboxes") or [])
+    return [pj["bbox"]]
+
+
+def bbox_in_any(lat: float, lon: float, boxes: list) -> bool:
+    return any(b["south"] <= lat <= b["north"] and b["west"] <= lon <= b["east"]
+               for b in boxes)
+
+
+def anchor_ll(el: dict):
+    """(lat, lon) an Overpass element is located by, or None: a node's point, a
+    way's first vertex (else its `center`), a relation's bounds centre (else its
+    center, else its first member point)."""
+    if "lat" in el and "lon" in el:
+        return el["lat"], el["lon"]
+    g = el.get("geometry") or []
+    for p in g:
+        if p:
+            return p["lat"], p["lon"]
+    b = el.get("bounds")
+    if el.get("type") == "relation" and b:
+        return 0.5 * (b["minlat"] + b["maxlat"]), 0.5 * (b["minlon"] + b["maxlon"])
+    c = el.get("center")
+    if c:
+        return c["lat"], c["lon"]
+    for m in el.get("members") or []:
+        if "lat" in m:
+            return m["lat"], m["lon"]
+        for p in m.get("geometry") or []:
+            if p:
+                return p["lat"], p["lon"]
+    return None
+
+
+def merge_answers(docs: list, base_box: dict) -> tuple:
+    """One Overpass document from the base answer (all of it, in order) and the
+    added answers (elements not already seen, anchored outside `base_box`)."""
+    if len(docs) == 1:
+        return docs[0], {"parts": 1}
+    out = dict(docs[0])
+    els = list(docs[0].get("elements", []))
+    seen = {(e.get("type"), e.get("id")) for e in els}
+    st = {"parts": len(docs), "base": len(els), "added": 0, "dup": 0,
+          "inside_base": 0, "no_anchor": 0}
+    for d in docs[1:]:
+        if d.get("remark") and not out.get("remark"):
+            out["remark"] = d["remark"]
+        for e in d.get("elements", []):
+            k = (e.get("type"), e.get("id"))
+            if k in seen:
+                st["dup"] += 1
+                continue
+            ll = anchor_ll(e)
+            if ll is None:
+                st["no_anchor"] += 1
+                continue
+            if bbox_in_any(ll[0], ll[1], [base_box]):
+                st["inside_base"] += 1
+                continue
+            seen.add(k)
+            els.append(e)
+            st["added"] += 1
+    out["elements"] = els
+    return out, st
+
+
+def fetch_boxes(place: str, qls: list, online: bool):
+    """Answers for every query, or (None, [missing cache paths])."""
+    docs, missing = [], []
+    for ql in qls:
+        d = fetch(place, ql, online)
+        if d is None:
+            missing.append(cache_path(place, ql))
+        docs.append(d)
+    return (None if missing else docs), missing
+
+
+def fetch_place(place: str, pj: dict, query_of_box, online: bool,
+                margin_deg: float = 0.0):
+    """The one-bbox producers' fetch for a plain OR an extended place.
+
+    query_of_box(box, added) -> query string; `added` is False for the base box
+    (which must rebuild the exact old query) and True for an added box. Returns
+    (merged doc or None, missing cache paths, merge stats)."""
+    boxes = place_boxes(pj)
+    qls = [query_of_box(b, k > 0) for k, b in enumerate(boxes)]
+    docs, missing = fetch_boxes(place, qls, online)
+    if docs is None:
+        return None, missing, {"queries": len(qls)}
+    b0 = boxes[0]
+    base_q = {"south": b0["south"] - margin_deg, "west": b0["west"] - margin_deg,
+              "north": b0["north"] + margin_deg, "east": b0["east"] + margin_deg}
+    doc, st = merge_answers(docs, base_q)
+    st["queries"] = len(qls)
+    return doc, missing, st
+
+
+def keep_base_records(place: str, pj: dict, fname: str, key: str, rows: list, id_of):
+    """An EXTENDED place: every record the existing <place>/<fname>[key] holds
+    is kept verbatim, in its order; only records with a new id are appended (in
+    `rows` order). So a producer whose code moved on since the base file was
+    written cannot change a base record. A plain place: rows unchanged."""
+    path = os.path.join(place, fname)
+    if len(place_boxes(pj)) < 2 or not os.path.exists(path):
+        return rows, None
+    with open(path, encoding="utf-8") as f:
+        old = json.load(f).get(key, [])
+    have = {id_of(r) for r in old}
+    regen = {id_of(r): r for r in rows}
+    added = [r for r in rows if id_of(r) not in have]
+    st = {"base": len(old), "added": len(added),
+          "base_regenerated_differently": sum(1 for r in old if id_of(r) in regen
+                                              and regen[id_of(r)] != r),
+          "base_gone_from_answer": sum(1 for r in old if id_of(r) not in regen)}
+    return old + added, st
+
+
+def dry_run_boxes(place: str, qls: list) -> dict:
+    """The fetch budget of a list of queries, proved offline (urlopen patched)."""
+    import urllib.request
+    would: list = []
+
+    class NetBlocked(RuntimeError):
+        pass
+
+    def blocked(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        body = getattr(req, "data", None)
+        would.append("%s [POST %d B]" % (url, len(body)) if body else str(url))
+        raise NetBlocked("dry run: WOULD FETCH " + str(url))
+
+    global _sleep
+    real, real_sleep = urllib.request.urlopen, _sleep
+    urllib.request.urlopen = blocked
+    _sleep = lambda s: None                   # noqa: E731 - the back-off, not a fetch
+    rows = []
+    try:
+        for ql in qls:
+            cp = cache_path(place, ql)
+            cached = os.path.exists(cp) and os.path.getsize(cp) > 0
+            n0 = len(would)
+            if not cached:
+                try:
+                    fetch(place, ql, online=True)
+                except Exception:              # noqa: BLE001 - expected offline
+                    pass
+            rows.append({"cached": cached, "cache_file": os.path.basename(cp),
+                         "query_bytes": len(ql.encode("utf-8")),
+                         "attempts_incl_retries_and_mirror": len(would) - n0})
+    finally:
+        urllib.request.urlopen = real
+        _sleep = real_sleep
+    return {"place": place, "queries": rows,
+            "real_run_requests_if_first_endpoint_answers":
+                sum(1 for r in rows if not r["cached"]),
+            "distinct_requests": sorted(set(would))}
 
 
 def _pt(proj, lat, lon):
@@ -463,14 +638,15 @@ def main(argv=None) -> int:
                     help="prove the fetch budget offline (urlopen patched)")
     a = ap.parse_args(argv)
     if a.dry_run:
-        print(json.dumps(dry_run(a.place), indent=1))
+        pj, _, _ = load_place(a.place)
+        print(json.dumps(dry_run_boxes(a.place, [query_for_box(b, k > 0) for k, b in
+                                                 enumerate(place_boxes(pj))]), indent=1))
         return 0
     pj, idx, proj = load_place(a.place)
-    ql = query_for(pj)
-    osm = fetch(a.place, ql, a.online)
+    osm, missing, mst = fetch_place(a.place, pj, query_for_box, a.online, BBOX_MARGIN_DEG)
     if osm is None:
-        print("NOT CACHED: %s\nrerun with --online (1 Overpass request)" %
-              cache_path(a.place, ql))
+        print("NOT CACHED: %s\nrerun with --online (%d Overpass request(s))" %
+              (", ".join(missing), len(missing)))
         return 2
     if osm.get("remark"):
         print("OVERPASS REMARK: %s" % osm["remark"])
@@ -486,6 +662,7 @@ def main(argv=None) -> int:
     rep["tiles"] = len(rows)
     rep["road_crossings_by_kind"] = xings
     rep["elements_in_answer"] = len(osm.get("elements", []))
+    rep["boxes"] = mst
     print(json.dumps(rep, indent=1, sort_keys=True))
     return 0
 
