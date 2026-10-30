@@ -126,3 +126,6 @@ each), 1393 tiles = 230 MB, PLACE.JSON, and the built `_route/` 62 MB -- 1.2 GB.
   curvature limit 10.6 -> 32.3 deg, a 1316-span route). Now "<slug>" or
   "<slug>_*".
 * **The old Python selector** (`geo_selector.py`) does not know tiled places.
+
+See also `docs/plans/geo_free_roam/S_GRAN_LA_PLATA.md` (round S): EXTENSION mode, `frame_from`
+grows a tiled place without moving its frame or re-fetching its blocks (Berisso + Ensenada).

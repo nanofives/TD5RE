@@ -1268,7 +1268,8 @@ def open_outputs_ext(ctx: Ctx) -> None:
         src = np.memmap(os.path.join(ex["base_dir"], name), dtype=rf.dtype, mode="r",
                         offset=HEADER_SIZE, shape=(oh, ow))
         for j in range(0, oh, 1024):
-            rf.mm[j:j + 1024, :ow] = src[j:j + 1024]
+            je = min(oh, j + 1024)
+            rf.mm[j:je, :ow] = src[j:je]
         rf.mm.flush()
         del src
     with open(marker, "w", encoding="utf-8") as f:
@@ -1333,7 +1334,8 @@ def ext_identity(ctx: Ctx) -> dict:
         else:
             tiles["changed_unfetched"] += 1
     tiles["base_files_missing"] = sorted(f for f in base_set
-                                         if not os.path.exists(os.path.join(sdir, f)))
+                                         if os.path.isfile(os.path.join(bdir, f))
+                                         and not os.path.exists(os.path.join(sdir, f)))
     return {"rasters": rast, "tiles": tiles}
 
 
