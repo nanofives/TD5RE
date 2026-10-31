@@ -556,22 +556,6 @@ void td5_geo_sync(void)
     }
 }
 
-void td5_geo_select(const char *slug)
-{
-    TD5_File *f;
-    if (!slug) slug = "";
-    _putenv_s("TD5RE_GEO_PLACE", slug);      /* "" removes it */
-    /* Persist, so the choice survives a relaunch and the browser selector sees
-     * what the game is set to. Best effort: a read-only install still works for
-     * this session. */
-    f = td5_plat_file_open(GEO_SELECTED_PATH, "wb");
-    if (f) {
-        td5_plat_file_write(f, slug, strlen(slug));
-        td5_plat_file_close(f);
-    }
-    TD5_LOG_I(LOG_TAG, "geo: LOCATION -> %s", slug[0] ? slug : "SYNTHETIC");
-}
-
 /* [J8 GEO-PICK] Record a place dir that exists but cannot be raced, so the
  * selector can name it and say why. */
 static void geo_place_note_incomplete(const char *slug, const char *reason)

@@ -69,7 +69,6 @@ so the auto track's bytes cannot move; the gate below confirms it.
 | What | Why |
 |---|---|
 | Section 2 islands still gated on `td5_geo_loaded()` / `td5_geo_route_count()` in tg_network (`tg_net_geo_*`), tg_streets (geo lawns, parks, plazas), tg_city (`tg_geo_city_prepare`, `tg_geo_mass_at`, sidewalk widths), tg_furniture (signals), tg_terrain, tg_bridge, tg_guard, trackgen (`tg_geo_apply_spec`, `tg_geo_track_name`, `tg_spec_hash` route fold, `tg_geo_sky_profile`), minimap_streets (geo branch), td5_geo_buildings (route binding) | DEAD now (the generator never runs with a place: set_target_slot pins the synthetic world) but each is a module of its own to trim with the synthetic gate after each. Brief rule: trim only what is provably strip-only, one module at a time. Next round |
-| td5_geo.c route loader (`td5_geo_route_count/node`, `_route/ROUTE.JSON`) | the racer AI's geo gates read it: a MASTER roam race logs `geo_corners: ARMED` because the strip's old `_route/ROUTE.JSON` (1330 nodes) is on disk and loads at boot. Deleting the loader would turn that governor off in roam. Kept so roam AI is unchanged; see open questions |
 | `td5_geo_route_build` (router + conditioner) | the geo map draws its routed line and the "ABOUT x KM" length |
 | Section 3 (place outlines, raster window reader `gr_raster_read_window`, `gr_resample`) | roam reads them |
 | The geo slots and their registration (ROAMGRID) | the GEOSPATIAL / FREE ROAM entries and the roam host need a registered slot |
@@ -98,3 +97,31 @@ so the auto track's bytes cannot move; the gate below confirms it.
 - Master roam probe (`roam-sprint-ai-smoke` on the master exe): `geo: route .../_route/ROUTE.JSON loaded:
   1330 nodes`, `geo_corners: ARMED`, no `[GEO ATTRS]` race tables, no `[XSPAN]` census: deleting attrs and
   xspan does not change a roam race.
+
+## Follow-up (orchestrator, same round): the AI no longer depends on the leftover `_route/ROUTE.JSON`
+
+What each of the three racer-AI behaviours read from the stale strip route, and what roam did with it:
+
+| Behaviour (td5_ai.c) | Read from the route | In a roam race | On a shipped track with a place selected |
+|---|---|---|---|
+| geo corner edge (`s_geo_gov`, `TD5RE_AI_GEO_EDGE`): the lane clamp kept 900 units off each rail | only "route loaded" (`td5_geo_route_count() >= 2`), plus a generated slot; the margin came from the TRACK's own span frame | armed at race init (master logs `geo_corners: ARMED`) but NEVER APPLIED: a roam race skips `td5_ai_tick()` (td5_game.c, roam runs `td5_roam_ai_tick`), so the lane brain that reads `s_geo_gov` does not run | off (needs a generated slot) |
+| time-based fork look-ahead (`TD5RE_AI_BRANCH_LOOK_SEC`, +1.5 s of travel added to the 7..15 span window) | only "route loaded" | never runs (same reason) | **ON by accident**: SELECTED.TXT loads the place and its route at boot, so every shipped-track race widened the fork window |
+| geo finish brake (`TD5RE_GEO_FINISH_BRAKE`): an AI car past the line brakes to a stop | only "place + route loaded" | never runs (roam has its own finish, td5_roam_race.c) | **ON by accident** on point-to-point shipped tracks |
+
+None of the three read any route DATA (nodes, names, speeds): only its presence. All three existed for the strip
+geo track, which is gone, so all three are DROPPED (not re-gated). Roam is unchanged by construction, and a
+shipped track no longer changes behaviour with the place selection.
+
+With that, nothing needed the route loader: `td5_geo.c` no longer reads `_route/ROUTE.JSON` (or its grade
+separations, `td5_geo_xsep`), and its readers went too: the generator's grade-separation planner
+(`tg_xsep_*`, td5_tg_road.c / td5_tg_bridge.c), the route-derived finish span, track name and spec-hash fold
+(td5_trackgen.c, `tg_geo_apply_spec` is now `tg_geo_sync_place`), the land-cover biome override (td5_tg_terrain.c),
+the painted finish line (td5_tg_furniture.c), the mast-arm plate planner (td5_tg_mastarm.c; roam keeps the
+`tg_plate_*` text helpers), the footprint-to-route binding (td5_geo_buildings.c; free roam reads footprints per
+tile), the minimap's geo street source (td5_minimap_streets.c; free roam has its own street map) and the plaza
+span report (td5_tg_streets.c). The route-gated generator islands that only test `td5_geo_loaded()` stay
+(dead: the generator never runs with a place).
+
+Also removed this pass: the AUTO TRACK STUDIO's hidden LOCATION row (`AT_KIND_PLACE`) and `td5_geo_select`, the
+last writer of SELECTED.TXT (td5_geo_init still reads a file left on disk). Pending CSV: 64 more strip-only rows
+from before round 1014 superseded (145 in total, `_archive/roam/SA/csv_supersede2.txt`).

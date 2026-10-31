@@ -147,15 +147,14 @@ void   td5_geo_grid(int *out_w, int *out_h, double *out_cell,
 
 /* ------------------------------------------------------- place selection ---
  * [GEO PHASE 4 2026-09-30] The selected place is the env knob TD5RE_GEO_PLACE,
- * mirrored to re/assets/geo/SELECTED.TXT so the browser selector
- * (re/tools/geo_selector.py) and the studio's LOCATION row agree across
- * launches: at init, an unset knob is filled from the file.
+ * read from re/assets/geo/SELECTED.TXT at init when the knob is unset.
+ * [roam SA] Nothing writes that file any more (the studio's LOCATION row and
+ * the browser selector are gone); one left on disk still selects the place.
  *
  * td5_geo_sync() makes the loaded place + route match the knob. The generator
  * calls it before folding the spec (build, studio preview, streamed rederive),
  * so a LOCATION change takes effect on the next build with no restart. */
 void td5_geo_sync(void);
-void td5_geo_select(const char *slug);   /* "" = synthetic; writes SELECTED.TXT */
 
 /* Places under re/assets/geo/ that carry a ROUTE.JSON (a place without a route
  * cannot be raced yet). Rescanned on td5_geo_places_rescan(); index order is
