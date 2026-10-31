@@ -191,3 +191,54 @@ td5_roam_race_drive.c, START Plaza Moreno, FINISH each relation's OSM admin_cent
 198449765 at -34.86886, -57.88287; Ensenada 198440814 at -34.85749, -57.90772). The planner chooses the
 streets. Same checks as roam-partido: 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units,
 >= 15 junctions, >= 3 km. Standalone: `TD5RE_ROAM_SPRINT_TEST=berisso|ensenada`.
+
+## Phase B results
+
+### The fetch (orchestrator, account3, 2026-10-30)
+Step 2 rc 0: identity built into the run, 119 207 493 old cells per raster, 0 differ; tiles 1755 same,
+0 changed homed in an old block, 32 changed homed in a new block, 86 new files. Step 3: all eight
+producers rc 0. The census on the staging place (`_archive/roam/SB/partido_census.py`):
+La Plata's count is IDENTICAL in every producer file and every tile layer. Berisso / Ensenada:
+POIs 60 / 115, fuel 5 / 6, S3D relations 3 / 4, park relations 6 / 15, plaza furniture 4 / 148,
+stadia 1 / 1, roads 1370 / 1341 (base 739 / 848), buildings 52 743 / 33 973 (base 23 590 / 19 049).
+Most producer records come from the BASE answers: the two town centres lie inside La Plata's old
+bbox (N -34.833, E -57.7526), which every bbox producer already fetched. Nothing clips to a polygon.
+PARK_RELATIONS `base_regenerated_differently 79` = every base record lacks the `dup_of` key (the
+shipped file predates d6659e32) and 2 of them would gain a value; kept verbatim. The b6_6
+`RuntimeWarning: invalid value encountered in divide` is the corrcoef of the Open Buildings vs OSM
+height STATISTIC (geo_fetch.conflate_extra_buildings `ob_vs_osm_measured.corr`), not a height: 0 of
+50 284 buildings in the new or changed tiles has a non-finite height field.
+
+### Water (`re/tools/geo_water_fill.py`, run after step 3)
+The overview (`_archive/roam/SB/raster_view.py`, view_ne.png): the union boundary runs ALONG the shore,
+the blocks hold sea out to their edges (sea floor -4 m), but past the last fetched block the Rio de la
+Plata was nodata (a dry plate at -1.53 m) and the Rio Santiago / port basins were WorldCover water
+(class 80) with no WATER mark (OSM maps them as multipolygon relations, the block query fetches ways).
+b3_8's "0 kept as sea, 2 refused" is NOT a missing shore: the coast leaves the grid's top edge there,
+the block is land up to it (15 wet cells).
+Fill, only outside the base fetched blocks (asserted): 11 455 008 nodata cells connected to sea -> sea
+(HEIGHT -4 m, WATER 1, COVER 80, CANOPY 0), 196 785 WorldCover-water cells -> wet (0 under a road:
+rasterize_layers had already cleared cover 80 under every non-bridge road). Out of the grid the reader
+clamps to the edge cell, so the sea edge continues as sea.
+
+### ROAMTILE identity (`re/tools/geo_roam_identity.py` + td5_roam_tile.c)
+The tile input hash covers the WHOLE PLACE.JSON text and the HEIGHT / WATER headers (grid w / h), so
+every La Plata tile would have rebuilt. PLACE.JSON `extension.roam_identity` now holds the base
+place_fnv / hdr_fnv (FNV-1a exactly as C: base PLACE.JSON 4C025F7D, headers 21FC3BA4) and the
+source-frame bbox of the changed cells of 17 blocks (8 new, 3 completed past the old edge only, 6
+sea-filled). A window clear of them hashes the base identity.
+Proof, 656 La Plata tiles rebuilt offline on the new data (`--RoamBuildTiles=list:`) vs master's
+shipped roam/x100 (`_archive/roam/SB/compare_rebuild.py`):
+
+| group | tiles | raw identical | content identical (hash, STMP, trailer masked) |
+|---|---|---|---|
+| far (> 3 km from Berisso/Ensenada, random 100) | 100 | 100 | 100 |
+| City Bell (1.5 km) | 50 | 48 | 50 |
+| casco | 404 | 388 | 404 |
+| within 1 km (rest) | 102 | 58 | 97 |
+
+All 62 not raw-identical tiles are within 1.8 km of the new partidos; 57 differ only in the input hash
+(their window meets a changed tile file), so they rebuild once in game with the same content. 5 tiles
+change content, 49_53 and 50_53..56 at -34.86, -58.02 (the La Plata / Ensenada line by Gonnet): EDGE
+records only (50_56 also SPAN / VERT), same counts: the roads crossing the line now continue into
+Ensenada's network. No ROAM_RULES / SCENERY_RULES bump.
