@@ -871,9 +871,8 @@ int frontend_geo_entry_launch_roam(int opponents)
  * single list position, not one row per place (round 1008 removed those), and
  * its button exists only on that position.
  *
- * Which place it stands for: the one BUILD armed, else the place the generator
- * last left in SELECTED.TXT / TD5RE_GEO_PLACE (BUILD writes both), else the
- * first registered place. Registered = has a slot in the track registry, i.e.
+ * Which place it stands for: the place left in SELECTED.TXT / TD5RE_GEO_PLACE,
+ * else the first registered place. Registered = has a slot in the track registry, i.e.
  * raceable. */
 int frontend_geo_entry_slot(void) {
     const char *want;

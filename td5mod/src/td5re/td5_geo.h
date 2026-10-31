@@ -70,12 +70,12 @@ void td5_geo_unload(void);
  *
  *   SOURCE   re/assets/geo/<slug>/<name>
  *            Exactly what re/tools/geo_fetch.py wrote, in the frame it fetched
- *            in. The GAME NEVER WRITES HERE. td5_geo_route_commit reads it and
- *            only reads it, so N commits in a row from the same route give
- *            byte-identical products.
+ *            in. The GAME NEVER WRITES HERE.
  *
  *   DERIVED  re/assets/geo/<slug>/_route/<name>
- *            The route-frame products of the LAST BUILD: re-gridded rasters,
+ *            [roam SA] Written by the strip geo BUILD's commit, deleted in round
+ *            S: nothing writes it any more, a frame already on disk is still
+ *            read. The route-frame products of the LAST BUILD: re-gridded rasters,
  *            re-projected ROADS/BUILDINGS/AREAS/SIGNALS, ROUTE.JSON,
  *            ROUTE_RAW.JSON and a PLACE.JSON carrying the route frame. Wholly
  *            rewritten by every commit, always from the source.
@@ -103,12 +103,6 @@ const char *td5_geo_source_path(char *buf, size_t cap,
 const char *td5_geo_derived_path(char *buf, size_t cap,
                                  const char *slug, const char *name);
 
-/* Drop every in-memory copy of the loaded place (rasters AND the parsed route)
- * so the next td5_geo_sync() reloads from disk. For td5_geo_route_commit, which
- * rewrites a place's ROUTE.JSON and rasters in place: a same-place rebuild in
- * the same process would otherwise keep the pre-commit copies, because sync
- * skips a reload when the slug/path are unchanged. */
-void td5_geo_invalidate(void);
 
 int         td5_geo_loaded(void);
 const char *td5_geo_place_name(void);   /* "" when nothing is loaded */
