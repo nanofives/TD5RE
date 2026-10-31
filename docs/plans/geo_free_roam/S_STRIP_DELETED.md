@@ -82,10 +82,19 @@ so the auto track's bytes cannot move; the gate below confirms it.
   -NoControl`): master exe and the new exe, `python verify/geo_level_identity.py level090_master
   level090_sa1`: **bytes IDENTICAL**, MODELS sha256 E2F1F33C221D61CAB0EFF701484011F0, md5 43FA31619D6DC5A4
   (`id_syn_master.txt`, `id_syn_sa1.txt`). Rerun on the final exe: `id_syn_final.txt`.
-- Compile: DEV 84 warnings (baseline 84), RELEASE builds (`pbuild3.log`, `pbuild3r.log`).
+- `build_all.bat` (absolute path): DEV + RELEASE OK, structure lint extern 3/3, td5_game.h includers 23/23,
+  warnings 84/84 (`build_all_final.log`). Smoke on that exe: 22 PASS / 0 WARN / 0 FAIL
+  (`selftest_smoke_final.txt`); synthetic level090 on that exe: IDENTICAL to master (`id_syn_final.txt`).
 - Selftest smoke: 22 PASS / 0 WARN / 0 FAIL incl. roam, roam-sprint(-ai)-smoke, roam-circuit-smoke,
-  roam-sprint-mp2, roam-circuit-mp2, roam-traffic-smoke, roam-cops-smoke (`selftest_smoke.txt`). Full: see
-  the round report.
+  roam-sprint-mp2, roam-circuit-mp2, roam-traffic-smoke, roam-cops-smoke (`selftest_smoke.txt`).
+- Selftest full: 87 PASS / 0 WARN / 2 FAIL (`selftest_full.txt`). `roam-cops-roadblock` FAILs on the MASTER
+  exe too, same verdict ("scenario 3", run alone on both exes). `suite-global-timeout`: the suite's own 900 s
+  deadline cut off roam-partido, ovr-edinburgh-finish and rt-sydney; run alone with
+  `TD5RE_SELFTEST_TIMEOUT_S=2400` all three PASS (`selftest_tail_*.txt`).
+- Geo map through the menus (`verify/roam/f2b_run.py`, `inputscripts/f11a_geo_race_route.txt`, two seeded
+  pins): `--StartScreen=56` RACE ROUTE -> car select -> `roam: session start ... host_track=61`, a city race
+  with route walls (`out/geo_race_route`); `--StartScreen=57` FREE ROAM setup, CONFIRM -> car select -> free
+  roam (`out/free_roam`).
 - Master roam probe (`roam-sprint-ai-smoke` on the master exe): `geo: route .../_route/ROUTE.JSON loaded:
   1330 nodes`, `geo_corners: ARMED`, no `[GEO ATTRS]` race tables, no `[XSPAN]` census: deleting attrs and
   xspan does not change a roam race.
