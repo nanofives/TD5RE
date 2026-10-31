@@ -1416,6 +1416,7 @@ def write_place_ext(ctx: Ctx, prep: dict, sums: list) -> dict:
         "base_bbox": ex["base_bbox"], "added_bboxes": ex["added_bboxes"],
         "base_grid": [ex["old_w"], ex["old_h"]],
         "base_blocks": len(ex["old"]),
+        "base_fetched_blocks": [[bx, bz] for (bx, bz) in sorted(ex["old"], key=lambda t: (t[1], t[0]))],
         "new_blocks": [[b["bx"], b["bz"]] for b in ex["new"]],
         "completed_blocks": [[b["bx"], b["bz"]] for b in ex["complete"]]}
     write_json(os.path.join(ctx.work, "PLACE.JSON"), pj)
