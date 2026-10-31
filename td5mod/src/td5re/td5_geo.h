@@ -152,16 +152,14 @@ void   td5_geo_grid(int *out_w, int *out_h, double *out_cell,
                     double *out_rotation_rad);
 
 /* ---------------------------------------------------------------- route ---
- * [GEO PHASE 3 2026-09-30] The conditioned centerline geo_condition.py writes
- * (ROUTE.JSON: points[] of {x, z, lanes}, node 0 at the origin, its first span
- * along +X, chord spacing of exactly span_length). When one is loaded,
- * tg_build_centerline pushes these nodes instead of walking sections, and the
- * track length follows the route.
+ * [GEO PHASE 3 2026-09-30] The conditioned centerline the strip geo BUILD
+ * committed (ROUTE.JSON: points[] of {x, z, lanes}, node 0 at the origin, its
+ * first span along +X, chord spacing of exactly span_length).
  *
- * SOURCE, in order: TD5RE_GEO_ROUTE=<path to a ROUTE.JSON> (works with no place
- * loaded, over the synthetic world -- the offline fixture path), else
- * re/assets/geo/<slug>/ROUTE.JSON of the loaded place. Neither present means
- * no route and the generator walks as before, byte-identical.
+ * [roam SA] The strip geo BUILD is deleted: nothing writes a ROUTE.JSON any
+ * more and the generator never walks one (it builds the synthetic auto track
+ * only). SOURCE: the loaded place's last committed ROUTE.JSON, if one is still
+ * on disk; the racer AI's geo gates (td5_ai.c) read its presence.
  *
  * The loader VALIDATES the contract rather than trusting it: node 0 at the
  * origin, span_length matching TD5_TG_SPAN_LENGTH, and every chord within
@@ -252,8 +250,7 @@ const TD5_GeoXSep *td5_geo_xsep(int i);
  *
  * td5_geo_sync() makes the loaded place + route match the knob. The generator
  * calls it before folding the spec (build, studio preview, streamed rederive),
- * so a LOCATION change takes effect on the next build with no restart.
- * TD5RE_GEO_ROUTE, when set, still overrides the place's own ROUTE.JSON. */
+ * so a LOCATION change takes effect on the next build with no restart. */
 void td5_geo_sync(void);
 void td5_geo_select(const char *slug);   /* "" = synthetic; writes SELECTED.TXT */
 
@@ -307,23 +304,6 @@ const char *td5_geo_places_buildable_slug(int i);
 int         td5_geo_places_incomplete_count(void);
 const char *td5_geo_places_incomplete_slug(int i);
 const char *td5_geo_places_incomplete_reason(int i);
-
-/* Route plot for the SELECT TRACK preview panel. Reads
- * re/assets/geo/<slug>/ROUTE.JSON directly and keeps only x/z -- deliberately
- * NOT td5_geo_load(), which also parses a multi-megabyte HEIGHT.R16 and belongs
- * to the build, not to a menu that re-draws every frame. Decimated to
- * TD5_GEO_PREVIEW_MAX points and cached by slug, so re-asking for the place
- * that is already shown costs one strcmp.
- *
- * [ROUND 1030 A1] The nodes come back NORTH UP (x = east, z = north, world
- * units), not in the turned world frame the BUILD writes, so the panel matches
- * the GEOSPATIAL TRACK GENERATOR map. TD5RE_GEO_PREVIEW_NORTH_UP=0 restores the
- * world frame.
- *
- * Returns the point count (0 when the place has no usable route). */
-#define TD5_GEO_PREVIEW_MAX 2048
-int td5_geo_preview_route(const char *slug);
-int td5_geo_preview_node(int i, double *x, double *z);
 
 /* Attribution every geo track must show (ODbL). */
 #define TD5_GEO_CREDIT "MAP DATA (C) OPENSTREETMAP CONTRIBUTORS"

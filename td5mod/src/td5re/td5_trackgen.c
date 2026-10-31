@@ -1053,7 +1053,7 @@ static int         s_rolls_valid = 0;
 
 int tg_rolls_enabled(void) { return td5_env_flag_on("TD5RE_R21_ROLL"); }
 
-/* [GEO item 11] Is a real place or route asked for? Environment only (see the
+/* [GEO item 11] Is a real place asked for? Environment only (see the
  * geo hold in td5_trackgen_resolve_rolls for why not td5_geo_loaded). */
 static int tg_rolls_geo_requested(void)
 {
@@ -1061,8 +1061,7 @@ static int tg_rolls_geo_requested(void)
      * track slot sets the override instead of the env knob, and the geo hold
      * must apply to it for exactly the same reason it applies to the knob. */
     const char *p = td5_geo_wanted_slug();
-    const char *r = getenv("TD5RE_GEO_ROUTE");
-    return (p && p[0]) || (r && r[0]);
+    return p && p[0];   /* [roam SA] TD5RE_GEO_ROUTE went with the strip geo BUILD */
 }
 
 /* Sibling of tg_biome_hash with its OWN salt namespace and, deliberately, no

@@ -454,10 +454,8 @@ void td5_geo_unload(void)
 
 /* ------------------------------------------------------------------ route --- */
 
-/* [GEO PHASE 3 2026-09-30] See td5_geo.h. Kept apart from s_geo because a route
- * is usable with no place loaded (the offline fixture over the synthetic world),
- * and td5_geo_unload must not throw away a route that came from
- * TD5RE_GEO_ROUTE. */
+/* [GEO PHASE 3 2026-09-30] See td5_geo.h. Kept apart from s_geo: the route is
+ * cached by path (geo_route_sync). */
 static struct {
     int     n;
     double *x, *z;
@@ -1051,129 +1049,6 @@ const char *td5_geo_places_incomplete_slug(int i)
 { return (i >= 0 && i < s_places_bad.n) ? s_places_bad.slug[i] : ""; }
 const char *td5_geo_places_incomplete_reason(int i)
 { return (i >= 0 && i < s_places_bad.n) ? s_places_bad.reason[i] : ""; }
-
-/* ------------------------------------------- [J8 GEO-PICK] preview route ---
- * The SELECT TRACK panel needs the SHAPE of a place's route before anything is
- * built or loaded. Parsing ROUTE.JSON for x/z alone is cheap (~150 KB) and,
- * unlike td5_geo_load, touches none of the module's live state -- so the panel
- * can show Valparaiso while La Plata is the loaded place, with no interaction
- * between the two.
- *
- * Deliberately NOT validating chord spacing / origin the way geo_route_load
- * does: those checks decide whether the ENGINE may build from a route, and a
- * route that fails them still draws a perfectly truthful map. Rejecting one
- * here would leave the panel blank for a place the user can see on disk. */
-static struct {
-    char   slug[64];
-    int    n;
-    double x[TD5_GEO_PREVIEW_MAX];
-    double z[TD5_GEO_PREVIEW_MAX];
-} s_preview;
-
-int td5_geo_preview_route(const char *slug)
-{
-    char path[384];
-    char *json;
-    cJSON *root, *pts;
-    int total, i, stride;
-
-    if (!slug || !slug[0]) { s_preview.slug[0] = '\0'; s_preview.n = 0; return 0; }
-    if (!strcmp(slug, s_preview.slug)) return s_preview.n;   /* already shown */
-
-    snprintf(s_preview.slug, sizeof(s_preview.slug), "%s", slug);
-    s_preview.n = 0;
-
-    td5_geo_place_path(path, sizeof(path), slug, "ROUTE.JSON");
-    json = geo_slurp(path);
-    if (!json) return 0;
-    root = cJSON_Parse(json);
-    free(json);
-    if (!root) {
-        TD5_LOG_W(LOG_TAG, "geo: preview route %s is not valid JSON", path);
-        return 0;
-    }
-    pts = cJSON_GetObjectItem(root, "points");
-    if (!pts || !cJSON_IsArray(pts) || (total = cJSON_GetArraySize(pts)) < 2) {
-        cJSON_Delete(root);
-        return 0;
-    }
-    /* [ROUND 1013 F3] The strip runs past the finish (the run-off), but the map
-     * shows the ROUTE: stop at the finish span so the finish marker sits on the
-     * line and not 350 m beyond it. An old file has no key and is unchanged. */
-    {
-        const cJSON *fs = cJSON_GetObjectItem(root, "finish_span");
-        if (fs && cJSON_IsNumber(fs) && fs->valueint > 1 && fs->valueint + 1 < total)
-            total = fs->valueint + 1;
-    }
-    /* Keep the LAST node whatever the stride, so the finish marker lands on the
-     * real end of the route rather than wherever the decimation happened to stop. */
-    stride = total / TD5_GEO_PREVIEW_MAX;
-    if (stride < 1) stride = 1;
-    for (i = 0; i < total && s_preview.n < TD5_GEO_PREVIEW_MAX; i += stride) {
-        const cJSON *p  = cJSON_GetArrayItem(pts, i);
-        const cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
-        const cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-        if (!px || !pz || !cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) continue;
-        s_preview.x[s_preview.n] = px->valuedouble;
-        s_preview.z[s_preview.n] = pz->valuedouble;
-        s_preview.n++;
-    }
-    if (s_preview.n > 1 && stride > 1 && s_preview.n < TD5_GEO_PREVIEW_MAX) {
-        const cJSON *p  = cJSON_GetArrayItem(pts, total - 1);
-        const cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
-        const cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
-        if (px && pz && cJSON_IsNumber(px) && cJSON_IsNumber(pz)) {
-            s_preview.x[s_preview.n] = px->valuedouble;
-            s_preview.z[s_preview.n] = pz->valuedouble;
-            s_preview.n++;
-        }
-    }
-    /* [ROUND 1030 A1] North up. A BUILD turns the route onto its principal axis
-     * (td5_geo_route.c gr_proj_to_world: x = (e cos t - n sin t) * upm + off_x,
-     * z = (e sin t + n cos t) * upm + off_z), so the raw x/z plot came out
-     * turned by rotation_rad -- -48.8 deg for La Plata -- while the GEOSPATIAL
-     * TRACK GENERATOR map the route was drawn on is north up. Undo the turn so
-     * the panel shows east right and north up, the way the player drew it. The
-     * offset is a pure translation and the panel re-centres on its own box, so
-     * only the rotation matters. TD5RE_GEO_PREVIEW_NORTH_UP=0 keeps the world
-     * frame. A route without the key (written before rotation existed) is
-     * already north up and is left alone. */
-    if (td5_env_int("TD5RE_GEO_PREVIEW_NORTH_UP", 1, 0, 1) != 0) {
-        const cJSON *rr = cJSON_GetObjectItem(root, "rotation_rad");
-        if (!rr || !cJSON_IsNumber(rr)) {
-            const cJSON *pj = cJSON_GetObjectItem(root, "projection");
-            rr = pj ? cJSON_GetObjectItem(pj, "rotation_rad") : NULL;
-        }
-        /* [roam M] a GAME-frame route ("reflect_x", td5_geo_frame.h) un-rotates to (-east, north) */
-        const cJSON *pj = cJSON_GetObjectItem(root, "projection");
-        const cJSON *rf = pj ? cJSON_GetObjectItem(pj, TD5_GEO_PROJ_REFLECT_KEY) : NULL;
-        const int reflect = cJSON_IsNumber(rf) && rf->valueint != 0;
-        if ((rr && cJSON_IsNumber(rr) && rr->valuedouble != 0.0) || reflect) {
-            const double th = (rr && cJSON_IsNumber(rr)) ? rr->valuedouble : 0.0;
-            const double c = cos(th), s = sin(th);
-            for (i = 0; i < s_preview.n; i++) {
-                const double x = s_preview.x[i], z = s_preview.z[i];
-                const double e = x * c + z * s;
-                s_preview.x[i] = reflect ? td5_geo_game_x(e) : e;   /* east  */
-                s_preview.z[i] = -x * s + z * c;                    /* north */
-            }
-            TD5_LOG_I(LOG_TAG, "geo: preview route %s turned north up (rotation %.4f rad)",
-                      slug, rr->valuedouble);
-        }
-    }
-    cJSON_Delete(root);
-    TD5_LOG_I(LOG_TAG, "geo: preview route %s -> %d of %d nodes (stride %d)",
-              slug, s_preview.n, total, stride);
-    return s_preview.n;
-}
-
-int td5_geo_preview_node(int i, double *x, double *z)
-{
-    if (i < 0 || i >= s_preview.n) return 0;
-    if (x) *x = s_preview.x[i];
-    if (z) *z = s_preview.z[i];
-    return 1;
-}
 
 int td5_geo_init(void)
 {
