@@ -215,6 +215,12 @@ static int    s_n_places;
 #define GEO_RING_MAX 400
 static double s_place_ring[GEO_PLACE_MAX][GEO_RING_MAX][2];
 static int    s_place_ring_n[GEO_PLACE_MAX];
+/* [roam SB] the partidos inside a several-partido place (Gran La Plata = La Plata + Berisso + Ensenada), drawn as
+ * thin lines over the outline so the map shows where each one ends */
+#define GEO_PART_MAX      4
+#define GEO_PART_RING_MAX 240
+static float  s_place_part[GEO_PLACE_MAX][GEO_PART_MAX][GEO_PART_RING_MAX][2];
+static int    s_place_part_n[GEO_PLACE_MAX][GEO_PART_MAX];
 
 /* Off-thread rebuild. The router is synchronous by contract but must finish
  * "well under a second"; we only move it off the main thread once a build has
@@ -1186,6 +1192,23 @@ static void geo_draw_places(float sx, float sy)
                 }
                 px = qx; py = qy;
             }
+            if (s_place_part_n[i][1] >= 4) {   /* [roam SB] two or more partidos: their borders, thin */
+                int p;
+                for (p = 0; p < GEO_PART_MAX; p++) {
+                    int pb = 2000;
+                    for (k = 0; k < s_place_part_n[i][p] && pb > 0; k++) {
+                        float qx, qy;
+                        geo_latlon_to_design(s_place_part[i][p][k][0], s_place_part[i][p][k][1],
+                                             sx, sy, &qx, &qy);
+                        if (k > 0 && !((px < GEO_MAP_X && qx < GEO_MAP_X) ||
+                                       (px > GEO_MAP_X + GEO_MAP_W && qx > GEO_MAP_X + GEO_MAP_W) ||
+                                       (py < GEO_MAP_Y && qy < GEO_MAP_Y) ||
+                                       (py > GEO_MAP_Y + GEO_MAP_H && qy > GEO_MAP_Y + GEO_MAP_H)))
+                            pb -= geo_stamp_line(px, py, qx, qy, 1.0f, GEO_COL_SHADE_ED, sx, sy, pb);
+                        px = qx; py = qy;
+                    }
+                }
+            }
             continue;
         }
         geo_latlon_to_design(s_place_bbox[i][3], s_place_bbox[i][0], sx, sy, &x0, &y0);
@@ -1734,6 +1757,20 @@ static void geo_screen_init(void)
                     s_place_ring[i][k][1] = ll[2 * k + 1];
                 }
                 s_place_ring_n[i] = n;
+            }
+            {   /* [roam SB] the partidos, when the place has more than one */
+                int p;
+                for (p = 0; p < GEO_PART_MAX; p++) {
+                    const int m = td5_geo_route_place_part_ring(s_place_slug[i], p, ll, GEO_RING_MAX);
+                    s_place_part_n[i][p] = 0;
+                    if (m >= 4 && m <= GEO_PART_RING_MAX) {
+                        for (k = 0; k < m; k++) {
+                            s_place_part[i][p][k][0] = (float)ll[2 * k];
+                            s_place_part[i][p][k][1] = (float)ll[2 * k + 1];
+                        }
+                        s_place_part_n[i][p] = m;
+                    }
+                }
             }
         }
     }

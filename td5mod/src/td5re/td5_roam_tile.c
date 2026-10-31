@@ -459,6 +459,13 @@ struct TD5_RoamTileCtx {
     char     grid_json[2048];
     int      grid_json_n;
     uint32_t place_fnv, hdr_fnv;
+    /* [roam SB] an EXTENDED place (geo_region frame_from, Gran La Plata): PLACE.JSON extension.roam_identity holds
+     * the base place's place_fnv / hdr_fnv and the source-frame boxes of every block whose data changed. A window
+     * clear of those boxes hashes the base identity, so the base place's tiles stay valid; one that meets a box
+     * hashes the real files and rebuilds. */
+    int      have_id;
+    uint32_t id_place_fnv, id_hdr_fnv;
+    double  *id_box;  int n_id_box;     /* minx, minz, maxx, maxz per box (source frame, the INDEX rows' frame) */
     char     hpath[400], wpath[400];
     int      ex100;
     TD5_RoamGraphParams prm;
@@ -693,6 +700,32 @@ TD5_RoamTileCtx *td5_roam_tile_ctx_open(const char *place, int create_grid,
     td5_geo_source_path(path, sizeof path, place, "PLACE.JSON");
     txt = slurp_len(path, &len);
     c->place_fnv = txt ? fnv_add(FNV_INIT, txt, len) : 0u;
+    if (txt) {   /* [roam SB] the frozen base identity of an extended place */
+        cJSON *root = cJSON_Parse(txt);
+        const cJSON *id = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "extension"), "roam_identity");
+        const cJSON *pf = cJSON_GetObjectItem(id, "place_fnv"), *hf = cJSON_GetObjectItem(id, "hdr_fnv");
+        const cJSON *bx = cJSON_GetObjectItem(id, "boxes"), *b;
+        if (cJSON_IsNumber(pf) && cJSON_IsNumber(hf) && cJSON_IsArray(bx)) {
+            const int nb = cJSON_GetArraySize(bx);
+            c->id_box = (double *)calloc((size_t)(nb > 0 ? nb : 1) * 4u, sizeof(double));
+            if (c->id_box) {
+                c->id_place_fnv = (uint32_t)pf->valuedouble;
+                c->id_hdr_fnv = (uint32_t)hf->valuedouble;
+                cJSON_ArrayForEach(b, bx) {
+                    if (cJSON_GetArraySize(b) != 4) continue;
+                    c->id_box[4 * c->n_id_box + 0] = cJSON_GetArrayItem(b, 0)->valuedouble;
+                    c->id_box[4 * c->n_id_box + 1] = cJSON_GetArrayItem(b, 1)->valuedouble;
+                    c->id_box[4 * c->n_id_box + 2] = cJSON_GetArrayItem(b, 2)->valuedouble;
+                    c->id_box[4 * c->n_id_box + 3] = cJSON_GetArrayItem(b, 3)->valuedouble;
+                    c->n_id_box++;
+                }
+                c->have_id = 1;
+                TD5_LOG_I(LOG_TAG, "roam tile: extended place %s, base identity %08X/%08X, %d changed block box(es)",
+                          place, c->id_place_fnv, c->id_hdr_fnv, c->n_id_box);
+            }
+        }
+        cJSON_Delete(root);
+    }
     free(txt);
     td5_geo_source_path(c->hpath, sizeof c->hpath, place, "HEIGHT.R16");
     td5_geo_source_path(c->wpath, sizeof c->wpath, place, "WATER.R8");
@@ -701,6 +734,7 @@ TD5_RoamTileCtx *td5_roam_tile_ctx_open(const char *place, int create_grid,
 
     if (!idx_load(c)) {
         TD5_LOG_E(LOG_TAG, "roam tile: no readable tiles/INDEX.JSON for %s", place);
+        free(c->id_box);
         free(c);
         return NULL;
     }
@@ -710,6 +744,7 @@ TD5_RoamTileCtx *td5_roam_tile_ctx_open(const char *place, int create_grid,
     if (td5_roam_cache_session_begin(place) <= 0) {
         TD5_LOG_E(LOG_TAG, "roam tile: cache session for %s did not start", place);
         free(c->idx);
+        free(c->id_box);
         free(c);
         return NULL;
     }
@@ -732,6 +767,7 @@ void td5_roam_tile_ctx_close(TD5_RoamTileCtx *c)
     if (c->gwork) work_free(c->gwork);
     for (i = 0; i < c->nidx; i++) free(c->idx[i].sig);
     free(c->idx);
+    free(c->id_box);
     if (c->session) td5_roam_cache_session_end();
     free(c);
 }
@@ -742,9 +778,17 @@ static uint32_t ctx_input_hash(TD5_RoamTileCtx *c, const double win[4], int *nti
 {
     uint32_t h = FNV_INIT;
     const TD5_RoamGraphParams *p = &c->prm;
-    int i, nt = 0;
+    int i, nt = 0, base_id = 0;
+    if (c->have_id) {   /* [roam SB] clear of every changed block: the base place's identity */
+        base_id = 1;
+        for (i = 0; i < c->n_id_box && base_id; i++) {
+            const double *b = &c->id_box[4 * i];
+            if (!(b[2] < win[0] - c->halo || b[0] > win[2] + c->halo ||
+                  b[3] < win[1] - c->halo || b[1] > win[3] + c->halo)) base_id = 0;
+        }
+    }
     h = fnv_add(h, c->place, strlen(c->place) + 1u);
-    h = fnv_u32(h, c->place_fnv);
+    h = fnv_u32(h, base_id ? c->id_place_fnv : c->place_fnv);
     h = fnv_u32(h, (uint32_t)c->grid.tile);
     h = fnv_add(h, c->grid_json, (size_t)c->grid_json_n);
     h = fnv_u32(h, ROAM_FORMAT_VERSION);
@@ -770,7 +814,7 @@ static uint32_t ctx_input_hash(TD5_RoamTileCtx *c, const double win[4], int *nti
     h = fnv_dbl(h, ROAM_DECK_REACH_U); h = fnv_dbl(h, ROAM_DECK_G_U); h = fnv_dbl(h, ROAM_DECK_R_U);   /* [roam IE] */
     h = fnv_dbl(h, ROAM_PAD_TOUCH_M);    h = fnv_dbl(h, ROAM_SPREAD_CLAMP_M);
     h = fnv_u32(h, ROAM_HC_PLANE);
-    h = fnv_u32(h, c->hdr_fnv);
+    h = fnv_u32(h, base_id ? c->id_hdr_fnv : c->hdr_fnv);
     for (i = 0; i < c->nidx; i++) {
         IdxRow *r = &c->idx[i];
         int k;

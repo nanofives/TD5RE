@@ -19,6 +19,7 @@
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM: replay trackside cameras are strip-only */
 #include "td5_roam_physics.h"   /* GEO FREE ROAM: roam ground under the chase camera (F2-B) */
+#include "td5_roam_stream.h"    /* [roam SB] the free-cam tour waits for the roam stream */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
 #include "td5_fp.h"     /* FP_TRUNC/FP_SCALE — 24.8 fixed-point idiom macros */
 #include "td5re.h"
@@ -2812,6 +2813,15 @@ static void tour_resolve(TourPose *P)
 
 static int tour_scenery_complete(void)
 {
+    if (td5_roam_active()) {
+        /* [roam SB] free roam has no strip (no MODELS display list), so the test below never holds there: the
+         * roam stream round the car is the scenery. Complete once nothing is queued or waiting to install for
+         * 1.5 s (a tile mid-build on the worker is in neither count). */
+        static uint32_t s_quiet0 = 0;
+        const uint32_t now = td5_plat_time_ms();
+        if (td5_roam_stream_busy() > 0 || !s_quiet0) { s_quiet0 = now; return 0; }
+        return now - s_quiet0 >= 1500u;
+    }
     return !td5_tgstream_active() && td5_track_scenery_undecorated_from_span() < 0 &&
            td5_track_get_models_display_list_count() > 0;
 }

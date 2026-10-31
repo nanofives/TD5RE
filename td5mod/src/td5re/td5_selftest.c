@@ -538,6 +538,16 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=15, .depth=ST_DEPTH_ROAM_PARTIDO },
+    /* [roam SB] full suite: Plaza Moreno into the partidos joined in round S, the planner's route, solo: the same
+     * checks as roam-partido (0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units, 0 pinches / stuck) */
+    { .name="roam-berisso",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=22, .depth=ST_DEPTH_ROAM_PARTIDO },
+    { .name="roam-ensenada",         .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=23, .depth=ST_DEPTH_ROAM_PARTIDO },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
@@ -919,7 +929,7 @@ static int  s_roam_status;
 static char s_roam_note[120];
 
 /* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
-static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15 || (row >= 18 && row <= 21); }   /* [roam RA] 18..21 split screen */  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
+static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15 || (row >= 18 && row <= 23); }   /* [roam SB] 22/23 Berisso / Ensenada */   /* [roam RA] 18..21 split screen */  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
 static int st_roam_is_cops(int row) { return row == 13 || row == 14 || row == 17; }   /* [roam F10] 13 full (traffic on), 14 smoke; [G1b] 17 roadblocks */
 static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
@@ -973,7 +983,8 @@ static void st_roam_arm(const RaceScenario *sc)
         double ll[8][2];
         const int mode = sc->roam == 4 ? TD5_RSPRINT_SMOKE : sc->roam == 5 ? TD5_RSPRINT_FULL_AI
                        : (sc->roam == 6 || sc->roam == 12 || sc->roam == 18 || sc->roam == 20) ? TD5_RSPRINT_SMOKE_AI : sc->roam == 7 ? TD5_RCIRCUIT_FULL
-                       : (sc->roam == 8 || sc->roam == 19 || sc->roam == 21) ? TD5_RCIRCUIT_SMOKE : sc->roam == 15 ? TD5_RSPRINT_PARTIDO_SHORT : TD5_RSPRINT_FULL;
+                       : (sc->roam == 8 || sc->roam == 19 || sc->roam == 21) ? TD5_RCIRCUIT_SMOKE : sc->roam == 15 ? TD5_RSPRINT_PARTIDO_SHORT
+                       : sc->roam == 22 ? TD5_RSPRINT_BERISSO : sc->roam == 23 ? TD5_RSPRINT_ENSENADA : TD5_RSPRINT_FULL;
         td5_roam_sprint_route_waypoints(mode, ll, 8);
         td5_roam_sprint_test_arm(mode);
         if (sc->roam >= 18 && sc->roam <= 21) td5_roam_sprint_test_set_humans(1 + sc->mp_ai_players);   /* [roam RA] */

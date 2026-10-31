@@ -3775,6 +3775,28 @@ int td5_geo_route_place_boundary(const char *slug, int ring, double *latlon, int
     return n;
 }
 
+int td5_geo_route_place_part_ring(const char *slug, int part, double *latlon, int max_pts)
+{
+    cJSON *root = NULL, *rings = gr_place_boundary(slug, &root), *parts, *pr, *r;
+    int n = 0;
+    if (!rings) return 0;
+    parts = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "boundary"), "parts");
+    pr = parts ? cJSON_GetArrayItem(parts, part) : NULL;
+    r = pr ? cJSON_GetArrayItem(cJSON_GetObjectItem(pr, "rings"), 0) : NULL;
+    if (r && cJSON_IsArray(r)) {
+        const cJSON *pt;
+        cJSON_ArrayForEach(pt, r) {
+            if (latlon && n < max_pts && pt->child && pt->child->next) {
+                latlon[2 * n]     = pt->child->valuedouble;
+                latlon[2 * n + 1] = pt->child->next->valuedouble;
+            }
+            n++;
+        }
+    }
+    cJSON_Delete(root);
+    return n;
+}
+
 const char *td5_geo_route_place_at(TD5_GeoLatLon p)
 {
     static char slug[64];

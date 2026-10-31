@@ -129,7 +129,19 @@ static const double k_partido_short_wp[][2] = {
     { -34.90500, -57.95450 },     /* via    Diagonal 74                        */
     { -34.88658, -58.00139 },     /* FINISH Camino Parque Centenario, Gonnet   */
 };
-#define SD_IS_PARTIDO(m) ((m) == TD5_RSPRINT_PARTIDO || (m) == TD5_RSPRINT_PARTIDO_SHORT)
+/* [roam SB] into the partidos Berisso and Ensenada joined to the place in round S: START and FINISH only, the
+ * planner chooses the streets. FINISH = each partido relation's OSM admin_centre node (Berisso 198449765, Ensenada
+ * 198440814), snapped to the nearest road by the planner. */
+static const double k_berisso_wp[][2] = {
+    { -34.92048, -57.95358 },     /* START  Calle 12, Plaza Moreno east side   */
+    { -34.86886, -57.88287 },     /* FINISH Berisso, admin_centre node         */
+};
+static const double k_ensenada_wp[][2] = {
+    { -34.92048, -57.95358 },     /* START  Calle 12, Plaza Moreno east side   */
+    { -34.85749, -57.90772 },     /* FINISH Ensenada, admin_centre node        */
+};
+#define SD_IS_GRAN(m) ((m) == TD5_RSPRINT_BERISSO || (m) == TD5_RSPRINT_ENSENADA)
+#define SD_IS_PARTIDO(m) ((m) == TD5_RSPRINT_PARTIDO || (m) == TD5_RSPRINT_PARTIDO_SHORT || SD_IS_GRAN(m))
 #define SD_IS_CIRC(m) ((m) == TD5_RCIRCUIT_FULL || (m) == TD5_RCIRCUIT_SMOKE)
 #define SD_IS_AI(m) ((m) == TD5_RSPRINT_FULL_AI || (m) == TD5_RSPRINT_SMOKE_AI || SD_IS_CIRC(m))
 #define SD_IS_SMOKE(m) ((m) == TD5_RSPRINT_SMOKE || (m) == TD5_RSPRINT_SMOKE_AI || (m) == TD5_RCIRCUIT_SMOKE)
@@ -271,8 +283,11 @@ int td5_roam_sprint_route_waypoints(int mode, double (*ll)[2], int max)
         return cn;
     }
     if (SD_IS_PARTIDO(mode)) {
-        const double (*ps)[2] = mode == TD5_RSPRINT_PARTIDO ? k_partido_wp : k_partido_short_wp;
+        const double (*ps)[2] = mode == TD5_RSPRINT_PARTIDO ? k_partido_wp : mode == TD5_RSPRINT_BERISSO ? k_berisso_wp
+                              : mode == TD5_RSPRINT_ENSENADA ? k_ensenada_wp : k_partido_short_wp;
         const int pn = mode == TD5_RSPRINT_PARTIDO ? (int)(sizeof k_partido_wp / sizeof k_partido_wp[0])
+                     : mode == TD5_RSPRINT_BERISSO ? (int)(sizeof k_berisso_wp / sizeof k_berisso_wp[0])
+                     : mode == TD5_RSPRINT_ENSENADA ? (int)(sizeof k_ensenada_wp / sizeof k_ensenada_wp[0])
                                                    : (int)(sizeof k_partido_short_wp / sizeof k_partido_short_wp[0]);
         int i, n = sd_env_wp(ll, max);          /* TD5RE_ROAM_CIRCUIT_WP replaces them here too */
         if (n >= 2) return n;
@@ -314,7 +329,8 @@ void td5_roam_sprint_test_arm(int mode)
              mode == TD5_RCIRCUIT_FULL ? "selftest_circuit" : mode == TD5_RCIRCUIT_SMOKE ? "selftest_circuit_smoke"
              : mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
              : mode == TD5_RSPRINT_SMOKE_AI ? "selftest_sprint_ai_smoke" : mode == TD5_RSPRINT_PARTIDO ? "selftest_partido"
-             : mode == TD5_RSPRINT_PARTIDO_SHORT ? "selftest_partido_short" : "selftest_sprint");
+             : mode == TD5_RSPRINT_PARTIDO_SHORT ? "selftest_partido_short" : mode == TD5_RSPRINT_BERISSO ? "selftest_berisso"
+             : mode == TD5_RSPRINT_ENSENADA ? "selftest_ensenada" : "selftest_sprint");
 }
 
 /* [roam RA] the MP rows: `n` humans race (slot 0 driven by this test, the others simulated test players driven by
@@ -772,11 +788,14 @@ void td5_roam_sprint_test_frame(void)
         const char *m = getenv("TD5RE_ROAM_SPRINT_TEST");
         E.checked = 1;
         if (m && (!strcmp(m, "full") || !strcmp(m, "smoke") || !strcmp(m, "ai") || !strcmp(m, "ai_smoke") ||
-                  !strcmp(m, "circuit") || !strcmp(m, "circuit_smoke") || !strcmp(m, "partido") || !strcmp(m, "partido_short"))) {
+                  !strcmp(m, "circuit") || !strcmp(m, "circuit_smoke") || !strcmp(m, "partido") || !strcmp(m, "partido_short") ||
+                  !strcmp(m, "berisso") || !strcmp(m, "ensenada"))) {
             td5_roam_sprint_test_arm(!strcmp(m, "smoke") ? TD5_RSPRINT_SMOKE : !strcmp(m, "ai") ? TD5_RSPRINT_FULL_AI
                                      : !strcmp(m, "ai_smoke") ? TD5_RSPRINT_SMOKE_AI : !strcmp(m, "circuit") ? TD5_RCIRCUIT_FULL
                                      : !strcmp(m, "circuit_smoke") ? TD5_RCIRCUIT_SMOKE : !strcmp(m, "partido") ? TD5_RSPRINT_PARTIDO
-                                     : !strcmp(m, "partido_short") ? TD5_RSPRINT_PARTIDO_SHORT : TD5_RSPRINT_FULL);
+                                     : !strcmp(m, "partido_short") ? TD5_RSPRINT_PARTIDO_SHORT
+                                     : !strcmp(m, "berisso") ? TD5_RSPRINT_BERISSO : !strcmp(m, "ensenada") ? TD5_RSPRINT_ENSENADA
+                                     : TD5_RSPRINT_FULL);
             td5_roam_ai_force_player_spot(-1);   /* [F7] standalone: the player's grid spot is drawn as in play */
             E.driven = 1;
             TD5_LOG_W(LOG_TAG, "[ROAMSPRINT] standalone %s sprint test armed (TD5RE_ROAM_SPRINT_TEST)", m);
@@ -1391,7 +1410,7 @@ int td5_roam_sprint_test_verdict(char *note, size_t n)
     size_t bl = 0;
     int i, blocked = 0;
     const int want_jn = SD_IS_CIRC(D.mode) ? (D.mode == TD5_RCIRCUIT_SMOKE ? 3 : 6)
-                      : D.mode == TD5_RSPRINT_PARTIDO ? 60 : D.mode == TD5_RSPRINT_PARTIDO_SHORT ? 15
+                      : D.mode == TD5_RSPRINT_PARTIDO ? 60 : (D.mode == TD5_RSPRINT_PARTIDO_SHORT || SD_IS_GRAN(D.mode)) ? 15
                       : (SD_IS_SMOKE(D.mode) ? 3 : (D.mode == TD5_RSPRINT_FULL_AI ? 10 : 8));
     const int full = D.mode == TD5_RSPRINT_FULL || D.mode == TD5_RSPRINT_FULL_AI;
     long pinch, resc, tele;

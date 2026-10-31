@@ -172,6 +172,8 @@ void td5_roam_race_wall_stats(TD5_RoamRaceWallStats *out);
 #define TD5_RCIRCUIT_SMOKE    6   /* [F9a] the same loop, 2 laps, 3 AI */
 #define TD5_RSPRINT_PARTIDO   7   /* [F9b] Plaza Moreno -> City Bell centre -> Plaza Moreno, ~24 km, solo, the whole-partido proof */
 #define TD5_RSPRINT_PARTIDO_SHORT 8 /* [F9b] Plaza Moreno out of the casco to the north-west, solo: tiles built on demand + a rebase */
+#define TD5_RSPRINT_BERISSO   9   /* [roam SB] Plaza Moreno -> Berisso centre, solo, the planner's route (Gran La Plata) */
+#define TD5_RSPRINT_ENSENADA 10   /* [roam SB] Plaza Moreno -> Ensenada centre, solo, the planner's route (Gran La Plata) */
 /* Arm before the roam session launches. The test plans + saves its route once the planner graph is
  * ready, loads it back by name, starts the race and drives it (pure pursuit on the polyline), with
  * scripted wrong turns into closed mouths that must be stopped by a barrier. */
