@@ -5,11 +5,9 @@
 # Boots --Roam=1 spawned at -Lat/-Lon (the stream builds the road + scenery tiles round the camera),
 # poses in the roam frame from td5re.exe's TD5RE_ROAM_RENDER_POSES generator. Same launch rules as
 # f2c_tour.ps1: windowed, sent to the back without activation, RT off + min graphics, PID kill.
-# -Strip also writes <Out>/f4a_<Tag>_strip_poses.txt: the SAME poses in the level091 route frame,
-# for verify/geo_tour.ps1 -Poses (the strip geo track side by side).
 param([string]$Tag = "spot", [double]$Lat, [double]$Lon, [string]$Poses = "",
       [string]$Out = "", [string]$Extra = "", [int]$Dwell = 240, [int]$Timeout = 300,
-      [int]$Width = 1280, [int]$Height = 720, [string]$Exe = "td5re.exe", [switch]$Strip)
+      [int]$Width = 1280, [int]$Height = 720, [string]$Exe = "td5re.exe")
 $ErrorActionPreference = "Stop"
 $wt = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 Get-ChildItem env: | Where-Object { $_.Name -like 'TD5RE_*' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
@@ -21,14 +19,6 @@ $pose = Join-Path $Out "f4a_${Tag}_poses.txt"
 $lines = @($Poses -split ';' | Where-Object { $_.Trim() } | ForEach-Object { "${Tag}_" + $_.Trim() })
 Set-Content -Path $pose -Encoding ASCII -Value $lines
 $names = @($lines | ForEach-Object { $_.Split(':')[0] })
-if ($Strip) {
-    # route frame (no SPAWN): the numbers verify/geo_tour.ps1 -Poses takes on level091
-    $env:TD5RE_ROAM_RENDER_POSES = $pose
-    & (Join-Path $wt $Exe) | Out-Null
-    Copy-Item "$pose.tour.txt" (Join-Path $Out "f4a_${Tag}_strip_poses.txt") -Force
-    Write-Host "strip poses -> $(Join-Path $Out "f4a_${Tag}_strip_poses.txt")"
-    Remove-Item env:TD5RE_ROAM_RENDER_POSES
-}
 $env:TD5RE_ROAM_RENDER_POSES = $pose
 $env:TD5RE_ROAM_RENDER_POSES_SPAWN = "${lat},${lon}"
 & (Join-Path $wt $Exe) | Out-Null

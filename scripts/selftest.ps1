@@ -16,8 +16,9 @@ param(
     [ValidateSet("smoke", "full")]
     [string]$Suite = "smoke",
     [string]$Exe = ".\td5re.exe",
-    [int]$TimeoutSec = 900
+    [int]$TimeoutSec = 0    # 0 = by suite: smoke 900 s, full 2400 s (full took 1202 s on 2026-10-31)
 )
+if ($TimeoutSec -le 0) { $TimeoutSec = if ($Suite -eq "full") { 2400 } else { 900 } }
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
