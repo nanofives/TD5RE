@@ -39,6 +39,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  settings and TERRAIN HEIGHT. The strip pages" },
     { CL_ITEM,    "  (forks, loops, signals, city) are gone with it." },
     { CL_ITEM,    "AUTO-GENERATED track and every shipped track: same." },
+    { CL_ITEM,    "Shipped tracks: opponents drive the same whether or" },
+    { CL_ITEM,    "  not a real place is selected on the geo map." },
     { CL_BLANK,   "" },
     { CL_DATE,    "October 25 (split screen races in the city)" },
     { CL_ITEM,    "Local multiplayer (2 to 6 players) on SPRINT / CIRCUIT" },

@@ -125,3 +125,32 @@ span report (td5_tg_streets.c). The route-gated generator islands that only test
 Also removed this pass: the AUTO TRACK STUDIO's hidden LOCATION row (`AT_KIND_PLACE`) and `td5_geo_select`, the
 last writer of SELECTED.TXT (td5_geo_init still reads a file left on disk). Pending CSV: 64 more strip-only rows
 from before round 1014 superseded (145 in total, `_archive/roam/SA/csv_supersede2.txt`).
+
+### Follow-up evidence (`_archive/roam/SA/`)
+
+- Lines: all td5re `.c` / `.h` now 398 079 (417 000 at d32da5ed: **-18 921**).
+- Roam AI, master exe vs this branch, every roam row with `TD5RE_FIXED_FRAME_US=16667`
+  (`roamab_*.md`, `roamab_compare.txt`), then roam-sprint-ai / roam-partido / roam-traffic /
+  roam-circuit-smoke twice more on each exe (`roamab_repeat.txt`). Roam runs are NOT repeatable even with
+  the frame delta pinned (the stream worker is wall-clock): master against itself moves the
+  roam-sprint-ai gaps (C2..C5 +28.83/+49.23, +28.50/+40.60, +36.63/+38.00 over three runs) and FAILs
+  roam-traffic once (rep 2). Every difference between the exes sits inside that spread:
+  roam-sprint-ai-smoke, roam-sprint-mp2 and roam-sprint-mp4 are identical on every run; roam-traffic on
+  this branch reps 2 and 3 equals master rep 3 to the digit; roam-partido passed on reps 2 and 3 (its one
+  "stream misses 2" FAIL is the same streaming timing); the lap times of roam-circuit-smoke differ by
+  0.13..0.26 s between runs on both exes. Corner-limit hits: none on either exe, because the governor's code
+  never runs in roam (`td5_ai_tick` is not called); master's `geo_corners: ARMED` line was the only trace.
+- Shipped track with a place selected (`place_ab.py 0 2500 1`: Moscow, 5 AI, AI slot 1 traced, with and
+  without SELECTED.TXT, `place_ab_t0_s1.txt`): MASTER diverges at sim tick 1191 (AI steering 5376 -> -1408,
+  controls / driver / motion / pose / rotation / track); this branch: every sim-tick module identical
+  (only the render-frame files differ, as on any two runs).
+- Roam race with `_route/` moved aside (`noroute_result.txt`): roam-sprint-ai-smoke and roam-sprint-ai
+  PASS, the first identical to every other run, the second equal to master rep 2; no route is read.
+- Gates on the final exe: synthetic level090 IDENTICAL (`id_syn_followup.txt`), smoke 22 / 0 / 0
+  (`selftest_smoke_followup.txt`), DEV 84 warnings, RELEASE builds.
+- Frames (RT off, minimum graphics, RenderScale 100, map tiles offline so the map shows placeholders):
+  `frames/geo56_panel.png`, `frames/geo56_sprint_circuit_pins.png`, `frames/roam57_free_roam_setup.png`,
+  `frames/roam_race_route_tick30.png`, `frames/studio52.png`, `frames/studio52_terrain.png`.
+
+Also changed by the loader cut, visible: the AUTO-GENERATED entry is always named AUTO-GENERATED (master
+named it after the selected place at boot, because the strip route was loaded then).
