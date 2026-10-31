@@ -1502,6 +1502,24 @@ static int st_depth_ticks(int depth)
     }
 }
 
+/* The running leash of one race row (SS_RACE_WAIT_START arms it): tick budget at 30 Hz / ff plus countdown and
+ * fade margins, natural finishes a long fixed one. */
+static uint32_t st_row_run_leash_ms(const RaceScenario *sc, float ff)
+{
+    return (sc->natural_finish ? 300000u
+                               : (uint32_t)((float)st_depth_ticks(sc->depth) / 30.0f / ff) * 1000u + 90000u)
+           * (uint32_t)td5_env_int("TD5RE_SELFTEST_LEASH_X", 1, 1, 20);   /* [F8c] slow-frame runs (vsync, monitors off) */
+}
+
+/* [integ roamS] the most one row may take before its own watchdogs fail it: launch 8 s + start 60 s + the running
+ * leash + exit 30 s + post-menu 30 s. The suite deadline is the sum of these over the rows it runs, so it is only
+ * the backstop for a broken step watchdog and never cuts a row that is still inside its own leash (at 900 s fixed
+ * it cut roam-partido, ovr-edinburgh-finish and rt-sydney once the roam rows grew). */
+static uint32_t st_row_max_ms(const RaceScenario *sc)
+{
+    return 8000u + 60000u + st_row_run_leash_ms(sc, sc->ff > 0 ? (float)sc->ff : s_ff) + 30000u + 30000u;
+}
+
 /* ------------------------------------------------------------------------
  * [NEW SUITE 2026-08-07] Auto-isolate on damage
  *
@@ -1534,6 +1552,7 @@ static void st_iso_push(const RaceScenario *v, const char *bad, const char *axis
     s_iso[s_iso_count] = *v;
     s_iso[s_iso_count].name  = s_iso_name[s_iso_count];
     s_iso[s_iso_count].depth = ST_DEPTH_RUN_5S;   /* need motion to reproduce damage */
+    if (!getenv("TD5RE_SELFTEST_TIMEOUT_S")) s_suite_deadline_ms += st_row_max_ms(&s_iso[s_iso_count]);   /* [integ roamS] */
     s_iso_count++;
 }
 
@@ -2772,8 +2791,16 @@ void td5_selftest_boot(void)
     s_sub    = SS_ENTER;
     s_step   = 0;
     s_suite_start_ms    = td5_plat_time_ms();
-    s_suite_deadline_ms = s_suite_start_ms +
-        (uint32_t)td5_env_int("TD5RE_SELFTEST_TIMEOUT_S", 900, 60, 7200) * 1000u;
+    {   /* [integ roamS] scaled with the row list (st_row_max_ms), never below the old 900 s; the env knob wins */
+        const char *ov = getenv("TD5RE_SELFTEST_TIMEOUT_S");
+        uint32_t ms = 120000u + (uint32_t)s_n_screens * 15000u;
+        int i;
+        for (i = 0; i < s_n_races; i++) ms += st_row_max_ms(&k_races[s_row_map_on ? s_row_map[i] : i]);
+        if (ms < 900000u) ms = 900000u;
+        if (ov && ov[0]) ms = (uint32_t)td5_env_int("TD5RE_SELFTEST_TIMEOUT_S", 900, 60, 7200) * 1000u;
+        s_suite_deadline_ms = s_suite_start_ms + ms;
+        TD5_LOG_I(LOG_TAG, "suite deadline %u s (%s)", ms / 1000u, ov && ov[0] ? "TD5RE_SELFTEST_TIMEOUT_S" : "row list");
+    }
 
     TD5_LOG_I(LOG_TAG, "suite armed: %s (%d screens + %d races), race_ticks=%d "
               "ff=%.1f leak_limit=%dMB drift=%d%%",
@@ -2940,10 +2967,7 @@ static void st_tick_races(uint32_t now)
             s_race_budget = st_depth_ticks(sc->depth);
             /* Running budget: tick target at 30 Hz / ff, plus countdown and
              * fade margins. Natural finishes get a much longer leash. */
-            s_step_deadline_ms = now + (sc->natural_finish
-                ? 300000u
-                : (uint32_t)((float)s_race_budget / 30.0f / s_scenario_ff) * 1000u + 90000u)
-                * (uint32_t)td5_env_int("TD5RE_SELFTEST_LEASH_X", 1, 1, 20);   /* [F8c] slow-frame runs (vsync, monitors off) */
+            s_step_deadline_ms = now + st_row_run_leash_ms(sc, s_scenario_ff);
         } else if ((int32_t)(now - s_step_deadline_ms) >= 0) {
             st_finish_row(row, ST_FAIL, "race never started (timeout)");
             g_td5.ini.auto_race = 0;
