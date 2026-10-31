@@ -1331,7 +1331,7 @@ void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
  * previous build's roll can never be mistaken for a pin. */
 void tg_rolls_unpublish(void);
 void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
-void tg_geo_apply_spec(TD5_TrackGenSpec *spec);   /* [GEO PHASE 3] route decides length */
+void tg_geo_sync_place(void);   /* the loaded place follows the target (synthetic for the auto slot) */
 void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
 int  tg_rolls_presence_count(void);                /* [R22] presence rows    */
 int  tg_roll_value(int id);
@@ -1488,17 +1488,6 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl, int secti
 enum { TG_ST_NONE = 0, TG_ST_BRIDGE, TG_ST_TUNNEL };
 int  tg_struct_kind(int si);                       /* TG_ST_* for main span si */
 void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run */
-/* [OPTION B 2026-09-30] GEO TRACK grade separation (td5_tg_road.c's own
- * section header has the design). A deck span here is a BRIDGE in the structure
- * table -- so the ~150 existing bridge consumers need no change -- but it is
- * crossing another CARRIAGEWAY, not water, and two bridge behaviours are wrong
- * for that: the river plane a dry run lays under its deck would flood the road
- * below, and a pier dropped to the river bed would stand in it. Both are gated
- * on this predicate. Always 0 on a synthetic build.
- *   tg_xsep_span      span si is a grade separation's DECK (full lift)
- *   tg_xsep_run_span  span si is anywhere in a lift window (ramp or deck) */
-int  tg_xsep_span(int si);
-int  tg_xsep_run_span(int si);
 double tg_road_ground_y(int i);                    /* world ground under node i */
 int    tg_road_node_wet(int i);                    /* water under node i        */
 int    tg_road_node_forced(int i);                 /* terrain-yields conform    */

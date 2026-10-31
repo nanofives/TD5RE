@@ -5215,21 +5215,6 @@ static void tg_geo_plaza_report_impl(int from_stream)
               s_geop_skirt_quad_n, s_geop_skirt_near_n, TD5_TG_SKIRT_PARK_NEAR,
               td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_QUAD") ? "on" : "off",
               td5_env_flag_on("TD5RE_GEO_PARK_SKIRT_NEAR") ? "on" : "off");
-    /* First span each bound plaza is attached to, so a capture
-     * (StartSpanOffset) can be aimed at one without guessing. */
-    {
-        int si, last = -1, n = td5_geo_route_count() - 1;
-        for (si = 1; si < n; si++) {
-            int i = td5_geob_span_area(si);
-            for (; i >= 0; i = td5_geob_next_area(i)) {
-                const TD5_GeoArea *a = td5_geob_area(i);
-                if (!a || !td5_geob_area_is_plaza(a) || i == last) continue;
-                TD5_LOG_I(LOG_TAG, "[GEO PLAZA]   area %d first at span %d", i, si);
-                last = i;
-                break;
-            }
-        }
-    }
 }
 
 /* Group BLOCK dispatcher (feedback R3 items 3-6). Wired into the scenery loop

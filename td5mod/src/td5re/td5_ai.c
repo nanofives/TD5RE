@@ -36,7 +36,6 @@
 #include "td5_input.h"  /* g_td5_steering_bias_max_swing — CATCHUP steering swing (S06) */
 #include "td5re.h"
 #include "td5_config.h"  /* td5_env_int/float/flag_* — TD5RE_* knob helpers */
-#include "td5_geo.h"       /* [GEO CORNERS] td5_geo_route_count -- geo-track gate */
 #include "td5_trackgen.h"  /* [GEO CORNERS] td5_trackgen_is_auto_slot */
 #include <string.h>
 #include <math.h>
@@ -4857,32 +4856,6 @@ static inline uint32_t smart_hash_u32(uint32_t x) {
     return g_smart_skill[slot];
 }
 
-/* ===== SECTION: GEO corner edge (SmartAI on real-world tracks) ============
- * [GEO item 10, 2026-09-30] PORT-ONLY. A real city route has corners the
- * synthetic generator never makes: ~90 degrees turned in 5 or 6 spans, a
- * 7-10 m radius, on a 2-3 lane street. Driving La Plata end to end with the
- * default SMART AI (5 AI cars, RaceTrace, verify/xspan_run.ps1) finished every
- * car with continuous spans, but 1367 wall-contact ticks before the line, 86%
- * of them at three corners (spans 410, 970, 1473) where the racing line aimed
- * the car at u=0.16. The line clamp (SMART_RAY_MARGIN) is 6% of the road
- * WIDTH, and a car's half-width is ~0.14 of a 2-lane street, so the body sat
- * ON the inside rail. It pinned there with full lock into the wall for 1 to
- * 13 s and the cars behind piled into it.
- *
- * Fix: on the auto-track slot with a geo route loaded (s_geo_gov) the final
- * lateral clamp keeps the target TD5RE_AI_GEO_EDGE track units (car
- * half-width + clearance) off each rail. Every shipped track, TD6 and the
- * synthetic auto track keep the unchanged clamp.
- *
- * Measured, same route, same seed, 5 AI cars: wall ticks before the finish
- * 1367 -> 238, mean finish tick 5824 -> 4648. A braking-distance governor
- * (per-span corner speed C*sqrt(R), constant-deceleration look-ahead) was
- * tried alongside and REJECTED on the numbers: alone it made it worse (3466
- * wall ticks, mean finish 7608), because a slower car cuts the same apex and
- * pins harder. TD5RE_AI_GEO_EDGE=0 restores the stock clamp for an A/B. */
-static int s_geo_gov  = 0;
-static int s_geo_edge = 900;
-
 /* ===== SECTION: YAW-ACCELERATION LIMITER (round 1017 S) ====================
  * PORT-ONLY, GENERATED TRACKS ONLY (TD5RE_AI_STEER_YAWLIM=2 also shipped tracks).
  * The faithful steering cascade (td5_ai_update_steering_bias) treats the steering command
@@ -5032,25 +5005,10 @@ static void ai_corr_race_init(void)
               s_corr_on ? "ON" : "off", td5_track_corridor_count());
 }
 
-static void geo_gov_race_init(void)
-{
-    s_geo_edge = td5_env_int("TD5RE_AI_GEO_EDGE", 900, 0, 4000);
-    /* [J8 GEO-PICK 2026-10-03] is_GENERATED_slot: a real place picked from
-     * SELECT TRACK is its own slot, and the geo corner governor exists precisely
-     * for the tight real-world corners those routes carry. The route-count test
-     * is what actually gates it on a geo build either way. */
-    s_geo_gov  = s_geo_edge > 0
-              && td5_trackgen_is_generated_slot(g_td5.track_index)
-              && td5_geo_route_count() >= 2;
-    TD5_LOG_I(LOG_TAG, "geo_corners: %s (edge=%d units)",
-              s_geo_gov ? "ARMED" : "off", s_geo_edge);
-}
-
 /* Per-race: derive a continuous skill from the difficulty tier plus a small,
  * deterministic per-car spread so the field isn't uniform (some opponents are
  * genuinely faster/cleaner than others). */
 static void td5_ai_smart_race_init(void) {
-    geo_gov_race_init();
     ai_corr_race_init();
     ai_steer_cap_race_init();
     int tier = g_td5.difficulty_tier;
@@ -5840,31 +5798,6 @@ static void td5_ai_smart_branch(int slot) {
      * 5->7 so even low-skill / fast cars have runway to reach the outer sub-lanes
      * before the at-crossing route test (td5_track.c cases 8/11). */
     int look = 7 + (int)(skill * 8.0f); /* 7..15 spans — react early enough to lane-change before the fork */
-    /* [ROUND 1013 F2b] GEO TRACKS ONLY: a real route has long straights, so the
-     * field arrives at a fork at 180+ km/h (about 0.5 span per tick, so the 7..15
-     * span window above is ONE second or less). The slide onto the corridor then
-     * starts too late and the car goes in at full lock with its rear out
-     * (measured on Mariano's route, fork 2: the corridor's first 12 spans carry
-     * steering at +-98304 and rear slip 26000..34000 for the cars that arrive at
-     * 185 km/h, and the pile-up behind them). Look a fixed TIME ahead instead:
-     * `TD5RE_AI_BRANCH_LOOK_SEC` seconds of travel are added (0 = the old window).
-     * Zero change off a geo route, and no RNG, so the synthetic races and netplay
-     * are untouched. Capped at 40 spans. */
-    if (td5_geo_route_count() >= 2) {
-        static float s_look_sec = -1.0f;
-        if (s_look_sec < 0.0f)
-            s_look_sec = td5_env_float("TD5RE_AI_BRANCH_LOOK_SEC", 1.5f, 0.0f, 4.0f);
-        if (s_look_sec > 0.0f) {
-            const int32_t sp = ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED);
-            if (sp > 0) {
-                /* speed is 24.8: (sp >> 8) world units per tick, 30 ticks a second */
-                const int extra = (int)((double)(sp >> 8) * 30.0 * (double)s_look_sec
-                                        / (double)TD5_TG_SPAN_LENGTH);
-                look += extra;
-                if (look > 40) look = 40;
-            }
-        }
-    }
 
     /* [R1016 K] A corridor-aware racer keeps its pull ON the fork span too
      * (d = 0): scanning from d = 1 dropped the pull on the very span whose
@@ -6405,19 +6338,6 @@ static void td5_ai_smart_lane_bias(int slot) {
      * keeps the car off the boundary whether the authored line hugs a rail, a
      * surface nudge went wide, or we're threading a tight branch. */
     double clamp_margin = rays_on ? SMART_RAY_MARGIN : WALL_MARGIN;
-    if (s_geo_gov && (!on_branch || corr_here)) {
-        /* [GEO CORNERS] margin in track units, not road fraction (see the
-         * governor section): the car's own half-width must fit inside it.
-         * [R1016 K] A corridor car is on the same real-world street width, so it
-         * gets the same margin (it used to be skipped on every branch). */
-        double glx, glz, gex, gez, gw;
-        int gs = span_count > 0 ? ((look_span % span_count) + span_count) % span_count : 0;
-        if (smart_span_frame(gs, &glx, &glz, &gex, &gez, &gw)) {
-            double m = (double)s_geo_edge / gw;
-            if (m > 0.45) m = 0.45;
-            if (m > clamp_margin) clamp_margin = m;
-        }
-    }
     if (target_u < clamp_margin)       target_u = clamp_margin;
     if (target_u > 1.0 - clamp_margin) target_u = 1.0 - clamp_margin;
 
@@ -8835,52 +8755,9 @@ static void mp_cop_pick_target(int cop_slot); /* defined below */
 /**
  * Dispatch a single racer slot based on its state.
  */
-/* [ROUND 1013 F3] A GEO RACER THAT HAS CROSSED THE FINISH LINE IS FINISHED.
- *
- * g_slot_state (this module's table) is written once, at race init, and never
- * again: the game flips ITS table (s_slot_state[].state = 2) when a car crosses
- * the line, and nothing carries that across. So `case 0x02` below -- brake to a
- * stop -- never ran for a car that finished a point-to-point race, and an AI car
- * that crossed the line just kept racing. MEASURED on Mariano's La Plata route
- * with the run-off built: five AI cars crossed span 955 at 102-127 km/h and
- * ACCELERATED to 171-199 km/h over the next 113 spans, until the end wall at
- * span 1069 stopped them (log/race_trace_motion.csv long_speed, 6 slots). That
- * is exactly "AI parked against a wall" -- a run-off nobody brakes on is just a
- * longer run to the wall.
- *
- * Gated to a GEO point-to-point race on purpose: this is a TD5RE track with a
- * run-off built for it, and the shipped tracks and the synthetic auto track
- * keep the behaviour they have always had (TD5RE_GEO_FINISH_BRAKE=0 pins the old
- * behaviour here too, for a single-variable A/B). A DNF (companion_2 == 2) is
- * not a finish and is left alone, which is what td5_game_slot_finished_at_line
- * tests. */
-static int ai_geo_slot_finished(int slot)
-{
-    static int s_on = -1;
-    if (s_on < 0) {
-        s_on = td5_env_flag_on("TD5RE_GEO_FINISH_BRAKE");
-        TD5_LOG_I(LOG_TAG, "ai geo_finish_brake: TD5RE_GEO_FINISH_BRAKE=%d "
-                  "(AI cars brake once they cross a geo track's finish line)",
-                  s_on);
-    }
-    if (!s_on || g_track_is_circuit) return 0;
-    if (!td5_geo_loaded() || td5_geo_route_count() < 2) return 0;
-    return td5_game_get_slot_state(slot) == 2 && td5_game_slot_finished_at_line(slot);
-}
-
 static void ai_update_single_racer(int slot) {
     char *actor = actor_ptr(slot);
     int state = g_slot_state[slot];
-
-    if (state == 0 && ai_geo_slot_finished(slot)) {
-        static int s_logged[TD5_MAX_TOTAL_ACTORS];
-        if (!s_logged[slot]) {
-            s_logged[slot] = 1;
-            TD5_LOG_I(LOG_TAG, "geo_finish_brake: slot=%d crossed the finish "
-                      "line -> brake to a stop on the run-off", slot);
-        }
-        state = 2;
-    }
 
     /* [MP COP CHASE 2026-06-23] An AI-driven cop racer (g_cop_is_cop, COP_CHASING)
      * hunts the suspects via the dedicated cop driver (aggressive ram steering)

@@ -98,218 +98,8 @@ int tg_span_near_bridge(int si, int clear)
 
 /* ------------------------------------ [OPTION B] grade separations -- */
 
-/* [OPTION B 2026-09-30] docs/plans/GEO_TRACK_OSM_PLAN.md section 5.
- *
- * A conditioned real route may cross ITSELF. td5_track.c's crossing-safe
- * localiser keeps each car on its own leg there, but two carriageways at the
- * same height over the same ground are still one piece of tarmac: nothing
- * physical separates them, and a car that drifts a lane has genuinely arrived
- * on the other leg. So the ROAD builds the separation -- one leg rides a deck
- * over the other -- and the two decks then differ in Y by metres, which is also
- * the key the localiser's height test reads.
- *
- * WHICH leg goes over is decided offline (geo_condition.py, shipped in
- * ROUTE.JSON) because the walk sees one 64-span window at a time and cannot
- * know at the first leg that a second is coming. HOW FAR the ramps run is
- * decided HERE, because that needs the per-biome grade caps (tg_road_cap_at)
- * that only the generator can see.
- *
- * TWO STAGES, and they do different jobs:
- *
- *   1. The WALK-TIME TARGET (tg_xsep_lift_at, folded into tg_road_node_fill's
- *      `t`). This is what makes the classifier see a deck at all: the profile
- *      ends up TG_ROAD_BRIDGE_LIFT above the ground, so tg_road_node_kind calls
- *      it a bridge by the ordinary rule and the terrain is NOT conformed up to
- *      it. Without this the conform would bury the lower leg under a 7 m
- *      embankment.
- *   2. The FINISH PASS (tg_xsep_finish, in tg_apply_elevation). Stage 1 aims
- *      the deck at `clearance` above the GROUND, and the lower leg's own road
- *      is not exactly at ground level -- its profile limiter puts it in a cut
- *      or on a fill. Stage 1 also cannot know the lower leg's final y while the
- *      walk is still upstream of it. So once everything is solved, measure the
- *      clearance that was actually achieved against the lower CARRIAGEWAY and
- *      top the deck up, re-blending the ramps between anchored feet.
- *
- * NO RNG. Not one tg_rand/tg_frand/tg_range call, per the standing rule at
- * td5_trackgen_internal.h:1290-1296: an extra draw moves the road for every
- * existing seed. Every branch here is behind td5_geo_xsep_count(), which is 0
- * unless a ROUTE.JSON declared a crossing, so a synthetic build is untouched. */
-
-/* Fraction of the local grade cap a ramp is allowed to use. The ramp shares the
- * budget with the TERRAIN it climbs over -- the limiter caps the total grade --
- * so a ramp planned at the full cap is clipped wherever the ground itself
- * rises, and the clearance is then lost with nothing reporting it. */
-#define TG_XSEP_RAMP_CAP_USE  0.8
-/* The deck may not be shorter than a bridge run's own minimum or the classifier
- * would trim it away (tg_road_classify's min-length rule). */
-#define TG_XSEP_DECK_PAD      2
-
-/* The per-node grade cap, defined with the profile below. The ramp length is
- * derived from it, and the lift it produces has to be readable by
- * tg_road_node_fill, which is also below -- so the two halves of this section
- * sit either side of the profile block and this declaration bridges them. */
+/* The per-node grade cap, defined with the profile below. */
 static double tg_road_cap_at(int i);
-
-static float         s_xsep_lift[TD5_TG_MAX_SPANS + 8];  /* per-node target lift */
-static unsigned char s_xsep_in[TD5_TG_MAX_SPANS + 8];    /* 1 = ramp or deck     */
-static unsigned char s_xsep_top[TD5_TG_MAX_SPANS + 8];   /* 1 = full-lift deck   */
-static int           s_xsep_sites;
-static struct {
-    int    d0, d1;      /* node range held at the full lift (the deck)     */
-    int    f0, f1;      /* ramp feet: anchored nodes at each end           */
-    int    u0, u1;      /* the lower leg's node range                      */
-    double lift;        /* clearance the deck carriageway wants            */
-} s_xsep[TD5_GEO_XSEP_MAX];
-
-int tg_xsep_span(int si)
-{
-    if (si < 0 || si >= TD5_TG_MAX_SPANS) return 0;
-    return s_xsep_top[si] ? 1 : 0;
-}
-
-int tg_xsep_run_span(int si)
-{
-    if (si < 0 || si >= TD5_TG_MAX_SPANS) return 0;
-    return s_xsep_in[si] ? 1 : 0;
-}
-
-/* Does the structure run [s, e] belong to a grade separation? Such a run is
- * DELIBERATE, so tg_road_classify must not trim it the way it trims a deck the
- * terrain happened to produce (min length, lane seams, bridge/tunnel
- * interlock) -- trimming it would drop the deck back onto the lower road. */
-static int tg_xsep_run_is_deck(int s, int e)
-{
-    int q;
-    if (!s_xsep_sites) return 0;
-    for (q = s; q <= e; q++) if (tg_xsep_span(q)) return 1;
-    return 0;
-}
-
-static double tg_xsep_lift_at(int i)
-{
-    if (!s_xsep_sites || i < 0 || i >= TD5_TG_MAX_SPANS) return 0.0;
-    return (double)s_xsep_lift[i];
-}
-
-/* Plan every site: clamp its ranges into the route, derive the ramp length from
- * the grade caps it will actually be built against, and rasterise the lift into
- * s_xsep_lift. Called once per build, before the walk. */
-static void tg_xsep_plan(const TD5_TrackGenSpec *spec, int n_nodes)
-{
-    const double span_len = (double)spec->span_length;
-    const int    n_sites  = td5_geo_xsep_count();
-    int k;
-
-    memset(s_xsep_lift, 0, sizeof(s_xsep_lift));
-    memset(s_xsep_in,   0, sizeof(s_xsep_in));
-    memset(s_xsep_top,  0, sizeof(s_xsep_top));
-    s_xsep_sites = 0;
-    if (n_sites <= 0 || n_nodes < 3) return;
-
-    for (k = 0; k < n_sites; k++) {
-        const TD5_GeoXSep *x = td5_geo_xsep(k);
-        int d0, d1, f0, f1, ramp, room_lo, room_hi, i;
-        double cap_min, lift, need;
-        if (!x) continue;
-        /* Span si spans nodes si and si+1, so covering spans over_lo..over_hi
-         * at the full lift means holding nodes over_lo..over_hi+1 there. Pad so
-         * the deck run clears the classifier's own minimum length. */
-        d0 = x->over_lo - TG_XSEP_DECK_PAD;
-        d1 = x->over_hi + 1 + TG_XSEP_DECK_PAD;
-        if (d0 < TD5_TG_GRID_SPAN + 25) d0 = TD5_TG_GRID_SPAN + 25;
-        if (d1 > n_nodes - 2) d1 = n_nodes - 2;
-        if (d1 <= d0) {
-            TD5_LOG_W(LOG_TAG, "trackgen: [GEO XSEP] site %d deck %d..%d does not "
-                      "fit this route (%d nodes); skipped", k, x->over_lo,
-                      x->over_hi, n_nodes);
-            continue;
-        }
-        /* The gentlest cap anywhere near the site, so the ramp is sized against
-         * the limit it will really meet rather than the spec's nominal aim. */
-        cap_min = tg_road_cap_at(d0);
-        for (i = d0; i <= d1; i++) {
-            const double c = tg_road_cap_at(i);
-            if (c < cap_min) cap_min = c;
-        }
-        lift = x->clearance_units;
-        need = cap_min * TG_XSEP_RAMP_CAP_USE * span_len;
-        ramp = (need > 0.0) ? (int)ceil(lift / need) : n_nodes;
-        if (ramp < x->ramp_spans) ramp = x->ramp_spans;
-        if (ramp < 1) ramp = 1;
-        /* Room: back to the first legal structure span, forward to the last
-         * node, and never into the lower leg -- the whole point is to leave
-         * that one at grade, and a ramp over it would lift it too. */
-        room_lo = d0 - (TD5_TG_GRID_SPAN + 25);
-        room_hi = (n_nodes - 2) - d1;
-        if (x->under_hi < d0 && d0 - x->under_hi - 1 < room_lo)
-            room_lo = d0 - x->under_hi - 1;
-        if (x->under_lo > d1 && x->under_lo - d1 - 1 < room_hi)
-            room_hi = x->under_lo - d1 - 1;
-        if (room_lo < 0) room_lo = 0;
-        if (room_hi < 0) room_hi = 0;
-        if (ramp > room_lo || ramp > room_hi) {
-            const int fit = (room_lo < room_hi) ? room_lo : room_hi;
-            if (fit < 1) {
-                TD5_LOG_W(LOG_TAG, "trackgen: [GEO XSEP] site %d has no ramp room "
-                          "(%d back / %d forward); left LEVEL, the localiser is "
-                          "the only separation there", k, room_lo, room_hi);
-                continue;
-            }
-            /* Keep the grade legal and take the clearance the room allows,
-             * loudly: a silently shallow deck is the failure this whole item
-             * exists to remove. */
-            lift = (double)fit * need;
-            TD5_LOG_W(LOG_TAG, "trackgen: [GEO XSEP] site %d wants %d ramp span(s) "
-                      "but has room for %d; clearance cut %.0f -> %.0f units",
-                      k, ramp, fit, x->clearance_units, lift);
-            ramp = fit;
-        }
-        f0 = d0 - ramp;
-        f1 = d1 + ramp;
-        if (f0 < 0) f0 = 0;
-        if (f1 > n_nodes - 1) f1 = n_nodes - 1;
-
-        if (s_xsep_sites >= TD5_GEO_XSEP_MAX) break;
-        s_xsep[s_xsep_sites].d0 = d0;   s_xsep[s_xsep_sites].d1 = d1;
-        s_xsep[s_xsep_sites].f0 = f0;   s_xsep[s_xsep_sites].f1 = f1;
-        s_xsep[s_xsep_sites].u0 = x->under_lo;
-        s_xsep[s_xsep_sites].u1 = x->under_hi + 1;
-        s_xsep[s_xsep_sites].lift = lift;
-        s_xsep_sites++;
-
-        /* Rasterise: a raised-cosine ramp into a flat deck. The cosine, not a
-         * straight line, because the slope limiter bounds the grade and the
-         * curvature clamp bounds how fast the grade may CHANGE -- a linear ramp
-         * asks for a step change in grade at each foot, which the clamp then
-         * shaves off the top of the ramp. */
-        for (i = d0; i <= d1; i++) {
-            s_xsep_lift[i] = (float)lift;
-            s_xsep_in[i]   = 1;
-            s_xsep_top[i]  = 1;
-        }
-        for (i = f0; i < d0; i++) {
-            const double u = (double)(i - f0) / (double)(d0 - f0);
-            const double v = 0.5 * (1.0 - cos(TD5_TG_PI * u));
-            if (lift * v > (double)s_xsep_lift[i]) s_xsep_lift[i] = (float)(lift * v);
-            s_xsep_in[i] = 1;
-        }
-        for (i = d1 + 1; i <= f1; i++) {
-            const double u = (double)(f1 - i) / (double)(f1 - d1);
-            const double v = 0.5 * (1.0 - cos(TD5_TG_PI * u));
-            if (lift * v > (double)s_xsep_lift[i]) s_xsep_lift[i] = (float)(lift * v);
-            s_xsep_in[i] = 1;
-        }
-        TD5_LOG_I(LOG_TAG, "trackgen: [GEO XSEP] site %d: deck nodes %d..%d over "
-                  "spans %d..%d, ramps %d span(s) (feet %d / %d), lift %.0f units "
-                  "(%.1f m), local grade cap %.3f, ramp grade %.3f",
-                  k, d0, d1, x->under_lo, x->under_hi, ramp, f0, f1, lift,
-                  lift / 430.0, cap_min,
-                  lift * TD5_TG_PI / (2.0 * (double)ramp * span_len));
-    }
-    if (s_xsep_sites)
-        TD5_LOG_I(LOG_TAG, "trackgen: [GEO XSEP] %d of %d grade separation(s) "
-                  "planned", s_xsep_sites, n_sites);
-}
 
 /* ------------------------------------------------------------ profile -- */
 
@@ -345,10 +135,6 @@ static void tg_road_node_fill(int i, const TG_Node *n)
     r->wy = tg_world_water_y(n->x, n->z);
     r->wet = (r->h < r->wy) ? 1 : 0;
     r->t  = r->wet ? r->wy + TG_ROAD_DECK_CLEAR : r->h;
-    /* [OPTION B] A planned grade separation raises the TARGET, so the ordinary
-     * limiter builds the ramps and the ordinary classifier calls the result a
-     * deck. Zero on every node of every synthetic build. */
-    r->t += tg_xsep_lift_at(i);
     r->capg = tg_road_cap_at(i) * (double)s_spec->span_length;
     r->force = 0;
 }
@@ -425,37 +211,6 @@ static void tg_road_solve(TG_NodeList *nl, int a, int n)
     }
 }
 
-/* [ROUND 1008 item 4] On a GEO route the two TERRAIN rules below are OFF.
- *
- * They exist because a synthetic road is a free-floating polyline over invented
- * ground: wherever the grade limiter cannot follow the terrain, the gap IS the
- * structure, and calling it a viaduct or a bore is the only honest reading. A
- * real road is the opposite -- it was surveyed onto the ground that the DEM
- * measured, and OSM already says where its bridges and tunnels are. Any residual
- * gap between the conditioned profile and the DEM is the conditioner's grade
- * limit and the DEM's own 30 m sampling arguing with each other, not a structure
- * anybody built. Letting it mint a viaduct is how a plain street becomes a
- * bridge, which is half of Mariano's item 4.
- *
- * What a geo route keeps: `r->wet` (real water under the road, from WATER.R8 via
- * tg_world_water_y) and a planned Option-B grade separation, which is read off
- * ROUTE.JSON's own crossing list and signals itself through s_xsep_in. Nothing
- * else may promote a span.
- *
- * Measured on La Plata before the change: the terrain rules already fired ZERO
- * times ([R22 RELIEF] 0 would-be viaducts / 0 would-be tunnels, max lift 0, max
- * cut 0), so this is a GUARD on the flat case rather than a fix for it -- it is
- * the hilly places (Valparaiso's box has a worst cell gradient of 1.69 against
- * the 0.20 road cap) where the rules would otherwise invent decks.
- *
- * TD5RE_GEO_STRUCT_OSM=0 restores the terrain rules on a geo route for an A/B.
- * A synthetic build never reaches the gate. */
-static int tg_road_geo_struct_from_data(void)
-{
-    return td5_geo_loaded() && td5_geo_route_count() >= 2
-        && td5_env_flag_on("TD5RE_GEO_STRUCT_OSM");
-}
-
 /* Raw per-node verdict from the solved profile. */
 static int tg_road_node_kind(const TG_NodeList *nl, int i)
 {
@@ -463,7 +218,6 @@ static int tg_road_node_kind(const TG_NodeList *nl, int i)
     const double d = nl->v[i].y - r->h;
     if (r->force) return TG_ST_NONE;
     if (r->wet) return tg_bridges_enabled() ? TG_ST_BRIDGE : TG_ST_NONE;
-    if (tg_road_geo_struct_from_data() && !s_xsep_in[i]) return TG_ST_NONE;
     if (d < -TG_ROAD_TUNNEL_DEPTH) return tg_tunnels_enabled() ? TG_ST_TUNNEL : TG_ST_NONE;
     if (d >  TG_ROAD_BRIDGE_LIFT)  return tg_bridges_enabled() ? TG_ST_BRIDGE : TG_ST_NONE;
     return TG_ST_NONE;
@@ -510,7 +264,6 @@ static void tg_road_classify(const TG_NodeList *nl, int s_a, int s_b)
          * fighting a neighbouring bore -- and applying any of them here would
          * drop the deck back onto the road it is crossing, which is the one
          * outcome this feature exists to prevent. */
-        if (tg_xsep_run_is_deck(s, e)) { s = e + 1; continue; }
 
         /* A lane seam inside (or hugging) a structure: trim the run to end
          * 3 spans before it, the walk only blocks seams on PROVISIONAL kinds
@@ -552,16 +305,6 @@ static void tg_road_classify(const TG_NodeList *nl, int s_a, int s_b)
                 int wet_here = 0, wet_other = 0, w2;
                 if (k == TG_ST_BRIDGE) for (w2 = s; w2 <= e + 1; w2++) if (s_rn[w2].wet) { wet_here = 1; break; }
                 if (s_struct[q] == TG_ST_BRIDGE) for (w2 = o0; w2 <= o1 + 1; w2++) if (s_rn[w2].wet) { wet_other = 1; break; }
-                /* [OPTION B] The other run is a grade separation's deck: it
-                 * wins outright, whatever the lengths say. The run being tidied
-                 * here is terrain-derived and can be given up; the deck cannot,
-                 * because the road under it has nowhere else to go. */
-                if (tg_xsep_run_is_deck(o0, o1)) {
-                    int w;
-                    for (w = s; w <= e; w++) s_struct[w] = TG_ST_NONE;
-                    len = 0;
-                    break;
-                }
                 if ((o1 - o0 + 1 >= len || o0 < s_struct_fin || wet_other) && !wet_here) {
                     int w;
                     for (w = s; w <= e; w++) s_struct[w] = TG_ST_NONE;
@@ -593,7 +336,6 @@ static int tg_road_longest_run(int kind, int from, int *at)
          * from a crossing it cannot afford; a real route cannot steer, and the
          * last resort the geo walk falls back on -- force the chunk to CONFORM
          * -- would bury the lower leg under the embankment. */
-        if (tg_xsep_run_is_deck(s, e)) { s = e + 1; continue; }
         if (e >= from && len > best) { best = len; if (at) *at = s; }
         s = e + 1;
     }
@@ -1011,7 +753,6 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     /* [OPTION B] Plan the grade separations BEFORE the first node is filled:
      * tg_road_node_fill folds the lift into that node's target, so the plan has
      * to exist by then. No-op (and no array read) with no route loaded. */
-    tg_xsep_plan(spec, td5_geo_route_count());
 
     if (!tg_nodes_push(nl, x, z, width, spec->lanes)) return 0;
     {
@@ -1664,109 +1405,6 @@ static void tg_road_pad_bridges(int *out_runs, int *out_spans)
     if (out_spans) *out_spans = added;
 }
 
-/* [OPTION B] STAGE 2 of the grade separation -- see the section header near the
- * top of this file.
- *
- * Stage 1 aimed the deck `clearance` above the GROUND under it. Two things make
- * that not the same as `clearance` above the lower CARRIAGEWAY, and both are
- * only knowable once the whole profile is solved:
- *
- *   - the lower leg sits in a cut or on a fill of its own, so its road is not
- *     at ground level (measured as p99 cut/fill in the [R22 SMOOTH] line);
- *   - while the walk is upstream of the lower leg it cannot read that leg's y
- *     at all, because the leg has not been walked yet.
- *
- * So measure the clearance that was actually built, against the lower leg's own
- * nodes, and top the deck up if it fell short. The ramp FEET are anchors and
- * are not moved, so this pass cannot disturb the track outside [f0, f1]. Every
- * write is a max() against the solved profile: this pass may raise the road, it
- * may never cut it into the ground.
- *
- * Reported per site, unconditionally, because "the deck clears the lower road"
- * is the claim the whole item rests on and it is cheap to measure. */
-static void tg_xsep_finish(TG_NodeList *nl)
-{
-    const double span_len = (double)s_spec->span_length;
-    int k;
-
-    for (k = 0; k < s_xsep_sites; k++) {
-        const int d0 = s_xsep[k].d0, d1 = s_xsep[k].d1;
-        const int f0 = s_xsep[k].f0, f1 = s_xsep[k].f1;
-        double under = -1e30, deck = 1e30, want, add = 0.0, worst = 0.0;
-        double ground_min = 1e30;
-        int i, over_cap = 0, forced = 0;
-
-        if (d1 >= nl->count || f1 >= nl->count || f0 < 0 || d0 <= f0) continue;
-        for (i = s_xsep[k].u0; i <= s_xsep[k].u1 && i < nl->count; i++)
-            if (i >= 0 && nl->v[i].y > under) under = nl->v[i].y;
-        if (under < -1e29) continue;
-        for (i = d0; i <= d1; i++) if (nl->v[i].y < deck) deck = nl->v[i].y;
-        want = under + s_xsep[k].lift;
-        add  = want - deck;
-
-        if (add > 0.0) {
-            const double y0 = nl->v[f0].y, y1 = nl->v[f1].y;
-            for (i = d0; i <= d1; i++)
-                if (nl->v[i].y < want) nl->v[i].y = want;
-            for (i = f0 + 1; i < d0; i++) {
-                const double t = (double)(i - f0) / (double)(d0 - f0);
-                const double y = y0 + (want - y0) * 0.5 * (1.0 - cos(TD5_TG_PI * t));
-                if (nl->v[i].y < y) nl->v[i].y = y;
-            }
-            for (i = d1 + 1; i < f1; i++) {
-                const double t = (double)(f1 - i) / (double)(f1 - d1);
-                const double y = y1 + (want - y1) * 0.5 * (1.0 - cos(TD5_TG_PI * t));
-                if (nl->v[i].y < y) nl->v[i].y = y;
-            }
-        }
-
-        /* What the window ended up as: worst grade against its own cap, and the
-         * deck's least height over the natural ground (which is what decides
-         * whether a deck is DRAWN at all -- TD5_TG_BRIDGE_MIN_LIFT). */
-        for (i = f0 + 1; i <= f1; i++) {
-            const double g = fabs(nl->v[i].y - nl->v[i - 1].y) / span_len;
-            if (g > worst) worst = g;
-            if (g > tg_road_cap_at(i) + 1e-6) over_cap++;
-        }
-        deck = 1e30;
-        for (i = d0; i <= d1; i++) {
-            if (nl->v[i].y < deck) deck = nl->v[i].y;
-            if (i < s_rn_n && nl->v[i].y - s_rn[i].h < ground_min)
-                ground_min = nl->v[i].y - s_rn[i].h;
-        }
-
-        /* Re-classify the window against the corrected profile, then PIN the
-         * deck spans. Pinning rather than trusting the detector because the
-         * detector's threshold (TG_ROAD_BRIDGE_LIFT) is about telling an
-         * embankment from a viaduct, and here the answer is already known: a
-         * span crossing another carriageway is a deck. The pin is withheld when
-         * the ramp-room clamp cut the lift below what a deck can even be drawn
-         * at, since a "deck" resting on the ground is worse than none. */
-        tg_road_classify(nl, f0, f1 - 1);
-        if (ground_min > TD5_TG_BRIDGE_MIN_LIFT) {
-            for (i = d0; i < d1; i++) {
-                if (i <= TD5_TG_GRID_SPAN + 24) continue;
-                if (tg_span_in_fork_run(i)) continue;
-                if (i >= s_struct_n) s_struct_n = i + 1;
-                if (s_struct[i] != TG_ST_BRIDGE) { s_struct[i] = TG_ST_BRIDGE; forced++; }
-            }
-        }
-        TD5_LOG_I(LOG_TAG, "trackgen: [GEO XSEP] site %d BUILT: deck y %.0f over "
-                  "lower carriageway y %.0f = %.0f units (%.1f m) of clearance, "
-                  "soffit %.0f above it; topped up by %.0f; deck %.0f over the "
-                  "natural ground; worst grade in the window %.3f (%d span(s) "
-                  "over cap); %d deck span(s) pinned",
-                  k, deck, under, deck - under, (deck - under) / 430.0,
-                  deck - under - TD5_TG_BRIDGE_UNDER, add > 0.0 ? add : 0.0,
-                  ground_min, worst, over_cap, forced);
-        if (deck - under < TD5_TG_UP_CLEAR)
-            TD5_LOG_W(LOG_TAG, "trackgen: [GEO XSEP] site %d clearance %.0f is "
-                      "under the %.0f the NETWORK underpasses use -- the deck is "
-                      "shallower than intended", k, deck - under,
-                      (double)TD5_TG_UP_CLEAR);
-    }
-}
-
 void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 {
     const double span_len = (double)spec->span_length;
@@ -1800,18 +1438,6 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         if (k == TG_ST_NONE) { s++; continue; }
         while (e + 1 < s_struct_n && s_struct[e + 1] == k) e++;
         len = e - s + 1;
-        /* [OPTION B] A grade separation's deck keeps the profile it was built
-         * with. Both halves of this pass are wrong for it: the chord flattens
-         * the run to a straight line between its END nodes, which sit partway
-         * down the ramps, so it would pull the deck DOWN onto the road it is
-         * crossing; and the clearance hump is a water-crossing device, aimed at
-         * the river level, which there is none of here. */
-        if (tg_xsep_run_is_deck(s, e)) {
-            n_bridge += len; runs_b++;
-            if (len > longest_b) longest_b = len;
-            s = e + 1;
-            continue;
-        }
         y0 = nl->v[s].y; y1 = nl->v[e + 1].y;
         for (q = s; q <= e + 1; q++) {
             const double u = (double)(q - s) / (double)(e + 1 - s);
@@ -1852,12 +1478,6 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         }
         s = e + 1;
     }
-
-    /* [OPTION B] After the chords, because the chord pass owns the ordinary
-     * runs and this pass owns the deck runs it just skipped; before the conform
-     * below, which must see the deck's FINAL height (it is what decides that
-     * the ground under the deck is left alone). */
-    if (s_xsep_sites) tg_xsep_finish(nl);
 
     /* Spawn anchor: y[0] is 0 by construction (tg_world_h(0,0) == 0 and the
      * grid straight is flat), enforced here in case a conform moved it. */

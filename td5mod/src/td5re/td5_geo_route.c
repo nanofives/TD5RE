@@ -1581,6 +1581,9 @@ typedef struct {
     int    over_is_b;
 } GrSite;
 
+/* Most grade separations one route may plan (was TD5_GEO_XSEP_MAX in td5_geo.h, the strip's route reader). */
+#define TD5_GEO_XSEP_MAX 16
+
 typedef struct {
     int    site;
     int    over_lo, over_hi, under_lo, under_hi;

@@ -2583,7 +2583,7 @@ static void tg_net_geo_arm_tails(const TG_NodeList *nl, int nspans)
 
 static int tg_net_geo_active(void)
 {
-    if (!td5_geo_loaded() || td5_geo_route_count() < 2) return 0;
+    if (!td5_geo_loaded()) return 0;
     return td5_geo_roads_sync(td5_geo_place_slug());
 }
 

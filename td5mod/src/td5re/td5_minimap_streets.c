@@ -2,35 +2,11 @@
  * td5_minimap_streets.c -- surrounding street network for the in-race minimap
  *                          (PORT-ONLY). Contract and rationale in the header.
  *
- * Two sources, both already in memory by the time a race starts:
- *
- *   GEO   td5_geo_roads.c's parsed ROADS.JSON -- every OSM way of the real
- *         place, in the route frame. La Plata: 2 291 ways / 11 739 points, so
- *         roughly 9 400 chords. Small enough that the HUD can cull the whole
- *         array per pane per frame with four float compares each, which is why
- *         there is no spatial index here: a grid would cost more code than the
- *         scan it replaces.
- *
- *   AUTO  the generator's own street graph (td5_tg_network.c), read back
- *         through td5_trackgen_street_edge_*. These edges ARE the side streets
- *         by construction -- the main road is not among them -- so the
- *         synthetic track gets the same overlay for free.
- *
- * WHAT IS DELIBERATELY NOT FILTERED. The geo source keeps the OSM way the race
- * route itself runs along. It draws UNDER the route quads and thinner, so where
- * the two agree it is invisible, and where the route walk STOPS (the walk is
- * bounded at 48-72 quads) the real road carries on -- which is the behaviour a
- * road map has and the one a driver wants. Suppressing it would need a
- * route-proximity index and would make the map end abruptly at the walk limit.
- *
- * CORRIDOR. Points outside the route's own bbox grown by MMS_CORRIDOR are
- * dropped at build time. The minimap window is a fixed 115 * 1024 = 117 760
- * world units across (s_minimap_width is sx*115 and the scale is sx/1024, so
- * the UI scale cancels), i.e. 58 880 units of half-extent and at most 83 270 of
- * reach once the heading rotation is accounted for. The corridor is nearly
- * double that, so nothing the minimap could show is ever culled here -- it only
- * discards the rest of a city-wide fetch (La Plata's roads span 4.1M units of
- * x against the route's 2.0M).
+ * One source: the AUTO track's own street graph (td5_tg_network.c), read back
+ * through td5_trackgen_street_edge_*. These edges ARE the side streets by
+ * construction -- the main road is not among them. [roam SA] The GEO source
+ * (every OSM way of the strip geo track's corridor, td5_geo_roads.c) went with
+ * the strip geo BUILD; free roam draws its own street map (td5_roam_route_ui.c).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,28 +77,6 @@ static int mms_reserve(int want)
     return 1;
 }
 
-/* Bounds of the stretch of world the overlay may cover: the route when there is
- * one (the geo case), else everything (the synthetic network only ever holds
- * streets the generator attached to the road, so it needs no corridor). */
-static int mms_route_bounds(double *minx, double *minz, double *maxx, double *maxz)
-{
-    const int n = td5_geo_route_count();
-    int i, got = 0;
-    for (i = 0; i < n; i++) {
-        double x, z;
-        if (!td5_geo_route_node(i, &x, &z, NULL)) break;
-        if (!got) { *minx = *maxx = x; *minz = *maxz = z; got = 1; continue; }
-        if (x < *minx) *minx = x;
-        if (x > *maxx) *maxx = x;
-        if (z < *minz) *minz = z;
-        if (z > *maxz) *maxz = z;
-    }
-    if (!got) return 0;
-    *minx -= MMS_CORRIDOR; *minz -= MMS_CORRIDOR;
-    *maxx += MMS_CORRIDOR; *maxz += MMS_CORRIDOR;
-    return 1;
-}
-
 /* 1 when the chord is long enough to be worth a quad. A walk uses this to
  * decide whether to ADVANCE its previous point: a run of sub-threshold OSM
  * points must accumulate into one drawn chord rather than vanishing one at a
@@ -150,16 +104,6 @@ static int mms_push(double x0, double z0, double x1, double z1, int rank, int na
     return 1;
 }
 
-/* OSM highway class -> draw weight. The TD5_GEO_RC_* order is already "by
- * importance" (its header calls that the contract), so this is one threshold
- * pair rather than a table. */
-static int mms_rank_for_osm(int klass)
-{
-    if (klass >= TD5_GEO_RC_SECONDARY) return TD5_MMS_RANK_MAJOR;
-    if (klass >= TD5_GEO_RC_RESIDENTIAL) return TD5_MMS_RANK_STREET;
-    return TD5_MMS_RANK_MINOR;
-}
-
 /* TG_NE_* -> draw weight. The enum is private to the generator, so the values
  * are spelled out: 0 street, 1 avenue, 2 backstreet, 3 continuation,
  * 4 country, 5 underpass, 6 bypass (td5_trackgen_internal.h). A continuation
@@ -173,422 +117,6 @@ static int mms_rank_for_edge(int kind)
     case 6:  return TD5_MMS_RANK_STREET;   /* bypass       */
     default: return TD5_MMS_RANK_MINOR;    /* back/country/underpass */
     }
-}
-
-/* ===== SECTION: built-road mask (ROUND 1023 E item 11) ===================== */
-
-/* [ROUND 1023 E item 11] "On the minimap I see a road that doesn't exist."
- *
- * The geo source above is EVERY OSM way of the corridor, but the generator only
- * builds the route, its fork corridors and the NETWORK.JSON side streets. On the
- * La Plata route that is 8.46 km of drawn street inside the window of which 3.75
- * km has a carriageway under it (verify/r1023e_minimap_phantom.py): 56 % of what
- * the minimap shows is a street the 3D world has no road for, which is the
- * "phantom road" Mariano flagged at span 703 (e175 s3).
- *
- * Rule: a chord is drawn only where something was BUILT under it. Built = a strip
- * span (ring and fork corridors: td5_track_get_span_edges) or a street-network
- * edge (live read-back, else the level's own NETWORK.JSON when the build was
- * reused from disk). Each is stamped into a coarse byte raster at its own
- * half-width plus MMS_BUILT_MARGIN, and a chord is cut into the runs of samples
- * that land on a stamped cell, so a way that is built for 40 m and then stops is
- * drawn for exactly those 40 m.
- *
- * Knob TD5RE_MINIMAP_BUILT_ONLY (default ON); =0 draws every OSM way as before.
- * The raster lives only for the duration of mms_build_geo. */
-#define MMS_BUILT_CELL    1000.0
-#define MMS_BUILT_MARGIN  2000.0
-#define MMS_BUILT_STEP    1000.0
-#define MMS_BUILT_MAXCELL 24000000
-
-static struct { unsigned char *c; int w, h; double x0, z0; } s_bt;
-
-static void mms_built_close(void)
-{
-    free(s_bt.c);
-    memset(&s_bt, 0, sizeof s_bt);
-}
-
-static int mms_built_open(double minx, double minz, double maxx, double maxz)
-{
-    const double w = (maxx - minx) / MMS_BUILT_CELL + 2.0, h = (maxz - minz) / MMS_BUILT_CELL + 2.0;
-    mms_built_close();
-    if (w < 1.0 || h < 1.0 || w * h > (double)MMS_BUILT_MAXCELL) return 0;
-    s_bt.c = (unsigned char *)calloc((size_t)w * (size_t)h, 1);
-    if (!s_bt.c) return 0;
-    s_bt.w = (int)w; s_bt.h = (int)h; s_bt.x0 = minx; s_bt.z0 = minz;
-    return 1;
-}
-
-/* Cell bits: which builder stamped it. A strip span (the race road and its fork
- * corridors) is what makes a way a CROSSING street, see mms_push_way. */
-#define MMS_BUILT_STRIP 1
-#define MMS_BUILT_NET   2
-
-static void mms_built_stamp(double x, double z, double r, int bit)
-{
-    const int cx0 = (int)floor((x - r - s_bt.x0) / MMS_BUILT_CELL);
-    const int cx1 = (int)floor((x + r - s_bt.x0) / MMS_BUILT_CELL);
-    const int cz0 = (int)floor((z - r - s_bt.z0) / MMS_BUILT_CELL);
-    const int cz1 = (int)floor((z + r - s_bt.z0) / MMS_BUILT_CELL);
-    const double lim = r + 0.75 * MMS_BUILT_CELL;
-    int cx, cz;
-    for (cz = cz0; cz <= cz1; cz++) {
-        if (cz < 0 || cz >= s_bt.h) continue;
-        for (cx = cx0; cx <= cx1; cx++) {
-            double dx, dz;
-            if (cx < 0 || cx >= s_bt.w) continue;
-            dx = s_bt.x0 + ((double)cx + 0.5) * MMS_BUILT_CELL - x;
-            dz = s_bt.z0 + ((double)cz + 0.5) * MMS_BUILT_CELL - z;
-            if (dx * dx + dz * dz <= lim * lim)
-                s_bt.c[(size_t)cz * (size_t)s_bt.w + (size_t)cx] |= (unsigned char)bit;
-        }
-    }
-}
-
-/* Stamp the segment a->b with radius ra..rb, a disc every half cell. */
-static void mms_built_stamp_seg(double ax, double az, double ra, double bx, double bz, double rb,
-                                int bit)
-{
-    const double dx = bx - ax, dz = bz - az, len = sqrt(dx * dx + dz * dz);
-    const int n = (int)(len / (0.5 * MMS_BUILT_CELL)) + 1;
-    int k;
-    for (k = 0; k <= n; k++) {
-        const double t = (double)k / (double)n;
-        mms_built_stamp(ax + dx * t, az + dz * t, ra + (rb - ra) * t, bit);
-    }
-}
-
-static int mms_built_at(double x, double z)
-{
-    const int cx = (int)floor((x - s_bt.x0) / MMS_BUILT_CELL);
-    const int cz = (int)floor((z - s_bt.z0) / MMS_BUILT_CELL);
-    if (cx < 0 || cx >= s_bt.w || cz < 0 || cz >= s_bt.h) return 0;
-    return s_bt.c[(size_t)cz * (size_t)s_bt.w + (size_t)cx];
-}
-
-/* Every strip span (ring + fork corridors), linked to its successor when the
- * two centres are one span apart (a corridor's last span and the next
- * corridor's first are not). Returns the number of spans stamped. */
-static int mms_built_stamp_strip(void)
-{
-    const int n = g_strip_span_count;
-    int i, stamped = 0, have_prev = 0;
-    double pcx = 0, pcz = 0, ph = 0;
-    for (i = 0; i < n; i++) {
-        int lx, lz, rx, rz;
-        double cx, cz, h;
-        td5_track_get_span_edges(i, &lx, &lz, &rx, &rz);
-        if (!lx && !lz && !rx && !rz) { have_prev = 0; continue; }
-        cx = 0.5 * ((double)lx + (double)rx);
-        cz = 0.5 * ((double)lz + (double)rz);
-        h  = 0.5 * sqrt(((double)rx - lx) * ((double)rx - lx) + ((double)rz - lz) * ((double)rz - lz))
-           + MMS_BUILT_MARGIN;
-        if (have_prev && (cx - pcx) * (cx - pcx) + (cz - pcz) * (cz - pcz) < 4500.0 * 4500.0)
-            mms_built_stamp_seg(pcx, pcz, ph, cx, cz, h, MMS_BUILT_STRIP);
-        else
-            mms_built_stamp(cx, cz, h, MMS_BUILT_STRIP);
-        pcx = cx; pcz = cz; ph = h; have_prev = 1;
-        stamped++;
-    }
-    return stamped;
-}
-
-/* The street network, from the generator's live arrays when this process built
- * the level, else from the level's NETWORK.JSON (a build reused from disk never
- * ran tg_network_build, so the live read-back is empty). Returns edges stamped. */
-static int mms_built_stamp_network(void)
-{
-    const int ne = td5_trackgen_street_edge_count();
-    int e, stamped = 0;
-    if (ne > 0) {
-        for (e = 0; e < ne; e++) {
-            const int np = td5_trackgen_street_edge_points(e);
-            const double hw = 0.5 * td5_trackgen_street_edge_width(e) + MMS_BUILT_MARGIN;
-            double qx = 0, qz = 0;
-            int k;
-            for (k = 0; k < np; k++) {
-                double x, z;
-                if (!td5_trackgen_street_edge_point(e, k, &x, &z)) break;
-                if (k > 0) mms_built_stamp_seg(qx, qz, hw, x, z, hw, MMS_BUILT_NET);
-                else mms_built_stamp(x, z, hw, MMS_BUILT_NET);
-                qx = x; qz = z;
-            }
-            stamped++;
-        }
-        return stamped;
-    }
-    {
-        char path[96];
-        TD5_File *f;
-        int64_t sz;
-        char *buf;
-        cJSON *root, *ej;
-        snprintf(path, sizeof path, "re/assets/levels/level%03d/NETWORK.JSON", td5_trackgen_level_number());
-        f = td5_plat_file_open(path, "rb");
-        if (!f) return 0;
-        sz = td5_plat_file_size(f);
-        if (sz <= 0 || sz > (int64_t)(32 << 20) ||
-            !(buf = (char *)malloc((size_t)sz + 1u))) { td5_plat_file_close(f); return 0; }
-        if (td5_plat_file_read(f, buf, (size_t)sz) != (size_t)sz) {
-            free(buf); td5_plat_file_close(f); return 0;
-        }
-        buf[sz] = '\0';
-        td5_plat_file_close(f);
-        root = cJSON_Parse(buf);
-        free(buf);
-        if (!root) return 0;
-        cJSON_ArrayForEach(ej, cJSON_GetObjectItem(root, "edges")) {
-            const cJSON *w = cJSON_GetObjectItem(ej, "w");
-            const double hw = 0.5 * (cJSON_IsNumber(w) ? w->valuedouble : 4500.0) + MMS_BUILT_MARGIN;
-            const cJSON *pt;
-            double qx = 0, qz = 0;
-            int k = 0;
-            cJSON_ArrayForEach(pt, cJSON_GetObjectItem(ej, "poly")) {
-                const cJSON *px = cJSON_GetArrayItem(pt, 0), *pz = cJSON_GetArrayItem(pt, 1);
-                if (!cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) break;
-                if (k > 0) mms_built_stamp_seg(qx, qz, hw, px->valuedouble, pz->valuedouble, hw,
-                                               MMS_BUILT_NET);
-                else mms_built_stamp(px->valuedouble, pz->valuedouble, hw, MMS_BUILT_NET);
-                qx = px->valuedouble; qz = pz->valuedouble; k++;
-            }
-            stamped++;
-        }
-        cJSON_Delete(root);
-    }
-    return stamped;
-}
-
-/* Push the part of chord a->b that lies on built road: the chord is sampled
- * every MMS_BUILT_STEP, and each run of built samples becomes one segment cut at
- * the sample boundaries. Returns 1 on success, 0 when the array is full. The
- * length left out (world units) accumulates in *dropped. */
-static int mms_push_built(double ax, double az, double bx, double bz, int rank, int name_id,
-                          double *dropped)
-{
-    const double dx = bx - ax, dz = bz - az, len = sqrt(dx * dx + dz * dz);
-    const int n = (len > MMS_BUILT_STEP) ? (int)ceil(len / MMS_BUILT_STEP) : 1;
-    int k, run0 = -1;
-    for (k = 0; k <= n; k++) {
-        const int on = (k < n) &&
-            mms_built_at(ax + dx * ((double)k + 0.5) / (double)n, az + dz * ((double)k + 0.5) / (double)n);
-        if (on && run0 < 0) run0 = k;
-        if (!on && run0 >= 0) {
-            const double t0 = (double)run0 / (double)n, t1 = (double)k / (double)n;
-            if (!mms_push(ax + dx * t0, az + dz * t0, ax + dx * t1, az + dz * t1, rank, name_id)) return 0;
-            run0 = -1;
-        }
-        if (!on && k < n && dropped) *dropped += len / (double)n;
-    }
-    return 1;
-}
-
-/* ===== SECTION: crossing streets carry on (ROUND 1030 C item 7) =========== */
-
-/* [ROUND 1030 C item 7] "Crossing streets on the minimap (in race) don't go past a
- * few meters" (Calle 23 / Calle 39). The built-only mask above cut every way to
- * the carriageway under it, and a geo cross street is built as a short R4_CROSS
- * arm: on Diagonal 73 at span 61 Calle 23 and Calle 40 are paved for about 58 m
- * each side, so that is all the minimap drew, while the 3D street carries on as
- * the gap between the blocks.
- *
- * Rule: a CROSSING street is a way with one unbroken built run that holds both
- * the race road (a strip-span cell: the route or a fork corridor) and a street
- * the generator built off it (a network-edge cell outside the strip). Such a way
- * is drawn on along its own OSM geometry for TD5RE_MINIMAP_CROSS_REACH world
- * units past either end of that run (default 60000, 140 m: the minimap's
- * half-window is 58 880, so a crossing in view reaches the frame). Every other
- * way keeps the round 1023 E rule, drawn only where something was built under
- * it: a street beside the route with no road, or one that merely touches the
- * route with no arm built (the span 703 case of round 1023 E), is still absent.
- * TD5RE_MINIMAP_CROSS_REACH=0 restores the plain built-only mask.
- *
- * The chords of one way are kept in a scratch buffer for the two passes: pass 1
- * finds the built runs along the way and keeps the crossing ones, pass 2 draws
- * each sample that is built OR within reach of a kept run. */
-typedef struct { double ax, az, bx, bz; } MmsChord;
-typedef struct { double lo, hi; } MmsSpan;
-
-static struct {
-    MmsChord *ch; int nch, cap;
-    MmsSpan  *iv; int niv, ivcap;
-} s_way;
-
-static int mms_way_add_chord(double ax, double az, double bx, double bz)
-{
-    if (s_way.nch >= s_way.cap) {
-        const int nc = s_way.cap ? s_way.cap * 2 : 256;
-        MmsChord *p = (MmsChord *)realloc(s_way.ch, (size_t)nc * sizeof(*p));
-        if (!p) return 0;
-        s_way.ch = p; s_way.cap = nc;
-    }
-    s_way.ch[s_way.nch].ax = ax; s_way.ch[s_way.nch].az = az;
-    s_way.ch[s_way.nch].bx = bx; s_way.ch[s_way.nch].bz = bz;
-    s_way.nch++;
-    return 1;
-}
-
-static void mms_way_add_cross(double lo, double hi)
-{
-    if (s_way.niv >= s_way.ivcap) {
-        const int nc = s_way.ivcap ? s_way.ivcap * 2 : 16;
-        MmsSpan *p = (MmsSpan *)realloc(s_way.iv, (size_t)nc * sizeof(*p));
-        if (!p) return;
-        s_way.iv = p; s_way.ivcap = nc;
-    }
-    s_way.iv[s_way.niv].lo = lo;
-    s_way.iv[s_way.niv].hi = hi;
-    s_way.niv++;
-}
-
-static void mms_way_free(void)
-{
-    free(s_way.ch);
-    free(s_way.iv);
-    memset(&s_way, 0, sizeof s_way);
-}
-
-/* Draw the chords collected in s_way. Returns 1 on success, 0 when the array is
- * full. *dropped gets the length left out, *extended the length drawn only
- * because of the reach (both world units). */
-static int mms_push_way(int rank, int name_id, double reach, double *dropped, double *extended)
-{
-    double s0 = 0.0, run_lo = 0.0, run_hi = 0.0;
-    int c, in_run = 0, run_bits = 0;
-    s_way.niv = 0;
-    for (c = 0; c <= s_way.nch; c++) {              /* pass 1: the crossing runs */
-        const MmsChord *q = (c < s_way.nch) ? &s_way.ch[c] : NULL;
-        const double dx = q ? q->bx - q->ax : 0.0, dz = q ? q->bz - q->az : 0.0;
-        const double len = sqrt(dx * dx + dz * dz);
-        const int n = !q ? 1 : (len > MMS_BUILT_STEP) ? (int)ceil(len / MMS_BUILT_STEP) : 1;
-        int k;
-        for (k = 0; k < n; k++) {
-            /* the extra step past the last chord closes a run still open */
-            const int b = q ? mms_built_at(q->ax + dx * ((double)k + 0.5) / (double)n,
-                                           q->az + dz * ((double)k + 0.5) / (double)n) : 0;
-            if (b) {
-                if (!in_run) { in_run = 1; run_bits = 0; run_lo = s0 + len * (double)k / (double)n; }
-                /* a cell only the network stamped is an arm built off the road */
-                run_bits |= (b == MMS_BUILT_NET) ? MMS_BUILT_NET : (b & MMS_BUILT_STRIP);
-                run_hi = s0 + len * ((double)k + 1.0) / (double)n;
-            } else if (in_run) {
-                if (run_bits == (MMS_BUILT_STRIP | MMS_BUILT_NET)) mms_way_add_cross(run_lo, run_hi);
-                in_run = 0;
-            }
-        }
-        s0 += len;
-    }
-    s0 = 0.0;
-    for (c = 0; c < s_way.nch; c++) {               /* pass 2: built, or within reach */
-        const MmsChord *q = &s_way.ch[c];
-        const double dx = q->bx - q->ax, dz = q->bz - q->az, len = sqrt(dx * dx + dz * dz);
-        const int n = (len > MMS_BUILT_STEP) ? (int)ceil(len / MMS_BUILT_STEP) : 1;
-        int k, run0 = -1;
-        for (k = 0; k <= n; k++) {
-            int on = 0;
-            if (k < n) {
-                const double t = ((double)k + 0.5) / (double)n, s = s0 + len * t;
-                on = mms_built_at(q->ax + dx * t, q->az + dz * t) != 0;
-                if (!on) {
-                    int v;
-                    for (v = 0; v < s_way.niv; v++)
-                        if (s >= s_way.iv[v].lo - reach && s <= s_way.iv[v].hi + reach) { on = 1; break; }
-                    if (on && extended) *extended += len / (double)n;
-                }
-                if (!on && dropped) *dropped += len / (double)n;
-            }
-            if (on && run0 < 0) run0 = k;
-            if (!on && run0 >= 0) {
-                const double t0 = (double)run0 / (double)n, t1 = (double)k / (double)n;
-                if (!mms_push(q->ax + dx * t0, q->az + dz * t0, q->ax + dx * t1, q->az + dz * t1,
-                              rank, name_id)) return 0;
-                run0 = -1;
-            }
-        }
-        s0 += len;
-    }
-    return 1;
-}
-
-static int mms_build_geo(const char *slug)
-{
-    double rminx = 0, rminz = 0, rmaxx = 0, rmaxz = 0;
-    int clipped = 0, nroads, i, have_bounds, full = 0, built_only = 0, crossed = 0;
-    double dropped_len = 0.0, extended_len = 0.0;
-    /* [ROUND 1030 C item 7] crossing streets carry on (see the section above) */
-    const double cross_reach = (double)td5_env_int("TD5RE_MINIMAP_CROSS_REACH", 60000, 0, 400000);
-
-    if (!td5_geo_roads_sync(slug)) return 0;
-    nroads = td5_geo_roads_count();
-    if (nroads <= 0) return 0;
-
-    have_bounds = mms_route_bounds(&rminx, &rminz, &rmaxx, &rmaxz);
-
-    /* [ROUND 1023 E item 11] only where something was built (see the section above) */
-    if (have_bounds && g_strip_span_count > 0 && td5_env_flag_on("TD5RE_MINIMAP_BUILT_ONLY") &&
-        mms_built_open(rminx, rminz, rmaxx, rmaxz)) {
-        const int ns = mms_built_stamp_strip();
-        const int nn = mms_built_stamp_network();
-        built_only = 1;
-        TD5_LOG_I(LOG_TAG, "minimap streets: built-road mask from %d strip span(s) + %d network edge(s) "
-                  "(%s)", ns, nn, td5_trackgen_street_edge_count() > 0 ? "live" : "NETWORK.JSON");
-        if (ns <= 0) { built_only = 0; mms_built_close(); }
-    }
-
-    for (i = 0; i < nroads && !full; i++) {
-        const TD5_GeoRoad *r = td5_geo_roads_get(i);
-        double px = 0, pz = 0, qx = 0, qz = 0;
-        int rank, k;
-        if (!r) continue;
-        if (have_bounds &&
-            (r->maxx < rminx || r->minx > rmaxx ||
-             r->maxz < rminz || r->minz > rmaxz)) { clipped++; continue; }
-        rank = mms_rank_for_osm(r->klass);
-        if (built_only && cross_reach > 0.0) {
-            const double before = extended_len;
-            s_way.nch = 0;
-            for (k = 0; td5_geo_roads_point(r, k, &px, &pz); k++) {
-                if (k == 0) { qx = px; qz = pz; continue; }
-                if (!mms_chord_ok(qx, qz, px, pz)) continue;   /* keep accumulating */
-                if (!mms_way_add_chord(qx, qz, px, pz)) break;
-                qx = px; qz = pz;
-            }
-            if (!mms_push_way(rank, r->name_id, cross_reach, &dropped_len, &extended_len)) {
-                TD5_LOG_W(LOG_TAG, "minimap streets: hit the %d-segment ceiling "
-                          "at way %d of %d; the rest of '%s' is not drawn",
-                          MMS_MAX_SEGS, i, nroads, slug);
-                full = 1;
-            }
-            if (extended_len > before) crossed++;
-            continue;
-        }
-        for (k = 0; td5_geo_roads_point(r, k, &px, &pz); k++) {
-            if (k == 0) { qx = px; qz = pz; continue; }
-            if (!mms_chord_ok(qx, qz, px, pz)) continue;   /* keep accumulating */
-            if (!(built_only ? mms_push_built(qx, qz, px, pz, rank, r->name_id, &dropped_len)
-                             : mms_push(qx, qz, px, pz, rank, r->name_id))) {
-                TD5_LOG_W(LOG_TAG, "minimap streets: hit the %d-segment ceiling "
-                          "at way %d of %d; the rest of '%s' is not drawn",
-                          MMS_MAX_SEGS, i, nroads, slug);
-                full = 1;
-                break;
-            }
-            qx = px; qz = pz;
-        }
-    }
-    snprintf(s_mms.source, sizeof s_mms.source, "geo:%s", slug ? slug : "");
-    TD5_LOG_I(LOG_TAG, "minimap streets: %d segment(s) from %d OSM way(s) of "
-              "'%s' (%d way(s) outside the route corridor)",
-              s_mms.n, nroads, slug ? slug : "", clipped);
-    if (built_only)
-        TD5_LOG_I(LOG_TAG, "minimap streets: built-only left out %.0f m of street with no road under it",
-                  dropped_len / 430.0);
-    if (built_only && cross_reach > 0.0)
-        TD5_LOG_I(LOG_TAG, "minimap streets: crossing streets carried on %.0f m past the race road "
-                  "(reach %.0f units, %d way(s))", extended_len / 430.0, cross_reach, crossed);
-    mms_built_close();
-    mms_way_free();
-    return s_mms.n;
 }
 
 static int mms_build_auto(void)
@@ -621,9 +149,8 @@ static int mms_build_auto(void)
 int td5_mmstreets_sync(void)
 {
     const int slot = g_td5.track_index;
-    const int geo  = td5_trackgen_is_geo_slot(slot);
     const int wild = td5_trackgen_is_auto_slot(slot);
-    const char *slug = (geo && td5_geo_loaded()) ? td5_geo_place_slug() : "";
+    const char *slug = "";   /* [roam SA] the geo source (the strip's corridor) is gone */
     int edges;
 
     if (!td5_env_flag_on("TD5RE_MINIMAP_STREETS")) {
@@ -632,7 +159,7 @@ int td5_mmstreets_sync(void)
     }
     /* A shipped track keeps the faithful minimap, and the signature below is
      * never even computed for it. */
-    if (!geo && !wild) {
+    if (!wild) {
         if (s_mms.n) mms_clear();
         s_mms.have = 1;
         s_mms.sig_slot = slot;
@@ -649,7 +176,7 @@ int td5_mmstreets_sync(void)
      * moves when the auto track is regenerated in place -- which the first two
      * can miss, because a regenerate can land on the same allocation with the
      * same span count. */
-    edges = (wild || geo) ? td5_trackgen_street_edge_count() : 0;
+    edges = td5_trackgen_street_edge_count();
     if (s_mms.have &&
         s_mms.sig_slot  == slot &&
         s_mms.sig_strip == g_strip_span_base &&
@@ -659,8 +186,7 @@ int td5_mmstreets_sync(void)
         return s_mms.n;
 
     mms_clear();
-    if (geo && slug[0]) mms_build_geo(slug);
-    else if (wild)      mms_build_auto();
+    mms_build_auto();
 
     if (!s_mms.n && !s_mms.source[0])
         TD5_LOG_W(LOG_TAG, "minimap streets: slot %d is a generated track but no "

@@ -890,63 +890,6 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
 #define TD5_TG_FLINE_CELL     300.0   /* raw: ~0.7 m at 430 units per metre   */
 #define TD5_TG_FLINE_CELLS_Q  6       /* cells across per quad (page cells 1..6) */
 #define TD5_TG_FLINE_QMAX     10
-static int tg_emit_finish_line(const TG_FBHook *h)
-{
-    /* Half a texel in, so a quad never samples a neighbouring cell or the leg
-     * column to the left of the chequer (leg_col = 7 texels on a 64 page). */
-    const double ins = 0.5 / (double)TD5_TG_TEX_DIM;
-    const double u0 = 0.125 + ins, u1 = 0.875 - ins;   /* cells 1..6 of 8     */
-    const double v0 = 0.25  + ins, v1 = 0.50  - ins;   /* cell rows 2..3 of 8 */
-    const TG_Node *a = &h->nl->v[h->si];
-    const TG_Node *b = &h->nl->v[h->si + 1];
-    const double w = 0.5 * (a->width + b->width);
-    /* [ROUND 1015 A item 18] ONE BAND PER CARRIAGEWAY. On a divided avenue the far
-     * carriageway gets its own band (the median between them is not paved, so the line
-     * does not run across it). band[0] is the race road, band[1] the far carriageway. */
-    double band_shift[2] = { 0.0, 0.0 }, band_w[2] = { w, 0.0 };
-    int nband = 1, bi;
-    double px[2 * 4 * TD5_TG_FLINE_QMAX], py[2 * 4 * TD5_TG_FLINE_QMAX], pz[2 * 4 * TD5_TG_FLINE_QMAX];
-    double uu[2 * 4 * TD5_TG_FLINE_QMAX], vv[2 * 4 * TD5_TG_FLINE_QMAX];
-    int seg_page = TD5_TG_PAGE_BANNER, seg_nq, n = 0, q;
-
-    if (h->si + 1 >= h->nl->count) return 1;
-    if (*h->nmesh >= h->maxmesh) return 1;
-    for (bi = 0; bi < nband; bi++) {
-        double l0x, l0y, l0z, r0x, r0y, r0z, l1x, l1y, l1z, r1x, r1y, r1z;
-        int nq = (int)(band_w[bi] / (TD5_TG_FLINE_CELL * TD5_TG_FLINE_CELLS_Q) + 0.5);
-        const double ws = (w > 1.0) ? band_w[bi] / w : 1.0;   /* wscale for tg_road_edge */
-        if (nq < 1) nq = 1;
-        if (nq > TD5_TG_FLINE_QMAX) nq = TD5_TG_FLINE_QMAX;
-
-        tg_road_edge(h->nl, h->si, TD5_TG_FLINE_F0, band_shift[bi], ws,
-                     &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
-        tg_road_edge(h->nl, h->si, TD5_TG_FLINE_F1, band_shift[bi], ws,
-                     &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
-
-        for (q = 0; q < nq; q++) {
-            const double t0 = (double)q / (double)nq, t1 = (double)(q + 1) / (double)nq;
-            /* left -> right is t 0 -> 1, on both the near and the far row */
-            px[n] = l0x + (r0x - l0x) * t0; py[n] = l0y + (r0y - l0y) * t0 + TD5_TG_CROSS_LIFT;
-            pz[n] = l0z + (r0z - l0z) * t0; uu[n] = u0; vv[n] = v0; n++;
-            px[n] = l0x + (r0x - l0x) * t1; py[n] = l0y + (r0y - l0y) * t1 + TD5_TG_CROSS_LIFT;
-            pz[n] = l0z + (r0z - l0z) * t1; uu[n] = u1; vv[n] = v0; n++;
-            px[n] = l1x + (r1x - l1x) * t1; py[n] = l1y + (r1y - l1y) * t1 + TD5_TG_CROSS_LIFT;
-            pz[n] = l1z + (r1z - l1z) * t1; uu[n] = u1; vv[n] = v1; n++;
-            px[n] = l1x + (r1x - l1x) * t0; py[n] = l1y + (r1y - l1y) * t0 + TD5_TG_CROSS_LIFT;
-            pz[n] = l1z + (r1z - l1z) * t0; uu[n] = u0; vv[n] = v1; n++;
-        }
-    }
-    seg_nq = n / 4;
-    h->moff[(*h->nmesh)++] = h->blk->len;
-    {
-        const size_t d0 = h->blk->len;
-        const int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                                         &seg_page, &seg_nq, 1);
-        tg_guard_mark(d0, h->blk->len, TG_GK_DECAL, h->si);
-        return r;
-    }
-}
-
 /* Group E -- track furniture: start/finish banners, branch mouths, run-off.
  * Exactly two gantries per track: one on the grid span and one on the finish
  * span (tg_finish_span, the same span the last LEVELINF checkpoint sits on --
@@ -964,9 +907,6 @@ int tg_emit_fb_track(const TG_FBHook *h)
     /* The finish span wins a tie: on a circuit the grid span and the finish can
      * be the same span, and that gantry marks the end of the race. */
     if (!tg_emit_gantry(h->nl, h->si, h->blk, h->si == finish)) return 0;
-    /* [ROUND 1013 F3] the painted line, under the finish banner, GEO only. */
-    if (h->si == finish && td5_geo_loaded() && td5_geo_route_count() >= 2)
-        return tg_emit_finish_line(h);
     return 1;
 }
 

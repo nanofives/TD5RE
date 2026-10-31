@@ -1223,9 +1223,7 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
              * proper finish line": the row rolled NONE (10% of seeds) on
              * Mariano's race, which on a geo track put the finish on the very
              * last span, behind the strip's backstop wall, so it could not even
-             * be crossed. A real place always has road past its finish. A geo
-             * route normally carries its own run-off (td5_geo_route_finish_span)
-             * and this row is then only what an OLD cache falls back to. */
+             * be crossed. A real place always has road past its finish. */
             { TD5_TG_ROLL_RUNOFF,         2 },
             /* [ROUND 1013 F3] ...and the BANNERS row is what puts the START and
              * FINISH gantries (and the painted finish line) on the track at all:
@@ -1520,39 +1518,15 @@ void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
         spec->target_spans = s_rolls.value[TD5_TG_ROLL_LENGTH];
 }
 
-/* [GEO PHASE 3 2026-09-30] A loaded geo route decides the track length: the
- * road IS the route, so target_spans follows it (capped at TD5_TG_MAX_SPANS,
- * which the loader already enforces) and the track is point-to-point. Called
- * right after tg_rolls_apply_spec at every spec-fold site, so the build, the
- * studio preview and the streamed span rederive all agree, and BEFORE the
- * GENSTAMP spec hash, so a geo build never REUSEs a synthetic one. No route
- * means no write: synthetic builds stay byte-identical. */
-void tg_geo_apply_spec(TD5_TrackGenSpec *spec)
+/* Keep the loaded place in step with the target before the spec is folded: the
+ * auto slot pins the synthetic world (td5_trackgen_set_target_slot), so a place
+ * left in TD5RE_GEO_PLACE is dropped here and every geo gate below reads "none".
+ * Called at every spec-fold site (the build, the studio preview, the streamed
+ * span rederive). [roam SA] A geo route no longer decides the length: the strip
+ * geo BUILD is deleted. */
+void tg_geo_sync_place(void)
 {
-    int n;
-    /* [GEO PHASE 4] Make the loaded place + route match TD5RE_GEO_PLACE first,
-     * so a LOCATION change in the studio takes effect on this very build. */
     td5_geo_sync();
-    n = td5_geo_route_count();
-    if (!spec || n < 2) return;
-    spec->target_spans = n - 1;
-    if (spec->target_spans > TD5_TG_MAX_SPANS) spec->target_spans = TD5_TG_MAX_SPANS;
-    spec->circuit = 0;
-}
-
-/* [GEO PHASE 4 2026-09-30] The name the track registers under: the real
- * place, upper-cased like every shipped track name, when a geo route drives the
- * road; the studio's own name otherwise. */
-static const char *tg_geo_track_name(void)
-{
-    static char buf[64];
-    const char *nm = td5_geo_place_name();
-    size_t i;
-    if (td5_geo_route_count() < 2 || !nm[0]) return TD5_TG_TRACK_NAME;
-    for (i = 0; nm[i] && i + 1 < sizeof(buf); i++)
-        buf[i] = (char)((nm[i] >= 'a' && nm[i] <= 'z') ? nm[i] - 32 : nm[i]);
-    buf[i] = '\0';
-    return buf;
 }
 
 /* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
@@ -2965,26 +2939,12 @@ int tg_finish_span(int ring)
     int lo = TD5_TG_GRID_SPAN + 60;      /* shortest race worth having */
     int fs, guard;
 
-    /* [ROUND 1013 F3] A GEO route carries its own finish: the line stands on the
-     * span the user's last waypoint landed on, and the road past it (extended
-     * along the real map at BUILD time, td5_geo_route.c) is the run-off. It is
-     * NOT `ring - runoff`: that would throw the last 350 m of the route the
-     * user drew away and put the line somewhere he never clicked. -1 = a route
-     * committed before round 1013, which keeps the old placement below. The
-     * 3-span margin is the strip's backstop wall (ring-3), which nothing can
-     * drive past, so a finish at or beyond it could never be crossed. */
-    const int geo_fs = td5_geo_route_finish_span();
 
     if (ring <= lo) return -1;
-    if (geo_fs > lo && geo_fs < ring - 3) {
-        fs = geo_fs;
-    } else {
-        /* A short track cannot afford the full run-off; give it what is left
-         * after the minimum race distance rather than refusing to place a
-         * finish. */
-        if (ring - runoff <= lo) runoff = ring - lo;
-        fs = ring - runoff;
-    }
+    /* A short track cannot afford the full run-off; give it what is left after
+     * the minimum race distance rather than refusing to place a finish. */
+    if (ring - runoff <= lo) runoff = ring - lo;
+    fs = ring - runoff;
 
     /* Never put the finish line inside a fork's split region (the line would
      * cross two separated half carriageways, so a banner over it would either
@@ -4638,7 +4598,7 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
     eff = *spec;
     tg_rolls_resolve(eff.seed);
     tg_rolls_apply_spec(&eff);
-    tg_geo_apply_spec(&eff);
+    tg_geo_sync_place();
     spec = &eff;
 
     /* Same preamble as build_level, minus the _mkdir. */
@@ -4729,7 +4689,7 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
      * built from the shipped defaults while the race used the rolls. */
     tg_rolls_resolve(seed);
     tg_rolls_apply_spec(&spec);
-    tg_geo_apply_spec(&spec);
+    tg_geo_sync_place();
 
     memset(&nl, 0, sizeof(nl));
     memset(&spans, 0, sizeof(spans));
@@ -4854,7 +4814,7 @@ int td5_trackgen_register_geo_places(void)
     for (i = 0; i < n; i++) {
         char name[40];
         tg_geo_slot_name(i, name, sizeof(name));
-        /* circuit=0: a conditioned geo route is point-to-point (tg_geo_apply_spec
+        /* circuit=0: a real place is point-to-point (the strip BUILD used to force
          * forces spec->circuit = 0). finish=0 until the real build publishes the
          * ring length -- the frontend never reads it, and regenerate re-registers
          * with the true value before the level loads. */
@@ -5092,7 +5052,7 @@ int td5_trackgen_init(void)
     TD5_TrackGenSpec spec;
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
-    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, tg_geo_track_name(),
+    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, TD5_TG_TRACK_NAME,
                                spec.circuit, TD5_TG_GRID_SPAN, 0);
     TD5_LOG_I(LOG_TAG, "trackgen: " TD5_TG_TRACK_NAME " registered (slot %d, level %d); "
               "built on race entry", TD5_TG_SLOT, TD5_TG_LEVEL_NUM);
@@ -5126,20 +5086,7 @@ static unsigned int tg_fnv1a(unsigned int h, const void *p, size_t n)
  * across builds of one route, which the determinism gate requires. */
 static unsigned int tg_spec_hash(const TD5_TrackGenSpec *spec)
 {
-    unsigned int h = tg_fnv1a(2166136261u, spec, sizeof *spec);
-    const int n = td5_geo_route_count();
-    int i;
-    if (n < 2) return h;                 /* synthetic: unchanged */
-    h = tg_fnv1a(h, &n, sizeof n);
-    for (i = 0; i < n; i++) {
-        double x = 0.0, z = 0.0;
-        int lanes = 0;
-        td5_geo_route_node(i, &x, &z, &lanes);
-        h = tg_fnv1a(h, &x, sizeof x);
-        h = tg_fnv1a(h, &z, sizeof z);
-        h = tg_fnv1a(h, &lanes, sizeof lanes);
-    }
-    return h;
+    return tg_fnv1a(2166136261u, spec, sizeof *spec);
 }
 
 static unsigned int tg_env_hash(void)
@@ -5328,7 +5275,7 @@ int td5_trackgen_regenerate(unsigned int seed)
      * still says what it is; it otherwise prints no inventory at all. */
     tg_rolls_resolve(seed);
     tg_rolls_apply_spec(&spec);
-    tg_geo_apply_spec(&spec);
+    tg_geo_sync_place();
     tg_rolls_report();
 
     /* [R14 GENPERF 2026-09-03] Identical build already on disk? Then the only
@@ -5352,7 +5299,7 @@ int td5_trackgen_regenerate(unsigned int seed)
             s_last_seed = seed;
             s_ring_len  = have.ring;
             s_tg_progress = 100;
-            tg_register_target(tg_geo_track_name(), have.circuit, have.finish);
+            tg_register_target(TD5_TG_TRACK_NAME, have.circuit, have.finish);
             TD5_LOG_W(LOG_TAG, "trackgen: REUSED the on-disk build for seed %u "
                       "(slot %d, level %d, %d spans, ring %d, finish %d) -- "
                       "generation skipped", seed, s_target_slot, s_target_level,
@@ -5395,7 +5342,7 @@ int td5_trackgen_regenerate(unsigned int seed)
         int finish = tg_finish_span(ring);
         if (finish <= 0)   /* ring too short for a placed finish: last-resort */
             finish = (spans > 8) ? spans - 4 : spans - 1;
-        tg_register_target(tg_geo_track_name(), spec.circuit, finish);
+        tg_register_target(TD5_TG_TRACK_NAME, spec.circuit, finish);
         TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
                   "strip=%d; old spans-4 would be %d)", finish, ring, spans,
                   spans > 8 ? spans - 4 : spans - 1);
