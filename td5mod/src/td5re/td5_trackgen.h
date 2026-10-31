@@ -220,19 +220,11 @@ int td5_trackgen_roam_is_night(int slot);   /* [F4f] the roam session's day/nigh
  * the number registered. */
 int td5_trackgen_register_geo_places(void);
 
-/* Point the NEXT build at `slot`: resolves the level dir it writes into and,
- * for a geo slot, applies the place override (td5_geo_force_place) so the build
- * uses that place without touching TD5RE_GEO_PLACE or SELECTED.TXT. Call it
- * before td5_trackgen_prepare_race / _regenerate. A slot that is not a
- * generated slot resets the target to the auto track. */
+/* Point the NEXT build at the auto track (level090) and pin the synthetic world
+ * for it. Call it before td5_trackgen_prepare_race / _regenerate. [roam SA] A
+ * geo slot is never generated (logged): real places race in the free-roam city. */
 void td5_trackgen_set_target_slot(int slot);
 
-/* [ROUND 1026 L] A frontend-split knob, DEFAULT ON, OFF = master (F11b retired its
- * twin TD5RE_GEO_OWN_SELECTOR: the GEOSPATIAL entry is always its own selector entry):
- *  - TD5RE_STUDIO_SYNTHETIC: the AUTO TRACK STUDIO (slot 60) always builds the
- *    procedural world; its LOCATION row is gone and a leftover geo place
- *    (TD5RE_GEO_PLACE / SELECTED.TXT) can no longer leak into level090. */
-int td5_trackgen_studio_synthetic(void);
 
 /* ------------------------------------------- [MINIMAP STREETS] ------------
  * Read-only walk of the street network td5_tg_network.c built for the auto

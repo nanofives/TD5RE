@@ -50,7 +50,6 @@
 #include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
 #include "td5_chaos.h"      /* [CHAOS CO-OP] per-pane role strip + swap countdown */
 #include "td5_geo.h"        /* [1011 C3] the route's per-node street names */
-#include "td5_geo_attrs.h"  /* [1011 C3] route-first/spatial-fallback resolver */
 #include "td5_geo_roads.h"  /* [1018 L] the street under a car on a block-loop corridor */
 #include "td5_race_state.h" /* [1011 C3] td5_game_get_slot_span */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM: speedo-only HUD, relabelled pause row */
@@ -3072,7 +3071,7 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
         /* [GEO FREE ROAM F2-A] roam shows the speedometer only: no position, lap timers /
          * counters, total timer, metric digits (odometer / checkpoint timer read the span)
          * or U-turn warning (reads the span and the route table). The minimap is gated
-         * in td5_hud_render_minimap, the street label in td5_hud_draw_street_lines. */
+         * in td5_hud_render_minimap. */
         if (td5_roam_active())    /* [HF] + the U-turn flag: in roam it only draws the route-driven WRONG WAY */
             flags = TD5_HUD_SPEEDOMETER | TD5_HUD_UTURN_WARNING | TD5_HUD_RESERVED_5 | TD5_HUD_RESERVED_3;
 
@@ -3809,121 +3808,6 @@ float td5_hud_utf8_line(float x, float baseline, float cap, const char *s, uint3
 {
     if (!td5_hudfont_ready()) return 0.0f;
     return hud_draw_utf8_line(x, baseline, cap, s, color, draw);
-}
-
-/* [ROUND 1011 C3] "ON <street>" -- the real street the player is driving on,
- * from the route's own per-node name table.
- *
- * SOURCE. A geo track's span index IS its route node index (tg_geo_walk pushes
- * node i for route node i), so the player's folded span indexes the name table
- * directly. It reads the ROUTE and not the generator's prepass tables on
- * purpose: a reused cached track skips generation entirely, and the route is
- * loaded for every race either way.
- *
- * Nothing is drawn on a shipped track, on the synthetic auto track, or on a
- * geo cache whose ROUTE.JSON predates round 1011 -- in all three the name is
- * "" and this returns without emitting a quad. */
-static void hud_draw_street_line(int player_slot, int view_index);
-
-/* Draw every pane's street line from the FULL-SCREEN HUD overlay pass, the
- * same shape and for the same reason as td5_hud_draw_damage_bars: a
- * screen-space quad emitted inside the per-viewport 3D loop is remapped and
- * clipped to that one pane. Self-gated -- a no-op on every non-geo track. */
-void td5_hud_draw_street_lines(void)
-{
-    int views = s_view_count;
-    if (g_replay_mode) return;
-    if (td5_roam_active()) return;   /* roam: the street is not a route span */
-    if (td5_geo_route_count() < 2) return;
-    if (views < 1) views = 1;
-    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
-    for (int v = 0; v < views; v++) {
-        const int slot = g_actor_slot_map[v];
-        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
-        hud_draw_street_line(slot, v);
-    }
-}
-
-static void hud_draw_street_line(int player_slot, int view_index)
-{
-    const TD5_HudViewLayout *vl = &s_view_layout[view_index];
-    const char *name;
-    char buf[96];
-    float cap, w;
-
-    if (!td5_env_flag_on("TD5RE_HUD_STREET")) return;
-    if (td5_geo_route_count() < 2) return;
-    /* THROUGH THE ATTRS MODULE, not td5_geo_route_name directly. The route only
-     * carries names on a ROUTE.JSON written by round 1011 or later, so reading
-     * it raw drew NOTHING on every cache built before this round -- which is
-     * every cache that exists today. td5_geo_attrs_name falls back to the
-     * nearest mapped way, which is the whole reason the fallback exists. */
-    name = td5_geo_attrs_name(td5_game_get_slot_span(player_slot));
-    {   /* [ROUND 1018 L] a block-loop corridor: span_norm names the MAIN road beside it, but the car is on a real cross
-         * street, so name the nearest real way under it instead (blank when the map has none). */
-        TD5_Actor *la = td5_game_get_actor(player_slot);
-        if (la && td5_track_loop_of_corridor((int)la->track_span_raw) >= 0) {
-            const TD5_GeoRoad *lr = td5_geo_roads_nearest((double)(la->world_pos.x >> 8), (double)(la->world_pos.z >> 8),
-                                                          6000.0, -1, NULL, NULL, NULL);
-            name = lr ? td5_geo_roads_name(lr) : "";
-        }
-    }
-#ifndef TD5RE_RELEASE
-    /* TD5RE_HUD_STREET_TEST=1 substitutes a name with a real UTF-8 accent.
-     *
-     * WHY THIS EXISTS. The accent path is the half of this feature that was
-     * actually broken, and La Plata's shipped route touches 18 streets of
-     * which NONE is accented -- the 9 accented names in that cache (Plaza
-     * Miguel de Azcuenaga, Plaza Espana, ...) are all off-route. So there is
-     * no way to photograph the fix by driving. This forces it.
-     *
-     * The literal is written as explicit hex escapes, not as source UTF-8:
-     * C3 A9 is e-acute, C3 B1 is n-tilde. That keeps this file pure ASCII (the
-     * house convention) and makes the bytes under test unambiguous rather than
-     * dependent on how an editor saved them. Correct output is "Azcuenaga"
-     * with an accented e; "AzcuA~(c)naga" means the decoder was bypassed.
-     *
-     * MIND THE SPLIT BEFORE THE TRAILING "a". A C hex escape is GREEDY, so
-     * "\xC3\xB1a" is ONE character of value 0xB1A, not n-tilde followed by
-     * 'a'. The first version of this line had exactly that bug and drew
-     * "Espa?[]" -- which, usefully, proved the rest of the chain correct:
-     * td5_utf8_next saw a lead byte with no continuation, returned U+FFFD
-     * without stalling, and the >U+01FF guard substituted '?'. Adjacent string
-     * literals end the escape without adding a byte. */
-    if (td5_env_flag_off("TD5RE_HUD_STREET_TEST"))
-        name = "Azcu\xC3\xA9naga / Espa\xC3\xB1" "a";
-#endif
-    if (!name || !name[0]) return;
-
-    snprintf(buf, sizeof buf, TR("ON %s"), name);
-
-    /* BOTTOM-CENTRE of the pane, and the position is not arbitrary: the
-     * minimap owns the bottom-LEFT corner and the speedo the bottom-RIGHT, so
-     * the first attempt at bottom-left drew the line underneath the minimap
-     * where no framedump could ever show it. The centre strip is free in every
-     * pane layout. */
-    cap = 11.0f * ((vl->scale_y > 0.0f) ? vl->scale_y : 1.0f);
-    if (cap < 8.0f)  cap = 8.0f;
-    if (cap > 28.0f) cap = 28.0f;
-    w = hud_draw_utf8_line(0.0f, 0.0f, cap, buf, 0, 0);
-    hud_draw_utf8_line(vl->center_x - w * 0.5f,
-                       vl->vp_int_bottom - cap * 1.1f,
-                       cap, buf, 0xFFE8E8F0u, 1);
-
-    /* One line per race, so a framedump that shows nothing can be told apart
-     * from a draw that never happened. */
-#ifndef TD5RE_RELEASE
-    {
-        static int s_said = -1;
-        if (s_said != g_td5.track_index) {
-            s_said = g_td5.track_index;
-            TD5_LOG_I("hud", "[GEO STREET] pane %d: \"%s\" (%d byte(s), %.0f px "
-                      "at cap %.1f) at (%.0f,%.0f)", view_index, buf,
-                      (int)strlen(buf), w, cap,
-                      vl->center_x - w * 0.5f, vl->vp_int_bottom - cap * 1.1f);
-        }
-    }
-#endif
 }
 
 /* [COP CHASE SCOREBOARD REMOVED 2026-08-19] The top-of-pane per-cop arrest
@@ -7548,7 +7432,7 @@ static int hud_minimap_streets(float offset_x, float offset_z,
  * under the racers. Knob: TD5RE_MINIMAP_LABELS=0 turns it off. */
 typedef struct { int id; float d2, mx, my; int banned; } MmLabelCand;
 
-static int hud_minimap_street_labels(int actor_slot, float offset_x, float offset_z,
+static int hud_minimap_street_labels(float offset_x, float offset_z,
                                      float cos_h, float sin_h, float mm_cx, float mm_cy)
 {
     enum { CAND_MAX = 96, LABELS_MAX = 5 };
@@ -7556,7 +7440,6 @@ static int hud_minimap_street_labels(int actor_slot, float offset_x, float offse
     float rects[LABELS_MAX][4];
     const int n = td5_mmstreets_count();
     const TD5_MMStreetSeg *segs = td5_mmstreets_segs();
-    const char *own;
     float ui, cap, px, pz, reach, mm_l, mm_t, mm_r, mm_b, keep;
     int nc = 0, placed = 0, i, j;
 
@@ -7578,8 +7461,6 @@ static int hud_minimap_street_labels(int actor_slot, float offset_x, float offse
         const float hy = (s_minimap_height * 0.5f) / s_minimap_world_scale_y;
         reach = sqrtf(hx * hx + hy * hy);
     }
-    own = td5_geo_attrs_name(td5_game_get_slot_span(actor_slot));
-    if (!own) own = "";
 
     for (i = 0; i < n; i++) {
         const TD5_MMStreetSeg *s = &segs[i];
@@ -7611,7 +7492,7 @@ static int hud_minimap_street_labels(int actor_slot, float offset_x, float offse
             c = &cand[nc++];
             c->id = s->name_id;
             c->d2 = d2; c->mx = mx; c->my = my;
-            c->banned = (strcmp(td5_mmstreets_name(s->name_id), own) == 0);
+            c->banned = 0;   /* [roam SA] the street the player is ON came from the strip's OSM attributes (deleted) */
         } else if (d2 < c->d2) {
             c->d2 = d2; c->mx = mx; c->my = my;
         }
@@ -8393,7 +8274,7 @@ void td5_hud_render_minimap(int actor_slot)
     }
 
     /* [ROUND 1022 S] Street-name labels over the map, under the racer dots. */
-    hud_minimap_street_labels(actor_slot, offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+    hud_minimap_street_labels(offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
 
     /* Render racer dot markers.
      *

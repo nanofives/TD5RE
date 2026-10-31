@@ -6,7 +6,9 @@
  * (TD5_SCREEN_GEO_GENERATOR), reached from SELECT TRACK's "GEOSPATIAL TRACK
  * GENERATOR" row. An OSM raster map fills the middle of the screen; the
  * player places START, FINISH and any number of middle points on it with the
- * mouse, and BUILD turns the resulting route into a track.
+ * mouse, and RACE ROUTE races them in the free-roam city (the FREE ROAM setup
+ * is the same screen with one pin). [roam SA] BUILD TRACK, which turned the
+ * route into a strip level (level091), went with the strip geo BUILD.
  *
  * This is the in-game equivalent of the browser selector
  * (re/tools/geo_selector/index.html, GEO_TRACK_OSM_PLAN.md section 6e), which
@@ -15,8 +17,7 @@
  *
  * THREE SEAMS, ALL OWNED ELSEWHERE:
  *   td5_geo_tiles.h  the map imagery (WinHTTP, disk cache, atlas page)
- *   td5_geo_route.h  routing + conditioning (group L3; a stub stands in today,
- *                    and td5_geo_route_is_stub() makes the screen say so)
+ *   td5_geo_route.h  routing + conditioning: the routed line and its length
  *   td5_geo.h        the place cache and the track slots a place registers
  *
  * COORDINATES. Three spaces, kept deliberately separate:
@@ -256,12 +257,6 @@ static int    s_mode_parent[2] = { TD5_SCREEN_TRACK_SELECTION, TD5_SCREEN_TRACK_
 /* the map screen the armed roam session came from: where leaving free roam returns */
 static int    s_roam_origin = TD5_SCREEN_GEO_GENERATOR;
 
-/* [GEO FREE ROAM F11a, F11b] 1 = the STRIP geo BUILD is on, read at screen entry: local multiplayer
- * (2+ humans, the only context the strip race is built in) or TD5RE_GEO_STRIP_BUILD=1 (dev). BUILD
- * TRACK and the generation OPTIONS panel as before. 0 (single player) = the button is RACE ROUTE: the
- * same pins raced inside the free-roam city, and the panel, whose rows only shape a strip build,
- * gives way to a short note. docs/plans/geo_free_roam/F11_PARITY.md. */
-static int    s_strip;
 static int    geo_roam_spawn(TD5_RoamSpawn *out);
 static int    s_roam_pending;              /* [roam G6] the START / pin check is waiting on the street layer */
 static int    geo_race_city_ready(const char **why);
@@ -842,26 +837,17 @@ static void geo_handle_mouse(void)
 }
 
 /* ========================================================================
- * SECTION: generation options ([ROUND 1030 B item 3])
+ * SECTION: map options ([ROUND 1030 B item 3])
  *
- * Every row is an EXISTING TD5RE_* knob the geo build already reads; nothing
- * here adds generation behaviour. Same mechanism as the AUTO TRACK STUDIO
- * (k_at_rows, td5_fe_race.c): the row writes the knob with _putenv_s, the
- * generator reads it with getenv when the race launches, and tg_env_hash
- * folds every TD5RE_* variable into the level's GENSTAMP, so a changed option
- * is a stamp miss and level09x is REBUILT rather than reused.
+ * Two rows are TD5RE_* knobs the roam session reads when it starts: TIME OF
+ * DAY (td5_trackgen_roam_is_night) and TERRAIN HEIGHT (TD5RE_GEO_EXAGGERATION).
+ * The row writes the knob with _putenv_s; a row set back to its default
+ * REMOVES the variable, so an untouched panel leaves the environment as it
+ * found it. [roam SA] The strip BUILD's generation rows (avenues, run-off,
+ * forks, loops, signals, crossings, city ...) went with the strip geo BUILD.
  *
- * A row set back to its default REMOVES the variable instead of writing the
- * default's digits, so an untouched panel leaves the environment exactly as
- * it found it: same env hash, same reused level, same bytes as master.
- *
- * Two rows (AVENUES, RUN-OFF) are read by the ROUTER rather than the track
- * builder -- td5_geo_route_build / commit -- so changing them re-routes the
- * pins at once and the status box shows the new verdict. The rest act when
- * the track is built.
- *
- * NOT persisted (same call as the studio): per-session generator settings,
- * and an env var set on the command line for an A/B must still win.
+ * NOT persisted, except TERRAIN HEIGHT ([Geo] TerrainHeight): an env var set
+ * on the command line for an A/B must still win.
  * ======================================================================== */
 
 typedef enum { GEO_OPT_INT = 0, GEO_OPT_FLAG_ON } GeoOptKind;
@@ -874,102 +860,24 @@ typedef struct {
     int         n;
     int         def;        /* what the reader does when the knob is unset    */
     unsigned char kind;     /* GeoOptKind: how an existing value is parsed    */
-    unsigned char route;    /* 1 = read by the router: re-route on change     */
-    signed char parent;     /* row that must be ON for this one to matter     */
-    const char *help1, *help2;
 } GeoOpt;
 
-static const int k_go_off_on_v[] = { 0, 1 };
-static const char *const k_go_off_on_n[] = { "OFF", "ON" };
 /* TD5RE_AUTOTRACK_NIGHT: 2 is the reader's own "derive from the seed", which is
- * also what unset means (tg_decide_night), so AUTO is the default entry. */
+ * also what unset means (tg_night_for), so AUTO is the default entry. */
 static const int k_go_night_v[] = { 2, 0, 1 };
 static const char *const k_go_night_n[] = { "AUTO", "DAY", "NIGHT" };
 /* TD5RE_GEO_EXAGGERATION x100, clamp 100..400, default 100 (td5_geo.h; 150 before round QA).
  * [roam QA] TERRAIN HEIGHT, named by its factor: 1X is the real relief. */
 static const int k_go_hills_v[] = { 100, 150, 200, 300 };
 static const char *const k_go_hills_n[] = { "1X (REAL)", "1.5X", "2X", "3X" };
-/* TD5RE_GEO_RUNOFF_SPANS, clamp 0..400, default 104 (GR_RO_SPANS_DEFAULT). */
-static const int k_go_runoff_v[] = { 0, 50, 104, 200 };
-static const char *const k_go_runoff_n[] = { "NONE", "SHORT", "STANDARD", "LONG" };
-/* TD5RE_GEO_BLOCKLOOP_MAX, clamp 0..BL_MAXPLAN, default 6. */
-static const int k_go_loops_v[] = { 1, 2, 3, 4, 6 };
-static const char *const k_go_loops_n[] = { "1", "2", "3", "4", "6" };
-/* TD5RE_GEO_PARK_TREES: ON = the big per-park cap (td5_tg_streets.c). */
-static const char *const k_go_trees_n[] = { "SPARSE", "DENSE" };
-/* TD5RE_GEO_LAMP_SPACING_M, clamp 8..200, default 30. */
-static const int k_go_lamps_v[] = { 15, 30, 60, 120 };
-static const char *const k_go_lamps_n[] = { "DENSE", "STANDARD", "SPARSE", "RARE" };
 
-/* Every `def` checked against its reader on master 78a6b25f:
- * td5_env_flag_on -> ON, td5_env_int -> its stated default. */
 static const GeoOpt k_geo_opts[] = {
-    /* ---------------------------------------------------------- ROUTE --- */
 #define GO_ROW_TIME 0
-    { "TIME OF DAY",    "TD5RE_AUTOTRACK_NIGHT",     k_go_night_v,  k_go_night_n,  3, 2,   GEO_OPT_INT,     0, -1,
-      "Day or night race. AUTO picks",   "from the track seed." },
+    { "TIME OF DAY",    "TD5RE_AUTOTRACK_NIGHT",  k_go_night_v, k_go_night_n, 3, 2, GEO_OPT_INT },
 #define GO_ROW_TERRAIN 1
-    { "TERRAIN HEIGHT", "TD5RE_GEO_EXAGGERATION",    k_go_hills_v,  k_go_hills_n,  4, TD5_GEO_EXAGGERATION_X100_DEFAULT,
-      GEO_OPT_INT,     0, -1,
-      "How much the real relief is",     "raised. 1X = the true heights." },
-    { "AVENUES",        "TD5RE_GEO_AVENUES",         k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 1, -1,
-      "Build divided avenues with the",  "real median where the map has one." },
-    { "RUN-OFF",        "TD5RE_GEO_RUNOFF_SPANS",    k_go_runoff_v, k_go_runoff_n, 4, 104, GEO_OPT_INT,     1, -1,
-      "Road kept past the finish line",  "to slow down on." },
-    /* ---------------------------------------------------------- FORKS --- */
-#define GO_ROW_FORKS 4
-    { "FORKS",          "TD5RE_GEO_FORKS",           k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
-      "Driveable forks where the real",  "map has a second road beside you." },
-#define GO_ROW_LOOPS 5
-    { "BLOCK LOOPS",    "TD5RE_GEO_FORK_BLOCKLOOP",  k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_FORKS,
-      "Alternate roads: turn off and",   "drive round a city block." },
-    { "MAX LOOPS",      "TD5RE_GEO_BLOCKLOOP_MAX",   k_go_loops_v,  k_go_loops_n,  5, 6,   GEO_OPT_INT,     0, GO_ROW_LOOPS,
-      "Most block loops one track",      "may have." },
-    { "LEFT LOOPS",     "TD5RE_GEO_BLOCKLOOP_LEFT",  k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_LOOPS,
-      "Allow loops that leave the route", "to the left as well." },
-    { "PLAZA FORKS",    "TD5RE_GEO_FORK_PLAZA",      k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_FORKS,
-      "A second way round a plaza",      "where the street circles one." },
-    { "LEFT FORKS",     "TD5RE_GEO_FORK_LEFT",       k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_FORKS,
-      "Offer forks on the left side",    "of the road too." },
-    /* -------------------------------------------------------- STREETS --- */
-#define GO_ROW_SIGNALS 10
-    { "TRAFFIC LIGHTS", "TD5RE_GEO_SIGNALS",         k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
-      "Traffic lights at the junctions", "the map marks as signalled." },
-    { "MAST ARMS",      "TD5RE_GEO_MASTARM",         k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_SIGNALS,
-      "Lights hung over the road on an", "arm, with the street name plate." },
-    { "LIVE SIGNALS",   "TD5RE_GEO_SIGNAL_LIVE",     k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_SIGNALS,
-      "Signal heads count down and",     "change. OFF = a fixed display." },
-    { "CROSSWALKS",     "TD5RE_GEO_XINGS",           k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
-      "Zebra crossings and stop lines",  "from the map." },
-    { "BUS STOPS",      "TD5RE_GEO_BUSSTOPS",        k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
-      "Shelters, benches and bins at",   "the map's bus stops." },
-    { "FOOTPATHS",      "TD5RE_GEO_FOOTPATHS",       k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
-      "Pedestrian paths from the map,",  "in parks and plazas." },
-    /* ----------------------------------------------------------- CITY --- */
-#define GO_ROW_CITY 16
-    { "CITY",           "TD5RE_GEO_CITY",            k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, -1,
-      "Real city scenery from the map.", "BUILDINGS and PLAZAS need it." },
-    { "BUILDINGS",      "TD5RE_GEO_BUILDINGS",       k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_CITY,
-      "Real building footprints and",    "heights." },
-    { "PLAZAS",         "TD5RE_GEO_PLAZAS",          k_go_off_on_v, k_go_off_on_n, 2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_CITY,
-      "Parks and plazas from the map,",  "with lawns and paths." },
-    { "PARK TREES",     "TD5RE_GEO_PARK_TREES",      k_go_off_on_v, k_go_trees_n,  2, 1,   GEO_OPT_FLAG_ON, 0, GO_ROW_CITY,
-      "How many trees a park may",       "carry." },
-    { "STREET LAMPS",   "TD5RE_GEO_LAMP_SPACING_M",  k_go_lamps_v,  k_go_lamps_n,  4, 30,  GEO_OPT_INT,     0, -1,
-      "Distance between lamp posts on",  "lit streets (15/30/60/120 m)." },
+    { "TERRAIN HEIGHT", "TD5RE_GEO_EXAGGERATION", k_go_hills_v, k_go_hills_n, 4,
+      TD5_GEO_EXAGGERATION_X100_DEFAULT, GEO_OPT_INT },
 };
-#define GEO_OPTS ((int)(sizeof(k_geo_opts) / sizeof(k_geo_opts[0])))
-
-typedef struct { const char *name; int first, count; } GeoOptSect;
-static const GeoOptSect k_geo_sects[] = {
-    { "ROUTE",   0,  4 },
-    { "FORKS",   4,  6 },
-    { "STREETS", 10, 6 },
-    { "CITY",    16, 5 },
-};
-#define GEO_SECTS ((int)(sizeof(k_geo_sects) / sizeof(k_geo_sects[0])))
-
-static int s_opt_sect;                      /* current section */
 
 /* The value the reader would use right now: the env var parsed the way the
  * reader parses it, or `def` when unset. */
@@ -1010,7 +918,6 @@ static void geo_opt_write(int row, int value)
     }
     TD5_LOG_I(LOG_TAG, "GEO GENERATOR: option %s -> %d (%s=%s)", o->label, value,
               o->knob, getenv(o->knob) ? getenv(o->knob) : "<unset>");
-    if (o->route && s_n_pts >= 2) geo_mark_dirty();
 }
 
 /* Step a row one value along its list, wrapping. */
@@ -1023,24 +930,7 @@ static void geo_opt_step(int row, int d)
     geo_opt_write(row, o->values[i]);
 }
 
-/* 1 when the row's parent is switched off, so the row has no effect. */
-static int geo_opt_inactive(int row)
-{
-    const int p = k_geo_opts[row].parent;
-    return (p >= 0 && geo_opt_value(p) == 0) ? 1 : 0;
-}
-
-static int geo_opt_row_at(int slot)
-{
-    const GeoOptSect *s = &k_geo_sects[s_opt_sect];
-    return (slot >= 0 && slot < s->count) ? s->first + slot : -1;
-}
-
-/* Show the current section's rows on the GEO_OPT_VIS row buttons. Fixed
- * buttons hidden past the section's end, so a page flip never rebuilds the
- * button table and the focus stays where the player left it. */
 /* [roam QA] What each row slot of the panel edits, per mode:
- *   strip build      the current section's generation options (geo_opt_row_at)
  *   SPRINT / CIRCUIT slot 0 TIME OF DAY, 1..5 the race settings, 6 TERRAIN HEIGHT
  *   FREE ROAM setup  slot 0 TIME OF DAY, 1 TRAFFIC, 2 COPS, 3 TERRAIN HEIGHT
  * TIME OF DAY and TERRAIN HEIGHT are k_geo_opts rows (env knobs the roam session reads at start:
@@ -1052,7 +942,6 @@ static const char *const k_free_label[GEO_FREE_ROWS] = { "TRAFFIC", "COPS" };
 
 static int geo_slot_kind(int slot, int *idx)
 {
-    int i = -1;
     if (slot < 0 || slot >= GEO_OPT_VIS) return GEO_SLOT_NONE;
     if (s_roam_mode) {
         switch (slot) {
@@ -1063,15 +952,10 @@ static int geo_slot_kind(int slot, int *idx)
         default:                       return GEO_SLOT_NONE;
         }
     }
-    if (!s_strip) {
-        if (slot == 0)               { *idx = GO_ROW_TIME;    return GEO_SLOT_OPT; }
-        if (slot <= GEO_RR_ROWS)     { *idx = slot - 1;       return GEO_SLOT_RR; }
-        if (slot == GEO_RR_ROWS + 1) { *idx = GO_ROW_TERRAIN; return GEO_SLOT_OPT; }
-        return GEO_SLOT_NONE;
-    }
-    i = geo_opt_row_at(slot);
-    *idx = i;
-    return i >= 0 ? GEO_SLOT_OPT : GEO_SLOT_NONE;
+    if (slot == 0)               { *idx = GO_ROW_TIME;    return GEO_SLOT_OPT; }
+    if (slot <= GEO_RR_ROWS)     { *idx = slot - 1;       return GEO_SLOT_RR; }
+    if (slot == GEO_RR_ROWS + 1) { *idx = GO_ROW_TERRAIN; return GEO_SLOT_OPT; }
+    return GEO_SLOT_NONE;
 }
 
 static void geo_free_value(int row, char *buf, size_t cap)
@@ -1113,10 +997,8 @@ static void geo_opt_layout_rows(void)
     int k;
     for (k = 0; k < GEO_OPT_VIS; k++) {
         FE_Button *b = &s_buttons[GEO_BTN_ROW0 + k];
-        /* [F11a] without the strip build only slot 0 of the ROUTE page (TIME OF DAY, which the roam
-         * session reads too: td5_trackgen_roam_is_night) stays; the other rows only shape a strip build */
-        /* [roam HA] ... and slots 1..5 are the race settings (RACE TYPE, LAPS, OPPONENTS, TRAFFIC, COPS) */
-        /* [roam QA] ... slot 6 TERRAIN HEIGHT; the FREE ROAM setup has its own four (geo_slot_kind) */
+        /* slot 0 TIME OF DAY, [roam HA] slots 1..5 the race settings (RACE TYPE, LAPS, OPPONENTS,
+         * TRAFFIC, COPS), [roam QA] slot 6 TERRAIN HEIGHT; the FREE ROAM setup has its own four */
         int idx;
         const int on = geo_slot_kind(k, &idx) != GEO_SLOT_NONE;
         b->hidden   = on ? 0 : 1;
@@ -1124,7 +1006,7 @@ static void geo_opt_layout_rows(void)
     }
     if (s_selected_button >= GEO_BTN_ROW0 && s_selected_button < GEO_BTN_ROW0 + GEO_OPT_VIS
         && s_buttons[s_selected_button].disabled)
-        s_selected_button = GEO_BTN_SECT;
+        s_selected_button = GEO_BTN_BUILD;
 }
 
 /* [roam HA] RACE SETTINGS of the city race (RACE ROUTE): the options that were a panel inside the race
@@ -1177,19 +1059,6 @@ static void geo_rr_step(int row, int d)
         TD5_LOG_I(LOG_TAG, "GEO GENERATOR: race setting %s -> %s", k_rr_label[row], v);
     }
 #endif
-}
-
-static void geo_opt_set_sect(int sect)
-{
-    s_opt_sect = (s_strip && !s_roam_mode) ? ((sect % GEO_SECTS) + GEO_SECTS) % GEO_SECTS : 0;   /* [F11a] city: ROUTE page only */
-    geo_opt_layout_rows();
-}
-
-static void geo_opt_defaults(void)
-{
-    int i;
-    for (i = 0; i < GEO_OPTS; i++)
-        if (getenv(k_geo_opts[i].knob)) geo_opt_write(i, k_geo_opts[i].def);
 }
 
 /* ========================================================================
@@ -1396,23 +1265,6 @@ static void geo_draw_route(float sx, float sy)
     }
 }
 
-static const char *geo_verdict_text(void)
-{
-    switch (s_verdict) {
-    case TD5_GEO_ROUTE_OK:         return TR("ROUTE OK");
-    case TD5_GEO_ROUTE_NO_DATA:    return TR("NO MAP DATA");
-    case TD5_GEO_ROUTE_NO_PATH:    return TR("NO ROAD PATH");
-    case TD5_GEO_ROUTE_TOO_LONG:   return TR("TOO LONG");
-    case TD5_GEO_ROUTE_TOO_SHORT:  return TR("TOO SHORT");
-    default:                       return TR("ROUTER ERROR");
-    }
-}
-
-static int geo_route_is_buildable(void)
-{
-    return s_have_route && s_verdict == TD5_GEO_ROUTE_OK && !td5_geo_route_is_stub();
-}
-
 /* Small text centred on a design-space x. fe_measure_small_text is in glyph
  * units, drawn at min(sx, sy) (see mp_pos_small_centered, td5_fe_race.c). */
 static void geo_small_centered(float cx, float y, const char *t, uint32_t col,
@@ -1549,89 +1401,6 @@ static void geo_draw_city_note(float sx, float sy)
     }
 }
 
-static void geo_draw_panel(float sx, float sy)
-{
-    const float px = (float)GEO_PANEL_X, pw = (float)GEO_PANEL_W;
-    const GeoOptSect *sec = &k_geo_sects[s_opt_sect];
-    const int focus = s_selected_button - GEO_BTN_ROW0;
-    const int frow = (focus >= 0 && focus < GEO_OPT_VIS) ? geo_opt_row_at(focus) : -1;
-    char line[64];
-    int k;
-
-    if (!s_strip) { geo_draw_city_note(sx, sy); return; }   /* [F11a] */
-
-    /* section selector: name centred, page count by the right arrow */
-    fe_draw_option_arrows(GEO_BTN_SECT, sx, sy);
-    fe_draw_text_centered((px + pw * 0.5f) * sx,
-                          ((float)GEO_SECT_Y + (float)GEO_SECT_H * 0.5f - FE_TEXT_CAP_MID) * sy,
-                          TR(sec->name), 0xFFE3D708u, sx, sy);
-    snprintf(line, sizeof line, "%d/%d", s_opt_sect + 1, GEO_SECTS);
-    fe_draw_small_text((px + pw - 46.0f) * sx, ((float)GEO_SECT_Y + 10.0f) * sy,
-                       line, GEO_COL_DIM, sx, sy);
-
-    for (k = 0; k < GEO_OPT_VIS; k++) {
-        const int row = geo_opt_row_at(k);
-        const float ry = (float)(GEO_ROW_Y0 + k * GEO_ROW_STEP);
-        const GeoOpt *o;
-        int idx, off;
-        if (row < 0) continue;
-        o = &k_geo_opts[row];
-        idx = geo_opt_index(row);
-        off = geo_opt_inactive(row);
-        fe_draw_option_arrows(GEO_BTN_ROW0 + k, sx, sy);
-        fe_draw_small_text((px + 22.0f) * sx, (ry + 7.0f) * sy, TR(o->label),
-                           off ? 0xFF6A7280u : 0xFFE6ECF4u, sx, sy);
-        if (idx >= 0) snprintf(line, sizeof line, "%s", TR(o->names[idx]));
-        else          snprintf(line, sizeof line, "%d", geo_opt_value(row));
-        /* A value moved off its default is drawn green, so a glance at a page
-         * says what this build will do differently from the stock one. */
-        geo_small_centered(px + 176.0f, ry + 7.0f, line,
-                           off ? 0xFF6A7280u
-                               : (geo_opt_value(row) != o->def ? 0xFF7CE07Cu : 0xFFFFFFFFu),
-                           sx, sy);
-    }
-
-    /* help box for the focused row */
-    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    geo_fill(px, GEO_HELP_Y, pw, GEO_HELP_H, 0xC0101018u, sx, sy);
-    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-    geo_frame_rect(px, GEO_HELP_Y, pw, GEO_HELP_H, GEO_COL_FRAME, sx, sy);
-    if (frow >= 0) {
-        const GeoOpt *o = &k_geo_opts[frow];
-        char help[2 * GEO_WRAP_LEN], wl[3][GEO_WRAP_LEN];
-        float y = GEO_HELP_Y + 5.0f;
-        int nl, j;
-        fe_draw_small_text((px + 6.0f) * sx, y * sy, TR(o->label), 0xFFE3D708u, sx, sy);
-        y += 14.0f;
-        snprintf(help, sizeof help, "%s %s", TR(o->help1), TR(o->help2));
-        nl = geo_wrap_small(help, pw - 12.0f, sx, sy, wl, 3);
-        for (j = 0; j < nl; j++, y += 12.0f)
-            fe_draw_small_text((px + 6.0f) * sx, y * sy, wl[j], 0xFFE6ECF4u, sx, sy);
-        y = GEO_HELP_Y + GEO_HELP_H - 16.0f;
-        if (geo_opt_inactive(frow)) {
-            snprintf(line, sizeof line, "%s %s", TR("NEEDS"), TR(k_geo_opts[o->parent].label));
-            fe_draw_small_text((px + 6.0f) * sx, y * sy, line, GEO_COL_BAD, sx, sy);
-        } else {
-            fe_draw_small_text((px + 6.0f) * sx, y * sy,
-                               o->route ? TR("CHANGES THE ROUTE NOW")
-                                        : TR("USED WHEN THE TRACK IS BUILT"),
-                               GEO_COL_DIM, sx, sy);
-        }
-    } else {
-        fe_draw_small_text((px + 6.0f) * sx, (GEO_HELP_Y + 5.0f) * sy,
-                           TR("GENERATION OPTIONS"), 0xFFE3D708u, sx, sy);
-        char wl[3][GEO_WRAP_LEN];
-        int nl, j;
-        nl = geo_wrap_small(TR("LEFT / RIGHT CHANGES A VALUE. CHANGED VALUES SHOW GREEN."),
-                            pw - 12.0f, sx, sy, wl, 3);
-        for (j = 0; j < nl; j++)
-            fe_draw_small_text((px + 6.0f) * sx, (GEO_HELP_Y + 19.0f + 12.0f * (float)j) * sy,
-                               wl[j], 0xFFE6ECF4u, sx, sy);
-        fe_draw_small_text((px + 6.0f) * sx, (GEO_HELP_Y + GEO_HELP_H - 16.0f) * sy,
-                           TR("USED WHEN THE TRACK IS BUILT"), GEO_COL_DIM, sx, sy);
-    }
-}
-
 void frontend_geo_generator_render(float sx, float sy)
 {
     char line[160];
@@ -1678,9 +1447,8 @@ void frontend_geo_generator_render(float sx, float sy)
      * agree. The row the player clicked still says Mariano's full phrase. */
     /* [roam QA] the city flow's screen is SPRINT / CIRCUIT (Mariano: "in the settings menu rename it
      * to sprint/circuit"), its roam twin FREE ROAM. 16 characters: inside the 4:3 budget above only
-     * because "/" and the spaces are narrow (checked on a 1024x768 framedump). The strip build
-     * (local multiplayer) keeps GEO GENERATOR. */
-    frontend_draw_screen_title(s_roam_mode ? TR("FREE ROAM") : s_strip ? TR("GEO GENERATOR") : TR("SPRINT / CIRCUIT"),
+     * because "/" and the spaces are narrow (checked on a 1024x768 framedump). */
+    frontend_draw_screen_title(s_roam_mode ? TR("FREE ROAM") : TR("SPRINT / CIRCUIT"),
                                FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                0xFFE3D708u, sx, sy);
 
@@ -1762,7 +1530,7 @@ void frontend_geo_generator_render(float sx, float sy)
             fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
                                TR("WHEEL ZOOMS, DRAG PANS"),
                                GEO_COL_DIM, sx, sy);
-        } else if (!s_strip) {
+        } else {
             /* [F11a] the race is planned again in the city: the strip router's verdict (spans, self
              * crossings) does not apply, only whether the pins can be raced there */
             const char *why = NULL;
@@ -1781,47 +1549,10 @@ void frontend_geo_generator_render(float sx, float sy)
             if (order)
                 fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
                                    TR("RIGHT CLICK: UNDO"), GEO_COL_DIM, sx, sy);
-        } else {
-            const uint32_t vc = (s_verdict == TD5_GEO_ROUTE_OK) ? GEO_COL_OK : GEO_COL_BAD;
-            fe_draw_text(lx * sx, (GEO_STATUS_Y - 3.0f) * sy, geo_verdict_text(), vc, sx, sy);
-            snprintf(line, sizeof(line), "%d / %d %s   %.1f KM",
-                     s_spans, TD5_GEO_ROUTE_MAX_SPANS, TR("SPANS"),
-                     (double)s_length_m / 1000.0);
-            fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 21.0f) * sy,
-                               line, GEO_COL_DIM, sx, sy);
-            if (s_n_xmark > 0) {
-                snprintf(line, sizeof(line), "%d %s", s_n_xmark, TR("SELF CROSSINGS"));
-                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f) * sy, line,
-                                   GEO_COL_XMARK, sx, sy);
-            } else if (s_reason[0]) {
-                /* router reasons run to ~80 characters: two wrapped lines */
-                char wl[2][GEO_WRAP_LEN];
-                const int nl = geo_wrap_small(TR(s_reason), GEO_STATUS_W - 12.0f,
-                                              sx, sy, wl, 2);
-                int j;
-                for (j = 0; j < nl; j++)
-                    fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f + 13.0f * (float)j) * sy,
-                                       wl[j], GEO_COL_DIM, sx, sy);
-            } else {
-                snprintf(line, sizeof(line), "%s   %d %s", s_place[0] ? s_place : "-",
-                         s_n_pts, TR("POINTS"));
-                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 34.0f) * sy, line,
-                                   GEO_COL_DIM, sx, sy);
-            }
-            if (order && !s_reason[0])
-                fe_draw_small_text(lx * sx, (GEO_STATUS_Y + 47.0f) * sy,
-                                   TR("RIGHT CLICK: UNDO"), GEO_COL_DIM, sx, sy);
         }
     }
 
-    geo_draw_panel(sx, sy);
-
-    /* The stub router must never be mistaken for the real one on a
-     * screenshot. Said plainly, on the screen, every frame. */
-    if (td5_geo_route_is_stub())
-        fe_draw_small_text(GEO_STATUS_X * sx, 444.0f * sy,
-                           TR("ROUTER NOT LINKED - LINE SHOWN IS NOT A DRIVABLE ROUTE"),
-                           GEO_COL_BAD, sx, sy);
+    geo_draw_city_note(sx, sy);
 }
 
 /* ========================================================================
@@ -1829,12 +1560,9 @@ void frontend_geo_generator_render(float sx, float sy)
  * ======================================================================== */
 
 #ifndef TD5RE_RELEASE
-/* [ROUND 1008] The dev seed, now parameterised by VARIANT so one process can
- * build several DIFFERENT routes in a row -- which is the only way to catch a
- * commit that corrupts the place cache, because the first build of a fresh
- * process always looks fine. Each variant is a start / middle / finish triple
- * at a different bearing across the centred place, well inside the La Plata
- * bbox (0.049 deg of latitude by 0.059 of longitude). */
+/* [ROUND 1008] The dev seed (TD5RE_GEO_SEED): a start / middle / finish triple
+ * at a different bearing across the centred place per VARIANT, well inside the
+ * La Plata bbox (0.049 deg of latitude by 0.059 of longitude). */
 static void geo_seed_dev_points(int variant)
 {
     static const double k_var[][6] = {
@@ -1944,19 +1672,20 @@ static void geo_screen_init(void)
      * roam car select returns here without a dedicated hook, and a stale ARMED session would
      * turn the next ordinary race into a roam race */
     td5_roam_cancel();
-    s_strip = s_roam_mode ? 0 : frontend_geo_strip_context();   /* [F11b] the strip BUILD; [roam RA] only with TD5RE_GEO_STRIP_BUILD=1 */
-    if (!s_strip) td5_roam_prefetch_streets();   /* [roam G6] the START check needs it; ~5 s, off-thread */
+    td5_roam_prefetch_streets();   /* [roam G6] the START check needs it; ~5 s, off-thread */
     frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
     frontend_reset_buttons();
     frontend_create_button(TR("CLEAR"), GEO_BTN_CLEAR_X, GEO_BTN_Y,
                            GEO_BTN_CLEAR_W, GEO_BTN_H);
-    frontend_create_button(s_roam_mode ? TR("CONFIRM") : s_strip ? TR("BUILD TRACK") : TR("RACE ROUTE"),
+    frontend_create_button(s_roam_mode ? TR("CONFIRM") : TR("RACE ROUTE"),
                            GEO_BTN_BUILD_X, GEO_BTN_Y, GEO_BTN_BUILD_W, GEO_BTN_H);
     frontend_create_button(TR("BACK"), GEO_BTN_BACK_X, GEO_BTN_Y,
                            GEO_BTN_BACK_W, GEO_BTN_H);
     /* [ROUND 1030 B item 3] the OPTIONS panel: section selector, rows, DEFAULTS.
      * Created in enum order -- frontend_create_button hands out indices
-     * sequentially after frontend_reset_buttons. */
+     * sequentially after frontend_reset_buttons. [roam SA] The section selector
+     * and DEFAULTS served the strip BUILD's generation pages: still created
+     * (button indices stay, inputscripts focus by number), never shown. */
     {
         int k, b;
         b = frontend_create_button("", GEO_PANEL_X, GEO_SECT_Y, GEO_PANEL_W, GEO_SECT_H);
@@ -1971,23 +1700,9 @@ static void geo_screen_init(void)
         if (b != GEO_BTN_DEFAULTS)
             TD5_LOG_E(LOG_TAG, "GEO GENERATOR: DEFAULTS button got index %d, "
                       "expected %d -- the panel's button map is off", b, GEO_BTN_DEFAULTS);
-        /* the section table must tile k_geo_opts with no gap, and no section
-         * may hold more rows than there are row buttons */
-        for (k = 0, b = 0; k < GEO_SECTS; k++) {
-            if (k_geo_sects[k].first != b || k_geo_sects[k].count > GEO_OPT_VIS)
-                TD5_LOG_E(LOG_TAG, "GEO GENERATOR: option section %s is malformed "
-                          "(first %d, count %d)", k_geo_sects[k].name,
-                          k_geo_sects[k].first, k_geo_sects[k].count);
-            b = k_geo_sects[k].first + k_geo_sects[k].count;
-        }
-        if (b != GEO_OPTS)
-            TD5_LOG_E(LOG_TAG, "GEO GENERATOR: option sections cover %d of %d rows",
-                      b, GEO_OPTS);
-        geo_opt_set_sect(s_opt_sect);
-        if (!s_strip) {   /* [F11a] the panel's buttons stay (indices) but cannot be seen or focused */
-            s_buttons[GEO_BTN_SECT].hidden = s_buttons[GEO_BTN_SECT].disabled = 1;
-            s_buttons[GEO_BTN_DEFAULTS].hidden = s_buttons[GEO_BTN_DEFAULTS].disabled = 1;
-        }
+        geo_opt_layout_rows();
+        s_buttons[GEO_BTN_SECT].hidden = s_buttons[GEO_BTN_SECT].disabled = 1;
+        s_buttons[GEO_BTN_DEFAULTS].hidden = s_buttons[GEO_BTN_DEFAULTS].disabled = 1;
     }
     {
         /* [GEO FREE ROAM F2-A] FREE ROAM: drive the real city from the START pin (the first click) */
@@ -2109,27 +1824,8 @@ static void geo_screen_init(void)
         }
     }
     {
-        const int sect = td5_env_int("TD5RE_GEO_PANEL_SECT", -1, -1, GEO_SECTS - 1);
-        const int foc  = td5_env_int("TD5RE_GEO_PANEL_FOCUS", -1, -1, GEO_BTN_COUNT - 1);
-        if (sect >= 0) geo_opt_set_sect(sect);
+        const int foc = td5_env_int("TD5RE_GEO_PANEL_FOCUS", -1, -1, GEO_BTN_COUNT - 1);
         if (foc >= 0 && !s_buttons[foc].disabled) s_selected_button = foc;
-    }
-    /* TD5RE_GEO_PANEL_SET="row:value[,row:value]" sets rows through the SAME
-     * geo_opt_write the arrows call, so a headless BUILD can prove a panel
-     * choice reaches the track build. Consumed once (cleared after use). */
-    {
-        const char *ps = getenv("TD5RE_GEO_PANEL_SET");
-        if (ps && ps[0]) {
-            char buf[128];
-            char *tok, *ctx = NULL;
-            snprintf(buf, sizeof buf, "%s", ps);
-            _putenv_s("TD5RE_GEO_PANEL_SET", "");
-            for (tok = strtok_s(buf, ",", &ctx); tok; tok = strtok_s(NULL, ",", &ctx)) {
-                int row, val;
-                if (sscanf(tok, "%d:%d", &row, &val) == 2 && row >= 0 && row < GEO_OPTS)
-                    geo_opt_write(row, val);
-            }
-        }
     }
     /* [ROUND 1030 B item 4] Scripted clicks through the SAME place / undo
      * functions the mouse calls, logged step by step, for a headless check of
@@ -2150,9 +1846,8 @@ static void geo_screen_init(void)
     s_moved_while_down = 0;
     (void)td5_plat_input_get_mouse_wheel();          /* drop queued wheel */
 
-    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: open at %.5f,%.5f z%d (%d routable place(s), "
-              "router=%s)", s_cen_lat, s_cen_lon, s_zoom, s_n_places,
-              td5_geo_route_is_stub() ? "STUB" : "real");
+    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: open at %.5f,%.5f z%d (%d routable place(s))",
+              s_cen_lat, s_cen_lon, s_zoom, s_n_places);
 
     s_anim_complete = 1;
     s_inner_state   = 1;
@@ -2183,75 +1878,6 @@ static void geo_leave(int screen)
 {
     geo_close_screen();
     td5_frontend_set_screen(screen);
-}
-
-/* BUILD: commit the route, re-register the place as a track slot, and hand
- * the player back to SELECT TRACK with that slot picked -- the same shape the
- * J8 GEO-PICK place slots use, so nothing downstream learns a new path. */
-/* [ROUND 1008] The commit half of BUILD, without leaving the screen, so the
- * dev multi-build harness can press it again. Returns the registered track
- * slot, or -1. */
-static int geo_commit_and_register(void)
-{
-    int n, i, slot = -1;
-
-    if (!geo_route_is_buildable()) { frontend_play_sfx(10); return -1; }
-    if (td5_geo_route_commit() != 0) {
-        /* [ROUND 1008] Say WHY. The commit refuses a degenerate route frame
-         * rather than writing one, and "COULD NOT SAVE THE ROUTE" for every
-         * cause is how the round-1007 corruption stayed invisible until it had
-         * already eaten the place cache. */
-        const char *why = td5_geo_route_commit_reason();
-        frontend_play_sfx(10);
-        snprintf(s_reason, sizeof(s_reason), "%s",
-                 (why && why[0]) ? why : "COULD NOT SAVE THE ROUTE");
-        s_verdict = TD5_GEO_ROUTE_ERROR;
-        return -1;
-    }
-
-    td5_trackgen_register_geo_places();
-    n = td5_geo_places_count();
-    for (i = 0; i < n; i++) {
-        const char *slug = td5_geo_places_slug(i);
-        if (slug && s_place[0] && strcmp(slug, s_place) == 0) {
-            slot = td5_trackgen_geo_slot_for_index(i);
-            break;
-        }
-    }
-    if (slot < 0) {
-        TD5_LOG_W(LOG_TAG, "GEO GENERATOR: committed '%s' but it did not register "
-                  "as a track slot", s_place);
-        frontend_play_sfx(10);
-        return -1;
-    }
-
-    TD5_LOG_I(LOG_TAG, "GEO GENERATOR: built '%s' -> track slot %d (%d spans)",
-              s_place, slot, s_spans);
-
-    /* [1008 N2 item 1] "I can't see the preview after I exit the menu."
-     *
-     * td5_geo_preview_route() caches the plotted route BY SLUG and returns the
-     * cached copy on a name match -- but BUILD has just REWRITTEN that place's
-     * ROUTE.JSON, and the slug is of course unchanged. So from the second BUILD
-     * of a session onwards the SELECT TRACK panel re-drew the FIRST route and
-     * the player's new one was never read off disk. Measured on master
-     * 3df2ce24: two BUILDs of la_plata in one session produce exactly ONE
-     * "geo: preview route la_plata -> N of M nodes" line in engine.log.
-     *
-     * Passing "" is that reader's documented invalidate (td5_geo.h: '"" =
-     * synthetic / clear'), so the next panel draw re-parses the file. One
-     * ~150 KB parse per BUILD, not per frame. */
-    td5_geo_preview_route("");
-
-    /* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] The place slots are no
-     * longer browsable, so SELECT TRACK would bounce this pick back to track 0
-     * on entry. Arm it: the selector accepts exactly this slot until the player
-     * cycles away. Must come BEFORE the s_selected_track write for symmetry
-     * with the screen's own entry validation, which reads both. */
-    frontend_geo_pick_arm(slot);
-    s_selected_track = slot;
-    frontend_play_sfx(3);
-    return slot;
 }
 
 /* [GEO FREE ROAM F2-A] The spawn for FREE ROAM: the START pin (the first click), as a point of a
@@ -2401,11 +2027,6 @@ int frontend_geo_generator_points(double (*ll)[2], int max)
     return n;
 }
 
-static void geo_do_build(void)
-{
-    if (geo_commit_and_register() >= 0) geo_leave(s_parent_screen);
-}
-
 void Screen_GeoGenerator(void)
 {
     if (s_inner_state == 0) { geo_screen_init(); return; }
@@ -2414,58 +2035,9 @@ void Screen_GeoGenerator(void)
     geo_handle_mouse();
     if (s_rebuild_wanted) geo_rebuild_route();
 
-#ifndef TD5RE_RELEASE
-    /* Dev-only in-session BUILD -> race, so the one-process path can be
-     * verified on a framedump: control-socket keys do not reach frontend menus
-     * and inject_key cannot press a vector button. TD5RE_GEO_AUTOBUILD=1 waits
-     * for the (seeded, see TD5RE_GEO_SEED) route to condition OK, presses
-     * BUILD, then re-arms AutoRace on the slot it registered -- which is the
-     * whole point: it exercises the commit -> re-grid -> reload -> build path
-     * WITHOUT a relaunch, the thing a fresh process would paper over.
-     *
-     * [ROUND 1008] TD5RE_GEO_AUTOBUILD_N=k repeats that k times on k DIFFERENT
-     * seeded routes before arming the race. One build per process could never
-     * have caught the cache corruption that shipped in round 1007: commit 1
-     * looked perfectly healthy and it was commit 2, reading commit 1's output
-     * back as if it were the fetched data, that collapsed the place. The whole
-     * class of bug only shows up on the SECOND build in a process, so the
-     * harness has to be able to press BUILD twice. Compiled out of RELEASE. */
-    {
-        static int s_autobuild_done;
-        const int want = td5_env_int("TD5RE_GEO_AUTOBUILD_N", 1, 1, 4);
-        /* [F11b] AUTOBUILD=1 is itself a dev strip request (td5_roam_strip_build_enabled), so s_strip is 1 */
-        if (s_strip && td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)
-            && s_autobuild_done < want && geo_route_is_buildable()) {
-            int slot;
-            TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - pressing "
-                      "BUILD %d of %d on the %d-span route (dev build only)",
-                      s_autobuild_done + 1, want, s_spans);
-            slot = geo_commit_and_register();   /* commit + invalidate + register */
-            s_autobuild_done++;
-            if (slot < 0) {
-                TD5_LOG_E(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - BUILD "
-                          "%d of %d FAILED: %s", s_autobuild_done, want,
-                          s_reason[0] ? s_reason : "(no reason given)");
-                return;
-            }
-            TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - BUILD %d of "
-                      "%d OK -> slot %d", s_autobuild_done, want, slot);
-            if (s_autobuild_done < want) {
-                geo_seed_dev_points(s_autobuild_done);   /* a DIFFERENT route */
-                return;
-            }
-            g_td5.ini.default_track = slot;
-            g_td5.ini.auto_race     = 1;   /* MENU loop fires auto_race_setup */
-            TD5_LOG_W(LOG_TAG, "GEO GENERATOR: TD5RE_GEO_AUTOBUILD - armed "
-                      "AutoRace on slot %d after %d build(s)", slot, want);
-            return;
-        }
-    }
-#endif
-
     s_buttons[GEO_BTN_CLEAR].disabled = (s_n_pts > 0) ? 0 : 1;
-    s_buttons[GEO_BTN_BUILD].disabled = (s_roam_mode ? geo_roam_spawn(NULL)                       /* [roam QA] CONFIRM */
-                                         : s_strip ? geo_route_is_buildable() : geo_race_city_ready(NULL)) ? 0 : 1;
+    s_buttons[GEO_BTN_BUILD].disabled = (s_roam_mode ? geo_roam_spawn(NULL)   /* [roam QA] CONFIRM */
+                                                     : geo_race_city_ready(NULL)) ? 0 : 1;
     s_buttons[GEO_BTN_ROAM].disabled = 1;   /* [roam QA] FREE ROAM moved to the track selector */
 
     if (frontend_check_escape()) {
@@ -2474,16 +2046,12 @@ void Screen_GeoGenerator(void)
         return;
     }
 
-    /* [ROUND 1030 B item 3] LEFT/RIGHT on the section selector flips the page,
-     * on a row steps its value (keyboard, pad, or a click on a row's arrow
-     * zone -- the shared nav turns all three into the same arrow bits). */
+    /* [ROUND 1030 B item 3] LEFT/RIGHT on a row steps its value (keyboard, pad, or a click on a
+     * row's arrow zone -- the shared nav turns all three into the same arrow bits). */
     {
         const int d = frontend_option_delta();
         const int slot = s_selected_button - GEO_BTN_ROW0;
-        if (d && s_selected_button == GEO_BTN_SECT) {
-            geo_opt_set_sect(s_opt_sect + d);
-            frontend_play_sfx(2);
-        } else if (d && geo_slot_step(slot, d)) {   /* [roam HA, QA] options / race settings / free roam rows */
+        if (d && geo_slot_step(slot, d)) {   /* [roam HA, QA] options / race settings / free roam rows */
             frontend_play_sfx(2);
         }
     }
@@ -2500,16 +2068,8 @@ void Screen_GeoGenerator(void)
                 frontend_play_sfx(10);
             }
             break;
-        case GEO_BTN_SECT:                      /* confirm = next page */
-            geo_opt_set_sect(s_opt_sect + 1);
-            break;
-        case GEO_BTN_DEFAULTS:
-            geo_opt_defaults();
-            frontend_play_sfx(5);
-            break;
         case GEO_BTN_BUILD:
             if (s_roam_mode) geo_do_roam();   /* [roam QA] CONFIRM */
-            else if (s_strip) geo_do_build();
             else geo_do_race_city();      /* [F11a] */
             return;
         case GEO_BTN_BACK:

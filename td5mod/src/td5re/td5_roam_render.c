@@ -16,10 +16,8 @@
  *   cmd 3  water    [roam LE] a flat-ish water quad per ground cell that touches a wet lattice point
  *
  * FRAME. place -> render is `place - (ox, oz)` in x/z and `y - dy` in height (the
- * contract of td5_roam_mode.h). DEV route mode swaps x/z for the place -> route
- * chain of td5_roam_view.c and dy for the strip datum, so the tiles can be laid
- * over a loaded geo level (an eye that is "g_cameraPos" lives in the same units:
- * strip units = 24.8 / 256, never multiplied again, see td5_roam_view.c).
+ * contract of td5_roam_mode.h). The eye (g_cameraPos) lives in the same render
+ * units (24.8 / 256), never multiplied again.
  *
  * WINDING / LIGHTING. Tile triangles come out of triangle_height with a DOWNWARD
  * normal (the locator flips it). This renderer submits pre-projected polygons and
@@ -99,7 +97,6 @@
 #include "td5_roam_cut.h"         /* [roam NC] cuttings: hole cells, the refill */
 #include "td5_roam_ribbon.h"
 #include "td5_roam_junction.h"   /* [roam HC] TD5_ROAM_CL_TAPER / _BEND: which clusters get stop lines */
-#include "td5_roam_view.h"
 #include "td5_roam_render.h"
 #include "td5_roam_scenery.h"   /* [F4a] the tile's SCENERY layer */
 #include "td5_roam_shops.h"     /* [roam PE] td5_roam_shops_session_begin */
@@ -226,8 +223,6 @@ typedef struct {
     int       dev_mode;                      /* 0 off, 1 near, 2 all                */
     int       dev_loaded_all;
     int       dev_reach;
-    int       dev_overlay;                   /* 0 unread, 1 off, 2 on (env, read once)  */
-    int       dev_hide;                      /* same encoding, HIDE_STRIP               */
     int      *tried;                         /* (tx,tz) pairs that failed to read   */
     int       ntried, captried;
     /* [F3] streamed: tiles come from td5_roam_stream.c (no DEV loader); retired tiles
@@ -268,12 +263,6 @@ static void rr_pt(double px, double py, double pz, float o[3])
 {
     double x = px - (double)s_rr.f.ox;
     double z = pz - (double)s_rr.f.oz;
-#ifndef TD5RE_RELEASE
-    if (s_rr.f.route) {
-        double xr, zr;
-        if (td5_roam_view_frame(s_rr.place, px, pz, &xr, &zr)) { x = xr; z = zr; }
-    }
-#endif
     o[0] = (float)x;
     o[1] = (float)(py - s_rr.f.dy + s_rr.lift);
     o[2] = (float)z;
@@ -1783,7 +1772,7 @@ static RRTile *rr_bake_full(const RoamTile *t, TD5_RoamHeight *hc, TD5_RoamScnSo
     rr_nb_get(&nb, t, src, main_thread);
     rt = rr_bake(t, hc, &nb);
     rr_nb_free(&nb);
-    if (!src || s_rr.f.route || !td5_roam_scn_enabled()) return rt;
+    if (!src || !td5_roam_scn_enabled()) return rt;
     sc = td5_roam_scn_build(src, t, hc);
     if (!sc) return rt;
     if (!rt) {
@@ -1936,7 +1925,7 @@ int td5_roam_render_add_tile(const RoamTile *t)
     if (!s_rr.began || !t) return 0;
     t0 = td5_plat_time_ms();
     /* [F4a] the F2 path bakes on the main thread with the session's own scenery source */
-    if (!s_rr.scn && !s_rr.scn_failed && !s_rr.f.route && td5_roam_scn_enabled()) {
+    if (!s_rr.scn && !s_rr.scn_failed && td5_roam_scn_enabled()) {
         s_rr.scn = td5_roam_scn_open(s_rr.place, &s_rr.grid, NULL, NULL);
         if (!s_rr.scn) s_rr.scn_failed = 1;
     }
@@ -2108,12 +2097,12 @@ int td5_roam_render_begin(const char *place, const TD5_RoamRenderFrame *frame)
         }
     }
     /* [F4c] the street-name plate atlas + its GPU pages, BEFORE any worker bakes a tile (main thread) */
-    if (!s_rr.f.route && td5_roam_scn_enabled()) td5_roam_furn_session_begin(place, &s_rr.grid);
-    if (!s_rr.f.route && td5_roam_scn_enabled()) td5_roam_shops_session_begin(place);   /* [roam PE] shop-name bank */
+    if (td5_roam_scn_enabled()) td5_roam_furn_session_begin(place, &s_rr.grid);
+    if (td5_roam_scn_enabled()) td5_roam_shops_session_begin(place);   /* [roam PE] shop-name bank */
     s_rr.began = 1;
-    TD5_LOG_I(LOG_TAG, "roam render: begin place=%s frame origin=(%d,%d) dy=%.0f route=%d pages road=%d ground=%d "
+    TD5_LOG_I(LOG_TAG, "roam render: begin place=%s frame origin=(%d,%d) dy=%.0f pages road=%d ground=%d "
               "kerb=%d ground=%s cell=%d m drop=%.0f units clamp=%d lift=%.0f R=%.0f m water=%d page=%d below=%.0f units",
-              place, (int)s_rr.f.ox, (int)s_rr.f.oz, s_rr.f.dy, s_rr.f.route, s_rr.page_road, s_rr.page_ground,
+              place, (int)s_rr.f.ox, (int)s_rr.f.oz, s_rr.f.dy, s_rr.page_road, s_rr.page_ground,
               s_rr.page_kerb, (s_rr.use_ground && s_rr.hc_ok) ? "on" : "off", s_rr.cell_m,
               s_rr.ground_drop, s_rr.ground_clamp, s_rr.lift, s_rr.radius / RR_UPM, s_rr.water, s_rr.page_water,
               s_rr.water_below);
@@ -2225,9 +2214,6 @@ static void rr_eye_place(double *px, double *pz)
 {
     const double ex = (double)g_cameraPos[0], ez = (double)g_cameraPos[2];
     *px = ex - (double)s_rr.draw_dx + (double)s_rr.f.ox; *pz = ez - (double)s_rr.draw_dz + (double)s_rr.f.oz;
-#ifndef TD5RE_RELEASE
-    if (s_rr.f.route) td5_roam_view_frame_inv(s_rr.place, ex, ez, px, pz);
-#endif
 }
 
 static void rr_dev_stream(void)
@@ -2261,22 +2247,6 @@ static void rr_dev_stream(void)
     }
 }
 
-#ifndef TD5RE_RELEASE
-static int rr_dev_overlay_on(void)
-{
-    if (!s_rr.dev_overlay) s_rr.dev_overlay = td5_env_int("TD5RE_ROAM_RENDER", 0, 0, 1) ? 2 : 1;
-    return s_rr.dev_overlay == 2;
-}
-int td5_roam_render_hides_strip(void)
-{
-    if (!rr_dev_overlay_on()) return 0;
-    if (!s_rr.dev_hide) s_rr.dev_hide = td5_env_int("TD5RE_ROAM_RENDER_HIDE_STRIP", 0, 0, 1) ? 2 : 1;
-    return s_rr.dev_hide == 2;
-}
-#else
-static int rr_dev_overlay_on(void) { return 0; }
-#endif
-
 static int rr_roam_active(void)
 {
 #ifdef RR_HAVE_MODE
@@ -2288,12 +2258,11 @@ static int rr_roam_active(void)
 
 int td5_roam_render_wanted(void)
 {
-    return s_rr.began || rr_roam_active() || rr_dev_overlay_on();
+    return s_rr.began || rr_roam_active();
 }
 
-/* Lazy session start for the two entry points that exist before the frontend /
- * resident-set plumbing does: a real roam session (frame from the mode), and the
- * DEV overlay (route frame on a loaded geo level). */
+/* Lazy session start for a real roam session (frame from the mode), which exists
+ * before the frontend / resident-set plumbing does. */
 static void rr_autobegin(void)
 {
     TD5_RoamRenderFrame f;
@@ -2301,19 +2270,11 @@ static void rr_autobegin(void)
     const char *mode;
     memset(&f, 0, sizeof f);
     if (!slug || !slug[0]) slug = "la_plata_partido";
-    if (rr_roam_active()) {
+    if (!rr_roam_active()) return;
 #ifdef RR_HAVE_MODE
-        td5_roam_world_origin(&f.ox, &f.oz);
+    td5_roam_world_origin(&f.ox, &f.oz);
 #endif
-        f.dy = (double)td5_env_int("TD5RE_ROAM_RENDER_DY", 0, -100000000, 100000000);
-    } else if (rr_dev_overlay_on()) {
-#ifndef TD5RE_RELEASE
-        f.route = 1;
-        f.dy = td5_roam_view_datum_units(slug);
-#endif
-    } else {
-        return;
-    }
+    f.dy = (double)td5_env_int("TD5RE_ROAM_RENDER_DY", 0, -100000000, 100000000);
     if (!td5_roam_render_begin(slug, &f)) return;
     mode = getenv("TD5RE_ROAM_RENDER_TILES");
     s_rr.dev_mode = (mode && strcmp(mode, "all") == 0) ? 2 : 1;
@@ -2346,10 +2307,10 @@ int td5_roam_render_ensure_begun(void)
  *   name:lat,lon,h_above_ground_m,yaw_deg,pitch_deg      (yaw 0 = north, as seen on the map;
  *   [roam M] yaw is a compass bearing, clockwise: both game frames are reflected (td5_geo_frame.h),
  *   so a clockwise bearing is a NEGATIVE engine yaw)
- * writes <file>.tour.txt in the free-cam tour format (STRIP units, the numbers the POS line prints;
- * the tour multiplies by 256 itself, y from the place height minus the strip datum) and returns 1 (the caller
- * exits). Only meaningful with a built geo level whose _route/ frame is the target of the
- * tour (verify/geo_tour.ps1 with TD5RE_ROAM_RENDER=1 TD5RE_ROAM_RENDER_HIDE_STRIP=1). */
+ * writes <file>.tour.txt in the free-cam tour format (render units, the numbers the POS line prints;
+ * the tour multiplies by 256 itself) in the ROAM frame of TD5RE_ROAM_RENDER_POSES_SPAWN=lat,lon (the
+ * session's origin for that spawn) and returns 1 (the caller exits). [roam SA] The route-frame arm (a
+ * pose on the strip level091's _route/ frame) went with the strip geo BUILD: SPAWN is required. */
 int td5_roam_render_dev_poses(void)
 {
     const char *in = getenv("TD5RE_ROAM_RENDER_POSES");
@@ -2359,7 +2320,7 @@ int td5_roam_render_dev_poses(void)
     FILE *o;
     int64_t n;
     char *line, *save = NULL;
-    double lat0 = 0, lon0 = 0, mdlat = 0, mdlon = 0, datum;
+    double lat0 = 0, lon0 = 0, mdlat = 0, mdlon = 0;
     TD5_RoamHeight *hc;
     int cnt = 0, rf = 0;
     int32_t rf_ox = 0, rf_oz = 0;
@@ -2398,7 +2359,6 @@ int td5_roam_render_dev_poses(void)
             (double)td5_env_int("TD5RE_GEO_EXAGGERATION", TD5_GEO_EXAGGERATION_X100_DEFAULT, 100, 400) / 100.0)) {
         fprintf(stderr, "roam poses: no height source\n"); free(buf); free(hc); return 1;
     }
-    datum = td5_roam_view_datum_units(slug);
     {   /* roam frame: TD5RE_ROAM_RENDER_POSES_SPAWN=lat,lon -> origin = the spawn tile's lattice corner */
         const char *sp = getenv("TD5RE_ROAM_RENDER_POSES_SPAWN");
         double slat, slon;
@@ -2426,11 +2386,16 @@ int td5_roam_render_dev_poses(void)
             fprintf(stderr, "roam poses: roam frame, spawn tile %d,%d origin %d,%d\n", stx, stz, (int)rf_ox, (int)rf_oz);
         }
     }
+    if (!rf) {
+        fprintf(stderr, "roam poses: TD5RE_ROAM_RENDER_POSES_SPAWN=lat,lon is required (the strip route frame is gone)\n");
+        td5_roam_height_close(hc); free(hc); free(buf);
+        return 1;
+    }
     snprintf(outp, sizeof outp, "%s.tour.txt", in);
     o = fopen(outp, "wb");
     for (line = strtok_s(buf, "\r\n;", &save); line && o; line = strtok_s(NULL, "\r\n;", &save)) {
         char nm[48];
-        double lat, lon, hm, yaw, pit, px, pz, xr, zr, xn, zn, g = 0.0, yr;
+        double lat, lon, hm, yaw, pit, px, pz, g = 0.0;
         const char *c = strchr(line, ':');
         size_t l;
         while (*line == ' ') line++;
@@ -2442,21 +2407,14 @@ int td5_roam_render_dev_poses(void)
         pz = (lat - lat0) * mdlat * 430.0;
         if (!td5_roam_height_prefetch(hc, px - 2000.0, pz - 2000.0, px + 2000.0, pz + 2000.0) ||
             !td5_roam_height_sample(hc, px, pz, &g, NULL)) { fprintf(stderr, "roam poses: no height at %s\n", nm); continue; }
-        if (rf) {   /* roam frame: world = place - origin, y = place height, yaw 0 = +Z (north) */
-            fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, (px - (double)rf_ox), (g + hm * 430.0),
-                    (pz - (double)rf_oz), -yaw, pit);
-            cnt++;
-            continue;
-        }
-        if (!td5_roam_view_frame(slug, px, pz, &xr, &zr) || !td5_roam_view_frame(slug, px, pz + 430.0, &xn, &zn)) continue;
-        yr = -yaw * 3.14159265358979 / 180.0 + atan2(xn - xr, zn - zr);  /* map north -> route +Z-relative */
-        fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, xr, (g + hm * 430.0 - datum), zr,
-                yr * 180.0 / 3.14159265358979, pit);
+        /* roam frame: world = place - origin, y = place height, yaw 0 = +Z (north) */
+        fprintf(o, "%s:%.0f,%.0f,%.0f,%.3f,%.3f\n", nm, (px - (double)rf_ox), (g + hm * 430.0),
+                (pz - (double)rf_oz), -yaw, pit);
         cnt++;
     }
     if (o) fclose(o);
     td5_roam_height_close(hc); free(hc); free(buf);
-    fprintf(stderr, "roam poses: %d pose(s) -> %s (datum %.0f units)\n", cnt, outp, datum);
+    fprintf(stderr, "roam poses: %d pose(s) -> %s\n", cnt, outp);
     return 1;
 }
 

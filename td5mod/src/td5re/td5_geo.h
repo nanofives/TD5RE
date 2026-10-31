@@ -70,12 +70,12 @@ void td5_geo_unload(void);
  *
  *   SOURCE   re/assets/geo/<slug>/<name>
  *            Exactly what re/tools/geo_fetch.py wrote, in the frame it fetched
- *            in. The GAME NEVER WRITES HERE. td5_geo_route_commit reads it and
- *            only reads it, so N commits in a row from the same route give
- *            byte-identical products.
+ *            in. The GAME NEVER WRITES HERE.
  *
  *   DERIVED  re/assets/geo/<slug>/_route/<name>
- *            The route-frame products of the LAST BUILD: re-gridded rasters,
+ *            [roam SA] Written by the strip geo BUILD's commit, deleted in round
+ *            S: nothing writes it any more, a frame already on disk is still
+ *            read. The route-frame products of the LAST BUILD: re-gridded rasters,
  *            re-projected ROADS/BUILDINGS/AREAS/SIGNALS, ROUTE.JSON,
  *            ROUTE_RAW.JSON and a PLACE.JSON carrying the route frame. Wholly
  *            rewritten by every commit, always from the source.
@@ -103,12 +103,6 @@ const char *td5_geo_source_path(char *buf, size_t cap,
 const char *td5_geo_derived_path(char *buf, size_t cap,
                                  const char *slug, const char *name);
 
-/* Drop every in-memory copy of the loaded place (rasters AND the parsed route)
- * so the next td5_geo_sync() reloads from disk. For td5_geo_route_commit, which
- * rewrites a place's ROUTE.JSON and rasters in place: a same-place rebuild in
- * the same process would otherwise keep the pre-commit copies, because sync
- * skips a reload when the slug/path are unchanged. */
-void td5_geo_invalidate(void);
 
 int         td5_geo_loaded(void);
 const char *td5_geo_place_name(void);   /* "" when nothing is loaded */
@@ -151,111 +145,16 @@ void   td5_geo_grid(int *out_w, int *out_h, double *out_cell,
                     double *out_origin_x, double *out_origin_z,
                     double *out_rotation_rad);
 
-/* ---------------------------------------------------------------- route ---
- * [GEO PHASE 3 2026-09-30] The conditioned centerline geo_condition.py writes
- * (ROUTE.JSON: points[] of {x, z, lanes}, node 0 at the origin, its first span
- * along +X, chord spacing of exactly span_length). When one is loaded,
- * tg_build_centerline pushes these nodes instead of walking sections, and the
- * track length follows the route.
- *
- * SOURCE, in order: TD5RE_GEO_ROUTE=<path to a ROUTE.JSON> (works with no place
- * loaded, over the synthetic world -- the offline fixture path), else
- * re/assets/geo/<slug>/ROUTE.JSON of the loaded place. Neither present means
- * no route and the generator walks as before, byte-identical.
- *
- * The loader VALIDATES the contract rather than trusting it: node 0 at the
- * origin, span_length matching TD5_TG_SPAN_LENGTH, and every chord within
- * tolerance of it. A route that fails is dropped with an error, never half
- * used -- uneven spacing is silently mis-measured by the engine, not rejected. */
-int  td5_geo_route_count(void);            /* nodes, 0 when no route */
-int  td5_geo_route_node(int i, double *x, double *z, int *lanes);
-const char *td5_geo_route_source(void);    /* path it came from, "" if none */
-
-/* [ROUND 1011 C3] The per-node OSM attributes, as the FILE holds them.
- *
- * STRICTLY ADDITIVE, same contract as the grade separations below: a
- * ROUTE.JSON written before this round carries neither key, and these then
- * report "unknown" for every node -- 0 km/h and name id -1. That is not a
- * failure, it is the honest answer, and td5_geo_attrs.c answers it by falling
- * back to the spatial query against ROADS.JSON, so the attributes work on an
- * existing cache without the user rebuilding the route first.
- *
- * The name accessors return a pointer into the loaded route, valid until the
- * next route load/unload, and "" rather than NULL for an unnamed node. */
-int  td5_geo_route_maxspeed(int i);        /* km/h, 0 = the file does not say */
-int  td5_geo_route_name_id(int i);         /* -1 = unnamed at this node       */
-const char *td5_geo_route_name_by_id(int id);
-const char *td5_geo_route_name(int i);
-
-/* [ROUND 1013 F3] WHERE THE USER'S ROUTE ENDS, as a span index, with real road
- * past it. td5_geo_route_build extends the route beyond the last waypoint along
- * the road that actually continues there (a run-off), so the strip is longer
- * than the race: the finish line stands at the waypoint and the road carries on.
- * `finish_span` is that waypoint's span, and `runoff_*` say what the extension
- * is made of.
- *
- * STRICTLY ADDITIVE, like the attributes above: a ROUTE.JSON written before this
- * round has no `finish_span` key and this returns -1, which the generator reads
- * as "no run-off was built into this route" and keeps its old placement (finish
- * = ring - the RUN-OFF knob). Also -1 when no route is loaded or the stored
- * value is not a span of THIS route. */
-int  td5_geo_route_finish_span(void);
-
-/* ------------------------------------------------- grade separations ------
- * [OPTION B 2026-09-30] docs/plans/GEO_TRACK_OSM_PLAN.md section 5, Option B.
- *
- * A real route through a city crosses ITSELF, and the crossing-safe localiser
- * (td5_track.c, TD5RE_XSPAN) makes that survivable: it keeps the car on the leg
- * it was already driving. What it does not do is make the crossing a road
- * LAYOUT -- two carriageways at the same height over the same ground are still
- * one piece of tarmac, and a car that changes lane there has legitimately
- * arrived on the other leg. So the generator BUILDS the separation: one leg
- * becomes a deck over the other, with grade-limited ramps, and the two decks
- * then differ in Y by metres -- which is also the key the localiser's height
- * test reads.
- *
- * WHO DECIDES WHAT. geo_condition.py decides WHICH leg goes over, because the
- * walk sees the route one 64-span window at a time and cannot know at the first
- * leg that a second one is coming. The decision is deterministic and draws no
- * random number (an extra RNG draw would move the road for every existing seed
- * -- td5_trackgen_internal.h:1290-1296). The ENGINE re-derives the ramp LENGTH,
- * because that depends on the per-biome grade caps only it can see; the
- * `ramp_spans` below is the conditioner's advisory minimum.
- *
- * BACKWARD COMPATIBILITY IS PART OF THE CONTRACT. `grade_separations` is an
- * optional key. A ROUTE.JSON written before Option B has none, the table is
- * then empty, and the build is bit-for-bit the pre-Option-B build of that same
- * route. Do not make the key required, and do not change what an absent key
- * means. */
-#define TD5_GEO_XSEP_MAX 16
-/* TD5_TG_UP_CLEAR (2600, the clearance the NETWORK underpass crossings use)
- * plus TD5_TG_BRIDGE_UNDER (480, the deck girder's depth): the fallback when a
- * file names a range but no clearance. */
-#define TD5_GEO_XSEP_LIFT_DEFAULT 3080.0
-
-typedef struct {
-    int    over_lo, over_hi;      /* span range that is RAISED (the deck)     */
-    int    under_lo, under_hi;    /* span range that stays at grade           */
-    int    ramp_spans;            /* conditioner's advisory ramp length       */
-    double clearance_units;       /* deck carriageway above the lower one     */
-} TD5_GeoXSep;
-
-int  td5_geo_xsep_count(void);
-/* NULL when `i` is out of range, so a caller can loop without a count. */
-const TD5_GeoXSep *td5_geo_xsep(int i);
-
 /* ------------------------------------------------------- place selection ---
  * [GEO PHASE 4 2026-09-30] The selected place is the env knob TD5RE_GEO_PLACE,
- * mirrored to re/assets/geo/SELECTED.TXT so the browser selector
- * (re/tools/geo_selector.py) and the studio's LOCATION row agree across
- * launches: at init, an unset knob is filled from the file.
+ * read from re/assets/geo/SELECTED.TXT at init when the knob is unset.
+ * [roam SA] Nothing writes that file any more (the studio's LOCATION row and
+ * the browser selector are gone); one left on disk still selects the place.
  *
  * td5_geo_sync() makes the loaded place + route match the knob. The generator
  * calls it before folding the spec (build, studio preview, streamed rederive),
- * so a LOCATION change takes effect on the next build with no restart.
- * TD5RE_GEO_ROUTE, when set, still overrides the place's own ROUTE.JSON. */
+ * so a LOCATION change takes effect on the next build with no restart. */
 void td5_geo_sync(void);
-void td5_geo_select(const char *slug);   /* "" = synthetic; writes SELECTED.TXT */
 
 /* Places under re/assets/geo/ that carry a ROUTE.JSON (a place without a route
  * cannot be raced yet). Rescanned on td5_geo_places_rescan(); index order is
@@ -307,23 +206,6 @@ const char *td5_geo_places_buildable_slug(int i);
 int         td5_geo_places_incomplete_count(void);
 const char *td5_geo_places_incomplete_slug(int i);
 const char *td5_geo_places_incomplete_reason(int i);
-
-/* Route plot for the SELECT TRACK preview panel. Reads
- * re/assets/geo/<slug>/ROUTE.JSON directly and keeps only x/z -- deliberately
- * NOT td5_geo_load(), which also parses a multi-megabyte HEIGHT.R16 and belongs
- * to the build, not to a menu that re-draws every frame. Decimated to
- * TD5_GEO_PREVIEW_MAX points and cached by slug, so re-asking for the place
- * that is already shown costs one strcmp.
- *
- * [ROUND 1030 A1] The nodes come back NORTH UP (x = east, z = north, world
- * units), not in the turned world frame the BUILD writes, so the panel matches
- * the GEOSPATIAL TRACK GENERATOR map. TD5RE_GEO_PREVIEW_NORTH_UP=0 restores the
- * world frame.
- *
- * Returns the point count (0 when the place has no usable route). */
-#define TD5_GEO_PREVIEW_MAX 2048
-int td5_geo_preview_route(const char *slug);
-int td5_geo_preview_node(int i, double *x, double *z);
 
 /* Attribution every geo track must show (ODbL). */
 #define TD5_GEO_CREDIT "MAP DATA (C) OPENSTREETMAP CONTRIBUTORS"

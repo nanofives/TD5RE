@@ -5,104 +5,6 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
-#include "td5_geo.h"            /* [GEO FORKS] is a place loaded */
-#include "td5_geo_forks.h"      /* [GEO FORKS] FORKS.JSON: confirmed forks */
-
-/* ===================== GEO FORKS (confirmed in the selector) =====================
- * SECTION: geo forks override the synthetic fork plan
- *
- * On a GEO track with a FORKS.JSON, the forks are the real ones the user
- * confirmed in the selector -- a median avenue that exists on the ground, or a
- * comparable alternative route -- so the synthetic plan ladder and its
- * seed-derived positions are not wanted. Rationale and the on-disk contract:
- * td5_geo_forks.h.
- *
- * THE OVERRIDE IS DELIBERATELY TINY AND IN ONE PLACE PER ANSWER. Fork geometry
- * is decided by exactly three stateless answers -- how many forks
- * (tg_fork_count_planned), what shape and length each one is (tg_fork_plan),
- * and where it sits (the `pos` cursor in tg_fork_place, tg_span_in_fork_run and
- * tg_fork_window_ahead) -- and the comment at tg_fork_first_off() records what
- * happens when those three answers disagree: the walk protects and widens one
- * set of spans while the placement loop commits to another, every moved fork
- * lands on a lane change, and the uniformity guard rightly rejects it. So the
- * geo answers are injected at those same three points and nowhere else.
- *
- * BYTE-IDENTICAL SYNTHETIC BUILDS. tg_geo_forks_n() is the only gate, and with
- * no geo place loaded td5_geo_forks_sync() returns 0 without opening a file. No
- * tg_rand / tg_frand / tg_range call is added on either path, so the single RNG
- * stream is untouched -- the standing rule at td5_trackgen_internal.h:1290-1296.
- *
- * TD5RE_GEO_FORKS=0 pins the synthetic fork placement on a geo track, for a
- * single-variable A/B against a build with the confirmed forks on. */
-static int tg_geo_forks_n(void)
-{
-    if (!td5_geo_loaded()) return 0;
-    if (!td5_env_flag_on("TD5RE_GEO_FORKS")) return 0;
-    {
-        /* idempotent: keyed on the loaded slug. A FORKS.JSON the user confirmed
-         * in the selector is authoritative, exactly as before. */
-        const int legacy = td5_geo_forks_sync();
-        if (legacy > 0) return legacy;
-    }
-    /* [ROUND 1013 F2] No confirmed file: the forks are the real ones the map
-     * has -- the opposite carriageway of a divided avenue and any real road
-     * running close to and parallel with the route (td5_tg_realfork.c). */
-    return tg_realfork_n();
-}
-
-/* Is geo fork `index` one of the REAL ones? (Only when no FORKS.JSON won.) */
-static int tg_geo_fork_is_real(int index)
-{
-    return td5_geo_forks_count() < 1 && index >= 0 && index < tg_realfork_n();
-}
-
-/* TG_ForkKind for the shape name FORKS.JSON carries. The mapping lives here,
- * with the enum, rather than in td5_geo_forks.c -- which is why that module
- * hands back a name and not an int. An unknown name is already refused by the
- * loader; treat it as an ISLAND here so this function has no failure mode. */
-static int tg_geo_fork_kind(const char *name)
-{
-    int k;
-    for (k = 0; k < TG_FORK_KIND_COUNT; k++)
-        if (strcmp(tg_fork_kind_name(k), name) == 0) return k;
-    return TG_FORK_ISLAND;
-}
-
-/* Geo fork `index`: its split span and its plan. Returns 0 when this build has
- * no geo forks (or the index is past the table), and then every caller falls
- * through to the synthetic ladder unchanged. */
-static int tg_geo_fork_at(int index, int *F, int *kind, int *len, double *sep)
-{
-    int gf, gl, glanes;
-    double gsep;
-    if (index < 0 || index >= tg_geo_forks_n()) return 0;
-    if (tg_geo_fork_is_real(index)) {
-        int la = 0, lb = 0;
-        if (!tg_realfork_get(index, &gf, &gl, &la, &lb, &gsep)) return 0;
-        if (F)    *F    = gf;
-        if (len)  *len  = gl;
-        if (sep)  *sep  = gsep;
-        if (kind) *kind = TG_FORK_AVENUE;     /* symmetric, central divider */
-        return 1;
-    }
-    if (!td5_geo_forks_get(index, &gf, &gl, &gsep, &glanes)) return 0;
-    if (F)    *F    = gf;
-    if (len)  *len  = gl;
-    /* sep comes from a JSON file, so clamp it into the range every reader
-     * assumes -- tg_fork_sep_for does the same for the synthetic ladder, and
-     * below TD5_TG_BRANCH_SEP_MIN the two carriageways stop being separable at
-     * all. (The 0.15 in the log against the 0.16 in the file is the port's FP
-     * control word truncating printf, not the value: the untouched synthetic
-     * path prints TD5_TG_FORK_MAX_TURN 0.045 as "0.044" the same way.) */
-    if (sep) {
-        if (gsep < TD5_TG_BRANCH_SEP_MIN) gsep = TD5_TG_BRANCH_SEP_MIN;
-        if (gsep > 1.0) gsep = 1.0;
-        *sep = gsep;
-    }
-    if (kind) *kind = tg_geo_fork_kind(td5_geo_forks_kind(index));
-    return 1;
-}
-
 int tg_branches_enabled(void)
 {
     /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_BRANCHES=0 to disable. */
@@ -116,13 +18,6 @@ int tg_span_in_fork_clear(int si)
 {
     int i;
     for (i = 0; i < s_fork_count; i++) {
-        if (s_forks[i].loopc > 0) continue;   /* [ROUND 1018 L] a block loop leaves the road alone */
-        /* [ROUND 1015 E] a plaza fork clears its two throats; between them the
-         * route is the ordinary ring road and its scenery stays. */
-        if (s_forks[i].freec > 0) {
-            if (tg_pf_clear_span(i, si)) return 1;
-            continue;
-        }
         if (si >= s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2 &&
             si <= s_forks[i].R + 2)
             return 1;
@@ -311,22 +206,12 @@ static int tg_fork_kinds_enabled(void)
 
 int tg_fork_count_planned(void)
 {
-    const int geo = tg_geo_forks_n();      /* [GEO FORKS] */
-    if (geo > 0) return geo;
-    /* [GEO 2026-09-30, Valparaiso] A real route with NO confirmed forks gets
-     * none: a synthetic fork there is a divided avenue that does not exist
-     * (Valparaiso grew an AVENUE fork at span 1201 on Av. Espana). The real
-     * ones come only from FORKS.JSON. TD5RE_GEO_FORKS=0 still pins the
-     * synthetic ladder for an A/B. */
-    if (td5_geo_route_count() >= 2 && td5_env_flag_on("TD5RE_GEO_FORKS"))
-        return 0;
     if (!tg_fork_kinds_enabled()) return 3;
     return td5_env_int("TD5RE_AUTOTRACK_BRANCH_COUNT", 6, 0, TD5_TG_BRANCH_MAX);
 }
 
 void tg_fork_plan(int index, int *kind, int *len, double *sep)
 {
-    if (tg_geo_fork_at(index, NULL, kind, len, sep)) return;   /* [GEO FORKS] */
     if (!tg_fork_kinds_enabled()) {
         /* pre-kinds ladder: three symmetric forks, the old sep ladder */
         static const int k_lens[3] = { 8, 40, 120 };
@@ -375,7 +260,6 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
 {
     s_fork_count = 0;
     s_fork_placed = 0;
-    tg_bl_reset();                     /* [ROUND 1018 L] the loops of the previous build */
     if (!nl || !tg_branches_enabled()) { s_fork_placed = 1; return; }
     {
         const int min_len = tg_branch_min_len();
@@ -409,43 +293,13 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
                                              : (kl < min_len ? min_len : kl);
             int F = pos;
             int R;
-            /* [GEO FORKS] The confirmed fork's own split span replaces the
-             * seed-derived cursor. Bounds-checked HERE and only on the geo
-             * path, because F comes from a file: the synthetic cursor is
-             * derived and cannot be stale, and leaving its path untouched is
-             * what keeps a synthetic build byte-identical. */
-            if (tg_geo_fork_at((int)i, &F, NULL, NULL, NULL) &&
-                (F < 1 || F + 1 + L >= nl->count)) {
-                TD5_LOG_W(LOG_TAG, "trackgen: [GEO FORKS] fork %u at F=%d len=%d "
-                          "runs past the %d-node ring -- dropped (stale "
-                          "FORKS.JSON, or target_spans truncated the route)",
-                          i, F, L, nl->count);
-                break;
-            }
             R = F + 1 + L;
             const int lanes = nl->v[F].lanes;
             int main_half, br_lanes;
             int q, uniform = 1;
-            /* [ROUND 1013 F2] A REAL fork's split is the two real carriageways'
-             * own lane counts, not a function of the total. */
-            const int is_real = tg_geo_fork_is_real((int)i);
-            /* [ROUND 1015 E] 1 + plaza plan when this real fork has a free corridor */
-            const int freec = is_real ? tg_realfork_free((int)i) : 0;
-            if (is_real) {
-                int la = 0, lb = 0;
-                tg_realfork_get((int)i, NULL, NULL, &la, &lb, NULL);
-                main_half = la; br_lanes = lb;
-                if (la < 1 || lb < 1 || la + lb != lanes) {
-                    TD5_LOG_W(LOG_TAG, "trackgen: [REAL FORK] fork %u at F=%d "
-                              "skipped: the ring carries %d lane(s) at F, the "
-                              "real fork needs %d+%d", i, F, lanes, la, lb);
-                    pos = R + fork_gap;
-                    continue;
-                }
-            } else
             tg_fork_split_lanes(kind, lanes, &main_half, &br_lanes);
             if (main_half < 1 || br_lanes < 1) break;
-            if (!is_real && lanes < tg_fork_kind_min_lanes(kind)) {
+            if (lanes < tg_fork_kind_min_lanes(kind)) {
                 /* [FORK KINDS] backstop: the walk widens the road ahead of a
                  * fork window, but a rejected section can leave it narrow. */
                 TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
@@ -458,7 +312,6 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
              * all 147 shipped forks obey it) needs ONE lane count across
              * the widened approach, the split and the rejoin. */
-            if (!freec)       /* a plaza fork's two throats were checked by its planner */
             for (q = F - TD5_TG_BRANCH_WIDEN - 2; q <= R + 2; q++)
                 if (q >= 0 && q < nl->count && nl->v[q].lanes != lanes) uniform = 0;
             if (!uniform) {
@@ -491,13 +344,8 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             s_forks[s_fork_count].br_lanes = br_lanes;
             s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
             s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
-        s_forks[s_fork_count].side = (is_real && !freec) ? tg_realfork_side((int)i) : -1;   /* [TOPOLOGY-FIRST] right unless a bypass goes left; [1019 V] or a real fork on the +t side */
-            s_forks[s_fork_count].real = is_real ? (int)i + 1 : 0;   /* [ROUND 1013 F2] (a plaza fork keeps it: its classic rows are an avenue fork's) */
-            s_forks[s_fork_count].freec = freec;                     /* [ROUND 1015 E] */
-            s_forks[s_fork_count].loopc = 0;                         /* [ROUND 1018 L] */
-            /* [ROUND 1016 K] a plaza fork's corridor has the spans its arc needs */
-            s_forks[s_fork_count].clen = freec ? tg_pf_plan_clen(freec - 1) : L;
-            if (s_forks[s_fork_count].clen < 2) s_forks[s_fork_count].clen = L;
+            s_forks[s_fork_count].side = -1;          /* [TOPOLOGY-FIRST] right unless a bypass goes left */
+            s_forks[s_fork_count].clen = L;
             off += 1 + s_forks[s_fork_count].clen;
             s_fork_count++;
             pos = R + fork_gap;                   /* [R20] gap before the next fork */
@@ -505,7 +353,6 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
 
     }
     s_fork_placed = 1;
-    tg_pf_finalize(nl);        /* [ROUND 1015 E] the free corridors, from the final nodes */
 }
 
 /* Corridor length after the taper floor. Only the shapes that BOW need the
@@ -612,7 +459,6 @@ int tg_span_in_fork_run(int si)
         int L = tg_fork_len_floored(kind, kl);
         int F = pos;
         int R;
-        tg_geo_fork_at(i, &F, NULL, NULL, NULL);   /* [GEO FORKS] */
         R = F + 1 + L;
         /* +/-2 spans of margin past the widened approach and the rejoin so the
          * road eases INTO and OUT of the fork gently rather than meeting a sharp
@@ -652,7 +498,6 @@ int tg_fork_window_ahead(int si, int within)
         const int L = tg_fork_len_floored(kind, kl);
         int F = pos;
         int R, w0;
-        tg_geo_fork_at(i, &F, NULL, NULL, NULL);   /* [GEO FORKS] */
         R  = F + 1 + L;
         w0 = F - TD5_TG_BRANCH_WIDEN - 2;
         if (si <= w0 && w0 - si <= within) return kind;
@@ -680,18 +525,13 @@ static int    tg_fork_gains(int fi)
 }
 double tg_fork_main_shift(int fi, double w)
 {
-    /* [ROUND 1015 E] a plaza fork's main half is the route's own carriageway (la
-     * lanes) wherever the node is wider than that: shift it back by the excess. */
-    if (tg_fork_is_free(fi)) {
-        const double wa = w * tg_pf_main_wscale(fi, w);
-        return -(double)tg_fork_side(fi) * (w - wa) * 0.5;
-    }
     return -(double)tg_fork_side(fi) * w * (1.0 - tg_fork_fm(fi)) * 0.5;
 }
 double tg_fork_main_wscale(int fi)           { return tg_fork_fm(fi); }
 double tg_fork_main_wscale_w(int fi, double w)
 {
-    return tg_fork_is_free(fi) ? tg_pf_main_wscale(fi, w) : tg_fork_fm(fi);
+    (void)w;
+    return tg_fork_fm(fi);
 }
 int    s_fork_placed;
 double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
@@ -705,11 +545,6 @@ int tg_fork_side_at(int si)
 {
     int f;
     for (f = 0; f < s_fork_count; f++) {
-        if (s_forks[f].loopc > 0) continue;  /* [ROUND 1018 L] */
-        if (s_forks[f].freec > 0) {          /* [ROUND 1015 E] throats only */
-            if (tg_pf_clear_span(f, si)) return s_forks[f].side > 0 ? 1 : -1;
-            continue;
-        }
         if (si >= s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2 && si <= s_forks[f].R + 2)
             return s_forks[f].side > 0 ? 1 : -1;
     }
@@ -740,7 +575,6 @@ int tg_fork_is_bypass(int fi)
 double tg_fork_br_shift(int fi, int k, double w)
 {
     const int    len = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].len : 1;
-    if (tg_fork_is_loop(fi)) { (void)k; (void)w; return 0.0; }   /* [ROUND 1018 L] rows are the loop's own nodes */
     /* [TOPOLOGY-FIRST] a BYPASS corridor is a planned lateral (world units,
      * right of travel negative), not a bow off the road width. */
     if (tg_fork_is_bypass(fi)) {
@@ -753,17 +587,6 @@ double tg_fork_br_shift(int fi, int k, double w)
     const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
     const double f   = (len > 0) ? (double)k / (double)len : 0.0;
     const double bow = sin(f * TD5_TG_PI);
-    /* [ROUND 1015 E] a plaza fork's classic rows: the lateral of the corridor
-     * centre from the (jogged) main node, from the node's own width. */
-    if (tg_fork_is_free(fi)) return tg_pf_br_shift(fi, k, w);
-    /* [ROUND 1013 F2] A REAL fork's corridor sits the real MEDIAN away from the
-     * main half: its inner edge is the main half's edge plus the measured gap
-     * between the two real carriageways, which is zero at both mouths. No bow,
-     * no sep -- those are what round 1010 removed. */
-    if (fi >= 0 && fi < s_fork_count && s_forks[fi].real > 0)
-        return (double)tg_fork_side(fi)
-             * (w * (1.0 - tg_fork_fb(fi)) * 0.5
-                + tg_realfork_med(s_forks[fi].real - 1, k));
     return (double)tg_fork_side(fi)
          * (w * (1.0 - tg_fork_fb(fi)) * 0.5 + w * tg_branch_bow(len, w) * sep * bow);
 }
@@ -776,14 +599,6 @@ int tg_fork_clen(int fi)
 int tg_fork_row_node(int fi, int k)
 {
     if (fi < 0 || fi >= s_fork_count) return 0;
-    if (tg_fork_is_free(fi)) {
-        const int n = tg_pf_row_node(fi, k);
-        if (n >= 0) return n;
-    }
-    if (tg_fork_is_loop(fi)) {            /* [ROUND 1018 L] */
-        const int n = tg_bl_row_node(fi, k);
-        if (n >= 0) return n;
-    }
     return s_forks[fi].F + 1 + k;
 }
 
@@ -875,16 +690,6 @@ int tg_median_fork_long_enough(int fork_index)
     if (fork_index >= 0 && fork_index < s_fork_count)
         return s_forks[fork_index].len >= TD5_TG_MEDIAN_MIN_FORK_LEN;
     return 1;
-}
-
-/* [ROUND 1021 A item 18] Is fork `fi` a LEFT real fork whose median is built in the signed
- * frame (see tg_r12_median_gore_w)? Real forks only, so every synthetic left fork keeps its
- * old geometry byte for byte. TD5RE_GEO_LEFT_MEDIAN=0 restores the right-frame-only rule. */
-int tg_fork_left_real_median(int fi)
-{
-    if (fi < 0 || fi >= s_fork_count) return 0;
-    if (s_forks[fi].real <= 0 || s_forks[fi].side <= 0) return 0;
-    return td5_env_flag_on("TD5RE_GEO_LEFT_MEDIAN");
 }
 
 /* Lateral centre of the BRANCH (right) half carriageway at corridor step k with
@@ -1033,22 +838,12 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
     double reach = tg_road_half_width(nl, si);
     int i;
 
-    {
-        const double av = tg_geo_avenue_reach(nl, si, side);
-        if (av > reach) reach = av;
-    }
     if (!tg_branches_enabled()) return reach;
     if (!nl || si < 0 || si + 1 >= nl->count) return reach;
 
     for (i = 0; i < s_fork_count; i++) {
         const int F = s_forks[i].F, L = s_forks[i].len;
         int k, e;
-        if (s_forks[i].loopc > 0) continue;  /* [ROUND 1018 L] the loop leaves through the mouth, the road is untouched */
-        if (s_forks[i].freec > 0) {          /* [ROUND 1015 E] free corridor: throats only */
-            const double fr = tg_pf_reach(nl, i, si, side);
-            if (fr > reach) reach = fr;
-            continue;
-        }
         /* One span of slack past each mouth: at the fork and the rejoin the
          * corridor is still lined up with the road, but a caller asking about
          * the mouth span itself must not see a narrower answer than its
@@ -1074,36 +869,6 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
         }
     }
     return reach;
-}
-
-/* [ROUND 1029 V] The outer edge of a REAL fork's corridor at ONE row of main span si
- * (e = 0 the near node si, e = 1 the far node si+1) on `side`, as a distance outward
- * from that node's own road edge, from the SAME helpers the corridor mesh is laid
- * with (tg_fork_br_shift / tg_fork_br_wscale at step k+e, node width). -1 when si is
- * not inside a real classic fork's window on that side. tg_carriageway_reach above
- * answers for the WHOLE span (the wider end), which is right for clearance but puts
- * a street mouth one corridor step out of place on the narrower row. */
-double tg_fork_real_row_shift(const TG_NodeList *nl, int si, double side, int e)
-{
-    int i;
-    if (!tg_branches_enabled()) return -1.0;
-    if (!nl || si < 0 || si + 1 >= nl->count || e < 0 || e > 1) return -1.0;
-    for (i = 0; i < s_fork_count; i++) {
-        const int F = s_forks[i].F, L = s_forks[i].len;
-        int k, kk;
-        double w, out;
-        if (s_forks[i].real <= 0 || s_forks[i].loopc > 0 || s_forks[i].freec > 0) continue;
-        if (si < F - 1 || si > F + L + 1) continue;
-        if (side * (double)s_forks[i].side < 0.0) continue;
-        k = si - F - 1;
-        if (k < 0) k = 0;
-        if (k > L) k = L;
-        kk = (k + e > L) ? L : k + e;
-        w = nl->v[si + e].width;
-        out = fabs(tg_fork_br_shift(i, kk, w)) + w * tg_fork_br_wscale(i, kk) * 0.5;
-        return (out > w * 0.5) ? out - w * 0.5 : 0.0;
-    }
-    return -1.0;
 }
 
 /* Is `lateral` on (or within `margin` of) any carriageway at span si? */
@@ -1193,27 +958,6 @@ void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
             for (f = 0; f < s_fork_count; f++)
                 if (tg_fork_is_bypass(f) && i >= s_forks[f].F - 1 && i <= s_forks[f].R + 1)
                     lim = TD5_TG_R8_LAT_MAX + w + 1.0;
-        }
-        {   /* [ROUND 1015 E] a plaza corridor's throat: the corridor leaves the road at
-             * the entry T and its reach (measured to the corridor's far edge) is the
-             * distance to a real road, not a synthetic bow */
-            int f;
-            for (f = 0; f < s_fork_count; f++)
-                if (tg_fork_is_free(f) && tg_pf_throat_span(f, i) && rr + 1.0 > lim)
-                    lim = rr + 1.0;
-        }
-        {   /* [ROUND 1013 F2] On a GEO track a divided avenue's real opposite
-             * carriageway is a LEGITIMATE reach: it is the real road, beside the
-             * race road (scenery) or as a fork's own corridor (driveable). The
-             * ceiling above was derived for synthetic bows (0.25 + bow + 0.5
-             * roads) and read Avenida 13's 10-20 m median as "suspect fork
-             * geometry" -- 76 spans on Mariano's route before any real fork
-             * existed. The avenue's own reach is the ceiling there; everything
-             * else keeps the derived one. */
-            const double avl = tg_geo_avenue_reach(nl, i, -1.0);
-            const double avr = tg_geo_avenue_reach(nl, i, 1.0);
-            const double av  = (avl > avr) ? avl : avr;
-            if (av + 1.0 > lim) lim = av + 1.0;
         }
         if (rr < hi - 1.0 || rr > lim) {
             if (bad_reach < 8)
@@ -1333,15 +1077,6 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     return br_sidewalk(nl, mb, k, L, fi, b, blk, moff, nmesh, acct_si, (double)tg_fork_side(fi));
 }
 
-/* [ROUND 1018 L] the OTHER edge of a block-loop corridor: the corridor runs in a real street, so it has a
- * pavement on both sides (the slip-lane rows beside the road are skipped by tg_bl_inner_ok). */
-int tg_emit_branch_sidewalk_inner(const TG_NodeList *nl, int mb, int k, int L,
-                                  int fi, const TG_Biome *b,
-                                  TG_Buf *blk, size_t *moff, int *nmesh, int acct_si)
-{
-    return br_sidewalk(nl, mb, k, L, fi, b, blk, moff, nmesh, acct_si, -(double)tg_fork_side(fi));
-}
-
 static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
                        int fi, const TG_Biome *b,
                        TG_Buf *blk, size_t *moff, int *nmesh,
@@ -1351,11 +1086,9 @@ static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const TG_Node *c = &nl->v[mb + 1];
     const double sw = tg_city_sidewalk_w(b);
     const double kh = tg_city_kerb_h(b);
-    /* Branch centre and half width at each end, from the shared helpers. A plaza
-     * fork's corridor is laid in ITS OWN node chain (nl is that view): shift 0. */
-    const int    pfree = tg_fork_is_free(fi);
-    const double sh0 = pfree ? 0.0 : tg_fork_br_shift(fi, k,     a->width);
-    const double sh1 = pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, c->width);
+    /* Branch centre and half width at each end, from the shared helpers. */
+    const double sh0 = tg_fork_br_shift(fi, k,     a->width);
+    const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
     /* fs: [TOPOLOGY-FIRST] -1 right / +1 left (the side of the fork; the inner edge of a block loop passes the opposite) */
@@ -1415,47 +1148,6 @@ static int br_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
         tg_pave_mark(p0, blk->len, TG_PVS_BRANCH, acct_si);
         return r;
     }
-}
-
-/* [ROUND 1030 G item 16] Mariano, level091 L91 e526 s8 p44:SIDEWALK pos 276977,809,-273388: "this sidewalk is
- * on top of the crossing road". The pick is the plaza-side kerb slab of the plaza fork's corridor (br_sidewalk via
- * TD5RE_PF_INNER_WALK, corridor span 2106). MEASURED: a wide real street leaves main spans 260..262 on the plaza
- * side and runs NE across to the corridor (e65 s10/s15/s21, page 101); its carriageway passes under the slabs of
- * spans 2105 and 2106, which stand 130 units proud across its mouth. Round 1023 B gave the TOWN-side slab a gap
- * for the far-arc streets (tg_pf_gap_at); the plaza side was assumed to have none ("the street opens on the town
- * side only"), and nothing asked the laid main-road streets at all.
- *
- * RULE (the footprint test real buildings already use, tg_xstreet_covers): a corridor slab whose centre, or two of
- * its four inset corners, lie on a laid cross-street carriageway is not laid, so the street meets the corridor
- * through an open kerb. Plaza corridors only, both slabs. TD5RE_PF_WALK_STREET_GAP=0 restores master's slabs. */
-int tg_br_sidewalk_on_street(const TG_NodeList *main_nl, int main_si, const TG_NodeList *nl, int mb,
-                             int k, int fi, const TG_Biome *b, double fs)
-{
-    static volatile int s_env = -1;
-    const TG_Node *a, *c;
-    const double sw = tg_city_sidewalk_w(b);
-    const double sg = (double)tg_fork_side(fi);
-    double h0, h1;
-    int env = s_env, hits = 0, q;
-    static const double kf[5][2] = { { 0.5, 0.5 }, { 0.15, 0.2 }, { 0.15, 0.8 }, { 0.85, 0.2 }, { 0.85, 0.8 } };
-
-    if (env < 0) { env = td5_env_flag_on("TD5RE_PF_WALK_STREET_GAP") ? 1 : 0; s_env = env; }
-    if (!env || !main_nl || !nl || !(sw > 0.0)) return 0;
-    if (!tg_fork_is_free(fi) || tg_fork_is_loop(fi) || !tg_geo_city_active()) return 0;
-    if (mb < 0 || mb + 1 >= nl->count) return 0;
-    a = &nl->v[mb]; c = &nl->v[mb + 1];
-    h0 = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
-    h1 = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
-    for (q = 0; q < 5; q++) {
-        const double f = kf[q][0], g = kf[q][1];
-        const double t0 = fs * (h0 + g * sw), t1 = fs * (h1 + g * sw);
-        const double x0 = a->x + a->tz * t0, z0 = a->z - a->tx * t0;
-        const double x1 = c->x + c->tz * t1, z1 = c->z - c->tx * t1;
-        const int on = tg_xstreet_covers(main_nl, main_si, sg, x0 + (x1 - x0) * f, z0 + (z1 - z0) * f);
-        if (on && q == 0) return 1;
-        hits += on;
-    }
-    return hits >= 2;
 }
 
 /* [R5 STRUCT item 10] Flat VERGE BAND along a branch corridor's OUTER edge.
@@ -1645,9 +1337,7 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     /* The gore runs from the main road's right edge (lateral ~0) to the branch's
      * LEFT edge (sh+half, negative). Median centre = halfway; gore width = how
      * far that edge is from the road centre. */
-    /* [ROUND 1021 A item 18] fs = the side the corridor is on, in the gore's signed frame
-     * (-1 right, the only value before this round; +1 only for a LEFT real fork). */
-    const double fs  = tg_fork_left_real_median(fork_index) ? 1.0 : -1.0;
+    const double fs  = -1.0;   /* the corridor's side in the gore's signed frame: always right */
     const double bl0 = sh0 - fs * half0, bl1 = sh1 - fs * half1;   /* branch inner edges */
     const double gw0 = fs * bl0, gw1 = fs * bl1;         /* gore widths (>=0)  */
     /* [R22 item 11] "median only near the right track, none near the left." The
@@ -1703,25 +1393,12 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * raising it would put a kerb lip 240 units into each live lane. The island
      * is inset from both edges by TD5_TG_R11_MEDIAN_INSET (> that overlap)
      * instead, which keeps every raised face inside the gore. */
-    /* [ROUND 1014 A] A REAL fork's median is the map's own, whatever its width: a
-     * 4.4..8.7 m median is still ONE kerbed strip kerb to kerb. The round-11 rule
-     * above (fill only up to TD5_TG_R11_MEDIAN_MAX = 6 m, otherwise a 0.32-scale
-     * island capped at 520 units in the middle of bare gore floor) is about a
-     * SYNTHETIC split, where a wide gore is scenery between two roads. On fork 0
-     * of Mariano's route it built a 2.4 m strip with ground-coloured flush margins
-     * either side -- "median suddenly grows and has no side geometry" -- and the
-     * planted/barrier/kerbed ladder changed the median's look from one avenue to the
-     * next. TD5RE_GEO_FORK_ISLAND=0 restores that. */
-    const int    real_fk = td5_env_flag_on("TD5RE_GEO_FORK_ISLAND") &&
-                           fork_index >= 0 && fork_index < s_fork_count &&
-                           s_forks[fork_index].real > 0;
-    const int    fill   = real_fk ? 1 : tg_r12_median_fill(gw0, gw1);
+    const int    fill   = tg_r12_median_fill(gw0, gw1);
     /* A CONCRETE BARRIER is narrow by nature, so filling a 2000-unit median
      * with one would be a lie about what the material is. Where the fill
      * applies, the treatment rolls between planted and kerbed only -- and a
      * planted top is still illegal in a bore, exactly as above. */
-    const int    treat  = real_fk ? 0
-                        : !fill ? treat0
+    const int    treat  = !fill ? treat0
                         : ((((unsigned)fork_index) & 1u)
                            || (tg_span_in_tunnel(si)
                                && td5_env_flag_on("TD5RE_R8_BORE_MEDIAN")))
