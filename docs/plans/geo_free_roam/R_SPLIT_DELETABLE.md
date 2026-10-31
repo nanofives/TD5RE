@@ -1,5 +1,7 @@
 # Round R (roam-RA): what becomes deletable once split-screen city races ship (2026-10-25)
 
+> **[round S, 2026-10-30] Done:** the strip geo BUILD is deleted (branch roam-SA). What went and what stayed: S_STRIP_DELETED.md.
+
 Base master 1e764f77, branch roam-RA. Nothing is deleted this round (brief rule). Source of the
 list: `F11_REMOVAL_MAP.md` section 1, re-measured at this branch (`wc -l`, 2026-10-25).
 

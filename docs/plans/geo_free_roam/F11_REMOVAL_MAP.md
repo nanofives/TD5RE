@@ -1,5 +1,7 @@
 # F11 removal map: what the strip geo BUILD leaves behind (F11a, 2026-10-18)
 
+> **[round S, 2026-10-30]** Sections 1 and 0 (D5, D6, D8) are done: S_STRIP_DELETED.md. Section 2 islands are dead now but still in the tree (next round, one module at a time with the synthetic gate).
+
 > **F11b status (2026-10-18):** the strip race stays for LOCAL MULTIPLAYER, so
 > sections 1 and 2 stay (the MP race runs them and its OPTIONS panel reaches
 > every knob's OFF arm). Closed: D1 + D2 (roam writes its own host files in
