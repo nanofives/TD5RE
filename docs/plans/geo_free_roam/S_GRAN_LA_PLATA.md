@@ -121,3 +121,73 @@ seeded: tiles, base cells in the rasters, `_cache` with the boundary and produce
    geo_lane_paint, geo_rails, geo_outskirts `--chunks 1`, in that order (stadia reads
    PARK_RELATIONS, pois / rails / outskirts read the new tiles, rails and outskirts put
    their INDEX layers back).
+
+## Phase B prep (no new data yet)
+
+### Boundary readers: the union ring needs no code
+Every reader takes `boundary.rings` with an even-odd test over all rings:
+`gr_place_contains` / `td5_geo_route_place_at` (td5_geo_route.c), `td5_roam_partido_load` (up to
+`RP_RING_MAX` 8 rings), whose `contains` / `dist_m` / `tile_ok` gate the roam spawn (td5_roam_mode.c),
+the planner region (td5_roam_route.c), the stream table (td5_roam_stream.c) and the planner map outline
+(td5_roam_route_ui.c). The union is 1 ring of 214 points; the geo map keeps up to `GEO_RING_MAX` 400.
+New: `td5_geo_route_place_part_ring` reads `boundary.parts[i]`, and the geo map draws each partido's
+border as a 1 px line over the 2 px outline (`GEO_PART_MAX` 4, `GEO_PART_RING_MAX` 240; parts are 69 /
+118 / 99 points). A place without `parts` draws as before.
+
+### Display name
+Both readers (td5_geo.c `s_geo.name`, `s_places.name`) take PLACE.JSON `name`, so "Gran La Plata"
+comes with the data. No hard-coded "La Plata" string in a frontend or HUD path.
+
+### Caps
+| cap | where | scope | verdict |
+|---|---|---|---|
+| 2048 tiles | td5_roam_tile.c `--RoamBuildTiles=casco`, GC_MAX_TILES, RS_MAX_TILES | the casco list (404 tiles) | unchanged |
+| `list:` tile list | td5_roam_tile.c | realloc, unbounded | unchanged |
+| ROAMGRID | roam/ROAMGRID.JSON | unbounded lattice (u/v about origin 0,0, 42.13 deg) | new tiles get new indices |
+| street layer | td5_roam_partido.c | realloc vectors + a grid sized to the ways' bbox | La Plata: 17201 ways, 102283 points, 413 ROADS tiles, 4874 ms, **1.5 MB** resident, grid 60 x 56 (now logged). Measure again on the union |
+| planner region | td5_roam_route.c | tiles round the car / waypoints / corridor, realloc | scales with the route, not the place |
+| RP_RING_MAX 8 | td5_roam_partido.c | boundary rings | 1 used |
+| MMS_MAX_SEGS 40000 | td5_minimap_streets.c | the strip route's minimap (geo route), not roam | unchanged |
+
+### Water and coast: the plan
+What the code does today: a nodata HEIGHT cell reads as the bias (-1.53 m) and a nodata WATER cell as dry
+(td5_roam_height.c). A tile is built only within 181 m + ROAM_HALO_M 300 m of the boundary
+(`td5_roam_partido_tile_ok`). The water plane (roam LE) and the shore sub-mesh (roam PC) draw from WATER.R8.
+So a river cell outside every fetched block would be a dry ground plate at sea level.
+
+What the boundaries say (cached relations): Berisso is 1 ring (340 points) reaching E -57.7092; Ensenada is
+1 ring (400 points) reaching N -34.7792. No island is a separate ring, so Isla Paulino and Isla Santiago are
+inside them. Both bboxes reach well past where the shore should be (to check on the data), so the polygons
+probably include river water and the blocks over it are fetched.
+
+Phase B steps, in order, once the data is in:
+1. Census on the new rasters: sea / water cells per new block (`extend_report.json` painted), the
+   coastline ways in the block answers, and the distance from the shoreline to the boundary along the
+   Rio de la Plata and the Rio Santiago.
+2. If water reaches the boundary edge anywhere a car can see (500 m render radius): a water-only tile
+   rule. A tile outside `tile_ok` whose cells are all sea in WATER.R8, within 1 km of a built tile, is
+   built as water plane only (no ground, no scenery). La Plata has 0 sea cells, so its tiles cannot change.
+3. If a fetched block ends on open water (nodata past it): treat a nodata WATER cell whose nearest data
+   cell is sea as sea, in td5_roam_height.c only. Same La Plata argument.
+4. Buildings, lots and lawns on water: census of footprint centroids on wet cells, and the same for
+   park / landuse rings, before any fix.
+5. Frames: the Punta Lara coast, the port and the Rio Santiago, the YPF refinery, Isla Paulino.
+
+### La Plata ROAMTILE baseline (master, read only)
+`_archive/roam/SB/roamtile_baseline.py <main place dir> roamtile_baseline_master.json`, every ROAMTILE
+with sha256 / md5, centre lat-lon and the distance to the new partidos:
+
+| dir | tiles | casco | City Bell (1.5 km) | within 1 km of Berisso/Ensenada | within 3 km | casco digest | City Bell digest |
+|---|---|---|---|---|---|---|---|
+| roam/ | 1812 | 404 | 0 | 267 | 717 | 5eecd90c9f81f399 | (none) |
+| roam/x100/ | 1142 | 404 | 50 | 166 | 549 | b88d7d061375a79d | 74b114cce42c31d0 |
+
+The casco's NE edge (Av 122) IS the border, so casco tiles near it can change legitimately; phase B
+compares with `--compare <baseline> <place> --near-km 1.0` and lists every change by its distance.
+
+### Selftest rows (skeletons, full suite)
+`roam-berisso` (roam=22) and `roam-ensenada` (roam=23): `TD5_RSPRINT_BERISSO` / `_ENSENADA` in
+td5_roam_race_drive.c, START Plaza Moreno, FINISH each relation's OSM admin_centre node (Berisso
+198449765 at -34.86886, -57.88287; Ensenada 198440814 at -34.85749, -57.90772). The planner chooses the
+streets. Same checks as roam-partido: 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units,
+>= 15 junctions, >= 3 km. Standalone: `TD5RE_ROAM_SPRINT_TEST=berisso|ensenada`.

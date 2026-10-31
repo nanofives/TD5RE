@@ -459,8 +459,14 @@ static void rp_streets_load(const char *place)
     s_pt.pt = (int32_t *)pts.p; s_pt.npt = pts.n / 2;
     s_pt.ms = (double)(td5_plat_time_ms() - t0);
     snprintf(s_pt.s_place, sizeof s_pt.s_place, "%s", place);
-    TD5_LOG_I(LOG_TAG, "ROAM_PARTIDO: street layer %d ways, %d points, %d street names from %d ROADS tiles in %.0f ms",
-              s_pt.nway, s_pt.npt, s_pt.nname, files, s_pt.ms);
+    {   /* [roam SB] the layer's resident size, to compare a grown place against La Plata alone */
+        const double mb = ((double)s_pt.nway * (sizeof(RpWay) + sizeof(int)) + (double)s_pt.npt * 2.0 * sizeof(int32_t)
+                           + ((double)s_pt.gnx * s_pt.gnz + 1.0) * sizeof(int)
+                           + (double)s_pt.gstart[s_pt.gnx * s_pt.gnz] * sizeof(int)
+                           + (double)nm.pool.n * nm.pool.sz + (double)s_pt.nname * sizeof(int)) / (1024.0 * 1024.0);
+        TD5_LOG_I(LOG_TAG, "ROAM_PARTIDO: street layer %d ways, %d points, %d street names from %d ROADS tiles in %.0f ms, "
+                  "%.1f MB (grid %d x %d)", s_pt.nway, s_pt.npt, s_pt.nname, files, s_pt.ms, mb, s_pt.gnx, s_pt.gnz);
+    }
     return;
 oom:
     if (root) cJSON_Delete(root);

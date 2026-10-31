@@ -186,6 +186,10 @@ const char *td5_geo_route_place_at(TD5_GeoLatLon p);
  * truncated), 0 when the place has no such ring. */
 int  td5_geo_route_place_boundary(const char *slug, int ring,
                                   double *latlon, int max_pts);
+/* [roam SB] A place made of several partidos (geo_region.py extension, "Gran La Plata"): the outer ring of
+ * PLACE.JSON `boundary.parts[part]`, same contract as td5_geo_route_place_boundary. 0 = no such part. */
+int  td5_geo_route_place_part_ring(const char *slug, int part,
+                                   double *latlon, int max_pts);
 
 /* ------------------------------------------------------- raster window ----
  * [ROAM F1-T2] One TD5GEOR1 raster, or a window of one read by seek. Exported
