@@ -242,3 +242,38 @@ All 62 not raw-identical tiles are within 1.8 km of the new partidos; 57 differ 
 change content, 49_53 and 50_53..56 at -34.86, -58.02 (the La Plata / Ensenada line by Gonnet): EDGE
 records only (50_56 also SPAN / VERT), same counts: the roads crossing the line now continue into
 Ensenada's network. No ROAM_RULES / SCENERY_RULES bump.
+
+### Driving, frames, gates (2026-10-30, worktree roam-SB, staging data overlaid on its place dir)
+* `roam-berisso` PASS: planner route Plaza Moreno -> Berisso admin_centre 10.23 km 11:00.90, 72
+  junctions, 6 rebases (worst frame 8.8 ms), tiles loaded 137 built 409, miss 0 hold 0, pinches /
+  rescues / teleports / stuck 0, frame median 7.4 ms. `roam-ensenada` PASS: 9.79 km 10:39.43, 75
+  junctions, 6 rebases, built 293, miss 0 hold 0, all 0; one frame of 447.9 ms (median 6.7 ms).
+* Street layer with the union: 18 323 ways, 109 345 points, 435 ROADS tiles, 355 ms, 1.6 MB, grid 60 x 57
+  (La Plata alone: 17 201 ways, 1.5 MB).
+* Casco: roam-sprint-smoke on the new data drives the identical race (0.42 km 00:47.93, 5 jn, same
+  barriers); frame 10.8 / 12 ms avg / p95 vs 16.0 / 19 ms on the master data earlier with the same exe
+  (that run was cold, load 13.6 s vs 4.7 s): no slowdown. Window sent to the back in both (launch rule).
+* Frames (`_archive/roam/SB/frames/`, verify/roam/f4c_tour.ps1; the roam stream follows the CAR, so each
+  spot needs its own spawn, a pose 1.5 km away shows only the sky): Berisso centre, Ensenada centre, the
+  port canal (water, Berisso streets on both banks), Isla Paulino / a Rio Santiago channel (water), Punta
+  Lara shore (the Rio de la Plata as water out to the render distance, clean shoreline, nothing in the
+  water), Av 122 x Av 60 (the city continues over the old line), the geo map at zoom 11 (union outline
+  to the coast, thin partido borders). The YPF refinery reads as an EMPTY dark industrial lot beside
+  Camino Rivadavia: its tanks are man_made=storage_tank, which no layer fetches.
+* Past the water's far edge the host level's sky panorama (trees, towers) shows over the river, as it
+  does at every roam edge. Not changed here.
+* Gates: build_all OK, lint 3 / 23 / 84 (baseline). Synthetic level090 MODELS sha256 E2F1F33C...
+  identical. level091 strip (TD5RE_GEO_STRIP_BUILD=1, seed 2054677019, x100) MODELS sha256 4A43A9B4...
+  = the main tree's level091 byte for byte. Smoke: 21/22 then 22/22 (roam-circuit-mp2 failed once,
+  "opponents stuck>5s 1", passed alone twice and in the second suite: the casco loop's tiles are
+  identical, not attributed).
+
+### Ship plan (staging `_archive/roam/S/place/la_plata_partido` -> main tree, copy in place, no deletes)
+`_archive/roam/SB/ship_plan.py`: 92 new tile files (10.8 MB), 43 changed tile files + tiles/INDEX.JSON,
+and 9 changed top-level files: HEIGHT.R16 362 -> 447 MB, COVER / WATER / CANOPY.R8 181 -> 223 MB each,
+PLACE.JSON, PARK_RELATIONS.JSON, PLAZA_FURNITURE.JSON, POIS.JSON, STADIA.JSON. LANES / RESTRICTIONS /
+S3D_RELATIONS unchanged. No main-tree file is missing from staging. Not shipped: `_region/`, `_cache/`.
+roam/ (ROAMTILEs): nothing to ship; La Plata's stay valid, the new area builds on demand.
+Order of the full data recipe: geo_region (extension) -> the 8 producers -> geo_water_fill.py --apply
+-> geo_roam_identity.py <place> <base place> --write (against the base's SHIPPED files, so before the
+main-tree copy).
