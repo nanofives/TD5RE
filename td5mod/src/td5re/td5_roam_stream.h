@@ -110,6 +110,9 @@ typedef struct {
     double   tick_worst_ms;      /* the whole td5_roam_stream_tick on the main thread */
 } TD5_RoamStreamStats;
 void td5_roam_stream_stats(TD5_RoamStreamStats *out);
+/* [roam SB] jobs queued for the worker + results not yet installed; 0 = nothing outstanding (no session: 0).
+ * A job the worker is building right now is in neither: callers wanting "settled" hold 0 for a while. */
+int  td5_roam_stream_busy(void);
 
 /* [roam RA] per racer (split screen: every local human): the tile it stands on, its ROAD ring (road_r) and
  * SCENERY ring (view_r) tiles inside the place and how many are resident, the guard's misses / holds for it. */

@@ -1084,6 +1084,17 @@ int td5_roam_stream_slot_census(int slot, TD5_RoamStreamSlotCensus *out)
     return 1;
 }
 
+int td5_roam_stream_busy(void)
+{
+    RsSession *s = s_stream.s;
+    int n;
+    if (!s) return 0;
+    EnterCriticalSection(&s->cs);
+    n = s->njob + s->nres + s->ninbox;
+    LeaveCriticalSection(&s->cs);
+    return n;
+}
+
 void td5_roam_stream_stats(TD5_RoamStreamStats *out)
 {
     RsSession *s = s_stream.s;

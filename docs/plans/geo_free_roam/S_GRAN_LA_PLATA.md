@@ -277,3 +277,31 @@ roam/ (ROAMTILEs): nothing to ship; La Plata's stay valid, the new area builds o
 Order of the full data recipe: geo_region (extension) -> the 8 producers -> geo_water_fill.py --apply
 -> geo_roam_identity.py <place> <base place> --write (against the base's SHIPPED files, so before the
 main-tree copy).
+
+### Review fixes (orchestrator, 2026-10-30)
+* **"Void" at the Berisso coast** (f4a_berisso_coast): the free camera was 1.8 km from the car and the roam
+  stream builds round the CAR, so no tile was loaded there. With the car ON the coast (Calle 32 in
+  Berisso -34.85569,-57.83859; Camino Costanero Almirante Brown at Punta Lara -34.79973,-57.98906, both
+  found by `_archive/roam/SB/coast_spawns.py`, road points within 300 m of sea) the river is water from the
+  kerb to the horizon line at car height: frames pl_final_eye_ne / be_final_eye_ne, tops pl_final_top /
+  be_final_top with the shoreline. No far plane is needed: the renderer's far plane (195 000 units, ~450 m)
+  is inside the 500 m draw radius, so nothing could be drawn further, and at 1.5 m eye height the water's
+  far edge sits 0.2 deg under the horizon. Above the horizon the host sky panorama (trees, towers) shows,
+  as at every roam edge; changing the roam sky would change La Plata's look too, not done here.
+* **YPF frame "slab"**: OSM way 195183524 natural=wetland (ESA cover 90) beside Camino Rivadavia, drawn
+  with the roam PC marsh paint (straw tint + reed clumps) as one quad per cell IN the drawn ground's own
+  heights: flat. Height transect over 600 m: 0.3 .. 2.6 m, no step. The "raised edge" was the far edge of
+  the draw radius against the sky panorama. The refinery itself is not in view; its tanks are not fetched.
+* **Footprints on water**: offline scenery build of the 37 tiles (`--RoamBuildScenery=list:`,
+  TD5RE_ROAM_BLD_LOG=1): the scenery has NO water rule, all 26 of the 70 it logged were EMITTED. Now
+  dropped by geo_water_fill.py step C (tiles homed outside the base fetched blocks only): 70 dropped from
+  15 tiles, INDEX rebuilt; 0 left in the new area. 68 were Overture ML footprints (45 Microsoft, 23 Google)
+  over the port basins / Rio Santiago, 2 OSM huts of 14 and 23 m2 on the shore's sea cells. The base
+  place's own 15 (on OSM-painted water) are untouched (dropping them is a La Plata change).
+* **Manifest `complete`**: it tested the STRIP (no tgstream, undecorated span < 0, MODELS display list > 0);
+  roam never loads a strip, so it was 0 on every roam pose and meant nothing, and with NOWAIT=1 the frames
+  were taken at sim tick 30 while the stream still had 12-16 jobs pending. td5_camera.c now, in roam,
+  calls a pose complete when td5_roam_stream_busy() (queued jobs + results not yet installed, new in
+  td5_roam_stream.c) has stayed 0 for 1.5 s; run tours with -Extra "TD5RE_FREECAM_TOUR_NOWAIT=0". The new
+  frames read complete=1 at sim tick 75.
+* Gates after the C change: smoke 22/22, synthetic level090 MODELS E2F1F33C... identical.

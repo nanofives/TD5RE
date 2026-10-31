@@ -42,6 +42,64 @@ SEA_ROAD_CLEAR_M = 6.0      # geo_fetch.SEA_ROAD_CLEAR_M
 COVER_WATER = 80
 
 
+def drop_wet_buildings(place: str, pj: dict, ext: dict, wat, apply: bool) -> dict:
+    """C. A footprint whose centroid is on a WET cell, in a BUILDINGS tile homed outside the base fetched
+    blocks, is dropped from the tile (the scenery has no water rule and builds it: 26 of 26 logged were
+    emitted). Census of Gran La Plata: 70, 68 of them Overture machine-learned footprints over the port
+    basins and the Rio Santiago, 2 OSM huts of 14 / 23 m2 on the shore's sea cells. The base place keeps
+    its own 15 (a La Plata change otherwise). Rewrites the tile files and the INDEX rows it changes."""
+    import geo_region as gr
+    W, H = pj["tiled"]["grid"]
+    x0, z0 = pj["tiled"]["origin"]
+    cell = pj["cell_units"]
+    side = float(pj["tiled"]["tile_size_units"])
+    bt = int(pj["tiled"]["block_tiles"])
+    base = {tuple(v) for v in ext["base_fetched_blocks"]}
+    tdir = os.path.join(place, "tiles")
+    dropped, files, by_src = 0, 0, {}
+    for fn in sorted(os.listdir(tdir)):
+        if not (fn.startswith("BUILDINGS_") and fn.endswith(".JSON")):
+            continue
+        try:
+            ix, iz = (int(v) for v in fn[len("BUILDINGS_"):-5].split("_"))
+        except ValueError:
+            continue
+        if (ix // bt, iz // bt) in base:
+            continue
+        path = os.path.join(tdir, fn)
+        doc = json.load(open(path, encoding="utf-8"))
+        keep = []
+        for b in doc.get("buildings", []):
+            p = b.get("points") or []
+            if p:
+                cx = sum(q["x"] for q in p) / len(p)
+                cz = sum(q["z"] for q in p) / len(p)
+                i = min(W - 1, max(0, int((cx - x0) / cell)))
+                j = min(H - 1, max(0, int((cz - z0) / cell)))
+                if wat[j, i] == 1:
+                    dropped += 1
+                    s = str(b.get("footprint_src") or "osm")
+                    by_src[s] = by_src.get(s, 0) + 1
+                    continue
+            keep.append(b)
+        if len(keep) != len(doc.get("buildings", [])):
+            files += 1
+            if apply:
+                doc["buildings"] = keep
+                with open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(doc, f, sort_keys=True, separators=(",", ":"))
+                    f.write("\n")
+                os.replace(path + ".tmp", path)
+    if apply and files:
+        class _F:
+            pass
+        fr = _F()
+        fr.cell, fr.x0, fr.z0, fr.w, fr.h = cell, x0, z0, W, H
+        lay = gr.Layout(fr, int(round(side / cell)), bt, [], 0.0)
+        gr.build_index(tdir, lay, keep_other=True)
+    return {"C_buildings_on_water_dropped": dropped, "C_tile_files": files, "C_by_source": by_src}
+
+
 def main(argv=None) -> int:
     a = sys.argv[1:] if argv is None else argv
     place, apply = a[0], "--apply" in a
@@ -145,6 +203,9 @@ def main(argv=None) -> int:
     rep["B_kept_dry_under_roads"] = int((cand & road).sum())
     rep["B_cells_to_wet"] = int(wet_b.sum())
 
+    # ---- C. footprints standing in the water (new area only)
+    rep.update(drop_wet_buildings(place, pj, ext, wat, apply))
+
     if apply:
         h2 = np.where(fill, floor_raw, h).astype(np.int16)
         w2 = np.where(fill | wet_b, 1, w).astype(np.uint8)
@@ -158,11 +219,14 @@ def main(argv=None) -> int:
         can[j0:j1, i0:i1] = n2
         for r in (hgt, wat, cov, can):
             r.flush()
-        pj.setdefault("layers", {}).setdefault("water_fill", {}).update(
-            {"tool": "geo_water_fill.py", "sea_cells_filled": rep["A_cells_to_sea"],
-             "worldcover_water_cells_wet": rep["B_cells_to_wet"],
-             "kept_dry_under_roads": rep["B_kept_dry_under_roads"],
-             "rule": "only cells outside extension.base_fetched_blocks"})
+        wf = pj.setdefault("layers", {}).setdefault("water_fill", {})
+        for k, v in (("sea_cells_filled", rep["A_cells_to_sea"]),
+                     ("worldcover_water_cells_wet", rep["B_cells_to_wet"]),
+                     ("kept_dry_under_roads", rep["B_kept_dry_under_roads"]),
+                     ("buildings_on_water_dropped", rep["C_buildings_on_water_dropped"])):
+            wf[k] = wf.get(k, 0) + v        # a rerun adds what it did (0 once applied)
+        wf["tool"] = "geo_water_fill.py"
+        wf["rule"] = "only cells / tiles outside extension.base_fetched_blocks"
         tmp = os.path.join(place, "PLACE.JSON.tmp")
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             json.dump(pj, f, indent=1, sort_keys=True)
