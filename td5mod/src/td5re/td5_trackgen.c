@@ -6,7 +6,6 @@
  */
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"
-#include "td5_geo_attrs.h"     /* [1011 C3] the per-span OSM attribute prepass */
 
 /* [PICK] Human name for an auto-track texture page id, for the dev geometry
  * picker's HUD/clipboard. Defined ENTIRELY in terms of the TD5_TG_PAGE_*
@@ -2711,15 +2710,6 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 int k;
 
                 /* 1. FORK span F: full width, type 8, link_next -> corridor. */
-                if (tg_fork_is_loop(fi)) {
-                    /* [ROUND 1018 L] a block loop does not touch the road: span F keeps its own
-                     * rows, only its type (8: the AI's fork scan finds it) and link_next change.
-                     * The engine never sends a sub-lane into link_next here (the lane count is
-                     * uniform), the side link does the crossing. */
-                    unsigned char *r = spans.b + (size_t)F * 24;
-                    r[0] = 8;
-                    r[8] = (unsigned char)(b0 & 0xFF); r[9] = (unsigned char)((b0 >> 8) & 0xFF);
-                } else
                 {
                     const TG_Node *a = &nl->v[F], *b = &nl->v[F + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
@@ -2732,13 +2722,9 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 /* 2. MAIN half carriageway [F+1 .. F+L]. */
                 for (k = 1; k <= L; k++) {
                     const int si = F + k;
-                    if (tg_fork_is_loop(fi)) continue;   /* [ROUND 1018 L] the road is untouched */
                     const TG_Node *a = &nl->v[si], *b = &nl->v[si + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                     int lvi, rvi;
-                    /* [ROUND 1015 E] between a plaza fork's two throats the main
-                     * road is the ordinary ring span the span pass already wrote */
-                    if (tg_fork_is_free(fi) && !tg_pf_throat_span(fi, si)) continue;
                     lvi = tg_append_row(&verts, &vtx_count, a, main_half,
                                             a->width * tg_fork_main_wscale_w(fi, a->width),
                                             tg_fork_main_shift(fi, a->width),
@@ -2766,12 +2752,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  *    row's point count comes from the SAME helper the road mesh
                  *    uses, so strip and mesh cannot drift apart. */
                 for (k = 0; k < CL; k++) {
-                    /* [ROUND 1015 E] a plaza fork's corridor rows are its own node
-                     * chain (shift 0); every other fork's ride the main nodes.
-                     * [ROUND 1016 K] ...and there are as many as its arc needs. */
-                    const int pfree = tg_fork_rview(fi) != NULL;     /* [ROUND 1018 L] plaza OR block loop */
-                    const TG_NodeList *cnl = pfree ? tg_fork_rview(fi) : nl;
-                    const TG_Node *a = &cnl->v[F + 1 + k], *b = &cnl->v[F + 2 + k];
+                    const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
                     const int ln = tg_fork_br_lanes_at(fi, k);
                     const double wn = tg_fork_br_wscale(fi, k);
                     const int lnf = tg_fork_br_lanes_at(fi, k + 1);
@@ -2793,11 +2774,11 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const int lanes_here = (lnf > ln) ? lnf : ln;
                     int lvi = tg_append_row(&verts, &vtx_count, a, lanes_here,
                                             a->width * wn,
-                                            pfree ? 0.0 : tg_fork_br_shift(fi, k, a->width),
+                                            tg_fork_br_shift(fi, k, a->width),
                                             ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, b, lanes_here,
                                             b->width * wf,
-                                            pfree ? 0.0 : tg_fork_br_shift(fi, k + 1, b->width),
+                                            tg_fork_br_shift(fi, k + 1, b->width),
                                             ox, oy, oz);
                     int type = (k == 0) ? 9 : ((k == CL - 1) ? 10 : 1);
                     int nxt  = (k == CL - 1) ? R : -1;
@@ -2806,13 +2787,6 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                    lanes_here, lvi, rvi, nxt, prv, ox, oy, oz);
                 }
                 /* 5. REJOIN span R: full width, type 11, link_prev -> sentinel. */
-                if (tg_fork_is_loop(fi)) {
-                    unsigned char *r = spans.b + (size_t)R * 24;       /* [ROUND 1018 L] type + link only */
-                    if (R >= 0 && R < ring) {
-                        r[0] = 11;
-                        r[10] = (unsigned char)(sentinel_end & 0xFF); r[11] = (unsigned char)((sentinel_end >> 8) & 0xFF);
-                    }
-                } else
                 {
                     const TG_Node *a = &nl->v[R], *b = &nl->v[R + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
@@ -2891,19 +2865,17 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
          * stands beside (see the CorrMap note in td5_track.c). Only forks whose corridor
          * has a different number of spans than the main stretch it bypasses write one, so
          * a build without such a fork is byte-identical to before. */
-        if (ok) tg_fork_gap_write(out);      /* [ROUND 1023 D] median gaps of real forks (no bytes without any) */
-        if (ok) tg_bl_slnk_write(out);       /* [ROUND 1018 L] side links of the block loops (no bytes without any) */
         if (ok) {
             int j, nv = 0;
             for (j = 0; j < s_fork_count; j++)
-                if (tg_fork_clen(j) != s_forks[j].len || tg_fork_is_loop(j)) nv++;
+                if (tg_fork_clen(j) != s_forks[j].len) nv++;
             if (nv > 0) {
                 tg_put_u32(out, 0x50524D43u);
                 tg_put_u32(out, (unsigned int)nv);
                 for (j = 0; j < s_fork_count; j++) {
                     const int cl = tg_fork_clen(j);
                     int k;
-                    if (cl == s_forks[j].len && !tg_fork_is_loop(j)) continue;
+                    if (cl == s_forks[j].len) continue;
                     tg_put_u32(out, (unsigned int)s_forks[j].cbase);
                     tg_put_u32(out, (unsigned int)cl);
                     tg_put_u32(out, (unsigned int)s_forks[j].len);
@@ -2967,12 +2939,6 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans,
          * straight) spawned every car pointing the wrong way, and with
          * auto-throttle they drove backwards off the start line into the void. */
         const TG_Node *hn = &nl->v[ni];
-        {   /* [ROUND 1015 E] a plaza corridor's heading is its own chain's */
-            int ck2 = 0, fi2;
-            if (i > nl->count - 2 && (fi2 = tg_fork_of_corridor(i, &ck2)) >= 0 &&
-                tg_fork_rview(fi2))
-                hn = &tg_fork_rview(fi2)->v[s_forks[fi2].F + 1 + ck2];
-        }
         double h = atan2(hn->tx, hn->tz) * 4096.0 / (2.0 * TD5_TG_PI);
         int h12 = tg_round(h) & 0xFFF;
         int hb  = tg_round((double)h12 * 256.0 / 4140.0);   /* 4140 = 0x102C */
@@ -3639,27 +3605,6 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * predicates it consults, and precede the per-entry loop. No-op with
          * no geo place loaded. */
         tg_geo_signals_prepare(nl, nspans);
-        /* [GEO STREET, round 1011 C4] Zebras at real crossing nodes, bus
-         * stops, mapped plaza paving. Same contract and the same placement in
-         * the order: all three consult the structure and street authorities
-         * above, and all three must be decided before the per-entry loop
-         * forks. The crossing prepass additionally publishes which spans the
-         * real data owns, which tg_emit_fb_city reads to stand the
-         * generator's own crossing rule down -- so it has to run BEFORE
-         * tg_xmemo_reset arms the crossing memo below. No-op with no geo
-         * place loaded. */
-        tg_geo_xings_prepare(nl, nspans);
-        tg_geo_bus_stops_prepare(nl, nspans);
-        /* [ROUND 1025 J] tg_geo_footpaths_prepare asks tg_xstreet_covers per sample (the 1022 P street clip), and
-         * that rebuilt the street quad of all 49 window spans on every call. Since round 1024 G/I (connector edge, ray
-         * clip, orphan streets) that rebuild cost ~30 s on level091 and held the first scenery entry back by that much.
-         * The quad is a pure function of the network and the pavement widths, and nothing in this call changes either,
-         * so memoise it for exactly this call and drop the memo again before tg_geo_city_prepare decides the widths. */
-        memset(s_xcov_state, 0, sizeof(s_xcov_state));
-        s_xcov_armed = td5_env_flag_on("TD5RE_TG_XMEMO");
-        tg_geo_footpaths_prepare(nl, nspans);
-        s_xcov_armed = 0;
-        memset(s_xcov_state, 0, sizeof(s_xcov_state));
         /* [GEO ROUND 1009 items 2 + 7] Same contract and the same reason: the
          * OSM pavement widths and the per-(span, side) frontage stand-down are
          * decided here, while this is the only thread, because every facade,
@@ -3676,14 +3621,6 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
         /* [ROUND 1024 F] park footpaths on the lawn + footpaths with context only; needs the pavement widths
          * the city prepass just decided. Both are no-ops with their knobs off. */
         tg_geo_park_prepare(nl, nprep);
-        tg_geo_footpaths_context(nl, nspans);
-        /* [ROUND 1011 C3] Same contract and the same reason again: the OSM
-         * lit / maxspeed / name answer for every span is decided here, while
-         * this is still the only thread, because the nearest-way query is
-         * O(ways) and the lamp beat and the sign emitters that read it run on
-         * workers. No-op with no geo place loaded. */
-        td5_geo_attrs_prepare(nl, nprep);   /* [ROUND 1013 F2] ring, see nprep above */
-        td5_geo_attrs_report(nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
         /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is
@@ -3788,7 +3725,6 @@ static int tg_scenery_entry(int e)
                 int ck = 0, fi = branch_active ? tg_fork_of_corridor(si, &ck) : -1;
                 if (fi >= 0) {
                     const int mb = tg_fork_row_node(fi, ck);          /* main node this span stands beside */
-                    const int mbv = s_forks[fi].F + 1 + ck;           /* [1016 K] its index in the corridor's own node list */
                     const int L  = s_forks[fi].len;
                     const int main_half = s_forks[fi].main_lanes;   /* [FORK KINDS] */
                     const int br_lanes  = s_forks[fi].br_lanes;
@@ -3815,15 +3751,11 @@ static int tg_scenery_entry(int e)
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
-                    const int pfree = tg_fork_rview(fi) != NULL;
-                    const TG_NodeList *cnl = pfree ? tg_fork_rview(fi) : nl;   /* [ROUND 1015 E] plaza / [1018 L] block loop */
-                    if (pfree && tg_fork_is_free(fi)) tg_road_v_scale = tg_pf_vscale(fi);
-                    if (!tg_emit_road_quad_taper(cnl, pfree ? mbv : mb, u_scale,
-                                           pfree ? 0.0 : tg_fork_br_shift(fi, ck, nl->v[mb].width),
-                                           pfree ? 0.0 : tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
+                    if (!tg_emit_road_quad_taper(nl, mb, u_scale,
+                                           tg_fork_br_shift(fi, ck, nl->v[mb].width),
+                                           tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
                                            wn, wf, tg_road_page(mb), &meshes))
                         ok = 0;
-                    tg_road_v_scale = 1.0;
                     /* [R7 GUARD] the branch carriageway is drivable; it sits deep
                      * inside the -side reach envelope, so mark it exempt. */
                     /* [R8 merge] GUARD replaced the blanket tg_guard_ex_mark()
@@ -3861,59 +3793,7 @@ static int tg_scenery_entry(int e)
                             &k_biomes[td5_env_flag_on("TD5RE_R14_FORK_PAVE")
                                       ? tg_scenery_biome_index(mb)
                                       : tg_biome_for_span(mb)];
-                        if (pfree) {
-                            /* [ROUND 1015 E] a plaza corridor's own kerb: the same slab,
-                             * laid from the corridor's node chain at shift 0, on the
-                             * outer (town) side; no corridor trees (see the lawn). Where
-                             * the corridor still runs beside the avenue (the classic rows)
-                             * the ring's far footway lays the pavement, exactly as it does
-                             * for an avenue fork: no second slab on top of it. */
-                            if (tg_pf_classic_span(fi, ck) && tg_realfork_walk_owned(fi, mb)) {
-                                /* owned by the far footway (td5_tg_avenue.c) */
-                            } else if (tg_city_sidewalk_w(cb) > 0.0 &&
-                                td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
-                                /* [ROUND 1023 B item 8] no kerb slab across the mouth of a real street
-                                 * that opens on this row (tg_net_geo_far_streets marks those rows). */
-                                /* [ROUND 1030 G item 16] ... nor across a laid main-road street that reaches the
-                                 * corridor (tg_br_sidewalk_on_street), on either side of it. */
-                                const int street_gap = tg_pf_gap_at(fi, ck) ||
-                                    tg_br_sidewalk_on_street(nl, mb, cnl, mbv, ck, fi, cb, (double)tg_fork_side(fi));
-                                const int in_gap = tg_br_sidewalk_on_street(nl, mb, cnl, mbv, ck, fi, cb,
-                                                                            -(double)tg_fork_side(fi));
-                                /* [ROUND 1030 G item 14] the avenue's median island, carried on to the plaza */
-                                const int med_row = tg_fork_is_free(fi) && !tg_fork_is_loop(fi) &&
-                                                    tg_pf_median_row(nl, fi, ck);
-                                if (!street_gap &&
-                                    !tg_emit_branch_sidewalk(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
-                                                             &meshes, moff, &nmesh, si)) ok = 0;
-                                if (ok && med_row &&
-                                    !tg_pf_emit_median_row(nl, fi, ck, si, &meshes, moff, &nmesh)) ok = 0;
-                                if (ok && tg_fork_is_loop(fi) && tg_bl_inner_ok(fi, ck) &&
-                                    !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
-                                                                   &meshes, moff, &nmesh, si)) ok = 0;
-                                /* [ROUND 1023 B item 7] Mariano, level091 L91 e313 s0 p0:ROAD (corridor span
-                                 * 1252, the far arc of Plaza Miguel de Azcuenaga): "there's no sidewalk near
-                                 * here". MEASURED in the MODELS.DAT dump of entries 300..330: every corridor
-                                 * span of the free arc has ONE p44 pavement mesh, on the outer (town) side;
-                                 * the plaza side, between the road and the lawn, has none, so the carriageway
-                                 * runs straight onto bare ground apron. A real ring plaza has a pavement on
-                                 * both sides of the ring road: the inner slab is the same kerb + slab on the
-                                 * other edge. Free rows only (the classic rows run beside the avenue's other
-                                 * carriageway). The inner slab runs on through a street mouth (the street opens
-                                 * on the town side only). TD5RE_PF_INNER_WALK=0 restores the one-sided arc. */
-                                if (ok && tg_fork_is_free(fi) && !tg_fork_is_loop(fi) &&
-                                    !tg_pf_classic_span(fi, ck) && td5_env_flag_on("TD5RE_PF_INNER_WALK") &&
-                                    !med_row && !in_gap &&
-                                    !tg_emit_branch_sidewalk_inner(cnl, mbv, ck, tg_fork_clen(fi), fi, cb,
-                                                                   &meshes, moff, &nmesh, si)) ok = 0;
-                            }
-                        } else if (tg_realfork_walk_owned(fi, mb)) {
-                            /* [ROUND 1014 A] The ring's far footway (td5_tg_avenue.c)
-                             * already lays this pavement at the real per-side width;
-                             * the branch slab would be a second, narrower one on the
-                             * same lateral (measured: 1081 vs 1450 units, 40 units
-                             * apart, z-fighting) and it began at k=0 with an open end. */
-                        } else if (tg_city_sidewalk_w(cb) > 0.0 &&
+                        if (tg_city_sidewalk_w(cb) > 0.0 &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
                             if (!tg_emit_branch_sidewalk(nl, mb, ck, L, fi,
                                                          cb, &meshes,
@@ -3933,12 +3813,12 @@ static int tg_scenery_entry(int e)
                         /* [R7 item 10] Dress the grass verge with the biome's own
                          * roadside trees. No-op on paved biomes (no billboard set)
                          * and inherently clear of the branch (clear_gap). */
-                        if (ok && !pfree && !tg_emit_branch_flora(nl, mb, cb, &meshes,
+                        if (ok && !tg_emit_branch_flora(nl, mb, cb, &meshes,
                                                         moff, &nmesh, si)) ok = 0;
                         /* [R22 CORRIDOR item 4] the corridor's own tree line,
                          * standing on the far-band ground the main road already
                          * lays past the fork. See tg_emit_corridor_flora. */
-                        if (ok && !pfree && !tg_emit_corridor_flora(nl, mb, ck, L, fi, cb,
+                        if (ok && !tg_emit_corridor_flora(nl, mb, ck, L, fi, cb,
                                                           &meshes, moff, &nmesh,
                                                           si)) ok = 0;
                     }
@@ -3971,27 +3851,11 @@ static int tg_scenery_entry(int e)
                     const int main_half = s_forks[fi].main_lanes;   /* [FORK KINDS] */
                     const int br_lanes  = s_forks[fi].br_lanes;
                     const int j = si - s_forks[fi].F - 1;   /* corridor step */
-                    if (tg_fork_is_free(fi)) {
-                        /* [ROUND 1015 E] the main half is the route's own la lanes at
-                         * every node width the throat ramps through */
-                        const double w0 = nl->v[si].width, w1 = nl->v[si + 1].width;
-                        const double ws0 = tg_pf_main_wscale(fi, w0), ws1 = tg_pf_main_wscale(fi, w1);
-                        if (!tg_emit_road_quad_taper(nl, si, (double)main_half / ws0,
-                                                     tg_fork_main_shift(fi, w0),
-                                                     tg_fork_main_shift(fi, w1),
-                                                     ws0, ws1, tg_road_page(si), &meshes))
-                            ok = 0;
-                    } else
                     if (!tg_emit_road_quad(nl, si, main_half,
                                            tg_fork_main_shift(fi, nl->v[si].width),
                                            tg_fork_main_shift(fi, nl->v[si + 1].width),
                                            tg_fork_main_wscale(fi), tg_road_page(si), &meshes))
                         ok = 0;
-                    if (ok && tg_fork_is_free(fi) && tg_pf_wedge_span(fi, si)) {
-                        /* [ROUND 1015 E] the corridor leaves the road here: the paved
-                         * wedge between the two edges, not a lateral gore */
-                        if (!tg_pf_emit_wedge(nl, fi, si, &meshes, moff, &nmesh)) ok = 0;
-                    } else
                     if (ok) {
                         /* Branch half widths from the SAME helper the corridor
                          * strip rows and mesh use, so the gore always meets the
@@ -4046,12 +3910,9 @@ static int tg_scenery_entry(int e)
                             if (tg_span_in_tunnel(si) &&
                                 td5_env_flag_on("TD5RE_R8_BORE_MEDIAN"))
                                 gore_page = TD5_TG_PAGE_R8_BRIDGE + 0;
-                            /* [ROUND 1015 A] a real median opening: paved flush, no island */
-                            const int rf_open = tg_fork_opening_at(si);
-                            if (rf_open) gore_page = tg_road_page(si);
                             if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1,
                                               gore_page, &meshes, tg_fork_side(fi),
-                                              rf_open))
+                                              0))
                                 ok = 0;
                             if (tg_span_in_tunnel(si))
                                 tg_acct(TG_ACCT_R8_BRIDGE, si);
@@ -4078,7 +3939,6 @@ static int tg_scenery_entry(int e)
                         if (ok && (tg_fork_is_avenue(fi)
                                    || tg_r11_median_rise()) &&
                             tg_median_bridge_uniform(nl, si, br_lanes) &&
-                            !tg_fork_opening_at(si) &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER"))
                             if (!tg_emit_avenue_divider(nl, si, fi, sh0, sh1,
                                                         gw0, gw1, br_lanes,
@@ -4093,20 +3953,6 @@ static int tg_scenery_entry(int e)
              * occupy the drivable envelope on purpose. */
             tg_guard_mark(road_ex0, meshes.len, TG_GK_ROAD, si);
             }
-            /* [ROUND 1010 AVENUES] A GEO divided avenue: the REAL opposite
-             * carriageway and the kerbed median between it and the race road,
-             * at the offset the OSM ways actually have. Emitted right after the
-             * road and before the guardrails, because the rails ask
-             * tg_carriageway_reach -- which now folds this in -- and must land
-             * outside the scenery carriageway rather than through it.
-             *
-             * Nothing here touches spans, the jump table or the occupancy
-             * paint, so the race gets no second drivable path: that is the
-             * whole difference from the fork this replaces. No-op on every
-             * synthetic track (tg_geo_avenue_n returns 0 with no geo place). */
-            if (ok && !TG_SUB(TG_SUB_ROAD,
-                              tg_emit_geo_avenue(nl, si, &meshes, moff, &nmesh)))
-                ok = 0;
             /* Guardrails belong in THIS loop, not the box pass below: that pass
              * recovers each piece's offset by dividing the appended bytes by
              * n_added, which only holds while every piece is a same-sized box.
@@ -4131,7 +3977,7 @@ static int tg_scenery_entry(int e)
              * tg_landmarks_place. Last in the span so a landmark never
              * displaces road, rail or pavement geometry when the entry runs
              * up against TG_MAX_MESHES_PER_ENTRY. */
-            if (ok && !tg_prefab_emit_span(nl, si, &meshes, moff, &nmesh, e)) ok = 0;
+            if (ok && !tg_prefab_emit_span(si, &meshes, moff, &nmesh, e)) ok = 0;
         }
         TG_ZONE_END(TG_ZONE_ENTRY_L1);
         TG_ZONE_BEGIN(TG_ZONE_ENTRY_L2);
@@ -4416,29 +4262,6 @@ static int tg_scenery_entry(int e)
                     }
                     tg_guard_mark(sq0, meshes.len, TG_GK_PROP, si);
                 }
-                /* [GEO STREET] Bus stops are furniture and take the same
-                 * last-in-the-span slot and the same TG_GK_PROP class as the
-                 * signal head beside them. The zebra and the mapped paving
-                 * mark themselves (DECAL and CITY respectively) inside their
-                 * own emitters, because neither is furniture and neither can
-                 * be judged by the furniture envelope: a decal is LICENSED to
-                 * cover the road it is painted on. Inert on synthetic. */
-                {
-                    size_t sb0 = meshes.len;
-                    if (!tg_emit_geo_bus_stops(nl, si, &meshes, moff, &nmesh,
-                                               TG_MAX_MESHES_PER_ENTRY)) {
-                        ok = 0; break;
-                    }
-                    tg_guard_mark(sb0, meshes.len, TG_GK_PROP, si);
-                }
-                if (!tg_emit_geo_xings(nl, si, &meshes, moff, &nmesh,
-                                       TG_MAX_MESHES_PER_ENTRY)) {
-                    ok = 0; break;
-                }
-                if (!tg_emit_geo_footpaths(nl, si, &meshes, moff, &nmesh,
-                                           TG_MAX_MESHES_PER_ENTRY)) {
-                    ok = 0; break;
-                }
             }
         }
 
@@ -4594,10 +4417,6 @@ static int tg_scenery_end(TG_Buf *out)
             /* [GEO SIGNALS] the G3 acceptance number: signals in cache, near
              * the route, placed, and dropped by reason. Silent on synthetic. */
             tg_geo_signals_report(nspans);
-            /* [GEO STREET] the C4 acceptance numbers: crossings, bus stops
-             * and mapped paving in cache, placed, and dropped by reason.
-             * Silent on synthetic. */
-            tg_geo_street_report(nspans);
             /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
              * assembled strip. These are the round's acceptance numbers. */
             tg_r9_city_report(nl, nspans);
@@ -4770,21 +4589,6 @@ static void tg_preview_emit_forks(const TG_NodeList *nl,
         const int L = s_forks[i].len;  (void)L;   /* [FORK KINDS] geometry now comes from the fork helpers */
         int si;
         if (F < 0 || R >= nl->count) continue;
-        if (tg_fork_is_loop(i)) continue;    /* [ROUND 1018 L] preview shows the route; loops are planned later */
-        if (tg_fork_is_free(i)) {            /* [ROUND 1015 E] the corridor's own rows */
-            int row;
-            for (row = 0; row <= tg_fork_clen(i); row++) {
-                TD5_TrackGenPoint p;
-                double px = 0.0, pz = 0.0;
-                if (!tg_pf_row_point(i, row, &px, &pz)) continue;
-                p.x = (float)px; p.z = (float)pz;
-                p.lanes = s_forks[i].br_lanes;
-                p.branch = i + 1;
-                p.node = -1;
-                sink->on_points(&p, 1, sink->ctx);
-            }
-            continue;
-        }
         for (si = F; si <= R; si++) {
             const TG_Node *n = &nl->v[si];
             const double lx = n->tz, lz = -n->tx;
@@ -5069,35 +4873,17 @@ int td5_trackgen_register_geo_places(void)
 
 void td5_trackgen_set_target_slot(int slot)
 {
-    const int gi = td5_trackgen_geo_index_for_slot(slot);
-    if (gi >= 0 && gi < td5_geo_places_count()) {
-        s_target_slot  = slot;
-        s_target_level = TD5_GEO_LEVEL_BASE + gi;
-        td5_geo_force_place(td5_geo_places_slug(gi));
-        TD5_LOG_I(LOG_TAG, "trackgen: target slot %d = real place '%s' -> level %d",
-                  slot, td5_geo_places_slug(gi), s_target_level);
-        return;
-    }
-    if (gi >= 0)
-        TD5_LOG_W(LOG_TAG, "trackgen: geo slot %d has no place behind it "
-                  "(%d place(s) known); falling back to the auto track",
-                  slot, td5_geo_places_count());
+    /* [roam SA] The generator builds the AUTO TRACK only. A real place (geo slot) is raced in the
+     * free-roam city on its own host (td5_trackgen_roam_host_slot) and never generated: the strip geo
+     * BUILD (level09x) is deleted. */
+    if (td5_trackgen_is_geo_slot(slot))
+        TD5_LOG_W(LOG_TAG, "trackgen: geo slot %d is raced in the city, not generated; "
+                  "target stays the auto track", slot);
     s_target_slot  = TD5_TG_SLOT;
     s_target_level = TD5_TG_LEVEL_NUM;
-    /* [ROUND 1026 L, Mariano: "when selecting auto track studio through the quick
-     * race it pulls from the geospatial generator"] The auto slot is the
-     * PROCEDURAL track. This used to clear the override, which hands the place
-     * decision to TD5RE_GEO_PLACE -- the studio's old LOCATION row -- and that
-     * knob is also what every geo BUILD leaves behind (td5_geo_select persists
-     * it to SELECTED.TXT, td5_geo_init reads it back each launch). So once a
-     * real place had been built, level090 was built FROM THAT PLACE. Now the
-     * auto slot pins the synthetic world. TD5RE_STUDIO_SYNTHETIC=0 restores the
-     * old "env knob decides" behaviour (dev harnesses that pick a place with
-     * TD5RE_GEO_PLACE and race slot 60). */
-    if (td5_trackgen_studio_synthetic())
-        td5_geo_force_synthetic();
-    else
-        td5_geo_force_place(NULL);
+    /* [ROUND 1026 L] The auto slot is the PROCEDURAL track: pin the synthetic world, so a place left
+     * in TD5RE_GEO_PLACE / SELECTED.TXT (the geo map's selection) cannot leak into level090. */
+    td5_geo_force_synthetic();
 }
 
 /* ---- [GEO FREE ROAM F2-F] roam host: a real place's own level dir, read-only ---- */
@@ -5283,24 +5069,11 @@ int td5_trackgen_roam_sky_path(int slot, char *out, size_t n)
     return 0;
 }
 
-int td5_trackgen_studio_synthetic(void)
-{
-    return td5_env_flag_on("TD5RE_STUDIO_SYNTHETIC");
-}
-
 /* Registry row for whatever the current target is. The auto track and the geo
  * places live in different registry tables (one struct vs an array), so this is
  * the single place that knows which one a build belongs to. */
 static void tg_register_target(const char *name, int circuit, int finish)
 {
-    const int gi = td5_trackgen_geo_index_for_slot(s_target_slot);
-    if (gi >= 0) {
-        char gname[40];
-        tg_geo_slot_name(gi, gname, sizeof(gname));
-        td5_track_registry_set_geo(gi, s_target_slot, s_target_level, gname,
-                                   circuit, TD5_TG_GRID_SPAN, finish);
-        return;
-    }
     td5_track_registry_set_auto(s_target_slot, s_target_level, name,
                                 circuit, TD5_TG_GRID_SPAN, finish);
 }
@@ -5530,33 +5303,9 @@ int td5_trackgen_regenerate(unsigned int seed)
         const unsigned int pinned = td5_env_u32("TD5RE_AUTOTRACK_SEED", 0u);
         if (pinned)
             TD5_LOG_I(LOG_TAG, "trackgen: seed pinned by TD5RE_AUTOTRACK_SEED = %u", pinned);
-        if (!pinned && td5_trackgen_is_geo_slot(s_target_slot)) {
-            /* [J8 GEO-PICK 2026-10-03] A REAL PLACE IS ITS OWN IDENTITY, so its
-             * seed comes from the slug instead of the clock. Two consequences,
-             * both of them the point of picking a place by name:
-             *
-             * REPRODUCIBLE -- "LA PLATA (REAL)" is the same track every time.
-             * The road already comes from ROUTE.JSON, but the seed still drives
-             * scenery, night and the structure table, so a rolled seed would
-             * hand the player a visibly different La Plata on every entry.
-             *
-             * CACHEABLE -- the GENSTAMP reuse check keys on the seed, so a
-             * rolled seed could never match and the SECOND race on a place
-             * would pay the full 20-35 s build again. With the seed fixed, and
-             * the place owning its own level dir, the second race is a reuse
-             * hit. TD5RE_AUTOTRACK_SEED still overrides, for an A/B. */
-            const char *slug = td5_geo_places_slug(
-                td5_trackgen_geo_index_for_slot(s_target_slot));
-            seed = tg_fnv1a(2166136261u, slug, strlen(slug));
-            if (seed == 0) seed = 1u;   /* 0 means "roll one" to every caller */
-            TD5_LOG_I(LOG_TAG, "trackgen: seed %u derived from real place '%s' "
-                      "(stable across races; TD5RE_AUTOTRACK_SEED overrides)",
-                      seed, slug);
-        } else {
-            seed = pinned ? pinned
-                          : (unsigned int)td5_plat_time_ms() * 2654435761u
-                            + 0x9E3779B9u;
-        }
+        seed = pinned ? pinned
+                      : (unsigned int)td5_plat_time_ms() * 2654435761u
+                        + 0x9E3779B9u;
     }
     spec.seed = seed;
 

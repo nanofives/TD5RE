@@ -714,19 +714,6 @@ typedef struct {
     int side;             /* [TOPOLOGY-FIRST] -1 corridor right of travel (the
                            * shipped shape), +1 left. A BYPASS or (1019 V) a real fork / block
                            * loop on the +t side goes left. */
-    int real;             /* [ROUND 1013 F2] 1 + index into the REAL fork table
-                           * (td5_tg_realfork.c): the corridor's lateral is the
-                           * measured gap between two real carriageways, not a
-                           * bow. 0 = a synthetic / legacy fork.              */
-    int freec;            /* [ROUND 1015 E] 1 + index of a PLAZA fork plan
-                           * (td5_tg_plazafork.c): the corridor has geometry of
-                           * its own (a free node chain round the real ring), not
-                           * main node + lateral. 0 = every other fork. real is
-                           * 0 on these so no avenue-only path touches them.  */
-    int loopc;            /* [ROUND 1018 L] 1 + index of a BLOCK LOOP plan (td5_tg_blockloop.c):
-                           * the corridor leaves through the road's side, the main road is
-                           * not touched (F = first span of the departure mouth, R = last
-                           * span of the arrival mouth). 0 = every other fork.            */
     int clen;             /* [ROUND 1016 K] CORRIDOR SPAN COUNT. == len for every
                            * fork whose corridor rides the main nodes one span per
                            * span; a plaza fork's free corridor has the spans its
@@ -747,7 +734,6 @@ double tg_fork_main_shift(int fi, double w);
 double tg_fork_main_wscale(int fi);
 double tg_fork_br_shift(int fi, int k, double w);
 double tg_fork_main_wscale_w(int fi, double w);   /* [1015 E] width scale of the main half at node width w */
-double tg_pf_br_shift(int fi, int k, double w);   /* [1015 E] classic-row lateral of a free corridor */
 double tg_fork_br_wscale(int fi, int k);
 int    tg_fork_br_lanes_at(int fi, int k);
 int    tg_fork_clen(int fi);                         /* [1016 K] corridor span count of fork fi */
@@ -1540,8 +1526,6 @@ void tg_net_fw_follow_counts(long *pieces, long *clamped, long *faces);
 /* [ROUND 1029 U] the network's laid road + footway surfaces as quads (8 doubles each) reaching the box; for the
  * park lawn clip. td5_tg_network.c */
 int  tg_net_footprint_quads(double bx0, double bz0, double bx1, double bz1, double *q, int maxq);
-void   tg_geo_lane_profile_reset(void);
-int    tg_geo_plaza_floor(int i, int lanes);   /* [1014 B] route lanes at node i, raised to the plaza ring's carriageway */
 double tg_net_mouth_shift(int si, int left);   /* [1014 B] 0, or how far past the race kerb this mouth's street starts (divided avenue) */
 void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
 int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
@@ -1838,7 +1822,6 @@ int tg_branch_lane_gain_s(int k, int len, int base_lanes, double sep);
 #define TD5_TG_CARRIAGEWAY_MARGIN 300.0   /* house verge between road and prop */
 double tg_road_half_width(const TG_NodeList *nl, int si);
 double tg_carriageway_reach(const TG_NodeList *nl, int si, double side);
-double tg_fork_real_row_shift(const TG_NodeList *nl, int si, double side, int e);   /* [1029 V] one row, -1 = no real fork */
 int tg_on_carriageway(const TG_NodeList *nl, int si, double lateral, double margin);
 double tg_carriageway_clear_gap(const TG_NodeList *nl, int si, double side, double gap, double margin);
 void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans);
@@ -2992,9 +2975,10 @@ int  tg_prefab_add(int si, int pf, double ox, double oy, double oz,
                    double yaw_c, double yaw_s);
 int  tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
                      int side, double clearance);
-int  tg_prefab_emit_span(const TG_NodeList *nl, int si, TG_Buf *meshes, size_t *moff, int *nmesh,
+int  tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
                          int entry);
 double      tg_prefab_half_depth(int pf);
+double      tg_prefab_half_width(int pf);
 const char *tg_prefab_name(int pf);
 void        tg_prefab_report(void);
 /* [GEO PHASE 5] footprint-driven fallback: pick the biggest set piece that
@@ -3942,7 +3926,6 @@ int tg_r11_median_rise(void);
  * constant, so every span of a fork gets the same answer -- the placement
  * predicate and the emitter cannot disagree. TD5RE_MEDIAN_MIN_RUN=0 for A/B. */
 int tg_median_fork_long_enough(int fork_index);
-int tg_fork_left_real_median(int fork_index);   /* [ROUND 1021 A] left real fork: signed median frame */
 int tg_r12_median_cap(void);
 int tg_r12_geom_diag(void);
 extern long s_r12_median_caps;
@@ -4259,94 +4242,15 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b, double side
 #define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
 int tg_fork_gore_page(int fork_index);
 int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side, int flush);
-int tg_fork_opening_at(int si);   /* [1015 A] a real median opening on a real fork's main span */
-int tg_fork_gap_write(TG_Buf *out);   /* [1023 D] the MGAP trailer: real median openings the car can cross; runs written */
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
-int tg_emit_branch_sidewalk_inner(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
-int tg_bl_inner_ok(int fi, int k);                        /* block loop: the corridor's other edge may carry a pavement at row k */
 int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L, int fi, double bw, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_branch_flora(const TG_NodeList *nl, int mb, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double sh0, double sh1, double half0, double half1, int br_lanes, TG_Buf *blk, size_t *moff, int *nmesh);
-/* ===================== [ROUND 1010] GEO DIVIDED AVENUES =====================
- * td5_tg_avenue.c. A divided avenue on a GEO track is NOT a fork: the race
- * keeps its own carriageway and its own lanes, and the median plus the opposite
- * carriageway are laid beside it as geometry only, at the offset the real OSM
- * ways give. Contract and the root cause this replaces: td5_geo_avenues.h. */
-int    tg_geo_avenue_n(void);
-double tg_geo_avenue_reach(const TG_NodeList *nl, int si, double side);
-int    tg_geo_avenue_slack_ok(int si, int e);       /* [1015 A] slack ahead of an avenue's first row */
-int    tg_geo_avenue_before_cap(const TG_NodeList *nl, int si, double x, double z);   /* [1027 O] point is before the avenue's first carriageway section */
-double tg_carriageway_reach_at(const TG_NodeList *nl, int si, double side, double x, double z);   /* [1027 O] tg_carriageway_reach, cap-aware */
-double tg_geo_avenue_start_along(const TG_NodeList *nl, int si, double x, double z, int *ok);   /* [1029 T] signed distance past an avenue run's start edge */
-/* [ROUND 1014 A] 1 where the ring's far-side footway (td5_tg_avenue.c) already lays the
- * pavement beside corridor step `mb` of REAL fork `fi`, so the corridor's own branch
- * slab must not be laid on top of it. */
-int tg_realfork_walk_owned(int fi, int mb);
-int    tg_emit_geo_avenue(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh);
-/* [ROUND 1021 B item 5] clip a main-road kerb slab against the street mouths round span si (td5_tg_avenue.c):
- * 0 = nothing free, 1 = whole span free, 2 = the clipped slab was emitted, -1 = out of memory */
-int    tg_av_main_pave_clip(const TG_NodeList *nl, int si, double sg, double e0, double e1,
-                            double f0, double f1, TG_Buf *blk, size_t *moff, int *nmesh);
 /* [ROUND 1027 O] the cross-street quad exactly as tg_city_emit_crossstreet lays it (td5_tg_streets.c), for the slab clip */
 int    tg_xstreet_laid_quad(const TG_NodeList *nl, int si, const double *ef, double sk, double rr, double *q);
-/* ================ [ROUND 1013 F2] DRIVEABLE FORKS FROM THE REAL MAP ==============
- * td5_tg_realfork.c. The real opposite carriageway of a divided avenue, and any
- * real road close to and parallel with the route, as a FORK the player and the AI
- * can take, with the corridor's lateral the MEASURED gap between the two
- * carriageways. Every one of these is a no-op (0 / the raw value) with no geo
- * place loaded, which is what keeps a synthetic build byte-identical. */
-int    tg_realfork_enabled(void);
-int    tg_realfork_finish_span(void);           /* THE finish rule: no real fork window reaches it */
-unsigned int tg_realfork_route_fp(void);         /* FNV of this build's conditioned route (0 = none) */
-int    tg_realfork_build(void);                  /* once per build, before the walk */
-void   tg_realfork_reset(void);
-int    tg_realfork_n(void);
-int    tg_realfork_get(int i, int *F, int *len, int *lanes_a, int *lanes_b, double *sep);
-int    tg_realfork_side(int i);                 /* [1019 V] -1 right / +1 left of travel */
-int    tg_realfork_free(int i);                 /* [1015 E] 1 + plaza plan when fork i has a free corridor */
-const char *tg_realfork_name(int i);
-double tg_realfork_med(int i, int k);            /* median width at corridor step k, >= 0 */
-int    tg_realfork_lanes_override(int node, int raw_lanes);
-double tg_realfork_node_adjust(int node, double *x, double *z);
-double tg_realfork_node_width(int node, int lanes, double lane_w);   /* ramped, not stepped */
-double tg_realfork_node_delta(int node);         /* lateral (+t) the walk moved node by */
-/* ================ [ROUND 1015 E] PLAZA FORKS (td5_tg_plazafork.c) ================
- * A route that runs along a named/unnamed junction=circular ring gets a drivable
- * corridor round the OTHER side of the ring, geometry of its own (free node chain)
- * instead of main node + lateral. Everything here is 0 / the classic answer with no
- * plaza fork planned, which keeps every other build byte-identical.
- *
- * Shape: the corridor is classic (a lateral from the main node, K1 rows) for the
- * first rows after F and the last rows before R, where it runs beside the main
- * road, and free in between (rows K1..K2), where it follows the real ring. */
-#define TG_PF_WEDGE     7     /* main spans after the classic rows where the corridor leaves the road */
-#define TG_PF_K1MIN     5     /* the fewest classic rows at either mouth                              */
-typedef struct {
-    int    F, R, len;
-    int    lanes_a, lanes_b;
-    int    k1, kx;            /* classic rows at the entry (0..k1) and the exit    */
-    int    plan;              /* index of the plan this came from                 */
-    int    clen;              /* [1016 K] corridor span count (free rows follow the arc, not the route) */
-    int    tin, tout;         /* [1017 R] the lane ramps in front of F / behind R this plan was fitted with */
-    int    merged;            /* [1017 R] 1 = absorbed the avenue fork(s) next to its throats (classic rows over the avenue) */
-    double stretch;           /* corridor arc / main arc over the free rows       */
-    double ring_m, near_m, far_m;
-    char   name[64];
-} TG_PfCand;
-void   tg_pf_reset(void);
-int    tg_pf_candidates(const double *rx, const double *rz, const int *rl, int rn,
-                        int win_hi, const int *avF, const int *avR, int nav,
-                        TG_PfCand *out, int max_out);
-double tg_pf_med(int plan, int k);                   /* classic median opening of row k of plan, world units */
-void   tg_pf_commit(int plan);                       /* this plan was selected */
-double tg_pf_node_extra(int plan, int node);         /* corridor lanes ramped into the node window */
-int    tg_fork_is_free(int fi);
-/* [ROUND 1018 L] BLOCK LOOPS (td5_tg_blockloop.c). A loop is a TG_Fork with loopc > 0: its corridor
- * spans are appended like any fork's, but the main road is NOT touched (no widening, no half
- * carriageway, no gore): the corridor leaves through the road's right side at a real cross street
- * and rejoins through another. The engine is told where the road is open by the SLNK trailer. */
+/* The street network's arms (td5_tg_network.c). */
 typedef struct {
     int    edge, kind, si, lo, hi, left, road, k0, step, loop;
     double width, skew, reach;
@@ -4360,52 +4264,7 @@ int    tg_net_mouth_is_loop(int si, int left);
 /* [ROUND 1023 E item 12] 1 when a frontage merge ribbon lands on this (span, side): the main pavement slab
  * is dropped there so the street meets the carriageway. */
 int    tg_net_fr_tip_here(int si, int left);
-void   tg_bl_reset(void);
-int    tg_bl_build(const TG_NodeList *nl, int ring);        /* after tg_network_build: plan + append the loops */
-int    tg_fork_is_loop(int fi);
-const TG_NodeList *tg_bl_rview(int fi);                     /* v[F+1+k] = loop corridor row k                 */
-const TG_NodeList *tg_fork_rview(int fi);                   /* free (plaza) or loop corridor rows, else NULL   */
-int    tg_bl_row_node(int fi, int k);                       /* main node corridor row k stands beside          */
-void   tg_bl_paint_network(int fi);                         /* occupancy + ground bed under the corridor       */
-int    tg_bl_slnk_write(TG_Buf *out);                       /* the SLNK trailer; number of loops written       */
-int    tg_bl_mouths(int fi, int *a1_lo, int *a1_hi, int *a2_lo, int *a2_hi);
-double tg_bl_reach(const TG_NodeList *nl, int si, double side);   /* outermost loop tarmac beside mouth span si (right side) */
-int    tg_bl_mouth_span(int si);                            /* si lies in a loop's mouth window (clear of facade) */
-int    tg_bl_corridor_near(double x, double z, double half);  /* a loop corridor row lies within half of (x,z) */
-void   tg_pf_finalize(const TG_NodeList *nl);        /* after tg_fork_place filled s_forks */
-const TG_NodeList *tg_pf_view(int fi);               /* v[F+1+j] = the corridor beside MAIN node F+1+j (throats, wedges) */
-const TG_NodeList *tg_pf_rview(int fi);              /* [1016 K] v[F+1+k] = corridor ROW k (strip rows, mesh, routes, preview) */
-int    tg_pf_plan_clen(int plan);                    /* [1016 K] corridor spans of a plan */
-int    tg_pf_row_node(int fi, int k);                /* [1016 K] main node index corridor row k stands beside */
-int    tg_pf_throat_span(int fi, int si);            /* main span si has throat geometry     */
-int    tg_pf_wedge_span(int fi, int si);             /* ... and is a free-corridor wedge span */
-int    tg_pf_classic_span(int fi, int ck);            /* corridor span ck runs beside the road on both rows */
-int    tg_pf_free_rows(int fi, int *k0, int *k1);     /* [1023 B] free rows k0 <= k < k1 of a plaza corridor */
-int    tg_pf_row_frame(int fi, int k, double *x, double *z, double *tx, double *tz, double *half);
-void   tg_pf_gap_mark(int fi, int k0, int k1);        /* [1023 B] rows where a real street opens: no kerb slab */
-int    tg_pf_gap_at(int fi, int k);
-int    tg_pf_rehost_buildings(const TG_NodeList *nl, int nspans);   /* [1023 B] far-arc footprints -> main spans */
-int    tg_pf_scenery_clash(const TG_NodeList *nl, int si, double lat);   /* an avenue's scenery road would stand on a plaza corridor */
-int    tg_pf_avenue_yield(int si, double lat);       /* [1030 F] free plaza window, corridor side: no scenery avenue */
-int    tg_pf_clear_span(int fi, int si);             /* scenery clearance window            */
-double tg_pf_reach(const TG_NodeList *nl, int fi, int si, double side);   /* outermost corridor edge beside span si */
-double tg_pf_main_wscale(int fi, double w);          /* main half width scale at node width w   */
-int    tg_pf_emit_wedge(const TG_NodeList *nl, int fi, int si, TG_Buf *blk,
-                        size_t *moff, int *nmesh);
-int    tg_pf_median_row(const TG_NodeList *nl, int fi, int k);   /* [1030 G] free row k still carries the avenue's median */
-int    tg_pf_emit_median_row(const TG_NodeList *nl, int fi, int k, int si, TG_Buf *blk,
-                             size_t *moff, int *nmesh);         /* [1030 G] that island, kerb to kerb, on corridor span si */
-void   tg_pf_median_report(void);
-int    tg_pf_ray_edge_hit(double ox, double oz, double ux, double uz, double tmin, double tmax,
-                          double margin, double *t_out);   /* [1030 G] where a ray reaches a plaza corridor's kerb */
-int    tg_br_sidewalk_on_street(const TG_NodeList *main_nl, int main_si, const TG_NodeList *nl, int mb,
-                                int k, int fi, const TG_Biome *b, double fs);   /* [1030 G] a corridor slab lies on a laid street */
-void   tg_pf_paint_network(int fi);
-int    tg_pf_row_point(int fi, int row, double *x, double *z);   /* preview */
-double tg_pf_vscale(int fi);                         /* V scale of a free corridor's road texture (its span stretch) */
-extern double tg_road_v_scale;                       /* [1015 E] set around the corridor's road quad, 1.0 elsewhere */
-int    tg_pf_far_over(int fi, int g0, int g1);       /* far-band group g0..g1 overlaps a throat window */
-int    tg_pf_ray_hit(double ox, double oz, double ux, double uz, double tmin, double tmax, double *t_out, double *y_out);   /* [1015 E] where a ray crosses a free corridor */
+extern double tg_road_v_scale;                       /* [1015 E] V scale of the road texture, 1.0 (a plaza corridor used to stretch it) */
 /* ===================== GUARDRAILS =====================
  * The car is already contained by collision WALLS derived from the STRIP rail
  * vertices, but nothing draws them, so the road ends at an invisible boundary.
@@ -6168,24 +6027,6 @@ void tg_plate_upper(const char *in, char *out, size_t cap);
 int  tg_plate_plan(const char *upper_name, char *l1, char *l2, size_t cap, int *abbreviated);
 int  tg_plate_split2(const char *upper_one_line, char *l1, char *l2, size_t cap);
 
-/* ================== GEO STREET LEVEL (round 1011 C4) ====================
- * Zebras at real highway=crossing nodes, bus stops at real highway=bus_stop
- * nodes, and mapped plaza/park paving from FOOTWAYS.JSON. Defined in
- * td5_tg_geo_street.c; rationale there. Same three-part contract as the geo
- * traffic lights above -- prepare single-threaded in the prepass, emit as a
- * read-only table scan per span, report the census -- and INERT on a synthetic
- * build for the same reason, so MODELS.DAT stays byte-identical. */
-void tg_geo_xings_prepare(const TG_NodeList *nl, int nspans);
-int  tg_emit_geo_xings(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
-/* 1 when a REAL crossing covers span si, so the generator's own crossing rule
- * stands down there. Always 0 on a synthetic build and before the prepass. */
-int  tg_geo_xing_owns_span(int si);
-
-void tg_geo_bus_stops_prepare(const TG_NodeList *nl, int nspans);
-int  tg_emit_geo_bus_stops(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
-
-void tg_geo_footpaths_prepare(const TG_NodeList *nl, int nspans);
-int  tg_emit_geo_footpaths(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
 /* [ROUND 1024 F] Serial prepass AFTER tg_geo_city_prepare: tg_geo_park_prepare tables every park outline the
  * plaza emitter will lay (projected exactly as it projects them) with the real footway pieces inside; then
  * tg_geo_footpaths_context cuts those in-park parts out of the skirt-height footpath set and drops the strays
@@ -6193,11 +6034,6 @@ int  tg_emit_geo_footpaths(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *m
 int    tg_geo_park_prepare(const TG_NodeList *nl, int nprep);
 int    tg_geo_park_cuts(double ax, double az, double bx, double bz, double *ta, double *tb, int max);
 double tg_geo_park_dist(double x, double z);
-int    tg_geo_fp_on_street(const TG_NodeList *nl, double x, double z, double nx, double nz, double half);
-void   tg_geo_footpaths_context(const TG_NodeList *nl, int nspans);
-
-/* One report for all three. */
-void tg_geo_street_report(int nspans);
 /* ====================================================================== */
 /* Terrain emits at most a couple of meshes per span; this is headroom, and the
  * emitter's own budget check is asserted against it below. */
@@ -6414,7 +6250,6 @@ unsigned int td5_trackgen_last_seed(void);
  * Everything else about the feature (the cache reader, the per-span bind, the
  * polygon geometry) is behind td5_geo_buildings.h. Both are a no-op success
  * unless TD5RE_GEO_PLACE names a loadable place. */
-int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
 void tg_geo_city_report(void);                    /* td5_tg_city.c    */
 void tg_geo_city_report_streamed(void);           /* td5_tg_city.c    */
 int  tg_geo_city_active(void);                    /* td5_tg_city.c    */

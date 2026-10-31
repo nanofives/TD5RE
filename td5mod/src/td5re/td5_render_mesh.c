@@ -2864,7 +2864,6 @@ void td5_render_actors_for_view(int view_index)
         if (g_td5.drag_race_enabled) td5_render_drag_gantry();
 
         const int roam_on = td5_roam_render_wanted();
-        const int roam_hide_strip = roam_on && td5_roam_render_hides_strip();
 
         for (int i = 0; i < n_entries; i++) {
             int entry_idx = start_entry + i;
@@ -2904,7 +2903,7 @@ void td5_render_actors_for_view(int view_index)
             if (submitted_count < TD5_RENDER_SUBMITTED_CAP)
                 s_submitted[submitted_count++] = display_list;
 
-            if (!s_photobooth_active && !roam_hide_strip) td5_render_span_display_list(display_list);
+            if (!s_photobooth_active) td5_render_span_display_list(display_list);
             rendered_spans++;
         }
 

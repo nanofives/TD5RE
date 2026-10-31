@@ -58,7 +58,7 @@
 #define ROAM_WGS_A       6378137.0
 #define ROAM_WGS_F       (1.0 / 298.257223563)
 
-/* The "projection" block of a PLACE.JSON (td5_roam_view.c rv_proj_load, same maths). */
+/* The "projection" block of a PLACE.JSON. */
 typedef struct { double lat0, lon0, upm, mdlat, mdlon, cs, sn, offx, offz; } RoamProj;
 
 typedef struct {

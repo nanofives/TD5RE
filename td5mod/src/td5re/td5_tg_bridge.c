@@ -2393,18 +2393,6 @@ static void tg_r12_median_gore_w(const TG_NodeList *nl, int si, int fi,
                      * tg_fork_br_wscale(fi, j) * 0.5;
     const double h1  = nl->v[si + 1].width
                      * tg_fork_br_wscale(fi, j + 1) * 0.5;
-    /* [ROUND 1021 A item 18] The gore frame is SIGNED: a left corridor's shift is positive and
-     * its inner edge is sh - h, so -(sh + h) came out NEGATIVE on every span of a left real fork
-     * (Diagonal 73 left, F=429): "a sliver" to the island gate, no island, the R17 rule paved the
-     * bare gore as road, and the median read as flush tarmac across the cross streets. A left
-     * real fork now answers the same positive width (the distance from the road centre to the
-     * corridor's inner edge) a right one does. Right forks and every synthetic fork keep the
-     * old expression exactly. TD5RE_GEO_LEFT_MEDIAN=0 restores it. */
-    if (tg_fork_left_real_median(fi)) {
-        *gw0 = sh0 - h0;
-        *gw1 = sh1 - h1;
-        return;
-    }
     *gw0 = -(sh0 + h0);
     *gw1 = -(sh1 + h1);
 }
@@ -2422,18 +2410,14 @@ static int tg_median_at_raw(const TG_NodeList *nl, int si, int br_lanes)
     if (!nl || si < 0 || si + 1 >= nl->count) return 0;
     fi = tg_fork_of_main(si);
     if (fi < 0) return 0;
-    if (tg_fork_is_free(fi) && tg_pf_wedge_span(fi, si)) return 0;   /* [1015 E] the wedge has no island */
     if (!tg_fork_is_avenue(fi) && !tg_r11_median_rise()) return 0;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER")) return 0;
-    if (tg_fork_opening_at(si)) return 0;    /* [ROUND 1015 A] a cross street cuts it */
     /* [R16 MEDIAN] short fork -> no median. True mirror of the emitter's own
      * tg_median_fork_long_enough early-return, so end caps agree. */
     if (!tg_median_fork_long_enough(fi)) return 0;
     tg_r12_median_gore_w(nl, si, fi, br_lanes, &gw0, &gw1);
     if (gw0 < 200.0 && gw1 < 200.0) return 0;              /* sliver */
-    /* [ROUND 1014 A] a real fork's median is always built (mirrors the emitter). */
-    if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi) &&
-        !(td5_env_flag_on("TD5RE_GEO_FORK_ISLAND") && s_forks[fi].real > 0)) return 0;
+    if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi)) return 0;
     return 1;
 }
 

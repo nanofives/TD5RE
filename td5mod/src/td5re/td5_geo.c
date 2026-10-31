@@ -23,7 +23,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_geo.h"
-#include "td5_geo_route.h"       /* td5_geo_derived_migrate */
+#include "td5_geo_route.h"
 #include "td5_geo_roads.h"     /* [1011 C3] TD5_GEO_ROADS_NAME_MAX */
 #include "td5_geo_frame.h"     /* [roam M] the geographic -> game reflection */
 #include "deps/cjson/cJSON.h"
@@ -873,14 +873,15 @@ const char *td5_geo_wanted_slug(void)
  * loaded" from "needs loading" without re-parsing JSON every build. */
 static char s_route_want[512];
 
+/* [roam SA] Only with a place loaded: the TD5RE_GEO_ROUTE override, a strip-build dev knob that could
+ * hand the synthetic generator a route, went with the strip geo BUILD. The route itself is the last
+ * strip BUILD's _route/ROUTE.JSON, which nothing writes any more; the racer AI's geo gates still read
+ * its presence (td5_ai.c geo_corners, branch look-ahead, finish brake). */
 static void geo_route_sync(void)
 {
-    const char *env = getenv("TD5RE_GEO_ROUTE");
     char want[512];
 
-    if (env && env[0])
-        snprintf(want, sizeof(want), "%s", env);
-    else if (s_geo.loaded)
+    if (s_geo.loaded)
         td5_geo_place_path(want, sizeof(want), s_geo.slug, "ROUTE.JSON");
     else
         want[0] = '\0';
@@ -889,9 +890,7 @@ static void geo_route_sync(void)
     snprintf(s_route_want, sizeof(s_route_want), "%s", want);
     geo_route_free();
     if (!want[0]) return;
-    if (!geo_route_load(want) && env && env[0])
-        TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_ROUTE=\"%s\" could not be loaded; "
-                  "the generator walks its own road", want);
+    (void)geo_route_load(want);
 }
 
 void td5_geo_sync(void)
@@ -901,16 +900,6 @@ void td5_geo_sync(void)
      * own value; with no override this reads the knob exactly as before. */
     const char *slug = td5_geo_wanted_slug();
     if (!slug) slug = "";
-
-    /* [ROUND 1011 C4] Bring an OLD derived frame up to the current schema
-     * before anything reads it. The all-or-nothing stamp stops a derived layer
-     * being mixed with a source one, but cannot tell that a derived frame
-     * written by an earlier build has WRONG CONTENTS -- a _route/ committed
-     * before this round has an unreprojected SIGNALS.JSON nodes[] and no
-     * FOOTWAYS.JSON. Idempotent, a no-op for a current or absent derived
-     * frame, and it must precede td5_geo_load below. Contract in
-     * td5_geo_route.h. */
-    if (slug[0]) td5_geo_derived_migrate(slug);
 
     if (strcmp(slug, s_geo.loaded ? s_geo.slug : "")) {
         if (!slug[0]) {

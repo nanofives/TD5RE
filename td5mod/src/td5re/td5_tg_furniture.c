@@ -7,7 +7,6 @@
 #include "td5_trackgen_internal.h"
 #include "td5_geo.h"            /* [GEO G3] traffic lights: is a place loaded */
 #include "td5_geo_signals.h"    /* [GEO G3] SIGNALS.JSON nodes + the lamp tag */
-#include "td5_geo_avenues.h"    /* [1015 A] AVENUES.JSON: the far carriageway at the finish */
 
 /* [R8 G1 "different guardrails"] Which page the roadside barrier wears.
  *
@@ -639,31 +638,6 @@ static int tg_banner_page(int finish, int half)
     return ((h >> 19) & 1u) ? TD5_TG_PAGE_R8V_BANNER + slot : k_orig[slot];
 }
 
-/* [ROUND 1015 A item 18] "if the finish line is on an avenue, the gantry / chequered
- * line must cover both carriageways" (Mariano, La Plata span 1201, Avenida 7).
- *
- * The far carriageway of a divided avenue, from AVENUES.JSON: the signed lateral of its
- * centreline (+ = left of travel) and its width, or 0 when span si has none or the knob
- * is off. The finish span is outside every real fork window (tg_realfork_finish_span
- * keeps them TG_RF_FINISH_GAP short of it), so the sidecar offset is the real one and
- * needs no node-delta correction. GEO only: tg_geo_avenue_n() is 0 without a place, so
- * a synthetic build never gets here and stays byte-identical.
- * TD5RE_GEO_FINISH_AVENUE=0 restores the one-carriageway gantry and line. */
-static int tg_finish_far_carriageway(const TG_NodeList *nl, int si, double *off_out,
-                                     double *width_out)
-{
-    double off = 0.0;
-    int lanes = 2;
-    if (!nl || si < 0 || si + 1 >= nl->count) return 0;
-    if (!td5_geo_loaded() || tg_geo_avenue_n() < 1) return 0;
-    if (!td5_env_flag_on("TD5RE_GEO_FINISH_AVENUE")) return 0;
-    if (!td5_geo_avenue_at(si, &off, &lanes, NULL)) return 0;
-    if (lanes < 1) lanes = 2;
-    *off_out   = off;
-    *width_out = (double)lanes * (double)TD5_TG_LANE_WIDTH;
-    return 1;
-}
-
 /* Gantry across span si. `finish` selects the FINISH artwork over the START
  * artwork. Returns 0 on OOM. */
 static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish)
@@ -697,25 +671,6 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
     len = sqrt(dx * dx + dz * dz);
     if (len < 1e-6) return 1;          /* degenerate span: nothing to straddle */
     dx /= len; dz /= len;
-    /* [ROUND 1015 A item 18] A finish ON a divided avenue: the legs stand outside BOTH
-     * carriageways and the banner spans the median, so the gantry is the width of the
-     * whole avenue. The race road's own edge moves out to the far carriageway's outer
-     * edge on the avenue's side; the legs, the panel and the cap all follow it. */
-    if (finish) {
-        double aoff = 0.0, aw = 0.0;
-        if (tg_finish_far_carriageway(nl, si, &aoff, &aw)) {
-            const double ext = ((aoff < 0.0) ? -aoff : aoff) + aw * 0.5
-                             - 0.5 * len;
-            if (ext > 0.0) {
-                if (aoff < 0.0) { rx -= dx * ext; rz -= dz * ext; }   /* right = -d */
-                else            { lx += dx * ext; lz += dz * ext; }
-                TD5_LOG_I(LOG_TAG, "trackgen: [FINISH] span %d gantry widened by %.1f m "
-                          "to cover the far carriageway (offset %.1f m, %.1f m wide)",
-                          si, ext / 430.0, aoff / 430.0, aw / 430.0);
-                len += ext;
-            }
-        }
-    }
     /* [ROUND 1030 D item 8] "column ... is in the middle of the road" (Mariano, level091
      * e6 s26 GANTRY_LEG, the START gantry at span 24). The race road's own edge is not the
      * edge of the tarmac there: Diagonal 73's second carriageway (td5_tg_avenue.c, fork 0
@@ -956,16 +911,6 @@ static int tg_emit_finish_line(const TG_FBHook *h)
 
     if (h->si + 1 >= h->nl->count) return 1;
     if (*h->nmesh >= h->maxmesh) return 1;
-    {
-        double aoff = 0.0, aw = 0.0;
-        if (tg_finish_far_carriageway(h->nl, h->si, &aoff, &aw)) {
-            band_shift[1] = aoff; band_w[1] = aw; nband = 2;
-            TD5_LOG_I(LOG_TAG, "trackgen: [FINISH] span %d chequered line on both "
-                      "carriageways (far one %.1f m away, %.1f m wide)",
-                      h->si, aoff / 430.0, aw / 430.0);
-        }
-    }
-
     for (bi = 0; bi < nband; bi++) {
         double l0x, l0y, l0z, r0x, r0y, r0z, l1x, l1y, l1z, r1x, r1y, r1z;
         int nq = (int)(band_w[bi] / (TD5_TG_FLINE_CELL * TD5_TG_FLINE_CELLS_Q) + 0.5);
@@ -1053,11 +998,6 @@ int tg_fork_of_main(int si)
 {
     int i;
     for (i = 0; i < s_fork_count; i++) {
-        if (s_forks[i].loopc > 0) continue;      /* [ROUND 1018 L] a block loop has no main half */
-        if (s_forks[i].freec > 0) {              /* [ROUND 1015 E] throat spans only */
-            if (tg_pf_throat_span(i, si)) return i;
-            continue;
-        }
         if (si > s_forks[i].F && si <= s_forks[i].F + s_forks[i].len) return i;
     }
     return -1;

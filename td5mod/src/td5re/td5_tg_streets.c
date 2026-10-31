@@ -8,8 +8,6 @@
 #include "td5_geo.h"             /* GEO TRACK: land cover for plaza planting  */
 #include "td5_geo_buildings.h"   /* GEO TRACK: real area polygons             */
 #include "td5_geo_footways.h"    /* [1013 F1] real OSM footways = ring plaza paths */
-#include "td5_geo_attrs.h"       /* [1011 C3] GEO TRACK: OSM lit -> the lamps */
-#include "td5_tg_geo_clear.h"    /* [1023 C] whole-footprint clearance for the procedural boxes and walls */
 
 /* [R8 CROSS item 1] The reveal row has to know how deep the street it reveals
  * actually runs, so it can stand BEYOND it instead of across it. Both live
@@ -422,24 +420,8 @@ static int tg_xsc_lo_min(void)
  * wide there), so only the oblique arms change. Geo city only; TD5RE_GEO_ARM_SQUARE=0 restores the along-road
  * back edge. Shared by the emitter and tg_xstreet_collect, so the footprint clearance tests see the slab that
  * is laid. */
-static volatile int s_xsc_env_armsq = -1, s_xsc_env_armpf = -1;
-static long s_arm_squared, s_arm_pf_clipped;
-
-/* [ROUND 1030 G item 16] A main-road street that reaches a plaza corridor (level091: the street off spans 260..262
- * that meets Plaza Azcuenaga's ring at corridor spans 2105..2106) laid its pavement arm the street's full reach,
- * straight across the corridor's two lanes: a raised slab lying on the crossing road. The arm (kerb ray and back
- * ray) now stops at the corridor's kerb. Geo city only; TD5RE_GEO_ARM_PF_CLIP=0 restores the full reach. */
-static double tg_arm_pf_clip(double cx, double cz, double bx, double bz, double sw,
-                             double ox, double oz, double rc)
-{
-    double t;
-    const double rc0 = rc;
-    if (!tg_geo_city_active() || !tg_xsc_env(&s_xsc_env_armpf, "TD5RE_GEO_ARM_PF_CLIP")) return rc;
-    if (tg_pf_ray_edge_hit(cx, cz, ox, oz, 1.0, rc, 0.0, &t) && t < rc) rc = t;
-    if (tg_pf_ray_edge_hit(cx + bx * sw, cz + bz * sw, ox, oz, 1.0, rc, 0.0, &t) && t < rc) rc = t;
-    if (rc < rc0) s_arm_pf_clipped++;
-    return rc;
-}
+static volatile int s_xsc_env_armsq = -1;
+static long s_arm_squared;
 
 static int tg_arm_square_back(const double *e, int far_corner, double ox, double oz, double *bx, double *bz)
 {
@@ -930,7 +912,7 @@ static double tg_xst_carr_depth(const TG_NodeList *nl, int si, double x, double 
     }
     if (ni < 0) return -1e300;
     lat = (x - nl->v[ni].x) * nl->v[ni].tz - (z - nl->v[ni].z) * nl->v[ni].tx;
-    r = tg_carriageway_reach_at(nl, ni, (lat >= 0.0) ? 1.0 : -1.0, x, z);   /* [ROUND 1027 O] the guard's own cap-aware measure */
+    r = tg_carriageway_reach(nl, ni, (lat >= 0.0) ? 1.0 : -1.0);
     return r - (lat >= 0.0 ? lat : -lat);
 }
 
@@ -976,24 +958,10 @@ static double tg_xst_ray_reach(const TG_NodeList *nl, int si, double cx, double 
 #define TG_XST_SNAP 450.0
 static long s_xst_snap;
 
-/* Has the point reached what the street runs into: the carriageway, or (`cap`) the start edge of an avenue run, which the far
- * footway shares beyond the carriageway's outer edge (La Plata node 81: span 77's near ray crosses it 774 units past the far
- * carriageway, at the footway's own start)? */
-static int tg_xst_snap_hit(const TG_NodeList *nl, int si, double x, double z, int cap)
+/* Has the point reached what the street runs into: the carriageway? */
+static int tg_xst_snap_hit(const TG_NodeList *nl, int si, double x, double z)
 {
-    if (tg_xst_carr_depth(nl, si, x, z) > 0.0) return 1;
-    if (cap) {
-        const int lo = (si - TD5_TG_R8_CLAMP_WIN < 0) ? 0 : si - TD5_TG_R8_CLAMP_WIN;
-        const int hi = (si + TD5_TG_R8_CLAMP_WIN > nl->count - 1) ? nl->count - 1 : si + TD5_TG_R8_CLAMP_WIN;
-        double best = 1e300;
-        int i, ni = -1, ok = 0;
-        for (i = lo; i <= hi; i++) {
-            const double dx = x - nl->v[i].x, dz = z - nl->v[i].z, d2 = dx * dx + dz * dz;
-            if (d2 < best) { best = d2; ni = i; }
-        }
-        if (ni >= 0 && tg_geo_avenue_start_along(nl, ni, x, z, &ok) >= 0.0 && ok) return 1;
-    }
-    return 0;
+    return tg_xst_carr_depth(nl, si, x, z) > 0.0;
 }
 
 static double tg_xst_ray_reach_snap(const TG_NodeList *nl, int si, double cx, double cz,
@@ -1001,16 +969,15 @@ static double tg_xst_ray_reach_snap(const TG_NodeList *nl, int si, double cx, do
 {
     const double r = tg_xst_ray_reach(nl, si, cx, cz, ox, oz, reach);
     double d, lo, hi;
-    int it, cap;
+    int it;
     if (r < reach || !(reach > 0.0) || !td5_env_flag_on("TD5RE_GEO_STREET_RAY_SNAP")) return r;
-    if (tg_xst_snap_hit(nl, si, cx + ox * reach, cz + oz * reach, 0)) return r;    /* ends ON it: not ours to move */
-    cap = !tg_xst_snap_hit(nl, si, cx + ox * reach, cz + oz * reach, 1);           /* ...nor past an avenue's start edge */
+    if (tg_xst_snap_hit(nl, si, cx + ox * reach, cz + oz * reach)) return r;    /* ends ON it: not ours to move */
     for (d = reach + TG_XST_CLIP_STEP * 0.5; d <= reach + TG_XST_SNAP; d += TG_XST_CLIP_STEP * 0.5) {
-        if (!tg_xst_snap_hit(nl, si, cx + ox * d, cz + oz * d, cap)) continue;
+        if (!tg_xst_snap_hit(nl, si, cx + ox * d, cz + oz * d)) continue;
         lo = d - TG_XST_CLIP_STEP * 0.5; hi = d;
         for (it = 0; it < 12; it++) {
             const double mid = 0.5 * (lo + hi);
-            if (tg_xst_snap_hit(nl, si, cx + ox * mid, cz + oz * mid, cap)) hi = mid; else lo = mid;
+            if (tg_xst_snap_hit(nl, si, cx + ox * mid, cz + oz * mid)) hi = mid; else lo = mid;
         }
         s_xst_snap++;
         return lo;
@@ -1817,13 +1784,6 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
                            + tg_xstreet_covers(nl, si, side, ex1 + lx1 * depth, ez1 + lz1 * depth);
             if (c_on || k_on >= 2) { s_geop_flank_street++; return 1; }
         }
-        /* [ROUND 1023 C] ... and the whole box against every laid street, arm and road (see the flank
-         * emitter). TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
-        if (td5_geo_loaded() &&
-            tg_geo_box_clear(nl, si, side, by, bx, bz, ax, az, lx0, lz0, lx1, lz1, depth)) {
-            s_geop_flank_street++;
-            return 1;
-        }
         if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                 bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
                                 depth, H, cols, rows, page, 1, si))
@@ -2179,7 +2139,6 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
                 rb = tg_xst_ray_reach(h->nl, h->si, e[0] + bx * sw_s, e[2] + bz * sw_s, ox, oz, reach);   /* the slab's back edge */
                 if (rb < rc) rc = rb;
             }
-            rc = tg_arm_pf_clip(e[0], e[2], bx, bz, sw_s, ox, oz, rc);   /* [ROUND 1030 G item 16] */
             /* back = -along (onto the built side, off the carriageway). */
             if (rc >= TG_XST_CLIP_MIN || rc >= reach)
                 if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, bx, bz,
@@ -2196,7 +2155,6 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
                 rb = tg_xst_ray_reach(h->nl, h->si, e[3] + bx * sw_s, e[5] + bz * sw_s, ox, oz, reach);
                 if (rb < rc) rc = rb;
             }
-            rc = tg_arm_pf_clip(e[3], e[5], bx, bz, sw_s, ox, oz, rc);   /* [ROUND 1030 G item 16] */
             if (rc >= TG_XST_CLIP_MIN || rc >= reach)
                 if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, bx, bz,
                                        rc, sw_s))
@@ -4584,7 +4542,7 @@ static int tg_pk_on_net(const double *q8, int n, double x, double z)
 
 static long s_pk_net_cut;
 
-static void tg_pk_build_area(const TG_NodeList *nl, TG_PkArea *pa)
+static void tg_pk_build_area(TG_PkArea *pa)
 {
     const unsigned kinds = (1u << TD5_GEO_FW_FOOTWAY) | (1u << TD5_GEO_FW_PATH)
                          | (1u << TD5_GEO_FW_PEDESTRIAN) | (1u << TD5_GEO_FW_CYCLEWAY);
@@ -4636,9 +4594,8 @@ static void tg_pk_build_area(const TG_NodeList *nl, TG_PkArea *pa)
                 if (ns > 96) ns = 96;
                 for (s = 0; s <= ns; s++) {
                     const double t = (s == ns) ? ib : ia + (ib - ia) * (double)s / (double)ns;
-                    on[s] = (unsigned char)tg_geo_fp_on_street(nl, ax + dx * t, az + dz * t,
-                                                               dz / len, -dx / len, hw);
-                    if (!on[s] && nnet > 0 && tg_pk_on_net(s_pk_q8, nnet, ax + dx * t, az + dz * t)) {
+                    on[s] = 0;   /* [roam SA] the cross-street test went with the strip's footways */
+                    if (nnet > 0 && tg_pk_on_net(s_pk_q8, nnet, ax + dx * t, az + dz * t)) {
                         on[s] = 1;
                         s_pk_net_cut++;
                     }
@@ -4795,7 +4752,7 @@ int tg_geo_park_prepare(const TG_NodeList *nl, int nprep)
                 if (pa->rz[k] > pa->maxz) pa->maxz = pa->rz[k];
             }
             s_pk_n++;
-            tg_pk_build_area(nl, pa);
+            tg_pk_build_area(pa);
             tg_pk_assign_slots(pa);
         }
     }
@@ -5190,10 +5147,6 @@ static void tg_geo_plaza_report_impl(int from_stream)
     TD5_LOG_I(LOG_TAG, "[GEO ARM] [R1030 G item 15] %ld oblique pavement arm(s) squared to their street, so the slab is "
               "the full pavement width across it (knob TD5RE_GEO_ARM_SQUARE=%s)",
               s_arm_squared, td5_env_flag_on("TD5RE_GEO_ARM_SQUARE") ? "on" : "off");
-    TD5_LOG_I(LOG_TAG, "[GEO ARM] [R1030 G item 16] %ld pavement arm(s) stopped at a plaza corridor's kerb instead of "
-              "crossing its lanes (knob TD5RE_GEO_ARM_PF_CLIP=%s)",
-              s_arm_pf_clipped, td5_env_flag_on("TD5RE_GEO_ARM_PF_CLIP") ? "on" : "off");
-    tg_pf_median_report();                     /* [R1030 G item 14] */
     TD5_LOG_I(LOG_TAG, "[GEO STREET] [R1023 A item 4] %ld cross-street arm(s) written as their own mesh, so the on-road "
               "guard judges an arm alone instead of deleting both (knob TD5RE_GEO_STREET_ARM_MESH=%s)",
               s_xst_arm_meshes, td5_env_flag_on("TD5RE_GEO_STREET_ARM_MESH") ? "on" : "off");
@@ -5530,15 +5483,6 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
                 s_geop_xwall_unbacked++;
                 continue;
             }
-            /* [ROUND 1023 C item 2] The wall's own base line against every laid street, arm and road: with the
-             * setback widened to the arm (above) the wall can now stand across ANOTHER street that leaves a
-             * neighbouring span (MEASURED on level091: 2 cross walls on a carriageway, one on a fork corridor).
-             * A 300-wide strip along the base that ignores the arm the wall abuts; never moved, the wall is
-             * skipped. TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
-            if (td5_geo_loaded() && tg_geo_wall_clear(h->nl, h->si, sg, by, cx, cz, ox, oz, flen)) {
-                s_geop_xwall_street++;
-                continue;
-            }
             /* base -> outward*flen, sinking with the skirt, rising H. */
             tg_facade_push_grid(cx, by, cz, ox * flen, -drop, oz * flen,
                                 0.0, H, 0.0, cols, rows, 0, rows,
@@ -5748,17 +5692,6 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
                                    + tg_xstreet_covers(h->nl, h->si, sg, bxp + bx * depth, bzp + bz * depth)
                                    + tg_xstreet_covers(h->nl, h->si, sg, bxp + fx + bx * depth, bzp + fz + bz * depth);
                     if (c_on || k_on >= 2) { s_geop_flank_street++; continue; }
-                }
-                /* [ROUND 1023 C] The centre / two-of-four-corners test above lets a box with an edge or a
-                 * corner on a street through (MEASURED on level091: 7 flank boxes had 1.4..7.3 m2 of their
-                 * roof on a laid carriageway, 4 on a pavement). The whole box against every laid street,
-                 * arm and road (never moved: a procedural box is simply skipped).
-                 * TD5RE_GEO_BLD_FOOTCLEAR=0 keeps it. */
-                if (td5_geo_loaded() &&
-                    tg_geo_box_clear(h->nl, h->si, sg, byp, bxp, bzp, ox * TD5_TG_R8_FLANK_LEN,
-                                     oz * TD5_TG_R8_FLANK_LEN, bx, bz, bx, bz, depth)) {
-                    s_geop_flank_street++;
-                    continue;
                 }
                 if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                         bxp, byp, bzp,
@@ -6008,12 +5941,6 @@ static int tg_r13_emit_gap_infill(const TG_FBHook *h)
                            + tg_xstreet_covers(h->nl, h->si, sg, bx + lx0 * depth, bz + lz0 * depth)
                            + tg_xstreet_covers(h->nl, h->si, sg, ex1 + lx1 * depth, ez1 + lz1 * depth);
             if (c_on || k_on >= 2) { s_geop_flank_street++; continue; }
-        }
-        /* [ROUND 1023 C] ... and the whole box against every laid street, arm and road. */
-        if (td5_geo_loaded() &&
-            tg_geo_box_clear(h->nl, h->si, sg, by, bx, bz, ax, az, lx0, lz0, lx1, lz1, depth)) {
-            s_geop_flank_street++;
-            continue;
         }
         flen = sqrt(ax * ax + az * az);
         cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
@@ -7171,7 +7098,6 @@ void tg_r9_city_report(const TG_NodeList *nl, int nspans)
         for (f = 0; f < s_fork_count; f++) {
             int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
             int hi = s_forks[f].R + 2;
-            if (s_forks[f].loopc > 0) continue;   /* [ROUND 1018 L] */
             if (lo < 1) lo = 1;
             if (hi > ring - 1) hi = ring - 1;
             for (si = lo; si <= hi; si++) {
@@ -7310,7 +7236,6 @@ void tg_r14_branch_report(const TG_NodeList *nl, int nspans)
     for (f = 0; f < s_fork_count; f++) {
         int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
         int hi = s_forks[f].R + 2;
-        if (s_forks[f].loopc > 0) continue;   /* [ROUND 1018 L] */
         if (lo < 2) lo = 2;
         if (hi > ring - 2) hi = ring - 2;
         for (si = lo; si <= hi; si++) {
@@ -7381,16 +7306,7 @@ int tg_emit_fb_city(const TG_FBHook *h)
         tg_verge_band_w(h->b) > 0.0) {
         if (!TG_TI(TG_T_CITY_VERGE, tg_city_emit_verge_band(h, tg_verge_band_w(h->b)))) return 0;
     }
-    /* [GEO STREET, round 1011 C4] REAL DATA WINS. Where OSM says a crossing
-     * is, tg_emit_geo_xings paints it with the markings OSM says it has, and
-     * the generator's own spacing rule stands down over a window around it.
-     * Two authorities painting one junction is worse than either alone: the
-     * synthetic rule's minimum gap is TD5_TG_XMIN_GAP spans, so without the
-     * stand-down a real zebra and a synthetic one land 8 spans apart and the
-     * street reads as a crossing every 30 m. Always 0 on a synthetic build,
-     * where this is the only authority there has ever been. */
     if (paved && tg_city_crossing_here(h->si) &&
-        !tg_geo_xing_owns_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
         if (!TG_TI(TG_T_CITY_CROSSING, tg_city_emit_crossing(h))) return 0;
     }
@@ -7415,17 +7331,8 @@ int tg_emit_fb_city(const TG_FBHook *h)
      * same 1-in-7 beat the prop layer used, so the spacing is unchanged -- only
      * the fixture under the glow is new. NIGHT ONLY (item 11): a lit lamp head
      * over a midday road is what gives the generated scenery away. */
-    /* [ROUND 1011 C3] On a GEO track that beat is REPLACED, not added to: the
-     * map says which streets are lit (OSM `lit`, on 1693 of La Plata's 2291
-     * ways) and td5_geo_attrs_lamp_here folds that together with a realistic
-     * 30 m spacing. A street OSM tags lit=no therefore gets no lamps even in a
-     * city biome, which the biome flag alone could never express. With no geo
-     * place loaded td5_geo_attrs_ready() is 0 and the synthetic rule below is
-     * reached unchanged -- that is what keeps slot 60 byte-identical. */
     {
-        const int lamp_here = td5_geo_attrs_ready()
-                            ? td5_geo_attrs_lamp_here(h->si)
-                            : (h->b->prop_lamp && (h->si % 7) == 0);
+        const int lamp_here = h->b->prop_lamp && (h->si % 7) == 0;
         if (lamp_here && !tg_span_in_bridge_run(h->si) &&
             td5_trackgen_is_night() &&
             td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
@@ -7445,15 +7352,6 @@ int tg_emit_fb_city(const TG_FBHook *h)
     if (paved && !tg_up_clear_span(h->si)) {
         if (!TG_TI(TG_T_CITY_FORKBACK, tg_city_emit_forkback(h))) return 0;
     }
-    /* [GEO PHASE 5] REAL OSM footprints bound to this span, extruded to their
-     * own heights. LAST in the CITY dispatcher on purpose: the procedural
-     * frontage and back rows above have already stood down wherever a real
-     * building stands (tg_side_geom / tg_city_emit_backrows read the same
-     * predicate), so the real masses go in after the pavement, kerb and
-     * crossings they stand behind. NOT gated on `paved`: a real footprint is a
-     * fact about the place, not about the biome the generator painted there, so
-     * an out-of-town stretch that OSM says is built-up gets its buildings. */
-    if (!tg_geo_emit_buildings(h)) return 0;
     return 1;
 }
 

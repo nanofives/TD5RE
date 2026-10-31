@@ -131,14 +131,6 @@ void frontend_roam_set_origin(int screen);
 /* [roam QA] 1 while a track selector's pick is the FREE ROAM entry (the position right after the
  * GEOSPATIAL one; s_selected_track still holds the geo slot). td5_fe_race.c. */
 int  frontend_roam_entry_selected(void);
-/* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] The per-place track slots are no
- * longer browsable in SELECT TRACK -- this generator is the only way to a real
- * place. BUILD therefore ARMS the slot it just registered (td5_fe_race.c keeps
- * the state) so the selector accepts the pick it was handed; any move off that
- * slot retires it with frontend_geo_pick_arm(-1). Query form returns -1 when
- * nothing is armed. */
-void frontend_geo_pick_arm(int slot);
-int  frontend_geo_pick_slot(void);
 /* [GEO FREE ROAM F2-A] Entering CAR SELECT from the geo selector's FREE ROAM button: single race
  * type, single local player, no net/MP flow. The car-select exit then launches the roam race
  * (OK) or returns to the geo selector (BACK) -- td5_fe_race.c, off td5_roam_armed(). */
@@ -152,9 +144,6 @@ int  frontend_roam_launch_chosen_car(void);
  * that entry's city-race launch (td5_fe_race.c): 1 = a roam race is armed, s_selected_track = host. */
 int  frontend_geo_generator_points(double (*ll)[2], int max);
 int  frontend_geo_entry_launch_roam(int opponents);
-/* [GEO FREE ROAM F11b] 1 in the only context the strip geo race is built in: local multiplayer
- * (2+ humans, no network), or TD5RE_GEO_STRIP_BUILD=1 (dev). */
-int  frontend_geo_strip_context(void);
 int  frontend_local_mp(void);           /* [roam RA] 2+ local humans (MP lobby flow), no network */
 int  frontend_roam_launch_mp(void);     /* [roam RA] launch the armed city race with the lobby's humans; 1 = launched */
 /* [F11b] OK on a track selector with the GEOSPATIAL entry picked: single player = a route the city

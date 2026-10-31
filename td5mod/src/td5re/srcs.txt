@@ -11,15 +11,10 @@ td5_track_registry.c
 td5_geo.c
 td5_geo_roads.c
 td5_roam_cache.c
-td5_geo_attrs.c
 td5_geo_buildings.c
 td5_geo_landmarks.c
 td5_geo_signals.c
 td5_geo_footways.c
-td5_tg_geo_street.c
-td5_tg_geo_clear.c
-td5_geo_forks.c
-td5_geo_avenues.c
 td5_geo_sidewalk.c
 td5_geo_route.c
 td5_roam_height.c
@@ -28,7 +23,6 @@ td5_roam_world.c
 td5_roam_junction.c
 td5_roam_tile.c
 td5_roam_locate.c
-td5_roam_view.c
 td5_roam_mode.c
 td5_roam_physics.c
 td5_roam_drive.c
@@ -73,10 +67,6 @@ td5_tg_world.c
 td5_tg_road.c
 td5_tg_network.c
 td5_tg_branch.c
-td5_tg_avenue.c
-td5_tg_realfork.c
-td5_tg_plazafork.c
-td5_tg_blockloop.c
 td5_tg_guard.c
 td5_tg_city.c
 td5_tg_s3d.c

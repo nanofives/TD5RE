@@ -38,7 +38,6 @@
 #include "td5_carparam.h"   /* car mass/accel offsets + td5cp_heaviness_q8 (get_state) */
 #include "td5_camera.h"
 #include "td5_pick.h"   /* dev free-cam geometry picker */
-#include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
 #include "td5_roam_furniture.h" /* GEO FREE ROAM street furniture (F4c): signal clock + lamp registry per frame */
@@ -3515,14 +3514,16 @@ static void init_race_level_and_assets(void)
      * condition that picks level030 (battle mode excluded there too). */
     int drag_strip = (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
                      && !td5_game_battle_mode_active();
-    /* [J8 GEO-PICK 2026-10-03] is_GENERATED_slot, not is_auto_slot: a real place
-     * (LA PLATA (REAL), ...) is a track slot of its own and is synthesised by the
-     * same generator, so it has to take this branch too or the loader would look
-     * for a level09x zip that no build ever wrote. set_target_slot resolves which
-     * level dir to build into and selects the place, and it must run BEFORE the
-     * generation worker starts -- the worker reads both. */
-    /* [GEO FREE ROAM F2-F] a roam session hosts on the place's already-built geo level: never rebuild it */
-    if (td5_trackgen_is_generated_slot(g_td5.track_index) && !td5_roam_active()) {
+    /* [roam SA] Only the AUTO TRACK is generated. A real place's geo slot is raced in the free-roam
+     * city on its own host files ([GEO FREE ROAM F2-F]: never rebuilt); the strip geo BUILD that
+     * generated level09x for it is deleted, so a geo slot reaching here outside a roam session (no menu
+     * path does: the GEOSPATIAL entry arms a roam session) races track 0 instead. */
+    if (td5_trackgen_is_geo_slot(g_td5.track_index) && !td5_roam_active()) {
+        TD5_LOG_E(LOG_TAG, "InitRace: geo slot %d outside a roam session has no level; racing track 0",
+                  g_td5.track_index);
+        g_td5.track_index = 0;
+    }
+    if (td5_trackgen_is_auto_slot(g_td5.track_index) && !td5_roam_active()) {
         td5_trackgen_set_target_slot(g_td5.track_index);
         if (drag_strip)
             TD5_LOG_I(LOG_TAG, "Auto track: skipped, drag race loads the drag strip (track_index=%d)",
@@ -8610,20 +8611,6 @@ static void frame_render(void)
         }
 
 #ifndef TD5RE_RELEASE
-        /* [ROAM VIEW] GEO FREE ROAM dev viewer: the ROAMTILE road layer near the
-         * render eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
-         * Pane 0 only. Not gated on td5_camera_freecam_active(): the geo tour
-         * (td5_camera.c tour_step) moves the eye without entering free-cam, so
-         * gating on it hid the overlay from every tour frame. The eye goes in
-         * RENDER-FLOAT units (world/256 = strip units, the space the debug-line
-         * projector and the ROAMTILE coordinates use), not the 24.8 world. */
-        if (vp == 0 && td5_roam_view_wanted()) {
-            td5_render_debug_lines_reset();
-            td5_roam_view_draw((int32_t)g_cameraPos[0], (int32_t)g_cameraPos[1],
-                               (int32_t)g_cameraPos[2]);
-            td5_render_debug_lines_flush();
-        }
-
         /* [PICK] Resolve the hovered mesh, draw the highlight box, handle the
          * copy click. Own debug-line batch; runs on viewport 0 only (the free
          * camera is single-pane). No-op unless the free camera is flying. */
@@ -8765,11 +8752,6 @@ static void frame_render(void)
      * steering-direction arrow). Self-gated: no-op unless the optional aid is
      * enabled for the pane's player. */
     td5_hud_draw_laneassist_indicator();
-    /* [ROUND 1011 C3] "ON <street>" per pane, from the route's real OSM street
-     * names. Same overlay-pass reason as the two above: a screen-space quad
-     * emitted inside the per-viewport 3D loop is clipped to one pane.
-     * Self-gated (no-op on every track that is not a real place). */
-    td5_hud_draw_street_lines();
     td5_roam_route_ui_draw_hud();   /* [GEO FREE ROAM F5-A] route key hints + status; self-gated */
     td5_roam_race_draw_hud();       /* [GEO FREE ROAM F6-B] sprint timer / checkpoints / results; self-gated */
     td5_roam_cops_draw_hud();       /* [GEO FREE ROAM F10] pursuit panel, bust meter, toasts; self-gated */

@@ -349,20 +349,6 @@ static int  s_trksel_auto_btn = -1;
  * it is how a player builds a route from a real place in the first place, so
  * gating it on the current pick would hide the only way in. */
 static int  s_trksel_geo_btn = -1;
-/* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] "I see La Plata as a separate
- * option in the track selector, remove it." The GEOSPATIAL TRACK GENERATOR row
- * is now the ONLY way to a real place: the per-place slots (TD5_GEO_SLOT_BASE+)
- * stay registered -- the generator's BUILD, the level dirs, the HUD/loading
- * name and the save/high-score indices all key off them -- but the TRACK
- * cyclers hop over them (frontend_track_excluded_from_selector).
- *
- * That alone would also reject the slot BUILD itself just picked, because the
- * screen re-validates its parked pick through the same predicate on entry. So
- * BUILD ARMS the slot here, and the predicate makes exactly that one geo slot
- * selectable. The arm is dropped the moment a cycler moves off it, so the row
- * cannot be browsed back onto -- you can only get there through the generator.
- * -1 = nothing armed. */
-static int  s_geo_pick_slot = -1;
 /* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO is now reachable from TWO
  * screens (Track Selection and Quick Race), so the studio can no longer hardcode
  * its way back to track-select. Whoever opens it records the parent here, and the
@@ -717,19 +703,6 @@ static int frontend_track_is_cup_slot(int track_index) {
  * and the cups via the Championship menu + the High Scores browser (which index
  * slots 20-25 directly, not through these cyclers). Quick Race already excluded
  * the drag strip; this unifies it with Track Selection. [user request 2026-06-05] */
-/* [GEO ROW REMOVAL 2026-10-08] Arm (slot >= 0) or retire (-1) the one geo slot
- * the selector will accept. Called by td5_fe_geo.c's BUILD and by every path
- * that moves the pick elsewhere. Declared in td5_frontend_internal.h. */
-void frontend_geo_pick_arm(int slot) {
-    if (s_geo_pick_slot == slot) return;
-    s_geo_pick_slot = slot;
-    TD5_LOG_I(LOG_TAG, "geo pick: %s (track selector accepts %s)",
-              slot >= 0 ? "armed" : "retired",
-              slot >= 0 ? "that one place slot" : "no place slot");
-}
-
-int frontend_geo_pick_slot(void) { return s_geo_pick_slot; }
-
 /* [GEO FREE ROAM F2-A] The geo selector's FREE ROAM button hands over to the NORMAL car select.
  * It must look like a fresh single local race: single-race type, one human, no MP / net flow
  * (stale state from an earlier lobby or cup would hijack the car-select exit dispatch). */
@@ -768,16 +741,6 @@ int frontend_roam_launch_chosen_car(void)
     frontend_init_race_schedule();
     frontend_init_display_mode_state();
     return 1;
-}
-
-/* [GEO FREE ROAM F11b] The strip geo race was LOCAL MULTIPLAYER only (2026-10-18). [roam RA] Not any more
- * (Mariano, 2026-10-25: "i want the circuit/sprint build come from the free roam style"): local split screen
- * races the city too (td5_roam_mode.h, TD5_ROAM_MAX_HUMANS), so the strip BUILD is reached ONLY through
- * TD5RE_GEO_STRIP_BUILD=1 (dev / the level091 identity gate, read in release too), in every context, the way
- * F11a left it. A network lobby never lists a geo slot (frontend_track_excluded_from_selector). */
-int frontend_geo_strip_context(void)
-{
-    return td5_roam_strip_build_enabled();
 }
 
 /* [roam RA] 2+ humans on this machine (the multiplayer lobby flow), no network: the city race runs split
@@ -840,65 +803,11 @@ static int frontend_geo_entry_city_ready(void)
     return 1;
 }
 
-/* Local multiplayer: build the strip from the planned pins on demand. The pins are committed
- * (td5_geo_route_build + td5_geo_route_commit, what the geo map's BUILD TRACK does) only when they
- * differ from the committed route's own waypoints (_route/ROUTE_RAW.JSON), so racing the same pins
- * again keeps the level and its REUSE. With no pins, an already committed route is raced. 1 when a
- * committed route is there to race. */
-#define FE_GEO_STRIP_PTS 32
-static int frontend_geo_entry_prepare_strip(void)
-{
-    double ll[FE_GEO_STRIP_PTS][2], cur[FE_GEO_STRIP_PTS][2];
-    TD5_GeoLatLon pts[FE_GEO_STRIP_PTS];
-    TD5_GeoRouteResult res;
-    char src[512] = "", path[512];
-    const int gi = td5_trackgen_geo_index_for_slot(s_selected_track);
-    const char *slug = gi >= 0 ? td5_geo_places_slug(gi) : NULL;
-    int n, nc = 0, i, same;
-    uint32_t t0;
-    if (!slug || !slug[0]) return 0;
-    td5_geo_place_path(path, sizeof path, slug, "ROUTE.JSON");
-    n = frontend_geo_entry_route(s_selected_track, ll, FE_GEO_STRIP_PTS, src, sizeof src);
-    if (n < 2) {
-        const int have = td5_plat_file_exists(path);
-        TD5_LOG_I(LOG_TAG, "geo entry: strip race, no pins: %s", have ? "racing the committed route" :
-                  "no committed route either, refused");
-        return have;
-    }
-    if (td5_geo_derived_path(path, sizeof path, slug, "ROUTE_RAW.JSON"))
-        nc = td5_roam_handoff_read_waypoints(path, cur, FE_GEO_STRIP_PTS);
-    same = (nc == n);
-    for (i = 0; same && i < n; i++)
-        same = fabs(cur[i][0] - ll[i][0]) < 1e-7 && fabs(cur[i][1] - ll[i][1]) < 1e-7;
-    if (same) {
-        TD5_LOG_I(LOG_TAG, "geo entry: strip race on the committed route (%d pin(s) from %s, unchanged)", n, src);
-        return 1;
-    }
-    for (i = 0; i < n; i++) { pts[i].lat = ll[i][0]; pts[i].lon = ll[i][1]; }
-    t0 = td5_plat_time_ms();
-    memset(&res, 0, sizeof res);
-    if (td5_geo_route_build(pts, n, &res) != 0 || res.verdict != TD5_GEO_ROUTE_OK) {
-        TD5_LOG_W(LOG_TAG, "geo entry: the %d pin(s) from %s do not route (verdict %d): strip refused",
-                  n, src, (int)res.verdict);
-        return 0;
-    }
-    if (td5_geo_route_commit() != 0) {
-        TD5_LOG_W(LOG_TAG, "geo entry: commit refused: %s", td5_geo_route_commit_reason());
-        return 0;
-    }
-    td5_trackgen_register_geo_places();
-    td5_geo_preview_route("");            /* the selector's preview re-reads the new ROUTE.JSON */
-    TD5_LOG_I(LOG_TAG, "geo entry: strip BUILT ON DEMAND from %d pin(s) from %s in %u ms (%d spans)",
-              n, src, (unsigned)(td5_plat_time_ms() - t0), res.spans);
-    return 1;
-}
-
 /* OK on a track selector: 0 = refuse (the caller plays the error sound and stays). Not a geo slot = 1.
- * Local multiplayer prepares the strip (above); single player needs a route the city can race. */
+ * The GEOSPATIAL entry needs a route the city can race. */
 int frontend_geo_entry_on_ok(void)
 {
     if (!td5_trackgen_is_geo_slot(s_selected_track)) return 1;
-    if (frontend_geo_strip_context()) return frontend_geo_entry_prepare_strip();
     return frontend_geo_entry_city_ready();
 }
 
@@ -909,8 +818,7 @@ int frontend_geo_entry_on_ok(void)
  * Opponents / traffic / cops follow the menus that launched it (roam: at most 5 opponents, traffic
  * OFF / LOW / HIGH).
  *
- * Not taken: local multiplayer (frontend_geo_strip_context: the strip race, built on demand) or a
- * single player whose OK frontend_geo_entry_on_ok refused. Returns 1 when armed, with
+ * Not taken: an entry whose OK frontend_geo_entry_on_ok refused. Returns 1 when armed, with
  * s_selected_track moved to the roam host level. */
 int frontend_geo_entry_launch_roam(int opponents)
 {
@@ -918,7 +826,7 @@ int frontend_geo_entry_launch_roam(int opponents)
     char src[512] = "the geo map";
     TD5_RoamSpawn sp;
     int n, traffic;
-    if (!td5_trackgen_is_geo_slot(s_selected_track) || frontend_geo_strip_context()) return 0;
+    if (!td5_trackgen_is_geo_slot(s_selected_track)) return 0;
     if (s_selected_game_type != 0) {
         TD5_LOG_E(LOG_TAG, "geo entry: game type %d reached the GEOSPATIAL entry in single player", s_selected_game_type);
         return 0;
@@ -970,8 +878,6 @@ int frontend_geo_entry_launch_roam(int opponents)
 int frontend_geo_entry_slot(void) {
     const char *want;
     int i, n, first = -1;
-    if (s_geo_pick_slot >= 0 && td5_track_registry_has_slot(s_geo_pick_slot))
-        return s_geo_pick_slot;
     want = getenv("TD5RE_GEO_PLACE");
     n = td5_geo_places_count();
     for (i = 0; i < n; i++) {
@@ -994,7 +900,7 @@ int frontend_geo_entry_slot(void) {
 static int s_roam_entry;
 
 static int frontend_roam_entry_available(void) {
-    if (s_network_active || frontend_geo_strip_context() || s_selected_game_type != 0) return 0;
+    if (s_network_active || s_selected_game_type != 0) return 0;
     return frontend_geo_entry_slot() >= 0;
 }
 
@@ -1032,23 +938,18 @@ static void frontend_roam_entry_open(int parent) {
 
 static int frontend_track_excluded_from_selector(int track_index) {
     /* [GEO ROW REMOVAL 2026-10-08, Mariano item 5] A real place's own slot is
-     * NOT a browsable track any more -- the GEOSPATIAL TRACK GENERATOR row is
-     * the single entry point. The one exception is the slot BUILD just armed
-     * (see s_geo_pick_slot), so the player it handed back to SELECT TRACK can
-     * still read the preview, set the race options and press OK.
-     * [ROUND 1026 L] With the generator's own selector entry (default) that
-     * exception is no longer the arm but the entry slot, which is always
-     * listed (F11b: the armed-only rule, TD5RE_GEO_OWN_SELECTOR=0, is gone). */
+     * NOT a browsable track: the GEOSPATIAL TRACK GENERATOR entry slot
+     * ([ROUND 1026 L]) is the one geo slot the selector lists. */
     if (td5_trackgen_is_geo_slot(track_index)) {
         /* A network lobby never lists it: the peers would each have to hold
          * (and build identically from) the host's real-place cache. */
         if (s_network_active) return 1;
-        /* [F11b] single player races the entry in the city, which has a single race only:
-         * a cup / time trial / cop chase never lists it (it would need the strip) */
-        if (!frontend_geo_strip_context() && s_selected_game_type != 0) return 1;
+        /* [F11b] the entry races in the city, which has a single race only:
+         * a cup / time trial / cop chase never lists it */
+        if (s_selected_game_type != 0) return 1;
         /* [roam RA] local multiplayer races it in the city too: a race (not the lobby's cop chase / cup / drag /
          * battle modes), and at most TD5_ROAM_MAX_HUMANS humans (the roam racer field is the 6-slot grid) */
-        if (!frontend_geo_strip_context() && frontend_local_mp() &&
+        if (frontend_local_mp() &&
             (g_td5.mp_mode_config.mode != TD5_MP_MODE_RACE || s_num_human_players > TD5_ROAM_MAX_HUMANS)) return 1;
         return track_index != frontend_geo_entry_slot();
     }
@@ -1098,11 +999,6 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
     s_gen_settings_seen = -1;   /* [roam HA] a new pick asks for its settings again */
     int attempts = track_max - track_min + 1;
     if (frontend_roam_entry_step_pre(delta)) return;   /* [roam QA] GEOSPATIAL <-> FREE ROAM */
-    /* [GEO ROW REMOVAL 2026-10-08] Touching the TRACK arrows retires the armed
-     * geo pick: the place leaves the list for good and cannot be cycled back
-     * onto. Dropped BEFORE the walk so the armed slot is not a landing spot
-     * for this very move either. */
-    frontend_geo_pick_arm(-1);
     while (attempts-- > 0) {
         s_selected_track += delta;
         if (s_selected_track < track_min) s_selected_track = track_max - 1;
@@ -1172,11 +1068,6 @@ static int frontend_pick_random_track(int track_max) {
     int pick = cand[rand() % n];
     if (pick == s_selected_track) return 0;
     s_selected_track = pick;
-    /* [GEO ROW REMOVAL 2026-10-08] Same rule as the arrows: moving off the
-     * armed geo slot retires it. (The loops above already cannot pick another
-     * geo slot -- the predicate excludes every one that is not armed, and the
-     * armed one is the current pick, which they skip.) */
-    frontend_geo_pick_arm(-1);
     return 1;
 }
 
@@ -1531,7 +1422,6 @@ static void frontend_quickrace_cycle_track(int delta) {
     int attempts = track_max + 1;
     s_gen_settings_seen = -1;   /* [roam QA] as frontend_cycle_track: a new pick asks for its settings again */
     if (frontend_roam_entry_step_pre(delta)) return;   /* [roam QA] GEOSPATIAL <-> FREE ROAM */
-    frontend_geo_pick_arm(-1);   /* [GEO ROW REMOVAL] see frontend_cycle_track */
     while (attempts-- > 0) {
         s_selected_track += delta;
         if (s_selected_track < 0) s_selected_track = track_max - 1;
@@ -1590,13 +1480,9 @@ static void frontend_refresh_geo_btn(int idx) {
     show = frontend_geo_btn_wanted() && !frontend_roam_entry_selected();
     s_buttons[idx].hidden   = show ? 0 : 1;
     s_buttons[idx].disabled = show ? 0 : 1;
-    /* [roam QA] "in the settings menu rename it to sprint/circuit": in the city flow the geo entry's
-     * button opens the SPRINT / CIRCUIT screen and says so; the strip build (local multiplayer) keeps
-     * SETTINGS */
-    frontend_btn_set_label(idx,
-        td5_trackgen_is_geo_slot(s_selected_track)
-            ? (frontend_geo_strip_context() ? TR("SETTINGS") : TR("SPRINT / CIRCUIT"))
-            : TR("SPRINT / CIRCUIT"));   /* [integ Q] the no-place fallback names the screen it opens */
+    /* [roam QA] "in the settings menu rename it to sprint/circuit": the geo entry's button opens the
+     * SPRINT / CIRCUIT screen and says so ([integ Q] the no-place fallback too) */
+    frontend_btn_set_label(idx, TR("SPRINT / CIRCUIT"));
 }
 
 static void frontend_qr_refresh_geo_btn(void) {
@@ -8599,7 +8485,7 @@ static void at_rebuild_view(void)
         if (k_at_rows[r].sect != (unsigned char)s_at_sect) continue;
         /* [ROUND 1026 L] No LOCATION row: the studio builds the procedural world
          * only; real places have their own GEOSPATIAL TRACK GENERATOR. */
-        if (k_at_rows[r].kind == AT_KIND_PLACE && td5_trackgen_studio_synthetic()) continue;
+        if (k_at_rows[r].kind == AT_KIND_PLACE) continue;
         want++;
         if (s_at_view_n < AT_VIS_ROWS) s_at_view[s_at_view_n++] = r;
     }
@@ -9108,77 +8994,7 @@ static int geo_draw_city_route(int place_index, float bx, float by, float bw, fl
 int td5_geo_draw_route(int place_index, float bx, float by, float bw, float bh,
                        float sx, float sy)
 {
-    double min_x, max_x, min_z, max_z;
-    float ext_x, ext_z, sc_x, sc_z, scale, ox, oz, cx, cy, dot;
-    int i, n;
-    const char *slug = td5_geo_places_slug(place_index);
-
-    if (!frontend_geo_strip_context()) {
-        return geo_draw_city_route(place_index, bx, by, bw, bh, sx, sy);
-    }
-    n = td5_geo_preview_route(slug);
-    if (n < 2) {
-        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f) * sy,
-                           TR("NO ROUTE DATA"), 0xFF8899AA, sx, sy);
-        fe_draw_small_text(bx * sx + 8 * sx, (by + bh * 0.5f + 12.0f) * sy,
-                           TR("RUN re/tools/geo_selector.py"), 0xFF8899AA, sx, sy);
-        return 0;
-    }
-
-    td5_geo_preview_node(0, &min_x, &min_z);
-    max_x = min_x; max_z = min_z;
-    for (i = 1; i < n; i++) {
-        double px, pz;
-        td5_geo_preview_node(i, &px, &pz);
-        if (px < min_x) min_x = px;
-        if (px > max_x) max_x = px;
-        if (pz < min_z) min_z = pz;
-        if (pz > max_z) max_z = pz;
-    }
-
-    /* Same uniform fit as td5_autotrack_draw_route: a long thin city route must
-     * keep its proportions in a 152x224 portrait panel, not be stretched into it. */
-    ext_x = (float)(max_x - min_x);
-    ext_z = (float)(max_z - min_z);
-    if (ext_x < 1.0f) ext_x = 1.0f;
-    if (ext_z < 1.0f) ext_z = 1.0f;
-    sc_x = (bw - AT_PV_MARGIN * 2.0f) / ext_x;
-    sc_z = (bh - AT_PV_MARGIN * 2.0f) / ext_z;
-    scale = (sc_x < sc_z) ? sc_x : sc_z;
-    if (scale <= 0.0f) return 0;
-    ox = (float)(min_x + max_x) * 0.5f;
-    oz = (float)(min_z + max_z) * 0.5f;
-    cx = bx + bw * 0.5f;
-    cy = by + bh * 0.5f;
-
-    dot = 1.0f * sx;
-    if (dot < 1.0f) dot = 1.0f;
-
-    for (i = 0; i < n; i++) {
-        double px, pz;
-        td5_geo_preview_node(i, &px, &pz);
-        /* +Z is into the screen in world space, flipped for a top-down map. */
-        fe_draw_quad((cx + ((float)px - ox) * scale) * sx,
-                     (cy - ((float)pz - oz) * scale) * sy,
-                     dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);
-    }
-
-    /* Start and finish. A conditioned geo route is point-to-point (node 0 is the
-     * origin by contract, see td5_geo.h), so both ends get a marker. The grid is
-     * staggered behind TD5_TG_GRID_SPAN, but a span index is a point index only
-     * on the FULL route -- the preview is decimated, so plot node 0 rather than
-     * claim a precision the decimation does not have. */
-    {
-        double sxp, szp, exp_, ezp;
-        td5_geo_preview_node(0, &sxp, &szp);
-        td5_geo_preview_node(n - 1, &exp_, &ezp);
-        frontend_draw_marker_dot((cx + ((float)exp_ - ox) * scale) * sx,
-                                 (cy - ((float)ezp - oz) * scale) * sy, sx, sy, 1);
-        frontend_draw_marker_dot((cx + ((float)sxp - ox) * scale) * sx,
-                                 (cy - ((float)szp - oz) * scale) * sy, sx, sy, 0);
-    }
-
-    return 1;
+    return geo_draw_city_route(place_index, bx, by, bw, bh, sx, sy);
 }
 
 /* Reason line for the places that exist under re/assets/geo/ but could not be
@@ -9572,8 +9388,7 @@ void Screen_AutoTrackOptions(void) {
          * preview this screen starts below does not inherit the place of a
          * geo race that ran earlier in the session (set_target_slot leaves the
          * override on that place until the next race entry). */
-        if (td5_trackgen_studio_synthetic())
-            td5_trackgen_set_target_slot(td5_trackgen_slot());
+        td5_trackgen_set_target_slot(td5_trackgen_slot());
         at_build_buttons();
         frontend_set_cursor_visible(1);
         s_return_screen   = s_at_parent_screen;   /* track-select OR quick race */
@@ -9991,14 +9806,6 @@ void Screen_TrackSelection(void) {
                     if (s_selected_track < 0) s_selected_track = 0;  /* drop any stale -1 */
                     frontend_cycle_track(delta, 0, s_track_max);
                 }
-                /* [GEO ROW REMOVAL 2026-10-08] Backstop for the legacy 2P
-                 * branch above, which steps s_selected_track by hand and only
-                 * reaches frontend_cycle_track (where the arm is dropped) when
-                 * the slot it landed on is excluded or absent. Without this, an
-                 * arrow press that walked straight onto a valid slot would
-                 * leave the arm set and let the place be cycled back onto. */
-                if (s_selected_track != frontend_geo_pick_slot())
-                    frontend_geo_pick_arm(-1);
                 frontend_play_sfx(2); /* ping2.wav cycle */
                 TD5_LOG_I(LOG_TAG, "TrackSel CYCLED: track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
