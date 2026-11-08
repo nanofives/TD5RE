@@ -177,3 +177,42 @@ Base: **integ-roamU @ fa1ec5c0** (UA+UB+UC+UD merged, build_all OK). Branch `rou
 - Tests: one row per item (`ue-q1-copchase-notraffic`, a row asserting the hidden rows per mode, `ue-shadow-sun`),
   run only those + the u5 rows (they must still pass). Update the matrix doc, CHANGELOG, pending_to_test rows
   ("round UE"). DEV builds while iterating, build_all once at the end.
+
+---------------------------------------------------------------------------------------------------------------------
+
+## Follow-ups after round U shipped (master 0ce2ebfa, 2026-11-08)
+
+Base: **master @ 0ce2ebfa** (round U shipped). Same common rules, tests section and efficiency rules as above.
+
+### UF: split-screen car grid (branch `round-UF`)
+1. **6-player drag MANUAL row is cramped.** UE added a grey display-only MANUAL row to each MP car-grid pane on drag
+   (`td5_fe_mp_setup.c`). In the 6-pane layout it is squeezed against CAR / OK (frame:
+   round UE `sheet_mpdrag.png`, bottom right). Lay it out cleanly in all three pane layouts (2, 4, 6): readable, not
+   overlapping, aligned with the other rows (button alignment routine). Frames of the 3 layouts before/after.
+2. **RANDOM in the split-screen car grid.** Round UB added a RANDOM entry to the single-player car selectors (one LEFT
+   from the first car, "?" card, rolled at launch, loading screen names it). Add the same per player to the MP / split-
+   screen car grid: each pane can go LEFT once from the first car to RANDOM, "?" card in that pane, PAINT / stats rows
+   greyed like single player, each RANDOM player rolls independently at launch (any selectable car), AI seats unchanged.
+   Reuse UB's code paths (find them by "RANDOM" in td5_fe_race.c / td5_fe_mp_setup.c), do not duplicate the roll.
+   Rows: `uf-mp-random` (2+ panes on RANDOM roll valid, independent cars) + frames of a 2P and 4P grid with RANDOM.
+
+### UG: RT-off sun shadows draw nothing (branch `round-UG`)
+Read the memory note `reference_rt_off_sun_shadow_pass_inert_2026-11-08.md` (in the account3 TD5RE memory dir:
+`C:\Users\maria\.claude-account3\projects\C--Users-maria-Desktop-Proyectos-TD5RE\memory\`). With RT off, the light2
+sun-shadow pass (`ps_shadow`, screen-space depth march, `Backend_ApplyShadowPass` in ddraw_wrapper d3d12_backend.c,
+BLEND_MULT) is dispatched every frame but leaves no visible darkening: framedumps SHADOWS ON vs `TD5RE_SHADOW_SUN=0`
+differ only on moving traffic. Since round UE it uses the sky sun's direction.
+1. **Root-cause it first** (instrument, don't guess): is the depth SRV the right one / populated at that point, does the
+   `D >= 0.99999` discard kill everything (depth convention, reversed-Z, linear vs NDC), is the target overwritten
+   later, are the march constants (steps 24, dist 2500, thick 600) in the right units. Use a debug output of the pass
+   alone (write its factor to a visible colour) to prove where it dies. Say the cause with evidence.
+2. **Make sun shadows visible with RT off** on sunny tracks: buildings, guardrails, trees, cars casting in the sun's
+   direction, strength matching the LIGHTING tier (LOW might keep them off: check what LOW promises and keep it), no
+   acne, no peter-panning, no shimmering when driving, works in split screen. If screen-space marching cannot give a
+   decent result (it misses off-screen casters), say so with frames and propose the shadow-map path (the 2026-07-27
+   consolidation plan's CSM) as a plan doc with a cost estimate, and ask before building it.
+3. **Cost**: GPU time of the pass at 1080p and 1440p (UA's `TD5RE_RT_TIMESTAMPS` / `verify/rt_bench.py` style), it
+   must stay cheap enough for a 3070 at 60 fps with RT off. Car blob shadows: leave them unless the new pass makes
+   them double up (then say what you did).
+4. Proof: before/after frames on Blue Ridge, Switzerland, Maui, Moscow (RT off), one split-screen frame, a row
+   `ug-shadow-visible` (e.g. mean luminance in a known shadowed region drops vs `TD5RE_SHADOW_SUN=0`).
