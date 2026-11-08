@@ -89,3 +89,33 @@ Mariano's feedback (2026-11-08, verbatim, numbering his):
 - Run ONLY your rows: `TD5RE_SELFTEST_ROWS="a,b" td5re.exe --SelfTest=1 ...` (or `TD5RE_SELFTEST_ONLY=<substring>`).
 - Do NOT run smoke or the full suite; the orchestrator runs smoke once at integration. No synthetic identity unless
   you touched trackgen (you should not).
+
+---------------------------------------------------------------------------------------------------------------------
+
+## UC: sun placement vs the skybox (item 7, added 2026-11-08)
+
+Mariano (verbatim): "sun placement on tracks should be careful to not be put somewhere where the background shows
+something that's NOT sky, for that you would need to make a round of detection of what's in the skybox texture and
+decide the correct position of the sun"
+
+7. **Sun in the sky, never over mountains/buildings/ground of the backdrop.**
+   - Find where the sun direction comes from per track (light2 / td5_light.c sun, RT sun, lens flare / sun disc
+     billboard, any per-level table or knob) and how the skybox is mapped (texture, projection: which texel is at
+     which azimuth/elevation from the camera). Say whether the sun disc, the flare and the lighting/shadow direction
+     all share ONE direction; they must stay consistent after your change.
+   - Build an offline classifier (Python under `re/tools/`) that reads each track's skybox texture(s) and labels
+     texels sky / not-sky (colour + gradient + saturation heuristics; validate by eye on a contact sheet: write a PNG
+     per track with the mask overlaid, look at all of them). Treat the sky edge with a margin so the sun disc + flare
+     radius clears the skyline.
+   - Choose per track a sun azimuth/elevation that lies fully in sky, as close as possible to the current direction
+     (so lighting changes as little as possible), keep a believable elevation (not at the zenith, not touching the
+     horizon). Output a table (e.g. `re/assets/.../SUNPOS` data file or a C table, your call, say why), loaded by the
+     game, with the old direction as fallback when a track has no entry.
+   - Scope: every shipped track (TD5 + TD6 if present, forward and reverse if the sky rotates), the auto track and
+     the free-roam city (if their sky is procedural or a shared texture, apply the same rule: the sun must sit in
+     sky where the backdrop has skyline/horizon geometry).
+   - Proof: before/after framedumps looking at the sun for at least 4 tracks where it was wrong (find them with the
+     classifier: report how many tracks had the sun over non-sky before), plus the contact sheet path. A selftest row
+     `u7-sun-in-sky` that samples the skybox at the sun direction at race start and asserts sky.
+   - Branch `round-UC`, worktree `.claude/worktrees/round-UC`, base 6610a463. Coordinate by not touching the RT
+     option screens (UA owns them); if you must touch td5_rt.c / td5_light2.c keep the change small and say so.
