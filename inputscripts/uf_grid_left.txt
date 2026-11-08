@@ -1,0 +1,10 @@
+# [round UF 2026-11-08] split-screen car grid: P1 (keyboard) presses LEFT once on CAR
+# (the first car) -> RANDOM, holds for the frame dump, then RIGHT once -> back to the
+# first car. Launch with TD5RE_MP_SIMUL_PREVIEW=2 --StartScreen=20.
+sync menu
+240 log UF_GRID_ENTRY
++30 key left press
++240 log UF_GRID_RANDOM
++30 key right press
++240 log UF_GRID_BACK
++10 quit

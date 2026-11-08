@@ -2472,12 +2472,16 @@ static void mp_simul_pane_ends(int p, int *first, int *last) {
     *last  = mp_simul_pane_step(p, lo, -1);
 }
 
-/* Pane p's RANDOM pool: UB's car pool (every reachable, unlocked car of the whole
- * roster) narrowed to the pane's role in a cop chase. Exported to the uf row. */
-int mp_simul_random_car_pool(int p, int *cand, int cap) {
-    int n = frontend_random_car_pool(0, TD5_CAR_COUNT - 1, cand, cap), k = 0;
-    for (int i = 0; i < n; i++)
-        if (!s_mp_simul_copchase || mp_simul_carsel_valid(p, cand[i])) cand[k++] = cand[i];
+/* Pane p's RANDOM pool: every car the pane's CAR row reaches. UB's car pool
+ * (every reachable, unlocked car of the roster) outside a cop chase; in a cop
+ * chase the pane's role roster (a cop pane's police cars are not in UB's pool,
+ * which skips police). */
+static int mp_simul_random_car_pool(int p, int *cand, int cap) {
+    int k = 0;
+    if (!s_mp_simul_copchase)
+        return frontend_random_car_pool(s_car_roster_min, s_car_roster_max, cand, cap);
+    for (int c = s_mp_player_roster_min[p]; c <= s_mp_player_roster_max[p] && k < cap; c++)
+        if (mp_simul_carsel_valid(p, c)) cand[k++] = c;
     return k;
 }
 
@@ -2606,9 +2610,9 @@ int frontend_uf_mp_random_selftest(char *note, size_t cap) {
 
     fail = !(ring_ok && bad_pool == 0 && moved == 0 && label_bad == 0 && differ >= 13 &&
              d0 >= 4 && d1 >= 4 && cop_bad == 0 && sus_bad == 0);
-    snprintf(note, cap, "ring %s (first %d last %d); 16 launches: P1/P2 differ %d, distinct P1 %d P2 %d, "
-             "out of pool %d, fixed/AI moved %d, label bad %d; cop chase 8: cop pane non-police %d, "
-             "suspect pane police %d", ring_ok ? "ok" : "BAD", first, last, differ, d0, d1, bad_pool, moved,
+    /* compact: the report keeps ~120 chars of the note */
+    snprintf(note, cap, "ring %s; 16 rolls P1!=P2 %d, cars P1 %d P2 %d, bad pool %d moved %d label %d; "
+             "cop non-police %d, suspect police %d", ring_ok ? "ok" : "BAD", differ, d0, d1, bad_pool, moved,
              label_bad, cop_bad, sus_bad);
     return fail;
 }
@@ -2900,7 +2904,7 @@ static void frontend_mp_simul_carsel_init(void) {
         mp_simul_refresh_pane(p);
     }
 #ifndef TD5RE_RELEASE
-    /* [round UF 2026-11-08] Dev harness: TD5RE_MP_SIMUL_PREVIEW_RANDOM=<mask> puts the
+    /* [round UF 2026-11-08] Dev harness: TD5RE_MP_SIMUL_PREVIEW_RANDOM=<decimal mask> puts the
      * panes of the set bits on RANDOM so the grid's "?" panes can be framedumped with
      * the TD5RE_MP_SIMUL_PREVIEW grid (its AI seats then draw like a player who picked
      * RANDOM and pressed OK). Display only: the launch roll still skips AI seats. */
