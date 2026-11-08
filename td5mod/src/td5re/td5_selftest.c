@@ -732,9 +732,10 @@ static float s_ue_shadow[3], s_ue_sky[3];
 
 /* [round UG] ug-shadow-visible: per-frame capture machine + verdict */
 static int   s_ug_frame, s_ug_done, s_ug_sun_saved;
+static int   s_ug_seq;   /* [round UG2] n-th ug capture this session (dump file names) */
 static int   s_ug_w, s_ug_h;
 static unsigned char *s_ug_on, *s_ug_off;   /* luminance, w*h */
-static char  s_ug_note[160];
+static char  s_ug_note[200];
 static int   s_ug_fail = -1;                 /* -1 = never judged */
 static void  st_ug_frame(void);
 
@@ -3598,18 +3599,53 @@ static void st_tick_races(uint32_t now)
     }
 }
 
+/* [round UG2] TD5RE_UG_DUMP=1: also write each capture as log/ug_<race>_<what>.png
+ * (the row's verdict is a ratio, the frames show WHAT changed). */
+static void st_ug_dump(const unsigned char *bgra, int w, int h, const char *what)
+{
+    static int s_on = -1;
+    unsigned char *rgba;
+    char path[96];
+    int i, n = w * h;
+    if (s_on < 0) s_on = td5_env_int("TD5RE_UG_DUMP", 0, 0, 1);
+    if (!s_on || !bgra || n <= 0) return;
+    rgba = (unsigned char *)malloc((size_t)n * 4);
+    if (!rgba) return;
+    for (i = 0; i < n; i++) {
+        rgba[i * 4 + 0] = bgra[i * 4 + 2]; rgba[i * 4 + 1] = bgra[i * 4 + 1];
+        rgba[i * 4 + 2] = bgra[i * 4 + 0]; rgba[i * 4 + 3] = 255;
+    }
+    snprintf(path, sizeof path, "log/ug_%d_%s.png", s_ug_seq, what);
+    td5_plat_write_png_rgba(path, rgba, w, h);
+    free(rgba);
+}
+
 /* [round UG] Luminance copy of the latest presented frame (Backend_GetCapture, BGRA). */
-static unsigned char *st_ug_grab(int *w, int *h)
+static unsigned char *st_ug_grab(int *w, int *h, const char *what)
 {
     unsigned char *px = NULL, *lum;
     int i, n;
     if (!Backend_GetCapture(&px, w, h) || !px || *w <= 0 || *h <= 0) return NULL;
+    st_ug_dump(px, *w, *h, what);
     n = *w * *h;
     lum = (unsigned char *)malloc((size_t)n);
     if (!lum) return NULL;
     for (i = 0; i < n; i++)
         lum[i] = (unsigned char)(((int)px[i * 4 + 0] + px[i * 4 + 1] + px[i * 4 + 2]) / 3);
     return lum;
+}
+
+/* [round UG2] Median of a ratio histogram (bin i = ratio i/1000); 1.0 when it is empty. */
+static double st_ug_hist_median(const int *hist, int bins, long long total)
+{
+    long long acc = 0;
+    int i;
+    if (total <= 0) return 1.0;
+    for (i = 0; i < bins; i++) {
+        acc += hist[i];
+        if (2 * acc >= total) return (double)i / 1000.0;
+    }
+    return (double)(bins - 1) / 1000.0;
 }
 
 /* [round UG] ug-shadow-visible: runs once per rendered race frame. The countdown holds the cars and the chase
@@ -3621,15 +3657,16 @@ static void st_ug_frame(void)
     const int f = s_ug_frame++;
     if (s_ug_done) return;
     if (f == UG_F0) {
+        s_ug_seq++;
         td5_plat_capture_arm(1);
         s_ug_sun_saved = td5_light2_sun_shadows();
         td5_light2_set_sun_shadows(1);
     } else if (f == UG_F0 + UG_GAP) {
-        s_ug_on = st_ug_grab(&s_ug_w, &s_ug_h);
+        s_ug_on = st_ug_grab(&s_ug_w, &s_ug_h, "on");
         td5_light2_set_sun_shadows(0);
     } else if (f == UG_F0 + 2 * UG_GAP) {
         int w = 0, h = 0;
-        s_ug_off = st_ug_grab(&w, &h);
+        s_ug_off = st_ug_grab(&w, &h, "off");
         if (w != s_ug_w || h != s_ug_h) { free(s_ug_off); s_ug_off = NULL; }
         td5_light2_set_sun_shadows(1);
         td5_plat_render_shadow_mask_view(1);
@@ -3639,6 +3676,7 @@ static void st_ug_frame(void)
         long long nb = 0, nw = 0, nbl = 0;
         double on_b = 0, off_b = 0, on_w = 0, off_w = 0;
         const int got = Backend_GetCapture(&px, &w, &h);
+        if (got) st_ug_dump(px, w, h, "mask");
         td5_plat_render_shadow_mask_view(0);
         td5_plat_capture_arm(-1);
         td5_light2_set_sun_shadows(s_ug_sun_saved);
@@ -3648,22 +3686,40 @@ static void st_ug_frame(void)
             snprintf(s_ug_note, sizeof s_ug_note, "capture missing (on=%d off=%d mask=%d %dx%d vs %dx%d)",
                      s_ug_on != NULL, s_ug_off != NULL, got, w, h, s_ug_w, s_ug_h);
         } else {
+            /* [round UG2] The verdict is the MEDIAN per-pixel on/off ratio, not the ratio of sums. The tyre
+             * smoke behind the car is bright, moves between the three captures and sits on the car's own
+             * shadow: a few hundred smoke pixels landing in the ON frame (or the OFF one) swung the summed
+             * ratio from 0.77 to 0.92 with the shadow itself unchanged (median 0.762 vs 0.763). Where the
+             * smoke lands follows the session RNG (the AI's countdown revs), so the row failed whenever any
+             * race ran before it. The sums stay in the note for comparison with older reports. */
+            enum { UG_HB = 2001 };   /* ratio bins 0.000 .. 2.000 */
+            static int hb[UG_HB], hw[UG_HB];
+            long long kb = 0, kw = 0;
             int i, n = w * h;
+            memset(hb, 0, sizeof hb); memset(hw, 0, sizeof hw);
             for (i = 0; i < n; i++) {
                 const int b = px[i * 4 + 0], g = px[i * 4 + 1], r = px[i * 4 + 2];
-                if (r < 24 && g < 24 && b < 24)          { nb++; on_b += s_ug_on[i]; off_b += s_ug_off[i]; }
-                else if (r > 232 && g > 232 && b > 232)  { nw++; on_w += s_ug_on[i]; off_w += s_ug_off[i]; }
-                else if (b > 200 && r < 40 && g < 40)    nbl++;
+                const int black = (r < 24 && g < 24 && b < 24), white = (r > 232 && g > 232 && b > 232);
+                if (black)      { nb++; on_b += s_ug_on[i]; off_b += s_ug_off[i]; }
+                else if (white) { nw++; on_w += s_ug_on[i]; off_w += s_ug_off[i]; }
+                else if (b > 200 && r < 40 && g < 40) nbl++;
+                if ((black || white) && s_ug_off[i] >= 16) {   /* near-black OFF pixels carry no ratio */
+                    int q = (int)(1000L * s_ug_on[i] / s_ug_off[i]);
+                    if (q > UG_HB - 1) q = UG_HB - 1;
+                    if (black) { hb[q]++; kb++; } else { hw[q]++; kw++; }
+                }
             }
             {
                 const double frac = (nb + nw) ? (double)nb / (double)(nb + nw) : 0.0;
-                const double rb = off_b > 0 ? on_b / off_b : 1.0;   /* shadowed pixels: on / off */
-                const double rw = off_w > 0 ? on_w / off_w : 1.0;   /* lit pixels: on / off */
+                const double sb = off_b > 0 ? on_b / off_b : 1.0;   /* shadowed pixels: sum on / sum off */
+                const double sw = off_w > 0 ? on_w / off_w : 1.0;   /* lit pixels */
+                const double rb = st_ug_hist_median(hb, UG_HB, kb);   /* shadowed pixels: median on/off */
+                const double rw = st_ug_hist_median(hw, UG_HB, kw);   /* lit pixels */
                 const double mask_share = (double)(nb + nw + nbl) / (double)n;
                 s_ug_fail = !(mask_share >= 0.30 && frac >= 0.005 && frac <= 0.80 && rw >= 0.97 && rw - rb >= 0.10);
                 snprintf(s_ug_note, sizeof s_ug_note,
-                         "shadowed %.1f%%, luma on/off shadowed %.3f lit %.3f, mask %.0f%% %dx%d",
-                         frac * 100.0, rb, rw, mask_share * 100.0, w, h);
+                         "shadowed %.1f%%, median on/off shadowed %.3f lit %.3f (sum %.3f/%.3f), mask %.0f%% %dx%d",
+                         frac * 100.0, rb, rw, sb, sw, mask_share * 100.0, w, h);
             }
         }
         free(s_ug_on); s_ug_on = NULL;
