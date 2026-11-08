@@ -649,13 +649,6 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=0,
       .mp_mode=-1, .depth=ST_DEPTH_COUNTDOWN, .u_check=54 },
-};
-#define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
-static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
-/* [round UB] u-row captures, taken on the first live race tick (after InitRace's per-mode overrides) */
-static int s_u_cap, s_u_traffic, s_u_vol, s_u_police, s_u_coll, s_u_cp, s_u_tier, s_u_track, s_u_car;
-static int s_u_max_traffic;   /* most traffic actors live on any tick */
-static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values set after the race type */
     /* [round UC 2026-11-08] item 7: the sun sits in the sky, never over the mountains / skyline / lake painted into
      * the panorama. Blue Ridge, Courmayeur, San Francisco, Lake Tahoe and Switzerland had it over backdrop (moved by
      * td5_sky_sunpos.h); Maui is the control (probed sun already in the sky, not moved). Countdown only. */
@@ -680,6 +673,11 @@ static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values 
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
+/* [round UB] u-row captures, taken on the first live race tick (after InitRace's per-mode overrides) */
+static int s_u_cap, s_u_traffic, s_u_vol, s_u_police, s_u_coll, s_u_cp, s_u_tier, s_u_track, s_u_car;
+static int s_u_max_traffic;   /* most traffic actors live on any tick */
+static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values set after the race type */
+
 static int  s_u7_res = -99;      /* [round UC] u7-sun-in-sky: td5_render_sky_sun_check result, -99 = not sampled */
 static char s_u7_note[96];
 #define ST_SMOKE_RACES 14  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-sprint-mp2 + roam-circuit-mp2 + roam-traffic-smoke + roam-cops-smoke + police-smoke */
