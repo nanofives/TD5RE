@@ -269,6 +269,12 @@ static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> posit
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
+/* [round UE 2026-11-08] Mariano (Q3): the LAPS row is hidden in single-player time
+ * trial, which always runs one lap (ConfigureGameTypeFlags case 7 forces
+ * circuit_lap_count = 1 and the launch never re-commits LAPS for game type 7). */
+static int frontend_laps_row_mode_hidden(void) {
+    return s_selected_game_type == 7 && !s_mp_flow;
+}
 /* [CONSOLIDATION 2026-07-21] RACE OPTIONS entry (defined below, near the screen).
  * back_mode: RO_BACK_PARENT returns to the parent; RO_BACK_DRAG_OPPONENT re-enters
  * the SP-drag opponent car-select pass. */
@@ -281,18 +287,13 @@ static int frontend_carsel_hold_repeat(void);    /* hold-to-scroll LEFT/RIGHT au
  * td5_frontend_internal.h (2026-07-09, A9 refactor).
  *   s_postrace_td6_level       — >0 = the post-race table is a TD6 track; this
  *                                FSM sets it, the high-score overlay reads it.
- *   frontend_qr_random_button_on / frontend_qr_roll_selector — the QR randomize
- *                                BUTTON gate + roll action reused by the dedicated
- *                                Randomize buttons (#10). */
+ */
 
-/* [#10] Dedicated RANDOMIZE button geometry (Car/Track rows). MUST match the
- * identical definitions in td5_frontend.c (which computes the value-text reserve)
- * — duplicated in both .c files to avoid touching shared headers. Created LAST in
- * the QR init so these indices follow QR_BTN_SPAN (11) without disturbing it. */
-#define QR_BTN_RAND_CAR   12
-#define QR_BTN_RAND_TRACK 13
-#define QR_RAND_BTN_W     104
-#define QR_RAND_BTN_X     (FE_QR_SCREEN_W - FE_QR_RIGHT_MARGIN - QR_RAND_BTN_W) /* 524 */
+/* [round UB] Indices 12 / 13 held the Quick Race RANDOMIZE buttons. RANDOM is a
+ * selector entry now; the two slots are still created (hidden, disabled) so
+ * QR_BTN_PHYSICS (14) and QR_BTN_RACEOPTS (15) keep their indices. */
+#define QR_BTN_RETIRED_12 12
+#define QR_BTN_RETIRED_13 13
 
 static int      s_mp_player_color_idx[TD5_MAX_HUMAN_PLAYERS]; /* palette cursor for TD6 colour cycling */
 
@@ -333,14 +334,6 @@ static int  s_p1_paint;
 
 static int  s_track_max;               /* max track index for current mode */
 
-/* [#14 2026-06-15] Dedicated RANDOMIZE button placed ABOVE the selector on the
- * car-selection screen. Created at the next free button index (so the existing
- * hard-coded button indices used by the action switches are untouched);
- * navigation is geometric (frontend_spatial_pick), so a higher index above the
- * selector is still reached by pressing UP. -1 = not created this entry.
- * [W3 2026-09-29] The TRACK selector's twin was dropped: there, randomizing is
- * the R key / pad X shortcut instead of a clickable chip. */
-static int  s_carsel_rand_btn = -1;
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS button index on the track-select
  * column, or -1 when the current pick is not the auto-generated slot. */
 static int  s_trksel_auto_btn = -1;
@@ -376,14 +369,6 @@ int  s_trksel_dyn_btn  = -1;
  * frame as an entry" (reset at screen init so a stale L/R bit can't cycle on the
  * first interactive frame); set to the live focus each interactive frame. */
 static int  s_trksel_prev_focus = -2;
-/* [J2 2026-10-03] Held-state latches for the RANDOM shortcut (keyboard R / pad X)
- * on the track-select screen, so the pick fires once per PRESS. Module scope (not
- * function statics) so screen init can seed them to 1 = "treat as already held":
- * a key still down when SELECT TRACK appears must be released before it can fire,
- * which is what stops a stray R carried in from the previous screen from
- * randomizing on entry. */
-static int  s_trksel_rand_r_held = 1;
-static int  s_trksel_rand_x_held = 1;
 
 /* Race results state */
 static int  s_results_button;           /* g_postRaceMenuButtonChoice */
@@ -843,20 +828,23 @@ int frontend_geo_entry_launch_roam(int opponents)
     }
     sp.spawn_yaw = -1;
     sp.car_index = frontend_current_car_index();
-    traffic = g_td5.traffic_volume >= 2 ? 2 : (g_td5.traffic_volume == 1 || g_td5.traffic_enabled) ? 1 : 0;
-    if (!g_td5.traffic_enabled) traffic = 0;
+    /* [round UB 2026-11-08] from the RACE OPTIONS rows, not g_td5.traffic_*: this runs
+     * BEFORE frontend_init_race_schedule commits them, so those still held the
+     * values of the moment the race type was picked. Roam has 3 levels: MEDIUM and
+     * above are HIGH, LOW is LOW. */
+    traffic = s_game_option_traffic >= 2 ? 2 : s_game_option_traffic == 1 ? 1 : 0;
     td5_roam_begin(&sp);
     frontend_roam_set_origin(TD5_SCREEN_GEO_GENERATOR);   /* [roam QA] leaving returns to the map, as before */
     if (!td5_roam_handoff_set((const double (*)[2])ll, n, TD5_ROUTE_SPRINT, 1, TD5_HANDOFF_AUTOSTART,
                               opponents < 0 ? -1 : (opponents > 5 ? 5 : opponents), traffic,
-                              g_td5.special_encounter_enabled ? 1 : 0)) {
+                              s_game_option_cops ? 1 : 0)) {
         td5_roam_cancel();
         return 0;
     }
     s_selected_track = td5_roam_host_track();
     TD5_LOG_I(LOG_TAG, "geo entry: RACE IN THE CITY %d point(s) from %s at %.5f,%.5f (%s), car=%d opponents=%d "
               "traffic=%d cops=%d humans=%d -> host track %d", n, src, ll[0][0], ll[0][1], sp.place, sp.car_index,
-              opponents, traffic, g_td5.special_encounter_enabled ? 1 : 0,
+              opponents, traffic, s_game_option_cops ? 1 : 0,
               frontend_local_mp() ? s_num_human_players : 1, s_selected_track);
     return 1;
 }
@@ -1009,95 +997,314 @@ static void frontend_cycle_track(int delta, int track_min, int track_max) {
     s_selected_track = start;
 }
 
-/* [#14] Pick a random SELECTABLE car within [lo,hi] for the RANDOMIZE button.
- * Uses the project rand() (the MSVC CRT override in td5_msvc_rand.c). Honours the
- * same selectability rules as cycling (locked TD5 cars / police gap skipped) by
- * landing on a random index then stepping forward to the next selectable one.
- * For the Masters roster (game type 5) the index space is the roster slot list,
- * so it just picks a non-AI slot. Returns the chosen index (or the input `cur`
- * unchanged if the range is empty). */
-static int frontend_pick_random_car(int cur, int lo, int hi) {
-    if (hi < lo) return cur;
-    int cand[TD5_CAR_SLOT_MAX];
-    int n = 0;
-    for (int i = lo; i <= hi && n < (int)(sizeof(cand)/sizeof(cand[0])); i++) {
-        int ok;
-        if (s_selected_game_type == 5)
-            ok = (i >= 0 && i < 15 && s_masters_roster_flags[i] != 1); /* roster slot, non-AI */
-        else
-            ok = frontend_car_selectable(i);                           /* unlocked, non-gap */
-        if (ok && i != cur) cand[n++] = i;                            /* prefer a change */
-    }
-    if (n == 0) {
-        /* Only the current car qualifies (or the range is a single car): keep it. */
-        return cur;
-    }
-    return cand[rand() % n];
-}
+/* ---- [round UB 2026-11-08] RANDOM as a selector ENTRY ----------------------
+ * Mariano: "remove randomize from the quick race menu on both car and track,
+ * going ONCE to the left on the default option (for car is the dodge viper, for
+ * track is moscow russia) it should go to the "Random" option, random of cars
+ * should be everything, random on tracks should be everything EXCEPT auto
+ * generated track OR la plata city free drive or the other mode".
+ *
+ * RANDOM sits in each ring between the last entry and the first: LEFT from the
+ * first entry lands on it, RIGHT from it returns to the first entry, LEFT from it
+ * goes to the last. It is a FLAG (s_car_random / s_track_random), not a sentinel
+ * index: while it is shown s_selected_car / s_selected_track stay parked on the
+ * first entry, a real, unlocked, plain choice, so every reader of the pick (lock
+ * checks, OK routing, the geo / roam / generated-slot tests) keeps working. The
+ * renderers draw RANDOM and a "?" card instead. The flags survive the race, so
+ * the selector still says RANDOM next time and every launch from a selection
+ * screen rolls again (frontend_resolve_random_picks, called by
+ * frontend_init_race_schedule). Race Again and the next race of a cup launch
+ * from the results screen and keep the car / track already rolled.
+ *
+ * Offered where the pick is the local player's own: not in network play (each
+ * peer would roll its own), not on the Masters roster (its index space is a
+ * roster slot), not in drag (the 2-pass player/opponent select), and the track
+ * one not on the cup track picker (its list is recorded per race at OK). */
+int s_car_random;
+int s_track_random;
+int s_car_random_outgoing;   /* car select: the entry sliding OUT was RANDOM (render) */
 
-/* [#14] Pick a random track for the RANDOMIZE button: choose a uniformly random
- * SELECTABLE, present track in [0, track_max) (drag strip + cups excluded, absent
- * levels skipped), different from the current one when possible. Writes
- * s_selected_track and returns 1 if it changed, 0 if no alternative exists.
- * track_max is the exclusive upper bound the caller already computed. */
-static int frontend_pick_random_track(int track_max) {
-    if (track_max <= 0) return 0;
-    /* Collect the valid candidate slots, then pick one. Bounded, deterministic
-     * count of rand() draws (one), and never lands on an excluded/absent slot. */
-    int cand[64];
-    int n = 0;
-    for (int t = 0; t < track_max && n < (int)(sizeof(cand)/sizeof(cand[0])); t++) {
-        if (t == s_selected_track) continue;                      /* prefer a change */
-        if (frontend_track_excluded_from_selector(t)) continue;
-        if (td5_trackgen_is_geo_slot(t)) continue;  /* [R1026 L] RANDOMIZE never picks the geo entry */
-        if (!frontend_track_level_exists(t)) continue;
-        cand[n++] = t;
-    }
-    if (n == 0) {
-        /* Only the current track is valid (or none) -- allow re-picking it so the
-         * button still resolves to a concrete, raceable track. */
-        for (int t = 0; t < track_max && n < (int)(sizeof(cand)/sizeof(cand[0])); t++) {
-            if (frontend_track_excluded_from_selector(t)) continue;
-            if (td5_trackgen_is_geo_slot(t) && t != s_selected_track) continue;
-            if (!frontend_track_level_exists(t)) continue;
-            cand[n++] = t;
-        }
-        if (n == 0) return 0;
-    }
-    int pick = cand[rand() % n];
-    if (pick == s_selected_track) return 0;
-    s_selected_track = pick;
+int frontend_car_random_offered(void) {
+    if (s_network_active) return 0;
+    if (s_selected_game_type == 5 || s_selected_game_type == 9) return 0;
+    if (g_td5.drag_race_enabled) return 0;
     return 1;
 }
 
-/* [#14] Master switch for the dedicated RANDOMIZE button (car + track selection).
- * Default ON: shows the button ABOVE the selector and removes the legacy
- * random-as-a-list-entry (the 2P track selector's wrap-to -1 "?" slot). Set
- * TD5RE_RANDOM_BUTTON=0 to restore the old behavior (no button; 2P keeps "?"). */
-static int frontend_random_button_on(void) {
-    static int v = -1;
-    if (v < 0) {
-        v = td5_env_flag_on("TD5RE_RANDOM_BUTTON");
-        TD5_LOG_I(LOG_TAG, "RANDOMIZE button (#14) %s (TD5RE_RANDOM_BUTTON)",
-                  v ? "ENABLED" : "disabled");
-    }
-    return v;
+int frontend_track_random_offered(void) {
+    if (s_network_active) return 0;
+    if (s_flow_context == 4) return 0;
+    if (td5_frontend_get_screen() == TD5_SCREEN_CUP_TRACK_SELECT) return 0;
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6) return 0;
+    return 1;
 }
 
-/* [item #7 2026-06-15] FORM of the randomize control: a compact ICON to the
- * RIGHT of the selector (NEW default) vs the legacy full-width "Randomize"
- * button. Gated separately from frontend_random_button_on() (which still decides
- * whether the control EXISTS at all) so all the existing random_button_on()
- * consumers — 2P "?" defaults, index guards — stay byte-identical. Default ON =
- * icon; TD5RE_RANDOM_ICON=0 falls back to the previous full-width button. */
-static int frontend_random_icon_on(void) {
-    static int v = -1;
-    if (v < 0) {
-        v = td5_env_flag_on("TD5RE_RANDOM_ICON");
-        TD5_LOG_I(LOG_TAG, "RANDOMIZE control form: %s (TD5RE_RANDOM_ICON)",
-                  v ? "small ICON" : "full button");
+/* Car RANDOM pool: every car the selector can reach in [lo,hi] (the same rule as
+ * frontend_car_cycle_step), minus locked TD5 cars. */
+static int frontend_random_car_ok(int i, int lo, int hi) {
+    if (i < lo || i > hi) return 0;
+    if (hi >= TD5_BASE_CAR_COUNT && !frontend_car_selectable(i)) return 0;
+    if (!s_cheat_unlock_all && i >= 0 && i < 37 && s_car_lock_table[i] != 0) return 0;
+    return 1;
+}
+
+int frontend_random_car_pool(int lo, int hi, int *cand, int cap) {
+    int n = 0;
+    for (int i = lo; i <= hi && n < cap; i++)
+        if (frontend_random_car_ok(i, lo, hi)) cand[n++] = i;
+    return n;
+}
+
+/* Track RANDOM pool: every entry the selector lists, minus the GENERATED slots
+ * (the auto track, the GEOSPATIAL entry and with it FREE ROAM, every real place)
+ * and locked or absent tracks. Exported for the u4 selftest row. */
+int frontend_random_track_pool(int *cand, int cap) {
+    int track_max = s_total_unlocked_tracks;
+    int n = 0;
+    for (int t = 0; t < track_max && n < cap; t++) {
+        if (frontend_track_excluded_from_selector(t)) continue;
+        if (td5_trackgen_is_generated_slot(t)) continue;
+        if (td5_trackgen_is_geo_slot(t)) continue;
+        if (!frontend_track_level_exists(t)) continue;
+        if (!s_cheat_unlock_all && t < 37 && s_track_lock_table[t] != 0) continue;
+        cand[n++] = t;
     }
-    return v;
+    return n;
+}
+
+/* The roster a car selector cycles: Quick Race walks [0, TD5_CAR_COUNT-1], the
+ * car select screen its per-mode s_car_roster_min..max. */
+void frontend_car_ring_bounds(int *lo, int *hi) {
+    if (td5_frontend_get_screen() == TD5_SCREEN_QUICK_RACE) { *lo = 0; *hi = TD5_CAR_COUNT - 1; }
+    else { *lo = s_car_roster_min; *hi = s_car_roster_max; }
+}
+
+/* One LEFT/RIGHT on a car selector with RANDOM in the ring. Without the offer it
+ * is the plain cycler. */
+static void frontend_car_ring_step(int delta, int lo, int hi) {
+    if (!frontend_car_random_offered()) {
+        s_car_random = 0;
+        s_selected_car = frontend_car_cycle_step(s_selected_car, delta, lo, hi);
+        return;
+    }
+    if (s_car_random) {
+        s_car_random = 0;
+        /* RIGHT: the first entry, LEFT: the last */
+        s_selected_car = (delta > 0) ? frontend_car_cycle_step(hi, +1, lo, hi)
+                                     : frontend_car_cycle_step(lo, -1, lo, hi);
+        return;
+    }
+    {
+        const int first = frontend_car_cycle_step(hi, +1, lo, hi);
+        const int last  = frontend_car_cycle_step(lo, -1, lo, hi);
+        if ((delta < 0 && s_selected_car == first) || (delta > 0 && s_selected_car == last)) {
+            s_car_random = 1;
+            s_selected_car = first;   /* parked on the first entry while RANDOM shows */
+            return;
+        }
+    }
+    s_selected_car = frontend_car_cycle_step(s_selected_car, delta, lo, hi);
+}
+
+/* One LEFT/RIGHT on a track selector with RANDOM in the ring. `cycle` is the
+ * screen's own walker (it skips excluded / absent slots and steps the FREE ROAM
+ * entry). A walk that wraps past either end lands on RANDOM instead. */
+static void frontend_track_park_random(void (*cycle)(int));
+static void frontend_track_ring_step(int delta, void (*cycle)(int), int track_max) {
+    if (!frontend_track_random_offered()) {
+        s_track_random = 0;
+        cycle(delta);
+        return;
+    }
+    if (s_track_random) {
+        s_track_random = 0;
+        s_roam_entry = 0;
+        /* walk in from just past the end the step comes from */
+        s_selected_track = (delta > 0) ? -1 : track_max;
+        cycle(delta);
+        return;
+    }
+    {
+        const int start = s_selected_track;
+        cycle(delta);
+        if ((delta > 0 && s_selected_track < start) || (delta < 0 && s_selected_track > start))
+            frontend_track_park_random(cycle);   /* wrapped past an end: RANDOM */
+    }
+}
+
+/* Show RANDOM on a track selector, parked on the first entry. */
+static void frontend_track_park_random(void (*cycle)(int)) {
+    s_roam_entry = 0;
+    s_selected_track = -1;
+    cycle(+1);
+    s_roam_entry = 0;
+    s_track_random = 1;
+}
+
+#ifndef TD5RE_RELEASE
+int frontend_random_selftest(int race_track, int race_car, char *note, size_t cap) {
+    int pool[128], cpool[TD5_CAR_SLOT_MAX];
+    int n = frontend_random_track_pool(pool, (int)(sizeof pool / sizeof pool[0]));
+    int nc = frontend_random_car_pool(0, TD5_CAR_COUNT - 1, cpool, (int)(sizeof cpool / sizeof cpool[0]));
+    int bad = 0, has0 = 0, gen_listed = 0, in_pool = 0, car_in = 0, i, t;
+    int seen_t[128] = {0}, distinct_t = 0, distinct_c = 0, last_c = -1;
+    const int sv_track = s_selected_track, sv_car = s_selected_car, sv_paint = s_selected_paint;
+    const int sv_cfg = s_selected_config, sv_tr = s_track_random, sv_cr = s_car_random;
+    const int sv_dir = s_track_direction, sv_rev = g_td5.reverse_direction;
+    const TD5_ScreenIndex sv_scr = s_current_screen;
+    for (i = 0; i < n; i++) {
+        t = pool[i];
+        if (td5_trackgen_is_generated_slot(t) || td5_trackgen_is_geo_slot(t)) bad++;
+        if (t == 0) has0 = 1;
+        if (t == race_track) in_pool = 1;
+    }
+    /* generated slots the plain selector lists (the auto track, the geo entry) */
+    for (t = 0; t < s_total_unlocked_tracks; t++)
+        if (td5_trackgen_is_generated_slot(t) && !frontend_track_excluded_from_selector(t)) gen_listed++;
+    for (i = 0; i < nc; i++) if (cpool[i] == race_car) car_in = 1;
+    /* 16 launches' worth of rolls: they must not all land on one entry */
+    for (i = 0; i < 16; i++) {
+        int k;
+        s_current_screen = TD5_SCREEN_QUICK_RACE;
+        s_track_random = 1; s_car_random = 1;
+        frontend_resolve_random_picks();
+        for (k = 0; k < n; k++) if (pool[k] == s_selected_track && !seen_t[k]) { seen_t[k] = 1; distinct_t++; }
+        if (s_selected_car != last_c) { distinct_c++; last_c = s_selected_car; }
+    }
+    s_current_screen = sv_scr;
+    s_selected_track = sv_track; s_selected_car = sv_car; s_selected_paint = sv_paint;
+    s_selected_config = sv_cfg; s_track_random = sv_tr; s_car_random = sv_cr;
+    s_track_direction = sv_dir; g_td5.reverse_direction = sv_rev;
+    snprintf(note, cap, "track pool %d (generated in pool %d, Moscow %s, generated slots listed %d), car pool %d; "
+             "race track %d %s, car %d %s; 16 rolls: %d tracks, %d car changes",
+             n, bad, has0 ? "in" : "OUT", gen_listed, nc, race_track, in_pool ? "in pool" : "NOT IN POOL",
+             race_car, car_in ? "in pool" : "NOT IN POOL", distinct_t, distinct_c);
+    return (n > 0 && bad == 0 && has0 && in_pool && car_in && nc > 0 && distinct_t >= 2 && distinct_c >= 2) ? 0 : 1;
+}
+#endif
+
+/* RANDOM on a track selector: no DIRECTION row (the roll runs forwards), the LAPS
+ * row shown (it applies when the roll is a circuit). Call after the screen's own
+ * per-track row refresh. */
+/* [round UE 2026-11-08] Mariano: "hidden rows must not leave gaps". Stack the
+ * VISIBLE rows of a selector column at y0, y0+dy, ... in the given order, so a
+ * hidden DIRECTION (RANDOM, forward-only track) or LAPS (point-to-point, time
+ * trial) row closes up instead of leaving an empty slot. The value column and
+ * the ◄► arrows read s_buttons[].y, so they follow. Hidden rows keep their y. */
+static void frontend_reflow_rows(const int *ids, int n, int y0, int dy) {
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        const int b = ids[i];
+        if (b < 0 || b >= s_button_count || s_buttons[b].hidden) continue;
+        s_buttons[b].y = y0 + k * dy;
+        k++;
+    }
+}
+
+/* Selector-column geometry of the two track pickers (must match the
+ * frontend_create_button calls: QUICK RACE rows QR_ROW_Y(0..2), SELECT TRACK
+ * rows y = 97 / 132 / 167). The RACE OPTIONS / SETTINGS / OK / BACK group keeps
+ * its own fixed rows below. */
+#define TRKSEL_ROW_Y0 97
+#define TRKSEL_ROW_DY 35
+
+static void frontend_random_track_rows(int dir_btn, int laps_btn) {
+    if (s_track_random) {
+        s_track_direction = 0;
+        if (dir_btn >= 0 && dir_btn < s_button_count) {
+            s_buttons[dir_btn].hidden = 1;
+            s_buttons[dir_btn].disabled = 1;
+            if (s_selected_button == dir_btn) s_selected_button = 0;
+        }
+        if (laps_btn >= 0 && laps_btn < s_button_count && !frontend_laps_row_mode_hidden()) {
+            s_buttons[laps_btn].hidden = 0;
+            s_buttons[laps_btn].disabled = 0;
+        }
+    }
+    /* [round UE] close the gaps (every caller runs this after the per-track
+     * DIRECTION / LAPS visibility refresh). */
+    if (dir_btn == QR_BTN_DIRECTION && laps_btn == QR_BTN_LAPS) {
+        static const int qr_rows[] = { QR_BTN_CAR, QR_BTN_TRACK, QR_BTN_DIRECTION, QR_BTN_LAPS };
+        frontend_reflow_rows(qr_rows, 4, QR_ROW_Y0, QR_ROW_DY);
+    } else {
+        const int ts_rows[] = { 0, dir_btn, laps_btn };   /* TRACK, DIRECTION, LAPS */
+        frontend_reflow_rows(ts_rows, 3, TRKSEL_ROW_Y0, TRKSEL_ROW_DY);
+    }
+}
+
+/* Roll the RANDOM picks into s_selected_car / s_selected_track. Called at the top
+ * of frontend_init_race_schedule; only a launch from a selection screen rolls
+ * (Race Again and the next cup race launch from the results screen and keep the
+ * pick). Logged so the race log names what RANDOM became. */
+/* The roll's own generator. rand() restarts from the same seed every boot (and
+ * the race reseeds it), so the first RANDOM race after starting the game was
+ * always the same car and track. xorshift32, seeded once from the clock, never
+ * touches the CRT rand() stream the race and the menus share. */
+static uint32_t frontend_random_roll(uint32_t n) {
+    static uint32_t st;
+    if (st == 0) {   /* splitmix32 finalizer over the performance counter: close seeds, far states */
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        st = (uint32_t)q.QuadPart ^ (uint32_t)(q.QuadPart >> 32) ^ (uint32_t)GetTickCount() ^ td5_plat_time_ms();
+        st += 0x9E3779B9u;
+        st = (st ^ (st >> 16)) * 0x85EBCA6Bu;
+        st = (st ^ (st >> 13)) * 0xC2B2AE35u;
+        st ^= st >> 16;
+    }
+    if (st == 0) st = 0x6D2B79F5u;
+    st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+    return n ? st % n : 0;
+}
+
+static char s_random_pick_label[160];   /* the loading screen's "RANDOM: ..." line */
+
+const char *td5_frontend_random_pick_label(void) { return s_random_pick_label; }
+
+void frontend_resolve_random_picks(void) {
+    const int scr = td5_frontend_get_screen();
+    int rolled_car = 0, rolled_track = 0;
+    s_random_pick_label[0] = '\0';   /* every launch: only a roll writes it */
+    if (scr != TD5_SCREEN_QUICK_RACE && scr != TD5_SCREEN_CAR_SELECTION &&
+        scr != TD5_SCREEN_TRACK_SELECTION && scr != TD5_SCREEN_RACE_OPTIONS)
+        return;
+    if (s_mp_flow) return;   /* the MP car grid picks per player, never through these flags */
+    if (s_car_random && frontend_car_random_offered()) {
+        int lo, hi, n, cand[TD5_CAR_SLOT_MAX];
+        if (scr == TD5_SCREEN_QUICK_RACE) { lo = 0; hi = TD5_CAR_COUNT - 1; }
+        else { lo = s_car_roster_min; hi = s_car_roster_max; }
+        n = frontend_random_car_pool(lo, hi, cand, (int)(sizeof cand / sizeof cand[0]));
+        if (n > 0) {
+            s_selected_car    = cand[frontend_random_roll((uint32_t)n)];
+            s_selected_paint  = 0;
+            s_selected_config = 0;
+            rolled_car = 1;
+        }
+        TD5_LOG_I(LOG_TAG, "RANDOM car -> %d %s (pool %d of %d..%d)", s_selected_car,
+                  frontend_get_car_display_name(s_selected_car), n, lo, hi);
+    }
+    if (s_track_random && frontend_track_random_offered()) {
+        int cand[128];
+        int n = frontend_random_track_pool(cand, (int)(sizeof cand / sizeof cand[0]));
+        if (n > 0) {
+            s_selected_track = cand[frontend_random_roll((uint32_t)n)];
+            /* RANDOM hides the Direction row, so the race runs forwards */
+            s_track_direction = 0;
+            g_td5.reverse_direction = 0;
+            rolled_track = 1;
+        }
+        TD5_LOG_I(LOG_TAG, "RANDOM track -> %d level=%d %s (pool %d)", s_selected_track,
+                  td5_asset_level_number(s_selected_track),
+                  frontend_get_track_name(s_selected_track), n);
+    }
+    if (rolled_track && rolled_car)
+        snprintf(s_random_pick_label, sizeof s_random_pick_label, "%s %s / %s", TR("RANDOM:"),
+                 frontend_get_track_name(s_selected_track), frontend_get_car_display_name(s_selected_car));
+    else if (rolled_track)
+        snprintf(s_random_pick_label, sizeof s_random_pick_label, "%s %s", TR("RANDOM:"),
+                 frontend_get_track_name(s_selected_track));
+    else if (rolled_car)
+        snprintf(s_random_pick_label, sizeof s_random_pick_label, "%s %s", TR("RANDOM:"),
+                 frontend_get_car_display_name(s_selected_car));
 }
 
 /* [#2b 2026-06-16] TD6 high-score placeholder suppression. Default ON: a TD6
@@ -1176,105 +1383,31 @@ static int frontend_track_has_high_scores(int track) {
     return td5_save_td6_record_level_valid(lvl) ? 1 : 0;
 }
 
-/* Canvas-space footprint of the randomize ICON (square chip). Kept here so the
- * button hit-rect (created in the car/track screens) and the drawer agree. */
-#define FE_RAND_ICON_W 28
-#define FE_RAND_ICON_H 28
-
-/* [item #7 / #12 2026-06-15] Reusable randomize-icon drawer. (x,y) is the chip's
- * TOP-LEFT in the 640x480 virtual canvas; sx/sy = window/canvas scale (same
- * convention as every other frontend overlay). Draws a die "5" dot pattern (a
- * recognisable "roll/shuffle" glyph). The rounded CHIP + rim highlight is drawn
- * ONLY when `focused` — when unselected there is NO background, just the white
- * pips (user request #12: drop the gray background when unselected, show the chip
- * only when it is the selected/focused button). NON-STATIC so another screen can
- * reuse it (caller adds its own extern). */
-void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused) {
-    const float w = (float)FE_RAND_ICON_W;
-    const float h = (float)FE_RAND_ICON_H;
+/* [round UB 2026-11-08] The RANDOM entry's preview: a "?" card filling the
+ * preview rect (x,y,w,h in the 640x480 canvas). Same steel interior + button-blue
+ * rim as the frontend's selector chips, so it reads as part of the menu rather
+ * than a missing picture. NON-STATIC: td5_frontend.c draws it on the car select
+ * and SELECT TRACK previews. */
+void frontend_draw_random_card(float x, float y, float w, float h, float sx, float sy) {
     const float px = x * sx, py = y * sy, pw = w * sx, ph = h * sy;
-
-    const uint32_t dot_col    = 0xFFFFFFFFu;   /* white pips (always drawn) */
-
-    /* [R6b 2026-06-19] ALWAYS draw the chip + border so the icon reads as a real
-     * button like its OK/Back siblings (the prior "[#12] focused-only chip" left it
-     * borderless/invisible when unselected — the reported regression). Unfocused =
-     * the dim blue button frame (matches fe_draw_button_frame_fill's unselected
-     * blue stops) over a transparent-ish steel interior; focused = the amber rim +
-     * lit interior. */
-    {
-        uint32_t chip_c, rim_c;
-        if (focused) { chip_c = 0xFF3A4660u; rim_c = 0xFFFFCC33u; }  /* lit steel + amber */
-        else         { chip_c = 0x90202838u; rim_c = 0xFF496BDCu; }  /* dim steel + button-blue rim */
-        /* Prefer the procedural neon rounded-rect (crisp at any res); fall back
-         * to a solid quad + a manual 4-edge border when shapes aren't available. */
-        if (td5_vui_shapes_available()) {
-            td5_vui_roundrect(px, py, pw, ph,
-                              5.0f * sy, 5.0f * sy,     /* corner radii */
-                              2.0f * sx, 2.0f * sy,     /* rim thickness */
-                              rim_c, rim_c, rim_c, chip_c, 1.0f);
-        } else {
-            td5_vui_quad(px, py, pw, ph, chip_c, -1, 0, 0, 0, 0);
-            float bx = 2.0f * sx, byb = 2.0f * sy;
-            td5_vui_quad(px, py, pw, byb, rim_c, -1, 0, 0, 0, 0);            /* top    */
-            td5_vui_quad(px, py + ph - byb, pw, byb, rim_c, -1, 0, 0, 0, 0); /* bottom */
-            td5_vui_quad(px, py, bx, ph, rim_c, -1, 0, 0, 0, 0);            /* left   */
-            td5_vui_quad(px + pw - bx, py, bx, ph, rim_c, -1, 0, 0, 0, 0);  /* right  */
-        }
+    const uint32_t chip_c = 0xC0202838u, rim_c = 0xFF496BDCu;
+    float scale;
+    if (td5_vui_shapes_available()) {
+        td5_vui_roundrect(px, py, pw, ph, 8.0f * sy, 8.0f * sy, 3.0f * sx, 3.0f * sy,
+                          rim_c, rim_c, rim_c, chip_c, 1.0f);
+    } else {
+        const float bx = 3.0f * sx, byb = 3.0f * sy;
+        td5_vui_quad(px, py, pw, ph, chip_c, -1, 0, 0, 0, 0);
+        td5_vui_quad(px, py, pw, byb, rim_c, -1, 0, 0, 0, 0);
+        td5_vui_quad(px, py + ph - byb, pw, byb, rim_c, -1, 0, 0, 0, 0);
+        td5_vui_quad(px, py, bx, ph, rim_c, -1, 0, 0, 0, 0);
+        td5_vui_quad(px + pw - bx, py, bx, ph, rim_c, -1, 0, 0, 0, 0);
     }
-
-    /* Die "5" pip pattern: four corners + centre, inside the chip's inner area.
-     * Coords in canvas px (relative to x,y), then scaled. */
-    const float d = 4.0f;            /* pip size (canvas px) */
-    const float m = 7.0f;            /* inset of corner pips from chip edge */
-    const float cx = x + w * 0.5f - d * 0.5f;
-    const float cy = y + h * 0.5f - d * 0.5f;
-    const float lx = x + m,          rx = x + w - m - d;
-    const float ty = y + m,          by = y + h - m - d;
-    const float pip[5][2] = {
-        { lx, ty }, { rx, ty },
-        { cx, cy },
-        { lx, by }, { rx, by },
-    };
-    for (int i = 0; i < 5; i++)
-        td5_vui_quad(pip[i][0] * sx, pip[i][1] * sy, d * sx, d * sy,
-                     dot_col, -1, 0, 0, 0, 0);
-}
-
-/* [item #7] Render-path drawers for the randomize ICON on the car- and track-
- * selection screens. The hit-rect button (s_*_rand_btn) is created HIDDEN so the
- * generic button loop skips its 9-slice + label; we paint the icon here instead,
- * at the button's own rect, lit when it holds focus. NON-STATIC so td5_frontend.c
- * can call them from its render switch (CAR_SELECTION / TRACK_SELECTION). Inert
- * when the control is off, in full-button form, or the handle isn't live. */
-void frontend_render_carsel_randomize_icon(float sx, float sy) {
-    if (!frontend_random_button_on() || !frontend_random_icon_on()) return;
-    if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
-    int b = s_carsel_rand_btn;
-    if (b < 0 || b >= FE_MAX_BUTTONS) return;
-    if (!s_buttons[b].active || s_buttons[b].hidden == 0) return; /* full-button mode draws itself */
-    if (s_buttons[b].disabled) return;                            /* hidden by the colour picker */
-    frontend_draw_randomize_icon((float)s_buttons[b].x, (float)s_buttons[b].y,
-                                 sx, sy, (s_selected_button == b));
-}
-
-/* [W3 2026-09-29] Track selector: the randomize CHIP is gone. Randomizing is a
- * shortcut now (keyboard R / pad X, both handled in Screen_TrackSelection state
- * 4), so this paints the hint that advertises it instead of an icon.
- * Placement: the OK/BACK row, right of the BACK button, below the LOCKED text
- * at y=375 — i.e. bottom-right, next to BACK. The centre is the MEASURED
- * midpoint of the gap it has to live in, taken off a 640x480 framedump: on this
- * text's rows (y=406..426) the BACK button's frame ends at x=344 and the
- * pitbull badge starts at x=522 (the badge is half black, so its disc reaches
- * ~26 px further left than its white half suggests). Midpoint 433 -> 432, which
- * leaves ~24 px of air on each side for the 129-px string and still clears both
- * when a longer translation widens it. Drawn unconditionally because the
- * shortcut itself is unconditional. NON-STATIC so td5_frontend.c can call it
- * from its render switch. */
-void frontend_render_trksel_hints(float sx, float sy) {
-    if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
-    fe_draw_text_centered(432.0f * sx, 400.0f * sy, TR("X / R = RANDOM"),
-                          0xFF8890A0u, sx * 0.75f, sy * 0.75f);
+    /* A "?" about half the card's height: the 24-px glyph cell scaled up, centred
+     * (caps sit on rows 8..23 of the cell, so lift by the cell's top 8 rows). */
+    scale = (h * 0.5f) / 16.0f;
+    fe_draw_text_centered(px + pw * 0.5f, py + ph * 0.5f - (8.0f + 8.0f) * scale * sy,
+                          "?", 0xFFFFCC33u, sx * scale, sy * scale);
 }
 
 static void frontend_load_selected_car_preview(void) {
@@ -1429,6 +1562,12 @@ static void frontend_quickrace_cycle_track(int delta) {
         if (frontend_track_level_exists(s_selected_track)) { frontend_roam_entry_step_post(delta); return; }
     }
     s_selected_track = start; /* nothing else available — restore (never lands on drag strip / cup) */
+}
+
+/* [round UB] SELECT TRACK's walker in the one-argument form
+ * frontend_track_ring_step takes (s_track_max is this screen's exclusive bound). */
+static void trksel_cycle_track(int delta) {
+    frontend_cycle_track(delta, 0, s_track_max);
 }
 
 /* [AUTOTRACK QUICKRACE 2026-09-06] Show the Quick Race AUTO TRACK STUDIO chip
@@ -1643,22 +1782,15 @@ void Screen_QuickRaceMenu(void) {
           if (bs >= 0) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
         }
 
-        /* [#10 2026-06-16] Dedicated RANDOMIZE buttons for the Car and Track rows.
-         * Created LAST (indices QR_BTN_RAND_CAR=12 / QR_BTN_RAND_TRACK=13) so every
-         * hard-coded index above is unchanged. They are REAL frontend_create_button
-         * entries — so (a) SHIFT+arrow geometric focus nav can land on them (same
-         * row as Car/Track, to the right) and (b) the standard button renderer
-         * draws them with the normal button format. Their presses are dispatched in
-         * state 4 to frontend_qr_roll_selector. When the knob is off they are
-         * created hidden+disabled and the legacy render-path icon hack runs instead
-         * (frontend_qr_random_icon_on auto-suppresses itself in button mode). */
+        /* [round UB 2026-11-08] Slots 12 / 13 were the RANDOMIZE buttons. RANDOM
+         * is the entry LEFT of the first car / track now (frontend_car_ring_step,
+         * frontend_track_ring_step); the slots stay, hidden and disabled, so every
+         * later QR_BTN_* index holds. */
         {
-            int rc = frontend_create_button(TR("Randomize"), QR_RAND_BTN_X, QR_ROW_Y(0), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_CAR */
-            int rt = frontend_create_button(TR("Randomize"), QR_RAND_BTN_X, QR_ROW_Y(1), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_TRACK */
-            if (!frontend_qr_random_button_on()) {
-                if (rc >= 0) { s_buttons[rc].hidden = 1; s_buttons[rc].disabled = 1; }
-                if (rt >= 0) { s_buttons[rt].hidden = 1; s_buttons[rt].disabled = 1; }
-            }
+            int r12 = frontend_create_button("", QR_COL_X, QR_ROW_Y(0), 8, 32); /* QR_BTN_RETIRED_12 */
+            int r13 = frontend_create_button("", QR_COL_X, QR_ROW_Y(1), 8, 32); /* QR_BTN_RETIRED_13 */
+            if (r12 >= 0) { s_buttons[r12].hidden = 1; s_buttons[r12].disabled = 1; }
+            if (r13 >= 0) { s_buttons[r13].hidden = 1; s_buttons[r13].disabled = 1; }
         }
 
         /* [PHYSICS 2026-06-26 / RETIRED 2026-09-29] This slot used to be the
@@ -1706,6 +1838,7 @@ void Screen_QuickRaceMenu(void) {
         frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
         /* Hide the Laps row on point-to-point tracks (no laps); show on circuits. */
         frontend_update_laps_button_visibility(QR_BTN_LAPS);
+        frontend_random_track_rows(QR_BTN_DIRECTION, QR_BTN_LAPS);   /* [round UB] */
         frontend_quickrace_clamp_counts();
 
         /* Mouse-interactive screen: restore the cursor in case the prior screen
@@ -1755,24 +1888,29 @@ void Screen_QuickRaceMenu(void) {
                  * police are skipped; the result is always a valid index, so the
                  * old off-by-one "UNKNOWN CAR" entry (index == unlocked count) is
                  * gone. */
-                s_selected_car = frontend_car_cycle_step(s_selected_car, delta,
-                                                         0, TD5_CAR_COUNT - 1);
+                /* [round UB] RANDOM sits LEFT of the first car (the Viper). */
+                frontend_car_ring_step(delta, 0, TD5_CAR_COUNT - 1);
+                TD5_LOG_I(LOG_TAG, "QuickRace car cycle: %s",
+                          s_car_random ? "RANDOM" : frontend_get_car_display_name(s_selected_car));
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
 
             if (selected_button == QR_BTN_TRACK && delta != 0) {
-                /* Cycle track, skipping Drag Strip (index 19) + absent levels. */
-                frontend_quickrace_cycle_track(delta);
+                /* Cycle track, skipping Drag Strip (index 19) + absent levels.
+                 * [round UB] RANDOM sits LEFT of the first track (Moscow). */
+                frontend_track_ring_step(delta, frontend_quickrace_cycle_track,
+                                         s_total_unlocked_tracks);
                 /* Re-evaluate the Direction toggle + Laps row for the new track. */
                 frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
                 frontend_update_laps_button_visibility(QR_BTN_LAPS);
+                frontend_random_track_rows(QR_BTN_DIRECTION, QR_BTN_LAPS);
                 /* [AUTOTRACK QUICKRACE 2026-09-06] Grow/drop the STUDIO chip with
                  * the new pick, same as the other track-dependent rows above. */
                 frontend_qr_refresh_auto_btn();
                 frontend_qr_refresh_geo_btn();
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
-                          frontend_get_track_name(s_selected_track));
+                          s_track_random ? "RANDOM" : frontend_get_track_name(s_selected_track));
                 frontend_play_sfx(2); /* ping2.wav cycle */
             }
 
@@ -1854,20 +1992,6 @@ void Screen_QuickRaceMenu(void) {
                 frontend_qr_span_toggle_active();
             }
 #endif
-
-            /* [#10] Dedicated RANDOMIZE buttons (Car/Track rows). Activating one
-             * rolls that selector to a random valid value (frontend_qr_roll_selector
-             * also refreshes the Direction/Laps rows on a track roll + plays the
-             * cycle cue). Only when the button mode is on (off => hidden+disabled,
-             * never the active button). */
-            if (frontend_qr_random_button_on() &&
-                s_button_index == QR_BTN_RAND_CAR && s_button_count > QR_BTN_RAND_CAR) {
-                frontend_qr_roll_selector(0);   /* roll CAR */
-            }
-            if (frontend_qr_random_button_on() &&
-                s_button_index == QR_BTN_RAND_TRACK && s_button_count > QR_BTN_RAND_TRACK) {
-                frontend_qr_roll_selector(1);   /* roll TRACK */
-            }
 
             /* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO. Same
              * focus-agreement guard the track-select chip uses (s_trksel_auto_btn):
@@ -2458,6 +2582,14 @@ void frontend_mp_simul_preview_setup(int n) {
     s_two_player_mode        = 1;
     s_mp_flow                = 1;
     s_mp_simul               = 1;
+    /* [round UE 2026-11-08] TD5RE_MP_MODE_FORCE=N (1 cup .. 4 drag) also seeds the
+     * mode the vote would have locked, so the mode-dependent grid (MP drag's greyed
+     * MANUAL row) can be screenshotted. */
+    {
+        const char *mf = getenv("TD5RE_MP_MODE_FORCE");
+        if (mf && mf[0] && atoi(mf) > 0 && atoi(mf) < TD5_MP_MODE_COUNT)
+            mp_mode_config_apply_defaults(atoi(mf));
+    }
     /* [layout preview 2026-07-04] TD5RE_MP_SIMUL_PREVIEW_PHASE=0 lands on the
      * phase-0 PROFILE SELECTION setup screen (name/colour/PROFILE/trans/assist/OK
      * per-pane buttons) instead of the default phase-1 car-select grid, so that
@@ -3850,9 +3982,12 @@ static int carsel_apply_cycle(int btn, int delta) {
         } else {
             /* Default/era/cop ranges. For the full single-race roster
              * this skips the locked-TD5/police gap so TD6 cars (37-75)
-             * are reachable; narrower ranges wrap plainly. */
-            s_selected_car = frontend_car_cycle_step(s_selected_car, delta,
-                                                     s_car_roster_min, s_car_roster_max);
+             * are reachable; narrower ranges wrap plainly.
+             * [round UB] RANDOM sits LEFT of the first car of the roster. */
+            s_car_random_outgoing = s_car_random;
+            frontend_car_ring_step(delta, s_car_roster_min, s_car_roster_max);
+            TD5_LOG_I(LOG_TAG, "CarSel cycle: %s",
+                      s_car_random ? "RANDOM" : frontend_get_car_display_name(s_selected_car));
         }
         /* [FIXED 2026-06-01] orig (0x40E8xx) resets paint + wheel/config
          * scheme to 0 on EVERY car change. s_paint_active is NOT cleared on
@@ -6826,7 +6961,9 @@ void Screen_CarSelection(void) {
         frontend_init_return_screen(TD5_SCREEN_CAR_SELECTION);
         TD5_LOG_D(LOG_TAG, "CarSelection: state 0 - init");
         s_anim_complete = 0;
-        s_carsel_rand_btn = -1;   /* [#14] (re)assigned when buttons are built in case 4 */
+        /* [round UB] RANDOM is offered per mode (not Masters / drag / network). */
+        if (!frontend_car_random_offered()) s_car_random = 0;
+        s_car_random_outgoing = 0;
 
         /* Reload MainMenu.tga background so that returning from TrackSelection
          * (which loads TrackSelect.tga) restores the correct background.
@@ -7004,42 +7141,6 @@ void Screen_CarSelection(void) {
         frontend_create_button(SNK_OkButTxt,   46, 369,  64, 32);
         if (!s_network_active)
             frontend_create_button(SNK_BackButTxt, 118, 369, 96, 32);
-        /* [#14] RANDOMIZE: a dedicated control for the Car selector. Created LAST
-         * so the Car/Paint/Config/Auto/OK/Back indices used by the action switch
-         * (cases 0..5) are unchanged. Activating it rolls a random selectable car.
-         * (frontend_apply_color_panel_layout only repositions buttons 0..5, so this
-         * one keeps its fixed position.) Skipped in network mode so the Back button
-         * (created only when !network) keeps index 5 and RANDOMIZE can't collide
-         * with the case-5 (Back) switch arm; net car-select picks are a deliberate
-         * per-client choice anyway, not randomized.
-         * [item #7 2026-06-15] NEW default form = a small ICON just to the RIGHT of
-         * the Car selector (x=218, on its OWN sub-row y=171 — 2px below the Car row
-         * y=169). The hit-rect is created HIDDEN so the generic button loop skips
-         * its frame+label; the icon is painted in frontend_render_carsel_randomize_icon
-         * (chip only when focused, #12).
-         * [#12 2026-06-15 nav-selectable] KEY POINT: the icon's .y (171) is kept
-         * DISTINCT from the Car selector's .y (169) on purpose. The car screen
-         * navigates by INDEX+ROW (frontend_cycle_selected_button_by_row): a DISTINCT
-         * row means (a) the Car row's LEFT/RIGHT keeps cycling the car VALUE (no
-         * same-row neighbour to hijack the key), and (b) this icon — the highest
-         * button index, on a different row — is reached by pressing UP from the Car
-         * row (the vertical cycler wraps past the top to the highest different-row
-         * button). It is `active`, only `hidden` (skips the 9-slice loop) and never
-         * `disabled` except while the colour picker is open, so neither
-         * frontend_cycle_selected_button_by_row NOR frontend_spatial_pick (both
-         * ignore `hidden`) exclude it. Sharing the Car row's .y would have BROKEN
-         * value cycling, so do NOT "align" it. The cross-file note (report) covers
-         * enabling true geometric nav for an even more natural RIGHT-to-icon feel.
-         * TD5RE_RANDOM_ICON=0 restores the legacy full-width button. */
-        if (frontend_random_button_on() && !s_network_active) {
-            if (frontend_random_icon_on()) {
-                s_carsel_rand_btn = frontend_create_button(NULL, 218, 171,
-                                                           FE_RAND_ICON_W, FE_RAND_ICON_H);
-                if (s_carsel_rand_btn >= 0) s_buttons[s_carsel_rand_btn].hidden = 1;
-            } else {
-                s_carsel_rand_btn = frontend_create_button(TR("Randomize"), 46, 133, 168, 32);
-            }
-        }
         frontend_apply_color_panel_layout();   /* fix positions immediately (picker may be open) */
 
         /* Time Trials: grey out Manual button */
@@ -7095,22 +7196,6 @@ void Screen_CarSelection(void) {
         if (!s_color_panel_visible && s_button_index < 0 && s_selected_button == 0) {
             int rep = frontend_carsel_hold_repeat();
             if (rep) { s_arrow_input |= rep; s_input_ready = 1; }
-        }
-
-        /* [#14] Keep RANDOMIZE out of the way while the TD6 colour picker is open
-         * (the picker fills the column band and is modal). Disabled so it can't be
-         * navigated to or clicked; restored when the picker closes.
-         * [item #7] In ICON form the hit-rect is permanently hidden (the icon is
-         * drawn from the render path, not the button loop) — only toggle disabled
-         * there; in the legacy full-button form keep the original hidden toggle so
-         * that path stays byte-identical. */
-        if (s_carsel_rand_btn >= 0 && s_carsel_rand_btn < FE_MAX_BUTTONS &&
-            s_buttons[s_carsel_rand_btn].active) {
-            if (!frontend_random_icon_on())
-                s_buttons[s_carsel_rand_btn].hidden = s_color_panel_visible;
-            s_buttons[s_carsel_rand_btn].disabled = s_color_panel_visible;
-            if (s_color_panel_visible && s_selected_button == s_carsel_rand_btn)
-                s_selected_button = 0;
         }
 
         /* Render car preview overlay */
@@ -7297,22 +7382,6 @@ void Screen_CarSelection(void) {
                 }
                 s_inner_state = 0x14;
                 break;
-            }
-
-            /* [#14] RANDOMIZE (index beyond the fixed 0..5 switch): roll a random
-             * selectable car, then run the SAME change flow as a manual cycle
-             * (reset paint/config, slide-in via state 10). Pressed on confirm. */
-            if (active_button == s_carsel_rand_btn && s_carsel_rand_btn >= 0) {
-                int old = s_selected_car;
-                s_selected_car = frontend_pick_random_car(s_selected_car,
-                                                          s_car_roster_min, s_car_roster_max);
-                s_selected_paint  = 0;
-                s_selected_config = 0;
-                if (s_color_panel_visible) frontend_set_color_panel(0);
-                frontend_play_sfx(3);
-                TD5_LOG_I(LOG_TAG, "CarSel RANDOMIZE: %d -> %d (roster %d..%d)",
-                          old, s_selected_car, s_car_roster_min, s_car_roster_max);
-                s_inner_state = 10;  /* trigger new-car image load/slide */
             }
 
             /* Auto-hide the color panel + restore PAINT arrows when the selection
@@ -7755,7 +7824,9 @@ static int frontend_track_is_circuit(int track_slot) {
 static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     if (laps_btn_idx < 0 || laps_btn_idx >= s_button_count) return;
     int show;
-    if (s_selected_track < 0)
+    if (frontend_laps_row_mode_hidden())
+        show = 0;                                             /* [round UE] time trial: always 1 lap */
+    else if (s_selected_track < 0)
         show = 1;                                             /* random/unset: keep the row */
     else if (td5_trackgen_is_geo_slot(s_selected_track))
         show = 0;   /* [F11b] the city sprint or the point-to-point strip; no level09x LEVELINF needed */
@@ -7906,6 +7977,7 @@ static void trksel_build_main_buttons(void) {
         s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
     }
     frontend_update_laps_button_visibility(2);
+    frontend_random_track_rows(1, 2);   /* [round UB] RANDOM: no DIRECTION row */
 }
 
 /* Commit the RACE OPTIONS the launched race reads from g_td5.ini (POWER-UPS +
@@ -9576,10 +9648,8 @@ void Screen_TrackSelection(void) {
         s_anim_complete = 0;
         s_trksel_dyn_btn  = -1;   /* [ARCADE] (re)assigned with the buttons below */
         s_trksel_prev_focus = -2; /* [R3-3] treat the first interactive frame as a focus-entry (no cycle) */
-        /* [J2 2026-10-03] A key/button still down when the screen appears must be
-         * released before the RANDOM shortcut can fire (no randomize on entry). */
-        s_trksel_rand_r_held = 1;
-        s_trksel_rand_x_held = 1;
+        /* [round UB] RANDOM is an entry LEFT of the first track where it is offered. */
+        if (!frontend_track_random_offered()) s_track_random = 0;
 
         /* Validate track index for cup modes: skip locked/invalid NPC groups */
         /* Determine track max for current mode. [2026-06-19] Net play can now
@@ -9589,12 +9659,9 @@ void Screen_TrackSelection(void) {
          * (the 19 native TD5 tracks), hiding every TD6 track from the host's
          * picker. All modes now use the full unlocked bound. */
         s_track_max = s_total_unlocked_tracks;
-        /* [#14] With the RANDOMIZE button on (default), the 2P "?" (-1) random list
-         * entry is retired, so default an out-of-range/stale selection to track 0 in
-         * every mode. (TD5RE_RANDOM_BUTTON=0 restores the legacy 2P -1 default.) */
-        if (s_selected_track >= s_track_max)
-            s_selected_track = (s_two_player_mode && !frontend_random_button_on()) ? -1 : 0;
-        if (s_selected_track < 0 && (!s_two_player_mode || frontend_random_button_on()))
+        /* An out-of-range / stale selection opens on track 0. [round UB] The old 2P
+         * "?" (-1) list entry is gone: RANDOM is s_track_random now, every mode. */
+        if (s_selected_track >= s_track_max || s_selected_track < 0)
             s_selected_track = 0;
         /* Never open parked on a selector-excluded slot — drag strip (19) or a
          * championship cup (20-25), see frontend_track_excluded_from_selector. */
@@ -9684,6 +9751,12 @@ void Screen_TrackSelection(void) {
             }
         }
 #endif
+        /* [round UB 2026-11-08] Track the focus on idle frames too. It was only
+         * updated on input frames, so the FIRST arrow after the screen opened (focus
+         * already on TRACK, prev still -2) counted as a focus entry and was dropped:
+         * one LEFT from Moscow did nothing, the second reached RANDOM. A real focus
+         * move onto TRACK still arrives on an input frame and is still caught. */
+        if (!s_input_ready) s_trksel_prev_focus = s_selected_button;
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
@@ -9722,32 +9795,16 @@ void Screen_TrackSelection(void) {
                 /* Cycle track index, skipping tracks whose level zips are absent */
                 if (s_network_active) {
                     frontend_cycle_track(delta, 0, s_track_max + 1);
-                } else if (s_two_player_mode && !frontend_random_button_on()) {
-                    /* [legacy, TD5RE_RANDOM_BUTTON=0] 2P supports -1 = random as a
-                     * list entry, handled separately. With the RANDOMIZE button on
-                     * (default) this wrap-to -1 is removed (see the else branch). */
-                    s_selected_track += delta;
-                    if (s_selected_track < -1) s_selected_track = s_track_max - 1;
-                    if (s_selected_track >= s_track_max) s_selected_track = -1;
-                    /* Skip unavailable levels AND selector-excluded slots (drag
-                     * strip + cups): cups resolve to level001.zip so the level-
-                     * exists check alone won't drop them — route through the
-                     * exclusion-aware cycler. */
-                    if (s_selected_track >= 0 &&
-                        (frontend_track_excluded_from_selector(s_selected_track) ||
-                         !frontend_track_level_exists(s_selected_track)))
-                        frontend_cycle_track(delta, 0, s_track_max);
                 } else {
-                    /* [#14] Normal cycling (incl. 2P when the RANDOMIZE button
-                     * replaces the old "?" random list entry): wrap 0..track_max-1,
-                     * never landing on -1. Random is now the dedicated button. */
+                    /* wrap 0..track_max-1; [round UB] RANDOM sits LEFT of the
+                     * first track where frontend_track_random_offered says so */
                     if (s_selected_track < 0) s_selected_track = 0;  /* drop any stale -1 */
-                    frontend_cycle_track(delta, 0, s_track_max);
+                    frontend_track_ring_step(delta, trksel_cycle_track, s_track_max);
                 }
                 frontend_play_sfx(2); /* ping2.wav cycle */
                 TD5_LOG_I(LOG_TAG, "TrackSel CYCLED: track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
-                          frontend_get_track_name(s_selected_track));
+                          s_track_random ? "RANDOM" : frontend_get_track_name(s_selected_track));
 
                 /* Hide text+image immediately so render on THIS frame shows neither
                  * (old preview still loaded, new s_selected_track already set).
@@ -9757,6 +9814,7 @@ void Screen_TrackSelection(void) {
                  * (hide on forward-only/circuit tracks, restore on reverse-capable). */
                 frontend_update_direction_button_visibility(1, 1);
                 frontend_update_laps_button_visibility(2);
+                frontend_random_track_rows(1, 2);   /* [round UB] */
                 /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Show/hide the AUTO
                  * TRACK STUDIO button for the newly selected track. */
                 frontend_trksel_refresh_auto_btn();
@@ -9895,71 +9953,6 @@ void Screen_TrackSelection(void) {
 
         }
 
-        /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
-         * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
-         * track_max is exclusive; network caps at 0x13 like frontend_cycle_track.
-         * [W3 2026-09-29] The chip is gone: the ONLY triggers are the keyboard
-         * 'R' key and the pad's X face button. Both are unambiguous, so the old
-         * focus-agreement guard (which existed purely to stop a stray
-         * s_button_index aliasing the chip's index) is no longer needed.
-         *
-         * [J2 2026-10-03 ROOT CAUSE] This block used to sit INSIDE the
-         * `if (s_input_ready)` above, which is why neither R nor pad X ever did
-         * anything. s_input_ready is NOT "input was polled" — frontend_poll_input
-         * clears it every frame (td5_frontend.c:4459) and raises it only on a
-         * CONFIRM (Enter/pad A on an active button, mouse activation) or when
-         * s_arrow_input is non-zero (a LEFT/RIGHT/UP/DOWN nav event, incl. the
-         * hold-repeater and the mouse arrow zones) — td5_frontend.c:4394, 4700,
-         * 4719, 4781. A bare letter key raises none of those, so the whole case-4
-         * body was skipped on an R-only frame and the shortcut was unreachable
-         * unless the player happened to nudge a direction in the same frame.
-         * It lives outside the gate now and runs on every interactive frame. */
-        {
-            /* One-shot each: latch the rising edge so HOLDING the key/button
-             * randomizes once per press, not every frame. s_fe_gamepad_nav is
-             * a HELD level refreshed by frontend_poll_input, hence the latch.
-             * 'R' = DIK 0x13, 0x80 = pad X (td5_plat_input_frontend_nav).
-             * Latches are module statics seeded to "held" at screen init so a key
-             * carried in from the previous screen can't fire on the entry frame. */
-            int active = frontend_window_is_active();
-            /* Never fire while a text field is accepting keystrokes (name entry,
-             * dev span field, any future field): there, 'R' is a typed character.
-             * The pad X latch follows the same gate so a single release/press
-             * can't straddle the field opening and closing. */
-            int typing = (s_text_input_state != 0);
-            int r_now  = (active && !typing && td5_plat_input_key_pressed(0x13)) ? 1 : 0;
-            int x_now  = (active && !typing && (s_fe_gamepad_nav & 0x80u)) ? 1 : 0;
-            int r_edge = (r_now && !s_trksel_rand_r_held) ? 1 : 0;
-            int x_edge = (x_now && !s_trksel_rand_x_held) ? 1 : 0;
-            s_trksel_rand_r_held = r_now;
-            s_trksel_rand_x_held = x_now;
-            /* Only act while still in the interactive sub-state: an OK/BACK/RACE
-             * OPTIONS handled above may already have moved s_inner_state on this
-             * same frame, and a randomize must not stomp that transition. */
-            if ((r_edge || x_edge) && s_inner_state == 4) {
-                int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
-                TD5_LOG_I(LOG_TAG, "TrackSel RANDOM shortcut: src=%s screen=%d bound=%d from=%d",
-                          r_edge ? "key-R" : "pad-X", (int)td5_frontend_get_screen(),
-                          bound, s_selected_track);
-                if (frontend_pick_random_track(bound)) {
-                    frontend_play_sfx(3);
-                    TD5_LOG_I(LOG_TAG, "TrackSel RANDOMIZE: track=%d level=%d name=%s",
-                              s_selected_track, td5_asset_level_number(s_selected_track),
-                              frontend_get_track_name(s_selected_track));
-                    s_track_switch_tick = 0;
-                    frontend_update_direction_button_visibility(1, 1);
-                    frontend_update_laps_button_visibility(2);
-                    /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] refresh for
-                     * the randomly picked track too. */
-                    frontend_trksel_refresh_auto_btn();
-                    frontend_trksel_refresh_geo_btn();
-                    s_inner_state = 5;
-                } else {
-                    TD5_LOG_W(LOG_TAG, "TrackSel RANDOM shortcut: no alternative track to pick");
-                    frontend_play_sfx(10); /* nothing else to pick */
-                }
-            }
-        }
         break;
 
     case 5: /* Track change: load new preview, start slide-in animation */
@@ -12515,3 +12508,119 @@ void Screen_CupWon(void) {
         break;
     }
 }
+
+#ifndef TD5RE_RELEASE
+/* [round UE 2026-11-08] ue-hidden-rows (see td5_frontend.h). Runs from the selftest
+ * verdict, off any menu: it rebuilds button sets into s_buttons, so it snapshots and
+ * restores the whole button table and every selector flag it changes. */
+int frontend_ue_rows_selftest(char *note, size_t cap) {
+    static FE_Button sv_buttons[FE_MAX_BUTTONS];
+    const int sv_count = s_button_count, sv_sel = s_selected_button;
+    const int sv_gt = s_selected_game_type, sv_mpf = s_mp_flow, sv_tr = s_track_random;
+    const int sv_track = s_selected_track, sv_dir = s_track_direction, sv_flow = s_flow_context;
+    const int sv_rev = g_td5.reverse_direction, sv_mode = g_td5.mp_mode_config.mode;
+    const int sv_auto = s_trksel_auto_btn, sv_geo = s_trksel_geo_btn, sv_dyn = s_trksel_dyn_btn;
+    TD5_RaceOptsCtx c;
+    int fail = 0, circ = -1, rev_track = -1, t;
+    char why[160] = "";
+    memcpy(sv_buttons, s_buttons, sizeof sv_buttons);
+
+#define UE_EXPECT(cond, ...) do { if (!fail && !(cond)) { fail = 1; snprintf(why, sizeof why, __VA_ARGS__); } } while (0)
+    /* 1. RACE OPTIONS rows per mode (Q2, Q4, Q5) + controls that must stay. */
+    memset(&c, 0, sizeof c); c.is_mp = 1; c.mp_mode = TD5_MP_MODE_TRAFFIC_BATTLE;
+    UE_EXPECT(!td5_raceopts_row_available(RO_TRAFFIC, &c), "traffic battle shows TRAFFIC");
+    UE_EXPECT(!td5_raceopts_row_available(RO_POLICE, &c), "traffic battle shows POLICE");
+    memset(&c, 0, sizeof c); c.game_type = 7; c.is_time_trial = 1;
+    UE_EXPECT(!td5_raceopts_row_available(RO_CHECKPOINTS, &c), "time trial shows CHECKPOINT TIMERS");
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c), "time trial lost TRAFFIC");
+    memset(&c, 0, sizeof c); c.game_type = 1; c.is_cup = 1;
+    UE_EXPECT(!td5_raceopts_row_available(RO_CHECKPOINTS, &c), "cup shows CHECKPOINT TIMERS");
+    memset(&c, 0, sizeof c); c.game_type = 0; c.opponents = 5;
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c) && td5_raceopts_row_available(RO_POLICE, &c) &&
+              td5_raceopts_row_available(RO_CHECKPOINTS, &c), "single race lost TRAFFIC / POLICE / CP TIMERS");
+    memset(&c, 0, sizeof c); c.game_type = 8; c.is_cop_chase = 1; c.opponents = 1;
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c), "cop chase lost TRAFFIC");
+    memset(&c, 0, sizeof c); c.is_mp = 1; c.mp_mode = TD5_MP_MODE_RACE;
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c) && td5_raceopts_row_available(RO_POLICE, &c),
+              "MP race lost TRAFFIC / POLICE");
+
+    /* 2. Q6: the MP car grid's greyed MANUAL row exists only in MP drag. */
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_DRAG_RACE;
+    UE_EXPECT(mp_carsel_drag_gear_row() == 1, "MP drag: no greyed MANUAL row");
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+    UE_EXPECT(mp_carsel_drag_gear_row() == 0, "MP race shows the drag MANUAL row");
+
+    /* 3. SELECT TRACK column: a circuit (LAPS shown) and a reversible track. */
+    for (t = 0; t < 26 && (circ < 0 || rev_track < 0); t++) {
+        if (t == 19 || frontend_track_excluded_from_selector(t)) continue;
+        if (circ < 0 && td5_asset_track_is_circuit(t)) circ = t;
+        if (rev_track < 0 && td5_asset_track_has_reverse(t) && !td5_asset_track_is_circuit(t)) rev_track = t;
+    }
+    UE_EXPECT(circ >= 0 && rev_track >= 0, "no circuit (%d) / reversible track (%d) found", circ, rev_track);
+    s_mp_flow = 0; s_flow_context = 0;
+    if (!fail) {
+        /* Q3: time trial hides LAPS even on a circuit; single race shows it. */
+        s_selected_game_type = 7; s_track_random = 0; s_selected_track = circ;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[2].hidden, "time trial: LAPS shown on circuit %d", circ);
+        s_selected_game_type = 0;
+        trksel_build_main_buttons();
+        UE_EXPECT(!s_buttons[2].hidden, "single race: LAPS hidden on circuit %d", circ);
+        /* RANDOM: DIRECTION hides, LAPS takes its row (no gap). */
+        s_track_random = 1;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[1].hidden && !s_buttons[2].hidden && s_buttons[2].y == TRKSEL_ROW_Y0 + TRKSEL_ROW_DY,
+                  "select track RANDOM: dir hidden %d, laps hidden %d at y %d (want %d)", s_buttons[1].hidden,
+                  s_buttons[2].hidden, s_buttons[2].y, TRKSEL_ROW_Y0 + TRKSEL_ROW_DY);
+        /* time trial + RANDOM: neither row, nothing below TRACK moves into a gap. */
+        s_selected_game_type = 7;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[1].hidden && s_buttons[2].hidden, "time trial RANDOM: dir %d laps %d shown",
+                  !s_buttons[1].hidden, !s_buttons[2].hidden);
+        /* back on a reversible track the rows return to their own slots */
+        s_selected_game_type = 0; s_track_random = 0; s_selected_track = rev_track;
+        trksel_build_main_buttons();
+        UE_EXPECT(!s_buttons[1].hidden && s_buttons[1].y == TRKSEL_ROW_Y0 + TRKSEL_ROW_DY,
+                  "select track %d: DIRECTION hidden %d y %d", rev_track, s_buttons[1].hidden, s_buttons[1].y);
+    }
+
+    /* 4. QUICK RACE column (same geometry as its case 0): RANDOM closes the
+     * DIRECTION slot, LAPS takes row 2. */
+    if (!fail) {
+        int i;
+        frontend_reset_buttons();
+        for (i = 0; i <= QR_BTN_LAPS; i++) {
+            static const int row[] = { 0, 1, 2, 3, 3, 4 };
+            frontend_create_button("", QR_COL_X, QR_ROW_Y(row[i]), QR_BTN_W, 32);
+        }
+        s_buttons[QR_BTN_PLAYERS].hidden = s_buttons[QR_BTN_OPPONENTS].hidden = 1;
+        s_track_random = 1; s_selected_track = circ;
+        frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+        frontend_update_laps_button_visibility(QR_BTN_LAPS);
+        frontend_random_track_rows(QR_BTN_DIRECTION, QR_BTN_LAPS);
+        UE_EXPECT(s_buttons[QR_BTN_DIRECTION].hidden && !s_buttons[QR_BTN_LAPS].hidden &&
+                  s_buttons[QR_BTN_LAPS].y == QR_ROW_Y(2),
+                  "quick race RANDOM: dir hidden %d, laps hidden %d at y %d (want %d)",
+                  s_buttons[QR_BTN_DIRECTION].hidden, s_buttons[QR_BTN_LAPS].hidden,
+                  s_buttons[QR_BTN_LAPS].y, QR_ROW_Y(2));
+        s_track_random = 0; s_selected_track = rev_track;
+        frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+        frontend_update_laps_button_visibility(QR_BTN_LAPS);
+        frontend_random_track_rows(QR_BTN_DIRECTION, QR_BTN_LAPS);
+        UE_EXPECT(!s_buttons[QR_BTN_DIRECTION].hidden && s_buttons[QR_BTN_DIRECTION].y == QR_ROW_Y(2),
+                  "quick race track %d: DIRECTION hidden %d y %d", rev_track,
+                  s_buttons[QR_BTN_DIRECTION].hidden, s_buttons[QR_BTN_DIRECTION].y);
+    }
+#undef UE_EXPECT
+
+    memcpy(s_buttons, sv_buttons, sizeof sv_buttons);
+    s_button_count = sv_count; s_selected_button = sv_sel;
+    s_selected_game_type = sv_gt; s_mp_flow = sv_mpf; s_track_random = sv_tr;
+    s_selected_track = sv_track; s_track_direction = sv_dir; s_flow_context = sv_flow;
+    g_td5.reverse_direction = sv_rev; g_td5.mp_mode_config.mode = sv_mode;
+    s_trksel_auto_btn = sv_auto; s_trksel_geo_btn = sv_geo; s_trksel_dyn_btn = sv_dyn;
+    snprintf(note, cap, "%s", fail ? why
+             : "TB no TRAFFIC/POLICE, TT no LAPS/CP, cup no CP, MP drag MANUAL greyed, no gap on RANDOM (select track + quick race)");
+    return fail;
+}
+#endif

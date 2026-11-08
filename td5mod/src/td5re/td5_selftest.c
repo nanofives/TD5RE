@@ -61,6 +61,7 @@
 #include "td5_input.h"   /* [CHAOS CO-OP] packed-axis constants for the fold check */
 #include "td5_camera.h"  /* [CHAOS CO-OP] per-view solved camera pose (pane check) */
 #include "td5_ai.h"      /* [R1026 K] pull-over latch query + dev plant (human-drive rows) */
+#include "td5_physics.h" /* [round UB] collisions flag for the u5 rows */
 #include "td5_roam_mode.h"   /* [roam F2-D] `roam` rows: arm a free-roam session */
 #include "td5_roam_drive.h"  /* [roam F2-D] scripted drive + verdict */
 #include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
@@ -241,6 +242,23 @@ typedef struct {
      * and the player finished on lap N. Roam row: the circuit driver races N laps (TD5RE_ROAM_CIRCUIT_LAPS),
      * its own verdict checks player_laps == laps. */
     int laps_menu;
+    /* [round UB 2026-11-08] targeted round-U checks (0 = none):
+     *   3  u3-kph-default          KPH is the speed unit (no explicit MPH choice in the INI)
+     *   4  u4-random-pick          RANDOM car + track rolled at launch: pools, the race ran the roll
+     *   51 u5-traffic-timetrial    time trial runs the TRAFFIC / POLICE / COLLISIONS picked
+     *   52 u5-options-after-config single race: COLLISIONS + CHECKPOINT TIMERS edited after the race type
+     *   53 u5-copchase-traffic     cop chase: the TRAFFIC level edited after the race type
+     *   54 u5-drag-difficulty      SP drag: the DIFFICULTY edited after the race type
+     * [round UE 2026-11-08] Mariano's decisions on the UB / UC questions:
+     *   61 ue-q1-copchase-notraffic cop chase with TRAFFIC OFF (set after the race type): empty road
+     *   62 ue-hidden-rows           rows hidden / greyed per mode, no gap when DIRECTION hides
+     *   63 ue-shadow-sun*           RT off: the sun-shadow pass casts from the sun the sky draws */
+    int u_check;
+    /* [round UC 2026-11-08] item 7: 1 = at race start the sun disc's direction, and a ring around it as wide as
+     * the glare, maps to SKY texels of the panorama (td5_render_sky_sun_check against the td5_sky_sunpos.h
+     * skyline). FAIL when any of it is over the painted backdrop, when the track draws no sun, or when the sky
+     * has no table entry. */
+    int sun_check;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -363,6 +381,7 @@ static const RaceScenario k_races[] = {
     { .name="race-r8-drag",          .track=19, .car=-1, .game_type=9, .player_is_ai=1,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=0,
+      .mp_mode=-1,   /* [round UB] an omitted mp_mode is 0: the AutoRace MP override locked RACE and cleared drag */
       .depth=ST_DEPTH_RUN_5S },
 
     /* ---- Block 2: MP-mode split-screen (1 human + N AI panes, N=1/4/8 -> 2/5/9
@@ -607,9 +626,90 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=8, .depth=ST_DEPTH_ROAM_SPRINT, .laps_menu=1 },
+
+    /* [round UB 2026-11-08] one targeted row per item (full suite only; run alone with TD5RE_SELFTEST_ROWS). */
+    { .name="u3-kph-default",        .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=3 },
+    { .name="u4-random-pick",        .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=4 },
+    /* Mariano's report: time trial, TRAFFIC VERY HIGH, no traffic. Moscow (point to point, LEVELINF traffic on). */
+    { .name="u5-traffic-timetrial",  .track=0,  .car=-1, .game_type=7, .player_is_ai=1,
+      .traffic=4, .opponents=-2, .difficulty=-1, .checkpoint_timers=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_RUN_20S, .u_check=51 },
+    { .name="u5-options-after-config", .track=0, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=52 },
+    { .name="u5-copchase-traffic",   .track=0,  .car=-1, .game_type=8, .player_is_ai=1,
+      .traffic=4, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=53 },
+    { .name="u5-drag-difficulty",    .track=19, .car=-1, .game_type=9, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=0,
+      .mp_mode=-1, .depth=ST_DEPTH_COUNTDOWN, .u_check=54 },
+    /* [round UE 2026-11-08] Q1: cop chase, TRAFFIC VERY HIGH at the race-type pick then OFF on RACE OPTIONS:
+     * no traffic car on the road for 20 s, the chase (wanted mode) still armed. Moscow. */
+    { .name="ue-q1-copchase-notraffic", .track=0, .car=-1, .game_type=8, .player_is_ai=1,
+      .traffic=4, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_RUN_20S, .u_check=61 },
+    /* Q2..Q6 + the QUICK RACE gap: a menu-model check (td5_fe_race.c frontend_ue_rows_selftest) run after a
+     * countdown so it sits in the race-row machinery like the other u rows. */
+    { .name="ue-hidden-rows",        .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=62 },
+    /* UC decision b: with RT off the sun shadows cast from the sun the sky draws. Blue Ridge and Switzerland had
+     * the disc moved by td5_sky_sunpos.h; Maui is the control (disc not moved). */
+    { .name="ue-shadow-sun",         .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .u_check=63 },
+    { .name="ue-shadow-sun-switzerland", .track=30, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .u_check=63 },
+    { .name="ue-shadow-sun-maui",    .track=6,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .u_check=63 },
+    /* [round UC 2026-11-08] item 7: the sun sits in the sky, never over the mountains / skyline / lake painted into
+     * the panorama. Blue Ridge, Courmayeur, San Francisco, Lake Tahoe and Switzerland had it over backdrop (moved by
+     * td5_sky_sunpos.h); Maui is the control (probed sun already in the sky, not moved). Countdown only. */
+    { .name="u7-sun-in-sky",               .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-courmayeur",    .track=7,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-sanfrancisco", .track=11, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-tahoe",         .track=28, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-switzerland",   .track=30, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-maui",          .track=6,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
+/* [round UB] u-row captures, taken on the first live race tick (after InitRace's per-mode overrides) */
+static int s_u_cap, s_u_traffic, s_u_vol, s_u_police, s_u_coll, s_u_cp, s_u_tier, s_u_track, s_u_car;
+static int s_u_max_traffic;   /* most traffic actors live on any tick */
+static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values set after the race type */
+static int s_u_wanted;                   /* [round UE] wanted (cop chase) mode at the first tick */
+static int s_ue_shadow_cls = -99, s_ue_sky_cls;   /* [round UE] ue-shadow-sun capture */
+static float s_ue_shadow[3], s_ue_sky[3];
+
+static int  s_u7_res = -99;      /* [round UC] u7-sun-in-sky: td5_render_sky_sun_check result, -99 = not sampled */
+static char s_u7_note[96];
 #define ST_SMOKE_RACES 14  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-sprint-mp2 + roam-circuit-mp2 + roam-traffic-smoke + roam-cops-smoke + police-smoke */
 
 typedef struct {
@@ -639,6 +739,7 @@ static const ScreenStep k_screens_full[] = {
     { "scr-sound-options",   TD5_SCREEN_SOUND_OPTIONS,      0, 0 },
     { "scr-display-options", TD5_SCREEN_DISPLAY_OPTIONS,    0, 0 },
     { "scr-performance",     TD5_SCREEN_PERFORMANCE_OPTIONS, 0, 0 },  /* [LOW-END PERF] */
+    { "scr-lighting-options", TD5_SCREEN_LIGHTING_OPTIONS,   0, 0 },  /* [round UA] under PERFORMANCE */
     { "scr-performance-cust", TD5_SCREEN_PERFORMANCE_CUSTOM, 0, 0 },  /* [PERF PRESETS] */
     { "scr-two-player-opts", TD5_SCREEN_TWO_PLAYER_OPTIONS, 0, 0 },
     { "scr-ctrl-binding",    TD5_SCREEN_CONTROLLER_BINDING, 0, 0 },
@@ -915,6 +1016,8 @@ static void st_reset_scenario_fields(void)
     _putenv("TD5RE_CHAOS_TRIGGER=");
     _putenv("TD5RE_CHAOS_PERIOD=");
     _putenv("TD5RE_AUTORACE_LAPS_AFTER_CONFIG=");   /* [round TA] t3-laps-* */
+    _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=");   /* [round UB] u5-* */
+    _putenv("TD5RE_AUTORACE_RANDOM=");              /* [round UB] u4-random-pick */
     _putenv("TD5RE_ROAM_CIRCUIT_LAPS=");
     td5_chaos_commit_config(NULL);
     /* [MP DRAG LEAK FIX 2026-10-01] This used to reset mp_mode_config.mode for
@@ -2236,8 +2339,23 @@ static void st_apply_scenario(const RaceScenario *sc)
         _putenv("TD5RE_CHAOS_TRIGGER=" ST_CHAOS_TRIGGER_TIME);
         _putenv("TD5RE_CHAOS_PERIOD="  ST_CHAOS_PERIOD_SECS);
     }
+    /* [round UB] u-rows: the RACE OPTIONS edit made after the race type was configured */
+    s_u_cap = 0; s_u_max_traffic = 0;
+    if (sc->u_check == 4) _putenv("TD5RE_AUTORACE_RANDOM=1");
+    if (sc->u_check == 52) {
+        char buf[96];
+        s_u_want_coll = g_td5.ini.collisions ? 0 : 1;           /* flip both against the INI value */
+        s_u_want_cp   = g_td5.ini.checkpoint_timers ? 0 : 1;
+        snprintf(buf, sizeof buf, "TD5RE_AUTORACE_OPTS_AFTER_CONFIG=-1,-1,%d,%d,-1", s_u_want_coll, s_u_want_cp);
+        _putenv(buf);
+    }
+    if (sc->u_check == 53) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=1,-1,-1,-1,-1");   /* VERY HIGH -> LOW */
+    if (sc->u_check == 54) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=-1,-1,-1,-1,2");   /* EASY -> HARD */
+    if (sc->u_check == 61) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=0,-1,-1,-1,-1");   /* [round UE] VERY HIGH -> OFF */
+    s_ue_shadow_cls = -99;
     /* [round TA] t3-laps-* rows (st_reset_scenario_fields clears both knobs and restores ini.laps). */
     s_t3_max_lap = 0;
+    s_u7_res = -99; s_u7_note[0] = 0;   /* [round UC] */
     if (sc->laps_menu > 0) {
         char buf[64];
         if (sc->roam) {
@@ -2252,7 +2370,9 @@ static void st_apply_scenario(const RaceScenario *sc)
      * TDR). An rt row forces RT HIGH -- only when the GPU actually supports it
      * -- and MUST run at a safe FF (see the rt row's .ff=1) so it doesn't trip
      * the watchdog. st_reset_scenario_fields restores LOW after. */
-    if (sc->rt && td5_rt_available()) {
+    /* [round UA] TD5RE_SELFTEST_RT=1 forces RT HIGH on EVERY row (dev RT
+     * benchmarking of scripted drives, e.g. the roam rows; verify/rt_bench.py --row). */
+    if ((sc->rt || td5_env_int("TD5RE_SELFTEST_RT", 0, 0, 1)) && td5_rt_available()) {
         g_td5.ini.lighting_quality = 1;
         td5_rt_set_quality(1);
     } else {
@@ -2637,6 +2757,78 @@ static void st_saveload_roundtrip_verdict(void)
     if (r->status == ST_FAIL) s_exit_code = 1;
 }
 
+/* [round UA 2026-11-08] u1-rt-options: item 1 of round U.
+ *  (a) GPU class -> LIGHTING tier (td5_perf_rt_class_tier, a pure function): a
+ *      3070 at Mariano's 2560x1351 must land on MEDIUM, a 4070 at 1440p on
+ *      HIGH but MEDIUM at 4K, 4090 HIGH at 4K, Radeon/unknown MEDIUM.
+ *  (b) LIGHTING OPTIONS are LIVE: changing g_td5.ini.rt_* changes what the
+ *      RT passes read on the very next call (they used to latch at first use,
+ *      so a menu change needed a restart).
+ *  (c) PERFORMANCE > LIGHTING MEDIUM really selects the half-res trace.
+ * Env overrides (TD5RE_RT_RAYS ...) win by design, so (b)/(c) are skipped
+ * (reported) when one is set. Restores every field it touches. */
+static void st_rt_options_verdict(void)
+{
+    static const struct { const char *name; unsigned vram; int w, h, want; } k[] = {
+        { "NVIDIA GeForce RTX 3070",     8192, 2560, 1351, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 3070",     8192, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 3090",    24576, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 4060",     8188, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 4070",    12282, 2560, 1440, TD5_QTIER_HIGH   },
+        { "NVIDIA GeForce RTX 4070",    12282, 3840, 2160, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 4090",    24564, 3840, 2160, TD5_QTIER_HIGH   },
+        { "NVIDIA GeForce RTX 5070 Ti", 16303, 2560, 1351, TD5_QTIER_HIGH   },
+        { "AMD Radeon RX 7900 XTX",     24560, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA RTX A6000",           49140, 1920, 1080, TD5_QTIER_HIGH   },
+        { "Some Future GPU",             8192, 1920, 1080, TD5_QTIER_MEDIUM },
+    };
+    StepRow *r = st_new_row("u1-rt-options", 'D');
+    int i, n = (int)(sizeof(k) / sizeof(k[0])), tier_ok = 0, first_bad = -1;
+    int live = -1, med = -1, env_set;
+    char fail[96] = "";
+    if (!r) return;
+    for (i = 0; i < n; i++) {
+        int got = td5_perf_rt_class_tier(k[i].name, k[i].vram, k[i].w, k[i].h);
+        if (got == k[i].want) tier_ok++;
+        else if (first_bad < 0) {
+            first_bad = i;
+            snprintf(fail, sizeof(fail), " BAD '%s' %dx%d -> %d want %d",
+                     k[i].name, k[i].w, k[i].h, got, k[i].want);
+        }
+    }
+    env_set = (getenv("TD5RE_RT_RAYS") || getenv("TD5RE_RT_SHADOW_HALF") ||
+               getenv("TD5RE_RT_REFL_HALF") || getenv("TD5RE_RT_GI"));
+    if (!env_set) {
+        int s_rays = g_td5.ini.rt_shadow_rays, s_res = g_td5.ini.rt_shadow_res;
+        int s_rq = g_td5.ini.rt_reflection_q, s_rr = g_td5.ini.rt_reflection_rng;
+        int s_gi = g_td5.ini.rt_gi_quality, s_sp = g_td5.ini.rt_sun_probe;
+        int s_lq = g_td5.ini.rt_light_quality, s_q = g_td5.ini.lighting_quality;
+        live = 1;
+        g_td5.ini.rt_shadow_rays = 8;  live &= (td5_rt_opt_shadow_rays() == 8);
+        g_td5.ini.rt_shadow_rays = 1;  live &= (td5_rt_opt_shadow_rays() == 1);
+        g_td5.ini.rt_shadow_res = 0;   live &= (td5_rt_opt_shadow_half() == 1);
+        g_td5.ini.rt_shadow_res = 1;   live &= (td5_rt_opt_shadow_half() == 0);
+        g_td5.ini.rt_reflection_q = 1; live &= (td5_rt_opt_refl_half() == 1 && td5_rt_opt_reflections() == 1);
+        g_td5.ini.rt_reflection_q = 0; live &= (td5_rt_opt_reflections() == 0);
+        g_td5.ini.rt_gi_quality = 0;   live &= (td5_rt_opt_gi_on() == 0);
+        g_td5.ini.rt_gi_quality = 2;   live &= (td5_rt_opt_gi_on() == 1 && td5_rt_opt_gi_rays() == 4);
+        g_td5.ini.rt_reflection_rng = 0; live &= (td5_rt_opt_refl_dist() < 5000.0f);
+        g_td5.ini.rt_reflection_rng = 1; live &= (td5_rt_opt_refl_dist() > 40000.0f && td5_rt_opt_refl_dist() < 60000.0f);
+        td5_perf_apply_lighting_tier(TD5_QTIER_MEDIUM, 0);
+        med = (td5_rt_opt_shadow_half() == 1 && td5_rt_opt_refl_half() == 1 &&
+               td5_rt_opt_gi_on() == 0 && td5_rt_opt_shadow_rays() == 1);
+        g_td5.ini.rt_shadow_rays = s_rays; g_td5.ini.rt_shadow_res = s_res;
+        g_td5.ini.rt_reflection_q = s_rq;  g_td5.ini.rt_reflection_rng = s_rr;
+        g_td5.ini.rt_gi_quality = s_gi;    g_td5.ini.rt_sun_probe = s_sp;
+        g_td5.ini.rt_light_quality = s_lq; g_td5.ini.lighting_quality = s_q;
+    }
+    snprintf(r->note, sizeof(r->note), "gpu-class %d/%d live-options=%s medium-halfres=%s%s",
+             tier_ok, n, live < 0 ? "skip(env)" : (live ? "1" : "0"),
+             med < 0 ? "skip(env)" : (med ? "1" : "0"), fail);
+    r->status = (tier_ok == n && live != 0 && med != 0) ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_write_report(void)
 {
     FILE *f;
@@ -2645,6 +2837,7 @@ static void st_write_report(void)
     CreateDirectoryA("log", NULL);
 
     st_degradation_verdicts();
+    st_rt_options_verdict();   /* [round UA] u1-rt-options */
     st_i18n_verdict();
     st_chaos_pad_fold_verdict();   /* [CHAOS CO-OP] pad-seat input fold (no pads needed) */
     st_saveload_roundtrip_verdict();
@@ -3109,6 +3302,69 @@ static void st_tick_races(uint32_t now)
                                  "natural finish did not reach results screen");
                     }
                 }
+                /* [round UB] u-row verdicts */
+                if (sc->u_check && status < ST_FAIL) {
+                    char un[220];
+                    int fail = 0;
+                    un[0] = 0;
+                    if (!s_u_cap) { fail = 1; snprintf(un, sizeof un, "race never ran a tick"); }
+                    else switch (sc->u_check) {
+                    case 3:
+                        fail = !(g_td5.ini.speed_units == 1 && td5_save_get_speed_units() == 1);
+                        snprintf(un, sizeof un, "speed units hud=%s results=%s (SpeedUnitsChosen=%d)",
+                                 g_td5.ini.speed_units ? "KPH" : "MPH", td5_save_get_speed_units() ? "KPH" : "MPH",
+                                 g_td5.ini.speed_units_chosen);
+                        break;
+                    case 4:
+                        fail = frontend_random_selftest(s_u_track, s_u_car, un, sizeof un);
+                        break;
+                    case 51:
+                        fail = !(s_u_traffic == 1 && s_u_vol == 4 && s_u_max_traffic > 0);
+                        snprintf(un, sizeof un, "time trial: traffic=%d vol=%d (asked 4) police=%d collisions=%d, "
+                                 "%d traffic cars live at most", s_u_traffic, s_u_vol, s_u_police, s_u_coll,
+                                 s_u_max_traffic);
+                        break;
+                    case 52:
+                        fail = !(s_u_coll == s_u_want_coll && s_u_cp == s_u_want_cp);
+                        snprintf(un, sizeof un, "single race: collisions %d (asked %d), checkpoint timers %d (asked %d)",
+                                 s_u_coll, s_u_want_coll, s_u_cp, s_u_want_cp);
+                        break;
+                    case 53:
+                        fail = !(s_u_traffic == 1 && s_u_vol == 1);
+                        snprintf(un, sizeof un, "cop chase: traffic=%d vol=%d (asked LOW=1 after VERY HIGH), %d traffic cars",
+                                 s_u_traffic, s_u_vol, s_u_max_traffic);
+                        break;
+                    case 54:
+                        fail = !(s_u_tier == 2);
+                        snprintf(un, sizeof un, "drag: difficulty tier %d (asked 2 after 0)", s_u_tier);
+                        break;
+                    case 61:   /* [round UE] Q1 */
+                        fail = !(s_u_wanted == 1 && s_u_traffic == 0 && s_u_vol == 0 && s_u_max_traffic == 0);
+                        snprintf(un, sizeof un, "cop chase: wanted=%d traffic=%d vol=%d (asked OFF after VERY HIGH), "
+                                 "%d traffic cars live at most", s_u_wanted, s_u_traffic, s_u_vol, s_u_max_traffic);
+                        break;
+                    case 62:   /* [round UE] Q2..Q6 + no gap */
+                        fail = frontend_ue_rows_selftest(un, sizeof un);
+                        break;
+                    case 63: { /* [round UE] shadows follow the drawn sun (RT off) */
+                        const float d = s_ue_shadow[0] * s_ue_sky[0] + s_ue_shadow[1] * s_ue_sky[1] +
+                                        s_ue_shadow[2] * s_ue_sky[2];
+                        if (s_ue_shadow_cls == -99) { fail = 1; snprintf(un, sizeof un, "shadow sun never sampled"); break; }
+                        fail = !(td5_rt_active() == 0 && s_ue_sky_cls == TD5_SKY_SUNNY &&
+                                 s_ue_shadow_cls == TD5_SKY_SUNNY && d > 0.9999f);
+                        snprintf(un, sizeof un, "rt=%d sky cls %d (%.3f,%.3f,%.3f) shadow cls %d (%.3f,%.3f,%.3f) dot %.5f",
+                                 td5_rt_active(), s_ue_sky_cls, s_ue_sky[0], s_ue_sky[1], s_ue_sky[2], s_ue_shadow_cls,
+                                 s_ue_shadow[0], s_ue_shadow[1], s_ue_shadow[2], (double)d);
+                        break;
+                    }
+                    }
+                    TD5_LOG_I(LOG_TAG, "%s: %s -> %s", sc->name, un, fail ? "FAIL" : "PASS");
+                    if (fail) { status = ST_FAIL; snprintf(note, sizeof(note), "%s", un); }
+                    else {
+                        size_t nl = strlen(note);
+                        if (nl < sizeof(note) - 1) snprintf(note + nl, sizeof(note) - nl, " | %s", un);
+                    }
+                }
                 /* [round TA] t3-laps-shipped: the race ran the LAPS picked after the race type, and ended there. */
                 if (sc->laps_menu > 0 && !sc->roam && status < ST_FAIL) {
                     const int used = g_td5.circuit_lap_count;
@@ -3120,6 +3376,19 @@ static void st_tick_races(uint32_t now)
                     } else if (nl < sizeof(note) - 1) {
                         snprintf(note + nl, sizeof(note) - nl, " laps asked %d used %d finished %d",
                                  sc->laps_menu, used, s_t3_max_lap);
+                    }
+                }
+                /* [round UC] u7-sun-in-sky*: the sun disc at race start was over sky. */
+                if (sc->sun_check && status < ST_FAIL) {
+                    size_t nl = strlen(note);
+                    if (s_u7_res != 1) {
+                        status = ST_FAIL;
+                        int w = snprintf(note, sizeof(note), "sun: %.90s (check %d)",
+                                         s_u7_res == -99 ? "never sampled" : s_u7_note, s_u7_res);
+                        (void)w;   /* return used: a long note is cut, never a warning */
+                    } else if (nl < sizeof(note) - 1) {
+                        int w = snprintf(note + nl, sizeof(note) - nl, " %.95s", s_u7_note);
+                        (void)w;
                     }
                 }
                 /* [CHAOS CO-OP 2026-09-30] A chaos row must have ROTATED. The
@@ -3198,6 +3467,25 @@ static void st_tick_races(uint32_t now)
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
             st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
+            if (sc->u_check) {                      /* [round UB] what the race runs */
+                int s, live = 0;
+                const int total = td5_game_get_total_actor_count();
+                if (!s_u_cap) {
+                    s_u_cap = 1;
+                    s_u_traffic = g_td5.traffic_enabled; s_u_vol = g_td5.traffic_volume;
+                    s_u_police = g_td5.special_encounter_enabled;
+                    s_u_coll = td5_physics_get_collisions_flag() == 0 ? 1 : 0;
+                    s_u_cp = g_td5.checkpoint_timers_enabled; s_u_tier = g_td5.difficulty_tier;
+                    s_u_track = g_td5.track_index; s_u_car = td5_game_get_slot_car_index(0);
+                    s_u_wanted = g_td5.wanted_mode_enabled;
+                }
+                /* [round UE] ue-shadow-sun: sample a few ticks in (the sky + zone lights are live by then) */
+                if (sc->u_check == 63 && s_ue_shadow_cls == -99 && tick - s_race_start_tick >= 5)
+                    s_ue_shadow_cls = td5_render_shadow_sun_query(s_ue_shadow, s_ue_sky, &s_ue_sky_cls);
+                for (s = g_traffic_slot_base; s < total; s++)
+                    if (!td5_ai_traffic_dynamic_parked(s)) live++;
+                if (live > s_u_max_traffic) s_u_max_traffic = live;
+            }
             if (sc->laps_menu > 0 && !sc->roam) {   /* [round TA] t3-laps-shipped: laps the player completed */
                 const int l = td5_game_get_player_lap(0);
                 TD5_Actor *a0 = td5_game_get_actor(0);
@@ -3220,6 +3508,10 @@ static void st_tick_races(uint32_t now)
                 st_chaos_pane_sample(tick - s_race_start_tick);
             if (sc->human_drive > 0)
                 st_drive_sample(tick - s_race_start_tick);   /* [R1026 K] */
+            if (sc->sun_check && s_u7_res == -99) {         /* [round UC] once, at race start */
+                s_u7_res = td5_render_sky_sun_check(s_u7_note, (int)sizeof s_u7_note);
+                TD5_LOG_I(LOG_TAG, "u7: sun check %d: %s", s_u7_res, s_u7_note);
+            }
             s_last_sim_tick = tick;
         }
         /* [render golden] grab the composited frame at fixed sim ticks. */

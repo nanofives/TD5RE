@@ -131,3 +131,119 @@ void td5_profile_end_frame(void)
     TD5_LOG_W("plat", "%s", line);
     s_window_start = now;
 }
+
+/* ---- [round UA 2026-11-08] frame-time percentiles (see td5_profile.h) ---- */
+#include <stdlib.h>
+#include "td5_config.h"
+
+static int    s_fs_target = -1;      /* frames to record (0 = off, -1 = unread) */
+static int    s_fs_skip, s_fs_quit;
+static int    s_fs_seen, s_fs_n, s_fs_done;
+static float *s_fs_ms;
+static LARGE_INTEGER s_fs_prev, s_fs_freq;
+static double s_fs_load_ms = -1.0;   /* process start -> first race frame */
+
+static int fs_cmp(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+static float fs_pct(const float *sorted, int n, double p)
+{
+    int i = (int)(p * (double)(n - 1) + 0.5);
+    if (i < 0) i = 0;
+    if (i >= n) i = n - 1;
+    return sorted[i];
+}
+
+static void fs_write(void)
+{
+    FILE *f;
+    float *srt;
+    double sum = 0.0, med;
+    int i, spikes = 0, over33 = 0, over50 = 0, over100 = 0;
+    const char *tag = getenv("TD5RE_FRAMESTATS_TAG");
+    if (s_fs_n <= 0) return;
+    srt = (float *)malloc(sizeof(float) * (size_t)s_fs_n);
+    if (!srt) return;
+    memcpy(srt, s_fs_ms, sizeof(float) * (size_t)s_fs_n);
+    qsort(srt, (size_t)s_fs_n, sizeof(float), fs_cmp);
+    for (i = 0; i < s_fs_n; i++) sum += s_fs_ms[i];
+    med = fs_pct(srt, s_fs_n, 0.50);
+    for (i = 0; i < s_fs_n; i++) {
+        if (s_fs_ms[i] > 2.0 * med) spikes++;
+        if (s_fs_ms[i] > 33.33f) over33++;
+        if (s_fs_ms[i] > 50.0f)  over50++;
+        if (s_fs_ms[i] > 100.0f) over100++;
+    }
+    f = fopen("log/framestats.txt", "a");
+    if (f) {
+        fprintf(f, "=== FRAMESTATS tag=%s frames=%d skip=%d ===\n", (tag && tag[0]) ? tag : "-", s_fs_n, s_fs_skip);
+        fprintf(f, "cpu_frame_ms mean=%.2f p50=%.2f p90=%.2f p95=%.2f p99=%.2f p99.9=%.2f max=%.2f fps_mean=%.1f fps_p1low=%.1f\n",
+                sum / s_fs_n, med, fs_pct(srt, s_fs_n, 0.90), fs_pct(srt, s_fs_n, 0.95),
+                fs_pct(srt, s_fs_n, 0.99), fs_pct(srt, s_fs_n, 0.999), srt[s_fs_n - 1],
+                1000.0 * s_fs_n / sum, 1000.0 / fs_pct(srt, s_fs_n, 0.99));
+        fprintf(f, "spikes(>2x p50)=%d over33ms=%d over50ms=%d over100ms=%d\n", spikes, over33, over50, over100);
+        fprintf(f, "load_ms process_start->first_race_frame=%.0f\n", s_fs_load_ms);
+        /* the 8 worst frames with their index (when in the run they happened) */
+        {
+            int worst[8], w, j, k;
+            for (w = 0; w < 8; w++) worst[w] = -1;
+            for (j = 0; j < s_fs_n; j++) {
+                for (w = 0; w < 8; w++) {
+                    if (worst[w] < 0 || s_fs_ms[j] > s_fs_ms[worst[w]]) {
+                        for (k = 7; k > w; k--) worst[k] = worst[k - 1];
+                        worst[w] = j; break;
+                    }
+                }
+            }
+            fprintf(f, "worst:");
+            for (w = 0; w < 8 && worst[w] >= 0; w++) fprintf(f, " #%d=%.1f", worst[w], s_fs_ms[worst[w]]);
+            fputc('\n', f);
+        }
+        fclose(f);
+    }
+    TD5_LOG_W("plat", "FRAMESTATS written (%d frames, p50=%.2f p99=%.2f max=%.2f ms)",
+              s_fs_n, med, fs_pct(srt, s_fs_n, 0.99), srt[s_fs_n - 1]);
+    free(srt);
+    td5_plat_gpu_stats_dump("log/framestats.txt");
+}
+
+int td5_profile_race_frame(void)
+{
+    LARGE_INTEGER now;
+    if (s_fs_target < 0) {
+        s_fs_target = td5_env_int("TD5RE_FRAMESTATS", 0, 0, 200000);
+        s_fs_skip   = td5_env_int("TD5RE_FRAMESTATS_SKIP", 120, 0, 100000);
+        s_fs_quit   = td5_env_int("TD5RE_FRAMESTATS_QUIT", 1, 0, 1);
+        if (s_fs_target > 0) {
+            s_fs_ms = (float *)calloc((size_t)s_fs_target, sizeof(float));
+            if (!s_fs_ms) s_fs_target = 0;
+            QueryPerformanceFrequency(&s_fs_freq);
+        }
+    }
+    if (s_fs_target <= 0 || s_fs_done) return 0;
+    QueryPerformanceCounter(&now);
+    if (s_fs_seen == 0) {
+        /* Load time: process creation -> first race frame (boot + frontend skip
+         * + track load + RT warmup), wall clock. */
+        FILETIME ct, et, kt, ut, nowft;
+        if (GetProcessTimes(GetCurrentProcess(), &ct, &et, &kt, &ut)) {
+            ULARGE_INTEGER a, b;
+            GetSystemTimeAsFileTime(&nowft);
+            a.LowPart = ct.dwLowDateTime; a.HighPart = ct.dwHighDateTime;
+            b.LowPart = nowft.dwLowDateTime; b.HighPart = nowft.dwHighDateTime;
+            s_fs_load_ms = (double)(b.QuadPart - a.QuadPart) / 10000.0;
+        }
+    }
+    if (s_fs_seen++ > s_fs_skip && s_fs_n < s_fs_target)
+        s_fs_ms[s_fs_n++] = (float)((double)(now.QuadPart - s_fs_prev.QuadPart) * 1000.0 / (double)s_fs_freq.QuadPart);
+    s_fs_prev = now;
+    if (s_fs_n >= s_fs_target) {
+        fs_write();
+        s_fs_done = 1;
+        return s_fs_quit;
+    }
+    return 0;
+}

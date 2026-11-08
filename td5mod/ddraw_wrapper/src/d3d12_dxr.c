@@ -30,6 +30,10 @@
 #include "shaders/cs_shadow_atrous_bytes_60.h"
 #include "shaders/cs_color_atrous_bytes_50.h"  /* edge-aware à-trous denoise, RGBA16F (light/refl) */
 #include "shaders/cs_color_atrous_bytes_60.h"
+#include "shaders/cs_rt_upsample_bytes_50.h"       /* [round UA] half-res -> full-res, R32F */
+#include "shaders/cs_rt_upsample_bytes_60.h"
+#include "shaders/cs_rt_upsample_color_bytes_50.h" /* [round UA] half-res -> full-res, RGBA16F */
+#include "shaders/cs_rt_upsample_color_bytes_60.h"
 #include "shaders/ps_light_rt_bytes_50.h"   /* additive light composite  (this TU only) */
 #include "shaders/ps_light_rt_bytes_60.h"
 #include "shaders/ps_ssr_rt_bytes_50.h"     /* reflection composite      (this TU only) */
@@ -203,6 +207,14 @@ typedef struct {
     ID3D12RootSignature        *denoise_rs;
     ID3D12PipelineState        *denoise_pso;       /* cs_shadow_atrous  R32F  (shadow, GI) */
     ID3D12PipelineState        *denoise_color_pso; /* cs_color_atrous   RGBA16F (light, refl) */
+    /* [round UA 2026-11-08] HALF-res tracing. res_shift[0] = shadow / GI /
+     * dynamic light, res_shift[1] = reflection (0 = full, 1 = half), set by the
+     * game every frame (Backend_RTSetResolution). The half-res mask is upsampled
+     * back to full res (cs_rt_upsample) before the composite. */
+    int                         res_shift[2];
+    ID3D12PipelineState        *upsample_pso;       /* cs_rt_upsample  R32F            */
+    ID3D12PipelineState        *upsample_color_pso; /* cs_rt_upsample  RGBA16F         */
+    int                         upsample_failed;
     ID3D12Resource             *sunvis2;          /* R32_FLOAT à-trous ping-pong scratch */
     D3D12_RESOURCE_STATES       sunvis2_state;
     ID3D12Resource             *sunvis_final;     /* sunvis or sunvis2 (denoised)  */
@@ -299,6 +311,7 @@ typedef struct {
 static DxrState g_dxr = { 0 };
 
 static int dxr_ensure_init(void);   /* forward: used by the AS feed below */
+static void dxr_prewarm_join(void); /* [round UA] forward: shutdown / device change */
 
 /* ---- descriptor-handle helpers (aggregate-return -> explicit out-param) ----- */
 
@@ -346,6 +359,7 @@ void d3d12_dxr_on_device(ID3D12Device5 *dev5, ID3D12GraphicsCommandList4 *list4)
     /* Device (re)created: cached interfaces change; any previously built
      * pipeline objects belong to the old device and were already released by
      * d3d12_dxr_shutdown during teardown. Reset lazy-init. */
+    dxr_prewarm_join();   /* [round UA] never swap the device under the compile thread */
     g_dxr.device5 = dev5;
     g_dxr.list4   = list4;
     g_dxr.inited  = 0;
@@ -374,7 +388,7 @@ static int dxr_create_global_rs(void)
 {
     D3D12_DESCRIPTOR_RANGE ranges[5];
     D3D12_DESCRIPTOR_RANGE bindless_range;
-    D3D12_ROOT_PARAMETER params[6];
+    D3D12_ROOT_PARAMETER params[7];
     D3D12_STATIC_SAMPLER_DESC samp;
     D3D12_ROOT_SIGNATURE_DESC rsd;
     ID3D10Blob *sig = NULL, *err = NULL;
@@ -430,6 +444,12 @@ static int dxr_create_global_rs(void)
     params[5].DescriptorTable.NumDescriptorRanges = 1;
     params[5].DescriptorTable.pDescriptorRanges = &bindless_range;
     params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    /* [round UA] b4 RTScaleCB: 4 root constants, rs_shift = trace resolution. */
+    params[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[6].Constants.ShaderRegister = 4;
+    params[6].Constants.RegisterSpace  = 0;
+    params[6].Constants.Num32BitValues = 4;
+    params[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&samp, sizeof(samp));
     samp.Filter   = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -440,7 +460,7 @@ static int dxr_create_global_rs(void)
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&rsd, sizeof(rsd));
-    rsd.NumParameters = 6; rsd.pParameters = params;
+    rsd.NumParameters = 7; rsd.pParameters = params;
     rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;   /* DXR global RS: no DENY flags */
 
@@ -514,7 +534,13 @@ static int dxr_create_state_object(void)
     sod.NumSubobjects = 5; sod.pSubobjects = so;
 
     d3d12_pso_crumb_set("dxr_state_object", g_rt_pipeline, sizeof(g_rt_pipeline));
-    hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
+    { LARGE_INTEGER t0, t1, fq; double ms;   /* [round UA] RT pipeline compile cost */
+      QueryPerformanceCounter(&t0);
+      hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
+      QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&fq);
+      ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
+      Backend_NotePsoCompile(ms, 0);
+      dxr_log("CreateStateObject %.1f ms (DXIL lib %u bytes)", ms, (unsigned)sizeof(g_rt_pipeline)); }
     d3d12_pso_crumb_clear();
     if (FAILED(hr)) { dxr_log("CreateStateObject 0x%08lX", hr); return 0; }
     return 1;
@@ -1283,7 +1309,9 @@ void Backend_RTSceneEnd(void)
     g_dxr.scene_inst = NULL;
 
     /* Build BLASes that are still pending (chunked) before the TLAS references them. */
+    Backend_RTStamp("pre.as");
     dxr_build_pending(cl, cl4);
+    Backend_RTStamp("rt.blas");
 
     /* TLAS sized for DXR_MAX_INSTANCES up front. */
     ZeroMemory(&inputs, sizeof(inputs));
@@ -1321,6 +1349,7 @@ void Backend_RTSceneEnd(void)
     dxr_uav_barrier(cl, g_dxr.tlas[cur]);
     dxr_refresh_tlas_srv(g_dxr.tlas[cur]);
     Backend_NoteRTMark("tlas_build");
+    Backend_RTStamp("rt.tlas");
 
     g_dxr.tlas_valid = 1;
     g_dxr.tlas_parity ^= 1;   /* double-buffer for the next frame */
@@ -1525,7 +1554,9 @@ static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len
  * N iterations at doubling à-trous step (1,2,4,...); the final buffer feeds the
  * plain MULT composite. Gated by TD5RE_RT_DENOISE (iterations, 0=off);
  * TD5RE_RT_DENOISE_EDGE (default 1.0) trades grain-kill vs edge sharpness. */
-typedef struct { float rect[4]; float params[4]; } DxrDenoiseCB; /* rect=paneXYWH; params={step,radius,depthSigma,normalPow} */
+typedef struct { float rect[4]; float params[4]; float map[4]; float full[4]; } DxrDenoiseCB; /* rect=paneXYWH (mask space); params={step,radius,depthSigma,normalPow}; [round UA] map.x=shift, full=pane XYWH full-res */
+/* [round UA] cs_rt_upsample constants (mirror of UpCB). */
+typedef struct { float rect[4]; float neutral[4]; float half[4]; float params[4]; float depth[4]; } DxrUpsampleCB;
 
 /* Cached knobs: iterations (0=off, clamped 0..4), edge = normal/depth sharpness.
  * [NIGHT SPECKLE 2026-08-10] Default 2 -> 3. At night the headlight-lit road and
@@ -1633,7 +1664,7 @@ static int dxr_ensure_denoise_psos(void)
  * SRV heap slot of the FINAL denoised buffer (for the composite) and writes it to
  * *final_out. On any failure returns srv0 (undenoised passthrough). */
 static UINT dxr_denoise_mask(ID3D12GraphicsCommandList *cl,
-                             int paneX, int paneY, int paneW, int paneH, int iters,
+                             int paneX, int paneY, int paneW, int paneH, int shift, int iters,
                              ID3D12PipelineState *pso,
                              ID3D12Resource *buf0, D3D12_RESOURCE_STATES *s0, UINT uav0, UINT srv0,
                              ID3D12Resource *buf1, D3D12_RESOURCE_STATES *s1, UINT uav1, UINT srv1,
@@ -1642,6 +1673,9 @@ static UINT dxr_denoise_mask(ID3D12GraphicsCommandList *cl,
     ID3D12Resource *bufs[2];   D3D12_RESOURCE_STATES *st[2];
     UINT uav_slot[2], srv_slot[2];   int i;
     float edge = dxr_denoise_edge();
+    /* [round UA] mask-space rect: the pane's quarter at half res. */
+    int mX = paneX >> shift, mY = paneY >> shift;
+    int mW = (paneW + (1 << shift) - 1) >> shift, mH = (paneH + (1 << shift) - 1) >> shift;
     if (iters <= 0 || !buf1 || !pso) { if (final_out) *final_out = buf0; return srv0; }
     bufs[0] = buf0; st[0] = s0; uav_slot[0] = uav0; srv_slot[0] = srv0;
     bufs[1] = buf1; st[1] = s1; uav_slot[1] = uav1; srv_slot[1] = srv1;
@@ -1660,7 +1694,9 @@ static UINT dxr_denoise_mask(ID3D12GraphicsCommandList *cl,
             dxr_barrier(cl, bufs[dst], *st[dst], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             *st[dst] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
-        dcb.rect[0] = (float)paneX; dcb.rect[1] = (float)paneY; dcb.rect[2] = (float)paneW; dcb.rect[3] = (float)paneH;
+        dcb.rect[0] = (float)mX; dcb.rect[1] = (float)mY; dcb.rect[2] = (float)mW; dcb.rect[3] = (float)mH;
+        dcb.map[0] = (float)shift; dcb.map[1] = dcb.map[2] = dcb.map[3] = 0.0f;
+        dcb.full[0] = (float)paneX; dcb.full[1] = (float)paneY; dcb.full[2] = (float)paneW; dcb.full[3] = (float)paneH;
         dcb.params[0] = (float)(1 << i);       /* à-trous step: 1,2,4,...           */
         dcb.params[1] = 2.0f;                  /* radius (taps/side) -> 5-tap kernel */
         dcb.params[2] = 3.0f / edge;           /* planar-depth tolerance mult (smaller = sharper) */
@@ -1671,11 +1707,92 @@ static UINT dxr_denoise_mask(ID3D12GraphicsCommandList *cl,
         ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 1, dxr_gpu(g_dxr.heap, DXR_SLOT_DEPTH_SRV));
         ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 2, dxr_gpu(g_dxr.heap, uav_slot[dst]));
         ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 3, cbva);
-        ID3D12GraphicsCommandList_Dispatch(cl, (UINT)((paneW + 7) / 8), (UINT)((paneH + 7) / 8), 1);
+        ID3D12GraphicsCommandList_Dispatch(cl, (UINT)((mW + 7) / 8), (UINT)((mH + 7) / 8), 1);
         dxr_uav_barrier(cl, bufs[dst]);
     }
     if (final_out) *final_out = bufs[iters & 1];   /* dst of the last iteration (UAV) */
     return srv_slot[iters & 1];
+}
+
+/* [round UA 2026-11-08] Upsample compute PSOs (share denoise_rs). Returns 1
+ * when both exist; a failure latches so the half-res path is never tried
+ * again (the passes then stay full-res, exactly as before). */
+static int dxr_ensure_upsample_psos(void)
+{
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd;
+    HRESULT hr;
+    if (g_dxr.upsample_pso && g_dxr.upsample_color_pso) return 1;
+    if (g_dxr.upsample_failed) return 0;
+    if (!dxr_ensure_denoise_psos() || !g_dxr.denoise_rs) { g_dxr.upsample_failed = 1; return 0; }
+    if (!g_dxr.upsample_pso) {
+        ZeroMemory(&pd, sizeof(pd));
+        pd.pRootSignature = g_dxr.denoise_rs;
+        pd.CS.pShaderBytecode = SH_BC(cs_rt_upsample); pd.CS.BytecodeLength = SH_LEN(cs_rt_upsample);
+        d3d12_pso_crumb_set("dxr_upsample_r32_cs", pd.CS.pShaderBytecode, pd.CS.BytecodeLength);
+        hr = ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.upsample_pso);
+        d3d12_pso_crumb_clear();
+        if (FAILED(hr)) { dxr_log("upsample R32 CS PSO FAILED 0x%08lX", hr); g_dxr.upsample_failed = 1; return 0; }
+    }
+    if (!g_dxr.upsample_color_pso) {
+        ZeroMemory(&pd, sizeof(pd));
+        pd.pRootSignature = g_dxr.denoise_rs;
+        pd.CS.pShaderBytecode = SH_BC(cs_rt_upsample_color); pd.CS.BytecodeLength = SH_LEN(cs_rt_upsample_color);
+        d3d12_pso_crumb_set("dxr_upsample_color_cs", pd.CS.pShaderBytecode, pd.CS.BytecodeLength);
+        hr = ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.upsample_color_pso);
+        d3d12_pso_crumb_clear();
+        if (FAILED(hr)) { dxr_log("upsample COLOR CS PSO FAILED 0x%08lX", hr); g_dxr.upsample_failed = 1; return 0; }
+    }
+    return 1;
+}
+
+/* [round UA] Half-res mask (src, top-left quarter) -> full-res mask (dst, pane
+ * rect). depth/gbuf must still be compute-readable (call before
+ * restore_scene_inputs). Returns 1 when it ran. */
+static int dxr_upsample_mask(ID3D12GraphicsCommandList *cl, ID3D12PipelineState *pso,
+                             ID3D12Resource *src, D3D12_RESOURCE_STATES *s_src, UINT srv_src,
+                             ID3D12Resource *dst, D3D12_RESOURCE_STATES *s_dst, UINT uav_dst,
+                             int paneX, int paneY, int paneW, int paneH,
+                             const float neutral[4], int nogbuf_neutral,
+                             float depth_scale, float depth_bias)
+{
+    DxrUpsampleCB ucb; D3D12_GPU_VIRTUAL_ADDRESS cbva;
+    if (!pso || !src || !dst) return 0;
+    if (*s_src != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) {
+        dxr_barrier(cl, src, *s_src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        *s_src = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    if (*s_dst != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+        dxr_barrier(cl, dst, *s_dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        *s_dst = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    ZeroMemory(&ucb, sizeof(ucb));
+    ucb.rect[0] = (float)paneX; ucb.rect[1] = (float)paneY; ucb.rect[2] = (float)paneW; ucb.rect[3] = (float)paneH;
+    memcpy(ucb.neutral, neutral, sizeof(ucb.neutral));
+    ucb.half[0] = (float)(paneX >> 1); ucb.half[1] = (float)(paneY >> 1);
+    ucb.half[2] = (float)((paneW + 1) >> 1); ucb.half[3] = (float)((paneH + 1) >> 1);
+    ucb.params[0] = 0.05f;                 /* view-Z tolerance: 5 % of the distance */
+    ucb.params[1] = 8.0f;                  /* normal power (same as the denoiser)   */
+    ucb.params[3] = nogbuf_neutral ? 1.0f : 0.0f;
+    ucb.depth[0] = depth_scale; ucb.depth[1] = depth_bias;
+    cbva = d3d12_priv_ring_cb(&ucb, (UINT)sizeof(ucb));
+    if (!cbva) return 0;
+    ID3D12GraphicsCommandList_SetComputeRootSignature(cl, g_dxr.denoise_rs);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, pso);
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 0, dxr_gpu(g_dxr.heap, srv_src));
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 1, dxr_gpu(g_dxr.heap, DXR_SLOT_DEPTH_SRV));
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 2, dxr_gpu(g_dxr.heap, uav_dst));
+    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 3, cbva);
+    ID3D12GraphicsCommandList_Dispatch(cl, (UINT)((paneW + 7) / 8), (UINT)((paneH + 7) / 8), 1);
+    dxr_uav_barrier(cl, dst);
+    return 1;
+}
+
+void Backend_RTSetResolution(int shadow_half, int refl_half)
+{
+    g_dxr.res_shift[0] = shadow_half ? 1 : 0;
+    g_dxr.res_shift[1] = refl_half ? 1 : 0;
 }
 
 /* Shared shadow/light pass: dispatch the raygen against the TLAS (reading depth +
@@ -1694,6 +1811,7 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     const float *f = (const float *)cb;
     int paneX, paneY, paneW, paneH; UINT raygen, cb_param;
     ID3D12Resource *mask; D3D12_RESOURCE_STATES *mask_state; UINT mask_srv; ID3D12PipelineState *comp;
+    int shift;   /* [round UA] 0 = full-res trace, 1 = half-res (+ upsample) */
 
     d3d12_priv_env(&e);
     if (g_dxr.disabled || !e.device5 || !e.list4 || !e.frame_open || !g_dxr.tlas_valid) return 0;
@@ -1727,6 +1845,12 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     if (!comp) return 0;
     if (!d3d12_priv_scene_inputs(&scene)) return 0;   /* needs depth + gbuffer; transitions them */
     cl = e.list; cl4 = e.list4;
+    /* [round UA] GPU per-pass stamps (TD5RE_RT_TIMESTAMPS=2). */
+    static const char *const k_ts_pre[4]   = { "pre.shadow", "pre.light", "pre.refl", "pre.gi" };
+    static const char *const k_ts_trace[4] = { "rt.shadow.trace", "rt.light.trace", "rt.refl.trace", "rt.gi.trace" };
+    static const char *const k_ts_dn[4]    = { "rt.shadow.denoise", "rt.light.denoise", "rt.refl.denoise", "rt.gi.denoise" };
+    static const char *const k_ts_comp[4]  = { "rt.shadow.comp", "rt.light.comp", "rt.refl.comp", "rt.gi.comp" };
+    Backend_RTStamp(k_ts_pre[mode & 3]);
 
     /* depth SRV (R32_FLOAT) t1 / gbuffer SRV (R8G8B8A8) t2 into the DXR heap. */
     ZeroMemory(&srvd, sizeof(srvd)); srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1741,6 +1865,11 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     if (mode == 1) { paneX = (int)f[18]; paneY = (int)f[19]; paneW = (int)f[21]; paneH = (int)f[22]; }
     else           { paneX = (int)f[17]; paneY = (int)f[18]; paneW = (int)f[27]; paneH = (int)f[28]; }
     if (paneW <= 0 || paneH <= 0) { paneX = 0; paneY = 0; paneW = e.width; paneH = e.height; }
+    /* [round UA] Half-res only when the upsample pipeline exists (else the
+     * composite would read an unfilled full-res mask). Pane origin/size are
+     * the full-res numbers; the dispatch below covers ceil(W/2) x ceil(H/2). */
+    shift = g_dxr.res_shift[mode == 2 ? 1 : 0];
+    if (shift && !dxr_ensure_upsample_psos()) shift = 0;
 
     cbva = d3d12_priv_ring_cb(cb, cb_size);
     if (!cbva) { d3d12_priv_restore_scene_inputs(); return 0; }
@@ -1765,6 +1894,8 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     /* [P3] bindless texture table (param 5) -> heap slot 16. Bound for every pass
      * (only chit_refl references it; harmless for shadow/light). */
     ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 5, dxr_gpu(g_dxr.heap, DXR_BINDLESS_BASE));
+    { UINT rc[4]; rc[0] = (UINT)shift; rc[1] = rc[2] = rc[3] = 0;   /* [round UA] b4 RTScaleCB */
+      ID3D12GraphicsCommandList_SetComputeRoot32BitConstants(cl, 6, 4, rc, 0); }
     ZeroMemory(&d, sizeof(d));
     d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF + (UINT64)raygen * DXR_SBT_RAYGEN_STRIDE;
     d.RayGenerationShaderRecord.SizeInBytes  = DXR_SHADER_ID_SIZE;
@@ -1774,52 +1905,82 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     d.HitGroupTable.StartAddress    = g_dxr.sbt_va + DXR_SBT_HITGROUP_OFF;
     d.HitGroupTable.SizeInBytes     = (UINT64)DXR_HITGROUP_COUNT * DXR_SHADER_ID_SIZE;
     d.HitGroupTable.StrideInBytes   = DXR_SHADER_ID_SIZE;
-    d.Width = (UINT)paneW; d.Height = (UINT)paneH; d.Depth = 1;
+    d.Width  = (UINT)((paneW + (1 << shift) - 1) >> shift);
+    d.Height = (UINT)((paneH + (1 << shift) - 1) >> shift);
+    d.Depth  = 1;
     ID3D12GraphicsCommandList4_DispatchRays(cl4, &d);
     dxr_uav_barrier(cl, mask);
     Backend_NoteRTMark(mode == 2 ? "dispatch_refl" : mode == 1 ? "dispatch_light" : "dispatch_shadow");
+    Backend_RTStamp(k_ts_trace[mode & 3]);
 
     /* [denoise] Edge-aware à-trous over the just-written mask, while depth/gbuf are
      * still compute-readable (before restore). Applies to every jittered pass:
      * shadow + GI (R32F), dynamic-light + reflection (RGBA16F). Redirect the
-     * composite to whichever ping-pong buffer holds the denoised result. */
+     * composite to whichever ping-pong buffer holds the denoised result.
+     * [round UA 2026-11-08] Table-driven (one pair of ping-pong buffers per
+     * pass) so the half-res path can follow the denoise with the 2x upsample
+     * into the OTHER buffer of the pair. Full-res behaviour is unchanged:
+     * same iterations, same buffers, same final selection. */
     {
-        int iters = dxr_denoise_iters();
-        if (iters > 0 && dxr_ensure_denoise_psos()) {
-            ID3D12Resource *final = mask;
-            switch (mode) {
-            case 0: mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_pso,
-                        g_dxr.sunvis,  &g_dxr.sunvis_state,  DXR_SLOT_SUNVIS_UAV,  DXR_SLOT_SUNVIS_SRV,
-                        g_dxr.sunvis2, &g_dxr.sunvis2_state, DXR_SLOT_SUNVIS2_UAV, DXR_SLOT_SUNVIS2_SRV, &final);
-                    g_dxr.sunvis_final = final;
-                    mask_state = (final == g_dxr.sunvis2) ? &g_dxr.sunvis2_state : &g_dxr.sunvis_state; break;
-            case 3: mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_pso,
-                        g_dxr.gi,  &g_dxr.gi_state,  DXR_SLOT_GI_UAV,  DXR_SLOT_GI_SRV,
-                        g_dxr.gi2, &g_dxr.gi2_state, DXR_SLOT_GI2_UAV, DXR_SLOT_GI2_SRV, &final);
-                    mask_state = (final == g_dxr.gi2) ? &g_dxr.gi2_state : &g_dxr.gi_state; break;
-            case 1: if (g_dxr.denoise_color_pso) {
-                        mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_color_pso,
-                            g_dxr.lightcol,  &g_dxr.lightcol_state,  DXR_SLOT_LIGHTCOL_UAV,  DXR_SLOT_LIGHTCOL_SRV,
-                            g_dxr.lightcol2, &g_dxr.lightcol2_state, DXR_SLOT_LIGHTCOL2_UAV, DXR_SLOT_LIGHTCOL2_SRV, &final);
-                        mask_state = (final == g_dxr.lightcol2) ? &g_dxr.lightcol2_state : &g_dxr.lightcol_state; } break;
-            case 2: if (g_dxr.denoise_color_pso) {
-                        /* [NIGHT SPECKLE 2026-08-10] Cap reflection denoise at 2
-                         * iters: the wider footprint that de-speckles shadow/GI/
-                         * light would over-soften a glossy car reflection into a
-                         * smear. Reflections carry only 1 ray but are a sharp
-                         * mirror signal, not stochastic grain. */
-                        int refl_iters = iters > 2 ? 2 : iters;
-                        mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, refl_iters, g_dxr.denoise_color_pso,
-                            g_dxr.reflcol,  &g_dxr.reflcol_state,  DXR_SLOT_REFLCOL_UAV,  DXR_SLOT_REFLCOL_SRV,
-                            g_dxr.reflcol2, &g_dxr.reflcol2_state, DXR_SLOT_REFLCOL2_UAV, DXR_SLOT_REFLCOL2_SRV, &final);
-                        mask_state = (final == g_dxr.reflcol2) ? &g_dxr.reflcol2_state : &g_dxr.reflcol_state; } break;
-            }
-            mask = final;
-        } else if (mode == 0) {
-            g_dxr.sunvis_final = g_dxr.sunvis;
+        struct {
+            ID3D12Resource *b[2]; D3D12_RESOURCE_STATES *st[2]; UINT uav[2], srv[2];
+            ID3D12PipelineState *dn, *up; int iter_cap; float neutral[4]; int ngn;
+        } P;
+        int iters = dxr_denoise_iters(), have_dn;
+        ID3D12Resource *final = mask; int fi = 0;
+        ZeroMemory(&P, sizeof(P));
+        switch (mode) {
+        case 0: P.b[0] = g_dxr.sunvis;   P.st[0] = &g_dxr.sunvis_state;   P.uav[0] = DXR_SLOT_SUNVIS_UAV;   P.srv[0] = DXR_SLOT_SUNVIS_SRV;
+                P.b[1] = g_dxr.sunvis2;  P.st[1] = &g_dxr.sunvis2_state;  P.uav[1] = DXR_SLOT_SUNVIS2_UAV;  P.srv[1] = DXR_SLOT_SUNVIS2_SRV;
+                P.dn = g_dxr.denoise_pso; P.up = g_dxr.upsample_pso; P.iter_cap = 4;
+                P.neutral[0] = 1.0f; P.ngn = 1; break;
+        case 3: P.b[0] = g_dxr.gi;       P.st[0] = &g_dxr.gi_state;       P.uav[0] = DXR_SLOT_GI_UAV;       P.srv[0] = DXR_SLOT_GI_SRV;
+                P.b[1] = g_dxr.gi2;      P.st[1] = &g_dxr.gi2_state;      P.uav[1] = DXR_SLOT_GI2_UAV;      P.srv[1] = DXR_SLOT_GI2_SRV;
+                P.dn = g_dxr.denoise_pso; P.up = g_dxr.upsample_pso; P.iter_cap = 4;
+                P.neutral[0] = 1.0f; P.ngn = 1; break;
+        case 1: P.b[0] = g_dxr.lightcol; P.st[0] = &g_dxr.lightcol_state; P.uav[0] = DXR_SLOT_LIGHTCOL_UAV; P.srv[0] = DXR_SLOT_LIGHTCOL_SRV;
+                P.b[1] = g_dxr.lightcol2;P.st[1] = &g_dxr.lightcol2_state;P.uav[1] = DXR_SLOT_LIGHTCOL2_UAV;P.srv[1] = DXR_SLOT_LIGHTCOL2_SRV;
+                P.dn = g_dxr.denoise_color_pso; P.up = g_dxr.upsample_color_pso; P.iter_cap = 4;
+                P.ngn = 0; break;   /* sky -> 0; rgen_light still lights no-G-buffer pixels */
+        default:/* 2 */
+                P.b[0] = g_dxr.reflcol;  P.st[0] = &g_dxr.reflcol_state;  P.uav[0] = DXR_SLOT_REFLCOL_UAV;  P.srv[0] = DXR_SLOT_REFLCOL_SRV;
+                P.b[1] = g_dxr.reflcol2; P.st[1] = &g_dxr.reflcol2_state; P.uav[1] = DXR_SLOT_REFLCOL2_UAV; P.srv[1] = DXR_SLOT_REFLCOL2_SRV;
+                P.dn = g_dxr.denoise_color_pso; P.up = g_dxr.upsample_color_pso;
+                /* [NIGHT SPECKLE 2026-08-10] Cap reflection denoise at 2
+                 * iters: the wider footprint that de-speckles shadow/GI/
+                 * light would over-soften a glossy car reflection into a
+                 * smear. Reflections carry only 1 ray but are a sharp
+                 * mirror signal, not stochastic grain. */
+                P.iter_cap = 2;
+                P.ngn = 1; break;
         }
+        if (iters > P.iter_cap) iters = P.iter_cap;
+        /* [round UA] At half res every à-trous step spans 2 full pixels, so one
+         * iteration fewer keeps the same screen footprint (1,2 half = 2,4 full). */
+        if (shift && iters > 1) iters--;
+        have_dn = iters > 0 && dxr_ensure_denoise_psos() && P.dn;
+        if (have_dn) {
+            mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, shift, iters, P.dn,
+                        P.b[0], P.st[0], P.uav[0], P.srv[0],
+                        P.b[1], P.st[1], P.uav[1], P.srv[1], &final);
+        } else {
+            final = P.b[0]; mask_srv = P.srv[0];
+        }
+        fi = (final == P.b[1]) ? 1 : 0;
+        if (shift) {
+            /* half-res result in b[fi] -> full-res into b[fi^1] */
+            if (dxr_upsample_mask(cl, P.up, P.b[fi], P.st[fi], P.srv[fi],
+                                  P.b[fi ^ 1], P.st[fi ^ 1], P.uav[fi ^ 1],
+                                  paneX, paneY, paneW, paneH, P.neutral, P.ngn, f[15], f[16])) {
+                fi ^= 1; final = P.b[fi]; mask_srv = P.srv[fi];
+            }
+        }
+        mask = final;
+        mask_state = P.st[fi];
+        if (mode == 0) g_dxr.sunvis_final = final;
     }
 
+    Backend_RTStamp(k_ts_dn[mode & 3]);
     d3d12_priv_restore_scene_inputs();
     if (*mask_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
         dxr_barrier(cl, mask, *mask_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1839,6 +2000,7 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &sc);
     ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
+    Backend_RTStamp(k_ts_comp[mode & 3]);
 
     d3d12_priv_end_rt_pass();   /* restore RTV+DSV + invalidate backend draw cache */
     return 1;
@@ -2027,15 +2189,57 @@ void Backend_RTDebugView(void)
     ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
 }
 
+/* ---- [round UA 2026-11-08] RT pipeline compile OFF the race-load path ------
+ * CreateStateObject is the single most expensive RT load step: 177 ms with a
+ * WARM driver shader cache on an RTX 5070 Ti (round UA measurement), more on a
+ * cold cache / slower CPU, and it used to run inside the race load (first
+ * dxr_ensure_init). Backend_RTPrewarmAsync (called by the game once, in the
+ * frontend, when LIGHTING is HIGH) compiles the global root signature + state
+ * object on a worker thread. The thread touches ONLY g_dxr.global_rs and
+ * g_dxr.so, and nothing on the main thread reads either before
+ * dxr_ensure_init, which joins the thread first; shutdown / device change join
+ * too. If the thread failed, ensure_init simply builds them itself. */
+static HANDLE s_prewarm_thread;
+static volatile LONG s_prewarm_ok;
+
+static DWORD WINAPI dxr_prewarm_proc(LPVOID arg)
+{
+    (void)arg;
+    if (!g_dxr.global_rs && !dxr_create_global_rs()) return 0;
+    if (!g_dxr.so && !dxr_create_state_object()) return 0;
+    InterlockedExchange(&s_prewarm_ok, 1);
+    return 0;
+}
+
+static void dxr_prewarm_join(void)
+{
+    if (!s_prewarm_thread) return;
+    WaitForSingleObject(s_prewarm_thread, INFINITE);
+    CloseHandle(s_prewarm_thread);
+    s_prewarm_thread = NULL;
+    dxr_log("prewarm joined (ok=%ld)", (long)s_prewarm_ok);
+}
+
+void Backend_RTPrewarmAsync(void)
+{
+    if (g_dxr.disabled || !g_dxr.device5 || g_dxr.inited || s_prewarm_thread) return;
+    if (g_dxr.global_rs && g_dxr.so) return;
+    s_prewarm_ok = 0;
+    s_prewarm_thread = CreateThread(NULL, 0, dxr_prewarm_proc, NULL, 0, NULL);
+    dxr_log("prewarm: RT pipeline compile started on a worker thread (%s)",
+            s_prewarm_thread ? "ok" : "CreateThread FAILED, will compile at race load");
+}
+
 static int dxr_ensure_init(void)
 {
     if (g_dxr.inited) return 1;
     if (!g_dxr.device5) return 0;
+    dxr_prewarm_join();
     if (!dxr_create_heap())        goto fail;
     dxr_write_null_tlas_srv(DXR_SLOT_TLAS_SRV);   /* valid descriptor before any TLAS */
     if (!dxr_fill_bindless_fallback()) goto fail; /* [P3] valid SRV in every bindless slot */
-    if (!dxr_create_global_rs())   goto fail;
-    if (!dxr_create_state_object())goto fail;
+    if (!g_dxr.global_rs && !dxr_create_global_rs())   goto fail;   /* [round UA] may be prewarmed */
+    if (!g_dxr.so && !dxr_create_state_object())       goto fail;
     if (!dxr_create_sbt())         goto fail;
     if (!dxr_create_blit())        goto fail;
     g_dxr.inited = 1;
@@ -2114,6 +2318,7 @@ void d3d12_dxr_smoke_blit(void)
 void d3d12_dxr_shutdown(void)
 {
     int i;
+    dxr_prewarm_join();   /* [round UA] the compile thread may still own so/global_rs */
     /* Meshes + pools + scratch (device-lost drill: everything torn down here). */
     for (i = 0; i < DXR_MAX_MESHES; i++) {
         DxrMesh *m = &g_dxr.meshes[i];
@@ -2148,6 +2353,10 @@ void d3d12_dxr_shutdown(void)
     if (g_dxr.denoise_pso){ ID3D12PipelineState_Release(g_dxr.denoise_pso); g_dxr.denoise_pso = NULL; }
     if (g_dxr.denoise_color_pso){ ID3D12PipelineState_Release(g_dxr.denoise_color_pso); g_dxr.denoise_color_pso = NULL; }
     if (g_dxr.denoise_rs) { ID3D12RootSignature_Release(g_dxr.denoise_rs); g_dxr.denoise_rs = NULL; }
+    /* [round UA] half-res upsample PSOs (must not survive a device loss). */
+    if (g_dxr.upsample_pso)       { ID3D12PipelineState_Release(g_dxr.upsample_pso);       g_dxr.upsample_pso = NULL; }
+    if (g_dxr.upsample_color_pso) { ID3D12PipelineState_Release(g_dxr.upsample_color_pso); g_dxr.upsample_color_pso = NULL; }
+    g_dxr.upsample_failed = 0;
     if (g_dxr.light_pso) { ID3D12PipelineState_Release(g_dxr.light_pso);  g_dxr.light_pso = NULL; }
     if (g_dxr.refl_pso)  { ID3D12PipelineState_Release(g_dxr.refl_pso);   g_dxr.refl_pso = NULL; }
     if (g_dxr.geo_buf)   { ID3D12Resource_Release(g_dxr.geo_buf); g_dxr.geo_buf = NULL; g_dxr.geo_mapped = NULL; }

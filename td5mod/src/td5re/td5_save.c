@@ -385,7 +385,7 @@ void td5_save_set_view_distance(float v) { if (v < 0.0f) v = 0.0f; if (v > 1.0f)
 
 static int32_t  s_display_mode;                               /* 0x466020 */
 static int32_t  s_fog_enabled;                                /* 0x466024 */
-static int32_t  s_speed_units;                                /* 0x466028 */
+static int32_t  s_speed_units = 1; /* 0x466028; round UB: KPH default (orig 0=MPH) */
 void td5_save_set_speed_units(int u) { s_speed_units = u; }
 static int32_t  s_camera_damping;                             /* 0x46602C */
 void td5_save_set_camera_damping(int d) { s_camera_damping = d; }

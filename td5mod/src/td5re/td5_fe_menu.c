@@ -221,12 +221,12 @@ static void frontend_refresh_display_option_labels(void) {
     frontend_set_button_label(3, "Speed Readout");
     frontend_set_button_label(4, "Show FPS");
     frontend_set_button_label(5, "Camera Damping");
-    frontend_set_button_label(6, "LIGHTING OPTIONS");   /* [RT2 P8] -> sub-screen */
-    /* [RUN1 2026-09-26] Row 7 became the PERFORMANCE nav row on 2026-09-12 and
-     * OK moved to row 8; this refresh still stamped "OK" over row 7, so the
-     * PERFORMANCE button read "OK" and the real OK kept its placeholder. */
-    frontend_set_button_label(7, "PERFORMANCE");
-    frontend_set_button_label(8, "OK");
+    /* [round UA 2026-11-08] LIGHTING OPTIONS moved under PERFORMANCE (Mariano:
+     * "put lighting options under performance"): row 6 is the PERFORMANCE nav
+     * row again and OK is row 7. [RUN1 2026-09-26] keep this list in step with
+     * the buttons created in Screen_DisplayOptions, or a nav row reads "OK". */
+    frontend_set_button_label(6, "PERFORMANCE");
+    frontend_set_button_label(7, "OK");
 }
 
 /* Load continue cup data: read + decrypt + restore game state. */
@@ -1823,8 +1823,11 @@ void Screen_LanguageOptions(void) {
 
 /* ========================================================================
  * [RT2 P8] LIGHTING OPTIONS sub-screen — per-feature RT tiers (see
- * docs/plans/RT_LIGHTING2_PLAN.md Phase 8). Reached from the GRAPHICS OPTIONS
- * "LIGHTING OPTIONS ->" row; BACK returns there. 10 ◄► selector rows + OK.
+ * docs/plans/RT_LIGHTING2_PLAN.md Phase 8). Reached from PERFORMANCE's
+ * "LIGHTING OPTIONS" nav row (round UA; it was a GRAPHICS OPTIONS row before);
+ * OK and BACK return to PERFORMANCE. 10 ◄► selector rows + OK.
+ * Since round UA every row applies LIVE (next rendered frame): see the
+ * td5_rt_opt_* getters in td5_rt.c.
  * Row 0 (LIGHTING QUALITY) is the master and is live even at LOW (greyed only
  * when no DXR device); rows 1..7 are HIGH-only features, greyed/inert at LOW.
  * L/R writes g_td5.ini.rt_* + persists; the tier->env-knob mapping is applied
@@ -1985,8 +1988,8 @@ void Screen_LightingOptions(void) {
                 } else if (lo_row_active(active_button)) {
                     lo_row_apply(active_button, delta);
                     td5_ini_persist_options();
-                    /* Best-effort live re-map; env-cached RT knobs apply on the
-                     * next race, QUALITY (row 0) applies immediately. */
+                    /* [round UA] every row is live (td5_rt_opt_* getters);
+                     * this only logs the new state. */
                     td5_rt_apply_lighting_options();
                     frontend_play_sfx(2);
                     s_inner_state = 4;
@@ -1994,9 +1997,9 @@ void Screen_LightingOptions(void) {
                     frontend_play_sfx(10);          /* HIGH-only row inert at LOW */
                 }
             } else if (s_button_index == LO_ROWS) {
-                /* OK -> persist + back to GRAPHICS OPTIONS. */
+                /* OK -> persist + back to PERFORMANCE (round UA: its parent). */
                 td5_ini_persist_options();
-                s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;
+                s_return_screen = TD5_SCREEN_PERFORMANCE_OPTIONS;
                 s_inner_state = 7;
             }
         }
@@ -2259,12 +2262,14 @@ void Screen_PerformanceCustom(void) {
  * [PERF PRESETS 2026-09-29] PERFORMANCE screen (the short preset page).
  *
  * Reached from GRAPHICS OPTIONS via the "PERFORMANCE ->" nav row; BACK/OK
- * return there. Four rows:
+ * return there. Five rows:
  *   0 AUTO-SELECT      action  — probe the GPU/CPU and pick both tiers
  *   1 GRAPHICS QUALITY ◄►      — LOW / MEDIUM / HIGH / ULTRA (raster knobs)
  *   2 LIGHTING         ◄►      — LOW / MEDIUM / HIGH / ULTRA (the RT stack)
- *   3 CUSTOM ->        nav     — the per-knob list (screen 54)
- *   4 OK
+ *   3 LIGHTING OPTIONS nav     — per-feature RT rows (screen 51) [round UA,
+ *                                moved here from GRAPHICS OPTIONS]
+ *   4 CUSTOM ->        nav     — the per-knob list (screen 54)
+ *   5 OK
  *
  * The two tier rows read back from the live g_td5.ini state, so a player who
  * changes one knob in CUSTOM sees the row fall to "CUSTOM" — the preset is a
@@ -2282,14 +2287,14 @@ void Screen_PerformanceCustom(void) {
  * ==================================================================== */
 #define PP_BASE_Y 97
 #define PP_STEP_Y 40
-enum { PP_ROW_AUTO = 0, PP_ROW_GFX, PP_ROW_LIGHT, PP_ROW_CUSTOM, PP_ROWS };
+enum { PP_ROW_AUTO = 0, PP_ROW_GFX, PP_ROW_LIGHT, PP_ROW_LIGHT_OPTS, PP_ROW_CUSTOM, PP_ROWS };
 
 /* [LAYOUT] "GRAPHICS QUALITY" overflowed the 224px frame into the ◄► arrow
  * zone (verified by framedump 2026-09-30). FRONTEND_SCREEN_GUIDE.md: shorten
  * the label, never widen the column -- and "GRAPHICS" reads fine as the pair
  * to "LIGHTING". */
 static const char *const k_pp_labels[PP_ROWS] = {
-    "AUTO-SELECT", "GRAPHICS", "LIGHTING", "CUSTOM"
+    "AUTO-SELECT", "GRAPHICS", "LIGHTING", "LIGHTING OPTIONS", "CUSTOM"
 };
 
 int td5_performance_first_selector_row(void) { return PP_ROW_GFX; }
@@ -2334,6 +2339,8 @@ void frontend_render_performance_options_overlay(float sx, float sy)
                      td5_tr(td5_perf_tier_name(tier)), 0xFFFFFFFFu,
                      sx * PERF_VALUE_SCALE, sy * PERF_VALUE_SCALE);
     }
+    fe_draw_text(PERF_VALUE_X * sx, (float)(PP_BASE_Y + PP_STEP_Y * PP_ROW_LIGHT_OPTS + 6) * sy,
+                 ">", 0xFF8890A0u, sx * PERF_VALUE_SCALE, sy * PERF_VALUE_SCALE);
     fe_draw_text(PERF_VALUE_X * sx, (float)(PP_BASE_Y + PP_STEP_Y * PP_ROW_CUSTOM + 6) * sy,
                  ">", 0xFF8890A0u, sx * PERF_VALUE_SCALE, sy * PERF_VALUE_SCALE);
 }
@@ -2379,6 +2386,13 @@ void Screen_PerformanceOptions(void) {
                 td5_ini_persist_options();
                 frontend_play_sfx(2);
                 s_inner_state = 4;
+            } else if (s_button_index == PP_ROW_LIGHT_OPTS) {
+                /* [round UA] LIGHTING OPTIONS -> per-feature RT rows; its OK
+                 * and BACK come back here. */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_LIGHTING_OPTIONS;
+                frontend_play_sfx(3);
+                s_inner_state = 7;
             } else if (s_button_index == PP_ROW_CUSTOM) {
                 /* CUSTOM -> the per-knob list; its OK comes back here. */
                 td5_ini_persist_options();
@@ -2563,10 +2577,10 @@ void Screen_DisplayOptions(void) {
         frontend_create_button(SNK_SpeedReadoutButTxt,  120, 217, 0x120, 0x20); /* Speed Readout */
         frontend_create_button(SNK_SpeedReadoutButTxt,  120, 257, 0x120, 0x20); /* Show FPS */
         frontend_create_button(SNK_CameraDampingButTxt, 120, 297, 0x120, 0x20); /* Camera Damping */
-        frontend_create_button(SNK_CameraDampingButTxt, 120, 337, 0x120, 0x20); /* LIGHTING OPTIONS -> (row 6 nav) */
-        /* [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS -> nav row (row 7). */
-        frontend_create_button(TR("PERFORMANCE"),       120, 377, 0x120, 0x20); /* PERFORMANCE -> (row 7 nav) */
-        frontend_create_button(SNK_OkButTxt,            200, 417, 0x60,  0x20); /* OK (row 8) */
+        /* [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS -> nav row. [round UA]
+         * row 6 now (the LIGHTING OPTIONS row moved under PERFORMANCE). */
+        frontend_create_button(TR("PERFORMANCE"),       120, 337, 0x120, 0x20); /* PERFORMANCE -> (row 6 nav) */
+        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20); /* OK (row 7) */
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -2617,6 +2631,7 @@ void Screen_DisplayOptions(void) {
                 /* Row 3 — Speed Readout MPH/KPH (applied live to the HUD) */
                 s_display_speed_units = !s_display_speed_units;
                 g_td5.ini.speed_units = s_display_speed_units;
+                g_td5.ini.speed_units_chosen = 1;   /* round UB: a real choice */
                 td5_save_set_speed_units(s_display_speed_units);
                 changed = 1;
             } else if (active_button == 4 && delta != 0) {
@@ -2631,22 +2646,13 @@ void Screen_DisplayOptions(void) {
                 if (s_display_camera_damping > 9) s_display_camera_damping = 9;
                 changed = 1;
             } else if (s_button_index == 6) {
-                /* [RT2 P8] Row 6 — LIGHTING OPTIONS: a navigation row (not a
-                 * selector). Enter opens the per-feature LIGHTING OPTIONS
-                 * sub-screen (LIGHTING QUALITY moved inside as row 0). Persist
-                 * the display options first so nothing is lost on the hop. */
-                td5_ini_persist_options();
-                s_return_screen = TD5_SCREEN_LIGHTING_OPTIONS;
-                s_inner_state = 7;
-                break;
-            } else if (s_button_index == 7) {
-                /* [LOW-END PERF 2026-09-12] Row 7 — PERFORMANCE OPTIONS: nav row.
-                 * Enter opens the low-end toggles + LOW-END PRESET sub-screen. */
+                /* [LOW-END PERF 2026-09-12] Row 6 — PERFORMANCE OPTIONS: nav row
+                 * (row 7 before round UA moved LIGHTING OPTIONS under it). */
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_PERFORMANCE_OPTIONS;
                 s_inner_state = 7;
                 break;
-            } else if (s_button_index == 8) {
+            } else if (s_button_index == 7) {
                 /* OK — persist every display option to td5re.ini. Resolution +
                  * window-mode/vsync already applied live; this writes them (plus
                  * fog / units / damping / lighting quality / W,H) so they survive a
@@ -2657,8 +2663,8 @@ void Screen_DisplayOptions(void) {
                 g_td5.ini.fog_enabled      = s_display_fog_enabled;
                 g_td5.ini.speed_units      = s_display_speed_units;
                 g_td5.ini.camera_damping   = s_display_camera_damping;
-                /* [RT2 P8] LIGHTING QUALITY moved to the LIGHTING OPTIONS
-                 * sub-screen (row 6 nav) — no longer written here. */
+                /* [RT2 P8] LIGHTING QUALITY lives in the LIGHTING OPTIONS
+                 * sub-screen (under PERFORMANCE since round UA). */
                 td5_save_set_speed_units(s_display_speed_units);
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;

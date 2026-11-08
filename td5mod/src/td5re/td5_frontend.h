@@ -103,6 +103,11 @@ int  td5_frontend_get_player_laneassist(int player);
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);
 
+/* [round UB 2026-11-08] What the last launch rolled for a RANDOM car / track
+ * ("RANDOM: <track> / <car>"), "" when the launch rolled nothing. The loading
+ * screen shows it. */
+const char *td5_frontend_random_pick_label(void);
+
 #ifndef TD5RE_RELEASE
 /* --- Self-test director queries (td5_selftest.c; dev builds only) --- */
 /* 1 once the current screen's slide-in animation has completed. */
@@ -119,6 +124,17 @@ void frontend_mp_simul_preview_setup(int n);
 int  frontend_mp_ai_player_count(void);
 int  frontend_mp_human_count(void);
 void frontend_mp_ai_players_reset(void);
+/* [round UB 2026-11-08] u4-random-pick: checks the RANDOM entries' pools (no
+ * generated / geo slot, Moscow and the Viper in) and that repeated rolls differ.
+ * `race_track` / `race_car` = what the race actually ran (both must be in the
+ * pools). 0 = pass, 1 = fail; `note` gets the counts. */
+int  frontend_random_selftest(int race_track, int race_car, char *note, size_t cap);
+/* [round UE 2026-11-08] ue-hidden-rows: the rows Mariano asked hidden per mode
+ * (traffic battle TRAFFIC + POLICE, time trial LAPS + CHECKPOINT TIMERS, cup
+ * CHECKPOINT TIMERS), the greyed MP drag gearbox, and no gap in the SELECT TRACK /
+ * QUICK RACE selector column when DIRECTION hides (RANDOM). Restores every piece of
+ * frontend state it touches. 0 = pass, 1 = fail; `note` names the first failure. */
+int  frontend_ue_rows_selftest(char *note, size_t cap);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""

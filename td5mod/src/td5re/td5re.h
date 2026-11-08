@@ -263,7 +263,12 @@ typedef struct TD5_GlobalState {
     struct {
         /* Display */
         int  fog_enabled;
-        int  speed_units;
+        int  speed_units;        /* 0=MPH, 1=KPH (default KPH, round UB) */
+        /* [round UB 2026-11-08] 1 once the user toggled SPEED READOUT in the
+         * DISPLAY options. Until then speed_units is forced to KPH on load:
+         * SpeedUnits=0 was written to every td5re.ini by the options persist
+         * (first-boot auto-perf included), so a saved 0 is not a choice. */
+        int  speed_units_chosen;
         int  camera_damping;
         /* UI language (PORT-ONLY i18n, td5_i18n.c): 0=English, 1=Spanish
          * (es-AR). [Game] Language; set from the LANGUAGE options screen. */
@@ -953,6 +958,10 @@ int  td5_perf_lighting_tier(void);
  * cores). Caps at HIGH: auto-detect never makes the game slower than today. */
 int  td5_perf_detect_graphics_tier(void);
 int  td5_perf_detect_lighting_tier(void);
+/* [round UA] GPU-class -> LIGHTING tier (MEDIUM / HIGH) for an RT-capable adapter.
+ * Pure function of the adapter name, VRAM and window size (unit-tested by the
+ * u1-rt-tier selftest row). */
+int  td5_perf_rt_class_tier(const char *name, unsigned vram_mb, int width, int height);
 
 /* Probe + apply both axes + log the verdict. `live` as above. Used by the boot
  * one-shot AND by the PERFORMANCE screen's AUTO-SELECT row. */

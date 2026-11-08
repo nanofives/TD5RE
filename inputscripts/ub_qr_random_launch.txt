@@ -1,0 +1,15 @@
+# [round UB 2026-11-08] QUICK RACE on RANDOM car + RANDOM track -> OK -> the race runs the roll (frontend.log
+# "RANDOM car -> / RANDOM track ->", race.log "RACE OPTIONS USED: ... track=N"). Launch as ub_qr_random.txt.
+sync menu
+240 log QR_ENTRY
++60 key left press
++30 key down press
++60 key left press
++60 key down press
++30 key down press
++30 key down press
++60 log QR_ON_OK
++30 key enter press
+sync race
+300 log RACE_RUNNING
++60 quit

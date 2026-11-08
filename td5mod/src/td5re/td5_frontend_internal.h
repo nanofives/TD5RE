@@ -812,6 +812,9 @@ typedef struct {
 } TD5_RaceOptsCtx;
 
 int  td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *ctx);
+/* [round UE 2026-11-08] 1 = the MP car-select panes show the greyed MANUAL gearbox
+ * row (MP drag locked by the mode vote). td5_fe_mp_setup.c. */
+int  mp_carsel_drag_gear_row(void);
 /* [MP DRAG 2026-09-29] 1 when a row is VISIBLE but not adjustable in this mode,
  * so build_page can mark its button `disabled` (greyed text, skipped by nav and
  * by the value arrows). Today only DIFFICULTY on the drag strip with 0 AI
@@ -1212,16 +1215,22 @@ void frontend_reset_text_input(void);
 
 /* [2026-07-09, A9 refactor] Cross-TU symbols that were re-declared inline-extern
  * at their call sites instead of living in this header (extern-in-.c lint). */
-void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused);          /* td5_fe_race.c */
-void frontend_render_carsel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
-void frontend_render_trksel_hints(float sx, float sy);                                         /* td5_fe_race.c */
+/* [round UB 2026-11-08] RANDOM as a car / track selector entry (td5_fe_race.c) */
+extern int s_car_random;               /* car selector shows RANDOM (rolled at launch) */
+extern int s_track_random;             /* track selector shows RANDOM (rolled at launch) */
+extern int s_car_random_outgoing;      /* car select: the entry sliding out was RANDOM */
+int   frontend_car_random_offered(void);
+int   frontend_track_random_offered(void);
+int   frontend_random_car_pool(int lo, int hi, int *cand, int cap);
+int   frontend_random_track_pool(int *cand, int cap);
+void  frontend_car_ring_bounds(int *lo, int *hi);
+void  frontend_resolve_random_picks(void);
+void  frontend_draw_random_card(float x, float y, float w, float h, float sx, float sy);
 extern int s_mp_postrace_menu_mode;    /* 0 = standard menu, 1 = cup-between menu (td5_fe_race.c) */
 float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);                        /* td5_fe_net.c */
 int   frontend_race_summary_on(void);                                                          /* td5_fe_race.c */
 void  frontend_render_race_summary_overlay(float sx, float sy);                                /* td5_fe_race.c */
 extern int s_postrace_td6_level;       /* >0 = post-race table is a TD6 track (td5_frontend.c) */
-int   frontend_qr_random_button_on(void);                                                      /* td5_frontend.c */
-void  frontend_qr_roll_selector(int which);                                                    /* td5_frontend.c */
 int   frontend_mp_player_pane_cell(int p);                                                     /* td5_fe_race.c */
 int   mp_profiles_enabled(void);                                                               /* td5_fe_race.c */
 

@@ -131,4 +131,8 @@ int   d3d12_shader_dxil(void);
 #define SH_BC(n)  (d3d12_shader_dxil() ? (const void *)g_##n##_60 : (const void *)g_##n##_50)
 #define SH_LEN(n) (d3d12_shader_dxil() ? (SIZE_T)sizeof(g_##n##_60) : (SIZE_T)sizeof(g_##n##_50))
 
+/* [round UA] PSO / RT state-object compile timing, summed into the
+ * Backend_GpuStatsDump report (graphics, compute and state objects). */
+void Backend_NotePsoCompile(double ms, int midframe);
+
 #endif /* D3D12_BACKEND_PRIV_H */

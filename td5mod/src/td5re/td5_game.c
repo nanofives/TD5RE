@@ -1203,20 +1203,25 @@ static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
 static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 3 } };
 /* [LOW-END PERF 2026-09-12] PERFORMANCE sub-screen: hub row 2 = GRAPHICS OPTIONS,
- * then Display row 7 = the "PERFORMANCE ->" nav row (rows: 0 Display Mode, 1 VSync,
- * 2 Fogging, 3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 LIGHTING, 7 PERFORMANCE,
- * 8 OK). Without this route --StartScreen=53 cannot land and the selftest screen
+ * then Display row 6 = the "PERFORMANCE ->" nav row (rows: 0 Display Mode, 1 VSync,
+ * 2 Fogging, 3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 PERFORMANCE, 7 OK;
+ * round UA moved the LIGHTING OPTIONS row under PERFORMANCE). Without this route --StartScreen=53 cannot land and the selftest screen
  * walk -- the frontend's only automated regression net -- never covers the screen. */
 static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
-                                                { TD5_SCREEN_DISPLAY_OPTIONS, 7 } };
+                                                { TD5_SCREEN_DISPLAY_OPTIONS, 6 } };
 /* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE is one row deeper: PERFORMANCE
- * row 3 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
- * 2 LIGHTING, 3 CUSTOM, 4 OK). Same reason as the route above -- without it
+ * row 4 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
+ * 2 LIGHTING, 3 LIGHTING OPTIONS, 4 CUSTOM, 5 OK). Same reason as the route above -- without it
  * --StartScreen=55 cannot land and the selftest screen walk skips the screen. */
 static const SSW_NavStep k_ssw_perf_custom[] = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                  { TD5_SCREEN_OPTIONS_HUB, 2 },
-                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 7 },
+                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 6 },
+                                                 { TD5_SCREEN_PERFORMANCE_OPTIONS, 4 } };
+/* [round UA 2026-11-08] LIGHTING OPTIONS: PERFORMANCE row 3. */
+static const SSW_NavStep k_ssw_light_opts[] = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
+                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 6 },
                                                  { TD5_SCREEN_PERFORMANCE_OPTIONS, 3 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
@@ -1279,6 +1284,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
     case TD5_SCREEN_PERFORMANCE_OPTIONS: SSW_ROUTE(k_ssw_perf_opts);  /* [LOW-END PERF] */
+    case TD5_SCREEN_LIGHTING_OPTIONS:    SSW_ROUTE(k_ssw_light_opts); /* [round UA] */
     case TD5_SCREEN_PERFORMANCE_CUSTOM: SSW_ROUTE(k_ssw_perf_custom); /* [PERF PRESETS] */
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
     case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);
@@ -2328,6 +2334,7 @@ static void init_race_modes_and_seed(void)
 {
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
+    td5_rt_prewarm();   /* [round UA] RT pipeline compile overlaps the track load */
 
 #ifndef TD5RE_RELEASE
     /* [CHAOS CO-OP 2026-09-29] TD5RE_CHAOS_FAKE_SEATS=4|6|8 fabricates a seat
@@ -3538,6 +3545,22 @@ static void init_race_level_and_assets(void)
             }
         }
     }
+
+    /* [round UB 2026-11-08] One line with every race option as THIS race runs it,
+     * after the per-mode overrides above (drag, traffic battle, net, LEVELINF):
+     * docs/RACE_OPTIONS_MATRIX.md reads "reaches the race" off this line and the
+     * u5-* selftest rows assert it. collisions: the physics flag is inverted
+     * (0 = on). */
+    TD5_LOG_I(LOG_TAG,
+              "RACE OPTIONS USED: gt=%d tt_synth=%d wanted=%d drag=%d mp_mode=%d net=%d track=%d rev=%d "
+              "laps=%d traffic=%d vol=%d police=%d opponents=%d tier=%d collisions=%d cp_timers=%d circuit=%d",
+              (int)g_td5.game_type, g_td5.solo_mode_synth, g_td5.wanted_mode_enabled,
+              g_td5.drag_race_enabled, (int)g_td5.mp_mode_config.mode, g_td5.network_active,
+              g_td5.track_index, g_td5.reverse_direction, g_td5.circuit_lap_count,
+              g_td5.traffic_enabled, g_td5.traffic_volume, g_td5.special_encounter_enabled,
+              g_td5.num_ai_opponents, g_td5.difficulty_tier,
+              td5_physics_get_collisions_flag() == 0 ? 1 : 0, g_special_encounter,
+              g_track_is_circuit);
 
     /* ---- Step 4b: Initialize per-track fog from LEVELINF.DAT ----
      * Original: 0x42AE56 reads fog_enable at +0x5C, fog RGB at +0x60..+0x62,
@@ -8921,6 +8944,8 @@ int td5_game_run_race_frame(void) {
         td5_game_net_sync_frame(1);
 
     td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
+    /* [round UA] TD5RE_FRAMESTATS=N: frame-time percentiles, dev measurement. */
+    if (td5_profile_race_frame()) g_td5.quit_requested = 1;
     td5_game_trace_stage("frame_begin", 0);
 
     /* [S27] Controller-disconnect check (once per frame, before the sim loop).
@@ -11942,6 +11967,16 @@ static void loadscreen_draw_frame_ex(int pct, int pump, int rt_warmup)
         /* Baseline sits just above the bar, left-aligned with it. The bar is the
          * "how far along" signal, so the line carries only the phase name. */
         loadscreen_draw_text(bx0, by0 - sh * 0.014f, cap_px, s_ls_label, 0xFFF0F0F0u);
+    }
+    {
+        /* [round UB 2026-11-08] A RANDOM car / track names what it rolled, above
+         * the phase line ("RANDOM: KESWICK, ENGLAND / HOT DOG"). Empty otherwise. */
+        const char *pick = td5_frontend_random_pick_label();
+        if (pick && pick[0]) {
+            float cap_px = sh * 0.026f;
+            if (cap_px < 13.0f) cap_px = 13.0f;
+            loadscreen_draw_text(bx0, by0 - sh * 0.050f, cap_px, pick, 0xFFFFCC33u);
+        }
     }
 
     if (rt_warmup >= 2)

@@ -381,6 +381,17 @@ enum { TD5_SKY_NIGHT = 0, TD5_SKY_SUNNY = 1, TD5_SKY_OVERCAST = 2 };
  * sun tint). dir/rgb are left untouched for NIGHT/OVERCAST or if unresolved
  * (return value TD5_SKY_OVERCAST is then used by callers as "soft shadows"). */
 int td5_render_sky_sun(float dir[3], float rgb[3]);
+/* [SKY SUNPOS round UC] Is the sun disc drawn over SKY? Maps the disc direction and a
+ * ring of directions around it (the sun's glare radius + slack) to the dome texels and
+ * tests each against the panorama's skyline (td5_sky_sunpos.h, re/tools/sky_sunpos.py).
+ * Returns 1 = the whole footprint is over sky, 0 = some of it is over backdrop,
+ * -1 = no sun drawn on this sky (not SUNNY), -2 = the sky has no table entry.
+ * `note` (optional) gets a one-line description. */
+int td5_render_sky_sun_check(char *note, int note_len);
+/* [round UE] Selftest hook (ue-shadow-sun): the direction the light2 sun-shadow pass
+ * casts from (+Y down) and the sky sun the disc is drawn at (+Y down, valid when
+ * *sky_cls == TD5_SKY_SUNNY). Returns the shadow class (0 = no sun shadows). */
+int td5_render_shadow_sun_query(float shadow[3], float sky[3], int *sky_cls);
 /* Draw the sun disc (SUNNY + HIGH only); called from the sky phase after the
  * dome, before the world. No-op otherwise. */
 void td5_render_draw_sun_disc(void);

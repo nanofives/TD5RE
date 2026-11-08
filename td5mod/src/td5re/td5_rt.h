@@ -59,4 +59,20 @@ int td5_rt_warmup_prepare(void);
  * debug view over the pane. No-op when RT is unavailable. */
 void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h);
 
+/* [round UA 2026-11-08] LIVE LIGHTING OPTIONS getters (see td5_rt.c): the
+ * user's pre-launch TD5RE_* env override wins, else derived from g_td5.ini.rt_*
+ * on every call, so LIGHTING OPTIONS / PERFORMANCE changes apply next frame. */
+void  td5_rt_prewarm(void);   /* [round UA] background RT pipeline compile */
+int   td5_rt_opt_shadow_rays(void);
+float td5_rt_opt_refl_dist(void);
+int   td5_rt_opt_gi_on(void);
+int   td5_rt_opt_gi_rays(void);
+int   td5_rt_opt_light_rays(void);
+float td5_rt_opt_light_cone_soft(void);
+int   td5_rt_opt_sun_disc(void);
+int   td5_rt_opt_sun_probe(void);
+int   td5_rt_opt_reflections(void);
+int   td5_rt_opt_shadow_half(void);
+int   td5_rt_opt_refl_half(void);
+
 #endif /* TD5_RT_H */

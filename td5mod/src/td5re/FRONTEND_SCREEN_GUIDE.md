@@ -174,17 +174,25 @@ centred on their row.
       time), and `fe_fit_text_scale` condenses over-wide captions.
 
 - **[RT2 P8] LIGHTING OPTIONS (screen 51, `Screen_LightingOptions` in
-  `td5_fe_menu.c`)** — the RT-lighting per-feature sub-screen, reached from the
-  **GRAPHICS OPTIONS** (16) row 6 "LIGHTING OPTIONS ->" (which replaced the old
-  LIGHTING QUALITY toggle; QUALITY is now row 0 here). 8 ◄► selector rows —
+  `td5_fe_menu.c`)** — the RT-lighting per-feature sub-screen. **Since round UA
+  (2026-11-08) it is reached from PERFORMANCE (53) row 3 "LIGHTING OPTIONS"**
+  (rows there: 0 AUTO-SELECT, 1 GRAPHICS ◄►, 2 LIGHTING ◄►, 3 LIGHTING OPTIONS
+  nav, 4 CUSTOM nav, 5 OK); its OK and BACK return to PERFORMANCE
+  (`frontend_get_parent_screen`), and the selftest screen walk reaches it via
+  `k_ssw_light_opts` (td5_game.c). GRAPHICS OPTIONS (16) no longer has the row:
+  0-5 selectors, 6 PERFORMANCE nav, 7 OK. Every row applies live since round UA
+  (`td5_rt_opt_*` getters in td5_rt.c), so the "env-cached, next race" note
+  below is history. Originally it was GRAPHICS OPTIONS row 6 "LIGHTING OPTIONS
+  ->" (which replaced the old LIGHTING QUALITY toggle; QUALITY is now row 0 here). 8 ◄► selector rows —
   LIGHTING QUALITY, SHADOW QUALITY, SHADOW DETAIL, REFLECTIONS, REFLECTION
   RANGE, GLOBAL ILLUM., SUN & SKY, LIGHTS — each defaulting to its highest
   tier, persisted to `[Lighting]` INI keys (`ShadowRays`/`ShadowRes`/
   `ReflectionQuality`/`ReflectionRange`/`GIQuality`/`SunProbe`/`LightQuality` +
   the existing `Quality`). Row 0 is live whenever a DXR device exists; rows 1–7
   are HIGH-only and render greyed/inert at LOW. Tiers map onto the `TD5RE_RT_*`
-  env knobs via `td5_rt_apply_lighting_options()` (env override still wins). BACK
-  returns to GRAPHICS OPTIONS. Adding this screen touched the 12 standard
+  getters (env override still wins; was env knobs via
+  `td5_rt_apply_lighting_options()` before round UA). BACK returned to GRAPHICS
+  OPTIONS before round UA, to PERFORMANCE now. Adding this screen touched the 12 standard
   new-screen sites (enum + `TD5_SCREEN_COUNT`, `s_screens[]`, title, parent-of,
   is-options, 2 button-anim switches, value-overlay + arrow dispatch,
   prototypes, handler, and the GRAPHICS-OPTIONS nav row).
@@ -363,6 +371,15 @@ button that exists only while that entry is the pick:
   route preview and its options button reads SPRINT / CIRCUIT (strip context: SETTINGS); screen 56
   is titled SPRINT / CIRCUIT in the city flow, has a 7th row (TERRAIN HEIGHT, `GEO_OPT_VIS` 7) and its
   FREE ROAM button is kept for index stability but always hidden + disabled.
+* **[Round UE] Hidden selector rows close up.** QUICK RACE (CAR, TRACK, DIRECTION, LAPS at
+  `QR_ROW_Y(0..)`) and SELECT TRACK (TRACK, DIRECTION, LAPS at y 97 + 35*k) re-stack their VISIBLE
+  rows in `frontend_random_track_rows` -> `frontend_reflow_rows` after every per-track DIRECTION /
+  LAPS refresh, so RANDOM, a forward-only track or time trial (no LAPS) never leave an empty slot.
+  The value column and arrows follow `s_buttons[].y`. RACE OPTIONS / SETTINGS / OK / BACK keep their
+  fixed rows. A new row in that column must be added to the id list there.
+* **[Round UE] MP drag car select** draws a grey MANUAL row between PAINT and OK in every pane layout
+  (`mp_carsel_drag_gear_row`, display only, not in the pane nav ring). Preview it with
+  `TD5RE_MP_SIMUL_PREVIEW=N TD5RE_MP_MODE_FORCE=4 --StartScreen=20`.
 * **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
   STUDIO chip was created as button 17 and silently refused (`-1`) until round
   1026. If you add a button past the last index of a screen, check the return value.

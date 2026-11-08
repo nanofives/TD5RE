@@ -265,7 +265,7 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
 /* [RT2 P1] TD5RE_SUN_PROBE dev toggle (default on). 0 = ignore the image sun,
  * fall back to the zone-derived sun in HIGH (matches pre-RT2 behaviour). */
 static int sun_probe_enabled(void)
-{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_PROBE"); v = (e && e[0]) ? atoi(e) : 1; } return v; }
+{ return td5_rt_opt_sun_probe(); }   /* [round UA] SUN & SKY row, live (env TD5RE_SUN_PROBE still wins) */
 
 /* [CAR SUN 2026-08-03] Sunlit-car brighten gain (car bodywork *= 1+gain in
  * ApplyFogAndAlphaTest). 2026-08-04: default ON in DEV (0.35) so the car reads
@@ -373,6 +373,64 @@ static int td5_render_scene_sun(float sun[3], float *out_dom)
     return 0;
 }
 
+/* [round UE 2026-11-08] Mariano (UC decision b): "shadows follow the visible sun
+ * without RT". The sun disc is drawn at s_sky_sun_dir on EVERY lighting level, and
+ * RT already casts from that direction (the probe branch above), but with RT off the
+ * light2 sun-shadow pass cast from the strongest per-zone light, so on a sunny track
+ * the shadows pointed away from the sun on screen (Blue Ridge, Switzerland: the
+ * round-UC table moved the disc further from the zone light). On a sky that draws a
+ * sun (td5_render_sky_sun SUNNY, above the horizon) the shadow pass now takes that
+ * direction. Only the DIRECTION moves: the class and the zone dominance (shadow
+ * strength) stay those of the zone light, so a track with no zone sun (tunnel,
+ * night) still casts nothing, and vertex / car lighting keep td5_render_scene_sun
+ * (the original zone table). TD5RE_SUN_SKY_SHADOWS=0 = the old zone direction. */
+static int sun_sky_shadows_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_SUN_SKY_SHADOWS", 1, 0, 1);
+    return v;
+}
+
+static int td5_render_shadow_sun(float sun[3], float *out_dom)
+{
+    int cls = td5_render_scene_sun(sun, out_dom);
+    int moved = 0;
+    float zone[3] = { sun[0], sun[1], sun[2] };
+    if (!td5_rt_active() && cls == TD5_SKY_SUNNY && sun_sky_shadows_enabled()) {
+        float pdir[3];
+        if (td5_render_sky_sun(pdir, NULL) == TD5_SKY_SUNNY && pdir[1] < -0.05f) {
+            sun[0] = pdir[0]; sun[1] = pdir[1]; sun[2] = pdir[2];
+            sun_elevate(sun);
+            moved = 1;
+        }
+    }
+    {   /* one line per race (the scene sun is fixed for a race): what the shadows use */
+        static uint32_t s_logged_race = 0xFFFFFFFFu;
+        const uint32_t race = (uint32_t)g_td5.track_index * 2u + (uint32_t)g_td5.reverse_direction;
+        if (race != s_logged_race) {
+            s_logged_race = race;
+            TD5_LOG_I(LOG_TAG, "shadow sun: track=%d rt=%d cls=%d zone=(%.3f,%.3f,%.3f) shadow=(%.3f,%.3f,%.3f) "
+                      "from=%s dom=%.3f",
+                      g_td5.track_index, td5_rt_active(), cls, zone[0], zone[1], zone[2],
+                      sun[0], sun[1], sun[2], moved ? "sky" : (td5_rt_active() ? "rt" : "zone"),
+                      (double)*out_dom);
+        }
+    }
+    return cls;
+}
+
+/* Test hook for selftest row ue-shadow-sun: the direction the shadow pass casts
+ * from this frame (+Y down) and the sky sun the disc is drawn at. Returns the
+ * shadow class (0 = none). */
+int td5_render_shadow_sun_query(float shadow[3], float sky[3], int *sky_cls)
+{
+    float dom = 0.0f;
+    int c = td5_render_shadow_sun(shadow, &dom);
+    int k = td5_render_sky_sun(sky, NULL);
+    if (sky_cls) *sky_cls = k;
+    return c;
+}
+
 /* [RT2 P1] Overcast softening knobs (HIGH-only; RT shadow shader reads params2.w
  * for the cone widen, and the game caps strength here). */
 static float sun_overcast_cone(void)
@@ -385,7 +443,7 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
 
     float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
-    int sky_cls = td5_render_scene_sun(sun, &dom);
+    int sky_cls = td5_render_shadow_sun(sun, &dom);   /* [round UE] sky sun with RT off */
     /* [ROAD-CAST SHADOW FIX 2026-08-03] The unified scene sun (td5_render_scene_sun)
      * is derived in the game's +Y-DOWN world/zone convention (sun.y < 0 = above the
      * horizon). The RT shadow pass, however, casts rays in the DEPTH-RECONSTRUCTED
@@ -531,18 +589,18 @@ void td5_render_apply_gi_pass(int vp_x, int vp_y)
          * multiplied most of the track down toward the 0.45 floor (only open-sky
          * spots stayed bright) — read as unwanted global dimming. TD5RE_RT_GI=1
          * re-enables (tune TD5RE_RT_GI_FLOOR up / _DIST down if used). */
-        s_gi_on    = ((e = getenv("TD5RE_RT_GI"))       && e[0]) ? atoi(e)        : 0;
-        s_gi_rays  = ((e = getenv("TD5RE_RT_GI_RAYS"))  && e[0]) ? atoi(e)        : 4;
+        s_gi_on    = 1;   /* [round UA] live: td5_rt_opt_gi_on() below */
+        s_gi_rays  = 1;
         s_gi_dist  = ((e = getenv("TD5RE_RT_GI_DIST"))  && e[0]) ? (float)atof(e) : 6000.0f;
         s_gi_floor = ((e = getenv("TD5RE_RT_GI_FLOOR")) && e[0]) ? (float)atof(e) : 0.45f;
-        if (s_gi_rays < 1)  s_gi_rays = 1;
-        if (s_gi_rays > 16) s_gi_rays = 16;
         if (s_gi_floor < 0.0f) s_gi_floor = 0.0f;
         if (s_gi_floor > 1.0f) s_gi_floor = 1.0f;
         TD5_LOG_I(LOG_TAG, "light2: GI pass rays=%d dist=%.0f floor=%.2f on=%d",
-                  s_gi_rays, (double)s_gi_dist, (double)s_gi_floor, s_gi_on);
+                  td5_rt_opt_gi_rays(), (double)s_gi_dist, (double)s_gi_floor, td5_rt_opt_gi_on());
     }
-    if (!s_gi_on) return;
+    /* [round UA] GLOBAL ILLUM. row, live (was latched = restart-only). */
+    if (!td5_rt_opt_gi_on()) return;
+    s_gi_rays = td5_rt_opt_gi_rays();
     for (i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
     cam[0] = s_camera_pos[0]; cam[1] = s_camera_pos[1]; cam[2] = s_camera_pos[2];
     depth_scale = 1.0f / DEPTH_NORMALIZE_INV;
@@ -562,6 +620,9 @@ void td5_render_apply_gi_pass(int vp_x, int vp_y)
 void td5_render_apply_ssr_pass(int vp_x, int vp_y)
 {
     if (!td5_light2_active() || !td5_light2_reflections()) return;
+    /* [round UA] LIGHTING OPTIONS > REFLECTIONS OFF gates only the RT pass in
+     * HIGH (it used to clear the shared SSR toggle and never restore it). */
+    if (td5_rt_active() && !td5_rt_opt_reflections()) return;
 
     /* Per-material base reflectivity LUT (ids 0..7; beyond COUNT = 0). */
     float refl8[8];
@@ -616,13 +677,9 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
      * count stays 1 (the precision lever is Phase 8's half-res dispatch). */
     float refl_dist = s_dist;
     if (td5_rt_active()) {
-        static float s_rt_refl_dist = -1.0f;
-        if (s_rt_refl_dist < 0.0f) {
-            const char *e = getenv("TD5RE_RT_REFL_DIST");
-            s_rt_refl_dist = (e && e[0]) ? (float)atof(e) : 50000.0f;
-            if (s_rt_refl_dist < s_dist) s_rt_refl_dist = s_dist;
-        }
-        refl_dist = s_rt_refl_dist;
+        /* [round UA] REFLECTION RANGE row, live (was latched = restart-only). */
+        float rd = td5_rt_opt_refl_dist();
+        refl_dist = (rd < s_dist) ? s_dist : rd;
     }
 
     /* [P3] Scene sun dir for the RT reflection's sun shadow ray -- SAME unified

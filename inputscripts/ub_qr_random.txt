@@ -1,0 +1,16 @@
+# [round UB 2026-11-08] QUICK RACE: LEFT once on CAR (Viper) -> RANDOM, DOWN, LEFT once on TRACK (Moscow) -> RANDOM,
+# hold so the frame dump catches both, then RIGHT on TRACK -> Moscow, UP, RIGHT on CAR -> Viper. Launch with
+# --StartScreen=7 --StartScreenDirect=1 --DefaultCar=0 --DefaultTrack=0.
+sync menu
+240 log QR_ENTRY
++60 key left press
++60 log QR_CAR_RANDOM
++30 key down press
++60 key left press
++180 log QR_BOTH_RANDOM
++30 key right press
++120 log QR_TRACK_BACK
++30 key up press
++30 key right press
++120 log QR_CAR_BACK
++10 quit

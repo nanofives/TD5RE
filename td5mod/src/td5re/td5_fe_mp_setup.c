@@ -193,6 +193,10 @@ void frontend_init_race_schedule(void) {
         TD5_LOG_I(LOG_TAG, "QuickRace launch: start_span_offset=%d", g_td5.ini.start_span_offset);
 #endif
 
+    /* [round UB 2026-11-08] roll the RANDOM car / track entries (a launch from a
+     * selection screen only; Race Again and the next cup race keep the pick) */
+    frontend_resolve_random_picks();
+
     g_td5.race_requested = 1;
     g_td5.car_index   = frontend_current_car_index();
     g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)
@@ -413,6 +417,62 @@ void frontend_init_race_schedule(void) {
         g_td5.circuit_lap_count = s_game_option_laps + 1;
         TD5_LOG_I(LOG_TAG, "InitRaceSchedule: circuit_lap_count=%d (laps row %d)",
                   g_td5.circuit_lap_count, s_game_option_laps + 1);
+        /* [round UB 2026-11-08] COLLISIONS + CHECKPOINT TIMERS: the same staleness.
+         * Only ConfigureGameTypeFlags wrote them, at game-type pick, so a RACE
+         * OPTIONS edit reached the race one mode pick later. */
+        td5_physics_set_collisions(s_game_option_collisions);
+        g_td5.checkpoint_timers_enabled = s_game_option_checkpoint_timers;
+    }
+
+    /* [round UB 2026-11-08] Mariano: "on time trials i selected traffic very high
+     * and it doesn't get reflecte on the race". RACE OPTIONS offers TRAFFIC,
+     * POLICE and COLLISIONS in time trial, but ConfigureGameTypeFlags case 7
+     * forces traffic, police and collisions off (as the original's case 7 @
+     * 0x00410CA0 does: gTrafficActorsEnabled = 0) and the commit above is
+     * single-race only, so all three were lost. Time trial is a single race at
+     * runtime (solo synth: slots 1..5 inactive, traffic slots untouched), so the
+     * race runs them as chosen. LAPS (1) and CHECKPOINT TIMERS (on) stay forced:
+     * those define the time trial (questions for Mariano in
+     * docs/RACE_OPTIONS_MATRIX.md). */
+    if (s_selected_game_type == 7 && !s_mp_flow) {
+        int tv = s_game_option_traffic;
+        if (tv < 0) tv = 0;
+        if (tv > TD5_TRAFFIC_VOLUME_COUNT - 1) tv = TD5_TRAFFIC_VOLUME_COUNT - 1;
+        g_td5.traffic_volume            = tv;
+        g_td5.traffic_enabled           = (tv != 0);
+        g_td5.special_encounter_enabled = s_game_option_cops ? 1 : 0;
+        td5_physics_set_collisions(s_game_option_collisions);
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: TIME TRIAL options traffic=%d police=%d collisions=%d",
+                  tv, g_td5.special_encounter_enabled, s_game_option_collisions);
+    }
+
+    /* [round UB] Cop chase (SP): the TRAFFIC level and LAPS picked on RACE OPTIONS /
+     * SELECT TRACK, not the ones of the moment the mode was picked.
+     * [round UE 2026-11-08] Mariano (Q1): TRAFFIC OFF = an empty road. The
+     * original forces traffic on in cop chase (it used to run Heavy here). */
+    if (s_selected_game_type == 8 && !s_mp_flow) {
+        int tv = s_game_option_traffic;
+        if (tv < 0) tv = 0;
+        if (tv > TD5_TRAFFIC_VOLUME_COUNT - 1) tv = TD5_TRAFFIC_VOLUME_COUNT - 1;
+        g_td5.traffic_enabled   = (tv != 0);
+        g_td5.traffic_volume    = tv;
+        g_td5.circuit_lap_count = s_game_option_laps + 1;
+        td5_physics_set_collisions(s_game_option_collisions);
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: COP CHASE options traffic=%d laps=%d collisions=%d",
+                  tv, g_td5.circuit_lap_count, s_game_option_collisions);
+    }
+
+    /* [round UB] Cups (SP): COLLISIONS was never written for game types 1..6, so a
+     * cup ran whatever the last single race left in the physics flag. */
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6 && !s_mp_flow)
+        td5_physics_set_collisions(s_game_option_collisions);
+
+    /* [round UB] SP drag launches from the RACE OPTIONS pre-launch step, which never
+     * wrote the DIFFICULTY tier (the AI driver of each lane reads it); the tier was
+     * the one of the moment drag was picked. */
+    if (s_selected_game_type == 9 && !s_mp_flow) {
+        g_td5.difficulty_tier = s_game_option_difficulty;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: DRAG difficulty tier=%d", g_td5.difficulty_tier);
     }
 
     /* [COP-CHASE 2026-06-21] Cop Chase / wanted mode never spawns the separate
@@ -1037,11 +1097,19 @@ static void mp_simul_draw_arrows(float bx, float by, float bw, float bh, float s
  * player's accent colour as the INTERIOR fill in place of the default purple.
  * Selector buttons draw the original ◄/► arrow sprites at the edges; `val`/
  * `swatch_rgb` (right, kept clear of the right arrow) are optional. */
+/* [round UE 2026-11-08] 1 = the next mp_simul_draw_btn call draws a shown-but-inert
+ * row: the shared disabled frame (bb_state 2) and a grey caption, never focused.
+ * One-shot, cleared by the call. */
+static int s_mp_btn_draw_disabled = 0;
+
 void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
                        int focused, uint32_t pcol, int arrows,
                        const char *val, int swatch_rgb, float sx, float sy) {
     uint32_t rgb = pcol & 0x00FFFFFFu;
     uint32_t tc  = 0xFFFFFFFFu;
+    const int disabled = s_mp_btn_draw_disabled;
+    s_mp_btn_draw_disabled = 0;
+    if (disabled) { focused = 0; tc = 0xFF808080u; }
     float ty = (y + (h - SMALLFONT_TTF_CAP) * 0.5f) * sy;   /* vertically centred */
     float redge = arrows ? (x + w - 18.0f) : (x + w - 6.0f);
     /* Transparent background: unselected frame has no interior fill; the focused
@@ -1056,7 +1124,7 @@ void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
     if (bscale > 1.0f) bscale = 1.0f;
     if (bscale < 0.34f) bscale = 0.34f;
     fe_draw_button_frame_fill_scaled(x * sx, y * sy, w * sx, h * sy,
-                                     focused ? 0 : 1, rgb | 0xFF000000u, bscale, sx, sy);
+                                     disabled ? 2 : (focused ? 0 : 1), rgb | 0xFF000000u, bscale, sx, sy);
     if (focused) {
         int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
         int lum = (r * 30 + g * 59 + b * 11) / 100;     /* readable label over the accent */
@@ -1263,6 +1331,24 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
                                          (uint32_t)s_mp_player_color[p],
                                          (uint32_t)s_mp_player_color[p],
                                          TD6_PAT_SOLID);
+}
+
+/* [round UE 2026-11-08] Mariano (Q6): MP drag forces the MANUAL gearbox (td5_input.c
+ * want_manual |= drag_race_enabled) while each player's AUTO / MANUAL pick lives on
+ * PROFILE SELECTION, which comes BEFORE the mode vote. So once the vote has locked
+ * DRAG, the car-select pane shows the gearbox as a greyed MANUAL row between PAINT
+ * and OK, as single-player drag greys its AUTO / MANUAL row on car select. Display
+ * only: not in the pane's nav ring, and the player's own pick is left untouched for
+ * the next non-drag race. */
+int mp_carsel_drag_gear_row(void) {
+    return g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE;
+}
+
+static void mp_simul_draw_drag_gear_row(int p, float bx, float by, float bw, float bh,
+                                        float sx, float sy) {
+    uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
+    s_mp_btn_draw_disabled = 1;
+    mp_simul_draw_btn(bx, by, bw, bh, TR("MANUAL"), 0, pcol, 0, NULL, -1, sx, sy);
 }
 
 /* Draw one car-select pane button by MP_BTN_* index — keeps the PAINT variants
@@ -1490,13 +1576,21 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
              * clumping at a fixed size — capped so they don't get comically tall in
              * a big 2-up pane. */
             {
-                float slot = col_h / (float)MP_BTN_COUNT;
+                const int gear = mp_carsel_drag_gear_row();   /* [round UE] MP drag */
+                const int rows = MP_BTN_COUNT + gear;
+                float slot = col_h / (float)rows;
                 float bh = slot - 5.0f;
-                int b;
+                int b, r = 0;
                 if (bh > 44.0f) bh = 44.0f;
                 if (bh < 10.0f) bh = 10.0f;
-                for (b = 0; b < MP_BTN_COUNT; b++) {
-                    float yy = col_top + (float)b * slot + (slot - bh) * 0.5f;
+                for (b = 0; b < MP_BTN_COUNT; b++, r++) {
+                    float yy;
+                    if (gear && b == MP_BTN_OK) {   /* MANUAL sits between PAINT and OK */
+                        yy = col_top + (float)r * slot + (slot - bh) * 0.5f;
+                        mp_simul_draw_drag_gear_row(p, rx, yy, rcw, bh, sx, sy);
+                        r++;
+                    }
+                    yy = col_top + (float)r * slot + (slot - bh) * 0.5f;
                     mp_simul_draw_pane_button(p, b, rx, yy, rcw, bh, sx, sy);
                 }
             }
@@ -1549,7 +1643,7 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
             lcw     = zusable * 0.44f;                    /* narrow buttons column */
             rcw     = zusable - lcw;                      /* WIDE stats column */
             rx      = bx + lcw + GAP;
-            slot    = zone_h / (float)MP_BTN_COUNT;
+            slot    = zone_h / (float)(MP_BTN_COUNT + mp_carsel_drag_gear_row());   /* [round UE] */
             bh      = slot - 1.5f;
             if (bh < 6.0f)  bh = 6.0f;
             if (bh > 28.0f) bh = 28.0f;
@@ -1566,9 +1660,19 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
                 }
             }
             mp_simul_draw_pane_car(p, bx, top0, bw, car_h, sx, sy);    /* full-width car */
-            for (b = 0; b < MP_BTN_COUNT; b++) {
-                float yy = zone_y + (float)b * slot + (slot - bh) * 0.5f;
-                mp_simul_draw_pane_button(p, b, bx, yy, lcw, bh, sx, sy);
+            {
+                const int gear = mp_carsel_drag_gear_row();   /* [round UE] MP drag */
+                int r = 0;
+                for (b = 0; b < MP_BTN_COUNT; b++, r++) {
+                    float yy;
+                    if (gear && b == MP_BTN_OK) {
+                        yy = zone_y + (float)r * slot + (slot - bh) * 0.5f;
+                        mp_simul_draw_drag_gear_row(p, bx, yy, lcw, bh, sx, sy);
+                        r++;
+                    }
+                    yy = zone_y + (float)r * slot + (slot - bh) * 0.5f;
+                    mp_simul_draw_pane_button(p, b, bx, yy, lcw, bh, sx, sy);
+                }
             }
             frontend_draw_car_stat_bars(rx, zone_y, rcw, zone_h,
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
@@ -1586,20 +1690,22 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
             float top0   = pyr + 32.0f;                  /* below the car-name banner */
             float bottom = pyr + pane_h - 18.0f;
             const float CAR_GAP = 4.0f, ROW_GAP = 2.0f;
-            /* 3 buttons (CAR/PAINT/OK) + 1 stat panel = 4 stacked rows below the car. */
-            float avail  = (bottom - top0) - (CAR_GAP + 4.0f * ROW_GAP);
+            /* 3 buttons (CAR/PAINT/OK) + 1 stat panel = 4 stacked rows below the car.
+             * [round UE] MP drag adds the greyed MANUAL row: 4 buttons. */
+            const float NB = 3.0f + (float)mp_carsel_drag_gear_row();
+            float avail  = (bottom - top0) - (CAR_GAP + (NB + 1.0f) * ROW_GAP);
             const float PANEL_WANT = 31.0f, PANEL_FLOOR = 12.0f;
             const float BTN_MIN = 11.0f, CAR_MIN = 16.0f;
             float car_h  = pane_h * (big_car ? 0.44f : 0.32f);
             float bh     = btn_cap;
             float panel_h = PANEL_WANT;
-            float over   = (car_h + 3.0f * bh + panel_h) - avail;
+            float over   = (car_h + NB * bh + panel_h) - avail;
             float frame_scale, yy;
             if (over > 0.0f) { float g = car_h - CAR_MIN; if (g > over) { car_h -= over; over = 0.0f; } else { car_h = CAR_MIN; over -= g; } }
-            if (over > 0.0f) { float g = 3.0f * (bh - BTN_MIN); if (g > over) { bh -= over / 3.0f; over = 0.0f; } else { bh = BTN_MIN; over -= g; } }
+            if (over > 0.0f) { float g = NB * (bh - BTN_MIN); if (g > over) { bh -= over / NB; over = 0.0f; } else { bh = BTN_MIN; over -= g; } }
             if (over > 0.0f) { panel_h -= over; if (panel_h < PANEL_FLOOR) panel_h = PANEL_FLOOR; }
-            { float total = car_h + 3.0f * bh + panel_h; if (total > avail && total > 0.0f) { float k = avail / total; car_h *= k; bh *= k; panel_h *= k; } }
-            { float slack = avail - (car_h + 3.0f * bh + panel_h); if (slack > 0.0f) car_h += slack; }
+            { float total = car_h + NB * bh + panel_h; if (total > avail && total > 0.0f) { float k = avail / total; car_h *= k; bh *= k; panel_h *= k; } }
+            { float slack = avail - (car_h + NB * bh + panel_h); if (slack > 0.0f) car_h += slack; }
             frame_scale = bh / 32.0f;
             if (frame_scale > 1.0f) frame_scale = 1.0f;
             if (frame_scale < 0.34f) frame_scale = 0.34f;
@@ -1612,6 +1718,10 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
                                         s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
                                         s_mp_pane_spec_car[p], pcol, 1, frame_scale, sx, sy);
             yy += panel_h + ROW_GAP;
+            if (mp_carsel_drag_gear_row()) {   /* [round UE] MP drag: greyed MANUAL */
+                mp_simul_draw_drag_gear_row(p, bx, yy, bw, bh, sx, sy);
+                yy += bh + ROW_GAP;
+            }
             mp_simul_draw_pane_button(p, MP_BTN_OK,    bx, yy, bw, bh, sx, sy);
         }
 

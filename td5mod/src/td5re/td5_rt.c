@@ -25,6 +25,7 @@
 #include "td5_race_state.h"
 #include "td5_ai.h"
 #include "td5_input.h"      /* td5_input_is_playback_active (chassis-lift parity) */
+#include "td5_roam_mode.h"  /* [round UA] td5_roam_active: no RT world feed in roam */
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <stdlib.h>
@@ -89,71 +90,133 @@ void td5_rt_set_quality(int high)
     s_quality_high = high ? 1 : 0;
 }
 
-/* [RT2 P8] Translate the LIGHTING OPTIONS INI tiers (g_td5.ini.rt_*) onto the
- * TD5RE_RT_* env knobs the RT passes already read. Called once at startup AFTER
- * the INI loads (main.c). An env var the user set explicitly is preserved (the
- * dev A/B override wins) — we only fill a knob the env doesn't already define.
- * Defaults are all HIGHEST, so a fresh INI yields the full-quality RT look.
- * HIGH-only effect: LOW never reads these. */
-static void rt_setenv_if_unset(const char *key, const char *val)
+/* [RT2 P8, reworked round UA 2026-11-08] LIGHTING OPTIONS -> the RT passes.
+ *
+ * Before round UA this function _putenv'd TD5RE_RT_* knobs "only if unset", and
+ * every pass latched its knob in a function-static on first use. The first call
+ * (startup) therefore set every knob, every later call (the menu) found it set
+ * and did nothing, and the passes had latched anyway: a LIGHTING OPTIONS change
+ * did NOTHING until the game was restarted (measured round UA: SHADOW QUALITY
+ * HIGH -> LOW in the menu left rgen_shadow at 8 rays for the rest of the run).
+ *
+ * Now the passes ask the getters below EVERY frame. A getter returns the user's
+ * explicit env override when one was set before launch (dev A/B, unchanged
+ * contract), otherwise it derives the value live from g_td5.ini.rt_*, so a menu
+ * change applies on the next rendered frame. */
+static int rt_env_i(const char *key, int *cache)
 {
-    const char *cur = getenv(key);
-    if (cur && cur[0]) return;                 /* explicit env override wins */
-    _putenv_s(key, val);
+    /* *cache: -2 unread, -1 not set, else the value. Read once: nothing in the
+     * game writes these keys any more, so an env value is the user's. */
+    if (*cache == -2) {
+        const char *e = getenv(key);
+        *cache = (e && e[0]) ? atoi(e) : -1;
+        if (*cache < -1) *cache = 0;
+    }
+    return *cache;
+}
+static float rt_env_f(const char *key, float *cache, int *state)
+{
+    if (*state == -2) {
+        const char *e = getenv(key);
+        if (e && e[0]) { *cache = (float)atof(e); *state = 1; } else *state = -1;
+    }
+    return (*state > 0) ? *cache : -1.0f;
+}
+
+int td5_rt_opt_shadow_rays(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_RT_RAYS", &c);
+    if (v < 0) v = g_td5.ini.rt_shadow_rays;
+    return v < 1 ? 1 : (v > 16 ? 16 : v);
+}
+float td5_rt_opt_refl_dist(void)
+{
+    static float c; static int st = -2; float v = rt_env_f("TD5RE_RT_REFL_DIST", &c, &st);
+    if (v >= 0.0f) return v;
+    return (g_td5.ini.rt_reflection_rng <= 0) ? 4000.0f :
+           (g_td5.ini.rt_reflection_rng == 1) ? 50000.0f : 10000000.0f;
+}
+int td5_rt_opt_gi_on(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_RT_GI", &c);
+    return (v >= 0) ? (v != 0) : (g_td5.ini.rt_gi_quality > 0);
+}
+int td5_rt_opt_gi_rays(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_RT_GI_RAYS", &c);
+    if (v < 0) v = (g_td5.ini.rt_gi_quality >= 2) ? 4 : 2;
+    return v < 1 ? 1 : (v > 16 ? 16 : v);
+}
+int td5_rt_opt_light_rays(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_RT_LIGHT_RAYS", &c);
+    if (v < 0) v = (g_td5.ini.rt_light_quality > 0) ? 2 : 1;
+    return v < 1 ? 1 : (v > 16 ? 16 : v);
+}
+float td5_rt_opt_light_cone_soft(void)
+{
+    static float c; static int st = -2; float v = rt_env_f("TD5RE_RT_LIGHT_CONE_SOFT", &c, &st);
+    if (v < 0.0f) v = (g_td5.ini.rt_light_quality > 0) ? 0.15f : 0.0f;
+    return v > 1.0f ? 1.0f : v;
+}
+int td5_rt_opt_sun_disc(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_SUN_DISC", &c);
+    return (v >= 0) ? (v != 0) : (g_td5.ini.rt_sun_probe > 0);
+}
+int td5_rt_opt_sun_probe(void)
+{
+    /* SUN & SKY CLASSIC used to drop only the disc; the image-probe sun stayed
+     * on (TD5RE_SUN_PROBE, never tied to the row). Round UA ties it: CLASSIC =
+     * zone sun, no disc, as the row has always said. */
+    static int c = -2; int v = rt_env_i("TD5RE_SUN_PROBE", &c);
+    return (v >= 0) ? (v != 0) : (g_td5.ini.rt_sun_probe > 0);
+}
+int td5_rt_opt_reflections(void)
+{
+    /* REFLECTIONS OFF used to write g_td5.ini.reflections = 0 (the shared
+     * screen-space SSR toggle, persisted) and never set it back, so OFF -> FULL
+     * left every reflection off, LOW included, until CUSTOM PERFORMANCE was
+     * touched. Now OFF only gates the RT reflection pass in HIGH. */
+    return g_td5.ini.rt_reflection_q > 0;
+}
+int td5_rt_opt_shadow_half(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_RT_SHADOW_HALF", &c);
+    return (v >= 0) ? (v != 0) : (g_td5.ini.rt_shadow_res == 0);   /* SHADOW DETAIL HALF */
+}
+int td5_rt_opt_refl_half(void)
+{
+    static int c = -2; int v = rt_env_i("TD5RE_RT_REFL_HALF", &c);
+    return (v >= 0) ? (v != 0) : (g_td5.ini.rt_reflection_q == 1);  /* REFLECTIONS HALF */
 }
 
 void td5_rt_apply_lighting_options(void)
 {
-    char buf[32];
+    /* Kept as the single "options changed" hook (startup, LIGHTING OPTIONS,
+     * PERFORMANCE tiers). Everything above is live; this only logs. */
+    rt_diag("P8 lighting options: rays=%d refl_dist=%.0f gi=%d/%d light=%d/%.2f "
+            "sun_probe=%d refl=%d shadow_half=%d refl_half=%d",
+            td5_rt_opt_shadow_rays(), (double)td5_rt_opt_refl_dist(),
+            td5_rt_opt_gi_on(), td5_rt_opt_gi_rays(),
+            td5_rt_opt_light_rays(), (double)td5_rt_opt_light_cone_soft(),
+            td5_rt_opt_sun_probe(), td5_rt_opt_reflections(),
+            td5_rt_opt_shadow_half(), td5_rt_opt_refl_half());
+    TD5_LOG_I("rt", "lighting options: quality=%d rays=%d shadow_half=%d refl=%d(half=%d) "
+              "range=%.0f gi=%d(rays %d) lights=%d sun_probe=%d",
+              g_td5.ini.lighting_quality, td5_rt_opt_shadow_rays(), td5_rt_opt_shadow_half(),
+              td5_rt_opt_reflections(), td5_rt_opt_refl_half(), (double)td5_rt_opt_refl_dist(),
+              td5_rt_opt_gi_on(), td5_rt_opt_gi_rays(), td5_rt_opt_light_rays(),
+              td5_rt_opt_sun_probe());
+}
 
-    /* SHADOW QUALITY -> sun-shadow sample count (P2b denoise): 1 / 4 / 8. */
-    snprintf(buf, sizeof(buf), "%d", g_td5.ini.rt_shadow_rays);
-    rt_setenv_if_unset("TD5RE_RT_RAYS", buf);
-
-    /* REFLECTION RANGE -> RT reflection ray TMax (P6): NEAR=SSR horizon,
-     * FAR=50000, UNLIMITED=1e7. */
-    rt_setenv_if_unset("TD5RE_RT_REFL_DIST",
-        (g_td5.ini.rt_reflection_rng <= 0) ? "4000" :
-        (g_td5.ini.rt_reflection_rng == 1) ? "50000" : "10000000");
-
-    /* GLOBAL ILLUMINATION -> GI enable + ray count (P4). OFF disables the GI
-     * pass, which re-arms the analytic zone dark-mode fallback in HIGH (see the
-     * darkener gate in td5_render_mesh.c). LOW=2 rays, HIGH=4. */
-    rt_setenv_if_unset("TD5RE_RT_GI", g_td5.ini.rt_gi_quality > 0 ? "1" : "0");
-    if (g_td5.ini.rt_gi_quality > 0) {
-        snprintf(buf, sizeof(buf), "%d", g_td5.ini.rt_gi_quality >= 2 ? 4 : 2);
-        rt_setenv_if_unset("TD5RE_RT_GI_RAYS", buf);
-    }
-
-    /* LIGHTS -> P7 soft headlight penumbra + smooth projector cone. BASIC =
-     * legacy (1 ray, hard cone); REALISTIC = soft (2 rays, feathered). */
-    if (g_td5.ini.rt_light_quality > 0) {
-        rt_setenv_if_unset("TD5RE_RT_LIGHT_RAYS", "2");
-        rt_setenv_if_unset("TD5RE_RT_LIGHT_CONE_SOFT", "0.15");
-    } else {
-        rt_setenv_if_unset("TD5RE_RT_LIGHT_RAYS", "1");
-        rt_setenv_if_unset("TD5RE_RT_LIGHT_CONE_SOFT", "0");
-    }
-
-    /* SUN & SKY -> AUTO = image-probe sun + disc (P1); CLASSIC = no disc.
-     * (Full zone-sun-instead-of-image-sun override is a documented residual.) */
-    rt_setenv_if_unset("TD5RE_SUN_DISC", g_td5.ini.rt_sun_probe > 0 ? "1" : "0");
-
-    /* REFLECTIONS OFF -> disable the reflection pass entirely (mirrors the
-     * existing [Lighting]Reflections toggle). HALF/FULL both dispatch full-res
-     * today (the half-res path is the P6.3 residual). */
-    if (g_td5.ini.rt_reflection_q <= 0) g_td5.ini.reflections = 0;
-
-    /* rt_shadow_res (HALF/FULL) is a documented residual — the half-res dispatch
-     * (P6.3) isn't wired yet; FULL is always used. The INI key persists so the
-     * row goes live for free once the mechanism lands. */
-
-    rt_diag("P8 lighting options applied: rays=%d refl_rng=%d gi=%d light_q=%d "
-            "sun_probe=%d refl_q=%d shadow_res=%d",
-            g_td5.ini.rt_shadow_rays, g_td5.ini.rt_reflection_rng,
-            g_td5.ini.rt_gi_quality, g_td5.ini.rt_light_quality,
-            g_td5.ini.rt_sun_probe, g_td5.ini.rt_reflection_q,
-            g_td5.ini.rt_shadow_res);
+/* [round UA 2026-11-08] Start the background RT pipeline compile (state
+ * object) when LIGHTING is HIGH, so the race load does not wait for it. Cheap
+ * to call every frame: the backend no-ops once started / built. */
+void td5_rt_prewarm(void)
+{
+    if (!td5_rt_available() || !rt_quality_seed() || !g_td5.ini.lighting_enabled) return;
+    td5_plat_rt_prewarm();
 }
 
 int td5_rt_active(void)
@@ -161,6 +224,19 @@ int td5_rt_active(void)
     if (!td5_rt_available()) return 0;    /* no DXR device -> auto-fallback to LOW */
     if (!rt_quality_seed())  return 0;    /* LIGHTING QUALITY = LOW               */
     if (!g_td5.ini.lighting_enabled) return 0;  /* [Lighting] Enabled master gate */
+    /* [round UA 2026-11-08] FREE ROAM: the RT world feed walks the MODELS.DAT
+     * display list, which the free-roam city does not have (its streets,
+     * buildings and furniture are roam tiles). Measured: 0 scenery entries fed,
+     * the TLAS holds the cars only, yet the shadow/GI/reflection passes still
+     * ran (1.8 ms/frame at 1440p on an RTX 5070 Ti) and REPLACED the
+     * screen-space sun shadows with an empty-scene result. Until the roam tiles
+     * are fed (docs/plans/RT_OLDER_GPU_PLAN.md, step R3), roam runs the LOW
+     * lighting stack. TD5RE_RT_ROAM=1 restores the old behaviour for A/B. */
+    if (td5_roam_active()) {
+        static int s_roam_rt = -1;
+        if (s_roam_rt < 0) s_roam_rt = td5_env_int("TD5RE_RT_ROAM", 0, 0, 1);
+        if (!s_roam_rt) return 0;
+    }
     /* "in a race, not frontend/FMV" is guaranteed by the sole caller: td5_rt_frame
      * runs only from the in-race per-pane deferred site, and the RT passes it
      * arms (shadow/light/SSR) are dispatched only during race rendering -- so the
@@ -1072,6 +1148,8 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
     if (vp == 0) {
         rt_build_tlas();
         td5_plat_rt_set_mode(1);   /* HIGH: deferred passes run the RT composite */
+        /* [round UA] SHADOW DETAIL / REFLECTIONS HALF -> half-res trace, live. */
+        td5_plat_rt_set_resolution(td5_rt_opt_shadow_half(), td5_rt_opt_refl_half());
     }
 
     /* Per-pane camera view. td5_camera_get_position returns FLOAT world units
