@@ -4636,11 +4636,6 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
          * so no caller can reproduce it from ring_len and the RUN-OFF knob. */
         out_stats->grid_span   = TD5_TG_GRID_SPAN;
         out_stats->finish_span = tg_finish_span(s_ring_len);
-        /* [W3 2026-09-29] Same ring the emitter uses (s_ring_len, falling back
-         * to nspans before tg_emit_strip has set it), so the preview's ticks are
-         * the level's real checkpoints and not a re-derivation. */
-        out_stats->cp_count = tg_checkpoint_spans(
-            (s_ring_len > 0) ? s_ring_len : nspans, out_stats->cp_span);
         out_stats->fork_count = s_fork_count;
         out_stats->cancelled  = s_preview_cancelled;
         for (s = 0; s < TD5_TG_SECTION_COUNT; s++)

@@ -1151,10 +1151,6 @@ int  td5_geo_incomplete_note(char *out, size_t cap);
  * 1 = FINISH (black/white checker). Shared with the auto-track route plot so
  * both previews mark their ends identically. */
 void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind);
-/* [W3 2026-09-29] White CHECKPOINT tick across a track preview: (tx,ty) is the
- * local road tangent in SCREEN px; the bar is drawn perpendicular to it. */
-void frontend_draw_marker_tick(float cx, float cy, float tx, float ty,
-                               float sx, float sy);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);

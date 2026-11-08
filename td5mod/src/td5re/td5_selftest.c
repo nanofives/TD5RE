@@ -235,6 +235,12 @@ typedef struct {
      * pursuit (pass a planted cop at speed), heat 3 -> roadblock ahead, escape (pursuers held back), a second
      * pursuit -> stop -> BUSTED 3 s hold -> released, drives off. */
     int police;
+    /* [round TA 2026-11-08] item 3 "selected laps ignored": N > 0 = the race must run N laps. Stock track: the
+     * row starts from a different lap count (the previous race's pick) and changes LAPS to N AFTER the game
+     * type is configured, the menus' order (TD5RE_AUTORACE_LAPS_AFTER_CONFIG); asserts circuit_lap_count == N
+     * and the player finished on lap N. Roam row: the circuit driver races N laps (TD5RE_ROAM_CIRCUIT_LAPS),
+     * its own verdict checks player_laps == laps. */
+    int laps_menu;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -566,8 +572,22 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
+
+    /* [round TA 2026-11-08] item 3: LAPS edited after the race type was picked (the menus' order) is the lap
+     * count the race runs. Maui (circuit), previous pick 1 lap, LAPS -> 3, natural finish. Not Newcastle: there the
+     * AI car's airborne counter passes the 450-frame invariant on lap 2 near span 465 while it keeps lapping. */
+    { .name="t3-laps-shipped",       .track=6,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .natural_finish=1, .depth=ST_DEPTH_RUN_FINISH, .laps_menu=3 },
+    /* [round TA 2026-11-08] item 3, roam: the city CIRCUIT ends after the laps asked for (1 lap of the block loop). */
+    { .name="t3-laps-roam",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=8, .depth=ST_DEPTH_ROAM_SPRINT, .laps_menu=1 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
+static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
 #define ST_SMOKE_RACES 14  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-sprint-mp2 + roam-circuit-mp2 + roam-traffic-smoke + roam-cops-smoke + police-smoke */
 
 typedef struct {
@@ -872,6 +892,8 @@ static void st_reset_scenario_fields(void)
     _putenv("TD5RE_CHAOS_FAKE_SEATS=");
     _putenv("TD5RE_CHAOS_TRIGGER=");
     _putenv("TD5RE_CHAOS_PERIOD=");
+    _putenv("TD5RE_AUTORACE_LAPS_AFTER_CONFIG=");   /* [round TA] t3-laps-* */
+    _putenv("TD5RE_ROAM_CIRCUIT_LAPS=");
     td5_chaos_commit_config(NULL);
     /* [MP DRAG LEAK FIX 2026-10-01] This used to reset mp_mode_config.mode for
      * CHAOS only, so EVERY other mode leaked into the following rows the same way
@@ -2191,6 +2213,18 @@ static void st_apply_scenario(const RaceScenario *sc)
         _putenv("TD5RE_CHAOS_TRIGGER=" ST_CHAOS_TRIGGER_TIME);
         _putenv("TD5RE_CHAOS_PERIOD="  ST_CHAOS_PERIOD_SECS);
     }
+    /* [round TA] t3-laps-* rows (st_reset_scenario_fields clears both knobs and restores ini.laps). */
+    s_t3_max_lap = 0;
+    if (sc->laps_menu > 0) {
+        char buf[64];
+        if (sc->roam) {
+            snprintf(buf, sizeof buf, "TD5RE_ROAM_CIRCUIT_LAPS=%d", sc->laps_menu);
+        } else {
+            g_td5.ini.laps = (sc->laps_menu == 1) ? 2 : 0;   /* the previous race's pick: a different count */
+            snprintf(buf, sizeof buf, "TD5RE_AUTORACE_LAPS_AFTER_CONFIG=%d", sc->laps_menu);
+        }
+        _putenv(buf);
+    }
     /* [CHUNK 8] RT coverage: the suite pins LOW at boot (8x-FF cold RT frames
      * TDR). An rt row forces RT HIGH -- only when the GPU actually supports it
      * -- and MUST run at a safe FF (see the rt row's .ff=1) so it doesn't trip
@@ -2944,6 +2978,8 @@ static void st_tick_races(uint32_t now)
         st_apply_scenario(sc);
         if (sc->human_drive > 0) st_drive_arm(sc);   /* [R1026 K] after apply: it forces auto_throttle OFF */
         if (sc->roam > 0) st_roam_arm(sc);           /* [roam F2-D] after apply: auto_throttle OFF + roam session */
+        if (sc->laps_menu > 0 && !sc->roam)          /* [round TA] t3-laps-shipped laps a circuit: the AI drives it */
+            g_td5.ini.auto_throttle = 0;
         if (sc->police > 0) {                        /* [round H HH] slot 0 a human; the police test drives */
             g_td5.ini.auto_throttle = 0;
             g_td5.ini.player_is_ai  = 0;
@@ -3049,6 +3085,19 @@ static void st_tick_races(uint32_t now)
                                  "natural finish did not reach results screen");
                     }
                 }
+                /* [round TA] t3-laps-shipped: the race ran the LAPS picked after the race type, and ended there. */
+                if (sc->laps_menu > 0 && !sc->roam && status < ST_FAIL) {
+                    const int used = g_td5.circuit_lap_count;
+                    size_t nl = strlen(note);
+                    if (used != sc->laps_menu || s_t3_max_lap != sc->laps_menu) {
+                        status = ST_FAIL;
+                        snprintf(note, sizeof(note), "laps: asked %d, race used %d, player finished lap %d",
+                                 sc->laps_menu, used, s_t3_max_lap);
+                    } else if (nl < sizeof(note) - 1) {
+                        snprintf(note + nl, sizeof(note) - nl, " laps asked %d used %d finished %d",
+                                 sc->laps_menu, used, s_t3_max_lap);
+                    }
+                }
                 /* [CHAOS CO-OP 2026-09-30] A chaos row must have ROTATED. The
                  * whole mode hangs off the rotation firing, and every other
                  * signal (seat table, HUD strip, role lookup) is inert-looking
@@ -3125,6 +3174,20 @@ static void st_tick_races(uint32_t now)
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
             st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
+            if (sc->laps_menu > 0 && !sc->roam) {   /* [round TA] t3-laps-shipped: laps the player completed */
+                const int l = td5_game_get_player_lap(0);
+                TD5_Actor *a0 = td5_game_get_actor(0);
+                static int s_t3_air_logged;
+                if (l > s_t3_max_lap) s_t3_max_lap = l;
+                if (tick - s_race_start_tick < 30) s_t3_air_logged = 0;
+                if (a0 && (int)a0->airborne_frame_counter >= 300 && !s_t3_air_logged) {
+                    s_t3_air_logged = 1;
+                    TD5_LOG_W(LOG_TAG, "t3: slot0 airborne %d frames at lap %d (of %d) tick %d span %d speed %d",
+                              (int)a0->airborne_frame_counter, l, g_td5.circuit_lap_count,
+                              tick - s_race_start_tick, td5_game_get_slot_span(0),
+                              (int)(a0->longitudinal_speed >> 8));
+                }
+            }
             /* [CHAOS CO-OP 2026-10-01] One-shot per-pane binding check. Must run
              * HERE, while the race is live: the drawn-mask it reads is per-frame
              * state, so SS_RACE_POST_MENU would see it cleared. No-op on every

@@ -8846,35 +8846,6 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
         const TD5_TrackGenPreviewStats *st = &s_at_status.stats;
         int gi = (s_at_status.done && st->grid_span > 0) ? st->grid_span : 0;
         if (gi >= s_at_pts_n) gi = 0;
-        /* [W3 2026-09-29] Checkpoint ticks, drawn BEFORE the start/finish dots
-         * so a dot sitting on a checkpoint still composites on top. The spans
-         * come from the generator (st->cp_span), and a span index is a point
-         * index on the main ring, so the tangent is just the neighbouring
-         * points -- same +Z flip the route plot above applies. */
-        if (s_at_status.done) {
-            int k;
-            for (k = 0; k < st->cp_count && k < 7; k++) {
-                const int ci = st->cp_span[k];
-                int a, b;
-                if (ci <= 0 || ci >= s_at_pts_n) continue;
-                /* [H5 2026-10-02] tg_checkpoint_spans puts its LAST checkpoint
-                 * exactly on the finish span (that crossing is what ends the
-                 * race), so ticking it stamped a bar under the checkered finish
-                 * dot. Same rule the shipped tracks follow: the finish is a dot,
-                 * not a tick. The short-ring fallback branch places no
-                 * checkpoint on the finish, so this drops nothing there. */
-                if (st->finish_span > 0 && ci == st->finish_span) continue;
-                a = (ci - 2 >= 0) ? ci - 2 : 0;
-                b = (ci + 2 < s_at_pts_n) ? ci + 2 : s_at_pts_n - 1;
-                if (b <= a) continue;
-                frontend_draw_marker_tick(
-                    (cx + (s_at_pts[ci].x - ox) * scale) * sx,
-                    (cy - (s_at_pts[ci].z - oz) * scale) * sy,
-                    (s_at_pts[b].x - s_at_pts[a].x) * scale * sx,
-                    -(s_at_pts[b].z - s_at_pts[a].z) * scale * sy,
-                    sx, sy);
-            }
-        }
         frontend_draw_marker_dot((cx + (s_at_pts[gi].x - ox) * scale) * sx,
                                  (cy - (s_at_pts[gi].z - oz) * scale) * sy,
                                  sx, sy, 0);

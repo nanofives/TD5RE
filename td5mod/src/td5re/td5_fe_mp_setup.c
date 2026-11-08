@@ -403,6 +403,16 @@ void frontend_init_race_schedule(void) {
         g_td5.traffic_volume            = tv;
         g_td5.traffic_enabled           = (g_td5.traffic_volume != 0);
         g_td5.special_encounter_enabled = s_game_option_cops;
+        /* [round TA 2026-11-08] LAPS, same staleness as the toggles above (Mariano:
+         * "selected laps on track selector is ignored on the race"). The LAPS row
+         * lives on Track Selection / Quick Race since S02 (2026-06-04), but
+         * circuit_lap_count was only written by ConfigureGameTypeFlags (at
+         * game-type pick, BEFORE that screen) and by the main-menu seed, so a race
+         * ran the lap count picked for the PREVIOUS race. Era (gt 2, 4 laps) and
+         * Time Trial (gt 7, 1 lap) force their own and are not gt 0. */
+        g_td5.circuit_lap_count = s_game_option_laps + 1;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: circuit_lap_count=%d (laps row %d)",
+                  g_td5.circuit_lap_count, s_game_option_laps + 1);
     }
 
     /* [COP-CHASE 2026-06-21] Cop Chase / wanted mode never spawns the separate
@@ -433,6 +443,9 @@ void frontend_init_race_schedule(void) {
             /* Per-race direction (forwards/backwards) and lap count (circuit). */
             g_td5.reverse_direction         = s_cup_user_dirs[idx] ? 1 : 0;
             g_td5.ini.laps                  = s_cup_user_laps[idx];
+            /* [round TA 2026-11-08] ini.laps alone reached nothing at race start:
+             * the race reads circuit_lap_count. */
+            g_td5.circuit_lap_count         = s_cup_user_laps[idx] + 1;
             TD5_LOG_I(LOG_TAG, "Cup race %d: per-race dir=%d laps=%d traffic=%d police=%d",
                       idx + 1, s_cup_user_dirs[idx], s_cup_user_laps[idx],
                       tv, s_cup_user_cops[idx]);
