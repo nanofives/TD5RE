@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <ctype.h>
 #include <float.h>  /* _controlfp + _RC_DOWN / _MCW_RC for FPU rounding mode */
 
 /* TD5RE headers */
@@ -447,13 +448,12 @@ typedef struct {
  * the documented TDR culprit from 2026-08-02 (multi-second RT frames at high
  * res tripped the Windows watchdog), so no preset may select it.
  *
- * !! UNMEASURED (Mariano's 2026-09-30 rule: no RT / default-graphics perf runs).
- * The MEDIUM row's "half-res shadows + half-res reflections + GI off" is a
- * reasoned cost reduction, NOT a benchmarked one -- nobody has timed this tier
- * on any card. The only RT datapoint in hand predates the rule: on an RTX
- * 5070 Ti, LIGHTING HIGH vs LOW was 14.12 ms vs 9.81 ms per frame (71 vs 102
- * fps). That says RT HIGH is expensive; it does NOT say what MEDIUM costs.
- * Needs a measurement pass on real hardware before these rows are trusted. */
+ * MEASURED round UA (2026-11-08, RTX 5070 Ti, Moscow, verify/rt_bench.py,
+ * RT GPU ms per frame p50/p99): 1920x1080 MEDIUM 0.63/0.92, HIGH 3.40/4.69,
+ * ULTRA 4.19/5.68; 2542x1333 MEDIUM 0.96/1.31, HIGH 5.41/7.49, ULTRA 6.63/9.03.
+ * MEDIUM's "half-res" was NOT wired before round UA (it traced full-res: p50
+ * 1.97 / 3.29 ms); the half-res trace + upsample now makes it real.
+ * See docs/plans/RT_OLDER_GPU_PLAN.md for the 3070 projection. */
 static const TD5_LightTier k_light_tier[TD5_QTIER_COUNT] = {
     /* qual rays res refl rng gi probe lights */
     {   0,   1,   0,  0,  0,  0,  0,  0 },   /* LOW    -- screen-space stack only, no DXR */
@@ -614,28 +614,79 @@ int td5_perf_detect_graphics_tier(void)
     return TD5_QTIER_HIGH;
 }
 
+/* [round UA 2026-11-08] GPU-class heuristic for the LIGHTING tier.
+ *
+ * MEASURED (round UA, RTX 5070 Ti, Moscow, uncapped, verify/rt_bench.py):
+ * RT GPU time per frame p50 / p99, 1920x1080 and 2542x1333:
+ *   MEDIUM (half-res shadow+lights+refl, 1 ray, no GI)     0.63/0.92   0.96/1.31 ms
+ *   HIGH   (full-res, 2 rays, GI LOW)                       3.40/4.69   5.41/7.49 ms
+ * A 3070 traces roughly 2.5-3x slower than a 5070 Ti, so HIGH at 2560x1351
+ * lands at ~14-16 ms of RT alone (p99 ~20 ms): the "unstable FPS" report.
+ * MEDIUM is ~3 ms there. So: every RT-capable card defaults to MEDIUM, and
+ * only cards known to trace at 4070-class speed or better get HIGH, and only
+ * up to ~1440p (HIGH's cost scales with pixels; at 4K a 4070 is back at 3070
+ * numbers). Device-id lists rot, so this reads the adapter NAME for the
+ * family + model number and falls back to VRAM (>= 16 GB) when it can't parse
+ * one. Still never ULTRA. */
+static int perf_name_has(const char *name, const char *needle)
+{
+    char a[160], b[32]; size_t i;
+    if (!name || !needle) return 0;
+    for (i = 0; name[i] && i < sizeof(a) - 1; i++) a[i] = (char)toupper((unsigned char)name[i]);
+    a[i] = 0;
+    for (i = 0; needle[i] && i < sizeof(b) - 1; i++) b[i] = (char)toupper((unsigned char)needle[i]);
+    b[i] = 0;
+    return strstr(a, b) != NULL;
+}
+
+/* Model number after "RTX " (e.g. 3070, 4090, 5070), 0 if none. */
+static int perf_rtx_model(const char *name)
+{
+    const char *p;
+    char up[160]; size_t i;
+    if (!name) return 0;
+    for (i = 0; name[i] && i < sizeof(up) - 1; i++) up[i] = (char)toupper((unsigned char)name[i]);
+    up[i] = 0;
+    p = strstr(up, "RTX ");
+    if (!p) return 0;
+    p += 4;
+    if (*p == 'A') return 0;            /* RTX A4000 / A6000 workstation: use VRAM */
+    return atoi(p);
+}
+
+int td5_perf_rt_class_tier(const char *name, unsigned vram_mb, int width, int height)
+{
+    int model = perf_rtx_model(name), fast = 0;
+    long long px = (long long)(width > 0 ? width : 1920) * (long long)(height > 0 ? height : 1080);
+    if (model >= 2000 && model < 10000) {
+        int gen = model / 1000, tier = (model % 1000) / 10;   /* 4070 -> gen 4, tier 7 */
+        if (gen >= 5)      fast = (tier >= 7);                /* 5070 and up            */
+        else if (gen == 4) fast = (tier >= 7);                /* 4070 and up            */
+        else               fast = 0;                          /* 20xx / 30xx incl. 3090 */
+        if (gen >= 4 && tier >= 8) px = 0;                    /* 4080/4090/5080/5090: any res */
+    } else if (perf_name_has(name, "Radeon") || perf_name_has(name, "Arc")) {
+        fast = 0;                                             /* RDNA2/3, Arc: MEDIUM   */
+    } else {
+        fast = (vram_mb >= 16384u);                           /* unknown family: VRAM proxy */
+    }
+    /* Above ~1.25x 2560x1440 (4.6 MP) even a 4070-class card is back at
+     * 3070-at-1440p cost: stay on MEDIUM. */
+    if (fast && px > 4608000LL) fast = 0;
+    return fast ? TD5_QTIER_HIGH : TD5_QTIER_MEDIUM;
+}
+
 int td5_perf_detect_lighting_tier(void)
 {
     unsigned vram = 0; int dxr = 0, ok = 0;
-    perf_probe_hw(NULL, &vram, &dxr, NULL, &ok, NULL, 0);
-    /* No DXR, or we could not identify the adapter: screen-space stack only.
+    char name[128] = "";
+    perf_probe_hw(NULL, &vram, &dxr, NULL, &ok, name, sizeof(name));
+    /* No DXR 1.1, or we could not identify the adapter: screen-space stack only.
      * Unknown hardware must not be handed the most expensive pass in the build. */
     if (!dxr || !ok) return TD5_QTIER_LOW;
-    /* DXR-capable but too little VRAM to be worth paying for (GTX 16xx-class
-     * DXR fallback, RTX 2060 6 GB, RX 6500). */
+    /* DXR-capable but too little VRAM to be worth paying for (RTX 2060 6 GB
+     * class, RX 6500). */
     if (vram < 6144u) return TD5_QTIER_LOW;
-    /* 6-16 GB: REDUCED RT -- half-res shadows + half-res reflections, GI off.
-     * This is where the 24 fps report's RTX 3070 (8 GB) lands, and where every
-     * 8/10/12 GB card lands: 2060 Super, 2080, 3060, 3060 Ti, 3070, 3070 Ti,
-     * 3080 10/12 GB, 4060, 4060 Ti 8 GB, 4070, 4070 Ti, RX 6700/6800/7700.
-     * Threshold raised 10240 -> 16384 on 2026-09-30: at 10 GB a 12 GB 4070 or
-     * 3080 was being handed FULL-res RT reflections + GI, which is the exact
-     * cost profile that produced the 24 fps report one tier down. */
-    if (vram < 16384u) return TD5_QTIER_MEDIUM;
-    /* >= 16 GB: full RT (2 shadow rays, full-res shadows, full reflections,
-     * GI LOW) -- 4080/4090, 5070 Ti/5080/5090, RX 7900 XT/XTX class. Still
-     * never ULTRA; that stays opt-in. */
-    return TD5_QTIER_HIGH;
+    return td5_perf_rt_class_tier(name, vram, g_td5.ini.disp_width, g_td5.ini.disp_height);
 }
 
 void td5_perf_auto_select(int live)
@@ -684,7 +735,10 @@ void td5_perf_auto_select(int live)
  * skipped unless BOTH axes still read as their shipped-default tier (HIGH), and
  * once applied the player's own PERFORMANCE settings always win afterwards.
  * TD5RE_AUTO_PERF=0 disables the probe; =2 forces it (testing). */
-#define TD5_AUTOPERF_VERSION 2
+/* v3 (round UA 2026-11-08): MEDIUM became real half-res RT (it used to trace
+ * full-res: HALF was never wired) and the lighting tier reads the GPU class.
+ * Re-tiers once an install still sitting on the shipped HIGH/HIGH defaults. */
+#define TD5_AUTOPERF_VERSION 3
 void td5_ini_persist_options(void);
 static void td5_auto_perf_preset(void)
 {

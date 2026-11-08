@@ -953,6 +953,10 @@ int  td5_perf_lighting_tier(void);
  * cores). Caps at HIGH: auto-detect never makes the game slower than today. */
 int  td5_perf_detect_graphics_tier(void);
 int  td5_perf_detect_lighting_tier(void);
+/* [round UA] GPU-class -> LIGHTING tier (MEDIUM / HIGH) for an RT-capable adapter.
+ * Pure function of the adapter name, VRAM and window size (unit-tested by the
+ * u1-rt-tier selftest row). */
+int  td5_perf_rt_class_tier(const char *name, unsigned vram_mb, int width, int height);
 
 /* Probe + apply both axes + log the verdict. `live` as above. Used by the boot
  * one-shot AND by the PERFORMANCE screen's AUTO-SELECT row. */

@@ -360,6 +360,22 @@ int  Backend_RTWarmupPending(void);
 /* Push an RT work crumb (RTMARK:<tag>) to the crash-forensics ring so a TDR
  * post-mortem shows which RT operation was in flight. */
 void Backend_NoteRTMark(const char *tag);
+/* [round UA 2026-11-08] GPU timestamp STAMP only (no crash-ring entry). With
+ * TD5RE_RT_TIMESTAMPS=2 the backend aggregates per-tag step times (time since
+ * the previous stamp, summed per frame) for Backend_GpuStatsDump. */
+void Backend_RTStamp(const char *tag);
+/* [round UA 2026-11-08] RT trace resolution, per pass family: shadow_half
+ * covers sun shadow + GI + dynamic lights, refl_half the reflection pass.
+ * 1 = trace one pixel per 2x2 block (4x fewer rays, 4x cheaper denoise) and
+ * upsample the mask back to full res before the composite. Live: read at
+ * every pass dispatch. */
+void Backend_RTSetResolution(int shadow_half, int refl_half);
+/* [round UA] Compile the RT pipeline (root signature + state object) on a
+ * worker thread now, so the first race load does not pay for it. No-op when
+ * DXR is unavailable or the pipeline already exists. */
+void Backend_RTPrewarmAsync(void);
+/* Append the per-tag GPU timing percentiles + VRAM budget/peak to `path`. */
+void Backend_GpuStatsDump(const char *path);
 
 /* [RT lighting P2b] HIGH mode: the deferred shadow/light passes run the RT
  * dispatch + composite instead of the screen-space march. Set per frame by the

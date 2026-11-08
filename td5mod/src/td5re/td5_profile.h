@@ -30,4 +30,16 @@ void td5_profile_begin_frame(void);
 void td5_profile_mark(const char *zone);
 void td5_profile_end_frame(void);
 
+/* [round UA 2026-11-08] FRAME-TIME PERCENTILES (dev measurement, env-gated,
+ * independent of [Logging] Profile). TD5RE_FRAMESTATS=N records the wall-clock
+ * interval between N consecutive race frames (after skipping the first
+ * TD5RE_FRAMESTATS_SKIP frames, default 120 = loading + countdown settle), then
+ * appends one block to log/framestats.txt: mean / p50 / p90 / p95 / p99 / p99.9
+ * / max, the count of frames over 2x the median ("spikes") and over 33.3 ms,
+ * plus the GPU per-pass summary + VRAM budget from the backend (needs
+ * TD5RE_RT_TIMESTAMPS=2 for the per-pass part). TD5RE_FRAMESTATS_TAG labels the
+ * block. Call once per race frame; returns 1 the frame the report was written
+ * and TD5RE_FRAMESTATS_QUIT (default 1) asks for a clean quit. */
+int td5_profile_race_frame(void);
+
 #endif /* TD5_PROFILE_H */

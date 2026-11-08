@@ -86,6 +86,24 @@ cbuffer SSRCB : register(b3)
     float4 sr_sun;       /* xyz surface->light dir (unit); w shadow-ray enable */
 };
 
+/* ---- b4: [round UA 2026-11-08] trace resolution (root constants) ---------- *
+ * rs_shift = 0 -> full-res: one ray-gen thread per pane pixel (the original).
+ * rs_shift = 1 -> HALF-res: one thread per 2x2 block; it traces the block's
+ * top-left pixel (depth + G-buffer read at full res there) and writes the mask
+ * at (paneOrigin >> 1) + thread, i.e. the pane's quarter in the top-left of the
+ * same full-size mask texture. The backend denoises that quarter and then runs
+ * a depth/normal-aware 2x upsample (cs_rt_upsample) back to full res before the
+ * composite, so every consumer of the masks still reads full-res values.
+ * With rs_shift = 0 every raygen reads and writes exactly the pixel it did
+ * before this change (wp == fp). */
+cbuffer RTScaleCB : register(b4)
+{
+    uint rs_shift;
+    uint rs_pad0;
+    uint rs_pad1;
+    uint rs_pad2;
+};
+
 /* Reflection / debug ray payload (<= 32 bytes). */
 struct RayPayload { float3 color; float t; };
 /* Shadow ray payload: miss_shadow sets visible=1; a hit leaves it 0. */

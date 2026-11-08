@@ -125,6 +125,12 @@ echo   cs_shadow_atrous OK
 %FXC% %OPTS% /T cs_5_0 /E main /Fh cs_color_atrous_bytes_50.h /Vn g_cs_color_atrous_50 cs_color_atrous.hlsl
 if errorlevel 1 (echo FAILED: cs_color_atrous ^(cs5^) && exit /b 1)
 echo   cs_color_atrous OK
+REM [round UA 2026-11-08] half-res RT mask -> full-res upsample, R32F + RGBA16F.
+%FXC% %OPTS% /T cs_5_0 /E main /Fh cs_rt_upsample_bytes_50.h /Vn g_cs_rt_upsample_50 cs_rt_upsample.hlsl
+if errorlevel 1 (echo FAILED: cs_rt_upsample ^(cs5^) && exit /b 1)
+%FXC% %OPTS% /T cs_5_0 /E main /D RT_UP_COLOR=1 /Fh cs_rt_upsample_color_bytes_50.h /Vn g_cs_rt_upsample_color_50 cs_rt_upsample.hlsl
+if errorlevel 1 (echo FAILED: cs_rt_upsample_color ^(cs5^) && exit /b 1)
+echo   cs_rt_upsample OK
 
 REM ===========================================================================
 REM [RT lighting] DXR shader library -> DXIL. ONE lib_6_3 blob containing every
@@ -158,10 +164,12 @@ for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_m
     %DXC% -nologo -O3 -T ps_6_0 -E main -Fh %%S_bytes_60.h -Vn g_%%S_60 %%S.hlsl
     if errorlevel 1 (echo FAILED: %%S ^(dxil^) && exit /b 1)
 )
-for %%S in (cs_shadow_atrous cs_color_atrous) do (
+for %%S in (cs_shadow_atrous cs_color_atrous cs_rt_upsample) do (
     %DXC% -nologo -O3 -T cs_6_0 -E main -Fh %%S_bytes_60.h -Vn g_%%S_60 %%S.hlsl
     if errorlevel 1 (echo FAILED: %%S ^(dxil^) && exit /b 1)
 )
+%DXC% -nologo -O3 -T cs_6_0 -E main -D RT_UP_COLOR=1 -Fh cs_rt_upsample_color_bytes_60.h -Vn g_cs_rt_upsample_color_60 cs_rt_upsample.hlsl
+if errorlevel 1 (echo FAILED: cs_rt_upsample_color ^(dxil^) && exit /b 1)
 echo   SM6.0 DXIL variants OK
 
 echo All shaders compiled successfully.
