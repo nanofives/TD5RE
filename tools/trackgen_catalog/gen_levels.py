@@ -35,29 +35,35 @@ STORE = os.path.join(HERE, "levels")
 FILES = ("MODELS.DAT", "MESHTAG.BIN", "TEXTURES.DAT", "GENSTAMP.TXT",
          "STRIP.DAT", "NETWORK.JSON")
 REFERENCE = 99991
-DEFAULT_SEEDS = [1, 2, 3, 7, 12345, 4172065417]
+# Seed 1 is left out on purpose: on 2026-11-08 its build never wrote
+# MODELS.DAT within 15 minutes (the game loaded the meshes, nothing reached
+# disk); every other seed here writes in under a minute.
+DEFAULT_SEEDS = [2, 3, 7, 12345, 4172065417]
 
 
-def build(seed, i, n, genwait):
-    print(f"[{i}/{n}] seed {seed} building", flush=True)
-    r = subprocess.run(["pwsh", "-NoProfile", "-File",
-                        os.path.join(REPO, "verify", "geo_tags_identity.ps1"),
-                        "-Arm", "synthetic", "-Tag", f"cat{seed}",
-                        "-Seed", str(seed), "-NoControl",
-                        "-GenWait", str(genwait)],
+def build(seed, i, n, genwait, night=False):
+    tag = f"cat{seed}" + ("n" if night else "")
+    print(f"[{i}/{n}] seed {seed}{' night' if night else ''} building", flush=True)
+    # The identity script clears every TD5RE_* variable, so a knob can only go
+    # in through its -Extra hashtable, which needs -Command rather than -File.
+    script = os.path.join(REPO, "verify", "geo_tags_identity.ps1")
+    extra = "@{TD5RE_AUTOTRACK_NIGHT='1'}" if night else "@{}"
+    r = subprocess.run(["pwsh", "-NoProfile", "-Command",
+                        f"& '{script}' -Arm synthetic -Tag {tag} -Seed {seed} "
+                        f"-NoControl -GenWait {genwait} -Extra {extra}"],
                        cwd=REPO, capture_output=True, text=True)
     out = (r.stdout or "") + (r.stderr or "")
     models = [l.strip() for l in out.splitlines() if "MODELS.DAT" in l]
     if not os.path.exists(os.path.join(LEVEL, "MODELS.DAT")):
         print(f"[{i}/{n}] seed {seed} FAIL (no MODELS.DAT)\n{out[-800:]}", flush=True)
         return False
-    dst = os.path.join(STORE, f"seed{seed}")
+    dst = os.path.join(STORE, f"seed{seed}" + ("_night" if night else ""))
     os.makedirs(dst, exist_ok=True)
     for f in FILES:
         s = os.path.join(LEVEL, f)
         if os.path.exists(s):
             shutil.copy2(s, os.path.join(dst, f))
-    rl = os.path.join(REPO, "log", f"idgate_synthetic_cat{seed}_race.log")
+    rl = os.path.join(REPO, "log", f"idgate_synthetic_{tag}_race.log")
     if os.path.exists(rl):
         shutil.copy2(rl, os.path.join(dst, "race.log"))
     print(f"[{i}/{n}] seed {seed} PASS  {models[0] if models else ''}", flush=True)
@@ -69,6 +75,8 @@ def main():
     ap.add_argument("--seeds", nargs="*", type=int, default=DEFAULT_SEEDS)
     ap.add_argument("--genwait", type=int, default=240,
                     help="seconds to wait for MODELS.DAT per seed (default 240)")
+    ap.add_argument("--night", type=int, nargs="*", default=[2],
+                    help="seeds to ALSO build at night (TD5RE_AUTOTRACK_NIGHT=1); default 2")
     ap.add_argument("--no-reference", action="store_true",
                     help="do not rebuild seed 99991 at the end")
     a = ap.parse_args()
@@ -76,10 +84,11 @@ def main():
     if os.path.exists(sel):
         sys.exit("re/assets/geo/SELECTED.TXT is present: move it aside first "
                  "(it turns the synthetic build into a geo build).")
-    seeds = [s for s in a.seeds if s != REFERENCE] + ([] if a.no_reference else [REFERENCE])
+    seeds = ([(s, False) for s in a.seeds if s != REFERENCE] + [(s, True) for s in a.night]
+             + ([] if a.no_reference else [(REFERENCE, False)]))
     ok = 0
-    for i, s in enumerate(seeds, 1):
-        ok += build(s, i, len(seeds), a.genwait)
+    for i, (s, night) in enumerate(seeds, 1):
+        ok += build(s, i, len(seeds), a.genwait, night)
     print(f"{ok}/{len(seeds)} seeds stored under {STORE}")
     return 0 if ok == len(seeds) else 1
 

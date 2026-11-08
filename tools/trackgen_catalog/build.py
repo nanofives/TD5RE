@@ -149,6 +149,8 @@ def list_levels(ref_dir):
                 continue
             st = L.read_genstamp(p)
             seed = st.get("seed", d[4:])
+            if st.get("night") == "1":
+                seed += " night"
             if any(l["seed"] == seed for l in out):
                 continue
             out.append({"label": f"seed {seed}", "seed": seed, "dir": p, "ref": False,
@@ -231,10 +233,13 @@ def analyse(levels, kinds, reg, spe):
                 s["faces"][lv["seed"]] += len(comp)
                 s["biomes"][lv["seed"]].add(biome)
                 s["entries"][lv["seed"]].add(e)
-                # example: prefer the reference level, then a mid-sized instance
+                # example: prefer the reference level, then the most complete
+                # instance that still fits the thumbnail (largest n <= crop)
+                def score(n):
+                    return n if n <= MAX_THUMB_FACES else MAX_THUMB_FACES - n / 1e6
                 if s["ex"] is None or (lv["ref"] and not s["ex"]["ref"]) or (
                         s["ex"]["ref"] == lv["ref"] and s["ex"]["seed"] == lv["seed"]
-                        and abs(len(comp) - 6) < abs(s["ex"]["n"] - 6)):
+                        and score(len(comp)) > score(s["ex"]["n"])):
                     s["ex"] = {"seed": lv["seed"], "ref": lv["ref"], "entry": e, "slot": j,
                                "n": len(comp), "faces": [fl[i] for i in comp]}
         lv["nslots"], lv["ncomp"] = nslots, ncomp
@@ -373,8 +378,9 @@ def build(args):
             am = L.approx_match(p["image"], *sig_ix)
             if am:
                 lv, pp, err = am
-                src = (f"close to shipped {lv} page {pp}" + (f" ({TRACK_NAMES[lv]})" if lv in TRACK_NAMES else "")
-                       + f", mean colour error {err:.1f}/255 (re-quantized or edited copy)")
+                where = f"{lv} page {pp}" + (f" ({TRACK_NAMES[lv]})" if lv in TRACK_NAMES else "")
+                src = (f"same picture as shipped {where}, palette bytes differ" if err < 0.5 else
+                       f"close to shipped {where}, mean colour error {err:.1f}/255 (re-quantized or edited copy)")
                 src_badge = "approx"
         flat = len(set(p["idx"])) <= 1
         dup = own_exact.get(ex)
@@ -578,7 +584,7 @@ def build(args):
           f"<p class='dim'>Decoded from the reference level ({esc(ref['label'])}). A page is "
           "<span class='badge real'>real</span> when its palette and pixels match a shipped track page byte for byte, "
           "<span class='badge recol'>recoloured</span> when only the pixels match, "
-          "<span class='badge approx'>close to shipped</span> when its 16x16 colour signature is within 7/255 of a shipped page "
+          "<span class='badge approx'>close to shipped</span> when its 16x16 colour signature is within 2.5/255 of a shipped page "
           "(a re-quantized or edited copy), and "
           "<span class='badge proc'>procedural</span> when it matches nothing shipped (drawn by td5_tg_pages.c). "
           "<span class='badge unused'>unused</span> = no face uses it in any scanned level.</p>",

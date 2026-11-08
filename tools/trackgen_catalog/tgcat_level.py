@@ -250,7 +250,7 @@ def shipped_signatures(levels_root, skip=("level090", "level091")):
     return names, sigs, std
 
 
-def approx_match(image, names, sigs, std, max_err=7.0, min_std=12.0):
+def approx_match(image, names, sigs, std, max_err=2.5, min_std=12.0):
     """Closest shipped page to a generated page by mean absolute difference of
     the 16x16 colour signature. Returns (level, page, err) or None. Flat pages
     (std < min_std) never match: a grey asphalt is not evidence of a copy."""

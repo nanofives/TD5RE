@@ -68,7 +68,7 @@ def to_html(md):
                 mm = re.match(r"^(\s*)([-*]|\d+\.)\s+(.*)", lines[j])
                 if mm:
                     items.append(mm.group(3))
-                elif lines[j].startswith("   ") and lines[j].strip() and items:
+                elif lines[j].startswith("  ") and lines[j].strip() and items:
                     items[-1] += " " + lines[j].strip()
                 else:
                     break

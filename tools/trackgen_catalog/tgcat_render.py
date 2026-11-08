@@ -7,7 +7,8 @@ for colour-keyed pages (format 1, index 0 transparent) like the game does.
 Lighting is a face-normal cosine plus ambient: enough to read the shape.
 
 View choice:
-  * every face in one plane (billboard tree / prop / sign)  -> face it head on
+  * every face in one plane (billboard tree / prop / sign)  -> face its front head on
+  * otherwise the 3/4 view (of four) that shows the most area, front faces first
   * mostly horizontal faces (road, pavement, ground)        -> steep 3/4 view
   * anything else                                           -> 3/4 view
 """
@@ -36,7 +37,7 @@ def _view_basis(yaw_deg, pitch_deg):
     y, p = math.radians(yaw_deg), math.radians(pitch_deg)
     fwd = np.array([math.sin(y) * math.cos(p), -math.sin(p), math.cos(y) * math.cos(p)])
     right = np.array([math.cos(y), 0.0, -math.sin(y)])
-    up = np.cross(right, fwd)
+    up = np.cross(fwd, right)
     return right, up, fwd
 
 
@@ -46,13 +47,31 @@ def choose_view(faces):
         return 35.0, 30.0
     n0 = normals[0]
     if all(abs(float(np.dot(n, n0))) > 0.995 for n in normals) and abs(n0[1]) < 0.5:
-        # planar vertical piece: look straight at it
-        yaw = math.degrees(math.atan2(-n0[0], -n0[2]))
+        # planar vertical piece: look straight at its FRONT. TD5 winds front
+        # faces clockwise as seen from the front (D3D), so the Newell normal
+        # points AWAY from a viewer who reads the texture the right way round.
+        yaw = math.degrees(math.atan2(n0[0], n0[2]))
         return yaw, 0.0
     horiz = sum(1 for n in normals if abs(n[1]) > 0.8)
-    if horiz > 0.7 * len(normals):
-        return 35.0, 55.0
-    return 35.0, 28.0
+    pitch = 55.0 if horiz > 0.7 * len(normals) else 28.0
+    # Of the four 3/4 views, keep the one that shows the most face area (a
+    # row of walls seen edge-on reads as nothing).
+    areas = []
+    for _, f in faces:
+        p = np.asarray([q for q, _ in f], dtype=np.float64)
+        a = np.zeros(3)
+        for i in range(1, len(p) - 1):
+            a += np.cross(p[i] - p[0], p[i + 1] - p[0])
+        areas.append(a * 0.5)
+    best, best_yaw = -1.0, 35.0
+    for yaw in (35.0, 125.0, 215.0, 305.0):
+        fwd = _view_basis(yaw, pitch)[2]
+        # visible area, plus a bonus for seeing faces from their front (see
+        # above: front-facing <=> Newell area vector along the view direction)
+        vis = sum(abs(float(np.dot(a, fwd))) + 0.5 * float(np.dot(a, fwd)) for a in areas)
+        if vis > best + 1e-6:
+            best, best_yaw = vis, yaw
+    return best_yaw, pitch
 
 
 def render(faces, textures, size=256, yaw=None, pitch=None, ss=2, bg=BG,
