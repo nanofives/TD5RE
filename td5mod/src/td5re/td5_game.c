@@ -6189,6 +6189,65 @@ static void td5_photobooth_tick(void) {
         TD5_LOG_I(LOG_TAG, "photobooth: front_az=%.1f -> azA=%.1f azB=%.1f", front_az, azA, azB);
     }
 
+    /* [round TA 2026-11-08] POSE SWEEP: TD5RE_PB_SWEEP="aofs,el,dist;aofs,el,dist;..."
+     * captures one frame per pose (re/assets/cars/<code>/_pb_sNN.png) in ONE launch,
+     * then quits. Used by re/tools/td5_carpic_patmap.py to find the booth camera
+     * that reproduces an ORIGINAL TD5 carpic photo, so the menu paint-pattern map
+     * (carpicpat0.png) can be rendered through that camera. Offsets are relative
+     * to front_az like TD5RE_PB_AOFS/BOFS. Dev tool only. */
+    {
+        static int sw_init = 0, sw_n = 0, sw_i = 0, sw_st = 0, sw_fc = 0;
+        static float sw_pose[160][3];
+        if (!sw_init) {
+            sw_init = 1;
+            const char *sp = getenv("TD5RE_PB_SWEEP");
+            while (sp && *sp && sw_n < 160) {
+                float a = 0, e = 0, d = 0;
+                if (sscanf(sp, "%f,%f,%f", &a, &e, &d) == 3) {
+                    sw_pose[sw_n][0] = a; sw_pose[sw_n][1] = e; sw_pose[sw_n][2] = d; sw_n++;
+                }
+                sp = strchr(sp, ';');
+                if (sp) sp++;
+            }
+            if (sw_n) TD5_LOG_I(LOG_TAG, "photobooth: sweep of %d poses", sw_n);
+        }
+        if (sw_n) {
+            sw_fc++;
+            if (sw_st == 0) {          /* hold pose sw_i, then grab */
+                td5_render_set_inspect_cam(1, front_az + sw_pose[sw_i][0], sw_pose[sw_i][1],
+                                           sw_pose[sw_i][2], 0);
+                if (sw_fc > (sw_i == 0 ? 50 : 12)) { Backend_RequestCapture(); sw_st = 1; }  /* readback lags a few presents */
+            } else if (sw_st == 1) {   /* captured last present -> save, next pose */
+                unsigned char *px; int w, h;
+                if (!Backend_GetCapture(&px, &w, &h)) {
+                    sw_st = 0; sw_fc = 0;   /* readback not ready: grab this pose again */
+                    return;
+                }
+                {
+                    unsigned char *rgb = (unsigned char *)malloc((size_t)w * h * 3);
+                    if (rgb) {
+                        for (int i = 0; i < w * h; i++) {
+                            rgb[i*3+0] = px[i*4+2]; rgb[i*3+1] = px[i*4+1]; rgb[i*3+2] = px[i*4+0];
+                        }
+                        char path[256];
+                        snprintf(path, sizeof(path), "re/assets/cars/%s/_pb_s%02d.png", code, sw_i);
+                        stbi_write_png(path, w, h, 3, rgb, w * 3);
+                        free(rgb);
+                    }
+                }
+                sw_i++; sw_fc = 0;
+                if (sw_i >= sw_n) {
+                    TD5_LOG_I(LOG_TAG, "photobooth: sweep done for '%s' (%d poses), quitting", code, sw_n);
+                    g_td5.quit_requested = 1;
+                    sw_st = 2;
+                } else {
+                    sw_st = 0;
+                }
+            }
+            return;
+        }
+    }
+
     static int st = 0, fc = 0;
     fc++;
     switch (st) {
