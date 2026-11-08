@@ -193,6 +193,10 @@ void frontend_init_race_schedule(void) {
         TD5_LOG_I(LOG_TAG, "QuickRace launch: start_span_offset=%d", g_td5.ini.start_span_offset);
 #endif
 
+    /* [round UB 2026-11-08] roll the RANDOM car / track entries (a launch from a
+     * selection screen only; Race Again and the next cup race keep the pick) */
+    frontend_resolve_random_picks();
+
     g_td5.race_requested = 1;
     g_td5.car_index   = frontend_current_car_index();
     g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)

@@ -2617,6 +2617,7 @@ void Screen_DisplayOptions(void) {
                 /* Row 3 — Speed Readout MPH/KPH (applied live to the HUD) */
                 s_display_speed_units = !s_display_speed_units;
                 g_td5.ini.speed_units = s_display_speed_units;
+                g_td5.ini.speed_units_chosen = 1;   /* round UB: a real choice */
                 td5_save_set_speed_units(s_display_speed_units);
                 changed = 1;
             } else if (active_button == 4 && delta != 0) {

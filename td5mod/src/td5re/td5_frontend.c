@@ -6754,8 +6754,9 @@ static float frontend_get_title_render_y(float sy) {
 }
 
 /* ===================================================================== *
- *  Quick Race PORT-ENHANCEMENT widgets — item #4 (dev span-offset field)
- *  and item #7 (Car/Track randomize icons).
+ *  Quick Race PORT-ENHANCEMENT widgets — item #4 (dev span-offset field).
+ *  ([round UB] the item #7 Car/Track randomize icons are gone: RANDOM is a
+ *  selector entry, td5_fe_race.c frontend_car_ring_step / _track_ring_step.)
  *
  *  Screen_QuickRaceMenu and its button action switch live in the sibling
  *  td5_fe_race.c; this file owns the Quick Race RENDER path
@@ -6767,56 +6768,6 @@ static float frontend_get_title_render_y(float sy) {
  *  (s_mouse_clicked / WM_CHAR queue). The FSM only consumes input for its
  *  own button indices 0..10, so there is no contention.
  * ===================================================================== */
-
-/* [item #7] Cross-module randomize-icon helpers (defined NON-STATIC in the
- * sibling td5_fe_race.c). frontend_draw_randomize_icon is the reusable chip
- * drawer used by the Quick Race icons below; the two render wrappers paint the
- * car-/track-SELECT screens' chips and are invoked from the post-button render
- * switch in td5_frontend_render_ui_rects. */
-/* [#10 2026-06-16] Dedicated RANDOMIZE button geometry for the Car/Track rows: a
- * compact button parked at the far-right of the value column (32px row height).
- * MUST match the identical definitions in td5_fe_race.c (which creates the
- * buttons) — kept in both .c files to avoid touching shared headers. The value
- * text reserves (QR_RAND_BTN_W + gap) on the right so a long name wraps before
- * the button rather than sliding under it. */
-#define QR_RAND_BTN_W   104   /* "Randomize" button width                        */
-#define QR_RAND_BTN_X   (FE_QR_SCREEN_W - FE_QR_RIGHT_MARGIN - QR_RAND_BTN_W) /* 524 */
-#define QR_RAND_RESERVE (QR_RAND_BTN_W + 8)  /* value-column right reserve for it */
-
-/* [#10 2026-06-16] TD5RE_QR_RANDOM_BUTTON gate (default ON). When on, the Quick
- * Race randomize controls are PROPER nav-selectable buttons (QR_BTN_RAND_CAR /
- * QR_BTN_RAND_TRACK, created in the QR init in td5_fe_race.c) drawn by the
- * standard button renderer; the legacy render-path icon/chip + its mouse/'r'
- * handler are suppressed. "0" reverts to the old icon widgets. NON-STATIC so the
- * FSM in td5_fe_race.c can read it (extern-declared there). */
-int frontend_qr_random_button_on(void) {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("TD5RE_QR_RANDOM_BUTTON");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "QuickRace randomize as real BUTTONS (#10) %s (TD5RE_QR_RANDOM_BUTTON=%s)",
-                  v ? "ENABLED" : "disabled (legacy icons)", e ? e : "default");
-    }
-    return v;
-}
-
-/* [item #7] TD5RE_RANDOM_ICON gate, read locally (the sibling file has its own
- * static cache of the same knob; we cache our own copy here per the brief).
- * Default ON; exactly "0" suppresses the Quick Race randomize icons.
- * [#10] The legacy icon path is ALSO suppressed whenever the new real-button
- * mode (frontend_qr_random_button_on) is on, so the two never double-draw. */
-static int frontend_qr_random_icon_on(void) {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("TD5RE_RANDOM_ICON");
-        v = (e && e[0] == '0') ? 0 : 1;
-        TD5_LOG_I(LOG_TAG, "QuickRace randomize icons (#7) %s (TD5RE_RANDOM_ICON=%s)",
-                  v ? "ENABLED" : "disabled", e ? e : "default");
-    }
-    /* Real-button mode wins: don't draw/handle the old chips when it's active. */
-    if (frontend_qr_random_button_on()) return 0;
-    return v;
-}
 
 #ifndef TD5RE_RELEASE
 /* [item #4] TD5RE_DEV_SPAN_FIELD gate (DEV builds only). Default ON; "0" hides
@@ -6889,160 +6840,6 @@ void frontend_qr_span_toggle_active(void) {
 }
 #endif /* !TD5RE_RELEASE */
 
-/* --- car/track validity, replicated from td5_fe_race.c (whose predicates are
- * file-static and unreachable here) using only cross-module primitives, so the
- * random pick honours the SAME selectability rules as the QR cyclers. --- */
-static int frontend_qr_td5_car_cap(void) {
-    /* mirrors frontend_td5_car_cap_inclusive() */
-    if (s_network_active) return TD5_BASE_CAR_COUNT - 1; /* 36 */
-    if (s_cheat_unlock_all) return 32;
-    int cap = s_total_unlocked_cars - 1;
-    if (cap > 32) cap = 32;
-    if (cap < 0)  cap = 0;
-    return cap;
-}
-static int frontend_qr_car_selectable(int i) {
-    /* mirrors frontend_car_selectable() */
-    if (i < 0 || i >= TD5_CAR_COUNT) return 0;
-    if (s_selected_game_type == 8) return frontend_car_is_cop(i); /* Cop Chase: cops only */
-    if (frontend_car_is_cop(i)) return 0;                          /* cops excluded elsewhere */
-    if (i >= TD5_BASE_CAR_COUNT) return 1;                         /* TD6 */
-    return i <= frontend_qr_td5_car_cap();                         /* unlocked TD5 */
-}
-static int frontend_qr_track_excluded(int t) {
-    /* mirrors frontend_track_excluded_from_selector(): drag strip + cups 20..25
-     * [GEO ROW REMOVAL 2026-10-08, Mariano item 5] ...plus the per-place geo
-     * slots, which are reachable only through the GEOSPATIAL TRACK GENERATOR
-     * now. Unlike the real predicate this mirror makes NO exception for the
-     * armed slot: RANDOMIZE is explicitly asking for a different track, so it
-     * should never re-roll onto the place the generator just handed over. */
-    if (td5_trackgen_is_geo_slot(t)) return 1;
-    return t == FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX || (t >= 20 && t <= 25);
-}
-static int frontend_qr_track_exists(int t) {
-    /* mirrors frontend_track_level_exists(): zip OR loose STRIP.DAT OR strip.json */
-    char path[80];
-    int level_num;
-    if (t < 0) return 1;
-    level_num = td5_asset_level_number(t);
-    snprintf(path, sizeof(path), "level%03d.zip", level_num);
-    if (td5_plat_file_exists(path)) return 1;
-    snprintf(path, sizeof(path), "re/assets/levels/level%03d/STRIP.DAT", level_num);
-    if (td5_plat_file_exists(path)) return 1;
-    snprintf(path, sizeof(path), "re/assets/levels/level%03d/strip.json", level_num);
-    return td5_plat_file_exists(path);
-}
-
-/* [item #7] Pick a random selectable car for the Quick Race CAR row (mirrors
- * frontend_pick_random_car). The QR cycler spans [0, TD5_CAR_COUNT-1]. */
-static int frontend_qr_pick_random_car(void) {
-    int cand[TD5_CAR_COUNT];
-    int n = 0;
-    for (int i = 0; i < TD5_CAR_COUNT; i++)
-        if (frontend_qr_car_selectable(i) && i != s_selected_car) cand[n++] = i;
-    if (n == 0) return s_selected_car;             /* only the current car qualifies */
-    return cand[rand() % n];
-}
-
-/* [item #7] Pick a random selectable, present track for the Quick Race TRACK row
- * (mirrors frontend_pick_random_track + the QR cycler's exclusive bound). Writes
- * s_selected_track and returns 1 on change. */
-static int frontend_qr_pick_random_track(void) {
-    int track_max = s_total_unlocked_tracks; /* exclusive (net incl. TD6 26-36 now) */
-    if (track_max <= 0) return 0;
-    if (track_max > 64) track_max = 64;
-    int cand[64];
-    int n = 0;
-    for (int t = 0; t < track_max; t++) {
-        if (t == s_selected_track) continue;       /* prefer a change */
-        if (frontend_qr_track_excluded(t)) continue;
-        if (!frontend_qr_track_exists(t)) continue;
-        cand[n++] = t;
-    }
-    if (n == 0) {                                  /* allow re-pick of the current */
-        for (int t = 0; t < track_max; t++) {
-            if (frontend_qr_track_excluded(t)) continue;
-            if (!frontend_qr_track_exists(t)) continue;
-            cand[n++] = t;
-        }
-        if (n == 0) return 0;
-    }
-    int pick = cand[rand() % n];
-    if (pick == s_selected_track) return 0;
-    s_selected_track = pick;
-    return 1;
-}
-
-/* After a randomize-track, refresh the QR rows whose visibility depends on the
- * track (Direction toggle + circuit Laps row). The FSM (td5_fe_race.c) only does
- * this on an arrow-cycle, and its updater functions are file-static there, so we
- * replicate the effect here using the same accessible asset queries. Mirrors
- * frontend_update_direction_button_visibility(QR_BTN_DIRECTION,0) and
- * frontend_update_laps_button_visibility(QR_BTN_LAPS). */
-static void frontend_qr_refresh_track_rows(void) {
-    /* Direction toggle: shown iff the track has reverse assets. */
-    if (QR_BTN_DIRECTION < s_button_count) {
-        int has_rev = (s_selected_track < 0) ? 1
-                      : td5_asset_track_has_reverse(s_selected_track);
-        s_buttons[QR_BTN_DIRECTION].hidden   = !has_rev;
-        s_buttons[QR_BTN_DIRECTION].disabled = !has_rev;
-        if (!has_rev) {
-            s_track_direction = 0;
-            if (s_selected_button == QR_BTN_DIRECTION) s_selected_button = 0;
-        }
-    }
-    /* Laps row: shown only for circuit tracks. */
-    if (QR_BTN_LAPS < s_button_count) {
-        int is_circuit;
-        if (s_selected_track < 0) {
-            is_circuit = 1;
-        } else {
-            int td6_level = td5_asset_td6_level_for_slot(s_selected_track);
-            if (td6_level > 0)
-                is_circuit = td5_asset_td6_finish_span_for_level(td6_level) > 0 ? 0 : 1;
-            else
-                is_circuit = td5_asset_track_has_reverse(s_selected_track) ? 0 : 1;
-        }
-        s_buttons[QR_BTN_LAPS].hidden   = !is_circuit;
-        s_buttons[QR_BTN_LAPS].disabled = !is_circuit;
-        if (!is_circuit && s_selected_button == QR_BTN_LAPS) s_selected_button = 0;
-    }
-}
-
-/* Footprint of the QR randomize chip (matches frontend_draw_randomize_icon's
- * fixed 28x28 canvas chip in td5_fe_race.c). */
-#define FE_QR_RAND_ICON_W 28
-#define FE_QR_RAND_ICON_H 28
-/* Canvas-space TOP-LEFT of the randomize chip for a given QR option row: parked
- * at the far right of the value column, vertically centred on the 32px row. */
-static void frontend_qr_rand_icon_xy(int row_btn_idx, float *out_x, float *out_y) {
-    int by = (row_btn_idx >= 0 && row_btn_idx < s_button_count)
-             ? s_buttons[row_btn_idx].y : QR_ROW_Y(0);
-    *out_x = (float)(FE_QR_SCREEN_W - FE_QR_RIGHT_MARGIN - FE_QR_RAND_ICON_W);
-    *out_y = (float)by + (32.0f - (float)FE_QR_RAND_ICON_H) * 0.5f;
-}
-
-/* Roll the selector identified by `which` (0 = Car, 1 = Track) and emit cycle sfx
- * on a real change. [#10] NON-STATIC: the dedicated Randomize buttons' action in
- * the Screen_QuickRaceMenu FSM (td5_fe_race.c) calls this via an extern decl. */
-void frontend_qr_roll_selector(int which) {
-    if (which == 0) {
-        int prev = s_selected_car;
-        s_selected_car = frontend_qr_pick_random_car();
-        if (s_selected_car != prev) frontend_play_sfx(2);
-        TD5_LOG_I(LOG_TAG, "QuickRace randomize CAR: %d -> %d", prev, s_selected_car);
-    } else {
-        int prev = s_selected_track;
-        if (frontend_qr_pick_random_track()) {
-            /* Keep the Direction/Laps rows consistent with the new track (the FSM
-             * only refreshes these on an arrow-cycle). */
-            frontend_qr_refresh_track_rows();
-            frontend_play_sfx(2);
-            TD5_LOG_I(LOG_TAG, "QuickRace randomize TRACK: %d -> %d", prev, s_selected_track);
-        }
-    }
-}
-
 /* Per-frame INPUT for the Quick Race port-enhancement widgets. Runs at the top of
  * the render overlay (after the generic input poll and the FSM, which have already
  * run this frame). Mouse click on a randomize chip rolls that selector. Typed
@@ -7051,12 +6848,11 @@ void frontend_qr_roll_selector(int which) {
  * focused selector. Inert when both knobs are off. Only active during the
  * interactive QR sub-state (and clears the span input latch when leaving it). */
 static void frontend_quickrace_widget_input(void) {
-    int icon_on = frontend_qr_random_icon_on();
     int span_on = 0;
 #ifndef TD5RE_RELEASE
     span_on = frontend_qr_span_field_on();
 #endif
-    if (!icon_on && !span_on) return;
+    if (!span_on) return;
     if (s_inner_state < 4) {
         /* Still sliding in: drain any chars typed before the screen settled so a
          * stale digit / 'r' can't leak into the span field or fire a randomize on
@@ -7074,21 +6870,6 @@ static void frontend_quickrace_widget_input(void) {
         return;                        /* interactive sub-state only */
     }
     if (!frontend_is_window_active()) return;
-
-    /* --- Mouse: a click landing on a randomize chip (which is NOT an s_buttons[]
-     * entry, so the generic poll hit-test ignored it and left s_mouse_clicked set
-     * and s_button_index = -1). --- */
-    if (icon_on && s_mouse_clicked) {
-        float ix, iy;
-        for (int which = 0; which <= 1; which++) {
-            frontend_qr_rand_icon_xy(which == 0 ? QR_BTN_CAR : QR_BTN_TRACK, &ix, &iy);
-            if ((float)s_mouse_x >= ix && (float)s_mouse_x < ix + FE_QR_RAND_ICON_W &&
-                (float)s_mouse_y >= iy && (float)s_mouse_y < iy + FE_QR_RAND_ICON_H) {
-                frontend_qr_roll_selector(which);
-                break;
-            }
-        }
-    }
 
     /* --- Keyboard: drain the WM_CHAR queue once. While the span field is INPUT-
      * ACTIVE (dev; toggled by clicking/activating QR_BTN_SPAN), digits/backspace/
@@ -7118,11 +6899,6 @@ static void frontend_quickrace_widget_input(void) {
             continue;                                      /* don't fall through to 'r' */
         }
 #endif /* !TD5RE_RELEASE */
-        if (icon_on && (ch == 'r' || ch == 'R')) {
-            int focus = (s_selected_button == QR_BTN_TRACK) ? 1 : 0; /* default Car */
-            frontend_qr_roll_selector(focus);
-            continue;
-        }
         /* Nothing else consumes WM_CHAR on this screen. */
     }
 }
@@ -7148,21 +6924,18 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
      * TRACK GENERATOR with the place name on a small line under it. */
     frontend_get_entry_title(s_selected_track, track_name, sizeof(track_name),
                              place_name, sizeof(place_name));
-    car_locked = (!s_cheat_unlock_all && !s_network_active &&
+    /* [round UB] the RANDOM entries (rolled at launch) */
+    if (s_car_random)   snprintf(car_name, sizeof(car_name), "%s", TR("RANDOM"));
+    if (s_track_random) { snprintf(track_name, sizeof(track_name), "%s", TR("RANDOM"));
+                          place_name[0] = '\0'; }
+    car_locked = (!s_car_random && !s_cheat_unlock_all && !s_network_active &&
                   s_selected_car >= 0 && s_selected_car < 37 &&
                   s_car_lock_table[s_selected_car] != 0);
-    track_locked = (!s_cheat_unlock_all && !s_network_active &&
+    track_locked = (!s_track_random && !s_cheat_unlock_all && !s_network_active &&
                     s_selected_track >= 0 && s_selected_track < 37 &&
                     s_track_lock_table[s_selected_track] != 0);
 
-    /* [item #7] Reserve the chip strip on the Car/Track rows so a long wrapped
-     * name never slides under the randomize icon. 0 when the icon is off.
-     * [#10] When the randomize controls are real BUTTONS (the new default), the
-     * Randomize button sits at the far-right of the value column instead, so
-     * reserve its (wider) footprint so the name wraps before it. */
-    int rand_reserve = frontend_qr_random_button_on() ? QR_RAND_RESERVE
-                     : frontend_qr_random_icon_on()   ? (FE_QR_RAND_ICON_W + 6)
-                     : 0;
+    const int rand_reserve = 0;   /* [round UB] no randomize control beside the rows */
 
     /* Each selected value renders in the right-hand value column at the same
      * glyph size as the button caption, vertically centered on its row, and
@@ -7200,26 +6973,6 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
         !s_buttons[QR_BTN_SPLITSCREENS].hidden) {
         snprintf(count, sizeof(count), "%d", s_num_spectate_screens);
         frontend_draw_qr_value(sx, sy, QR_BTN_SPLITSCREENS, count, 0xFFFFFFFF, 0);
-    }
-
-    /* [item #7] Randomize chips to the RIGHT of the Car and Track selectors. Each
-     * is lit when its row holds focus (mouse click or 'r'/'R' rolls it — handled
-     * in frontend_quickrace_widget_input above). NOT s_buttons[] entries, so the
-     * Car/Track/.../OK/Back nav ring is untouched. */
-    if (frontend_qr_random_icon_on()) {
-        float ix, iy;
-        const int iw = FE_QR_RAND_ICON_W, ih = FE_QR_RAND_ICON_W;
-        /* [fix 2026-06-15] The chip lights only when the MOUSE is over the icon
-         * itself — NOT when the adjacent Car/Track row is focused (which made the
-         * chip look "selected" while hovering Car/Track). */
-        frontend_qr_rand_icon_xy(QR_BTN_CAR, &ix, &iy);
-        frontend_draw_randomize_icon(ix, iy, sx, sy,
-            s_mouse_x >= (int)ix && s_mouse_x < (int)ix + iw &&
-            s_mouse_y >= (int)iy && s_mouse_y < (int)iy + ih);
-        frontend_qr_rand_icon_xy(QR_BTN_TRACK, &ix, &iy);
-        frontend_draw_randomize_icon(ix, iy, sx, sy,
-            s_mouse_x >= (int)ix && s_mouse_x < (int)ix + iw &&
-            s_mouse_y >= (int)iy && s_mouse_y < (int)iy + ih);
     }
 
 #ifndef TD5RE_RELEASE
@@ -8381,7 +8134,10 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * grey (see the button draw's bb_state==2 path). Paintable cars keep the
      * working ◄► arrows (TD5) / modal colour picker (TD6). */
     if (s_button_count > 1 && s_buttons[1].active)
-        s_buttons[1].disabled = !frontend_car_has_paint(actual_car);
+        s_buttons[1].disabled = s_car_random || !frontend_car_has_paint(actual_car);
+    /* [round UB] RANDOM has no spec sheet either: MORE STATS greyed while it shows */
+    if (s_button_count > 2 && s_buttons[2].active)
+        s_buttons[2].disabled = s_car_random ? 1 : 0;
 
     /* [SP DRAG MANUAL LOCK 2026-09-12] SP drag forces MANUAL transmission, so the
      * AUTO/MANUAL row (slot 3) is non-interactive: grey it out so nav/mouse skip it
@@ -8465,7 +8221,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * that band). Slides in with the button column (mirrors button 2, directly
      * below it). Drawn after the bar/curve/topbar layer so it sits on top, like
      * the buttons. */
-    if (s_button_count > 0 && !s_color_panel_visible) {
+    if (s_button_count > 0 && !s_color_panel_visible && !s_car_random) {
         float panel_x = frontend_get_button_anim_x(2, FE_CARSTAT_PANEL_X);
         frontend_load_car_spec_fields(actual_car);
         frontend_draw_car_stat_bars(panel_x, FE_CARSTAT_PANEL_Y,
@@ -8500,10 +8256,21 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
          * becomes a non-paintable TD5 car the overlay stops drawing: the old car
          * slides out as its plain (grey) carpic and no TD6 paint bleeds into the
          * TD5 transition. TD6->TD6 switches still slide out painted. */
-        int show_paint = (s_color_panel_visible || s_paint_active) &&
+        int show_paint = (s_color_panel_visible || s_paint_active) && !s_car_random &&
                          frontend_paint_overlay_visible(actual_car,
                                                         (uint32_t)g_td5.ini.td6_paint_color);
-        if (s_inner_state == 11) {
+        if (s_inner_state == 11 && s_car_random_outgoing) {
+            /* [round UB] RANDOM's "?" card slides out like a car */
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 433.0f);
+            frontend_draw_random_card(232.0f + 408.0f * t + 20.0f, 134.0f, 368.0f, 260.0f, sx, sy);
+        } else if (s_car_random && s_inner_state == 14) {
+            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 800.0f);
+            frontend_draw_random_card(1832.0f - 1600.0f * t + 20.0f, 134.0f, 368.0f, 260.0f, sx, sy);
+        } else if (s_car_random && s_inner_state != 11) {
+            /* [round UB] the RANDOM entry: a "?" card where the car picture goes */
+            if (s_inner_state >= 6 && s_inner_state != 12 && s_inner_state != 13)
+                frontend_draw_random_card(252.0f, 134.0f, 368.0f, 260.0f, sx, sy);
+        } else if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
              * On the very first frame(s) of state 11 the case-11 update that loads
              * prev_surface may not have run yet (prev==0); in that case keep the OLD
@@ -8578,7 +8345,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * color as live feedback. Once a carpic exists it is drawn above (gray base
      * + body-only paint overlay), so this flat box must NOT cover it — gated on
      * s_car_preview_surface <= 0. Skipped on the dimmed stats sub-screen (15). */
-    if (frontend_car_paintable(actual_car) && s_car_preview_surface <= 0 &&
+    if (frontend_car_paintable(actual_car) && s_car_preview_surface <= 0 && !s_car_random &&
         s_inner_state >= 6 && s_inner_state != 15) {
         td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         fe_draw_quad(232.0f * sx, 124.0f * sy, 408.0f * sx, 280.0f * sy,
@@ -8588,15 +8355,17 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
 
     if (s_anim_complete) {
         /* Car name: y = canvasH/2 - 0x97 = 480/2 - 151 = 89 (gap between topbar bottom y=81 and car preview y=124) */
-        frontend_draw_value_text(sx, sy, 232, 89, frontend_get_car_display_name(actual_car), 0xFFFFFFFF);
-        int is_locked = (!s_cheat_unlock_all && !s_network_active &&
+        frontend_draw_value_text(sx, sy, 232, 89,
+                                 s_car_random ? TR("RANDOM") : frontend_get_car_display_name(actual_car),
+                                 0xFFFFFFFF);
+        int is_locked = (!s_car_random && !s_cheat_unlock_all && !s_network_active &&
                          actual_car >= 0 && actual_car < 37 &&
                          s_car_lock_table[actual_car] != 0);
         if (is_locked) {
             /* [FIXED 2026-06-01] SNK_LockedTxt white (orig), at (86,163)=(cx-0xea, cy-0x77),
              * not red at y=121. */
             frontend_draw_value_text(sx, sy, 86, 163, SNK_LockedTxt, 0xFFFFFFFF);
-        } else if (s_selected_game_type == 2) {
+        } else if (s_selected_game_type == 2 && !s_car_random) {
             /* [FIXED 2026-06-01] Beast/Beauty tag for the Era cup (gametype 2), same
              * (86,163) slot as Locked (mutually exclusive). [CONFIRMED @ 0x40DFC0 case0xc:
              * car<8 → Beauty (SNK_BeautyTxt), else Beast (SNK_BeastTxt).] */
@@ -8808,6 +8577,10 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     /* [ROUND 1030 A2] Geo entry: generator title + place subline. */
     frontend_get_entry_title(s_selected_track, track_name, sizeof(track_name),
                              place_name, sizeof(place_name));
+    if (s_track_random) {   /* [round UB] the RANDOM entry, rolled at launch */
+        snprintf(track_name, sizeof(track_name), "%s", TR("RANDOM"));
+        place_name[0] = '\0';
+    }
     /* Original: text surface 296x184 at (344,81), city at surf y=0, country at surf y=0x20=32
      * RE: 0x00427CD0-0x00427D56 — split at 0x2C; blit top 64 rows to screen (344,81) */
     comma = strchr(track_name, ',');
@@ -8844,7 +8617,10 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
     /* Track preview: 152x224 portrait, right of buttons.
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480).
      * Slides in from right during track-switch animation (state 9). */
-    if (s_track_preview_surface > 0) {
+    if (s_track_random) {
+        /* [round UB] RANDOM: a "?" card in the preview's place, sliding in with it */
+        frontend_draw_random_card(412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f, sx, sy);
+    } else if (s_track_preview_surface > 0) {
         fe_draw_surface_rect(s_track_preview_surface,
                              412.0f * sx + img_x_off, 135.0f * sy,
                              152.0f * sx, 224.0f * sy, 0xFFFFFFFF);
@@ -8930,7 +8706,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
      * cycler; the Forwards/Backwards row (slot 1) is a PRESS toggle, not a ◄►
      * cycler, so it must NOT show selector arrows. */
     fe_draw_option_arrows(0, sx, sy);
-    if (!s_cheat_unlock_all &&
+    if (!s_cheat_unlock_all && !s_track_random &&
         s_selected_track >= 0 &&
         s_selected_track < 31 &&
         s_track_lock_table[s_selected_track] != 0 &&
@@ -11219,16 +10995,6 @@ void td5_frontend_render_ui_rects(void) {
         }
     }
 
-    /* [item #7 2026-06-15] The car-select randomize chip is painted by
-     * frontend_render_carsel_randomize_icon (extern-declared with
-     * frontend_draw_randomize_icon up by the Quick Race widgets). It is called
-     * from inside the CAR_SELECTION case below — AFTER the per-screen button loop
-     * above — so the chip composites on TOP of the button frames (original
-     * BltFast z-order). The wrapper self-skips when the control is off / not in
-     * icon form / the handle isn't live.
-     * [W3 2026-09-29] TRACK_SELECTION has no chip any more; its post-button pass
-     * draws the R / pad-X randomize HINT (frontend_render_trksel_hints) instead. */
-
     /* Option arrows drawn AFTER buttons so they render on top of the button fill.
      * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
     if (s_anim_complete) {
@@ -11344,8 +11110,6 @@ void td5_frontend_render_ui_rects(void) {
             if (!frontend_car_paintable(frontend_current_car_index()))
                 fe_draw_option_arrows(1, sx, sy);
             frontend_render_td6_color_panel(sx, sy);
-            /* [item #7] Randomize chip to the right of the Car selector. */
-            frontend_render_carsel_randomize_icon(sx, sy);
             break;
         case TD5_SCREEN_TRACK_SELECTION:
         case TD5_SCREEN_CUP_TRACK_SELECT:
@@ -11354,8 +11118,6 @@ void td5_frontend_render_ui_rects(void) {
              * moved onto the RACE OPTIONS screen. */
             fe_draw_option_arrows(0, sx, sy);   /* Track */
             fe_draw_option_arrows(2, sx, sy);   /* Laps (self-skips on P2P) */
-            /* [W3 2026-09-29] "X / R = RANDOM" hint, bottom-right next to BACK. */
-            frontend_render_trksel_hints(sx, sy);
             break;
         case TD5_SCREEN_RACE_OPTIONS:
             /* [CONSOLIDATION 2026-07-21] ◄► arrows for each current-page option
@@ -11806,6 +11568,12 @@ int td5_frontend_init(void) {
     s_results_cup_complete = 0;
     s_cheat_unlock_all = 0;
 
+    /* [round UB 2026-11-08] Speed units sync from g_td5.ini whether or not a
+     * td5re.ini was found: main.c resolves the KPH default either way, and the
+     * HUD (g_td5.ini) and the results screens (td5_save) must agree. */
+    s_display_speed_units = g_td5.ini.speed_units;
+    td5_save_set_speed_units(g_td5.ini.speed_units);
+
     /* Apply INI defaults (override compile-time defaults if INI was loaded) */
     if (g_td5.ini.loaded) {
         s_display_fog_enabled       = g_td5.ini.fog_enabled;
@@ -11814,8 +11582,6 @@ int td5_frontend_init(void) {
         s_display_window_mode       = g_td5.ini.window_mode;
         s_display_vsync             = g_td5.ini.vsync;
         s_display_show_fps          = g_td5.ini.show_fps;
-        s_display_speed_units       = g_td5.ini.speed_units;
-        td5_save_set_speed_units(g_td5.ini.speed_units);
         s_display_camera_damping    = g_td5.ini.camera_damping;
         td5_save_set_camera_damping(g_td5.ini.camera_damping);
         s_display_lighting_quality  = g_td5.ini.lighting_quality;  /* [RT] LOW/HIGH */

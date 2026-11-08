@@ -725,6 +725,7 @@ void td5_ini_persist_options(void)
     /* Display */
     td5_ini_write_int("Display", "Fogging",       g_td5.ini.fog_enabled);
     td5_ini_write_int("Display", "SpeedUnits",    g_td5.ini.speed_units);
+    td5_ini_write_int("Display", "SpeedUnitsChosen", g_td5.ini.speed_units_chosen);
     td5_ini_write_int("Display", "CameraDamping", g_td5.ini.camera_damping);
     td5_ini_write_int("Display", "DisplayMode",   td5_save_get_display_mode());
     /* [S01 2026-06-04] window mode / vsync / fps overlay + the chosen resolution
@@ -1375,7 +1376,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* Display options */
     g_td5.ini.fog_enabled    = td5_ini_int("Display", "Fogging", 1);
-    g_td5.ini.speed_units    = td5_ini_int("Display", "SpeedUnits", 0);
+    /* [round UB 2026-11-08] KPH is the default. SpeedUnits is honoured only
+     * when SpeedUnitsChosen=1 (written once the user toggles SPEED READOUT);
+     * an older td5re.ini carries SpeedUnits=0 written by the options persist,
+     * not by a choice, so it is read as KPH. --SpeedUnits=N still overrides. */
+    g_td5.ini.speed_units_chosen = td5_ini_int("Display", "SpeedUnitsChosen", 0) ? 1 : 0;
+    g_td5.ini.speed_units    = g_td5.ini.speed_units_chosen
+                             ? (td5_ini_int("Display", "SpeedUnits", 1) ? 1 : 0)
+                             : 1;
     g_td5.ini.camera_damping = td5_ini_int("Display", "CameraDamping", 5);
     g_td5.ini.display_mode   = td5_ini_int("Display", "DisplayMode", 0);
     /* [S01 2026-06-04] 3-way window mode (0=fullscreen,1=windowed,2=borderless;
