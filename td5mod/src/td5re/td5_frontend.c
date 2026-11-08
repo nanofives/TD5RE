@@ -3874,6 +3874,19 @@ void td5_frontend_auto_race_setup(void) {
     ConfigureGameTypeFlags();
 
 #ifndef TD5RE_RELEASE
+    /* [round TA 2026-11-08] Dev harness for selftest row t3-laps-shipped:
+     * TD5RE_AUTORACE_LAPS_AFTER_CONFIG=N changes the LAPS row value AFTER the
+     * game type was configured, which is the order the menus use (race type
+     * picked first, LAPS edited later on SELECT TRACK / QUICK RACE). The race
+     * must still run N laps (frontend_init_race_schedule applies it). */
+    {
+        const int ml = td5_env_int("TD5RE_AUTORACE_LAPS_AFTER_CONFIG", 0, 0, 10);
+        if (ml > 0) {
+            TD5_LOG_I(LOG_TAG, "AutoRace: LAPS row %d -> %d after ConfigureGameTypeFlags (circuit_lap_count=%d)",
+                      s_game_option_laps + 1, ml, g_td5.circuit_lap_count);
+            s_game_option_laps = ml - 1;
+        }
+    }
     /* [CHAOS CO-OP 2026-10-01] Dev harness: TD5RE_CHAOS_FE_SEATS=4|6|8 fabricates
      * the lobby + board state and commits it through the real frontend path, so
      * the schedule call below takes the frontend_chaos_pending() branch. No-op
