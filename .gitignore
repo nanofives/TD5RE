@@ -96,6 +96,12 @@ pyghidra_projects/
 !/tools/frida_pool5_00405D70.js
 !/tools/frida_race_trace.js
 !/tools/run_ai_probe.py
+# Auto-track piece + texture catalogue (round UD): scripts tracked, the
+# generated site and its scratch are not.
+!/tools/trackgen_catalog/
+/tools/trackgen_catalog/site/
+/tools/trackgen_catalog/levels/
+/tools/trackgen_catalog/__pycache__/
 
 # MinGW-w64 x86_64 toolchain (winlibs GCC 16.1.0) — the ONLY toolchain since
 # the i686 retirement 2026-07-30 (32-bit toolchain parked in _archive/).
