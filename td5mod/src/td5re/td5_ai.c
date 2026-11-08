@@ -290,6 +290,9 @@ uint8_t g_actor_broken_down[TD5_MAX_TOTAL_ACTORS]; /* 1 = crashed/disabled: park
 int16_t g_actor_broken_ticks[TD5_MAX_TOTAL_ACTORS];/* remaining broken-down ticks */
 static int16_t g_cop_glow_phase[TD5_MAX_TOTAL_ACTORS];    /* steady strobe intensity ramp per cop */
 static int16_t g_cop_cooldown[TD5_MAX_TOTAL_ACTORS];      /* ticks before a cop may re-acquire after a chase */
+/* [round TB item 6] the car the cooldown is about: the cop's last target. The cooldown keeps THIS cop off THAT car
+ * only; a pursuit of any other car can be joined at once (it used to bar every acquire for 5 s). */
+static int8_t  g_cop_cool_target[TD5_MAX_TOTAL_ACTORS];
 int32_t s_cop_spawn_counter;                       /* deterministic 1:CopRatio cop cadence */
 /* [R3-12 COP NO-PROGRESS WATCHDOG 2026-06-19] Per-cop chase progress tracker:
  * the best (smallest) main-ring |gap| this cop has achieved toward its current
@@ -402,6 +405,7 @@ enum { COP_RAM_LUNGE = 0, COP_RAM_BACKUP = 1 };
     memset(g_actor_broken_ticks, 0, sizeof(g_actor_broken_ticks));
     memset(g_cop_glow_phase, 0, sizeof(g_cop_glow_phase));
     memset(g_cop_cooldown, 0, sizeof(g_cop_cooldown));
+    memset(g_cop_cool_target, 0xFF, sizeof(g_cop_cool_target));
     /* [R1026 K] The pull-over latch is police-chase per-race state like the rest of
      * this block; a stale 1 here brakes the next race's human car forever. */
     if (encounter_leak_fix_enabled()) {
@@ -466,6 +470,7 @@ static void cop_end_chase(int slot) {
     }
     /* [MULTI-COP 2026-06-29] No per-target pursuer lock to clear anymore — a car
      * can be chased by several cops at once; td5_ai_actor_is_pursued() scans cops. */
+    g_cop_cool_target[slot] = g_cop_target[slot];   /* [round TB item 6] the car the re-chase cooldown is about */
     g_cop_target[slot] = -1;
     g_cop_phase[slot]  = COP_IDLE;
     g_cop_glow_phase[slot] = 0;
@@ -8318,8 +8323,10 @@ void td5_ai_update_special_encounter(void) {
 
         if (phase == COP_IDLE) {
             /* Cruise normally during the post-chase cooldown (don't immediately
-             * re-acquire the car it just chased). */
-            if (g_cop_cooldown[k] > 0) { g_cop_cooldown[k]--; continue; }
+             * re-acquire the car it just chased). [round TB item 6] Only that car:
+             * the cooldown no longer stops this cop joining a pursuit of another
+             * car (it skipped the whole acquire for 5 s). */
+            if (g_cop_cooldown[k] > 0) g_cop_cooldown[k]--;
             /* Acquire the FIRST (lowest-slot = deterministic) racer that just
              * passed this cop and isn't already pursued by another cop. */
             int chosen = -1, joined = 0;
@@ -8336,6 +8343,10 @@ void td5_ai_update_special_encounter(void) {
                  * it immediately, and this cop resumes after the cooldown). */
                 if (cop_no_rechase_enabled() && s_cop_rebust_ticks[k] > 0 &&
                     s_cop_rebust_target[k] == (int8_t)c)
+                    continue;
+                /* [round TB item 6] the post-chase cooldown: this cop leaves the car
+                 * it just let go alone for COP_RECHASE_COOLDOWN ticks, nothing else. */
+                if (g_cop_cooldown[k] > 0 && g_cop_cool_target[k] == (int8_t)c)
                     continue;
                 st = g_slot_state[c];
                 /* Cops chase HUMAN players only (state 1), never AI opponents.

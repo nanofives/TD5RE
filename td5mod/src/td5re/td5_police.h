@@ -16,11 +16,13 @@
  *               rams a cop (contact, impact over TD5RE_POLICE_RAM_IMPACT): the rammed cop gives chase. Toast
  *               "POLICE PURSUIT: ...", the pursuit panel (heat boxes, cops on you, the EVADE bar).
  *   HEAT 1..5   1 at the start, +1 per further offence (passing another cop at speed, ramming a cop) and per 25 s.
- *   JOINS       while a pursuit runs, a cop the car passes joins at any speed; from heat 2 an idle cop within 200 m
- *               BEHIND the car joins too (a cop ahead waits to be passed: the span chaser would otherwise "overtake"
- *               at once and pull the car over).
- *   REINFORCE   pursuers wanted = 1 + heat: while fewer cops are on the road, the next traffic spawn (ahead, in the
- *               normal spawn window) is a cop, one per 3 s.
+ *   JOINS       while a pursuit runs, a cop the car passes joins at any speed; an idle cop within 200 m BEHIND the
+ *               car joins too, at any heat and with no cap on the pursuers (round TB; was from heat 2, up to 1 + heat)
+ *               (a cop ahead waits to be passed: the span chaser would otherwise "overtake" at once and pull the car
+ *               over).
+ *   REINFORCE   cops wanted on the road = TD5RE_POLICE_COPS_BASE (2) + heat: while fewer are on the road, the next
+ *               traffic spawn (ahead, in the normal spawn window) is a cop and a far car ahead becomes one, with no
+ *               timer between them (round TB; was 1 + heat, one per 3 s, the first 2 s after the start).
  *   ROADBLOCKS  from heat TD5RE_POLICE_BLOCK_HEAT (3): a block on the MAIN-RING SPAN 200..400 m ahead of the car
  *               (TD5RE_POLICE_BLOCK_MIN_M / _MAX_M), away from fork / loop mouths, across the span's road band
  *               (the lane quads, slow verge lanes trimmed). 2 cars at heat 3, 3 at heat 4-5, parked across the road
@@ -65,6 +67,7 @@ typedef struct {
     const char *toast;          /* NULL / "" = none                                        */
     uint32_t    toast_col;
     long        tick;           /* the flash phase                                         */
+    int         race;           /* [round TB item 5] 1 = a race: no heat boxes, no "HEAT n COPS n" line (free roam 0) */
 } TD5_PoliceHud;
 /* Draws in the pane (x0, y0, w, h), screen pixels. Sets and restores the HUD render preset. */
 void td5_police_hud_draw(const TD5_PoliceHud *h, float x0, float y0, float w, float h_px);
