@@ -2237,8 +2237,8 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans, int lateral, TG_Buf *out);
 #define TD5_TG_RUNOFF_SPANS  100
 int tg_finish_span(int ring);
 /* [W3 2026-09-29] Ring span indices of this route's checkpoints (zero-padded
- * cp_span[7]); returns the count. Shared by tg_emit_levelinf and the preview
- * stats so the track-select ticks land on the spans the level ships. */
+ * cp_span[7]); returns the count. Used by tg_emit_levelinf. (The track-select
+ * preview ticks that also read it were removed in round TA, 2026-11-08.) */
 int tg_checkpoint_spans(int ring, int *cp_span);
 int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans, TG_Buf *out);
 /* [GEO FREE ROAM F11b] the roam host's TEXTURES.DAT (td5_tg_pages.c): the fixed page block only */
