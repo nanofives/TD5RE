@@ -531,6 +531,28 @@ static const RaceScenario k_races[] = {
       .traffic=3, .opponents=2, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=1, .auto_gearbox=1,
       .police=2, .ff=4, .depth=ST_DEPTH_ROAM_SPRINT },
+    /* [round TB, 2026-11-08] one targeted row per police item (full suite only; run alone with TD5RE_SELFTEST_ROWS).
+     * t4 / t5 / t6 share one short drive on Moscow (td5_police_test.c TB modes): pass a planted cop at speed, plant 2
+     * idle cops 20 / 32 spans behind at heat 1, hold 6 s (FF 2: at 4 the 265 km/h car trips the 8000-unit
+     * jump WARN, see police-smoke). No rebase check for t6-cops-join-roam (a 3 s window). t4: the race minimap drew chasing cops in both blink colours.
+     * t5: the race pursuit panel drawn, its HEAT / COPS line never. t6: 3 pursuers within 4 s at heat 1, the 2 behind
+     * by the behind-join rule. t6-cops-join-roam: free roam, 3 pursuers within 3 s of the pursuit start. */
+    { .name="t4-minimap-cops",       .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=1, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .police=3, .ff=2, .depth=ST_DEPTH_ROAM_SPRINT },
+    { .name="t5-race-panel",         .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=1, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .police=4, .ff=2, .depth=ST_DEPTH_ROAM_SPRINT },
+    { .name="t6-cops-join",          .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=1, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=1,
+      .police=5, .ff=2, .depth=ST_DEPTH_ROAM_SPRINT },
+    { .name="t6-cops-join-roam",     .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .roam=24, .depth=ST_DEPTH_ROAM_SPRINT },
     /* [roam F9b] out of the casco: Plaza Moreno -> Diagonal 74 -> Camino Parque Centenario at Gonnet (~8 km, solo, free
      * roam): the region planner maps the route (tiles built on the stream worker when missing), the drive crosses
      * world-origin rebases; 0 stream misses / holds, >= 1 rebase, no actor past 4.19 M units, 0 pinches / rescues /
@@ -953,7 +975,7 @@ static char s_roam_note[120];
 /* [roam F8] rows the sprint test drives (the rest are td5_roam_drive scripts) */
 static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 12 || row == 15 || (row >= 18 && row <= 23); }   /* [roam SB] 22/23 Berisso / Ensenada */   /* [roam RA] 18..21 split screen */  /* 7/8 = F9a circuits, 12 = F8 sprint+traffic, 15 = F9b partido (13/14 = F10 cops) */
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
-static int st_roam_is_cops(int row) { return row == 13 || row == 14 || row == 17; }   /* [roam F10] 13 full (traffic on), 14 smoke; [G1b] 17 roadblocks */
+static int st_roam_is_cops(int row) { return row == 13 || row == 14 || row == 17 || row == 24; }   /* [round TB] 24 t6-cops-join-roam */   /* [roam F10] 13 full (traffic on), 14 smoke; [G1b] 17 roadblocks */
 static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
 
 static void st_roam_arm(const RaceScenario *sc)
@@ -991,8 +1013,9 @@ static void st_roam_arm(const RaceScenario *sc)
     }
     if (st_roam_is_cops(sc->roam)) {
         /* [roam F10] the cops drive: the smoke row without ambient traffic, the full row with the knob density */
-        if (sc->roam == 14) td5_roam_traffic_force_density(0);
-        td5_roam_cops_test_arm(sc->roam == 13 ? TD5_RCOPS_FULL : sc->roam == 17 ? TD5_RCOPS_ROADBLOCK : TD5_RCOPS_SMOKE);
+        if (sc->roam == 14 || sc->roam == 24) td5_roam_traffic_force_density(0);
+        td5_roam_cops_test_arm(sc->roam == 13 ? TD5_RCOPS_FULL : sc->roam == 17 ? TD5_RCOPS_ROADBLOCK :
+                               sc->roam == 24 ? TD5_RCOPS_JOIN : TD5_RCOPS_SMOKE);
         if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
             s_roam_captured = 1;
             s_roam_status = ST_FAIL;
@@ -1073,7 +1096,7 @@ static void st_roam_capture(void)
         td5_roam_rebase_stats(&rb);
         snprintf(base, sizeof base, "%s", s_roam_note);
         snprintf(s_roam_note, sizeof s_roam_note, "%.100s rb %ld", base, rb.count);
-        if (rb.count < 1 && s_roam_status < ST_FAIL && s_roam_row != 17) {
+        if (rb.count < 1 && s_roam_status < ST_FAIL && s_roam_row != 17 && s_roam_row != 24) {
             s_roam_status = ST_FAIL;
             snprintf(s_roam_note, sizeof s_roam_note, "%.100s NO REBASE", base);
         }
@@ -2983,7 +3006,8 @@ static void st_tick_races(uint32_t now)
         if (sc->police > 0) {                        /* [round H HH] slot 0 a human; the police test drives */
             g_td5.ini.auto_throttle = 0;
             g_td5.ini.player_is_ai  = 0;
-            td5_police_test_arm(sc->police == 2 ? TD5_POLICE_TEST_FULL : TD5_POLICE_TEST_SMOKE);
+            td5_police_test_arm(sc->police >= 3 ? sc->police   /* [round TB] TD5_POLICE_TEST_TB_* (3..5) */
+                                : sc->police == 2 ? TD5_POLICE_TEST_FULL : TD5_POLICE_TEST_SMOKE);
         }
         g_td5.ini.auto_race = 1;      /* the MENU state consumes this next frame */
         s_race_launch_ms = now;

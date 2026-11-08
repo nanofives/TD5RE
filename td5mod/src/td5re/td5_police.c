@@ -88,6 +88,15 @@ static float tx_w(const char *s, float px) { return td5_vui_text_width(s, px / 2
 
 static float pol_clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+#ifndef TD5RE_RELEASE
+static long s_dev_panel[3];   /* race panels / free-roam panels / HEAT-COPS lines drawn (td5_police_dev_panel_counts) */
+void td5_police_dev_panel_counts(long out[3]) { out[0] = s_dev_panel[0]; out[1] = s_dev_panel[1]; out[2] = s_dev_panel[2]; }
+void td5_police_dev_panel_reset(void) { s_dev_panel[0] = s_dev_panel[1] = s_dev_panel[2] = 0; }
+#define POL_DEV_PANEL(i) (s_dev_panel[i]++)
+#else
+#define POL_DEV_PANEL(i) ((void)0)
+#endif
+
 void td5_police_hud_draw(const TD5_PoliceHud *h, float x0, float y0, float W, float H)
 {
     const float S = H / 720.0f < 0.6f ? 0.6f : H / 720.0f;
@@ -99,17 +108,24 @@ void td5_police_hud_draw(const TD5_PoliceHud *h, float x0, float y0, float W, fl
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
     if (h->pursuit && !h->busted) {
         /* top right: PURSUIT, heat boxes, the cops on it, the evade bar */
+        /* [round TB item 5] a race (h->race) shows PURSUIT + the EVADE bar only: no heat boxes, no "HEAT n COPS n"
+         * line (Mariano 2026-11-08), the EVADE row moves up into the freed line. Free roam keeps the full panel. */
         const float bw = 250.0f * S, bx = x0 + W - bw - 12.0f * S, by = y0 + 80.0f * S;
+        const float ey = (h->race ? 38.0f : 62.0f) * S;
         const int flash = ((tick / 8) & 1) != 0;
-        qb_rect(bx, by, bw, 92.0f * S, 0xA0000000);
+        qb_rect(bx, by, bw, (h->race ? 68.0f : 92.0f) * S, 0xA0000000);
+        POL_DEV_PANEL(h->race ? 0 : 1);
         tx(bx + 12.0f * S, by + 6.0f * S, "PURSUIT", flash ? 0xFFFF3B3B : 0xFF3B7BFF, 24.0f * S);
-        for (i = 0; i < 5; i++)
-            qb_rect(bx + 140.0f * S + (float)i * 20.0f * S, by + 12.0f * S, 15.0f * S, 15.0f * S, i < h->heat ? 0xFFFF3B3B : 0xFF3A3F48);
-        snprintf(line, sizeof line, "HEAT %d   COPS %d", h->heat, h->cops);
-        tx(bx + 12.0f * S, by + 38.0f * S, line, 0xFFFFFFFF, 15.0f * S);
-        tx(bx + 12.0f * S, by + 62.0f * S, "EVADE", 0xFFC8D0DA, 13.0f * S);
-        qb_rect(bx + 70.0f * S, by + 66.0f * S, bw - 84.0f * S, 9.0f * S, 0xFF2A323D);
-        qb_rect(bx + 70.0f * S, by + 66.0f * S, (bw - 84.0f * S) * pol_clampf(h->evade, 0.0f, 1.0f), 9.0f * S, 0xFF50E070);
+        if (!h->race) {
+            for (i = 0; i < 5; i++)
+                qb_rect(bx + 140.0f * S + (float)i * 20.0f * S, by + 12.0f * S, 15.0f * S, 15.0f * S, i < h->heat ? 0xFFFF3B3B : 0xFF3A3F48);
+            snprintf(line, sizeof line, "HEAT %d   COPS %d", h->heat, h->cops);
+            tx(bx + 12.0f * S, by + 38.0f * S, line, 0xFFFFFFFF, 15.0f * S);
+            POL_DEV_PANEL(2);
+        }
+        tx(bx + 12.0f * S, by + ey, "EVADE", 0xFFC8D0DA, 13.0f * S);
+        qb_rect(bx + 70.0f * S, by + ey + 4.0f * S, bw - 84.0f * S, 9.0f * S, 0xFF2A323D);
+        qb_rect(bx + 70.0f * S, by + ey + 4.0f * S, (bw - 84.0f * S) * pol_clampf(h->evade, 0.0f, 1.0f), 9.0f * S, 0xFF50E070);
         if (h->bust > 0.0f) {
             const float mw = 360.0f * S, mx = x0 + (W - mw) * 0.5f, my = y0 + H * 0.72f;
             qb_rect(mx - 6.0f * S, my - 30.0f * S, mw + 12.0f * S, 52.0f * S, 0xA0000000);
@@ -222,6 +238,18 @@ static double pol_dist_m(const TD5_Actor *a, const TD5_Actor *b)
 static double pol_speed_ms(const TD5_Actor *a)
 {
     return pol_m(sqrt((double)a->linear_velocity_x * a->linear_velocity_x + (double)a->linear_velocity_z * a->linear_velocity_z) / 256.0) * POL_HZ;
+}
+
+/* [round TB item 6] cops a running pursuit wants on the road: TD5RE_POLICE_COPS_BASE (default 2) + heat, so 3 from the
+ * first second (was 1 + heat with a reinforcement every 3 s: one extra cop at heat 1). */
+static int pol_cops_wanted(const PolTarget *T)
+{
+    static int base = -1;
+    if (base < 0) {
+        base = td5_env_int("TD5RE_POLICE_COPS_BASE", 2, 1, 6);
+        TD5_LOG_I(LOG_TAG, "police pursuit: %d + heat cops wanted on the road (TD5RE_POLICE_COPS_BASE), no reinforcement timer", base);
+    }
+    return base + T->heat;
 }
 
 static int pol_racer_n(void)
@@ -360,7 +388,7 @@ static void pol_start(int target, int cop, int cause)
     T->t0 = pol_tick();
     T->lost = 0;
     T->bust = 0.0;
-    T->reinf_cd = pol_tick() + 60;
+    T->reinf_cd = pol_tick();          /* [round TB item 6] reinforcements from the first tick (was 2 s later) */
     T->block_cd = pol_tick();
     P.st.pursuits++;
     if (cause == 1) P.st.notice_speed++; else P.st.notice_ram++;
@@ -444,8 +472,9 @@ int td5_police_acquire_gate(int cop, int target, int gap)
     if (!T->on) return TD5_POLICE_GATE_STOCK;
     /* a pursuit runs: a cop the car passes joins at any speed (the stock window: just passed, 0..15 spans) */
     if (gap >= 0 && gap <= 15) return TD5_POLICE_GATE_JOIN;
-    /* from heat 2 an idle cop up to join_m BEHIND the car joins while the pursuers are short */
-    if (T->heat >= 2 && gap > 0 && T->npur < 1 + T->heat) {
+    /* an idle cop up to join_m BEHIND the car joins. [round TB item 6] At any heat and with no cap on the pursuers
+     * (was: from heat 2, while the pursuers were under 1 + heat) */
+    if (gap > 0) {
         const TD5_Actor *a = td5_game_get_actor(cop), *b = td5_game_get_actor(target);
         if (a && b && pol_dist_m(a, b) <= P.join_m) { P.st.joins_behind++; return TD5_POLICE_GATE_JOIN; }
     }
@@ -549,8 +578,7 @@ int td5_police_want_cop_spawn(void)
             for (k = g_traffic_slot_base; k < TD5_MAX_TOTAL_ACTORS && k < td5_game_get_total_actor_count(); k++)
                 if (td5_ai_actor_is_cop(k) && !td5_ai_traffic_dynamic_parked(k) && !P.blk_of[k]) live++;
         }
-        if (live >= 1 + T->heat) continue;
-        T->reinf_cd = pol_tick() + 90;
+        if (live >= pol_cops_wanted(T)) continue;   /* [round TB item 6] no 3 s timer after a reinforcement spawn */
         P.st.reinforcements++;
         TD5_LOG_I(LOG_TAG, "POLICE: reinforcement %ld for slot %d (heat %d, %d cop(s) on the road)", P.st.reinforcements, t, T->heat, live);
         return 1;
@@ -883,14 +911,16 @@ static void pol_target_tick(int t)
         if (T->heat > P.st.max_heat) P.st.max_heat = T->heat;
     }
     /* reinforcements: a spawn carries one when the pool has room (td5_police_want_cop_spawn); otherwise, or first,
-     * a far car ahead becomes a cop. One per 3 s either way (shared cooldown). */
+     * a far car ahead becomes a cop. [round TB item 6] No timer between them: every tick while the cops on the road
+     * are under pol_cops_wanted (was one per 3 s, shared). reinf_cd only spaces the RETRY when no car could be
+     * recruited (a search, not a join timer). */
     if (tick >= T->reinf_cd) {
         int live = 0;
         for (k = g_traffic_slot_base; k < nact && k < TD5_MAX_TOTAL_ACTORS; k++)
             if (td5_ai_actor_is_cop(k) && !td5_ai_traffic_dynamic_parked(k) && !P.blk_of[k]) live++;
-        if (live < 1 + T->heat) {
+        if (live < pol_cops_wanted(T)) {
             const int r = td5_ai_traffic_police_recruit(t, 90);
-            T->reinf_cd = tick + 90;
+            T->reinf_cd = r >= 0 ? tick : tick + 15;
             if (r >= 0) {
                 P.st.reinforcements++;
                 TD5_LOG_I(LOG_TAG, "POLICE: reinforcement %ld for slot %d (heat %d, %d cop(s) on the road): traffic slot %d recruited",
@@ -989,6 +1019,7 @@ void td5_police_draw_hud(void)
         if (!td5_hud_pane_rect(v, &x0, &y0, &w, &hh)) continue;
         memset(&h, 0, sizeof h);
         h.tick = tick;
+        h.race = 1;                    /* [round TB item 5] no heat / cops readout in a race */
         h.pursuit = T->on;
         h.heat = T->heat;
         h.cops = T->npur;

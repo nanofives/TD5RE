@@ -80,6 +80,9 @@ static struct {
     TD5_RoamCopsStats rb_base;
     long   pinch0;
     int    s2_tries;                    /* scenario 2 repeats when the bust landed far from the block */
+    /* [round TB item 6] TD5_RCOPS_JOIN: pursuers in the first 3 s of the pursuit */
+    int    join_max, join_heat;
+    long   join_t3;                     /* ticks from the pursuit start to the 3rd pursuer, -1 = never */
 } T;
 
 void td5_roam_cops_test_arm(int mode)
@@ -88,7 +91,9 @@ void td5_roam_cops_test_arm(int mode)
     T.mode = mode;
     T.cop_slot = -1;
     T.lane_off = 1.6;
-    TD5_LOG_I(LOG_TAG, "[ROAMCOPS] armed: %s", mode == TD5_RCOPS_FULL ? "full" : mode == TD5_RCOPS_ROADBLOCK ? "roadblock" : "smoke");
+    T.join_t3 = -1;
+    TD5_LOG_I(LOG_TAG, "[ROAMCOPS] armed: %s", mode == TD5_RCOPS_FULL ? "full" : mode == TD5_RCOPS_ROADBLOCK ? "roadblock" :
+              mode == TD5_RCOPS_JOIN ? "join" : "smoke");
 }
 
 void td5_roam_cops_test_disarm(void)
@@ -347,6 +352,17 @@ static uint32_t ct_bits(TD5_Actor *a, long tick, int full)
             T.t_pursuit_a = tick;
             TD5_LOG_I(LOG_TAG, "[ROAMCOPS] scenario A: pursuit started at %.1f s, %.0f m along, %.0f km/h", (tick - T.phase_t0) / CT_HZ,
                       T.s, ct_kmh(a));
+        }
+        if (T.mode == TD5_RCOPS_JOIN && T.t_pursuit_a) {
+            /* [round TB item 6] the join window: the pursuers on the car in the first 3 s, then done */
+            if (st.pursuing > T.join_max) {
+                T.join_max = st.pursuing;
+                T.join_heat = td5_roam_cops_heat();
+                TD5_LOG_I(LOG_TAG, "[ROAMCOPS] join: %d pursuer(s) at +%.2f s (heat %d)", st.pursuing, (tick - T.t_pursuit_a) / CT_HZ,
+                          T.join_heat);
+                if (st.pursuing >= 3 && T.join_t3 < 0) T.join_t3 = tick - T.t_pursuit_a;
+            }
+            if (tick - T.t_pursuit_a >= 90) { ct_finish("join window over", 0); return 0; }
         }
         if (T.t_pursuit_a && !T.shot_p) {
             if (T.rear > 0) {
@@ -776,6 +792,15 @@ static int rb_verdict(char *note, size_t n)
 int td5_roam_cops_test_verdict(char *note, size_t n)
 {
     if (T.mode == TD5_RCOPS_ROADBLOCK) return rb_verdict(note, n);
+    if (T.mode == TD5_RCOPS_JOIN) {
+        /* [round TB item 6] PASS = 3+ pursuers within 3 s of the pursuit start (was 2 at heat 1, one per 3 s) */
+        const int ok = T.done && !T.failed && T.t_pursuit_a && T.join_t3 >= 0 && T.join_t3 <= 90;
+        snprintf(note, n, "%spursuit %s, max %d pursuers in 3 s (heat %d), 3rd at %s%.2f s%s%.40s", ok ? "" : "FAIL ",
+                 T.t_pursuit_a ? "on" : "never", T.join_max, T.join_heat, T.join_t3 < 0 ? "never " : "+",
+                 T.join_t3 < 0 ? 0.0 : T.join_t3 / CT_HZ, T.failed ? ": " : "", T.failed ? T.why : "");
+        TD5_LOG_I(LOG_TAG, "[ROAMCOPS] VERDICT %s: %s", ok ? "PASS" : "FAIL", note);
+        return ok ? 0 : 2;
+    }
     return ct_verdict(note, n);
 }
 

@@ -7279,6 +7279,43 @@ static int minimap_emit_checkpoint_dash(uint8_t *span_base, uint8_t *vert_base, 
     return drawn > 0;
 }
 
+/* [round TB item 4] PORT-ONLY. A police car on the race minimap, the free-roam map's mark (td5_roam_route_ui.c
+ * draw_cops, [G1a]): a cop in a chase blinks red / blue every 8 sim ticks, any other cop (patrol, roadblock car) is a
+ * plain dark blue dot, both on a black rim. Same colours and blink rate as the roam map. An octagon from 4 warped
+ * HUD quads (centre + 3 rim points each) on the white page, through the same batch as the racer dots. */
+static void hud_minimap_disc(float cx, float cy, float r, uint32_t col)
+{
+    float px[9], py[9];
+    for (int k = 0; k <= 8; k++) {
+        const float a = (float)k * 0.78539816f;
+        px[k] = cx + cosf(a) * r;
+        py[k] = cy + sinf(a) * r;
+    }
+    for (int i = 0; i < 4; i++) {
+        TD5_SpriteQuad q;
+        /* slots TL, BL, BR, TR -> tris (TL, TR, BR) + (TL, BR, BL): (c, p0, p1) + (c, p1, p2) */
+        hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+            cx, cy, px[2 * i + 2], py[2 * i + 2], px[2 * i + 1], py[2 * i + 1], px[2 * i], py[2 * i],
+            0.0f, 0.0f, 0.0f, 0.0f, col, HUD_DEPTH);
+        hud_submit_quad(&q);
+    }
+}
+
+static int s_cop_dot_log;   /* the minimap police-dot log line, one per 300 marks */
+static long s_cop_marks[3]; /* marks drawn: pursuing red phase / pursuing blue phase / patrol (td5_hud_police_marks) */
+
+void td5_hud_police_marks(long out[3]) { out[0] = s_cop_marks[0]; out[1] = s_cop_marks[1]; out[2] = s_cop_marks[2]; }
+void td5_hud_police_marks_reset(void) { s_cop_marks[0] = s_cop_marks[1] = s_cop_marks[2] = 0; }
+
+static void hud_minimap_police_dot(float cx, float cy, int pursuing)
+{
+    const float r = s_minimap_dot_size * 0.6f;
+    const int blink = (g_td5.simulation_tick_counter / 8) & 1;
+    s_cop_marks[pursuing ? (blink ? 0 : 1) : 2]++;
+    hud_minimap_disc(cx, cy, r + s_minimap_dot_size * 0.21f, 0xFF0A0A0A);
+    hud_minimap_disc(cx, cy, r, pursuing ? (blink ? 0xFFE23B3B : 0xFF2F6BFF) : 0xFF1F3A7A);
+}
+
 /* Vectorized minimap "grid" (VectorUI). The original tiles a small rose "+"
  * SCANBACK sprite 4x4; this replaces it with a clean radar-style grid: a darker
  * semi-transparent GREEN background panel + continuous lighter-green grid lines
@@ -8369,6 +8406,12 @@ void td5_hud_render_minimap(int actor_slot)
              * Confirmed Ghidra constants @ 0x45D724=8.5, 0x45D720=16.5 are
              * U-axis offsets: player at u=atlas_x+0.5, AI at +8.5, other at +16.5.
              * Pixel data: player(64,200)=red, AI(72,200)=blue, other(80,200)=teal. */
+            /* [round TB item 4] cop chase: another racer that is a COP is a police mark (it is always chasing:
+             * blinks red / blue). This pane's own car keeps its red dot. */
+            if (r != actor_slot && g_td5.wanted_mode_enabled && td5_game_cop_chase_is_cop(r)) {
+                hud_minimap_police_dot(dot_x, dot_y, 1);
+                continue;
+            }
             int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
             float dot_u0;
             if (r == actor_slot) {
@@ -8450,6 +8493,15 @@ void td5_hud_render_minimap(int actor_slot)
                 dot_x - half_dot > s_minimap_x + s_minimap_width ||
                 dot_y + half_dot < s_minimap_y ||
                 dot_y - half_dot > s_minimap_y + s_minimap_height) {
+                continue;
+            }
+            /* [round TB item 4] a police car: blinks red / blue while it chases a car, dark blue otherwise
+             * (patrol, roadblock car), the free-roam map's mark. Ordinary traffic stays teal. */
+            if (td5_ai_actor_is_cop(t)) {
+                hud_minimap_police_dot(dot_x, dot_y, td5_ai_cop_target(t) >= 0);
+                if ((s_cop_dot_log++ % 300) == 0)
+                    TD5_LOG_I(LOG_TAG, "minimap police dot: slot=%d %s at (%.0f,%.0f) pane slot %d",
+                              t, td5_ai_cop_target(t) >= 0 ? "pursuing" : "patrol", dot_x, dot_y, actor_slot);
                 continue;
             }
             int dot_tex = s_minimap_scandots_tex_page ? s_minimap_scandots_tex_page : HUD_WHITE_TEX_PAGE;
