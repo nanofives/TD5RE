@@ -1198,6 +1198,26 @@ static void frontend_random_track_rows(int dir_btn, int laps_btn) {
  * of frontend_init_race_schedule; only a launch from a selection screen rolls
  * (Race Again and the next cup race launch from the results screen and keep the
  * pick). Logged so the race log names what RANDOM became. */
+/* The roll's own generator. rand() restarts from the same seed every boot (and
+ * the race reseeds it), so the first RANDOM race after starting the game was
+ * always the same car and track. xorshift32, seeded once from the clock, never
+ * touches the CRT rand() stream the race and the menus share. */
+static uint32_t frontend_random_roll(uint32_t n) {
+    static uint32_t st;
+    if (st == 0) {   /* splitmix32 finalizer over the performance counter: close seeds, far states */
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        st = (uint32_t)q.QuadPart ^ (uint32_t)(q.QuadPart >> 32) ^ (uint32_t)GetTickCount() ^ td5_plat_time_ms();
+        st += 0x9E3779B9u;
+        st = (st ^ (st >> 16)) * 0x85EBCA6Bu;
+        st = (st ^ (st >> 13)) * 0xC2B2AE35u;
+        st ^= st >> 16;
+    }
+    if (st == 0) st = 0x6D2B79F5u;
+    st ^= st << 13; st ^= st >> 17; st ^= st << 5;
+    return n ? st % n : 0;
+}
+
 static char s_random_pick_label[160];   /* the loading screen's "RANDOM: ..." line */
 
 const char *td5_frontend_random_pick_label(void) { return s_random_pick_label; }
@@ -1216,7 +1236,7 @@ void frontend_resolve_random_picks(void) {
         else { lo = s_car_roster_min; hi = s_car_roster_max; }
         n = frontend_random_car_pool(lo, hi, cand, (int)(sizeof cand / sizeof cand[0]));
         if (n > 0) {
-            s_selected_car    = cand[rand() % n];
+            s_selected_car    = cand[frontend_random_roll((uint32_t)n)];
             s_selected_paint  = 0;
             s_selected_config = 0;
             rolled_car = 1;
@@ -1228,7 +1248,7 @@ void frontend_resolve_random_picks(void) {
         int cand[128];
         int n = frontend_random_track_pool(cand, (int)(sizeof cand / sizeof cand[0]));
         if (n > 0) {
-            s_selected_track = cand[rand() % n];
+            s_selected_track = cand[frontend_random_roll((uint32_t)n)];
             /* RANDOM hides the Direction row, so the race runs forwards */
             s_track_direction = 0;
             g_td5.reverse_direction = 0;
