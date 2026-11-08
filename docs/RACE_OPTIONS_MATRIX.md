@@ -1,4 +1,4 @@
-# Race options per mode (round UB, 2026-11-08)
+# Race options per mode (round UB, 2026-11-08; Mariano's decisions applied in round UE)
 
 Mariano: "on time trials i selected traffic very high and it doesn't get reflected on the race, make sure in every race
 mode every valid option is passed correctly". This page is the audit: for every race mode and every race option, is
@@ -36,23 +36,23 @@ Modes: **SR** single race (RACE > SINGLE RACE > SELECT TRACK), **QR** quick race
 battle, **MPC** MP cop chase, **MPD** MP drag, **Net** network race (host's values), **Roam** free-roam sprint /
 circuit / free drive (own panels).
 
-Cells: **R** offered and reaches the race. **FIXED** was lost or stale, reaches the race since round UB. **Q** offered
-but forced by the mode: question below. **-** not offered. **own** the mode has its own control.
+Cells: **R** offered and reaches the race. **FIXED** was lost or stale, reaches the race since round UB. **UE** decided
+by Mariano and done in round UE (Q1-Q6 below). **-** not offered. **own** the mode has its own control.
 
 | Option | SR | QR | TT | Cup | Drag | Cop | MPR | TB | MPC | MPD | Net | Roam |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Traffic | R | R | **FIXED** | R per race | R (OFF/ON, ON = drag stream) | **FIXED** level; OFF = Q1 | R | Q2 | R | own | R | own |
-| Police | R | R | **FIXED** | R per race | - | - | R (off when the split field > 6) | Q2 | - | - | R | own |
-| Laps (circuits) | R | R | Q3 (1 lap) | R per race (Era 4) | n/a | **FIXED** | R | R | R | n/a | R | own |
+| Traffic | R | R | **FIXED** | R per race | R (OFF/ON, ON = drag stream) | **FIXED** level, **UE** OFF = no traffic | R | **UE** hidden (forced VERY HIGH) | R | own | R | own |
+| Police | R | R | **FIXED** | R per race | - | - | R (off when the split field > 6) | **UE** hidden (forced off) | - | - | R | own |
+| Laps (circuits) | R | R | **UE** hidden (1 lap) | R per race (Era 4) | n/a | **FIXED** | R | R | R | n/a | R | own |
 | Difficulty | R | R | R (tier only) | - | **FIXED** | R | R | - | - | R | R | n/a |
 | Opponents | R | R | - | - | R | R | R | - | R | R | host | own |
 | Direction | R | R | R | R per race | n/a | R | R | R | R | n/a | R | forwards |
 | Collisions | **FIXED** | **FIXED** | **FIXED** | **FIXED** | forced ON with traffic | **FIXED** | **FIXED** (gt 0) | forced ON | R | forced ON / R | R | n/a |
-| Checkpoint timers | **FIXED** | **FIXED** | Q4 (forced ON) | Q5 (forced OFF) | - | - | - | - | - | - | off | - |
+| Checkpoint timers | **FIXED** | **FIXED** | **UE** hidden (forced ON) | **UE** hidden (forced OFF) | - | - | - | - | - | - | off | - |
 | Damage / deform | R | R | R | R | R | R | R | R | R | R | R | n/a |
 | Catch-up | not shown, saved value applies | same | n/a | same | same | same | R | - | R | R | local | n/a |
 | Lane assist | R | R | R | R | - | R | per player | per player | per player | - | per player | n/a |
-| Auto gearbox | R | R | R | R | forced MANUAL (row greyed) | R | R | R | R | Q6 | R | own |
+| Auto gearbox | R | R | R | R | forced MANUAL (row greyed) | R | R | R | R | **UE** forced MANUAL (grey row on car select) | R | own |
 | Speed units | R (global) | R | R | R | R | R | R | R | R | R | R | R |
 | Weather | - (per track) | - | - | - | - | - | - | - | - | - | - | - |
 | Time of day | - | - | - | - | - | - | - | - | - | - | - | own |
@@ -82,7 +82,19 @@ control  u5-drag-difficulty     FAIL  drag: difficulty tier 0 (asked 2 after 0)
 UB       all four               PASS  (time trial: traffic=1 vol=4 police=1 collisions=1)
 ```
 
-## Questions for Mariano (offered, but the mode forces it)
+## Round UE: Mariano's decisions (2026-11-08, "go with all recommendations")
+
+| # | Decision | Where | Test |
+|---|---|---|---|
+| Q1 | Cop chase TRAFFIC OFF = an empty road (no longer forced HEAVY). LOW..VERY HIGH as picked. | `td5_frontend.c` ConfigureGameTypeFlags case 8, `td5_fe_mp_setup.c` frontend_init_race_schedule | `ue-q1-copchase-notraffic`: wanted=1 traffic=0 vol=0, 0 traffic cars in 20 s |
+| Q2 | Traffic battle: TRAFFIC and POLICE rows hidden. | `td5_frontend.c` td5_raceopts_row_available | `ue-hidden-rows` |
+| Q3 | Time trial: LAPS row hidden on SELECT TRACK (also on RANDOM). | `td5_fe_race.c` frontend_laps_row_mode_hidden | `ue-hidden-rows` |
+| Q4 | Time trial: CHECKPOINT TIMERS row hidden. | td5_raceopts_row_available | `ue-hidden-rows` |
+| Q5 | Cups (SP; MP already hid it): CHECKPOINT TIMERS row hidden. | td5_raceopts_row_available | `ue-hidden-rows` |
+| Q6 | MP drag: the car-select pane shows a grey, non-selectable MANUAL row between PAINT and OK. The per-player AUTO / MANUAL row lives on PROFILE SELECTION, which comes BEFORE the mode vote, so it cannot know drag yet; the car grid is the first screen after the vote. The player's own pick is not changed. | `td5_fe_mp_setup.c` mp_carsel_drag_gear_row | `ue-hidden-rows` + frames |
+| - | Hidden rows leave no gap: QUICK RACE (CAR, TRACK, DIRECTION, LAPS) and SELECT TRACK (TRACK, DIRECTION, LAPS) stack their visible rows. RACE OPTIONS already built a filtered list. | `td5_fe_race.c` frontend_reflow_rows | `ue-hidden-rows` |
+
+## Questions for Mariano asked in round UB (answered above, kept for the record)
 
 The original game forces each of these; the port's RACE OPTIONS screen still shows the row. For each: make it work, or
 hide the row in that mode.

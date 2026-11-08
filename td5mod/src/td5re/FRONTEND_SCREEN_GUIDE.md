@@ -371,6 +371,15 @@ button that exists only while that entry is the pick:
   route preview and its options button reads SPRINT / CIRCUIT (strip context: SETTINGS); screen 56
   is titled SPRINT / CIRCUIT in the city flow, has a 7th row (TERRAIN HEIGHT, `GEO_OPT_VIS` 7) and its
   FREE ROAM button is kept for index stability but always hidden + disabled.
+* **[Round UE] Hidden selector rows close up.** QUICK RACE (CAR, TRACK, DIRECTION, LAPS at
+  `QR_ROW_Y(0..)`) and SELECT TRACK (TRACK, DIRECTION, LAPS at y 97 + 35*k) re-stack their VISIBLE
+  rows in `frontend_random_track_rows` -> `frontend_reflow_rows` after every per-track DIRECTION /
+  LAPS refresh, so RANDOM, a forward-only track or time trial (no LAPS) never leave an empty slot.
+  The value column and arrows follow `s_buttons[].y`. RACE OPTIONS / SETTINGS / OK / BACK keep their
+  fixed rows. A new row in that column must be added to the id list there.
+* **[Round UE] MP drag car select** draws a grey MANUAL row between PAINT and OK in every pane layout
+  (`mp_carsel_drag_gear_row`, display only, not in the pane nav ring). Preview it with
+  `TD5RE_MP_SIMUL_PREVIEW=N TD5RE_MP_MODE_FORCE=4 --StartScreen=20`.
 * **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
   STUDIO chip was created as button 17 and silently refused (`-1`) until round
   1026. If you add a button past the last index of a screen, check the return value.
