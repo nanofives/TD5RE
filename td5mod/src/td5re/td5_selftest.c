@@ -241,6 +241,11 @@ typedef struct {
      * and the player finished on lap N. Roam row: the circuit driver races N laps (TD5RE_ROAM_CIRCUIT_LAPS),
      * its own verdict checks player_laps == laps. */
     int laps_menu;
+    /* [round UC 2026-11-08] item 7: 1 = at race start the sun disc's direction, and a ring around it as wide as
+     * the glare, maps to SKY texels of the panorama (td5_render_sky_sun_check against the td5_sky_sunpos.h
+     * skyline). FAIL when any of it is over the painted backdrop, when the track draws no sun, or when the sky
+     * has no table entry. */
+    int sun_check;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -607,9 +612,32 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=8, .depth=ST_DEPTH_ROAM_SPRINT, .laps_menu=1 },
+    /* [round UC 2026-11-08] item 7: the sun sits in the sky, never over the mountains / skyline / lake painted into
+     * the panorama. Blue Ridge, Courmayeur, San Francisco, Lake Tahoe and Switzerland had it over backdrop (moved by
+     * td5_sky_sunpos.h); Maui is the control (probed sun already in the sky, not moved). Countdown only. */
+    { .name="u7-sun-in-sky",               .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-courmayeur",    .track=7,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-sanfrancisco", .track=11, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-tahoe",         .track=28, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-switzerland",   .track=30, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    { .name="u7-sun-in-sky-maui",          .track=6,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
+static int  s_u7_res = -99;      /* [round UC] u7-sun-in-sky: td5_render_sky_sun_check result, -99 = not sampled */
+static char s_u7_note[96];
 #define ST_SMOKE_RACES 14  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-sprint-mp2 + roam-circuit-mp2 + roam-traffic-smoke + roam-cops-smoke + police-smoke */
 
 typedef struct {
@@ -2238,6 +2266,7 @@ static void st_apply_scenario(const RaceScenario *sc)
     }
     /* [round TA] t3-laps-* rows (st_reset_scenario_fields clears both knobs and restores ini.laps). */
     s_t3_max_lap = 0;
+    s_u7_res = -99; s_u7_note[0] = 0;   /* [round UC] */
     if (sc->laps_menu > 0) {
         char buf[64];
         if (sc->roam) {
@@ -3122,6 +3151,19 @@ static void st_tick_races(uint32_t now)
                                  sc->laps_menu, used, s_t3_max_lap);
                     }
                 }
+                /* [round UC] u7-sun-in-sky*: the sun disc at race start was over sky. */
+                if (sc->sun_check && status < ST_FAIL) {
+                    size_t nl = strlen(note);
+                    if (s_u7_res != 1) {
+                        status = ST_FAIL;
+                        int w = snprintf(note, sizeof(note), "sun: %.90s (check %d)",
+                                         s_u7_res == -99 ? "never sampled" : s_u7_note, s_u7_res);
+                        (void)w;   /* return used: a long note is cut, never a warning */
+                    } else if (nl < sizeof(note) - 1) {
+                        int w = snprintf(note + nl, sizeof(note) - nl, " %.95s", s_u7_note);
+                        (void)w;
+                    }
+                }
                 /* [CHAOS CO-OP 2026-09-30] A chaos row must have ROTATED. The
                  * whole mode hangs off the rotation firing, and every other
                  * signal (seat table, HUD strip, role lookup) is inert-looking
@@ -3220,6 +3262,10 @@ static void st_tick_races(uint32_t now)
                 st_chaos_pane_sample(tick - s_race_start_tick);
             if (sc->human_drive > 0)
                 st_drive_sample(tick - s_race_start_tick);   /* [R1026 K] */
+            if (sc->sun_check && s_u7_res == -99) {         /* [round UC] once, at race start */
+                s_u7_res = td5_render_sky_sun_check(s_u7_note, (int)sizeof s_u7_note);
+                TD5_LOG_I(LOG_TAG, "u7: sun check %d: %s", s_u7_res, s_u7_note);
+            }
             s_last_sim_tick = tick;
         }
         /* [render golden] grab the composited frame at fixed sim ticks. */

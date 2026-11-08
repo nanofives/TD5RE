@@ -3243,6 +3243,45 @@ static float s_sky_sun_rgb[3] = { 255.0f, 255.0f, 255.0f };
 static float s_sky_sun_dir[3] = { 0.0f, -1.0f, 0.0f }; /* position space, +Y dn */
 static int   s_sky_sun_dir_valid = 0;
 
+/* [SKY SUNPOS round UC 2026-11-08] Sun placement vs the backdrop painted into the
+ * panorama. The probe above looks for the brightest region of the top 55% of the
+ * image and cannot tell sky from what the image shows, so on 8 of the 19 SUNNY skies
+ * it put the sun on a mountain, a skyline, a mesa or a lake reflection (the disc is
+ * depth-tested against the WORLD, not against the backdrop texture, so it drew right
+ * over them). re/tools/sky_sunpos.py labels every panorama sky / backdrop offline
+ * (per-column skyline, eye-validated on a contact sheet) and writes td5_sky_sunpos.h:
+ * per sky (keyed by an FNV-1a of the decoded pixels, so the auto track's borrowed
+ * FORWSKY and the free-roam host skies match too) the skyline and, where the probed
+ * sun was over backdrop, the nearest direction whose whole disc + glare is in sky.
+ * The replacement goes into s_sky_sun_dir, so the disc, the glare/halo and (RT on)
+ * the scene sun of the shadow / SSR / car-sun passes all move together.
+ * TD5RE_SUN_SKYPOS=0 keeps the probed direction (A/B). */
+#include "td5_sky_sunpos.h"
+static int      s_sky_sunpos_idx = -1;   /* row of k_sky_sunpos for the loaded sky */
+static uint32_t s_sky_hash = 0;
+static int      s_sky_h = 0;             /* loaded sky height in texels */
+static int      s_sky_sunpos_moved = 0;  /* 1 = s_sky_sun_dir came from the table */
+
+static int sky_sunpos_enabled(void)
+{
+    const char *e = getenv("TD5RE_SUN_SKYPOS");   /* read per load: A/B within one session */
+    return (e && e[0]) ? (atoi(e) != 0) : 1;
+}
+
+/* FNV-1a 32 over B,G,R of every pixel (alpha ignored) -- the key sky_sunpos.py writes. */
+static uint32_t sky_pixels_hash(const uint8_t *bgra, int w, int h)
+{
+    uint32_t hsh = 0x811C9DC5u;
+    size_t n = (size_t)w * (size_t)h;
+    for (size_t i = 0; i < n; i++) {
+        const uint8_t *p = bgra + i * 4;
+        hsh = (hsh ^ p[0]) * 0x01000193u;
+        hsh = (hsh ^ p[1]) * 0x01000193u;
+        hsh = (hsh ^ p[2]) * 0x01000193u;
+    }
+    return hsh;
+}
+
 /* Probe knobs (dev A/B; mirror the sky_probe.py flags). Cached once. */
 static float sky_probe_ratio(void)
 { static float v=-1; if(v<0){const char*e=getenv("TD5RE_SUN_RATIO"); v=(e&&e[0])?(float)atof(e):1.8f;} return v; }
@@ -3400,6 +3439,19 @@ static void sky_probe_resolve_dir(void)
         float horiz = sqrtf(1.0f - s_min_elev * s_min_elev);
         dx = dx / hl * horiz; dz = dz / hl * horiz; dy = -s_min_elev;
     }
+    /* [SKY SUNPOS round UC] the probed sun sits over backdrop on this sky: take the
+     * table's direction (dome space +Y up -> position space +Y down: flip Y). Its
+     * elevation is 10..40 deg, above the clamp, so the clamp has nothing to do. */
+    s_sky_sunpos_moved = 0;
+    if (s_sky_sunpos_idx >= 0 && k_sky_sunpos[s_sky_sunpos_idx].sun_set && sky_sunpos_enabled()) {
+        const TD5_SkySunPos *e = &k_sky_sunpos[s_sky_sunpos_idx];
+        TD5_LOG_I(RENDER_LOG_TAG,
+            "sky sunpos: %s probed sun (%.3f,%.3f,%.3f) is over backdrop -> (%.3f,%.3f,%.3f)",
+            e->name, (double)dx, (double)dy, (double)dz,
+            (double)e->sun_dir[0], (double)-e->sun_dir[1], (double)e->sun_dir[2]);
+        dx = e->sun_dir[0]; dy = -e->sun_dir[1]; dz = e->sun_dir[2];
+        s_sky_sunpos_moved = 1;
+    }
     s_sky_sun_dir[0] = dx; s_sky_sun_dir[1] = dy; s_sky_sun_dir[2] = dz;
     s_sky_sun_dir_valid = 1;
     TD5_LOG_I(RENDER_LOG_TAG,
@@ -3421,6 +3473,97 @@ int td5_render_sky_sun(float dir[3], float rgb[3])
     return TD5_SKY_OVERCAST;
 }
 
+/* [SKY SUNPOS round UC] The texel the dome draws in direction d (render/dome space,
+ * +Y up, the space the sun disc projects in): the UV the rasteriser interpolates
+ * there is the barycentric UV of the ray's hit on the flat dome triangle (the dome
+ * is a plain triangle list). Returns 1 on a hit. */
+static int sky_dir_to_uv(const double d[3], double *ou, double *ov)
+{
+    const TD5_MeshVertex *v = s_sky_mesh->vertices;
+    const int n = (s_sky_mesh->total_vertex_count / 3) * 3;
+    double best_t = 1e300;
+    int hit = 0;
+    for (int i = 0; i + 2 < n; i += 3) {
+        const double a[3]  = { v[i].pos_x, v[i].pos_y, v[i].pos_z };
+        const double e1[3] = { v[i+1].pos_x - a[0], v[i+1].pos_y - a[1], v[i+1].pos_z - a[2] };
+        const double e2[3] = { v[i+2].pos_x - a[0], v[i+2].pos_y - a[1], v[i+2].pos_z - a[2] };
+        const double p[3]  = { d[1]*e2[2] - d[2]*e2[1], d[2]*e2[0] - d[0]*e2[2], d[0]*e2[1] - d[1]*e2[0] };
+        const double det = e1[0]*p[0] + e1[1]*p[1] + e1[2]*p[2];
+        if (fabs(det) < 1e-9) continue;
+        const double inv = 1.0 / det;
+        const double T[3] = { -a[0], -a[1], -a[2] };   /* ray origin = dome centre */
+        const double bu = (T[0]*p[0] + T[1]*p[1] + T[2]*p[2]) * inv;
+        if (bu < -1e-6 || bu > 1.0 + 1e-6) continue;
+        const double q[3] = { T[1]*e1[2] - T[2]*e1[1], T[2]*e1[0] - T[0]*e1[2], T[0]*e1[1] - T[1]*e1[0] };
+        const double bv = (d[0]*q[0] + d[1]*q[1] + d[2]*q[2]) * inv;
+        if (bv < -1e-6 || bu + bv > 1.0 + 1e-6) continue;
+        const double t = (e2[0]*q[0] + e2[1]*q[1] + e2[2]*q[2]) * inv;
+        if (t <= 0.0 || t >= best_t) continue;
+        best_t = t;
+        *ou = (1.0 - bu - bv) * v[i].tex_u + bu * v[i+1].tex_u + bv * v[i+2].tex_u;
+        *ov = (1.0 - bu - bv) * v[i].tex_v + bu * v[i+1].tex_v + bv * v[i+2].tex_v;
+        hit = 1;
+    }
+    return hit;
+}
+
+int td5_render_sky_sun_check(char *note, int note_len)
+{
+    if (s_sky_sun_class != TD5_SKY_SUNNY || !s_sky_sun_dir_valid) {
+        if (note) snprintf(note, (size_t)note_len, "no sun drawn on this sky (class %d, dir %d)",
+                           s_sky_sun_class, s_sky_sun_dir_valid);
+        return -1;
+    }
+    if (s_sky_sunpos_idx < 0 || !s_sky_mesh || !s_sky_mesh->vertices || s_sky_h <= 0) {
+        if (note) snprintf(note, (size_t)note_len, "sky %08X has no sunpos entry", s_sky_hash);
+        return -2;
+    }
+    const TD5_SkySunPos *e = &k_sky_sunpos[s_sky_sunpos_idx];
+    /* the direction the disc is drawn at: s_sky_sun_dir with Y back to +Y up */
+    double d[3] = { s_sky_sun_dir[0], -s_sky_sun_dir[1], s_sky_sun_dir[2] };
+    double m = sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+    d[0] /= m; d[1] /= m; d[2] /= m;
+    double t1[3], t2[3];
+    {   /* tangent basis around d */
+        const double up[3] = { 0.0, 1.0, 0.0 }, ax[3] = { 1.0, 0.0, 0.0 };
+        const double *r = (fabs(d[1]) < 0.9) ? up : ax;
+        t1[0] = d[1]*r[2] - d[2]*r[1]; t1[1] = d[2]*r[0] - d[0]*r[2]; t1[2] = d[0]*r[1] - d[1]*r[0];
+        m = sqrt(t1[0]*t1[0] + t1[1]*t1[1] + t1[2]*t1[2]);
+        t1[0] /= m; t1[1] /= m; t1[2] /= m;
+        t2[0] = d[1]*t1[2] - d[2]*t1[1]; t2[1] = d[2]*t1[0] - d[0]*t1[2]; t2[2] = d[0]*t1[1] - d[1]*t1[0];
+    }
+    /* the footprint the placement cleared, less 0.5 deg of float slack: still wider than
+     * the glare quad (atan(2.6 * 0.03) = 4.46 deg) */
+    const double rad = (TD5_SKY_SUNPOS_CLEAR_DEG - 0.5) * 3.14159265358979 / 180.0;
+    int nsky = 0, ntot = 0, worst = 1 << 20;
+    for (int ring = 0; ring <= 2; ring++) {
+        const int k = ring ? 12 : 1;
+        const double tr = tan(rad * ring * 0.5);
+        for (int j = 0; j < k; j++) {
+            const double th = 2.0 * 3.14159265358979 * j / k;
+            double s[3] = { d[0] + tr * (cos(th) * t1[0] + sin(th) * t2[0]),
+                            d[1] + tr * (cos(th) * t1[1] + sin(th) * t2[1]),
+                            d[2] + tr * (cos(th) * t1[2] + sin(th) * t2[2]) };
+            double u = 0.0, vv = 1.0;
+            ntot++;
+            if (!sky_dir_to_uv(s, &u, &vv)) { worst = -1; continue; }
+            u -= floor(u);
+            int col = (int)(u * TD5_SKY_SUNPOS_COLS);
+            if (col >= TD5_SKY_SUNPOS_COLS) col = TD5_SKY_SUNPOS_COLS - 1;
+            const int row = (int)(vv * s_sky_h);
+            const int margin = (int)e->skyline[col] - row;   /* rows of sky below the sample */
+            if (margin < worst) worst = margin;
+            if (margin > 0) nsky++;
+        }
+    }
+    if (note)
+        snprintf(note, (size_t)note_len, "sun %s az=%.1f el=%.1f %s: footprint %d/%d over sky, min margin %d rows",
+                 e->name, atan2(d[0], d[2]) * 180.0 / 3.14159265358979,
+                 asin(d[1]) * 180.0 / 3.14159265358979,
+                 s_sky_sunpos_moved ? "moved" : "probed", nsky, ntot, worst);
+    return nsky == ntot ? 1 : 0;
+}
+
 void td5_render_load_sky(const char *path)
 {
     void *pixels = NULL;
@@ -3429,6 +3572,8 @@ void td5_render_load_sky(const char *path)
     /* Reset so a new sky is loaded each race */
     s_sky_loaded = 0;
     s_sky_luma   = -1.0f;   /* [AUTO LIGHTS] recomputed below; stays -1 if no sky */
+    s_sky_sunpos_idx = -1;  /* [SKY SUNPOS] set below from the pixels */
+    s_sky_h = 0;
 
     /* td5_asset_decode_png_rgba32 handles R↔B swap to BGRA internally */
     if (td5_asset_decode_png_rgba32(path, &pixels, &w, &h)) {
@@ -3460,6 +3605,14 @@ void td5_render_load_sky(const char *path)
         }
         /* [RT2 P1] Sun classification off the same CPU pixels. */
         sky_probe_classify((const uint8_t *)pixels, w, h);
+        /* [SKY SUNPOS round UC] which panorama this is, by content */
+        s_sky_hash = sky_pixels_hash((const uint8_t *)pixels, w, h);
+        s_sky_h = h;
+        for (int i = 0; i < (int)(sizeof k_sky_sunpos / sizeof k_sky_sunpos[0]); i++)
+            if (k_sky_sunpos[i].hash == s_sky_hash) { s_sky_sunpos_idx = i; break; }
+        TD5_LOG_I(RENDER_LOG_TAG, "sky sunpos: hash=%08X entry=%s move=%d", s_sky_hash,
+                  s_sky_sunpos_idx >= 0 ? k_sky_sunpos[s_sky_sunpos_idx].name : "(none)",
+                  s_sky_sunpos_idx >= 0 ? k_sky_sunpos[s_sky_sunpos_idx].sun_set : 0);
         free(pixels);
     } else {
         TD5_LOG_W(RENDER_LOG_TAG, "sky not found: %s", path);
