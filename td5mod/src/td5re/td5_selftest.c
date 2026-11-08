@@ -252,7 +252,9 @@ typedef struct {
      * [round UE 2026-11-08] Mariano's decisions on the UB / UC questions:
      *   61 ue-q1-copchase-notraffic cop chase with TRAFFIC OFF (set after the race type): empty road
      *   62 ue-hidden-rows           rows hidden / greyed per mode, no gap when DIRECTION hides
-     *   63 ue-shadow-sun*           RT off: the sun-shadow pass casts from the sun the sky draws */
+     *   63 ue-shadow-sun*           RT off: the sun-shadow pass casts from the sun the sky draws
+     * [round UF 2026-11-08] follow-up:
+     *   71 uf-mp-random             split-screen car grid: per-pane RANDOM rolls independently at launch */
     int u_check;
     /* [round UC 2026-11-08] item 7: 1 = at race start the sun disc's direction, and a ring around it as wide as
      * the glare, maps to SKY texels of the panorama (td5_render_sky_sun_check against the td5_sky_sunpos.h
@@ -665,6 +667,12 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .depth=ST_DEPTH_COUNTDOWN, .u_check=62 },
+    /* [round UF] the split-screen car grid's RANDOM: a menu-model check (td5_fe_race.c
+     * frontend_uf_mp_random_selftest) through the real launch roll, after a countdown. */
+    { .name="uf-mp-random",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .mp_mode=-1, .depth=ST_DEPTH_COUNTDOWN, .u_check=71 },
     /* UC decision b: with RT off the sun shadows cast from the sun the sky draws. Blue Ridge and Switzerland had
      * the disc moved by td5_sky_sunpos.h; Maui is the control (disc not moved). */
     { .name="ue-shadow-sun",         .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
@@ -3345,6 +3353,9 @@ static void st_tick_races(uint32_t now)
                         break;
                     case 62:   /* [round UE] Q2..Q6 + no gap */
                         fail = frontend_ue_rows_selftest(un, sizeof un);
+                        break;
+                    case 71:   /* [round UF] split-screen car grid RANDOM */
+                        fail = frontend_uf_mp_random_selftest(un, sizeof un);
                         break;
                     case 63: { /* [round UE] shadows follow the drawn sun (RT off) */
                         const float d = s_ue_shadow[0] * s_ue_sky[0] + s_ue_shadow[1] * s_ue_sky[1] +
