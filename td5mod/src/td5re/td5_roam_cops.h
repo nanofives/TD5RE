@@ -28,8 +28,9 @@
  * pursuit steering, the traffic throttle law), up to TD5RE_ROAM_COPS_VMAX (125 km/h); within 150 m of the player a
  * pursuer may take a one-way against the flow, and a player behind it is reached by turning round. Inside 30 m with
  * line of sight it drives at a box point beside the player instead. HEAT 1..5: 1 at the start, +1 per further
- * offence and per 25 s of chase. Pursuers wanted = 1 + heat (pool permitting): reinforcements spawn 120..220 m out, behind or beside the
- * player (they join the chase, they do not meet the car head-on), and patrols within 200 m join from heat 2.
+ * offence and per 25 s of chase. Pursuers wanted = TD5RE_ROAM_COPS_WANT_BASE (2) + heat (pool permitting): reinforcements spawn
+ * 120..220 m out, behind or beside the player (they join the chase, they do not meet the car head-on), one per tick with no timer,
+ * and patrols within 200 m join at once at any heat with no cap (round TB; was 1 + heat, one per 3 s, patrols from heat 2).
  *
  * ESCAPE when no pursuer has seen the player for 6 + 2 x heat seconds, or every pursuer is farther than 320 m. The
  * cops switch off and go back to patrolling.
@@ -144,6 +145,7 @@ int  td5_roam_cops_dev_block(int i, double *cx, double *cz, double *tx, double *
 #define TD5_RCOPS_FULL   1
 #define TD5_RCOPS_SMOKE  2
 #define TD5_RCOPS_ROADBLOCK 3   /* [G1b] gap crossing, bust at a block, detour */
+#define TD5_RCOPS_JOIN   4      /* [round TB item 6] scenario A's pursuit, then 3 s: 3+ pursuers at once (t6-cops-join-roam) */
 void     td5_roam_cops_test_arm(int mode);
 void     td5_roam_cops_test_disarm(void);
 int      td5_roam_cops_test_mode(void);

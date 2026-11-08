@@ -32,13 +32,10 @@
 #include "td5_roam_height.h"     /* [F3] TD5_RoamHeight: the worker's own ground source */
 
 /* The frame the baked meshes live in. x/z: render = place - (ox, oz); y: render =
- * place y - dy. DEV route mode (route != 0): x/z come from the place -> route
- * chain of td5_roam_view.c instead, and dy is the strip's height datum, so the
- * tiles land on a loaded geo level's strip (overlay checks, doc tours). */
+ * place y - dy. */
 typedef struct {
     int32_t ox, oz;
     double  dy;
-    int     route;
 } TD5_RoamRenderFrame;
 
 typedef struct {
@@ -108,19 +105,11 @@ void           td5_roam_render_retire_tick(void);            /* main, once per g
  * td5_render_actors_for_view right after the strip's span loop. */
 void td5_roam_render_tiles(int view);
 
-/* 1 when the hook should run: a roam session is active (td5_roam_active) or the
- * DEV overlay is on (TD5RE_ROAM_RENDER=1). Cheap, called every frame. */
+/* 1 when the hook should run: a roam session is active (td5_roam_active). Cheap,
+ * called every frame. */
 int  td5_roam_render_wanted(void);
 
 void td5_roam_render_stats(TD5_RoamRenderStats *out);
-
-#ifndef TD5RE_RELEASE
-/* DEV: TD5RE_ROAM_RENDER_HIDE_STRIP=1 skips the strip's span walk so only the roam
- * surface shows (what a real roam session draws). */
-int  td5_roam_render_hides_strip(void);
-#else
-#define td5_roam_render_hides_strip() 0
-#endif
 
 #ifndef TD5RE_RELEASE
 /* DEV: TD5RE_ROAM_RENDER_POSES=<file> -> <file>.tour.txt (free-cam tour poses from lat/lon). 1 = handled, exit. */

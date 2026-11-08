@@ -12,8 +12,9 @@
  * selector: the browser drew the map, geo_route found the path and
  * geo_condition turned it into a TD5-legal centerline. The release exe shipped
  * neither. This module is the whole of that pipeline with no interpreter in
- * it, so the in-game GEOSPATIAL TRACK GENERATOR screen can route, condition
- * and commit on its own.
+ * it, so the in-game geo map can route and condition on its own. [roam SA] The
+ * commit (route frame + strip build) is gone with the strip geo BUILD: the map
+ * draws the routed line, the race runs in the free-roam city.
  *
  * WHAT IT IS NOT. It does not fetch. Routing works only inside a place that is
  * already in re/assets/geo/ (today: la_plata); nothing here speaks HTTP,
@@ -24,8 +25,7 @@
  * the Python tool's on the same input -- the conditioner is what certifies a
  * route the engine then builds, so a C/Python disagreement would be a route
  * the selector blesses and the game breaks on. The fixtures in
- * re/tools/geo_fixtures/ are the reference, and the dev harness
- * (TD5RE_GEO_ROUTE_TEST, below) re-measures against them.
+ * re/tools/geo_fixtures/ are the reference.
  *
  * BYTE-IDENTITY. Nothing here runs on a synthetic auto-track build. The only
  * entry points are called from the geo screen and from the dev harness; the
@@ -101,47 +101,6 @@ typedef struct {
  * point into module-owned storage valid until the next build. */
 int  td5_geo_route_build(const TD5_GeoLatLon *pts, int n_pts, TD5_GeoRouteResult *out);
 
-/* Build the DERIVED route frame of the last OK route and select the place.
- * Returns 0 on success.
- *
- * [ROUND 1008] It READS re/assets/geo/<slug>/ and WRITES only
- * re/assets/geo/<slug>/_route/ (see td5_geo.h). The fetched source is never
- * modified, so pressing BUILD N times on the same route gives N identical
- * results -- before the split each press re-derived from the previous press's
- * output and the place collapsed to a 2x2 grid by the third.
- *
- * It REFUSES rather than writing a degenerate frame (tiny grid, no terrain
- * under the route, a vector layer that survived empty). On a refusal nothing
- * is written, the place keeps racing off whatever it raced off before, and
- * td5_geo_route_commit_reason() is a short line the screen can show. */
-int  td5_geo_route_commit(void);
-
-/* Why the last td5_geo_route_commit() refused, in screen-ready English.
- * "" after a successful commit, or before the first one. */
-const char *td5_geo_route_commit_reason(void);
-
-/* Bring `slug`'s derived _route/ frame up to the current schema, repairing it
- * in place from the PRISTINE SOURCE. Call before anything reads a derived
- * vector layer; td5_geo_sync() does.
- *
- * The derived cache is all-or-nothing on DERIVED.OK, which stops a derived
- * layer being mixed with a source one -- but says nothing about a derived
- * frame written by an OLDER build whose CONTENTS are wrong. Round 1011 C4 is
- * that case: every _route/ committed before it has a SIGNALS.JSON whose
- * nodes[] was never reprojected, and no FOOTWAYS.JSON at all, so its crossings
- * and bus stops would be drawn in the source frame on a route-frame track.
- *
- * [roam M] Schema 3 (the geographic -> game reflection, td5_geo_frame.h) moves
- * the whole frame, so an older derived frame is rebuilt by a RE-COMMIT of the
- * route from its own committed waypoints (ROUTE_RAW.JSON), as BUILD TRACK
- * would: no user input, no network.
- *
- * Returns 1 if it repaired something, 0 if there was nothing to do (no derived
- * frame, or already current), -1 if the repair failed -- in which case the
- * stamp is DELETED so the place falls back to its source frame wholesale
- * rather than racing a half-converted one. Idempotent. */
-int  td5_geo_derived_migrate(const char *slug);
-
 /* Bounds of every downloaded place, so the screen can shade where routing works.
  * bbox rows are {west, south, east, north} in degrees -- lon first, the order
  * the screen's own projection takes, and the one td5_fe_geo.c reads. Returns
@@ -155,13 +114,6 @@ int  td5_geo_route_places(char slugs[][64], double bbox[][4], int max);
  * show "N / 3000" without pulling in the generator's private header. */
 #define TD5_GEO_ROUTE_MAX_SPANS 3000
 
-/* 1 while the L2 placeholder is standing in for the router, 0 once the real
- * module is linked. The screen gates BUILD TRACK on it and labels its status
- * line with it, so a framedump of the placeholder can never be read as proof
- * that routing works. (The L2 header had this comment the other way round;
- * every call site -- td5_fe_geo.c:823, :957, :1030 -- reads it as written
- * here, and the placeholder returned 1.) */
-int  td5_geo_route_is_stub(void);
 
 /* ------------------------------------------------------------ extensions ---
  * Additive helpers. The three calls above are the contract; these exist so the
@@ -186,6 +138,10 @@ const char *td5_geo_route_place_at(TD5_GeoLatLon p);
  * truncated), 0 when the place has no such ring. */
 int  td5_geo_route_place_boundary(const char *slug, int ring,
                                   double *latlon, int max_pts);
+/* [roam SB] A place made of several partidos (geo_region.py extension, "Gran La Plata"): the outer ring of
+ * PLACE.JSON `boundary.parts[part]`, same contract as td5_geo_route_place_boundary. 0 = no such part. */
+int  td5_geo_route_place_part_ring(const char *slug, int part,
+                                   double *latlon, int max_pts);
 
 /* ------------------------------------------------------- raster window ----
  * [ROAM F1-T2] One TD5GEOR1 raster, or a window of one read by seek. Exported

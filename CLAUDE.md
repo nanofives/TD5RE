@@ -130,24 +130,23 @@ includers, no new compiler warnings per -W class.
   (`ok (N samp) air=.. spd=.. jmp=.. prog=.. span=..`, `st_invariants_*` in
   `td5_selftest.c`), which is robust to intentional physics/AI tuning. CI can't
   run the suite (no game assets on runners), so CI gates on the structure lint.
-  For a byte-level check of the generated tracks use
+  For a byte-level check of the generated track use
   `verify/geo_tags_identity.ps1 -Arm synthetic -NoControl` (move
-  `re/assets/geo/SELECTED.TXT` aside first).
+  `re/assets/geo/SELECTED.TXT` aside first). That is the ONLY generated track
+  since round S (2026-10-30): the strip geo BUILD (level091, `-Arm geo`,
+  `TD5RE_GEO_STRIP_BUILD`) is deleted and real places race in the free-roam
+  city (docs/plans/geo_free_roam/S_STRIP_DELETED.md).
 - **Comparing generated-track bytes: same algorithm on both sides, then read
   GENSTAMP.TXT.** `python verify/geo_level_identity.py <levelDir> [<other>]`
   prints **both** the sha256 prefix and the md5, plus the build identity
   (`seed=`/`spec=`/`env=`/`exe=`), and names which input moved.
   ⚠️ `verify/geo_tags_identity.ps1` prints a **sha256** prefix while the round
-  memories record **md5** — the standing "a fresh worktree builds level091 to a
-  different hash (61410E76 vs main's be65458d)" warning was exactly that
-  mix-up: one 12332744-byte MODELS.DAT, md5 `BE65458D…`, sha256 `61410E76…`
-  (verified 2026-10-13 on the file itself).
-  **A fresh worktree is NOT a variable** — at 66a9f923 with main's exe, level091
-  (`-Seed 2054677019`) came out byte-identical in the main tree, in two fresh
-  worktrees, over both the gate and the streamed race path, and across three
-  different `env=` hashes; the 1.1 GB `re/assets/geo` cache was md5-identical in
-  both trees and unchanged by the build. Only a knob that changes generation
-  (e.g. `TD5RE_GEO_MASTARM=0`) moved the bytes.
+  memories record **md5**: compare like with like (the old "a fresh worktree
+  builds a different hash" warning was exactly that mix-up, verified 2026-10-13).
+  **A fresh worktree is NOT a variable**: the same exe and seed give the same
+  bytes in the main tree and in fresh worktrees; only a knob that changes
+  generation moves them. Synthetic level090 reference (seed 99991): MODELS
+  sha256 `E2F1F33C…`, md5 `43FA3161…` (round S, 2026-10-30).
 - **Live-control socket** (dev builds): `td5re.exe --Control=1` (or `[Control]
   Enabled=1`) opens a localhost UDP command socket (`127.0.0.1:37060`,
   `TD5RE_CONTROL_PORT` override; default OFF) so an external process can drive
@@ -156,8 +155,10 @@ includers, no new compiler warnings per -W class.
   (listener thread → ring, drained on the main thread at the top of
   `td5_game_tick`). Driver: the `td5re` MCP server in `scripts/td5re_mcp/`
   (or its stdlib `game_client.py` directly). Compiled out of RELEASE.
-- **Fast free-cam tours** (dev builds, round 1019 T): `pwsh verify/geo_tour.ps1 -Tag x
+- **Fast free-cam tours** (dev builds, round 1019 T): `pwsh verify/geo_tour.ps1 -Tag x -Track 60
   (-Poses file | -Picks file | -Spans 561,922 [-TopDown]) [-Extra @{TD5RE_KNOB=v}]`
+  (its default `-Track 61` was the deleted strip geo track: a geo slot now races in
+  the city, so pass `-Track 60` for the auto track)
   captures EVERY pose of a list in ONE launch (world poses, picks, or span-relative
   `name:@span,lateral,height,yawrel,pitch`, corridor spans included) and quits cleanly:
   ~10 s warm, ~26 s cold for 20 poses, vs ~10 min with the old per-round tour scripts
@@ -226,29 +227,66 @@ comment — regenerate after adding/splitting modules with
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_geo.c` | GEO TRACK: real-world terrain source for the auto-track |
 | `td5_geo_roads.c` | GEO TRACK: real OSM road graph (ROADS.JSON) reader (PORT-ONLY) |
-| `td5_geo_attrs.c` | GEO TRACK: the per-span OSM ATTRIBUTE authority (PORT-ONLY) |
+| `td5_roam_cache.c` | GEO FREE ROAM: the cache ROADS reader (PORT-ONLY). |
 | `td5_geo_buildings.c` | GEO TRACK: real OSM building footprints and area |
 | `td5_geo_landmarks.c` | GEO TRACK: which footprints belong to one LANDMARK (PORT-ONLY) |
 | `td5_geo_signals.c` | GEO TRACK: traffic-signal nodes + the lamp cycle |
 | `td5_geo_footways.c` | GEO TRACK: real OSM pedestrian ways (FOOTWAYS.JSON) |
-| `td5_tg_geo_street.c` | GEO TRACK street-level reality from real OSM data |
-| `td5_tg_geo_clear.c` | GEO TRACK: where a BUILDING may NOT stand (PORT-ONLY). |
-| `td5_geo_forks.c` | GEO TRACK: CONFIRMED FORKS for a real place (PORT-ONLY). |
-| `td5_geo_avenues.c` | GEO TRACK: DIVIDED AVENUES for a real place (PORT-ONLY). |
 | `td5_geo_sidewalk.c` | GEO TRACK: where a pavement's WIDTH comes from |
 | `td5_geo_route.c` | GEO TRACK: route + condition, in C (PORT-ONLY) |
+| `td5_roam_height.c` | GEO FREE ROAM: height from the SOURCE rasters, by window |
+| `td5_roam_ribbon.c` | GEO FREE ROAM: street ribbons + heights (PORT-ONLY, |
+| `td5_roam_world.c` | GEO FREE ROAM: the street GRAPH (PORT-ONLY, F1 task T3). |
+| `td5_roam_junction.c` | GEO FREE ROAM: junction CLUSTERS and their PATCH |
+| `td5_roam_tile.c` | GEO FREE ROAM: tile assembly + the ROAMTILE file |
+| `td5_roam_locate.c` | GEO FREE ROAM: the road locator (PORT-ONLY, F1 task T6b). |
+| `td5_roam_mode.c` | GEO FREE ROAM: the ROAM game mode (PORT-ONLY, F2 task A). |
+| `td5_roam_physics.c` | GEO FREE ROAM: the contact provider + the resident set |
+| `td5_roam_drive.c` | GEO FREE ROAM: scripted drive + verdict for the `roam` selftest rows |
+| `td5_roam_render.c` | GEO FREE ROAM plain road + ground render (PORT-ONLY, F2-C). |
+| `td5_roam_scenery.c` | GEO FREE ROAM: the SCENERY layer of one tile (PORT-ONLY, |
+| `td5_roam_furniture.c` | GEO FREE ROAM: street FURNITURE of one tile (PORT-ONLY, |
+| `td5_roam_rails.c` | GEO FREE ROAM: RAILWAYS of one tile (PORT-ONLY, roam ID). |
+| `td5_roam_plaza.c` | GEO FREE ROAM: PLAZA FURNITURE AND MONUMENTS of one tile (PORT-ONLY, roam LD). |
+| `td5_roam_stadium.c` | GEO FREE ROAM: STADIUMS and SPORTS PITCHES of one tile (PORT-ONLY, roam PB). |
+| `td5_roam_cut.c` | GEO FREE ROAM: CUTTINGS, the walls of a road that runs under the ground (PORT-ONLY, roam NC). |
+| `td5_roam_shops.c` | GEO FREE ROAM: shopfronts and the ground-floor identity of a footprint |
+| `td5_roam_muni.c` | GEO FREE ROAM: the MUNICIPAL LINE of a block (PORT-ONLY, roam NA). See td5_roam_muni.h. |
+| `td5_roam_outskirts.c` | GEO FREE ROAM: poles, wires, guard rails, gates outside the casco |
+| `td5_roam_greenhouse.c` | GEO FREE ROAM: arched greenhouses on the horticulture belt's footprints (PORT-ONLY, |
+| `td5_roam_partido.c` | GEO FREE ROAM: the place boundary + the light street layer (PORT-ONLY, F9b). |
+| `td5_roam_rebase.c` | GEO FREE ROAM: dynamic world-origin rebasing (PORT-ONLY, F9b). |
+| `td5_roam_stream.c` | GEO FREE ROAM: tile streaming (PORT-ONLY, F3-A). |
+| `td5_roam_route.c` | GEO FREE ROAM: the route model + planner (PORT-ONLY, F5-A). |
+| `td5_roam_rules.c` | GEO FREE ROAM: posted speed limits + turn restrictions of the real map (PORT-ONLY, roam LG). |
+| `td5_roam_lanes.c` | GEO FREE ROAM: bus-lane / bike-lane paint data (PORT-ONLY, roam PA). |
+| `td5_roam_route_ui.c` | GEO FREE ROAM: route planner input + drawing (PORT-ONLY, F5-A). |
+| `td5_roam_barrier.c` | GEO FREE ROAM: NFSU2 route barriers (PORT-ONLY, F6-A). |
+| `td5_roam_race.c` | GEO FREE ROAM: the sprint race flow (PORT-ONLY, F6-B). |
+| `td5_roam_race_wall.c` | GEO FREE ROAM: the racer-only barrier collision layer (PORT-ONLY, F6-B). |
+| `td5_roam_lap.c` | GEO FREE ROAM: lap counting on a closed route polyline (PORT-ONLY, F9a). |
+| `td5_roam_race_drive.c` | GEO FREE ROAM: the `roam-sprint` self-test (PORT-ONLY, DEV-ONLY, F6-B). |
+| `td5_roam_wall_test.c` | GEO FREE ROAM: the `roam-walls` test (PORT-ONLY, DEV-ONLY, round H task HE). |
+| `td5_roam_handoff.c` | GEO FREE ROAM: a route handed from the frontend to the next roam session |
+| `td5_roam_ai.c` | GEO FREE ROAM: AI racers on the planned route (PORT-ONLY, F7). |
+| `td5_roam_traffic.c` | GEO FREE ROAM: ambient traffic on the street graph (PORT-ONLY, F8). |
+| `td5_roam_cops.c` | GEO FREE ROAM: police on the street graph (PORT-ONLY, F10). |
+| `td5_roam_cops_test.c` | GEO FREE ROAM: the `roam-cops` self-test drive + verdict (PORT-ONLY, DEV-ONLY, F10). |
+| `td5_police.c` | POLICE PURSUIT for the normal races (PORT-ONLY, round H HH). Contract and rules: td5_police.h. |
+| `td5_police_test.c` | the `police` self-test drive + verdict (PORT-ONLY, DEV-ONLY, round H HH). |
+| `td5_roam_gcensus.c` | GEO FREE ROAM: planner street graph vs drivable surface census |
+| `td5_roam_groundfix.c` | the ground held at or under the road, shared by the renderer and the scenery. |
+| `td5_roam_pavecensus.c` | GEO FREE ROAM G4b: pavement vs ground-as-drawn census (PORT-ONLY, DEV-ONLY). |
+| `td5_roam_ram_test.c` | GEO FREE ROAM: the `roam-ram` self-test (PORT-ONLY, DEV-ONLY, F8e). |
 | `td5_geo_tiles.c` | OUTBOUND-ONLY OSM raster tile client. See td5_geo_tiles.h |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
 | `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
 | `td5_tg_network.c` | auto-track STREET NETWORK: planar road graph (city streets, avenues, back streets, bend continuations, country loops, underpass crossings) validated on the world occupancy raster; the (span,side) street authority; NETWORK.JSON |
 | `td5_tg_branch.c` | auto-track BRANCHES: fork corridors, long diverging branch, carriageway query, branch pavement + avenue divider |
-| `td5_tg_avenue.c` | GEO TRACK: a DIVIDED AVENUE built from the real map |
-| `td5_tg_realfork.c` | GEO TRACK: DRIVEABLE FORKS FROM THE REAL MAP (PORT-ONLY). |
-| `td5_tg_plazafork.c` | GEO TRACK: PLAZA FORKS, free corridor round a ring (PORT-ONLY). |
-| `td5_tg_blockloop.c` | GEO TRACK: BLOCK-LOOP FORKS, drive straight into a perpendicular |
 | `td5_tg_guard.c` | auto-track GUARD: on-road geometry backstop, MESHTAG sidecar, pavement provenance marks, over-water / coast audits |
 | `td5_tg_city.c` | auto-track CITY: bend-fold authority, facade walls, turn continuation, pavement geometry, run-end census, side-street occupancy, street furniture |
+| `td5_tg_s3d.c` | GEO: OSM Simple 3D Buildings mass + roof for FREE ROAM (PORT-ONLY, roam JC). |
 | `td5_tg_streets.c` | auto-track SIDE STREETS: direction, occupancy, intersections, parks + houses, real intersections, infill, measurement sweeps |
 | `td5_tg_terrain.c` | auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context |
 | `td5_tg_bridge.c` | auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness |
@@ -316,6 +354,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_control.c` | live-control MCP transport (PORT-ONLY, DEV-ONLY) |
 | `td5_trig_lut_data.c` | baked 12-bit trig LUT data (dumped from the original exe) |
 | `td5_profile.c` | per-phase frame profiler (see td5_profile.h). |
+| `td5_hitchwatch.c` | DEV-only main-thread stall sampler (PORT-ONLY, roam F3-B). |
 | `td5_jobs.c` | fork/join worker pool (Win32 CONDITION_VARIABLE based). |
 | `td5_rcmd.c` | per-pane CPU render command list. See td5_rcmd.h. |
 | `td5_platform_win32.c` | Win32 platform layer for TD5RE |

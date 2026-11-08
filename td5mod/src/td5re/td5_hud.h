@@ -195,6 +195,10 @@ float td5_hud_utf8_line(float x, float baseline, float cap, const char *s, uint3
 /* [roam F5-A] untextured pre-transformed screen triangles in ONE draw (the route map / minimap batcher) */
 struct TD5_D3DVertex;
 void td5_hud_prim_tris(const struct TD5_D3DVertex *v, int nv, const uint16_t *idx, int ni);
+/* [round TB item 4] police marks the race minimap drew since the last reset: [0] pursuing, red phase, [1] pursuing,
+ * blue phase, [2] patrol / roadblock (dark blue). Read by the t4-minimap-cops self-test row. */
+void td5_hud_police_marks(long out[3]);
+void td5_hud_police_marks_reset(void);
 void td5_hud_draw_pause_overlay(void);
 /* [S27] Per-viewport "controller disconnected — reconnect" modal. No-op unless a
  * required player's controller is currently missing. */
@@ -232,11 +236,6 @@ void td5_hud_draw_laneassist_indicator(void);
  * that was clipped to one viewport and invisible in split-screen. */
 void td5_hud_draw_damage_bars(void);
 
-/* [ROUND 1011 C3] "ON <street>" per pane, from the route's own OSM street
- * names. Same overlay-pass contract as the damage bars above and the same
- * reason. Self-gated: a no-op on every shipped track, on the synthetic auto
- * track, and on a geo cache whose ROUTE.JSON predates round 1011. */
-void td5_hud_draw_street_lines(void);
 void td5_hud_clear_player_identities(void);
 void td5_hud_update_pause_overlay(int cursor, float view_dist_frac, float music_frac, float sfx_frac);
 void td5_hud_draw_race_fade(float progress, int direction);

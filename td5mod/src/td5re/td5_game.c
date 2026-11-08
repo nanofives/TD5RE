@@ -38,7 +38,6 @@
 #include "td5_carparam.h"   /* car mass/accel offsets + td5cp_heaviness_q8 (get_state) */
 #include "td5_camera.h"
 #include "td5_pick.h"   /* dev free-cam geometry picker */
-#include "td5_roam_view.h"   /* GEO FREE ROAM dev viewer (TD5RE_ROAM_VIEW) */
 #include "td5_roam_mode.h"   /* GEO FREE ROAM mode (F2): session, spawn, gates */
 #include "td5_roam_stream.h" /* GEO FREE ROAM tile streaming (F3): per-frame install + start gate line */
 #include "td5_roam_furniture.h" /* GEO FREE ROAM street furniture (F4c): signal clock + lamp registry per frame */
@@ -939,79 +938,6 @@ int td5_game_get_minimap_checkpoint_span(int idx)
     if (g_active_td6_level > 0 && s_td6_cp_count > 0)
         return s_td6_cp_spans[idx];
     return (int)s_active_checkpoint.checkpoints[idx].span_threshold;
-}
-
-/* [H5 2026-10-02] The race's checkpoint spans for a SCHEDULE track index, for
- * callers that have no race loaded -- the SELECT TRACK preview, which has to
- * tick exactly the checkpoints the race will use.
- *
- * Resolved the same three steps init_race_checkpoints uses, so there is one
- * answer and not two:
- *   k_schedule_to_checkpoint_index[track]        (forward), or
- *   td5_asset_resolve_checkpoint_record_index()  (reverse: its own record)
- *   -> k_checkpoint_table[record]                (spans + bonuses)
- * All three tables are byte-verified against the original binary: the record
- * table [CONFIRMED @ 0x0046CBB0], the schedule->pool map [CONFIRMED @
- * 0x00466894], the forward/reverse pool->record maps [CONFIRMED @ 0x00466D50 /
- * 0x00466E3C].
- *
- * Returns the raw record entry count (0 when the track has no record, e.g. the
- * drag strip or a custom/auto slot past the 19 schedule rows). out_spans gets
- * the span thresholds in record order. The entries are NOT all drawable
- * checkpoints -- see td5_game_checkpoint_is_tick below. */
-int td5_game_track_checkpoint_record(int track_index, int reverse,
-                                     int *out_spans, int max_spans)
-{
-    int record_idx = -1;
-    int n, i;
-
-    if (!out_spans || max_spans <= 0) return 0;
-    if (track_index < 0 ||
-        track_index >= (int)(sizeof(k_schedule_to_checkpoint_index) /
-                             sizeof(k_schedule_to_checkpoint_index[0])))
-        return 0;
-
-    record_idx = (int)k_schedule_to_checkpoint_index[track_index];
-    if (reverse) {
-        /* Reverse races run their OWN record (different spans AND a different
-         * initial time), exactly as the race path does. A track with no reverse
-         * data resolves to -1 there and keeps the forward record; mirror that
-         * rather than inventing a mapping. */
-        int rev_rec = td5_asset_resolve_checkpoint_record_index(track_index, 1);
-        if (rev_rec >= 0) record_idx = rev_rec;
-    }
-    if (record_idx < 0 || record_idx >= 40) return 0;
-
-    n = (int)k_checkpoint_table[record_idx][0];
-    if (n > 5) n = 5;                 /* the record holds 5 (span,bonus) pairs */
-    if (n > max_spans) n = max_spans;
-    for (i = 0; i < n; i++)
-        out_spans[i] = (int)k_checkpoint_table[record_idx][2 + 2 * i];
-    return n;
-}
-
-/* [H5 2026-10-02] Is record entry `idx` of `count` a checkpoint the preview
- * should tick, given the ring length and whether the track is a circuit?
- *
- * Two entries in a record are NOT intermediate checkpoints and must not get a
- * tick, because they are already drawn as marker DOTS:
- *   - point-to-point: the LAST entry is the finish line (it is the entry whose
- *     time_bonus is 0 in every shipped record, and crossing it is what ends the
- *     race),
- *   - circuit: the FIRST entry is the lap / start-finish line (a circuit race
- *     ends on laps, not on checkpoints).
- * Entries outside [1, ring) are inert at race time too: the shipped circuit
- * records carry four spans copied from Keswick (1511/2061/2618/3120) that sit
- * far past every circuit's ring, and the HUD minimap already drops them the
- * same way (minimap_emit_checkpoint_dash). */
-int td5_game_checkpoint_is_tick(int idx, int count, int span, int ring,
-                                int is_circuit)
-{
-    if (idx < 0 || idx >= count) return 0;
-    if (span <= 0) return 0;
-    if (ring > 0 && span >= ring) return 0;
-    if (is_circuit) return idx != 0;
-    return idx != count - 1;
 }
 
 static void set_countdown_indicator_state(int value);
@@ -3515,14 +3441,16 @@ static void init_race_level_and_assets(void)
      * condition that picks level030 (battle mode excluded there too). */
     int drag_strip = (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
                      && !td5_game_battle_mode_active();
-    /* [J8 GEO-PICK 2026-10-03] is_GENERATED_slot, not is_auto_slot: a real place
-     * (LA PLATA (REAL), ...) is a track slot of its own and is synthesised by the
-     * same generator, so it has to take this branch too or the loader would look
-     * for a level09x zip that no build ever wrote. set_target_slot resolves which
-     * level dir to build into and selects the place, and it must run BEFORE the
-     * generation worker starts -- the worker reads both. */
-    /* [GEO FREE ROAM F2-F] a roam session hosts on the place's already-built geo level: never rebuild it */
-    if (td5_trackgen_is_generated_slot(g_td5.track_index) && !td5_roam_active()) {
+    /* [roam SA] Only the AUTO TRACK is generated. A real place's geo slot is raced in the free-roam
+     * city on its own host files ([GEO FREE ROAM F2-F]: never rebuilt); the strip geo BUILD that
+     * generated level09x for it is deleted, so a geo slot reaching here outside a roam session (no menu
+     * path does: the GEOSPATIAL entry arms a roam session) races track 0 instead. */
+    if (td5_trackgen_is_geo_slot(g_td5.track_index) && !td5_roam_active()) {
+        TD5_LOG_E(LOG_TAG, "InitRace: geo slot %d outside a roam session has no level; racing track 0",
+                  g_td5.track_index);
+        g_td5.track_index = 0;
+    }
+    if (td5_trackgen_is_auto_slot(g_td5.track_index) && !td5_roam_active()) {
         td5_trackgen_set_target_slot(g_td5.track_index);
         if (drag_strip)
             TD5_LOG_I(LOG_TAG, "Auto track: skipped, drag race loads the drag strip (track_index=%d)",
@@ -6188,6 +6116,65 @@ static void td5_photobooth_tick(void) {
         TD5_LOG_I(LOG_TAG, "photobooth: front_az=%.1f -> azA=%.1f azB=%.1f", front_az, azA, azB);
     }
 
+    /* [round TA 2026-11-08] POSE SWEEP: TD5RE_PB_SWEEP="aofs,el,dist;aofs,el,dist;..."
+     * captures one frame per pose (re/assets/cars/<code>/_pb_sNN.png) in ONE launch,
+     * then quits. Used by re/tools/td5_carpic_patmap.py to find the booth camera
+     * that reproduces an ORIGINAL TD5 carpic photo, so the menu paint-pattern map
+     * (carpicpat0.png) can be rendered through that camera. Offsets are relative
+     * to front_az like TD5RE_PB_AOFS/BOFS. Dev tool only. */
+    {
+        static int sw_init = 0, sw_n = 0, sw_i = 0, sw_st = 0, sw_fc = 0;
+        static float sw_pose[160][3];
+        if (!sw_init) {
+            sw_init = 1;
+            const char *sp = getenv("TD5RE_PB_SWEEP");
+            while (sp && *sp && sw_n < 160) {
+                float a = 0, e = 0, d = 0;
+                if (sscanf(sp, "%f,%f,%f", &a, &e, &d) == 3) {
+                    sw_pose[sw_n][0] = a; sw_pose[sw_n][1] = e; sw_pose[sw_n][2] = d; sw_n++;
+                }
+                sp = strchr(sp, ';');
+                if (sp) sp++;
+            }
+            if (sw_n) TD5_LOG_I(LOG_TAG, "photobooth: sweep of %d poses", sw_n);
+        }
+        if (sw_n) {
+            sw_fc++;
+            if (sw_st == 0) {          /* hold pose sw_i, then grab */
+                td5_render_set_inspect_cam(1, front_az + sw_pose[sw_i][0], sw_pose[sw_i][1],
+                                           sw_pose[sw_i][2], 0);
+                if (sw_fc > (sw_i == 0 ? 50 : 12)) { Backend_RequestCapture(); sw_st = 1; }  /* readback lags a few presents */
+            } else if (sw_st == 1) {   /* captured last present -> save, next pose */
+                unsigned char *px; int w, h;
+                if (!Backend_GetCapture(&px, &w, &h)) {
+                    sw_st = 0; sw_fc = 0;   /* readback not ready: grab this pose again */
+                    return;
+                }
+                {
+                    unsigned char *rgb = (unsigned char *)malloc((size_t)w * h * 3);
+                    if (rgb) {
+                        for (int i = 0; i < w * h; i++) {
+                            rgb[i*3+0] = px[i*4+2]; rgb[i*3+1] = px[i*4+1]; rgb[i*3+2] = px[i*4+0];
+                        }
+                        char path[256];
+                        snprintf(path, sizeof(path), "re/assets/cars/%s/_pb_s%02d.png", code, sw_i);
+                        stbi_write_png(path, w, h, 3, rgb, w * 3);
+                        free(rgb);
+                    }
+                }
+                sw_i++; sw_fc = 0;
+                if (sw_i >= sw_n) {
+                    TD5_LOG_I(LOG_TAG, "photobooth: sweep done for '%s' (%d poses), quitting", code, sw_n);
+                    g_td5.quit_requested = 1;
+                    sw_st = 2;
+                } else {
+                    sw_st = 0;
+                }
+            }
+            return;
+        }
+    }
+
     static int st = 0, fc = 0;
     fc++;
     switch (st) {
@@ -8610,20 +8597,6 @@ static void frame_render(void)
         }
 
 #ifndef TD5RE_RELEASE
-        /* [ROAM VIEW] GEO FREE ROAM dev viewer: the ROAMTILE road layer near the
-         * render eye, through the same debug-line batch (TD5RE_ROAM_VIEW=1).
-         * Pane 0 only. Not gated on td5_camera_freecam_active(): the geo tour
-         * (td5_camera.c tour_step) moves the eye without entering free-cam, so
-         * gating on it hid the overlay from every tour frame. The eye goes in
-         * RENDER-FLOAT units (world/256 = strip units, the space the debug-line
-         * projector and the ROAMTILE coordinates use), not the 24.8 world. */
-        if (vp == 0 && td5_roam_view_wanted()) {
-            td5_render_debug_lines_reset();
-            td5_roam_view_draw((int32_t)g_cameraPos[0], (int32_t)g_cameraPos[1],
-                               (int32_t)g_cameraPos[2]);
-            td5_render_debug_lines_flush();
-        }
-
         /* [PICK] Resolve the hovered mesh, draw the highlight box, handle the
          * copy click. Own debug-line batch; runs on viewport 0 only (the free
          * camera is single-pane). No-op unless the free camera is flying. */
@@ -8765,11 +8738,6 @@ static void frame_render(void)
      * steering-direction arrow). Self-gated: no-op unless the optional aid is
      * enabled for the pane's player. */
     td5_hud_draw_laneassist_indicator();
-    /* [ROUND 1011 C3] "ON <street>" per pane, from the route's real OSM street
-     * names. Same overlay-pass reason as the two above: a screen-space quad
-     * emitted inside the per-viewport 3D loop is clipped to one pane.
-     * Self-gated (no-op on every track that is not a real place). */
-    td5_hud_draw_street_lines();
     td5_roam_route_ui_draw_hud();   /* [GEO FREE ROAM F5-A] route key hints + status; self-gated */
     td5_roam_race_draw_hud();       /* [GEO FREE ROAM F6-B] sprint timer / checkpoints / results; self-gated */
     td5_roam_cops_draw_hud();       /* [GEO FREE ROAM F10] pursuit panel, bust meter, toasts; self-gated */

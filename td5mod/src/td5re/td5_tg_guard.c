@@ -657,11 +657,6 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
             lateral = (vx - nl->v[si].x) * nl->v[si].tz
                     - (vz - nl->v[si].z) * nl->v[si].tx;
             r = tg_guard_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, cls);
-            /* [ROUND 1027 O] a vertex before the first carriageway section of an avenue is not on it */
-            if (cls != TG_GKC_FURNITURE) {
-                const double rc = tg_carriageway_reach_at(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, vx, vz);
-                if (rc < r) r = rc;
-            }
             if (s_guard_vdump)   /* [ROUND 1029 T] TD5RE_R8_GUARD_DIAG: why a rejected mesh was judged on the road */
                 TD5_LOG_I(LOG_TAG, "guard-diag:   v%u (%.0f,%.0f,%.0f) node %d lat %.0f reach %.0f (half %.0f) t %.3f",
                           vi + (unsigned)k, vx, vy, vz, si, lateral, r, tg_road_half_width(nl, si),

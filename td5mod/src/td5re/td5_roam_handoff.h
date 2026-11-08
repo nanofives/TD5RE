@@ -71,9 +71,4 @@ int  td5_roam_handoff_last_route(const char *place, double (*ll)[2], int max, ch
  * [{ "lat":..., "lon":... }, ...] (a roam route). Returns the count. */
 int  td5_roam_handoff_read_waypoints(const char *path, double (*ll)[2], int max);
 
-/* TD5RE_GEO_STRIP_BUILD=1 (default 0, dev): the STRIP geo BUILD in every context. Without it the
- * strip is local multiplayer only (frontend_geo_strip_context, F11b): a single player's geo selector
- * BUILD races in the city and the GEOSPATIAL entry launches a roam race. */
-int  td5_roam_strip_build_enabled(void);
-
 #endif /* TD5_ROAM_HANDOFF_H */

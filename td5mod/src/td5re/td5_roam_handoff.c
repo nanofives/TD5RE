@@ -64,15 +64,6 @@ void td5_roam_free_prefs_set(const TD5_RoamFreePrefs *in)
     s_free.cops = in->cops ? 1 : 0;
 }
 
-int td5_roam_strip_build_enabled(void)
-{
-#ifndef TD5RE_RELEASE
-    /* [F11b] the dev BUILD harness (td5_fe_geo.c) presses the strip BUILD and races it: it is a strip request */
-    if (td5_env_int("TD5RE_GEO_AUTOBUILD", 0, 0, 1)) return 1;
-#endif
-    return td5_env_int("TD5RE_GEO_STRIP_BUILD", 0, 0, 1);
-}
-
 int td5_roam_handoff_set(const double (*ll)[2], int n, int type, int laps, int mode,
                          int opponents, int traffic, int cops)
 {

@@ -47,7 +47,7 @@ param([string]$Tag = "run",
       [object]$Extra = @{},        # @{TD5RE_KNOB="v"} or, from `pwsh -File`, the string "TD5RE_KNOB=v|OTHER=w"
       [string]$Exe = "td5re.exe",
       [string]$GeoPlace = "",
-      [int]$Track = 61,
+      [int]$Track = 60,
       [int]$Dwell = 6,
       [int]$Width = 1280,
       [int]$Height = 720,

@@ -29,19 +29,11 @@
  * chose for ROUTE.JSON. Heights arrive in METRES and are converted here with
  * the cache's own projection.units_per_metre, so no caller does unit maths.
  *
- * HOST BINDING. A footprint is emitted by the span it stands beside, so every
- * polygon is bound once -- AT LOAD TIME -- to its nearest node of the
- * CONDITIONED ROUTE (td5_geo_route_node), with a side and a lateral distance.
- * Two reasons it is the route and not TG_Node:
- *
- *  - On the geo path the conditioned route IS the centreline: phase 3 stubbed
- *    the section loop of tg_build_centerline to walk ROUTE.JSON, so node i sits
- *    at route point i. The emitter asserts that rather than assuming it, and
- *    logs the worst deviation it finds.
- *  - Binding at load time is SINGLE-THREADED. The scenery loop is not -- a
- *    streamed build runs entries in a worker (td5_trackgen_stream.c) -- so a
- *    lazy first-call bind inside an emitter would be a race over a table that
- *    has to allocate. Nothing here allocates once a place is loaded.
+ * HOST BINDING. [roam SA] Footprints used to be bound at load time to the nearest
+ * node of the strip's CONDITIONED ROUTE so the strip emitter could find them by
+ * span. The strip geo BUILD is deleted: nothing is bound, and the span queries
+ * (td5_geob_span_building / _area) answer -1. Free roam reads the footprints
+ * through the parse helpers, per tile.
  */
 #ifndef TD5_GEO_BUILDINGS_H
 #define TD5_GEO_BUILDINGS_H

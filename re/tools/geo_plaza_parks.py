@@ -142,9 +142,15 @@ WATCH = ("Dardo Rocha", "San Mart", "Moreno", "Garibaldi", "Italia", "Rocha",
 
 
 def query_for(pj: dict) -> str:
-    b = pj["bbox"]
+    return query_for_box(pj["bbox"])
+
+
+def query_for_box(b: dict, added: bool = False) -> str:
+    """The query for one box. The base box of an extended place (and a plain
+    place's bbox) must give the exact old string, so its cached answer is used."""
     bbox = "%.6f,%.6f,%.6f,%.6f" % (b["south"], b["west"], b["north"], b["east"])
-    return QL % {"bbox": bbox}
+    q = QL % {"bbox": bbox}
+    return q
 
 
 def _num(v):
@@ -387,6 +393,15 @@ def census(rels: list, items: list) -> tuple[dict, dict]:
 
 
 def dry_run(place: str) -> dict:
+    pj0, _, _ = geo_rails.load_place(place)
+    boxes = geo_rails.place_boxes(pj0)
+    if len(boxes) > 1:          # an extended place: one query per box
+        return geo_rails.dry_run_boxes(
+            place, [query_for_box(b, k > 0) for k, b in enumerate(boxes)])
+    return _dry_run_one(place)
+
+
+def _dry_run_one(place: str) -> dict:
     """Prove the budget offline: every urlopen is recorded and refused."""
     import urllib.request
     would: list = []
@@ -436,11 +451,13 @@ def main(argv=None) -> int:
         return 0
     pj, _, proj = geo_rails.load_place(a.place)
     upm = float(pj["projection"]["units_per_metre"])
-    ql = query_for(pj)
-    osm = geo_rails.fetch(a.place, ql, a.online)
+    osm, missing, mst = geo_rails.fetch_place(a.place, pj, query_for_box, a.online)
     if osm is None:
-        print("NOT CACHED: %s\nrerun with --online (1 Overpass request)" % geo_rails.cache_path(a.place, ql))
+        print("NOT CACHED: %s\nrerun with --online (%d Overpass request(s))"
+              % (", ".join(missing), len(missing)))
         return 2
+    if mst.get("parts", 1) > 1:
+        print("boxes: %s" % json.dumps(mst), file=sys.stderr)
     if osm.get("remark"):
         print("OVERPASS REMARK: %s" % osm["remark"])
         if "runtime error" in osm["remark"]:
@@ -460,6 +477,15 @@ def main(argv=None) -> int:
     rels.sort(key=lambda e: e["id"])
     items.sort(key=lambda e: (e["osm"], e["id"]))
     ndup = mark_dups(a.place, rels)
+    # An extended place keeps every base record verbatim: the shipped La Plata
+    # file predates mark_dups (d6659e32), and a rerun marks 2 casco relations
+    # dup_of, which the C side skips -- a La Plata change, not an addition.
+    rels, kr = geo_rails.keep_base_records(a.place, pj, "PARK_RELATIONS.JSON", "relations",
+                                           rels, lambda e: e["id"])
+    items, ki = geo_rails.keep_base_records(a.place, pj, "PLAZA_FURNITURE.JSON", "items",
+                                            items, lambda e: (e["osm"], e["id"]))
+    if kr:
+        print("base records kept: relations %s, items %s" % (kr, ki), file=sys.stderr)
     rc, ic = census(rels, items)
     rc["dup_of_areas_record"] = ndup
     rc["elements_in_answer"] = len(osm.get("elements", []))

@@ -1,18 +1,14 @@
-# geo_tags_identity.ps1 -- the two byte-identity gates for the OSM tag round
+# geo_tags_identity.ps1 -- the byte-identity gate of the generated auto track
 # (docs/plans/GEO_TAG_AUDIT.md, round 1007).
 #
 #   SYNTHETIC   seed 99991, slot 60 (level090), no place loaded. Every geo code
 #               path is gated on td5_geo_loaded(), so this MUST be
 #               byte-identical to master. It is the regression gate.
-#   GEO         La Plata, slot 61 (level091). Expected to CHANGE -- the point is
-#               that the change is attributable, which is what the three A/B
-#               knobs are for (TD5RE_GEO_LM_TAGS / _AREA_TAGS / _ROAD_TAGS).
+#   The GEO arm (La Plata strip, slot 61 / level091) went with the strip geo
+#   BUILD in round S (docs/plans/geo_free_roam/S_STRIP_DELETED.md).
 #
 #   pwsh verify/geo_tags_identity.ps1 -Arm synthetic -Tag base
 #   pwsh verify/geo_tags_identity.ps1 -Arm synthetic -Tag base -NoControl
-#   pwsh verify/geo_tags_identity.ps1 -Arm geo -Tag new
-#   pwsh verify/geo_tags_identity.ps1 -Arm geo -Tag noknobs `
-#        -Extra @{TD5RE_GEO_LM_TAGS="0"; TD5RE_GEO_AREA_TAGS="0"; TD5RE_GEO_ROAD_TAGS="0"}
 #
 # Standing launch rules, all applied here: --Windowed=1 (never fullscreen,
 # never steal focus), RT off and minimum graphics, no networking.
@@ -22,7 +18,7 @@
 # end (td5_tg_pages.c), so a run that quits on a tick cap races that worker and
 # can hash nothing at all; and the trackgen counters read 0 on a reused second
 # regenerate. See commit 400c9751 and the memory note on slot 60.
-param([ValidateSet("synthetic","geo")][string]$Arm = "synthetic",
+param([ValidateSet("synthetic")][string]$Arm = "synthetic",
       [string]$Tag = "run",
       [string]$Seed = "99991",
       [int]$Port = 37231,
@@ -51,12 +47,7 @@ $env:TD5RE_CONTROL_PORT     = "$Port"
 $env:TD5RE_WINDOW_TITLE     = "TD5RE idgate $Arm $Tag"
 $env:TD5RE_RT               = "0"
 
-if ($Arm -eq "geo") {
-    $env:TD5RE_GEO_PLACE = "la_plata"
-    $slot = 61; $lvlName = "level091"
-} else {
-    $slot = 60; $lvlName = "level090"
-}
+$slot = 60; $lvlName = "level090"
 foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }
 
 $gfx = @("--Windowed=1","--Lighting=0","--Quality=0","--SunShadows=0",

@@ -136,6 +136,57 @@ def load_place(place: str):
     return pj, idx, proj
 
 
+def place_boxes(pj: dict) -> list:
+    """[base bbox, added bboxes...] -- geo_rails.place_boxes, copied (stdlib, -I)."""
+    ext = pj.get("extension") or {}
+    if ext.get("base_bbox"):
+        return [ext["base_bbox"]] + list(ext.get("added_bboxes") or [])
+    return [pj["bbox"]]
+
+
+def queries_all(pj: dict, chunks: int) -> list:
+    """Every query of the place: the base box in `chunks` x `chunks` (the old
+    queries, byte for byte), then one per added box of an extended place."""
+    boxes = place_boxes(pj)
+    out = queries_for({"bbox": boxes[0]}, chunks)
+    for b in boxes[1:]:
+        out += queries_for({"bbox": b}, 1)
+    return out
+
+
+def merge_added(osms: list, n_base: int, pj: dict) -> list:
+    """Drop from the added answers every element the base answers hold, and every
+    element anchored inside the base query box (an OSM edit made in the old area
+    since it was fetched must not leak in). Same rule as geo_rails.merge_answers."""
+    boxes = place_boxes(pj)
+    if len(boxes) < 2:
+        return osms
+    b = boxes[0]
+    m = BBOX_MARGIN_DEG
+    seen = {(e.get("type"), e.get("id")) for o in osms[:n_base] for e in o.get("elements", [])}
+    out = list(osms[:n_base])
+    for o in osms[n_base:]:
+        keep = []
+        for e in o.get("elements", []):
+            k = (e.get("type"), e.get("id"))
+            if k in seen:
+                continue
+            if "lat" in e:
+                ll = (e["lat"], e["lon"])
+            else:
+                g = [p for p in (e.get("geometry") or []) if p]
+                ll = (g[0]["lat"], g[0]["lon"]) if g else None
+            if ll is None or (b["south"] - m <= ll[0] <= b["north"] + m
+                              and b["west"] - m <= ll[1] <= b["east"] + m):
+                continue
+            seen.add(k)
+            keep.append(e)
+        q = dict(o)
+        q["elements"] = keep
+        out.append(q)
+    return out
+
+
 def queries_for(pj: dict, chunks: int) -> list:
     b = pj["bbox"]
     s, w = b["south"] - BBOX_MARGIN_DEG, b["west"] - BBOX_MARGIN_DEG
@@ -307,12 +358,13 @@ def convert(osms: list, proj, roads) -> dict:
 KEYS = ("lines", "poles", "guards", "gates")
 
 
-def split_by_tile(entries: list, idx: dict, bbox: dict) -> list:
+def split_by_tile(entries: list, idx: dict, bbox) -> list:
     """Overpass returns WHOLE ways (some run 300 km), the tile layer owns an entry by its first
     vertex: cut every way into per-tile runs (each run keeps the next vertex, so the pieces join),
     and drop runs that start outside the place bbox. A piece keeps the way id and gains "part"."""
     size, x0, z0 = float(idx["size"]), float(idx["x0"]), float(idx["z0"])
     tile = lambda p: (int(math.floor((p["x"] - x0) / size)), int(math.floor((p["z"] - z0) / size)))  # noqa: E731
+    boxes = bbox if isinstance(bbox, list) else [bbox]   # an extended place: every box
     out = []
     for e in entries:
         pts, n = e["points"], len(e["points"])
@@ -323,7 +375,8 @@ def split_by_tile(entries: list, idx: dict, bbox: dict) -> list:
             while j < n - 1 and tile(pts[j]) == t:
                 j += 1
             ll = e["latlon"][i]
-            if bbox["south"] <= ll[0] <= bbox["north"] and bbox["west"] <= ll[1] <= bbox["east"]:
+            if any(b["south"] <= ll[0] <= b["north"] and b["west"] <= ll[1] <= b["east"]
+                   for b in boxes):
                 q = dict(e)
                 q["points"], q["latlon"], q["part"] = pts[i:j + 1], e["latlon"][i:j + 1], part
                 if "pole_ids" in e:
@@ -409,7 +462,7 @@ def dry_run(place: str, chunks: int) -> dict:
     real_sleep, _sleep = _sleep, (lambda s: None)
     try:
         pj, _, _ = load_place(place)
-        qls = queries_for(pj, chunks)
+        qls = queries_all(pj, chunks)
         uncached = [q for q in qls if not os.path.exists(cache_path(place, q))]
         for q in uncached:
             try:
@@ -437,7 +490,7 @@ def main(argv=None) -> int:
         return 0
     pj, idx, proj = load_place(a.place)
     osms = []
-    for q in queries_for(pj, a.chunks):
+    for q in queries_all(pj, a.chunks):
         o = fetch(a.place, q, a.online)
         if o is None:
             print("NOT CACHED: %s\nrerun with --online" % cache_path(a.place, q))
@@ -447,9 +500,10 @@ def main(argv=None) -> int:
             if "runtime error" in o["remark"]:
                 return 3
         osms.append(o)
+    osms = merge_added(osms, a.chunks * a.chunks, pj)
     doc = convert(osms, proj, load_roads(a.place))
     for k in ("lines", "guards"):
-        doc[k] = split_by_tile(doc[k], idx, pj["bbox"])
+        doc[k] = split_by_tile(doc[k], idx, place_boxes(pj))
     rows = write_tiles(a.place, idx, doc)
     idx["layers"]["OUTSKIRTS"] = {"file": "OUTSKIRTS.JSON", "key": "lines", "key2": "poles",
                                   "keys": list(KEYS), "tiles": rows}

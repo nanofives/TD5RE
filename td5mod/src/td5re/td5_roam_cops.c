@@ -147,6 +147,7 @@ static struct {
     /* roadblocks [G1b] */
     RcBlock blk[RC_BLK_MAX];
     int     block_heat, block_max, block_fail_run;
+    int     want_base;                           /* [round TB item 6] TD5RE_ROAM_COPS_WANT_BASE: pursuers wanted = this + heat */
     int     dev_race_pursuit;                    /* DEV: a race with COPS on starts a heat 5 pursuit once (TD5RE_ROAM_COPS_DEV_RACE_PURSUIT) */
     double  block_min_m, block_max_m;
     long    block_cd;
@@ -228,6 +229,7 @@ static void rc_read_knobs(void)
     C.r_despawn   = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_M", 330, 80, 800);
     C.r_despawn_pursuit = td5_env_int("TD5RE_ROAM_COPS_DESPAWN_PURSUIT_M", 450, 100, 2000);
     C.block_heat  = td5_env_int("TD5RE_ROAM_COPS_BLOCK_HEAT", 3, 0, 5);
+    C.want_base   = td5_env_int("TD5RE_ROAM_COPS_WANT_BASE", 2, 1, TD5_ROAM_COPS_POOL_MAX);   /* [round TB item 6] pursuers wanted = this + heat */
     C.dev_race_pursuit = td5_env_int("TD5RE_ROAM_COPS_DEV_RACE_PURSUIT", 0, 0, 1);
     C.block_max   = td5_env_int("TD5RE_ROAM_COPS_BLOCKS", 2, 1, RC_BLK_MAX);
     C.block_min_m = td5_env_int("TD5RE_ROAM_COPS_BLOCK_MIN_M", 200, 100, 500);
@@ -1986,7 +1988,7 @@ static void rc_start_pursuit(RcCop *by, int cause, double kmh)
     C.p_t0 = rc_tick();
     C.lost_t = 0;
     C.bust_meter = 0.0;
-    C.spawn_cd = rc_tick() + 60;
+    C.spawn_cd = rc_tick();            /* [round TB item 6] reinforcements from the first tick (was 2 s later) */
     C.st.pursuits++;
     if (cause == 1) C.st.notice_speed++;
     else if (cause == 2) C.st.notice_red++;
@@ -2144,19 +2146,23 @@ static void rc_pursuit_tick(TD5_Actor *pl, double plx, double plz)
     if (seen) C.lost_t = 0; else C.lost_t++;
     if (npur == 0 || dmin > C.escape_m) { rc_end_pursuit(1, 1); return; }
     if (C.lost_t > (long)((C.lose_s + 2.0 * C.heat) * RC_HZ)) { rc_end_pursuit(1, 0); return; }
-    /* reinforcements: 1 + heat pursuers; patrols within 200 m join from heat 2 */
-    wanted = 1 + C.heat;
-    if (C.heat >= 2)
-        for (i = 0; i < C.pool && npur < wanted; i++) {
-            RcCop *c = &C.cop[i];
-            if (c->state == RC_PATROL && c->fade >= 0 && c->alpha > 0 && c->d_player < 200.0) {
-                rc_join(c); npur++; C.st.joins++;
-                TD5_LOG_I(LOG_TAG, "ROAM_COPS: slot %d joins the pursuit (%.0f m away)", c->slot, c->d_player);
-            }
+    /* [round TB item 6] every patrol within 200 m joins at once, at any heat and past `wanted` (was: from heat 2,
+     * while the pursuers were under 1 + heat); reinforcements spawn up to want_base + heat pursuers with no timer
+     * between them (was 1 + heat, one per 3 s, the first 2 s after the start). spawn_cd only spaces the RETRY after
+     * a failed placement (a search, not a join timer). */
+    wanted = C.want_base + C.heat;
+    for (i = 0; i < C.pool; i++) {
+        RcCop *c = &C.cop[i];
+        if (c->state == RC_PATROL && c->fade >= 0 && c->alpha > 0 && c->d_player < 200.0) {
+            rc_join(c); npur++; C.st.joins++;
+            TD5_LOG_I(LOG_TAG, "ROAM_COPS: slot %d joins the pursuit (%.0f m away, heat %d, %d pursuer(s) now)", c->slot,
+                      c->d_player, C.heat, npur);
         }
+    }
     if (npur < wanted && tick >= C.spawn_cd && rc_free_count() > rc_block_reserve()) {
-        C.spawn_cd = tick + 90;
+        C.spawn_cd = tick + 15;
         if (rc_try_spawn(plx, plz, fx, fz, 1, RC_PURSUIT) || rc_try_spawn(plx, plz, fx, fz, 0, RC_PURSUIT)) {
+            C.spawn_cd = tick;
             C.st.reinforcements++;
             rc_assign_roles();
             TD5_LOG_I(LOG_TAG, "ROAM_COPS: reinforcement %ld (heat %d, %d pursuer(s) now)", C.st.reinforcements, C.heat, npur + 1);
@@ -2420,6 +2426,7 @@ void td5_roam_cops_draw_hud(void)
     if (!C.pursuit && C.busted_t <= 0 && tick >= C.toast_until) return;
     memset(&h, 0, sizeof h);
     h.tick = tick;
+    h.race = C.race_on;               /* [round TB item 5] a race on the city: no heat / cops readout; free roam keeps it */
     h.pursuit = C.pursuit;
     h.heat = C.heat;
     h.cops = rc_count(RC_PURSUIT);

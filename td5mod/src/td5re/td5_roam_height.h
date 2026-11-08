@@ -91,12 +91,4 @@ int  td5_roam_height_sample(TD5_RoamHeight *c, double x, double z,
  * contour is the real shoreline at the raster's resolution). 1 when a resident window covers it. */
 int  td5_roam_height_wetfrac(TD5_RoamHeight *c, double x, double z, double *out_frac);
 
-#ifndef TD5RE_RELEASE
-/* Dev test, run by td5_geo_route_init when TD5RE_ROAM_HEIGHT_TEST=1. Samples
- * 1000 points of the derived route window through td5_geo_height and through
- * the source-window reader, and prints the differences. Returns 0 when the
- * test ran, 1 when there was no geo place to test against. */
-int  td5_roam_height_selftest(void);
-#endif
-
 #endif /* TD5_ROAM_HEIGHT_H */

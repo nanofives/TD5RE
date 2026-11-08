@@ -709,55 +709,6 @@ static void tg_biome_layout_pass(unsigned int seed, int snow)
     s_biome_laid_out = 1;
 }
 
-/* [GEO PHASE 5 2026-09-30] On a geo track the biome of each cell comes from
- * the REAL land cover beside the route, not from the seeded succession. The
- * seeded layout put sidewalk-less FIELDS/FOREST cells along what is really a
- * city street, and tg_facade_built only consults the real mouths where there is
- * a sidewalk -- 37 of 94 real side streets were dropped for exactly that.
- *
- * Per cell, COVER.R8 is sampled on both sides of every route node, a little
- * past the kerb (4000) and one block back (9000 units ~ 21 m): >= 35% BUILT is
- * CITY, else >= 40% TREE is FOREST, else FIELDS. Those three are ordinary
- * neighbours in the adjacency table, so no transition the emitters do not
- * already handle can appear. Cells past the route's end keep the seeded
- * layout. No RNG draw; synthetic builds never reach this (the geo test). */
-static void tg_biome_geo_override(void)
-{
-    static const double k_off[4] = { 4000.0, 9000.0, -4000.0, -9000.0 };
-    const int n = td5_geo_route_count();
-    int cell, city = 0, forest = 0, fields = 0;
-
-    for (cell = 0; cell < TD5_TG_BIOME_CELLS; cell++) {
-        const int a = cell * TD5_TG_BIOME_RUN;
-        int i, built = 0, tree = 0, tot = 0;
-        if (a + 1 >= n) break;
-        for (i = a; i < a + TD5_TG_BIOME_RUN && i + 1 < n; i += 3) {
-            double x0, z0, x1, z1, tx, tz, len;
-            int k, l;
-            td5_geo_route_node(i, &x0, &z0, &l);
-            td5_geo_route_node(i + 1, &x1, &z1, &l);
-            tx = x1 - x0; tz = z1 - z0;
-            len = sqrt(tx * tx + tz * tz);
-            if (len < 1e-6) continue;
-            tx /= len; tz /= len;
-            for (k = 0; k < 4; k++) {
-                const int c = td5_geo_cover(x0 + tz * k_off[k], z0 - tx * k_off[k]);
-                if (c == TD5_GEO_COVER_NONE) continue;
-                tot++;
-                if (c == TD5_GEO_COVER_BUILT) built++;
-                else if (c == TD5_GEO_COVER_TREE) tree++;
-            }
-        }
-        if (tot == 0) continue;               /* no data: keep the seeded cell */
-        if (built * 100 >= tot * 35)      { s_biome_cell[cell] = 0; city++;   }   /* CITY   */
-        else if (tree * 100 >= tot * 40)  { s_biome_cell[cell] = 2; forest++; }   /* FOREST */
-        else                              { s_biome_cell[cell] = 1; fields++; }   /* FIELDS */
-    }
-    TD5_LOG_I(LOG_TAG, "trackgen: [GEO] biome from real land cover: %d city, "
-              "%d forest, %d fields cell(s) (%d-span cells)", city, forest,
-              fields, TD5_TG_BIOME_RUN);
-}
-
 /* Set by tg_biome_layout so the build log and the element inventory can state
  * plainly whether the snow-coherent path was taken. */
 int s_biome_snow_seed = 0;
@@ -775,10 +726,6 @@ void tg_biome_layout(unsigned int seed, int nspans_hint)
 
     s_biome_snow_seed = 0;
     tg_biome_layout_pass(seed, 0);
-    if (td5_geo_loaded() && td5_geo_route_count() >= 2) {
-        tg_biome_geo_override();   /* [GEO PHASE 5] real cover wins, no snow pass */
-        return;
-    }
 
     if (!td5_env_flag_on("TD5RE_R8_BIOME_SNOW")) return;
 
@@ -2051,48 +1998,6 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                 px[n]=bfx+gx*b0; py[n]=bfy-dyf; pz[n]=bfz+gz*b0; uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
                 px[n]=bfx;        py[n]=bfy-dyf; pz[n]=bfz;        uu[n]=0.0;                         vv[n]=(double)si+1.0; n++;
             }
-        }
-        /* [ROUND 1029 V] "tiny triangles of sky show through the ground", La Plata (seed
-         * 2054677019) spans 661 and 834: the LAST span of a fork window, beside the rejoin.
-         * This slab's far edge is span si+1's profile (R8 item 11, so the seam between slabs
-         * closes), and at the rejoin that profile is pulled far out (d0 4505 beside the plaza
-         * fork's rejoin wedge at 662, 3362 beside the avenue's far carriageway at 835) while
-         * this span's own clearance d0 is a few hundred units. The inner edge therefore runs
-         * diagonally across the span, and the triangle between it and the corridor's kerb is
-         * covered by nothing: 13.1 m2 at 661, 14.0 m2 at 834 (with the cross street there).
-         * The wedge above fills that strip everywhere else but stands down on fork main spans
-         * (the gore lies under the road edge there). Fill it here from the corridor's kerb
-         * (or THIS span's clearance d0, which clears the corridor at both ends of the span:
-         * tg_carriageway_reach takes the wider end) out to the slab's inner edge: never
-         * under the corridor or the gore. It also fires along a WIDENING corridor (the far
-         * row's clearance is one step, 180 units on Avenida 13's fork, wider than the near
-         * row's), where it lays ground in the margin between the kerb and d0: covered from
-         * above by the corridor's footway, and the ground under a street mouth's near edge
-         * (span 805, where the cut footway left a 4.0 m2 sliver of sky).
-         * Geo tracks only; TD5RE_GEO_FORK_SLANT_FILL=0 restores the hole. */
-        if (td5_geo_loaded() && pa.n > 0 && pb.n > 0 &&
-            n + 4 <= (TD5_TG_GROUND_MAXPT - 1) * 8 + 8 &&
-            tg_fork_of_main(si) >= 0 &&
-            pb.d[0] > pa.d[0] + 50.0 &&
-            td5_env_flag_on("TD5RE_GEO_FORK_SLANT_FILL")) {
-            const double a0 = pa.d[0], b0 = pb.d[0];
-            const double dyn = pa.dy[0], dyf = pb.dy[0];
-            /* Beside a REAL fork the fill starts on the corridor's own kerb at each row (the
-             * corridor mesh's helpers), so the clearance margin between the kerb and d0 is
-             * covered too (at 834 a 200-unit strip that the cross street leaves open). A free
-             * or loop corridor has no per-row answer and starts at d0. */
-            const double sgn = is_left ? 1.0 : -1.0;
-            const double k0 = tg_fork_real_row_shift(nl, si, sgn, 0);
-            const double k1 = tg_fork_real_row_shift(nl, si, sgn, 1);
-            const double c0 = (k0 >= 0.0 && k0 < a0) ? k0 : a0;
-            const double c1 = (k1 >= 0.0 && k1 < a0) ? k1 : a0;
-            const double a1 = (a0 > c0 + 1.0) ? a0 : c0 + 1.0;
-            /* near end: from the kerb to the slab's own inner edge, at least 1 unit wide (a
-             * quad with two coincident corners is degenerate and the renderer drops it) */
-            px[n]=bnx+ox*c0;         py[n]=bny-dyn; pz[n]=bnz+oz*c0;         uu[n]=c0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
-            px[n]=bnx+ox*a1;         py[n]=bny-dyn; pz[n]=bnz+oz*a1;         uu[n]=a1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si;     n++;
-            px[n]=bfx+gx*b0;         py[n]=bfy-dyf; pz[n]=bfz+gz*b0;         uu[n]=b0/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
-            px[n]=bfx+gx*c1;         py[n]=bfy-dyf; pz[n]=bfz+gz*c1;         uu[n]=c1/(double)TD5_TG_SPAN_LENGTH;         vv[n]=(double)si+1.0; n++;
         }
         side_n[s] += n;
     }
@@ -3992,8 +3897,6 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
     double X[2][4], Y[2][4], Z[2][4], D[2][4], U[2], B[2];
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
-    int pin_j[2] = { -1, -1 };      /* [ROUND 1015 E] ring pinned on a plaza corridor, per end */
-    double pin_y[2] = { 0.0, 0.0 };
     int e, j, n = 0, nseg = 1;
     int seam_fix;   /* [R22 item 12] far-band group-boundary seam fix, set below */
     /* [R5 item 16] The height/stretch cure only applies where the ridge is an
@@ -4326,21 +4229,6 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             if (D[e][3] > d3cap) D[e][3] = d3cap;
         }
 
-        {   /* [ROUND 1015 E] A plaza fork's corridor crosses this band, 100..180 m out
-             * on the far side of the ring: pin ring 2 ON it, a little under the road,
-             * so the apron meets the corridor instead of rolling over it (the apron's
-             * ring points sample the natural terrain, and its planes between them rose
-             * 1..3 m above the road: the corridor surface was buried and the car drove
-             * under it). Nothing happens with no plaza fork built. */
-            double th = 0.0, ty = 0.0;
-            pin_j[e] = -1;
-            if (tg_pf_ray_hit(is_left ? lx : rx, is_left ? lz : rz, ux, uz,
-                              D[e][0] + 1500.0, 260000.0, &th, &ty)) {
-                if (th + 12000.0 > D[e][3]) D[e][3] = th + 12000.0;
-                if (D[e][1] > th - 3000.0) D[e][1] = D[e][0] + (th - D[e][0]) * 0.5;
-                D[e][2] = th; pin_j[e] = 2; pin_y[e] = ty - 300.0;
-            }
-        }
         for (j = 0; j < 4; j++) {
             const double ex = (is_left ? lx : rx) + ux * D[e][j];
             const double ez = (is_left ? lz : rz) + uz * D[e][j];
@@ -4372,7 +4260,6 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             /* [TOPOLOGY-FIRST] ring 0 is the seam under the skirt; every
              * other ring is the world's own ground there. */
             Y[e][j] = (j == 0) ? base : tg_world_h(ex, ez);
-            if (j == pin_j[e]) Y[e][j] = pin_y[e];      /* [ROUND 1015 E] */
             (void)yb; (void)ampj;
         }
 
@@ -4663,11 +4550,6 @@ static int tg_far_group_over_fork(int si)
     for (i = 0; i < s_fork_count; i++) {
         const int a = s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2;
         const int b = s_forks[i].R + TD5_TG_FAR_FORK_PAD;
-        if (s_forks[i].loopc > 0) continue;   /* [ROUND 1018 L] */
-        if (s_forks[i].freec > 0) {          /* [ROUND 1015 E] throats only */
-            if (tg_pf_far_over(i, g0, g1)) return 1;
-            continue;
-        }
         if (g1 >= a && g0 <= b) return 1;   /* group overlaps the fork + bow */
     }
     return 0;
