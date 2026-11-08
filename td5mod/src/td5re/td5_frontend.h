@@ -119,6 +119,11 @@ void frontend_mp_simul_preview_setup(int n);
 int  frontend_mp_ai_player_count(void);
 int  frontend_mp_human_count(void);
 void frontend_mp_ai_players_reset(void);
+/* [round UB 2026-11-08] u4-random-pick: checks the RANDOM entries' pools (no
+ * generated / geo slot, Moscow and the Viper in) and that repeated rolls differ.
+ * `race_track` / `race_car` = what the race actually ran (both must be in the
+ * pools). 0 = pass, 1 = fail; `note` gets the counts. */
+int  frontend_random_selftest(int race_track, int race_car, char *note, size_t cap);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""

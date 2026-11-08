@@ -822,20 +822,23 @@ int frontend_geo_entry_launch_roam(int opponents)
     }
     sp.spawn_yaw = -1;
     sp.car_index = frontend_current_car_index();
-    traffic = g_td5.traffic_volume >= 2 ? 2 : (g_td5.traffic_volume == 1 || g_td5.traffic_enabled) ? 1 : 0;
-    if (!g_td5.traffic_enabled) traffic = 0;
+    /* [round UB 2026-11-08] from the RACE OPTIONS rows, not g_td5.traffic_*: this runs
+     * BEFORE frontend_init_race_schedule commits them, so those still held the
+     * values of the moment the race type was picked. Roam has 3 levels: MEDIUM and
+     * above are HIGH, LOW is LOW. */
+    traffic = s_game_option_traffic >= 2 ? 2 : s_game_option_traffic == 1 ? 1 : 0;
     td5_roam_begin(&sp);
     frontend_roam_set_origin(TD5_SCREEN_GEO_GENERATOR);   /* [roam QA] leaving returns to the map, as before */
     if (!td5_roam_handoff_set((const double (*)[2])ll, n, TD5_ROUTE_SPRINT, 1, TD5_HANDOFF_AUTOSTART,
                               opponents < 0 ? -1 : (opponents > 5 ? 5 : opponents), traffic,
-                              g_td5.special_encounter_enabled ? 1 : 0)) {
+                              s_game_option_cops ? 1 : 0)) {
         td5_roam_cancel();
         return 0;
     }
     s_selected_track = td5_roam_host_track();
     TD5_LOG_I(LOG_TAG, "geo entry: RACE IN THE CITY %d point(s) from %s at %.5f,%.5f (%s), car=%d opponents=%d "
               "traffic=%d cops=%d humans=%d -> host track %d", n, src, ll[0][0], ll[0][1], sp.place, sp.car_index,
-              opponents, traffic, g_td5.special_encounter_enabled ? 1 : 0,
+              opponents, traffic, s_game_option_cops ? 1 : 0,
               frontend_local_mp() ? s_num_human_players : 1, s_selected_track);
     return 1;
 }
@@ -1131,6 +1134,48 @@ static void frontend_track_park_random(void (*cycle)(int)) {
     s_roam_entry = 0;
     s_track_random = 1;
 }
+
+#ifndef TD5RE_RELEASE
+int frontend_random_selftest(int race_track, int race_car, char *note, size_t cap) {
+    int pool[128], cpool[TD5_CAR_SLOT_MAX];
+    int n = frontend_random_track_pool(pool, (int)(sizeof pool / sizeof pool[0]));
+    int nc = frontend_random_car_pool(0, TD5_CAR_COUNT - 1, cpool, (int)(sizeof cpool / sizeof cpool[0]));
+    int bad = 0, has0 = 0, gen_listed = 0, in_pool = 0, car_in = 0, i, t;
+    int seen_t[128] = {0}, distinct_t = 0, distinct_c = 0, last_c = -1;
+    const int sv_track = s_selected_track, sv_car = s_selected_car, sv_paint = s_selected_paint;
+    const int sv_cfg = s_selected_config, sv_tr = s_track_random, sv_cr = s_car_random;
+    const int sv_dir = s_track_direction, sv_rev = g_td5.reverse_direction;
+    const TD5_ScreenIndex sv_scr = s_current_screen;
+    for (i = 0; i < n; i++) {
+        t = pool[i];
+        if (td5_trackgen_is_generated_slot(t) || td5_trackgen_is_geo_slot(t)) bad++;
+        if (t == 0) has0 = 1;
+        if (t == race_track) in_pool = 1;
+    }
+    /* generated slots the plain selector lists (the auto track, the geo entry) */
+    for (t = 0; t < s_total_unlocked_tracks; t++)
+        if (td5_trackgen_is_generated_slot(t) && !frontend_track_excluded_from_selector(t)) gen_listed++;
+    for (i = 0; i < nc; i++) if (cpool[i] == race_car) car_in = 1;
+    /* 16 launches' worth of rolls: they must not all land on one entry */
+    for (i = 0; i < 16; i++) {
+        int k;
+        s_current_screen = TD5_SCREEN_QUICK_RACE;
+        s_track_random = 1; s_car_random = 1;
+        frontend_resolve_random_picks();
+        for (k = 0; k < n; k++) if (pool[k] == s_selected_track && !seen_t[k]) { seen_t[k] = 1; distinct_t++; }
+        if (s_selected_car != last_c) { distinct_c++; last_c = s_selected_car; }
+    }
+    s_current_screen = sv_scr;
+    s_selected_track = sv_track; s_selected_car = sv_car; s_selected_paint = sv_paint;
+    s_selected_config = sv_cfg; s_track_random = sv_tr; s_car_random = sv_cr;
+    s_track_direction = sv_dir; g_td5.reverse_direction = sv_rev;
+    snprintf(note, cap, "track pool %d (generated in pool %d, Moscow %s, generated slots listed %d), car pool %d; "
+             "race track %d %s, car %d %s; 16 rolls: %d tracks, %d car changes",
+             n, bad, has0 ? "in" : "OUT", gen_listed, nc, race_track, in_pool ? "in pool" : "NOT IN POOL",
+             race_car, car_in ? "in pool" : "NOT IN POOL", distinct_t, distinct_c);
+    return (n > 0 && bad == 0 && has0 && in_pool && car_in && nc > 0 && distinct_t >= 2 && distinct_c >= 2) ? 0 : 1;
+}
+#endif
 
 /* RANDOM on a track selector: no DIRECTION row (the roll runs forwards), the LAPS
  * row shown (it applies when the roll is a circuit). Call after the screen's own

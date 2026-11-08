@@ -3887,6 +3887,39 @@ void td5_frontend_auto_race_setup(void) {
             s_game_option_laps = ml - 1;
         }
     }
+    /* [round UB 2026-11-08] Dev harness for the u5-* rows:
+     * TD5RE_AUTORACE_OPTS_AFTER_CONFIG="traffic,police,collisions,cp_timers,difficulty"
+     * (-1 = keep) edits the RACE OPTIONS values AFTER the game type was configured,
+     * the menus' order (race type first, RACE OPTIONS later). */
+    {
+        const char *oa = getenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG");
+        if (oa && oa[0]) {
+            int t = -1, p = -1, c = -1, k = -1, d = -1;
+            if (sscanf(oa, "%d,%d,%d,%d,%d", &t, &p, &c, &k, &d) >= 1) {
+                if (t >= 0) s_game_option_traffic           = t;
+                if (p >= 0) s_game_option_cops              = p;
+                if (c >= 0) s_game_option_collisions        = c;
+                if (k >= 0) s_game_option_checkpoint_timers = k;
+                if (d >= 0) s_game_option_difficulty        = d;
+            }
+            TD5_LOG_I(LOG_TAG, "AutoRace: RACE OPTIONS after config (%s): traffic=%d police=%d collisions=%d "
+                      "cp_timers=%d difficulty=%d", oa, s_game_option_traffic, s_game_option_cops,
+                      s_game_option_collisions, s_game_option_checkpoint_timers, s_game_option_difficulty);
+        }
+    }
+    /* [round UB] Dev harness for u4-random-pick: TD5RE_AUTORACE_RANDOM=1 puts the
+     * Quick Race car and track selectors on RANDOM and rolls them the way a launch
+     * from QUICK RACE does. */
+    if (td5_env_int("TD5RE_AUTORACE_RANDOM", 0, 0, 1)) {
+        const TD5_ScreenIndex sv = s_current_screen;
+        s_car_random = 1;
+        s_track_random = 1;
+        s_current_screen = TD5_SCREEN_QUICK_RACE;
+        frontend_resolve_random_picks();
+        s_current_screen = sv;
+        s_car_random = 0;     /* the harness must not leave the menus on RANDOM */
+        s_track_random = 0;
+    }
     /* [CHAOS CO-OP 2026-10-01] Dev harness: TD5RE_CHAOS_FE_SEATS=4|6|8 fabricates
      * the lobby + board state and commits it through the real frontend path, so
      * the schedule call below takes the frontend_chaos_pending() branch. No-op
