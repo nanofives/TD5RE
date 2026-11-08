@@ -31,7 +31,7 @@ if (-not (Test-Path $Exe)) {
 
 Remove-Item "log\selftest_report.csv", "log\selftest_report.md" -ErrorAction SilentlyContinue
 
-$args = "--SelfTest=1"
+$args = "--SelfTest=1 --VSync=0"  # [U 2026-11-08] monitors asleep = 261 ms vsync present, smoke hit its cap
 if ($Suite -eq "full") { $args += " --SelfTestSuite=1" }
 
 $env:TD5RE_WINDOW_TITLE = "TD5RE SELFTEST ($Suite)"
