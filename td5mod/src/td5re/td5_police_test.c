@@ -52,6 +52,7 @@ static struct {
     char   why[96];
     long   t0, phase_t0, t_pursuit, t_block, t_block_gone, t_escape, t_pursuit2, t_bust, t_release, t_go;
     int    cop_a, cop_b, plants;
+    long   join_t0; int join_a, join_b, join_np, join_done;   /* [round TB item 6] TD5RE_POLICE_TEST_JOIN */
     int    block_seen, block_span, block_ncar; double block_gap;
     double kmh_max, kmh_go, held_kmh_max;
     int    rear, shot_p, shot_blk, shot_esc, shot_bust;
@@ -190,6 +191,29 @@ void td5_police_test_tick(void)
         }
         break;
     case PT_WAIT_PURSUIT:
+        if (td5_police_dev_pursuit(0) && T.join_t0 == 0 && td5_env_int("TD5RE_POLICE_TEST_JOIN", 0, 0, 1)) {
+            /* [round TB item 6] DEV check, off by default: at heat 1 plant 2 idle cops 20 and 32 spans BEHIND the car (past
+             * the 0..15-span "just passed" window, inside 200 m) and hold 4 s before the heat goes up. Before round TB such a
+             * cop could only join from heat 2, up to 1 + heat pursuers; now each one joins on its first tick on the road. */
+            T.join_t0 = tick;
+            T.join_a = td5_ai_traffic_police_dev_plant_cop(-20);
+            T.join_b = td5_ai_traffic_police_dev_plant_cop(-32);
+            td5_police_dev_slow_pursuers(1);   /* no pull-over by the first cop during the check */
+            TD5_LOG_I(LOG_TAG, "[POLICETEST] join check: heat %d, pursuers %d, cops planted behind in slots %d and %d",
+                      td5_police_heat(0), td5_police_dev_pursuers(0), T.join_a, T.join_b);
+        }
+        if (T.join_t0 > 0 && !T.join_done) {
+            const int np = td5_police_dev_pursuers(0);
+            if (np > T.join_np) {
+                TD5_LOG_I(LOG_TAG, "[POLICETEST] join check: %d pursuer(s) at +%.2f s (heat %d; planted %d -> %d, %d -> %d)", np,
+                          (tick - T.join_t0) / PT_HZ, td5_police_heat(0), T.join_a, T.join_a >= 0 ? td5_ai_cop_target(T.join_a) : -9,
+                          T.join_b, T.join_b >= 0 ? td5_ai_cop_target(T.join_b) : -9);
+                T.join_np = np;
+            }
+            if (tick - T.join_t0 < 4 * 30 && td5_police_dev_pursuit(0)) break;
+            T.join_done = 1;
+            TD5_LOG_I(LOG_TAG, "[POLICETEST] join check done: max %d pursuer(s) within 4 s", T.join_np);
+        }
         if (td5_police_dev_pursuit(0)) {
             T.t_pursuit = tick;
             td5_police_dev_set_heat(0, 3);
