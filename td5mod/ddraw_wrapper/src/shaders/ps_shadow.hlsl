@@ -30,6 +30,7 @@ cbuffer ShadowCB : register(b0)
     float4 sun;           /* xyz = surface->light dir (world, unit), w = max march dist (world units) */
     float4 params;        /* x = steps, y = thickness (view-z units), z = start offset (world units), w = pane width  */
     float4 params2;       /* x = pane height, yzw reserved                     */
+    float4 params3;       /* [round UG] x = debug view, y = 1 if t1 is the real G-buffer */
 };
 
 Texture2D    depthTex : register(t0);
@@ -80,12 +81,46 @@ float4 main(PS_INPUT input) : SV_TARGET
      * skip: their shading is already dark, and grazing pixels are the worst
      * self-shadow (acne/speckle) offenders under the jittered march. */
     float4 gb = gbufTex.Load(int3(px, 0));
-    if (gb.a > 0.001)
+    int dbg = (int)params3.x;
+    if (dbg == 1)   /* G-buffer presence: green = matid>0, magenta = none */
+        return (gb.a > 0.001) ? float4(0.3, 1.0, 0.3, 1.0) : float4(1.0, 0.3, 1.0, 1.0);
+    if (dbg == 4)   /* reconstruction check: world.y in 1000-unit bands */
+    {
+        float b = frac(world.y / 1000.0);
+        return float4(b, 1.0 - b, 0.5, 1.0);
+    }
+    /* [round UG] With the real G-buffer bound (params3.y), a receiver with no
+     * material id is a camera-facing billboard (tree crown, banner sprite):
+     * marching from it self-hits its own quad and speckles. Leave it lit, the
+     * same rule that already keeps billboards from CASTING. */
+    if (params3.y > 0.5 && gb.a <= 0.001 && dbg != 2)
+    {
+        if (dbg == 5) return float4(0.0, 0.0, 1.0, 1.0);
+        discard;
+    }
+    float ysign = (params3.z != 0.0) ? params3.z : 1.0;
+    if (gb.a > 0.001 && dbg != 2)
     {
         float3 N = gb.rgb * 2.0 - 1.0;
+        /* [round UG] Two-sided quads (banners, signs, fences) carry ONE normal;
+         * seen from the back it points away from the camera. Face it toward
+         * the viewer first (view vector taken into the normal's frame), else
+         * a sunlit-looking back face marches through its own quad and the
+         * whole sign reads as shadowed. */
+        float3 V = camPosFocal.xyz - world;
+        V.y *= ysign;
+        if (dot(N, V) < 0.0) N = -N;
         if (dot(N, sun.xyz) <= 0.25)
+        {
+            if (dbg == 5) return float4(0.0, 0.0, 1.0, 1.0);   /* mask: faces away */
             discard;
+        }
     }
+
+    /* [round UG] params3.z = sign applied to sun.y for the MARCH only (the
+     * receiver test above compares against the G-buffer normal, which lives in
+     * the same frame as the sun the game passes). 0 = legacy (+1). */
+    float3 msun = float3(sun.x, sun.y * ysign, sun.z);
 
     int   steps   = (int)params.x;
     float maxDist = sun.w;
@@ -105,7 +140,7 @@ float4 main(PS_INPUT input) : SV_TARGET
     for (int k = 1; k <= steps; k++)
     {
         float t = t0 + (maxDist - t0) * (((float)k - jit) / (float)steps);
-        float3 P = world + sun.xyz * t;
+        float3 P = world + msun * t;
 
         /* World -> view (basis rows are orthonormal). */
         float3 d = P - camPosFocal.xyz;
@@ -133,13 +168,16 @@ float4 main(PS_INPUT input) : SV_TARGET
         /* Depth bias grows with march distance — grazing self-hits far along
          * the ray were the speckle source on curved car bodies. */
         float dz = pvz - sceneVz;
-        if (dz > 6.0 + 0.02 * t && dz < thick)
+        /* [round UG] + a term in the receiver's view distance: the 24-bit
+         * perspective depth loses precision with distance, and far road pixels
+         * read their own neighbours as occluders (speckle near the horizon). */
+        if (dz > 6.0 + 0.02 * t + 0.004 * vz && dz < thick)
         {
             /* Billboard occluders (camera-facing tree/sprite quads) carry no
              * G-buffer data (matid 0): their quads reorient with the camera,
              * so their "shadows" would swing and morph while driving. Only
              * REAL geometry (matid > 0: roads, walls, cars) casts. */
-            if (gbufTex.Load(int3(sp, 0)).a > 0.001)
+            if (dbg == 2 || gbufTex.Load(int3(sp, 0)).a > 0.001)
             {
                 /* Distance-softened: far occluders cast lighter shadows. */
                 occ = 1.0 - 0.45 * (t / maxDist);
@@ -148,6 +186,10 @@ float4 main(PS_INPUT input) : SV_TARGET
         }
     }
 
+    if (dbg == 5)   /* [round UG] opaque MASK for the ug-shadow-visible row: black = shadowed, white = lit */
+        return (occ > 0.0) ? float4(0.0, 0.0, 0.0, 1.0) : float4(1.0, 1.0, 1.0, 1.0);
+    if (dbg == 2 || dbg == 3)   /* occlusion as red (2 = gbuffer filter off) */
+        return (occ > 0.0) ? float4(1.0, 0.15, 0.15, 1.0) : float4(1.0, 1.0, 1.0, 1.0);
     float shade = 1.0 - strength * occ;
     return float4(shade, shade, shade, 1.0);
 }

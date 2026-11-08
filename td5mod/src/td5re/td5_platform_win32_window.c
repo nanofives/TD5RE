@@ -644,6 +644,12 @@ static void td5_plat_dump_frame_png(const char *path) {
     }
 }
 
+#ifndef TD5RE_RELEASE
+/* [round UG] ug-shadow-visible row hooks (see td5_platform.h). */
+void td5_plat_render_shadow_mask_view(int on) { Backend_SetShadowMaskView(on); }
+void td5_plat_capture_arm(int on) { Backend_SetCaptureArmed(on); }
+#endif
+
 /* Runtime one-shot frame-dump request (live-control `framedump` verb).
  * Latched on the main thread (td5_control_tick), serviced at the next
  * present by the same td5_plat_dump_frame_png path as the env dump. */

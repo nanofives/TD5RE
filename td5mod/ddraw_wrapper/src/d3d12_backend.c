@@ -3575,14 +3575,42 @@ int Backend_SceneSnapshotBlit(void)
  * t1 (gbuffer) is the depth SRV placeholder for now -- the gbuffer is not yet
  * populated (Phase 4 later), which matches the port's largely-empty gbuffer on
  * the PlatDrawTris path. BLEND_MULT so out = dst*src. */
+/* [round UG] The march only counts an occluder whose G-buffer texel has a
+ * material id (gbuf.a > 0: real geometry, not a camera-facing billboard), and
+ * skips receivers that face away from the sun. Before round UG t1 was always the
+ * 1x1 zero placeholder, so no occluder ever qualified and the pass multiplied
+ * every pixel by 1.0 (dispatched, drew nothing). Bind the real G-buffer when the
+ * game produced one this frame (the game turns it on for RT-off sun shadows),
+ * and tell the shader through params3.y. */
+static int s_shadow_mask_view;   /* [round UG] 1 = draw the pass as an opaque mask (dev row) */
+void Backend_SetShadowMaskView(int on) { s_shadow_mask_view = on ? 1 : 0; }
+void Backend_SetCaptureArmed(int on) { s_cap_on = (on < 0) ? -1 : (on ? 1 : 0); }   /* -1 = back to the env knobs */
+
 void Backend_ApplyShadowPass(const ShadowCB *cb)
 {
-    UINT srvs[1];
+    UINT srvs[2];
+    int nsrv = 1, gb = 0;
+    ShadowCB c;
     if (!cb) return;
     if (s_rt_mode && d3d12_dxr_shadow_pass(cb)) return;   /* RT sun-shadow composite */
+    c = *cb;
     srvs[0] = s_depth_srv_slot;
-    d3d12_fullscreen_pass(SH_BC(ps_shadow), SH_LEN(ps_shadow), BLEND_MULT,
-                          cb, sizeof(ShadowCB), srvs, 1);
+    if (s_gbuffer_tex && s_gbuffer_enabled && g_d3d12.frame_open) {
+        if (s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+            d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        srvs[1] = s_gbuffer_tex->srv_slot;
+        nsrv = 2; gb = 1;
+    }
+    c.params3[1] = gb ? 1.0f : 0.0f;
+    if (s_shadow_mask_view) c.params3[0] = 5.0f;
+    d3d12_fullscreen_pass(SH_BC(ps_shadow), SH_LEN(ps_shadow), s_shadow_mask_view ? BLEND_OPAQUE : BLEND_MULT,
+                          &c, sizeof(ShadowCB), srvs, nsrv);
+    if (gb && s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
 }
 
 /* [P4] Sky-visibility GI: HIGH-only (no LOW screen-space fallback). The game

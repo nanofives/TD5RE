@@ -725,8 +725,16 @@ void td5_render_lighting2_frame_begin(void)
      * the old always-on behaviour. */
     static int s_gb_always = -1;
     if (s_gb_always < 0) s_gb_always = td5_env_int("TD5RE_GBUFFER_ALWAYS", 0, 0, 1);
+    /* [round UG] The RT-off screen-space sun-shadow march (ps_shadow) is a
+     * consumer too: it only lets real geometry (G-buffer matid > 0) cast and
+     * skips sun-facing-away receivers. Without the G-buffer it drew nothing.
+     * TD5RE_SHADOW_GBUF=0 = the old gate (pass inert, for A/B). */
+    static int s_gb_shadow = -1;
+    if (s_gb_shadow < 0) s_gb_shadow = td5_env_int("TD5RE_SHADOW_GBUF", 1, 0, 1);
+    int ss_shadow = s_gb_shadow && !td5_rt_active() && td5_light2_sun_shadows();
     int on = (td5_light2_active() &&
-              (s_gb_always || td5_rt_active() || td5_render_car_sun_gain() > 0.0f)) ? 1 : 0;
+              (s_gb_always || td5_rt_active() || ss_shadow ||
+               td5_render_car_sun_gain() > 0.0f)) ? 1 : 0;
     td5_plat_render_set_gbuffer(on);
     /* [CAR SUN 2026-08-04] Publish this frame's scene sun (+Y-down, UN-flipped —
      * matches the packed COLOR1 normal) so the directional car brighten in

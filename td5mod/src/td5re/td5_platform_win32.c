@@ -4371,6 +4371,25 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
      * OVERCAST widens it for a soft, directionless penumbra). RT-only: the LOW
      * screen-space shadow shader reads only params2.x. */
     cb.params2[3] = (cone_scale > 0.0f) ? cone_scale : 1.0f;
+    /* [round UG] params3.x = screen-space pass debug view (dev only):
+     * 1 = G-buffer presence, 2 = raw march hits (no G-buffer occluder filter),
+     * 3 = final hits, 4 = reconstructed world.y bands. */
+#ifndef TD5RE_RELEASE
+    { static int s_ssdbg = -1;
+      if (s_ssdbg < 0) { const char *e = getenv("TD5RE_SHADOW_DEBUG"); s_ssdbg = (e && e[0]) ? atoi(e) : 0; }
+      cb.params3[0] = (float)s_ssdbg; }
+#endif
+    /* [round UG] params3.z = the sign the screen-space march applies to sun.y.
+     * sun_dir arrives in the game's +Y-DOWN position frame (the frame of the
+     * G-buffer normals, which the receiver test needs), but the depth
+     * reconstruction the march walks in is +Y-UP (the RT path flips it for the
+     * same reason, td5_render_apply_shadow_pass). Unflipped, every ray headed
+     * into the ground and hit it (debug view 2 = the whole frame "shadowed").
+     * TD5RE_SHADOW_MARCH_YSIGN=1 restores the old (wrong) march for A/B. */
+    { static float s_ysign = 0.0f;
+      if (s_ysign == 0.0f) { const char *e = getenv("TD5RE_SHADOW_MARCH_YSIGN"); s_ysign = (e && e[0]) ? (float)atof(e) : -1.0f;
+                             if (s_ysign == 0.0f) s_ysign = -1.0f; }
+      cb.params3[2] = s_ysign; }
 
     Backend_ApplyShadowPass(&cb);
 }
