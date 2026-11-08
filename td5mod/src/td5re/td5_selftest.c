@@ -248,7 +248,11 @@ typedef struct {
      *   51 u5-traffic-timetrial    time trial runs the TRAFFIC / POLICE / COLLISIONS picked
      *   52 u5-options-after-config single race: COLLISIONS + CHECKPOINT TIMERS edited after the race type
      *   53 u5-copchase-traffic     cop chase: the TRAFFIC level edited after the race type
-     *   54 u5-drag-difficulty      SP drag: the DIFFICULTY edited after the race type */
+     *   54 u5-drag-difficulty      SP drag: the DIFFICULTY edited after the race type
+     * [round UE 2026-11-08] Mariano's decisions on the UB / UC questions:
+     *   61 ue-q1-copchase-notraffic cop chase with TRAFFIC OFF (set after the race type): empty road
+     *   62 ue-hidden-rows           rows hidden / greyed per mode, no gap when DIRECTION hides
+     *   63 ue-shadow-sun*           RT off: the sun-shadow pass casts from the sun the sky draws */
     int u_check;
     /* [round UC 2026-11-08] item 7: 1 = at race start the sun disc's direction, and a ring around it as wide as
      * the glare, maps to SKY texels of the panorama (td5_render_sky_sun_check against the td5_sky_sunpos.h
@@ -649,6 +653,29 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=0,
       .mp_mode=-1, .depth=ST_DEPTH_COUNTDOWN, .u_check=54 },
+    /* [round UE 2026-11-08] Q1: cop chase, TRAFFIC VERY HIGH at the race-type pick then OFF on RACE OPTIONS:
+     * no traffic car on the road for 20 s, the chase (wanted mode) still armed. Moscow. */
+    { .name="ue-q1-copchase-notraffic", .track=0, .car=-1, .game_type=8, .player_is_ai=1,
+      .traffic=4, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_RUN_20S, .u_check=61 },
+    /* Q2..Q6 + the QUICK RACE gap: a menu-model check (td5_fe_race.c frontend_ue_rows_selftest) run after a
+     * countdown so it sits in the race-row machinery like the other u rows. */
+    { .name="ue-hidden-rows",        .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=62 },
+    /* UC decision b: with RT off the sun shadows cast from the sun the sky draws. Blue Ridge and Switzerland had
+     * the disc moved by td5_sky_sunpos.h; Maui is the control (disc not moved). */
+    { .name="ue-shadow-sun",         .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .u_check=63 },
+    { .name="ue-shadow-sun-switzerland", .track=30, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .u_check=63 },
+    { .name="ue-shadow-sun-maui",    .track=6,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .u_check=63 },
     /* [round UC 2026-11-08] item 7: the sun sits in the sky, never over the mountains / skyline / lake painted into
      * the panorama. Blue Ridge, Courmayeur, San Francisco, Lake Tahoe and Switzerland had it over backdrop (moved by
      * td5_sky_sunpos.h); Maui is the control (probed sun already in the sky, not moved). Countdown only. */
@@ -677,6 +704,9 @@ static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player
 static int s_u_cap, s_u_traffic, s_u_vol, s_u_police, s_u_coll, s_u_cp, s_u_tier, s_u_track, s_u_car;
 static int s_u_max_traffic;   /* most traffic actors live on any tick */
 static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values set after the race type */
+static int s_u_wanted;                   /* [round UE] wanted (cop chase) mode at the first tick */
+static int s_ue_shadow_cls = -99, s_ue_sky_cls;   /* [round UE] ue-shadow-sun capture */
+static float s_ue_shadow[3], s_ue_sky[3];
 
 static int  s_u7_res = -99;      /* [round UC] u7-sun-in-sky: td5_render_sky_sun_check result, -99 = not sampled */
 static char s_u7_note[96];
@@ -2321,6 +2351,8 @@ static void st_apply_scenario(const RaceScenario *sc)
     }
     if (sc->u_check == 53) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=1,-1,-1,-1,-1");   /* VERY HIGH -> LOW */
     if (sc->u_check == 54) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=-1,-1,-1,-1,2");   /* EASY -> HARD */
+    if (sc->u_check == 61) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=0,-1,-1,-1,-1");   /* [round UE] VERY HIGH -> OFF */
+    s_ue_shadow_cls = -99;
     /* [round TA] t3-laps-* rows (st_reset_scenario_fields clears both knobs and restores ini.laps). */
     s_t3_max_lap = 0;
     s_u7_res = -99; s_u7_note[0] = 0;   /* [round UC] */
@@ -3306,6 +3338,25 @@ static void st_tick_races(uint32_t now)
                         fail = !(s_u_tier == 2);
                         snprintf(un, sizeof un, "drag: difficulty tier %d (asked 2 after 0)", s_u_tier);
                         break;
+                    case 61:   /* [round UE] Q1 */
+                        fail = !(s_u_wanted == 1 && s_u_traffic == 0 && s_u_vol == 0 && s_u_max_traffic == 0);
+                        snprintf(un, sizeof un, "cop chase: wanted=%d traffic=%d vol=%d (asked OFF after VERY HIGH), "
+                                 "%d traffic cars live at most", s_u_wanted, s_u_traffic, s_u_vol, s_u_max_traffic);
+                        break;
+                    case 62:   /* [round UE] Q2..Q6 + no gap */
+                        fail = frontend_ue_rows_selftest(un, sizeof un);
+                        break;
+                    case 63: { /* [round UE] shadows follow the drawn sun (RT off) */
+                        const float d = s_ue_shadow[0] * s_ue_sky[0] + s_ue_shadow[1] * s_ue_sky[1] +
+                                        s_ue_shadow[2] * s_ue_sky[2];
+                        if (s_ue_shadow_cls == -99) { fail = 1; snprintf(un, sizeof un, "shadow sun never sampled"); break; }
+                        fail = !(td5_rt_active() == 0 && s_ue_sky_cls == TD5_SKY_SUNNY &&
+                                 s_ue_shadow_cls == TD5_SKY_SUNNY && d > 0.9999f);
+                        snprintf(un, sizeof un, "rt=%d sky cls %d (%.3f,%.3f,%.3f) shadow cls %d (%.3f,%.3f,%.3f) dot %.5f",
+                                 td5_rt_active(), s_ue_sky_cls, s_ue_sky[0], s_ue_sky[1], s_ue_sky[2], s_ue_shadow_cls,
+                                 s_ue_shadow[0], s_ue_shadow[1], s_ue_shadow[2], (double)d);
+                        break;
+                    }
                     }
                     TD5_LOG_I(LOG_TAG, "%s: %s -> %s", sc->name, un, fail ? "FAIL" : "PASS");
                     if (fail) { status = ST_FAIL; snprintf(note, sizeof(note), "%s", un); }
@@ -3426,7 +3477,11 @@ static void st_tick_races(uint32_t now)
                     s_u_coll = td5_physics_get_collisions_flag() == 0 ? 1 : 0;
                     s_u_cp = g_td5.checkpoint_timers_enabled; s_u_tier = g_td5.difficulty_tier;
                     s_u_track = g_td5.track_index; s_u_car = td5_game_get_slot_car_index(0);
+                    s_u_wanted = g_td5.wanted_mode_enabled;
                 }
+                /* [round UE] ue-shadow-sun: sample a few ticks in (the sky + zone lights are live by then) */
+                if (sc->u_check == 63 && s_ue_shadow_cls == -99 && tick - s_race_start_tick >= 5)
+                    s_ue_shadow_cls = td5_render_shadow_sun_query(s_ue_shadow, s_ue_sky, &s_ue_sky_cls);
                 for (s = g_traffic_slot_base; s < total; s++)
                     if (!td5_ai_traffic_dynamic_parked(s)) live++;
                 if (live > s_u_max_traffic) s_u_max_traffic = live;

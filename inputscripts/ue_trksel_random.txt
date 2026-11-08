@@ -1,0 +1,7 @@
+# [round UE 2026-11-08] SELECT TRACK: LEFT once on TRACK (Moscow) -> RANDOM. DIRECTION hides and LAPS takes its
+# row (no empty slot). Launch with --StartScreen=21 --StartScreenDirect=1 --DefaultTrack=0.
+sync menu
+240 log TS_ENTRY
++60 key left press
++240 log TS_RANDOM
++10 quit

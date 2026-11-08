@@ -388,6 +388,10 @@ int td5_render_sky_sun(float dir[3], float rgb[3]);
  * -1 = no sun drawn on this sky (not SUNNY), -2 = the sky has no table entry.
  * `note` (optional) gets a one-line description. */
 int td5_render_sky_sun_check(char *note, int note_len);
+/* [round UE] Selftest hook (ue-shadow-sun): the direction the light2 sun-shadow pass
+ * casts from (+Y down) and the sky sun the disc is drawn at (+Y down, valid when
+ * *sky_cls == TD5_SKY_SUNNY). Returns the shadow class (0 = no sun shadows). */
+int td5_render_shadow_sun_query(float shadow[3], float sky[3], int *sky_cls);
 /* Draw the sun disc (SUNNY + HIGH only); called from the sky phase after the
  * dome, before the world. No-op otherwise. */
 void td5_render_draw_sun_disc(void);

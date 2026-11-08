@@ -5579,7 +5579,12 @@ int ConfigureGameTypeFlags(void) {
 
     case 8: /* Cop Chase */
         g_td5.wanted_mode_enabled = 1;
-        g_td5.traffic_enabled = 1;
+        /* [round UE 2026-11-08] Mariano (Q1): TRAFFIC OFF in cop chase means an
+         * empty road. The original forces traffic on here (gTrafficActorsEnabled
+         * = 1); the port follows the TRAFFIC row instead. The chase itself runs
+         * on the racer slots (cop 0, suspect 1), not on traffic, so nothing else
+         * depends on it. */
+        g_td5.traffic_enabled = (s_game_option_traffic > 0) ? 1 : 0;
         g_td5.special_encounter_enabled = 0;
         break;
 
@@ -7436,10 +7441,13 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
                           * anywhere. Show it for SP drag: the value feeds
                           * g_td5.ini.traffic, which the SP drag InitRace block
                           * (td5_game.c) turns into the same oncoming stream MP drag
-                          * gets from mp_mode_config.drag_traffic. */
-        return !(c->is_drag && c->is_mp);
-    case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag */
-        return !(c->is_cop_chase || c->is_drag);
+                          * gets from mp_mode_config.drag_traffic.
+                          * [round UE 2026-11-08] Mariano (Q2): hidden in traffic
+                          * battle, which forces VERY HIGH (td5_game.c InitRace). */
+        return !(c->is_drag && c->is_mp) && !tb;
+    case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag.
+                          * [round UE] Q2: none in traffic battle (forced off). */
+        return !(c->is_cop_chase || c->is_drag || tb);
     case RO_DIFFICULTY:  /* AI difficulty: opponent-gated except drag's own 1v1 rule.
                           * [DIFFICULTY RESTORE 2026-09-12] The `is_quick_race`
                           * exclusion was hiding this row in the main-menu QUICK
@@ -7464,8 +7472,12 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_CATCHUP:     /* [CATCHUP 2026-07-21] MP-only AI rubber-band assist */
         return c->is_mp;
     case RO_CHECKPOINTS: /* checkpoint TIMERS: SP point-to-point only (off in MP,
-                          * cop chase, drag — see td5_game.c ~2380) */
-        return !c->is_mp && !c->is_cop_chase && !c->is_drag;
+                          * cop chase, drag — see td5_game.c ~2380).
+                          * [round UE 2026-11-08] Mariano: hidden in time trial (Q4,
+                          * forced ON: the timers ARE the time trial) and in cups
+                          * (Q5, forced OFF at race init for game types 1..6). */
+        return !c->is_mp && !c->is_cop_chase && !c->is_drag &&
+               !c->is_time_trial && !c->is_cup;
     case RO_AI_MODEL:    /* opponent-AI mode — only meaningful when the race
                           * actually has AI opponents. [AI MODEL OPP-GATE
                           * 2026-09-12] Hide it whenever the effective opponent

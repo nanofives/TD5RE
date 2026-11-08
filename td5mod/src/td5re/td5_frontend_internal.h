@@ -812,6 +812,9 @@ typedef struct {
 } TD5_RaceOptsCtx;
 
 int  td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *ctx);
+/* [round UE 2026-11-08] 1 = the MP car-select panes show the greyed MANUAL gearbox
+ * row (MP drag locked by the mode vote). td5_fe_mp_setup.c. */
+int  mp_carsel_drag_gear_row(void);
 /* [MP DRAG 2026-09-29] 1 when a row is VISIBLE but not adjustable in this mode,
  * so build_page can mark its button `disabled` (greyed text, skipped by nav and
  * by the value arrows). Today only DIFFICULTY on the drag strip with 0 AI

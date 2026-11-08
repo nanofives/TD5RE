@@ -1,0 +1,4 @@
+# [round UE 2026-11-08] hold a menu screen for the frame dump, then quit cleanly.
+sync menu
+300 log UE_HOLD
++10 quit

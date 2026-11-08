@@ -269,6 +269,12 @@ static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> posit
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
+/* [round UE 2026-11-08] Mariano (Q3): the LAPS row is hidden in single-player time
+ * trial, which always runs one lap (ConfigureGameTypeFlags case 7 forces
+ * circuit_lap_count = 1 and the launch never re-commits LAPS for game type 7). */
+static int frontend_laps_row_mode_hidden(void) {
+    return s_selected_game_type == 7 && !s_mp_flow;
+}
 /* [CONSOLIDATION 2026-07-21] RACE OPTIONS entry (defined below, near the screen).
  * back_mode: RO_BACK_PARENT returns to the parent; RO_BACK_DRAG_OPPONENT re-enters
  * the SP-drag opponent car-select pass. */
@@ -1180,17 +1186,49 @@ int frontend_random_selftest(int race_track, int race_car, char *note, size_t ca
 /* RANDOM on a track selector: no DIRECTION row (the roll runs forwards), the LAPS
  * row shown (it applies when the roll is a circuit). Call after the screen's own
  * per-track row refresh. */
-static void frontend_random_track_rows(int dir_btn, int laps_btn) {
-    if (!s_track_random) return;
-    s_track_direction = 0;
-    if (dir_btn >= 0 && dir_btn < s_button_count) {
-        s_buttons[dir_btn].hidden = 1;
-        s_buttons[dir_btn].disabled = 1;
-        if (s_selected_button == dir_btn) s_selected_button = 0;
+/* [round UE 2026-11-08] Mariano: "hidden rows must not leave gaps". Stack the
+ * VISIBLE rows of a selector column at y0, y0+dy, ... in the given order, so a
+ * hidden DIRECTION (RANDOM, forward-only track) or LAPS (point-to-point, time
+ * trial) row closes up instead of leaving an empty slot. The value column and
+ * the ◄► arrows read s_buttons[].y, so they follow. Hidden rows keep their y. */
+static void frontend_reflow_rows(const int *ids, int n, int y0, int dy) {
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        const int b = ids[i];
+        if (b < 0 || b >= s_button_count || s_buttons[b].hidden) continue;
+        s_buttons[b].y = y0 + k * dy;
+        k++;
     }
-    if (laps_btn >= 0 && laps_btn < s_button_count) {
-        s_buttons[laps_btn].hidden = 0;
-        s_buttons[laps_btn].disabled = 0;
+}
+
+/* Selector-column geometry of the two track pickers (must match the
+ * frontend_create_button calls: QUICK RACE rows QR_ROW_Y(0..2), SELECT TRACK
+ * rows y = 97 / 132 / 167). The RACE OPTIONS / SETTINGS / OK / BACK group keeps
+ * its own fixed rows below. */
+#define TRKSEL_ROW_Y0 97
+#define TRKSEL_ROW_DY 35
+
+static void frontend_random_track_rows(int dir_btn, int laps_btn) {
+    if (s_track_random) {
+        s_track_direction = 0;
+        if (dir_btn >= 0 && dir_btn < s_button_count) {
+            s_buttons[dir_btn].hidden = 1;
+            s_buttons[dir_btn].disabled = 1;
+            if (s_selected_button == dir_btn) s_selected_button = 0;
+        }
+        if (laps_btn >= 0 && laps_btn < s_button_count && !frontend_laps_row_mode_hidden()) {
+            s_buttons[laps_btn].hidden = 0;
+            s_buttons[laps_btn].disabled = 0;
+        }
+    }
+    /* [round UE] close the gaps (every caller runs this after the per-track
+     * DIRECTION / LAPS visibility refresh). */
+    if (dir_btn == QR_BTN_DIRECTION && laps_btn == QR_BTN_LAPS) {
+        static const int qr_rows[] = { QR_BTN_CAR, QR_BTN_TRACK, QR_BTN_DIRECTION, QR_BTN_LAPS };
+        frontend_reflow_rows(qr_rows, 4, QR_ROW_Y0, QR_ROW_DY);
+    } else {
+        const int ts_rows[] = { 0, dir_btn, laps_btn };   /* TRACK, DIRECTION, LAPS */
+        frontend_reflow_rows(ts_rows, 3, TRKSEL_ROW_Y0, TRKSEL_ROW_DY);
     }
 }
 
@@ -2544,6 +2582,14 @@ void frontend_mp_simul_preview_setup(int n) {
     s_two_player_mode        = 1;
     s_mp_flow                = 1;
     s_mp_simul               = 1;
+    /* [round UE 2026-11-08] TD5RE_MP_MODE_FORCE=N (1 cup .. 4 drag) also seeds the
+     * mode the vote would have locked, so the mode-dependent grid (MP drag's greyed
+     * MANUAL row) can be screenshotted. */
+    {
+        const char *mf = getenv("TD5RE_MP_MODE_FORCE");
+        if (mf && mf[0] && atoi(mf) > 0 && atoi(mf) < TD5_MP_MODE_COUNT)
+            mp_mode_config_apply_defaults(atoi(mf));
+    }
     /* [layout preview 2026-07-04] TD5RE_MP_SIMUL_PREVIEW_PHASE=0 lands on the
      * phase-0 PROFILE SELECTION setup screen (name/colour/PROFILE/trans/assist/OK
      * per-pane buttons) instead of the default phase-1 car-select grid, so that
@@ -7778,7 +7824,9 @@ static int frontend_track_is_circuit(int track_slot) {
 static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     if (laps_btn_idx < 0 || laps_btn_idx >= s_button_count) return;
     int show;
-    if (s_selected_track < 0)
+    if (frontend_laps_row_mode_hidden())
+        show = 0;                                             /* [round UE] time trial: always 1 lap */
+    else if (s_selected_track < 0)
         show = 1;                                             /* random/unset: keep the row */
     else if (td5_trackgen_is_geo_slot(s_selected_track))
         show = 0;   /* [F11b] the city sprint or the point-to-point strip; no level09x LEVELINF needed */
@@ -12460,3 +12508,119 @@ void Screen_CupWon(void) {
         break;
     }
 }
+
+#ifndef TD5RE_RELEASE
+/* [round UE 2026-11-08] ue-hidden-rows (see td5_frontend.h). Runs from the selftest
+ * verdict, off any menu: it rebuilds button sets into s_buttons, so it snapshots and
+ * restores the whole button table and every selector flag it changes. */
+int frontend_ue_rows_selftest(char *note, size_t cap) {
+    static FE_Button sv_buttons[FE_MAX_BUTTONS];
+    const int sv_count = s_button_count, sv_sel = s_selected_button;
+    const int sv_gt = s_selected_game_type, sv_mpf = s_mp_flow, sv_tr = s_track_random;
+    const int sv_track = s_selected_track, sv_dir = s_track_direction, sv_flow = s_flow_context;
+    const int sv_rev = g_td5.reverse_direction, sv_mode = g_td5.mp_mode_config.mode;
+    const int sv_auto = s_trksel_auto_btn, sv_geo = s_trksel_geo_btn, sv_dyn = s_trksel_dyn_btn;
+    TD5_RaceOptsCtx c;
+    int fail = 0, circ = -1, rev_track = -1, t;
+    char why[160] = "";
+    memcpy(sv_buttons, s_buttons, sizeof sv_buttons);
+
+#define UE_EXPECT(cond, ...) do { if (!fail && !(cond)) { fail = 1; snprintf(why, sizeof why, __VA_ARGS__); } } while (0)
+    /* 1. RACE OPTIONS rows per mode (Q2, Q4, Q5) + controls that must stay. */
+    memset(&c, 0, sizeof c); c.is_mp = 1; c.mp_mode = TD5_MP_MODE_TRAFFIC_BATTLE;
+    UE_EXPECT(!td5_raceopts_row_available(RO_TRAFFIC, &c), "traffic battle shows TRAFFIC");
+    UE_EXPECT(!td5_raceopts_row_available(RO_POLICE, &c), "traffic battle shows POLICE");
+    memset(&c, 0, sizeof c); c.game_type = 7; c.is_time_trial = 1;
+    UE_EXPECT(!td5_raceopts_row_available(RO_CHECKPOINTS, &c), "time trial shows CHECKPOINT TIMERS");
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c), "time trial lost TRAFFIC");
+    memset(&c, 0, sizeof c); c.game_type = 1; c.is_cup = 1;
+    UE_EXPECT(!td5_raceopts_row_available(RO_CHECKPOINTS, &c), "cup shows CHECKPOINT TIMERS");
+    memset(&c, 0, sizeof c); c.game_type = 0; c.opponents = 5;
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c) && td5_raceopts_row_available(RO_POLICE, &c) &&
+              td5_raceopts_row_available(RO_CHECKPOINTS, &c), "single race lost TRAFFIC / POLICE / CP TIMERS");
+    memset(&c, 0, sizeof c); c.game_type = 8; c.is_cop_chase = 1; c.opponents = 1;
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c), "cop chase lost TRAFFIC");
+    memset(&c, 0, sizeof c); c.is_mp = 1; c.mp_mode = TD5_MP_MODE_RACE;
+    UE_EXPECT(td5_raceopts_row_available(RO_TRAFFIC, &c) && td5_raceopts_row_available(RO_POLICE, &c),
+              "MP race lost TRAFFIC / POLICE");
+
+    /* 2. Q6: the MP car grid's greyed MANUAL row exists only in MP drag. */
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_DRAG_RACE;
+    UE_EXPECT(mp_carsel_drag_gear_row() == 1, "MP drag: no greyed MANUAL row");
+    g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
+    UE_EXPECT(mp_carsel_drag_gear_row() == 0, "MP race shows the drag MANUAL row");
+
+    /* 3. SELECT TRACK column: a circuit (LAPS shown) and a reversible track. */
+    for (t = 0; t < 26 && (circ < 0 || rev_track < 0); t++) {
+        if (t == 19 || frontend_track_excluded_from_selector(t)) continue;
+        if (circ < 0 && td5_asset_track_is_circuit(t)) circ = t;
+        if (rev_track < 0 && td5_asset_track_has_reverse(t) && !td5_asset_track_is_circuit(t)) rev_track = t;
+    }
+    UE_EXPECT(circ >= 0 && rev_track >= 0, "no circuit (%d) / reversible track (%d) found", circ, rev_track);
+    s_mp_flow = 0; s_flow_context = 0;
+    if (!fail) {
+        /* Q3: time trial hides LAPS even on a circuit; single race shows it. */
+        s_selected_game_type = 7; s_track_random = 0; s_selected_track = circ;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[2].hidden, "time trial: LAPS shown on circuit %d", circ);
+        s_selected_game_type = 0;
+        trksel_build_main_buttons();
+        UE_EXPECT(!s_buttons[2].hidden, "single race: LAPS hidden on circuit %d", circ);
+        /* RANDOM: DIRECTION hides, LAPS takes its row (no gap). */
+        s_track_random = 1;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[1].hidden && !s_buttons[2].hidden && s_buttons[2].y == TRKSEL_ROW_Y0 + TRKSEL_ROW_DY,
+                  "select track RANDOM: dir hidden %d, laps hidden %d at y %d (want %d)", s_buttons[1].hidden,
+                  s_buttons[2].hidden, s_buttons[2].y, TRKSEL_ROW_Y0 + TRKSEL_ROW_DY);
+        /* time trial + RANDOM: neither row, nothing below TRACK moves into a gap. */
+        s_selected_game_type = 7;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[1].hidden && s_buttons[2].hidden, "time trial RANDOM: dir %d laps %d shown",
+                  !s_buttons[1].hidden, !s_buttons[2].hidden);
+        /* back on a reversible track the rows return to their own slots */
+        s_selected_game_type = 0; s_track_random = 0; s_selected_track = rev_track;
+        trksel_build_main_buttons();
+        UE_EXPECT(!s_buttons[1].hidden && s_buttons[1].y == TRKSEL_ROW_Y0 + TRKSEL_ROW_DY,
+                  "select track %d: DIRECTION hidden %d y %d", rev_track, s_buttons[1].hidden, s_buttons[1].y);
+    }
+
+    /* 4. QUICK RACE column (same geometry as its case 0): RANDOM closes the
+     * DIRECTION slot, LAPS takes row 2. */
+    if (!fail) {
+        int i;
+        frontend_reset_buttons();
+        for (i = 0; i <= QR_BTN_LAPS; i++) {
+            static const int row[] = { 0, 1, 2, 3, 3, 4 };
+            frontend_create_button("", QR_COL_X, QR_ROW_Y(row[i]), QR_BTN_W, 32);
+        }
+        s_buttons[QR_BTN_PLAYERS].hidden = s_buttons[QR_BTN_OPPONENTS].hidden = 1;
+        s_track_random = 1; s_selected_track = circ;
+        frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+        frontend_update_laps_button_visibility(QR_BTN_LAPS);
+        frontend_random_track_rows(QR_BTN_DIRECTION, QR_BTN_LAPS);
+        UE_EXPECT(s_buttons[QR_BTN_DIRECTION].hidden && !s_buttons[QR_BTN_LAPS].hidden &&
+                  s_buttons[QR_BTN_LAPS].y == QR_ROW_Y(2),
+                  "quick race RANDOM: dir hidden %d, laps hidden %d at y %d (want %d)",
+                  s_buttons[QR_BTN_DIRECTION].hidden, s_buttons[QR_BTN_LAPS].hidden,
+                  s_buttons[QR_BTN_LAPS].y, QR_ROW_Y(2));
+        s_track_random = 0; s_selected_track = rev_track;
+        frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
+        frontend_update_laps_button_visibility(QR_BTN_LAPS);
+        frontend_random_track_rows(QR_BTN_DIRECTION, QR_BTN_LAPS);
+        UE_EXPECT(!s_buttons[QR_BTN_DIRECTION].hidden && s_buttons[QR_BTN_DIRECTION].y == QR_ROW_Y(2),
+                  "quick race track %d: DIRECTION hidden %d y %d", rev_track,
+                  s_buttons[QR_BTN_DIRECTION].hidden, s_buttons[QR_BTN_DIRECTION].y);
+    }
+#undef UE_EXPECT
+
+    memcpy(s_buttons, sv_buttons, sizeof sv_buttons);
+    s_button_count = sv_count; s_selected_button = sv_sel;
+    s_selected_game_type = sv_gt; s_mp_flow = sv_mpf; s_track_random = sv_tr;
+    s_selected_track = sv_track; s_track_direction = sv_dir; s_flow_context = sv_flow;
+    g_td5.reverse_direction = sv_rev; g_td5.mp_mode_config.mode = sv_mode;
+    s_trksel_auto_btn = sv_auto; s_trksel_geo_btn = sv_geo; s_trksel_dyn_btn = sv_dyn;
+    snprintf(note, cap, "%s", fail ? why
+             : "TB no TRAFFIC/POLICE, TT no LAPS/CP, cup no CP, MP drag MANUAL greyed, no gap on RANDOM (select track + quick race)");
+    return fail;
+}
+#endif

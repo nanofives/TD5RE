@@ -129,6 +129,12 @@ void frontend_mp_ai_players_reset(void);
  * `race_track` / `race_car` = what the race actually ran (both must be in the
  * pools). 0 = pass, 1 = fail; `note` gets the counts. */
 int  frontend_random_selftest(int race_track, int race_car, char *note, size_t cap);
+/* [round UE 2026-11-08] ue-hidden-rows: the rows Mariano asked hidden per mode
+ * (traffic battle TRAFFIC + POLICE, time trial LAPS + CHECKPOINT TIMERS, cup
+ * CHECKPOINT TIMERS), the greyed MP drag gearbox, and no gap in the SELECT TRACK /
+ * QUICK RACE selector column when DIRECTION hides (RANDOM). Restores every piece of
+ * frontend state it touches. 0 = pass, 1 = fail; `note` names the first failure. */
+int  frontend_ue_rows_selftest(char *note, size_t cap);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
