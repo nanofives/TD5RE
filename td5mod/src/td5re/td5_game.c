@@ -11959,6 +11959,16 @@ static void loadscreen_draw_frame_ex(int pct, int pump, int rt_warmup)
          * "how far along" signal, so the line carries only the phase name. */
         loadscreen_draw_text(bx0, by0 - sh * 0.014f, cap_px, s_ls_label, 0xFFF0F0F0u);
     }
+    {
+        /* [round UB 2026-11-08] A RANDOM car / track names what it rolled, above
+         * the phase line ("RANDOM: KESWICK, ENGLAND / HOT DOG"). Empty otherwise. */
+        const char *pick = td5_frontend_random_pick_label();
+        if (pick && pick[0]) {
+            float cap_px = sh * 0.026f;
+            if (cap_px < 13.0f) cap_px = 13.0f;
+            loadscreen_draw_text(bx0, by0 - sh * 0.050f, cap_px, pick, 0xFFFFCC33u);
+        }
+    }
 
     if (rt_warmup >= 2)
         td5_plat_rt_warmup_begin();

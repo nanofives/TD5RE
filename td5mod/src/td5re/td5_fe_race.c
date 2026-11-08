@@ -1198,8 +1198,14 @@ static void frontend_random_track_rows(int dir_btn, int laps_btn) {
  * of frontend_init_race_schedule; only a launch from a selection screen rolls
  * (Race Again and the next cup race launch from the results screen and keep the
  * pick). Logged so the race log names what RANDOM became. */
+static char s_random_pick_label[160];   /* the loading screen's "RANDOM: ..." line */
+
+const char *td5_frontend_random_pick_label(void) { return s_random_pick_label; }
+
 void frontend_resolve_random_picks(void) {
     const int scr = td5_frontend_get_screen();
+    int rolled_car = 0, rolled_track = 0;
+    s_random_pick_label[0] = '\0';   /* every launch: only a roll writes it */
     if (scr != TD5_SCREEN_QUICK_RACE && scr != TD5_SCREEN_CAR_SELECTION &&
         scr != TD5_SCREEN_TRACK_SELECTION && scr != TD5_SCREEN_RACE_OPTIONS)
         return;
@@ -1213,6 +1219,7 @@ void frontend_resolve_random_picks(void) {
             s_selected_car    = cand[rand() % n];
             s_selected_paint  = 0;
             s_selected_config = 0;
+            rolled_car = 1;
         }
         TD5_LOG_I(LOG_TAG, "RANDOM car -> %d %s (pool %d of %d..%d)", s_selected_car,
                   frontend_get_car_display_name(s_selected_car), n, lo, hi);
@@ -1225,11 +1232,21 @@ void frontend_resolve_random_picks(void) {
             /* RANDOM hides the Direction row, so the race runs forwards */
             s_track_direction = 0;
             g_td5.reverse_direction = 0;
+            rolled_track = 1;
         }
         TD5_LOG_I(LOG_TAG, "RANDOM track -> %d level=%d %s (pool %d)", s_selected_track,
                   td5_asset_level_number(s_selected_track),
                   frontend_get_track_name(s_selected_track), n);
     }
+    if (rolled_track && rolled_car)
+        snprintf(s_random_pick_label, sizeof s_random_pick_label, "%s %s / %s", TR("RANDOM:"),
+                 frontend_get_track_name(s_selected_track), frontend_get_car_display_name(s_selected_car));
+    else if (rolled_track)
+        snprintf(s_random_pick_label, sizeof s_random_pick_label, "%s %s", TR("RANDOM:"),
+                 frontend_get_track_name(s_selected_track));
+    else if (rolled_car)
+        snprintf(s_random_pick_label, sizeof s_random_pick_label, "%s %s", TR("RANDOM:"),
+                 frontend_get_car_display_name(s_selected_car));
 }
 
 /* [#2b 2026-06-16] TD6 high-score placeholder suppression. Default ON: a TD6
@@ -9666,6 +9683,12 @@ void Screen_TrackSelection(void) {
             }
         }
 #endif
+        /* [round UB 2026-11-08] Track the focus on idle frames too. It was only
+         * updated on input frames, so the FIRST arrow after the screen opened (focus
+         * already on TRACK, prev still -2) counted as a focus entry and was dropped:
+         * one LEFT from Moscow did nothing, the second reached RANDOM. A real focus
+         * move onto TRACK still arrives on an input frame and is still caught. */
+        if (!s_input_ready) s_trksel_prev_focus = s_selected_button;
         if (s_input_ready) {
             int delta = frontend_option_delta();
             int selected_button = (s_button_index >= 0) ? s_button_index : s_selected_button;

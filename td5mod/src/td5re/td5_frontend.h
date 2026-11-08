@@ -103,6 +103,11 @@ int  td5_frontend_get_player_laneassist(int player);
 void td5_frontend_render_ui_rects(void);
 void td5_frontend_flush_sprite_blits(void);
 
+/* [round UB 2026-11-08] What the last launch rolled for a RANDOM car / track
+ * ("RANDOM: <track> / <car>"), "" when the launch rolled nothing. The loading
+ * screen shows it. */
+const char *td5_frontend_random_pick_label(void);
+
 #ifndef TD5RE_RELEASE
 /* --- Self-test director queries (td5_selftest.c; dev builds only) --- */
 /* 1 once the current screen's slide-in animation has completed. */

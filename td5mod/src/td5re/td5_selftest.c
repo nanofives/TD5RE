@@ -3201,6 +3201,7 @@ static void st_tick_races(uint32_t now)
                         snprintf(un, sizeof un, "drag: difficulty tier %d (asked 2 after 0)", s_u_tier);
                         break;
                     }
+                    TD5_LOG_I(LOG_TAG, "%s: %s -> %s", sc->name, un, fail ? "FAIL" : "PASS");
                     if (fail) { status = ST_FAIL; snprintf(note, sizeof(note), "%s", un); }
                     else {
                         size_t nl = strlen(note);
