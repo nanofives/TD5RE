@@ -88,6 +88,15 @@ static float tx_w(const char *s, float px) { return td5_vui_text_width(s, px / 2
 
 static float pol_clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+#ifndef TD5RE_RELEASE
+static long s_dev_panel[3];   /* race panels / free-roam panels / HEAT-COPS lines drawn (td5_police_dev_panel_counts) */
+void td5_police_dev_panel_counts(long out[3]) { out[0] = s_dev_panel[0]; out[1] = s_dev_panel[1]; out[2] = s_dev_panel[2]; }
+void td5_police_dev_panel_reset(void) { s_dev_panel[0] = s_dev_panel[1] = s_dev_panel[2] = 0; }
+#define POL_DEV_PANEL(i) (s_dev_panel[i]++)
+#else
+#define POL_DEV_PANEL(i) ((void)0)
+#endif
+
 void td5_police_hud_draw(const TD5_PoliceHud *h, float x0, float y0, float W, float H)
 {
     const float S = H / 720.0f < 0.6f ? 0.6f : H / 720.0f;
@@ -105,12 +114,14 @@ void td5_police_hud_draw(const TD5_PoliceHud *h, float x0, float y0, float W, fl
         const float ey = (h->race ? 38.0f : 62.0f) * S;
         const int flash = ((tick / 8) & 1) != 0;
         qb_rect(bx, by, bw, (h->race ? 68.0f : 92.0f) * S, 0xA0000000);
+        POL_DEV_PANEL(h->race ? 0 : 1);
         tx(bx + 12.0f * S, by + 6.0f * S, "PURSUIT", flash ? 0xFFFF3B3B : 0xFF3B7BFF, 24.0f * S);
         if (!h->race) {
             for (i = 0; i < 5; i++)
                 qb_rect(bx + 140.0f * S + (float)i * 20.0f * S, by + 12.0f * S, 15.0f * S, 15.0f * S, i < h->heat ? 0xFFFF3B3B : 0xFF3A3F48);
             snprintf(line, sizeof line, "HEAT %d   COPS %d", h->heat, h->cops);
             tx(bx + 12.0f * S, by + 38.0f * S, line, 0xFFFFFFFF, 15.0f * S);
+            POL_DEV_PANEL(2);
         }
         tx(bx + 12.0f * S, by + ey, "EVADE", 0xFFC8D0DA, 13.0f * S);
         qb_rect(bx + 70.0f * S, by + ey + 4.0f * S, bw - 84.0f * S, 9.0f * S, 0xFF2A323D);

@@ -145,6 +145,7 @@ int  td5_roam_cops_dev_block(int i, double *cx, double *cz, double *tx, double *
 #define TD5_RCOPS_FULL   1
 #define TD5_RCOPS_SMOKE  2
 #define TD5_RCOPS_ROADBLOCK 3   /* [G1b] gap crossing, bust at a block, detour */
+#define TD5_RCOPS_JOIN   4      /* [round TB item 6] scenario A's pursuit, then 3 s: 3+ pursuers at once (t6-cops-join-roam) */
 void     td5_roam_cops_test_arm(int mode);
 void     td5_roam_cops_test_disarm(void);
 int      td5_roam_cops_test_mode(void);

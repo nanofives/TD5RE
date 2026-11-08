@@ -7302,11 +7302,16 @@ static void hud_minimap_disc(float cx, float cy, float r, uint32_t col)
 }
 
 static int s_cop_dot_log;   /* the minimap police-dot log line, one per 300 marks */
+static long s_cop_marks[3]; /* marks drawn: pursuing red phase / pursuing blue phase / patrol (td5_hud_police_marks) */
+
+void td5_hud_police_marks(long out[3]) { out[0] = s_cop_marks[0]; out[1] = s_cop_marks[1]; out[2] = s_cop_marks[2]; }
+void td5_hud_police_marks_reset(void) { s_cop_marks[0] = s_cop_marks[1] = s_cop_marks[2] = 0; }
 
 static void hud_minimap_police_dot(float cx, float cy, int pursuing)
 {
     const float r = s_minimap_dot_size * 0.6f;
     const int blink = (g_td5.simulation_tick_counter / 8) & 1;
+    s_cop_marks[pursuing ? (blink ? 0 : 1) : 2]++;
     hud_minimap_disc(cx, cy, r + s_minimap_dot_size * 0.21f, 0xFF0A0A0A);
     hud_minimap_disc(cx, cy, r, pursuing ? (blink ? 0xFFE23B3B : 0xFF2F6BFF) : 0xFF1F3A7A);
 }

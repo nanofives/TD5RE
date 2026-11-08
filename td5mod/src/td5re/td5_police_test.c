@@ -38,6 +38,7 @@
 #include "td5_input.h"
 #include "td5_ai.h"
 #include "td5_police.h"
+#include "td5_hud.h"            /* [round TB item 4] td5_hud_police_marks */
 #include "../../../re/include/td5_actor_struct.h"
 
 #define LOG_TAG "ai"
@@ -53,6 +54,7 @@ static struct {
     long   t0, phase_t0, t_pursuit, t_block, t_block_gone, t_escape, t_pursuit2, t_bust, t_release, t_go;
     int    cop_a, cop_b, plants;
     long   join_t0; int join_a, join_b, join_np, join_done;   /* [round TB item 6] TD5RE_POLICE_TEST_JOIN */
+    long   join_t3; int join_heat;                            /* ticks to the 3rd pursuer + 1 (0 = never), max heat */
     int    block_seen, block_span, block_ncar; double block_gap;
     double kmh_max, kmh_go, held_kmh_max;
     int    rear, shot_p, shot_blk, shot_esc, shot_bust;
@@ -102,6 +104,8 @@ void td5_police_test_arm(int mode)
     T.mode = mode;
     T.cop_a = T.cop_b = -1;
     td5_police_dev_slow_pursuers(0);
+    td5_hud_police_marks_reset();      /* [round TB] the t4 / t5 rows count from here */
+    td5_police_dev_panel_reset();
 }
 
 void td5_police_test_disarm(void)
@@ -191,7 +195,8 @@ void td5_police_test_tick(void)
         }
         break;
     case PT_WAIT_PURSUIT:
-        if (td5_police_dev_pursuit(0) && T.join_t0 == 0 && td5_env_int("TD5RE_POLICE_TEST_JOIN", 0, 0, 1)) {
+        if (td5_police_dev_pursuit(0) && T.join_t0 == 0 &&
+            (T.mode >= TD5_POLICE_TEST_TB_MINIMAP || td5_env_int("TD5RE_POLICE_TEST_JOIN", 0, 0, 1))) {
             /* [round TB item 6] DEV check, off by default: at heat 1 plant 2 idle cops 20 and 32 spans BEHIND the car (past
              * the 0..15-span "just passed" window, inside 200 m) and hold 4 s before the heat goes up. Before round TB such a
              * cop could only join from heat 2, up to 1 + heat pursuers; now each one joins on its first tick on the road. */
@@ -209,10 +214,14 @@ void td5_police_test_tick(void)
                           (tick - T.join_t0) / PT_HZ, td5_police_heat(0), T.join_a, T.join_a >= 0 ? td5_ai_cop_target(T.join_a) : -9,
                           T.join_b, T.join_b >= 0 ? td5_ai_cop_target(T.join_b) : -9);
                 T.join_np = np;
+                if (np >= 3 && T.join_t3 == 0) T.join_t3 = tick - T.join_t0 + 1;   /* +1: 0 = never */
             }
-            if (tick - T.join_t0 < 4 * 30 && td5_police_dev_pursuit(0)) break;
+            if (td5_police_heat(0) > T.join_heat) T.join_heat = td5_police_heat(0);
+            /* the TB rows hold 6 s so the HUD draws the pursuit panel + minimap marks over many frames */
+            if (tick - T.join_t0 < (T.mode >= TD5_POLICE_TEST_TB_MINIMAP ? 6 : 4) * 30 && td5_police_dev_pursuit(0)) break;
             T.join_done = 1;
             TD5_LOG_I(LOG_TAG, "[POLICETEST] join check done: max %d pursuer(s) within 4 s", T.join_np);
+            if (T.mode >= TD5_POLICE_TEST_TB_MINIMAP) { pt_phase(PT_DONE); T.done = 1; break; }
         }
         if (td5_police_dev_pursuit(0)) {
             T.t_pursuit = tick;
@@ -362,7 +371,51 @@ void td5_police_test_tick(void)
     T.bits = bits;
 }
 
+/* [round TB] the three short-drive verdicts (items 4, 5, 6) */
+static int pt_tb_verdict(char *note, size_t n)
+{
+    TD5_PoliceStats s;
+    long mk[3], pc[3];
+    int ok = 0;
+    const char *what = "";
+    char why[96] = "";
+    td5_police_stats(&s);
+    td5_hud_police_marks(mk);
+    td5_police_dev_panel_counts(pc);
+    if (!T.done || T.failed) snprintf(why, sizeof why, "drive %.80s", T.failed ? T.why : "not finished");
+    else if (T.mode == TD5_POLICE_TEST_TB_MINIMAP) {
+        /* item 4: the race minimap drew the chasing cops in both blink colours */
+        what = "minimap police marks";
+        ok = mk[0] > 0 && mk[1] > 0;
+        if (!ok) snprintf(why, sizeof why, "no %s phase drawn", mk[0] ? "blue" : "red");
+    } else if (T.mode == TD5_POLICE_TEST_TB_PANEL) {
+        /* item 5: the race pursuit panel was drawn, the HEAT / COPS line never */
+        what = "race pursuit panel";
+        ok = pc[0] > 0 && pc[2] == 0;
+        if (!ok) snprintf(why, sizeof why, pc[0] ? "HEAT / COPS line drawn" : "no race panel drawn");
+    } else {
+        /* item 6: 3 pursuers within 4 s at heat 1, the 2 cops behind (past the 0..15-span window) by the behind rule */
+        what = "cops join";
+        ok = T.join_t3 > 0 && T.join_t3 - 1 <= 4 * 30 && T.join_heat <= 1 && s.joins_behind >= 2;
+        if (!ok) snprintf(why, sizeof why, "3rd pursuer %s, heat %d, behind joins %ld", T.join_t3 ? "late" : "never", T.join_heat,
+                          s.joins_behind);
+    }
+    snprintf(note, n, "%s%s: marks red %ld blue %ld patrol %ld | race panels %ld roam %ld heat lines %ld | pursuers %d "
+             "(3rd at %s%.2f s, heat %d, behind joins %ld)%s%s", ok ? "" : "FAIL ", what, mk[0], mk[1], mk[2], pc[0], pc[1], pc[2],
+             T.join_np, T.join_t3 ? "+" : "never ", T.join_t3 ? (T.join_t3 - 1) / PT_HZ : 0.0, T.join_heat, s.joins_behind,
+             why[0] ? ": " : "", why);
+    TD5_LOG_I(LOG_TAG, "[POLICETEST] VERDICT %s: %s", ok ? "PASS" : "FAIL", note);
+    return ok ? 0 : 2;
+}
+
+static int pt_full_verdict(char *note, size_t n);
+
 int td5_police_test_verdict(char *note, size_t n)
+{
+    return T.mode >= TD5_POLICE_TEST_TB_MINIMAP ? pt_tb_verdict(note, n) : pt_full_verdict(note, n);
+}
+
+static int pt_full_verdict(char *note, size_t n)
 {
     TD5_PoliceStats s;
     char bad[160] = "";

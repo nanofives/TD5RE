@@ -126,6 +126,15 @@ void td5_police_dev_slow_pursuers(int level);     /* 1 = the pursuers keep 80 m 
 int  td5_police_dev_slow(void);
 #define TD5_POLICE_TEST_SMOKE 1
 #define TD5_POLICE_TEST_FULL  2
+/* [round TB] one short drive (pass a planted cop, 2 idle cops planted 20 / 32 spans behind at heat 1, 6 s held),
+ * three verdicts: item 4 minimap police marks, item 5 race pursuit panel without HEAT / COPS, item 6 3+ pursuers */
+#define TD5_POLICE_TEST_TB_MINIMAP 3
+#define TD5_POLICE_TEST_TB_PANEL   4
+#define TD5_POLICE_TEST_TB_JOIN    5
+/* [round TB item 5] pursuit panels drawn since the last reset: [0] race panels, [1] free-roam panels, [2] the
+ * "HEAT n COPS n" line drawn (any panel) */
+void     td5_police_dev_panel_counts(long out[3]);
+void     td5_police_dev_panel_reset(void);
 void     td5_police_test_arm(int mode);
 void     td5_police_test_disarm(void);
 int      td5_police_test_mode(void);

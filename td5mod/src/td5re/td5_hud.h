@@ -195,6 +195,10 @@ float td5_hud_utf8_line(float x, float baseline, float cap, const char *s, uint3
 /* [roam F5-A] untextured pre-transformed screen triangles in ONE draw (the route map / minimap batcher) */
 struct TD5_D3DVertex;
 void td5_hud_prim_tris(const struct TD5_D3DVertex *v, int nv, const uint16_t *idx, int ni);
+/* [round TB item 4] police marks the race minimap drew since the last reset: [0] pursuing, red phase, [1] pursuing,
+ * blue phase, [2] patrol / roadblock (dark blue). Read by the t4-minimap-cops self-test row. */
+void td5_hud_police_marks(long out[3]);
+void td5_hud_police_marks_reset(void);
 void td5_hud_draw_pause_overlay(void);
 /* [S27] Per-viewport "controller disconnected — reconnect" modal. No-op unless a
  * required player's controller is currently missing. */
