@@ -528,7 +528,11 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     if (s_steps < 0) {
         const char *e;
         s_steps = ((e = getenv("TD5RE_SHADOW_STEPS")) && e[0]) ? atoi(e)         : 24;
-        s_dist  = ((e = getenv("TD5RE_SHADOW_DIST"))  && e[0]) ? (float)atof(e)  : 2500.0f;
+        /* [round UG] 4500 (was 2500): a low sun throws a house / wall shadow
+         * further than 2500, and the march ended it on a hard arc. The shader
+         * packs its 24 steps toward the receiver, so near casters keep fine
+         * steps (ps_shadow.hlsl). */
+        s_dist  = ((e = getenv("TD5RE_SHADOW_DIST"))  && e[0]) ? (float)atof(e)  : 4500.0f;
         s_thick = ((e = getenv("TD5RE_SHADOW_THICK")) && e[0]) ? (float)atof(e)  : 600.0f;
         if (s_steps < 4)  s_steps = 4;
         if (s_steps > 64) s_steps = 64;

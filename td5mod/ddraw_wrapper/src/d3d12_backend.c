@@ -3605,8 +3605,10 @@ void Backend_ApplyShadowPass(const ShadowCB *cb)
     }
     c.params3[1] = gb ? 1.0f : 0.0f;
     if (s_shadow_mask_view) c.params3[0] = 5.0f;
+    Backend_RTStamp("pre.ssshadow");   /* [round UG] GPU cost (TD5RE_RT_TIMESTAMPS=2) */
     d3d12_fullscreen_pass(SH_BC(ps_shadow), SH_LEN(ps_shadow), s_shadow_mask_view ? BLEND_OPAQUE : BLEND_MULT,
                           &c, sizeof(ShadowCB), srvs, nsrv);
+    Backend_RTStamp("ss.shadow");
     if (gb && s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_RENDER_TARGET) {
         d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_RENDER_TARGET);
         s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_RENDER_TARGET;

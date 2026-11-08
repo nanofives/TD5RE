@@ -57,6 +57,7 @@
 #include "td5_i18n.h"   /* [I18N] catalog robustness check (st_i18n_verdict) */
 #include "td5_backend_capture.h"
 #include "td5_rt.h"   /* pin the harness to LOW (RT render-only; avoids 8x-FF TDR) */
+#include "td5_light2.h"   /* [round UG] ug-shadow-visible toggles the sun-shadow pass */
 #include "td5_chaos.h"   /* [CHAOS CO-OP] read-only rotation-step query + config reset */
 #include "td5_input.h"   /* [CHAOS CO-OP] packed-axis constants for the fold check */
 #include "td5_camera.h"  /* [CHAOS CO-OP] per-view solved camera pose (pane check) */
@@ -259,6 +260,11 @@ typedef struct {
      * skyline). FAIL when any of it is over the painted backdrop, when the track draws no sun, or when the sky
      * has no table entry. */
     int sun_check;
+    /* [round UG 2026-11-08] 1 = RT off, sun shadows on: during the countdown (static scene) capture the
+     * frame with the screen-space sun-shadow pass, without it, and the pass drawn as an opaque mask
+     * (black = shadowed, white = lit). PASS when a sane share of the receivers is shadowed AND those pixels
+     * really got darker than the lit ones (the pass used to be dispatched yet multiply by 1.0). */
+    int ug_check;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -697,6 +703,14 @@ static const RaceScenario k_races[] = {
     { .name="u7-sun-in-sky-maui",          .track=6,  .car=-1, .game_type=0, .player_is_ai=1,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN, .sun_check=1 },
+    /* [round UG 2026-11-08] RT-off sun shadows draw (Blue Ridge start: the car and the houses cast). FF 1 so the
+     * countdown lasts long enough for the three captures; the second row is a 2-pane split screen. */
+    { .name="ug-shadow-visible",           .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .ug_check=1 },
+    { .name="ug-shadow-visible-2p",        .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .ug_check=1 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -707,6 +721,14 @@ static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values 
 static int s_u_wanted;                   /* [round UE] wanted (cop chase) mode at the first tick */
 static int s_ue_shadow_cls = -99, s_ue_sky_cls;   /* [round UE] ue-shadow-sun capture */
 static float s_ue_shadow[3], s_ue_sky[3];
+
+/* [round UG] ug-shadow-visible: per-frame capture machine + verdict */
+static int   s_ug_frame, s_ug_done, s_ug_sun_saved;
+static int   s_ug_w, s_ug_h;
+static unsigned char *s_ug_on, *s_ug_off;   /* luminance, w*h */
+static char  s_ug_note[160];
+static int   s_ug_fail = -1;                 /* -1 = never judged */
+static void  st_ug_frame(void);
 
 static int  s_u7_res = -99;      /* [round UC] u7-sun-in-sky: td5_render_sky_sun_check result, -99 = not sampled */
 static char s_u7_note[96];
@@ -2356,6 +2378,7 @@ static void st_apply_scenario(const RaceScenario *sc)
     /* [round TA] t3-laps-* rows (st_reset_scenario_fields clears both knobs and restores ini.laps). */
     s_t3_max_lap = 0;
     s_u7_res = -99; s_u7_note[0] = 0;   /* [round UC] */
+    s_ug_frame = 0; s_ug_done = 0; s_ug_fail = -1; s_ug_note[0] = 0;   /* [round UG] */
     if (sc->laps_menu > 0) {
         char buf[64];
         if (sc->roam) {
@@ -3378,6 +3401,18 @@ static void st_tick_races(uint32_t now)
                                  sc->laps_menu, used, s_t3_max_lap);
                     }
                 }
+                /* [round UG] ug-shadow-visible*: the RT-off sun-shadow pass darkens real shadows. */
+                if (sc->ug_check && status < ST_FAIL) {
+                    size_t nl = strlen(note);
+                    if (s_ug_fail != 0) {
+                        status = ST_FAIL;
+                        int w = snprintf(note, sizeof(note), "ug: %.100s", s_ug_fail < 0 ? "never judged" : s_ug_note);
+                        (void)w;   /* return used: a long note is cut, never a warning */
+                    } else if (nl < sizeof(note) - 1) {
+                        int w = snprintf(note + nl, sizeof(note) - nl, " %.100s", s_ug_note);
+                        (void)w;
+                    }
+                }
                 /* [round UC] u7-sun-in-sky*: the sun disc at race start was over sky. */
                 if (sc->sun_check && status < ST_FAIL) {
                     size_t nl = strlen(note);
@@ -3464,6 +3499,7 @@ static void st_tick_races(uint32_t now)
 
     if (s_sub == SS_RACE_RUNNING) {
         int tick = g_td5.simulation_tick_counter;
+        if (sc->ug_check) st_ug_frame();   /* [round UG] per rendered frame, not per sim tick */
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
             st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
@@ -3548,6 +3584,80 @@ static void st_tick_races(uint32_t now)
             s_step_deadline_ms = now + 30000u;
             s_sub = SS_RACE_WAIT_MENU;
         }
+    }
+}
+
+/* [round UG] Luminance copy of the latest presented frame (Backend_GetCapture, BGRA). */
+static unsigned char *st_ug_grab(int *w, int *h)
+{
+    unsigned char *px = NULL, *lum;
+    int i, n;
+    if (!Backend_GetCapture(&px, w, h) || !px || *w <= 0 || *h <= 0) return NULL;
+    n = *w * *h;
+    lum = (unsigned char *)malloc((size_t)n);
+    if (!lum) return NULL;
+    for (i = 0; i < n; i++)
+        lum[i] = (unsigned char)(((int)px[i * 4 + 0] + px[i * 4 + 1] + px[i * 4 + 2]) / 3);
+    return lum;
+}
+
+/* [round UG] ug-shadow-visible: runs once per rendered race frame. The countdown holds the cars and the chase
+ * camera still, so three captures a few frames apart see the same scene: shadows ON, OFF, and the pass drawn
+ * as an opaque mask. The capture is read 6 frames after each switch (readback latency is 1-2 presents). */
+static void st_ug_frame(void)
+{
+    enum { UG_F0 = 30, UG_GAP = 6 };
+    const int f = s_ug_frame++;
+    if (s_ug_done) return;
+    if (f == UG_F0) {
+        td5_plat_capture_arm(1);
+        s_ug_sun_saved = td5_light2_sun_shadows();
+        td5_light2_set_sun_shadows(1);
+    } else if (f == UG_F0 + UG_GAP) {
+        s_ug_on = st_ug_grab(&s_ug_w, &s_ug_h);
+        td5_light2_set_sun_shadows(0);
+    } else if (f == UG_F0 + 2 * UG_GAP) {
+        int w = 0, h = 0;
+        s_ug_off = st_ug_grab(&w, &h);
+        if (w != s_ug_w || h != s_ug_h) { free(s_ug_off); s_ug_off = NULL; }
+        td5_light2_set_sun_shadows(1);
+        td5_plat_render_shadow_mask_view(1);
+    } else if (f == UG_F0 + 3 * UG_GAP) {
+        unsigned char *px = NULL;
+        int w = 0, h = 0;
+        long long nb = 0, nw = 0, nbl = 0;
+        double on_b = 0, off_b = 0, on_w = 0, off_w = 0;
+        const int got = Backend_GetCapture(&px, &w, &h);
+        td5_plat_render_shadow_mask_view(0);
+        td5_plat_capture_arm(-1);
+        td5_light2_set_sun_shadows(s_ug_sun_saved);
+        s_ug_done = 1;
+        s_ug_fail = 1;
+        if (!got || !px || !s_ug_on || !s_ug_off || w != s_ug_w || h != s_ug_h) {
+            snprintf(s_ug_note, sizeof s_ug_note, "capture missing (on=%d off=%d mask=%d %dx%d vs %dx%d)",
+                     s_ug_on != NULL, s_ug_off != NULL, got, w, h, s_ug_w, s_ug_h);
+        } else {
+            int i, n = w * h;
+            for (i = 0; i < n; i++) {
+                const int b = px[i * 4 + 0], g = px[i * 4 + 1], r = px[i * 4 + 2];
+                if (r < 24 && g < 24 && b < 24)          { nb++; on_b += s_ug_on[i]; off_b += s_ug_off[i]; }
+                else if (r > 232 && g > 232 && b > 232)  { nw++; on_w += s_ug_on[i]; off_w += s_ug_off[i]; }
+                else if (b > 200 && r < 40 && g < 40)    nbl++;
+            }
+            {
+                const double frac = (nb + nw) ? (double)nb / (double)(nb + nw) : 0.0;
+                const double rb = off_b > 0 ? on_b / off_b : 1.0;   /* shadowed pixels: on / off */
+                const double rw = off_w > 0 ? on_w / off_w : 1.0;   /* lit pixels: on / off */
+                const double mask_share = (double)(nb + nw + nbl) / (double)n;
+                s_ug_fail = !(mask_share >= 0.30 && frac >= 0.005 && frac <= 0.80 && rw >= 0.97 && rw - rb >= 0.10);
+                snprintf(s_ug_note, sizeof s_ug_note,
+                         "shadowed %.1f%%, luma on/off shadowed %.3f lit %.3f, mask %.0f%% %dx%d",
+                         frac * 100.0, rb, rw, mask_share * 100.0, w, h);
+            }
+        }
+        free(s_ug_on); s_ug_on = NULL;
+        free(s_ug_off); s_ug_off = NULL;
+        TD5_LOG_I(LOG_TAG, "ug-shadow-visible: %s -> %s", s_ug_note, s_ug_fail ? "FAIL" : "PASS");
     }
 }
 

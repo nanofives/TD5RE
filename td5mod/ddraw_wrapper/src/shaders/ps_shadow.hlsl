@@ -139,7 +139,11 @@ float4 main(PS_INPUT input) : SV_TARGET
     [loop]
     for (int k = 1; k <= steps; k++)
     {
-        float t = t0 + (maxDist - t0) * (((float)k - jit) / (float)steps);
+        /* [round UG] steps packed toward the receiver (u^1.6): small casters
+         * close by (car, bollards, rails) keep fine steps, tall far casters
+         * (houses, walls) are reached with coarse ones, so the range can be
+         * long enough for a low sun without more steps. */
+        float t = t0 + (maxDist - t0) * pow(((float)k - jit) / (float)steps, 1.6);
         float3 P = world + msun * t;
 
         /* World -> view (basis rows are orthonormal). */
@@ -179,8 +183,13 @@ float4 main(PS_INPUT input) : SV_TARGET
              * REAL geometry (matid > 0: roads, walls, cars) casts. */
             if (dbg == 2 || gbufTex.Load(int3(sp, 0)).a > 0.001)
             {
-                /* Distance-softened: far occluders cast lighter shadows. */
-                occ = 1.0 - 0.45 * (t / maxDist);
+                /* Distance-softened: far occluders cast lighter shadows.
+                 * [round UG] and fade to 0 at the end of the march, so
+                 * a long low-sun shadow (house, wall) ends in a gradient
+                 * instead of a hard arc where the rays stop reaching it
+                 * (last 30% of the range). */
+                float f = t / maxDist;
+                occ = (1.0 - 0.45 * f) * saturate((1.0 - f) / 0.3);
                 break;
             }
         }
