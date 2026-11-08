@@ -320,6 +320,9 @@ int      s_mp_joined_count = 0;     /* players who have joined the lobby */
 int      s_mp_join_device[TD5_MAX_HUMAN_PLAYERS]; /* device idx per joined player */
 int      s_mp_car_player    = 0;    /* which player is picking (sequential car select) */
 int      s_mp_player_car[TD5_MAX_HUMAN_PLAYERS];   /* per-player chosen car */
+/* [round UF 2026-11-08] 1 = this player's car-grid pane shows RANDOM (rolled at
+ * launch by frontend_resolve_random_picks; s_mp_player_car[p] then holds the roll). */
+int      s_mp_player_car_random[TD5_MAX_HUMAN_PLAYERS];
 int      s_mp_player_paint[TD5_MAX_HUMAN_PLAYERS]; /* per-player chosen paint */
 
 /* [PORT ENHANCEMENT 2026-06-07] SIMULTANEOUS grid car-select: every joined
@@ -439,6 +442,7 @@ int frontend_mp_add_ai_player(void) {
     snprintf(s_mp_player_name[slot], sizeof s_mp_player_name[slot], "%s", k_ai_player_names[idx]);
     s_mp_player_accent[slot] = (int)(k_mp_player_colors[slot % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu);
     s_mp_player_car[slot]    = s_selected_car;   /* placeholder; randomised at the car grid */
+    s_mp_player_car_random[slot] = 0;            /* [round UF] AI seats never show RANDOM */
     s_mp_player_paint[slot]  = 0;
     s_mp_player_color[slot]  = -1;
     s_mp_player_ready[slot]  = 0;

@@ -1079,6 +1079,23 @@ void frontend_car_ring_bounds(int *lo, int *hi) {
     else { *lo = s_car_roster_min; *hi = s_car_roster_max; }
 }
 
+/* The RANDOM ring walk shared by the single-player selectors and [round UF] the
+ * split-screen car grid panes: `first` / `last` are the ring's ends, `stepped`
+ * the plain cycler's answer for `cur`. LEFT from `first` (or RIGHT from `last`)
+ * lands on RANDOM, parked on `first`; leaving RANDOM goes to `first` (RIGHT) or
+ * `last` (LEFT). Returns the new car, *rnd updated. */
+static int frontend_car_ring_walk(int *rnd, int cur, int delta, int first, int last, int stepped) {
+    if (*rnd) {
+        *rnd = 0;
+        return (delta > 0) ? first : last;
+    }
+    if ((delta < 0 && cur == first) || (delta > 0 && cur == last)) {
+        *rnd = 1;
+        return first;   /* parked on the first entry while RANDOM shows */
+    }
+    return stepped;
+}
+
 /* One LEFT/RIGHT on a car selector with RANDOM in the ring. Without the offer it
  * is the plain cycler. */
 static void frontend_car_ring_step(int delta, int lo, int hi) {
@@ -1087,23 +1104,18 @@ static void frontend_car_ring_step(int delta, int lo, int hi) {
         s_selected_car = frontend_car_cycle_step(s_selected_car, delta, lo, hi);
         return;
     }
-    if (s_car_random) {
-        s_car_random = 0;
-        /* RIGHT: the first entry, LEFT: the last */
-        s_selected_car = (delta > 0) ? frontend_car_cycle_step(hi, +1, lo, hi)
-                                     : frontend_car_cycle_step(lo, -1, lo, hi);
-        return;
-    }
-    {
-        const int first = frontend_car_cycle_step(hi, +1, lo, hi);
-        const int last  = frontend_car_cycle_step(lo, -1, lo, hi);
-        if ((delta < 0 && s_selected_car == first) || (delta > 0 && s_selected_car == last)) {
-            s_car_random = 1;
-            s_selected_car = first;   /* parked on the first entry while RANDOM shows */
-            return;
-        }
-    }
-    s_selected_car = frontend_car_cycle_step(s_selected_car, delta, lo, hi);
+    s_selected_car = frontend_car_ring_walk(&s_car_random, s_selected_car, delta,
+                                            frontend_car_cycle_step(hi, +1, lo, hi),
+                                            frontend_car_cycle_step(lo, -1, lo, hi),
+                                            frontend_car_cycle_step(s_selected_car, delta, lo, hi));
+}
+
+/* [round UF 2026-11-08] RANDOM in the split-screen car grid: each human pane can
+ * go LEFT once from the first car to RANDOM. Local split screen only (a network
+ * peer would roll its own). Every MP mode, drag and cop chase included: the roll
+ * keeps to the pane's own roster (mp_simul_random_car). */
+int frontend_mp_car_random_offered(void) {
+    return !s_network_active;
 }
 
 /* One LEFT/RIGHT on a track selector with RANDOM in the ring. `cycle` is the
@@ -1260,14 +1272,25 @@ static char s_random_pick_label[160];   /* the loading screen's "RANDOM: ..." li
 
 const char *td5_frontend_random_pick_label(void) { return s_random_pick_label; }
 
+static int mp_simul_resolve_random_cars(char *label, size_t cap);   /* [round UF], below */
+
 void frontend_resolve_random_picks(void) {
     const int scr = td5_frontend_get_screen();
     int rolled_car = 0, rolled_track = 0;
     s_random_pick_label[0] = '\0';   /* every launch: only a roll writes it */
+    /* [round UF] CUP_TRACK_SELECT added: a cup with the track picker on launches
+     * race 1 from there (SP and MP), and its car RANDOM must roll too. The track
+     * roll stays off there (frontend_track_random_offered). */
     if (scr != TD5_SCREEN_QUICK_RACE && scr != TD5_SCREEN_CAR_SELECTION &&
-        scr != TD5_SCREEN_TRACK_SELECTION && scr != TD5_SCREEN_RACE_OPTIONS)
+        scr != TD5_SCREEN_TRACK_SELECTION && scr != TD5_SCREEN_RACE_OPTIONS &&
+        scr != TD5_SCREEN_CUP_TRACK_SELECT)
         return;
-    if (s_mp_flow) return;   /* the MP car grid picks per player, never through these flags */
+    if (s_mp_flow) {
+        /* [round UF] the MP car grid keeps one RANDOM flag per pane: each RANDOM
+         * player rolls on its own (s_car_random / s_track_random are not used) */
+        mp_simul_resolve_random_cars(s_random_pick_label, sizeof s_random_pick_label);
+        return;
+    }
     if (s_car_random && frontend_car_random_offered()) {
         int lo, hi, n, cand[TD5_CAR_SLOT_MAX];
         if (scr == TD5_SCREEN_QUICK_RACE) { lo = 0; hi = TD5_CAR_COUNT - 1; }
@@ -2434,6 +2457,167 @@ static void mp_simul_set_pane_roster(int p) {
     }
 }
 
+/* ---- [round UF 2026-11-08] RANDOM per pane in the split-screen car grid ----
+ * The pane's ring is the one its CAR row cycles: the pane's role roster in a cop
+ * chase, the shared [s_car_roster_min, s_car_roster_max] otherwise. */
+static int mp_simul_pane_step(int p, int cur, int delta) {
+    return s_mp_simul_copchase ? mp_simul_carsel_step(p, cur, delta)
+                               : frontend_car_cycle_step(cur, delta, s_car_roster_min, s_car_roster_max);
+}
+
+static void mp_simul_pane_ends(int p, int *first, int *last) {
+    const int lo = s_mp_simul_copchase ? s_mp_player_roster_min[p] : s_car_roster_min;
+    const int hi = s_mp_simul_copchase ? s_mp_player_roster_max[p] : s_car_roster_max;
+    *first = mp_simul_pane_step(p, hi, +1);
+    *last  = mp_simul_pane_step(p, lo, -1);
+}
+
+/* Pane p's RANDOM pool: every car the pane's CAR row reaches. UB's car pool
+ * (every reachable, unlocked car of the roster) outside a cop chase; in a cop
+ * chase the pane's role roster (a cop pane's police cars are not in UB's pool,
+ * which skips police). */
+static int mp_simul_random_car_pool(int p, int *cand, int cap) {
+    int k = 0;
+    if (!s_mp_simul_copchase)
+        return frontend_random_car_pool(s_car_roster_min, s_car_roster_max, cand, cap);
+    for (int c = s_mp_player_roster_min[p]; c <= s_mp_player_roster_max[p] && k < cap; c++)
+        if (mp_simul_carsel_valid(p, c)) cand[k++] = c;
+    return k;
+}
+
+/* Roll every human pane that shows RANDOM, each on its own draw of UB's roll
+ * generator; AI seats keep the car the grid dealt them. Writes the loading
+ * screen's "RANDOM: P1 ... / P3 ..." line. Returns the number of panes rolled. */
+static int mp_simul_resolve_random_cars(char *label, size_t cap) {
+    int p, n = s_num_human_players, rolled = 0;
+    size_t len = 0;
+    if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
+    if (!frontend_mp_car_random_offered()) return 0;
+    for (p = 0; p < n; p++) {
+        int cand[TD5_CAR_SLOT_MAX], k;
+        if (!s_mp_player_car_random[p] || s_mp_slot_is_ai[p]) continue;
+        k = mp_simul_random_car_pool(p, cand, (int)(sizeof cand / sizeof cand[0]));
+        if (k <= 0) continue;
+        s_mp_player_car[p]   = cand[frontend_random_roll((uint32_t)k)];
+        s_mp_player_paint[p] = 0;
+        mp_apply_profile_car_color(p);   /* the new car takes the profile colour */
+        if (p == 0) { s_selected_car = s_mp_player_car[0]; s_selected_paint = 0; }
+        TD5_LOG_I(LOG_TAG, "RANDOM car (MP pane %d) -> %d %s (pool %d)", p, s_mp_player_car[p],
+                  frontend_get_car_display_name(s_mp_player_car[p]), k);
+        if (label && len < cap) {
+            int w = snprintf(label + len, cap - len, "%s P%d %s", rolled ? " /" : TR("RANDOM:"),
+                             p + 1, frontend_get_car_display_name(s_mp_player_car[p]));
+            if (w > 0) len += (size_t)w;
+        }
+        rolled++;
+    }
+    return rolled;
+}
+
+#ifndef TD5RE_RELEASE
+static int mp_uf_in_pool(int p, int car) {
+    int cand[TD5_CAR_SLOT_MAX];
+    int k = mp_simul_random_car_pool(p, cand, (int)(sizeof cand / sizeof cand[0]));
+    for (int i = 0; i < k; i++) if (cand[i] == car) return 1;
+    return 0;
+}
+
+/* [round UF 2026-11-08] uf-mp-random: the split-screen car grid's RANDOM, through
+ * the real launch entry (frontend_resolve_random_picks from SELECT TRACK, MP flow).
+ * 4 seats: P1, P2 on RANDOM, P3 on a fixed car, P4 an AI seat flagged RANDOM (must
+ * keep its car). 16 launches: every roll in the pane's pool, P3 / P4 untouched, P1
+ * and P2 roll independently (they differ on most launches, each sees several cars),
+ * the loading line names P1 and P2 only. The pane ring: LEFT from the first car
+ * lands on RANDOM, RIGHT from RANDOM returns to it, LEFT from RANDOM reaches the
+ * last. Cop chase: a cop pane rolls police cars only, a suspect pane never does.
+ * Restores every piece of frontend state it touches. 0 = pass, 1 = fail. */
+int frontend_uf_mp_random_selftest(char *note, size_t cap) {
+    enum { NP = 4 };
+    int sv_car[NP], sv_paint[NP], sv_rnd[NP], sv_ai[NP], sv_col[NP], sv_cidx[NP];
+    int sv_rmin[NP], sv_rmax[NP], sv_rcop[NP];
+    const int sv_flow = s_mp_flow, sv_n = s_num_human_players, sv_cop = s_mp_simul_copchase;
+    const int sv_sel = s_selected_car, sv_selp = s_selected_paint;
+    const int sv_lo = s_car_roster_min, sv_hi = s_car_roster_max;
+    const TD5_ScreenIndex sv_scr = s_current_screen;
+    int p, i, fail = 0, differ = 0, bad_pool = 0, moved = 0, label_bad = 0;
+    int seen0[TD5_CAR_SLOT_MAX] = {0}, seen1[TD5_CAR_SLOT_MAX] = {0}, d0 = 0, d1 = 0;
+    int ring_ok, first, last, car, rnd, cop_bad = 0, sus_bad = 0;
+    for (p = 0; p < NP; p++) {
+        sv_car[p] = s_mp_player_car[p]; sv_paint[p] = s_mp_player_paint[p];
+        sv_rnd[p] = s_mp_player_car_random[p]; sv_ai[p] = s_mp_slot_is_ai[p];
+        sv_col[p] = s_mp_player_color[p]; sv_cidx[p] = s_mp_player_color_idx[p];
+        sv_rmin[p] = s_mp_player_roster_min[p]; sv_rmax[p] = s_mp_player_roster_max[p];
+        sv_rcop[p] = s_mp_player_roster_cop[p];
+    }
+    s_mp_flow = 1; s_num_human_players = NP; s_mp_simul_copchase = 0;
+    s_car_roster_min = 0; s_car_roster_max = TD5_CAR_COUNT - 1;
+    s_current_screen = TD5_SCREEN_TRACK_SELECTION;
+
+    /* the pane ring */
+    mp_simul_pane_ends(0, &first, &last);
+    rnd = 0;
+    car = frontend_car_ring_walk(&rnd, first, -1, first, last, mp_simul_pane_step(0, first, -1));
+    ring_ok = (rnd == 1 && car == first);
+    car = frontend_car_ring_walk(&rnd, car, +1, first, last, mp_simul_pane_step(0, car, +1));
+    ring_ok = ring_ok && (rnd == 0 && car == first);
+    rnd = 1;
+    car = frontend_car_ring_walk(&rnd, first, -1, first, last, mp_simul_pane_step(0, first, -1));
+    ring_ok = ring_ok && (rnd == 0 && car == last && last != first);
+
+    /* 16 launches */
+    for (i = 0; i < 16; i++) {
+        for (p = 0; p < NP; p++) s_mp_slot_is_ai[p] = (p == 3);
+        s_mp_player_car_random[0] = 1; s_mp_player_car_random[1] = 1;
+        s_mp_player_car_random[2] = 0; s_mp_player_car_random[3] = 1;
+        s_mp_player_car[2] = 5; s_mp_player_car[3] = 7;
+        frontend_resolve_random_picks();
+        if (!mp_uf_in_pool(0, s_mp_player_car[0]) || !mp_uf_in_pool(1, s_mp_player_car[1])) bad_pool++;
+        if (s_mp_player_car[2] != 5 || s_mp_player_car[3] != 7) moved++;
+        if (s_mp_player_car[0] != s_mp_player_car[1]) differ++;
+        if (s_mp_player_car[0] >= 0 && s_mp_player_car[0] < TD5_CAR_SLOT_MAX && !seen0[s_mp_player_car[0]]++) d0++;
+        if (s_mp_player_car[1] >= 0 && s_mp_player_car[1] < TD5_CAR_SLOT_MAX && !seen1[s_mp_player_car[1]]++) d1++;
+        {
+            const char *l = td5_frontend_random_pick_label();
+            if (!strstr(l, "P1 ") || !strstr(l, "P2 ") || strstr(l, "P3 ") || strstr(l, "P4 ")) label_bad++;
+        }
+        if (s_selected_car != s_mp_player_car[0]) bad_pool++;   /* slot 0 = player 1's roll */
+    }
+
+    /* cop chase: P1 a cop pane, P2 a suspect pane */
+    s_mp_simul_copchase = 1;
+    s_mp_player_roster_cop[0] = 1; s_mp_player_roster_min[0] = 33; s_mp_player_roster_max[0] = TD6_COP_LAST;
+    s_mp_player_roster_cop[1] = 0; s_mp_player_roster_min[1] = 0;  s_mp_player_roster_max[1] = td5_car_total_count() - 1;
+    for (i = 0; i < 8; i++) {
+        for (p = 0; p < NP; p++) s_mp_slot_is_ai[p] = (p >= 2);
+        s_mp_player_car_random[0] = 1; s_mp_player_car_random[1] = 1;
+        frontend_resolve_random_picks();
+        if (!frontend_car_is_cop(s_mp_player_car[0])) cop_bad++;
+        if (frontend_car_is_cop(s_mp_player_car[1])) sus_bad++;
+    }
+
+    for (p = 0; p < NP; p++) {
+        s_mp_player_car[p] = sv_car[p]; s_mp_player_paint[p] = sv_paint[p];
+        s_mp_player_car_random[p] = sv_rnd[p]; s_mp_slot_is_ai[p] = sv_ai[p];
+        s_mp_player_color[p] = sv_col[p]; s_mp_player_color_idx[p] = sv_cidx[p];
+        s_mp_player_roster_min[p] = sv_rmin[p]; s_mp_player_roster_max[p] = sv_rmax[p];
+        s_mp_player_roster_cop[p] = sv_rcop[p];
+    }
+    s_mp_flow = sv_flow; s_num_human_players = sv_n; s_mp_simul_copchase = sv_cop;
+    s_selected_car = sv_sel; s_selected_paint = sv_selp;
+    s_car_roster_min = sv_lo; s_car_roster_max = sv_hi;
+    s_current_screen = sv_scr;
+    s_random_pick_label[0] = '\0';
+
+    fail = !(ring_ok && bad_pool == 0 && moved == 0 && label_bad == 0 && differ >= 13 &&
+             d0 >= 4 && d1 >= 4 && cop_bad == 0 && sus_bad == 0);
+    /* compact: the report keeps ~120 chars of the note */
+    snprintf(note, cap, "ring %s; 16 rolls P1!=P2 %d, cars P1 %d P2 %d, bad pool %d moved %d label %d; "
+             "cop non-police %d, suspect police %d", ring_ok ? "ok" : "BAD", differ, d0, d1, bad_pool, moved,
+             label_bad, cop_bad, sus_bad);
+    return fail;
+}
+#endif
+
 static int mp_int_in(const int *set, int ns, int v) {
     int i;
     for (i = 0; i < ns; i++) if (set[i] == v) return 1;
@@ -2499,6 +2683,7 @@ static void mp_simul_host_apply(int opt, int n) {
          * intentionally gives every player the host's identical car). */
         if (opt != MP_HOST_OPT_SAME && nused < (int)(sizeof(used) / sizeof(used[0])))
             used[nused++] = car;
+        s_mp_player_car_random[p] = 0;   /* [round UF] the host dealt a real car */
         if (s_mp_player_car[p] != car) {
             s_mp_player_car[p]   = car;
             s_mp_player_paint[p] = 0;     /* reset paint on car change (matches manual cycle) */
@@ -2663,6 +2848,7 @@ static void frontend_mp_simul_carsel_init(void) {
             int car  = lo + (int)((unsigned)rand() % (unsigned)span);
             if (!mp_simul_carsel_valid(p, car)) car = mp_simul_carsel_step(p, car, +1);
             s_mp_player_car[p]       = car;
+            s_mp_player_car_random[p] = 0;    /* [round UF] AI seats unchanged */
             s_mp_player_color_idx[p] = (int)((unsigned)rand() % (unsigned)TD6_PALETTE_N);
             s_mp_player_color[p]     = (int)s_td6_palette[s_mp_player_color_idx[p]];
             s_mp_player_paint[p]     = 0;
@@ -2692,6 +2878,7 @@ static void frontend_mp_simul_carsel_init(void) {
             car = mp_simul_carsel_step(p, car, 1);
         s_mp_player_car[p]       = car;
         s_mp_player_ready[p]     = 0;
+        if (!frontend_mp_car_random_offered()) s_mp_player_car_random[p] = 0;   /* [round UF] */
         if (has_session) {
             int k;
             s_mp_player_color_idx[p] = p % TD6_PALETTE_N;      /* fallback cursor */
@@ -2716,6 +2903,18 @@ static void frontend_mp_simul_carsel_init(void) {
         mp_apply_profile_car_color(p);  /* [PROFILE CAR COLOUR] default paintable car to profile accent */
         mp_simul_refresh_pane(p);
     }
+#ifndef TD5RE_RELEASE
+    /* [round UF 2026-11-08] Dev harness: TD5RE_MP_SIMUL_PREVIEW_RANDOM=<decimal mask> puts the
+     * panes of the set bits on RANDOM so the grid's "?" panes can be framedumped with
+     * the TD5RE_MP_SIMUL_PREVIEW grid (its AI seats then draw like a player who picked
+     * RANDOM and pressed OK). Display only: the launch roll still skips AI seats. */
+    {
+        const int mask = td5_env_int("TD5RE_MP_SIMUL_PREVIEW_RANDOM", 0, 0, 0x1FF);
+        for (p = 0; p < n; p++)
+            if (mask & (1 << p)) s_mp_player_car_random[p] = 1;
+        if (mask) TD5_LOG_I(LOG_TAG, "MP simul PREVIEW: RANDOM panes mask 0x%X", mask);
+    }
+#endif
     s_mp_simul_ready_ms = 0;
     s_mp_simul_anim_ms  = td5_plat_time_ms();   /* start the lobby->grid slide-in */
     s_anim_complete = 1;
@@ -2874,6 +3073,9 @@ static void frontend_mp_simul_carsel_update(void) {
         car = s_mp_player_car[p];
         if (edge & 4) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + MP_BTN_COUNT - 1) % MP_BTN_COUNT; frontend_play_sfx(2); }
         if (edge & 8) { s_mp_pane_btn[p] = (s_mp_pane_btn[p] + 1) % MP_BTN_COUNT;                 frontend_play_sfx(2); }
+        /* [round UF] RANDOM greys PAINT (no car to paint yet): the cursor steps over it */
+        if (s_mp_player_car_random[p] && s_mp_pane_btn[p] == MP_BTN_PAINT)
+            s_mp_pane_btn[p] = (edge & 4) ? MP_BTN_CAR : MP_BTN_OK;
         {
             int act = (edge & 0x10) != 0;
             /* [#7 2026-06-15 MP hold-to-change] CAR/PAINT ◄► auto-repeat: first fire
@@ -2900,10 +3102,17 @@ static void frontend_mp_simul_carsel_update(void) {
                     /* Cop-chase grids cycle inside the pane's role roster (cop ->
                      * police, suspect -> civilian); every other mode keeps the full
                      * shared roster cycle (unchanged). */
-                    car = s_mp_simul_copchase
-                        ? mp_simul_carsel_step(p, car, right ? +1 : -1)
-                        : frontend_car_cycle_step(car, right ? +1 : -1,
-                                                  s_car_roster_min, s_car_roster_max);
+                    const int d = right ? +1 : -1;
+                    if (frontend_mp_car_random_offered()) {
+                        /* [round UF] RANDOM sits LEFT of the pane's first car */
+                        int first, last;
+                        mp_simul_pane_ends(p, &first, &last);
+                        car = frontend_car_ring_walk(&s_mp_player_car_random[p], car, d, first, last,
+                                                     mp_simul_pane_step(p, car, d));
+                    } else {
+                        s_mp_player_car_random[p] = 0;
+                        car = mp_simul_pane_step(p, car, d);
+                    }
                     s_mp_player_car[p]   = car;
                     s_mp_player_paint[p] = 0;   /* reset paint on car change (matches single-player) */
                     mp_apply_profile_car_color(p);/* re-default the new car to the profile colour */
@@ -2912,7 +3121,8 @@ static void frontend_mp_simul_carsel_update(void) {
                 }
                 break;
             case MP_BTN_PAINT:
-                if (left || right) mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
+                if ((left || right) && !s_mp_player_car_random[p])   /* [round UF] greyed on RANDOM */
+                    mp_simul_cycle_paint(p, right ? +1 : -1, lr_edge);
                 break;
             case MP_BTN_OK:
                 if (act) { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }
@@ -4071,6 +4281,8 @@ void frontend_mp_flow_reset(void) {
      * colour yet, so every paintable car re-defaults to its player's profile
      * accent until they cycle PAINT. (Persists across a BACK within a flow.) */
     for (int rp = 0; rp < TD5_MAX_HUMAN_PLAYERS; rp++) s_mp_car_color_user_set[rp] = 0;
+    /* [round UF] a fresh flow starts every pane on a real car, not RANDOM */
+    for (int rp = 0; rp < TD5_MAX_HUMAN_PLAYERS; rp++) s_mp_player_car_random[rp] = 0;
 }
 
 /* [#8] Decide what happens after name/colour setup completes: show the position

@@ -380,6 +380,12 @@ button that exists only while that entry is the pick:
 * **[Round UE] MP drag car select** draws a grey MANUAL row between PAINT and OK in every pane layout
   (`mp_carsel_drag_gear_row`, display only, not in the pane nav ring). Preview it with
   `TD5RE_MP_SIMUL_PREVIEW=N TD5RE_MP_MODE_FORCE=4 --StartScreen=20`.
+* **[Round UF] MP car grid RANDOM** per pane: `s_mp_player_car_random[p]` (td5_frontend.c), the ring
+  walk is UB's `frontend_car_ring_walk` (shared with the single-player selectors), the roll is
+  `mp_simul_resolve_random_cars` inside UB's `frontend_resolve_random_picks` (same roll generator, pool
+  = what the pane's CAR row reaches). AI seats never roll. Preview: `TD5RE_MP_SIMUL_PREVIEW_RANDOM=<decimal
+  mask>` with the preview grid. On drag the button zone grows by one row for the grey MANUAL row
+  (short narrow pane) instead of squeezing four rows into three rows' height.
 * **`FE_MAX_BUTTONS` is 18, not 16.** Quick Race already creates 16 buttons; the
   STUDIO chip was created as button 17 and silently refused (`-1`) until round
   1026. If you add a button past the last index of a screen, check the return value.

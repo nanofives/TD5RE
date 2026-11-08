@@ -1139,7 +1139,10 @@ void mp_simul_draw_btn(float x, float y, float w, float h, const char *label,
     float l_right;
     if (swatch_rgb >= 0)   l_right = (redge - 17.0f) * sx;
     else if (val)          l_right = redge * sx - val_w - 4.0f * sx;
-    else                   l_right = (arrows ? (x + w - 18.0f) : (x + w - 4.0f)) * sx;
+    /* [round UF 2026-11-08] plain rows keep 6px clear of the rim (was 4): in the
+     * narrow 6-player column "MANUAL" filled the button and touched its frame. Only
+     * a label wider than the button shrinks; a narrower one stays centred as before. */
+    else                   l_right = (arrows ? (x + w - 18.0f) : (x + w - 6.0f)) * sx;
     /* [MP PROFILE SELECTION centring 2026-07-04] Mirror the right-side reserve
      * (value readout, colour swatch, or arrow gutter) onto the LEFT so the label
      * is centred on the BUTTON centre — matching the plain PROFILE/AUTOMATIC/
@@ -1309,6 +1312,15 @@ static int mp_carsel_two_col(float pane_w, float pane_h) {
 /* Draw player p's car preview (+ TD6 body-paint overlay) fitted into the rect,
  * keeping the 408:280 car-pic aspect and centred both ways. Shared by the single-
  * and two-column card layouts. */
+/* [round UF 2026-11-08] The car a pane's stat bars describe: none (-1, empty
+ * tracks) while the pane shows RANDOM, as single player hides them. */
+static int mp_pane_stat_car(int p) {
+    return s_mp_player_car_random[p] ? -1 : s_mp_pane_spec_car[p];
+}
+static const char *mp_pane_stat_field(int p, int field) {
+    return s_mp_player_car_random[p] ? "" : s_mp_pane_spec[p][field];
+}
+
 static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah,
                                    float sx, float sy) {
     int car = s_mp_player_car[p];
@@ -1317,6 +1329,11 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
     if (dh > ah) { dh = ah; dw = ah * ar; }
     dx = ax + (aw - dw) * 0.5f;
     dy = ay + (ah - dh) * 0.5f;
+    if (s_mp_player_car_random[p]) {
+        /* [round UF 2026-11-08] RANDOM: UB's "?" card where the car picture goes */
+        frontend_draw_random_card(dx, dy, dw, dh, sx, sy);
+        return;
+    }
     if (s_mp_pane_preview[p] > 0)
         fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
     /* [MP DOUBLE BODY 2026-10-01] Must go through frontend_draw_paint_overlay_rect,
@@ -1368,6 +1385,11 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
         mp_simul_draw_btn(bx, by, bw, bh, TR("CAR"), focus, pcol, 1, NULL, -1, sx, sy);
         break;
     case MP_BTN_PAINT:
+        if (s_mp_player_car_random[p]) {   /* [round UF] RANDOM: no car to paint yet */
+            s_mp_btn_draw_disabled = 1;
+            mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), 0, pcol, 0, NULL, -1, sx, sy);
+            break;
+        }
         /* Colour swatch for any car with the free picker (ported TD6, or an
          * original car with a paint bake); ◄► arrows for the four fixed schemes;
          * "-" when the car has no paint choice at all. */
@@ -1507,7 +1529,8 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
         mp_draw_pane_name_banner(p, px, pyr, pane_w, cx, sx, sy);
 
         /* Car NAME above the image (request). */
-        snprintf(buf, sizeof buf, "%s", frontend_get_car_display_name(car));
+        snprintf(buf, sizeof buf, "%s", s_mp_player_car_random[p] ? TR("RANDOM")
+                                                                 : frontend_get_car_display_name(car));
         mp_simul_small_centered_fit(cx * sx, (pyr + 21) * sy, buf, 0xFFFFFFFFu, sx, sy, (pane_w - 10.0f) * sx);
 
         /* READY panes: chosen car centred with a READY badge, no menu. */
@@ -1569,8 +1592,8 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
             mp_simul_draw_pane_car(p, lx, col_top, lcw, car_h, sx, sy);
             if (bars_h > 8.0f)
                 frontend_draw_car_stat_bars(lx, bars_y, lcw, bars_h,
-                                            s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                            s_mp_pane_spec_car[p], pcol, 1, 0.0f, sx, sy);
+                                            mp_pane_stat_field(p, 7), mp_pane_stat_field(p, 8),
+                                            mp_pane_stat_car(p), pcol, 1, 0.0f, sx, sy);
             /* RIGHT: the 5 buttons spread evenly down the WHOLE column (one row each
              * = col_h / MP_BTN_COUNT) so they always fill the height instead of
              * clumping at a fixed size — capped so they don't get comically tall in
@@ -1623,6 +1646,11 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
              * ~30px, giving a much BIGGER car with tighter buttons + stats (their text
              * auto-shrinks to the row height, so smaller stays legible, never overlaps). */
             zone_h = content_h * 0.35f;
+            /* [round UF 2026-11-08] MP drag's greyed MANUAL row is a 4th button row.
+             * Squeezed into the 3-row zone it left ~11px rows (labels shrunk to
+             * nothing, the 6-player frame of round UE): grow the zone by one row of
+             * the normal height instead, taken from the car. */
+            zone_h *= (float)(MP_BTN_COUNT + mp_carsel_drag_gear_row()) / (float)MP_BTN_COUNT;
             if (zone_h < 28.0f) zone_h = 28.0f;
             car_h  = content_h - zone_h - GAP;
             if (car_h > car_natural) {                    /* car would letterbox: cap, grow zone */
@@ -1675,8 +1703,8 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
                 }
             }
             frontend_draw_car_stat_bars(rx, zone_y, rcw, zone_h,
-                                        s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                        s_mp_pane_spec_car[p], pcol, 2, frame_scale, sx, sy);
+                                        mp_pane_stat_field(p, 7), mp_pane_stat_field(p, 8),
+                                        mp_pane_stat_car(p), pcol, 2, frame_scale, sx, sy);
         } else {
             /* TALL single-column stack: the 3p LEFT/RIGHT narrow pane (172x381) AND the
              * 2-player big-car pane (258x381, which bypasses the two-column card). Both
@@ -1694,7 +1722,9 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
              * [round UE] MP drag adds the greyed MANUAL row: 4 buttons. */
             const float NB = 3.0f + (float)mp_carsel_drag_gear_row();
             float avail  = (bottom - top0) - (CAR_GAP + (NB + 1.0f) * ROW_GAP);
-            const float PANEL_WANT = 31.0f, PANEL_FLOOR = 12.0f;
+            /* [round UF 2026-11-08] the 2-player big-car pane has room to spare (the car
+             * takes the slack): 31px squashed SPEED / ACCEL / HANDLING into touching rows. */
+            const float PANEL_WANT = big_car ? 40.0f : 31.0f, PANEL_FLOOR = 12.0f;
             const float BTN_MIN = 11.0f, CAR_MIN = 16.0f;
             float car_h  = pane_h * (big_car ? 0.44f : 0.32f);
             float bh     = btn_cap;
@@ -1715,8 +1745,8 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
             mp_simul_draw_pane_button(p, MP_BTN_CAR,   bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             mp_simul_draw_pane_button(p, MP_BTN_PAINT, bx, yy, bw, bh, sx, sy); yy += bh + ROW_GAP;
             frontend_draw_car_stat_bars(bx, yy, bw, panel_h,
-                                        s_mp_pane_spec[p][7], s_mp_pane_spec[p][8],
-                                        s_mp_pane_spec_car[p], pcol, 1, frame_scale, sx, sy);
+                                        mp_pane_stat_field(p, 7), mp_pane_stat_field(p, 8),
+                                        mp_pane_stat_car(p), pcol, 1, frame_scale, sx, sy);
             yy += panel_h + ROW_GAP;
             if (mp_carsel_drag_gear_row()) {   /* [round UE] MP drag: greyed MANUAL */
                 mp_simul_draw_drag_gear_row(p, bx, yy, bw, bh, sx, sy);

@@ -922,6 +922,15 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float start_off, float pane_w, float pane_h,
                                   float cone_scale);
 
+#ifndef TD5RE_RELEASE
+/* [round UG] dev hooks for the ug-shadow-visible selftest row: draw the
+ * screen-space sun-shadow pass as an opaque mask (black = shadowed, white =
+ * lit, blue = faces away from the sun) and arm the per-present backbuffer
+ * capture read by Backend_GetCapture (1 on, -1 back to the env knobs). */
+void td5_plat_render_shadow_mask_view(int on);
+void td5_plat_capture_arm(int on);
+#endif
+
 /* [RT2 P4] Sky-visibility GI pass for the CURRENT viewport (HIGH-only). */
 void td5_plat_render_apply_gi(const float cam_pos[3], const float basis9[9],
                               float focal, float center_x, float center_y,

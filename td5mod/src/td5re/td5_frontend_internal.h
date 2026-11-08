@@ -385,6 +385,7 @@ extern int      s_mp_flow;
 extern int      s_mp_join_device[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_joined_count;
 extern int      s_mp_player_car[TD5_MAX_HUMAN_PLAYERS];
+extern int      s_mp_player_car_random[TD5_MAX_HUMAN_PLAYERS]; /* [round UF] pane shows RANDOM */
 extern int      s_mp_player_color[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_paint[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_ready[TD5_MAX_HUMAN_PLAYERS];
@@ -1226,6 +1227,7 @@ int   frontend_random_track_pool(int *cand, int cap);
 void  frontend_car_ring_bounds(int *lo, int *hi);
 void  frontend_resolve_random_picks(void);
 void  frontend_draw_random_card(float x, float y, float w, float h, float sx, float sy);
+int   frontend_mp_car_random_offered(void);   /* [round UF] RANDOM in the split-screen car grid */
 extern int s_mp_postrace_menu_mode;    /* 0 = standard menu, 1 = cup-between menu (td5_fe_race.c) */
 float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);                        /* td5_fe_net.c */
 int   frontend_race_summary_on(void);                                                          /* td5_fe_race.c */

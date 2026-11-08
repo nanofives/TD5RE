@@ -135,6 +135,10 @@ int  frontend_random_selftest(int race_track, int race_car, char *note, size_t c
  * QUICK RACE selector column when DIRECTION hides (RANDOM). Restores every piece of
  * frontend state it touches. 0 = pass, 1 = fail; `note` names the first failure. */
 int  frontend_ue_rows_selftest(char *note, size_t cap);
+/* [round UF 2026-11-08] uf-mp-random: the split-screen car grid's per-pane RANDOM
+ * rolled through the real launch entry (independent rolls, pools, fixed and AI
+ * seats untouched, cop-chase roles, the pane ring). 0 = pass, 1 = fail. */
+int  frontend_uf_mp_random_selftest(char *note, size_t cap);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
