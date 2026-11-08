@@ -284,6 +284,8 @@ void Backend_SetCarSunDir(float x, float y, float z);
  * world, BEFORE Backend_ApplyLightPass (so additive lights are not darkened).
  * No-op if depth_srv/ps_shadow are NULL. */
 void Backend_ApplyShadowPass(const ShadowCB *cb);
+void Backend_SetShadowMaskView(int on);   /* [round UG] dev: pass drawn as an opaque black/white mask */
+void Backend_SetCaptureArmed(int on);     /* [round UG] dev: 1 arm the per-present capture, -1 = env default */
 void Backend_ApplyGIPass(const ShadowCB *cb);   /* [P4] sky-visibility GI (HIGH-only) */
 
 /* [P3] Screen-space reflections: fullscreen ALPHA-BLENDED draw over the

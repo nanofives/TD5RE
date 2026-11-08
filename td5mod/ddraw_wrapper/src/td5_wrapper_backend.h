@@ -214,6 +214,9 @@ typedef struct {
     float sun[4];            /* xyz = surface->light dir (unit), w = max march dist */
     float params[4];         /* x = steps, y = thickness, z = start offset, w = pane W */
     float params2[4];        /* x = pane H, yzw reserved                     */
+    float params3[4];        /* [round UG] screen-space pass only: x = debug view
+                              * (TD5RE_SHADOW_DEBUG), y = 1 when t1 holds the real
+                              * G-buffer, zw reserved. RT shaders do not declare it. */
 } ShadowCB;
 
 /* [P3] Screen-space reflections constant buffer (mirrors ps_ssr.hlsl SSRCB). */

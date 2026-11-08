@@ -15,7 +15,10 @@ struct PS_OUTPUT
 
 PS_OUTPUT main(PS_INPUT input)
 {
-    float4 tex = texMap.Sample(samplerState, input.uv);
+    /* [round UG] SampleTex, as the non-G-buffer variant does: plain Sample
+     * skipped foliage AA, so turning the G-buffer on (RT HIGH, and RT-off sun
+     * shadows since round UG) changed every cutout tree / banner edge. */
+    float4 tex = SampleTex(texMap, samplerState, input.uv);
     /* [CAR REFL 2026-08-04] Per-texel car matid baked into the skin alpha — see
      * ps_modulate_g. Force color.a = 1 on car draws so the tiny matid value in
      * alpha never alpha-test-discards the (opaque) body. */
