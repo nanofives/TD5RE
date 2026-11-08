@@ -639,6 +639,7 @@ static const ScreenStep k_screens_full[] = {
     { "scr-sound-options",   TD5_SCREEN_SOUND_OPTIONS,      0, 0 },
     { "scr-display-options", TD5_SCREEN_DISPLAY_OPTIONS,    0, 0 },
     { "scr-performance",     TD5_SCREEN_PERFORMANCE_OPTIONS, 0, 0 },  /* [LOW-END PERF] */
+    { "scr-lighting-options", TD5_SCREEN_LIGHTING_OPTIONS,   0, 0 },  /* [round UA] under PERFORMANCE */
     { "scr-performance-cust", TD5_SCREEN_PERFORMANCE_CUSTOM, 0, 0 },  /* [PERF PRESETS] */
     { "scr-two-player-opts", TD5_SCREEN_TWO_PLAYER_OPTIONS, 0, 0 },
     { "scr-ctrl-binding",    TD5_SCREEN_CONTROLLER_BINDING, 0, 0 },
@@ -2639,6 +2640,78 @@ static void st_saveload_roundtrip_verdict(void)
     if (r->status == ST_FAIL) s_exit_code = 1;
 }
 
+/* [round UA 2026-11-08] u1-rt-options: item 1 of round U.
+ *  (a) GPU class -> LIGHTING tier (td5_perf_rt_class_tier, a pure function): a
+ *      3070 at Mariano's 2560x1351 must land on MEDIUM, a 4070 at 1440p on
+ *      HIGH but MEDIUM at 4K, 4090 HIGH at 4K, Radeon/unknown MEDIUM.
+ *  (b) LIGHTING OPTIONS are LIVE: changing g_td5.ini.rt_* changes what the
+ *      RT passes read on the very next call (they used to latch at first use,
+ *      so a menu change needed a restart).
+ *  (c) PERFORMANCE > LIGHTING MEDIUM really selects the half-res trace.
+ * Env overrides (TD5RE_RT_RAYS ...) win by design, so (b)/(c) are skipped
+ * (reported) when one is set. Restores every field it touches. */
+static void st_rt_options_verdict(void)
+{
+    static const struct { const char *name; unsigned vram; int w, h, want; } k[] = {
+        { "NVIDIA GeForce RTX 3070",     8192, 2560, 1351, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 3070",     8192, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 3090",    24576, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 4060",     8188, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 4070",    12282, 2560, 1440, TD5_QTIER_HIGH   },
+        { "NVIDIA GeForce RTX 4070",    12282, 3840, 2160, TD5_QTIER_MEDIUM },
+        { "NVIDIA GeForce RTX 4090",    24564, 3840, 2160, TD5_QTIER_HIGH   },
+        { "NVIDIA GeForce RTX 5070 Ti", 16303, 2560, 1351, TD5_QTIER_HIGH   },
+        { "AMD Radeon RX 7900 XTX",     24560, 1920, 1080, TD5_QTIER_MEDIUM },
+        { "NVIDIA RTX A6000",           49140, 1920, 1080, TD5_QTIER_HIGH   },
+        { "Some Future GPU",             8192, 1920, 1080, TD5_QTIER_MEDIUM },
+    };
+    StepRow *r = st_new_row("u1-rt-options", 'D');
+    int i, n = (int)(sizeof(k) / sizeof(k[0])), tier_ok = 0, first_bad = -1;
+    int live = -1, med = -1, env_set;
+    char fail[96] = "";
+    if (!r) return;
+    for (i = 0; i < n; i++) {
+        int got = td5_perf_rt_class_tier(k[i].name, k[i].vram, k[i].w, k[i].h);
+        if (got == k[i].want) tier_ok++;
+        else if (first_bad < 0) {
+            first_bad = i;
+            snprintf(fail, sizeof(fail), " BAD '%s' %dx%d -> %d want %d",
+                     k[i].name, k[i].w, k[i].h, got, k[i].want);
+        }
+    }
+    env_set = (getenv("TD5RE_RT_RAYS") || getenv("TD5RE_RT_SHADOW_HALF") ||
+               getenv("TD5RE_RT_REFL_HALF") || getenv("TD5RE_RT_GI"));
+    if (!env_set) {
+        int s_rays = g_td5.ini.rt_shadow_rays, s_res = g_td5.ini.rt_shadow_res;
+        int s_rq = g_td5.ini.rt_reflection_q, s_rr = g_td5.ini.rt_reflection_rng;
+        int s_gi = g_td5.ini.rt_gi_quality, s_sp = g_td5.ini.rt_sun_probe;
+        int s_lq = g_td5.ini.rt_light_quality, s_q = g_td5.ini.lighting_quality;
+        live = 1;
+        g_td5.ini.rt_shadow_rays = 8;  live &= (td5_rt_opt_shadow_rays() == 8);
+        g_td5.ini.rt_shadow_rays = 1;  live &= (td5_rt_opt_shadow_rays() == 1);
+        g_td5.ini.rt_shadow_res = 0;   live &= (td5_rt_opt_shadow_half() == 1);
+        g_td5.ini.rt_shadow_res = 1;   live &= (td5_rt_opt_shadow_half() == 0);
+        g_td5.ini.rt_reflection_q = 1; live &= (td5_rt_opt_refl_half() == 1 && td5_rt_opt_reflections() == 1);
+        g_td5.ini.rt_reflection_q = 0; live &= (td5_rt_opt_reflections() == 0);
+        g_td5.ini.rt_gi_quality = 0;   live &= (td5_rt_opt_gi_on() == 0);
+        g_td5.ini.rt_gi_quality = 2;   live &= (td5_rt_opt_gi_on() == 1 && td5_rt_opt_gi_rays() == 4);
+        g_td5.ini.rt_reflection_rng = 0; live &= (td5_rt_opt_refl_dist() < 5000.0f);
+        g_td5.ini.rt_reflection_rng = 1; live &= (td5_rt_opt_refl_dist() > 40000.0f && td5_rt_opt_refl_dist() < 60000.0f);
+        td5_perf_apply_lighting_tier(TD5_QTIER_MEDIUM, 0);
+        med = (td5_rt_opt_shadow_half() == 1 && td5_rt_opt_refl_half() == 1 &&
+               td5_rt_opt_gi_on() == 0 && td5_rt_opt_shadow_rays() == 1);
+        g_td5.ini.rt_shadow_rays = s_rays; g_td5.ini.rt_shadow_res = s_res;
+        g_td5.ini.rt_reflection_q = s_rq;  g_td5.ini.rt_reflection_rng = s_rr;
+        g_td5.ini.rt_gi_quality = s_gi;    g_td5.ini.rt_sun_probe = s_sp;
+        g_td5.ini.rt_light_quality = s_lq; g_td5.ini.lighting_quality = s_q;
+    }
+    snprintf(r->note, sizeof(r->note), "gpu-class %d/%d live-options=%s medium-halfres=%s%s",
+             tier_ok, n, live < 0 ? "skip(env)" : (live ? "1" : "0"),
+             med < 0 ? "skip(env)" : (med ? "1" : "0"), fail);
+    r->status = (tier_ok == n && live != 0 && med != 0) ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_write_report(void)
 {
     FILE *f;
@@ -2647,6 +2720,7 @@ static void st_write_report(void)
     CreateDirectoryA("log", NULL);
 
     st_degradation_verdicts();
+    st_rt_options_verdict();   /* [round UA] u1-rt-options */
     st_i18n_verdict();
     st_chaos_pad_fold_verdict();   /* [CHAOS CO-OP] pad-seat input fold (no pads needed) */
     st_saveload_roundtrip_verdict();

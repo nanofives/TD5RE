@@ -177,7 +177,7 @@ int td5_plat_dxr_probe(void)
         ZeroMemory(&o5, sizeof(o5));
         if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_D3D12_OPTIONS5,
                                                        &o5, sizeof(o5))))
-            dxr = (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) ? 1 : 0;
+            dxr = (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1) ? 1 : 0;   /* [round UA] lib_6_5 needs DXR 1.1 */
         ID3D12Device_Release(dev);
     }
     FreeLibrary(lib);

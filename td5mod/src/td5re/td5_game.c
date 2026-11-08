@@ -1203,20 +1203,25 @@ static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
 static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 3 } };
 /* [LOW-END PERF 2026-09-12] PERFORMANCE sub-screen: hub row 2 = GRAPHICS OPTIONS,
- * then Display row 7 = the "PERFORMANCE ->" nav row (rows: 0 Display Mode, 1 VSync,
- * 2 Fogging, 3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 LIGHTING, 7 PERFORMANCE,
- * 8 OK). Without this route --StartScreen=53 cannot land and the selftest screen
+ * then Display row 6 = the "PERFORMANCE ->" nav row (rows: 0 Display Mode, 1 VSync,
+ * 2 Fogging, 3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 PERFORMANCE, 7 OK;
+ * round UA moved the LIGHTING OPTIONS row under PERFORMANCE). Without this route --StartScreen=53 cannot land and the selftest screen
  * walk -- the frontend's only automated regression net -- never covers the screen. */
 static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
-                                                { TD5_SCREEN_DISPLAY_OPTIONS, 7 } };
+                                                { TD5_SCREEN_DISPLAY_OPTIONS, 6 } };
 /* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE is one row deeper: PERFORMANCE
- * row 3 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
- * 2 LIGHTING, 3 CUSTOM, 4 OK). Same reason as the route above -- without it
+ * row 4 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
+ * 2 LIGHTING, 3 LIGHTING OPTIONS, 4 CUSTOM, 5 OK). Same reason as the route above -- without it
  * --StartScreen=55 cannot land and the selftest screen walk skips the screen. */
 static const SSW_NavStep k_ssw_perf_custom[] = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                  { TD5_SCREEN_OPTIONS_HUB, 2 },
-                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 7 },
+                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 6 },
+                                                 { TD5_SCREEN_PERFORMANCE_OPTIONS, 4 } };
+/* [round UA 2026-11-08] LIGHTING OPTIONS: PERFORMANCE row 3. */
+static const SSW_NavStep k_ssw_light_opts[] = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
+                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 6 },
                                                  { TD5_SCREEN_PERFORMANCE_OPTIONS, 3 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
@@ -1279,6 +1284,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
     case TD5_SCREEN_PERFORMANCE_OPTIONS: SSW_ROUTE(k_ssw_perf_opts);  /* [LOW-END PERF] */
+    case TD5_SCREEN_LIGHTING_OPTIONS:    SSW_ROUTE(k_ssw_light_opts); /* [round UA] */
     case TD5_SCREEN_PERFORMANCE_CUSTOM: SSW_ROUTE(k_ssw_perf_custom); /* [PERF PRESETS] */
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
     case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);

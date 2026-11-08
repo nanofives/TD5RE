@@ -3090,7 +3090,12 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
             D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5;
             ZeroMemory(&o5, sizeof(o5));
             if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(g_d3d12.device, D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)))
-                && o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) {
+                /* [round UA] 1_0 -> 1_1: rt_pipeline is lib_6_5 and the hit
+                 * shaders call GeometryIndex() (DXR 1.1). A 1.0-only device
+                 * (GTX 10xx/16xx DXR fallback) used to report RT available,
+                 * then fail CreateStateObject while LIGHTING HIGH still
+                 * switched the game into its RT-only shading paths. */
+                && o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1) {
                 if (FAILED(ID3D12Device_QueryInterface(g_d3d12.device, &IID_ID3D12Device5, (void **)&g_d3d12.device5)))
                     g_d3d12.device5 = NULL;
             }

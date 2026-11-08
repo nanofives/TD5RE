@@ -4069,9 +4069,9 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
         return TD5_SCREEN_OPTIONS_HUB;
-    case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] entered from GRAPHICS OPTIONS -> BACK there */
         return TD5_SCREEN_DISPLAY_OPTIONS;
+    case TD5_SCREEN_LIGHTING_OPTIONS:   /* [round UA] entered from PERFORMANCE -> BACK there */
     case TD5_SCREEN_PERFORMANCE_CUSTOM: /* [PERF PRESETS] entered from PERFORMANCE -> BACK there */
         return TD5_SCREEN_PERFORMANCE_OPTIONS;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] track-select OR quick race */
@@ -11261,8 +11261,9 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_DISPLAY_OPTIONS:
             /* Rows 0-5 are all selector rows (Display Mode, VSync, Fogging, Speed
-             * Readout, Show FPS, Camera Damping). [RT2 P8] Row 6 = LIGHTING
-             * OPTIONS -> (navigation, no ◄►); Row 7 = OK. */
+             * Readout, Show FPS, Camera Damping). Row 6 = PERFORMANCE ->
+             * (navigation, no ◄►); Row 7 = OK. [round UA] LIGHTING OPTIONS
+             * moved under PERFORMANCE. */
             for (int i = 0; i <= 5; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_SOUND_OPTIONS:
