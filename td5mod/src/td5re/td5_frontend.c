@@ -6057,6 +6057,7 @@ static int frontend_shared_nav_owner_device(void) {
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
+    td5_rt_prewarm();   /* [round UA] compile the RT pipeline in the background while in menus */
     td5_plat_set_idle_frame_cap(frontend_frame_cap());
     frontend_update_anim_pacing();   /* [FPS-DECOUPLE] pace animations at 60 Hz */
     /* 0. Poll platform input so s_keyboard[] is fresh for this frame */

@@ -271,7 +271,12 @@ static HRESULT d3d12_create_pso(const char *site, int ps_id, int blend, int ds, 
     }
 
     d3d12_api_mark("CreateGraphicsPipelineState");
-    hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, pd, &IID_ID3D12PipelineState, (void **)out);
+    { LARGE_INTEGER t0, t1, fq; double ms;   /* [round UA] PSO compile cost */
+      QueryPerformanceCounter(&t0);
+      hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, pd, &IID_ID3D12PipelineState, (void **)out);
+      QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&fq);
+      ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
+      Backend_NotePsoCompile(ms, g_d3d12.frame_open); }
     d3d12_api_done();
     s_pso_crumb[0] = '\0';
     return hr;
@@ -885,6 +890,16 @@ static void gstat_frame(UINT fi, const UINT64 *ts, UINT n)
 static int gstat_cmp(const void *a, const void *b)
 { float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
 
+/* [round UA] PSO / state-object compile accounting (always on, ~free). */
+static unsigned s_psoc_n, s_psoc_mid;
+static double   s_psoc_ms, s_psoc_max, s_psoc_mid_ms;
+void Backend_NotePsoCompile(double ms, int midframe)
+{
+    s_psoc_n++; s_psoc_ms += ms;
+    if (ms > s_psoc_max) s_psoc_max = ms;
+    if (midframe) { s_psoc_mid++; s_psoc_mid_ms += ms; }
+}
+
 void Backend_GpuStatsDump(const char *path)
 {
     FILE *f; int i;
@@ -892,6 +907,8 @@ void Backend_GpuStatsDump(const char *path)
     gstat_vram_sample();
     f = fopen(path, "a");
     if (!f) return;
+    fprintf(f, "pso_compiles n=%u total=%.1f ms max=%.1f ms; mid-frame n=%u total=%.1f ms\n",
+            s_psoc_n, s_psoc_ms, s_psoc_max, s_psoc_mid, s_psoc_mid_ms);
     if (s_vram_samples)
         fprintf(f, "vram_local usage_now=%llu MB peak=%llu MB budget_now=%llu MB budget_min=%llu MB samples=%d\n",
                 (unsigned long long)(s_vram_usage_last >> 20), (unsigned long long)(s_vram_peak >> 20),

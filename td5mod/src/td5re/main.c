@@ -449,10 +449,10 @@ typedef struct {
  * res tripped the Windows watchdog), so no preset may select it.
  *
  * MEASURED round UA (2026-11-08, RTX 5070 Ti, Moscow, verify/rt_bench.py,
- * RT GPU ms per frame p50/p99): 1920x1080 MEDIUM 0.65/0.92, HIGH 3.41/4.84,
- * ULTRA 4.29/5.68; 2542x1333 MEDIUM 0.96/1.31, HIGH 5.23/7.33, ULTRA 6.69/9.03.
- * MEDIUM's "half-res" was NOT wired before round UA (it traced full-res and
- * cost 2.16/3.44 ms); the half-res trace + upsample now makes it real.
+ * RT GPU ms per frame p50/p99): 1920x1080 MEDIUM 0.63/0.92, HIGH 3.40/4.69,
+ * ULTRA 4.19/5.68; 2542x1333 MEDIUM 0.96/1.31, HIGH 5.41/7.49, ULTRA 6.63/9.03.
+ * MEDIUM's "half-res" was NOT wired before round UA (it traced full-res: p50
+ * 1.97 / 3.29 ms); the half-res trace + upsample now makes it real.
  * See docs/plans/RT_OLDER_GPU_PLAN.md for the 3070 projection. */
 static const TD5_LightTier k_light_tier[TD5_QTIER_COUNT] = {
     /* qual rays res refl rng gi probe lights */
@@ -618,8 +618,8 @@ int td5_perf_detect_graphics_tier(void)
  *
  * MEASURED (round UA, RTX 5070 Ti, Moscow, uncapped, verify/rt_bench.py):
  * RT GPU time per frame p50 / p99, 1920x1080 and 2542x1333:
- *   MEDIUM (half-res shadow+GI+lights+refl, 1 ray, no GI)  0.65/0.92   0.96/1.31 ms
- *   HIGH   (full-res, 2 rays, GI LOW)                       3.41/4.84   5.23/7.33 ms
+ *   MEDIUM (half-res shadow+lights+refl, 1 ray, no GI)     0.63/0.92   0.96/1.31 ms
+ *   HIGH   (full-res, 2 rays, GI LOW)                       3.40/4.69   5.41/7.49 ms
  * A 3070 traces roughly 2.5-3x slower than a 5070 Ti, so HIGH at 2560x1351
  * lands at ~14-16 ms of RT alone (p99 ~20 ms): the "unstable FPS" report.
  * MEDIUM is ~3 ms there. So: every RT-capable card defaults to MEDIUM, and

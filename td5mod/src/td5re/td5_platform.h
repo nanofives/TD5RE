@@ -989,6 +989,7 @@ void td5_plat_rt_pool_stats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_us
 void td5_plat_rt_set_mode(int high);
 /* [round UA] RT trace resolution: 1 = half-res (shadow/GI/lights; reflections). */
 void td5_plat_rt_set_resolution(int shadow_half, int refl_half);
+void td5_plat_rt_prewarm(void);   /* [round UA] async RT pipeline compile */
 /* [P3] Register the just-bound texture page into the RT bindless table (index =
  * page id) so reflection hits sample the real texture. No-op when RT inactive. */
 void td5_plat_rt_register_page(unsigned page_id);

@@ -210,6 +210,15 @@ void td5_rt_apply_lighting_options(void)
               td5_rt_opt_sun_probe());
 }
 
+/* [round UA 2026-11-08] Start the background RT pipeline compile (state
+ * object) when LIGHTING is HIGH, so the race load does not wait for it. Cheap
+ * to call every frame: the backend no-ops once started / built. */
+void td5_rt_prewarm(void)
+{
+    if (!td5_rt_available() || !rt_quality_seed() || !g_td5.ini.lighting_enabled) return;
+    td5_plat_rt_prewarm();
+}
+
 int td5_rt_active(void)
 {
     if (!td5_rt_available()) return 0;    /* no DXR device -> auto-fallback to LOW */

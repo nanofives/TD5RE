@@ -4303,6 +4303,7 @@ void td5_plat_rt_pool_stats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_us
 }
 void td5_plat_rt_set_mode(int high) { Backend_RTSetMode(high); }
 void td5_plat_rt_set_resolution(int shadow_half, int refl_half) { Backend_RTSetResolution(shadow_half, refl_half); }
+void td5_plat_rt_prewarm(void) { Backend_RTPrewarmAsync(); }
 void td5_plat_rt_register_page(unsigned page_id) { Backend_RTRegisterBoundPage(page_id); }
 void td5_plat_rt_warmup_begin(void) { Backend_RTWarmupBegin(); }
 void td5_plat_rt_warmup_step(void)  { Backend_RTWarmupStep(); }

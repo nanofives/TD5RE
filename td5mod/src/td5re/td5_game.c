@@ -2334,6 +2334,7 @@ static void init_race_modes_and_seed(void)
 {
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
+    td5_rt_prewarm();   /* [round UA] RT pipeline compile overlaps the track load */
 
 #ifndef TD5RE_RELEASE
     /* [CHAOS CO-OP 2026-09-29] TD5RE_CHAOS_FAKE_SEATS=4|6|8 fabricates a seat

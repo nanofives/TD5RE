@@ -370,6 +370,10 @@ void Backend_RTStamp(const char *tag);
  * upsample the mask back to full res before the composite. Live: read at
  * every pass dispatch. */
 void Backend_RTSetResolution(int shadow_half, int refl_half);
+/* [round UA] Compile the RT pipeline (root signature + state object) on a
+ * worker thread now, so the first race load does not pay for it. No-op when
+ * DXR is unavailable or the pipeline already exists. */
+void Backend_RTPrewarmAsync(void);
 /* Append the per-tag GPU timing percentiles + VRAM budget/peak to `path`. */
 void Backend_GpuStatsDump(const char *path);
 

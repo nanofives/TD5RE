@@ -311,6 +311,7 @@ typedef struct {
 static DxrState g_dxr = { 0 };
 
 static int dxr_ensure_init(void);   /* forward: used by the AS feed below */
+static void dxr_prewarm_join(void); /* [round UA] forward: shutdown / device change */
 
 /* ---- descriptor-handle helpers (aggregate-return -> explicit out-param) ----- */
 
@@ -358,6 +359,7 @@ void d3d12_dxr_on_device(ID3D12Device5 *dev5, ID3D12GraphicsCommandList4 *list4)
     /* Device (re)created: cached interfaces change; any previously built
      * pipeline objects belong to the old device and were already released by
      * d3d12_dxr_shutdown during teardown. Reset lazy-init. */
+    dxr_prewarm_join();   /* [round UA] never swap the device under the compile thread */
     g_dxr.device5 = dev5;
     g_dxr.list4   = list4;
     g_dxr.inited  = 0;
@@ -532,7 +534,13 @@ static int dxr_create_state_object(void)
     sod.NumSubobjects = 5; sod.pSubobjects = so;
 
     d3d12_pso_crumb_set("dxr_state_object", g_rt_pipeline, sizeof(g_rt_pipeline));
-    hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
+    { LARGE_INTEGER t0, t1, fq; double ms;   /* [round UA] RT pipeline compile cost */
+      QueryPerformanceCounter(&t0);
+      hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
+      QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&fq);
+      ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
+      Backend_NotePsoCompile(ms, 0);
+      dxr_log("CreateStateObject %.1f ms (DXIL lib %u bytes)", ms, (unsigned)sizeof(g_rt_pipeline)); }
     d3d12_pso_crumb_clear();
     if (FAILED(hr)) { dxr_log("CreateStateObject 0x%08lX", hr); return 0; }
     return 1;
@@ -2181,15 +2189,57 @@ void Backend_RTDebugView(void)
     ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
 }
 
+/* ---- [round UA 2026-11-08] RT pipeline compile OFF the race-load path ------
+ * CreateStateObject is the single most expensive RT load step: 177 ms with a
+ * WARM driver shader cache on an RTX 5070 Ti (round UA measurement), more on a
+ * cold cache / slower CPU, and it used to run inside the race load (first
+ * dxr_ensure_init). Backend_RTPrewarmAsync (called by the game once, in the
+ * frontend, when LIGHTING is HIGH) compiles the global root signature + state
+ * object on a worker thread. The thread touches ONLY g_dxr.global_rs and
+ * g_dxr.so, and nothing on the main thread reads either before
+ * dxr_ensure_init, which joins the thread first; shutdown / device change join
+ * too. If the thread failed, ensure_init simply builds them itself. */
+static HANDLE s_prewarm_thread;
+static volatile LONG s_prewarm_ok;
+
+static DWORD WINAPI dxr_prewarm_proc(LPVOID arg)
+{
+    (void)arg;
+    if (!g_dxr.global_rs && !dxr_create_global_rs()) return 0;
+    if (!g_dxr.so && !dxr_create_state_object()) return 0;
+    InterlockedExchange(&s_prewarm_ok, 1);
+    return 0;
+}
+
+static void dxr_prewarm_join(void)
+{
+    if (!s_prewarm_thread) return;
+    WaitForSingleObject(s_prewarm_thread, INFINITE);
+    CloseHandle(s_prewarm_thread);
+    s_prewarm_thread = NULL;
+    dxr_log("prewarm joined (ok=%ld)", (long)s_prewarm_ok);
+}
+
+void Backend_RTPrewarmAsync(void)
+{
+    if (g_dxr.disabled || !g_dxr.device5 || g_dxr.inited || s_prewarm_thread) return;
+    if (g_dxr.global_rs && g_dxr.so) return;
+    s_prewarm_ok = 0;
+    s_prewarm_thread = CreateThread(NULL, 0, dxr_prewarm_proc, NULL, 0, NULL);
+    dxr_log("prewarm: RT pipeline compile started on a worker thread (%s)",
+            s_prewarm_thread ? "ok" : "CreateThread FAILED, will compile at race load");
+}
+
 static int dxr_ensure_init(void)
 {
     if (g_dxr.inited) return 1;
     if (!g_dxr.device5) return 0;
+    dxr_prewarm_join();
     if (!dxr_create_heap())        goto fail;
     dxr_write_null_tlas_srv(DXR_SLOT_TLAS_SRV);   /* valid descriptor before any TLAS */
     if (!dxr_fill_bindless_fallback()) goto fail; /* [P3] valid SRV in every bindless slot */
-    if (!dxr_create_global_rs())   goto fail;
-    if (!dxr_create_state_object())goto fail;
+    if (!g_dxr.global_rs && !dxr_create_global_rs())   goto fail;   /* [round UA] may be prewarmed */
+    if (!g_dxr.so && !dxr_create_state_object())       goto fail;
     if (!dxr_create_sbt())         goto fail;
     if (!dxr_create_blit())        goto fail;
     g_dxr.inited = 1;
@@ -2268,6 +2318,7 @@ void d3d12_dxr_smoke_blit(void)
 void d3d12_dxr_shutdown(void)
 {
     int i;
+    dxr_prewarm_join();   /* [round UA] the compile thread may still own so/global_rs */
     /* Meshes + pools + scratch (device-lost drill: everything torn down here). */
     for (i = 0; i < DXR_MAX_MESHES; i++) {
         DxrMesh *m = &g_dxr.meshes[i];
@@ -2302,6 +2353,10 @@ void d3d12_dxr_shutdown(void)
     if (g_dxr.denoise_pso){ ID3D12PipelineState_Release(g_dxr.denoise_pso); g_dxr.denoise_pso = NULL; }
     if (g_dxr.denoise_color_pso){ ID3D12PipelineState_Release(g_dxr.denoise_color_pso); g_dxr.denoise_color_pso = NULL; }
     if (g_dxr.denoise_rs) { ID3D12RootSignature_Release(g_dxr.denoise_rs); g_dxr.denoise_rs = NULL; }
+    /* [round UA] half-res upsample PSOs (must not survive a device loss). */
+    if (g_dxr.upsample_pso)       { ID3D12PipelineState_Release(g_dxr.upsample_pso);       g_dxr.upsample_pso = NULL; }
+    if (g_dxr.upsample_color_pso) { ID3D12PipelineState_Release(g_dxr.upsample_color_pso); g_dxr.upsample_color_pso = NULL; }
+    g_dxr.upsample_failed = 0;
     if (g_dxr.light_pso) { ID3D12PipelineState_Release(g_dxr.light_pso);  g_dxr.light_pso = NULL; }
     if (g_dxr.refl_pso)  { ID3D12PipelineState_Release(g_dxr.refl_pso);   g_dxr.refl_pso = NULL; }
     if (g_dxr.geo_buf)   { ID3D12Resource_Release(g_dxr.geo_buf); g_dxr.geo_buf = NULL; g_dxr.geo_mapped = NULL; }
