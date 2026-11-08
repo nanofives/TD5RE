@@ -152,3 +152,28 @@ and how to add more things there". He chose: **a local dev web page served from 
      look at the screenshots, report piece and texture counts. One-line command in the report for Mariano to start it.
    - Branch `round-UD`, worktree `.claude/worktrees/round-UD`, base 6610a463. Read-only on trackgen code; synthetic
      identity must stay E2F1F33C (you should not touch generation).
+
+---------------------------------------------------------------------------------------------------------------------
+
+## UE: Mariano's decisions on the UA/UB/UC questions (2026-11-08)
+
+Base: **integ-roamU @ fa1ec5c0** (UA+UB+UC+UD merged, build_all OK). Branch `round-UE`, worktree
+`.claude/worktrees/round-UE`. Mariano: "Go with all recommendations". Read `docs/RACE_OPTIONS_MATRIX.md` first.
+
+- **Q1 Cop chase, TRAFFIC OFF:** make it work, OFF = an empty road (today the original forces HEAVY).
+- **Q2 Traffic battle:** hide the TRAFFIC and POLICE rows (forced VERY HIGH / off there).
+- **Q3 Time trial:** hide the LAPS row (always 1 lap).
+- **Q4 Time trial:** hide the CHECKPOINT TIMERS row (forced on).
+- **Q5 Cups:** hide the CHECKPOINT TIMERS row (forced off at race start).
+- **Q6 Multiplayer drag:** grey the AUTO gearbox row, as single-player drag does.
+- **Hidden rows must not leave gaps:** re-flow the remaining rows (button alignment routine). Same for the QUICK
+  RACE screen: on a RANDOM track the DIRECTION row hides and leaves an empty slot between TRACK and LAPS: close it.
+- **Shadows follow the visible sun without RT (UC decision b):** on tracks that draw a sun (td5_sky_sunpos.h /
+  s_sky_sun_dir), the light2 sun-shadow pass uses that sky sun direction at every lighting level (small change in
+  `td5_render_scene_sun`, td5_render_mesh.c). Vertex lighting stays as the original. Frames: shadows with RT off
+  before/after on two moved-sun tracks (Blue Ridge, Switzerland) + one control (Maui) where nothing should change.
+- UA decisions kept as UA shipped them: RT off in free roam, refactor R1-R5 on hold until a 3070 bench, SUN & SKY
+  CLASSIC moves the sun direction.
+- Tests: one row per item (`ue-q1-copchase-notraffic`, a row asserting the hidden rows per mode, `ue-shadow-sun`),
+  run only those + the u5 rows (they must still pass). Update the matrix doc, CHANGELOG, pending_to_test rows
+  ("round UE"). DEV builds while iterating, build_all once at the end.
