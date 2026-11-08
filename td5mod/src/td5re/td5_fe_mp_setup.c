@@ -193,6 +193,10 @@ void frontend_init_race_schedule(void) {
         TD5_LOG_I(LOG_TAG, "QuickRace launch: start_span_offset=%d", g_td5.ini.start_span_offset);
 #endif
 
+    /* [round UB 2026-11-08] roll the RANDOM car / track entries (a launch from a
+     * selection screen only; Race Again and the next cup race keep the pick) */
+    frontend_resolve_random_picks();
+
     g_td5.race_requested = 1;
     g_td5.car_index   = frontend_current_car_index();
     g_td5.track_index = (s_current_screen == TD5_SCREEN_ATTRACT_MODE)
@@ -413,6 +417,61 @@ void frontend_init_race_schedule(void) {
         g_td5.circuit_lap_count = s_game_option_laps + 1;
         TD5_LOG_I(LOG_TAG, "InitRaceSchedule: circuit_lap_count=%d (laps row %d)",
                   g_td5.circuit_lap_count, s_game_option_laps + 1);
+        /* [round UB 2026-11-08] COLLISIONS + CHECKPOINT TIMERS: the same staleness.
+         * Only ConfigureGameTypeFlags wrote them, at game-type pick, so a RACE
+         * OPTIONS edit reached the race one mode pick later. */
+        td5_physics_set_collisions(s_game_option_collisions);
+        g_td5.checkpoint_timers_enabled = s_game_option_checkpoint_timers;
+    }
+
+    /* [round UB 2026-11-08] Mariano: "on time trials i selected traffic very high
+     * and it doesn't get reflecte on the race". RACE OPTIONS offers TRAFFIC,
+     * POLICE and COLLISIONS in time trial, but ConfigureGameTypeFlags case 7
+     * forces traffic, police and collisions off (as the original's case 7 @
+     * 0x00410CA0 does: gTrafficActorsEnabled = 0) and the commit above is
+     * single-race only, so all three were lost. Time trial is a single race at
+     * runtime (solo synth: slots 1..5 inactive, traffic slots untouched), so the
+     * race runs them as chosen. LAPS (1) and CHECKPOINT TIMERS (on) stay forced:
+     * those define the time trial (questions for Mariano in
+     * docs/RACE_OPTIONS_MATRIX.md). */
+    if (s_selected_game_type == 7 && !s_mp_flow) {
+        int tv = s_game_option_traffic;
+        if (tv < 0) tv = 0;
+        if (tv > TD5_TRAFFIC_VOLUME_COUNT - 1) tv = TD5_TRAFFIC_VOLUME_COUNT - 1;
+        g_td5.traffic_volume            = tv;
+        g_td5.traffic_enabled           = (tv != 0);
+        g_td5.special_encounter_enabled = s_game_option_cops ? 1 : 0;
+        td5_physics_set_collisions(s_game_option_collisions);
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: TIME TRIAL options traffic=%d police=%d collisions=%d",
+                  tv, g_td5.special_encounter_enabled, s_game_option_collisions);
+    }
+
+    /* [round UB] Cop chase (SP): the TRAFFIC level and LAPS picked on RACE OPTIONS /
+     * SELECT TRACK, not the ones of the moment the mode was picked. Traffic stays
+     * ON in cop chase (case 8, as the original): OFF still runs Heavy (question in
+     * the matrix doc). */
+    if (s_selected_game_type == 8 && !s_mp_flow) {
+        int tv = s_game_option_traffic;
+        if (tv < 1 || tv > TD5_TRAFFIC_VOLUME_COUNT - 1) tv = 3;
+        g_td5.traffic_enabled   = 1;
+        g_td5.traffic_volume    = tv;
+        g_td5.circuit_lap_count = s_game_option_laps + 1;
+        td5_physics_set_collisions(s_game_option_collisions);
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: COP CHASE options traffic=%d laps=%d collisions=%d",
+                  tv, g_td5.circuit_lap_count, s_game_option_collisions);
+    }
+
+    /* [round UB] Cups (SP): COLLISIONS was never written for game types 1..6, so a
+     * cup ran whatever the last single race left in the physics flag. */
+    if (s_selected_game_type >= 1 && s_selected_game_type <= 6 && !s_mp_flow)
+        td5_physics_set_collisions(s_game_option_collisions);
+
+    /* [round UB] SP drag launches from the RACE OPTIONS pre-launch step, which never
+     * wrote the DIFFICULTY tier (the AI driver of each lane reads it); the tier was
+     * the one of the moment drag was picked. */
+    if (s_selected_game_type == 9 && !s_mp_flow) {
+        g_td5.difficulty_tier = s_game_option_difficulty;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: DRAG difficulty tier=%d", g_td5.difficulty_tier);
     }
 
     /* [COP-CHASE 2026-06-21] Cop Chase / wanted mode never spawns the separate

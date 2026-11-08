@@ -960,6 +960,13 @@ void td5_plat_present(int vsync)
          * first race present whose sim tick has reached N, so two builds (or two
          * shader sets) can be compared at the same simulated moment instead of at
          * a wall-clock frame count. */
+        /* [round UB 2026-11-08] TD5RE_FRAMEDUMP_EVERY=N: dump every N presents (default 30;
+         * 1 catches the few presents of a loading screen). */
+        static int s_fd_every = 0;
+        if (s_fd_every == 0) {
+            const char *ev = getenv("TD5RE_FRAMEDUMP_EVERY");
+            s_fd_every = (ev && atoi(ev) > 0) ? atoi(ev) : 30;
+        }
         static int s_fd_tick = -2;
         if (s_fd_tick == -2) {
             const char *t = getenv("TD5RE_FRAMEDUMP_TICK");
@@ -974,7 +981,7 @@ void td5_plat_present(int vsync)
                 s_fd_tick = -1;
                 s_fd_on = 0;
             }
-        } else if (s_fd_on && (s_fd_count++ % 30) == 0) {
+        } else if (s_fd_on && (s_fd_count++ % s_fd_every) == 0) {
             if (s_fd_isseq) {
                 char buf[320];
                 snprintf(buf, sizeof(buf), s_fd_path, s_fd_seq++);

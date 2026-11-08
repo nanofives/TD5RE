@@ -1,0 +1,15 @@
+# [round UB 2026-11-08] CAR SELECT: LEFT once on the first car -> RANDOM ("?" card), hold, OK (two DOWNs: PAINT / MORE STATS are greyed on RANDOM and skipped)
+# -> SELECT TRACK on Moscow: LEFT once -> RANDOM ("?" card), hold. Launch with --StartScreen=20 --StartScreenDirect=1
+# --DefaultCar=0 --DefaultTrack=0.
+sync menu
+300 log CS_ENTRY
++60 key left press
++240 log CS_RANDOM
++30 key down press
++30 key down press
++60 log CS_ON_OK
++30 key enter press
++300 log TS_ENTRY
++300 key left press
++240 log TS_RANDOM
++10 quit

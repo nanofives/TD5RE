@@ -3546,6 +3546,22 @@ static void init_race_level_and_assets(void)
         }
     }
 
+    /* [round UB 2026-11-08] One line with every race option as THIS race runs it,
+     * after the per-mode overrides above (drag, traffic battle, net, LEVELINF):
+     * docs/RACE_OPTIONS_MATRIX.md reads "reaches the race" off this line and the
+     * u5-* selftest rows assert it. collisions: the physics flag is inverted
+     * (0 = on). */
+    TD5_LOG_I(LOG_TAG,
+              "RACE OPTIONS USED: gt=%d tt_synth=%d wanted=%d drag=%d mp_mode=%d net=%d track=%d rev=%d "
+              "laps=%d traffic=%d vol=%d police=%d opponents=%d tier=%d collisions=%d cp_timers=%d circuit=%d",
+              (int)g_td5.game_type, g_td5.solo_mode_synth, g_td5.wanted_mode_enabled,
+              g_td5.drag_race_enabled, (int)g_td5.mp_mode_config.mode, g_td5.network_active,
+              g_td5.track_index, g_td5.reverse_direction, g_td5.circuit_lap_count,
+              g_td5.traffic_enabled, g_td5.traffic_volume, g_td5.special_encounter_enabled,
+              g_td5.num_ai_opponents, g_td5.difficulty_tier,
+              td5_physics_get_collisions_flag() == 0 ? 1 : 0, g_special_encounter,
+              g_track_is_circuit);
+
     /* ---- Step 4b: Initialize per-track fog from LEVELINF.DAT ----
      * Original: 0x42AE56 reads fog_enable at +0x5C, fog RGB at +0x60..+0x62,
      * constructs color = (R<<16)|(G<<8)|B and passes to FUN_0040af10. */
@@ -11951,6 +11967,16 @@ static void loadscreen_draw_frame_ex(int pct, int pump, int rt_warmup)
         /* Baseline sits just above the bar, left-aligned with it. The bar is the
          * "how far along" signal, so the line carries only the phase name. */
         loadscreen_draw_text(bx0, by0 - sh * 0.014f, cap_px, s_ls_label, 0xFFF0F0F0u);
+    }
+    {
+        /* [round UB 2026-11-08] A RANDOM car / track names what it rolled, above
+         * the phase line ("RANDOM: KESWICK, ENGLAND / HOT DOG"). Empty otherwise. */
+        const char *pick = td5_frontend_random_pick_label();
+        if (pick && pick[0]) {
+            float cap_px = sh * 0.026f;
+            if (cap_px < 13.0f) cap_px = 13.0f;
+            loadscreen_draw_text(bx0, by0 - sh * 0.050f, cap_px, pick, 0xFFFFCC33u);
+        }
     }
 
     if (rt_warmup >= 2)

@@ -61,6 +61,7 @@
 #include "td5_input.h"   /* [CHAOS CO-OP] packed-axis constants for the fold check */
 #include "td5_camera.h"  /* [CHAOS CO-OP] per-view solved camera pose (pane check) */
 #include "td5_ai.h"      /* [R1026 K] pull-over latch query + dev plant (human-drive rows) */
+#include "td5_physics.h" /* [round UB] collisions flag for the u5 rows */
 #include "td5_roam_mode.h"   /* [roam F2-D] `roam` rows: arm a free-roam session */
 #include "td5_roam_drive.h"  /* [roam F2-D] scripted drive + verdict */
 #include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
@@ -241,6 +242,14 @@ typedef struct {
      * and the player finished on lap N. Roam row: the circuit driver races N laps (TD5RE_ROAM_CIRCUIT_LAPS),
      * its own verdict checks player_laps == laps. */
     int laps_menu;
+    /* [round UB 2026-11-08] targeted round-U checks (0 = none):
+     *   3  u3-kph-default          KPH is the speed unit (no explicit MPH choice in the INI)
+     *   4  u4-random-pick          RANDOM car + track rolled at launch: pools, the race ran the roll
+     *   51 u5-traffic-timetrial    time trial runs the TRAFFIC / POLICE / COLLISIONS picked
+     *   52 u5-options-after-config single race: COLLISIONS + CHECKPOINT TIMERS edited after the race type
+     *   53 u5-copchase-traffic     cop chase: the TRAFFIC level edited after the race type
+     *   54 u5-drag-difficulty      SP drag: the DIFFICULTY edited after the race type */
+    int u_check;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -363,6 +372,7 @@ static const RaceScenario k_races[] = {
     { .name="race-r8-drag",          .track=19, .car=-1, .game_type=9, .player_is_ai=1,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=0,
+      .mp_mode=-1,   /* [round UB] an omitted mp_mode is 0: the AutoRace MP override locked RACE and cleared drag */
       .depth=ST_DEPTH_RUN_5S },
 
     /* ---- Block 2: MP-mode split-screen (1 human + N AI panes, N=1/4/8 -> 2/5/9
@@ -607,9 +617,40 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .roam=8, .depth=ST_DEPTH_ROAM_SPRINT, .laps_menu=1 },
+
+    /* [round UB 2026-11-08] one targeted row per item (full suite only; run alone with TD5RE_SELFTEST_ROWS). */
+    { .name="u3-kph-default",        .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=3 },
+    { .name="u4-random-pick",        .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=4 },
+    /* Mariano's report: time trial, TRAFFIC VERY HIGH, no traffic. Moscow (point to point, LEVELINF traffic on). */
+    { .name="u5-traffic-timetrial",  .track=0,  .car=-1, .game_type=7, .player_is_ai=1,
+      .traffic=4, .opponents=-2, .difficulty=-1, .checkpoint_timers=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_RUN_20S, .u_check=51 },
+    { .name="u5-options-after-config", .track=0, .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=52 },
+    { .name="u5-copchase-traffic",   .track=0,  .car=-1, .game_type=8, .player_is_ai=1,
+      .traffic=4, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN, .u_check=53 },
+    { .name="u5-drag-difficulty",    .track=19, .car=-1, .game_type=9, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=0,
+      .mp_mode=-1, .depth=ST_DEPTH_COUNTDOWN, .u_check=54 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
+/* [round UB] u-row captures, taken on the first live race tick (after InitRace's per-mode overrides) */
+static int s_u_cap, s_u_traffic, s_u_vol, s_u_police, s_u_coll, s_u_cp, s_u_tier, s_u_track, s_u_car;
+static int s_u_max_traffic;   /* most traffic actors live on any tick */
+static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values set after the race type */
 #define ST_SMOKE_RACES 14  /* r1..r5 + roam + roam-sprint-smoke + roam-sprint-ai-smoke + roam-circuit-smoke + roam-sprint-mp2 + roam-circuit-mp2 + roam-traffic-smoke + roam-cops-smoke + police-smoke */
 
 typedef struct {
@@ -916,6 +957,8 @@ static void st_reset_scenario_fields(void)
     _putenv("TD5RE_CHAOS_TRIGGER=");
     _putenv("TD5RE_CHAOS_PERIOD=");
     _putenv("TD5RE_AUTORACE_LAPS_AFTER_CONFIG=");   /* [round TA] t3-laps-* */
+    _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=");   /* [round UB] u5-* */
+    _putenv("TD5RE_AUTORACE_RANDOM=");              /* [round UB] u4-random-pick */
     _putenv("TD5RE_ROAM_CIRCUIT_LAPS=");
     td5_chaos_commit_config(NULL);
     /* [MP DRAG LEAK FIX 2026-10-01] This used to reset mp_mode_config.mode for
@@ -2237,6 +2280,18 @@ static void st_apply_scenario(const RaceScenario *sc)
         _putenv("TD5RE_CHAOS_TRIGGER=" ST_CHAOS_TRIGGER_TIME);
         _putenv("TD5RE_CHAOS_PERIOD="  ST_CHAOS_PERIOD_SECS);
     }
+    /* [round UB] u-rows: the RACE OPTIONS edit made after the race type was configured */
+    s_u_cap = 0; s_u_max_traffic = 0;
+    if (sc->u_check == 4) _putenv("TD5RE_AUTORACE_RANDOM=1");
+    if (sc->u_check == 52) {
+        char buf[96];
+        s_u_want_coll = g_td5.ini.collisions ? 0 : 1;           /* flip both against the INI value */
+        s_u_want_cp   = g_td5.ini.checkpoint_timers ? 0 : 1;
+        snprintf(buf, sizeof buf, "TD5RE_AUTORACE_OPTS_AFTER_CONFIG=-1,-1,%d,%d,-1", s_u_want_coll, s_u_want_cp);
+        _putenv(buf);
+    }
+    if (sc->u_check == 53) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=1,-1,-1,-1,-1");   /* VERY HIGH -> LOW */
+    if (sc->u_check == 54) _putenv("TD5RE_AUTORACE_OPTS_AFTER_CONFIG=-1,-1,-1,-1,2");   /* EASY -> HARD */
     /* [round TA] t3-laps-* rows (st_reset_scenario_fields clears both knobs and restores ini.laps). */
     s_t3_max_lap = 0;
     if (sc->laps_menu > 0) {
@@ -3185,6 +3240,50 @@ static void st_tick_races(uint32_t now)
                                  "natural finish did not reach results screen");
                     }
                 }
+                /* [round UB] u-row verdicts */
+                if (sc->u_check && status < ST_FAIL) {
+                    char un[220];
+                    int fail = 0;
+                    un[0] = 0;
+                    if (!s_u_cap) { fail = 1; snprintf(un, sizeof un, "race never ran a tick"); }
+                    else switch (sc->u_check) {
+                    case 3:
+                        fail = !(g_td5.ini.speed_units == 1 && td5_save_get_speed_units() == 1);
+                        snprintf(un, sizeof un, "speed units hud=%s results=%s (SpeedUnitsChosen=%d)",
+                                 g_td5.ini.speed_units ? "KPH" : "MPH", td5_save_get_speed_units() ? "KPH" : "MPH",
+                                 g_td5.ini.speed_units_chosen);
+                        break;
+                    case 4:
+                        fail = frontend_random_selftest(s_u_track, s_u_car, un, sizeof un);
+                        break;
+                    case 51:
+                        fail = !(s_u_traffic == 1 && s_u_vol == 4 && s_u_max_traffic > 0);
+                        snprintf(un, sizeof un, "time trial: traffic=%d vol=%d (asked 4) police=%d collisions=%d, "
+                                 "%d traffic cars live at most", s_u_traffic, s_u_vol, s_u_police, s_u_coll,
+                                 s_u_max_traffic);
+                        break;
+                    case 52:
+                        fail = !(s_u_coll == s_u_want_coll && s_u_cp == s_u_want_cp);
+                        snprintf(un, sizeof un, "single race: collisions %d (asked %d), checkpoint timers %d (asked %d)",
+                                 s_u_coll, s_u_want_coll, s_u_cp, s_u_want_cp);
+                        break;
+                    case 53:
+                        fail = !(s_u_traffic == 1 && s_u_vol == 1);
+                        snprintf(un, sizeof un, "cop chase: traffic=%d vol=%d (asked LOW=1 after VERY HIGH), %d traffic cars",
+                                 s_u_traffic, s_u_vol, s_u_max_traffic);
+                        break;
+                    case 54:
+                        fail = !(s_u_tier == 2);
+                        snprintf(un, sizeof un, "drag: difficulty tier %d (asked 2 after 0)", s_u_tier);
+                        break;
+                    }
+                    TD5_LOG_I(LOG_TAG, "%s: %s -> %s", sc->name, un, fail ? "FAIL" : "PASS");
+                    if (fail) { status = ST_FAIL; snprintf(note, sizeof(note), "%s", un); }
+                    else {
+                        size_t nl = strlen(note);
+                        if (nl < sizeof(note) - 1) snprintf(note + nl, sizeof(note) - nl, " | %s", un);
+                    }
+                }
                 /* [round TA] t3-laps-shipped: the race ran the LAPS picked after the race type, and ended there. */
                 if (sc->laps_menu > 0 && !sc->roam && status < ST_FAIL) {
                     const int used = g_td5.circuit_lap_count;
@@ -3274,6 +3373,21 @@ static void st_tick_races(uint32_t now)
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
             st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
+            if (sc->u_check) {                      /* [round UB] what the race runs */
+                int s, live = 0;
+                const int total = td5_game_get_total_actor_count();
+                if (!s_u_cap) {
+                    s_u_cap = 1;
+                    s_u_traffic = g_td5.traffic_enabled; s_u_vol = g_td5.traffic_volume;
+                    s_u_police = g_td5.special_encounter_enabled;
+                    s_u_coll = td5_physics_get_collisions_flag() == 0 ? 1 : 0;
+                    s_u_cp = g_td5.checkpoint_timers_enabled; s_u_tier = g_td5.difficulty_tier;
+                    s_u_track = g_td5.track_index; s_u_car = td5_game_get_slot_car_index(0);
+                }
+                for (s = g_traffic_slot_base; s < total; s++)
+                    if (!td5_ai_traffic_dynamic_parked(s)) live++;
+                if (live > s_u_max_traffic) s_u_max_traffic = live;
+            }
             if (sc->laps_menu > 0 && !sc->roam) {   /* [round TA] t3-laps-shipped: laps the player completed */
                 const int l = td5_game_get_player_lap(0);
                 TD5_Actor *a0 = td5_game_get_actor(0);
