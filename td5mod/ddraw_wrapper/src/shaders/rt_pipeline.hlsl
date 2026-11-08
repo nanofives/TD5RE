@@ -181,8 +181,10 @@ void miss_refl(inout RayPayload p)
 [shader("raygeneration")]
 void rgen_shadow()
 {
-    uint2 lpx = DispatchRaysIndex().xy;                       /* pane-local pixel   */
+    uint2 dpx = DispatchRaysIndex().xy;                       /* mask-space thread  */
+    uint2 lpx = dpx << rs_shift;                              /* pane-local pixel   */
     int2  fp  = int2((int)sh_misc.y, (int)sh_misc.z) + int2(lpx); /* full-frame pixel */
+    int2  wp  = (int2((int)sh_misc.y, (int)sh_misc.z) >> rs_shift) + int2(dpx); /* [round UA] mask write pixel */
     float D = g_depth.Load(int3(fp, 0));
     float4 gb = g_gbuf.Load(int3(fp, 0));
     /* [shadow debug] sh_params.x < 0 (set by TD5RE_RT_SHADOW_DEBUG) tints the
@@ -193,22 +195,22 @@ void rgen_shadow()
     /* debug level: 1=raw vis, 2/3/4 = reconstructed world .x/.y/.z readout */
     int dbgLvl = sh_params.x < 0.0f ? (int)(-sh_params.x + 0.5f) : 0;
     bool sdbg = dbgLvl > 0;
-    if (D >= 0.99999f)   { g_sunvis[fp] = 1.0f; return; }                /* sky = lit    */
-    if (gb.a < 0.001f)   { g_sunvis[fp] = sdbg ? 0.5f : 1.0f; return; }  /* no gbuffer   */
+    if (D >= 0.99999f)   { g_sunvis[wp] = 1.0f; return; }                /* sky = lit    */
+    if (gb.a < 0.001f)   { g_sunvis[wp] = sdbg ? 0.5f : 1.0f; return; }  /* no gbuffer   */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
     /* [shadow debug] reconstructed world-pos readout: sample the pixel under the
      * car and decode value*scale, compare to the HUD car POS. Mismatch => the
      * road's depth reconstruction is in a different frame than the geometry. */
-    if (dbgLvl == 2) { g_sunvis[fp] = saturate(abs(world.x) / 262144.0f); return; }
-    if (dbgLvl == 3) { g_sunvis[fp] = saturate(abs(world.y) /  65536.0f); return; }
-    if (dbgLvl == 4) { g_sunvis[fp] = saturate(abs(world.z) / 262144.0f); return; }
+    if (dbgLvl == 2) { g_sunvis[wp] = saturate(abs(world.x) / 262144.0f); return; }
+    if (dbgLvl == 3) { g_sunvis[wp] = saturate(abs(world.y) /  65536.0f); return; }
+    if (dbgLvl == 4) { g_sunvis[wp] = saturate(abs(world.z) / 262144.0f); return; }
     /* [shadow debug] G-buffer normal check: 5 = validity (|raw normal|, 1=good
      * 0=zero/bad -> acne), 6/7/8 = encoded normal x/y/z (0.5 = zero component). */
-    if (dbgLvl == 5) { g_sunvis[fp] = saturate(length(gb.rgb * 2.0f - 1.0f)); return; }
-    if (dbgLvl == 6) { g_sunvis[fp] = gb.r; return; }
-    if (dbgLvl == 7) { g_sunvis[fp] = gb.g; return; }
-    if (dbgLvl == 8) { g_sunvis[fp] = gb.b; return; }
+    if (dbgLvl == 5) { g_sunvis[wp] = saturate(length(gb.rgb * 2.0f - 1.0f)); return; }
+    if (dbgLvl == 6) { g_sunvis[wp] = gb.r; return; }
+    if (dbgLvl == 7) { g_sunvis[wp] = gb.g; return; }
+    if (dbgLvl == 8) { g_sunvis[wp] = gb.b; return; }
     float3 L = normalize(sh_sun.xyz);
     /* [ROAD-CAST FIX 2026-08-03] Offset the shadow-ray origin along the SUN
      * direction L, NOT the surface normal. The G-buffer normal's SIGN is
@@ -265,7 +267,7 @@ void rgen_shadow()
      * band on the road where the ray hit an occluder), covered+lit -> 1 (white).
      * If the road stays uniformly white, the shadow rays are missing the fed
      * geometry (occluder mis-placed in the TLAS); black bands = shadows land. */
-    if (dbgLvl == 1) { g_sunvis[fp] = vis; return; }
+    if (dbgLvl == 1) { g_sunvis[wp] = vis; return; }
     float shade = 1.0f - sh_misc.w * (1.0f - vis);
     /* [CAR SUN] Overbright the sunlit car body (matid CARBODY=5). shade > 1 is a
      * BRIGHTEN under the unclamped MULT composite. vis keeps shadowed panels dark;
@@ -273,7 +275,7 @@ void rgen_shadow()
      * lifts a little. World/road (matid != 5) is left at shade <= 1. */
     /* Car sunlit BRIGHTENING is done additively in rgen_light (the mult composite
      * here clamps to [0,1] on the UNORM target, so it can only darken). */
-    g_sunvis[fp] = shade;
+    g_sunvis[wp] = shade;
 }
 
 /* ----- [P4] Sky-visibility GI (b1 ShadowCB layout, camera reconstruct) ------ *
@@ -288,11 +290,13 @@ void rgen_shadow()
 [shader("raygeneration")]
 void rgen_ao()
 {
-    uint2 lpx = DispatchRaysIndex().xy;
+    uint2 dpx = DispatchRaysIndex().xy;
+    uint2 lpx = dpx << rs_shift;
     int2  fp  = int2((int)sh_misc.y, (int)sh_misc.z) + int2(lpx);
+    int2  wp  = (int2((int)sh_misc.y, (int)sh_misc.z) >> rs_shift) + int2(dpx); /* [round UA] */
     float D = g_depth.Load(int3(fp, 0));
     float4 gb = g_gbuf.Load(int3(fp, 0));
-    if (D >= 0.99999f || gb.a < 0.001f) { g_gi[fp] = 1.0f; return; }   /* sky = fully open */
+    if (D >= 0.99999f || gb.a < 0.001f) { g_gi[wp] = 1.0f; return; }   /* sky = fully open */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
     float3 N = rt_gbuf_normal(gb);
@@ -329,7 +333,7 @@ void rgen_ao()
         visSum += rt_shadow_ray_ex(origin, dir, 1.0f, tmax, RAY_FLAG_FORCE_OPAQUE); /* 1 = reached sky */
     }
     float skyvis = visSum / (float)Kc;
-    g_gi[fp] = lerp(floorv, 1.0f, skyvis);
+    g_gi[wp] = lerp(floorv, 1.0f, skyvis);
 }
 
 /* ----- Phase 2b: RT dynamic-light occlusion (b2 LightCB) ------------------- *
@@ -339,10 +343,12 @@ void rgen_ao()
 [shader("raygeneration")]
 void rgen_light()
 {
-    uint2 lpx = DispatchRaysIndex().xy;
+    uint2 dpx = DispatchRaysIndex().xy;
+    uint2 lpx = dpx << rs_shift;
     int2  fp  = int2((int)li_misc.z, (int)li_misc.w) + int2(lpx);   /* vpX/vpY at misc.z/.w */
+    int2  wp  = (int2((int)li_misc.z, (int)li_misc.w) >> rs_shift) + int2(dpx); /* [round UA] */
     float D = g_depth.Load(int3(fp, 0));
-    if (D >= 0.99999f) { g_lightcol[fp] = float4(0,0,0,0); return; }
+    if (D >= 0.99999f) { g_lightcol[wp] = float4(0,0,0,0); return; }
 
     float3 world = rt_world_from_depth(D, float2(lpx), li_camPosFocal, li_rightCx, li_upCy, li_fwdDepthScale, li_misc.x);
     float4 gb = g_gbuf.Load(int3(fp, 0));
@@ -442,7 +448,7 @@ void rgen_light()
             if (m > RT_LAMP_LIGHT_SOFT) accum *= RT_LAMP_LIGHT_SOFT / m;
         }
     }
-    g_lightcol[fp] = float4(accum, 1.0f);
+    g_lightcol[wp] = float4(accum, 1.0f);
 }
 
 /* ----- Phase 3: RT reflections (b3 SSRCB) ---------------------------------- *
@@ -454,9 +460,11 @@ void rgen_light()
 [shader("raygeneration")]
 void rgen_refl()
 {
-    uint2 lpx = DispatchRaysIndex().xy;
+    uint2 dpx = DispatchRaysIndex().xy;
+    uint2 lpx = dpx << rs_shift;
     int2  fp  = int2((int)sr_misc.y, (int)sr_misc.z) + int2(lpx);
-    g_reflcol[fp] = float4(0,0,0,0);
+    int2  wp  = (int2((int)sr_misc.y, (int)sr_misc.z) >> rs_shift) + int2(dpx); /* [round UA] */
+    g_reflcol[wp] = float4(0,0,0,0);
     float D = g_depth.Load(int3(fp, 0));
     float4 gb = g_gbuf.Load(int3(fp, 0));
     if (D >= 0.99999f || gb.a < 0.001f) return;
@@ -485,12 +493,12 @@ void rgen_refl()
     int dg = (int)(sr_params2.z + 0.5f);
     /* [CAR SUN GLINT diag] dg5: green where the G-buffer has geometry, +blue where
      * the pixel is a detected car (isCar). Confirms the car reaches the RT pass. */
-    if (dg == 5) { g_reflcol[fp] = float4(0.0f, (gb.a > 0.001f) ? 1.0f : 0.0f, isCar ? 1.0f : 0.0f, 1.0f); return; }
+    if (dg == 5) { g_reflcol[wp] = float4(0.0f, (gb.a > 0.001f) ? 1.0f : 0.0f, isCar ? 1.0f : 0.0f, 1.0f); return; }
     /* [CAR SUN GLINT diag] dg6: N.L vs sr_sun over ALL geometry — green=sun-facing
      * (N.L>0, can glint), red=facing away. Validates the sun vector sign. */
-    if (dg == 6) { float3 Ls = float3(sr_sun.x, -sr_sun.y, sr_sun.z); float nl = dot(N, Ls); g_reflcol[fp] = float4(saturate(-nl), saturate(nl), 0.0f, (gb.a > 0.001f) ? 1.0f : 0.0f); return; }
+    if (dg == 6) { float3 Ls = float3(sr_sun.x, -sr_sun.y, sr_sun.z); float nl = dot(N, Ls); g_reflcol[wp] = float4(saturate(-nl), saturate(nl), 0.0f, (gb.a > 0.001f) ? 1.0f : 0.0f); return; }
     /* [P3 diag] dg1: R=base reflectivity, G=matid/8, B=up. */
-    if (dg == 1) { g_reflcol[fp] = float4(base, (float)matid / 8.0f, saturate(-N.y), 1.0f); return; }
+    if (dg == 1) { g_reflcol[wp] = float4(base, (float)matid / 8.0f, saturate(-N.y), 1.0f); return; }
     if (base < 0.01f && !isCar && dg == 0) return;   /* early-out: most pixels don't reflect (perf save; car keeps going for the glint) */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sr_camPosFocal, sr_rightCx, sr_upCy, sr_fwdDepthScale, sr_misc.x);
@@ -498,7 +506,7 @@ void rgen_refl()
     float ndv = saturate(dot(-V, N));
     float w = base * (0.25f + 0.75f * pow(1.0f - ndv, 3.0f)) * sr_params2.y;   /* Fresnel * intensity */
     /* [P3 diag] dg2: weight w as grayscale (params2.y intensity check). */
-    if (dg == 2) { g_reflcol[fp] = float4(w, w, w, 1.0f); return; }
+    if (dg == 2) { g_reflcol[wp] = float4(w, w, w, 1.0f); return; }
     if (w < 0.02f && !isCar && dg == 0) return;
 
     float dist = length(world - sr_camPosFocal.xyz);
@@ -523,7 +531,7 @@ void rgen_refl()
         w = max(w, 0.14f);
     }
     /* [P3 diag] dg3: raw reflected color. */
-    if (dg == 3) { g_reflcol[fp] = float4(pl.color, 1.0f); return; }
+    if (dg == 3) { g_reflcol[wp] = float4(pl.color, 1.0f); return; }
 
     /* [CAR SUN GLINT 2026-08-04] Blinn-Phong sun highlight on car bodywork &
      * glass so the sun visibly reflects off the paint and windows. sr_sun.xyz is
@@ -564,5 +572,5 @@ void rgen_refl()
     float3 cPremul = glint + pl.color * w * (1.0f - glintA);
     float3 cOut = cPremul / max(aOut, 1e-4f);
     if (aOut < 0.001f && dg == 0) return;
-    g_reflcol[fp] = float4(cOut, aOut);
+    g_reflcol[wp] = float4(cOut, aOut);
 }

@@ -638,7 +638,7 @@ static unsigned  s_rtmark_head, s_rtmark_total;
  *
  * Deltas are reported against the FIRST mark of the frame, plus a per-mark step,
  * so a single dominant operation stands out immediately. */
-#define TD5_RTTS_SLOTS 32
+#define TD5_RTTS_SLOTS 64   /* [round UA] 32 -> 64: per-pass stamps x 2 panes */
 static ID3D12QueryHeap *s_rtts_heap;
 static ID3D12Resource  *s_rtts_rb[D3D12_FRAME_COUNT];
 static char             s_rtts_tag[D3D12_FRAME_COUNT][TD5_RTTS_SLOTS][24];
@@ -659,7 +659,10 @@ static int rtts_enabled(void)
 {
     if (s_rtts_on < 0) {
         const char *e = getenv("TD5RE_RT_TIMESTAMPS");
-        s_rtts_on = (e && e[0] == '1') ? 1 : 0;
+        /* 1 = slow-frame mark log (original); 2 = [round UA] per-pass summary:
+         * explicit Backend_RTStamp() boundaries, aggregated per tag for
+         * Backend_GpuStatsDump (TD5RE_FRAMESTATS writes it). */
+        s_rtts_on = (e && e[0] == '1') ? 1 : (e && e[0] == '2') ? 2 : 0;
     }
     return s_rtts_on;
 }
@@ -795,6 +798,130 @@ static void rtts_frame_end(UINT fi)
  * produced only the "armed" header). */
 static void rtts_drain_forced(UINT fi);
 
+/* ---- [round UA 2026-11-08] GPU per-pass SUMMARY (TD5RE_RT_TIMESTAMPS=2) -----
+ * Each stamp's STEP (ticks since the previous stamp of the same frame) is the
+ * GPU time of the work recorded between the two stamps, so stamps are placed
+ * at pass BOUNDARIES: "pre.<x>" closes whatever ran before pass x (raster,
+ * HUD...), "rt.<x>.<stage>" closes a stage of RT pass x. Steps are summed per
+ * tag per frame and kept per frame, so Backend_GpuStatsDump can report
+ * percentiles (spikes), not just means. "*total" = first..last stamp span =
+ * all GPU work of the frame; "*rt" = sum of every "rt.*" step. VRAM usage vs
+ * the OS budget (IDXGIAdapter3::QueryVideoMemoryInfo, LOCAL segment) is
+ * sampled every 30 presents while summary mode is on. */
+#define GSTAT_TAGS   48
+#define GSTAT_FRAMES 30000
+typedef struct { char tag[24]; float *ms; int n; } GStat;
+static GStat  s_gstat[GSTAT_TAGS];
+static int    s_gstat_count;
+static UINT64 s_vram_peak, s_vram_budget_min = ~0ull, s_vram_budget_last, s_vram_usage_last;
+static int    s_vram_samples;
+
+static GStat *gstat_get(const char *tag)
+{
+    int i;
+    for (i = 0; i < s_gstat_count; i++) if (!strcmp(s_gstat[i].tag, tag)) return &s_gstat[i];
+    if (s_gstat_count >= GSTAT_TAGS) return NULL;
+    {
+        GStat *g = &s_gstat[s_gstat_count];
+        g->ms = (float *)calloc(GSTAT_FRAMES, sizeof(float));
+        if (!g->ms) return NULL;
+        strncpy(g->tag, tag, sizeof(g->tag) - 1); g->tag[sizeof(g->tag) - 1] = 0;
+        g->n = 0;
+        s_gstat_count++;
+        return g;
+    }
+}
+
+static void gstat_vram_sample(void)
+{
+    static IDXGIAdapter3 *s_ad3; static int s_tried;
+    DXGI_QUERY_VIDEO_MEMORY_INFO vi;
+    if (!s_tried) {
+        IDXGIFactory4 *fac = NULL; LUID luid;
+        s_tried = 1;
+        if (g_d3d12.device && SUCCEEDED(CreateDXGIFactory2(0, &IID_IDXGIFactory4, (void **)&fac))) {
+            IDXGIAdapter1 *a1 = NULL;
+            g_d3d12.device->lpVtbl->GetAdapterLuid(g_d3d12.device, &luid);
+            if (SUCCEEDED(IDXGIFactory4_EnumAdapterByLuid(fac, luid, &IID_IDXGIAdapter1, (void **)&a1)) && a1) {
+                IDXGIAdapter1_QueryInterface(a1, &IID_IDXGIAdapter3, (void **)&s_ad3);
+                IDXGIAdapter1_Release(a1);
+            }
+            IDXGIFactory4_Release(fac);
+        }
+    }
+    if (!s_ad3) return;
+    ZeroMemory(&vi, sizeof(vi));
+    if (FAILED(IDXGIAdapter3_QueryVideoMemoryInfo(s_ad3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vi))) return;
+    s_vram_usage_last = vi.CurrentUsage; s_vram_budget_last = vi.Budget;
+    if (vi.CurrentUsage > s_vram_peak) s_vram_peak = vi.CurrentUsage;
+    if (vi.Budget && vi.Budget < s_vram_budget_min) s_vram_budget_min = vi.Budget;
+    s_vram_samples++;
+}
+
+static void gstat_frame(UINT fi, const UINT64 *ts, UINT n)
+{
+    /* Per-frame sums (one frame's tags are few; linear search is fine). */
+    struct { const char *tag; double ms; } acc[TD5_RTTS_SLOTS + 2];
+    int na = 0, j; UINT i;
+    double rt = 0.0, inv = 1000.0 / (double)s_rtts_freq;
+    static unsigned s_frames;
+    if (n < 2) return;
+    for (i = 1; i < n; i++) {
+        const char *tag = s_rtts_tag[fi][i];
+        double step = (double)(ts[i] - ts[i - 1]) * inv;
+        if (!strncmp(tag, "rt.", 3)) rt += step;
+        for (j = 0; j < na; j++) if (!strcmp(acc[j].tag, tag)) { acc[j].ms += step; break; }
+        if (j == na) { acc[na].tag = tag; acc[na].ms = step; na++; }
+    }
+    acc[na].tag = "*total"; acc[na].ms = (double)(ts[n - 1] - ts[0]) * inv; na++;
+    acc[na].tag = "*rt";    acc[na].ms = rt; na++;
+    for (j = 0; j < na; j++) {
+        GStat *g = gstat_get(acc[j].tag);
+        if (g && g->n < GSTAT_FRAMES) g->ms[g->n++] = (float)acc[j].ms;
+    }
+    if ((s_frames++ % 30u) == 0u) gstat_vram_sample();
+}
+
+static int gstat_cmp(const void *a, const void *b)
+{ float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
+
+void Backend_GpuStatsDump(const char *path)
+{
+    FILE *f; int i;
+    if (!path) return;
+    gstat_vram_sample();
+    f = fopen(path, "a");
+    if (!f) return;
+    if (s_vram_samples)
+        fprintf(f, "vram_local usage_now=%llu MB peak=%llu MB budget_now=%llu MB budget_min=%llu MB samples=%d\n",
+                (unsigned long long)(s_vram_usage_last >> 20), (unsigned long long)(s_vram_peak >> 20),
+                (unsigned long long)(s_vram_budget_last >> 20),
+                (unsigned long long)((s_vram_budget_min == ~0ull ? 0 : s_vram_budget_min) >> 20), s_vram_samples);
+    if (!s_gstat_count) {
+        fprintf(f, "gpu: no per-pass stamps (run with TD5RE_RT_TIMESTAMPS=2)\n");
+    } else {
+        unsigned frames = 0;
+        for (i = 0; i < s_gstat_count; i++) if (!strcmp(s_gstat[i].tag, "*total")) frames = (unsigned)s_gstat[i].n;
+        fprintf(f, "gpu_ms per tag (step since previous stamp, summed per frame; frames_with_tag/%u):\n", frames);
+        fprintf(f, "  %-22s %6s %7s %7s %7s %7s %7s\n", "tag", "frames", "mean", "p50", "p95", "p99", "max");
+        for (i = 0; i < s_gstat_count; i++) {
+            GStat *g = &s_gstat[i];
+            float *srt; double sum = 0.0; int k;
+            if (g->n <= 0) continue;
+            srt = (float *)malloc(sizeof(float) * (size_t)g->n);
+            if (!srt) continue;
+            memcpy(srt, g->ms, sizeof(float) * (size_t)g->n);
+            qsort(srt, (size_t)g->n, sizeof(float), gstat_cmp);
+            for (k = 0; k < g->n; k++) sum += srt[k];
+            fprintf(f, "  %-22s %6d %7.3f %7.3f %7.3f %7.3f %7.3f\n", g->tag, g->n, sum / g->n,
+                    srt[(int)(0.50 * (g->n - 1) + 0.5)], srt[(int)(0.95 * (g->n - 1) + 0.5)],
+                    srt[(int)(0.99 * (g->n - 1) + 0.5)], srt[g->n - 1]);
+            free(srt);
+        }
+    }
+    fclose(f);
+}
+
 /* Called AFTER the present path's existing wait on this slot's fence, so the
  * data is complete without us adding any synchronisation. */
 static void rtts_drain_ex(UINT fi, int force, double present_ms)
@@ -824,7 +951,9 @@ static void rtts_drain_ex(UINT fi, int force, double present_ms)
     s_rtts_last_end = ts[n - 1];
     s_rtts_have_last = 1;
 
-    if (force || total_ms >= rtts_threshold_ms()) {
+    if (s_rtts_on == 2) { gstat_frame(fi, ts, n); total_ms = -1.0; }   /* summary mode: no per-frame log */
+
+    if (total_ms >= 0.0 && (force || total_ms >= rtts_threshold_ms())) {
         if (force)
             rtts_log("*** SLOW PRESENT %.0f ms (cpu wall) -- GPU marks for that frame follow ***",
                      present_ms);
@@ -865,7 +994,12 @@ void Backend_NoteRTMark(const char *tag)
     m->gen     = g_backend.device_generation;
     s_rtmark_head++; s_rtmark_total++;
 
-    rtts_stamp(m->tag);
+    if (s_rtts_on != 2) rtts_stamp(m->tag);   /* mode 2 uses explicit Backend_RTStamp */
+}
+
+void Backend_RTStamp(const char *tag)
+{
+    if (rtts_enabled() == 2) rtts_stamp(tag);
 }
 
 void Backend_NotePresent(void)

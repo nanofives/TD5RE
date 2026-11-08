@@ -4222,18 +4222,9 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
      * only when RT is active; 0 => rgen_light falls back to its old hard-cone /
      * single-shadow-ray path. */
     if (td5_rt_active()) {
-        static float s_cone_soft = -1.0f; static int s_light_rays = -1;
-        if (s_light_rays < 0) {
-            const char *e;
-            s_cone_soft  = ((e = getenv("TD5RE_RT_LIGHT_CONE_SOFT")) && e[0]) ? (float)atof(e) : 0.15f;
-            s_light_rays = ((e = getenv("TD5RE_RT_LIGHT_RAYS"))      && e[0]) ? atoi(e)        : 2;
-            if (s_cone_soft < 0.0f) s_cone_soft = 0.0f;
-            if (s_cone_soft > 1.0f) s_cone_soft = 1.0f;
-            if (s_light_rays < 1)  s_light_rays = 1;
-            if (s_light_rays > 16) s_light_rays = 16;
-        }
-        cb.ext[3]  = s_cone_soft;
-        cb.ext2[0] = (float)s_light_rays;
+        /* [round UA] live LIGHTS row (was latched on first use = restart-only). */
+        cb.ext[3]  = td5_rt_opt_light_cone_soft();
+        cb.ext2[0] = (float)td5_rt_opt_light_rays();
     }
 
     for (int i = 0; i < n; i++) {
@@ -4311,10 +4302,12 @@ void td5_plat_rt_pool_stats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_us
     Backend_RTPoolStats(vb_used, vb_cap, ib_used, ib_cap, meshes);
 }
 void td5_plat_rt_set_mode(int high) { Backend_RTSetMode(high); }
+void td5_plat_rt_set_resolution(int shadow_half, int refl_half) { Backend_RTSetResolution(shadow_half, refl_half); }
 void td5_plat_rt_register_page(unsigned page_id) { Backend_RTRegisterBoundPage(page_id); }
 void td5_plat_rt_warmup_begin(void) { Backend_RTWarmupBegin(); }
 void td5_plat_rt_warmup_step(void)  { Backend_RTWarmupStep(); }
 int  td5_plat_rt_warmup_pending(void) { return Backend_RTWarmupPending(); }
+void td5_plat_gpu_stats_dump(const char *path) { Backend_GpuStatsDump(path); }
 
 void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float focal, float center_x, float center_y,
@@ -4366,15 +4359,13 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
      * The edge-aware bilateral DENOISE composite (TD5RE_RT_DENOISE, backend side)
      * cleans the low-sample grain, so this stays cheap; fallback default 2 matches
      * the fresh-INI SHADOW QUALITY (only used if TD5RE_RT_RAYS is wholly unset). */
-    { static float s_bias = -1.0f; static int s_rays = -1;
-      if (s_rays < 0) { const char *e;
+    { static float s_bias = -1.0f;
+      if (s_bias < 0.0f) { const char *e;
           s_bias = ((e = getenv("TD5RE_RT_BIAS")) && e[0]) ? (float)atof(e) : 1.0f;
-          s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 2;
-          if (s_bias < 0.0f) s_bias = 0.0f;
-          if (s_rays < 1) s_rays = 1;
-          if (s_rays > 16) s_rays = 16; }
+          if (s_bias < 0.0f) s_bias = 0.0f; }
       cb.params2[1] = s_bias;
-      cb.params2[2] = (float)s_rays; }
+      /* [round UA] live SHADOW QUALITY row (was latched = restart-only). */
+      cb.params2[2] = (float)td5_rt_opt_shadow_rays(); }
     /* [RT2 P1] params2.w = RT sun-shadow cone-spread scale (1 = default ~0.7deg;
      * OVERCAST widens it for a soft, directionless penumbra). RT-only: the LOW
      * screen-space shadow shader reads only params2.x. */

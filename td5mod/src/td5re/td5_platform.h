@@ -987,6 +987,8 @@ void td5_plat_rt_pool_stats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_us
                             unsigned *ib_cap, unsigned *meshes);
 /* [P2b] HIGH mode: deferred shadow/light passes run the RT dispatch+composite. */
 void td5_plat_rt_set_mode(int high);
+/* [round UA] RT trace resolution: 1 = half-res (shadow/GI/lights; reflections). */
+void td5_plat_rt_set_resolution(int shadow_half, int refl_half);
 /* [P3] Register the just-bound texture page into the RT bindless table (index =
  * page id) so reflection hits sample the real texture. No-op when RT inactive. */
 void td5_plat_rt_register_page(unsigned page_id);
@@ -999,6 +1001,9 @@ void td5_plat_rt_register_page(unsigned page_id);
 void td5_plat_rt_warmup_begin(void);
 void td5_plat_rt_warmup_step(void);
 int  td5_plat_rt_warmup_pending(void);
+/* [round UA] Append the backend's GPU per-pass timing summary (TD5RE_RT_TIMESTAMPS=2)
+ * and the VRAM budget/peak to `path`. No-op when nothing was collected. */
+void td5_plat_gpu_stats_dump(const char *path);
 
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);

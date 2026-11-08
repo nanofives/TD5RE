@@ -8921,6 +8921,8 @@ int td5_game_run_race_frame(void) {
         td5_game_net_sync_frame(1);
 
     td5_profile_begin_frame();   /* race-frame profiler timeline (zones via trace_stage + render/present below) */
+    /* [round UA] TD5RE_FRAMESTATS=N: frame-time percentiles, dev measurement. */
+    if (td5_profile_race_frame()) g_td5.quit_requested = 1;
     td5_game_trace_stage("frame_begin", 0);
 
     /* [S27] Controller-disconnect check (once per frame, before the sim loop).

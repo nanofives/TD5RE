@@ -2252,7 +2252,9 @@ static void st_apply_scenario(const RaceScenario *sc)
      * TDR). An rt row forces RT HIGH -- only when the GPU actually supports it
      * -- and MUST run at a safe FF (see the rt row's .ff=1) so it doesn't trip
      * the watchdog. st_reset_scenario_fields restores LOW after. */
-    if (sc->rt && td5_rt_available()) {
+    /* [round UA] TD5RE_SELFTEST_RT=1 forces RT HIGH on EVERY row (dev RT
+     * benchmarking of scripted drives, e.g. the roam rows; verify/rt_bench.py --row). */
+    if ((sc->rt || td5_env_int("TD5RE_SELFTEST_RT", 0, 0, 1)) && td5_rt_available()) {
         g_td5.ini.lighting_quality = 1;
         td5_rt_set_quality(1);
     } else {

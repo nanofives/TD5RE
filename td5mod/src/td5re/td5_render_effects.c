@@ -3699,12 +3699,12 @@ void td5_render_draw_sun_disc(void)
         return;
     }
     if (s_disc_on < 0) {
-        const char *e = getenv("TD5RE_SUN_DISC");      s_disc_on = (e && e[0]) ? atoi(e) : 1;
+        s_disc_on = 1;   /* [round UA] live: td5_rt_opt_sun_disc() below */
         const char *z = getenv("TD5RE_SUN_DISC_SIZE"); s_disc_sz = (z && z[0]) ? (float)atof(z) : 0.03f;
         const char *d = getenv("TD5RE_SUN_DISC_DBG");  s_disc_dbg = (d && d[0]) ? atoi(d) : 0;
         if (s_disc_sz <= 0.0f) s_disc_sz = 0.03f;
     }
-    if (!s_disc_on) return;
+    if (!s_disc_on || !td5_rt_opt_sun_disc()) return;
 
     /* [SUN DISC Y-SPACE FIX 2026-10-03] The disc must project onto the painted
      * sun, and where the painted sun lands is fixed by construction: the dome is

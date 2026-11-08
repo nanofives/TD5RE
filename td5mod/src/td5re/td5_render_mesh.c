@@ -265,7 +265,7 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
 /* [RT2 P1] TD5RE_SUN_PROBE dev toggle (default on). 0 = ignore the image sun,
  * fall back to the zone-derived sun in HIGH (matches pre-RT2 behaviour). */
 static int sun_probe_enabled(void)
-{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_PROBE"); v = (e && e[0]) ? atoi(e) : 1; } return v; }
+{ return td5_rt_opt_sun_probe(); }   /* [round UA] SUN & SKY row, live (env TD5RE_SUN_PROBE still wins) */
 
 /* [CAR SUN 2026-08-03] Sunlit-car brighten gain (car bodywork *= 1+gain in
  * ApplyFogAndAlphaTest). 2026-08-04: default ON in DEV (0.35) so the car reads
@@ -531,18 +531,18 @@ void td5_render_apply_gi_pass(int vp_x, int vp_y)
          * multiplied most of the track down toward the 0.45 floor (only open-sky
          * spots stayed bright) — read as unwanted global dimming. TD5RE_RT_GI=1
          * re-enables (tune TD5RE_RT_GI_FLOOR up / _DIST down if used). */
-        s_gi_on    = ((e = getenv("TD5RE_RT_GI"))       && e[0]) ? atoi(e)        : 0;
-        s_gi_rays  = ((e = getenv("TD5RE_RT_GI_RAYS"))  && e[0]) ? atoi(e)        : 4;
+        s_gi_on    = 1;   /* [round UA] live: td5_rt_opt_gi_on() below */
+        s_gi_rays  = 1;
         s_gi_dist  = ((e = getenv("TD5RE_RT_GI_DIST"))  && e[0]) ? (float)atof(e) : 6000.0f;
         s_gi_floor = ((e = getenv("TD5RE_RT_GI_FLOOR")) && e[0]) ? (float)atof(e) : 0.45f;
-        if (s_gi_rays < 1)  s_gi_rays = 1;
-        if (s_gi_rays > 16) s_gi_rays = 16;
         if (s_gi_floor < 0.0f) s_gi_floor = 0.0f;
         if (s_gi_floor > 1.0f) s_gi_floor = 1.0f;
         TD5_LOG_I(LOG_TAG, "light2: GI pass rays=%d dist=%.0f floor=%.2f on=%d",
-                  s_gi_rays, (double)s_gi_dist, (double)s_gi_floor, s_gi_on);
+                  td5_rt_opt_gi_rays(), (double)s_gi_dist, (double)s_gi_floor, td5_rt_opt_gi_on());
     }
-    if (!s_gi_on) return;
+    /* [round UA] GLOBAL ILLUM. row, live (was latched = restart-only). */
+    if (!td5_rt_opt_gi_on()) return;
+    s_gi_rays = td5_rt_opt_gi_rays();
     for (i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
     cam[0] = s_camera_pos[0]; cam[1] = s_camera_pos[1]; cam[2] = s_camera_pos[2];
     depth_scale = 1.0f / DEPTH_NORMALIZE_INV;
@@ -562,6 +562,9 @@ void td5_render_apply_gi_pass(int vp_x, int vp_y)
 void td5_render_apply_ssr_pass(int vp_x, int vp_y)
 {
     if (!td5_light2_active() || !td5_light2_reflections()) return;
+    /* [round UA] LIGHTING OPTIONS > REFLECTIONS OFF gates only the RT pass in
+     * HIGH (it used to clear the shared SSR toggle and never restore it). */
+    if (td5_rt_active() && !td5_rt_opt_reflections()) return;
 
     /* Per-material base reflectivity LUT (ids 0..7; beyond COUNT = 0). */
     float refl8[8];
@@ -616,13 +619,9 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
      * count stays 1 (the precision lever is Phase 8's half-res dispatch). */
     float refl_dist = s_dist;
     if (td5_rt_active()) {
-        static float s_rt_refl_dist = -1.0f;
-        if (s_rt_refl_dist < 0.0f) {
-            const char *e = getenv("TD5RE_RT_REFL_DIST");
-            s_rt_refl_dist = (e && e[0]) ? (float)atof(e) : 50000.0f;
-            if (s_rt_refl_dist < s_dist) s_rt_refl_dist = s_dist;
-        }
-        refl_dist = s_rt_refl_dist;
+        /* [round UA] REFLECTION RANGE row, live (was latched = restart-only). */
+        float rd = td5_rt_opt_refl_dist();
+        refl_dist = (rd < s_dist) ? s_dist : rd;
     }
 
     /* [P3] Scene sun dir for the RT reflection's sun shadow ray -- SAME unified
