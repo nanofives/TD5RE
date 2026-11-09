@@ -110,6 +110,10 @@ typedef struct {
     uint32_t route_hash;
     int shortcuts;            /* [round VD] DEV shortcut census: places where the surface links two route legs past the barriers (must be 0) */
     double shortcut_gain_m;   /* [round VD] ... the most route length one of them skips */
+    int revisits;             /* [round VD] DEV shortcut census: sites inside ONE junction the route passes twice (not closable by a static barrier) */
+    double revisit_gain_m;    /* [round VD] ... the most route length one of them skips */
+    int glue_panels;          /* [round VD] panels across the seam of two touching route junctions far apart along the route */
+    int finish_pocket_closed; /* [round VD] 1 when the finish pocket's arm was barriered (the route passes that junction earlier) */
 } TD5_RoamBarrierStats;
 void td5_roam_barriers_stats(TD5_RoamBarrierStats *out);
 

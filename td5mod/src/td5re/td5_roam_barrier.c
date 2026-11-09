@@ -645,7 +645,72 @@ typedef struct {
     int       have_dir, have_in, have_out;
     int       degree;              /* planner graph degree, -1 unknown */
     int       origin;              /* 1 + index of the route cluster this one was glued to, 0 = a route cluster */
+    double    rs[8];               /* [round VD] route distance (m) of each time the route passes within 30 m */
+    int       nrs;
+    int       npass, uturn;        /* [round VD] through passes of the planner here; one of them turns back (> 150 deg) */
+    int       pidx[8], npidx;      /* [round VD] indices (in route order) of the passes here, pockets included */
 } Cl;
+
+/* [round VD] the route passes near a cluster: one distance per contiguous run of route segments within 30 m of its
+ * centre (the nearest point of the run). A junction the route passes twice has two. */
+#define BAR_RUN_R_M     30.0
+/* two route junctions joined by an arm that the route does not take: the route goes from one to the other through at least
+ * one junction more (their passes are not consecutive) = the arm skips that much route */
+static int cl_pass_gap(const Cl *a, const Cl *b, int npass, int closed)
+{
+    int g = 1 << 30, i, j;
+    for (i = 0; i < a->npidx; i++) for (j = 0; j < b->npidx; j++) {
+        int d = a->pidx[i] - b->pidx[j];
+        if (d < 0) d = -d;
+        if (closed && npass - d < d) d = npass - d;
+        if (d < g) g = d;
+    }
+    return g;
+}
+static void cl_route_runs(Cl *c, const TD5_RoamRouteResult *route)
+{
+    const double R2 = (BAR_RUN_R_M * BAR_UPM) * (BAR_RUN_R_M * BAR_UPM);
+    int i, in = 0;
+    double best = 0.0, bs = 0.0;
+    c->nrs = 0;
+    if (!c->node || !route->dist_m) return;
+    for (i = 0; i + 1 < route->npt; i++) {
+        const double sx = route->px[i + 1] - route->px[i], sz = route->pz[i + 1] - route->pz[i], l2 = sx * sx + sz * sz;
+        double t = l2 > 0.0 ? ((c->cx - route->px[i]) * sx + (c->cz - route->pz[i]) * sz) / l2 : 0.0, dx, dz, d2;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+        dx = route->px[i] + sx * t - c->cx; dz = route->pz[i] + sz * t - c->cz; d2 = dx * dx + dz * dz;
+        if (d2 < R2) {
+            const double s = route->dist_m[i] + t * (route->dist_m[i + 1] - route->dist_m[i]);
+            if (!in || d2 < best) { best = d2; bs = s; }
+            in = 1;
+        } else if (in) {
+            if (c->nrs < 8) c->rs[c->nrs++] = bs;
+            in = 0;
+        }
+    }
+    if (in && c->nrs < 8) c->rs[c->nrs++] = bs;
+}
+
+/* [round VD] DEV A/B: TD5RE_ROAM_BARRIER_VD=0 places the barriers as before round VD (no glue panels, the finish
+ * pocket always open). RELEASE: on. */
+static int bar_vd_on(void)
+{
+#ifndef TD5RE_RELEASE
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_int("TD5RE_ROAM_BARRIER_VD", 1, 0, 1);
+    return s_on;
+#else
+    return 1;
+#endif
+}
+
+#ifndef TD5RE_RELEASE
+/* [round VD] the route clusters of the last build and their passes, for the shortcut census's revisit test */
+typedef struct { double cx, cz, rs[8]; int nrs, npass, uturn; } ClRuns;
+static ClRuns *s_clr;
+static int     s_nclr;
+#endif
 
 typedef struct { int cl; int64_t ckey; int has_in, has_out; ArmId in, out; } Pass;
 
@@ -814,6 +879,68 @@ static void push_key(uint64_t **arr, int *n, int *cap, uint64_t v)
     (*arr)[(*n)++] = v;
 }
 
+static int seal_prims(const BarLoc *L, double px, double pz, uint64_t *key, uint8_t *patch, uint32_t *prim, int cap);
+
+/* [round VD] a panel across the SEAM of two touching junction patches (an arm whose edge has no ribbon: the patches
+ * meet). The seam is found on the line between the two centres: the last point on patch a before patch b begins. The
+ * panel stands across that line, its ends taken out to where the road ends, and must keep 2 m (1 m at worst) off the
+ * route polyline; it slides along the line up to 8 m each way to find such a place. 1 when one was added. */
+static int glue_panel(const BarLoc *L, const TD5_RoamRouteResult *route, const Cl *a, const Cl *b, uint64_t edge_key)
+{
+    const double dx = b->cx - a->cx, dz = b->cz - a->cz, D = sqrt(dx * dx + dz * dz);
+    double ux, uz, nx, nz, seam = -1.0, last_a = -1.0, t;
+    int pass, k;
+    if (!L->rs || D < 1.0) return 0;
+    ux = dx / D; uz = dz / D; nx = -uz; nz = ux;
+    for (t = 0.0; t <= D; t += 0.25 * BAR_UPM) {
+        uint64_t key[16]; uint8_t pa[16]; uint32_t pr[16];
+        const int n = seal_prims(L, a->cx + ux * t, a->cz + uz * t, key, pa, pr, 16);
+        int on_a = 0, on_b = 0, i;
+        for (i = 0; i < n; i++) {
+            if (pa[i] && key[i] == (uint64_t)a->key) on_a = 1;
+            if (pa[i] && key[i] == (uint64_t)b->key) on_b = 1;
+        }
+        if (on_a) last_a = t;
+        if (on_b && !on_a) { seam = last_a >= 0.0 ? 0.5 * (last_a + t) : t; break; }
+    }
+    if (seam < 0.0) seam = 0.5 * D;
+    for (pass = 0; pass < 2; pass++) {
+        const double clear = (pass == 0 ? 2.0 : 1.0) * BAR_UPM;
+        for (k = 0; k <= 32; k++) {
+            const double off = (double)((k + 1) / 2) * 0.5 * BAR_UPM * ((k & 1) ? 1.0 : -1.0);
+            const double px = a->cx + ux * (seam + off), pz = a->cz + uz * (seam + off);
+            PlBar pb;
+            double r0, r1;
+            if (seam + off < 0.0 || seam + off > D) continue;
+            if (!bar_on_road(L, px, pz)) continue;
+            r0 = bar_end_reach(L, px, pz, -nx, -nz, 15.0);
+            r1 = bar_end_reach(L, px, pz, nx, nz, 15.0);
+            if (r0 >= 14.9 * BAR_UPM || r1 >= 14.9 * BAR_UPM) continue;           /* no wall within 15 m: not a street */
+            pb.x0 = px - nx * (r0 + BAR_KERB_M * BAR_UPM); pb.z0 = pz - nz * (r0 + BAR_KERB_M * BAR_UPM);
+            pb.x1 = px + nx * (r1 + BAR_KERB_M * BAR_UPM); pb.z1 = pz + nz * (r1 + BAR_KERB_M * BAR_UPM);
+            pb.y0 = pb.y1 = 0.5 * (a->cy + b->cy);
+            if (!seg_clear_of_route(pb.x0, pb.z0, pb.x1, pb.z1, route, clear)) continue;
+            if (!bar_add(&pb, TD5_ROAM_BARRIER_MOUTH, (uint64_t)a->key, 1, edge_key, -2)) return 0;
+            {   /* chevrons along the nearest route direction, the open side back toward a */
+                double best = 1e300, rx = 0.0, rz = 0.0;
+                int j;
+                for (j = 0; j + 1 < route->npt; j++) {
+                    const double d2 = pt_seg_d2(px, pz, route->px[j], route->pz[j], route->px[j + 1], route->pz[j + 1]);
+                    if (d2 < best) { best = d2; rx = route->px[j + 1] - route->px[j]; rz = route->pz[j + 1] - route->pz[j]; }
+                }
+                B.aux[B.n - 1].sign = (B.aux[B.n - 1].ax * rx + B.aux[B.n - 1].az * rz) < 0.0 ? -1 : 1;
+                B.aux[B.n - 1].openx = -ux; B.aux[B.n - 1].openz = -uz;
+            }
+            TD5_LOG_I(LOG_TAG, "BARRIERS: glue panel on edge %llX between route junctions %lld and %lld (passes %d and %d): "
+                      "seam %.1f m from the first, slid %.1f m, %.1f m wide, clearance %.0f m",
+                      (unsigned long long)edge_key, (long long)a->key, (long long)b->key, a->pidx[0], b->pidx[0], seam / BAR_UPM, off / BAR_UPM,
+                      (r0 + r1) / BAR_UPM + 2.0 * BAR_KERB_M, clear / BAR_UPM);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in, const BarLoc *loc_in, const BarSeals *sx)
 {
     Pool pool = *pool_in;
@@ -907,6 +1034,15 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
             q->has_in = 1; q->in.key = re[last].key; q->in.end = EXIT_END(last);
         }
     }
+    if (bar_vd_on() && !route->closed && npass > 0 && ps[npass - 1].has_in && !ps[npass - 1].has_out) {
+        /* [round VD] the finish pocket's arm is the last street past the FINISH line. When the route also goes THROUGH
+         * that junction earlier, opening it let a car leave the route there and reach the line along that street
+         * backwards (the avenida census route: 358 m skipped). Then it gets a barrier like any other arm; past the line
+         * the car meets it at the junction, which is after the race. */
+        int b2, through = 0;
+        for (b2 = 0; b2 + 1 < npass; b2++) if (ps[b2].ckey == ps[npass - 1].ckey && ps[b2].has_in && ps[b2].has_out) through = 1;
+        if (through) { ps[npass - 1].has_in = 0; B.st.finish_pocket_closed++; }
+    }
     for (a = 0; a < npass; a++) {
         const int64_t key = ps[a].ckey;
         int ci = cl_find(cl, ncl, key);
@@ -915,6 +1051,7 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
             if (!cl_init(&cl[ci], key, pool_node(&pool, key), &pool)) goto oom;
         }
         ps[a].cl = ci;
+        if (cl[ci].npidx < 8) cl[ci].pidx[cl[ci].npidx++] = a;
         if (!cl[ci].node) { B.st.missing_cluster++; continue; }
         if (ps[a].has_in)  cl_take(&cl[ci], ps[a].in.key,  ps[a].in.end);
         if (ps[a].has_out) cl_take(&cl[ci], ps[a].out.key, ps[a].out.end);
@@ -968,6 +1105,27 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
             if (!added) break;
         }
     }
+    /* [round VD] where along the route each route cluster is passed (glued / touching neighbours: none of their own) */
+    for (i = 0; i < ncl; i++) { if (cl[i].origin == 0) cl_route_runs(&cl[i], route); else cl[i].nrs = 0; }
+#ifndef TD5RE_RELEASE
+    free(s_clr); s_clr = (ClRuns *)calloc((size_t)(ncl ? ncl : 1), sizeof(ClRuns)); s_nclr = 0;
+    for (a = 0; a < npass; a++) {   /* through passes per cluster, U-turns */
+        Cl *c = &cl[ps[a].cl];
+        int ki, ko;
+        if (!c->node || !ps[a].has_in || !ps[a].has_out) continue;
+        c->npass++;
+        ki = cl_arm_index(&pool, c, ps[a].in.key, ps[a].in.end);
+        ko = cl_arm_index(&pool, c, ps[a].out.key, ps[a].out.end);
+        if (ki >= 0 && ko >= 0 && c->row[ki].ok && c->row[ko].ok &&
+            (-c->row[ki].ox) * c->row[ko].ox + (-c->row[ki].oz) * c->row[ko].oz < -0.866) c->uturn = 1;
+    }
+    for (i = 0; s_clr && i < ncl; i++)
+        if (cl[i].nrs > 0) {
+            ClRuns *q = &s_clr[s_nclr++];
+            q->cx = cl[i].cx; q->cz = cl[i].cz; q->nrs = cl[i].nrs; q->npass = cl[i].npass; q->uturn = cl[i].uturn;
+            memcpy(q->rs, cl[i].rs, sizeof q->rs);
+        }
+#endif
     /* arrow directions per cluster: the entry and exit travel direction of its first pass (a start pocket has only an
      * exit, a finish pocket only an entry) */
     for (a = 0; a < npass; a++) {
@@ -1199,7 +1357,7 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
         nr = &tt->node[cl[i].node->rec];
         for (k = 0; k < cl[i].narm; k++) {
             const RoamArmRec *ar = &tt->arm[nr->arm_first + k];
-            int j, m, found = 0;
+            int j, m, found = 0, pj = -1;
             if (cl[i].taken[k] || cl[i].blocked[k]) continue;
             for (j = 0; j < ncl && !found; j++) {
                 const RoamTile *t2;
@@ -1209,7 +1367,7 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
                 n2 = &t2->node[cl[j].node->rec];
                 for (m = 0; m < cl[j].narm; m++) {
                     const RoamArmRec *a2 = &t2->arm[n2->arm_first + m];
-                    if (a2->edge_key == ar->edge_key && (j != i || m != k) && (a2->end != ar->end || j != i)) { found = 1; break; }
+                    if (a2->edge_key == ar->edge_key && (j != i || m != k) && (a2->end != ar->end || j != i)) { found = 1; pj = j; break; }
                 }
             }
             if (!found) {
@@ -1219,6 +1377,25 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
                     const RoamEdgeRec *er = &pool.tl[ei->tile].edge[ei->rec];
                     if (er->end_kind[1 - (ar->end ? 1 : 0)] == TD5_ROAM_END_DEAD) found = 1;       /* a dead-end pocket */
                 }
+            }
+            if (bar_vd_on() && found && pj >= 0 && pj != i && cl[i].npidx > 0 && cl[pj].npidx > 0 &&
+                cl_pass_gap(&cl[i], &cl[pj], npass, route->closed) >= 2) {
+                /* [round VD] Mariano: "sometimes they don't avoid going through a shortcut". This arm leads to another
+                 * ROUTE junction, one the route reaches earlier or later, not next (geo_map: a via point at the end of
+                 * a spur off a plaza ring; the two ring junctions the spur leaves and rejoins touch, the ring piece
+                 * between them has no ribbon). Left "linked", it skipped the whole spur. Close it at the seam. */
+                int b, have = 0;
+                for (b = 0; b < B.n; b++)
+                    if (B.pub[b].kind == TD5_ROAM_BARRIER_MOUTH && B.aux[b].arm_key == ar->edge_key && B.aux[b].arm_end == -2) have = 1;
+                if (have || (cl[i].nrows[k] <= 0 && glue_panel(&loc, route, &cl[i], &cl[pj], ar->edge_key))) {
+                    cl[i].blocked[k] = 1;
+                    if (!have) { B.st.glue_panels++; B.st.barriers_mouth++; }
+                    B.st.arms_blocked++;
+                } else {
+                    TD5_LOG_W(LOG_TAG, "BARRIERS: arm edge %llX of cluster %lld links route junctions %d passes apart and no panel fits: OPEN",
+                              (unsigned long long)ar->edge_key, (long long)cl[i].key, cl_pass_gap(&cl[i], &cl[pj], npass, route->closed));
+                }
+                continue;
             }
             if (found) { cl[i].linked[k] = 1; B.st.arms_linked++; }
         }
@@ -1703,7 +1880,7 @@ done:
 #define SC_OFFROUTE_M 8         /* ... and its path leaves the route surface (d_a + d_b), not a route touching itself */
 #define SC_SITES      24
 
-typedef struct { int64_t key; uint8_t used, ok; uint16_t d; float s; } ScCell;
+typedef struct { int64_t key; uint8_t used, ok, par; uint16_t d; float s; } ScCell;   /* par: 1+dir to the parent, 0 = seed */
 typedef struct { ScCell *c; int cap, n; } ScHash;
 static int s_sc_on;            /* the census runs after every build while set */
 
@@ -1738,24 +1915,25 @@ static ScCell *sc_get(ScHash *h, int64_t key, int add)
     return &h->c[i];
 }
 
-typedef struct { double x, z, sa, sb, gain; } ScSite;
+typedef struct { double x, z, sa, sb, gain; int64_t ka, kb; int revisit; } ScSite;
 static ScSite s_sc_site[SC_SITES];
 static int    s_sc_nsite, s_sc_cells;
 static double s_sc_best;
 
-static void sc_note(double x, double z, double sa, double sb, double gain)
+static void sc_note(double x, double z, double sa, double sb, double gain, int64_t ka, int64_t kb)
 {
     int i;
+    ScSite *t = NULL;
     if (gain > s_sc_best) s_sc_best = gain;
     for (i = 0; i < s_sc_nsite; i++)
         if (hypot(s_sc_site[i].x - x, s_sc_site[i].z - z) < 40.0 * BAR_UPM) {
-            if (gain > s_sc_site[i].gain) { s_sc_site[i].x = x; s_sc_site[i].z = z; s_sc_site[i].sa = sa; s_sc_site[i].sb = sb; s_sc_site[i].gain = gain; }
-            return;
+            if (gain > s_sc_site[i].gain) t = &s_sc_site[i];
+            else return;
+            break;
         }
-    if (s_sc_nsite < SC_SITES) {
-        s_sc_site[s_sc_nsite].x = x; s_sc_site[s_sc_nsite].z = z; s_sc_site[s_sc_nsite].sa = sa; s_sc_site[s_sc_nsite].sb = sb;
-        s_sc_site[s_sc_nsite].gain = gain; s_sc_nsite++;
-    }
+    if (!t && s_sc_nsite < SC_SITES) t = &s_sc_site[s_sc_nsite++];
+    if (!t) return;
+    t->x = x; t->z = z; t->sa = sa; t->sb = sb; t->gain = gain; t->ka = ka; t->kb = kb;
 }
 
 static void bar_shortcut_census(const TD5_RoamRouteResult *route, const BarLoc *L)
@@ -1803,7 +1981,7 @@ static void bar_shortcut_census(const TD5_RoamRouteResult *route, const BarLoc *
                     double ds = fabs((double)a.s - (double)b->s), gain;
                     if (route->closed && len - ds < ds) ds = len - ds;
                     gain = ds - (double)(a.d + b->d + 1);
-                    if (gain > SC_GAIN_M && a.d + b->d >= SC_OFFROUTE_M) sc_note(0.5 * (ax + bx), 0.5 * (az + bz), a.s, b->s, gain);
+                    if (gain > SC_GAIN_M && a.d + b->d >= SC_OFFROUTE_M) sc_note(0.5 * (ax + bx), 0.5 * (az + bz), a.s, b->s, gain, ck, seal_ck(nx, nz));
                 }
                 continue;
             }
@@ -1811,21 +1989,87 @@ static void bar_shortcut_census(const TD5_RoamRouteResult *route, const BarLoc *
             if (!(b = sc_get(&h, seal_ck(nx, nz), 1))) goto done;
             b->ok = (uint8_t)seal_passable(L, bx, bz);
             if (!b->ok) continue;
-            b->d = (uint16_t)(a.d + 1); b->s = a.s;
+            b->d = (uint16_t)(a.d + 1); b->s = a.s; b->par = (uint8_t)(1 + (k ^ 1));   /* the step back to a */
             if (qn >= qcap) { int64_t *nq = (int64_t *)realloc(q, (size_t)(qcap *= 2) * sizeof *q); if (!nq) goto done; q = nq; }
             q[qn++] = seal_ck(nx, nz);
         }
     }
 done:
     s_sc_cells = qn;
+    if (s_sc_nsite > 0) {   /* DEV: every site's leak path (both halves back to their seeds) for verify/roam plots */
+        char path[600];
+        const char *dir = td5_plat_log_dir();
+        FILE *f;
+        snprintf(path, sizeof path, "%sroam_shortcut_%08X.json", dir ? dir : "", (unsigned)route->hash);
+        f = fopen(path, "wb");
+        if (f) {
+            int si, j;
+            fprintf(f, "{\"hash\":\"%08X\",\"sites\":[", (unsigned)route->hash);
+            for (si = 0; si < s_sc_nsite; si++) {
+                int half;
+                fprintf(f, "%s{\"x\":%.1f,\"z\":%.1f,\"sa\":%.1f,\"sb\":%.1f,\"gain\":%.1f,\"revisit\":%d,\"path\":[", si ? "," : "",
+                        s_sc_site[si].x, s_sc_site[si].z, s_sc_site[si].sa, s_sc_site[si].sb, s_sc_site[si].gain, s_sc_site[si].revisit);
+                for (half = 0; half < 2; half++) {
+                    int64_t k = half ? s_sc_site[si].kb : s_sc_site[si].ka;
+                    int guard = 0, first = 1;
+                    if (half) fprintf(f, "],[");
+                    else fprintf(f, "[");
+                    while (guard++ < 4000) {
+                        const ScCell *c = sc_get(&h, k, 0);
+                        static const int dx4[4] = { 1, -1, 0, 0 }, dz4[4] = { 0, 0, 1, -1 };
+                        const int cx = (int)(k >> 32), cz = (int)(int32_t)(uint32_t)(k & 0xFFFFFFFF);
+                        if (!c) break;
+                        fprintf(f, "%s[%.1f,%.1f]", first ? "" : ",", L->ox + (cx + 0.5) * SEAL_CELL, L->oz + (cz + 0.5) * SEAL_CELL);
+                        first = 0;
+                        if (!c->par) break;
+                        k = seal_ck(cx + dx4[c->par - 1], cz + dz4[c->par - 1]);
+                    }
+                }
+                fprintf(f, "]]}");
+            }
+            fprintf(f, "],\"barriers\":[");
+            for (j = 0; j < B.n; j++)
+                fprintf(f, "%s[%d,%.1f,%.1f,%.1f,%.1f]", j ? "," : "", B.pub[j].kind, B.pl[j].x0, B.pl[j].z0, B.pl[j].x1, B.pl[j].z1);
+            fprintf(f, "],\"route\":[");
+            for (j = 0; j < route->npt; j++) fprintf(f, "%s[%.1f,%.1f]", j ? "," : "", route->px[j], route->pz[j]);
+#ifndef TD5RE_RELEASE
+            fprintf(f, "],\"arms\":[");
+            for (j = 0; j < B.ndbg; j++)
+                fprintf(f, "%s[%d,%.1f,%.1f,%.1f,%.1f,\"%llX\",\"%llX\",%d]", j ? "," : "", B.dbg[j].status, B.dbg[j].x0, B.dbg[j].z0,
+                        B.dbg[j].x1, B.dbg[j].z1, B.dbg[j].ck, B.dbg[j].ek, B.dbg[j].end);
+#endif
+            fprintf(f, "]}\n");
+            fclose(f);
+        }
+    }
     free(h.c); free(q);
-    B.st.shortcuts = s_sc_nsite;
-    B.st.shortcut_gain_m = s_sc_best;
-    for (i = 0; i < s_sc_nsite; i++)
-        TD5_LOG_W(LOG_TAG, "BARRIERS: SHORTCUT %d at place (%.1f,%.1f) m: route %.0f m -> %.0f m skips %.0f m",
-                  i, s_sc_site[i].x / BAR_UPM, s_sc_site[i].z / BAR_UPM, s_sc_site[i].sa, s_sc_site[i].sb, s_sc_site[i].gain);
-    TD5_LOG_I(LOG_TAG, "BARRIERS: shortcut census: %d cells flooded (paths up to %d m off the route), %d shortcut site(s), best gain %.0f m",
-              qn, SC_DMAX_M, s_sc_nsite, s_sc_best);
+    /* a REVISIT: the site lies in one junction the route passes twice, once near each end of the skip (a via point at
+     * the end of a spur, a lap of a plaza ring and back out the way in). Every arm there is one the route takes, so no
+     * static barrier closes it; race progress (a 150 m window, td5_roam_race.c) only credits skips shorter than that. */
+    B.st.shortcuts = 0; B.st.shortcut_gain_m = 0.0; B.st.revisits = 0; B.st.revisit_gain_m = 0.0;
+    for (i = 0; i < s_sc_nsite; i++) {
+        ScSite *t = &s_sc_site[i];
+        int c;
+        t->revisit = 0;
+        for (c = 0; c < s_nclr && !t->revisit; c++) {
+            int ia, ib;
+            if (hypot(s_clr[c].cx - t->x, s_clr[c].cz - t->z) > 40.0 * BAR_UPM) continue;
+            if (s_clr[c].npass < 2 && !s_clr[c].uturn) continue;      /* the planner goes through it once, no U-turn */
+            if (s_clr[c].uturn && s_clr[c].npass < 2) {               /* a U-turn: one run, the skip is the turn itself */
+                for (ia = 0; ia < s_clr[c].nrs; ia++)
+                    if (fabs(s_clr[c].rs[ia] - t->sa) <= 60.0 && fabs(s_clr[c].rs[ia] - t->sb) <= 60.0) t->revisit = 1;
+                continue;
+            }
+            for (ia = 0; ia < s_clr[c].nrs; ia++) for (ib = 0; ib < s_clr[c].nrs; ib++)
+                if (ia != ib && fabs(s_clr[c].rs[ia] - t->sa) <= 50.0 && fabs(s_clr[c].rs[ib] - t->sb) <= 50.0) t->revisit = 1;
+        }
+        if (t->revisit) { B.st.revisits++; if (t->gain > B.st.revisit_gain_m) B.st.revisit_gain_m = t->gain; }
+        else { B.st.shortcuts++; if (t->gain > B.st.shortcut_gain_m) B.st.shortcut_gain_m = t->gain; }
+        TD5_LOG_W(LOG_TAG, "BARRIERS: %s %d at place (%.1f,%.1f) m: route %.0f m -> %.0f m skips %.0f m",
+                  t->revisit ? "REVISIT (one junction passed twice)" : "SHORTCUT", i, t->x / BAR_UPM, t->z / BAR_UPM, t->sa, t->sb, t->gain);
+    }
+    TD5_LOG_I(LOG_TAG, "BARRIERS: shortcut census: %d cells flooded (paths up to %d m off the route), %d shortcut site(s) (best gain %.0f m), "
+              "%d revisit site(s) (best gain %.0f m)", qn, SC_DMAX_M, B.st.shortcuts, B.st.shortcut_gain_m, B.st.revisits, B.st.revisit_gain_m);
 }
 
 void td5_roam_barriers_set_shortcut_census(int on) { s_sc_on = on ? 1 : 0; }
@@ -2296,11 +2540,12 @@ static int bar_census_routes(int write_files, int *shortcuts, double *best_gain,
         }
         TD5_LOG_I(LOG_TAG, "BARRIER_TEST %s: route %.0f m, %d edges, hash %08X -> %d barriers (mouth %d, turn %d), clusters %d, passes %d, "
                   "arms total %d route %d blocked %d linked %d open %d, planner-degree open %d, across route %d, pass gaps %d, missing cluster %d, "
-                  "no-row arms %d, ring edges %d, one-way edges %d, seal ways out %d, SHORTCUTS %d (best gain %.0f m), tiles %d, %.0f ms",
+                  "no-row arms %d, ring edges %d, one-way edges %d, seal ways out %d, glue panels %d, finish pocket closed %d, SHORTCUTS %d (best gain %.0f m), "
+                  "revisits %d (best gain %.0f m), tiles %d, %.0f ms",
                   tr->name, res->length_m, res->nedge, (unsigned)res->hash, n, st.barriers_mouth, st.barriers_turn, st.clusters_passed, st.passes,
                   st.arms_total, st.arms_route, st.arms_blocked, st.arms_linked, st.arms_open, st.degree_open, st.across_route, st.pass_gaps,
-                  st.missing_cluster, st.arm_no_row, st.ring_edges, st.oneway_edges, st.seal_escapes, st.shortcuts, st.shortcut_gain_m,
-                  st.tiles_read, st.build_ms);
+                  st.missing_cluster, st.arm_no_row, st.ring_edges, st.oneway_edges, st.seal_escapes, st.glue_panels, st.finish_pocket_closed,
+                  st.shortcuts, st.shortcut_gain_m, st.revisits, st.revisit_gain_m, st.tiles_read, st.build_ms);
         if (cf)
             fprintf(cf, "%s: route %.0f m, %d edges, hash %08X\n"
                         "  barriers %d (mouth %d, turn boards %d)\n"
@@ -2327,7 +2572,7 @@ static int bar_census_routes(int write_files, int *shortcuts, double *best_gain,
         if (best_gain && st.shortcut_gain_m > *best_gain) *best_gain = st.shortcut_gain_m;
         if (note && ncap) {
             const size_t l = strlen(note);
-            if (l + 2 < ncap) snprintf(note + l, ncap - l, "%s%s %d/%d/%d", l ? " " : "", tr->name, st.clusters_passed, st.barriers_mouth, st.shortcuts);
+            if (l + 2 < ncap) snprintf(note + l, ncap - l, "%s%s %d/%d/%d/%d", l ? " " : "", tr->name, st.clusters_passed, st.barriers_mouth, st.shortcuts, st.revisits);
         }
         tot.barriers_mouth += st.barriers_mouth; tot.barriers_turn += st.barriers_turn;
     }
@@ -2358,7 +2603,7 @@ int td5_roam_barriers_shortcut_selftest(char *note, size_t n)
     s_sc_on = 0;
     if (note && n) snprintf(note, n, "%s: %d routes, %d failed, shortcuts %d (gain %.0f m) | %s",
                             fails == 0 && nr > 0 ? "ok" : "FAIL", nr, fails, sc, g, per);
-    TD5_LOG_I(LOG_TAG, "[V9] barrier shortcut census: %d routes, %d failed a check, %d shortcut site(s), best gain %.0f m -> %s (clusters/mouths/shortcuts: %s)",
+    TD5_LOG_I(LOG_TAG, "[V9] barrier shortcut census: %d routes, %d failed a check, %d shortcut site(s), best gain %.0f m -> %s (clusters/mouths/shortcuts/revisits: %s)",
               nr, fails, sc, g, fails == 0 && nr > 0 ? "PASS" : "FAIL", per);
     return fails == 0 && nr > 0 ? 0 : 2;
 }
