@@ -272,6 +272,27 @@ uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
 int  s_anim_complete = 0;
 static float s_anim_t = 0.0f;          /* continuous 0..1 for smooth button position */
+/* [round VA 2026-11-09] Mariano: "during menu animations when entering from one
+ * menu to the other (not coming back) for a frame the menu goes back and then
+ * disappears". The button / title slide is a function of (screen, inner state):
+ * frontend_get_button_anim_state maps only the states that ANIMATE. Many screens
+ * finish a slide in a state and switch to the next state, which is not mapped,
+ * one frame (or a whole wipe) before they settle or leave:
+ *   - slide-OUT done, then an unmapped exit state (OPTIONS 8 -> 9, every options
+ *     sub-screen, TRACK SELECT 7 -> 8, AUTO TRACK OPTIONS, CAR SELECT 0x18 ->
+ *     0x19 wipe -> 0x1A): s_anim_complete is still 1, so the OLD buttons and
+ *     title were drawn back AT REST until set_screen (1 frame, ~8 on car select);
+ *   - slide-IN done, then an unmapped "settle" state (RACE TYPE 1 -> 2, SELECT
+ *     CUP 7 -> 8): s_anim_complete is still 0, so the "before the intro" guard
+ *     put the NEW buttons and title back OFF-SCREEN for one frame.
+ * These two latches remember that a slide ran to its end, so the unmapped state
+ * after it keeps the slide's end pose: gone after an OUT, at rest after an IN.
+ * Set by frontend_note_anim_end (frontend_update_timed_animation at t >= 1 in a
+ * mapped IN / OUT state), cleared by set_screen, frontend_reset_buttons and
+ * frontend_create_button (new buttons start from the screen's own rules). */
+static int s_fe_slide_in_done  = 0;
+static int s_fe_slide_out_done = 0;
+static void frontend_note_anim_end(void);
 static TD5_ScreenIndex s_previous_screen = (TD5_ScreenIndex)-1;
 
 /* Context / flow tracking (DAT_004962d4) */
@@ -1532,6 +1553,7 @@ float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
 
     if (duration_ms == 0) {
         s_anim_tick = max_tick;
+        frontend_note_anim_end();
         return 1.0f;
     }
 
@@ -1539,6 +1561,7 @@ float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
     s_anim_tick = (int)(t * (float)max_tick + 0.5f);
     if (s_anim_tick > max_tick) s_anim_tick = max_tick;
     s_anim_t = t;
+    if (t >= 1.0f) frontend_note_anim_end();
     return t;
 }
 
@@ -2890,6 +2913,7 @@ void frontend_reset_buttons(void) {
     s_button_count = 0;
     s_auto_button_idx = 0;
     s_selected_button = 0;
+    s_fe_slide_in_done = s_fe_slide_out_done = 0;   /* [round VA] */
     s_selection_from_mouse = 0;
     s_button_index = -1;
     s_mouse_confirm_button = -1;
@@ -3261,6 +3285,7 @@ void td5_frontend_selftest_nav_result(int *screen, int *reached, int *navigable)
  *     absolute placement in 640x480 virtual coords.
  */
 int frontend_create_button(const char *label, int x, int y, int w, int h) {
+    s_fe_slide_in_done = s_fe_slide_out_done = 0;   /* [round VA] new buttons: the screen's own rules */
     for (int i = 0; i < FE_MAX_BUTTONS; i++) {
         if (!s_buttons[i].active) {
             s_buttons[i].active = 1;
@@ -5757,6 +5782,7 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_anim_start_ms = 0;
     s_anim_elapsed_ms = 0;
     s_anim_complete = 0;
+    s_fe_slide_in_done = s_fe_slide_out_done = 0;   /* [round VA] */
     /* Force a few opaque backbuffer clears so no stale RACE frame lingering in
      * the flip-model swapchain bleeds through the incoming screen (see
      * s_fe_entry_clear_frames). 4 covers a 2-3 buffer swapchain with margin. */
@@ -6672,6 +6698,20 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     return (mode != FE_BUTTON_ANIM_NONE && max_tick > 0) ? 1 : 0;
 }
 
+/* [round VA] A timed animation reached t >= 1: if the current (screen, state) is
+ * a mapped button slide, latch which one ended (see s_fe_slide_in_done). */
+static void frontend_note_anim_end(void) {
+    int mode = FE_BUTTON_ANIM_NONE;
+#ifndef TD5RE_RELEASE
+    static int latch = -1;   /* dev A/B: TD5RE_FE_SLIDE_LATCH=0 = the old one-frame flash */
+    if (latch < 0) latch = td5_env_int("TD5RE_FE_SLIDE_LATCH", 1, 0, 1);
+    if (!latch) return;
+#endif
+    if (!frontend_get_button_anim_state(&mode, NULL, NULL)) return;
+    if (mode == FE_BUTTON_ANIM_IN)  { s_fe_slide_in_done = 1; s_fe_slide_out_done = 0; }
+    if (mode == FE_BUTTON_ANIM_OUT) { s_fe_slide_out_done = 1; s_fe_slide_in_done = 0; }
+}
+
 /* Returns 1 if the current screen has timed button slide-in/out animations. */
 static int frontend_screen_has_button_anim(void) {
     switch (frontend_effective_screen(s_current_screen)) {
@@ -6755,10 +6795,16 @@ static float frontend_get_button_anim_x(int button_index, float base_x) {
     }
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
+        /* [round VA] A slide-out ran to its end: the buttons stay gone until the
+         * screen leaves (or creates new buttons), never back at rest. */
+        if (s_fe_slide_out_done)
+            return offscreen_x;
         /* Before the intro animation completes, keep buttons at their off-screen
          * starting position. This prevents a one-frame flash of the final button
-         * layout before the slide-in animation begins. */
-        if (!s_anim_complete && frontend_screen_has_button_anim())
+         * layout before the slide-in animation begins. [round VA] Only BEFORE
+         * the slide-in: once it ran to its end the buttons are at rest even if
+         * the screen sets s_anim_complete a state later. */
+        if (!s_anim_complete && !s_fe_slide_in_done && frontend_screen_has_button_anim())
             return offscreen_x;
         return base_x;
     }
@@ -6816,8 +6862,11 @@ static float frontend_get_title_render_y(float sy) {
     float t;
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
-        /* Mirror button guard: keep title hidden before slide-in anim starts */
-        if (!s_anim_complete && frontend_screen_has_button_anim())
+        /* Mirror button guard: keep title hidden before slide-in anim starts
+         * [round VA] and after a slide-out ran to its end. */
+        if (s_fe_slide_out_done)
+            return hidden_y * sy;
+        if (!s_anim_complete && !s_fe_slide_in_done && frontend_screen_has_button_anim())
             return hidden_y * sy;
         return base_y * sy;
     }
