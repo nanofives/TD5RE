@@ -66,6 +66,7 @@
 #include "td5_roam_mode.h"   /* [roam F2-D] `roam` rows: arm a free-roam session */
 #include "td5_roam_drive.h"  /* [roam F2-D] scripted drive + verdict */
 #include "td5_roam_race.h"   /* [roam F6-B] `roam-sprint` rows: scripted sprint + verdict */
+#include "td5_roam_barrier.h"   /* [round VD] v9-barrier-no-shortcut: the barrier shortcut census */
 #include "td5_roam_rebase.h" /* [roam F9b] the invariant checker carries its samples across a rebase */
 #include "td5_roam_physics.h" /* [roam F9a] the roam provider's wheel / teleport counters for the invariant note */
 #include "td5_roam_traffic.h" /* [roam F8] `roam-traffic` rows: ambient traffic verdict */
@@ -719,6 +720,12 @@ static const RaceScenario k_races[] = {
     { .name="ug-shadow-visible-2p",        .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
       .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .ug_check=1 },
+    /* [round VD 2026-11-09] item 9: the free-roam race barriers leave no shortcut. In a free-roam session (La Plata
+     * casco) plans 8 routes (Mariano's geo_map sprint among them), builds their barriers and runs the surface shortcut
+     * census on each: PASS when every route plans, no arm is left open and no shortcut site is found. No drive. */
+    { .name="v9-barrier-no-shortcut",      .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .roam=25, .depth=ST_DEPTH_ROAM_SPRINT },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -1111,6 +1118,9 @@ static int st_roam_is_sprint(int row) { return (row >= 3 && row <= 8) || row == 
 static int st_roam_has_traffic(int row) { return row >= 10 && row <= 12; }  /* F8 rows renumbered 7/8/9 -> 10/11/12 at integ (F9a took 7/8) */
 static int st_roam_is_cops(int row) { return row == 13 || row == 14 || row == 17 || row == 24; }   /* [round TB] 24 t6-cops-join-roam */   /* [roam F10] 13 full (traffic on), 14 smoke; [G1b] 17 roadblocks */
 static int st_roam_is_ram(int row) { return row == 16; }   /* [roam F8e] */
+static int st_roam_is_census(int row) { return row == 25; }   /* [round VD] v9-barrier-no-shortcut: no drive, a census */
+static int  s_v9_ran, s_v9_status;
+static char s_v9_note[120];
 
 static void st_roam_arm(const RaceScenario *sc)
 {
@@ -1174,6 +1184,16 @@ static void st_roam_arm(const RaceScenario *sc)
         }
         return;
     }
+    if (st_roam_is_census(sc->roam)) {
+        /* [round VD] the census needs a free-roam session (place, tiles, planner) but no drive */
+        s_v9_ran = 0; s_v9_status = ST_FAIL; s_v9_note[0] = 0;
+        if (!td5_roam_selftest_arm(ST_ROAM_LAT, ST_ROAM_LON)) {
+            s_roam_captured = 1;
+            s_roam_status = ST_FAIL;
+            snprintf(s_roam_note, sizeof s_roam_note, "roam: no roam tiles for la_plata_partido (RoamBuildTiles=casco)");
+        }
+        return;
+    }
     td5_roam_drive_arm(sc->roam == 2 ? TD5_RDRV_CORNERS : TD5_RDRV_ROUTE);
     if (sc->roam == 10 || sc->roam == 11)   /* [roam F8] the soak: a 2.4 km square round the spawn (F3-B soak) */
     {
@@ -1209,6 +1229,11 @@ static void st_roam_capture(void)
 {
     if (s_roam_captured) return;
     s_roam_captured = 1;
+    if (st_roam_is_census(s_roam_row)) {
+        s_roam_status = s_v9_ran ? s_v9_status : ST_FAIL;
+        snprintf(s_roam_note, sizeof s_roam_note, "%s", s_v9_ran ? s_v9_note : "census never ran (no live roam session)");
+        return;
+    }
     s_roam_status = st_roam_is_ram(s_roam_row) ? td5_roam_ram_test_verdict(s_roam_note, sizeof s_roam_note)
                   : st_roam_is_cops(s_roam_row) ? td5_roam_cops_test_verdict(s_roam_note, sizeof s_roam_note)
                   : st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_verdict(s_roam_note, sizeof s_roam_note)
@@ -1240,6 +1265,13 @@ static void st_roam_capture(void)
 /* [roam F6-B] the running roam row's script has ended itself */
 static int st_roam_done(void)
 {
+    if (st_roam_is_census(s_roam_row)) {
+        if (!s_v9_ran && td5_roam_active()) {
+            s_v9_status = td5_roam_barriers_shortcut_selftest(s_v9_note, sizeof s_v9_note);
+            s_v9_ran = 1;
+        }
+        return s_v9_ran;
+    }
     if (st_roam_is_ram(s_roam_row)) return td5_roam_ram_test_done();
     if (st_roam_is_cops(s_roam_row)) return td5_roam_cops_test_done();
     return st_roam_is_sprint(s_roam_row) ? td5_roam_sprint_test_done() : td5_roam_drive_done();

@@ -1689,6 +1689,148 @@ done:
     return added;
 }
 
+#ifndef TD5RE_RELEASE
+/* ============================================================ shortcut census (DEV, round VD) ===
+ * Mariano (2026-11-09): "sometimes they don't avoid going through a shortcut". An independent check of the finished
+ * set, judged on the SURFACE a car drives, not on the graph the placement reasons about: a breadth-first flood over
+ * the car-passable cells (1 m, the seal pass's erosion) from the route polyline, every mouth panel a cut, no surface
+ * treated as sealed. Each cell keeps the route distance s of the seed that reached it and its path length d. Two
+ * neighbouring cells whose seeds lie far apart along the route but whose paths are short form a SHORTCUT: the gain
+ * |s_a - s_b| - (d_a + d_b + 1) is route length skipped. A twin carriageway or a junction patch links seeds a few
+ * metres apart (no gain); a side street left open links two legs of the route. Off-route paths up to SC_DMAX_M. */
+#define SC_DMAX_M     220
+#define SC_GAIN_M     30.0      /* a shortcut skips at least this much route */
+#define SC_OFFROUTE_M 8         /* ... and its path leaves the route surface (d_a + d_b), not a route touching itself */
+#define SC_SITES      24
+
+typedef struct { int64_t key; uint8_t used, ok; uint16_t d; float s; } ScCell;
+typedef struct { ScCell *c; int cap, n; } ScHash;
+static int s_sc_on;            /* the census runs after every build while set */
+
+static ScCell *sc_get(ScHash *h, int64_t key, int add)
+{
+    uint64_t i;
+    if (add && (h->n + 1) * 2 > h->cap) {
+        ScHash nh;
+        int j;
+        nh.cap = h->cap ? h->cap * 2 : 1 << 17;
+        nh.n = 0;
+        nh.c = (ScCell *)calloc((size_t)nh.cap, sizeof(ScCell));
+        if (!nh.c) return NULL;
+        for (j = 0; j < h->cap; j++) {
+            if (!h->c[j].used) continue;
+            i = ((uint64_t)h->c[j].key * 0x9E3779B97F4A7C15ull) & (uint64_t)(nh.cap - 1);
+            while (nh.c[i].used) i = (i + 1) & (uint64_t)(nh.cap - 1);
+            nh.c[i] = h->c[j]; nh.n++;
+        }
+        free(h->c);
+        *h = nh;
+    }
+    if (!h->cap) return NULL;
+    i = ((uint64_t)key * 0x9E3779B97F4A7C15ull) & (uint64_t)(h->cap - 1);
+    while (h->c[i].used) {
+        if (h->c[i].key == key) return &h->c[i];
+        i = (i + 1) & (uint64_t)(h->cap - 1);
+    }
+    if (!add) return NULL;
+    h->c[i].used = 1; h->c[i].key = key;
+    h->n++;
+    return &h->c[i];
+}
+
+typedef struct { double x, z, sa, sb, gain; } ScSite;
+static ScSite s_sc_site[SC_SITES];
+static int    s_sc_nsite, s_sc_cells;
+static double s_sc_best;
+
+static void sc_note(double x, double z, double sa, double sb, double gain)
+{
+    int i;
+    if (gain > s_sc_best) s_sc_best = gain;
+    for (i = 0; i < s_sc_nsite; i++)
+        if (hypot(s_sc_site[i].x - x, s_sc_site[i].z - z) < 40.0 * BAR_UPM) {
+            if (gain > s_sc_site[i].gain) { s_sc_site[i].x = x; s_sc_site[i].z = z; s_sc_site[i].sa = sa; s_sc_site[i].sb = sb; s_sc_site[i].gain = gain; }
+            return;
+        }
+    if (s_sc_nsite < SC_SITES) {
+        s_sc_site[s_sc_nsite].x = x; s_sc_site[s_sc_nsite].z = z; s_sc_site[s_sc_nsite].sa = sa; s_sc_site[s_sc_nsite].sb = sb;
+        s_sc_site[s_sc_nsite].gain = gain; s_sc_nsite++;
+    }
+}
+
+static void bar_shortcut_census(const TD5_RoamRouteResult *route, const BarLoc *L)
+{
+    ScHash h = { NULL, 0, 0 };
+    int64_t *q = NULL;
+    int qn = 0, qcap = 0, qh = 0, i;
+    const double len = route->length_m;
+    s_sc_nsite = 0; s_sc_best = 0.0; s_sc_cells = 0;
+    if (!L->rs || route->npt < 2 || !route->dist_m) return;
+    for (i = 0; i + 1 < route->npt; i++) {
+        const double ex = route->px[i + 1] - route->px[i], ez = route->pz[i + 1] - route->pz[i], l = sqrt(ex * ex + ez * ez);
+        const int ns = 1 + (int)(l / (0.5 * BAR_UPM));
+        int sI;
+        for (sI = 0; sI <= ns; sI++) {
+            const double f = (double)sI / ns;
+            const double px = route->px[i] + ex * f, pz = route->pz[i] + ez * f;
+            const int cx = (int)floor((px - L->ox) / SEAL_CELL), cz = (int)floor((pz - L->oz) / SEAL_CELL);
+            ScCell *c = sc_get(&h, seal_ck(cx, cz), 0);
+            if (c) continue;
+            if (!(c = sc_get(&h, seal_ck(cx, cz), 1))) goto done;
+            c->ok = (uint8_t)seal_passable(L, L->ox + (cx + 0.5) * SEAL_CELL, L->oz + (cz + 0.5) * SEAL_CELL);
+            c->d = 0; c->s = (float)(route->dist_m[i] + (route->dist_m[i + 1] - route->dist_m[i]) * f);
+            if (!c->ok) continue;
+            if (qn >= qcap) { int64_t *nq = (int64_t *)realloc(q, (size_t)(qcap = qcap ? qcap * 2 : 1 << 16) * sizeof *q); if (!nq) goto done; q = nq; }
+            q[qn++] = seal_ck(cx, cz);
+        }
+    }
+    while (qh < qn) {
+        static const int dx4[4] = { 1, -1, 0, 0 }, dz4[4] = { 0, 0, 1, -1 };
+        const int64_t ck = q[qh++];
+        const int cx = (int)(ck >> 32), cz = (int)(int32_t)(uint32_t)(ck & 0xFFFFFFFF);
+        const double ax = L->ox + (cx + 0.5) * SEAL_CELL, az = L->oz + (cz + 0.5) * SEAL_CELL;
+        ScCell a;
+        int k;
+        { const ScCell *pa = sc_get(&h, ck, 0); if (!pa) continue; a = *pa; }
+        for (k = 0; k < 4; k++) {
+            const int nx = cx + dx4[k], nz = cz + dz4[k];
+            const double bx = ax + dx4[k] * SEAL_CELL, bz = az + dz4[k] * SEAL_CELL;
+            ScCell *b;
+            if (seal_cut(ax, az, bx, bz)) continue;
+            b = sc_get(&h, seal_ck(nx, nz), 0);
+            if (b) {
+                if (b->ok) {
+                    double ds = fabs((double)a.s - (double)b->s), gain;
+                    if (route->closed && len - ds < ds) ds = len - ds;
+                    gain = ds - (double)(a.d + b->d + 1);
+                    if (gain > SC_GAIN_M && a.d + b->d >= SC_OFFROUTE_M) sc_note(0.5 * (ax + bx), 0.5 * (az + bz), a.s, b->s, gain);
+                }
+                continue;
+            }
+            if (a.d + 1 > SC_DMAX_M) continue;
+            if (!(b = sc_get(&h, seal_ck(nx, nz), 1))) goto done;
+            b->ok = (uint8_t)seal_passable(L, bx, bz);
+            if (!b->ok) continue;
+            b->d = (uint16_t)(a.d + 1); b->s = a.s;
+            if (qn >= qcap) { int64_t *nq = (int64_t *)realloc(q, (size_t)(qcap *= 2) * sizeof *q); if (!nq) goto done; q = nq; }
+            q[qn++] = seal_ck(nx, nz);
+        }
+    }
+done:
+    s_sc_cells = qn;
+    free(h.c); free(q);
+    B.st.shortcuts = s_sc_nsite;
+    B.st.shortcut_gain_m = s_sc_best;
+    for (i = 0; i < s_sc_nsite; i++)
+        TD5_LOG_W(LOG_TAG, "BARRIERS: SHORTCUT %d at place (%.1f,%.1f) m: route %.0f m -> %.0f m skips %.0f m",
+                  i, s_sc_site[i].x / BAR_UPM, s_sc_site[i].z / BAR_UPM, s_sc_site[i].sa, s_sc_site[i].sb, s_sc_site[i].gain);
+    TD5_LOG_I(LOG_TAG, "BARRIERS: shortcut census: %d cells flooded (paths up to %d m off the route), %d shortcut site(s), best gain %.0f m",
+              qn, SC_DMAX_M, s_sc_nsite, s_sc_best);
+}
+
+void td5_roam_barriers_set_shortcut_census(int on) { s_sc_on = on ? 1 : 0; }
+#endif
+
 int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
 {
     Pool pool;
@@ -1728,6 +1870,9 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
                   sx->iters, B.st.seal_panels, B.st.clusters_touching, sx->entries_left, sx->pockets, sx->escapes, B.st.pairs_single,
                   B.n, B.st.build_ms);
     }
+#ifndef TD5RE_RELEASE
+    if (n >= 0 && (s_sc_on || td5_env_int("TD5RE_ROAM_BARRIER_SHORTCUT", 0, 0, 1))) bar_shortcut_census(route, &loc);
+#endif
     free(sx);
     free(loc.rs);
     pool_free(&pool);
@@ -1741,37 +1886,50 @@ int td5_roam_barriers_build(const TD5_RoamRouteResult *route)
 #define BAR_CELL_M    3.0
 #define BAR_MAX_DRAW  96
 
-static TD5_D3DVertex q_v[BQ_MAX * 4];
-static uint16_t      q_i[BQ_MAX * 6];
-static int           q_n;
+static TD5_D3DVertex q_v[BQ_MAX * 5];
+static uint16_t      q_i[BQ_MAX * 9];
+static int           q_nv, q_ni;
 
 static void q_flush(TD5_RenderPreset preset)
 {
-    if (q_n > 0) {
+    if (q_ni > 0) {
         td5_plat_render_set_preset(preset);
         td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
-        td5_plat_render_draw_tris(q_v, q_n * 4, q_i, q_n * 6);
-        q_n = 0;
+        td5_plat_render_draw_tris(q_v, q_nv, q_i, q_ni);
     }
+    q_nv = 0; q_ni = 0;
 }
 
+/* [round VD] clipped against the near plane (td5_render_project_world_poly): a panel with one corner behind the
+ * camera was dropped whole, so a barrier beside the car blinked out at the screen edge. */
 static void q_quad(TD5_RenderPreset preset, const float a[3], const float b[3], const float c[3], const float d[3],
                    uint32_t ca, uint32_t cb, uint32_t cc, uint32_t cd)
 {
-    TD5_D3DVertex *v;
-    uint16_t *ix;
-    uint16_t base;
-    if (q_n >= BQ_MAX) q_flush(preset);
-    v = &q_v[q_n * 4];
-    if (!td5_render_project_world_vertex(a[0], a[1], a[2], ca, &v[0]) ||
-        !td5_render_project_world_vertex(b[0], b[1], b[2], cb, &v[1]) ||
-        !td5_render_project_world_vertex(c[0], c[1], c[2], cc, &v[2]) ||
-        !td5_render_project_world_vertex(d[0], d[1], d[2], cd, &v[3])) return;
-    base = (uint16_t)(q_n * 4);
-    ix = &q_i[q_n * 6];
-    ix[0] = base; ix[1] = (uint16_t)(base + 1); ix[2] = (uint16_t)(base + 2);
-    ix[3] = base; ix[4] = (uint16_t)(base + 2); ix[5] = (uint16_t)(base + 3);
-    q_n++;
+    float q[4][3];
+    const uint32_t col[4] = { ca, cb, cc, cd };
+    int k, m;
+    if (q_nv + 5 > BQ_MAX * 5 || q_ni + 9 > BQ_MAX * 9) q_flush(preset);
+    for (k = 0; k < 3; k++) { q[0][k] = a[k]; q[1][k] = b[k]; q[2][k] = c[k]; q[3][k] = d[k]; }
+#ifndef TD5RE_RELEASE
+    {   /* DEV A/B: TD5RE_ROAM_GUIDE_LEGACY=1, a panel with a corner behind the camera is dropped whole (before round VD) */
+        static int s_l = -1;
+        if (s_l < 0) s_l = td5_env_int("TD5RE_ROAM_GUIDE_LEGACY", 0, 0, 1);
+        if (s_l) {
+            for (k = 0; k < 4; k++) if (!td5_render_project_world_vertex(q[k][0], q[k][1], q[k][2], col[k], &q_v[q_nv + k])) return;
+            m = 4;
+        } else
+            m = td5_render_project_world_poly((const float (*)[3])q, col, 4, &q_v[q_nv]);
+    }
+#else
+    m = td5_render_project_world_poly((const float (*)[3])q, col, 4, &q_v[q_nv]);
+#endif
+    if (m < 3) return;
+    for (k = 1; k + 1 < m; k++) {
+        q_i[q_ni++] = (uint16_t)q_nv;
+        q_i[q_ni++] = (uint16_t)(q_nv + k);
+        q_i[q_ni++] = (uint16_t)(q_nv + k + 1);
+    }
+    q_nv += m;
 }
 
 static uint32_t argb(int a, float r, float g, float b)
@@ -2049,6 +2207,13 @@ static const TestRoute k_routes[] = {
     { "calles",    2, { -34.9190, -34.9290 }, { -57.9490, -57.9370 } },
     { "plaza",     3, { -34.9215, -34.9107, -34.9040 }, { -57.9540, -57.9553, -57.9500 } },
     { "avenida",   2, { -34.9100, -34.9190 }, { -57.9680, -57.9570 } },
+    /* [round VD] the shortcut census routes: Mariano's own sprint (routes/geo_map.json, 2026-11-09), the selftest
+     * sprints, and two longer casco crossings over the diagonals */
+    { "geo_map",   3, { -34.92185326, -34.93001975, -34.92136568 }, { -57.96583143, -57.94322496, -57.94026709 } },
+    { "sprint",    3, { -34.92700, -34.92048, -34.90950 }, { -57.95411, -57.95358, -57.95520 } },
+    { "sprint_ai", 3, { -34.93215, -34.92048, -34.90950 }, { -57.95397, -57.95358, -57.95520 } },
+    { "diagonal",  2, { -34.90500, -34.93000 }, { -57.96200, -57.93000 } },
+    { "eje",       3, { -34.91500, -34.92500, -34.90500 }, { -57.97000, -57.94500, -57.94000 } },
 };
 
 static void json_barriers(FILE *f, const TD5_RoamRouteResult *r)
@@ -2076,22 +2241,30 @@ static void json_barriers(FILE *f, const TD5_RoamRouteResult *r)
     fprintf(f, "]}\n");
 }
 
-int td5_roam_barriers_dev_test(void)
+/* the census routes: plan each, build its barriers, log (+ census file + json when write_files). Returns the routes
+ * that failed a check (-1: no planner graph); *shortcuts / *best_gain sum the shortcut census when it is on. */
+static int bar_census_routes(int write_files, int *shortcuts, double *best_gain, int *nroutes, char *note, size_t ncap)
 {
     const char *dir = td5_plat_log_dir();
     char path[600];
-    FILE *cf;
+    FILE *cf = NULL;
     int ri, fails = 0;
     TD5_RoamBarrierStats tot;
-    if (td5_env_int("TD5RE_ROAM_BARRIER_TEST", 0, 0, 1) != 1) return 0;
     memset(&tot, 0, sizeof tot);
-    snprintf(path, sizeof path, "%sroam_barrier_census.txt", dir ? dir : "");
-    cf = fopen(path, "wb");
+    if (shortcuts) *shortcuts = 0;
+    if (best_gain) *best_gain = 0.0;
+    if (nroutes) *nroutes = 0;
+    if (note && ncap) note[0] = 0;
+    if (write_files) {
+        snprintf(path, sizeof path, "%sroam_barrier_census.txt", dir ? dir : "");
+        cf = fopen(path, "wb");
+    }
     td5_roam_route_reset();
     if (!td5_roam_route_graph_ensure(td5_roam_route_place())) {
         TD5_LOG_E(LOG_TAG, "BARRIER_TEST: planner graph failed");
         if (cf) fclose(cf);
-        return 1;
+        if (note && ncap) snprintf(note, ncap, "planner graph failed");
+        return -1;
     }
     for (ri = 0; ri < (int)(sizeof k_routes / sizeof k_routes[0]); ri++) {
         const TestRoute *tr = &k_routes[ri];
@@ -2113,19 +2286,21 @@ int td5_roam_barriers_dev_test(void)
             fails++;
             continue;
         }
+        if (nroutes) (*nroutes)++;
         n = td5_roam_barriers_build(res);
         td5_roam_barriers_stats(&st);
-        {
+        if (write_files) {
             char nm[48];
             snprintf(nm, sizeof nm, "f6a_%s", tr->name);
             td5_roam_route_save(nm);
         }
         TD5_LOG_I(LOG_TAG, "BARRIER_TEST %s: route %.0f m, %d edges, hash %08X -> %d barriers (mouth %d, turn %d), clusters %d, passes %d, "
                   "arms total %d route %d blocked %d linked %d open %d, planner-degree open %d, across route %d, pass gaps %d, missing cluster %d, "
-                  "no-row arms %d, ring edges %d, one-way edges %d, tiles %d, %.0f ms",
+                  "no-row arms %d, ring edges %d, one-way edges %d, seal ways out %d, SHORTCUTS %d (best gain %.0f m), tiles %d, %.0f ms",
                   tr->name, res->length_m, res->nedge, (unsigned)res->hash, n, st.barriers_mouth, st.barriers_turn, st.clusters_passed, st.passes,
                   st.arms_total, st.arms_route, st.arms_blocked, st.arms_linked, st.arms_open, st.degree_open, st.across_route, st.pass_gaps,
-                  st.missing_cluster, st.arm_no_row, st.ring_edges, st.oneway_edges, st.tiles_read, st.build_ms);
+                  st.missing_cluster, st.arm_no_row, st.ring_edges, st.oneway_edges, st.seal_escapes, st.shortcuts, st.shortcut_gain_m,
+                  st.tiles_read, st.build_ms);
         if (cf)
             fprintf(cf, "%s: route %.0f m, %d edges, hash %08X\n"
                         "  barriers %d (mouth %d, turn boards %d)\n"
@@ -2134,22 +2309,57 @@ int td5_roam_barriers_dev_test(void)
                         "  mouth barriers slid outward along their arm: %d, none fit: %d; turn boards on the outer kerb %d, left out %d\n"
                         "  chevrons on mouth barriers vs the nearest route direction: with %d, sideways %d, against %d\n"
                         "  barriers across the route polyline: %d   pass gaps: %d   cluster records missing: %d\n"
+                        "  seal pass ways out: %d   shortcut census: %d site(s), best gain %.0f m\n"
                         "  tiles read %d, build %.0f ms\n",
                     tr->name, res->length_m, res->nedge, (unsigned)res->hash, n, st.barriers_mouth, st.barriers_turn,
                     st.clusters_passed, st.passes, st.ring_edges, st.oneway_edges, st.arms_total, st.arms_route, st.arms_blocked,
-                    st.arms_linked, st.arms_open, st.degree_open, st.arm_no_row, st.slid, st.slide_fail, st.boards_alt, st.boards_dropped, st.arrows_with, st.arrows_side, st.arrows_against, st.across_route, st.pass_gaps, st.missing_cluster, st.tiles_read, st.build_ms);
-        {
+                    st.arms_linked, st.arms_open, st.degree_open, st.arm_no_row, st.slid, st.slide_fail, st.boards_alt, st.boards_dropped,
+                    st.arrows_with, st.arrows_side, st.arrows_against, st.across_route, st.pass_gaps, st.missing_cluster,
+                    st.seal_escapes, st.shortcuts, st.shortcut_gain_m, st.tiles_read, st.build_ms);
+        if (write_files) {
             FILE *jf;
             snprintf(path, sizeof path, "%sroam_barrier_%s.json", dir ? dir : "", tr->name);
             jf = fopen(path, "wb");
             if (jf) { json_barriers(jf, res); fclose(jf); }
         }
-        if (st.arms_open || st.degree_open || st.across_route || st.pass_gaps || st.missing_cluster) fails++;
+        if (st.arms_open || st.degree_open || st.across_route || st.pass_gaps || st.missing_cluster || st.shortcuts) fails++;
+        if (shortcuts) *shortcuts += st.shortcuts;
+        if (best_gain && st.shortcut_gain_m > *best_gain) *best_gain = st.shortcut_gain_m;
+        if (note && ncap) {
+            const size_t l = strlen(note);
+            if (l + 2 < ncap) snprintf(note + l, ncap - l, "%s%s %d/%d/%d", l ? " " : "", tr->name, st.clusters_passed, st.barriers_mouth, st.shortcuts);
+        }
         tot.barriers_mouth += st.barriers_mouth; tot.barriers_turn += st.barriers_turn;
     }
     TD5_LOG_I(LOG_TAG, "BARRIER_TEST: %d route(s) failed a check, %d mouth + %d turn barriers in total", fails, tot.barriers_mouth, tot.barriers_turn);
     if (cf) { fprintf(cf, "failed checks: %d\n", fails); fclose(cf); }
     td5_roam_barriers_clear();
+    td5_roam_route_reset();
+    return fails;
+}
+
+int td5_roam_barriers_dev_test(void)
+{
+    if (td5_env_int("TD5RE_ROAM_BARRIER_TEST", 0, 0, 1) != 1) return 0;
+    (void)bar_census_routes(1, NULL, NULL, NULL, NULL, 0);
     return 1;
+}
+
+/* [round VD] the `v9-barrier-no-shortcut` selftest row: every census route planned and its barriers built with the
+ * shortcut census on; PASS when every route plans and none fails a check (no open arm, no shortcut). 0 PASS / 2 FAIL.
+ * The note lists per route: clusters passed / mouth barriers / shortcut sites. */
+int td5_roam_barriers_shortcut_selftest(char *note, size_t n)
+{
+    int sc = 0, nr = 0, fails;
+    double g = 0.0;
+    char per[200];
+    s_sc_on = 1;
+    fails = bar_census_routes(0, &sc, &g, &nr, per, sizeof per);
+    s_sc_on = 0;
+    if (note && n) snprintf(note, n, "%s: %d routes, %d failed, shortcuts %d (gain %.0f m) | %s",
+                            fails == 0 && nr > 0 ? "ok" : "FAIL", nr, fails, sc, g, per);
+    TD5_LOG_I(LOG_TAG, "[V9] barrier shortcut census: %d routes, %d failed a check, %d shortcut site(s), best gain %.0f m -> %s (clusters/mouths/shortcuts: %s)",
+              nr, fails, sc, g, fails == 0 && nr > 0 ? "PASS" : "FAIL", per);
+    return fails == 0 && nr > 0 ? 0 : 2;
 }
 #endif

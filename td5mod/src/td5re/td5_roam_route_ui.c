@@ -1054,6 +1054,9 @@ void td5_roam_route_ui_draw_hud(void)
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
     if (paused) {
         const float H = g_render_height_f;
+        /* [round VD] item 13: no "M ROUTE MAP" prompt in a race's pause menu (countdown, racing, finished). The
+         * prompt stays in FREE ROAM, where the map is how a route gets planned. */
+        if (td5_roam_race_hide_route_hint()) return;
         const char *t = "M  ROUTE MAP:  PLAN, SAVE AND LOAD A ROUTE";
         const float w = ui_text_w(t, 16.0f * S);
         rb_rect((W - w) * 0.5f - 12.0f * S, H - 52.0f * S, w + 24.0f * S, 30.0f * S, 0xB0000000);
@@ -1301,38 +1304,57 @@ static float gnd_y(double wx_units, double wz_units, int *ok)
 }
 
 /* world-space quads: screen-space triangles with the debug lines' depth, drawn depth-tested and
- * blended (TD5_PRESET_TRANSLUCENT_POINT_ZTEST) so the ribbon lies on the road and the car is in front */
+ * blended (TD5_PRESET_TRANSLUCENT_POINT_ZTEST) so the ribbon lies on the road and the car is in front.
+ * [round VD] each quad is clipped against the near plane (td5_render_project_world_poly): it used to be dropped
+ * whole when one corner was behind the camera, so the band and arrows vanished early at the screen edges. */
 #define WQ_QUADS 900
-static TD5_D3DVertex wq_v[WQ_QUADS * 4];
-static uint16_t      wq_i[WQ_QUADS * 6];
-static int           wq_n;
+static TD5_D3DVertex wq_v[WQ_QUADS * 5];
+static uint16_t      wq_i[WQ_QUADS * 9];
+static int           wq_nv, wq_ni;
+
+/* [round VD] DEV A/B: TD5RE_ROAM_GUIDE_LEGACY=1 draws the guidance as before round VD (1.7 m band at alpha 0x70,
+ * chevrons anchored to the moving first point, a quad dropped whole when a corner is behind the camera). RELEASE: 0. */
+static int wq_legacy(void)
+{
+#ifndef TD5RE_RELEASE
+    static int s_l = -1;
+    if (s_l < 0) s_l = td5_env_int("TD5RE_ROAM_GUIDE_LEGACY", 0, 0, 1);
+    return s_l;
+#else
+    return 0;
+#endif
+}
 
 static void wq_flush(void)
 {
-    if (wq_n > 0) {
+    if (wq_ni > 0) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_POINT_ZTEST);
         td5_plat_render_bind_texture(HUD_WHITE_TEX_PAGE);
-        td5_plat_render_draw_tris(wq_v, wq_n * 4, wq_i, wq_n * 6);
-        wq_n = 0;
+        td5_plat_render_draw_tris(wq_v, wq_nv, wq_i, wq_ni);
     }
+    wq_nv = 0; wq_ni = 0;
 }
 
 /* four world points (render-float: place - origin, y) in order around the quad */
 static void wq_quad(const float a[3], const float b[3], const float c[3], const float d[3], uint32_t col)
 {
-    TD5_D3DVertex *v;
-    uint16_t *ix;
-    const uint16_t base = (uint16_t)(wq_n * 4);
-    if (wq_n >= WQ_QUADS) wq_flush();
-    v = &wq_v[wq_n * 4];
-    if (!td5_render_project_world_vertex(a[0], a[1], a[2], col, &v[0]) ||
-        !td5_render_project_world_vertex(b[0], b[1], b[2], col, &v[1]) ||
-        !td5_render_project_world_vertex(c[0], c[1], c[2], col, &v[2]) ||
-        !td5_render_project_world_vertex(d[0], d[1], d[2], col, &v[3])) return;
-    ix = &wq_i[wq_n * 6];
-    ix[0] = base; ix[1] = (uint16_t)(base + 1); ix[2] = (uint16_t)(base + 2);
-    ix[3] = base; ix[4] = (uint16_t)(base + 2); ix[5] = (uint16_t)(base + 3);
-    wq_n++;
+    float q[4][3];
+    const uint32_t cols[4] = { col, col, col, col };
+    int k, m;
+    if (wq_nv + 5 > WQ_QUADS * 5 || wq_ni + 9 > WQ_QUADS * 9) wq_flush();
+    for (k = 0; k < 3; k++) { q[0][k] = a[k]; q[1][k] = b[k]; q[2][k] = c[k]; q[3][k] = d[k]; }
+    if (wq_legacy()) {
+        for (k = 0; k < 4; k++) if (!td5_render_project_world_vertex(q[k][0], q[k][1], q[k][2], col, &wq_v[wq_nv + k])) return;
+        m = 4;
+    } else
+        m = td5_render_project_world_poly((const float (*)[3])q, cols, 4, &wq_v[wq_nv]);
+    if (m < 3) return;
+    for (k = 1; k + 1 < m; k++) {
+        wq_i[wq_ni++] = (uint16_t)wq_nv;
+        wq_i[wq_ni++] = (uint16_t)(wq_nv + k);
+        wq_i[wq_ni++] = (uint16_t)(wq_nv + k + 1);
+    }
+    wq_nv += m;
 }
 
 /* a flat strip from P0 to P1 (render-float xz, y0 / y1) of half width hw, shifted sideways by off */
@@ -1398,7 +1420,45 @@ void td5_roam_route_ui_draw_world(int view)
     i1 = *hint;
     while (i1 + 1 < r->npt && r->dist_m[i1 + 1] - r->dist_m[*hint] < 320.0) i1++;
     {
-        double next_chev = r->dist_m[i0] + 4.0;
+        /* [round VD] the chevrons sit at fixed route distances (every 9 m from the start), so they stay put on the
+         * road. They were placed 4 m past the first drawn point, which moves with the car: they slid along the
+         * road and jumped each time that point changed. */
+        const int legacy = wq_legacy();
+        const double band = legacy ? 0.85 : 0.50, edge = legacy ? 0.10 : 0.06;
+        const uint32_t band_col = legacy ? 0x70FFB400u : 0x34FFB400u, edge_col = legacy ? 0xE0FFE070u : 0x70FFE070u;
+        double next_chev = legacy ? r->dist_m[i0] + 4.0 : ceil((r->dist_m[i0] - 4.0) / 9.0) * 9.0 + 4.0;
+#ifndef TD5RE_RELEASE
+        {   /* [round VD] DEV: TD5RE_ROAM_VD_SHOTS="m1,m2,.." dumps one frame each time pane 0 first passes that route
+             * distance, to <log dir>vd_<TD5RE_ROAM_VD_SHOT_TAG>_<m>.png: the same pose from two runs (A/B) */
+            static int s_init, s_n, s_done[16];
+            static double s_at[16];
+            if (!s_init) {
+                const char *e = getenv("TD5RE_ROAM_VD_SHOTS");
+                s_init = 1;
+                while (e && *e && s_n < 16) {
+                    char *end;
+                    const double v = strtod(e, &end);
+                    if (end == e) break;
+                    s_at[s_n++] = v;
+                    e = (*end == ',') ? end + 1 : end;
+                }
+            }
+            if (view == 0) {
+                int k;
+                for (k = 0; k < s_n; k++) {
+                    if (s_done[k] || r->dist_m[*hint] < s_at[k] || r->dist_m[*hint] > s_at[k] + 30.0) continue;
+                    {
+                        char path[512];
+                        const char *dir = td5_plat_log_dir(), *tag = getenv("TD5RE_ROAM_VD_SHOT_TAG");
+                        snprintf(path, sizeof path, "%svd_%s_%04d.png", dir ? dir : "", tag && tag[0] ? tag : "shot", (int)s_at[k]);
+                        td5_plat_request_frame_dump(path);
+                        TD5_LOG_I("roam", "[VD] frame dump at %.1f m along (target %.0f m) -> %s", r->dist_m[*hint], s_at[k], path);
+                        s_done[k] = 1;
+                    }
+                }
+            }
+        }
+#endif
         for (i = i0; i < i1; i++) {
             const double ax = r->px[i] - ox, az = r->pz[i] - oz, bx = r->px[i + 1] - ox, bz = r->pz[i + 1] - oz;
             const double dx = bx - ax, dz = bz - az, len = sqrt(dx * dx + dz * dz);
@@ -1407,9 +1467,11 @@ void td5_roam_route_ui_draw_world(int view)
             if (len < 1.0) continue;
             ya = gnd_y(ax, az, &ok_a) + lift; yb = gnd_y(bx, bz, &ok_b) + lift;
             if (!ok_a || !ok_b) continue;
-            wq_strip(ax, az, ya, bx, bz, yb, 0.85 * M, 0x70FFB400, 0.0);          /* the amber band    */
-            wq_strip(ax, az, ya, bx, bz, yb, 0.10 * M, 0xE0FFE070, 0.85 * M);     /* its bright edges  */
-            wq_strip(ax, az, ya, bx, bz, yb, 0.10 * M, 0xE0FFE070, -0.85 * M);
+            /* [round VD] Mariano: narrower and more transparent. 1.0 m wide (was 1.7 m), alpha 0x34 (was 0x70),
+             * edges 0.12 m at alpha 0x70 (were 0.2 m at 0xE0) */
+            wq_strip(ax, az, ya, bx, bz, yb, band * M, band_col, 0.0);          /* the amber band    */
+            wq_strip(ax, az, ya, bx, bz, yb, edge * M, edge_col, band * M);     /* its bright edges  */
+            wq_strip(ax, az, ya, bx, bz, yb, edge * M, edge_col, -band * M);
             /* chevrons every 9 m: a V of two strips pointing along the route */
             while (next_chev < r->dist_m[i + 1]) {
                 const double t = (next_chev - r->dist_m[i]) / (r->dist_m[i + 1] - r->dist_m[i] + 1e-9);

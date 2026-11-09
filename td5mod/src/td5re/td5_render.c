@@ -3642,6 +3642,60 @@ int td5_render_project_world_vertex(float wx, float wy, float wz, uint32_t argb,
     return debug_line_project(wx, wy, wz, argb, out);
 }
 
+/* [round VD] a convex world polygon clipped against the near plane, then projected like
+ * td5_render_project_world_vertex. A quad with one corner behind the camera used to be dropped whole (the
+ * per-vertex test above), so a long route-ribbon piece running past the camera vanished at the screen edges. */
+static uint32_t argb_lerp(uint32_t a, uint32_t b, float t) {
+    uint32_t r = 0;
+    int sh;
+    for (sh = 0; sh < 32; sh += 8) {
+        const float ca = (float)((a >> sh) & 0xFF), cb = (float)((b >> sh) & 0xFF);
+        int c = (int)(ca + (cb - ca) * t + 0.5f);
+        if (c < 0) c = 0;
+        if (c > 255) c = 255;
+        r |= (uint32_t)c << sh;
+    }
+    return r;
+}
+
+int td5_render_project_world_poly(const float (*p)[3], const uint32_t *argb, int n, struct TD5_D3DVertex *out) {
+    float vin[8][3], vout[9][3];
+    uint32_t cout[9];
+    const float zc = s_near_clip + 1.0f;
+    int i, m = 0;
+    if (n < 3 || n > 8) return 0;
+    for (i = 0; i < n; i++) {
+        const float dx = p[i][0] - s_camera_pos[0], dy = p[i][1] - s_camera_pos[1], dz = p[i][2] - s_camera_pos[2];
+        vin[i][0] = dx * s_camera_basis[0] + dy * s_camera_basis[1] + dz * s_camera_basis[2];
+        vin[i][1] = dx * s_camera_basis[3] + dy * s_camera_basis[4] + dz * s_camera_basis[5];
+        vin[i][2] = dx * s_camera_basis[6] + dy * s_camera_basis[7] + dz * s_camera_basis[8];
+    }
+    for (i = 0; i < n; i++) {   /* Sutherland-Hodgman against vz >= zc, colours interpolated along the cut edge */
+        const int j = (i + 1) % n;
+        const float *a = vin[i], *b = vin[j];
+        const int ia = a[2] >= zc, ib = b[2] >= zc;
+        if (ia) { vout[m][0] = a[0]; vout[m][1] = a[1]; vout[m][2] = a[2]; cout[m] = argb[i]; m++; }
+        if (ia != ib) {
+            const float t = (zc - a[2]) / (b[2] - a[2]);
+            vout[m][0] = a[0] + (b[0] - a[0]) * t; vout[m][1] = a[1] + (b[1] - a[1]) * t; vout[m][2] = zc;
+            cout[m] = argb_lerp(argb[i], argb[j], t); m++;
+        }
+    }
+    if (m < 3) return 0;
+    for (i = 0; i < m; i++) {
+        const float inv_z = 1.0f / vout[i][2];
+        out[i].screen_x = -vout[i][0] * s_focal_length * inv_z + s_center_x;
+        out[i].screen_y = -vout[i][1] * s_focal_length * inv_z + s_center_y;
+        out[i].depth_z  = td5_depth_persp(vout[i][2]);
+        out[i].rhw      = inv_z;
+        out[i].diffuse  = cout[i];
+        out[i].specular = 0;
+        out[i].tex_u    = 0.0f;
+        out[i].tex_v    = 0.0f;
+    }
+    return m;
+}
+
 /* Public world->screen projection for the dev geometry picker. See header. */
 int td5_render_project_world(float wx, float wy, float wz,
                              float *sx, float *sy, float *rhw) {
