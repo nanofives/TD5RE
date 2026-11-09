@@ -443,7 +443,11 @@ static float s_encl_q_frac[TD5_MAX_VIEWPORTS], s_encl_q_fade[TD5_MAX_VIEWPORTS];
 static float s_encl_q_strength[TD5_MAX_VIEWPORTS];
 static int   s_encl_q_valid[TD5_MAX_VIEWPORTS];
 static int   shadow_enclosure_enabled(void);
-static float shadow_encl_fraction(float *t_eye, float *t_ahead);
+static int   shadow_encl_log(void);
+static float shadow_encl_fraction(float *t_up, float *t_sun);
+static float s_encl_sun[3];                         /* defined with the probe (SECTION shadow enclosure probe) */
+static int   s_encl_sun_valid;
+static __thread uint64_t s_encl_us, s_encl_calls;   /* TD5RE_SHADOW_ENCL_LOG=1: probe CPU time */
 
 int td5_render_shadow_enclosure_query(int vp, float *frac, float *fade, float *strength)
 {
@@ -460,6 +464,15 @@ void td5_render_apply_shadow_pass(int vp, int vp_x, int vp_y)
 
     float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
     int sky_cls = td5_render_shadow_sun(sun, &dom);   /* [round UE] sky sun with RT off */
+    /* [round VB] the roof probe's sun rays, for the NEXT walk: the shadow sun is +Y-down, the
+     * walk's render-float world is +Y-up (as the RT path flips it below). */
+    if (sky_cls && !td5_rt_active()) {
+        const float m = sqrtf(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
+        if (m > 1e-6f) {
+            s_encl_sun[0] = sun[0] / m; s_encl_sun[1] = -sun[1] / m; s_encl_sun[2] = sun[2] / m;
+            s_encl_sun_valid = 1;
+        }
+    }
     /* [ROAD-CAST SHADOW FIX 2026-08-03] The unified scene sun (td5_render_scene_sun)
      * is derived in the game's +Y-DOWN world/zone convention (sun.y < 0 = above the
      * horizon). The RT shadow pass, however, casts rays in the DEPTH-RECONSTRUCTED
@@ -557,8 +570,16 @@ void td5_render_apply_shadow_pass(int vp, int vp_x, int vp_y)
             static float s_logged[TD5_MAX_VIEWPORTS] = { -2, -2, -2, -2, -2, -2, -2, -2, -2 };
             if (frac != s_logged[vp]) {
                 s_logged[vp] = frac;
-                TD5_LOG_I(LOG_TAG, "shadow roof probe: pane %d covered %.2f (eye roof %.0f, ahead roof %.0f)",
+                TD5_LOG_I(LOG_TAG, "shadow roof probe: pane %d covered %.2f (eye: roof %.0f, sun blocked at %.0f)",
                           vp, (double)frac, te < 1e29f ? (double)te : -1.0, ta < 1e29f ? (double)ta : -1.0);
+            }
+        }
+        if (shadow_encl_log()) {   /* probe CPU cost, every 600 passes (timer overhead included) */
+            static int s_passes = 0;
+            if (++s_passes >= 600) {
+                TD5_LOG_I(LOG_TAG, "shadow roof probe cost: %.1f us per pass over %d passes (%.0f meshes/pass)",
+                          (double)s_encl_us / (double)s_passes, s_passes, (double)s_encl_calls / (double)s_passes);
+                s_passes = 0; s_encl_us = 0; s_encl_calls = 0;
             }
         }
         s_fade_on[vp] = 1;
@@ -1591,21 +1612,39 @@ static int td6_reverse_banner_page(int page)
  * 660 the same. A tunnel interior is lit by its own zone lights in TD5, so the
  * sun pass has nothing to add there.
  *
- * The probe: while the track walk visits the meshes around this pane's camera,
- * cast two vertical rays UP (+Y in the render-float world the walk uses) against their real triangles, one from the
- * camera eye and one from a point ENCL_AHEAD units ahead of it (where the chase
- * car sits). Track geometry over a ray within ENCL_HEIGHT = a roof. The shadow
- * pass fades by the covered share (0, 1/2, 1) over ~0.2 s, so it is off inside a
- * tunnel and back in the open; a gantry or a bridge deck passing overhead only
- * dips it. Billboards (tree crowns) never count. RT keeps its own (correct) ray
- * traced shadows, so the probe runs with RT off only. TD5RE_SHADOW_ENCLOSURE=0
- * = the old behaviour, for A/B. Per thread: a pane's walk and its shadow pass
- * run on the same thread, one pane after the other. */
-#define ENCL_RAYS 2
+ * The probe: while the track walk visits the meshes around this pane's camera
+ * (before the frustum cull: the roof right over the eye is usually outside the
+ * view), cast two vertical rays UP (+Y in the render-float world the walk uses)
+ * against their real triangles, one from the camera eye and one from a point
+ * ENCL_AHEAD units ahead of it (where the chase car sits). Opaque or cutout track
+ * geometry 400..ENCL_HEIGHT units over a ray = a roof (the 400 floor: an "ahead"
+ * point that lands just under a hillside, Keswick 497, is no roof; translucent and
+ * additive pages and billboards never count). The shadow pass fades by the covered
+ * share (0, 1/2, 1) over ~0.2 s: off inside a tunnel, back in the open, a gantry
+ * or a bridge deck overhead only dips it. Sweep of 16 tracks, 115 poses: every
+ * tunnel pose 0 darkened pixels (was up to 135k at 1280x720), open poses unchanged.
+ * Known limit: a street under overhanging terrain (Courmayeur 105..125, a hillside
+ * triangle 3360 over the road; RT does shade it) loses its RT-off shadows too.
+ * TD5RE_SHADOW_ENCL_SUNRAY=1 also requires the ray toward the sun to be blocked
+ * (off: Newcastle's tunnel lets it out through its side openings). RT keeps its
+ * own ray-traced shadows, so the probe runs with RT off only.
+ * TD5RE_SHADOW_ENCLOSURE=0 = the old behaviour, for A/B. TD5RE_SHADOW_ENCL_LOG=1
+ * logs the hits and the probe's CPU time. Per thread: a pane's walk and its
+ * shadow pass run on the same thread, one pane after the other. */
+#define ENCL_ORIGINS 2                              /* 0 = eye, 1 = ahead (the chase car) */
+#define ENCL_RAYS    (2 * ENCL_ORIGINS)            /* k < 2: straight up, k >= 2: toward the sun */
 static __thread float s_encl_eye[3];
-static __thread int   s_encl_armed;                 /* origins set for the camera in s_encl_eye */
-static __thread float s_encl_o[ENCL_RAYS][3];
-static __thread float s_encl_t[ENCL_RAYS];          /* nearest roof above origin k, render units */
+static __thread int   s_encl_armed;                 /* rays set for the camera in s_encl_eye */
+static __thread float s_encl_o[ENCL_RAYS][3], s_encl_d[ENCL_RAYS][3], s_encl_max[ENCL_RAYS];
+static __thread float s_encl_t[ENCL_RAYS];          /* nearest hit along ray k, render units */
+/* s_encl_sun / s_encl_sun_valid (render-float sun, +Y up) are declared above td5_render_apply_shadow_pass */
+
+static int shadow_encl_log(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_SHADOW_ENCL_LOG", 0, 0, 1);
+    return v;
+}
 
 static int shadow_enclosure_enabled(void)
 {
@@ -1613,49 +1652,70 @@ static int shadow_enclosure_enabled(void)
     if (v < 0) v = td5_env_int("TD5RE_SHADOW_ENCLOSURE", 1, 0, 1);
     return v;
 }
-static float shadow_enclosure_height(void)
-{
-    static float v = -1.0f;
-    if (v < 0.0f) v = (float)td5_env_int("TD5RE_SHADOW_ENCL_HEIGHT", 6000, 100, 100000);
-    return v;
-}
 
-/* Re-arm when this pane's camera differs from the one the origins were built for
+/* Re-arm when this pane's camera differs from the one the rays were built for
  * (a new frame or the next pane). */
 static void shadow_encl_arm(void)
 {
     if (s_encl_armed && s_encl_eye[0] == s_camera_pos[0] &&
         s_encl_eye[1] == s_camera_pos[1] && s_encl_eye[2] == s_camera_pos[2])
         return;
-    static float s_ahead = -1.0f;
-    if (s_ahead < 0.0f) s_ahead = (float)td5_env_int("TD5RE_SHADOW_ENCL_AHEAD", 1500, 0, 20000);
+    static float s_ahead = -1.0f, s_up = -1.0f, s_sun = -1.0f;
+    static int s_sunray = -1;
+    if (s_ahead < 0.0f) {
+        /* Sun rays OFF by default: requiring the sun to be blocked as well broke Newcastle's
+         * tunnel (its side openings let the sun ray out, wedges came back). Kept for A/B. */
+        s_sunray = td5_env_int("TD5RE_SHADOW_ENCL_SUNRAY", 0, 0, 1);
+        s_ahead = (float)td5_env_int("TD5RE_SHADOW_ENCL_AHEAD", 1500, 0, 20000);
+        s_up    = (float)td5_env_int("TD5RE_SHADOW_ENCL_HEIGHT", 6000, 100, 100000);
+        s_sun   = (float)td5_env_int("TD5RE_SHADOW_ENCL_SUNDIST", 20000, 100, 1000000);
+    }
     float fx = s_camera_basis[6], fz = s_camera_basis[8];
     float l = sqrtf(fx * fx + fz * fz);
     if (l > 1e-4f) { fx /= l; fz /= l; } else { fx = 0.0f; fz = 0.0f; }
     for (int i = 0; i < 3; i++) s_encl_eye[i] = s_camera_pos[i];
+    const int sun_ok = s_sunray && s_encl_sun_valid;
     for (int k = 0; k < ENCL_RAYS; k++) {
-        s_encl_o[k][0] = s_camera_pos[0] + fx * s_ahead * (float)k;
+        const int o = k % ENCL_ORIGINS, sun = (k >= ENCL_ORIGINS);
+        s_encl_o[k][0] = s_camera_pos[0] + fx * s_ahead * (float)o;
         s_encl_o[k][1] = s_camera_pos[1];
-        s_encl_o[k][2] = s_camera_pos[2] + fz * s_ahead * (float)k;
-        s_encl_t[k] = 1e30f;
+        s_encl_o[k][2] = s_camera_pos[2] + fz * s_ahead * (float)o;
+        s_encl_d[k][0] = sun ? s_encl_sun[0] : 0.0f;
+        s_encl_d[k][1] = sun ? s_encl_sun[1] : 1.0f;   /* up = +Y in the render-float world */
+        s_encl_d[k][2] = sun ? s_encl_sun[2] : 0.0f;
+        s_encl_max[k] = sun ? s_sun : s_up;
+        s_encl_t[k] = (sun && !sun_ok) ? 0.0f : 1e30f;   /* sun rays off / no sun yet: the roof decides */
     }
     s_encl_armed = 1;
 }
 
-/* Vertical ray (x,z fixed, going to LARGER y = up) vs triangle: 1 + the height of the
- * hit above the origin when the triangle covers (ox,oz) above oy within maxd. */
-static int encl_tri(const float *a, const float *b, const float *c,
-                    float ox, float oy, float oz, float maxd, float *t)
+/* Moller-Trumbore, two-sided (track geometry is drawn without culling). 1 and the
+ * distance when ray k crosses the triangle within (ENCL_MIN_T, max]. The minimum keeps a
+ * ray that starts just under a hillside (Keswick 497: the "ahead" point 13 units below
+ * the slope) from reading the slope as a roof. */
+#define ENCL_MIN_T 400.0f
+static int encl_tri(int k, const float *v0, const float *v1, const float *v2, float *t)
 {
-    float d = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
-    if (d > -1e-3f && d < 1e-3f) return 0;           /* vertical / degenerate in XZ */
-    float u = ((ox - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (oz - a[2])) / d;
-    float v = ((b[0] - a[0]) * (oz - a[2]) - (ox - a[0]) * (b[2] - a[2])) / d;
-    if (u < 0.0f || v < 0.0f || u + v > 1.0f) return 0;
-    float y = a[1] + u * (b[1] - a[1]) + v * (c[1] - a[1]);
-    float h = y - oy;                                 /* up = +Y in render-float world */
-    if (h <= 1.0f || h > maxd) return 0;
-    *t = h;
+    const float *o = s_encl_o[k], *dv = s_encl_d[k];
+    float e1[3], e2[3], p[3], q[3], tv[3];
+    for (int i = 0; i < 3; i++) { e1[i] = v1[i] - v0[i]; e2[i] = v2[i] - v0[i]; }
+    p[0] = dv[1] * e2[2] - dv[2] * e2[1];
+    p[1] = dv[2] * e2[0] - dv[0] * e2[2];
+    p[2] = dv[0] * e2[1] - dv[1] * e2[0];
+    const float det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+    if (det > -1e-6f && det < 1e-6f) return 0;
+    const float inv = 1.0f / det;
+    for (int i = 0; i < 3; i++) tv[i] = o[i] - v0[i];
+    const float u = (tv[0] * p[0] + tv[1] * p[1] + tv[2] * p[2]) * inv;
+    if (u < 0.0f || u > 1.0f) return 0;
+    q[0] = tv[1] * e1[2] - tv[2] * e1[1];
+    q[1] = tv[2] * e1[0] - tv[0] * e1[2];
+    q[2] = tv[0] * e1[1] - tv[1] * e1[0];
+    const float v = (dv[0] * q[0] + dv[1] * q[1] + dv[2] * q[2]) * inv;
+    if (v < 0.0f || u + v > 1.0f) return 0;
+    const float tt = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
+    if (tt <= ENCL_MIN_T || tt > s_encl_max[k]) return 0;
+    *t = tt;
     return 1;
 }
 
@@ -1664,15 +1724,15 @@ static int encl_tri(const float *a, const float *b, const float *c,
 static void shadow_encl_consider(const TD5_MeshHeader *mesh, float cx, float cy, float cz,
                                  float r, float zoff)
 {
-    const float maxd = shadow_enclosure_height();
     int want = 0;
     shadow_encl_arm();
     for (int k = 0; k < ENCL_RAYS; k++) {
-        if (s_encl_t[k] < 1e29f) continue;            /* already covered */
-        float dx = cx - s_encl_o[k][0], dz = cz - s_encl_o[k][2];
-        if (dx * dx + dz * dz > r * r) continue;      /* column misses the sphere */
-        if (cy + r <= s_encl_o[k][1]) continue;       /* sphere entirely below the origin */
-        if ((cy - r) - s_encl_o[k][1] > maxd) continue; /* sphere entirely too high */
+        if (s_encl_t[k] < 1e29f) continue;            /* already blocked */
+        const float ox = cx - s_encl_o[k][0], oy = cy - s_encl_o[k][1], oz = cz - s_encl_o[k][2];
+        const float tca = ox * s_encl_d[k][0] + oy * s_encl_d[k][1] + oz * s_encl_d[k][2];
+        if (tca + r < ENCL_MIN_T || tca - r > s_encl_max[k]) continue;   /* outside the ray's range */
+        const float d2 = ox * ox + oy * oy + oz * oz - tca * tca;
+        if (d2 > r * r) continue;                     /* ray misses the sphere */
         want |= 1 << k;
     }
     if (!want) return;
@@ -1682,9 +1742,9 @@ static void shadow_encl_consider(const TD5_MeshHeader *mesh, float cx, float cy,
     const int cc = mesh->command_count, total = mesh->total_vertex_count;
     if (!cmds || !base || cc <= 0 || cc > 4096 || total <= 0 || total > 65536) return;
     if ((uintptr_t)cmds < 0x10000u || (uintptr_t)base < 0x10000u) return;
-    const float ox = mesh->origin_x * (1.0f / 256.0f);
-    const float oy = mesh->origin_y * (1.0f / 256.0f);
-    const float oz = mesh->origin_z * (1.0f / 256.0f) + zoff;
+    const float mx = mesh->origin_x * (1.0f / 256.0f);
+    const float my = mesh->origin_y * (1.0f / 256.0f);
+    const float mz = mesh->origin_z * (1.0f / 256.0f) + zoff;
     int cursor = 0;
     for (int i = 0; i < cc && want; i++) {
         const TD5_PrimitiveCmd *cmd = &cmds[i];
@@ -1703,8 +1763,12 @@ static void shadow_encl_consider(const TD5_MeshHeader *mesh, float cx, float cy,
             cursor += need;
         }
         if (cmd->dispatch_type < 0 || cmd->dispatch_type > 6) continue;
-#define ENCL_V(j, o) do { (o)[0] = v[(j)].pos_x + ox; (o)[1] = v[(j)].pos_y + oy; \
-                          (o)[2] = v[(j)].pos_z + oz; } while (0)
+        {   /* translucent / additive pages block no sun */
+            const int tp = td5_asset_get_page_transparency(cmd->texture_page_id);
+            if (tp == 2 || tp == 3) continue;
+        }
+#define ENCL_V(j, o) do { (o)[0] = v[(j)].pos_x + mx; (o)[1] = v[(j)].pos_y + my; \
+                          (o)[2] = v[(j)].pos_z + mz; } while (0)
         int j = 0;
         for (int q = 0; q < nq + nt && want; q++) {
             float a[3], b[3], c[3], d[3];
@@ -1715,20 +1779,18 @@ static void shadow_encl_consider(const TD5_MeshHeader *mesh, float cx, float cy,
             for (int k = 0; k < ENCL_RAYS; k++) {
                 float t;
                 if (!(want & (1 << k))) continue;
-                const float *o = s_encl_o[k];
-                if (encl_tri(a, b, c, o[0], o[1], o[2], maxd, &t) ||
-                    (quad && encl_tri(a, c, d, o[0], o[1], o[2], maxd, &t))) {
+                if (encl_tri(k, a, b, c, &t) || (quad && encl_tri(k, a, c, d, &t))) {
                     s_encl_t[k] = t;
                     want &= ~(1 << k);
                     {
-                        static int s_dbg = -1, s_n = 0;
-                        if (s_dbg < 0) s_dbg = td5_env_int("TD5RE_SHADOW_ENCL_LOG", 0, 0, 1);
-                        if (s_dbg && s_n < 40) {
+                        static int s_n = 0;
+                        if (shadow_encl_log() && s_n < 60) {
                             s_n++;
-                            TD5_LOG_I(LOG_TAG, "roof probe hit k=%d o=(%.0f,%.0f,%.0f) t=%.0f tri y=%.0f/%.0f/%.0f "
-                                      "page=%d bc=(%.0f,%.0f,%.0f) r=%.0f cam_up=(%.2f,%.2f,%.2f)",
-                                      k, o[0], o[1], o[2], t, a[1], b[1], c[1], (int)cmd->texture_page_id,
-                                      cx, cy, cz, r, s_camera_basis[3], s_camera_basis[4], s_camera_basis[5]);
+                            TD5_LOG_I(LOG_TAG, "roof probe hit ray %d (%s, %s) t=%.0f page=%d "
+                                      "o=(%.0f,%.0f,%.0f) bc=(%.0f,%.0f,%.0f) r=%.0f",
+                                      k, (k % ENCL_ORIGINS) ? "ahead" : "eye", k >= ENCL_ORIGINS ? "sun" : "up",
+                                      t, (int)cmd->texture_page_id, s_encl_o[k][0], s_encl_o[k][1],
+                                      s_encl_o[k][2], cx, cy, cz, r);
                         }
                     }
                 }
@@ -1738,19 +1800,21 @@ static void shadow_encl_consider(const TD5_MeshHeader *mesh, float cx, float cy,
     }
 }
 
-/* Covered share of the probe rays for the camera the last walk on this thread
- * ran with: 0 = open sky, 1 = roof over the eye and over the car. -1 = no probe
- * for this camera (walk did not run, or probe off). */
-static float shadow_encl_fraction(float *t_eye, float *t_ahead)
+/* Enclosed share for the camera the last walk on this thread ran with: an origin is
+ * enclosed when the roof ray AND the sun ray from it are both blocked. 0 = open,
+ * 1 = eye and car both under a roof that hides the sun. -1 = no probe for this camera.
+ * t_up / t_sun: the eye's roof and sun-blocker distances (1e30 = none). */
+static float shadow_encl_fraction(float *t_up, float *t_sun)
 {
     if (!s_encl_armed || s_encl_eye[0] != s_camera_pos[0] ||
         s_encl_eye[1] != s_camera_pos[1] || s_encl_eye[2] != s_camera_pos[2])
         return -1.0f;
     int n = 0;
-    for (int k = 0; k < ENCL_RAYS; k++) n += (s_encl_t[k] < 1e29f);
-    if (t_eye)   *t_eye   = s_encl_t[0];
-    if (t_ahead) *t_ahead = s_encl_t[1];
-    return (float)n / (float)ENCL_RAYS;
+    for (int o = 0; o < ENCL_ORIGINS; o++)
+        n += (s_encl_t[o] < 1e29f && s_encl_t[o + ENCL_ORIGINS] < 1e29f);
+    if (t_up)  *t_up  = s_encl_t[0];
+    if (t_sun) *t_sun = s_encl_t[ENCL_ORIGINS];
+    return (float)n / (float)ENCL_ORIGINS;
 }
 
 /* --- Mesh Rendering --- */
@@ -2014,8 +2078,11 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
 
         /* [round VB] roof probe for the RT-off sun-shadow pass, BEFORE the frustum
          * cull: the roof right over the eye is usually outside the view. */
-        if (encl_on && !dbg_is_bb)
+        if (encl_on && !dbg_is_bb) {
+            const uint64_t t0 = shadow_encl_log() ? td5_plat_time_us() : 0;
             shadow_encl_consider(mesh, cx, cy, cz + s_dl_z_offset, r, s_dl_z_offset);
+            if (t0) { s_encl_us += td5_plat_time_us() - t0; s_encl_calls++; }
+        }
 
         if (!td5_render_is_sphere_visible(cx, cy, cz + s_dl_z_offset, r)) {
             if (dbg_is_bb) s_dbg_bb_culled++;   /* [task#7] */

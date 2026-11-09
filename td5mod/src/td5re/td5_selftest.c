@@ -267,6 +267,11 @@ typedef struct {
      * (black = shadowed, white = lit). PASS when a sane share of the receivers is shadowed AND those pixels
      * really got darker than the lit ones (the pass used to be dispatched yet multiply by 1.0). */
     int ug_check;
+    /* [round VB 2026-11-09] item 4 "triangle shadows": 1 = RT off, sun shadows on, the car spawned under a
+     * tunnel roof. During the countdown capture the frame with and without the screen-space sun-shadow pass;
+     * PASS when the pass darkens (almost) nothing in the scene area AND the roof probe saw the roof and faded
+     * the pass out. The old pass drew hard-edged wedges there (TD5RE_SHADOW_ENCLOSURE=0 = the control). */
+    int vb_check;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -719,6 +724,11 @@ static const RaceScenario k_races[] = {
     { .name="ug-shadow-visible-2p",        .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
       .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .ug_check=1 },
+    /* [round VB 2026-11-09] item 4: no sun-shadow wedges under a tunnel roof. Honolulu (track 8) starts at span
+     * ~103, +990 puts the grid at ~1093, inside the brick tunnel with ceiling lamps (light zone 1066-1121). */
+    { .name="v4-tunnel-no-shadow",         .track=8,  .car=-1, .game_type=0, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1, .span_offset=990,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .vb_check=1 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -738,6 +748,12 @@ static unsigned char *s_ug_on, *s_ug_off;   /* luminance, w*h */
 static char  s_ug_note[200];
 static int   s_ug_fail = -1;                 /* -1 = never judged */
 static void  st_ug_frame(void);
+
+/* [round VB] v4-tunnel-no-shadow: capture machine + verdict */
+static int   s_vb_frame, s_vb_done, s_vb_sun_saved;
+static int   s_vb_fail = -1;                 /* -1 = never judged */
+static char  s_vb_note[200];
+static void  st_vb_frame(void);
 
 static int  s_u7_res = -99;      /* [round UC] u7-sun-in-sky: td5_render_sky_sun_check result, -99 = not sampled */
 static char s_u7_note[96];
@@ -2388,6 +2404,7 @@ static void st_apply_scenario(const RaceScenario *sc)
     s_t3_max_lap = 0;
     s_u7_res = -99; s_u7_note[0] = 0;   /* [round UC] */
     s_ug_frame = 0; s_ug_done = 0; s_ug_fail = -1; s_ug_note[0] = 0;   /* [round UG] */
+    s_vb_frame = 0; s_vb_done = 0; s_vb_fail = -1; s_vb_note[0] = 0;   /* [round VB] */
     if (sc->laps_menu > 0) {
         char buf[64];
         if (sc->roam) {
@@ -3425,6 +3442,18 @@ static void st_tick_races(uint32_t now)
                         (void)w;
                     }
                 }
+                /* [round VB] v4-tunnel-no-shadow: no sun-shadow wedges under the tunnel roof. */
+                if (sc->vb_check && status < ST_FAIL) {
+                    size_t nl = strlen(note);
+                    if (s_vb_fail != 0) {
+                        status = ST_FAIL;
+                        int w = snprintf(note, sizeof(note), "vb: %.100s", s_vb_fail < 0 ? "never judged" : s_vb_note);
+                        (void)w;
+                    } else if (nl < sizeof(note) - 1) {
+                        int w = snprintf(note + nl, sizeof(note) - nl, " %.100s", s_vb_note);
+                        (void)w;
+                    }
+                }
                 /* [round UC] u7-sun-in-sky*: the sun disc at race start was over sky. */
                 if (sc->sun_check && status < ST_FAIL) {
                     size_t nl = strlen(note);
@@ -3512,6 +3541,7 @@ static void st_tick_races(uint32_t now)
     if (s_sub == SS_RACE_RUNNING) {
         int tick = g_td5.simulation_tick_counter;
         if (sc->ug_check) st_ug_frame();   /* [round UG] per rendered frame, not per sim tick */
+        if (sc->vb_check) st_vb_frame();   /* [round VB] */
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
             st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
@@ -3725,6 +3755,60 @@ static void st_ug_frame(void)
         free(s_ug_on); s_ug_on = NULL;
         free(s_ug_off); s_ug_off = NULL;
         TD5_LOG_I(LOG_TAG, "ug-shadow-visible: %s -> %s", s_ug_note, s_ug_fail ? "FAIL" : "PASS");
+    }
+}
+
+/* [round VB] v4-tunnel-no-shadow: runs once per rendered race frame during the (static) countdown. Captures the
+ * frame with the sun-shadow pass ON, then OFF, 6 frames apart (readback latency), and counts the scene pixels the
+ * pass darkened by more than 6 levels. The HUD corners and an 8% border (the pulsing vignette) are left out. */
+static void st_vb_frame(void)
+{
+    enum { VB_F0 = 30, VB_GAP = 6 };
+    static unsigned char *s_on;
+    static int s_w, s_h;
+    const int f = s_vb_frame++;
+    if (s_vb_done) return;
+    if (f == VB_F0) {
+        s_ug_seq++;   /* shares the ug dump numbering (TD5RE_UG_DUMP=1 -> log/ug_<n>_vb_on/off.png) */
+        td5_plat_capture_arm(1);
+        s_vb_sun_saved = td5_light2_sun_shadows();
+        td5_light2_set_sun_shadows(1);
+    } else if (f == VB_F0 + VB_GAP) {
+        s_on = st_ug_grab(&s_w, &s_h, "vb_on");
+        td5_light2_set_sun_shadows(0);
+    } else if (f == VB_F0 + 2 * VB_GAP) {
+        int w = 0, h = 0;
+        unsigned char *off = st_ug_grab(&w, &h, "vb_off");
+        float frac = -1.0f, fade = -1.0f, str = -1.0f;
+        const int q = td5_render_shadow_enclosure_query(0, &frac, &fade, &str);
+        td5_plat_capture_arm(-1);
+        td5_light2_set_sun_shadows(s_vb_sun_saved);
+        s_vb_done = 1;
+        s_vb_fail = 1;
+        if (!s_on || !off || w != s_w || h != s_h) {
+            snprintf(s_vb_note, sizeof s_vb_note, "capture missing (on=%d off=%d)", s_on != NULL, off != NULL);
+        } else {
+            long long n = 0, dark = 0;
+            int x, y;
+            for (y = h * 8 / 100; y < h * 92 / 100; y++)
+                for (x = w * 8 / 100; x < w * 92 / 100; x++) {
+                    if (x < w * 40 / 100 && y < h * 36 / 100) continue;   /* debug text */
+                    if (x < w * 17 / 100 && y > h * 70 / 100) continue;   /* minimap */
+                    if (x > w * 80 / 100 && y > h * 68 / 100) continue;   /* gauge */
+                    n++;
+                    if ((int)off[y * w + x] - (int)s_on[y * w + x] > 6) dark++;
+                }
+            {
+                const double share = n ? (double)dark / (double)n : 1.0;
+                s_vb_fail = !(q && frac >= 0.5f && fade >= 0.9f && share <= 0.002);
+                snprintf(s_vb_note, sizeof s_vb_note,
+                         "darkened %.3f%% of %lld scene px, roof probe covered %.2f fade %.2f strength %.3f (q=%d) %dx%d",
+                         share * 100.0, n, (double)frac, (double)fade, (double)str, q, w, h);
+            }
+        }
+        free(s_on); s_on = NULL;
+        free(off);
+        TD5_LOG_I(LOG_TAG, "v4-tunnel-no-shadow: %s -> %s", s_vb_note, s_vb_fail ? "FAIL" : "PASS");
     }
 }
 
