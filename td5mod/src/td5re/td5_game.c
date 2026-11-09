@@ -365,6 +365,7 @@ typedef struct RaceSlotState {
 } RaceSlotState;
 
 static RaceSlotState s_slot_state[TD5_MAX_RACER_SLOTS];
+static int   s_last_race_span_offset;       /* [integ V] StartSpanOffset the last race started with */
 
 /* Per-actor metrics */
 typedef struct ActorRaceMetric {
@@ -2757,7 +2758,10 @@ static void init_race_modes_and_seed(void)
             g_td5.ini.traffic_dyn_period    = s_sv_period;
             g_td5.ini.traffic_dyn_spawn_min = s_sv_smin;
             g_td5.ini.traffic_dyn_spawn_max = s_sv_smax;
-            g_td5.ini.start_span_offset     = s_sv_offset;
+            /* [integ V 2026-11-09] put the offset back only if nothing changed it since the mode race
+             * ran (a dev/selftest StartSpanOffset set after a drag race was wiped to 0). */
+            if (g_td5.ini.start_span_offset == s_last_race_span_offset)
+                g_td5.ini.start_span_offset = s_sv_offset;
             TD5_LOG_I(LOG_TAG, "InitRace: restored mode-tuned INI knobs (dynamic=%d period=%d spawn=%d..%d offset=%d)",
                       s_sv_dynamic, s_sv_period, s_sv_smin, s_sv_smax, s_sv_offset);
         } else {
@@ -4474,6 +4478,7 @@ static void init_race_spawn_actors(void)
          * configured offset. Gated by TD5RE_REPLAY_OFFSET_FIX (cached): "0" reverts
          * to using the live offset (old, diverging behaviour). */
         int effective_start_span_offset = g_td5.ini.start_span_offset;
+        s_last_race_span_offset = g_td5.ini.start_span_offset;   /* [integ V] see the mode-knob restore */
         if (s_replay_mode) {
             static int s_replay_off_init = 0;
             static int s_replay_off_enabled = 1;
