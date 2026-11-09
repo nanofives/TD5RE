@@ -93,6 +93,23 @@ arrows, vote markers) goes in the **post-button** switch. The title (top, no
 overlap) can go either place; the reference screens draw everything in the
 post-button render fn.
 
+### Slides end where they ended (round VA, 2026-11-09)
+
+`frontend_get_button_anim_state` maps only the (screen, state) pairs that ANIMATE. A
+screen may finish a slide and spend a frame or more in an unmapped state before it
+settles or calls `set_screen` (OPTIONS 8 -> 9, CAR SELECT 0x18 -> 0x19 wipe -> 0x1A,
+RACE TYPE 1 -> 2). Two latches in `td5_frontend.c` (`s_fe_slide_in_done` /
+`s_fe_slide_out_done`, set by `frontend_update_timed_animation` at t >= 1 in a mapped
+IN / OUT state, cleared by `set_screen`, `frontend_reset_buttons` and
+`frontend_create_button`) keep the end pose in those states: gone after an OUT, at rest
+after an IN. Before, the old menu came back at rest for a frame after its slide-out and
+RACE TYPE blinked out at the end of its slide-in. A new screen gets this for free; it
+only has to list its slide states in `frontend_get_button_anim_state`.
+Check a walk frame by frame: `TD5RE_FE_TRANSITION_PROBE=1` (stamps each frame + one
+`FE-PROBE` line in frontend.log), `TD5RE_FRAMEDUMP=<dir>/f%05d.png
+TD5RE_FRAMEDUMP_EVERY=1`, an `--InputScript`, then `python verify/fe_transition_check.py
+log/frontend.log` (SNAP-BACK / VANISH per frame; A/B `TD5RE_FE_SLIDE_LATCH=0`).
+
 ## Background
 
 Call `frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip")` in

@@ -37,13 +37,13 @@ battle, **MPC** MP cop chase, **MPD** MP drag, **Net** network race (host's valu
 circuit / free drive (own panels).
 
 Cells: **R** offered and reaches the race. **FIXED** was lost or stale, reaches the race since round UB. **UE** decided
-by Mariano and done in round UE (Q1-Q6 below). **-** not offered. **own** the mode has its own control.
+by Mariano and done in round UE (Q1-Q6 below). **VA** changed in round VA (below). **-** not offered. **own** the mode has its own control.
 
 | Option | SR | QR | TT | Cup | Drag | Cop | MPR | TB | MPC | MPD | Net | Roam |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Traffic | R | R | **FIXED** | R per race | R (OFF/ON, ON = drag stream) | **FIXED** level, **UE** OFF = no traffic | R | **UE** hidden (forced VERY HIGH) | R | own | R | own |
 | Police | R | R | **FIXED** | R per race | - | - | R (off when the split field > 6) | **UE** hidden (forced off) | - | - | R | own |
-| Laps (circuits) | R | R | **UE** hidden (1 lap) | R per race (Era 4) | n/a | **FIXED** | R | R | R | n/a | R | own |
+| Laps (circuits) | R | R | **VA** R (circuits; was hidden by UE) | R per race (Era 4) | n/a | **FIXED** | R | R | R | n/a | R | own |
 | Difficulty | R | R | R (tier only) | - | **FIXED** | R | R | - | - | R | R | n/a |
 | Opponents | R | R | - | - | R | R | R | - | R | R | host | own |
 | Direction | R | R | R | R per race | n/a | R | R | R | R | n/a | R | forwards |
@@ -88,11 +88,22 @@ UB       all four               PASS  (time trial: traffic=1 vol=4 police=1 coll
 |---|---|---|---|
 | Q1 | Cop chase TRAFFIC OFF = an empty road (no longer forced HEAVY). LOW..VERY HIGH as picked. | `td5_frontend.c` ConfigureGameTypeFlags case 8, `td5_fe_mp_setup.c` frontend_init_race_schedule | `ue-q1-copchase-notraffic`: wanted=1 traffic=0 vol=0, 0 traffic cars in 20 s |
 | Q2 | Traffic battle: TRAFFIC and POLICE rows hidden. | `td5_frontend.c` td5_raceopts_row_available | `ue-hidden-rows` |
-| Q3 | Time trial: LAPS row hidden on SELECT TRACK (also on RANDOM). | `td5_fe_race.c` frontend_laps_row_mode_hidden | `ue-hidden-rows` |
+| Q3 | Time trial: LAPS row hidden on SELECT TRACK (also on RANDOM). **Reverted in round VA**, see below. | `td5_fe_race.c` frontend_laps_row_mode_hidden (removed in VA) | `ue-hidden-rows` |
 | Q4 | Time trial: CHECKPOINT TIMERS row hidden. | td5_raceopts_row_available | `ue-hidden-rows` |
 | Q5 | Cups (SP; MP already hid it): CHECKPOINT TIMERS row hidden. | td5_raceopts_row_available | `ue-hidden-rows` |
 | Q6 | MP drag: the car-select pane shows a grey, non-selectable MANUAL row between PAINT and OK. The per-player AUTO / MANUAL row lives on PROFILE SELECTION, which comes BEFORE the mode vote, so it cannot know drag yet; the car grid is the first screen after the vote. The player's own pick is not changed. | `td5_fe_mp_setup.c` mp_carsel_drag_gear_row | `ue-hidden-rows` + frames |
 | - | Hidden rows leave no gap: QUICK RACE (CAR, TRACK, DIRECTION, LAPS) and SELECT TRACK (TRACK, DIRECTION, LAPS) stack their visible rows. RACE OPTIONS already built a filtered list. | `td5_fe_race.c` frontend_reflow_rows | `ue-hidden-rows` |
+
+## Round VA (2026-11-09): LAPS back in time trial
+
+Mariano: "there's no lap configuration on the latest version for circuits on time trials". Round UE's Q3 is reversed:
+
+| Change | Where | Test |
+|---|---|---|
+| SELECT TRACK shows LAPS in time trial on circuit tracks, hides it point to point (same rule as a single race; RANDOM keeps the row) | `td5_fe_race.c` frontend_update_laps_button_visibility, frontend_random_track_rows (frontend_laps_row_mode_hidden removed) | `ue-hidden-rows` (expectations updated) |
+| Time trial commits the LAPS row at launch, after ConfigureGameTypeFlags case 7 forced 1 | `td5_fe_mp_setup.c` frontend_init_race_schedule | `v2-tt-laps`: Maui, time trial, LAPS 1 -> 2 after the race type, natural finish, circuit_lap_count 2 and the player finished lap 2 |
+
+CHECKPOINT TIMERS stays forced ON and hidden in time trial (Q4 unchanged).
 
 ## Questions for Mariano asked in round UB (answered above, kept for the record)
 

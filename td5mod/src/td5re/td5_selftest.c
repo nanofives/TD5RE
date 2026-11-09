@@ -255,7 +255,9 @@ typedef struct {
      *   62 ue-hidden-rows           rows hidden / greyed per mode, no gap when DIRECTION hides
      *   63 ue-shadow-sun*           RT off: the sun-shadow pass casts from the sun the sky draws
      * [round UF 2026-11-08] follow-up:
-     *   71 uf-mp-random             split-screen car grid: per-pane RANDOM rolls independently at launch */
+     *   71 uf-mp-random             split-screen car grid: per-pane RANDOM rolls independently at launch
+     * [round VA 2026-11-09]:
+     *   83 v3-drag-no-highscore     after a real SP drag race: results QUIT -> main menu, no name entry */
     int u_check;
     /* [round UC 2026-11-08] item 7: 1 = at race start the sun disc's direction, and a ring around it as wide as
      * the glare, maps to SKY texels of the panorama (td5_render_sky_sun_check against the td5_sky_sunpos.h
@@ -719,6 +721,20 @@ static const RaceScenario k_races[] = {
     { .name="ug-shadow-visible-2p",        .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
       .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .ug_check=1 },
+    /* [round VA 2026-11-09] item 2: TIME TRIAL on a circuit (Maui) runs the LAPS picked on SELECT TRACK. Previous
+     * pick 1 lap, LAPS -> 2 after the race type (the menus' order), natural finish: circuit_lap_count == 2 and the
+     * player finished lap 2 (the t3-laps-shipped verdict). */
+    { .name="v2-tt-laps",                  .track=6,  .car=-1, .game_type=7, .player_is_ai=1,
+      .traffic=0, .opponents=-2, .difficulty=-1, .checkpoint_timers=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .mp_mode=-1,
+      .natural_finish=1, .depth=ST_DEPTH_RUN_FINISH, .laps_menu=2 },
+    /* [round VA 2026-11-09] item 3: no high scores for the drag strip. A real SP drag race run to its finish, then the
+     * results QUIT target and the post-race name entry are asked (frontend_v3_drag_hs_selftest): main menu, entry
+     * refused; a single race still goes to the name entry (control). */
+    { .name="v3-drag-no-highscore",        .track=19, .car=-1, .game_type=9, .player_is_ai=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .mp_mode=-1,
+      .natural_finish=1, .depth=ST_DEPTH_RUN_FINISH, .u_check=83 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -3380,6 +3396,9 @@ static void st_tick_races(uint32_t now)
                         break;
                     case 71:   /* [round UF] split-screen car grid RANDOM */
                         fail = frontend_uf_mp_random_selftest(un, sizeof un);
+                        break;
+                    case 83:   /* [round VA] item 3: no high scores after a drag race */
+                        fail = frontend_v3_drag_hs_selftest(un, sizeof un);
                         break;
                     case 63: { /* [round UE] shadows follow the drawn sun (RT off) */
                         const float d = s_ue_shadow[0] * s_ue_sky[0] + s_ue_shadow[1] * s_ue_sky[1] +
