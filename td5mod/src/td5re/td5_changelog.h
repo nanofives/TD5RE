@@ -40,6 +40,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  tracks, and the race runs the laps picked." },
     { CL_ITEM,    "Drag race: no high scores. QUIT on the results goes" },
     { CL_ITEM,    "  straight to the main menu (no name entry, no table)." },
+    { CL_ITEM,    "  Old drag records left in the save file are dropped" },
+    { CL_ITEM,    "  the next time progress is saved." },
     { CL_ITEM,    "RANDOM car / track: no picture (the \"?\" card is" },
     { CL_ITEM,    "  gone), just the RANDOM title." },
     { CL_DATE,    "November 9 (no shadow triangles in tunnels)" },
