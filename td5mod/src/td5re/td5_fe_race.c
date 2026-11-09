@@ -12829,6 +12829,12 @@ int frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels
     return s_button_count;
 }
 
+int frontend_ve_car_locked(void)
+{
+    const int c = frontend_current_car_index();
+    return !s_cheat_unlock_all && c >= 0 && c < 37 && s_car_lock_table[c] != 0;
+}
+
 void frontend_ve_mark_lobby_flow(void)
 {
     s_mp_flow = 1;

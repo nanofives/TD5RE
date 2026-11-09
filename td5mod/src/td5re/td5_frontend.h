@@ -150,6 +150,7 @@ int  frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *label
 /* The selftest's AutoRace launches split screen without the lobby, so the frontend's local-MP flow flag is off;
  * the v12 split-screen row sets it the way the lobby leaves it (the MP post-race menu keys off it). */
 void frontend_ve_mark_lobby_flow(void);
+int  frontend_ve_car_locked(void);   /* the car select's current car cannot be raced (locked) */
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""

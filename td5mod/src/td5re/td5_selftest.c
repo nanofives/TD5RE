@@ -741,6 +741,18 @@ static const RaceScenario k_races[] = {
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1,
       .mp_mode=0, .mp_ai_players=1, .roam=18, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=12 },
+    /* a 2-lap circuit with 3 AI: laps into the results, RACE AGAIN the same loop */
+    { .name="v12-roam-finish-circuit",     .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1, .roam=8, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=12 },
+    /* SELECT NEW CAR: car select, the next car, OK: the same route with that car */
+    { .name="v12-roam-newcar",             .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1, .roam=4, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=13 },
+    /* VIEW RACE DATA (the table again), then QUIT: back to the map the race came from */
+    { .name="v12-roam-quit",               .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1, .roam=4, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=14 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -3243,7 +3255,10 @@ static struct {
     char     labels[160];
     int      nbtn, dmask;
     int      mp;               /* the split-screen post-race menu */
-    char     tag[8];
+    int      check;            /* 12 RACE AGAIN, 13 SELECT NEW CAR, 14 VIEW RACE DATA then QUIT */
+    int      viewed;           /* 14: VIEW RACE DATA done */
+    int      car0;             /* the first race's car */
+    char     tag[12];
 } s_ve;
 
 static void st_ve_shot(const char *what)
@@ -3258,7 +3273,9 @@ static void st_ve_shot(const char *what)
 static void st_ve_reset(const RaceScenario *sc)
 {
     memset(&s_ve, 0, sizeof s_ve);
-    snprintf(s_ve.tag, sizeof s_ve.tag, "%s", sc && sc->roam == 18 ? "mp2" : sc && sc->roam == 6 ? "field" : "solo");
+    s_ve.check = sc ? sc->ve_check : 12;
+    snprintf(s_ve.tag, sizeof s_ve.tag, "%s", sc && sc->roam == 18 ? "mp2" : sc && sc->roam == 6 ? "field"
+             : sc && sc->roam == 8 ? "circuit" : s_ve.check == 13 ? "newcar" : s_ve.check == 14 ? "quit" : "solo");
 }
 
 /* in race: the finish data, then frames of the place / star / fade */
@@ -3273,6 +3290,7 @@ static void st_ve_race_frame(const RaceScenario *sc, uint32_t now)
         const TD5_RoamRaceResult *r = td5_roam_race_result();
         s_ve.fin_ms = now;
         s_ve.ticks = r->ticks; s_ve.hash = r->hash; s_ve.len = r->length_m; s_ve.rank = r->player_rank;
+        s_ve.car0 = g_td5.car_index;
         TD5_LOG_I(LOG_TAG, "v12: race finished, %ld ticks, route %08X %.1f m, place %d", s_ve.ticks,
                   (unsigned)s_ve.hash, s_ve.len, s_ve.rank);
     }
@@ -3332,7 +3350,7 @@ static int st_ve_tick(uint32_t now)
         break;
     case 1:   /* the table, interactive: frame, then OK */
         if (inner == 6 && td5_frontend_harness_ready()) {
-            if (++s_ve.settle == 30) st_ve_shot("6_stats");
+            if (++s_ve.settle == 30) st_ve_shot(s_ve.viewed ? "6b_stats_again" : "6_stats");
             if (s_ve.settle == 45) { st_ve_press(1); s_ve.phase = 2; s_ve.phase_ms = now; s_ve.settle = 0; }
         } else if (now - s_ve.phase_ms > 15000u) {
             snprintf(why, sizeof why, "results table never interactive (inner state %d)", inner);
@@ -3349,7 +3367,13 @@ static int st_ve_tick(uint32_t now)
                 TD5_LOG_I(LOG_TAG, "v12: post-race menu %d button(s): %s (disabled mask 0x%X)", s_ve.nbtn, s_ve.labels,
                           (unsigned)s_ve.dmask);
             }
-            if (s_ve.settle == 45) { st_ve_press(0); s_ve.phase = 3; s_ve.phase_ms = now; }
+            if (s_ve.settle == 45) {
+                if (s_ve.check == 13) { st_ve_press(3); s_ve.phase = 7; }                 /* SELECT NEW CAR */
+                else if (s_ve.check == 14 && !s_ve.viewed) { st_ve_press(2); s_ve.viewed = 1; s_ve.phase = 1; }   /* VIEW RACE DATA */
+                else if (s_ve.check == 14) { st_ve_press(4); s_ve.phase = 6; }            /* QUIT */
+                else { st_ve_press(0); s_ve.phase = 3; }                                  /* RACE AGAIN */
+                s_ve.phase_ms = now; s_ve.settle = 0;
+            }
         } else if (now - s_ve.phase_ms > 15000u) {
             snprintf(why, sizeof why, "post-race menu never up (inner state %d)", inner);
             st_ve_fail(why);
@@ -3378,17 +3402,57 @@ static int st_ve_tick(uint32_t now)
             const int okt = s_ve.prim == (int32_t)s_ve.ticks;
             const int okp = s_ve.fpos == (s_ve.rank > 0 ? s_ve.rank - 1 : 0);
             const int okm = s_ve.nbtn == (s_ve.mp ? 6 : 5) && (s_ve.dmask & ~2) == 0 && (s_ve.dmask & 2);
+            const int okc = s_ve.check != 13 || g_td5.car_index != s_ve.car0;
             st_ve_shot("8_again_go");
-            s_ve.status = (okt && okp && okm) ? ST_PASS : ST_FAIL;
-            snprintf(s_ve.note, sizeof s_ve.note, "%s: t %d/%ld%s p%d/%d%s, %s%d btn%s, AGAIN same route GO",
+            s_ve.status = (okt && okp && okm && okc) ? ST_PASS : ST_FAIL;
+            snprintf(s_ve.note, sizeof s_ve.note, "%s: t %d/%ld%s p%d/%d%s, %s%d btn%s, %s same route GO",
                      s_ve.tag, (int)s_ve.prim, s_ve.ticks, okt ? "" : " BAD", s_ve.fpos + 1, s_ve.rank > 0 ? s_ve.rank : 1,
-                     okp ? "" : " BAD", s_ve.mp ? "MP menu " : "", s_ve.nbtn, okm ? " replay grey" : " BAD MENU");
+                     okp ? "" : " BAD", s_ve.mp ? "MP menu " : "", s_ve.nbtn, okm ? " replay grey" : " BAD MENU",
+                     s_ve.check != 13 ? "AGAIN" : okc ? "NEW CAR" : "SAME CAR (BAD)");
+            TD5_LOG_I(LOG_TAG, "v12: second race car %d (first race %d)", g_td5.car_index, s_ve.car0);
             TD5_LOG_I(LOG_TAG, "v12: verdict %s: %s | menu: %s", s_ve.status == ST_PASS ? "PASS" : "FAIL", s_ve.note,
                       s_ve.labels);
             td5_game_selftest_end_race();
             s_ve.phase = 5; s_ve.phase_ms = now;
         } else if (now - s_ve.phase_ms > 30000u) {
             st_ve_fail("RACE AGAIN never reached GO");
+        }
+        break;
+    case 6:   /* QUIT: back on the map the race was started from, roam session gone */
+        if (td5_frontend_get_screen() != TD5_SCREEN_RACE_RESULTS && g_td5.game_state == TD5_GAMESTATE_MENU) {
+            const int scr = (int)td5_frontend_get_screen(), want = (int)td5_frontend_roam_origin_screen();
+            if (++s_ve.settle < 20) break;
+            st_ve_shot("8_quit");
+            {
+                const int okt = s_ve.prim == (int32_t)s_ve.ticks;
+                const int okm = s_ve.nbtn == 5 && s_ve.dmask == 2;
+                const int okq = scr == want && !td5_roam_armed() && !td5_roam_active();
+                s_ve.status = (okt && okm && okq) ? ST_PASS : ST_FAIL;
+                snprintf(s_ve.note, sizeof s_ve.note, "%s: t %d/%ld%s, %d btn%s, RACE DATA again, QUIT -> screen %d (map %d)%s",
+                         s_ve.tag, (int)s_ve.prim, s_ve.ticks, okt ? "" : " BAD", s_ve.nbtn, okm ? " replay grey" : " BAD MENU",
+                         scr, want, okq ? "" : " BAD");
+            }
+            TD5_LOG_I(LOG_TAG, "v12: verdict %s: %s", s_ve.status == ST_PASS ? "PASS" : "FAIL", s_ve.note);
+            s_ve.phase = 5; s_ve.phase_ms = now;
+        } else if (now - s_ve.phase_ms > 15000u) {
+            st_ve_fail("QUIT never left the results screen");
+        }
+        break;
+    case 7:   /* SELECT NEW CAR: the car select, one car to the right, OK */
+        if (td5_frontend_get_screen() == TD5_SCREEN_CAR_SELECTION && td5_frontend_harness_ready()) {
+            ++s_ve.settle;
+            /* RIGHT on CAR until a car that is not locked (the car select walks the locked ones too) */
+            if (s_ve.settle == 30) { td5_frontend_harness_select(0); td5_plat_input_inject_key(0xCD, 1); }
+            if (s_ve.settle == 34) td5_plat_input_inject_key(0xCD, 0);
+            /* the car-change slide runs ~0.45 s plus its settle states: judge / press well after it (frames run at
+             * 60..150 a second here, so 300 frames is 2..5 s) */
+            if (s_ve.settle == 300 && frontend_ve_car_locked() && s_ve.viewed++ < 40) s_ve.settle = 29;
+            if (s_ve.settle == 320) st_ve_shot("8_car_select");
+            if (s_ve.settle == 340) { st_ve_press(4); s_ve.phase = 3; s_ve.phase_ms = now; s_ve.settle = 0; }   /* OK */
+        } else if (now - s_ve.phase_ms > 15000u) {
+            char why[96];
+            snprintf(why, sizeof why, "SELECT NEW CAR never reached the car select (screen %d)", (int)td5_frontend_get_screen());
+            st_ve_fail(why);
         }
         break;
     default:  /* back in the menus */
