@@ -11313,10 +11313,9 @@ int frontend_v3_drag_hs_selftest(char *note, size_t cap) {
     fail = !(sv_gt == 9 && !td5_game_drag_mp_active() && !td5_game_mp_cup_active() &&
              q_drag == TD5_SCREEN_MAIN_MENU && ne_drag == 1 &&
              q_single == TD5_SCREEN_NAME_ENTRY && ne_single == 0);
-    snprintf(note, cap, "drag (gt %d, mp %d): QUIT -> screen %d (main menu %d), name entry skipped %d | "
-             "single race: QUIT -> screen %d (name entry %d), skipped %d",
-             sv_gt, td5_game_drag_mp_active(), (int)q_drag, (int)TD5_SCREEN_MAIN_MENU, ne_drag,
-             (int)q_single, (int)TD5_SCREEN_NAME_ENTRY, ne_single);
+    /* short: the row note shares 120 chars with the invariant summary. Screens: 5 main menu, 25 name entry. */
+    snprintf(note, cap, "drag%d QUIT>%d skip%d; single QUIT>%d skip%d",
+             sv_gt, (int)q_drag, ne_drag, (int)q_single, ne_single);
     return fail;
 }
 #endif
@@ -12841,7 +12840,7 @@ int frontend_ue_rows_selftest(char *note, size_t cap) {
     g_td5.reverse_direction = sv_rev; g_td5.mp_mode_config.mode = sv_mode;
     s_trksel_auto_btn = sv_auto; s_trksel_geo_btn = sv_geo; s_trksel_dyn_btn = sv_dyn;
     snprintf(note, cap, "%s", fail ? why
-             : "TB no TRAFFIC/POLICE, TT no LAPS/CP, cup no CP, MP drag MANUAL greyed, no gap on RANDOM (select track + quick race)");
+             : "TB no TRAFFIC/POLICE, TT LAPS on circuits only + no CP, cup no CP, MP drag MANUAL greyed, no gap on RANDOM");
     return fail;
 }
 #endif
