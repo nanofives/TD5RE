@@ -2155,12 +2155,12 @@ const char *td5_game_cop_chase_outcome_name(int outcome)
 /* [round VC 2026-11-09] Mariano 2026-11-09 item 5: a SINGLE-PLAYER cop chase has
  * no finishing position. The player is the cop chasing speeders, so "1ST" / the
  * centred place digit means nothing; the race just fades out. (The victory star
- * was already off for game type 8, see td5_game_begin_fade_out.) MP cop chase is
- * untouched. */
+ * was already off for game type 8, see td5_game_begin_fade_out.) [integ-roamV,
+ * Mariano 2026-11-09] MP cop chase too: no place digit on any pane and no
+ * placing points on top of the ram score. */
 int td5_game_finish_place_hidden(void)
 {
-    return g_td5.wanted_mode_enabled &&
-           g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE;
+    return g_td5.wanted_mode_enabled;
 }
 
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
