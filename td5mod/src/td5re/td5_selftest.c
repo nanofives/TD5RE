@@ -260,7 +260,7 @@ typedef struct {
      * [round UF 2026-11-08] follow-up:
      *   71 uf-mp-random             split-screen car grid: per-pane RANDOM rolls independently at launch
      * [round VA 2026-11-09]:
-     *   83 v3-drag-no-highscore     after a real SP drag race: results QUIT -> main menu, no name entry */
+     *   83 v3-drag-no-highscore     after a real SP drag race: results QUIT -> main menu, no name entry
      * [round VC 2026-11-09]:
      *   106 v6-copchase-results     SP cop chase to its end: no finishing place drawn (item 5), and the results
      *                               table's BUSTED / ESCAPED per speeder match the race state (item 6) */
