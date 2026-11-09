@@ -1042,6 +1042,8 @@ void td5_roam_route_ui_draw_overlay(void)
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
+static int wq_legacy(void);
+
 /* ============================================================ the HUD line ===== */
 
 void td5_roam_route_ui_draw_hud(void)
@@ -1056,7 +1058,7 @@ void td5_roam_route_ui_draw_hud(void)
         const float H = g_render_height_f;
         /* [round VD] item 13: no "M ROUTE MAP" prompt in a race's pause menu (countdown, racing, finished). The
          * prompt stays in FREE ROAM, where the map is how a route gets planned. */
-        if (td5_roam_race_hide_route_hint()) return;
+        if (td5_roam_race_hide_route_hint() && !wq_legacy()) return;   /* DEV A/B: TD5RE_ROAM_GUIDE_LEGACY=1 shows it */
         const char *t = "M  ROUTE MAP:  PLAN, SAVE AND LOAD A ROUTE";
         const float w = ui_text_w(t, 16.0f * S);
         rb_rect((W - w) * 0.5f - 12.0f * S, H - 52.0f * S, w + 24.0f * S, 30.0f * S, 0xB0000000);
@@ -1469,15 +1471,36 @@ void td5_roam_route_ui_draw_world(int view)
             if (!ok_a || !ok_b) continue;
             /* [round VD] Mariano: narrower and more transparent. 1.0 m wide (was 1.7 m), alpha 0x34 (was 0x70),
              * edges 0.12 m at alpha 0x70 (were 0.2 m at 0xE0) */
-            wq_strip(ax, az, ya, bx, bz, yb, band * M, band_col, 0.0);          /* the amber band    */
-            wq_strip(ax, az, ya, bx, bz, yb, edge * M, edge_col, band * M);     /* its bright edges  */
-            wq_strip(ax, az, ya, bx, bz, yb, edge * M, edge_col, -band * M);
+            {
+                /* [round VD] the band follows the road every 3 m: a polyline segment can run 50+ m across a junction,
+                 * and a height interpolated straight between its two ends sank under the patch, so the band vanished
+                 * there near the car (the chevrons, sampled the same way, only just cleared it) */
+                const int np = legacy ? 1 : 1 + (int)(len / (3.0 * M));
+                int j;
+                double px0 = ax, pz0 = az;
+                float py0 = ya;
+                for (j = 1; j <= np; j++) {
+                    const double f = (double)j / np, px1 = ax + dx * f, pz1 = az + dz * f;
+                    int okp = 1;
+                    float py1 = j == np ? yb : gnd_y(px1, pz1, &okp) + lift;
+                    if (!okp) py1 = ya + (yb - ya) * (float)f;
+                    wq_strip(px0, pz0, py0, px1, pz1, py1, band * M, band_col, 0.0);          /* the amber band    */
+                    wq_strip(px0, pz0, py0, px1, pz1, py1, edge * M, edge_col, band * M);     /* its bright edges  */
+                    wq_strip(px0, pz0, py0, px1, pz1, py1, edge * M, edge_col, -band * M);
+                    px0 = px1; pz0 = pz1; py0 = py1;
+                }
+            }
             /* chevrons every 9 m: a V of two strips pointing along the route */
             while (next_chev < r->dist_m[i + 1]) {
                 const double t = (next_chev - r->dist_m[i]) / (r->dist_m[i + 1] - r->dist_m[i] + 1e-9);
                 const double fx = dx / len, fz = dz / len, rxn = fz, rzn = -fx;
                 const double cxp = ax + dx * t, czp = az + dz * t;
-                const float cy = ya + (yb - ya) * (float)t + 8.0f;
+                int okc = 1;
+                float cy = ya + (yb - ya) * (float)t + 8.0f;
+                if (!legacy) {   /* [round VD] on the road under it, like the band */
+                    const float gy = gnd_y(cxp, czp, &okc);
+                    if (okc) cy = gy + lift + 8.0f;
+                }
                 const double tipx = cxp + fx * 1.5 * M, tipz = czp + fz * 1.5 * M;
                 const double w1x = cxp - fx * 0.5 * M + rxn * 1.3 * M, w1z = czp - fz * 0.5 * M + rzn * 1.3 * M;
                 const double w2x = cxp - fx * 0.5 * M - rxn * 1.3 * M, w2z = czp - fz * 0.5 * M - rzn * 1.3 * M;
@@ -1556,6 +1579,28 @@ void td5_roam_route_ui_frame(void)
         snprintf(path, sizeof path, "%sroam_route_shot_%02d.png", dir ? dir : "", s_shot++);
         td5_plat_request_frame_dump(path);
         TD5_LOG_I(LOG_TAG, "ROUTE_UI: frame dump %s", path);
+    }
+    {   /* [round VD] DEV: TD5RE_ROAM_VD_PAUSE_AT=<m> opens the pause menu once the race passes that route distance, dumps
+         * <log dir>vd_<TD5RE_ROAM_VD_SHOT_TAG>_pause.png and closes it again (item 13: no M ROUTE MAP prompt) */
+        static int s_init, s_phase, s_frames;
+        static double s_at = -1.0;
+        if (!s_init) { const char *e = getenv("TD5RE_ROAM_VD_PAUSE_AT"); s_init = 1; if (e && e[0]) s_at = atof(e); }
+        if (s_at >= 0.0 && s_phase < 6) {
+            const TD5_RouteResult *r = td5_roam_route_display();
+            s_frames++;
+            if (s_phase == 0 && td5_roam_race_running() && r->ok && u.hint >= 0 && u.hint < r->npt && r->dist_m[u.hint] >= s_at) {
+                td5_plat_input_inject_key(0x01, 1); s_phase = 1; s_frames = 0;
+            } else if (s_phase == 1 && s_frames >= 2) { td5_plat_input_inject_key(0x01, 0); s_phase = 2; s_frames = 0; }
+            else if (s_phase == 2 && s_frames >= 30) {
+                char path[512];
+                const char *dir = td5_plat_log_dir(), *tag = getenv("TD5RE_ROAM_VD_SHOT_TAG");
+                snprintf(path, sizeof path, "%svd_%s_pause.png", dir ? dir : "", tag && tag[0] ? tag : "shot");
+                td5_plat_request_frame_dump(path);
+                TD5_LOG_I(LOG_TAG, "[VD] pause frame dump (pause menu %s) -> %s", td5_game_is_pause_menu_active() ? "open" : "NOT open", path);
+                s_phase = 3; s_frames = 0;
+            } else if (s_phase == 3 && s_frames >= 10) { td5_plat_input_inject_key(0x01, 1); s_phase = 4; s_frames = 0; }
+            else if (s_phase == 4 && s_frames >= 2) { td5_plat_input_inject_key(0x01, 0); s_phase = 6; }
+        }
     }
 #endif
     if (u.map_open) {

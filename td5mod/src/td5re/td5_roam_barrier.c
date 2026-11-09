@@ -1287,8 +1287,18 @@ static int bar_build_once(const TD5_RoamRouteResult *route, const Pool *pool_in,
         B.st.seal_panels++;
     }
 
-    /* ---- turn boards ----------------------------------------------------------- */
-    for (a = 0; a < npass; a++) {
+    /* ---- turn boards ----------------------------------------------------------- *
+     * [round VD] OFF. Mariano (2026-11-09): "the arrows with black background seem to represent nothing". They were the
+     * NFSU2 turn sign: a dark board with two yellow chevrons, one per pass that turns more than 30 deg, standing where
+     * the straight-on ray meets the far kerb or another arm's cut row. Every such arm already carries a mouth barrier
+     * whose chevrons point the same way, and the ground band and its chevrons show the turn, so the board stood in
+     * front of a barrier saying the same thing again (Plaza Italia, roam-sprint frame vd_legacy_2280). DEV A/B:
+     * TD5RE_ROAM_TURN_BOARDS=1 places them again. */
+#ifndef TD5RE_RELEASE
+    for (a = td5_env_int("TD5RE_ROAM_TURN_BOARDS", 0, 0, 1) ? 0 : npass; a < npass; a++) {
+#else
+    for (a = npass; a < npass; a++) {
+#endif
         Cl *c = &cl[ps[a].cl];
         int ki, ko, dup = 0, b2;
         double tx, tz, dotv, defl, depth, lx, lz, cxp, czp, y;
