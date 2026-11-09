@@ -10714,7 +10714,7 @@ static void fe_cop_chase_draw_common(int slot, float y, uint32_t color,
     char buf[40];
     #define CC_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
     snprintf(buf, sizeof(buf), "%s", frontend_summary_car_name(slot));
-    fe_cop_chase_fit(buf, 78.0f);
+    fe_cop_chase_fit(buf, 88.0f);
     fe_draw_small_text(CC_CTR(cx_car, buf), y, buf, color, sx, sy);
 
     const TD5_RaceMetrics *m = td5_game_get_metrics(slot);
@@ -10808,15 +10808,15 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         /* Column anchors (640x480 canvas px): NAME left-aligned at the title
          * edge; the rest centred. Columns 3 + 4 carry the mode values. */
         /* Widths measured on the 2026-11-09 frame (small font, canvas px): names
-         * ~70, car names <= 78 (fitted), OUTCOME / ESCAPED ~60, a time ~55, a
+         * ~70, car names <= 88 (fitted), OUTCOME / ESCAPED ~60, a time ~55, a
          * speed ~50, RAMMED ~55. Long headers go on two lines (TOP / SPEED). */
         const float cc_name  = 120.0f;   /* left edge; names fitted to 78 px      */
-        const float cc_car   = 242.0f;
-        const float cc_stat  = 316.0f;   /* ARRESTS (cops) / OUTCOME (suspects)   */
-        const float cc_stat2 = 380.0f;   /* POINTS (cops)  / BUSTED AT (suspects) */
-        const float cc_top   = 438.0f;
-        const float cc_avg   = 494.0f;
-        const float cc_hits  = 552.0f;   /* HITS (cops)    / RAMMED (suspects)    */
+        const float cc_car   = 247.0f;   /* car names fitted to 88 px             */
+        const float cc_stat  = 323.0f;   /* ARRESTS (cops) / OUTCOME (suspects)   */
+        const float cc_stat2 = 389.0f;   /* POINTS (cops)  / BUSTED AT (suspects) */
+        const float cc_top   = 447.0f;
+        const float cc_avg   = 501.0f;
+        const float cc_hits  = 554.0f;   /* HITS (cops)    / RAMMED (suspects)    */
         const float cc_end   = 586.0f;   /* separator right edge                  */
         const uint32_t CC_BUSTED  = 0xFFFF6A4Au;   /* red-orange: arrested */
         const uint32_t CC_ESCAPED = 0xFF7CE07Cu;   /* green: got away      */
