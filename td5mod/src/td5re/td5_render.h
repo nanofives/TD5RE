@@ -269,6 +269,10 @@ void td5_render_debug_lines_flush(void);
 /* [roam F5-A] see td5_render.c: world -> pre-transformed vertex (depth + rhw), 0 when behind the near plane. */
 struct TD5_D3DVertex;
 int  td5_render_project_world_vertex(float wx, float wy, float wz, uint32_t argb, struct TD5_D3DVertex *out);
+/* [round VD] convex polygon (3..8 points, one 0xAARRGGBB colour each) clipped against the near plane and
+ * projected; returns the vertex count written to out (0 = wholly behind the camera, at most n + 1; the cut
+ * vertices interpolate the colours). Same space and validity as the call above. */
+int  td5_render_project_world_poly(const float (*p)[3], const uint32_t *argb, int n, struct TD5_D3DVertex *out);
 
 void td5_render_debug_lines_reset(void);
 
