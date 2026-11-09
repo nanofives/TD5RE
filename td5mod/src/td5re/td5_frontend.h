@@ -144,6 +144,11 @@ int  frontend_uf_mp_random_selftest(char *note, size_t cap);
  * scores for drag); a single race still goes to the name entry. 0 = pass. */
 int  frontend_v3_drag_hs_selftest(char *note, size_t cap);
 #endif
+/* [round VC 2026-11-09] What the cop-chase results table last drew per suspect
+ * (TD5_CHASE_*, 0 = not drawn): the v6-copchase-results row compares it with the
+ * race state. reset() clears it before a race. */
+int  frontend_vc_drawn_outcome(int slot);
+void frontend_vc_reset_drawn_outcomes(void);
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
  * when they never picked one (= use the car's own horn). Exposed so the race

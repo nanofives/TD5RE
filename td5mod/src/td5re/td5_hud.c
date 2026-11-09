@@ -3619,8 +3619,15 @@ static int hud_draw_centered_ttf_char(char ch, float cx, float cy,
  * as the countdown digit; falls back to the NUMBERS bitmap quads below when the
  * font isn't ready / the knob is off.
  * ======================================================================== */
+/* [round VC 2026-11-09] Monotonic count of finishing-place digit draws (one per
+ * pane per frame), so a test can prove a mode shows NO place: read it at race
+ * start and at the end, the delta is the frames the digit was on screen. */
+static unsigned s_finish_pos_draws;
+unsigned td5_hud_finish_position_draws(void) { return s_finish_pos_draws; }
+
 void td5_hud_draw_finish_position(int position)
 {
+    s_finish_pos_draws++;
     if (position < 1) position = 1;
     if (position > 9) position = 9;   /* single digit (max 6 racers) */
 

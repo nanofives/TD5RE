@@ -415,6 +415,13 @@ static RaceResultEntry s_results[TD5_MAX_RACER_SLOTS];
  * original binary stores no arrest time — AwardWantedDamageScore @ 0x0043d690
  * writes only the bust count + ram score — so this is a port-added field. */
 static int32_t s_arrest_time[TD5_MAX_RACER_SLOTS];
+/* [round VC 2026-11-09] Cop-chase results: per-suspect count of material rams by
+ * a cop (every hit td5_ai_wanted_cop_hit accepts, first hit included), and the
+ * per-suspect OUTCOME frozen when the results table is built (TD5_CHASE_*), so the
+ * results screen reads the race's real state, not the live damage bar that the
+ * next race init clears. Both survive a View Replay through the snapshot. */
+static int16_t s_wanted_rams[TD5_MAX_RACER_SLOTS];
+static uint8_t s_chase_outcome[TD5_MAX_RACER_SLOTS];
 
 /* Checkpoint timing record (24 bytes = 12 x uint16, from binary at 0x46CBB0)
  * Loaded per-track via pointer table at 0x46CF6C (1-based index). */
@@ -657,6 +664,8 @@ static RaceSlotState   s_saved_slot_state[TD5_MAX_RACER_SLOTS];
 static uint8_t         s_saved_race_order[TD5_MAX_RACER_SLOTS];
 static int             s_saved_slot_finish_place[TD5_MAX_RACER_SLOTS];
 static int32_t         s_saved_arrest_time[TD5_MAX_RACER_SLOTS];
+static int16_t         s_saved_wanted_rams[TD5_MAX_RACER_SLOTS];     /* [round VC] */
+static uint8_t         s_saved_chase_outcome[TD5_MAX_RACER_SLOTS];   /* [round VC] */
 static int             s_saved_finish_position_display;
 /* [REPLAY RESULTS STATS 2026-07-27] Several post-race summary columns don't read
  * s_results/s_metrics: COLLISIONS/AIR TIME come from g_race_metrics[] (wiped by
@@ -2058,6 +2067,89 @@ int32_t td5_game_get_arrest_time(int slot)
     return s_arrest_time[slot];
 }
 
+/* [round VC 2026-11-09] One material cop ram on `slot` (a suspect). Called from
+ * td5_ai_wanted_cop_hit for every hit it accepts (first hit and re-hits alike), so
+ * the cop-chase results can list who the cop rammed, busted or not. */
+void td5_game_add_wanted_ram(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (s_wanted_rams[slot] < 0x7FFF) s_wanted_rams[slot]++;
+}
+
+/* [round VC] The cop's ram score alone (10 / 20 per hit + 50 per bust, the HUD's
+ * POINTS), without the placing points build_results_table adds to the results'
+ * secondary metric. */
+int td5_game_get_wanted_score(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (int)s_metrics[slot].accumulated_score;
+}
+
+int td5_game_get_wanted_rams(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_wanted_rams[slot];
+}
+
+/* [round VC 2026-11-09] Freeze each cop-chase racer's outcome from the mode's own
+ * state at the moment the results table is built: a SUSPECT whose wanted damage
+ * bar is drained (the arrest td5_ai_wanted_cop_hit completes, which also stamps
+ * the arrest time) is BUSTED; every other suspect got away: ESCAPED. Cops get
+ * TD5_CHASE_COP. Logs one line per racer (the v6-copchase-results row checks the
+ * screen's outcomes against these). No-op outside a cop chase. */
+static void cop_chase_capture_outcomes(void)
+{
+    int s;
+    if (!g_td5.wanted_mode_enabled) return;
+    for (s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+        uint8_t oc = TD5_CHASE_NONE;
+        if (s < g_traffic_slot_base && s_slot_state[s].state != 3) {
+            if (td5_game_cop_chase_is_cop(s)) {
+                oc = TD5_CHASE_COP;
+            } else if (td5_game_cop_chase_is_suspect(s)) {
+                oc = (g_wanted_damage_state[s] <= 0 || s_arrest_time[s] != 0)
+                         ? TD5_CHASE_BUSTED : TD5_CHASE_ESCAPED;
+            }
+        }
+        s_chase_outcome[s] = oc;
+        if (oc == TD5_CHASE_NONE) continue;
+        TD5_LOG_I(LOG_TAG,
+                  "COP CHASE RESULT: slot=%d car=%d outcome=%s rams=%d damage_left=%d "
+                  "arrest_time=%d arrests=%d points=%d finished=%d",
+                  s, td5_game_get_slot_car_index(s), td5_game_cop_chase_outcome_name(oc),
+                  (int)s_wanted_rams[s], (int)g_wanted_damage_state[s], (int)s_arrest_time[s],
+                  td5_game_get_wanted_kills(s), (int)s_metrics[s].accumulated_score,
+                  (int)s_slot_state[s].companion_1);
+    }
+}
+
+int td5_game_cop_chase_outcome(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return TD5_CHASE_NONE;
+    return s_chase_outcome[slot];
+}
+
+const char *td5_game_cop_chase_outcome_name(int outcome)
+{
+    switch (outcome) {
+    case TD5_CHASE_COP:     return "COP";
+    case TD5_CHASE_BUSTED:  return "BUSTED";
+    case TD5_CHASE_ESCAPED: return "ESCAPED";
+    default:                return "-";
+    }
+}
+
+/* [round VC 2026-11-09] Mariano 2026-11-09 item 5: a SINGLE-PLAYER cop chase has
+ * no finishing position. The player is the cop chasing speeders, so "1ST" / the
+ * centred place digit means nothing; the race just fades out. (The victory star
+ * was already off for game type 8, see td5_game_begin_fade_out.) MP cop chase is
+ * untouched. */
+int td5_game_finish_place_hidden(void)
+{
+    return g_td5.wanted_mode_enabled &&
+           g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE;
+}
+
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
  * [CONFIRMED: g_raceOrderTable = s_race_order at 0x004ae279] */
 int td5_game_get_race_order(int pos)
@@ -2106,6 +2198,7 @@ int td5_game_slot_finished_at_line(int slot)
 int td5_game_slot_finish_place(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (td5_game_finish_place_hidden()) return 0;   /* [round VC] SP cop chase */
     return s_slot_finish_place[slot];
 }
 
@@ -4028,6 +4121,8 @@ static void init_race_track_resources(void)
      * 0..5 before first UpdateRaceOrder). */
     memset(s_metrics, 0, sizeof(s_metrics));
     memset(s_arrest_time, 0, sizeof(s_arrest_time));   /* [MP COP CHASE results] clear arrest times */
+    memset(s_wanted_rams, 0, sizeof(s_wanted_rams));   /* [round VC] rams per suspect */
+    memset(s_chase_outcome, 0, sizeof(s_chase_outcome));
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_race_order[i] = (uint8_t)i;
     }
@@ -10453,6 +10548,11 @@ static void build_results_table(void) {
              * can reuse that routine: override it to the wreck count and skip the
              * championship / ultimate position points entirely. */
             r->secondary_metric = (int32_t)r->wanted_kills;
+        } else if (td5_game_finish_place_hidden()) {
+            /* [round VC 2026-11-09] SP cop chase has no finishing place, so no
+             * placing points either: they turned the HUD's ram POINTS into
+             * "POINTS 155" for a 140-point chase on the last frames (the results
+             * table now shows the ram score alone, td5_game_get_wanted_score). */
         } else if (g_td5.race_rule_variant == 0 && pos < TD5_MAX_RACER_SLOTS) {
             /* Championship: {15, 12, 10, 5, 4, 3} */
             r->secondary_metric += s_championship_points[pos];
@@ -10461,6 +10561,8 @@ static void build_results_table(void) {
             r->secondary_metric += s_ultimate_points[pos];
         }
     }
+
+    cop_chase_capture_outcomes();   /* [round VC] freeze BUSTED / ESCAPED per suspect */
 
     /* Sort results by the appropriate metric for the game type */
     if (battle) {
@@ -10531,6 +10633,8 @@ static void capture_replay_results_snapshot(void) {
     memcpy(s_saved_race_order,        s_race_order,        sizeof(s_race_order));
     memcpy(s_saved_slot_finish_place, s_slot_finish_place, sizeof(s_slot_finish_place));
     memcpy(s_saved_arrest_time,       s_arrest_time,       sizeof(s_arrest_time));
+    memcpy(s_saved_wanted_rams,       s_wanted_rams,       sizeof(s_wanted_rams));
+    memcpy(s_saved_chase_outcome,     s_chase_outcome,     sizeof(s_chase_outcome));
     s_saved_finish_position_display = s_finish_position_display;
     /* [REPLAY RESULTS STATS 2026-07-27] g_race_metrics[] + the live actor summary
      * fields the results accessors fall back to (see td5_game_get_result_avg_speed,
@@ -10566,6 +10670,8 @@ static void restore_replay_results_snapshot(void) {
     memcpy(s_race_order,        s_saved_race_order,        sizeof(s_race_order));
     memcpy(s_slot_finish_place, s_saved_slot_finish_place, sizeof(s_slot_finish_place));
     memcpy(s_arrest_time,       s_saved_arrest_time,       sizeof(s_arrest_time));
+    memcpy(s_wanted_rams,       s_saved_wanted_rams,       sizeof(s_wanted_rams));
+    memcpy(s_chase_outcome,     s_saved_chase_outcome,     sizeof(s_chase_outcome));
     s_finish_position_display = s_saved_finish_position_display;
     /* [REPLAY RESULTS STATS 2026-07-27] Restore g_race_metrics[] + the live actor
      * summary fields so the COLLISIONS/AIR TIME/AVG SPEED/HIGHEST POSITION columns
@@ -11519,6 +11625,7 @@ int td5_game_get_victory_position(void) {
      * off s_slot_finish_place, which a quit never sets). */
     if (s_pause_exit_pending || s_pause_lobby_pending || s_pause_restart_pending)
         return 0;
+    if (td5_game_finish_place_hidden()) return 0;   /* [round VC] SP cop chase: no place */
     /* [FIX timeout-DNF 2026-06-23] A P2P checkpoint-timer expiry (companion_2==2)
      * is a LOSS, not a finish — suppress the centered finishing-place digit. The
      * original routes a timeout to the FAILED results screen with no position

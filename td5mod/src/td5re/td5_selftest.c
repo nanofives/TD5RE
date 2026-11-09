@@ -74,6 +74,7 @@
 #include "td5_roam_handoff.h" /* [integ Q] the FREE ROAM setup's TRAFFIC / COPS prefs */
 #include "td5_police.h"       /* [round H HH] `police` rows: the pursuit layer on a stock track */
 #include "td5_render.h"  /* [CHAOS CO-OP] td5_render_actor_was_drawn (pane check)  */
+#include "td5_hud.h"     /* [round VC] finishing-place digit draw counter */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
 
@@ -258,6 +259,9 @@ typedef struct {
      *   71 uf-mp-random             split-screen car grid: per-pane RANDOM rolls independently at launch
      * [round VA 2026-11-09]:
      *   83 v3-drag-no-highscore     after a real SP drag race: results QUIT -> main menu, no name entry */
+     * [round VC 2026-11-09]:
+     *   106 v6-copchase-results     SP cop chase to its end: no finishing place drawn (item 5), and the results
+     *                               table's BUSTED / ESCAPED per speeder match the race state (item 6) */
     int u_check;
     /* [round UC 2026-11-08] item 7: 1 = at race start the sun disc's direction, and a ring around it as wide as
      * the glare, maps to SKY texels of the panorama (td5_render_sky_sun_check against the td5_sky_sunpos.h
@@ -751,6 +755,16 @@ static const RaceScenario k_races[] = {
     { .name="v4-tunnel-no-shadow-rt",      .track=8,  .car=-1, .game_type=8, .player_is_ai=1,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1, .span_offset=990,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1, .rt=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .vb_check=1 },
+    /* [round VC 2026-11-09] items 5 + 6: single-player cop chase on Edinburgh, 2 speeders, run to the end
+     * (forced at checkpoint 1) and the results screen. Mid-race the row rams through the real arrest path
+     * (td5_ai_wanted_cop_hit, what the V2V contact calls): speeder slot 1 until BUSTED, speeder slot 2 once
+     * (rammed, gets away). PASS = the race faded out with the finishing-place digit drawn on 0 frames, and
+     * for every speeder the outcome the results table drew = the frozen outcome = the race state
+     * (arrest time stamped -> BUSTED, else ESCAPED); slot 1 BUSTED, slot 2 ESCAPED with its rams counted. */
+    { .name="v6-copchase-results",         .track=1,  .car=-1, .game_type=8, .player_is_ai=1,
+      .traffic=0, .opponents=2, .difficulty=0, .checkpoint_timers=1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .mp_mode=-1,
+      .natural_finish=1, .end_checkpoint=1, .depth=ST_DEPTH_RUN_FINISH, .u_check=106 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -759,6 +773,64 @@ static int s_u_cap, s_u_traffic, s_u_vol, s_u_police, s_u_coll, s_u_cp, s_u_tier
 static int s_u_max_traffic;   /* most traffic actors live on any tick */
 static int s_u_want_coll, s_u_want_cp;   /* u5-options-after-config: the values set after the race type */
 static int s_u_wanted;                   /* [round UE] wanted (cop chase) mode at the first tick */
+/* [round VC] v6-copchase-results captures */
+static int      s_v6_injected, s_v6_bust_ok, s_v6_ram_calls, s_v6_faded, s_v6_place_seen;
+static unsigned s_v6_draws0;
+static void st_v6_tick(int rel)
+{
+    if (rel <= 1) s_v6_draws0 = td5_hud_finish_position_draws();
+    /* Ram through the real arrest path once the cars are moving. Slot 1: a first hit, then heavy re-hits
+     * (-0x400 each) until td5_ai_wanted_cop_hit reports the arrest. Slot 2: a first hit + one light re-hit. */
+    if (!s_v6_injected && rel >= 90) {
+        int i;
+        s_v6_injected = 1;
+        for (i = 0; i < 8 && !s_v6_bust_ok; i++) {
+            s_v6_ram_calls++;
+            if (td5_ai_wanted_cop_hit(0, 1, 30000)) s_v6_bust_ok = 1;
+        }
+        td5_ai_wanted_cop_hit(0, 2, 15000);
+        td5_ai_wanted_cop_hit(0, 2, 15000);
+        TD5_LOG_I(LOG_TAG, "v6: rammed slot 1 x%d (busted=%d), slot 2 x2; damage left s1=%d s2=%d",
+                  s_v6_ram_calls, s_v6_bust_ok, (int)g_wanted_damage_state[1], (int)g_wanted_damage_state[2]);
+    }
+    if (g_td5.race_end_fade_state > 0) {
+        s_v6_faded = 1;
+        if (td5_game_get_victory_position() > 0 || td5_game_slot_finish_place(0) > 0) s_v6_place_seen = 1;
+    }
+}
+/* Verdict: 0 = pass. */
+static int st_v6_verdict(char *un, size_t cap)
+{
+    int s, fail = 0, n_sus = 0;
+    const unsigned draws = td5_hud_finish_position_draws() - s_v6_draws0;
+    size_t len;
+    if (!s_v6_faded || draws != 0 || s_v6_place_seen) fail = 1;
+    if (!s_v6_bust_ok) fail = 1;
+    len = (size_t)snprintf(un, cap, "fade=%d place_draws=%u place=%d bust=%d |", s_v6_faded, draws,
+                           s_v6_place_seen, s_v6_bust_ok);
+    for (s = 0; s < TD5_LEGACY_RACE_SLOTS; s++) {
+        const int oc = td5_game_cop_chase_outcome(s);
+        int want, drawn;
+        if (oc == TD5_CHASE_COP) {
+            if (td5_game_get_wanted_kills(s) < 1) fail = 1;
+            if (len < cap) len += (size_t)snprintf(un + len, cap - len, " cop%d arrests=%d pts=%d", s,
+                                                   td5_game_get_wanted_kills(s), td5_game_get_wanted_score(s));
+            continue;
+        }
+        if (oc != TD5_CHASE_BUSTED && oc != TD5_CHASE_ESCAPED) continue;
+        n_sus++;
+        want  = td5_game_get_arrest_time(s) > 0 ? TD5_CHASE_BUSTED : TD5_CHASE_ESCAPED;
+        drawn = frontend_vc_drawn_outcome(s);
+        if (oc != want || drawn != oc) fail = 1;
+        if (s == 1 && oc != TD5_CHASE_BUSTED) fail = 1;
+        if (s == 2 && (oc != TD5_CHASE_ESCAPED || td5_game_get_wanted_rams(2) < 2)) fail = 1;
+        if (len < cap) len += (size_t)snprintf(un + len, cap - len, " s%d %s rams=%d drawn=%s", s,
+                                               td5_game_cop_chase_outcome_name(oc), td5_game_get_wanted_rams(s),
+                                               td5_game_cop_chase_outcome_name(drawn));
+    }
+    if (n_sus != 2) fail = 1;
+    return fail;
+}
 static int s_ue_shadow_cls = -99, s_ue_sky_cls;   /* [round UE] ue-shadow-sun capture */
 static float s_ue_shadow[3], s_ue_sky[3];
 
@@ -2410,6 +2482,9 @@ static void st_apply_scenario(const RaceScenario *sc)
     }
     /* [round UB] u-rows: the RACE OPTIONS edit made after the race type was configured */
     s_u_cap = 0; s_u_max_traffic = 0;
+    s_v6_injected = 0; s_v6_bust_ok = 0; s_v6_ram_calls = 0; s_v6_faded = 0; s_v6_place_seen = 0;   /* [round VC] */
+    s_v6_draws0 = td5_hud_finish_position_draws();
+    if (sc->u_check == 106) frontend_vc_reset_drawn_outcomes();
     if (sc->u_check == 4) _putenv("TD5RE_AUTORACE_RANDOM=1");
     if (sc->u_check == 52) {
         char buf[96];
@@ -3422,6 +3497,8 @@ static void st_tick_races(uint32_t now)
                         break;
                     case 83:   /* [round VA] item 3: no high scores after a drag race */
                         fail = frontend_v3_drag_hs_selftest(un, sizeof un);
+                    case 106:  /* [round VC] SP cop chase: no place at the end, BUSTED / ESCAPED per speeder */
+                        fail = st_v6_verdict(un, sizeof un);
                         break;
                     case 63: { /* [round UE] shadows follow the drawn sun (RT off) */
                         const float d = s_ue_shadow[0] * s_ue_sky[0] + s_ue_shadow[1] * s_ue_sky[1] +
@@ -3583,6 +3660,7 @@ static void st_tick_races(uint32_t now)
                     s_u_wanted = g_td5.wanted_mode_enabled;
                 }
                 /* [round UE] ue-shadow-sun: sample a few ticks in (the sky + zone lights are live by then) */
+                if (sc->u_check == 106) st_v6_tick(tick - s_race_start_tick);   /* [round VC] */
                 if (sc->u_check == 63 && s_ue_shadow_cls == -99 && tick - s_race_start_tick >= 5)
                     s_ue_shadow_cls = td5_render_shadow_sun_query(s_ue_shadow, s_ue_sky, &s_ue_sky_cls);
                 for (s = g_traffic_slot_base; s < total; s++)

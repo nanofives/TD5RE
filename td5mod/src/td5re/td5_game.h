@@ -297,6 +297,17 @@ void td5_game_reset_infect_state(void);
  * 0x0043d690 writes only the bust count + ram score). */
 void    td5_game_set_arrest_time(int slot);
 int32_t td5_game_get_arrest_time(int slot);
+/* [round VC 2026-11-09] Cop-chase results: rams per suspect (every material cop
+ * hit, busted or not) and the per-racer OUTCOME frozen when the results table is
+ * built. finish_place_hidden() = 1 in a SINGLE-PLAYER cop chase: no finishing
+ * place digit at the end, the race just fades out. */
+enum { TD5_CHASE_NONE = 0, TD5_CHASE_COP = 1, TD5_CHASE_BUSTED = 2, TD5_CHASE_ESCAPED = 3 };
+void        td5_game_add_wanted_ram(int slot);
+int         td5_game_get_wanted_rams(int slot);
+int         td5_game_get_wanted_score(int slot);   /* the cop's ram POINTS, no placing points */
+int         td5_game_cop_chase_outcome(int slot);           /* TD5_CHASE_* */
+const char *td5_game_cop_chase_outcome_name(int outcome);   /* "BUSTED" / "ESCAPED" / ... */
+int         td5_game_finish_place_hidden(void);
 
 /* [MP GAME MODES: CUP 2026-06-22] Self-contained best-of-X series orchestrator
  * for the "Cup" mode. begin() arms the series (track list, zeroed standings,

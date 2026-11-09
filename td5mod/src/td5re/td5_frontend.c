@@ -1591,7 +1591,7 @@ static int frontend_screen_substate(TD5_ScreenIndex screen, const char **out_lab
         lbl = (s_inner_state == 15) ? "MORE STATS" : "SELECT CAR";
         break;
     case TD5_SCREEN_RACE_RESULTS:
-        if (td5_game_mp_cop_chase_active()) { sub = 2; lbl = "CHASE RESULTS"; }
+        if (td5_game_is_wanted_mode()) { sub = 2; lbl = "CHASE RESULTS"; }   /* [round VC] SP too */
         else if (td5_game_mp_cup_active() && g_td5.num_human_players >= 2) {
             sub = 1; lbl = "CUP RESULTS";
         } else { sub = 0; lbl = "RESULTS"; }
@@ -1688,7 +1688,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
      * CHASE renders its own COPS/SUSPECTS table and reads "CHASE RESULTS".
      * Plain races keep "RESULTS". [MP COP CHASE RESULTS 2026-06-25] */
     case TD5_SCREEN_RACE_RESULTS:
-        if (td5_game_mp_cop_chase_active()) return "CHASE RESULTS";
+        if (td5_game_is_wanted_mode()) return "CHASE RESULTS";   /* [round VC] SP cop chase too */
         return (td5_game_mp_cup_active() && g_td5.num_human_players >= 2)
                ? "CUP RESULTS" : "RESULTS";
     case TD5_SCREEN_MP_LOBBY:           return "MULTIPLAYER";

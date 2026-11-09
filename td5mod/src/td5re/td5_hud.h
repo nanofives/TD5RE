@@ -249,6 +249,7 @@ void td5_hud_set_indicator_state(int view_index, int value);
 /* Finishing-position center-screen digit (race-end victory overlay).
  * position is 1-based (1 = 1st). See td5_hud.c. */
 void td5_hud_draw_finish_position(int position);
+unsigned td5_hud_finish_position_draws(void);   /* [round VC] monotonic draw count (tests) */
 
 /* --- Wanted-mode damage indicator overlay (cop chase) ---
  *
