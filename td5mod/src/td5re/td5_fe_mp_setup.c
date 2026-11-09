@@ -431,9 +431,9 @@ void frontend_init_race_schedule(void) {
      * 0x00410CA0 does: gTrafficActorsEnabled = 0) and the commit above is
      * single-race only, so all three were lost. Time trial is a single race at
      * runtime (solo synth: slots 1..5 inactive, traffic slots untouched), so the
-     * race runs them as chosen. LAPS (1) and CHECKPOINT TIMERS (on) stay forced:
-     * those define the time trial (questions for Mariano in
-     * docs/RACE_OPTIONS_MATRIX.md). */
+     * race runs them as chosen. CHECKPOINT TIMERS (on) stays forced: it defines
+     * the time trial (docs/RACE_OPTIONS_MATRIX.md). LAPS was forced to 1 until
+     * round VA, which commits the LAPS row below. */
     if (s_selected_game_type == 7 && !s_mp_flow) {
         int tv = s_game_option_traffic;
         if (tv < 0) tv = 0;
@@ -442,8 +442,13 @@ void frontend_init_race_schedule(void) {
         g_td5.traffic_enabled           = (tv != 0);
         g_td5.special_encounter_enabled = s_game_option_cops ? 1 : 0;
         td5_physics_set_collisions(s_game_option_collisions);
-        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: TIME TRIAL options traffic=%d police=%d collisions=%d",
-                  tv, g_td5.special_encounter_enabled, s_game_option_collisions);
+        /* [round VA 2026-11-09] Mariano: "there's no lap configuration ... for circuits
+         * on time trials". LAPS is shown again on circuits in time trial (SELECT
+         * TRACK), so commit it here, after ConfigureGameTypeFlags case 7 forced 1.
+         * Point-to-point tracks finish at the line and ignore the count. */
+        g_td5.circuit_lap_count = s_game_option_laps + 1;
+        TD5_LOG_I(LOG_TAG, "InitRaceSchedule: TIME TRIAL options traffic=%d police=%d collisions=%d laps=%d",
+                  tv, g_td5.special_encounter_enabled, s_game_option_collisions, g_td5.circuit_lap_count);
     }
 
     /* [round UB] Cop chase (SP): the TRAFFIC level and LAPS picked on RACE OPTIONS /
@@ -1330,8 +1335,7 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
     dx = ax + (aw - dw) * 0.5f;
     dy = ay + (ah - dh) * 0.5f;
     if (s_mp_player_car_random[p]) {
-        /* [round UF 2026-11-08] RANDOM: UB's "?" card where the car picture goes */
-        frontend_draw_random_card(dx, dy, dw, dh, sx, sy);
+        /* [round VA 2026-11-09] RANDOM: no car picture (was UB's "?" card, round UF). */
         return;
     }
     if (s_mp_pane_preview[p] > 0)

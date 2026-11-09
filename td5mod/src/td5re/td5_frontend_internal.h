@@ -1226,7 +1226,6 @@ int   frontend_random_car_pool(int lo, int hi, int *cand, int cap);
 int   frontend_random_track_pool(int *cand, int cap);
 void  frontend_car_ring_bounds(int *lo, int *hi);
 void  frontend_resolve_random_picks(void);
-void  frontend_draw_random_card(float x, float y, float w, float h, float sx, float sy);
 int   frontend_mp_car_random_offered(void);   /* [round UF] RANDOM in the split-screen car grid */
 extern int s_mp_postrace_menu_mode;    /* 0 = standard menu, 1 = cup-between menu (td5_fe_race.c) */
 float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);                        /* td5_fe_net.c */

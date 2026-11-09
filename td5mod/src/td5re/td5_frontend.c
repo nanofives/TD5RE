@@ -6096,6 +6096,39 @@ static int frontend_shared_nav_owner_device(void) {
     return s_mp_join_device[0];
 }
 
+#ifndef TD5RE_RELEASE
+/* [round VA 2026-11-09] item 1 probe: TD5RE_FE_TRANSITION_PROBE=1 stamps every
+ * frontend frame with what it drew (screen, inner state, anim complete, anim t,
+ * button count, button 0's drawn x, title y) as small text in the bottom-left
+ * corner AND as one frontend.log line, so a per-frame framedump sequence
+ * (TD5RE_FRAMEDUMP=<path %05d>, TD5RE_FRAMEDUMP_EVERY=1) labels itself. Off by
+ * default; costs one getenv once. */
+static float frontend_get_title_render_y(float sy);
+void frontend_get_button_render_rect(int button_index, float sx, float sy,
+                                     float *out_x, float *out_y, float *out_w, float *out_h);
+static void frontend_transition_probe(void) {
+    static int on = -1;
+    static uint32_t n;
+    char line[160];
+    int sw = 0, sh = 0, b0 = -1, i;
+    float bx = 0.0f, by = 0.0f, bw = 0.0f, bh = 0.0f, sx, sy;
+    if (on < 0) on = td5_env_int("TD5RE_FE_TRANSITION_PROBE", 0, 0, 1);
+    if (!on) return;
+    td5_plat_get_window_size(&sw, &sh);
+    if (sw <= 0 || sh <= 0) return;
+    sx = (float)sw / 640.0f; sy = (float)sh / 480.0f;
+    for (i = 0; i < s_button_count; i++)
+        if (s_buttons[i].active && !s_buttons[i].hidden) { b0 = i; break; }
+    if (b0 >= 0) frontend_get_button_render_rect(b0, sx, sy, &bx, &by, &bw, &bh);
+    snprintf(line, sizeof line, "F%u P%u S%d ST%d C%d T%.3f K%d N%d B%d X%.0f TY%.0f",
+             (unsigned)n++, (unsigned)td5_plat_present_count(), (int)s_current_screen, s_inner_state,
+             s_anim_complete, (double)s_anim_t, s_anim_tick, s_button_count, b0,
+             b0 >= 0 ? (double)(bx / sx) : -9999.0, (double)(frontend_get_title_render_y(sy) / sy));
+    fe_draw_small_text(4.0f * sx, 466.0f * sy, line, 0xFFFFFF00u, sx, sy);
+    TD5_LOG_I(LOG_TAG, "FE-PROBE %s", line);
+}
+#endif
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
@@ -6186,6 +6219,9 @@ int td5_frontend_display_loop(void) {
 
     /* 4. Render flush (cursor queued after all other UI) */
     td5_frontend_render_ui_rects();
+#ifndef TD5RE_RELEASE
+    frontend_transition_probe();   /* [round VA] TD5RE_FE_TRANSITION_PROBE=1: per-frame screen/state stamp */
+#endif
     frontend_render_cursor();
     td5_frontend_flush_sprite_blits();
     td5_profile_mark("fe_render");
@@ -8309,17 +8345,12 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         int show_paint = (s_color_panel_visible || s_paint_active) && !s_car_random &&
                          frontend_paint_overlay_visible(actual_car,
                                                         (uint32_t)g_td5.ini.td6_paint_color);
-        if (s_inner_state == 11 && s_car_random_outgoing) {
-            /* [round UB] RANDOM's "?" card slides out like a car */
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 433.0f);
-            frontend_draw_random_card(232.0f + 408.0f * t + 20.0f, 134.0f, 368.0f, 260.0f, sx, sy);
-        } else if (s_car_random && s_inner_state == 14) {
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 800.0f);
-            frontend_draw_random_card(1832.0f - 1600.0f * t + 20.0f, 134.0f, 368.0f, 260.0f, sx, sy);
-        } else if (s_car_random && s_inner_state != 11) {
-            /* [round UB] the RANDOM entry: a "?" card where the car picture goes */
-            if (s_inner_state >= 6 && s_inner_state != 12 && s_inner_state != 13)
-                frontend_draw_random_card(252.0f, 134.0f, 368.0f, 260.0f, sx, sy);
+        if ((s_inner_state == 11 && s_car_random_outgoing) ||
+            (s_car_random && s_inner_state != 11)) {
+            /* [round VA 2026-11-09] the RANDOM entry draws NO picture (Mariano:
+             * "delete random picture"; round UB drew a "?" card here, sliding
+             * in / out like a car). The branch stays so nothing else (a stale
+             * carpic, the paint overlay) draws in the empty picture area. */
         } else if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
              * On the very first frame(s) of state 11 the case-11 update that loads
@@ -8668,8 +8699,8 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480).
      * Slides in from right during track-switch animation (state 9). */
     if (s_track_random) {
-        /* [round UB] RANDOM: a "?" card in the preview's place, sliding in with it */
-        frontend_draw_random_card(412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f, sx, sy);
+        /* [round VA 2026-11-09] RANDOM: no preview image (was round UB's "?" card).
+         * The branch stays so a stale track preview never draws under RANDOM. */
     } else if (s_track_preview_surface > 0) {
         fe_draw_surface_rect(s_track_preview_surface,
                              412.0f * sx + img_x_off, 135.0f * sy,

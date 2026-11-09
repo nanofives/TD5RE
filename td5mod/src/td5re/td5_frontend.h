@@ -139,6 +139,10 @@ int  frontend_ue_rows_selftest(char *note, size_t cap);
  * rolled through the real launch entry (independent rolls, pools, fixed and AI
  * seats untouched, cop-chase roles, the pane ring). 0 = pass, 1 = fail. */
 int  frontend_uf_mp_random_selftest(char *note, size_t cap);
+/* [round VA 2026-11-09] v3-drag-no-highscore: after a real SP drag race the results
+ * QUIT goes to the main menu and the post-race name entry refuses the run (no high
+ * scores for drag); a single race still goes to the name entry. 0 = pass. */
+int  frontend_v3_drag_hs_selftest(char *note, size_t cap);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
