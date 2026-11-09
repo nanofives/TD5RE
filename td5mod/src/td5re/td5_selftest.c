@@ -736,6 +736,11 @@ static const RaceScenario k_races[] = {
     { .name="v12-roam-finish-field",       .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1, .roam=6, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=12 },
+    /* split screen, 2 humans (P2 a simulated test player) + 4 AI: the per-pane place, the MP post-race menu */
+    { .name="v12-roam-finish-mp2",         .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1,
+      .mp_mode=0, .mp_ai_players=1, .roam=18, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=12 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -3237,6 +3242,7 @@ static struct {
     int32_t  prim; int fpos;   /* what the results screen holds for slot 0 */
     char     labels[160];
     int      nbtn, dmask;
+    int      mp;               /* the split-screen post-race menu */
     char     tag[8];
 } s_ve;
 
@@ -3252,7 +3258,7 @@ static void st_ve_shot(const char *what)
 static void st_ve_reset(const RaceScenario *sc)
 {
     memset(&s_ve, 0, sizeof s_ve);
-    snprintf(s_ve.tag, sizeof s_ve.tag, "%s", sc && sc->roam == 6 ? "field" : "solo");
+    snprintf(s_ve.tag, sizeof s_ve.tag, "%s", sc && sc->roam == 18 ? "mp2" : sc && sc->roam == 6 ? "field" : "solo");
 }
 
 /* in race: the finish data, then frames of the place / star / fade */
@@ -3313,6 +3319,7 @@ static int st_ve_tick(uint32_t now)
     switch (s_ve.phase) {
     case 0:   /* the race's fade landed on the results screen */
         if (td5_frontend_get_screen() == TD5_SCREEN_RACE_RESULTS) {
+            if (!strcmp(s_ve.tag, "mp2")) frontend_ve_mark_lobby_flow();   /* the lobby's state (AutoRace skips it) */
             s_ve.prim = td5_game_get_result_primary(0);
             s_ve.fpos = td5_game_get_finish_position(0);
             TD5_LOG_I(LOG_TAG, "v12: RESULTS screen %u ms after the race: slot 0 time %d (race %ld), place %d (race %d)",
@@ -3332,8 +3339,10 @@ static int st_ve_tick(uint32_t now)
             st_ve_fail(why);
         }
         break;
-    case 2:   /* the post-race menu: frame, its buttons, then RACE AGAIN */
-        if (inner == 0x0F && td5_frontend_harness_ready()) {
+    case 2:   /* the post-race menu (split screen: the MP post-race menu): frame, its buttons, then RACE AGAIN */
+        if (((td5_frontend_get_screen() == TD5_SCREEN_RACE_RESULTS && inner == 0x0F) ||
+             (td5_frontend_get_screen() == TD5_SCREEN_MP_POST_RACE && inner == 3)) && td5_frontend_harness_ready()) {
+            s_ve.mp = td5_frontend_get_screen() == TD5_SCREEN_MP_POST_RACE;
             if (++s_ve.settle == 30) {
                 st_ve_shot("7_menu");
                 s_ve.nbtn = frontend_ve_results_probe(NULL, &s_ve.dmask, s_ve.labels, sizeof s_ve.labels);
@@ -3368,12 +3377,12 @@ static int st_ve_tick(uint32_t now)
         if (td5_roam_race_state() == TD5_RRACE_RACING) {
             const int okt = s_ve.prim == (int32_t)s_ve.ticks;
             const int okp = s_ve.fpos == (s_ve.rank > 0 ? s_ve.rank - 1 : 0);
-            const int okm = s_ve.nbtn == 5 && (s_ve.dmask & ~2) == 0 && (s_ve.dmask & 2);
+            const int okm = s_ve.nbtn == (s_ve.mp ? 6 : 5) && (s_ve.dmask & ~2) == 0 && (s_ve.dmask & 2);
             st_ve_shot("8_again_go");
             s_ve.status = (okt && okp && okm) ? ST_PASS : ST_FAIL;
-            snprintf(s_ve.note, sizeof s_ve.note, "%s: t %d/%ld%s p%d/%d%s, %d btn%s, AGAIN same route GO",
+            snprintf(s_ve.note, sizeof s_ve.note, "%s: t %d/%ld%s p%d/%d%s, %s%d btn%s, AGAIN same route GO",
                      s_ve.tag, (int)s_ve.prim, s_ve.ticks, okt ? "" : " BAD", s_ve.fpos + 1, s_ve.rank > 0 ? s_ve.rank : 1,
-                     okp ? "" : " BAD", s_ve.nbtn, okm ? " replay grey" : " BAD MENU");
+                     okp ? "" : " BAD", s_ve.mp ? "MP menu " : "", s_ve.nbtn, okm ? " replay grey" : " BAD MENU");
             TD5_LOG_I(LOG_TAG, "v12: verdict %s: %s | menu: %s", s_ve.status == ST_PASS ? "PASS" : "FAIL", s_ve.note,
                       s_ve.labels);
             td5_game_selftest_end_race();

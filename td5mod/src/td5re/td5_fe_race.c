@@ -12829,6 +12829,13 @@ int frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels
     return s_button_count;
 }
 
+void frontend_ve_mark_lobby_flow(void)
+{
+    s_mp_flow = 1;
+    if (g_td5.num_human_players > s_num_human_players) s_num_human_players = g_td5.num_human_players;
+    TD5_LOG_I(LOG_TAG, "v12: local-MP flow marked (humans=%d), as the lobby leaves it", s_num_human_players);
+}
+
 /* [round UE 2026-11-08] ue-hidden-rows (see td5_frontend.h). Runs from the selftest
  * verdict, off any menu: it rebuilds button sets into s_buttons, so it snapshots and
  * restores the whole button table and every selector flag it changes. */

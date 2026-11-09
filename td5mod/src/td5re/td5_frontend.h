@@ -147,6 +147,9 @@ int  frontend_uf_mp_random_selftest(char *note, size_t cap);
 /* [round VE 2026-11-09] v12 rows: the results screen's inner state, its buttons' labels ("A / B(grey) / C*",
  * * = focused) and a mask of the disabled ones. Returns the button count. */
 int  frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels, size_t cap);
+/* The selftest's AutoRace launches split screen without the lobby, so the frontend's local-MP flow flag is off;
+ * the v12 split-screen row sets it the way the lobby leaves it (the MP post-race menu keys off it). */
+void frontend_ve_mark_lobby_flow(void);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
