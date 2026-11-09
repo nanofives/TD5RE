@@ -268,9 +268,9 @@ typedef struct {
      * really got darker than the lit ones (the pass used to be dispatched yet multiply by 1.0). */
     int ug_check;
     /* [round VB 2026-11-09] item 4 "triangle shadows": 1 = RT off, sun shadows on, the car spawned under a
-     * tunnel roof. During the countdown capture the frame with and without the screen-space sun-shadow pass;
-     * PASS when the pass darkens (almost) nothing in the scene area AND the roof probe saw the roof and faded
-     * the pass out. The old pass drew hard-edged wedges there (TD5RE_SHADOW_ENCLOSURE=0 = the control). */
+     * tunnel roof. During the countdown capture the sun-shadow pass drawn as its opaque mask; PASS when it marks
+     * (almost) nothing shadowed in the scene area AND the roof probe saw the roof and faded the pass out. The
+     * old pass drew hard-edged wedges there (TD5RE_SHADOW_ENCLOSURE=0 = the control, it must FAIL). */
     int vb_check;
 } RaceScenario;
 
@@ -3758,56 +3758,59 @@ static void st_ug_frame(void)
     }
 }
 
-/* [round VB] v4-tunnel-no-shadow: runs once per rendered race frame during the (static) countdown. Captures the
- * frame with the sun-shadow pass ON, then OFF, 6 frames apart (readback latency), and counts the scene pixels the
- * pass darkened by more than 6 levels. The HUD corners and an 8% border (the pulsing vignette) are left out. */
+/* [round VB] v4-tunnel-no-shadow: runs once per rendered race frame during the countdown. Draws the sun-shadow
+ * pass as its opaque MASK (td5_plat_render_shadow_mask_view: pure black = shadowed, pure white = lit, as the
+ * ug-shadow-visible row) and captures one frame 6 presents later (readback latency). A single capture: comparing
+ * an ON and an OFF frame failed on the countdown camera sway (every edge differed). Counts the scene pixels the
+ * pass marked shadowed; the HUD corners and an 8% border are left out. With the roof probe the pass is skipped
+ * under the tunnel roof, so no mask pixels appear at all; with TD5RE_SHADOW_ENCLOSURE=0 the wedges show black. */
 static void st_vb_frame(void)
 {
     enum { VB_F0 = 30, VB_GAP = 6 };
-    static unsigned char *s_on;
-    static int s_w, s_h;
     const int f = s_vb_frame++;
     if (s_vb_done) return;
     if (f == VB_F0) {
-        s_ug_seq++;   /* shares the ug dump numbering (TD5RE_UG_DUMP=1 -> log/ug_<n>_vb_on/off.png) */
+        s_ug_seq++;   /* shares the ug dump numbering (TD5RE_UG_DUMP=1 -> log/ug_<n>_vb_mask.png) */
         td5_plat_capture_arm(1);
         s_vb_sun_saved = td5_light2_sun_shadows();
         td5_light2_set_sun_shadows(1);
+        td5_plat_render_shadow_mask_view(1);
     } else if (f == VB_F0 + VB_GAP) {
-        s_on = st_ug_grab(&s_w, &s_h, "vb_on");
-        td5_light2_set_sun_shadows(0);
-    } else if (f == VB_F0 + 2 * VB_GAP) {
+        unsigned char *px = NULL;
         int w = 0, h = 0;
-        unsigned char *off = st_ug_grab(&w, &h, "vb_off");
         float frac = -1.0f, fade = -1.0f, str = -1.0f;
+        const int got = Backend_GetCapture(&px, &w, &h);
         const int q = td5_render_shadow_enclosure_query(0, &frac, &fade, &str);
+        if (got) st_ug_dump(px, w, h, "vb_mask");
+        td5_plat_render_shadow_mask_view(0);
         td5_plat_capture_arm(-1);
         td5_light2_set_sun_shadows(s_vb_sun_saved);
         s_vb_done = 1;
         s_vb_fail = 1;
-        if (!s_on || !off || w != s_w || h != s_h) {
-            snprintf(s_vb_note, sizeof s_vb_note, "capture missing (on=%d off=%d)", s_on != NULL, off != NULL);
+        if (!got || !px || w <= 0 || h <= 0) {
+            snprintf(s_vb_note, sizeof s_vb_note, "capture missing");
         } else {
-            long long n = 0, dark = 0;
+            long long n = 0, black = 0, white = 0;
             int x, y;
             for (y = h * 8 / 100; y < h * 92 / 100; y++)
                 for (x = w * 8 / 100; x < w * 92 / 100; x++) {
+                    const unsigned char *c = px + ((size_t)y * w + x) * 4;
                     if (x < w * 40 / 100 && y < h * 36 / 100) continue;   /* debug text */
                     if (x < w * 17 / 100 && y > h * 70 / 100) continue;   /* minimap */
                     if (x > w * 80 / 100 && y > h * 68 / 100) continue;   /* gauge */
                     n++;
-                    if ((int)off[y * w + x] - (int)s_on[y * w + x] > 6) dark++;
+                    if (c[0] == 0 && c[1] == 0 && c[2] == 0) black++;
+                    else if (c[0] == 255 && c[1] == 255 && c[2] == 255) white++;
                 }
             {
-                const double share = n ? (double)dark / (double)n : 1.0;
-                s_vb_fail = !(q && frac >= 0.5f && fade >= 0.9f && share <= 0.002);
+                const double sh = n ? (double)black / (double)n : 1.0;
+                const double ms = n ? (double)(black + white) / (double)n : 1.0;
+                s_vb_fail = !(q && frac >= 0.5f && fade >= 0.9f && sh <= 0.002);
                 snprintf(s_vb_note, sizeof s_vb_note,
-                         "darkened %.3f%% of %lld scene px, roof probe covered %.2f fade %.2f strength %.3f (q=%d) %dx%d",
-                         share * 100.0, n, (double)frac, (double)fade, (double)str, q, w, h);
+                         "shadowed %.3f%% (mask drawn on %.1f%%) of %lld scene px, roof probe covered %.2f fade %.2f "
+                         "strength %.3f %dx%d", sh * 100.0, ms * 100.0, n, (double)frac, (double)fade, (double)str, w, h);
             }
         }
-        free(s_on); s_on = NULL;
-        free(off);
         TD5_LOG_I(LOG_TAG, "v4-tunnel-no-shadow: %s -> %s", s_vb_note, s_vb_fail ? "FAIL" : "PASS");
     }
 }

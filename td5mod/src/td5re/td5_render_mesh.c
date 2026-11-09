@@ -1615,10 +1615,10 @@ static int td6_reverse_banner_page(int page)
  * The probe: while the track walk visits the meshes around this pane's camera
  * (before the frustum cull: the roof right over the eye is usually outside the
  * view), cast two vertical rays UP (+Y in the render-float world the walk uses)
- * against their real triangles, one from the camera eye and one from a point
- * ENCL_AHEAD units ahead of it (where the chase car sits). Opaque or cutout track
+ * against their real triangles, one from the camera eye and one from the car the
+ * pane follows (free-cam: a point ENCL_AHEAD ahead of the eye). Opaque or cutout track
  * geometry 400..ENCL_HEIGHT units over a ray = a roof (the 400 floor: an "ahead"
- * point that lands just under a hillside, Keswick 497, is no roof; translucent and
+ * point that lands just under a hillside is no roof; translucent and
  * additive pages and billboards never count). The shadow pass fades by the covered
  * share (0, 1/2, 1) over ~0.2 s: off inside a tunnel, back in the open, a gantry
  * or a bridge deck overhead only dips it. Sweep of 16 tracks, 115 poses: every
@@ -1631,7 +1631,7 @@ static int td6_reverse_banner_page(int page)
  * TD5RE_SHADOW_ENCLOSURE=0 = the old behaviour, for A/B. TD5RE_SHADOW_ENCL_LOG=1
  * logs the hits and the probe's CPU time. Per thread: a pane's walk and its
  * shadow pass run on the same thread, one pane after the other. */
-#define ENCL_ORIGINS 2                              /* 0 = eye, 1 = ahead (the chase car) */
+#define ENCL_ORIGINS 2                              /* 0 = eye, 1 = the car the pane follows */
 #define ENCL_RAYS    (2 * ENCL_ORIGINS)            /* k < 2: straight up, k >= 2: toward the sun */
 static __thread float s_encl_eye[3];
 static __thread int   s_encl_armed;                 /* rays set for the camera in s_encl_eye */
@@ -1674,12 +1674,35 @@ static void shadow_encl_arm(void)
     float l = sqrtf(fx * fx + fz * fz);
     if (l > 1e-4f) { fx /= l; fz /= l; } else { fx = 0.0f; fz = 0.0f; }
     for (int i = 0; i < 3; i++) s_encl_eye[i] = s_camera_pos[i];
+    /* origin 1 = the car this pane follows: the nearest per-view actor within 4000 of the
+     * eye, 150 over its reference point (the car's own mesh is not in the track walk). A
+     * point ahead along the camera's forward drifted into the hillside on bends (Keswick
+     * 497) or under arches (Jarash). No car that close (free-cam tours): the forward point. */
+    float car[3] = { s_camera_pos[0] + fx * s_ahead, s_camera_pos[1], s_camera_pos[2] + fz * s_ahead };
+    {
+        float best = 4000.0f * 4000.0f;
+        int nv = g_td5.viewport_count;
+        if (nv < 1) nv = 1;
+        if (nv > TD5_MAX_VIEWPORTS) nv = TD5_MAX_VIEWPORTS;
+        for (int v = 0; v < nv; v++) {
+            const TD5_Actor *a = td5_game_get_actor(g_actorSlotForView[v]);
+            if (!a) continue;
+            const float px = (float)a->world_pos.x * (1.0f / 256.0f);
+            const float py = (float)a->world_pos.y * (1.0f / 256.0f);
+            const float pz = (float)a->world_pos.z * (1.0f / 256.0f);
+            const float dx = px - s_camera_pos[0], dz = pz - s_camera_pos[2];
+            if (dx * dx + dz * dz < best) {
+                best = dx * dx + dz * dz;
+                car[0] = px; car[1] = py + 150.0f; car[2] = pz;
+            }
+        }
+    }
     const int sun_ok = s_sunray && s_encl_sun_valid;
     for (int k = 0; k < ENCL_RAYS; k++) {
         const int o = k % ENCL_ORIGINS, sun = (k >= ENCL_ORIGINS);
-        s_encl_o[k][0] = s_camera_pos[0] + fx * s_ahead * (float)o;
-        s_encl_o[k][1] = s_camera_pos[1];
-        s_encl_o[k][2] = s_camera_pos[2] + fz * s_ahead * (float)o;
+        s_encl_o[k][0] = o ? car[0] : s_camera_pos[0];
+        s_encl_o[k][1] = o ? car[1] : s_camera_pos[1];
+        s_encl_o[k][2] = o ? car[2] : s_camera_pos[2];
         s_encl_d[k][0] = sun ? s_encl_sun[0] : 0.0f;
         s_encl_d[k][1] = sun ? s_encl_sun[1] : 1.0f;   /* up = +Y in the render-float world */
         s_encl_d[k][2] = sun ? s_encl_sun[2] : 0.0f;
@@ -1779,6 +1802,17 @@ static void shadow_encl_consider(const TD5_MeshHeader *mesh, float cx, float cy,
             for (int k = 0; k < ENCL_RAYS; k++) {
                 float t;
                 if (!(want & (1 << k))) continue;
+                if (k < ENCL_ORIGINS) {   /* vertical ray: cheap box reject (most terrain triangles) */
+                    const float *o = s_encl_o[k];
+                    float lo = a[1], hi = a[1], x0 = a[0], x1 = a[0], z0 = a[2], z1 = a[2];
+#define ENCL_BOX(p) do { if ((p)[1] < lo) lo = (p)[1]; if ((p)[1] > hi) hi = (p)[1];                          if ((p)[0] < x0) x0 = (p)[0]; if ((p)[0] > x1) x1 = (p)[0];                          if ((p)[2] < z0) z0 = (p)[2]; if ((p)[2] > z1) z1 = (p)[2]; } while (0)
+                    ENCL_BOX(b); ENCL_BOX(c);
+                    if (quad) ENCL_BOX(d);
+#undef ENCL_BOX
+                    if (hi <= o[1] + ENCL_MIN_T || lo > o[1] + s_encl_max[k] ||
+                        o[0] < x0 || o[0] > x1 || o[2] < z0 || o[2] > z1)
+                        continue;
+                }
                 if (encl_tri(k, a, b, c, &t) || (quad && encl_tri(k, a, c, d, &t))) {
                     s_encl_t[k] = t;
                     want &= ~(1 << k);
